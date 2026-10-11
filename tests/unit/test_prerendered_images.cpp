@@ -12,6 +12,8 @@
 
 #include "../../include/lvgl_image_writer.h"
 #include "../../include/prerendered_images.h"
+#include "../../include/printer_image_manager.h"
+#include "helix_fs.h"
 
 #include <array>
 #include <cstdint>
@@ -26,43 +28,61 @@
 
 using namespace helix;
 
+namespace helix {
+class PrinterImageManagerTestAccess {
+  public:
+    static int invalidate_printer_image_cache(const std::string& source_image_path) {
+        return PrinterImageManager::invalidate_printer_image_cache(source_image_path);
+    }
+};
+} // namespace helix
+
 // ============================================================================
 // Splash Screen Size Selection Tests
 // ============================================================================
 
 TEST_CASE("get_splash_size_name returns correct size category", "[assets][splash]") {
-    SECTION("Tiny displays (< 600px width)") {
-        REQUIRE(std::string(get_splash_size_name(480)) == "tiny");
-        REQUIRE(std::string(get_splash_size_name(320)) == "tiny");
-        REQUIRE(std::string(get_splash_size_name(599)) == "tiny");
+    // Classes are UiBreakpoint tiers selected from the narrow axis, so a
+    // landscape panel classifies on its height.
+    SECTION("Micro displays - 480x272") {
+        REQUIRE(std::string(get_splash_size_name(480, 272)) == "micro");
+        REQUIRE(std::string(get_splash_size_name(480, 200)) == "micro");
     }
 
-    SECTION("Small displays (600-899px width) - AD5M class") {
-        REQUIRE(std::string(get_splash_size_name(600)) == "small");
-        REQUIRE(std::string(get_splash_size_name(800)) == "small");
-        REQUIRE(std::string(get_splash_size_name(899)) == "small");
+    SECTION("Tiny displays - 480x320") {
+        REQUIRE(std::string(get_splash_size_name(480, 320)) == "tiny");
+        REQUIRE(std::string(get_splash_size_name(480, 273)) == "tiny");
+        REQUIRE(std::string(get_splash_size_name(480, 390)) == "tiny");
     }
 
-    SECTION("Medium displays (900-1099px width)") {
-        REQUIRE(std::string(get_splash_size_name(900)) == "medium");
-        REQUIRE(std::string(get_splash_size_name(1024)) == "medium");
-        REQUIRE(std::string(get_splash_size_name(1099)) == "medium");
+    SECTION("Small displays - 480x400") {
+        REQUIRE(std::string(get_splash_size_name(480, 400)) == "small");
+        REQUIRE(std::string(get_splash_size_name(480, 460)) == "small");
     }
 
-    SECTION("Large displays (>= 1100px width)") {
-        REQUIRE(std::string(get_splash_size_name(1100)) == "large");
-        REQUIRE(std::string(get_splash_size_name(1280)) == "large");
-        REQUIRE(std::string(get_splash_size_name(1920)) == "large");
+    SECTION("Medium displays - 800x480 class") {
+        REQUIRE(std::string(get_splash_size_name(800, 480)) == "medium");
+        REQUIRE(std::string(get_splash_size_name(800, 550)) == "medium");
     }
 
-    SECTION("Boundary conditions") {
-        // Exact boundaries
-        REQUIRE(std::string(get_splash_size_name(599)) == "tiny");
-        REQUIRE(std::string(get_splash_size_name(600)) == "small");
-        REQUIRE(std::string(get_splash_size_name(899)) == "small");
-        REQUIRE(std::string(get_splash_size_name(900)) == "medium");
-        REQUIRE(std::string(get_splash_size_name(1099)) == "medium");
-        REQUIRE(std::string(get_splash_size_name(1100)) == "large");
+    SECTION("Large displays - 1024x600 class") {
+        REQUIRE(std::string(get_splash_size_name(1024, 600)) == "large");
+        REQUIRE(std::string(get_splash_size_name(1024, 700)) == "large");
+    }
+
+    SECTION("XLarge displays - 1280x720 and above") {
+        REQUIRE(std::string(get_splash_size_name(1280, 720)) == "xlarge");
+        // Nothing is composited above xlarge, so a 4K panel clamps to it.
+        REQUIRE(std::string(get_splash_size_name(3840, 2160)) == "xlarge");
+    }
+
+    SECTION("Wide, short bar displays take their own class") {
+        REQUIRE(std::string(get_splash_size_name(1920, 440)) == "ultrawide");
+    }
+
+    SECTION("Rotation is the caller's job - the selector sees effective pixels") {
+        // A K2 panel is 480x800 used rotated; the caller passes 800x480.
+        REQUIRE(std::string(get_splash_size_name(800, 480)) == "medium");
     }
 }
 
@@ -70,7 +90,7 @@ TEST_CASE("get_prerendered_splash_path generates correct paths", "[assets][splas
     SECTION("Path format includes size name") {
         // Note: These tests check path format, not file existence
         // The function will fall back to PNG if .bin doesn't exist
-        std::string path_800 = get_prerendered_splash_path(800);
+        std::string path_800 = get_prerendered_splash_path(800, 480);
 
         // Should either be a prerendered .bin or fallback PNG
         bool is_bin = path_800.find(".bin") != std::string::npos;
@@ -82,9 +102,9 @@ TEST_CASE("get_prerendered_splash_path generates correct paths", "[assets][splas
     }
 
     SECTION("Different screen sizes get different paths") {
-        std::string path_tiny = get_prerendered_splash_path(480);
-        std::string path_small = get_prerendered_splash_path(800);
-        std::string path_large = get_prerendered_splash_path(1280);
+        std::string path_tiny = get_prerendered_splash_path(480, 320);
+        std::string path_small = get_prerendered_splash_path(800, 480);
+        std::string path_large = get_prerendered_splash_path(1280, 720);
 
         // Paths should differ (unless all falling back to same PNG)
         // At minimum, they should all be valid LVGL paths
@@ -170,7 +190,7 @@ TEST_CASE("get_prerendered_printer_path generates correct paths", "[assets][prin
 TEST_CASE("Prerendered paths fall back to PNG when .bin missing", "[assets][fallback]") {
     SECTION("Splash fallback is PNG") {
         // Since we're testing without pre-rendered files, should get PNG fallback
-        std::string path = get_prerendered_splash_path(800);
+        std::string path = get_prerendered_splash_path(800, 480);
 
         // In test environment without pre-rendered files, should fall back to PNG
         // The path should be valid either way
@@ -196,18 +216,18 @@ TEST_CASE("Prerendered image edge cases", "[assets][edge]") {
     SECTION("Zero width defaults sensibly") {
         // Should not crash, pick smallest size
         REQUIRE(get_printer_image_size(0) == 150);
-        REQUIRE(std::string(get_splash_size_name(0)) == "tiny");
+        REQUIRE(std::string(get_splash_size_name(0, 0)) == "micro");
     }
 
     SECTION("Negative width handled gracefully") {
         // Should not crash
         REQUIRE(get_printer_image_size(-100) == 150);
-        REQUIRE(std::string(get_splash_size_name(-100)) == "tiny");
+        REQUIRE(std::string(get_splash_size_name(-100, -100)) == "micro");
     }
 
     SECTION("Very large width handled") {
         REQUIRE(get_printer_image_size(10000) == 300);
-        REQUIRE(std::string(get_splash_size_name(10000)) == "large");
+        REQUIRE(std::string(get_splash_size_name(10000, 10000)) == "xlarge");
     }
 
     SECTION("Empty printer name returns valid path") {
@@ -438,4 +458,146 @@ TEST_CASE("Cache larger than the prerendered tier is sourced from the PNG",
 
     std::error_code ec;
     std::filesystem::remove_all(tmp, ec);
+}
+
+// ============================================================================
+// Cache naming and invalidation
+// ============================================================================
+
+// Every navigation back to the home panel refreshes the printer image, and a
+// cache entry it can no longer name is rebuilt by a decode-and-resize costing
+// half a second per entry on a two-core board, plus a flash write. The name
+// therefore has to stay put for as long as the source bytes do, and has to move
+// the moment they change.
+TEST_CASE("Cached printer image path is keyed on the source file", "[assets][printer][cache]") {
+    const auto tmp =
+        std::filesystem::temp_directory_path() / ("helix_cache_key_" + std::to_string(::getpid()));
+    std::filesystem::create_directories(tmp);
+    const auto source_file = tmp / "helix-keyed-printer-300.bin";
+    std::ofstream(source_file, std::ios::binary) << "first revision";
+    const std::string source = "A:" + source_file.string();
+
+    const std::string first = get_cached_printer_image_path(source, 233, 209);
+
+    SECTION("an unchanged source names the same entry every time") {
+        CHECK(get_cached_printer_image_path(source, 233, 209) == first);
+        CHECK(get_cached_printer_image_path(source, 233, 209) == first);
+    }
+
+    SECTION("different dimensions name different entries") {
+        CHECK(get_cached_printer_image_path(source, 234, 209) != first);
+        CHECK(get_cached_printer_image_path(source, 233, 210) != first);
+    }
+
+    SECTION("rewriting the source in place names a different entry") {
+        // The replacement differs in LENGTH as well as content. mtime granularity
+        // is a filesystem property — a coarse one can stamp both writes with the
+        // same instant — and the size moves the fingerprint regardless.
+        std::ofstream(source_file, std::ios::binary | std::ios::trunc)
+            << "second revision, materially longer than the first";
+        CHECK(get_cached_printer_image_path(source, 233, 209) != first);
+    }
+
+    SECTION("a source that cannot be stat'ed still names one deterministic entry") {
+        const std::string missing = "A:" + (tmp / "helix-absent-300.bin").string();
+        const std::string named = get_cached_printer_image_path(missing, 233, 209);
+        CHECK_FALSE(named.empty());
+        CHECK(get_cached_printer_image_path(missing, 233, 209) == named);
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(tmp, ec);
+}
+
+// A printer's PNG and its prerendered variants share a stem: "creality-k1-se.png"
+// beside "creality-k1-se-300.bin". Matching on the stem plus a dash alone lets an
+// invalidation of the PNG delete the caches of two other source images.
+TEST_CASE("Printer cache entries are attributed to one source image", "[assets][printer][cache]") {
+    const std::string stem = "helix_stem_" + std::to_string(::getpid());
+    const std::string png = "A:assets/images/printers/" + stem + ".png";
+    const std::string tier300 = "A:assets/images/printers/prerendered/" + stem + "-300.bin";
+
+    SECTION("the dimension segment separates a PNG from its prerendered variants") {
+        CHECK(printer_cache_entry_matches(stem + "-233x209-1700000000-4096.bin", png));
+        CHECK_FALSE(printer_cache_entry_matches(stem + "-300-233x209-1700000000-4096.bin", png));
+        CHECK_FALSE(printer_cache_entry_matches(stem + "-150-120x100-1700000000-2048.bin", png));
+
+        CHECK(printer_cache_entry_matches(stem + "-300-233x209-1700000000-4096.bin", tier300));
+        CHECK_FALSE(printer_cache_entry_matches(stem + "-233x209-1700000000-4096.bin", tier300));
+    }
+
+    SECTION("a name without a well-formed dimension segment is not ours") {
+        CHECK_FALSE(printer_cache_entry_matches(stem + "-x209-1-2.bin", png));
+        CHECK_FALSE(printer_cache_entry_matches(stem + "-233x-1-2.bin", png));
+        CHECK_FALSE(printer_cache_entry_matches(stem + "-233209-1-2.bin", png));
+        CHECK_FALSE(printer_cache_entry_matches(stem + "-233x209.bin", png));
+        CHECK_FALSE(printer_cache_entry_matches("other-233x209-1-2.bin", png));
+    }
+}
+
+// import_image() invalidates the sizes it just rewrote. Deleting the caches of the
+// neighbouring source images costs each of them a full regeneration on the next
+// refresh, for a file nobody touched.
+TEST_CASE("Invalidating a printer PNG spares the prerendered variants' caches",
+          "[assets][printer][cache]") {
+    const std::string stem = "helix_inval_" + std::to_string(::getpid());
+    const std::filesystem::path cache_dir = get_printer_image_cache_dir();
+    REQUIRE_FALSE(cache_dir.empty());
+
+    // Entries named the way get_cached_printer_image_path() names them. Invalidation
+    // matches on the filename and never reads the contents.
+    const auto png_entry = cache_dir / (stem + "-233x209-1700000000-4096.bin");
+    const auto tier300_entry = cache_dir / (stem + "-300-233x209-1700000001-4096.bin");
+    const auto tier150_entry = cache_dir / (stem + "-150-120x100-1700000002-2048.bin");
+    for (const auto& entry : {png_entry, tier300_entry, tier150_entry}) {
+        std::ofstream(entry, std::ios::binary) << "cached pixels";
+        REQUIRE(std::filesystem::exists(entry));
+    }
+
+    CHECK(PrinterImageManagerTestAccess::invalidate_printer_image_cache(
+              "A:assets/images/printers/" + stem + ".png") == 1);
+    CHECK_FALSE(std::filesystem::exists(png_entry));
+    CHECK(std::filesystem::exists(tier300_entry));
+    CHECK(std::filesystem::exists(tier150_entry));
+
+    // Each prerendered variant still owns, and can still clear, its own entries.
+    CHECK(PrinterImageManagerTestAccess::invalidate_printer_image_cache(
+              "A:assets/images/printers/prerendered/" + stem + "-300.bin") == 1);
+    CHECK_FALSE(std::filesystem::exists(tier300_entry));
+    CHECK(std::filesystem::exists(tier150_entry));
+
+    std::error_code ec;
+    std::filesystem::remove(tier150_entry, ec);
+}
+
+TEST_CASE("Printer cache names carry libstdc++'s file_clock tick count", "[assets][printer]") {
+    // Cache files already on disk are named from file_time_type's tick count; a
+    // name computed any other way would orphan every one of them.
+    const std::string src = std::filesystem::temp_directory_path().string() +
+                            "/helix_fingerprint_" + std::to_string(::getpid()) + ".png";
+    {
+        std::ofstream out(src, std::ios::binary);
+        out << "twelve bytes";
+    }
+    // Unix nanoseconds shifted to libstdc++'s file_clock epoch (2174-01-01). The shift is
+    // fixed by the on-disk naming, not by whichever std library builds the test: libc++'s
+    // file_clock counts from the Unix epoch, so std::filesystem's own tick count differs there.
+    constexpr long long kLibstdcxxEpochDiffNs = 6'437'664'000LL * 1'000'000'000LL;
+    const auto unix_ns = helix::fs::mtime_ns(src);
+    REQUIRE(unix_ns.has_value());
+    const long long libstdcxx_ticks = *unix_ns - kLibstdcxxEpochDiffNs;
+#if defined(_GLIBCXX_RELEASE)
+    // Where the build's std library is libstdc++, its own clock must agree with the shift.
+    CHECK(static_cast<long long>(
+              std::filesystem::last_write_time(src).time_since_epoch().count()) == libstdcxx_ticks);
+#endif
+    const std::string expected = "-" +
+                                 std::to_string(static_cast<unsigned long long>(libstdcxx_ticks)) +
+                                 "-" + std::to_string(std::filesystem::file_size(src)) + ".bin";
+
+    const std::string name = get_cached_printer_image_path(src, 10, 10);
+    std::filesystem::remove(src);
+
+    REQUIRE(name.size() > expected.size());
+    CHECK(name.substr(name.size() - expected.size()) == expected);
 }

@@ -29,6 +29,20 @@ void register_print_handlers(std::unordered_map<std::string, MethodHandler>& reg
             script = params["script"].get<std::string>();
         }
 
+        // The all-in-one tool offset calibration blocks until it is done, so
+        // its rpc cannot be answered by the line loop below: the simulation
+        // owns the callbacks and fires them when the run ends.
+        if (self->simulate_tool_offset_calibration(script, success_cb, error_cb)) {
+            return true;
+        }
+
+        // Pressure advance completes asynchronously (a handful of candidate
+        // probes) so the panel's phase list and attempt counter are observable
+        // in mock mode rather than snapping straight to a number.
+        if (self->simulate_pa_calibration(script, success_cb, error_cb)) {
+            return true;
+        }
+
         // Real Klipper executes a multi-line script line-by-line; the per-command
         // parsers in gcode_script() assume a SINGLE command (e.g. they `find('S')`
         // globally, which a multi-line script would point at the wrong token and
@@ -72,6 +86,12 @@ void register_print_handlers(std::unordered_map<std::string, MethodHandler>& reg
             if (nl == std::string::npos)
                 break;
             line_start = nl + 1;
+        }
+
+        // Test injection: a console line the script produced, delivered before the
+        // RPC answers as Klipper's own replies are.
+        if (auto reply = self->take_forced_console_reply(script)) {
+            self->dispatch_gcode_response(*reply);
         }
 
         // Test injection: simulate a response that never comes back at all (Klippy

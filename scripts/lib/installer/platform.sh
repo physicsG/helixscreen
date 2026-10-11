@@ -99,6 +99,57 @@ describe_hardware() {
     echo "ARM SBC"
 }
 
+# The board a FlashForge MIPS firmware names for itself, from the one of two
+# places it is written that this shell can reach: the MACHINE= line of
+# /usr/prog/app_startup.sh on the host, or, inside the Z-Mod chroot (whose
+# prepare.sh bind-mounts only /usr/prog/config, leaving app_startup.sh
+# unreachable), the first word of VERSION_CODENAME in the chroot's os-release:
+# the chroot's start.sh runs as `start.sh "$SWAP" "$VER" "$MACHINE"` and writes
+# VERSION_CODENAME="<MACHINE> <version>" on every boot. The three boards (AD5X,
+# Creator5, Creator5Pro) share the unified MIPS payload, the /usr/data +
+# /usr/prog layout, the root user and the Z-Mod install shape, so they all ride
+# the platform key "ad5x" and this is the only thing that tells them apart.
+# Both paths are env-overridable so the bats suite can point the reads at a
+# sandbox; OS_RELEASE_FILE is the same override moonraker.sh reads os-release
+# through, and HELIX_FF_MACHINE_FILE follows HELIX_MOD_TREE_CANDIDATES.
+#
+# Echoes the MACHINE value, or nothing when neither source carries a
+# recognized value.
+ff_machine_id() {
+    local _v
+    # tail keeps one answer when a file carries several MACHINE= lines, and
+    # makes the pipeline's exit status sed-independent under set -e.
+    _v=$(sed -n 's/^MACHINE=//p' "${HELIX_FF_MACHINE_FILE:-/usr/prog/app_startup.sh}" 2>/dev/null | tail -n 1)
+    _v=$(printf '%s' "$_v" | tr -d ' \t\r')
+    # Whole-value match: Creator5 is a prefix of Creator5Pro, so a prefix test
+    # would fold the Pro into the plain Creator 5.
+    case "$_v" in
+        AD5X|Creator5|Creator5Pro) printf '%s\n' "$_v"; return 0 ;;
+    esac
+    _v=$(sed -n 's/^VERSION_CODENAME=//p' "${OS_RELEASE_FILE:-/etc/os-release}" 2>/dev/null | tail -n 1)
+    # Strip os-release's shell quoting and CR, then keep the first word: the
+    # rest of the value is the firmware version, and a distro codename left
+    # over (bookworm & co) simply fails the whole-value match below.
+    _v=$(printf '%s' "$_v" | tr -d "\"'\r")
+    _v="${_v%% *}"
+    case "$_v" in
+        AD5X|Creator5|Creator5Pro) printf '%s\n' "$_v" ;;
+    esac
+    return 0
+}
+
+# Board name for the user-facing messages of the ad5x platform. The platform
+# KEY stays "ad5x" everywhere (payload, paths, hooks); only what the user
+# reads carries this name. Unrecognized or unreadable MACHINE falls back to
+# the AD5X name, which is what the key has always meant.
+ad5x_board_name() {
+    case "$(ff_machine_id)" in
+        Creator5)    echo "FlashForge Creator 5" ;;
+        Creator5Pro) echo "FlashForge Creator 5 Pro" ;;
+        *)           echo "FlashForge AD5X" ;;
+    esac
+}
+
 # Resolve the primary group of a user, falling back to the user name.
 # Some firmwares (e.g. QIDI Q2 stock) ship a `mks` user without a matching
 # `mks` group, which makes `Group=mks` in the systemd unit fail with
@@ -366,6 +417,11 @@ detect_platform() {
 # Echoes: platform key to use when constructing release archive URLs
 get_download_platform() {
     local detected=$1
+    # k1 and ad5x download their own board-name assets: every release line
+    # publishes them (the release/1.0 line builds them natively; main-line
+    # releases upload them as aliases of the unified mips build, see the
+    # upload step in .github/workflows/release.yml), so the board name is the
+    # one download name every release carries.
     case "$detected" in
         m1)
             # Artillery M1 Pro is a Debian SBC. The pi/pi32 binary runs as-is.
@@ -393,19 +449,24 @@ get_download_platform() {
 # no asset matches it falls back to the alphabetically-first release asset — a
 # .sym debug file — then dies with "File is not a zip file"
 # (prestonbrown/helixscreen#993). This must also agree with
-# UpdateChecker::get_platform_key() (src/system/update_checker.cpp);
+# helix::platform::current_key() (src/system/platform_table.cpp);
 # tests/shell/test_update_platform_coverage.bats enforces the agreement.
 #
-# Convention: a platform's asset is helixscreen-<platform>.zip. The only borrows
-# are handled by get_download_platform() (m1 -> pi/pi32 by userspace bitness) and
-# the k1-dynamic dev/debug variant, which is not built by the release matrix and
-# rides the stable k1 asset.
+# Convention: a platform's asset is helixscreen-<platform>.zip. The borrows:
+# m1 -> pi/pi32 by userspace bitness (get_download_platform), and the MIPS board
+# spellings -> the unified mips asset, mapped right here because
+# get_download_platform names fresh-install downloads by board. ONE static
+# binary serves the Creality K1 series and the FlashForge AD5X; k1, ad5x and
+# the k1-dynamic dev/debug variant (not built by the release matrix) all ride
+# helixscreen-mips.zip. release-mips also publishes identical-content
+# helixscreen-k1.zip / -ad5x.zip aliases so already-deployed binaries that
+# compute those names still find an update.
 #
 # Args: platform (detected platform key)
 # Echoes: release asset filename, e.g. helixscreen-pi.zip
 helix_self_update_asset() {
     case "$1" in
-        k1-dynamic) echo "helixscreen-k1.zip" ;;
+        k1|ad5x|k1-dynamic) echo "helixscreen-mips.zip" ;;
         *)          echo "helixscreen-$(get_download_platform "$1").zip" ;;
     esac
 }
@@ -437,7 +498,7 @@ mod_check_chroot_context() {
 
     log_error ""
     log_error "=========================================================="
-    log_error " AD5X manual installs must run inside the ZMOD chroot."
+    log_error " $(ad5x_board_name) manual installs must run inside the ZMOD chroot."
     log_error "=========================================================="
     log_error ""
     log_error "ZMOD installs HelixScreen into an overlay at:"
@@ -617,9 +678,11 @@ detect_k1_firmware() {
 }
 
 # Locations a HelixScreen install may already occupy, for the existing-install
-# probe below. Mirrors HELIX_INSTALL_DIRS in uninstall.sh — same question, same
-# answer. Overridable so the bats suite can point it at a sandbox.
-: "${_HELIX_KNOWN_INSTALL_DIRS:=/opt/helixscreen /srv/helixscreen /usr/data/helixscreen /root/printer_software/helixscreen /user-resource/helixscreen /userdata/helixscreen}"
+# probe below. This is the same question HELIX_INSTALL_DIRS answers for the
+# uninstall sweep, so it IS that list rather than a second copy of it: common.sh
+# is the bundle's first module, so the value is set by the time this one loads.
+# Overridable so the bats suite can point it at a sandbox.
+: "${_HELIX_KNOWN_INSTALL_DIRS:=${HELIX_INSTALL_DIRS}}"
 
 # Print the directory of an install that is already on disk, or return 1.
 # Checks $KLIPPER_HOME/helixscreen first so an ecosystem install outranks a stale
@@ -628,6 +691,27 @@ detect_k1_firmware() {
 # bin/helix-screen is what makes a directory an install: uninstall leaves the
 # directory (and its config/) behind on several platforms, and treating that
 # husk as a live install would pin every future install to it.
+# Print the superseded root when an install is sitting at it, else return 1.
+#
+# Searched in the same list the existing-install probe uses, so a sandboxed tree
+# answers exactly as the device path does. The answer does not depend on whether
+# the new root is populated: a migration interrupted partway has both, and the
+# tree left behind still has to be swept.
+_find_superseded_install() {
+    [ -n "${PREVIOUS_INSTALL_DIR:-}" ] || return 1
+    for _fsi_dir in $_HELIX_KNOWN_INSTALL_DIRS; do
+        case "$_fsi_dir" in
+            "$PREVIOUS_INSTALL_DIR"|*"$PREVIOUS_INSTALL_DIR") ;;
+            *) continue ;;
+        esac
+        if [ -x "${_fsi_dir}/bin/helix-screen" ]; then
+            printf '%s\n' "$_fsi_dir"
+            return 0
+        fi
+    done
+    return 1
+}
+
 _detect_existing_install_dir() {
     _eid_candidates=""
     [ -n "${KLIPPER_HOME:-}" ] && _eid_candidates="${KLIPPER_HOME}/helixscreen"
@@ -737,6 +821,10 @@ detect_pi_install_dir() {
 # tries candidates in order, picks first writable dir with >= 100MB free.
 # User can override via TMP_DIR env var.
 # Sets: TMP_DIR
+#
+# Writability is probed as the invoking user, never through sudo: this runs
+# before the confirm point, where sudo must not prompt, and download_release
+# creates TMP_DIR and writes the archive into it as that user anyway.
 detect_tmp_dir() {
     # User already set TMP_DIR — respect it, but only after the ownership and
     # name guards. TMP_DIR is rm -rf'd on both the success and the failure
@@ -818,13 +906,12 @@ detect_tmp_dir() {
         if [ ! -d "$check_dir" ]; then
             continue
         fi
-        if [ ! -w "$check_dir" ] && ! $SUDO test -w "$check_dir" 2>/dev/null; then
+        if [ ! -w "$check_dir" ]; then
             continue
         fi
 
-        # Check free space (BusyBox df: KB in $4)
         local available_mb
-        available_mb=$(df "$check_dir" 2>/dev/null | tail -1 | awk '{print int($4/1024)}')
+        available_mb=$(_fs_free_mb "$check_dir")
         if [ -z "$available_mb" ] || [ "$available_mb" -lt "$required_mb" ]; then
             continue
         fi
@@ -853,9 +940,9 @@ detect_tmp_dir() {
 # with no UI.
 #
 # Sets HELIX_CHROOT_DAEMON_DIR to a spelling that resolves in-chroot, trying
-# INSTALL_DIR first and then the same path under each other mod-tree candidate.
-# Leaves it empty and warns when none does: a wrong DAEMON_DIR fails silently,
-# so it must be said out loud here.
+# INSTALL_DIR first and then the same parent-relative path through each other
+# mod-tree candidate's spelling. Leaves it empty and warns when none does: a
+# wrong DAEMON_DIR fails silently, so it must be said out loud here.
 # shellcheck disable=SC2034  # consumed by service.sh (install_service_sysv)
 resolve_chroot_daemon_dir() {
     HELIX_CHROOT_DAEMON_DIR=""
@@ -868,11 +955,15 @@ resolve_chroot_daemon_dir() {
     fi
 
     local cand suffix candidate
-    suffix="${INSTALL_DIR#"${HOST_MOD_ROOT}"}"
+    # The suffix is relative to the mod tree's PARENT, because the payload
+    # root is a mod_data sibling of the tree, not a child of it. Every
+    # candidate shares that parent, so dirname restores the prefix whatever
+    # spelling the probe found.
+    suffix="${INSTALL_DIR#"$(dirname "${HOST_MOD_ROOT}")"}"
     # shellcheck disable=SC2086  # word splitting is the point: a candidate list
     for cand in ${HELIX_MOD_TREE_CANDIDATES:-/usr/data/config/mod /opt/config/mod}; do
         [ "$cand" = "${HOST_MOD_ROOT:-}" ] && continue
-        candidate="${cand}${suffix}"
+        candidate="$(dirname "$cand")${suffix}"
         if [ -d "${HOST_MOD_CHROOT}${candidate}" ]; then
             # shellcheck disable=SC2034  # consumed by service.sh (install_service_sysv)
             HELIX_CHROOT_DAEMON_DIR="$candidate"
@@ -887,6 +978,34 @@ resolve_chroot_daemon_dir() {
     return 0
 }
 
+# /data doubles as Moonraker's gcodes root on the AD5M (the gcodes path is a
+# symlink to the whole partition), so anything of ours left at its top level
+# is a folder or file in the user's print-file picker. main() sweeps it after
+# the confirm point: the in-app updater removes its own archive, but nothing
+# else ever does.
+# AD5M_GCODES_ROOT is the test seam; nothing on a device ever sets it.
+cleanup_ad5m_gcodes_root() {
+    local _root="${AD5M_GCODES_ROOT:-/data}"
+    # Release archives scp'd in for manual installs, tens of MB each on a
+    # 6.2 GB partition, and the updater's fallback install log. Never the
+    # archive this run is installing from.
+    local _f
+    for _f in "$_root"/helixscreen-*.tar.gz "$_root"/helixscreen-*.zip "$_root"/helixscreen-*.install.log; do
+        [ -f "$_f" ] || continue
+        [ "$_f" = "${local_tarball:-}" ] && continue
+        rm -f "$_f" 2>/dev/null || $SUDO rm -f "$_f" 2>/dev/null || true
+        log_info "Removed leftover from the gcodes root: $_f"
+    done
+
+    # A cleanup staging directory naming this app; removed only in its exact
+    # known shape — nothing inside but our own subtree. Anything a person put
+    # there themselves survives.
+    if [ -d "$_root/hx-clean" ] && [ "$(ls -A "$_root/hx-clean" 2>/dev/null)" = "helixscreen" ]; then
+        rm -rf "$_root/hx-clean" 2>/dev/null || $SUDO rm -rf "$_root/hx-clean" 2>/dev/null || true
+        log_info "Removed leftover cleanup staging directory: $_root/hx-clean"
+    fi
+}
+
 set_install_paths() {
     local platform=$1
     local firmware=${2:-}
@@ -895,6 +1014,15 @@ set_install_paths() {
     # below opt out. Without the reset a stale value from the environment (or
     # from an earlier call in the same shell) would leak into another platform.
     KLIPPER_CONFIG_DIR=""
+    _install_dir_from_detection=0
+    # Only the k2 branch declares a superseded root; clear them for everyone
+    # else so one platform's migration cannot leak into another's run.
+    PREVIOUS_INSTALL_DIR=""
+    PREVIOUS_STATE_DIR=""
+    STATE_DIR=""
+    STATE_ROOT=""
+    PREVIOUS_STATE_ROOT=""
+    MIGRATE_FROM_DIR=""
 
     if [ "$platform" = "ad5m" ]; then
         # AD5M runs the helix-screen service as root on all three firmwares
@@ -933,15 +1061,34 @@ set_install_paths() {
                 log_info "Install directory: ${INSTALL_DIR}"
                 ;;
         esac
+        # /data is this board's only large writable partition and the vendor
+        # symlinks it whole into Moonraker's gcodes root, so the state root
+        # must be dot-prefixed to stay out of the print-file picker:
+        # Moonraker's listings hide dot-entries, the mechanism the vendor's
+        # own .mod and .thumbs rely on. migrate_state_root() moves an install
+        # that still carries the plain-named root.
+        # shellcheck disable=SC2034  # consumed by release.sh (state-root rename)
+        STATE_ROOT="/data/.helixscreen"
+        # shellcheck disable=SC2034  # consumed by release.sh (state-root rename)
+        PREVIOUS_STATE_ROOT="/data/helixscreen"
+        # Reclaim the cache an install that predates the rename left at the
+        # plain-named root, once migrate_state_root() has carried it across.
+        # shellcheck disable=SC2034  # consumed by release.sh (stale cache reclaim)
+        STALE_CACHE_DIRS="/data/helixscreen/cache"
     elif [ "$platform" = "ad5x" ]; then
         # FlashForge AD5X - uses ZMOD, /usr/data structure, runs as root
         KLIPPER_USER="root"
         KLIPPER_GROUP="root"
         KLIPPER_HOME="/root"
         INSTALL_DIR="/srv/helixscreen"
+        # The cache moved to a sibling of the payload, because the payload is
+        # what an update replaces. Reclaim the copy an older install left inside
+        # it rather than leaving a second one on the flash.
+        # shellcheck disable=SC2034  # consumed by release.sh (stale cache reclaim)
+        STALE_CACHE_DIRS="/srv/helixscreen/cache"
         INIT_SCRIPT_DEST="/etc/init.d/S80helixscreen"
         PREVIOUS_UI_SCRIPT=""
-        log_info "Platform: FlashForge AD5X (ZMOD)"
+        log_info "Platform: $(ad5x_board_name) (ZMOD)"
         log_info "Install directory: ${INSTALL_DIR}"
     elif [ "$platform" = "k1" ]; then
         # Creality K1 series - uses /usr/data structure.
@@ -950,6 +1097,11 @@ set_install_paths() {
         # KLIPPER_HOME=/root and setup_config_symlink skips with
         # "No printer_data/config found" on every K1 install.
         INSTALL_DIR="/usr/data/helixscreen"
+        # The cache moved to a sibling of the payload, because the payload is
+        # what an update replaces. Reclaim the copy an older install left inside
+        # it rather than leaving a second one on the flash.
+        # shellcheck disable=SC2034  # consumed by release.sh (stale cache reclaim)
+        STALE_CACHE_DIRS="/usr/data/helixscreen/cache"
         INIT_SCRIPT_DEST="/etc/init.d/S99helixscreen"
         KLIPPER_USER="root"
         KLIPPER_GROUP="root"
@@ -976,18 +1128,29 @@ set_install_paths() {
         # /root/printer_data -> /mnt/UDISK/printer_data/, but the installer
         # runs before that bootstrap for many users — point KLIPPER_HOME at
         # the actual storage so config symlinks work on first install.
-        INSTALL_DIR="/opt/helixscreen"
+        INSTALL_DIR="/mnt/UDISK/helixscreen"
         INIT_SCRIPT_DEST="/etc/init.d/S99helixscreen"
         PREVIOUS_UI_SCRIPT=""
         KLIPPER_USER="root"
         KLIPPER_GROUP="root"
         KLIPPER_HOME="/mnt/UDISK"
+        # PREVIOUS_INSTALL_DIR is a root this platform may already be installed
+        # at. set_install_paths migrates such a tree to INSTALL_DIR instead of
+        # adopting it, so the fleet converges on one layout.
+        PREVIOUS_INSTALL_DIR="/opt/helixscreen"
+        # PREVIOUS_STATE_DIR is the path the payload now occupies, so cache/ and
+        # logs/ still sitting there have to move out before anything extracts
+        # over them. Mirrors storage.previous_state_root in the manifest.
+        # shellcheck disable=SC2034  # consumed by release.sh (state migration)
+        PREVIOUS_STATE_DIR="/mnt/UDISK/helixscreen"
+        # shellcheck disable=SC2034  # consumed by release.sh (state migration)
+        STATE_DIR="/mnt/UDISK/helixscreen-state"
         # /opt and /usr/data are both on the 240MB overlay; /mnt/UDISK is the
         # 27.5GB user partition. Staging the download anywhere else fills the
         # overlay (a unit was found with a leaked 60MB archive on it).
         TMP_DIR_PREFERRED="/mnt/UDISK/helixscreen-install"
         # Older builds cached thumbnails/gcode on the overlay via /usr/data;
-        # the app now caches on /mnt/UDISK, so reclaim the old location.
+        # the app caches under the state root, so reclaim the old location.
         # Also reclaim scratch dirs leaked by pre-EXIT-trap installers: one
         # unit held a 60MB archive at /usr/data/helixscreen-install for months.
         # shellcheck disable=SC2034  # consumed by release.sh (stale cache reclaim)
@@ -1005,6 +1168,11 @@ set_install_paths() {
         #   printer.cfg, and the vendor *-readonly/ include dirs), which is
         #   also the `config` root Moonraker advertises over /server/files/roots.
         INSTALL_DIR="/user-resource/helixscreen"
+        # The cache moved to a sibling of the payload, because the payload is
+        # what an update replaces. Reclaim the copy an older install left inside
+        # it rather than leaving a second one on the flash.
+        # shellcheck disable=SC2034  # consumed by release.sh (stale cache reclaim)
+        STALE_CACHE_DIRS="/user-resource/helixscreen/cache"
         INIT_SCRIPT_DEST="/etc/init.d/helixscreen"
         PREVIOUS_UI_SCRIPT=""
         KLIPPER_USER="root"
@@ -1023,6 +1191,11 @@ set_install_paths() {
         # on a freshly-flashed U1 before klipper has ever run that path may
         # not exist yet — make it explicit so the installer is deterministic.
         INSTALL_DIR="/userdata/helixscreen"
+        # The cache moved to a sibling of the payload, because the payload is
+        # what an update replaces. Reclaim the copy an older install left inside
+        # it rather than leaving a second one on the flash.
+        # shellcheck disable=SC2034  # consumed by release.sh (stale cache reclaim)
+        STALE_CACHE_DIRS="/userdata/helixscreen/cache"
         KLIPPER_USER="root"
         KLIPPER_GROUP="root"
         KLIPPER_HOME="/home/lava"
@@ -1043,6 +1216,51 @@ set_install_paths() {
         PREVIOUS_UI_SCRIPT=""
         detect_klipper_user
         detect_pi_install_dir
+        _install_dir_from_detection=1
+    fi
+
+    # Only the detection branch above and a mod host (below) honour an explicit
+    # INSTALL_DIR; a fixed-root platform installs at its own root regardless.
+    # An override that is ignored must not switch off the migration or the
+    # existing-install check either (prestonbrown/helixscreen#1674).
+    local user_install_dir="${_USER_INSTALL_DIR:-}"
+    if [ -n "$user_install_dir" ] && [ "${_install_dir_from_detection:-0}" != "1" ] \
+       && [ -z "${HOST_INSTALL_ROOT:-}" ]; then
+        if [ "$user_install_dir" != "$INSTALL_DIR" ]; then
+            log_warn "Ignoring INSTALL_DIR=${user_install_dir}: this platform installs at its own root"
+        fi
+        user_install_dir=""
+    fi
+
+    # A root the platform declares superseded is migrated, never adopted, so the
+    # fleet converges on one layout. An honoured INSTALL_DIR still outranks it.
+    if [ -n "${PREVIOUS_INSTALL_DIR:-}" ] && [ -z "$user_install_dir" ] \
+       && [ "$PREVIOUS_INSTALL_DIR" != "$INSTALL_DIR" ]; then
+        MIGRATE_FROM_DIR=$(_find_superseded_install) || MIGRATE_FROM_DIR=""
+        if [ -n "$MIGRATE_FROM_DIR" ]; then
+            log_info "Migrating install from ${MIGRATE_FROM_DIR} to ${INSTALL_DIR}"
+        fi
+    fi
+
+    # An install already on disk decides, on every platform. The roots above are
+    # defaults for a FIRST install; once a tree exists, moving it orphans that
+    # tree and the user config inside it, and an in-app update cannot carry the
+    # move: the payload lands at the new prefix while the init script still
+    # names the old one, so the device reboots into the old binary with two
+    # copies on disk. detect_pi_install_dir already did this for its own branch,
+    # and an honoured INSTALL_DIR is a deliberate choice that outranks it.
+    if [ "${_install_dir_from_detection:-0}" != "1" ] && [ -z "$user_install_dir" ]; then
+        _existing_install_dir=$(_detect_existing_install_dir) || _existing_install_dir=""
+        if [ -n "$_existing_install_dir" ] && [ "$_existing_install_dir" != "$INSTALL_DIR" ] \
+           && [ "$_existing_install_dir" != "${MIGRATE_FROM_DIR:-}" ]; then
+            log_info "Install directory (existing install): $_existing_install_dir"
+            INSTALL_DIR="$_existing_install_dir"
+            # Snapmaker U1 is the one platform whose init script lives INSIDE the
+            # install tree, so its path has to follow the tree.
+            if [ "$platform" = "snapmaker-u1" ]; then
+                INIT_SCRIPT_DEST="${INSTALL_DIR}/config/helixscreen.init"
+            fi
+        fi
     fi
 
     # A probed mod host installs into the mod's own payload root: the mod owns
@@ -1061,7 +1279,7 @@ set_install_paths() {
             log_info "Mod host: honoring the explicitly requested install directory"
         elif [ "${STANDALONE_INSTALL:-}" != "1" ]; then
             INSTALL_DIR="$HOST_INSTALL_ROOT"
-            log_info "Mod host: install root is the firmware mod's payload tree"
+            log_info "Mod host: install root is the mod's payload dir beside its tree"
             # The payload boots from inside the mod's chroot, so its init
             # script goes in the chroot's /etc/init.d, not the host's. The mod
             # runs `chroot $MOD .root/start.sh`, which starts every S* it finds
@@ -1118,7 +1336,7 @@ resolve_platform_hook_key() {
     # Platform hooks (pi32 shares Pi hooks). AD5X gets its own key, never
     # ad5m-zmod: it runs inside the chroot at /usr/data/.mod/.zmod, installs to
     # /srv/helixscreen, and has no /data, so the AD5M hook's
-    # HELIX_CACHE_DIR=/data/helixscreen/cache does not exist there.
+    # HELIX_CACHE_DIR=/data/.helixscreen/cache does not exist there.
     case "$platform" in
         pi|pi32)       platform_hook="pi" ;;
         k1)            platform_hook="k1" ;;
@@ -1127,6 +1345,17 @@ resolve_platform_hook_key() {
         m1)            platform_hook="m1" ;;
         ad5x)          platform_hook="ad5x" ;;
         snapmaker-u1)  platform_hook="snapmaker-u1" ;;
+    esac
+
+    # A QIDI-class SBC reports platform pi, whose hooks are no-ops, so its
+    # stock screen would only ever come down at install time. Select its own
+    # hooks by the same fingerprint that vetoes M1 detection.
+    case "$platform" in
+        pi|pi32)
+            if _is_qidi_class_sbc; then
+                platform_hook="qidi"
+            fi
+            ;;
     esac
 
     # A probed mod host outranks both dispatches above. HOST_PLATFORM_HOOK_KEY
@@ -1146,7 +1375,7 @@ resolve_platform_hook_key() {
 # These are the files users may want to edit from Fluidd/Mainsail, and that
 # the app writes to at runtime. All other files in INSTALL_DIR/config/ are
 # static assets reinstalled on each update.
-HELIX_USER_CONFIG_FILES="settings.json helixscreen.env .disabled_services tool_spools.json crash_history.json"
+HELIX_USER_CONFIG_FILES="settings.json helixscreen.env .disabled_services tool_spools.json crash_history.json user_filaments.json"
 
 # User-writable config DIRECTORIES that live in printer_data/config/helixscreen/.
 #
@@ -1177,6 +1406,7 @@ HELIX_USER_CONFIG_DIRS="custom_images themes printer_database.d"
 _helix_config_file_seed() {
     case "$1" in
         crash_history.json) printf '[]\n' ;;   # CrashHistory::load() expects a JSON array
+        user_filaments.json) printf '[]\n' ;;  # FilamentCatalog reads a bare array as no products
         *) return 1 ;;
     esac
 }
@@ -1498,7 +1728,8 @@ setup_config_symlink() {
     done
 
     log_success "Config directory: $pd_helix"
-    log_info "You can now edit HelixScreen config from Mainsail/Fluidd"
+    # shellcheck disable=SC2034  # consumed by plan.sh (print_summary)
+    HELIX_CONFIG_EDITABLE="$pd_helix"
     return 0
 }
 
@@ -1542,7 +1773,7 @@ remove_config_symlink() {
 
     # Leave printer_data/config/helixscreen/ directory intact — user's config files
     if [ -d "$pd_helix" ]; then
-        log_info "User config preserved at: $pd_helix"
+        log_note "User config preserved at: $(display_path "$pd_helix")"
     fi
 
     return 0
@@ -1603,7 +1834,7 @@ fix_ad5m_klipper_config() {
     $SUDO mv "$tmp_file" "$target_file"
 
     if grep -qw 'CCW-M4' "$target_file"; then
-        log_success "Fixed AD5M screw_thread: CW-M4 → CCW-M4"
+        log_note "Fixed AD5M screw_thread: CW-M4 → CCW-M4"
     else
         log_warn "Failed to fix screw_thread, restoring backup"
         $SUDO cp "$backup_file" "$target_file"

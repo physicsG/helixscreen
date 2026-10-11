@@ -59,4 +59,32 @@ void ui_spool_canvas_invalidate_cache(void);
 
 #ifdef __cplusplus
 }
+
+namespace helix::ui {
+bool reduced_effects();
+
+/**
+ * @brief Create a glow layer: an image the caller places behind a spool,
+ *        centered on it and sized like it.
+ */
+lv_obj_t* spool_glow_create(lv_obj_t* parent);
+
+/**
+ * @brief Light the glow for a silhouette of @p size px and keep it current.
+ *
+ * The silhouette is @p spool_canvas's own alpha (3D style), or a disc of
+ * diameter @p size when it is null (flat style). The layer stays bound to the
+ * spool: it repaints when the spool renders a new shape, and stays empty until
+ * the spool's first render. Capable hardware gets a soft accent halo plus a
+ * lighter tight rim; @p simple a 2 px solid outline. The image overhangs the
+ * object by the glow margin, reported as ext draw size, so layout never moves.
+ * One image per (shape, accent, simple) is shared by every layer showing it,
+ * from a small cache of its own. Calling again re-reads the theme accent.
+ */
+void spool_glow_paint(lv_obj_t* glow, lv_obj_t* spool_canvas, int32_t size,
+                      bool simple = reduced_effects());
+
+/// Unlight the layer and drop its image reference.
+void spool_glow_clear(lv_obj_t* glow);
+} // namespace helix::ui
 #endif

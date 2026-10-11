@@ -8,8 +8,22 @@
 #include <atomic>
 #include <chrono>
 #include <thread>
+#include <type_traits>
 
 #include "../catch_amalgamated.hpp"
+
+// Detection reports a drive's identity - mount point, device, label - and
+// nothing else. Free space on a removable FAT volume costs a full FAT scan on
+// the first query after mount, so UsbDrive carries no capacity members and
+// detection cannot grow a dependency on them; this fails the build if one is
+// reintroduced.
+template <typename T, typename = void> struct HasCapacityMembers : std::false_type {};
+template <typename T>
+struct HasCapacityMembers<
+    T, std::void_t<decltype(std::declval<T&>().total_bytes, std::declval<T&>().available_bytes)>>
+    : std::true_type {};
+static_assert(!HasCapacityMembers<UsbDrive>::value,
+              "UsbDrive must not carry capacity fields; compute free space on demand");
 
 TEST_CASE("UsbBackendMock lifecycle", "[usb_backend][mock]") {
     UsbBackendMock backend;
@@ -51,7 +65,7 @@ TEST_CASE("UsbBackendMock drive simulation", "[usb_backend][mock]") {
     }
 
     SECTION("simulate drive insert") {
-        UsbDrive drive("/media/usb0", "/dev/sda1", "TEST_USB", 1024 * 1024, 512 * 1024);
+        UsbDrive drive("/media/usb0", "/dev/sda1", "TEST_USB");
         backend.simulate_drive_insert(drive);
 
         std::vector<UsbDrive> drives;
@@ -59,11 +73,10 @@ TEST_CASE("UsbBackendMock drive simulation", "[usb_backend][mock]") {
         REQUIRE(drives.size() == 1);
         REQUIRE(drives[0].mount_path == "/media/usb0");
         REQUIRE(drives[0].label == "TEST_USB");
-        REQUIRE(drives[0].total_bytes == 1024 * 1024);
     }
 
     SECTION("simulate drive remove") {
-        UsbDrive drive("/media/usb0", "/dev/sda1", "TEST_USB", 1024 * 1024, 512 * 1024);
+        UsbDrive drive("/media/usb0", "/dev/sda1", "TEST_USB");
         backend.simulate_drive_insert(drive);
 
         backend.simulate_drive_remove("/media/usb0");
@@ -74,8 +87,8 @@ TEST_CASE("UsbBackendMock drive simulation", "[usb_backend][mock]") {
     }
 
     SECTION("multiple drives") {
-        backend.simulate_drive_insert(UsbDrive("/media/usb0", "/dev/sda1", "USB1", 1024, 512));
-        backend.simulate_drive_insert(UsbDrive("/media/usb1", "/dev/sdb1", "USB2", 2048, 1024));
+        backend.simulate_drive_insert(UsbDrive("/media/usb0", "/dev/sda1", "USB1"));
+        backend.simulate_drive_insert(UsbDrive("/media/usb1", "/dev/sdb1", "USB2"));
 
         std::vector<UsbDrive> drives;
         REQUIRE(backend.get_connected_drives(drives).success());
@@ -83,7 +96,7 @@ TEST_CASE("UsbBackendMock drive simulation", "[usb_backend][mock]") {
     }
 
     SECTION("duplicate insert ignored") {
-        UsbDrive drive("/media/usb0", "/dev/sda1", "TEST_USB", 1024, 512);
+        UsbDrive drive("/media/usb0", "/dev/sda1", "TEST_USB");
         backend.simulate_drive_insert(drive);
         backend.simulate_drive_insert(drive); // Should be ignored
 
@@ -119,7 +132,7 @@ TEST_CASE("UsbBackendMock event callbacks", "[usb_backend][mock]") {
     });
 
     SECTION("insert fires callback") {
-        UsbDrive drive("/media/usb0", "/dev/sda1", "TEST", 1024, 512);
+        UsbDrive drive("/media/usb0", "/dev/sda1", "TEST");
         backend.simulate_drive_insert(drive);
 
         REQUIRE(insert_count == 1);
@@ -128,7 +141,7 @@ TEST_CASE("UsbBackendMock event callbacks", "[usb_backend][mock]") {
     }
 
     SECTION("remove fires callback") {
-        UsbDrive drive("/media/usb0", "/dev/sda1", "TEST", 1024, 512);
+        UsbDrive drive("/media/usb0", "/dev/sda1", "TEST");
         backend.simulate_drive_insert(drive);
         backend.simulate_drive_remove("/media/usb0");
 
@@ -141,7 +154,7 @@ TEST_CASE("UsbBackendMock G-code file scanning", "[usb_backend][mock]") {
     UsbBackendMock backend;
     backend.start();
 
-    UsbDrive drive("/media/usb0", "/dev/sda1", "GCODE_USB", 1024 * 1024, 512 * 1024);
+    UsbDrive drive("/media/usb0", "/dev/sda1", "GCODE_USB");
     backend.simulate_drive_insert(drive);
 
     SECTION("no files initially") {
@@ -272,7 +285,7 @@ TEST_CASE("UsbManager drive queries", "[usb_manager]") {
     }
 
     SECTION("get_drives returns inserted drives") {
-        backend->simulate_drive_insert(UsbDrive("/media/usb0", "/dev/sda1", "TEST", 1024, 512));
+        backend->simulate_drive_insert(UsbDrive("/media/usb0", "/dev/sda1", "TEST"));
 
         auto drives = manager.get_drives();
         REQUIRE(drives.size() == 1);
@@ -280,7 +293,7 @@ TEST_CASE("UsbManager drive queries", "[usb_manager]") {
     }
 
     SECTION("scan_for_gcode works through manager") {
-        backend->simulate_drive_insert(UsbDrive("/media/usb0", "/dev/sda1", "TEST", 1024, 512));
+        backend->simulate_drive_insert(UsbDrive("/media/usb0", "/dev/sda1", "TEST"));
         backend->set_mock_files("/media/usb0",
                                 {
                                     {"/media/usb0/test.gcode", "test.gcode", 100, 1000},
@@ -311,8 +324,7 @@ TEST_CASE("UsbManager event callbacks", "[usb_manager]") {
     REQUIRE(backend != nullptr);
 
     SECTION("callback fires on drive insert") {
-        backend->simulate_drive_insert(
-            UsbDrive("/media/usb0", "/dev/sda1", "CALLBACK_TEST", 1024, 512));
+        backend->simulate_drive_insert(UsbDrive("/media/usb0", "/dev/sda1", "CALLBACK_TEST"));
 
         REQUIRE(event_count == 1);
         REQUIRE(last_event == UsbEvent::DRIVE_INSERTED);
@@ -320,7 +332,7 @@ TEST_CASE("UsbManager event callbacks", "[usb_manager]") {
     }
 
     SECTION("callback fires on drive remove") {
-        backend->simulate_drive_insert(UsbDrive("/media/usb0", "/dev/sda1", "TEST", 1024, 512));
+        backend->simulate_drive_insert(UsbDrive("/media/usb0", "/dev/sda1", "TEST"));
         backend->simulate_drive_remove("/media/usb0");
 
         REQUIRE(event_count == 2);
@@ -368,4 +380,28 @@ TEST_CASE("UsbBackend factory", "[usb_backend][factory]") {
         REQUIRE(backend == nullptr);
 #endif
     }
+}
+
+#if defined(__linux__) && !defined(__ANDROID__)
+TEST_CASE("UsbBackend factory returns the Linux backend unstarted", "[usb_backend][factory]") {
+    // UsbManager attaches its event callback and then starts the backend; a
+    // backend already running when it arrives reports drives to no one.
+    auto backend = UsbBackend::create(false);
+    REQUIRE(backend != nullptr);
+    CHECK_FALSE(backend->is_running());
+}
+#endif
+
+TEST_CASE("UsbManager stops its backend even while a scan still holds it", "[usb_manager]") {
+    // A USB walk on a worker thread keeps a reference to the backend; a
+    // backend still running after its manager dies reports events into
+    // freed memory.
+    auto manager = std::make_unique<UsbManager>(true);
+    REQUIRE(manager->start());
+    std::shared_ptr<UsbBackend> held = manager->backend_snapshot();
+    REQUIRE(held != nullptr);
+    REQUIRE(held->is_running());
+
+    manager.reset();
+    CHECK_FALSE(held->is_running());
 }

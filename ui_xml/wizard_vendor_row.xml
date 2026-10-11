@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <!-- Copyright (C) 2025-2026 356C LLC -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- Wizard vendor row: vendor name + source badge (Spoolman/Database) -->
+<!-- Wizard vendor row: vendor name + a "Spoolman" badge once the vendor is on the server -->
 <!-- Used in spool_wizard step 0 vendor list -->
 <component>
   <styles>
@@ -16,8 +16,7 @@
     <!-- Vendor name -->
     <text_body name="vendor_name" text="Vendor" flex_grow="1" long_mode="dots" clickable="false"/>
     <!-- Source badge -->
-    <text_small name="vendor_source"
-                text="Database" translation_tag="Database" style_text_color="#text_muted" clickable="false"/>
+    <text_small name="vendor_source" text="" style_text_color="#text_muted" clickable="false"/>
     <!-- Click handler -->
     <event_cb trigger="clicked" callback="on_wizard_vendor_selected"/>
   </view>

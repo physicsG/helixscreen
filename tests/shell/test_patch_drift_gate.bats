@@ -18,6 +18,8 @@
 # Every test runs against a throwaway fixture repo under BATS_TEST_TMPDIR. None
 # of them touch lib/ in this checkout: those are shared submodule checkouts.
 
+load helpers
+
 GATE="scripts/check_patch_drift.py"
 
 # Build a miniature repo shaped like this one: a Makefile that names a submodule
@@ -168,8 +170,8 @@ in_sync() {
 
     run_gate
     [ "$status" -eq 1 ]
-    [[ "$output" == *"alpha.patch"* ]]
-    [[ "$output" == *"edited since"* ]]
+    contains "alpha.patch" "$output"
+    contains "edited since" "$output"
     [[ "$output" == *"make reapply-patches"* ]]
 }
 
@@ -183,7 +185,7 @@ in_sync() {
 
     run_gate
     [ "$status" -eq 1 ]
-    [[ "$output" == *"delta.patch"* ]]
+    contains "delta.patch" "$output"
     [[ "$output" == *"never applied"* ]]
 }
 
@@ -193,7 +195,7 @@ in_sync() {
 
     run_gate
     [ "$status" -eq 1 ]
-    [[ "$output" == *"one.txt"* ]]
+    contains "one.txt" "$output"
     [[ "$output" == *"changed since"* ]]
 }
 
@@ -213,7 +215,7 @@ in_sync() {
 
     run_gate
     [ "$status" -eq 1 ]
-    [[ "$output" == *"one.txt"* ]]
+    contains "one.txt" "$output"
     [[ "$output" == *"two.txt"* ]]
 }
 
@@ -223,7 +225,7 @@ in_sync() {
     apply_all
     run_gate
     [ "$status" -eq 1 ]
-    [[ "$output" == *"no-stamp"* ]]
+    contains "no-stamp" "$output"
     [[ "$output" == *"make reapply-patches"* ]]
 }
 
@@ -243,8 +245,62 @@ in_sync() {
 
     run_gate
     [ "$status" -eq 1 ]
-    [[ "$output" == *"beta.patch"* ]]
+    contains "beta.patch" "$output"
     [[ "$output" == *"gone from patches/"* ]]
+}
+
+init_root_repo() {
+    # The stale-stamp discrimination needs a superproject git can ask about:
+    # commit the fixture's shelf and wiring so a deleted patch is either
+    # ref-held (a real removal) or ref-less (never shipped anywhere).
+    git -C "$ROOT" init -q
+    git -C "$ROOT" config user.email t@example.invalid
+    git -C "$ROOT" config user.name "Fixture"
+    printf 'FAKE_DIR := lib/fake\n' > "$ROOT/Makefile"
+    git -C "$ROOT" add Makefile mk/patches.mk patches
+    git -C "$ROOT" commit -qm fixture
+}
+
+@test "a stamp entry no ref ever held is a stale entry, not a removed patch" {
+    # An uncommitted ghost patch is applied and stamped, then deleted and
+    # unwired. The stamp is the only place it ever existed; the patch-removed
+    # wording would claim its hunks linger in the submodule and send someone
+    # hunting for a patch that never shipped anywhere.
+    init_root_repo
+    printf 'ghost\n' > "$SUB/ghost.txt"
+    git -C "$SUB" add -N ghost.txt
+    git -C "$SUB" diff -- ghost.txt > "$ROOT/patches/ghost.patch"
+    git -C "$SUB" reset -q -- ghost.txt
+    rm -f "$SUB/ghost.txt"
+    write_patches_mk alpha beta gamma ghost
+    apply_all
+    git -C "$SUB" apply "$ROOT/patches/ghost.patch"
+    write_stamp
+    rm -f "$ROOT/patches/ghost.patch"
+    write_patches_mk alpha beta gamma
+
+    run_gate
+    [ "$status" -eq 1 ]
+    contains "ghost.patch" "$output"
+    contains "stale-stamp-entry" "$output"
+    contains "exists in no ref" "$output"
+    contains "to resync the stamp" "$output"
+    lacks "patch-removed" "$output"
+}
+
+@test "a stamp entry a ref still holds keeps the patch-removed verdict" {
+    # beta was committed before it was deleted: its hunks really do linger,
+    # and the remedy is the ordinary removal repair, not a stamp resync.
+    init_root_repo
+    in_sync
+    rm -f "$ROOT/patches/beta.patch"
+    write_patches_mk alpha gamma
+
+    run_gate
+    [ "$status" -eq 1 ]
+    contains "beta.patch" "$output"
+    contains "patch-removed" "$output"
+    lacks "stale-stamp-entry" "$output"
 }
 
 # ---------------------------------------------------------------------------
@@ -300,8 +356,8 @@ in_sync() {
 
     run_gate --list
     [ "$status" -eq 1 ]
-    [[ "$output" == *"patch-edited lib/fake alpha.patch"* ]]
-    [[ "$output" == *"file-changed lib/fake two.txt"* ]]
+    contains "patch-edited lib/fake alpha.patch" "$output"
+    contains "file-changed lib/fake two.txt" "$output"
     # No decoration, no remedy paragraph.
     [[ "$output" != *"make reapply-patches"* ]]
 }
@@ -381,4 +437,219 @@ print('ok')
         python3 "$GATE" --repo-root "$ROOT"
     [ "$status" -eq 1 ]
     [[ "$output" == *"patch-edited"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# Reachability. The gate above is only worth what the build actually runs, and
+# mk/patches.mk runs it from the $(PATCHES_STAMP) recipe - which is skipped
+# whenever that stamp is up to date. The stamp is per-worktree; lib/ and the
+# .git/modules that hold the applied-stamp are shared. So when ANOTHER worktree
+# re-applies a different branch's patches, nothing in this tree's own patches/
+# or submodule HEADs moves, the recipe is skipped, every apply guard greps a
+# marker the foreign revision also has, and the tree compiles against a patch
+# revision that is not the one in its patches/ - silently.
+#
+# These two run against the real repo rather than the fixture, because what
+# they pin is this repo's wiring. Both are read-only: `make -pn` prints the
+# database without running a recipe, and nothing here writes to lib/.
+
+@test "the per-worktree patch stamp depends on the shared applied-stamp" {
+    cd "$BATS_TEST_DIRNAME/../.." || return 1
+    local problems=""
+
+    grep -qE '^\$\(PATCHES_STAMP\):.*\$\(APPLIED_STAMP_ID\)' mk/patches.mk \
+        || problems="the stamp rule does not list \$(APPLIED_STAMP_ID); "
+    # The id is only a proxy: it has to be hashed FROM the applied-stamps, or it
+    # never moves when another worktree re-patches.
+    grep -qE '^APPLIED_STAMP_HASH_CMD = cat .*\$\(APPLIED_STAMPS\)' mk/patches.mk \
+        || problems="${problems}the id is not derived from \$(APPLIED_STAMPS); "
+    grep -qE '^APPLIED_STAMP_HASH := \$\(shell \$\(APPLIED_STAMP_HASH_CMD\)\)' mk/patches.mk \
+        || problems="${problems}the id is not the hash of that command; "
+
+    # `help` has no prerequisites: it prints the database without make first
+    # deciding whether the default goal can be built, which on a host with no
+    # compiled dependencies it cannot. Only APPLIED_STAMPS feeds the id, so a
+    # stamp variable defined but left out of it watches nothing.
+    local db
+    db="$(make -pn help 2>/dev/null | grep '^APPLIED_STAMPS := ')"
+    # Anchored: a path that merely starts with the name is a different file,
+    # and make would be watching something the gate never writes.
+    grep -qE 'modules/lvgl/helix-patches-applied\.json( |$)' <<<"$db" \
+        || problems="${problems}no lvgl applied-stamp in the make database; "
+    grep -qE 'modules/libhv/helix-patches-applied\.json( |$)' <<<"$db" \
+        || problems="${problems}no libhv applied-stamp in the make database; "
+    grep -qE 'modules/lib/lua/helix-patches-applied\.json( |$)' <<<"$db" \
+        || problems="${problems}no lua applied-stamp in the make database"
+
+    [ -z "$problems" ] || { echo "$problems"; false; }
+}
+
+@test "make and the gate agree on the applied-stamp filename" {
+    cd "$BATS_TEST_DIRNAME/../.." || return 1
+    local name
+    name="$(sed -n 's/^STAMP_NAME = "\(.*\)"$/\1/p' "$GATE")"
+    [ -n "$name" ] || { echo "STAMP_NAME not found in $GATE"; false; }
+    # mk/patches.mk spells the name out; a rename on either side would leave
+    # make watching a path the gate never writes, and the recipe would go back
+    # to being unreachable without anything failing.
+    local esc="${name//./\\.}"
+    grep -qE "/${esc}\$" mk/patches.mk \
+        || { echo "mk/patches.mk does not end a path with $name"; false; }
+}
+
+# ---------------------------------------------------------------------------
+# Which remedy gets printed. `make reapply-patches` repairs whatever checkout
+# the submodule path resolves to, so the advice is only safe when that path is
+# this tree's own. A tree sharing another's checkout is also the tree most
+# likely to be reported, since patches/ is per-branch.
+# ---------------------------------------------------------------------------
+
+# Move the fixture submodule outside the repo and leave a symlink behind: the
+# shape of a worktree whose lib/ entry points into another tree's checkout.
+share_sub_from_another_tree() {
+    SHARED_SUB="${BATS_TEST_TMPDIR:-$(mktemp -d)}/other-tree/lib/fake"
+    mkdir -p "$(dirname "$SHARED_SUB")"
+    mv "$SUB" "$SHARED_SUB"
+    ln -s "$SHARED_SUB" "$SUB"
+}
+
+# The drift used by both cases below: an applied patch grows a hunk the
+# submodule does not carry.
+edit_an_applied_patch() {
+    printf 'one\nALPHA\nALPHA_NEW\n' > "$SUB/one.txt"
+    git -C "$SUB" diff -- one.txt > "$ROOT/patches/alpha.patch"
+    printf 'one\nALPHA\n' > "$SUB/one.txt"
+}
+
+@test "drift in a symlinked submodule does not tell you to reapply" {
+    in_sync
+    share_sub_from_another_tree
+    edit_an_applied_patch
+
+    run_gate
+    [ "$status" -eq 1 ]
+    contains "Do NOT run" "$output"
+    # Naming the real target is the point: it is the tree that would be damaged.
+    contains "$SHARED_SUB" "$output"
+    contains "setup-worktree.sh --setup-only" "$output"
+    case "$output" in
+        *"Fix: make reapply-patches"*)
+            printf 'symlinked tree was told to reapply:\n%s\n' "$output" >&2
+            return 1
+            ;;
+    esac
+}
+
+@test "drift in a private submodule still tells you to reapply" {
+    in_sync
+    edit_an_applied_patch
+
+    run_gate
+    [ "$status" -eq 1 ]
+    contains "Fix: make reapply-patches" "$output"
+    case "$output" in
+        *"Do NOT run"*)
+            printf 'private checkout was refused the reapply remedy:\n%s\n' "$output" >&2
+            return 1
+            ;;
+    esac
+}
+
+@test "a symlinked submodule with no drift is not warned about" {
+    in_sync
+    share_sub_from_another_tree
+
+    run_gate
+    [ "$status" -eq 0 ]
+    case "$output" in
+        *"Do NOT run"*)
+            printf 'clean tree got a remedy it has no use for:\n%s\n' "$output" >&2
+            return 1
+            ;;
+    esac
+}
+
+# --- where the pre-push hook asks the question (prestonbrown/helixscreen#1471) ---
+#
+# The hook's throwaway checkout symlinks lib/ back to the primary tree, so its
+# submodules carry the primary branch's applied patches. Running the gate there
+# measures one branch's patches/ against another branch's lib/.
+
+@test "qc_patch_drift defers when the caller says lib/ is borrowed" {
+    . scripts/qc/patch_drift.sh
+    section_time() { :; }
+    HELIX_QC_SKIP_PATCH_DRIFT=1 run qc_patch_drift
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "deferred to the tree that owns lib/"
+}
+
+@test "qc_patch_drift runs the real gate when nothing defers it" {
+    . scripts/qc/patch_drift.sh
+    section_time() { :; }
+    run qc_patch_drift
+    ! echo "$output" | grep -q "deferred to the tree that owns lib/"
+    echo "$output" | grep -q "patch drift"
+}
+
+@test "pre-push defers drift in the isolated sweep and re-asks in the primary tree" {
+    # The sweep invocation spans lines, so assert the flag and the invocation
+    # separately rather than pinning one formatting of the command.
+    grep -q 'HELIX_QC_SKIP_PATCH_DRIFT=1' .githooks/pre-push
+    grep -q './scripts/quality-checks.sh' .githooks/pre-push
+    grep -q 'cd "$REPO_ROOT" && python3 scripts/check_patch_drift.py' .githooks/pre-push
+}
+
+@test "pre-push blames the working tree, not the pushed commit, for drift" {
+    grep -q 'Patch drift is in YOUR WORKING TREE' .githooks/pre-push
+}
+
+# --- the clang gate has the same borrowed-tree problem ---
+#
+# check_clang_diagnostics.py derives its repo root from its own path and needs a
+# compile database there. The isolated checkout is never built, so the gate
+# declines rather than reporting a vacuous green, and the hook re-asks it in the
+# tree that has a database.
+
+@test "qc_clang_divergence_deferred is set by the env flag" {
+    . scripts/qc/decl_ui.sh
+    HELIX_QC_SKIP_CLANG_DIVERGENCE=1 qc_clang_divergence_deferred
+}
+
+@test "qc_clang_divergence_deferred is false without the flag" {
+    . scripts/qc/decl_ui.sh
+    unset HELIX_QC_SKIP_CLANG_DIVERGENCE
+    ! qc_clang_divergence_deferred
+}
+
+@test "the clang section consults the predicate before running the gate" {
+    # The deferral arm must come first, or an unbuilt isolated tree still fails.
+    local sec
+    sec=$(awk '/Checking clang\/GCC divergence/,/check_clang_diagnostics.py not found/' scripts/qc/decl_ui.sh)
+    contains "if qc_clang_divergence_deferred; then" "$sec"
+    contains 'elif [ "$STAGED_ONLY" = false ]' "$sec"
+}
+
+@test "pre-push defers the clang gate in the sweep and re-asks in the primary tree" {
+    grep -q 'HELIX_QC_SKIP_CLANG_DIVERGENCE=1' .githooks/pre-push
+    grep -q 'cd "$REPO_ROOT" && python3 scripts/check_clang_diagnostics.py' .githooks/pre-push
+}
+
+@test "pre-push lends build/bin only to a commit that descends from this tree" {
+    # Another line's commit validated by this branch's binaries reports this
+    # branch's constants as missing from that line's XML.
+    grep -q 'build/bin" \] && git merge-base --is-ancestor HEAD "\$TARGET"' .githooks/pre-push
+}
+
+@test "a branch whose quality-checks.sh predates the deferral is still pushable" {
+    # The hook only exports the flag; a script that has never heard of it must
+    # ignore it rather than fail, so an older branch stays pushable.
+    run env HELIX_QC_SKIP_CLANG_DIVERGENCE=1 bash -c '
+        STAGED_ONLY=false
+        section_time() { :; }
+        # Stand in for a pre-deferral script: the plain guard, no predicate.
+        if [ "$STAGED_ONLY" = false ] && [ -f "scripts/check_clang_diagnostics.py" ]; then
+            echo "gate would run"
+        fi'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"gate would run"* ]]
 }

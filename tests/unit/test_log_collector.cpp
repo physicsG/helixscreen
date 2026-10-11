@@ -8,6 +8,7 @@
 
 #include "system/log_collector.h"
 #include "test_helpers/ad5x_layout_fixture.h"
+#include "test_helpers/unique_temp_dir.h"
 
 #include <algorithm>
 #include <array>
@@ -29,8 +30,7 @@ namespace {
 struct TempDirGuard {
     fs::path path;
     TempDirGuard() {
-        path = fs::temp_directory_path() / ("helix-logs-test-" + std::to_string(::getpid()) + "-" +
-                                            std::to_string(std::rand()));
+        path = helix::test::unique_temp_dir("helix-logs-test");
         fs::create_directories(path);
     }
     ~TempDirGuard() {

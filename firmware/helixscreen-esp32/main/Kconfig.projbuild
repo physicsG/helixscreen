@@ -29,7 +29,7 @@ config HELIX_HIL_MOONRAKER_URL
         settings.json. Empty in the committed tree — a bench printer's address
         is site-local, so supply it via a git-ignored sdkconfig.local. Left
         empty, the device boots into the not-ready UI and the host is set in
-        Settings > System > Host.
+        Settings > Connection > Host.
 
 endmenu
 
@@ -62,6 +62,16 @@ config HELIX_HTTP_HIL
         owns its own WiFi bring-up) — this probe rides the real app's already-
         connected client.
 
+config HELIX_FAULT_CRASH_HOST
+    string "Crash on connecting to this Moonraker host (fault injection)"
+    default ""
+    help
+        Test-only. When set, the panel aborts as soon as it is connected to a
+        printer whose WebSocket URL contains this string, the way a printer
+        whose discovery crashes the firmware would. Exercises the boot crash
+        guard (prestonbrown/helixscreen#1750). Supply it via a git-ignored
+        sdkconfig.local; empty in every committed config, so it never ships.
+
 endmenu
 
 menu "HelixScreen App Core"
@@ -85,10 +95,12 @@ config HELIX_MOCK_PRINTER
     bool "Compile the mock Moonraker client into the app core"
     default n
     help
-        Adds the mock client/API sources to the helixapp component and defines
-        HELIX_ENABLE_MOCKS=1, so the UI can be driven from synthetic printer
-        state with no live Moonraker. Off by default: production firmware talks
-        to a real printer over EspMoonrakerClient. Development-only.
+        Adds ams_backend_mock.cpp to the helixapp component and runs a
+        firmware-local synthetic printer driver (app_boot.cpp) instead of the
+        real connection, so the UI can be driven from synthetic printer state
+        with no live Moonraker. HELIX_ENABLE_MOCKS is never defined on ESP32.
+        Off by default: production firmware talks to a real printer over
+        EspMoonrakerClient. Development-only.
 
 config HELIX_AMS_HTTP_POLL_BACKENDS
     bool "Enable HTTP-polling AMS backends (ACE, AD5X IFS)"

@@ -17,7 +17,10 @@
 
 #include "ui_observer_guard.h"
 
+#include "ams_environment_zone.h"
+#include "helix/xml/indexed_subject_pool.h"
 #include "overlay_base.h"
+#include "static_panel_registry.h"
 #include "subject_managed_panel.h"
 
 #include <lvgl/lvgl.h>
@@ -26,10 +29,14 @@
 #include <vector>
 
 // Forward declarations
+namespace helix {
 class AmsBackend;
 struct DryingPreset;
+} // namespace helix
 
 namespace helix::ui {
+
+struct AmsEnvironmentOverlayTestAccess;
 
 /**
  * @class AmsEnvironmentOverlay
@@ -41,12 +48,7 @@ namespace helix::ui {
  */
 class AmsEnvironmentOverlay : public OverlayBase {
   public:
-    AmsEnvironmentOverlay();
     ~AmsEnvironmentOverlay() override;
-
-    // Non-copyable
-    AmsEnvironmentOverlay(const AmsEnvironmentOverlay&) = delete;
-    AmsEnvironmentOverlay& operator=(const AmsEnvironmentOverlay&) = delete;
 
     // === OverlayBase Interface ===
 
@@ -54,11 +56,29 @@ class AmsEnvironmentOverlay : public OverlayBase {
     void register_callbacks() override;
     lv_obj_t* create(lv_obj_t* parent) override;
 
+    const char* xml_component() const override {
+        return "ams_environment_overlay";
+    }
+
     /// Subscribe to live AMS state changes and pull current data.
     void on_activate() override;
 
     /// Drop the live-update subscription.
-    void on_deactivate() override;
+    void on_deactivating(DeactivateReason reason) override;
+
+  protected:
+    void before_show() override;
+
+    /// Drop the cached widgets and reclaim the three zone-tab pools. Zones,
+    /// selection and dryer readouts live in members and subjects; the dryer inputs
+    /// are re-derived from config on every open.
+    void on_ui_destroyed() override;
+
+  public:
+    /// Freed on close; the next open rebuilds it.
+    bool destroy_on_close() const override {
+        return true;
+    }
 
     const char* get_name() const override {
         return "AMS Environment";
@@ -67,11 +87,24 @@ class AmsEnvironmentOverlay : public OverlayBase {
     // === Public API ===
 
     /**
-     * @brief Show the environment overlay for a given unit
-     * @param parent_screen Parent screen for overlay creation
-     * @param unit_index AMS unit index (0-based)
+     * @brief Show the overlay over a set of zones.
+     *
+     * @param zones         The zones this view covers, ordered as the selector shows them
+     * @param selected      Index into @p zones to open on
+     * @param with_selector Whether to offer the tab strip. False when one zone was drilled
+     *                      into from the overview, where Back is the way between zones.
      */
-    void show(lv_obj_t* parent_screen, int unit_index = 0);
+    void show_zone(lv_obj_t* parent_screen, std::vector<helix::printer::EnvironmentZone> zones,
+                   size_t selected, bool with_selector);
+
+    /// Switch the shown zone without rebuilding the detail widgets.
+    void select_zone(size_t index);
+
+    [[nodiscard]] size_t selected_zone_index() const {
+        return selected_zone_;
+    }
+    /// Zones the selector offers; 0 when no selector is shown.
+    [[nodiscard]] size_t zone_count() const;
 
     /**
      * @brief Refresh overlay data from backend
@@ -80,11 +113,13 @@ class AmsEnvironmentOverlay : public OverlayBase {
 
     /// Materials shown in the comfort table when no AMS slot is loaded.
     /// Falls back to the user's configured quick-preset materials rather than a
-    /// private hardcoded list (which used to disagree with every other preset
-    /// surface in the app on its 4th entry).
+    /// private hardcoded list, so this surface names the same materials as every
+    /// other preset surface in the app.
     static std::vector<std::string> fallback_comfort_materials();
 
   private:
+    friend struct AmsEnvironmentOverlayTestAccess;
+
     // === Internal Methods ===
 
     /// Update all subjects from backend state
@@ -102,22 +137,58 @@ class AmsEnvironmentOverlay : public OverlayBase {
     /// Auto-select preset based on loaded materials
     void auto_select_preset();
 
-    // === Static Callbacks ===
+    /// Start or stop drying on the shown zone's unit.
+    void handle_start_stop();
 
-    static void on_start_stop_clicked(lv_event_t* e);
-    static void on_preset_changed(lv_event_t* e);
+    /// Arm or disarm humidity-controlled drying on the shown zone's unit.
     static void on_auto_dry_toggled(lv_event_t* e);
+
+    /// Which of the two dryer inputs a keypad session is filling.
+    enum class DryerField { Temperature, Duration };
+
+    /// Open the numeric keypad over one input, ranged by what the shown box accepts.
+    void show_dryer_keypad(DryerField field);
+    /// Write a confirmed keypad value back into its input.
+    void apply_dryer_keypad_value(DryerField field, float value);
+    static void on_dryer_keypad_confirmed(float value, void* user_data);
+
+    /// Field the open keypad is filling. Read by the confirm callback, which the
+    /// keypad hands only a value and this overlay.
+    DryerField keypad_field_ = DryerField::Temperature;
+
+    /// Set once the user types a temp or duration, cleared when the overlay is shown
+    /// again. Presets are a starting point, so the auto-selection stands down for the
+    /// rest of a showing in which the user set a value themselves.
+    bool dryer_inputs_edited_ = false;
+
+    /// Push the selected zone's values into the detail subjects.
+    void publish_selected_zone();
+    /// Fill the tab pools and publish the count, populate-before-count.
+    void rebuild_tabs();
+    /// Restore the dryer temp/duration inputs from the last remembered values.
+    void restore_remembered_dryer_inputs();
+    /// The unit the on-screen zone belongs to, for the dryer-control call sites that
+    /// command a specific box. -1 when no zone is shown, or the shown zone spans
+    /// several units and cannot be attributed to one (HappyHare can report this for a
+    /// gate outside every known unit's slot range). A read that only shapes a display
+    /// value may treat -1 as "no data for this unit"; a call that would command the
+    /// backend must refuse rather than guess which box to act on.
+    [[nodiscard]] int acting_unit_index() const;
 
     // === State ===
 
     /// Alias for overlay_root_ to match existing pattern
     lv_obj_t*& overlay_ = overlay_root_;
 
-    /// Current unit index
-    int unit_index_ = 0;
-
     /// Cached dryer presets
     std::vector<DryingPreset> cached_presets_;
+
+    /// Zones this instance is currently showing.
+    std::vector<helix::printer::EnvironmentZone> zones_;
+    /// Index into zones_ the detail subjects currently reflect.
+    size_t selected_zone_ = 0;
+    /// Whether the tab strip is offered for the current zones_.
+    bool with_selector_ = false;
 
     /// Live-update observers. Environment temperature/humidity and dryer state do
     /// NOT bump AmsState's slots_version (that tracks slot data only), so the
@@ -133,38 +204,37 @@ class AmsEnvironmentOverlay : public OverlayBase {
     lv_obj_t* preset_dropdown_ = nullptr;
     lv_obj_t* temp_input_ = nullptr;
     lv_obj_t* duration_input_ = nullptr;
-    lv_obj_t* temp_range_label_ = nullptr;
 
     // === Subjects (managed by SubjectManager) ===
 
     SubjectManager subjects_;
 
-    lv_subject_t temp_text_subject_;
+    lv_subject_t temp_text_subject_{};
     char temp_text_buf_[64] = {};
 
-    lv_subject_t target_temp_text_subject_;
+    lv_subject_t target_temp_text_subject_{};
     char target_temp_text_buf_[32] = {};
 
-    lv_subject_t humidity_text_subject_;
+    lv_subject_t humidity_text_subject_{};
     char humidity_text_buf_[32] = {};
 
     /// 1 when the shown unit has a humidity sensor. Gates the humidity readout
     /// and the Material Comfort strip, both of which need a real reading to say
     /// anything true. Per-overlay rather than the shown unit's
     /// ams_env_ind_<i>_humidity_visible so it cannot answer for the wrong unit.
-    lv_subject_t humidity_visible_subject_;
+    lv_subject_t humidity_visible_subject_{};
 
-    lv_subject_t title_text_subject_;
-    char title_text_buf_[64] = {};
+    lv_subject_t title_text_subject_{};
+    char title_text_buf_[96] = {};
 
-    lv_subject_t dryer_visible_subject_;
-    lv_subject_t no_dryer_visible_subject_;
-    lv_subject_t drying_active_subject_;
+    lv_subject_t dryer_visible_subject_{};
+    lv_subject_t no_dryer_visible_subject_{};
+    lv_subject_t drying_active_subject_{};
 
-    lv_subject_t drying_text_subject_;
+    lv_subject_t drying_text_subject_{};
     char drying_text_buf_[64] = {};
 
-    lv_subject_t drying_progress_subject_;
+    lv_subject_t drying_progress_subject_{};
 
     static constexpr int MAX_COMFORT_ROWS = 4;
     lv_subject_t comfort_visible_[MAX_COMFORT_ROWS] = {};
@@ -172,29 +242,64 @@ class AmsEnvironmentOverlay : public OverlayBase {
     lv_subject_t comfort_text_[MAX_COMFORT_ROWS] = {};
     char comfort_text_buf_[MAX_COMFORT_ROWS][96] = {};
 
-    lv_subject_t start_stop_text_subject_;
+    lv_subject_t start_stop_text_subject_{};
     char start_stop_text_buf_[32] = {};
 
-    lv_subject_t preset_text_subject_;
+    lv_subject_t preset_text_subject_{};
     char preset_text_buf_[64] = {};
 
     /// Humidity-controlled drying. A separate capability from the dryer itself —
     /// a backend can have one without the other — so it carries its own
     /// visibility rather than riding on dryer_visible_subject_.
-    lv_subject_t auto_dry_visible_subject_;
-    lv_subject_t auto_dry_on_subject_;
-    lv_subject_t auto_dry_text_subject_;
+    lv_subject_t auto_dry_visible_subject_{};
+    lv_subject_t auto_dry_on_subject_{};
+    lv_subject_t auto_dry_text_subject_{};
     char auto_dry_text_buf_[96] = {};
+    /// Zone selector + per-zone ceiling. "env_zone_" prefix; the pools are
+    /// distinct from Task 7's overview overlay, which uses "zone_ov_".
+    lv_subject_t zone_count_subject_{};
+    lv_subject_t zone_state_subject_{};
+    lv_subject_t temp_range_subject_{};
+    char temp_range_buf_[32] = {};
+
+    /// Which lanes the shown zone covers. The header names the box; this says how
+    /// much of the printer is inside it, which a single-zone view cannot infer.
+    /// Sized for a translated plural noun plus a range: a ToolChanger reports
+    /// LaneNoun::Tool, whose Russian plural makes "Инструменты 10-13" 28 bytes.
+    lv_subject_t slots_text_subject_{};
+    char slots_text_buf_[64] = {};
+
+    /// Cross-unit affordance: offered only when the printer has more zones than this
+    /// view is showing and no overview already sits beneath this overlay.
+    lv_subject_t all_zones_visible_subject_{};
+    lv_subject_t all_zones_text_subject_{};
+    char all_zones_text_buf_[64] = {};
+
+    /// Names the zone actually running, for the banner shown while
+    /// zone_state_subject_ reads Queued. Empty otherwise.
+    lv_subject_t queued_banner_subject_{};
+    char queued_banner_buf_[128] = {};
+
+    helix::xml::IndexedSubjectPool tab_label_pool_{"env_zone_tab_label",
+                                                   helix::xml::IndexedSubjectPool::Type::String};
+    helix::xml::IndexedSubjectPool tab_state_pool_{"env_zone_tab_state",
+                                                   helix::xml::IndexedSubjectPool::Type::Int};
+    helix::xml::IndexedSubjectPool tab_active_pool_{"env_zone_tab_active",
+                                                    helix::xml::IndexedSubjectPool::Type::Int};
 };
 
+inline AmsEnvironmentOverlay& get_ams_environment_overlay() {
+    return lazy_global<AmsEnvironmentOverlay>("AmsEnvironmentOverlay");
+}
+
 /**
- * @brief Global instance accessor
+ * @brief Open the environment UI for one unit.
  *
- * Creates the overlay on first access and registers it for cleanup.
- *
- * @return Reference to singleton AmsEnvironmentOverlay
+ * The branch lives here rather than inside either overlay, so neither has to decide
+ * which one should have been opened. A unit with one zone goes straight to detail; a
+ * few interchangeable zones get the tab strip; anything else gets the list.
  */
-AmsEnvironmentOverlay& get_ams_environment_overlay();
+void open_environment_for_unit(int unit_index);
 
 /**
  * @brief Register the AMS environment-indicator badge (component + click callback) once.

@@ -54,14 +54,12 @@
         </lv_obj>
       </lv_obj>
     </lv_obj>
-    <!-- Horizontal divider above button -->
-    <divider_horizontal/>
-    <!-- Single OK button row -->
-    <lv_obj width="100%" height="#button_height" style_pad_all="0" style_pad_gap="0" flex_flow="row">
-      <!-- OK button -->
-      <ui_button name="btn_ok" height="100%" flex_grow="1" style_radius="0" text="OK">
-        <event_cb trigger="clicked" callback="on_print_complete_ok"/>
-      </ui_button>
-    </lv_obj>
+    <!-- Button row: OK always; "Start next: <name>" only while the queue has
+         jobs — job_queue_count drives the secondary's visibility, the
+         job_queue_start_next_text subject its label. -->
+    <modal_button_row primary_text="OK"
+                      secondary_variant="primary" primary_callback="on_print_complete_ok"
+                      secondary_subject="job_queue_start_next_text" secondary_show_subject="job_queue_count"
+                      secondary_callback="on_print_complete_start_next"/>
   </view>
 </component>

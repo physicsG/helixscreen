@@ -13,6 +13,7 @@
 #include "tool_state.h"
 
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "../catch_amalgamated.hpp"
@@ -20,6 +21,7 @@
 using namespace helix;
 using namespace helix::ui;
 
+namespace {
 struct FormatterScope {
     FormatterScope() {
         PrintStatusWidget::destroy_formatter_for_test();
@@ -29,6 +31,7 @@ struct FormatterScope {
         PrintStatusWidget::release_formatter_for_test();
     }
 };
+} // namespace
 
 TEST_CASE_METHOD(HelixTestFixture, "Tool override: pinned reads per-tool subject",
                  "[print_status][tool_override]") {
@@ -42,7 +45,7 @@ TEST_CASE_METHOD(HelixTestFixture, "Tool override: pinned reads per-tool subject
     ps.init_subjects(false);
 
     // Register extruder + extruder1 so dynamic subjects exist
-    ps.init_extruders({"extruder", "extruder1"});
+    ps.temperature_state().init_extruders({"extruder", "extruder1"});
 
     lv_subject_set_int(ts.get_tool_count_subject(), 2);
     UpdateQueueTestAccess::drain_all(UpdateQueue::instance());
@@ -51,10 +54,11 @@ TEST_CASE_METHOD(HelixTestFixture, "Tool override: pinned reads per-tool subject
 
     // Seed per-tool and active-extruder subjects with distinct values
     SubjectLifetime lt;
-    auto* e1_temp = ps.get_extruder_temp_subject("extruder1", lt);
+    auto* e1_temp = ps.temperature_state().get_extruder_temp_subject("extruder1", lt);
     REQUIRE(e1_temp != nullptr);
-    lv_subject_set_int(e1_temp, 25000);                               // 250 °C
-    lv_subject_set_int(ps.get_active_extruder_temp_subject(), 19000); // 190 °C (distinct)
+    lv_subject_set_int(e1_temp, 25000); // 250 °C
+    lv_subject_set_int(ps.temperature_state().get_active_extruder_temp_subject(),
+                       19000); // 190 °C (distinct)
     UpdateQueueTestAccess::drain_all(UpdateQueue::instance());
 
     // Pin the formatter to extruder1
@@ -83,7 +87,7 @@ TEST_CASE_METHOD(HelixTestFixture, "Tool override: stale pin falls back to auto"
 
     // Pin to a ghost extruder that doesn't exist — should fall back to auto
     PrintStatusWidget::set_nozzle_tool_override_for_test("extruder7_ghost");
-    lv_subject_set_int(ps.get_active_extruder_temp_subject(), 12345); // 123 °C
+    lv_subject_set_int(ps.temperature_state().get_active_extruder_temp_subject(), 12345); // 123 °C
     UpdateQueueTestAccess::drain_all(UpdateQueue::instance());
 
     auto* nozzle_sub = lv_xml_get_subject(nullptr, "print_status_nozzle_text");
@@ -98,7 +102,7 @@ TEST_CASE_METHOD(HelixTestFixture, "Tool override: stale pin falls back to auto"
 // set_ams_topology() expands ToolState's tool list to one entry per filament
 // slot, so tool_count() on a 4-lane AMS or a 16-wide AD5X tool map says nothing
 // about how many nozzles the machine has. Driving print_status_multi_tool from
-// it stamped a "T0" badge and a tool-picker chevron onto single-hotend printers.
+// it stamped a "Slot 1" badge and a tool-picker chevron onto single-hotend printers.
 // ============================================================================
 
 namespace {
@@ -125,7 +129,6 @@ helix::ToolTopology lane_topology(int lanes) {
     topo.tool_to_slot.resize(static_cast<size_t>(lanes));
     for (int i = 0; i < lanes; ++i)
         topo.tool_to_slot[static_cast<size_t>(i)] = i;
-    topo.tool_name_prefix = "T";
     return topo;
 }
 
@@ -183,7 +186,7 @@ TEST_CASE_METHOD(HelixTestFixture, "Tool badge: a genuine second extruder still 
 
     auto* label = lv_xml_get_subject(nullptr, "print_status_nozzle_tool_label");
     REQUIRE(label != nullptr);
-    REQUIRE(std::string(lv_subject_get_string(label)) == "T0");
+    REQUIRE(std::string(lv_subject_get_string(label)) == "Tool 1");
 }
 
 // ============================================================================
@@ -195,7 +198,7 @@ TEST_CASE_METHOD(HelixTestFixture, "Nozzle picker: rows come from the discovered
     auto& ts = ToolState::instance();
     PrinterState& ps = get_printer_state();
     reset_state_for_tool_gate(ts, ps);
-    ps.init_extruders({"extruder", "extruder1"});
+    ps.temperature_state().init_extruders({"extruder", "extruder1"});
 
     auto disc = discovery_with({"extruder", "extruder1", "heater_bed"});
     ts.init_tools(disc);
@@ -226,6 +229,33 @@ TEST_CASE_METHOD(HelixTestFixture, "Nozzle picker: no discovered extruders means
         PrintStatusWidget::build_nozzle_tool_options(ps.temperature_state().extruders()).empty());
 }
 
+TEST_CASE_METHOD(HelixTestFixture,
+                 "Nozzle picker: a lone extruder with no assigned display name reads Nozzle",
+                 "[print_status][tool_override]") {
+    // A bare "extruder" key by itself carries no signal about whether the printer
+    // has one nozzle or several, so this exercises build_nozzle_tool_options()
+    // directly rather than through PrinterState::init_extruders(), which would
+    // have already populated display_name and skipped this fallback entirely.
+    std::unordered_map<std::string, ExtruderInfo> extruders;
+    extruders["extruder"];
+    auto options = PrintStatusWidget::build_nozzle_tool_options(extruders);
+    REQUIRE(options.size() == 1);
+    CHECK(options[0].label == "Nozzle");
+}
+
+TEST_CASE_METHOD(
+    HelixTestFixture,
+    "Nozzle picker: a second extruder with no assigned display name still gets a number",
+    "[print_status][tool_override]") {
+    std::unordered_map<std::string, ExtruderInfo> extruders;
+    extruders["extruder"];
+    extruders["extruder1"];
+    auto options = PrintStatusWidget::build_nozzle_tool_options(extruders);
+    REQUIRE(options.size() == 2);
+    CHECK(options[0].label == "Nozzle");
+    CHECK(options[1].label == "Nozzle 2");
+}
+
 // ============================================================================
 // A rejected pin is not written to the widget's config
 // ============================================================================
@@ -235,7 +265,7 @@ TEST_CASE_METHOD(HelixTestFixture, "Nozzle picker: a rejected override is not pe
     auto& ts = ToolState::instance();
     PrinterState& ps = get_printer_state();
     reset_state_for_tool_gate(ts, ps);
-    ps.init_extruders({"extruder", "extruder1"});
+    ps.temperature_state().init_extruders({"extruder", "extruder1"});
     UpdateQueueTestAccess::drain_all(UpdateQueue::instance());
 
     FormatterScope fs;

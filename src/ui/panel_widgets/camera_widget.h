@@ -7,6 +7,7 @@
 
 #include "async_lifetime_guard.h"
 #include "camera_stream.h"
+#include "moonraker_types.h"
 #include "observer_factory.h"
 #include "panel_widget.h"
 
@@ -49,10 +50,23 @@ class CameraWidget : public PanelWidget {
   private:
     void start_stream();
     void stop_stream();
-    void apply_transform();   // Push rotation/flip config to stream
+    void apply_transform();                // Push rotation/flip config to stream
+    std::string configured_source() const; // `source` key of config_ (webcam name), or ""
+    /// Restart the stream when the feed configured_source() resolves to is no
+    /// longer the one running — after a config save, or when the webcam list
+    /// changes under a running stream (the named camera gone, or back).
+    void resync_source();
     void update_stream_fps(); // Re-evaluate and set max_fps based on current state
     void set_status_text(const char* text);
+    /// Show the translation of @p key, a string literal, and keep it translated.
+    void set_status_key(const char* key);
     void destroy_fullscreen(); // Synchronous cleanup of fullscreen overlay
+    /// Create the fullscreen overlay on the active screen and push it, unless
+    /// another widget already owns one. The caller has already started the stream.
+    void show_fullscreen_overlay();
+    /// LV_EVENT_DELETE on the fullscreen overlay. A screen teardown frees it
+    /// without running the NavigationManager close callback (#1430).
+    static void on_fullscreen_overlay_deleted(lv_event_t* e);
 
     /// Null the tile-tree pointers (root, screen, image, overlay, status
     /// label) without touching the stream, the observers, or the fullscreen
@@ -82,10 +96,16 @@ class CameraWidget : public PanelWidget {
 
     // Observer for webcam availability — starts stream when URLs arrive
     ObserverGuard webcam_observer_;
+    // Observer for the webcam list — re-resolves a named source when it changes
+    ObserverGuard webcam_list_observer_;
     // Observer for home edit mode — throttles camera fps during editing
     ObserverGuard edit_mode_observer_;
+    ObserverGuard language_observer_;
 
-    int target_fps_ = 15;                     // From Moonraker webcam config
+    // The feed the running stream shows: its Moonraker flip flags and fps are
+    // this camera's, not necessarily the auto-pick's.
+    WebcamInfo current_feed_;
+    int target_fps_ = 15;                     // From current_feed_
     lv_timer_t* fps_recheck_timer_ = nullptr; // Periodic re-eval when paused
 
     // Lifetime guard — prevents use-after-free in queued callbacks.
@@ -119,7 +139,7 @@ class CameraWidget : public PanelWidget {
  *
  * Creates a standalone CameraStream + camera_fullscreen overlay and pushes it
  * onto NavigationManager. Used by entry points outside the home panel (e.g.
- * Settings → Hardware & Devices → Camera). No-ops if no webcam is configured
+ * Settings → Devices → Camera). No-ops if no webcam is configured
  * or if a fullscreen view is already open.
  *
  * @param parent_screen Active screen the overlay is attached to.

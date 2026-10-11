@@ -26,6 +26,10 @@
  *    the same path PanelWidgetManager uses — sized to its authored minimum on
  *    each shipping geometry, and measured.
  *
+ * A growth pass renders every self-sizing tile again at two cells square, where
+ * a scaled-up glyph or face can spill instead, and pins that a tile given more
+ * than a cell on a small panel draws a larger glyph than at one cell.
+ *
  * The sweep asserts against kKnownClipping, an enumerated baseline of what
  * clips today. Fixing those is a per-widget judgement call (raise the authored
  * minimum, add a smaller layout branch, or accept the truncation) and is not
@@ -37,9 +41,13 @@
 #include "ui_update_queue.h"
 
 #include "../lvgl_ui_test_fixture.h"
+#include "../test_helpers/ams_state_test_access.h"
+#include "../test_helpers/buffer_infos.h"
 #include "../test_helpers/panel_widget_size_harness.h"
 #include "../test_helpers/tips_manager_test_access.h"
 #include "../test_helpers/update_queue_test_access.h"
+#include "ams_backend_mock.h"
+#include "ams_state.h"
 #include "display_metrics.h"
 #include "grid_layout.h"
 #include "panel_widget_manager.h"
@@ -49,12 +57,15 @@
 #include "src/ui/panel_widgets/print_status_widget.h"
 #include "theme_manager.h"
 #include "tool_state.h"
+#include "xml_registration.h"
 
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "../catch_amalgamated.hpp"
@@ -131,6 +142,10 @@ const OverflowExceptions& exceptions() {
         // and its content exceeding the box is its normal state, not a size
         // failure.
         "gcode_console_output",
+        // active_spool's wide text column scrolls each line (long_mode
+        // scroll_circular), so a material name wider than the column is read
+        // by scrolling, not clipped.
+        "spoolman_text_stack",
     }};
     return ex;
 }
@@ -173,31 +188,12 @@ bool operator<(const KnownClip& a, const KnownClip& b) {
 /// which is why these are recorded rather than patched.
 // clang-format off
 const std::vector<KnownClip> kKnownClipping = {
-    // control_buttons is pinned at exactly 4x2 tracks (min == max in the
-    // registry, so it can never be given more room). At XXLARGE that is ~345px
-    // for two labelled buttons at a 32px body font, and the primary label runs
-    // ~60px past its button. Both real fixes are wider than the defect: raising
-    // min_colspan re-lays-out every shipping panel to fix one tier, and a
-    // per-tier minimum span does not exist in PanelWidgetDef. The narrow fix is
-    // an icon-only branch in ui_button once the button is too narrow for its
-    // label, which is measured layout and belongs in C++.
-    {"control_buttons",  "1080x2400"},
-
     // Whole-widget: does not fit at its minimum on any shipping panel.
-    {"clog_detection",   "*"},
-    {"lock",             "*"},
     {"preheat",          "*"},
     {"print_status",     "*"},
     {"printer_image",    "*"},
-    {"shutdown",         "*"},
-    {"temp_stack",       "*"},
-    {"temperature",      "*"},
 
     // Geometry-specific.
-    {"active_spool",     "1024x600"}, {"active_spool",     "272x480"},
-    {"active_spool",     "480x272"},  {"active_spool",     "480x320"},
-    {"active_spool",     "480x400"},  {"active_spool",     "480x800"},
-
     {"ams",              "272x480"},
 
     // The #icon_size cluster that used to live here - bed_temperature,
@@ -208,25 +204,15 @@ const std::vector<KnownClip> kKnownClipping = {
     // no more cell to grow into. The rung is "lg" now (ui_xml/globals.xml), and
     // all ten pairs fit.
 
-    // btn_primary's label runs 76-100px past its button on every panel; the
-    // 480x320 entry is the same defect, one pixel over on btn_stop's icon.
-    {"control_buttons",  "1024x600"}, {"control_buttons",  "1280x720"},
-    {"control_buttons",  "272x480"},  {"control_buttons",  "480x272"},
-    {"control_buttons",  "480x320"},  {"control_buttons",  "480x400"},
-    {"control_buttons",  "480x800"},  {"control_buttons",  "800x480"},
 
-    {"favorite_macro",   "272x480"},  {"favorite_macro",   "480x272"},
-
-    // Not the badge any more (that was ui_button padding, now zeroed) — the
-    // "Restart" caption below it, 1px, on the two smallest panels only.
-    {"firmware_restart", "272x480"},  {"firmware_restart", "480x272"},
-
-    {"nozzle_temps",     "1024x600"}, {"nozzle_temps",     "1280x720"},
+    // Below the ladder's floor: at the authored minimum tile these
+    // geometries cannot hold the stack (the two smallest panels are narrower
+    // than icon + value at the compact font; 1024x600's minimum tile floors a
+    // pixel over at the large tier's fonts), and the card scrolls rather than
+    // clipping silently. Every wider geometry holds the ladder's output with
+    // no entry.
     {"nozzle_temps",     "272x480"},  {"nozzle_temps",     "480x400"},
-
-    {"power_device",     "1024x600"}, {"power_device",     "272x480"},
-    {"power_device",     "480x272"},  {"power_device",     "480x320"},
-    {"power_device",     "480x400"},  {"power_device",     "480x800"},
+    {"nozzle_temps",     "1024x600"},
 
     // Measured against the LONGEST title in the database, which is what the
     // sweep now pins — the two entries this used to hold were whatever the
@@ -304,11 +290,112 @@ void seed_printer_topology(PrinterState& state) {
     ToolTopology topo;
     topo.tool_count = 2;
     topo.active_tool = 0;
-    topo.tool_name_prefix = "T";
     ToolState::instance().set_ams_topology(topo);
 
-    state.init_extruders({"extruder"});
+    state.temperature_state().init_extruders({"extruder"});
     helix::ui::UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
+}
+
+/// The filament buffer tile binds to AmsState subjects, so it only has content
+/// to lay out while a pressure reading with a set point is published. Scoped to
+/// that tile so the AmsState subjects exist only while a widget that binds them
+/// is measured.
+struct BufferReadingSeed {
+    BufferReadingSeed() {
+        AmsState::instance().init_subjects(true);
+        AmsStateTestAccess::sync_buffer(AmsState::instance(), test::fps_units({0.71f}), 0);
+    }
+    ~BufferReadingSeed() {
+        AmsStateTestAccess::sync_buffer(AmsState::instance(), AmsSystemInfo{}, 0);
+        AmsStateTestAccess::clear_buffer_traces(AmsState::instance());
+        AmsState::instance().deinit_subjects();
+    }
+};
+
+/// The Clog Detection tile binds the clog_meter_* subjects, so unseeded it
+/// measures placeholder text. Two readings cover the widest cases: FlowGuard
+/// (end labels, signed centre text) and the encoder (longest mode text).
+struct ClogReadingSeed {
+    ClogReadingSeed() {
+        auto& ams = AmsState::instance();
+        ams.init_subjects(true);
+        auto mock = std::make_unique<AmsBackendMock>();
+        backend_ = mock.get();
+        backend_->set_operation_delay(0);
+        ams.set_backend(std::move(mock));
+        backend_->start();
+    }
+    ~ClogReadingSeed() {
+        AmsState::instance().set_backend(nullptr);
+        AmsState::instance().deinit_subjects();
+    }
+    // The widget re-syncs from the backend when it attaches, so the reading has
+    // to live there rather than on the subjects.
+    void flowguard() {
+        FlowguardInfo fg;
+        fg.enabled = true;
+        fg.level = 0.45f;
+        backend_->set_encoder_clog_info(EncoderClogInfo{}, 0);
+        backend_->set_flowguard_info(fg);
+        AmsState::instance().sync_from_backend();
+    }
+    void encoder() {
+        backend_->set_flowguard_info(FlowguardInfo{});
+        EncoderClogInfo enc;
+        enc.enabled = true;
+        enc.detection_mode = 1;
+        enc.detection_length = 20.0f;
+        enc.headroom = 12.5f;
+        enc.desired_headroom = 5.0f;
+        enc.min_headroom = 8.0f;
+        backend_->set_encoder_clog_info(enc, 1);
+        AmsState::instance().sync_from_backend();
+    }
+
+  private:
+    AmsBackendMock* backend_ = nullptr;
+};
+
+struct Rendered {
+    bool built = false;
+    OverflowReport report;
+    int icon_rung = -1; ///< the tile's published rung; -1 for a widget that does not size itself
+    int icon_h = 0;     ///< the named icon's drawn height, when one is asked for
+};
+
+/// Build @p def through its registry factory, size it to @p c x @p r tracks of
+/// grid @p m with the arithmetic PanelWidgetManager applies (truncation
+/// included), and measure what spills.
+Rendered render_at(lv_obj_t* screen, const PanelWidgetDef& def, const CellMetrics& m, int c, int r,
+                   const char* icon_name = nullptr) {
+    Rendered out;
+    {
+        RegistryWidgetHarness h(screen, def, &m);
+        if (!h.created()) {
+            return out;
+        }
+        out.built = true;
+        h.resize(c, r, static_cast<int>(grid_track_extent(m.cell_w, m.gutter, c)),
+                 static_cast<int>(grid_track_extent(m.cell_h, m.gutter, r)));
+        // Several widgets rebuild their content from an observer that fires
+        // through UpdateQueue rather than inline (observe<int> queues its
+        // handler), so measuring before the drain measures the pre-rebuild tree.
+        helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+        lv_obj_update_layout(h.root());
+        out.report = collect_overflow(h.root(), exceptions());
+        if (lv_subject_t* rung =
+                lv_xml_get_subject(nullptr, (std::string(def.id) + "_tile_icon").c_str())) {
+            out.icon_rung = lv_subject_get_int(rung);
+        }
+        if (lv_obj_t* icon = icon_name ? lv_obj_find_by_name(h.root(), icon_name) : nullptr) {
+            // The layout box, which a glyph drawn above its face's size fills.
+            out.icon_h = lv_obj_get_height(icon);
+        }
+    }
+    // Anything the widget queued on its way out must run while the objects it
+    // captured are still the most recent ones deleted.
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+    return out;
 }
 
 } // namespace
@@ -533,6 +620,9 @@ TEST_CASE_METHOD(ContentFitsFixture,
     for (const auto& g : kShipping) {
         ScopedResolution res(disp, g.panel_w, g.panel_h);
         theme_manager_refresh_layout_constants(disp);
+        // What the app's resize handler does: idle components register again
+        // at the new geometry, as they would on a panel that booted at it.
+        helix::unregister_idle_xml_components();
 
         const UiBreakpoint bp = breakpoint_for(std::min(g.panel_w, g.panel_h));
         const GridDimensions dims = GridLayout::get_dimensions(bp, g.content_w, g.content_h);
@@ -540,8 +630,33 @@ TEST_CASE_METHOD(ContentFitsFixture,
             grid_cell_metrics(g.content_w, g.content_h, dims.cols, dims.rows, g.gutter);
 
         for (const auto& def : defs) {
-            const int min_c = def.effective_min_colspan();
-            const int min_r = def.effective_min_rowspan();
+            // The smallest span the widget is actually OFFERED here, not the
+            // registry floor. A widget that declines a size through fits_at is
+            // grown past it by the resize clamp and by the load path alike, so
+            // measuring the floor would measure a box the runtime never hands
+            // it. grow_span_to_fit is the same helper both of those use, so
+            // this cannot drift from what they do.
+            int min_c = def.effective_min_colspan();
+            int min_r = def.effective_min_rowspan();
+            if (def.factory) {
+                auto probe = def.factory(def.id);
+                if (probe) {
+                    // PanelWidgetManager hands every tile the live tracks before
+                    // it asks fits_at; the nominal tier cell is larger than the
+                    // track some panels build, and would refuse a span the
+                    // runtime accepts.
+                    if (TileSizing* sizing = probe->tile_sizing()) {
+                        sizing->set_cell_metrics(m);
+                    }
+                    const auto [fit_c, fit_r] = grow_span_to_fit(
+                        [&probe](int w, int h) { return probe->fits_at(w, h); }, min_c, min_r,
+                        def.effective_max_colspan(), def.effective_max_rowspan(),
+                        def.supports_half_col ? 1 : GridLayout::TRACKS_PER_CELL,
+                        def.supports_half_row ? 1 : GridLayout::TRACKS_PER_CELL, m);
+                    min_c = fit_c;
+                    min_r = fit_r;
+                }
+            }
             if (min_c > dims.cols || min_r > dims.rows) {
                 // GridLayout::PlacementFailure::TooLargeForGrid — the widget is
                 // never placed here, so there is no size to measure. Recorded
@@ -556,52 +671,47 @@ TEST_CASE_METHOD(ContentFitsFixture,
                 continue;
             }
 
-            // Same arithmetic PanelWidgetManager applies before calling
-            // on_size_changed(), truncation included.
             const int w_px = static_cast<int>(grid_track_extent(m.cell_w, m.gutter, min_c));
             const int h_px = static_cast<int>(grid_track_extent(m.cell_h, m.gutter, min_r));
-
-            OverflowReport r;
-            {
-                RegistryWidgetHarness h(test_screen(), def);
-                if (!h.created()) {
+            std::optional<BufferReadingSeed> buffer_seed;
+            if (std::string_view(def.id) == "filament_buffer")
+                buffer_seed.emplace();
+            std::optional<ClogReadingSeed> clog_seed;
+            if (std::string_view(def.id) == "clog_detection")
+                clog_seed.emplace();
+            for (int pass = 0; pass < (clog_seed ? 2 : 1); ++pass) {
+                if (clog_seed) {
+                    pass == 0 ? clog_seed->flowguard() : clog_seed->encoder();
+                }
+                const Rendered rendered = render_at(test_screen(), def, m, min_c, min_r);
+                if (!rendered.built) {
                     spdlog::warn("[content_fits] {} @ {}: component would not build", def.id,
                                  g.name);
                     ++unbuildable;
                     continue;
                 }
-                h.resize(min_c, min_r, w_px, h_px);
-                // Several widgets rebuild their content from an observer that
-                // fires through UpdateQueue rather than inline (observe_int_sync
-                // queues its handler), so measuring before the drain measures
-                // the pre-rebuild tree.
-                helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
-                lv_obj_update_layout(h.root());
-                r = collect_overflow(h.root(), exceptions());
-            }
-            // Anything the widget queued on its way out must run while the
-            // objects it captured are still the most recent ones deleted.
-            helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
-            ++checked;
+                const OverflowReport& r = rendered.report;
+                ++checked;
 
-            if (!r.clean()) {
-                observed.insert({def.id, g.name});
-                for (const auto& f : r.findings) {
-                    spdlog::warn("[content_fits] {} @ {} ({}x{}px, min span {}x{}) [{}] {}: {}",
-                                 def.id, g.name, w_px, h_px, min_c, min_r,
-                                 overflow_kind_name(f.kind), f.path, f.detail);
+                if (!r.clean()) {
+                    observed.insert({def.id, g.name});
+                    for (const auto& f : r.findings) {
+                        spdlog::warn("[content_fits] {} @ {} ({}x{}px, min span {}x{}) [{}] {}: {}",
+                                     def.id, g.name, w_px, h_px, min_c, min_r,
+                                     overflow_kind_name(f.kind), f.path, f.detail);
+                    }
+                    for (const auto& s : r.skipped) {
+                        spdlog::info("[content_fits] {} @ {} skipped {}", def.id, g.name, s);
+                    }
+                } else if (r.min_text_slack_px <= 2 && r.min_text_slack_px != INT32_MAX) {
+                    // One translation away from clipping. Text slack only: a child
+                    // sitting flush against its parent's content box is what
+                    // LV_PCT(100) is for and says nothing about the next language,
+                    // whereas a string with 2px to spare in English will not
+                    // survive German.
+                    tight.push_back(std::string(def.id) + " @ " + g.name + " (text slack " +
+                                    std::to_string(r.min_text_slack_px) + "px)");
                 }
-                for (const auto& s : r.skipped) {
-                    spdlog::info("[content_fits] {} @ {} skipped {}", def.id, g.name, s);
-                }
-            } else if (r.min_text_slack_px <= 2 && r.min_text_slack_px != INT32_MAX) {
-                // One translation away from clipping. Text slack only: a child
-                // sitting flush against its parent's content box is what
-                // LV_PCT(100) is for and says nothing about the next language,
-                // whereas a string with 2px to spare in English will not
-                // survive German.
-                tight.push_back(std::string(def.id) + " @ " + g.name + " (text slack " +
-                                std::to_string(r.min_text_slack_px) + "px)");
             }
         }
     }
@@ -647,4 +757,112 @@ TEST_CASE_METHOD(ContentFitsFixture,
         return s;
     }());
     CHECK(regressions.empty());
+}
+
+TEST_CASE_METHOD(ContentFitsFixture, "every icon tile renders its content grown to two cells",
+                 "[content_fits][growth]") {
+    // The sweep above measures the smallest span; a tile that scales its glyph
+    // and text up with its box can just as well spill when given room, so each
+    // one is rendered again at two cells square, capped by its own maximum and
+    // by the grid.
+    lv_display_t* disp = lv_display_get_default();
+    REQUIRE(disp != nullptr);
+    TestModeGuard test_mode_guard(get_runtime_config());
+    PanelWidgetManager::instance().init_widget_subjects();
+    require_font_tokens_distinct();
+    seed_printer_topology(state());
+
+    constexpr int kTwoCells = 2 * GridLayout::TRACKS_PER_CELL;
+    int checked = 0;
+    std::vector<std::string> spilled;
+    for (const auto& g : kShipping) {
+        ScopedResolution res(disp, g.panel_w, g.panel_h);
+        theme_manager_refresh_layout_constants(disp);
+        helix::unregister_idle_xml_components();
+        const UiBreakpoint bp = breakpoint_for(std::min(g.panel_w, g.panel_h));
+        const GridDimensions dims = GridLayout::get_dimensions(bp, g.content_w, g.content_h);
+        const CellMetrics m =
+            grid_cell_metrics(g.content_w, g.content_h, dims.cols, dims.rows, g.gutter);
+
+        for (const auto& def : get_all_widget_defs()) {
+            if (!def.factory) {
+                continue;
+            }
+            auto probe = def.factory(def.id);
+            if (!probe || !probe->tile_sizing()) {
+                continue; // only tiles that scale themselves
+            }
+            const int c = std::min({kTwoCells, def.effective_max_colspan(), dims.cols});
+            const int r = std::min({kTwoCells, def.effective_max_rowspan(), dims.rows});
+            const Rendered rendered = render_at(test_screen(), def, m, c, r);
+            REQUIRE(rendered.built);
+            ++checked;
+            if (!rendered.report.clean()) {
+                for (const auto& f : rendered.report.findings) {
+                    spilled.push_back(std::string(def.id) + " @ " + g.name + " " +
+                                      std::to_string(c) + "x" + std::to_string(r) + " [" +
+                                      overflow_kind_name(f.kind) + "] " + f.path + ": " + f.detail);
+                }
+            }
+        }
+    }
+
+    CHECK(checked > 0);
+    std::string joined;
+    for (const auto& s : spilled) {
+        joined += "\n  " + s;
+    }
+    INFO("tiles that spill when grown to two cells:" << joined);
+    CHECK(spilled.empty());
+}
+
+TEST_CASE_METHOD(ContentFitsFixture,
+                 "a one-cell action tile draws a bigger glyph when given two cells",
+                 "[content_fits][growth]") {
+    // At the tiny tier a one-cell tile keeps the rung the screen was designed
+    // with, and anything bigger has room that rung would leave empty. At the
+    // medium tier a cell already draws the tier's largest authored face, so
+    // two cells take the xxl rung, drawn from a larger face or scaled up.
+    lv_display_t* disp = lv_display_get_default();
+    REQUIRE(disp != nullptr);
+    TestModeGuard test_mode_guard(get_runtime_config());
+    PanelWidgetManager::instance().init_widget_subjects();
+    require_font_tokens_distinct();
+
+    for (const char* geometry : {"480x320", "800x480"}) {
+        const auto g = std::find_if(kShipping.begin(), kShipping.end(), [&](const Geometry& x) {
+            return std::string(x.name) == geometry;
+        });
+        REQUIRE(g != kShipping.end());
+        ScopedResolution res(disp, g->panel_w, g->panel_h);
+        theme_manager_refresh_layout_constants(disp);
+        helix::unregister_idle_xml_components();
+        const UiBreakpoint bp = breakpoint_for(std::min(g->panel_w, g->panel_h));
+        const GridDimensions dims = GridLayout::get_dimensions(bp, g->content_w, g->content_h);
+        const CellMetrics m =
+            grid_cell_metrics(g->content_w, g->content_h, dims.cols, dims.rows, g->gutter);
+
+        constexpr int kCell = GridLayout::TRACKS_PER_CELL;
+        // The tiles drawn by home_action_tile, and the icon each names.
+        const std::pair<const char*, const char*> kTiles[] = {
+            {"motion", "motion_icon"},
+            {"shutdown", "shutdown_icon"},
+            {"macros", "macros_icon"},
+            {"led_controls", "led_controls_icon"},
+            {"firmware_restart", "firmware_restart_icon"},
+            {"lock", "lock_icon_closed"}};
+        for (const auto& [id, icon] : kTiles) {
+            const PanelWidgetDef* def = find_widget_def(id);
+            REQUIRE(def != nullptr);
+            const Rendered one = render_at(test_screen(), *def, m, kCell, kCell, icon);
+            const Rendered two = render_at(test_screen(), *def, m, 2 * kCell, 2 * kCell, icon);
+            INFO(geometry << " " << id << ": rung " << one.icon_rung << " / " << one.icon_h
+                          << "px at one cell, " << two.icon_rung << " / " << two.icon_h
+                          << "px at two");
+            REQUIRE(one.icon_rung >= 0);
+            REQUIRE(one.icon_h > 0);
+            CHECK(two.icon_rung > one.icon_rung);
+            CHECK(two.icon_h > one.icon_h);
+        }
+    }
 }

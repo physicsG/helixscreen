@@ -44,10 +44,11 @@ from __future__ import annotations
 
 import argparse
 import re
-import subprocess
 import sys
 from pathlib import Path
 from typing import Iterable
+
+from staged_content import read_index_blobs, staged_paths
 
 # Log calls that reach the ring buffer. spdlog::trace is deliberately absent:
 # the ring's level is debug even when the logger is at trace, so trace lines
@@ -250,7 +251,12 @@ def check_file(path: Path) -> list[tuple[int, str, str]]:
         original = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return []
+    return check_source(original)
 
+
+def check_source(original: str) -> list[tuple[int, str, str]]:
+    """check_file's body, operating on already-sourced text - disk, or the
+    STAGED blob a --staged-only caller reads instead."""
     if "spdlog::" not in original and "_INTERNAL" not in original:
         return []
 
@@ -288,13 +294,18 @@ def check_file(path: Path) -> list[tuple[int, str, str]]:
     return findings
 
 
-def iter_targets(explicit: list[str]) -> Iterable[Path]:
+def iter_targets(explicit: list[str], check_disk: bool = True) -> Iterable[Path]:
+    """`check_disk=False` for a staged path list: it already came from the
+    index (`git diff --cached`), so a `Path.is_file()` gate would drop a
+    violation that is staged and then deleted from the working tree without
+    being staged for deletion - exactly the content the commit will still
+    carry."""
     if explicit:
         for f in explicit:
             if f.startswith("firmware/"):
                 continue
             p = Path(f)
-            if p.suffix in SCAN_SUFFIXES and p.is_file() and not is_excluded(p):
+            if p.suffix in SCAN_SUFFIXES and not is_excluded(p) and (not check_disk or p.is_file()):
                 yield p
         return
     for d in SCAN_DIRS:
@@ -308,14 +319,7 @@ def iter_targets(explicit: list[str]) -> Iterable[Path]:
 
 
 def staged_files() -> list[str]:
-    try:
-        out = subprocess.run(
-            ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMR"],
-            capture_output=True, text=True, check=True,
-        ).stdout
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return []
-    return [f for f in out.splitlines() if f.endswith(SCAN_SUFFIXES)]
+    return staged_paths(suffixes=SCAN_SUFFIXES)
 
 
 def main() -> int:
@@ -329,11 +333,20 @@ def main() -> int:
         return 0
 
     total = 0
-    for path in sorted(set(iter_targets(targets))):
-        for line, kind, snippet in check_file(path):
-            total += 1
-            print(f"{path}:{line}: {kind} logged above trace level")
-            print(f"    {snippet}")
+    paths = sorted(set(iter_targets(targets, check_disk=not args.staged_only)))
+    if args.staged_only:
+        # The set above is the staged diff; the CONTENT has to come from the
+        # same place - the index, not whatever a re-read of the path finds on
+        # disk, which may have been reverted after staging a violation.
+        staged_src = dict(read_index_blobs([str(p) for p in paths]))
+        findings = ((path, hit) for path in paths
+                    for hit in check_source(staged_src.get(str(path), "")))
+    else:
+        findings = ((path, hit) for path in paths for hit in check_file(path))
+    for path, (line, kind, snippet) in findings:
+        total += 1
+        print(f"{path}:{line}: {kind} logged above trace level")
+        print(f"    {snippet}")
 
     if total:
         print()

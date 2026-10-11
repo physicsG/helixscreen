@@ -19,6 +19,14 @@ class CjkFontManager {
         return loaded_;
     }
 
+    /// Number of compiled faces currently carrying a CJK fallback. Compared
+    /// against the count of baked .bin files on disk, this proves every baked
+    /// fallback is reachable through the mapping tables and every mapped
+    /// entry resolves to a real file.
+    size_t loaded_font_count() const {
+        return loaded_fonts_.size();
+    }
+
     void shutdown();
 
   private:

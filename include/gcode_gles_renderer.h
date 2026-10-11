@@ -17,8 +17,10 @@
 #include <lvgl/lvgl.h>
 
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <glm/glm.hpp>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -46,15 +48,19 @@ constexpr float CAMERA_LIGHT_INTENSITY = 0.6f;
 constexpr float FILL_LIGHT_INTENSITY = 0.2f;
 constexpr float AMBIENT_INTENSITY = 0.25f;
 
-// Background color (neutral gray for contrast with light and dark filaments)
-constexpr float BACKGROUND_GRAY = 0.45f;
-constexpr float BACKGROUND_GRAY_BLUE = 0.47f;
+// Still and incremental frames render into an FBO this many times the widget
+// size and come back down through a 2x2 box filter (blit_to_lvgl); moving
+// frames keep their own plan resolution.
+constexpr float kStillSupersample = 2.0f;
 
 // Default filament color (#26A69A teal)
 constexpr glm::vec4 DEFAULT_FILAMENT_COLOR{0.15f, 0.65f, 0.60f, 1.0f};
 
 // Ghost layer default opacity (out of 255)
-constexpr uint8_t DEFAULT_GHOST_OPACITY = 5; // ~2% opacity — ghost layers should barely be visible
+/// ~2% opacity: ghost layers should barely be visible. Keep it at 3 or above: a
+/// ghost fragment over a solid pixel tops out near 255 - opacity, and 2 or 1
+/// would land on the excluded (253) or selected (254) alpha tag.
+constexpr uint8_t DEFAULT_GHOST_OPACITY = 5;
 
 // Frame-skip epsilon for float comparisons
 constexpr float ANGLE_EPSILON = 1e-5f;
@@ -156,6 +162,11 @@ class GCodeGLESRenderer {
         return geometry_ && !geometry_uploaded_;
     }
 
+    /// True while a still or incremental job still has slices to draw (caller keeps invalidating).
+    bool is_refining() const {
+        return job_.active && !render_failed();
+    }
+
     /// True if geometry has been set via set_prebuilt_geometry(). Used by the
     /// viewer widget to decide whether a live 2D→3D switch needs an on-demand
     /// geometry build (initial load in 2D mode skips the build).
@@ -163,13 +174,25 @@ class GCodeGLESRenderer {
         return geometry_ != nullptr;
     }
 
-    /// True once a fatal GL error (out-of-memory / invalid-operation) was seen
-    /// during a draw batch. The viewer polls this after render() and switches
-    /// to the pure-CPU 2D renderer for the rest of the session rather than
-    /// risk a driver-side crash on constrained GPUs (e.g. Mali-G31 on CB1).
-    /// Sticky: once set it stays set until the renderer is destroyed.
+    /// True once the GPU path is unusable for the rest of the session: either
+    /// a fatal GL error (out-of-memory / invalid-operation) was seen during a
+    /// draw batch, or GL could not be initialized at all (no GL in the video
+    /// driver, no EGL device). The viewer polls this after render() and
+    /// switches to the pure-CPU 2D renderer rather than risk a driver-side
+    /// crash on constrained GPUs (e.g. Mali-G31 on CB1) — or draw nothing,
+    /// frame after frame, where no GL exists (a --test run under the dummy
+    /// video driver). Sticky: once set it stays set until the renderer is
+    /// destroyed.
     bool render_failed() const {
-        return gl_render_failed_;
+        return gl_render_failed_ || gl_init_failed_;
+    }
+
+    /// Which half of render_failed() fired: true when GL could not be brought
+    /// up at all, false when a draw batch reported a fatal error (and when
+    /// nothing has failed). The two reach the viewer through the same sticky
+    /// flag but mean different things to anyone reading the log.
+    bool init_failed() const {
+        return gl_init_failed_;
     }
 
     // ====== Color / Material ======
@@ -194,7 +217,6 @@ class GCodeGLESRenderer {
     ///
     /// No-op when nothing has been overridden on the current geometry.
     void clear_tool_color_overrides();
-    void set_travel_color(lv_color_t) {}
     void set_brightness_factor(float) {}
 
     // ====== Rendering Options ======
@@ -226,6 +248,14 @@ class GCodeGLESRenderer {
                                            const ParsedGCodeFile& gcode,
                                            const GCodeCamera& camera) const;
 
+    /// World point -> widget-local pixel in the image on screen now.
+    ///
+    /// That image can lag the camera: the last finished frame stays up during
+    /// VBO upload, render deferral and refinement, so this projects through the
+    /// MVP that image was rendered with, not the live one. nullopt before any
+    /// image, and behind the camera.
+    std::optional<glm::vec2> project_to_shown_image(const glm::vec3& world) const;
+
     // ====== Ghost Layer / Print Progress ======
 
     void set_print_progress_layer(int current_layer);
@@ -255,6 +285,8 @@ class GCodeGLESRenderer {
         return triangles_rendered_ / 2;
     }
     size_t get_geometry_color_count() const;
+    /// The loaded geometry's color palette, overrides included (empty with no geometry).
+    std::vector<uint32_t> get_geometry_color_palette() const;
     /// Itemized heap and VRAM this renderer holds, for A/B measurement. Replaces
     /// a get_memory_usage() that returned a bare total, had no caller anywhere,
     /// and silently omitted the readback buffer.
@@ -285,6 +317,11 @@ class GCodeGLESRenderer {
 
     void upload_geometry(const RibbonGeometry& geom, std::vector<LayerVBO>& vbos);
 
+    /// Fill `out` with one layer's VBO (prepared buffer, else expanded strips via `buf`).
+    /// An empty layer or a GL error leaves `out` empty.
+    void upload_layer(const RibbonGeometry& geom, size_t layer, std::vector<uint8_t>& buf,
+                      LayerVBO& out);
+
     /// Upload a time-budgeted batch of layers. Returns true when all layers are done.
     bool upload_geometry_chunk(const RibbonGeometry& geom, std::vector<LayerVBO>& vbos,
                                size_t& next_layer, size_t total_layers);
@@ -293,10 +330,19 @@ class GCodeGLESRenderer {
 
     // ====== Internal Rendering ======
 
-    void render_to_fbo(const ParsedGCodeFile& gcode, const GCodeCamera& camera);
-    void draw_layers(const std::vector<LayerVBO>& vbos, int layer_start, int layer_end,
-                     float color_scale, float alpha);
-    void blit_to_lvgl(lv_layer_t* layer, const lv_area_t* widget_coords);
+    /// One frame while a finger is down: draw the whole visible range at the
+    /// stride and resolution plan_moving() picked for the measured GPU rate,
+    /// then blit. No selection tag (the rim is a still-frame nicety), no job.
+    void render_moving(lv_layer_t* layer, const ParsedGCodeFile& gcode, const GCodeCamera& camera,
+                       const lv_area_t* widget_coords);
+    /// Draws layers [layer_start, layer_end] at `stride`, stopping once `max_triangles`
+    /// have been submitted. Returns the next layer that was not drawn (layer_end + 1
+    /// when finished).
+    int draw_layers(const std::vector<LayerVBO>& vbos, int layer_start, int layer_end,
+                    float color_scale, float alpha, int stride = 1,
+                    size_t max_triangles = std::numeric_limits<size_t>::max());
+    /// @param overlays_drawn False for a moving frame, which skips the overlay passes.
+    void blit_to_lvgl(lv_layer_t* layer, const lv_area_t* widget_coords, bool overlays_drawn);
     void draw_cached_to_lvgl(lv_layer_t* layer, const lv_area_t* widget_coords);
 
     /// Crash-loop breaker (Layer 2). arm_gpu_guard() writes a persistent guard
@@ -309,14 +355,14 @@ class GCodeGLESRenderer {
 
     /// Build the model-view-projection matrix the GLES geometry pass applies:
     /// -90° model rotation about Z plus the optional vertical content offset.
-    /// Shared by render_to_fbo, render_brackets_3d, and pick_object so they
-    /// can't drift — drift caused #22 (clicks landing on the wrong object).
+    /// Shared by setup_frame and pick_object so they can't drift; drift
+    /// caused #22 (clicks landing on the wrong object).
     glm::mat4 build_mvp(const GCodeCamera& camera) const;
     /// Lazily compile/link the simple line shader used for selection brackets.
     bool init_line_program();
-    /// Draw 3D corner brackets around highlighted objects into the FBO. Called
-    /// at the end of render_to_fbo so brackets become part of the rendered
-    /// image that gets blitted to LVGL. Matches the deleted TinyGL impl.
+    /// Draw 3D corner brackets around highlighted objects into the FBO, at the
+    /// end of a frame, so brackets become part of the rendered image that gets
+    /// blitted to LVGL. Matches the deleted TinyGL impl.
     void render_brackets_3d(const ParsedGCodeFile& gcode, const glm::mat4& mvp);
 
     /// Lazily compile/link the tag program used by the selection silhouette.
@@ -353,6 +399,35 @@ class GCodeGLESRenderer {
     void render_selection_tag(const ParsedGCodeFile& gcode, const glm::mat4& mvp_dequant,
                               int layer_start, int layer_end);
 
+    /**
+     * @brief Grey out the excluded objects and tag them for the red hatch.
+     *
+     * Re-draws each excluded object's runs with the lit program in flat grey
+     * (LEQUAL, so only where it is frontmost), then writes kExcludedAlpha over
+     * the solid range for stroke_exclusion_hatch() to find in the readback. The
+     * ghost is left alone: re-blending its ~2% layers doubles their density and
+     * whitens whatever they cover. Runs before
+     * render_selection_tag(), whose tag wins on an object that is both.
+     */
+    void render_excluded(const ParsedGCodeFile& gcode, const glm::mat4& mvp_dequant,
+                         int solid_start, int solid_end);
+
+    /// Interned-index lookup of `names` in `gcode`; empty when none of them is in it.
+    static std::vector<bool> object_mask(const ParsedGCodeFile& gcode,
+                                         const std::unordered_set<std::string>& names);
+
+    /// Draw every object run in [layer_start, layer_end] whose object is set in
+    /// `mask`, with the currently bound program. `a_normal` < 0 binds position only.
+    size_t draw_object_runs(const std::vector<bool>& mask, int layer_start, int layer_end,
+                            int a_position, int a_normal);
+
+    /// Overwrite the alpha byte of `mask`'s visible pixels with `tag`.
+    void write_alpha_tag(const std::vector<bool>& mask, const glm::mat4& mvp_dequant,
+                         int layer_start, int layer_end, uint8_t tag);
+
+    /// One glGetError() for an overlay pass; on a fatal error, fall back to 2D.
+    bool check_overlay_error(const char* pass);
+
     // ====== Frame Skip ======
 
     struct CachedRenderState {
@@ -369,6 +444,13 @@ class GCodeGLESRenderer {
         size_t exclude_count = 0;
         glm::vec4 filament_color{-1.0f};
         uint8_t ghost_opacity = 0;
+        float content_offset_y = 0.0f;
+        int viewport_width = -2;
+        int viewport_height = -2;
+        /// Equality minus progress_layer: everything that describes the scene
+        /// itself. decide_job treats a progress-only change as continuation,
+        /// not as a new scene.
+        bool same_scene(const CachedRenderState& o) const;
         bool operator==(const CachedRenderState& o) const;
         bool operator!=(const CachedRenderState& o) const {
             return !(*this == o);
@@ -456,13 +538,29 @@ class GCodeGLESRenderer {
     // ====== Geometry ======
 
     std::unique_ptr<RibbonGeometry> geometry_;
-    RibbonGeometry* active_geometry_ = nullptr;
+    const RibbonGeometry* active_geometry_ = nullptr;
     std::string current_filename_;
 
     std::vector<LayerVBO> layer_vbos_;
+    /// geometry_->moving_mesh uploaded whole once the main upload finishes.
+    /// Indexed by the same layer numbers as layer_vbos_ (the mesh keeps the
+    /// original layer indices), so pass_ranges addresses both identically.
+    std::vector<LayerVBO> moving_vbos_;
     bool geometry_uploaded_ = false;
     size_t upload_next_layer_ = 0;   ///< Next layer to upload (incremental)
     size_t upload_total_layers_ = 0; ///< Total layers needing upload
+
+    /// Reads the upload flag and selection sets without a GL context.
+    friend class GCodeGLESRendererTestAccess;
+
+    /// The FBO holds a finished frame drawn with frame_mvp_, and it is what
+    /// the widget shows until the next one.
+    void latch_shown_image(int width, int height);
+    glm::mat4 frame_mvp_{1.0f}; ///< MVP of the last setup_frame()
+    glm::mat4 shown_mvp_{1.0f};
+    int shown_width_ = 0;
+    int shown_height_ = 0;
+    bool has_shown_image_ = false;
 
     // ====== Configuration ======
 
@@ -475,11 +573,18 @@ class GCodeGLESRenderer {
     /// palette and no other. Guarded by palette_mutex_.
     std::vector<uint32_t> baked_color_palette_;
 
+    /// moving_mesh->color_palette as the builder produced it, under the same
+    /// lifecycle as baked_color_palette_. The mesh's palette is its own (only
+    /// exterior features built it), so the slicer colors sit at different
+    /// indices than the main geometry's and it cannot share the snapshot.
+    /// Guarded by palette_mutex_.
+    std::vector<uint32_t> mesh_baked_palette_;
+
     /// Selection colors from ui_xml/gcode_tokens.xml, refreshed in reset_colors().
     /// The defaults cover a frame drawn before that first refresh, and the
     /// headless tests, which register no tokens.
     selection::Palette sel_palette_;
-    std::mutex palette_mutex_; ///< Guards geometry color palette reads/writes
+    mutable std::mutex palette_mutex_; ///< Guards geometry color palette reads/writes
     glm::vec4 filament_color_{DEFAULT_FILAMENT_COLOR};
     float specular_intensity_ = DEFAULT_SPECULAR_INTENSITY;
     float specular_shininess_ = DEFAULT_SPECULAR_SHININESS;
@@ -503,9 +608,46 @@ class GCodeGLESRenderer {
 
     // ====== Frame Skip ======
 
-    CachedRenderState cached_state_;
     bool frame_dirty_ = true;
     size_t triangles_rendered_ = 0;
+
+    // ====== Time-sliced refinement ======
+
+    enum class JobPhase { Solid, Ghost, Overlays, Done };
+    struct RefineJob {
+        bool active = false;
+        bool incremental = false;
+        bool first_slice = true;
+        JobPhase phase = JobPhase::Done;
+        int next_layer = 0;
+        int solid_start = 0;
+        int solid_end = -1; ///< inclusive
+        int ghost_start = 0;
+        int ghost_end = -1; ///< inclusive
+        int progress_layer = -1;
+        int solid_end_limit = -1; ///< an Extend never runs past the job's last drawn layer
+        int slices = 0;
+        float max_slice_ms = 0.0f;
+        std::chrono::steady_clock::time_point started;
+    };
+    RefineJob job_;
+    CachedRenderState job_scene_;       ///< scene the running or last finished job was drawn for
+    bool have_complete_image_ = false;  ///< draw_buf_ holds a finished still image of job_scene_
+    float gpu_rate_tris_per_ms_ = 0.0f; ///< smoothed measured throughput; 0 = unmeasured
+    size_t uploaded_triangles_ = 0;     ///< sum of layer_vbos_ triangles
+    size_t mesh_triangles_ = 0;         ///< sum of moving_vbos_ triangles; 0 = no mesh
+
+    CachedRenderState snapshot_state(const GCodeCamera& camera) const;
+    bool setup_frame(const GCodeCamera& camera, float scale, bool clear, glm::mat4& mvp,
+                     glm::mat4& mvp_dequant, const RibbonGeometry& geom);
+    /// Upload geometry_->moving_mesh into moving_vbos_ and free its CPU
+    /// buffers. No-op when no mesh was built.
+    void upload_moving_mesh();
+    void pass_ranges(int& draw_start, int& draw_end, int& solid_end, int& ghost_start,
+                     bool& ghosting) const;
+    void start_job(bool incremental, const CachedRenderState& scene);
+    bool run_slice(const ParsedGCodeFile& gcode, const GCodeCamera& camera);
+    void cancel_job();
 
     // ====== Readback Buffer (persistent to avoid per-frame allocation) ======
 

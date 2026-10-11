@@ -54,24 +54,113 @@
 
 #if HELIX_HAS_CAMERA
 
+#include "ui_breakpoint.h"
 #include "ui_update_queue.h"
 
 #include "../lvgl_ui_test_fixture.h"
 #include "../test_helpers/camera_widget_test_access.h"
 #include "../test_helpers/panel_widget_size_harness.h"
 #include "app_globals.h"
+#include "helix-xml/src/xml/lv_xml.h"
 #include "panel_widget_manager.h"
 #include "panel_widget_size.h"
 #include "printer_state.h"
 #include "src/ui/panel_widgets/camera_widget.h"
+#include "theme_manager.h"
 
 using namespace helix;
 using namespace helix::widget_size;
 
+// The display singleton is shared by every case in a shard, and the case
+// below judges its resize ladder against the tier that display yields
+// (w_normal() at the fixture's 800x480 is Medium's 174px; at this case's
+// 1080x1920 the narrow axis is XXLarge's 309px, which swallows the 233px
+// Medium cell below). This case moves the resolution and rotation, publishes
+// the leaked geometry into the layout subjects the way an aborted resize
+// scope leaves behind, and deliberately puts none of it back, then checks the
+// reset the direct way: LVGLTestFixture::reclaim_display() is exactly what
+// the next case's fixture constructor runs, called here as a plain static
+// rather than by constructing a second fixture inside the live one (a nested
+// fixture would tear the update queue down mid-case). A stray display holds
+// the default slot at reclaim time, so the slot restore executes on every
+// run of this case, not only in shards where a translation unit's static
+// display happens to sit there. Pinning it in the same case keeps the oracle
+// with the leak no matter where Catch2's shard boundaries fall.
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "camera: a leaked display resolution does not reach the next case",
+                 "[1563][widget_size][camera]") {
+    lv_display_t* disp = lv_display_get_default();
+    REQUIRE(disp != nullptr);
+    lv_display_set_resolution(disp, 1080, 1920);
+    lv_display_set_rotation(disp, LV_DISPLAY_ROTATION_90);
+    // Publish the leaked geometry into the process-global layout state, as
+    // an aborted resize scope leaves it.
+    theme_manager_refresh_layout_constants(disp);
+
+    lv_subject_t* const breakpoint = lv_xml_get_subject(nullptr, "ui_breakpoint");
+    lv_subject_t* const breakpoint_v = lv_xml_get_subject(nullptr, "ui_breakpoint_v");
+    REQUIRE(breakpoint != nullptr);
+    REQUIRE(breakpoint_v != nullptr);
+    // The leak landed in the derived subjects, not just the raw pixels.
+    REQUIRE(lv_subject_get_int(breakpoint) == to_int(UiBreakpoint::XXLarge));
+
+    // A stray display owning the default slot, as test translation units'
+    // static initializers leave behind.
+    lv_display_t* stray = lv_display_create(64, 64);
+    REQUIRE(stray != nullptr);
+    lv_display_set_default(stray);
+
+    LVGLTestFixture::reclaim_display();
+
+    lv_display_t* const d = lv_display_get_default();
+    CHECK(d == LVGLTestFixture::s_display);
+    CHECK(lv_display_get_rotation(d) == LV_DISPLAY_ROTATION_0);
+    CHECK(lv_display_get_horizontal_resolution(d) == TEST_DISPLAY_WIDTH);
+    CHECK(lv_display_get_vertical_resolution(d) == TEST_DISPLAY_HEIGHT);
+    CHECK(lv_subject_get_int(breakpoint) == to_int(UiBreakpoint::Medium));
+    CHECK(lv_subject_get_int(breakpoint_v) == to_int(UiBreakpoint::Medium));
+    // Consumer level: current_breakpoint() reads the subject rather than the
+    // display, so a stale tier surfaces here as XXLarge's 309px band.
+    CHECK(w_normal() == w_normal(UiBreakpoint::Medium));
+
+    lv_display_delete(stray);
+}
+
+// The sibling case above pins the geometry-moved arm of the reclaim. This one
+// pins the other way the derived state goes stale: with rotation, resolution
+// and the default slot all exactly home, the breakpoint subject alone can
+// still disagree — the shape a resize scope leaves when it republishes from
+// moved geometry and then restores the pixels only, or a direct subject write.
+// Every precondition below is REQUIREd, so the repaint that follows can only
+// have fired through the subject-disagreement arm; a reclaim that skipped the
+// refresh because "nothing moved" leaves the stale tier in place.
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "camera: a stale breakpoint subject is reclaimed without the pixels moving",
+                 "[1563][widget_size][camera]") {
+    lv_display_t* const disp = lv_display_get_default();
+    REQUIRE(disp == LVGLTestFixture::s_display);
+    REQUIRE(lv_display_get_rotation(disp) == LV_DISPLAY_ROTATION_0);
+    REQUIRE(lv_display_get_horizontal_resolution(disp) == TEST_DISPLAY_WIDTH);
+    REQUIRE(lv_display_get_vertical_resolution(disp) == TEST_DISPLAY_HEIGHT);
+
+    lv_subject_t* const breakpoint = theme_manager_get_breakpoint_subject();
+    REQUIRE(breakpoint != nullptr);
+    REQUIRE(breakpoint->type == LV_SUBJECT_TYPE_INT);
+    REQUIRE(lv_subject_get_int(breakpoint) == to_int(UiBreakpoint::Medium));
+
+    lv_subject_set_int(breakpoint, to_int(UiBreakpoint::XXLarge));
+    REQUIRE(w_normal() == w_normal(UiBreakpoint::XXLarge)); // stale tier is live
+
+    LVGLTestFixture::reclaim_display();
+
+    CHECK(lv_subject_get_int(breakpoint) == to_int(UiBreakpoint::Medium));
+    CHECK(w_normal() == w_normal(UiBreakpoint::Medium));
+}
+
 TEST_CASE_METHOD(LVGLUITestFixture,
                  "camera compact/live layout follows width alone, and stream "
                  "start/stop stays edge-triggered",
-                 "[widget_size][camera]") {
+                 "[1563][widget_size][camera]") {
     // Actively zero the global PrinterState singleton's webcam config rather
     // than trusting it is already empty: MoonrakerClientMock::discover_printer()
     // (src/api/moonraker_client_mock.cpp) calls
@@ -81,11 +170,11 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     // that file. Whether this test observes that pollution depends entirely
     // on Catch2's shard split — set_webcam_available() defers through
     // async_lifetime_, so it needs a drain to actually apply.
-    get_printer_state().set_webcam_available(false);
+    get_printer_state().capabilities_state().set_webcam_available(false);
     helix::ui::UpdateQueue::instance().drain();
 
-    REQUIRE(get_printer_state().get_webcam_stream_url().empty());
-    REQUIRE(get_printer_state().get_webcam_snapshot_url().empty());
+    REQUIRE(get_printer_state().capabilities_state().get_webcam_stream_url().empty());
+    REQUIRE(get_printer_state().capabilities_state().get_webcam_snapshot_url().empty());
 
     // Widget-owned subjects (camera_status_text) are registered lazily; the
     // harness alone does not trigger it, and panel_widget_camera.xml's

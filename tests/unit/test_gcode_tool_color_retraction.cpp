@@ -77,10 +77,10 @@ uint32_t resolved(const GCodeLayerRenderer& r, int tool) {
 class NoAmsBackend {
   public:
     NoAmsBackend() {
-        AmsState::instance().set_backend(nullptr);
+        helix::AmsState::instance().set_backend(nullptr);
     }
     ~NoAmsBackend() {
-        AmsState::instance().set_backend(nullptr);
+        helix::AmsState::instance().set_backend(nullptr);
     }
     NoAmsBackend(const NoAmsBackend&) = delete;
     NoAmsBackend& operator=(const NoAmsBackend&) = delete;
@@ -232,7 +232,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "a dead AMS answer retracts the viewer's appli
     NoAmsBackend no_backend;
     // Assert the setup reached the branch under test: this whole case is about
     // what happens when routed_tool_colors() comes back empty.
-    REQUIRE(AmsState::instance().routed_tool_colors().empty());
+    REQUIRE(helix::AmsState::instance().routed_tool_colors().empty());
 
     lv_obj_t* parent = lv_obj_create(lv_screen_active());
     REQUIRE(parent != nullptr);
@@ -240,13 +240,14 @@ TEST_CASE_METHOD(LVGLTestFixture, "a dead AMS answer retracts the viewer's appli
     REQUIRE(viewer != nullptr);
 
     ui_gcode_viewer_set_tool_colors(viewer, {kLaneT0, kLaneT1});
-    REQUIRE(ui_gcode_viewer_get_tool_colors(viewer) == std::vector<uint32_t>{kLaneT0, kLaneT1});
+    REQUIRE(helix::test_access::gcode_viewer_tool_colors(viewer) ==
+            std::vector<uint32_t>{kLaneT0, kLaneT1});
 
     // The shipped defect: this returned false and left the overrides applied,
     // because the retraction it performed was set_tool_colors(viewer, {}) and
     // an empty vector is the one value that function drops on the floor.
     CHECK_FALSE(ui_gcode_viewer_apply_ams_tool_colors(viewer));
-    CHECK(ui_gcode_viewer_get_tool_colors(viewer).empty());
+    CHECK(helix::test_access::gcode_viewer_tool_colors(viewer).empty());
 
     lv_obj_delete(parent);
 }
@@ -259,18 +260,19 @@ TEST_CASE_METHOD(LVGLTestFixture, "an empty vector on the viewer's setter is not
     REQUIRE(viewer != nullptr);
 
     ui_gcode_viewer_set_tool_colors(viewer, {kLaneT0, kLaneT1});
-    REQUIRE(ui_gcode_viewer_get_tool_colors(viewer).size() == 2);
+    REQUIRE(helix::test_access::gcode_viewer_tool_colors(viewer).size() == 2);
 
     // The guard this pins is load-bearing for the OTHER caller: a first apply
     // with no AMS data must leave the file's own colours alone. Making {} mean
     // "clear" here is the tempting one-line fix, and it is the wrong one — the
     // two meanings have to stay on different entry points.
     ui_gcode_viewer_set_tool_colors(viewer, {});
-    CHECK(ui_gcode_viewer_get_tool_colors(viewer) == std::vector<uint32_t>{kLaneT0, kLaneT1});
+    CHECK(helix::test_access::gcode_viewer_tool_colors(viewer) ==
+          std::vector<uint32_t>{kLaneT0, kLaneT1});
 
     // The explicit path does retract.
-    ui_gcode_viewer_clear_tool_colors(viewer);
-    CHECK(ui_gcode_viewer_get_tool_colors(viewer).empty());
+    helix::test_access::gcode_viewer_clear_tool_colors(viewer);
+    CHECK(helix::test_access::gcode_viewer_tool_colors(viewer).empty());
 
     lv_obj_delete(parent);
 }
@@ -283,13 +285,13 @@ TEST_CASE_METHOD(LVGLTestFixture,
     lv_obj_t* viewer = ui_gcode_viewer_create(parent);
     REQUIRE(viewer != nullptr);
 
-    REQUIRE(ui_gcode_viewer_get_tool_colors(viewer).empty());
-    ui_gcode_viewer_clear_tool_colors(viewer);
-    CHECK(ui_gcode_viewer_get_tool_colors(viewer).empty());
+    REQUIRE(helix::test_access::gcode_viewer_tool_colors(viewer).empty());
+    helix::test_access::gcode_viewer_clear_tool_colors(viewer);
+    CHECK(helix::test_access::gcode_viewer_tool_colors(viewer).empty());
 
     // Also safe on a null widget — the retraction runs from an AMS observer that
     // can fire while a panel is being torn down.
-    ui_gcode_viewer_clear_tool_colors(nullptr);
+    helix::test_access::gcode_viewer_clear_tool_colors(nullptr);
 
     lv_obj_delete(parent);
 }

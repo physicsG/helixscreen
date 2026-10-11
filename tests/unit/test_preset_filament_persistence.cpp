@@ -15,6 +15,7 @@
 // nothing leaks from the host config.
 
 #include "../helix_test_fixture.h"
+#include "../test_helpers/material_settings_manager_test_access.h"
 #include "config.h"
 #include "filament_catalog.h"
 #include "material_settings_manager.h"
@@ -148,30 +149,12 @@ TEST_CASE_METHOD(MigrationV19Fixture,
 // MaterialSettingsManager::{set,get,clear}_preset_filament
 // ============================================================================
 
-// ODR NOTE: this class must stay byte-identical to the one defined in
-// tests/unit/test_material_settings_manager.cpp — both are `helix::TestAccess`
-// linked into the same helix-tests binary, and a mismatched body is an ODR
-// violation. If you change one, change both.
-namespace helix {
-class TestAccess {
-  public:
-    static void reset(MaterialSettingsManager& mgr) {
-        mgr.overrides_.clear();
-        mgr.preset_materials_ = default_preset_materials();
-        mgr.preset_filaments_ = {};
-        mgr.initialized_ = false;
-    }
-};
-} // namespace helix
-
 struct PresetFilamentFixture : HelixTestFixture {
     PresetFilamentFixture() {
         TestAccess::reset(MaterialSettingsManager::instance());
         Config* config = Config::get_instance();
-        if (config) {
-            config->get_json("/preset_materials") =
-                nlohmann::json::array({"PLA", "PETG", "ABS", "TPU"});
-        }
+        config->get_json("/preset_materials") =
+            nlohmann::json::array({"PLA", "PETG", "ABS", "TPU"});
     }
     ~PresetFilamentFixture() override {
         TestAccess::reset(MaterialSettingsManager::instance());
@@ -225,7 +208,6 @@ TEST_CASE_METHOD(PresetFilamentFixture, "load tolerates legacy bare-string prese
     // Defensive: if /preset_materials still holds bare strings (pre-migration or hand-edit),
     // load must treat each string as {type: string}, not crash.
     Config* config = Config::get_instance();
-    REQUIRE(config != nullptr);
     config->get_json("/preset_materials") = nlohmann::json::array({"PLA", "PETG", "ABS", "TPU"});
     auto& mgr = MaterialSettingsManager::instance();
     mgr.init();

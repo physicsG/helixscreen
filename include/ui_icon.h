@@ -7,12 +7,14 @@
  *
  * @pattern Semantic variants (text/muted/primary/danger/etc.) with shared reactive styles
  * @threading Main thread only
- * @gotchas Must call ui_icon_register_widget() BEFORE loading icon.xml
+ * @gotchas Must call helix::ui::icon::register_widget() BEFORE loading icon.xml
  */
 
 #pragma once
 
 #include "lvgl/lvgl.h"
+
+namespace helix::ui::icon {
 
 /**
  * Register the custom icon widget with LVGL's XML system.
@@ -53,10 +55,10 @@
  * Call once at application startup, BEFORE registering XML components.
  *
  * Example initialization order:
- *   ui_icon_register_widget();  // <-- Register before icon.xml
+ *   helix::ui::icon::register_widget();  // <-- Register before icon.xml
  *   lv_xml_register_component_from_file("A:ui_xml/icon.xml");
  */
-void ui_icon_register_widget();
+void register_widget();
 
 /**
  * Drop the memoized icon_font_* lookups so the next icon re-reads them.
@@ -72,16 +74,16 @@ void ui_icon_register_widget();
  * Icons that already exist keep the face they were built with — the lv_font_t
  * objects are static .rodata and are never freed.
  */
-void ui_icon_invalidate_font_cache();
+void invalidate_font_cache();
 
 /**
  * Change the icon source at runtime.
  *
- * @param icon       Icon widget created by ui_icon_register_widget()
+ * @param icon       Icon widget created by register_widget()
  * @param icon_name  Icon short name (e.g., "home", "wifi")
  *                   Legacy "mat_*_img" names are also supported for transition.
  */
-void ui_icon_set_source(lv_obj_t* icon, const char* icon_name);
+void set_source(lv_obj_t* icon, const char* icon_name);
 
 /**
  * Change the icon size at runtime.
@@ -89,7 +91,7 @@ void ui_icon_set_source(lv_obj_t* icon, const char* icon_name);
  * @param icon      Icon widget
  * @param size_str  Size string: "xs", "sm", "md", "lg", or "xl"
  */
-void ui_icon_set_size(lv_obj_t* icon, const char* size_str);
+void set_size(lv_obj_t* icon, const char* size_str);
 
 /**
  * Change the icon color variant at runtime.
@@ -99,7 +101,7 @@ void ui_icon_set_size(lv_obj_t* icon, const char* size_str);
  *                     "tertiary", "disabled", "success", "warning", "danger",
  *                     "info", or "none"
  */
-void ui_icon_set_variant(lv_obj_t* icon, const char* variant_str);
+void set_variant(lv_obj_t* icon, const char* variant_str);
 
 /**
  * Set custom color for icon at runtime.
@@ -108,7 +110,7 @@ void ui_icon_set_variant(lv_obj_t* icon, const char* variant_str);
  * @param color  LVGL color value
  * @param opa    Opacity (0-255, use LV_OPA_COVER for full opacity)
  */
-void ui_icon_set_color(lv_obj_t* icon, lv_color_t color, lv_opa_t opa);
+void set_color(lv_obj_t* icon, lv_color_t color, lv_opa_t opa);
 
 /**
  * Set only an icon's opacity, leaving its color untouched.
@@ -121,16 +123,6 @@ void ui_icon_set_color(lv_obj_t* icon, lv_color_t color, lv_opa_t opa);
  * @param icon  Icon widget
  * @param opa   Opacity (0-255, use LV_OPA_COVER for full opacity)
  */
-void ui_icon_set_opa(lv_obj_t* icon, lv_opa_t opa);  // NAMESPACE_OK: joins the global ui_icon_* API; the family moves together (prestonbrown/helixscreen#1443)
+void set_opa(lv_obj_t* icon, lv_opa_t opa);
 
-/**
- * Set clickable state for icon at runtime.
- *
- * When clickable is enabled, the icon can receive click events and be used
- * as an interactive element. Icons are non-clickable by default (they inherit
- * from lv_label which has no click flag set).
- *
- * @param icon      Icon widget
- * @param clickable true to enable click events, false to disable
- */
-void ui_icon_set_clickable(lv_obj_t* icon, bool clickable);
+} // namespace helix::ui::icon

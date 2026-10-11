@@ -2,7 +2,12 @@
 
 #include "toolchanger_addon.h"
 
+#include "color_utils.h"
 #include "printer_discovery.h"
+#include "text_io.h"
+#include "zmod_color_status.h"
+
+#include <spdlog/fmt/fmt.h>
 
 #include <algorithm>
 #include <cctype>
@@ -17,7 +22,7 @@ constexpr const char* kMedusaObject = "medusahc";
 /// "t9999999" cannot size a vector off a network payload.
 constexpr int kMaxDockIndex = 63;
 
-/// One machine bolted onto klipper-toolchanger.
+/// One machine this module knows the dialect of.
 struct Provider {
     const char* name;
     /// Identifies the machine from discovered hardware.
@@ -33,6 +38,9 @@ struct Provider {
     const char* select_prefix;
     /// Unmounts the tool on the head, or nullptr when there is no such command.
     const char* unselect_gcode;
+    /// Stores a slot's material and colour in firmware, or nullptr when the
+    /// firmware keeps no such record.
+    std::string (*material_write_gcode)(int slot_index, const std::string& type, std::uint32_t rgb);
 };
 
 // --- MedusaHC ---------------------------------------------------------------
@@ -93,6 +101,47 @@ std::string medusa_close_gcode(const PrinterDiscovery& hw) {
     return hw.has_macro("MHC_CLOSE") ? "MHC_CLOSE" : "CLOSE";
 }
 
+// --- Z-Mod on the FlashForge Creator 5 Pro -----------------------------------
+//
+// Z-Mod runs FlashForge's own Klipper, which has no klipper-toolchanger. Its
+// zmod_color extra mounts a head with `_T_IN T=<n>`, parks it with `_T_OUT`, and
+// reads gcode_button extruder_pos1..4 (dock) and extruder_grab1..4 (carriage)
+// into zmod_color.active_tool_id: 0..3 mounted, -1 nothing on the carriage, -2
+// the buttons disagree. The AD5X Z-Mod publishes zmod_color too but has no
+// carriage buttons, which is what keeps it out of this row.
+
+constexpr const char* kZmodColorObject = "zmod_color";
+
+bool printer_has_object(const PrinterDiscovery& hw, const char* name) {
+    const auto& objects = hw.printer_objects();
+    return std::find(objects.begin(), objects.end(), name) != objects.end();
+}
+
+bool zmod_c5_detect(const PrinterDiscovery& hw) {
+    return printer_has_object(hw, kZmodColorObject) &&
+           printer_has_object(hw, "gcode_button extruder_grab1");
+}
+
+std::vector<std::string> zmod_c5_status_objects(const PrinterDiscovery& hw) {
+    // The afclite shim carries the firmware's own fault flag and activity word
+    // on zmod 1.7.4+; subscribing it on a build that does not publish the
+    // object is harmless (the frame simply never arrives).
+    std::vector<std::string> objects = {kZmodColorObject};
+    if (hw.has_zmod_afclite()) {
+        objects.emplace_back("zmod_afclite");
+    }
+    return objects;
+}
+
+/// HEX and TYPE together write without opening a prompt; SILENT=1 keeps the
+/// GET_ZCOLOR that CHANGE_ZCOLOR runs afterwards from opening one in
+/// Mainsail/Fluidd.
+std::string zmod_c5_material_write(int slot_index, const std::string& type, std::uint32_t rgb) {
+    return fmt::format("CHANGE_ZCOLOR SLOT={} HEX={:06X} TYPE={} SILENT=1",
+                       slot_index + 1, // DISPLAY_NUMBERING_OK: gcode wire, not a label
+                       rgb & 0xFFFFFFu, type);
+}
+
 const std::vector<Provider>& providers() {
     static const std::vector<Provider> table = {
         // T<n> and DROP_TOOL are what the extra registers when it runs the swap
@@ -103,7 +152,9 @@ const std::vector<Provider>& providers() {
         // the way the feeder macros are, and naming it here is the whole point of
         // this table.
         {"MedusaHC", medusa_detect, medusa_status_objects, medusa_open_gcode, medusa_close_gcode,
-         "T", "DROP_TOOL"},
+         "T", "DROP_TOOL", nullptr},
+        {kZmodC5ProviderName, zmod_c5_detect, zmod_c5_status_objects, nullptr, nullptr,
+         "_T_IN T=", "_T_OUT", zmod_c5_material_write},
     };
     return table;
 }
@@ -127,11 +178,7 @@ std::optional<int> int_field(const nlohmann::json& obj, const char* key) {
         return it->get<int>();
     }
     if (it->is_string()) {
-        try {
-            return std::stoi(it->get<std::string>());
-        } catch (...) {
-            return std::nullopt;
-        }
+        return helix::text_io::parse_leading<int>(it->get<std::string>());
     }
     return std::nullopt;
 }
@@ -169,11 +216,8 @@ std::optional<int> dock_index(const std::string& key) {
                                        [](unsigned char c) { return std::isdigit(c); })) {
         return std::nullopt;
     }
-    try {
-        return std::stoi(digits);
-    } catch (...) {
-        return std::nullopt;
-    }
+    // All digits, but an arbitrarily long run still overflows int.
+    return helix::text_io::parse_leading<int>(digits);
 }
 
 /// 1/0 and true/false both mean the same thing to these controllers.
@@ -229,6 +273,7 @@ std::optional<ToolReading> read_medusahc(const nlohmann::json& obj) {
     // Irbis3D publishes sensor_error outright; both schemas encode it as -2.
     if (auto flag = bool_field(obj, "sensor_error")) {
         r.sensor_error = *flag;
+        r.sensor_error_reported = *flag;
         saw_anything = true;
     }
     if (r.current_tool == -2) {
@@ -295,10 +340,139 @@ std::optional<ToolReading> read_pin_watch(const nlohmann::json& obj) {
     return r;
 }
 
+/// The firmware's own -2 is reported as a sensor error, not derived here.
+std::optional<ToolReading> read_zmod_color(const nlohmann::json& obj) {
+    auto tool = int_field(obj, "active_tool_id");
+    if (!tool) {
+        return std::nullopt;
+    }
+    ToolReading r;
+    r.current_tool = *tool;
+    r.sensor_error = (*tool == -2);
+    return r;
+}
+
 } // namespace
 
 bool present(const PrinterDiscovery& hw) {
     return match(hw) != nullptr;
+}
+
+bool zmod_c5_present(const PrinterDiscovery& hw) {
+    return zmod_c5_detect(hw);
+}
+
+std::optional<ToolReading> parse_zmod_marker(const std::string& line) {
+    // Both spellings are respond_info output, so on the wire each arrives with
+    // whatever console framing the host adds; the tokens themselves are unique
+    // to the swap macros. A change runs the dropping markers first (the parked
+    // head's echoes) and the picking markers second, which is the order the
+    // step bar wants.
+    ToolReading r;
+    r.phase_names_direction = true;
+    if (line.find("Grab attempt for T") != std::string::npos ||
+        line.find("_T_IN") != std::string::npos) {
+        r.operation = "picking";
+        return r;
+    }
+    if (line.find("Unload attempt for T") != std::string::npos ||
+        line.find("_T_OUT") != std::string::npos) {
+        r.operation = "dropping";
+        return r;
+    }
+    return std::nullopt;
+}
+
+std::optional<ToolReading> parse_zmod_tinfo_line(const std::string& line, bool& block_ended_out) {
+    block_ended_out = false;
+    // T_INFO's rows are `T<n>: home|HEAD|?|ERROR (both)`; the trailing block is
+    // Door/Top/Offset, and `Offset:` is documented last, so it is the block
+    // end the "no HEAD anywhere" answer hangs off.
+    std::string_view view = line;
+    while (!view.empty() && (view.front() == ' ' || view.front() == '/')) {
+        view.remove_prefix(1);
+    }
+    if (view.rfind("Offset:", 0) == 0) {
+        block_ended_out = true;
+        return std::nullopt;
+    }
+    if (view.empty() || view.front() != 'T') {
+        return std::nullopt;
+    }
+    const std::size_t colon = view.find(':');
+    if (colon == std::string_view::npos || colon < 2) {
+        return std::nullopt;
+    }
+    const auto index = helix::text_io::parse_leading<int>(std::string(view.substr(1, colon - 1)));
+    if (!index || *index < 0) {
+        return std::nullopt;
+    }
+    const std::size_t word = view.find_first_not_of(" \t", colon + 1);
+    if (word == std::string_view::npos) {
+        return std::nullopt;
+    }
+    ToolReading r;
+    if (view.compare(word, 4, "HEAD") == 0) {
+        r.current_tool = *index;
+    } else if (view.compare(word, 4, "home") == 0) {
+        r.docks.resize(static_cast<size_t>(*index) + 1);
+        r.docks[static_cast<size_t>(*index)] = true;
+    } else if (view.compare(word, 5, "ERROR") == 0) {
+        // "ERROR (both)": the tool reads home AND on the head, which is the
+        // same disagreeing-sensors fault a -2 active_tool_id is.
+        r.sensor_error = true;
+    } else {
+        // "?" (undefined) says nothing for this tool; anything unrecognised is
+        // treated the same way rather than guessed at.
+        return std::nullopt;
+    }
+    return r;
+}
+
+std::optional<AfcStateReading> read_afc_state(const nlohmann::json& status) {
+    if (!status.is_object()) {
+        return std::nullopt;
+    }
+    // The extra registers itself as `zmod_afclite` and aliases `AFC`; either
+    // can carry a delta.
+    const auto it = status.find("zmod_afclite");
+    const auto alias = status.find("AFC");
+    const nlohmann::json* obj = nullptr;
+    if (it != status.end() && it->is_object()) {
+        obj = &*it;
+    } else if (alias != status.end() && alias->is_object()) {
+        obj = &*alias;
+    }
+    if (obj == nullptr) {
+        return std::nullopt;
+    }
+    AfcStateReading r;
+    if (auto state = obj->find("current_state"); state != obj->end() && state->is_string()) {
+        r.current_state = state->get<std::string>();
+    }
+    if (auto err = obj->find("error_state"); err != obj->end() && err->is_boolean()) {
+        r.error_state = err->get<bool>();
+    }
+    if (auto msg = obj->find("message"); msg != obj->end() && msg->is_string()) {
+        r.message = msg->get<std::string>();
+    }
+    if (auto lanes = obj->find("lanes"); lanes != obj->end() && lanes->is_array()) {
+        for (const auto& lane_name : *lanes) {
+            if (!lane_name.is_string()) {
+                continue;
+            }
+            const std::string key = "AFC_lane " + lane_name.get<std::string>();
+            const auto lane = status.find(key);
+            if (lane == status.end() || !lane->is_object()) {
+                continue;
+            }
+            const auto map = lane->find("map");
+            if (map != lane->end() && map->is_string()) {
+                r.lane_maps.push_back(map->get<std::string>());
+            }
+        }
+    }
+    return r;
 }
 
 std::string machine_name(const PrinterDiscovery& hw) {
@@ -315,18 +489,22 @@ ToolSensor resolve_tool_sensor(const PrinterDiscovery& hw) {
 }
 
 ToolCommands resolve_tool_commands(const PrinterDiscovery& hw) {
-    const Provider* p = match(hw);
     // klipper-toolchanger present means SELECT_TOOL/UNSELECT_TOOL exist and are
-    // the machine's own answer. Only a changer running without it needs to name
-    // its commands here.
-    if (!p || hw.has_tool_changer()) {
+    // the machine's own answer.
+    if (hw.has_tool_changer()) {
         return {};
     }
+    // Without it there is no SELECT_TOOL, and T<n> is what every multi-tool
+    // machine answers to instead: Klipper maps it to ACTIVATE_EXTRUDER, and a
+    // changer extra registers its own T<n> over that. So the table only has to
+    // name what DIFFERS, which is the unmount - a machine whose tools are plain
+    // extruders has none, and its tool can only be swapped for another.
+    const Provider* p = match(hw);
     ToolCommands c;
     c.present = true;
-    c.provider_name = p->name;
-    c.select_prefix = p->select_prefix ? p->select_prefix : "";
-    c.unselect = p->unselect_gcode ? p->unselect_gcode : "";
+    c.provider_name = p ? p->name : std::string();
+    c.select_prefix = (p && p->select_prefix) ? p->select_prefix : "T";
+    c.unselect = (p && p->unselect_gcode) ? p->unselect_gcode : "";
     return c;
 }
 
@@ -361,7 +539,8 @@ Feeder resolve_feeder(const PrinterDiscovery& hw, const std::string& open_overri
 
 std::vector<std::string> feeder_macro_candidates(const PrinterDiscovery& hw) {
     std::vector<std::string> out;
-    if (!match(hw)) {
+    const Provider* p = match(hw);
+    if (!p || !p->open_gcode) {
         return out;
     }
     // A feeder macro is one of the controller's own MHC_* commands, or a macro
@@ -385,6 +564,49 @@ std::vector<std::string> required_status_objects(const PrinterDiscovery& hw) {
     return p ? p->status_objects(hw) : std::vector<std::string>{};
 }
 
+MaterialSource resolve_material_source(const PrinterDiscovery& hw) {
+    const Provider* p = match(hw);
+    if (!p || !p->material_write_gcode) {
+        return {};
+    }
+    MaterialSource s;
+    s.present = true;
+    s.provider_name = p->name;
+    s.write_gcode = p->material_write_gcode;
+    return s;
+}
+
+std::optional<MaterialReading> read_materials(const nlohmann::json& status, int max_slots) {
+    if (!status.is_object()) {
+        return std::nullopt;
+    }
+    auto it = status.find(kZmodColorObject);
+    if (it == status.end() || !it->is_object()) {
+        return std::nullopt;
+    }
+    MaterialReading r;
+    if (auto slots = zmod_color::parse_slots(*it, max_slots)) {
+        std::vector<std::optional<SlotMaterial>> out(slots->size());
+        for (size_t i = 0; i < slots->size(); ++i) {
+            if (!(*slots)[i]) {
+                continue;
+            }
+            SlotMaterial m;
+            m.material = (*slots)[i]->material;
+            m.rgb = parse_hex_color((*slots)[i]->hex);
+            m.filament_present = (*slots)[i]->filament_present;
+            out[i] = std::move(m);
+        }
+        r.slots = std::move(out);
+    }
+    r.valid_types = zmod_color::parse_valid_types(*it);
+    r.palette = zmod_color::parse_palette(*it);
+    if (!r.slots && !r.valid_types && !r.palette) {
+        return std::nullopt;
+    }
+    return r;
+}
+
 std::optional<ToolReading> read_tool(const nlohmann::json& status) {
     if (!status.is_object()) {
         return std::nullopt;
@@ -404,7 +626,20 @@ std::optional<ToolReading> read_tool(const nlohmann::json& status) {
             }
         }
     }
+    auto zmod = status.find(kZmodColorObject);
+    if (zmod != status.end() && zmod->is_object()) {
+        if (auto r = read_zmod_color(*zmod)) {
+            return r;
+        }
+    }
     return std::nullopt;
+}
+
+bool sensor_error_is_fault(const ToolReading& reading, bool swap_in_flight) {
+    if (!reading.sensor_error) {
+        return false;
+    }
+    return reading.sensor_error_reported || !swap_in_flight;
 }
 
 } // namespace helix::toolchanger_addon

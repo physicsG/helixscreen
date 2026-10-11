@@ -7,6 +7,10 @@ set -e
 
 # Show help
 show_help() {
+    local ids
+    ids=$(sed -n 's/^ *{"\([a-z0-9_]*\)", PrinterType::.*/\1/p' \
+        "$(dirname "${BASH_SOURCE[0]}")/../include/mock_persona.h" | paste -sd, - |
+        sed 's/,/, /g' | fold -s -w 60 | sed 's/ *$//; s/^/            /')
     cat << 'EOF'
 Usage: screenshot.sh [BINARY] [NAME] [TOKEN] [FLAGS...]
 
@@ -41,11 +45,35 @@ Arguments:
             steps (semicolon-separated) instead of a recipe-table lookup —
             for a screen with no table entry yet. Overrides TOKEN's recipe.
 
-            --printer <id>      Which printer the mock impersonates
-            (voron_24, voron_trident, k1, ad5m, generic_corexy,
-            generic_bedslinger, multi_extruder). Sets HELIX_MOCK_PRINTER.
+EOF
+    cat << EOF
+            --printer <id>      Which printer the mock impersonates. Sets
+            HELIX_MOCK_PRINTER to one of:
+${ids}
             Default: unset, which is the mock's own default of Voron 2.4.
             Ignored (with a warning) under --real.
+
+EOF
+    cat << 'EOF'
+            --binary-path PATH  Drive this binary instead of
+            build/bin/<BINARY> (sanitizer builds live in their own BIN_DIR).
+            The same binary also acts as the ctl client.
+
+            --repeat N          Run the recipe N times against the one booted
+            instance (races need iterations). One '[screenshot] recipe pass
+            n/N' line is printed for every pass whose steps all succeeded.
+
+            --no-capture        Drive only: skip the settle, the screenshot
+            and the PNG check. The app's exit status is still enforced.
+
+            --log FILE          Write the app's stdout/stderr to FILE and keep
+            it on exit (sanitizer reports land there; the throwaway log is
+            otherwise deleted by cleanup).
+
+            --shutdown-timeout SECS
+            Seconds to wait for a clean ctl shutdown before SIGTERM
+            (default 2; instrumented binaries need longer to finish their
+            at-exit pass).
 
 Determinism:
   A capture must depend only on its explicit inputs, so every run gets a fresh
@@ -65,6 +93,9 @@ Environment Variables:
   HELIX_SCREENSHOT_DISPLAY   Display index to open the window on (default: auto)
   HELIX_SCREENSHOT_TIMEOUT   Max seconds to wait for the control socket (default: 20)
   HELIX_SCREENSHOT_DELAY     Settle seconds after the recipe before capture (default: 1.5)
+  HELIX_SCREENSHOT_SHUTDOWN_TIMEOUT
+                             Clean-shutdown wait before SIGTERM (default: 2);
+                             --shutdown-timeout is the flag form
   HELIX_SCREENSHOT_OPEN      If set, opens the screenshot in a viewer
   HELIX_THEME                Color theme name (default: the config's, i.e. helixscreen)
   HELIX_MOCK_PRINTER         Mock printer identity; --printer <id> is the flag form
@@ -81,6 +112,8 @@ Examples:
   ./scripts/screenshot.sh helix-screen ad5m-home home --printer ad5m
   ./scripts/screenshot.sh helix-screen light-home home --light
   ./scripts/screenshot.sh helix-screen live-home home --real   # real printer
+  ./scripts/screenshot.sh helix-screen qr-drive help-qr --repeat 25 \
+      --no-capture --log /tmp/asan-app.log   # sanitizer drive, no PNG
 
 Output:
   Screenshots are saved to /tmp/ui-screenshot-<NAME>.png, encoded by the app.
@@ -129,8 +162,8 @@ else
     shift 2 2>/dev/null || true; EXTRA_ARGS=("$@")
 fi
 
-# Script-level flags that take a value. Neither is a binary flag, so both are
-# consumed here and never forwarded.
+# Script-level flags. None is a binary flag, so all are consumed here and
+# never forwarded. Value-taking flags:
 #   --recipe '<ctl steps>'  captures a screen with no table entry, without
 #                           having to add one first.
 #   --printer <id>          pins the mock printer identity for this capture.
@@ -138,15 +171,30 @@ fi
 #                           default so the env-var form keeps working; unset
 #                           means the mock's own default (Voron 2.4), which is
 #                           what bare --test has always produced.
+#   --binary-path PATH      drives that binary (see help text).
+#   --repeat N              repeats the recipe on the booted instance.
+#   --log FILE              keeps the app log at FILE.
+#   --shutdown-timeout SECS widens the clean-shutdown deadline.
+# Boolean:
+#   --no-capture            drive only, no screenshot.
 INLINE_RECIPE=""
 SHOT_PRINTER="${HELIX_MOCK_PRINTER:-}"
+BINARY_PATH_OVERRIDE=""
+REPEAT_COUNT=1
+NO_CAPTURE=0
+LOG_FILE=""
+SHUTDOWN_TIMEOUT_FLAG=""
 FILTERED_ARGS=()
 pending=""
 for a in "${EXTRA_ARGS[@]}"; do
     if [ -n "$pending" ]; then
         case "$pending" in
-            recipe) INLINE_RECIPE="$a" ;;
-            printer) SHOT_PRINTER="$a" ;;
+            recipe)           INLINE_RECIPE="$a" ;;
+            printer)          SHOT_PRINTER="$a" ;;
+            binary-path)      BINARY_PATH_OVERRIDE="$a" ;;
+            repeat)           REPEAT_COUNT="$a" ;;
+            log)              LOG_FILE="$a" ;;
+            shutdown-timeout) SHUTDOWN_TIMEOUT_FLAG="$a" ;;
         esac
         pending=""
         continue
@@ -154,6 +202,11 @@ for a in "${EXTRA_ARGS[@]}"; do
     case "$a" in
         --recipe) pending="recipe"; continue ;;
         --printer) pending="printer"; continue ;;
+        --binary-path) pending="binary-path"; continue ;;
+        --repeat) pending="repeat"; continue ;;
+        --log) pending="log"; continue ;;
+        --shutdown-timeout) pending="shutdown-timeout"; continue ;;
+        --no-capture) NO_CAPTURE=1; continue ;;
     esac
     FILTERED_ARGS+=("$a")
 done
@@ -162,6 +215,27 @@ if [ -n "$pending" ]; then
     exit 1
 fi
 EXTRA_ARGS=("${FILTERED_ARGS[@]}")
+
+# Numeric-flag validation: a silent fallback to the default would hide a
+# mistyped invocation, and the pass-count consumers of --repeat read the
+# countable output lines, so a wrong N must be refused up front.
+case "$REPEAT_COUNT" in
+    ''|*[!0-9]*) error "--repeat needs a whole number of passes, got '$REPEAT_COUNT'"; exit 1 ;;
+esac
+[ "$REPEAT_COUNT" -ge 1 ] || { error "--repeat must be at least 1, got $REPEAT_COUNT"; exit 1; }
+# An unset (or empty) flag falls through to the env/default; only a value
+# holding a non-digit is refused.
+case "$SHUTDOWN_TIMEOUT_FLAG" in
+    *[!0-9]*) error "--shutdown-timeout needs whole seconds, got '$SHUTDOWN_TIMEOUT_FLAG'"; exit 1 ;;
+esac
+
+if [ -n "$BINARY_PATH_OVERRIDE" ]; then
+    BINARY_PATH="$BINARY_PATH_OVERRIDE"
+    # One executable, two roles: the driven app and the `ctl` client are the
+    # same binary, so an override redirects both. A dev build of helix-screen
+    # is then not required to exist beside the instrumented one.
+    HELIXCTL=("$BINARY_PATH" ctl)
+fi
 
 # Wizard capture: --wizard is forwarded to the binary, where it sets force_wizard
 # and overrides the --skip-wizard that --test otherwise implies. We also withhold
@@ -218,19 +292,26 @@ fi
 
 SOCKET_TIMEOUT="${HELIX_SCREENSHOT_TIMEOUT:-20}"
 SETTLE="${HELIX_SCREENSHOT_DELAY:-1.5}"
+SHUTDOWN_TIMEOUT="${SHUTDOWN_TIMEOUT_FLAG:-${HELIX_SCREENSHOT_SHUTDOWN_TIMEOUT:-2}}"
 
 # Binary present + executable
 if [ ! -f "$BINARY_PATH" ]; then
     error "Binary not found: $BINARY_PATH"; info "Build first with: make"; exit 1
 fi
 [ -x "$BINARY_PATH" ] || chmod +x "$BINARY_PATH"
-if [ ! -x "./build/bin/helix-screen" ]; then
+# The ctl client is the same binary unless --binary-path redirected it.
+if [ -z "$BINARY_PATH_OVERRIDE" ] && [ ! -x "./build/bin/helix-screen" ]; then
     error "helix-screen not found: ./build/bin/helix-screen"; info "Build it with: make -j"; exit 1
 fi
 
 # Private per-invocation socket so we never collide with a dev instance.
 SOCK="/tmp/helix-shot-$$.sock"
 LOG="/tmp/helix-shot-$$.log"
+KEEP_LOG=0
+if [ -n "$LOG_FILE" ]; then
+    LOG="$LOG_FILE"
+    KEEP_LOG=1
+fi
 rm -f "$SOCK" 2>/dev/null || true
 
 # Private per-invocation CONFIG directory, for the same reason. Without it the
@@ -249,22 +330,52 @@ CONFIG_DIR="$(mktemp -d /tmp/helix-shot-config-$$-XXXXXX)"
 export HELIX_CONFIG_DIR="$CONFIG_DIR"
 
 HELIX_PID=""
+APP_EXIT=""
 cleanup() {
     if [ -n "$HELIX_PID" ] && kill -0 "$HELIX_PID" 2>/dev/null; then
         # Ask it to exit cleanly (flushes logs, runs shutdown paths); fall back
-        # to a signal if the control socket is already gone.
+        # to a signal if the control socket is already gone. An instrumented
+        # binary finishes its at-exit pass slowly, so the deadline is
+        # --shutdown-timeout (0.2 s polls), not a fixed 2 s.
         "${HELIXCTL[@]}" -s "$SOCK" shutdown >/dev/null 2>&1 || kill "$HELIX_PID" 2>/dev/null || true
-        for _ in 1 2 3 4 5 6 7 8 9 10; do
+        for ((i = 0; i < SHUTDOWN_TIMEOUT * 5; i++)); do
             kill -0 "$HELIX_PID" 2>/dev/null || break
             sleep 0.2
         done
         kill -0 "$HELIX_PID" 2>/dev/null && kill "$HELIX_PID" 2>/dev/null || true
     fi
-    rm -f "$SOCK" "$LOG" 2>/dev/null || true
+    # Reap the app so its own exit status reaches this script's caller: a
+    # sanitizer abort in the at-exit pass happens after every capture has
+    # succeeded, and only this status carries it. Bash keeps a dead child's
+    # status until the first wait, so this works whether it died just now or
+    # long before cleanup. A still-alive process is NOT waited on - that
+    # would hang cleanup on anything that survives SIGTERM.
+    if [ -n "$HELIX_PID" ] && ! kill -0 "$HELIX_PID" 2>/dev/null; then
+        APP_EXIT=0
+        wait "$HELIX_PID" 2>/dev/null || APP_EXIT=$?
+    fi
+    rm -f "$SOCK" 2>/dev/null || true
+    if [ "$KEEP_LOG" != "1" ]; then
+        rm -f "$LOG" 2>/dev/null || true
+    fi
     # Pattern-guarded: only ever remove a directory this script created.
     case "$CONFIG_DIR" in
         /tmp/helix-shot-config-*) rm -rf "$CONFIG_DIR" 2>/dev/null || true ;;
     esac
+    # 143/137 are the TERM/KILL sent above, i.e. an expected shutdown, not a
+    # failure; every other non-zero status is the app's own verdict. exit here
+    # overrides the script's status only for those - the error paths that
+    # already exit 1 keep a non-zero status either way. This must stay the
+    # last thing cleanup does: an exit here cuts the trap short.
+    if [ -n "$APP_EXIT" ] && [ "$APP_EXIT" -ne 0 ] &&
+       [ "$APP_EXIT" -ne 143 ] && [ "$APP_EXIT" -ne 137 ]; then
+        if [ "$KEEP_LOG" = "1" ]; then
+            error "helix-screen exited with status ${APP_EXIT} - crash or sanitizer report; app log kept at ${LOG}"
+        else
+            error "helix-screen exited with status ${APP_EXIT} - crash or sanitizer report; re-run with --log FILE to keep the app log"
+        fi
+        exit "$APP_EXIT"
+    fi
 }
 trap cleanup EXIT
 
@@ -363,6 +474,13 @@ while [ ! -S "$SOCK" ]; do
 done
 
 # Run the navigation recipe (skip in wizard mode — the wizard shows itself).
+# --repeat re-runs the recipe on the SAME booted instance: a race needs the
+# open/close cycle exercised repeatedly, and one boot is much cheaper than N.
+# Each pass whose steps ALL succeeded prints exactly one countable line
+# ('[screenshot] recipe pass n/N'); a pass with a failed step prints a
+# differently-worded warning instead, so counting those lines measures how
+# much real driving happened - the vacuity guard for sanitizer runs reads it.
+PASSES_DONE=0
 if [ "$WIZARD_MODE" = "0" ]; then
     if [ -n "$INLINE_RECIPE" ]; then
         RECIPE="$INLINE_RECIPE"
@@ -372,43 +490,78 @@ if [ "$WIZARD_MODE" = "0" ]; then
         info "Recipe: $RECIPE"
     fi
     IFS=';' read -ra STEPS <<< "$RECIPE"
-    for step in "${STEPS[@]}"; do
-        # trim leading/trailing whitespace
-        step="$(echo "$step" | sed 's/^ *//;s/ *$//')"
-        [ -z "$step" ] && continue
-        # Surface the control server's error text — a silently-skipped step
-        # produces a screenshot of the wrong screen, which is worse than a fail.
-        if ! STEP_ERR=$("${HELIXCTL[@]}" -s "$SOCK" $step 2>&1 >/dev/null); then
-            warn "Recipe step failed: '$step'${STEP_ERR:+ — $STEP_ERR}"
+    for ((pass = 1; pass <= REPEAT_COUNT; pass++)); do
+        # A dead app cannot execute a recipe; driving its corpse would print
+        # pass lines that prove nothing, so stop at the first dead pass.
+        if ! kill -0 "$HELIX_PID" 2>/dev/null; then
+            error "helix-screen died before recipe pass ${pass}/${REPEAT_COUNT}"
+            tail -15 "$LOG" 2>/dev/null
+            exit 1
+        fi
+        STEP_FAILS=0
+        for step in "${STEPS[@]}"; do
+            # trim leading/trailing whitespace
+            step="$(echo "$step" | sed 's/^ *//;s/ *$//')"
+            [ -z "$step" ] && continue
+            # Surface the control server's error text — a silently-skipped step
+            # produces a screenshot of the wrong screen, which is worse than a fail.
+            if ! STEP_ERR=$("${HELIXCTL[@]}" -s "$SOCK" $step 2>&1 >/dev/null); then
+                warn "Recipe step failed (pass ${pass}/${REPEAT_COUNT}): '$step'${STEP_ERR:+ — $STEP_ERR}"
+                STEP_FAILS=$((STEP_FAILS + 1))
+            fi
+        done
+        if [ "$STEP_FAILS" -eq 0 ]; then
+            echo "[screenshot] recipe pass ${pass}/${REPEAT_COUNT}"
+            PASSES_DONE=$((PASSES_DONE + 1))
+        else
+            warn "recipe pass ${pass}/${REPEAT_COUNT} incomplete: ${STEP_FAILS} failed step(s) - pass not counted"
         fi
     done
+    [ "$REPEAT_COUNT" -gt 1 ] && info "Recipe passes completed: ${PASSES_DONE}/${REPEAT_COUNT}"
 else
+    if [ "$REPEAT_COUNT" -gt 1 ]; then
+        warn "--repeat has no effect in wizard mode (no recipe runs)"
+    fi
     info "Wizard mode: capturing boot screen (no recipe)"
 fi
 
 # Let animations/transitions settle, then capture straight to PNG. The app
 # encodes it (lodepng), so there is no BMP hop and no ImageMagick dependency.
-sleep "$SETTLE"
-if ! CAPTURE_ERR=$("${HELIXCTL[@]}" -s "$SOCK" screenshot "$PNG_FILE" 2>&1 >/dev/null); then
-    error "helix-screen ctl screenshot failed${CAPTURE_ERR:+: $CAPTURE_ERR}"
-    tail -10 "$LOG" 2>/dev/null
-    exit 1
-fi
-if [ ! -f "$PNG_FILE" ]; then
-    error "Screenshot not written: $PNG_FILE"; tail -10 "$LOG" 2>/dev/null; exit 1
-fi
-
-PNG_SIZE=$(ls -lh "$PNG_FILE" | awk '{print $5}')
-echo ""
-success "Screenshot ready!"
-echo "  File:  $PNG_FILE ($PNG_SIZE)"
-if [ -n "$INLINE_RECIPE" ]; then
-    echo "  Recipe: $INLINE_RECIPE"
+# --no-capture skips all of it: sanitizer drives exist to exercise the app,
+# and the app's own exit status (enforced in cleanup) is the verdict.
+if [ "$NO_CAPTURE" = "1" ]; then
+    echo ""
+    success "Drive complete (no capture requested)"
+    if [ -n "$INLINE_RECIPE" ]; then
+        echo "  Recipe: $INLINE_RECIPE"
+    else
+        echo "  Token: ${TOKEN:-home}"
+    fi
+    echo "  Passes: ${PASSES_DONE}/${REPEAT_COUNT} completed"
+    echo ""
 else
-    echo "  Token: ${TOKEN:-home}"
-fi
-echo ""
+    sleep "$SETTLE"
+    if ! CAPTURE_ERR=$("${HELIXCTL[@]}" -s "$SOCK" screenshot "$PNG_FILE" 2>&1 >/dev/null); then
+        error "helix-screen ctl screenshot failed${CAPTURE_ERR:+: $CAPTURE_ERR}"
+        tail -10 "$LOG" 2>/dev/null
+        exit 1
+    fi
+    if [ ! -f "$PNG_FILE" ]; then
+        error "Screenshot not written: $PNG_FILE"; tail -10 "$LOG" 2>/dev/null; exit 1
+    fi
 
-if [ -n "$HELIX_SCREENSHOT_OPEN" ]; then
+    PNG_SIZE=$(ls -lh "$PNG_FILE" | awk '{print $5}')
+    echo ""
+    success "Screenshot ready!"
+    echo "  File:  $PNG_FILE ($PNG_SIZE)"
+    if [ -n "$INLINE_RECIPE" ]; then
+        echo "  Recipe: $INLINE_RECIPE"
+    else
+        echo "  Token: ${TOKEN:-home}"
+    fi
+    echo ""
+fi
+
+if [ -n "$HELIX_SCREENSHOT_OPEN" ] && [ "$NO_CAPTURE" = "0" ]; then
     command -v open &>/dev/null && open "$PNG_FILE" || { command -v xdg-open &>/dev/null && xdg-open "$PNG_FILE"; }
 fi

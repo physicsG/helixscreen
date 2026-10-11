@@ -24,16 +24,15 @@
 
 namespace {
 
-// Find the overlay canvas child of the path-canvas widget. The widget creates
-// two lv_canvas children in order: [0] static topology, [1] state overlay.
-// MIXED draws all of its lanes/dots/hub/nozzles into the overlay canvas.
+// Find the overlay canvas child of the path-canvas widget. MIXED draws all of
+// its lanes/dots/hub/nozzles into the overlay canvas.
 lv_obj_t* overlay_canvas_of(lv_obj_t* widget) {
     lv_obj_t* last = nullptr;
     uint32_t n = lv_obj_get_child_count(widget);
     for (uint32_t i = 0; i < n; ++i) {
         lv_obj_t* c = lv_obj_get_child(widget, i);
         if (lv_obj_check_type(c, &lv_canvas_class))
-            last = c; // overlay is the second (last-created) canvas
+            last = c;
     }
     return last;
 }
@@ -61,19 +60,21 @@ long count_opaque_pixels(lv_obj_t* canvas) {
 // two hub-routed, with installed filament so lanes draw in filament color.
 void configure_mixed(lv_obj_t* w) {
     ui_filament_path_canvas_set_slot_count(w, 4);
-    ui_filament_path_canvas_set_topology(w, static_cast<int>(PathTopology::MIXED));
+    ui_filament_path_canvas_set_topology(w, static_cast<int>(helix::PathTopology::MIXED));
     // {direct, direct, hub-routed, hub-routed}
     ui_filament_path_canvas_set_slot_hub_routed(w, 0, false);
     ui_filament_path_canvas_set_slot_hub_routed(w, 1, false);
     ui_filament_path_canvas_set_slot_hub_routed(w, 2, true);
     ui_filament_path_canvas_set_slot_hub_routed(w, 3, true);
     // Installed filament on each lane (non-NONE segment so lanes are "filled").
-    ui_filament_path_canvas_set_slot_filament(w, 0, static_cast<int>(PathSegment::NOZZLE),
+    ui_filament_path_canvas_set_slot_filament(w, 0, static_cast<int>(helix::PathSegment::NOZZLE),
                                               0xE53935);
-    ui_filament_path_canvas_set_slot_filament(w, 1, static_cast<int>(PathSegment::SPOOL), 0x1E88E5);
-    ui_filament_path_canvas_set_slot_filament(w, 2, static_cast<int>(PathSegment::NOZZLE),
+    ui_filament_path_canvas_set_slot_filament(w, 1, static_cast<int>(helix::PathSegment::SPOOL),
+                                              0x1E88E5);
+    ui_filament_path_canvas_set_slot_filament(w, 2, static_cast<int>(helix::PathSegment::NOZZLE),
                                               0x43A047);
-    ui_filament_path_canvas_set_slot_filament(w, 3, static_cast<int>(PathSegment::SPOOL), 0xFDD835);
+    ui_filament_path_canvas_set_slot_filament(w, 3, static_cast<int>(helix::PathSegment::SPOOL),
+                                              0xFDD835);
     ui_filament_path_canvas_set_slot_mapped_tool(w, 0, 0);
     ui_filament_path_canvas_set_slot_mapped_tool(w, 1, 1);
     ui_filament_path_canvas_set_slot_mapped_tool(w, 2, 2);
@@ -103,10 +104,11 @@ TEST_CASE_METHOD(LVGLTestFixture, "PARALLEL detail canvas renders pixels (harnes
     lv_obj_set_size(w, 400, 240);
 
     ui_filament_path_canvas_set_slot_count(w, 4);
-    ui_filament_path_canvas_set_topology(w, static_cast<int>(PathTopology::PARALLEL));
-    ui_filament_path_canvas_set_slot_filament(w, 0, static_cast<int>(PathSegment::NOZZLE),
+    ui_filament_path_canvas_set_topology(w, static_cast<int>(helix::PathTopology::PARALLEL));
+    ui_filament_path_canvas_set_slot_filament(w, 0, static_cast<int>(helix::PathSegment::NOZZLE),
                                               0xE53935);
-    ui_filament_path_canvas_set_slot_filament(w, 1, static_cast<int>(PathSegment::SPOOL), 0x1E88E5);
+    ui_filament_path_canvas_set_slot_filament(w, 1, static_cast<int>(helix::PathSegment::SPOOL),
+                                              0x1E88E5);
     ui_filament_path_canvas_set_active_slot(w, 0);
 
     FORCE_RENDER();
@@ -118,36 +120,13 @@ TEST_CASE_METHOD(LVGLTestFixture, "PARALLEL detail canvas renders pixels (harnes
     REQUIRE(pixels > 200);
 }
 
-TEST_CASE_METHOD(LVGLTestFixture, "MIXED detail canvas renders pixels (hub_only=true)",
+TEST_CASE_METHOD(LVGLTestFixture, "MIXED detail canvas renders pixels",
                  "[filament-path][canvas][mixed][regression]") {
     lv_obj_t* w = ui_filament_path_canvas_create(test_screen());
     REQUIRE(w != nullptr);
     lv_obj_set_size(w, 400, 240);
 
     configure_mixed(w);
-    ui_filament_path_canvas_set_hub_only(w, true);
-
-    // Let the async canvas refresh + render pass run.
-    FORCE_RENDER();
-
-    lv_obj_t* overlay = overlay_canvas_of(w);
-    REQUIRE(overlay != nullptr);
-
-    long pixels = count_opaque_pixels(overlay);
-    INFO("hub_only=true opaque overlay pixels: " << pixels);
-    // A populated MIXED panel paints lanes, sensor dots, the hub box, and
-    // nozzles — hundreds of pixels minimum. Blank canvas (the bug) is 0.
-    REQUIRE(pixels > 200);
-}
-
-TEST_CASE_METHOD(LVGLTestFixture, "MIXED detail canvas renders pixels (hub_only=false)",
-                 "[filament-path][canvas][mixed][regression]") {
-    lv_obj_t* w = ui_filament_path_canvas_create(test_screen());
-    REQUIRE(w != nullptr);
-    lv_obj_set_size(w, 400, 240);
-
-    configure_mixed(w);
-    ui_filament_path_canvas_set_hub_only(w, false);
 
     FORCE_RENDER();
 
@@ -155,7 +134,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "MIXED detail canvas renders pixels (hub_only=
     REQUIRE(overlay != nullptr);
 
     long pixels = count_opaque_pixels(overlay);
-    INFO("hub_only=false opaque overlay pixels: " << pixels);
+    INFO("opaque overlay pixels: " << pixels);
     REQUIRE(pixels > 200);
 }
 
@@ -175,7 +154,6 @@ TEST_CASE_METHOD(LVGLTestFixture,
     lv_obj_set_size(w, 400, 240);
 
     configure_mixed(w);
-    ui_filament_path_canvas_set_hub_only(w, true);
 
     // Drain the create-time async while the widget still has zero layout size
     // (width is 0 until lv_obj_update_layout runs). The refresh bails on its

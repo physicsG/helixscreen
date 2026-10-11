@@ -2,21 +2,54 @@
 <!-- Copyright (C) 2025-2026 356C LLC -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <component>
+  <api>
+    <!-- Per-instance subject names, supplied by the widget at creation. They
+         must exist before this component is parsed: a binding whose subject is
+         missing at parse time is dropped permanently and silently. -->
+    <!-- 1 = buttons show their labels, 0 = icons only -->
+    <prop name="labels_subject" type="string" default=""/>
+    <!-- 1 = buttons stacked vertically, 0 = side by side -->
+    <prop name="column_subject" type="string" default=""/>
+    <!-- 1 = buttons fill the tile's height, 0 = capped at a large button -->
+    <prop name="fill_subject" type="string" default=""/>
+  </api>
+  <styles>
+    <!-- One cell tall: no taller than a large button. Taller tiles fill. -->
+    <style name="cb_btn_capped" max_height="#button_height_lg"/>
+    <!-- Stacked: each button takes the full width and half the height. -->
+    <style name="cb_btn_column" width="100%"/>
+    <!-- Labelled: a slim side inset, so the label fits a half-width button.
+         ControlButtonsWidget measures the label against this same token. -->
+    <style name="cb_btn_labelled" pad_left="#space_xxs" pad_right="#space_xxs"/>
+    <!-- Icons only: the glyph gets the whole button, which at one cell is
+         narrower than the glyph plus the labelled button's padding. -->
+    <style name="cb_btn_icon_only" pad_all="0"/>
+  </styles>
   <view extends="lv_obj"
         width="100%" height="100%" style_pad_all="#space_sm" style_pad_gap="#space_sm" style_bg_opa="0%"
-        scrollable="false" flex_flow="row" style_flex_main_place="center" style_flex_cross_place="center">
+        scrollable="false">
+    <bind_style_if_eq name="styles.tile_row" subject="$column_subject" ref_value="0"/>
+    <bind_style_if_eq name="styles.tile_column" subject="$column_subject" ref_value="1"/>
     <!-- Primary control: Pause/Resume — icon, label, and enabled state all driven
          by the PrintControlButtons singleton's global subjects. -->
     <ui_button name="btn_primary"
-               height="#button_height_lg" flex_grow="1" bind_icon="print_control_primary_icon"
-               bind_text="print_control_primary_label" label_hidden_if_bp_eq="1">
+               height="100%" flex_grow="1" bind_icon="print_control_primary_icon"
+               bind_text="print_control_primary_label" label_hidden_subject="$labels_subject" label_hidden_if_eq="0">
+      <bind_style_if_eq name="cb_btn_capped" subject="$fill_subject" ref_value="0"/>
+      <bind_style_if_eq name="cb_btn_column" subject="$column_subject" ref_value="1"/>
+      <bind_style_if_eq name="cb_btn_labelled" subject="$labels_subject" ref_value="1"/>
+      <bind_style_if_eq name="cb_btn_icon_only" subject="$labels_subject" ref_value="0"/>
       <event_cb trigger="clicked" callback="on_print_control_primary"/>
       <bind_state_if_eq subject="print_control_primary_enabled" state="disabled" ref_value="0"/>
     </ui_button>
     <!-- Stop control -->
     <ui_button name="btn_stop"
-               height="#button_height_lg" flex_grow="1" variant="danger" icon="stop" text="Stop" translation_tag="Stop"
-               label_hidden_if_bp_eq="1">
+               height="100%" flex_grow="1" variant="danger" icon="stop" text="Stop"
+               label_hidden_subject="$labels_subject" label_hidden_if_eq="0">
+      <bind_style_if_eq name="cb_btn_capped" subject="$fill_subject" ref_value="0"/>
+      <bind_style_if_eq name="cb_btn_column" subject="$column_subject" ref_value="1"/>
+      <bind_style_if_eq name="cb_btn_labelled" subject="$labels_subject" ref_value="1"/>
+      <bind_style_if_eq name="cb_btn_icon_only" subject="$labels_subject" ref_value="0"/>
       <event_cb trigger="clicked" callback="on_print_control_stop"/>
       <bind_state_if_eq subject="print_control_stop_enabled" state="disabled" ref_value="0"/>
     </ui_button>

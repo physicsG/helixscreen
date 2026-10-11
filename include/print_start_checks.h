@@ -11,9 +11,11 @@
  */
 
 #include "ams_types.h"
+#include "filament_database.h"
 #include "filament_mapper.h"
 #include "moonraker_types.h"
 
+#include <cstdint>
 #include <map>
 #include <optional>
 #include <set>
@@ -54,6 +56,39 @@ namespace helix {
 /// (kept separate so this header stays LVGL-free).
 enum class GateSeverity { Info, Warning, Error };
 
+/// What the file scan found about commands this printer treats as an emergency stop.
+struct PrinterStopCheck {
+    enum class State {
+        NotRun, ///< No answer: no scan of this file, a failed download, or unread macros
+        Clean,  ///< The scanned lines call none of them
+        Stops,  ///< The file calls one
+    };
+    State state = State::NotRun;
+    std::string not_run_reason; ///< Why, when NotRun
+    std::string command;        ///< The first call's command word as the file writes it
+    size_t line_number = 0;     ///< Its 1-indexed line
+    std::string stop_message;   ///< The macro's literal stop message; empty when unknown
+    /// The MacroParamCache generation this answer was computed against. An
+    /// answer from an older generation describes a macro set the printer may no
+    /// longer have, so it is treated as no answer at all.
+    uint64_t macro_generation = 0;
+};
+
+/// How much of a file's head the printer-stopping command check reads. Every
+/// caller downloads exactly this much: the answer describes the scanned prefix,
+/// so two callers reading different amounts would disagree about one file.
+inline constexpr size_t PRINTER_STOP_SCAN_BYTES = 200 * 1024;
+
+/// Look through @p content for a command this printer's macros make an
+/// emergency stop. A download cut at @p limit ends mid-line, so that last
+/// partial line is not read: a truncated word could spell a command the file
+/// never calls.
+[[nodiscard]] PrinterStopCheck printer_stop_check_in(const std::string& content, size_t limit);
+
+/// An answer of "no answer", carrying @p reason and the macro generation it was
+/// made against.
+[[nodiscard]] PrinterStopCheck printer_stop_not_run(std::string reason);
+
 /// Everything a gate may read. Gathered fresh by the controller per pipeline
 /// (re-)entry; gates never fetch singleton state themselves.
 struct PrintStartContext {
@@ -73,6 +108,9 @@ struct PrintStartContext {
     std::vector<double> tool_grams;
     size_t filament_color_count = 0; ///< filament_colors_.size() on the controller
 
+    /// The printer-stopping command scan of this file (PrintPreparationManager).
+    PrinterStopCheck printer_stop;
+
     // ---- environment (from AmsState / FilamentSensorManager) ----
     bool ams_available = false;           ///< AmsState::is_available()
     bool ams_manages_filament = false;    ///< any backend present
@@ -91,6 +129,7 @@ struct PrintStartContext {
     /// lanes; populated only when ams_manages_filament && has_active_backend.
     std::vector<std::pair<int, int>> empty_required_lanes;
     std::optional<SlotInfo> external_spool; ///< AmsState::get_external_spool_info()
+    float filament_diameter_mm = filament::DEFAULT_DIAMETER_MM; ///< [extruder] filament_diameter
 
     // ---- non-AMS aggregate runout fallback ----
     bool runout_enabled = false;
@@ -111,6 +150,11 @@ struct PrintStartGate {
     std::string_view name;                             // for logging
     CheckResult (*evaluate)(const PrintStartContext&); // pure fn, no captures
 };
+
+/// The dialog for a file that calls a command this printer treats as an
+/// emergency stop. Pass for every other state, so a caller can hand it any
+/// check and read the verdict.
+[[nodiscard]] CheckResult gate_printer_stopping_command(const PrintStartContext& ctx);
 
 /// Per-tool material mismatch detail (ported verbatim from
 /// PrintStartController::MaterialMismatchDetail).
@@ -151,6 +195,14 @@ struct LaneWeightShortfall {
     int mapped_backend = -1;
     float needed_g = 0.0f;
     float remaining_g = 0.0f;
+
+    /// The lane's display identity, copied from the AvailableSlot this
+    /// shortfall was measured against so the gate dialog does not re-resolve
+    /// (and, on a multi-unit backend, re-derive the wrong number from
+    /// mapped_slot) what insufficient_lane_weights_in() already found.
+    helix::ui::LaneNoun noun = helix::ui::LaneNoun::Slot;
+    std::string unit_display_name;
+    int local_slot_index = -1;
 };
 
 /**
@@ -176,8 +228,12 @@ std::vector<LaneWeightShortfall> insufficient_lane_weights_in(const PrintStartCo
 /// path (gcode material vs external spool), with filament-database temps.
 std::vector<MaterialMismatchDetail> material_mismatches_in(const PrintStartContext& ctx);
 
-/// The ordered production gate list. Order is behavior-critical: it preserves
-/// the pre-pipeline check order with the two new gates inserted at 2 and 3.
+/// The ordered production gate list. Order is behavior-critical.
 const std::vector<PrintStartGate>& default_print_start_gates();
+
+/// Log that a print is starting without the printer-stopping command check.
+/// @param start_path The in-app path starting it, as the log line names it.
+void warn_printer_stop_check_skipped(std::string_view start_path, std::string_view filename,
+                                     std::string_view reason);
 
 } // namespace helix

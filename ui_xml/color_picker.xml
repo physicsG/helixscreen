@@ -25,8 +25,7 @@
         extends="ui_dialog" width="470" height="content" align="center" flex_flow="column" style_flex_main_place="start"
         style_pad_gap="0">
     <!-- Header: title + close. -->
-    <modal_header title="Pick Color"
-                  title_tag="Pick Color" hide_icon="true" hide_close="false" close_callback="color_picker_close_cb"/>
+    <modal_header title="Pick Color" hide_icon="true" hide_close="false" close_callback="color_picker_close_cb"/>
     <!-- Horizontal divider -->
     <divider_horizontal/>
 
@@ -38,13 +37,11 @@
             style_pad_top="#space_sm" style_pad_bottom="0" flex_flow="row" style_pad_gap="#space_sm" scrollable="false">
       <bind_flag_if_gt subject="ui_breakpoint" flag="hidden" ref_value="1"/>
       <ui_button name="btn_tab_presets"
-                 height="#button_height_sm" text="Presets" translation_tag="Presets" flex_grow="1" variant="ghost"
-                 focusable="false">
+                 height="#button_height_sm" text="Presets" flex_grow="1" variant="ghost" focusable="false">
         <event_cb trigger="clicked" callback="color_picker_tab_presets_cb"/>
       </ui_button>
       <ui_button name="btn_tab_custom"
-                 height="#button_height_sm" text="Custom" translation_tag="Custom" flex_grow="1" variant="ghost"
-                 focusable="false">
+                 height="#button_height_sm" text="Custom" flex_grow="1" variant="ghost" focusable="false">
         <event_cb trigger="clicked" callback="color_picker_tab_custom_cb"/>
       </ui_button>
     </lv_obj>
@@ -83,14 +80,14 @@
                   style_flex_cross_place="center" style_pad_gap="#space_sm" scrollable="false">
             <text_input name="hex_input"
                         width="100" height="content" max_length="9" text="#808080" placeholder_text="#hex_placeholder"
-                        style_border_width="0" style_outline_width="0" scrollable="false">
+                        style_outline_width="0" scrollable="false">
               <event_cb trigger="value_changed" callback="hex_input_changed_cb"/>
               <event_cb trigger="defocused" callback="hex_input_defocused_cb"/>
             </text_input>
-            <lv_label name="selected_name_label" flex_grow="1" text="Gray" translation_tag="Gray" long_mode="wrap"/>
+            <lv_label name="selected_name_label" flex_grow="1" text="Gray" long_mode="wrap"/>
           </lv_obj>
           <!-- Presets label -->
-          <text_small text="Presets" translation_tag="Presets"/>
+          <text_small text="Presets"/>
         </lv_obj>
         <!-- BOTTOM: Presets grid (pushed to bottom via space_between) -->
         <!-- Preset grid: 6 columns x 5 rows. ColorPicker::set_palette() drives
@@ -98,9 +95,9 @@
              Must stay the LAST child — a reactive <if> appends its rebuilt body
              to the end of the parent's child list. -->
         <if cond="color_picker_palette eq 1">
-          <theme_swatch_grid swatch_callback="color_swatch_clicked_cb"/>
+          <theme_swatch_grid swatch_callback="color_swatch_clicked_cb" selected_subject="color_picker_selected_swatch"/>
           <else/>
-          <color_swatch_grid swatch_callback="color_swatch_clicked_cb"/>
+          <color_swatch_grid swatch_callback="color_swatch_clicked_cb" selected_subject="color_picker_selected_swatch"/>
         </if>
       </lv_obj>
     </lv_obj>
@@ -119,9 +116,15 @@
         <!-- Only child of presets_content, so the reactive <if> ordering
              constraint is satisfied. -->
         <if cond="color_picker_palette eq 1">
-          <theme_swatch_grid width="100%" swatch_callback="color_swatch_clicked_cb"/>
+          <theme_swatch_grid width="100%"
+                             swatch_callback="color_swatch_clicked_cb" selected_subject="color_picker_selected_swatch"
+                             swatch_size="#picker_tab_swatch_size" gap="#picker_tab_swatch_gap"
+                             gap_half="#picker_tab_swatch_gap_half"/>
           <else/>
-          <color_swatch_grid width="100%" swatch_callback="color_swatch_clicked_cb"/>
+          <color_swatch_grid width="100%"
+                             swatch_callback="color_swatch_clicked_cb" selected_subject="color_picker_selected_swatch"
+                             swatch_size="#picker_tab_swatch_size" gap="#picker_tab_swatch_gap"
+                             gap_half="#picker_tab_swatch_gap_half"/>
         </if>
       </lv_obj>
 
@@ -143,12 +146,12 @@
           <!-- Hex input -->
           <text_input name="hex_input_tiny"
                       width="100" height="content" max_length="9" text="#808080" placeholder_text="#hex_placeholder"
-                      style_border_width="0" style_outline_width="0" scrollable="false">
+                      style_outline_width="0" scrollable="false">
             <event_cb trigger="value_changed" callback="hex_input_changed_cb"/>
             <event_cb trigger="defocused" callback="hex_input_defocused_cb"/>
           </text_input>
           <!-- Color name -->
-          <lv_label name="selected_name_label_tiny" text="Gray" translation_tag="Gray" long_mode="wrap"/>
+          <lv_label name="selected_name_label_tiny" text="Gray" long_mode="wrap"/>
         </lv_obj>
       </lv_obj>
     </lv_obj>
@@ -159,7 +162,7 @@
     </lv_obj>
     <!-- Action buttons row using standard modal component -->
     <modal_button_row secondary_text="Cancel"
-                      secondary_tag="Cancel" secondary_callback="color_picker_cancel_cb" primary_text="Select"
-                      primary_tag="Select" primary_callback="color_picker_select_cb"/>
+                      secondary_callback="color_picker_cancel_cb" primary_text="Select"
+                      primary_callback="color_picker_select_cb"/>
   </view>
 </component>

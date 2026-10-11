@@ -22,28 +22,13 @@
  */
 
 #include "../test_fixtures.h"
+#include "../test_helpers/layout_manager_test_access.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "layout_manager.h"
 #include "lvgl/lvgl.h"
 #include "theme_manager.h"
 
 #include "../catch_amalgamated.hpp"
-
-// Resets LayoutManager between tests so a prior init()/set_override() cannot
-// leak into the fallback-path cases. Identical body to the friend class in
-// test_layout_manager.cpp / test_grid_layout.cpp — Catch2 amalgamated builds
-// compile each TU separately, no ODR conflict.
-class LayoutManagerTestAccess {
-  public:
-    static void reset(helix::LayoutManager& lm) {
-        lm.type_ = helix::LayoutType::STANDARD;
-        lm.name_ = "standard";
-        lm.override_name_.clear();
-        lm.initialized_ = false;
-        lm.width_ = 0;
-        lm.height_ = 0;
-    }
-};
 
 namespace {
 

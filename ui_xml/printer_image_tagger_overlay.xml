@@ -1,0 +1,93 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Printer image tagger: tap each part of the displayed printer image, one
+     prompt at a time, then review chips at the tapped points before saving.
+     Full screen (width-unmanaged), so the image gets every pixel to tap. -->
+<component>
+  <view name="printer_image_tagger_overlay"
+        extends="overlay_panel" width="100%" title="Tag Parts" bg_color="#card_bg"
+        back_button_callback="on_printer_image_tagger_cancel">
+    <lv_obj name="overlay_content"
+            width="100%" flex_grow="1" style_pad_all="#space_sm" flex_flow="column" style_pad_gap="#space_xs"
+            scrollable="false" style_bg_opa="0" style_border_width="0">
+      <text_body name="tagger_prompt" width="100%" bind_text="printer_image_tagger_prompt" style_text_align="center"/>
+
+      <lv_obj name="tagger_area"
+              width="100%" flex_grow="1" style_pad_all="0" scrollable="false" style_bg_color="#elevated_bg"
+              style_bg_opa="255" style_radius="#border_radius" style_border_width="0">
+        <lv_image name="tagger_image"
+                  width="100%" height="100%" bind_src="printer_image_tagger_src" inner_align="contain" clickable="true"
+                  scrollable="false">
+          <event_cb trigger="clicked" callback="on_printer_image_tagger_tap"/>
+        </lv_image>
+
+        <!-- Review: sample chips laid out by C++ with the home widget's pinning
+             rules (review_callout_layout), over this view rather than the tile.
+             They are the home widget's compact pinned chips: text in font_xs, no
+             icon, no unit letter; the light chip keeps its icon. The toolhead chip
+             stands in for nozzle and fan when they sit close together. C++ finds
+             each chip and its shown subject by part name (review_chip_name,
+             review_chip_shown_subject). -->
+        <lv_obj name="tagger_review_layer"
+                width="100%" height="100%" style_pad_all="0" style_bg_opa="0" style_border_width="0" scrollable="false"
+                clickable="false" hidden="true">
+          <bind_flag_if_eq subject="printer_image_tagger_reviewing" flag="hidden" ref_value="0"/>
+          <lv_obj name="tagger_chip_nozzle" width="content" height="content" scrollable="false" hidden="true">
+            <style name="styles.activity_chip"/>
+            <bind_flag_if_eq subject="printer_image_tagger_nozzle_shown" flag="hidden" ref_value="0"/>
+            <text_small name="tagger_chip_nozzle_text" text="215°" style_text_font="#font_xs"/>
+          </lv_obj>
+          <lv_obj name="tagger_chip_fan" width="content" height="content" scrollable="false" hidden="true">
+            <style name="styles.activity_chip"/>
+            <bind_flag_if_eq subject="printer_image_tagger_fan_shown" flag="hidden" ref_value="0"/>
+            <text_small name="tagger_chip_fan_text" text="100%" style_text_font="#font_xs"/>
+          </lv_obj>
+          <lv_obj name="tagger_chip_bed" width="content" height="content" scrollable="false" hidden="true">
+            <style name="styles.activity_chip"/>
+            <bind_flag_if_eq subject="printer_image_tagger_bed_shown" flag="hidden" ref_value="0"/>
+            <text_small name="tagger_chip_bed_text" text="60°" style_text_font="#font_xs"/>
+          </lv_obj>
+          <lv_obj name="tagger_chip_chamber" width="content" height="content" scrollable="false" hidden="true">
+            <style name="styles.activity_chip"/>
+            <bind_flag_if_eq subject="printer_image_tagger_chamber_shown" flag="hidden" ref_value="0"/>
+            <text_small name="tagger_chip_chamber_text" text="35°" style_text_font="#font_xs"/>
+          </lv_obj>
+          <lv_obj name="tagger_chip_light" width="content" height="content" scrollable="false" hidden="true">
+            <style name="styles.activity_chip"/>
+            <bind_flag_if_eq subject="printer_image_tagger_light_shown" flag="hidden" ref_value="0"/>
+            <icon src="lightbulb_on" size="xs" variant="warning"/>
+          </lv_obj>
+          <lv_obj name="tagger_chip_toolhead" width="content" height="content" scrollable="false" hidden="true">
+            <style name="styles.activity_chip"/>
+            <bind_flag_if_eq subject="printer_image_tagger_toolhead_shown" flag="hidden" ref_value="0"/>
+            <text_small name="tagger_chip_toolhead_text" text="215°  100%" style_text_font="#font_xs"/>
+          </lv_obj>
+        </lv_obj>
+      </lv_obj>
+
+      <lv_obj name="tagger_buttons"
+              width="100%" height="content" flex_flow="row" style_pad_all="0" style_pad_gap="#space_sm"
+              scrollable="false" style_bg_opa="0" style_border_width="0">
+        <ui_button name="btn_tagger_cancel" height="#button_height_sm" flex_grow="1" variant="secondary" text="Cancel">
+          <event_cb trigger="clicked" callback="on_printer_image_tagger_cancel"/>
+        </ui_button>
+        <ui_button name="btn_tagger_undo"
+                   height="#button_height_sm" flex_grow="1" variant="secondary" icon="undo" text="Undo">
+          <bind_state_if_eq subject="printer_image_tagger_can_undo" state="disabled" ref_value="0"/>
+          <event_cb trigger="clicked" callback="on_printer_image_tagger_undo"/>
+        </ui_button>
+        <ui_button name="btn_tagger_skip"
+                   height="#button_height_sm" flex_grow="1" variant="secondary" text="Skip" hidden="true">
+          <bind_flag_if_eq subject="printer_image_tagger_can_skip" flag="hidden" ref_value="0"/>
+          <event_cb trigger="clicked" callback="on_printer_image_tagger_skip"/>
+        </ui_button>
+        <ui_button name="btn_tagger_save"
+                   height="#button_height_sm" flex_grow="1" icon="check" text="Save" hidden="true">
+          <bind_flag_if_eq subject="printer_image_tagger_reviewing" flag="hidden" ref_value="0"/>
+          <event_cb trigger="clicked" callback="on_printer_image_tagger_save"/>
+        </ui_button>
+      </lv_obj>
+    </lv_obj>
+  </view>
+</component>

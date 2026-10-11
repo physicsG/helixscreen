@@ -3,7 +3,11 @@
 
 #include "ui_history_list_view.h"
 
+#include "ui_virtual_list.h"
+
+#include "format_utils.h"
 #include "theme_manager.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/spdlog.h>
 
@@ -139,7 +143,8 @@ void HistoryListView::init_pool() {
             static_cast<lv_obj_t*>(lv_xml_create(container_, "history_list_row", nullptr));
 
         if (row) {
-            lv_obj_add_flag(row, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(
+                row, LV_OBJ_FLAG_HIDDEN); // XML_HIDDEN_OK: pooled row, built once with its list
             // Attach click handler — one per pool row, reused across recycles
             lv_obj_add_event_cb(row, on_row_click_static, LV_EVENT_CLICKED, this);
             pool_.push_back(row);
@@ -215,56 +220,42 @@ static const char* get_status_color(PrintJobStatus status) {
     }
 }
 
-static const char* get_status_text(PrintJobStatus status) {
-    switch (status) {
-    case PrintJobStatus::COMPLETED:
-        return "Completed";
-    case PrintJobStatus::CANCELLED:
-        return "Cancelled";
-    case PrintJobStatus::ERROR:
-        return "Failed";
-    case PrintJobStatus::IN_PROGRESS:
-        return "In Progress";
-    default:
-        return "Unknown";
-    }
-}
-
 void HistoryListView::configure_row(lv_obj_t* row, size_t data_index, const PrintHistoryJob& job) {
     if (!row) {
         return;
     }
 
     // Filename label
-    lv_obj_t* filename_label = lv_obj_find_by_name(row, "row_filename");
+    lv_obj_t* filename_label = helix::ui::find_required(row, "row_filename", "HistoryListView");
     if (filename_label) {
         lv_label_set_text(filename_label, job.filename.c_str());
     }
 
     // Date label
-    lv_obj_t* date_label = lv_obj_find_by_name(row, "row_date");
+    lv_obj_t* date_label = helix::ui::find_required(row, "row_date", "HistoryListView");
     if (date_label) {
         lv_label_set_text(date_label, job.date_str.c_str());
     }
 
     // Duration label
-    lv_obj_t* duration_label = lv_obj_find_by_name(row, "row_duration");
+    lv_obj_t* duration_label = helix::ui::find_required(row, "row_duration", "HistoryListView");
     if (duration_label) {
-        lv_label_set_text(duration_label, job.duration_str.c_str());
+        lv_label_set_text(duration_label,
+                          helix::format::duration(static_cast<int>(job.print_duration)).c_str());
     }
 
     // Filament type label
-    lv_obj_t* filament_label = lv_obj_find_by_name(row, "row_filament");
+    lv_obj_t* filament_label = helix::ui::find_required(row, "row_filament", "HistoryListView");
     if (filament_label) {
         lv_label_set_text(filament_label,
-                          job.filament_type.empty() ? "Unknown" : job.filament_type.c_str());
+                          job.filament_type.empty() ? lv_tr("Unknown") : job.filament_type.c_str());
     }
 
     // Status text
-    const char* status_text = get_status_text(job.status);
+    const char* status_text = lv_tr(status_to_label(job.status));
     const char* status_color = get_status_color(job.status);
 
-    lv_obj_t* status_label = lv_obj_find_by_name(row, "row_status");
+    lv_obj_t* status_label = helix::ui::find_required(row, "row_status", "HistoryListView");
     if (status_label) {
         lv_label_set_text(status_label, status_text);
         lv_color_t color = parse_hex_color(status_color, theme_manager_get_color("text_muted"));
@@ -272,7 +263,7 @@ void HistoryListView::configure_row(lv_obj_t* row, size_t data_index, const Prin
     }
 
     // Status bar color (left edge indicator)
-    lv_obj_t* status_bar = lv_obj_find_by_name(row, "status_bar");
+    lv_obj_t* status_bar = helix::ui::find_required(row, "status_bar", "HistoryListView");
     if (status_bar) {
         lv_color_t color = parse_hex_color(status_color, theme_manager_get_color("text_muted"));
         lv_obj_set_style_bg_color(status_bar, color, LV_PART_MAIN);
@@ -341,14 +332,8 @@ void HistoryListView::update_visible(const std::vector<PrintHistoryJob>& jobs) {
         for (auto* row : pool_) {
             lv_obj_add_flag(row, LV_OBJ_FLAG_HIDDEN);
         }
-        if (leading_spacer_) {
-            lv_obj_set_height(leading_spacer_, 0);
-            last_leading_height_ = 0;
-        }
-        if (trailing_spacer_) {
-            lv_obj_set_height(trailing_spacer_, 0);
-            last_trailing_height_ = 0;
-        }
+        sync_list_spacers(container_, leading_spacer_, trailing_spacer_, VirtualWindow{},
+                          last_leading_height_, last_trailing_height_);
         visible_start_ = -1;
         visible_end_ = -1;
         total_items_ = 0;
@@ -361,13 +346,12 @@ void HistoryListView::update_visible(const std::vector<PrintHistoryJob>& jobs) {
     int total_rows = static_cast<int>(jobs.size());
 
     int row_height = cached_row_height_ > 0 ? cached_row_height_ : 56;
-    int row_gap = cached_row_gap_;
-    int row_stride = row_height + row_gap;
+    int row_stride = row_height + cached_row_gap_;
 
-    // Calculate visible range with buffer
-    int first_visible = std::max(0, static_cast<int>(scroll_y / row_stride) - BUFFER_ROWS);
-    int last_visible = std::min(
-        total_rows, static_cast<int>((scroll_y + viewport_height) / row_stride) + 1 + BUFFER_ROWS);
+    const VirtualWindow win =
+        compute_window(scroll_y, viewport_height, row_stride, total_rows, BUFFER_ROWS);
+    const int first_visible = win.first;
+    const int last_visible = win.last;
 
     // Force re-render if total item count changed (e.g. filter applied)
     bool data_changed = (total_rows != total_items_);
@@ -383,61 +367,21 @@ void HistoryListView::update_visible(const std::vector<PrintHistoryJob>& jobs) {
         "[HistoryListView] Rendering rows {}-{} of {} (scroll_y={} viewport={} data_changed={})",
         first_visible, last_visible, total_rows, scroll_y, viewport_height, data_changed);
 
-    // Update spacer heights (only when changed to avoid redundant relayout)
-    int leading_height = first_visible * row_stride;
-    if (leading_spacer_) {
-        if (leading_height != last_leading_height_) {
-            lv_obj_set_height(leading_spacer_, leading_height);
-            last_leading_height_ = leading_height;
-        }
-        if (lv_obj_get_index(leading_spacer_) != 0) {
-            lv_obj_move_to_index(leading_spacer_, 0);
-        }
-    }
+    sync_list_spacers(container_, leading_spacer_, trailing_spacer_, win, last_leading_height_,
+                      last_trailing_height_);
 
-    int trailing_height = std::max(0, (total_rows - last_visible) * row_stride);
-    if (trailing_spacer_) {
-        if (trailing_height != last_trailing_height_) {
-            lv_obj_set_height(trailing_spacer_, trailing_height);
-            last_trailing_height_ = trailing_height;
-        }
-    }
-
-    // Assign pool rows to visible indices, skipping rows that already show correct data
-    size_t pool_idx = 0;
-    for (int job_idx = first_visible; job_idx < last_visible && pool_idx < pool_.size();
-         job_idx++, pool_idx++) {
-        lv_obj_t* row = pool_[pool_idx];
-
-        if (data_changed || pool_indices_[pool_idx] != job_idx) {
-            configure_row(row, static_cast<size_t>(job_idx), jobs[job_idx]);
-            pool_indices_[pool_idx] = job_idx;
-        }
-
-        // Ensure row is in correct position (guard to avoid redundant relayout)
-        int target_index = static_cast<int>(pool_idx) + 1;
-        if (lv_obj_get_index(row) != target_index) {
-            lv_obj_move_to_index(row, target_index);
-        }
-    }
-
-    // Hide unused pool rows
-    for (; pool_idx < pool_.size(); pool_idx++) {
-        lv_obj_add_flag(pool_[pool_idx], LV_OBJ_FLAG_HIDDEN);
-        pool_indices_[pool_idx] = -1;
-    }
-
-    // Ensure trailing spacer is always last child
-    if (trailing_spacer_) {
-        int32_t child_count = lv_obj_get_child_count(container_);
-        if (lv_obj_get_index(trailing_spacer_) != child_count - 1) {
-            lv_obj_move_to_index(trailing_spacer_, child_count - 1);
-        }
-    }
+    show_window(
+        container_, pool_indices_, first_visible, last_visible, data_changed,
+        [this](size_t slot) { return pool_[slot]; },
+        [&](size_t slot, ssize_t job_idx) {
+            configure_row(pool_[slot], static_cast<size_t>(job_idx),
+                          jobs[static_cast<size_t>(job_idx)]);
+        },
+        [this](size_t slot) { lv_obj_add_flag(pool_[slot], LV_OBJ_FLAG_HIDDEN); });
 
     spdlog::debug("[HistoryListView] Spacers: leading={}px trailing={}px, visible rows={}, "
                   "container content_h={} child_count={}",
-                  leading_height, trailing_height, last_visible - first_visible,
+                  win.leading_px, win.trailing_px, last_visible - first_visible,
                   lv_obj_get_content_height(container_), lv_obj_get_child_count(container_));
 
     visible_start_ = first_visible;

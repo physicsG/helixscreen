@@ -11,7 +11,32 @@ Physical tool changers have multiple complete toolheads that are swapped on the 
 
 ### Detection
 
-Klipper object `toolchanger` in `printer.objects.list` sets `AmsType::TOOL_CHANGER`. Individual tool names come from `tool T*` objects (e.g., `tool T0`, `tool T1`).
+Tool counts come from three sources, in descending authority
+(`include/printer_discovery.h#PrinterDiscovery/parse_objects`):
+
+1. **`tool T*` objects** - created by klipper-toolchanger, and authoritative: a
+   klipper-toolchanger name is arbitrary and `ASSIGN_TOOL` can remap it, so real objects
+   are never overwritten by anything below.
+2. **The changer extra's own count** - for a changer running *without*
+   klipper-toolchanger. Only MedusaHC exposes one today
+   (`docs/devel/FILAMENT_BACKEND_MEDUSAHC.md`).
+3. **Extruder heaters** - the fallback for a machine presenting one heater and one
+   extruder motor per tool. Names become the G-code tool numbers `T0`, `T1`, ... Counted
+   through `helix::is_extruder_name()`, so `extruder_stepper` sections do not inflate it
+   and a Chimera/cyclops mixing hotend stays one tool.
+
+`AmsType::TOOL_CHANGER` is registered whenever the printer has tools and either the
+`toolchanger` object or more than one of them - a multi-extruder machine with no filament
+system is a parallel-topology multi-tool printer whether or not anything calls itself a
+changer, and registering it is what gives it slots, per-tool spool identity and the
+filament panel's tool selector (prestonbrown/helixscreen#1350). A real MMU always wins:
+the tool-changer arm is last in the detection chain.
+
+Swap commands follow from the same fact. `SELECT_TOOL`/`UNSELECT_TOOL` exist only where
+klipper-toolchanger does; without it the swap is plain `T<n>`, which Klipper maps to
+`ACTIVATE_EXTRUDER` and a changer extra overrides with its own. `toolchanger_addon::
+resolve_tool_commands()` answers this, and the provider table only has to name what
+differs - the unmount, which a machine whose tools are plain extruders does not have.
 
 ### Key Differences from Filament Systems
 
@@ -39,9 +64,9 @@ Klipper object `toolchanger` in `printer.objects.list` sets `AmsType::TOOL_CHANG
 |----------|------|-------------|
 | `active` | bool | Is this tool selected? |
 | `mounted` | bool | Is this tool mounted on carriage? |
-| `gcode_x_offset` | float | X offset |
-| `gcode_y_offset` | float | Y offset |
-| `gcode_z_offset` | float | Z offset |
+| `gcode_x_offset` | float | X offset — settable at runtime with `SET_TOOL_PARAMETER T=<n> PARAMETER=gcode_x_offset VALUE=<mm>`, persisted with `SAVE_TOOL_PARAMETER T=<n> PARAMETER=gcode_x_offset` + `SAVE_CONFIG` (see `include/tool_offsets.h`) |
+| `gcode_y_offset` | float | Y offset — same, `PARAMETER=gcode_y_offset` |
+| `gcode_z_offset` | float | Z offset — same, `PARAMETER=gcode_z_offset` |
 | `extruder` | string | Associated extruder name |
 | `fan` | string | Associated fan name |
 
@@ -84,7 +109,7 @@ non-settled states are easy to get wrong:
 | Feature | Supported | Editable |
 |---------|-----------|----------|
 | Endless Spool | `Unsupported` | No override; inherits the base default |
-| Tool Mapping | Yes | `RemapStrategy::Native` - `set_tool_mapping()` emits `ASSIGN_TOOL TOOL=T{n} N={tool}`, so a G-code T-number can point at any physical tool. `parse_toolchanger_state()` resolves `tool_number` back through the forward map |
+| Tool Mapping | Yes | With klipper-toolchanger: `RemapStrategy::Native` - `set_tool_mapping()` emits `ASSIGN_TOOL TOOL=T{n} N={tool}`, so a G-code T-number can point at any physical tool. `parse_toolchanger_state()` resolves `tool_number` back through the forward map. Without it (`tool_commands_.present`, the machine swaps with its own `T<n>` commands): `RemapStrategy::GcodeRewrite` - the job file is rewritten before printing, which needs the HelixPrint plugin. See [the remapper](FILAMENT_MANAGEMENT.md#gcode-tool-remapper) for what that rewrite does and does not move |
 | Bypass Mode | No | Not applicable - each tool is its own path. [The force override](FILAMENT_MANAGEMENT.md#bypass-visibility-and-the-force-override) shows the external spool for tracking only |
 | Spoolman | Fields only | `spoolman_id`/`spoolman_vendor_id` persist in slot overrides; no toolchanger-specific Spoolman wiring exists in the backend |
 | Slot metadata | Yes | Persisted via `FilamentSlotOverrideStore` (`lane_data`, `T<n>` keys). The firmware supplies none of it, so the store is the sole source - see [FILAMENT_SLOT_METADATA.md](FILAMENT_SLOT_METADATA.md#tool-changer-is-the-odd-one-out) |
@@ -95,11 +120,192 @@ non-settled states are easy to get wrong:
 
 ### Discovery Sequence
 
-Tool names must be provided via `set_discovered_tools()` before calling `start()`. The caller (typically `AmsState::init_backend_from_hardware()`) extracts tool names from `PrinterDiscovery::get_tool_names()`.
+Tool names must be provided via `set_discovered_tools()` before calling `start()`. `set_discovery()` does that from `PrinterDiscovery::tool_names()` when `AmsState::init_backends_from_hardware()` hands it the discovery snapshot.
 
 ---
 
 Hotend changers (MedusaHC) run on this backend with add-ons layered on top - see
 [FILAMENT_BACKEND_MEDUSAHC.md](FILAMENT_BACKEND_MEDUSAHC.md).
 
+## Z-Mod on the Creator 5 Pro
+
+A Creator 5 Pro on Z-Mod firmware ([ghzserg/z_c5pro](https://github.com/ghzserg/z_c5pro))
+is the same backend speaking a different dialect: FlashForge's own Klipper fork, no
+klipper-toolchanger, and Z-Mod's `zmod_color` extra driving the changer. From the UI it is
+a 4-tool changer like any other; the row in `src/printer/toolchanger_addon.cpp#providers`
+is what supplies everything below.
+
+### Detection
+
+`zmod_color` **and** `gcode_button extruder_grab1` in `printer.objects.list`
+(`src/printer/toolchanger_addon.cpp#zmod_c5_detect`, exported as `zmod_c5_present`). Both
+halves are required: the AD5X Z-Mod also publishes `zmod_color` but has no carriage grab
+buttons, so it cannot match, and `zmod_color` alone would not say which machine this is.
+Reforge, the other C5 Pro firmware, needs none of this: it matches no provider row and
+takes the plain klipper-toolchanger path described above.
+
+Z-Mod 1.7.4 additionally publishes an **AFC shim** (`zmod_afclite` registering `AFC`,
+`AFC_lane E0..E3`, `AFC_unit C5`) so Fluidd and Mainsail draw their AFC panel for the C5's
+heads. Discovery keys on the bare `AFC` object, so `PrinterDiscovery::parse_objects`
+yields that claim to this row whenever the shim's own object and the changer fingerprint
+coexist — the same carve-out shape as the PAXX AFC-Lite rule, and for the same reason:
+the shim reports no extruders and no hubs, so an AFC backend would infer a hub topology
+for heads that are each their own path, and its op macros (`AFC_RESET`,
+`AFC_LANE_RESET`, `SET_SPOOL_ID`, ...) do not exist on this firmware.
+
+### Tool reading
+
+`zmod_color.active_tool_id` maps one-to-one onto `ToolReading::current_tool`
+(`include/toolchanger_addon.h#ToolReading`): 0..3 mounted, -1 nothing on the carriage, -2
+dock and carriage buttons disagree. A frame without the field is no news, never a clear
+(Moonraker republishes only what changed). The -2 rules are the shared ones: the last
+known tool is held, the unit shows a sensor error, and the fault is withdrawn by the next
+agreeing frame (`src/printer/ams_backend_toolchanger.cpp#apply_tool_sensor_locked`; a -2
+mid-swap is transitional, per `sensor_error_is_fault()`).
+
+Z-Mod only recomputes `active_tool_id` inside its own commands. On a release without
+[ghzserg/z_c5pro#1](https://github.com/ghzserg/z_c5pro/pull/1) the field reads a stale -2
+after every restart, so the unit boots showing a dock sensor error until the first
+`_T_IN` / `_T_OUT` / `GET_ZCOLOR` runs. Accepted as-is: the fix is upstream (the PR
+computes the field live from the dock and carriage buttons), not a second copy of Z-Mod's
+button rule here.
+
+### Commands
+
+| Action | G-code |
+|--------|--------|
+| Mount | `_T_IN T=<n>` (0-based tool number; the provider's `select_prefix`) |
+| Unmount | `_T_OUT` |
+
+Completion is the gcode ack plus the next `active_tool_id`, as for MedusaHC. A refused
+`_T_IN` / `_T_OUT` (Z-Mod raises `gcmd.error`) surfaces like a failed `SELECT_TOOL`; tool
+state does not move because `active_tool_id` does not.
+
+### Swap phases from console markers
+
+Z-Mod publishes no phase word on a status object; its macros narrate the swap through
+respond_info lines instead. The backend subscribes `notify_gcode_response` for this row
+alone and classifies the lines (`toolchanger_addon::parse_zmod_marker`, marker text
+field-verified in bundle `5WSPTZBL`):
+
+| Marker | Phase word |
+|--------|------------|
+| `Grab attempt for T<n>: i of N...` | `picking` |
+| `X/Y/Z-Offset: ... _T_IN` | `picking` |
+| `Unload attempt for T<n>: i of N...` | `dropping` |
+| `X/Y/Z-Offset: ... _T_OUT` | `dropping` |
+
+Each maps onto the same picking/dropping vocabulary the MedusaHC controllers publish, so
+the action, the direction latch and the step bar ride the existing machinery: a mount is
+[Pick up tool], an unmount is [Dock tool], a change is [Dock tool, Pick up tool]. The
+direction capability is latched from the provider row itself (`set_tool_sensor`), not
+from a first marker, because the step bar snapshots the latch when it is built and a bar
+built at dispatch time — before the macro's first marker — would otherwise pin a
+suppressed sequence forever. A firmware build that stops echoing the markers degrades to
+no step bar, never a wrong one; the marker text on a live swap is the one piece still
+pending hardware verification (prestonbrown/helixscreen#1714).
+
+### The afclite shim's status, and what is acted on
+
+Z-Mod 1.7.4+ publishes `zmod_afclite` (aliased `AFC`), and the provider row subscribes
+it. Of its fields, exactly two are acted on, both with semantics a boolean or the
+firmware's own string fixes:
+
+| Field | Treatment |
+|-------|-----------|
+| `error_state` + `message` | A fault the firmware itself reports: raises the ERROR action and surfaces through `current_error()` with the firmware's own wording; clears when the flag clears |
+| `current_state` | **Logged, not acted on.** The vocabulary beyond "idle" is unverified on this firmware; the log line is what a field capture during a real load/unload reads, and the mapping that follows is written against that evidence |
+| `lanes[].map` (via the `AFC_lane` objects) | Logged when it is not identity — a `SET_MAP` remap is exactly what a bundle should show. Nothing acts on it until a capture says what lane→tool means for head indices |
+
+### T_INFO: the read-only carriage query
+
+`T_INFO` answers where every tool sits and moves nothing (zmod's own doc). The backend
+sends it once at start and again on `notify_klippy_ready`, and parses its rows through
+the same console listener as the swap markers: `T<n>: HEAD` names the carriage tool,
+`T<n>: home` seats a dock, `ERROR (both)` is the disagreeing-sensors fault, and the
+trailing `Offset:` row closes the block — the only place "nothing is on the carriage"
+can be stated, which is what clears the stale boot reading on firmware whose
+`active_tool_id` only recomputes inside its own commands (the pre-1.7.4 condition).
+
+### Per-head filament presence (Z-Mod 1.7.4+)
+
+`zmod_color.slots[].hasFilament` says whether each head physically holds filament. It
+stamps the slot EMPTY only in the docked arm — a docked head whose slot says no filament
+reads Empty — and deliberately cannot outrank the carriage (a mounted head that ran dry
+is the runout flow's question) or a dock-reported vacancy (the head itself is out of the
+machine). `slot_status_tracks_filament()` stays false: the per-head `fd_ex` sensors keep
+driving pre-print checks as before.
+
+### Firmware material source
+
+Z-Mod stores each head's material and colour in firmwareRes/config/filament.json on the
+printer and exports them through `zmod_color.get_status()`. `read_materials()`
+(`src/printer/toolchanger_addon.cpp#read_materials`, parsing in
+`include/zmod_color_status.h`) turns a frame into per-slot material/hex readings plus
+`valid_types` and `palette`; `apply_material_reading_locked()` files each as an
+`ObservationSource::VendorCache` observation through `helix::ams::ingest()`. A Spoolman
+link still outranks it.
+
+Once a frame has carried both `slots` and `palette`, the firmware is the only store for
+colour and material (`src/printer/ams_backend_toolchanger.cpp#firmware_stores_color_and_material`).
+A user edit sends the writer's gcode and files **no** colour or material declaration;
+brand, spool name, Spoolman link and weights are declared as usual. The screen updates
+from the firmware's echo one status frame later, so a rejected write never shows. Before
+the first such frame (a Z-Mod build without ghzserg/z_c5pro#1) the hook answers "none" and
+edits stay local, as on any tool changer.
+
+- **Types:** `zmod_color.valid_types` becomes `get_supported_materials()`, so the edit
+  dropdown offers only those. `AmsBackend::normalize_material()` maps anything else by
+  compat group before sending, and a type the firmware lists but that is unsafe on a
+  gcode line (`IMoonrakerAPI::is_safe_material_param()`) is refused with an error and
+  never sent.
+- **Colours:** filament.json stores a colour as an index into Z-Mod's 24-entry
+  `COLOR_MAPPING`; a hex outside it is saved as index 0, white. The writer snaps the
+  picked colour to the nearest palette entry (squared RGB distance,
+  `include/color_utils.h#nearest_palette_key`, the same rule QIDI Box uses) before
+  sending.
+- **SILENT=1:** `CHANGE_ZCOLOR` with `HEX` and `TYPE` runs `GET_ZCOLOR` on the same
+  command, which opens a Mainsail/Fluidd prompt unless `SILENT=1` is set. The command
+  needs both `HEX` and `TYPE` to write without a prompt, so a colour-only edit sends the
+  slot's current type and a material-only edit sends its current (snapped) colour.
+
+### Mock
+
+`HELIX_MOCK_PRINTER=creator5_zmod` exercises this path against mock hardware: the persona
+publishes Z-Mod's objects and status (1.7.4 shape, afclite shim included), answers
+`_T_IN` / `_T_OUT` by narrating the swap markers, and implies `--real-ams`, so real
+discovery builds this backend under `--test` (see
+`docs/devel/MOCK_ENVIRONMENT_VARIABLES.md`). Hardware verification on a real Z-Mod C5 is
+tracked as prestonbrown/helixscreen#1714 follow-up work.
+
+### Endless spool
+
+Z-Mod's C5 firmware switches to the next head whose colour AND type both match on runout
+(its docs call this "endless spool mode"), always on with no flag to write. The backend
+reports it exactly as the AD5X IFS backend reports stock zMod: Available /
+FirmwareManaged / ReadOnly, provider `"zmod"` (`get_endless_spool_capabilities`, gated on
+this provider row). Every other tool changer keeps the base default (Unsupported).
+
 Part of the filament system - see [FILAMENT_MANAGEMENT.md](FILAMENT_MANAGEMENT.md) for the shared architecture, slot metadata, and endless spool model.
+
+## Automatic tool offset calibration
+
+klipper-toolchanger's example config (`examples/calibrate-offsets.cfg`) defines a
+`CALIBRATE_TOOL_OFFSETS` macro that measures every tool on a nozzle-contact sensor and writes
+the result with `SET_TOOL_PARAMETER` + `SAVE_TOOL_PARAMETER` on `gcode_x/y/z_offset`. HelixScreen
+runs that macro and follows it; it does not drive the individual `TOOL_LOCATE_SENSOR` /
+`TOOL_CALIBRATE_TOOL_OFFSET` steps itself, and it makes no assumption about which tool the
+macro measures against, how it heats, or where the sensor is — all of that is the macro's.
+
+| Piece | Where |
+|-------|-------|
+| Capability, gcode | `include/tool_offset_calibration.h` (`helix::tool_offset_calibration`) — capability is `has_tool_changer()` + the macro; the only gcode is the bare macro |
+| Capability subject for XML | `printer_has_tool_offset_cal` (`PrinterCapabilitiesState`) |
+| Screen | `include/ui_panel_calibration_tool_offset.h` — Controls ▸ Tool Offsets, and the Advanced row |
+| Results | never parsed off the console: the macro's `SET_TOOL_PARAMETER` writes land on the `tool T<n>` objects and reach `ToolState` through `helix::tool_offsets`, exactly as a manual adjustment would |
+| Progress | the rpc's completion only: `printer.gcode.script` answers when the macro finishes. The rows fill in as the macro writes, since `ToolState` publishes every offset change, but no row says which tool is under the probe: `toolchanger.tool_number` says which tool is mounted, and the tool the macro measures the others against is mounted without being probed, so mounted and probed differ. Per-tool progress needs the macro to report it |
+| Save | the macro persists nothing; `SAVE_TOOL_PARAMETER` only stages. The panel's Save is the shared `save_dirty_offsets()` path (`src/ui/z_offset_utils.cpp`): re-send SET+SAVE for every dirty axis, then one `SAVE_CONFIG` through `SaveConfigWatch` |
+| Stop | the macro blocks Klipper's gcode queue, so Stop is M112 + `FIRMWARE_RESTART` with the disconnect suppressed as expected; the restart discards the offsets measured so far |
+| Timeout | the rpc ceiling is the panel's own `CALIBRATION_TIMEOUT_MS` (15 min; ~30 s to measure plus heating from cold, per tool, sequentially). Moonraker never times out `printer.gcode.script`, so an expiry while `idle_timeout` still reads Printing is a macro that is still running: the run completes on the busy→idle edge, with one more ceiling as the backstop - `PrintPreparationManager`'s rule for a pre-start macro that outlives its ceiling |
+| Mock | `HELIX_MOCK_AMS=toolchanger` advertises the macro and simulates the run (see `docs/devel/MOCK_ENVIRONMENT_VARIABLES.md`) |
+

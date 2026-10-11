@@ -6,7 +6,7 @@
  * @brief Byte-level pin on the ErrorEvents Happy Hare and AFC emit (#1250).
  *
  * The existing per-backend tests spot-check a field or two (source, severity,
- * "RESUME is first", "MMU_RECOVER LOADED=1 is present"). Nothing pinned the
+ * "RESUME is first", "MMU_RECOVER is present"). Nothing pinned the
  * WHOLE event: title text, exact detail, sticky, and the recovery list in order
  * with every RecoveryAction member — label, gcode, log_tag, style and
  * needs_hot_nozzle.
@@ -30,6 +30,7 @@
 #include "ams_fault_event.h"
 #include "ams_types.h"
 #include "error_event.h"
+#include "test_helpers/afc_test_access.h"
 
 #include <string>
 #include <vector>
@@ -87,6 +88,8 @@ void check_common_shape(const ErrorEvent& e, helix::ErrorSource source) {
 // befriended).
 // ---------------------------------------------------------------------------
 
+namespace helix {
+
 class HhFaultEventCharHelper : public AmsBackendHappyHare {
   public:
     HhFaultEventCharHelper() : AmsBackendHappyHare(nullptr, nullptr) {
@@ -112,12 +115,15 @@ class HhFaultEventCharHelper : public AmsBackendHappyHare {
         handle_status_update(notification);
     }
 };
+} // namespace helix
+
+namespace helix {
 
 class AfcFaultEventCharHelper : public AmsBackendAfc {
   public:
     AfcFaultEventCharHelper() : AmsBackendAfc(nullptr, nullptr) {
         std::vector<std::string> names{"lane1", "lane2", "lane3", "lane4"};
-        initialize_slots(names);
+        AfcTestAccess::initialize_slots(*this, names);
     }
 
     void feed_afc(const nlohmann::json& afc) {
@@ -130,23 +136,24 @@ class AfcFaultEventCharHelper : public AmsBackendAfc {
 
     void set_toolhead_sensor(bool state) {
         std::lock_guard<std::mutex> lock(mutex_);
-        tool_start_sensor_ = state;
+        AfcTestAccess::tool_start_sensor(*this) = state;
     }
 
     void set_current_lane(const std::string& lane) {
         std::lock_guard<std::mutex> lock(mutex_);
-        current_lane_name_ = lane;
+        AfcTestAccess::current_lane_name(*this) = lane;
     }
 };
+} // namespace helix
 
 namespace {
 
 /// A backend that overrides nothing error-related, to pin the base defaults.
 /// The mock implements the whole AmsBackend interface without touching
 /// classify_error / current_error / build_recovery_actions.
-class InertBackend : public AmsBackendMock {
+class InertBackend : public helix::AmsBackendMock {
   public:
-    InertBackend() : AmsBackendMock(4) {}
+    InertBackend() : helix::AmsBackendMock(4) {}
 
     /// Reach the protected hook from the test.
     [[nodiscard]] std::vector<RecoveryAction> recovery_actions() const {
@@ -162,8 +169,8 @@ class InertBackend : public AmsBackendMock {
 
 TEST_CASE("Characterization: Happy Hare runout event, filament at the toolhead",
           "[ams][happy_hare][error-center][characterization][1250]") {
-    HhFaultEventCharHelper hh;
-    hh.feed_mmu(nlohmann::json{{"action", "Error"},
+    helix::HhFaultEventCharHelper hh;
+    hh.feed_mmu(nlohmann::json{{"print_state", "pause_locked"},
                                {"filament_pos", 8},
                                {"filament", "Loaded"},
                                {"reason_for_pause",
@@ -181,19 +188,18 @@ TEST_CASE("Characterization: Happy Hare runout event, filament at the toolhead",
     // reason_for_pause_ wins over the terse !! line.
     CHECK(e->detail == "Runout detected on gate 0  EndlessSpool mode is off - manual "
                        "intervention is required");
-    check_actions(e->recovery_actions,
-                  {
-                      {"Resume", "RESUME", "hh::resume", "primary", true},
-                      {"Recover", "MMU_RECOVER LOADED=1", "hh::recover", "", false},
-                      {"Unload", "MMU_UNLOAD", "hh::unload", "", true},
-                      {"Unlock", "MMU_UNLOCK", "hh::unlock", "danger", false},
-                  });
+    check_actions(e->recovery_actions, {
+                                           {"Resume", "RESUME", "hh::resume", "primary", true},
+                                           {"Recover", "MMU_RECOVER", "hh::recover", "", false},
+                                           {"Unload", "MMU_UNLOAD", "hh::unload", "", true},
+                                           {"Unlock", "MMU_UNLOCK", "hh::unlock", "danger", false},
+                                       });
 }
 
 TEST_CASE("Characterization: Happy Hare clog event, nothing at the toolhead",
           "[ams][happy_hare][error-center][characterization][1250]") {
-    HhFaultEventCharHelper hh;
-    hh.feed_mmu(nlohmann::json{{"action", "Error"},
+    helix::HhFaultEventCharHelper hh;
+    hh.feed_mmu(nlohmann::json{{"print_state", "pause_locked"},
                                {"filament_pos", 0}, // unloaded
                                {"filament", "Unloaded"},
                                {"reason_for_pause", "Clog detected on gate 2"}});
@@ -207,48 +213,41 @@ TEST_CASE("Characterization: Happy Hare clog event, nothing at the toolhead",
     // No "runout" in the detail, so the generic title.
     CHECK(e->title == "Filament System Error");
     CHECK(e->detail == "Clog detected on gate 2");
-    // Unload is dropped, and MMU_RECOVER flips to UNLOADED=1.
-    check_actions(e->recovery_actions,
-                  {
-                      {"Resume", "RESUME", "hh::resume", "primary", true},
-                      {"Recover", "MMU_RECOVER UNLOADED=1", "hh::recover", "", false},
-                      {"Unlock", "MMU_UNLOCK", "hh::unlock", "danger", false},
-                  });
+    // Unload is dropped.
+    check_actions(e->recovery_actions, {
+                                           {"Resume", "RESUME", "hh::resume", "primary", true},
+                                           {"Recover", "MMU_RECOVER", "hh::recover", "", false},
+                                           {"Unlock", "MMU_UNLOCK", "hh::unlock", "danger", false},
+                                       });
 }
 
 TEST_CASE("Characterization: Happy Hare falls back to the !! text when HH gives no reason",
           "[ams][happy_hare][error-center][characterization][1250]") {
-    HhFaultEventCharHelper hh;
-    hh.feed_mmu(nlohmann::json{{"action", "Error"}, {"reason_for_pause", ""}});
+    helix::HhFaultEventCharHelper hh;
+    hh.feed_mmu(nlohmann::json{{"print_state", "pause_locked"}, {"reason_for_pause", ""}});
 
     helix::ClassifyContext ctx;
     ctx.is_paused = true;
 
     SECTION("the single space after !! is consumed") {
-        auto e = hh.classify_error("!! Gate 1 jammed", ctx);
+        auto e = hh.classify_error("!! MMU issue detected. Gate 1 jammed", ctx);
         REQUIRE(e.has_value());
-        CHECK(e->detail == "Gate 1 jammed");
+        CHECK(e->detail == "MMU issue detected. Gate 1 jammed");
     }
     SECTION("no space after !! means nothing extra is eaten") {
-        auto e = hh.classify_error("!!Gate 1 jammed", ctx);
+        auto e = hh.classify_error("!!MMU issue detected. Gate 1 jammed", ctx);
         REQUIRE(e.has_value());
-        CHECK(e->detail == "Gate 1 jammed");
+        CHECK(e->detail == "MMU issue detected. Gate 1 jammed");
     }
-    SECTION("a bare !! yields an empty detail rather than throwing") {
-        auto e = hh.classify_error("!!", ctx);
-        REQUIRE(e.has_value());
-        CHECK(e->detail.empty());
-    }
-    SECTION("!! plus a lone space keeps the space") {
-        auto e = hh.classify_error("!! ", ctx);
-        REQUIRE(e.has_value());
-        CHECK(e->detail == " ");
+    SECTION("a bare !! names no HH fault and is left to the generic classifier") {
+        CHECK_FALSE(hh.classify_error("!!", ctx).has_value());
+        CHECK_FALSE(hh.classify_error("!! ", ctx).has_value());
     }
 }
 
 TEST_CASE("Characterization: Happy Hare declines lines it does not own",
           "[ams][happy_hare][error-center][characterization][1250]") {
-    HhFaultEventCharHelper hh;
+    helix::HhFaultEventCharHelper hh;
     helix::ClassifyContext ctx;
 
     CHECK_FALSE(hh.classify_error("Error: generic klipper error", ctx).has_value());
@@ -265,7 +264,7 @@ TEST_CASE("Characterization: Happy Hare declines lines it does not own",
 
 TEST_CASE("Characterization: AFC toolhead jam from a !! line",
           "[ams][afc][error-center][characterization][1250]") {
-    AfcFaultEventCharHelper afc;
+    helix::AfcFaultEventCharHelper afc;
     afc.set_toolhead_sensor(true);
 
     helix::ClassifyContext ctx; // is_jam does not need is_paused
@@ -284,7 +283,7 @@ TEST_CASE("Characterization: AFC toolhead jam from a !! line",
 
 TEST_CASE("Characterization: AFC empty toolhead offers the cold lane eject",
           "[ams][afc][error-center][characterization][1250]") {
-    AfcFaultEventCharHelper afc;
+    helix::AfcFaultEventCharHelper afc;
     afc.set_toolhead_sensor(false);
     afc.set_current_lane("lane3");
     afc.feed_afc(nlohmann::json{{"error_state", true}, {"current_state", "Error"}});
@@ -307,7 +306,7 @@ TEST_CASE("Characterization: AFC empty toolhead offers the cold lane eject",
 
 TEST_CASE("Characterization: AFC with neither a loaded toolhead nor a lane",
           "[ams][afc][error-center][characterization][1250]") {
-    AfcFaultEventCharHelper afc;
+    helix::AfcFaultEventCharHelper afc;
     afc.feed_afc(nlohmann::json{{"error_state", true}, {"current_state", "Error"}});
 
     helix::ClassifyContext ctx;
@@ -323,7 +322,7 @@ TEST_CASE("Characterization: AFC with neither a loaded toolhead nor a lane",
 
 TEST_CASE("Characterization: AFC status-driven current_error",
           "[ams][afc][error-center][characterization][1250]") {
-    AfcFaultEventCharHelper afc;
+    helix::AfcFaultEventCharHelper afc;
     afc.set_toolhead_sensor(true);
     afc.feed_afc(nlohmann::json{
         {"error_state", true},
@@ -346,7 +345,7 @@ TEST_CASE("Characterization: AFC status-driven current_error",
 
 TEST_CASE("Characterization: AFC declines lines it does not own",
           "[ams][afc][error-center][characterization][1250]") {
-    AfcFaultEventCharHelper afc;
+    helix::AfcFaultEventCharHelper afc;
     helix::ClassifyContext ctx;
 
     CHECK_FALSE(afc.classify_error("Error: generic klipper error", ctx).has_value());

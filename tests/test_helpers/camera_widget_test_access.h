@@ -61,6 +61,33 @@ class CameraWidgetTestAccess {
     static helix::LifetimeToken stream_token(const CameraWidget& w) {
         return w.lifetime_.token();
     }
+
+    /// The `source` (webcam name) the widget's config asks for; "" = auto.
+    static std::string configured_source(const CameraWidget& w) {
+        return w.configured_source();
+    }
+    /// The feed the running stream shows (name is "" for the auto-pick).
+    static const WebcamInfo& current_feed(const CameraWidget& w) {
+        return w.current_feed_;
+    }
+    static bool has_stream(const CameraWidget& w) {
+        return w.stream_ != nullptr;
+    }
+
+    /// Open the fullscreen overlay without the stream open_fullscreen()
+    /// requires, so a test can reach the overlay's lifetime with no camera.
+    static void show_fullscreen_overlay(CameraWidget& w) {
+        w.show_fullscreen_overlay();
+    }
+    static lv_obj_t* fullscreen_overlay(const CameraWidget& w) {
+        return w.fullscreen_overlay_;
+    }
+    static lv_obj_t* fullscreen_image(const CameraWidget& w) {
+        return w.fullscreen_image_;
+    }
+    static lv_obj_t* fullscreen_spinner(const CameraWidget& w) {
+        return w.fullscreen_spinner_;
+    }
 };
 
 } // namespace helix

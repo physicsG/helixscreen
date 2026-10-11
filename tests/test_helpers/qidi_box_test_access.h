@@ -4,15 +4,22 @@
 
 #include "ams_backend_qidi.h"
 #include "ams_types.h"
+#include "filament_slot_override.h"
+#include "filament_slot_override_store.h"
+#include "test_helpers/seeded_override.h"
 
 #include <functional>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 
 #include "hv/json.hpp"
 
 using json = nlohmann::json;
+
+namespace helix {
 
 // Friend-class shim per L065 — exposes private parse helpers for unit tests.
 // Mirrors the Ad5xIfsTestAccess pattern in test_ams_backend_ad5x_ifs.cpp.
@@ -21,8 +28,11 @@ class QidiBoxTestAccess {
     static void parse_vars(AmsBackendQidi& b, const json& v) {
         b.parse_save_variables(v);
     }
-    static void handle_status(AmsBackendQidi& b, const json& n) {
-        b.handle_status_update(n);
+    /// Feeds @p status the way the subscription delivers it: inside the
+    /// notify_status_update envelope.
+    static void handle_status(AmsBackendQidi& b, const json& status) {
+        b.handle_status_update(
+            json{{"method", "notify_status_update"}, {"params", json::array({status, 1.0})}});
     }
     static int filament_id(const AmsBackendQidi& b, int slot) {
         return b.slot_rfid_.at(static_cast<size_t>(slot)).filament_id;
@@ -94,4 +104,38 @@ class QidiBoxTestAccess {
         b.fw_has_m603_ = has_m603;
         b.fw_has_clear_nozzle_ = has_clear_nozzle;
     }
+    static void seed_override(AmsBackendQidi& b, int slot_index,
+                              const helix::ams::FilamentSlotOverride& ovr) {
+        {
+            std::lock_guard<std::mutex> lock(b.mutex_);
+            b.overrides_[slot_index] = ovr;
+        }
+        // The backend's own init files both stores together; a fixture that
+        // wrote only this map would leave the lane reading empty.
+        helix::test::file_override_as_lane_records(b, slot_index, ovr);
+    }
+    static std::optional<helix::ams::FilamentSlotOverride> get_override(const AmsBackendQidi& b,
+                                                                        int slot_index) {
+        std::lock_guard<std::mutex> lock(b.mutex_);
+        auto it = b.overrides_.find(slot_index);
+        if (it == b.overrides_.end())
+            return std::nullopt;
+        return it->second;
+    }
+    static void inject_override_store(AmsBackendQidi& b,
+                                      std::unique_ptr<helix::ams::FilamentSlotOverrideStore> s) {
+        b.override_store_ = std::move(s);
+    }
+    // Runs only the startup store load: a null client makes on_started return
+    // immediately after it, skipping the subscription machinery.
+    static void start_load(AmsBackendQidi& b) {
+        b.on_started();
+    }
+    static std::optional<std::string> last_fingerprint(const AmsBackendQidi& b, int slot_index) {
+        return b.rfid_tracker_.baseline(slot_index);
+    }
+    static std::string normalize_legacy_fingerprint(const std::string& stored) {
+        return AmsBackendQidi::normalize_legacy_fingerprint(stored);
+    }
 };
+} // namespace helix

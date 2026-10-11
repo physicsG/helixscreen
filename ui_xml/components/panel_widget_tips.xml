@@ -18,7 +18,7 @@
             style_flex_cross_place="center" clickable="true">
       <event_cb trigger="clicked" callback="tip_text_clicked_cb"/>
       <!-- "Tip: " prefix -->
-      <text_heading text="Tip:" translation_tag="Tip:" style_text_color="#text"/>
+      <text_heading text="Tip:" style_text_color="#text"/>
       <!-- Tip text (bound to subject) -->
       <text_heading name="status_text_label"
                     bind_text="status_text" flex_grow="1" long_mode="wrap" style_text_color="#text"/>

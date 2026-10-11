@@ -94,6 +94,18 @@ class NotificationHistory {
     size_t count() const;
 
     /**
+     * @brief Get the history revision
+     *
+     * Increments on every add() and clear(). mark_all_read() does not bump it,
+     * so a consumer that refreshes on revision change cannot loop itself
+     * (refresh marks the entries read). Used by the notification panel to
+     * rebuild its list when a notification arrives while it is open.
+     *
+     * @return Monotonic revision counter
+     */
+    uint64_t version() const;
+
+    /**
      * @brief Seed test notifications for --test mode debugging
      *
      * Adds a variety of test notifications with different severities
@@ -111,4 +123,5 @@ class NotificationHistory {
     std::vector<NotificationHistoryEntry> entries_;
     size_t head_index_ = 0;    ///< Circular buffer write position
     bool buffer_full_ = false; ///< True when we've wrapped around
+    uint64_t version_ = 0;     ///< Bumped on add()/clear(), never on mark_all_read()
 };

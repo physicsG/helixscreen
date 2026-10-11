@@ -58,14 +58,16 @@
 # -------
 #   --platform PLATFORM   Target platform to build and serve (default: pi).
 #                         See platform list above.
-#   --configure-remote    SSH into the device, write dev channel + dev_url into
-#                         settings.json, enable HELIX_LOG_LEVEL=debug in
+#   --configure-remote    SSH into the device, select the dev channel in
+#                         settings.json, install a root-owned override file at
+#                         /var/lib/helixscreen/update_urls.json pointing dev_url
+#                         at this server, enable HELIX_LOG_LEVEL=debug in
 #                         helixscreen.env for debug logging, copy install.sh to
 #                         /tmp/ for local install testing, and restart the
 #                         helixscreen service. Run once per device (or after a
-#                         factory reset). Requires SSH key access.
+#                         factory reset). Requires SSH key access and sudo.
 #                         Note: uses Pi paths (~/helixscreen/). For other
-#                         platforms configure settings.json manually.
+#                         platforms configure the two files manually.
 #   --no-bump             Serve the exact version from VERSION.txt instead of
 #                         99.0.0. Useful if you manually set a higher version.
 #   --no-build            Skip compile + package. Patches install.sh from the
@@ -88,8 +90,9 @@
 #   - After install the device binary still reports VERSION.txt's version
 #     (< 99.0.0), so the next run will again offer an update — intentional
 #     for iteration.
-#   - To reset the device back to the stable channel, re-run --configure-remote
-#     after removing the dev_url key, or delete settings.json on the device.
+#   - To reset the device back to the stable channel, remove
+#     /var/lib/helixscreen/update_urls.json and set update/channel back to 0 in
+#     settings.json on the device.
 
 set -euo pipefail
 
@@ -202,11 +205,11 @@ echo "  Device       : ${USERNAME}@${PRINTER}"
 echo ""
 
 # ── Bundle install.sh from modules ───────────────────────────────────────────
-# install.sh is auto-generated from scripts/lib/installer/*.sh by bundle-installer.sh.
-# Always regenerate before build or patch so the tarball contains the latest installer,
-# even if only module sources were edited (not the bundled install.sh).
+# install.sh is generated from scripts/lib/installer/*.sh. Regenerate before build or
+# patch so the tarball carries the installer the modules describe.
 echo "[serve-local-update] Bundling install.sh from modules..."
-"$SCRIPT_DIR/bundle-installer.sh" -o "$PROJECT_DIR/scripts/install.sh"
+make -C "$PROJECT_DIR" --no-print-directory installer
+INSTALLER="$PROJECT_DIR/build/installer/install.sh"
 echo ""
 
 # ── Build ─────────────────────────────────────────────────────────────────────
@@ -238,7 +241,7 @@ if [[ $BUILD -eq 0 ]]; then
         echo "ERROR: Tarball does not contain expected helixscreen/ directory."
         exit 1
     fi
-    cp "$PROJECT_DIR/scripts/install.sh" "$PATCH_DIR/helixscreen/install.sh"
+    cp "$INSTALLER" "$PATCH_DIR/helixscreen/install.sh"
     chmod +x "$PATCH_DIR/helixscreen/install.sh"
     COPYFILE_DISABLE=1 tar -czf "$TARBALL_PATH" --owner=0 --group=0 -C "$PATCH_DIR" helixscreen
     rm -rf "$PATCH_DIR"
@@ -272,10 +275,12 @@ echo "  Size:   ${TARBALL_SIZE} bytes"
 # ── Configure remote device ────────────────────────────────────────────────────
 if [[ $CONFIGURE_REMOTE -eq 1 ]]; then
     echo "[serve-local-update] Configuring ${USERNAME}@${PRINTER} ..."
-    ssh "${USERNAME}@${PRINTER}" "python3 -c \"
-import json, os, re
+    REMOTE_PY_OUT="$(ssh "${USERNAME}@${PRINTER}" "python3 -c \"
+import json, os, re, tempfile
 
-# Write dev channel + dev_url into settings.json (read by Config::get_instance())
+# Select the dev channel in settings.json. The dev URL itself lives in the
+# root-owned /var/lib/helixscreen/update_urls.json installed below: settings.json
+# sits in Moonraker-web-editable storage, so the app ignores any URL it names.
 path = os.path.expanduser('~/helixscreen/config/settings.json')
 if not os.path.exists(path):
     # Try legacy name
@@ -288,11 +293,20 @@ with open(path) as f:
     data = json.load(f)
 data.setdefault('update', {})
 data['update']['channel'] = 2
-data['update']['dev_url'] = '${BASE_URL}/'
+data['update'].pop('dev_url', None)
+data['update'].pop('r2_url', None)
 with open(path, 'w') as f:
     json.dump(data, f, indent=2)
 print('  update/channel =', data['update']['channel'], '(dev)')
-print('  update/dev_url =', data['update']['dev_url'])
+
+# Stage the trusted override under an unpredictable name; the sudo install in
+# the next ssh drops places it root-owned where config_trust accepts it. A
+# fixed /tmp name would let another local user pre-plant or symlink the path
+# between this write and the install.
+_fd, override = tempfile.mkstemp(prefix='helixscreen-update-urls.', suffix='.json', dir='/tmp')
+with os.fdopen(_fd, 'w') as f:
+    json.dump({'dev_url': '${BASE_URL}/'}, f)
+print('STAGED_OVERRIDE=' + override)
 
 # Enable HELIX_LOG_LEVEL=debug in helixscreen.env (enables debug logging via launcher).
 # Launcher checks INSTALL_DIR/config/ first, then /etc/helixscreen/.
@@ -325,17 +339,32 @@ content = re.sub(r'^#?\s*HELIX_DEBUG=.*\n?', '', content, flags=re.MULTILINE)
 content = content.rstrip('\n') + '\nHELIX_LOG_LEVEL=debug\n'
 open(env_path, 'w').write(content)
 print('  HELIX_LOG_LEVEL=debug  (debug logging enabled in', env_path + ')')
-\""
+\"" 2>&1)"
+    echo "$REMOTE_PY_OUT"
+    # The python above stages the override under an unpredictable mkstemp name
+    # and prints it as STAGED_OVERRIDE=<path>; carry it into the sudo install
+    # below rather than a fixed /tmp path another user could pre-plant.
+    STAGED_OVERRIDE="$(printf '%s\n' "$REMOTE_PY_OUT" | sed -n 's/^STAGED_OVERRIDE=//p')"
+    if [[ -z "$STAGED_OVERRIDE" ]]; then
+        echo "  ERROR: remote setup failed before staging update_urls.json"
+        exit 1
+    fi
+    echo ""
+    # The state dir must exist and stay owner-locked (755 root:root); a
+    # group/world-writable parent makes the app refuse the override file.
+    echo "[serve-local-update] Installing update_urls.json (root-owned, 644) on ${USERNAME}@${PRINTER} ..."
+    ssh "${USERNAME}@${PRINTER}" "sudo mkdir -p /var/lib/helixscreen && sudo chmod 755 /var/lib/helixscreen && sudo install -o root -g root -m 644 '$STAGED_OVERRIDE' /var/lib/helixscreen/update_urls.json && rm -f '$STAGED_OVERRIDE'"
+    echo "  dev_url = ${BASE_URL}/  (in /var/lib/helixscreen/update_urls.json)"
     echo ""
     echo "[serve-local-update] Copying install.sh to /tmp/ on ${USERNAME}@${PRINTER} ..."
-    scp "$PROJECT_DIR/scripts/install.sh" "${USERNAME}@${PRINTER}:/tmp/install.sh"
+    scp "$INSTALLER" "${USERNAME}@${PRINTER}:/tmp/install.sh"
     echo "  To test the installer directly on the device (bypasses update checker):"
     echo "    ssh ${USERNAME}@${PRINTER} 'sh /tmp/install.sh --local /tmp/helixscreen-update.tar.gz'"
     echo ""
     echo "[serve-local-update] Restarting helix-screen on ${USERNAME}@${PRINTER} ..."
     ssh "${USERNAME}@${PRINTER}" "sudo systemctl restart helixscreen"
     echo "[serve-local-update] helix-screen restarted."
-    echo "  To revert: remove update/dev_url from ~/helixscreen/config/settings.json on the device."
+    echo "  To revert: sudo rm /var/lib/helixscreen/update_urls.json on the device and set update/channel back to 0 in ~/helixscreen/config/settings.json."
     echo ""
 fi
 
@@ -347,8 +376,8 @@ echo "  Manifest : ${BASE_URL}/manifest.json"
 echo "  Tarball  : ${BASE_URL}/${TARBALL_NAME}"
 echo ""
 echo "  Device expects (set via --configure-remote if not already done):"
-echo "    update/channel  = 2"
-echo "    update/dev_url  = \"${BASE_URL}/\""
+echo "    update/channel  = 2                            (~/helixscreen/config/settings.json)"
+echo "    dev_url         = \"${BASE_URL}/\"   (/var/lib/helixscreen/update_urls.json, root-owned)"
 echo ""
 echo "  Press Ctrl+C to stop."
 echo "  ─────────────────────────────────────────────────"

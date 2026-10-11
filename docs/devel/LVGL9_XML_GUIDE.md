@@ -118,12 +118,13 @@ lv_xml_register_component_from_file("A:ui_xml/globals.xml");
 theme_manager_register_responsive_spacing(display);  // Sets #space_md, #space_lg, etc.
 theme_manager_register_responsive_fonts(display);    // Sets #font_body, etc.
 
-// 4. Register components (order doesn't matter after globals)
-lv_xml_register_component_from_file("A:ui_xml/icon.xml");
-lv_xml_register_component_from_file("A:ui_xml/text_heading.xml");
-lv_xml_register_component_from_file("A:ui_xml/home_panel.xml");
-// ... etc
+// 4. Components register on first use: when a tag, extends= base or
+//    lv_xml_create() name is not yet known, the loader installed by
+//    helix::register_xml_on_first_use() registers ui_xml/<name>.xml or
+//    ui_xml/components/<name>.xml. No list, no ordering between components.
 ```
+
+Only `styles.xml` registers eagerly (its theme-token consts resolve at registration), plus `color_picker` and `ams_edit_overlay`, whose scopes C++ fills with responsive consts. A name with no XML file makes `lv_xml_create()` return NULL and log an error.
 
 ---
 
@@ -182,6 +183,27 @@ Components are reusable UI pieces defined with the `<component>` tag.
 | `bool` | true/false | `default="true"` |
 | `color` | Hex colors | `default="0xff4444"` |
 | `subject` | Subject references | For data binding |
+
+#### Slot Injection into a Component Instance
+
+A component can expose a named widget as a slot for the instantiating screen to
+fill. Nest a `<component_name-slot_name>` tag inside the instantiation; the
+engine splits the tag at the first `-`, requires the prefix to be a registered
+component, and re-parents the tag's children into the widget named `slot_name`
+inside that instance:
+
+```xml
+<header_bar title="Motion">
+    <header_bar-header_content>
+        <lv_label name="my_readout" bind_text="some_subject"/>
+    </header_bar-header_content>
+</header_bar>
+```
+
+`header_bar` does this with its `header_content` strip (between the title
+region and the action buttons). A slot widget should be `width="content"` and
+not clickable, so an unfilled slot costs its container no layout and steals no
+taps.
 
 ### 2. Subjects (Reactive Data)
 
@@ -244,6 +266,26 @@ LVGL XML uses prefix sigils to distinguish different value types:
 | `${expr}` | Embedded composition / integer expression | `bind_text="slot_${i + 1}_label"`, `style_translate_x="${i * 84}"` | Splices a bare name (`${i}`, `${grp}`) or evaluates an integer expression and splices the result. See [Repeating fragments](#repeating-fragments-with-repeat) |
 | `@` | Subject binding | `text="@my_subject"` | Reactive data on `ui_button` |
 
+A value that starts with `#` is always read as a const, including a value passed through a
+component prop. An unknown name resolves to nothing, so a user or plugin string that happens
+to begin with `#` (a device name, a macro, a plugin widget title) passed as a prop renders as
+an empty label. Set such text from C++ instead (`helix::ui::set_row_label_text`,
+`include/ui_row_text.h`).
+
+**Colors and theme switches.** helix-xml records every inline `style_*` color the XML sets.
+On a live dark/light or theme switch:
+
+| Written as | Follows the switch | Kept from the live recolor pass |
+|------------|-------------------|---------------------------------|
+| Global token, inline (`style_text_color="#text_muted"`) | yes, re-resolved by name | yes |
+| Global token in a named `<style>` | yes | yes (a bound or component style beats the pass's text color) |
+| Literal (`style_bg_color="0x000000"`) | no, it is fixed by design | yes |
+| `$prop` value, or a component-local `<const>` | no | yes |
+| Nothing set (theme default) | via the shared theme styles and the recolor pass | no |
+
+A color C++ changed after creation is left alone by the re-apply. Details:
+`THEME_SYSTEM.md` § Authored Inline Colors.
+
 The `@` prefix on `ui_button`'s `text` attribute marks a value as a subject reference (reactive) vs. a literal string (static). Alternatively, `bind_text` always treats its value as a subject name (no `@` needed). See [ui_button](#ui_button) for details.
 
 #### Simple Attribute Bindings
@@ -273,15 +315,15 @@ Widgets that understand `text=` also accept inline element content, HTML-style:
 ```xml
 <text_muted>Print speed</text_muted>
 <!-- equivalent to: -->
-<text_muted text="Print speed" translation_tag="Print speed"/>
+<text_muted text="Print speed"/>
 ```
 
 **Inline text is translatable by default.** The literal string is used as the
 translation key (and as the fallback when no translation exists), and the label
 re-resolves on language change -- same behavior as the `label=`/`label_tag=`
 pairs on setting rows. `make translation-sync` extracts inline text
-automatically. Use `text="..."` instead when a string must stay untranslated
-(versions, IPs, device names).
+automatically. A literal `text=` is translatable the same way (its value is
+the implied tag); `translation_tag=""` keeps a string untranslated.
 
 Rules:
 
@@ -373,6 +415,17 @@ Inline style attributes (e.g., `style_bg_color="#card_bg"`) have **higher priori
     <bind_style name="active_style" subject="is_active" ref_value="1"/>
 </lv_button>
 ```
+
+**Semantic text widgets (`text_*`) sit one notch below binds.** Their built-in font and
+color are applied as a shared style at create time, before nested bind elements are parsed —
+so a `bind_style_if_*` carrying `text_font` (or `text_color`) **can** retier a `text_small`
+to another font, and an inline `style_text_font` attribute still beats both, exactly like
+the `bg_color` rule above. This is the supported way to swap a text widget's font from a
+width-band or mode subject without touching C++. An `<icon>`'s face and `temp_display`'s
+four labels sit in the same notch (`helix::ui::apply_font_style`): a bound style can
+retier them too. The home tiles scale their glyph, value and label through
+`<bind_tile_rung ladder="icon|value|label" subject="..."/>` (`include/ui_tile_rung.h`),
+which applies the face its rung names through the same shared style.
 
 **Rule:** When using `bind_style` for reactive visual changes, do NOT set inline style attributes for the properties you want to change reactively.
 
@@ -493,7 +546,15 @@ Full rule, both directions, and the tests that pin it:
 HelixScreen phases are in
 [`architecture/01-declarative-ui.md`](architecture/01-declarative-ui.md).
 Worked examples in this tree: `ui_xml/temp_graph_overlay.xml`
-(`temp_graph_mode`) and `ui_xml/header_bar.xml` (`any_tool_z_dirty`).
+(`temp_graph_mode`).
+
+There is a third way out when the same condition is needed on several surfaces
+*and* an operand comes from a Phase 9a `init_subjects()`: publish the answer as a
+plain subject from C++ and let every site bind that one name — a `subject="..."`
+reference resolves at view-create time, so the phase trap does not apply. That is
+what the Z-offset save affordance's `z_offset_save_available` subject does
+(`include/z_offset_utils.h#init_save_available_subject`). Reach for it only when repeating the `cond=`
+would put one rule in several files; a condition used once belongs inline.
 
 ##### HelixScreen examples
 
@@ -518,8 +579,6 @@ Worked examples in this tree: `ui_xml/temp_graph_overlay.xml`
     <text_body text="Styled by bind_style_if"/>
 </ui_card>
 ```
-
-A full working demo of all four constructs (sliders/switch driving `demo_temp`, `demo_threshold`, `demo_error`, all four binding types reacting live) is in `ui_xml/test_panel.xml` (reachable via `helix-screen ctl navigate test`) — use it as the canonical reference and a live testbed when writing new expressions.
 
 #### Parse-Time Conditional Hidden Attributes
 
@@ -558,15 +617,17 @@ instead.
 
 **✅ Compound conditions are supported** via the expression evaluator (see "Expression Conditionals" above) — `cond="a or b gt c"` on `bind_flag_if`/`bind_state_if`/`bind_style_if`, or a `<subject_expr>` derived subject for a condition reused in multiple places. This replaces stacking several single-subject `bind_flag_if_*` elements or writing a hand-rolled C++ derived subject for "OR of two subjects" type logic.
 
-**Reuse alone does not pick `<subject_expr>`** — check the phase table above first. If any referenced subject comes from an `init_subjects()` (Phase 9a), the derived subject silently never registers and you must repeat the `cond=` at each site instead.
+**Reuse alone does not pick `<subject_expr>`** — check the phase table above first. If any referenced subject comes from an `init_subjects()` (Phase 9a), the derived subject silently never registers, so either repeat the `cond=` at each site or, when that would scatter one rule across several files, publish the answer as a C++ subject every site binds (see "Which phase registers the subject" above).
 
-**❌ Never put two flag bindings for the same flag on one widget.** The flag
-binds are two-way — a non-matching `bind_flag_if_eq` actively *removes* the flag
-rather than abstaining — so two of them do not AND, they overwrite each other.
-Combine into one expression (`cond="can and dirty"`) instead. Two binds for one
-flag are safe only on different widgets, which is why the broken form can look
-correct in nested markup. Worked example and the tests that pin it:
-[`lib/helix-xml/docs/BINDINGS.md` § *The flag binds are two-way*](../../lib/helix-xml/docs/BINDINGS.md#the-flag-binds-are-two-way).
+**✅ Several bindings on one flag or state OR together.** Give each independent
+reason its own line — a widget disabled while a job holds the machine *or* while
+an operation is running gets two `bind_state_if_eq` elements, and the state is
+applied while either holds, in whatever order the subjects notify. What that
+does *not* give you is the conjunction: two bindings never AND, so a condition
+that needs one is a single expression (`cond="can and dirty"`). Composition is
+per widget and per property; it never reaches an ancestor's binding on the same
+flag. Worked example and the tests that pin it:
+[`lib/helix-xml/docs/BINDINGS.md` § *Several bindings on one property OR together*](../../lib/helix-xml/docs/BINDINGS.md#several-bindings-on-one-property-or-together).
 
 #### Repeating fragments with `<repeat>`
 
@@ -586,7 +647,7 @@ for the base semantics; the rest of this section is the detail that bites in pra
 
 Each iteration re-resolves the body against pristine attribute values, so `$i`, `$param`, and `#const` references all yield independent per-iteration results — each iteration gets its own index, not a shared last value.
 
-> ⚠️ **Subject-bound `<repeat>` MUST be the last child of its parent, or the only child of a dedicated container.** On rebuild, the old expansion's roots are detached and the new ones are created fresh — and LVGL always appends a freshly-created child to the *end* of its parent's child list. If a subject-bound `<repeat>` shares a parent with static siblings that come after it in the document, those siblings stay put but the rebuilt repeat items land *after* them, silently reordering the layout every time the count changes. A literal or `#const` `count` never rebuilds, so this only matters for subject-bound `count`. Fix: give the `<repeat>` its own container (an `<lv_obj>` wrapper with no other children), or make it the last element inside its parent. See `ui_xml/test_panel.xml` "XML Repeat Demo" for a worked example of both the fixed and subject-bound forms side by side.
+> ⚠️ **Subject-bound `<repeat>` MUST be the last child of its parent, or the only child of a dedicated container.** On rebuild, the old expansion's roots are detached and the new ones are created fresh — and LVGL always appends a freshly-created child to the *end* of its parent's child list. If a subject-bound `<repeat>` shares a parent with static siblings that come after it in the document, those siblings stay put but the rebuilt repeat items land *after* them, silently reordering the layout every time the count changes. A literal or `#const` `count` never rebuilds, so this only matters for subject-bound `count`. Fix: give the `<repeat>` its own container (an `<lv_obj>` wrapper with no other children), or make it the last element inside its parent.
 
 ##### Self-wiring indexed subjects with `${name}`
 
@@ -607,7 +668,7 @@ The bare `$i` sigil is a whole-value substitution: `text="$i"` becomes the index
 
 > ⚠️ **Resolve-once.** A `${expr}` is evaluated **once, when the widget is created** — subject operands are read at that moment and the composed value does **not** update if the subject changes later. A `<repeat count="subject">` rebuild re-runs composition; a standalone attribute does not. For a value that must track a subject live, use a `bind_*` binding, not composition.
 
-`<repeat>` is intercepted directly by the XML view parser (it creates no widget of its own), so its body must be well-formed markup that would be valid where the `<repeat>` sits. Nesting `<repeat>` inside another `<repeat>` is not yet supported.
+`<repeat>` is intercepted directly by the XML view parser (it creates no widget of its own), so its body must be well-formed markup that would be valid where the `<repeat>` sits. Nesting a `<repeat>` or `<if>` inside a `<repeat>` body is not supported. The engine logs `<repeat> nested inside <repeat> in '<file>' is not supported; skipping it`, skips the inner block, and still expands the outer one. Keep the inner loop in C++, or give the inner level its own component.
 
 #### Structural conditionals with `<if>` / `<else>`
 
@@ -624,7 +685,7 @@ subject-referencing cond rebuilds repeatedly rather than once:
 
 > ⚠️ **A reactively-rebuilt `<if>` must be the last child of its parent, or the only child of a dedicated container** — the same ordering constraint as [`<repeat>`](#repeating-fragments-with-repeat). On rebuild, LVGL appends the freshly-built body to the *end* of the parent's child list, so static siblings that come after the `<if>` in the document stay put while the rebuilt body lands after them, silently reordering the layout on every flip. A static `<if>` never rebuilds, so this only matters for a subject-referencing `cond`.
 
-Nested `<if>` (an `<if>` inside another `<if>`/`<repeat>` body) is not yet supported, same as nested `<repeat>`.
+Nested `<if>` (an `<if>` inside another `<if>` or `<repeat>` body) is not supported either: it is logged and skipped the same way.
 
 ### 4. Observer Cleanup in DELETE Handlers
 
@@ -899,6 +960,16 @@ When using `flex_grow`, the parent MUST have explicit height:
     <lv_label text="Centered"/>
 </lv_obj>
 
+<!-- Row of mixed-height children in a taller container: cross_place alone
+     centers each child within a track only as tall as the tallest child, and
+     that track sits at the TOP of the container, so the children read as
+     top-aligned. track_place positions the track itself. -->
+<lv_obj flex_flow="row" height="100%"
+        style_flex_cross_place="center" style_flex_track_place="center">
+    <lv_label text="X"/>
+    <lv_label text="235.00"/>
+</lv_obj>
+
 <!-- Single child: use align, NOT flex (flex conflicts with align) -->
 <lv_obj width="100%" height="100%">
     <lv_obj align="center">Perfectly centered</lv_obj>
@@ -930,6 +1001,11 @@ Font-based icons using Material Design Icons (MDI):
 **Sizes:** `xs` (16px), `sm` (24px), `md` (32px), `lg` (48px), `xl` (64px)
 
 **Variants:** `primary`, `secondary`, `accent`, `disabled`, `warning`
+
+**Bindable face:** the icon's font is applied as a shared style, so `bind_style_if_*` can
+retier it - the home tiles scale a glyph with its tile through
+`<bind_tile_rung ladder="icon" subject="$tile_icon_subject"/>` (`include/ui_tile_rung.h`).
+An inline `style_text_font` attribute still outranks both.
 
 **Adding Icons:**
 1. Find icon at [Pictogrammers MDI](https://pictogrammers.com/library/mdi/)
@@ -1035,6 +1111,29 @@ Semantic button with variant-based styling and auto-contrast text.
 Both `text="@subject"` and `bind_text="subject"` produce identical reactive bindings. Use whichever reads better in context. `bind_text` is the LVGL-standard attribute and always expects a subject name. `text` with `@` prefix is syntactic sugar for the same thing.
 
 When bound to a subject, the button label updates automatically, and a deferred invalidation ensures the button background repaints correctly (avoids partial-redraw artifacts).
+
+**Breakpoint-conditional attributes:**
+
+Two `ui_button` attributes react to the `ui_breakpoint` subject, for the two ways a
+button outgrows a small panel. Both need the button to carry an icon and a label.
+
+```xml
+<!-- Icon over label on tiny and micro panels (ui_breakpoint <= 1), row layout above.
+     From ui_xml/print_status_panel.xml: a stacked button fills its growable row. -->
+<ui_button name="btn_tune" flex_grow="1" icon="tune" text="Tune"
+           translation_tag="Tune" stacked_if_bp_lte="1"/>
+
+<!-- Icon-only while ui_breakpoint == 1 -->
+<ui_button icon="stop" text="Stop" label_hidden_if_bp_eq="1"/>
+```
+
+| Attr | Effect |
+|------|--------|
+| `stacked_if_bp_lte="N"` | While `ui_breakpoint <= N`, restacks the button icon-over-label - the create-time `icon_position="top"` recipe - and sets its height to 100% of its parent, so a stacked button fills the growable row it lives in. Above `N` the button returns to the row layout and fixed `button_height` it declared at create time. |
+| `label_hidden_if_bp_eq="N"` | Hides the button's label while `ui_breakpoint == N`, collapsing it to icon-only; every other rung shows the label. The `ui_breakpoint` spelling of the pair below. |
+| `label_hidden_subject="S"` + `label_hidden_if_eq="N"` | Hides the label while int subject `S` equals `N`. An empty `S` installs no binding. From ui_xml/components/panel_widget_control_buttons.xml, where the widget folds the breakpoint rule into its own measured subject. |
+
+Give each label one writer: a widget that measures whether its label fits should fold the breakpoint rule into its own subject rather than set both attributes.
 
 #### divider_vertical / divider_horizontal
 
@@ -1145,6 +1244,40 @@ The widget is registered via `ui_markdown_init()` in `xml_registration.cpp`. Thi
 - The `text` attribute in XML does not support literal newlines; use `\n` for line breaks in static content
 - When using `bind_text`, the observer does not use `ObserverGuard` -- the observer is cleaned up automatically when the widget is deleted via LVGL's built-in observer-object tracking
 
+#### moves_machine
+
+`moves_machine="true"` on any widget that commands the toolhead or starts a print makes the XML engine bind its disabled state to `machine_motion_blocked` (`lib/helix-xml/src/xml/parsers/lv_xml_obj_parser.c`). That subject is `job_holds_machine` (a print owns the machine) or the spools-on-the-bed latch ([BED_DRYING.md](BED_DRYING.md)). The attribute composes with the widget's own `bind_state_*` children, and `tests/unit/test_job_holds_machine.cpp` keeps a census of every control that should carry it. Disabling is a courtesy; the send-layer gates are the guarantee.
+
+#### home_action_tile
+
+One centred icon over one label, filling its cell (`ui_xml/components/home_action_tile.xml`). The home action tiles and every cell of the Controls panel's Calibration & Tools card, plus Motors Off on its Position card, are built from it, so a row of them aligns by construction. Extend its props rather than hand-building a look-alike cell.
+
+| Prop | Default | Purpose |
+|------|---------|---------|
+| `icon`, `icon_variant`, `icon_size` | `power`, `secondary`, `#icon_size` | The glyph |
+| `label`, `label_tag` | empty | The label and its translation tag |
+| `callback` | empty | Clicked callback on the inner button |
+| `disabled_cond` | `0 eq 1` | Whole expression; the default can never be true |
+| `label_hidden_cond` | `show_widget_labels eq 0` | Whole expression; a cell outside the home grid can follow the breakpoint instead |
+| `moves_machine` | `false` | Forwarded to the inner button (see [moves_machine](#moves_machine)) |
+| `alt_icon`, `alt_icon_variant`, `icon_swap_subject` | `power`, `secondary`, empty | Shows `alt_icon` in place of `icon` while the subject reads 0; empty installs no binding |
+| `button_name`, `icon_name` | `home_action_tile_button`, `home_action_tile_icon` | Names C++ looks up; keep the one the owning class already finds |
+| `tile_icon_subject`, `tile_label_subject` | empty | Per-instance size rung from a home tile; empty keeps `#icon_size` |
+
+#### option_tile
+
+One pre-print option as a checkable tile: an icon and a two-line label in an outline, with a corner check tab that appears only while checked (`ui_xml/components/option_tile.xml`). The whole tile is the tap target. Its view sets `state_trickle`, so the tile's checked state reaches the children and each child styles itself with a `-checked` state style (the border turns `#primary`, the icon tints, the tab's `style_opa` goes 255). You do not instantiate it from XML: `PrePrintOptionsRenderer` creates one tile per option and binds the option's subject to the tile's checked state (`src/ui/ui_pre_print_options_renderer.cpp`). The tile height and the tab's negative lift come from the `option_tile_height_*` / `option_tile_tab_lift_*` token ladders in `ui_xml/globals.xml`.
+
+| Prop | Default | Purpose |
+|------|---------|---------|
+| `label`, `label_tag` | `Option`, empty | The label and its translation tag |
+| `icon` | `tune` | The glyph |
+| `callback` | empty | `value_changed` callback; the renderer wires the toggle |
+
+#### setting_group
+
+A card of settings rows under a `setting_group_header`. When every row in it is hidden, the group hides its header and collapses (the `LV_STATE_USER_1` style zeroes its margin, border and background), and it comes back when a row shows again. LVGL sends no event when a child's hidden flag changes, but any row appearing or disappearing changes the group's height, so the check runs on `LV_EVENT_SIZE_CHANGED` (`src/ui/setting_group.cpp#setting_group_sync_header`). A row counts when it is visible with a non-zero height, so a wrapper that groups gated rows must have `style_pad_all="0"`: padding gives an empty wrapper height, and its header would stay.
+
 #### Widget Defaults Quick Reference
 
 | Widget | Don't Specify (Built-in) |
@@ -1185,6 +1318,26 @@ Quick summary for reference:
     <style name="bad_style" style_bg_color="0x111"/>
 </styles>
 ```
+
+**A `<styles>` block is file-local; share a style through `ui_xml/styles.xml`.** A bare
+style name resolves in the file that declares it, then in `globals`. A component nested
+inside another file cannot see that file's `<styles>`. When two files need the same look,
+define it once in `ui_xml/styles.xml` and borrow it from anywhere by dotted name, where the
+prefix is the library's basename:
+
+```xml
+<!-- ui_xml/styles.xml -->
+<style name="press_wash" bg_color="#primary" bg_opa="30%" radius="#border_radius"/>
+
+<!-- any other file: applied directly, or through a binding -->
+<style name="styles.press_wash" selector="pressed"/>
+<bind_style name="styles.invisible" subject="preparing_visible" ref_value="1"/>
+```
+
+The library registers after theme init, so `#token` values resolve there, which a style in
+`globals.xml` cannot do. In-tree borrowers: `components/filament_catalog_row.xml`,
+`components/print_status_preview_card.xml`. Keep the library small; the borrowed-pointer
+lifetime rule is in `UI_CONTRIBUTOR_GUIDE.md` § "Shared styles".
 
 **`flex_flow` in a `<style>` is inert without `layout="flex"`.** Setting the flow
 alone is a no-op: `lv_obj_set_flex_flow()` sets *both* `LAYOUT` and `FLEX_FLOW`,
@@ -1244,6 +1397,167 @@ Many widgets have styleable parts:
 | `knob` | slider, arc |
 | `items` | dropdown, roller |
 | `scrollbar` | Scrollable containers |
+
+### Transitions
+
+A style can animate a property change between states instead of snapping to it,
+in either of two spellings.
+
+**Longhand** — four separate attributes:
+
+```xml
+<style name="t" transition_props="opa|transform_scale_x"
+       transition_duration="180" transition_easing="ease_out"
+       transition_delay="20"/>
+```
+
+**Shorthand** — one CSS-style attribute, `transition="<props> <duration> [easing] [delay]"`:
+
+```xml
+<style name="t" transition="opa|transform_scale_x 200ms ease_out 30ms"/>
+
+<!-- easing and delay are both optional -->
+<style name="t" transition="opa 90"/>
+```
+
+`transition_props` (longhand) accepts `|`, `,` or whitespace to separate names,
+interchangeably — the same delimiter set `parts=` accepts. The shorthand's own
+property-list token can use `|` or `,` but not a bare space: the shorthand already
+splits its whole value on whitespace to find the props/duration/easing/delay fields,
+so a space inside the property list would read as the end of it. Duration and delay
+are milliseconds (a trailing `ms` is accepted and ignored; a bare number is
+milliseconds too), and easing is one of:
+
+| Easing | | |
+|--------|--|--|
+| `linear` (default) | `ease_in` | `ease_out` |
+| `ease_in_out` | `overshoot` | `bounce` |
+| `step` | | |
+
+The two spellings can combine on one `<style>` element; a longhand attribute always
+wins its own field over the shorthand, whichever attribute the XML happens to list
+first:
+
+```xml
+<!-- duration is 55, easing is still ease_out - the shorthand's duration is
+     shadowed by the explicit longhand attribute, not overwritten by it -->
+<style name="t" transition="opa 200ms ease_out" transition_duration="55"/>
+```
+
+**A bad value warns by name and is refused — it never guesses.** An unrecognised
+`transition_easing`, longhand or shorthand, warns and falls back to `linear`, exactly
+like an omitted easing. A duration or delay that is not a plain non-negative integer
+(optionally `ms`-suffixed) warns and is refused the same way; a value ending in a
+bare `s` (`transition_duration="0.2s"`, the most common way to carry a CSS habit over)
+gets its own message, since every duration in this dialect is milliseconds, never
+seconds. A refused longhand field falls back to whatever the shorthand on the same
+element supplied, or to the default (`0`, `linear`) if neither did — only a
+`transition_props` list with no valid property left in it refuses the whole
+transition, since there is nothing left to build without one.
+
+A few things about where a transition takes effect are not guessable from the
+syntax:
+
+- **Put `transition` on the base style for symmetric motion.** LVGL scans every
+  style on the object whose state bits are a *subset* of the state being entered
+  (`update_obj_state`'s style compare, `lib/lvgl/src/core/lv_obj.c#"lv_obj_style_state_compare(obj, prev_state, new_state)"`), and `LV_STATE_DEFAULT` is `0` — a
+  subset of every state — so a transition on the base style is scanned on every
+  state change, in both directions. A transition declared only on a `<style
+  selector="pressed">` still applies when *entering* pressed; leaving pressed snaps,
+  because that style's bits are not a subset of the (default) state being entered.
+  Add a state-specific style carrying its own transition only when you
+  deliberately want asymmetric timing — that is what `lv_theme_default` does for a
+  button: an instant press and a 70ms-delayed release, by putting one transition on
+  the base style and a second, faster one on `LV_STATE_PRESSED`
+  (the button branch of `theme_apply`, `lib/lvgl/src/themes/default/lv_theme_default.c#"lv_obj_check_type(obj, &lv_button_class)"`). `selector` itself
+  is read only when a `<style>` child is *applied* to a widget
+  (`lib/helix-xml/src/xml/parsers/lv_xml_obj_parser.c#lv_obj_xml_style_apply`) — a
+  style's own `<styles>` definition has no `selector` handling, so the two roles
+  never collapse into one tag:
+
+  ```xml
+  <styles>
+    <!-- bare definitions - no selector here -->
+    <style name="btn_base" transition="bg_opa 200ms"/>
+    <style name="btn_pressed" bg_opa="128"/>
+  </styles>
+  <lv_button>
+    <style name="btn_base"/>
+    <style name="btn_pressed" selector="pressed"/>   <!-- selector lives here -->
+  </lv_button>
+  ```
+- **The state-specific style must still set the animated property itself.** Two
+  equal endpoints are a silent no-op — there is nothing to interpolate — and this
+  bites `text_opa` in particular, since it is inheritable: a value set on a parent
+  reads as already applied to a child that never set it locally, so the child's
+  state style must set `text_opa` explicitly even though it "already has" that
+  opacity by inheritance.
+- **`LV_STATE_CHECKED` carries a themed background on buttons.** A transition on a
+  checked button's `bg_color`/`bg_opa` fights the theme's own checked-state style,
+  which already carries its own background/transform transition — `text_opa` and
+  `text_color` are not in that set, so a text-opacity transition does not contend
+  with it. Prefer putting checked-state transitions on labels, or override the
+  button's background explicitly in the checked style.
+- **Declaring the same property in two transitions on one widget is
+  order-dependent.** If a base style and a state style both name the same property
+  in their `transition_props`, which descriptor governs it depends on style
+  application order, not on anything either transition declares. Put each property
+  in exactly one transition per widget.
+
+**Every duration is scaled by the animations preference, and can become `0`.**
+HelixScreen drives `lv_xml_set_transition_scale()` from the animations-enabled
+setting (`src/system/display_settings_manager.cpp#init_subjects`); with animations
+off, every duration authored in XML runs as `0` — instant — no matter what the XML
+says. `HelixTestFixture` forces that preference off suite-wide
+(`tests/helix_test_fixture.cpp#reset_all`), so a test asserting on a transition's
+timing must turn it on explicitly, as `tests/unit/test_xml_transition_pref.cpp` does.
+This is the first thing to check when a transition "does nothing": it may be doing
+exactly what it was told, at `0ms`.
+
+**The shorthand cannot take a `#const` for just the duration.** The style attribute
+loop resolves a `#name` reference only when `#` is the first character of the
+*whole* attribute value (`lib/helix-xml/src/xml/lv_xml_style.c#lv_xml_register_style`).
+`transition="opa #anim_fast"` has `#` at an offset into the value, not at `0`, so it
+is never resolved and is parsed literally as a duration token, which then fails.
+Use the longhand `transition_duration="#anim_fast"` when a duration needs to come
+from a const.
+
+**`transition_duration` is not `anim_duration`.** `anim_duration` is LVGL's own style
+property, controlling a widget's *internal* animation (a switch knob's slide, a
+label's scroll) and has no effect on a state change. `transition`/`transition_duration`
+is this dialect's name for LVGL's separate state-transition mechanism
+(`lv_style_set_transition`), and only that.
+
+#### Engine internals
+
+A few of LVGL's own constraints shape what the parser accepts — worth knowing before
+extending this feature rather than working around it:
+
+- **The transition interpolator is a blacklist, not a whitelist.**
+  `trans_anim_cb` (`lib/lvgl/src/core/lv_obj_style.c#"switch(tr->prop)"`) switches on only the properties
+  that *cannot* interpolate; everything else falls through to a generic numeric
+  lerp. A pointer property absent from that blacklist (`bg_image_src`, `bg_grad`,
+  `bitmap_mask_src`, the grid `*_dsc_array` pair, `arc_image_src`) has its low 32
+  bits arithmetically blended and the result handed to the draw pass as a pointer —
+  a crash. Nothing in LVGL itself validates this when a transition is built, so the
+  XML parser is the only place a bad property is ever caught, which is why an
+  unrecognised or non-interpolatable property in `transition_props` refuses the
+  whole transition rather than warning and continuing.
+- **The style owns its transition descriptor and its property array.**
+  `lv_xml_style_t` (`lib/helix-xml/src/xml/lv_xml_style.h`) frees the previous
+  descriptor and array before installing a new one, and only in the style walk
+  inside `component_scope_free`, at `lib/helix-xml/src/xml/lv_xml_component.c#"lv_xml_style_transition_clear(style)"` — which is
+  what keeps a `globals.xml` hot reload (re-registering the same style name re-runs
+  every setter over the existing record) from orphaning one descriptor per save,
+  without ever freeing a descriptor a running transition is still reading from
+  (LVGL copies duration, delay, path and property list out of the descriptor before
+  animating it).
+- **A widget that has never been drawn snaps instead of animating.**
+  `update_obj_state` returns early from the transition scan for an object that has
+  not rendered yet, so state set during construction or by an initial data bind
+  never animates — there is no startup-flash to guard against.
+- **`STYLE_TRANSITION_MAX` caps transitioning properties at 32** per state change,
+  across every style on one object, theme styles included.
 
 ### Theme Colors (C++ API)
 
@@ -1444,11 +1758,26 @@ ExamplePanel::show_loading();
 
 ```cpp
 // ✅ CORRECT - Name-based (resilient)
-lv_obj_t* w = lv_obj_find_by_name(parent, "temperature_display");
+lv_obj_t* w = helix::ui::find_required(parent, "temperature_display", "TempPanel");
 
 // ❌ WRONG - Index-based (fragile)
 lv_obj_t* w = lv_obj_get_child(parent, 3);
 ```
+
+App code looks widgets up through the two helpers in `include/ui/ui_widget_helpers.h`
+rather than calling `lv_obj_find_by_name()` directly:
+
+- `find_required(root, name, owner)` is for a widget the component's XML must contain. A
+  missing name is a breached contract: it logs once per (owner, name) and returns nullptr in a
+  release build, and aborts under `--test` and in unit tests (`set_strict_ui_checks()`), so a
+  rename in XML fails the run where the C++ disagrees instead of shipping a dead control.
+  `scripts/check_required_names.py` (in the commit hook) checks each literal name against
+  every layout variant of the component the calling file creates.
+- `find_optional(root, name)` is for a widget that may legitimately be absent: inside an
+  `<if>`, omitted by one layout variant, or in plugin-supplied XML. It never reports.
+
+Both return nullptr silently for a null root, so a lookup nested under a failed one does not
+report twice.
 
 ### Component Names Required
 
@@ -1570,6 +1899,51 @@ Bar shows FULL instead of empty when created with `cur_value=0` and XML sets `va
 lv_bar_set_value(bar, 1, LV_ANIM_OFF);
 lv_bar_set_value(bar, 0, LV_ANIM_OFF);
 ```
+
+#### 7. Component Names Are File Basenames, Not Paths
+
+A component is named by its file's basename, so `ui_xml/micro/controls_panel.xml` and
+`ui_xml/controls_panel.xml` both register as `controls_panel`. Registering the second
+replaces the first for every later `lv_xml_create()` in that process, silently.
+
+Six names exist in both the base tree and a variant directory: `controls_panel`,
+`header_bar`, `print_status_panel`, `print_tune_panel`, `theme_editor_overlay`,
+`theme_preview_overlay`.
+
+Tests feel this most, because registering everything under `ui_xml/` so nested
+components resolve is the obvious move and the wrong one:
+
+```cpp
+// ❌ WRONG - the micro variant replaces the base panel for the rest of the run
+for (const auto& f : all_xml_files) lv_xml_register_component_from_file(f.c_str());
+
+// ✅ CORRECT - base tree and components/ once, then the file under test
+//              immediately before building it
+register_base_and_components();
+lv_xml_register_component_from_file("A:ui_xml/micro/controls_panel.xml");
+lv_obj_t* panel = lv_xml_create(parent, "controls_panel", NULL);
+```
+
+A file whose `<view>` carries a name the base tree also uses cannot be built alongside
+the panel it shadows. Assert on its source text instead.
+
+#### 8. lv_obj_find_by_name() Searches Descendants Only
+
+It never tests the object handed to it, so a component carrying its name or its
+bindings on its own `<view>` element reads as missing:
+
+```cpp
+// ❌ WRONG - NULL when `root` IS the named widget
+lv_obj_t* w = lv_obj_find_by_name(root, "ams_current_tool");
+
+// ✅ CORRECT - test the root, then its descendants
+const char* root_name = lv_obj_get_name(root);
+lv_obj_t* w = (root_name && strcmp(root_name, "ams_current_tool") == 0)
+                  ? root
+                  : lv_obj_find_by_name(root, "ams_current_tool");
+```
+
+`ams_current_tool` is built this way.
 
 ### Debugging Checklist
 

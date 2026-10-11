@@ -11,7 +11,7 @@
 #
 # The third case below is the one worth having: a `#define _FILE_OFFSET_BITS` in
 # the .cpp looks like the obvious simplification of the build rule and is a
-# complete no-op, because $(PCH_FLAGS) force-includes lvgl_pch.h ahead of the
+# complete no-op, because $(FORCED_INCLUDE) force-includes lvgl_pch.h ahead of the
 # source and glibc latches the value first. That mistake reverts the fix while
 # looking like a tidy-up.
 
@@ -138,7 +138,7 @@ EOF
 EOF
     run python3 "$GATE" --rules "$FIXTURE/rules.mk" --source "$FIXTURE/empty.cpp"
     [ "$status" -eq 1 ]
-    [[ "$output" == *"no target-specific"* ]]
+    contains "no target-specific" "$output"
     [[ "$output" == *"backstop is gone"* ]]
 }
 

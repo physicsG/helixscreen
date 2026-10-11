@@ -40,7 +40,7 @@ TEST_CASE_METHOD(HelixTestFixture, "Layout gate: wide width band reveals filamen
     auto& ps = get_printer_state();
     PrinterStateTestAccess::reset(ps);
     ps.init_subjects(false);
-    lv_subject_set_int(ps.get_print_filament_used_subject(), 1500); // 1.5m
+    lv_subject_set_int(ps.print_state().get_print_filament_used_subject(), 1500); // 1.5m
 
     PrintStatusWidget w;
     w.set_config({{"layout_style", "detailed"}});

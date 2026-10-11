@@ -2,7 +2,7 @@
 
 HelixScreen discovers the sensors your printer reports to Klipper and groups them by type. Filament switch/motion sensors and filament width sensors are configurable — you assign each one a role and choose whether it's monitored. The remaining sensor types are shown as read-only information.
 
-Open the Sensor Settings overlay from **Settings > Hardware & Devices > Sensors**.
+Open the Sensor Settings overlay from **Settings > Devices > Sensors**.
 
 ![Sensor Settings](../../images/user/settings-sensors.png)
 
@@ -106,7 +106,7 @@ The remaining sections list sensors for information only — there's nothing to 
 | **Humidity Sensors** | Chamber and dryer humidity monitoring | BME280, HTU21D, SHT3X, AHT10, AHT20, AHT20-F |
 | **Accelerometers** | Input shaper calibration sensors | ADXL345, LIS2DW, LIS3DH, MPU9250, ICM20948 |
 | **Color Sensors** | TD-1 filament color detection | TD-1 |
-| **Temperature Sensors** | MCU, host, and auxiliary temperature monitoring | MCU, Host, Aux |
+| **Temperature Sensors** | MCU, host, and auxiliary temperature monitoring, including generic heaters such as a filament dryer | MCU, Host, Aux |
 
 > Probes, humidity, accelerometer, color, and temperature sensors are display-only — HelixScreen shows their readings but there's nothing to set on this screen.
 
@@ -120,6 +120,8 @@ Inside the **Temperature Sensors** section, two dropdowns let you override auto-
 - **Chamber Sensor** — pick which temperature sensor reports chamber temperature (Auto / a specific sensor / None).
 
 The **Auto** option shows the currently detected name in parentheses, or "(none detected)" when nothing matched.
+
+A chamber heater can supply the chamber temperature reading itself: when one is connected and no sensor is assigned, the heater's reported temperature is used. Naming a sensor here always wins for the reading; the heater keeps its target but the sensor becomes the temperature you see.
 
 ---
 

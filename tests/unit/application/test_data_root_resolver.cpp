@@ -25,6 +25,7 @@ namespace fs = std::filesystem;
 
 /// RAII guard that restores an env var to its original state on destruction.
 /// Same pattern as tests/unit/test_cache_dir.cpp.
+namespace {
 struct EnvGuard {
     std::string name;
     std::string original;
@@ -46,6 +47,7 @@ struct EnvGuard {
         }
     }
 };
+} // namespace
 
 /**
  * @brief Test fixture that creates temporary directory trees

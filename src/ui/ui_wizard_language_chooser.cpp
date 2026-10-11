@@ -2,6 +2,7 @@
 
 #include "ui_wizard_language_chooser.h"
 
+#include "ui_fonts.h"
 #include "ui_wizard.h"
 
 #include "app_globals.h"
@@ -10,6 +11,7 @@
 #include "static_panel_registry.h"
 #include "system_settings_manager.h"
 #include "theme_manager.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/spdlog.h>
 
@@ -17,6 +19,13 @@
 #include <memory>
 
 using namespace helix;
+
+#ifndef HELIX_MAX_FONT_TIER
+#define HELIX_MAX_FONT_TIER 6 // default: all tiers (micro=0 .. xxlarge=6)
+#endif
+#ifndef HELIX_HAS_HIDPI_FONTS
+#define HELIX_HAS_HIDPI_FONTS 0 // conservative: assume the 48/64 faces are not linked
+#endif
 
 // External subject for enabling/disabling Next button
 extern lv_subject_t connection_test_passed;
@@ -48,11 +57,54 @@ static constexpr uint32_t WELCOME_CYCLE_MS = 2500;
 // Animation durations
 static constexpr int32_t CROSSFADE_DURATION_MS = 150;
 
+namespace helix {
+
+const lv_font_t* wizard_welcome_header_font(UiBreakpoint bp) {
+    switch (bp) {
+    case UiBreakpoint::Micro:
+        return &noto_sans_16;
+    case UiBreakpoint::Tiny:
+        return &noto_sans_18;
+    case UiBreakpoint::Small:
+        return &noto_sans_24;
+    case UiBreakpoint::Medium:
+#if HELIX_MAX_FONT_TIER >= 6 && HELIX_HAS_HIDPI_FONTS
+        return &noto_sans_48;
+#elif HELIX_MAX_FONT_TIER >= 3
+        return &noto_sans_26;
+#else
+        return &noto_sans_24;
+#endif
+    default: // Large / XLarge / XXLarge
+#if HELIX_MAX_FONT_TIER >= 6 && HELIX_HAS_HIDPI_FONTS
+        return &noto_sans_64;
+#elif HELIX_MAX_FONT_TIER >= 5
+        return &noto_sans_32;
+#elif HELIX_MAX_FONT_TIER >= 4
+        return &noto_sans_28;
+#elif HELIX_MAX_FONT_TIER >= 3
+        return &noto_sans_26;
+#else
+        return &noto_sans_24;
+#endif
+    }
+}
+
+} // namespace helix
+
+// The header wears the ladder as a local style resolved at create(); a resize
+// that moves the ui_breakpoint subject mid-wizard must re-resolve it or the
+// header keeps the tier the step was built at (prestonbrown/helixscreen#1612).
+static void welcome_header_font_observer_cb(lv_observer_t* observer, lv_subject_t* subject) {
+    lv_obj_t* header = static_cast<lv_obj_t*>(lv_observer_get_target(observer));
+    lv_obj_set_style_text_font(
+        header, wizard_welcome_header_font(as_breakpoint(lv_subject_get_int(subject))),
+        LV_PART_MAIN);
+}
+
 // ============================================================================
 // Global Instance
 // ============================================================================
-
-static std::unique_ptr<WizardLanguageChooserStep> g_wizard_language_chooser_step;
 
 // Flag to force language step to show (for visual testing)
 static bool g_force_language_step = false;
@@ -65,12 +117,7 @@ void force_language_chooser_step(bool force) {
 }
 
 WizardLanguageChooserStep* get_wizard_language_chooser_step() {
-    if (!g_wizard_language_chooser_step) {
-        g_wizard_language_chooser_step = std::make_unique<WizardLanguageChooserStep>();
-        StaticPanelRegistry::instance().register_destroy(
-            "WizardLanguageChooserStep", []() { g_wizard_language_chooser_step.reset(); });
-    }
-    return g_wizard_language_chooser_step.get();
+    return &helix::lazy_global<WizardLanguageChooserStep>("WizardLanguageChooserStep");
 }
 
 // ============================================================================
@@ -83,12 +130,6 @@ WizardLanguageChooserStep::WizardLanguageChooserStep() {
 
 WizardLanguageChooserStep::~WizardLanguageChooserStep() {
     // Timer guard handles cleanup automatically via RAII
-
-    // Deinitialize subjects to disconnect observers before destruction
-    if (subjects_initialized_) {
-        lv_subject_deinit(&welcome_text_);
-        subjects_initialized_ = false;
-    }
 
     screen_root_ = nullptr;
 }
@@ -109,9 +150,8 @@ void WizardLanguageChooserStep::init_subjects() {
     // Initialize welcome text subject with string buffer
     strncpy(welcome_buffer_, WELCOME_TRANSLATIONS[0], sizeof(welcome_buffer_) - 1);
     welcome_buffer_[sizeof(welcome_buffer_) - 1] = '\0';
-    lv_subject_init_string(&welcome_text_, welcome_buffer_, nullptr, sizeof(welcome_buffer_),
-                           welcome_buffer_);
-    lv_xml_register_subject(nullptr, "wizard_welcome_text", &welcome_text_);
+    UI_MANAGED_SUBJECT_STRING(welcome_text_, welcome_buffer_, welcome_buffer_,
+                              "wizard_welcome_text", subjects_);
 
     subjects_initialized_ = true;
     spdlog::debug("[{}] Subjects initialized", get_name());
@@ -138,8 +178,8 @@ static void update_language_list_selection(lv_obj_t* selected_btn) {
         if (!btn)
             continue;
 
-        // Get the label inside the button (first child)
-        lv_obj_t* label = lv_obj_get_child(btn, 0);
+        // Each row is a flag image followed by its label.
+        lv_obj_t* label = lv_obj_get_child(btn, 1);
         bool is_selected = (btn == selected_btn);
 
         if (is_selected) {
@@ -147,11 +187,9 @@ static void update_language_list_selection(lv_obj_t* selected_btn) {
             lv_obj_set_style_bg_color(btn, theme_manager_get_color("primary"), LV_PART_MAIN);
             lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
             if (label) {
-                // Contrast text color based on background luminance
-                lv_color_t primary = theme_manager_get_color("primary");
-                uint8_t lum = lv_color_luminance(primary);
-                lv_color_t text_color = (lum > 140) ? lv_color_black() : lv_color_white();
-                lv_obj_set_style_text_color(label, text_color, LV_PART_MAIN);
+                lv_obj_set_style_text_color(
+                    label, theme_manager_get_readable_on(theme_manager_get_color("primary")),
+                    LV_PART_MAIN);
             }
         } else {
             // Unselected: transparent background
@@ -237,7 +275,7 @@ void WizardLanguageChooserStep::animate_crossfade(const char* new_text) {
         return;
     }
 
-    lv_obj_t* welcome_header = lv_obj_find_by_name(screen_root_, "welcome_header");
+    lv_obj_t* welcome_header = helix::ui::find_required(screen_root_, "welcome_header", get_name());
     if (!welcome_header) {
         // Fallback: just update the subject directly
         lv_subject_copy_string(&welcome_text_, new_text);
@@ -323,6 +361,24 @@ lv_obj_t* WizardLanguageChooserStep::create(lv_obj_t* parent) {
         return nullptr;
     }
 
+    // Display-size face, a size class above the text_heading default
+    // (prestonbrown/helixscreen#1599).
+    if (lv_obj_t* header = helix::ui::find_required(screen_root_, "welcome_header", get_name())) {
+        // The observer below fires on registration, superseding this set when
+        // the breakpoint subject is live; this is the null-subject fallback.
+        lv_obj_set_style_text_font(
+            header, wizard_welcome_header_font(breakpoint_for(responsive_dimension(nullptr))),
+            LV_PART_MAIN);
+
+        // Follow a runtime breakpoint change. The observer is bound to the
+        // header widget, so it unsubscribes itself when the wizard framework
+        // deletes the step content — no cleanup wiring needed.
+        if (lv_subject_t* bp_subject = theme_manager_get_breakpoint_subject()) {
+            lv_subject_add_observer_obj(bp_subject, welcome_header_font_observer_cb, header,
+                                        nullptr);
+        }
+    }
+
     // Start the welcome text cycling timer
     lv_timer_t* timer = lv_timer_create(cycle_timer_cb, WELCOME_CYCLE_MS, this);
     cycle_timer_.reset(timer);
@@ -346,7 +402,8 @@ void WizardLanguageChooserStep::cleanup() {
     // Without this, a mid-animation cleanup would leave the animation timer
     // referencing a deleted widget, causing a crash in lv_obj_refresh_style
     if (screen_root_) {
-        lv_obj_t* welcome_header = lv_obj_find_by_name(screen_root_, "welcome_header");
+        lv_obj_t* welcome_header =
+            helix::ui::find_required(screen_root_, "welcome_header", get_name());
         if (welcome_header) {
             // Delete all animations on this widget (NULL = any exec_cb)
             lv_anim_delete(welcome_header, nullptr);
@@ -381,9 +438,6 @@ bool WizardLanguageChooserStep::should_skip() const {
     }
 
     Config* cfg = Config::get_instance();
-    if (!cfg) {
-        return false;
-    }
 
     // Check if language has already been set in config
     std::string saved_language = cfg->get<std::string>("/language", "");

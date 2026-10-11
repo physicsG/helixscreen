@@ -11,6 +11,9 @@
     <prop name="icon" type="string" default=""/>
     <prop name="value" type="string" default=""/>
     <prop name="value_tag" type="string" default=""/>
+    <!-- Follow a subject instead of a static value: the subject name, or empty to
+         show the static value. -->
+    <prop name="bind_value" type="string" default=""/>
   </api>
   <view name="info_row"
         extends="lv_obj" width="100%" height="content" flex_flow="row" style_flex_main_place="start"
@@ -22,6 +25,6 @@
     <!-- Middle: Label -->
     <text_body name="label" text="$label" translation_tag="$label_tag" flex_grow="1"/>
     <!-- Right side: Value (secondary color) -->
-    <text_muted name="value" text="$value" translation_tag="$value_tag"/>
+    <text_muted name="value" text="$value" translation_tag="$value_tag" bind_text="$bind_value"/>
   </view>
 </component>

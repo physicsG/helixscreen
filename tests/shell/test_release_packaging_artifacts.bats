@@ -25,26 +25,32 @@ CROSS_MK="${HELIX_TEST_CROSS_MK:-mk/cross.mk}"
 # could arrive without one — and the numbers still cleared the bar. The stale
 # 7-element array in the second test had already missed release-ad5x,
 # release-cc1 and release-x86.
-release_targets() {
-    grep -oE '^release-[a-z0-9-]+:' "$CROSS_MK" \
-        | sed 's/:$//' \
-        | grep -vxE 'release-all|release-clean|release-clean-assets' \
-        | sort -u
-}
-
 # Recipe body of target $1: the lines after it, up to the first line that is
-# neither indented nor blank.
+# neither indented nor blank. A recipe that delegates to the shared
+# release-package macro is followed by that macro's body, so the checks below
+# see what the target actually runs, and fail for a target that stops calling it.
 release_recipe() {
-    awk -v t="$1" '
+    local body
+    body=$(awk -v t="$1" '
         index($0, t ":") == 1 { inside = 1; next }
         inside && /^[^\t ]/ && NF { inside = 0 }
+        inside { print }
+    ' "$CROSS_MK")
+    printf '%s\n' "$body"
+    if printf '%s\n' "$body" | grep -q 'call release-package'; then release_package_body; fi
+}
+
+release_package_body() {
+    awk '
+        /^define release-package$/ { inside = 1; next }
+        inside && /^endef/ { inside = 0 }
         inside { print }
     ' "$CROSS_MK"
 }
 
 @test "every release target calls release-clean-assets" {
     local targets
-    targets=$(release_targets)
+    targets=$(release_targets "$CROSS_MK")
     # A regex that stops matching would empty the list and pass vacuously.
     [ "$(printf '%s\n' "$targets" | wc -l)" -ge 8 ] || fail "release_targets() found only: $targets"
 
@@ -72,16 +78,50 @@ release_recipe() {
     # to run the version-matched installer. A target that skips the cp ships a
     # package whose self-update fails with "Installer not found".
     local targets
-    targets=$(release_targets)
+    targets=$(release_targets "$CROSS_MK")
     [ "$(printf '%s\n' "$targets" | wc -l)" -ge 8 ] || fail "release_targets() found only: $targets"
 
     local t missing=""
     for t in $targets; do
         release_recipe "$t" \
-            | grep -qE 'cp scripts/\$\(INSTALLER_FILENAME\).*\$\(RELEASE_DIR\)' \
+            | grep -qE 'cp \$\(INSTALLER_BUNDLE\).*\$\(RELEASE_DIR\)' \
             || missing="$missing $t"
     done
     [ -z "$missing" ] || fail "release targets not packaging the installer:$missing"
+}
+
+# ============================================================================
+# moonraker-plugin included in release packages
+# ============================================================================
+
+@test "release-copy-xml-config stages moonraker-plugin without tests or pyc" {
+    # HelixPluginInstaller resolves <install>/moonraker-plugin/install.sh next
+    # to bin/helix-screen, so a release tree without the plugin dir breaks the
+    # in-UI install/uninstall on every device. Run the real macro against a
+    # temp stage dir rather than grepping its text: this proves the copy lands
+    # AND that nothing later in the macro (dev-panel rm, minify) eats it.
+    cd "$BATS_TEST_DIRNAME/../.." || fail "cannot reach repo root"
+
+    local stage="$BATS_TEST_TMPDIR/helixscreen" mkfile="$BATS_TEST_TMPDIR/stage.mk"
+    mkdir -p "$stage"
+    # DEV_PANEL_XML must come along: undefined, the macro's rm -f would target
+    # $(1)/ui_xml/ itself (a directory rm -f cannot delete, so make fails).
+    {
+        grep -E '^DEV_PANEL_XML :=' "$CROSS_MK" || fail "DEV_PANEL_XML missing from $CROSS_MK"
+        sed -n '/^define release-copy-xml-config/,/^endef/p' "$CROSS_MK"
+        printf '\n.PHONY: stage\nstage:\n\t$(call release-copy-xml-config,%s)\n' "$stage"
+    } > "$mkfile"
+
+    run make -f "$mkfile" stage
+    [ "$status" -eq 0 ] || fail "release-copy-xml-config failed: $output"
+
+    [ -f "$stage/moonraker-plugin/install.sh" ] \
+        || fail "release tree ships no moonraker-plugin/install.sh"
+    [ -f "$stage/moonraker-plugin/helix_print.py" ] \
+        || fail "release tree ships no moonraker-plugin/helix_print.py"
+    [ ! -e "$stage/moonraker-plugin/tests" ] || fail "plugin tests shipped in release tree"
+    [ -z "$(find "$stage/moonraker-plugin" -name __pycache__ -print -quit)" ] \
+        || fail "bytecode cache shipped in release tree"
 }
 
 # ============================================================================
@@ -98,4 +138,19 @@ release_recipe() {
 
 @test "3D splash generation uses LZ4 compression" {
     grep -q '"--compress".*"LZ4"' scripts/gen_splash_3d.py
+}
+
+# ============================================================================
+# CA bundle ships in every release package
+# ============================================================================
+
+@test "release-package installs certs/ca-certificates.crt and fails without a bundle" {
+    release_package_body | grep -q 'certs/ca-certificates.crt' || fail "release-package no longer installs the CA bundle"
+    release_package_body | grep -q 'CA_BUNDLE' || fail "release-package has no host-bundle fallback"
+    release_package_body | grep -qE 'exit 1' || fail "release-package does not fail on a missing bundle"
+    local t missing=""
+    for t in $(release_targets "$CROSS_MK"); do
+        release_recipe "$t" | grep -q 'call release-package' || missing="$missing $t"
+    done
+    [ -z "$missing" ] || fail "release targets bypassing release-package:$missing"
 }

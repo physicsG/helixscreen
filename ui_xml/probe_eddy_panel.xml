@@ -6,18 +6,18 @@
         extends="lv_obj" width="100%" height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_sm"
         scrollable="false">
 
-    <setting_section_header title="EDDY CURRENT" title_tag="EDDY CURRENT" icon="sine_wave"/>
+    <setting_section_header title="EDDY CURRENT" icon="sine_wave"/>
 
     <!-- Action buttons — 2 equal-width -->
     <lv_obj width="100%" height="content" style_pad_all="0" flex_flow="row" style_pad_gap="#space_sm" scrollable="false">
       <ui_button name="btn_eddy_calibrate"
-                 width="1" height="#button_height_sm" flex_grow="1" variant="secondary" text="Calibrate"
-                 translation_tag="Calibrate" icon="target">
+                 width="1" height="#button_height_sm" flex_grow="1" variant="secondary" text="Calibrate" icon="target"
+                 moves_machine="true">
         <event_cb trigger="clicked" callback="on_eddy_calibrate"/>
       </ui_button>
       <ui_button name="btn_eddy_drive_current"
-                 width="1" height="#button_height_sm" flex_grow="1" variant="secondary" text="Drive Cal"
-                 translation_tag="Drive Cal" icon="tune">
+                 width="1" height="#button_height_sm" flex_grow="1" variant="secondary" text="Drive Cal" icon="tune"
+                 moves_machine="true">
         <event_cb trigger="clicked" callback="on_eddy_drive_current"/>
       </ui_button>
     </lv_obj>

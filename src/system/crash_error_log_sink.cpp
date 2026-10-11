@@ -2,11 +2,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "system/crash_error_log_sink.h"
 
+#include <cstring>
+
 namespace helix {
 
 CrashErrorLogSink& CrashErrorLogSink::instance() {
-    static CrashErrorLogSink s;
-    return s;
+    // Never destroyed. The crash handler holds raw pointers into this object's
+    // ring and every logger holds a non-owning sink_ptr to it, so anything that
+    // logs while static destructors run - a global panel tearing down, a worker
+    // on its way out - has to find a live sink. A destroyed sink dispatches
+    // through base_sink's pure virtuals and aborts the process.
+    static CrashErrorLogSink* s = new CrashErrorLogSink();
+    return *s;
 }
 
 CrashErrorLogSink::CrashErrorLogSink() {
@@ -16,6 +23,12 @@ CrashErrorLogSink::CrashErrorLogSink() {
     // stores these pointers; install() does not clear them, so order vs.
     // install() doesn't matter.
     crash_handler::register_error_log_ring(&ring_[0][0], CAP, &next_);
+}
+
+void CrashErrorLogSink::clear_for_test() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::memset(ring_, 0, sizeof(ring_));
+    next_ = 0;
 }
 
 void CrashErrorLogSink::sink_it_(const spdlog::details::log_msg& msg) {

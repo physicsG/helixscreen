@@ -6,7 +6,10 @@
   <!-- Displays network SSID, signal strength icon, and security status -->
   <!-- Uses responsive theme tokens: #space_lg for padding, #font_body for text -->
   <!-- Connected network is indicated via LV_STATE_CHECKED - adds left border accent -->
-  <!-- Click triggers on_network_item_clicked callback in C++ -->
+  <!-- Click triggers the owner's callback, named by the click_callback prop -->
+  <api>
+    <prop name="click_callback" type="string" default=""/>
+  </api>
   <styles>
     <!-- Style applied when item has LV_STATE_CHECKED (connected network) -->
     <style name="checked_style"
@@ -17,7 +20,7 @@
         style_pad_ver="#space_sm" style_pad_hor="#space_md" flex_flow="row" style_flex_main_place="start"
         style_flex_cross_place="center" style_pad_gap="#space_sm">
     <style name="checked_style" selector="checked"/>
-    <event_cb trigger="clicked" callback="on_network_item_clicked"/>
+    <event_cb trigger="clicked" callback="$click_callback"/>
     <!-- Signal strength icons - 8 variants controlled by signal_icon_state subject -->
     <!-- States 1-4: unsecured networks, States 5-8: secured networks (with lock) -->
     <!-- Only one icon visible at a time via bind_flag_if_not_eq binding -->

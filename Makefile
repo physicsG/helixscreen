@@ -21,6 +21,17 @@
 # Use bash for all shell commands (needed for [[ ]] and read -n)
 SHELL := /bin/bash
 
+# GNU make >= 4.2 (the $(file ...) function). An older make parses this file
+# without complaint and silently skips every $(file) call: the test-link
+# response file is never written, so a link either dies on a missing @-file or
+# runs against the manifest the last 4.2+ build left behind. macOS ships
+# /usr/bin/make as GNU 3.81 and Homebrew installs 4.x only as `gmake`, so this
+# is the loud version of a failure that is otherwise indistinguishable from a
+# stale build.
+ifneq ($(shell test "$(firstword $(subst ., ,$(MAKE_VERSION)))" -gt 4 -o \( "$(firstword $(subst ., ,$(MAKE_VERSION)))" -eq 4 -a "$(word 2,$(subst ., ,$(MAKE_VERSION)))" -ge 2 \) && echo ok),ok)
+$(error GNU make >= 4.2 required, this is $(MAKE_VERSION). On macOS use `gmake`.)
+endif
+
 # Delete a target if its recipe fails. Without this, a failed link can leave a
 # truncated/0-byte output (e.g. helix-tests) on disk with a newer mtime than its
 # prerequisites — the next `make` then treats the broken artifact as up-to-date
@@ -122,10 +133,17 @@ ifeq ($(origin CXX),default)
         ifeq ($(call test_cxx_stdlib,clang++),ok)
             CXX := clang++
         else ifneq ($(shell command -v g++ 2>/dev/null),)
-            # Clang has stdlib issues, fall back to g++
+            # clang selects the newest GCC installation it can find and takes
+            # libstdc++ from there, so a gcc-N without a matching libstdc++-N-dev
+            # leaves it unable to link. Usually fixable, and worth fixing: the
+            # sanitizer jobs are clang, so a working local clang is the only way
+            # to reproduce them here.
             CXX := g++
             CC := gcc
-            $(info Note: clang++ has stdlib issues on this system, using g++ instead)
+            $(info Note: clang++ cannot link C++ here, using g++ instead)
+            $(info   Usually a missing libstdc++-<N>-dev for the newest installed gcc.)
+            $(info   Diagnose: clang++ -v -xc++ /dev/null -o /dev/null 2>&1 | grep "Selected GCC")
+            $(info   Fix: install that libstdc++-<N>-dev, or pass --gcc-install-dir=/usr/lib/gcc/<triple>/<N>)
         else
             # No g++ available, try clang++ anyway and let it fail with a clear error
             CXX := clang++
@@ -165,6 +183,9 @@ DEPFLAGS = -MMD -MP
 # Optimization level: -O2 by default, override with OPT=0 or OPT=1 for faster builds
 # 'make dev' sets OPT=0 automatically (~2x faster compilation)
 OPT ?= 2
+# Debug info level. ASAN links of this tree need multiple GB at -g2; DBGLEVEL=0
+# keeps the symbol table (which is what ASAN frames resolve from) without DWARF.
+DBGLEVEL ?= 2
 
 # Project source flags - warnings enabled, strict mode optional
 # Use WERROR=1 to treat warnings as errors (for CI or `make strict`)
@@ -180,29 +201,22 @@ ifeq ($(PLATFORM_TARGET),yocto)
     CFLAGS += -std=c11 -Wall -Wextra -D_GNU_SOURCE -Wno-psabi
     CXXFLAGS += -std=c++17 -Wall -Wextra -Wno-psabi
 else
-    # DWARF is emitted per translation unit with no cross-TU dedup, so every one
-    # of the ~800 test files that includes catch_amalgamated.hpp — plus LVGL,
-    # nlohmann::json and spdlog in almost every file — ships its own full copy of
-    # those type descriptions. That is why .debug_info reached 2.88 GB against
-    # 67 MB of actual code, and why a 16 GB object tree kept evicting itself from
-    # ccache.
+    # DWARF is emitted per translation unit with no cross-TU dedup, so every TU
+    # that includes Catch2, LVGL, nlohmann::json or spdlog carries its own copy
+    # of those type descriptions and .debug_info dwarfs the code it describes.
+    # -gz compresses the debug sections in place, shrinking objects and binaries
+    # so more of a build fits in ccache. It is orthogonal to DBGLEVEL, which
+    # picks how much DWARF is emitted, not how it is stored.
     #
-    # -gz compresses the debug sections in place. It shrinks the objects AND the
-    # binaries, which is what matters here: smaller objects mean more of a build
-    # fits in ccache and less I/O per rebuild.
+    # -fdebug-types-section is not used: its per-type-unit overhead grows the
+    # object tree by more than the dedup saves at this TU count.
     #
-    # MEASURED, not assumed. -fdebug-types-section was tried first, since COMDAT
-    # type units target the duplication directly: it took only ~5% off the
-    # binaries and added 36% to the object tree (15.4 GB -> 21 GB), because GCC's
-    # per-type-unit overhead outweighed the dedup at this TU count. Net loss for
-    # the thing being fixed, so it is not used.
-    #
-    # Probed, not assumed: this block also feeds the cross toolchains (pi, ad5m,
-    # cc1), where an unsupported flag would break the build outright.
+    # Probed because this block also feeds the cross toolchains (pi, ad5m, cc1),
+    # where an unsupported flag would break the build outright.
     DEBUG_SIZE_FLAGS := $(shell printf 'int main(){return 0;}' | \
         $(CXX) -x c++ -gz -c -o /dev/null - >/dev/null 2>&1 && echo -gz)
-    CFLAGS := -std=c11 -Wall -Wextra -O$(OPT) -g $(DEBUG_SIZE_FLAGS) -D_GNU_SOURCE -fno-omit-frame-pointer -fstack-protector-strong
-    CXXFLAGS := -std=c++17 -Wall -Wextra -O$(OPT) -g $(DEBUG_SIZE_FLAGS) -fno-omit-frame-pointer -fstack-protector-strong
+    CFLAGS := -std=c11 -Wall -Wextra -O$(OPT) -g$(DBGLEVEL) $(DEBUG_SIZE_FLAGS) -D_GNU_SOURCE -fno-omit-frame-pointer -fstack-protector-strong
+    CXXFLAGS := -std=c++17 -Wall -Wextra -O$(OPT) -g$(DBGLEVEL) $(DEBUG_SIZE_FLAGS) -fno-omit-frame-pointer -fstack-protector-strong
     ifneq ($(OPT),0)
         CFLAGS += -D_FORTIFY_SOURCE=2
         CXXFLAGS += -D_FORTIFY_SOURCE=2
@@ -214,9 +228,15 @@ endif
 # NOTE: Must use .txt extension to avoid shadowing C++20 <version> header on macOS
 #       (macOS filesystem is case-insensitive, so VERSION would match <version>)
 HELIX_VERSION := $(shell cat VERSION.txt 2>/dev/null || echo "0.0.0")
-HELIX_VERSION_MAJOR := $(word 1,$(subst ., ,$(HELIX_VERSION)))
-HELIX_VERSION_MINOR := $(word 2,$(subst ., ,$(HELIX_VERSION)))
-HELIX_VERSION_PATCH := $(word 3,$(subst ., ,$(HELIX_VERSION)))
+# The numeric fields come from the version's core triple, with any prerelease or
+# build suffix cut off first. Splitting the full string on "." puts "0-beta" in
+# the patch field, and that reaches every translation unit as
+# -DHELIX_VERSION_PATCH=0-beta, where helix_version_at_least() compares it as an
+# integer and nothing compiles.
+HELIX_VERSION_CORE := $(firstword $(subst +, ,$(firstword $(subst -, ,$(HELIX_VERSION)))))
+HELIX_VERSION_MAJOR := $(word 1,$(subst ., ,$(HELIX_VERSION_CORE)))
+HELIX_VERSION_MINOR := $(word 2,$(subst ., ,$(HELIX_VERSION_CORE)))
+HELIX_VERSION_PATCH := $(word 3,$(subst ., ,$(HELIX_VERSION_CORE)))
 # The short git hash is produced by scripts/gen-git-hash.sh into a generated
 # header, not read here: a make variable would be a second source of the same
 # value, free to drift from the one the binary actually reports.
@@ -276,8 +296,8 @@ endif
 # Submodule flags - suppress warnings from third-party code we don't control
 # Uses -w to completely silence warnings (cleaner build output)
 # Note: No DEPFLAGS for submodules - we don't track their internal dependencies
-SUBMODULE_CFLAGS := -std=c11 -O2 -g -D_GNU_SOURCE -w
-SUBMODULE_CXXFLAGS := -std=c++17 -O2 -g -w
+SUBMODULE_CFLAGS := -std=c11 -O2 -g$(DBGLEVEL) -D_GNU_SOURCE -w
+SUBMODULE_CXXFLAGS := -std=c++17 -O2 -g$(DBGLEVEL) -w
 
 # XML create-cost profiling in lib/helix-xml (lv_xml.c). Counts component
 # creates and separates expat/SAX time from element-handler time, which is the
@@ -326,7 +346,7 @@ BUILD_DIR ?= build
 #
 # BIN_DIR is deliberately NOT suffixed. mk/tests.mk computes TEST_ASAN_BIN from
 # BIN_DIR in the PARENT make (where SANITIZE is unset) and passes only
-# OBJ_DIR/PCH down, so moving BIN_DIR here would have the sub-make build into a
+# OBJ_DIR down, so moving BIN_DIR here would have the sub-make build into a
 # directory the parent is not looking in. The app binary is therefore still
 # replaced in place — but it is genuinely instrumented, which is the part that
 # matters. Pass BIN_DIR=... explicitly to keep both.
@@ -347,15 +367,27 @@ endif
 BIN_DIR ?= $(BUILD_DIR)/bin
 OBJ_DIR ?= $(BUILD_DIR)/obj
 
+# Objects are invalidated by a change to the flags they were built with, not only
+# by a change to their sources. The path is fixed here beside OBJ_DIR because the
+# rules naming it are read before CXXFLAGS is final; mk/rules.mk writes contents.
+FLAGS_STAMP := $(OBJ_DIR)/.build-flags
+# Created empty here, before the first rule naming it is parsed. A prerequisite
+# that neither exists nor has a rule makes make discard the whole pattern rule,
+# and every one of the 15 rules naming this stamp shares that one file record --
+# so an object not already on disk reports "No rule to make target" instead. Only
+# a build with no $(OBJ_DIR) yet is affected, which is why CI sees it and an
+# incremental tree never does. mk/rules.mk fills in the flag text below.
+$(shell mkdir -p $(OBJ_DIR); [ -e $(FLAGS_STAMP) ] || : > $(FLAGS_STAMP))
+
 # LVGL
 LVGL_DIR := lib/lvgl
 # LVGL config discovery. Defined here (not further down) so it can travel inside
 # $(LVGL_INC): every flag set that compiles LVGL-dependent code then reaches
 # lv_conf.h via -I. (project root) + -DLV_CONF_INCLUDE_SIMPLE, instead of LVGL's
-# fragile '#include "../../lv_conf.h"' fallback. That fallback only resolves by
-# accident in a normal checkout and BREAKS when lib/lvgl is a symlink (git
-# worktrees — see scripts/setup-worktree.sh), which silently broke every
-# cross-compile from a worktree (splash + display-backend + watchdog sub-builds).
+# fragile '#include "../../lv_conf.h"' fallback. That fallback resolves only by
+# accident in a normal checkout and not at all wherever lib/lvgl does not sit two
+# levels below the tree holding lv_conf.h, which takes out the splash,
+# display-backend and watchdog sub-builds with it.
 # Carrying it in LVGL_INC means new LVGL sub-builds inherit correct discovery
 # automatically rather than each having to remember to append $(LV_CONF).
 LV_CONF := -DLV_CONF_INCLUDE_SIMPLE
@@ -450,29 +482,44 @@ APP_SRCS := $(filter-out $(wildcard $(SRC_DIR)/bluetooth/*.cpp),$(APP_SRCS))
 ifneq ($(ENABLE_GLES_3D),yes)
     APP_SRCS := $(filter-out $(SRC_DIR)/rendering/gcode_gles_renderer.cpp,$(APP_SRCS))
 endif
-# Exclude screensaver when not enabled
+# Screensaver sources: every saver, the parts they share and the manager
+SCREENSAVER_SRCS := $(SRC_DIR)/ui/ui_screensaver.cpp $(wildcard $(SRC_DIR)/ui/screensaver_*.cpp)
+# Targets whose lv_conf.h LV_COLOR_DEPTH is 16. The savers below static_assert 32 bpp, so a
+# 16 bpp target missing here fails to compile rather than shipping them.
+SCREENSAVER_16BPP_TARGETS := ad5m ad5m-br cc1 mips k1 k1-dynamic ad5x k2 snapmaker-u1
+# Every saver now draws at both depths, so a 16 bpp build compiles all of them. A saver that
+# cannot would be listed here and marked SAVER_DEPTH_32 in SCREENSAVERS; the two must agree.
+SCREENSAVER_32BPP_ONLY_SRCS :=
 ifneq ($(ENABLE_SCREENSAVER),yes)
-    APP_SRCS := $(filter-out $(SRC_DIR)/ui/ui_screensaver.cpp,$(APP_SRCS))
-    APP_SRCS := $(filter-out $(SRC_DIR)/ui/screensaver_manager.cpp,$(APP_SRCS))
-    APP_SRCS := $(filter-out $(SRC_DIR)/ui/screensaver_starfield.cpp,$(APP_SRCS))
-    APP_SRCS := $(filter-out $(SRC_DIR)/ui/screensaver_pipes.cpp,$(APP_SRCS))
+    APP_SRCS := $(filter-out $(SCREENSAVER_SRCS),$(APP_SRCS))
+else ifneq ($(filter $(PLATFORM_TARGET),$(SCREENSAVER_16BPP_TARGETS)),)
+    APP_SRCS := $(filter-out $(SCREENSAVER_32BPP_ONLY_SRCS),$(APP_SRCS))
 endif
-# Mock backends (enabled by default, disable with ENABLE_MOCKS=no for production)
-ENABLE_MOCKS ?= yes
+# Mock backends (the --test simulator). Dev/test scaffolding: ON for every developer
+# build, OFF under HELIX_PACKAGING=1 so released binaries do not carry it. Targets
+# in mk/cross.mk that set ENABLE_MOCKS := no keep it off for dev builds too.
+ifeq ($(HELIX_PACKAGING),1)
+    ENABLE_MOCKS ?= no
+else
+    ENABLE_MOCKS ?= yes
+endif
 
-# PWM sysfs buzzer backend — ad5m/ad5m-br/ad5x only.
+# PWM sysfs buzzer backend — ad5m/ad5m-br probe it; the generic SBC builds
+# (pi, pi32, x86, yocto, native) carry it for a sound.pwm_channel setting, a
+# buzzer the user wired to any board's hardware PWM pin.
 #
 # The backend's own runtime probe is just "does /sys/class/pwm/pwmchip0 exist",
 # which is true on boards whose PWM controller drives something else entirely: a
 # CC1 has 8 channels there, no beeper on any of them, and its backlight on the
 # same controller. So the probe cannot be trusted to decide this — the platform
-# must. M300 (the PRINTER's beeper, over gcode) is deliberately NOT gated and
-# keeps working everywhere.
+# must, or the user naming the channel. M300 (the PRINTER's beeper, over gcode) is deliberately NOT gated and
+# keeps working everywhere. Neither MIPS board exposes a sysfs pwmchip (the
+# AD5X piezo goes through jz_pwm below, the K1 has no audio at all).
 #
 # Decided HERE, above APP_OBJS, and not down in the sound-flags section: APP_OBJS
 # is computed from APP_SRCS a few lines below, so a filter-out placed after it is
 # a silent no-op that still compiles and still links the backend.
-ifneq (,$(filter ad5m ad5m-br ad5x,$(PLATFORM_TARGET)))
+ifneq (,$(filter ad5m ad5m-br pi pi-fbdev pi-both pi32 pi32-fbdev pi32-both x86 x86-fbdev x86-both yocto native,$(PLATFORM_TARGET)))
     PWM_SOUND_CXXFLAGS := -DHELIX_HAS_PWM_SOUND
     # Auto-export: the stock AD5M kernel ships the beeper channel unexported
     # and nothing materializes pwm6, so initialize() writes the channel to
@@ -487,10 +534,11 @@ endif
 
 # AD5X piezo via the jz_pwm DMA engine, exec'd through fx-pwm - there is no
 # sysfs pwmchip on the X2600, so the sysfs PWM backend above cannot drive it.
-# Gated to ad5x AND probed at runtime (/dev/jz_pwm + the fx-pwm binary): a
-# host build that happens to carry the binary simply falls through the
-# backend ladder, and remote-UI installs keep the M300 path.
-ifneq (,$(filter ad5x,$(PLATFORM_TARGET)))
+# Compiled into the unified MIPS build and probed at runtime (/dev/jz_pwm + the
+# fx-pwm binary): the K1 carries /dev/jz_pwm but no fx-pwm, so the probe fails
+# there and the ladder falls through; a host build that happens to carry the
+# binary simply falls through too, and remote-UI installs keep the M300 path.
+ifneq (,$(filter mips k1 ad5x,$(PLATFORM_TARGET)))
     JZ_PWM_CXXFLAGS := -DHELIX_HAS_JZ_PWM
 else
     APP_SRCS := $(filter-out $(SRC_DIR)/system/jz_pwm_sound_backend.cpp,$(APP_SRCS))
@@ -500,6 +548,7 @@ ifneq ($(ENABLE_MOCKS),yes)
     APP_SRCS := $(filter-out $(wildcard $(SRC_DIR)/api/*_mock*.cpp),$(APP_SRCS))
     APP_SRCS := $(filter-out $(SRC_DIR)/printer/ams_backend_mock.cpp,$(APP_SRCS))
     APP_SRCS := $(filter-out $(SRC_DIR)/api/moonraker_api_mock.cpp,$(APP_SRCS))
+    APP_SRCS := $(filter-out $(SRC_DIR)/system/mock_performance_source.cpp,$(APP_SRCS))
 endif
 
 # Remote-control subsystem (helixctl server + socket/HTTP transport + the folded
@@ -533,11 +582,28 @@ else
     APP_SRCS := $(filter-out $(wildcard $(SRC_DIR)/remote/*.cpp),$(APP_SRCS))
 endif
 
-# Developer-only showcase panels. Not reachable from the shipped navigation
-# (no PanelId, no PanelFactory wiring) — they exist as live testbeds: XML
-# binding/repeat demos (test_panel), wizard step-progress (step_test_panel),
-# the 3D G-code viewer harness (gcode_test_panel), and icon-font coverage
-# (glyphs_panel). Dev-only: default ON for the native dev build, OFF for
+# Diagnostic-upload gate (prestonbrown/helixscreen#1410): whether this build may
+# ship debug bundles / crash reports to crash.helixscreen.org, or serve the log
+# ring over the `ctl log` RPC. Official packaging builds (HELIX_PACKAGING=1)
+# upload — the installed fleet is the telemetry. Every other build — plain
+# local make, fork cross-builds — defaults OFF; our own dev rigs are turned on
+# at deploy time instead (sync-device-features stamps
+# HELIX_DIAGNOSTIC_UPLOADS=1 in the device env), because nothing build-side can
+# tell our rig build from a source-modified fork build. A dev build can also be
+# opted in for a run with HELIX_DIAGNOSTIC_UPLOADS=1 in the environment.
+#
+# The define only flips the runtime DEFAULT of helix::diag::uploads_enabled()
+# and the payload marker; it never compiles the pipes out, so the opt-in needs
+# no rebuild.
+ifeq ($(HELIX_PACKAGING),1)
+    ENABLE_DIAGNOSTIC_UPLOADS ?= yes
+else
+    ENABLE_DIAGNOSTIC_UPLOADS ?= no
+endif
+
+# Developer-only showcase panel. Not reachable from the shipped navigation
+# (no PanelId, no PanelFactory wiring) — it exists as a live testbed for
+# icon-font coverage (glyphs_panel). Dev-only: default ON for the native dev build, OFF for
 # release/cross builds. Force into a device dev image with:
 #   make PLATFORM_TARGET=pi ENABLE_DEV_PANELS=yes
 ifeq ($(PLATFORM_TARGET),native)
@@ -547,9 +613,6 @@ else
 endif
 
 ifneq ($(ENABLE_DEV_PANELS),yes)
-    APP_SRCS := $(filter-out $(SRC_DIR)/ui/ui_panel_test.cpp,$(APP_SRCS))
-    APP_SRCS := $(filter-out $(SRC_DIR)/ui/ui_panel_step_test.cpp,$(APP_SRCS))
-    APP_SRCS := $(filter-out $(SRC_DIR)/ui/ui_panel_gcode_test.cpp,$(APP_SRCS))
     APP_SRCS := $(filter-out $(SRC_DIR)/ui/ui_panel_glyphs.cpp,$(APP_SRCS))
 endif
 APP_OBJS := $(patsubst $(SRC_DIR)/%.cpp,$(OBJ_DIR)/%.o,$(APP_SRCS))
@@ -669,6 +732,11 @@ else
     SPDLOG_DIR := lib/spdlog
     # Use -isystem to suppress warnings from third-party headers in strict mode
     SPDLOG_INC := -isystem $(SPDLOG_DIR)/include
+    # Compiled once from lib/spdlog/src and linked into every binary, instead of
+    # header-only code instantiated in every translation unit. A system spdlog
+    # above stays header-only.
+    SPDLOG_DEFINES := -DSPDLOG_COMPILED_LIB
+    SPDLOG_OBJS := $(patsubst $(SPDLOG_DIR)/src/%.cpp,$(OBJ_DIR)/spdlog/%.o,$(wildcard $(SPDLOG_DIR)/src/*.cpp))
 endif
 
 # fmt (formatting library required by header-only spdlog)
@@ -755,6 +823,14 @@ else
     REMOTE_CONTROL_DEFINES :=
 endif
 
+# Diagnostic-upload define (see ENABLE_DIAGNOSTIC_UPLOADS above): runtime
+# default of helix::diag::uploads_enabled() plus the payload channel marker.
+ifeq ($(ENABLE_DIAGNOSTIC_UPLOADS),yes)
+    DIAG_UPLOAD_DEFINES := -DHELIX_ENABLE_DIAGNOSTIC_UPLOADS
+else
+    DIAG_UPLOAD_DEFINES :=
+endif
+
 # Developer-only showcase panels define (see ENABLE_DEV_PANELS above)
 ifeq ($(ENABLE_DEV_PANELS),yes)
     DEV_PANELS_DEFINES := -DHELIX_ENABLE_DEV_PANELS
@@ -769,23 +845,11 @@ WPA_CLIENT_LIB := $(BUILD_DIR)/lib/libwpa_client.a
 # Use -isystem to suppress warnings from third-party headers in strict mode
 WPA_INC := -isystem $(WPA_DIR)/src/common -isystem $(WPA_DIR)/src/utils
 
-# Precompiled header for LVGL (30-50% faster clean builds)
-# Only supported by gcc and clang (not MSVC)
-PCH_HEADER := $(INC_DIR)/lvgl_pch.h
-# Sanitizer builds get their own PCH for the same reason they get their own
-# OBJ_DIR: a PCH compiled without -fsanitize cannot be reused by an
-# instrumented compile, and sharing one silently poisons the whole tree.
-# `:=` is fine — a command-line PCH=... still overrides it.
-ifeq ($(SANITIZE),address)
-PCH := $(BUILD_DIR)/asan-lvgl_pch.h.gch
-else ifeq ($(SANITIZE),thread)
-PCH := $(BUILD_DIR)/tsan-lvgl_pch.h.gch
-else ifeq ($(COVERAGE),1)
-PCH := $(BUILD_DIR)/cov-lvgl_pch.h.gch
-else
-PCH := $(BUILD_DIR)/lvgl_pch.h.gch
-endif
-PCH_FLAGS := -include $(PCH_HEADER)
+# Force-included ahead of every app and test C++ source. It supplies LVGL,
+# helix-xml, spdlog and the common STL headers, and many sources compile only
+# because of it. It is an ordinary header, tracked through each object's .d
+# file; nothing is precompiled.
+FORCED_INCLUDE := -include $(INC_DIR)/lvgl_pch.h
 
 # Include paths
 # Project includes use -I (warnings enabled), library includes use -isystem (warnings suppressed)
@@ -843,7 +907,8 @@ else ifneq ($(CROSS_COMPILE)$(filter x86 x86-fbdev x86-both,$(PLATFORM_TARGET)),
     # No SDL2 - display handled by framebuffer/DRM
     # SSL is optional - only needed if connecting to remote Moonraker over HTTPS
     # Note: libnl must come AFTER wpa_client (static linking order matters)
-    # Note: -L path only for glibc targets (Pi, AD5M) - musl targets (K1) are self-contained
+    # Note: -L path only for targets that link against host libs (Pi, AD5M);
+    # the toolchains below each carry their own sysroot
     ifeq ($(PLATFORM_TARGET),k1-dynamic)
         # K1 Dynamic: Mixed static/dynamic linking
         # Project libraries linked statically, system libraries linked dynamically
@@ -853,7 +918,9 @@ else ifneq ($(CROSS_COMPILE)$(filter x86 x86-fbdev x86-both,$(PLATFORM_TARGET)),
             -Wl,-Bdynamic \
             -lstdc++ -lz -lm -lpthread -lrt -ldl -latomic -lgcc_s
     else ifneq ($(filter mips k1 ad5x,$(PLATFORM_TARGET)),)
-        # MIPS targets (K1, AD5X) use musl - fully static, no system library paths needed
+        # No system library path: these toolchains are self-contained.
+        # The unified MIPS build (mips/k1/ad5x) uses the ct-ng musl toolchain
+        # and links fully static, so nothing resolves from a host or chroot at runtime.
         # -latomic: Required for 64-bit atomics on 32-bit MIPS (std::atomic<int64_t>)
         LDFLAGS := $(LIBHV_LIBS) $(FMT_LIBS) $(WPA_CLIENT_LIB) $(LIBNL_LIBS) -latomic -ldl -lz -lm -lpthread
     else ifeq ($(PLATFORM_TARGET),k2)
@@ -885,8 +952,9 @@ else ifneq ($(CROSS_COMPILE)$(filter x86 x86-fbdev x86-both,$(PLATFORM_TARGET)),
         ifneq ($(SNAPMAKER_SKIP_LIBINPUT),yes)
             LDFLAGS += -linput
         endif
-        # GPU-accelerated rendering via EGL/OpenGL ES
-        ifeq ($(ENABLE_OPENGLES),yes)
+        # EGL/GLES/GBM for the 3D G-code renderer (src/rendering/gcode_gles_renderer.cpp)
+        # and any LVGL EGL display path once one is compiled.
+        ifneq ($(filter yes,$(ENABLE_OPENGLES) $(ENABLE_GLES_3D)),)
             LDFLAGS += -lEGL -lGLESv2 -lgbm
         endif
     endif
@@ -950,9 +1018,15 @@ CXXFLAGS += $(SCREENSAVER_DEFINES)
 CFLAGS += $(MOCK_DEFINES)
 CXXFLAGS += $(MOCK_DEFINES)
 
+CXXFLAGS += $(SPDLOG_DEFINES)
+
 # Add remote-control defines to compiler flags
 CFLAGS += $(REMOTE_CONTROL_DEFINES)
 CXXFLAGS += $(REMOTE_CONTROL_DEFINES)
+
+# Add diagnostic-upload defines to compiler flags
+CFLAGS += $(DIAG_UPLOAD_DEFINES)
+CXXFLAGS += $(DIAG_UPLOAD_DEFINES)
 
 # Add developer-panel defines to compiler flags
 CFLAGS += $(DEV_PANELS_DEFINES)
@@ -1036,7 +1110,8 @@ endif
 # Fast linker for host builds. helix-tests links 18 GB of objects into a 5 GB
 # binary -- 99% of both is DWARF from `-O2 -g` -- and every mutation-gate hunk,
 # every `make test`, pays that link again. Measured on this tree, same objects,
-# same warm page cache: GNU ld 31s, lld 6s (cold cache: 73s vs 9s).
+# same warm page cache: GNU ld 31s, lld 6s (cold cache: 73s vs 9s). Back to back
+# on a contended box, one test TU plus the link: lld 46s, mold 18s.
 #
 # Host only. Cross toolchains ship their own ld and are not all lld-capable, and
 # Yocto's LDFLAGS come from the recipe -- neither is ours to second-guess. macOS
@@ -1048,15 +1123,17 @@ ifeq ($(FAST_LINK),1)
 ifeq ($(CROSS_COMPILE),)
 ifneq ($(YOCTO_BUILD),yes)
 ifneq ($(UNAME_S),Darwin)
-    HOST_FAST_LD := $(shell command -v ld.lld 2>/dev/null)
+    # mold first, then lld. Both beat GNU ld by a wide margin on this link, and
+    # every test build pays for it, so take the fastest one installed.
+    #
+    # Which one is usable is decided by scripts/pick-fast-linker.sh, not here:
+    # scripts/check-deps.sh has to give a developer the same answer, and a rule
+    # written out twice is a rule that drifts. It prints the name for -fuse-ld=
+    # and explains an unusable linker on stderr. Empty means GNU ld, which is
+    # correct everywhere and only slower.
+    HOST_FAST_LD := $(strip $(shell $(CURDIR)/scripts/pick-fast-linker.sh '$(CXX)'))
     ifneq ($(HOST_FAST_LD),)
-        LDFLAGS += -fuse-ld=lld
-    else
-        # Loud on purpose. Without lld this box silently pays ~25 extra seconds
-        # on every test link, and the person or agent waiting on it has no way
-        # to tell that from the build simply being big.
-        $(warning ⚠️  ld.lld not found — helix-tests will link with GNU ld and take ~25s longer per link.)
-        $(warning     Install it: sudo apt install lld   (or set FAST_LINK=0 to silence this.))
+        LDFLAGS += -fuse-ld=$(HOST_FAST_LD)
     endif
 endif
 endif
@@ -1066,8 +1143,9 @@ endif
 # Sound system — synth, sequencer, backends (PWM/M300/SDL/ALSA), themes
 # Tracker player — MOD/MED file playback with PCM samples (requires HELIX_HAS_SOUND)
 #
-# HELIX_HAS_SOUND:   Pi, x86, AD5M family, native — any platform with audio output
-# HELIX_HAS_TRACKER: Pi, x86, native, ad5x — platforms cleared for tracker playback
+# HELIX_HAS_SOUND:   Pi, x86, AD5M family, unified MIPS, native — any platform
+#                    with audio output
+# HELIX_HAS_TRACKER: Pi, x86, native, unified MIPS — platforms cleared for tracker playback
 # ad5m/ad5m-br: tone-only. The PWM backend answers supports_render_source() false —
 #   the piezo demodulates a duty-modulated carrier as static — so tracker playback
 #   falls back to the set_voice note path on the sequencer thread: SCHED_OTHER, a
@@ -1076,27 +1154,27 @@ endif
 #   note fallback is measured against a running print on the hardware.
 # ad5x: tracker on. The jz_pwm backend drives the tracker's PC-speaker path with
 #   per-note buffers, so no PCM render loop is involved.
-# K1/K2/MIPS: no audio hardware at all
+# K1, MIPS and AD5X: tone SFX via the PWM/jz_pwm backend (HELIX_HAS_SOUND).
+# K2, cc1, snapmaker-u1 and yocto match no branch below: no sound flags at all.
 SOUND_CXXFLAGS :=
 TRACKER_CXXFLAGS :=
 ifneq (,$(filter pi pi-fbdev pi-both pi32 pi32-fbdev pi32-both x86 x86-fbdev x86-both,$(PLATFORM_TARGET)))
     SOUND_CXXFLAGS := -DHELIX_HAS_SOUND
     TRACKER_CXXFLAGS := -DHELIX_HAS_TRACKER
-else ifneq (,$(filter ad5m ad5m-br ad5x,$(PLATFORM_TARGET)))
+else ifneq (,$(filter ad5m ad5m-br mips k1 ad5x,$(PLATFORM_TARGET)))
     # PWM buzzer for tone-mode SFX only. Auto-export still applies to
     # ad5m/ad5m-br above; only tracker playback is withheld.
     SOUND_CXXFLAGS := -DHELIX_HAS_SOUND
-    ifneq (,$(filter ad5x,$(PLATFORM_TARGET)))
-        # ad5x: the jz_pwm backend drives the tracker's PC-speaker (synth
-        # fallback) path — per-note buffers, no PCM render loop involved.
+    ifneq (,$(filter mips k1 ad5x,$(PLATFORM_TARGET)))
+        # Unified MIPS: the jz_pwm backend drives the tracker's PC-speaker
+        # (synth fallback) path — per-note buffers, no PCM render loop involved.
         TRACKER_CXXFLAGS := -DHELIX_HAS_TRACKER
     endif
 else ifeq ($(PLATFORM_TARGET),native)
     SOUND_CXXFLAGS := -DHELIX_HAS_SOUND
     TRACKER_CXXFLAGS := -DHELIX_HAS_TRACKER
 endif
-# K1, K2, MIPS — no sound at all
-CXXFLAGS += $(SOUND_CXXFLAGS) $(TRACKER_CXXFLAGS) $(PWM_SOUND_CXXFLAGS) $(PWM_AUTO_EXPORT_CXXFLAGS) $(JZ_PWM_CXXFLAGS)
+CXXFLAGS +=$(SOUND_CXXFLAGS) $(TRACKER_CXXFLAGS) $(PWM_SOUND_CXXFLAGS) $(PWM_AUTO_EXPORT_CXXFLAGS) $(JZ_PWM_CXXFLAGS)
 
 # Feature gates — default ON for all platforms.
 # Disabled per-platform in mk/cross.mk for memory-constrained targets.
@@ -1116,21 +1194,36 @@ HELIX_HAS_SNAPMAKER ?= 1
 # code AND their big runtime buffers (ESP32-class targets set these to 0).
 HELIX_HAS_GCODE_VIEWER ?= 1
 HELIX_HAS_BED_MESH_3D ?= 1
-# Compile-out gate for the dlopen()-based plugin system — no dynamic linking
-# on statically-linked embedded targets (ESP32-class).
+# Compile-out gate for the plugin runtime — embedded targets that cannot
+# spare the interpreter's size set this to 0 (ESP32-class).
 HELIX_HAS_PLUGINS ?= 1
+# Lua 5.4 for the plugin runtime. Compiled as C++ so a Lua error is an exception and a
+# binding's destructors run. The io, os, package and debug libraries stay out of the
+# binary, which keeps them out of every plugin's reach.
+LUA_DIR := lib/lua
+ifeq ($(HELIX_HAS_PLUGINS),1)
+LUA_EXCLUDED := lua.c onelua.c ltests.c linit.c liolib.c loslib.c loadlib.c ldblib.c
+LUA_SRCS := $(filter-out $(addprefix $(LUA_DIR)/,$(LUA_EXCLUDED)),$(wildcard $(LUA_DIR)/*.c))
+LUA_OBJS := $(patsubst $(LUA_DIR)/%.c,$(OBJ_DIR)/lua/%.o,$(LUA_SRCS))
+else
+LUA_OBJS :=
+endif
 # Compile-out gate for the timelapse VIEWING UI (video list/download/playback).
 # Capture-control (settings, render, save-frames) is plain JSON-RPC and is NOT
 # gated — printers keep capturing timelapses even where the screen can't view them.
 HELIX_HAS_TIMELAPSE_VIEWER ?= 1
-# Compile-out gate for the belt-tuning UI. It needs klippy's UDS accelerometer
-# stream, so it only works co-located with klippy, and its widgets are dropped
-# from builds that cannot reach one.
+# Compile-out gate for the Belt Tension panel. It reads Klipper's /tmp results,
+# so it only works co-located with Klipper.
 HELIX_HAS_BELT_TUNER ?= 1
 # Compile-out gate for the font rungs above the authored tier ladder. Only the
 # high-DPI UI scale factor reaches them, so a platform with a fixed panel and no
 # scale factor above 1.0 neither packs nor links those faces.
 HELIX_HAS_HIDPI_FONTS ?= 1
+# Lowest raw backlight level the panel renders visibly, as a percent of the raw
+# range. Nonzero percent scales across [floor, max] so the dimmest slider level
+# is the darkest visible level instead of black. settings.json's
+# /display/backlight_floor_percent overrides it per panel.
+HELIX_BACKLIGHT_FLOOR_PERCENT ?= 0
 CXXFLAGS += -DHELIX_HAS_LABEL_PRINTER=$(HELIX_HAS_LABEL_PRINTER) \
             -DHELIX_HAS_CFS=$(HELIX_HAS_CFS) \
             -DHELIX_HAS_IFS=$(HELIX_HAS_IFS) \
@@ -1142,25 +1235,53 @@ CXXFLAGS += -DHELIX_HAS_LABEL_PRINTER=$(HELIX_HAS_LABEL_PRINTER) \
             -DHELIX_HAS_PLUGINS=$(HELIX_HAS_PLUGINS) \
             -DHELIX_HAS_TIMELAPSE_VIEWER=$(HELIX_HAS_TIMELAPSE_VIEWER) \
             -DHELIX_HAS_BELT_TUNER=$(HELIX_HAS_BELT_TUNER) \
-            -DHELIX_HAS_HIDPI_FONTS=$(HELIX_HAS_HIDPI_FONTS)
+            -DHELIX_HAS_HIDPI_FONTS=$(HELIX_HAS_HIDPI_FONTS) \
+            -DHELIX_BACKLIGHT_FLOOR_PERCENT=$(HELIX_BACKLIGHT_FLOOR_PERCENT)
 
 # Parallel build control
-# Auto-parallelizes builds: plain 'make' automatically uses -j$(NPROC).
-#
-# Detection method (see mk/rules.mk):
-#   - 'make':     No jobserver → auto-add -j$(NPROC)
-#   - 'make -j':  No jobserver → auto-fix to -j$(NPROC) with warning
-#   - 'make -j8': Has jobserver → pass through unchanged
+# A make that picks its own -j (plain `make`, or unlimited `make -j`) takes
+# JOBS from `scripts/helix-claim jobs`: the jobpool's size when one is live,
+# else the cores capped by memory. A make under the jobpool shim already
+# carries the pool's jobserver and never reads JOBS. An explicit -jN passes
+# through unchanged. The two-phase re-invoke that applies it lives in
+# mk/rules.mk `all:` and mk/tests.mk `$(TEST_BIN)`.
 #
 # MAKEFLAGS format:
 #   - 'make' or 'make -j': No 'jobserver' in MAKEFLAGS
 #   - 'make -jN': MAKEFLAGS contains '--jobserver-fds=X,Y' or '--jobserver-auth'
+#
+# The shell text that asks helix-claim. Its answer is used only when it is one
+# positive integer, anything else (no answer, an error, a second line) falls
+# back to the cores, because make reads every extra word after -jN as a goal.
+JOBS_QUERY = j=$$(scripts/helix-claim jobs 2>/dev/null) && [ "$$j" -gt 0 ] 2>/dev/null && echo $$j || echo $(NPROC)
 
-JOBS ?= $(NPROC)
+# Asked once, and only when read, so a make under a bounded -jN never pays for it.
+JOBS_CLAIMED = $(eval JOBS_CLAIMED := $(shell $(JOBS_QUERY)))$(JOBS_CLAIMED)
+JOBS ?= $(JOBS_CLAIMED)
 
-# Output synchronization for parallel builds (requires make 4.0+, ignored on 3.81)
-ifneq ($(JOBS),1)
+# The same answer as shell text, for the re-invoke recipes. make expands a
+# recipe's whole logical line before the shell picks a branch, so $(JOBS) there
+# would ask helix-claim even when MAKEFLAGS already carries a jobserver. A JOBS
+# the caller set is used as given.
+JOBS_SH = $(if $(filter file,$(origin JOBS)),$$($(JOBS_QUERY)),$(JOBS))
+
+# Output synchronization for parallel builds (requires make 4.0+, ignored on 3.81).
+# Only a JOBS=1 the caller set means serial; reading the default here would ask
+# helix-claim on every parse.
+ifneq ($(if $(filter file,$(origin JOBS)),default,$(JOBS)),1)
     MAKEFLAGS += --output-sync=target
+endif
+
+# Builds run niced, so the compositor and editor stay responsive while every
+# core is busy. The desktop's own scheduler (system76-scheduler on thelio)
+# drops a make to nice 19 only when it happens to notice it, and never lists
+# helix-tests, so without this a sweep's shards can run at nice 0. Nested makes
+# inherit it and see no need to go lower. HELIX_NICE=0 opts out.
+HELIX_NICE ?= 10
+ifneq ($(HELIX_NICE),0)
+    # `nice` with no command prints its priority on GNU coreutils but only a
+    # usage error on macOS, so its stderr stays inside the substitution.
+    $(shell [ "$$(nice 2>/dev/null)" -lt $(HELIX_NICE) ] 2>/dev/null && renice -n $(HELIX_NICE) -p $$PPID >/dev/null 2>&1)
 endif
 
 # Binaries
@@ -1195,7 +1316,7 @@ MOCK_OBJS := $(patsubst $(TEST_MOCK_DIR)/%.cpp,$(OBJ_DIR)/tests/mocks/%.o,$(MOCK
 # Default target
 .DEFAULT_GOAL := all
 
-.PHONY: all build clean run test tests demo compile_commands compile_commands_full libhv-build apply-patches generate-fonts validate-fonts regen-fonts check-doc-anchors docs-pinned regen-lvgl-event-codes check-lvgl-event-codes update-mdi-cache verify-mdi-codepoints help check-deps install-deps venv-setup icon format format-staged screenshots tools moonraker-inspector strict quality setup translations symbols strip dev install regen-filaments
+.PHONY: all build clean run test tests demo compile_commands compile_commands_full libhv-build apply-patches generate-fonts validate-fonts regen-fonts check-doc-anchors docs-pinned regen-lvgl-event-codes check-lvgl-event-codes update-mdi-cache help check-deps install-deps venv-setup icon format format-staged screenshots tools moonraker-inspector strict quality setup translations symbols strip dev install regen-filaments
 
 # Fast development build: -O0 skips optimization passes (~2x faster compilation)
 # Library code still builds at -O2 (via SUBMODULE_CFLAGS) since it rarely changes
@@ -1227,7 +1348,8 @@ help:
 	echo "  $${G}make -j$${X}           - Build (parallel, auto-detects cores)"; \
 	echo "  $${G}make dev$${X}          - Fast build (-O0, ~2x faster compilation)"; \
 	echo "  $${G}make run$${X}          - Build and run the UI"; \
-	echo "  $${G}make test$${X}         - Run unit tests"; \
+	echo "  $${G}make t F=[tag]$${X}    - Build, then run ONE tag or case (the inner loop)"; \
+	echo "  $${G}make test$${X}         - Build unit tests (does not run them)"; \
 	echo "  $${G}make clean$${X}        - Remove build artifacts"; \
 	echo "  $${G}make strict$${X}       - Build with -Werror (warnings = errors)"; \
 	echo ""; \
@@ -1322,6 +1444,8 @@ quality:
 # Generated contributors header — sourced from CONTRIBUTORS.txt (committed)
 # so cross-compile Docker builds and shallow CI checkouts produce correct output.
 CONTRIBUTORS_H := $(BUILD_DIR)/generated/contributors.h
+# Lines from this marker down in CONTRIBUTORS.txt are hand-maintained.
+CONTRIB_MARKER := \# --- no commit, but this exists because of them ---
 
 $(CONTRIBUTORS_H): CONTRIBUTORS.txt scripts/gen-contributors.sh
 	$(Q)BUILD_DIR=$(BUILD_DIR) ./scripts/gen-contributors.sh
@@ -1349,6 +1473,9 @@ $(OBJ_DIR)/system/helix_version.o: $(GIT_HASH_H)
 # contributors, then commit the result.
 .PHONY: update-contributors
 update-contributors:
+	@# Everything from MARKER down is hand-maintained (people with no commit:
+	@# field testers, bug reporters, firmware authors) and is preserved verbatim.
+	@sed -n '/^$(CONTRIB_MARKER)$$/,$$p' CONTRIBUTORS.txt > $(BUILD_DIR)/.contrib-extras 2>/dev/null || true
 	@{ \
 		git -c safe.directory='*' log --format='%aN'; \
 		git -c safe.directory='*' log --format='%(trailers:key=Co-authored-by,valueonly,unfold)' \
@@ -1358,6 +1485,8 @@ update-contributors:
 	} | sort -u \
 		| grep -ivE 'bot\b|\[bot\]|dependabot|github-actions|claude' \
 		| awk 'length >= 2' > CONTRIBUTORS.txt
+	@if [ -s $(BUILD_DIR)/.contrib-extras ]; then cat $(BUILD_DIR)/.contrib-extras >> CONTRIBUTORS.txt; fi
+	@rm -f $(BUILD_DIR)/.contrib-extras
 	@echo "$(GREEN)✓ CONTRIBUTORS.txt updated ($$(wc -l < CONTRIBUTORS.txt) contributors)$(RESET)"
 	@echo "  Review the diff and commit: git diff CONTRIBUTORS.txt"
 
@@ -1377,6 +1506,9 @@ include mk/watchdog.mk
 ifdef PI_DUAL_LINK
 include mk/pi-dual-link.mk
 endif
+ifeq ($(ENABLE_EGL_RUNG),yes)
+include mk/egl-link.mk
+endif
 include mk/rules.mk
 
 # Debug helpers — print computed variables for bats tests.
@@ -1392,6 +1524,11 @@ print-target-cflags:
 print-cxxflags:
 	@echo "$(CXXFLAGS)"
 
+# Generic accessor, so a gate that needs a variable no one has printed before
+# does not need a new target here. `make print-var-SUBMODULE_CXXFLAGS`.
+print-var-%:
+	@echo "$($*)"
+
 # =============================================================================
 # Install target — stages binary + assets under $(DESTDIR)/opt/helixscreen/
 #
@@ -1401,7 +1538,7 @@ print-cxxflags:
 #
 # Layout:
 #   $(DESTDIR)/opt/helixscreen/
-#     bin/          helix-screen, helix-splash, helix-watchdog (if built)
+#     bin/          helix-screen, helix-splash, helix-watchdog, libhelix-bluetooth.so (if built)
 #     ui_xml/       runtime XML layouts (components, panels, translations)
 #     assets/
 #       fonts/      (only tiers enabled for this platform)
@@ -1435,6 +1572,10 @@ install:
 	fi
 	@if [ -x "$(BIN_DIR)/helix-watchdog" ]; then \
 		install -m 0755 "$(BIN_DIR)/helix-watchdog" "$(DESTDIR)/opt/helixscreen/bin/helix-watchdog"; \
+	fi
+	@# Bluetooth plugin: BluetoothLoader dlopen()s it from the binary's own directory.
+	@if [ -f "$(BIN_DIR)/libhelix-bluetooth.so" ]; then \
+		install -m 0755 "$(BIN_DIR)/libhelix-bluetooth.so" "$(DESTDIR)/opt/helixscreen/bin/libhelix-bluetooth.so"; \
 	fi
 	@echo "  → binaries"
 	@# ui_xml: copy tree, then prune source-tree build scaffolding that isn't runtime data.

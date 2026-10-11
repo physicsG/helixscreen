@@ -38,6 +38,7 @@
 
 #include "ams_backend_afc.h"
 #include "ams_types.h"
+#include "test_helpers/afc_test_access.h"
 
 #include <algorithm>
 #include <any>
@@ -49,11 +50,13 @@
 
 using namespace helix;
 
+namespace helix {
+
 class AfcToolchangerStatusHelper : public AmsBackendAfc {
   public:
     AfcToolchangerStatusHelper() : AmsBackendAfc(nullptr, nullptr) {
         std::vector<std::string> names{"lane1", "lane2"};
-        initialize_slots(names);
+        AfcTestAccess::initialize_slots(*this, names);
         running_ = true;
     }
 
@@ -68,19 +71,20 @@ class AfcToolchangerStatusHelper : public AmsBackendAfc {
 
     [[nodiscard]] int extruder_count() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        return num_extruders_;
+        return AfcTestAccess::num_extruders(*this);
     }
 
     [[nodiscard]] std::vector<std::string> extruder_infos() const {
         std::lock_guard<std::mutex> lock(mutex_);
         std::vector<std::string> out;
-        out.reserve(extruders_.size());
-        for (const auto& e : extruders_) {
+        out.reserve(AfcTestAccess::extruders(*this).size());
+        for (const auto& e : AfcTestAccess::extruders(*this)) {
             out.push_back(e.name);
         }
         return out;
     }
 };
+} // namespace helix
 
 namespace {
 
@@ -192,6 +196,8 @@ TEST_CASE("AFC.system still wins when present — it carries strictly more",
 // status-only answer; the `[AFC_Toolchanger …]` section in configfile.settings
 // is the only discriminator, and that case seeds it directly.
 
+namespace helix {
+
 /// Four lanes, gcode captured, driven only by fed status frames.
 class AfcStatusDispatchHelper : public AmsBackendAfc {
   public:
@@ -200,7 +206,7 @@ class AfcStatusDispatchHelper : public AmsBackendAfc {
         // status UNKNOWN, which is what a freshly subscribed backend holds
         // before the per-lane AFC_stepper frames land.
         std::vector<std::string> names{"lane1", "lane2", "lane3", "lane4"};
-        initialize_slots(names);
+        AfcTestAccess::initialize_slots(*this, names);
         running_ = true;
     }
 
@@ -233,7 +239,7 @@ class AfcStatusDispatchHelper : public AmsBackendAfc {
     /// client_ is null here, so query_afc_configfile_topology() never runs.
     void seed_configfile_toolchanger(bool present) {
         std::lock_guard<std::mutex> lock(mutex_);
-        configfile_has_toolchanger_ = present;
+        AfcTestAccess::configfile_has_toolchanger(*this) = present;
     }
 
     [[nodiscard]] bool sent(const std::string& gcode) const {
@@ -253,6 +259,7 @@ class AfcStatusDispatchHelper : public AmsBackendAfc {
 
     std::vector<std::string> captured;
 };
+} // namespace helix
 
 namespace {
 
@@ -421,6 +428,17 @@ TEST_CASE("Per-extruder device actions materialise from the status payload alone
         CHECK_FALSE(single.has_action("bowden_T0"));
         CHECK_FALSE(single.has_action("led_extruder_T0"));
     }
+
+    SECTION("a hub-less topology does not advertise the hub-keyed bowden slider") {
+        // SET_BOWDEN_LENGTH is HUB= keyed, and a PARALLEL / direct_load
+        // machine publishes no hub object for the slider to address — the
+        // control cannot succeed there.
+        AfcStatusDispatchHelper hubless;
+        nlohmann::json frame = single_extruder_status();
+        frame["hubs"] = nlohmann::json::array();
+        hubless.feed_afc(frame);
+        CHECK_FALSE(hubless.has_action("bowden_length"));
+    }
 }
 
 TEST_CASE("Per-extruder actions resolve names discovered from the status payload (#1200)",
@@ -444,5 +462,27 @@ TEST_CASE("Per-extruder actions resolve names discovered from the status payload
     SECTION("an index past the discovered extruders is refused, not sent") {
         CHECK_FALSE(afc.execute_device_action("led_extruder_T7"));
         CHECK(afc.captured.empty());
+    }
+
+    SECTION("plain led_extruder drives the first extruder on a single-extruder frame") {
+        AfcStatusDispatchHelper single;
+        single.feed_afc(single_extruder_status());
+
+        REQUIRE(single.execute_device_action("led_extruder"));
+        CHECK(single.sent("AFC_SET_EXTRUDER_LED EXTRUDER=extruder TURN_ON=1"));
+        REQUIRE(single.execute_device_action("led_extruder"));
+        CHECK(single.sent("AFC_SET_EXTRUDER_LED EXTRUDER=extruder TURN_ON=0"));
+    }
+
+    SECTION("plain led_extruder addresses Klipper's default extruder when none is discovered") {
+        // A frame that published no extruder names must not brick the toggle:
+        // Klipper's first extruder is always named `extruder`.
+        AfcStatusDispatchHelper bare;
+        nlohmann::json frame = single_extruder_status();
+        frame["extruders"] = nlohmann::json::array();
+        bare.feed_afc(frame);
+
+        REQUIRE(bare.execute_device_action("led_extruder"));
+        CHECK(bare.sent("AFC_SET_EXTRUDER_LED EXTRUDER=extruder TURN_ON=1"));
     }
 }

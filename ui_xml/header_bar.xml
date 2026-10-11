@@ -14,19 +14,16 @@
   -->
   <consts>
     <!-- Cap for the header's action buttons.
-
          These must fit INSIDE header_height, not merely be a comfortable
          standalone touch target. button_height's own ladder exceeds
          header_height from the LARGE tier up (72>60, 80>68, 96>80), so a
          header passing #button_height gets a button taller than its own bar;
          style_flex_cross_place centers the overflow and the top half clips off
          the screen.
-
          Applied as style_max_height rather than height, because the
          action_button_height default is `content` and those self-sized buttons
          are already correct — a cap leaves them alone and clamps only the
          oversized ones.
-
          Roughly 80% of the corresponding header_height at each tier. -->
     <px name="header_button_height_micro" value="22"/>
     <px name="header_button_height_tiny" value="26"/>
@@ -35,25 +32,22 @@
     <px name="header_button_height_large" value="48"/>
     <px name="header_button_height_xlarge" value="54"/>
     <px name="header_button_height_xxlarge" value="64"/>
-
-    <!-- E-Stop spacer gutter. The slot itself holds NO button — it is a
-         transparent right-most strip that reserves horizontal room so the
-         title and any action buttons stay clear of the floating e-stop circle,
-         which lives at the PANEL ROOT (full-height parent → fully hit-testable,
-         no header clip — prestonbrown/helixscreen#1204). The spacer is gated by
-         estop_visible_subject; re-measure with ctl geom if the FAB resizes. -->
-    <px name="estop_slot_width_micro" value="48"/>
-    <px name="estop_slot_width_tiny" value="52"/>
-    <px name="estop_slot_width_small" value="58"/>
-    <px name="estop_slot_width_medium" value="64"/>
-    <px name="estop_slot_width_large" value="68"/>
-    <px name="estop_slot_width_xlarge" value="78"/>
-    <px name="estop_slot_width_xxlarge" value="88"/>
   </consts>
   <!-- API Properties -->
   <api>
     <prop name="title" type="string"/>
     <prop name="title_tag" type="string" default=""/>
+    <!-- Optional live title. When a screen's header names something that changes
+         under it - the box a detail view is showing, say - it binds a string
+         subject here and leaves `title` as the value shown until the first
+         publish. An empty default resolves to no binding at all, so every header
+         that does not need one is untouched. `title` is still what a static
+         header uses, and stays the translated one: a bound title carries a name
+         the app composed, and is translated at the point it is composed. -->
+    <prop name="title_subject" type="string" default=""/>
+    <!-- Titles render in capitals; "none" keeps the title's own case (a name
+         whose case carries meaning, like "LEDs"). -->
+    <prop name="title_transform" type="string" default="uppercase"/>
     <!-- Optional trailing badge: a small image plus a short label, for a screen
          that needs to show WHICH record it is editing. Both parts are empty by
          default and the group stays hidden unless title_badge_subject resolves
@@ -103,17 +97,24 @@
     <!-- Second action button (appears to LEFT of primary action button) -->
     <prop name="action_button_2_text" type="string" default=""/>
     <prop name="action_button_2_text_tag" type="string" default=""/>
+    <prop name="action_button_2_icon" type="string" default=""/>
+    <prop name="action_button_2_icon_size" type="string" default="sm"/>
     <prop name="action_button_2_bg_color" type="string" default="#secondary"/>
+    <prop name="action_button_2_radius" type="string" default="#border_radius"/>
+    <prop name="action_button_2_width" type="string" default="content"/>
+    <!-- Floor for the text-shaped slot; an icon-only consumer passes a smaller
+         value so the button reads as a circle. -->
+    <prop name="action_button_2_min_width" type="string" default="90"/>
     <prop name="action_button_2_callback" type="string" default=""/>
     <prop name="hide_action_button_2" type="string" default="true"/>
-    <!-- Dedicated E-Stop spacer (rightmost). When estop_visible_subject
-         resolves to 1, the spacer takes layout width, shifting the title and
-         any action buttons left so they never share x with the floating e-stop
-         circle (which lives at the panel root). The spacer holds NO button.
-         Empty default = the bind_flag no-ops (engine guard) and the spacer
-         stays hidden, so a header that does not ask for e-stop renders nothing
-         — same pattern as action_button_hidden_subject above. -->
-    <prop name="estop_visible_subject" type="string" default=""/>
+    <prop name="action_button_2_hidden_subject" type="string" default=""/>
+    <!-- Expression form of the above, for a button hidden by a threshold or
+         compound condition on global subjects (e.g. "ui_breakpoint lt 2").
+         Empty default leaves the flag alone; unlike disabled_cond's "0" a
+         constant here would fire once at bind and un-hide the slot for every
+         consumer that never asked for the button. -->
+    <prop name="action_button_2_hidden_cond" type="string" default=""/>
+    <prop name="action_button_2_disabled_subject" type="string" default=""/>
   </api>
   <view extends="lv_obj"
         width="100%" height="#header_height" style_pad_left="0" style_pad_right="#space_lg" style_pad_top="0"
@@ -126,9 +127,18 @@
             style_flex_track_place="center" flex_flow="row" style_pad_gap="#space_xs">
       <event_cb trigger="clicked" callback="$back_button_callback"/>
       <icon src="back" size="lg" variant="text" clickable="false" event_bubble="true"/>
+      <!-- bind_text is deliberately FIRST. An unsupplied title_subject resolves to the
+           empty name, which is a registered no-op INT subject, and binding to that
+           stamps "0" over the title. Applying text/translation_tag afterwards puts the
+           static title back, and the no-op subject never changes, so it never returns.
+           A header that does supply a subject still retitles on every publish. -->
+      <!-- clip, not dots: dots with a content height wraps a title too long
+           for its slot onto a second line mid-word. clip measures the text
+           unwrapped, so the title stays one line and is cut at the slot edge. -->
       <text_heading name="header_title"
-                    text="$title" translation_tag="$title_tag" text_transform="uppercase" flex_grow="1"
-                    style_text_align="left" clickable="false" event_bubble="true" scrollable="false"/>
+                    long_mode="clip" bind_text="$title_subject" text="$title" translation_tag="$title_tag"
+                    text_transform="$title_transform" flex_grow="1" style_text_align="left" clickable="false"
+                    event_bubble="true" scrollable="false"/>
       <!-- Trailing badge (image + label), see the props above. Sits after the
            title so the two parts read together as one mark. -->
       <lv_obj name="header_title_badge"
@@ -140,11 +150,33 @@
         <text_body name="header_title_badge_text" style_text_color="#text_muted" clickable="false" event_bubble="true"/>
       </lv_obj>
     </lv_obj>
+    <!-- Content slot: a screen injects its own widgets here by nesting a
+         <header_bar-header_content> tag inside its header_bar instantiation;
+         the engine re-parents that tag's children into this object. Sits
+         between the title region and the action buttons, so the growing
+         back_button keeps it clear of the title. Carries no padding of its
+         own: injected content brings its left margin with it (see
+         header_coords in motion_panel.xml), so an unfilled slot is zero
+         width and a header that asks for nothing renders exactly as if the
+         slot did not exist. -->
+    <lv_obj name="header_content"
+            width="content" height="100%" style_pad_all="0" style_pad_left="0" style_pad_right="0" style_bg_opa="0"
+            style_border_width="0" scrollable="false" clickable="false" flex_flow="row" style_pad_gap="#space_sm"
+            style_flex_cross_place="center"/>
     <!-- Secondary action button (left of primary, hidden by default) -->
     <ui_button name="action_button_2"
-               width="content" height="$action_button_height" style_min_width="90"
-               style_max_height="#header_button_height" style_bg_color="$action_button_2_bg_color"
-               hidden="$hide_action_button_2" text="$action_button_2_text" translation_tag="$action_button_2_text_tag">
+               width="$action_button_2_width" height="$action_button_height"
+               style_min_width="$action_button_2_min_width" style_max_height="#header_button_height"
+               style_radius="$action_button_2_radius" style_bg_color="$action_button_2_bg_color"
+               hidden="$hide_action_button_2" icon="$action_button_2_icon" icon_size="$action_button_2_icon_size"
+               text="$action_button_2_text" translation_tag="$action_button_2_text_tag">
+      <bind_state_if_eq subject="$action_button_2_disabled_subject" state="disabled" ref_value="1"/>
+      <!-- Both bindings drive the same hidden flag, so order settles only the
+           value at bind time, where the subject form lands last. After that
+           whichever input changed most recently decides. Supply one form or
+           the other. -->
+      <bind_flag_if cond="$action_button_2_hidden_cond" flag="hidden"/>
+      <bind_flag_if_eq subject="$action_button_2_hidden_subject" flag="hidden" ref_value="1"/>
       <event_cb trigger="clicked" callback="$action_button_2_callback"/>
     </ui_button>
     <!-- Primary action button (hidden by default, pass hide_action_button="false" to show) -->
@@ -155,11 +187,8 @@
                style_radius="$action_button_radius" style_bg_color="$action_button_bg_color"
                hidden="$hide_action_button" icon="$action_button_icon" icon_size="$action_button_icon_size"
                text="$action_button_text" translation_tag="$action_button_text_tag">
-      <!-- STATE_BINDING_OK: a caller supplies EITHER action_button_disabled_cond
-           OR action_button_disabled_subject, never both, and the unused one
-           defaults to a constant that fires once at bind and never again. This
-           expression form must precede the subject binding so the subject form
-           wins when it is the one in use; see the prop comment. -->
+      <!-- Expression-driven disabled binding. Must precede the subject binding below;
+           see the action_button_disabled_cond prop comment for why. -->
       <bind_state_if cond="$action_button_disabled_cond" state="disabled"/>
       <!-- Reactive disabled state binding (enabled when subject exists and is non-empty) -->
       <bind_state_if_eq subject="$action_button_disabled_subject" state="disabled" ref_value="1"/>
@@ -171,45 +200,21 @@
          action_button props because those slots are already spoken for — 14
          panels set action_button, 4 set action_button_2 — and this must be able
          to appear on any of them.
-
          Global on purpose: an unsaved offset is lost on the next Klipper
          restart no matter which screen you are looking at, so the affordance
          follows you. The Controls panel keeps its own full-width Save button
-         for the moment you close the tune overlay and land back on it; both
-         carry the IDENTICAL condition and call the same handler, or one surface
-         would offer a save the other says is unnecessary.
-
-         Inline cond= rather than a shared <subject_expr>: subject_expr resolves
-         at component-load (Phase 8c) and any_tool_z_dirty is not registered
-         until ToolState::init_subjects() (Phase 9a), so a derived subject would
-         silently never register. See docs/devel/LVGL9_XML_GUIDE.md
-         § "Expression Conditionals".
-
+         for the moment you close the tune overlay and land back on it.
+         z_offset_save_available is the whole rule - firmware does not auto-save
+         AND something is dirty, machine-wide or per-tool - published by
+         helix::zoffset so every save surface and the save path itself ask one
+         question and cannot disagree.
          Icon-only: the micro header is 28px tall with 22px buttons and the
          title already flex-grows, so a labelled button here eats the title. -->
     <ui_button name="header_save_z_offset"
                width="content" height="$action_button_height" style_max_height="#header_button_height"
-               style_bg_color="#success" icon="check" icon_size="sm" hidden="true">
-      <!-- ONE binding, both conditions. Two flag bindings on the same widget
-           fight: bind_flag_if_eq is two-way, so a separate
-           `subject="z_offset_can_save" ref_value="0"` does not merely hide when
-           the firmware auto-saves — with the subject at 1 it REMOVES hidden,
-           overriding the dirty test beside it and leaving the button on screen
-           permanently. The Controls panel gets away with the pair only because
-           its two bindings sit on different widgets (button inside wrapper). -->
-      <bind_flag_if cond="z_offset_can_save and (gcode_z_offset ne 0 or any_tool_z_dirty)" flag="hidden" invert="true"/>
-      <bind_state_if_eq subject="job_holds_machine" state="disabled" ref_value="1"/>
+               style_bg_color="#success" icon="check" icon_size="sm" hidden="true" moves_machine="true">
+      <bind_flag_if_eq subject="z_offset_save_available" flag="hidden" ref_value="0"/>
       <event_cb trigger="clicked" callback="on_header_save_z_offset"/>
     </ui_button>
-    <!-- E-Stop spacer: rightmost reserved gutter — NO button inside. The
-         floating e-stop circle lives at the panel root (full-height parent) so
-         it never clips and stays fully hit-testable (#1204). This spacer just
-         reserves horizontal room so the title/action buttons stay clear of it.
-         Empty subject default = no-op binding, spacer stays hidden. -->
-    <lv_obj name="estop_slot"
-            width="#estop_slot_width" height="100%" style_pad_all="0" style_bg_opa="0" style_border_width="0"
-            scrollable="false" clickable="false" hidden="true">
-      <bind_flag_if_eq subject="$estop_visible_subject" flag="hidden" ref_value="0"/>
-    </lv_obj>
   </view>
 </component>

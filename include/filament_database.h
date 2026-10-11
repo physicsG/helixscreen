@@ -3,14 +3,17 @@
 
 #pragma once
 
+#include "text_io.h"
+
 #include <algorithm>
 #include <cmath>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
-// Forward declaration for override merge in find_material()
+// The user's sparse per-type fields, owned by MaterialSettingsManager
 namespace filament {
 struct MaterialOverride;
 const MaterialOverride* get_material_override(std::string_view name);
@@ -18,11 +21,11 @@ const MaterialOverride* get_material_override(std::string_view name);
 
 /**
  * @file filament_database.h
- * @brief Static database of filament materials with temperature recommendations
+ * @brief Filament material types with temperature recommendations
  *
- * Provides a comprehensive list of common 3D printing materials with their
- * recommended temperature ranges. Used by the Edit Filament modal to auto-derive
- * temperatures when a material is selected.
+ * The shipped rows are the `types` array in assets/filaments.json. The user
+ * overlay's `types` array (user_filaments.json) patches a shipped row by name or
+ * defines a new one. Everything here reads the merged snapshot from materials().
  *
  * Temperature sources:
  * - Manufacturer recommendations from major brands (Bambu, Polymaker, eSUN, etc.)
@@ -33,16 +36,17 @@ const MaterialOverride* get_material_override(std::string_view name);
 namespace filament {
 
 /**
- * @brief User override for material temperature settings
+ * @brief The fields of one type the user set in the overlay
  *
- * Only overridden fields are present (sparse storage).
- * Applied transparently in find_material() so all callers
- * automatically get user-customized values.
+ * Only the fields the user set are present (sparse). They are already merged
+ * into materials(); this view exists for callers that must tell a user value
+ * from a shipped default.
  */
 struct MaterialOverride {
     std::optional<int> nozzle_min;
     std::optional<int> nozzle_max;
     std::optional<int> bed_temp;
+    std::optional<int> chamber_temp; ///< 0 = deliberate "no chamber heat" for this material
     std::optional<std::string> preheat_macro;  ///< Klipper macro name (uppercase canonical form)
     std::optional<bool> macro_handles_heating; ///< true = macro replaces SET_HEATER_TEMPERATURE
 };
@@ -68,6 +72,8 @@ struct MaterialInfo {
     int chamber_temp_c;       ///< Recommended chamber temp (0 = none/open)
     const char* compat_group; ///< "PLA", "PETG", "ABS_ASA", "PA", "TPU", "PC", "HIGH_TEMP"
 
+    bool user_defined = false; ///< Defined by the user overlay, no shipped row
+
     /**
      * @brief Get recommended nozzle temperature (midpoint of range)
      */
@@ -91,115 +97,27 @@ struct MaterialInfo {
 };
 
 /**
- * @brief Static database of common filament materials
+ * @brief The effective material table: shipped types with the user overlay merged in
  *
- * Materials are grouped by category:
- * - Standard: PLA, PETG - most common, beginner-friendly
- * - Engineering: ABS, ASA, PC, PA - require enclosure/higher temps
- * - Flexible: TPU, TPE - rubber-like materials
- * - Support: PVA, HIPS - dissolvable/breakaway supports
- * - Specialty: Wood-fill, Marble, Metal-fill - decorative
- * - High-Temp: PEEK, PEI - industrial applications
+ * Loaded on first use. The snapshot is immutable; a reload swaps in a new one,
+ * and every `const char*` a MaterialInfo carries stays valid across reloads.
+ * Empty when the asset is missing or unparseable (logged as an error).
  */
-// clang-format off
-inline constexpr MaterialInfo MATERIALS[] = {
-    // name           nozzle   bed   category        dry_temp dry_min density chamber compat_group
-    //                min max                        °C       min     g/cm³   °C
+// NAMESPACE_OK: extends filament::, the material table's existing namespace
+std::shared_ptr<const std::vector<MaterialInfo>> materials();
 
-    // === Standard Materials (No enclosure required) ===
-    {"PLA",         190, 220, 60,  "Standard",      45, 240,  1.24f,  0,  "PLA"},
-    {"PLA+",        200, 230, 60,  "Standard",      45, 240,  1.24f,  0,  "PLA"},
-    {"PLA-CF",      200, 230, 60,  "Standard",      45, 240,  1.24f,  0,  "PLA"},       // Carbon fiber PLA
-    {"PLA-GF",      200, 230, 60,  "Standard",      45, 240,  1.24f,  0,  "PLA"},       // Glass fiber PLA
-    {"Silk PLA",    200, 230, 60,  "Standard",      45, 240,  1.24f,  0,  "PLA"},       // Shiny finish PLA
-    {"Matte PLA",   200, 230, 60,  "Standard",      45, 240,  1.24f,  0,  "PLA"},
-    {"PETG",        230, 260, 80,  "Standard",      55, 360,  1.27f,  0,  "PETG"},
-    {"PETG-CF",     240, 270, 80,  "Standard",      55, 360,  1.27f,  0,  "PETG"},      // Carbon fiber PETG
-    {"PETG-GF",     240, 270, 80,  "Standard",      55, 360,  1.27f,  0,  "PETG"},      // Glass fiber PETG
-    {"PCTG",        240, 270, 80,  "Standard",      55, 360,  1.23f,  0,  "PETG"},      // PETG variant, clearer
-    {"PET-CF",      270, 300, 80,  "Standard",      65, 480,  1.30f,  0,  "PETG"},      // Carbon fiber PET (Polymaker Fiberon)
-    {"PET-GF",      270, 300, 80,  "Standard",      65, 480,  1.40f,  0,  "PETG"},      // Glass fiber PET (Polymaker Fiberon)
-    {"PET",         250, 270, 80,  "Standard",      65, 480,  1.38f,  0,  "PETG"},      // Unmodified PET - runs hotter than PETG
-    {"PHA",         190, 220, 60,  "Standard",      45, 240,  1.25f,  0,  "PLA"},       // Polyhydroxyalkanoate, usually sold as a PLA/PHA blend
+/// The shipped rows alone, before the user overlay: the defaults a user
+/// override is measured against. Same lifetime rules as materials().
+// NAMESPACE_OK: extends filament::, the material table's existing namespace
+std::shared_ptr<const std::vector<MaterialInfo>> shipped_materials();
 
-    // === Engineering Materials (Enclosure recommended) ===
-    {"ABS",         240, 270, 100, "Engineering",   60, 240,  1.04f,  50, "ABS_ASA"},
-    {"ABS+",        240, 270, 100, "Engineering",   60, 240,  1.04f,  50, "ABS_ASA"},
-    {"ABS-CF",      240, 270, 100, "Engineering",   60, 240,  1.10f,  50, "ABS_ASA"},   // Carbon fiber ABS
-    {"ABS-GF",      240, 270, 100, "Engineering",   60, 240,  1.15f,  50, "ABS_ASA"},   // Glass fiber ABS
-    {"ASA",         240, 270, 100, "Engineering",   60, 240,  1.07f,  50, "ABS_ASA"},   // UV-resistant ABS alternative
-    {"ASA+",        240, 270, 100, "Engineering",   60, 240,  1.07f,  50, "ABS_ASA"},   // Enhanced ASA
-    {"ASA-CF",      250, 280, 100, "Engineering",   60, 240,  1.12f,  50, "ABS_ASA"},   // Carbon fiber ASA
-    {"ASA-GF",      250, 280, 100, "Engineering",   60, 240,  1.18f,  50, "ABS_ASA"},   // Glass fiber ASA
-    {"PC",          260, 300, 110, "Engineering",   80, 480,  1.20f,  55, "PC"},        // Polycarbonate
-    {"PC-CF",       270, 300, 110, "Engineering",   80, 480,  1.20f,  55, "PC"},        // Carbon fiber PC
-    {"PC-GF",       270, 300, 110, "Engineering",   80, 480,  1.35f,  55, "PC"},        // Glass fiber PC
-    {"PC-ABS",      250, 280, 100, "Engineering",   60, 240,  1.12f,  50, "ABS_ASA"},   // PC/ABS blend
+/// Re-read the shipped asset and the user overlay from their default paths.
+// NAMESPACE_OK: extends filament::, the material table's existing namespace
+void reload_materials();
 
-    // === Nylon/Polyamide (Enclosure required, dry storage) ===
-    {"PA",          250, 280, 80,  "Engineering",   70, 480,  1.14f,  50, "PA"},        // Generic nylon
-    {"PA6",         250, 280, 80,  "Engineering",   70, 480,  1.14f,  50, "PA"},
-    {"PA12",        250, 280, 80,  "Engineering",   70, 480,  1.14f,  50, "PA"},
-    {"PA66",        260, 290, 90,  "Engineering",   80, 480,  1.14f,  55, "PA"},        // Nylon 66
-    {"PA-CF",       260, 290, 80,  "Engineering",   70, 480,  1.14f,  50, "PA"},        // Carbon fiber nylon
-    {"PA-GF",       260, 290, 80,  "Engineering",   70, 480,  1.14f,  50, "PA"},        // Glass fiber nylon
-    {"PA6-CF",      270, 300, 90,  "Engineering",   80, 480,  1.15f,  50, "PA"},        // Carbon fiber nylon 6
-    {"PPA",         280, 320, 100, "Engineering",   80, 480,  1.18f,  60, "PA"},        // Polyphthalamide
-    {"PPA-CF",      290, 320, 100, "Engineering",   80, 480,  1.17f,  60, "PA"},        // Carbon fiber polyphthalamide
-    {"PPA-GF",      290, 320, 100, "Engineering",   80, 480,  1.25f,  60, "PA"},        // Glass fiber polyphthalamide
-
-    // === Polyolefins (poor bed adhesion; each keeps its OWN compat group so
-    //     endless spool never cross-swaps them with a chemically unrelated material) ===
-    {"PP",          220, 250, 60,  "Engineering",   60, 240,  0.90f,  0,  "PP"},        // Polypropylene
-    {"PP-CF",       225, 255, 60,  "Engineering",   60, 240,  0.98f,  0,  "PP"},        // Carbon fiber PP
-    {"PP-GF",       225, 255, 60,  "Engineering",   60, 240,  1.05f,  0,  "PP"},        // Glass fiber PP
-    {"PE",          220, 250, 60,  "Engineering",   0,  0,    0.95f,  0,  "PE"},        // Polyethylene - negligible moisture uptake, no drying
-
-    // === Flexible Materials ===
-    {"TPU",         210, 240, 50,  "Flexible",      55, 240,  1.21f,  0,  "TPU"},       // Shore 95A typical
-    {"TPU-Soft",    200, 230, 50,  "Flexible",      55, 240,  1.21f,  0,  "TPU"},       // Shore 85A or softer
-    {"TPE",         200, 230, 50,  "Flexible",      55, 240,  1.21f,  0,  "TPU"},
-    {"TPU-95A",     210, 240, 50,  "Flexible",      55, 240,  1.21f,  0,  "TPU"},       // Shore 95A hardness
-    {"TPU-85A",     200, 230, 50,  "Flexible",      55, 240,  1.19f,  0,  "TPU"},       // Shore 85A hardness (softer)
-    // CoPE/EVA/SBS get their own compat groups: they are semi-flexible but do NOT
-    // interchange with TPU, so endless spool must not treat them as swappable.
-    {"CoPE",        190, 240, 55,  "Flexible",      55, 240,  1.29f,  0,  "CoPE"},      // Copolyester elastomer - range taken from the only shipped product, uncertain
-    {"EVA",         190, 220, 50,  "Flexible",      0,  0,    0.95f,  0,  "EVA"},       // Ethylene-vinyl acetate - conservative range, uncertain; low Vicat so no drying
-    {"SBS",         215, 250, 70,  "Flexible",      50, 240,  1.02f,  0,  "SBS"},       // Styrene-butadiene-styrene
-
-    // === Support Materials ===
-    {"PVA",         180, 210, 60,  "Support",       45, 240,  1.23f,  0,  "PLA"},       // Water-soluble
-    {"HIPS",        230, 250, 100, "Support",       60, 240,  1.05f,  50, "ABS_ASA"},   // Limonene-soluble
-    {"BVOH",        190, 220, 60,  "Support",       45, 240,  1.10f,  0,  "PLA"},       // Water-soluble (better than PVA)
-
-    // === Specialty/Decorative ===
-    {"Wood PLA",    190, 220, 60,  "Specialty",     45, 240,  1.24f,  0,  "PLA"},       // Wood fiber fill
-    {"Marble PLA",  200, 220, 60,  "Specialty",     45, 240,  1.24f,  0,  "PLA"},       // Marble effect
-    {"Metal PLA",   200, 230, 60,  "Specialty",     45, 240,  1.24f,  0,  "PLA"},       // Metal powder fill
-    {"Glow PLA",    200, 230, 60,  "Specialty",     45, 240,  1.24f,  0,  "PLA"},       // Glow-in-the-dark
-    {"Color-Change",200, 230, 60,  "Specialty",     45, 240,  1.24f,  0,  "PLA"},       // Temperature reactive
-    // Foaming ("Aero"/LW) grades: the wide nozzle range IS the control knob - hotter
-    // means more foaming. Density below is the UNFOAMED value; effective density
-    // drops with foaming ratio, so length-from-weight math is approximate.
-    {"PLA-AERO",    200, 260, 55,  "Specialty",     45, 240,  1.21f,  0,  "PLA"},       // Foaming/lightweight PLA (LW-PLA)
-    {"ASA-AERO",    240, 280, 100, "Specialty",     60, 240,  0.99f,  50, "ABS_ASA"},   // Foaming/lightweight ASA
-
-    // === Recycled Materials ===
-    {"rPLA",        190, 220, 60,  "Recycled",      45, 240,  1.24f,  0,  "PLA"},       // Recycled PLA
-    {"rPETG",       230, 260, 80,  "Recycled",      55, 360,  1.27f,  0,  "PETG"},      // Recycled PETG
-
-    // === High-Temperature Industrial ===
-    {"PEEK",        370, 420, 120, "High-Temp",     100, 720, 1.30f,  80, "HIGH_TEMP"}, // Requires all-metal hotend
-    {"PEI",         340, 380, 120, "High-Temp",     100, 720, 1.27f,  80, "HIGH_TEMP"}, // ULTEM
-    {"PSU",         340, 380, 120, "High-Temp",     100, 720, 1.24f,  80, "HIGH_TEMP"}, // Polysulfone
-    {"PPSU",        350, 390, 140, "High-Temp",     100, 720, 1.29f,  80, "HIGH_TEMP"}, // Medical grade
-    {"PPS",         320, 350, 120, "High-Temp",     100, 720, 1.35f,  80, "HIGH_TEMP"}, // Polyphenylene sulfide
-    {"PPS-CF",      320, 350, 120, "High-Temp",     100, 720, 1.42f,  80, "HIGH_TEMP"}, // Carbon fiber PPS
-};
-// clang-format on
-
-/// Number of materials in the database
-inline constexpr size_t MATERIAL_COUNT = sizeof(MATERIALS) / sizeof(MATERIALS[0]);
+/// Load from explicit paths; an empty @p overlay_path means no overlay.
+// NAMESPACE_OK: extends filament::, the material table's existing namespace
+void load_materials_from(const std::string& asset_path, const std::string& overlay_path);
 
 /**
  * @brief Material name alias for common variations
@@ -235,11 +153,11 @@ inline constexpr size_t ALIAS_COUNT = sizeof(MATERIAL_ALIASES) / sizeof(MATERIAL
  */
 inline std::string_view resolve_alias(std::string_view name) {
     std::string name_lower(name);
-    std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+    name_lower = helix::text_io::to_lower(name_lower);
 
     for (const auto& alias : MATERIAL_ALIASES) {
         std::string alias_lower(alias.alias);
-        std::transform(alias_lower.begin(), alias_lower.end(), alias_lower.begin(), ::tolower);
+        alias_lower = helix::text_io::to_lower(alias_lower);
 
         if (alias_lower == name_lower) {
             return alias.canonical;
@@ -253,32 +171,33 @@ inline std::string_view resolve_alias(std::string_view name) {
  * @param name Material name to look up (aliases are resolved automatically)
  * @return MaterialInfo if found, std::nullopt otherwise
  */
-inline std::optional<MaterialInfo> find_material(std::string_view name) {
-    // First resolve any alias
-    std::string_view resolved = resolve_alias(name);
+// NAMESPACE_OK: extends filament::, the material table's existing namespace
+inline std::optional<MaterialInfo> find_material_in(const std::vector<MaterialInfo>& table,
+                                                    std::string_view name) {
+    std::string wanted(resolve_alias(name));
+    wanted = helix::text_io::to_lower(wanted);
 
-    for (const auto& mat : MATERIALS) {
-        // Case-insensitive comparison
+    for (const auto& mat : table) {
         std::string mat_lower(mat.name);
-        std::string name_lower(resolved);
-        std::transform(mat_lower.begin(), mat_lower.end(), mat_lower.begin(), ::tolower);
-        std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
-
-        if (mat_lower == name_lower) {
-            MaterialInfo result = mat;
-            const auto* ovr = get_material_override(mat.name);
-            if (ovr) {
-                if (ovr->nozzle_min)
-                    result.nozzle_min = *ovr->nozzle_min;
-                if (ovr->nozzle_max)
-                    result.nozzle_max = *ovr->nozzle_max;
-                if (ovr->bed_temp)
-                    result.bed_temp = *ovr->bed_temp;
-            }
-            return result;
+        mat_lower = helix::text_io::to_lower(mat_lower);
+        if (mat_lower == wanted) {
+            return mat;
         }
     }
     return std::nullopt;
+}
+
+inline std::optional<MaterialInfo> find_material(std::string_view name) {
+    return find_material_in(*materials(), name);
+}
+
+/**
+ * @brief Find the shipped row for a material, ignoring the user overlay
+ * @return nullopt for an unknown name and for a type only the user defined
+ */
+// NAMESPACE_OK: extends filament::, the material table's existing namespace
+inline std::optional<MaterialInfo> find_shipped_material(std::string_view name) {
+    return find_material_in(*shipped_materials(), name);
 }
 
 /**
@@ -288,7 +207,7 @@ inline std::optional<MaterialInfo> find_material(std::string_view name) {
  */
 inline std::vector<MaterialInfo> get_materials_by_category(std::string_view category) {
     std::vector<MaterialInfo> result;
-    for (const auto& mat : MATERIALS) {
+    for (const auto& mat : *materials()) {
         if (category == mat.category) {
             result.push_back(mat);
         }
@@ -302,7 +221,7 @@ inline std::vector<MaterialInfo> get_materials_by_category(std::string_view cate
  */
 inline std::vector<const char*> get_categories() {
     std::vector<const char*> categories;
-    for (const auto& mat : MATERIALS) {
+    for (const auto& mat : *materials()) {
         bool found = false;
         for (const auto* cat : categories) {
             if (std::string_view(cat) == mat.category) {
@@ -322,9 +241,10 @@ inline std::vector<const char*> get_categories() {
  * @return Vector of material name strings
  */
 inline std::vector<const char*> get_all_material_names() {
+    const auto table = materials();
     std::vector<const char*> names;
-    names.reserve(MATERIAL_COUNT);
-    for (const auto& mat : MATERIALS) {
+    names.reserve(table->size());
+    for (const auto& mat : *table) {
         names.push_back(mat.name);
     }
     return names;
@@ -374,7 +294,7 @@ struct DryingPreset {
 /**
  * @brief Get drying presets grouped by compatibility group (for dropdown)
  *
- * MATERIALS[] is the ONLY source of drying data in this codebase. This function
+ * The `types` table is the ONLY source of drying data in this codebase. This function
  * derives one preset per compatibility group by taking the group-wide MAXIMUM of
  * both dry_temp_c and dry_time_min across that group's hygroscopic members.
  *
@@ -403,7 +323,7 @@ struct DryingPreset {
 inline std::vector<DryingPreset> get_drying_presets_by_group() {
     std::vector<DryingPreset> presets;
 
-    for (const auto& mat : MATERIALS) {
+    for (const auto& mat : *materials()) {
         if (mat.dry_temp_c == 0) {
             continue; // Skip non-hygroscopic materials
         }
@@ -454,40 +374,45 @@ inline std::optional<DryingPreset> get_drying_preset_for_material(std::string_vi
     return std::nullopt;
 }
 
+/// Filament diameter assumed when the printer has not reported its own
+/// ([extruder] filament_diameter).
+// NAMESPACE_OK: extends filament::, the material table's existing namespace
+inline constexpr float DEFAULT_DIAMETER_MM = 1.75f;
+
+/// Filament cross-section in mm², pi * (d/2)^2
+// NAMESPACE_OK: extends filament::, the material table's existing namespace
+inline float cross_section_mm2(float diameter_mm) {
+    const float radius_mm = diameter_mm / 2.0f;
+    return static_cast<float>(M_PI) * radius_mm * radius_mm;
+}
+
 /**
  * @brief Calculate filament length from weight
  * @param weight_g Weight in grams
  * @param density Material density in g/cm³
- * @param diameter_mm Filament diameter in mm (default 1.75)
+ * @param diameter_mm Filament diameter in mm
  * @return Length in meters
  */
-inline float weight_to_length_m(float weight_g, float density, float diameter_mm = 1.75f) {
-    // Volume = mass / density (in cm³)
-    float volume_cm3 = weight_g / density;
-
-    // Cross-sectional area in cm² (diameter in mm -> radius in cm)
-    float radius_cm = (diameter_mm / 2.0f) / 10.0f;
-    float area_cm2 = static_cast<float>(M_PI) * radius_cm * radius_cm;
-
-    // Length = volume / area (in cm, then convert to m)
-    float length_cm = volume_cm3 / area_cm2;
-    return length_cm / 100.0f;
+inline float weight_to_length_m(float weight_g, float density,
+                                float diameter_mm = DEFAULT_DIAMETER_MM) {
+    // mass / density is cm³; x1000 is mm³, / area is mm of filament
+    const float length_mm = (weight_g / density) * 1000.0f / cross_section_mm2(diameter_mm);
+    return length_mm / 1000.0f;
 }
 
 /**
  * @brief Calculate filament weight in grams from length
  * @param length_mm Length in millimeters
  * @param density Material density in g/cm³
- * @param diameter_mm Filament diameter in mm (default 1.75)
+ * @param diameter_mm Filament diameter in mm
  * @return Mass in grams, or 0 if density or length is not positive
  */
-inline float length_to_weight_g(float length_mm, float density, float diameter_mm = 1.75f) {
+inline float length_to_weight_g(float length_mm, float density,
+                                float diameter_mm = DEFAULT_DIAMETER_MM) {
     if (density <= 0.0f || length_mm <= 0.0f) {
         return 0.0f;
     }
-    float radius_mm = diameter_mm / 2.0f;
-    float area_mm2 = static_cast<float>(M_PI) * radius_mm * radius_mm;
-    float volume_mm3 = length_mm * area_mm2;
+    const float volume_mm3 = length_mm * cross_section_mm2(diameter_mm);
     return (volume_mm3 / 1000.0f) * density;
 }
 
@@ -514,16 +439,16 @@ struct MaterialComfortRange {
 /**
  * @brief Humidity thresholds per compatibility group
  *
- * This is the ONLY comfort data that is not derivable from MATERIALS[], because
+ * This is the ONLY comfort data that is not derivable from the `types` table, because
  * there is no moisture-uptake field on MaterialInfo to derive it from. It is
  * keyed by compat_group rather than by material name on purpose: a group is a set
  * of chemically interchangeable materials, so one row covers every member and a
- * newly added MATERIALS row inherits humidity coverage for free instead of
+ * newly added type row inherits humidity coverage for free instead of
  * silently falling off the AMS humidity indicator.
  *
  * The drying temperature and time that get_comfort_range() reports are NOT listed
  * here — they come from get_drying_presets_by_group(), which derives them from
- * MATERIALS[]. Adding dry_temp/dry_time columns to this table would recreate the
+ * the `types` table. Adding dry_temp/dry_time columns to this table would recreate the
  * third drying source that this layout exists to eliminate.
  */
 struct GroupHumidityRange {
@@ -576,7 +501,7 @@ inline constexpr GroupHumidityRange MATERIAL_HUMIDITY_OVERRIDES[] = {
  *
  * Fully DERIVED: humidity thresholds come from the material's compat group (with
  * a small per-material override table), and drying temp/time come from
- * get_drying_presets_by_group(), which reads MATERIALS[]. There is no independent
+ * get_drying_presets_by_group(), which reads the `types` table. There is no independent
  * drying opinion in this function — that is the point.
  *
  * @param material Material name or alias (e.g., "PLA", "PETG", "Nylon")
@@ -638,14 +563,14 @@ inline std::optional<MaterialComfortRange> get_comfort_range(const std::string& 
  * @brief Material types that intentionally have NO catalog product
  *
  * The material picker builds its list from the PRODUCT catalog
- * (assets/filaments.json), not from MATERIALS[]. A type with no product is
+ * (assets/filaments.json), not from the `types` table. A type with no product is
  * therefore invisible in the UI. For most rows that is a bug; for these it is the
  * design — they exist so that a material string arriving from Orca, a printer's
  * firmware, or Spoolman resolves to sane temperatures, and were never meant to be
  * user-selectable.
  *
  * This list is the machine-readable form of that intent. An invariant test
- * asserts the shipped catalog covers exactly MATERIALS minus this list, in both
+ * asserts the shipped catalog covers exactly the shipped types minus this list, in both
  * directions — so a new type with no product fails the build until someone
  * decides which bucket it belongs in, and an entry here that DOES gain a product
  * must be removed rather than rotting.
@@ -678,7 +603,7 @@ inline constexpr size_t RESOLUTION_ONLY_COUNT =
 
 /**
  * @brief Is this material deliberately absent from the product catalog?
- * @param name Material name (exact MATERIALS[] spelling)
+ * @param name Material name (exact `types` spelling)
  */
 inline bool is_resolution_only(std::string_view name) {
     for (const auto* m : RESOLUTION_ONLY_MATERIALS) {

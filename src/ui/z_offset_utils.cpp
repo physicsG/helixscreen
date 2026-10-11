@@ -5,6 +5,7 @@
 #include "ui_emergency_stop.h"
 #include "ui_error_reporting.h"
 #include "ui_modal.h"
+#include "ui_observer_guard.h"
 #include "ui_toast_manager.h"
 
 #include "app_globals.h"
@@ -12,7 +13,9 @@
 #include "i_moonraker_api.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "save_config_restart.h"
+#include "state/subject_macros.h"
 #include "static_subject_registry.h"
+#include "subject_managed_panel.h"
 #include "tool_offsets.h"
 #include "tool_state.h"
 #include "toolhead_homing.h"
@@ -22,6 +25,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <lvgl.h>
@@ -77,9 +81,10 @@ int displayed_z_offset_microns(int live_microns, std::optional<int> persisted_mi
 }
 
 int displayed_z_offset_microns(helix::PrinterState& state) {
-    return displayed_z_offset_microns(lv_subject_get_int(state.get_gcode_z_offset_subject()),
-                                      state.get_persisted_z_offset_microns(),
-                                      lv_subject_get_int(state.get_print_active_subject()) != 0);
+    return displayed_z_offset_microns(
+        lv_subject_get_int(state.motion_state().get_gcode_z_offset_subject()),
+        state.get_persisted_z_offset_microns(),
+        lv_subject_get_int(state.print_state().get_print_active_subject()) != 0);
 }
 
 std::string build_z_adjust_gcode(int base_microns, int live_microns, int delta_microns,
@@ -106,7 +111,7 @@ void apply_and_save(IMoonrakerAPI* api, helix::ui::SaveConfigWatch& save_watch,
     // genuinely persisted even though HelixScreen sent nothing.
     auto on_saved = [ps, on_success = std::move(on_success)]() {
         if (ps) {
-            ps->clear_pending_z_offset_delta();
+            ps->motion_state().clear_pending_z_offset_delta();
         }
         if (on_success) {
             on_success();
@@ -172,17 +177,19 @@ void apply_and_save(IMoonrakerAPI* api, helix::ui::SaveConfigWatch& save_watch,
                 });
         },
         [apply_cmd, on_error](const MoonrakerError& err) {
-            spdlog::error("[ZOffsetUtils] {} failed: {}", apply_cmd, err.user_message());
-            if (on_error)
-                on_error(fmt::format(lv_tr("{} failed: {}"), apply_cmd, err.user_message()));
+            spdlog::error("[ZOffsetUtils] {} failed: {}", apply_cmd, err.message);
+            if (!on_error)
+                return;
+            // Klipper's reply arrives on the WebSocket thread; on_error is UI-facing.
+            helix::ui::run_on_main("ZOffsetUtils::apply_error", [on_error, apply_cmd, err]() {
+                on_error(fmt::format(fmt::runtime(lv_tr("{} failed: {}")), apply_cmd,
+                                     err.localized_message()));
+            });
         });
 }
 
 int persisted_step_index() {
     Config* config = Config::get_instance();
-    if (!config) {
-        return kZStepDefaultIndex;
-    }
     int idx = config->get<int>(config->df() + "z_offset/step_index", kZStepDefaultIndex);
     if (idx < 0 || idx >= static_cast<int>(std::size(kZStepAmountsMm))) {
         return kZStepDefaultIndex;
@@ -202,9 +209,6 @@ void set_persisted_step_index(int idx) {
         return;
     }
     Config* config = Config::get_instance();
-    if (!config) {
-        return;
-    }
     config->set<int>(config->df() + "z_offset/step_index", idx);
     config->save();
 }
@@ -240,13 +244,14 @@ AdjustResult adjust(IMoonrakerAPI* api, PrinterState* ps, double session_base_mm
     const int new_microns = static_cast<int>(std::lround(new_offset * 1000.0));
     const int base_microns = new_microns - delta_microns;
     // Read the live offset before the optimistic write below overwrites it.
-    const int live_microns = ps ? lv_subject_get_int(ps->get_gcode_z_offset_subject()) : 0;
+    const int live_microns =
+        ps ? lv_subject_get_int(ps->motion_state().get_gcode_z_offset_subject()) : 0;
     const bool adjusting_from_persisted = ps && base_microns != live_microns;
 
     if (ps) {
-        ps->add_pending_z_offset_delta(delta_microns);
+        ps->motion_state().add_pending_z_offset_delta(delta_microns);
         // Publish immediately rather than waiting for Moonraker to broadcast.
-        if (auto* subj = ps->get_gcode_z_offset_subject()) {
+        if (auto* subj = ps->motion_state().get_gcode_z_offset_subject()) {
             lv_subject_set_int(subj, new_microns);
         }
         // When the base came from the firmware-persisted value we are about to
@@ -254,7 +259,7 @@ AdjustResult adjust(IMoonrakerAPI* api, PrinterState* ps, double session_base_mm
         // persisted subject with it so the Controls row does not show the stale
         // number until save_variables is broadcast back.
         if (adjusting_from_persisted) {
-            if (auto* subj = ps->get_persisted_z_offset_subject()) {
+            if (auto* subj = ps->motion_state().get_persisted_z_offset_subject()) {
                 lv_subject_set_int(subj, new_microns);
             }
         }
@@ -277,7 +282,7 @@ AdjustResult adjust(IMoonrakerAPI* api, PrinterState* ps, double session_base_mm
     // becomes a no-op). Clear it on the same script, before the override reads
     // it. Never mid-print: there the subtraction excludes the live per-print
     // transient and is correct.
-    if (ps && lv_subject_get_int(ps->get_print_active_subject()) == 0) {
+    if (ps && lv_subject_get_int(ps->print_state().get_print_active_subject()) == 0) {
         const std::string clear = stale_probe_delta_clear_gcode(ps->get_discovery());
         if (!clear.empty()) {
             gcode = clear + "\n" + gcode;
@@ -289,10 +294,134 @@ AdjustResult adjust(IMoonrakerAPI* api, PrinterState* ps, double session_base_mm
         gcode, [sent_delta]() { spdlog::debug("[zoffset] adjusted {:+.3f}mm", sent_delta); },
         [](const MoonrakerError& err) {
             spdlog::error("[zoffset] adjust failed: {}", err.message);
-            NOTIFY_ERROR(lv_tr("Z-offset failed: {}"), err.user_message());
+            helix::ui::notify_error_tr(TR_NOOP("Z-offset failed: {}"), err);
         });
 
     return AdjustResult{delta_mm, new_offset, true, false};
+}
+
+// ============================================================================
+// Save availability
+// ============================================================================
+
+SaveAvailability current_save_availability() {
+    PrinterState& ps = get_printer_state();
+    SaveAvailability facts;
+    // The published form of "the strategy is not FIRMWARE_MANAGED", so the C++
+    // answer and the XML bindings are computed from the same input.
+    facts.manual_save_supported =
+        lv_subject_get_int(ps.profile_state().get_z_offset_can_save_subject()) != 0;
+    facts.global_dirty = lv_subject_get_int(ps.motion_state().get_gcode_z_offset_subject()) != 0;
+    facts.tools_dirty =
+        lv_subject_get_int(helix::ToolState::instance().get_any_tool_offset_dirty_subject()) == 1;
+    return facts;
+}
+
+bool save_available() {
+    return save_available(current_save_availability());
+}
+
+namespace {
+
+void republish_save_available(lv_observer_t*, lv_subject_t*);
+
+/// Publishes `z_offset_save_available` and holds the observers that keep it
+/// current.
+///
+/// A `<subject_expr>` cannot express this rule: it resolves its operands when
+/// the component is REGISTERED, and `any_tool_offset_dirty` does not exist until
+/// ToolState::init_subjects(). Publishing the answer from C++ is what lets every
+/// surface bind one name instead of repeating the expression at each site
+/// (docs/devel/LVGL9_XML_GUIDE.md § "Expression Conditionals").
+///
+/// Held in an optional rather than as plain statics so the observers are dropped
+/// from a StaticSubjectRegistry deinit, while LVGL is still up.
+struct SaveAvailabilityPublisher {
+    SubjectManager subjects;
+    lv_subject_t z_offset_save_available_{};
+    ObserverGuard global_offset_obs;
+    ObserverGuard tools_dirty_obs;
+    ObserverGuard can_save_obs;
+
+    void init(bool register_xml) {
+        INIT_SUBJECT_INT(z_offset_save_available, 0, subjects, register_xml);
+
+        PrinterState& ps = get_printer_state();
+        auto& ts = helix::ToolState::instance();
+        observe(global_offset_obs, ps.motion_state().get_gcode_z_offset_subject(),
+                ps.get_subjects_lifetime());
+        observe(can_save_obs, ps.profile_state().get_z_offset_can_save_subject(),
+                ps.get_subjects_lifetime());
+        observe(tools_dirty_obs, ts.get_any_tool_offset_dirty_subject(),
+                ts.get_subjects_lifetime());
+    }
+
+    void publish(int available) {
+        lv_subject_set_int(&z_offset_save_available_, available);
+    }
+
+  private:
+    /// Observe @p subject under @p owner's lifetime token, so which of the two
+    /// tears down first cannot matter.
+    static void observe(ObserverGuard& guard, lv_subject_t* subject, const SubjectLifetime& owner) {
+        if (!subject) {
+            return;
+        }
+        guard = ObserverGuard(subject, republish_save_available, nullptr);
+        guard.set_alive_token(owner);
+    }
+};
+
+std::optional<SaveAvailabilityPublisher>& save_available_storage() {
+    static std::optional<SaveAvailabilityPublisher> storage;
+    return storage;
+}
+
+void republish_save_available(lv_observer_t*, lv_subject_t*) {
+    auto& storage = save_available_storage();
+    if (!storage) {
+        return;
+    }
+    storage->publish(save_available() ? 1 : 0);
+}
+
+} // namespace
+
+void init_save_available_subject(bool register_xml) {
+    auto& storage = save_available_storage();
+    if (storage) {
+        spdlog::debug("[zoffset] save-availability subject already initialized, skipping");
+        return;
+    }
+
+    storage.emplace();
+    // Attaching an observer notifies it once, so this also publishes the answer
+    // for the state the app is already in. It has to: a printer that reconnects
+    // with an offset already set never writes one afterwards, and the subject
+    // would sit at its 0 default over an unsaved offset.
+    storage->init(register_xml);
+
+    StaticSubjectRegistry::instance().register_deinit("zoffset::save_available",
+                                                      deinit_save_available_subject);
+}
+
+void deinit_save_available_subject() {
+    auto& storage = save_available_storage();
+    if (!storage) {
+        return;
+    }
+    // Observers first: a notification arriving after deinit_all() would write to
+    // a freed subject.
+    storage->global_offset_obs.reset();
+    storage->can_save_obs.reset();
+    storage->tools_dirty_obs.reset();
+    storage->subjects.deinit_all();
+    storage.reset();
+}
+
+lv_subject_t* get_save_available_subject() {
+    auto& storage = save_available_storage();
+    return storage ? &storage->z_offset_save_available_ : nullptr;
 }
 
 namespace {
@@ -307,6 +436,21 @@ std::optional<helix::ui::SaveConfigWatch>& shared_save_watch_storage() {
     return storage;
 }
 
+/// How long a shared save counts as running. SAVE_CONFIG restarts Klipper, and
+/// the resulting disconnect drops the rpc, so neither callback is guaranteed to
+/// fire; the window is what keeps the button from staying dead. It covers
+/// Z_OFFSET_APPLY_* plus SAVE_CONFIG plus the restart, with headroom for stock
+/// code that chains a second config write (Creality K2 + CFS writes CFS Tn_data
+/// via CXSAVE_CONFIG ~50s later).
+constexpr uint32_t kSharedSaveWindowMs = 90000;
+
+std::atomic<bool> g_shared_save_running{false};
+std::atomic<uint32_t> g_shared_save_started_ms{0};
+
+void end_shared_save() {
+    g_shared_save_running = false;
+}
+
 /// The watch, constructing it on first use and registering the teardown that
 /// destroys it while LVGL is still up. Deliberately NOT reached through the
 /// same call that re-creates it: the deinit callback touches the storage
@@ -315,56 +459,87 @@ helix::ui::SaveConfigWatch& shared_save_watch() {
     auto& storage = shared_save_watch_storage();
     if (!storage) {
         storage.emplace();
-        StaticSubjectRegistry::instance().register_deinit(
-            "zoffset::shared_save_watch", [] { shared_save_watch_storage().reset(); });
+        StaticSubjectRegistry::instance().register_deinit("zoffset::shared_save_watch",
+                                                          [] { reset_shared_save(); });
     }
     return *storage;
 }
 
 } // namespace
 
+bool shared_save_in_flight() {
+    return g_shared_save_running && lv_tick_elaps(g_shared_save_started_ms) < kSharedSaveWindowMs;
+}
+
+void reset_shared_save() {
+    end_shared_save();
+    shared_save_watch_storage().reset();
+}
+
 namespace {
 
 /// The save itself, once any confirmation has been answered.
 void run_shared_save() {
+    if (shared_save_in_flight()) {
+        spdlog::warn("[ZOffsetUtils] Z-offset save already in progress, ignoring");
+        return;
+    }
     IMoonrakerAPI* api = get_moonraker_api();
     PrinterState& ps = get_printer_state();
     if (!api) {
         NOTIFY_ERROR("{}", lv_tr("No printer connection"));
         return;
     }
-    const bool global_dirty = lv_subject_get_int(ps.get_gcode_z_offset_subject()) != 0;
-
+    g_shared_save_started_ms = lv_tick_get();
+    g_shared_save_running = true;
     NOTIFY_INFO(lv_tr("Saving Z-offset..."));
     save_dirty_offsets(
-        api, shared_save_watch(), ps.get_z_offset_calibration_strategy(), ps.get_discovery(),
-        global_dirty, []() { NOTIFY_SUCCESS("{}", lv_tr("Z-offset saved")); },
-        [](const std::string& error) { NOTIFY_ERROR("{}", error); }, &ps);
+        api, shared_save_watch(), ps.profile_state().z_offset_calibration_strategy(),
+        ps.get_discovery(), current_save_availability().global_dirty,
+        []() {
+            end_shared_save();
+            NOTIFY_SUCCESS("{}", lv_tr("Z-offset saved"));
+        },
+        [](const std::string& error) {
+            end_shared_save();
+            NOTIFY_ERROR("{}", error);
+        },
+        &ps);
 }
 
 } // namespace
 
 void save_dirty_offsets_shared() {
     PrinterState& ps = get_printer_state();
-    const bool global_dirty = lv_subject_get_int(ps.get_gcode_z_offset_subject()) != 0;
-    const bool tools_dirty =
-        lv_subject_get_int(helix::ToolState::instance().get_any_tool_z_dirty_subject()) == 1;
+    const SaveAvailability facts = current_save_availability();
+
+    // The rule both surfaces' buttons bind to, so a click that got through
+    // cannot mean something different from what the button offered.
+    if (!save_available(facts)) {
+        spdlog::debug("[ZOffsetUtils] No Z-offset adjustment to save");
+        return;
+    }
+    if (shared_save_in_flight()) {
+        spdlog::warn("[ZOffsetUtils] Z-offset save already in progress, ignoring");
+        return;
+    }
 
     // Only warn when a restart is actually coming. The machine-wide save always
     // ends in SAVE_CONFIG, and so does a tool-only save on firmware that stages
     // its parameters — but a firmware that persists immediately restarts
     // nothing, and a confirmation promising a disconnect would be a lie.
     const bool restart_expected =
-        global_dirty ||
-        (tools_dirty && helix::tool_offsets::persist_requires_save_config(ps.get_discovery()));
+        facts.global_dirty ||
+        (facts.tools_dirty &&
+         helix::tool_offsets::persist_requires_save_config(ps.get_discovery()));
 
     if (!restart_expected) {
         run_shared_save();
         return;
     }
 
-    // Same warning the Controls button gives. A one-tap header button that
-    // silently restarts Klipper mid-session is the worse failure.
+    // A one-tap button that silently restarts Klipper mid-session is the worse
+    // failure.
     helix::ui::modal_confirm(
         lv_tr("Save Z-Offset?"),
         lv_tr("This will save the Z-offset and restart Klipper to write the configuration. The "
@@ -384,19 +559,30 @@ void save_dirty_offsets(IMoonrakerAPI* api, helix::ui::SaveConfigWatch& save_wat
     }
 
     auto& ts = helix::ToolState::instance();
-    const std::vector<int> dirty_tools = ts.dirty_tool_z_indices();
+    const std::vector<int> dirty_tools = ts.dirty_tool_indices();
 
     // Tool offsets first: on klipper-toolchanger SAVE_TOOL_PARAMETER only STAGES
     // a config change, which the machine-wide SAVE_CONFIG below then commits in
     // the same restart. Sending them after it would leave them staged until
     // some later save happened to flush them.
+    //
+    // EVERY dirty axis of a dirty tool, not only Z. SET_TOOL_PARAMETER is
+    // runtime-only and SAVE_CONFIG restarts Klipper, so a Z-only save here
+    // would silently throw away an unsaved X or Y on the way through.
     for (int tool : dirty_tools) {
-        const int microns = static_cast<int>(std::lround(ts.tool_z_offset_mm(tool) * 1000.0));
-        const std::string gcode = helix::tool_offsets::save_tool_z_gcode(hw, tool, microns);
-        if (gcode.empty()) {
-            continue;
+        for (helix::Axis axis : helix::kAllAxes) {
+            if (!ts.tool_offset_dirty(tool, axis)) {
+                continue;
+            }
+            const int microns =
+                static_cast<int>(std::lround(ts.tool_offset_mm(tool, axis) * 1000.0));
+            const std::string gcode =
+                helix::tool_offsets::save_tool_offset_gcode(hw, axis, tool, microns);
+            if (gcode.empty()) {
+                continue;
+            }
+            api->execute_gcode(gcode, nullptr, nullptr);
         }
-        api->execute_gcode(gcode, nullptr, nullptr);
     }
 
     // Marked saved only once the save is ACKNOWLEDGED, never on send.
@@ -411,7 +597,7 @@ void save_dirty_offsets(IMoonrakerAPI* api, helix::ui::SaveConfigWatch& save_wat
     auto mark_saved = [dirty_tools]() {
         auto& tool_state = helix::ToolState::instance();
         for (int tool : dirty_tools) {
-            tool_state.mark_tool_z_saved(tool);
+            tool_state.mark_tool_offsets_saved(tool);
         }
     };
     auto on_saved = [mark_saved, ok = std::move(on_success)]() {

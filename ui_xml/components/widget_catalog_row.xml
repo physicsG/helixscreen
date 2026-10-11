@@ -1,0 +1,53 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component>
+  <!-- One widget in the home-screen widget catalog:
+       [icon] [name / description ....] [Placed] [size badge].
+       A placed, hardware-gated or unfit widget is dimmed and not clickable;
+       C++ passes those as props and wires the click on an offerable row. The
+       text column takes its width from flex_grow, not its content: a gated
+       widget carries its reason in the name, which can be far wider than the
+       row, so the name wraps instead of running through the badge. C++ sets the name
+       and description: a Lua plugin supplies both, and as a prop a leading '#'
+       would read as a const. -->
+  <api>
+    <prop name="hide_desc" type="boolean" default="true"/>
+    <prop name="icon_src" type="string" default=""/>
+    <prop name="icon_variant" type="string" default="secondary"/>
+    <prop name="hide_icon" type="boolean" default="true"/>
+    <prop name="size_text" type="string" default=""/>
+    <prop name="placed_text" type="string" default=""/>
+    <prop name="hide_placed" type="boolean" default="true"/>
+    <prop name="row_opa" type="string" default="255"/>
+    <prop name="row_clickable" type="boolean" default="true"/>
+  </api>
+  <view extends="lv_obj"
+        width="100%" height="content" flex_flow="row" style_flex_main_place="space_between"
+        style_flex_cross_place="center" style_pad_all="#space_md" style_pad_gap="#space_sm" style_bg_color="#card_bg"
+        style_bg_opa="255" style_radius="8" style_border_width="0" style_opa="$row_opa" scrollable="false"
+        clickable="$row_clickable">
+    <style name="styles.press_wash" selector="pressed"/>
+    <icon src="$icon_src" size="sm" variant="$icon_variant" hidden="$hide_icon"/>
+    <lv_obj width="0"
+            height="content" flex_grow="1" flex_flow="column" style_pad_all="0" style_bg_opa="0" style_border_width="0"
+            scrollable="false" clickable="false">
+      <lv_label name="row_name"
+                width="100%" text="" long_mode="wrap" style_text_font="noto_sans_16" style_text_color="#text"/>
+      <lv_label name="row_desc"
+                width="100%" text="" hidden="$hide_desc" long_mode="wrap" style_text_font="noto_sans_12"
+                style_text_color="#text_muted"/>
+    </lv_obj>
+    <lv_obj width="content"
+            height="content" flex_flow="row" style_flex_cross_place="center" style_pad_all="0" style_pad_gap="#space_xs"
+            style_bg_opa="0" style_border_width="0" scrollable="false" clickable="false">
+      <lv_label text="$placed_text" hidden="$hide_placed" style_text_font="noto_sans_12" style_text_color="#text_muted"/>
+      <lv_obj width="content"
+              height="content" style_pad_left="#space_xs" style_pad_right="#space_xs" style_pad_top="#space_xxs"
+              style_pad_bottom="#space_xxs" style_bg_color="#secondary" style_bg_opa="255" style_radius="4"
+              style_border_width="0" scrollable="false" clickable="false">
+        <lv_label text="$size_text" style_text_font="noto_sans_12" style_text_color="#text_muted"/>
+      </lv_obj>
+    </lv_obj>
+  </view>
+</component>

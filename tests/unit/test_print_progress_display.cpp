@@ -20,10 +20,10 @@ namespace {
 
 // Read the pair back the way XML bindings do.
 int display_pct(PrinterState& ps) {
-    return lv_subject_get_int(ps.get_print_progress_display_subject());
+    return lv_subject_get_int(ps.print_state().get_print_progress_display_subject());
 }
 std::string display_text(PrinterState& ps) {
-    return lv_subject_get_string(ps.get_print_progress_text_subject());
+    return lv_subject_get_string(ps.print_state().get_print_progress_text_subject());
 }
 
 // Feed a Moonraker status payload through the real parser.
@@ -71,7 +71,7 @@ TEST_CASE_METHOD(ProgressFixture, "bar and text agree through the standby that f
     // The raw subject follows it down; the display pair must not.
     push_status(ps, "standby", 0.0);
 
-    REQUIRE(lv_subject_get_int(ps.get_print_progress_subject()) == 0);
+    REQUIRE(lv_subject_get_int(ps.print_state().get_print_progress_subject()) == 0);
     REQUIRE(display_pct(ps) == 100);
     REQUIRE(display_text(ps) == "100%");
 }
@@ -107,5 +107,5 @@ TEST_CASE_METHOD(ProgressFixture, "the raw progress subject stays zero before a 
     push_status(ps, "complete", 0.98);
     push_status(ps, "standby", 0.0);
 
-    REQUIRE(lv_subject_get_int(ps.get_print_progress_subject()) == 0);
+    REQUIRE(lv_subject_get_int(ps.print_state().get_print_progress_subject()) == 0);
 }

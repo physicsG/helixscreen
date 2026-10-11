@@ -4,11 +4,36 @@ on:
   push:
     tags:
       - 'v*'  # Triggers on v1.0.0, v1.2.3-beta, etc.
+  # Always a dry run: exercises the whole pipeline on any ref without releasing
+  # anything. See RELEASE_MODE below for what it does instead of publishing.
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: 'Comma-separated subset of the build matrix (e.g. "x86" or "pi,mips"); empty builds every platform'
+        type: string
+        default: ''
 
-# Ensure only one release workflow runs at a time
+# Ensure only one release workflow runs at a time per ref. The event name keeps
+# a dry run and a real release in separate groups, so neither can wait on or
+# cancel the other.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: false
+
+# Every patch is judged from clean here (see build.yml for why the flag is
+# environment-wide rather than per-step).
+env:
+  HELIX_PATCHES_FROM_CLEAN: "1"
+  # publish: a v* tag push, and nothing else. Every dispatch is dryrun.
+  #
+  # dryrun never touches anything users or other runs can see. Steps that only
+  # publish (GitHub release, Play Store, Discord, docs dispatch, R2 pruning) are
+  # gated on publish; the R2 uploads run in both modes but write under
+  # needs.plan.outputs.r2_prefix, which is dry-run/<run_id>/ in a dry run and
+  # empty in a release. dry-run-verify checks the result and deletes the prefix.
+  # tests/shell/test_release_dry_run.bats fails any publishing step that is
+  # neither gated nor prefixed.
+  RELEASE_MODE: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) && 'publish' || 'dryrun' }}
 
 jobs:
   # ============================================================================
@@ -39,28 +64,89 @@ jobs:
     - name: Install bats
       run: sudo npm install -g bats
 
-    - name: Verify bundled installers are up-to-date
-      run: |
-        bash scripts/bundle-installer.sh -o /tmp/install-regen.sh
-        bash scripts/bundle-uninstaller.sh -o /tmp/uninstall-regen.sh
-        diff scripts/install.sh /tmp/install-regen.sh || {
-          echo "::error::scripts/install.sh is stale — run: bash scripts/bundle-installer.sh -o scripts/install.sh"
-          exit 1
-        }
-        diff scripts/uninstall.sh /tmp/uninstall-regen.sh || {
-          echo "::error::scripts/uninstall.sh is stale — run: bash scripts/bundle-uninstaller.sh -o scripts/uninstall.sh"
-          exit 1
-        }
+    # The installer bundles are generated, never committed. Built once here: the
+    # release job attaches this install.sh to the GitHub release and upload-r2
+    # publishes the same file as the one-line installer. Each release tarball's
+    # copy comes from its own `make release-*`, which the bundlers' determinism
+    # (test_uninstall_hardening.bats) keeps byte-identical to this one.
+    - name: Build installer bundles
+      run: make installer
+
+    - name: Upload installer artifact
+      uses: actions/upload-artifact@v7
+      with:
+        name: installer
+        path: build/installer/install.sh
+        if-no-files-found: error
+        retention-days: 7
 
     - name: Run shell tests
       run: make test-shell
+
+  # ============================================================================
+  # Resolve the release mode, version, R2 prefix and platform matrix once
+  # ============================================================================
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      tag: ${{ steps.plan.outputs.tag }}
+      version: ${{ steps.plan.outputs.version }}
+      r2_prefix: ${{ steps.plan.outputs.r2_prefix }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      platforms: ${{ steps.plan.outputs.platforms }}
+
+    steps:
+    - name: Resolve mode, version and platform matrix
+      id: plan
+      env:
+        PLATFORMS: ${{ inputs.platforms }}
+        # The release platform matrix. A tag push builds all of it; a dry run may
+        # name a subset through the platforms input.
+        FULL_MATRIX: |
+          [
+            {"platform": "pi", "display_name": "Raspberry Pi", "build_target": "pi-both"},
+            {"platform": "pi32", "display_name": "Raspberry Pi 32-bit", "build_target": "pi32-both"},
+            {"platform": "ad5m", "display_name": "Flashforge AD5M"},
+            {"platform": "cc1", "display_name": "Elegoo Centauri Carbon 1"},
+            {"platform": "mips", "display_name": "Unified MIPS (K1 Series + AD5X)", "build_target": "mips", "build_dir": "mips"},
+            {"platform": "k2", "display_name": "Creality K2 Series"},
+            {"platform": "x86", "display_name": "x86_64 Debian", "build_target": "x86-both"},
+            {"platform": "snapmaker-u1", "display_name": "Snapmaker U1"}
+          ]
+      run: |
+        set -euo pipefail
+        # A dry run's version sorts below every real one, so even a manifest
+        # that escaped its prefix could never read as an update.
+        case "$RELEASE_MODE" in
+          publish) TAG="$GITHUB_REF_NAME"; PREFIX="" ;;
+          dryrun)  TAG="v0.0.0-dryrun.${GITHUB_RUN_ID}"; PREFIX="dry-run/${GITHUB_RUN_ID}/" ;;
+          *) echo "::error::RELEASE_MODE is '$RELEASE_MODE', expected publish or dryrun"; exit 1 ;;
+        esac
+        MATRIX=$(jq -c --arg wanted "$PLATFORMS" '
+          [$wanted | splits("[,[:space:]]+") | select(length > 0)] as $w
+          | ($w - map(.platform)) as $unknown
+          | if ($unknown | length) > 0 then error("unknown platform(s): \($unknown | join(", "))")
+            elif ($w | length) == 0 then {include: .}
+            else {include: map(select(.platform | IN($w[])))}
+            end' <<<"$FULL_MATRIX")
+        {
+          echo "mode=$RELEASE_MODE"
+          echo "tag=$TAG"
+          echo "version=${TAG#v}"
+          echo "r2_prefix=$PREFIX"
+          echo "matrix=$MATRIX"
+          echo "platforms=$(jq -r '[.include[].platform] | join(" ")' <<<"$MATRIX")"
+        } | tee -a "$GITHUB_OUTPUT"
 
   # ============================================================================
   # Build embedded platform binaries using Docker cross-compilation
   # ============================================================================
   build-platforms:
     name: Build (${{ matrix.display_name }})
-    needs: [validate-shell]
+    needs: [validate-shell, plan]
     runs-on: ubuntu-22.04
     # The pi-both / pi32-both / x86-both cross-compiles are the long poles here:
     # a full DRM+GLES+thorvg build that lands at 58-70 min and grows with the
@@ -79,36 +165,7 @@ jobs:
     timeout-minutes: 180
     strategy:
       fail-fast: false
-      matrix:
-        platform: [pi, pi32, ad5m, cc1, k1, ad5x, k2, x86, snapmaker-u1]
-        include:
-          - platform: pi
-            display_name: "Raspberry Pi"
-            build_target: pi-both
-          - platform: pi32
-            display_name: "Raspberry Pi 32-bit"
-            build_target: pi32-both
-          - platform: ad5m
-            display_name: "Flashforge AD5M"
-          - platform: cc1
-            display_name: "Elegoo Centauri Carbon 1"
-          - platform: k1
-            display_name: "Creality K1 Series"
-            docker_image: k1
-            build_target: mips
-            build_dir: mips
-          - platform: ad5x
-            display_name: "Flashforge AD5X"
-            docker_image: ad5x
-            build_target: ad5x
-            build_dir: ad5x
-          - platform: k2
-            display_name: "Creality K2 Series"
-          - platform: x86
-            display_name: "x86_64 Debian"
-            build_target: x86-both
-          - platform: snapmaker-u1
-            display_name: "Snapmaker U1"
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
 
     steps:
     - name: Checkout repository
@@ -129,13 +186,11 @@ jobs:
         sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
         df -h /
 
-    # What actually failed every pi leg of v0.99.110 was the OOM killer, not the
-    # clock: exit 137 roughly two minutes after helix-splash and helix-watchdog
-    # link, i.e. during the main helix-screen link, which pi-both performs twice
-    # (one per display variant). It fit on v0.99.108 at ~82 min and no longer
-    # does. A warm ccache does NOT avoid this — the link still runs — so the
-    # cache work in ccache-warm.yml could not have fixed it alone. -j is not the
-    # lever either: the spike is one ld process. Swap lets the link page rather
+    # The main helix-screen link peaks past the runner's RAM and dies to the OOM
+    # killer as exit 137, not to the job timeout. pi-both performs that link
+    # twice, one per display variant. A warm ccache does not avoid it, because
+    # the link still runs; ccache-warm.yml cannot help here. -j is not the lever
+    # either: the spike is a single ld process. Swap lets the link page rather
     # than be killed, and costs wall time only when the peak is exceeded.
     - name: Add swap for the link peak
       run: |
@@ -201,6 +256,7 @@ jobs:
           -v "${{ github.workspace }}":/src \
           -v /tmp/.ccache-${{ matrix.docker_image || matrix.platform }}:/root/.cache/ccache \
           -e CCACHE_DIR=/root/.cache/ccache \
+          -e HELIX_PATCHES_FROM_CLEAN \
           -w /src \
           helixscreen/toolchain-${{ matrix.docker_image || matrix.platform }} \
           make PLATFORM_TARGET=${{ matrix.build_target || matrix.platform }} HELIX_PACKAGING=1 SKIP_OPTIONAL_DEPS=1 -j$(nproc)
@@ -229,9 +285,19 @@ jobs:
       uses: actions/upload-artifact@v7
       with:
         name: release-${{ matrix.platform }}
+        # The k1/ad5x globs only match in the mips build, whose Makefile
+        # target copies the unified archive under the retired board keys so
+        # deployed binaries whose get_platform_key() still reports them keep
+        # finding an update asset (self-update survives the rename). On every
+        # other platform they match nothing, which is inert: upload-artifact
+        # warns only when NO path matches at all.
         path: |
           releases/helixscreen-${{ matrix.platform }}-*.tar.gz
           releases/helixscreen-${{ matrix.platform }}.zip
+          releases/helixscreen-k1-*.tar.gz
+          releases/helixscreen-k1.zip
+          releases/helixscreen-ad5x-*.tar.gz
+          releases/helixscreen-ad5x.zip
         retention-days: 7
 
     - name: Upload symbol map artifact
@@ -251,9 +317,11 @@ jobs:
   # ============================================================================
   build-android:
     name: Build (Android)
-    needs: [validate-shell]
+    needs: [validate-shell, plan]
     runs-on: ubuntu-22.04
-    timeout-minutes: 90
+    # Two ABIs ran 46-64 minutes through assembleRelease + bundleRelease, and
+    # armeabi-v7a adds roughly half again, so 90 would cut a cold-cache run.
+    timeout-minutes: 130
 
     steps:
     - name: Checkout repository
@@ -300,10 +368,8 @@ jobs:
       run: |
         if [ -z "$KEYSTORE_B64" ]; then
           # A release tag has no business producing unsigned or debug-signed
-          # artifacts. This used to be a ::warning:: and the build carried on
-          # with the debug keystore — that is how v0.99.43 shipped a
-          # debug-signed AAB that Play Store rejects. Gradle refuses the same
-          # case now, but failing here names the missing secret instead of
+          # artifacts: Play Store rejects a debug-signed AAB. Gradle refuses the
+          # same case, but failing here names the missing secret instead of
           # surfacing as a build error 40 minutes later.
           echo "::error::ANDROID_KEYSTORE_BASE64 is not set. A release build must be signed with the upload keystore; see docs/devel/ANDROID_PLAY_STORE.md for the four ANDROID_KEYSTORE_* / ANDROID_KEY_* secrets."
           exit 1
@@ -409,8 +475,10 @@ jobs:
 
     - name: Extract version
       id: version
+      env:
+        RELEASE_TAG: ${{ needs.plan.outputs.tag }}
       run: |
-        VERSION="${GITHUB_REF_NAME#v}"
+        VERSION="${RELEASE_TAG#v}"
         echo "version=$VERSION" >> $GITHUB_OUTPUT
 
     - name: Rename APKs
@@ -423,9 +491,10 @@ jobs:
         for apk in "$APK_DIR"/*.apk; do
           filename=$(basename "$apk")
           case "$filename" in
-            *arm64-v8a*) cp "$apk" "release-apks/helixscreen-android-arm64-v${VERSION}.apk" ;;
-            *x86_64*)    cp "$apk" "release-apks/helixscreen-android-x86_64-v${VERSION}.apk" ;;
-            *universal*) cp "$apk" "release-apks/helixscreen-android-universal-v${VERSION}.apk" ;;
+            *arm64-v8a*)   cp "$apk" "release-apks/helixscreen-android-arm64-v${VERSION}.apk" ;;
+            *armeabi-v7a*) cp "$apk" "release-apks/helixscreen-android-armv7-v${VERSION}.apk" ;;
+            *x86_64*)      cp "$apk" "release-apks/helixscreen-android-x86_64-v${VERSION}.apk" ;;
+            *universal*)   cp "$apk" "release-apks/helixscreen-android-universal-v${VERSION}.apk" ;;
           esac
         done
 
@@ -462,8 +531,8 @@ jobs:
         # Play Store uploader (r0adkll) expects whatsnew-<locale> files in a flat dir.
         # Fastlane source of truth is android/fastlane/metadata/android/en-US/changelogs/<versionCode>.txt
         # Same packing as the script that just wrote the file. Both sides call
-        # scripts/android-version-code.sh; when this step re-derived it locally
-        # the two drifted (10014 vs 99114) and the copy below silently missed.
+        # scripts/android-version-code.sh: a local copy of the arithmetic here
+        # would name a file that does not exist and the copy below would miss.
         VERSION_CODE=$(scripts/android-version-code.sh)
         SRC="android/fastlane/metadata/android/en-US/changelogs/${VERSION_CODE}.txt"
         if [ -f "$SRC" ]; then
@@ -476,7 +545,7 @@ jobs:
           # tolerable condition. publish-android's download-artifact step
           # hard-fails on the missing artifact anyway; fail here where the
           # cause is visible.
-          echo "::error::$SRC is missing right after scripts/generate-whatsnew.sh wrote it — the versionCode used to name the file and the one used to read it disagree."
+          echo "::error::$SRC is missing right after scripts/generate-whatsnew.sh wrote it — that script and this step computed different versionCodes."
           ls -la android/fastlane/metadata/android/en-US/changelogs/ || true
           exit 1
         fi
@@ -498,18 +567,24 @@ jobs:
   # docs/devel/ANDROID_PLAY_STORE.md for one-time setup (service account,
   # first manual upload, Play App Signing enrollment).
   # Gated on `release`, not just `build-android`, and that ordering is load-bearing:
-  # a Play Store versionCode can never be reused or lowered. v0.99.109 and v0.99.110
-  # both published here while their GitHub releases never materialised (109 died on a
-  # non-GLES compile error that Android, being a GLES build, never hit; 110 lost its
-  # Raspberry Pi link to the OOM killer). That burned versionCodes 10009 and 10010 on
-  # builds nobody could download, and made both tags impossible to re-cut — the only
-  # way forward was to skip a version. Depending on `release` (which itself needs the
-  # full build-platforms matrix) means Play only ever receives a version that users
-  # can also download from GitHub. If a platform build fails, this job is skipped and
-  # the version number stays free to re-cut.
+  # a Play Store versionCode can never be reused or lowered. A version published here
+  # whose GitHub release then fails to materialise burns its number permanently and
+  # makes the tag impossible to re-cut, leaving no way forward but skipping a version.
+  # Depending on `release` (which itself needs the full build-platforms matrix) means
+  # Play only ever receives a version users can also download from GitHub. If a
+  # platform build fails, this job is skipped and the number stays free to re-cut.
+  #
+  # Stable releases only. A Play versionCode is a one-way ratchet per track, and
+  # the trunk's versions lead the stable line: a 1.1.0-beta.1 packs to 100100031
+  # while the 1.0.1 hotfix that may follow it packs to 100000199, so a beta
+  # reaching Play makes the next stable hotfix unpublishable. Android beta testers
+  # sideload the APK from the GitHub release instead. The condition reads the
+  # channel the branch declares rather than the tag string, for the same reason
+  # every other routing decision does.
   publish-android:
     name: Publish to Play Store (internal)
-    needs: [build-android, release]
+    needs: [build-android, release, plan]
+    if: ${{ !cancelled() && needs.release.result == 'success' && needs.release.outputs.channel == 'stable' && needs.plan.outputs.mode == 'publish' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -559,6 +634,27 @@ jobs:
         changesNotSentForReview: true
 
   # ============================================================================
+  # Build the ESP32 (BTT K-Touch) firmware zip, alpha
+  # ============================================================================
+  # The same workflow that builds the firmware on every push, asked to package
+  # the result. Skipped on the 1.0 line, which does not support ESP32 (the same
+  # exclusion esp32-build.yml's own triggers carry).
+  #
+  # A skipped job poisons the implicit success() of every job downstream of it,
+  # transitively, so release, publish-android, upload-r2 and notify-website each
+  # spell out their own condition with !cancelled() and explicit results instead
+  # of relying on it. Release ignores this job's result: the firmware is alpha,
+  # so a red ESP32 build ships the release without the zip instead of blocking
+  # every platform.
+  build-esp32:
+    name: Build (ESP32 K-Touch)
+    needs: [plan]
+    if: ${{ !startsWith(github.ref, 'refs/tags/v1.0.') && github.ref != 'refs/heads/release/1.0' }}
+    uses: ./.github/workflows/esp32-build.yml
+    with:
+      release_tag: ${{ needs.plan.outputs.tag }}
+
+  # ============================================================================
   # Create GitHub Release with all artifacts
   # ============================================================================
   release:
@@ -571,9 +667,16 @@ jobs:
     # with no Android assets and nothing went red.
     # No cycle: publish-android needs [build-android, release], and build-android
     # needs only validate-shell.
-    needs: [build-platforms, build-android]
+    needs: [build-platforms, build-android, build-esp32, plan]
+    if: >-
+      ${{ !cancelled()
+      && needs.plan.result == 'success'
+      && needs.build-platforms.result == 'success'
+      && needs.build-android.result == 'success' }}
     permissions:
       contents: write  # Required to create releases
+    env:
+      RELEASE_TAG: ${{ needs.plan.outputs.tag }}
     outputs:
       # Declared by RELEASE_CHANNEL on the branch being tagged, NOT derived from
       # the tag string. Downstream jobs (upload-r2, notify-website) consume these
@@ -610,22 +713,23 @@ jobs:
         find artifacts -name '*.apk' -exec mv {} release-files/ \;
         find artifacts -name '*.aab' -exec mv {} release-files/ \;
         # Include install.sh so users can download it directly from the release
-        cp scripts/install.sh release-files/
+        cp artifacts/installer/install.sh release-files/
         echo "Release files:"
         ls -lh release-files/
 
     # softprops/action-gh-release runs with fail_on_unmatched_files: false —
     # deliberately, because several of its globs are optional — so a missing
     # Android artifact would publish a release with no Android downloads and
-    # still report success. Assert the four by name instead of flipping that
+    # still report success. Assert the five by name instead of flipping that
     # flag globally. The names must stay in step with the rename steps in
     # build-android and with the download instructions in the release notes.
     - name: Verify Android artifacts are present
       run: |
         set -euo pipefail
-        VERSION="${GITHUB_REF_NAME#v}"
+        VERSION="${RELEASE_TAG#v}"
         missing=""
         for f in "helixscreen-android-arm64-v${VERSION}.apk" \
+                 "helixscreen-android-armv7-v${VERSION}.apk" \
                  "helixscreen-android-x86_64-v${VERSION}.apk" \
                  "helixscreen-android-universal-v${VERSION}.apk" \
                  "helixscreen-android-v${VERSION}.aab"; do
@@ -709,37 +813,43 @@ jobs:
       run: |
         # Tag name is the full version with 'v' prefix (e.g., v1.2.3)
         # Used for release title and filename references
-        VERSION="${GITHUB_REF_NAME}"
+        VERSION="${RELEASE_TAG}"
         echo "version=$VERSION" >> $GITHUB_OUTPUT
         echo "Version: $VERSION"
 
     - name: Resolve release channel
       id: channel
       run: |
-        # The channel comes from the RELEASE_CHANNEL file on the branch being
-        # tagged, not from whether the tag has a hyphen. That old rule forced
-        # every devel build to carry a -devN suffix, which helix::version
-        # discards -- so consecutive devel builds compared EQUAL and the in-app
-        # updater went quiet after the first install.
+        # Channel routing is a property of the BRANCH, so it comes from the
+        # RELEASE_CHANNEL file on the branch being tagged rather than from the
+        # tag string. A version cannot carry the routing: `dev` has no spelling
+        # in a version at all; a plain vX.Y.Z cut from the trunk would reach the
+        # stable fleet, and the downgrade guard could not refuse it because a
+        # higher version IS a forward move; and a stable-line candidate
+        # (1.0.1-rc.1) has to be testable on a prerelease channel while still
+        # belonging to the stable line.
         # pipefail is required: without it `tee` supplies the pipeline's exit
         # status and an invalid RELEASE_CHANNEL would pass as a green step,
         # leaving every downstream channel expression empty.
         set -o pipefail
-        scripts/release-channel.sh --tag "$GITHUB_REF_NAME" | tee -a "$GITHUB_OUTPUT"
+        # A dry run has no tag to cross-check against the declared channel.
+        if [ "$RELEASE_MODE" = publish ]; then
+          scripts/release-channel.sh --tag "$GITHUB_REF_NAME" | tee -a "$GITHUB_OUTPUT"
+        else
+          scripts/release-channel.sh | tee -a "$GITHUB_OUTPUT"
+        fi
 
     - name: Generate release notes
       id: notes
       run: |
         # Try to get annotated tag message, fall back to auto-generated notes.
         #
-        # The cap is a runaway guard, NOT an expected limit. It used to be
-        # `head -50`, which silently truncated v0.99.105's notes to 51 of 99
-        # lines — the tail of ### Fixed and the whole of ### Changed vanished
-        # from the release page while the job still reported success. The tag
-        # annotation is authored deliberately at release time (the /release
-        # workflow writes the changelog entry into it), so a short cap discards
-        # exactly the content someone chose to publish. GitHub's own limit is
-        # 125,000 characters; 500 lines stays well inside it.
+        # The cap is a runaway guard, NOT an expected limit. The tag annotation
+        # is authored deliberately at release time (the /release workflow writes
+        # the changelog entry into it), so a cap short enough to bite discards
+        # exactly the content someone chose to publish, and does it silently
+        # while the job still reports success. GitHub's own limit is 125,000
+        # characters; 500 lines stays well inside it.
         TAG_MESSAGE=$(git tag -l --format='%(contents)' "$GITHUB_REF_NAME" 2>/dev/null | head -500)
 
         if [ -n "$TAG_MESSAGE" ] && [ "$TAG_MESSAGE" != "" ]; then
@@ -787,11 +897,11 @@ jobs:
         ./helix-screen
         ```
 
-        ### Creality K1 Series (Simple AF)
+        ### Creality K1 Series / FlashForge AD5X (one binary)
         ```bash
         # Download and extract
-        wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/helixscreen-k1-${{ steps.version.outputs.version }}.tar.gz
-        tar -xzf helixscreen-k1-${{ steps.version.outputs.version }}.tar.gz
+        wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/helixscreen-mips-${{ steps.version.outputs.version }}.tar.gz
+        tar -xzf helixscreen-mips-${{ steps.version.outputs.version }}.tar.gz
         cd helixscreen
 
         # Run
@@ -834,21 +944,31 @@ jobs:
         ### Android (Experimental)
         Download the APK for your device architecture:
         - **arm64**: `helixscreen-android-arm64-${{ steps.version.outputs.version }}.apk` (most Android phones/tablets)
+        - **armv7**: `helixscreen-android-armv7-${{ steps.version.outputs.version }}.apk` (32-bit devices: Echo Show 5 2nd gen on LineageOS, Fire tablets, older phones)
         - **x86_64**: `helixscreen-android-x86_64-${{ steps.version.outputs.version }}.apk` (emulators, Chromebooks)
         - **universal**: `helixscreen-android-universal-${{ steps.version.outputs.version }}.apk` (all architectures)
         - **Play Store bundle**: `helixscreen-android-${{ steps.version.outputs.version }}.aab`
 
         Sideload via `adb install` or download directly on device.
 
-        ## Checksums
-
-        ```
-        $(cd release-files && sha256sum *.tar.gz *.zip *.apk *.aab 2>/dev/null)
-        ```
+        ### ESP32 (BTT K-Touch) - alpha
+        Firmware for the BigTreeTech K-Touch, flashed over USB with esptool. Not built for 1.0.x releases.
+        - `helixscreen-esp32-ktouch-${{ steps.version.outputs.version }}.zip`: unzip it and follow `README.txt` inside, or see the [install guide](https://github.com/${{ github.repository }}/blob/main/docs/user/guide/install-esp32.md)
         EOF
+          # The heredoc above is quoted so the notes' backticks stay literal, so
+          # the checksums are appended by a real command.
+          {
+            echo
+            echo "## Checksums"
+            echo
+            echo '```'
+            (cd release-files && sha256sum *.tar.gz *.zip *.apk *.aab 2>/dev/null) || true
+            echo '```'
+          } >> release-notes.md
         fi
 
     - name: Create GitHub Release
+      if: env.RELEASE_MODE == 'publish'
       uses: softprops/action-gh-release@v3
       with:
         name: ${{ steps.version.outputs.version }}
@@ -866,8 +986,25 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+    # The dry-run stand-in for the release above: the same file set less the
+    # AAB (only Play consumes it), kept as a workflow artifact for
+    # dry-run-verify to compare against R2.
+    - name: Upload would-be release assets (dry run)
+      if: env.RELEASE_MODE == 'dryrun'
+      uses: actions/upload-artifact@v7
+      with:
+        name: dry-run-release-assets
+        path: |
+          release-files/*.tar.gz
+          release-files/*.zip
+          release-files/*.apk
+          release-files/*.sym.zst
+          release-files/install.sh
+        if-no-files-found: error
+        retention-days: 3
+
     - name: Notify Discord
-      if: success()
+      if: success() && env.RELEASE_MODE == 'publish'
       continue-on-error: true
       env:
         DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
@@ -940,15 +1077,18 @@ jobs:
   upload-r2:
     name: Upload to R2
     runs-on: ubuntu-latest
-    needs: [release]
+    needs: [release, plan]
+    if: ${{ !cancelled() && needs.release.result == 'success' }}
     # NOT continue-on-error: a failed R2 publish means the new version is invisible
     # to every in-app updater (the manifest is the source of truth and is trusted on
     # any HTTP-200, never re-checked for staleness) and CDN installs 404. That is a
     # worse outcome than a red release run, so the job MUST fail the workflow loudly
     # — a green run with a stale manifest is the silent-failure trap from .github#952
     # / v0.99.80, where continue-on-error hid a real publish failure from alerting.
-    # Run for all tagged releases (including prereleases)
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Runs in both modes; every R2 key below starts with R2_PREFIX.
+    env:
+      R2_PREFIX: ${{ needs.plan.outputs.r2_prefix }}
+      RELEASE_TAG: ${{ needs.plan.outputs.tag }}
 
     steps:
     - name: Checkout repository
@@ -969,6 +1109,12 @@ jobs:
         pattern: release-*
         path: artifacts
 
+    - name: Download installer artifact
+      uses: actions/download-artifact@v8
+      with:
+        name: installer
+        path: installer
+
     - name: Flatten release files
       run: |
         mkdir -p release-files
@@ -984,10 +1130,10 @@ jobs:
       id: version
       run: |
         # Strip 'v' prefix: v0.9.5 -> 0.9.5
-        VERSION="${GITHUB_REF_NAME#v}"
+        VERSION="${RELEASE_TAG#v}"
         echo "version=$VERSION" >> $GITHUB_OUTPUT
-        echo "tag=$GITHUB_REF_NAME" >> $GITHUB_OUTPUT
-        echo "Version: $VERSION (tag: $GITHUB_REF_NAME)"
+        echo "tag=$RELEASE_TAG" >> $GITHUB_OUTPUT
+        echo "Version: $VERSION (tag: $RELEASE_TAG)"
 
     - name: Extract changelog for version
       id: notes
@@ -1008,7 +1154,7 @@ jobs:
         fi
 
         if [ -z "$NOTES" ]; then
-          NOTES="Release $GITHUB_REF_NAME"
+          NOTES="Release $RELEASE_TAG"
         fi
 
         # Use delimiter for multiline output
@@ -1058,9 +1204,14 @@ jobs:
         # hotfix landing on a channel that already serves 1.1.x), and by
         # re-tagging an old commit. Republishing the SAME version is allowed --
         # that is how a partially-failed upload is retried.
+        #
+        # Precedence comes from scripts/version-compare.sh, which implements
+        # Semantic Versioning 2.0.0 section 11. A shell version sort cannot
+        # answer it: `sort -V` ranks 1.1.0 BELOW 1.1.0-beta.1, so on a channel
+        # that has served a prerelease its verdict is inverted.
         FAILED=0
         for CHANNEL in $UPLOAD_CHANNELS; do
-          MANIFEST_URL="${R2_PUBLIC_URL}/${CHANNEL}/manifest.json"
+          MANIFEST_URL="${R2_PUBLIC_URL}/${R2_PREFIX}${CHANNEL}/manifest.json"
           SERVED=$(curl -fsS --max-time 30 "$MANIFEST_URL" 2>/dev/null | jq -r '.version // empty' || true)
 
           if [ -z "$SERVED" ]; then
@@ -1073,14 +1224,32 @@ jobs:
             continue
           fi
 
-          OLDEST=$(printf '%s\n%s\n' "$SERVED" "$RELEASE_VERSION" | sort -V | head -n1)
-          if [ "$OLDEST" = "$RELEASE_VERSION" ]; then
-            echo "::error::${CHANNEL} currently serves ${SERVED}; publishing ${RELEASE_VERSION} would move it BACKWARD."
-            echo "::error::Clients on ${SERVED} would never be offered another ${CHANNEL} update."
+          # A pair the comparator cannot rank is a failure, not a pass: it exits
+          # non-zero rather than printing an order, so an unparseable manifest
+          # version can never read as "forward".
+          if ! ORDER=$(scripts/version-compare.sh "$RELEASE_VERSION" "$SERVED"); then
+            echo "::error::${CHANNEL}: cannot order ${RELEASE_VERSION} against the served ${SERVED}."
             FAILED=1
-          else
-            echo "${CHANNEL}: ${SERVED} -> ${RELEASE_VERSION} (forward)"
+            continue
           fi
+
+          case "$ORDER" in
+            -1)
+              echo "::error::${CHANNEL} currently serves ${SERVED}; publishing ${RELEASE_VERSION} would move it BACKWARD."
+              echo "::error::Clients on ${SERVED} would never be offered another ${CHANNEL} update."
+              FAILED=1
+              ;;
+            0)
+              echo "${CHANNEL}: ${SERVED} and ${RELEASE_VERSION} rank equal (build metadata only) -- allowed"
+              ;;
+            1)
+              echo "${CHANNEL}: ${SERVED} -> ${RELEASE_VERSION} (forward)"
+              ;;
+            *)
+              echo "::error::${CHANNEL}: version-compare.sh printed '${ORDER}', which is not -1, 0 or 1."
+              FAILED=1
+              ;;
+          esac
         done
 
         if [ "$FAILED" -eq 1 ]; then
@@ -1104,13 +1273,17 @@ jobs:
         R2_PUBLIC_URL: ${{ vars.R2_PUBLIC_URL }}
         UPLOAD_CHANNELS: ${{ steps.channels.outputs.channels }}
       run: |
+        [ "$RELEASE_MODE" = publish ] || [[ "$R2_PREFIX" == dry-run/?*/ ]] || {
+          echo "::error::dry run with R2_PREFIX='${R2_PREFIX}'; refusing to write live R2 paths"
+          exit 1
+        }
         chmod +x scripts/generate-manifest.sh
 
         # Retry wrapper for transient R2 errors. A 504 Gateway Timeout on a large
-        # multipart upload exhausted the AWS CLI's own retries during v0.99.76 and
-        # aborted this step before the manifest uploaded, leaving every client
-        # pinned to the previous version's manifest (.github#952). All R2 puts go
-        # through this so a single transient failure no longer kills the release.
+        # multipart upload can exhaust the AWS CLI's own retries and abort this
+        # step before the manifest uploads, which pins every client to the
+        # previous version's manifest (.github#952). All R2 puts go through this
+        # so one transient failure does not kill the release.
         s3cp() {
           local attempt=1 max=4
           while true; do
@@ -1129,12 +1302,12 @@ jobs:
 
         # 1. Upload the .tar.gz artifacts the manifest references. These MUST land
         #    before the manifest goes live so clients never 404 mid-download.
-        echo "=== Uploading tarballs to releases/v${RELEASE_VERSION}/ ==="
+        echo "=== Uploading tarballs to ${R2_PREFIX}releases/v${RELEASE_VERSION}/ ==="
         for tarball in release-files/*.tar.gz; do
           [ -f "$tarball" ] || continue
           filename=$(basename "$tarball")
-          echo "Uploading releases/v${RELEASE_VERSION}/${filename}..."
-          s3cp "$tarball" "s3://${R2_BUCKET}/releases/v${RELEASE_VERSION}/${filename}"
+          echo "Uploading ${R2_PREFIX}releases/v${RELEASE_VERSION}/${filename}..."
+          s3cp "$tarball" "s3://${R2_BUCKET}/${R2_PREFIX}releases/v${RELEASE_VERSION}/${filename}"
         done
 
         # 2. Upload the .zip artifacts, which the manifest now references as the
@@ -1142,12 +1315,12 @@ jobs:
         #    these MUST land before the manifest goes live so clients never 404
         #    following zip_url. (The tarball url/sha256 stay as the legacy fallback
         #    for pre-v0.99.31 clients, which never read zip_url.)
-        echo "=== Uploading zip artifacts to releases/v${RELEASE_VERSION}/ ==="
+        echo "=== Uploading zip artifacts to ${R2_PREFIX}releases/v${RELEASE_VERSION}/ ==="
         for zip in release-files/*.zip; do
           [ -f "$zip" ] || continue
           filename=$(basename "$zip")
-          echo "Uploading releases/v${RELEASE_VERSION}/${filename}..."
-          s3cp "$zip" "s3://${R2_BUCKET}/releases/v${RELEASE_VERSION}/${filename}"
+          echo "Uploading ${R2_PREFIX}releases/v${RELEASE_VERSION}/${filename}..."
+          s3cp "$zip" "s3://${R2_BUCKET}/${R2_PREFIX}releases/v${RELEASE_VERSION}/${filename}"
         done
 
         # 3. Generate and upload the per-channel manifests. This is the artifact
@@ -1163,15 +1336,15 @@ jobs:
             --tag "$RELEASE_TAG" \
             --notes "$RELEASE_NOTES" \
             --dir release-files \
-            --base-url "${R2_PUBLIC_URL}/releases/v${RELEASE_VERSION}" \
+            --base-url "${R2_PUBLIC_URL}/${R2_PREFIX}releases/v${RELEASE_VERSION}" \
             --output "release-files/manifest-${CHANNEL}.json"
 
           echo "Generated manifest for ${CHANNEL}:"
           cat "release-files/manifest-${CHANNEL}.json" | jq .
 
-          echo "Uploading ${CHANNEL}/manifest.json..."
+          echo "Uploading ${R2_PREFIX}${CHANNEL}/manifest.json..."
           s3cp "release-files/manifest-${CHANNEL}.json" \
-            "s3://${R2_BUCKET}/${CHANNEL}/manifest.json" \
+            "s3://${R2_BUCKET}/${R2_PREFIX}${CHANNEL}/manifest.json" \
             --content-type "application/json"
 
           # Verify the manifest is actually SERVED as this version. A successful
@@ -1180,10 +1353,10 @@ jobs:
           # version with no error (the v0.99.76 failure mode, .github#952). R2 is
           # strongly consistent and manifest.json is not edge-cached
           # (cf-cache-status: DYNAMIC), so a mismatch after a few reads is real.
-          echo "Verifying ${CHANNEL}/manifest.json serves v${RELEASE_VERSION}..."
+          echo "Verifying ${R2_PREFIX}${CHANNEL}/manifest.json serves v${RELEASE_VERSION}..."
           served=""
           for attempt in 1 2 3 4; do
-            served=$(curl -fsS "${R2_PUBLIC_URL}/${CHANNEL}/manifest.json" | jq -r '.version // empty')
+            served=$(curl -fsS "${R2_PUBLIC_URL}/${R2_PREFIX}${CHANNEL}/manifest.json" | jq -r '.version // empty')
             [ "$served" = "$RELEASE_VERSION" ] && break
             echo "  attempt ${attempt}: served '${served:-<none>}', expected '${RELEASE_VERSION}'; retrying in 5s..."
             sleep 5
@@ -1199,7 +1372,7 @@ jobs:
         # 4. Upload install.sh AFTER the manifest — it is not manifest-referenced,
         #    so a transient failure here must never gate release visibility.
         echo "Uploading install.sh..."
-        s3cp scripts/install.sh "s3://${R2_BUCKET}/install.sh" \
+        s3cp installer/install.sh "s3://${R2_BUCKET}/${R2_PREFIX}install.sh" \
           --content-type "text/x-shellscript"
 
         # Symbol maps and debug info are published separately by the upload-symbols
@@ -1208,37 +1381,44 @@ jobs:
 
         echo "All uploads complete!"
         for CHANNEL in $UPLOAD_CHANNELS; do
-          echo "  ${CHANNEL}: ${R2_PUBLIC_URL}/${CHANNEL}/manifest.json"
+          echo "  ${CHANNEL}: ${R2_PUBLIC_URL}/${R2_PREFIX}${CHANNEL}/manifest.json"
         done
 
     - name: Clean up old releases (retain 5 most recent)
+      if: env.RELEASE_MODE == 'publish'
       env:
         AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
         AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
         R2_BUCKET: ${{ vars.R2_BUCKET_NAME || 'helixscreen-releases' }}
         RETAIN_COUNT: 5
+        RELEASE_VERSION: ${{ steps.version.outputs.version }}
       run: |
-        semver_sort() {
-          sort -t. -k1,1n -k2,2n -k3,3n
-        }
+        # Every channel shares this store, so retention alone lets a run of
+        # prereleases outrank the stable release. r2-prune-plan.sh never deletes
+        # a version a channel manifest names, and ranks the rest by semver.
+        # The version this run publishes is pinned as well: a manifest may not
+        # name it yet when this step runs.
 
         # Prune old releases from releases/ (shared artifact store)
         echo "=== Pruning old releases ==="
         VERSIONS=$(aws s3 ls "s3://${R2_BUCKET}/releases/" \
           --endpoint-url "$R2_ENDPOINT" \
-          | grep -oP 'PRE v\K[0-9]+\.[0-9]+\.[0-9]+(?:-[a-zA-Z0-9.]+)?' \
-          | sort -u \
-          | semver_sort)
+          | grep -oP 'PRE v\K[0-9]+\.[0-9]+\.[0-9]+(?:-[a-zA-Z0-9.]+)?')
 
         VERSION_COUNT=$(echo "$VERSIONS" | grep -c . || true)
         echo "Found ${VERSION_COUNT} versions in releases/"
 
-        if [ "$VERSION_COUNT" -gt "$RETAIN_COUNT" ]; then
-          DELETE_VERSIONS=$(echo "$VERSIONS" | head -n -${RETAIN_COUNT})
-          DELETE_COUNT=$(echo "$DELETE_VERSIONS" | grep -c . || true)
-          echo "Pruning ${DELETE_COUNT} old versions: $(echo $DELETE_VERSIONS | tr '\n' ' ')"
+        if ! PINNED=$(scripts/r2-prune-plan.sh pinned); then
+          echo "::warning::Cannot read every channel manifest; skipping the release prune rather than risk deleting a served version"
+          DELETE_VERSIONS=""
+        else
+          echo "Pinned by channel manifests: $(echo $PINNED)"
+          DELETE_VERSIONS=$(echo "$VERSIONS" | scripts/r2-prune-plan.sh plan "$RETAIN_COUNT" $PINNED "$RELEASE_VERSION")
+        fi
 
+        if [ -n "$DELETE_VERSIONS" ]; then
+          echo "Pruning old versions: $(echo $DELETE_VERSIONS)"
           for VERSION in $DELETE_VERSIONS; do
             echo "  Deleting releases/v${VERSION}/"
             aws s3 rm "s3://${R2_BUCKET}/releases/v${VERSION}/" \
@@ -1246,7 +1426,7 @@ jobs:
               --recursive
           done
         else
-          echo "Within retention limit, nothing to prune"
+          echo "Nothing to prune"
         fi
 
         # Prune legacy per-channel tarballs (from before shared artifact store)
@@ -1284,8 +1464,11 @@ jobs:
   upload-symbols:
     name: Upload Symbols to R2
     runs-on: ubuntu-latest
-    needs: [build-platforms]
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-platforms, plan]
+    # Runs in both modes; every R2 key below starts with R2_PREFIX.
+    env:
+      R2_PREFIX: ${{ needs.plan.outputs.r2_prefix }}
+      RELEASE_TAG: ${{ needs.plan.outputs.tag }}
 
     steps:
     - name: Checkout repository
@@ -1307,8 +1490,24 @@ jobs:
         path: artifacts
 
     - name: Flatten symbol files
+      env:
+        PLATFORMS: ${{ needs.plan.outputs.platforms }}
       run: |
         mkdir -p symbol-files
+        # download-artifact extracts straight into path, with no per-artifact
+        # directory, when its pattern matches exactly one artifact (a
+        # one-platform dry run). Put that lone artifact back under
+        # symbols-<platform>/ so the loop below sees one layout.
+        if ! compgen -G 'artifacts/symbols-*/' > /dev/null; then
+          read -ra plats <<< "$PLATFORMS"
+          if [ "${#plats[@]}" -ne 1 ]; then
+            echo "::error::no artifacts/symbols-*/ directories, and plan built '${PLATFORMS}', not one platform"
+            exit 1
+          fi
+          mkdir "artifacts/symbols-${plats[0]}"
+          find artifacts -mindepth 1 -maxdepth 1 ! -name "symbols-${plats[0]}" \
+            -exec mv -t "artifacts/symbols-${plats[0]}/" {} +
+        fi
         # mv (not cp) the selected symbol files into place: the source artifacts/
         # tree is discarded right after, and cp doubled ~6.7GB of debug symbols on
         # disk, which is what pushed the runner into ENOSPC (v0.99.80). Each source
@@ -1369,9 +1568,9 @@ jobs:
       id: version
       run: |
         # Strip 'v' prefix: v0.9.5 -> 0.9.5
-        VERSION="${GITHUB_REF_NAME#v}"
+        VERSION="${RELEASE_TAG#v}"
         echo "version=$VERSION" >> $GITHUB_OUTPUT
-        echo "Version: $VERSION (tag: $GITHUB_REF_NAME)"
+        echo "Version: $VERSION (tag: $RELEASE_TAG)"
 
     - name: Upload symbols to R2
       env:
@@ -1381,6 +1580,10 @@ jobs:
         R2_BUCKET: ${{ vars.R2_BUCKET_NAME || 'helixscreen-releases' }}
         RELEASE_VERSION: ${{ steps.version.outputs.version }}
       run: |
+        [ "$RELEASE_MODE" = publish ] || [[ "$R2_PREFIX" == dry-run/?*/ ]] || {
+          echo "::error::dry run with R2_PREFIX='${R2_PREFIX}'; refusing to write live R2 paths"
+          exit 1
+        }
         # Retry wrapper for transient R2 errors (mirrors upload-r2's s3cp).
         s3cp() {
           local attempt=1 max=4
@@ -1410,11 +1613,18 @@ jobs:
           platform="${filename%.sym}"
           echo "Compressing ${platform}.sym..."
           zstd -19 --rm -q "$symfile"
-          echo "Uploading symbols/v${RELEASE_VERSION}/${platform}.sym.zst..."
+          echo "Uploading ${R2_PREFIX}symbols/v${RELEASE_VERSION}/${platform}.sym.zst..."
           s3cp "${symfile}.zst" \
-            "s3://${R2_BUCKET}/symbols/v${RELEASE_VERSION}/${platform}.sym.zst" \
+            "s3://${R2_BUCKET}/${R2_PREFIX}symbols/v${RELEASE_VERSION}/${platform}.sym.zst" \
             --content-type "application/zstd"
         done
+
+        # The .sym maps already exercise the upload path; a dry run skips the
+        # multi-GB debug info.
+        if [ "$RELEASE_MODE" != publish ]; then
+          echo "=== Dry run: skipping debug info upload ==="
+          exit 0
+        fi
 
         echo "=== Uploading debug info (zstd compressed) ==="
         # .sym files were zstd-compressed (--rm) above, so count the .sym.zst
@@ -1426,9 +1636,9 @@ jobs:
           platform="${filename%.debug}"
           echo "Compressing ${platform}.debug..."
           zstd -9 --rm -q "$dbgfile"
-          echo "Uploading symbols/v${RELEASE_VERSION}/${platform}.debug.zst..."
+          echo "Uploading ${R2_PREFIX}symbols/v${RELEASE_VERSION}/${platform}.debug.zst..."
           s3cp "${dbgfile}.zst" \
-            "s3://${R2_BUCKET}/symbols/v${RELEASE_VERSION}/${platform}.debug.zst" \
+            "s3://${R2_BUCKET}/${R2_PREFIX}symbols/v${RELEASE_VERSION}/${platform}.debug.zst" \
             --content-type "application/zstd"
           dbg_uploaded=$((dbg_uploaded + 1))
         done
@@ -1446,31 +1656,38 @@ jobs:
         echo "=== Symbol upload complete ==="
 
     - name: Prune old symbol maps (retain 5 most recent)
+      if: env.RELEASE_MODE == 'publish'
       env:
         AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
         AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
         R2_BUCKET: ${{ vars.R2_BUCKET_NAME || 'helixscreen-releases' }}
         RETAIN_COUNT: 5
+        RELEASE_VERSION: ${{ steps.version.outputs.version }}
       run: |
-        semver_sort() {
-          sort -t. -k1,1n -k2,2n -k3,3n
-        }
+        # Every channel shares this store, so retention alone lets a run of
+        # prereleases outrank the stable release. r2-prune-plan.sh never deletes
+        # a version a channel manifest names, and ranks the rest by semver.
+        # The version this run publishes is pinned as well: a manifest may not
+        # name it yet when this step runs.
 
         echo "=== Pruning old symbol maps ==="
         SYM_VERSIONS=$(aws s3 ls "s3://${R2_BUCKET}/symbols/" \
           --endpoint-url "$R2_ENDPOINT" \
-          | grep -oP 'PRE v\K[0-9]+\.[0-9]+\.[0-9]+(?:[-.][a-zA-Z0-9.]+)?' \
-          | sort -u \
-          | semver_sort)
+          | grep -oP 'PRE v\K[0-9]+\.[0-9]+\.[0-9]+(?:[-.][a-zA-Z0-9.]+)?')
 
         SYM_COUNT=$(echo "$SYM_VERSIONS" | grep -c . || true)
         echo "Found ${SYM_COUNT} symbol versions"
 
-        if [ "$SYM_COUNT" -gt "$RETAIN_COUNT" ]; then
-          DELETE_SYM_VERSIONS=$(echo "$SYM_VERSIONS" | head -n -${RETAIN_COUNT})
-          DELETE_SYM_COUNT=$(echo "$DELETE_SYM_VERSIONS" | grep -c . || true)
-          echo "Pruning ${DELETE_SYM_COUNT} old symbol versions"
+        if ! PINNED=$(scripts/r2-prune-plan.sh pinned); then
+          echo "::warning::Cannot read every channel manifest; skipping the symbol prune rather than risk deleting a served version's symbols"
+          DELETE_SYM_VERSIONS=""
+        else
+          DELETE_SYM_VERSIONS=$(echo "$SYM_VERSIONS" | scripts/r2-prune-plan.sh plan "$RETAIN_COUNT" $PINNED "$RELEASE_VERSION")
+        fi
+
+        if [ -n "$DELETE_SYM_VERSIONS" ]; then
+          echo "Pruning old symbol versions: $(echo $DELETE_SYM_VERSIONS)"
 
           for VERSION in $DELETE_SYM_VERSIONS; do
             echo "  Deleting symbols/v${VERSION}/"
@@ -1479,23 +1696,22 @@ jobs:
               --recursive
           done
         else
-          echo "Within retention limit, nothing to prune"
+          echo "Nothing to prune"
         fi
         echo "=== Symbol pruning complete ==="
 
   # ============================================================================
-  # Trigger docs rebuild + deploy on helixscreen-website for stable releases.
-  # Gated on the channel declared by RELEASE_CHANNEL, so helixscreen.org tracks
-  # the latest stable docs rather than in-flight devel content. The old gate was
-  # `tag has no hyphen`, which would deploy devel-track docs the moment that
-  # track started tagging plain vX.Y.Z versions.
+  # Trigger a docs rebuild + deploy on helixscreen-website for every published
+  # release. The website ignores the dispatched tag: it resolves each docs
+  # version (stable at the root, the beta line under /<version>/) from its own
+  # release-tag prefix, so any release rebuilds every version correctly.
   # Requires WEBSITE_DISPATCH_TOKEN: PAT with contents:write on helixscreen-website.
   # ============================================================================
   notify-website:
     name: Trigger Docs Deploy
     runs-on: ubuntu-latest
-    needs: [release]
-    if: startsWith(github.ref, 'refs/tags/v') && needs.release.outputs.channel == 'stable'
+    needs: [release, plan]
+    if: ${{ !cancelled() && needs.release.result == 'success' && needs.plan.outputs.mode == 'publish' }}
 
     steps:
     - name: Record dispatch time
@@ -1552,3 +1768,66 @@ jobs:
           exit 1
         done
         echo "::warning title=Docs deploy unverified::Timed out waiting for the docs deploy to finish. Check $repo."
+
+  # ============================================================================
+  # Dry run only: check what the run published, then delete it from R2
+  # ============================================================================
+  # always() so a failed upload or verification still removes the prefix. Both
+  # R2 steps refuse to run unless R2_PREFIX is a dry-run/<run_id>/ prefix.
+  dry-run-verify:
+    name: Verify dry run
+    runs-on: ubuntu-latest
+    needs: [plan, release, upload-r2, upload-symbols]
+    if: always() && needs.plan.outputs.mode == 'dryrun'
+    env:
+      R2_BUCKET: ${{ vars.R2_BUCKET_NAME || 'helixscreen-releases' }}
+      R2_PREFIX: ${{ needs.plan.outputs.r2_prefix }}
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+
+    - name: Free up disk space
+      run: |
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+        df -h /
+
+    - name: Download would-be release assets
+      uses: actions/download-artifact@v8
+      with:
+        name: dry-run-release-assets
+        path: dry-run-assets
+
+    - name: Download the dry-run R2 prefix
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+      run: |
+        [[ "$R2_PREFIX" == dry-run/?*/ ]] || { echo "::error::R2_PREFIX='${R2_PREFIX}' is not a dry-run prefix"; exit 1; }
+        # Symbols are uploaded here too, but nothing below checks them and the
+        # debug info runs to gigabytes.
+        aws s3 cp --recursive "s3://${R2_BUCKET}/${R2_PREFIX}" dry-run-r2 \
+          --exclude 'symbols/*' --endpoint-url "$R2_ENDPOINT"
+        find dry-run-r2 -type f | sort
+
+    - name: Verify release artifact against R2
+      env:
+        BASE_URL: ${{ vars.R2_PUBLIC_URL }}/${{ needs.plan.outputs.r2_prefix }}
+        VERSION: ${{ needs.plan.outputs.version }}
+        PLATFORMS: ${{ needs.plan.outputs.platforms }}
+        CHANNELS: ${{ needs.release.outputs.channels }}
+      run: |
+        scripts/verify-dry-run-release.sh --artifact dry-run-assets --r2 dry-run-r2 \
+          --base-url "$BASE_URL" --version "$VERSION" \
+          --platforms "$PLATFORMS" --channels "$CHANNELS"
+
+    - name: Delete the dry-run R2 prefix
+      if: always()
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+      run: |
+        [[ "$R2_PREFIX" == dry-run/?*/ ]] || { echo "::error::R2_PREFIX='${R2_PREFIX}' is not a dry-run prefix"; exit 1; }
+        aws s3 rm --recursive "s3://${R2_BUCKET}/${R2_PREFIX}" --endpoint-url "$R2_ENDPOINT"

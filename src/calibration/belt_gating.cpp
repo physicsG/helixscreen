@@ -10,11 +10,9 @@ BeltGate evaluate_belt_gate(const BeltGateInputs& in) {
     if (!in.has_accelerometer)
         return BeltGate::NO_ACCELEROMETER;
     if (!in.is_corexy)
-        return BeltGate::NOT_COREXY;
+        return in.detecting ? BeltGate::DETECTING : BeltGate::NOT_COREXY;
     if (!in.klippy_socket_reachable)
         return BeltGate::NOT_COLOCATED;
-    if (!in.dsp_capable)
-        return BeltGate::HARDWARE_TOO_SLOW;
     if (in.print_active)
         return BeltGate::PRINTING;
     return BeltGate::OK;
@@ -28,38 +26,16 @@ const char* belt_gate_message(BeltGate gate) {
         return "Not connected to the printer";
     case BeltGate::NO_ACCELEROMETER:
         return "No accelerometer found in your Klipper config";
+    case BeltGate::DETECTING:
+        return "Checking the printer...";
     case BeltGate::NOT_COREXY:
-        return "Belt tuning is only available on CoreXY printers";
+        return "Belt Tension needs a CoreXY printer.";
     case BeltGate::NOT_COLOCATED:
         return "This needs HelixScreen running on the printer itself";
-    case BeltGate::HARDWARE_TOO_SLOW:
-        return "This display is not fast enough to analyse belt frequencies live";
     case BeltGate::PRINTING:
         return "Wait until the print finishes";
     }
     return "Unavailable";
-}
-
-ParkTarget park_y_for_span(float target_span_mm, std::optional<float> span_offset_mm,
-                           const AxisBounds& bounds) {
-    ParkTarget out;
-    if (!span_offset_mm.has_value() || !bounds.has_y) {
-        return out;
-    }
-    const float y = target_span_mm - *span_offset_mm;
-    if (y < bounds.y_min || y > bounds.y_max) {
-        return out;
-    }
-    out.y_mm = y;
-    out.valid = true;
-    return out;
-}
-
-std::optional<float> park_x_center(const AxisBounds& bounds) {
-    if (!bounds.has_x) {
-        return std::nullopt;
-    }
-    return (bounds.x_min + bounds.x_max) / 2.0f;
 }
 
 } // namespace helix::calibration

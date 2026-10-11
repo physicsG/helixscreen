@@ -49,10 +49,10 @@ namespace {
 // gating tests don't cross-pollinate their setup invariants.
 struct TrackerGatingFixture : LVGLTestFixture {
     int backend_idx = 0;
-    AmsBackendMock* mock = nullptr;
+    helix::AmsBackendMock* mock = nullptr;
 
     TrackerGatingFixture() {
-        auto& ams = AmsState::instance();
+        auto& ams = helix::AmsState::instance();
         auto& printer = get_printer_state();
 
         FilamentConsumptionTracker::instance().stop();
@@ -62,27 +62,27 @@ struct TrackerGatingFixture : LVGLTestFixture {
         printer.init_subjects(false);
         ams.clear_external_spool_info();
 
-        auto m = std::make_unique<AmsBackendMock>(4);
+        auto m = std::make_unique<helix::AmsBackendMock>(4);
         m->set_identity_extruder_mapping_for_testing(true);
         mock = m.get();
         backend_idx = ams.add_backend(std::move(m));
 
         for (int s = 0; s < 4; ++s) {
-            SlotInfo info = mock->get_slot_info(s);
+            helix::SlotInfo info = mock->get_slot_info(s);
             info.material = "PLA";
             info.remaining_weight_g = 1000.0f;
             info.total_weight_g = 1000.0f;
             info.spoolman_id = 0;
-            mock->set_slot_info(s, info, /*persist=*/false);
+            mock->sync_external_identity(s, info);
         }
 
         // Zero stale subjects before tracker start — see routing fixture
         // notes: LVGL subjects notify observers on add with the existing
         // value, which would consume filament from the wrong slot.
-        lv_subject_set_int(printer.get_print_filament_used_subject(), 0);
+        lv_subject_set_int(printer.print_state().get_print_filament_used_subject(), 0);
         SubjectLifetime reset_lt;
         for (int i = 0; i < 16; ++i) {
-            auto* subj = printer.get_extruder_filament_used_subject(i, reset_lt);
+            auto* subj = printer.print_state().get_extruder_filament_used_subject(i, reset_lt);
             if (subj) {
                 lv_subject_set_int(subj, 0);
             }
@@ -97,7 +97,7 @@ struct TrackerGatingFixture : LVGLTestFixture {
     ~TrackerGatingFixture() override {
         FilamentConsumptionTrackerTestAccess::force_print_state(PrintJobState::COMPLETE);
         FilamentConsumptionTracker::instance().stop();
-        auto& ams = AmsState::instance();
+        auto& ams = helix::AmsState::instance();
         ams.clear_backends();
         ams.clear_external_spool_info();
     }
@@ -110,13 +110,13 @@ TEST_CASE_METHOD(TrackerGatingFixture, "Gating: slot with spoolman_id != 0 not t
     // Link slot 0 to Spoolman BEFORE any delta arrives so the tracker's
     // per-tick re-gate (apply_delta top-of-loop) sees it and disables the
     // sink without decrementing.
-    SlotInfo info = mock->get_slot_info(0);
+    helix::SlotInfo info = mock->get_slot_info(0);
     info.spoolman_id = 42;
-    mock->set_slot_info(0, info, /*persist=*/false);
+    mock->sync_external_identity(0, info);
 
     auto& state = get_printer_state();
     SubjectLifetime lt;
-    auto* e0 = state.get_extruder_filament_used_subject(0, lt);
+    auto* e0 = state.print_state().get_extruder_filament_used_subject(0, lt);
     REQUIRE(e0 != nullptr);
 
     const float before = mock->get_slot_info(0).remaining_weight_g;
@@ -140,7 +140,7 @@ TEST_CASE_METHOD(TrackerGatingFixture, "Gating: native tracking backend not decr
 
     auto& state = get_printer_state();
     SubjectLifetime lt;
-    auto* e0 = state.get_extruder_filament_used_subject(0, lt);
+    auto* e0 = state.print_state().get_extruder_filament_used_subject(0, lt);
     REQUIRE(e0 != nullptr);
 
     const float before0 = mock->get_slot_info(0).remaining_weight_g;
@@ -156,7 +156,7 @@ TEST_CASE_METHOD(TrackerGatingFixture, "Gating: native tracking backend not decr
 TEST_CASE_METHOD(TrackerGatingFixture, "Mid-print edit rebaselines sink", "[tracker][gating]") {
     auto& state = get_printer_state();
     SubjectLifetime lt;
-    auto* e0 = state.get_extruder_filament_used_subject(0, lt);
+    auto* e0 = state.print_state().get_extruder_filament_used_subject(0, lt);
     REQUIRE(e0 != nullptr);
 
     // First tick: push 500 mm → slot 0 decrements ~1.49 g.
@@ -168,9 +168,9 @@ TEST_CASE_METHOD(TrackerGatingFixture, "Mid-print edit rebaselines sink", "[trac
 
     // User edits mid-print to 800 g (delta from last_written_weight_g_
     // exceeds the 0.5 g rebaseline threshold).
-    SlotInfo info = mock->get_slot_info(0);
+    helix::SlotInfo info = mock->get_slot_info(0);
     info.remaining_weight_g = 800.0f;
-    mock->set_slot_info(0, info, /*persist=*/false);
+    mock->sync_external_identity(0, info);
 
     // Next tick: sink detects external write and rebases — no decrement on
     // this tick, weight stays at exactly the user's 800 g.
@@ -192,16 +192,16 @@ TEST_CASE_METHOD(TrackerGatingFixture,
     // Start slot 0 with unknown weight. The fixture's default snapshot at
     // PRINTING-edge already ran with weight=1000, so we force a fresh
     // snapshot cycle with the new -1 to land the sink in the inactive state.
-    SlotInfo info = mock->get_slot_info(0);
+    helix::SlotInfo info = mock->get_slot_info(0);
     info.remaining_weight_g = -1.0f;
-    mock->set_slot_info(0, info, /*persist=*/false);
+    mock->sync_external_identity(0, info);
     FilamentConsumptionTrackerTestAccess::force_print_state(PrintJobState::COMPLETE);
     FilamentConsumptionTrackerTestAccess::force_print_state(PrintJobState::PRINTING);
     helix::ui::UpdateQueue::instance().drain();
 
     auto& state = get_printer_state();
     SubjectLifetime lt;
-    auto* e0 = state.get_extruder_filament_used_subject(0, lt);
+    auto* e0 = state.print_state().get_extruder_filament_used_subject(0, lt);
     REQUIRE(e0 != nullptr);
 
     // Push delta on an inactive slot → no write, still -1 (sentinel).
@@ -215,7 +215,7 @@ TEST_CASE_METHOD(TrackerGatingFixture,
     // simulate that by cycling print state, which re-snapshots all sinks.
     info = mock->get_slot_info(0);
     info.remaining_weight_g = 800.0f;
-    mock->set_slot_info(0, info, /*persist=*/false);
+    mock->sync_external_identity(0, info);
 
     // Push another delta BEFORE re-snapshot — still inactive, no write.
     lv_subject_set_int(e0, 1000);

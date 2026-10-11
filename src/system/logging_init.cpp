@@ -31,6 +31,7 @@
 #include <lvgl.h>
 #include <memory>
 #include <sstream>
+#include <string_view>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
@@ -356,14 +357,13 @@ void add_system_sink(std::vector<spdlog::sink_ptr>& sinks, LogTarget target,
             sink->set_formatter(make_formatter(SinkKind::File));
             sinks.push_back(std::move(sink));
         } catch (const spdlog::spdlog_ex& e) {
-            // rotating_file_sink_mt THROWS when the path cannot be opened —
-            // missing parent directory, read-only mount, full flash. That
-            // exception used to propagate out of init() and out of
-            // Application::run(), so a bad HELIX_LOG_FILE took the whole UI
-            // down. Logging is never worth refusing to boot over: degrade to
-            // whatever this platform would have picked on its own and say so.
-            // Matters now that platform hooks steer the log at firmware-owned
-            // directories that may not exist on every variant (#1249).
+            // rotating_file_sink_mt THROWS when the path cannot be opened:
+            // missing parent directory, read-only mount, full flash. Uncaught,
+            // it would escape init() and Application::run() and take the UI
+            // down over a bad HELIX_LOG_FILE. Logging is never worth refusing
+            // to boot over: degrade to whatever this platform would pick on its
+            // own and say so. Platform hooks steer the log at firmware-owned
+            // directories that do not exist on every variant (#1249).
             LogTarget fallback = detect_best_target();
             spdlog::warn("[Logging] Cannot open log file '{}' ({}); falling back to {}", path,
                          e.what(), log_target_name(fallback));
@@ -532,6 +532,9 @@ void init_early() {
     auto logger = std::make_shared<spdlog::logger>("helix", sinks.begin(), sinks.end());
     logger->set_level(std::min(EARLY_CONSOLE_LEVEL, ring_level));
     spdlog::set_default_logger(logger);
+#ifndef HELIX_WATCHDOG
+    route_libhv_to_spdlog();
+#endif
 }
 
 StdoutKind classify_stdout() {
@@ -646,11 +649,10 @@ void init(const LogConfig& config) {
     // init_early() when there is one to adopt (see below). This is the
     // authoritative source for the debug bundle's log_tail: always the live
     // process, always fresh, and (by default) always carrying DEBUG even when
-    // the persistent sinks run at WARN. On syslog-target devices (AD5X/AD5M)
-    // the file cascade otherwise falls back to a stale leftover file and only
-    // WARN-filtered /var/log/messages lines reach the bundle — the runtime
-    // debug context needed to diagnose an in-progress incident (e.g. a stuck
-    // IFS filament purge) was being lost entirely.
+    // the persistent sinks run at a coarser level. The persistent sinks keep
+    // only what their level lets through, so the debug context needed to
+    // diagnose an in-progress incident (e.g. a stuck IFS filament purge) lives
+    // only here.
     //
     // Perf tradeoff (MIPS/AD5X): debug-level emission costs a format pass per
     // line into the ring even when persistent sinks drop it. That cost is
@@ -688,15 +690,16 @@ void init(const LogConfig& config) {
     auto logger = std::make_shared<spdlog::logger>("helix", sinks.begin(), sinks.end());
     logger->set_level(std::min(config.level, ring_level));
 
-    // Flush warnings and worse immediately instead of waiting for spdlog's
+    // Flush info and worse immediately instead of waiting for spdlog's
     // buffer to fill. The UI is routinely SIGKILLed rather than shut down
     // cleanly — an init script escalating `kill` to `kill -9`, or a firmware
     // helper stopping the GUI to free RAM — and anything still buffered at that
     // moment is lost. The lost lines are exactly the ones describing why the
     // process was in trouble, which is what makes such a failure undiagnosable
-    // after the fact. Levels below warn stay buffered so ordinary logging on
-    // flash-backed boards keeps its write batching.
-    logger->flush_on(spdlog::level::warn);
+    // after the fact. INFO is the production level and runs at a few hundred
+    // lines an hour at most, so a write per line costs nothing and the page
+    // cache still batches the flash writes. Debug and trace stay buffered.
+    logger->flush_on(spdlog::level::info);
 
     // Set as default logger
     spdlog::set_default_logger(logger);
@@ -762,6 +765,12 @@ std::string effective_destination() {
 
 std::string effective_log_file_path() {
     return (g_effective_target == LogTarget::File) ? g_effective_file_path : std::string{};
+}
+
+void clear_ring_buffer() {
+    if (auto sink = g_ring_sink) {
+        sink->clear();
+    }
 }
 
 std::string tail_ring_buffer(int num_lines) {
@@ -926,6 +935,47 @@ int to_hv_level(spdlog::level::level_enum level) {
     }
 }
 
+int libhv_level_for(spdlog::level::level_enum level) {
+    return to_hv_level(std::max(level, spdlog::level::warn));
+}
+
+#ifndef HELIX_WATCHDOG
+namespace {
+void libhv_log_handler(int hv_level, const char* buf, int len) {
+    spdlog::level::level_enum level = spdlog::level::debug;
+    switch (hv_level) {
+    case LOG_LEVEL_INFO:
+        level = spdlog::level::info;
+        break;
+    case LOG_LEVEL_WARN:
+        level = spdlog::level::warn;
+        break;
+    case LOG_LEVEL_ERROR:
+        level = spdlog::level::err;
+        break;
+    case LOG_LEVEL_FATAL:
+        level = spdlog::level::critical;
+        break;
+    default:
+        break;
+    }
+    std::string_view text(buf, static_cast<size_t>(std::max(len, 0)));
+    while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) {
+        text.remove_suffix(1);
+    }
+    // Null after spdlog::shutdown(), while libhv threads may still be logging.
+    if (auto logger = spdlog::default_logger()) {
+        logger->log(level, "[libhv] {}", text);
+    }
+}
+} // namespace
+
+void route_libhv_to_spdlog() {
+    hlog_set_format("%s"); // message only: spdlog adds the timestamp and level
+    hlog_set_handler(libhv_log_handler);
+}
+#endif
+
 #ifndef HELIX_WATCHDOG
 void set_runtime_level(spdlog::level::level_enum level) {
     // Mirror init()'s split: the logger floor must stay at least as verbose as
@@ -961,7 +1011,7 @@ void set_runtime_level(spdlog::level::level_enum level) {
         spdlog::set_level(std::min(level, ring_level));
     }
 
-    hlog_set_level(to_hv_level(level));
+    hlog_set_level(libhv_level_for(level));
     spdlog::info("[Logging] Runtime log level changed to {}",
                  spdlog::level::to_string_view(level).data());
 }
@@ -982,8 +1032,8 @@ spdlog::level::level_enum resolve_log_level(int cli_verbosity, const std::string
         return parse_level(config_level_str, spdlog::level::warn);
     }
 
-    // Defaults: test mode = debug, production = warn
-    return test_mode ? spdlog::level::debug : spdlog::level::warn;
+    // Defaults: test mode = debug, production = info
+    return test_mode ? spdlog::level::debug : spdlog::level::info;
 }
 
 } // namespace logging

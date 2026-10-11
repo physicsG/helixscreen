@@ -8,17 +8,19 @@
 
 #include "ui_overlay_qr_scanner.h"
 
-#include "ui_event_safety.h"
-#include "ui_nav_manager.h"
+#include "ui_callback_helpers.h"
+#include "ui_effects.h"
+#include "ui_nav.h"
+#include "ui_panel_common.h"
 #include "ui_update_queue.h"
 
 #include "app_globals.h"
 #include "display_settings_manager.h"
+#include "helix_thread.h"
 #include "i_moonraker_api.h"
 #include "printer_state.h"
 #include "sound_manager.h"
-#include "static_panel_registry.h"
-#include "ui/ui_lazy_panel_helper.h"
+#include "ui/ui_widget_helpers.h"
 
 #if HELIX_HAS_CAMERA
 #include "camera_stream.h"
@@ -49,21 +51,6 @@ void disable_lvgl_keyboards(bool disable) {
 namespace helix::ui {
 
 // ============================================================================
-// SINGLETON ACCESSOR
-// ============================================================================
-
-static std::unique_ptr<QrScannerOverlay> g_qr_scanner_overlay;
-
-QrScannerOverlay& get_qr_scanner_overlay() {
-    if (!g_qr_scanner_overlay) {
-        g_qr_scanner_overlay = std::make_unique<QrScannerOverlay>();
-        StaticPanelRegistry::instance().register_destroy("QrScannerOverlay",
-                                                         []() { g_qr_scanner_overlay.reset(); });
-    }
-    return *g_qr_scanner_overlay;
-}
-
-// ============================================================================
 // CONSTRUCTOR / DESTRUCTOR
 // ============================================================================
 
@@ -72,12 +59,10 @@ QrScannerOverlay::QrScannerOverlay() {
     qr_decoder_ = std::make_unique<helix::QrDecoder>();
     camera_ = std::make_unique<helix::CameraStream>();
 #endif
-    spdlog::debug("[{}] Created", get_name());
 }
 
 QrScannerOverlay::~QrScannerOverlay() {
     stop_scanning();
-    spdlog::trace("[{}] Destroyed", get_name());
 }
 
 // ============================================================================
@@ -93,8 +78,9 @@ void QrScannerOverlay::init_subjects() {
 }
 
 void QrScannerOverlay::register_callbacks() {
-    lv_xml_register_event_cb(nullptr, "on_qr_scanner_close", on_close_clicked);
-    spdlog::debug("[{}] Callbacks registered", get_name());
+    register_xml_callbacks({
+        {"on_qr_scanner_close", [](lv_event_t*) { get_qr_scanner_overlay().handle_close(); }},
+    });
 }
 
 // ============================================================================
@@ -102,11 +88,6 @@ void QrScannerOverlay::register_callbacks() {
 // ============================================================================
 
 lv_obj_t* QrScannerOverlay::create(lv_obj_t* parent) {
-    if (overlay_root_) {
-        spdlog::warn("[{}] create() called but overlay already exists", get_name());
-        return overlay_root_;
-    }
-
     spdlog::debug("[{}] Creating overlay...", get_name());
 
     parent_screen_ = parent;
@@ -114,24 +95,20 @@ lv_obj_t* QrScannerOverlay::create(lv_obj_t* parent) {
 
     // Create fullscreen overlay from XML (not using create_overlay_from_xml since
     // this is a fullscreen overlay, not the standard overlay_panel with header)
-    overlay_root_ = static_cast<lv_obj_t*>(lv_xml_create(parent, "qr_scanner_overlay", nullptr));
+    overlay_root_ = helix::ui::create_xml_hidden(parent, xml_component());
     if (!overlay_root_) {
         spdlog::error("[{}] Failed to create overlay from XML", get_name());
         return nullptr;
     }
 
     // Find child widgets by name
-    viewfinder_ = lv_obj_find_by_name(overlay_root_, "viewfinder");
-    status_text_ = lv_obj_find_by_name(overlay_root_, "status_text");
-    success_flash_ = lv_obj_find_by_name(overlay_root_, "success_flash");
+    viewfinder_ = helix::ui::find_required(overlay_root_, "viewfinder", get_name());
+    success_flash_ = helix::ui::find_required(overlay_root_, "success_flash", get_name());
 
     // Scale camera frames to cover the viewfinder area
     if (viewfinder_) {
         lv_image_set_inner_align(viewfinder_, LV_IMAGE_ALIGN_COVER);
     }
-
-    // Initially hidden until show() pushes it
-    lv_obj_add_flag(overlay_root_, LV_OBJ_FLAG_HIDDEN);
 
     spdlog::info("[{}] Overlay created", get_name());
     return overlay_root_;
@@ -139,9 +116,7 @@ lv_obj_t* QrScannerOverlay::create(lv_obj_t* parent) {
 
 void QrScannerOverlay::on_ui_destroyed() {
     viewfinder_ = nullptr;
-    status_text_ = nullptr;
     success_flash_ = nullptr;
-    cached_overlay_ = nullptr;
 }
 
 // ============================================================================
@@ -154,22 +129,19 @@ void QrScannerOverlay::show(lv_obj_t* parent, int slot_index, ResultCallback on_
     result_callback_ = std::move(on_result);
     cancel_callback_ = std::move(on_cancel);
 
-    spdlog::debug("[{}] show() called, parent={}, cached_overlay_={}", get_name(), fmt::ptr(parent),
-                  fmt::ptr(cached_overlay_));
+    spdlog::debug("[{}] show() called, parent={}", get_name(), fmt::ptr(parent));
 
     // Always use the active screen so the overlay renders above modals
     lv_obj_t* screen = lv_screen_active();
 
-    bool ok = lazy_create_and_push_overlay<QrScannerOverlay>(
-        get_qr_scanner_overlay, cached_overlay_, screen ? screen : parent, "QR Scanner",
-        "QrScannerOverlay", true /* destroy_on_close */);
+    bool ok = OverlayBase::show(screen ? screen : parent);
     if (!ok) {
         spdlog::error("[{}] Failed to show overlay", get_name());
     }
 
     // Move to front so it renders above any open modals
-    if (cached_overlay_) {
-        lv_obj_move_foreground(cached_overlay_);
+    if (overlay_root_) {
+        helix::ui::bring_to_front(overlay_root_);
     }
 }
 
@@ -183,7 +155,7 @@ void QrScannerOverlay::on_activate() {
 
     // Re-lookup viewfinder in case overlay was reused after on_deactivate nulled it
     if (!viewfinder_ && overlay_root_) {
-        viewfinder_ = lv_obj_find_by_name(overlay_root_, "viewfinder");
+        viewfinder_ = helix::ui::find_required(overlay_root_, "viewfinder", get_name());
     }
 
     start_scanning();
@@ -204,7 +176,7 @@ void QrScannerOverlay::on_activate() {
                 if (overlay.cancel_callback_) {
                     overlay.cancel_callback_();
                 }
-                NavigationManager::instance().go_back();
+                helix::nav::go_back();
             }
             delete d;
             lv_timer_delete(timer);
@@ -215,7 +187,12 @@ void QrScannerOverlay::on_activate() {
     spdlog::debug("[{}] Activated", get_name());
 }
 
-void QrScannerOverlay::on_deactivate() {
+void QrScannerOverlay::on_deactivating(DeactivateReason) {
+    // The reason is deliberately ignored: this tears down unconditionally, a
+    // suspended screen included. A camera left streaming behind the screensaver
+    // is both a power cost and a privacy one, and the viewfinder buffers must
+    // not outlive the frames LVGL points at. Do not add a Suspended guard here.
+
     // Expire all outstanding lifetime tokens FIRST, before any cleanup.
     // Camera BG thread may be mid-frame with a valid token; invalidating
     // early ensures queued lambdas are skipped. (#632)
@@ -244,8 +221,6 @@ void QrScannerOverlay::on_deactivate() {
     // Clear callbacks to prevent stale references on reuse
     result_callback_ = nullptr;
     cancel_callback_ = nullptr;
-
-    OverlayBase::on_deactivate();
     spdlog::debug("[{}] Deactivated", get_name());
 }
 
@@ -261,12 +236,13 @@ void QrScannerOverlay::start_scanning() {
 
     // On moving-bed printers, lower the bed to give room for QR scanning
     auto& state = get_printer_state();
-    bool bed_moves = lv_subject_get_int(state.get_printer_bed_moves_subject()) != 0;
-    const char* homed = lv_subject_get_string(state.get_homed_axes_subject());
+    bool bed_moves =
+        lv_subject_get_int(state.capabilities_state().subject(Capability::BedMoves)) != 0;
+    const char* homed = lv_subject_get_string(state.motion_state().get_homed_axes_subject());
     bool z_homed = homed && strchr(homed, 'z') != nullptr;
 
     if (bed_moves && z_homed) {
-        int z_centimm = lv_subject_get_int(state.get_position_z_subject());
+        int z_centimm = lv_subject_get_int(state.motion_state().get_position_z_subject());
         double z_mm = z_centimm / 100.0;
         constexpr double QR_SCAN_Z = 150.0;
         if (z_mm < QR_SCAN_Z) {
@@ -339,7 +315,7 @@ void QrScannerOverlay::start_scanning() {
     // No compiled camera support — try snapshot polling as fallback
     {
         auto& state = get_printer_state();
-        std::string snapshot_url = state.get_webcam_snapshot_url();
+        std::string snapshot_url = state.capabilities_state().get_webcam_snapshot_url();
         auto* api = get_moonraker_api();
         if (api && !snapshot_url.empty()) {
             api->resolve_webcam_url(snapshot_url);
@@ -489,7 +465,7 @@ void QrScannerOverlay::on_camera_frame(lv_draw_buf_t* frame) {
         // ARM (AD5M/CC1) throws std::system_error which aborts with std::terminate
         // if it escapes an LVGL event frame (#724, #837, [L083]).
         try {
-            std::thread([this, qr_buf, qr_w, qr_h, decode_tok]() {
+            helix::make_thread([this, qr_buf, qr_w, qr_h, decode_tok]() {
                 auto result = qr_decoder_->decode(qr_buf->data(), qr_w, qr_h);
                 decode_busy_ = false;
 
@@ -624,7 +600,7 @@ void QrScannerOverlay::on_spool_found(const SpoolInfo& spool) {
                 auto callback = d->callback;
                 auto spool = d->spool;
                 // Close the overlay properly via navigation (handles backdrop cleanup)
-                NavigationManager::instance().go_back();
+                helix::nav::go_back();
                 // Fire callback AFTER close — the caller (modal) was hidden by
                 // go_back but is re-shown by the modal's own show logic
                 if (callback) {
@@ -667,26 +643,19 @@ void QrScannerOverlay::update_status(const std::string& text) {
 }
 
 // ============================================================================
-// STATIC CALLBACKS
+// CLOSE
 // ============================================================================
 
-void QrScannerOverlay::on_close_clicked(lv_event_t* /*e*/) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[QrScannerOverlay] on_close_clicked");
+void QrScannerOverlay::handle_close() {
+    spdlog::info("[{}] Close clicked", get_name());
 
-    auto& overlay = get_qr_scanner_overlay();
-    spdlog::info("[{}] Close clicked", overlay.get_name());
+    stop_scanning();
 
-    overlay.stop_scanning();
-
-    // Fire cancel callback
-    if (overlay.cancel_callback_) {
-        overlay.cancel_callback_();
+    if (cancel_callback_) {
+        cancel_callback_();
     }
 
-    // Navigate back
-    NavigationManager::instance().go_back();
-
-    LVGL_SAFE_EVENT_CB_END();
+    helix::nav::go_back();
 }
 
 } // namespace helix::ui

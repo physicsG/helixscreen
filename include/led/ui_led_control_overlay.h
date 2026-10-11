@@ -4,11 +4,15 @@
 
 #include "ui_observer_guard.h"
 
+#include "helix/xml/indexed_subject_pool.h"
 #include "led/led_backend.h"
+#include "led/led_device_page.h"
 #include "overlay_base.h"
+#include "static_panel_registry.h"
 #include "subject_managed_panel.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -20,161 +24,204 @@ namespace helix::led {
 
 /**
  * @file ui_led_control_overlay.h
- * @brief Full-screen overlay for controlling LED strips, effects, WLED, and macros
+ * @brief The LEDs overlay: one tab per LED device, and a page for the focused one
  *
- * Displays sections for each available LED backend:
- * - Native color: Color presets, brightness slider, custom color picker
- * - Effects: led_effect buttons with stop-all
- * - WLED: Preset buttons and brightness
- * - Macros: On/off and custom action buttons
- *
- * Sections auto-hide based on discovered backends.
- * Opened via long-press on home panel lightbulb.
+ * Every control acts on the focused device and nothing else. Focusing a tab
+ * never writes the controller's selection, the auto-state targets or config.
+ * The page reads its slider and swatch state on focus and activation only; a
+ * live status frame updates the tab dots, the power state and the page color.
  *
  * @see LedController for backend discovery and control
  * @see led_control_overlay.xml for layout definition
  */
 class LedControlOverlay : public OverlayBase {
-    // Test access for exercising private visibility logic (color picker gate).
     friend class LedControlOverlayTestAccess;
 
   public:
-    explicit LedControlOverlay(helix::PrinterState& printer_state);
-    ~LedControlOverlay() override;
-
     void init_subjects() override;
+    const char* xml_component() const override {
+        return "led_control_overlay";
+    }
     lv_obj_t* create(lv_obj_t* parent) override;
     void register_callbacks() override;
 
+    /**
+     * @brief Death signal for the subjects this LedControlOverlay owns.
+     *
+     * Pass to observe_*() from anything that can outlive this object's
+     * deinit_subjects(): that path frees every observer node without bumping
+     * the ObserverGuard invalidation epoch, so a guard without the token
+     * dereferences a freed observer on its next reset().
+     */
+    [[nodiscard]] SubjectLifetime get_subjects_lifetime() const {
+        return subjects_.get_subjects_lifetime();
+    }
+
     [[nodiscard]] const char* get_name() const override {
-        return "LED Control";
+        return "LEDs";
     }
 
     void on_activate() override;
-    void on_deactivate() override;
+    void on_deactivating(DeactivateReason reason) override;
     void cleanup() override;
 
+    /// Freed on close; the next open rebuilds it. Focus and the current look live
+    /// in members, the page in subjects, so nothing is lost with the widgets.
+    bool destroy_on_close() const override {
+        return true;
+    }
+
+    /// The device the next activation opens on, when it still exists. Empty
+    /// opens on the last focused device.
+    void request_focus(const std::string& device_id);
+
+    [[nodiscard]] const std::string& focused_device() const {
+        return focused_strip_;
+    }
+
   private:
-    // Section population
-    void populate_sections();
-    void populate_strip_selector();
-    void populate_color_presets();
-    void populate_effects();
-    void populate_wled();
-    void populate_macros();
-    void update_section_visibility();
+    /// Releases the tab, swatch and chip pools the tree was bound to.
+    void on_ui_destroyed() override;
 
-    // Action handlers
-    void handle_color_preset(uint32_t color);
-    void handle_brightness_change(int brightness);
+    /// LV_EVENT_DELETE on the root: a tree deleted by anyone else leaves no
+    /// pointer into it, and the next open recreates it.
+    static void on_root_deleted(lv_event_t* e);
+
+    void rebuild_tabs();
+    void publish_tab_dots();
+    void focus_device(const std::string& id);
+    void scroll_tab_into_view(int index);
+    /// Reads the focused device's brightness, color and white level.
+    void load_page_state();
+    void publish_page();
+    void publish_color_state();
+    /// Edges are judged against the current theme's surfaces.
+    void publish_swatch_edges();
+    void publish_list();
+    void on_led_state_changed();
+    /// Polls the focused WLED strip and re-reads its page when the poll lands.
+    void refresh_wled_page();
+
+    [[nodiscard]] const LedStripInfo* focused_info() const;
+    [[nodiscard]] MacroLedType focused_macro_type() const;
+    /// The focused strip's running effect among its list chips, or -1.
+    [[nodiscard]] int active_effect_index() const;
+    [[nodiscard]] std::vector<bool> focused_effects_enabled() const;
+    /// Shows @p chip (-1 the None chip) until a frame changes the focused
+    /// strip's effect state or PENDING_EFFECT_TIMEOUT_MS passes.
+    void set_pending_effect_chip(int chip);
+    /// A status frame: a pending chip holds until the effect state moves, then
+    /// the tapped chip stays if it is running, else the running one wins.
+    void resolve_effect_chip();
+    /// The bounded wait for pending chip @p gen ran out: show the real state.
+    void end_pending_effect(unsigned gen);
+
+    void handle_tab_clicked(int index);
+    void handle_power();
+    void handle_brightness(int pct);
+    void handle_white(int tone);
+    void handle_swatch(int index);
     void handle_custom_color();
-    void handle_effect_activate(const std::string& effect_name);
-    void handle_native_turn_off();
-    void handle_wled_toggle();
-    void handle_wled_preset(int preset_id);
-    void handle_wled_brightness(int brightness);
-    void handle_macro_on(const std::string& macro_name);
-    void handle_macro_off(const std::string& macro_name);
-    void handle_macro_toggle(const std::string& macro_name);
-    void handle_macro_custom(const std::string& gcode);
-    void handle_strip_selected(const std::string& strip_id);
+    void handle_list_chip(int index);
+    void handle_effects_none();
+    void handle_macro_on();
+    void handle_macro_off();
+    void handle_macro_toggle();
 
-    // WLED status refresh
-    void refresh_wled_status();
-
-    // Helpers
+    /// A full-brightness @p rgb with no white, at the current brightness (full
+    /// when the light is off).
+    void apply_swatch_color(uint32_t rgb);
+    /// Makes @p rgb and @p w the current look and sends it.
+    void apply_look(uint32_t rgb, double w);
+    /// Sends current color, W and brightness to the focused NATIVE device,
+    /// stopping its effects first.
     void apply_current_color();
-    /// Selected strips a @p type backend's commands may address.
-    ///
-    /// The selection is mixed by design — tapping a chip front-inserts rather than
-    /// collapsing — so a backend must never fan out across the whole list. Sending
-    /// an output_pin id down the native path yields `SET_LED LED="enclosure"`
-    /// ("Unknown LED"), a `macro:` id is rejected outright by is_safe_identifier()
-    /// and toasts once per slider step, and the output_pin path would emit
-    /// `SET_PIN PIN=a` for a neopixel.
-    ///
-    /// Falls back to the first strip the backend owns when the selection contains
-    /// none of its strips, preserving the implicit target the color/turn-off paths
-    /// have always used. Returns empty when the backend owns nothing.
-    static std::vector<std::string> target_strips_for(LedBackendType type);
+    void stop_focused_effects();
 
-    /// Native strips a color/turn-off action applies to.
-    static std::vector<std::string> native_target_strips();
-    void send_color_to_strips(double r, double g, double b, double w);
-    void update_brightness_text(int brightness);
-    void update_wled_brightness_text(int brightness);
-    void update_current_color_swatch();
-    void highlight_active_effect(const std::string& active_name);
-
-    // Helper for creating macro chips with click handlers
-    using MacroClickHandler = void (LedControlOverlay::*)(const std::string&);
-    void add_macro_chip(const std::string& label, const std::string& data,
-                        MacroClickHandler handler);
-    void populate_macro_controls(const LedMacroInfo& macro);
-
-    // Update WLED toggle button appearance based on strip state
-    void update_wled_toggle_button();
-
-    // Static callbacks for XML event_cb (delegate to singleton)
-    static void on_custom_color_cb(lv_event_t* e);
-    static void on_native_turn_off_cb(lv_event_t* e);
-    static void on_wled_toggle_cb(lv_event_t* e);
-    static void on_color_preset_cb(lv_event_t* e);
-    static void on_brightness_changed_cb(lv_event_t* e);
-
-    // Widget references (owned by LVGL, not us)
-    // Section visibility handled declaratively via bind_flag_if_eq subjects
-    lv_obj_t* strip_selector_section_ = nullptr;
-    lv_obj_t* color_presets_container_ = nullptr;
-    lv_obj_t* effects_container_ = nullptr;
-    lv_obj_t* wled_presets_container_ = nullptr;
-    lv_obj_t* macro_buttons_container_ = nullptr;
-    lv_obj_t* current_color_swatch_ = nullptr;
-    // brightness_slider and wled_brightness_slider use bind_value — no C++ reference needed
-    // wled_toggle_btn_ removed — styling driven by led_wled_is_on subject + bind_style
-
-    // Subjects for XML bindings
     SubjectManager subjects_;
-    lv_subject_t brightness_subject_{};
-    lv_subject_t brightness_text_subject_{};
-    char brightness_text_buf_[16] = {0};
-    lv_subject_t strip_name_subject_{};
-    char strip_name_buf_[64] = {0};
-    lv_subject_t wled_brightness_subject_{};
-    lv_subject_t wled_brightness_text_subject_{};
-    char wled_brightness_text_buf_[16] = {0};
-    lv_subject_t wled_is_on_{};
 
-    // Section visibility subjects (0=hidden, 1=visible)
-    lv_subject_t native_visible_{};
-    lv_subject_t effects_visible_{};
-    lv_subject_t wled_visible_{};
-    lv_subject_t macro_visible_{};
-    lv_subject_t strip_selector_visible_{};
-    lv_subject_t color_visible_{};
+    // Tab row
+    lv_subject_t tab_count_{};
+    lv_subject_t focused_tab_{};
+    lv_subject_t tabs_fade_{};
+    helix::xml::IndexedSubjectPool tab_name_pool_{"led_tab_name",
+                                                  helix::xml::IndexedSubjectPool::Type::String};
+    /// PowerState per tab.
+    helix::xml::IndexedSubjectPool tab_dot_pool_{"led_tab_dot",
+                                                 helix::xml::IndexedSubjectPool::Type::Int};
+    helix::xml::IndexedSubjectPool tab_dot_color_pool_{"led_tab_dot_color",
+                                                       helix::xml::IndexedSubjectPool::Type::Color};
 
-    // Observers
-    ObserverGuard wled_brightness_observer_;
+    // Page sections: the DevicePage enums as ints
+    lv_subject_t page_lamp_{};
+    lv_subject_t page_white_{};
+    lv_subject_t page_color_vis_{};
+    lv_subject_t page_list_{};
 
-    // State
+    // Page state
+    lv_subject_t page_on_{}; ///< PowerState of the focused device
+    lv_subject_t page_color_{};
+    lv_subject_t page_fill_text_{};
+    lv_subject_t page_brightness_{};
+    lv_subject_t page_brightness_text_{};
+    char page_brightness_text_buf_[16] = {0};
+    lv_subject_t page_white_sel_{};
+    lv_subject_t swatch_count_{};
+    helix::xml::IndexedSubjectPool swatch_color_pool_{"led_swatch_color",
+                                                      helix::xml::IndexedSubjectPool::Type::Color};
+    /// 1 where a swatch's fill is near-white and needs the light-theme hairline.
+    helix::xml::IndexedSubjectPool swatch_edge_pool_{"led_swatch_edge",
+                                                     helix::xml::IndexedSubjectPool::Type::Int};
+    lv_subject_t selected_swatch_{};
+    lv_subject_t page_list_title_{};
+    char page_list_title_buf_[64] = {0};
+    lv_subject_t chip_count_{};
+    helix::xml::IndexedSubjectPool chip_label_pool_{"led_chip_label",
+                                                    helix::xml::IndexedSubjectPool::Type::String};
+    lv_subject_t active_chip_{}; ///< chip index, -1 the None chip, -2 nothing
+    lv_subject_t page_level_{};  ///< the LEVEL_CHIPS value shown, 0 none
+    lv_subject_t page_note_{};
+    char page_note_buf_[128] = {0};
+
+    ObserverGuard state_observer_;
+    ObserverGuard theme_observer_;
+
+    std::string focused_strip_;
+    std::string last_focused_; ///< for this session only
+    std::string requested_focus_;
+    std::vector<LedStripInfo> devices_;
+    DevicePage page_;
+    /// What each list chip sends: effect names, WLED preset ids, or macro gcode.
+    std::vector<std::string> list_values_;
+
     int current_brightness_ = 100;
-    uint32_t current_color_ = 0xFFFFFF;
-    double current_white_ = 0.0; // White channel 0.0-1.0 (RGBW strips only)
-    LedBackendType selected_backend_type_ = LedBackendType::NATIVE;
-    bool strips_rebuild_pending_ = false; ///< Coalesces strip selector rebuild requests
+    uint32_t current_color_ = 0xFFFFFF; ///< full-brightness RGB
+    double current_white_ = 0.0;        ///< full-brightness W, 0.0-1.0
+    /// Bumped by every control; a poll landing after a bump leaves the page alone.
+    unsigned page_gen_ = 0;
+
+    static constexpr uint32_t PENDING_EFFECT_TIMEOUT_MS = 4000;
+    std::optional<int> pending_effect_chip_;
+    std::vector<bool> pending_effects_snapshot_;
+    unsigned pending_effect_gen_ = 0;
 };
 
 } // namespace helix::led
 
-/**
- * @brief Get global LedControlOverlay instance
- * @return Reference to singleton instance
- * @throws std::runtime_error if not initialized
- */
-helix::led::LedControlOverlay& get_led_control_overlay();
+inline helix::led::LedControlOverlay& get_led_control_overlay() {
+    return helix::lazy_global<helix::led::LedControlOverlay>("LedControlOverlay");
+}
 
+namespace helix {
 /**
- * @brief Initialize global LedControlOverlay instance
- * @param printer_state Reference to global helix::PrinterState
+ * @brief Push the LED control overlay, creating it under @p parent_screen when it has no live tree
+ *
+ * The overlay singleton owns its one widget tree; every caller opens through
+ * here and none keeps or deletes the root.
+ * @param parent_screen Screen to create the overlay on when it has no live tree
+ * @param device_id Device to open on; empty opens on the last focused device,
+ *        then the chamber light
+ * @return The pushed root, or nullptr if it could not be created
  */
-void init_led_control_overlay(helix::PrinterState& printer_state);
+lv_obj_t* open_led_control_overlay(lv_obj_t* parent_screen, const std::string& device_id = "");
+} // namespace helix

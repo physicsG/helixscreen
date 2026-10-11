@@ -4,6 +4,7 @@
 #include "ui_busy_overlay.h"
 
 #include "ui_effects.h"
+#include "ui_update_queue.h"
 #include "ui_utils.h"
 
 #include "format_utils.h"
@@ -178,6 +179,13 @@ void BusyOverlay::show(const std::string& initial_text, uint32_t grace_period_ms
         spdlog::debug("[BusyOverlay] Started grace timer ({}ms) for: '{}'", grace_period_ms,
                       initial_text);
     }
+}
+
+void BusyOverlay::queue_progress(const std::string& operation, size_t done, size_t total) {
+    const float pct =
+        (total > 0) ? (100.0f * static_cast<float>(done) / static_cast<float>(total)) : 0.0f;
+    helix::ui::queue_update("BusyOverlay::queue_progress",
+                            [operation, pct]() { BusyOverlay::set_progress(operation, pct); });
 }
 
 void BusyOverlay::set_progress(const std::string& operation, float percent) {

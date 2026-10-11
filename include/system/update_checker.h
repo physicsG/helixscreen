@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include "ui_observer_guard.h"
+
 #include "async_lifetime_guard.h"
 #include "lvgl.h"
 #include "subject_managed_panel.h"
@@ -56,6 +58,11 @@ enum class ChannelVersionRelation {
  */
 ChannelVersionRelation compare_channel_version(const std::string& installed,
                                                const std::string& channel_version);
+
+namespace helix {
+class IMoonrakerClient;
+}
+class IMoonrakerAPI; // NAMESPACE_OK: forward-declares the global interface
 
 /**
  * @brief Async update checker for HelixScreen
@@ -202,6 +209,19 @@ class UpdateChecker {
     void on_channel_changed();
 
     /**
+     * @brief Point moonraker.conf's [update_manager helixscreen] at the app's channel
+     *
+     * Mainsail and Fluidd offer whatever that stanza's `channel:` names, so a stale one
+     * offers a beta install a "stable" downgrade. Rewrites the line only when a stanza
+     * with a channel line exists and disagrees, then restarts Moonraker, which reads its
+     * config only at startup. While a job holds the machine the file is still written
+     * but the restart is skipped, so the change lands at Moonraker's next start. Called
+     * on every Moonraker discovery and whenever the effective channel changes. Main
+     * thread only.
+     */
+    void sync_moonraker_channel();
+
+    /**
      * @brief Initialize the update checker
      *
      * Call once at startup. Idempotent - safe to call multiple times.
@@ -220,6 +240,20 @@ class UpdateChecker {
     lv_subject_t* status_subject();
     lv_subject_t* version_text_subject();
     lv_subject_t* new_version_subject();
+
+    /// Re-render update_version_text in the active language. A subject string
+    /// is not re-translated by LVGL, so the language switch calls this after
+    /// lv_translation_set_language(). Main thread only.
+    void on_language_changed();
+
+    /// Death signal for the subjects this singleton owns.
+    ///
+    /// shutdown() frees every observer node on them without bumping the
+    /// ObserverGuard invalidation epoch, so outside observers must pass this to
+    /// observe_*(), or their guards call lv_observer_remove() on a freed node.
+    [[nodiscard]] SubjectLifetime get_subjects_lifetime() const {
+        return subjects_.get_subjects_lifetime();
+    }
 
     // Download and install
     void start_download();
@@ -289,6 +323,66 @@ class UpdateChecker {
     static std::string compute_update_staging_dir(const std::string& tarball_path,
                                                   const std::string& install_root);
 
+    /**
+     * @brief The filename an update download stages under for a release URL.
+     * @param url The release asset URL; a .zip URL stages under its .zip name.
+     * @return The basename (no directory) of the staged file.
+     *
+     * Dot-prefixed so the staged archive and the scratch files derived from it
+     * stay hidden wherever the free-space search puts them: on boards whose
+     * gcodes root is the whole data partition rather than a directory inside
+     * it, a plainly named archive is a file in the print picker for the whole
+     * update. Pure + static so the hiding invariant is unit-testable without
+     * a network fetch.
+     */
+    static std::string download_filename_for_url(const std::string& url);
+
+    /**
+     * @brief The line of install.sh output the UI shows when an install fails.
+     * @param lines The install log, one entry per line.
+     * @return The first substantive "[ERROR]" or "<command> failed (exit N):"
+     *         line of the final failing block; else the last line with ERROR or
+     *         FAILED; else the last WARNING line; ANSI color stripped. Empty if
+     *         none. Only lines after the last completed step ("... ok") count.
+     *
+     * The installer's step line ("[n/N] <title> ... FAILED") comes after the
+     * lines that explain it, so a plain last-match would show the step's name
+     * instead of its cause. Its refusal blocks are cause-first, advice-after,
+     * so within a block the FIRST substantive [ERROR] line is the cause; the
+     * closing advice line points at log context the touchscreen never shows.
+     * Best-effort steps log errors and carry on, so an error before a
+     * completed step is not the cause.
+     */
+    static std::string install_failure_detail(const std::vector<std::string>& lines);
+
+    /**
+     * @brief Probe the init destination with a real new-file write, before the
+     *        archive download.
+     * @param init_dir The directory the service definition installs into
+     *                 (/etc/init.d or /etc/systemd/system).
+     * @return "" when a new file can be created there, else a user-facing
+     *         failure line naming the directory.
+     *
+     * Mirrors the installer's check_service_dest_space: the service definition
+     * is the one update payload that lands on the root filesystem (a ~97MB
+     * overlay on K1-class boards, a different partition from the install dir),
+     * so a free-space check on the install dir says nothing about it. The probe
+     * must create a NEW file: overwriting an existing one needs no fresh blocks
+     * and succeeds on a full filesystem.
+     */
+    static std::string service_dest_probe_error(const std::string& init_dir);
+
+    /**
+     * @brief The directory the service definition installs into on this host.
+     * @return "/etc/systemd/system" when systemd runs, "/etc/init.d" for SysV,
+     *         "" when neither shape is present (a dev machine; the installer's
+     *         own pre-flight then decides).
+     *
+     * Same resolution order as install.sh's detect_init_system, so the probe
+     * aims at the filesystem the installer will actually write.
+     */
+    static std::string init_service_dest_dir();
+
     std::string get_platform_asset_name() const;
 
     /// Single source of truth for the release asset name Moonraker's update
@@ -352,10 +446,19 @@ class UpdateChecker {
     static const char* channel_name(UpdateChannel channel);
 
     /**
+     * @brief The `channel:` Moonraker's web updater needs to serve @p channel
+     *
+     * Moonraker knows only GitHub's stable and prerelease tracks; Dev ships
+     * prereleases, so it rides beta (the installer's update_manager_web_channel).
+     */
+    static const char* moonraker_channel_name(UpdateChannel channel);
+
+    /**
      * @brief Resolve the R2 base URL the next check will actually use.
      *
-     * Reads /update/r2_url, falls back to DEFAULT_R2_BASE_URL when unset, and
-     * strips trailing slashes. Single source of truth for that resolution:
+     * Reads r2_url from the trusted update_urls.json, falls back to
+     * DEFAULT_R2_BASE_URL when unset, and strips trailing slashes. Single
+     * source of truth for that resolution:
      * check_for_updates() caches its result into cached_r2_base_url_, and
      * refresh_config_snapshot() stores it for off-thread readers.
      *
@@ -389,35 +492,6 @@ class UpdateChecker {
     /** @brief Thread-safe copy of the diagnostics snapshot. Safe from any thread. */
     ConfigSnapshot config_snapshot() const;
 
-    /** @brief Get platform key for current build ("pi", "ad5m", "k1") */
-    static std::string get_platform_key();
-
-    /**
-     * @brief Runtime K1-vs-AD5X split for the mips build.
-     *
-     * The mips binary ships for K1 and AD5X alike; get_platform_key() calls
-     * this under HELIX_PLATFORM_MIPS. The AD5X side is the AD5X mod-tree
-     * layout question (ZMOD markers or a reachable Forge-X mod tree) answered
-     * by helix::ad5x_mod_layout_present() — the same rule the launcher
-     * and log collector use. Returns a KNOWN platform key: "ad5x" or "k1".
-     *
-     * @param probe_root  root the layout probes resolve under (test seam;
-     *                    default "/", the running environment)
-     */
-    static std::string mips_runtime_platform_key(const std::string& probe_root = "/");
-
-    /**
-     * @brief Map a platform key to its human-readable display name.
-     * @param key  Platform key as returned by get_platform_key().
-     * @return Display name (e.g. "Raspberry Pi", "Creality K1").
-     *         Falls back to @p key itself for unrecognised values.
-     *
-     * Canonical single source of truth for the key→name map; call sites in
-     * debug_bundle_collector.cpp and elsewhere must use this instead of
-     * maintaining their own copies.
-     */
-    static std::string get_platform_display_name(const std::string& key);
-
     /**
      * @brief Find a local install.sh by searching well-known paths
      * @param extra_search_paths Additional paths to search (prepended to default list)
@@ -442,6 +516,16 @@ class UpdateChecker {
     static std::string extract_installer_from_tarball(const std::string& tarball_path,
                                                       const std::string& extract_dir);
 
+    /**
+     * @brief Write the self-restart sentinel into the fallback backup dir
+     *
+     * Tells helixscreen-update.service that the app is handling its own restart.
+     * Creates the dir first: a box updated only through Moonraker may never have
+     * had ~/.helixscreen created. Exposed as public static for unit testing.
+     * @return true when the sentinel was written
+     */
+    static bool write_self_restart_sentinel();
+
     /** @brief Check if a version is dismissed (user chose to ignore) */
     bool is_version_dismissed(const std::string& version) const;
 
@@ -460,6 +544,20 @@ class UpdateChecker {
      * replacement for the systemd-only helixscreen-update.path watcher.
      */
     static void handle_external_update_complete();
+
+    /**
+     * @brief React to a (re)connected Moonraker: finish a self-restart and listen for updates
+     *
+     * Clears the self-restart sentinel (the app came back up, so
+     * helixscreen-update.service no longer needs to be suppressed) and asks Moonraker to
+     * re-read the version it reports for HelixScreen. Subscribes to
+     * notify_update_response to catch an update finished from Mainsail. Idempotent:
+     * every discovery calls it, and a repeat replaces the earlier subscription.
+     */
+    void on_connected(helix::IMoonrakerClient& client);
+
+    /** @brief Drop the subscription on_connected() made. Safe when never attached. */
+    void detach(helix::IMoonrakerClient& client);
 
     /** @brief Start automatic update checking (15s initial, then 24h periodic) */
     void start_auto_check();
@@ -577,6 +675,13 @@ class UpdateChecker {
      */
     void report_result(Status status, std::optional<ReleaseInfo> info, const std::string& error);
 
+    /// Last hop of sync_moonraker_channel(): restart Moonraker unless a job holds the
+    /// machine or update_manager is busy. @p gen is the sync's moonraker_sync_generation_.
+    void restart_moonraker_for_channel(IMoonrakerAPI& api, uint64_t gen);
+    /// sync_moonraker_channel() with this install's directory supplied; the stanza's
+    /// `path:` must resolve to it.
+    void sync_moonraker_channel_for(const std::string& install_root);
+
     void init_subjects();
 
     // State (protected by mutex_)
@@ -593,6 +698,9 @@ class UpdateChecker {
     std::thread worker_thread_;
     std::atomic<bool> cancelled_{false};
     std::atomic<bool> shutting_down_{false};
+    /// Bumped by each moonraker.conf sync and by detach(), so an in-flight sync
+    /// yields to a newer one and abandons a printer it was detached from.
+    std::atomic<uint64_t> moonraker_sync_generation_{0};
     std::atomic<bool> initialized_{false};
     Callback pending_callback_;
 
@@ -619,6 +727,17 @@ class UpdateChecker {
     // String buffers for string subjects (must outlive subjects)
     char version_text_buf_[256]{};
     char new_version_buf_[64]{};
+
+    // What update_version_text shows, kept untranslated so a language switch
+    // can render it again. Main thread only.
+    struct ShownVersionText {
+        Status status = Status::Idle;
+        std::string version;
+        bool is_downgrade = false;
+        std::string error;
+    };
+    ShownVersionText shown_{};
+    void render_version_text();
 
     // Download state
     std::atomic<DownloadStatus> download_status_{DownloadStatus::Idle};
@@ -710,3 +829,34 @@ class UpdateChecker {
     /// on a possibly-freed `this` (#1165, #1146).
     helix::AsyncLifetimeGuard async_lifetime_;
 };
+
+/**
+ * @brief Parse a GitHub release API response into ReleaseInfo
+ *
+ * Declared in the header so the asset-selection rule — a platform key must
+ * anchor its tarball exactly, so k1 never selects the k1-dynamic asset whose
+ * name carries the k1 prefix — is unit-tested against the shipped function
+ * rather than a local twin of it.
+ *
+ * @param json_str GitHub releases API response body
+ * @param info Parsed release info; download_url stays empty when no asset
+ *             matches this build's platform (never a wrong-platform fallback)
+ * @param error Failure reason when the response is not a valid release
+ * @return true when the release parsed to a usable version
+ */
+namespace helix {
+bool parse_github_release(const std::string& json_str, UpdateChecker::ReleaseInfo& info,
+                          std::string& error);
+
+/**
+ * @brief Strip a leading 'v' or 'V' from a GitHub release tag
+ *
+ * GitHub releases are tagged "v1.2.3" but version comparison needs "1.2.3".
+ * Declared in the header so the rule is unit-tested against the shipped
+ * function rather than a local twin of it.
+ *
+ * @param tag Release tag as GitHub serves it
+ * @return The tag without its version prefix
+ */
+std::string strip_version_prefix(const std::string& tag);
+} // namespace helix

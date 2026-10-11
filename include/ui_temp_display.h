@@ -110,7 +110,7 @@ extern "C" {
  * Call this during UI initialization, after fonts are registered but
  * BEFORE loading any XML components that use <temp_display>.
  *
- * Typical call location: main.cpp after ui_icon_register_widget()
+ * Typical call location: main.cpp after helix::ui::icon::register_widget()
  */
 void ui_temp_display_init(void);
 

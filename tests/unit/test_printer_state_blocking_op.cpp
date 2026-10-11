@@ -50,11 +50,11 @@ class BlockingOpFixture : public LVGLTestFixture {
     }
 
     void set_manual_probe(int v) {
-        lv_subject_set_int(state.get_manual_probe_active_subject(), v);
+        lv_subject_set_int(state.calibration_state().get_manual_probe_active_subject(), v);
     }
 
     void set_print_state(PrintJobState s) {
-        lv_subject_set_int(state.get_print_state_enum_subject(), static_cast<int>(s));
+        lv_subject_set_int(state.print_state().get_print_state_enum_subject(), static_cast<int>(s));
     }
 
     PrinterState state;
@@ -136,6 +136,23 @@ TEST_CASE_METHOD(BlockingOpFixture, "is_external_blocking_operation_active attri
         state.app_motion_activity().note_done();
     }
 
+    SECTION("self busy: the app's long move outlasting the ack grace -> not blocked") {
+        // The episode began SETTLE ago; the move was sent just before it and
+        // acked long enough ago that only episode ownership can explain it.
+        const auto now = AppMotionActivity::clock::now();
+        state.app_motion_activity().note_sent(now - std::chrono::milliseconds(2800));
+        state.app_motion_activity().note_done(now - std::chrono::milliseconds(2600));
+        CHECK_FALSE(state.app_motion_activity().recently_active(now));
+        CHECK_FALSE(state.is_external_blocking_operation_active());
+    }
+
+    SECTION("external busy after the app's move settled -> blocked") {
+        const auto now = AppMotionActivity::clock::now();
+        state.app_motion_activity().note_sent(now - std::chrono::seconds(10));
+        state.app_motion_activity().note_done(now - std::chrono::seconds(10));
+        CHECK(state.is_external_blocking_operation_active());
+    }
+
     SECTION("manual probe blocks even during app motion") {
         set_manual_probe(1);
         state.app_motion_activity().note_sent();
@@ -150,7 +167,7 @@ TEST_CASE_METHOD(BlockingOpFixture, "is_external_blocking_operation_active attri
 
 TEST_CASE_METHOD(BlockingOpFixture, "update_from_status parses idle_timeout.state into subject",
                  "[printer_state][blocking_op]") {
-    lv_subject_t* subj = state.get_idle_timeout_printing_subject();
+    lv_subject_t* subj = state.calibration_state().get_idle_timeout_printing_subject();
 
     SECTION("state == Printing -> 1") {
         nlohmann::json status = {{"idle_timeout", {{"state", "Printing"}}}};
@@ -198,23 +215,23 @@ TEST_CASE_METHOD(BlockingOpFixture, "claim_busy_queue_toast fires once per block
 
     SECTION("idle_timeout episode: claimed once, then re-armed after it ends") {
         idle_timeout("Printing"); // episode 1 begins
-        CHECK(state.claim_busy_queue_toast());
-        CHECK_FALSE(state.claim_busy_queue_toast());
-        CHECK_FALSE(state.claim_busy_queue_toast());
+        CHECK(state.calibration_state().claim_busy_queue_toast());
+        CHECK_FALSE(state.calibration_state().claim_busy_queue_toast());
+        CHECK_FALSE(state.calibration_state().claim_busy_queue_toast());
 
         idle_timeout("Ready");    // op flushes -> re-arm
         idle_timeout("Printing"); // episode 2 begins
-        CHECK(state.claim_busy_queue_toast());
+        CHECK(state.calibration_state().claim_busy_queue_toast());
     }
 
     SECTION("manual-probe episode re-arms once it clears") {
         manual_probe(true); // probe episode begins (idle_timeout stays Ready/0)
-        CHECK(state.claim_busy_queue_toast());
-        CHECK_FALSE(state.claim_busy_queue_toast());
+        CHECK(state.calibration_state().claim_busy_queue_toast());
+        CHECK_FALSE(state.calibration_state().claim_busy_queue_toast());
 
         manual_probe(false); // probe done -> composite clears -> re-arm
         manual_probe(true);  // new probe episode
-        CHECK(state.claim_busy_queue_toast());
+        CHECK(state.calibration_state().claim_busy_queue_toast());
     }
 
     SECTION("idle_timeout bounce mid manual-probe does NOT re-toast (composite episode)") {
@@ -223,19 +240,19 @@ TEST_CASE_METHOD(BlockingOpFixture, "claim_busy_queue_toast fires once per block
         // NOT re-arm the toast — it is still one episode (#1108 review, Finding 1).
         manual_probe(true);
         idle_timeout("Printing");
-        CHECK(state.claim_busy_queue_toast()); // first tap -> toast
-        CHECK_FALSE(state.claim_busy_queue_toast());
+        CHECK(state.calibration_state().claim_busy_queue_toast()); // first tap -> toast
+        CHECK_FALSE(state.calibration_state().claim_busy_queue_toast());
 
-        idle_timeout("Ready");                       // idle bounce, probe still active
-        CHECK_FALSE(state.claim_busy_queue_toast()); // STILL suppressed
-        idle_timeout("Printing");                    // next TESTZ move
-        CHECK_FALSE(state.claim_busy_queue_toast()); // STILL the same episode
+        idle_timeout("Ready"); // idle bounce, probe still active
+        CHECK_FALSE(state.calibration_state().claim_busy_queue_toast()); // STILL suppressed
+        idle_timeout("Printing");                                        // next TESTZ move
+        CHECK_FALSE(state.calibration_state().claim_busy_queue_toast()); // STILL the same episode
 
         // Episode ends only when BOTH signals clear.
         manual_probe(false);
         idle_timeout("Ready");
         idle_timeout("Printing"); // a fresh homing/leveling episode
-        CHECK(state.claim_busy_queue_toast());
+        CHECK(state.calibration_state().claim_busy_queue_toast());
     }
 }
 
@@ -344,7 +361,7 @@ TEST_CASE_METHOD(BlockingOpFixture,
                              {"idle_timeout", {{"state", "Printing"}}}};
     state.update_from_status(status);
 
-    CHECK(lv_subject_get_int(state.get_idle_timeout_printing_subject()) == 1);
+    CHECK(lv_subject_get_int(state.calibration_state().get_idle_timeout_printing_subject()) == 1);
 }
 
 TEST_CASE_METHOD(BlockingOpFixture, "a repeated Klippy state is not treated as a transition",

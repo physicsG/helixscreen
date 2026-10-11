@@ -32,6 +32,9 @@
 
 #include "../catch_amalgamated.hpp"
 
+using helix::SlotInfo;
+using helix::SlotStatus;
+
 using helix::ui::EXTERNAL_SPOOL_SLOT;
 using helix::ui::load_preheat_temp;
 using helix::ui::PreheatTarget;
@@ -280,4 +283,11 @@ TEST_CASE("Only where nothing is named do the surfaces diverge, and deliberately
         panel_preheat(0, &nameless, nullptr, /*preset=*/"", /*min_extrude=*/170);
     CHECK(no_preset.temp_c == 170);
     CHECK(no_preset.material_name.empty());
+}
+
+TEST_CASE("A filament op heats to its material, raised to what the nozzle is already set to",
+          "[filament][preheat]") {
+    CHECK(helix::ui::filament_op_nozzle_temp(240, 260) == 260);
+    CHECK(helix::ui::filament_op_nozzle_temp(240, 200) == 240);
+    CHECK(helix::ui::filament_op_nozzle_temp(240, 0) == 240);
 }

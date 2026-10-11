@@ -38,7 +38,7 @@
  * Teardown order matters and is why the guard is declared before the harness:
  * `~PanelWidgetHarness` must detach the widget (releasing its observer) BEFORE
  * `deinit_one()` deinits the subject it observes. The guard also un-registers
- * all three names from helix-xml's global scope — `JobQueueState` is
+ * every queue-subject name from helix-xml's global scope — `JobQueueState` is
  * process-lifetime in production and never does, so leaving a local instance's
  * subjects in that table would dangle for the rest of the binary (the same
  * trap documented at length in test_widget_size_print_status.cpp).
@@ -46,6 +46,7 @@
 
 #include "../lvgl_ui_test_fixture.h"
 #include "../test_helpers/job_queue_state_test_access.h"
+#include "../test_helpers/job_queue_subjects_fixture.h"
 #include "../test_helpers/panel_widget_size_harness.h"
 #include "app_globals.h"
 #include "helix-xml/src/xml/lv_xml.h"
@@ -77,30 +78,9 @@ struct ScopedJobQueueState {
     ScopedJobQueueState& operator=(const ScopedJobQueueState&) = delete;
 };
 
-/// Runs JobQueueState's registered deinit while the instance is still alive,
-/// then drops all three subject names out of helix-xml's global scope so no
-/// later test resolves a pointer into this test's stack frame.
-///
-/// deinit_one() rather than deinit_all(): the test binary's registry also
-/// holds entries left by earlier fixtures, some capturing destroyed objects.
-struct ScopedJobQueueSubjects {
-    ~ScopedJobQueueSubjects() {
-        StaticSubjectRegistry::instance().deinit_one("JobQueueState");
-        lv_xml_unregister_subject(nullptr, "job_queue_count");
-        lv_xml_unregister_subject(nullptr, "job_queue_summary_text");
-        lv_xml_unregister_subject(nullptr, "job_queue_state_text");
-    }
-};
-
-JobQueueStatus status_with(int n) {
-    JobQueueStatus s;
-    s.queue_state = "ready";
-    for (int i = 0; i < n; ++i) {
-        s.queued_jobs.push_back({"job-" + std::to_string(i), "file-" + std::to_string(i) + ".gcode",
-                                 1000.0 + i, 30.0 * (i + 1)});
-    }
-    return s;
-}
+/// ScopedJobQueueSubjects / status_with:
+/// shared test_helpers/job_queue_subjects_fixture.h. Kept as a name in this
+/// file via the helix using-directive above.
 
 int container_children(lv_obj_t* c) {
     return static_cast<int>(lv_obj_get_child_count(c));
@@ -128,6 +108,25 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     lv_subject_t* summary = lv_xml_get_subject(nullptr, "job_queue_summary_text");
     REQUIRE(summary != nullptr);
 
+    lv_subject_t* up_next = lv_xml_get_subject(nullptr, "job_queue_up_next_text");
+    REQUIRE(up_next != nullptr);
+    CHECK(std::string(lv_subject_get_string(up_next)).empty());
+
+    // The up-next line must be settled whenever the count moves: count is the
+    // rebuild trigger, so an observer firing on it re-reads the line.
+    std::string up_next_seen_on_count;
+    lv_observer_t* count_observer = lv_subject_add_observer(
+        count,
+        [](lv_observer_t* observer, lv_subject_t*) {
+            auto* dest = static_cast<std::string*>(lv_observer_get_user_data(observer));
+            lv_subject_t* up_next_subj = lv_xml_get_subject(nullptr, "job_queue_up_next_text");
+            if (up_next_subj != nullptr) {
+                const char* text = lv_subject_get_string(up_next_subj);
+                *dest = text ? text : "";
+            }
+        },
+        &up_next_seen_on_count);
+
     ScopedJobQueueState scoped_state(&jqs);
     PanelWidgetHarness<JobQueueWidget> h(test_screen());
 
@@ -146,6 +145,9 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     JobQueueStateTestAccess::deliver_status(jqs, status_with(3));
     CHECK(lv_subject_get_int(count) == 3);
     CHECK(std::string(lv_subject_get_string(summary)) == "3 jobs queued");
+    // Up-next line follows the FIRST entry (display name, extension stripped)
+    CHECK(std::string(lv_subject_get_string(up_next)) == "Up next: file-0 (+2)");
+    CHECK(up_next_seen_on_count == "Up next: file-0 (+2)");
 
     REQUIRE(wait_until([&] { return container_children(container) == 3; }, 3000));
 
@@ -154,12 +156,19 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     JobQueueStateTestAccess::deliver_status(jqs, status_with(1));
     CHECK(lv_subject_get_int(count) == 1);
     CHECK(std::string(lv_subject_get_string(summary)) == "1 job queued");
+    CHECK(std::string(lv_subject_get_string(up_next)) == "Up next: file-0");
+    CHECK(up_next_seen_on_count == "Up next: file-0");
 
     REQUIRE(wait_until([&] { return container_children(container) == 1; }, 3000));
 
     // --- Emptied queue: back to zero rows, and the empty-state label returns.
     JobQueueStateTestAccess::deliver_status(jqs, status_with(0));
     CHECK(lv_subject_get_int(count) == 0);
+    // ...and the up-next line clears with it.
+    CHECK(std::string(lv_subject_get_string(up_next)).empty());
+    CHECK(up_next_seen_on_count.empty());
+
+    lv_observer_remove(count_observer);
 
     REQUIRE(wait_until([&] { return container_children(container) == 0; }, 3000));
 

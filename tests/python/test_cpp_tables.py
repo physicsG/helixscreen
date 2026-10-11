@@ -153,6 +153,22 @@ def test_positional_device_action_yields_label_and_description():
 # =============================================================================
 
 
+def test_device_action_factory_calls_yield_label_and_description():
+    found = extract_table_strings(dedent("""\
+        return {
+            DA::button("a_btn", "Button Label", "setup", "play", "Button hint"),
+            DA::toggle("a_tog", "Toggle Label", "setup", false, "bolt", "Toggle hint"),
+            DA::slider("a_sld", "Slider Label", "speed", 1.0f, 0.5f, 2.0f, "x", "ruler",
+                       "Slider hint"),
+            DeviceAction::dropdown("a_dd", "Dropdown Label", "setup", {"off", "on"},
+                                   std::string("off"), "", "Dropdown hint"),
+        };
+    """))
+    assert {"Button Label", "Button hint", "Toggle Label", "Toggle hint", "Slider Label",
+            "Slider hint", "Dropdown Label", "Dropdown hint"} <= found
+    assert not {"a_btn", "setup", "off", "mm", "ruler"} & found
+
+
 def test_builder_lambda_calls_yield_the_label_argument():
     """hh_defaults.cpp builds its rows through local lambdas, not initializers."""
     found = extract_table_strings(dedent("""\

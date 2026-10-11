@@ -5,26 +5,28 @@
 <!-- Toggles for the gcode console panel: temperature filter, firmware-noise filter -->
 <!-- Patterns for the firmware-noise filter ship per-printer in printer_database.json -->
 <component>
-  <view name="console_settings_overlay"
-        extends="overlay_panel" title="Console Settings" title_tag="Console Settings" bg_color="#screen_bg">
+  <view name="console_settings_overlay" extends="overlay_panel" title="Console Settings" bg_color="#screen_bg">
     <!-- Content Area - rows handle their own padding -->
-    <lv_obj name="overlay_content" width="100%" flex_grow="1" style_pad_top="0" scrollable="true" flex_flow="column">
+    <lv_obj name="overlay_content"
+            width="100%" flex_grow="1" style_pad_top="0" style_pad_left="0" style_pad_right="0"
+            style_pad_bottom="#space_lg" scrollable="true" flex_flow="column">
       <!-- ================================================================== -->
       <!-- FILTERS SECTION -->
       <!-- ================================================================== -->
-      <setting_section_header title="FILTERS" title_tag="FILTERS" icon="tune"/>
-      <!-- Temperature reports filter -->
-      <setting_toggle_row name="row_filter_temps"
-                          label="Hide Temperature Reports" label_tag="Hide Temperature Reports" icon="thermometer"
-                          description="Suppress periodic 'T:.../B:...' status lines"
-                          description_tag="Suppress periodic temperature status lines" subject="console_filter_temps"
-                          callback="on_console_filter_temps_changed"/>
-      <!-- Firmware noise filter -->
-      <setting_toggle_row name="row_filter_firmware_noise"
-                          label="Hide Firmware Noise" label_tag="Hide Firmware Noise" icon="code_tags"
-                          description="Suppress raw debug output from printer firmware modules"
-                          description_tag="Suppress raw debug output from printer firmware modules"
-                          subject="console_filter_firmware_noise" callback="on_console_filter_firmware_noise_changed"/>
+      <setting_group name="group_filters">
+        <setting_group_header title="FILTERS"/>
+        <!-- Temperature reports filter -->
+        <setting_toggle_row name="row_filter_temps"
+                            label="Hide Temperature Reports" icon="thermometer"
+                            description="Suppress periodic 'T:.../B:...' status lines"
+                            description_tag="Suppress periodic temperature status lines" subject="console_filter_temps"
+                            callback="on_console_filter_temps_changed"/>
+        <!-- Firmware noise filter -->
+        <setting_toggle_row name="row_filter_firmware_noise"
+                            label="Hide Firmware Noise" icon="code_tags"
+                            description="Suppress raw debug output from printer firmware modules"
+                            subject="console_filter_firmware_noise" callback="on_console_filter_firmware_noise_changed"/>
+      </setting_group>
     </lv_obj>
   </view>
 </component>

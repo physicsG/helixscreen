@@ -9,6 +9,7 @@
 #include "lvgl/lvgl.h"
 #include "panel_widget_registry.h"
 #include "panel_widget_size.h"
+#include "temperature_sensor_manager.h"
 
 #include <algorithm>
 
@@ -25,6 +26,10 @@ class helix::TempGraphWidgetTestAccess {
     }
     static std::vector<TempGraphSeriesSpec> build_series(TempGraphWidget& w) {
         return w.build_series_from_config();
+    }
+    static const nlohmann::json& build_default_config(TempGraphWidget& w) {
+        w.build_default_config();
+        return w.config_;
     }
     static bool merge_discovered_extruders(nlohmann::json& config, bool enabled) {
         return TempGraphWidget::merge_discovered_extruders(config, enabled);
@@ -55,6 +60,9 @@ class helix::TempGraphWidgetTestAccess {
     }
     static bool has_controller(const TempGraphWidget& w) {
         return w.controller_ != nullptr;
+    }
+    static const TempGraphController* controller(const TempGraphWidget& w) {
+        return w.controller_.get();
     }
     static const nlohmann::json& get_config(const TempGraphWidget& w) {
         return w.config_;
@@ -177,8 +185,8 @@ TEST_CASE_METHOD(TempGraphFeatureFixture, "Gradient opacity zeroed when GRADIENT
     REQUIRE(graph != nullptr);
 
     // Add a series so we can check gradient state
-    int sid = ui_temp_graph_add_series(graph, "Nozzle", lv_color_hex(0xFF4444));
-    REQUIRE(sid >= 0);
+    SeriesId sid = ui_temp_graph_add_series(graph, "Nozzle", lv_color_hex(0xFF4444));
+    REQUIRE(sid != SeriesId::None);
 
     // Disable gradients
     ui_temp_graph_set_features(graph, TEMP_GRAPH_FEATURE_LINES);
@@ -758,20 +766,20 @@ TEST_CASE("sensor_display_name maps Klipper names to user-facing labels",
 
     // Pre-discovery / no extruder yet known: derived from suffix.
     auto& ps = get_printer_state();
-    ps.init_extruders({}); // clear
+    ps.temperature_state().init_extruders({}); // clear
     REQUIRE(TempGraphWidgetTestAccess::sensor_display_name("extruder") == "Nozzle");
     REQUIRE(TempGraphWidgetTestAccess::sensor_display_name("extruder1") == "Nozzle 2");
     REQUIRE(TempGraphWidgetTestAccess::sensor_display_name("extruder5") == "Nozzle 6");
 
     // After discovery: defers to the cached display_name (which itself is
     // sorted/translated). Multi-extruder => "extruder" becomes "Nozzle 1".
-    ps.init_extruders({"extruder", "extruder1", "extruder2", "extruder3"});
+    ps.temperature_state().init_extruders({"extruder", "extruder1", "extruder2", "extruder3"});
     REQUIRE(TempGraphWidgetTestAccess::sensor_display_name("extruder") == "Nozzle 1");
     REQUIRE(TempGraphWidgetTestAccess::sensor_display_name("extruder1") == "Nozzle 2");
     REQUIRE(TempGraphWidgetTestAccess::sensor_display_name("extruder3") == "Nozzle 4");
 
     // Reset to empty so we don't leak state into other tests.
-    ps.init_extruders({});
+    ps.temperature_state().init_extruders({});
 }
 
 // ============================================================================
@@ -781,7 +789,7 @@ TEST_CASE("sensor_display_name maps Klipper names to user-facing labels",
 TEST_CASE("merge_discovered_extruders adds missing entries and is idempotent",
           "[temp_graph][panel_widget][config]") {
     auto& ps = get_printer_state();
-    ps.init_extruders({"extruder", "extruder1", "extruder2", "extruder3"});
+    ps.temperature_state().init_extruders({"extruder", "extruder1", "extruder2", "extruder3"});
 
     nlohmann::json config = {{"sensors",
                               {
@@ -810,13 +818,13 @@ TEST_CASE("merge_discovered_extruders adds missing entries and is idempotent",
     REQUIRE(added_again == false);
     REQUIRE(sensors.size() == 5); // extruder + bed + 3 new
 
-    ps.init_extruders({});
+    ps.temperature_state().init_extruders({});
 }
 
 TEST_CASE("merge_discovered_extruders honors the enabled flag",
           "[temp_graph][panel_widget][config]") {
     auto& ps = get_printer_state();
-    ps.init_extruders({"extruder", "extruder1"});
+    ps.temperature_state().init_extruders({"extruder", "extruder1"});
 
     nlohmann::json config = {{"sensors", nlohmann::json::array()}};
 
@@ -825,7 +833,7 @@ TEST_CASE("merge_discovered_extruders honors the enabled flag",
         REQUIRE(entry["enabled"].get<bool>() == false);
     }
 
-    ps.init_extruders({});
+    ps.temperature_state().init_extruders({});
 }
 
 // ============================================================================
@@ -907,7 +915,7 @@ TEST_CASE_METHOD(TempGraphFeatureFixture,
 
     // PrinterState is a process-global; clear any tools a previous case
     // discovered so attach() really does run pre-discovery.
-    ps.init_extruders({});
+    ps.temperature_state().init_extruders({});
     queue.drain();
 
     // Given: a widget attached while only the legacy single extruder is known
@@ -925,7 +933,7 @@ TEST_CASE_METHOD(TempGraphFeatureFixture,
     REQUIRE(before.size() == 2);
 
     // When: a 3-tool changer is discovered after the fact
-    ps.init_extruders({"extruder", "extruder1", "extruder2"});
+    ps.temperature_state().init_extruders({"extruder", "extruder1", "extruder2"});
     queue.drain();
     lv_timer_handler_safe(); // lv_async_call runs here, outside the queue batch
 
@@ -953,7 +961,7 @@ TEST_CASE_METHOD(TempGraphFeatureFixture,
     ps.init_subjects(false);
     auto& queue = helix::ui::UpdateQueue::instance();
 
-    ps.init_extruders({"extruder", "extruder1"});
+    ps.temperature_state().init_extruders({"extruder", "extruder1"});
     queue.drain();
 
     TempGraphWidget widget("temp_graph:test_no_churn");
@@ -968,7 +976,7 @@ TEST_CASE_METHOD(TempGraphFeatureFixture,
     auto* controller_before = TempGraphWidgetTestAccess::get_widget_obj(widget);
 
     // When: the same tool set is rediscovered (reconnect bumps the version)
-    ps.init_extruders({"extruder", "extruder1"});
+    ps.temperature_state().init_extruders({"extruder", "extruder1"});
     queue.drain();
     lv_timer_handler_safe();
 
@@ -979,4 +987,60 @@ TEST_CASE_METHOD(TempGraphFeatureFixture,
     REQUIRE(TempGraphWidgetTestAccess::build_series(widget).size() == 3);
 
     widget.detach();
+}
+
+TEST_CASE_METHOD(TempGraphFeatureFixture,
+                 "TempGraphWidget takes no live samples while its panel is inactive",
+                 "[temp_graph][panel_widget]") {
+    TempGraphWidget w("test_pause");
+    lv_obj_t* container = lv_obj_create(screen);
+    lv_obj_set_size(container, 400, 300);
+    w.attach(container, screen);
+    REQUIRE(TempGraphWidgetTestAccess::controller(w) != nullptr);
+    // Attached before its panel shows it (a page off screen, or a rebuild
+    // under an overlay): no samples until on_activate().
+    CHECK(TempGraphWidgetTestAccess::controller(w)->paused());
+
+    w.on_activate();
+    CHECK_FALSE(TempGraphWidgetTestAccess::controller(w)->paused());
+
+    w.on_deactivate();
+    CHECK(TempGraphWidgetTestAccess::controller(w)->paused());
+
+    SECTION("a rebuild while shown stays live") {
+        w.on_activate();
+        w.detach();
+        w.attach(container, screen);
+        CHECK_FALSE(TempGraphWidgetTestAccess::controller(w)->paused());
+    }
+    SECTION("a rebuild while hidden stays paused") {
+        w.detach();
+        w.attach(container, screen);
+        CHECK(TempGraphWidgetTestAccess::controller(w)->paused());
+    }
+
+    w.detach();
+    lv_obj_delete(container);
+}
+
+TEST_CASE("TempGraphWidget: default config lists aux heaters but not the chamber's own objects",
+          "[temp_graph][panel_widget][heater_generic]") {
+    // The chamber is the "chamber" row; its own sensor listed again would plot
+    // the chamber twice.
+    auto& tsm = sensors::TemperatureSensorManager::instance();
+    tsm.discover({"temperature_sensor chamber", "heater_generic filament_dryer"});
+
+    TempGraphWidget widget("test_default_chamber_skip");
+    const auto& config = TempGraphWidgetTestAccess::build_default_config(widget);
+    std::vector<std::string> names;
+    for (const auto& entry : config["sensors"])
+        names.push_back(entry["name"].get<std::string>());
+
+    auto has = [&](const char* n) {
+        return std::find(names.begin(), names.end(), n) != names.end();
+    };
+    CHECK(has("heater_generic filament_dryer"));
+    CHECK_FALSE(has("temperature_sensor chamber"));
+
+    tsm.discover({});
 }

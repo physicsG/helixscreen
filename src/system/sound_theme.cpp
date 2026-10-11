@@ -3,11 +3,12 @@
 
 #include "sound_theme.h"
 
+#include "text_io.h"
+
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <cmath>
-#include <fstream>
 #include <unordered_map>
 
 #include "hv/json.hpp"
@@ -301,17 +302,15 @@ static std::optional<SoundTheme> parse_theme(const json& j) {
 // ============================================================================
 
 std::optional<SoundTheme> SoundThemeParser::load_from_file(const std::string& path) {
-    std::ifstream file(path);
-    if (!file.is_open()) {
+    const auto text = helix::text_io::read_file(path);
+    if (!text) {
         spdlog::warn("[SoundTheme] Could not open '{}'", path);
         return std::nullopt;
     }
 
-    json j;
-    try {
-        j = json::parse(file);
-    } catch (const json::parse_error& e) {
-        spdlog::warn("[SoundTheme] JSON parse error in '{}': {}", path, e.what());
+    json j = json::parse(*text, nullptr, false);
+    if (j.is_discarded()) {
+        spdlog::warn("[SoundTheme] JSON parse error in '{}': not valid JSON", path);
         return std::nullopt;
     }
 
@@ -323,11 +322,9 @@ std::optional<SoundTheme> SoundThemeParser::load_from_string(const std::string& 
         return std::nullopt;
     }
 
-    json j;
-    try {
-        j = json::parse(json_str);
-    } catch (const json::parse_error& e) {
-        spdlog::warn("[SoundTheme] JSON parse error: {}", e.what());
+    json j = json::parse(json_str, nullptr, false);
+    if (j.is_discarded()) {
+        spdlog::warn("[SoundTheme] JSON parse error: not valid JSON");
         return std::nullopt;
     }
 
@@ -361,12 +358,7 @@ float SoundThemeParser::note_to_freq(const std::string& note) {
         return 0.0f;
 
     // Parse octave number
-    int octave = -1;
-    try {
-        octave = std::stoi(note.substr(pos));
-    } catch (...) {
-        return 0.0f;
-    }
+    const int octave = helix::text_io::parse_leading<int>(note.substr(pos)).value_or(-1);
 
     if (octave < 0 || octave > 8)
         return 0.0f;
@@ -414,12 +406,7 @@ float SoundThemeParser::musical_duration_to_ms(const std::string& dur, float bpm
     }
 
     // Parse the numeric divisor
-    int divisor = 0;
-    try {
-        divisor = std::stoi(working);
-    } catch (...) {
-        return 0.0f;
-    }
+    const int divisor = helix::text_io::parse_leading<int>(working).value_or(0);
 
     if (divisor <= 0)
         return 0.0f;

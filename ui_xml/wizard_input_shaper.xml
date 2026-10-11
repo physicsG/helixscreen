@@ -24,12 +24,9 @@
       <!-- Info section -->
       <lv_obj width="100%" flex_flow="column" style_pad_all="0" style_pad_gap="#space_sm">
         <text_body width="100%"
-                   text="Input shaping reduces vibration artifacts (ringing) in your prints."
-                   translation_tag="Input shaping reduces vibration artifacts (ringing) in your prints."
-                   style_text_align="center"/>
+                   text="Input shaping reduces vibration artifacts (ringing) in your prints." style_text_align="center"/>
         <text_small width="100%"
-                    text="An accelerometer was detected on your printer."
-                    translation_tag="An accelerometer was detected on your printer." style_text_align="center"
+                    text="An accelerometer was detected on your printer." style_text_align="center"
                     style_text_color="#text_muted"/>
       </lv_obj>
 
@@ -44,8 +41,6 @@
              seconds so the step keeps moving for the analysis' multi-minute
              window. -->
         <progress_bar name="calibration_progress_bar" width="80%" bind_value="wizard_input_shaper_progress">
-          <!-- One compound rule, not two: two flag observers on the same flag
-               each assert both polarities on every fire and clobber each other -->
           <bind_flag_if cond="wizard_input_shaper_progress eq 0 or wizard_input_shaper_indeterminate eq 1" flag="hidden"/>
         </progress_bar>
 
@@ -56,9 +51,8 @@
 
         <!-- Completion help text (shown only when calibration finishes, progress==100) -->
         <text_small width="100%"
-                    text="Recalibrate or view detailed results anytime in Settings."
-                    translation_tag="Recalibrate or view detailed results anytime in Settings."
-                    style_text_align="center" style_text_color="#text_muted">
+                    text="Recalibrate or view detailed results anytime in Settings." style_text_align="center"
+                    style_text_color="#text_muted">
           <bind_flag_if_not_eq subject="wizard_input_shaper_progress" flag="hidden" ref_value="100"/>
         </text_small>
       </lv_obj>
@@ -68,8 +62,7 @@
 
       <!-- Start calibration button (centered, hidden once calibration started) -->
       <ui_button name="start_calibration_btn"
-                 width="#wizard_button_width" height="#button_height" text="Start Calibration"
-                 translation_tag="Start Calibration">
+                 width="#wizard_button_width" height="#button_height" text="Start Calibration">
         <event_cb trigger="clicked" callback="on_start_is_calibration"/>
         <bind_flag_if_eq subject="wizard_input_shaper_started" flag="hidden" ref_value="1"/>
       </ui_button>
@@ -81,16 +74,14 @@
            wizard_input_shaper_active subject so we don't get two bind_flag_if_eq
            rules fighting over the hidden flag. -->
       <ui_button name="cancel_calibration_btn"
-                 width="#wizard_button_width" height="#button_height" text="Cancel" translation_tag="Cancel"
-                 variant="warning">
+                 width="#wizard_button_width" height="#button_height" text="Cancel" variant="warning">
         <event_cb trigger="clicked" callback="on_cancel_is_calibration"/>
         <bind_flag_if_eq subject="wizard_input_shaper_active" flag="hidden" ref_value="0"/>
       </ui_button>
 
       <!-- Help text (hidden once calibration starts) -->
       <text_small width="100%"
-                  text="You can skip this and calibrate later in Settings."
-                  translation_tag="You can skip this and calibrate later in Settings." style_text_align="center"
+                  text="You can skip this and calibrate later in Settings." style_text_align="center"
                   style_text_color="#text_muted">
         <bind_flag_if_eq subject="wizard_input_shaper_started" flag="hidden" ref_value="1"/>
       </text_small>

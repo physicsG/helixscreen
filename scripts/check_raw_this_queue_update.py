@@ -75,6 +75,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from staged_content import read_index_blobs, staged_paths
+
 SCAN_DIRS = ('src',)
 SCAN_EXTS = ('.cpp', '.cc', '.h', '.hpp')
 
@@ -263,6 +265,16 @@ def scan_file(path: str) -> list[tuple[str, int, str, str]]:
         src = Path(path).read_text(encoding='utf-8', errors='replace')
     except OSError:
         return []
+    return scan_source(path, src)
+
+
+def scan_source(path: str, src: str) -> list[tuple[str, int, str, str]]:
+    """scan_file's body, operating on already-sourced text.
+
+    Split out so a caller holding the STAGED blob (index content, not
+    necessarily what sits on disk) can scan that directly. `path` is only
+    carried into the report.
+    """
     if 'queue_update' not in src:
         return []
 
@@ -292,12 +304,7 @@ def scan_file(path: str) -> list[tuple[str, int, str, str]]:
 
 
 def staged_targets() -> list[str]:
-    out = subprocess.run(
-        ['git', 'diff', '--cached', '--name-only', '--diff-filter=ACM'],
-        capture_output=True, text=True, check=False,
-    ).stdout
-    return [p for p in out.splitlines()
-            if p.endswith(SCAN_EXTS) and p.startswith(SCAN_DIRS) and os.path.isfile(p)]
+    return [p for p in staged_paths(suffixes=SCAN_EXTS) if p.startswith(SCAN_DIRS)]
 
 
 def walk_targets() -> list[str]:
@@ -338,8 +345,15 @@ def main() -> int:
         targets = walk_targets()
 
     hits: list[tuple[str, int, str, str]] = []
-    for path in sorted(targets):
-        hits += scan_file(path)
+    if args.staged_only:
+        staged_src = dict(read_index_blobs(targets))
+        for path in sorted(targets):
+            src = staged_src.get(path)
+            if src is not None:
+                hits += scan_source(path, src)
+    else:
+        for path in sorted(targets):
+            hits += scan_file(path)
     hits.sort(key=lambda h: (h[0], h[1]))
 
     by_kind: dict[str, int] = {}

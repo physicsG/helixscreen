@@ -13,10 +13,13 @@ namespace helix {
 namespace ui {
 namespace wizard {
 
+ItemNamer display_name_for(helix::DeviceType type) {
+    return [type](const std::string& item) { return helix::get_display_name(item, type); };
+}
+
 std::string build_dropdown_options(const std::vector<std::string>& items,
                                    std::function<bool(const std::string&)> filter,
-                                   bool include_none,
-                                   std::optional<helix::DeviceType> device_type) {
+                                   bool include_none, ItemNamer display_name) {
     std::string options_str;
 
     // "None" goes FIRST for optional hardware (makes index 0 = safe default)
@@ -35,12 +38,7 @@ std::string build_dropdown_options(const std::vector<std::string>& items,
             options_str += "\n";
         }
 
-        // Transform to display name if device type is provided
-        if (device_type.has_value()) {
-            options_str += helix::get_display_name(item, device_type.value());
-        } else {
-            options_str += item;
-        }
+        options_str += display_name ? display_name(item) : item;
     }
 
     return options_str;
@@ -97,7 +95,8 @@ int restore_dropdown_selection(lv_obj_t* dropdown, lv_subject_t* subject,
         }
     }
     // Priority 2: Try to restore from saved config
-    else if (Config* config = Config::get_instance()) {
+    else {
+        Config* config = Config::get_instance();
         std::string saved = config->get<std::string>(config->df() + config_path, "");
         if (!saved.empty() && try_select(saved, "Restored selection")) {
             // Found saved item
@@ -140,10 +139,6 @@ bool save_dropdown_selection(lv_subject_t* subject, const std::vector<std::strin
     }
 
     Config* config = Config::get_instance();
-    if (!config) {
-        spdlog::warn("{} Cannot save selection: config not available", log_prefix);
-        return false;
-    }
 
     // Get selection index from subject
     int index = lv_subject_get_int(subject);
@@ -163,9 +158,10 @@ bool save_dropdown_selection(lv_subject_t* subject, const std::vector<std::strin
     return true;
 }
 
-void init_int_subject(lv_subject_t* subject, int32_t initial_value, const char* subject_name) {
+void init_int_subject(SubjectManager& subjects, lv_subject_t* subject, int32_t initial_value,
+                      const char* subject_name) {
     lv_subject_init_int(subject, initial_value);
-    lv_xml_register_subject(nullptr, subject_name, subject);
+    subjects.publish(subject_name, subject);
 }
 
 } // namespace wizard

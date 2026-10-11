@@ -561,42 +561,16 @@ void TrackerPlayer::apply_to_backend() {
         return freq;
     };
 
-    if (backend_->voice_count() == 1) {
-        // Mono backend: emit the lead line, not whatever sits on channel 0
-        // (crocketts_theme parks the bass there). Highest active voice wins;
-        // the earlier channel takes ties, nothing active falls back to
-        // silence on slot 0.
-        int best = -1;
-        float best_freq = 0.0f;
-        for (int ch = 0; ch < 4; ++ch) {
-            const auto& cs = channels_[static_cast<size_t>(ch)];
-            const float freq = emit_freq(cs);
-            if (cs.active && freq > 0.0f && cs.volume > 0.0f && freq > best_freq) {
-                best = ch;
-                best_freq = freq;
-            }
-        }
-        if (best >= 0) {
-            const auto& cs = channels_[static_cast<size_t>(best)];
-            backend_->set_voice(0, best_freq, cs.volume * master_vol, cs.duty);
+    for (int ch = 0; ch < 4; ++ch) {
+        const auto& cs = channels_[static_cast<size_t>(ch)];
+        const float freq = emit_freq(cs);
+        if (cs.active && freq > 0 && cs.volume > 0) {
+            backend_->set_voice(ch, freq, cs.volume * master_vol, cs.duty);
             if (backend_->supports_waveforms()) {
-                backend_->set_voice_waveform(0, cs.waveform);
+                backend_->set_voice_waveform(ch, cs.waveform);
             }
         } else {
-            backend_->silence_voice(0);
-        }
-    } else {
-        for (int ch = 0; ch < 4; ++ch) {
-            const auto& cs = channels_[static_cast<size_t>(ch)];
-            const float freq = emit_freq(cs);
-            if (cs.active && freq > 0 && cs.volume > 0) {
-                backend_->set_voice(ch, freq, cs.volume * master_vol, cs.duty);
-                if (backend_->supports_waveforms()) {
-                    backend_->set_voice_waveform(ch, cs.waveform);
-                }
-            } else {
-                backend_->silence_voice(ch);
-            }
+            backend_->silence_voice(ch);
         }
     }
 

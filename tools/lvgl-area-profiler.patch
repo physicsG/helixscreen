@@ -1,0 +1,186 @@
+# LVGL per-area render profiler (dev instrumentation, NOT for main)
+#
+# Turns "where does the per-invalidated-area cost go" into a per-tag ns profile.
+# Used 2026-09-17 to decompose the AD5X-vs-K1C 1.65x render gap into
+# 1.22x dynamic-linkage overhead + 1.40x residual.
+#
+# DO NOT MERGE: lv_conf.h here sets LV_USE_PROFILER 1, which would enable the
+# profiler in shipping builds. Apply to a worktree, measure, discard.
+#
+# Apply:  git apply lvgl-area-profiler.patch
+# Run:    HELIX_LVGL_PROFILE=<delay_s>:<run_s>   e.g. 15:1.2
+#         Trace goes to stderr as tracing_mark_write B|1|<tag> lines.
+#
+# NOT included: tag sites inside lib/lvgl (a submodule managed by patches/,
+# so a diff there is entangled with our own patches). Re-add by hand:
+#   lib/lvgl/src/drivers/display/fb/lv_linux_fbdev.c  flush_cb  -> fb_flush, fb_rotate
+#   lib/lvgl/src/core/lv_refr.c                       draw_buf_flush -> dbflush
+# LVGL's own refr_area / lv_draw_image / dispatch tags need no edit.
+#
+# Gotchas that cost time:
+#   - Default trace buffer is 16 KB and wraps mid-frame at ~60 areas; use 2 MB.
+#   - Default lv_tick_get() is 1 ms; use clock_gettime(CLOCK_MONOTONIC) ns ticks.
+#   - The profiler roughly DOUBLES CPU while enabled, so compare ratios between
+#     instrumented runs, never against an un-instrumented cost model.
+#   - Report p50, not mean: a buffer flush pauses the thread and poisons means.
+diff --git a/lv_conf.h b/lv_conf.h
+index 019245264..469c29c3b 100644
+--- a/lv_conf.h
++++ b/lv_conf.h
+@@ -1021,17 +1021,20 @@
+ #endif /*LV_USE_SYSMON*/
+ 
+ /*1: Enable the runtime performance profiler*/
+-#define LV_USE_PROFILER 0
++#define LV_USE_PROFILER 1
+ #if LV_USE_PROFILER
+     /*1: Enable the built-in profiler*/
+     #define LV_USE_PROFILER_BUILTIN 1
+     #if LV_USE_PROFILER_BUILTIN
+         /*Default profiler trace buffer size*/
+-        #define LV_PROFILER_BUILTIN_BUF_SIZE (16 * 1024)     /*[bytes]*/
++        #define LV_PROFILER_BUILTIN_BUF_SIZE (2 * 1024 * 1024)     /*[bytes]*/
+     #endif
+ 
+-    /*Header to include for the profiler*/
+-    #define LV_PROFILER_INCLUDE "lvgl/src/misc/lv_profiler_builtin.h"
++    /*Header to include for the profiler. Included only by lv_profiler.h, which
++     * sits in the same directory, so a bare filename resolves under every
++     * build's include flags (the splash build has no path that spells
++     * "lvgl/src/...").*/
++    #define LV_PROFILER_INCLUDE "lv_profiler_builtin.h"
+ 
+     /*Profiler start point function*/
+     #define LV_PROFILER_BEGIN    LV_PROFILER_BUILTIN_BEGIN
+@@ -1044,6 +1047,17 @@
+ 
+     /*Profiler end point function with custom tag*/
+     #define LV_PROFILER_END_TAG   LV_PROFILER_BUILTIN_END_TAG
++
++    /*Keep only per-area categories: event/timer/font tags fire orders of
++     * magnitude more often than a frame and would wrap the trace buffer
++     * before a single saver frame completes.*/
++    #define LV_PROFILER_EVENT 0
++    #define LV_PROFILER_TIMER 0
++    #define LV_PROFILER_FONT 0
++    #define LV_PROFILER_INDEV 0
++    #define LV_PROFILER_STYLE 0
++    #define LV_PROFILER_FS 0
++    #define LV_PROFILER_CACHE 0
+ #endif
+ 
+ /*1: Enable Monkey test*/
+diff --git a/src/application/display_manager.cpp b/src/application/display_manager.cpp
+index 6c669f5cc..a1339f009 100644
+--- a/src/application/display_manager.cpp
++++ b/src/application/display_manager.cpp
+@@ -30,6 +30,7 @@
+ #include "helix-xml/src/xml/lv_xml.h"
+ #include "lvgl/src/misc/cache/instance/lv_image_cache.h"        // not in the lvgl.h umbrella
+ #include "lvgl/src/misc/cache/instance/lv_image_header_cache.h" // not in the lvgl.h umbrella
++#include "lvgl/src/misc/lv_profiler_builtin_private.h" // config struct for the builtin profiler
+ #include "lvgl/src/misc/lv_timer_private.h" // lv_timer_t::period; LVGL has no period getter
+ #include "lvgl/src/others/translation/lv_translation.h"
+ #include "lvgl_log_handler.h"
+@@ -224,6 +225,90 @@ void apply_image_cache_env() {
+     }
+ }
+ 
++#if LV_USE_PROFILER
++/// One-shot capture window for LVGL's builtin profiler.
++///
++/// HELIX_LVGL_PROFILE=<delay_s>:<run_s> arms it: the profiler initializes
++/// disabled, switches on <delay_s> after init, records for <run_s>, then
++/// disables and dumps the whole trace buffer to stderr in one pass. Picking
++/// <delay_s> so the window lands on a running screensaver keeps the buffer off
++/// its auto-flush-on-full path, which would dump mid-capture. The dump goes to
++/// stderr as raw trace text; it is instrument output, not app logging.
++namespace {
++
++uint64_t profiler_tick_ns() {
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return static_cast<uint64_t>(ts.tv_sec) * 1000000000ull + static_cast<uint64_t>(ts.tv_nsec);
++}
++
++double g_profile_delay_s = 0.0;
++double g_profile_run_s = 2.0;
++long g_profile_bytes_dumped = 0;
++
++void profiler_flush_stderr(const char* buf) {
++    fputs(buf, stderr);
++    g_profile_bytes_dumped += static_cast<long>(strlen(buf));
++}
++
++void profile_capture_timer_cb(lv_timer_t* timer) {
++    auto* started_ns = static_cast<uint64_t*>(timer->user_data);
++    const double elapsed_s = static_cast<double>(profiler_tick_ns() - *started_ns) / 1e9;
++    static double stop_at = 0.0;
++    static bool capturing = false;
++    if (!capturing && elapsed_s >= g_profile_delay_s) {
++        capturing = true;
++        lv_profiler_builtin_set_enable(true);
++        spdlog::info("[DisplayManager] LVGL profiler capture started");
++        stop_at = g_profile_delay_s + g_profile_run_s;
++    } else if (capturing && elapsed_s >= stop_at) {
++        lv_profiler_builtin_set_enable(false);
++        g_profile_bytes_dumped = 0;
++        lv_profiler_builtin_flush();
++        spdlog::info("[DisplayManager] LVGL profiler capture done: {} bytes of trace on stderr",
++                     g_profile_bytes_dumped);
++        lv_timer_delete(timer);
++        delete started_ns;
++    }
++}
++
++} // namespace
++
++void arm_lvgl_profile_capture() {
++    const char* spec = std::getenv("HELIX_LVGL_PROFILE");
++    if (!spec || !spec[0]) {
++        return;
++    }
++    char* end = nullptr;
++    const double delay_s = std::strtod(spec, &end);
++    const double run_s = (end && *end == ':') ? std::strtod(end + 1, &end) : -1.0;
++    if (run_s <= 0 || delay_s < 0 || run_s > 60) {
++        spdlog::warn("[DisplayManager] HELIX_LVGL_PROFILE='{}' is not <delay_s>:<run_s>, ignoring",
++                     spec);
++        return;
++    }
++    g_profile_delay_s = delay_s;
++    g_profile_run_s = run_s;
++
++    lv_profiler_builtin_config_t cfg;
++    lv_profiler_builtin_config_init(&cfg);
++    // Must stay in sync with LV_PROFILER_BUILTIN_BUF_SIZE in lv_conf.h: the
++    // buffer has to hold one whole capture window without wrapping.
++    cfg.buf_size = LV_PROFILER_BUILTIN_BUF_SIZE;
++    cfg.tick_per_sec = 1000000000; // ns ticks; the default lv_tick_get() is 1 ms
++    cfg.tick_get_cb = profiler_tick_ns;
++    cfg.flush_cb = profiler_flush_stderr;
++    lv_profiler_builtin_init(&cfg);
++    lv_profiler_builtin_set_enable(false);
++
++    auto* started_ns = new uint64_t(profiler_tick_ns());
++    lv_timer_t* timer = lv_timer_create(profile_capture_timer_cb, 100, started_ns);
++    lv_timer_set_repeat_count(timer, -1);
++    spdlog::info("[DisplayManager] LVGL profiler armed: capture {}s..{}s after init", delay_s,
++                 delay_s + run_s);
++}
++#endif
++
+ } // namespace
+ 
+ bool DisplayManager::init(const Config& config) {
+@@ -235,6 +320,10 @@ bool DisplayManager::init(const Config& config) {
+     // Initialize LVGL library
+     lv_init();
+ 
++#if LV_USE_PROFILER
++    arm_lvgl_profile_capture();
++#endif
++
+     // lv_init() builds both cache objects even when lv_conf.h sizes them at 0,
+     // so they can be sized here rather than at compile time. Both default to 0,
+     // which is the behaviour every board ships with today.

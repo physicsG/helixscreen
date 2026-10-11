@@ -1,6 +1,6 @@
 # Filament Slot Metadata — `lane_data` Convention
 
-**Status**: Informational, v1.7 (2026-08). See [Changelog](#changelog).
+**Status**: Informational, v1.15 (2026-09). See [Changelog](#changelog).
 
 This document describes HelixScreen's use of the `lane_data` Moonraker database
 namespace to share per-slot filament metadata with OrcaSlicer and other tools.
@@ -150,9 +150,13 @@ A full HelixScreen-emitted record looks like this:
   "spool_name": "PolyLite ASA-GF Black",
   "name": "PolyLite ASA-GF Black",
   "spoolman_vendor_id": 7,
+  "helix_spoolman_filament_id": 55,
   "remaining_weight_g": 850.0,
   "total_weight_g": 1000.0,
-  "color_name": "Black"
+  "color_name": "Black",
+  "helix_locked_color": true,
+  "helix_locked_material": false,
+  "helix_declared": ["brand", "spool_name"]
 }
 ```
 
@@ -169,7 +173,7 @@ reference below.
 | Field | Type | Required | Format / units | Semantics | Source |
 |-------|------|----------|----------------|-----------|--------|
 | `lane` | string | yes | stringified integer, 0-based | Tool / slot index as interpreted by the slicer. Matches OrcaSlicer's tool-index convention. See §4 for the intentional off-by-one versus the outer DB key. | HelixScreen writes slot index as string. |
-| `color` | string | optional | `#RRGGBB` hex | Slot color. Leading `#` is conventional; HelixScreen's parser also accepts `0x`-prefixed forms on read. Emitted only when the override carries a non-zero RGB. | User-edited, or firmware-reported on backends where the user has no override. |
+| `color` | string | optional | `#RRGGBB` hex | Slot color. Leading `#` is conventional; HelixScreen's parser also accepts `0x`-prefixed forms on read. Emitted whenever the record carries a colour at all, pure black `#000000` included: black is a real filament colour, not an unset one. | User-edited, or firmware-reported on backends where the user has no override. |
 | `material` | string | optional | short code (`PLA`, `PETG`, `ABS`, `TPU`, …) | The **slicer-matchable** material string. OrcaSlicer matches a lane to a preset by this value alone, so a writer should emit a string the slicer's library actually carries. HelixScreen derives it from the user's precise type (see `helix_material`): explicit override → exact library type → base polymer, and **omits the field entirely** when nothing safely matches, rather than emit a string the slicer would resolve to a wrong (Generic PLA) preset. Readers should still treat unknown values as opaque strings — do NOT silently map them. | Derived by HelixScreen (`orca_match_type()`), or user-edited on writers without a match table. |
 | `vendor` | string | optional | free-form | Brand / manufacturer. Readers match case-insensitively when pairing with their own filament databases. | User-edited. |
 | `vendor_name` | string | optional | free-form | Alias of `vendor`, mirroring Happy Hare's key convention (`push_lane_data` in components/mmu_server.py). Emitted with the same value as `vendor` for forward-compat: as OrcaSlicer moves toward vendor-aware preset matching, `vendor_name` is the key it is most likely to consume. Zero-cost today — Orca ignores unknown keys. HelixScreen's reader accepts either key. | Same as `vendor`. |
@@ -195,13 +199,27 @@ throw on unknown keys).
 | `spool_name` | string | optional | free-form | Human-readable name for the spool (e.g. `"PolyLite ASA-GF Black"`). Distinct from `vendor` + `material` because users often want a friendlier label. | User-edited, or auto-filled from Spoolman. |
 | `name` | string | optional | free-form | Alias of `spool_name`, mirroring Happy Hare's key convention (`push_lane_data` in components/mmu_server.py). Emitted with the same value as `spool_name` for forward-compat. HelixScreen's reader accepts either key. | Same as `spool_name`. |
 | `spoolman_vendor_id` | integer | optional | positive integer | Spoolman vendor ID, paired with `spool_id` for full Spoolman round-tripping. Omitted when zero. | From Spoolman when a spool is selected. |
+| `helix_spoolman_filament_id` | integer | optional | positive integer | The Spoolman filament definition ID behind the `spool_id`: the specific filament record whose vendor, material and colour the spool instantiates. Filed with the spool id and dropped with it, since a definition id whose spool is unlinked names nothing. `helix_`-prefixed because Happy Hare's `push_lane_data` writes its own unprefixed `filament_id` inner field, a different value with the same name. Omitted when zero. | From Spoolman when a spool is selected. |
 | `remaining_weight_g` | float | optional | grams | Remaining filament weight. Negative = unset / unknown. | Spoolman, or user-entered. |
 | `total_weight_g` | float | optional | grams | Full-spool nominal weight. Negative = unset / unknown. | Spoolman, or user-entered. |
 | `color_name` | string | optional | free-form | Human-readable color label (e.g. `"Orange"`), distinct from the `color` hex value. Some user workflows care about the marketing name as well as the RGB. | User-edited, or auto-filled from Spoolman. |
+| `helix_locked_color` | boolean | optional | `true` / `false` | Whether the record declares its `color` as the user's own choice, written by HelixScreen from `helix_declared` (true exactly when `helix_declared` names `color_rgb`), so an older reader of the namespace sees the same authorship. **Always emitted when HelixScreen authors the record, `false` included.** HelixScreen reads it only for a record whose `helix_declared` does not name `color_rgb`: on a record with no `spool_id`, a true value beside a colour the record carries is the user's declaration; false, absent, or any value on a record with a `spool_id` is not. | HelixScreen (`to_lane_data_record()`). |
+| `helix_locked_material` | boolean | optional | `true` / `false` | The same statement about `material` / `helix_material`, true exactly when `helix_declared` names `material`. Always emitted, `false` included, and read on the same terms as `helix_locked_color`. | HelixScreen (`to_lane_data_record()`). |
+| `helix_declared` | array of strings | optional | JSON array of field names | The authorship statement for the identity fields, colour and material included. A name in the array says the user entered that field's value themselves; a field the record holds no value for is never named, because a clear states "whatever the machine reports", not an emptiness. The names are HelixScreen's own field names, not this record's key names: `color_rgb` names the field written as `color`, `material` the field written as `material` / `helix_material`, `brand` names the field written as `vendor` / `vendor_name`, `spool_name` the field written as `spool_name` / `name`, and `spoolman_vendor_id` is spelled the same either way. **Always emitted when HelixScreen authors the record, the empty array included**: an empty array says the record claims none of them, which an implementer has to be able to tell from a record written before the key existed. **Absent** means the latter. | HelixScreen (`to_lane_data_record()`). |
+| `helix_fingerprint` | string | optional | backend-specific slot identity | The spool identity HelixScreen's hardware-swap detection last observed on this lane (an RFID CARD_UID list for tag readers, or a composite of the identity fields a box firmware reports). Not user data and not filament metadata: it exists so that after a HelixScreen restart the first observation is compared against the stored value; a mismatch means the spool was swapped while the app was down, which clears the record, instead of every first observation reading as a new baseline. Omitted when empty, which is every record for a lane with no identity-reading hardware and every record written before this key existed; absence is read as "no comparison possible", never as a mismatch. Other tools should carry it through unchanged on rewrite, same as the authorship keys. | HelixScreen (`to_lane_data_record()`). |
 
 Fields are emitted only when present. Empty strings, zero, and negative floats
 are treated as "not set" and omitted from the written record — reducing noise
-and making future schema evolution easier.
+and making future schema evolution easier. The three `helix_` authorship keys
+are the deliberate exception: they are always emitted, because an explicit
+`false` or empty array says something an absent key does not.
+
+**Preserve the authorship keys when you rewrite a record you did not author.**
+They are opaque to everyone but HelixScreen: no other reader needs to act on
+them, and none should try to interpret them. But dropping them on a rewrite
+silently reassigns authorship: a colour the user chose comes back as a value
+nobody claimed, and the next firmware report overwrites it. Carry the three
+keys through unchanged, or leave the record alone.
 
 ---
 
@@ -277,12 +295,26 @@ HelixScreen combines three sources of slot metadata:
    any other well-behaved writer.
 3. **User edits in progress** — in-memory, not yet persisted.
 
-The merge rule is **override-wins, field-by-field**:
+The merge rule is **authorship-ranked, field-by-field**. What settles a field
+is not that the record carries a value for it but what the record says about
+who put it there:
 
-- If an override record contains a non-empty / non-zero / non-negative field,
-  it replaces the firmware-reported value for that field in the UI.
-- If a field is missing, empty, zero, or negative in the override, the
-  firmware value falls through.
+- A field the record names in `helix_declared`, or, on a record with no
+  `spool_id` whose `helix_declared` does not name that field, a colour or
+  material beside a true `helix_locked_*`, outranks whatever the printer
+  reports for that lane. A declaration stands only over a value the record
+  carries: a field named in the set with no value behind it claims nothing,
+  and the printer's report stands. This is what keeps a deliberate choice
+  from being erased by the next status poll.
+- A record naming a `spool_id` is read as the spool server's statement about
+  that lane's identity, and ranks above a firmware report, except a colour its
+  `helix_declared` names, which is the user's.
+- A field the record merely carries, claiming no authorship for it, stands
+  only where firmware says nothing about that field. A firmware report of the
+  same field on the current frame wins.
+- A field the record does not carry never displaces firmware.
+- `remaining_weight_g` and `total_weight_g` are read as measurements whatever
+  else the record claims. A weight is not a statement about identity.
 - User edits are committed to the override record atomically on save; there is
   no partial-edit state on disk.
 
@@ -291,6 +323,30 @@ differs from a reader's stored override, the firmware value is authoritative —
 HelixScreen drops its whole override record for that lane rather than shadowing
 the external write. An override survives only an absent/zero firmware id
 (ejection), which HelixScreen makes user-configurable per system (§6).
+
+**Amendment (v1.14):** when a lane's record disagrees with the statement
+standing on it, the newest edit wins whoever made it
+(prestonbrown/helixscreen#1632). A record carrying none of this application's
+authorship marks, whether a `helix_` extension key or the legacy `vendor` or
+`spool_name` spellings that no other lane_data writer emits, was written by
+another tool that replaced ours wholesale and files as the lane's statement
+rather than as a memory below it: unstamped it wins outright, because every
+HelixScreen write carries a `scan_time` and a record without one can only be
+a foreign replacement; stamped it wins only over a statement older than its
+`scan_time`, and an older or equal record still files as remembered. A
+statement stamped before 2020 is a device with no clock rather than a moment
+in the lane's history, and an order against it cannot be known, so the
+statement keeps the lane. Records HelixScreen wrote never promote, whatever
+their `scan_time` says, and neither do records AFC's plugin wrote: a record
+carrying `td` and no `vendor_name` is the plugin stating what it measured
+(`td` is on every plugin build; `extruder_index` only on newer ones), so it
+files as a firmware reading and its `scan_time`, a measurement time, never
+orders it against an edit. While one of our writes is still awaiting
+firmware's echo the re-read strips what matches it before judging anything,
+so our own write coming back is never misread as a newer outside edit. This
+is why §3 asks a rewriter to carry the authorship keys through unchanged: a
+tool that drops them reassigns its own edit to nobody, and the next
+HelixScreen load reads the record as a foreign replacement.
 
 A tool reading these records does not need to replicate HelixScreen's merge
 rule — it is documented here so third parties understand why we emit only the
@@ -305,20 +361,76 @@ detects that the *physical* spool in a slot has changed. This prevents stale
 "user said this was orange PLA" metadata from surviving a spool swap the user
 never re-entered in the UI.
 
-Per backend:
+### The insert rule
 
-| Backend | Signal | Rationale |
-|---------|--------|-----------|
-| AD5X IFS | `Adventurer5M.json` color transition to a materially different RGB | No RFID on IFS; color is the only spool-identity signal firmware exposes. |
-| Snapmaker U1 | `CARD_UID` change on the RFID tag | Snapmaker tags every spool with a unique UID — the cleanest available fingerprint. |
-| CFS | Per-slot composite `material_type|color_value` fingerprint change | CFS rewrites both fields from a server-side RFID lookup, so their concatenation is a stable spool fingerprint. |
-| ACE | Slot status transition `EMPTY → present` | ACE has no RFID or stable tag; the only reliable "different spool" proxy is an empty-to-loaded transition. |
-| AFC | Per-lane `spool_id` reported by the AFC plugin: a *different positive* id, or `0`/absent | The plugin owns the lane↔spool binding and reports the loaded spool's id. A different positive id is a re-bind, cleared via the §5 amendment; `0`/absent is the plugin's own eject signal. |
-| Happy Hare | Per-gate `spool_id` (SPOOLID) reported by the MMU: same split as AFC | Same authority argument as AFC — the MMU reports the bound spool's id per gate. |
+One rule decides what a spool going into a slot does to the slot's record
+(`prestonbrown/helixscreen#1710`). It is judged on **evidence**: what the
+hardware physically read off the spool now in the slot, compared against what
+it read off the one before.
+
+| Evidence | What counts |
+|----------|-------------|
+| Tag UID | A per-spool tag identifier nobody can set through the UI (Snapmaker `CARD_UID`). A reader that has finished with a spool and found no tag counts too: it says the spool is untagged. |
+| Material and colour | Values decoded from the spool's tag in this insert. A value the firmware remembers across inserts (a colour set on the printer's own menu, a saved slot table) is **not** a reading of the new spool. |
+| Binding | A spool id the firmware names for the lane (AFC, Happy Hare, CFS flat schema), judged by the §5 re-bind rule. |
+
+| Verdict | When | What happens |
+|---------|------|--------------|
+| Different spool | The tag UIDs differ, or a finished read finds a tag where the previous spool had none or none where it had one; or, with no UID on either side, any of material or colour read on both sides differs; or the firmware names a different spool id | HelixScreen drops what described the previous spool: the user's declarations, the remembered copy, the Spoolman binding, the metered weight and the persisted record. The firmware's own reading stays and paints the lane. Nothing is written to firmware, which already holds the new spool's reading. |
+| Same spool | The tag UIDs match; or, with no UID on either side (or a read not yet finished), material **and** colour both match | Everything is kept, silently. Two spools of one material and colour are interchangeable; a change of manufacturer between them is the user's to correct. |
+| No evidence | Anything less, including every untagged spool | Everything is kept, and HelixScreen shows a non-blocking "same spool?" notice whose Clear button runs Clear Spool. The notice is not shown for a slot with no details to clear. |
+
+Materials compare without case or surrounding whitespace; colours compare as
+exact RGB. A family match (`PLA` against `PLA-CF`) is a different spool. A
+backend that reads no colour reports none, never its no-colour sentinel as an
+RGB, and a multi-colour spool contributes its primary colour, the one the slot
+paints. The verdict does not depend on
+the print state: when the hardware says the slot holds a different spool,
+keeping the old details would describe a spool that is gone, so a runout
+reload mid-print clears too. The "same spool?" notice alone is withheld on
+the slot feeding the print, because the Clear Spool it offers is refused
+there.
+
+Continuous swap detection is the same rule applied without an insert edge.
+Backends whose hardware re-reads a tag while the slot stays occupied compare
+each reading against the stored one (the fingerprint below) and treat a change
+exactly as a different-spool verdict, so the fingerprint must be built from
+the same evidence fields: a fingerprint that includes a field the rule
+ignores would call a same-spool insert a swap.
+
+### Per backend, under the insert rule
+
+| Backend | Tag UID | Material and colour read off the spool | Binding | Verdict for an untagged insert |
+|---------|---------|----------------------------------------|---------|-------------------------------|
+| Snapmaker U1 | `CARD_UID` | From the tag | - | No evidence |
+| CFS | - | `material_type` and `color_value` from the RFID lookup, when a tag was read | Flat schema only | No evidence |
+| QIDI Box | - | The filament and colour table ids from the tag; the vendor id is not evidence | - | No evidence |
+| ACE | - | From the tag, for tagged spools only | - | No evidence |
+| AD5X IFS | - | None: the IFS colour and type are firmware memory, set on the printer's menu | - | No evidence |
+| AFC | - | None | Per-lane `spool_id` | No evidence, unless the plugin names a different spool |
+| Happy Hare | - | None: the gate map is user-maintained | Per-gate `spool_id` | No evidence, unless the MMU names a different spool |
+| OpenAMS | - | None: the manager reports only `ready` and `loaded` | - | No evidence |
+| Tool changer | - | - | - | No insert signal; the rule never runs |
+
+Two rows carry caveats the table cannot hold. Every AD5X IFS insert is No
+evidence; one its port sensor sees raises the notice, and one inferred only
+from `Adventurer5M.json` (no port sensor) raises none. Stock CFS waits up to 3
+frames for the RFID probe before judging an insert, and discounts values
+equal to a label HelixScreen itself pushed while its echo guard stands. The
+wait does not count down while the box is busy and the probe is deferred; it
+restarts when the probe runs. A finished read (`vender` past `"unknown"`) that
+restates the pulled spool's material and colour is the same spool, and stays
+silent.
 
 Clearing is a `DELETE` on the slot's `lane_data` key. The first observation
 after startup establishes the baseline fingerprint and is NOT treated as a
-swap — otherwise every app launch would wipe overrides.
+swap; otherwise every app launch would wipe overrides. For backends whose
+fingerprint is hardware-read (Snapmaker `CARD_UID`, CFS and QIDI composites),
+the baseline travels with the record as `helix_fingerprint` (§3), so the first
+observation after a restart is a comparison against the stored value: a match
+is the same spool, a mismatch is a swap made while HelixScreen was not running
+and clears the record. Records without the key, including everything written
+before it existed, keep the first-observation-is-a-baseline rule.
 
 Where firmware reports a spool id while a spool is loaded (AFC, Happy Hare),
 the eject half of that signal is user-configurable in HelixScreen: the
@@ -402,6 +514,11 @@ Guidelines:
 - **Add extension fields freely.** Other tools will ignore them. If your
   extension becomes broadly useful, open a documentation PR here or in the
   AFC docs so the convention grows deliberately.
+- **Carry a record's `helix_`-prefixed keys through when you rewrite it.**
+  You do not have to understand them, and nothing asks you to act on them.
+  Dropping them changes what the record says about who chose its values (§3),
+  which is not something a rewrite of the material or the weight meant to
+  say.
 - **Best-effort only.** No transactions, no locking. If two writers race,
   last write wins. Use `scan_time` to avoid clobbering fresher data when
   you can.
@@ -525,6 +642,61 @@ reader can resolve.
 
 ## Changelog
 
+- **v1.15 (2026-09-27)**: §5: a record AFC's plugin wrote (`td`, no
+  `vendor_name`) is a firmware reading and never promotes, whether or not the
+  plugin build writes `extruder_index`. §6: stock CFS judges a finished read
+  that restates the pulled spool as the same spool, and holds its insert wait
+  while a busy box defers the probe (`prestonbrown/helixscreen#1710`).
+- **v1.14 (2026-09-25)**: §5 amendment: newest edit wins whoever made it
+  (prestonbrown/helixscreen#1632). A shared-namespace record carrying none of
+  our authorship marks (`helix_` keys, or the legacy `vendor` / `spool_name`
+  spellings) is another tool's replacement of ours and files as the lane's
+  statement, unstamped outright or stamped only over an older statement,
+  instead of as a memory below whatever a person said. A `scan_time` in the
+  JavaScript or Python spelling (fractional seconds, numeric offset) orders
+  the same as a `Z`-suffixed one. §6: Snapmaker U1, ACE and AFC moved onto
+  the insert rule (prestonbrown/helixscreen#1710).
+- **v1.13 (2026-09-24)**: §6 states one insert rule for every backend: a
+  spool going into a slot is judged on what the hardware read off it (tag UID,
+  or material and colour decoded from the tag, or a firmware-named spool id).
+  A different spool drops HelixScreen's record of the old one; the same spool
+  keeps it; no evidence keeps it and asks the user
+  (`prestonbrown/helixscreen#1710`). The wire format is unchanged.
+- **v1.12 (2026-09-23)**: New optional extension key `helix_spoolman_filament_id` (§3): the
+  Spoolman filament definition ID behind the `spool_id`, persisted with the binding so the
+  definition survives HelixScreen restarts and every poll of a box that replaces its parsed
+  slots wholesale (`prestonbrown/helixscreen#1632`). Filed with the spool id and dropped with
+  it. The `helix_` prefix is load-bearing: Happy Hare writes its own unprefixed
+  `filament_id` inner field, a different value with the same name, which HelixScreen does
+  not read. Omitted when zero; records written by earlier versions and by other tools are
+  unaffected.
+- **v1.11 (2026-09-22)**: A name in `helix_declared` stands only over a value
+  the record carries (§3, §5). Clearing a field is not a declaration of
+  emptiness: HelixScreen no longer names a field in the set when a user clears
+  it, and a stored record naming a field it holds no value for - written by an
+  older build - now reads as claiming nothing for that field, so firmware's
+  value reaches the lane again (`prestonbrown/helixscreen#1661`).
+- **v1.10 (2026-09-22)**: New optional extension key `helix_fingerprint` (§3):
+  the slot identity HelixScreen's hardware-swap detection last observed,
+  persisted so a restart can compare rather than treat every first observation
+  as a baseline (§6). Omitted when empty; absence keeps the old
+  first-observation rule, so records written by earlier versions and by other
+  tools are unaffected.
+- **v1.9 (2026-09-15)**: `helix_declared` names `color_rgb` and `material` as
+  well, and `helix_locked_color` / `helix_locked_material` are written from it.
+  A reader takes a lock key only for a field `helix_declared` does not name, on
+  a record with no `spool_id`, where a true key beside a value is the user's
+  declaration (§3, §5).
+- **v1.8 (2026-09-14)**: Documented the three authorship keys HelixScreen
+  writes into every record it authors and which this document had never
+  described: `helix_locked_color`, `helix_locked_material` and `helix_declared`
+  (§3), each always emitted so that `false` and the empty array stay
+  distinguishable from an absent key, with a note asking other writers to
+  preserve them across a rewrite (§3, §7). §5 restated accordingly: the merge
+  is ranked by what a record claims about authorship, not by whether a field
+  holds a value. Also corrected the `color` row, which said the field was
+  emitted only for a non-zero RGB. `#000000` is a real filament colour and is
+  emitted like any other.
 - **v1.7 (2026-08-17)**: §5 amendment — firmware-authoritative re-bind: when
   firmware reports a per-lane `spool_id` that differs from a stored override,
   HelixScreen drops its whole override record for that lane instead of

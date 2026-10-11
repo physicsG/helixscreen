@@ -31,6 +31,7 @@
 
 #include "../test_fixtures.h"
 #include "helix-xml/src/xml/lv_xml_component.h"
+#include "theme_manager.h"
 
 #include "../catch_amalgamated.hpp"
 
@@ -111,4 +112,105 @@ TEST_CASE_METHOD(XMLTestFixture,
     // whatever test runs next in this process (packs themselves are left
     // registered -- see note above).
     lv_translation_set_language("en");
+}
+
+// A literal text= with no translation_tag= is its own tag (the engine implies
+// it), so it must reach ui_text_apply() and ui_button's apply the same way the
+// inline form does. Same pack-lifetime caveat as the test above.
+TEST_CASE_METHOD(XMLTestFixture, "a literal text attribute with no tag is translated",
+                 "[xml][ui_text][translation]") {
+    const char* probe = "Zz implied i18n probe zZ";
+    lv_translation_pack_t* pack = lv_translation_add_dynamic();
+    REQUIRE(pack != nullptr);
+    lv_translation_add_language(pack, "en");
+    lv_translation_add_language(pack, "de");
+    lv_translation_tag_dsc_t* tag = lv_translation_add_tag(pack, probe);
+    REQUIRE(tag != nullptr);
+    lv_translation_set_tag_translation(pack, tag, 0, probe);
+    lv_translation_set_tag_translation(pack, tag, 1, "Zz implied Deutsch zZ");
+    lv_translation_set_language("en");
+
+    const char* xml = R"(<component>
+  <view extends="lv_obj" width="300" height="300">
+    <text_muted name="msg" text="Zz implied i18n probe zZ"/>
+    <ui_button name="btn" text="Zz implied i18n probe zZ"/>
+  </view>
+</component>)";
+    REQUIRE(lv_xml_register_component_from_data("it_implied_tag", xml) == LV_RESULT_OK);
+    lv_obj_t* root = create_component("it_implied_tag");
+    REQUIRE(root != nullptr);
+    lv_obj_t* msg = lv_obj_find_by_name(root, "msg");
+    lv_obj_t* btn = lv_obj_find_by_name(root, "btn");
+    REQUIRE(msg != nullptr);
+    REQUIRE(btn != nullptr);
+    lv_obj_t* btn_label = lv_obj_get_child_by_type(btn, 0, &lv_label_class);
+    REQUIRE(btn_label != nullptr);
+
+    lv_translation_set_language("de");
+    process_lvgl(50);
+    CHECK(lv_streq(lv_label_get_text(msg), "Zz implied Deutsch zZ"));
+    CHECK(lv_streq(lv_label_get_text(btn_label), "Zz implied Deutsch zZ"));
+
+    lv_translation_set_language("en");
+}
+
+// helix::ui::is_translation_key() is the engine's key callback, so a literal it
+// rejects keeps its text even when some pack happens to carry it as a key.
+TEST_CASE_METHOD(XMLTestFixture, "a non-key literal implies no translation tag",
+                 "[xml][ui_text][translation][implied_tags]") {
+    lv_translation_pack_t* pack = lv_translation_add_dynamic();
+    REQUIRE(pack != nullptr);
+    lv_translation_add_language(pack, "en");
+    lv_translation_add_language(pack, "de");
+    lv_translation_tag_dsc_t* tag = lv_translation_add_tag(pack, "-7.25");
+    REQUIRE(tag != nullptr);
+    lv_translation_set_tag_translation(pack, tag, 0, "-7.25");
+    lv_translation_set_tag_translation(pack, tag, 1, "Zz non-key leaked zZ");
+    lv_translation_set_language("en");
+
+    const char* xml = R"(<component>
+  <view extends="lv_obj" width="300" height="300">
+    <text_muted name="msg" text="-7.25"/>
+  </view>
+</component>)";
+    REQUIRE(lv_xml_register_component_from_data("it_non_key_literal", xml) == LV_RESULT_OK);
+    lv_obj_t* root = create_component("it_non_key_literal");
+    REQUIRE(root != nullptr);
+    lv_obj_t* msg = lv_obj_find_by_name(root, "msg");
+    REQUIRE(msg != nullptr);
+
+    lv_translation_set_language("de");
+    process_lvgl(50);
+    CHECK(lv_streq(lv_label_get_text(msg), "-7.25"));
+
+    lv_translation_set_language("en");
+}
+
+// Modal::show and a theme switch run the palette walker over the tree, and the
+// walker writes a local text color onto every label. An author's inline color
+// is a local style too, so the walker must leave it alone (#1735).
+TEST_CASE_METHOD(XMLTestFixture, "the palette walker keeps an inline style_text_color",
+                 "[xml][ui_text][theme]") {
+    const char* xml = R"(<component>
+  <view extends="lv_obj" width="300" height="300">
+    <text_small name="authored" text="Warn" style_text_color="#FF0000"/>
+    <text_small name="themed" text="Plain"/>
+  </view>
+</component>)";
+    REQUIRE(lv_xml_register_component_from_data("it_inline_color", xml) == LV_RESULT_OK);
+    lv_obj_t* root = create_component("it_inline_color");
+    REQUIRE(root != nullptr);
+    lv_obj_t* authored = lv_obj_find_by_name(root, "authored");
+    lv_obj_t* themed = lv_obj_find_by_name(root, "themed");
+    REQUIRE(authored != nullptr);
+    REQUIRE(themed != nullptr);
+
+    lv_obj_set_style_text_color(themed, lv_color_hex(0x00FF00), LV_PART_MAIN);
+    theme_apply_current_palette_to_tree(root);
+
+    CHECK(lv_color_to_u32(lv_obj_get_style_text_color(authored, LV_PART_MAIN)) ==
+          lv_color_to_u32(lv_color_hex(0xFF0000)));
+    // The walker still themes a label nobody colored in XML.
+    CHECK(lv_color_to_u32(lv_obj_get_style_text_color(themed, LV_PART_MAIN)) !=
+          lv_color_to_u32(lv_color_hex(0x00FF00)));
 }

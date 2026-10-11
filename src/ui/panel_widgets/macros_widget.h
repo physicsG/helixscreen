@@ -3,11 +3,11 @@
 
 #pragma once
 
-#include "panel_widget.h"
+#include "src/ui/panel_widgets/tiled_panel_widget.h"
 
 namespace helix {
 
-class MacrosWidget : public PanelWidget {
+class MacrosWidget : public TiledPanelWidget {
   public:
     MacrosWidget();
     ~MacrosWidget() override;
@@ -24,8 +24,6 @@ class MacrosWidget : public PanelWidget {
     lv_obj_t* widget_obj_ = nullptr;
     lv_obj_t* btn_ = nullptr;
     lv_obj_t* parent_screen_ = nullptr;
-
-    static inline lv_obj_t* macros_panel_ = nullptr;
 
     void handle_click();
 };

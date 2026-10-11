@@ -13,6 +13,7 @@
 #include "i_moonraker_api.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "moonraker_job_api.h"
+#include "print_start_checks.h"
 #include "printer_state.h"
 #include "standard_macros.h"
 
@@ -46,6 +47,8 @@ void restart_from_beginning(IMoonrakerAPI* api, const std::string& filename,
         return;
     }
 
+    helix::warn_printer_stop_check_skipped("a restart from the beginning", filename,
+                                           "a restart does not scan the file");
     spdlog::info("{} Restart-from-beginning confirmed; running "
                  "SDCARD_RESET_FILE + CANCEL_PRINT_BASE then start_print({})",
                  log_prefix, filename);
@@ -66,25 +69,22 @@ void restart_from_beginning(IMoonrakerAPI* api, const std::string& filename,
                     [log_prefix, on_failure](const MoonrakerError& err) {
                         spdlog::error("{} start_print after restart failed: {}", log_prefix,
                                       err.message);
-                        auto user_msg = err.user_message();
-                        queue_update("ui_resume_dispatch::restart_start_error",
-                                     [user_msg = std::move(user_msg), on_failure]() {
-                                         NOTIFY_ERROR(lv_tr("Failed to restart: {}"), user_msg);
-                                         if (on_failure)
-                                             on_failure();
-                                     });
+                        queue_update("ui_resume_dispatch::restart_start_error", [err,
+                                                                                 on_failure]() {
+                            NOTIFY_ERROR(lv_tr("Failed to restart: {}"), err.localized_message());
+                            if (on_failure)
+                                on_failure();
+                        });
                     });
             });
         },
         [log_prefix, on_failure](const MoonrakerError& err) {
             spdlog::error("{} restart prep gcode failed: {}", log_prefix, err.message);
-            auto user_msg = err.user_message();
-            queue_update("ui_resume_dispatch::restart_prep_error",
-                         [user_msg = std::move(user_msg), on_failure]() {
-                             NOTIFY_ERROR(lv_tr("Failed to clear print state: {}"), user_msg);
-                             if (on_failure)
-                                 on_failure();
-                         });
+            queue_update("ui_resume_dispatch::restart_prep_error", [err, on_failure]() {
+                NOTIFY_ERROR(lv_tr("Failed to clear print state: {}"), err.localized_message());
+                if (on_failure)
+                    on_failure();
+            });
         });
 }
 
@@ -97,11 +97,10 @@ void send_cancel_macro(IMoonrakerAPI* api, const std::string& log_prefix) {
         [log_prefix]() { spdlog::info("{} Print cancelled", log_prefix); },
         [log_prefix](const MoonrakerError& err) {
             spdlog::error("{} Failed to cancel print: {}", log_prefix, err.message);
-            auto user_msg = err.user_message();
             // StandardMacros::execute may deliver this from the libhv WebSocket
-            // thread; the toast and its lv_tr() lookup are main-thread only.
-            queue_update("dispatch_cancel_print::on_error", [user_msg = std::move(user_msg)]() {
-                NOTIFY_ERROR(lv_tr("Failed to cancel: {}"), user_msg);
+            // thread; the toast is main-thread only.
+            queue_update("dispatch_cancel_print::on_error", [err]() {
+                NOTIFY_ERROR(lv_tr("Failed to cancel: {}"), err.localized_message());
             });
         });
 }
@@ -109,19 +108,25 @@ void send_cancel_macro(IMoonrakerAPI* api, const std::string& log_prefix) {
 } // namespace
 
 void show_restart_required_modal(IMoonrakerAPI* api, const std::string& filename,
-                                 std::string log_prefix, std::function<void()> on_failure) {
-    // Klipper's print_stats.message describes the cause of the abort
-    // (Snapmaker firmware writes e.g. "Dirty bed detected" / "Filament Sensor:
-    // Runout Detected"). When present, surface it so the user knows why
-    // restart is needed instead of seeing only generic copy.
-    const char* fw_msg = lv_subject_get_string(get_printer_state().get_print_message_subject());
+                                 const std::string& authored_reason, std::string log_prefix,
+                                 std::function<void()> on_failure) {
+    // Prefer the backend's authored reason. Fall back to Klipper's raw
+    // print_stats.message only when none was supplied, so a backend not yet
+    // taught to author copy still tells the user why restart is needed.
+    std::string reason = authored_reason;
+    if (reason.empty()) {
+        const char* fw_msg =
+            lv_subject_get_string(get_printer_state().print_state().get_print_message_subject());
+        if (fw_msg && *fw_msg) {
+            reason = fw_msg;
+        }
+    }
     std::string body =
-        (fw_msg && *fw_msg)
-            ? fmt::format(lv_tr("Reason: {}\n\nThe printer cannot resume this print. "
-                                "Restart from the beginning?"),
-                          fw_msg)
-            : std::string(lv_tr("The printer halted this print and cannot resume it. "
-                                "Restart from the beginning?"));
+        !reason.empty() ? fmt::format(lv_tr("Reason: {}\n\nThe printer cannot resume this print. "
+                                            "Restart from the beginning?"),
+                                      reason)
+                        : std::string(lv_tr("The printer halted this print and cannot resume it. "
+                                            "Restart from the beginning?"));
 
     // Cancel and dismissal answer the question the same way: the user chose not
     // to restart, which the caller learns through on_failure.
@@ -161,8 +166,8 @@ void dispatch_prepared_resume(IMoonrakerAPI* api, std::string log_prefix,
 
     // The macro-dispatch closure. The success path stays on whichever
     // thread the API delivers it — we only spdlog::info() there (thread
-    // safe). The error path bounces through queue_update so the toast,
-    // lv_tr() lookup, and `on_failure` body all run on the main thread
+    // safe). The error path bounces through queue_update so the toast
+    // and `on_failure` body run on the main thread
     // even though StandardMacros::execute may invoke this callback from
     // the libhv WebSocket event-loop thread on JSON-RPC failure.
     auto dispatch = [api, log_prefix, on_failure]() {
@@ -171,13 +176,12 @@ void dispatch_prepared_resume(IMoonrakerAPI* api, std::string log_prefix,
             [log_prefix]() { spdlog::info("{} Resume command sent successfully", log_prefix); },
             [log_prefix, on_failure](const MoonrakerError& err) {
                 spdlog::error("{} Failed to resume: {}", log_prefix, err.message);
-                auto user_msg = err.user_message();
-                helix::ui::queue_update("dispatch_prepared_resume::on_macro_error",
-                                        [user_msg = std::move(user_msg), on_failure]() {
-                                            NOTIFY_ERROR(lv_tr("Failed to resume: {}"), user_msg);
-                                            if (on_failure)
-                                                on_failure();
-                                        });
+                helix::ui::queue_update(
+                    "dispatch_prepared_resume::on_macro_error", [err, on_failure]() {
+                        NOTIFY_ERROR(lv_tr("Failed to resume: {}"), err.localized_message());
+                        if (on_failure)
+                            on_failure();
+                    });
             },
             /*timeout_ms=*/0, /*suppress_auto_toast=*/true);
     };
@@ -199,11 +203,12 @@ void dispatch_prepared_resume(IMoonrakerAPI* api, std::string log_prefix,
             // Surface the restart-from-beginning modal instead of
             // firing the resume macro chain. Filename comes from
             // PrinterState (subscribed via print_stats.filename).
-            std::string filename =
-                lv_subject_get_string(get_printer_state().get_print_filename_subject());
+            std::string filename = lv_subject_get_string(
+                get_printer_state().print_state().get_print_filename_subject());
             spdlog::warn("{} RESUME_REQUIRES_RESTART — showing restart modal (file: {})",
                          log_prefix, filename);
-            show_restart_required_modal(api, filename, log_prefix, std::move(on_failure));
+            show_restart_required_modal(api, filename, err.user_msg, log_prefix,
+                                        std::move(on_failure));
             return;
         }
         if (!err.success()) {
@@ -242,7 +247,7 @@ void dispatch_cancel_print(IMoonrakerAPI* api, std::string log_prefix,
     // two dialogs cancel the same print, so they must read the same. Severity
     // Error selects modal_dialog.xml's alert_octagon/danger icon, which is the
     // icon that component uses. (The primary button there carries an explicit
-    // danger variant that modal_dialog's severity binding does not drive — the
+    // danger variant that modal_dialog's severity attr does not drive — the
     // one cosmetic difference between the two.)
     //
     // Cancel and dismissal answer the question the same way: the print keeps

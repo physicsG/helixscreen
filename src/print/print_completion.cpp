@@ -10,7 +10,7 @@
 #include "ui_heater_config.h"
 #include "ui_icon.h"
 #include "ui_modal.h"
-#include "ui_nav_manager.h"
+#include "ui_nav.h"
 #include "ui_panel_print_status.h"
 #include "ui_toast_manager.h"
 
@@ -24,6 +24,7 @@
 #include "printer_state.h"
 #include "sound_manager.h"
 #include "static_subject_registry.h"
+#include "subject_managed_panel.h"
 #include "temperature_controller.h"
 
 #include <spdlog/spdlog.h>
@@ -37,6 +38,7 @@ namespace helix {
 
 // --- Subjects for declarative XML bindings in print_completion_modal.xml ---
 static bool s_subjects_initialized = false;
+static SubjectManager s_subjects;
 
 // String subjects with backing buffers
 static char s_title_buf[64];
@@ -78,37 +80,29 @@ static void init_completion_subjects() {
     lv_subject_init_int(&s_has_estimate_subject, 1);
     lv_subject_init_int(&s_has_filament_subject, 1);
 
-    lv_xml_register_subject(nullptr, "print_completion_title", &s_title_subject);
-    lv_xml_register_subject(nullptr, "print_completion_filename", &s_filename_subject);
-    lv_xml_register_subject(nullptr, "print_completion_duration", &s_duration_subject);
-    lv_xml_register_subject(nullptr, "print_completion_estimate", &s_estimate_subject);
-    lv_xml_register_subject(nullptr, "print_completion_layers", &s_layers_subject);
-    lv_xml_register_subject(nullptr, "print_completion_filament", &s_filament_subject);
-    lv_xml_register_subject(nullptr, "print_completion_has_estimate", &s_has_estimate_subject);
-    lv_xml_register_subject(nullptr, "print_completion_has_filament", &s_has_filament_subject);
+    s_subjects.publish("print_completion_title", &s_title_subject);
+    s_subjects.publish("print_completion_filename", &s_filename_subject);
+    s_subjects.publish("print_completion_duration", &s_duration_subject);
+    s_subjects.publish("print_completion_estimate", &s_estimate_subject);
+    s_subjects.publish("print_completion_layers", &s_layers_subject);
+    s_subjects.publish("print_completion_filament", &s_filament_subject);
+    s_subjects.publish("print_completion_has_estimate", &s_has_estimate_subject);
+    s_subjects.publish("print_completion_has_filament", &s_has_filament_subject);
 
     s_subjects_initialized = true;
 
     StaticSubjectRegistry::instance().register_deinit("PrintCompletion", []() {
         if (!s_subjects_initialized)
             return;
-        lv_subject_deinit(&s_title_subject);
-        lv_subject_deinit(&s_filename_subject);
-        lv_subject_deinit(&s_duration_subject);
-        lv_subject_deinit(&s_estimate_subject);
-        lv_subject_deinit(&s_layers_subject);
-        lv_subject_deinit(&s_filament_subject);
-        lv_subject_deinit(&s_has_estimate_subject);
-        lv_subject_deinit(&s_has_filament_subject);
+        s_subjects.deinit_all();
         s_subjects_initialized = false;
     });
 }
 
-// Helper to cleanup .helix_temp modified G-code files after print ends
+// Helper to cleanup the staged G-code copy after a print ends
 static void cleanup_helix_temp_file(const std::string& filename) {
-    // Check if this is a .helix_temp modified file
-    if (filename.find(".helix_temp/modified_") == std::string::npos) {
-        return; // Not a temp file
+    if (!helix::gcode::is_uploaded_rewrite_path(filename)) {
+        return; // Not a copy we staged
     }
 
     auto* mgr = get_moonraker_manager();
@@ -248,10 +242,12 @@ static void show_rich_completion_modal(PrintJobState state, const char* filename
     auto& printer_state = get_printer_state();
 
     // Get print stats (wall-clock elapsed including prep time)
-    int duration_secs = lv_subject_get_int(printer_state.get_print_elapsed_subject());
-    int total_layers = lv_subject_get_int(printer_state.get_print_layer_total_subject());
-    int estimated_secs = printer_state.get_estimated_print_time();
-    int filament_mm = lv_subject_get_int(printer_state.get_print_filament_used_subject());
+    int duration_secs = lv_subject_get_int(printer_state.print_state().get_print_elapsed_subject());
+    int total_layers =
+        lv_subject_get_int(printer_state.print_state().get_print_layer_total_subject());
+    int estimated_secs = printer_state.print_state().get_estimated_print_time();
+    int filament_mm =
+        lv_subject_get_int(printer_state.print_state().get_print_filament_used_subject());
 
     spdlog::info("[PrintComplete] Stats: duration={}s, estimated={}s, layers={}, filament={}mm",
                  duration_secs, estimated_secs, total_layers, filament_mm);
@@ -316,8 +312,8 @@ static void show_rich_completion_modal(PrintJobState state, const char* filename
     // Icon src/variant must be set imperatively (no XML binding support for icon properties)
     lv_obj_t* icon_widget = lv_obj_find_by_name(dialog, "status_icon");
     if (icon_widget) {
-        ui_icon_set_source(icon_widget, icon_src);
-        ui_icon_set_variant(icon_widget, icon_variant);
+        helix::ui::icon::set_source(icon_widget, icon_src);
+        helix::ui::icon::set_variant(icon_widget, icon_variant);
     }
 
     // Celebrate successful prints with confetti (respects animations setting)
@@ -343,18 +339,18 @@ static void on_print_state_changed_for_notification(lv_observer_t* observer,
     // value starts at Idle, so booting straight into a terminal state reads as
     // Idle -> Complete and correctly does not notify.
     (void)subject; // the lifecycle subject; read through the typed accessor
-    const auto lifecycle = get_printer_state().get_print_lifecycle();
+    const auto lifecycle = get_printer_state().print_state().get_print_lifecycle();
     // PRINT_STATE_CAST_OK: the PREVIOUS lifecycle has no typed accessor, and
     // this transition check needs the prior value; the prev subject is
     // PrintState-typed by construction, so the pairing is not in question.
     const auto prev_lifecycle = static_cast<PrintState>(
-        lv_subject_get_int(get_printer_state().get_print_lifecycle_prev_subject()));
+        lv_subject_get_int(get_printer_state().print_state().get_print_lifecycle_prev_subject()));
 
     spdlog::debug("[PrintComplete] Lifecycle: {} -> {}", static_cast<int>(prev_lifecycle),
                   static_cast<int>(lifecycle));
 
     const auto outcome = static_cast<PrintOutcome>(
-        lv_subject_get_int(get_printer_state().get_print_outcome_subject()));
+        lv_subject_get_int(get_printer_state().print_state().get_print_outcome_subject()));
 
     // Take the previous job's result down as soon as a new one is committed.
     // Level, not edge, is deliberate: the handle is cleared on the dialog's
@@ -367,10 +363,10 @@ static void on_print_state_changed_for_notification(lv_observer_t* observer,
         // The terminal job state still drives which message and sound are used.
         // RAW_PRINT_STATE_OK: terminal-outcome formatting is about what the
         // printer reported, and the outcome enum derives from it directly.
-        const auto current = get_printer_state().get_print_job_state();
+        const auto current = get_printer_state().print_state().get_print_job_state();
         // Get filename from PrinterState and format for display
         const char* raw_filename =
-            lv_subject_get_string(get_printer_state().get_print_filename_subject());
+            lv_subject_get_string(get_printer_state().print_state().get_print_filename_subject());
         std::string resolved_filename =
             (raw_filename && raw_filename[0]) ? resolve_gcode_filename(raw_filename) : "";
         std::string display_name =
@@ -400,7 +396,7 @@ static void on_print_state_changed_for_notification(lv_observer_t* observer,
 
         // Check if user is on print status panel
         lv_obj_t* print_status_panel = get_global_print_status_panel().get_panel();
-        bool on_print_status = NavigationManager::instance().is_panel_in_stack(print_status_panel);
+        bool on_print_status = helix::nav::is_in_stack(print_status_panel);
 
         auto mode = AudioSettingsManager::instance().get_completion_alert_mode();
 
@@ -470,7 +466,7 @@ ObserverGuard init_print_completion_observer() {
     init_completion_subjects();
 
     spdlog::debug("[PrintComplete] Observer registered, awaiting first Moonraker update");
-    return ObserverGuard(get_printer_state().get_print_lifecycle_subject(),
+    return ObserverGuard(get_printer_state().print_state().get_print_lifecycle_subject(),
                          on_print_state_changed_for_notification, nullptr);
 }
 
@@ -514,13 +510,13 @@ void on_preparing_epoch_changed(lv_observer_t*, lv_subject_t* subject) {
     if (epoch != 0 || prev == 0) {
         return;
     }
-    apply_preparing_exit(get_printer_state().last_preparing_exit());
+    apply_preparing_exit(get_printer_state().print_state().last_preparing_exit());
 }
 
 } // namespace
 
 ObserverGuard init_preparing_exit_observer() {
-    return ObserverGuard(get_printer_state().get_preparing_epoch_subject(),
+    return ObserverGuard(get_printer_state().print_state().get_preparing_epoch_subject(),
                          on_preparing_epoch_changed, nullptr);
 }
 

@@ -1,0 +1,88 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component>
+  <!-- One printed object in the exclude-object side list.
+       Landscape, where the list is a narrow column:
+         [numbered disc] [object name ...]
+                         [status         ]
+       Portrait, where the list spans the screen:
+         [numbered disc] [object name ...] [status slot]
+       Either way the status area is sized by both status strings, present but
+       invisible, so a row's height never changes as the printing object moves
+       and the portrait slot is as wide as the longer string in the active
+       language.
+       The disc carries the same number and color the map gives the object.
+       state_subject names the row's int state: 0 idle, 1 printing now, 2 excluded,
+       3 picked before the print starts. Excluded and picked rows are dimmed and
+       muted; an excluded row is not clickable, a picked row is, so the pick can be
+       undone. The row restyles in place, so the list keeps its scroll position
+       while the printing object moves.
+       C++ sets the object name, which comes from the slicer and so cannot travel
+       as a prop: a leading '#' would read as a const. -->
+  <styles>
+    <style name="row_excluded" opa="150"/>
+    <style name="name_idle" text_color="#text"/>
+    <style name="name_excluded" text_color="#text_muted"/>
+    <style name="text_stacked" layout="flex" flex_flow="column" pad_gap="0"/>
+    <style name="text_side_by_side" layout="flex" flex_flow="row" flex_cross_place="center" pad_gap="#space_sm"/>
+    <style name="name_stacked" width="100%" flex_grow="0"/>
+    <style name="name_beside_status" width="0" flex_grow="1"/>
+    <style name="status_stacked" width="100%"/>
+    <style name="status_slot" width="content"/>
+    <style name="status_in_slot" align="right_mid"/>
+  </styles>
+  <api>
+    <prop name="badge_text" type="string" default=""/>
+    <prop name="badge_color" type="string" default="#primary"/>
+    <prop name="badge_text_color" type="string" default="#text"/>
+    <prop name="state_subject" type="string" default=""/>
+  </api>
+  <view extends="lv_obj"
+        width="100%" height="content" flex_flow="row" style_flex_main_place="start" style_flex_cross_place="center"
+        style_flex_track_place="center" style_pad_all="#space_sm" style_pad_gap="#space_sm" style_radius="6"
+        style_bg_color="#card_bg" style_bg_opa="255" style_border_width="0" scrollable="false" clickable="true">
+    <style name="styles.press_wash" selector="pressed"/>
+    <bind_style_if_ge name="row_excluded" subject="$state_subject" ref_value="2"/>
+    <bind_flag_if_not_eq subject="$state_subject" flag="clickable" ref_value="2"/>
+    <!-- SIZE_OK: the index disc is a fixed 24px circle at every breakpoint -->
+    <lv_obj width="24"
+            height="24" style_radius="12" style_bg_color="$badge_color" style_bg_opa="255" style_border_width="0"
+            style_pad_all="0" scrollable="false" clickable="false" event_bubble="true">
+      <lv_label align="center"
+                text="$badge_text" style_text_color="$badge_text_color" style_text_font="#font_small"
+                event_bubble="true"/>
+    </lv_obj>
+    <lv_obj name="text_column"
+            height="content" flex_grow="1" style_pad_all="0" style_bg_opa="0" style_border_width="0" scrollable="false"
+            clickable="false" event_bubble="true">
+      <bind_style_if_not_eq name="text_stacked" subject="ui_is_portrait" ref_value="1"/>
+      <bind_style_if_eq name="text_side_by_side" subject="ui_is_portrait" ref_value="1"/>
+      <lv_label name="object_name" text="" long_mode="wrap" style_text_font="#font_body" event_bubble="true">
+        <bind_style_if_not_eq name="name_stacked" subject="ui_is_portrait" ref_value="1"/>
+        <bind_style_if_eq name="name_beside_status" subject="ui_is_portrait" ref_value="1"/>
+        <bind_style_if_lt name="name_idle" subject="$state_subject" ref_value="2"/>
+        <bind_style_if_ge name="name_excluded" subject="$state_subject" ref_value="2"/>
+      </lv_label>
+      <lv_obj name="status_line"
+              height="content" style_pad_all="0" style_bg_opa="0" style_border_width="0" scrollable="false"
+              clickable="false" event_bubble="true">
+        <bind_style_if_not_eq name="status_stacked" subject="ui_is_portrait" ref_value="1"/>
+        <bind_style_if_eq name="status_slot" subject="ui_is_portrait" ref_value="1"/>
+        <!-- Size the status area whatever is showing. -->
+        <text_small text="Printing now" style_opa="0" event_bubble="true"/>
+        <text_small text="Excluded" style_opa="0" event_bubble="true"/>
+        <text_small name="status_printing"
+                    text="Printing now" style_text_color="#success" hidden="true" event_bubble="true">
+          <bind_flag_if_not_eq subject="$state_subject" flag="hidden" ref_value="1"/>
+          <bind_style_if_eq name="status_in_slot" subject="ui_is_portrait" ref_value="1"/>
+        </text_small>
+        <text_small name="status_excluded"
+                    text="Excluded" style_text_color="#text_muted" hidden="true" event_bubble="true">
+          <bind_flag_if_lt subject="$state_subject" flag="hidden" ref_value="2"/>
+          <bind_style_if_eq name="status_in_slot" subject="ui_is_portrait" ref_value="1"/>
+        </text_small>
+      </lv_obj>
+    </lv_obj>
+  </view>
+</component>

@@ -2,9 +2,9 @@
 <!-- Copyright (C) 2025-2026 356C LLC -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <!-- About Settings Overlay Panel -->
-<!-- Shows branding, version info, update controls, and system details -->
+<!-- Shows branding, version info, and system details -->
 <component>
-  <view name="about_settings_overlay" extends="overlay_panel" title="About" title_tag="About" bg_color="#screen_bg">
+  <view name="about_settings_overlay" extends="overlay_panel" title="About" bg_color="#screen_bg">
     <!-- Content Area -->
     <lv_obj name="overlay_content"
             width="100%" flex_grow="1" style_pad_top="0" style_pad_left="#space_lg" style_pad_right="#space_lg"
@@ -28,7 +28,8 @@
                 scrollable="false" style_clip_corner="true"/>
       </lv_obj>
       <!-- Printer Name (7-tap easter egg trigger) -->
-      <ui_button name="row_printer" width="100%" height="content" variant="ghost" style_radius="0" style_pad_all="0">
+      <ui_button name="row_printer"
+                 width="100%" height="content" variant="ghost" style_radius="0" style_border_width="0" style_pad_all="0">
         <lv_obj width="100%"
                 height="content" flex_flow="row" style_flex_main_place="start" style_flex_cross_place="center"
                 style_pad_left="#space_lg" style_pad_right="#space_lg" style_pad_top="#space_md"
@@ -36,14 +37,14 @@
                 event_bubble="true">
           <icon name="row_icon" src="printer_3d" size="sm" variant="secondary" clickable="false" event_bubble="true"/>
           <text_body name="label"
-                     text="Printer Name" translation_tag="Printer Name" style_text_color="#text" flex_grow="1"
-                     clickable="false" event_bubble="true"/>
+                     text="Printer Name" style_text_color="#text" flex_grow="1" clickable="false" event_bubble="true"/>
           <text_muted name="value" bind_text="printer_value" clickable="false" event_bubble="true"/>
         </lv_obj>
         <event_cb trigger="clicked" callback="on_about_printer_name_clicked"/>
       </ui_button>
       <!-- Current Version - ui_button for native press feedback (7-tap secret to toggle beta features) -->
-      <ui_button name="row_version" width="100%" height="content" variant="ghost" style_radius="0" style_pad_all="0">
+      <ui_button name="row_version"
+                 width="100%" height="content" variant="ghost" style_radius="0" style_border_width="0" style_pad_all="0">
         <lv_obj width="100%"
                 height="content" flex_flow="row" style_flex_main_place="start" style_flex_cross_place="center"
                 style_pad_left="#space_lg" style_pad_right="#space_lg" style_pad_top="#space_md"
@@ -51,126 +52,59 @@
                 event_bubble="true">
           <icon name="row_icon" src="info" size="sm" variant="secondary" clickable="false" event_bubble="true"/>
           <text_body name="label"
-                     text="Current Version" translation_tag="Current Version" style_text_color="#text" flex_grow="1"
-                     clickable="false" event_bubble="true"/>
+                     text="Current Version" style_text_color="#text" flex_grow="1" clickable="false" event_bubble="true"/>
           <text_muted name="value" bind_text="version_value" clickable="false" event_bubble="true"/>
         </lv_obj>
         <event_cb trigger="clicked" callback="on_about_version_clicked"/>
       </ui_button>
-      <!-- Update Channel (beta_features, and only where checking is possible).
-           show_update_settings is part of the condition because a firmware-managed
-           install has no channel to pick: on_channel_changed() re-checks, and
-           check_for_updates() short-circuits there, so the dropdown would persist a
-           setting nothing reads and sit directly above "Managed by your firmware".
-           ONE expression rather than two stacked bind_flag_if_eq — see the note on
-           container_install_update below for why stacking silently loses. -->
-      <lv_obj name="container_update_channel" width="100%" style_pad_all="0">
-        <bind_flag_if cond="show_beta_features eq 1 and show_update_settings eq 1" flag="hidden" invert="true"/>
-        <setting_dropdown_row name="row_update_channel"
-                              label="Update Channel" label_tag="Update Channel" icon="swap_vertical"
-                              options="Stable&#10;Beta&#10;Dev" options_tag="Stable&#10;Beta&#10;Dev"
-                              bind_selected="update_channel" hide_description="true"
-                              callback="on_about_update_channel_changed"/>
-      </lv_obj>
-      <!-- Check for Updates (reactive description shows available version) -->
-      <lv_obj name="container_check_updates" width="100%" style_pad_all="0" scrollable="false">
-        <bind_flag_if_eq subject="show_update_settings" flag="hidden" ref_value="0"/>
-        <setting_action_row name="row_check_updates"
-                            label="Check for Updates" label_tag="Check for Updates" icon="refresh"
-                            bind_description="update_version_text" description_min_bp="0"
-                            callback="on_about_check_updates_clicked"/>
-      </lv_obj>
-      <!-- Install Update (visible only when an update is available AND this
-           install can actually apply one — updates_unavailable means it cannot,
-           in which case the notice below carries the instructions instead) -->
-      <lv_obj name="container_install_update" width="100%" style_pad_all="0">
-        <!-- ONE expression, not three stacked bind_flag_if_eq. Each of those
-             installs its own observer that writes the same `hidden` flag, so
-             whichever fires last wins and the other two are advisory: with three
-             of them the row reappeared on a non-updatable install as soon as
-             update_status reached 2. See LVGL9_XML_GUIDE.md, "Expression
-             Conditionals". -->
-        <bind_flag_if cond="show_update_settings eq 1 and updates_unavailable eq 0 and update_status eq 2"
-                      flag="hidden" invert="true"/>
-        <setting_action_row name="row_install_update"
-                            label="Install Update" label_tag="Install Update" icon="download" description=""
-                            description_tag="" callback="on_about_install_update_clicked"/>
-      </lv_obj>
-      <!-- Firmware-managed updates notice (replaces the check/install controls
-           when HELIX_DISABLE_AUTO_UPDATES is set — updates come from the firmware) -->
-      <lv_obj name="container_updates_firmware_managed" width="100%" style_pad_all="0" scrollable="false">
-        <bind_flag_if_eq subject="updates_firmware_managed" flag="hidden" ref_value="0"/>
-        <setting_info_row name="row_updates_firmware_managed"
-                          label="Software Updates" label_tag="Software Updates" icon="info_outline">
-          <text_muted name="value" text="Managed by your firmware" translation_tag="Managed by your firmware"/>
-        </setting_info_row>
-      </lv_obj>
-      <!-- Cannot-install notice. Sits ALONGSIDE "Check for Updates" rather than
-           replacing it: this install can still see that a new version exists, it
-           just cannot apply one itself, so the row says what to do instead of
-           saying nothing. Shown when the install tree isn't writable and updates
-           are NOT firmware-managed. -->
-      <lv_obj name="container_updates_unavailable" width="100%" style_pad_all="0" scrollable="false">
-        <bind_flag_if_eq subject="updates_unavailable" flag="hidden" ref_value="0"/>
-        <!-- An action row, not an info row: the whole point is that the user can
-             still act, and the modal behind it carries the command and a QR to
-             the docs. A row that only states the problem is the dead end this
-             replaces. description_min_bp="0" keeps the line on 480x272, where it
-             is the only thing telling them what to do. -->
-        <setting_action_row name="row_updates_unavailable"
-                            label="Software Updates" label_tag="Software Updates" icon="console"
-                            description="Not available here. Update from a terminal."
-                            description_tag="Not available here. Update from a terminal." description_min_bp="0"
-                            callback="on_about_updates_unavailable_clicked"/>
-      </lv_obj>
       <!-- Klipper Version -->
-      <setting_info_row name="row_klipper" label="Klipper" label_tag="Klipper" icon="toy_brick_outline">
+      <setting_info_row name="row_klipper" label="Klipper" icon="toy_brick_outline">
         <text_muted name="value" bind_text="klipper_version"/>
       </setting_info_row>
       <!-- Moonraker Version -->
-      <setting_info_row name="row_moonraker" label="Moonraker" label_tag="Moonraker" icon="toy_brick_outline">
+      <setting_info_row name="row_moonraker" label="Moonraker" icon="toy_brick_outline">
         <text_muted name="value" bind_text="moonraker_version"/>
       </setting_info_row>
       <!-- OS Version -->
-      <setting_info_row name="row_os" label="OS" label_tag="OS" icon="console">
+      <setting_info_row name="row_os" label="OS" icon="console">
         <text_muted name="value" bind_text="os_version"/>
       </setting_info_row>
       <!-- Host (kernel arch · userspace bitness). Hidden on Android — irrelevant
            when the OS row already reads "Android". -->
       <lv_obj name="container_host_arch" width="100%" style_pad_all="0" scrollable="false">
         <bind_flag_if_eq subject="settings_is_android" flag="hidden" ref_value="1"/>
-        <setting_info_row name="row_host_arch" label="Host" label_tag="Host" icon="sysinfo">
+        <setting_info_row name="row_host_arch" label="Host" icon="sysinfo">
           <text_muted name="value" bind_text="host_arch_value"/>
         </setting_info_row>
       </lv_obj>
       <!-- Install Root (hidden on Android — SDL-sandboxed paths are not user-meaningful) -->
       <lv_obj name="container_install_root" width="100%" style_pad_all="0" scrollable="false">
         <bind_flag_if_eq subject="settings_is_android" flag="hidden" ref_value="1"/>
-        <setting_info_row name="row_install_root" label="Install Root" label_tag="Install Root" icon="folder_home">
-          <text_muted name="value" bind_text="install_root_value"/>
+        <setting_info_row name="row_install_root" label="Install Root" icon="folder_home">
+          <text_muted name="value" width="75%" bind_text="install_root_value" style_text_align="right" long_mode="wrap"/>
         </setting_info_row>
       </lv_obj>
       <!-- Config Dir (hidden on Android) -->
       <lv_obj name="container_config_dir" width="100%" style_pad_all="0" scrollable="false">
         <bind_flag_if_eq subject="settings_is_android" flag="hidden" ref_value="1"/>
-        <setting_info_row name="row_config_dir" label="Config Dir" label_tag="Config Dir" icon="cog">
-          <text_muted name="value" bind_text="config_dir_value"/>
+        <setting_info_row name="row_config_dir" label="Config Dir" icon="cog">
+          <text_muted name="value" width="75%" bind_text="config_dir_value" style_text_align="right" long_mode="wrap"/>
         </setting_info_row>
       </lv_obj>
       <!-- Logs (active spdlog destination — journal/syslog/file path/console/logcat) -->
-      <setting_info_row name="row_log_dest" label="Logs" label_tag="Logs" icon="script_text">
-        <text_muted name="value" bind_text="log_dest_value"/>
+      <setting_info_row name="row_log_dest" label="Logs" icon="script_text">
+        <text_muted name="value" width="75%" bind_text="log_dest_value" style_text_align="right" long_mode="wrap"/>
       </setting_info_row>
       <!-- Cache Dir (hidden on Android) -->
       <lv_obj name="container_cache_dir" width="100%" style_pad_all="0" scrollable="false">
         <bind_flag_if_eq subject="settings_is_android" flag="hidden" ref_value="1"/>
-        <setting_info_row name="row_cache_dir" label="Cache Dir" label_tag="Cache Dir" icon="database">
-          <text_muted name="value" bind_text="cache_dir_value"/>
+        <setting_info_row name="row_cache_dir" label="Cache Dir" icon="database">
+          <text_muted name="value" width="75%" bind_text="cache_dir_value" style_text_align="right" long_mode="wrap"/>
         </setting_info_row>
       </lv_obj>
       <!-- Total Print Hours (opens history dashboard) -->
       <setting_action_row name="row_print_hours"
-                          label="Print Hours" label_tag="Print Hours" icon="clock" bind_description="print_hours_value"
+                          label="Print Hours" icon="clock" bind_description="print_hours_value"
                           callback="on_about_print_hours_clicked"/>
       <!-- ================================================================== -->
       <!-- OPEN SOURCE LICENSES -->
@@ -178,15 +112,13 @@
       <lv_obj width="100%"
               height="content" flex_flow="column" style_pad_top="#space_lg" style_pad_bottom="0" style_pad_left="0"
               style_pad_right="0" style_pad_gap="#space_xs" scrollable="false">
-        <text_small width="100%"
-                    text="Open Source Licenses" translation_tag="Open Source Licenses" style_text_color="#text_muted"
-                    style_text_align="center"/>
+        <text_small width="100%" text="Open Source Licenses" style_text_color="#text_muted" style_text_align="center"/>
         <lv_obj width="100%"
                 height="content" style_pad_all="#space_md" style_bg_color="#card_bg" style_bg_opa="255"
                 style_radius="#border_radius" scrollable="false">
           <text_tiny name="licenses_text"
                      width="100%" style_text_color="#text_muted" style_text_line_space="4"
-                     text="HelixScreen — GPL-3.0&#10;LVGL — MIT License&#10;helix-xml — MIT License (our fork of LVGL's XML engine)&#10;libhv — BSD 3-Clause License&#10;spdlog — MIT License&#10;nlohmann/json — MIT License&#10;SDL2 — zlib License&#10;Expat — MIT License&#10;md4c — MIT License&#10;ThorVG — MIT License&#10;GLM — Happy Bunny or MIT License&#10;quirc — ISC License&#10;lv_i18n — MIT License&#10;lv_markdown — MIT License&#10;stb — MIT License / Public Domain&#10;mdns — Public Domain&#10;picosha2 — MIT License&#10;linenoise — BSD 2-Clause License&#10;OpenVDB — Apache 2.0 License&#10;libnl — LGPL 2.1&#10;minilzo — GPL 2.0&#10;ftxui — MIT License&#10;cpp-terminal — MIT License&#10;wpa_supplicant — BSD 3-Clause License"/>
+                     text="HelixScreen — GPL-3.0&#10;LVGL — MIT License&#10;helix-xml — MIT License (our fork of LVGL's XML engine)&#10;libhv — BSD 3-Clause License&#10;spdlog — MIT License&#10;nlohmann/json — MIT License&#10;SDL2 — zlib License&#10;Expat — MIT License&#10;md4c — MIT License&#10;ThorVG — MIT License&#10;GLM — Happy Bunny or MIT License&#10;quirc — ISC License&#10;lv_i18n — MIT License&#10;lv_markdown — MIT License&#10;stb — MIT License / Public Domain&#10;mdns — Public Domain&#10;linenoise — BSD 2-Clause License&#10;libnl — LGPL 2.1&#10;minilzo — GPL 2.0&#10;cpp-terminal — MIT License&#10;wpa_supplicant — BSD 3-Clause License"/>
         </lv_obj>
       </lv_obj>
       <!-- Credits -->

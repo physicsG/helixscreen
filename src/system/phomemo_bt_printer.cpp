@@ -8,6 +8,7 @@
 
 #include "bluetooth_loader.h"
 #include "bt_print_utils.h"
+#include "helix_thread.h"
 #include "log_redact.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "phomemo_printer.h"
@@ -37,7 +38,7 @@ void PhomemoBluetoothPrinter::print(const LabelBitmap& bitmap, const LabelSize& 
     auto& loader = helix::bluetooth::BluetoothLoader::instance();
     if (!loader.is_available()) {
         spdlog::error("Phomemo BT: Bluetooth not available");
-        helix::ui::queue_update([callback]() {
+        helix::ui::queue_update("PhomemoBluetoothPrinter::print", [callback]() {
             if (callback)
                 callback(false, lv_tr("Bluetooth not available"));
         });
@@ -46,7 +47,7 @@ void PhomemoBluetoothPrinter::print(const LabelBitmap& bitmap, const LabelSize& 
 
     if (mac_.empty()) {
         spdlog::error("Phomemo BT: No device configured");
-        helix::ui::queue_update([callback]() {
+        helix::ui::queue_update("PhomemoBluetoothPrinter::print", [callback]() {
             if (callback)
                 callback(false, lv_tr("Bluetooth device not configured"));
         });
@@ -64,7 +65,7 @@ void PhomemoBluetoothPrinter::print(const LabelBitmap& bitmap, const LabelSize& 
     // ARM (AD5M/CC1) throws std::system_error which aborts with std::terminate
     // if it escapes an LVGL event frame (#724, #837, [L083]).
     try {
-        std::thread([mac, use_spp, commands = std::move(commands), callback]() {
+        helix::make_thread([mac, use_spp, commands = std::move(commands), callback]() {
             bool success = false;
             std::string error;
 
@@ -104,14 +105,14 @@ void PhomemoBluetoothPrinter::print(const LabelBitmap& bitmap, const LabelSize& 
                 }
             }
 
-            helix::ui::queue_update([callback, success, error]() {
+            helix::ui::queue_update("PhomemoBluetoothPrinter::print", [callback, success, error]() {
                 if (callback)
                     callback(success, error);
             });
         }).detach();
     } catch (const std::system_error& e) {
         spdlog::error("Phomemo BT: failed to spawn print thread: {}", e.what());
-        helix::ui::queue_update([callback]() {
+        helix::ui::queue_update("PhomemoBluetoothPrinter::print", [callback]() {
             if (callback)
                 callback(false, lv_tr("System busy — please try again"));
         });

@@ -33,6 +33,7 @@ Tests are tagged by **feature/importance**, not layer/speed. This enables runnin
 | `[core]` | ~12 | Critical tests - if these fail, the app is fundamentally broken |
 | `[slow]` | ~36 | Tests with network/timing - excluded from `test-run` |
 | `[eventloop]` | ~2 | Uses `hv::EventLoop` - very slow, always paired with `[slow]` |
+| `[serial]` | 0 | A `[slow]` test that fails when it shares the box with other `[slow]` shards - `test-all` and `test-slow` run it alone, after the sharded tier. Add it only for a failure seen sharded and not serially |
 
 *Counts are TEST_CASE definitions; each can have multiple SECTIONs expanding the actual test paths.*
 
@@ -103,28 +104,17 @@ These validate fundamental functionality:
 |--------|----------|
 | `make test-run` | Parallel, excludes `[slow]` and hidden |
 | `make test-fast` | Same as test-run |
-| `make test-all` | Parallel, includes `[slow]` |
-| `make test-slow` | Only `[slow]` tagged tests |
+| `make test-all` | Fast tests in `NPROCS` shards, then `[slow]` in `SLOW_SHARDS` (16) shards in `SLOW_ORDER` (fixed-seed shuffle), then `[slow][serial]` alone |
+| `make test-slow` | Only `[slow]`: the same two slow tiers as `test-all` |
 | `make test-eventloop` | Only `[eventloop]` tests (5-10 min) |
 | `make test-serial` | Sequential for debugging |
 | `make test-verbose` | Sequential with timing |
 
 ### By Feature
 
-| Target | Tags |
-|--------|------|
-| `make test-core` | `[core]` |
-| `make test-connection` | `[connection]` |
-| `make test-state` | `[state]` |
-| `make test-print` | `[print]` |
-| `make test-gcode` | `[gcode]` |
-| `make test-moonraker` | `[api]` |
-| `make test-ui` | `[ui]` |
-| `make test-network` | `[network]` |
-| `make test-ams` | `[ams]` |
-| `make test-calibration` | `[calibration]` |
-| `make test-filament` | `[filament]` |
-| `make test-security` | `[security]` |
+Run one area by its tag: `make t F='[ams]'` (also `[core]`, `[connection]`, `[state]`,
+`[print]`, `[gcode]`, `[api]`, `[network]`, `[calibration]`, `[filament]`, `[security]`).
+`make test-ui` runs `[navigation],[theme],[wizard]`.
 
 ### Sanitizers
 

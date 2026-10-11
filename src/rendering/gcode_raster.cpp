@@ -239,4 +239,33 @@ void stroke_selection_rim(const RasterTarget& t, int rim_px, int gap_px, uint32_
     }
 }
 
+void stroke_exclusion_hatch(const RasterTarget& t, int period_px, int stripe_px, uint32_t rgb,
+                            ChannelOrder order, RowOrder rows) {
+    if (t.data == nullptr || period_px < 2 || stripe_px < 1 || stripe_px >= period_px) {
+        return;
+    }
+
+    const uint8_t hatch_b = static_cast<uint8_t>(rgb & 0xFF);
+    const uint8_t hatch_g = static_cast<uint8_t>((rgb >> 8) & 0xFF);
+    const uint8_t hatch_r = static_cast<uint8_t>((rgb >> 16) & 0xFF);
+    const size_t r_byte = (order == ChannelOrder::Bgra) ? 2 : 0;
+    const size_t b_byte = (order == ChannelOrder::Bgra) ? 0 : 2;
+
+    for (int y = 0; y < t.h; ++y) {
+        const int screen_y = (rows == RowOrder::BottomUp) ? (t.h - 1 - y) : y;
+        uint8_t* row = t.data + static_cast<size_t>(y) * t.stride;
+        // (x + screen_y) mod period, carried along the row instead of divided per pixel.
+        int phase = screen_y % period_px;
+        for (int x = 0; x < t.w; ++x, phase = (phase + 1 == period_px) ? 0 : phase + 1) {
+            uint8_t* pixel = row + static_cast<size_t>(x) * 4;
+            if (phase >= stripe_px || pixel[3] != kExcludedAlpha) {
+                continue;
+            }
+            pixel[b_byte] = hatch_b;
+            pixel[1] = hatch_g;
+            pixel[r_byte] = hatch_r;
+        }
+    }
+}
+
 } // namespace helix::gcode

@@ -38,57 +38,16 @@ class TimelapseSettingsOverlay : public OverlayBase {
      */
     explicit TimelapseSettingsOverlay(IMoonrakerAPI* api);
 
-    //
-    // === OverlayBase Implementation ===
-    //
-
-    /**
-     * @brief Initialize subjects for XML binding
-     */
-    void init_subjects() override;
-
-    /**
-     * @brief Create overlay UI from XML
-     *
-     * @param parent Parent widget to attach overlay to (usually screen)
-     * @return Root object of overlay, or nullptr on failure
-     */
-    lv_obj_t* create(lv_obj_t* parent) override;
-
-    /**
-     * @brief Get human-readable overlay name
-     * @return "Timelapse Settings"
-     */
     [[nodiscard]] const char* get_name() const override {
         return "Timelapse Settings";
     }
-
-    /**
-     * @brief Called when overlay becomes visible
-     */
-    void on_activate() override;
-
-    /**
-     * @brief Called when overlay is hidden
-     */
-    void on_deactivate() override;
-
-    /**
-     * @brief Clean up resources for async-safe destruction
-     */
-    void cleanup() override;
-
-    //
-    // === Legacy Compatibility ===
-    //
-
-    /**
-     * @brief Get XML component name for lv_xml_create()
-     * @return "timelapse_settings_overlay"
-     */
-    [[nodiscard]] const char* get_xml_component_name() const {
+    [[nodiscard]] const char* xml_component() const override {
         return "timelapse_settings_overlay";
     }
+
+    lv_obj_t* create(lv_obj_t* parent) override;
+    void register_callbacks() override;
+    void on_activate() override;
 
     /**
      * @brief Get root panel object (alias for get_root())
@@ -122,12 +81,6 @@ class TimelapseSettingsOverlay : public OverlayBase {
      * @param mode_index 0=Layer Macro, 1=Hyperlapse
      */
     void update_mode_info(int mode_index);
-
-    // Event handlers
-    static void on_enabled_changed(lv_event_t* e);
-    static void on_mode_changed(lv_event_t* e);
-    static void on_framerate_changed(lv_event_t* e);
-    static void on_autorender_changed(lv_event_t* e);
 
     //
     // === Injected Dependencies ===

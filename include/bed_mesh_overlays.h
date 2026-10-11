@@ -3,96 +3,69 @@
 
 #pragma once
 
-#include "bed_mesh_renderer.h" // For bed_mesh_renderer_t, bed_mesh_view_state_t
+#include "bed_mesh_coordinate_transform.h" // For WallBounds
+#include "bed_mesh_renderer.h"             // For bed_mesh_renderer_t, bed_mesh_view_state_t
 
 #include <lvgl/lvgl.h>
 
 /**
  * @file bed_mesh_overlays.h
- * @brief Grid lines, axes, and labels for bed mesh visualization
+ * @brief Grid lines, axes, labels and heatmap overlays for bed mesh visualization
  *
- * Provides overlay rendering functions for the bed mesh 3D view:
- * - Grid lines on mesh surface
- * - Reference grids (Mainsail-style wall grids)
- * - Axis labels (X, Y, Z indicators)
- * - Numeric tick labels showing coordinate values
- *
- * All functions operate on an existing bed_mesh_renderer_t instance and
- * render to an LVGL layer in the helix::mesh namespace.
+ * The render thread draws the wireframe and reference grids into a PixelBuffer.
+ * Text and the 2D heatmap's touch overlay need LVGL's font engine, so the
+ * widget's draw callback draws those on the main thread on top of the blitted frame.
  */
 
 namespace helix {
 namespace mesh {
 
+class PixelBuffer;
+
 /**
- * @brief Render grid lines on mesh surface
+ * @brief Printer-bed extent of the reference grids and its world transform
  *
- * Draws a wireframe grid connecting all mesh probe points using cached
- * screen coordinates. Grid lines help visualize mesh topology and spacing.
- *
- * @param layer LVGL draw layer (from DRAW_POST event callback)
- * @param renderer Renderer instance with valid mesh data and projection cache
- * @param canvas_width Canvas width in pixels
- * @param canvas_height Canvas height in pixels
+ * The one place that decides the grid extent: the bed bounds once
+ * bed_mesh_renderer_set_bounds() has run, else the mesh index grid at BED_MESH_SCALE.
  */
-void render_grid_lines(lv_layer_t* layer, const bed_mesh_renderer_t* renderer, int canvas_width,
-                       int canvas_height);
+struct BedExtent {
+    double x_min_mm, x_max_mm, y_min_mm, y_max_mm; ///< Bed range in printer mm
+    double center_x, center_y;                     ///< Bed center in printer mm
+    double coord_scale;                            ///< World units per mm
+    double half_width, half_height;                ///< Bed half-size in world units
+    WallBounds walls;                              ///< Floor/ceiling at the current z_scale
+};
+
+BedExtent compute_bed_extent(const bed_mesh_renderer_t* renderer);
 
 /**
- * @brief Render reference grids (floor and walls)
+ * @brief Cell layout of the 2D heatmap within the canvas (canvas-local pixels)
  *
- * Draws a reference frame around the mesh:
- * - Floor grid (XY plane) below the mesh
- * - Back wall (XZ plane) and left wall (YZ plane)
- *
- * Uses PRINTER BED dimensions (not mesh dimensions) so the mesh "floats" inside.
- * Z range extends 25% above and below mesh to provide visual context.
- * Should be called BEFORE render_mesh_surface() so mesh correctly occludes it.
- *
- * @param layer LVGL draw layer (from DRAW_POST event callback)
- * @param renderer Renderer instance with valid mesh data
- * @param canvas_width Canvas width in pixels
- * @param canvas_height Canvas height in pixels
+ * N probe points per axis give N-1 cells. `valid` is false below a 2x2 mesh.
  */
-void render_reference_grids(lv_layer_t* layer, const bed_mesh_renderer_t* renderer,
-                            int canvas_width, int canvas_height);
+struct HeatmapLayout {
+    bool valid;
+    int grid_x, grid_y;   ///< Top-left of the first cell
+    int cell_w, cell_h;   ///< Cell size, at least 1px
+    int cells_x, cells_y; ///< Cell count per axis
+};
 
-// Legacy stubs - kept for API compatibility
-void render_reference_floor(lv_layer_t* layer, const bed_mesh_renderer_t* renderer,
-                            int canvas_width, int canvas_height);
-void render_reference_walls(lv_layer_t* layer, const bed_mesh_renderer_t* renderer,
-                            int canvas_width, int canvas_height);
+HeatmapLayout compute_heatmap_layout(int rows, int cols, int canvas_width, int canvas_height);
 
 /**
- * @brief Render axis labels (X, Y, Z indicators)
+ * @brief Render axis labels (X, Y, Z indicators) on the main thread
  *
- * Positions labels at the MIDPOINT of each axis extent, just outside the grid edge:
- * - X label: Middle of X axis extent, below/outside the front edge
- * - Y label: Middle of Y axis extent, to the right/outside the right edge
- * - Z label: At the top of the Z axis, at the back-right corner
- *
- * This matches Mainsail's visualization style where axis labels indicate
- * the direction/dimension rather than the axis endpoint.
- *
- * @param layer LVGL draw layer (from DRAW_POST event callback)
- * @param renderer Renderer instance with valid mesh data
- * @param canvas_width Canvas width in pixels
- * @param canvas_height Canvas height in pixels
+ * X and Y sit at the middle of their axis, just outside the grid edge; Z sits
+ * above the ceiling of the front-left corner.
  */
 void render_axis_labels(lv_layer_t* layer, const bed_mesh_renderer_t* renderer, int canvas_width,
                         int canvas_height);
 
 /**
- * @brief Render numeric tick labels on X, Y, and Z axes
+ * @brief Render numeric tick labels on X, Y, and Z axes on the main thread
  *
- * Adds millimeter labels (e.g., "-100", "0", "100") at regular intervals along
- * the X and Y axes to show bed dimensions, and height labels on the Z-axis.
- * Uses actual printer coordinates (works with any origin convention).
- *
- * @param layer LVGL draw layer (from DRAW_POST event callback)
- * @param renderer Renderer instance with valid mesh data
- * @param canvas_width Canvas width in pixels
- * @param canvas_height Canvas height in pixels
+ * Millimeter labels at the reference-grid spacing along X and Y, and probe
+ * heights (with the Z display offset added back) along Z.
  */
 void render_numeric_axis_ticks(lv_layer_t* layer, const bed_mesh_renderer_t* renderer,
                                int canvas_width, int canvas_height);
@@ -100,18 +73,6 @@ void render_numeric_axis_ticks(lv_layer_t* layer, const bed_mesh_renderer_t* ren
 /**
  * @brief Draw a single axis tick label at the given screen position
  *
- * Helper function to reduce code duplication in render_numeric_axis_ticks.
- * Handles bounds checking, text formatting, and deferred text copy for LVGL.
- *
- * @param layer LVGL draw layer (from DRAW_POST event callback)
- * @param label_dsc LVGL label drawing descriptor (pre-configured with font, color, opacity)
- * @param screen_x Screen X coordinate for label origin
- * @param screen_y Screen Y coordinate for label origin
- * @param offset_x X offset from screen position (for label alignment)
- * @param offset_y Y offset from screen position (for label alignment)
- * @param value Numeric value to format and display
- * @param canvas_width Canvas width in pixels
- * @param canvas_height Canvas height in pixels
  * @param use_decimals If true, formats with 2 decimal places (for Z-axis mm values)
  *                     If false, formats as whole number (for X/Y axis values)
  */
@@ -119,48 +80,34 @@ void draw_axis_tick_label(lv_layer_t* layer, lv_draw_label_dsc_t* label_dsc, int
                           int screen_y, int offset_x, int offset_y, double value, int canvas_width,
                           int canvas_height, bool use_decimals = false);
 
-// ========== Buffer-targeted overloads (no LVGL calls) ==========
-// These replace lv_draw_line() with PixelBuffer::draw_line().
-// Safe to call from background threads.
-// Note: axis labels and tick labels are NOT rendered to buffer
-// (text rendering requires LVGL font engine).
-
-class PixelBuffer;
+/**
+ * @brief Draw the 2D heatmap's border, touched-cell highlight and Z tooltip
+ *
+ * Runs on the main thread over the blitted heatmap frame.
+ *
+ * @param layout Layout of the frame being shown
+ * @param offset_x, offset_y Widget's absolute screen position
+ */
+void render_heatmap_overlay(lv_layer_t* layer, const bed_mesh_renderer_t* renderer,
+                            const HeatmapLayout& layout, int offset_x, int offset_y);
 
 /**
  * @brief Render grid lines on mesh surface into a pixel buffer
  *
- * @param buf Target pixel buffer
- * @param renderer Renderer instance with valid mesh data and projection cache
- * @param canvas_width Canvas width in pixels
- * @param canvas_height Canvas height in pixels
  * @param line_r, line_g, line_b Grid line color (pre-fetched from theme)
  */
 void render_grid_lines(PixelBuffer& buf, const bed_mesh_renderer_t* renderer, int canvas_width,
                        int canvas_height, uint8_t line_r, uint8_t line_g, uint8_t line_b);
 
 /**
- * @brief Render reference grids (floor and walls) into a pixel buffer
+ * @brief Render reference grids (floor, back wall, left wall) into a pixel buffer
  *
- * @param buf Target pixel buffer
- * @param renderer Renderer instance with valid mesh data
- * @param canvas_width Canvas width in pixels
- * @param canvas_height Canvas height in pixels
+ * Uses the bed extent, so the mesh floats inside. Draw before the mesh surface
+ * so the surface occludes it.
+ *
  * @param line_r, line_g, line_b Grid line color (pre-fetched from theme)
  */
 void render_reference_grids(PixelBuffer& buf, const bed_mesh_renderer_t* renderer, int canvas_width,
-                            int canvas_height, uint8_t line_r, uint8_t line_g, uint8_t line_b);
-
-/**
- * @brief Render reference floor into a pixel buffer (delegates to render_reference_grids)
- */
-void render_reference_floor(PixelBuffer& buf, const bed_mesh_renderer_t* renderer, int canvas_width,
-                            int canvas_height, uint8_t line_r, uint8_t line_g, uint8_t line_b);
-
-/**
- * @brief Render reference walls into a pixel buffer (stub, merged into render_reference_grids)
- */
-void render_reference_walls(PixelBuffer& buf, const bed_mesh_renderer_t* renderer, int canvas_width,
                             int canvas_height, uint8_t line_r, uint8_t line_g, uint8_t line_b);
 
 } // namespace mesh

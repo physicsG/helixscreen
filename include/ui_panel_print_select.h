@@ -15,21 +15,32 @@
 #include "ui_print_select_path_navigator.h"
 #include "ui_print_select_usb_source.h"
 #include "ui_print_start_controller.h"
+#include "ui_timer_guard.h"
 
+#include "ams_backend.h"
 #include "async_lifetime_guard.h"
+#include "connection_state.h"
+#include "gcode_ops_detector.h"
 #include "helix_plugin_installer.h"
 #include "in_flight_guard.h"
+#include "moonraker_error.h"
 #include "print_file_data.h"
 #include "print_history_manager.h"
+#include "print_select_button_view.h"
+#include "queued_job_options.h"
 #include "subject_managed_panel.h"
+#include "text_io.h"
 #include "usb_backend.h"
 
 #include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <ctime>
+#include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -177,33 +188,28 @@ inline bool dir_error_should_reset_to_root(const std::string& error_message, boo
         return false; // nowhere to fall back to; avoid an infinite reset loop
     }
     std::string lower = error_message;
-    std::transform(lower.begin(), lower.end(), lower.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    lower = helix::text_io::to_lower(lower);
     return lower.find("does not exist") != std::string::npos;
 }
 
 /**
- * @brief Whether a notify_filelist_changed payload can change what this panel lists.
+ * @brief Decide whether a connection-state notification should re-list the files.
  *
- * PrintSelectFileProvider requests the "gcodes" root and nothing else, so a
- * change under any other root cannot alter this list. Moonraker fires the same
- * notification for every registered directory, and printers write to `config`
- * constantly: an AFC unit rewrites `AFC/AFC.var.unit` on every SET_* command and
- * a SAVE_VARIABLE delayed_gcode rewrites `saved_variables.cfg`, which together
- * cost 113 full server.files.get_directory round trips in one session in debug
- * bundle L53W5PKG — all while the user sat on the print-status panel.
+ * A reconnect re-lists, since files may have been uploaded while the socket was
+ * down (#577). The observer's first notification is not a reconnect: it fires on
+ * registration and reports the state the panel was built in, and the panel's
+ * first activation lists anyway. A forced refresh there supersedes that request,
+ * so the first fill waits for a second listing.
  *
- * An empty root means the payload had no shape we recognise; refresh in that
- * case, because going stale is worse than one extra round trip.
- *
- * Exact match, not a prefix: a separately registered root such as
- * "gcodes_backup" is a different directory and would reintroduce the storm.
- * Extracted as a pure function so it can be tested without the full
- * PrintSelectPanel/LVGL fixture.
+ * @param previous The state of the previous notification, or -1 for the first.
+ * @param state The state now (a ConnectionState value).
  */
-inline bool filelist_change_affects_gcodes(const std::string& root) {
-    return root.empty() || root == "gcodes";
+namespace helix {
+inline bool connection_change_should_refresh(int previous, int state) {
+    const int connected = static_cast<int>(ConnectionState::CONNECTED);
+    return state == connected && previous != -1 && previous != connected;
 }
+} // namespace helix
 
 /**
  * @brief Value to publish to a thumbnail POINTER subject (lv_image_bind_src).
@@ -252,6 +258,12 @@ class PrintSelectPanel : public PanelBase {
      */
     ~PrintSelectPanel() override;
 
+    /// The Filament Mapping dialog's warning for a file's start line, or empty.
+    /// @param start The line scanned from the file being remapped, or nullptr.
+    [[nodiscard]] static std::string
+    start_macro_remap_note(helix::AmsBackend::RemapStrategy strategy,
+                           const helix::gcode::PrintStartCallInfo* start);
+
     //
     // === PanelBase Implementation ===
     //
@@ -286,6 +298,9 @@ class PrintSelectPanel : public PanelBase {
         return "print_select_panel";
     }
 
+    /// Re-render the held file list into the views a rebuild recreated.
+    void repopulate() override;
+
     /**
      * @brief Called when panel becomes visible
      *
@@ -293,7 +308,7 @@ class PrintSelectPanel : public PanelBase {
      * This handles the case where set_api() was called before WebSocket connection.
      */
     void on_activate() override;
-    void on_deactivate() override;
+    void on_deactivating(DeactivateReason reason) override;
 
     //
     // === Public API ===
@@ -364,6 +379,18 @@ class PrintSelectPanel : public PanelBase {
                                  const FileMetadata& metadata);
 
     /**
+     * @brief Handles a metadata request the connection took down with it
+     *
+     * A lost connection says nothing about the file, so instead of falling back
+     * to a metascan and gcode extraction, file @p i is marked unfetched and the
+     * refresh after reconnecting asks again.
+     *
+     * @return true when @p error was a connection loss and has been handled
+     */
+    bool refetch_after_connection_loss(size_t i, const std::string& filename,
+                                       const MoonrakerError& error);
+
+    /**
      * @brief Navigate into a subdirectory
      *
      * @param dirname Directory name to navigate into
@@ -408,21 +435,19 @@ class PrintSelectPanel : public PanelBase {
      * @brief Set selected file data and update subjects
      *
      * @param filename File name
-     * @param thumbnail_src Pre-scaled thumbnail path for cards (.bin)
-     * @param original_url Moonraker thumbnail URL (for detail view PNG lookup)
+     * @param thumbnail_src Pre-scaled thumbnail path for cards (.bin), which the
+     *        detail view shows too
      * @param print_time Formatted print time
      * @param filament_weight Formatted filament weight
      * @param layer_count Formatted layer count (or "--" if unknown)
      * @param print_height Formatted print height (or "--" if unknown)
-     * @param modified_timestamp File modification time (for cache validation)
      * @param layer_height Formatted layer height string (e.g., "0.24 mm")
      * @param filament_type Filament type/name (e.g., "ABS" or "PolyMaker PolyLite ABS")
      */
-    void set_selected_file(const char* filename, const char* thumbnail_src,
-                           const char* original_url, const char* print_time,
+    void set_selected_file(const char* filename, const char* thumbnail_src, const char* print_time,
                            const char* filament_weight, const char* layer_count,
-                           const char* print_height, time_t modified_timestamp,
-                           const char* layer_height = "", const char* filament_type = "");
+                           const char* print_height, const char* layer_height = "",
+                           const char* filament_type = "");
 
     /**
      * @brief Show detail view overlay for selected file
@@ -431,6 +456,9 @@ class PrintSelectPanel : public PanelBase {
 
     /// Forward the "Show sliced colors" toggle to the detail view.
     void forward_sliced_colors_toggle(bool checked);
+
+    /// Open or close exclude mode in the detail view.
+    void toggle_detail_exclude_mode();
 
     /**
      * @brief Programmatically select a file by name and show detail view
@@ -475,6 +503,16 @@ class PrintSelectPanel : public PanelBase {
     void hide_detail_view();
 
     /**
+     * @brief The back-out rule for a pending queued start: an untapped start
+     * for exactly the shown file is discarded with the closing view.
+     *
+     * Shared by hide_detail_view() and the detail view's on_dismissed
+     * callback, fired from PrintSelectDetailView::on_deactivating() when
+     * ESC / go_back() pops the overlay without this panel's hide function.
+     */
+    void discard_pending_queued_start_on_back_out();
+
+    /**
      * @brief Access the print start controller (owned by this panel).
      *
      * Exposed so the print status panel's reprint path can route through the
@@ -489,6 +527,11 @@ class PrintSelectPanel : public PanelBase {
      * @brief Show delete confirmation dialog
      */
     void show_delete_confirmation();
+
+    /// Explain the filament card's remap state. Reached from the card's help
+    /// icon, whose XML event_cb routes here so the icon keeps working while the
+    /// card itself is disabled.
+    void show_remap_help();
 
     /**
      * @brief Set reference to print status panel
@@ -531,6 +574,42 @@ class PrintSelectPanel : public PanelBase {
      */
     void start_print(bool force = false);
 
+    /// Moonraker directory (under the gcodes root) that USB files are copied
+    /// into before they print. Not "usb": that name is the stick symlink some
+    /// images create, which check_moonraker_usb_symlink() looks for.
+    static constexpr const char* kUsbCopyDir = "usb_prints";
+
+    /// A USB copy whose transfer reports no progress for this long is abandoned.
+    static constexpr uint32_t kUsbCopyStallMs = 30000;
+
+    /**
+     * @brief Queue the selected file instead of starting it.
+     *
+     * The print button's queue-mode action: post_job the original filename,
+     * store the detail view's current option row states against the new
+     * job_id, and toast the queue position. Does not touch
+     * PrintStartController — the job starts through the normal pipeline when
+     * its turn comes.
+     */
+    void add_to_queue();
+
+    /**
+     * @brief Start a queued job through this panel's detail view.
+     *
+     * The job queue's single entry point (the job queue modal's row tap, the
+     * completion screen's "Start next"): guards on can_start_new_print()
+     * (warn and leave the job queued when the printer is busy), reads the
+     * job's saved option states from the store, and opens the file's detail
+     * view seeded with them — the same pipeline a manual Print tap uses, so
+     * every start-time check (filament, preflight, printer-stopping commands)
+     * runs as usual. The queue entry and its stored options are deleted only
+     * from the print-start success callback, never here: a missing file, a
+     * back-out or a failed start leaves the job queued.
+     *
+     * @param job The queue entry to start (job_id + queued filename)
+     */
+    void start_queued_job(const JobQueueEntry& job);
+
     /**
      * @brief Show the enriched pre-flight filament check modal.
      *
@@ -569,7 +648,7 @@ class PrintSelectPanel : public PanelBase {
     // card tap (any non-None backend), and the embedded mapping card tap.
     void open_remap_modal();
     // Strategy-dispatched APPLY for the chosen mappings. The ONLY per-backend
-    // branch: GcodeRewrite rewrites + prints; Native / SnapmakerNative push to
+    // branch: GcodeRewrite rewrites + prints; Native / PrePrintSend push to
     // the shared card store (backend-specific send happens at print-start).
     void apply_remap(const std::vector<helix::ToolMapping>& updated);
 
@@ -591,6 +670,11 @@ class PrintSelectPanel : public PanelBase {
     //
 
     lv_obj_t* card_view_container_ = nullptr;
+    /// Card container content size the current cards were sized for.
+    lv_coord_t sized_for_w_ = -1;
+    lv_coord_t sized_for_h_ = -1;
+    /// A deferred re-populate for a card container resize is queued.
+    bool card_resize_pending_ = false;
     lv_obj_t* list_view_container_ = nullptr;
     lv_obj_t* list_rows_container_ = nullptr;
     lv_obj_t* empty_state_container_ = nullptr;
@@ -604,44 +688,62 @@ class PrintSelectPanel : public PanelBase {
 
     SubjectManager subjects_; ///< RAII manager for automatic subject cleanup
 
-    lv_subject_t selected_filename_subject_; ///< Raw filename (for API/lookups)
+    lv_subject_t selected_filename_subject_{}; ///< Raw filename (for API/lookups)
     char selected_filename_buffer_[128];
 
-    lv_subject_t selected_display_filename_subject_; ///< Display name (no .gcode extension)
+    lv_subject_t selected_display_filename_subject_{}; ///< Display name (no .gcode extension)
     char selected_display_filename_buffer_[128];
 
-    lv_subject_t selected_thumbnail_subject_;
+    lv_subject_t selected_thumbnail_subject_{};
     char selected_thumbnail_buffer_[256];
 
-    lv_subject_t selected_detail_thumbnail_subject_; ///< Full-res PNG for detail view
+    lv_subject_t selected_detail_thumbnail_subject_{}; ///< Full-res PNG for detail view
     char selected_detail_thumbnail_buffer_[256];
+    /// 1 when the detail view has an image to show, 0 for the placeholder glyph.
+    lv_subject_t selected_has_thumbnail_subject_{};
 
-    lv_subject_t selected_print_time_subject_;
+    lv_subject_t selected_print_time_subject_{};
     char selected_print_time_buffer_[32];
 
-    lv_subject_t selected_filament_weight_subject_;
+    lv_subject_t selected_filament_weight_subject_{};
     char selected_filament_weight_buffer_[32];
 
-    lv_subject_t selected_layer_count_subject_;
+    lv_subject_t selected_layer_count_subject_{};
     char selected_layer_count_buffer_[32];
 
-    lv_subject_t selected_print_height_subject_;
+    lv_subject_t selected_print_height_subject_{};
     char selected_print_height_buffer_[32];
 
-    lv_subject_t selected_layer_height_subject_;
+    lv_subject_t selected_layer_height_subject_{};
     char selected_layer_height_buffer_[32];
 
-    lv_subject_t selected_filament_type_subject_;
+    lv_subject_t selected_filament_type_subject_{};
     char selected_filament_type_buffer_[64]; // Longer for full names like "PolyMaker PolyLite ABS"
 
-    lv_subject_t detail_view_visible_subject_;
+    lv_subject_t detail_view_visible_subject_{};
 
     /// View mode subject: 0 = CARD, 1 = LIST (XML bindings control visibility)
-    lv_subject_t view_mode_subject_;
+    lv_subject_t view_mode_subject_{};
 
     /// Can start print subject: 1 = can print, 0 = print in progress (disables button via XML
     /// binding)
-    lv_subject_t can_print_subject_;
+    lv_subject_t can_print_subject_{};
+
+    /// Button mode subject: 0 = Print, 1 = Queue (label + card visibility)
+    lv_subject_t button_mode_subject_{};
+
+    /// Button label text ("Print" / "Add to Queue")
+    lv_subject_t button_label_subject_{};
+    char button_label_buffer_[32];
+
+    /// Button icon name ("print" / "progress_clock"), bound to the button's
+    /// icon slot the same way the label subject binds to its text
+    lv_subject_t button_icon_subject_{};
+    char button_icon_buffer_[32];
+
+    /// Why the print button is disabled, shown beside it. Empty when it is not.
+    lv_subject_t blocked_reason_subject_{};
+    char blocked_reason_buffer_[96];
 
     //
     // === Panel State ===
@@ -653,8 +755,9 @@ class PrintSelectPanel : public PanelBase {
     std::string selected_filament_type_; ///< Filament type of selected file (for dropdown default)
     std::vector<std::string> selected_filament_colors_; ///< Tool colors of selected file
     std::vector<std::string>
-        selected_filament_materials_;        ///< Per-tool material types of selected file
-    size_t selected_file_size_bytes_ = 0;    ///< File size of selected file (for safety checks)
+        selected_filament_materials_;     ///< Per-tool material types of selected file
+    size_t selected_file_size_bytes_ = 0; ///< File size of selected file (for safety checks)
+    std::string selected_local_path_; ///< USB file's path on this host; empty for Moonraker files
     time_t selected_modified_timestamp_ = 0; ///< mtime of selected file (tools-used cache key)
     uint64_t selected_gcode_end_byte_ = 0;   ///< G-code body end offset (sizes the footer read)
     FileHistoryStatus selected_history_status_ =
@@ -662,6 +765,40 @@ class PrintSelectPanel : public PanelBase {
     int selected_success_count_ = 0;      ///< Success count of selected file
     std::string
         pending_file_selection_; ///< File to auto-select when list is populated (--select-file)
+
+    /// A queued job being walked through the detail view toward a start.
+    /// Lives from start_queued_job() until one of:
+    ///   - print-start confirmed  -> finish_pending_queued_job() removes the
+    ///     queue entry and the stored options, then clears this;
+    ///   - the user backs out / opens a different file -> cleared, job stays
+    ///     queued for its own row tap;
+    ///   - a failed start -> kept, so a later confirmed retry still removes
+    ///     the job that was finally started.
+    struct PendingQueuedStart {
+        std::string job_id;
+        std::string filename;                 ///< gcodes-relative, as queued
+        helix::queue::QueuedJobOptions saved; ///< options read from the store (empty is valid)
+        bool saved_loaded = false;            ///< the options read has answered
+        bool start_attempted = false;         ///< a Print tap for THIS file is in flight
+        bool listing_arrived = false;         ///< a file listing answered after the request
+    };
+    std::optional<PendingQueuedStart> pending_queued_start_;
+
+    /// Queue-entry removal + stored-options delete, from the print-start
+    /// success callback only.
+    void finish_pending_queued_job();
+
+    /// Open the pending queued job's file, or toast "file not found" once the
+    /// post-request listing has answered and the file is provably absent.
+    /// The options read and the listing answer in either order; whichever
+    /// lands second is the one that can decide. No-op once a Print tap is in
+    /// flight — from then the pending entry exists only to remove the job on
+    /// a confirmed start, and a refresh must not re-open the file.
+    void try_open_pending_queued_job();
+
+    /// current_path_ + "/" + selected_filename_buffer_, or the bare name at
+    /// the gcodes root — the shape queued filenames have.
+    [[nodiscard]] std::string composed_selected_filename() const;
     bool return_to_home_on_close_ = false;
     int return_home_activation_count_ = 0;
     PrintSelectViewMode current_view_mode_ = PrintSelectViewMode::CARD;
@@ -669,6 +806,8 @@ class PrintSelectPanel : public PanelBase {
     PrintSelectSortDirection current_sort_direction_ = PrintSelectSortDirection::DESCENDING;
     bool panel_initialized_ = false;               ///< Guard flag for resize callback
     bool first_activation_ = true;                 ///< Skip redundant refresh on first activation
+    bool file_list_loaded_ = false;                ///< A listing has been rendered at least once
+    bool detail_view_built_ = false;               ///< create_detail_view() built the widget tree
     bool detail_view_open_ = false;                ///< True while detail view overlay is showing
     bool files_changed_while_detail_open_ = false; ///< True if filelist changed while detail open
     bool was_deactivated_ = false; ///< True if panel was fully deactivated (navigated away)
@@ -677,6 +816,12 @@ class PrintSelectPanel : public PanelBase {
     /// is empty, giving them one retry per panel visit. Self-heals files whose metadata
     /// extraction failed transiently on Moonraker (e.g. JSON-RPC -32601 during upload).
     bool retry_missing_thumbnails_on_refresh_ = false;
+
+    /// When the last successful listing was applied. When a navigation target
+    /// turns out not to exist, the age of the listing that offered it separates
+    /// a stale index (old listing) from a server listing a phantom entry (fresh).
+    /// Epoch means no listing has been applied yet.
+    std::chrono::steady_clock::time_point last_listing_applied_at_{};
 
     // Debounce timer for view refresh (prevents rebuilding views for each metadata callback)
     lv_timer_t* refresh_timer_ = nullptr;
@@ -727,17 +872,62 @@ class PrintSelectPanel : public PanelBase {
     ObserverGuard connection_observer_;
     ObserverGuard print_state_observer_; ///< Observes print state to enable/disable print button
     ObserverGuard
-        print_in_progress_observer_;      ///< Observes workflow in-progress for immediate disable
-    ObserverGuard helix_plugin_observer_; ///< Observes plugin status for install prompt
+        print_in_progress_observer_; ///< Observes workflow in-progress for immediate disable
+    ObserverGuard print_lifecycle_observer_; ///< Observes the lifecycle the button decision reads
+    ObserverGuard helix_plugin_observer_;    ///< Observes plugin status for install prompt
+    ObserverGuard language_observer_;        ///< Re-formats card metadata on a switch
 
     /// Observer for PrintHistoryManager - updates file status when history changes
     helix::HistoryChangedCallback history_observer_;
 
-    /// Guards async API callbacks from accessing a destroyed instance
-    helix::AsyncLifetimeGuard lifetime_;
-
     /// Compatibility alive flag for ThumbnailLoadContext (which uses shared_ptr<atomic<bool>> API)
     std::shared_ptr<std::atomic<bool>> thumbnail_alive_ = std::make_shared<std::atomic<bool>>(true);
+
+#if defined(HELIX_PLATFORM_ESP32)
+    /// Card thumbnail fetches started and not yet completed.
+    int esp_thumbnails_in_flight_ = 0;
+
+    /// Starts one card thumbnail fetch. QueueFull and Failed started nothing.
+    enum class EspThumbnailFetch { Started, QueueFull, Failed };
+    EspThumbnailFetch fetch_esp_thumbnail(size_t index, const std::string& filename,
+                                          const std::string& thumb_path);
+    /// Buffers card thumbnails decode into while this panel is shown: reused as
+    /// cards scroll, freed when it is left. Created on first need.
+    std::shared_ptr<helix::ThumbnailSlotPool> esp_slots_;
+    /// The last deactivate kept the thumbnails for a detail view push.
+    bool esp_kept_for_detail_ = false;
+    /// The HTTP lane refused a card fetch and none of ours has completed since.
+    bool esp_lane_refused_ = false;
+    /// Clears a refusal when no fetch of ours is in flight to free a lane slot.
+    helix::ui::LvglTimerGuard esp_lane_retry_timer_;
+    static constexpr uint32_t ESP_LANE_RETRY_MS = 500;
+
+    /// The card window [first, end) the last sync saw.
+    size_t esp_window_first_ = 0;
+    size_t esp_window_end_ = 0;
+    /// Counts syncs; a file in the window records it as when it was last shown.
+    uint32_t esp_show_tick_ = 0;
+    /// Applies plan_card_thumbnails() to the card window [first, end): fetches
+    /// within CARD_THUMBNAIL_BUDGET, and keeps thumbnails outside it, most
+    /// recently shown first, in what the budget leaves.
+    /// With @p keep_off_screen false, thumbnails outside the window are dropped
+    /// and their slots freed.
+    void sync_esp_thumbnails(size_t first, size_t end, bool keep_off_screen = true);
+    /// Drops every card thumbnail and the slot pool, and empties the window so
+    /// nothing fetches until the cards report one again.
+    void release_esp_card_thumbnails();
+    /// Cancels @p f's fetch, if one is queued or downloading.
+    static void cancel_esp_fetch(PrintFileData& f);
+    /// The selected file's card thumbnail, held while the detail view shows it.
+    std::shared_ptr<helix::ui::EspPsramThumbnail> esp_detail_thumbnail_;
+    /// Shows @p filename's decoded card thumbnail in the detail view, which
+    /// scales it to fit; false when its card holds none.
+    bool show_esp_detail_thumbnail(const char* filename);
+    /// Publishes @p next as the detail image and holds it, releasing the old one.
+    void publish_esp_detail_thumbnail(std::shared_ptr<helix::ui::EspPsramThumbnail> next);
+    /// Frees the detail view's hold: a slot the card planner does not count.
+    void release_esp_detail_thumbnail();
+#endif
 
     /// Navigation generation counter: incremented on each directory change.
     /// Metadata callbacks capture the current value and discard results
@@ -771,6 +961,9 @@ class PrintSelectPanel : public PanelBase {
      * @param preserve_scroll If true, preserve scroll position; otherwise reset to top
      */
     void populate_list_view(bool preserve_scroll = false);
+
+    /// Populate whichever view current_view_mode_ selects.
+    void populate_current_view(bool preserve_scroll = false);
 
     /**
      * @brief Animate view container entrance with fade-in
@@ -824,11 +1017,74 @@ class PrintSelectPanel : public PanelBase {
     void update_empty_state();
 
     /**
-     * @brief Update print button enabled/disabled state based on print job state
+     * @brief Update print button state from the pure mode decision
      *
-     * Disables the print button when a print is in progress to prevent concurrent prints.
+     * Maps compute_print_select_button_view() onto the panel's subjects: mode
+     * (Print/Queue), enabled/disabled, label text and the one-line reason or
+     * queue hint shown beside the button.
      */
     void update_print_button_state();
+
+    /// The mode the button was last rendered in; routes the tap.
+    helix::ui::PrintSelectButtonMode print_button_mode_ = helix::ui::PrintSelectButtonMode::Print;
+
+    /// True while an add_job request is on the wire: taps are ignored and the
+    /// button renders disabled until its callback lands (success or failure).
+    bool queue_add_in_flight_ = false;
+
+    /// True while a USB file is being copied to Moonraker; Print and Add to
+    /// Queue taps are ignored until the copy lands or fails.
+    bool usb_copy_in_flight_ = false;
+
+    /// A USB copy's inputs, read when Print or Add to Queue was tapped.
+    struct UsbCopyRequest {
+        std::string filename;
+        std::string local_path;
+        uint64_t size = 0;
+        uint64_t generation = 0; ///< usb_copy_generation_ when the copy began
+        std::function<void(const std::string& dest)> then;
+    };
+
+    /// Bumped per copy and on abandon; an answer for another value is stale.
+    uint64_t usb_copy_generation_ = 0;
+    helix::ui::LvglTimerGuard usb_copy_watchdog_;
+
+    /// The copy started under @p generation is still the one in flight.
+    [[nodiscard]] bool usb_copy_current(uint64_t generation) const;
+
+    /// Release the in-flight guard, the watchdog and the overlay.
+    void end_usb_copy();
+
+    /// Watchdog expiry: drop the copy and say so.
+    void abandon_stalled_usb_copy();
+
+    /**
+     * @brief Get the selected USB file into Moonraker's gcodes root.
+     *
+     * Moonraker cannot read a stick HelixScreen mounted itself, so a USB file
+     * goes to kUsbCopyDir first, named by choose_usb_copy_target(): a
+     * same-size copy already there is reused, a different file of that name
+     * is never replaced. @p then runs on the main thread with the copy's
+     * Moonraker-relative path; a failure toasts and runs nothing.
+     */
+    void copy_usb_file_to_printer(std::function<void(const std::string& dest)> then);
+
+    /// Name the copy from what kUsbCopyDir holds, then upload or reuse.
+    void upload_usb_copy(UsbCopyRequest req, const std::map<std::string, uint64_t>& existing);
+
+    /// Hand the controller @p filename in Moonraker directory @p dir, with the
+    /// tool colors, thumbnail and object picks read when Print was tapped, and start.
+    void dispatch_print(const std::string& filename, const std::string& dir,
+                        const std::vector<std::string>& filament_colors,
+                        const std::string& thumbnail, std::vector<std::string> exclude_picks);
+
+    /// True, after a toast, when every object is picked and nothing would print.
+    bool refuse_start_with_every_object_picked();
+
+    /// post_job @p filename (Moonraker-relative) with the detail view's options.
+    /// Picks are dropped once the add succeeds, if @p tapped (the composed
+    /// name at the tap) is still the selected file.
+    void queue_file(const std::string& filename, const std::string& tapped);
 
     /**
      * @brief Update sort indicator icons on column headers
@@ -836,9 +1092,15 @@ class PrintSelectPanel : public PanelBase {
     void update_sort_indicators();
 
     /**
-     * @brief Create detail view overlay (called once during setup)
+     * @brief Create the detail view and its PRINT_START analysis, without widgets
+     */
+    void ensure_detail_view_model();
+
+    /**
+     * @brief Build the detail view overlay's widget tree (first open only)
      */
     void create_detail_view();
+    void create_print_controller();
 
     /**
      * @brief Handle resize event for responsive card layout
@@ -901,6 +1163,7 @@ class PrintSelectPanel : public PanelBase {
 
     static void on_resize_static(void* user_data);
     static void on_scroll_static(lv_event_t* e);
+    static void on_card_container_resized_static(lv_event_t* e);
     static void on_file_clicked_static(lv_event_t* e);
 };
 

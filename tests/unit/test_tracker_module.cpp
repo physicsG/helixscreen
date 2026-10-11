@@ -77,13 +77,13 @@ static std::vector<uint8_t> build_minimal_mod() {
 TEST_CASE("TrackerModule: reject garbage data", "[tracker]") {
     // Random bytes with no valid magic
     std::vector<uint8_t> garbage(2048, 0xAB);
-    // No MOD magic at 1080, no MED magic at 0
+    // No MOD magic at 1080
     auto result = TrackerModule::load_from_memory(garbage.data(), garbage.size());
     REQUIRE_FALSE(result.has_value());
 }
 
 TEST_CASE("TrackerModule: reject too-small buffer", "[tracker]") {
-    SECTION("4 bytes — too small for MOD, no MED magic") {
+    SECTION("4 bytes — too small for MOD") {
         std::vector<uint8_t> tiny = {0x00, 0x01, 0x02, 0x03};
         auto result = TrackerModule::load_from_memory(tiny.data(), tiny.size());
         REQUIRE_FALSE(result.has_value());
@@ -189,72 +189,6 @@ TEST_CASE("TrackerModule: pattern data integrity — row 1 is empty", "[tracker]
         REQUIRE(note.instrument == 0);
         REQUIRE(note.effect == 0);
         REQUIRE(note.effect_data == 0);
-    }
-}
-
-TEST_CASE("TrackerModule: MED magic is detected and routed", "[tracker]") {
-    // Build a minimal MED-magic buffer (MMD0) — too small to parse successfully,
-    // but must be identified as MED (not MOD) and return nullopt for incomplete data.
-    std::vector<uint8_t> med(256, 0x00);
-    med[0] = 'M';
-    med[1] = 'M';
-    med[2] = 'D';
-    med[3] = '0';
-
-    // The buffer is too small to parse; parse_med should return nullopt gracefully.
-    auto result = TrackerModule::load_from_memory(med.data(), med.size());
-    REQUIRE_FALSE(result.has_value());
-}
-
-TEST_CASE("TrackerModule: MED — load crocketts_theme.med", "[tracker]") {
-    const std::string path = "assets/sounds/crocketts_theme.med";
-
-    std::ifstream probe(path, std::ios::binary);
-    if (!probe.is_open()) {
-        SKIP("assets/sounds/crocketts_theme.med not present — skipping MED integration test");
-    }
-    probe.close();
-
-    auto result = TrackerModule::load(path);
-    REQUIRE(result.has_value());
-
-    const TrackerModule& mod = *result;
-
-    SECTION("block count") {
-        // The MED file has 9 blocks
-        REQUIRE(mod.patterns.size() == 9);
-    }
-
-    SECTION("order count") {
-        REQUIRE(mod.num_orders > 0);
-    }
-
-    SECTION("instruments populated") {
-        REQUIRE_FALSE(mod.instruments.empty());
-    }
-
-    SECTION("at least one pattern has notes") {
-        bool found_note = false;
-        for (const auto& pattern : mod.patterns) {
-            for (const auto& note : pattern) {
-                if (note.note != 0) {
-                    found_note = true;
-                    break;
-                }
-            }
-            if (found_note)
-                break;
-        }
-        REQUIRE(found_note);
-    }
-
-    SECTION("note values in range") {
-        for (const auto& pattern : mod.patterns) {
-            for (const auto& note : pattern) {
-                // note 0 = silence, 1..84 = valid
-                REQUIRE(note.note <= 84);
-            }
-        }
     }
 }
 

@@ -4,6 +4,7 @@
 #include "bypass_widget.h"
 
 #include "ui_event_safety.h"
+#include "ui_external_spool_menu.h"
 
 #include "ams_state.h"
 #include "observer_factory.h"
@@ -20,26 +21,26 @@ void register_bypass_widget() {
     lv_xml_register_event_cb(nullptr, "bypass_widget_clicked_cb", BypassWidget::clicked_cb);
 }
 
-BypassWidget::BypassWidget() = default;
+BypassWidget::BypassWidget()
+    : TiledPanelWidget("bypass", TileSizing::Content{"", "", "Bypass", false}) {}
 
 BypassWidget::~BypassWidget() {
     detach();
 }
 
 void BypassWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
-    (void)parent_screen; // unused override param (lock_widget idiom)
     widget_obj_ = widget_obj;
+    parent_screen_ = parent_screen;
     if (!widget_obj_) {
         return;
     }
-    lv_obj_set_user_data(widget_obj_, this);
 
     // External-spool color dot: styles cannot bind a dynamic color, so the
     // dot's bg color follows the color subject through the sanctioned
     // observer path. Runs from attach() too — instances are recycled across
     // rebuilds. The dot is resolved by name inside the callback (not captured)
     // so a recycled instance never writes through a stale pointer.
-    spool_color_observer_ = helix::ui::observe_int_sync<BypassWidget>(
+    spool_color_observer_ = helix::ui::observe<int>(
         AmsState::instance().get_external_spool_color_subject(), this,
         [](BypassWidget* self, int color) {
             if (!self || !self->widget_obj_) {
@@ -62,18 +63,29 @@ void BypassWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
 
 void BypassWidget::detach() {
     spool_color_observer_.reset();
+    // The menu holds a callback capturing this widget, and the tile is going
+    // away (recycled or torn down).
+    context_menu_.reset();
+    parent_screen_ = nullptr;
     // Abort any pending unload→enable chain: the tile is going away (widget
     // recycled or screen torn down) and the controller's self-observer must
     // not fire the enable for a chain nobody is waiting on.
     toggle_.cancel_pending();
-    if (widget_obj_) {
-        lv_obj_set_user_data(widget_obj_, nullptr);
-    }
     widget_obj_ = nullptr;
 }
 
 void BypassWidget::handle_click() {
-    toggle_.toggle();
+    if (!parent_screen_ || !widget_obj_) {
+        return;
+    }
+    // No on_load / on_unload: with no operation stepper on the home screen there
+    // is nothing this surface would add to the dispatch. The controller is what
+    // it must supply — the menu engages bypass through it before a load, and
+    // drives the toggle entry with it.
+    helix::ui::ExternalSpoolMenuHooks hooks;
+    hooks.toggle = &toggle_;
+    helix::ui::show_external_spool_menu(parent_screen_, widget_obj_, context_menu_,
+                                        std::move(hooks));
 }
 
 void BypassWidget::clicked_cb(lv_event_t* e) {

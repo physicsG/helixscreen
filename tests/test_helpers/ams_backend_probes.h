@@ -30,14 +30,14 @@
 #include "ams_backend_snapmaker.h"
 #include "ams_backend_toolchanger.h"
 
-class AfcProbe : public AmsBackendAfc {
+class AfcProbe : public helix::AmsBackendAfc {
   public:
-    AfcProbe() : AmsBackendAfc(nullptr, nullptr) {}
+    AfcProbe() : helix::AmsBackendAfc(nullptr, nullptr) {}
 };
 
-class HappyHareProbe : public AmsBackendHappyHare {
+class HappyHareProbe : public helix::AmsBackendHappyHare {
   public:
-    HappyHareProbe() : AmsBackendHappyHare(nullptr, nullptr) {}
+    HappyHareProbe() : helix::AmsBackendHappyHare(nullptr, nullptr) {}
 };
 
 class CfsProbe : public helix::printer::AmsBackendCfs {
@@ -45,27 +45,27 @@ class CfsProbe : public helix::printer::AmsBackendCfs {
     CfsProbe() : helix::printer::AmsBackendCfs(nullptr, nullptr) {}
 };
 
-class Ad5xIfsProbe : public AmsBackendAd5xIfs {
+class Ad5xIfsProbe : public helix::AmsBackendAd5xIfs {
   public:
-    Ad5xIfsProbe() : AmsBackendAd5xIfs(nullptr, nullptr) {}
+    Ad5xIfsProbe() : helix::AmsBackendAd5xIfs(nullptr, nullptr) {}
 };
 
-class ToolChangerProbe : public AmsBackendToolChanger {
+class ToolChangerProbe : public helix::AmsBackendToolChanger {
   public:
-    ToolChangerProbe() : AmsBackendToolChanger(nullptr, nullptr) {}
+    ToolChangerProbe() : helix::AmsBackendToolChanger(nullptr, nullptr) {}
 };
 
-class SnapmakerProbe : public AmsBackendSnapmaker {
+class SnapmakerProbe : public helix::AmsBackendSnapmaker {
   public:
-    SnapmakerProbe() : AmsBackendSnapmaker(nullptr, nullptr) {}
+    SnapmakerProbe() : helix::AmsBackendSnapmaker(nullptr, nullptr) {}
 };
 
-class AceProbe : public AmsBackendAce {
+class AceProbe : public helix::AmsBackendAce {
   public:
-    AceProbe() : AmsBackendAce(nullptr, nullptr) {}
+    AceProbe() : helix::AmsBackendAce(nullptr, nullptr) {}
 };
 
-class QidiProbe : public AmsBackendQidi {
+class QidiProbe : public helix::AmsBackendQidi {
   public:
-    QidiProbe() : AmsBackendQidi(nullptr, nullptr) {}
+    QidiProbe() : helix::AmsBackendQidi(nullptr, nullptr) {}
 };

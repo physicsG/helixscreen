@@ -80,7 +80,7 @@ namespace {
 void drive_lifecycle(PrinterState& ps, const char* wire_state,
                      PrintStartPhase phase = PrintStartPhase::IDLE) {
     ps.update_from_status(json{{"print_stats", {{"state", wire_state}}}});
-    ps.set_print_start_state(phase, "", 0);
+    ps.print_state().set_print_start_state(phase, "", 0);
     // set_print_start_state defers, and its callback publishes the lifecycle.
     for (int i = 0; i < 8; ++i) {
         helix::ui::UpdateQueue::instance().drain();
@@ -88,7 +88,7 @@ void drive_lifecycle(PrinterState& ps, const char* wire_state,
 }
 
 PrintState published_lifecycle(PrinterState& ps) {
-    return ps.get_print_lifecycle();
+    return ps.print_state().get_print_lifecycle();
 }
 
 /// One RUNOUT-role toolhead sensor seeded with filament present, the
@@ -144,10 +144,20 @@ class SensorEdgeToastFixture : public LVGLTestFixture {
     /// toasts that produced. Filtered on the message rather than counting every
     /// warning so an unrelated toast from another subsystem cannot be mistaken
     /// for the one under test.
+    ///
+    /// On a backend that could be changing tools the toast serves a dwell before
+    /// it fires, so the edge alone answers nothing; this drives past the dwell
+    /// and asks whether the removal was reported AT ALL, which is what each gate
+    /// below is about. A gate that suppresses the edge records no dwell either,
+    /// so it still decides the count.
     size_t report_head_empty() {
         warnings.clear();
         mgr.update_from_status(json{{"filament_switch_sensor toolhead_sensor",
                                      {{"filament_detected", false}, {"enabled", true}}}});
+        helix::ui::UpdateQueue::instance().drain();
+        PostUnloadGraceTestAccess::age_removal_dwell(mgr, helix::RUNOUT_TOAST_DWELL +
+                                                              std::chrono::seconds(1));
+        mgr.update_from_status(json::object());
         helix::ui::UpdateQueue::instance().drain();
         size_t n = 0;
         for (const auto& w : warnings) {

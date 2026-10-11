@@ -9,7 +9,8 @@ namespace helix {
 
 bool PreflightResult::has_block() const {
     return std::any_of(checks.begin(), checks.end(), [](const ToolCheck& c) {
-        return c.severity == ToolCheck::Severity::EmptySlot;
+        return c.severity == ToolCheck::Severity::EmptySlot ||
+               c.severity == ToolCheck::Severity::UnknownMaterial;
     });
 }
 
@@ -49,8 +50,8 @@ PreflightResult PreflightValidator::validate(const std::vector<GcodeToolInfo>& t
 
     // Bypass / external spool: the filament reaching the nozzle does not come from
     // any slot, so nothing in `slots` can satisfy a tool and every check would
-    // report EmptySlot. The gcode still names T0, so without this the user gets a
-    // "T0 has no filament loaded — this print will run out." block that no
+    // report EmptySlot. Without this the user gets a
+    // "%s has no filament loaded — this print will run out." block that no
     // configuration can clear, because bypass is deliberately not a slot in
     // AmsState::collect_available_slots().
     //
@@ -65,7 +66,7 @@ PreflightResult PreflightValidator::validate(const std::vector<GcodeToolInfo>& t
     // empty or not). There is nothing to map tools to, so the slot-based checks
     // don't apply — filament presence is the physical runout sensor's job,
     // surfaced separately. Returning an empty result avoids a false
-    // "T0 has no filament loaded" block on single-extruder printers.
+    // "%s has no filament loaded" block on single-extruder printers.
     if (slots.empty()) {
         return out;
     }
@@ -82,6 +83,18 @@ PreflightResult PreflightValidator::validate(const std::vector<GcodeToolInfo>& t
         if (slot == nullptr || slot->is_empty) {
             c.slot_present = false;
             c.severity = ToolCheck::Severity::EmptySlot;
+        } else if (slot->material == "NONE") {
+            // A Snapmaker U1 slot holding a spool it has no identity for. The
+            // filament is seated, so this is not an empty slot, but the
+            // firmware refuses RESUME for that extruder until a material is
+            // assigned -- starting anyway only defers the failure until after
+            // the heat, home and probe. An unreported material is the empty
+            // string and stays out of this arm: "not known" is not the same
+            // claim as "declared unusable", and blocking it would stop prints
+            // on every backend that reports no material at all.
+            c.slot_present = true;
+            c.color_ok = FilamentMapper::colors_match(t.color_rgb, slot->color_rgb);
+            c.severity = ToolCheck::Severity::UnknownMaterial;
         } else {
             c.slot_present = true;
             c.color_ok = FilamentMapper::colors_match(t.color_rgb, slot->color_rgb);

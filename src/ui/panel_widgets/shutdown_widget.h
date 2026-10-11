@@ -6,7 +6,7 @@
 #include "ui_shutdown_modal.h"
 
 #include "async_lifetime_guard.h"
-#include "panel_widget.h"
+#include "src/ui/panel_widgets/tiled_panel_widget.h"
 
 #include <functional>
 #include <string>
@@ -15,7 +15,7 @@ class IMoonrakerAPI;
 
 namespace helix {
 
-class ShutdownWidget : public PanelWidget {
+class ShutdownWidget : public TiledPanelWidget {
   public:
     explicit ShutdownWidget(IMoonrakerAPI* api);
     ~ShutdownWidget() override;
@@ -29,7 +29,14 @@ class ShutdownWidget : public PanelWidget {
     // XML event callback (public for early registration)
     static void shutdown_clicked_cb(lv_event_t* e);
 
+  protected:
+    /// Drop the cached tile pointers and expire the guard when the tile tree
+    /// dies without a detach() — screen teardown.
+    void on_hooked_root_deleted() override;
+
   private:
+    friend class ShutdownWidgetTestAccess;
+
     IMoonrakerAPI* api_;
 
     lv_obj_t* widget_obj_ = nullptr;

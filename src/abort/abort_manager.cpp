@@ -109,6 +109,8 @@ void AbortManager::start_abort() {
         spdlog::debug("[AbortManager] Already aborting, ignoring start_abort()");
         return;
     }
+    // A reply still in flight from the previous sequence must not advance this one
+    lifetime_.invalidate();
 
     spdlog::info("[AbortManager] Starting abort sequence");
     escalation_level_ = 0;
@@ -117,26 +119,26 @@ void AbortManager::start_abort() {
         last_result_message_.clear();
     }
 
-    // Detect Kalico from printer.info "app" field (set during discovery)
-    // This avoids sending HEATER_INTERRUPT as a probe, which errors on vanilla Klipper
-    // and clutters the user's console (prestonbrown/helixscreen#685)
-    if (kalico_status_ == KalicoStatus::UNKNOWN && printer_state_) {
-        bool kalico = printer_state_->get_capability_overrides().is_kalico();
-        kalico_status_ = kalico ? KalicoStatus::DETECTED : KalicoStatus::NOT_PRESENT;
-        spdlog::info("[AbortManager] Kalico detection from printer.info: {}",
-                     kalico ? "DETECTED" : "NOT_PRESENT");
+    // Ask the capability instead of probing: sending HEATER_INTERRUPT to firmware without it
+    // errors and clutters the user's console (prestonbrown/helixscreen#685)
+    if (heater_interrupt_support_ == HeaterInterruptSupport::UNKNOWN && printer_state_) {
+        bool supported = printer_state_->get_capability_overrides().supports_heater_interrupt();
+        heater_interrupt_support_ =
+            supported ? HeaterInterruptSupport::SUPPORTED : HeaterInterruptSupport::UNSUPPORTED;
+        spdlog::info("[AbortManager] HEATER_INTERRUPT support from discovery: {}",
+                     supported ? "SUPPORTED" : "UNSUPPORTED");
     }
 
-    // Decide starting state based on Kalico status
-    if (kalico_status_ == KalicoStatus::DETECTED) {
-        // Kalico present - send HEATER_INTERRUPT as a soft interrupt (helps with M109 waits)
-        spdlog::debug("[AbortManager] Kalico detected, sending HEATER_INTERRUPT");
+    // Decide starting state based on HEATER_INTERRUPT support
+    if (heater_interrupt_support_ == HeaterInterruptSupport::SUPPORTED) {
+        // Supported - send HEATER_INTERRUPT as a soft interrupt (helps with M109 waits)
+        spdlog::debug("[AbortManager] HEATER_INTERRUPT supported, sending it");
         set_state(State::TRY_HEATER_INTERRUPT);
         set_progress_message("Stopping print...");
         try_heater_interrupt();
     } else {
-        // Not Kalico or unknown - skip HEATER_INTERRUPT, go directly to PROBE_QUEUE
-        spdlog::debug("[AbortManager] Kalico not present, skipping to PROBE_QUEUE");
+        // Unsupported or unknown - skip HEATER_INTERRUPT, go directly to PROBE_QUEUE
+        spdlog::debug("[AbortManager] HEATER_INTERRUPT unsupported, skipping to PROBE_QUEUE");
         set_state(State::PROBE_QUEUE);
         set_progress_message("Stopping print...");
         start_probe();
@@ -167,8 +169,8 @@ AbortManager::State AbortManager::get_state() const {
     return abort_state_.load();
 }
 
-AbortManager::KalicoStatus AbortManager::get_kalico_status() const {
-    return kalico_status_.load();
+AbortManager::HeaterInterruptSupport AbortManager::get_heater_interrupt_support() const {
+    return heater_interrupt_support_.load();
 }
 
 std::string AbortManager::get_state_name() const {
@@ -238,28 +240,19 @@ void AbortManager::try_heater_interrupt() {
     lv_timer_set_repeat_count(t, 1);
     heater_interrupt_timer_.reset(t);
 
-    // Send HEATER_INTERRUPT G-code
+    // Send HEATER_INTERRUPT G-code.
+    // ERROR_OWNERSHIP_OK: the error advances the abort state machine; "Unknown
+    // command" from a printer without it is expected and must stay quiet.
     api_->execute_gcode(
         "HEATER_INTERRUPT",
-        [this]() {
-            // Success callback - Kalico detected
-            helix::ui::async_call(
-                [](void* user_data) {
-                    auto* self = static_cast<AbortManager*>(user_data);
-                    self->on_heater_interrupt_success();
-                },
-                this);
-        },
-        [this](const MoonrakerError& err) {
-            // Error callback - likely "Unknown command"
+        // Success - HEATER_INTERRUPT supported
+        lifetime_.bg_cb("AbortManager::heater_interrupt_ok",
+                        [this]() { on_heater_interrupt_success(); }),
+        // Error - likely "Unknown command"
+        lifetime_.bg_cb("AbortManager::heater_interrupt_err", [this](const MoonrakerError& err) {
             spdlog::debug("[AbortManager] HEATER_INTERRUPT error: {}", err.message);
-            helix::ui::async_call(
-                [](void* user_data) {
-                    auto* self = static_cast<AbortManager*>(user_data);
-                    self->on_heater_interrupt_error();
-                },
-                this);
-        });
+            on_heater_interrupt_error();
+        }));
 }
 
 void AbortManager::start_probe() {
@@ -280,24 +273,11 @@ void AbortManager::start_probe() {
     // Send M115 to probe the queue
     api_->execute_gcode(
         "M115",
-        [this]() {
-            // Success callback - queue is responsive
-            helix::ui::async_call(
-                [](void* user_data) {
-                    auto* self = static_cast<AbortManager*>(user_data);
-                    self->on_probe_response();
-                },
-                this);
-        },
-        [this](const MoonrakerError& /* err */) {
-            // Error callback - treat as timeout/blocked
-            helix::ui::async_call(
-                [](void* user_data) {
-                    auto* self = static_cast<AbortManager*>(user_data);
-                    self->on_probe_timeout();
-                },
-                this);
-        });
+        // Success - queue is responsive
+        lifetime_.bg_cb("AbortManager::probe_ok", [this]() { on_probe_response(); }),
+        // Error - treat as timeout/blocked
+        lifetime_.bg_cb("AbortManager::probe_err",
+                        [this](const MoonrakerError& /* err */) { on_probe_timeout(); }));
 }
 
 void AbortManager::send_cancel_print() {
@@ -307,11 +287,12 @@ void AbortManager::send_cancel_print() {
         // RAW_PRINT_STATE_OK: subscribes to the WIRE deliberately - the cancel macro's
         // completion is something the PRINTER reports, and Preparing is not a
         // state CANCEL_PRINT can produce.
-        cancel_state_observer_ = helix::ui::observe_print_state_immediate<AbortManager>(
-            printer_state_->get_print_state_enum_subject(), this,
+        cancel_state_observer_ = helix::ui::observe_print_state(
+            printer_state_->print_state().get_print_state_enum_subject(), this,
             [](AbortManager* self, PrintJobState value) {
                 self->on_print_state_during_cancel(value);
-            });
+            },
+            printer_state_->get_subjects_lifetime(), helix::ui::Dispatch::Immediate);
         spdlog::debug("[AbortManager] Registered print_state_enum observer for cancel detection");
     }
 
@@ -347,35 +328,20 @@ void AbortManager::send_cancel_print() {
     // The RPC calls Klipper's pause_resume/cancel endpoint which bypasses the gcode
     // queue — works even if the queue blocks between our M115 probe and now.
     api_->job().cancel_print(
-        [this]() {
-            // Success callback
-            helix::ui::async_call(
-                [](void* user_data) {
-                    auto* self = static_cast<AbortManager*>(user_data);
-                    self->on_cancel_success();
-                },
-                this);
-        },
-        [this](const MoonrakerError& err) {
+        lifetime_.bg_cb("AbortManager::cancel_ok", [this]() { on_cancel_success(); }),
+        lifetime_.bg_cb("AbortManager::cancel_err", [this](const MoonrakerError& err) {
             spdlog::warn("[AbortManager] printer.print.cancel error: {}", err.message);
-            helix::ui::async_call(
-                [](void* user_data) {
-                    auto* self = static_cast<AbortManager*>(user_data);
-                    if (self->abort_state_ != State::SENT_CANCEL) {
-                        return;
-                    }
-                    bool esc = SafetySettingsManager::instance().get_cancel_escalation_enabled();
-                    if (esc) {
-                        self->on_cancel_timeout();
-                    } else {
-                        spdlog::warn(
-                            "[AbortManager] printer.print.cancel failed, escalation disabled");
-                        self->complete_abort(
-                            "Cancel command failed. Use E-Stop if print continues.");
-                    }
-                },
-                this);
-        });
+            if (abort_state_ != State::SENT_CANCEL) {
+                return;
+            }
+            bool esc = SafetySettingsManager::instance().get_cancel_escalation_enabled();
+            if (esc) {
+                on_cancel_timeout();
+            } else {
+                spdlog::warn("[AbortManager] printer.print.cancel failed, escalation disabled");
+                complete_abort("Cancel command failed. Use E-Stop if print continues.");
+            }
+        }));
 }
 
 void AbortManager::escalate_to_estop() {
@@ -401,23 +367,10 @@ void AbortManager::escalate_to_estop() {
 
     // Send M112 emergency stop
     api_->emergency_stop(
-        [this]() {
-            helix::ui::async_call(
-                [](void* user_data) {
-                    auto* self = static_cast<AbortManager*>(user_data);
-                    self->on_estop_sent();
-                },
-                this);
-        },
-        [this](const MoonrakerError& /* err */) {
-            // Even on error, proceed to restart (M112 may have worked)
-            helix::ui::async_call(
-                [](void* user_data) {
-                    auto* self = static_cast<AbortManager*>(user_data);
-                    self->on_estop_sent();
-                },
-                this);
-        });
+        lifetime_.bg_cb("AbortManager::estop_ok", [this]() { on_estop_sent(); }),
+        // Even on error, proceed to restart (M112 may have worked)
+        lifetime_.bg_cb("AbortManager::estop_err",
+                        [this](const MoonrakerError& /* err */) { on_estop_sent(); }));
 }
 
 void AbortManager::send_firmware_restart() {
@@ -442,26 +395,13 @@ void AbortManager::send_firmware_restart() {
     // through to printer.firmware_restart and behave exactly as before.
     PrinterRecoveryService recovery(api_);
     recovery.recover(
-        [this]() {
-            helix::ui::async_call(
-                [](void* user_data) {
-                    auto* self = static_cast<AbortManager*>(user_data);
-                    self->on_restart_sent();
-                },
-                this);
-        },
-        [this](const MoonrakerError& /* err */) {
-            // Even on error, proceed to wait for reconnect — Klipper may
-            // still come back via natural recovery, and if it doesn't the
-            // reconnect timer surfaces the recovery dialog so the user has
-            // a path forward.
-            helix::ui::async_call(
-                [](void* user_data) {
-                    auto* self = static_cast<AbortManager*>(user_data);
-                    self->on_restart_sent();
-                },
-                this);
-        });
+        lifetime_.bg_cb("AbortManager::restart_ok", [this]() { on_restart_sent(); }),
+        // Even on error, proceed to wait for reconnect — Klipper may
+        // still come back via natural recovery, and if it doesn't the
+        // reconnect timer surfaces the recovery dialog so the user has
+        // a path forward.
+        lifetime_.bg_cb("AbortManager::restart_err",
+                        [this](const MoonrakerError& /* err */) { on_restart_sent(); }));
 }
 
 void AbortManager::wait_for_reconnect() {
@@ -481,10 +421,12 @@ void AbortManager::wait_for_reconnect() {
 
     // Register observer on klippy_state subject to detect when klippy becomes ready
     if (printer_state_) {
-        klippy_observer_ = helix::ui::observe_int_immediate<AbortManager>(
-            printer_state_->get_klippy_state_subject(), this, [](AbortManager* self, int value) {
+        klippy_observer_ = helix::ui::observe<int>(
+            printer_state_->network_state().get_klippy_state_subject(), this,
+            [](AbortManager* self, int value) {
                 self->on_klippy_state_changed(static_cast<KlippyState>(value));
-            });
+            },
+            printer_state_->get_subjects_lifetime(), helix::ui::Dispatch::Immediate);
         spdlog::debug("[AbortManager] Registered klippy_state observer for reconnect detection");
     }
 }
@@ -505,14 +447,11 @@ void AbortManager::complete_abort(const char* message) {
 
     // Set print outcome to CANCELLED for UI badge display
     // Moonraker reports "standby" after M112+restart, not "cancelled"
-    if (printer_state_) {
-        helix::ui::async_call(
-            [](void* user_data) {
-                auto* state = static_cast<PrinterState*>(user_data);
-                state->set_print_outcome(PrintOutcome::CANCELLED);
-            },
-            printer_state_);
-    }
+    lifetime_.defer("AbortManager::print_outcome", [this]() {
+        if (printer_state_) {
+            printer_state_->print_state().set_print_outcome(PrintOutcome::CANCELLED);
+        }
+    });
 
     {
         std::lock_guard<std::mutex> lock(message_mutex_);
@@ -529,12 +468,12 @@ void AbortManager::complete_abort(const char* message) {
     // time the user would otherwise get no recovery UI at all.
     if (was_handling_shutdown && printer_state_) {
         auto ks = static_cast<KlippyState>(
-            lv_subject_get_int(printer_state_->get_klippy_state_subject()));
+            lv_subject_get_int(printer_state_->network_state().get_klippy_state_subject()));
         if (ks == KlippyState::SHUTDOWN || ks == KlippyState::ERROR) {
             spdlog::warn("[AbortManager] Klippy still {} after abort — surfacing recovery dialog",
                          ks == KlippyState::SHUTDOWN ? "SHUTDOWN" : "ERROR");
-            // show_recovery_for() internally defers to the main thread via
-            // async_call, so calling it directly from complete_abort (which
+            // show_recovery_for() internally defers to the main thread,
+            // so calling it directly from complete_abort (which
             // already runs on the main thread) is safe and self-deferring.
             EmergencyStopOverlay::instance().show_recovery_for(
                 ks == KlippyState::SHUTDOWN ? RecoveryReason::SHUTDOWN : RecoveryReason::ERROR);
@@ -554,8 +493,8 @@ void AbortManager::on_heater_interrupt_success() {
     // Cancel timeout timer
     heater_interrupt_timer_.reset();
 
-    spdlog::info("[AbortManager] Kalico detected (HEATER_INTERRUPT succeeded)");
-    kalico_status_ = KalicoStatus::DETECTED;
+    spdlog::info("[AbortManager] HEATER_INTERRUPT supported (command succeeded)");
+    heater_interrupt_support_ = HeaterInterruptSupport::SUPPORTED;
 
     // Proceed to PROBE_QUEUE
     set_state(State::PROBE_QUEUE);
@@ -571,8 +510,8 @@ void AbortManager::on_heater_interrupt_error() {
     // Cancel timeout timer
     heater_interrupt_timer_.reset();
 
-    spdlog::info("[AbortManager] Kalico NOT present (HEATER_INTERRUPT failed)");
-    kalico_status_ = KalicoStatus::NOT_PRESENT;
+    spdlog::info("[AbortManager] HEATER_INTERRUPT unsupported (command failed)");
+    heater_interrupt_support_ = HeaterInterruptSupport::UNSUPPORTED;
 
     // Proceed to PROBE_QUEUE
     set_state(State::PROBE_QUEUE);
@@ -587,8 +526,8 @@ void AbortManager::on_heater_interrupt_timeout() {
 
     heater_interrupt_timer_.release(); // One-shot already auto-deleted by LVGL
 
-    spdlog::warn("[AbortManager] HEATER_INTERRUPT timed out, treating as not-Kalico");
-    kalico_status_ = KalicoStatus::NOT_PRESENT;
+    spdlog::warn("[AbortManager] HEATER_INTERRUPT timed out, treating as unsupported");
+    heater_interrupt_support_ = HeaterInterruptSupport::UNSUPPORTED;
 
     // Proceed to PROBE_QUEUE
     set_state(State::PROBE_QUEUE);

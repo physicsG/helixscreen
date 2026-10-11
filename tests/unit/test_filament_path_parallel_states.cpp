@@ -25,6 +25,8 @@
 
 #include "../catch_amalgamated.hpp"
 
+using helix::PathSegment;
+using helix::PathTopology;
 using helix::ui::fpath::compute_slot_render_states;
 using helix::ui::fpath::FilamentPathData;
 using helix::ui::fpath::SlotRenderStates;

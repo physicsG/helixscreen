@@ -18,6 +18,7 @@
 #include "../test_helpers/printer_state_test_access.h"
 #include "../ui_test_utils.h"
 #include "active_print_media_manager.h"
+#include "async_lifetime_guard.h"
 #include "moonraker_api.h"
 #include "moonraker_client_mock.h"
 #include "moonraker_file_api.h"
@@ -137,17 +138,17 @@ class ActivePrintMediaManagerTestFixture {
 
     // Get current print_filename (raw)
     std::string get_print_filename() {
-        return lv_subject_get_string(state_.get_print_filename_subject());
+        return lv_subject_get_string(state_.print_state().get_print_filename_subject());
     }
 
     // Get current print_display_filename (processed for UI)
     std::string get_display_filename() {
-        return lv_subject_get_string(state_.get_print_display_filename_subject());
+        return lv_subject_get_string(state_.print_state().get_print_display_filename_subject());
     }
 
     // Get current print_thumbnail_path
     std::string get_thumbnail_path() {
-        return lv_subject_get_string(state_.get_print_thumbnail_path_subject());
+        return lv_subject_get_string(state_.print_state().get_print_thumbnail_path_subject());
     }
 
   private:
@@ -243,7 +244,7 @@ TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
     set_print_filename("test.gcode");
 
     // Manually set a thumbnail path (simulating a loaded thumbnail)
-    state().set_print_thumbnail("test.gcode", "A:/tmp/thumbnail_abc123.bin");
+    state().print_state().set_print_thumbnail("test.gcode", "A:/tmp/thumbnail_abc123.bin");
     REQUIRE(get_thumbnail_path() == "A:/tmp/thumbnail_abc123.bin");
 
     // When filename is cleared, thumbnail is PRESERVED (not cleared)
@@ -261,7 +262,7 @@ TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
     REQUIRE(get_display_filename() == "first_print");
 
     // Manually set thumbnail (simulating loaded thumbnail)
-    state().set_print_thumbnail("first_print.gcode", "A:/tmp/first_thumb.bin");
+    state().print_state().set_print_thumbnail("first_print.gcode", "A:/tmp/first_thumb.bin");
     REQUIRE(get_thumbnail_path() == "A:/tmp/first_thumb.bin");
 
     // Start a NEW print - this should replace display name
@@ -363,8 +364,8 @@ TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
         (*count)++;
     };
 
-    lv_observer_t* observer = lv_subject_add_observer(state().get_print_display_filename_subject(),
-                                                      observer_cb, &observer_count);
+    lv_observer_t* observer = lv_subject_add_observer(
+        state().print_state().get_print_display_filename_subject(), observer_cb, &observer_count);
 
     // Initial observer registration fires once
     REQUIRE(observer_count == 1);
@@ -515,7 +516,7 @@ TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
         // from being set. Without API, metadata can't be fetched, but the code
         // path that checks skip_thumbnail should not early-return before the
         // API check. Verify the subject is still at 0 (no API = no metadata).
-        REQUIRE(lv_subject_get_int(state().get_print_layer_total_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state().print_state().get_print_layer_total_subject()) == 0);
 
         // The key assertion: load_thumbnail_for_file should NOT early-return
         // when thumbnail is set. It should proceed to the API check and only
@@ -570,24 +571,24 @@ TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
     };
 
     auto data = std::make_pair(&last_observed_path, &observer_fire_count);
-    lv_observer_t* obs =
-        lv_subject_add_observer(state().get_print_thumbnail_path_subject(), observer_cb, &data);
+    lv_observer_t* obs = lv_subject_add_observer(
+        state().print_state().get_print_thumbnail_path_subject(), observer_cb, &data);
 
     // Observer fires on registration with the initial (placeholder) value
     REQUIRE(observer_fire_count == 1);
     REQUIRE(last_observed_path == NO_THUMB);
 
     // Setting a thumbnail path should fire the observer
-    state().set_print_thumbnail("model.gcode", "A:/cache/thumb.bin");
+    state().print_state().set_print_thumbnail("model.gcode", "A:/cache/thumb.bin");
     REQUIRE(observer_fire_count == 2);
     REQUIRE(last_observed_path == "A:/cache/thumb.bin");
 
     // Setting same path should NOT fire (de-duplication in set_print_thumbnail)
-    state().set_print_thumbnail("model.gcode", "A:/cache/thumb.bin");
+    state().print_state().set_print_thumbnail("model.gcode", "A:/cache/thumb.bin");
     REQUIRE(observer_fire_count == 2);
 
     // Clearing path should fire
-    state().set_print_thumbnail("model.gcode", "");
+    state().print_state().set_print_thumbnail("model.gcode", "");
     REQUIRE(observer_fire_count == 3);
     REQUIRE(last_observed_path.empty());
 
@@ -607,17 +608,17 @@ TEST_CASE_METHOD(
         values->push_back(lv_subject_get_string(subj));
     };
 
-    lv_observer_t* obs = lv_subject_add_observer(state().get_print_thumbnail_path_subject(),
-                                                 observer_cb, &observed_values);
+    lv_observer_t* obs = lv_subject_add_observer(
+        state().print_state().get_print_thumbnail_path_subject(), observer_cb, &observed_values);
 
     // Initial fire
     REQUIRE(observed_values.size() == 1);
     REQUIRE(observed_values[0] == NO_THUMB);
 
     // Rapid updates - observer should see each distinct value
-    state().set_print_thumbnail("first.gcode", "A:/cache/first.bin");
-    state().set_print_thumbnail("second.gcode", "A:/cache/second.bin");
-    state().set_print_thumbnail("third.gcode", "A:/cache/third.bin");
+    state().print_state().set_print_thumbnail("first.gcode", "A:/cache/first.bin");
+    state().print_state().set_print_thumbnail("second.gcode", "A:/cache/second.bin");
+    state().print_state().set_print_thumbnail("third.gcode", "A:/cache/third.bin");
 
     REQUIRE(observed_values.size() == 4); // initial + 3 changes
     REQUIRE(observed_values[1] == "A:/cache/first.bin");
@@ -633,7 +634,7 @@ TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
     SECTION("different file after idle clears old thumbnail") {
         // Print A starts and gets a thumbnail
         set_print_filename("print_a.gcode");
-        state().set_print_thumbnail("print_a.gcode", "A:/cache/print_a_thumb.bin");
+        state().print_state().set_print_thumbnail("print_a.gcode", "A:/cache/print_a_thumb.bin");
         REQUIRE(get_thumbnail_path() == "A:/cache/print_a_thumb.bin");
 
         // Print A ends - Moonraker sends empty filename
@@ -651,7 +652,7 @@ TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
     SECTION("direct switch between prints clears old thumbnail") {
         // Print A with thumbnail
         set_print_filename("first.gcode");
-        state().set_print_thumbnail("first.gcode", "A:/cache/first_thumb.bin");
+        state().print_state().set_print_thumbnail("first.gcode", "A:/cache/first_thumb.bin");
         REQUIRE(get_thumbnail_path() == "A:/cache/first_thumb.bin");
 
         // Print B starts immediately (no empty filename in between)
@@ -663,7 +664,7 @@ TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
     SECTION("same filename reprint preserves thumbnail") {
         // Print A with thumbnail
         set_print_filename("benchy.gcode");
-        state().set_print_thumbnail("benchy.gcode", "A:/cache/benchy_thumb.bin");
+        state().print_state().set_print_thumbnail("benchy.gcode", "A:/cache/benchy_thumb.bin");
         REQUIRE(get_thumbnail_path() == "A:/cache/benchy_thumb.bin");
 
         // Same file reprinted - idempotent guard means no change, which is correct
@@ -681,7 +682,7 @@ TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
     // last_loaded_thumbnail_filename_ is empty. The shared subject, however,
     // still carries the previous print's path. The first filename this manager
     // ever sees must clear that leftover, not adopt it.
-    state().set_print_thumbnail("previous.gcode", "A:/cache/previous.bin");
+    state().print_state().set_print_thumbnail("previous.gcode", "A:/cache/previous.bin");
     REQUIRE(get_thumbnail_path() == "A:/cache/previous.bin");
 
     set_print_filename("brand_new.gcode");
@@ -690,7 +691,7 @@ TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
     // The leftover must be dropped, and the identity must describe the file we
     // are now loading for — not the finished print.
     CHECK(get_thumbnail_path() == NO_THUMB);
-    CHECK(state().get_print_thumbnail_file() != "previous.gcode");
+    CHECK(state().print_state().get_print_thumbnail_file() != "previous.gcode");
 }
 
 // ============================================================================
@@ -790,7 +791,7 @@ class StubTransferAPI : public MoonrakerFileTransferAPI {
 
     void download_thumbnail(const std::string& thumbnail_path, const std::string& cache_path,
                             StringCallback on_success, ErrorCallback on_error) override {
-        (void)thumbnail_path;
+        last_thumbnail_path_ = thumbnail_path;
         download_count_++;
         if (capture_downloads_) {
             captured_.push_back(Captured{cache_path, std::move(on_success)});
@@ -809,11 +810,36 @@ class StubTransferAPI : public MoonrakerFileTransferAPI {
         }
     }
 
+    /// Holds every gcode header request open instead of sending it, so no
+    /// real HTTP request outlives the test and a test can fire its error late.
+    void download_file_partial(const std::string& root, const std::string& path, size_t max_bytes,
+                               StringCallback on_success, ErrorCallback on_error,
+                               CancelFlag = nullptr) override {
+        (void)root;
+        (void)path;
+        (void)max_bytes;
+        (void)on_success;
+        partial_errors_.push_back(std::move(on_error));
+    }
+    [[nodiscard]] size_t partial_count() const {
+        return partial_errors_.size();
+    }
+    void fire_partial_error_last(const MoonrakerError& err) {
+        REQUIRE(!partial_errors_.empty());
+        auto cb = partial_errors_.back();
+        REQUIRE(cb);
+        cb(err);
+    }
+
     void set_fail_downloads(bool fail) {
         fail_downloads_ = fail;
     }
     [[nodiscard]] int download_count() const {
         return download_count_;
+    }
+    /// Moonraker path of the most recent thumbnail download.
+    [[nodiscard]] const std::string& last_thumbnail_path() const {
+        return last_thumbnail_path_;
     }
 
     /// Hold subsequent downloads open instead of completing them inline, so a
@@ -847,7 +873,9 @@ class StubTransferAPI : public MoonrakerFileTransferAPI {
     bool fail_downloads_ = false;
     bool capture_downloads_ = false;
     int download_count_ = 0;
+    std::string last_thumbnail_path_;
     std::vector<Captured> captured_;
+    std::vector<ErrorCallback> partial_errors_;
 };
 
 /// MoonrakerAPI that installs the CapturingFileAPI in place of the real file API
@@ -973,11 +1001,11 @@ class ActivePrintMediaAsyncFixture {
     }
 
     int get_layer_total() {
-        return lv_subject_get_int(state_.get_print_layer_total_subject());
+        return lv_subject_get_int(state_.print_state().get_print_layer_total_subject());
     }
 
     std::string get_thumbnail_path() {
-        return lv_subject_get_string(state_.get_print_thumbnail_path_subject());
+        return lv_subject_get_string(state_.print_state().get_print_thumbnail_path_subject());
     }
 
     static FileMetadata make_metadata(uint32_t layer_count) {
@@ -1052,6 +1080,41 @@ TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
     drain();
 
     REQUIRE(get_layer_total() == 0);
+}
+
+TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
+                 "ActivePrintMediaManager: gcode header error after manager destroy is skipped",
+                 "[ActivePrintMediaManager][async][lifetime]") {
+    set_print_filename_no_drain("doomed_header.gcode");
+    drain();
+    REQUIRE(files().has_pending());
+
+    // A metadata error self-serves from the gcode header; the stub holds that
+    // download open.
+    MoonrakerError metadata_err;
+    metadata_err.message = "Metadata not available";
+    files().fire_error_last(metadata_err);
+    drain();
+    REQUIRE(transfers_stub().partial_count() == 1);
+
+    (void)helix::async_lifetime::take_snapshot();
+    manager_ptr().reset();
+
+    // The download fails after the manager is gone (soft restart). Its error
+    // body touches members, so it must be dropped rather than run.
+    MoonrakerError download_err;
+    download_err.message = "connection reset";
+    transfers_stub().fire_partial_error_last(download_err);
+    drain();
+
+    auto snapshot = helix::async_lifetime::take_snapshot();
+    bool skipped = false;
+    for (const auto& entry : snapshot.entries) {
+        if (entry.tag == "ActivePrintMediaManager::on_extract_error") {
+            skipped = entry.count > 0;
+        }
+    }
+    REQUIRE(skipped);
 }
 
 TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
@@ -1350,6 +1413,24 @@ TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
 
     REQUIRE(get_thumbnail_path() != NO_THUMB);
     REQUIRE(TestAccess::thumbnail_loaded(manager()));
+}
+
+TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
+                 "ActivePrintMediaManager: subfolder print downloads its thumbnail from that "
+                 "subfolder",
+                 "[ActivePrintMediaManager][thumbnail]") {
+    set_print_filename_no_drain("sub/dir/subfolder_thumb.gcode");
+    drain();
+    REQUIRE(files().pending_count() == 1);
+
+    // Moonraker gives a thumbnail's relative_path relative to the gcode's own
+    // directory, so the download has to prepend that directory.
+    const std::string rel = unique_thumb_path("subfolder_thumb");
+    files().fire_last(make_metadata_with_thumb(4, rel));
+    drain();
+
+    REQUIRE(transfers_stub().download_count() == 1);
+    REQUIRE(transfers_stub().last_thumbnail_path() == "sub/dir/" + rel);
 }
 
 TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
@@ -1748,7 +1829,7 @@ TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
     set_print_filename("previous.gcode");
     REQUIRE(get_display_filename() == "previous");
 
-    state().begin_preparing(helix::PrintJobRef{"next.gcode", "", ""});
+    state().print_state().begin_preparing(helix::PrintJobRef{"next.gcode", "", ""});
     UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
 
     REQUIRE(get_display_filename() == "next");
@@ -1760,11 +1841,11 @@ TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
     // Somebody started a different print while ours was preparing. Our override
     // must go, including thumbnail_origin_ - a stale PreSet skips the thumbnail
     // fetch, which is the mechanism behind #526.
-    state().begin_preparing(helix::PrintJobRef{"mine.gcode", "", ""});
+    state().print_state().begin_preparing(helix::PrintJobRef{"mine.gcode", "", ""});
     UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
     REQUIRE(get_display_filename() == "mine");
 
-    state().retire_preparing(helix::PreparingExit::Superseded);
+    state().print_state().retire_preparing(helix::PreparingExit::Superseded);
     set_print_filename("someone_elses.gcode");
 
     REQUIRE(get_display_filename() == "someone_elses");
@@ -1776,10 +1857,10 @@ TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
     // Confirmed means the printer took OUR job. The override must survive,
     // because the printer may report a rewritten temp file standing in for the
     // file the user actually chose.
-    state().begin_preparing(helix::PrintJobRef{"mine.gcode", "", ""});
+    state().print_state().begin_preparing(helix::PrintJobRef{"mine.gcode", "", ""});
     UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
 
-    state().retire_preparing(helix::PreparingExit::Confirmed);
+    state().print_state().retire_preparing(helix::PreparingExit::Confirmed);
     set_print_filename(".helix_temp/modified_mine.gcode");
 
     REQUIRE(get_display_filename() == "mine");
@@ -1799,7 +1880,7 @@ TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
 TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
                  "A confirmed print re-arms media that failed to load while preparing",
                  "[active_print_media][preparing][metadata]") {
-    state().begin_preparing(helix::PrintJobRef{"job.gcode", "", ""});
+    state().print_state().begin_preparing(helix::PrintJobRef{"job.gcode", "", ""});
     drain();
     REQUIRE(files().pending_count() == 1); // commit issued the first attempt
 
@@ -1811,7 +1892,7 @@ TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
 
     // The printer takes the job. The effective filename has not changed, so
     // nothing in the filename path will ever ask again.
-    state().retire_preparing(helix::PreparingExit::Confirmed);
+    state().print_state().retire_preparing(helix::PreparingExit::Confirmed);
     drain();
 
     REQUIRE(files().pending_count() == 2); // re-armed
@@ -1826,7 +1907,7 @@ TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
                  "[active_print_media][preparing][metadata]") {
     // The re-arm is for recovery, not a second unconditional fetch. Firing it
     // when the data is already present would waste an RPC on every print start.
-    state().begin_preparing(helix::PrintJobRef{"job.gcode", "", ""});
+    state().print_state().begin_preparing(helix::PrintJobRef{"job.gcode", "", ""});
     drain();
     REQUIRE(files().pending_count() == 1);
 
@@ -1835,7 +1916,7 @@ TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
     REQUIRE(get_layer_total() == 17);
 
     const size_t before = files().pending_count();
-    state().retire_preparing(helix::PreparingExit::Confirmed);
+    state().print_state().retire_preparing(helix::PreparingExit::Confirmed);
     drain();
 
     REQUIRE(files().pending_count() == before);
@@ -1846,7 +1927,7 @@ TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
                  "[active_print_media][preparing][metadata]") {
     // Superseded/Cancelled/Failed release the identity instead. Re-arming there
     // would fetch metadata for a job that is not going to run.
-    state().begin_preparing(helix::PrintJobRef{"job.gcode", "", ""});
+    state().print_state().begin_preparing(helix::PrintJobRef{"job.gcode", "", ""});
     drain();
     MoonrakerError err;
     err.message = "file not found";
@@ -1854,7 +1935,7 @@ TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
     drain();
 
     const size_t before = files().pending_count();
-    state().retire_preparing(helix::PreparingExit::Cancelled);
+    state().print_state().retire_preparing(helix::PreparingExit::Cancelled);
     drain();
 
     REQUIRE(files().pending_count() == before);
@@ -1867,7 +1948,8 @@ TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
     // print is the rewritten temp path. Recording that raw as the thumbnail
     // source also suppressed process_filename()'s auto-resolve, which is guarded
     // on the source being empty - so the panel showed `modified_1748_orig`.
-    state().begin_preparing(helix::PrintJobRef{".helix_temp/modified_1748_orig.gcode", "", ""});
+    state().print_state().begin_preparing(
+        helix::PrintJobRef{".helix_temp/modified_1748_orig.gcode", "", ""});
     UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
 
     REQUIRE(get_display_filename() == "orig");
@@ -1887,8 +1969,8 @@ TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
     // effective name from the stale override, matches last_effective_filename_,
     // and early-returns - so the thumbnail subject is never republished and the
     // preview keeps rendering print A's image for the whole of print B.
-    state().begin_preparing(helix::PrintJobRef{"printA.gcode", "", ""});
-    state().retire_preparing(helix::PreparingExit::Confirmed);
+    state().print_state().begin_preparing(helix::PrintJobRef{"printA.gcode", "", ""});
+    state().print_state().retire_preparing(helix::PreparingExit::Confirmed);
     set_print_filename("printA.gcode");
     REQUIRE(get_display_filename() == "printA");
 
@@ -1902,7 +1984,7 @@ TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
     REQUIRE(get_display_filename() == "printB");
     // The thumbnail subject must now describe print B. If it still names
     // print A, the preview is showing the previous print's image.
-    REQUIRE(state().get_print_thumbnail_file() == "printB.gcode");
+    REQUIRE(state().print_state().get_print_thumbnail_file() == "printB.gcode");
 }
 
 TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
@@ -1910,15 +1992,15 @@ TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
                  "[active_print_media][preparing][1339]") {
     // The same defect without any in-app start: once ANY override is recorded
     // it must not survive into a file it does not describe.
-    state().begin_preparing(helix::PrintJobRef{"first.gcode", "", ""});
-    state().retire_preparing(helix::PreparingExit::Confirmed);
+    state().print_state().begin_preparing(helix::PrintJobRef{"first.gcode", "", ""});
+    state().print_state().retire_preparing(helix::PreparingExit::Confirmed);
     set_print_filename("first.gcode");
 
     set_print_filename("second.gcode");
-    REQUIRE(state().get_print_thumbnail_file() == "second.gcode");
+    REQUIRE(state().print_state().get_print_thumbnail_file() == "second.gcode");
 
     set_print_filename("third.gcode");
-    REQUIRE(state().get_print_thumbnail_file() == "third.gcode");
+    REQUIRE(state().print_state().get_print_thumbnail_file() == "third.gcode");
     REQUIRE(get_display_filename() == "third");
 }
 
@@ -1928,8 +2010,8 @@ TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
     // Retiring a stale override must not fire on a REPRINT, where the override
     // still describes exactly what is printing. Losing it here would discard a
     // USB / pre-extracted thumbnail the print is entitled to keep.
-    state().begin_preparing(helix::PrintJobRef{"repeat.gcode", "", ""});
-    state().retire_preparing(helix::PreparingExit::Confirmed);
+    state().print_state().begin_preparing(helix::PrintJobRef{"repeat.gcode", "", ""});
+    state().print_state().retire_preparing(helix::PreparingExit::Confirmed);
     set_print_filename("repeat.gcode");
     REQUIRE(get_display_filename() == "repeat");
 
@@ -1937,7 +2019,7 @@ TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
     set_print_filename("repeat.gcode");
 
     REQUIRE(get_display_filename() == "repeat");
-    REQUIRE(state().get_print_thumbnail_file() == "repeat.gcode");
+    REQUIRE(state().print_state().get_print_thumbnail_file() == "repeat.gcode");
 }
 
 TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
@@ -1946,8 +2028,8 @@ TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
     // The override exists precisely to map a rewritten temp copy back to the
     // name the user chose. Only this app writes those paths, so one arriving
     // always belongs to the print whose epoch set the override.
-    state().begin_preparing(helix::PrintJobRef{"chosen.gcode", "", ""});
-    state().retire_preparing(helix::PreparingExit::Confirmed);
+    state().print_state().begin_preparing(helix::PrintJobRef{"chosen.gcode", "", ""});
+    state().print_state().retire_preparing(helix::PreparingExit::Confirmed);
     set_print_filename(".helix_temp/modified_1748_chosen.gcode");
 
     REQUIRE(get_display_filename() == "chosen");
@@ -1963,7 +2045,7 @@ TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
     // just adopted and send the new print's media lookup back to the old file.
     set_print_filename("previous.gcode");
 
-    state().begin_preparing(helix::PrintJobRef{"committed.gcode", "", ""});
+    state().print_state().begin_preparing(helix::PrintJobRef{"committed.gcode", "", ""});
     UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
 
     // Moonraker is still reporting the finished print while ours prepares.

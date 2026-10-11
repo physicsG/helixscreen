@@ -207,6 +207,16 @@ class HelixApp:
                   f"settings-test.json seeding; a hang at boot likely means this "
                   f"directory is already locked by another running instance")
 
+        # The thumbnail cache otherwise resolves to ~/.cache/helix, shared by
+        # every helix-screen on the machine. Each boot rewrites the cached PNGs
+        # and drops their prescaled .bin variants there, so another instance on
+        # print-select can delete art this one is loading. A private cache also
+        # gives every boot the same cold start.
+        if not env.get("HELIX_CACHE_DIR"):
+            cache_dir = self.workdir / "helix-cache"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            env["HELIX_CACHE_DIR"] = str(cache_dir)
+
         args = [
             str(self.binary),
             "--test", "--skip-wizard", "--skip-splash",
@@ -436,9 +446,9 @@ class HelixApp:
     def wait_idle(self, timeout: float = 10.0) -> dict:
         """Block until the UI has settled.
 
-        Best-effort: raw lv_async_call work, the gcode/thumbnail build threads,
-        and the mock backends' own threads are invisible to this. See the design
-        spec's determinism section.
+        Best-effort: raw lv_async_call work, the gcode-viewer and per-object
+        thumbnail render threads, and the mock backends' own threads are
+        invisible to this. See the design spec's determinism section.
         """
         return self.ctl("wait_idle", "--timeout", timeout)
 

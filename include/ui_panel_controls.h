@@ -12,22 +12,25 @@
 
 #include "async_lifetime_guard.h"
 #include "config.h"
+#include "i_moonraker_api.h"
 #include "operation_timeout_guard.h"
-#include "save_config_restart.h"
+#include "quick_action_buttons.h"
 #include "standard_macros.h"
 #include "subject_managed_panel.h"
 #include "ui/position_observer_bundle.h"
 #include "ui/temperature_observer_bundle.h"
 #include "ui/ui_modal_guard.h"
 
+#include <array>
+#include <functional>
 #include <memory>
 #include <optional>
+#include <string>
 
 // Forward declaration
 class TemperatureService;
 namespace helix {
 class TemperatureController;
-class LedWidget;
 namespace ui {
 struct ControlsPanelTestAccess; // test-only friend (tests/test_helpers/)
 } // namespace ui
@@ -99,10 +102,9 @@ class ControlsPanel : public PanelBase {
     void deinit_subjects();
 
     /**
-     * @brief Setup the controls panel with card navigation handlers
+     * @brief Setup the controls panel: cache its dynamic lists and start observing live data
      *
-     * Wires up card background click handlers for navigation to full panels.
-     * All button handlers are already wired via XML event_cb in init_subjects().
+     * Every click handler is wired in the XML (callbacks registered by init_subjects()).
      *
      * @param panel Root panel object from lv_xml_create()
      * @param parent_screen Parent screen (needed for overlay panel creation)
@@ -123,7 +125,7 @@ class ControlsPanel : public PanelBase {
      * completed after initial setup or when switching between connections.
      */
     void on_activate() override;
-    void on_deactivate() override;
+    void on_deactivating(DeactivateReason reason) override;
 
   private:
     // Test-only access to private secondary-fan lifetime/observer internals.
@@ -150,21 +152,6 @@ class ControlsPanel : public PanelBase {
     helix::TemperatureController* controller() const;
 
     //
-    // === Configurable Macro Buttons (StandardMacros integration) ===
-    //
-
-    std::optional<StandardMacroSlot> macro_1_slot_; ///< Slot for macro button 1
-    std::optional<StandardMacroSlot> macro_2_slot_; ///< Slot for macro button 2
-
-    /**
-     * @brief Refresh macro button labels and visibility
-     *
-     * Called after StandardMacros config changes to update button text
-     * and hide buttons for empty slots.
-     */
-    void refresh_macro_buttons();
-
-    //
     // === Subject Manager (RAII cleanup) ===
     //
 
@@ -184,19 +171,22 @@ class ControlsPanel : public PanelBase {
     lv_subject_t nozzle_temp_subject_{};
     char nozzle_temp_buf_[32] = {};
     lv_subject_t nozzle_pct_subject_{};
-    lv_subject_t nozzle_status_subject_{};
-    char nozzle_status_buf_[16] = {};
+    lv_subject_t nozzle_status_subject_{}; ///< duty text ("" = none)
+    char nozzle_status_buf_[helix::ui::temperature::HEATER_STATUS_BUF_BYTES] = {};
+    lv_subject_t nozzle_status_state_subject_{}; ///< HeaterStatusState int
 
     // Bed temperature display
     lv_subject_t bed_temp_subject_{};
     char bed_temp_buf_[32] = {};
     lv_subject_t bed_pct_subject_{};
-    lv_subject_t bed_status_subject_{};
-    char bed_status_buf_[16] = {};
+    lv_subject_t bed_status_subject_{}; ///< duty text ("" = none)
+    char bed_status_buf_[helix::ui::temperature::HEATER_STATUS_BUF_BYTES] = {};
+    lv_subject_t bed_status_state_subject_{}; ///< HeaterStatusState int
 
     // Chamber temperature display
-    lv_subject_t chamber_status_subject_{};
-    char chamber_status_buf_[16] = {};
+    lv_subject_t chamber_status_subject_{}; ///< duty text ("" = none)
+    char chamber_status_buf_[helix::ui::temperature::HEATER_STATUS_BUF_BYTES] = {};
+    lv_subject_t chamber_status_state_subject_{}; ///< HeaterStatusState int
 
     // Heating icon animators (nozzle/bed/chamber), bound from the panel's own
     // container so lv_obj_find_by_name() cannot pick up another panel's
@@ -205,29 +195,17 @@ class ControlsPanel : public PanelBase {
     helix::ui::HeaterIconBinder bed_icon_binder_;
     helix::ui::HeaterIconBinder chamber_icon_binder_;
 
+    // "N more sensors" link: caption plus the count that hides it at zero
+    lv_subject_t more_sensors_subject_{};
+    char more_sensors_buf_[48] = {};
+    lv_subject_t more_sensors_count_{};
+    void update_more_sensors();
+
     // Fan speed display
     lv_subject_t fan_speed_subject_{};
     char fan_speed_buf_[16] = {};
     lv_subject_t fan_pct_subject_{};
     uint32_t last_fan_slider_input_ = 0; // Tick of last slider interaction (suppression window)
-
-    // Macro button subjects for declarative binding.
-    //
-    // Two independent gates, because a macro button has three states, not two:
-    //   *_visible   0 = nothing is assigned to this slot, do not render it
-    //   *_available 0 = rendered but not usable — the slot resolves to a macro
-    //                   the connected printer does not define
-    // A slot the user configured against a macro this printer lacks stays
-    // visible and goes disabled, so the button that stopped working is still
-    // where they left it instead of silently vanishing.
-    lv_subject_t macro_1_visible_{};
-    lv_subject_t macro_2_visible_{};
-    lv_subject_t macro_1_available_{};
-    lv_subject_t macro_2_available_{};
-    lv_subject_t macro_1_name_{};
-    lv_subject_t macro_2_name_{};
-    char macro_1_name_buf_[64] = {};
-    char macro_2_name_buf_[64] = {};
 
     //
     // === Cached Values (for display update efficiency) ===
@@ -255,7 +233,6 @@ class ControlsPanel : public PanelBase {
 
     /// @brief Temperature observer bundle (nozzle + bed temps)
     helix::ui::TemperatureObserverBundle<ControlsPanel> temp_observers_;
-    ObserverGuard macros_version_observer_; // Macro slot resolution changed
     ObserverGuard fan_observer_;
     ObserverGuard fans_version_observer_;      // Multi-fan list changes
     ObserverGuard temp_sensor_count_observer_; // Temp sensor list changes
@@ -270,53 +247,17 @@ class ControlsPanel : public PanelBase {
     ObserverGuard chamber_mode_observer_;             // Chamber M141 control mode observer
 
     bool fans_rebuild_pending_ = false; ///< Coalesces rapid fans_version observer notifications
-    bool temps_rebuild_pending_ =
-        false; ///< Coalesces rapid temp_sensor_count observer notifications
-    helix::AsyncLifetimeGuard
-        lifetime_; ///< Guards deferred callbacks from accessing destroyed panel
 
     //
     // === Lazily-Created Child Panels ===
     //
 
-    lv_obj_t* motion_panel_ = nullptr;
-    lv_obj_t* fan_control_panel_ = nullptr;
-    lv_obj_t* bed_mesh_panel_ = nullptr;
-    lv_obj_t* zoffset_panel_ = nullptr;
-    lv_obj_t* screws_panel_ = nullptr;
-
-    /// LED quick-toggle for the Calibration & Tools grid cell. Reuses the same
-    /// LedWidget that drives the home-dashboard light widget (stateful bulb icon
-    /// reflecting on/off + brightness + LED color; tap toggles). Present only
-    /// when an LED strip is controllable (cell hidden via led_controllable).
-    std::unique_ptr<helix::LedWidget> led_widget_;
-
     //
     // === Modal Dialog State ===
     //
 
-    /// Owns the SAVE_CONFIG contract for the z-offset save: absorbs the rpc the
-    /// restart drops and reports success only once Klipper is back (#1359).
-    helix::ui::SaveConfigWatch save_config_watch_;
-
     helix::ui::ModalGuard motors_confirmation_dialog_;
-    helix::ui::ModalGuard save_z_offset_confirmation_dialog_;
-    helix::ui::ModalGuard macro_run_confirmation_dialog_;
     OperationTimeoutGuard operation_guard_;
-
-    /// Guards against a double-click race on Save Z-Offset.
-    ///
-    /// A bounded timeout rather than a bare bool: SAVE_CONFIG restarts Klipper,
-    /// and MoonrakerClient::notify_klippy_disconnected() calls
-    /// tracker_.cleanup_all(), which drops the pending RPC — so neither the
-    /// success nor the error callback ever fires and a plain flag stayed latched
-    /// until app restart, leaving the Save button dead. The guard self-clears.
-    OperationTimeoutGuard save_z_offset_guard_;
-
-    /// Covers Z_OFFSET_APPLY_PROBE + SAVE_CONFIG plus the Klipper restart, with
-    /// headroom for stock code that chains a second config write (Creality K2 +
-    /// CFS writes CFS Tn_data via CXSAVE_CONFIG ~50s later).
-    static constexpr uint32_t SAVE_Z_OFFSET_TIMEOUT_MS = 90000;
 
     //
     // === Dynamic UI Containers ===
@@ -333,24 +274,13 @@ class ControlsPanel : public PanelBase {
     std::vector<ObserverGuard> secondary_fan_observers_; ///< Per-fan speed observers
     /// Lifetime tokens for the dynamic per-fan speed subjects observed above. Per-fan
     /// subjects are destroyed/recreated on fan rediscovery; what makes the guards safe is
-    /// that each token is handed to observe_int_sync(), not where the token is stored.
+    /// that each token is handed to observe<int>(), not where the token is stored.
     /// These are copies of shared_ptrs PrinterFanState owns — it signals subject death by
     /// writing *token = false — so declaring them after the observers (destroyed first) is
     /// equivalent to declaring them before. Kept index-aligned with
     /// secondary_fan_observers_. See docs/devel/THREADING.md § 5.
     std::vector<SubjectLifetime> secondary_fan_lifetimes_;
     uint32_t fan_populate_gen_ = 0; ///< Incremented on each populate; stale callbacks skip
-
-    lv_obj_t* secondary_temps_list_ = nullptr; // Container for dynamic temp sensor rows
-
-    /// @brief Info for a secondary temperature sensor row for reactive temp updates
-    struct SecondaryTempRow {
-        std::string klipper_name; // e.g., "temperature_sensor mcu_temp"
-        lv_obj_t* temp_label = nullptr;
-    };
-    std::vector<SecondaryTempRow> secondary_temp_rows_;   ///< Tracked for reactive updates
-    std::vector<ObserverGuard> secondary_temp_observers_; ///< Per-sensor temp observers
-    uint32_t temp_populate_gen_ = 0; ///< Incremented on each populate; stale callbacks skip
 
     //
     // === Z-Offset Banner (reactive binding - no widget caching needed) ===
@@ -404,21 +334,7 @@ class ControlsPanel : public PanelBase {
     char speed_override_buf_[16] = {};
     ObserverGuard speed_factor_observer_;
 
-    //
-    // === Macro Slots 3 & 4 ===
-    //
-
-    std::optional<StandardMacroSlot> macro_3_slot_;
-    std::optional<StandardMacroSlot> macro_4_slot_;
-    lv_subject_t macro_3_visible_{};
-    lv_subject_t macro_4_visible_{};
-    lv_subject_t macro_3_available_{};
-    lv_subject_t macro_4_available_{};
-    lv_subject_t macro_3_name_{};
-    lv_subject_t macro_4_name_{};
-    char macro_3_name_buf_[64] = {};
-    char macro_4_name_buf_[64] = {};
-    lv_subject_t macro_header_visible_{};
+    helix::QuickActionButtons quick_actions_; ///< The four Quick Actions slots
 
   public:
     // === Leveling Commands (shared with MotionPanel) ===
@@ -430,7 +346,6 @@ class ControlsPanel : public PanelBase {
     // === Private Helpers ===
     //
 
-    void setup_card_handlers();
     void register_observers();
 
     // Display update helpers
@@ -438,14 +353,10 @@ class ControlsPanel : public PanelBase {
     void update_bed_temp_display();
     void update_chamber_temp_display();
     void update_fan_display();
-    void populate_secondary_fans();  // Build fan list from helix::PrinterState
-    void populate_secondary_temps(); // Build temp sensor list from TemperatureSensorManager
+    void populate_secondary_fans(); // Build fan list from helix::PrinterState
     void update_z_offset_delta_display(int delta_microns); // Format delta for banner
 
-    // Z-Offset save handler
     void handle_save_z_offset();
-    void handle_save_z_offset_confirm();
-    void handle_save_z_offset_cancel();
 
     //
     // === V2 Card Click Handlers (navigation to full panels) ===
@@ -461,6 +372,12 @@ class ControlsPanel : public PanelBase {
     void handle_nozzle_target_edit();
     void handle_bed_target_edit();
     void handle_chamber_target_edit();
+
+    /// Effective ceiling (°C) a target-edit keypad offers: the shared
+    /// keypad-ceiling authority when the controller is reachable, this panel's
+    /// own compiled-in member otherwise. All three target-edit keypads ask
+    /// this (#1619).
+    int target_edit_max(helix::HeaterType type, int fallback_deg) const;
     void handle_custom_nozzle_confirmed(float value);
     void handle_custom_bed_confirmed(float value);
     void handle_custom_chamber_confirmed(float value);
@@ -482,41 +399,57 @@ class ControlsPanel : public PanelBase {
     // === Quick Action Button Handlers ===
     //
 
+    /**
+     * @brief The words one quick action shows the user, start to finish.
+     *
+     * Every field is already translated — the call site runs lv_tr(), which
+     * keeps the literals where the translation sweep can see them. Holding the
+     * whole lifecycle in one struct is what stops the next quick action from
+     * shipping with a start toast and no completion toast.
+     */
+    struct QuickActionText {
+        std::string started;         ///< As the command is dispatched
+        std::string completed;       ///< Once the printer acknowledges it
+        std::string guard_timed_out; ///< The timeout guard gave up waiting
+        std::string rpc_timed_out;   ///< The rpc timed out; the printer may still be working
+        std::string failed_fmt;      ///< Failure, with one {} for the error detail
+    };
+
+    /// Hands the shared success/error callbacks to whichever API entry point
+    /// runs this quick action's command.
+    using QuickActionDispatch =
+        std::function<void(IMoonrakerAPI::SuccessCallback, IMoonrakerAPI::ErrorCallback)>;
+
+    /**
+     * @brief Run one guarded quick action end to end.
+     *
+     * Homing, QGL and Z-Tilt differ only in the command they send and the words
+     * around it. Sharing the body is what keeps the parts the user sees from
+     * drifting apart between them: the busy check, the toast on every outcome,
+     * and the answer when there is no printer to talk to.
+     *
+     * @param timeout_ms How long the guard waits before declaring the op hung.
+     *                   Pass the same constant the API applies to the rpc.
+     * @param text       What the user is told at each outcome.
+     * @param dispatch   Called once, only after the guard is armed and only with
+     *                   a live api_.
+     */
+    void run_quick_action(uint32_t timeout_ms, const QuickActionText& text,
+                          const QuickActionDispatch& dispatch);
+
+    /// The QuickActionText the five homing buttons share, with @p started as the
+    /// one line that names an axis.
+    static QuickActionText homing_text(const char* started);
+
+    /// Home @p axes ("" for all) as a quick action. The axis spelling is the
+    /// same one MoonrakerMotionAPI::home_axes() validates.
+    void home_axes_action(const char* axes, const char* started_toast);
+
     void handle_home_all();
     void handle_home_x();
     void handle_home_y();
     void handle_home_xy();
     void handle_home_z();
-
-    /**
-     * @brief Execute a macro by slot index (0-3)
-     *
-     * Consolidates duplicate logic from handle_macro_1/2/3/4.
-     * @param index Macro button index (0=macro_1, 1=macro_2, etc.)
-     */
-    void execute_macro(size_t index);
-
-    /**
-     * @brief Actually run a configured macro slot (bypasses confirmation)
-     *
-     * Called by execute_macro() directly or from the confirmation callback.
-     */
-    void do_execute_macro(size_t index);
-
-    /**
-     * @brief Update a single macro button's visibility and label
-     *
-     * Used by refresh_macro_buttons() to update each button.
-     * @param macros Reference to StandardMacros instance
-     * @param slot Optional slot for this button (nullopt = hide)
-     * @param visible_subject Subject controlling visibility binding
-     * @param available_subject Subject controlling the disabled-state binding
-     * @param name_subject Subject controlling label text binding
-     * @param button_num Button number for debug logging (1-4)
-     */
-    void update_macro_button(StandardMacros& macros, const std::optional<StandardMacroSlot>& slot,
-                             lv_subject_t& visible_subject, lv_subject_t& available_subject,
-                             lv_subject_t& name_subject, int button_num);
 
     //
     // === Speed/Flow Override Handlers ===
@@ -547,62 +480,18 @@ class ControlsPanel : public PanelBase {
     //
 
     void handle_motors_clicked();
-    void handle_motors_confirm();
-    void handle_motors_cancel();
     void handle_calibration_bed_mesh();
     void handle_calibration_zoffset();
+    void handle_calibration_pa();
     void handle_calibration_screws();
+    void handle_calibration_tool_offsets();
     void handle_calibration_motors();
 
-    //
-    // === V2 Card Click Trampolines (manual wiring with user_data) ===
-    //
-
-    static void on_quick_actions_clicked(lv_event_t* e);
-    static void on_nozzle_temp_clicked(lv_event_t* e);
-    static void on_bed_temp_clicked(lv_event_t* e);
-    static void on_chamber_temp_clicked(lv_event_t* e);
-    static void on_cooling_clicked(lv_event_t* e);
-    static void on_secondary_fans_clicked(lv_event_t* e);
-    static void on_secondary_temps_clicked(lv_event_t* e);
-    static void on_nozzle_target_edit(lv_event_t* e);
-    static void on_bed_target_edit(lv_event_t* e);
-    static void on_chamber_target_edit(lv_event_t* e);
-    //
-    // === Calibration Button Trampolines (XML event_cb - global accessor) ===
-    //
-
-    static void on_calibration_bed_mesh(lv_event_t* e);
-    static void on_calibration_zoffset(lv_event_t* e);
-    static void on_calibration_screws(lv_event_t* e);
-    static void on_calibration_motors(lv_event_t* e);
-
-    //
-    // === V2 Button Trampolines (XML event_cb - global accessor) ===
-    //
-
-    static void on_home_all(lv_event_t* e);
-    static void on_home_x(lv_event_t* e);
-    static void on_home_y(lv_event_t* e);
-    static void on_home_xy(lv_event_t* e);
-    static void on_home_z(lv_event_t* e);
-    static void on_qgl(lv_event_t* e);
-    static void on_z_tilt(lv_event_t* e);
+    /// XML on_controls_macro: the macro slot index rides in user_data.
     static void on_macro(lv_event_t* e);
-    static void on_fan_slider_changed(lv_event_t* e);
-    static void on_save_z_offset(lv_event_t* e);
-
-    //
-    // === Z-Offset Trampolines (XML event_cb - global accessor) ===
-    //
-
-    static void on_zoffset_tune(lv_event_t* e);
 
     void subscribe_to_secondary_fan_speeds();
     void update_secondary_fan_speed(const std::string& object_name, int speed_pct);
-
-    void subscribe_to_secondary_temp_subjects();
-    void update_secondary_temp(const std::string& klipper_name, int decidegrees);
 };
 
 // ============================================================================

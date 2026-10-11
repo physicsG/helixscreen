@@ -213,7 +213,6 @@ TEST_CASE("MultiColor - Build geometry with tool colors", "[gcode][multicolor][g
 
         GeometryBuilder builder;
         builder.set_tool_color_palette(gcode.tool_color_palette);
-        builder.set_use_height_gradient(false); // Use tool colors, not gradient
 
         SimplificationOptions opts;
         opts.enable_merging = false;
@@ -382,7 +381,6 @@ TEST_CASE("MultiColor - Synthetic multi-layer multi-tool file",
     SECTION("Geometry builds with tool colors") {
         GeometryBuilder builder;
         builder.set_tool_color_palette(result.tool_color_palette);
-        builder.set_use_height_gradient(false);
 
         SimplificationOptions opts;
         opts.enable_merging = false;
@@ -432,7 +430,6 @@ TEST_CASE("MultiColor - Benchbin MMU3 real file", "[gcode][multicolor][integrati
     SECTION("Geometry builds from real file") {
         GeometryBuilder builder;
         builder.set_tool_color_palette(result.tool_color_palette);
-        builder.set_use_height_gradient(false);
 
         SimplificationOptions opts;
         auto geometry = builder.build(result, opts);
@@ -486,10 +483,7 @@ TEST_CASE("MultiColor - Backward compatibility", "[gcode][multicolor][compatibil
         REQUIRE(result.filament_color_hex == "#00FF00");
     }
 
-    SECTION("A colon-separated key form keeps its validated single color") {
-        // The list parser requires '='; a colon form used to reach
-        // filament_color_hex as the raw value by accident. The cleaned-token
-        // path keeps the color while still rejecting blobs.
+    SECTION("A colon-separated key form parses like the '=' form") {
         parser.parse_line("; filament_colour: #FF8800");
         parser.parse_line("G1 X0 Y0 Z0.2 E0");
         parser.parse_line("G1 X10 Y0 E1");
@@ -498,15 +492,15 @@ TEST_CASE("MultiColor - Backward compatibility", "[gcode][multicolor][compatibil
 
         REQUIRE(result.filament_color_hex == "#FF8800");
 
-        // A blob in the same form still never lands whole - on a fresh
-        // parser, so the assertion cannot lean on the color stored above.
+        // A list in the same form is a per-tool palette, never one raw blob -
+        // on a fresh parser, so the assertion cannot lean on the color above.
         GCodeParser fresh;
         fresh.parse_line("; filament_colour: #800080,#63A5BB");
         fresh.parse_line("G1 X0 Y0 Z0.2 E0");
         fresh.parse_line("G1 X10 Y0 E1");
-        auto blobbed = fresh.finalize();
-        REQUIRE(blobbed.filament_color_hex != "#800080,#63A5BB");
-        REQUIRE(blobbed.filament_color_hex.empty());
+        auto listed = fresh.finalize();
+        REQUIRE(listed.tool_color_palette == std::vector<std::string>{"#800080", "#63A5BB"});
+        REQUIRE(listed.filament_color_hex == "#800080");
     }
 
     SECTION("No color metadata at all") {

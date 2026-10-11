@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "mock_performance_source.h"
 
+#include "memory_utils.h"
+
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -31,21 +33,8 @@ bool read_proc_stat(uint64_t& idle, uint64_t& total) {
 }
 
 bool read_meminfo(uint32_t& free_mb, float& pct_used) {
-    std::ifstream f("/proc/meminfo");
-    if (!f)
-        return false;
-    uint64_t total_kb = 0, avail_kb = 0;
-    std::string key;
-    uint64_t val;
-    std::string unit;
-    while (f >> key >> val >> unit) {
-        if (key == "MemTotal:")
-            total_kb = val;
-        else if (key == "MemAvailable:") {
-            avail_kb = val;
-            break;
-        }
-    }
+    const MemoryInfo mem = get_system_memory_info();
+    const uint64_t total_kb = mem.total_kb, avail_kb = mem.available_kb;
     if (!total_kb || !avail_kb)
         return false;
     free_mb = static_cast<uint32_t>(avail_kb / 1024);

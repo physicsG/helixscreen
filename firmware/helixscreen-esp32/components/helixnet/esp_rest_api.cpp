@@ -22,6 +22,9 @@
 //   thumbnail bytes (root="gcodes", path=the resolved .thumbs/ path, capped
 //   at HARD_CAP_BYTES), it just isn't wired to a UI yet.
 //
+// ITransfersAPI::download_file — REAL, capped at WHOLE_FILE_CAP_BYTES and
+// erroring above it: small config files such as AFC.cfg, read into memory.
+//
 // ITransfersAPI::get_file_metadata / metascan_file are IFilesAPI (NOT this
 // file) and are already real: they're pure JSON-RPC over the WebSocket
 // transport (src/api/moonraker_file_api.cpp, kept unmodified in
@@ -47,7 +50,7 @@
 //     implies a file path, it gets an asserting stub instead" carve-out.
 //     Task 11's new PSRAM-thumbnail design calls download_file_partial
 //     directly instead of going through this file-path-shaped method.
-//   ITransfersAPI::download_file, download_file_to_path, upload_file,
+//   ITransfersAPI::download_file_to_path, upload_file,
 //     upload_file_with_name, upload_file_from_path — not reachable from the
 //     v1 print-select thumbnail/metadata surface (used elsewhere: macro
 //     editor, AD5X polling — itself real again as of Task 15 via
@@ -63,100 +66,18 @@
 
 #include "esp_http_lane.h"
 #include "esp_log.h"
+#include "http_request_epoch.h"
 #include "moonraker_file_transfer_api.h"
 #include "moonraker_rest_api.h"
+#include "moonraker_validation.h"
 
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
 
-// NOTE: deliberately does NOT include src/api/moonraker_api_internal.h. That
-// header unconditionally pulls in moonraker_api.h -> moonraker_client.h, which
-// needs the parse-only hv/Event.h + hv/WebSocketClient.h shim helixapp
-// provides (HELIXAPP_SHIM) — helixnet doesn't have that shim and shouldn't
-// gain a dependency on it just for two validation helpers. This file stays in
-// the same "no calls into helixapp-only symbols" lane esp_moonraker_client.cpp
-// already keeps (see its header comment) and reimplements the small
-// ESP32-relevant subset of moonraker_api_internal.h's validation/error-report
-// helpers directly, against nothing heavier than moonraker_error.h (already
-// proven to compile standalone in this component — see this CMakeLists.txt's
-// REPO_SRCS comment on MoonrakerError::timeout()).
-
 namespace {
 constexpr char TAG[] = "esp_rest_api";
-
-// --- Minimal standalone equivalents of src/api/moonraker_api_internal.h's
-// path/root validation + error-report helpers (desktop's file rejects
-// directory traversal / control chars the same way; kept in sync by hand
-// since this file can't include that header — see note above). ---
-
-bool esp_is_safe_path(const std::string& path) {
-    if (path.empty() || path.find("..") != std::string::npos || path[0] == '/' ||
-        path.find('\0') != std::string::npos) {
-        return false;
-    }
-    if (path.size() >= 2 && path[1] == ':') { // drive letter, same as desktop
-        return false;
-    }
-    if (path.find_first_of("<>|*?") != std::string::npos) {
-        return false;
-    }
-    for (char c : path) {
-        if (std::iscntrl(static_cast<unsigned char>(c))) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool esp_is_safe_file_root(const std::string& root) {
-    auto is_plain = [](const std::string& s) {
-        return !s.empty() && std::all_of(s.begin(), s.end(), [](unsigned char c) {
-            return std::isalnum(c) || c == '_' || c == ' ';
-        });
-    };
-    if (is_plain(root)) {
-        return true;
-    }
-    return root.size() > 1 && root[0] == '.' && is_plain(root.substr(1));
-}
-
-void esp_report_error(const std::function<void(const MoonrakerError&)>& on_error,
-                      MoonrakerErrorType type, const char* method, const std::string& message) {
-    if (!on_error) {
-        return;
-    }
-    MoonrakerError err;
-    err.type = type;
-    err.method = method;
-    err.message = message;
-    on_error(err);
-}
-
-// Returns true (and reports VALIDATION_ERROR) if path is INVALID — caller
-// should return immediately, mirroring reject_invalid_path()'s contract.
-bool esp_reject_invalid_path(const std::string& path, const char* method,
-                             const std::function<void(const MoonrakerError&)>& on_error) {
-    if (esp_is_safe_path(path)) {
-        return false;
-    }
-    ESP_LOGE(TAG, "%s: invalid path '%s'", method, path.c_str());
-    esp_report_error(on_error, MoonrakerErrorType::VALIDATION_ERROR, method,
-                     "Invalid path contains directory traversal or illegal characters");
-    return true;
-}
-
-bool esp_reject_invalid_file_root(const std::string& root, const char* method,
-                                  const std::function<void(const MoonrakerError&)>& on_error) {
-    if (esp_is_safe_file_root(root)) {
-        return false;
-    }
-    ESP_LOGE(TAG, "%s: invalid file root '%s'", method, root.c_str());
-    esp_report_error(on_error, MoonrakerErrorType::VALIDATION_ERROR, method,
-                     "Invalid file root contains illegal characters");
-    return true;
-}
 
 // Percent-encodes a Moonraker file path the same way desktop's HUrl::escape(
 // path, "/.-_") does: alnum and "/.-_" pass through unescaped, everything else
@@ -195,9 +116,9 @@ void esp_rest_unimplemented_err(const char* sym,
 
 // Task 15 R2: validation for call_rest_get's endpoint, mirroring desktop's
 // is_safe_endpoint (src/api/moonraker_rest_api.cpp) — rejects directory
-// traversal and CRLF/NUL injection. Deliberately NOT esp_is_safe_path above:
+// traversal and CRLF/NUL injection. Deliberately NOT moonraker_internal::is_safe_path:
 // REST endpoints are absolute paths ("/server/ace/info"), which
-// esp_is_safe_path rejects (it's shaped for Moonraker file-root paths).
+// is_safe_path rejects (it's shaped for Moonraker file-root paths).
 bool esp_is_safe_endpoint(const std::string& endpoint) {
     if (endpoint.empty()) {
         return false;
@@ -218,6 +139,7 @@ bool esp_is_safe_endpoint(const std::string& endpoint) {
 // of the lane's PSRAM accumulation buffer. EspHttpLane fails loud rather than
 // silently truncating an over-cap response (see esp_http_lane.cpp).
 constexpr size_t REST_GET_CAP_BYTES = 16 * 1024;
+constexpr size_t WHOLE_FILE_CAP_BYTES = 64 * 1024;
 } // namespace
 
 // ============================================================================
@@ -233,15 +155,16 @@ MoonrakerFileTransferAPI::~MoonrakerFileTransferAPI() = default;
 void MoonrakerFileTransferAPI::download_file_partial(const std::string& root,
                                                      const std::string& path, size_t max_bytes,
                                                      StringCallback on_success,
-                                                     ErrorCallback on_error) {
-    if (esp_reject_invalid_path(path, "download_file_partial", on_error))
+                                                     ErrorCallback on_error, CancelFlag cancelled) {
+    on_success = helix::http_epoch::guard_reply(on_success, on_error, "download_file_partial");
+    if (moonraker_internal::reject_invalid_path(path, "download_file_partial", on_error))
         return;
-    if (esp_reject_invalid_file_root(root, "download_file_partial", on_error))
+    if (moonraker_internal::reject_invalid_file_root(root, "download_file_partial", on_error))
         return;
 
     if (http_base_url_.empty()) {
-        esp_report_error(on_error, MoonrakerErrorType::CONNECTION_LOST, "download_file_partial",
-                         "HTTP base URL not configured");
+        moonraker_internal::report_error(on_error, MoonrakerErrorType::CONNECTION_LOST,
+                                         "download_file_partial", "HTTP base URL not configured");
         return;
     }
 
@@ -250,19 +173,21 @@ void MoonrakerFileTransferAPI::download_file_partial(const std::string& root,
 
     bool queued = helix::http::EspHttpLane::instance().submit_get(
         url, max_bytes,
-        [on_success](const uint8_t* data, size_t size) {
+        [on_success](std::string& body) {
             if (on_success) {
-                on_success(std::string(reinterpret_cast<const char*>(data), size));
+                on_success(body);
             }
         },
         [on_error](const std::string& message) {
-            esp_report_error(on_error, MoonrakerErrorType::UNKNOWN, "download_file_partial",
-                             message);
-        });
+            moonraker_internal::report_error(on_error, MoonrakerErrorType::UNKNOWN,
+                                             "download_file_partial", message);
+        },
+        std::move(cancelled));
 
     if (!queued) {
-        esp_report_error(on_error, MoonrakerErrorType::UNKNOWN, "download_file_partial",
-                         "HTTP request could not be queued — try again");
+        moonraker_internal::report_error(on_error, MoonrakerErrorType::QUEUE_FULL,
+                                         "download_file_partial",
+                                         "HTTP request could not be queued — try again");
     }
 }
 
@@ -270,21 +195,68 @@ void MoonrakerFileTransferAPI::download_file_partial(const std::string& root,
 // file header). download_file_to_path is additionally hard-banned by R3
 // regardless of reachability: its contract IS file materialization. ---
 
-void MoonrakerFileTransferAPI::download_file(const std::string&, const std::string&, StringCallback,
-                                             ErrorCallback on_error) {
-    esp_rest_unimplemented_err("MoonrakerFileTransferAPI::download_file", on_error);
+// Whole-file reads into memory: config files (AFC.cfg and friends), which are a
+// few KB. The lane asks for a bounded prefix, so one byte past the cap is
+// requested and receiving it means the file is too big: that is an error, never
+// a truncated file handed back as the whole thing.
+void MoonrakerFileTransferAPI::download_file(const std::string& root, const std::string& path,
+                                             StringCallback on_success, ErrorCallback on_error) {
+    on_success = helix::http_epoch::guard_reply(on_success, on_error, "download_file");
+    if (moonraker_internal::reject_invalid_path(path, "download_file", on_error))
+        return;
+    if (moonraker_internal::reject_invalid_file_root(root, "download_file", on_error))
+        return;
+    if (http_base_url_.empty()) {
+        moonraker_internal::report_error(on_error, MoonrakerErrorType::CONNECTION_LOST,
+                                         "download_file", "HTTP base URL not configured");
+        return;
+    }
+
+    std::string url = http_base_url_ + "/server/files/" + root + "/" + esp_url_escape_path(path);
+    bool queued = helix::http::EspHttpLane::instance().submit_get(
+        url, WHOLE_FILE_CAP_BYTES + 1,
+        [on_success, on_error](std::string& body) {
+            if (body.size() > WHOLE_FILE_CAP_BYTES) {
+                moonraker_internal::report_error(
+                    on_error, MoonrakerErrorType::UNKNOWN, "download_file",
+                    "file exceeds the " + std::to_string(WHOLE_FILE_CAP_BYTES) +
+                        "-byte in-memory cap");
+                return;
+            }
+            if (on_success) {
+                on_success(body);
+            }
+        },
+        [on_error](const std::string& message) {
+            moonraker_internal::report_error(on_error, MoonrakerErrorType::UNKNOWN, "download_file",
+                                             message);
+        });
+    if (!queued) {
+        moonraker_internal::report_error(on_error, MoonrakerErrorType::QUEUE_FULL, "download_file",
+                                         "HTTP request could not be queued — try again");
+    }
 }
 
 // The head-range sibling above is real because EspHttpLane::submit_get() asks
 // for a bounded prefix ("bytes=0-N"). A tail needs a suffix range ("bytes=-N"),
-// which the lane does not express, and nothing on this surface reads slicer
-// footers -- so this stays a stub rather than growing the lane an option with
-// no caller. Defining it is not optional even so: it is a non-pure virtual, so
+// which the lane does not express, so this stays a stub and
+// supports_tail_reads() says so: the detail view's footer read asks first and
+// skips it. Defining it is not optional even so: it is a non-pure virtual, so
 // MoonrakerFileTransferAPI's vtable references it and the link fails without a
 // definition.
 void MoonrakerFileTransferAPI::download_file_tail(const std::string&, const std::string&, size_t,
                                                   StringCallback, ErrorCallback on_error) {
     esp_rest_unimplemented_err("MoonrakerFileTransferAPI::download_file_tail", on_error);
+}
+
+// No file materialization on this transport (R3), so callers that want a local
+// copy ask supports_local_copies() first and never reach the stub.
+bool MoonrakerFileTransferAPI::supports_local_copies() const {
+    return false;
+}
+
+bool MoonrakerFileTransferAPI::supports_tail_reads() const {
+    return false;
 }
 
 void MoonrakerFileTransferAPI::download_file_to_path(const std::string&, const std::string&,
@@ -360,17 +332,15 @@ void MoonrakerRestAPI::call_rest_get(const std::string& endpoint, RestCallback o
 
     bool queued = helix::http::EspHttpLane::instance().submit_get(
         url, REST_GET_CAP_BYTES,
-        [on_complete](const uint8_t* data, size_t size) {
+        [on_complete](std::string& body) {
             RestResponse resp;
             resp.success = true;
             resp.status_code = 200; // the lane only succeeds on HTTP 200/206
-            if (size > 0) {
-                try {
-                    resp.data = nlohmann::json::parse(reinterpret_cast<const char*>(data),
-                                                      reinterpret_cast<const char*>(data) + size);
-                } catch (const nlohmann::json::exception&) {
+            if (!body.empty()) {
+                resp.data = nlohmann::json::parse(body, nullptr, false);
+                if (resp.data.is_discarded()) {
                     resp.data = nlohmann::json::object();
-                    resp.data["_raw_body"] = std::string(reinterpret_cast<const char*>(data), size);
+                    resp.data["_raw_body"] = std::move(body);
                 }
             }
             if (on_complete) {
@@ -404,8 +374,16 @@ void MoonrakerRestAPI::call_rest_post(const std::string&, const json&, RestCallb
     }
 }
 
-void MoonrakerRestAPI::wled_get_strips(RestCallback, ErrorCallback on_error) {
-    esp_rest_unimplemented_err("MoonrakerRestAPI::wled_get_strips", on_error);
+// No WLED on this platform: report an empty strip map, so LED discovery settles
+// without an error on every connect.
+void MoonrakerRestAPI::wled_get_strips(RestCallback on_success, ErrorCallback) {
+    if (on_success) {
+        RestResponse resp;
+        resp.success = true;
+        resp.status_code = 200;
+        resp.data = json{{"result", {{"strips", json::object()}}}};
+        on_success(resp);
+    }
 }
 
 void MoonrakerRestAPI::wled_set_strip(const std::string&, const std::string&, int, int,

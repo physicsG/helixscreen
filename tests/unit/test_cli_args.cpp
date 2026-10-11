@@ -9,8 +9,10 @@
  * not require graphics or printer state.
  */
 
+#include "../test_helpers/scoped_runtime_config.h"
 #include "cli_args.h"
 #include "runtime_config.h"
+#include "test_helpers/scoped_env.h"
 
 #include <vector>
 
@@ -47,7 +49,7 @@ TEST_CASE("CliArgs: default values", "[cli_args]") {
     CliArgs args;
 
     SECTION("screen settings default to auto") {
-        REQUIRE(args.screen_size == ScreenSize::MEDIUM);
+        REQUIRE_FALSE(args.size_was_explicit);
         REQUIRE(args.dpi == -1);
         REQUIRE(args.display_num == -1);
         REQUIRE(args.x_pos == -1);
@@ -88,34 +90,83 @@ TEST_CASE("CliArgs: default values", "[cli_args]") {
 }
 
 // ============================================================================
-// ScreenSize Enum Tests
+// Screen size parsing
 // ============================================================================
 
-TEST_CASE("ScreenSize enum values", "[cli_args]") {
-    SECTION("All enum values are distinct") {
-        REQUIRE(ScreenSize::TINY != ScreenSize::SMALL);
-        REQUIRE(ScreenSize::TINY != ScreenSize::MEDIUM);
-        REQUIRE(ScreenSize::TINY != ScreenSize::LARGE);
-        REQUIRE(ScreenSize::TINY != ScreenSize::XLARGE);
-        REQUIRE(ScreenSize::SMALL != ScreenSize::MEDIUM);
-        REQUIRE(ScreenSize::SMALL != ScreenSize::LARGE);
-        REQUIRE(ScreenSize::SMALL != ScreenSize::XLARGE);
-        REQUIRE(ScreenSize::MEDIUM != ScreenSize::LARGE);
-        REQUIRE(ScreenSize::MEDIUM != ScreenSize::XLARGE);
-        REQUIRE(ScreenSize::LARGE != ScreenSize::XLARGE);
+TEST_CASE("parse_screen_size_string: named presets", "[cli_args]") {
+    int w = 0, h = 0;
+
+    SECTION("each preset resolves to its resolution") {
+        REQUIRE(parse_screen_size_string("micro", w, h));
+        REQUIRE(w == 480);
+        REQUIRE(h == 272);
+
+        REQUIRE(parse_screen_size_string("medium", w, h));
+        REQUIRE(w == 800);
+        REQUIRE(h == 480);
+
+        REQUIRE(parse_screen_size_string("large", w, h));
+        REQUIRE(w == 1024);
+        REQUIRE(h == 600);
+
+        REQUIRE(parse_screen_size_string("xlarge", w, h));
+        REQUIRE(w == 1280);
+        REQUIRE(h == 720);
     }
 
-    SECTION("ScreenSize ordering matches expected breakpoint order") {
-        // Verify enum values are ordered TINY < SMALL < MEDIUM < LARGE < XLARGE
-        REQUIRE(static_cast<int>(ScreenSize::TINY) < static_cast<int>(ScreenSize::SMALL));
-        REQUIRE(static_cast<int>(ScreenSize::SMALL) < static_cast<int>(ScreenSize::MEDIUM));
-        REQUIRE(static_cast<int>(ScreenSize::MEDIUM) < static_cast<int>(ScreenSize::LARGE));
-        REQUIRE(static_cast<int>(ScreenSize::LARGE) < static_cast<int>(ScreenSize::XLARGE));
+    SECTION("names are case-insensitive") {
+        REQUIRE(parse_screen_size_string("Large", w, h));
+        REQUIRE(w == 1024);
+        REQUIRE(h == 600);
+
+        REQUIRE(parse_screen_size_string("XLARGE", w, h));
+        REQUIRE(w == 1280);
+        REQUIRE(h == 720);
+
+        REQUIRE(parse_screen_size_string("MeDiUm", w, h));
+        REQUIRE(w == 800);
+        REQUIRE(h == 480);
     }
 
-    SECTION("Default CliArgs screen_size is MEDIUM") {
-        CliArgs args;
-        REQUIRE(args.screen_size == ScreenSize::MEDIUM);
+    SECTION("an unknown name is still rejected whatever its case") {
+        REQUIRE_FALSE(parse_screen_size_string("HUGE", w, h));
+    }
+}
+
+TEST_CASE("parse_screen_size_string: WxH", "[cli_args]") {
+    int w = 0, h = 0;
+
+    SECTION("landscape and portrait both pass through verbatim") {
+        REQUIRE(parse_screen_size_string("1920x1080", w, h));
+        REQUIRE(w == 1920);
+        REQUIRE(h == 1080);
+
+        REQUIRE(parse_screen_size_string("480x800", w, h));
+        REQUIRE(w == 480);
+        REQUIRE(h == 800);
+    }
+
+    SECTION("a capital separator parses too") {
+        REQUIRE(parse_screen_size_string("1920X1080", w, h));
+        REQUIRE(w == 1920);
+        REQUIRE(h == 1080);
+    }
+
+    SECTION("a rejected string leaves the outputs untouched") {
+        w = -7;
+        h = -9;
+        REQUIRE_FALSE(parse_screen_size_string("not-a-size", w, h));
+        REQUIRE(w == -7);
+        REQUIRE(h == -9);
+    }
+
+    SECTION("malformed and non-positive dimensions are rejected") {
+        REQUIRE_FALSE(parse_screen_size_string("800x", w, h));
+        REQUIRE_FALSE(parse_screen_size_string("x480", w, h));
+        REQUIRE_FALSE(parse_screen_size_string("0x480", w, h));
+        REQUIRE_FALSE(parse_screen_size_string("800x0", w, h));
+        REQUIRE_FALSE(parse_screen_size_string("-800x480", w, h));
+        REQUIRE_FALSE(parse_screen_size_string("", w, h));
     }
 }
 
@@ -297,4 +348,96 @@ TEST_CASE("parse_cli_args: without --test the wizard gate is untouched", "[cli_a
     REQUIRE(parse({"helix-screen"}, args));
     REQUIRE_FALSE(args.skip_wizard);
     REQUIRE_FALSE(args.force_wizard);
+}
+
+// --- creator5_zmod implies the real AMS backend --------------------------
+//
+// The persona is mock HARDWARE, not a mock backend: MoonrakerClientMock
+// publishes Z-Mod's objects and the production AmsBackendToolChanger is meant
+// to drive them, which is what --real-ams selects. An explicit HELIX_MOCK_AMS
+// names its own topology, so it wins over the persona's implication.
+
+TEST_CASE("parse_cli_args: HELIX_MOCK_PRINTER=creator5_zmod implies --real-ams under --test",
+          "[cli_args][mock]") {
+    ScopedRuntimeConfig scoped_config;
+    ScopedEnv ams{"HELIX_MOCK_AMS", nullptr};
+    ScopedEnv printer{"HELIX_MOCK_PRINTER", "creator5_zmod"};
+    CliArgs args;
+    REQUIRE(parse({"helix-screen", "--test"}, args));
+    REQUIRE(get_runtime_config()->use_real_ams);
+}
+
+TEST_CASE("parse_cli_args: an explicit HELIX_MOCK_AMS wins over the persona", "[cli_args][mock]") {
+    ScopedRuntimeConfig scoped_config;
+    ScopedEnv ams{"HELIX_MOCK_AMS", "toolchanger"};
+    ScopedEnv printer{"HELIX_MOCK_PRINTER", "creator5_zmod"};
+    CliArgs args;
+    REQUIRE(parse({"helix-screen", "--test"}, args));
+    REQUIRE_FALSE(get_runtime_config()->use_real_ams);
+}
+
+// A real printer behind a mock AMS would see the mock's fabricated spool ids
+// set active and PATCHed on its real Spoolman, so a real connection means the
+// real AMS, even when HELIX_MOCK_AMS names a mock topology.
+TEST_CASE("parse_cli_args: --real-moonraker implies --real-ams", "[cli_args][mock]") {
+    ScopedRuntimeConfig scoped_config;
+    ScopedEnv printer{"HELIX_MOCK_PRINTER", nullptr};
+    SECTION("with no HELIX_MOCK_AMS") {
+        ScopedEnv ams{"HELIX_MOCK_AMS", nullptr};
+        CliArgs args;
+        REQUIRE(parse({"helix-screen", "--test", "--real-moonraker"}, args));
+        REQUIRE(get_runtime_config()->use_real_ams);
+        REQUIRE_FALSE(get_runtime_config()->should_mock_ams());
+    }
+    SECTION("over an explicit HELIX_MOCK_AMS") {
+        ScopedEnv ams{"HELIX_MOCK_AMS", "toolchanger"};
+        CliArgs args;
+        REQUIRE(parse({"helix-screen", "--test", "--real-moonraker"}, args));
+        REQUIRE(get_runtime_config()->use_real_ams);
+    }
+}
+
+TEST_CASE("parse_cli_args: other personas do not imply --real-ams", "[cli_args][mock]") {
+    ScopedRuntimeConfig scoped_config;
+    ScopedEnv ams{"HELIX_MOCK_AMS", nullptr};
+    ScopedEnv printer{"HELIX_MOCK_PRINTER", "creator5"};
+    CliArgs args;
+    REQUIRE(parse({"helix-screen", "--test"}, args));
+    REQUIRE_FALSE(get_runtime_config()->use_real_ams);
+}
+
+// ============================================================================
+// --sim-speed
+// ============================================================================
+
+TEST_CASE("parse_cli_args: --sim-speed", "[cli_args][simclock]") {
+    ScopedRuntimeConfig scoped_config;
+    CliArgs args;
+    int w = 0, h = 0;
+
+    SECTION("accepted with --test") {
+        const char* argv[] = {"helix-screen", "--test", "--sim-speed", "60"};
+        REQUIRE(parse_cli_args(4, const_cast<char**>(argv), args, w, h));
+        REQUIRE(get_runtime_config()->sim_speedup == Catch::Approx(60.0));
+    }
+
+    SECTION("rejected without --test") {
+        // Outside a mock run the factor would fast-forward the pre-print clock
+        // against a real printer.
+        const char* argv[] = {"helix-screen", "--sim-speed", "60"};
+        REQUIRE_FALSE(parse_cli_args(3, const_cast<char**>(argv), args, w, h));
+    }
+
+    SECTION("1.0 without --test is not a speedup, so it passes") {
+        const char* argv[] = {"helix-screen", "--sim-speed", "1.0"};
+        REQUIRE(parse_cli_args(3, const_cast<char**>(argv), args, w, h));
+    }
+
+    SECTION("out of range is rejected, not clamped") {
+        const char* below[] = {"helix-screen", "--test", "--sim-speed", "0.5"};
+        REQUIRE_FALSE(parse_cli_args(4, const_cast<char**>(below), args, w, h));
+
+        const char* above[] = {"helix-screen", "--test", "--sim-speed", "1001"};
+        REQUIRE_FALSE(parse_cli_args(4, const_cast<char**>(above), args, w, h));
+    }
 }

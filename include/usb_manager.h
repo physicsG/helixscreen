@@ -114,6 +114,15 @@ class UsbManager {
     std::vector<UsbGcodeFile> scan_for_gcode(const std::string& mount_path,
                                              int max_depth = 3) const;
 
+    /**
+     * @brief The backend, for work that must not reach back into this manager
+     *
+     * A worker thread that may outlive the manager scans through this rather
+     * than through scan_for_gcode(). The manager's destructor stops the
+     * backend, after which its scans return nothing.
+     */
+    std::shared_ptr<UsbBackend> backend_snapshot() const;
+
     // ========================================================================
     // Test API (for UsbBackendMock)
     // ========================================================================
@@ -128,7 +137,9 @@ class UsbManager {
   private:
     void on_backend_event(UsbEvent event, const UsbDrive& drive);
 
-    std::unique_ptr<UsbBackend> backend_;
+    // Shared so a scan can walk the stick without holding mutex_: stop()
+    // dropping its reference mid-walk leaves the scan's copy alive.
+    std::shared_ptr<UsbBackend> backend_;
     DriveCallback drive_callback_;
     mutable std::mutex mutex_;
     bool force_mock_;

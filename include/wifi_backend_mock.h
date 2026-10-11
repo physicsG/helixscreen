@@ -6,11 +6,13 @@
 #include "wifi_backend.h"
 
 #include <atomic>
-#include <map>
+#include <condition_variable>
+#include <mutex>
 #include <optional>
 #include <random>
 #include <set>
 #include <thread>
+#include <vector>
 
 /**
  * @brief Mock WiFi network with password for testing
@@ -58,24 +60,32 @@ class WifiBackendMock : public WifiBackend {
     void stop() override;
     bool is_running() const override;
 
-    void register_event_callback(const std::string& name,
-                                 std::function<void(const std::string&)> callback) override;
-
     WiFiError trigger_scan() override;
     WiFiError get_scan_results(std::vector<WiFiNetwork>& networks) override;
-    WiFiError connect_network(const std::string& ssid, const std::string& password) override;
+    WiFiError connect_network(const std::string& ssid, const std::string& password,
+                              bool is_hidden) override;
     WiFiError disconnect_network() override;
     WiFiError set_radio_enabled(bool on) override;
     bool is_radio_enabled() const override;
     ConnectionStatus get_status() override;
     bool supports_5ghz() const override;
     WiFiError forget_network(const std::string& ssid) override;
+    bool supports_forget() const override {
+        return true;
+    }
     std::optional<helix::wifi::WifiInterface> resolved_interface() const override;
 
     // Test helpers — allow test code to drive state directly without going
     // through the simulated async connect/disconnect flow.
     void set_connected_state(bool connected, const std::string& ssid = "",
                              const std::string& ip = "", int signal = 0);
+
+    /// Whether the most recent connect_network() request asked for a hidden
+    /// association. Lets tests observe the flag WiFiManager threaded through,
+    /// which the mock otherwise drops on the floor.
+    bool last_connect_hidden() const {
+        return last_connect_hidden_;
+    }
 
     /// Test helper — stands in for real interface resolution (which this
     /// backend never performs on its own) so tests can exercise callers that
@@ -85,21 +95,43 @@ class WifiBackendMock : public WifiBackend {
         resolved_interface_ = std::move(iface);
     }
 
+    /// Test helper — makes join_displaces_wired_link() answer true, mirroring
+    /// a single-transport daemon holding the link on Ethernet so the
+    /// manager's advisory can be tested without a netd daemon.
+    void set_join_displaces_wired_link_for_test(bool displaces) {
+        join_displaces_wired_link_ = displaces;
+    }
+
+    bool join_displaces_wired_link() override {
+        return join_displaces_wired_link_;
+    }
+
+    /// Test helpers for callers that must never block on a status read: the
+    /// threads get_status() ran on since the last clear, and a gate that makes
+    /// the next get_status() take its answer, then wait for release.
+    std::vector<std::thread::id> status_callers();
+    void clear_status_callers();
+    void hold_next_status();
+    void release_held_status();
+
   private:
     // ========================================================================
     // Internal State
     // ========================================================================
 
     bool running_;
+    std::mutex status_mutex_; ///< get_status() runs on workers; tests write the state
+    std::condition_variable status_cv_;
+    std::vector<std::thread::id> status_callers_;
+    bool hold_next_status_{false};
+    bool status_held_{false};
     bool connected_;
     std::string connected_ssid_;
     std::string connected_ip_;
     int connected_signal_;
     bool radio_enabled_{true};
+    bool join_displaces_wired_link_{false};
     std::optional<helix::wifi::WifiInterface> resolved_interface_;
-
-    // Event system
-    std::map<std::string, std::function<void(const std::string&)>> callbacks_;
 
     // Async timers for scan/connect simulation (std::thread based - no LVGL dependency)
     std::thread scan_thread_;
@@ -125,7 +157,6 @@ class WifiBackendMock : public WifiBackend {
 
     void init_mock_networks();
     void vary_signal_strengths(); // Add realism with signal variations
-    void fire_event(const std::string& event_name, const std::string& data = "");
 
     // Thread functions for async scan/connect simulation
     void scan_thread_func();
@@ -134,5 +165,6 @@ class WifiBackendMock : public WifiBackend {
     // Connection simulation state
     std::string connecting_ssid_;
     std::string connecting_password_;
+    bool last_connect_hidden_ = false;
     std::function<void(bool, const std::string&)> connect_callback_;
 };

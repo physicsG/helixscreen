@@ -43,7 +43,7 @@ namespace helix {
 class UpgradeNudge {
   public:
     enum class Intensity {
-        Off = 0,        // No in-app nudge beyond Settings > About
+        Off = 0,        // No in-app nudge beyond Settings > Updates
         Normal = 1,     // Red dot on Settings icon
         Aggressive = 2, // Persistent top-banner for 1.0 rollout
     };

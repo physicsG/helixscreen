@@ -6,7 +6,7 @@
 # This prevents regressions like the check_klipper_ecosystem bug (#39).
 
 WORKTREE_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-INSTALL_SH="$WORKTREE_ROOT/scripts/install.sh"
+INSTALL_SH="$INSTALL_BUNDLE"
 MODULAR_DIR="$WORKTREE_ROOT/scripts/lib/installer"
 
 # Extract function names defined in a shell script (lines matching "funcname() {")

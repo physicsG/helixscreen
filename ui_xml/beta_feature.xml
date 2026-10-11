@@ -20,8 +20,12 @@
     <style name="badge_pos_narrow" translate_x="36"/>
     <style name="badge_pos_wide" translate_x="68"/>
   </styles>
+  <!-- flex_flow gives the wrapper a layout so a wrapped row hiding itself later
+       (a capability binding) re-measures this content-sized wrapper. Without a
+       layout LVGL never marks the parent dirty and the row leaves a blank gap. -->
   <view extends="lv_obj"
-        width="100%" height="content" style_pad_top="0" style_pad_left="0" style_pad_bottom="0" scrollable="false">
+        width="100%" height="content" style_pad_top="0" style_pad_left="0" style_pad_bottom="0" scrollable="false"
+        flex_flow="column">
     <bind_flag_if_eq subject="show_beta_features" flag="hidden" ref_value="0"/>
     <bind_style name="beta_accent" subject="show_beta_features" ref_value="1"/>
     <bind_style_if_lt name="gutter_narrow" subject="ui_breakpoint" ref_value="2"/>

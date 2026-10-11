@@ -24,17 +24,21 @@
 #pragma once
 
 #include "advanced_panel_types.h"
+#include "axis_move.h"
 #include "belt_tension_types.h"
 #include "calibration_types.h"
 #include "json_fwd.h"
 #include "moonraker_error.h"
 #include "moonraker_types.h"
+#include "pa_calibration.h"
 #include "print_history_data.h"
 #include "spoolman_types.h"
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
@@ -83,6 +87,16 @@ class IMotionAPI {
 
     virtual void move_to_position(char axis, double position, double feedrate,
                                   SuccessCallback on_success, ErrorCallback on_error) = 0;
+
+    /// Absolute multi-axis move: XY combines on one G0, Z gets its own. Z moves
+    /// first (a lift clears the bed before travel), EXCEPT when the target
+    /// descends below a known current_z, where XY travels first and Z descends
+    /// last. An empty target completes immediately without an RPC.
+    /// current_z is the Z the toolhead sits at when this script starts; pass
+    /// nullopt when unknown and Z always moves first.
+    virtual void move_to(const helix::AxisTarget& target, double xy_feedrate, double z_feedrate,
+                         SuccessCallback on_success, ErrorCallback on_error,
+                         std::optional<double> current_z = std::nullopt) = 0;
 };
 
 /**
@@ -189,7 +203,10 @@ class IQueueAPI {
 
     virtual void pause_queue(SuccessCallback on_success, ErrorCallback on_error) = 0;
 
-    virtual void add_job(const std::string& filename, SuccessCallback on_success,
+    /// Success carries the resulting queue: Moonraker's post_job response
+    /// holds `queued_jobs` and `queue_state`, and the caller identifies the
+    /// new job as the job_id that was absent before the call.
+    virtual void add_job(const std::string& filename, StatusCallback on_success,
                          ErrorCallback on_error) = 0;
 
     virtual void remove_jobs(const std::vector<std::string>& job_ids, SuccessCallback on_success,
@@ -233,6 +250,27 @@ class IHistoryAPI {
  */
 class IAdvancedAPI {
   public:
+    // ========== Timeout constants for long-running G-code commands ==========
+    static constexpr uint32_t CALIBRATION_TIMEOUT_MS =
+        300000; // 5 min - BED_MESH_CALIBRATE, SCREWS_TILT_CALCULATE
+    /// A printer-shipped calibration sequence does its own heating, homing and
+    /// wipe inside the one script, so its clock starts at heat-begin rather than
+    /// at probe-begin. CALIBRATION_TIMEOUT_MS measures only the probing and
+    /// times out mid-probe here — which flips the panel to ERROR and cools the
+    /// machine while it is still measuring.
+    static constexpr uint32_t SELF_PREPARED_CALIBRATION_TIMEOUT_MS = 900000; // 15 min
+    static constexpr uint32_t LEVELING_TIMEOUT_MS = 600000; // 10 min - QGL, Z_TILT_ADJUST
+    static constexpr uint32_t SHAPER_TIMEOUT_MS =
+        600000; // 10 min - SHAPER_CALIBRATE, MEASURE_AXES_NOISE. Analysis alone
+                // measured ~3m50s per axis on a Creality K1C host; the analysis
+                // phase shows a spinner + elapsed time, so the longer wait is
+                // not silent.
+    static constexpr uint32_t PID_TIMEOUT_MS =
+        1200000; // 20 min - PID_CALIBRATE (slow-cooling beds, e.g. AD5M Pro, exceed 15 min)
+    static constexpr uint32_t MPC_TIMEOUT_MS = 1200000; // 20 min - MPC_CALIBRATE
+    static constexpr uint32_t PROBING_TIMEOUT_MS =
+        180000; // 3 min - PROBE_CALIBRATE, Z_ENDSTOP_CALIBRATE
+
     using SuccessCallback = std::function<void()>;
     using ErrorCallback = std::function<void(const MoonrakerError&)>;
     using BedMeshProgressCallback = std::function<void(int current, int total)>;
@@ -241,6 +279,14 @@ class IAdvancedAPI {
     using HeaterControlTypeCallback = std::function<void(const std::string& control_type)>;
     using PIDProgressCallback = std::function<void(int sample, float tolerance)>;
     using PIDCalibrateCallback = std::function<void(float kp, float ki, float kd)>;
+
+    /// Measured pressure advance (Klipper's K). One number is the whole result.
+    using PACalibrateCallback = std::function<void(float k)>;
+    /// Best-effort per-attempt progress: how many candidate measurements the
+    /// firmware has reported so far, against how many a run typically makes,
+    /// and the candidate K that attempt tried. `k_so_far` is <= 0 when the
+    /// firmware reports an attempt without a value.
+    using PAProgressCallback = std::function<void(int attempt, int expected, float k_so_far)>;
 
     /// Result struct for MPC calibration
     struct MPCResult {
@@ -253,7 +299,12 @@ class IAdvancedAPI {
     using MPCCalibrateCallback = std::function<void(const MPCResult&)>;
     using MPCProgressCallback =
         std::function<void(int phase, int total_phases, const std::string& description)>;
-    using BeltResonanceCallback = std::function<void(const std::string& csv_path)>;
+    /// (percent 0-100, current sweep frequency Hz). Fires off the LVGL thread.
+    using BeltSweepProgressCallback = std::function<void(int percent, float freq_hz)>;
+    /// Fires off the LVGL thread with the parsed curve.
+    using BeltCurveCallback = std::function<void(const helix::calibration::BeltCurve& curve)>;
+    /// Stops listening and suppresses every later callback. Idempotent.
+    using BeltRunCancel = std::function<void()>;
     using BeltHardwareCallback =
         std::function<void(const helix::calibration::BeltTensionHardware&)>;
 
@@ -276,7 +327,32 @@ class IAdvancedAPI {
     get_available_objects(std::function<void(const std::vector<std::string>&)> on_success,
                           ErrorCallback on_error) = 0;
 
-    virtual void start_bed_mesh_calibrate(BedMeshProgressCallback on_progress,
+    /**
+     * @brief What to send for a mesh calibration.
+     *
+     * The command is resolved by the caller through StandardMacros, so a printer
+     * that ships its own sequence, a user who configured one in Settings, and a
+     * plain BED_MESH_CALIBRATE all arrive here the same way.
+     */
+    struct BedMeshCommand {
+        /// Resolved gcode. May be multi-line — Klipper's gcode.script accepts it.
+        std::string script;
+
+        /// The script prepares the printer itself, so probe_preparation must not
+        /// prepend its own. True for a printer-shipped sequence: those are
+        /// authored per machine, and the database's skip_if_macro_in cannot
+        /// recognise them because they are scripts rather than macro names.
+        bool self_prepares = false;
+
+        /// A sequence helixscreen ships for this printer, so every command in it
+        /// is meant to exist and an unknown one fails the calibration. Any other
+        /// script may call something the printer does not define; that is logged,
+        /// and the calibration is judged by what it stores.
+        bool shipped = false;
+    };
+
+    virtual void start_bed_mesh_calibrate(const BedMeshCommand& command,
+                                          BedMeshProgressCallback on_progress,
                                           SuccessCallback on_complete, ErrorCallback on_error,
                                           int expected_probes = 0, int probe_samples = 1) = 0;
 
@@ -319,6 +395,16 @@ class IAdvancedAPI {
                                      ErrorCallback on_error,
                                      MPCProgressCallback on_progress = nullptr) = 0;
 
+    /// Run one automatic pressure-advance calibration. `proc` carries the
+    /// already-resolved command and console patterns (helix::pacal), so this
+    /// layer stays firmware-agnostic: it sends, it watches, it reports.
+    /// Returns a cancel handle that stops listening; no callback fires after
+    /// it. The firmware still finishes the run it is in.
+    virtual std::function<void()> start_pa_calibrate(const helix::pacal::Procedure& proc,
+                                                     PACalibrateCallback on_complete,
+                                                     ErrorCallback on_error,
+                                                     PAProgressCallback on_progress = nullptr) = 0;
+
     virtual void get_machine_limits(helix::MachineLimitsCallback on_success,
                                     ErrorCallback on_error) = 0;
 
@@ -338,16 +424,14 @@ class IAdvancedAPI {
 
     virtual void detect_belt_hardware(BeltHardwareCallback on_complete, ErrorCallback on_error) = 0;
 
-    virtual void test_belt_resonance(const std::string& axis_param, const std::string& output_name,
-                                     helix::AdvancedProgressCallback on_progress,
-                                     BeltResonanceCallback on_complete, ErrorCallback on_error) = 0;
-
-    virtual void excite_belt_at_frequency(const std::string& axis_param, float freq_hz,
-                                          SuccessCallback on_complete, ErrorCallback on_error) = 0;
-
-    virtual void download_accel_csv(const std::string& filename,
-                                    std::function<void(const std::string& csv_data)> on_complete,
-                                    ErrorCallback on_error) = 0;
+    /// TEST_RESONANCES AXIS=<axis_param> OUTPUT=resonances NAME=<output_name> SWEEPING_PERIOD=0.
+    /// Completes on Klipper's "Resonances data written to" line; there is no
+    /// overall deadline (the caller owns stall detection and cancels).
+    [[nodiscard]] virtual BeltRunCancel test_belt_resonance(const std::string& axis_param,
+                                                            const std::string& output_name,
+                                                            BeltSweepProgressCallback on_progress,
+                                                            BeltCurveCallback on_complete,
+                                                            ErrorCallback on_error) = 0;
 };
 
 /**
@@ -389,6 +473,9 @@ class ITransfersAPI {
     using ErrorCallback = std::function<void(const MoonrakerError&)>;
     using StringCallback = std::function<void(const std::string&)>;
     using ProgressCallback = std::function<void(size_t current, size_t total)>;
+    /// Set by the requester when it no longer wants the result: a request still
+    /// queued is dropped unsent and reports an error instead.
+    using CancelFlag = std::shared_ptr<const std::atomic<bool>>;
 
     virtual ~ITransfersAPI() = default;
 
@@ -397,7 +484,7 @@ class ITransfersAPI {
 
     virtual void download_file_partial(const std::string& root, const std::string& path,
                                        size_t max_bytes, StringCallback on_success,
-                                       ErrorCallback on_error) = 0;
+                                       ErrorCallback on_error, CancelFlag cancelled = nullptr) = 0;
 
     /// Download only the LAST @p max_bytes of a file (HTTP suffix range).
     ///
@@ -418,6 +505,17 @@ class ITransfersAPI {
                                        const std::string& dest_path, StringCallback on_success,
                                        ErrorCallback on_error,
                                        ProgressCallback on_progress = nullptr) = 0;
+
+    /// Whether download_file_to_path() can write a local copy. A transport with
+    /// nowhere to keep one answers false, and callers skip the request.
+    virtual bool supports_local_copies() const {
+        return true;
+    }
+
+    /// Whether download_file_tail() can fetch a file's last bytes.
+    virtual bool supports_tail_reads() const {
+        return true;
+    }
 
     virtual void download_thumbnail(const std::string& thumbnail_path,
                                     const std::string& cache_path, StringCallback on_success,
@@ -511,12 +609,12 @@ class ISpoolmanAPI {
     virtual void delete_spoolman_filament(int filament_id, SuccessCallback on_success,
                                           ErrorCallback on_error) = 0;
 
-    virtual void get_spoolman_external_vendors(helix::VendorListCallback on_success,
-                                               ErrorCallback on_error) = 0;
-
-    virtual void get_spoolman_external_filaments(const std::string& vendor_name,
-                                                 helix::FilamentListCallback on_success,
-                                                 ErrorCallback on_error) = 0;
+    /// Search SpoolmanDB for up to @p limit filaments matching @p query word by
+    /// word. A server without the search route answers on_error with an error
+    /// whose is_not_found() is true.
+    virtual void search_spoolman_external_filaments(const std::string& query, int limit,
+                                                    helix::ExternalFilamentListCallback on_success,
+                                                    ErrorCallback on_error) = 0;
 };
 
 /**

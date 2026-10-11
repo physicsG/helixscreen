@@ -44,6 +44,18 @@ The Standard Macros system provides a unified registry that maps semantic operat
 | `bed_level` | Physical bed leveling | QUAD_GANTRY_LEVEL, QGL, Z_TILT_ADJUST | — |
 | `clean_nozzle` | Nozzle cleaning | CLEAN_NOZZLE, NOZZLE_WIPE, WIPE_NOZZLE, CLEAR_NOZZLE | HELIX_CLEAN_NOZZLE |
 | `heat_soak` | Chamber/bed soak | HEAT_SOAK, CHAMBER_SOAK, SOAK | — |
+| `park_toolhead` | Park the toolhead | PARK, PARK_TOOLHEAD, TOOLHEAD_PARK | HELIX_PARK_TOOLHEAD (not shipped) |
+
+> **Park fallback note:** `HELIX_PARK_TOOLHEAD` is a reserved name with no
+> definition in `assets/config/helix_macros.cfg`, so the fallback tier never
+> resolves for this slot - an undetected, unconfigured `park_toolhead` answers
+> **Empty**. The Motion screen's Park button then falls back to its own move:
+> Z up 10mm, then over the rear of the plate (`src/ui/ui_panel_motion.cpp#park_over_plate`,
+> `helix::plate_rear_park()`), homing first when needed. Detection is exact-name like every other slot, so underscore-prefixed
+> or suffixed variants (`_PARK`, `PARK_2`, ...) never match; a printer wanting
+> detection must expose one of the three names verbatim. Config key:
+> `standard_macros/park_toolhead` (per-printer prefix applies); the settings row
+> is the **Park** row in Macro Buttons.
 
 ### Slot States
 
@@ -86,7 +98,7 @@ This is the forwarding contract behind the adaptive bed mesh behavior. It is a
 property of the **single** Bed Mesh pre-print toggle — there is no separate
 sub-row. When the printer's `pre_print_options.bed_mesh` entry declares an
 `adaptive_param`, the firmware exposes `[exclude_object]`, and there is no custom
-`calibration.bed_mesh_gcode` template, `PrinterState::apply_dynamic_options()`
+`calibration.bed_mesh_gcode` template, `PrinterProfileState::apply_dynamic_options()`
 sets `PrePrintOption::adaptive_active` on the bed_mesh option. That single flag:
 
 - **relabels** the toggle from "Auto Bed Mesh" to **"Adaptive Bed Mesh"**
@@ -119,12 +131,27 @@ struct StandardMacroInfo {
     std::string slot_name;        // "load_filament"
     std::string display_name;     // "Load Filament"
     std::string configured_macro; // User override (or empty)
+    std::string shipped_macro;    // Sequence the printer database ships (or empty)
+    bool shipped_self_prepares;   // That sequence heats, homes and prepares itself
     std::string detected_macro;   // Auto-detected (or empty)
     std::string fallback_macro;   // HELIX_* fallback (or empty)
 
     bool is_empty() const;        // No macro available
-    std::string get_macro() const; // Returns first non-empty: configured > detected > fallback
+    // Returns first non-empty: configured > shipped > detected > fallback
+    std::string get_macro() const;
 };
+
+The shipped tier carries a whole sequence rather than a macro name, so a printer
+that needs pre-probe housekeeping expresses it as data in `printer_database.json`
+instead of a branch in the panel that runs the operation. `resolve_macro_script()`
+turns a slot into something runnable: it substitutes `{profile_arg}` (the bed mesh
+profile argument with its leading space, empty for the firmware's `default` profile)
+and `{bed_temp}` (the whole-degree bed temperature to probe at), reports whether the
+script marks a place for the profile argument, whether the winner is the shipped tier
+(whose commands are all meant to exist), whether it brings its own preparation (only
+a shipped sequence whose entry sets `calibration.bed_mesh_self_prepares`), and
+can be told to refuse the `HELIX_*` fallback — those are "if needed" macros that
+return without acting, which is wrong for a button that means "do it now".
 
 class StandardMacros {
 public:
@@ -186,7 +213,8 @@ When executing a macro, the system checks in order:
     "bed_mesh": "",
     "bed_level": "",
     "clean_nozzle": "",
-    "heat_soak": ""
+    "heat_soak": "",
+    "park_toolhead": ""
   }
 }
 ```
@@ -274,7 +302,7 @@ void FilamentPanel::execute_load() {
 |-------|-------|-------|-------------|
 | 1 | Core class | `standard_macros.h/cpp` | Compiles, unit tests pass |
 | 2 | Discovery integration | `moonraker_manager.cpp` | Auto-detection logs on connect |
-| 3 | Overlay UI | `macro_buttons_overlay.xml`, `xml_registration.cpp` | UI renders, dropdowns populate |
+| 3 | Overlay UI | `macro_buttons_overlay.xml` | UI renders, dropdowns populate |
 | 4 | Settings handler | `ui_panel_settings.cpp/h` | Overlay opens, saves to config |
 | 5 | Controls integration | `ui_panel_controls.cpp/h` | Quick buttons use StandardMacros |
 | 6 | Filament integration | `ui_panel_filament.cpp` | Load/Unload use StandardMacros |
@@ -291,7 +319,7 @@ void FilamentPanel::execute_load() {
   - Access via `MoonrakerAPI::hardware_discovery()`
 - `src/printer/macro_manager.cpp` - HELIX_* macro definitions
 - `include/config.h` - `MacroConfig` struct, `get_macro()` method
-- `ui_xml/settings_display_sound_overlay.xml` - Reference overlay pattern
+- `ui_xml/settings_display_overlay.xml` - Reference overlay pattern
 
 ### Files Created (historical planning list; paths updated to as-built locations)
 - `include/standard_macros.h`
@@ -301,7 +329,6 @@ void FilamentPanel::execute_load() {
 ### Files Modified (historical planning list; paths updated to as-built locations)
 - `src/ui/ui_panel_settings.cpp/h` - Add overlay handler
 - `ui_xml/settings_panel.xml` - Add action row
-- `src/xml_registration.cpp` - Register new component
 - `src/application/moonraker_manager.cpp` - Init after discovery
 - `src/ui/ui_panel_controls.cpp/h` - Use StandardMacros
 - `src/ui/ui_panel_filament.cpp` - Use StandardMacros

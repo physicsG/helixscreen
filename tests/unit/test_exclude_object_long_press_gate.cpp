@@ -53,7 +53,7 @@ struct LongPressHarness {
     explicit LongPressHarness(LVGLUITestFixture& f) : fx(f) {
         manager = std::make_unique<PrintExcludeObjectManager>(fx.api(), fx.state(), nullptr);
         manager->init();
-        // observe_int_sync defers its initial-value callback through UpdateQueue;
+        // observe<int> defers its initial-value callback through UpdateQueue;
         // drain it so the first real drain isn't carrying a STANDBY fire-on-subscribe.
         UpdateQueue::instance().drain();
     }
@@ -66,20 +66,20 @@ struct LongPressHarness {
         // are plain members that init_subjects() does not touch — so anything left
         // here survives into the next test (and into unrelated ones), where a
         // manager syncs it on init and silently rejects a long-press.
-        fx.state().set_excluded_objects({});
-        fx.state().get_excluded_objects_state()->set_defined_objects({});
+        fx.state().excluded_objects_state().set_excluded_objects({});
+        fx.state().excluded_objects_state().set_defined_objects({});
         UpdateQueue::instance().drain();
     }
 
     /// Populate what the slicer's EXCLUDE_OBJECT_DEFINE markers would have set.
     void define_objects(const std::vector<std::string>& names) {
-        fx.state().get_excluded_objects_state()->set_defined_objects(names);
+        fx.state().excluded_objects_state().set_defined_objects(names);
         UpdateQueue::instance().drain();
     }
 
     /// Push Klipper's exclude_object.excluded_objects the way a status update does.
     void klipper_excluded(const std::unordered_set<std::string>& names) {
-        fx.state().set_excluded_objects(names);
+        fx.state().excluded_objects_state().set_excluded_objects(names);
         UpdateQueue::instance().drain();
     }
 };

@@ -265,6 +265,31 @@ which was measured resolving to MedusaHC when the signal was wired as an MMU typ
 `pin_watch_object_name()`). Deciding that pin_watch + toolchanger *means* MedusaHC is the
 add-on module's business - see the vendor-abstraction rule in the root `CLAUDE.md`.
 
+## Tool mapping
+
+Which remap route a MedusaHC takes follows from the same fact as the tool names above:
+whether `[toolchanger]` is there.
+
+| Configuration | `[toolchanger]` | Route | How a remap lands |
+|---------------|-----------------|-------|-------------------|
+| (a) Irbis3D Python controller | Yes | `RemapStrategy::Native` | `ASSIGN_TOOL TOOL=T{n} N={tool}`; the file is untouched |
+| (b) topi314's fork | No | `RemapStrategy::GcodeRewrite` | The job file is rewritten and printed through the HelixPrint plugin |
+
+`AmsBackendToolChanger::get_remap_strategy()` asks `tool_commands_.present`, which
+`resolve_tool_commands()` sets exactly when `[toolchanger]` is absent. The provider row
+does not decide it: any changer without klipper-toolchanger rewrites.
+
+On the rewrite route the file is the only thing that moves, so a start macro that takes
+per-tool values (`EXTRUDER_TEMP`, `EXTRUDER1_TEMP`, ...) keeps heating the tools the slicer
+chose while the rewritten body selects others. The rewrite handles `INITIAL_TOOL=` and
+`TOOL=`, and the Filament Mapping dialog warns about the rest while the picks move a tool; see
+[the remapper](FILAMENT_MANAGEMENT.md#gcode-tool-remapper). The recommended slicer start
+G-code for these machines is in the user guide,
+[Printers that remap by rewriting the file](../user/guide/filament.md#printers-that-remap-by-rewriting-the-file).
+
+`HELIX_MOCK_AMS=medusahc-fork` runs the rewrite route end to end in `--test`; set
+`helix_plugin_installed` to `1` with `ctl set` to get past the plugin gate.
+
 ## Adding another hotend changer
 
 Add one `Provider` row to the table in `toolchanger_addon.cpp`: a detection predicate,
@@ -313,7 +338,14 @@ Not yet reconciled, and worth knowing before extending this:
   (`t{N}_gcode_{x,y,z}_offset`) is the persistent source, loaded into `TOOL_OFFSET` at
   startup, and MedusaHC works off the runtime `TOOL_OFFSET` values. A temporary nudge means
   writing `TOOL_OFFSET`; a permanent one means writing both. klipper-toolchanger's own
-  offset model is not the authority. We still touch neither.
+  offset model is not the authority. The Z half is handled: the `TOOL_OFFSET macro` row in
+  `src/printer/tool_offsets.cpp` reads `t{N}_off_z` and writes both stores. X and Y are
+  currently **declined** (`supports_axis()` is false for them), because only the Z runtime
+  variable names are confirmed against a machine — not because MedusaHC lacks the axes: the
+  durable store already names `t{N}_gcode_{x,y}_offset`. Verifying the X/Y runtime names
+  (presumably `t{N}_off_x` / `t{N}_off_y`) is all that `supports_axis_tool_offset_macro()`
+  needs to widen; the rest of the row is already axis-agnostic. Until then the tool
+  object's `gcode_x_offset` is not consulted on this printer either.
 - **`layer`, `PRIME_FLAGS_*`, `MHC_CLEAN`** - per-tool priming and cleaning scheduled
   against layer number. No analogue in the toolchanger model, unused today.
 

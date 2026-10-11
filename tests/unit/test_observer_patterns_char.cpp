@@ -55,7 +55,7 @@ TEST_CASE("CHAR: deci_to_degrees_f preserves decimals",
  *     [](lv_observer_t* observer, lv_subject_t* subject) {
  *         auto* self = static_cast<FilamentPanel*>(lv_observer_get_user_data(observer));
  *         self->nozzle_current_ = deci_to_degrees(lv_subject_get_int(subject));
- *         helix::ui::async_call(...);  // Queue UI updates
+ *         helix::ui::queue_update(...);  // Queue UI updates
  *     }, this);
  */
 TEST_CASE_METHOD(LVGLTestFixture, "CHAR: FilamentPanel transforms decidegrees in callback",

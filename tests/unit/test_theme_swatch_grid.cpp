@@ -15,6 +15,8 @@
 // These tests pin that structure — a reordered or dropped swatch breaks the
 // contract the theme editor's users navigate by.
 
+#include "ui_color_picker.h"
+
 #include "../lvgl_test_fixture.h"
 
 #include <algorithm>
@@ -82,6 +84,9 @@ std::vector<uint32_t> swatch_colors(lv_obj_t* grid) {
 struct GridFixture : public LVGLTestFixture {
     GridFixture() {
         REQUIRE(lv_xml_register_component_from_file("A:ui_xml/globals.xml") == LV_RESULT_OK);
+        helix::ui::ensure_swatch_grid_subjects();
+        REQUIRE(lv_xml_register_component_from_file("A:ui_xml/components/color_swatch.xml") ==
+                LV_RESULT_OK);
         REQUIRE(lv_xml_register_component_from_file("A:ui_xml/components/theme_swatch_grid.xml") ==
                 LV_RESULT_OK);
     }
@@ -199,6 +204,9 @@ struct PaletteSwitchFixture : public LVGLTestFixture {
 
     PaletteSwitchFixture() {
         REQUIRE(lv_xml_register_component_from_file("A:ui_xml/globals.xml") == LV_RESULT_OK);
+        helix::ui::ensure_swatch_grid_subjects();
+        REQUIRE(lv_xml_register_component_from_file("A:ui_xml/components/color_swatch.xml") ==
+                LV_RESULT_OK);
         REQUIRE(lv_xml_register_component_from_file("A:ui_xml/components/color_swatch_grid.xml") ==
                 LV_RESULT_OK);
         REQUIRE(lv_xml_register_component_from_file("A:ui_xml/components/theme_swatch_grid.xml") ==

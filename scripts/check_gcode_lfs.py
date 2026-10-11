@@ -10,7 +10,7 @@
 # read_range()'s cast to off_t truncates.
 #
 # The request cannot live in the source. mk/rules.mk compiles every app TU with
-# $(PCH_FLAGS), which force-includes include/lvgl_pch.h ahead of the file, and
+# $(FORCED_INCLUDE), which force-includes include/lvgl_pch.h ahead of the file, and
 # that header pulls in <chrono>/<cstdint>/<mutex>/<string> - so glibc has latched
 # _FILE_OFFSET_BITS before line 1 of any .cpp is read. A #define in the .cpp
 # compiles clean and does absolutely nothing. It has to arrive on the command

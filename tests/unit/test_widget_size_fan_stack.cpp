@@ -239,8 +239,9 @@ TEST_CASE_METHOD(LVGLUITestFixture, "fan_stack icons line up one under the other
     // Real fans so all three rows stay visible and the roles resolve. The
     // bare `fan` object maps to "Part Cooling Fan" (device_display_name.cpp
     // DIRECT_MAPPINGS) — same trio as the fit-the-cell case below.
-    state().init_fans({"fan", "heater_fan hotend_fan", "fan_generic chamber_circulation"});
-    state().update_fan_speed("fan", 0.35);
+    state().fan_state().init_fans(
+        {"fan", "heater_fan hotend_fan", "fan_generic chamber_circulation"});
+    state().fan_state().update_fan_speed("fan", 0.35);
     helix::ui::UpdateQueue::instance().drain();
 
     PanelWidgetHarness<FanStackWidget> h(test_screen(), "fan_stack", state());
@@ -274,7 +275,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "fan_stack icons line up one under the other
     CHECK(lv_obj_get_x(part_speed) == lv_obj_get_x(hotend_speed));
 
     // --- Speed ramp after layout: "0%" -> "100%" must fit the fixed row. ---
-    state().update_fan_speed("heater_fan hotend_fan", 1.0);
+    state().fan_state().update_fan_speed("heater_fan hotend_fan", 1.0);
     helix::ui::UpdateQueue::instance().drain();
     process_lvgl(30);
 
@@ -407,7 +408,8 @@ TEST_CASE_METHOD(LVGLUITestFixture, "fan_stack rows fit the cell they were grant
     // The bare Klipper `fan` object maps to "Part Cooling Fan"
     // (device_display_name.cpp DIRECT_MAPPINGS) — the exact string the defect
     // report showed clipped.
-    state().init_fans({"fan", "heater_fan hotend_fan", "fan_generic chamber_circulation"});
+    state().fan_state().init_fans(
+        {"fan", "heater_fan hotend_fan", "fan_generic chamber_circulation"});
     helix::ui::UpdateQueue::instance().drain();
 
     struct FitCase {

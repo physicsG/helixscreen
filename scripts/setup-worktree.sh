@@ -30,8 +30,9 @@ usage() {
     echo "                  refreshed first. Use --base HEAD for the local tip.)"
     echo "  --no-fetch      Skip refreshing the upstream before branching from it"
     echo "  --setup-only    Only set up an existing worktree, don't create it"
-    echo "  --unlink        Replace lib/ symlinks with what git expects, so git"
-    echo "                  status/merge/rebase/stash work in this worktree"
+    echo "  --unlink        Replace the remaining lib/ symlinks with what git expects,"
+    echo "                  so git status/merge/rebase/stash work in this worktree."
+    echo "                  Private checkouts (lvgl, libhv, lua, helix-xml) are untouched."
     echo "  --relink        Restore the lib/ symlinks after --unlink"
     echo "  --no-build      Skip the initial build after setup"
     echo "  -h, --help      Show this help message"
@@ -56,9 +57,12 @@ usage() {
     echo "  - Adopts the main tree's mtimes for byte-identical files (so the cloned"
     echo "    objects are not all invalidated by the fresh checkout timestamp)"
     echo "  - Configures ccache for cross-worktree reuse (no cold rebuild per worktree)"
-    echo "  - Clones build/obj/ from main tree (APFS copy-on-write — instant, zero disk)"
-    echo "  - Symlinks lib/ from main tree (all submodule sources + generated headers)"
-    echo "  - Clones compiled libraries (libhv.a) and the PCH — copies, not symlinks,"
+    echo "  - Clones build/obj/ from main tree (APFS copy-on-write — instant, zero disk),"
+    echo "    unless this branch adds or removes a .c/.cpp relative to the main tree"
+    echo "  - Symlinks the unpatched lib/ submodules from the main tree (sources +"
+    echo "    generated headers), and gives lvgl/libhv/lua/helix-xml a PRIVATE checkout"
+    echo "    copied from it, so this branch's patches/ stay inside this worktree"
+    echo "  - Clones compiled libraries (libhv.a) — copies, not symlinks,"
     echo "    so a rebuild here can never write back into the main tree"
     echo "  - Copies compile_commands.json with rewritten paths for clangd"
     echo "  - Symlinks node_modules and .venv for font/python tools"
@@ -66,10 +70,11 @@ usage() {
 }
 
 # --- lib/ link management ---------------------------------------------------
-# A worktree shares the main tree's submodule checkouts, and their IN-TREE build
-# artifacts, by symlinking each lib/ entry. That sharing is the whole point: it
-# is why a fresh worktree builds in seconds instead of recompiling every
-# submodule from cold.
+# A worktree shares the main tree's checkout of every submodule NOT listed in
+# LIB_PRIVATE_SUBMODULES, and their IN-TREE build artifacts, by symlinking each
+# lib/ entry. That sharing is the whole point: it is why a fresh worktree builds
+# in seconds instead of recompiling every submodule from cold. It is safe for
+# exactly the submodules no tree rewrites — nothing patches or edits these.
 #
 # The cost is that git refuses to scan a tree where a gitlink path is a symlink:
 #   error: expected submodule path 'lib/cpp-terminal' not to be a symbolic link
@@ -77,7 +82,8 @@ usage() {
 #
 # So: --unlink before a merge/rebase, --relink after. Relinking is NOT optional;
 # the empty submodule dirs left by --unlink have no headers, so the build fails
-# with 'lvgl.h file not found' until the symlinks are back.
+# with a missing-header error until the symlinks are back. Private checkouts are
+# untouched by both — they are what git expects and never blocked a scan.
 #
 # Do NOT unlink to commit. `git add <paths>` and `git commit` both work fine with
 # the symlinks in place, and the pre-commit hook compiles the tree — so committing
@@ -86,7 +92,7 @@ usage() {
 #
 # Nothing here may run while a build is in flight: pulling lib/ out from under a
 # compile fails it with missing headers, and re-linking mid-compile is no better.
-LIB_NON_SUBMODULE_ITEMS=("tuibox.h" "mdns")
+LIB_NON_SUBMODULE_ITEMS=("mdns")
 
 # Submodules that get a PRIVATE checkout per worktree instead of a symlink.
 #
@@ -95,10 +101,18 @@ LIB_NON_SUBMODULE_ITEMS=("tuibox.h" "mdns")
 # every worktree would be editing the MAIN tree's submodule working tree, so two
 # branches could not hold different engine versions, and an edit made here would
 # surface as dirt in main's `git status` for another session to sweep up.
-# Cloning it costs ~2.6 MB and a couple of seconds, against the ~GB and minutes
-# that make symlinking lvgl/libhv worthwhile. A real checkout is also what git
-# expects, so these need no --unlink/--relink dance.
-LIB_PRIVATE_SUBMODULES=("lib/helix-xml")
+#
+# lib/lvgl, lib/libhv and lib/lua are here for a second reason: they are the
+# submodules patches/ rewrites, and patches/ is per-branch. One shared checkout
+# cannot satisfy two branches carrying different patch sets — each tree's
+# `make reapply-patches` redefines what every other tree compiles, and each
+# correct action invalidates the other. A private checkout per worktree is what
+# makes the patch set a property of the branch again
+# (prestonbrown/helixscreen#1471).
+#
+# A real checkout is also what git expects, so these need no --unlink/--relink
+# dance; the submodules still symlinked below do.
+LIB_PRIVATE_SUBMODULES=("lib/helix-xml" "lib/lvgl" "lib/libhv" "lib/lua")
 
 is_private_submodule() {
     local candidate="$1" p
@@ -119,6 +133,15 @@ clone_file() {
         || cp --reflink=auto "$src" "$dst" 2>/dev/null \
         || cp "$src" "$dst"
     touch -r "$src" "$dst"
+}
+
+# clone_file for a whole directory. Every fallback preserves mtimes: GNU cp -R
+# does not on its own, so the reflink form has to carry -a as well.
+clone_tree() {
+    local src="$1" dst="$2"
+    cp -Rc "$src" "$dst" 2>/dev/null \
+        || cp -a --reflink=auto "$src" "$dst" 2>/dev/null \
+        || cp -a "$src" "$dst"
 }
 
 # Symlinked submodules only. A private checkout is a normal submodule as far as
@@ -164,6 +187,10 @@ BRANCH=""
 WORKTREE_PATH=""
 BASE_REF=""
 NO_FETCH=false
+# What the branch was actually cut from, carried to the closing summary.
+CREATED_BASE=""
+CREATED_BASE_SHA=""
+EXCLUDED_COMMITS=0
 EXPLICIT_PATH=""
 
 while [[ $# -gt 0 ]]; do
@@ -219,6 +246,7 @@ done
 
 # Get the main tree root (where this script lives)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/worktree_lib.sh"
 MAIN_TREE="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # SCRIPT_DIR/.. is only the main tree when this copy of the script is the main
@@ -316,6 +344,34 @@ if [[ -e "$WORKTREE_PATH" ]] \
     exit 1
 fi
 
+# Guard: an existing directory is a worktree someone may be working in. The
+# default path is derived from the branch's LAST segment, so a new branch can
+# name a peer's tree, and every step below rewrites what it finds: it resets the
+# private submodules' patches, syncs mtimes and prunes build outputs. Only a
+# deliberate re-setup (--setup-only) of the same branch, by the session that
+# holds the tree, may proceed.
+if [[ -e "$WORKTREE_PATH" ]]; then
+    EXISTING_BRANCH="$(git -C "$WORKTREE_PATH" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    if [[ "$EXISTING_BRANCH" != "$BRANCH" ]]; then
+        echo -e "${RED}Error: $WORKTREE_PATH already holds branch '${EXISTING_BRANCH:-<not a git worktree>}', not '$BRANCH'.${RESET}"
+        echo -e "The directory is named after the branch's last segment ('${BRANCH##*/}')."
+        echo -e "Pick a branch whose last segment is free, or name a path as the second argument."
+        exit 1
+    fi
+    if [[ "$SETUP_ONLY" == "false" ]]; then
+        echo -e "${RED}Error: a worktree for '$BRANCH' already exists at $WORKTREE_PATH.${RESET}"
+        echo -e "To re-run setup on it: ${CYAN}$0 --setup-only $BRANCH${RESET}"
+        exit 1
+    fi
+    if [[ -x "$SCRIPT_DIR/helix-claim" ]] \
+       && CLAIM_HOLDER="$(cd "$MAIN_TREE" && "$SCRIPT_DIR/helix-claim" held-by-other "worktree:$(basename "$WORKTREE_PATH")")"; then
+        echo -e "${RED}Error: another session holds $WORKTREE_PATH:${RESET}"
+        echo -e "$CLAIM_HOLDER"
+        echo -e "Ask it (the message= address above) before setting up its tree."
+        exit 1
+    fi
+fi
+
 echo -e "${BOLD}${CYAN}HelixScreen Worktree Setup${RESET}"
 echo -e "Main tree:    $MAIN_TREE"
 echo -e "Worktree:     $WORKTREE_PATH"
@@ -324,62 +380,69 @@ echo ""
 
 # Step 1: Create or verify the worktree
 if [[ "$SETUP_ONLY" == "false" ]]; then
-    if [[ -d "$WORKTREE_PATH" ]]; then
-        echo -e "${YELLOW}Worktree already exists at $WORKTREE_PATH${RESET}"
-    else
-        # Validate BEFORE creating anything, so a rejected invocation leaves no
-        # half-made directory behind.
-        BRANCH_EXISTS=false
-        if git -C "$MAIN_TREE" rev-parse --verify --quiet "$BRANCH" >/dev/null; then
-            BRANCH_EXISTS=true
-            if [[ -n "$BASE_REF" ]]; then
-                echo -e "${RED}Error: branch '$BRANCH' already exists, so --base would be ignored.${RESET}"
-                echo -e "Drop --base to check it out, or pick a new branch name."
-                exit 1
-            fi
-        elif [[ -n "$BASE_REF" ]] \
-             && ! git -C "$MAIN_TREE" rev-parse --verify --quiet "$BASE_REF" >/dev/null; then
-            echo -e "${RED}Error: base '$BASE_REF' is not a valid commit or branch${RESET}"
+    # Validate BEFORE creating anything, so a rejected invocation leaves no
+    # half-made directory behind.
+    BRANCH_EXISTS=false
+    if git -C "$MAIN_TREE" rev-parse --verify --quiet "$BRANCH" >/dev/null; then
+        BRANCH_EXISTS=true
+        if [[ -n "$BASE_REF" ]]; then
+            echo -e "${RED}Error: branch '$BRANCH' already exists, so --base would be ignored.${RESET}"
+            echo -e "Drop --base to check it out, or pick a new branch name."
             exit 1
         fi
-
-        echo -e "${CYAN}Creating worktree...${RESET}"
-        mkdir -p "$(dirname "$WORKTREE_PATH")"
-
-        if [[ "$BRANCH_EXISTS" == "true" ]]; then
-            git -C "$MAIN_TREE" worktree add "$WORKTREE_PATH" "$BRANCH"
-        else
-            # Branch from the tracked upstream rather than local HEAD. A main
-            # that has not been fetched today omits commits the new branch is
-            # meant to build on, and nothing surfaces that gap until the work is
-            # already under review. "--base HEAD" asks for the local tip.
-            BASE="$BASE_REF"
-            if [[ -z "$BASE" ]]; then
-                UPSTREAM="$(git -C "$MAIN_TREE" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
-                if [[ -n "$UPSTREAM" ]]; then
-                    if [[ "$NO_FETCH" != "true" ]]; then
-                        echo -e "${CYAN}Refreshing $UPSTREAM...${RESET}"
-                        git -C "$MAIN_TREE" fetch --quiet "${UPSTREAM%%/*}" "${UPSTREAM#*/}" 2>/dev/null \
-                            || echo -e "${YELLOW}  fetch failed; using the $UPSTREAM already on disk${RESET}"
-                    fi
-                    BASE="$UPSTREAM"
-                else
-                    echo -e "${YELLOW}Current branch tracks no upstream; falling back to HEAD${RESET}"
-                    BASE="HEAD"
-                fi
-            fi
-            BASE_DESC="$(git -C "$MAIN_TREE" log --oneline -1 "$BASE")"
-            echo -e "${YELLOW}Branch '$BRANCH' doesn't exist, creating from ${BOLD}$BASE${RESET}${YELLOW}:${RESET}"
-            echo -e "  ${CYAN}$BASE_DESC${RESET}"
-            LOCAL_ONLY="$(git -C "$MAIN_TREE" rev-list --count "$BASE..HEAD" 2>/dev/null || echo 0)"
-            if [[ "$LOCAL_ONLY" != "0" ]]; then
-                echo -e "${YELLOW}  local HEAD has $LOCAL_ONLY commit(s) not in $BASE, excluded from this branch${RESET}"
-                echo -e "${YELLOW}  re-run with --base HEAD if you meant to build on them${RESET}"
-            fi
-            git -C "$MAIN_TREE" worktree add -b "$BRANCH" "$WORKTREE_PATH" "$BASE"
-        fi
-        echo -e "${GREEN}✓ Worktree created${RESET}"
+    elif [[ -n "$BASE_REF" ]] \
+         && ! git -C "$MAIN_TREE" rev-parse --verify --quiet "$BASE_REF" >/dev/null; then
+        echo -e "${RED}Error: base '$BASE_REF' is not a valid commit or branch${RESET}"
+        exit 1
     fi
+
+    echo -e "${CYAN}Creating worktree...${RESET}"
+    mkdir -p "$(dirname "$WORKTREE_PATH")"
+
+    if [[ "$BRANCH_EXISTS" == "true" ]]; then
+        git -C "$MAIN_TREE" worktree add "$WORKTREE_PATH" "$BRANCH"
+    else
+        # Branch from the tracked upstream rather than local HEAD. A main
+        # that has not been fetched today omits commits the new branch is
+        # meant to build on, and nothing surfaces that gap until the work is
+        # already under review. "--base HEAD" asks for the local tip.
+        BASE="$BASE_REF"
+        if [[ -z "$BASE" ]]; then
+            UPSTREAM="$(git -C "$MAIN_TREE" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
+            if [[ -n "$UPSTREAM" ]]; then
+                if [[ "$NO_FETCH" != "true" ]]; then
+                    echo -e "${CYAN}Refreshing $UPSTREAM...${RESET}"
+                    git -C "$MAIN_TREE" fetch --quiet "${UPSTREAM%%/*}" "${UPSTREAM#*/}" 2>/dev/null \
+                        || echo -e "${YELLOW}  fetch failed; using the $UPSTREAM already on disk${RESET}"
+                fi
+                BASE="$UPSTREAM"
+            else
+                echo -e "${YELLOW}Current branch tracks no upstream; falling back to HEAD${RESET}"
+                BASE="HEAD"
+            fi
+        fi
+        BASE_DESC="$(git -C "$MAIN_TREE" log --oneline -1 "$BASE")"
+        echo -e "${YELLOW}Branch '$BRANCH' doesn't exist, creating from ${BOLD}$BASE${RESET}${YELLOW}:${RESET}"
+        echo -e "  ${CYAN}$BASE_DESC${RESET}"
+        LOCAL_ONLY="$(git -C "$MAIN_TREE" rev-list --count "$BASE..HEAD" 2>/dev/null || echo 0)"
+        # Only worth saying when the base was picked FOR you. An explicit
+        # --base onto another line (a backport, say) leaves hundreds of
+        # commits behind by design, and counting them there is noise.
+        if [[ -z "$BASE_REF" && "$LOCAL_ONLY" != "0" ]]; then
+            echo -e "${YELLOW}  local HEAD has $LOCAL_ONLY commit(s) not in $BASE, excluded from this branch${RESET}"
+            echo -e "${YELLOW}  re-run with --base HEAD if you meant to build on them${RESET}"
+        fi
+        # Repeated in the closing summary. A build can run for minutes after
+        # this point, so a reader who sees only the tail of the log would
+        # otherwise never learn which base the branch was cut from.
+        CREATED_BASE="$BASE"
+        CREATED_BASE_SHA="$(git -C "$MAIN_TREE" rev-parse --short "$BASE")"
+        if [[ -z "$BASE_REF" ]]; then
+            EXCLUDED_COMMITS="$LOCAL_ONLY"
+        fi
+        git -C "$MAIN_TREE" worktree add -b "$BRANCH" "$WORKTREE_PATH" "$BASE"
+    fi
+    echo -e "${GREEN}✓ Worktree created${RESET}"
 else
     if [[ ! -d "$WORKTREE_PATH" ]]; then
         echo -e "${RED}Error: Worktree doesn't exist at $WORKTREE_PATH${RESET}"
@@ -445,41 +508,278 @@ link_lib_from_main() {
     done
 
     checkout_private_submodules
+    warn_if_docker_mount_probes_lvgl
+
+    echo -e "${CYAN}Restoring shared submodule pointers...${RESET}"
+    restore_shared_module_pointers "$MAIN_TREE" "$WORKTREE_PATH"
+}
+
+# mk/cross.mk bind-mounts the directory the symlinked lib/ entries point into, so
+# a Docker cross-build resolves them the same way inside the container. A tree
+# that works out whether it is a worktree by asking where lib/lvgl really lives
+# gets the wrong answer once lvgl is a private checkout under this worktree: it
+# concludes there is nothing to mount, and the entries that ARE still symlinks
+# dangle. Native builds are unaffected.
+warn_if_docker_mount_probes_lvgl() {
+    local cross="$WORKTREE_PATH/mk/cross.mk"
+    [[ -f "$cross" ]] || return 0
+    grep -q 'realpath lib/lvgl' "$cross" || return 0
+    echo -e "  ${YELLOW}mk/cross.mk on this branch detects a worktree by probing lib/lvgl,${RESET}"
+    echo -e "  ${YELLOW}which is now a private checkout here — Docker cross-builds from this${RESET}"
+    echo -e "  ${YELLOW}worktree will not mount the main tree's lib/. Merge the branch that${RESET}"
+    echo -e "  ${YELLOW}generalizes that detection, or cross-build from the main tree.${RESET}"
+}
+
+# The patch-drift stamp check_patch_drift.py keeps in a submodule's git dir. It
+# records which revision of each patch went in, so it belongs to the checkout it
+# describes and has to travel with a copied one.
+PATCH_DRIFT_STAMP="helix-patches-applied.json"
+
+# Set when a private submodule ends up somewhere the main tree's patches do not
+# describe, so the patch reconcile below knows it has real work to do.
+PRIVATE_SUBMODULES_NEED_PATCHES=false
+
+# Git names a submodule's git dir after its .gitmodules SECTION, which is not
+# always its path: lib/lvgl is section "lvgl", so its git dir is modules/lvgl
+# while lib/helix-xml's is modules/lib/helix-xml.
+submodule_section_name() {
+    local want="$1"
+    git -C "$MAIN_TREE" config --file .gitmodules --get-regexp '^submodule\..*\.path$' 2>/dev/null \
+        | awk -v p="$want" '$2 == p { n = $1; sub(/^submodule\./, "", n); sub(/\.path$/, "", n); print n; exit }'
+}
+
+submodule_origin_url() {
+    git -C "$MAIN_TREE" config --file .gitmodules --get "submodule.$1.url" 2>/dev/null || true
+}
+
+# True when a directory holds anything besides its own .git.
+has_worktree_content() {
+    local dir="$1" entry
+    for entry in "$dir"/* "$dir"/.[!.]*; do
+        [[ -e "$entry" || -L "$entry" ]] || continue
+        [[ "$(basename "$entry")" == ".git" ]] && continue
+        return 0
+    done
+    return 1
+}
+
+# Materialize one private submodule by COPYING the main tree's checkout rather
+# than checking it out fresh. A fresh checkout writes fresh mtimes, and every
+# object in the cloned build/obj/ that was compiled against those headers is
+# then out of date — a new worktree would pay a full cold rebuild for a
+# submodule whose content it already has. The copy-on-write primitive keeps the
+# mtimes, so those objects stay valid.
+#
+# Three pieces have to be separated for this to be a private checkout rather
+# than a second view of a shared one:
+#   - the FILES are copied, so this tree's patches only ever rewrite its own;
+#   - the GIT DIR is a local clone, which hardlinks the object store: no network,
+#     no second copy of 500 MB of packs, and independent refs, HEAD and index;
+#   - the `.git` file is written fresh. Copying the source's would name the
+#     source's git dir, which is precisely the sharing being removed here.
+# Returns non-zero when there is nothing to copy from, leaving the caller to
+# fall back to a fresh clone.
+materialize_private_submodule() {
+    local submod="$1"
+    local src="$MAIN_TREE/$submod" dst="$WORKTREE_PATH/$submod"
+    local name url src_gitdir wt_gitdir pinned src_head entry base
+
+    # A checked-out submodule always carries its own `.git`. A deinitialized one
+    # is a bare empty directory, and rev-parse inside it answers the
+    # SUPERPROJECT's git dir and HEAD — copying from that would fill lib/<sub>
+    # with a clone of helixscreen itself and report success.
+    [[ -e "$src/.git" ]] || return 1
+    src_gitdir="$(git -C "$src" rev-parse --absolute-git-dir 2>/dev/null || true)"
+    src_head="$(git -C "$src" rev-parse --verify --quiet HEAD 2>/dev/null || true)"
+    [[ -n "$src_gitdir" && -n "$src_head" && -d "$src_gitdir" ]] || return 1
+
+    name="$(submodule_section_name "$submod")"
+    [[ -n "$name" ]] || name="$submod"
+    wt_gitdir="$WORKTREE_GIT_DIR/modules/$name"
+    pinned="$(git -C "$WORKTREE_PATH" rev-parse --verify --quiet "HEAD:$submod" 2>/dev/null || true)"
+
+    rm -rf "$wt_gitdir"
+    mkdir -p "$(dirname "$wt_gitdir")" "$(dirname "$dst")"
+    git clone --quiet --local --no-checkout --separate-git-dir "$wt_gitdir" \
+        "$src_gitdir" "$dst" 2>/dev/null || return 1
+    git -C "$wt_gitdir" config core.worktree "$dst"
+    url="$(submodule_origin_url "$submod")"
+    # origin is the public remote, not the neighbouring checkout it was cloned
+    # from, so committing and pushing from in here works as it does in main.
+    [[ -n "$url" ]] && git -C "$dst" remote set-url origin "$url"
+
+    for entry in "$src"/* "$src"/.[!.]*; do
+        [[ -e "$entry" ]] || continue
+        base="$(basename "$entry")"
+        [[ "$base" == ".git" ]] && continue
+        clone_tree "$entry" "$dst/"
+    done
+
+    # HEAD and the index describe the commit the files were copied FROM, so the
+    # checkout reads exactly as the main tree's does: clean apart from the patch
+    # hunks in its working tree.
+    git -C "$dst" update-ref --no-deref HEAD "$src_head"
+    git -C "$dst" read-tree HEAD
+    # The HEAD file is a prerequisite of build/.patches-applied, which every
+    # object lists directly and reaches through libhv.a, so a fresh mtime here rebuilds
+    # the whole tree. It now names the commit the main tree's HEAD names, so
+    # adopt that file's mtime, as the source mtime sync does for identical bytes.
+    # A pin that differs is checked out below and rewrites HEAD fresh again.
+    touch -r "$src_gitdir/HEAD" "$wt_gitdir/HEAD"
+    if [[ -f "$src_gitdir/$PATCH_DRIFT_STAMP" ]]; then
+        clone_file "$src_gitdir/$PATCH_DRIFT_STAMP" "$wt_gitdir/$PATCH_DRIFT_STAMP"
+    fi
+
+    # Reconcile the pin. The main tree sits at ITS branch's commit, which this
+    # branch need not share. Checking out the pinned commit rewrites only the
+    # files that actually differ between the two, so everything else keeps the
+    # mtime that keeps its object valid — which is what makes copy-then-fix
+    # cheaper than a fresh checkout rather than merely different. --force
+    # discards the copied patch hunks, and can discard nothing else: this
+    # working tree was created from a copy seconds ago and no one has seen it.
+    if [[ -n "$pinned" && "$pinned" != "$src_head" ]]; then
+        echo -e "  $submod: ${YELLOW}pin differs from the main tree ($(echo "$src_head" | cut -c1-8) -> $(echo "$pinned" | cut -c1-8))${RESET}"
+        # The function runs as an `if` condition, where `set -e` is suppressed,
+        # so a failure here has to be returned rather than left to abort.
+        git -C "$dst" checkout --detach --force --quiet "$pinned" || return 1
+        PRIVATE_SUBMODULES_NEED_PATCHES=true
+    fi
+    return 0
+}
+
+# Undo the main tree's patch set in this worktree's private checkouts. They are
+# copied from the main tree with its patches applied, and reapply-patches resets
+# only the files THIS branch's patch list names, so a hunk or a created file from
+# a patch only the main tree carries would otherwise ship in this branch's build.
+# Every file those patches touch goes back to the pinned commit; a file they
+# create, which the pin does not track, is removed.
+unapply_main_tree_patches() {
+    local submod dst f patches
+    for submod in "${LIB_PRIVATE_SUBMODULES[@]}"; do
+        dst="$WORKTREE_PATH/$submod"
+        [[ -e "$dst/.git" ]] || continue
+        patches=("$MAIN_TREE/patches/${submod#lib/}"*.patch)
+        [[ -e "${patches[0]}" ]] || continue
+        while IFS= read -r f; do
+            if git -C "$dst" ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then
+                git -C "$dst" checkout --quiet HEAD -- "$f"
+            else
+                rm -f "$dst/$f"
+            fi
+        done < <(sed -n 's#^\(---\|+++\) [ab]/##p' "${patches[@]}" | sort -u)
+    done
 }
 
 # Give each private submodule its own working tree at the commit this branch
-# points at. The gitdir lands under .git/worktrees/<name>/modules/, so the
-# checkout is independent of the main tree's and of every other worktree's, and
-# `git submodule status` reports it clean. origin stays the public GitHub remote,
-# so committing and pushing from in here works exactly as it does in main.
+# points at. The git dir lands under .git/worktrees/<name>/modules/, so the
+# checkout is independent of the main tree's and of every other worktree's.
 checkout_private_submodules() {
-    local submod
+    local submod dst wt_gitdir name clone_err line
+    WORKTREE_GIT_DIR="$(git -C "$WORKTREE_PATH" rev-parse --absolute-git-dir)"
+
     for submod in "${LIB_PRIVATE_SUBMODULES[@]}"; do
-        [[ -e "$MAIN_TREE/$submod/.git" ]] || continue
-        if [[ -L "$WORKTREE_PATH/$submod" ]]; then
-            rm "$WORKTREE_PATH/$submod"
+        dst="$WORKTREE_PATH/$submod"
+        name="$(submodule_section_name "$submod")"
+        [[ -n "$name" ]] || name="$submod"
+        wt_gitdir="$WORKTREE_GIT_DIR/modules/$name"
+
+        if [[ -L "$dst" ]]; then
+            rm "$dst"
         fi
-        if [[ -e "$WORKTREE_PATH/$submod/.git" ]]; then
+
+        # An interrupted run leaves a git dir with no checkout beside it, or a
+        # checkout gutted down to its .git — a state that does not self-heal and
+        # surfaces as a build error naming a missing object file rather than a
+        # submodule. Both are ours and both are safe to redo, because the only
+        # thing in either is what this script put there.
+        if [[ -d "$wt_gitdir" ]] && { [[ ! -e "$dst/.git" ]] || ! has_worktree_content "$dst"; }; then
+            echo -e "  $submod: ${YELLOW}interrupted materialization — redoing it${RESET}"
+            rm -rf "$dst" "$wt_gitdir"
+        fi
+
+        if [[ -e "$dst/.git" ]]; then
             echo -e "  $submod: ${GREEN}already a private checkout${RESET}"
             continue
         fi
-        echo -e "  $submod: ${CYAN}private checkout (ours — edited directly, not patched)${RESET}"
-        if ! git -C "$WORKTREE_PATH" submodule update --init "$submod" >/dev/null 2>&1; then
-            echo -e "  $submod: ${YELLOW}checkout failed${RESET}"
-            # Only a partial clone may be swept: anything with a .git returned
-            # above, and a directory holding files but no .git is something a
-            # person put there, not ours to delete.
-            if [[ -d "$WORKTREE_PATH/$submod" ]] \
-               && [[ -n "$(ls -A "$WORKTREE_PATH/$submod" 2>/dev/null)" ]]; then
-                echo -e "  ${RED}$submod has content but is not a checkout — leaving it alone.${RESET}"
-                echo -e "  ${YELLOW}Resolve by hand, then re-run with --setup-only.${RESET}"
-                continue
-            fi
-            echo -e "  ${YELLOW}falling back to a symlink — edits here will land in the MAIN tree's submodule${RESET}"
-            rmdir "$WORKTREE_PATH/$submod" 2>/dev/null || true
-            ln -s "$MAIN_TREE/$submod" "$WORKTREE_PATH/$submod"
+
+        # Files with no .git and no git dir of ours beside them are something a
+        # person put there, not ours to delete. Everything past this point may
+        # clear the path, so the check has to come first.
+        if [[ -d "$dst" ]] && has_worktree_content "$dst"; then
+            echo -e "  ${RED}$submod has content but is not a checkout — leaving it alone.${RESET}"
+            echo -e "  ${YELLOW}Resolve by hand, then re-run with --setup-only.${RESET}"
+            continue
+        fi
+
+        rm -rf "$dst"
+        if materialize_private_submodule "$submod"; then
+            echo -e "  $submod: ${GREEN}private checkout (copied from the main tree, mtimes kept)${RESET}"
+            continue
+        fi
+
+        # No usable checkout to copy from: fall back to a fresh clone, which
+        # needs the network and arrives unpatched.
+        echo -e "  $submod: ${CYAN}private checkout (fresh clone — nothing to copy from)${RESET}"
+        rm -rf "$dst" "$wt_gitdir"
+        mkdir -p "$dst"
+        # git refuses the file transport for submodules unless
+        # protocol.file.allow says otherwise, and only the command-line form is
+        # consulted for the inner clone. The URLs come from this tree's own
+        # .gitmodules, which is already the code about to be compiled.
+        if clone_err="$(git -C "$WORKTREE_PATH" -c protocol.file.allow=always \
+                            submodule update --init "$submod" 2>&1)"; then
+            PRIVATE_SUBMODULES_NEED_PATCHES=true
+            continue
+        fi
+
+        # A fallback that hides why it fell back leaves the symlink looking like
+        # a choice rather than a defeat, so say what git said.
+        echo -e "  $submod: ${YELLOW}checkout failed${RESET}"
+        while IFS= read -r line; do
+            if [[ -n "$line" ]]; then echo -e "    ${YELLOW}git: $line${RESET}"; fi
+        done <<< "$clone_err"
+        echo -e "  ${YELLOW}falling back to a symlink — patches applied here will land in the MAIN tree's submodule${RESET}"
+        rmdir "$dst" 2>/dev/null || true
+        ln -s "$MAIN_TREE/$submod" "$dst"
+    done
+}
+
+# Assert every lib/ submodule sits at the commit this branch pins. `git
+# submodule status` cannot answer this in a worktree — it refuses to scan a tree
+# where a gitlink path is a symlink — so ask each checkout directly.
+#
+# A private submodule at the wrong revision is fatal: it compiles, it links, and
+# it is not the code this branch describes. A symlinked one can only ever be at
+# the main tree's revision, so a mismatch there is a warning about a difference
+# nothing in this worktree can fix.
+check_submodule_pins() {
+    local submod pinned actual fatal=false
+    echo -e "${CYAN}Verifying submodule revisions...${RESET}"
+    for submod in $(git -C "$MAIN_TREE" config --file .gitmodules --get-regexp path \
+                        | grep "^submodule\." | awk '{print $2}' | grep "^lib/"); do
+        pinned="$(git -C "$WORKTREE_PATH" rev-parse --verify --quiet "HEAD:$submod" 2>/dev/null || true)"
+        actual="$(git -C "$WORKTREE_PATH/$submod" rev-parse --verify --quiet HEAD 2>/dev/null || true)"
+        [[ -n "$pinned" && -n "$actual" ]] || continue
+        [[ "$pinned" == "$actual" ]] && continue
+        if is_private_submodule "$submod"; then
+            echo -e "  ${RED}${BOLD}$submod is at $actual, this branch pins $pinned${RESET}"
+            fatal=true
+        else
+            echo -e "  ${YELLOW}$submod is at $actual, this branch pins $pinned${RESET}"
+            echo -e "  ${YELLOW}  (shared with the main tree — it holds whichever revision that tree checked out)${RESET}"
         fi
     done
+    if [[ "$fatal" == "true" ]]; then
+        echo ""
+        echo -e "${RED}${BOLD}================================================================${RESET}"
+        echo -e "${RED}${BOLD}  A private submodule is not at the revision this branch pins.${RESET}"
+        echo -e "${RED}${BOLD}================================================================${RESET}"
+        echo -e "${YELLOW}Building now would compile a different version of that library than"
+        echo -e "the branch describes, and nothing downstream would say so.${RESET}"
+        echo -e "Fix with: ${CYAN}git -C <submodule> checkout <pinned-sha>${RESET}"
+        exit 1
+    fi
+    echo -e "${GREEN}✓ Submodules match this branch's pins${RESET}"
 }
 
 # --unlink / --relink operate on lib/ only and then stop. They must NOT fall
@@ -503,10 +803,9 @@ link_lib_from_main
 # every file fresh, so the whole checkout is newer than the artifacts we are
 # about to clone, and make rebuilds essentially all of them — twice over:
 #
-#   - $(PCH) lists include/lvgl_pch.h and lv_conf.h as prerequisites, and EVERY
-#     C++ object lists $(PCH), so one fresh header invalidates the entire tree;
-#   - the .d files list include/*.h per object, and those are fresh too, so
-#     fixing only the PCH would still leave every object out of date.
+#   - the .d files list include/*.h per object, lvgl_pch.h and lv_conf.h among
+#     them, and EVERY C++ object force-includes lvgl_pch.h, so one fresh header
+#     invalidates the entire tree.
 #
 # Measured on a fresh worktree of an up-to-date main tree: 1945 of 1967 cloned
 # objects recompiled (~6.5 min) purely because of checkout timestamps.
@@ -540,6 +839,16 @@ if [[ -d "$MAIN_OBJ" ]]; then
     OBJ_COUNT=$(find "$WORKTREE_OBJ" -name "*.o" 2>/dev/null | wc -l | tr -d ' ')
     if [[ "$OBJ_COUNT" -gt 10 ]]; then
         echo -e "  build/obj: ${GREEN}already populated ($OBJ_COUNT objects)${RESET}"
+    elif [[ -n "$(git -C "$WORKTREE_PATH" diff --no-renames --diff-filter=AD --name-only \
+            HEAD "$(git -C "$MAIN_TREE" rev-parse HEAD)" -- '*.cpp' '*.c' 2>/dev/null | head -n1)" ||
+            -n "$(git -C "$WORKTREE_PATH" diff --raw HEAD "$(git -C "$MAIN_TREE" rev-parse HEAD)" -- lib 2>/dev/null | head -n1)" ]]; then
+        # A source added or removed between this branch and the main tree leaves an
+        # object with no matching source here (or none for a new one), and a lib/
+        # submodule pinned elsewhere makes its objects describe other code under a
+        # fresh-looking mtime. make links every object it finds, so a stale one lands
+        # in the binary. Changed sources are fine: the mtime sync leaves them fresh
+        # and they rebuild.
+        echo -e "  build/obj: ${YELLOW}not cloned: this branch's source set differs from the main tree's (ccache covers the rebuild)${RESET}"
     else
         echo -e "${CYAN}Cloning build objects from main tree...${RESET}"
         # Clone all build artifacts (.o, .d, .ccj) from main tree.
@@ -549,7 +858,11 @@ if [[ -d "$MAIN_OBJ" ]]; then
         # Either way, make only recompiles files whose sources diverge in the worktree.
         CLONE_START=$(date +%s)
         rm -rf "$WORKTREE_OBJ"
-        cp -Rc "$MAIN_OBJ" "$WORKTREE_OBJ" 2>/dev/null || cp -a "$MAIN_OBJ" "$WORKTREE_OBJ"
+        # A build running in the main tree renames its *.tmp files away mid-copy, which
+        # fails cp; the objects are only a cache, so finish the setup and drop the strays.
+        cp -Rc "$MAIN_OBJ" "$WORKTREE_OBJ" 2>/dev/null || cp -a "$MAIN_OBJ" "$WORKTREE_OBJ" ||
+            echo -e "  build/obj: ${YELLOW}some files changed during the copy (a build is running in the main tree); continuing${RESET}"
+        find "$WORKTREE_OBJ" -name '*.tmp' -delete 2>/dev/null || true
         CLONE_END=$(date +%s)
         NEW_COUNT=$(find "$WORKTREE_OBJ" -name "*.o" 2>/dev/null | wc -l | tr -d ' ')
         echo -e "  build/obj: ${GREEN}cloned $NEW_COUNT objects in $((CLONE_END - CLONE_START))s${RESET}"
@@ -563,7 +876,7 @@ if [[ -d "$MAIN_OBJ" ]]; then
         # is usually enough to force a rebuild, but it is not enough on its own:
         # the compiler cache can still answer the fresh compile with an object
         # built elsewhere (base_dir collapses the worktree path, and
-        # `sloppiness = pch_defines` lets a differing PCH through). The failure is
+        # `sloppiness = pch_defines` relaxes what it hashes). The failure is
         # silent and lands at link time as an undefined reference, pointing at
         # whichever worktree compiled first.
         #
@@ -590,7 +903,7 @@ if [[ -d "$MAIN_OBJ" ]]; then
             # GNU "architecture:" line for Mach-O at all, so under `set -euo
             # pipefail` the grep found nothing, the pipeline exited 1, and the
             # whole setup aborted HERE — leaving the worktree with cloned objects
-            # but no PCH, no build markers, no git excludes and no initial build.
+            # but no build markers, no git excludes and no initial build.
             # (Re-running the script "fixed" it only because the second run skips
             # this branch entirely.) `file -b` answers on both toolchains:
             #   macOS: "Mach-O 64-bit object arm64"
@@ -643,10 +956,96 @@ if [[ -d "$MAIN_GEN" && ! -d "$WORKTREE_PATH/build/generated" ]]; then
 fi
 
 # Step 3c: Copy compile_commands.json for clangd support
+#
+# Both halves of the compile database are inherited from the main tree, and both
+# describe ITS branch. Any source that exists there and not here — main runs
+# hundreds of commits ahead of a release branch — arrives as an entry naming a
+# file this worktree does not have. Nothing notices until a gate walks the
+# database: quality-checks.sh's clang-divergence pass hands every entry to
+# clang++, which reports `no such file or directory` and fails the run, so the
+# pre-push hook rejects a push over files the branch never contained.
+#
+# Drop those on both sides. The .ccj fragments matter as much as the assembled
+# JSON: the build reassembles the JSON from whatever fragments are present, so
+# fixing only the JSON lets the next build put the phantoms straight back.
+if [[ -d "$WORKTREE_OBJ" ]]; then
+    PRUNED=$(python3 - "$WORKTREE_PATH" "$MAIN_TREE" <<'PRUNE_CCJ'
+import json, os, pathlib, sys
+worktree, main_tree = sys.argv[1], sys.argv[2]
+# Both spellings of each root: on macOS /var and /private/var name the same
+# directory, and a fragment can carry either, so a single string replace misses.
+def spellings(path):
+    """Every way this directory can be written. On macOS /var is a symlink to
+    /private/var, so a fragment and $MAIN_TREE can name one directory two ways
+    and a single string replace silently matches neither."""
+    out = [path, os.path.realpath(path)]
+    for p in list(out):
+        out.append(p[len("/private"):] if p.startswith("/private/") else "/private" + p)
+    seen = []
+    for p in out:
+        if p and p not in seen:
+            seen.append(p)
+    # Longest first, so /private/var/x is consumed before /var/x.
+    return sorted(seen, key=len, reverse=True)
+
+roots = spellings(main_tree)
+removed = 0
+for frag in (pathlib.Path(worktree) / "build").rglob("*.ccj"):
+    text = frag.read_text()
+    # A cloned fragment describes the MAIN tree. Repoint it here first — the
+    # objects it goes with were just cloned and are perfectly good — and only
+    # then decide whether its source exists on this branch.
+    fixed = text
+    for r in roots:
+        fixed = fixed.replace(r, worktree)
+    try:
+        entry = json.loads(fixed.strip().splitlines()[0])
+    except Exception:
+        frag.unlink()
+        removed += 1
+        continue
+    if not os.path.exists(entry.get("file", "")):
+        frag.unlink()
+        removed += 1
+    elif fixed != text:
+        frag.write_text(fixed)
+print(removed)
+PRUNE_CCJ
+    ) || PRUNED=0
+    [[ "${PRUNED:-0}" -gt 0 ]] \
+        && echo -e "  build/obj: ${YELLOW}pruned $PRUNED .ccj fragment(s) for sources absent on this branch${RESET}"
+fi
+
 if [[ -f "$MAIN_TREE/compile_commands.json" ]]; then
-    # Use sed to rewrite paths from main tree to worktree
-    sed "s|${MAIN_TREE}|${WORKTREE_PATH}|g" "$MAIN_TREE/compile_commands.json" > "$WORKTREE_PATH/compile_commands.json"
-    echo -e "  compile_commands.json: ${GREEN}copied and paths rewritten${RESET}"
+    # Rewrite main-tree paths to this worktree, then drop entries whose file is
+    # not actually here. Counts come back on one line; `read` rather than
+    # `set --`, which would clobber the script's own positional parameters.
+    CCJSON_COUNTS=$(
+        sed "s|${MAIN_TREE}|${WORKTREE_PATH}|g" "$MAIN_TREE/compile_commands.json" \
+        | python3 -c '
+import json, os, sys
+out = sys.argv[1]
+raw = sys.stdin.read().strip()
+try:
+    entries = json.loads(raw) if raw else []
+except json.JSONDecodeError:
+    entries = []          # unusable database: emit an empty one, never a broken one
+kept = [e for e in entries if os.path.exists(e.get("file", ""))]
+json.dump(kept, open(out, "w"), indent=2)
+print(len(kept), len(entries) - len(kept))
+' "$WORKTREE_PATH/compile_commands.json"
+    ) || CCJSON_COUNTS=""
+
+    if [[ -n "$CCJSON_COUNTS" ]]; then
+        read -r CC_KEPT CC_DROPPED <<< "$CCJSON_COUNTS"
+        if [[ "${CC_DROPPED:-0}" -gt 0 ]]; then
+            echo -e "  compile_commands.json: ${GREEN}$CC_KEPT entries${RESET} (${YELLOW}dropped $CC_DROPPED for sources absent on this branch${RESET})"
+        else
+            echo -e "  compile_commands.json: ${GREEN}copied and paths rewritten${RESET}"
+        fi
+    else
+        echo -e "  compile_commands.json: ${YELLOW}could not be filtered — skipped${RESET}"
+    fi
 fi
 
 # Step 3d: Point claude-recall at the MAIN tree's .claude-recall/
@@ -698,12 +1097,11 @@ fi
 
 # Step 4: Clone compiled libraries from the main tree
 #
-# Copies, not symlinks, for the same reason as the PCH below: these are build
-# OUTPUTS. `make libhv-build` ends by copying the freshly-ar'd archive to
+# Copies, not symlinks: these are build OUTPUTS. `make libhv-build` ends by copying the freshly-ar'd archive to
 # build/lib/libhv.a, and cp follows a symlink — so a worktree that rebuilds
 # libhv writes into the MAIN TREE's build/lib. Observed: a single fresh-worktree
 # build moved the main tree's libhv.a mtime forward by five days, which left the
-# main tree's own PCH older than it and put ~1900 objects back on the main
+# main tree's own objects older than it and put them all back on the main
 # tree's next build. One worktree setup, and the main tree rebuilds the world.
 #
 # The old `touch -h` here was also load-bearing in the wrong direction: it
@@ -731,38 +1129,6 @@ for lib in "${MAIN_LIBS[@]}"; do
         echo -e "  $lib: ${YELLOW}not found in main tree (will build from scratch)${RESET}"
     fi
 done
-
-# Step 5: Clone the precompiled header if it exists
-#
-# Deliberately a COPY, not a symlink. The PCH is a build OUTPUT: make rebuilds it
-# whenever lv_conf.h / include/lvgl_pch.h / the patch stamp move, and clang opens
-# the output path with O_CREAT|O_TRUNC, which follows a symlink. A symlinked PCH
-# therefore lets a worktree write its own PCH straight into the main tree — and a
-# worktree that changed lv_conf.h would leave the main tree, and every other
-# worktree sharing that symlink, linking against a PCH built for someone else's
-# feature flags. On APFS `cp -c` is a clonefile: instant, zero disk until one
-# side diverges, and independent. mtime is preserved so make still sees it as
-# up to date relative to the (now mtime-synced) prerequisites.
-MAIN_PCH="$MAIN_TREE/build/lvgl_pch.h.gch"
-WORKTREE_PCH="$WORKTREE_PATH/build/lvgl_pch.h.gch"
-if [[ -f "$MAIN_PCH" ]]; then
-    if [[ -L "$WORKTREE_PCH" ]]; then
-        # Legacy worktree from an older setup run — swap the symlink for a clone
-        # before a build can write through it.
-        rm -f "$WORKTREE_PCH"
-        clone_file "$MAIN_PCH" "$WORKTREE_PCH"
-        echo -e "  lvgl_pch.h.gch: ${YELLOW}was a symlink into the main tree, replaced with a private clone${RESET}"
-    elif [[ -f "$WORKTREE_PCH" ]]; then
-        # This worktree already has its own PCH. It may have been built here from
-        # locally-modified prerequisites, so leave it alone and let make decide.
-        echo -e "  lvgl_pch.h.gch: ${GREEN}already present (worktree-local)${RESET}"
-    else
-        clone_file "$MAIN_PCH" "$WORKTREE_PCH"
-        echo -e "  lvgl_pch.h.gch: ${GREEN}cloned${RESET}"
-    fi
-else
-    echo -e "  lvgl_pch.h.gch: ${YELLOW}not found in main tree (will build from scratch)${RESET}"
-fi
 
 # Step 5b: Validate library architectures
 # Cross-compilation (make pi-test) can leave ARM .a files in build/lib/.
@@ -859,10 +1225,8 @@ mkdir -p "$(dirname "$EXCLUDE_FILE")"
 # content there stays visible. In a worktree the path is a symlink, the
 # negation does not apply, and lib/* keeps it hidden — otherwise every worktree
 # reports a permanent `?? lib/mdns` for a symlink this script created. That
-# stray entry is what `git add -A` once swept onto main as a blob replacing the
-# tracked directory (restored in 3b0a8491b). lib/tuibox.h needs no such care:
-# its symlink sits at the tracked path itself, and a path in the index is never
-# reported as untracked.
+# stray entry is exactly what `git add -A` sweeps onto main as a blob
+# replacing the tracked directory.
 EXCLUDES=(
     "# HelixScreen worktree setup - auto-generated excludes"
     "lib/*"
@@ -870,7 +1234,6 @@ EXCLUDES=(
     "!lib/mdns/"
     "!lib/minilzo"
     "!lib/quirc"
-    "!lib/tuibox.h"
     "node_modules"
     ".venv"
     "build/"
@@ -898,13 +1261,19 @@ done
 echo -e "${CYAN}Marking symlinks as skip-worktree...${RESET}"
 cd "$WORKTREE_PATH"
 
-# Mark all lib/ submodules
+# Symlinked submodules only. The mark exists to hide the symlink's typechange,
+# and a private checkout has none — marking one would instead hide a real change
+# of its pinned revision from `git status`, `git add` and the revision check
+# below, which is the one thing that must stay visible.
 for submod in $SUBMODULES; do
+    if is_private_submodule "$submod"; then
+        git update-index --no-skip-worktree "$submod" 2>/dev/null || true
+        continue
+    fi
     git update-index --skip-worktree "$submod" 2>/dev/null || true
 done
 
 # Mark other lib items
-git update-index --skip-worktree lib/tuibox.h 2>/dev/null || true
 # lib/mdns is a directory, not a submodule - mark its contents
 git update-index --skip-worktree lib/mdns/mdns.h 2>/dev/null || true
 
@@ -914,8 +1283,8 @@ echo -e "${GREEN}✓ Git excludes configured${RESET}"
 #
 # .patches-applied and .fonts.stamp are prerequisites, not just markers, so a
 # fresh `now` timestamp on them is not free:
-#   - $(PATCHES_STAMP) is a prerequisite of $(PCH), every LVGL/helix-xml/font
-#     object and libhv.a — stamping it `now` invalidates all of them;
+#   - $(PATCHES_STAMP) is a prerequisite of every C++, LVGL, helix-xml and font
+#     object and of libhv.a — stamping it `now` invalidates all of them;
 #   - .fonts.stamp is a prerequisite of assets/fonts/*.c, which have no recipe,
 #     so make marks them updated and recompiles all 46 font objects.
 # Adopt the main tree's timestamps when it has them, for the same reason the
@@ -934,7 +1303,26 @@ copy_marker_mtime() {
 }
 copy_marker_mtime "build/.patches-applied"
 copy_marker_mtime ".fonts.stamp"
-echo "native" > "$WORKTREE_PATH/build/.build-target"
+# These two hold a hash that make compares at parse time, and a missing or
+# differing one is rewritten `now`. .thirdparty-abi is a prerequisite of every
+# object and .patches-applied-id of .patches-applied, so either one written fresh
+# rebuilds the whole tree. Copy content and mtime together: when this tree's
+# headers and patch records match the main tree's, make finds the same hash and
+# leaves them alone; when they differ, make rewrites them and rebuilds, as it must.
+for stamp in build/.thirdparty-abi build/.patches-applied-id; do
+    if [[ -f "$MAIN_TREE/$stamp" ]]; then
+        clone_file "$MAIN_TREE/$stamp" "$WORKTREE_PATH/$stamp"
+    fi
+done
+# .build-target names the target and compiler the objects in build/ came from,
+# and make runs `make clean` when it does not match the toolchain it is about to
+# use. That clean deletes every cloned object, and runs the clean
+# recipe of lib/wpa_supplicant, a checkout this tree shares with the main tree.
+# The objects came from the main tree, so its marker is the true one. With no
+# marker there, write none: make records the current toolchain without cleaning.
+if [[ -f "$MAIN_TREE/build/.build-target" ]]; then
+    cp "$MAIN_TREE/build/.build-target" "$WORKTREE_PATH/build/.build-target"
+fi
 echo -e "${GREEN}✓ Build markers created${RESET}"
 
 # Step 9c: Seed runtime config from the main tree
@@ -1005,7 +1393,7 @@ if [[ -n "$CCACHE_BIN" ]]; then
     fi
 
     # WITHOUT THIS, ccache CACHES NOTHING. Every native build compiles with
-    # -include $(PCH), and ccache refuses to cache any compilation using a
+    # -include include/lvgl_pch.h, and ccache refuses to cache any compilation using a
     # precompiled header unless sloppiness allows it. Measured before/after on
     # a single -include compile: "Uncacheable calls: 1/1 (100%)" -> "Cacheable
     # calls: 1/1 (100%)", with the repeat compile hitting. base_dir and hash_dir
@@ -1021,21 +1409,36 @@ if [[ -n "$CCACHE_BIN" ]]; then
     CUR_SLOPPY="$(ccache --get-config sloppiness 2>/dev/null || true)"
     if [[ "$CUR_SLOPPY" != *pch_defines* || "$CUR_SLOPPY" != *time_macros* ]]; then
         ccache --set-config sloppiness=pch_defines,time_macros 2>/dev/null \
-            && echo -e "  sloppiness: ${GREEN}pch_defines,time_macros (PCH builds are now cacheable)${RESET}"
+            && echo -e "  sloppiness: ${GREEN}pch_defines,time_macros (forced-include builds are now cacheable)${RESET}"
     else
-        echo -e "  sloppiness: ${GREEN}already allows PCH caching ($CUR_SLOPPY)${RESET}"
+        echo -e "  sloppiness: ${GREEN}already allows forced-include caching ($CUR_SLOPPY)${RESET}"
     fi
 
     # The shared cache thrashes hard once a couple of worktrees + cross-compiles
     # pile in (default 5 GiB fills and evicts constantly, re-causing cold misses).
     # Raise the ceiling so objects survive between builds. Only ever raise it.
+    #
+    # ccache spells this three ways depending on version and value: human
+    # readable ("5.0 GiB"), parsable ("5.0G"), and a bare byte count below a
+    # megabyte, where 0 means unlimited. A unit is therefore optional, so
+    # neither grep may decide the script's exit status — under `set -o
+    # pipefail` a non-matching grep in an assignment aborts the whole run.
     CUR_MAX="$(ccache --get-config max_size 2>/dev/null || true)"
-    MAX_NUM="$(echo "$CUR_MAX" | grep -oE '[0-9]+' | head -1)"
-    MAX_UNIT="$(echo "$CUR_MAX" | grep -oiE '[KMGT]i?B' | head -1)"
-    if [[ "$MAX_UNIT" =~ ^[Kk] || "$MAX_UNIT" =~ ^[Mm] ]] || \
-       { [[ "$MAX_UNIT" =~ ^[Gg] ]] && [[ -n "$MAX_NUM" ]] && [[ "$MAX_NUM" -lt 25 ]]; }; then
-        ccache --max-size=25G >/dev/null 2>&1 \
-            && echo -e "  max_size: ${GREEN}raised to 25G (was $CUR_MAX)${RESET}"
+    MAX_NUM="$(printf '%s' "$CUR_MAX" | grep -oE '[0-9]+' | head -1 || true)"
+    MAX_UNIT="$(printf '%s' "$CUR_MAX" | grep -oiE '[KMGT]' | head -1 || true)"
+    raise_max=false
+    case "$MAX_UNIT" in
+        [Kk]|[Mm]) raise_max=true ;;
+        [Gg]) if [[ -n "$MAX_NUM" && "$MAX_NUM" -lt 25 ]]; then raise_max=true; fi ;;
+        [Tt]) ;;
+        *) if [[ -n "$MAX_NUM" && "$MAX_NUM" -ne 0 ]]; then raise_max=true; fi ;;
+    esac
+    if [[ "$raise_max" == true ]]; then
+        if ccache --max-size=25G >/dev/null 2>&1; then
+            echo -e "  max_size: ${GREEN}raised to 25G (was $CUR_MAX)${RESET}"
+        else
+            echo -e "  max_size: ${YELLOW}could not raise it from $CUR_MAX${RESET}"
+        fi
     else
         echo -e "  max_size: ${GREEN}already ample ($CUR_MAX)${RESET}"
     fi
@@ -1061,7 +1464,7 @@ else
     echo -e "${RED}${BOLD}================================================================${RESET}"
     echo -e "${YELLOW}A clean worktree still builds fast (timestamps are aligned above)."
     echo -e "But any build that has to recompile — you edit lv_conf.h, or another"
-    echo -e "tree rebuilds libhv and re-invalidates the shared PCH — pays full"
+    echo -e "tree rebuilds libhv and re-invalidates every object — pays full"
     echo -e "price with no cache to fall back on: ~400s instead of ~10s.${RESET}"
     echo ""
     case "$(uname -s)" in
@@ -1077,12 +1480,44 @@ else
     echo ""
 fi
 
+# Step 9d: Make the private submodules carry THIS branch's patches
+#
+# patches/ is per-branch, and a private checkout is what lets two branches hold
+# different patch sets at once. The copy above arrives carrying the main tree's
+# patches, so it is already correct whenever the two trees agree on patches/ —
+# and reapplying anyway is not free: build/.patches-applied is a prerequisite of
+# every object, so re-stamping it turns a warm worktree
+# cold. Reapply exactly when the copy cannot be trusted to describe this branch.
+cd "$WORKTREE_PATH"
+if [[ "$PRIVATE_SUBMODULES_NEED_PATCHES" != "true" ]] \
+   && ! diff -rq "$MAIN_TREE/patches" "$WORKTREE_PATH/patches" >/dev/null 2>&1; then
+    PRIVATE_SUBMODULES_NEED_PATCHES=true
+    echo -e "${YELLOW}patches/ differs from the main tree's${RESET}"
+fi
+if [[ "$PRIVATE_SUBMODULES_NEED_PATCHES" == "true" ]]; then
+    echo -e "${CYAN}Applying this branch's patches to the private submodules...${RESET}"
+    unapply_main_tree_patches
+    if make reapply-patches; then
+        echo -e "${GREEN}✓ Patches match this branch${RESET}"
+    else
+        echo -e "${RED}✗ make reapply-patches failed — this worktree's submodules do not match patches/${RESET}"
+        exit 1
+    fi
+else
+    echo -e "${GREEN}✓ Patches match the main tree's — private checkouts already carry them${RESET}"
+fi
+
+check_submodule_pins
+
 # Step 10: Build (optional)
 if [[ "$NO_BUILD" == "false" ]]; then
     echo ""
     echo -e "${BOLD}${CYAN}Running initial build...${RESET}"
     cd "$WORKTREE_PATH"
-    if make -j; then
+    # Homebrew installs GNU make as gmake; Apple's /usr/bin/make is 3.81 and
+    # the Makefile hard-errors below 4.2.
+    MAKE_BIN="$(command -v gmake || command -v make)"
+    if "$MAKE_BIN" -j; then
         echo ""
         echo -e "${GREEN}${BOLD}✓ Build successful!${RESET}"
     else
@@ -1095,6 +1530,14 @@ fi
 echo ""
 echo -e "${GREEN}${BOLD}✓ Worktree setup complete!${RESET}"
 echo ""
+if [[ -n "$CREATED_BASE" ]]; then
+    echo -e "Branched from ${BOLD}$CREATED_BASE${RESET} (${CYAN}$CREATED_BASE_SHA${RESET})"
+    if [[ "$EXCLUDED_COMMITS" != "0" ]]; then
+        echo -e "${YELLOW}${BOLD}  $EXCLUDED_COMMITS commit(s) on local HEAD are NOT in this branch.${RESET}"
+        echo -e "${YELLOW}  To build on them instead: remove this worktree and re-run with --base HEAD${RESET}"
+    fi
+    echo ""
+fi
 echo -e "To work in this worktree:"
 echo -e "  ${CYAN}cd $WORKTREE_PATH${RESET}"
 echo ""
@@ -1114,5 +1557,6 @@ echo -e "  ${CYAN}./build/bin/helix-screen --test -vv --remote-socket \"\$HELIX_
 echo -e "  ${CYAN}./build/bin/helix-screen ctl -s \"\$HELIX_SOCK\" navigate settings${RESET}"
 echo -e "See ${CYAN}docs/devel/HELIXCTL.md${RESET} § \"Running a fully isolated second instance\"."
 echo ""
-echo -e "${YELLOW}Note: lib/ is symlinked from main tree. If you need to modify"
-echo -e "library code, un-symlink that specific directory first.${RESET}"
+echo -e "${YELLOW}Note: lib/lvgl, lib/libhv, lib/lua and lib/helix-xml are private to this worktree —"
+echo -e "patches applied here reach no other tree. The remaining lib/ submodules are"
+echo -e "symlinked from the main tree; un-symlink one before modifying it.${RESET}"

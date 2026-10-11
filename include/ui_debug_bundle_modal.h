@@ -45,11 +45,12 @@ class DebugBundleModal : public Modal {
 
   private:
     // Subject state machine: 0=consent, 1=uploading, 2=success, 3=error
-    lv_subject_t state_subject_;
-    lv_subject_t status_subject_;
-    lv_subject_t share_code_subject_;
-    lv_subject_t error_subject_;
-    lv_subject_t include_logs_subject_;
+    SubjectManager subjects_;
+    lv_subject_t state_subject_{};
+    lv_subject_t status_subject_{};
+    lv_subject_t share_code_subject_{};
+    lv_subject_t error_subject_{};
+    lv_subject_t include_logs_subject_{};
     bool subjects_initialized_ = false;
 
     // Subject string buffers

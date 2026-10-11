@@ -283,7 +283,7 @@ def parse_apply_styles(source: str) -> dict[str, dict[str, Any]]:
 
     # Find the apply_styles function body first
     func_pattern = re.compile(
-        r"static\s+void\s+apply_styles\s*\([^)]*\)\s*\{",
+        r"static\s+(?:void|bool)\s+apply_styles\s*\([^)]*\)\s*\{",
         re.DOTALL,
     )
     func_match = func_pattern.search(source)
@@ -1115,6 +1115,8 @@ CPP_WIDGET_FILES: dict[str, dict[str, Any]] = {
             "bind_op_state": {"type": "string"},
             "long_mode": {"type": "enum", "enum": "label_long_mode"},
             "label_hidden_if_bp_eq": {"type": "int"},
+            "label_hidden_subject": {"type": "string"},
+            "label_hidden_if_eq": {"type": "int"},
             "bind_text-fmt": {"type": "string"},
             "text-fmt": {"type": "string"},
         },
@@ -1297,7 +1299,7 @@ def _infer_cpp_attr_type(source: str, attr_name: str) -> dict[str, Any]:
     bool_attrs = {
         "focusable", "show_clear_button", "multiline", "dither",
         "show_selection", "show_target", "show_indicators", "wrap",
-        "bypass_active", "show_bypass", "hub_only", "hide_target_when_off",
+        "bypass_active", "show_bypass", "hide_target_when_off",
     }
     if attr_name in bool_attrs:
         return {"type": "bool"}
@@ -1307,7 +1309,7 @@ def _infer_cpp_attr_type(source: str, attr_name: str) -> dict[str, Any]:
         "max_length", "sv_size", "hue_height", "gap",
         "slot_index", "fill_level", "slot_count", "active_slot",
         "unit_count", "active_unit", "slot_width", "knob_pad",
-        "label_hidden_if_bp_eq", "anim_progress",
+        "label_hidden_if_bp_eq", "label_hidden_if_eq", "stacked_if_bp_lte", "anim_progress",
     }
     if attr_name in int_attrs or attr_name.endswith("_length") or attr_name.endswith("_count"):
         return {"type": "int"}
@@ -1546,12 +1548,12 @@ def _strip_responsive_suffix(name: str) -> str:
 
 
 _CPP_REGISTER_CONST_RE = re.compile(
-    r'lv_xml_register_const\s*\(\s*[^,]+,\s*"([a-zA-Z_][a-zA-Z0-9_]*)"'
+    r'lv_xml_(?:register|set)_const\s*\(\s*[^,]+,\s*"([a-zA-Z_][a-zA-Z0-9_]*)"'
 )
 
 
 def extract_cpp_registered_constants(cpp_src_dirs: list[Path]) -> set[str]:
-    """Scan C++ source for every literal lv_xml_register_const() call site.
+    """Scan C++ source for every literal lv_xml_register_const()/set_const() call site.
 
     Catches constants the runtime registers via C++ (responsive spacing tokens
     like nav_width / overlay_panel_width / hue_height) which would otherwise

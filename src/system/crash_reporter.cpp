@@ -5,11 +5,14 @@
 
 #include "helix_version.h"
 #include "hv/requests.h"
-#include "platform_capabilities.h"
+#include "json_utils.h"
 #include "system/crash_handler.h"
 #include "system/crash_history.h"
+#include "system/debug_bundle_collector.h"
+#include "system/diag_upload_gate.h"
+#include "system/diagnostics.h"
+#include "system/ingest_client.h"
 #include "system/log_collector.h"
-#include "system/update_checker.h"
 
 #include <spdlog/spdlog.h>
 
@@ -21,13 +24,6 @@
 #include <fstream>
 #include <iomanip>
 #include <sstream>
-
-#ifdef __ANDROID__
-#include "system/android_jni.h"
-
-#include <SDL.h>
-#include <jni.h>
-#endif
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -133,11 +129,6 @@ bool heap_snapshot_age_is_plausible(long age_ms, int uptime_sec) {
     // slack before calling an age impossible.
     constexpr long SLACK_MS = 2000;
     return age_ms <= static_cast<long>(uptime_sec) * 1000 + SLACK_MS;
-}
-
-CrashReporter& CrashReporter::instance() {
-    static CrashReporter instance;
-    return instance;
 }
 
 // =============================================================================
@@ -327,17 +318,24 @@ CrashReporter::CrashReport CrashReporter::collect_report() {
         }
     }
 
-    // Collect additional system context
-    report.platform = UpdateChecker::get_platform_key();
+    // Collect additional system context. This runs on the normal startup path
+    // (the signal handler only wrote crash.txt), so the diagnostics snapshot —
+    // which allocates and reads /proc — is safe here and only its populated
+    // strings are read afterwards when a report is assembled.
+    const helix::diagnostics::Diagnostics diag = helix::diagnostics::collect();
+    report.platform = diag.identity.platform_key;
+    report.printer_model = diag.identity.printer_model;
+    report.mod_flavor = diag.identity.mod_flavor;
+    report.config_dir = diag.paths.config_dir;
+    report.cache_dir = diag.paths.cache_dir;
+    report.cache_tier = diag.paths.cache_tier;
+    report.ram_total_mb = static_cast<int>(diag.machine.mem_total_kb / 1024);
+    report.cpu_cores = diag.machine.cpu_cores;
 #ifdef HELIX_BINARY_VARIANT
     report.display_info = HELIX_BINARY_VARIANT;
 #else
     report.display_info = "unknown";
 #endif
-
-    auto caps = helix::PlatformCapabilities::detect();
-    report.ram_total_mb = static_cast<int>(caps.total_ram_mb);
-    report.cpu_cores = caps.cpu_cores;
 
     // Log tail — collect a generous buffer (the new reporting session writes
     // its own boot lines, which flood a small tail). We then filter to lines
@@ -365,9 +363,8 @@ CrashReporter::CrashReport CrashReporter::collect_report() {
         }
     }
 
-    // Printer/Klipper info — these may not be available at startup
-    // (no Moonraker connection yet), so left empty until connected
-    // The modal or caller can populate these later if Moonraker is available
+    // printer_model comes from the saved config (no Moonraker needed);
+    // klipper_version needs a live connection and stays empty here.
 
     spdlog::info(
         "[CrashReporter] Collected report: {} (signal {}), platform={}, RAM={}MB, cores={}",
@@ -423,6 +420,18 @@ nlohmann::json CrashReporter::report_to_json(const CrashReport& report) {
     j["display_backend"] = report.display_info;
     j["ram_mb"] = report.ram_total_mb;
     j["cpu_cores"] = report.cpu_cores;
+    j["mod_flavor"] = report.mod_flavor;
+    // Paths can embed a username, and this JSON reaches a public GitHub issue,
+    // so they pass through the same redaction the debug bundle applies to the
+    // same values; the local text report keeps them raw.
+    j["config_dir"] = helix::DebugBundleCollector::sanitize_value(report.config_dir);
+    j["cache_dir"] = helix::DebugBundleCollector::sanitize_value(report.cache_dir);
+    j["cache_tier"] = report.cache_tier;
+
+    // Compile-time channel marker, same contract as the debug bundle's: the
+    // endpoint rejects or flags reports from unmarked clients
+    // (prestonbrown/helixscreen#1410).
+    j["diag_upload_marked"] = helix::diag::marked_build();
 
     // Exception message (for EXCEPTION crashes)
     if (!report.exception_what.empty()) {
@@ -641,11 +650,18 @@ std::string CrashReporter::report_to_text(const CrashReport& report) {
 
     ss << "--- System Info ---\n";
     ss << "Platform:  " << report.platform << "\n";
+    ss << "Mod:       " << report.mod_flavor << "\n";
     ss << "RAM:       " << report.ram_total_mb << " MB\n";
     ss << "CPU Cores: " << report.cpu_cores << "\n";
     ss << "Display:   " << report.display_info << "\n";
     ss << "Printer:   " << report.printer_model << "\n";
-    ss << "Klipper:   " << report.klipper_version << "\n\n";
+    ss << "Klipper:   " << report.klipper_version << "\n";
+    ss << "Config:    " << report.config_dir << "\n";
+    ss << "Cache:     " << report.cache_dir;
+    if (!report.cache_tier.empty()) {
+        ss << " (" << report.cache_tier << ")";
+    }
+    ss << "\n\n";
 
     if (!report.backtrace.empty()) {
         ss << "--- Backtrace ---\n";
@@ -709,7 +725,7 @@ std::string CrashReporter::generate_github_url(const CrashReport& report) {
     body << "## Crash Summary\n";
     body << "- **Signal:** " << report.signal << " (" << report.signal_name << ")\n";
     body << "- **Version:** " << report.app_version << "\n";
-    body << "- **Platform:** " << report.platform << "\n";
+    body << "- **Platform:** " << report.platform << " (" << report.mod_flavor << ")\n";
     body << "- **Uptime:** " << report.uptime_sec << "s\n";
     if (!report.exception_what.empty()) {
         body << "- **Exception:** " << report.exception_what << "\n";
@@ -910,121 +926,36 @@ bool CrashReporter::is_duplicate(const CrashReport& report) const {
 // Auto-Send
 // =============================================================================
 
-#ifdef __ANDROID__
-/// HTTPS POST via Android's Java HttpURLConnection (JNI bridge).
-/// libhv is built without SSL on Android, so we use the platform TLS stack.
-/// Returns {status_code, response_body}; status 0 means network/JNI failure.
-static std::pair<int, std::string> android_https_post(const std::string& url,
-                                                      const std::string& body,
-                                                      const std::string& user_agent,
-                                                      const std::string& api_key, int timeout_sec) {
-    // SDL_AndroidGetJNIEnv() returns a per-thread JNI env (handles AttachCurrentThread)
-    JNIEnv* env = static_cast<JNIEnv*>(SDL_AndroidGetJNIEnv());
-    if (!env) {
-        spdlog::error("[CrashReporter] Failed to get JNI env");
-        return {0, "JNI env unavailable"};
+namespace {
+
+/// The crash worker URL, overridable so tests can point the POST at a loopback
+/// listener. libhv honours no proxy environment, so without this a test that
+/// reaches the real send path would file a live GitHub issue.
+const char* crash_worker_url() {
+    if (const char* u = std::getenv("HELIX_CRASH_WORKER_URL")) {
+        return u;
     }
-
-    // Cached global ref owned by helix_activity_class() — never released here.
-    // The one caller reaches this from the main thread (send_with_bundle is
-    // marshaled back via token.defer), but the sole reason it works is that
-    // FindClass() needs Java frames on the stack; moving the send onto the
-    // bundle worker would silently turn every report into an HTTP 0.
-    jclass cls = helix::android::helix_activity_class(env);
-    if (!cls) {
-        return {0, "HelixActivity class not found"};
-    }
-
-    jmethodID method = env->GetStaticMethodID(
-        cls, "httpsPost",
-        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)"
-        "Ljava/lang/String;");
-    if (!method) {
-        spdlog::error("[CrashReporter] Failed to find httpsPost method");
-        env->ExceptionClear();
-        return {0, "httpsPost method not found"};
-    }
-
-    jstring j_url = env->NewStringUTF(url.c_str());
-    jstring j_body = env->NewStringUTF(body.c_str());
-    jstring j_ua = env->NewStringUTF(user_agent.c_str());
-    jstring j_key = env->NewStringUTF(api_key.c_str());
-
-    if (!j_url || !j_body || !j_ua || !j_key) {
-        if (j_url)
-            env->DeleteLocalRef(j_url);
-        if (j_body)
-            env->DeleteLocalRef(j_body);
-        if (j_ua)
-            env->DeleteLocalRef(j_ua);
-        if (j_key)
-            env->DeleteLocalRef(j_key);
-        env->ExceptionClear();
-        return {0, "JNI string allocation failed"};
-    }
-
-    auto j_result = static_cast<jstring>(env->CallStaticObjectMethod(
-        cls, method, j_url, j_body, j_ua, j_key, static_cast<jint>(timeout_sec)));
-
-    env->DeleteLocalRef(j_url);
-    env->DeleteLocalRef(j_body);
-    env->DeleteLocalRef(j_ua);
-    env->DeleteLocalRef(j_key);
-
-    if (!j_result || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        return {0, "JNI call failed"};
-    }
-
-    const char* result_cstr = env->GetStringUTFChars(j_result, nullptr);
-    std::string result(result_cstr);
-    env->ReleaseStringUTFChars(j_result, result_cstr);
-    env->DeleteLocalRef(j_result);
-
-    // Parse "STATUS_CODE\nRESPONSE_BODY"
-    auto newline = result.find('\n');
-    if (newline == std::string::npos) {
-        return {0, result};
-    }
-    int status = 0;
-    try {
-        status = std::stoi(result.substr(0, newline));
-    } catch (...) {
-    }
-    return {status, result.substr(newline + 1)};
+    return CrashReporter::CRASH_WORKER_URL;
 }
-#endif // __ANDROID__
+
+} // namespace
 
 bool CrashReporter::try_auto_send(const CrashReport& report) {
+    // The upload gate, before any POST: a build that may not ship diagnostics
+    // falls through to the QR/local-file path (prestonbrown/helixscreen#1410).
+    // Refusing here also stops the worker from auto-filing a GitHub issue for
+    // a crash our symbols cannot resolve.
+    if (!helix::diag::uploads_enabled()) {
+        spdlog::info("[CrashReporter] Auto-send refused: diagnostic uploads are "
+                     "disabled in this build");
+        return false;
+    }
+
     // Best-effort POST to crash worker — failure falls through to QR/file
     try {
         json payload = report_to_json(report);
-        std::string body = payload.dump();
-        std::string user_agent = std::string("HelixScreen/") + HELIX_VERSION;
-
-        int status = 0;
-        std::string resp_body;
-
-#ifdef __ANDROID__
-        // Android: use JNI bridge to Java's HttpURLConnection (libhv has no SSL)
-        auto [s, b] = android_https_post(CRASH_WORKER_URL, body, user_agent, INGEST_API_KEY, 15);
-        status = s;
-        resp_body = std::move(b);
-#else
-        // Desktop/embedded: use libhv directly
-        auto req = std::make_shared<HttpRequest>();
-        req->method = HTTP_POST;
-        req->url = CRASH_WORKER_URL;
-        req->timeout = 15;
-        req->content_type = APPLICATION_JSON;
-        req->headers["User-Agent"] = user_agent;
-        req->headers["X-API-Key"] = INGEST_API_KEY;
-        req->body = std::move(body);
-
-        auto resp = requests::request(req);
-        status = resp ? static_cast<int>(resp->status_code) : 0;
-        resp_body = resp ? resp->body : "";
-#endif
+        std::string body = helix::json_util::safe_dump(payload);
+        auto [status, resp_body] = helix::ingest::post(crash_worker_url(), body, 15);
 
         if (status >= 200 && status < 300) {
             spdlog::info("[CrashReporter] Crash report sent to worker (HTTP {})", status);

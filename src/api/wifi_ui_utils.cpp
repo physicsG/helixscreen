@@ -3,15 +3,15 @@
 
 #include "wifi_ui_utils.h"
 
+#include "helix_fs.h"
 #include "log_redact.h"
+#include "text_io.h"
 
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
-#include <filesystem>
-#include <fstream>
 #include <vector>
 
 #ifdef __APPLE__
@@ -32,17 +32,14 @@ namespace wifi {
 
 namespace {
 
-namespace fs = std::filesystem;
+namespace hfs = helix::fs;
+
+namespace tio = helix::text_io;
 
 // Read the first line of a small sysfs file, trimmed of trailing whitespace.
 // Returns empty string if the file is missing or unreadable.
 std::string read_trimmed_line(const std::string& path) {
-    std::ifstream file(path);
-    if (!file.is_open()) {
-        return "";
-    }
-    std::string line;
-    std::getline(file, line);
+    std::string line = tio::read_first_line(path).value_or("");
     line.erase(
         std::find_if(line.rbegin(), line.rend(), [](unsigned char ch) { return !std::isspace(ch); })
             .base(),
@@ -52,28 +49,23 @@ std::string read_trimmed_line(const std::string& path) {
 
 // Decide whether an interface under <net_dir>/<iface> is wireless. An iface is
 // wireless if it exposes a `wireless/` or `phy80211` subdirectory in sysfs.
-bool sysfs_iface_is_wireless(const fs::path& iface_dir) {
-    std::error_code ec;
-    if (fs::exists(iface_dir / "wireless", ec)) {
+bool sysfs_iface_is_wireless(const std::string& iface_dir) {
+    if (hfs::exists(hfs::join_path(iface_dir, "wireless"))) {
         return true;
     }
-    ec.clear();
-    if (fs::exists(iface_dir / "phy80211", ec)) {
-        return true;
-    }
-    return false;
+    return hfs::exists(hfs::join_path(iface_dir, "phy80211"));
 }
 
 // Parse interface names out of /proc/net/wireless. The file has two header
 // lines, then one line per wireless iface of the form "  wlan0: 0000 ...".
 std::vector<std::string> proc_wireless_ifaces(const std::string& proc_root) {
     std::vector<std::string> result;
-    std::ifstream file(proc_root + "/net/wireless");
-    if (!file.is_open()) {
+    tio::LineReader file(proc_root + "/net/wireless");
+    if (!file) {
         return result;
     }
     std::string line;
-    while (std::getline(file, line)) {
+    while (file.next(line)) {
         auto colon = line.find(':');
         if (colon == std::string::npos) {
             continue; // header lines have no colon
@@ -229,15 +221,14 @@ std::string wifi_get_device_mac(const std::string& interface) {
 #else
     // Linux: Read from /sys/class/net/{interface}/address
     std::string path = "/sys/class/net/" + interface + "/address";
-    std::ifstream file(path);
+    auto first_line = tio::read_first_line(path);
 
-    if (!file.is_open()) {
+    if (!first_line) {
         spdlog::debug("[wifi_ui] Failed to open {} (interface may not exist)", path);
         return "";
     }
 
-    std::string mac;
-    std::getline(file, mac);
+    std::string mac = *first_line;
 
     // Remove trailing newline/whitespace
     mac.erase(
@@ -259,8 +250,7 @@ OsWifiLink probe_os_wifi_link(const std::string& sysfs_root, const std::string& 
     OsWifiLink link;
 
     const std::string net_path = sysfs_root + "/class/net";
-    std::error_code ec;
-    if (!fs::exists(net_path, ec)) {
+    if (!hfs::exists(net_path)) {
         return link;
     }
 
@@ -268,39 +258,41 @@ OsWifiLink probe_os_wifi_link(const std::string& sysfs_root, const std::string& 
     // node lacks the expected subdirs (some drivers/older kernels).
     std::vector<std::string> proc_names = proc_wireless_ifaces(proc_root);
 
-    for (const auto& entry : fs::directory_iterator(net_path, ec)) {
-        const fs::path iface_dir = entry.path();
-        const std::string iface = iface_dir.filename().string();
+    if (auto entries = hfs::list_dir(net_path)) {
+        for (const auto& e : *entries) {
+            const std::string& iface_dir = e.path;
+            const std::string& iface = e.name;
 
-        const bool wireless =
-            sysfs_iface_is_wireless(iface_dir) ||
-            std::find(proc_names.begin(), proc_names.end(), iface) != proc_names.end();
-        if (!wireless) {
-            continue;
-        }
-
-        // operstate "up" is the authoritative signal; carrier == "1" is a
-        // fallback for drivers that leave operstate at "unknown" while the
-        // physical link is genuinely associated.
-        const std::string operstate = read_trimmed_line((iface_dir / "operstate").string());
-        const std::string carrier = read_trimmed_line((iface_dir / "carrier").string());
-        const bool up = (operstate == "up") || (carrier == "1");
-
-        if (up) {
-            link.has_link = true;
-            link.iface = iface;
-            // Live socket table only corresponds to the real root; don't probe
-            // getifaddrs against a fixture tree (it would report the dev box).
-            if (sysfs_root == "/sys") {
-                link.has_ip = iface_has_global_ipv4(iface);
+            const bool wireless =
+                sysfs_iface_is_wireless(iface_dir) ||
+                std::find(proc_names.begin(), proc_names.end(), iface) != proc_names.end();
+            if (!wireless) {
+                continue;
             }
-            return link; // first up wireless iface wins
-        }
 
-        // Remember a wireless iface even if down, so the caller can see one
-        // exists; the first up iface above takes precedence over this.
-        if (link.iface.empty()) {
-            link.iface = iface;
+            // operstate "up" is the authoritative signal; carrier == "1" is a
+            // fallback for drivers that leave operstate at "unknown" while the
+            // physical link is genuinely associated.
+            const std::string operstate = read_trimmed_line(hfs::join_path(iface_dir, "operstate"));
+            const std::string carrier = read_trimmed_line(hfs::join_path(iface_dir, "carrier"));
+            const bool up = (operstate == "up") || (carrier == "1");
+
+            if (up) {
+                link.has_link = true;
+                link.iface = iface;
+                // Live socket table only corresponds to the real root; don't probe
+                // getifaddrs against a fixture tree (it would report the dev box).
+                if (sysfs_root == "/sys") {
+                    link.has_ip = iface_has_global_ipv4(iface);
+                }
+                return link; // first up wireless iface wins
+            }
+
+            // Remember a wireless iface even if down, so the caller can see one
+            // exists; the first up iface above takes precedence over this.
+            if (link.iface.empty()) {
+                link.iface = iface;
+            }
         }
     }
 

@@ -42,6 +42,11 @@ bool is_exhaust_fan_candidate(const std::string& o) {
     return o.find("exhaust") != std::string::npos || o.find("vent") != std::string::npos ||
            o.find("external") != std::string::npos;
 }
+// Aux / secondary cooling fan. "aux" also covers the spelled-out "auxiliary".
+bool is_aux_fan_candidate(const std::string& o) {
+    return o.find("aux") != std::string::npos || o.find("internal") != std::string::npos ||
+           o.find("side") != std::string::npos;
+}
 bool is_bed_heater_candidate(const std::string& o) {
     return o.find("bed") != std::string::npos;
 }
@@ -62,6 +67,9 @@ std::string guess_chamber_fan(const std::vector<std::string>& fans) {
 }
 std::string guess_exhaust_fan(const std::vector<std::string>& fans) {
     return PrinterHardware({}, {}, fans, {}).guess_exhaust_fan();
+}
+std::string guess_aux_fan(const std::vector<std::string>& fans) {
+    return PrinterHardware({}, {}, fans, {}).guess_aux_fan();
 }
 std::string guess_bed_heater(const std::vector<std::string>& heaters) {
     return PrinterHardware(heaters, {}, {}, {}).guess_bed_heater();
@@ -86,6 +94,8 @@ const std::vector<HardwareRoleDescriptor>& registry() {
          helix::wizard::StepId::FanSelect, true, &is_chamber_fan_candidate, &guess_chamber_fan},
         {HardwareRoleId::ExhaustFan, helix::wizard::EXHAUST_FAN, "", HardwareCategory::Fan,
          helix::wizard::StepId::FanSelect, true, &is_exhaust_fan_candidate, &guess_exhaust_fan},
+        {HardwareRoleId::AuxFan, helix::wizard::AUX_FAN, "", HardwareCategory::Fan,
+         helix::wizard::StepId::FanSelect, true, &is_aux_fan_candidate, &guess_aux_fan},
     };
     return REG;
 }
@@ -177,6 +187,31 @@ std::string resolve_role_from_config(HardwareRoleId id, Config* config,
     return res.object;
 }
 
+bool heal_heater_roles(Config* config, const std::vector<std::string>& heaters) {
+    if (!config) {
+        return false;
+    }
+    bool changed = false;
+    for (auto id : {HardwareRoleId::HotendHeater, HardwareRoleId::BedHeater}) {
+        const auto* desc = role_descriptor(id);
+        if (!desc)
+            continue;
+        const std::string key = config->df() + desc->config_key;
+        const std::string dflt =
+            desc->canonical_default ? std::string(desc->canonical_default) : std::string();
+        const std::string saved = config->get<std::string>(key, dflt);
+        std::string healed = resolve_role_from_config(id, config, heaters, false);
+        if (!healed.empty() && healed != saved) {
+            config->set<std::string>(key, healed);
+            changed = true;
+        }
+    }
+    if (changed && !config->save()) {
+        spdlog::warn("[HardwareRole] Failed to persist heater role heals");
+    }
+    return changed;
+}
+
 std::vector<helix::wizard::StepId> unresolved_guided_steps(Config* config,
                                                            const PrinterDiscovery& hw) {
     std::vector<helix::wizard::StepId> out;
@@ -247,6 +282,10 @@ bool decline_unresolved_guided_roles(Config* config, const PrinterDiscovery& hw)
         spdlog::warn("[HardwareRole] Failed to persist declined role(s)");
     }
     return changed;
+}
+
+bool settle_targeted_reconfig(Config* config, const PrinterDiscovery& hw) {
+    return decline_unresolved_guided_roles(config, hw);
 }
 
 } // namespace helix

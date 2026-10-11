@@ -16,6 +16,6 @@
         style_pad_bottom="#space_sm" style_pad_gap="#space_md" scrollable="false">
     <icon name="row_icon" src="$icon" size="sm" variant="secondary"/>
     <text_body name="label" text="$label" translation_tag="$label_tag" flex_grow="1"/>
-    <lv_dropdown name="dropdown" width="40%" style_border_width="0"/>
+    <lv_dropdown name="dropdown" width="40%"/>
   </view>
 </component>

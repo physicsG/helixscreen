@@ -4,6 +4,7 @@
 #pragma once
 
 #include "lvgl/lvgl.h"
+#include "persisted_setting.h"
 #include "subject_managed_panel.h"
 
 namespace helix {
@@ -39,17 +40,19 @@ class SafetySettingsManager {
     // GETTERS / SETTERS
     // =========================================================================
 
-    /** @brief Get E-Stop confirmation requirement */
-    bool get_estop_require_confirmation() const;
+    bool get_estop_require_confirmation() const {
+        return settings_.get_bool(Key::EstopConfirm);
+    }
+    void set_estop_require_confirmation(bool require) {
+        settings_.set(Key::EstopConfirm, require);
+    }
 
-    /** @brief Set E-Stop confirmation requirement (updates subject + persists) */
-    void set_estop_require_confirmation(bool require);
-
-    /** @brief Get cancel escalation enabled state */
-    bool get_cancel_escalation_enabled() const;
-
-    /** @brief Set cancel escalation enabled state (updates subject + persists) */
-    void set_cancel_escalation_enabled(bool enabled);
+    bool get_cancel_escalation_enabled() const {
+        return settings_.get_bool(Key::CancelEscalation);
+    }
+    void set_cancel_escalation_enabled(bool enabled) {
+        settings_.set(Key::CancelEscalation, enabled);
+    }
 
     /** @brief Get cancel escalation timeout in seconds (15, 30, 60, or 120) */
     int get_cancel_escalation_timeout_seconds() const;
@@ -57,18 +60,21 @@ class SafetySettingsManager {
     /** @brief Set cancel escalation timeout in seconds (clamped to valid values) */
     void set_cancel_escalation_timeout_seconds(int seconds);
 
-    /** @brief Get whether macro runs require a confirmation modal */
-    bool get_macro_require_confirmation() const;
+    /** @brief Whether macro runs require a confirmation modal */
+    bool get_macro_require_confirmation() const {
+        return settings_.get_bool(Key::MacroConfirm);
+    }
+    void set_macro_require_confirmation(bool require) {
+        settings_.set(Key::MacroConfirm, require);
+    }
 
-    /** @brief Set whether macro runs require a confirmation modal (updates subject + persists) */
-    void set_macro_require_confirmation(bool require);
-
-    /** @brief Get whether filament load/unload may run below min_extrude_temp (#978) */
-    bool get_allow_cold_extrude() const;
-
-    /** @brief Set whether filament load/unload may run on a cold hotend (updates subject +
-     * persists) */
-    void set_allow_cold_extrude(bool allow);
+    /** @brief Whether filament load/unload may run below min_extrude_temp (#978) */
+    bool get_allow_cold_extrude() const {
+        return settings_.get_bool(Key::AllowColdExtrude);
+    }
+    void set_allow_cold_extrude(bool allow) {
+        settings_.set(Key::AllowColdExtrude, allow);
+    }
 
     /** @brief Get the minimum toast severity index (0=All, 1=Warnings & errors, 2=Errors only) */
     int get_min_toast_severity() const;
@@ -83,12 +89,12 @@ class SafetySettingsManager {
 
     /** @brief E-Stop confirmation subject (integer: 0=immediate, 1=require confirm) */
     lv_subject_t* subject_estop_require_confirmation() {
-        return &estop_require_confirmation_subject_;
+        return settings_.subject(Key::EstopConfirm);
     }
 
     /** @brief Cancel escalation enabled subject (integer: 0=disabled, 1=enabled) */
     lv_subject_t* subject_cancel_escalation_enabled() {
-        return &cancel_escalation_enabled_subject_;
+        return settings_.subject(Key::CancelEscalation);
     }
 
     /** @brief Cancel escalation timeout subject (integer: dropdown index 0-3) */
@@ -98,12 +104,12 @@ class SafetySettingsManager {
 
     /** @brief Macro confirmation subject (integer: 0=run immediately, 1=require confirm) */
     lv_subject_t* subject_macro_require_confirmation() {
-        return &macro_require_confirmation_subject_;
+        return settings_.subject(Key::MacroConfirm);
     }
 
     /** @brief Allow-cold-extrude subject (integer: 0=gate on temp, 1=always allow) */
     lv_subject_t* subject_allow_cold_extrude() {
-        return &allow_cold_extrude_subject_;
+        return settings_.subject(Key::AllowColdExtrude);
     }
 
     /** @brief Minimum toast severity subject (integer: dropdown index 0/1/2, #1213) */
@@ -115,14 +121,19 @@ class SafetySettingsManager {
     SafetySettingsManager();
     ~SafetySettingsManager() = default;
 
-    SubjectManager subjects_;
+    enum class Key : uint8_t {
+        EstopConfirm,
+        CancelEscalation,
+        MacroConfirm,
+        AllowColdExtrude,
+        COUNT
+    };
 
-    lv_subject_t estop_require_confirmation_subject_;
-    lv_subject_t cancel_escalation_enabled_subject_;
-    lv_subject_t cancel_escalation_timeout_subject_;
-    lv_subject_t macro_require_confirmation_subject_;
-    lv_subject_t allow_cold_extrude_subject_;
-    lv_subject_t min_toast_severity_subject_;
+    SubjectManager subjects_;
+    settings::PersistedSettings<Key, static_cast<size_t>(Key::COUNT)> settings_;
+
+    lv_subject_t cancel_escalation_timeout_subject_{};
+    lv_subject_t min_toast_severity_subject_{};
 
     bool subjects_initialized_ = false;
 };

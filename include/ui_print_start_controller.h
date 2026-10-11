@@ -21,10 +21,10 @@
 
 // Forward declarations
 namespace helix {
-class PrinterState;
-}
-class IMoonrakerAPI;
 class AmsBackend;
+class PrinterState;
+} // namespace helix
+class IMoonrakerAPI;
 struct PrintFileData;
 class PrintStartControllerTestAccess; // test-only friend (global scope)
 
@@ -93,6 +93,12 @@ class PrintStartController {
     void set_file(const std::string& filename, const std::string& path,
                   const std::vector<std::string>& filament_colors,
                   const std::string& thumbnail_path = "");
+
+    /// Objects to skip in the next start, captured at the Print tap. Consumed
+    /// by that start; a reprint never reads them.
+    void set_exclude_picks(std::vector<std::string> picks) {
+        exclude_picks_ = std::move(picks);
+    }
 
     /**
      * @brief Initiate print workflow
@@ -174,6 +180,10 @@ class PrintStartController {
     // dialog introspection).
     friend class ::PrintStartControllerTestAccess;
 
+    /// With spools latched on the bed, opens the drying banner's prompt instead
+    /// of a start the API layer would refuse. True when the start must stop.
+    bool divert_to_spool_removal();
+
     /**
      * @brief Execute the actual print start
      *
@@ -186,7 +196,7 @@ class PrintStartController {
     /**
      * @brief Send the Snapmaker U1 firmware-native print_task_config gcode, then continue.
      *
-     * When the active AMS backend's RemapStrategy is SnapmakerNative, the U1
+     * When the active AMS backend's RemapStrategy is PrePrintSend, the U1
      * firmware requires SET_PRINT_USED_EXTRUDERS / SET_PRINT_EXTRUDER_MAP to be
      * emitted BEFORE PRINT_START (they error mid-print). Builds that gcode from
      * @p tools_used and @p remap (supplied by the caller), sends it, and only invokes
@@ -237,6 +247,7 @@ class PrintStartController {
     std::string filename_;
     std::string path_;
     std::vector<std::string> filament_colors_;
+    std::vector<std::string> exclude_picks_;
     std::string thumbnail_path_; ///< Pre-extracted thumbnail for USB/embedded files
 
     // === Gate Pipeline State ===
@@ -269,6 +280,10 @@ class PrintStartController {
     // Observer for klippy state, armed only while a restore is deferred waiting
     // for Klipper to come back (see observe_klippy_state_for_restore).
     ObserverGuard klippy_state_observer_;
+
+    // Armed while a record the backend refused is retained; retries once the
+    // backend would accept every refused entry (see observe_backend_for_retry).
+    ObserverGuard backend_retry_observer_;
 
     // Armed only between sending a restore and the firmware confirming it.
     ObserverGuard ams_data_observer_;
@@ -314,6 +329,19 @@ class PrintStartController {
      * pending_remap.json. Idempotent: a second deferral does not stack observers.
      */
     void observe_klippy_state_for_restore();
+
+    /**
+     * @brief Retry a restore the backend refused, once it would accept it.
+     *
+     * Watches AmsState's data revision and retries when every entry that still
+     * differs passes AmsBackend::can_set_tool_mapping(), never while a job holds
+     * the machine (prestonbrown/helixscreen#1684). Idempotent.
+     */
+    void observe_backend_for_retry();
+
+    /// True when the backend has reported its lanes and would send every saved
+    /// entry that differs from its current mapping.
+    [[nodiscard]] bool retained_restore_sendable() const;
 
     /**
      * @brief Clear the restore snapshot and the on-disk recovery record.

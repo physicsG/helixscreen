@@ -7,19 +7,21 @@
  * @brief The shared friend accessor for driving WiFiManager's private
  *        connection handlers from tests.
  *
- * One copy (previously three hand-written variants in
- * test_wifi_observer_notification.cpp, test_wifi_manager_auth_debounce.cpp,
- * and test_network_settings_transport_refresh.cpp). The handlers under test
- * are production's own; all this shim reimplements is the BACKEND-side state
- * write a real nmcli or wpa_supplicant poll would have made before the event
- * fired.
+ * The only definition: a second one in any test TU is an ODR violation the
+ * linker resolves silently. The handlers under test are production's own; all this shim
+ * reimplements is the BACKEND-side state write a real nmcli or wpa_supplicant poll would have made
+ * before the event fired.
  */
 
 #include "wifi_backend_mock.h"
 #include "wifi_manager.h"
+#include "wifi_ui_utils.h"
 
+#include <chrono>
 #include <functional>
+#include <mutex>
 #include <string>
+#include <utility>
 
 namespace helix {
 
@@ -47,7 +49,7 @@ class WiFiManagerTestAccess {
     }
 
     /// Simulate an in-flight connect() without invoking the backend.
-    static void begin_connect(WiFiManager& wm, std::function<void(bool, const std::string&)> cb) {
+    static void begin_connect(WiFiManager& wm, ConnectCallback cb) {
         wm.connect_callback_ = std::move(cb);
         wm.connecting_in_progress_ = true;
     }
@@ -78,6 +80,12 @@ class WiFiManagerTestAccess {
         return wm.backend_.get();
     }
 
+    /// Arm the connect watchdog the way connect() does after the backend
+    /// accepts a join, so a test can drive its expiry with lv_tick_inc().
+    static void arm_connect_watchdog(WiFiManager& wm) {
+        wm.start_connect_timeout();
+    }
+
     static bool grace_pending(WiFiManager& wm) {
         return wm.auth_fail_grace_timer_ != nullptr;
     }
@@ -89,6 +97,47 @@ class WiFiManagerTestAccess {
     static void add_observer(WiFiManager& wm, helix::LifetimeToken token,
                              std::function<void()> cb) {
         wm.add_state_observer(std::move(token), std::move(cb));
+    }
+
+    static int radio_ops_inflight(WiFiManager& wm) {
+        std::lock_guard<std::mutex> lock(wm.radio_op_mutex_);
+        return wm.radio_ops_inflight_;
+    }
+
+    static void set_sys_root(const std::string& root) {
+        WiFiManager::sys_root_ = root;
+    }
+    static void reset_sys_root() {
+        WiFiManager::sys_root_ = "/sys";
+    }
+
+    static void set_os_link_probe(std::function<bool()> probe) {
+        WiFiManager::os_link_probe_ = std::move(probe);
+    }
+    static void reset_os_link_probe() {
+        WiFiManager::os_link_probe_ = []() {
+            return helix::ui::wifi::probe_os_wifi_link().has_link;
+        };
+    }
+    static bool os_link_up() {
+        return WiFiManager::os_link_up();
+    }
+    // Stops the backend directly. set_enabled(false) only disables the radio
+    // and keeps the backend alive, so it cannot put trigger_scan() into its
+    // NOT_INITIALIZED failure; tests of that path reach in here instead.
+    static void stop_backend(WiFiManager& wm) {
+        if (wm.backend_) {
+            wm.backend_->stop();
+        }
+    }
+    // Backdate the association stamp past ASSOCIATION_GRACE so the expiry side
+    // of the suppression is testable without a 5-second sleep.
+    static void expire_association_grace(WiFiManager& wm) {
+        wm.last_association_change_ = std::chrono::steady_clock::now() -
+                                      WiFiManager::ASSOCIATION_GRACE - std::chrono::seconds(1);
+    }
+    static bool in_association_grace(const WiFiManager& wm) {
+        return wm.in_association_grace();
     }
 };
 

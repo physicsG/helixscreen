@@ -5,6 +5,7 @@
 
 #include "moonraker_client_mock_internal.h"
 #include "runtime_config.h"
+#include "text_io.h"
 
 #include <spdlog/spdlog.h>
 
@@ -40,7 +41,7 @@ std::vector<std::string> scan_test_gcode_files() {
 
         // Check for .gcode extension (case insensitive)
         std::string ext = name.substr(name.length() - 6);
-        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+        ext = helix::text_io::to_lower(ext);
         if (ext != ".gcode") {
             continue;
         }
@@ -104,6 +105,7 @@ void register_history_handlers(std::unordered_map<std::string, MethodHandler>& r
         int limit = params.value("limit", 50);
         int start = params.value("start", 0);
         double since = params.value("since", 0.0);
+        double before = params.value("before", 0.0);
 
         int count = 0;
         for (size_t i = 0; i < gcode_files.size() && count < limit; i++) {
@@ -120,8 +122,10 @@ void register_history_handlers(std::unordered_map<std::string, MethodHandler>& r
             double start_time = std::chrono::duration<double>(job_time.time_since_epoch()).count();
             double end_time = start_time + duration_minutes * 60;
 
-            // Skip if before 'since' filter
+            // Moonraker's window: start_time > since and start_time < before
             if (since > 0 && start_time < since)
+                continue;
+            if (before > 0 && start_time >= before)
                 continue;
 
             // Generate thumbnail path from filename (strip the gcode extension,

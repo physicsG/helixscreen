@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "sensor_enum_names.h"
+
 #include <string>
 
 namespace helix::sensors {
@@ -45,132 +47,52 @@ struct ProbeSensorConfig {
 
 /// @brief Runtime state for a probe sensor
 struct ProbeSensorState {
-    bool triggered = false;     ///< Current triggered state (from query, not regular status)
+    bool triggered = false;     ///< Last QUERY_PROBE result (status key last_query)
     float last_z_result = 0.0f; ///< Last Z probe result in mm
     float z_offset = 0.0f;      ///< Z offset in mm
     bool available = false;     ///< Sensor available in current config
 };
 
-/// @brief Convert role enum to config string
-/// @param role The role to convert
-/// @return Config-safe string for JSON storage
+inline constexpr EnumName<ProbeSensorRole> kProbeSensorRoles[] = {
+    {ProbeSensorRole::NONE, "none", "Unassigned"},
+    {ProbeSensorRole::Z_PROBE, "z_probe", "Z Probe"},
+};
+
+inline constexpr EnumName<ProbeSensorType> kProbeSensorTypes[] = {
+    {ProbeSensorType::STANDARD, "standard", "Probe"},
+    {ProbeSensorType::BLTOUCH, "bltouch", "BLTouch"},
+    {ProbeSensorType::SMART_EFFECTOR, "smart_effector", "Smart Effector"},
+    {ProbeSensorType::EDDY_CURRENT, "eddy_current", "Eddy Current"},
+    {ProbeSensorType::CARTOGRAPHER, "cartographer", "Cartographer"},
+    {ProbeSensorType::BEACON, "beacon", "Beacon"},
+    {ProbeSensorType::TAP, "tap", "Voron Tap"},
+    {ProbeSensorType::KLICKY, "klicky", "Klicky"},
+    {ProbeSensorType::PRTOUCH_V2, "prtouch_v2", "Creality ProTouch"},
+    {ProbeSensorType::LOADCELL, "loadcell", "Load Cell"},
+};
+
 [[nodiscard]] inline std::string probe_role_to_string(ProbeSensorRole role) {
-    switch (role) {
-    case ProbeSensorRole::NONE:
-        return "none";
-    case ProbeSensorRole::Z_PROBE:
-        return "z_probe";
-    default:
-        return "none";
-    }
+    return enum_id(kProbeSensorRoles, role);
 }
 
-/// @brief Parse role string to enum
-/// @param str The config string to parse
-/// @return Parsed role, or NONE if unrecognized
 [[nodiscard]] inline ProbeSensorRole probe_role_from_string(const std::string& str) {
-    if (str == "z_probe")
-        return ProbeSensorRole::Z_PROBE;
-    return ProbeSensorRole::NONE;
+    return enum_from_id(kProbeSensorRoles, str);
 }
 
-/// @brief Convert role to display string
-/// @param role The role to convert
-/// @return Human-readable role name for UI display
 [[nodiscard]] inline std::string probe_role_to_display_string(ProbeSensorRole role) {
-    switch (role) {
-    case ProbeSensorRole::NONE:
-        return "Unassigned";
-    case ProbeSensorRole::Z_PROBE:
-        return "Z Probe";
-    default:
-        return "Unassigned";
-    }
+    return enum_display(kProbeSensorRoles, role);
 }
 
-/// @brief Convert type enum to config string
-/// @param type The type to convert
-/// @return Config-safe string
 [[nodiscard]] inline std::string probe_type_to_string(ProbeSensorType type) {
-    switch (type) {
-    case ProbeSensorType::STANDARD:
-        return "standard";
-    case ProbeSensorType::BLTOUCH:
-        return "bltouch";
-    case ProbeSensorType::SMART_EFFECTOR:
-        return "smart_effector";
-    case ProbeSensorType::EDDY_CURRENT:
-        return "eddy_current";
-    case ProbeSensorType::CARTOGRAPHER:
-        return "cartographer";
-    case ProbeSensorType::BEACON:
-        return "beacon";
-    case ProbeSensorType::TAP:
-        return "tap";
-    case ProbeSensorType::KLICKY:
-        return "klicky";
-    case ProbeSensorType::PRTOUCH_V2:
-        return "prtouch_v2";
-    case ProbeSensorType::LOADCELL:
-        return "loadcell";
-    default:
-        return "standard";
-    }
+    return enum_id(kProbeSensorTypes, type);
 }
 
-/// @brief Convert type to display string
-/// @param type The type to convert
-/// @return Human-readable type name for UI display
 [[nodiscard]] inline std::string probe_type_to_display_string(ProbeSensorType type) {
-    switch (type) {
-    case ProbeSensorType::STANDARD:
-        return "Probe";
-    case ProbeSensorType::BLTOUCH:
-        return "BLTouch";
-    case ProbeSensorType::SMART_EFFECTOR:
-        return "Smart Effector";
-    case ProbeSensorType::EDDY_CURRENT:
-        return "Eddy Current";
-    case ProbeSensorType::CARTOGRAPHER:
-        return "Cartographer";
-    case ProbeSensorType::BEACON:
-        return "Beacon";
-    case ProbeSensorType::TAP:
-        return "Voron Tap";
-    case ProbeSensorType::KLICKY:
-        return "Klicky";
-    case ProbeSensorType::PRTOUCH_V2:
-        return "Creality ProTouch";
-    case ProbeSensorType::LOADCELL:
-        return "Load Cell";
-    default:
-        return "Unknown Probe";
-    }
+    return enum_display(kProbeSensorTypes, type);
 }
 
-/// @brief Parse type string to enum
-/// @param str The config string to parse
-/// @return Parsed type, defaults to STANDARD if unrecognized
 [[nodiscard]] inline ProbeSensorType probe_type_from_string(const std::string& str) {
-    if (str == "bltouch")
-        return ProbeSensorType::BLTOUCH;
-    if (str == "smart_effector")
-        return ProbeSensorType::SMART_EFFECTOR;
-    if (str == "eddy_current")
-        return ProbeSensorType::EDDY_CURRENT;
-    if (str == "cartographer")
-        return ProbeSensorType::CARTOGRAPHER;
-    if (str == "beacon")
-        return ProbeSensorType::BEACON;
-    if (str == "tap")
-        return ProbeSensorType::TAP;
-    if (str == "klicky")
-        return ProbeSensorType::KLICKY;
-    if (str == "prtouch_v2")
-        return ProbeSensorType::PRTOUCH_V2;
-    if (str == "loadcell")
-        return ProbeSensorType::LOADCELL;
-    return ProbeSensorType::STANDARD;
+    return enum_from_id(kProbeSensorTypes, str);
 }
 
 } // namespace helix::sensors

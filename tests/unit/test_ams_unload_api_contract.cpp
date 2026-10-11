@@ -50,21 +50,21 @@ using std::vector;
 
 namespace {
 
-class CapturingSnapmaker : public AmsBackendSnapmaker {
+class CapturingSnapmaker : public helix::AmsBackendSnapmaker {
   public:
     // running_ has to be set: unload_filament() gates on check_preconditions(),
     // which answers not_connected on a backend that never started. api_ stays
     // null so the print-active half of that gate passes; it is covered on its
     // own in test_ams_paused_filament_ops.cpp.
-    CapturingSnapmaker() : AmsBackendSnapmaker(nullptr, nullptr) {
+    CapturingSnapmaker() : helix::AmsBackendSnapmaker(nullptr, nullptr) {
         running_.store(true);
     }
 
     vector<string> captured_gcodes;
 
-    AmsError execute_gcode(const string& gcode) override {
+    helix::AmsError execute_gcode(const string& gcode) override {
         captured_gcodes.push_back(gcode);
-        return AmsErrorHelper::success();
+        return helix::AmsErrorHelper::success();
     }
 
     void set_loaded_slot(int slot) {
@@ -146,7 +146,7 @@ TEST_CASE("Per-backend unload_filament(N) sends slot-specific gcode", "[ams][unl
 
 TEST_CASE("AmsBackendMock unload_filament requires explicit slot",
           "[ams][unload][contract][mock]") {
-    AmsBackendMock backend(4);
+    helix::AmsBackendMock backend(4);
     backend.set_operation_delay(0);
     REQUIRE(backend.start());
 

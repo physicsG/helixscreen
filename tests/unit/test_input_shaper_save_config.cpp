@@ -123,7 +123,7 @@ class ToastRecorder {
   public:
     ToastRecorder() {
         set_test_toast_hook(
-            [this](ToastSeverity, const std::string& msg) { messages_.push_back(msg); });
+            [this](ToastSeverity, const std::string& msg, uint32_t) { messages_.push_back(msg); });
     }
     ~ToastRecorder() {
         set_test_toast_hook(nullptr);
@@ -172,7 +172,7 @@ class SaveConfigFixture : public LVGLTestFixture {
         join_worker(kJoinTimeoutMs);
         UpdateQueue::instance().drain();
 
-        panel_.on_deactivate();
+        panel_.on_deactivate(DeactivateReason::NavigateAway);
         panel_.set_api(nullptr, nullptr);
         ::InputShaperPanelTestAccess::clear_results(panel_);
         UpdateQueue::instance().drain();
@@ -391,7 +391,7 @@ TEST_CASE_METHOD(SaveConfigFixture, "the auto-revert warning survives the panel 
     // Exactly what handle_save_clicked() does the instant save_configuration()
     // returns: OverlayBase::on_deactivate() invalidates lifetime_, expiring
     // every token the async chain is holding.
-    panel_.on_deactivate();
+    panel_.on_deactivate(DeactivateReason::NavigateAway);
 
     REQUIRE(settle());
 
@@ -407,7 +407,7 @@ TEST_CASE_METHOD(SaveConfigFixture, "the success toast survives the panel closin
     ToastRecorder toasts;
 
     ::InputShaperPanelTestAccess::save(panel_);
-    panel_.on_deactivate();
+    panel_.on_deactivate(DeactivateReason::NavigateAway);
 
     REQUIRE(settle());
 

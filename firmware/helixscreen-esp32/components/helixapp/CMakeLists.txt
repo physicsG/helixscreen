@@ -80,6 +80,7 @@ set(LOCAL_SRCS
     helix_lvgl_abi_check.c
     link_probe.cpp
     wifi_backend_esp.cpp
+    wall_clock_esp.cpp
     provisioning_esp.cpp)
 
 idf_component_register(
@@ -100,7 +101,7 @@ target_compile_options(${COMPONENT_LIB} PRIVATE
 
 # Real v1 Core+AMS gate set (the plan's compile definitions). Excluded
 # subsystems compile out via these; kept files that touch them see the #else
-# no-op branch. HELIX_ENABLE_MOCKS is added only when CONFIG_HELIX_MOCK_PRINTER.
+# no-op branch. HELIX_ENABLE_MOCKS is never defined here (see the NOTE below).
 target_compile_definitions(${COMPONENT_LIB} PRIVATE
     HELIX_VERSION="0.0.0-esp32"
     HELIX_VERSION_MAJOR=0 HELIX_VERSION_MINOR=0 HELIX_VERSION_PATCH=0
@@ -130,6 +131,9 @@ target_compile_definitions(${COMPONENT_LIB} PRIVATE
     HELIX_HAS_QIDI=1
     HELIX_HAS_SNAPMAKER=1
     HELIX_HAS_SOUND=0
+    # No CJK font fits the storage partition (~900KB for the faces the panel
+    # uses), so zh/ja are left out of the language list and the asset image.
+    HELIX_HAS_CJK=0
     HELIX_ENABLE_SCREENSAVER=0
     HELIX_RELEASE_BUILD)
 # NOTE: HELIX_ENABLE_MOCKS is intentionally NEVER defined on ESP32 — the

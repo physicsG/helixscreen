@@ -35,6 +35,13 @@ struct PanelWidgetEntry {
         return col >= 0 && row >= 0;
     }
 
+    /// True when this entry is enabled AND holds a grid cell, which is what
+    /// puts the widget on a dashboard. An entry enabled at (-1,-1), or disabled
+    /// while keeping coordinates, draws nothing.
+    bool is_placed() const {
+        return enabled && has_grid_position();
+    }
+
     /// Turn this entry off AND surrender its grid cell.
     ///
     /// These belong together. save() persists col/row for every entry whether
@@ -42,8 +49,7 @@ struct PanelWidgetEntry {
     /// a claim on a cell nothing is drawing in - and the anchored pass, which
     /// looks entries up by id, could then hand that cell to a widget the
     /// manager synthesizes (the temporary firmware_restart tile), knocking a
-    /// user-anchored widget off its saved rectangle (#1414). Three call sites
-    /// wrote this rule by hand; one of them forgot the coordinates.
+    /// user-anchored widget off its saved rectangle (#1414).
     void disable_and_unplace() {
         enabled = false;
         col = -1;
@@ -55,6 +61,10 @@ struct PanelWidgetEntry {
 struct PageConfig {
     std::string id;
     std::vector<PanelWidgetEntry> widgets;
+    /// Saved entries whose id has no widget definition (a plugin widget while
+    /// its plugin is absent), kept verbatim so the placement is restored when
+    /// the definition returns.
+    nlohmann::json retained = nlohmann::json::array();
 };
 
 /// Soft cap on maximum number of pages
@@ -70,13 +80,29 @@ class PanelWidgetConfig {
 
     /// Mark the cached pages_ vector as stale so the next load() reloads from disk.
     /// Used by the settings overlay and widget catalog when they mutate Config
-    /// directly rather than going through this object's setters.
-    void mark_dirty() {
-        loaded_ = false;
+    /// directly rather than going through this object's setters, and on an
+    /// active-printer change. A save held by save_soon() is written first, to
+    /// the path it was requested for, so the reload cannot discard it.
+    void mark_dirty();
+
+    /// Save current order to config now. Replaces a save held by save_soon().
+    void save();
+
+    /// Save once edits settle: SAVE_SETTLE_MS after the last request, to the
+    /// panel's path as it was at the first. Every save is a flash write that
+    /// stalls a slow board's UI for hundreds of ms, and an edit session asks
+    /// for one per drop and resize.
+    void save_soon();
+
+    /// Write a save held by save_soon() now. Nothing when none is held.
+    void flush_pending_save();
+
+    /// A save requested through save_soon() has not been written yet.
+    bool save_pending() const {
+        return deferred_save_.timer != nullptr;
     }
 
-    /// Save current order to config
-    void save();
+    static constexpr uint32_t SAVE_SETTLE_MS = 2000;
 
     // ========================================================================
     // Backward-compatible accessors (delegate to page 0)
@@ -104,12 +130,20 @@ class PanelWidgetConfig {
         return main_page_index_;
     }
 
-    /// Get widget entries for a specific page (const)
+    /// Get widget entries for a specific page (const). A page index past the
+    /// last page reads as an empty page.
     const std::vector<PanelWidgetEntry>& page_entries(size_t page_index) const {
+        if (page_index >= pages_.size()) {
+            static const std::vector<PanelWidgetEntry> kEmpty;
+            return kEmpty;
+        }
         return pages_[page_index].widgets;
     }
 
-    /// Get mutable widget entries for a specific page
+    /// Get mutable widget entries for a specific page.
+    ///
+    /// Precondition: @p page_index < page_count(). Unlike page_entries(), an
+    /// index past the last page is not checked: there is no page to write to.
     std::vector<PanelWidgetEntry>& page_entries_mut(size_t page_index) {
         return pages_[page_index].widgets;
     }
@@ -124,12 +158,47 @@ class PanelWidgetConfig {
         return pages_;
     }
 
-    /// Add a new empty page. Returns the index of the new page, or -1 if at cap.
-    int add_page(const std::string& name = "");
+    /// True when page @p page_index holds at least one placed entry
+    /// (PanelWidgetEntry::is_placed). A page index past the last page reads as
+    /// unpopulated.
+    bool page_is_populated(size_t page_index) const;
 
-    /// Remove a page by index. Cannot remove the last page.
-    /// If the removed page is the main page, main_page_index resets to 0.
-    /// Returns true if removed.
+    /// Place widget @p id on page @p page_index at (@p col, @p row), spanning
+    /// @p colspan x @p rowspan, enabled. Returns the entry's index on that page,
+    /// or -1 when @p page_index is past the last page, in which case nothing
+    /// changes.
+    ///
+    /// Leaves exactly one entry named @p id across all pages. The first entry
+    /// with that id on the landing page is updated in place; with none there,
+    /// the entry is created on it. Every other entry with that id, on any page,
+    /// is removed: two entries with one id render the widget twice, and
+    /// delete_entry() only removes the first.
+    ///
+    /// Per-widget config belongs to the widget, not to the page it sat on. The
+    /// kept entry's own config stays; an entry without one takes the first
+    /// non-empty config among the removed entries, in page order.
+    ///
+    /// The rectangle is written as given: fitting it to the grid is the
+    /// caller's job. Does not save(). @p id is taken by value because callers
+    /// pass the id of an entry this call may erase.
+    int place_entry(std::string id, size_t page_index, int col, int row, int colspan, int rowspan);
+
+    /// True while another page fits under the cap (MAX_PAGES).
+    bool can_add_page() const {
+        return pages_.size() < MAX_PAGES;
+    }
+
+    /// Add a new empty page. Returns the index of the new page, or -1 if at cap.
+    /// A @p position of -1 appends past the last page; any other position is
+    /// clamped into [0, page_count] and the page is inserted there, shifting
+    /// every later page and the main page's index with it. The one place a page
+    /// is created: every affordance routes through it.
+    int add_page(const std::string& name = "", int position = -1);
+
+    /// Remove a page by index. Returns true if removed.
+    /// Refuses, returning false, the last remaining page, the main page and an
+    /// index past the last page. Removing a page before the main page shifts
+    /// main_page_index down with it.
     bool remove_page(size_t page_index);
 
     /// Generate a unique page ID
@@ -155,6 +224,11 @@ class PanelWidgetConfig {
     /// Remove an entry entirely from ANY page (first match).
     void delete_entry(const std::string& id);
 
+    /// Take entry @p index off page @p page_index the way Edit Mode's trash
+    /// does: an added instance ("fan:1") is deleted, a built-in widget stays in
+    /// the catalog disabled and unplaced. Does not save().
+    void remove_from_page(size_t page_index, size_t index);
+
     /// Generate the default layout for a measured grid.
     ///
     /// @p grid_cols / @p grid_rows are the track counts the layout will be
@@ -170,6 +244,26 @@ class PanelWidgetConfig {
     /// clamp_to_grid, which would shove its origin back until the span fitted
     /// and seat it on top of a neighbour looking deliberate.
     static std::vector<PanelWidgetEntry> build_default_grid(int grid_cols = 0, int grid_rows = 0);
+
+    /// True when @p panel_node places widgets but names no system for the
+    /// numbers it places them at.
+    ///
+    /// A saved layout is coordinates, and a coordinate means nothing on its
+    /// own. From config version 24 on, the node says which system it counts in:
+    /// `grid` names the track grid, `layout_units` marks pre-v22 cells, and
+    /// `anchors: "pending"` marks the shipped defaults saved before any grid was
+    /// measured. A node holding `pages` with a placed widget and none of these is one that only a
+    /// build older than its own version stamp can produce — such a build
+    /// re-serializes the panel as `pages`/`main_page_index`/`next_page_id` and
+    /// nothing else, so every key naming the system is gone while the numbers
+    /// stay. Reading them as tracks seats each widget at a coordinate it never
+    /// meant, so load() rebuilds the panel from defaults instead.
+    ///
+    /// Static and pure so the ways a layout stays legitimate — a named grid, a
+    /// cells tag, pending default anchors, a version below 24 — are testable
+    /// without a Config.
+    static bool has_uninterpretable_coordinates(const nlohmann::json& panel_node,
+                                                int config_version);
 
     /// True while this layout is the default set with its anchors not yet
     /// applied, because no grid had been measured when it was built.
@@ -283,6 +377,25 @@ class PanelWidgetConfig {
     bool legacy_units_ = false;
     int legacy_rows_ = 0;
 
+    /// The save save_soon() holds: its timer and the path it writes to. A copy
+    /// holds none, so a copied config never writes for the original; the
+    /// destructor cancels the timer, whose callback holds a raw `this`.
+    struct DeferredSave {
+        lv_timer_t* timer = nullptr;
+        std::string path;
+        DeferredSave() = default;
+        DeferredSave(const DeferredSave&) {}
+        DeferredSave& operator=(const DeferredSave&) {
+            return *this;
+        }
+        ~DeferredSave();
+        void cancel();
+    };
+    DeferredSave deferred_save_;
+
+    /// Write the current state to @p panel_path and save the config file.
+    void write_to(const std::string& panel_path);
+
     static std::vector<PanelWidgetEntry> build_defaults();
 
     /// The pages payload as it is persisted. Shared by save() and by
@@ -294,8 +407,11 @@ class PanelWidgetConfig {
 
     /// Parse a JSON array of widget entries into a vector, applying migrations.
     /// If append_registry_defaults is true, appends missing registry widgets.
+    /// An entry whose id has no definition is dropped, or appended verbatim to
+    /// @p retained when given, so a layout survives a missing plugin.
     std::vector<PanelWidgetEntry> parse_widget_array(const nlohmann::json& arr,
-                                                     bool append_registry_defaults = true);
+                                                     bool append_registry_defaults = true,
+                                                     nlohmann::json* retained = nullptr);
 
     /// Attempt to populate pages_ from a preset-shipped seed file at
     /// assets/config/panel_widgets/<preset>/<panel_id>.json. Returns true if a

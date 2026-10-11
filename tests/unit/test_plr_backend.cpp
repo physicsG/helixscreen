@@ -13,6 +13,7 @@
 // path that could produce a resume gcode is pinned here.
 
 #include "plr_backend.h"
+#include "printer_discovery.h"
 
 #include "../catch_amalgamated.hpp"
 #include "hv/json.hpp"
@@ -319,6 +320,111 @@ TEST_CASE("plr_creality_sdcard_relative_name: unrecognizable root left alone", "
             "/somewhere/else/a.gcode");
 }
 
+// ===========================================================================
+// Qidi backend - passive, like Snapmaker's
+//
+// The stock PRINT_START chain (save_last_file) leaves
+// save_variables.variables.was_interrupted true; a normal end or cancel runs
+// CLEAR_LAST_FILE, which sets it false. So the variable reads true at boot
+// after power loss, and ALSO during every normal print, which the offer's
+// printer_idle gate scopes to the boot case.
+// ===========================================================================
+
+TEST_CASE("plr_select_backend: qidi macro + was_interrupted => QIDI", "[plr][backend][qidi]") {
+    PlrCapabilitySignals caps;
+    caps.qidi_resume_macro = true;
+    caps.qidi_was_interrupted = true;
+    REQUIRE(helix::plr_select_backend(caps) == PlrBackendType::QIDI);
+}
+
+TEST_CASE("plr_select_backend: was_interrupted without the macro => NONE", "[plr][backend][qidi]") {
+    // save_variables entries are user-writable on ANY Klipper, so a variable
+    // with this name alone must never select the backend: only the stock
+    // firmware's RESUME_INTERRUPTED macro identifies Qidi.
+    PlrCapabilitySignals caps;
+    caps.qidi_was_interrupted = true;
+    REQUIRE(helix::plr_select_backend(caps) == PlrBackendType::NONE);
+}
+
+TEST_CASE("plr_select_backend: macro without was_interrupted => NONE", "[plr][backend][qidi]") {
+    // A Qidi printer whose last print ended normally: CLEAR_LAST_FILE set the
+    // variable false. Capability is not availability.
+    PlrCapabilitySignals caps;
+    caps.qidi_resume_macro = true;
+    REQUIRE(helix::plr_select_backend(caps) == PlrBackendType::NONE);
+}
+
+TEST_CASE("plr_select_backend: SNAPMAKER outranks QIDI", "[plr][backend][qidi]") {
+    // No firmware carries both markers; the order just makes the tie
+    // deterministic, passive flag first.
+    PlrCapabilitySignals caps;
+    caps.snapmaker_pl_env_valid = true;
+    caps.qidi_resume_macro = true;
+    caps.qidi_was_interrupted = true;
+    REQUIRE(helix::plr_select_backend(caps) == PlrBackendType::SNAPMAKER);
+}
+
+TEST_CASE("plr_select_backend: QIDI outranks CREALITY", "[plr][backend][qidi]") {
+    // Same tie rule: a passive signal beats one that needs a side-effectful
+    // probe.
+    PlrCapabilitySignals caps;
+    caps.creality_power_loss_field = true;
+    caps.qidi_resume_macro = true;
+    caps.qidi_was_interrupted = true;
+    REQUIRE(helix::plr_select_backend(caps) == PlrBackendType::QIDI);
+}
+
+TEST_CASE("plr_build_plan: QIDI uses the stock resume/discard macros", "[plr][backend][qidi]") {
+    PlrRecoveryPlan plan =
+        helix::plr_build_plan(PlrBackendType::QIDI, "benchy.gcode", PlrDetectResult{});
+    REQUIRE(plan.backend == PlrBackendType::QIDI);
+    REQUIRE(plan.resume_gcode == "RESUME_INTERRUPTED");
+    REQUIRE(plan.discard_gcode == "CLEAR_LAST_FILE");
+    REQUIRE(plan.discard_rpc_method.empty());
+    REQUIRE(plan.recovery_file == "benchy.gcode");
+    REQUIRE(plan.resume_allowed() == true);
+}
+
+TEST_CASE("plr_build_plan: QIDI resume does not depend on the Creality probe",
+          "[plr][backend][qidi]") {
+    // Passive backend: was_interrupted already means the stock firmware
+    // recorded an interrupted print. Requiring a probe would break every Qidi.
+    PlrDetectResult never_probed;
+    PlrRecoveryPlan plan = helix::plr_build_plan(PlrBackendType::QIDI, "", never_probed);
+    REQUIRE(plan.resume_allowed() == true);
+    REQUIRE(plan.resume_gcode == "RESUME_INTERRUPTED");
+    // The stock macros record no filename; the prompt degrades to its generic
+    // body and the gcode carries none.
+    REQUIRE(plan.recovery_file.empty());
+}
+
+TEST_CASE("plr_resume_macro_present: keyed on the RESUME_INTERRUPTED macro",
+          "[plr][backend][qidi]") {
+    helix::PrinterDiscovery stock;
+    stock.parse_objects(json::array({"gcode_macro RESUME_INTERRUPTED", "save_variables"}));
+    REQUIRE(helix::plr_resume_macro_present(stock));
+
+    // Detection is case-insensitive like every other macro gate.
+    helix::PrinterDiscovery lower;
+    lower.parse_objects(json::array({"gcode_macro resume_interrupted"}));
+    REQUIRE(helix::plr_resume_macro_present(lower));
+
+    helix::PrinterDiscovery other;
+    other.parse_objects(json::array({"gcode_macro START_PRINT", "save_variables"}));
+    REQUIRE_FALSE(helix::plr_resume_macro_present(other));
+}
+
+TEST_CASE("plr_resume_macro_present: DETECT_INTERRUPTION alone marks Python-command firmware",
+          "[plr][backend][qidi]") {
+    // Q2 firmware 01.01.02.03: RESUME_INTERRUPTED / CLEAR_LAST_FILE are Python
+    // commands, so the only Qidi recovery object discovery sees is the macro.
+    helix::PrinterDiscovery q2;
+    q2.parse_objects(json::array({"gcode_macro DETECT_INTERRUPTION", "gcode_macro PRINT_START",
+                                  "save_variables", "print_stats_manager"}));
+    REQUIRE(helix::plr_resume_macro_present(q2));
+    REQUIRE(helix::plr_required_status_objects(q2) == std::vector<std::string>{"save_variables"});
+}
+
 TEST_CASE("plr_build_plan: NONE backend yields no actions at all", "[plr][backend]") {
     PlrRecoveryPlan plan =
         helix::plr_build_plan(PlrBackendType::NONE, "benchy.gcode", confirmed_detect());
@@ -382,4 +488,17 @@ TEST_CASE("plr_parse_creality_sidecar: malformed JSON => empty, no throw",
     REQUIRE_NOTHROW(helix::plr_parse_creality_sidecar("{not json"));
     REQUIRE(helix::plr_parse_creality_sidecar("{not json").empty());
     REQUIRE(helix::plr_parse_creality_sidecar("").empty());
+}
+
+TEST_CASE("plr_parse_power_loss_signal: numeric presence only", "[plr][backend]") {
+    using json = nlohmann::json;
+    REQUIRE(helix::plr_parse_power_loss_signal(json{{"print_stats", {{"power_loss", 0}}}}));
+    REQUIRE(helix::plr_parse_power_loss_signal(json{{"print_stats", {{"power_loss", 1.0}}}}));
+    REQUIRE_FALSE(
+        helix::plr_parse_power_loss_signal(json{{"print_stats", {{"power_loss", nullptr}}}}));
+    REQUIRE_FALSE(helix::plr_parse_power_loss_signal(json{{"print_stats", {{"power_loss", "1"}}}}));
+    REQUIRE_FALSE(
+        helix::plr_parse_power_loss_signal(json{{"print_stats", {{"state", "standby"}}}}));
+    REQUIRE_FALSE(helix::plr_parse_power_loss_signal(json{{"print_stats", 5}}));
+    REQUIRE_FALSE(helix::plr_parse_power_loss_signal(json::object()));
 }

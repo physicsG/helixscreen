@@ -82,7 +82,8 @@ class RunoutProbeBackend : public AmsBackendMock {
 };
 
 void set_print_state(PrintJobState s) {
-    lv_subject_set_int(get_printer_state().get_print_state_enum_subject(), static_cast<int>(s));
+    lv_subject_set_int(get_printer_state().print_state().get_print_state_enum_subject(),
+                       static_cast<int>(s));
 }
 
 /// Install a probe backend and return it. AmsState::set_backend() resets the

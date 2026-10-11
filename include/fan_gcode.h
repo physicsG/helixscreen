@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include <spdlog/fmt/fmt.h>
+
 #include <cmath>
-#include <iomanip>
-#include <sstream>
 #include <string>
 
 namespace helix {
@@ -47,10 +47,7 @@ inline std::string fan_gcode(const std::string& fan, double speed_percent) {
         }
 
         // Non-numeric output_pin fan or non-fan output_pin: SET_PIN
-        std::ostringstream ss;
-        ss << std::fixed << std::setprecision(2) << "SET_PIN PIN=" << short_name
-           << " VALUE=" << (speed_percent / 100.0);
-        return ss.str();
+        return fmt::format("SET_PIN PIN={} VALUE={:.2f}", short_name, speed_percent / 100.0);
     }
 
     // All other fan types: SET_FAN_SPEED
@@ -59,10 +56,7 @@ inline std::string fan_gcode(const std::string& fan, double speed_percent) {
     if (space_pos != std::string::npos) {
         fan_name = fan_name.substr(space_pos + 1);
     }
-    std::ostringstream ss;
-    ss << std::fixed << std::setprecision(2) << "SET_FAN_SPEED FAN=" << fan_name
-       << " SPEED=" << (speed_percent / 100.0);
-    return ss.str();
+    return fmt::format("SET_FAN_SPEED FAN={} SPEED={:.2f}", fan_name, speed_percent / 100.0);
 }
 
 } // namespace helix

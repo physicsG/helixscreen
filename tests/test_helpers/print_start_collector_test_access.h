@@ -6,24 +6,44 @@
 
 class PrintStartCollectorTestAccess {
   public:
-    /// Wind back the start time to simulate elapsed seconds.
-    ///
-    /// Also winds back last_activity_time_, so this models "N seconds passed
-    /// and the printer said nothing" — the case the timeouts exist for. Use
-    /// set_last_activity_seconds_ago() afterwards to model a printer that is
-    /// still narrating its pre-print.
-    static void set_elapsed_seconds(PrintStartCollector& c, int seconds) {
-        std::lock_guard<std::mutex> lock(c.state_mutex_);
-        auto when = std::chrono::steady_clock::now() - std::chrono::seconds(seconds);
-        c.printing_state_start_ = when;
-        c.last_activity_time_ = when;
+    static bool is_heater_wait_report(const std::string& line) {
+        return PrintStartCollector::is_heater_wait_report(line);
     }
 
-    /// Set how long ago the last pre-print activity (phase match or probe line)
-    /// was observed, independent of total elapsed time.
+    static bool is_print_start_marker(const std::string& line) {
+        return PrintStartCollector::is_print_start_marker(line);
+    }
+
+    static bool is_completion_marker(const std::string& line) {
+        return PrintStartCollector::is_completion_marker(line);
+    }
+
+    static bool is_respond_completion(const std::string& line) {
+        return PrintStartCollector::is_respond_completion(line);
+    }
+
+    /// Wind back the start time to simulate elapsed seconds.
+    ///
+    /// Also winds back both activity stamps, so this models "N seconds passed
+    /// and the printer showed nothing" — the case the timeouts exist for. Use
+    /// set_last_activity_seconds_ago() afterwards to model a printer that is
+    /// still working on its pre-print.
+    static void set_elapsed_seconds(PrintStartCollector& c, int seconds) {
+        std::lock_guard<std::mutex> lock(c.state_mutex_);
+        auto when = helix::sim::SimulatedClock::now() - std::chrono::seconds(seconds);
+        c.printing_state_start_ = when;
+        c.last_signal_time_ = when;
+        c.last_inferred_activity_time_ = when;
+    }
+
+    /// Set how long ago the printer last showed pre-print activity of every
+    /// kind (a matched line, a probe line, a climbing heater, a status-signal
+    /// rule), independent of total elapsed time.
     static void set_last_activity_seconds_ago(PrintStartCollector& c, int seconds) {
         std::lock_guard<std::mutex> lock(c.state_mutex_);
-        c.last_activity_time_ = std::chrono::steady_clock::now() - std::chrono::seconds(seconds);
+        const auto when = helix::sim::SimulatedClock::now() - std::chrono::seconds(seconds);
+        c.last_signal_time_ = when;
+        c.last_inferred_activity_time_ = when;
     }
 
     /// Set predicted_total_seconds_ directly for timeout threshold tests
@@ -43,7 +63,7 @@ class PrintStartCollectorTestAccess {
     /// the first tick where bed+nozzle reach target — bypassing the natural
     /// path keeps tests deterministic.
     static void set_temps_ready_elapsed_seconds(PrintStartCollector& c, int seconds) {
-        c.temps_ready_time_ = std::chrono::steady_clock::now() - std::chrono::seconds(seconds);
+        c.temps_ready_time_ = helix::sim::SimulatedClock::now() - std::chrono::seconds(seconds);
     }
 
     /// Reset silent_progression_idx_ to N (default 0) so a test can rewind
@@ -99,6 +119,13 @@ class PrintStartCollectorTestAccess {
     static int get_last_remaining(PrintStartCollector& c) {
         std::lock_guard<std::mutex> lock(c.state_mutex_);
         return c.last_remaining_;
+    }
+
+    /// Whether the mesh-extrapolation anchor release is armed for the mesh
+    /// segment under way. A pure latch with no externally visible state until
+    /// the next publish, so the per-run reset is pinned by reading it.
+    static bool is_mesh_extrapolation_armed(PrintStartCollector& c) {
+        return c.mesh_extrapolation_armed_;
     }
 
     /// Inject predictor history (deterministic per-phase durations) instead of

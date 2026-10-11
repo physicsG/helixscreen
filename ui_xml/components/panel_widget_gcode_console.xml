@@ -2,20 +2,42 @@
 <!-- Copyright (C) 2025-2026 356C LLC -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <component>
+  <api>
+    <!-- Per-instance subject names, supplied by the widget at creation. They
+         must exist before this component is parsed: a binding whose subject is
+         missing at parse time is dropped permanently and silently. -->
+    <prop name="tile_icon_subject" type="string" default=""/>
+    <prop name="tile_label_subject" type="string" default=""/>
+    <prop name="tile_dir_subject" type="string" default=""/>
+    <prop name="tile_target_subject" type="string" default=""/>
+    <!-- 0 = icon tile, 1 = output tail with nothing to show yet, 2 = output tail -->
+    <prop name="tail_view_subject" type="string" default=""/>
+  </api>
   <view name="panel_widget_gcode_console"
         extends="lv_obj" height="100%" flex_grow="1" style_pad_all="0" scrollable="false">
-    <ui_button name="gcode_console_button"
-               width="100%" height="100%" variant="ghost" flex_flow="column" style_flex_main_place="center"
-               style_flex_cross_place="center" style_flex_track_place="center" style_border_width="0" focusable="false">
-      <bind_state_if_not_eq subject="printer_connection_state" state="disabled" ref_value="2"/>
-      <icon name="console_icon"
-            src="console" size="#icon_size" variant="secondary" clickable="false" event_bubble="true"/>
-      <text_tiny text="Console"
-                 translation_tag="Console" style_text_color="#text_muted" style_text_align="center" clickable="false"
-                 event_bubble="true">
-        <bind_flag_if_eq subject="show_widget_labels" flag="hidden" ref_value="0"/>
-      </text_tiny>
+    <lv_obj name="gcode_console_icon_face" width="100%" height="100%" style_pad_all="0" scrollable="false">
+      <bind_flag_if_not_eq subject="$tail_view_subject" flag="hidden" ref_value="0"/>
+      <home_action_tile width="100%"
+                        height="100%" icon="console" icon_variant="secondary" label="Console"
+                        callback="gcode_console_clicked_cb" button_name="gcode_console_button" icon_name="console_icon"
+                        tile_icon_subject="$tile_icon_subject" tile_label_subject="$tile_label_subject"
+                        disabled_cond="printer_connection_state ne 2"/>
+    </lv_obj>
+    <!-- Live output tail: newest line at the bottom, older lines clip off the top.
+         Rows are created in C++ as output arrives. -->
+    <lv_obj name="gcode_console_tail"
+            width="100%" height="100%" style_pad_all="#space_sm" scrollable="false" clickable="true" hidden="true"
+            style_radius="#border_radius">
+      <style name="styles.press_wash" selector="pressed"/>
+      <bind_flag_if_eq subject="$tail_view_subject" flag="hidden" ref_value="0"/>
       <event_cb trigger="clicked" callback="gcode_console_clicked_cb"/>
-    </ui_button>
+      <text_muted name="gcode_console_tail_empty"
+                  width="100%" align="center" text="No output yet" style_text_align="center" event_bubble="true">
+        <bind_flag_if_not_eq subject="$tail_view_subject" flag="hidden" ref_value="1"/>
+      </text_muted>
+      <lv_obj name="gcode_console_tail_rows"
+              width="100%" height="100%" style_pad_all="0" style_pad_gap="0" flex_flow="column"
+              style_flex_main_place="end" scrollable="false" clickable="false" event_bubble="true"/>
+    </lv_obj>
   </view>
 </component>

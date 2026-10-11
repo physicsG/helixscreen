@@ -6,7 +6,7 @@
  * @brief Unit tests for helix::paths filesystem-path primitives.
  *
  * These primitives centralize behavior currently reimplemented across
- * update_checker.cpp, log_path_probe.cpp, input_shaper_cache.cpp,
+ * update_checker.cpp, log_path_probe.cpp,
  * thumbnail_cache.cpp, app_globals.cpp, app_constants.h, logging_init.cpp,
  * and data_root_resolver.cpp. Written TDD-style: the cases below encode the
  * exact edge-case semantics converged from those sources.
@@ -196,7 +196,7 @@ TEST_CASE("probe_writable fails on nonexistent dir", "[helix_paths]") {
     CHECK_FALSE(probe_writable("/no/such/path/really/unlikely/xyz", 0));
 }
 
-// GAP 3 (L093 shape): the two cache sites (input_shaper_cache, thumbnail_cache)
+// GAP 3 (L093 shape): the cache sites (thumbnail_cache)
 // depend on probe_writable correctly REJECTING an existing-but-unwritable dir —
 // a plain is_writable_dir/exists check would wrongly accept it. This proves the
 // create+write+remove probe actually fails when the dir denies writes.
@@ -283,4 +283,34 @@ TEST_CASE("first_writable_dir honors min_free_bytes", "[helix_paths]") {
     // be skipped, so no candidate qualifies.
     CHECK(first_writable_dir({dir.string()}, UINT64_MAX) == "");
     fs::remove_all(dir);
+}
+
+TEST_CASE("is_ram_backed separates tmpfs from storage", "[helix_paths]") {
+    // A path we cannot stat answers "not RAM" — the predicate gates a warning,
+    // and a warning invented from a failed syscall is noise.
+    CHECK_FALSE(is_ram_backed(""));
+    CHECK_FALSE(is_ram_backed("/no/such/path/really/unlikely/xyz"));
+
+#if defined(__linux__)
+    // /dev/shm is tmpfs on every Linux that has it; a build host without one
+    // cannot exercise the positive case.
+    if (fs::exists("/dev/shm")) {
+        CHECK(is_ram_backed("/dev/shm"));
+    }
+    // The tree the tests are running from is real storage.
+    CHECK_FALSE(is_ram_backed(fs::current_path().string()));
+
+    // Resolves through symlinks: the CC1 reaches tmpfs as /tmp -> /var/tmp ->
+    // /var/volatile/tmp, and a predicate that stopped at the link would miss it.
+    fs::path link = fs::temp_directory_path() / "helix_ram_link_test";
+    fs::remove(link);
+    if (fs::exists("/dev/shm")) {
+        std::error_code ec;
+        fs::create_directory_symlink("/dev/shm", link, ec);
+        if (!ec) {
+            CHECK(is_ram_backed(link.string()));
+            fs::remove(link);
+        }
+    }
+#endif
 }

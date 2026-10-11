@@ -5,6 +5,7 @@
 #include "ams_state.h"
 #include "ams_types.h"
 #include "consumption_sink.h"
+#include "lane_source_store.h"
 
 #include "../catch_amalgamated.hpp"
 
@@ -16,10 +17,10 @@ namespace {
 // LVGL initialization. Mirrors the existing tracker tests.
 struct ExternalSpoolSinkFixture : LVGLTestFixture {
     ExternalSpoolSinkFixture() {
-        auto& ams = AmsState::instance();
+        auto& ams = helix::AmsState::instance();
         ams.init_subjects(false);
 
-        SlotInfo info;
+        helix::SlotInfo info;
         info.material = "PLA";
         info.remaining_weight_g = 1000.0f;
         info.total_weight_g = 1000.0f;
@@ -27,7 +28,7 @@ struct ExternalSpoolSinkFixture : LVGLTestFixture {
     }
 
     ~ExternalSpoolSinkFixture() override {
-        AmsState::instance().clear_external_spool_info();
+        helix::AmsState::instance().clear_external_spool_info();
     }
 };
 
@@ -48,7 +49,7 @@ TEST_CASE_METHOD(ExternalSpoolSinkFixture,
     sink.snapshot(0.0f);
     // 1000 mm of 1.75mm PLA @ 1.24 g/cm^3 ≈ 2.98 g.
     sink.apply_delta(1000.0f);
-    auto info = AmsState::instance().get_external_spool_info();
+    auto info = helix::AmsState::instance().get_external_spool_info();
     REQUIRE(info.has_value());
     REQUIRE(info->remaining_weight_g < 1000.0f);
     REQUIRE(info->remaining_weight_g > 996.0f);
@@ -56,10 +57,10 @@ TEST_CASE_METHOD(ExternalSpoolSinkFixture,
 
 TEST_CASE_METHOD(ExternalSpoolSinkFixture, "ExternalSpoolSink: unknown weight not trackable",
                  "[consumption_sink][external]") {
-    SlotInfo info;
+    helix::SlotInfo info;
     info.material = "PLA";
     info.remaining_weight_g = -1.0f;
-    AmsState::instance().set_external_spool_info_in_memory(info);
+    helix::AmsState::instance().set_external_spool_info_in_memory(info);
 
     ExternalSpoolSink sink;
     sink.snapshot(0.0f);
@@ -68,11 +69,11 @@ TEST_CASE_METHOD(ExternalSpoolSinkFixture, "ExternalSpoolSink: unknown weight no
 
 TEST_CASE_METHOD(ExternalSpoolSinkFixture, "ExternalSpoolSink: unknown material not trackable",
                  "[consumption_sink][external]") {
-    SlotInfo info;
+    helix::SlotInfo info;
     info.material = "UnknownNovelMaterial9000";
     info.remaining_weight_g = 1000.0f;
     info.total_weight_g = 1000.0f;
-    AmsState::instance().set_external_spool_info_in_memory(info);
+    helix::AmsState::instance().set_external_spool_info_in_memory(info);
 
     ExternalSpoolSink sink;
     sink.snapshot(0.0f);
@@ -82,7 +83,7 @@ TEST_CASE_METHOD(ExternalSpoolSinkFixture, "ExternalSpoolSink: unknown material 
 TEST_CASE_METHOD(ExternalSpoolSinkFixture,
                  "ExternalSpoolSink: no external spool info not trackable",
                  "[consumption_sink][external]") {
-    AmsState::instance().clear_external_spool_info();
+    helix::AmsState::instance().clear_external_spool_info();
 
     ExternalSpoolSink sink;
     sink.snapshot(0.0f);
@@ -92,11 +93,11 @@ TEST_CASE_METHOD(ExternalSpoolSinkFixture,
 TEST_CASE_METHOD(ExternalSpoolSinkFixture,
                  "ExternalSpoolSink: apply_delta clamps remaining weight at zero",
                  "[consumption_sink][external]") {
-    SlotInfo info;
+    helix::SlotInfo info;
     info.material = "PLA";
     info.remaining_weight_g = 5.0f; // only 5 g available
     info.total_weight_g = 1000.0f;
-    AmsState::instance().set_external_spool_info_in_memory(info);
+    helix::AmsState::instance().set_external_spool_info_in_memory(info);
 
     ExternalSpoolSink sink;
     sink.snapshot(0.0f);
@@ -104,7 +105,7 @@ TEST_CASE_METHOD(ExternalSpoolSinkFixture,
 
     // Consume ~29.8 g (would drive negative without clamp).
     sink.apply_delta(10000.0f);
-    auto after = AmsState::instance().get_external_spool_info();
+    auto after = helix::AmsState::instance().get_external_spool_info();
     REQUIRE(after.has_value());
     REQUIRE(after->remaining_weight_g == 0.0f);
 }
@@ -117,20 +118,84 @@ TEST_CASE_METHOD(ExternalSpoolSinkFixture,
     sink.apply_delta(1000.0f); // ~3 g consumed → ~997 g remaining
 
     // Simulate an external writer replacing remaining_weight_g.
-    auto current = AmsState::instance().get_external_spool_info();
+    auto current = helix::AmsState::instance().get_external_spool_info();
     REQUIRE(current.has_value());
-    SlotInfo edited = *current;
+    helix::SlotInfo edited = *current;
     edited.remaining_weight_g = 500.0f;
-    AmsState::instance().set_external_spool_info_in_memory(edited);
+    helix::AmsState::instance().set_external_spool_info_in_memory(edited);
 
     // Next tick detects the external write and rebaselines (no decrement).
     sink.apply_delta(1100.0f);
-    auto snap_after_rebase = AmsState::instance().get_external_spool_info();
+    auto snap_after_rebase = helix::AmsState::instance().get_external_spool_info();
     REQUIRE(snap_after_rebase->remaining_weight_g == 500.0f);
 
     // Subsequent extrusion decrements from 500g, not from the original baseline.
     sink.apply_delta(1200.0f); // only 100 mm past rebase
-    auto after = AmsState::instance().get_external_spool_info();
+    auto after = helix::AmsState::instance().get_external_spool_info();
     REQUIRE(after->remaining_weight_g < 500.0f);
     REQUIRE(after->remaining_weight_g > 499.0f);
+}
+
+TEST_CASE_METHOD(ExternalSpoolSinkFixture,
+                 "ExternalSpoolSink: flush persists the binding, "
+                 "not the resolved view",
+                 "[consumption_sink][external][1632]") {
+    ExternalSpoolSink sink;
+    sink.snapshot(0.0f);
+    sink.apply_delta(1000.0f); // ~3 g consumed; raw and Metered both ~997 g
+    auto raw_before = helix::AmsState::instance().raw_external_spool_info();
+    REQUIRE(raw_before.has_value());
+    REQUIRE(raw_before->remaining_weight_g < 1000.0f);
+
+    // A resolved weight that disagrees with the stored record (a newer meter
+    // reading filed on the lane). Flushing must persist the binding as it
+    // stands, not bake the resolved view into the stored record.
+    helix::ams::Observation metered(helix::ams::ObservationSource::Metered);
+    metered.remaining_weight_g = 500.0f;
+    helix::ams::ingest(helix::ams::BYPASS_LANE_ID, metered);
+
+    sink.flush();
+
+    auto raw_after = helix::AmsState::instance().raw_external_spool_info();
+    REQUIRE(raw_after.has_value());
+    CHECK(raw_after->remaining_weight_g == raw_before->remaining_weight_g);
+}
+
+TEST_CASE_METHOD(ExternalSpoolSinkFixture, "ExternalSpoolSink: Spoolman-linked spool not metered",
+                 "[consumption_sink][external][1632]") {
+    helix::SlotInfo info;
+    info.material = "PLA";
+    info.spoolman_id = 4;
+    info.remaining_weight_g = 1000.0f;
+    info.total_weight_g = 1000.0f;
+    helix::AmsState::instance().set_external_spool_info_in_memory(info);
+
+    ExternalSpoolSink sink;
+    sink.snapshot(0.0f);
+    // The server tracks a linked spool's own consumption; a local meter would
+    // fight it.
+    REQUIRE_FALSE(sink.is_trackable());
+}
+
+TEST_CASE_METHOD(ExternalSpoolSinkFixture, "ExternalSpoolSink: linking mid-print pauses the meter",
+                 "[consumption_sink][external][1632]") {
+    ExternalSpoolSink sink;
+    sink.snapshot(0.0f);
+    REQUIRE(sink.is_trackable());
+
+    helix::SlotInfo linked;
+    linked.material = "PLA";
+    linked.spoolman_id = 4;
+    linked.remaining_weight_g = 1000.0f;
+    linked.total_weight_g = 1000.0f;
+    helix::AmsState::instance().set_external_spool_info_in_memory(linked);
+
+    sink.apply_delta(1000.0f); // ~3 g consumed
+
+    // Paused, not counting: the bypass lane carries no Metered record, and the
+    // shown weight is the binding's own, not a local decrement of it.
+    CHECK_FALSE(helix::ams::lane_sources(helix::ams::BYPASS_LANE_ID).metered.has_value());
+    auto shown = helix::AmsState::instance().get_external_spool_info();
+    REQUIRE(shown.has_value());
+    CHECK(shown->remaining_weight_g == 1000.0f);
 }

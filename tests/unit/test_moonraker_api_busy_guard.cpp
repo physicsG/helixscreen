@@ -24,6 +24,7 @@
 
 #include "../../include/moonraker_api.h"
 #include "../../include/moonraker_client_mock.h"
+#include "../../include/print_start_phase.h"
 #include "../../include/printer_state.h"
 #include "../busy_guard_fixture.h"
 
@@ -34,6 +35,13 @@ using namespace helix;
 namespace {
 
 class BusyGuardApiFixture : public helix::BusyGuardFixture {};
+
+/// Stage the print-start phase the way a live collector publish would (the
+/// subject write is what is_in_print_start() reads).
+void set_print_start_phase(PrinterState& state, PrintStartPhase phase) {
+    lv_subject_set_int(state.print_state().get_print_start_phase_subject(),
+                       static_cast<int>(phase));
+}
 
 } // namespace
 
@@ -247,6 +255,209 @@ TEST_CASE_METHOD(BusyGuardApiFixture,
         CHECK_FALSE(error_called);
         REQUIRE(mock_client.last_send_method() == "printer.gcode.script");
     }
+}
+
+// ============================================================================
+// Print start holds the same gate even while print_stats says PRINTING
+// ============================================================================
+//
+// The START macro (heat soak, mesh, probing) holds Klipper's single-threaded
+// gcode lock for minutes while print_stats already reports PRINTING — the
+// blocking-op predicate excludes active file prints, so it never fires in that
+// window and a synchronous temp RPC stalls into its 60s timeout (bundle
+// SQJ8SAL7, FlashForge AD5X). The print-start phase is the signal that covers
+// exactly that window.
+
+TEST_CASE_METHOD(BusyGuardApiFixture,
+                 "benign discretionary gcode queues while print start holds the gcode lock",
+                 "[busy_guard][mock]") {
+    set_print_state(PrintJobState::PRINTING);
+    REQUIRE_FALSE(state.is_external_blocking_operation_active()); // the bypass this pins
+    set_print_start_phase(state, PrintStartPhase::HOMING);
+    REQUIRE(state.print_state().is_in_print_start());
+
+    int success_calls = 0;
+    int queued_calls = 0;
+    api->execute_gcode(
+        "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=200",
+        [&success_calls]() { success_calls++; },
+        [this](const MoonrakerError& err) { error_cb(err); }, 0, false,
+        [&queued_calls]() { queued_calls++; });
+
+    CHECK(queued_calls == 1); // queued for later, not run now
+    CHECK(success_calls == 0);
+    CHECK_FALSE(error_called);
+    REQUIRE(mock_client.last_send_method() == "printer.gcode.script");
+    REQUIRE(mock_client.gcode_script_history().size() == 1);
+
+    // The interactive temp path rides the same gate.
+    api->set_temperature("extruder", 200.0, nullptr,
+                         [this](const MoonrakerError& err) { error_cb(err); });
+    CHECK_FALSE(error_called);
+    REQUIRE(mock_client.gcode_script_history().size() == 2);
+
+    // One toast per episode: the first send claimed it, the second claims nothing.
+    CHECK_FALSE(state.calibration_state().claim_busy_queue_toast());
+}
+
+TEST_CASE_METHOD(BusyGuardApiFixture,
+                 "busy-queue toast latch holds through a print-start episode and re-arms after",
+                 "[busy_guard][mock]") {
+    set_print_state(PrintJobState::PRINTING);
+    set_print_start_phase(state, PrintStartPhase::BED_MESH);
+
+    // First benign command of the episode claims the once-per-episode toast.
+    api->execute_gcode("M106 S128", nullptr, [this](const MoonrakerError& err) { error_cb(err); });
+    CHECK_FALSE(error_called);
+    CHECK_FALSE(state.calibration_state().claim_busy_queue_toast());
+
+    // Status keeps flowing while the START macro is still inside the gcode lock.
+    // print_stats PRINTING keeps the composite blocking predicate clear, so the
+    // latch must key on the print-start arm here or it re-arms mid-episode and
+    // every status tick buys back a toast.
+    state.update_from_status(nlohmann::json{{"idle_timeout", {{"state", "Printing"}}}});
+    CHECK(state.print_state().is_in_print_start());
+    CHECK_FALSE(state.calibration_state().claim_busy_queue_toast());
+
+    // The collector stops, the phase returns to IDLE, and the next status update
+    // re-arms the latch so a later episode can announce itself again.
+    set_print_start_phase(state, PrintStartPhase::IDLE);
+    state.update_from_status(nlohmann::json{{"idle_timeout", {{"state", "Printing"}}}});
+    CHECK_FALSE(state.print_state().is_in_print_start());
+    CHECK(state.calibration_state().claim_busy_queue_toast());
+}
+
+TEST_CASE_METHOD(BusyGuardApiFixture,
+                 "execute_gcode refuses a raw move while print start holds the gcode lock",
+                 "[busy_guard][mock]") {
+    // Same danger as the blocking-op arm: a jog firing minutes late, after the
+    // mesh finishes and the print is laying down plastic, crashes the toolhead.
+    set_print_state(PrintJobState::PRINTING);
+    set_print_start_phase(state, PrintStartPhase::HOMING);
+
+    api->execute_gcode("G0 X10 F3000", nullptr,
+                       [this](const MoonrakerError& err) { error_cb(err); });
+
+    REQUIRE(error_called);
+    CHECK(captured_error.type == MoonrakerErrorType::NOT_READY);
+    CHECK(mock_client.gcode_script_history().empty());
+}
+
+TEST_CASE_METHOD(BusyGuardApiFixture,
+                 "execute_gcode runs discretionary gcode synchronously outside print start",
+                 "[busy_guard][mock]") {
+    // The print-start arm must not widen the gate past the start window: mid-print
+    // with the phase back at IDLE, a temp tweak is the ordinary case and takes the
+    // normal synchronous path (the mock answers inline).
+    set_print_state(PrintJobState::PRINTING);
+    set_print_start_phase(state, PrintStartPhase::IDLE);
+
+    int success_calls = 0;
+    int queued_calls = 0;
+    api->execute_gcode(
+        "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=210",
+        [&success_calls]() { success_calls++; },
+        [this](const MoonrakerError& err) { error_cb(err); }, 0, false,
+        [&queued_calls]() { queued_calls++; });
+
+    CHECK(success_calls == 1);
+    CHECK(queued_calls == 0);
+    CHECK_FALSE(error_called);
+}
+
+TEST_CASE_METHOD(BusyGuardApiFixture,
+                 "motion API refuses a jog while print start holds the gcode lock",
+                 "[busy_guard][mock][motion_guard]") {
+    // The motion API's gate is the refuse-always twin of the split: a jog queued
+    // behind the START macro fires minutes late, so it must be refused not_ready,
+    // not sent to wait out the macro.
+    set_print_state(PrintJobState::PRINTING);
+    set_print_start_phase(state, PrintStartPhase::HOMING);
+    REQUIRE(state.print_state().is_in_print_start());
+
+    api->motion().move_axis('X', 10.0, 6000.0, nullptr,
+                            [this](const MoonrakerError& err) { error_cb(err); });
+
+    REQUIRE(error_called);
+    CHECK(captured_error.type == MoonrakerErrorType::NOT_READY);
+    CHECK(mock_client.gcode_script_history().empty());
+
+    // Phase back to IDLE (mid-print tweaks): the same jog goes through.
+    set_print_start_phase(state, PrintStartPhase::IDLE);
+    REQUIRE_FALSE(state.print_state().is_in_print_start());
+    error_called = false;
+    mock_client.clear_gcode_script_history();
+
+    api->motion().move_axis('X', 10.0, 6000.0, nullptr,
+                            [this](const MoonrakerError& err) { error_cb(err); });
+
+    CHECK_FALSE(error_called);
+    REQUIRE(mock_client.last_send_method() == "printer.gcode.script");
+    CHECK_FALSE(mock_client.gcode_script_history().empty());
+}
+
+TEST_CASE_METHOD(BusyGuardApiFixture,
+                 "bypass_busy_gate sends the print-launch block synchronously during print start",
+                 "[busy_guard][mock]") {
+    // PrintStartController arms the preparing job BEFORE the pre-start block is
+    // sent, so is_in_print_start() is already true at dispatch. A purely
+    // discretionary block (a pre_start_gcode heater template) would be queued
+    // fire-and-forget and its on_success — the only trigger that launches the
+    // job — would never fire. The bypass keeps the launch send synchronous.
+    set_print_state(PrintJobState::PRINTING);
+    set_print_start_phase(state, PrintStartPhase::HOMING);
+    REQUIRE(state.print_state().is_in_print_start());
+
+    int success_calls = 0;
+    int queued_calls = 0;
+
+    SECTION("with the bypass: synchronous path, on_success fires") {
+        api->execute_gcode(
+            "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=200",
+            [&success_calls]() { success_calls++; },
+            [this](const MoonrakerError& err) { error_cb(err); }, 0, false,
+            [&queued_calls]() { queued_calls++; }, true, /*bypass_busy_gate=*/true);
+
+        CHECK(success_calls == 1);
+        CHECK(queued_calls == 0);
+        CHECK_FALSE(error_called);
+        REQUIRE(mock_client.last_send_method() == "printer.gcode.script");
+    }
+
+    SECTION("without the bypass: the same block is queued fire-and-forget") {
+        api->execute_gcode(
+            "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=200",
+            [&success_calls]() { success_calls++; },
+            [this](const MoonrakerError& err) { error_cb(err); }, 0, false,
+            [&queued_calls]() { queued_calls++; }, true, /*bypass_busy_gate=*/false);
+
+        CHECK(success_calls == 0);
+        CHECK(queued_calls == 1);
+        CHECK_FALSE(error_called);
+        REQUIRE(mock_client.last_send_method() == "printer.gcode.script");
+    }
+}
+
+TEST_CASE_METHOD(BusyGuardApiFixture,
+                 "silent discretionary send during print start leaves the busy toast unclaimed",
+                 "[busy_guard][mock][led]") {
+    // LedAutoState applies the state theme on every print-state change, so its
+    // SET_LED lands inside the gate's window at every print start. It is not a
+    // user command, and the #1108 toast exists to explain one — a silent send
+    // must neither show nor claim the once-per-episode latch. (The non-silent
+    // side — a user command claiming exactly once — is pinned by the first
+    // print-start case above.)
+    set_print_state(PrintJobState::PRINTING);
+    set_print_start_phase(state, PrintStartPhase::HOMING);
+    REQUIRE(state.print_state().is_in_print_start());
+
+    api->execute_gcode("SET_LED LED=my_leds RED=1.0 GREEN=1.0 BLUE=1.0 SYNC=0 TRANSMIT=1", nullptr,
+                       nullptr, /*timeout_ms=*/0, /*silent=*/true);
+
+    // Fire-and-forget to Klipper, but the toast latch is still armed: this claim
+    // succeeds only because the silent send took nothing.
+    REQUIRE(mock_client.last_send_method() == "printer.gcode.script");
+    CHECK(state.calibration_state().claim_busy_queue_toast());
 }
 
 // ============================================================================

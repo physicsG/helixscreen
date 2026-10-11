@@ -121,3 +121,70 @@ TEST_CASE_METHOD(MigrationV18Fixture,
     REQUIRE(config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
     REQUIRE(config.get<bool>("/input/calibration/recheck_pending", true) == false);
 }
+
+TEST_CASE_METHOD(MigrationV18Fixture,
+                 "Config migration v18: a seed with a printer node keeps its calibration",
+                 "[config][migration]") {
+    // seed_from_moonraker_detection's C path: a preset's input/display blocks
+    // plus a moonraker_host under printers/default, and no config_version.
+    json seed = {{"input", {{"calibration", {{"valid", true}, {"a", 1.66}, {"e", 1.76}}}}},
+                 {"display", {{"rotate", 180}}},
+                 {"active_printer_id", "default"},
+                 {"printers", {{"default", {{"moonraker_host", "127.0.0.1"}}}}}};
+    write_and_init(seed);
+
+    REQUIRE(config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+    REQUIRE_FALSE(config.get<bool>("/input/calibration/recheck_pending", false));
+    REQUIRE(config.get<bool>("/input/calibration/valid", false));
+}
+
+TEST_CASE_METHOD(MigrationV18Fixture,
+                 "Config migration v18: a packaged preset keeps its calibration",
+                 "[config][migration]") {
+    // A preset shipped as the release tarball's settings.json, on a fresh
+    // install with no rolling backup to restore.
+    json preset = {{"preset", "artillery-m1-pro"},
+                   {"wizard_completed", false},
+                   {"input", {{"calibration", {{"valid", true}, {"a", 1.64}, {"e", 1.83}}}}},
+                   {"printer", {{"heaters", {{"bed", "heater_bed"}, {"hotend", "extruder"}}}}}};
+    write_and_init(preset);
+
+    REQUIRE(config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+    REQUIRE_FALSE(config.get<bool>("/input/calibration/recheck_pending", false));
+    REQUIRE(config.get<bool>("/input/calibration/valid", false));
+}
+
+TEST_CASE_METHOD(MigrationV18Fixture,
+                 "Config migration v18: a full preset seed keeps its calibration",
+                 "[config][migration]") {
+    // seed_full_preset_for_printer's B path: the device blocks, the preset's
+    // printer block under printers/default, and the root preset marker.
+    json seed = {
+        {"input", {{"calibration", {{"valid", true}, {"a", 1.66}, {"e", 1.76}}}}},
+        {"display", {{"rotate", 180}}},
+        {"active_printer_id", "default"},
+        {"preset", "sovol_sv06_ace"},
+        {"printers",
+         {{"default", {{"wizard_completed", false}, {"heaters", {{"bed", "heater_bed"}}}}}}}};
+    write_and_init(seed);
+
+    REQUIRE(config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+    REQUIRE_FALSE(config.get<bool>("/input/calibration/recheck_pending", false));
+    REQUIRE(config.get<bool>("/input/calibration/valid", false));
+}
+
+TEST_CASE_METHOD(MigrationV18Fixture,
+                 "Config migration v18: a versionless user config with a finished wizard is "
+                 "rechecked",
+                 "[config][migration]") {
+    // v0.9.10 and earlier wrote no config_version: a single /printer, the
+    // wizard flag at the root, and the wizard's affine under /display.
+    json user = {{"wizard_completed", true},
+                 {"printer", {{"moonraker_host", "192.168.1.50"}}},
+                 {"display", {{"calibration", {{"valid", true}, {"a", 1.5}, {"e", 1.7}}}}}};
+    write_and_init(user);
+
+    REQUIRE(config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+    REQUIRE(config.get<bool>("/input/calibration/valid", false));
+    REQUIRE(config.get<bool>("/input/calibration/recheck_pending", false));
+}

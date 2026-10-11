@@ -4,6 +4,7 @@
 #pragma once
 
 #include "lvgl/lvgl.h"
+#include "persisted_setting.h"
 #include "subject_managed_panel.h"
 
 #include <string>
@@ -70,6 +71,9 @@ class SystemSettingsManager {
     /** @brief Get dropdown options string "English\nDeutsch\nFrancais\n..." */
     static const char* get_language_options();
 
+    /** @brief Get the current language's native display name (e.g. "Deutsch") */
+    std::string get_language_display_name() const;
+
     /** @brief Get language code for dropdown index */
     static std::string language_index_to_code(int index);
 
@@ -81,7 +85,9 @@ class SystemSettingsManager {
     // =========================================================================
 
     /** @brief Get current update channel (0=Stable, 1=Beta, 2=Dev) */
-    int get_update_channel() const;
+    int get_update_channel() const {
+        return settings_.get(Key::UpdateChannel);
+    }
 
     /** @brief Set update channel, persist, and clear update cache */
     void set_update_channel(int channel);
@@ -90,8 +96,9 @@ class SystemSettingsManager {
     // TELEMETRY SETTINGS
     // =========================================================================
 
-    /** @brief Get telemetry enabled state */
-    bool get_telemetry_enabled() const;
+    bool get_telemetry_enabled() const {
+        return settings_.get_bool(Key::TelemetryEnabled);
+    }
 
     /** @brief Set telemetry enabled state (persists to config + notifies TelemetryManager) */
     void set_telemetry_enabled(bool enabled);
@@ -101,21 +108,25 @@ class SystemSettingsManager {
     // =========================================================================
 
     /**
-     * @brief Get stored WiFi radio on/off choice (default true — WiFi on)
+     * @brief Stored WiFi radio on/off choice (default true, also before init_subjects())
      *
-     * Requires init_subjects() to have run first — see the caveat on the
-     * definition in system_settings_manager.cpp.
+     * WiFiManager's READY handler reads this to decide whether to force the
+     * radio off, so a wrong "off" here switches WiFi off on a remote printer.
      */
-    bool get_wifi_enabled() const;
+    bool get_wifi_enabled() const {
+        return settings_.get_bool(Key::WifiEnabled);
+    }
 
     /**
      * @brief Persist the WiFi radio on/off choice
      *
-     * Persists only — deliberately does NOT call into WiFiManager. WiFiManager
-     * reasserts this stored value against the radio itself once its backend is
-     * ready; calling back into it from here would create a feedback loop.
+     * Persists only and does NOT call into WiFiManager. WiFiManager reasserts
+     * this stored value against the radio itself once its backend is ready;
+     * calling back into it from here would create a feedback loop.
      */
-    void set_wifi_enabled(bool enabled);
+    void set_wifi_enabled(bool enabled) {
+        settings_.set(Key::WifiEnabled, enabled);
+    }
 
     // =========================================================================
     // LOG LEVEL SETTINGS
@@ -136,19 +147,24 @@ class SystemSettingsManager {
         return &language_subject_;
     }
 
+    /// Death signal for this manager's subjects, for observers of them.
+    [[nodiscard]] SubjectLifetime get_subjects_lifetime() const {
+        return subjects_.get_subjects_lifetime();
+    }
+
     /** @brief Update channel subject (integer: 0=Stable, 1=Beta, 2=Dev) */
     lv_subject_t* subject_update_channel() {
-        return &update_channel_subject_;
+        return settings_.subject(Key::UpdateChannel);
     }
 
     /** @brief Telemetry enabled subject (integer: 0=off, 1=on) */
     lv_subject_t* subject_telemetry_enabled() {
-        return &telemetry_enabled_subject_;
+        return settings_.subject(Key::TelemetryEnabled);
     }
 
     /** @brief WiFi radio enabled subject (integer: 0=off, 1=on) */
     lv_subject_t* subject_wifi_enabled() {
-        return &wifi_enabled_subject_;
+        return settings_.subject(Key::WifiEnabled);
     }
 
     /** @brief Log level subject (integer: 0=Warn, 1=Info, 2=Debug, 3=Trace) */
@@ -160,13 +176,13 @@ class SystemSettingsManager {
     SystemSettingsManager();
     ~SystemSettingsManager() = default;
 
-    SubjectManager subjects_;
+    enum class Key : uint8_t { UpdateChannel, TelemetryEnabled, WifiEnabled, COUNT };
 
-    lv_subject_t language_subject_;
-    lv_subject_t update_channel_subject_;
-    lv_subject_t telemetry_enabled_subject_;
-    lv_subject_t wifi_enabled_subject_;
-    lv_subject_t log_level_subject_;
+    SubjectManager subjects_;
+    settings::PersistedSettings<Key, static_cast<size_t>(Key::COUNT)> settings_;
+
+    lv_subject_t language_subject_{};
+    lv_subject_t log_level_subject_{};
 
     bool subjects_initialized_ = false;
 };

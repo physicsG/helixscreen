@@ -6,6 +6,7 @@
 #include "ams_types.h"
 #include "color_utils.h"
 #include "filament_display_name.h"
+#include "lane_observation.h"
 
 #include <cstdint>
 #include <functional>
@@ -31,7 +32,6 @@
 struct VendorInfo {
     int id = 0;       ///< Spoolman vendor ID
     std::string name; ///< Vendor name (e.g., "Hatchbox", "Polymaker")
-    std::string url;  ///< Vendor website URL (optional)
 
     /**
      * @brief Get display name for the vendor
@@ -57,15 +57,16 @@ struct FilamentInfo {
     /// Spoolman has no colour-name field, only `color_hex`. Anything needing a
     /// human colour label derives it from the hex (`helix::describe_color`).
     std::string filament_name;
-    std::string color_hex;   ///< Hex color code (e.g., "#1A1A2E")
-    float density = 0;       ///< Material density (g/cm³)
-    float diameter = 1.75f;  ///< Filament diameter in mm
-    float weight = 0;        ///< Net weight per spool (g)
-    float spool_weight = 0;  ///< Empty spool weight (g)
-    int nozzle_temp_min = 0; ///< Minimum nozzle temperature
-    int nozzle_temp_max = 0; ///< Maximum nozzle temperature
-    int bed_temp_min = 0;    ///< Minimum bed temperature
-    int bed_temp_max = 0;    ///< Maximum bed temperature
+    std::string color_hex;         ///< Hex color code (e.g., "#1A1A2E")
+    std::string multi_color_hexes; ///< Comma-separated colours of a multi-colour filament
+    float density = 0;             ///< Material density (g/cm³)
+    float diameter = 1.75f;        ///< Filament diameter in mm
+    float weight = 0;              ///< Net weight per spool (g)
+    float spool_weight = 0;        ///< Empty spool weight (g)
+    int nozzle_temp_min = 0;       ///< Minimum nozzle temperature
+    int nozzle_temp_max = 0;       ///< Maximum nozzle temperature
+    int bed_temp_min = 0;          ///< Minimum bed temperature
+    int bed_temp_max = 0;          ///< Maximum bed temperature
 
     /**
      * @brief Get display name combining vendor, filament name, and material
@@ -109,7 +110,6 @@ struct SpoolInfo {
     std::string comment;           ///< User notes/comment
     std::string last_used;         ///< ISO 8601 timestamp of last use (empty = never used)
     std::string registered;        ///< ISO 8601 creation timestamp from Spoolman
-    bool is_active = false;        ///< True if this is the currently tracked spool
 
     // Temperature recommendations from filament database
     int nozzle_temp_min = 0;
@@ -179,7 +179,7 @@ struct FilamentUsageRecord {
  * @brief Filter spools by a multi-term search query
  *
  * Each space-separated term must match somewhere in the spool's combined
- * searchable text (ID, vendor, material, color_name, location). Case-insensitive.
+ * searchable text (ID, vendor, material, filament_name, location). Case-insensitive.
  * Empty query returns all spools.
  *
  * @param spools Input spool list
@@ -260,6 +260,63 @@ void sort_spools_by_recency(std::vector<SpoolInfo>& spools);
 // SpoolInfo → SlotInfo Conversion
 // ============================================================================
 
+namespace helix::ams {
+
+/**
+ * @brief What a Spoolman spool record states about a filament's identity
+ *
+ * The one mapping from a spool record's fields onto the identity fields a slot
+ * and a lane carry. apply_spool_to_slot() writes it onto a slot, and
+ * SpoolmanManager::file_spool_on_lane() files it as a lane's Spoolman record,
+ * so the two cannot disagree about which spool field means what.
+ *
+ * A field the record leaves empty or zero is not observed. A spool with no
+ * vendor says nothing about a lane's brand, which is a different statement
+ * from the brand being blank, so a weaker source's brand is left to stand. The
+ * colour is observed only when the hex parses.
+ *
+ * Identity only: an unknown weight needs a different answer on a slot, which
+ * has no "not observed", than on a lane, which does.
+ */
+inline helix::ams::Observation spool_identity_observation(const SpoolInfo& spool) {
+    helix::ams::Observation stated(helix::ams::ObservationSource::Spoolman);
+    if (spool.id > 0) {
+        stated.spoolman_id = spool.id;
+    }
+    if (spool.filament_id > 0) {
+        stated.spoolman_filament_id = spool.filament_id;
+    }
+    if (spool.vendor_id > 0) {
+        stated.spoolman_vendor_id = spool.vendor_id;
+    }
+    if (!spool.vendor.empty()) {
+        stated.brand = spool.vendor;
+    }
+    if (!spool.material.empty()) {
+        stated.material = spool.material;
+    }
+    // Spoolman's filament name goes to spool_name, never to color_name.
+    // spool_name means "a filament name" on every other writer (AFC's
+    // filament_name, CFS's `name`, Snapmaker's RFID SUB_TYPE), and
+    // docs/specs/filament_slots.md pins the lane_data field OrcaSlicer and
+    // Happy Hare read as "distinct from vendor + material". A synthesized
+    // "vendor material" would not survive the card either:
+    // compose_filament_label() dedups the brand and the material back out,
+    // leaving nothing behind.
+    if (!spool.filament_name.empty()) {
+        stated.spool_name = spool.filament_name;
+    }
+    if (!spool.color_hex.empty()) {
+        uint32_t rgb = 0;
+        if (helix::parse_hex_color(spool.color_hex.c_str(), rgb)) {
+            stated.color_rgb = rgb;
+        }
+    }
+    return stated;
+}
+
+} // namespace helix::ams
+
 /**
  * @brief Apply SpoolInfo fields onto a SlotInfo
  *
@@ -275,21 +332,16 @@ void sort_spools_by_recency(std::vector<SpoolInfo>& spools);
  * @param info Target SlotInfo to populate
  * @param spool Source SpoolInfo from Spoolman
  */
-inline void apply_spool_to_slot(SlotInfo& info, const SpoolInfo& spool) {
-    info.spoolman_id = spool.id;
+inline void apply_spool_to_slot(helix::SlotInfo& info, const SpoolInfo& spool) {
+    // A link replaces the slot's identity whole, so a field the spool does not
+    // state lands blank rather than leaving the previous spool's value behind.
+    const helix::ams::Observation stated = helix::ams::spool_identity_observation(spool);
+    info.spoolman_id = stated.spoolman_id.value_or(0);
     info.spoolman_filament_id = spool.filament_id;
-    info.spoolman_vendor_id = spool.vendor_id;
-    info.material = spool.material;
-    info.brand = spool.vendor;
-    // Spoolman's filament name goes to spool_name, never to color_name.
-    // spool_name means "a filament name" on every other writer (AFC's
-    // filament_name, CFS's `name`, Snapmaker's RFID SUB_TYPE), and
-    // docs/specs/filament_slots.md pins the lane_data field OrcaSlicer and
-    // Happy Hare read as "distinct from vendor + material". Synthesizing
-    // "vendor material" here also destroyed the name outright at the card:
-    // compose_filament_label() dedups the brand and the material back out,
-    // leaving nothing behind.
-    info.spool_name = spool.filament_name;
+    info.spoolman_vendor_id = stated.spoolman_vendor_id.value_or(0);
+    info.material = stated.material.value_or(std::string{});
+    info.brand = stated.brand.value_or(std::string{});
+    info.spool_name = stated.spool_name.value_or(std::string{});
     info.multi_color_hexes = spool.multi_color_hexes;
     info.remaining_weight_g = static_cast<float>(spool.remaining_weight_g);
     info.total_weight_g = static_cast<float>(spool.initial_weight_g);
@@ -310,12 +362,9 @@ inline void apply_spool_to_slot(SlotInfo& info, const SpoolInfo& spool) {
     // the colour: an existing user-entered colour label describes the colour it
     // was entered against, so it survives a link that carries no colour and is
     // dropped by one that does.
-    if (!spool.color_hex.empty()) {
-        uint32_t rgb = 0;
-        if (helix::parse_hex_color(spool.color_hex.c_str(), rgb)) {
-            info.color_rgb = rgb;
-            info.color_name.clear();
-        }
+    if (stated.color_rgb.has_value()) {
+        info.color_rgb = *stated.color_rgb;
+        info.color_name.clear();
     }
 }
 
@@ -338,6 +387,32 @@ using VendorListCallback = std::function<void(const std::vector<VendorInfo>&)>;
 
 /// Filament list callback
 using FilamentListCallback = std::function<void(const std::vector<FilamentInfo>&)>;
+
+/**
+ * @brief A filament from SpoolmanDB, Spoolman's external catalog
+ *
+ * Spoolman's ExternalFilament: catalog products, not server records, so the
+ * id is the catalog's string key and the vendor is a manufacturer name.
+ */
+struct ExternalFilament {
+    std::string id;           ///< Catalog key, e.g. "polymaker_pla_polylitepla_black_1000_175_n"
+    std::string manufacturer; ///< e.g. "Polymaker"
+    std::string name;         ///< e.g. "PolyLite PLA Black"
+    std::string material;     ///< e.g. "PLA"
+    std::string color_hex;    ///< Single colour, no '#'; empty for multi-colour
+    std::vector<std::string> color_hexes; ///< Multi-colour filaments
+    std::string multi_color_direction;    ///< "coaxial" or "longitudinal" with color_hexes
+    float density = 0;                    ///< g/cm³
+    float diameter = 0;                   ///< mm
+    float weight = 0;                     ///< Net filament weight per spool (g)
+    float spool_weight = 0;               ///< Empty spool weight (g), 0 when unknown
+    int extruder_temp = 0;                ///< °C, 0 when unknown
+    int bed_temp = 0;                     ///< °C, 0 when unknown
+};
+
+/// SpoolmanDB search results callback. By value, so the list parsed on the
+/// network thread moves through to the UI thread without a copy.
+using ExternalFilamentListCallback = std::function<void(std::vector<ExternalFilament>)>;
 
 /// Single spool creation callback (returns the created spool)
 using SpoolCreateCallback = std::function<void(const SpoolInfo&)>;

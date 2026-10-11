@@ -22,51 +22,40 @@ void MoonrakerAPI::query_configfile(JsonCallback on_success, ErrorCallback on_er
 
     client_.send_jsonrpc(
         "printer.objects.query", params,
-        [on_success, on_error](json response) {
-            try {
-                // Navigate to result.status.configfile.config
-                if (!response.contains("result") || !response["result"].contains("status") ||
-                    !response["result"]["status"].contains("configfile")) {
-                    spdlog::warn("[Moonraker API] Configfile not available in response");
-                    if (on_error) {
-                        MoonrakerError err;
-                        err.type = MoonrakerErrorType::PARSE_ERROR;
-                        err.message = "Configfile not available in printer response";
-                        on_error(err);
-                    }
-                    return;
-                }
-
-                const json& configfile = response["result"]["status"]["configfile"];
-
-                if (!configfile.contains("config")) {
-                    spdlog::warn("[Moonraker API] Config section not available in configfile");
-                    if (on_error) {
-                        MoonrakerError err;
-                        err.type = MoonrakerErrorType::PARSE_ERROR;
-                        err.message = "Config section not available";
-                        on_error(err);
-                    }
-                    return;
-                }
-
-                const json& config = configfile["config"];
-
-                spdlog::debug("[Moonraker API] Configfile query successful, {} sections",
-                              config.size());
-
-                if (on_success) {
-                    on_success(config);
-                }
-            } catch (const json::exception& e) {
-                spdlog::error("[Moonraker API] JSON parse error in configfile response: {}",
-                              e.what());
+        [on_success, on_error](const json& response) {
+            // Navigate to result.status.configfile.config
+            if (!response.contains("result") || !response["result"].contains("status") ||
+                !response["result"]["status"].contains("configfile")) {
+                spdlog::warn("[Moonraker API] Configfile not available in response");
                 if (on_error) {
                     MoonrakerError err;
                     err.type = MoonrakerErrorType::PARSE_ERROR;
-                    err.message = std::string("Failed to parse configfile response: ") + e.what();
+                    err.message = "Configfile not available in printer response";
                     on_error(err);
                 }
+                return;
+            }
+
+            const json& configfile = response["result"]["status"]["configfile"];
+
+            if (!configfile.contains("config")) {
+                spdlog::warn("[Moonraker API] Config section not available in configfile");
+                if (on_error) {
+                    MoonrakerError err;
+                    err.type = MoonrakerErrorType::PARSE_ERROR;
+                    err.message = "Config section not available";
+                    on_error(err);
+                }
+                return;
+            }
+
+            const json& config = configfile["config"];
+
+            spdlog::debug("[Moonraker API] Configfile query successful, {} sections",
+                          config.size());
+
+            if (on_success) {
+                on_success(config);
             }
         },
         on_error);

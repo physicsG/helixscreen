@@ -3,12 +3,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Check that responsive design tokens are declared at the top level of ui_xml/.
 
-Token auto-discovery is top-level-only. theme_manager_find_xml_files()
-(src/ui/theme_manager.cpp) walks the ui_xml directory with readdir and does
-
-    if (entry->d_type == DT_DIR) continue;
-
-so only ui_xml/*.xml is ever parsed for `<px name="foo_small">` /
+Token auto-discovery is top-level-only. It lists files with
+theme_manager_find_xml_files() (src/ui/theme_token_scan.cpp) and recursive=false,
+which skips every subdirectory, so only ui_xml/*.xml is ever parsed for `<px name="foo_small">` /
 `<string name="foo_small">`. A responsive token declared in ui_xml/components/,
 ui_xml/portrait/, ui_xml/micro/ — anywhere below the top level — is never
 registered, and every `#foo` that references it silently resolves to nothing.

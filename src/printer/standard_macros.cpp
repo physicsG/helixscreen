@@ -3,17 +3,23 @@
 
 #include "standard_macros.h"
 
+#include "ui_update_queue.h"
+
 #include "config.h"
 #include "i_moonraker_api.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "macro_patterns.h"
+#include "printer_detector.h"
 #include "printer_discovery.h"
 #include "state/subject_macros.h"
 #include "static_subject_registry.h"
+#include "text_io.h"
 
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cstring>
+#include <string_view>
 
 using namespace helix;
 
@@ -40,13 +46,23 @@ struct SlotPatterns {
 
 // clang-format off
 const std::vector<SlotPatterns> DETECTION_PATTERNS = {
-    {StandardMacroSlot::LoadFilament,   {"LOAD_FILAMENT", "LOAD_MATERIAL", "M701"}},
+    // M604 ranks last: it is QIDI's stock load, the macro their own screen
+    // drives, and it means nothing in Marlin (which has no M604 at all). A
+    // printer that defines a conventionally-named load macro keeps it — this
+    // only reaches printers where nothing else matched, which on stock Q2
+    // firmware is every one of them: it ships no LOAD_FILAMENT, LOAD_MATERIAL
+    // or M701 for the earlier patterns to find (bundle in #1030).
+    {StandardMacroSlot::LoadFilament,   {"LOAD_FILAMENT", "LOAD_MATERIAL", "M701", "M604"}},
     // HELIX_UNLOAD_FILAMENT (from our macro pack) deliberately outranks
     // Creality's QUIT_MATERIAL — that stock macro purges filament forward and
     // retracts only part of it (a melt-zone clearer for manually-cut
     // filament), not a true unload. A printer's own native unload macros and
     // the MMU M702 keep priority over the override.
-    {StandardMacroSlot::UnloadFilament, {"UNLOAD_FILAMENT", "UNLOAD_MATERIAL", "M702", "HELIX_UNLOAD_FILAMENT", "QUIT_MATERIAL"}},
+    //
+    // M603 is M604's counterpart and ranks last for the same reason. Marlin's
+    // M603 configures a filament change rather than running one, so the tail
+    // position also keeps that reading from ever winning a slot.
+    {StandardMacroSlot::UnloadFilament, {"UNLOAD_FILAMENT", "UNLOAD_MATERIAL", "M702", "HELIX_UNLOAD_FILAMENT", "QUIT_MATERIAL", "M603"}},
     {StandardMacroSlot::Purge,          {"PURGE", "PURGE_LINE", "PRIME_LINE", "PURGE_FILAMENT", "LINE_PURGE"}},
     {StandardMacroSlot::Pause,          {"PAUSE", "M601"}},
     {StandardMacroSlot::Resume,         {"RESUME", "M602"}},
@@ -63,6 +79,7 @@ const std::vector<SlotPatterns> DETECTION_PATTERNS = {
     // Shared with PrinterDiscovery's nozzle_clean_macro_ scan — see include/macro_patterns.h.
     {StandardMacroSlot::CleanNozzle,    helix::macro_patterns::clean_nozzle()},
     {StandardMacroSlot::HeatSoak,       {"HEAT_SOAK", "CHAMBER_SOAK", "SOAK"}},
+    {StandardMacroSlot::ParkToolhead,   helix::macro_patterns::park_toolhead()},
 };
 // clang-format on
 
@@ -85,6 +102,7 @@ const std::map<StandardMacroSlot, std::string> FALLBACK_MACROS = {
     {StandardMacroSlot::ScrewsTilt,     ""},
     {StandardMacroSlot::CleanNozzle,    "HELIX_CLEAN_NOZZLE"},
     {StandardMacroSlot::HeatSoak,       ""},
+    {StandardMacroSlot::ParkToolhead,   "HELIX_PARK_TOOLHEAD"},
 };
 // clang-format on
 
@@ -109,18 +127,9 @@ const std::map<StandardMacroSlot, SlotMeta> SLOT_METADATA = {
     {StandardMacroSlot::ScrewsTilt,     {"screws_tilt",     "Bed Screw Adjustment"}},
     {StandardMacroSlot::CleanNozzle,    {"clean_nozzle",    "Clean Nozzle"}},
     {StandardMacroSlot::HeatSoak,       {"heat_soak",       "Heat Soak"}},
+    {StandardMacroSlot::ParkToolhead,   {"park_toolhead",   "Park Toolhead"}},
 };
 // clang-format on
-
-/**
- * @brief Convert string to uppercase for case-insensitive comparison
- */
-std::string to_upper(const std::string& str) {
-    std::string result = str;
-    std::transform(result.begin(), result.end(), result.begin(),
-                   [](unsigned char c) { return std::toupper(c); });
-    return result;
-}
 
 } // namespace
 
@@ -136,6 +145,67 @@ StandardMacros& StandardMacros::instance() {
 StandardMacros::StandardMacros() {
     init_slot_definitions();
 }
+
+namespace {
+
+/// A sequence the printer database ships, and whether it prepares the machine itself.
+struct ShippedSequence {
+    std::string script;
+    bool self_prepares = false;
+};
+
+/// The sequence the printer database ships for @p slot on @p printer, or an empty one.
+///
+/// One row per slot a printer may override. Adding a row is the entire cost of
+/// letting printers ship their own sequence for that operation: the priority
+/// rule, the Settings UI and every dispatch site already handle the tier.
+ShippedSequence shipped_sequence_for(const std::string& printer, StandardMacroSlot slot) {
+    if (printer.empty()) {
+        return {};
+    }
+    switch (slot) {
+    case StandardMacroSlot::BedMesh:
+        return {PrinterDetector::get_bed_mesh_calibrate_gcode(printer),
+                PrinterDetector::get_bed_mesh_self_prepares(printer)};
+    default:
+        return {};
+    }
+}
+
+/// Replace every @p placeholder in @p script with @p value. Inserted text is never
+/// rescanned, so a value that spells a placeholder is kept verbatim.
+void substitute(std::string& script, std::string_view placeholder, const std::string& value) {
+    for (size_t pos = script.find(placeholder); pos != std::string::npos;
+         pos = script.find(placeholder, pos + value.size())) {
+        script.replace(pos, placeholder.size(), value);
+    }
+}
+
+} // namespace
+
+namespace helix {
+
+ResolvedMacroScript resolve_macro_script(const StandardMacroInfo& info,
+                                         const helix::MacroScriptValues& values,
+                                         bool accept_fallback) {
+    ResolvedMacroScript out;
+    const MacroSource source = info.get_source();
+    if (!accept_fallback && source == MacroSource::FALLBACK) {
+        return out;
+    }
+    out.script = info.get_macro();
+    out.shipped = source == MacroSource::SHIPPED;
+    out.self_prepares = out.shipped && info.shipped_self_prepares;
+
+    out.takes_profile_arg = out.script.find("{profile_arg}") != std::string::npos;
+
+    // The temperature first: a profile name is free text and may spell a placeholder.
+    substitute(out.script, "{bed_temp}", std::to_string(values.bed_temp_c));
+    substitute(out.script, "{profile_arg}", values.profile_arg);
+    return out;
+}
+
+} // namespace helix
 
 void StandardMacros::init_slot_definitions() {
     slots_.clear();
@@ -183,14 +253,6 @@ void StandardMacros::deinit_subjects() {
     if (!subjects_initialized_) {
         return;
     }
-
-    // Death signal BEFORE the subjects go away: deinit frees every observer node
-    // on them, so outside ObserverGuards must learn they are gone or their next
-    // reset() calls lv_observer_remove() on freed memory.
-    if (subjects_lifetime_) {
-        *subjects_lifetime_ = false;
-    }
-    subjects_lifetime_ = std::make_shared<bool>(true);
 
     subjects_.deinit_all();
     subjects_initialized_ = false;
@@ -274,10 +336,6 @@ void StandardMacros::set_macro(StandardMacroSlot slot, const std::string& macro)
 
 void StandardMacros::load_from_config() {
     auto* config = Config::get_instance();
-    if (!config) {
-        spdlog::warn("[StandardMacros] Config not available");
-        return;
-    }
 
     for (auto& slot : slots_) {
         std::string path = "/standard_macros/" + slot.slot_name;
@@ -294,10 +352,6 @@ void StandardMacros::load_from_config() {
 
 void StandardMacros::save_to_config() {
     auto* config = Config::get_instance();
-    if (!config) {
-        spdlog::warn("[StandardMacros] Config not available for save");
-        return;
-    }
 
     for (const auto& slot : slots_) {
         std::string path = "/standard_macros/" + slot.slot_name;
@@ -338,18 +392,35 @@ bool StandardMacros::execute(StandardMacroSlot slot, IMoonrakerAPI* api,
     }
 
     spdlog::info("[StandardMacros] Executing {} via {}", info.slot_name, macro_name);
+    // Callers toast, which is main-thread only, while the printer's answer
+    // arrives on the WebSocket thread. A null callback stays
+    // null: whether one exists is what tells the API who reports the error.
+    if (on_success) {
+        on_success = [cb = std::move(on_success)]() {
+            helix::ui::run_on_main("StandardMacros::on_success", cb);
+        };
+    }
+    if (on_error) {
+        on_error = [cb = std::move(on_error)](const MoonrakerError& err) {
+            helix::ui::run_on_main("StandardMacros::on_error", [cb, err]() { cb(err); });
+        };
+    }
     // suppress_auto_toast is CallerIntent::silent — see rpc_error_policy.h.
     api->advanced().execute_macro(macro_name, params, std::move(on_success), std::move(on_error),
                                   timeout_ms, suppress_auto_toast);
     return true;
 }
 
-void StandardMacros::init(const helix::PrinterDiscovery& hardware) {
+void StandardMacros::init(const helix::PrinterDiscovery& hardware,
+                          const std::string& printer_type) {
     spdlog::debug("[StandardMacros] Initializing with hardware discovery");
 
     // Reset detected macros and restore fallbacks from static table
     for (auto& slot : slots_) {
         slot.detected_macro.clear();
+        ShippedSequence shipped = shipped_sequence_for(printer_type, slot.slot);
+        slot.shipped_macro = std::move(shipped.script);
+        slot.shipped_self_prepares = shipped.self_prepares;
 
         // Restore fallback from static definition
         auto fallback_it = FALLBACK_MACROS.find(slot.slot);
@@ -381,11 +452,14 @@ void StandardMacros::init(const helix::PrinterDiscovery& hardware) {
     initialized_ = true;
 
     // Log summary
-    int configured = 0, detected = 0, fallback = 0, empty = 0;
+    int configured = 0, shipped = 0, detected = 0, fallback = 0, empty = 0;
     for (const auto& slot : slots_) {
         switch (slot.get_source()) {
         case MacroSource::CONFIGURED:
             configured++;
+            break;
+        case MacroSource::SHIPPED:
+            shipped++;
             break;
         case MacroSource::DETECTED:
             detected++;
@@ -398,8 +472,10 @@ void StandardMacros::init(const helix::PrinterDiscovery& hardware) {
             break;
         }
     }
-    spdlog::debug("[StandardMacros] Initialized: {} configured, {} detected, {} fallback, {} empty",
-                  configured, detected, fallback, empty);
+    spdlog::debug(
+        "[StandardMacros] Initialized: {} configured, {} shipped, {} detected, {} fallback, {} "
+        "empty",
+        configured, shipped, detected, fallback, empty);
 
     bump_version();
 }
@@ -453,7 +529,7 @@ std::string StandardMacros::try_detect(const helix::PrinterDiscovery& hardware,
     const auto& macros = hardware.macros();
 
     for (const auto& pattern : patterns) {
-        std::string upper_pattern = to_upper(pattern);
+        std::string upper_pattern = helix::text_io::to_upper(pattern);
         // Check if the pattern exists as a macro (both are uppercase)
         if (macros.find(upper_pattern) != macros.end()) {
             // Return the pattern as-is (Klipper macros are case-insensitive)

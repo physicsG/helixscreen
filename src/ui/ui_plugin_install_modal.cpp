@@ -72,7 +72,6 @@ void PluginInstallModal::on_show() {
     result_container_ = find_widget("result_container");
     checkbox_container_ = find_widget("checkbox_container");
     dont_ask_checkbox_ = find_widget("dont_ask_checkbox");
-    phase_tracking_checkbox_ = find_widget("phase_tracking_checkbox");
     copy_feedback_ = find_widget("copy_feedback");
 
     // Determine mode based on installer
@@ -138,7 +137,6 @@ void PluginInstallModal::on_hide() {
     result_container_ = nullptr;
     checkbox_container_ = nullptr;
     dont_ask_checkbox_ = nullptr;
-    phase_tracking_checkbox_ = nullptr;
     copy_feedback_ = nullptr;
 }
 
@@ -232,14 +230,7 @@ void PluginInstallModal::on_install_clicked() {
         return;
     }
 
-    // Check if phase tracking is enabled (checkbox is checked by default)
-    bool enable_phase_tracking = false;
-    if (phase_tracking_checkbox_) {
-        enable_phase_tracking = lv_obj_has_state(phase_tracking_checkbox_, LV_STATE_CHECKED);
-    }
-
-    spdlog::info("[Plugin Install] Starting local installation (phase_tracking={})",
-                 enable_phase_tracking);
+    spdlog::info("[Plugin Install] Starting local installation");
     show_installing_state();
 
     // Run installation synchronously. This blocks the UI but is necessary because
@@ -251,7 +242,7 @@ void PluginInstallModal::on_install_clicked() {
     // storage (TLS) cleanup during std::thread exit can trigger SIGABRT. This
     // affects any code that uses TLS (spdlog, std::function, etc.) on a detached
     // thread. The only reliable workaround is to avoid detached threads entirely.
-    auto install_result = installer_->install_local_sync(enable_phase_tracking);
+    auto install_result = installer_->install_local_sync();
 
     spdlog::info("[Plugin Install] Installation {}: {}",
                  install_result.success ? "succeeded" : "failed", install_result.message);

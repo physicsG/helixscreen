@@ -14,8 +14,6 @@ using namespace helix;
 // ============================================================================
 // pause_resume.is_paused Tracking Tests
 // ============================================================================
-// Tests use update_from_status() directly since update_from_notification() uses
-// lv_async_call() which requires pumping the LVGL timer.
 
 TEST_CASE("PrinterState tracks pause_resume.is_paused", "[printer-state][pause]") {
     lv_init_safe();

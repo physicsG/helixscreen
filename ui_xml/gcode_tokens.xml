@@ -23,10 +23,10 @@
          this is the color of the traced contour, not of the object itself. -->
     <color name="gcode_selection_outline" value="#FFFFFF"/>
 
-    <!-- Excluded (cancelled) object. Orange-red. This is what the isometric
-         view - the path users actually see - has always drawn; the CPU
-         wireframe used theme "danger", a different hue, and lost. -->
-    <color name="gcode_selection_excluded" value="#FF6B35"/>
+    <!-- Excluded (cancelled) object: the red of the diagonal stripes drawn
+         over its greyed-out body. Grey + stripes stays distinct against any
+         filament color, grey filament included. -->
+    <color name="gcode_selection_excluded" value="#FF3B30"/>
 
     <!-- 24-arm corner bracket wireframe around a selected object. Light grey.
          Was 0xC0C0C0 in 2D and a hand-written 0.75f in 3D, under a comment in

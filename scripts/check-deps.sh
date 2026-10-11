@@ -266,6 +266,33 @@ check_libraries() {
             hint "libnl" "" "libnl-3-dev libnl-genl-3-dev" "libnl3-devel"
         fi
     fi
+
+    # libusb (USB printer detection). The native Linux build links -lusb-1.0
+    # unconditionally, so the headers are required there. macOS detects it via
+    # pkg-config and compiles the detector out when absent. Cross targets get it
+    # from their Docker image or build without it (ad5m, cc1), so --minimal
+    # skips it entirely.
+    if [ $MINIMAL -eq 0 ]; then
+        if [ "$(uname -s)" = "Darwin" ]; then
+            if ! check_pkg libusb-1.0 "libusb"; then
+                skip "libusb not found (optional on macOS - USB printer detection compiled out)"
+            fi
+        elif ! check_pkg libusb-1.0 "libusb"; then
+            fail "libusb-1.0 development headers not found (the Linux build links -lusb-1.0)" "libusb"
+            hint "libusb" "libusb" "libusb-1.0-0-dev" "libusb1-devel"
+        fi
+    fi
+
+    # ALSA (sound output on Linux). Optional at build time, but without the
+    # headers the ALSA backend is compiled out and the app runs silent, which
+    # reads as a sound bug rather than a missing package - so warn, not skip.
+    if [ $MINIMAL -eq 0 ] && [ "$(uname -s)" = "Linux" ]; then
+        if ! check_pkg alsa "ALSA"; then
+            warn "ALSA development headers not found (sound output backend will be compiled out)"
+            echo -e "  Install: ${YELLOW}sudo apt install libasound2-dev${RESET} (Debian/Ubuntu)"
+            echo -e "           ${YELLOW}sudo dnf install alsa-lib-devel${RESET} (Fedora/RHEL)"
+        fi
+    fi
 }
 
 check_desktop_tools() {
@@ -377,6 +404,31 @@ check_desktop_tools() {
     else
         warn "bats not found (needed for shell/platform hook tests)"
         hint "bats" "bats-core" "bats" "bats"
+    fi
+
+    # Fast linker. Warning only: GNU ld is correct everywhere and only slower.
+    # The answer comes from the same helper the Makefile uses, so what is reported
+    # here is what the build will actually do — including the case where the mold
+    # on PATH is not the mold clang will exec.
+    local picker desc choice mold_bin mold_ver lld_bin
+    picker="$(dirname "$0")/pick-fast-linker.sh"
+    if [ -x "$picker" ]; then
+        desc=$("$picker" "${CXX:-c++}" --describe 2>/dev/null || echo '|||')
+        IFS='|' read -r choice mold_bin mold_ver lld_bin <<< "$desc"
+        if [ "$choice" = "mold" ]; then
+            ok "fast linker: mold $mold_ver ($mold_bin)"
+        elif [ -n "$mold_bin" ]; then
+            # Deliberately not a fail: the build is correct, it just gets no speedup.
+            warn "mold $mold_ver at $mold_bin links this tree incorrectly (#1584) — not used"
+            echo -e "  Install mold 2.x ${YELLOW}over that path${RESET}; a newer one elsewhere on"
+            echo -e "  PATH does not help, ${YELLOW}${CXX:-c++}${RESET} resolves this one first."
+            [ -n "$lld_bin" ] && info "falling back to lld ($lld_bin)"
+        elif [ "$choice" = "lld" ]; then
+            ok "fast linker: lld ($lld_bin)"
+        else
+            warn "no fast linker found — each test link takes ~25s longer under GNU ld"
+            hint "mold" "mold" "mold" "mold"
+        fi
     fi
 }
 

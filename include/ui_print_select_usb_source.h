@@ -3,10 +3,14 @@
 
 #pragma once
 
+#include "single_flight_walk.h"
+#include "thumbnail_processor.h"
 #include "usb_backend.h"
 
+#include <atomic>
 #include <functional>
 #include <lvgl.h>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -25,6 +29,23 @@ enum class FileSource {
 };
 
 namespace helix::ui {
+
+/// A walk of the mounted drives: the G-code found and each file's cached
+/// header thumbnail (empty when it has none).
+struct UsbScan {
+    std::vector<UsbGcodeFile> files;
+    std::vector<std::string> thumbnails;
+};
+
+/**
+ * @brief Walk @p drives for G-code and cache each file's header thumbnail
+ *
+ * Blocking disk I/O and decodes, for a worker thread. Each thumbnail is
+ * pre-scaled to @p card_target. @p cancelled is polled before each drive and
+ * each file; once it returns true the walk stops and returns what it has.
+ */
+UsbScan scan_usb_drives(UsbBackend& backend, const std::vector<UsbDrive>& drives,
+                        const ThumbnailTarget& card_target, const std::function<bool()>& cancelled);
 
 /**
  * @file ui_print_select_usb_source.h
@@ -76,11 +97,9 @@ class PrintSelectUsbSource {
     PrintSelectUsbSource() = default;
     ~PrintSelectUsbSource() = default;
 
-    // Non-copyable, movable
+    // Non-copyable, non-movable: in-flight scans hold a token keyed to this object
     PrintSelectUsbSource(const PrintSelectUsbSource&) = delete;
     PrintSelectUsbSource& operator=(const PrintSelectUsbSource&) = delete;
-    PrintSelectUsbSource(PrintSelectUsbSource&&) noexcept = default;
-    PrintSelectUsbSource& operator=(PrintSelectUsbSource&&) noexcept = default;
 
     // === Setup ===
 
@@ -137,6 +156,11 @@ class PrintSelectUsbSource {
      */
     [[nodiscard]] FileSource get_current_source() const {
         return current_source_;
+    }
+
+    /// A walk is running or its result has not been delivered yet (UI thread).
+    [[nodiscard]] bool is_scanning() const {
+        return walk_.in_flight();
     }
 
     /**
@@ -199,8 +223,11 @@ class PrintSelectUsbSource {
     /**
      * @brief Refresh USB file list
      *
-     * Scans connected USB drives for G-code files.
-     * Invokes on_files_ready callback with results.
+     * Walks every connected drive for G-code and extracts header thumbnails
+     * on a worker thread, then invokes on_files_ready on the UI thread. One
+     * walk runs at a time: a refresh during a walk stops it early and starts
+     * one more when it ends. Only the newest refresh delivers, and nothing is
+     * delivered once the source has switched back to Printer.
      */
     void refresh_files();
 
@@ -230,6 +257,13 @@ class PrintSelectUsbSource {
     UsbFilesReadyCallback on_files_ready_;
     SourceChangedCallback on_source_changed_;
 
+    /// Every refresh supersedes the walk before it; a switch to Printer
+    /// cancels it.
+    helix::SingleFlightWalk walk_;
+
+    /// Hand on_files_ready an empty list.
+    void deliver_empty();
+
     // === Internal Methods ===
 
     /**
@@ -239,8 +273,11 @@ class PrintSelectUsbSource {
 
     /**
      * @brief Convert USB files to PrintFileData format
+     * @param thumbnails Cached thumbnail path per usb_files_ entry; empty keeps
+     *                   the default thumbnail
      */
-    [[nodiscard]] std::vector<PrintFileData> convert_to_print_file_data() const;
+    [[nodiscard]] std::vector<PrintFileData>
+    convert_to_print_file_data(const std::vector<std::string>& thumbnails) const;
 };
 
 } // namespace helix::ui

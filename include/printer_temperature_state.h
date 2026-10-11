@@ -46,8 +46,10 @@ struct ExtruderInfo {
     float last_nonzero_target = 0.0f;
     std::unique_ptr<lv_subject_t> temp_subject;   ///< Decidegrees (value * 10)
     std::unique_ptr<lv_subject_t> target_subject; ///< Decidegrees
+    std::unique_ptr<lv_subject_t> power_subject;  ///< Duty in whole percent, -1 until reported
     SubjectLifetime temp_lifetime;   ///< Lifetime token for temp_subject (for ObserverGuard safety)
     SubjectLifetime target_lifetime; ///< Lifetime token for target_subject
+    SubjectLifetime power_lifetime;  ///< Lifetime token for power_subject
 };
 
 /**
@@ -88,29 +90,22 @@ class PrinterTemperatureState {
     void update_from_status(const nlohmann::json& status);
 
     /**
-     * @brief Re-register subjects with LVGL XML system
-     *
-     * Call this to ensure subjects are registered in LVGL's global XML registry.
-     * Use when other code may have overwritten the registry (e.g., other tests
-     * calling init_subjects(true) on their own PrinterState instances).
-     *
-     * Does NOT reinitialize subjects - only updates LVGL XML registry mappings.
-     * Safe to call multiple times.
-     */
-    void register_xml_subjects();
-
-    /**
      * @brief Initialize extruder tracking from discovered heater objects
      *
-     * Filters the heater list for extruder* names, creates ExtruderInfo entries
-     * with heap-allocated subjects, and bumps the version subject to trigger
-     * UI rebuilds.
-     *
-     * Safe to call multiple times (cleans up previous entries first).
+     * Filters the heater list for extruder* names and reconciles against the
+     * current set: an extruder still present keeps its subjects and lifetimes,
+     * a removed one has its lifetimes flipped and subjects freed, a new one
+     * gets fresh heap-allocated subjects. Display names are recomputed, and the
+     * version subject bumps only when the set changed.
      *
      * @param heaters List of Moonraker heater object names
      */
     void init_extruders(const std::vector<std::string>& heaters);
+
+    /// Re-render each extruder's translated display name ("Nozzle 2") in the
+    /// current language. The extruder set is unchanged, so extruder_version is
+    /// not bumped: consumers showing a name re-read it on the language switch.
+    void refresh_display_names();
 
     // Active extruder subjects (decidegrees: value * 10)
     // These track whichever extruder is currently active (set via set_active_extruder)
@@ -131,6 +126,20 @@ class PrinterTemperatureState {
     /// Get per-extruder target subject with lifetime token (use when creating observers)
     lv_subject_t* get_extruder_target_subject(const std::string& name, SubjectLifetime& lifetime);
 
+    /// Get a specific extruder's heater duty with lifetime token (whole
+    /// percent, -1 until that heater reports one). Distinct from the nullary
+    /// overload, which is the ACTIVE extruder's mirror.
+    lv_subject_t* get_extruder_power_subject(const std::string& name, SubjectLifetime& lifetime);
+
+    lv_subject_t* get_extruder_power_subject() {
+        return &active_extruder_power_;
+    }
+    lv_subject_t* get_bed_power_subject() {
+        return &bed_power_;
+    }
+    lv_subject_t* get_chamber_power_subject() {
+        return &chamber_power_;
+    }
     lv_subject_t* get_bed_temp_subject() {
         return &bed_temp_;
     }
@@ -216,6 +225,23 @@ class PrinterTemperatureState {
         lifetime = chamber_heater_inhibited_lifetime_;
         return &chamber_heater_inhibited_;
     }
+    /// Device unreachable on its own link (0/1). 1 only on an engaged
+    /// "not connected" report — a backend with no link state leaves it 0
+    /// (unknown is not offline).
+    lv_subject_t* get_chamber_heater_externally_controlled_subject() {
+        return &chamber_heater_externally_controlled_;
+    }
+    lv_subject_t* get_chamber_heater_externally_controlled_subject(SubjectLifetime& lifetime) {
+        lifetime = chamber_heater_externally_controlled_lifetime_;
+        return &chamber_heater_externally_controlled_;
+    }
+    lv_subject_t* get_chamber_heater_offline_subject() {
+        return &chamber_heater_offline_;
+    }
+    lv_subject_t* get_chamber_heater_offline_subject(SubjectLifetime& lifetime) {
+        lifetime = chamber_heater_offline_lifetime_;
+        return &chamber_heater_offline_;
+    }
     /// Translated fault reason for the UI ("" when none) — derived from the
     /// backend's generic FaultReason kind; the raw vendor code never binds.
     lv_subject_t* get_chamber_heater_fault_reason_text_subject() {
@@ -225,13 +251,36 @@ class PrinterTemperatureState {
         lifetime = chamber_heater_fault_reason_text_lifetime_;
         return &chamber_heater_fault_reason_text_;
     }
-    /// Filter fan running state (-1 unknown, 0 off, 1 on)
+    /// Filter fan running state (-1 unknown, 0 off, 1 on) — whether the fan is
+    /// actually spinning, from the backend-reported speed when there is one,
+    /// from the pin otherwise. NOT the pin: the device also runs this fan on
+    /// its own while heating or purging.
     lv_subject_t* get_chamber_filter_fan_on_subject() {
         return &chamber_filter_fan_on_;
     }
     lv_subject_t* get_chamber_filter_fan_on_subject(SubjectLifetime& lifetime) {
         lifetime = chamber_filter_fan_on_lifetime_;
         return &chamber_filter_fan_on_;
+    }
+    /// Filter-fan pin request (-1 unknown, 0 off, 1 on) — what WE asked for
+    /// via the output_pin; the click handler inverts this, not the running
+    /// state.
+    lv_subject_t* get_chamber_filter_fan_requested_subject() {
+        return &chamber_filter_fan_requested_;
+    }
+    lv_subject_t* get_chamber_filter_fan_requested_subject(SubjectLifetime& lifetime) {
+        lifetime = chamber_filter_fan_requested_lifetime_;
+        return &chamber_filter_fan_requested_;
+    }
+    /// Filter fan is device-driven (0/1): the backend reports the device
+    /// running it on its own initiative (heater warmup, thermal purge), so a
+    /// pin request cannot stop it.
+    lv_subject_t* get_chamber_filter_fan_device_driven_subject() {
+        return &chamber_filter_fan_device_driven_;
+    }
+    lv_subject_t* get_chamber_filter_fan_device_driven_subject(SubjectLifetime& lifetime) {
+        lifetime = chamber_filter_fan_device_driven_lifetime_;
+        return &chamber_filter_fan_device_driven_;
     }
     /// Heating-element temp display string ("--" unknown; "106.2°C" nominal)
     lv_subject_t* get_chamber_heater_element_temp_text_subject() {
@@ -249,22 +298,14 @@ class PrinterTemperatureState {
         lifetime = chamber_filter_fan_percent_text_lifetime_;
         return &chamber_filter_fan_percent_text_;
     }
-    /// Filter-fan toggle label (translated "Filter Fan: On"/"Filter Fan: Off")
-    lv_subject_t* get_chamber_filter_fan_on_text_subject() {
-        return &chamber_filter_fan_on_text_;
+
+    /// A filament-drying cycle is running on the chamber appliance (0/1).
+    lv_subject_t* get_chamber_dryer_active_subject() {
+        return &chamber_dryer_active_;
     }
-    lv_subject_t* get_chamber_filter_fan_on_text_subject(SubjectLifetime& lifetime) {
-        lifetime = chamber_filter_fan_on_text_lifetime_;
-        return &chamber_filter_fan_on_text_;
-    }
-    /// Filter-fan toggle icon name ("fan"/"fan_off") — drives the compact
-    /// portrait card's icon button via bind_icon
-    lv_subject_t* get_chamber_filter_fan_icon_subject() {
-        return &chamber_filter_fan_icon_;
-    }
-    lv_subject_t* get_chamber_filter_fan_icon_subject(SubjectLifetime& lifetime) {
-        lifetime = chamber_filter_fan_icon_lifetime_;
-        return &chamber_filter_fan_icon_;
+    /// The running cycle's readout ("41/55°C  3:12 left"), "" when idle.
+    lv_subject_t* get_chamber_dryer_text_subject() {
+        return &chamber_dryer_text_;
     }
 
     /// Number of tracked extruders
@@ -280,6 +321,13 @@ class PrinterTemperatureState {
     /// Version subject, bumped when extruder list changes (for UI rebuild triggers)
     lv_subject_t* get_extruder_version_subject() {
         return &extruder_version_;
+    }
+
+    /// Death signal for every subject this state owns (the active-extruder
+    /// mirrors, the version subject and the per-extruder subjects alike).
+    /// Hand to observe_*() by anything that can outlive a deinit.
+    [[nodiscard]] SubjectLifetime get_subjects_lifetime() const {
+        return subjects_.get_subjects_lifetime();
     }
 
     /**
@@ -339,6 +387,12 @@ class PrinterTemperatureState {
         chamber_backend_id_ = backend_id;
         chamber_diagnostics_object_ = diagnostics_object;
         chamber_filter_fan_pin_ = filter_fan_pin;
+        chamber_dryer_running_ = false;
+        chamber_dryer_remaining_s_ = 0;
+        chamber_dryer_target_c_ = 0;
+        if (subjects_initialized_) {
+            publish_chamber_dryer();
+        }
     }
 
     /**
@@ -353,6 +407,24 @@ class PrinterTemperatureState {
      */
     const std::string& chamber_sensor_name() const {
         return chamber_sensor_name_;
+    }
+
+    /**
+     * @brief The Klipper object the chamber temperature is read from.
+     *
+     * A chamber heater measures its own chamber, so discovery resolves the
+     * sensor role to the heater itself and the two names agree. A sensor that
+     * names a different object is therefore a deliberate assignment, and it
+     * wins the reading while the heater goes on supplying the target. With no
+     * heater the sensor is the only reading there is. Every chamber readout
+     * and graph series resolves its source here so they cannot disagree about
+     * which probe they mean.
+     */
+    const std::string& chamber_temperature_source() const {
+        if (!chamber_sensor_name_.empty() && chamber_sensor_name_ != chamber_heater_name_) {
+            return chamber_sensor_name_;
+        }
+        return chamber_heater_name_;
     }
 
     /**
@@ -419,6 +491,12 @@ class PrinterTemperatureState {
     lv_subject_t active_extruder_target_{};
     lv_subject_t bed_temp_{};
     lv_subject_t bed_target_{};
+    // Duty cycle in whole percent, -1 until a heater reports one. Klipper sends
+    // 0.0-1.0 on a heater object; a temperature_fan reports a speed instead and
+    // never publishes power, so -1 is a lasting state, not just a startup one.
+    lv_subject_t active_extruder_power_{};
+    lv_subject_t bed_power_{};
+    lv_subject_t chamber_power_{};
     SubjectLifetime bed_temp_lifetime_;
     SubjectLifetime bed_target_lifetime_;
     // XML display subjects: chamber_effective_target + chamber_mode are THE canonical
@@ -440,33 +518,57 @@ class PrinterTemperatureState {
 
     // Chamber-heater diagnostics (backend-provided, issue #1290). Absent
     // objects in a delta status frame = no news: subjects keep last values.
-    lv_subject_t chamber_heater_fault_{};             ///< XML: 0/1
-    lv_subject_t chamber_heater_inhibited_{};         ///< XML: 0/1
-    lv_subject_t chamber_heater_fault_reason_text_{}; ///< XML: translated reason, "" when none
-    lv_subject_t chamber_filter_fan_on_{};            ///< XML: -1 unknown / 0 / 1
+    lv_subject_t chamber_heater_fault_{};                 ///< XML: 0/1
+    lv_subject_t chamber_heater_inhibited_{};             ///< XML: 0/1
+    lv_subject_t chamber_heater_externally_controlled_{}; ///< XML: 0/1
+    lv_subject_t chamber_heater_offline_{};               ///< XML: 0/1
+    lv_subject_t chamber_heater_fault_reason_text_{};     ///< XML: translated reason, "" when none
+    lv_subject_t chamber_filter_fan_on_{};                ///< XML: -1 unknown / 0 / 1 (fan RUNNING)
+    lv_subject_t chamber_filter_fan_requested_{};     ///< XML: -1 unknown / 0 / 1 (our pin request)
+    lv_subject_t chamber_filter_fan_device_driven_{}; ///< XML: 0/1 (device runs the fan itself)
     lv_subject_t chamber_heater_element_temp_text_{}; ///< XML: display string ("--"/"106.2°C")
     lv_subject_t chamber_filter_fan_percent_text_{};  ///< XML: display string ("--"/"100%")
-    lv_subject_t chamber_filter_fan_on_text_{};       ///< XML: translated toggle label
-    lv_subject_t chamber_filter_fan_icon_{};          ///< XML: toggle icon name ("fan"/"fan_off")
     char chamber_heater_fault_reason_text_buf_[64] = {};
     char chamber_heater_element_temp_text_buf_[32] = {};
     char chamber_filter_fan_percent_text_buf_[32] = {};
-    char chamber_filter_fan_on_text_buf_[64] = {};
-    char chamber_filter_fan_icon_buf_[16] = {};
+    lv_subject_t chamber_dryer_active_{}; ///< XML: 0/1
+    lv_subject_t chamber_dryer_text_{};   ///< XML: countdown string, "" when idle
+    char chamber_dryer_text_buf_[64] = {};
+    /// Last reported drying state; frames name only what changed.
+    bool chamber_dryer_running_ = false;
+    int chamber_dryer_remaining_s_ = 0;
+    int chamber_dryer_target_c_ = 0; ///< 0 = not reported
+    void publish_chamber_dryer();
     SubjectLifetime chamber_heater_fault_lifetime_;
     SubjectLifetime chamber_heater_inhibited_lifetime_;
+    /// The appliance drops a poll periodically and recovers within a frame or
+    /// two, so asserting offline on the first connected:false flashes an alarm
+    /// for a couple of seconds several times an hour. Offline is asserted only
+    /// after this many consecutive reports; any connected report clears the
+    /// run. Measured flap lengths on a U1 over an hour were 1, 1 and 2 polls
+    /// about twenty minutes apart, so the bar sits clear of the longest seen
+    /// rather than one sample above it. At the module's 2s poll this notices a
+    /// real outage in about eight seconds, which costs nothing: an appliance
+    /// that has actually gone is gone for minutes.
+    static constexpr int CHAMBER_OFFLINE_CONSECUTIVE_REPORTS = 4;
+    int chamber_offline_run_ = 0;
+
+    SubjectLifetime chamber_heater_externally_controlled_lifetime_;
+    SubjectLifetime chamber_heater_offline_lifetime_;
     SubjectLifetime chamber_heater_fault_reason_text_lifetime_;
     SubjectLifetime chamber_filter_fan_on_lifetime_;
+    SubjectLifetime chamber_filter_fan_requested_lifetime_;
+    SubjectLifetime chamber_filter_fan_device_driven_lifetime_;
     SubjectLifetime chamber_heater_element_temp_text_lifetime_;
     SubjectLifetime chamber_filter_fan_percent_text_lifetime_;
-    SubjectLifetime chamber_filter_fan_on_text_lifetime_;
-    SubjectLifetime chamber_filter_fan_icon_lifetime_;
 
     // Dynamic per-extruder tracking
     std::unordered_map<std::string, ExtruderInfo> extruders_;
     lv_subject_t extruder_version_{}; ///< Bumped when extruder list changes
 
-    // Active extruder name (defaults to "extruder")
+    // Active extruder name (defaults to "extruder"). Follows the machine's
+    // toolhead status; a surface that wants to show a different tool reads the
+    // per-extruder subjects instead of these mirrors.
     std::string active_extruder_name_ = "extruder";
 
     // Chamber configuration
@@ -484,6 +586,7 @@ class PrinterTemperatureState {
     std::string chamber_backend_id_;         ///< Matched backend id, "" = none/generic
     std::string chamber_diagnostics_object_; ///< Status object with diagnostics, "" = none
     std::string chamber_filter_fan_pin_;     ///< Binary filter fan output_pin, "" = none
+    int chamber_filter_fan_percent_ = -1;    ///< Last backend-reported fan speed, -1 = none yet
 };
 
 } // namespace helix

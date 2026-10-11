@@ -1,5 +1,0 @@
-# Build artifacts
-*.o
-*.so
-*.dylib
-build/

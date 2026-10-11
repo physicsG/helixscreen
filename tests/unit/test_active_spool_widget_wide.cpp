@@ -49,12 +49,12 @@ TEST_CASE_METHOD(LVGLUITestFixture, "active_spool wide canvas is colored after r
     ext.remaining_weight_g = 500.0f;
     AmsState::instance().set_external_spool_info_in_memory(ext);
 
-    // Build the component + controller the way the panel manager does.
-    lv_obj_t* comp =
-        static_cast<lv_obj_t*>(lv_xml_create(test_screen(), "panel_widget_active_spool", nullptr));
-    REQUIRE(comp != nullptr);
-
+    // Build the controller, then its component, the way the panel manager
+    // does: the widget's subjects must exist before the XML binds to them.
     ActiveSpoolWidget widget(api());
+    lv_obj_t* comp = static_cast<lv_obj_t*>(
+        lv_xml_create(test_screen(), "panel_widget_active_spool", widget.xml_attrs()));
+    REQUIRE(comp != nullptr);
     widget.attach(comp, test_screen());
 
     lv_obj_t* spool_compact = lv_obj_find_by_name(comp, "spool_compact");
@@ -100,8 +100,8 @@ TEST_CASE_METHOD(LVGLUITestFixture, "active_spool stays colored after a 2x1 inst
     ActiveSpoolWidget widget(api());
 
     // First placement at 2x1 — is_wide_ becomes true.
-    lv_obj_t* comp1 =
-        static_cast<lv_obj_t*>(lv_xml_create(test_screen(), "panel_widget_active_spool", nullptr));
+    lv_obj_t* comp1 = static_cast<lv_obj_t*>(
+        lv_xml_create(test_screen(), "panel_widget_active_spool", widget.xml_attrs()));
     REQUIRE(comp1 != nullptr);
     widget.attach(comp1, test_screen());
     widget.on_size_changed(2, 1, 200, 100);
@@ -110,8 +110,8 @@ TEST_CASE_METHOD(LVGLUITestFixture, "active_spool stays colored after a 2x1 inst
     // Rebuild: destroy the old component, recycle the SAME widget onto a fresh one,
     // and re-run the manager's attach() + on_size_changed(colspan) sequence.
     lv_obj_delete(comp1);
-    lv_obj_t* comp2 =
-        static_cast<lv_obj_t*>(lv_xml_create(test_screen(), "panel_widget_active_spool", nullptr));
+    lv_obj_t* comp2 = static_cast<lv_obj_t*>(
+        lv_xml_create(test_screen(), "panel_widget_active_spool", widget.xml_attrs()));
     REQUIRE(comp2 != nullptr);
     widget.attach(comp2, test_screen());
     widget.on_size_changed(2, 1, 200, 100);
@@ -134,4 +134,32 @@ TEST_CASE_METHOD(LVGLUITestFixture, "active_spool stays colored after a 2x1 inst
     REQUIRE(color_is(ui_spool_canvas_get_color(wide2), TEST_SPOOL_COLOR));
 
     AmsState::instance().clear_external_spool_info();
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture, "active_spool's compact spool is sized by its box",
+                 "[active_spool][panel_widget][tile]") {
+    // The compact spool is a square one line of the tile's icon face, so a
+    // bigger box draws a bigger spool, and a box too small for the smallest
+    // face is refused rather than clipped.
+    ActiveSpoolWidget widget(api());
+    lv_obj_t* comp = static_cast<lv_obj_t*>(
+        lv_xml_create(test_screen(), "panel_widget_active_spool", widget.xml_attrs()));
+    REQUIRE(comp != nullptr);
+    widget.attach(comp, test_screen());
+    lv_obj_t* spool = lv_obj_find_by_name(comp, "spool_compact");
+    REQUIRE(spool != nullptr);
+
+    widget.on_size_changed(1, 1, 50, 50);
+    lv_obj_update_layout(comp);
+    const int small = lv_obj_get_height(spool);
+    widget.on_size_changed(2, 2, 110, 110);
+    lv_obj_update_layout(comp);
+    const int large = lv_obj_get_height(spool);
+    INFO("spool " << small << "px at 50x50, " << large << "px at 110x110");
+    CHECK(large > small);
+    CHECK(lv_obj_get_width(spool) == large);
+
+    CHECK_FALSE(widget.fits_at(8, 8));
+    CHECK(widget.fits_at(200, 200));
+    widget.detach();
 }

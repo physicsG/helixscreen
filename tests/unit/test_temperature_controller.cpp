@@ -1,8 +1,11 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "../../include/moonraker_client_mock.h"
+#include "../helix_test_fixture.h"
+#include "../test_helpers/scoped_shared_resource.h"
 #include "../test_helpers/temperature_controller_test_access.h"
 #include "app_globals.h"
+#include "macro_param_cache.h"
 #include "moonraker_api.h"
 #include "panel_widget_manager.h"
 #include "printer_discovery.h"
@@ -10,13 +13,24 @@
 #include "settings_manager.h"
 #include "temperature_controller.h"
 
+#include <memory>
+
 #include "../catch_amalgamated.hpp"
 
 using helix::HeaterType;
 using helix::TemperatureController;
 
 namespace {
-struct ControllerFixture {
+// HelixTestFixture base drains UpdateQueue on both construction and
+// destruction. PrinterState::update_from_status() unconditionally forwards
+// every status update to the FilamentSensorManager singleton, which queues an
+// async subject-refresh callback whenever it has not yet processed a status
+// (or a sensor changed) and is not in sync mode - true even for an
+// otherwise-private, per-fixture PrinterState like `state` below.
+// feed_nozzle()'s calls into that path queue such a callback between test
+// cases; the HelixTestFixture base drains it at teardown so it can't leak
+// into the next test.
+struct ControllerFixture : public HelixTestFixture {
     MoonrakerClientMock client;
     helix::PrinterState state;
     MoonrakerAPI api;
@@ -49,7 +63,8 @@ TEST_CASE("TemperatureController resolves heater names", "[temp_controller]") {
         REQUIRE(f.controller.resolved_name(HeaterType::Chamber) == "heater_generic chamber_heater");
     }
     SECTION("nozzle is the active extruder") {
-        REQUIRE(f.controller.resolved_name(HeaterType::Nozzle) == f.state.active_extruder_name());
+        REQUIRE(f.controller.resolved_name(HeaterType::Nozzle) ==
+                f.state.temperature_state().active_extruder_name());
     }
 }
 
@@ -173,6 +188,83 @@ TEST_CASE("TemperatureController reports an error when the chamber heater is not
     }
 }
 
+TEST_CASE(
+    "TemperatureController sends a preset's missing chamber heater target only to discovery's",
+    "[temp_controller][chamber]") {
+    // A model preset names its family's chamber heater before the wizard runs; this
+    // member of the family does not have it.
+    struct AssignmentRestore {
+        ~AssignmentRestore() {
+            helix::SettingsManager::instance().set_chamber_heater_assignment("auto");
+        }
+    } restore;
+    ControllerFixture f;
+    // No M141 macro, so the raw heater or fan command is what reaches Klipper.
+    helix::MacroParamCache::instance().clear();
+    helix::SettingsManager::instance().set_chamber_heater_assignment(
+        "heater_generic chamber_heater");
+
+    const auto discover = [&f](std::initializer_list<const char*> names) {
+        helix::PrinterDiscovery hardware;
+        nlohmann::json objects = nlohmann::json::array();
+        for (const char* name : names) {
+            objects.push_back(name);
+        }
+        hardware.parse_objects(objects);
+        f.state.set_hardware(hardware);
+        f.state.set_klippy_state_sync(helix::KlippyState::READY);
+        f.client.clear_gcode_script_history();
+    };
+    const auto sent = [&f](const std::string& fragment) {
+        for (const auto& gcode : f.client.gcode_script_history()) {
+            if (gcode.find(fragment) != std::string::npos) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    SECTION("a chamber-named temperature_fan takes the chamber target") {
+        discover({"temperature_fan chamber_fan", "temperature_sensor chamber_temp", "extruder",
+                  "heater_bed"});
+        CHECK(f.controller.resolved_name(HeaterType::Chamber) == "temperature_fan chamber_fan");
+
+        bool error_fired = false;
+        f.controller.set_target(
+            HeaterType::Chamber, 35.0,
+            helix::SendOptions{.toast = true,
+                               .on_error = [&](const MoonrakerError&) { error_fired = true; }});
+
+        CHECK_FALSE(error_fired);
+        CHECK(sent("SET_TEMPERATURE_FAN_TARGET TEMPERATURE_FAN=chamber_fan TARGET=35"));
+        CHECK_FALSE(sent("chamber_heater"));
+    }
+
+    SECTION("with neither a heater nor a chamber fan") {
+        discover({"temperature_sensor chamber_temp", "extruder", "heater_bed"});
+        CHECK(f.controller.resolved_name(HeaterType::Chamber).empty());
+
+        SECTION("a chamber target is refused and nothing reaches Klipper") {
+            bool error_fired = false;
+            f.controller.set_target(
+                HeaterType::Chamber, 50.0,
+                helix::SendOptions{.toast = true,
+                                   .on_error = [&](const MoonrakerError&) { error_fired = true; }});
+
+            CHECK(error_fired);
+            CHECK(f.client.gcode_script_history().empty());
+        }
+
+        SECTION("a material's chamber temperature is left out of apply_material") {
+            f.controller.apply_material(210.0, 60.0, 50.0, helix::SendOptions{.toast = false});
+
+            // The nozzle send proves apply_material ran.
+            REQUIRE_FALSE(f.client.gcode_script_history().empty());
+            CHECK_FALSE(sent("chamber_heater"));
+        }
+    }
+}
+
 // --------------------------------------------------------------------------
 // Swap-preheat guard: keep_previous_hot floors the nozzle target at the hotter
 // of the latched last-nonzero target and the current actual nozzle temp so a
@@ -202,13 +294,14 @@ std::string last_temp_gcode(const MoonrakerClientMock& client) {
 TEST_CASE("TemperatureController swap-preheat guard holds the previous filament temp",
           "[temp_controller][temperature][swap_preheat]") {
     ControllerFixture f;
-    f.state.init_extruders({"extruder"});
+    f.state.temperature_state().init_extruders({"extruder"});
     f.state.set_klippy_state_sync(helix::KlippyState::READY);
 
     SECTION("raises a lower request to the latched target when the nozzle is still hot") {
         // ABS at 250 loaded/hot; switch to TPU at 230. Latch=250, actual=245.
         feed_nozzle(f.state, /*actual=*/245.0, /*target=*/250.0);
-        REQUIRE(f.state.get_active_extruder_last_nonzero_target() == Catch::Approx(250.0));
+        REQUIRE(f.state.temperature_state().get_active_extruder_last_nonzero_target() ==
+                Catch::Approx(250.0));
 
         f.client.clear_gcode_script_history();
         f.controller.set_target(helix::HeaterType::Nozzle, 230.0,
@@ -234,7 +327,8 @@ TEST_CASE("TemperatureController swap-preheat guard holds the previous filament 
     SECTION("cold nozzle with no latch sends the requested target unchanged") {
         // Never heated: latch=0, actual=25. Request 230 stands.
         feed_nozzle(f.state, /*actual=*/25.0, /*target=*/0.0);
-        REQUIRE(f.state.get_active_extruder_last_nonzero_target() == Catch::Approx(0.0));
+        REQUIRE(f.state.temperature_state().get_active_extruder_last_nonzero_target() ==
+                Catch::Approx(0.0));
 
         f.client.clear_gcode_script_history();
         f.controller.set_target(helix::HeaterType::Nozzle, 230.0,
@@ -268,8 +362,7 @@ TEST_CASE("TemperatureController swap-preheat guard holds the previous filament 
 
 TEST_CASE("get_temperature_controller returns the registered shared resource",
           "[temp_controller][globals]") {
-    helix::TemperatureController ctrl(get_printer_state(), nullptr);
-    helix::PanelWidgetManager::instance().register_shared_resource<helix::TemperatureController>(
-        &ctrl);
-    REQUIRE(get_temperature_controller() == &ctrl);
+    helix_test::ScopedSharedResource<helix::TemperatureController> scope(
+        std::make_shared<helix::TemperatureController>(get_printer_state(), nullptr));
+    REQUIRE(get_temperature_controller() == scope.ptr());
 }

@@ -21,6 +21,7 @@
 #include "ui_switch.h"
 #include "ui_temp_display.h"
 #include "ui_text_input.h"
+#include "ui_tile_rung.h"
 
 #include "setting_group.h"
 
@@ -128,7 +129,8 @@ void LVGLUITestFixture::register_widgets() {
 
     // Register C++ widgets in dependency order
     // These are needed before XML components that embed them
-    ui_icon_register_widget();
+    helix::ui::icon::register_widget();
+    helix::ui::register_tile_rung_binding();
     ui_switch_register();
     ui_card_register();
     ui_temp_display_init();
@@ -228,7 +230,10 @@ void LVGLUITestFixture::cleanup() {
         // Wizard subjects
         ui_wizard_deinit_subjects();
 
-        // PrinterState subjects
+        // PrinterState subjects, reset first: with them down,
+        // HelixTestFixture::reset_all() can no longer clear the fan list or end
+        // a print this case started, and the next case inherits both.
+        reset_printer_state();
         get_printer_state().deinit_subjects();
 
         // Core singleton subjects - must be deinitialized to clear observers
@@ -246,6 +251,15 @@ void LVGLUITestFixture::cleanup() {
         helix::deinit_xml_subjects();
         m_xml_registered = false;
     }
+
+    // safe_delete_deferred_raw() reparents a child onto lv_layer_top() and hands
+    // it to lv_obj_delete_async(). LVGL drains that list from lv_timer_handler(),
+    // which the app calls continuously and a test need never call - so without
+    // this the object stays on the top layer holding a raw lv_style_t* into the
+    // component scope that the next registration frees. Two passes: the first
+    // can schedule more deletes as parents go away.
+    process_lvgl(5);
+    process_lvgl(5);
 
     m_fully_initialized = false;
     spdlog::debug("[LVGLUITestFixture] Cleanup complete");

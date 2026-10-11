@@ -104,7 +104,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "afc_fault_path_apply publishes and clears t
                  "[afc][fault][modal]") {
     // OUTPUT (5) — past the hub, short of the toolhead.
     const std::string shown = helix::ui::afc_fault_path_apply(PRE_GEAR_FAULT);
-    CHECK(fault_segment() == static_cast<int>(PathSegment::OUTPUT));
+    CHECK(fault_segment() == static_cast<int>(helix::PathSegment::OUTPUT));
     CHECK(shown == PRE_GEAR_SENTENCE);
 
     // An unrecognised message must CLEAR the previous marker, not inherit it,
@@ -126,21 +126,21 @@ TEST_CASE_METHOD(LVGLUITestFixture, "the fault position is named in words, not o
 
     struct Case {
         const char* message;
-        PathSegment segment;
+        helix::PathSegment segment;
         const char* caption_name;
         const char* caption_text;
     };
 
     // One per AFC fault position, message text as afc_fault_position() sees it.
     const Case cases[] = {
-        {"lane1 FAILED TO LOAD, CHECK FILAMENT AT TRIGGER", PathSegment::SPOOL,
+        {"lane1 FAILED TO LOAD, CHECK FILAMENT AT TRIGGER", helix::PathSegment::SPOOL,
          "afc_stop_caption_spool", "Stopped between Spool and Lane"},
-        {"lane1 filament did not trigger hub sensor, CHECK FILAMENT PATH", PathSegment::HUB,
+        {"lane1 filament did not trigger hub sensor, CHECK FILAMENT PATH", helix::PathSegment::HUB,
          "afc_stop_caption_hub", "Stopped between Lane and Hub"},
         {"lane1 filament failed to trigger pre extruder gear toolhead sensor, CHECK FILAMENT PATH",
-         PathSegment::OUTPUT, "afc_stop_caption_output", "Stopped between Hub and Toolhead"},
+         helix::PathSegment::OUTPUT, "afc_stop_caption_output", "Stopped between Hub and Toolhead"},
         {"lane1 filament failed to trigger post extruder gear toolhead sensor, CHECK FILAMENT PATH",
-         PathSegment::TOOLHEAD, "afc_stop_caption_toolhead", "Jammed at the Toolhead"},
+         helix::PathSegment::TOOLHEAD, "afc_stop_caption_toolhead", "Jammed at the Toolhead"},
     };
 
     for (const auto& c : cases) {
@@ -191,7 +191,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
 
     lv_obj_t* screen = lv_screen_active();
     CHECK(graphic_visible(screen));
-    CHECK(fault_segment() == static_cast<int>(PathSegment::OUTPUT));
+    CHECK(fault_segment() == static_cast<int>(helix::PathSegment::OUTPUT));
     // The art rows are gone; the sentence survives.
     CHECK(prompt_body_text(screen) == PRE_GEAR_SENTENCE);
 

@@ -32,7 +32,9 @@
       <!-- Nozzle row -->
       <lv_obj name="preheat_nozzle_row"
               width="content" height="content" style_pad_all="#space_xxs" scrollable="false" flex_flow="row"
-              style_flex_main_place="center" style_flex_cross_place="center" style_pad_gap="#space_xxs" clickable="true">
+              style_flex_main_place="center" style_flex_cross_place="center" style_pad_gap="#space_xxs" clickable="true"
+              style_radius="#border_radius">
+        <style name="styles.press_wash" selector="pressed"/>
         <event_cb trigger="clicked" callback="preheat_nozzle_tap_cb"/>
         <nozzle_icon name="preheat_nozzle_icon" size="xs" badge_subject="" clickable="false" event_bubble="true"/>
         <temp_display name="preheat_nozzle_temp"
@@ -43,7 +45,9 @@
       <!-- Bed row -->
       <lv_obj name="preheat_bed_row"
               width="content" height="content" style_pad_all="#space_xxs" scrollable="false" flex_flow="row"
-              style_flex_main_place="center" style_flex_cross_place="center" style_pad_gap="#space_xxs" clickable="true">
+              style_flex_main_place="center" style_flex_cross_place="center" style_pad_gap="#space_xxs" clickable="true"
+              style_radius="#border_radius">
+        <style name="styles.press_wash" selector="pressed"/>
         <event_cb trigger="clicked" callback="preheat_bed_tap_cb"/>
         <heater_icon src="radiator" glyph_name="bed_icon_glyph" size="xs" clickable="false" event_bubble="true"/>
         <temp_display name="preheat_bed_temp"

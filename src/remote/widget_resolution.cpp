@@ -9,6 +9,7 @@
 // has_own_click_handler() needs it to tell a click target from scaffolding.
 #include "lvgl/src/misc/lv_event_private.h"
 
+#include <algorithm>
 #include <cstdlib>
 
 namespace helix {
@@ -283,6 +284,33 @@ std::string path_of(lv_obj_t* o, lv_obj_t* base) {
     }
 }
 
+std::vector<Overflow> find_overflow(lv_obj_t* root) {
+    std::vector<Overflow> found;
+    std::function<void(lv_obj_t*)> walk = [&](lv_obj_t* o) {
+        if (lv_obj_has_flag(o, LV_OBJ_FLAG_HIDDEN)) {
+            return;
+        }
+        // LVGL reports a short content box as a negative remainder.
+        const auto past = [](int32_t px) { return std::max<int32_t>(px, 0); };
+        Overflow ov{o, past(lv_obj_get_scroll_top(o)), past(lv_obj_get_scroll_bottom(o)),
+                    past(lv_obj_get_scroll_left(o)), past(lv_obj_get_scroll_right(o))};
+        // A label that dots, scrolls or clips its text truncates by design.
+        const bool truncates = lv_obj_check_type(o, &lv_label_class) &&
+                               lv_label_get_long_mode(o) != LV_LABEL_LONG_MODE_WRAP;
+        if (!truncates && (ov.top > 0 || ov.bottom > 0 || ov.left > 0 || ov.right > 0)) {
+            found.push_back(ov);
+        }
+        const uint32_t n = lv_obj_get_child_count(o);
+        for (uint32_t i = 0; i < n; ++i) {
+            walk(lv_obj_get_child(o, static_cast<int32_t>(i)));
+        }
+    };
+    if (root) {
+        walk(root);
+    }
+    return found;
+}
+
 lv_obj_t* resolve_path(const std::string& path, lv_obj_t* base, std::vector<lv_obj_t*>* ambiguous) {
     if (ambiguous) {
         ambiguous->clear();
@@ -305,6 +333,40 @@ lv_obj_t* resolve_path(const std::string& path, lv_obj_t* base, std::vector<lv_o
         cur = resolve_segment(cur, segs[i], ambiguous);
     }
     return cur;
+}
+
+void collect_widgets(lv_obj_t* root, const std::function<bool(const char* name)>& pred,
+                     std::vector<lv_obj_t*>& out, bool include_hidden) {
+    if (!root) {
+        return;
+    }
+    const uint32_t count = lv_obj_get_child_count(root);
+    for (uint32_t i = 0; i < count; ++i) {
+        lv_obj_t* child = lv_obj_get_child(root, i);
+        if (!child || (!include_hidden && lv_obj_has_flag(child, LV_OBJ_FLAG_HIDDEN))) {
+            continue;
+        }
+        char resolved[128];
+        lv_obj_get_name_resolved(child, resolved, sizeof(resolved));
+        const char* name = resolved[0] != '\0' ? resolved : lv_obj_get_name(child);
+        if (name && pred(name)) {
+            out.push_back(child);
+        }
+        collect_widgets(child, pred, out, include_hidden);
+    }
+}
+
+std::vector<lv_obj_t*> search_widgets(lv_obj_t* scope,
+                                      const std::function<bool(const char* name)>& pred,
+                                      bool include_hidden) {
+    std::vector<lv_obj_t*> out;
+    if (scope) {
+        collect_widgets(scope, pred, out, include_hidden);
+        return out;
+    }
+    collect_widgets(lv_screen_active(), pred, out, include_hidden);
+    collect_widgets(lv_layer_top(), pred, out, include_hidden);
+    return out;
 }
 
 int64_t widget_pick_key(lv_obj_t* o, size_t discovery_order) {
@@ -336,6 +398,28 @@ lv_obj_t* topmost_visible(const std::vector<lv_obj_t*>& matches) {
         }
     }
     return best;
+}
+
+const char* click_blocker(lv_obj_t* obj) {
+    if (obj == nullptr) {
+        return "not found";
+    }
+    // Hidden is inherited: an object inside a hidden parent is not drawn and
+    // never hit-tested, however unhidden it is itself.
+    for (lv_obj_t* o = obj; o != nullptr; o = lv_obj_get_parent(o)) {
+        if (lv_obj_has_flag(o, LV_OBJ_FLAG_HIDDEN)) {
+            return "hidden";
+        }
+    }
+    if (!lv_obj_has_flag(obj, LV_OBJ_FLAG_CLICKABLE)) {
+        return "not clickable";
+    }
+    // Checked on the hit object only, which is what lv_indev.c does - a
+    // disabled parent does not stop an enabled child receiving its own taps.
+    if (lv_obj_has_state(obj, LV_STATE_DISABLED)) {
+        return "disabled";
+    }
+    return nullptr;
 }
 
 } // namespace helix

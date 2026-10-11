@@ -8,7 +8,7 @@
 load helpers
 
 HOOKS_DIR="assets/config/platform"
-HOOK_FILES="hooks-ad5m-forgex.sh hooks-ad5m-kmod.sh hooks-ad5m-zmod.sh hooks-pi.sh hooks-k1.sh hooks-k2.sh hooks-snapmaker-u1.sh"
+HOOK_FILES="hooks-qidi.sh hooks-ad5m-forgex.sh hooks-ad5m-kmod.sh hooks-ad5m-zmod.sh hooks-pi.sh hooks-k1.sh hooks-k2.sh hooks-snapmaker-u1.sh"
 REQUIRED_FUNCTIONS="platform_stop_competing_uis platform_enable_backlight platform_wait_for_services platform_pre_start platform_post_stop"
 
 # --- Hook contract tests: every hook file must define all 5 functions ---
@@ -45,7 +45,7 @@ REQUIRED_FUNCTIONS="platform_stop_competing_uis platform_enable_backlight platfo
 # maps platform ad5x -> hook ad5m-zmod). Its app-log path must stay under
 # /opt/config: ghzserg's TAR_CONFIG archiver collects /opt/config/ (plus
 # /usr/prog/config/, /usr/data/logs/ on AD5X and /data/logFiles/ on AD5M) and
-# nothing under /data/helixscreen/, so moving the log back to /data makes it
+# nothing under /data/.helixscreen/, so moving the log back to /data makes it
 # invisible to every support archive a user can send us. That is the exact
 # regression that reopens #1249.
 @test "zmod hook logs under /opt/config so ZMOD's TAR_CONFIG archives it" {
@@ -62,7 +62,7 @@ REQUIRED_FUNCTIONS="platform_stop_competing_uis platform_enable_backlight platfo
     [ "$status" -eq 0 ]
 
     # The file sink must be explicitly selected — "auto" never resolves to File.
-    [[ "$output" == *"dest=file"* ]]
+    contains "dest=file" "$output"
 
     log_file=$(echo "$output" | sed -n 's/^file=//p')
     [ -n "$log_file" ]
@@ -95,7 +95,7 @@ REQUIRED_FUNCTIONS="platform_stop_competing_uis platform_enable_backlight platfo
         echo "bytes=$HELIX_LOG_ROTATE_BYTES files=$HELIX_LOG_ROTATE_FILES"
     '
     [ "$status" -eq 0 ]
-    [[ "$output" == *"bytes=1048576"* ]]
+    contains "bytes=1048576" "$output"
     [[ "$output" == *"files=3"* ]]
 }
 
@@ -180,6 +180,14 @@ REQUIRED_FUNCTIONS="platform_stop_competing_uis platform_enable_backlight platfo
     sh -n "$HOOKS_DIR/hooks-k2.sh"
 }
 
+# A mock server left running by a failed assertion would never exit.
+MOCK_SERVER_PID=""
+teardown() {
+    [ -n "$MOCK_SERVER_PID" ] && kill "$MOCK_SERVER_PID" 2>/dev/null
+    MOCK_SERVER_PID=""
+    return 0
+}
+
 @test "k2 gate writes splash heartbeat and detects a ready Moonraker fast" {
     # Behavioral check of the Moonraker gate: against an already-ready endpoint
     # it must return 0 quickly and leave the splash status file in the
@@ -187,32 +195,43 @@ REQUIRED_FUNCTIONS="platform_stop_competing_uis platform_enable_backlight platfo
     # never touches a real printer.
     command -v python3 >/dev/null 2>&1 || skip "python3 not available"
 
-    local tmp port status_file
-    tmp="$(mktemp -d)"
-    status_file="$tmp/splash-status"
-    port=7191
+    local port status_file port_file
+    status_file="$BATS_TEST_TMPDIR/splash-status"
+    port_file="$BATS_TEST_TMPDIR/port"
 
-    # Minimal mock Moonraker /server/info on 127.0.0.1:$port
+    # Mock Moonraker /server/info on an ephemeral port: a fixed port collides
+    # with a concurrent run of this test, whose teardown kills the server this
+    # one is polling. The port file appears only once the socket is listening.
     python3 -c "
-import http.server, sys
+import http.server, os
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b'{}')
     def log_message(self, *a): pass
-http.server.HTTPServer(('127.0.0.1', $port), H).serve_forever()
+s = http.server.HTTPServer(('127.0.0.1', 0), H)
+open('$port_file.tmp', 'w').write(str(s.server_address[1]))
+os.rename('$port_file.tmp', '$port_file')
+s.serve_forever()
 " &
-    local server_pid=$!
-    sleep 1
+    MOCK_SERVER_PID=$!
+    local i
+    for i in $(seq 1 600); do
+        [ -s "$port_file" ] && break
+        sleep 0.1
+    done
+    [ -s "$port_file" ]
+    port="$(cat "$port_file")"
 
+    # The generous timeout only absorbs a loaded box; the elapsed bound is
+    # what proves a ready server is detected on the first poll.
+    local start=$SECONDS
     HELIX_MOONRAKER_READY_URL="http://127.0.0.1:$port/server/info" \
-        HELIX_MOONRAKER_WAIT_TIMEOUT=10 \
+        HELIX_MOONRAKER_WAIT_TIMEOUT=60 \
         HELIX_SPLASH_STATUS_FILE="$status_file" \
         bash -c ". '$HOOKS_DIR/hooks-k2.sh'; platform_wait_for_services"
-    local rc=$?
+    local elapsed=$((SECONDS - start))
 
-    kill "$server_pid" 2>/dev/null || true
-    [ "$rc" -eq 0 ]
+    [ "$elapsed" -le 5 ]
     grep -q "HelixScreen" "$status_file"
-    rm -rf "$tmp"
 }
 
 @test "k2 gate times out cleanly and marks splash 'no printer'" {
@@ -232,6 +251,28 @@ http.server.HTTPServer(('127.0.0.1', $port), H).serve_forever()
     [ "$status" -ne 0 ]
     grep -q "without printer" "$status_file"
     rm -rf "$tmp"
+}
+
+# The restore that follows /etc/init.d/app's stop races nothing: the stop's
+# killall -9 takes any live web-server down and a killed pid leaves the
+# table within ~0.03s (measured on the K2 Plus), before the restore samples
+# it — and a killed instance is procd's job to respawn. Nothing may wait
+# between the disable and the restore (prestonbrown/helixscreen#1617).
+@test "k2 stop-and-restore restores immediately — no sleep before the restore" {
+    local sleeps="$BATS_TEST_TMPDIR/sleep_calls" calls="$BATS_TEST_TMPDIR/pidof_calls"
+    mock_command_script "sleep" 'echo x >> "'"$sleeps"'"'
+    mock_command_script "killall" 'exit 0'
+    mock_command_script "pidof" 'echo x >> "'"$calls"'" 2>/dev/null; exit 1'
+
+    # Neither /etc/init.d path exists on a test host, so the restore falls
+    # through to the pidof-guarded elif; the function's return value is the
+    # guard's, not the thing under test.
+    run bash -c ". '$HOOKS_DIR/hooks-k2.sh'; platform_stop_competing_uis || true"
+
+    [ "$status" -eq 0 ]
+    # The restore was reached (its pidof guard sampled) and nothing slept.
+    [ -f "$calls" ]
+    [ ! -f "$sleeps" ]
 }
 
 # --- Init script integration tests ---
@@ -289,43 +330,78 @@ INIT_SCRIPT="config/helixscreen.init"
     grep -q 'status)' "$INIT_SCRIPT"
 }
 
+@test "qidi hooks define all required functions" {
+    ( . "$HOOKS_DIR/hooks-qidi.sh"
+      for func in $REQUIRED_FUNCTIONS; do
+          type "$func" >/dev/null 2>&1
+      done )
+}
+
+# The hook ships to the device and runs at boot with none of the installer
+# library available, so it carries its own copy of what the stock screen looks
+# like. Two hand-written copies of one rule drift; this is the gate.
+@test "qidi hook and the installer agree on the stock screen's shape" {
+    run sh -c '
+        . scripts/lib/installer/competing_uis.sh
+        want_bins="$QIDI_STOCK_UI_BINS"
+        want_pat="$QIDI_STOCK_UI_EXEC_PATTERN"
+        unset QIDI_STOCK_UI_BINS QIDI_STOCK_UI_EXEC_PATTERN
+        . assets/config/platform/hooks-qidi.sh
+        [ "$want_bins" = "$QIDI_STOCK_UI_BINS" ] || { echo "BINS drift"; exit 1; }
+        [ "$want_pat" = "$QIDI_STOCK_UI_EXEC_PATTERN" ] || { echo "PATTERN drift"; exit 1; }
+    '
+    [ "$status" -eq 0 ]
+}
+
+# The unit must go down before the process is killed: the stock unit is
+# Restart=always with StartLimitIntervalSec=0 and its start script relaunches
+# the client under taskset, so a kill while the unit is live respawns it.
+@test "qidi hook: the unit loop comes before the process loop" {
+    local hook="$HOOKS_DIR/hooks-qidi.sh" unit_line bin_line
+    unit_line=$(grep -nF 'for _qidi_path in /etc/systemd/system' "$hook" | cut -d: -f1)
+    bin_line=$(grep -nF 'for _qidi_bin in $QIDI_STOCK_UI_BINS' "$hook" | cut -d: -f1)
+    [ -n "$unit_line" ]
+    [ -n "$bin_line" ]
+    [ "$unit_line" -lt "$bin_line" ]
+}
+
 # --- Bundle integrity tests ---
 
 @test "bundled installer passes syntax check" {
-    sh -n scripts/install.sh
+    sh -n "$INSTALL_BUNDLE"
 }
 
 @test "bundled installer contains configure_platform" {
-    grep -q 'configure_platform' scripts/install.sh
+    grep -q 'configure_platform' "$INSTALL_BUNDLE"
 }
 
 @test "bundled installer contains deploy_platform_hooks" {
-    grep -q 'deploy_platform_hooks' scripts/install.sh
+    grep -q 'deploy_platform_hooks' "$INSTALL_BUNDLE"
 }
 
 @test "bundled installer contains detect_klipper_user" {
-    grep -q 'detect_klipper_user' scripts/install.sh
+    grep -q 'detect_klipper_user' "$INSTALL_BUNDLE"
 }
 
 @test "bundled installer contains record_disabled_service" {
-    grep -q 'record_disabled_service' scripts/install.sh
+    grep -q 'record_disabled_service' "$INSTALL_BUNDLE"
 }
 
 @test "bundled installer contains fix_install_ownership" {
-    grep -q 'fix_install_ownership' scripts/install.sh
+    grep -q 'fix_install_ownership' "$INSTALL_BUNDLE"
 }
 
 @test "bundled installer contains detect_pi_install_dir function" {
-    grep -q 'detect_pi_install_dir()' scripts/install.sh
+    grep -q 'detect_pi_install_dir()' "$INSTALL_BUNDLE"
 }
 
 @test "bundled installer calls detect_pi_install_dir in Pi branch" {
     # The Pi branch of set_install_paths must call detect_pi_install_dir
-    grep -A5 'detect_klipper_user' scripts/install.sh | grep -q 'detect_pi_install_dir'
+    grep -A5 'detect_klipper_user' "$INSTALL_BUNDLE" | grep -q 'detect_pi_install_dir'
 }
 
 @test "bundled installer captures _USER_INSTALL_DIR" {
-    grep -q '_USER_INSTALL_DIR=' scripts/install.sh
+    grep -q '_USER_INSTALL_DIR=' "$INSTALL_BUNDLE"
 }
 
 # --- Parity tests: platform.sh functions must exist in bundled install.sh ---
@@ -337,7 +413,7 @@ INIT_SCRIPT="config/helixscreen.init"
     local funcs
     funcs=$(grep -E '^[a-z_]+\(\)' scripts/lib/installer/platform.sh | sed 's/().*//')
     for func in $funcs; do
-        if ! grep -q "${func}()" scripts/install.sh; then
+        if ! grep -q "${func}()" "$INSTALL_BUNDLE"; then
             echo "MISSING in install.sh: ${func}()"
             return 1
         fi
@@ -347,7 +423,7 @@ INIT_SCRIPT="config/helixscreen.init"
 @test "parity: Pi branch in install.sh matches platform.sh" {
     # Both files should call detect_pi_install_dir (not hardcode /opt/helixscreen)
     # in their Pi/else branch of set_install_paths
-    refute_sh "grep -A3 'Pi and other platforms' scripts/install.sh | grep -q 'INSTALL_DIR=\"/opt/helixscreen\"'"
+    refute_sh "grep -A3 'Pi and other platforms' "$INSTALL_BUNDLE" | grep -q 'INSTALL_DIR=\"/opt/helixscreen\"'"
     refute_sh "grep -A3 'Pi and other platforms' scripts/lib/installer/platform.sh | grep -q 'INSTALL_DIR=\"/opt/helixscreen\"'"
 }
 
@@ -415,8 +491,8 @@ INIT_SCRIPT="config/helixscreen.init"
         rm -f "$f"
     '
     [ "$status" -eq 0 ]
-    [[ "$output" == *"--backend drm"* ]]
-    [[ "$output" == *"--drm-device /dev/dri/card0"* ]]
+    contains "--backend drm" "$output"
+    contains "--drm-device /dev/dri/card0" "$output"
     [[ "$output" == *"--drm-wait 60"* ]]
 }
 
@@ -431,7 +507,7 @@ INIT_SCRIPT="config/helixscreen.init"
         rm -f "$f"
     '
     [ "$status" -eq 0 ]
-    [[ "$output" != *"--backend"* ]]
+    lacks "--backend" "$output"
     [[ "$output" != *"UNEXPECTED"* ]]
 }
 
@@ -453,7 +529,7 @@ INIT_SCRIPT="config/helixscreen.init"
         exit $rc
     '
     [ "$status" -eq 0 ]
-    [[ "$output" == *"SURVIVED"* ]]      # unrelated process must NOT be killed
+    contains "SURVIVED" "$output"      # unrelated process must NOT be killed
     [[ "$output" != *"PIDFILE-LEFT"* ]]  # stale pidfile is still cleaned up
 }
 
@@ -526,8 +602,8 @@ INIT_SCRIPT="config/helixscreen.init"
 }
 
 @test "ad5x-forgex hooks keep durable state out of the synced payload tree" {
-    # The payload root is replaceable on every update (and their OTA git-cleans
-    # it), so runtime caches must live in mod_data beside the mod's own state.
+    # The payload root is replaceable on every update, so runtime caches must
+    # live outside it, in mod_data beside the mod's own state.
     run sh -c '
         HOOKS_DIR="'"$HOOKS_DIR"'"
         . "$HOOKS_DIR/hooks-ad5x-forgex.sh"
@@ -538,6 +614,6 @@ INIT_SCRIPT="config/helixscreen.init"
         echo "file=$HELIX_LOG_FILE"
     '
     [ "$status" -eq 0 ]
-    [[ "$output" == *"cache=/opt/config/mod_data/helixscreen/cache"* ]]
+    contains "cache=/opt/config/mod_data/helixscreen-state/cache" "$output"
     [[ "$output" == *"file=/opt/config/mod_data/log/helix.log"* ]]
 }

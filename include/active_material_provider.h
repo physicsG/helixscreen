@@ -3,6 +3,7 @@
 
 #include "ams_types.h"
 #include "filament_database.h"
+#include "filament_temperature_source.h"
 
 #include <optional>
 #include <string>
@@ -21,6 +22,14 @@ struct ActiveMaterial {
     std::string brand;                    ///< Brand name (Spoolman or manual entry)
     std::string display_name;             ///< Human-readable: "PA-CF" or "Polymaker PA-CF"
     std::string material_name;            ///< Raw material name for DB lookups
+
+    /// Operation temperatures (load / unload / clean-nozzle) the firmware
+    /// itself publishes for this exact vendor/type/sub-type. Tier-2 vendor
+    /// data, like slot.nozzle_temp_*, but a different QUANTITY from the print
+    /// range: they ride as their own fields and never fold into
+    /// material_info.nozzle_min/nozzle_max. nullopt when the firmware has no
+    /// table or none for this spool.
+    std::optional<filament_temps::FilamentTemperatures> firmware_temps;
 
     // Spoolman integration (0 = not tracked)
     int spoolman_id = 0;

@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Spool wizard SpoolmanDB search result: colour swatch, filament name, and
+     manufacturer and material under it. One per result, bound to the
+     spool_db_result_*_<index> subjects the wizard publishes. -->
+<component>
+  <api>
+    <prop name="index" type="string" default="0"/>
+  </api>
+  <view name="wizard_catalog_row"
+        extends="lv_button" width="100%" height="content" style_bg_opa="0" style_border_width="0" style_shadow_width="0"
+        style_pad_all="#space_sm" style_radius="#border_radius" flex_flow="row" style_flex_cross_place="center"
+        style_pad_gap="#space_sm" clickable="true" scrollable="false">
+    <style name="styles.press_wash" selector="pressed"/>
+    <bind_flag_if cond="spool_db_result_count le ${index}" flag="hidden"/>
+    <color_swatch index="$index"
+                  color_subject="spool_db_result_color_${index}" edge_subject="spool_db_result_edge_${index}"
+                  callback="on_wizard_catalog_result_selected" size="#swatch_grid_size" hit="#swatch_grid_gap_half"
+                  reach="#swatch_grid_ring_reach" ring="styles.grid_swatch_ring"/>
+    <lv_obj height="content"
+            flex_grow="1" flex_flow="column" style_pad_all="0" style_pad_gap="0" style_bg_opa="0" style_border_width="0"
+            scrollable="false" clickable="false" event_bubble="true">
+      <text_body width="100%"
+                 bind_text="spool_db_result_title_${index}" long_mode="dots" clickable="false" event_bubble="true"/>
+      <text_small width="100%"
+                  bind_text="spool_db_result_detail_${index}" long_mode="dots" style_text_color="#text_muted"
+                  clickable="false" event_bubble="true"/>
+    </lv_obj>
+    <event_cb trigger="clicked" callback="on_wizard_catalog_result_selected" user_data="$index"/>
+  </view>
+</component>

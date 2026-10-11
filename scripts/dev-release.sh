@@ -124,7 +124,16 @@ fi
 if [[ -z "$VERSION" ]]; then
     BASE_VERSION=$(cat "$REPO_ROOT/VERSION.txt" | tr -d '\n')
     TIMESTAMP=$(date +%Y%m%d%H%M%S)
-    VERSION="${BASE_VERSION}-dev.${TIMESTAMP}"
+    # The dev marker is appended as extra prerelease identifiers, and only the
+    # first one introduces the suffix. VERSION.txt already carries a prerelease on
+    # the trunk (1.1.0-beta.1), so a second "-" would put the two markers in one
+    # identifier and order the dev build against its own base by string rules.
+    # Extra identifiers rank above a shared prefix, which is what a dev build off
+    # that base should do.
+    case "$BASE_VERSION" in
+        *-*) VERSION="${BASE_VERSION}.dev.${TIMESTAMP}" ;;
+        *)   VERSION="${BASE_VERSION}-dev.${TIMESTAMP}" ;;
+    esac
 fi
 
 echo -e "${GREEN}Version: $VERSION${NC}"
@@ -136,14 +145,27 @@ if [[ ! -d "$BUILD_DIR" ]]; then
     exit 1
 fi
 
+# install.sh is generated, never committed; the bucket-root copy comes from here.
+make -C "$REPO_ROOT" --no-print-directory installer
+
 # Determine which platforms to process
 declare -a PLATFORMS=()
 if [[ "$PLATFORM" == "all" ]]; then
     for tarball in "$BUILD_DIR"/helixscreen-*-*.tar.gz; do
         if [[ -f "$tarball" ]]; then
             filename=$(basename "$tarball")
-            # Extract platform from filename: helixscreen-{platform}-*.tar.gz
-            plat=$(echo "$filename" | sed -E 's/helixscreen-([^-]+)-.*/\1/')
+            # Recover the platform key. Platform names and versions both carry
+            # hyphens (android-arm64, v1.1.0-beta.1), so the split anchors on
+            # the '-v<digit>' that opens the version. A name carrying no
+            # version names no platform, and is skipped rather than becoming
+            # one: the rename below globs on the key it returns, so a
+            # truncated key matches a sibling platform's tarball and renames
+            # it out from under that platform.
+            plat=$(echo "$filename" | sed -n -E 's/^helixscreen-(.+)-v[0-9][0-9A-Za-z.+-]*\.tar\.gz$/\1/p')
+            if [[ -z "$plat" ]]; then
+                echo -e "${YELLOW}Skipping unrecognised artifact: ${filename}${NC}" >&2
+                continue
+            fi
             PLATFORMS+=("$plat")
         fi
     done
@@ -219,7 +241,7 @@ if [[ "$DRY_RUN" == "true" ]]; then
 
     echo ""
     echo "# Upload install.sh to bucket root"
-    echo "aws s3 cp \"$REPO_ROOT/scripts/install.sh\" \"s3://${R2_BUCKET_NAME}/install.sh\" --endpoint-url \"$R2_ENDPOINT\" --content-type \"text/x-shellscript\""
+    echo "aws s3 cp \"$REPO_ROOT/build/installer/install.sh\" \"s3://${R2_BUCKET_NAME}/install.sh\" --endpoint-url \"$R2_ENDPOINT\" --content-type \"text/x-shellscript\""
 
     echo ""
     echo -e "${GREEN}Manifest would be available at: ${R2_PUBLIC_URL}/${CHANNEL}/manifest.json${NC}"
@@ -245,7 +267,7 @@ else
 
     echo ""
     echo -e "${GREEN}Uploading install.sh to bucket root...${NC}"
-    aws s3 cp "$REPO_ROOT/scripts/install.sh" "s3://${R2_BUCKET_NAME}/install.sh" \
+    aws s3 cp "$REPO_ROOT/build/installer/install.sh" "s3://${R2_BUCKET_NAME}/install.sh" \
         --endpoint-url "$R2_ENDPOINT" \
         --content-type "text/x-shellscript"
 

@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 
@@ -48,17 +49,29 @@ class BusyOverlay {
      * Only updates if overlay is visible or pending.
      *
      * @note NOT thread-safe! Must be called from the main LVGL thread.
-     *       When calling from HTTP/background threads, use helix::ui::async_call():
+     *       When calling from HTTP/background threads, use helix::ui::queue_update():
      *       @code
-     *       helix::ui::async_call([](void* data) {
+     *       helix::ui::queue_update("Caller::progress", [pct]() {
      *           BusyOverlay::set_progress("Downloading", pct);
-     *       }, nullptr);
+     *       });
      *       @endcode
      *
      * @param operation Operation name (e.g., "Downloading", "Uploading")
      * @param percent Progress percentage (0-100)
      */
     static void set_progress(const std::string& operation, float percent);
+
+    /**
+     * @brief set_progress() from a transfer callback on any thread
+     *
+     * Queues the update to the main thread. The overlay is process-wide, so
+     * the update belongs to no object and runs whoever started the transfer.
+     *
+     * @param operation Operation name (e.g., "Uploading")
+     * @param done Bytes transferred so far
+     * @param total Total bytes (0 shows 0%)
+     */
+    static void queue_progress(const std::string& operation, size_t done, size_t total);
 
     /**
      * @brief Hide overlay immediately

@@ -3,10 +3,13 @@
 
 #pragma once
 
+#include "ui_widget_ref.h"
+
 #include "async_lifetime_guard.h"
 #include "lvgl/lvgl.h"
 #include "platform_info.h"
 #include "subject_managed_panel.h"
+#include "wifi_backend.h"
 #include "wizard_step.h"
 
 #include <memory>
@@ -102,9 +105,9 @@ class WizardWifiStep : public helix::wizard::Step {
      *
      * Registers callbacks:
      * - on_wifi_toggle_changed
-     * - on_network_item_clicked
-     * - on_wifi_password_cancel
-     * - on_wifi_password_connect
+     * - on_wizard_wifi_network_clicked
+     * - on_wizard_wifi_password_cancel
+     * - on_wizard_wifi_password_connect
      */
     void register_callbacks() override;
 
@@ -150,22 +153,25 @@ class WizardWifiStep : public helix::wizard::Step {
     }
 
   private:
+    friend class WizardWifiStepTestAccess;
+
     // Screen instances
     lv_obj_t* screen_root_ = nullptr;
-    lv_obj_t* password_modal_ = nullptr;
+    helix::ui::WidgetRef password_modal_;
     lv_obj_t* network_list_container_ = nullptr;
 
-    // Subjects (8 total - visibility controlled by Modal system)
-    lv_subject_t wifi_enabled_;
-    lv_subject_t wifi_status_;
-    lv_subject_t wifi_ip_;
-    lv_subject_t wifi_mac_;
-    lv_subject_t ethernet_status_;
-    lv_subject_t ethernet_mac_;
-    lv_subject_t wifi_scanning_;
-    lv_subject_t wifi_password_modal_ssid_;
-    lv_subject_t wifi_connecting_;
-    lv_subject_t wifi_hardware_available_;
+    // Subjects (visibility controlled by Modal system)
+    lv_subject_t wifi_enabled_{};
+    lv_subject_t wifi_status_{};
+    lv_subject_t wifi_ip_{};
+    lv_subject_t wifi_mac_{};
+    lv_subject_t ethernet_status_{};
+    lv_subject_t ethernet_mac_{};
+    lv_subject_t wifi_scanning_{};
+    lv_subject_t wifi_password_modal_ssid_{};
+    lv_subject_t wifi_connecting_{};
+    lv_subject_t wifi_hardware_available_{};
+    lv_subject_t wifi_can_toggle_radio_{}; ///< 1 if the backend can move the radio
 
     // String buffers (must be persistent)
     char wifi_status_buffer_[64];
@@ -205,23 +211,34 @@ class WizardWifiStep : public helix::wizard::Step {
 
     // Helper functions
     void update_wifi_status(const char* status);
-    void update_wifi_ip(const char* ip);
+    // Shows what a status read returned; never reads the backend itself.
+    void update_wifi_ip(const char* ip, const std::string& mac = "");
+    // "Connected to <current_ssid_>", then the address from one async read.
+    void announce_connected();
     void update_ethernet_status();
+    /// Publish what wifi_manager_'s backend can do to the capability subjects.
+    void publish_wifi_capabilities();
 
     // Apply the current (already-initialized) WiFi backend state to the UI.
     // Called once during init_wifi_manager() and again on every backend
     // state change via add_state_observer(). Non-blocking: never calls
     // set_enabled(). Runs on the UI thread (state observer defers via token).
     void apply_wifi_backend_state();
-    void populate_network_list(const std::vector<WiFiNetwork>& networks);
+    // Bumped (main thread) on every user-initiated change to the connection
+    // state: toggle, connect start, disconnect, cleanup. A status answer issued
+    // under an older value describes a state the user has since replaced.
+    uint32_t status_generation_ = 0;
+    // Repopulates from cached_networks_ once an async status read says which
+    // network is connected. A status read can block for seconds on
+    // wpa_supplicant, so none happens on the UI thread.
+    void refresh_network_list();
+    void populate_network_list(const std::vector<WiFiNetwork>& networks,
+                               const WifiBackend::ConnectionStatus& status);
     void clear_network_list();
 
-    // Static trampolines for LVGL callbacks
+    // LVGL callbacks with their own logic
     static void network_item_delete_cb(lv_event_t* e);
-    static void on_wifi_toggle_changed_static(lv_event_t* e);
     static void on_network_item_clicked_static(lv_event_t* e);
-    static void on_modal_cancel_clicked_static(lv_event_t* e);
-    static void on_modal_connect_clicked_static(lv_event_t* e);
 
     // Static helpers
     static const char* get_status_text(const char* status_name);

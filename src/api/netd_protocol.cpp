@@ -4,6 +4,9 @@
 #include "netd_protocol.h"
 
 #include "hv/base64.h"
+#include "text_io.h"
+
+#include <spdlog/spdlog.h>
 
 #include <cctype>
 #include <cerrno>
@@ -13,34 +16,12 @@
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
 
 namespace helix::netd {
 namespace {
-
-// Whitespace the daemon may pad a value with (and the assembler's line tail).
-std::string trim_copy(const std::string& s) {
-    const auto is_space = [](unsigned char c) {
-        return c == ' ' || c == '\t' || c == '\r' || c == '\n';
-    };
-    size_t begin = 0;
-    size_t end = s.size();
-    while (begin < end && is_space(s[begin]))
-        ++begin;
-    while (end > begin && is_space(s[end - 1]))
-        --end;
-    return s.substr(begin, end - begin);
-}
-
-std::string ascii_lower(const std::string& s) {
-    std::string out;
-    out.reserve(s.size());
-    for (char c : s) {
-        out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-    }
-    return out;
-}
 
 /// Lowercased key of a snapshot line ("MODE=ETHERNET" -> "mode"), or empty
 /// when the line carries no '='. Internal: only the snapshot parser needs
@@ -50,7 +31,7 @@ std::string snapshot_line_key(const std::string& line) {
     const size_t eq = line.find('=');
     if (eq == std::string::npos)
         return {};
-    return ascii_lower(trim_copy(line.substr(0, eq)));
+    return helix::text_io::to_lower(std::string(helix::text_io::trim(line.substr(0, eq))));
 }
 
 // Strict full-string integer parse: optional sign, digits only, no whitespace,
@@ -119,12 +100,12 @@ Ack parse_ack(const std::string& line) {
     }
     if (line.rfind("OK ", 0) == 0) {
         ack.kind = Ack::Kind::Ok;
-        ack.text = trim_copy(line.substr(3));
+        ack.text = std::string(helix::text_io::trim(line.substr(3)));
         return ack;
     }
     if (line.rfind("ERR ", 0) == 0) {
         ack.kind = Ack::Kind::Err;
-        ack.text = trim_copy(line.substr(4));
+        ack.text = std::string(helix::text_io::trim(line.substr(4)));
         return ack;
     }
     return ack;
@@ -136,7 +117,7 @@ bool parse_snapshot_line(const std::string& line, NetdSnapshot& out) {
         return false;
 
     const std::string key = snapshot_line_key(line);
-    const std::string value = trim_copy(line.substr(eq + 1));
+    const std::string value(helix::text_io::trim(line.substr(eq + 1)));
 
     // Known keys only; everything else is a newer daemon's addition and is
     // ignored without disturbing what was already merged.
@@ -285,12 +266,16 @@ std::string binary_path() {
     return "/opt/config/mod/.bin/exec/netd";
 }
 
+bool binary_present() {
+    return ::access(binary_path().c_str(), X_OK) == 0;
+}
+
 bool available() {
     struct stat st {};
     if (::stat(socket_path().c_str(), &st) == 0 && (st.st_mode & S_IFMT) == S_IFSOCK) {
         return true;
     }
-    return ::access(binary_path().c_str(), X_OK) == 0;
+    return binary_present();
 }
 
 bool set_nonblocking(int fd, bool on) {
@@ -308,7 +293,16 @@ int connect_unix(const std::string& path, int timeout_ms, std::string* error_out
             *error_out = std::string("socket(): ") + std::strerror(errno);
         return -1;
     }
-    (void)set_nonblocking(fd, true);
+    if (!set_nonblocking(fd, true)) {
+        // The bounded wait below is built entirely on this: a blocking fd makes
+        // timeout_ms and the poll() dead code, and a daemon with a full accept
+        // backlog parks the caller for as long as it stays wedged. Fail rather
+        // than hand back a descriptor that cannot honour the contract.
+        if (error_out)
+            *error_out = std::string("fcntl(O_NONBLOCK): ") + std::strerror(errno);
+        ::close(fd);
+        return -1;
+    }
     sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
     if (path.size() >= sizeof(addr.sun_path)) {
@@ -355,8 +349,15 @@ QueryResult query_snapshot(int timeout_ms) {
         return result;
 
     // Back to blocking mode so the SO_RCVTIMEO read loop below keeps its
-    // per-read timeout semantics.
-    (void)set_nonblocking(fd, false);
+    // per-read timeout semantics. Left non-blocking, every recv() returns
+    // EAGAIN immediately instead of waiting out timeout_ms, and the caller
+    // cannot tell that from a daemon that genuinely said nothing — reached
+    // stays false and the network row is blanked on a local fcntl failure.
+    if (!set_nonblocking(fd, false)) {
+        spdlog::warn("[netd] fcntl(~O_NONBLOCK) failed on query socket: {}", std::strerror(errno));
+        ::close(fd);
+        return result;
+    }
 
     struct timeval tv {};
     tv.tv_sec = timeout_ms / 1000;

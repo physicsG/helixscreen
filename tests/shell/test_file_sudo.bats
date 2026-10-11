@@ -239,25 +239,25 @@ SEDWRAP
 # =============================================================================
 
 @test "bundled install.sh contains file_sudo function" {
-    grep -q 'file_sudo()' "$WORKTREE_ROOT/scripts/install.sh"
+    grep -q 'file_sudo()' "$INSTALL_BUNDLE"
 }
 
 @test "bundled install.sh uses file_sudo for moonraker.conf operations" {
-    grep -q 'file_sudo.*conf' "$WORKTREE_ROOT/scripts/install.sh"
+    grep -q 'file_sudo.*conf' "$INSTALL_BUNDLE"
 }
 
 @test "bundled uninstall.sh contains file_sudo function" {
-    grep -q 'file_sudo()' "$WORKTREE_ROOT/scripts/uninstall.sh"
+    grep -q 'file_sudo()' "$UNINSTALL_BUNDLE"
 }
 
 @test "bundled install.sh does NOT use bare SUDO for moonraker.conf backup" {
     # The bundled moonraker module section should use $fs (file_sudo result), not $SUDO
     # Look for the old pattern: $SUDO cp ... bak.helixscreen
-    ! grep -q '\$SUDO cp.*bak\.helixscreen' "$WORKTREE_ROOT/scripts/install.sh"
+    ! grep -q '\$SUDO cp.*bak\.helixscreen' "$INSTALL_BUNDLE"
 }
 
 @test "bundled install.sh does NOT use bare SUDO for tee -a moonraker.conf" {
     # The old pattern: | $SUDO tee -a ... moonraker.conf
     # Should now use file_sudo or $fs
-    ! grep -q '\$SUDO tee -a.*conf' "$WORKTREE_ROOT/scripts/install.sh"
+    ! grep -q '\$SUDO tee -a.*conf' "$INSTALL_BUNDLE"
 }

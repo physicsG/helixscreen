@@ -6,26 +6,34 @@
 
 #include "app_globals.h"
 #include "data_root_resolver.h"
+#include "helix_install_roots.h"
+#include "helix_regex.h"
 #include "helix_version.h"
 #include "host_identity.h"
 #include "http_executor.h"
 #include "hv/requests.h"
 #include "i_moonraker_api.h"
+#include "json_utils.h"
+#include "klipper_config_includes.h"
 #include "log_redact.h"
 #include "logging_init.h"
 #include "platform_capabilities.h"
 #include "platform_info.h"
+#include "platform_table.h"
+#include "power_loss_sensor.h"
 #include "printer_state.h"
 #include "system/crash_history.h"
+#include "system/diag_upload_gate.h"
+#include "system/diagnostics.h"
 #include "system/helix_paths.h"
+#include "system/ingest_client.h"
 #include "system/log_collector.h"
 #include "system/moonraker_local_probe.h"
 #include "system/telemetry_manager.h"
 #include "system/update_checker.h"
+#include "text_io.h"
 #include "touch_calibration_wrapper.h"
-#ifdef __ANDROID__
-#include "system/http_android.h"
-#endif
+#include "wifi_link_monitor.h"
 
 #include <spdlog/spdlog.h>
 
@@ -34,7 +42,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
-#include <regex>
+#include <functional>
 #include <set>
 #include <sstream>
 #include <unordered_map>
@@ -52,6 +60,11 @@ json DebugBundleCollector::collect(const BundleOptions& options) {
 
     bundle["version"] = HELIX_VERSION;
 
+    // Compile-time channel marker: the endpoint rejects or flags bundles whose
+    // client was not built to upload (prestonbrown/helixscreen#1410). Always
+    // present so "old client" and "fork client" are the same server-side test.
+    bundle["diag_upload_marked"] = diag::marked_build();
+
     if (!options.user_note.empty()) {
         bundle["user_note"] = sanitize_value(options.user_note);
     }
@@ -60,14 +73,37 @@ json DebugBundleCollector::collect(const BundleOptions& options) {
     auto now = std::chrono::system_clock::now();
     auto time_t_now = std::chrono::system_clock::to_time_t(now);
     char time_buf[64];
-    std::strftime(time_buf, sizeof(time_buf), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&time_t_now));
+    std::tm tm_buf{};
+    gmtime_r(&time_t_now, &tm_buf);
+    std::strftime(time_buf, sizeof(time_buf), "%Y-%m-%dT%H:%M:%SZ", &tm_buf);
     bundle["timestamp"] = time_buf;
 
+    // One evaluation feeds both `system` and `diagnostics`, so the sections
+    // cannot disagree about the machine. collect() is stat() and small /proc
+    // reads; the default-constructed fallback degrades exactly the two
+    // sections it feeds if it ever throws.
+    diagnostics::Diagnostics diag;
     try {
-        bundle["system"] = collect_system_info();
+        diag = diagnostics::collect();
+    } catch (const std::exception& e) {
+        spdlog::warn("[DebugBundle] Failed to collect diagnostics: {}", e.what());
+    }
+
+    try {
+        bundle["system"] = collect_system_info(diag, helix::diag::collect_host_census());
     } catch (const std::exception& e) {
         spdlog::warn("[DebugBundle] Failed to collect system info: {}", e.what());
         bundle["system"] = json{{"error", e.what()}};
+    }
+
+    // The resolved layout. A sibling of `system` rather than a nesting of it:
+    // `system` answers what the machine is, this answers where this process put
+    // everything on it, which is the half an overridden box makes unguessable.
+    try {
+        bundle["diagnostics"] = build_diagnostics_info(diag);
+    } catch (const std::exception& e) {
+        spdlog::warn("[DebugBundle] Failed to collect diagnostics: {}", e.what());
+        bundle["diagnostics"] = json{{"error", e.what()}};
     }
 
     // Why the in-app updater is (or isn't) usable on this device. Kept as a
@@ -81,10 +117,10 @@ json DebugBundleCollector::collect(const BundleOptions& options) {
     }
 
     try {
-        // upload_async() captures this on the main thread; a direct caller is
-        // main-thread itself, so taking it inline there is equally safe.
-        bundle["printer"] = collect_printer_info(
-            options.printer.captured ? options.printer : snapshot_printer_state());
+        // Only upload_async() may fill options.printer: it captures on the main
+        // thread, and this runs on the slow lane where PrinterState is not safe
+        // to read. An uncaptured snapshot renders as an empty section.
+        bundle["printer"] = collect_printer_info(options.printer);
     } catch (const std::exception& e) {
         spdlog::warn("[DebugBundle] Failed to collect printer info: {}", e.what());
         bundle["printer"] = json{{"error", e.what()}};
@@ -102,6 +138,10 @@ json DebugBundleCollector::collect(const BundleOptions& options) {
     } catch (const std::exception& e) {
         spdlog::warn("[DebugBundle] Failed to collect log tail: {}", e.what());
     }
+
+    // Link telemetry only (frequency, RSSI, quality, retry counters): no SSID,
+    // BSSID or MAC may enter this section.
+    bundle["network"] = helix::WifiLinkMonitor::instance().to_json();
 
     // log_meta records the active sink target, the persistent level, and whether
     // the log_tail came from the live ring buffer or the on-disk cascade — so a
@@ -169,8 +209,11 @@ json DebugBundleCollector::collect(const BundleOptions& options) {
         bundle["settings"] = json{{"error", e.what()}};
     }
 
+    // Read once: the moonraker and filament_system sections both select from it.
+    const json object_list = fetch_object_list(get_moonraker_url());
+
     try {
-        bundle["moonraker"] = collect_moonraker_info();
+        bundle["moonraker"] = collect_moonraker_info(options.printer, object_list);
     } catch (const std::exception& e) {
         spdlog::warn("[DebugBundle] Failed to collect moonraker info: {}", e.what());
         bundle["moonraker"] = json{{"error", e.what()}};
@@ -186,7 +229,7 @@ json DebugBundleCollector::collect(const BundleOptions& options) {
     }
 
     try {
-        bundle["filament_system"] = collect_filament_system_info();
+        bundle["filament_system"] = collect_filament_system_info(object_list);
     } catch (const std::exception& e) {
         spdlog::warn("[DebugBundle] Failed to collect filament system info: {}", e.what());
         bundle["filament_system"] = json{{"error", e.what()}};
@@ -240,21 +283,6 @@ json DebugBundleCollector::collect(const BundleOptions& options) {
 // =============================================================================
 // System info
 // =============================================================================
-
-// Map a platform key ("ad5x", "ad5m", etc.) to the display-name root the
-// printer database uses for that hardware. The dashboard's title generator
-// can compare this against the user-picked model name (printer.model) and
-// surface the mismatch instead of trusting the wizard pick blindly. The
-// AD5X/AD5M Pro pair is the prototypical mismatch — same Klipper config,
-// different hardware; a wizard pick of "Adventurer 5M Pro" on an AD5X
-// platform is structurally wrong but has no local way to self-correct
-// without reflashing or re-running the wizard.
-//
-// Generic dev/SBC platforms (pi, pi32, x86) have no specific printer hardware
-// to compare against, so platform_model is omitted for them.
-static bool platform_has_printer_hardware(const std::string& key) {
-    return key != "pi" && key != "pi32" && key != "x86";
-}
 
 json DebugBundleCollector::collect_touch_info() {
     TouchRangeDiagnostics diag;
@@ -318,6 +346,7 @@ json DebugBundleCollector::build_touch_info(const TouchRangeDiagnostics& diag) {
         stored["max_x"] = pipe.stored.max_x;
         stored["min_y"] = pipe.stored.min_y;
         stored["max_y"] = pipe.stored.max_y;
+        stored["capture_rotation"] = pipe.stored.capture_rotation;
     }
     touch["stored_range"] = stored;
     touch["affine_valid"] = diag.affine_valid;
@@ -330,25 +359,85 @@ json DebugBundleCollector::build_touch_info(const TouchRangeDiagnostics& diag) {
     return touch;
 }
 
-json DebugBundleCollector::collect_system_info() {
+json DebugBundleCollector::collect_system_info(const diagnostics::Diagnostics& diag,
+                                               const helix::diag::HostCensus& census) {
     json sys;
 
-    sys["platform"] = UpdateChecker::get_platform_key();
-    sys["host_arch"] = helix::host_arch_string();
+    sys["platform"] = diag.identity.platform_key;
+    sys["host_arch"] = diag.identity.host_arch;
+    sys["total_ram_mb"] = diag.machine.mem_total_kb / 1024;
+    sys["cpu_cores"] = diag.machine.cpu_cores;
+    sys["uptime_seconds"] = static_cast<int>(diag.machine.uptime_seconds);
 
-    auto caps = PlatformCapabilities::detect();
-    sys["total_ram_mb"] = caps.total_ram_mb;
-    sys["cpu_cores"] = caps.cpu_cores;
-
-    // Read uptime from /proc/uptime if available
-    std::ifstream uptime_file("/proc/uptime");
-    if (uptime_file.good()) {
-        double uptime_sec = 0.0;
-        uptime_file >> uptime_sec;
-        sys["uptime_seconds"] = static_cast<int>(uptime_sec);
+    if (!census.os_pretty_name.empty()) {
+        sys["os_pretty_name"] = sanitize_value(census.os_pretty_name);
     }
+    // Absent, not empty, where systemd gave no answer: an empty list would
+    // claim nothing failed on a box that cannot say.
+    if (census.failed_units) {
+        json units = json::array();
+        for (const auto& unit : *census.failed_units) {
+            units.push_back(sanitize_value(unit));
+        }
+        sys["failed_units"] = std::move(units);
+    }
+    json procs = json::array();
+    for (const auto& proc : census.processes) {
+        json reasons = json::array();
+        for (const auto& reason : proc.reasons) {
+            reasons.push_back(sanitize_value(reason));
+        }
+        procs.push_back(
+            json{{"pid", proc.pid}, {"name", sanitize_value(proc.name)}, {"why", reasons}});
+    }
+    sys["display_processes"] = std::move(procs);
 
     return sys;
+}
+
+json DebugBundleCollector::build_diagnostics_info(const diagnostics::Diagnostics& diag) {
+    json out;
+
+    // A path carries the account name it sits under and the Moonraker URL is an
+    // address, so both leave through sanitize_value().
+    out["paths"] = json{
+        {"install_root", sanitize_value(diag.paths.install_root)},
+        {"config_dir", sanitize_value(diag.paths.config_dir)},
+        {"settings_file", sanitize_value(diag.paths.settings_file)},
+        {"cache_dir", sanitize_value(diag.paths.cache_dir)},
+        {"cache_tier", diag.paths.cache_tier},
+        {"state_dir", sanitize_value(diag.paths.state_dir)},
+        {"log_file", sanitize_value(diag.paths.log_file)},
+        {"updater_staging_dir", sanitize_value(diag.paths.updater_staging_dir)},
+    };
+
+    out["identity"] = json{
+        {"platform_key", diag.identity.platform_key},
+        {"mod_flavor", diag.identity.mod_flavor},
+        {"printer_model", diag.identity.printer_model},
+        {"host_arch", diag.identity.host_arch},
+    };
+
+    out["machine"] = json{
+        {"cpu_model", sanitize_value(diag.machine.cpu_model)},
+        {"cpu_cores", diag.machine.cpu_cores},
+        {"mem_total_kb", diag.machine.mem_total_kb},
+        {"mem_available_kb", diag.machine.mem_available_kb},
+        {"uptime_seconds", static_cast<int64_t>(diag.machine.uptime_seconds)},
+        {"loadavg", diag.machine.loadavg},
+        {"kernel_release", sanitize_value(diag.machine.kernel_release)},
+        {"kernel_arch", diag.machine.kernel_arch},
+    };
+
+    out["log"] = json{
+        {"destination", sanitize_value(diag.log.destination)},
+        {"level", diag.log.level},
+        {"file", sanitize_value(diag.log.file)},
+    };
+
+    out["moonraker_url"] = sanitize_value(diag.moonraker_url);
+
+    return out;
 }
 
 // =============================================================================
@@ -472,18 +561,24 @@ PrinterSnapshot DebugBundleCollector::snapshot_printer_state() {
         auto& ps = get_printer_state();
 
         // Copy, do not bind: get_printer_type() returns a reference to a member
-        // that set_printer_type() reassigns without a mutex.
-        snap.model = ps.get_printer_type();
+        // that a printer-type change reassigns without a mutex.
+        snap.model = ps.profile_state().printer_type();
 
-        if (auto* kv_subj = ps.get_klipper_version_subject()) {
-            const char* kv = lv_subject_get_string(kv_subj);
-            if (kv && kv[0] != '\0')
-                snap.klipper_version = kv;
+        // The raw string, not the display subject: the subject localizes
+        // placeholder versions ("?"/"unknown" from some vendor forks) into a
+        // translated label, which tells a bundle reader nothing about what
+        // the host actually reported.
+        if (!ps.versions_state().get_klipper_version_raw().empty()) {
+            snap.klipper_version = ps.versions_state().get_klipper_version_raw();
         }
-        if (auto* conn_subj = ps.get_printer_connection_state_subject())
+        if (auto* conn_subj = ps.network_state().get_printer_connection_state_subject())
             snap.connection_state = lv_subject_get_int(conn_subj);
-        if (auto* klippy_subj = ps.get_klippy_state_subject())
+        if (auto* klippy_subj = ps.network_state().get_klippy_state_subject())
             snap.klippy_state = lv_subject_get_int(klippy_subj);
+
+        // Discovery is read here with the subjects, on the main thread, so the
+        // worker never races a re-discovery reassigning it.
+        snap.mains_status_objects = helix::power_loss::required_status_objects(ps.get_discovery());
 
         snap.captured = true;
     } catch (const std::exception& e) {
@@ -506,10 +601,26 @@ json DebugBundleCollector::collect_printer_info(const PrinterSnapshot& snap) {
         // case — same Klipper config, different hardware). Dashboard title
         // generation should prefer platform_model when it differs from model
         // so AD5X devices stop showing as "5M Pro" in the bundle list.
-        const std::string platform = UpdateChecker::get_platform_key();
-        const std::string platform_model = platform_has_printer_hardware(platform)
-                                               ? UpdateChecker::get_platform_display_name(platform)
-                                               : std::string{};
+        const std::string platform = helix::platform::current_key();
+        std::string display = helix::platform::display_name(platform);
+        if (platform == "mips") {
+            // The unified MIPS key names a board family, not hardware; the
+            // mismatch check below needs the actual board. Name it the way the
+            // installer does (the MACHINE= line or the Z-Mod chroot's os-release
+            // codename — flashforge_machine_id, mirroring ff_machine_id in
+            // scripts/lib/installer/platform.sh), which is what tells the
+            // FlashForge boards apart; a board that names itself neither way
+            // (the K1 series) falls back to the mod-layout probe.
+            if (auto machine = helix::flashforge_machine_id()) {
+                display = helix::flashforge_machine_display_name(*machine);
+            } else {
+                display =
+                    helix::platform::display_name(helix::ad5x_mod_layout_present() ? "ad5x" : "k1");
+            }
+        }
+        const auto* row = helix::platform::find(platform);
+        const std::string platform_model =
+            row && row->has_printer_hardware ? display : std::string{};
         if (!platform_model.empty()) {
             printer["platform_model"] = platform_model;
             // Substring match handles trim variations ("5M" vs "5M Pro"). If
@@ -605,10 +716,13 @@ std::string DebugBundleCollector::collect_crash_txt() {
         config_dirs.push_back(std::string(home) + "/helixscreen/config");
     }
 
-    // Absolute paths for embedded platforms (AD5M, AD5X, K1, etc.)
-    config_dirs.push_back("/opt/helixscreen/config");
-    config_dirs.push_back("/srv/helixscreen/config");
-    config_dirs.push_back("/usr/data/helixscreen/config");
+    // Every install root, not a subset: $HOME is /root on the Creality and
+    // Flashforge targets and on CC1, so the home-relative entry above covers
+    // none of them. A root missing here is a device whose crash.txt cannot be
+    // recovered from a bundle.
+    for (const char* root : helix::kInstallRoots) {
+        config_dirs.push_back(std::string(root) + "/config");
+    }
 
     // Try crash.txt first, then rotated files (crash_1.txt, crash_2.txt, crash_3.txt).
     // The crash reporter rotates crash.txt → crash_1.txt after consuming it,
@@ -645,8 +759,7 @@ std::string DebugBundleCollector::collect_crash_txt() {
 bool DebugBundleCollector::is_sensitive_key(const std::string& key) {
     // Case-insensitive substring match for sensitive patterns
     std::string lower_key = key;
-    std::transform(lower_key.begin(), lower_key.end(), lower_key.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
+    lower_key = helix::text_io::to_lower(lower_key);
 
     // "serial_number" covers cpu_info.serial_number (the Pi board serial) and
     // sd_info.serial_number, both of which arrive under /machine/system_info.
@@ -658,6 +771,11 @@ bool DebugBundleCollector::is_sensitive_key(const std::string& key) {
     static const std::vector<std::string> sensitive_patterns = {
         "token",      "password", "secret",        "key",          "webhook",
         "credential", "auth",     "serial_number", "serialnumber", "bearer"};
+
+    // Klipper's `webhooks` object is klippy state and state_message, not a
+    // notification URL; webhook URLs are caught by value in sanitize_value().
+    if (lower_key == "webhooks")
+        return false;
 
     for (const auto& pattern : sensitive_patterns) {
         if (lower_key.find(pattern) != std::string::npos) {
@@ -688,25 +806,32 @@ std::string DebugBundleCollector::sanitize_value(const std::string& value) {
 
     try {
         // Check for long token-like strings (40+ chars of hex/base64/alphanum with prefix)
-        static const std::regex token_re(
+        static const helix::Regex token_re(
             R"(^(?:ghp_|gho_|glpat-|xoxb-|xoxp-)?[A-Za-z0-9+/=_-]{36,}$)");
-        if (std::regex_match(value, token_re)) {
+        // A lowercase 40-hex string is a git SHA-1 (update_manager hashes),
+        // which identifies a public commit, not a secret.
+        static const helix::Regex git_sha_re(R"(^[0-9a-f]{40}$)");
+        if (!helix::regex_match(value, git_sha_re) && helix::regex_match(value, token_re)) {
             return "[REDACTED_TOKEN]";
         }
 
         std::string result = value;
 
         // Redact URL credentials: ://user:pass@ -> ://[REDACTED_CREDENTIALS]@
-        static const std::regex cred_url_re(R"(://[^@/\s]+:[^@/\s]+@)");
-        result = std::regex_replace(result, cred_url_re, "://[REDACTED_CREDENTIALS]@");
+        static const helix::Regex cred_url_re(R"(://[^@/\s]+:[^@/\s]+@)");
+        result = helix::regex_replace(result, cred_url_re, "://[REDACTED_CREDENTIALS]@");
 
-        // Redact email addresses
-        static const std::regex email_re(R"(\b[\w.+-]+@[\w-]+\.[\w.]+\b)");
-        result = std::regex_replace(result, email_re, "[REDACTED_EMAIL]");
+        // Redact email addresses. The last label must be alphabetic, because a
+        // bare `<word>@<number>.<number><unit>` is a diagnostic value, not an
+        // address: an input shaper logs its result as `mzv@40.2Hz`, and a
+        // pattern that accepts a numeric final label eats it. No TLD is a
+        // single character, so requiring two costs no real address.
+        static const helix::Regex email_re(R"(\b[\w.+-]+@[\w-]+(\.[\w-]+)*\.[A-Za-z]{2,}\b)");
+        result = helix::regex_replace(result, email_re, "[REDACTED_EMAIL]");
 
         // Redact MAC addresses (aa:bb:cc:dd:ee:ff or AA-BB-CC-DD-EE-FF)
-        static const std::regex mac_re(R"(\b([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}\b)");
-        result = std::regex_replace(result, mac_re, "[REDACTED_MAC]");
+        static const helix::Regex mac_re(R"(\b([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}\b)");
+        result = helix::regex_replace(result, mac_re, "[REDACTED_MAC]");
 
         // Redact globally routable IP addresses, IPv4 and IPv6 alike. Private
         // ones are deliberately kept: 192.168.1.50 is the same address in
@@ -719,15 +844,15 @@ std::string DebugBundleCollector::sanitize_value(const std::string& value) {
 
         return result;
     } catch (const std::exception& e) {
-        spdlog::debug("[DebugBundle] sanitize_value regex failed: {}", e.what());
-        return value; // Return unsanitized rather than crash
+        spdlog::debug("[DebugBundle] sanitize_value failed: {}", e.what());
+        return "[REDACTED]"; // A value that cannot be checked is not uploaded
     }
 }
 
 json DebugBundleCollector::sanitize_json(const json& input, int depth) {
     if (depth > 32) {
-        spdlog::debug("[DebugBundle] sanitize_json hit depth limit, passing through");
-        return input;
+        spdlog::debug("[DebugBundle] sanitize_json hit depth limit, dropping subtree");
+        return "[REDACTED]";
     }
 
     if (input.is_object()) {
@@ -886,7 +1011,20 @@ json DebugBundleCollector::moonraker_get(const std::string& base_url, const std:
     }
 }
 
-json DebugBundleCollector::collect_moonraker_info() {
+std::string
+DebugBundleCollector::printer_objects_query(const std::vector<std::string>& extra_objects) {
+    std::string query = "/printer/objects/query"
+                        "?heater_bed&extruder&print_stats&toolhead&motion_report"
+                        "&fan&display_status&virtual_sdcard";
+    for (const auto& obj : extra_objects) {
+        query += "&";
+        query += obj;
+    }
+    return query;
+}
+
+json DebugBundleCollector::collect_moonraker_info(const PrinterSnapshot& snap,
+                                                  const json& object_list) {
     json mr;
     std::string base_url = get_moonraker_url();
 
@@ -896,6 +1034,8 @@ json DebugBundleCollector::collect_moonraker_info() {
         mr["printer_info"] = json{{"error", "Not connected"}};
         mr["system_info"] = json{{"error", "Not connected"}};
         mr["printer_state"] = json{{"error", "Not connected"}};
+        mr["klipper_status"] = json{{"error", "Not connected"}};
+        mr["update_status"] = json{{"error", "Not connected"}};
         mr["config"] = json{{"error", "Not connected"}};
         return mr;
     }
@@ -926,15 +1066,34 @@ json DebugBundleCollector::collect_moonraker_info() {
         mr["system_info"] = json{{"error", e.what()}};
     }
 
-    // Current printer state — temps, positions, fans, print progress
+    // Current printer state — temps, positions, fans, print progress, plus
+    // the firmware's mains monitor when it publishes one: present-mains state
+    // (voltage_type, duty_percent) is diagnostic data a support bundle wants.
     try {
         mr["printer_state"] = sanitize_json(
-            moonraker_get(base_url, "/printer/objects/query"
-                                    "?heater_bed&extruder&print_stats&toolhead&motion_report"
-                                    "&fan&display_status&virtual_sdcard"));
+            moonraker_get(base_url, printer_objects_query(snap.mains_status_objects)));
     } catch (const std::exception& e) {
         spdlog::debug("[DebugBundle] printer_state collection failed: {}", e.what());
         mr["printer_state"] = json{{"error", e.what()}};
+    }
+
+    // Everything else cheap that triage keeps asking for, limited to what this
+    // printer publishes so the query names no object it would answer empty.
+    try {
+        mr["klipper_status"] = collect_klipper_status(base_url, object_list);
+    } catch (const std::exception& e) {
+        spdlog::debug("[DebugBundle] klipper_status collection failed: {}", e.what());
+        mr["klipper_status"] = json{{"error", e.what()}};
+    }
+
+    // Installed versions and commits of every managed repo (klipper, plugins
+    // such as klipper_openams). Moonraker answers from its cache; no refresh.
+    try {
+        mr["update_status"] =
+            bound_response(moonraker_get(base_url, "/machine/update/status"), "version_info");
+    } catch (const std::exception& e) {
+        spdlog::debug("[DebugBundle] update_status collection failed: {}", e.what());
+        mr["update_status"] = json{{"error", e.what()}};
     }
 
     // Full Moonraker config — heavily sanitized
@@ -1011,7 +1170,17 @@ json DebugBundleCollector::filter_filament_objects(const json& object_list) {
         "AFC", "mmu", "toolchanger", "tool ", "filament_switch_sensor", "filament_motion_sensor",
         // Creality CFS (K2 family): [box] is the CFS controller, [filament_rack]
         // is the slot-occupancy gate. Both expose state via printer.objects.query.
-        "box", "filament_rack"};
+        // QIDI Box publishes box_stepper / box_config / box_extras under the same prefix.
+        "box", "filament_rack",
+        // klipper_openams: oams_manager, [oams N] units, [fps N] pressure sensors,
+        // [filament_group T0] tool groups.
+        "oams", "fps", "filament_group",
+        // ACE: community drivers (ace, ace_manager, ace_instance_N) and
+        // GoKlipper's filament_hub. AD5X IFS: ifs, ifs_materials, zmod_*.
+        "ace", "filament_hub", "ifs", "zmod",
+        // Snapmaker U1, and the dock-sensing extras of hotend changers.
+        "filament_detect", "filament_feed", "filament_entangle", "print_task_config", "pin_watch",
+        "medusahc"};
 
     json result = json::array();
     if (!object_list.is_array())
@@ -1029,6 +1198,137 @@ json DebugBundleCollector::filter_filament_objects(const json& object_list) {
         }
     }
     return result;
+}
+
+json DebugBundleCollector::filter_triage_objects(const json& object_list) {
+    static const std::vector<std::string> bases = {"webhooks",
+                                                   "configfile",
+                                                   "idle_timeout",
+                                                   "pause_resume",
+                                                   "gcode_move",
+                                                   "bed_mesh",
+                                                   "probe",
+                                                   "bltouch",
+                                                   "smart_effector",
+                                                   "beacon",
+                                                   "cartographer",
+                                                   "scanner",
+                                                   "probe_eddy_current",
+                                                   "heaters",
+                                                   "quad_gantry_level",
+                                                   "z_tilt",
+                                                   "z_tilt_ng",
+                                                   "exclude_object",
+                                                   "system_stats",
+                                                   "mcu",
+                                                   "firmware_retraction"};
+
+    json result = json::array();
+    if (!object_list.is_array())
+        return result;
+
+    for (const auto& obj : object_list) {
+        if (!obj.is_string())
+            continue;
+        const std::string name = obj.get<std::string>();
+        for (const auto& base : bases) {
+            if (name == base || name.rfind(base + " ", 0) == 0) {
+                result.push_back(name);
+                break;
+            }
+        }
+    }
+    return result;
+}
+
+std::string DebugBundleCollector::objects_query_path(const json& names) {
+    std::string query = "/printer/objects/query?";
+    bool first = true;
+    for (const auto& n : names) {
+        if (!n.is_string())
+            continue;
+        if (!first)
+            query += '&';
+        first = false;
+        const std::string name = n.get<std::string>();
+        for (char c : name) {
+            if (c == ' ')
+                query += "%20";
+            else
+                query += c;
+        }
+        if (name == "configfile")
+            query += "=warnings";
+    }
+    return query;
+}
+
+json DebugBundleCollector::bound_status(json status, size_t max_field_bytes,
+                                        size_t max_total_bytes) {
+    if (!status.is_object())
+        return status;
+
+    std::vector<std::pair<size_t, std::string>> sizes;
+    size_t total = 0;
+    for (auto obj = status.begin(); obj != status.end(); ++obj) {
+        if (obj.value().is_object()) {
+            for (auto field = obj.value().begin(); field != obj.value().end(); ++field) {
+                const size_t bytes = field.value().dump().size();
+                if (bytes <= max_field_bytes)
+                    continue;
+                json summary{{"omitted_bytes", bytes}};
+                if (field.value().is_array() || field.value().is_object()) {
+                    summary["length"] = field.value().size();
+                }
+                if (field.value().is_array() && !field.value().empty() &&
+                    field.value()[0].is_array()) {
+                    summary["shape"] = json::array({field.value().size(), field.value()[0].size()});
+                }
+                field.value() = summary;
+            }
+        }
+        const size_t bytes = obj.value().dump().size();
+        sizes.emplace_back(bytes, obj.key());
+        total += bytes;
+    }
+
+    std::sort(sizes.begin(), sizes.end(), std::greater<>());
+    for (const auto& [bytes, key] : sizes) {
+        if (total <= max_total_bytes)
+            break;
+        status[key] = json{{"omitted_bytes", bytes}};
+        total -= bytes;
+    }
+    return status;
+}
+
+json DebugBundleCollector::fetch_object_list(const std::string& base_url) {
+    json resp = moonraker_get(base_url, "/printer/objects/list");
+    if (resp.contains("result") && resp["result"].contains("objects") &&
+        resp["result"]["objects"].is_array()) {
+        return resp["result"]["objects"];
+    }
+    return resp.contains("error") ? resp : json{{"error", "No objects in /printer/objects/list"}};
+}
+
+json DebugBundleCollector::collect_klipper_status(const std::string& base_url,
+                                                  const json& object_list) {
+    if (!object_list.is_array())
+        return object_list;
+    return query_objects_bounded(base_url, filter_triage_objects(object_list));
+}
+
+json DebugBundleCollector::query_objects_bounded(const std::string& base_url, const json& names) {
+    if (names.empty())
+        return json::object();
+    return bound_response(moonraker_get(base_url, objects_query_path(names)), "status");
+}
+
+json DebugBundleCollector::bound_response(json resp, const char* map_key) {
+    if (resp.contains("result") && resp["result"].contains(map_key)) {
+        resp["result"][map_key] = bound_status(resp["result"][map_key]);
+    }
+    return sanitize_json(resp);
 }
 
 json DebugBundleCollector::extract_gcode_macro_names(const json& object_list) {
@@ -1057,7 +1357,7 @@ json DebugBundleCollector::extract_gcode_macro_names(const json& object_list) {
     return result;
 }
 
-json DebugBundleCollector::collect_filament_system_info() {
+json DebugBundleCollector::collect_filament_system_info(const json& object_list) {
     json fs;
     std::string base_url = get_moonraker_url();
 
@@ -1079,17 +1379,11 @@ json DebugBundleCollector::collect_filament_system_info() {
     json macro_names = json::array();
     size_t total_macros = 0;
     try {
-        auto objects_resp = moonraker_get(base_url, "/printer/objects/list");
-        if (objects_resp.contains("result") && objects_resp["result"].contains("objects")) {
-            const json& objects = objects_resp["result"]["objects"];
-            discovered = filter_filament_objects(objects);
-            macro_names = extract_gcode_macro_names(objects);
-            if (objects.is_array()) {
-                for (const auto& obj : objects) {
-                    if (obj.is_string() && obj.get<std::string>().rfind("gcode_macro ", 0) == 0) {
-                        ++total_macros;
-                    }
-                }
+        discovered = filter_filament_objects(object_list);
+        macro_names = extract_gcode_macro_names(object_list);
+        for (const auto& obj : object_list) {
+            if (obj.is_string() && obj.get<std::string>().rfind("gcode_macro ", 0) == 0) {
+                ++total_macros;
             }
         }
     } catch (const std::exception& e) {
@@ -1109,24 +1403,7 @@ json DebugBundleCollector::collect_filament_system_info() {
     // Phase 2: Batch query all discovered objects
     if (!discovered.empty()) {
         try {
-            // Build query string with URL-encoded object names
-            std::string query = "/printer/objects/query?";
-            for (size_t i = 0; i < discovered.size(); ++i) {
-                if (i > 0)
-                    query += '&';
-                // Percent-encode spaces in object names (e.g. "AFC_stepper lane1")
-                std::string name = discovered[i].get<std::string>();
-                std::string encoded;
-                encoded.reserve(name.size());
-                for (char c : name) {
-                    if (c == ' ')
-                        encoded += "%20";
-                    else
-                        encoded += c;
-                }
-                query += encoded;
-            }
-            fs["object_state"] = sanitize_json(moonraker_get(base_url, query));
+            fs["object_state"] = query_objects_bounded(base_url, discovered);
         } catch (const std::exception& e) {
             spdlog::debug("[DebugBundle] filament object_state query failed: {}", e.what());
             fs["object_state"] = json{{"error", e.what()}};
@@ -1135,31 +1412,50 @@ json DebugBundleCollector::collect_filament_system_info() {
         fs["object_state"] = json::object();
     }
 
-    // Phase 3: Additional endpoints
-    try {
-        fs["spoolman_status"] = sanitize_json(moonraker_get(base_url, "/server/spoolman/status"));
-    } catch (const std::exception& e) {
-        spdlog::debug("[DebugBundle] spoolman_status failed: {}", e.what());
-        fs["spoolman_status"] = json{{"error", e.what()}};
-    }
+    // Phase 3: Additional endpoints. Every section records its own failure: a
+    // missing endpoint is diagnostic data about the printer, not a reason to
+    // drop the rest of the bundle.
+    const auto capture = [&](const char* key, const std::string& endpoint) {
+        try {
+            fs[key] = sanitize_json(moonraker_get(base_url, endpoint));
+        } catch (const std::exception& e) {
+            spdlog::debug("[DebugBundle] {} failed: {}", key, e.what());
+            fs[key] = json{{"error", e.what()}};
+        }
+    };
 
-    try {
-        fs["afc_version"] =
-            sanitize_json(moonraker_get(base_url, "/server/database/item?namespace=afc-install"));
-    } catch (const std::exception& e) {
-        spdlog::debug("[DebugBundle] afc_version failed: {}", e.what());
-        fs["afc_version"] = json{{"error", e.what()}};
-    }
+    capture("spoolman_status", "/server/spoolman/status");
+    capture("afc_version", "/server/database/item?namespace=afc-install");
+    capture("mmu_version", "/server/database/item?namespace=mmu-install");
 
-    try {
-        fs["mmu_version"] =
-            sanitize_json(moonraker_get(base_url, "/server/database/item?namespace=mmu-install"));
-    } catch (const std::exception& e) {
-        spdlog::debug("[DebugBundle] mmu_version failed: {}", e.what());
-        fs["mmu_version"] = json{{"error", e.what()}};
+    // The per-lane override records. These decide the colour, material and
+    // Spoolman link the UI actually shows, so a filament-identity report that
+    // lacks them can only be answered by reading code.
+    json overrides = json::object();
+    for (const auto& ns : filament_override_namespaces()) {
+        try {
+            overrides[ns] =
+                sanitize_json(moonraker_get(base_url, "/server/database/item?namespace=" + ns));
+        } catch (const std::exception& e) {
+            spdlog::debug("[DebugBundle] override namespace {} failed: {}", ns, e.what());
+            overrides[ns] = json{{"error", e.what()}};
+        }
     }
+    fs["slot_overrides"] = overrides;
+
+    // Namespace NAMES only, never their values. Enough to tell whether a
+    // namespace we have never captured exists on this printer, at no risk.
+    capture("database_namespaces", "/server/database/list");
 
     return fs;
+}
+
+std::vector<std::string> DebugBundleCollector::filament_override_namespaces() {
+    // "lane_data" is the shared, cooperative namespace (AD5X IFS, ACE, CFS,
+    // Snapmaker, plus AFC and Happy Hare's bypass-lane publishes). AFC and
+    // Happy Hare keep their own records privately because their Klipper
+    // plugins own lane_data and AFC rewrites it wholesale on every boot.
+    return {"lane_data", "helix-screen-afc-overrides", "helix-screen-hh-overrides"};
 }
 
 // =============================================================================
@@ -1174,31 +1470,25 @@ struct PlatformFile {
     PlatformFileFormat format;
 };
 
-// Returns the platform-specific files to capture. moonraker_path is rooted
-// at the Moonraker base URL (e.g. "/server/files/config/Adventurer5M.json").
-// Empty list = nothing to collect.
+// Returns the platform-specific files to capture, from the platform table.
+// moonraker_path is rooted at the Moonraker base URL. Empty list = nothing to
+// collect.
 //
 // Keep entries small (a few KB each) — this is the debug-bundle hot path. For
 // larger files, route through a dedicated capture with a size cap.
 static std::vector<PlatformFile> platform_diagnostic_files(const std::string& platform) {
-    if (platform == "ad5x" || platform == "ad5m") {
-        return {
-            // ZMOD's authoritative IFS slot truth: color, material, lessWaste
-            // pairings. Polling this is our primary change-detection mechanism
-            // in AmsBackendAd5xIfs::poll_adventurer_json(); having it in the
-            // bundle lets us verify what zmod wrote vs. what the UI cached.
-            {"Adventurer5M.json", "/server/files/config/Adventurer5M.json",
-             PlatformFileFormat::JSON},
-            // zmod's user-defined filament types (PLA+, RPLA, HELIX, ...). Read
-            // by the COLOR gcode macro at print time. helix-screen's edit modal
-            // currently restricts to the firmware whitelist and silently
-            // normalises user types away on save (#904); the file in the bundle
-            // lets us see exactly what types were defined and how the macro
-            // consumes them.
-            {"user.cfg", "/server/files/config/mod_data/user.cfg", PlatformFileFormat::TEXT},
-        };
+    std::vector<PlatformFile> files;
+    const auto* info = helix::platform::find(platform);
+    if (!info) {
+        return files;
     }
-    return {};
+    for (const auto& path : info->diagnostic_files) {
+        std::string name = path.substr(path.rfind('/') + 1);
+        const bool is_json = name.size() > 5 && name.compare(name.size() - 5, 5, ".json") == 0;
+        files.push_back(
+            {std::move(name), path, is_json ? PlatformFileFormat::JSON : PlatformFileFormat::TEXT});
+    }
+    return files;
 }
 
 // Fetch a text file from Moonraker. Returns body + HTTP status; an HTTP-status
@@ -1219,7 +1509,7 @@ static RawHttpResult http_get_text(const std::string& base_url, const std::strin
 
 json DebugBundleCollector::collect_platform_files() {
     json result = json::object();
-    const std::string platform = UpdateChecker::get_platform_key();
+    const std::string platform = helix::platform::current_key();
     auto files = platform_diagnostic_files(platform);
     if (files.empty()) {
         return result;
@@ -1276,65 +1566,7 @@ json DebugBundleCollector::collect_platform_files() {
 // =============================================================================
 
 std::vector<std::string> DebugBundleCollector::parse_include_patterns(const std::string& body) {
-    std::vector<std::string> patterns;
-    std::istringstream stream(body);
-    std::string line;
-    while (std::getline(stream, line)) {
-        // Strip a trailing CR so CRLF configs parse (Klipper accepts them).
-        if (!line.empty() && line.back() == '\r') {
-            line.pop_back();
-        }
-        // Klipper section headers must start at column 0; a leading space makes
-        // the line a continuation of the previous option, not a new section.
-        // Comments (# or ;) are not section headers either.
-        if (line.compare(0, 9, "[include ") != 0) {
-            continue;
-        }
-        const size_t close = line.find(']', 9);
-        if (close == std::string::npos) {
-            continue;
-        }
-        std::string pattern = line.substr(9, close - 9);
-        // Trim surrounding whitespace: "[include  foo.cfg ]" is valid.
-        const size_t first = pattern.find_first_not_of(" \t");
-        const size_t last = pattern.find_last_not_of(" \t");
-        if (first == std::string::npos) {
-            continue;
-        }
-        patterns.push_back(pattern.substr(first, last - first + 1));
-    }
-    return patterns;
-}
-
-bool DebugBundleCollector::glob_match(const std::string& pattern, const std::string& path) {
-    // Iterative wildcard match with backtracking. '*' and '?' do not cross '/',
-    // matching Python's glob (which is what Klipper's configfile.py uses), so
-    // "mod/*.cfg" does not reach into "mod/sub/".
-    size_t p = 0, s = 0;
-    size_t star = std::string::npos; // last '*' in the pattern
-    size_t star_s = 0;               // where that '*' started consuming
-    while (s < path.size()) {
-        const bool lit_match =
-            p < pattern.size() && (pattern[p] == '?' ? path[s] != '/' : pattern[p] == path[s]);
-        if (lit_match) {
-            ++p;
-            ++s;
-        } else if (p < pattern.size() && pattern[p] == '*') {
-            star = p++;
-            star_s = s;
-        } else if (star != std::string::npos && path[star_s] != '/') {
-            // Give the '*' one more character, unless that character is a
-            // separator it is not allowed to swallow.
-            p = star + 1;
-            s = ++star_s;
-        } else {
-            return false;
-        }
-    }
-    while (p < pattern.size() && pattern[p] == '*') {
-        ++p;
-    }
-    return p == pattern.size();
+    return helix::system::extract_includes(body);
 }
 
 std::vector<std::string>
@@ -1358,7 +1590,7 @@ DebugBundleCollector::resolve_include_pattern(const std::string& pattern,
 
     std::vector<std::string> matches;
     for (const auto& path : available) {
-        if (glob_match(full, path)) {
+        if (helix::system::config_glob_match(full, path)) {
             matches.push_back(path);
         }
     }
@@ -2113,66 +2345,82 @@ std::vector<uint8_t> DebugBundleCollector::gzip_compress(const std::string& data
 // Async upload
 // =============================================================================
 
+const char* DebugBundleCollector::worker_url() {
+    if (const char* u = std::getenv("HELIX_BUNDLE_WORKER_URL")) {
+        return u;
+    }
+    return WORKER_URL;
+}
+
+namespace {
+DebugBundleCollector::CollectFn& collect_override() {
+    static DebugBundleCollector::CollectFn fn;
+    return fn;
+}
+} // namespace
+
+void DebugBundleCollector::set_collect_override_for_test(CollectFn fn) {
+    collect_override() = std::move(fn);
+}
+
 void DebugBundleCollector::upload_async(const BundleOptions& options, ResultCallback callback) {
+    // The upload gate, before any collection or worker submission: a build that
+    // may not ship diagnostics must not even assemble a bundle off-device
+    // (prestonbrown/helixscreen#1410). The callback fires synchronously on the
+    // caller's thread here, which every caller already handles — the async
+    // paths marshal to the UI thread themselves.
+    if (!diag::uploads_enabled()) {
+        spdlog::info("[DebugBundle] Upload refused: diagnostic uploads are disabled "
+                     "in this build");
+        BundleResult result;
+        result.uploads_disabled = true;
+        result.error_message = "Diagnostic uploads are disabled in this build";
+        callback(result);
+        return;
+    }
+
     // Read PrinterState and its subjects HERE, on the main thread, and carry the
     // result into the worker as plain data. Everything past submit() runs on the
     // slow lane, where touching either is a data race (see PrinterSnapshot).
     BundleOptions opts = options;
     opts.printer = snapshot_printer_state();
 
+    // Resolve the worker URL on the submitting thread, with the rest of the
+    // caller-thread state: the slow lane can execute after the caller's
+    // environment has changed, and an env read at execution time would
+    // retarget an upload that was already accepted.
+    const std::string url = worker_url();
+    const CollectFn collect_fn = collect_override();
+
     // Large compressed upload — route through HttpExecutor::slow() (1-worker lane)
     // to avoid head-of-line blocking REST calls AND to avoid raw std::thread spawn,
     // which crashes with std::terminate on AD5M under thread exhaustion (#837, #724).
-    helix::http::HttpExecutor::slow().submit([opts, callback = std::move(callback)]() {
+    helix::http::HttpExecutor::slow().submit([opts, callback = std::move(callback), url,
+                                              collect_fn]() {
         BundleResult result;
 
         try {
             spdlog::info("[DebugBundle] Collecting debug bundle...");
-            json bundle = collect(opts);
-            std::string json_str = bundle.dump();
+            json bundle = collect_fn ? collect_fn(opts) : collect(opts);
+            std::string json_str = helix::json_util::safe_dump(bundle);
 
             spdlog::info("[DebugBundle] Compressing {} bytes...", json_str.size());
             auto compressed = gzip_compress(json_str);
 
             if (compressed.empty()) {
                 result.error_message = "Compression failed";
-                helix::ui::queue_update([callback, result]() { callback(result); });
+                helix::ui::queue_update("DebugBundleCollector::upload_async",
+                                        [callback, result]() { callback(result); });
                 return;
             }
 
             spdlog::info("[DebugBundle] Uploading {} bytes (compressed from {})...",
                          compressed.size(), json_str.size());
 
-            std::string ua = std::string("HelixScreen/") + HELIX_VERSION;
-            int status;
-            std::string response_body;
-
-#ifdef __ANDROID__
-            // libhv is built without SSL on Android (no NDK OpenSSL), so route
-            // the gzip-compressed bundle through the platform TLS stack via JNI.
-            // The binary bridge avoids corrupting gzip bytes through a Java
-            // String — the existing httpsPost takes String body and would
-            // mangle arbitrary binary. Same pattern as update_checker and
-            // crash_reporter.
-            auto [s, body] = helix::android::https_post_binary(
-                WORKER_URL, compressed, "application/json", "gzip", ua, INGEST_API_KEY, 30);
-            status = s;
-            response_body = body;
-#else
-            auto req = std::make_shared<HttpRequest>();
-            req->method = HTTP_POST;
-            req->url = WORKER_URL;
-            req->timeout = 30;
-            req->headers["Content-Type"] = "application/json";
-            req->headers["Content-Encoding"] = "gzip";
-            req->headers["User-Agent"] = ua;
-            req->headers["X-API-Key"] = INGEST_API_KEY;
-            req->body.assign(reinterpret_cast<const char*>(compressed.data()), compressed.size());
-
-            auto resp = requests::request(req);
-            status = resp ? static_cast<int>(resp->status_code) : 0;
-            response_body = resp ? resp->body : "";
-#endif
+            auto [status, response_body] = helix::ingest::post(
+                url,
+                std::string(reinterpret_cast<const char*>(compressed.data()), compressed.size()),
+                30, "gzip");
 
             if (status >= 200 && status < 300) {
                 // Parse share_code from response
@@ -2198,7 +2446,8 @@ void DebugBundleCollector::upload_async(const BundleOptions& options, ResultCall
             spdlog::error("[DebugBundle] Upload exception: {}", e.what());
         }
 
-        helix::ui::queue_update([callback, result]() { callback(result); });
+        helix::ui::queue_update("DebugBundleCollector::upload_async",
+                                [callback, result]() { callback(result); });
     });
 }
 

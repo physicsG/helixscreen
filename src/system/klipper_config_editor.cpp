@@ -6,6 +6,7 @@
 #include "http_executor.h"
 #include "i_moonraker_api.h"
 #include "klipper_config_includes.h"
+#include "text_io.h"
 
 #include <spdlog/spdlog.h>
 
@@ -13,7 +14,6 @@
 #include <atomic>
 #include <chrono>
 #include <set>
-#include <sstream>
 #include <thread>
 
 namespace helix::system {
@@ -24,9 +24,10 @@ std::optional<ConfigKey> ConfigStructure::find_key(const std::string& section,
     if (it == sections.end())
         return std::nullopt;
 
-    for (const auto& k : it->second.keys) {
-        if (k.name == key)
-            return k;
+    // Klipper keeps the last of a repeated key, so that is the line an edit must reach.
+    for (auto k = it->second.keys.rbegin(); k != it->second.keys.rend(); ++k) {
+        if (k->name == key)
+            return *k;
     }
     return std::nullopt;
 }
@@ -82,19 +83,17 @@ void KlipperConfigEditor::cancel_restart_monitors() {
     for (auto& monitor : pending) {
         if (!monitor.valid())
             continue;
-        try {
-            if (monitor.wait_until(deadline) != std::future_status::ready) {
-                spdlog::warn("[ConfigEditor] Restart monitor did not finish within {}s — "
-                             "giving up the wait",
-                             MONITOR_JOIN_TIMEOUT.count());
-            }
-        } catch (const std::exception& e) {
-            spdlog::warn("[ConfigEditor] Waiting on restart monitor failed: {}", e.what());
+        // valid() holds here, so wait_until cannot throw future_error for a
+        // missing shared state.
+        if (monitor.wait_until(deadline) != std::future_status::ready) {
+            spdlog::warn("[ConfigEditor] Restart monitor did not finish within {}s — "
+                         "giving up the wait",
+                         MONITOR_JOIN_TIMEOUT.count());
         }
     }
 }
 
-ConfigStructure KlipperConfigEditor::parse_structure(const std::string& content) const {
+ConfigStructure KlipperConfigEditor::parse_structure(const std::string& content) {
     ConfigStructure result;
 
     if (content.empty()) {
@@ -104,10 +103,8 @@ ConfigStructure KlipperConfigEditor::parse_structure(const std::string& content)
 
     // Split content into lines
     std::vector<std::string> lines;
-    std::istringstream stream(content);
-    std::string line;
-    while (std::getline(stream, line)) {
-        lines.push_back(line);
+    for (std::string_view sv : helix::text_io::lines(content)) {
+        lines.push_back(std::string(sv));
     }
 
     result.total_lines = static_cast<int>(lines.size());
@@ -168,8 +165,10 @@ ConfigStructure KlipperConfigEditor::parse_structure(const std::string& content)
 
                 current_section = section_name;
                 auto& sec = result.sections[current_section];
-                sec.name = current_section;
-                sec.line_start = i;
+                if (sec.name.empty()) {
+                    sec.name = current_section;
+                    sec.line_start = i;
+                }
                 continue;
             }
         }
@@ -205,12 +204,7 @@ ConfigStructure KlipperConfigEditor::parse_structure(const std::string& content)
 
         // Extract key name and lowercase it
         std::string key_name = raw_line.substr(0, delim_pos);
-        // Trim trailing whitespace from key
-        while (!key_name.empty() && (key_name.back() == ' ' || key_name.back() == '\t')) {
-            key_name.pop_back();
-        }
-        std::transform(key_name.begin(), key_name.end(), key_name.begin(),
-                       [](unsigned char c) { return std::tolower(c); });
+        key_name = helix::text_io::to_lower(std::string(helix::text_io::trim(key_name)));
 
         // Extract value (after delimiter, trimming leading whitespace)
         std::string value;
@@ -252,6 +246,16 @@ ConfigStructure KlipperConfigEditor::parse_structure(const std::string& content)
         result.sections[current_section].line_end = last_line;
     }
 
+    // Blank lines after a value separate it from what follows; they are not part of it.
+    for (auto& [name, sec] : result.sections) {
+        for (auto& key : sec.keys) {
+            while (key.end_line > key.line_number &&
+                   helix::text_io::trim(lines[key.end_line]).empty()) {
+                --key.end_line;
+            }
+        }
+    }
+
     return result;
 }
 
@@ -272,10 +276,8 @@ constexpr const char* ROOT_CONFIG_FILE = "printer.cfg";
 // Split content into lines, preserving the ability to rejoin with \n
 std::vector<std::string> split_lines(const std::string& content) {
     std::vector<std::string> lines;
-    std::istringstream stream(content);
-    std::string line;
-    while (std::getline(stream, line)) {
-        lines.push_back(line);
+    for (std::string_view sv : helix::text_io::lines(content)) {
+        lines.push_back(std::string(sv));
     }
     return lines;
 }
@@ -297,7 +299,7 @@ std::string join_lines(const std::vector<std::string>& lines, bool trailing_newl
 std::optional<std::string> KlipperConfigEditor::set_value(const std::string& content,
                                                           const std::string& section,
                                                           const std::string& key,
-                                                          const std::string& new_value) const {
+                                                          const std::string& new_value) {
     auto structure = parse_structure(content);
     auto found = structure.find_key(section, key);
     if (!found.has_value())
@@ -336,6 +338,9 @@ std::optional<std::string> KlipperConfigEditor::set_value(const std::string& con
     std::string prefix = raw_line.substr(0, delim_pos + 1);
     // Restore the original spacing between delimiter and old value
     std::string spacing = raw_line.substr(delim_pos + 1, value_start - (delim_pos + 1));
+    // A bare `key:` has no spacing to preserve.
+    if (spacing.empty() && !new_value.empty())
+        spacing = " ";
     lines[target] = prefix + spacing + new_value;
 
     bool trailing = !content.empty() && content.back() == '\n';
@@ -346,7 +351,7 @@ std::optional<std::string> KlipperConfigEditor::add_key(const std::string& conte
                                                         const std::string& section,
                                                         const std::string& key,
                                                         const std::string& value,
-                                                        const std::string& delimiter) const {
+                                                        const std::string& delimiter) {
     auto structure = parse_structure(content);
     auto sec_it = structure.sections.find(section);
     if (sec_it == structure.sections.end())
@@ -509,9 +514,10 @@ void KlipperConfigEditor::load_config_files(IMoonrakerAPI& api, SectionMapCallba
     spdlog::info("[ConfigEditor] Loading config files from printer");
 
     // Listing and downloading is delegated to resolve_active_config_files_with_content():
-    // it pulls the whole config directory, which is the only way a glob include
+    // it lists the whole config directory, which is the only way a glob include
     // ([include conf.d/*.cfg]) can be followed — the pattern names files we do not
-    // know about until Moonraker lists them. resolve_includes() then does the pure
+    // know about until Moonraker lists them — and downloads the files the include
+    // chain from printer.cfg reaches. resolve_includes() then does the pure
     // section -> file mapping over that content, globs included.
     resolve_active_config_files_with_content(
         api,

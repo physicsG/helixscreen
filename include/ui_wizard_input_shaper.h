@@ -7,6 +7,7 @@
 #include "async_lifetime_guard.h"
 #include "input_shaper_calibrator.h"
 #include "lvgl/lvgl.h"
+#include "subject_managed_panel.h"
 #include "wizard_step.h"
 
 #include <atomic>
@@ -23,7 +24,7 @@
  * ## Skip Logic:
  *
  * - No accelerometer detected: Skip entirely (input shaper can be configured later
- *   in Settings → Advanced → Input Shaper)
+ *   in Advanced → Input Shaping)
  * - Accelerometer detected: Show wizard step for calibration
  * - Footer shows "Skip" button (via wizard_show_skip subject) to allow skipping
  * - After successful calibration, footer changes to "Next"
@@ -282,16 +283,20 @@ class WizardInputShaperStep : public helix::wizard::Step {
     // Screen instance
     lv_obj_t* screen_root_ = nullptr;
 
+    // SubjectManager, declared ahead of the subjects it owns so it tears down
+    // after them (names withdraw before storage dies).
+    SubjectManager subjects_;
+
     // Subjects
-    lv_subject_t calibration_status_;
-    lv_subject_t calibration_progress_;
-    lv_subject_t calibration_started_;       ///< 0=not started, 1=started (hides Start button)
-    lv_subject_t calibration_active_;        ///< 1 iff calibration is running (controls Cancel
-                                             ///< button visibility). Cleared on complete / cancel /
-                                             ///< error. Distinct from `started_` which stays at 1
-                                             ///< post-completion to keep the Start button hidden.
-    lv_subject_t calibration_indeterminate_; ///< 1 during the offline analysis phase (no
-                                             ///< percent): hides the bar, shows the spinner
+    lv_subject_t calibration_status_{};
+    lv_subject_t calibration_progress_{};
+    lv_subject_t calibration_started_{}; ///< 0=not started, 1=started (hides Start button)
+    lv_subject_t calibration_active_{};  ///< 1 iff calibration is running (controls Cancel
+                                         ///< button visibility). Cleared on complete / cancel /
+                                         ///< error. Distinct from `started_` which stays at 1
+                                         ///< post-completion to keep the Start button hidden.
+    lv_subject_t calibration_indeterminate_{}; ///< 1 during the offline analysis phase (no
+                                               ///< percent): hides the bar, shows the spinner
 
     // String buffers for subjects
     char status_buffer_[128] = "Ready to calibrate";

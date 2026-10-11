@@ -28,7 +28,7 @@ on top of somebody's content.
 
 Both the component registration and the `PageScrollAutoInject::init()` call happen
 in `src/xml_registration.cpp#register_xml_components`. Teardown is
-`src/application/application.cpp#cancel_add_printer_wizard`.
+`src/application/printer_session.cpp#teardown_printer_scope`.
 
 ---
 
@@ -63,11 +63,10 @@ re-init clears the observer list. An observer registered there would never fire.
 
 This is the part to read before you change anything.
 
-`on_root_shown(root)` is called from four places in `NavigationManager`, all of
-them "a root just became visible": `src/ui/ui_nav_manager.cpp#set_active` (panel
-activate), `src/ui/ui_nav_manager.cpp#activate_initial_panel` (initial panel),
-`src/ui/ui_nav_manager.cpp#push_overlay` and
-`src/ui/ui_nav_manager.cpp#push_overlay_zoom_from` (overlay push). It reads
+`on_root_shown(root)` is called from three places in `NavigationManager`, all of
+them "a root just became visible": `src/ui/ui_nav_manager.cpp#"NavigationManager::set_active("` (panel
+activate), `src/ui/ui_nav_manager.cpp#activate_initial_panel` (initial panel) and
+`src/ui/ui_nav_manager.cpp#"NavigationManager::push_overlay("` (overlay push). It reads
 the setting live, prunes dead controllers, forces a layout pass so overflow is
 measurable, then walks.
 
@@ -104,9 +103,10 @@ separated by a `#space_2xl` gap, in a `#button_height`-wide column:
 172px of chevrons inside a tile on a 480px-tall screen is most of the tile.
 
 The cut is a **subtree** cut, not a "is this tile scrollable" test, and that
-distinction is load-bearing. 37 of the 40 `panel_widget_*.xml` roots already set
-`scrollable="false"`, and two more inherit the clear from `ui_card`
-(`src/ui/ui_card.cpp#ui_card_xml_create`). So testing the tile root would find almost nothing -
+distinction is load-bearing. 38 of the 41 `panel_widget_*.xml` roots already set
+`scrollable="false"`, and two more (the camera and print-status tiles) inherit the clear from
+`ui_card` (`src/ui/ui_card.cpp#ui_card_xml_create`) - the nozzle-temps root alone sets
+`scrollable="true"`. So testing the tile root would find almost nothing -
 the walk was sailing straight through those innocent-looking roots and
 attaching to whatever was scrollable inside. Marking the root and returning
 there is what actually stops it.
@@ -229,4 +229,4 @@ wanted gone.
 - [LVGL9_XML_GUIDE.md](LVGL9_XML_GUIDE.md) - `lv_obj` defaults, and why
   `scrollable` is the one this project's theme does not override
 - [HELIXCTL.md](HELIXCTL.md) - `ctl geom`
-- `docs/user/guide/settings/display-sound.md` - the user-facing description
+- `docs/user/guide/settings/touch-input.md` - the user-facing description

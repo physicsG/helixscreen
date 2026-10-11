@@ -12,6 +12,7 @@
 #include "helix-xml/src/xml/lv_xml_utils.h"
 #include "helix-xml/src/xml/lv_xml_widget.h"
 #include "helix-xml/src/xml/parsers/lv_xml_obj_parser.h"
+#include "lv_draw_buf_guard.h"
 #include "lvgl/lvgl.h"
 #include "memory_utils.h"
 #include "theme_manager.h"
@@ -36,7 +37,7 @@ constexpr uint8_t LIGHT_START_GRAY = 235; // Top-right - brighter
 constexpr uint8_t LIGHT_END_GRAY = 188;   // Bottom-left - darker
 
 // Pre-rendered gradient buffer size
-// 256x256 on normal devices, 128x128 on constrained (saves 192KB ARGB8888)
+// 256x256 on normal devices, 128x128 on constrained (saves 192KB at 32 bpp, 96KB at 16 bpp)
 static int32_t gradient_buffer_size() {
     static const int32_t size = helix::get_system_memory_info().is_constrained_device() ? 128 : 256;
     return size;
@@ -46,7 +47,7 @@ static int32_t gradient_buffer_size() {
 constexpr uint8_t BAYER_4X4[4][4] = {{0, 8, 2, 10}, {12, 4, 14, 6}, {3, 11, 1, 9}, {15, 7, 13, 5}};
 
 // Maximum gradient buffer dimension (pixels per axis).
-// Caps memory on large displays — a 512x512 ARGB8888 buffer is 1 MB.
+// Caps memory on large displays — a 512x512 buffer is 1 MB at 32 bpp, 512 KB at 16 bpp.
 // COVER scaling from 512 to any panel size is visually lossless for a smooth gradient.
 static constexpr int32_t MAX_GRADIENT_DIM = 512;
 
@@ -102,7 +103,7 @@ static inline int16_t bayer_threshold(int32_t x, int32_t y) {
 }
 
 /**
- * @brief Render diagonal gradient into an ARGB8888 draw buffer
+ * @brief Render diagonal gradient into an opaque ARGB8888, XRGB8888 or RGB565 draw buffer
  *
  * Renders bright at top-right, dark at bottom-left.
  * Uses ordered dithering for smooth appearance on 16-bit displays.
@@ -118,6 +119,7 @@ static void render_gradient_to_buf(lv_draw_buf_t* buf, uint8_t start_r, uint8_t 
     uint32_t stride = buf->header.stride;
     int32_t w = buf->header.w;
     int32_t h = buf->header.h;
+    const bool rgb565 = buf->header.cf == LV_COLOR_FORMAT_RGB565;
 
     // For diagonal gradient (top-right to bottom-left), max distance is (w-1)+(h-1)
     float max_dist = static_cast<float>((w - 1) + (h - 1));
@@ -147,6 +149,11 @@ static void render_gradient_to_buf(lv_draw_buf_t* buf, uint8_t start_r, uint8_t 
                 b = std::clamp<int16_t>(b + threshold, 0, 255);
             }
 
+            if (rgb565) {
+                reinterpret_cast<uint16_t*>(row)[x] = lv_color_to_u16(lv_color_make(
+                    static_cast<uint8_t>(r), static_cast<uint8_t>(g), static_cast<uint8_t>(b)));
+                continue;
+            }
             row[x].red = static_cast<uint8_t>(r);
             row[x].green = static_cast<uint8_t>(g);
             row[x].blue = static_cast<uint8_t>(b);
@@ -198,14 +205,14 @@ static void gradient_resize_to_widget(lv_obj_t* obj) {
     if (data->draw_buf && data->draw_buf->header.w == buf_w && data->draw_buf->header.h == buf_h)
         return;
 
-    // Destroy old buffer
-    if (data->draw_buf) {
-        lv_draw_buf_destroy(data->draw_buf);
-        data->draw_buf = nullptr;
-    }
+    // The widget's image src still points at the old buffer until the
+    // lv_image_set_src below; a blend of it may be in flight.
+    helix::safe_draw_buf_destroy(data->draw_buf, "grad_cv");
 
-    data->draw_buf = lv_draw_buf_create(buf_w, buf_h, LV_COLOR_FORMAT_ARGB8888, 0);
+    data->draw_buf = lv_draw_buf_create(buf_w, buf_h, LV_COLOR_FORMAT_NATIVE, 0);
     if (!data->draw_buf) {
+        // The image would otherwise keep naming the buffer just freed.
+        lv_image_set_src(obj, nullptr);
         spdlog::error("[GradientCanvas] Failed to resize buffer to {}x{}", buf_w, buf_h);
         return;
     }
@@ -230,10 +237,9 @@ static void gradient_delete_cb(lv_event_t* e) {
     std::unique_ptr<GradientData> data(get_gradient_data(obj));
     lv_obj_set_user_data(obj, nullptr);
     if (data) {
-        if (data->draw_buf) {
-            lv_draw_buf_destroy(data->draw_buf);
-            data->draw_buf = nullptr;
-        }
+        // The buffer was this image widget's src until now; a blend of it may
+        // still be in flight.
+        helix::safe_draw_buf_destroy(data->draw_buf, "grad_cv");
         // data automatically freed
     }
 }
@@ -269,7 +275,9 @@ static void* ui_gradient_canvas_xml_create(lv_xml_parser_state_t* state, const c
     // Create initial small buffer — gradient_resize_to_widget() will
     // recreate at actual dimensions once layout resolves
     int32_t init_size = gradient_buffer_size();
-    data_ptr->draw_buf = lv_draw_buf_create(init_size, init_size, LV_COLOR_FORMAT_ARGB8888, 0);
+    // Every pixel is opaque, so the native format: half the bytes of ARGB8888 on a
+    // 16-bit display, which a full-panel backdrop on the ESP32 cannot spare.
+    data_ptr->draw_buf = lv_draw_buf_create(init_size, init_size, LV_COLOR_FORMAT_NATIVE, 0);
 
     if (!data_ptr->draw_buf) {
         LOG_ERROR_INTERNAL("[GradientCanvas] Failed to create draw buffer");
@@ -476,3 +484,51 @@ lv_draw_buf_t* ui_gradient_canvas_create_buf(int32_t width, int32_t height, bool
                   height, dark_mode ? "dark" : "light", radius);
     return buf;
 }
+
+namespace helix::ui {
+
+lv_draw_buf_t* gradient_canvas_create_opaque_buf(int32_t width, int32_t height, bool dark_mode,
+                                                 int32_t radius, lv_color_t behind,
+                                                 lv_color_t under) {
+    lv_draw_buf_t* masked = ui_gradient_canvas_create_buf(width, height, dark_mode, radius);
+    if (!masked)
+        return nullptr;
+    lv_draw_buf_t* out = lv_draw_buf_create(width, height, LV_COLOR_FORMAT_NATIVE, 0);
+    if (!out) {
+        spdlog::error("[GradientCanvas] Failed to allocate {}x{} opaque buffer", width, height);
+        lv_draw_buf_destroy(masked);
+        return nullptr;
+    }
+
+    auto mix = [](uint8_t fg, uint8_t bg, uint8_t a) {
+        return static_cast<uint8_t>((fg * a + bg * (255 - a) + 127) / 255);
+    };
+    for (int32_t y = 0; y < height; y++) {
+        const auto* src = reinterpret_cast<const lv_color32_t*>(
+            masked->data + static_cast<uint32_t>(y) * masked->header.stride);
+        uint8_t* dst = out->data + static_cast<uint32_t>(y) * out->header.stride;
+        for (int32_t x = 0; x < width; x++) {
+            const lv_color32_t p = src[x];
+            // The masked image's fringe let the card's own rounded background,
+            // anti-aliased by about the same coverage, show over the page.
+            const uint8_t a = p.alpha;
+            const lv_color_t c = lv_color_make(mix(p.red, mix(under.red, behind.red, a), a),
+                                               mix(p.green, mix(under.green, behind.green, a), a),
+                                               mix(p.blue, mix(under.blue, behind.blue, a), a));
+#if LV_COLOR_DEPTH == 16
+            reinterpret_cast<uint16_t*>(dst)[x] = lv_color_to_u16(c);
+#else
+            reinterpret_cast<lv_color32_t*>(dst)[x] = lv_color_to_32(c, LV_OPA_COVER);
+#endif
+        }
+    }
+    lv_draw_buf_destroy(masked);
+    return out;
+}
+
+void gradient_canvas_render(lv_draw_buf_t* buf, lv_color_t start, lv_color_t end, bool dither) {
+    render_gradient_to_buf(buf, start.red, start.green, start.blue, end.red, end.green, end.blue,
+                           dither);
+}
+
+} // namespace helix::ui

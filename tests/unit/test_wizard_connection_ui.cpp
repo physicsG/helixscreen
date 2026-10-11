@@ -6,6 +6,7 @@
 #include "ui_wizard_connection.h"
 
 #include "../lvgl_ui_test_fixture.h"
+#include "../mocks/mock_mdns_discovery.h"
 #include "../test_helpers/update_queue_test_access.h"
 #include "../ui_test_utils.h"
 #include "lvgl/lvgl.h"
@@ -301,6 +302,19 @@ class WizardConnectionLifetimeFixture : public LVGLTestFixture {
 };
 
 TEST_CASE_METHOD(WizardConnectionLifetimeFixture,
+                 "Connection step: IP and port subjects carry the seeded defaults",
+                 "[wizard][connection]") {
+    // Regression: seeding the string subject from its own buffer aliased
+    // snprintf's source and destination and left both fields blank.
+    lv_subject_t* ip = lv_xml_get_subject(nullptr, "connection_ip");
+    lv_subject_t* port = lv_xml_get_subject(nullptr, "connection_port");
+    REQUIRE(ip != nullptr);
+    REQUIRE(port != nullptr);
+    CHECK(std::string(lv_subject_get_string(ip)).find_first_not_of(" ") != std::string::npos);
+    CHECK(std::string(lv_subject_get_string(port)) == "7125");
+}
+
+TEST_CASE_METHOD(WizardConnectionLifetimeFixture,
                  "Connection step: cleanup expires lifetime tokens",
                  "[wizard][connection][lifetime]") {
     auto tok = step->lifetime_token_for_test();
@@ -498,4 +512,27 @@ TEST_CASE_METHOD(LVGLTestFixture, "Connection step: destructor cancels the auto-
 
     // A still-armed one-shot would dispatch into the freed step here.
     process_lvgl(150);
+}
+
+// ============================================================================
+// mDNS discovery behind a hidden section (#1217)
+// ============================================================================
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "Connection step: a hidden discovery section starts no mDNS discovery",
+                 "[wizard][connection][mdns]") {
+    WizardConnectionStep* step = get_wizard_connection_step();
+    step->init_subjects();
+    auto mock = std::make_unique<MockMdnsDiscovery>();
+    MockMdnsDiscovery* mdns = mock.get();
+    step->set_mdns_discovery(std::move(mock));
+
+    lv_obj_t* root = step->create(test_screen());
+    REQUIRE(root != nullptr);
+    lv_obj_t* section = lv_obj_find_by_name(root, "discovery_section");
+    REQUIRE(section != nullptr);
+    REQUIRE(lv_obj_has_flag(section, LV_OBJ_FLAG_HIDDEN));
+
+    CHECK_FALSE(mdns->is_discovering());
+    step->cleanup();
 }

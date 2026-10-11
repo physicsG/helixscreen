@@ -1,0 +1,38 @@
+{
+  "id": "calibration-bridge",
+  "name": "Calibration Bridge",
+  "version": "0.1.0",
+  "author": "HelixScreen",
+  "description": "Run slicer-side filament calibrations at the printer: a companion (an OrcaSlicer plugin) posts the wizard context, the screen starts the pre-sliced print, asks which result is best, and sends the answer back.",
+  "permissions": [
+    "http",
+    "moonraker_write"
+  ],
+  "widgets": [],
+  "settings": [
+    {
+      "key": "companion_url",
+      "type": "string",
+      "label": "Companion result URL",
+      "default": ""
+    },
+    {
+      "key": "auto_open",
+      "type": "bool",
+      "label": "Open when a calibration arrives",
+      "default": true
+    },
+    {
+      "key": "auto_ask",
+      "type": "bool",
+      "label": "Open the picker when the print finishes",
+      "default": true
+    },
+    {
+      "key": "open_now",
+      "type": "action",
+      "label": "Open calibration",
+      "callback": "calibration-bridge__open"
+    }
+  ]
+}

@@ -33,6 +33,7 @@
 #include "../../lvgl/lvgl.h"
 #include "../helix_test_fixture.h"
 #include "../mocks/mock_printer_state.h"
+#include "../test_helpers/mock_personas.h"
 #include "../ui_test_utils.h"
 
 #include <algorithm>
@@ -101,15 +102,14 @@ class FullStackTestFixture {
         // initialize to SHUTDOWN until production code observes a real state update.
         printer_state_.set_klippy_state_sync(helix::KlippyState::READY);
 
-        // Create API mock BEFORE discovery so it can receive hardware callbacks
         api_ = std::make_unique<MoonrakerAPIMock>(client_, printer_state_);
         api_->set_mock_state(shared_state_);
 
         // Connect mock client (required for discovery)
         client_.connect("ws://mock/websocket", []() {}, []() {});
 
-        // Run discovery to populate hardware lists (API receives hardware via callback)
-        client_.discover_printer([]() {});
+        // Run discovery, then hand the hardware to the API as Application does
+        client_.discover_printer([this]() { api_->hardware() = client_.hardware(); });
     }
 
     ~FullStackTestFixture() {
@@ -502,31 +502,21 @@ TEST_CASE_METHOD(HelixTestFixture, "Full stack: All printer types work correctly
     PrinterState state;
     state.init_subjects(false);
 
-    std::vector<MoonrakerClientMock::PrinterType> printer_types = {
-        MoonrakerClientMock::PrinterType::VORON_24,
-        MoonrakerClientMock::PrinterType::VORON_TRIDENT,
-        MoonrakerClientMock::PrinterType::CREALITY_K1,
-        MoonrakerClientMock::PrinterType::FLASHFORGE_AD5M,
-        MoonrakerClientMock::PrinterType::GENERIC_COREXY,
-        MoonrakerClientMock::PrinterType::GENERIC_BEDSLINGER,
-        MoonrakerClientMock::PrinterType::MULTI_EXTRUDER,
-    };
-
-    for (auto printer_type : printer_types) {
-        DYNAMIC_SECTION("Printer type " << static_cast<int>(printer_type)) {
+    for (const auto* persona : helix::test::personas_one_per_type()) {
+        DYNAMIC_SECTION(persona->id) {
+            helix::test::PersonaEnv env(persona->id);
             // Create full stack for this printer type
             auto shared_state = std::make_shared<MockPrinterState>();
 
-            MoonrakerClientMock client(printer_type, 1000.0);
+            MoonrakerClientMock client(persona->type, 1000.0);
             client.set_mock_state(shared_state);
 
-            // Create API BEFORE discovery so it can receive hardware callbacks
             MoonrakerAPIMock api(client, state);
             api.set_mock_state(shared_state);
 
-            // Now connect and discover (API receives hardware via callback)
+            // Connect and discover, then hand the hardware to the API as Application does
             client.connect("ws://mock/websocket", []() {}, []() {});
-            client.discover_printer([]() {});
+            client.discover_printer([&]() { api.hardware() = client.hardware(); });
 
             // Verify basic operations work via PrinterHardware
             PrinterHardware hw(api.hardware().heaters(), api.hardware().sensors(),
@@ -614,16 +604,22 @@ TEST_CASE_METHOD(FullStackTestFixture, "Full stack: Concurrent access to shared 
             }
         });
 
-        // Thread that reads temperatures via shared state
-        std::thread reader([this, &stop_flag]() {
+        // Thread that reads temperatures via shared state. Catch2 assertions are
+        // not thread-safe, and a failing REQUIRE here would throw out of the
+        // thread and terminate the run, so the reader only tallies and the main
+        // thread asserts after join().
+        std::atomic<int> read_count{0};
+        std::atomic<int> out_of_range{0};
+        std::thread reader([this, &stop_flag, &read_count, &out_of_range]() {
             while (!stop_flag.load()) {
                 double ext_temp = shared_state_->extruder_temp;
                 double bed_temp = shared_state_->bed_temp;
-                // Values should be valid (non-NaN, reasonable range)
-                REQUIRE(ext_temp >= 0.0);
-                REQUIRE(ext_temp <= 500.0);
-                REQUIRE(bed_temp >= 0.0);
-                REQUIRE(bed_temp <= 200.0);
+                // Negated so a NaN counts as out of range.
+                if (!(ext_temp >= 0.0 && ext_temp <= 500.0) ||
+                    !(bed_temp >= 0.0 && bed_temp <= 200.0)) {
+                    out_of_range++;
+                }
+                read_count++;
                 std::this_thread::yield();
             }
         });
@@ -636,6 +632,8 @@ TEST_CASE_METHOD(FullStackTestFixture, "Full stack: Concurrent access to shared 
         reader.join();
 
         REQUIRE(update_count.load() > 0);
+        REQUIRE(read_count.load() > 0);
+        REQUIRE(out_of_range.load() == 0);
     }
 }
 
@@ -693,10 +691,9 @@ TEST_CASE_METHOD(HelixTestFixture, "Full stack: API error callbacks work correct
     MoonrakerClientMock client(MoonrakerClientMock::PrinterType::VORON_24, 1000.0);
     client.connect("ws://mock/websocket", []() {}, []() {});
 
-    // Construct API before discovery so its hardware callbacks get fired
     MoonrakerAPIMock api(client, state);
 
-    client.discover_printer([]() {});
+    client.discover_printer([&]() { api.hardware() = client.hardware(); });
 
     // Allow async discovery to populate hardware data
     std::this_thread::sleep_for(std::chrono::milliseconds(100));

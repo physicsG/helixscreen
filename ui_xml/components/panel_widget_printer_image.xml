@@ -12,9 +12,11 @@
     <!-- Printer image container -->
     <lv_obj name="printer_container"
             width="100%" flex_grow="1" style_bg_color="#screen_bg" style_pad_all="0" scrollable="false" align="center"
-            flex_flow="row" clickable="true">
+            clickable="true">
       <event_cb trigger="clicked" callback="printer_manager_clicked_cb"/>
-      <lv_image name="printer_image" width="100%" height="100%" align="center" inner_align="contain">
+      <!-- Fills the container; a one-side callout layout moves and shrinks it
+           (apply_callout_layout), so it is placed from the top-left. -->
+      <lv_image name="printer_image" width="100%" height="100%" inner_align="contain">
         <!-- Dim image when disconnected (state 0) or connecting (state 1) -->
         <bind_style name="image_dimmed" subject="printer_connection_state" ref_value="0"/>
         <bind_style name="image_dimmed" subject="printer_connection_state" ref_value="1"/>
@@ -22,6 +24,96 @@
         <bind_style name="image_dimmed" subject="klippy_state" ref_value="2"/>
         <bind_style name="image_dimmed" subject="klippy_state" ref_value="3"/>
       </lv_image>
+
+      <!-- Live callouts: one chip per active heater/fan/light, positioned by
+           C++ (compute_callout_layout in callout_layout.h). Hidden entirely
+           in ImageOnly mode (printer_callout_mode == 0); each chip further
+           hides on its own shown subject (0 hidden, 1 active, 2 residual:
+           shown, text greyed), or when the toolhead-merged chip
+           replaces the nozzle/fan pair. Leader lines draw only in the
+           line modes (BothSides = 3, OneSide = 4); the bed glow needs tagged
+           bed points, so it skips Docked (2), which means untagged. Pinned
+           chips (1) sit on the picture, so they go compact: icons hide and the
+           text drops to font_xs (C++ drops the unit letter). -->
+      <lv_obj name="callout_layer"
+              width="100%" height="100%" style_pad_all="0" style_bg_opa="0" style_border_width="0" scrollable="false"
+              clickable="false" ignore_layout="true">
+        <bind_flag_if_eq subject="printer_callout_mode" flag="hidden" ref_value="0"/>
+
+        <!-- Under the chips, so lines and glow draw beneath them. -->
+        <lv_obj name="callout_bed_glow"
+                style_radius="32767" style_bg_color="#danger" style_bg_opa="60" style_border_width="0"
+                scrollable="false" clickable="false">
+          <bind_flag_if cond="callout_bed_heating eq 0 or printer_callout_mode eq 0 or printer_callout_mode eq 2"
+                        flag="hidden"/>
+        </lv_obj>
+        <leader_line name="callout_line_nozzle" style_line_width="1" style_line_color="#text_muted">
+          <bind_flag_if cond="printer_callout_mode lt 3 or callout_nozzle_shown eq 0" flag="hidden"/>
+        </leader_line>
+        <leader_line name="callout_line_bed" style_line_width="1" style_line_color="#text_muted">
+          <bind_flag_if cond="printer_callout_mode lt 3 or callout_bed_shown eq 0" flag="hidden"/>
+        </leader_line>
+        <leader_line name="callout_line_chamber" style_line_width="1" style_line_color="#text_muted">
+          <bind_flag_if cond="printer_callout_mode lt 3 or callout_chamber_shown eq 0" flag="hidden"/>
+        </leader_line>
+        <leader_line name="callout_line_fan" style_line_width="1" style_line_color="#text_muted">
+          <bind_flag_if cond="printer_callout_mode lt 3 or callout_fan_shown eq 0" flag="hidden"/>
+        </leader_line>
+        <leader_line name="callout_line_light" style_line_width="1" style_line_color="#text_muted">
+          <bind_flag_if cond="printer_callout_mode lt 3 or callout_light_shown eq 0" flag="hidden"/>
+        </leader_line>
+
+        <activity_chip name="callout_chip_nozzle"
+                       text_subject="callout_nozzle_text" shown_subject="callout_nozzle_shown"
+                       compact_subject="printer_callout_mode">
+          <bind_flag_if cond="callout_nozzle_shown eq 0 or callout_toolhead_merged eq 1" flag="hidden"/>
+          <event_cb trigger="clicked" callback="printer_callout_nozzle_cb"/>
+          <nozzle_icon size="xs">
+            <bind_flag_if_eq subject="printer_callout_mode" flag="hidden" ref_value="1"/>
+          </nozzle_icon>
+        </activity_chip>
+        <activity_chip name="callout_chip_bed"
+                       text_subject="callout_bed_text" shown_subject="callout_bed_shown"
+                       compact_subject="printer_callout_mode">
+          <bind_flag_if_eq subject="callout_bed_shown" flag="hidden" ref_value="0"/>
+          <event_cb trigger="clicked" callback="printer_callout_bed_cb"/>
+          <heater_icon src="radiator" glyph_name="bed_icon_glyph" size="xs">
+            <bind_flag_if_eq subject="printer_callout_mode" flag="hidden" ref_value="1"/>
+          </heater_icon>
+        </activity_chip>
+        <activity_chip name="callout_chip_chamber"
+                       text_subject="callout_chamber_text" shown_subject="callout_chamber_shown"
+                       compact_subject="printer_callout_mode">
+          <bind_flag_if_eq subject="callout_chamber_shown" flag="hidden" ref_value="0"/>
+          <event_cb trigger="clicked" callback="printer_callout_chamber_cb"/>
+          <heater_icon src="fridge_industrial" glyph_name="chamber_icon_glyph" size="xs">
+            <bind_flag_if_eq subject="printer_callout_mode" flag="hidden" ref_value="1"/>
+          </heater_icon>
+        </activity_chip>
+        <activity_chip name="callout_chip_fan"
+                       text_subject="callout_fan_text" shown_subject="callout_fan_shown"
+                       compact_subject="printer_callout_mode">
+          <bind_flag_if cond="callout_fan_shown eq 0 or callout_toolhead_merged eq 1" flag="hidden"/>
+          <event_cb trigger="clicked" callback="printer_callout_fan_cb"/>
+          <icon name="callout_fan_icon" src="fan" size="xs">
+            <bind_flag_if_eq subject="printer_callout_mode" flag="hidden" ref_value="1"/>
+          </icon>
+        </activity_chip>
+        <lv_obj name="callout_chip_light" width="content" height="content" scrollable="false" clickable="true">
+          <style name="styles.activity_chip"/>
+          <bind_flag_if_eq subject="callout_light_shown" flag="hidden" ref_value="0"/>
+          <event_cb trigger="clicked" callback="printer_callout_light_cb"/>
+          <icon src="lightbulb_on" size="xs" variant="warning"/>
+        </lv_obj>
+        <activity_chip name="callout_chip_toolhead"
+                       text_subject="callout_toolhead_text" shown_subject="callout_toolhead_merged"
+                       compact_subject="printer_callout_mode">
+          <bind_flag_if_eq subject="callout_toolhead_merged" flag="hidden" ref_value="0"/>
+          <event_cb trigger="clicked" callback="printer_callout_nozzle_cb"/>
+          <!-- Merged only while pinned, where chips are text alone. -->
+        </activity_chip>
+      </lv_obj>
+
       <!-- Disconnected overlay - shown when NOT connected (state != 2) -->
       <icon name="disconnected_overlay" src="prohibited" size="xl" align="center" variant="danger">
         <bind_flag_if_eq subject="printer_connection_state" flag="hidden" ref_value="2"/>

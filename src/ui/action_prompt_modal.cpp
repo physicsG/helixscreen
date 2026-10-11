@@ -11,6 +11,7 @@
 #include <spdlog/spdlog.h>
 
 #include <cstdlib>
+#include <optional>
 
 namespace helix::ui {
 
@@ -26,7 +27,7 @@ int32_t label_width_px(const std::string& label, const lv_font_t* font) {
 }
 
 /**
- * @brief Can every regular button show its label on one equal-width row?
+ * @brief Can every button of a row show its label on one equal-width row?
  *
  * The equal-width row divides the container evenly, so it only works while the
  * widest label still fits its share. AFC's four short "Lane N" buttons do fit,
@@ -37,11 +38,11 @@ int32_t label_width_px(const std::string& label, const lv_font_t* font) {
  * Returns false when the container width cannot be measured yet — wrapping is
  * the safe answer, because it never clips.
  */
-bool equal_width_row_fits(lv_obj_t* container, const std::vector<PromptButton>& buttons,
-                          int regular_count) {
-    if (regular_count <= 0) {
+bool equal_width_row_fits(lv_obj_t* container, const std::vector<PromptButton>& row) {
+    if (row.empty()) {
         return false;
     }
+    const int32_t count = static_cast<int32_t>(row.size());
 
     const lv_font_t* font = theme_manager_get_font("font_body");
     if (font == nullptr) {
@@ -59,17 +60,55 @@ bool equal_width_row_fits(lv_obj_t* container, const std::vector<PromptButton>& 
 
     const int32_t gap = lv_obj_get_style_pad_column(container, LV_PART_MAIN);
     const int32_t cell_pad = theme_manager_get_spacing("space_sm"); // per side, see create_button()
-    const int32_t cell_width = (available - gap * (regular_count - 1)) / regular_count;
+    const int32_t cell_width = (available - gap * (count - 1)) / count;
 
-    for (const auto& btn : buttons) {
-        if (btn.is_footer) {
-            continue;
-        }
+    for (const auto& btn : row) {
         if (label_width_px(btn.label, font) + 2 * cell_pad > cell_width) {
             return false;
         }
     }
     return true;
+}
+
+/**
+ * @brief Classify a close for the dismiss callback; nullopt for the owner's own hide().
+ */
+std::optional<PromptCloseKind> close_kind(ModalCloseReason reason, bool button_sent_gcode) {
+    switch (reason) {
+    case ModalCloseReason::Programmatic:
+        return std::nullopt;
+    case ModalCloseReason::ButtonPress:
+        return button_sent_gcode ? PromptCloseKind::ButtonWithGcode
+                                 : PromptCloseKind::ButtonWithoutGcode;
+    case ModalCloseReason::BackdropTap:
+    case ModalCloseReason::EscKey:
+        return PromptCloseKind::UserDismiss;
+    case ModalCloseReason::HotReload:
+        return PromptCloseKind::HotReload;
+    case ModalCloseReason::External:
+        return PromptCloseKind::External;
+    }
+    return std::nullopt;
+}
+
+/**
+ * @brief Split the regular (non-footer) buttons into rows.
+ *
+ * Each prompt_button_group gets a row of its own, and a run of ungrouped
+ * buttons between groups shares one row, which is how Mainsail lays them out.
+ */
+std::vector<std::vector<PromptButton>> split_button_rows(const std::vector<PromptButton>& buttons) {
+    std::vector<std::vector<PromptButton>> rows;
+    for (const auto& btn : buttons) {
+        if (btn.is_footer) {
+            continue;
+        }
+        if (rows.empty() || rows.back().front().group_id != btn.group_id) {
+            rows.emplace_back();
+        }
+        rows.back().push_back(btn);
+    }
+    return rows;
 }
 
 } // namespace
@@ -95,6 +134,10 @@ void ActionPromptModal::set_gcode_callback(GcodeCallback callback) {
     gcode_callback_ = std::move(callback);
 }
 
+void ActionPromptModal::set_dismiss_callback(DismissCallback callback) {
+    dismiss_callback_ = std::move(callback);
+}
+
 bool ActionPromptModal::show_prompt(lv_obj_t* parent, const PromptData& data) {
     // Store prompt data
     prompt_data_ = data;
@@ -108,17 +151,30 @@ bool ActionPromptModal::show_prompt(lv_obj_t* parent, const PromptData& data) {
     return true;
 }
 
+bool ActionPromptModal::show_owned_prompt(lv_obj_t* parent, const PromptData& data) {
+    auto modal = std::make_unique<ActionPromptModal>();
+    modal->prompt_data_ = data;
+    return Modal::show_owned(std::move(modal), parent);
+}
+
 // ============================================================================
 // Modal Hooks
 // ============================================================================
 
 void ActionPromptModal::on_show() {
+    button_sent_gcode_ = false;
     populate_content();
 }
 
 void ActionPromptModal::on_hide() {
     clear_dynamic_content();
     spdlog::debug("[ActionPromptModal] on_hide()");
+    if (!dismiss_callback_) {
+        return;
+    }
+    if (auto kind = close_kind(close_reason_, button_sent_gcode_)) {
+        dismiss_callback_(*kind);
+    }
 }
 
 // ============================================================================
@@ -194,58 +250,47 @@ void ActionPromptModal::create_buttons() {
     }
 
     bool has_footer_buttons = false;
-    bool has_regular_buttons = false;
     int footer_button_count = 0;
 
-    // Count regular (non-footer) buttons up front. With >= 4 of them the legacy
-    // content-sized row_wrap overflows the fixed-width (320px) dialog and the 4th
-    // button wraps to a second line (R2 / #1043). In that case switch the shared
-    // button_container to a non-wrapping row of equal-width cells so they all fit
-    // on ONE line. With <= 3 regular buttons keep the existing row_wrap behaviour
-    // byte-for-byte (this container is shared with L1's recovery modal).
-    //
-    // The count alone is not sufficient: an equal-width row divides the container
-    // evenly, so it is only usable while the labels still fit their share. A
-    // macro that offers many long labels (seven "PLA 220/60" material presets)
-    // gets a few dozen pixels per cell and every label clips, so those fall back
-    // to row_wrap and take the extra lines they need.
-    int regular_count = 0;
-    for (const auto& btn : prompt_data_.buttons) {
-        if (!btn.is_footer) {
-            ++regular_count;
+    // Regular buttons go in rows inside button_container. A row of >= 4 buttons
+    // overflows the fixed-width (320px) dialog with content-sized buttons, so it
+    // becomes a non-wrapping row of equal-width cells (R2 / #1043), but only
+    // while every label still fits its share: seven "PLA 220/60" presets would
+    // get a few dozen pixels per cell and clip, so those keep row_wrap and take
+    // the extra lines they need.
+    bool has_regular_buttons = false;
+    for (const auto& row_buttons : split_button_rows(prompt_data_.buttons)) {
+        auto* row = static_cast<lv_obj_t*>(
+            lv_xml_create(button_container, "action_prompt_button_row", nullptr));
+        if (!row) {
+            // Without rows the footer still has to be built, or the prompt has no way out.
+            spdlog::warn("[ActionPromptModal] action_prompt_button_row not registered");
+            break;
+        }
+        has_regular_buttons = true;
+        const bool equal_width = row_buttons.size() >= 4 && equal_width_row_fits(row, row_buttons);
+        if (equal_width) {
+            lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        }
+        for (const auto& btn : row_buttons) {
+            create_button(btn, row, equal_width);
         }
     }
-    const bool equal_width_row =
-        regular_count >= 4 &&
-        equal_width_row_fits(button_container, prompt_data_.buttons, regular_count);
-    // Set the flow explicitly for BOTH cases so a reused modal instance never
-    // inherits the wrong flow from a previous prompt: row_wrap restores the
-    // legacy <= 3 look (matching the XML default); plain row drives the >= 4
-    // equal-width layout.
-    lv_obj_set_flex_flow(button_container,
-                         equal_width_row ? LV_FLEX_FLOW_ROW : LV_FLEX_FLOW_ROW_WRAP);
 
-    // Create buttons based on PromptData
     for (const auto& btn : prompt_data_.buttons) {
-        if (btn.is_footer) {
-            if (footer_container) {
-                // Add vertical divider between footer buttons
-                if (footer_button_count > 0) {
-                    lv_obj_t* divider = lv_obj_create(footer_container);
-                    lv_obj_set_size(divider, 1, lv_pct(100));
-                    lv_obj_set_style_bg_color(divider, theme_manager_get_color("border"),
-                                              LV_PART_MAIN);
-                    lv_obj_set_style_bg_opa(divider, LV_OPA_COVER, LV_PART_MAIN);
-                    lv_obj_set_style_pad_all(divider, 0, LV_PART_MAIN);
-                    lv_obj_remove_flag(divider, LV_OBJ_FLAG_SCROLLABLE);
-                }
-                create_button(btn, footer_container);
-                has_footer_buttons = true;
-                footer_button_count++;
+        if (btn.is_footer && footer_container) {
+            // Add vertical divider between footer buttons
+            if (footer_button_count > 0) {
+                lv_obj_t* divider = lv_obj_create(footer_container);
+                lv_obj_set_size(divider, 1, lv_pct(100));
+                lv_obj_set_style_bg_color(divider, theme_manager_get_color("border"), LV_PART_MAIN);
+                lv_obj_set_style_bg_opa(divider, LV_OPA_COVER, LV_PART_MAIN);
+                lv_obj_set_style_pad_all(divider, 0, LV_PART_MAIN);
+                lv_obj_remove_flag(divider, LV_OBJ_FLAG_SCROLLABLE);
             }
-        } else {
-            create_button(btn, button_container, equal_width_row);
-            has_regular_buttons = true;
+            create_button(btn, footer_container);
+            has_footer_buttons = true;
+            footer_button_count++;
         }
     }
 
@@ -282,7 +327,7 @@ void ActionPromptModal::create_button(const PromptButton& btn, lv_obj_t* contain
         lv_obj_set_flex_grow(button, 1);
         lv_obj_set_style_radius(button, 0, LV_PART_MAIN);
     } else if (equal_width) {
-        // Regular buttons, >= 4 of them and all short enough to share a row:
+        // A row of >= 4 buttons, all short enough to share it:
         // equal-width cells on a non-wrapping row (R2 / #1043). grow=1 with
         // width 0 lets short labels ("Lane 1".."Lane 4") share the fixed-width
         // row instead of overflowing and wrapping. Trim the horizontal padding
@@ -295,8 +340,8 @@ void ActionPromptModal::create_button(const PromptButton& btn, lv_obj_t* contain
         lv_obj_set_style_radius(button, 8, LV_PART_MAIN);
     } else {
         // Everything else: content-sized with padding, which row_wrap spreads
-        // over as many lines as the labels need (<= 3 buttons, or more than
-        // three that are too wide to share one row).
+        // over as many lines as the labels need (<= 3 buttons in the row, or
+        // more than three that are too wide to share one row).
         lv_obj_set_size(button, LV_SIZE_CONTENT, theme_manager_get_spacing("button_height"));
         lv_obj_set_style_pad_left(button, theme_manager_get_spacing("space_lg"), LV_PART_MAIN);
         lv_obj_set_style_pad_right(button, theme_manager_get_spacing("space_lg"), LV_PART_MAIN);
@@ -319,18 +364,16 @@ void ActionPromptModal::create_button(const PromptButton& btn, lv_obj_t* contain
     lv_label_set_text(label, btn.label.c_str());
     lv_obj_center(label);
     lv_obj_set_style_text_font(label, theme_manager_get_font("font_body"), LV_PART_MAIN);
-    lv_obj_set_style_text_color(label, theme_manager_get_contrast_color(bg_color), LV_PART_MAIN);
+    lv_obj_set_style_text_color(
+        label, theme_manager_get_contrast_adjusted_text(theme_manager_get_color("text"), bg_color),
+        LV_PART_MAIN);
 
     // Create callback data with owned copy of gcode string and lifetime token.
     //
-    // An empty gcode means DO NOTHING — the button closes the modal and sends
-    // no command. This used to fall back to sending the *label*, so a button
-    // marked "OK" or "Dismiss" transmitted `OK` to Klipper (#1172). Nothing
-    // relies on that fallback: Klipper's own `action_prompt_button` protocol
-    // already applies the label-as-gcode convention explicitly in
-    // ActionPromptManager::parse_button_spec(), so prompts arriving over the
-    // wire are unaffected. Only programmatically built PromptData reaches here
-    // with a blank gcode, and there it always meant "no command".
+    // An empty gcode means DO NOTHING: the button closes the modal and sends no
+    // command (#1172). Klipper's label-as-gcode convention is applied in
+    // ActionPromptManager::parse_button_spec(), so a wire prompt never reaches
+    // here with a blank gcode; only PromptData built in C++ does.
     auto cbd = std::make_unique<ButtonCallbackData>();
     cbd->modal = this;
     cbd->token = lifetime_.token();
@@ -354,7 +397,7 @@ lv_color_t ActionPromptModal::get_button_color(const std::string& color_name) {
     if (color_name == "primary" || color_name.empty()) {
         return theme_manager_get_color("primary");
     } else if (color_name == "secondary") {
-        return theme_manager_get_color("success");
+        return theme_manager_get_color("secondary");
     } else if (color_name == "info") {
         return theme_manager_get_color("info");
     } else if (color_name == "warning") {
@@ -389,24 +432,21 @@ void ActionPromptModal::clear_dynamic_content() {
 // ============================================================================
 
 void ActionPromptModal::handle_button_click(const std::string& gcode) {
-    // An empty gcode is a dismiss affordance: close, send nothing. Callers no
-    // longer have to smuggle a Klipper comment ("; error-dismiss") through to
-    // get a button that does nothing (#1172).
+    // An empty gcode is a dismiss affordance: close, send nothing (#1172).
     if (gcode.empty()) {
         spdlog::info("[ActionPromptModal] Dismiss button clicked (no gcode)");
-        hide();
+        hide(ModalCloseReason::ButtonPress);
         return;
     }
 
     spdlog::info("[ActionPromptModal] Button clicked, gcode: {}", gcode);
 
-    // Call the gcode callback if set
     if (gcode_callback_) {
         gcode_callback_(gcode);
+        button_sent_gcode_ = true;
     }
 
-    // Close the modal
-    hide();
+    hide(ModalCloseReason::ButtonPress);
 }
 
 // ============================================================================
@@ -437,8 +477,7 @@ void ActionPromptModal::on_button_cb(lv_event_t* e) {
 
 void report_action_prompt_gcode_failure(const std::string& error_message) {
     // Same presentation as every other failed macro in the UI (ui_panel_controls,
-    // ui_panel_filament). NOTIFY_ERROR marshals to the main thread itself, which
-    // matters here: the RPC error callback fires on the WebSocket thread.
+    // ui_panel_filament). Main thread only: it shows a toast.
     //
     // Klipper's own wording is the useful part ("Extruder not hot enough"); the
     // generic string only stands in when the transport gave us nothing.

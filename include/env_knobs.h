@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include "text_io.h"
+
 #include <algorithm>
 #include <cstdlib>
 
@@ -24,6 +26,23 @@ inline float env_float(const char* name, float fallback, float lo, float hi) {
         return fallback;
     }
     return std::clamp(value, lo, hi);
+}
+
+/// The one truthiness rule for environment flags: `1`, `true`, `yes` or `on`,
+/// ASCII case-insensitive and ignoring surrounding whitespace (helixscreen.env
+/// values can carry a stray space). Everything else is false: nullptr, "",
+/// "0", "false", and anything unrecognised.
+inline bool env_truthy(const char* value) {
+    if (value == nullptr) {
+        return false;
+    }
+    const std::string v = text_io::to_lower(text_io::trim(value));
+    return v == "1" || v == "true" || v == "yes" || v == "on";
+}
+
+/// env_truthy() applied to the environment variable @p name.
+inline bool env_flag(const char* name) {
+    return env_truthy(std::getenv(name));
 }
 
 } // namespace helix

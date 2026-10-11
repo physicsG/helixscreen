@@ -47,12 +47,40 @@ std::vector<AudioOutputDevice> assemble(const std::vector<RawCard>& cards) {
     return out;
 }
 
+bool is_safe_pcm_name(const std::string& pcm) {
+    if (pcm.find('|') != std::string::npos || pcm.find("file") != std::string::npos ||
+        pcm.find("tee") != std::string::npos) {
+        return false;
+    }
+    if (pcm == "default" || pcm == "sysdefault") {
+        return true;
+    }
+    for (const char* prefix : {"sysdefault:", "hw:", "plughw:", "dmix:"}) {
+        if (pcm.rfind(prefix, 0) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::string resolve_alsa_device(const std::string& settings_device, const char* env_device) {
     if (env_device && env_device[0] != '\0') {
-        return env_device; // 1. env override (highest)
+        if (is_safe_pcm_name(env_device)) {
+            return env_device; // 1. env override (highest)
+        }
+#ifdef HELIX_HAS_ALSA
+        spdlog::warn("[Audio] Ignoring HELIX_ALSA_DEVICE '{}': not a hardware PCM name",
+                     env_device);
+#endif
     }
     if (!settings_device.empty()) {
-        return settings_device; // 2. user preference
+        if (is_safe_pcm_name(settings_device)) {
+            return settings_device; // 2. user preference
+        }
+#ifdef HELIX_HAS_ALSA
+        spdlog::warn("[Audio] Ignoring saved output device '{}': not a hardware PCM name",
+                     settings_device);
+#endif
     }
     return "default"; // 3. ALSA default (honors /etc/asound.conf)
 }

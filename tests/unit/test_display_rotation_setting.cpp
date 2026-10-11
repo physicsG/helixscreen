@@ -12,7 +12,7 @@
  * that replaces that.
  */
 
-#include "ui_settings_display_sound.h"
+#include "ui_settings_display.h"
 
 #include "../lvgl_test_fixture.h"
 #include "../lvgl_ui_test_fixture.h"
@@ -128,8 +128,8 @@ TEST_CASE_METHOD(LVGLTestFixture, "DisplayRotation: restart is signalled only on
                  "[display_settings][rotation]") {
     DisplaySettingsManager::instance().set_display_rotation(0);
 
-    // The return value is what drives the restart prompt in
-    // DisplaySoundSettingsOverlay::handle_display_rotation_changed().
+    // The return value is what drives the restart prompt in the
+    // on_display_rotation_changed callback.
     REQUIRE(DisplaySettingsManager::instance().set_display_rotation(90) == true);
     REQUIRE(DisplaySettingsManager::instance().set_display_rotation(90) == false);
     REQUIRE(DisplaySettingsManager::instance().set_display_rotation(270) == true);
@@ -145,7 +145,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "DisplayRotation: restart is signalled only on
 TEST_CASE_METHOD(LVGLUITestFixture, "DisplayRotation: the settings row is present and populated",
                  "[display_settings][rotation][ui]") {
     lv_obj_t* overlay = static_cast<lv_obj_t*>(
-        lv_xml_create(lv_screen_active(), "settings_display_sound_overlay", nullptr));
+        lv_xml_create(lv_screen_active(), "settings_display_overlay", nullptr));
     REQUIRE(overlay != nullptr);
 
     lv_obj_t* row = lv_obj_find_by_name(overlay, "row_display_rotation");
@@ -176,7 +176,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "DisplayRotation: the row is gated on backen
             (DisplaySettingsManager::rotation_setting_available() ? 1 : 0));
 
     lv_obj_t* overlay = static_cast<lv_obj_t*>(
-        lv_xml_create(lv_screen_active(), "settings_display_sound_overlay", nullptr));
+        lv_xml_create(lv_screen_active(), "settings_display_overlay", nullptr));
     REQUIRE(overlay != nullptr);
     lv_obj_t* row = lv_obj_find_by_name(overlay, "row_display_rotation");
     REQUIRE(row != nullptr);
@@ -193,6 +193,6 @@ TEST_CASE_METHOD(LVGLUITestFixture, "DisplayRotation: the dropdown callback is r
                  "[display_settings][rotation][ui]") {
     // Registering the XML row without adding the handler to register_callbacks()
     // fails silently - the dropdown moves and nothing is saved.
-    helix::settings::get_display_sound_settings_overlay().register_callbacks();
+    helix::settings::get_display_settings_overlay().register_callbacks();
     REQUIRE(lv_xml_get_event_cb(nullptr, "on_display_rotation_changed") != nullptr);
 }

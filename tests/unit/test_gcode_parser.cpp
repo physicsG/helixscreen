@@ -8,6 +8,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <set>
 #include <sstream>
 #include <unistd.h>
 
@@ -103,6 +104,37 @@ TEST_CASE("GCodeParser - Coordinate extraction", "[gcode][parser]") {
         REQUIRE(seg2.end.x == Approx(15.5f));
         REQUIRE(seg2.end.y == Approx(-15.3f));
     }
+
+    SECTION("A leading '+' on a coordinate parses as the signed value, matching Klipper") {
+        // Klipper's klippy/gcode.py reads G-code parameters through Python's float(),
+        // which accepts a single leading '+' ("+10.5" == 10.5); the preview follows suit
+        // so a hand-written G1 X+10.5 renders the same move the printer executes.
+        parser.parse_line("G1 X+10.5 Y20");
+        auto file = parser.finalize();
+
+        REQUIRE(file.total_segments == 1);
+        auto& seg = file.layers[0].segments[0];
+        CHECK(seg.start.x == Approx(0.0f));
+        CHECK(seg.end.x == Approx(10.5f));
+        CHECK(seg.end.y == Approx(20.0f));
+    }
+
+    SECTION("A lone '+' or a second sign right after it is not extracted, matching Klipper") {
+        // Python's float() rejects "+" and a second sign immediately after the first
+        // ("++1", "+-1"); the coordinate is treated as absent in each case.
+        parser.parse_line("G1 X+ Y1");
+        parser.parse_line("G1 X++1 Y2");
+        parser.parse_line("G1 X+-1 Y3");
+        auto file = parser.finalize();
+
+        REQUIRE(file.total_segments == 3);
+        for (const auto& seg : file.layers[0].segments) {
+            CHECK(seg.end.x == Approx(0.0f)); // X was never extracted on any of the 3 lines
+        }
+        CHECK(file.layers[0].segments[0].end.y == Approx(1.0f));
+        CHECK(file.layers[0].segments[1].end.y == Approx(2.0f));
+        CHECK(file.layers[0].segments[2].end.y == Approx(3.0f));
+    }
 }
 
 TEST_CASE("GCodeParser - Comments and whitespace", "[gcode][parser]") {
@@ -164,6 +196,47 @@ TEST_CASE("GCodeParser - EXCLUDE_OBJECT commands", "[gcode][parser]") {
         REQUIRE(file.get_object_name(file.layers[0].segments[0].object_name_index) == "part1");
         REQUIRE(file.get_object_name(file.layers[0].segments[1].object_name_index) == "part1");
         REQUIRE(file.layers[0].segments[2].object_name_index < 0);
+    }
+
+    SECTION("CENTER with a leading '+' parses as the signed value, matching Klipper") {
+        // Klipper's float()-based parameter parsing accepts a leading '+', so the
+        // preview must too rather than reading the object as centered at its default.
+        parser.parse_line("EXCLUDE_OBJECT_DEFINE NAME=cube_1 CENTER=+50,75");
+        auto file = parser.finalize();
+
+        REQUIRE(file.objects.count("cube_1") == 1);
+        auto& obj = file.objects["cube_1"];
+        CHECK(obj.center.x == Approx(50.0f));
+        CHECK(obj.center.y == Approx(75.0f));
+    }
+
+    SECTION("POLYGON point with a leading '+' parses as the signed value, matching Klipper") {
+        parser.parse_line("EXCLUDE_OBJECT_DEFINE NAME=cube_3 "
+                          "POLYGON=[[+45,70],[55,70],[55,+80],[45,80]]");
+        auto file = parser.finalize();
+
+        REQUIRE(file.objects.count("cube_3") == 1);
+        auto& obj = file.objects["cube_3"];
+        REQUIRE(obj.polygon.size() == 4);
+        CHECK(obj.polygon[0].x == Approx(45.0f));
+        CHECK(obj.polygon[2].y == Approx(80.0f));
+    }
+
+    SECTION("POLYGON point too large for float truncates the polygon instead of writing inf") {
+        // An overflowing token reports result_out_of_range, so
+        // parse_exclude_object_command stops at the first bad point instead of
+        // continuing with an inf coordinate.
+        std::string huge_x(80, '9');
+        parser.parse_line("EXCLUDE_OBJECT_DEFINE NAME=cube_2 CENTER=50,75 "
+                          "POLYGON=[[45,70],[" +
+                          huge_x + ",70],[55,80],[45,80]]");
+        auto file = parser.finalize();
+
+        REQUIRE(file.objects.count("cube_2") == 1);
+        auto& obj = file.objects["cube_2"];
+        REQUIRE(obj.polygon.size() == 1); // only the point before the overflow survives
+        CHECK(obj.polygon[0].x == Approx(45.0f));
+        CHECK(obj.polygon[0].y == Approx(70.0f));
     }
 }
 
@@ -631,9 +704,39 @@ TEST_CASE("extract_header_metadata - Cura format parsing", "[gcode][metadata]") 
 
         // 1.20047m = 1200.47mm
         REQUIRE(metadata.filament_used_mm == Approx(1200.47));
-        // Should also estimate grams based on PLA density
-        REQUIRE(metadata.filament_used_g > 0);
+        // Grams estimated as PLA (1.24 g/cm^3) through a 1.75mm cross-section
+        REQUIRE(metadata.filament_used_g == Approx(3.5805).margin(0.0005));
         std::remove(temp_path.c_str());
+    }
+}
+
+TEST_CASE("extract_header_metadata - slot-aligned colors and day-long times", "[gcode][metadata]") {
+    SECTION("An empty color slot keeps later tools on their own index") {
+        auto metadata =
+            extract_header_metadata_from_content("; extruder_colour = #FF0000;;#0000FF\nG1 X10\n");
+        REQUIRE(metadata.tool_colors.size() == 3);
+        CHECK(metadata.tool_colors[0] == "#FF0000");
+        CHECK(metadata.tool_colors[1].empty());
+        CHECK(metadata.tool_colors[2] == "#0000FF");
+    }
+
+    SECTION("A colon-separated color line fills the palette") {
+        auto metadata =
+            extract_header_metadata_from_content("; filament_colour: #FF0000;#00FF00\nG1 X10\n");
+        REQUIRE(metadata.tool_colors.size() == 2);
+        CHECK(metadata.tool_colors[0] == "#FF0000");
+        CHECK(metadata.tool_colors[1] == "#00FF00");
+    }
+
+    SECTION("A print longer than a day keeps its days") {
+        auto metadata = extract_header_metadata_from_content(
+            "; estimated printing time (normal mode) = 1d 2h 3m 4s\nG1 X10\n");
+        CHECK(metadata.estimated_time_seconds == Approx(93784.0));
+    }
+
+    SECTION("A key with no space after the semicolon keeps its first letter") {
+        auto metadata = extract_header_metadata_from_content(";layer_height = 0.16\nG1 X10\n");
+        CHECK(metadata.layer_height == Approx(0.16));
     }
 }
 
@@ -1017,7 +1120,7 @@ TEST_CASE("GCodeParser - Z-hop handling", "[gcode][parser][layers][zhop]") {
 // Thumbnail Extraction from Content Tests
 // ============================================================================
 
-TEST_CASE("extract_thumbnails_from_content - Basic extraction", "[gcode][thumbnail]") {
+TEST_CASE("get_best_thumbnail_from_content - Basic extraction", "[gcode][thumbnail]") {
     SECTION("Extract thumbnail from minimal valid gcode content") {
         // Create minimal gcode with a tiny base64-encoded PNG
         // This is a minimal 1x1 PNG (smallest valid PNG)
@@ -1034,19 +1137,17 @@ TEST_CASE("extract_thumbnails_from_content - Basic extraction", "[gcode][thumbna
         gcode << "; thumbnail end\n";
         gcode << "G28 ; home\n";
 
-        auto thumbnails = extract_thumbnails_from_content(gcode.str());
+        auto thumb = get_best_thumbnail_from_content(gcode.str());
 
-        REQUIRE(thumbnails.size() == 1);
-        REQUIRE(thumbnails[0].width == 1);
-        REQUIRE(thumbnails[0].height == 1);
-        REQUIRE(!thumbnails[0].png_data.empty());
+        REQUIRE(thumb.width == 1);
+        REQUIRE(thumb.height == 1);
 
         // Verify PNG magic bytes
-        REQUIRE(thumbnails[0].png_data.size() >= 8);
-        REQUIRE(thumbnails[0].png_data[0] == 0x89);
-        REQUIRE(thumbnails[0].png_data[1] == 'P');
-        REQUIRE(thumbnails[0].png_data[2] == 'N');
-        REQUIRE(thumbnails[0].png_data[3] == 'G');
+        REQUIRE(thumb.png_data.size() >= 8);
+        REQUIRE(thumb.png_data[0] == 0x89);
+        REQUIRE(thumb.png_data[1] == 'P');
+        REQUIRE(thumb.png_data[2] == 'N');
+        REQUIRE(thumb.png_data[3] == 'G');
     }
 
     SECTION("Returns empty for gcode without thumbnails") {
@@ -1055,14 +1156,11 @@ TEST_CASE("extract_thumbnails_from_content - Basic extraction", "[gcode][thumbna
                             "G1 X10 Y10 Z0.2\n"
                             "G1 X20 Y20 E1.0\n";
 
-        auto thumbnails = extract_thumbnails_from_content(gcode);
-
-        REQUIRE(thumbnails.empty());
+        REQUIRE(get_best_thumbnail_from_content(gcode).png_data.empty());
     }
 
     SECTION("Returns empty for empty content") {
-        auto thumbnails = extract_thumbnails_from_content("");
-        REQUIRE(thumbnails.empty());
+        REQUIRE(get_best_thumbnail_from_content("").png_data.empty());
     }
 
     SECTION("Truncated thumbnail block emits nothing") {
@@ -1072,18 +1170,171 @@ TEST_CASE("extract_thumbnails_from_content - Basic extraction", "[gcode][thumbna
                             // Missing "thumbnail end" - the block never closes
                             "G28 ; home\n";
 
-        auto thumbnails = extract_thumbnails_from_content(gcode);
-
-        // The parser only pushes an entry from the "thumbnail end" / "png end"
-        // branches; hitting real gcode breaks out of the header scan with the
-        // block still open, so the accumulated base64 is dropped. That is the
-        // contract - a truncated block must NOT yield a half-decoded PNG that
-        // downstream image decoding would then choke on.
-        REQUIRE(thumbnails.empty());
+        // A block counts only once "thumbnail end" / "png end" closes it; real
+        // gcode ends the header scan with the block still open. A truncated
+        // block must NOT yield a half-decoded PNG that image decoding chokes on.
+        REQUIRE(get_best_thumbnail_from_content(gcode).png_data.empty());
     }
 }
 
-TEST_CASE("extract_thumbnails_from_content - Multiple thumbnails", "[gcode][thumbnail]") {
+TEST_CASE("get_best_thumbnail_from_content - an unusable JPEG yields to the PNG",
+          "[gcode][thumbnail]") {
+    const std::string png_block = "; thumbnail begin 1x1 96\n"
+                                  "; "
+                                  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+"
+                                  "M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==\n"
+                                  "; thumbnail end\n";
+
+    SECTION("a JPEG wider than the 4096px decode limit") {
+        const std::string gcode =
+            png_block +
+            "; thumbnail_JPG begin 5000x8 1040\n"
+            "; /9j/4AAQSkZJRgABAQAAAQABAAD/2wBDABALDA4MChAODQ4SERATGCgaGBYWGDEjJR0oOjM9PDkz\n"
+            "; ODdASFxOQERXRTc4UG1RV19iZ2hnPk1xeXBkeFxlZ2P/2wBDARESEhgVGC8aGi9jQjhCY2NjY2Nj\n"
+            "; Y2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2P/wAARCAAIE4gDASIA\n"
+            "; AhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQA\n"
+            "; AAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3\n"
+            "; ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWm\n"
+            "; p6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEA\n"
+            "; AwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSEx\n"
+            "; BhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElK\n"
+            "; U1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3\n"
+            "; uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDHooor\n"
+            "; kPLCiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooo\n"
+            "; oAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiig\n"
+            "; AooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigD//Z\n"
+            "; thumbnail_JPG end\n"
+            "G28\n";
+        auto thumb = get_best_thumbnail_from_content(gcode);
+        CHECK(thumb.width == 1);
+        CHECK(thumb.height == 1);
+        REQUIRE(thumb.png_data.size() >= 8);
+        CHECK(thumb.png_data[0] == 0x89);
+    }
+
+    SECTION("a 600px-wide JPEG converts and wins on size") {
+        const std::string gcode =
+            png_block +
+            "; thumbnail_JPG begin 600x8 1040\n"
+            "; /9j/4AAQSkZJRgABAQAAAQABAAD/2wBDABALDA4MChAODQ4SERATGCgaGBYWGDEjJR0oOjM9PDkz\n"
+            "; ODdASFxOQERXRTc4UG1RV19iZ2hnPk1xeXBkeFxlZ2P/2wBDARESEhgVGC8aGi9jQjhCY2NjY2Nj\n"
+            "; Y2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2P/wAARCAAIAlgDASIA\n"
+            "; AhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQA\n"
+            "; AAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3\n"
+            "; ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWm\n"
+            "; p6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEA\n"
+            "; AwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSEx\n"
+            "; BhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElK\n"
+            "; U1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3\n"
+            "; uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDHooor\n"
+            "; kPLCiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooo\n"
+            "; oAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiig\n"
+            "; AooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigD//Z\n"
+            "; thumbnail_JPG end\n"
+            "G28\n";
+        auto thumb = get_best_thumbnail_from_content(gcode);
+        CHECK(thumb.width == 600);
+        CHECK(thumb.height == 8);
+        REQUIRE(thumb.png_data.size() >= 8);
+        CHECK(thumb.png_data[0] == 0x89);
+    }
+
+    SECTION("a JPEG that does not decode") {
+        const std::string gcode =
+            png_block +
+            "; thumbnail_JPG begin 300x300 96\n"
+            "; /9j/4G5vdCBhIGpwZWcgYXQgYWxsbm90IGEganBlZyBhdCBhbGxub3QgYSBqcGVnIGF0IGFsbG5v\n"
+            "; dCBhIGpwZWcgYXQgYWxs\n"
+            "; thumbnail_JPG end\n"
+            "G28\n";
+        auto thumb = get_best_thumbnail_from_content(gcode);
+        CHECK(thumb.width == 1);
+        REQUIRE(thumb.png_data.size() >= 8);
+        CHECK(thumb.png_data[0] == 0x89);
+    }
+
+    SECTION("a 512px-wide JPEG still converts") {
+        const std::string gcode =
+            png_block +
+            "; thumbnail_JPG begin 512x8 1008\n"
+            "; /9j/4AAQSkZJRgABAQAAAQABAAD/2wBDABALDA4MChAODQ4SERATGCgaGBYWGDEjJR0oOjM9PDkz\n"
+            "; ODdASFxOQERXRTc4UG1RV19iZ2hnPk1xeXBkeFxlZ2P/2wBDARESEhgVGC8aGi9jQjhCY2NjY2Nj\n"
+            "; Y2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2P/wAARCAAIAgADASIA\n"
+            "; AhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQA\n"
+            "; AAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3\n"
+            "; ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWm\n"
+            "; p6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEA\n"
+            "; AwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSEx\n"
+            "; BhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElK\n"
+            "; U1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3\n"
+            "; uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDHooor\n"
+            "; kPLCiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooo\n"
+            "; oAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiig\n"
+            "; AooooAKKKKACiiigD//Z\n"
+            "; thumbnail_JPG end\n"
+            "G28\n";
+        auto thumb = get_best_thumbnail_from_content(gcode);
+        CHECK(thumb.width == 512);
+        REQUIRE(thumb.png_data.size() >= 8);
+        CHECK(thumb.png_data[0] == 0x89);
+    }
+}
+
+TEST_CASE("get_best_thumbnail_from_content - Cura JPEG thumbnail comes back as PNG",
+          "[gcode][thumbnail]") {
+    // Cura writes "; thumbnail_JPG begin"; a 16x8 JPEG.
+    std::stringstream gcode;
+    gcode << ";FLAVOR:Marlin\n";
+    gcode << "; thumbnail_JPG begin 16x8 848\n";
+    gcode << "; /9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsK\n";
+    gcode << "; CwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQU\n";
+    gcode << "; FBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAAIABADASIA\n";
+    gcode << "; AhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQA\n";
+    gcode << "; AAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3\n";
+    gcode << "; ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWm\n";
+    gcode << "; p6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEA\n";
+    gcode << "; AwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSEx\n";
+    gcode << "; BhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElK\n";
+    gcode << "; U1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3\n";
+    gcode << "; uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDwSiii\n";
+    gcode << "; vz8/uA//2Q==\n";
+    gcode << "; thumbnail_JPG end\n";
+    gcode << "G28 ; home\n";
+
+    auto thumb = get_best_thumbnail_from_content(gcode.str());
+
+    REQUIRE(thumb.width == 16);
+    REQUIRE(thumb.height == 8);
+    REQUIRE(thumb.png_data.size() >= 8);
+    CHECK(thumb.png_data[0] == 0x89);
+    CHECK(thumb.png_data[1] == 'P');
+    CHECK(thumb.png_data[2] == 'N');
+    CHECK(thumb.png_data[3] == 'G');
+}
+
+TEST_CASE("get_best_thumbnail_from_content - thumbnail after setup commands",
+          "[gcode][thumbnail]") {
+    const std::string png =
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAA"
+        "BJRU5ErkJggg==";
+    const std::string block = "; thumbnail begin 1x1 " + std::to_string(png.size()) + "\n; " + png +
+                              "\n; thumbnail end\n";
+
+    SECTION("M73 / temperature / mode commands before the block do not hide it") {
+        std::string gcode =
+            "; generated by Cura\nM73 P0 R42\nM82\nM140 S60\nM104 S200\nG21\n" + block + "G28\n";
+        auto thumb = get_best_thumbnail_from_content(gcode);
+        REQUIRE(thumb.width == 1);
+        REQUIRE_FALSE(thumb.png_data.empty());
+    }
+
+    SECTION("a block after the first extrusion move is outside the header") {
+        std::string gcode = "; generated by Cura\nG28\nG1 X10 Y10 E1\n" + block;
+        REQUIRE(get_best_thumbnail_from_content(gcode).png_data.empty());
+    }
+}
+
+TEST_CASE("get_best_thumbnail_from_content - Multiple thumbnails", "[gcode][thumbnail]") {
     // Real slicers often embed multiple sizes (e.g., 48x48 for LCD, 300x300 for web)
     std::string small_png_base64 =
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAA"
@@ -1104,22 +1355,16 @@ TEST_CASE("extract_thumbnails_from_content - Multiple thumbnails", "[gcode][thum
     gcode << "; thumbnail end\n";
     gcode << "G28 ; home\n";
 
-    auto thumbnails = extract_thumbnails_from_content(gcode.str());
+    auto thumb = get_best_thumbnail_from_content(gcode.str());
 
-    REQUIRE(thumbnails.size() == 2);
-
-    // Should be sorted largest-first
-    REQUIRE(thumbnails[0].width >= thumbnails[1].width);
-
-    // Verify both have valid PNG data
-    for (const auto& thumb : thumbnails) {
-        REQUIRE(thumb.png_data.size() >= 8);
-        REQUIRE(thumb.png_data[0] == 0x89);
-        REQUIRE(thumb.png_data[1] == 'P');
-    }
+    // The largest wins regardless of order in the file
+    REQUIRE(thumb.width == 2);
+    REQUIRE(thumb.png_data.size() >= 8);
+    REQUIRE(thumb.png_data[0] == 0x89);
+    REQUIRE(thumb.png_data[1] == 'P');
 }
 
-TEST_CASE("extract_thumbnails_from_content - Real-world format variations", "[gcode][thumbnail]") {
+TEST_CASE("get_best_thumbnail_from_content - Real-world format variations", "[gcode][thumbnail]") {
     SECTION("Handles multi-line base64 (split across lines)") {
         // Real slicers split base64 into ~78 char lines
         std::string line1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk";
@@ -1131,12 +1376,11 @@ TEST_CASE("extract_thumbnails_from_content - Real-world format variations", "[gc
         gcode << "; " << line2 << "\n";
         gcode << "; thumbnail end\n";
 
-        auto thumbnails = extract_thumbnails_from_content(gcode.str());
+        auto thumb = get_best_thumbnail_from_content(gcode.str());
 
-        REQUIRE(thumbnails.size() == 1);
         // Should have decoded the concatenated base64
-        REQUIRE(thumbnails[0].png_data.size() >= 8);
-        REQUIRE(thumbnails[0].png_data[0] == 0x89);
+        REQUIRE(thumb.png_data.size() >= 8);
+        REQUIRE(thumb.png_data[0] == 0x89);
     }
 
     SECTION("Ignores non-thumbnail comments") {
@@ -1153,11 +1397,66 @@ TEST_CASE("extract_thumbnails_from_content - Real-world format variations", "[gc
         gcode << "; thumbnail end\n";
         gcode << "; total layer number: 240\n";
 
-        auto thumbnails = extract_thumbnails_from_content(gcode.str());
+        auto thumb = get_best_thumbnail_from_content(gcode.str());
 
-        // Should find exactly one thumbnail, not confuse other comments
-        REQUIRE(thumbnails.size() == 1);
+        // Other comments are not mistaken for thumbnail data
+        REQUIRE(thumb.width == 1);
+        REQUIRE(thumb.png_data.size() >= 8);
+        REQUIRE(thumb.png_data[0] == 0x89);
     }
+}
+
+TEST_CASE("GCodeParser - a T with parameters is not a tool change", "[gcode][parser]") {
+    // Same rule as tool_index_for_line(), so the full parse and the streaming
+    // index agree on the tool set.
+    GCodeParser parser;
+    parser.parse_line("T0");
+    parser.parse_line("T1 X5");
+    parser.parse_line("G1 X10 Y10 E1");
+    auto file = parser.finalize();
+    CHECK(file.tools_used_indices == std::set<int>{0});
+}
+
+TEST_CASE("get_best_thumbnail - real file picks the largest block", "[gcode][thumbnail]") {
+    // 3DBenchy embeds a 48x48 and a 300x300 thumbnail, in that order
+    const std::string test_file = "assets/test_gcodes/3DBenchy.gcode";
+    if (!std::ifstream(test_file).good()) {
+        SKIP("Test G-code file not found: " << test_file);
+    }
+    auto thumb = get_best_thumbnail(test_file);
+    REQUIRE(thumb.width == 300);
+    REQUIRE(thumb.height == 300);
+    REQUIRE(thumb.png_data.size() > 1000);
+    REQUIRE(thumb.png_data[0] == 0x89);
+    REQUIRE(thumb.png_data[1] == 'P');
+}
+
+TEST_CASE("get_cached_thumbnail - a cache entry that is not a PNG is regenerated",
+          "[gcode][thumbnail]") {
+    const std::string test_file = "assets/test_gcodes/3DBenchy.gcode";
+    if (!std::ifstream(test_file).good()) {
+        SKIP("Test G-code file not found: " << test_file);
+    }
+    char dir_tmpl[] = "/tmp/helix_thumb_cache_XXXXXX";
+    REQUIRE(mkdtemp(dir_tmpl) != nullptr);
+    const std::string cache_dir = dir_tmpl;
+    const std::string cache_file = cache_dir + "/3DBenchy.png";
+
+    // JPEG bytes under a .png name, newer than the G-code.
+    {
+        std::ofstream out(cache_file, std::ios::binary);
+        out << "\xff\xd8\xff\xe0\x00\x10JFIF-not-a-png";
+    }
+
+    REQUIRE(get_cached_thumbnail(test_file, cache_dir) == cache_file);
+
+    std::ifstream in(cache_file, std::ios::binary);
+    char head[4] = {};
+    in.read(head, 4);
+    CHECK(std::memcmp(head, "\x89PNG", 4) == 0);
+
+    std::remove(cache_file.c_str());
+    rmdir(cache_dir.c_str());
 }
 
 TEST_CASE("GCodeParser - Real 3DBenchy layer count", "[gcode][parser][layers][integration]") {
@@ -1188,18 +1487,6 @@ TEST_CASE("GCodeParser - Real 3DBenchy layer count", "[gcode][parser][layers][in
         // Allow some tolerance for first layer/intro differences
         REQUIRE(file.layers.size() >= 230);
         REQUIRE(file.layers.size() <= 250);
-    }
-
-    SECTION("Layer count stored in metadata matches parsed count") {
-        // The metadata layer count should match what we parsed
-        INFO("Parsed layers: " << file.layers.size());
-        INFO("Metadata layer count: " << file.total_layer_count);
-
-        // If metadata has layer count, it should roughly match parsed
-        if (file.total_layer_count > 0) {
-            REQUIRE(file.layers.size() >= static_cast<size_t>(file.total_layer_count * 0.9));
-            REQUIRE(file.layers.size() <= static_cast<size_t>(file.total_layer_count * 1.1));
-        }
     }
 }
 
@@ -1521,6 +1808,119 @@ TEST_CASE("GCodeParser - stationary toolchange prime mints no segment",
     REQUIRE(file.global_bounding_box.max.y < 150.0f);
 }
 
+TEST_CASE("GCodeParser - auxiliary-only whole file promotes its extrusion to the print",
+          "[gcode][parser][feature_type]") {
+    // OrcaSlicer calibration files (pressure advance, flow rate) tag their
+    // entire body ;TYPE:Custom. The auxiliary classification exists to hide
+    // purge lines and prime towers NEXT TO a real print; applied to a file
+    // whose only extrusion is auxiliary it suppresses the whole toolpath. When
+    // finalize() has the whole file and finds not one non-auxiliary extrusion,
+    // the auxiliary geometry IS the print and must draw and frame normally.
+    SECTION("Custom-only body (calibration file shape)") {
+        GCodeParser parser;
+        parser.parse_line("M83");
+        parser.parse_line("G1 X10 Y10 Z0.2 F600"); // travel into position, before any ;TYPE:
+        parser.parse_line(";TYPE:Custom");
+        parser.parse_line("G1 X100 Y10 E0.5"); // the print, per the slicer's own tagging
+        parser.parse_line("G1 X100 Y100 E0.6");
+        auto file = parser.finalize(/*whole_file=*/true);
+
+        // The setup reached the branch: extrusion exists and none of it is
+        // auxiliary any more.
+        REQUIRE(file.total_segments == 3);
+        size_t extrusions = 0;
+        for (const auto& layer : file.layers) {
+            for (const auto& seg : layer.segments) {
+                REQUIRE_FALSE(is_auxiliary_geometry(seg.feature_type));
+                if (seg.is_extrusion) {
+                    ++extrusions;
+                }
+            }
+        }
+        REQUIRE(extrusions == 2);
+
+        // Drawability with extrusions shown - the blank-preview failure mode.
+        for (const auto& layer : file.layers) {
+            for (const auto& seg : layer.segments) {
+                CHECK(segment_drawable(seg, /*is_support=*/false, /*show_support=*/false,
+                                       /*show_extrusion=*/true,
+                                       /*show_travel=*/false) == seg.is_extrusion);
+            }
+        }
+
+        // Bounds were accumulated during parse under the auxiliary assumption,
+        // so they were never expanded; promotion must rebuild them.
+        REQUIRE_FALSE(file.global_bounding_box.is_empty());
+        CHECK(file.global_bounding_box.min.x == Approx(10.0f));
+        CHECK(file.global_bounding_box.max.x == Approx(100.0f));
+        CHECK(file.global_bounding_box.max.y == Approx(100.0f));
+        REQUIRE_FALSE(file.layers[0].bounding_box.is_empty());
+
+        // The running drawable count must include the promoted mass.
+        CHECK(file.drawable_segments == file.total_segments);
+    }
+
+    SECTION("Wipe-tower-only body promotes the same way") {
+        GCodeParser parser;
+        parser.parse_line("M83");
+        parser.parse_line("G1 X10 Y10 Z0.2 F600");
+        parser.parse_line(";TYPE:Wipe tower");
+        parser.parse_line("G1 X60 Y10 E0.5");
+        auto file = parser.finalize(/*whole_file=*/true);
+
+        REQUIRE(file.total_segments == 2);
+        REQUIRE(file.layers[0].segments[1].feature_type == FeatureType::Unknown);
+        CHECK_FALSE(file.global_bounding_box.is_empty());
+        CHECK(file.drawable_segments == file.total_segments);
+    }
+
+    SECTION("a per-layer chunk parse never promotes: it cannot see the rest of the file") {
+        // Streaming parses one layer at a time, and a tower-only layer of a
+        // normal multi-color print is indistinguishable from an
+        // auxiliary-only file at chunk granularity. The whole-file answer is
+        // the only safe one, so the default finalize() (what the streaming
+        // controller calls) must keep hiding auxiliary extrusion.
+        GCodeParser parser;
+        parser.parse_line("M83");
+        parser.parse_line("G1 X10 Y10 Z0.2 F600");
+        parser.parse_line(";TYPE:Custom");
+        parser.parse_line("G1 X100 Y10 E0.5");
+        auto file = parser.finalize();
+
+        REQUIRE(file.layers[0].segments[1].feature_type == FeatureType::Custom);
+        CHECK(file.global_bounding_box.is_empty());
+        CHECK(file.drawable_segments == 1); // the pre-marker travel only
+    }
+}
+
+TEST_CASE("GCodeParser - whole file with real extrusion keeps its purge auxiliary",
+          "[gcode][parser][feature_type]") {
+    // Promotion fires only when not one non-auxiliary extrusion exists
+    // anywhere in the file. A normal print's purge line stays hidden and out
+    // of every bounds even though finalize() was told it has the whole file.
+    GCodeParser parser;
+    parser.parse_line("M83");
+    parser.parse_line(";TYPE:Custom");
+    parser.parse_line("G1 X200 Y10 Z0.2 E5"); // purge line, out at the bed's edge
+    parser.parse_line(";TYPE:Outer wall");
+    parser.parse_line("G0 X10 Y10");      // travel from the purge to the part
+    parser.parse_line("G1 X50 Y50 E0.2"); // the part
+
+    auto file = parser.finalize(/*whole_file=*/true);
+    REQUIRE(file.total_segments == 3);
+    // The setup reached the branch's other side: real extrusion exists.
+    REQUIRE(file.layers[0].segments[2].is_extrusion);
+
+    REQUIRE(file.layers[0].segments[0].feature_type == FeatureType::Custom);
+    CHECK_FALSE(segment_drawable(file.layers[0].segments[0], /*is_support=*/false,
+                                 /*show_support=*/false, /*show_extrusion=*/true,
+                                 /*show_travel=*/true));
+    CHECK(file.global_bounding_box.max.x == Approx(50.0f));
+    CHECK(file.layers[0].bounding_box.max.x == Approx(50.0f));
+    // The purge extrusion is not drawable; the travel and the wall are.
+    CHECK(file.drawable_segments == 2);
+}
+
 TEST_CASE("GCodeParser - FeatureType normalization across slicer dialects",
           "[gcode][parser][feature_type]") {
     SECTION("OrcaSlicer / PrusaSlicer / Bambu dialect (space-separated)") {
@@ -1533,6 +1933,8 @@ TEST_CASE("GCodeParser - FeatureType normalization across slicer dialects",
                 FeatureType::SparseInfill);
         REQUIRE(GCodeParser::parse_feature_type_value("Solid infill") == FeatureType::SolidInfill);
         REQUIRE(GCodeParser::parse_feature_type_value("Top surface") == FeatureType::TopSurface);
+        REQUIRE(GCodeParser::parse_feature_type_value("Top solid infill") ==
+                FeatureType::TopSurface);
         REQUIRE(GCodeParser::parse_feature_type_value("Bottom surface") ==
                 FeatureType::BottomSurface);
         REQUIRE(GCodeParser::parse_feature_type_value("Bridge") == FeatureType::Bridge);
@@ -1695,4 +2097,79 @@ TEST_CASE("GCodeParser - Real Cura file FeatureType distribution",
                         counts[FeatureType::Skirt] + counts[FeatureType::SparseInfill] +
                         counts[FeatureType::SolidInfill];
     REQUIRE(recognized > counts[FeatureType::Unknown]);
+}
+
+TEST_CASE("parse_exclude_object_define reads a slicer DEFINE line",
+          "[gcode][parser][pre_start_exclude]") {
+    using helix::gcode::parse_exclude_object_define;
+    auto obj = parse_exclude_object_define(
+        "EXCLUDE_OBJECT_DEFINE NAME=Cube_id_1_copy_0 CENTER=-36.362,6.5 "
+        "POLYGON=[[-40,2],[-32,2],[-32,11],[-40,11]]");
+    REQUIRE(obj.has_value());
+    CHECK(obj->name == "Cube_id_1_copy_0");
+    CHECK(obj->center.x == Catch::Approx(-36.362f));
+    CHECK(obj->center.y == Catch::Approx(6.5f));
+    REQUIRE(obj->polygon.size() == 4);
+    CHECK(obj->polygon[2] == glm::vec2(-32.0f, 11.0f));
+
+    CHECK_FALSE(parse_exclude_object_define("EXCLUDE_OBJECT_START NAME=Cube").has_value());
+    CHECK_FALSE(parse_exclude_object_define("EXCLUDE_OBJECT_DEFINE CENTER=1,2").has_value());
+    CHECK_FALSE(parse_exclude_object_define("G1 X10 Y10").has_value());
+}
+
+TEST_CASE("parse_exclude_object_define keeps a quoted name whole",
+          "[gcode][parser][pre_start_exclude]") {
+    using helix::gcode::parse_exclude_object_define;
+    auto dq = parse_exclude_object_define("EXCLUDE_OBJECT_DEFINE NAME=\"Part 1\" CENTER=5,6");
+    REQUIRE(dq.has_value());
+    CHECK(dq->name == "Part 1");
+    CHECK(dq->center == glm::vec2(5.0f, 6.0f));
+
+    auto sq = parse_exclude_object_define("EXCLUDE_OBJECT_DEFINE NAME='Part 2' CENTER=7,8");
+    REQUIRE(sq.has_value());
+    CHECK(sq->name == "Part 2");
+    CHECK(sq->center == glm::vec2(7.0f, 8.0f));
+}
+
+TEST_CASE("collect_exclude_object_defines keeps file order and ignores a cut final line",
+          "[gcode][parser][pre_start_exclude]") {
+    const std::string content = "; header\n"
+                                "EXCLUDE_OBJECT_DEFINE NAME=Zed CENTER=30,30\n"
+                                "EXCLUDE_OBJECT_DEFINE NAME=Alpha CENTER=90,30 ; slicer note\n"
+                                "G28\n"
+                                "EXCLUDE_OBJECT_DEFINE NAME=Mid CENTER=150,30\n"
+                                "EXCLUDE_OBJECT_DEFINE NAME=Cut_of"; // the read stopped here
+    const auto objs = helix::gcode::collect_exclude_object_defines(content);
+    REQUIRE(objs.size() == 3);
+    CHECK(objs[0].name == "Zed");
+    CHECK(objs[1].name == "Alpha");
+    CHECK(objs[2].name == "Mid");
+    CHECK(helix::gcode::collect_exclude_object_defines("G28\nG1 X1\n").empty());
+}
+
+TEST_CASE("collect_exclude_object_defines: a redefinition replaces the object in place",
+          "[gcode][parser][pre_start_exclude]") {
+    const auto objs =
+        helix::gcode::collect_exclude_object_defines("EXCLUDE_OBJECT_DEFINE NAME=Zed CENTER=1,1\n"
+                                                     "EXCLUDE_OBJECT_DEFINE NAME=Alpha CENTER=5,5\n"
+                                                     "EXCLUDE_OBJECT_DEFINE NAME=Zed CENTER=2,2\n");
+    REQUIRE(objs.size() == 2);
+    CHECK(objs[0].name == "Zed");
+    CHECK(objs[0].center == glm::vec2(2.0f, 2.0f));
+    CHECK(objs[1].name == "Alpha");
+}
+
+TEST_CASE("GCodeParser keeps a quoted object name whole across DEFINE and START",
+          "[gcode][parser][pre_start_exclude]") {
+    helix::gcode::GCodeParser parser;
+    parser.parse_line("EXCLUDE_OBJECT_DEFINE NAME='Part 1' CENTER=10,10");
+    parser.parse_line("EXCLUDE_OBJECT_START NAME='Part 1'");
+    parser.parse_line("G1 X10 Y10 Z0.2 E1");
+    parser.parse_line("G1 X20 Y10 E2");
+    parser.parse_line("EXCLUDE_OBJECT_END NAME='Part 1'");
+    auto file = parser.finalize();
+    REQUIRE(file.objects.count("Part 1") == 1);
+    REQUIRE_FALSE(file.layers.empty());
+    REQUIRE_FALSE(file.layers[0].segments.empty());
+    CHECK(file.get_object_name(file.layers[0].segments[0].object_name_index) == "Part 1");
 }

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // Guards against drift between the AMS mock backends' slot filaments and the
-// mock Spoolman inventory (MoonrakerSpoolmanAPIMock::init_mock_spools). A slot
+// mock Spoolman inventory (MockSpoolmanServer::init_mock_spools). A slot
 // that claims spoolman_id=N must describe the same filament as spool N, or the
 // slot editor looks broken in mock mode (spec §9).
 
@@ -41,12 +41,12 @@ std::map<int, SpoolInfo> fetch_mock_spools() {
 /// carries its own brand is mocking something hardware never sends -- which is
 /// what hid #1264. (CFS, Snapmaker and QIDI do read a vendor from firmware, but
 /// none of them has a mock backend.)
-void check_backend_against_spoolman(AmsBackendMock& mock, int slot_count) {
+void check_backend_against_spoolman(helix::AmsBackendMock& mock, int slot_count) {
     auto spools = fetch_mock_spools();
     REQUIRE(!spools.empty());
 
     for (int i = 0; i < slot_count; ++i) {
-        SlotInfo slot = mock.get_slot_info(i);
+        helix::SlotInfo slot = mock.get_slot_info(i);
         if (slot.spoolman_id <= 0) {
             continue; // intentionally unlinked lane (untracked path)
         }
@@ -78,23 +78,23 @@ void check_backend_against_spoolman(AmsBackendMock& mock, int slot_count) {
 
 TEST_CASE("AFC mock slots match mock Spoolman spools (spec §9 drift)",
           "[mock][spoolman][ams_edit_overlay]") {
-    AmsBackendMock mock(8);
+    helix::AmsBackendMock mock(8);
     mock.set_afc_mode(true);
     check_backend_against_spoolman(mock, 8);
 }
 
 TEST_CASE("Happy Hare mock slots match mock Spoolman spools (spec §9 drift)",
           "[mock][spoolman][ams_edit_overlay]") {
-    AmsBackendMock mock(8);
+    helix::AmsBackendMock mock(8);
     // Happy Hare reports no vendor either: its gate map cannot carry one.
     check_backend_against_spoolman(mock, 8);
 }
 
 TEST_CASE("AFC mock keeps one unlinked lane for the untracked path",
           "[mock][spoolman][ams_edit_overlay]") {
-    AmsBackendMock mock(4);
+    helix::AmsBackendMock mock(4);
     mock.set_afc_mode(true);
-    SlotInfo lane3 = mock.get_slot_info(3);
+    helix::SlotInfo lane3 = mock.get_slot_info(3);
     CHECK(lane3.spoolman_id == 0);
     // Unlinked AND unbranded: no Spoolman record to name it, and AFC reports no
     // vendor, so this lane is the one that must fall back to its color name.
@@ -109,11 +109,11 @@ TEST_CASE("AFC mock lane resolves its brand through the Spoolman identity, not t
     // the brand is the Spoolman identity cache. If a future change reseeds a
     // brand onto the AFC slots, the first CHECK here fails and #1264 is silently
     // untestable again.
-    AmsBackendMock mock(8);
+    helix::AmsBackendMock mock(8);
     mock.set_afc_mode(true);
 
-    const SlotInfo lane0 = mock.get_slot_info(0);
-    REQUIRE(lane0.status == SlotStatus::LOADED);
+    const helix::SlotInfo lane0 = mock.get_slot_info(0);
+    REQUIRE(lane0.status == helix::SlotStatus::LOADED);
     REQUIRE(lane0.spoolman_id > 0);
     CHECK(lane0.brand.empty());
 

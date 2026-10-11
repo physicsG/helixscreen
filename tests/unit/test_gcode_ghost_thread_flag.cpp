@@ -89,7 +89,6 @@ TEST_CASE("a finished ghost build never strands the running flag", "[gcode][ghos
     GCodeLayerRenderer renderer;
     renderer.set_canvas_size(kCanvas, kCanvas);
     renderer.set_gcode(&gcode);
-    renderer.set_view_mode(GCodeLayerRenderer::ViewMode::FRONT);
     renderer.set_ghost_mode(true);
 
     int spawned = 0;
@@ -117,4 +116,30 @@ TEST_CASE("a finished ghost build never strands the running flag", "[gcode][ghos
     // A run that never spawned would report zero strands for the wrong reason.
     REQUIRE(spawned == kSpawns);
     CHECK(stranded == 0);
+}
+
+TEST_CASE("ghost build progress counts the layers the worker has drawn",
+          "[gcode][ghost][progress]") {
+    ParsedGCodeFile gcode = make_small_tower();
+
+    GCodeLayerRenderer renderer;
+    renderer.set_canvas_size(kCanvas, kCanvas);
+    renderer.set_gcode(&gcode);
+    renderer.set_ghost_mode(true);
+
+    REQUIRE(GCodeLayerRendererTestAccess::start_and_join_ghost_build(renderer));
+    const auto [done, total] = GCodeLayerRendererTestAccess::ghost_layer_progress(renderer);
+    CHECK(total == kLayers);
+    CHECK(done == kLayers);
+    CHECK(renderer.get_ghost_build_progress() == 1.0f);
+
+    // Mid-build the fraction is layers drawn over layers planned.
+    GCodeLayerRendererTestAccess::stage_running_ghost(renderer, 0, 4);
+    CHECK(renderer.get_ghost_build_progress() == 0.0f);
+    GCodeLayerRendererTestAccess::stage_running_ghost(renderer, 3, 4);
+    CHECK(renderer.get_ghost_build_progress() == 0.75f);
+    // Before the worker has planned its pass there is no denominator yet.
+    GCodeLayerRendererTestAccess::stage_running_ghost(renderer, 0, 0);
+    CHECK(renderer.get_ghost_build_progress() == 0.0f);
+    GCodeLayerRendererTestAccess::clear_staged_ghost(renderer);
 }

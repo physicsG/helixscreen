@@ -2,12 +2,12 @@
 
 #include "shaper_csv_parser.h"
 
+#include "text_io.h"
+
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <cstdlib>
-#include <fstream>
-#include <sstream>
 #include <string>
 #include <vector>
 
@@ -16,22 +16,11 @@ namespace calibration {
 
 namespace {
 
-/// Trim leading and trailing whitespace from a string
-std::string trim(const std::string& s) {
-    auto start = s.find_first_not_of(" \t\r\n");
-    if (start == std::string::npos)
-        return "";
-    auto end = s.find_last_not_of(" \t\r\n");
-    return s.substr(start, end - start + 1);
-}
-
 /// Split a CSV line into fields (simple comma-delimited, no quoting)
 std::vector<std::string> split_csv_line(const std::string& line) {
     std::vector<std::string> fields;
-    std::istringstream stream(line);
-    std::string field;
-    while (std::getline(stream, field, ',')) {
-        fields.push_back(trim(field));
+    for (std::string_view field : text_io::lines(line, ',')) {
+        fields.push_back(std::string(helix::text_io::trim(field)));
     }
     return fields;
 }
@@ -59,15 +48,15 @@ bool parse_shaper_header(const std::string& header, std::string& name, float& fr
 ShaperCsvData parse_shaper_csv(const std::string& csv_path, char axis) {
     ShaperCsvData result;
 
-    std::ifstream file(csv_path);
-    if (!file.is_open()) {
+    text_io::LineReader file(csv_path);
+    if (!file) {
         spdlog::warn("shaper_csv_parser: cannot open file: {}", csv_path);
         return result;
     }
 
     // Read header line
     std::string header_line;
-    if (!std::getline(file, header_line)) {
+    if (!file.next(header_line)) {
         spdlog::warn("shaper_csv_parser: empty file: {}", csv_path);
         return result;
     }
@@ -136,8 +125,8 @@ ShaperCsvData parse_shaper_csv(const std::string& csv_path, char axis) {
 
     // Parse data rows
     std::string line;
-    while (std::getline(file, line)) {
-        auto trimmed = trim(line);
+    while (file.next(line)) {
+        const std::string trimmed(helix::text_io::trim(line));
         if (trimmed.empty())
             continue;
 
@@ -179,6 +168,86 @@ ShaperCsvData parse_shaper_csv(const std::string& csv_path, char axis) {
     spdlog::debug("shaper_csv_parser: parsed {} frequency bins, {} shaper curves from {}",
                   result.frequencies.size(), result.shaper_curves.size(), csv_path);
 
+    return result;
+}
+
+ResonanceCsvData parse_resonance_csv(const std::string& csv_path) {
+    ResonanceCsvData result;
+
+    text_io::LineReader file(csv_path);
+    if (!file) {
+        spdlog::warn("[ShaperCSV] cannot open resonance file: {}", csv_path);
+        result.error = ResonanceCsvError::MISSING;
+        return result;
+    }
+
+    std::string header_line;
+    file.next(header_line);
+    auto headers = split_csv_line(header_line);
+
+    int freq_col = -1;
+    int psd_col = -1;
+    bool has_axis_psd = false;
+    int other_cols = 0;
+    for (int i = 0; i < static_cast<int>(headers.size()); ++i) {
+        const auto& h = headers[i];
+        if (h == "freq") {
+            freq_col = i;
+        } else if (h == "psd_xyz") {
+            psd_col = i;
+        } else if (h == "psd_x" || h == "psd_y" || h == "psd_z") {
+            has_axis_psd = true;
+        } else {
+            ++other_cols;
+        }
+    }
+
+    if (freq_col < 0 || psd_col < 0) {
+        // Per-chip output (one column per accelerometer) has no summed psd_xyz;
+        // which chip to use is a caller decision, not a guess this parser makes.
+        if (freq_col >= 0 && !has_axis_psd && other_cols > 1) {
+            spdlog::warn("[ShaperCSV] per-chip columns, no psd_xyz: {}", csv_path);
+            result.error = ResonanceCsvError::MULTI_CHIP;
+        } else {
+            spdlog::warn("[ShaperCSV] no freq/psd_xyz column: {}", csv_path);
+            result.error = ResonanceCsvError::NO_PSD_COLUMN;
+        }
+        return result;
+    }
+
+    std::string line;
+    while (file.next(line)) {
+        if (helix::text_io::trim(line).empty())
+            continue;
+        auto fields = split_csv_line(line);
+        if (fields.size() < headers.size())
+            continue;
+
+        bool numeric = true;
+        for (const auto& field : fields) {
+            char* end = nullptr;
+            std::strtof(field.c_str(), &end);
+            if (field.empty() || end == field.c_str()) {
+                numeric = false;
+                break;
+            }
+        }
+        if (!numeric)
+            continue;
+
+        char* end = nullptr;
+        float freq_val = std::strtof(fields[freq_col].c_str(), &end);
+        float psd_val = std::strtof(fields[psd_col].c_str(), &end);
+        result.curve.emplace_back(freq_val, psd_val);
+    }
+
+    if (result.curve.empty()) {
+        spdlog::warn("[ShaperCSV] no data rows in resonance file: {}", csv_path);
+        result.error = ResonanceCsvError::EMPTY;
+        return result;
+    }
+
+    spdlog::debug("[ShaperCSV] parsed {} resonance bins from {}", result.curve.size(), csv_path);
     return result;
 }
 

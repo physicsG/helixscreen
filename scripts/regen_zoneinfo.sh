@@ -26,7 +26,7 @@ TABLE_SRC="${REPO_ROOT}/src/system/display_settings_manager.cpp"
 # no other brace-and-quote construct in the file can leak in.
 extract_zones() {
     sed -n '/^static const TimezoneEntry TIMEZONE_ENTRIES\[\] = {/,/^};/p' "$TABLE_SRC" |
-        sed -n 's/.*{[[:space:]]*"[^"]*"[[:space:]]*,[[:space:]]*"\([^"]*\)"[[:space:]]*}.*/\1/p'
+        sed -n 's/.*{[[:space:]]*"[^"]*"[[:space:]]*,[[:space:]]*"\([^"]*\)"[[:space:]]*[,}].*/\1/p'
 }
 
 if [ ! -f "$TABLE_SRC" ]; then

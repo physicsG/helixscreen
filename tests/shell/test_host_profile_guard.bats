@@ -78,8 +78,16 @@ sandbox_candidates() {
         || fail "HOST_CHROOT_STATE='$HOST_CHROOT_STATE'"
     [ "$HOST_SERVICE_MECHANISM" = "mod-managed" ] \
         || fail "HOST_SERVICE_MECHANISM='$HOST_SERVICE_MECHANISM'"
-    [ "$HOST_INSTALL_ROOT" = "$SANDBOX/usr/data/config/mod/.bin/helixscreen" ] \
+    [ "$HOST_INSTALL_ROOT" = "$SANDBOX/usr/data/config/mod_data/helixscreen" ] \
         || fail "HOST_INSTALL_ROOT='$HOST_INSTALL_ROOT'"
+    # The payload root must be a SIBLING of the mod's git tree, never inside
+    # it: Forge-X's OTA runs git clean -fd over the tree. Relationship, not
+    # string - the disarm of the mod-owned guard below is deliberate only
+    # while this holds.
+    [ "$(dirname "$HOST_INSTALL_ROOT")" = "$(dirname "$HOST_MOD_ROOT")/mod_data" ] \
+        || fail "payload root '$HOST_INSTALL_ROOT' is not the mod tree's mod_data sibling"
+    ! host_path_is_mod_owned "$HOST_INSTALL_ROOT" \
+        || fail "the mod-owned guard claims the payload root: it is ours, outside the tree"
     [ "$HOST_OWNS_COMPETING_UIS" = "1" ] \
         || fail "HOST_OWNS_COMPETING_UIS='$HOST_OWNS_COMPETING_UIS'"
 }
@@ -155,7 +163,7 @@ ad5m_sandbox() {
         || fail "HOST_MOD_CHROOT='$HOST_MOD_CHROOT' - the AD5M chroot was not probed"
     [ "$HOST_SERVICE_MECHANISM" = "mod-managed" ] \
         || fail "HOST_SERVICE_MECHANISM='$HOST_SERVICE_MECHANISM'"
-    [ "$HOST_INSTALL_ROOT" = "$SANDBOX/opt/config/mod/.bin/helixscreen" ] \
+    [ "$HOST_INSTALL_ROOT" = "$SANDBOX/opt/config/mod_data/helixscreen" ] \
         || fail "HOST_INSTALL_ROOT='$HOST_INSTALL_ROOT'"
     # mod_data is a sibling of the mod tree: /opt/config/mod_data on the AD5M,
     # their .shell/helixscreen.sh DATA_ROOT=/opt/config/mod_data/helixscreen.
@@ -258,6 +266,37 @@ ad5m_sandbox() {
     [ "$status" -eq 0 ] || fail "symlink into the mod tree not resolved: $output"
 }
 
+@test "host_path_is_mod_owned: a canonical root reached through a symlink is still owned" {
+    # The canonical roots are absolute production paths, so the resolver is the
+    # only seam a sandbox can drive. Shim realpath to answer the way a rig whose
+    # /usr/data is a link onto its data partition does: two spellings, one tree,
+    # and the guard must own both or the --auto-update refusal fails open on the
+    # spelling it did not recognize.
+    HOST_MOD_ROOT=""
+    HOST_MOD_CHROOT=""
+    local partition="$SANDBOX/mnt/UDISK/config/mod"
+    mkdir -p "$partition/.bin/helixscreen" "$SANDBOX/mnt/UDISK/config/other"
+
+    mkdir -p "$BATS_TEST_TMPDIR/bin"
+    cat > "$BATS_TEST_TMPDIR/bin/realpath" <<RESOLVER
+#!/bin/sh
+case "\$1" in
+    /usr/data/config/mod*) printf '%s\n' "$partition\${1#/usr/data/config/mod}" ;;
+    *)                     printf '%s\n' "\$1" ;;
+esac
+RESOLVER
+    chmod +x "$BATS_TEST_TMPDIR/bin/realpath"
+    PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+
+    run host_path_is_mod_owned "$partition/.bin/helixscreen"
+    [ "$status" -eq 0 ] || fail "canonical root reached through a link not owned: $output"
+
+    # A neighbour on the same partition is not the mod's namespace: resolving
+    # must widen the match to one tree, not to everything beside it.
+    run host_path_is_mod_owned "$SANDBOX/mnt/UDISK/config/other/helixscreen"
+    [ "$status" -ne 0 ] || fail "unrelated path on the resolved partition reported owned"
+}
+
 @test "host_path_is_mod_owned: with no mod on the host nothing is owned" {
     HOST_MOD_ROOT=""
     HOST_MOD_CHROOT=""
@@ -295,24 +334,36 @@ ad5m_sandbox() {
     [ "$status" -ne 0 ] || fail "unrelated /opt/config path reported owned"
 }
 
-@test "the AD5M chroot location is in BOTH lists: probe default and canonical literal" {
+@test "the AD5M chroot location is in BOTH lists: probe default and canonical root" {
     # The BOTH-PLACES RULE (host_profile.sh): a mod location appears in the
-    # env-overridable probe candidates AND in the canonical literals, or it is
+    # env-overridable probe candidates AND in HOST_CANONICAL_MOD_ROOTS, or it is
     # either a path the guard does not recognize or one the probe can never
     # find without help. The AD5M's chroot is /data/.mod/.forge-x - one
     # derivation off its DATA_MNT, the same rule the AD5X's
-    # /usr/data/.mod/.forge-x follows. The sandbox tests above override the
-    # candidates, so the PRODUCTION default list is pinned here by shape, the
-    # same way the mode tests pin their dispatch arms.
+    # /usr/data/.mod/.forge-x follows.
     local profile="$WORKTREE_ROOT/scripts/lib/installer/host_profile.sh"
 
-    # The probe default (production runs leave the env unset).
+    # The probe default is inline in host_profile_probe and the sandbox tests
+    # override it, so nothing can reach it but its shape.
     grep -q 'usr/data/.mod/.forge-x /usr/data/.mod/.zmod /data/.mod/.forge-x' "$profile" \
         || fail "the AD5M chroot is missing from the probe's default candidate list"
-    # The canonical literal (canonical /data/.mod ownership is pinned
-    # behaviorally in the test above; this catches the arm being re-scoped).
-    grep -q '/data/.mod|/data/.mod/\*' "$profile" \
-        || fail "the canonical mod-owned case is missing its /data/.mod arm"
+
+    # The canonical half is a list the module exports, so pin the ENTRY rather
+    # than its source text: /data/.mod exactly, not a re-scoped
+    # /data/.mod/.forge-x and not a sibling that merely contains the string.
+    case " $HOST_CANONICAL_MOD_ROOTS " in
+        *" /data/.mod "*) ;;
+        *) fail "HOST_CANONICAL_MOD_ROOTS lost its /data/.mod entry: $HOST_CANONICAL_MOD_ROOTS" ;;
+    esac
+
+    # ...and that the entry is consulted, so a list nothing iterates cannot
+    # satisfy the rule by existing.
+    HOST_MOD_ROOT=""
+    HOST_MOD_CHROOT=""
+    run host_path_is_mod_owned "/data/.mod"
+    [ "$status" -eq 0 ] || fail "/data/.mod itself is not owned: $output"
+    run host_path_is_mod_owned "/data/.mod/.forge-x/usr/bin/bash"
+    [ "$status" -eq 0 ] || fail "a path under /data/.mod is not owned: $output"
 }
 
 # ===========================================================================
@@ -324,26 +375,30 @@ ad5m_sandbox() {
 # and must stay free of later-module calls (the arch review's S2 hoist).
 # These tests drive the real flow, not the validator in isolation.
 
-@test "set_install_paths' gate refuses a mod-owned INSTALL_DIR outside --mod-payload" {
+@test "set_install_paths' gate refuses a mod-owned INSTALL_DIR outside the payload contract" {
     sandbox_candidates
     # The gate's scenario is the payload-capable host shape: the mod tree WITH
     # its chroot (a chroot-less tree is the AD5M Forge-X layout, which the
-    # probe no longer claims a payload root for - see A1).
+    # probe no longer claims a payload root for - see A1). The probed default
+    # lives OUTSIDE the tree, so the refused root must arrive by the operator
+    # seam: an explicit in-tree INSTALL_DIR.
     mkdir -p "$SANDBOX/usr/data/.mod/.forge-x/usr/bin"
     host_profile_probe
     HELIX_MOD_PAYLOAD=""
+    _USER_INSTALL_DIR="$SANDBOX/usr/data/config/mod/.bin/helixscreen"
     detect_tmp_dir() { TMP_DIR="/tmp/helixscreen-install"; }
 
     run set_install_paths "ad5x" "forge_x"
     [ "$status" -ne 0 ]
-    [[ "$output" == *"refusing"* ]]
-    [[ "$output" == *"--payload-root"* ]]   # the current lever, not the retired --mod-payload
+    contains "refusing" "$output"
+    contains "--payload-root" "$output"   # the current lever, not the retired --mod-payload
 
-    # --mod-payload's contract is an in-place update inside the mod layout:
-    # the guard must stand down for it.
+    # --mod-payload's contract accepts the probed default (outside the tree,
+    # ours): armed, the run lands there.
     HELIX_MOD_PAYLOAD=1
+    _USER_INSTALL_DIR=""
     set_install_paths "ad5x" "forge_x"
-    [ "$INSTALL_DIR" = "$SANDBOX/usr/data/config/mod/.bin/helixscreen" ] \
+    [ "$INSTALL_DIR" = "$SANDBOX/usr/data/config/mod_data/helixscreen" ] \
         || fail "INSTALL_DIR='$INSTALL_DIR'"
 }
 
@@ -364,7 +419,7 @@ ad5m_sandbox() {
 
     run set_install_paths "pi"
     [ "$status" -ne 0 ]
-    [[ "$output" == *"refusing"* ]]
+    contains "refusing" "$output"
     [[ "$output" == *"--payload-root"* ]]   # the current lever, not the retired --mod-payload
 }
 
@@ -381,8 +436,8 @@ ad5m_sandbox() {
     TMP_DIR="$SANDBOX/usr/data/config/mod/helixscreen-install"
     run detect_tmp_dir
     [ "$status" -ne 0 ]
-    [[ "$output" == *"refusing"* ]]
-    [[ "$output" == *"--payload-root"* ]]   # the current lever, not the retired --mod-payload
+    contains "refusing" "$output"
+    contains "--payload-root" "$output"   # the current lever, not the retired --mod-payload
 
     HELIX_MOD_PAYLOAD=1
     detect_tmp_dir
@@ -437,7 +492,7 @@ ad5m_sandbox() {
 
     run backup_install_dir_for_update
     [ "$status" -ne 0 ]
-    [[ "$output" == *"refusing"* ]]
+    contains "refusing" "$output"
     [ -d "$INSTALL_DIR" ]              # untouched
     [ ! -d "${INSTALL_DIR}.old" ]      # nothing moved aside
 }
@@ -473,7 +528,7 @@ ad5m_sandbox() {
 
     run add_update_manager_section "$conf"
     [ "$status" -ne 0 ]
-    [[ "$output" == *"refusing"* ]]
+    contains "refusing" "$output"
     refute_grep 'update_manager helixscreen' "$conf"
     [ ! -f "${conf}.bak.helixscreen" ]   # not even the backup write happened
 }

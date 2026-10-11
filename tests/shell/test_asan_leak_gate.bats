@@ -19,6 +19,8 @@
 # These tests pin the property whose absence broke the nightly: the same leak
 # site, symbolized by either compiler, is ONE key.
 
+load helpers
+
 GATE="scripts/check_asan_leaks.py"
 
 setup() {
@@ -130,7 +132,7 @@ gcc_ui_button_log() {
     frame 1 'MoonrakerClientMock::dispatch_shaper_calibrate_response(char) src/api/moonraker_client_mock.cpp:4749:17'
     finish_run 80 1
     run python3 "$GATE" --list "$LOG"
-    [[ "$output" == *'src/api/moonraker_client_mock.cpp::MoonrakerClientMock::dispatch_shaper_calibrate_response'* ]]
+    contains 'src/api/moonraker_client_mock.cpp::MoonrakerClientMock::dispatch_shaper_calibrate_response' "$output"
 
     : > "$LOG"
     leak_header
@@ -177,6 +179,19 @@ gcc_ui_button_log() {
     grep -q '^tests/unit/test_temp_graph_controller\.cpp::CATCH2_INTERNAL_TEST::test$' "$BASE"
 }
 
+@test "an observer-factory frame keys the leak to the code that asked for the observer" {
+    leak_header
+    printf 'Direct leak of 48 byte(s) in 1 object(s) allocated from:\n' >> "$LOG"
+    frame 0 'operator new(unsigned long) (/usr/lib/.../libasan.so+0x351a24d)'
+    frame 1 'helix::ui::detail::observe_core(_lv_subject_t*, void const*, std::function<void (int)>, helix::ui::Dispatch, std::shared_ptr<bool> const&, std::function<void ()>) /home/runner/work/helixscreen/helixscreen/src/ui/observer_factory.cpp:128:16'
+    frame 2 'ObserverGuard helix::ui::observe_int_sync<ControlsPanel, ControlsPanel::register_observers()::$_0>(_lv_subject_t*, ControlsPanel*, ControlsPanel::register_observers()::$_0&&, std::shared_ptr<bool> const&) /home/runner/work/helixscreen/helixscreen/include/observer_factory.h:84:12'
+    frame 3 'ControlsPanel::register_observers() /home/runner/work/helixscreen/helixscreen/src/ui/ui_panel_controls.cpp:210:19'
+    finish_run 48 1
+    run python3 "$GATE" --write-baseline "$BASE" "$LOG"
+    grep -q '^src/ui/ui_panel_controls\.cpp::ControlsPanel::register_observers$' "$BASE"
+    ! grep -q 'observer_factory' "$BASE"
+}
+
 # --- what must still fail ---------------------------------------------------
 
 @test "a genuinely new origin fails" {
@@ -207,6 +222,20 @@ gcc_ui_button_log() {
     run_gate
     [ "$status" -ne 0 ]
     [[ "$output" == *'exceeds the baseline ceiling'* ]]
+}
+
+@test "a sharded log is held to the ceilings by the sum of its shards" {
+    clang_ui_button_log
+    run python3 "$GATE" --write-baseline "$BASE" "$LOG"
+    grep -q '^max-leaked-bytes: 7168$' "$BASE" || fail "$(cat "$BASE")"
+
+    # Two shards, each under the ceiling on its own, together over it.
+    : > "$LOG"
+    clang_ui_button_log
+    clang_ui_button_log
+    run_gate
+    [ "$status" -ne 0 ] || fail "$output"
+    [[ "$output" == *'exceeds the baseline ceiling'* ]] || fail "$output"
 }
 
 # --- parser safety rails ----------------------------------------------------

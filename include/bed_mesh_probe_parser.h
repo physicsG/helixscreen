@@ -2,10 +2,12 @@
 
 #pragma once
 
+#include "helix_regex.h"
+#include "text_io.h"
+
 #include <algorithm>
 #include <cmath>
 #include <optional>
-#include <regex>
 #include <string>
 #include <vector>
 
@@ -40,16 +42,17 @@ struct ProbeProgress {
 inline std::optional<ProbeProgress> parse_probe_progress(const std::string& line) {
     // Static regex — handles "Probing point 5/25", "Probe point 5 of 25",
     // "Probing mesh point 5/25"
-    static const std::regex probe_regex(
+    static const helix::Regex probe_regex(
         R"(Prob(?:ing (?:mesh )?point|e point) (\d+)[/\s]+(?:of\s+)?(\d+))");
 
-    std::smatch match;
-    if (std::regex_search(line, match, probe_regex) && match.size() == 3) {
-        try {
-            return ProbeProgress{std::stoi(match[1].str()), std::stoi(match[2].str())};
-        } catch (...) {
+    helix::RegexMatch match;
+    if (helix::regex_search(line, match, probe_regex) && match.size() == 3) {
+        const auto current = helix::text_io::parse_leading<int>(match[1].str());
+        const auto total = helix::text_io::parse_leading<int>(match[2].str());
+        if (!current || !total) {
             return std::nullopt;
         }
+        return ProbeProgress{*current, *total};
     }
     return std::nullopt;
 }
@@ -62,6 +65,17 @@ inline std::optional<ProbeProgress> parse_probe_progress(const std::string& line
  */
 inline bool is_probe_result_line(const std::string& line) {
     return line.find("probe at ") != std::string::npos && line.find(" is z=") != std::string::npos;
+}
+
+/**
+ * @brief Check if a line is the verdict a standalone PROBE prints after its samples
+ *
+ * "Result is z=Z" closes one PROBE command: a single measurement such as a
+ * homing or Z-offset touch, never a mesh point. Mesh probing prints no such line,
+ * so its samples look exactly like a mesh point's until this line arrives.
+ */
+inline bool is_standalone_probe_result_line(const std::string& line) {
+    return line.find("Result is z=") != std::string::npos;
 }
 
 /**
@@ -101,17 +115,13 @@ struct ProbePosition {
  * @return Total probe count (N * M) or std::nullopt
  */
 inline std::optional<int> parse_adapted_probe_count(const std::string& line) {
-    static const std::regex adapt_regex(R"(Adapted probe count:\s*(\d+)\s*,\s*(\d+))");
-    std::smatch match;
-    if (std::regex_search(line, match, adapt_regex) && match.size() == 3) {
-        try {
-            int x = std::stoi(match[1].str());
-            int y = std::stoi(match[2].str());
-            if (x > 0 && y > 0) {
-                return x * y;
-            }
-        } catch (...) {
-            // fall through
+    static const helix::Regex adapt_regex(R"(Adapted probe count:\s*(\d+)\s*,\s*(\d+))");
+    helix::RegexMatch match;
+    if (helix::regex_search(line, match, adapt_regex) && match.size() == 3) {
+        const auto x = helix::text_io::parse_leading<int>(match[1].str());
+        const auto y = helix::text_io::parse_leading<int>(match[2].str());
+        if (x && y && *x > 0 && *y > 0) {
+            return *x * *y;
         }
     }
     return std::nullopt;
@@ -119,15 +129,16 @@ inline std::optional<int> parse_adapted_probe_count(const std::string& line) {
 
 inline std::optional<ProbePosition> parse_probe_position(const std::string& line) {
     // Matches "probe at x: 181.474, y: 55.048 is z=..." and "probe at 150.0,150.0 is z=..."
-    static const std::regex pos_regex(
+    static const helix::Regex pos_regex(
         R"(probe at (?:x:\s*)?(-?\d+(?:\.\d+)?)[,\s]+(?:y:\s*)?(-?\d+(?:\.\d+)?)\s+is z=)");
-    std::smatch match;
-    if (std::regex_search(line, match, pos_regex) && match.size() == 3) {
-        try {
-            return ProbePosition{std::stod(match[1].str()), std::stod(match[2].str())};
-        } catch (...) {
+    helix::RegexMatch match;
+    if (helix::regex_search(line, match, pos_regex) && match.size() == 3) {
+        const auto x = helix::text_io::parse_leading<double>(match[1].str());
+        const auto y = helix::text_io::parse_leading<double>(match[2].str());
+        if (!x || !y) {
             return std::nullopt;
         }
+        return ProbePosition{*x, *y};
     }
     return std::nullopt;
 }
@@ -168,6 +179,13 @@ inline constexpr double PROBE_POSITION_TOLERANCE_MM = 0.5;
  * name, which is what failed here — deriving `samples` requires recognising the
  * section, and that list is open-ended across firmware forks.
  *
+ * Samples that turn out to belong to a standalone PROBE are taken back. Such a
+ * probe prints its samples at one position, then "Result is z=". Firmware that
+ * homes or measures a Z offset with PROBE inside its mesh macro (COSMOS runs
+ * several before the mesh and one after) would otherwise count those touches as
+ * mesh points. Samples whose coordinates do not parse are never taken back:
+ * nothing says which of them the Result belongs to.
+ *
  * Stateful and single-threaded: feed lines in arrival order.
  */
 class ProbePointCounter {
@@ -184,23 +202,32 @@ class ProbePointCounter {
      *         probe result line (caller should ignore it).
      */
     std::optional<int> feed(const std::string& line) {
+        if (is_standalone_probe_result_line(line)) {
+            discard_standalone_probe();
+            return std::nullopt;
+        }
         if (!is_probe_result_line(line)) {
             return std::nullopt;
         }
-        ++sample_lines_;
 
         if (auto pos = parse_probe_position(line)) {
+            if (!run_ || !same_point(*pos, run_->at)) {
+                run_ = Run{*pos, points_, sample_lines_, seen_.size()};
+            }
+            ++sample_lines_;
             const bool seen_before =
-                std::any_of(seen_.begin(), seen_.end(), [&](const ProbePosition& p) {
-                    return std::fabs(pos->x - p.x) <= PROBE_POSITION_TOLERANCE_MM &&
-                           std::fabs(pos->y - p.y) <= PROBE_POSITION_TOLERANCE_MM;
-                });
+                std::any_of(seen_.begin(), seen_.end(),
+                            [&](const ProbePosition& p) { return same_point(*pos, p); });
             if (!seen_before) {
                 seen_.push_back(*pos);
                 ++points_;
             }
             return points_;
         }
+
+        // No position to group by, so no later Result may take anything back.
+        run_.reset();
+        ++sample_lines_;
 
         // Coordinates unparseable — ceiling-divide the raw line count. Clamped
         // upward only: a progress readout must never count backwards if a
@@ -215,7 +242,7 @@ class ProbePointCounter {
         return points_;
     }
 
-    /// Raw "probe at" lines seen so far, samples included.
+    /// Raw "probe at" lines counted toward mesh points, samples included.
     int sample_lines() const {
         return sample_lines_;
     }
@@ -224,12 +251,38 @@ class ProbePointCounter {
         points_ = 0;
         sample_lines_ = 0;
         seen_.clear();
+        run_.reset();
     }
 
   private:
+    static bool same_point(const ProbePosition& a, const ProbePosition& b) {
+        return std::fabs(a.x - b.x) <= PROBE_POSITION_TOLERANCE_MM &&
+               std::fabs(a.y - b.y) <= PROBE_POSITION_TOLERANCE_MM;
+    }
+
+    /// Take back everything the samples before a "Result is z=" line added.
+    void discard_standalone_probe() {
+        if (!run_) {
+            return;
+        }
+        points_ = run_->points_before;
+        sample_lines_ = run_->sample_lines_before;
+        seen_.erase(seen_.begin() + static_cast<std::ptrdiff_t>(run_->seen_before), seen_.end());
+        run_.reset();
+    }
+
+    /// Consecutive samples at one position, and the counts from before the first.
+    struct Run {
+        ProbePosition at;
+        int points_before;
+        int sample_lines_before;
+        size_t seen_before;
+    };
+
     int samples_;
     int points_ = 0;
     int sample_lines_ = 0;
+    std::optional<Run> run_;
     /// Every distinct point seen this mesh. Bounded by the grid size (a few
     /// hundred at the very largest), and cleared by reset() between meshes, so
     /// the linear scan per sample stays cheaper than the probe move it follows.

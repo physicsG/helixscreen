@@ -2,6 +2,7 @@
 
 #include "filament_mapper.h"
 
+#include "display_numbering.h"
 #include "filament_database.h"
 #include "filament_variants.h"
 #include "lvgl/src/others/translation/lv_translation.h"
@@ -9,41 +10,23 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
-#include <cstdio>
 
 namespace helix {
 
 std::string FilamentMapper::format_slot_label(const AvailableSlot& slot) {
-    char buf[192];
+    std::string label =
+        helix::ui::lane_label(slot.noun, slot.unit_display_name, slot.local_slot_index);
 
-    // Build material suffix
     const char* material_str = nullptr;
     if (slot.is_empty) {
         material_str = lv_tr("Empty");
     } else if (!slot.material.empty()) {
         material_str = slot.material.c_str();
     }
+    if (material_str)
+        label += std::string(": ") + material_str;
 
-    if (slot.unit_display_name.empty()) {
-        // Single-unit: "Slot 2" or "Slot 2: PLA"
-        if (material_str) {
-            snprintf(buf, sizeof(buf), "%s %d: %s", lv_tr("Slot"), slot.local_slot_index + 1,
-                     material_str);
-        } else {
-            snprintf(buf, sizeof(buf), "%s %d", lv_tr("Slot"), slot.local_slot_index + 1);
-        }
-    } else {
-        // Multi-unit: "Turtle 1 · Slot 2" or "Turtle 1 · Slot 2: PLA"
-        // unit_display_name is not translated — it's a user-configured AFC name
-        if (material_str) {
-            snprintf(buf, sizeof(buf), "%s \xc2\xb7 %s %d: %s", slot.unit_display_name.c_str(),
-                     lv_tr("Slot"), slot.local_slot_index + 1, material_str);
-        } else {
-            snprintf(buf, sizeof(buf), "%s \xc2\xb7 %s %d", slot.unit_display_name.c_str(),
-                     lv_tr("Slot"), slot.local_slot_index + 1);
-        }
-    }
-    return buf;
+    return label;
 }
 
 const AvailableSlot* FilamentMapper::resolve_mapped_slot(const ToolMapping& mapping,
@@ -68,7 +51,7 @@ const AvailableSlot* FilamentMapper::resolve_mapped_slot(const ToolMapping& mapp
 int FilamentMapper::mapped_lane_display_number(const ToolMapping& mapping,
                                                const std::vector<AvailableSlot>& slots) {
     const AvailableSlot* const s = resolve_mapped_slot(mapping, slots);
-    return s ? s->local_slot_index + 1 : -1;
+    return s ? helix::ui::lane_number(s->local_slot_index) : -1;
 }
 
 int FilamentMapper::color_distance(uint32_t a, uint32_t b) {
@@ -456,7 +439,8 @@ FilamentMapper::reprint_remap(const std::vector<int>& last_routing,
 }
 
 std::vector<uint32_t> FilamentMapper::routed_tool_colors(const std::vector<int>& tool_to_head,
-                                                         const std::vector<AvailableSlot>& slots) {
+                                                         const std::vector<AvailableSlot>& slots,
+                                                         helix::printer::ToolMappingOrigin origin) {
     if (tool_to_head.empty()) {
         return {};
     }
@@ -505,14 +489,16 @@ std::vector<uint32_t> FilamentMapper::routed_tool_colors(const std::vector<int>&
     const bool nothing_known =
         std::all_of(colors.begin(), colors.end(), [](uint32_t c) { return c == 0x808080; });
 
-    // A routing that sends every ROUTED tool to ONE head carries no per-tool
-    // information - observed as a partially-published plugin table resolving a
-    // whole 4-tool print to head 0's color, painting the model one solid color
-    // over the file's own palette. The degenerate signal is the ROUTING
-    // collapsing, not the colors agreeing: distinct heads that happen to hold
-    // same-color spools (a runout backup pair) are a true uniform answer and
-    // must still be published, and a single routed tool legitimately goes
-    // wherever it goes. Unrouted tools (-1) count toward neither side.
+    // A routing that sends every ROUTED tool to ONE head is read two ways, and
+    // the numbers cannot separate them: a table published only in part degrades
+    // to it, and a user pointing several tools at one spool builds it on
+    // purpose. @p origin is the whole difference - a deliberate share prints one
+    // solid color, and the uniform lane color is the only honest preview of it.
+    // The degenerate signal is the ROUTING collapsing, not the colors agreeing:
+    // distinct heads that happen to hold same-color spools (a runout backup
+    // pair) are a true uniform answer and must still be published, and a single
+    // routed tool legitimately goes wherever it goes. Unrouted tools (-1) count
+    // toward neither side.
     int first_routed_head = -2;
     int routed_count = 0;
     bool heads_distinct = false;
@@ -529,7 +515,13 @@ std::vector<uint32_t> FilamentMapper::routed_tool_colors(const std::vector<int>&
         }
     }
     const bool one_head_for_every_tool = routed_count > 1 && !heads_distinct;
-    if (nothing_known || one_head_for_every_tool) {
+    const bool unexplained_collapse =
+        one_head_for_every_tool && origin == helix::printer::ToolMappingOrigin::Unvouched;
+
+    // nothing_known stays unconditional: provenance says who chose the routing,
+    // never what the lanes hold. An all-neutral answer is still nothing worth
+    // pushing at the renderer, whoever authored it.
+    if (nothing_known || unexplained_collapse) {
         return {};
     }
     return colors;

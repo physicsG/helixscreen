@@ -11,11 +11,13 @@
 
 #include "platform_capabilities.h"
 
+#include "helix_regex.h"
+#include "text_io.h"
+
 #include <spdlog/spdlog.h>
 
-#include <fstream>
-#include <regex>
-#include <sstream>
+#include <algorithm>
+#include <cctype>
 
 #ifdef __APPLE__
 #include <sys/sysctl.h>
@@ -36,13 +38,7 @@ namespace {
  * @return File content, or empty string on failure
  */
 std::string read_file_content(const std::string& path) {
-    std::ifstream file(path);
-    if (!file.is_open()) {
-        return "";
-    }
-    std::stringstream buffer;
-    buffer << file.rdbuf();
-    return buffer.str();
+    return helix::text_io::read_file(path).value_or("");
 }
 
 /**
@@ -56,7 +52,7 @@ PlatformTier classify_tier(size_t ram_mb, int cores) {
         return PlatformTier::EMBEDDED;
     }
 
-    // STANDARD: RAM >= 2GB AND 4+ cores
+    // STANDARD: RAM >= 768MB AND 4+ cores
     if (ram_mb >= PlatformCapabilities::STANDARD_RAM_THRESHOLD_MB &&
         cores >= PlatformCapabilities::STANDARD_CPU_CORES_MIN) {
         return PlatformTier::STANDARD;
@@ -131,27 +127,27 @@ int get_macos_cpu_cores() {
 // /proc/meminfo parsing
 // ============================================================================
 
-size_t parse_meminfo_total_mb(const std::string& content) {
-    if (content.empty()) {
+uint64_t parse_meminfo_kb(const std::string& content, const std::string& key) {
+    if (key.empty()) {
         return 0;
     }
-
-    // Look for "MemTotal:" line
     // Format: "MemTotal:        3884136 kB"
-    std::regex memtotal_regex(R"(MemTotal:\s+(\d+)\s+kB)");
-    std::smatch match;
-
-    if (std::regex_search(content, match, memtotal_regex) && match.size() > 1) {
-        try {
-            size_t kb = std::stoull(match[1].str());
-            return kb / 1024; // Convert kB to MB
-        } catch (const std::exception& e) {
-            spdlog::warn("Failed to parse MemTotal value: {}", e.what());
-            return 0;
+    const std::string prefix = key + ":";
+    for (size_t pos = 0; pos < content.size();) {
+        const size_t eol = std::min(content.find('\n', pos), content.size());
+        if (content.compare(pos, prefix.size(), prefix) == 0) {
+            return helix::text_io::parse_leading<unsigned long long>(
+                       std::string_view(content).substr(pos + prefix.size(),
+                                                        eol - pos - prefix.size()))
+                .value_or(0);
         }
+        pos = eol + 1;
     }
-
     return 0;
+}
+
+size_t parse_meminfo_total_mb(const std::string& content) {
+    return static_cast<size_t>(parse_meminfo_kb(content, "MemTotal") / 1024);
 }
 
 // ============================================================================
@@ -167,31 +163,45 @@ CpuInfo parse_cpuinfo(const std::string& content) {
 
     // Count processor entries
     // Each CPU core has a "processor : N" line
-    std::regex processor_regex(R"(processor\s*:\s*\d+)");
-    auto proc_begin = std::sregex_iterator(content.begin(), content.end(), processor_regex);
-    auto proc_end = std::sregex_iterator();
+    helix::Regex processor_regex(R"(processor\s*:\s*\d+)");
+    auto proc_begin = helix::RegexIterator(content, processor_regex);
+    auto proc_end = helix::RegexIterator();
     info.core_count = static_cast<int>(std::distance(proc_begin, proc_end));
 
     // Extract BogoMIPS (first occurrence)
     // Format: "BogoMIPS : 270.00" or "bogomips : 3999.93"
-    std::regex bogomips_regex(R"([Bb]ogo[Mm][Ii][Pp][Ss]\s*:\s*([0-9.]+))");
-    std::smatch match;
-    if (std::regex_search(content, match, bogomips_regex) && match.size() > 1) {
-        try {
-            info.bogomips = std::stof(match[1].str());
-        } catch (const std::exception&) {
-            // Ignore parse failures
-        }
+    helix::Regex bogomips_regex(R"([Bb]ogo[Mm][Ii][Pp][Ss]\s*:\s*([0-9.]+))");
+    helix::RegexMatch match;
+    if (helix::regex_search(content, match, bogomips_regex) && match.size() > 1) {
+        // Ignore parse failures
+        info.bogomips = helix::text_io::parse_leading<float>(match[1].str()).value_or(0.0f);
     }
 
     // Extract CPU MHz if BogoMIPS not found or as supplement
     // Format: "cpu MHz : 2400.000"
-    std::regex mhz_regex(R"(cpu MHz\s*:\s*([0-9.]+))");
-    if (std::regex_search(content, match, mhz_regex) && match.size() > 1) {
-        try {
-            info.cpu_mhz = static_cast<int>(std::stof(match[1].str()));
-        } catch (const std::exception&) {
-            // Ignore parse failures
+    helix::Regex mhz_regex(R"(cpu MHz\s*:\s*([0-9.]+))");
+    if (helix::regex_search(content, match, mhz_regex) && match.size() > 1) {
+        // Ignore parse failures
+        info.cpu_mhz =
+            static_cast<int>(helix::text_io::parse_leading<float>(match[1].str()).value_or(0.0f));
+    }
+
+    // CPU name. No architecture publishes it under the same key: x86 has
+    // "model name", ARM has "Hardware", MIPS has "cpu model", and some boards
+    // only carry "Processor". First hit wins; a kernel with none of them leaves
+    // the field empty for the caller to label.
+    for (const char* key : {"model name", "Hardware", "cpu model", "Processor", "machine"}) {
+        helix::Regex model_regex(std::string(key) + R"(\s*:\s*([^\n]+))");
+        if (!helix::regex_search(content, match, model_regex) || match.size() <= 1) {
+            continue;
+        }
+        std::string value = match[1].str();
+        while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back()))) {
+            value.pop_back();
+        }
+        if (!value.empty()) {
+            info.model = value;
+            break;
         }
     }
 
@@ -257,6 +267,10 @@ PlatformCapabilities PlatformCapabilities::from_metrics(size_t ram_mb, int cores
 // ============================================================================
 // Utility functions
 // ============================================================================
+
+bool full_style_effects_allowed(PlatformTier tier) {
+    return tier == PlatformTier::STANDARD;
+}
 
 std::string platform_tier_to_string(PlatformTier tier) {
     switch (tier) {

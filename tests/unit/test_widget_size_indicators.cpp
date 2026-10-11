@@ -3,97 +3,76 @@
 
 /**
  * @file test_widget_size_indicators.cpp
- * @brief humidity and width_sensor pick their font from physical width and height.
+ * @brief humidity and width_sensor draw their glyph and reading in the faces
+ *        their box earns, not the ones their span suggests.
  *
- * Each case passes a span that contradicts the pixels, so a widget still
- * reading colspan/rowspan fails rather than passing by coincidence. Every
- * widget touches three objects on resize — the value label, the indicator's
- * icon, and the bottom label — and all three are asserted here, including
- * the narrow+tall case that isolates h_tall()'s contribution to the icon font
- * from w_normal()'s contribution to the text fonts.
+ * Each case passes a span that contradicts the pixels, so a tile still reading
+ * colspan/rowspan fails rather than passing by coincidence.
  */
 
-#include "ui_fonts.h"
+#include "ui_tile_rung.h"
 
 #include "../lvgl_ui_test_fixture.h"
 #include "../test_helpers/panel_widget_size_harness.h"
-#include "panel_widget_size.h"
-#include "src/ui/panel_widgets/humidity_widget.h"
-#include "src/ui/panel_widgets/width_sensor_widget.h"
+#include "panel_widget_registry.h"
+#include "src/ui/panel_widgets/tile_layout.h"
+#include "theme_manager.h"
 
 #include "../catch_amalgamated.hpp"
 
 using namespace helix;
-using namespace helix::widget_size;
 
-TEST_CASE_METHOD(LVGLUITestFixture, "humidity value font follows width, not colspan",
-                 "[widget_size][humidity]") {
-    require_font_tokens_distinct();
+namespace {
 
-    PanelWidgetHarness<HumidityWidget> h(test_screen());
-    lv_obj_t* value = h.child("humidity_value");
+void check_faces_follow_pixels(PanelWidgetHarnessBase& h, const char* id, const char* value_name) {
+    lv_obj_t* value = h.child(value_name);
     REQUIRE(value != nullptr);
-    lv_obj_t* indicator = h.child("humidity_indicator");
-    REQUIRE(indicator != nullptr);
-    lv_obj_t* icon = lv_obj_get_child(indicator, 0);
+    lv_obj_t* icon = h.child((std::string(id) + "_icon").c_str());
     REQUIRE(icon != nullptr);
-    REQUIRE(lv_obj_get_child_count(h.root()) >= 2);
-    lv_obj_t* label = lv_obj_get_child(h.root(), 1);
-    REQUIRE(label != nullptr);
+    lv_subject_t* rung = lv_xml_get_subject(nullptr, (std::string(id) + "_tile_icon").c_str());
+    REQUIRE(rung != nullptr);
 
-    // Narrow pixels with a large colspan: everything must stay compact.
-    // icon_font = (tall || wide) ? 32 : 24, so this also proves neither half
-    // of the OR is stuck true.
-    h.resize(4, 4, w_normal() - 1, h_tall() - 1);
-    REQUIRE(lv_obj_get_style_text_font(value, LV_PART_MAIN) == theme_manager_get_font("font_xs"));
-    REQUIRE(lv_obj_get_style_text_font(icon, LV_PART_MAIN) == &mdi_icons_24);
-    REQUIRE(lv_obj_get_style_text_font(label, LV_PART_MAIN) == theme_manager_get_font("font_xs"));
+    auto faces_match_rung = [&] {
+        const int r = lv_subject_get_int(rung);
+        CHECK(lv_obj_get_style_text_font(value, LV_PART_MAIN) ==
+              ui::tile_rung_face(ui::TileLadder::Value, r).font);
+        CHECK(lv_obj_get_style_text_font(icon, LV_PART_MAIN) ==
+              ui::tile_rung_face(ui::TileLadder::Icon, r).font);
+        return r;
+    };
 
-    // Narrow width, tall height, colspan/rowspan both 1: isolates `tall`.
-    // A rowspan-reading implementation sees rowspan=1 and stays compact; only
-    // height_px >= h_tall() can flip the icon here. Text stays compact too —
-    // label_token/value_token key off `wide` alone, not `tall`.
-    h.resize(1, 1, w_normal() - 1, h_tall());
-    REQUIRE(lv_obj_get_style_text_font(value, LV_PART_MAIN) == theme_manager_get_font("font_xs"));
-    REQUIRE(lv_obj_get_style_text_font(icon, LV_PART_MAIN) == &mdi_icons_32);
-    REQUIRE(lv_obj_get_style_text_font(label, LV_PART_MAIN) == theme_manager_get_font("font_xs"));
+    // A big span over a small box, then a small span over a big box.
+    h.resize(8, 8, 60, 60);
+    const int small = faces_match_rung();
+    h.resize(1, 1, 400, 400);
+    const int large = faces_match_rung();
+    CHECK(large > small);
 
-    // Wide pixels with colspan 1: everything must go wide.
-    h.resize(1, 1, w_normal(), h_tall());
-    REQUIRE(lv_obj_get_style_text_font(value, LV_PART_MAIN) == theme_manager_get_font("font_body"));
-    REQUIRE(lv_obj_get_style_text_font(icon, LV_PART_MAIN) == &mdi_icons_32);
-    REQUIRE(lv_obj_get_style_text_font(label, LV_PART_MAIN) == theme_manager_get_font("font_body"));
+    // At the top rung the glyph doubles, and the reading steps up with it.
+    if (large == helix::kTileRungs - 1) {
+        CHECK(lv_obj_get_style_text_font(value, LV_PART_MAIN) == theme_manager_get_font("font_xl"));
+    }
+    CHECK(large == helix::kTileRungs - 1);
 }
 
-TEST_CASE_METHOD(LVGLUITestFixture, "width_sensor value font follows width, not colspan",
+} // namespace
+
+TEST_CASE_METHOD(LVGLUITestFixture, "humidity faces follow pixels, not colspan",
+                 "[widget_size][humidity]") {
+    require_font_tokens_distinct();
+    init_widget_registrations();
+    const PanelWidgetDef* def = find_widget_def("humidity");
+    REQUIRE(def != nullptr);
+    RegistryWidgetHarness h(test_screen(), *def);
+    check_faces_follow_pixels(h, "humidity", "humidity_value");
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture, "width_sensor faces follow pixels, not colspan",
                  "[widget_size][width_sensor]") {
     require_font_tokens_distinct();
-
-    PanelWidgetHarness<WidthSensorWidget> h(test_screen());
-    lv_obj_t* value = h.child("width_value");
-    REQUIRE(value != nullptr);
-    lv_obj_t* indicator = h.child("width_indicator");
-    REQUIRE(indicator != nullptr);
-    lv_obj_t* icon = lv_obj_get_child(indicator, 0);
-    REQUIRE(icon != nullptr);
-    REQUIRE(lv_obj_get_child_count(h.root()) >= 2);
-    lv_obj_t* label = lv_obj_get_child(h.root(), 1);
-    REQUIRE(label != nullptr);
-
-    h.resize(4, 4, w_normal() - 1, h_tall() - 1);
-    REQUIRE(lv_obj_get_style_text_font(value, LV_PART_MAIN) == theme_manager_get_font("font_xs"));
-    REQUIRE(lv_obj_get_style_text_font(icon, LV_PART_MAIN) == &mdi_icons_24);
-    REQUIRE(lv_obj_get_style_text_font(label, LV_PART_MAIN) == theme_manager_get_font("font_xs"));
-
-    // Narrow width, tall height, colspan/rowspan both 1: isolates `tall` the
-    // same way as the humidity case above.
-    h.resize(1, 1, w_normal() - 1, h_tall());
-    REQUIRE(lv_obj_get_style_text_font(value, LV_PART_MAIN) == theme_manager_get_font("font_xs"));
-    REQUIRE(lv_obj_get_style_text_font(icon, LV_PART_MAIN) == &mdi_icons_32);
-    REQUIRE(lv_obj_get_style_text_font(label, LV_PART_MAIN) == theme_manager_get_font("font_xs"));
-
-    h.resize(1, 1, w_normal(), h_tall());
-    REQUIRE(lv_obj_get_style_text_font(value, LV_PART_MAIN) == theme_manager_get_font("font_body"));
-    REQUIRE(lv_obj_get_style_text_font(icon, LV_PART_MAIN) == &mdi_icons_32);
-    REQUIRE(lv_obj_get_style_text_font(label, LV_PART_MAIN) == theme_manager_get_font("font_body"));
+    init_widget_registrations();
+    const PanelWidgetDef* def = find_widget_def("width_sensor");
+    REQUIRE(def != nullptr);
+    RegistryWidgetHarness h(test_screen(), *def);
+    check_faces_follow_pixels(h, "width_sensor", "width_value");
 }

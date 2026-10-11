@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include "system/diagnostics.h"
+#include "system/host_census.h"
 #include "touch_calibration.h"
 
 #include <cstdint>
@@ -29,15 +31,19 @@ struct PrinterSnapshot {
     std::string klipper_version; ///< klipper_version subject, "" if unset
     int connection_state = -1;   ///< printer_connection_state subject; -1 = unavailable
     int klippy_state = -1;       ///< klippy_state subject; -1 = unavailable
+    /// Firmware mains-monitor objects this printer publishes
+    /// (helix::power_loss::required_status_objects), for the printer-state
+    /// query. Empty on a printer without one.
+    std::vector<std::string> mains_status_objects;
 };
 
 struct BundleOptions {
     bool include_klipper_logs = false;
     bool include_moonraker_logs = false;
     std::string user_note;
-    /// Filled by upload_async() on the main thread. Left uncaptured by direct
-    /// collect() callers, which are main-thread themselves and get a snapshot
-    /// taken inline instead.
+    /// Filled by upload_async() on the main thread. collect() never reads
+    /// PrinterState itself, so a caller that leaves this uncaptured gets empty
+    /// printer and moonraker sections.
     PrinterSnapshot printer;
 };
 
@@ -45,6 +51,11 @@ struct BundleResult {
     bool success = false;
     std::string share_code;
     std::string error_message;
+    /// The upload was refused because this build may not ship diagnostics
+    /// (helix::diag::uploads_enabled() false). Distinct from a network
+    /// failure: the caller shows the "unavailable in this build" message
+    /// instead of a retryable error.
+    bool uploads_disabled = false;
 };
 
 /// One config file as the include walker sees it. `status` is the HTTP status
@@ -89,6 +100,13 @@ class DebugBundleCollector {
     using ResultCallback = std::function<void(const BundleResult&)>;
     static void upload_async(const BundleOptions& options, ResultCallback callback);
 
+    /// Replaces collect() inside upload_async's worker, so a test can exercise the
+    /// gate/compress/upload path without walking the host's /proc or asking
+    /// systemd. An empty function restores the real collector. Main thread only;
+    /// upload_async captures the value at submit.
+    using CollectFn = std::function<nlohmann::json(const BundleOptions&)>;
+    static void set_collect_override_for_test(CollectFn fn);
+
     /// Read PrinterState and its LVGL subjects into plain data.
     ///
     /// MAIN THREAD ONLY. lv_subject_get_string() hands back the subject's live
@@ -98,7 +116,32 @@ class DebugBundleCollector {
     static PrinterSnapshot snapshot_printer_state();
 
     /// Individual collectors (public for testing)
-    static nlohmann::json collect_system_info();
+    /// A projection of the caller's Diagnostics onto the legacy `system` keys
+    /// (scripts/debug-bundle.sh --summary/--pretty read them), plus the host
+    /// census: distro, failed units and display-contending processes, every
+    /// string through sanitize_value(). Pure, so both are testable against a
+    /// synthetic snapshot.
+    static nlohmann::json collect_system_info(const diagnostics::Diagnostics& diag,
+                                              const helix::diag::HostCensus& census);
+
+    /**
+     * @brief The resolved paths, identity, machine and log facts.
+     *
+     * Every path in this app is picked by a cascade whose every rung is
+     * overridable, and one release-asset key can serve several filesystem
+     * layouts, so a bundle that carries only the rules cannot say where
+     * anything actually landed.
+     *
+     * No LVGL access — safe from the HttpExecutor thread upload_async()
+     * collects on. Reached through build_diagnostics_info() with the same
+     * Diagnostics that feeds `system`, so the two sections cannot disagree.
+     */
+
+    /// Serialize an explicit Diagnostics. Pure and static so the redaction and
+    /// the field set are testable without a live process. Host-shaped values
+    /// (paths, the Moonraker URL, the kernel and CPU strings) pass through
+    /// sanitize_value(); the numbers do not.
+    static nlohmann::json build_diagnostics_info(const diagnostics::Diagnostics& diag);
     /// Pure assembly from a snapshot — touches no LVGL and no PrinterState, so
     /// it is safe on the collect worker and testable without either.
     static nlohmann::json collect_printer_info(const PrinterSnapshot& snap);
@@ -231,8 +274,28 @@ class DebugBundleCollector {
     static std::string collect_log_tail_from_paths(const std::vector<std::string>& paths,
                                                    int num_lines);
 
-    /// Collect Moonraker state via REST (server info, printer state, config)
-    static nlohmann::json collect_moonraker_info();
+    /// Collect Moonraker state via REST (server info, printer state, config).
+    /// The snapshot carries which mains-monitor objects the printer-state
+    /// query should also fetch.
+    static nlohmann::json collect_moonraker_info(const PrinterSnapshot& snap,
+                                                 const nlohmann::json& object_list);
+
+    /// The klipper_status section: the triage objects in `object_list`,
+    /// queried and bounded. A non-array `object_list` is the error from
+    /// fetch_object_list() and is returned as the section.
+    static nlohmann::json collect_klipper_status(const std::string& base_url,
+                                                 const nlohmann::json& object_list);
+
+    /// printer.objects.list as an array, or an {"error"} object when Moonraker
+    /// cannot answer.
+    static nlohmann::json fetch_object_list(const std::string& base_url);
+
+    /// The /printer/objects/query path for the printer-state section: the core
+    /// object list plus any firmware mains monitors. Pure and static so the
+    /// conditional join is testable without a live Moonraker — which matters
+    /// because Moonraker answers a query naming an object the firmware does
+    /// not publish with an error, not an empty result.
+    static std::string printer_objects_query(const std::vector<std::string>& extra_objects);
 
     /// Local evidence about a same-host Moonraker, gathered from /proc rather
     /// than from Moonraker. Everything in collect_moonraker_info() goes through
@@ -244,10 +307,48 @@ class DebugBundleCollector {
     static nlohmann::json collect_moonraker_local_probe();
 
     /// Collect filament system data (AFC, Happy Hare, ACE, Spoolman, tool changers)
-    static nlohmann::json collect_filament_system_info();
+    static nlohmann::json collect_filament_system_info(const nlohmann::json& object_list);
+
+    /// The Moonraker DB namespaces holding per-lane filament overrides, which
+    /// are what decide the colour, material and Spoolman link the user actually
+    /// sees. Pure and static so the allowlist is testable without a Moonraker
+    /// round trip.
+    ///
+    /// Deliberately an allowlist, never a whole-database dump. Moonraker keeps
+    /// user accounts and its API key in the same database, `gcode_metadata`
+    /// holds base64 thumbnails that would blow past the text-section cap, and
+    /// sanitize_value() is field-aware so it cannot know what is sensitive
+    /// inside a namespace it has never seen. A namespace earns its place here
+    /// one at a time, after someone has looked at what it carries.
+    static std::vector<std::string> filament_override_namespaces();
 
     /// Filter a Klipper object list to filament-related objects (public for testing)
     static nlohmann::json filter_filament_objects(const nlohmann::json& object_list);
+
+    /// Filter a Klipper object list to the cheap, triage-worthy objects that
+    /// printer_state does not already carry: klippy state, config warnings,
+    /// probes, leveling, bed mesh, MCUs, host load (public for testing). A base
+    /// name matches itself and its named instances: "mcu" takes "mcu nhk".
+    static nlohmann::json filter_triage_objects(const nlohmann::json& object_list);
+
+    /// The /printer/objects/query path for a list of object names, spaces
+    /// percent-encoded. `configfile` is narrowed to its warnings: the bundle
+    /// already ships the config files, and the parsed config is the largest
+    /// object Klipper publishes.
+    static std::string objects_query_path(const nlohmann::json& names);
+
+    /// Bound an objects/query `status` map (object -> field -> value) for the
+    /// bundle. A field whose JSON exceeds `max_field_bytes` becomes
+    /// {"omitted_bytes", "length", "shape"} (a full-resolution mesh matrix, a
+    /// long exclude_object polygon list); then whole objects are dropped
+    /// largest-first until the map fits `max_total_bytes`.
+    static nlohmann::json bound_status(nlohmann::json status, size_t max_field_bytes = 4096,
+                                       size_t max_total_bytes = 40960);
+
+    /// A Moonraker response with `result.<map_key>` run through bound_status()
+    /// and the whole thing sanitized: the path every Klipper status section and
+    /// the update-manager status take into the bundle.
+    static nlohmann::json bound_response(nlohmann::json resp, const char* map_key);
 
     /// Extract bare `gcode_macro` NAMES from a Klipper object list (public for testing).
     ///
@@ -307,12 +408,6 @@ class DebugBundleCollector {
     /// Returns the raw patterns; resolution against the config root is
     /// resolve_include_pattern()'s job.
     static std::vector<std::string> parse_include_patterns(const std::string& body);
-
-    /// Shell-glob match used to resolve an `[include]` pattern against the
-    /// config-root file listing (public for testing). `*` and `?` do NOT cross
-    /// a '/', matching Python glob, so `[include mod/*.cfg]` picks up
-    /// `mod/a.cfg` but not `mod/sub/a.cfg`.
-    static bool glob_match(const std::string& pattern, const std::string& path);
 
     /// Resolve one `[include]` pattern, relative to the including file's
     /// directory, against a config-root-relative file listing (public for
@@ -407,11 +502,21 @@ class DebugBundleCollector {
 
   private:
     static constexpr const char* WORKER_URL = "https://crash.helixscreen.org/v1/debug-bundle";
-    static constexpr const char* INGEST_API_KEY = "hx-tel-v1-a7f3c9e2d1b84056";
+
+    /// WORKER_URL with the HELIX_BUNDLE_WORKER_URL test override applied. The
+    /// override exists so a test that reaches the real upload path posts to a
+    /// loopback listener instead of the CDN — libhv honours no proxy
+    /// environment, so this is the only thing keeping an ungated test run
+    /// from shipping bytes off-box.
+    static const char* worker_url();
 
     /// Blocking HTTP GET to a Moonraker endpoint, returns parsed JSON or error object
     static nlohmann::json moonraker_get(const std::string& base_url, const std::string& endpoint,
                                         int timeout_sec = 10);
+
+    /// Query `names` and return the response with its status bounded and sanitized.
+    static nlohmann::json query_objects_bounded(const std::string& base_url,
+                                                const nlohmann::json& names);
 
     /// Get the Moonraker HTTP base URL (from IMoonrakerAPI if connected)
     static std::string get_moonraker_url();

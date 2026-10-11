@@ -11,7 +11,7 @@
         style_pad_gap="0">
 
     <!-- Header -->
-    <modal_header icon_src="chart_line" icon_variant="accent" title="Configure Graph" title_tag="Configure Graph"/>
+    <modal_header icon_src="chart_line" icon_variant="accent" title="Configure Graph"/>
 
     <divider_horizontal/>
 

@@ -7,7 +7,7 @@
  *
  * TempGraphController::reattach_observers() rebinds every observer to whatever
  * subjects are live after a reconnect, without tearing the chart down. The
- * hazard it has to avoid is the attach-time fire: observe_int_sync() attaches
+ * hazard it has to avoid is the attach-time fire: observe<int>() attaches
  * with lv_subject_add_observer_obj(), which fires the observer once
  * immediately, and the subjects still hold their PRE-disconnect values. The
  * live handler stamps whatever it receives with a fresh `now`, so an
@@ -15,7 +15,7 @@
  * disconnect gap.
  *
  * What makes this easy to get wrong — and what these tests pin — is that the
- * attach fire is not synchronous. observe_int_sync's LVGL callback only QUEUES
+ * attach fire is not synchronous. observe<int>'s LVGL callback only QUEUES
  * the handler (observer_factory.h), so it runs on a later UpdateQueue tick,
  * long after setup_observers() has returned. Any suppression scoped to the
  * body of reattach_observers() is a no-op.
@@ -26,6 +26,7 @@
 #include "../../include/temp_graph_controller.h"
 #include "../../include/ui_temp_graph.h"
 #include "../lvgl_test_fixture.h"
+#include "../test_helpers/temp_graph_controller_test_access.h"
 #include "app_globals.h"
 #include "lvgl/lvgl.h"
 #include "printer_state.h"
@@ -60,7 +61,7 @@ class TempGraphReattachFixture : public LVGLTestFixture {
         // SAMPLE_INTERVAL_SEC throttle. The follow-up reading these tests push
         // would then be throttled away, and the assertion would blame the
         // suppression flag for a co-tenant's leftover state.
-        if (auto* bed = get_printer_state().get_bed_temp_subject()) {
+        if (auto* bed = get_printer_state().temperature_state().get_bed_temp_subject()) {
             lv_subject_set_int(bed, 0);
         }
         settle();
@@ -83,7 +84,7 @@ class TempGraphReattachFixture : public LVGLTestFixture {
     /// Drive a disconnect → reconnect transition past the controller's
     /// connection observer, then let everything it scheduled run.
     static void reconnect() {
-        auto* conn = get_printer_state().get_printer_connection_state_subject();
+        auto* conn = get_printer_state().network_state().get_printer_connection_state_subject();
         REQUIRE(conn != nullptr);
         lv_subject_set_int(conn, CONN_DISCONNECTED);
         settle();
@@ -109,7 +110,7 @@ std::unique_ptr<TempGraphController> make_stale_controller(lv_obj_t* parent, int
     // sampled yet, so a later reading cannot be rejected for arriving too soon.
     REQUIRE(controller->graph()->visible_point_count == 0);
 
-    auto* bed = get_printer_state().get_bed_temp_subject();
+    auto* bed = get_printer_state().temperature_state().get_bed_temp_subject();
     REQUIRE(bed != nullptr);
 
     controller->pause();
@@ -156,7 +157,7 @@ TEST_CASE_METHOD(TempGraphReattachFixture, "Reattach suppression clears for the 
     // A genuinely fresh reading after the reconnect must land. This is the half
     // that fails if the suppression is set and never cleared — the graph would
     // simply freeze for the rest of the session.
-    auto* bed = get_printer_state().get_bed_temp_subject();
+    auto* bed = get_printer_state().temperature_state().get_bed_temp_subject();
     lv_subject_set_int(bed, 2100);
     settle();
 
@@ -178,8 +179,8 @@ TEST_CASE_METHOD(TempGraphReattachFixture, "Reattach keeps the graph and its ser
     settle();
 
     auto* graph_before = controller->graph();
-    const int bed_id = controller->series_id_for("heater_bed");
-    REQUIRE(bed_id >= 0);
+    const SeriesId bed_id = controller->series_id_for("heater_bed");
+    REQUIRE(bed_id != SeriesId::None);
 
     reconnect();
 
@@ -187,7 +188,61 @@ TEST_CASE_METHOD(TempGraphReattachFixture, "Reattach keeps the graph and its ser
     // IDs, and therefore the chart data all survive.
     REQUIRE(controller->graph() == graph_before);
     REQUIRE(controller->series_id_for("heater_bed") == bed_id);
-    REQUIRE(controller->series_id_for("extruder") >= 0);
+    REQUIRE(controller->series_id_for("extruder") != SeriesId::None);
+
+    controller.reset();
+    settle();
+}
+
+TEST_CASE_METHOD(TempGraphReattachFixture,
+                 "The first reading of a sample slot pushes every series at once",
+                 "[controller][temp_graph_controller]") {
+    auto* bed = get_printer_state().temperature_state().get_bed_temp_subject();
+    auto* chamber = get_printer_state().temperature_state().get_chamber_temp_subject();
+    REQUIRE(bed != nullptr);
+    REQUIRE(chamber != nullptr);
+    lv_subject_set_int(chamber, 0);
+    settle();
+
+    TempGraphControllerConfig cfg;
+    cfg.series = {{"heater_bed", lv_color_hex(0x88C0D0), false, "Bed"},
+                  {"chamber", lv_color_hex(0xA3BE8C), false, "Chamber"}};
+    auto controller = std::make_unique<TempGraphController>(test_screen(), cfg);
+    REQUIRE(controller->is_valid());
+    constexpr int64_t slot = UI_TEMP_GRAPH_SAMPLE_INTERVAL_SEC * 1000;
+    int64_t now = 1'000'000 * slot + 100;
+    TempGraphControllerTestAccess::set_clock(*controller, [&now] { return now; });
+    settle();
+    const int baseline = controller->graph()->visible_point_count;
+
+    lv_subject_set_int(bed, 600);
+    lv_subject_set_int(chamber, 300);
+    settle();
+    REQUIRE(controller->graph()->visible_point_count == baseline + 2);
+
+    // Next slot: a bed reading alone brings the chamber's latest value with it.
+    now += slot;
+    lv_subject_set_int(bed, 610);
+    settle();
+    REQUIRE(controller->graph()->visible_point_count == baseline + 4);
+
+    // The chamber's own reading in the same slot adds nothing.
+    lv_subject_set_int(chamber, 310);
+    settle();
+    REQUIRE(controller->graph()->visible_point_count == baseline + 4);
+
+    // A reading from before a pause is not current: after resume, the bed's push
+    // in a new slot leaves the chamber out until the chamber reports again.
+    controller->pause();
+    lv_subject_set_int(chamber, 400);
+    settle();
+    controller->resume();
+    settle();
+    const int after_resume = controller->graph()->visible_point_count;
+    now += slot;
+    lv_subject_set_int(bed, 620);
+    settle();
+    REQUIRE(controller->graph()->visible_point_count == after_resume + 1);
 
     controller.reset();
     settle();

@@ -4,6 +4,7 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 
 /**
  * @brief Mark a string literal for translation extraction without translating
@@ -51,6 +52,17 @@ namespace helix::ui {
  * @param lang Locale code, e.g. "en", "de", "zh"
  */
 void ensure_translation_loaded(const std::string& lang);
+
+/**
+ * @brief Whether a literal UI string can be a translation key.
+ *
+ * False for numbers, short punctuation, icon glyphs, identifiers, URLs and the
+ * like. The C++ twin of should_skip_text() in scripts/translations/extractor.py,
+ * so the engine implies a tag exactly where the extractor would look for a key;
+ * tests/fixtures/translation_key_cases.txt pins both to the same verdicts.
+ * Registered with helix-xml as its translation key callback.
+ */
+bool is_translation_key(std::string_view text);
 
 /**
  * @brief Locale whose translations are the tags themselves, so it needs no pack.

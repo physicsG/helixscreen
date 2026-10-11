@@ -16,8 +16,11 @@
 
 #include "ui_update_queue.h"
 
+#include "../test_helpers/scoped_language.h"
 #include "../test_helpers/scoped_runtime_config.h"
+#include "../test_helpers/wifi_manager_test_access.h"
 #include "../ui_test_utils.h"
+#include "log_redact.h"
 #include "runtime_config.h"
 #include "wifi_manager.h"
 #include "wifi_ui_utils.h"
@@ -35,45 +38,6 @@
 
 using namespace helix;
 namespace fs = std::filesystem;
-
-namespace helix {
-// Friend accessor — injects a stub OS-link probe and drives start_scan()
-// without standing up a threaded backend, so the suppression decision is
-// deterministic.
-class WiFiManagerTestAccess {
-  public:
-    static void set_os_link_probe(std::function<bool()> probe) {
-        WiFiManager::os_link_probe_ = std::move(probe);
-    }
-    static void reset_os_link_probe() {
-        WiFiManager::os_link_probe_ = []() {
-            return helix::ui::wifi::probe_os_wifi_link().has_link;
-        };
-    }
-    static bool os_link_up() {
-        return WiFiManager::os_link_up();
-    }
-    // Stops the backend directly, bypassing set_enabled()'s radio-only
-    // semantics (helixscreen wifi-interface-identity task 6: set_enabled(false)
-    // now disables the radio and keeps the backend/control-connection alive,
-    // so it no longer forces trigger_scan() into a NOT_INITIALIZED failure).
-    // Tests that need that specific failure path reach in here instead.
-    static void stop_backend(WiFiManager& wm) {
-        if (wm.backend_) {
-            wm.backend_->stop();
-        }
-    }
-    // Backdate the association stamp past ASSOCIATION_GRACE so the expiry side
-    // of the suppression is testable without a 5-second sleep.
-    static void expire_association_grace(WiFiManager& wm) {
-        wm.last_association_change_ = std::chrono::steady_clock::now() -
-                                      WiFiManager::ASSOCIATION_GRACE - std::chrono::seconds(1);
-    }
-    static bool in_association_grace(const WiFiManager& wm) {
-        return wm.in_association_grace();
-    }
-};
-} // namespace helix
 
 namespace {
 
@@ -355,4 +319,32 @@ TEST_CASE("The association grace is not armed before any association change",
     OsLinkBehaviorFixture fx;
     auto wm = fx.make_manager();
     REQUIRE_FALSE(helix::WiFiManagerTestAccess::in_association_grace(*wm));
+}
+
+TEST_CASE("WiFi failure toasts render in the active language",
+          "[wifi][unit][api-error-i18n][i18n]") {
+    OsLinkBehaviorFixture fx;
+    auto wm = fx.make_manager();
+    helix::WiFiManagerTestAccess::stop_backend(*wm);
+    helix::WiFiManagerTestAccess::set_os_link_probe([]() { return false; });
+
+    ScopedLanguage de("de");
+
+    std::string warning;
+    std::string error;
+    helix::ui::set_test_notification_warning_hook([&](const std::string& m) { warning = m; });
+    helix::ui::set_test_notification_error_hook([&](const std::string& m) { error = m; });
+
+    wm->start_scan([](const std::vector<WiFiNetwork>&) {});
+    CHECK(warning == "WiFi-Suche fehlgeschlagen. Versuche es erneut.");
+
+    // The SSID is a format argument, so the translated template still carries it.
+    wm->connect("HomeNet", "", nullptr);
+    CHECK(error.rfind("Verbindung mit WiFi-Netzwerk '", 0) == 0);
+    CHECK(error.find(helix::redact::ssid("HomeNet")) != std::string::npos);
+
+    helix::ui::set_test_notification_warning_hook(nullptr);
+    helix::ui::set_test_notification_error_hook(nullptr);
+    wm->stop_scan();
+    helix::ui::UpdateQueue::instance().drain();
 }

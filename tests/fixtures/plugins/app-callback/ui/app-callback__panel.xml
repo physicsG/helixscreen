@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<component>
+  <view extends="lv_obj">
+    <lv_button>
+      <event_cb trigger="clicked" callback="on_estop_clicked"/>
+    </lv_button>
+  </view>
+</component>

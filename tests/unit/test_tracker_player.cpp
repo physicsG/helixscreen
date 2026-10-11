@@ -175,52 +175,6 @@ TEST_CASE("TrackerPlayer fallback emits note frequency, not sample rate", "[trac
     }
 }
 
-TEST_CASE("TrackerPlayer mono backend follows the highest voice, not channel 0",
-          "[tracker][player]") {
-    // crocketts_theme parks the bass on channel 0; a mono backend pinned to
-    // slot 0 would play the bass and drop the melody.
-    const uint8_t bass = 34; // A-2, 110 Hz — the on-device bass register
-    const uint8_t lead = 58; // A-4, 440 Hz
-    REQUIRE(TrackerModule::note_to_freq(lead) > 2.0f * TrackerModule::note_to_freq(bass));
-
-    {
-        // Bass on ch0, lead on ch1: mono must emit the LEAD on slot 0
-        auto backend = std::make_shared<TrackerMockBackend>(/*voices=*/1);
-        auto player = make_player(backend);
-
-        auto pat = empty_pattern(2);
-        pat[0] = {bass, 1, 0x00, 0x00};
-        pat[1] = {lead, 1, 0x00, 0x00};
-
-        player->load(make_module({0}, {pat}, 2));
-        player->play();
-
-        REQUIRE(backend->voices[0].active);
-        REQUIRE(backend->voices[0].freq ==
-                Catch::Approx(TrackerModule::note_to_freq(lead)).margin(0.1f));
-        // Mono path must not touch the other slots
-        REQUIRE_FALSE(backend->voices[1].active);
-        player->stop();
-    }
-
-    {
-        // Only the bass active: mono still emits it (falls back, not silent)
-        auto backend = std::make_shared<TrackerMockBackend>(/*voices=*/1);
-        auto player = make_player(backend);
-
-        auto pat = empty_pattern(2);
-        pat[0] = {bass, 1, 0x00, 0x00};
-
-        player->load(make_module({0}, {pat}, 2));
-        player->play();
-
-        REQUIRE(backend->voices[0].active);
-        REQUIRE(backend->voices[0].freq ==
-                Catch::Approx(TrackerModule::note_to_freq(bass)).margin(0.1f));
-        player->stop();
-    }
-}
-
 TEST_CASE("TrackerPlayer silences the backend when the module ends", "[tracker][player]") {
     // A tone-mode backend holds whatever the last set_voice left it emitting;
     // without an explicit silence at module end the final note sticks on

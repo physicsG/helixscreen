@@ -10,6 +10,8 @@
  */
 
 #include "android_asset_extractor.h"
+#include "test_helpers/unique_temp_dir.h"
+#include "text_io.h"
 
 #include <filesystem>
 #include <fstream>
@@ -37,10 +39,11 @@ bool is_non_shippable_config_file(const std::string& filename);
 // RAII temp directory helper
 // ============================================================================
 
+namespace {
 class TempDir {
   public:
     TempDir(const std::string& prefix) {
-        path_ = fs::temp_directory_path() / (prefix + "_" + std::to_string(counter_++));
+        path_ = fs::temp_directory_path() / (prefix + "_" + helix::test::unique_suffix());
         fs::create_directories(path_);
     }
 
@@ -62,22 +65,14 @@ class TempDir {
 
   private:
     fs::path path_;
-    static inline int counter_ = 0;
 };
+} // namespace
 
 // Helper to write a file with content
 static void write_file(const fs::path& path, const std::string& content) {
     fs::create_directories(path.parent_path());
     std::ofstream ofs(path, std::ios::trunc);
     ofs << content;
-}
-
-// Helper to read a file's content
-static std::string read_file(const fs::path& path) {
-    std::ifstream ifs(path);
-    std::string content;
-    std::getline(ifs, content);
-    return content;
 }
 
 // ============================================================================
@@ -100,8 +95,10 @@ TEST_CASE("Extracts files from source to target directory", "[android][asset]") 
     REQUIRE(result == AssetExtractionResult::EXTRACTED);
     REQUIRE(fs::exists(target.path() / "config.json"));
     REQUIRE(fs::exists(target.path() / "ui_xml" / "main.xml"));
-    REQUIRE(read_file(target.path() / "config.json") == R"({"key": "value"})");
-    REQUIRE(read_file(target.path() / "ui_xml" / "main.xml") == "<root/>");
+    REQUIRE(helix::text_io::read_first_line(target.path() / "config.json").value_or("") ==
+            R"({"key": "value"})");
+    REQUIRE(helix::text_io::read_first_line(target.path() / "ui_xml" / "main.xml").value_or("") ==
+            "<root/>");
 }
 
 TEST_CASE("Skips extraction if VERSION marker matches current version", "[android][asset]") {
@@ -119,7 +116,8 @@ TEST_CASE("Skips extraction if VERSION marker matches current version", "[androi
 
     REQUIRE(result == AssetExtractionResult::ALREADY_CURRENT);
     // Target content should be unchanged (old content, not re-extracted)
-    REQUIRE(read_file(target.path() / "data.txt") == "old content");
+    REQUIRE(helix::text_io::read_first_line(target.path() / "data.txt").value_or("") ==
+            "old content");
 }
 
 TEST_CASE("Re-extracts if VERSION marker differs", "[android][asset]") {
@@ -136,8 +134,9 @@ TEST_CASE("Re-extracts if VERSION marker differs", "[android][asset]") {
     auto result = extract_assets_if_needed(source.str(), target.str(), "2.0.0");
 
     REQUIRE(result == AssetExtractionResult::EXTRACTED);
-    REQUIRE(read_file(target.path() / "data.txt") == "new content");
-    REQUIRE(read_file(target.path() / "VERSION") == "2.0.0");
+    REQUIRE(helix::text_io::read_first_line(target.path() / "data.txt").value_or("") ==
+            "new content");
+    REQUIRE(helix::text_io::read_first_line(target.path() / "VERSION").value_or("") == "2.0.0");
 }
 
 TEST_CASE("Creates target directory if it does not exist", "[android][asset]") {
@@ -153,7 +152,7 @@ TEST_CASE("Creates target directory if it does not exist", "[android][asset]") {
 
     REQUIRE(result == AssetExtractionResult::EXTRACTED);
     REQUIRE(fs::exists(target_path / "file.txt"));
-    REQUIRE(read_file(target_path / "file.txt") == "hello");
+    REQUIRE(helix::text_io::read_first_line(target_path / "file.txt").value_or("") == "hello");
 }
 
 TEST_CASE("Missing VERSION marker triggers re-extraction", "[android][asset]") {
@@ -168,8 +167,8 @@ TEST_CASE("Missing VERSION marker triggers re-extraction", "[android][asset]") {
     auto result = extract_assets_if_needed(source.str(), target.str(), "1.0.0");
 
     REQUIRE(result == AssetExtractionResult::EXTRACTED);
-    REQUIRE(read_file(target.path() / "data.txt") == "fresh");
-    REQUIRE(read_file(target.path() / "VERSION") == "1.0.0");
+    REQUIRE(helix::text_io::read_first_line(target.path() / "data.txt").value_or("") == "fresh");
+    REQUIRE(helix::text_io::read_first_line(target.path() / "VERSION").value_or("") == "1.0.0");
 }
 
 TEST_CASE("Writes correct version marker after extraction", "[android][asset]") {
@@ -181,7 +180,7 @@ TEST_CASE("Writes correct version marker after extraction", "[android][asset]") 
     auto result = extract_assets_if_needed(source.str(), target.str(), "3.14.159");
 
     REQUIRE(result == AssetExtractionResult::EXTRACTED);
-    REQUIRE(read_file(target.path() / "VERSION") == "3.14.159");
+    REQUIRE(helix::text_io::read_first_line(target.path() / "VERSION").value_or("") == "3.14.159");
 }
 
 TEST_CASE("Preserves directory structure during extraction", "[android][asset]") {
@@ -202,7 +201,8 @@ TEST_CASE("Preserves directory structure during extraction", "[android][asset]")
     REQUIRE(fs::exists(target.path() / "a" / "b" / "c.txt"));
     REQUIRE(fs::exists(target.path() / "a" / "sibling.txt"));
     REQUIRE(fs::exists(target.path() / "top.txt"));
-    REQUIRE(read_file(target.path() / "a" / "b" / "c.txt") == "deep");
+    REQUIRE(helix::text_io::read_first_line(target.path() / "a" / "b" / "c.txt").value_or("") ==
+            "deep");
 }
 
 TEST_CASE("Returns FAILED when source directory does not exist", "[android][asset]") {
@@ -317,6 +317,8 @@ TEST_CASE("Runtime artifacts are never extracted from the package", "[android][a
     CHECK(is_non_shippable_config_file("crash_history.json"));
     CHECK(is_non_shippable_config_file(".crash_restart_count"));
     CHECK(is_non_shippable_config_file("tool_spools.json"));
+    CHECK(is_non_shippable_config_file("user_filaments.json"));
+    CHECK(is_non_shippable_config_file("filament_slot_overrides.json"));
     CHECK(is_non_shippable_config_file("telemetry_device.json"));
     CHECK(is_non_shippable_config_file("telemetry_queue.json"));
     CHECK(is_non_shippable_config_file(".helix-screen.lock"));

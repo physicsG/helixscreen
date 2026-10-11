@@ -82,6 +82,13 @@ class GCodeCamera {
      */
     void zoom(float factor);
 
+    /// Move the view so content follows a screen-space drag of (dx, dy) pixels.
+    void pan_pixels(float dx, float dy);
+
+    /// Zoom by factor, keeping the world point under widget-local pixel
+    /// (anchor_x, anchor_y) where it is on screen.
+    void zoom_at(float factor, float anchor_x, float anchor_y);
+
     /**
      * @brief Reset camera to default view
      *
@@ -320,6 +327,9 @@ class GCodeCamera {
      * @return Camera position in world space
      */
     glm::vec3 compute_camera_position() const;
+
+    /// World units per screen pixel of the orthographic view; 0 when undefined.
+    float world_units_per_pixel() const;
 
     // Camera parameters
     float azimuth_{45.0f};                     ///< Horizontal rotation (degrees)

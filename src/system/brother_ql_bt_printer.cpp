@@ -10,6 +10,7 @@
 #include "brother_ql_printer.h"
 #include "brother_ql_protocol.h"
 #include "bt_print_utils.h"
+#include "helix_thread.h"
 #include "log_redact.h"
 
 #include <spdlog/spdlog.h>
@@ -36,7 +37,7 @@ void BrotherQLBluetoothPrinter::print(const LabelBitmap& bitmap, const LabelSize
     auto& loader = helix::bluetooth::BluetoothLoader::instance();
     if (!loader.is_available()) {
         spdlog::error("Brother QL BT: Bluetooth not available");
-        helix::ui::queue_update([callback]() {
+        helix::ui::queue_update("BrotherQLBluetoothPrinter::print", [callback]() {
             if (callback)
                 callback(false, "Bluetooth not available");
         });
@@ -45,7 +46,7 @@ void BrotherQLBluetoothPrinter::print(const LabelBitmap& bitmap, const LabelSize
 
     if (mac_.empty()) {
         spdlog::error("Brother QL BT: No device configured");
-        helix::ui::queue_update([callback]() {
+        helix::ui::queue_update("BrotherQLBluetoothPrinter::print", [callback]() {
             if (callback)
                 callback(false, "Bluetooth device not configured");
         });
@@ -63,17 +64,17 @@ void BrotherQLBluetoothPrinter::print(const LabelBitmap& bitmap, const LabelSize
     // ARM (AD5M/CC1) throws std::system_error which aborts with std::terminate
     // if it escapes an LVGL event frame (#724, #837, [L083]).
     try {
-        std::thread([mac, channel, commands = std::move(commands), callback]() {
+        helix::make_thread([mac, channel, commands = std::move(commands), callback]() {
             auto result = helix::bluetooth::rfcomm_send(mac, channel, commands, "Brother QL BT");
 
-            helix::ui::queue_update([callback, result]() {
+            helix::ui::queue_update("BrotherQLBluetoothPrinter::print", [callback, result]() {
                 if (callback)
                     callback(result.success, result.error);
             });
         }).detach();
     } catch (const std::system_error& e) {
         spdlog::error("Brother QL BT: failed to spawn print thread: {}", e.what());
-        helix::ui::queue_update([callback]() {
+        helix::ui::queue_update("BrotherQLBluetoothPrinter::print", [callback]() {
             if (callback)
                 callback(false, "System busy — please try again");
         });

@@ -11,11 +11,14 @@
 #include "app_globals.h"
 #include "config.h"
 #include "i_moonraker_api.h"
+#include "i_moonraker_client.h"
+#include "led/led_auto_state.h"
+#include "led/led_devices.h"
 #include "lvgl/lvgl.h"
 #include "lvgl/src/others/translation/lv_translation.h"
-#include "moonraker_client.h"
 #include "printer_hardware.h"
 #include "static_panel_registry.h"
+#include "ui/ui_widget_helpers.h"
 #include "wizard_config_paths.h"
 
 #include <spdlog/spdlog.h>
@@ -33,15 +36,8 @@ using namespace helix;
 // Global Instance
 // ============================================================================
 
-static std::unique_ptr<WizardLedSelectStep> g_wizard_led_select_step;
-
 WizardLedSelectStep* get_wizard_led_select_step() {
-    if (!g_wizard_led_select_step) {
-        g_wizard_led_select_step = std::make_unique<WizardLedSelectStep>();
-        StaticPanelRegistry::instance().register_destroy(
-            "WizardLedSelectStep", []() { g_wizard_led_select_step.reset(); });
-    }
-    return g_wizard_led_select_step.get();
+    return &helix::lazy_global<WizardLedSelectStep>("WizardLedSelectStep");
 }
 
 // ============================================================================
@@ -53,7 +49,8 @@ WizardLedSelectStep::WizardLedSelectStep() {
 }
 
 WizardLedSelectStep::~WizardLedSelectStep() {
-    // NOTE: Do NOT call LVGL functions here - LVGL may be destroyed first
+    // LVGL may be destroyed first: no direct LVGL calls here. The subjects_ member
+    // deinits its subjects only while lv_is_initialized().
     // NOTE: Do NOT log here - spdlog may be destroyed first
     screen_root_ = nullptr;
 }
@@ -66,9 +63,12 @@ WizardLedSelectStep::~WizardLedSelectStep() {
 void WizardLedSelectStep::init_subjects() {
     spdlog::debug("[{}] Initializing subjects", get_name());
 
+    // Each visit re-initializes; drop the previous visit's subjects and names first.
+    subjects_.deinit_all();
+
     // Initialize subject with default index 0
     // Actual selection will be restored from config during create() after hardware is discovered
-    helix::ui::wizard::init_int_subject(&led_strip_selected_, 0, "led_strip_selected");
+    helix::ui::wizard::init_int_subject(subjects_, &led_strip_selected_, 0, "led_strip_selected");
 
     subjects_initialized_ = true;
     spdlog::debug("[{}] Subjects initialized", get_name());
@@ -115,12 +115,18 @@ lv_obj_t* WizardLedSelectStep::create(lv_obj_t* parent) {
             true,    // Allow "None" option
             helix::wizard::LED_STRIP,
             [](const PrinterHardware& hw) { return hw.guess_main_led_strip(); }, "[Wizard LED]",
-            helix::DeviceType::LED);
+            [](const std::string& id) {
+                // The same name the LEDs overlay, picker, tile and Settings show.
+                led::LedStripInfo device{};
+                device.id = id;
+                return led::device_display_name(device);
+            });
 
         spdlog::debug("[{}] Dropdown populated, attaching callback", get_name());
 
         // Attach LED dropdown callback programmatically
-        lv_obj_t* led_dropdown = lv_obj_find_by_name(screen_root_, "led_main_dropdown");
+        lv_obj_t* led_dropdown =
+            helix::ui::find_required(screen_root_, "led_main_dropdown", get_name());
         if (led_dropdown) {
             lv_obj_add_event_cb(led_dropdown, wizard_hardware_dropdown_changed_cb,
                                 LV_EVENT_VALUE_CHANGED, &led_strip_selected_);
@@ -141,30 +147,25 @@ lv_obj_t* WizardLedSelectStep::create(lv_obj_t* parent) {
 void WizardLedSelectStep::cleanup() {
     spdlog::debug("[{}] Cleaning up resources", get_name());
 
-    // Save LED selection to leds/selected_strips (array — canonical path for
-    // LedController) and leds/strip (string — used by wizard dropdown restore)
+    // Stage the pick as the light button's device and the auto-state strip, and
+    // keep leds/strip (string) for the wizard dropdown restore.
     Config* config = Config::get_instance();
-    if (config) {
-        int index = lv_subject_get_int(&led_strip_selected_);
-        if (index >= 0 && static_cast<size_t>(index) < led_strip_items_.size()) {
-            const std::string& item = led_strip_items_[static_cast<size_t>(index)];
-            const std::string save_value = (item == "None") ? "" : item;
+    int index = lv_subject_get_int(&led_strip_selected_);
+    if (index >= 0 && static_cast<size_t>(index) < led_strip_items_.size()) {
+        const std::string& item = led_strip_items_[static_cast<size_t>(index)];
+        const std::string save_value = (item == "None") ? "" : item;
 
-            // Canonical: array for LedController
-            nlohmann::json strips = nlohmann::json::array();
-            if (!save_value.empty()) {
-                strips.push_back(save_value);
-            }
-            config->set(config->df() + "leds/selected_strips", strips);
-
-            // String for wizard dropdown restore
-            config->set(config->df() + "leds/strip", save_value);
-
-            spdlog::debug("[Wizard LED] Saved LED selection: {}", strips.dump());
+        if (!save_value.empty()) {
+            helix::led::stage_light_selection({save_value, {save_value}});
         }
-        if (!config->save()) {
-            NOTIFY_ERROR(lv_tr("Failed to save LED configuration"));
-        }
+
+        // String for wizard dropdown restore
+        config->set(config->df() + "leds/strip", save_value);
+
+        spdlog::debug("[Wizard LED] Saved LED selection: '{}'", save_value);
+    }
+    if (!config->save()) {
+        NOTIFY_ERROR(lv_tr("Failed to save LED configuration"));
     }
 
     // Reset UI references

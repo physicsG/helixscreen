@@ -119,6 +119,10 @@ std::vector<std::string> listeners_on_port(uint16_t port);
  */
 std::vector<ProcMatch> select_moonraker_processes(const std::vector<ProcMatch>& candidates);
 
+/// Every process under @p proc_root with a non-empty cmdline (kernel threads
+/// have none). Empty on a system without /proc.
+std::vector<ProcMatch> read_process_table(const std::string& proc_root = "/proc");
+
 /// Processes whose cmdline mentions Moonraker or Klipper. Empty on a system
 /// without /proc, or when neither is running — which is itself the finding.
 /// Reads /proc and applies select_moonraker_processes() to what it finds.

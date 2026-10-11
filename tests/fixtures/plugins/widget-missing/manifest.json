@@ -1,0 +1,9 @@
+{
+  "id": "widget-missing",
+  "name": "Widget Missing",
+  "version": "1.0.0",
+  "widgets": [
+    {"id": "widget-missing__tile", "name": "Missing Tile", "component": "widget-missing__tile",
+     "colspan": 1, "rowspan": 1}
+  ]
+}

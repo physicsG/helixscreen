@@ -15,6 +15,7 @@
  * Both callbacks are now wrapped: any exception is logged and swallowed.
  */
 
+#include "../test_helpers/moonraker_request_tracker_test_access.h"
 #include "moonraker_request.h"
 #include "moonraker_request_tracker.h"
 
@@ -25,21 +26,12 @@
 
 using namespace helix;
 
-class MoonrakerRequestTrackerTestAccess {
-  public:
-    static void inject_request(MoonrakerRequestTracker& tracker, RequestId id,
-                               PendingRequest request) {
-        std::lock_guard<std::mutex> lock(tracker.requests_mutex_);
-        tracker.pending_requests_[id] = std::move(request);
-    }
-};
-
 namespace {
 
 /// No-op event sink — these tests don't care about the emitted events,
 /// only whether the callback exception escapes route_response().
 auto null_emit() {
-    return [](MoonrakerEventType, const std::string&, bool, const std::string&) {};
+    return [](const MoonrakerEvent&) {};
 }
 
 PendingRequest make_request_with_throwing_error_cb(std::shared_ptr<std::atomic<int>> entered) {

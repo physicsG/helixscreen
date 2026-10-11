@@ -10,18 +10,25 @@ platform_stop_competing_uis() {
     # while leaving S12boot_display in place — so kill it unconditionally.
     killall boot_display 2>/dev/null || true
 
-    # Stop and persistently disable stock Creality UI (display-server, Monitor, etc.)
-    # S99start_app launches the entire stock UI stack; if it remains executable it
+    # Stop and persistently disable the stock Creality display stack.
+    # S99start_app launches the entire stock stack; if it remains executable it
     # will respawn every boot since it runs after S99helixscreen alphabetically.
+    # The backend servers (master-server, app-server, web-server) are NOT
+    # framebuffer contenders; they are what Creality Print and Creality Cloud
+    # talk to, and /etc/init.d/S99creality-backend starts them at boot
+    # (prestonbrown/helixscreen#1468). Everything else in the stock stack
+    # simply never starts: with S99start_app dead nothing launches it.
     if [ -f /etc/init.d/S99start_app ]; then
         if [ -x /etc/init.d/S99start_app ]; then
             /etc/init.d/S99start_app stop 2>/dev/null || true
-            # Persistently disable (reversible with chmod +x)
+            # Persistently disable (reversible with chmod +x). Gated on -x:
+            # this de-executes a stock UI that could still run; one the
+            # installer already disabled (and recorded) stays down untouched.
             chmod a-x /etc/init.d/S99start_app 2>/dev/null || true
         fi
-        # Kill any remaining stock UI processes (full list from S99start_app)
-        for proc in display-server Monitor master-server audio-server \
-                    wifi-server app-server upgrade-server web-server; do
+        # Monitor dies first: it is a watchdog that respawns display-server
+        # moments after the kill below.
+        for proc in Monitor display-server; do
             killall "$proc" 2>/dev/null || true
         done
     fi
@@ -86,7 +93,21 @@ platform_wait_for_services() {
 }
 
 platform_pre_start() {
-    export HELIX_CACHE_DIR="/usr/data/helixscreen/cache"
+    # Cache and logs live beside the payload, never inside it. The install root
+    # is what an update replaces, and not only by our own hand: a Moonraker
+    # `type: web` entry does shutil.rmtree(path) before extracting. Anything
+    # under it goes on every update - logs vanish exactly when someone needs
+    # them, and the thumbnail cache is rebuilt from nothing.
+    export HELIX_CACHE_DIR="${HELIX_CACHE_DIR:-/usr/data/helixscreen-state/cache}"
+
+    # LVGL decodes each thumbnail on every draw with no cache. 2 MB is the knee
+    # measured on a K1C: -14% process CPU over a scroll-the-grid scenario, RSS
+    # slightly BELOW the uncached run, and the first size at which no image is
+    # too large to store (1 MB leaves 28 of them uncacheable). Larger buys 0.4
+    # points for four times the memory. The K1 family is the only board where
+    # this resolved cleanly - the K2 and AD5X measured inside their own run-to-run
+    # spread, so they stay at the built-in 0.
+    export HELIX_IMAGE_CACHE_KB="${HELIX_IMAGE_CACHE_KB:-2048}"
 
     # Logging policy: write to /usr/data (mmcblk0p10 ext4, ~5.7 GB free on
     # a typical install), NOT to /tmp. /tmp here is a ~104 MB tmpfs and
@@ -96,11 +117,11 @@ platform_pre_start() {
     # UI. Constrain rotation to 1 MiB × 3 (~3 MiB cap); at WARN/INFO that
     # gives months of headroom, and a debug session still has a bounded
     # window before rolling over.
-    export HELIX_LOG_DEST=file
-    export HELIX_LOG_FILE="/usr/data/helixscreen/logs/helix.log"
-    export HELIX_LOG_ROTATE_BYTES=1048576
-    export HELIX_LOG_ROTATE_FILES=3
-    mkdir -p "/usr/data/helixscreen/logs" 2>/dev/null || true
+    export HELIX_LOG_DEST="${HELIX_LOG_DEST:-file}"
+    export HELIX_LOG_FILE="${HELIX_LOG_FILE:-/usr/data/helixscreen-state/logs/helix.log}"
+    export HELIX_LOG_ROTATE_BYTES="${HELIX_LOG_ROTATE_BYTES:-1048576}"
+    export HELIX_LOG_ROTATE_FILES="${HELIX_LOG_ROTATE_FILES:-3}"
+    mkdir -p "/usr/data/helixscreen-state/logs" 2>/dev/null || true
 }
 
 platform_post_stop() {

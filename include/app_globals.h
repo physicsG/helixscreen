@@ -172,6 +172,17 @@ lv_subject_t& get_notification_subject();
 lv_subject_t& get_home_edit_mode_subject();
 
 /**
+ * @brief Death signal for the file-static app_globals subjects
+ *
+ * home_edit_mode, wizard_active and siblings are freed by
+ * app_globals_deinit_subjects() during a soft restart, outside the
+ * ObserverGuard invalidation epoch. Observers of them must pass this to
+ * observe_*().
+ */
+SubjectLifetime get_app_globals_subjects_lifetime(); // NAMESPACE_OK: sits with the other
+                                                     // app-globals accessors at file scope
+
+/**
  * @brief Get the global wizard-active subject
  *
  * Observable mirror of is_wizard_active(), updated inside set_wizard_active().
@@ -363,9 +374,9 @@ std::function<void()> get_wizard_cancel_callback();
  * 1. HELIX_CACHE_DIR env var + /<subdir>
  * 2. Config /cache/base_directory + /<subdir>
  * 3. Platform-specific (compile-time):
- *    - AD5M:  /data/helixscreen/cache/<subdir>
- *    - K1:    /usr/data/helixscreen/cache/<subdir>
- *    - K2:    /mnt/UDISK/helixscreen/cache/<subdir>, then /usr/data
+ *    - AD5M:  /data/.helixscreen/cache/<subdir>
+ *    - K1:    /usr/data/helixscreen-state/cache/<subdir>
+ *    - K2:    /mnt/UDISK/helixscreen-state/cache/<subdir>, then /usr/data
  *             (/usr/data is the small root overlay on the K2, not user storage)
  * 4. XDG_CACHE_HOME/helix/<subdir>
  * 5. $HOME/.cache/helix/<subdir>
@@ -397,10 +408,16 @@ std::string get_helix_cache_dir(const std::string& subdir);
  * lower tier silently splits the cache across two locations.
  *
  * @param subdir Subdirectory name (e.g., "gcode_temp", "thumbs")
+ * @param tier_out When non-null, receives a static label naming the rung that
+ *        won ("HELIX_CACHE_DIR", "config", "AD5M", "CC1", "K2", "MIPS",
+ *        "Android"), or nullptr for a fall-through rung (XDG, $HOME, /var/tmp,
+ *        /tmp) and when nothing is usable. Which rung answered is what a
+ *        diagnostic needs: the path alone cannot say whether an override, a
+ *        config setting or the platform default produced it.
  * @return Full path the cascade resolves to, or empty string if no candidate
  *         is usable. A non-empty result may not exist yet.
  */
-std::string peek_helix_cache_dir(const std::string& subdir);
+std::string peek_helix_cache_dir(const std::string& subdir, const char** tier_out = nullptr);
 
 /**
  * @brief Remove cache directories an older layout left on the wrong filesystem.
@@ -422,6 +439,27 @@ std::string peek_helix_cache_dir(const std::string& subdir);
  * @return Number of stale directories reclaimed.
  */
 int sweep_stale_helix_cache_dirs();
+
+namespace helix {
+
+/**
+ * @brief Move a platform state root whose name had to change, repairing env.
+ *
+ * Which platforms need this and why is a platform question (on the AD5M,
+ * /data is the only large writable partition and the vendor symlinks it whole
+ * into Moonraker's gcodes root, so the state root must stay dot-prefixed to
+ * stay out of the print-file picker: Moonraker's listings hide dot-entries,
+ * the same mechanism the vendor's own .mod and .thumbs rely on). This renames
+ * the old root into place and repoints HELIX_CACHE_DIR / HELIX_LOG_FILE
+ * values the platform hook exported from the old name, so a binary deployed
+ * without the installer does not recreate the visible directory on first use.
+ *
+ * A no-op on builds whose state root never moved. Call once at startup,
+ * before logging init: HELIX_LOG_FILE is consumed there.
+ */
+void migrate_legacy_state_roots();
+
+} // namespace helix
 
 /**
  * @brief Returns the installation root directory (containing bin/, ui_xml/, assets/).
@@ -455,12 +493,6 @@ std::string app_get_runtime_dir();
 // Falls back to the relative "config" when install root is unknown.
 // Result is cached after first call.
 std::string app_get_config_dir();
-
-// Parses an environment-variable value as a boolean. Truthy values are
-// "1", "true", "yes", "on" (case-insensitive); everything else (including
-// nullptr, "", "0", "false") is false. Pure/side-effect-free so it can be
-// unit-tested without depending on the process environment.
-bool helix_parse_truthy_env(const char* value);
 
 // Pure predicate behind updates_externally_managed(), split out for testing so
 // both inputs can be exercised without mutating the process env or the platform.

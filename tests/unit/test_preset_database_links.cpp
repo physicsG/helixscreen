@@ -14,6 +14,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -140,5 +141,63 @@ TEST_CASE("every printer_database.json preset reference resolves to a file",
         json preset = load_json(path);
         REQUIRE(preset.contains("preset"));
         CHECK(preset["preset"].get<std::string>() == ref);
+    }
+}
+
+// Entries that share one preset are one family, and a preset install that
+// identifies no machine of it persists the family's default. That default is
+// named in data with "preset_default", so it must be unambiguous.
+TEST_CASE("each preset names at most one printer_database.json default",
+          "[printer_detector][presets][assets]") {
+    json db = load_json(DB_PATH);
+    std::map<std::string, std::vector<std::string>> defaults;
+    size_t marked = 0;
+    for (const auto& printer : db["printers"]) {
+        if (!printer.value("preset_default", false)) {
+            continue;
+        }
+        ++marked;
+        const std::string preset = printer.value("preset", "");
+        INFO("'" << printer.value("name", "") << "' is a preset_default with no preset");
+        CHECK_FALSE(preset.empty());
+        defaults[preset].push_back(printer.value("name", ""));
+    }
+    REQUIRE(marked >= 1);
+    for (const auto& [preset, names] : defaults) {
+        CAPTURE(preset, names);
+        CHECK(names.size() == 1);
+    }
+}
+
+// A preset shared by only one database entry has nothing to disambiguate: the
+// no-evidence answer can only ever be that entry. Once a second entry joins the
+// family, get_name_for_preset()'s no-evidence answer floats with array order
+// unless one entry is marked. Named ids here (rather than "size() == 1" as
+// above) so removing a marker fails this test even when the array happens to
+// already list the base model first.
+TEST_CASE("every preset family with more than one database entry names a default",
+          "[printer_detector][presets][assets]") {
+    json db = load_json(DB_PATH);
+    std::map<std::string, std::vector<std::string>> ids_by_preset;
+    std::map<std::string, int> defaults_by_preset;
+    for (const auto& printer : db["printers"]) {
+        std::string preset = printer.value("preset", "");
+        if (preset.empty()) {
+            continue;
+        }
+        ids_by_preset[preset].push_back(printer.value("id", ""));
+        if (printer.value("preset_default", false)) {
+            ++defaults_by_preset[preset];
+        }
+    }
+    for (const auto& [preset, ids] : ids_by_preset) {
+        if (ids.size() < 2) {
+            continue;
+        }
+        CAPTURE(preset, ids);
+        INFO("preset '" << preset << "' has " << ids.size()
+                        << " database entries and no preset_default marker (or more than "
+                           "one); its no-evidence default floats with array order");
+        CHECK(defaults_by_preset[preset] == 1);
     }
 }

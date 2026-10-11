@@ -11,7 +11,12 @@ name: Server Tests
 
 on:
   push:
-    branches: [ main, "claude/**" ]
+    branches:
+      - main
+      - "claude/**"
+      # Report branches carry a worker's STATUS.md over a full tree. Nothing
+      # in them is code, and each push otherwise queues a whole run.
+      - "!claude/report-*"
     paths:
       - 'server/**'
       - '.github/workflows/server-tests.yml'
@@ -21,9 +26,10 @@ on:
       - 'server/**'
       - '.github/workflows/server-tests.yml'
 
-# A newer push to the same branch makes an in-flight run pointless.
+# A newer push to the same branch makes an in-flight run pointless. main keys on
+# the SHA instead, so a group never cancels the run for a commit that landed.
 concurrency:
-  group: server-tests-${{ github.ref }}
+  group: server-tests-${{ github.event.pull_request.number || (startsWith(github.ref, 'refs/heads/release/') && github.sha || github.ref) }}
   cancel-in-progress: true
 
 jobs:

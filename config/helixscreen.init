@@ -81,6 +81,23 @@ mkdir -p /var/lib/helixscreen 2>/dev/null || mkdir -p "${HOME}/.helixscreen" 2>/
 # Check if binary exists
 [ -x "$DAEMON" ] || exit 0
 
+# HELIX_NO_SPLASH is the one operator-settable variable this script consumes
+# before the launcher runs: the early splash gate inside start(). Init runs
+# ahead of the launcher's env-file read, so without this the gate would see
+# only the shell environment and the hook default while the launcher honours
+# the file — and the two splash decisions disagree. Ask the launcher itself
+# (`helix-launcher.sh --print-env NAME`) so one parser and one resolution
+# order — shell environment, env file, then the hooks' guarded default —
+# answers both readers (prestonbrown/helixscreen#1634). A missing launcher
+# or a failed query leaves the variable unset and the hook default governs,
+# the same environment the fallback install path execs the daemon in; the
+# launcher re-parses the file on startup and logs any warnings there.
+if [ -z "${HELIX_NO_SPLASH:-}" ] && [ -x "$LAUNCHER" ]; then
+    _no_splash=$("$LAUNCHER" --print-env HELIX_NO_SPLASH 2>/dev/null) || _no_splash=""
+    [ -n "$_no_splash" ] && HELIX_NO_SPLASH="$_no_splash"
+fi
+unset _no_splash
+
 # Platform hook defaults (no-ops). Platform-specific hook files override these.
 platform_stop_competing_uis() { :; }
 platform_enable_backlight() { :; }
@@ -126,8 +143,14 @@ start() {
 
     echo "Starting $DESC..."
 
-    # Platform-specific pre-start (e.g., flag files for firmware coordination)
-    platform_pre_start
+    # Platform-specific pre-start (e.g., flag files for firmware
+    # coordination). Runs for its SIDE EFFECTS only, in a subshell: the
+    # launcher inherits this script's environment, and a hook default exported
+    # here arrives as "already set" when the launcher reads helixscreen.env,
+    # silently outranking the operator's value. The launcher runs this hook
+    # again itself, after applying the env file — that is where platform
+    # defaults are supplied.
+    ( platform_pre_start )
 
     # Stop any competing UIs first
     platform_stop_competing_uis
@@ -178,6 +201,10 @@ start() {
     # Start splash screen early (before launcher) so it's visible during load
     # Set HELIX_NO_SPLASH=1 to disable splash (for debugging backlight issues)
     # Splash auto-detects resolution from display hardware
+    # HELIX_NO_SPLASH here resolves in the launcher's order — shell
+    # environment, helixscreen.env (the --print-env query above the
+    # hooks), then the hook's file-scope default (Forge-X) — so this gate
+    # and the launcher's own splash decision agree.
     EARLY_SPLASH_PID=""
     if [ -x "$SPLASH" ] && [ "${HELIX_NO_SPLASH:-0}" != "1" ]; then
         echo "Starting splash screen..."

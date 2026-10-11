@@ -10,69 +10,42 @@
  * BeltTensionCalibrator and analysis functions are implemented.
  *
  * Test categories:
- * 1. Type tests - BeltStatus evaluation thresholds
- * 2. CSV parsing - Klipper raw accelerometer CSV format
- * 3. FFT/PSD computation - Frequency spectrum from time-domain samples
- * 4. Peak finding - Locate resonant frequency in PSD data
- * 5. Similarity calculation - Pearson correlation between PSD curves
- * 6. State machine - BeltTensionCalibrator lifecycle
- * 7. BeltTensionResult - Completeness, overall status, recommendations
+ * 1. CSV parsing - Klipper raw accelerometer CSV format
+ * 2. FFT/PSD computation - Frequency spectrum from time-domain samples
+ * 3. Peak finding - Locate resonant frequency in PSD data
+ * 4. Similarity calculation - Pearson correlation between PSD curves
+ * 5. State machine - BeltTensionCalibrator lifecycle
  */
 
 #include "../../include/belt_tension_calibrator.h"
 #include "../../include/belt_tension_types.h"
+#include "../../include/moonraker_api.h"
+#include "../../include/moonraker_client_mock.h"
+#include "../../include/printer_state.h"
+#include "../../lvgl/lvgl.h"
+#include "../test_helpers/printer_state_test_access.h"
+#include "../test_helpers/update_queue_test_access.h"
+#include "../ui_test_utils.h"
+#include "app_globals.h"
 
+#include <algorithm>
+#include <atomic>
 #include <cfloat>
+#include <chrono>
 #include <cmath>
+#include <memory>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <vector>
 
 #include "../catch_amalgamated.hpp"
 
+using namespace helix;
 using namespace helix::calibration;
 
 // ============================================================================
-// 1. Type Tests - evaluate_belt_status
-// ============================================================================
-
-TEST_CASE("evaluate_belt_status classifies correctly", "[belt_tension][types]") {
-    // target=110, tolerance=10
-    // GOOD: within [target-tolerance, target+tolerance] = [100, 120]
-    CHECK(evaluate_belt_status(110.0f, 110.0f, 10.0f) == BeltStatus::GOOD);
-    CHECK(evaluate_belt_status(100.0f, 110.0f, 10.0f) == BeltStatus::GOOD);
-    CHECK(evaluate_belt_status(120.0f, 110.0f, 10.0f) == BeltStatus::GOOD);
-
-    // WARNING: within [target-2*tolerance, target-tolerance) or (target+tolerance,
-    // target+2*tolerance] i.e. [90, 100) or (120, 130]
-    CHECK(evaluate_belt_status(95.0f, 110.0f, 10.0f) == BeltStatus::WARNING);
-    CHECK(evaluate_belt_status(125.0f, 110.0f, 10.0f) == BeltStatus::WARNING);
-
-    // BAD: outside [target-2*tolerance, target+2*tolerance] i.e. <90 or >130
-    CHECK(evaluate_belt_status(80.0f, 110.0f, 10.0f) == BeltStatus::BAD);
-    CHECK(evaluate_belt_status(145.0f, 110.0f, 10.0f) == BeltStatus::BAD);
-}
-
-TEST_CASE("evaluate_belt_status boundary values", "[belt_tension][types]") {
-    // Exact boundary at tolerance edge
-    CHECK(evaluate_belt_status(100.0f, 110.0f, 10.0f) == BeltStatus::GOOD);
-    CHECK(evaluate_belt_status(120.0f, 110.0f, 10.0f) == BeltStatus::GOOD);
-
-    // Exact boundary at 2x tolerance
-    CHECK(evaluate_belt_status(90.0f, 110.0f, 10.0f) == BeltStatus::WARNING);
-    CHECK(evaluate_belt_status(130.0f, 110.0f, 10.0f) == BeltStatus::WARNING);
-}
-
-TEST_CASE("evaluate_belt_status with different targets", "[belt_tension][types]") {
-    // Prusa MK4 default: target=96, tolerance=15
-    CHECK(evaluate_belt_status(96.0f, 96.0f, 15.0f) == BeltStatus::GOOD);
-    CHECK(evaluate_belt_status(80.0f, 96.0f, 15.0f) ==
-          BeltStatus::WARNING);                                          // delta=16, > tolerance
-    CHECK(evaluate_belt_status(50.0f, 96.0f, 15.0f) == BeltStatus::BAD); // delta=46, > 2*tolerance
-}
-
-// ============================================================================
-// 2. CSV Parsing - parse_accel_csv
+// 1. CSV Parsing - parse_accel_csv
 // ============================================================================
 
 TEST_CASE("parse_accel_csv handles Klipper format", "[belt_tension][csv]") {
@@ -123,7 +96,7 @@ TEST_CASE("parse_accel_csv handles Klipper format", "[belt_tension][csv]") {
 }
 
 // ============================================================================
-// 3. FFT/PSD Computation
+// 2. FFT/PSD Computation
 // ============================================================================
 
 TEST_CASE("compute_psd produces frequency spectrum", "[belt_tension][fft]") {
@@ -187,7 +160,7 @@ TEST_CASE("compute_psd frequency resolution scales with sample count", "[belt_te
 }
 
 // ============================================================================
-// 4. Peak Finding
+// 3. Peak Finding
 // ============================================================================
 
 TEST_CASE("find_peak_frequency with known data", "[belt_tension][peak]") {
@@ -242,7 +215,7 @@ TEST_CASE("find_peak_frequency with dual peaks", "[belt_tension][peak]") {
 }
 
 // ============================================================================
-// 5. Similarity Calculation
+// 4. Similarity Calculation
 // ============================================================================
 
 TEST_CASE("calculate_similarity between curves", "[belt_tension][similarity]") {
@@ -290,7 +263,7 @@ TEST_CASE("calculate_similarity between curves", "[belt_tension][similarity]") {
 }
 
 // ============================================================================
-// 6. State Machine - BeltTensionCalibrator
+// 5. State Machine - BeltTensionCalibrator
 // ============================================================================
 
 TEST_CASE("BeltTensionCalibrator initial state", "[belt_tension][calibrator]") {
@@ -327,68 +300,10 @@ TEST_CASE("BeltTensionCalibrator detect_hardware without API calls error",
     CHECK(cal.get_state() == BeltTensionCalibrator::State::IDLE);
 }
 
-TEST_CASE("BeltTensionCalibrator run_auto_sweep without API calls error",
-          "[belt_tension][calibrator]") {
-    BeltTensionCalibrator cal;
-    bool error_called = false;
-    std::string error_msg;
-
-    cal.run_auto_sweep([](int) {},
-                       [](const BeltTensionResult&) { FAIL("Should not succeed without API"); },
-                       [&](const std::string& msg) {
-                           error_called = true;
-                           error_msg = msg;
-                       });
-
-    CHECK(error_called);
-    CHECK_FALSE(error_msg.empty());
-    CHECK(cal.get_state() == BeltTensionCalibrator::State::IDLE);
-}
-
-TEST_CASE("BeltTensionCalibrator test_path without API calls error", "[belt_tension][calibrator]") {
-    BeltTensionCalibrator cal;
-    bool error_called = false;
-
-    cal.test_path(
-        BeltPath::PATH_A, [](int) {},
-        [](const BeltMeasurement&) { FAIL("Should not succeed without API"); },
-        [&](const std::string&) { error_called = true; });
-
-    CHECK(error_called);
-    CHECK(cal.get_state() == BeltTensionCalibrator::State::IDLE);
-}
-
-TEST_CASE("BeltTensionCalibrator target/tolerance config", "[belt_tension][calibrator]") {
-    BeltTensionCalibrator cal;
-    cal.set_target_frequency(96.0f);
-    cal.set_tolerance(15.0f);
-
-    CHECK(cal.get_results().target_frequency == Catch::Approx(96.0f));
-    CHECK(cal.get_results().tolerance == Catch::Approx(15.0f));
-}
-
-TEST_CASE("BeltTensionCalibrator default target values", "[belt_tension][calibrator]") {
-    BeltTensionCalibrator cal;
-    CHECK(cal.get_results().target_frequency == Catch::Approx(110.0f));
-    CHECK(cal.get_results().tolerance == Catch::Approx(10.0f));
-}
-
 TEST_CASE("BeltTensionCalibrator detect_hardware with null callbacks does not crash",
           "[belt_tension][calibrator][edge_case]") {
     BeltTensionCalibrator cal;
     REQUIRE_NOTHROW(cal.detect_hardware(nullptr, nullptr));
-}
-
-TEST_CASE("BeltTensionCalibrator run_auto_sweep with null callbacks does not crash",
-          "[belt_tension][calibrator][edge_case]") {
-    BeltTensionCalibrator cal;
-    REQUIRE_NOTHROW(cal.run_auto_sweep(nullptr, nullptr, nullptr));
-}
-
-TEST_CASE("BeltTensionCalibrator test_path with null callbacks does not crash",
-          "[belt_tension][calibrator][edge_case]") {
-    BeltTensionCalibrator cal;
-    REQUIRE_NOTHROW(cal.test_path(BeltPath::PATH_A, nullptr, nullptr, nullptr));
 }
 
 TEST_CASE("BeltTensionCalibrator multiple resets are safe",
@@ -407,21 +322,6 @@ TEST_CASE("BeltTensionCalibrator multiple cancels are safe",
     REQUIRE_NOTHROW(cal.cancel());
     REQUIRE_NOTHROW(cal.cancel());
     CHECK(cal.get_state() == BeltTensionCalibrator::State::IDLE);
-}
-
-TEST_CASE("BeltTensionCalibrator get_results is always valid reference",
-          "[belt_tension][calibrator][edge_case]") {
-    BeltTensionCalibrator cal;
-    const auto& results1 = cal.get_results();
-    CHECK_FALSE(results1.is_complete());
-
-    cal.cancel();
-    const auto& results2 = cal.get_results();
-    CHECK_FALSE(results2.is_complete());
-
-    cal.reset();
-    const auto& results3 = cal.get_results();
-    CHECK_FALSE(results3.is_complete());
 }
 
 TEST_CASE("BeltTensionCalibrator get_hardware returns default values",
@@ -444,170 +344,155 @@ TEST_CASE("BeltTensionCalibrator State enum values are distinct", "[belt_tension
     using State = BeltTensionCalibrator::State;
 
     CHECK(State::IDLE != State::DETECTING_HARDWARE);
-    CHECK(State::DETECTING_HARDWARE != State::CHECKING_ADXL);
-    CHECK(State::CHECKING_ADXL != State::HOMING);
-    CHECK(State::HOMING != State::TESTING_PATH_A);
-    CHECK(State::TESTING_PATH_A != State::TESTING_PATH_B);
-    CHECK(State::TESTING_PATH_B != State::RESULTS_READY);
-    CHECK(State::RESULTS_READY != State::ERROR);
+    CHECK(State::DETECTING_HARDWARE != State::HOMING);
+    CHECK(State::HOMING != State::MEASURING);
+    CHECK(State::MEASURING != State::ERROR);
     CHECK(State::ERROR != State::IDLE);
 }
 
 // ============================================================================
-// 7. BeltTensionResult Tests
+// 5b. One-Path Measurement (mock client end to end)
 // ============================================================================
 
-TEST_CASE("BeltTensionResult completeness checks", "[belt_tension][result]") {
-    BeltTensionResult result;
+namespace {
 
-    SECTION("empty result is not complete") {
-        CHECK_FALSE(result.is_complete());
-        CHECK_FALSE(result.has_path_a());
-        CHECK_FALSE(result.has_path_b());
+struct LVGLInitializerBeltCal {
+    LVGLInitializerBeltCal() {
+        static bool initialized = false;
+        if (!initialized) {
+            lv_init_safe();
+            lv_display_t* disp = lv_display_create(800, 480);
+            alignas(64) static lv_color_t buf[800 * 10];
+            lv_display_set_buffers(disp, buf, NULL, sizeof(buf), LV_DISPLAY_RENDER_MODE_PARTIAL);
+            initialized = true;
+        }
+    }
+};
+
+static LVGLInitializerBeltCal lvgl_init_belt_cal;
+
+} // namespace
+
+/**
+ * @brief Calibrator over the mock client, with the printer already homed
+ *
+ * Same shape as BeltApiFixture (test_moonraker_api_belt_resonance.cpp): the
+ * mock answers TEST_RESONANCES by playing console lines on an lv_timer, so
+ * every wait is a lv_tick_inc/lv_timer_handler_safe pump. measure_path()
+ * homes through ensure_homed_then(), which reads the GLOBAL PrinterState's
+ * homed_axes subject, so that one is seeded "xyz" and the sweep starts
+ * without a G28.
+ */
+class BeltCalibratorFixture {
+  public:
+    BeltCalibratorFixture() : mock_client_(MoonrakerClientMock::PrinterType::VORON_24) {
+        state_.init_subjects(false); // Don't register XML bindings in tests
+        // execute_gcode() halted gate would otherwise reject every command.
+        state_.set_klippy_state_sync(helix::KlippyState::READY);
+        api_ = std::make_unique<MoonrakerAPI>(mock_client_, state_);
+        mock_client_.set_belt_line_interval_ms(1);
+
+        PrinterStateTestAccess::reset(get_printer_state());
+        get_printer_state().init_subjects(false);
+        lv_subject_copy_string(get_printer_state().motion_state().get_homed_axes_subject(), "xyz");
+
+        calibrator_ = std::make_unique<BeltTensionCalibrator>(api_.get());
     }
 
-    SECTION("only path A is not complete") {
-        result.path_a.peak_frequency = 110.0f;
-        CHECK(result.has_path_a());
-        CHECK_FALSE(result.has_path_b());
-        CHECK_FALSE(result.is_complete());
+    ~BeltCalibratorFixture() {
+        // Cancel and invalidate the guard before the test-local callback
+        // targets die, then run whatever is still queued.
+        calibrator_.reset();
+        helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+        api_.reset();
+        MoonrakerClientMock::remove_belt_csvs();
     }
 
-    SECTION("only path B is not complete") {
-        result.path_b.peak_frequency = 112.0f;
-        CHECK_FALSE(result.has_path_a());
-        CHECK(result.has_path_b());
-        CHECK_FALSE(result.is_complete());
+    /// Pump LVGL until @p flag is set; false when the bound ran out instead.
+    static bool pump_until(std::atomic<bool>& flag) {
+        for (int i = 0; i < 2000 && !flag.load(); ++i) {
+            lv_tick_inc(100);
+            lv_timer_handler_safe();
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return flag.load();
     }
 
-    SECTION("both paths = complete") {
-        result.path_a.peak_frequency = 110.0f;
-        result.path_b.peak_frequency = 112.0f;
-        CHECK(result.has_path_a());
-        CHECK(result.has_path_b());
-        CHECK(result.is_complete());
-    }
+  protected:
+    MoonrakerClientMock mock_client_;
+    PrinterState state_;
+    std::unique_ptr<MoonrakerAPI> api_;
+    std::unique_ptr<BeltTensionCalibrator> calibrator_;
+};
+
+TEST_CASE("belt path names match Klipper's axis syntax", "[belt_tension][calibrator]") {
+    // Voron/Shake&Tune naming: A is the 1,-1 diagonal, B the 1,1 one.
+    CHECK(std::string(BeltTensionCalibrator::axis_param(BeltPath::PATH_A)) == "1,-1");
+    CHECK(std::string(BeltTensionCalibrator::axis_param(BeltPath::PATH_B)) == "1,1");
+    CHECK(std::string(BeltTensionCalibrator::output_name(BeltPath::PATH_A)) == "helix_belt_a");
+    CHECK(std::string(BeltTensionCalibrator::output_name(BeltPath::PATH_B)) == "helix_belt_b");
 }
 
-TEST_CASE("BeltTensionResult overall_status", "[belt_tension][result]") {
-    BeltTensionResult result;
-    result.target_frequency = 110.0f;
-    result.tolerance = 10.0f;
-
-    SECTION("both good = GOOD") {
-        result.path_a.peak_frequency = 108.0f;
-        result.path_a.status = BeltStatus::GOOD;
-        result.path_b.peak_frequency = 112.0f;
-        result.path_b.status = BeltStatus::GOOD;
-        result.frequency_delta = 4.0f;
-        CHECK(result.overall_status() == BeltStatus::GOOD);
-    }
-
-    SECTION("one warning = WARNING") {
-        result.path_a.peak_frequency = 108.0f;
-        result.path_a.status = BeltStatus::GOOD;
-        result.path_b.peak_frequency = 122.0f;
-        result.path_b.status = BeltStatus::WARNING;
-        result.frequency_delta = 14.0f; // Below 15 Hz delta threshold
-        CHECK(result.overall_status() == BeltStatus::WARNING);
-    }
-
-    SECTION("one bad = BAD") {
-        result.path_a.peak_frequency = 108.0f;
-        result.path_a.status = BeltStatus::GOOD;
-        result.path_b.peak_frequency = 145.0f;
-        result.path_b.status = BeltStatus::BAD;
-        result.frequency_delta = 37.0f;
-        CHECK(result.overall_status() == BeltStatus::BAD);
-    }
-
-    SECTION("large delta = BAD even if individual ok") {
-        result.path_a.peak_frequency = 105.0f;
-        result.path_a.status = BeltStatus::GOOD;
-        result.path_b.peak_frequency = 115.0f;
-        result.path_b.status = BeltStatus::GOOD;
-        result.frequency_delta = 16.0f; // >15 Hz diff = BAD
-        CHECK(result.overall_status() == BeltStatus::BAD);
-    }
-
-    SECTION("moderate delta = WARNING") {
-        result.path_a.peak_frequency = 107.0f;
-        result.path_a.status = BeltStatus::GOOD;
-        result.path_b.peak_frequency = 113.0f;
-        result.path_b.status = BeltStatus::GOOD;
-        result.frequency_delta = 8.0f;
-        auto status = result.overall_status();
-        // Implementation determines threshold for delta-based warning
-        CHECK((status == BeltStatus::GOOD || status == BeltStatus::WARNING));
-    }
+TEST_CASE_METHOD(BeltCalibratorFixture, "measure_path sweeps its path and reports the peak",
+                 "[belt_tension][calibrator]") {
+    std::atomic<bool> done{false};
+    BeltCurve got;
+    int last_percent = -1;
+    calibrator_->measure_path(
+        BeltPath::PATH_B, [&](int percent, float) { last_percent = percent; },
+        [&](BeltCurve curve) {
+            got = std::move(curve);
+            done = true;
+        },
+        [&](const std::string& msg) { FAIL(msg); });
+    REQUIRE(pump_until(done));
+    CHECK(last_percent == 100);
+    REQUIRE_FALSE(got.empty());
+    auto peak = find_peak_frequency(got, 20.0f, got.back().first);
+    REQUIRE(peak.found);
+    CHECK(peak.frequency == Catch::Approx(mock_client_.belt_peak_hz('B')).margin(1.0f));
+    CHECK(calibrator_->get_state() == BeltTensionCalibrator::State::IDLE);
 }
 
-TEST_CASE("BeltTensionResult recommendation text", "[belt_tension][result]") {
-    BeltTensionResult result;
-    result.target_frequency = 110.0f;
-    result.tolerance = 10.0f;
-
-    SECTION("both good produces non-empty recommendation") {
-        result.path_a.peak_frequency = 110.0f;
-        result.path_a.status = BeltStatus::GOOD;
-        result.path_b.peak_frequency = 111.0f;
-        result.path_b.status = BeltStatus::GOOD;
-        result.frequency_delta = 1.0f;
-        auto rec = result.recommendation();
-        CHECK(!rec.empty());
+TEST_CASE_METHOD(BeltCalibratorFixture, "cancel while homing never starts the sweep",
+                 "[belt_tension][calibrator]") {
+    lv_subject_copy_string(get_printer_state().motion_state().get_homed_axes_subject(), "");
+    mock_client_.clear_gcode_script_history();
+    bool called = false;
+    calibrator_->measure_path(
+        BeltPath::PATH_A, [&](int, float) { called = true; }, [&](BeltCurve) { called = true; },
+        [&](const std::string&) { called = true; });
+    calibrator_->cancel();
+    for (int i = 0; i < 500; ++i) {
+        helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+        lv_tick_inc(10);
+        lv_timer_handler_safe();
     }
-
-    SECTION("path B lower than A produces recommendation") {
-        result.path_a.peak_frequency = 115.0f;
-        result.path_a.status = BeltStatus::GOOD;
-        result.path_b.peak_frequency = 95.0f;
-        result.path_b.status = BeltStatus::WARNING;
-        result.frequency_delta = 20.0f;
-        auto rec = result.recommendation();
-        CHECK(!rec.empty());
-    }
-
-    SECTION("both bad produces non-empty recommendation") {
-        result.path_a.peak_frequency = 60.0f;
-        result.path_a.status = BeltStatus::BAD;
-        result.path_b.peak_frequency = 55.0f;
-        result.path_b.status = BeltStatus::BAD;
-        result.frequency_delta = 5.0f;
-        auto rec = result.recommendation();
-        CHECK(!rec.empty());
-    }
-
-    SECTION("incomplete result produces non-empty recommendation") {
-        auto rec = result.recommendation();
-        CHECK(!rec.empty());
-    }
+    const auto history = mock_client_.gcode_script_history();
+    const bool homed = std::any_of(history.begin(), history.end(), [](const std::string& g) {
+        return g.find("G28") != std::string::npos;
+    });
+    const bool swept = std::any_of(history.begin(), history.end(), [](const std::string& g) {
+        return g.find("TEST_RESONANCES") != std::string::npos;
+    });
+    CHECK(homed); // the homing path really ran
+    CHECK_FALSE(swept);
+    CHECK_FALSE(called);
 }
 
-// ============================================================================
-// BeltMeasurement Tests
-// ============================================================================
-
-TEST_CASE("BeltMeasurement validity", "[belt_tension][types]") {
-    BeltMeasurement m;
-
-    SECTION("default is invalid") {
-        CHECK_FALSE(m.is_valid());
+TEST_CASE_METHOD(BeltCalibratorFixture, "cancel silences the run's callbacks",
+                 "[belt_tension][calibrator]") {
+    bool called = false;
+    calibrator_->measure_path(
+        BeltPath::PATH_A, [&](int, float) { called = true; }, [&](BeltCurve) { called = true; },
+        [&](const std::string&) { called = true; });
+    calibrator_->cancel();
+    CHECK(calibrator_->get_state() == BeltTensionCalibrator::State::IDLE);
+    for (int i = 0; i < 500; ++i) {
+        lv_tick_inc(2);
+        lv_timer_handler_safe();
     }
-
-    SECTION("non-zero frequency is valid") {
-        m.peak_frequency = 110.0f;
-        CHECK(m.is_valid());
-    }
-
-    SECTION("zero frequency is invalid") {
-        m.peak_frequency = 0.0f;
-        CHECK_FALSE(m.is_valid());
-    }
-
-    SECTION("negative frequency is invalid") {
-        m.peak_frequency = -10.0f;
-        CHECK_FALSE(m.is_valid());
-    }
+    CHECK_FALSE(called);
 }
 
 // ============================================================================
@@ -627,8 +512,6 @@ TEST_CASE("BeltTensionHardware default construction", "[belt_tension][types]") {
 
 TEST_CASE("BeltPath enum values", "[belt_tension][types]") {
     CHECK(BeltPath::PATH_A != BeltPath::PATH_B);
-    CHECK(BeltPath::X_AXIS != BeltPath::Y_AXIS);
-    CHECK(BeltPath::PATH_A != BeltPath::X_AXIS);
 }
 
 TEST_CASE("KinematicsType enum values", "[belt_tension][types]") {
@@ -712,7 +595,7 @@ MockBeltPair generate_mismatched_belt_pair(float target = 110.0f) {
 } // anonymous namespace
 
 // ============================================================================
-// 8. End-to-End Pipeline: CSV -> PSD -> Peak -> Status -> Recommendation
+// 6. End-to-End Pipeline: CSV -> PSD -> Peak
 // ============================================================================
 
 TEST_CASE("End-to-end pipeline: 110 Hz resonance detection", "[belt_tension][mock][pipeline]") {
@@ -735,15 +618,6 @@ TEST_CASE("End-to-end pipeline: 110 Hz resonance detection", "[belt_tension][moc
         CHECK(peak.found);
         CHECK(peak.frequency == Catch::Approx(110.0f).margin(5.0f));
         CHECK(peak.amplitude > 0.0f);
-    }
-
-    SECTION("status evaluates as GOOD for on-target frequency") {
-        auto samples = parse_accel_csv(csv);
-        auto psd = compute_psd(samples, 3200.0f);
-        auto peak = find_peak_frequency(psd, 20.0f, 200.0f);
-
-        BeltStatus status = evaluate_belt_status(peak.frequency, 110.0f, 10.0f);
-        CHECK(status == BeltStatus::GOOD);
     }
 }
 
@@ -775,27 +649,6 @@ TEST_CASE("End-to-end pipeline: matched belt pair", "[belt_tension][mock][pipeli
         // Real belts produce broader peaks that correlate much better.
         CHECK(sim > 0.0f);
     }
-
-    SECTION("BeltTensionResult reports GOOD overall") {
-        BeltTensionResult result;
-        result.target_frequency = 110.0f;
-        result.tolerance = 10.0f;
-
-        result.path_a.peak_frequency = peak_a.frequency;
-        result.path_a.freq_response = psd_a;
-        result.path_a.status = evaluate_belt_status(peak_a.frequency, 110.0f, 10.0f);
-
-        result.path_b.peak_frequency = peak_b.frequency;
-        result.path_b.freq_response = psd_b;
-        result.path_b.status = evaluate_belt_status(peak_b.frequency, 110.0f, 10.0f);
-
-        result.frequency_delta = std::abs(peak_a.frequency - peak_b.frequency);
-        result.similarity_percent = calculate_similarity(psd_a, psd_b);
-
-        CHECK(result.is_complete());
-        CHECK(result.overall_status() == BeltStatus::GOOD);
-        CHECK(!result.recommendation().empty());
-    }
 }
 
 TEST_CASE("End-to-end pipeline: mismatched belt pair", "[belt_tension][mock][pipeline]") {
@@ -823,90 +676,10 @@ TEST_CASE("End-to-end pipeline: mismatched belt pair", "[belt_tension][mock][pip
         // 25 Hz apart: very different PSD shapes
         CHECK(sim < 50.0f);
     }
-
-    SECTION("BeltTensionResult reports BAD overall due to delta") {
-        BeltTensionResult result;
-        result.target_frequency = 110.0f;
-        result.tolerance = 10.0f;
-
-        result.path_a.peak_frequency = peak_a.frequency;
-        result.path_a.freq_response = psd_a;
-        result.path_a.status = evaluate_belt_status(peak_a.frequency, 110.0f, 10.0f);
-
-        result.path_b.peak_frequency = peak_b.frequency;
-        result.path_b.freq_response = psd_b;
-        result.path_b.status = evaluate_belt_status(peak_b.frequency, 110.0f, 10.0f);
-
-        result.frequency_delta = std::abs(peak_a.frequency - peak_b.frequency);
-        result.similarity_percent = calculate_similarity(psd_a, psd_b);
-
-        CHECK(result.is_complete());
-        // Large delta (>15 Hz) should yield BAD
-        CHECK(result.overall_status() == BeltStatus::BAD);
-        // Recommendation should mention tightening
-        auto rec = result.recommendation();
-        CHECK(!rec.empty());
-    }
-}
-
-TEST_CASE("End-to-end pipeline: loose belts (both low)", "[belt_tension][mock][pipeline]") {
-    // Both belts at 70 Hz (way below 110 Hz target)
-    std::string csv_a = generate_mock_accel_csv(70.0f);
-    std::string csv_b = generate_mock_accel_csv(72.0f);
-
-    auto samples_a = parse_accel_csv(csv_a);
-    auto samples_b = parse_accel_csv(csv_b);
-
-    auto psd_a = compute_psd(samples_a, 3200.0f);
-    auto psd_b = compute_psd(samples_b, 3200.0f);
-
-    auto peak_a = find_peak_frequency(psd_a, 20.0f, 200.0f);
-    auto peak_b = find_peak_frequency(psd_b, 20.0f, 200.0f);
-
-    BeltTensionResult result;
-    result.target_frequency = 110.0f;
-    result.tolerance = 10.0f;
-    result.path_a.peak_frequency = peak_a.frequency;
-    result.path_a.status = evaluate_belt_status(peak_a.frequency, 110.0f, 10.0f);
-    result.path_b.peak_frequency = peak_b.frequency;
-    result.path_b.status = evaluate_belt_status(peak_b.frequency, 110.0f, 10.0f);
-    result.frequency_delta = std::abs(peak_a.frequency - peak_b.frequency);
-
-    CHECK(result.is_complete());
-    CHECK(result.overall_status() == BeltStatus::BAD);
-    CHECK(result.recommendation().find("tightening") != std::string::npos);
-}
-
-TEST_CASE("End-to-end pipeline: overtightened belts (both high)",
-          "[belt_tension][mock][pipeline]") {
-    std::string csv_a = generate_mock_accel_csv(150.0f);
-    std::string csv_b = generate_mock_accel_csv(148.0f);
-
-    auto samples_a = parse_accel_csv(csv_a);
-    auto samples_b = parse_accel_csv(csv_b);
-
-    auto psd_a = compute_psd(samples_a, 3200.0f);
-    auto psd_b = compute_psd(samples_b, 3200.0f);
-
-    auto peak_a = find_peak_frequency(psd_a, 20.0f, 200.0f);
-    auto peak_b = find_peak_frequency(psd_b, 20.0f, 200.0f);
-
-    BeltTensionResult result;
-    result.target_frequency = 110.0f;
-    result.tolerance = 10.0f;
-    result.path_a.peak_frequency = peak_a.frequency;
-    result.path_a.status = evaluate_belt_status(peak_a.frequency, 110.0f, 10.0f);
-    result.path_b.peak_frequency = peak_b.frequency;
-    result.path_b.status = evaluate_belt_status(peak_b.frequency, 110.0f, 10.0f);
-    result.frequency_delta = std::abs(peak_a.frequency - peak_b.frequency);
-
-    CHECK(result.is_complete());
-    CHECK(result.overall_status() == BeltStatus::BAD);
-    CHECK(result.recommendation().find("overtightened") != std::string::npos);
 }
 
 // ============================================================================
-// 9. Mock Pipeline: Different Sample Rates and Durations
+// 7. Mock Pipeline: Different Sample Rates and Durations
 // ============================================================================
 
 TEST_CASE("Pipeline with short duration data (0.25s)", "[belt_tension][mock][pipeline]") {
@@ -945,7 +718,7 @@ TEST_CASE("Pipeline with different sample rates", "[belt_tension][mock][pipeline
 }
 
 // ============================================================================
-// 10. Mock State Machine: Calibrator Without API
+// 8. Mock State Machine: Calibrator Without API
 // ============================================================================
 
 TEST_CASE("BeltTensionCalibrator state transitions without API (error paths)",
@@ -966,103 +739,10 @@ TEST_CASE("BeltTensionCalibrator state transitions without API (error paths)",
         CHECK(error_msg.find("API") != std::string::npos);
         CHECK(cal.get_state() == BeltTensionCalibrator::State::IDLE);
     }
-
-    SECTION("test_path -> error -> IDLE") {
-        bool error_called = false;
-        cal.test_path(
-            BeltPath::PATH_A, [](int) {},
-            [](const BeltMeasurement&) { FAIL("Should not succeed"); },
-            [&](const std::string&) { error_called = true; });
-        CHECK(error_called);
-        CHECK(cal.get_state() == BeltTensionCalibrator::State::IDLE);
-    }
-
-    SECTION("run_auto_sweep -> error -> IDLE") {
-        bool error_called = false;
-        cal.run_auto_sweep([](int) {}, [](const BeltTensionResult&) { FAIL("Should not succeed"); },
-                           [&](const std::string&) { error_called = true; });
-        CHECK(error_called);
-        CHECK(cal.get_state() == BeltTensionCalibrator::State::IDLE);
-    }
-}
-
-TEST_CASE("BeltTensionCalibrator full workflow simulation (analysis only)",
-          "[belt_tension][mock][calibrator]") {
-    // Simulate what the calibrator does after receiving CSV data,
-    // exercising the full analysis chain manually.
-    BeltTensionCalibrator cal;
-    cal.set_target_frequency(110.0f);
-    cal.set_tolerance(10.0f);
-
-    // Generate and analyze path A
-    auto csv_a = generate_mock_accel_csv(108.0f);
-    auto samples_a = parse_accel_csv(csv_a);
-    auto psd_a = compute_psd(samples_a, 3200.0f);
-    auto peak_a = find_peak_frequency(psd_a, 20.0f, 200.0f);
-    REQUIRE(peak_a.found);
-
-    // Generate and analyze path B
-    auto csv_b = generate_mock_accel_csv(112.0f);
-    auto samples_b = parse_accel_csv(csv_b);
-    auto psd_b = compute_psd(samples_b, 3200.0f);
-    auto peak_b = find_peak_frequency(psd_b, 20.0f, 200.0f);
-    REQUIRE(peak_b.found);
-
-    // Build result (mirrors what the calibrator does internally)
-    BeltTensionResult result;
-    result.target_frequency = 110.0f;
-    result.tolerance = 10.0f;
-
-    result.path_a.path = BeltPath::PATH_A;
-    result.path_a.peak_frequency = peak_a.frequency;
-    result.path_a.peak_amplitude = peak_a.amplitude;
-    result.path_a.freq_response = psd_a;
-    result.path_a.status = evaluate_belt_status(peak_a.frequency, 110.0f, 10.0f);
-
-    result.path_b.path = BeltPath::PATH_B;
-    result.path_b.peak_frequency = peak_b.frequency;
-    result.path_b.peak_amplitude = peak_b.amplitude;
-    result.path_b.freq_response = psd_b;
-    result.path_b.status = evaluate_belt_status(peak_b.frequency, 110.0f, 10.0f);
-
-    result.frequency_delta = std::abs(result.path_a.peak_frequency - result.path_b.peak_frequency);
-    result.similarity_percent =
-        calculate_similarity(result.path_a.freq_response, result.path_b.freq_response);
-
-    // Validate results
-    CHECK(result.is_complete());
-    CHECK(result.path_a.status == BeltStatus::GOOD);
-    CHECK(result.path_b.status == BeltStatus::GOOD);
-    CHECK(result.overall_status() == BeltStatus::GOOD);
-    CHECK(result.frequency_delta < 10.0f);
-    // Similarity is low for pure sine waves (narrow PSD peaks), but still positive
-    CHECK(result.similarity_percent >= 0.0f);
-    CHECK(result.recommendation().find("good") != std::string::npos);
-}
-
-TEST_CASE("BeltTensionCalibrator config persists through analysis",
-          "[belt_tension][mock][calibrator]") {
-    BeltTensionCalibrator cal;
-
-    // Set non-default target (e.g., Prusa MK4 belt frequency)
-    cal.set_target_frequency(96.0f);
-    cal.set_tolerance(15.0f);
-
-    // Verify config accessible via results
-    CHECK(cal.get_results().target_frequency == Catch::Approx(96.0f));
-    CHECK(cal.get_results().tolerance == Catch::Approx(15.0f));
-
-    // Reset should clear results but re-initialized with defaults
-    cal.reset();
-    // After reset, results are default-constructed
-    const auto& r = cal.get_results();
-    CHECK(r.target_frequency == Catch::Approx(110.0f));
-    CHECK(r.tolerance == Catch::Approx(10.0f));
-    CHECK_FALSE(r.is_complete());
 }
 
 // ============================================================================
-// 11. Mock Analysis Edge Cases
+// 9. Mock Analysis Edge Cases
 // ============================================================================
 
 TEST_CASE("Pipeline with low-frequency resonance (30 Hz)", "[belt_tension][mock][pipeline]") {
@@ -1074,7 +754,6 @@ TEST_CASE("Pipeline with low-frequency resonance (30 Hz)", "[belt_tension][mock]
 
     CHECK(peak.found);
     CHECK(peak.frequency == Catch::Approx(30.0f).margin(5.0f));
-    CHECK(evaluate_belt_status(peak.frequency, 110.0f, 10.0f) == BeltStatus::BAD);
 }
 
 TEST_CASE("Pipeline with high-frequency resonance (190 Hz)", "[belt_tension][mock][pipeline]") {
@@ -1086,7 +765,6 @@ TEST_CASE("Pipeline with high-frequency resonance (190 Hz)", "[belt_tension][moc
 
     CHECK(peak.found);
     CHECK(peak.frequency == Catch::Approx(190.0f).margin(5.0f));
-    CHECK(evaluate_belt_status(peak.frequency, 110.0f, 10.0f) == BeltStatus::BAD);
 }
 
 TEST_CASE("Pipeline with two close frequencies", "[belt_tension][mock][pipeline]") {

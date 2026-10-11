@@ -8,12 +8,14 @@
 
 #include "ams_state.h"
 #include "color_utils.h"
+#include "display_numbering.h"
 #include "filament_mapper.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "print_start_checks.h"
 #include "settings_manager.h"
 #include "theme_manager.h"
 #include "tool_state.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/spdlog.h>
 
@@ -84,7 +86,7 @@ bool FilamentMappingCard::recompute_visibility() {
     // Snapmaker U1 / ACE, back when a second surface (the print-detail FILAMENTS
     // card) drew the same chips there. That surface is gone, so hiding here would
     // show the user nothing at all. Whether a TAP does anything is a separate
-    // question, answered by PrintSelectDetailView::color_card_opens_remap().
+    // question, answered by PrintSelectDetailView::current_remap_block().
 
     // A dead-control rule survives here even without the editable-backend gate
     // above: with bypass engaged a single-tool print takes its filament from
@@ -403,7 +405,7 @@ void FilamentMappingCard::rebuild_compact_view() {
         }
 
         // TOP band: the gcode file's intended colour for this tool.
-        if (auto* top = lv_obj_find_by_name(chip, "top_band")) {
+        if (auto* top = helix::ui::find_required(chip, "top_band", "FilamentMapping")) {
             if (tool.color_known) {
                 lv_obj_set_style_bg_opa(top, LV_OPA_COVER, 0); // DECLARATIVE_OK: see above
                 lv_obj_set_style_bg_color(top, lv_color_hex(tool.color_rgb), 0);
@@ -412,20 +414,32 @@ void FilamentMappingCard::rebuild_compact_view() {
                 // prints in grey", a claim nothing has made. (K2 Plus report.)
                 lv_obj_set_style_bg_opa(top, LV_OPA_TRANSP, 0); // DECLARATIVE_OK: see above
             }
-            if (auto* tool_lbl = lv_obj_find_by_name(top, "tool_label")) {
-                if (multi_tool) {
-                    lv_label_set_text_fmt(tool_lbl, "T%d", tool.tool_index);
-                    // Contrast is computed against the fill; with no fill there is
-                    // nothing to contrast against, so take the normal text colour.
-                    lv_obj_set_style_text_color(tool_lbl,
-                                                tool.color_known ? theme_manager_get_contrast_color(
-                                                                       lv_color_hex(tool.color_rgb))
-                                                                 : theme_manager_get_color("text"),
-                                                0);
-                    lv_obj_remove_flag(tool_lbl, LV_OBJ_FLAG_HIDDEN);
-                } else {
-                    lv_obj_add_flag(tool_lbl, LV_OBJ_FLAG_HIDDEN);
-                }
+            // The material names the tool on its own, so it takes the band; the
+            // Tx number is the fallback for a file that reports no material.
+            auto* material_lbl = helix::ui::find_required(top, "material_label", "FilamentMapping");
+            auto* tool_lbl = helix::ui::find_required(top, "tool_label", "FilamentMapping");
+            lv_obj_t* shown = nullptr;
+            if (!tool.material.empty() && material_lbl) {
+                lv_label_set_text(material_lbl, tool.material.c_str());
+                shown = material_lbl;
+            } else if (multi_tool && tool_lbl) {
+                lv_label_set_text(tool_lbl, helix::ui::tool_label(tool.tool_index).c_str());
+                shown = tool_lbl;
+            }
+            if (shown) {
+                // Contrast is computed against the fill; with no fill there is
+                // nothing to contrast against, so take the normal text colour.
+                lv_obj_set_style_text_color(
+                    shown,
+                    tool.color_known
+                        ? theme_manager_get_contrast_adjusted_text(theme_manager_get_color("text"),
+                                                                   lv_color_hex(tool.color_rgb))
+                        : theme_manager_get_color("text"),
+                    0);
+                lv_obj_remove_flag(shown, LV_OBJ_FLAG_HIDDEN);
+            }
+            if (tool_lbl && shown != tool_lbl) {
+                lv_obj_add_flag(tool_lbl, LV_OBJ_FLAG_HIDDEN);
             }
         }
 
@@ -433,7 +447,7 @@ void FilamentMappingCard::rebuild_compact_view() {
         const bool slot_empty = resolved && resolved->is_empty;
         const lv_color_t slot_color =
             (resolved && !resolved->is_empty) ? lv_color_hex(resolved->color_rgb) : neutral;
-        if (auto* bottom = lv_obj_find_by_name(chip, "bottom_band")) {
+        if (auto* bottom = helix::ui::find_required(chip, "bottom_band", "FilamentMapping")) {
             if (slot_empty) {
                 // Declarative empty_slot style (warning border, reduced opacity)
                 // declared in filament_swatch.xml under selector user_1.
@@ -445,20 +459,23 @@ void FilamentMappingCard::rebuild_compact_view() {
                 // not made, so the band stays blank.
                 lv_obj_set_style_bg_opa(bottom, LV_OPA_TRANSP, 0); // DECLARATIVE_OK: see above
             }
-            if (auto* slot_lbl = lv_obj_find_by_name(bottom, "slot_label")) {
+            if (auto* slot_lbl =
+                    helix::ui::find_required(bottom, "slot_label", "FilamentMapping")) {
                 // resolve_mapped_slot() already found the lane; asking
                 // mapped_lane_display_number() would rescan available_slots_ for
                 // the same answer, which is the split this task exists to close.
-                const int lane_number = resolved ? resolved->local_slot_index + 1 : -1;
+                const int lane_number =
+                    resolved ? helix::ui::lane_number(resolved->local_slot_index) : -1;
                 if (lane_number > 0) {
                     lv_label_set_text_fmt(slot_lbl, "%d", lane_number);
                     // An empty lane draws no fill, so there is nothing to contrast
                     // against - take the warning colour that the band border uses.
-                    lv_obj_set_style_text_color(slot_lbl,
-                                                slot_empty
-                                                    ? theme_manager_get_color("warning")
-                                                    : theme_manager_get_contrast_color(slot_color),
-                                                0);
+                    lv_obj_set_style_text_color(
+                        slot_lbl,
+                        slot_empty ? theme_manager_get_color("warning")
+                                   : theme_manager_get_contrast_adjusted_text(
+                                         theme_manager_get_color("text"), slot_color),
+                        0);
                     lv_obj_remove_flag(slot_lbl, LV_OBJ_FLAG_HIDDEN);
                 } else {
                     lv_obj_add_flag(slot_lbl, LV_OBJ_FLAG_HIDDEN);
@@ -469,11 +486,11 @@ void FilamentMappingCard::rebuild_compact_view() {
         // Divider: a colour that reads against BOTH band fills. Blend the two
         // 50/50 and take the contrast of the blend, so the rule stays visible
         // whether the bands are light, dark or mixed.
-        if (auto* divider = lv_obj_find_by_name(chip, "divider")) {
+        if (auto* divider = helix::ui::find_required(chip, "divider", "FilamentMapping")) {
             const lv_color_t top_color = tool.color_known ? lv_color_hex(tool.color_rgb) : neutral;
             lv_obj_set_style_bg_color(
                 divider,
-                theme_manager_get_contrast_color(lv_color_mix(top_color, slot_color, LV_OPA_50)),
+                theme_manager_get_readable_on(lv_color_mix(top_color, slot_color, LV_OPA_50)),
                 0); // DECLARATIVE_OK: see above
         }
     }
@@ -486,7 +503,7 @@ void FilamentMappingCard::rebuild_compact_view() {
             // and the component is content-sized.
             lv_obj_set_width(more, CHIP_WIDTH); // DECLARATIVE_OK: see the chip width above
             lv_obj_set_height(more, lv_pct(100));
-            if (auto* lbl = lv_obj_find_by_name(more, "count_label")) {
+            if (auto* lbl = helix::ui::find_required(more, "count_label", "FilamentMapping")) {
                 const size_t hidden = tool_count - visible;
                 lv_label_set_text_fmt(lbl, "+%zu", hidden); // DECLARATIVE_OK: see above
             }

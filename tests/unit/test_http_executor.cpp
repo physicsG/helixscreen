@@ -297,9 +297,17 @@ TEST_CASE("HttpExecutor: singletons are usable and idempotent", "[http_executor]
     HttpExecutor::stop_all();
     HttpExecutor::stop_all(); // Idempotent.
 
-    // After stop_all, submits reject. Restart so we don't poison other tests.
+    // fast() and slow() are process-wide and nothing else in a test run starts
+    // them, so a stopped lane stays stopped for every test ordered after this
+    // one. Their submit() then rejects silently - broken promise, work never
+    // run, inflight() reading 0 - and a test waiting on async work sees it
+    // complete instantly having done nothing. Restart the lanes, and run work
+    // on both to prove the restart took.
     HttpExecutor::start_all();
-    HttpExecutor::stop_all();
+    HttpExecutor::fast().run_sync([&]() { fast_runs.fetch_add(1); });
+    HttpExecutor::slow().run_sync([&]() { slow_runs.fetch_add(1); });
+    CHECK(fast_runs.load() == 2);
+    CHECK(slow_runs.load() == 2);
 }
 
 TEST_CASE("HttpExecutor: submit after stop breaks promise immediately", "[http_executor][slow]") {
@@ -357,6 +365,54 @@ TEST_CASE("HttpExecutor: exception in work item does not kill worker", "[http_ex
     std::atomic<bool> ran{false};
     ex.run_sync([&]() { ran.store(true); });
     REQUIRE(ran.load());
+
+    ex.stop();
+}
+
+TEST_CASE("HttpExecutor: inflight reaches zero only after the item is destroyed",
+          "[http_executor][slow]") {
+    // inflight() is what wait_idle() polls, so zero is the answer a caller acts
+    // on: it starts tearing down objects the finished work touched. That is only
+    // safe if the work item itself — its std::function captures and its promise —
+    // is already gone when the count drops. A capture that outlives the count is
+    // a live reference into whatever the caller is now free to destroy.
+    //
+    // The probe records inflight() from its own destructor, which runs when the
+    // last copy of the lambda dies. Seeing 0 there means the counter went first.
+    // A real constructor, not aggregate init: make_shared<Probe>(Probe{...})
+    // would copy a temporary and then destroy it, and this destructor has side
+    // effects — the stray one fires before the work is even submitted.
+    struct Probe {
+        HttpExecutor* ex;
+        std::atomic<int>* observed;
+        Probe(HttpExecutor* e, std::atomic<int>* o) : ex(e), observed(o) {}
+        ~Probe() {
+            observed->store(static_cast<int>(ex->inflight()));
+        }
+    };
+
+    HttpExecutor ex("test", 1);
+    ex.start();
+
+    std::atomic<int> observed{-1};
+    std::atomic<bool> ran{false};
+    // The lambda is the probe's ONLY owner, so the destructor runs on the worker
+    // thread when the work item is released. A reference held here would instead
+    // keep it alive until this scope ended, long after the counter had dropped,
+    // and the test would report the bug whether or not it was there.
+    ex.submit([probe = std::make_shared<Probe>(&ex, &observed), &ran]() {
+          ran.store(true);
+      }).wait();
+
+    // The future is satisfied before the item is released, so wait for the
+    // destructor rather than assuming it has already run.
+    for (int i = 0; i < 500 && observed.load() < 0; ++i) {
+        std::this_thread::sleep_for(2ms);
+    }
+
+    REQUIRE(ran.load());
+    REQUIRE(observed.load() >= 0); // The probe was actually destroyed.
+    REQUIRE(observed.load() == 1); // Still counted as in flight while it died.
 
     ex.stop();
 }

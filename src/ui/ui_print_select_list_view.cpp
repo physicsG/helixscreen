@@ -5,12 +5,16 @@
 
 #include "ui_filename_utils.h"
 #include "ui_panel_print_select.h" // For PrintFileData
+#include "ui_subject_registry.h"
+#include "ui_virtual_list.h"
 
 #include "display_settings_manager.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cstring>
 
 using helix::gcode::strip_gcode_extension;
 
@@ -83,6 +87,7 @@ void PrintSelectListView::clear_cached_state() {
     trailing_spacer_ = nullptr;
     visible_start_ = -1;
     visible_end_ = -1;
+    total_items_ = 0;
     last_leading_height_ = -1;
     last_trailing_height_ = -1;
 }
@@ -126,7 +131,8 @@ void PrintSelectListView::init_pool() {
             static_cast<lv_obj_t*>(lv_xml_create(container_, "print_file_list_row", attrs));
 
         if (row) {
-            lv_obj_add_flag(row, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(
+                row, LV_OBJ_FLAG_HIDDEN); // XML_HIDDEN_OK: pooled row, built once with its list
 
             // Attach click handler ONCE at pool creation
             lv_obj_add_event_cb(row, on_row_clicked, LV_EVENT_CLICKED, this);
@@ -145,34 +151,42 @@ void PrintSelectListView::init_pool() {
                                    sizeof(data->time_buf), "--");
 
             // Bind labels to subjects
-            lv_obj_t* filename_label = lv_obj_find_by_name(row, "row_filename");
+            lv_obj_t* filename_label =
+                helix::ui::find_required(row, "row_filename", "PrintSelectListView");
             if (filename_label) {
                 data->filename_observer =
                     lv_label_bind_text(filename_label, &data->filename_subject, "%s");
             }
 
-            lv_obj_t* size_label = lv_obj_find_by_name(row, "row_size");
+            lv_obj_t* size_label = helix::ui::find_required(row, "row_size", "PrintSelectListView");
             if (size_label) {
                 data->size_observer = lv_label_bind_text(size_label, &data->size_subject, "%s");
             }
 
-            lv_obj_t* modified_label = lv_obj_find_by_name(row, "row_modified");
+            lv_obj_t* modified_label =
+                helix::ui::find_required(row, "row_modified", "PrintSelectListView");
             if (modified_label) {
                 data->modified_observer =
                     lv_label_bind_text(modified_label, &data->modified_subject, "%s");
             }
 
-            lv_obj_t* time_label = lv_obj_find_by_name(row, "row_print_time");
+            lv_obj_t* time_label =
+                helix::ui::find_required(row, "row_print_time", "PrintSelectListView");
             if (time_label) {
                 data->time_observer = lv_label_bind_text(time_label, &data->time_subject, "%s");
             }
 
             // Find status display widgets (controlled programmatically, no subject binding)
-            data->status_printing_icon = lv_obj_find_by_name(row, "status_printing");
-            data->status_success_container = lv_obj_find_by_name(row, "status_success_container");
-            data->status_success_count = lv_obj_find_by_name(row, "status_success_count");
-            data->status_failed_icon = lv_obj_find_by_name(row, "status_failed");
-            data->status_cancelled_icon = lv_obj_find_by_name(row, "status_cancelled");
+            data->status_printing_icon =
+                helix::ui::find_required(row, "status_printing", "PrintSelectListView");
+            data->status_success_container =
+                helix::ui::find_required(row, "status_success_container", "PrintSelectListView");
+            data->status_success_count =
+                helix::ui::find_required(row, "status_success_count", "PrintSelectListView");
+            data->status_failed_icon =
+                helix::ui::find_required(row, "status_failed", "PrintSelectListView");
+            data->status_cancelled_icon =
+                helix::ui::find_required(row, "status_cancelled", "PrintSelectListView");
 
             list_pool_.push_back(row);
             list_data_pool_.push_back(std::move(data));
@@ -223,64 +237,34 @@ void PrintSelectListView::configure_row(lv_obj_t* row, size_t pool_index, size_t
     std::string display_name =
         file.is_dir ? file.filename + "/" : strip_gcode_extension(file.filename);
 
-    // Update labels via subjects
-    lv_subject_copy_string(&data->filename_subject, display_name.c_str());
-    lv_subject_copy_string(&data->size_subject, file.size_str.c_str());
-    lv_subject_copy_string(&data->modified_subject, file.modified_str.c_str());
-    lv_subject_copy_string(&data->time_subject, file.print_time_str.c_str());
+    // Update labels via subjects. A metadata refresh re-applies every row, so
+    // unchanged text and indicators must not redraw it.
+    copy_string_if_changed(&data->filename_subject, display_name.c_str());
+    copy_string_if_changed(&data->size_subject, file.size_str.c_str());
+    copy_string_if_changed(&data->modified_subject, file.modified_str.c_str());
+    copy_string_if_changed(&data->time_subject, file.print_time_str.c_str());
 
-    // Update status display based on history_status
-    // Hide all status indicators first
-    if (data->status_printing_icon) {
-        lv_obj_add_flag(data->status_printing_icon, LV_OBJ_FLAG_HIDDEN);
-    }
-    if (data->status_success_container) {
-        lv_obj_add_flag(data->status_success_container, LV_OBJ_FLAG_HIDDEN);
-    }
-    if (data->status_failed_icon) {
-        lv_obj_add_flag(data->status_failed_icon, LV_OBJ_FLAG_HIDDEN);
-    }
-    if (data->status_cancelled_icon) {
-        lv_obj_add_flag(data->status_cancelled_icon, LV_OBJ_FLAG_HIDDEN);
-    }
-
-    // Show appropriate status indicator (directories have no history)
-    if (!file.is_dir) {
-        switch (file.history_status) {
-        case FileHistoryStatus::CURRENTLY_PRINTING:
-            if (data->status_printing_icon) {
-                lv_obj_remove_flag(data->status_printing_icon, LV_OBJ_FLAG_HIDDEN);
-            }
-            break;
-
-        case FileHistoryStatus::COMPLETED:
-            if (data->status_success_container && data->status_success_count) {
-                // Format count (e.g., "3" for 3 successful prints)
-                char count_buf[8];
-                snprintf(count_buf, sizeof(count_buf), "%d", file.success_count);
-                lv_label_set_text(data->status_success_count, count_buf);
-                lv_obj_remove_flag(data->status_success_container, LV_OBJ_FLAG_HIDDEN);
-            }
-            break;
-
-        case FileHistoryStatus::FAILED:
-            if (data->status_failed_icon) {
-                lv_obj_remove_flag(data->status_failed_icon, LV_OBJ_FLAG_HIDDEN);
-            }
-            break;
-
-        case FileHistoryStatus::CANCELLED:
-            if (data->status_cancelled_icon) {
-                lv_obj_remove_flag(data->status_cancelled_icon, LV_OBJ_FLAG_HIDDEN);
-            }
-            break;
-
-        case FileHistoryStatus::NEVER_PRINTED:
-        default:
-            // All indicators already hidden
-            break;
+    // One status indicator for the file's history; directories have none.
+    const FileHistoryStatus status =
+        file.is_dir ? FileHistoryStatus::NEVER_PRINTED : file.history_status;
+    const auto show = [](lv_obj_t* obj, bool shown) {
+        if (obj) {
+            lv_obj_set_flag(obj, LV_OBJ_FLAG_HIDDEN, !shown);
+        }
+    };
+    show(data->status_printing_icon, status == FileHistoryStatus::CURRENTLY_PRINTING);
+    show(data->status_failed_icon, status == FileHistoryStatus::FAILED);
+    show(data->status_cancelled_icon, status == FileHistoryStatus::CANCELLED);
+    const bool completed = status == FileHistoryStatus::COMPLETED && data->status_success_count;
+    if (completed) {
+        // Count of successful prints, e.g. "3"
+        char count_buf[8];
+        snprintf(count_buf, sizeof(count_buf), "%d", file.success_count);
+        if (std::strcmp(lv_label_get_text(data->status_success_count), count_buf) != 0) {
+            lv_label_set_text(data->status_success_count, count_buf);
         }
     }
+    show(data->status_success_container, completed);
 
     // Store file index for click handler
     lv_obj_set_user_data(row, reinterpret_cast<void*>(file_index));
@@ -332,6 +316,9 @@ void PrintSelectListView::populate(const std::vector<PrintFileData>& file_list,
     visible_start_ = -1;
     visible_end_ = -1;
 
+    // Invalidate pool indices so rows reconfigure for the new file list
+    std::fill(list_pool_indices_.begin(), list_pool_indices_.end(), static_cast<ssize_t>(-1));
+
     // Update visible rows (this also updates spacer heights)
     update_visible(file_list);
 
@@ -350,6 +337,17 @@ void PrintSelectListView::populate(const std::vector<PrintFileData>& file_list,
 
 void PrintSelectListView::update_visible(const std::vector<PrintFileData>& file_list) {
     if (!container_ || list_pool_.empty() || file_list.empty()) {
+        for (auto* row : list_pool_) {
+            lv_obj_add_flag(row, LV_OBJ_FLAG_HIDDEN);
+        }
+        std::fill(list_pool_indices_.begin(), list_pool_indices_.end(), static_cast<ssize_t>(-1));
+        if (container_) {
+            sync_list_spacers(container_, leading_spacer_, trailing_spacer_, VirtualWindow{},
+                              last_leading_height_, last_trailing_height_);
+        }
+        visible_start_ = -1;
+        visible_end_ = -1;
+        total_items_ = 0;
         return;
     }
 
@@ -362,65 +360,37 @@ void PrintSelectListView::update_visible(const std::vector<PrintFileData>& file_
     // Use cached row dimensions (set in populate())
     // Fall back to defaults if not yet cached
     int row_height = cached_row_height_ > 0 ? cached_row_height_ : 44;
-    int row_gap = cached_row_gap_;
-    int row_stride = row_height + row_gap;
+    int row_stride = row_height + cached_row_gap_;
 
-    // Calculate visible row range (with buffer)
-    int first_visible = std::max(0, static_cast<int>(scroll_y / row_stride) - BUFFER_ROWS);
-    int last_visible = std::min(
-        total_rows, static_cast<int>((scroll_y + viewport_height) / row_stride) + 1 + BUFFER_ROWS);
+    const VirtualWindow win =
+        compute_window(scroll_y, viewport_height, row_stride, total_rows, BUFFER_ROWS);
+    const int first_visible = win.first;
+    const int last_visible = win.last;
+
+    // Force re-render if total item count changed (e.g. directory change)
+    bool data_changed = (total_rows != total_items_);
 
     // Skip update if visible range hasn't changed
-    if (first_visible == visible_start_ && last_visible == visible_end_) {
+    if (!data_changed && first_visible == visible_start_ && last_visible == visible_end_) {
         return;
     }
+
+    total_items_ = total_rows;
 
     spdlog::trace("[PrintSelectListView] Scroll: y={} viewport={} visible={}-{}/{} stride={}",
                   scroll_y, viewport_height, first_visible, last_visible, total_rows, row_stride);
 
-    // Update spacer heights (only when changed to avoid redundant relayout)
-    int leading_height = first_visible * row_stride;
-    if (leading_spacer_) {
-        if (leading_height != last_leading_height_) {
-            lv_obj_set_height(leading_spacer_, leading_height);
-            last_leading_height_ = leading_height;
-        }
-        if (lv_obj_get_index(leading_spacer_) != 0) {
-            lv_obj_move_to_index(leading_spacer_, 0);
-        }
-    }
+    sync_list_spacers(container_, leading_spacer_, trailing_spacer_, win, last_leading_height_,
+                      last_trailing_height_);
 
-    int trailing_height = std::max(0, (total_rows - last_visible) * row_stride);
-    if (trailing_spacer_) {
-        if (trailing_height != last_trailing_height_) {
-            lv_obj_set_height(trailing_spacer_, trailing_height);
-            last_trailing_height_ = trailing_height;
-        }
-    }
-
-    // Assign pool rows to visible indices, skipping rows that already show correct file
-    size_t pool_idx = 0;
-    for (int file_idx = first_visible; file_idx < last_visible && pool_idx < list_pool_.size();
-         file_idx++, pool_idx++) {
-        lv_obj_t* row = list_pool_[pool_idx];
-
-        if (list_pool_indices_[pool_idx] != file_idx) {
-            configure_row(row, pool_idx, static_cast<size_t>(file_idx), file_list[file_idx]);
-            list_pool_indices_[pool_idx] = file_idx;
-        }
-
-        // Ensure row is in correct position (guard to avoid redundant relayout)
-        int target_index = static_cast<int>(pool_idx) + 1;
-        if (lv_obj_get_index(row) != target_index) {
-            lv_obj_move_to_index(row, target_index);
-        }
-    }
-
-    // Hide unused pool rows
-    for (; pool_idx < list_pool_.size(); pool_idx++) {
-        lv_obj_add_flag(list_pool_[pool_idx], LV_OBJ_FLAG_HIDDEN);
-        list_pool_indices_[pool_idx] = -1;
-    }
+    show_window(
+        container_, list_pool_indices_, first_visible, last_visible, data_changed,
+        [this](size_t slot) { return list_pool_[slot]; },
+        [&](size_t slot, ssize_t file_idx) {
+            configure_row(list_pool_[slot], slot, static_cast<size_t>(file_idx),
+                          file_list[static_cast<size_t>(file_idx)]);
+        },
+        [this](size_t slot) { lv_obj_add_flag(list_pool_[slot], LV_OBJ_FLAG_HIDDEN); });
 
     visible_start_ = first_visible;
     visible_end_ = last_visible;

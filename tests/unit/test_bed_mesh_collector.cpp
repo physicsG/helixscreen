@@ -13,7 +13,9 @@
 
 #include <algorithm>
 #include <cstdio>
-#include <regex>
+#include <fstream>
+#include <iterator>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -25,33 +27,15 @@
 
 namespace {
 
-/**
- * @brief Parse a probe progress line and extract current/total values
- *
- * Handles both formats:
- * - "Probing point 5/25"
- * - "Probe point 5 of 25"
- *
- * @param line The G-code response line to parse
- * @param current Output: current probe number
- * @param total Output: total probe count
- * @return true if line matched and was parsed successfully
- */
-bool parse_probe_progress(const std::string& line, int& current, int& total) {
-    // Static regex for performance - handles both formats
-    static const std::regex probe_regex(R"(Prob(?:ing point|e point) (\d+)[/\s]+(?:of\s+)?(\d+))");
-
-    std::smatch match;
-    if (std::regex_search(line, match, probe_regex) && match.size() == 3) {
-        try {
-            current = std::stoi(match[1].str());
-            total = std::stoi(match[2].str());
-            return true;
-        } catch (const std::exception&) {
-            return false;
-        }
+/// helix::parse_probe_progress() through the out-parameter shape these cases assert on.
+bool probe_progress(const std::string& line, int& current, int& total) {
+    const auto pp = helix::parse_probe_progress(line);
+    if (!pp) {
+        return false;
     }
-    return false;
+    current = pp->current;
+    total = pp->total;
+    return true;
 }
 
 /**
@@ -84,31 +68,31 @@ TEST_CASE("BedMeshCollector parses 'Probing point X/Y' format", "[bed_mesh_colle
     int current = 0, total = 0;
 
     SECTION("simple case") {
-        REQUIRE(parse_probe_progress("Probing point 5/25", current, total));
+        REQUIRE(probe_progress("Probing point 5/25", current, total));
         REQUIRE(current == 5);
         REQUIRE(total == 25);
     }
 
     SECTION("first point") {
-        REQUIRE(parse_probe_progress("Probing point 1/25", current, total));
+        REQUIRE(probe_progress("Probing point 1/25", current, total));
         REQUIRE(current == 1);
         REQUIRE(total == 25);
     }
 
     SECTION("last point") {
-        REQUIRE(parse_probe_progress("Probing point 25/25", current, total));
+        REQUIRE(probe_progress("Probing point 25/25", current, total));
         REQUIRE(current == 25);
         REQUIRE(total == 25);
     }
 
     SECTION("large grid") {
-        REQUIRE(parse_probe_progress("Probing point 49/100", current, total));
+        REQUIRE(probe_progress("Probing point 49/100", current, total));
         REQUIRE(current == 49);
         REQUIRE(total == 100);
     }
 
     SECTION("with prefix text") {
-        REQUIRE(parse_probe_progress("// Probing point 3/9", current, total));
+        REQUIRE(probe_progress("// Probing point 3/9", current, total));
         REQUIRE(current == 3);
         REQUIRE(total == 9);
     }
@@ -118,25 +102,25 @@ TEST_CASE("BedMeshCollector parses 'Probe point X of Y' format", "[bed_mesh_coll
     int current = 0, total = 0;
 
     SECTION("simple case") {
-        REQUIRE(parse_probe_progress("Probe point 5 of 25", current, total));
+        REQUIRE(probe_progress("Probe point 5 of 25", current, total));
         REQUIRE(current == 5);
         REQUIRE(total == 25);
     }
 
     SECTION("first point") {
-        REQUIRE(parse_probe_progress("Probe point 1 of 16", current, total));
+        REQUIRE(probe_progress("Probe point 1 of 16", current, total));
         REQUIRE(current == 1);
         REQUIRE(total == 16);
     }
 
     SECTION("last point") {
-        REQUIRE(parse_probe_progress("Probe point 16 of 16", current, total));
+        REQUIRE(probe_progress("Probe point 16 of 16", current, total));
         REQUIRE(current == 16);
         REQUIRE(total == 16);
     }
 
     SECTION("large grid") {
-        REQUIRE(parse_probe_progress("Probe point 77 of 144", current, total));
+        REQUIRE(probe_progress("Probe point 77 of 144", current, total));
         REQUIRE(current == 77);
         REQUIRE(total == 144);
     }
@@ -146,22 +130,22 @@ TEST_CASE("BedMeshCollector rejects invalid lines", "[bed_mesh_collector][regex]
     int current = 0, total = 0;
 
     SECTION("empty string") {
-        REQUIRE_FALSE(parse_probe_progress("", current, total));
+        REQUIRE_FALSE(probe_progress("", current, total));
     }
 
     SECTION("unrelated gcode output") {
-        REQUIRE_FALSE(parse_probe_progress("ok", current, total));
-        REQUIRE_FALSE(parse_probe_progress("G28", current, total));
-        REQUIRE_FALSE(parse_probe_progress("M104 S200", current, total));
+        REQUIRE_FALSE(probe_progress("ok", current, total));
+        REQUIRE_FALSE(probe_progress("G28", current, total));
+        REQUIRE_FALSE(probe_progress("M104 S200", current, total));
     }
 
     SECTION("similar but different text") {
-        REQUIRE_FALSE(parse_probe_progress("Moving to point 5/25", current, total));
-        REQUIRE_FALSE(parse_probe_progress("Point 5 of 25", current, total));
+        REQUIRE_FALSE(probe_progress("Moving to point 5/25", current, total));
+        REQUIRE_FALSE(probe_progress("Point 5 of 25", current, total));
     }
 
     SECTION("malformed numbers") {
-        REQUIRE_FALSE(parse_probe_progress("Probing point abc/def", current, total));
+        REQUIRE_FALSE(probe_progress("Probing point abc/def", current, total));
     }
 }
 
@@ -247,7 +231,7 @@ TEST_CASE("BedMeshCollector progress callback receives correct values",
 
     for (const auto& line : lines) {
         int current = 0, total = 0;
-        if (parse_probe_progress(line, current, total)) {
+        if (probe_progress(line, current, total)) {
             on_progress(current, total);
         }
     }
@@ -276,7 +260,7 @@ TEST_CASE("BedMeshCollector handles mixed format progress lines",
 
     for (const auto& line : lines) {
         int current = 0, total = 0;
-        if (parse_probe_progress(line, current, total)) {
+        if (probe_progress(line, current, total)) {
             on_progress(current, total);
         }
     }
@@ -300,19 +284,19 @@ TEST_CASE("BedMeshCollector handles edge case probe counts", "[bed_mesh_collecto
     int current = 0, total = 0;
 
     SECTION("minimum grid (2x2 = 4 points)") {
-        REQUIRE(parse_probe_progress("Probing point 1/4", current, total));
+        REQUIRE(probe_progress("Probing point 1/4", current, total));
         REQUIRE(current == 1);
         REQUIRE(total == 4);
     }
 
     SECTION("large grid (20x20 = 400 points)") {
-        REQUIRE(parse_probe_progress("Probing point 399/400", current, total));
+        REQUIRE(probe_progress("Probing point 399/400", current, total));
         REQUIRE(current == 399);
         REQUIRE(total == 400);
     }
 
     SECTION("adaptive mesh with odd count") {
-        REQUIRE(parse_probe_progress("Probing point 17/37", current, total));
+        REQUIRE(probe_progress("Probing point 17/37", current, total));
         REQUIRE(current == 17);
         REQUIRE(total == 37);
     }
@@ -753,4 +737,202 @@ TEST_CASE("ProbePointCounter reset clears both counters", "[bed_mesh_collector][
     REQUIRE(counter.sample_lines() == 0);
     // And the position history is cleared, so the first point after reset counts.
     REQUIRE(counter.feed(probe_line(20.0, 10.0)) == 1);
+}
+
+// ============================================================================
+// Standalone probes: a PROBE command's samples end in "Result is z=" and are
+// not mesh points
+// ============================================================================
+
+namespace {
+
+/// Resolve tests/fixtures/ from __FILE__ so the test does not depend on cwd.
+std::string fixture_dir() {
+    std::string src = __FILE__;
+    auto pos = src.rfind("/tests/unit/");
+    if (pos != std::string::npos) {
+        return src.substr(0, pos) + "/tests/fixtures/";
+    }
+    return "tests/fixtures/";
+}
+
+/// Console lines, in order, from a real COSMOS (Kalico) BED_MESH_CALIBRATE on an
+/// Elegoo Centauri Carbon: three LOADCELL_Z_HOME probes, the 9x9 mesh, completion,
+/// and the probe CALIBRATE_Z_OFFSET runs afterwards at the bed centre.
+std::vector<std::string> cc1_cosmos_mesh_console() {
+    const std::string path = fixture_dir() + "cc1_cosmos_bed_mesh_console.txt";
+    INFO("reading " << path);
+    std::ifstream in(path);
+    REQUIRE(in.good());
+    std::vector<std::string> lines;
+    for (std::string line; std::getline(in, line);) {
+        if (!line.empty()) {
+            lines.push_back(line);
+        }
+    }
+    return lines;
+}
+
+bool is_standalone_result(const std::string& line) {
+    return line.find("Result is z=") != std::string::npos;
+}
+
+bool is_probe_sample(const std::string& line) {
+    return helix::is_probe_result_line(line);
+}
+
+} // namespace
+
+TEST_CASE("CC1 COSMOS mesh replay counts the 81 mesh points, not the standalone probes",
+          "[bed_mesh_collector][dedupe][cc1]") {
+    const auto lines = cc1_cosmos_mesh_console();
+
+    // Locate the mesh without the counter: the probe lines between the last
+    // standalone Result before completion and the completion line itself.
+    const auto complete = std::find_if(lines.begin(), lines.end(), [](const std::string& l) {
+        return l.find("Mesh Bed Leveling Complete") != std::string::npos;
+    });
+    REQUIRE(complete != lines.end());
+    const auto last_result =
+        std::find_if(std::make_reverse_iterator(complete), lines.rend(), is_standalone_result);
+    REQUIRE(last_result != lines.rend());
+    const auto mesh_begin = last_result.base();
+    REQUIRE(std::count_if(mesh_begin, complete, is_probe_sample) == 81);
+    REQUIRE(std::count_if(lines.begin(), mesh_begin, is_standalone_result) == 3);
+    REQUIRE(std::count_if(complete, lines.end(), is_standalone_result) == 1);
+
+    // The standalone probes touch one spot no mesh point does and one that a
+    // mesh point also does, so counting every distinct position reads 82.
+    std::vector<helix::ProbePosition> distinct;
+    for (const auto& line : lines) {
+        if (auto p = helix::parse_probe_position(line)) {
+            const bool seen = std::any_of(distinct.begin(), distinct.end(), [&](const auto& q) {
+                return std::fabs(p->x - q.x) <= helix::PROBE_POSITION_TOLERANCE_MM &&
+                       std::fabs(p->y - q.y) <= helix::PROBE_POSITION_TOLERANCE_MM;
+            });
+            if (!seen) {
+                distinct.push_back(*p);
+            }
+        }
+    }
+    REQUIRE(distinct.size() == 82);
+
+    helix::ProbePointCounter counter(1);
+    std::optional<int> at_first_mesh_point;
+    std::optional<int> at_last_mesh_point;
+    int highest = 0;
+    for (auto it = lines.begin(); it != lines.end(); ++it) {
+        const auto reported = counter.feed(*it);
+        if (reported) {
+            highest = std::max(highest, *reported);
+        }
+        if (it >= mesh_begin && it < complete && is_probe_sample(*it)) {
+            if (!at_first_mesh_point) {
+                at_first_mesh_point = reported;
+            }
+            at_last_mesh_point = reported;
+        }
+    }
+
+    REQUIRE(at_first_mesh_point.has_value());
+    REQUIRE(at_last_mesh_point.has_value());
+    CHECK(*at_first_mesh_point == 1);
+    CHECK(*at_last_mesh_point == 81);
+    CHECK(highest <= 81);
+    // The Z-offset probe after completion lands on the centre mesh point, and
+    // discarding it must not take that point with it.
+    CHECK(counter.points() == 81);
+}
+
+TEST_CASE("A standalone probe at a new position is discarded when its Result arrives",
+          "[bed_mesh_collector][dedupe][cc1]") {
+    helix::ProbePointCounter counter(1);
+    counter.feed(probe_line(10.0, 10.0));
+    counter.feed(probe_line(39.5, 10.0));
+    REQUIRE(counter.points() == 2);
+
+    // Counted while it runs: nothing yet says it is not a mesh point.
+    for (int s = 0; s < 3; ++s) {
+        REQUIRE(counter.feed(probe_line(128.0, 128.0)) == 3);
+    }
+    CHECK_FALSE(counter.feed("// Result is z=-0.169623").has_value());
+    CHECK(counter.points() == 2);
+    CHECK(counter.sample_lines() == 2);
+
+    // The position is forgotten too, so a mesh point there later still counts.
+    CHECK(counter.feed(probe_line(128.0, 128.0)) == 3);
+}
+
+TEST_CASE("A standalone probe over an existing mesh point leaves that point counted",
+          "[bed_mesh_collector][dedupe][cc1]") {
+    helix::ProbePointCounter counter(1);
+    counter.feed(probe_line(98.5, 128.0));
+    counter.feed(probe_line(128.0, 128.0));
+    counter.feed(probe_line(157.5, 128.0));
+    REQUIRE(counter.points() == 3);
+
+    for (int s = 0; s < 3; ++s) {
+        counter.feed(probe_line(128.0, 128.0));
+    }
+    counter.feed("// Result is z=-0.108591");
+    CHECK(counter.points() == 3);
+    CHECK(counter.feed(probe_line(187.0, 128.0)) == 4);
+}
+
+TEST_CASE("A retried standalone probe is still discarded as one group",
+          "[bed_mesh_collector][dedupe][cc1]") {
+    helix::ProbePointCounter counter(1);
+    counter.feed(probe_line(10.0, 10.0));
+    counter.feed(probe_line(120.001, -0.998));
+    counter.feed(probe_line(120.001, -0.998));
+    // A console line between samples of one probe does not split it.
+    CHECK_FALSE(counter.feed("// Probe samples exceed tolerance. Retrying...").has_value());
+    for (int s = 0; s < 3; ++s) {
+        counter.feed(probe_line(120.001, -0.998));
+    }
+    REQUIRE(counter.points() == 2);
+    counter.feed("// Result is z=0.075980");
+    CHECK(counter.points() == 1);
+}
+
+TEST_CASE("A Result that follows no probe of its own discards nothing",
+          "[bed_mesh_collector][dedupe][cc1]") {
+    SECTION("before any probe") {
+        helix::ProbePointCounter counter(1);
+        CHECK_FALSE(counter.feed("// Result is z=0.075980").has_value());
+        CHECK(counter.points() == 0);
+        CHECK(counter.feed(probe_line(10.0, 10.0)) == 1);
+    }
+
+    SECTION("twice in a row") {
+        helix::ProbePointCounter counter(1);
+        counter.feed(probe_line(10.0, 10.0));
+        counter.feed(probe_line(128.0, 128.0));
+        counter.feed("// Result is z=0.1");
+        REQUIRE(counter.points() == 1);
+        counter.feed("// Result is z=0.1");
+        CHECK(counter.points() == 1);
+    }
+
+    SECTION("after samples whose coordinates do not parse") {
+        // Nothing says where such samples were, so there is no group to take back,
+        // and the mesh point before them must survive.
+        helix::ProbePointCounter counter(1);
+        counter.feed(probe_line(10.0, 10.0));
+        REQUIRE(counter.feed("// probe at somewhere is z=0.100000") == 2);
+        counter.feed("// Result is z=0.1");
+        CHECK(counter.points() == 2);
+    }
+}
+
+TEST_CASE("ProbePointCounter reset forgets an open standalone probe",
+          "[bed_mesh_collector][dedupe][cc1]") {
+    helix::ProbePointCounter counter(1);
+    counter.feed(probe_line(10.0, 10.0));
+    counter.reset();
+    counter.feed(probe_line(20.0, 20.0));
+    counter.feed(probe_line(30.0, 30.0));
+    // The Result belongs to the run at (30,30) only; nothing from before reset.
+    counter.feed("// Result is z=0.1");
+    CHECK(counter.points() == 1);
 }

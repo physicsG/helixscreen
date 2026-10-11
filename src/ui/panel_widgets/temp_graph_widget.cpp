@@ -3,12 +3,16 @@
 
 #include "temp_graph_widget.h"
 
+#include "ui_next_tick.h"
 #include "ui_overlay_temp_graph.h"
 
 #include "app_globals.h"
+#include "display_numbering.h"
 #include "helix-xml/src/xml/lv_xml.h"
+#include "json_utils.h"
 #include "klipper_extruder_naming.h"
 #include "lvgl/src/others/translation/lv_translation.h"
+#include "observe_language.h"
 #include "observer_factory.h"
 #include "panel_widget_registry.h"
 #include "panel_widget_size.h"
@@ -63,15 +67,13 @@ std::string TempGraphWidget::get_component_name() const {
 
 void TempGraphWidget::set_config(const nlohmann::json& config) {
     config_ = config;
-    follow_overlay_ = config.is_object() && config.value("follow_overlay", false);
+    follow_overlay_ =
+        config.is_object() && helix::json_util::safe_bool(config, "follow_overlay", false);
 }
 
 void TempGraphWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
     widget_obj_ = widget_obj;
     parent_screen_ = parent_screen;
-
-    // Store self-pointer for click callback routing
-    lv_obj_set_user_data(widget_obj_, this);
 
     // Build default config if not yet configured
     if (config_.empty() || !config_.contains("sensors")) {
@@ -111,6 +113,10 @@ void TempGraphWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
     applied_visibility_signature_ = current_visibility_signature();
 
     controller_ = std::make_unique<TempGraphController>(widget_obj_, std::move(ctrl_config));
+    // Live only while the panel shows it: attach() also runs on rebuilds under
+    // an overlay and for pages that are not on screen, and on_activate() resumes.
+    if (!active_)
+        controller_->pause();
 
     // Discovery lands after the WebSocket connects, which is later than the
     // startup attach of a dashboard widget. When it adds extruders this config
@@ -119,18 +125,25 @@ void TempGraphWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
     // the current version so the immediate registration callback is a no-op.
     {
         auto& ps = get_printer_state();
-        if (auto* version_subj = ps.get_extruder_version_subject()) {
+        if (auto* version_subj = ps.temperature_state().get_extruder_version_subject()) {
             int initial_version = lv_subject_get_int(version_subj);
-            extruder_version_observer_ = helix::ui::observe_int_sync<TempGraphWidget>(
+            extruder_version_observer_ = helix::ui::observe<int>(
                 version_subj, this,
                 [initial_version](TempGraphWidget* self, int version) {
                     if (version == initial_version)
                         return; // Series were built against this version already
+                    // A rediscovery that changes the tool count can rename an
+                    // extruder ("Nozzle" to "Nozzle 1").
+                    self->refresh_series_names();
                     self->schedule_discovery_rebuild();
                 },
                 ps.get_subjects_lifetime());
         }
     }
+
+    // Bed and chamber are named here, not by the printer layer.
+    language_observer_ = helix::ui::observe_language_change(
+        this, [](TempGraphWidget* self) { self->refresh_series_names(); });
 
     // The graph is `merges_into_card = false` — it reads as its own panel, not
     // as one tile in a fused run — so it supplies its own surface. Use the
@@ -147,11 +160,9 @@ void TempGraphWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
 void TempGraphWidget::detach() {
     cancel_discovery_rebuild();
     extruder_version_observer_.reset();
+    language_observer_.reset();
     controller_.reset();
 
-    if (widget_obj_) {
-        lv_obj_set_user_data(widget_obj_, nullptr);
-    }
     widget_obj_ = nullptr;
     parent_screen_ = nullptr;
 
@@ -168,6 +179,10 @@ void TempGraphWidget::on_size_changed(int colspan, int rowspan, int width_px, in
 }
 
 void TempGraphWidget::on_activate() {
+    active_ = true;
+    if (controller_)
+        controller_->resume();
+
     // Follow mode: rebuild if the overlay's visibility snapshot drifted while
     // the user was on the full-screen graph.
     if (!follow_overlay_ || !widget_obj_ || !parent_screen_)
@@ -178,7 +193,26 @@ void TempGraphWidget::on_activate() {
     rebuild_in_place();
 }
 
-void TempGraphWidget::on_deactivate() {}
+// Off screen, or under an overlay, the graph takes no live samples: each one
+// invalidates the chart, and that redraw merges with whatever the overlay is
+// redrawing and drags the panel beneath it into every frame. resume() backfills.
+void TempGraphWidget::on_deactivate() {
+    active_ = false;
+    if (controller_)
+        controller_->pause();
+}
+
+void TempGraphWidget::refresh_series_names() {
+    if (!controller_ || !config_.contains("sensors") || !config_["sensors"].is_array()) {
+        return;
+    }
+    for (const auto& entry : config_["sensors"]) {
+        if (entry.contains("name") && entry["name"].is_string()) {
+            const std::string name = entry["name"].get<std::string>();
+            controller_->set_series_name(name, TempGraphConfigModal::sensor_display_name(name));
+        }
+    }
+}
 
 void TempGraphWidget::rebuild_in_place() {
     // Snapshot the *current* widget pointers before detach() nulls them. They
@@ -206,23 +240,19 @@ void TempGraphWidget::schedule_discovery_rebuild() {
         return; // Already queued — collapse the burst into one rebuild
     }
     discovery_rebuild_pending_ = true;
-    lv_async_call(discovery_rebuild_async, this);
+    helix::ui::run_next_tick(discovery_rebuild_guard_.token(),
+                             [this]() { run_discovery_rebuild(); });
 }
 
 void TempGraphWidget::cancel_discovery_rebuild() {
-    if (discovery_rebuild_pending_) {
-        if (lv_is_initialized()) {
-            lv_async_call_cancel(discovery_rebuild_async, this);
-        }
-        discovery_rebuild_pending_ = false;
-    }
+    discovery_rebuild_guard_.invalidate();
+    discovery_rebuild_pending_ = false;
 }
 
-void TempGraphWidget::discovery_rebuild_async(void* self) {
-    auto* widget = static_cast<TempGraphWidget*>(self);
-    widget->discovery_rebuild_pending_ = false;
+void TempGraphWidget::run_discovery_rebuild() {
+    discovery_rebuild_pending_ = false;
 
-    if (!widget->widget_obj_) {
+    if (!widget_obj_) {
         return; // Detached while queued
     }
 
@@ -230,14 +260,13 @@ void TempGraphWidget::discovery_rebuild_async(void* self) {
     // version bump (rediscovery of the same tools) must not tear the graph down
     // and throw away its trace — the controller re-resolves those subjects on
     // its own.
-    if (!merge_discovered_extruders(widget->config_, true)) {
+    if (!merge_discovered_extruders(config_, true)) {
         return;
     }
 
-    widget->save_widget_config(widget->config_);
-    spdlog::info("[TempGraphWidget] '{}' rebuilding: discovery added extruders",
-                 widget->instance_id_);
-    widget->rebuild_in_place();
+    save_widget_config(config_);
+    spdlog::info("[TempGraphWidget] '{}' rebuilding: discovery added extruders", instance_id_);
+    rebuild_in_place();
 }
 
 bool TempGraphWidget::on_edit_configure() {
@@ -307,7 +336,7 @@ std::vector<TempGraphSeriesSpec> TempGraphWidget::build_series_from_config() con
             enabled =
                 std::find(snapshot->begin(), snapshot->end(), klipper_name) != snapshot->end();
         } else {
-            enabled = entry.value("enabled", true);
+            enabled = helix::json_util::safe_bool(entry, "enabled", true);
         }
         if (!enabled)
             continue;
@@ -325,7 +354,8 @@ std::vector<TempGraphSeriesSpec> TempGraphWidget::build_series_from_config() con
         // Heaters have targets, sensors generally don't
         spec.show_target =
             (spec.klipper_name == "extruder" || spec.klipper_name.find("extruder") == 0 ||
-             spec.klipper_name == "heater_bed" || spec.klipper_name == "chamber");
+             spec.klipper_name == "heater_bed" || spec.klipper_name == "chamber" ||
+             sensors::klipper_object_has_target(spec.klipper_name));
         specs.push_back(std::move(spec));
     }
     return specs;
@@ -400,7 +430,8 @@ void TempGraphWidget::build_default_config() {
     auto& sensor_mgr = sensors::TemperatureSensorManager::instance();
     auto discovered = sensor_mgr.get_sensors_sorted();
     for (const auto& sensor : discovered) {
-        if (!sensor.enabled)
+        // The chamber's own objects are the "chamber" row above.
+        if (!sensor.enabled || sensor.role == sensors::TemperatureSensorRole::CHAMBER)
             continue;
         sensors.push_back({
             {"name", sensor.klipper_name},
@@ -508,12 +539,13 @@ TempGraphWidget::TempGraphConfigModal::sensor_display_name(const std::string& kl
         if (it != exts.end() && !it->second.display_name.empty()) {
             return it->second.display_name;
         }
-        // Fallback when extruders haven't been discovered yet: derive a
-        // best-effort number from the klipper suffix. "extruder" -> "Nozzle 1",
-        // "extruderN" -> "Nozzle N+1".
+        // Fallback when extruders haven't been discovered yet: a bare "extruder"
+        // carries no signal about whether the printer has one nozzle or several,
+        // so index 0 answers with the common single-extruder case rather than
+        // guessing multi. "extruderN" (N >= 1) implies multi and gets a number.
         if (*tool_number == 0)
             return lv_tr("Nozzle");
-        return std::string(lv_tr("Nozzle")) + " " + std::to_string(*tool_number + 1);
+        return std::string(lv_tr("Nozzle")) + " " + helix::ui::lane_number_text(*tool_number);
     }
     if (klipper_name == "heater_bed")
         return lv_tr("Bed");
@@ -522,7 +554,7 @@ TempGraphWidget::TempGraphConfigModal::sensor_display_name(const std::string& kl
 
     // Strip common prefixes for auxiliary sensors
     std::string display = klipper_name;
-    const char* prefixes[] = {"temperature_sensor ", "temperature_fan "};
+    const char* prefixes[] = {"temperature_sensor ", "temperature_fan ", "heater_generic "};
     for (const char* prefix : prefixes) {
         if (display.find(prefix) == 0) {
             display = display.substr(strlen(prefix));
@@ -579,7 +611,7 @@ void TempGraphWidget::TempGraphConfigModal::populate_follow_toggle() {
     // Toggle switch
     lv_obj_t* sw = lv_switch_create(row);
     lv_obj_set_size(sw, 44, 24);
-    if (config_.is_object() && config_.value("follow_overlay", false))
+    if (config_.is_object() && helix::json_util::safe_bool(config_, "follow_overlay", false))
         lv_obj_add_state(sw, LV_STATE_CHECKED);
     follow_switch_ = sw;
 }
@@ -622,16 +654,16 @@ void TempGraphWidget::TempGraphConfigModal::populate_sensor_list() {
     const auto& sensors = config_["sensors"];
     for (size_t i = 0; i < sensors.size(); ++i) {
         const auto& entry = sensors[i];
-        if (!entry.contains("name"))
+        if (!entry.contains("name") || !entry["name"].is_string())
             continue;
 
         SensorRow row;
         row.name = entry["name"].get<std::string>();
         row.display = sensor_display_name(row.name);
-        row.enabled = entry.value("enabled", true);
+        row.enabled = helix::json_util::safe_bool(entry, "enabled", true);
 
         // Find the matching color index from the palette
-        if (entry.contains("color")) {
+        if (entry.contains("color") && entry["color"].is_number_integer()) {
             uint32_t cfg_hex = entry["color"].get<uint32_t>();
             lv_color_t cfg_color = lv_color_hex(cfg_hex);
             row.color_idx = static_cast<int>(i) % TEMP_GRAPH_PALETTE_SIZE; // default

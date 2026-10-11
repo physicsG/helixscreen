@@ -5,9 +5,7 @@
 
 #include "ui_error_reporting.h"
 #include "ui_fan_arc_resize.h"
-#include "ui_global_panel_helper.h"
 #include "ui_modal.h"
-#include "ui_nav_manager.h"
 #include "ui_notification.h"
 #include "ui_settings_fans.h"
 #include "ui_utils.h"
@@ -22,6 +20,7 @@
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "observer_factory.h"
 #include "ui/fan_spin_animation.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/spdlog.h>
 
@@ -127,23 +126,19 @@ void attach_long_press_rename(lv_obj_t* widget, const std::string& object_name,
 
 } // namespace
 
-// ============================================================================
-// GLOBAL INSTANCE
-// ============================================================================
-
-DEFINE_GLOBAL_OVERLAY_STORAGE(FanControlOverlay, g_fan_control_overlay, get_fan_control_overlay)
-
-void init_fan_control_overlay(PrinterState& printer_state) {
-    INIT_GLOBAL_OVERLAY(FanControlOverlay, g_fan_control_overlay, printer_state);
+namespace helix {
+lv_obj_t* open_fan_control_overlay(lv_obj_t* parent_screen) {
+    auto& overlay = get_fan_control_overlay();
+    overlay.set_api(get_moonraker_api());
+    return overlay.show(parent_screen) ? overlay.get_root() : nullptr;
 }
+} // namespace helix
 
 // ============================================================================
 // CONSTRUCTOR / DESTRUCTOR
 // ============================================================================
 
-FanControlOverlay::FanControlOverlay(PrinterState& printer_state) : printer_state_(printer_state) {
-    spdlog::trace("[{}] Constructor", get_name());
-}
+FanControlOverlay::FanControlOverlay(PrinterState& printer_state) : printer_state_(printer_state) {}
 
 FanControlOverlay::~FanControlOverlay() {
     // LVGL may already be destroyed during static destruction
@@ -163,43 +158,19 @@ FanControlOverlay::~FanControlOverlay() {
 // OVERLAYBASE IMPLEMENTATION
 // ============================================================================
 
-void FanControlOverlay::init_subjects() {
-    if (subjects_initialized_) {
-        spdlog::warn("[{}] init_subjects() called twice - ignoring", get_name());
-        return;
-    }
-
-    subjects_initialized_ = true;
-    spdlog::trace("[{}] Subjects initialized", get_name());
-}
-
 lv_obj_t* FanControlOverlay::create(lv_obj_t* parent) {
-    // Create overlay root from XML
-    overlay_root_ = static_cast<lv_obj_t*>(lv_xml_create(parent, "fan_control_overlay", nullptr));
-    if (!overlay_root_) {
-        spdlog::error("[{}] Failed to create overlay from XML", get_name());
+    if (!OverlayBase::create(parent)) {
         return nullptr;
     }
 
-    // Find container widget
-    fans_container_ = lv_obj_find_by_name(overlay_root_, "fans_container");
+    lv_obj_add_event_cb(overlay_root_, on_root_deleted, LV_EVENT_DELETE, nullptr);
 
-    if (!fans_container_) {
-        spdlog::error("[{}] Failed to find fans_container widget", get_name());
-    }
+    fans_container_ = helix::ui::find_required(overlay_root_, "fans_container", get_name());
 
     // Populate fans from current PrinterState
     populate_fans();
 
-    spdlog::trace("[{}] Created overlay with {} animated dials and {} auto fans", get_name(),
-                  animated_fan_dials_.size(), auto_fan_cards_.size());
-
     return overlay_root_;
-}
-
-void FanControlOverlay::register_callbacks() {
-    // Back button is handled by overlay_panel base component
-    spdlog::trace("[{}] Callbacks registered", get_name());
 }
 
 void FanControlOverlay::on_activate() {
@@ -207,10 +178,11 @@ void FanControlOverlay::on_activate() {
 
     // Subscribe to fans_version subject for structural changes (fan discovery)
     // Using observer factory for type-safe lambda observer
-    using helix::ui::observe_int_sync;
-    if (auto* fans_ver = printer_state_.get_fans_version_subject()) {
-        fans_observer_ = observe_int_sync<FanControlOverlay>(
-            fans_ver, this, [](FanControlOverlay* self, int /* version */) {
+    using helix::ui::observe;
+    if (auto* fans_ver = printer_state_.fan_state().get_fans_version_subject()) {
+        fans_observer_ = observe<int>(
+            fans_ver, this,
+            [](FanControlOverlay* self, int /* version */) {
                 if (!self->is_visible())
                     return;
                 // Defer rebuild (#80) AND use safe_clean_children (#776): lifetime_.defer
@@ -228,11 +200,12 @@ void FanControlOverlay::on_activate() {
                         self->subscribe_to_fan_speeds();
                     });
                 }
-            });
+            },
+            printer_state_.get_subjects_lifetime());
     }
 
     // Observe animation setting changes to refresh spin animations on all fan cards
-    anim_settings_observer_ = observe_int_sync<FanControlOverlay>(
+    anim_settings_observer_ = observe<int>(
         DisplaySettingsManager::instance().subject_animations_enabled(), this,
         [](FanControlOverlay* self, int /* enabled */) {
             if (self->is_visible()) {
@@ -257,9 +230,7 @@ void FanControlOverlay::on_activate() {
     spdlog::trace("[{}] Activated", get_name());
 }
 
-void FanControlOverlay::on_deactivate() {
-    OverlayBase::on_deactivate();
-
+void FanControlOverlay::on_deactivating(DeactivateReason) {
     // Unsubscribe from all observers
     fans_observer_.reset();
     anim_settings_observer_.reset();
@@ -277,18 +248,37 @@ void FanControlOverlay::cleanup() {
         auto freeze = helix::ui::UpdateQueue::instance().scoped_freeze();
         helix::ui::UpdateQueue::instance().drain();
 
-        fans_observer_.reset();
-        anim_settings_observer_.reset();
-        unsubscribe_from_fan_speeds();
-        // Stop spin animations before clearing cards
-        for (auto& card : auto_fan_cards_) {
-            helix::ui::fan_spin_stop(card.fan_icon);
-        }
-        // Clear widget tracking vectors (widgets will be destroyed by OverlayBase::cleanup)
-        animated_fan_dials_.clear();
-        auto_fan_cards_.clear();
+        release_fan_widgets();
     }
     OverlayBase::cleanup();
+}
+
+void FanControlOverlay::release_fan_widgets() {
+    fans_observer_.reset();
+    anim_settings_observer_.reset();
+    unsubscribe_from_fan_speeds();
+    // Stop spin animations before clearing cards
+    for (auto& card : auto_fan_cards_) {
+        helix::ui::fan_spin_stop(card.fan_icon);
+    }
+    animated_fan_dials_.clear();
+    auto_fan_cards_.clear();
+}
+
+void FanControlOverlay::on_root_deleted(lv_event_t* e) {
+    // Resolved through the global, not user_data: a printer switch destroys the
+    // overlay before freeing its tree, and the re-created overlay can be opened
+    // on a new root before the old one is freed.
+    auto* overlay = helix::lazy_global_if_exists<FanControlOverlay>();
+    if (!overlay || overlay->overlay_root_ != lv_event_get_target_obj(e)) {
+        return;
+    }
+    // LVGL sends LV_EVENT_DELETE before deleting the children, so the dials'
+    // widgets are still alive here.
+    auto& self = *overlay;
+    self.release_fan_widgets();
+    self.fans_container_ = nullptr;
+    self.overlay_root_ = nullptr;
 }
 
 // ============================================================================
@@ -315,7 +305,7 @@ void FanControlOverlay::populate_fans() {
     // UpdateQueue batch that this observer-deferred rebuild runs inside (#776).
     helix::ui::safe_clean_children(fans_container_);
 
-    const auto& fans = printer_state_.get_fans();
+    const auto& fans = printer_state_.fan_state().get_fans();
 
     // First pass: create controllable fans (FanDial widgets with animation)
     for (const auto& fan : fans) {
@@ -357,7 +347,7 @@ void FanControlOverlay::populate_fans() {
 
             if (card) {
                 // Find speed label and format with % suffix, including RPM when available
-                lv_obj_t* speed_label = lv_obj_find_by_name(card, "speed_label");
+                lv_obj_t* speed_label = helix::ui::find_required(card, "speed_label", get_name());
                 if (speed_label) {
                     if (fan.rpm.has_value() && fan.rpm.value() > 0) {
                         char speed_str[32];
@@ -374,7 +364,7 @@ void FanControlOverlay::populate_fans() {
 
                 // Find arc and make read-only (fan_arc_core is interactive by default)
                 // Also bubble events so long-press reaches the card
-                lv_obj_t* arc = lv_obj_find_by_name(card, "dial_arc");
+                lv_obj_t* arc = helix::ui::find_required(card, "dial_arc", get_name());
                 if (arc) {
                     lv_obj_remove_flag(arc, LV_OBJ_FLAG_CLICKABLE);
                     lv_obj_add_flag(arc, LV_OBJ_FLAG_EVENT_BUBBLE);
@@ -384,7 +374,7 @@ void FanControlOverlay::populate_fans() {
                 }
 
                 // Find fan icon for spin animation
-                lv_obj_t* fan_icon = lv_obj_find_by_name(card, "fan_icon");
+                lv_obj_t* fan_icon = helix::ui::find_required(card, "fan_icon", get_name());
                 if (fan_icon) {
                     lv_obj_set_style_transform_pivot_x(fan_icon, LV_PCT(50), 0);
                     lv_obj_set_style_transform_pivot_y(fan_icon, LV_PCT(50), 0);
@@ -422,7 +412,7 @@ void FanControlOverlay::populate_fans() {
 }
 
 void FanControlOverlay::update_fan_speeds() {
-    const auto& fans = printer_state_.get_fans();
+    const auto& fans = printer_state_.fan_state().get_fans();
 
     // Note: FanDial widgets are updated via AnimatedValue bindings in subscribe_to_fan_speeds()
     // This method only updates auto fan cards which don't need animation
@@ -471,7 +461,8 @@ void FanControlOverlay::send_fan_speed(const std::string& object_name, int speed
     // Optimistic update: immediately reflect the new speed in PrinterState so
     // other UI (e.g. controls card secondary fan rows) updates without waiting
     // for the Moonraker round-trip confirmation.
-    printer_state_.update_fan_speed(object_name, static_cast<double>(speed_percent) / 100.0);
+    printer_state_.fan_state().update_fan_speed(object_name,
+                                                static_cast<double>(speed_percent) / 100.0);
 
     // IMoonrakerAPI::set_fan_speed expects:
     // - "fan" for part cooling fan (uses M106)
@@ -482,17 +473,18 @@ void FanControlOverlay::send_fan_speed(const std::string& object_name, int speed
             // Silent success
         },
         [object_name](const MoonrakerError& err) {
-            NOTIFY_ERROR(lv_tr("Fan control failed: {}"), err.user_message());
+            helix::ui::notify_error_tr(TR_NOOP("Fan control failed: {}"), err);
         });
 }
 
 void FanControlOverlay::subscribe_to_fan_speeds() {
-    using helix::ui::observe_int_sync;
+    using helix::ui::observe;
 
     // Bind AnimatedValue for each FanDial - provides smooth animation when speed changes
     for (auto& afd : animated_fan_dials_) {
         SubjectLifetime lifetime;
-        if (auto* subject = printer_state_.get_fan_speed_subject(afd.object_name, lifetime)) {
+        if (auto* subject =
+                printer_state_.fan_state().get_fan_speed_subject(afd.object_name, lifetime)) {
             FanDial* dial_ptr = afd.dial.get();
             // 2% threshold to avoid micro-updates
             helix::ui::AnimatedValueConfig anim_config;
@@ -509,8 +501,9 @@ void FanControlOverlay::subscribe_to_fan_speeds() {
     fan_speed_observers_.reserve(auto_fan_cards_.size());
     for (const auto& card : auto_fan_cards_) {
         SubjectLifetime lifetime;
-        if (auto* subject = printer_state_.get_fan_speed_subject(card.object_name, lifetime)) {
-            fan_speed_observers_.push_back(observe_int_sync<FanControlOverlay>(
+        if (auto* subject =
+                printer_state_.fan_state().get_fan_speed_subject(card.object_name, lifetime)) {
+            fan_speed_observers_.push_back(observe<int>(
                 subject, this,
                 [](FanControlOverlay* self, int /*speed*/) {
                     if (self->is_visible()) {

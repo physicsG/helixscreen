@@ -46,12 +46,12 @@ DISPLAY_CXXFLAGS := $(CXXFLAGS) -I$(INC_DIR) -isystem lib $(LVGL_INC) $(SPDLOG_I
 
 # Build object files from src/api/ (with dependency tracking)
 # Depends on LIBHV_LIB to ensure libhv's configure runs first (creates include/hv/*.h)
-$(BUILD_DIR)/display/%.o: src/api/%.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) | $(BUILD_DIR)/display
+$(BUILD_DIR)/display/%.o: src/api/%.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(ABI_STAMP) | $(BUILD_DIR)/display
 	@echo "[CXX] $<"
 	$(Q)$(CXX) $(DISPLAY_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # Build object files from src/ui/ (with dependency tracking)
-$(BUILD_DIR)/display/%.o: src/ui/%.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) | $(BUILD_DIR)/display
+$(BUILD_DIR)/display/%.o: src/ui/%.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(ABI_STAMP) | $(BUILD_DIR)/display
 	@echo "[CXX] $<"
 	$(Q)$(CXX) $(DISPLAY_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 

@@ -258,7 +258,7 @@ The deploy target automatically:
 To restore the stock Snapmaker touchscreen UI, run the uninstaller — it re-enables the stock UI binary (`/usr/bin/gui`) and restores the stock `S99screen` launcher (firmware 1.3) or removes the HelixScreen-created one (firmware 1.4):
 
 ```bash
-ssh root@<printer-ip> "curl -sSL https://raw.githubusercontent.com/prestonbrown/helixscreen/main/scripts/install.sh | sh -s -- --uninstall; reboot"
+ssh root@<printer-ip> "curl -sSL https://releases.helixscreen.org/install.sh | sh -s -- --uninstall; reboot"
 ```
 
 > **A bare `rm -rf /userdata/helixscreen` is no longer sufficient.** The installer disables the stock UI binary (`chmod -x /usr/bin/gui`) so neither firmware's launcher can start it; removing HelixScreen without re-enabling the binary leaves a black screen. If you can't run the uninstaller, revert manually:
@@ -405,6 +405,17 @@ Verified against two real slices: a single-color file with `enable_pressure_adva
 
 **HelixScreen relevance:** the routine is gated on the print task's `flow_calibrate` flag (disable-able per job), and emits `SET_MAIN_STATE MAIN_STATE=FLOW_CALIBRATION` plus per-extruder `{EXTRUDER}_FLOW_CALIBRATING` action codes — both surfaceable in the UI during the pre-print phase.
 
+**Running it outside a print.** `SM_PRINT_FLOW_CALIBRATE` is the print-job wrapper and returns without a word when no print task is running. The routine itself is `FLOW_CALIBRATE`, registered by the same Python extra (listed in `/printer/gcode/help`, never a `gcode_macro`). `FLOW_CALIBRATE TEMP=<c>` calibrates the **mounted** extruder: it homes X/Y if needed, moves to the discard position, heats to `TEMP` (clamped to the heater's limits), purges through about five candidates and applies and saves the result. The flow calibrator has no status object, so the capability is recognised by `filament_parameters`, the Snapmaker extra it cannot run without. Its console lines:
+
+| Line | Meaning |
+|---|---|
+| `measure k: 0.02000` | one per candidate |
+| `Got pressure advance: 0.0412` | the result |
+| `flow k is out of range, use default value:0.02` | failed; the default K was applied |
+| `abort calibration: <reason>` | failed |
+
+K is set through the extruder stepper directly, so no `SET_PRESSURE_ADVANCE` echo reaches the console. HelixScreen drives this from its Pressure Advance screen: its `SNAPMAKER_U1` provider row in `src/printer/pa_calibration.cpp` holds the command and patterns, and `src/printer/pa_calibration.cpp#procedure_for` turns it into a run.
+
 ## 480x320 Display Considerations
 
 The U1's 480x320 display uses the TINY layout preset. This is the smallest resolution HelixScreen supports, and several UI panels have known layout issues at this size. Key issues:
@@ -448,13 +459,13 @@ Package HelixScreen as an Extended Firmware overlay for one-click installation v
 
 The `AmsBackendSnapmaker` backend parses RFID data from `filament_detect.info` when the RFID reader is enabled. With the RFID reader disabled (default on Extended Firmware via `disable-rfid-reader.cfg`), all RFID fields return `"NONE"` and `print_task_config` is the authoritative filament data source.
 
-### Virtual Slot Mapping
+### Virtual Toolhead Mapping
 
 The U1 maps 32 logical tools onto 4 physical heads through `extruder_map_table`, and that table
-— not the physical slot layout — is what decides which head prints a given `Tn`. HelixScreen
+— not the physical toolhead layout — is what decides which head prints a given `Tn`. HelixScreen
 both writes it (the pre-print `SET_PRINT_EXTRUDER_MAP` sequence, one line per used tool) and
 reads it back (`AmsBackendSnapmaker::get_tool_mapping()`), so the live preview colours each
-tool by the lane that will actually print it instead of inferring a mapping from the slicer
+tool by the toolhead that will actually print it instead of inferring a mapping from the slicer
 palette. Two properties make the read safe:
 
 - **Write every used entry, not just the remaps.** `SET_PRINT_EXTRUDER_MAP` sets one entry and
@@ -462,7 +473,7 @@ palette. Two properties make the read safe:
   values — a job that remapped `T0`→head 2 made the next job print `T0` from head 2 as well.
 - **Only read it while a task is configured.** Idle, the table holds a default identity
   `[0,1,2,3,…]` that is indistinguishable from "this print needs no remap" and is wrong for any
-  file whose tools do not line up with the lanes. `extruders_used` being all-false is the
+  file whose tools do not line up with the toolheads. `extruders_used` being all-false is the
   firmware's own "no task" signal and gates the read.
 
 Full command and data-model reference: [FILAMENT_BACKEND_SNAPMAKER_U1.md](../FILAMENT_BACKEND_SNAPMAKER_U1.md) § "Firmware API: `print_task_config`".
@@ -477,17 +488,17 @@ The primary source for filament info. Populated by the stock firmware's task man
 
 | Field | Example | Handled | Notes |
 |-------|---------|---------|-------|
-| `filament_type` | `["PLA","PLA","PLA","PLA"]` | ✅ | Material per slot |
+| `filament_type` | `["PLA","PLA","PLA","PLA"]` | ✅ | Material per feeder |
 | `filament_sub_type` | `["SnapSpeed",...]` | ✅ | Appended to type (e.g., "PLA SnapSpeed") |
-| `filament_vendor` | `["Snapmaker",...]` | ✅ | Brand per slot |
+| `filament_vendor` | `["Snapmaker",...]` | ✅ | Brand per feeder |
 | `filament_color_rgba` | `["080A0DFF",...]` | ✅ | RGBA hex → RGB uint32 |
-| `filament_exist` | `[true,true,true,true]` | ✅ | Slot presence |
+| `filament_exist` | `[true,true,true,true]` | ✅ | Feeder presence |
 | `filament_color` | `[4278716941,...]` | — | Redundant with `_rgba`, not parsed |
 | `filament_official` | `[true,...]` | ❌ | Could show official/third-party badge |
 | `filament_sku` | `[900001,...]` | ❌ | Snapmaker product SKU |
 | `filament_soft` | `[false,...]` | ❌ | Soft filament flag (TPU etc.) |
 | `filament_edit` | `[false,...]` | ❌ | Whether user has edited filament info |
-| `extruder_map_table` | `[0,1,2,3,0,...(x32)]` | ✅ | **Logical tool → physical head routing for the running print.** Published by `AmsBackendSnapmaker::get_tool_mapping()`; the live preview colours each tool by the lane that actually prints it. Only read while `extruders_used` says a task is configured — idle it holds a default identity that would read as "no remap". |
+| `extruder_map_table` | `[0,1,2,3,0,...(x32)]` | ✅ | **Logical tool → physical head routing for the running print.** Published by `AmsBackendSnapmaker::get_tool_mapping()`; the live preview colours each tool by the toolhead that actually prints it. Only read while `extruders_used` says a task is configured — idle it holds a default identity that would read as "no remap". |
 | `extruders_used` | `[false,...]` | ✅ | Which heads the current task uses. Gates whether `extruder_map_table` may be read at all (all-false = no task configured). |
 | `extruders_replenished` | `[0,1,2,3]` | ❌ | Auto-replenish mapping |
 | `auto_replenish_filament` | `true` | ❌ | Auto-replenish enabled |
@@ -537,18 +548,18 @@ Per-extruder filament feed state. Left module serves extruder0/1, right serves e
 
 Known `channel_state` values: `"idle"`, `"preloading"`, `"loading"`, `"load_finish"`, `"unloading"`
 
-### `machine_state_manager` — Machine state (NOT HANDLED)
+### `machine_state_manager` — Machine state
 
 | Field | Example | Handled | Notes |
 |-------|---------|---------|-------|
-| `main_state` | `0` | ❌ | Top-level machine state (0=idle) |
+| `main_state` | `0` | ✅ | Screws-tilt state (8): gated exit, connect-time reconcile |
 | `action_code` | `0` | ❌ | Current action code |
 
-Likely redundant with `print_stats.state` for most purposes.
+Subscribed only when `mmu_type()` reports SnapSwap; the screws-tilt code reads it via `printer.objects.query` regardless.
 
 ### `defect_detection` — Print defect detection (NOT SUBSCRIBED)
 
-AI-based print defect detection system. The status object itself is not subscribed — HelixScreen consumes detection through `print_stats.exception` instead: on a confirmed defect (custom `exception` sub-object, `code: 2` = spaghetti/noodle) the firmware pauses the print itself, and `U1StockSource` → `DetectionManager` (`include/detection_manager.h`) surfaces it as the response surface — spaghetti modal, defer-to-source policy, master toggle + per-source policy in Settings. Capability is gated by probing `printer.objects.list` for `defect_detection` after the WebSocket connects (probing at init would latch false forever).
+AI-based print defect detection system. The status object itself is not subscribed; HelixScreen consumes detection through `print_stats.exception` instead: on a confirmed defect (custom `exception` sub-object, `code: 2` = spaghetti/noodle) the firmware pauses the print itself, and `U1StockSource` reports it to `DetectionManager` (`include/detection_manager.h`) with `already_paused` set. Sources only report: `DetectionManager::response_for()` classifies the event from the settings in Settings > Safety & Alerts (**Spaghetti Detection**, exposed to XML as the `detection_available` subject). **Pause on Detection** is hidden on a U1 (the `detection_pause_applicable` subject is 0): the firmware pauses by itself and no HelixScreen setting can prevent that, so the row only exists for sources whose pause HelixScreen sends. Every confirmed U1 detection therefore shows the response modal (Resume / Abort / Tune / Turn off detection) even under a warn-only policy: a print the firmware already paused cannot be left on a vanishing toast. The U1 firmware keeps no preference HelixScreen can read, so the first capable start seeds the settings with the defaults (detection on) and they are HelixScreen's from then on. Capability is gated by probing `printer.objects.list` for `defect_detection` after the WebSocket connects (probing at init would latch false forever).
 
 | Field | Example | Notes |
 |-------|---------|-------|
@@ -609,7 +620,7 @@ We welcome additional testers with Snapmaker U1 hardware — **especially anyone
 - **[U1 Config Example](https://github.com/JNP-1/Snapmaker-U1-Config)** -- Community reverse-engineered Klipper configuration
 - **[Snapmaker Forum](https://forum.snapmaker.com/c/snapmaker-products/87)** -- Official U1 discussion
 - **[LAN Client Authorization](../LAN_CLIENT_AUTHORIZATION.md)** -- How Snapmaker Orca and the Snapmaker App pair with the printer, and why the prompt is HelixScreen's job once it replaces the stock screen
-- **[Toolchanger Research](../printer-research/SNAPMAKER_U1_RESEARCH.md)** -- Detailed analysis of U1's toolchanger implementation vs. standard Klipper toolchanger module
+- **[U1 Research](../printer-research/SNAPMAKER_U1_RESEARCH.md)** -- Toolhead layout, published firmware sources, on-device layout, PAXX extended firmware
 - **[Snapmaker/u1-klipper](https://github.com/Snapmaker/u1-klipper)** -- Open source Klipper fork
 - **[Snapmaker/u1-moonraker](https://github.com/Snapmaker/u1-moonraker)** -- Open source Moonraker fork
 - **[Snapmaker/u1-fluidd](https://github.com/Snapmaker/u1-fluidd)** -- Open source Fluidd fork

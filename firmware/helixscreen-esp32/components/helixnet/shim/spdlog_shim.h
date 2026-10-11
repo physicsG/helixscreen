@@ -40,7 +40,14 @@ enum level_enum : int {
     off = 6,
     n_levels
 };
+
+// Same names as real spdlog's SPDLOG_LEVEL_NAMES.
+inline fmt::string_view to_string_view(level_enum l) {
+    static const fmt::string_view names[] = {"trace", "debug",    "info", "warning",
+                                             "error", "critical", "off"};
+    return names[l];
 }
+} // namespace level
 
 namespace sinks {
 class sink {

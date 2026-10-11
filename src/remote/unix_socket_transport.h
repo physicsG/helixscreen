@@ -21,6 +21,11 @@ class UnixSocketTransport : public SocketServerBase {
   public:
     explicit UnixSocketTransport(std::string socket_path);
 
+    /// Stops a still-running transport; also unlinks the socket file through on_stopped().
+    ~UnixSocketTransport() override {
+        stop();
+    }
+
     std::string endpoint() const override {
         return socket_path_;
     }
@@ -85,5 +90,69 @@ class UnixSocketTransport : public SocketServerBase {
   private:
     std::string socket_path_;
 };
+
+/**
+ * @brief Directory that holds the control socket
+ *
+ * In preference order: systemd's `$RUNTIME_DIRECTORY`, then `$XDG_RUNTIME_DIR`,
+ * then `/tmp`.
+ *
+ * `RuntimeDirectory=helixscreen` in `config/helixscreen.service` has to win.
+ * That unit sets `ProtectSystem=strict`, which leaves `/tmp` read-only, so a
+ * bind there fails on every systemd install while the launcher has already
+ * logged that remote control is enabled (prestonbrown/helixscreen#1602). The
+ * variable may name several directories, colon separated; the first is ours.
+ *
+ * Client and server both resolve through this, or `ctl` looks for the socket
+ * somewhere the app never created it.
+ */
+std::string control_socket_dir();
+
+/// The well-known control socket path, inside control_socket_dir().
+std::string well_known_socket_path();
+
+/**
+ * @brief Every directory a control socket might be in, best guess first
+ *
+ * The server binds one directory - whichever control_socket_dir() picks in the
+ * context it runs in. A client usually runs in a different context: an ssh
+ * session has `$XDG_RUNTIME_DIR` and no `$RUNTIME_DIRECTORY`, while the service
+ * it wants to reach has the opposite, so resolving a single directory finds
+ * nothing and reports that the app is not running
+ * (prestonbrown/helixscreen#1602). Searching the candidates instead lets `ctl`
+ * work without `-s`. Ordered, de-duplicated, and includes systemd's
+ * `RuntimeDirectory=helixscreen` location even when the variable is unset.
+ */
+std::vector<std::string> control_socket_search_dirs();
+
+/**
+ * @brief What a client should do after searching for a live control socket.
+ */
+struct ClientSocketResolution {
+    enum class Status {
+        Found,      ///< Exactly one live socket; connect to `path`.
+        NotRunning, ///< Nothing live anywhere; `path` is the path to report against.
+        Ambiguous,  ///< More than one live socket; see `candidates`.
+    };
+    Status status = Status::NotRunning;
+    std::string path;
+    std::vector<std::string> candidates;
+};
+
+/**
+ * @brief Search @p dirs for a live control socket and decide what to do with it.
+ *
+ * Two passes, each resolved by the same rule: exactly one live socket found is
+ * used without asking, more than one is refused rather than guessed at. The
+ * well-known name is checked first, across every directory, because a
+ * pid-suffixed instance in one directory implies that directory's own
+ * well-known socket is already taken - it is not a second independent app.
+ * Only when no well-known socket answers anywhere does the search fall back to
+ * pid-suffixed instances, again across every directory.
+ *
+ * A caller silently preferring one live socket among several drives a
+ * different app than the one the user meant to reach.
+ */
+ClientSocketResolution resolve_client_socket_path(const std::vector<std::string>& dirs);
 
 } // namespace helix

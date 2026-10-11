@@ -29,9 +29,11 @@ namespace wizard {
 
 // Printer identification
 constexpr const char* PRINTER_NAME = "printer_name";
+// The hostname the printer's Klipper reports; how mDNS re-finds it at a new address
+constexpr const char* HOSTNAME = "hostname";
 constexpr const char* PRINTER_TYPE = "type";
 // Which saved printer type the one-time saved-vs-detected mismatch warning
-// (Application::maybe_warn_type_mismatch) was last shown for. Changing the
+// (HardwareSetupPrompter::maybe_warn_type_mismatch) was last shown for. Changing the
 // saved type re-arms the warning once.
 constexpr const char* TYPE_MISMATCH_SHOWN_FOR = "type_mismatch_shown_for";
 
@@ -48,6 +50,7 @@ constexpr const char* HOTEND_FAN = "fans/hotend";
 constexpr const char* PART_FAN = "fans/part";
 constexpr const char* CHAMBER_FAN = "fans/chamber";
 constexpr const char* EXHAUST_FAN = "fans/exhaust";
+constexpr const char* AUX_FAN = "fans/aux";
 
 // Chamber hardware (sensor and heater — distinct from chamber_fan above)
 constexpr const char* CHAMBER_SENSOR = "temp_sensors/chamber";
@@ -59,8 +62,21 @@ constexpr const char* CHAMBER_HEATER = "heaters/chamber";
 constexpr const char* FEEDER_OPEN_MACRO = "toolchanger/feeder_open_macro";
 constexpr const char* FEEDER_CLOSE_MACRO = "toolchanger/feeder_close_macro";
 
-// LED hardware (legacy — used for migration only in LedController::load_config()
-// and hardware_validator.cpp. New code should use LedController::selected_strips())
+// ACE bypass macros. The ACE Pro has no bypass command, so the master switch
+// that disables its filament path is thrown by macros. "auto" detects the
+// conventional names; a printer exposing neither reports no bypass. Per-printer,
+// because the wrapper macros are the owner's own and differ between machines.
+constexpr const char* ACE_BYPASS_ON_MACRO = "ams/ace_bypass_on_macro";
+constexpr const char* ACE_BYPASS_OFF_MACRO = "ams/ace_bypass_off_macro";
+
+// LED hardware. LED_AUTO_STATE_STRIPS holds the devices the user chose (the wizard's
+// LED step stages its pick there). LED_SELECTED_STRIPS is the older selection
+// LedController still reads. LED_STRIP is the wizard's own record of the user's pick
+// (written by the LED step, read by the summary) and LED_SELECTED its array form.
+// None are kept in step, so hardware_validator.cpp asks each in that order before
+// deciding no LED is configured.
+constexpr const char* LED_AUTO_STATE_STRIPS = "leds/auto_state/strips";
+constexpr const char* LED_SELECTED_STRIPS = "leds/selected_strips";
 constexpr const char* LED_STRIP = "leds/strip";
 constexpr const char* LED_SELECTED = "leds/selected";
 
@@ -77,21 +93,25 @@ constexpr const char* WIFI_PASSWORD = "/wifi/password";
 constexpr const char* PRINTER_IMAGE = "printer_image";
 
 /// Get the printer display name from config: saved name → model/type → fallback.
+/**
+ * @brief The resolved printer type as saved in config, or empty.
+ *
+ * Config is the only source populated during the discovery callback
+ * (init_subsystems_from_hardware). PrinterState's copy is set later, by
+ * auto_detect_and_save, so anything constructed or initialised in that callback
+ * that reads PrinterState gets "" on every run and silently behaves as though
+ * the printer were unknown.
+ */
+inline std::string get_saved_printer_type() {
+    Config* config = Config::get_instance();
+    return config->get<std::string>(config->df() + wizard::PRINTER_TYPE, "");
+}
+
+/// The active printer's display name (Config::get_printer_display_name()), or @p fallback.
 /// Used by both the home screen widget and printer manager overlay.
 inline std::string get_printer_display_name(const std::string& fallback = "My Printer") {
     Config* config = Config::get_instance();
-    if (!config)
-        return fallback;
-
-    std::string name = config->get<std::string>(config->df() + wizard::PRINTER_NAME, "");
-    if (!name.empty())
-        return name;
-
-    std::string type = config->get<std::string>(config->df() + wizard::PRINTER_TYPE, "");
-    if (!type.empty())
-        return type;
-
-    return fallback;
+    return config->get_printer_display_name(config->get_active_printer_id(), fallback);
 }
 
 } // namespace helix

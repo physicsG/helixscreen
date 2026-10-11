@@ -3,16 +3,25 @@
 
 #include "ams_backend_cfs.h"
 
+#include "ui_error_reporting.h"
+#include "ui_insert_notice.h"
 #include "ui_temperature_utils.h"
+#include "ui_update_queue.h"
 
 #include "ams_bypass_policy.h"
 #include "ams_fault_event.h"
 #include "ams_tool_map_sync.h"
+#include "cfs_status_parse.h"
 #include "filament_catalog.h"
 #include "filament_op_dispatch.h" // EXTERNAL_SPOOL_SLOT — the shared bypass sentinel
 #include "filament_slot_override.h"
 #include "filament_slot_override_store.h"
 #include "json_utils.h"
+#include "klipper_error_table.h"
+#include "lane_apply.h"
+#include "lane_legacy_migration.h"
+#include "lane_source_store.h"
+#include "lane_translation.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "macro_param_cache.h"
 #include "moonraker_error.h"
@@ -22,10 +31,16 @@
 #include "printer_detector.h"
 #include "printer_state.h" // get_print_lifecycle_subject: the insert-probe gate
 #include "settings_manager.h"
+#include "text_io.h"
 
+#include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 
+#include <atomic>
 #include <cctype>
+#include <functional>
+#include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 
@@ -51,16 +66,19 @@ std::string CfsMaterialDb::strip_code(const std::string& code) {
 }
 
 uint32_t CfsMaterialDb::parse_color(const std::string& color_str) {
-    if (color_str == "-1" || color_str == "None" || color_str.empty())
+    if (color_str == "-1" || color_str == "None")
         return DEFAULT_COLOR;
+    // Creality's leading-zero "0RRGGBB" is this firmware's own spelling and is
+    // owned here; what is left is ordinary hex, which helix::ams::read_lane_color
+    // reads by the same grammar as every other lane-shaped producer. A value
+    // carrying anything but a colour is refused whole rather than read up to its
+    // first bad character, so a trailing-garbage field renders as "no colour"
+    // instead of a plausible wrong one.
     std::string hex = color_str;
     if (hex.size() == 7 && hex[0] == '0')
         hex = hex.substr(1);
-    try {
-        return static_cast<uint32_t>(std::stoul(hex, nullptr, 16));
-    } catch (...) {
-        return DEFAULT_COLOR;
-    }
+    const auto reading = helix::ams::read_lane_color(hex);
+    return reading.kind == helix::ams::ColorReadingKind::Observed ? reading.rgb : DEFAULT_COLOR;
 }
 
 std::string CfsMaterialDb::slot_to_tnn(int global_index) {
@@ -85,46 +103,6 @@ int CfsMaterialDb::tnn_to_slot(const std::string& tnn) {
 // --- CFS Error Decoder ---
 
 namespace {
-
-/// Format the [unit, slot] payload observed in `key849` (and likely all
-/// SLOT-level CFS errors) into a human locator. Klipper emits unit as an
-/// integer (1-based) and slot as a single uppercase letter ("A"..."D").
-/// Returns "" when the payload doesn't match the expected shape — caller
-/// then displays the un-augmented message rather than guessing.
-///
-/// Real-world sample (telemetry 2026-05-05):
-///     !! {"code":"key849","values":[1,"B"]}
-///   → " in unit 1 slot B"
-std::string format_unit_slot(const nlohmann::json& values) {
-    if (!values.is_array() || values.size() < 2)
-        return "";
-    if (!values[0].is_number_integer())
-        return "";
-    if (!values[1].is_string())
-        return "";
-    int unit = values[0].get<int>();
-    std::string slot = values[1].get<std::string>();
-    if (unit < 1 || slot.size() != 1)
-        return "";
-    char c = slot[0];
-    if (c < 'A' || c > 'D')
-        return "";
-    return " in unit " + std::to_string(unit) + " slot " + slot;
-}
-
-/// Format unit-level errors where values is `[unit]` or `[unit, ...]`.
-/// We just grab the leading int and ignore tails. Empty string if the
-/// shape doesn't match.
-std::string format_unit_only(const nlohmann::json& values) {
-    if (!values.is_array() || values.empty())
-        return "";
-    if (!values[0].is_number_integer())
-        return "";
-    int unit = values[0].get<int>();
-    if (unit < 1)
-        return "";
-    return " on unit " + std::to_string(unit);
-}
 
 /// True when a per-slot `vender` string carries no occupancy signal. The box
 /// reports one of these for an empty bay; `"none"` (lowercase) is also the
@@ -154,6 +132,72 @@ bool is_vender_sentinel(const std::string& v) {
 /// occupancy for any seated spool independently of what the RFID fields say.
 bool is_material_code_sentinel(const std::string& v) {
     return v.empty() || v == "none" || v == "None" || v == "-1" || v == "unknown";
+}
+
+/// The exclusive upper bound every slot-index check uses: the attached unit
+/// count once a unit-bearing frame has been parsed, the TNN alphabet (4
+/// units × 4 bays) until then. total_slots is 0 until the first such frame
+/// commits it, and that 0 means the box size is UNKNOWN, not "no bays" — the
+/// print-start mapping restore fires on klippy READY, unordered against the
+/// first box frame, and its recovery record is deleted when a send is
+/// refused, so the pre-frame window stays permissive.
+int slot_index_ceiling(int total_slots) {
+    return total_slots > 0 ? total_slots : 16;
+}
+
+/// Bays per CFS box. Both firmwares number a bay (box address - 1) * 4 + local.
+constexpr int kBaysPerBox = 4;
+
+/// Order @p info's units by address and stand an absent unit in for every
+/// address below the highest one that reported nothing, so a bay's global
+/// index stays its firmware slot number whichever boxes are on the bus, and
+/// state keyed by it stays on that bay. total_slots becomes the index span.
+void reserve_address_gaps(AmsSystemInfo& info) {
+    std::sort(info.units.begin(), info.units.end(), [](const AmsUnit& a, const AmsUnit& b) {
+        return a.first_slot_global_index < b.first_slot_global_index;
+    });
+    std::vector<AmsUnit> units;
+    for (auto& unit : info.units) {
+        for (int address = static_cast<int>(units.size()); address < unit.unit_index; ++address) {
+            AmsUnit gap;
+            gap.unit_index = address;
+            gap.name = "T" + std::to_string(address + 1);
+            gap.display_name = "CFS Unit " + std::to_string(address + 1);
+            gap.slot_count = kBaysPerBox;
+            gap.first_slot_global_index = address * kBaysPerBox;
+            gap.topology = PathTopology::HUB;
+            gap.absent = true;
+            for (int local = 0; local < kBaysPerBox; ++local) {
+                SlotInfo bay;
+                bay.slot_index = local;
+                bay.global_index = gap.first_slot_global_index + local;
+                bay.status = SlotStatus::EMPTY;
+                gap.slots.push_back(std::move(bay));
+            }
+            units.push_back(std::move(gap));
+        }
+        units.push_back(std::move(unit));
+    }
+    info.units = std::move(units);
+    info.total_slots = info.units.empty() ? 0
+                                          : info.units.back().first_slot_global_index +
+                                                info.units.back().slot_count;
+}
+
+/// No tool routes through an absent unit's bay: the box is not there to feed it.
+void unmap_absent_bays(AmsSystemInfo& info) {
+    for (auto& unit : info.units) {
+        if (!unit.absent) {
+            continue;
+        }
+        for (auto& bay : unit.slots) {
+            if (bay.mapped_tool >= 0 &&
+                bay.mapped_tool < static_cast<int>(info.tool_to_slot_map.size())) {
+                info.tool_to_slot_map[static_cast<size_t>(bay.mapped_tool)] = -1;
+            }
+            bay.mapped_tool = -1;
+        }
+    }
 }
 
 /// Harvest the material_type codes a box status actually reported, keyed three
@@ -234,203 +278,20 @@ std::string quote_gcode_param(const std::string& value) {
 
 } // namespace
 
-struct CfsErrorEntry {
-    const char* message;
-    const char* hint;
-    AmsAlertLevel level;
-    /// Optional formatter that stringifies the `values` array into a
-    /// human-readable locator (" in unit 1 slot B"). Caller appends the
-    /// result to the friendly message. nullptr = no per-error format
-    /// known yet (no regression — message displays unchanged).
-    std::string (*format_values)(const nlohmann::json&) = nullptr;
-    /// True when the firmware's own `msg` names the real cause and the table
-    /// text cannot (one code, several causes: key843 fires for a busy box AND
-    /// an unreadable tag). lookup_message_with_values then uses the firmware's
-    /// wording as the message whenever the caller has one (#1387).
-    bool prefer_fw_msg = false;
-};
-
-// Format-callback aliases keep the table tidy. Only key849 has been
-// confirmed against real telemetry (`[1,"B"]`); the other SLOT/UNIT
-// codes are wired up to the same formatters on the assumption that
-// Creality uses a consistent shape, but they'll degrade gracefully
-// (no extra locator displayed) if the assumption is wrong.
-static auto* const fmt_unit_slot = &format_unit_slot;
-static auto* const fmt_unit_only = &format_unit_only;
-
-static const std::unordered_map<std::string, CfsErrorEntry> CFS_ERROR_TABLE = {
-    // Klipper-internal errors (not CFS-specific) that we frequently surface to
-    // users. Despite living in the CFS table for now, these are general — the
-    // table predates the broader use case. TODO: rename to KlipperErrorTable.
-    {"key111",
-     {"Pre-heat the extruder first",
-      "Filament can't be loaded below the minimum extrude temperature. Set a hotend target (e.g. "
-      "220°C for PLA, 240°C for PETG), wait for it to reach temperature, then try again",
-      AmsAlertLevel::SYSTEM, nullptr}},
-    {"key298",
-     {"MCU bridge daemon is shut down",
-      "Tap Firmware Restart to recover — on K2 this also bounces the rpi MCU bridge",
-      AmsAlertLevel::SYSTEM, nullptr}},
-    {"key585",
-     {"Move out of range", "The requested position is outside the printer's bounds",
-      AmsAlertLevel::SYSTEM, nullptr}},
-
-    // Motor controller init errors (motor_control_wrapper.so). Typically fire
-    // during CFS bring-up. Users can't fix these directly — power cycle is the
-    // standard remedy. Surfacing them avoids the raw chinglish from Creality
-    // ("Motor set pin restore io status error").
-    {"key800",
-     {"Motor controller error",
-      "A motor IO pin couldn't be restored. Power-cycle the printer to recover",
-      AmsAlertLevel::SYSTEM, nullptr}},
-    {"key801",
-     {"Z motor calibration failed",
-      "Stall detection setup failed for the Z motor — power-cycle to retry", AmsAlertLevel::SYSTEM,
-      nullptr}},
-    {"key802",
-     {"Extruder motor calibration failed",
-      "Stall detection setup failed for the extruder — power-cycle to retry", AmsAlertLevel::SYSTEM,
-      nullptr}},
-    {"key803",
-     {"Motor parameter setup failed",
-      "A motor's parameters couldn't be written. Power-cycle the printer to retry",
-      AmsAlertLevel::SYSTEM, nullptr}},
-
-    {"key831",
-     {"Lost connection to CFS unit", "Check the RS-485 cable between printer and CFS",
-      AmsAlertLevel::SYSTEM, nullptr}},
-    {"key834",
-     {"Invalid parameters sent to CFS", "This may indicate a firmware bug — try restarting",
-      AmsAlertLevel::SYSTEM, nullptr}},
-    {"key835",
-     {"Filament jammed at CFS connector",
-      "Open the CFS lid, check the PTFE tube connection for the stuck slot", AmsAlertLevel::SLOT,
-      fmt_unit_slot}},
-    {"key836",
-     {"Filament jammed between CFS and sensor", "Check the Bowden tube for kinks or debris",
-      AmsAlertLevel::SLOT, fmt_unit_slot}},
-    {"key837",
-     {"Filament jammed before extruder gear",
-      "Check for tangles on the spool and clear the filament path to the printhead",
-      AmsAlertLevel::SLOT, fmt_unit_slot}},
-    {"key838",
-     {"Filament reached extruder but won't feed",
-      "Check for a clog in the hotend or a worn drive gear", AmsAlertLevel::SLOT, fmt_unit_slot}},
-    {"key839",
-     {"No filament detected at CFS extrude position",
-      "The selected slot may be empty or the filament didn't reach the CFS extruder",
-      AmsAlertLevel::SLOT, fmt_unit_slot}},
-    {"key840",
-     {"CFS unit state error", "A unit reported an unexpected state — check its current operation",
-      AmsAlertLevel::UNIT, fmt_unit_only}},
-    {"key841",
-     {"Filament cutter stuck",
-      "The cutter blade didn't return — check for filament wrapped around the cutting mechanism",
-      AmsAlertLevel::SYSTEM, nullptr}},
-    {"key843",
-     {"Can't read filament RFID tag",
-      // The busy-box case (#1387) needs no spool handling at all, so the
-      // re-seat remedy is conditional, not asserted: the firmware msg names
-      // the actual cause.
-      "If it keeps failing once the box is idle, re-seat the spool with the RFID label "
-      "facing the reader",
-      AmsAlertLevel::SLOT, fmt_unit_slot, /*prefer_fw_msg=*/true}},
-    {"key844",
-     {"PTFE tube connection loose", "Re-seat the Bowden tube connector on the CFS unit",
-      AmsAlertLevel::UNIT, fmt_unit_only}},
-    {"key845",
-     {"Nozzle clog detected", "Run a cold pull or replace the nozzle", AmsAlertLevel::SYSTEM,
-      nullptr}},
-    {"key846",
-     {"Empty print detected — feed rate too slow",
-      "CFS feed rate fell below extruder demand. The spool may be empty or jammed",
-      AmsAlertLevel::SYSTEM, nullptr}},
-    {"key847",
-     {"Empty spool — filament wound around hub",
-      "Remove the empty spool and clear wound filament from the CFS hub", AmsAlertLevel::SLOT,
-      fmt_unit_slot}},
-    {"key848",
-     {"Filament snapped inside CFS",
-      "Open the CFS unit and remove the broken filament from the slot", AmsAlertLevel::SLOT,
-      fmt_unit_slot}},
-    {"key849",
-     {"Retract failed — filament stuck in connector",
-      "Manually pull the filament back through the connector", AmsAlertLevel::SLOT, fmt_unit_slot}},
-    {"key850",
-     {"Retract error — multiple connectors triggered",
-      "Check that only one filament path is active", AmsAlertLevel::UNIT, fmt_unit_only}},
-    {"key851",
-     {"Retract didn't reach buffer empty position",
-      "The filament may not have fully retracted — try again or manually pull", AmsAlertLevel::SLOT,
-      fmt_unit_slot}},
-    {"key852",
-     {"Sensor mismatch — check extruder and CFS sensors",
-      "Extruder and CFS disagree on filament state — inspect both sensors", AmsAlertLevel::SYSTEM,
-      nullptr}},
-    {"key853",
-     {"Humidity sensor malfunction",
-      "CFS unit's humidity sensor is not responding — may need service", AmsAlertLevel::UNIT,
-      fmt_unit_only}},
-    {"key854",
-     {"Cutter blade didn't sever filament",
-      "Filament is still present after the cut — the blade may be dull or misaligned",
-      AmsAlertLevel::SYSTEM, nullptr}},
-    {"key855",
-     {"Filament cutter position error",
-      "The cutter is out of alignment — recalibrate with CALIBRATE_CUT_POS", AmsAlertLevel::SYSTEM,
-      nullptr}},
-    {"key856",
-     {"Filament cutter not detected", "Check that the cutter mechanism is properly installed",
-      AmsAlertLevel::SYSTEM, nullptr}},
-    {"key857",
-     {"CFS motor overloaded", "A spool may be tangled or the drive gear is jammed",
-      AmsAlertLevel::UNIT, fmt_unit_only}},
-    {"key858",
-     {"EEPROM error on CFS unit", "CFS unit storage is corrupted — may need firmware reflash",
-      AmsAlertLevel::UNIT, fmt_unit_only}},
-    {"key859",
-     {"Measuring wheel error", "The filament length sensor is malfunctioning", AmsAlertLevel::UNIT,
-      fmt_unit_only}},
-    {"key860",
-     {"Buffer tube problem", "Check the buffer unit on the back of the printer",
-      AmsAlertLevel::SYSTEM, nullptr}},
-    {"key861",
-     {"RFID reader malfunction (left)", "The left RFID reader in this CFS unit may need service",
-      AmsAlertLevel::UNIT, fmt_unit_only}},
-    {"key862",
-     {"RFID reader malfunction (right)", "The right RFID reader in this CFS unit may need service",
-      AmsAlertLevel::UNIT, fmt_unit_only}},
-    {"key863",
-     {"Retract error — filament still detected",
-      "Filament didn't fully retract, may need manual removal", AmsAlertLevel::SLOT,
-      fmt_unit_slot}},
-    {"key864",
-     {"Extrude error — buffer not full", "Filament didn't fill buffer tube during load",
-      AmsAlertLevel::SLOT, fmt_unit_slot}},
-    {"key865",
-     {"Retract error — failed to exit connector", "Filament stuck in connector during unload",
-      AmsAlertLevel::SLOT, fmt_unit_slot}},
-    // key866 is a second "no cutter" variant emitted from the motor driver path
-    // (key856 comes from the box driver). Same root cause, same remedy.
-    {"key866",
-     {"Filament cutter not detected", "Check that the cutter mechanism is properly installed",
-      AmsAlertLevel::SYSTEM, nullptr}},
-};
-
 std::optional<std::pair<const char*, const char*>>
 CfsErrorDecoder::lookup_message(const std::string& key_code) {
-    auto it = CFS_ERROR_TABLE.find(key_code);
-    if (it == CFS_ERROR_TABLE.end())
+    const KlipperErrorEntry* entry = klipper_error_lookup(key_code);
+    if (!entry)
         return std::nullopt;
-    return std::make_pair(it->second.message, it->second.hint);
+    return std::make_pair(entry->message, entry->hint);
 }
 
 std::optional<std::pair<std::string, std::string>> CfsErrorDecoder::lookup_message_with_values(
     const std::string& key_code, const nlohmann::json& values, const std::string& fw_msg) {
-    auto it = CFS_ERROR_TABLE.find(key_code);
-    if (it == CFS_ERROR_TABLE.end())
+    const KlipperErrorEntry* found = klipper_error_lookup(key_code);
+    if (!found)
         return std::nullopt;
-    const auto& entry = it->second;
+    const KlipperErrorEntry& entry = *found;
     // A preferring entry's table text asserts one cause for a code with
     // several; the firmware's msg says which one actually fired (#1387).
     std::string message = (entry.prefer_fw_msg && !fw_msg.empty()) ? fw_msg : entry.message;
@@ -445,11 +306,11 @@ std::optional<std::pair<std::string, std::string>> CfsErrorDecoder::lookup_messa
 
 std::optional<AmsAlert> CfsErrorDecoder::decode(const std::string& key_code, int unit_index,
                                                 int slot_index) {
-    auto it = CFS_ERROR_TABLE.find(key_code);
-    if (it == CFS_ERROR_TABLE.end())
+    const KlipperErrorEntry* found = klipper_error_lookup(key_code);
+    if (!found)
         return std::nullopt;
 
-    const auto& entry = it->second;
+    const KlipperErrorEntry& entry = *found;
     AmsAlert alert;
     alert.message = entry.message;
     alert.hint = entry.hint;
@@ -480,7 +341,7 @@ AmsBackendCfs::AmsBackendCfs(IMoonrakerAPI* api, helix::IMoonrakerClient* client
     system_info_.type = AmsType::CFS;
     system_info_.type_name = "CFS";
     // Starts false and converges on the first full box frame in
-    // handle_status_update — see the convergence comment there for the two
+    // handle_status — see the convergence comment there for the two
     // dialect rules (Fork: verified T<external> command + payload entry;
     // stock: sensor-derived rule, no load command exists).
     system_info_.supports_bypass = false;
@@ -532,6 +393,16 @@ bool AmsBackendCfs::owns_filament_sensor(const std::string& bare_name,
 void AmsBackendCfs::on_started() {
     spdlog::info("[AMS CFS] Backend started — querying initial box state");
 
+    // A start is a new session: the merged stock frames, the first-frame
+    // mirror sort and whether the auto-refill bit has been seen describe the
+    // last one.
+    stock_box_state_ = nlohmann::json::object();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        mirrors_sorted_ = false;
+        endless_spool_enable_reported_ = false;
+    }
+
     // Restore the persisted stock-dialect bypass declaration. The
     // BOX_ENABLE_CFS_PRINT ENABLE=0 sent when it was made survives in the
     // box's own tn_data.json, but nothing firmware-side records that
@@ -554,18 +425,27 @@ void AmsBackendCfs::on_started() {
     // lane_data happens automatically inside load_blocking the first time
     // lane_data is empty (Task 8).
     if (api_) {
-        override_store_ = std::make_unique<helix::ams::FilamentSlotOverrideStore>(
-            api_, "cfs", helix::ams::lane_key_style_for(get_type()));
-        // Do the (potentially 5s) MR DB round-trip OUTSIDE the lock, then swap
-        // in under mutex_. Holding mutex_ during the swap ensures the parse
-        // path sees a coherent map rather than a torn write.
-        auto loaded = override_store_->load_blocking();
-        const auto loaded_count = loaded.size();
+        auto loaded =
+            helix::ams::make_loaded_override_store(api_, "cfs", get_type(), backend_log_tag());
+        if (loaded.store) {
+            helix::ams::ingest_legacy_records(*loaded.store, helix::ams::LegacyLockKeys::LaneData,
+                                              backend_index());
+        }
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            overrides_ = std::move(loaded);
+            override_store_ = std::move(loaded.store);
+            overrides_ = std::move(loaded.overrides);
+            // A persisted four-field composite seeds a baseline the current
+            // two-field fingerprint never matches, which would read as a
+            // swap at the first poll and clear every override on upgrade:
+            // fold each onto the current shape first.
+            for (auto& entry : overrides_) {
+                entry.second.fingerprint =
+                    normalize_legacy_flat_fingerprint(entry.second.fingerprint);
+            }
+            helix::ams::bind_fingerprint_persistence(rfid_tracker_, override_store_.get(),
+                                                     overrides_);
         }
-        spdlog::info("[AMS CFS] Loaded {} slot overrides from filament_slot store", loaded_count);
     }
 
     // Query initial state explicitly since the subscription response may have
@@ -586,17 +466,15 @@ void AmsBackendCfs::on_started() {
             [this, token = lifetime_.token()](const nlohmann::json& response) {
                 if (response.contains("result") && response["result"].contains("status") &&
                     response["result"]["status"].is_object()) {
-                    // Wrap in notify_status_update format for handle_status_update
-                    nlohmann::json notification = {
-                        {"params", nlohmann::json::array({response["result"]["status"]})}};
                     // The response callback runs on the libhv WS thread; the
-                    // notify subscription defers handle_status_update to main,
-                    // and this entry point must match it (handle_status_update
-                    // reads LVGL subjects for the insert-probe gate).
-                    token.defer("AmsBackendCfs::initial_state", [this, notification]() {
-                        handle_status_update(notification);
-                        spdlog::info("[AMS CFS] Initial state loaded");
-                    });
+                    // notify subscription defers handle_status to main, and
+                    // this entry point must match it (handle_status reads
+                    // LVGL subjects for the insert-probe gate).
+                    token.defer("AmsBackendCfs::initial_state",
+                                [this, status = response["result"]["status"]]() {
+                                    handle_status(status);
+                                    spdlog::info("[AMS CFS] Initial state loaded");
+                                });
                 } else {
                     spdlog::warn("[AMS CFS] Initial state query returned unexpected format");
                 }
@@ -659,6 +537,63 @@ static int find_external_slot_index(const nlohmann::json& box_json) {
     return -1;
 }
 
+// The firmware slot number of every bay a Flat payload lists, in payload
+// order. The fork numbers slots globally, (box address - 1) * 4 + local, and
+// that number IS our bay's global index, so a box missing from the chain
+// leaves its indices unused rather than shifting the boxes behind it. An entry
+// without an index takes the count of bays before it.
+static std::vector<int> flat_bay_indices(const nlohmann::json& box_json) {
+    std::vector<int> indices;
+    auto it = box_json.find("slots");
+    if (it == box_json.end() || !it->is_array()) {
+        return indices;
+    }
+    for (const auto& slot_json : *it) {
+        if (!slot_json.is_object() || helix::json_util::safe_bool(slot_json, "external", false)) {
+            continue;
+        }
+        const int index =
+            helix::json_util::safe_int(slot_json, "index", static_cast<int>(indices.size()));
+        if (index >= 0) {
+            indices.push_back(index);
+        }
+    }
+    return indices;
+}
+
+static bool is_flat_bay(const std::vector<int>& bays, int index) {
+    return index >= 0 && std::find(bays.begin(), bays.end(), index) != bays.end();
+}
+
+// A Fork bay no box reported. Sending it would name a slot box.py has not
+// registered.
+static AmsError firmware_slot_unknown(int bay) {
+    return AmsError(AmsResult::INVALID_SLOT,
+                    "Slot " + std::to_string(bay) + " not known to the box firmware",
+                    lv_tr("Invalid tool/slot"),
+                    lv_tr("It has not reported its slots yet. Try again in a moment."), bay);
+}
+
+void AmsBackendCfs::make_bay_record_locked(int bay, helix::ams::FilamentSlotOverride& record) {
+    record.external_mirror = false;
+    if (!override_store_) {
+        return;
+    }
+    override_store_->save_async(
+        bay, record, [tag = backend_log_tag(), bay](bool ok, const std::string& err) {
+            if (!ok) {
+                spdlog::warn("{} unmarking the record at bay {} failed: {}", tag, bay, err);
+            }
+        });
+}
+
+int AmsBackendCfs::firmware_slot_locked(int bay) const {
+    if (system_info_.slot_absent(bay)) {
+        return -1;
+    }
+    return macro_variant_ != CfsMacroVariant::Fork || system_info_.slot_exists(bay) ? bay : -1;
+}
+
 AmsSystemInfo
 AmsBackendCfs::parse_stock_box_status(const nlohmann::json& box_json,
                                       const std::unordered_map<int, std::string>* own_labels) {
@@ -673,7 +608,7 @@ AmsBackendCfs::parse_stock_box_status(const nlohmann::json& box_json,
     //
     // Top-level box fields (auto_refill, filament, enable, filament_useup) are
     // documented as JSON ints, unlike the per-unit scalars further down, which are
-    // documented as strings (CREALITY_K2_SUPPORT.md § "Moonraker Object: box").
+    // documented as strings (CREALITY_CFS_K2_INTERNALS.md § "Moonraker Object: box").
     // safe_int is therefore belt-and-braces here rather than a known-shape fix:
     // .value("auto_refill", 0) still throws type_error.302 on a null or a string,
     // and that throw escapes parse_box_status and drops the entire box frame.
@@ -687,7 +622,7 @@ AmsBackendCfs::parse_stock_box_status(const nlohmann::json& box_json,
     // loaded" truth — it retains a lane number even when nothing is loaded,
     // producing phantom "loaded from lane N". The authoritative loaded signal
     // is the toolhead sensor (filament_switch_sensor filament_sensor), handled
-    // in handle_status_update. Leave filament_loaded false here.
+    // in handle_status. Leave filament_loaded false here.
     info.filament_loaded = false;
 
     // Runout signal: box.filament_useup == 1 means no filament at the box gate.
@@ -786,7 +721,7 @@ AmsBackendCfs::parse_stock_box_status(const nlohmann::json& box_json,
 
         const auto& unit_json = box_json[key];
         // safe_string, not .value(): the per-unit scalars below are documented as
-        // strings (CREALITY_K2_SUPPORT.md § "Per-Unit Fields"), but .value() with a
+        // strings (CREALITY_CFS_K2_INTERNALS.md § "Per-Unit Fields"), but .value() with a
         // string default THROWS type_error.302 on a JSON null or a numeric value,
         // and that throw escapes parse_box_status and drops the whole box frame.
         // safe_string returns the supplied default for null/wrong-type WITHOUT
@@ -808,6 +743,9 @@ AmsBackendCfs::parse_stock_box_status(const nlohmann::json& box_json,
         unit.first_slot_global_index = (n - 1) * 4;
         unit.connected = true;
         unit.topology = PathTopology::HUB;
+        // Every box feeds the printer's one extruder through the CFS hub, so all
+        // of them share toolhead 0; the T<n> numbers are routes into it.
+        unit.hub_tool_label = 0;
 
         // Firmware version and serial
         std::string ver = helix::json_util::safe_string(unit_json, "version", "-1");
@@ -830,16 +768,8 @@ AmsBackendCfs::parse_stock_box_status(const nlohmann::json& box_json,
             helix::json_util::safe_string(unit_json, "dry_and_humidity", "None");
         if (temp_str != "None" && temp_str != "-1" && humid_str != "None" && humid_str != "-1") {
             EnvironmentData env;
-            try {
-                env.temperature_c = std::stof(temp_str);
-            } catch (...) {
-                env.temperature_c = 0.0f;
-            }
-            try {
-                env.humidity_pct = std::stof(humid_str);
-            } catch (...) {
-                env.humidity_pct = 0.0f;
-            }
+            env.temperature_c = helix::text_io::parse_leading<float>(temp_str).value_or(0.0f);
+            env.humidity_pct = helix::text_io::parse_leading<float>(humid_str).value_or(0.0f);
             env.has_humidity = true;
             unit.environment = env;
         }
@@ -848,7 +778,7 @@ AmsBackendCfs::parse_stock_box_status(const nlohmann::json& box_json,
         //
         // These four keys are array[4] on a connected unit, but a unit that drops
         // out reports the SCALAR sentinel "-1"/"None" for the very same keys
-        // (CREALITY_K2_SUPPORT.md § "Disconnected Units"; the sibling
+        // (CREALITY_CFS_K2_INTERNALS.md § "Disconnected Units"; the sibling
         // `filament_rack` object is documented with exactly that scalar form).
         // .value(key, json::array()) does not throw on a scalar — it round-trips
         // through get<json> and hands back the string — but a string json has
@@ -933,11 +863,8 @@ AmsBackendCfs::parse_stock_box_status(const nlohmann::json& box_json,
                 remain_str = remain_arr[i].get<std::string>();
             }
             if (remain_str != "-1" && remain_str != "None") {
-                try {
-                    slot.remaining_length_m = std::stof(remain_str);
-                } catch (...) {
-                    slot.remaining_length_m = 0.0f;
-                }
+                slot.remaining_length_m =
+                    helix::text_io::parse_leading<float>(remain_str).value_or(0.0f);
             }
 
             // Presence, in priority order. Each firmware field is used only
@@ -995,7 +922,8 @@ AmsBackendCfs::parse_stock_box_status(const nlohmann::json& box_json,
             //
             // An override never promotes presence. It supplies IDENTITY only —
             // a bay that reads EMPTY here stays EMPTY, and the retained
-            // identity is what ui_ams_slot.cpp ghosts (see apply_overrides).
+            // identity is what ui_ams_slot.cpp ghosts (see apply_resolved_lane,
+            // which takes presence from a sensed reading and nothing else).
             const bool remain_present = slot.remaining_length_m > 0.0f;
             bool code_is_own_label = false;
             if (own_labels != nullptr) {
@@ -1012,7 +940,8 @@ AmsBackendCfs::parse_stock_box_status(const nlohmann::json& box_json,
                 // Scrub the latched display fields parse populated so a removed
                 // spool's stale color/material doesn't render on the empty bay.
                 // This resets only PARSED firmware fields — not the persistent
-                // user override, which apply_overrides/clear_override_locked own.
+                // user declaration, which the lane sources and
+                // clear_override_locked own.
                 slot.brand.clear();
                 slot.material.clear();
                 slot.color_name.clear();
@@ -1041,8 +970,8 @@ AmsBackendCfs::parse_stock_box_status(const nlohmann::json& box_json,
         }
 
         info.units.push_back(std::move(unit));
-        info.total_slots += 4;
     }
+    reserve_address_gaps(info);
 
     // Publish both directions from the one source the box actually states —
     // box.map. identity_fallback=true keeps the historical 1:1 default for
@@ -1050,6 +979,7 @@ AmsBackendCfs::parse_stock_box_status(const nlohmann::json& box_json,
     // `map` key at all), so a box that has never been remapped parses exactly
     // as it always did.
     sync_tool_map_from_forward(info, /*identity_fallback=*/true);
+    unmap_absent_bays(info);
 
     // current_tool must name the tool that ROUTES THROUGH the seated lane, not
     // the lane index: with T0 remapped onto lane 2 the print-status color dot
@@ -1078,28 +1008,52 @@ AmsBackendCfs::parse_stock_box_status(const nlohmann::json& box_json,
 
 // --- Flat schema (community Kalico box.py reimplementations) ---------------
 
-// Parse a conventional "#RRGGBB" (or bare "RRGGBB") into 0xRRGGBB.
+// The flat schema's colour, as a SlotInfo value.
 //
-// NOT CfsMaterialDb::parse_color: that one owns Creality's leading-zero
-// "0RRGGBB" form and its "-1"/"None" sentinels. The flat schema uses the
-// ordinary web spelling, and marks "no color" with an empty string (the
-// external-spool entry). Anything unparseable — wrong length, non-hex digits,
-// empty — yields the default slot color rather than a partial read, so a
-// malformed field renders as "unknown color" instead of a plausible wrong one.
+// The grammar is helix::ams::read_lane_color's, which is every lane-shaped
+// producer's, so "#RRGGBB", a bare "RRGGBB", "#RGB", an "0x" prefix and the
+// 8-digit alpha form all mean here what they mean everywhere else. NOT
+// CfsMaterialDb::parse_color: that one owns Creality's leading-zero "0RRGGBB"
+// form and its "-1"/"None" sentinels, which are this firmware's alone.
+//
+// Both of the helper's non-colour answers land on AMS_DEFAULT_SLOT_COLOR,
+// because SlotInfo has no other way to say "no colour": the external-spool
+// entry writes the key empty (Cleared) and a malformed value is refused rather
+// than half-read (NoReading), and a bay renders as "unknown colour" for either.
 static uint32_t parse_flat_slot_color(const std::string& raw) {
-    std::string s = raw;
-    if (!s.empty() && s[0] == '#') {
-        s.erase(0, 1);
+    const auto reading = helix::ams::read_lane_color(raw);
+    return reading.kind == helix::ams::ColorReadingKind::Observed ? reading.rgb
+                                                                  : AMS_DEFAULT_SLOT_COLOR;
+}
+
+// The flat schema's box-gate presence reading, or nullopt when this frame
+// published none.
+//
+// filament_detected is the flat analogue of stock's filament_useup, inverted:
+// true means filament is at the box gate. Like every scalar in that object it
+// is nullable (the sibling filament_sensor_error ships as JSON null until the
+// sensor reads), and Moonraker subscribes `box: null`, so a delta may omit the
+// key entirely. Both cases mean "no reading", which is a different answer from
+// false — false is a runout. Returning an optional keeps that distinction at
+// the one place it is decided, so the parse and the merge gate in
+// handle_status cannot drift apart on it.
+static std::optional<bool> flat_gate_filament_present(const nlohmann::json& box_json) {
+    auto it = box_json.find("filament_detected");
+    if (it == box_json.end() || !it->is_boolean()) {
+        return std::nullopt;
     }
-    if (s.size() != 6) {
-        return AMS_DEFAULT_SLOT_COLOR;
-    }
-    for (char c : s) {
-        if (std::isxdigit(static_cast<unsigned char>(c)) == 0) {
-            return AMS_DEFAULT_SLOT_COLOR;
-        }
-    }
-    return static_cast<uint32_t>(std::stoul(s, nullptr, 16));
+    return it->get<bool>();
+}
+
+// The literal string "None" means ABSENT on this module's text fields, and it
+// is not a chosen value: the module builds each profile entry with
+// `str(value.get(key, ""))`, so a key that is present but JSON null
+// stringifies to Python's "None" rather than falling back to the "" default.
+// Every text field can therefore arrive as "None"; surfacing it would put a
+// spool named "None" made of "None" on screen.
+static std::string flat_text_field(const nlohmann::json& slot_json, const char* key) {
+    std::string v = helix::json_util::safe_string(slot_json, key);
+    return v == "None" ? std::string{} : v;
 }
 
 AmsSystemInfo AmsBackendCfs::parse_flat_box_status(const nlohmann::json& box_json) {
@@ -1110,7 +1064,7 @@ AmsSystemInfo AmsBackendCfs::parse_flat_box_status(const nlohmann::json& box_jso
     info.supports_purge = true;
 
     // Bypass on a Flat payload is decided at convergence in
-    // handle_status_update, not here: the holder entry is observable, but only
+    // handle_status, not here: the holder entry is observable, but only
     // the identified Fork dialect has a verified command for it (`T<external>`
     // is registered by the port's own box.py; BOX_UNLOAD's external branch
     // ejects it). This static parser cannot see the latched dialect, so it
@@ -1125,12 +1079,24 @@ AmsSystemInfo AmsBackendCfs::parse_flat_box_status(const nlohmann::json& box_jso
     info.endless_spool_enabled =
         helix::json_util::safe_bool(box_json, "runout_swap_enabled", false);
 
-    // `runout` is null while idle and carries a slot descriptor once tripped;
-    // presence of any non-null value is the runout signal. filament_loaded is
-    // left false here for the same reason as the stock parse — the toolhead
-    // sensor branch in handle_status_update is its sole writer.
-    auto runout_it = box_json.find("runout");
-    info.filament_runout = runout_it != box_json.end() && !runout_it->is_null();
+    // Runout is the box gate's own presence boolean, negated. No reading (key
+    // absent, or null before the sensor's first read) is not a runout, and the
+    // merge gate in handle_status tests the same optional so such a
+    // frame leaves the latch as it was.
+    //
+    // `runout` is NOT a runout signal. It is the runout-SWAP plan — the
+    // `chain` of fallback slots and the `loaded_slot` they back — which the
+    // module publishes whenever a lane is loaded, including on the
+    // load-completion frame of a wholly successful load. Treating its presence
+    // as an event arms a runout episode against the lane that just loaded, and
+    // that episode drops the lane's remembered Spoolman link the moment the bay
+    // next reads empty. parse_flat_runout_edges() reads it as the backup
+    // relation instead.
+    //
+    // filament_loaded is left false for the same reason as the stock parse —
+    // the toolhead sensor branch in handle_status is its sole writer.
+    const std::optional<bool> gate_present = flat_gate_filament_present(box_json);
+    info.filament_runout = gate_present.has_value() && !*gate_present;
     info.filament_loaded = false;
 
     // Per-material recommended temps. The fork publishes a materials table the
@@ -1153,13 +1119,13 @@ AmsSystemInfo AmsBackendCfs::parse_flat_box_status(const nlohmann::json& box_jso
         }
     }
 
+    // What every box shares: the payload states one driver, one environment
+    // reading and one feed path for the whole chain.
     AmsUnit unit;
-    unit.unit_index = 0;
-    unit.name = "CFS";
-    unit.display_name = "CFS Unit 1";
-    unit.first_slot_global_index = 0;
     unit.connected = helix::json_util::safe_bool(box_json, "driver_ready", true);
     unit.topology = PathTopology::HUB;
+    unit.hub_tool_label = 0; // every box feeds the one extruder
+    unit.slot_count = kBaysPerBox;
 
     // Environment. Unlike the stock schema these are JSON numbers, not strings,
     // but safe_float accepts either — so a firmware revision that switches
@@ -1202,9 +1168,14 @@ AmsSystemInfo AmsBackendCfs::parse_flat_box_status(const nlohmann::json& box_jso
     }
 
     // Slots. Each entry is self-describing — no parallel arrays, no material
-    // code table, no TNN letter math.
+    // code table, no TNN letter math. Each bay is filed under the payload's own
+    // index, the firmware slot number, in the unit for its box address; a bay
+    // a present box did not list reads EMPTY.
+    std::map<int, AmsUnit> boxes;
+    const auto bay_indices = flat_bay_indices(box_json);
     auto slots_it = box_json.find("slots");
     if (slots_it != box_json.end() && slots_it->is_array()) {
+        size_t bay_ordinal = 0;
         for (const auto& slot_json : *slots_it) {
             // A non-object entry (a "-1" sentinel, say) is skipped rather than
             // aborting the frame — same discipline as the stock array_field
@@ -1217,40 +1188,40 @@ AmsSystemInfo AmsBackendCfs::parse_flat_box_status(const nlohmann::json& box_jso
             if (helix::json_util::safe_bool(slot_json, "external", false)) {
                 continue;
             }
-
-            SlotInfo slot;
-            // Index by VECTOR POSITION, not the payload's `index`. Downstream
-            // slot-widget creation walks this vector and treats position as the
-            // bay, so a sparse or out-of-order payload must not leave holes. On
-            // every payload seen so far the two agree; warn if they ever stop,
-            // because a silent relabel would put a spool on the wrong bay.
-            slot.slot_index = static_cast<int>(unit.slots.size());
-            slot.global_index = slot.slot_index;
-            if (int reported = helix::json_util::safe_int(slot_json, "index", slot.slot_index);
-                reported != slot.slot_index) {
-                spdlog::warn("[AMS CFS] Flat slot reports index {} at position {} — "
-                             "using position; check for sparse or reordered slots",
-                             reported, slot.slot_index);
+            // flat_bay_indices() walked these same entries with the same skips.
+            if (bay_ordinal >= bay_indices.size()) {
+                break;
             }
+            const int index = bay_indices[bay_ordinal++];
+            const int address = index / kBaysPerBox;
+
+            auto [box_it, created] = boxes.try_emplace(address, unit);
+            AmsUnit& box = box_it->second;
+            if (created) {
+                box.unit_index = address;
+                box.name = "T" + std::to_string(address + 1);
+                box.display_name = "CFS Unit " + std::to_string(address + 1);
+                box.first_slot_global_index = address * kBaysPerBox;
+                for (int local = 0; local < kBaysPerBox; ++local) {
+                    SlotInfo empty;
+                    empty.slot_index = local;
+                    empty.global_index = box.first_slot_global_index + local;
+                    empty.status = SlotStatus::EMPTY;
+                    box.slots.push_back(std::move(empty));
+                }
+            }
+
+            SlotInfo& slot = box.slots[static_cast<size_t>(index % kBaysPerBox)];
             // mapped_tool comes from the sync pass at the end of this function,
             // as in the stock parse — one writer for both directions. The flat
             // schema states no map of its own, so that pass hands every lane
-            // the 1:1 default this line used to write.
+            // the 1:1 default, which is box.py's own T<n> = slot n.
 
-            // The literal string "None" means ABSENT on every one of these
-            // fields, and it is not a chosen value: the module builds each
-            // profile entry with `str(value.get(key, ""))`, so a key that is
-            // present but JSON null stringifies to Python's "None" rather than
-            // falling back to the "" default. Every text field can therefore
-            // arrive as "None", not just brand — surfacing it would put a spool
-            // named "None" made of "None" on screen.
-            auto text_field = [&slot_json](const char* key) -> std::string {
-                std::string v = helix::json_util::safe_string(slot_json, key);
-                return v == "None" ? std::string{} : v;
-            };
-            slot.material = text_field("material");
-            slot.brand = text_field("brand");
-            slot.spool_name = text_field("name");
+            // text fields: flat_text_field above owns the "None"-means-absent
+            // rule this module's null-to-"None" stringification creates.
+            slot.material = flat_text_field(slot_json, "material");
+            slot.brand = flat_text_field(slot_json, "brand");
+            slot.spool_name = flat_text_field(slot_json, "name");
             // Colors need no such guard: "None" is not six hex digits, so
             // parse_flat_slot_color already falls back to the default.
             slot.color_rgb =
@@ -1269,21 +1240,27 @@ AmsSystemInfo AmsBackendCfs::parse_flat_box_status(const nlohmann::json& box_jso
             const bool loaded = helix::json_util::safe_bool(slot_json, "loaded", false);
             slot.status =
                 loaded ? SlotStatus::LOADED : (present ? SlotStatus::AVAILABLE : SlotStatus::EMPTY);
-
-            unit.slots.push_back(std::move(slot));
         }
     }
 
-    unit.slot_count = static_cast<int>(unit.slots.size());
-    info.total_slots = unit.slot_count;
+    // One environment reading covers the chain; giving it to every box would
+    // show the same sensor as several zones.
+    bool environment_placed = false;
+    for (auto& [address, box] : boxes) {
+        if (environment_placed) {
+            box.environment.reset();
+        }
+        environment_placed = environment_placed || box.environment.has_value();
+        info.units.push_back(std::move(box));
+    }
+    reserve_address_gaps(info);
 
-    // loaded_slot is -1 when nothing is loaded. It indexes the same slots[]
-    // array — including the external entry, which is not in our vector. A bay
-    // index lands in the bounds branch; the external index maps to the -2
-    // bypass sentinel (the same convention AFC and Happy Hare use, and what
-    // AmsState's bypass subjects key off).
+    // loaded_slot is -1 when nothing is loaded. It is a firmware slot number,
+    // so a listed bay is its own index; the external entry, which is not a
+    // bay, maps to the -2 bypass sentinel (the same convention AFC and Happy
+    // Hare use, and what AmsState's bypass subjects key off).
     int loaded_slot = helix::json_util::safe_int(box_json, "loaded_slot", -1);
-    if (loaded_slot >= 0 && loaded_slot < unit.slot_count) {
+    if (is_flat_bay(bay_indices, loaded_slot)) {
         info.current_slot = loaded_slot;
         info.current_tool = loaded_slot;
     } else if (loaded_slot >= 0 && loaded_slot == find_external_slot_index(box_json)) {
@@ -1291,14 +1268,42 @@ AmsSystemInfo AmsBackendCfs::parse_flat_box_status(const nlohmann::json& box_jso
         info.current_tool = -2;
     }
 
-    info.units.push_back(std::move(unit));
-
     // Same single-writer pass as the stock parse. The flat payload carries no
     // `map`, so tool_to_slot_map is empty here and identity_fallback supplies
     // the 1:1 default in BOTH directions rather than in one of them.
     sync_tool_map_from_forward(info, /*identity_fallback=*/true);
+    unmap_absent_bays(info);
 
     return info;
+}
+
+std::optional<std::vector<int>>
+AmsBackendCfs::parse_flat_runout_edges(const nlohmann::json& box_json) {
+    // box.py's _runout_status builds `chain` from every other present slot with
+    // identical material and colour, in slot order, and runout_recovery swaps to
+    // chain[0]; the tail is not a succession, so the head is the one edge
+    // stated. null means nothing is loaded: no plan.
+    auto runout_it = box_json.find("runout");
+    if (runout_it == box_json.end() || !runout_it->is_object()) {
+        return std::nullopt;
+    }
+    auto chain_it = runout_it->find("chain");
+    if (chain_it == runout_it->end() || !chain_it->is_array()) {
+        return std::nullopt;
+    }
+    const auto bays = flat_bay_indices(box_json);
+    const int span = bays.empty() ? 0 : (*std::max_element(bays.begin(), bays.end()) + 1);
+    std::vector<int> edges(static_cast<size_t>(span), -1);
+    if (chain_it->empty()) {
+        return edges;
+    }
+    const int source = helix::json_util::safe_int(*runout_it, "loaded_slot", -1);
+    const int target = chain_it->front().is_number_integer() ? chain_it->front().get<int>() : -1;
+    if (!is_flat_bay(bays, source) || !is_flat_bay(bays, target) || target == source) {
+        return std::nullopt;
+    }
+    edges[static_cast<size_t>(source)] = target;
+    return edges;
 }
 
 // Canonicalize per-slot RFID data into a fingerprint string used by
@@ -1350,33 +1355,98 @@ static std::string build_cfs_slot_uid(const nlohmann::json& unit_json, int local
     return mat + "|" + color;
 }
 
-// --- handle_status_update ---
+// Join the flat schema's evidence fields into that fingerprint's spelling.
+// The slot spec pins a fingerprint to exactly the fields an insert is judged
+// on, material and colour; brand and the product line are presentation, not
+// identity, so two readings that differ only in them are the same spool.
+// Both consumers must agree on it: the payload feed reads what the box
+// reports, and the fork writeback guard reads what _BOX_SLOT_SET pushed, so
+// the echo of our own write classifies as OwnWriteEcho rather than a swap.
+static std::string compose_cfs_flat_uid(const std::string& material, bool has_color,
+                                        uint32_t color_rgb) {
+    if (material.empty() && !has_color)
+        return "";
+    char hex[8];
+    std::snprintf(hex, sizeof(hex), "%06X", color_rgb & 0xFFFFFFu);
+    return material + "|" + (has_color ? hex : "");
+}
 
-void AmsBackendCfs::handle_status_update(const nlohmann::json& notification) {
-    // notify_status_update format: {"method": "notify_status_update", "params": [{...}, timestamp]}
-    if (!notification.contains("params") || !notification["params"].is_array() ||
-        notification["params"].empty()) {
-        return;
+std::string AmsBackendCfs::normalize_legacy_flat_fingerprint(const std::string& stored) {
+    // "material|brand|product|HEX" from a build whose composite counted brand
+    // and the product line folds to the two-field shape. Anything else is
+    // already current or a value no build of ours wrote: left as found.
+    std::string head;
+    size_t start = 0;
+    for (int pipes = 0; pipes < 3; ++pipes) {
+        const auto pipe = stored.find('|', start);
+        if (pipe == std::string::npos) {
+            return stored;
+        }
+        if (pipes == 0) {
+            head = stored.substr(0, pipe);
+        }
+        start = pipe + 1;
     }
-
-    const auto& params = notification["params"][0];
-    if (!params.is_object()) {
-        return;
+    if (stored.find('|', start) != std::string::npos) {
+        return stored;
     }
+    return head + "|" + stored.substr(start);
+}
 
+// The flat schema's per-slot fingerprint, fed to the same
+// check_hardware_event_clear path as the stock composite above. It carries
+// exactly the insert rule's evidence fields, material and colour (see
+// compose_cfs_flat_uid); spoolman_id is excluded because it is a binding,
+// not a tag property, and reconcile_lane_binding owns its rules. Both empty
+// reads as no signal: an occupied bay whose tag did not read is not a
+// fingerprint, for the same reason a stock sentinel read is not (see
+// build_cfs_slot_uid): it must not overwrite the baseline and mask the swap
+// the next good read reports.
+static std::string build_cfs_flat_slot_uid(const nlohmann::json& slot_json) {
+    const auto color =
+        helix::ams::read_lane_color(helix::json_util::safe_string(slot_json, "color"));
+    return compose_cfs_flat_uid(flat_text_field(slot_json, "material"),
+                                color.kind == helix::ams::ColorReadingKind::Observed, color.rgb);
+}
+
+// --- handle_status ---
+
+/// What one full `box` frame carries from the parse to the locked steps that
+/// apply it.
+struct AmsBackendCfs::BoxFrame {
+    const nlohmann::json* box = nullptr;
+    bool is_flat = false;
+    bool has_unit_data = false;
+    bool print_holds_machine = false;
+    /// unit number -> bay bitmask of the inserts to probe once mutex_ is
+    /// released.
+    std::map<int, int>* insert_probes = nullptr;
+    /// parse_box_status of this frame.
+    AmsSystemInfo new_info;
+    /// The external-holder slot index of a flat payload, -1 otherwise.
+    int external_index = -1;
+    ObservedMaterialCodes observed_codes;
+    /// Per-bay RFID fingerprints of every unit this frame described. A bay it
+    /// did not describe is absent, and an empty fingerprint is a no-op in
+    /// check_hardware_event_clear.
+    std::unordered_map<int, std::string> observed_uids;
+};
+
+void AmsBackendCfs::handle_status(const nlohmann::json& params) {
     bool changed = false;
     // unit number -> bay bitmask, filled under mutex_ and dispatched after it.
     std::map<int, int> insert_probes;
 
-    // Print-lifecycle input for the insert-probe gate below. handle_status_update
-    // runs on the main thread (the subscription defers every notify there, and
-    // on_started's initial-state query response defers through the same token), so a
+    // Print-lifecycle input for the insert-probe gate. handle_status runs on the
+    // main thread (the subscription defers every notify there, and on_started's
+    // initial-state query response defers through the same token), so a
     // synchronous subject read is safe. A null api_ (unit-test rigs, cold boot)
     // means the lifecycle is unknown, treated as not holding the machine,
     // mirroring the filament-op guard's null path in ams_subscription_backend.
     bool print_holds_machine = false;
     if (api_) {
-        print_holds_machine = job_holds_machine(api_->printer_state().get_print_lifecycle());
+        print_holds_machine =
+            job_holds_machine(api_->printer_state().print_state().get_print_lifecycle());
     }
 
     // Drop the previous frame's derived LOADED stamp before anything below
@@ -1389,366 +1459,9 @@ void AmsBackendCfs::handle_status_update(const nlohmann::json& notification) {
     }
 
     if (params.contains("box") && params["box"].is_object()) {
-        const auto& box = params["box"];
-        spdlog::debug("[AMS CFS] Received box data with {} keys", box.size());
-
-        // Log box.filament_useup transitions with box-local context. Decoded
-        // (2026-06-18, live K2 runout->reload): runout / path-empty signal —
-        // 1 when no filament at the box gate (pre-load, runout), 0 when loaded
-        // and feeding. Reads only the notification's own fields — no
-        // system_info_ access, so no lock needed here. No UI effect yet.
-        if (box.contains("filament_useup") && box["filament_useup"].is_number()) {
-            int useup = box["filament_useup"].get<int>();
-            if (useup != last_filament_useup_) {
-                // safe_int, not .value(): spdlog evaluates its arguments before it
-                // consults the log level, so a null or wrong-typed "filament"/
-                // "auto_refill"/"enable" would throw type_error.302 out of
-                // handle_status_update in a release build too, not just under -vv.
-                // NB these are the TOP-LEVEL box fields, documented as ints — not
-                // the same-named per-unit "filament" letter, which is a string.
-                spdlog::debug("[AMS CFS] filament_useup {} -> {} (box.filament={}, "
-                              "auto_refill={}, enable={})",
-                              last_filament_useup_, useup,
-                              helix::json_util::safe_int(box, "filament", -1),
-                              helix::json_util::safe_int(box, "auto_refill", -1),
-                              helix::json_util::safe_int(box, "enable", -1));
-                last_filament_useup_ = useup;
-            }
-        }
-
-        // Distinguish meaningful updates from noise (e.g., just measuring_wheel).
-        // Full updates have "filament"/"map". Unit updates have "T1"/"T2"/etc.
-        bool has_top_level = box.contains("filament") || box.contains("map");
-        bool has_unit_data =
-            box.contains("T1") || box.contains("T2") || box.contains("T3") || box.contains("T4");
-        // Flat schema: a `slots` array is the payload that carries everything —
-        // there is no top-level/per-unit split to reason about, so its presence
-        // alone marks a full update.
-        const bool is_flat = detect_schema(box) == CfsSchema::Flat;
-        bool is_full_update = has_top_level || has_unit_data || is_flat;
-
-        if (is_flat && schema_ != CfsSchema::Flat) {
-            schema_ = CfsSchema::Flat;
-            // Select the command dialect from the explicit API version, not by
-            // assuming every `slots[]` payload implements the same commands.
-            if (detect_fork_dialect(box)) {
-                macro_variant_ = CfsMacroVariant::Fork;
-                spdlog::info("[AMS CFS] Flat box schema + fork dialect detected "
-                             "(community box.py, API v{}) — Fork control enabled",
-                             helix::json_util::safe_int(box, "api_version", 0));
-            } else {
-                spdlog::warn("[AMS CFS] Flat box schema without a supported API version — "
-                             "slot display active, control paths disabled (no verified "
-                             "command dialect)");
-            }
-        }
-
-        if (is_full_update) {
-            // Snapshot under the lock: pushed_material_codes_ is written by
-            // push_slot_identity_to_firmware on the UI thread, and the parse
-            // itself deliberately runs before the lock taken below. At most one
-            // entry per bay (16), so the copy is not worth a second lock scope
-            // further down.
-            std::unordered_map<int, std::string> own_labels;
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                own_labels = pushed_material_codes_;
-            }
-            auto new_info = parse_box_status(box, &own_labels);
-
-            // Payload reads happen before the lock; the values converge under
-            // it with everything else below.
-            const int external_index = is_flat ? find_external_slot_index(box) : -1;
-
-            // Firmware-sourced mapping tick. box.map is what the CFS itself
-            // reports — verified on a live K2: BOX_MODIFY_TN T1A=T1B echoed back
-            // as a single-key delta in ~0.7s. This is what lets a remap restore
-            // be confirmed against the box rather than against the optimistic
-            // write set_tool_mapping() makes before sending (#1270). Bumped here
-            // rather than inside parse_box_status because that parser is static.
-            if (box.contains("map") && box["map"].is_object()) {
-                ++firmware_map_generation_;
-            }
-
-            // Harvest the material_type codes this frame reported, for the
-            // identity writeback's lookup chain (push_slot_identity_to_
-            // firmware). Runs on the same pre-lock walk as the fingerprint
-            // pass below; the merge itself happens under mutex_.
-            const auto observed_codes =
-                collect_observed_material_codes(box, *FilamentCatalog::load_codes_cached("cfs"));
-
-            // Build observed per-slot RFID fingerprints for every unit present
-            // in this notification. Slots that weren't included stay empty
-            // (observed_uids stays at default ""), and empty-UID observations
-            // are a no-op inside check_hardware_event_clear (no baseline
-            // update, no clear) — exactly the behavior we want for incremental
-            // updates that only touch a subset of units.
-            std::unordered_map<int, std::string> observed_uids;
-            for (int n = 1; n <= 4; ++n) {
-                std::string key = "T" + std::to_string(n);
-                if (!box.contains(key) || !box[key].is_object())
-                    continue;
-                const auto& unit_json = box[key];
-                // safe_string for the same reason as the parse_box_status unit
-                // loop: a null/wrong-typed `state` must degrade to "disconnected",
-                // not throw out of handle_status_update.
-                std::string state = helix::json_util::safe_string(unit_json, "state", "None");
-                if (state == "None" || state == "-1")
-                    continue;
-                for (int i = 0; i < 4; ++i) {
-                    int global_idx = (n - 1) * 4 + i;
-                    observed_uids[global_idx] = build_cfs_slot_uid(unit_json, i);
-                }
-            }
-
-            std::lock_guard<std::mutex> lock(mutex_);
-
-            // Insert-if-absent so a key's first-observed code stays stable.
-            for (const auto& [k, v] : observed_codes.by_id)
-                observed_material_id_codes_.emplace(k, v);
-            for (const auto& [k, v] : observed_codes.by_brand_type)
-                observed_material_codes_.emplace(k, v);
-            for (const auto& [k, v] : observed_codes.by_type)
-                observed_material_type_codes_.emplace(k, v);
-
-            if (!new_info.units.empty()) {
-                system_info_.units = std::move(new_info.units);
-                system_info_.total_slots = new_info.total_slots;
-                system_info_.endless_spool_enabled = new_info.endless_spool_enabled;
-                system_info_.tool_to_slot_map = std::move(new_info.tool_to_slot_map);
-                // Presence-gated like filament_runout below: a stock delta
-                // frame carries a changed T1 subtree but no same_material key
-                // (the field rides full frames), and copying the parse's empty
-                // defaults would silently revert OnWithoutBackup to plain On
-                // until the firmware re-sends the list. Copy the grouping only
-                // when this frame actually carried the field. A flat frame is
-                // the one deliberate exception: it is a schema transition, not
-                // a delta omission, and the flat dialect never sends
-                // same_material - retaining stock-era grouping would answer
-                // from a dead schema forever, so it is cleared.
-                if (is_flat) {
-                    system_info_.endless_spool_group_ids.clear();
-                    system_info_.endless_spool_groups_reported = false;
-                } else if (new_info.endless_spool_groups_reported) {
-                    system_info_.endless_spool_group_ids =
-                        std::move(new_info.endless_spool_group_ids);
-                    system_info_.endless_spool_groups_reported = true;
-                }
-            }
-
-            // Bays that just went from empty to occupied and still carry no
-            // resolved tag. Dispatched after the lock — execute_gcode must not
-            // run under mutex_.
-            insert_probes = collect_insert_probes_locked(box);
-
-            // Bypass capability convergence. Two rules, one per dialect axis:
-            //  - Flat: only the identified Fork dialect has a verified command
-            //    for the holder (T<external>, registered by the port's own
-            //    box.py). An unidentified Flat module keeps bypass off.
-            //  - Stock: the first full box frame proves a CFS is attached, and
-            //    every stock CFS machine pairs an external holder with the
-            //    toolhead filament_sensor we already subscribe to — the
-            //    sensor-derived bypass rule is available. There is no load
-            //    command (Creality's own UI drives the box over RS-485), so
-            //    enable_bypass() is a declaration backed by that sensor, not a
-            //    gcode.
-            if (is_flat) {
-                external_slot_index_ = external_index;
-                // The declaration is a stock-dialect concept; drop it if the
-                // payload ever flips dialects mid-session so is_bypass_active()
-                // cannot report a stale engage.
-                bypass_declared_ = false;
-                const bool fork_bypass =
-                    macro_variant_ == CfsMacroVariant::Fork && external_slot_index_ >= 0;
-                if (system_info_.supports_bypass != fork_bypass) {
-                    spdlog::info("[AMS CFS] supports_bypass {} -> {} (flat, fork dialect={}, "
-                                 "external slot index={})",
-                                 system_info_.supports_bypass, fork_bypass,
-                                 macro_variant_ == CfsMacroVariant::Fork, external_slot_index_);
-                    system_info_.supports_bypass = fork_bypass;
-                }
-            } else if (!system_info_.supports_bypass) {
-                spdlog::info("[AMS CFS] supports_bypass -> true (stock: external holder + "
-                             "toolhead sensor rule)");
-                system_info_.supports_bypass = true;
-            }
-
-            // Cross-UI drift guard: has the CFS taken the feed back? The box
-            // naming an ACTIVE BAY is that signal, and it is the only one that
-            // means it.
-            //
-            // `enable` is not, because the box re-arms itself. Verified on a K2
-            // Plus: bypass was declared (ENABLE=0) and restored cleanly across
-            // one restart with the box still reporting enable=0, but by the next
-            // restart enable had returned to 1 with no host command in between —
-            // no BOX_ENABLE_CFS_PRINT anywhere in klippy.log, no disable_bypass()
-            // in ours, and the prints in that window were plain Moonraker
-            // start_print calls from a third-party client, which runs nothing
-            // vendor-specific. Keying the drop on enable therefore discarded the
-            // declaration on the first full frame after every restart (partial
-            // frames omit the field, so it only ever bit at startup) and took
-            // bypass down with it while the external spool was still feeding the
-            // nozzle.
-            //
-            // current_slot >= 0 keys on the feed instead: an armed box with every
-            // bay empty has taken nothing back, and a stood-down box with a lane
-            // threaded and named active has. In-memory clear only; this runs on
-            // the libhv thread and the persisted flag is re-evaluated by this
-            // same rule after the next boot's restore.
-            if (bypass_declared_ && new_info.current_slot >= 0) {
-                bypass_declared_ = false;
-                spdlog::info("[AMS CFS] Bypass declaration dropped — bay {} is loaded, the "
-                             "CFS has the feed back",
-                             new_info.current_slot);
-            }
-
-            // Deliberately do NOT touch filament_loaded here. box.filament is a
-            // selection index, not a loaded flag (see parse_box_status). The
-            // toolhead-sensor branch below is the sole writer of
-            // filament_loaded — a box update lacking the sensor param must not
-            // clobber the sensor-derived value.
-
-            // Update runout flag only when the field was actually present.
-            // Stock spells it filament_useup; the flat schema spells it runout
-            // (JSON null while idle, a descriptor once tripped).
-            const bool runout_field_present =
-                box.contains("filament_useup") || (is_flat && box.contains("runout"));
-            if (runout_field_present) {
-                system_info_.filament_runout = new_info.filament_runout;
-            }
-
-            // Insert-probe gate (#1387): a box mid-operation answers an RFID
-            // refresh with busy, firmware raises key843, and the failed probe
-            // pins the bay's remain_len at 255, so a probe caught on an insert
-            // edge must wait for an idle box. Two busy signals cover the
-            // observed case:
-            //  - filament_runout, the box-wide filament_useup latch above
-            //  - print_holds_machine, read from the print lifecycle at the top
-            //    of this function (NOT system_info_.action: CFS only sets that
-            //    around our own dispatched scripts, so a runout pause leaves it
-            //    IDLE)
-            // Deferred, not dropped. Blocked probes park in deferred_probes_
-            // and re-dispatch on the first later poll that reads idle, which
-            // is also the settle the issue asked for: the deferral spans at
-            // least one full status-poll cycle between the busy observation and
-            // the probe, so no timer is needed. Entries leave the set on that
-            // dispatch, giving each probe exactly one deferred retry and never
-            // a loop; a bay probed again needs a fresh insert edge.
-            if (!insert_probes.empty() || !deferred_probes_.empty()) {
-                if (system_info_.filament_runout || print_holds_machine) {
-                    if (!insert_probes.empty()) {
-                        for (const auto& [unit, mask] : insert_probes)
-                            deferred_probes_[unit] |= mask;
-                        spdlog::debug("{} Box busy (runout={} print_holds={}) - deferring "
-                                      "RFID insert probe",
-                                      backend_log_tag(), system_info_.filament_runout,
-                                      print_holds_machine);
-                        insert_probes.clear();
-                    }
-                } else {
-                    // Idle again: release the deferred probes into this frame's
-                    // dispatch set. insert_probes from this frame's own edges
-                    // (if any) merge in by OR. A bay the user emptied while the
-                    // deferral was pending is dropped: its occupied edge is
-                    // long consumed and the spool is gone, so there is nothing
-                    // to probe.
-                    for (const auto& [unit, mask] : deferred_probes_) {
-                        int live_mask = 0;
-                        for (int bay = 0; bay < 4; ++bay) {
-                            if ((mask & (1 << bay)) == 0) {
-                                continue;
-                            }
-                            auto occupied = bay_occupied_.find((unit - 1) * 4 + bay);
-                            if (occupied != bay_occupied_.end() && occupied->second) {
-                                live_mask |= (1 << bay);
-                            }
-                        }
-                        if (live_mask != 0) {
-                            insert_probes[unit] |= live_mask;
-                        }
-                    }
-                    deferred_probes_.clear();
-                }
-            }
-
-            // Active slot from T{n}.filament field ("A"/"B"/"C"/"D"). When the
-            // notification carried per-unit lane data but no unit reports an
-            // active lane (current_slot < 0) and we're not mid-load, clear the
-            // active selection. Driven solely by the per-unit T{n}.filament
-            // letter — not box.filament, which is a stale selection index, not
-            // a loaded flag. Gate on has_unit_data so a partial top-level-only
-            // update (e.g. box:{filament:N} during a tool change) can't clobber
-            // a still-valid active slot.
-            // The -2 bypass sentinel (flat payload with loaded_slot naming the
-            // external entry) takes the same copy path as a bay index — the
-            // else branch would otherwise clobber it to -1.
-            if (new_info.current_slot >= 0 || new_info.current_slot == -2) {
-                system_info_.current_slot = new_info.current_slot;
-                system_info_.current_tool = new_info.current_tool;
-            } else if ((has_unit_data || is_flat) && system_info_.action != AmsAction::LOADING) {
-                system_info_.current_slot = -1;
-                system_info_.current_tool = -1;
-            }
-
-            // Runout-episode bookkeeping (#1390). Runs after the current_slot
-            // update above so the edge capture reads this frame's settled
-            // active lane, and before the convergence loop below so the strip
-            // sees the captured lane.
-            if (runout_field_present) {
-                update_runout_episode_locked();
-            }
-
-            // Override integration convergence point. Firmware-sourced fields
-            // are now written to system_info_.units; run the hardware-event
-            // check FIRST (so it sees firmware truth, not override-masked
-            // data) and apply_overrides AFTER (so the final SlotInfo visible
-            // via get_slot_info reflects user edits).
-            for (auto& unit : system_info_.units) {
-                for (size_t j = 0; j < unit.slots.size(); ++j) {
-                    auto& slot = unit.slots[j];
-                    int global_idx = unit.first_slot_global_index + static_cast<int>(j);
-
-                    auto uid_it = observed_uids.find(global_idx);
-                    const std::string& observed_uid =
-                        (uid_it != observed_uids.end()) ? uid_it->second : std::string{};
-
-                    // Both clear paths run BEFORE apply_overrides so a clear's
-                    // field reset isn't masked by a stale override layer.
-                    bool cleared = check_hardware_event_clear(slot, global_idx, observed_uid);
-                    cleared |= clear_stale_override_on_removal_locked(slot, global_idx);
-
-                    // Mirror firmware-truth color/material into lane_data so
-                    // OrcaSlicer's MoonrakerPrinterAgent sees the spool. Runs
-                    // BEFORE apply_overrides so the values reflect firmware,
-                    // not the override-masked view. FillUnsetOnly: CFS user
-                    // edits don't reach firmware, so we must not let firmware
-                    // overwrite them - see mirror_firmware_to_lane_data docs.
-                    //
-                    // The runout strip (#1390) runs inside the same !cleared
-                    // gate and before the mirror: it POSTs the stripped record,
-                    // which must not race a clear's DELETE, and the mirror must
-                    // read the already-stripped override.
-                    //
-                    // Skipped on a parse that cleared: a clear fires clear_async
-                    // (DELETE) and the mirror fires save_async (POST) against
-                    // the SAME lane_data key. Both are async and independently
-                    // ordered, so issuing them together is a write race whose
-                    // outcome depends on which reply Moonraker processes last -
-                    // a DELETE landing second silently drops the record we just
-                    // published. The next poll republishes from firmware truth
-                    // with the delete already settled.
-                    if (!cleared) {
-                        strip_spoolman_link_on_runout_locked(slot, global_idx);
-                        helix::ams::mirror_firmware_to_lane_data(
-                            override_store_.get(), overrides_, global_idx, slot.color_rgb,
-                            slot.material, slot.status == SlotStatus::AVAILABLE,
-                            helix::ams::MirrorPolicy::FillUnsetOnly, backend_log_tag());
-                    }
-                    apply_overrides(slot, global_idx);
-                }
-            }
-        }
-        // Partial updates (measuring_wheel, etc.): skip — don't touch state
+        handle_box_frame(params["box"], print_holds_machine, insert_probes);
+        // Partial updates (measuring_wheel, etc.) change no state but still
+        // re-pump the downstream sync.
         changed = true;
     }
 
@@ -1779,77 +1492,21 @@ void AmsBackendCfs::handle_status_update(const nlohmann::json& notification) {
                       " NUM=" + std::to_string(mask));
     }
 
-    if (params.contains("filament_switch_sensor filament_sensor")) {
-        const auto& sensor = params["filament_switch_sensor filament_sensor"];
-        // filament_detected: Klipper publishes this as null until the sensor
-        // takes its first reading. Use .find() + is_boolean() (per [L087])
-        // rather than a bare get<bool>(), which throws type_error.302 on that
-        // null — and because the throw escapes into UpdateQueue's catch, it
-        // would take the extruder-temp and motor_control blocks below down
-        // with it and skip the EVENT_STATE_CHANGED emit, freezing the UI on
-        // stale AMS state. A null means "no reading", not "no filament", so
-        // there is no safe default here: skip and keep the previous value.
-        auto fd_it = sensor.find("filament_detected");
-        if (fd_it != sensor.end() && fd_it->is_boolean()) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            bool detected = fd_it->get<bool>();
-            system_info_.filament_loaded = detected;
-
-            // The filament_switch_sensor sits at the toolhead extruder. It
-            // trips at the END of CR_BOX_EXTRUDE — long before the load
-            // sequence's CR_BOX_WASTE + CR_BOX_FLUSH (~109 mm @ 240 °C, ~3
-            // min) actually finishes. Don't flip `action` here: completion
-            // semantics live in `dispatch_action_script`'s gcode-script
-            // success callback, which fires when Klipper drains the *entire*
-            // script. We just mirror the live filament-present flag.
-
-            // Drive phase synthesis off the transition (Task #2).
-            if (detected != last_filament_detected_) {
-                on_filament_transition_locked(detected);
-            }
-            last_filament_detected_ = detected;
-            // A real boolean landed, so last_filament_detected_ is now an
-            // observation rather than its default. Phase verification refuses
-            // to judge anything until this flips.
-            filament_sensor_seen_ = true;
-        }
+    if (const auto sensor = cfs::parse_filament_sensor(params)) {
+        apply_filament_sensor(*sensor);
         changed = true;
     }
 
-    if (params.contains("extruder")) {
-        const auto& extr = params["extruder"];
-        bool action_transitioned = false;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (extr.contains("target") && extr["target"].is_number()) {
-                last_extruder_target_deci_ =
-                    helix::units::to_decidegrees(extr["target"].get<double>());
-            }
-            if (extr.contains("temperature") && extr["temperature"].is_number()) {
-                last_extruder_temp_deci_ =
-                    helix::units::to_decidegrees(extr["temperature"].get<double>());
-            }
-            AmsAction before = system_info_.action;
-            on_extruder_temp_change_locked(last_extruder_temp_deci_, last_extruder_target_deci_);
-            action_transitioned = (system_info_.action != before);
-        }
-        // Extruder telemetry is high-frequency; only emit when action
-        // actually moved, otherwise we'd thrash the UI on every temp tick.
-        if (action_transitioned) {
+    if (const auto extruder = cfs::parse_extruder(params)) {
+        // Extruder telemetry is high-frequency; only emit when action actually
+        // moved, otherwise we'd thrash the UI on every temp tick.
+        if (apply_extruder_telemetry(*extruder)) {
             changed = true;
         }
     }
 
-    if (params.contains("motor_control")) {
-        const auto& motor = params["motor_control"];
-        // Same null hazard as filament_detected above — .find() + is_boolean()
-        // so a null reading leaves motor_ready_ at its previous value instead
-        // of throwing out of the handler.
-        auto mr_it = motor.find("motor_ready");
-        if (mr_it != motor.end() && mr_it->is_boolean()) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            motor_ready_ = mr_it->get<bool>();
-        }
+    if (const auto motor = cfs::parse_motor_control(params)) {
+        apply_motor_control(*motor);
         changed = true;
     }
 
@@ -1866,6 +1523,643 @@ void AmsBackendCfs::handle_status_update(const nlohmann::json& notification) {
 
     if (changed) {
         emit_event(EVENT_STATE_CHANGED);
+    }
+}
+
+void AmsBackendCfs::handle_box_frame(const nlohmann::json& box, bool print_holds_machine,
+                                     std::map<int, int>& insert_probes) {
+    spdlog::debug("[AMS CFS] Received box data with {} keys", box.size());
+
+    // Log box.filament_useup transitions with box-local context. Decoded
+    // (2026-06-18, live K2 runout->reload): runout / path-empty signal —
+    // 1 when no filament at the box gate (pre-load, runout), 0 when loaded
+    // and feeding. Reads only the notification's own fields — no
+    // system_info_ access, so no lock needed here. No UI effect yet.
+    if (box.contains("filament_useup") && box["filament_useup"].is_number()) {
+        int useup = box["filament_useup"].get<int>();
+        if (useup != last_filament_useup_) {
+            // safe_int, not .value(): spdlog evaluates its arguments before it
+            // consults the log level, so a null or wrong-typed "filament"/
+            // "auto_refill"/"enable" would throw type_error.302 out of
+            // handle_status in a release build too, not just under -vv.
+            // NB these are the TOP-LEVEL box fields, documented as ints — not
+            // the same-named per-unit "filament" letter, which is a string.
+            spdlog::debug("[AMS CFS] filament_useup {} -> {} (box.filament={}, "
+                          "auto_refill={}, enable={})",
+                          last_filament_useup_, useup,
+                          helix::json_util::safe_int(box, "filament", -1),
+                          helix::json_util::safe_int(box, "auto_refill", -1),
+                          helix::json_util::safe_int(box, "enable", -1));
+            last_filament_useup_ = useup;
+        }
+    }
+
+    const auto shape = cfs::classify_box_frame(box);
+    const bool has_unit_data = shape.has_unit_data;
+    // Flat schema: a `slots` array is the payload that carries everything —
+    // there is no top-level/per-unit split to reason about, so its presence
+    // alone marks a full update.
+    const bool is_flat = detect_schema(box) == CfsSchema::Flat;
+    const bool is_full_update = shape.has_top_level || has_unit_data || is_flat;
+
+    if (is_flat && schema_ != CfsSchema::Flat) {
+        schema_ = CfsSchema::Flat;
+        // Select the command dialect from the explicit API version, not by
+        // assuming every `slots[]` payload implements the same commands.
+        if (detect_fork_dialect(box)) {
+            macro_variant_ = CfsMacroVariant::Fork;
+            spdlog::info("[AMS CFS] Flat box schema + fork dialect detected "
+                         "(community box.py, API v{}) — Fork control enabled",
+                         helix::json_util::safe_int(box, "api_version", 0));
+        } else {
+            spdlog::warn("[AMS CFS] Flat box schema without a supported API version — "
+                         "slot display active, control paths disabled (no verified "
+                         "command dialect)");
+        }
+    }
+
+    // Stock frames are deltas: a frame naming only T3 says nothing about T1
+    // and T2, so the parse reads the box as the merge of every frame since
+    // the last flat one. A unit leaves only when a frame reports it
+    // disconnected.
+    if (is_flat) {
+        stock_box_state_ = nlohmann::json::object();
+    } else {
+        if (!stock_box_state_.is_object()) {
+            stock_box_state_ = nlohmann::json::object();
+        }
+        stock_box_state_.merge_patch(box);
+    }
+
+    // Partial updates (measuring_wheel, etc.): skip — don't touch state
+    if (!is_full_update) {
+        return;
+    }
+
+    // Snapshot under the lock: pushed_material_codes_ is written by
+    // push_slot_identity_to_firmware on the UI thread, and the parse
+    // itself deliberately runs before the lock taken below. At most one
+    // entry per bay (16), so the copy is not worth a second lock scope
+    // further down.
+    std::unordered_map<int, std::string> own_labels;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        own_labels = pushed_material_codes_;
+    }
+    auto new_info = parse_box_status(is_flat ? box : stock_box_state_, &own_labels);
+
+    file_box_readings(new_info);
+
+    BoxFrame frame;
+    frame.box = &box;
+    frame.is_flat = is_flat;
+    frame.has_unit_data = has_unit_data;
+    frame.print_holds_machine = print_holds_machine;
+    frame.insert_probes = &insert_probes;
+    frame.new_info = std::move(new_info);
+
+    // Payload reads happen before the lock; the values converge under it with
+    // everything else below.
+    frame.external_index = is_flat ? find_external_slot_index(box) : -1;
+
+    // Firmware-sourced mapping tick. box.map is what the CFS itself
+    // reports — verified on a live K2: BOX_MODIFY_TN T1A=T1B echoed back
+    // as a single-key delta in ~0.7s. This is what lets a remap restore
+    // be confirmed against the box rather than against the optimistic
+    // write set_tool_mapping() makes before sending (#1270). Bumped here
+    // rather than inside parse_box_status because that parser is static.
+    if (box.contains("map") && box["map"].is_object()) {
+        ++firmware_map_generation_;
+    }
+
+    // Harvest the material_type codes this frame reported, for the
+    // identity writeback's lookup chain (push_slot_identity_to_
+    // firmware). Runs on the same pre-lock walk as the fingerprint
+    // pass below; the merge itself happens under mutex_.
+    frame.observed_codes =
+        collect_observed_material_codes(box, *FilamentCatalog::load_codes_cached("cfs"));
+
+    // Build observed per-slot RFID fingerprints for every unit present
+    // in this notification. Slots that weren't included stay empty
+    // (observed_uids stays at default ""), and empty-UID observations
+    // are a no-op inside check_hardware_event_clear (no baseline
+    // update, no clear) — exactly the behavior we want for incremental
+    // updates that only touch a subset of units.
+    auto& observed_uids = frame.observed_uids;
+    if (is_flat) {
+        // Each bay's fingerprint is filed under its firmware slot
+        // number from flat_bay_indices(), the numbering
+        // parse_flat_box_status gives the bay. The skips are the
+        // parse's own, so a fingerprint can never address a different
+        // bay than the parse put a spool on.
+        const auto bay_indices = flat_bay_indices(box);
+        auto slots_it = box.find("slots");
+        if (slots_it != box.end() && slots_it->is_array()) {
+            size_t bay_ordinal = 0;
+            for (const auto& slot_json : *slots_it) {
+                if (!slot_json.is_object() ||
+                    helix::json_util::safe_bool(slot_json, "external", false)) {
+                    continue;
+                }
+                if (bay_ordinal >= bay_indices.size()) {
+                    break;
+                }
+                observed_uids[bay_indices[bay_ordinal++]] = build_cfs_flat_slot_uid(slot_json);
+            }
+        }
+    } else {
+        for (int n = 1; n <= 4; ++n) {
+            std::string key = "T" + std::to_string(n);
+            if (!box.contains(key) || !box[key].is_object())
+                continue;
+            const auto& unit_json = box[key];
+            // safe_string for the same reason as the parse_box_status
+            // unit loop: a null/wrong-typed `state` must degrade to
+            // "disconnected", not throw out of handle_status.
+            std::string state = helix::json_util::safe_string(unit_json, "state", "None");
+            if (state == "None" || state == "-1")
+                continue;
+            for (int i = 0; i < 4; ++i) {
+                int global_idx = (n - 1) * 4 + i;
+                observed_uids[global_idx] = build_cfs_slot_uid(unit_json, i);
+            }
+        }
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    apply_box_frame_locked(frame);
+}
+
+void AmsBackendCfs::file_box_readings(const AmsSystemInfo& new_info) {
+    // Firmware's own account of every bay this frame described. What
+    // makes this correct is the values, not the position: new_info is
+    // what the parse just built out of the payload, where the
+    // system_info_.units the resolve pass further down walks is the
+    // struct apply_resolved_lane() has rewritten in place on every
+    // previous frame. A translation reading that back would file a user's own
+    // edit as something the box remembers.
+    //
+    // A bay this frame did not describe is not in new_info and is filed
+    // nothing. One ingest replaces a source's record whole, so a lane
+    // the box said nothing about keeps the reading it last stated.
+    {
+        // Both calls below document mutex_ as a precondition:
+        // reconcile_lane_binding() consumes the slot's own-write expectation,
+        // and clear_persisted_override() mutates overrides_. ingest() is
+        // unaffected, taking only the lane store's own lock.
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& unit : new_info.units) {
+            // A box off the bus said nothing about its bays.
+            if (unit.absent) {
+                continue;
+            }
+            for (const auto& slot : unit.slots) {
+                const helix::ams::LaneId lane = lane_id(slot.global_index);
+
+                helix::ams::Observation sensed(helix::ams::ObservationSource::Sensed);
+                sensed.present = slot_status_reports_filament(slot.status);
+                helix::ams::ingest(lane, sensed);
+
+                // What the box remembers reading off a tag, which is a
+                // cache of a past declaration and never evidence of what is
+                // loaded. `name` says which PRODUCT the bay holds, a
+                // different question from what a spool is called.
+                helix::ams::Observation cache(helix::ams::ObservationSource::VendorCache);
+                if (!slot.material.empty())
+                    cache.material = slot.material;
+                if (!slot.brand.empty())
+                    cache.brand = slot.brand;
+                if (!slot.spool_name.empty())
+                    cache.product_name = slot.spool_name;
+                if (helix::ams::is_declarable_color(slot.color_rgb))
+                    cache.color_rgb = slot.color_rgb;
+                if (slot.spoolman_id > 0)
+                    cache.spoolman_id = slot.spoolman_id;
+                // A field repeating this bay's armed declaration is our
+                // own BOX_MODIFY_TN_DATA / _BOX_SLOT_SET write coming
+                // back, not a tag read. The boundary stays empty: the
+                // fingerprint's own swap detection and Clear Spool are
+                // what end the suppression.
+                own_write_echoes_.withhold(slot.global_index, std::string{}, cache);
+                helix::ams::ingest(lane, cache);
+
+                // Whether the identity declared on this bay still names
+                // what is in it. The id is new_info's, which is the flat
+                // schema's own parse; the stock schema states none and
+                // leaves this at 0, where the re-bind arm cannot fire.
+                // Nor can the eject arm: printer_reports_spool_ids() is
+                // false here, so a bay reading 0 is the everyday reading
+                // and never an eject.
+                if (reconcile_lane_binding(slot.global_index, slot.spoolman_id) !=
+                    helix::ams::BindingVerdict::Holds) {
+                    helix::ams::clear_persisted_override(override_store_.get(), overrides_,
+                                                         slot.global_index, backend_log_tag());
+                }
+            }
+        }
+    }
+}
+
+void AmsBackendCfs::apply_box_frame_locked(BoxFrame& f) {
+    // Insert-if-absent so a key's first-observed code stays stable.
+    for (const auto& [k, v] : f.observed_codes.by_id)
+        observed_material_id_codes_.emplace(k, v);
+    for (const auto& [k, v] : f.observed_codes.by_brand_type)
+        observed_material_codes_.emplace(k, v);
+    for (const auto& [k, v] : f.observed_codes.by_type)
+        observed_material_type_codes_.emplace(k, v);
+
+    apply_box_units_locked(f);
+
+    // Bays that just went from empty to occupied and still carry no
+    // resolved tag. Dispatched after the lock — execute_gcode must not
+    // run under mutex_.
+    *f.insert_probes = collect_insert_probes_locked(*f.box);
+
+    converge_box_bypass_locked(f);
+    const bool runout_field_present = apply_box_runout_locked(f);
+    gate_insert_probes_locked(f);
+    apply_box_active_slot_locked(f);
+
+    // Runout-episode bookkeeping (#1390). Runs after the current_slot
+    // update above so the edge capture reads this frame's settled
+    // active lane, and before the convergence loop below so the strip
+    // sees the captured lane.
+    if (runout_field_present) {
+        update_runout_episode_locked();
+    }
+
+    converge_box_lanes_locked(f);
+}
+
+void AmsBackendCfs::apply_box_units_locked(BoxFrame& f) {
+    const auto& box = *f.box;
+    const bool is_flat = f.is_flat;
+    AmsSystemInfo& new_info = f.new_info;
+
+    // Presence-gated, and independent of whether any unit is up. The box sends
+    // the enable bit with its first full frame, often before a unit has
+    // answered, and never again while it is unchanged, so a frame that drops
+    // it here leaves the firmware's answer unread for good. A frame without
+    // the bit says nothing about it: Moonraker subscribes `box: null`, and a
+    // frame that changed only a slot omits the bit while both parsers default
+    // it to off. Stock spells it auto_refill, the flat schema
+    // runout_swap_enabled.
+    if (box.contains("auto_refill") || (is_flat && box.contains("runout_swap_enabled"))) {
+        system_info_.endless_spool_enabled = new_info.endless_spool_enabled;
+        endless_spool_enable_reported_ = true;
+    }
+
+    if (!new_info.units.empty()) {
+        system_info_.units = std::move(new_info.units);
+        system_info_.total_slots = new_info.total_slots;
+        // A loaded external-spool mirror is a bay's record where its
+        // key is a bay the box reports (an adopted mirror may have been
+        // that bay's record), and no one's anywhere else. Decided once,
+        // on the first frame: a bay whose box later leaves keeps it.
+        //
+        // A mirror kept as a bay's record is that bay's record from
+        // here on: unmarked and persisted so, or the external publish
+        // would go on treating it as its own to overwrite or clear.
+        if (!mirrors_sorted_) {
+            mirrors_sorted_ = true;
+            for (auto it = overrides_.begin(); it != overrides_.end();) {
+                if (!it->second.external_mirror) {
+                    ++it;
+                } else if (!system_info_.slot_exists(it->first)) {
+                    it = overrides_.erase(it);
+                } else {
+                    make_bay_record_locked(it->first, it->second);
+                    ++it;
+                }
+            }
+        }
+        // The same rule for the mirror published this session: once its
+        // key is a bay the box reports (the top box came back), the
+        // record there is that bay's, so a later save of the bay is not
+        // written marked and the next publish does not clear it.
+        if (auto it = overrides_.find(external_lane_published_);
+            it != overrides_.end() && it->second.external_mirror &&
+            system_info_.slot_exists(it->first)) {
+            make_bay_record_locked(it->first, it->second);
+        }
+        system_info_.tool_to_slot_map = std::move(new_info.tool_to_slot_map);
+        // Presence-gated like filament_runout below: a stock delta
+        // frame carries a changed T1 subtree but no same_material key
+        // (the field rides full frames), and copying the parse's empty
+        // defaults would silently revert OnWithoutBackup to plain On
+        // until the firmware re-sends the list. Copy the grouping only
+        // when this frame actually carried the field. A flat frame is
+        // the one deliberate exception: it is a schema transition, not
+        // a delta omission, and the flat dialect never sends
+        // same_material - retaining stock-era grouping would answer
+        // from a dead schema forever, so it is cleared.
+        //
+        // The flat swap plan follows the same presence rule: a delta
+        // omitting `runout` keeps the last plan, an explicit null
+        // (nothing loaded) clears it. Stock never publishes one.
+        if (is_flat) {
+            system_info_.endless_spool_group_ids.clear();
+            system_info_.endless_spool_groups_reported = false;
+            if (box.contains("runout")) {
+                flat_backup_edges_ = parse_flat_runout_edges(box);
+            }
+        } else {
+            flat_backup_edges_.reset();
+            if (new_info.endless_spool_groups_reported) {
+                system_info_.endless_spool_group_ids = std::move(new_info.endless_spool_group_ids);
+                system_info_.endless_spool_groups_reported = true;
+            }
+        }
+    }
+}
+
+void AmsBackendCfs::converge_box_bypass_locked(BoxFrame& f) {
+    const bool is_flat = f.is_flat;
+    const int external_index = f.external_index;
+    const AmsSystemInfo& new_info = f.new_info;
+
+    // Bypass capability convergence. Two rules, one per dialect axis:
+    //  - Flat: only the identified Fork dialect has a verified command
+    //    for the holder (T<external>, registered by the port's own
+    //    box.py). An unidentified Flat module keeps bypass off.
+    //  - Stock: the first full box frame proves a CFS is attached, and
+    //    every stock CFS machine pairs an external holder with the
+    //    toolhead filament_sensor we already subscribe to — the
+    //    sensor-derived bypass rule is available. There is no load
+    //    command (Creality's own UI drives the box over RS-485), so
+    //    enable_bypass() is a declaration backed by that sensor, not a
+    //    gcode.
+    if (is_flat) {
+        external_slot_index_ = external_index;
+        // The declaration is a stock-dialect concept; drop it if the
+        // payload ever flips dialects mid-session so is_bypass_active()
+        // cannot report a stale engage.
+        bypass_declared_ = false;
+        const bool fork_bypass =
+            macro_variant_ == CfsMacroVariant::Fork && external_slot_index_ >= 0;
+        if (system_info_.supports_bypass != fork_bypass) {
+            spdlog::info("[AMS CFS] supports_bypass {} -> {} (flat, fork dialect={}, "
+                         "external slot index={})",
+                         system_info_.supports_bypass, fork_bypass,
+                         macro_variant_ == CfsMacroVariant::Fork, external_slot_index_);
+            system_info_.supports_bypass = fork_bypass;
+        }
+    } else if (!system_info_.supports_bypass) {
+        spdlog::info("[AMS CFS] supports_bypass -> true (stock: external holder + "
+                     "toolhead sensor rule)");
+        system_info_.supports_bypass = true;
+    }
+
+    // Cross-UI drift guard: has the CFS taken the feed back? The box
+    // naming an ACTIVE BAY is that signal, and it is the only one that
+    // means it.
+    //
+    // `enable` is not, because the box re-arms itself. Verified on a K2
+    // Plus: bypass was declared (ENABLE=0) and restored cleanly across
+    // one restart with the box still reporting enable=0, but by the next
+    // restart enable had returned to 1 with no host command in between —
+    // no BOX_ENABLE_CFS_PRINT anywhere in klippy.log, no disable_bypass()
+    // in ours, and the prints in that window were plain Moonraker
+    // start_print calls from a third-party client, which runs nothing
+    // vendor-specific. Keying the drop on enable therefore discarded the
+    // declaration on the first full frame after every restart (partial
+    // frames omit the field, so it only ever bit at startup) and took
+    // bypass down with it while the external spool was still feeding the
+    // nozzle.
+    //
+    // current_slot >= 0 keys on the feed instead: an armed box with every
+    // bay empty has taken nothing back, and a stood-down box with a lane
+    // threaded and named active has. In-memory clear only; the persisted flag is re-evaluated by
+    // this same rule after the next boot's restore.
+    if (bypass_declared_ && new_info.current_slot >= 0) {
+        bypass_declared_ = false;
+        spdlog::info("[AMS CFS] Bypass declaration dropped — bay {} is loaded, the "
+                     "CFS has the feed back",
+                     new_info.current_slot);
+    }
+}
+
+bool AmsBackendCfs::apply_box_runout_locked(BoxFrame& f) {
+    const auto& box = *f.box;
+    const bool is_flat = f.is_flat;
+    const AmsSystemInfo& new_info = f.new_info;
+
+    // Deliberately do NOT touch filament_loaded here. box.filament is a
+    // selection index, not a loaded flag (see parse_box_status). The
+    // toolhead-sensor branch below is the sole writer of
+    // filament_loaded — a box update lacking the sensor param must not
+    // clobber the sensor-derived value.
+
+    // Update runout flag only when the field was actually present.
+    // Stock spells it filament_useup; the flat schema spells it
+    // filament_detected, and reads it inverted (see the flat parse).
+    // A delta carrying that key as null published no reading, so it is
+    // gated out by the same optional the parse consults — the latch
+    // keeps whatever the last frame with a real reading set.
+    const bool runout_field_present =
+        box.contains("filament_useup") || (is_flat && flat_gate_filament_present(box).has_value());
+    if (runout_field_present) {
+        system_info_.filament_runout = new_info.filament_runout;
+    }
+    return runout_field_present;
+}
+
+void AmsBackendCfs::gate_insert_probes_locked(BoxFrame& f) {
+    auto& insert_probes = *f.insert_probes;
+    const bool print_holds_machine = f.print_holds_machine;
+
+    // Insert-probe gate (#1387): a box mid-operation answers an RFID
+    // refresh with busy, firmware raises key843, and the failed probe
+    // pins the bay's remain_len at 255, so a probe caught on an insert
+    // edge must wait for an idle box. Two busy signals cover the
+    // observed case:
+    //  - filament_runout, the box-wide filament_useup latch above
+    //  - print_holds_machine, read from the print lifecycle at the top
+    //    of this function (NOT system_info_.action: CFS only sets that
+    //    around our own dispatched scripts, so a runout pause leaves it
+    //    IDLE)
+    // Deferred, not dropped. Blocked probes park in deferred_probes_
+    // and re-dispatch on the first later poll that reads idle, which
+    // is also the settle the issue asked for: the deferral spans at
+    // least one full status-poll cycle between the busy observation and
+    // the probe, so no timer is needed. Entries leave the set on that
+    // dispatch, giving each probe exactly one deferred retry and never
+    // a loop; a bay probed again needs a fresh insert edge.
+    if (!insert_probes.empty() || !deferred_probes_.empty()) {
+        if (system_info_.filament_runout || print_holds_machine) {
+            if (!insert_probes.empty()) {
+                for (const auto& [unit, mask] : insert_probes)
+                    deferred_probes_[unit] |= mask;
+                spdlog::debug("{} Box busy (runout={} print_holds={}) - deferring "
+                              "RFID insert probe",
+                              backend_log_tag(), system_info_.filament_runout, print_holds_machine);
+                insert_probes.clear();
+            }
+        } else {
+            // Idle again: release the deferred probes into this frame's
+            // dispatch set. insert_probes from this frame's own edges
+            // (if any) merge in by OR. A bay the user emptied while the
+            // deferral was pending is dropped: its occupied edge is
+            // long consumed and the spool is gone, so there is nothing
+            // to probe.
+            for (const auto& [unit, mask] : deferred_probes_) {
+                int live_mask = 0;
+                for (int bay = 0; bay < 4; ++bay) {
+                    if ((mask & (1 << bay)) == 0) {
+                        continue;
+                    }
+                    auto occupied = bay_occupied_.find((unit - 1) * 4 + bay);
+                    if (occupied != bay_occupied_.end() && occupied->second) {
+                        live_mask |= (1 << bay);
+                    }
+                }
+                if (live_mask != 0) {
+                    insert_probes[unit] |= live_mask;
+                }
+            }
+            deferred_probes_.clear();
+        }
+    }
+}
+
+void AmsBackendCfs::apply_box_active_slot_locked(BoxFrame& f) {
+    const bool is_flat = f.is_flat;
+    const bool has_unit_data = f.has_unit_data;
+    const AmsSystemInfo& new_info = f.new_info;
+
+    // Active slot from T{n}.filament field ("A"/"B"/"C"/"D"). When the
+    // notification carried per-unit lane data but no unit reports an
+    // active lane (current_slot < 0) and we're not mid-load, clear the
+    // active selection. Driven solely by the per-unit T{n}.filament
+    // letter — not box.filament, which is a stale selection index, not
+    // a loaded flag. Gate on has_unit_data so a partial top-level-only
+    // update (e.g. box:{filament:N} during a tool change) can't clobber
+    // a still-valid active slot.
+    // The -2 bypass sentinel (flat payload with loaded_slot naming the
+    // external entry) takes the same copy path as a bay index — the
+    // else branch would otherwise clobber it to -1.
+    if (new_info.current_slot >= 0 || new_info.current_slot == -2) {
+        system_info_.current_slot = new_info.current_slot;
+        system_info_.current_tool = new_info.current_tool;
+    } else if ((has_unit_data || is_flat) && system_info_.action != AmsAction::LOADING) {
+        system_info_.current_slot = -1;
+        system_info_.current_tool = -1;
+    }
+}
+
+void AmsBackendCfs::converge_box_lanes_locked(BoxFrame& f) {
+    const auto& observed_uids = f.observed_uids;
+
+    // Lane resolve convergence point. Firmware-sourced fields are now
+    // written to system_info_.units; run the hardware-event check FIRST
+    // (so it sees firmware truth, not the resolved view) and
+    // apply_resolved_lane AFTER (so the final SlotInfo visible via
+    // get_slot_info reflects the lane's declared values).
+    for (auto& unit : system_info_.units) {
+        // An absent box's bays keep every record they had until it
+        // reports again; its placeholder EMPTY is not a removal.
+        if (unit.absent) {
+            continue;
+        }
+        for (size_t j = 0; j < unit.slots.size(); ++j) {
+            auto& slot = unit.slots[j];
+            int global_idx = unit.first_slot_global_index + static_cast<int>(j);
+
+            auto uid_it = observed_uids.find(global_idx);
+            const std::string& observed_uid =
+                (uid_it != observed_uids.end()) ? uid_it->second : std::string{};
+
+            // Both clear paths run BEFORE apply_resolved_lane so a
+            // clear's field reset isn't masked by a stale declaration.
+            bool cleared = check_hardware_event_clear(slot, global_idx, observed_uid);
+            cleared |= clear_stale_override_on_removal_locked(slot, global_idx);
+            // The insert rule after them: a swap the fingerprint path
+            // may already have cleared is re-cleared harmlessly here,
+            // while an untagged insert is this path's alone to notice.
+            cleared |= note_insert_edge_locked(slot, global_idx);
+
+            // Mirror firmware-truth color/material into lane_data so
+            // OrcaSlicer's MoonrakerPrinterAgent sees the spool. Runs
+            // BEFORE apply_resolved_lane so the values reflect firmware,
+            // not the resolved view. FillUnsetOnly: CFS user
+            // edits don't reach firmware, so we must not let firmware
+            // overwrite them - see mirror_firmware_to_lane_data docs.
+            // The record's own declarations guard this mirror, and so
+            // does a field a declaring lane source holds: a linked
+            // spool's material never reaches firmware.
+            //
+            // The runout strip (#1390) runs inside the same !cleared
+            // gate and before the mirror: it POSTs the stripped record,
+            // which must not race a clear's DELETE, and the mirror must
+            // read the already-stripped override.
+            //
+            // Skipped on a parse that cleared: a clear fires clear_async
+            // (DELETE) and the mirror fires save_async (POST) against
+            // the SAME lane_data key. Both are async and independently
+            // ordered, so issuing them together is a write race whose
+            // outcome depends on which reply Moonraker processes last -
+            // a DELETE landing second silently drops the record we just
+            // published. The next poll republishes from firmware truth
+            // with the delete already settled.
+            if (!cleared) {
+                strip_spoolman_link_on_runout_locked(slot, global_idx);
+                helix::ams::mirror_firmware_to_lane_data(
+                    override_store_.get(), overrides_, global_idx, slot.color_rgb, slot.material,
+                    slot.status == SlotStatus::AVAILABLE, helix::ams::MirrorPolicy::FillUnsetOnly,
+                    backend_log_tag(), helix::ams::declared_on_lane(lane_id(global_idx)));
+            }
+            apply_resolved_lane(slot, global_idx);
+        }
+    }
+}
+
+void AmsBackendCfs::apply_filament_sensor(const cfs::FilamentSensorDelta& sensor) {
+    // filament_detected: Klipper publishes this as null until the sensor takes
+    // its first reading, which reads as absent: a null means "no reading", not
+    // "no filament", so there is no safe default here and the previous value
+    // stands.
+    if (!sensor.filament_detected) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    const bool detected = *sensor.filament_detected;
+    system_info_.filament_loaded = detected;
+
+    // The filament_switch_sensor sits at the toolhead extruder. It trips at the
+    // END of CR_BOX_EXTRUDE — long before the load sequence's CR_BOX_WASTE +
+    // CR_BOX_FLUSH (~109 mm @ 240 °C, ~3 min) actually finishes. Don't flip
+    // `action` here: completion semantics live in `dispatch_action_script`'s
+    // gcode-script success callback, which fires when Klipper drains the *entire*
+    // script. We just mirror the live filament-present flag.
+
+    // Drive phase synthesis off the transition.
+    if (detected != last_filament_detected_) {
+        on_filament_transition_locked(detected);
+    }
+    last_filament_detected_ = detected;
+    // A real boolean landed, so last_filament_detected_ is now an observation
+    // rather than its default. Phase verification refuses to judge anything
+    // until this flips.
+    filament_sensor_seen_ = true;
+}
+
+bool AmsBackendCfs::apply_extruder_telemetry(const cfs::ExtruderTempDelta& extruder) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (extruder.target_c) {
+        last_extruder_target_deci_ = helix::units::to_decidegrees(*extruder.target_c);
+    }
+    if (extruder.temperature_c) {
+        last_extruder_temp_deci_ = helix::units::to_decidegrees(*extruder.temperature_c);
+    }
+    const AmsAction before = system_info_.action;
+    on_extruder_temp_change_locked(last_extruder_temp_deci_, last_extruder_target_deci_);
+    return system_info_.action != before;
+}
+
+void AmsBackendCfs::apply_motor_control(const cfs::MotorControlDelta& motor) {
+    if (motor.motor_ready) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        motor_ready_ = *motor.motor_ready;
     }
 }
 
@@ -1915,13 +2209,12 @@ AmsSystemInfo AmsBackendCfs::get_system_info() const {
     return system_info_;
 }
 
-SlotInfo AmsBackendCfs::get_slot_info(int slot_index) const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    const auto* slot = system_info_.get_slot_global(slot_index);
-    if (slot) {
-        return *slot;
-    }
-    return SlotInfo{};
+int AmsBackendCfs::slot_index_bound_locked() const {
+    return slot_index_ceiling(system_info_.total_slots);
+}
+
+SlotInfo* AmsBackendCfs::cached_slot_locked(int slot_index) {
+    return system_info_.get_slot_global(slot_index);
 }
 
 // --- Path segments ---
@@ -2001,6 +2294,22 @@ AmsError AmsBackendCfs::do_load_filament(int slot_index) {
     const bool bypass =
         slot_index == helix::ui::EXTERNAL_SPOOL_SLOT && macro_variant_ != CfsMacroVariant::Fork;
 
+    // The bound is the attached unit count (the TNN alphabet while the box
+    // size is unknown), so a 4-slot CFS refuses index 7 here instead of
+    // dispatching a load script for a bay that is not there.
+    int max_slot;
+    int firmware_slot;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        max_slot = slot_index_bound_locked() - 1;
+        if (!bypass) {
+            if (auto err = validate_slot_index_locked(slot_index); !err.success()) {
+                return err;
+            }
+        }
+        firmware_slot = firmware_slot_locked(slot_index);
+    }
+
     std::string gcode;
     if (bypass) {
         const bool has_load_material =
@@ -2009,11 +2318,14 @@ AmsError AmsBackendCfs::do_load_filament(int slot_index) {
         spdlog::info("[AMS CFS] Bypass load — external spool, via {}",
                      has_load_material ? "LOAD_MATERIAL" : "fallback feed");
     } else {
-        gcode = load_gcode(slot_index, macro_variant_);
+        gcode = load_gcode(firmware_slot, macro_variant_);
     }
 
     if (gcode.empty()) {
-        return AmsErrorHelper::invalid_slot(slot_index, 15);
+        if (!bypass && firmware_slot < 0) {
+            return firmware_slot_unknown(slot_index);
+        }
+        return AmsErrorHelper::invalid_slot(lane_noun(), slot_index, max_slot);
     }
 
     // Declaring bypass stood the box down with BOX_ENABLE_CFS_PRINT ENABLE=0,
@@ -2102,25 +2414,34 @@ AmsError AmsBackendCfs::do_change_tool(int tool) {
         return err;
 
     bool needs_unload = false;
+    int firmware_slot;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        firmware_slot = firmware_slot_locked(tool);
         // Cut-first decision centralized in needs_unload_before_load(): on K1 CFS
         // current_slot reports a *preloaded* (cassette-staged) slot with the
         // nozzle still empty, so the K1 override keys on filament_loaded only
         // (avoids the "hallucinated cut on an empty nozzle" the reporter saw,
         // #968). K2 retains the filament_loaded || current_slot >= 0 behavior.
         //
-        // `tool` doubles as the target slot: CFS bays map 1:1 to tools. Safe
-        // under mutex_ — CFS does not override get_unit_topology(), so the
+        // Safe under mutex_ — CFS does not override get_unit_topology(), so the
         // base's per-lane arm reaches only the inline get_topology() constant.
         needs_unload = needs_unload_before_load(system_info_, tool);
     }
 
-    // Validate gcode before mutating state
-    std::string gcode =
-        needs_unload ? swap_gcode(tool, macro_variant_) : load_gcode(tool, macro_variant_);
+    // `tool` is a routing key over firmware's T0-T15 table, not a bay index:
+    // plan_load() feeds a lane's mapped_tool here verbatim, and that key can
+    // sit high while fewer units are attached. The 1:1 slot identity (CFS bays
+    // map 1:1 to tools) is what lets the builders below encode it as a bay
+    // TNN; encodability is the only bound a key needs.
+    std::string gcode = needs_unload ? swap_gcode(firmware_slot, macro_variant_)
+                                     : load_gcode(firmware_slot, macro_variant_);
     if (gcode.empty()) {
-        return AmsErrorHelper::invalid_slot(tool, 15);
+        if (firmware_slot < 0) {
+            return firmware_slot_unknown(tool);
+        }
+        // 15 = the last encodable TNN index; slot_to_tnn refuses anything past it.
+        return AmsErrorHelper::invalid_slot(lane_noun(), tool, 15);
     }
 
     {
@@ -2156,26 +2477,39 @@ AmsError AmsBackendCfs::cancel() {
     return execute_gcode("CANCEL_PRINT");
 }
 
-// --- set_slot_info ---
+// --- apply_user_edit / sync_external_identity ---
 
-AmsError AmsBackendCfs::set_slot_info(int slot_index, const SlotInfo& info, bool persist) {
+namespace {
+
+/// Put @p info's filament fields on @p bay, covering every SlotInfo field the
+/// caller may have set, so get_slot_info returns them at once.
+void write_filament_fields(SlotInfo& bay, const SlotInfo& info) {
+    helix::ams::copy_resolver_owned_identity(bay, info);
+}
+
+} // namespace
+
+SlotInfo* AmsBackendCfs::bay_locked(int slot_index) {
+    // Find the unit and local slot for this global index
+    for (auto& unit : system_info_.units) {
+        int first = unit.first_slot_global_index;
+        int last = first + static_cast<int>(unit.slots.size()) - 1;
+        if (slot_index >= first && slot_index <= last) {
+            return unit.absent ? nullptr : &unit.slots[slot_index - first];
+        }
+    }
+    return nullptr;
+}
+
+AmsError AmsBackendCfs::apply_user_edit(int slot_index, const SlotInfo& info,
+                                        const helix::ams::Observation& declared) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
 
-        // Find the unit and local slot for this global index
-        SlotInfo* target = nullptr;
-        for (auto& unit : system_info_.units) {
-            int first = unit.first_slot_global_index;
-            int last = first + static_cast<int>(unit.slots.size()) - 1;
-            if (slot_index >= first && slot_index <= last) {
-                int local = slot_index - first;
-                target = &unit.slots[local];
-                break;
-            }
-        }
-
+        SlotInfo* target = bay_locked(slot_index);
         if (!target) {
-            return AmsErrorHelper::invalid_slot(slot_index, system_info_.total_slots - 1);
+            return AmsErrorHelper::invalid_slot(lane_noun(), slot_index,
+                                                system_info_.total_slots - 1);
         }
 
         // Firmware's last reported id for this bay, captured BEFORE the
@@ -2184,35 +2518,16 @@ AmsError AmsBackendCfs::set_slot_info(int slot_index, const SlotInfo& info, bool
         // in-flight frames will keep reporting until that echo lands.
         const int previous_firmware_id = target->spoolman_id;
 
-        // Update in-memory slot state so get_slot_info returns the edit
-        // immediately — covers every SlotInfo field the caller may have set,
-        // including persist=false previews that must survive until the next
-        // firmware parse.
-        target->color_rgb = info.color_rgb;
-        target->color_name = info.color_name;
-        target->material = info.material;
-        target->brand = info.brand;
-        // Carry the catalog product identity through preview writes too — a
-        // persist=false preview that dropped it would make the editor snap
-        // back to a different variant on the next get_slot_info().
-        target->catalog_id = info.catalog_id;
-        target->product_name = info.product_name;
-        target->spool_name = info.spool_name;
-        target->spoolman_id = info.spoolman_id;
-        target->spoolman_vendor_id = info.spoolman_vendor_id;
-        target->remaining_weight_g = info.remaining_weight_g;
-        target->total_weight_g = info.total_weight_g;
+        write_filament_fields(*target, info);
 
-        // For persist=true, stage the override into overrides_ so
-        // apply_overrides re-applies the new values on every subsequent parse.
-        // For persist=false we explicitly do NOT touch overrides_ — preview
-        // edits are in-memory only and will be overwritten by the next
-        // firmware parse (expected preview contract).
+        // Stage the override into overrides_ so the edit survives a restart;
+        // the lane's own declaration, filed when the edit is committed, is what
+        // apply_resolved_lane paints on every subsequent parse.
         //
         // NOTE on self-wipe: CFS's hardware-event check is RFID-fingerprint-
         // based (material_type + color_value from firmware), and BOTH halves
         // of that fingerprint are user-writable — push_slot_identity_to_
-        // firmware (below, persist path only) rewrites color_value always and
+        // firmware (below) rewrites color_value always and
         // material_type when a firmware-observed code exists, via
         // BOX_MODIFY_TN_DATA. Firmware echoes those writes back on a later
         // poll, where they are indistinguishable from a physical spool swap
@@ -2221,77 +2536,26 @@ AmsError AmsBackendCfs::set_slot_info(int slot_index, const SlotInfo& info, bool
         // The self-wipe guard lives in push_slot_identity_to_firmware, which
         // registers the expected post-write fingerprints with rfid_tracker_
         // before dispatching the gcode.
-        if (persist) {
-            helix::ams::FilamentSlotOverride ovr;
-            ovr.brand = info.brand;
-            ovr.spool_name = info.spool_name;
-            ovr.spoolman_id = info.spoolman_id;
-            ovr.spoolman_vendor_id = info.spoolman_vendor_id;
-            ovr.remaining_weight_g = info.remaining_weight_g;
-            ovr.total_weight_g = info.total_weight_g;
-            ovr.color_rgb = info.color_rgb;
-            ovr.color_set = true; // a user-edit always records a color, even pure black (#000000)
-            ovr.color_name = info.color_name;
-            ovr.material = info.material;
-            // Catalog product identity. Persisted so a reopen can restore the
-            // EXACT product rather than the alphabetically-first variant of the
-            // same vendor+material. Never auto-mirrored (firmware has no notion
-            // of a catalog product), so no user-lock flag is needed: a non-empty
-            // value can only have come from a user pick.
-            ovr.catalog_id = info.catalog_id;
-            ovr.product_name = info.product_name;
-            // User-lock: CFS uses FillUnsetOnly so the locks are
-            // belt-and-suspenders here, but they keep the on-disk schema
-            // consistent across backends and protect against a future
-            // policy change. See #965 for the motivating bug.
-            ovr.user_locked_color = true;
-            ovr.user_locked_material = !info.material.empty();
-            // SlotInfo carries the user's edit OR the bound Spoolman spool's
-            // filament profile; the material-DB fallback for fields left at 0
-            // is applied at emit time inside resolved_temps(). Centralized in
-            // the helper so the four AMS backends stay in sync.
-            helix::ams::populate_temps_from_slot_info(ovr, info);
-            // updated_at left default — save_async stamps a fresh value.
-            overrides_[slot_index] = ovr;
-        }
+        helix::ams::stage_user_override(overrides_, slot_index, info, declared);
 
         // Record our own SPOOLMAN_ID write for the fork dialect (the only
         // CFS whose _BOX_SLOT_SET carries it — stock CFS never writes ids
         // and never reports positive ones, so the record would be inert
         // there). Gate matches the write's reachability exactly:
-        // push_slot_identity_to_firmware's Fork branch runs only for
-        // persist && override_store_. Rule 1 must not read the in-flight
+        // push_slot_identity_to_firmware's Fork branch runs only with
+        // override_store_. Rule 1 must not read the in-flight
         // stale ids as an external re-bind (#1281 on flat-schema CFS).
-        if (persist && override_store_ && macro_variant_ == CfsMacroVariant::Fork) {
+        if (override_store_ && macro_variant_ == CfsMacroVariant::Fork) {
             record_own_spool_write(slot_index, info.spoolman_id, previous_firmware_id);
         }
     }
 
-    spdlog::info("[AMS CFS] Updated slot {} info (persist={}): {} {}", slot_index, persist,
-                 info.material, info.color_name);
+    spdlog::info("[AMS CFS] Updated slot {} info: {} {}", slot_index, info.material,
+                 info.color_name);
 
-    if (persist && override_store_) {
-        // Re-read from overrides_ under the lock to pick up the staged copy.
-        helix::ams::FilamentSlotOverride ovr_to_save;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            auto it = overrides_.find(slot_index);
-            if (it != overrides_.end()) {
-                ovr_to_save = it->second;
-            }
-        }
-        // Capture by value — save_async's MR callback may fire long after
-        // this returns (MR tracker ~60s timeout). Do NOT capture `this`:
-        // the backend may outlive its store, but the store will outlive
-        // the scheduled save by design.
-        const std::string tag = backend_log_tag();
-        override_store_->save_async(
-            slot_index, ovr_to_save, [tag, slot_index](bool success, const std::string& err) {
-                if (!success) {
-                    spdlog::warn("{} Override persist failed for slot {}: {}", tag, slot_index,
-                                 err);
-                }
-            });
+    if (override_store_) {
+        helix::ams::persist_staged_override(override_store_.get(), mutex_, overrides_, slot_index,
+                                            backend_log_tag(), "Override");
 
         // Push the user's identity back to firmware so the stock LCD, any
         // other Moonraker-DB readers, and the wrapper's own material-DB
@@ -2299,41 +2563,88 @@ AmsError AmsBackendCfs::set_slot_info(int slot_index, const SlotInfo& info, bool
         // slot. Color always; material_type when a firmware-observed code
         // for the user's pick exists. See push_slot_identity_to_firmware.
         push_slot_identity_to_firmware(slot_index, info.material, info.brand, info.catalog_id,
-                                       info.color_rgb);
+                                       info.color_rgb, &declared);
     }
 
     emit_event(EVENT_SLOT_CHANGED, std::to_string(slot_index));
     return AmsErrorHelper::success();
 }
 
+AmsError AmsBackendCfs::sync_external_identity(int slot_index, const SlotInfo& info) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        SlotInfo* target = bay_locked(slot_index);
+        if (!target) {
+            return AmsErrorHelper::invalid_slot(lane_noun(), slot_index,
+                                                system_info_.total_slots - 1);
+        }
+        // overrides_ is left alone: a synced value lives in memory only, and
+        // the next firmware parse overwrites it.
+        write_filament_fields(*target, info);
+    }
+
+    spdlog::info("[AMS CFS] Synced slot {} info: {} {}", slot_index, info.material,
+                 info.color_name);
+    emit_event(EVENT_SLOT_CHANGED, std::to_string(slot_index));
+    return AmsErrorHelper::success();
+}
+
+void AmsBackendCfs::persist_external_identity_impl(int slot_index,
+                                                   const helix::ams::Observation& spoolman) {
+    const std::string tag = backend_log_tag();
+    std::lock_guard<std::mutex> lock(mutex_);
+    helix::ams::persist_override_external_identity(override_store_.get(), overrides_, slot_index,
+                                                   spoolman, tag);
+}
+
+void AmsBackendCfs::persist_slot_weight(int slot_index, float remaining_weight_g,
+                                        float total_weight_g) {
+    const std::string tag = backend_log_tag();
+    std::lock_guard<std::mutex> lock(mutex_);
+    helix::ams::persist_override_weight(override_store_.get(), overrides_, slot_index,
+                                        remaining_weight_g, total_weight_g, tag);
+}
+
 void AmsBackendCfs::push_slot_identity_to_firmware(int global_index, const std::string& material,
                                                    const std::string& brand,
                                                    const std::string& catalog_id,
-                                                   uint32_t color_rgb) {
+                                                   uint32_t color_rgb,
+                                                   const helix::ams::Observation* declared) {
     // Validate slot index BEFORE formatting the gcode — invalid args trigger
     // an unhandled TypeError in box_wrapper that Klipper escalates to
     // invoke_shutdown. Better to silently no-op than to crash the printer.
+    // The bound is the attached unit count (the TNN alphabet while the box
+    // size is unknown), so a write for a bay the box has not reported never
+    // leaves the app. A malformed frame inflating total_slots past the TNN
+    // alphabet is still caught by the static gcode builders, which refuse
+    // anything they cannot encode.
     //
     // No color-value validation here on purpose: pure black (0x000000) is a
     // legitimate user choice and we don't want to silently drop it. The
-    // caller (set_slot_info, which sets color_set=true on the override) is
+    // caller (apply_user_edit, which sets color_set=true on the override) is
     // responsible for only invoking this when a real color was chosen.
-    constexpr int CFS_MAX_SLOTS = 16; // 4 units × 4 slots
-    if (global_index < 0 || global_index >= CFS_MAX_SLOTS) {
+    if (!validate_slot_index(global_index).success()) {
         spdlog::debug("{} push_slot_identity_to_firmware: skipping invalid slot {}",
                       backend_log_tag(), global_index);
         return;
     }
 
     // The Fork module defines no BOX_MODIFY_TN_DATA. `_BOX_SLOT_SET` requires
-    // a material; explicit clears route through clear_box_slot_profile().
+    // a material; explicit clears route through clear_slot_override().
     if (macro_variant_ == CfsMacroVariant::Fork) {
         std::string slot_material;
         std::string slot_brand;
         std::string name;
         int spoolman_id = 0;
+        std::vector<std::string> staged_echoes;
+        // The echo staging's stamp, for the matched abandons on the failure
+        // paths below.
+        std::uint64_t echo_sequence = 0;
+        int firmware_slot;
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            firmware_slot = firmware_slot_locked(global_index);
             for (const auto& unit : system_info_.units) {
                 for (const auto& slot : unit.slots) {
                     if (slot.global_index == global_index) {
@@ -2345,14 +2656,64 @@ void AmsBackendCfs::push_slot_identity_to_firmware(int global_index, const std::
                     }
                 }
             }
+
+            // Self-wipe guard, same contract as the stock branch below: the
+            // fork's box.py echoes _BOX_SLOT_SET's values back in later status
+            // frames, and that echo is the flat fingerprint changing to exactly
+            // what we pushed. slot_set_gcode uppercases MATERIAL, so the
+            // expectation carries the uppercased spelling the echo will report.
+            // With no baseline yet there is nothing to guard; the first
+            // observation for a slot is always a baseline and never clears.
+            if (!slot_material.empty() && rfid_tracker_.baseline(global_index)) {
+                staged_echoes = rfid_tracker_.expect_any_of(
+                    global_index, {compose_cfs_flat_uid(helix::text_io::to_upper(slot_material),
+                                                        /*has_color=*/true, color_rgb)});
+            }
+
+            // The echo guard for the lane model: stage what the user declared,
+            // pruned to the fields _BOX_SLOT_SET actually carries (material in
+            // the wire's uppercased spelling, color, brand, and the slot name
+            // the flat schema reads back as the product line). The stamp is for
+            // the matched abandons on the failure paths below.
+            if (declared) {
+                echo_sequence = own_write_echoes_.stage(global_index, *declared);
+                if (auto* staged = own_write_echoes_.staged(global_index)) {
+                    if (staged->material.has_value()) {
+                        staged->material = helix::text_io::to_upper(slot_material);
+                    }
+                    if (staged->spool_name.has_value()) {
+                        staged->product_name = std::move(staged->spool_name);
+                        staged->spool_name.reset();
+                    } else {
+                        staged->product_name.reset();
+                    }
+                    staged->color_name.reset();
+                }
+                own_write_echoes_.arm(global_index, std::string{});
+            }
         }
         std::string gcode =
-            slot_set_gcode(global_index, slot_material, color_rgb, slot_brand, name, spoolman_id);
+            slot_set_gcode(firmware_slot, slot_material, color_rgb, slot_brand, name, spoolman_id);
         if (gcode.empty()) {
             spdlog::debug("{} slot-set skipped for slot {}", backend_log_tag(), global_index);
+            std::lock_guard<std::mutex> lock(mutex_);
+            rfid_tracker_.forget_expected(global_index, staged_echoes);
+            if (declared) {
+                own_write_echoes_.abandon(global_index, echo_sequence);
+            }
             return;
         }
-        execute_gcode(gcode);
+        auto err = execute_gcode(gcode);
+        if (err.result != AmsResult::SUCCESS) {
+            // No echo is coming for this push's staged values, so release
+            // exactly their claims - an earlier push's in-flight echo stays
+            // expected. Same reason as the stock failure path.
+            std::lock_guard<std::mutex> lock(mutex_);
+            rfid_tracker_.forget_expected(global_index, staged_echoes);
+            own_write_echoes_.abandon(global_index, echo_sequence);
+            spdlog::warn("{} slot-set dispatch failed for slot {}: {}", backend_log_tag(),
+                         global_index, err.technical_msg);
+        }
         return;
     }
 
@@ -2387,6 +2748,8 @@ void AmsBackendCfs::push_slot_identity_to_firmware(int global_index, const std::
     // the wrapper never uses could poison its material-DB lookups.
     std::string mat_code;
     std::string expected_material_half;
+    std::vector<std::string> staged_echoes;
+    std::uint64_t echo_sequence = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto base = rfid_tracker_.baseline(global_index);
@@ -2470,8 +2833,34 @@ void AmsBackendCfs::push_slot_identity_to_firmware(int global_index, const std::
                 expected.push_back(intermediate_fp);
             if (final_fp != *base)
                 expected.push_back(final_fp);
-            if (!expected.empty())
-                rfid_tracker_.expect_any_of(global_index, std::move(expected));
+            staged_echoes = rfid_tracker_.expect_any_of(global_index, std::move(expected));
+        }
+
+        // The echo guard for the lane model, pruned to what this dialect's
+        // write carries: color always, material only as the firmware code
+        // BOX_MODIFY_TN_DATA was handed, and no name fields at all. The
+        // material is staged under the code's own catalog name, because the
+        // echo parses the code back through those tables rather than the
+        // user's spelling; a code the catalog cannot decode states no
+        // material at all.
+        if (declared) {
+            echo_sequence = own_write_echoes_.stage(global_index, *declared);
+            if (auto* staged = own_write_echoes_.staged(global_index)) {
+                staged->brand.reset();
+                staged->spool_name.reset();
+                staged->product_name.reset();
+                staged->color_name.reset();
+                if (staged->material.has_value()) {
+                    const auto* entry = FilamentCatalog::load_codes_cached("cfs")->resolve_code(
+                        "cfs", CfsMaterialDb::strip_code(mat_code));
+                    if (entry && !mat_code.empty()) {
+                        staged->material = entry->type;
+                    } else {
+                        staged->material.reset();
+                    }
+                }
+            }
+            own_write_echoes_.arm(global_index, std::string{});
         }
     }
 
@@ -2496,11 +2885,14 @@ void AmsBackendCfs::push_slot_identity_to_firmware(int global_index, const std::
         // Non-fatal — the override is already in lane_data so user data isn't
         // lost; only the firmware-side LCD won't reflect this edit.
         //
-        // Drop the expectation: no echo is coming, so the next fingerprint
-        // change is genuinely external and must be treated as a swap.
+        // Drop this push's expectation claims: no echo is coming for them, so
+        // the next fingerprint change is genuinely external and must be
+        // treated as a swap. An earlier push whose echo is still in flight
+        // keeps its own claims and stays expected.
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            rfid_tracker_.forget_expected(global_index);
+            rfid_tracker_.forget_expected(global_index, staged_echoes);
+            own_write_echoes_.abandon(global_index, echo_sequence);
             // Same reason: no write landed, so firmware will keep reporting
             // whatever it reported before and nothing of ours is echoing back.
             pushed_material_codes_.erase(global_index);
@@ -2519,7 +2911,36 @@ void AmsBackendCfs::push_slot_identity_to_firmware(int global_index, const std::
     execute_gcode("BOX_UPDATE_SAME_MATERIAL_LIST");
 }
 
-AmsError AmsBackendCfs::set_tool_mapping(int tool_number, int slot_index) {
+AmsError AmsBackendCfs::can_set_tool_mapping(int tool_number, int slot_index) const {
+    // slot_index names a bay, so its bound is the attached unit count (the
+    // TNN alphabet while the box size is unknown): a remap naming a bay on an
+    // unattached unit is refused instead of leaving firmware's routing table
+    // pointing at a bay that cannot feed.
+    // tool_number is a routing-table KEY, not a bay: the T0-T15 key space
+    // exists wherever firmware's map says it does — a slicer-driven remap or
+    // Creality's own UI can hold a high key while fewer units are attached —
+    // so its bound is the TNN alphabet.
+    if (get_remap_strategy() == RemapStrategy::None) {
+        return AmsErrorHelper::not_supported("Tool remapping on this firmware's CFS module");
+    }
+    constexpr int CFS_MAX_SLOTS = 16; // 4 units × 4 slots
+    if (tool_number < 0 || tool_number >= CFS_MAX_SLOTS) {
+        return AmsErrorHelper::tool_out_of_range(tool_number);
+    }
+    if (auto err = validate_slot_index(slot_index); !err.success()) {
+        return err;
+    }
+    if (CfsMaterialDb::slot_to_tnn(tool_number).empty() ||
+        CfsMaterialDb::slot_to_tnn(slot_index).empty()) {
+        return AmsError(AmsResult::INVALID_TOOL,
+                        "Failed to encode TNN for tool=" + std::to_string(tool_number) +
+                            " slot=" + std::to_string(slot_index),
+                        lv_tr("Invalid tool/slot"), "");
+    }
+    return AmsErrorHelper::success();
+}
+
+AmsError AmsBackendCfs::set_tool_mapping_impl(int tool_number, int slot_index) {
     // CFS exposes per-print tool→slot remap via the BOX_MODIFY_TN gcode (format
     // observed in box_wrapper.cpython-39.so: "BOX_MODIFY_TN %s=%s"). Both sides
     // use the TNN notation (T1A..T4D) that matches the box.map JSON keys/values
@@ -2527,24 +2948,11 @@ AmsError AmsBackendCfs::set_tool_mapping(int tool_number, int slot_index) {
     //
     // Example: set_tool_mapping(0, 5) sends "BOX_MODIFY_TN T1A=T2B" — when the
     // slicer emits T0/T1A, the CFS routes from physical slot T2B (index 5).
-    constexpr int CFS_MAX_SLOTS = 16; // 4 units × 4 slots
-    if (tool_number < 0 || tool_number >= CFS_MAX_SLOTS) {
-        return AmsError(AmsResult::INVALID_TOOL,
-                        "Tool " + std::to_string(tool_number) + " out of range",
-                        "Invalid tool number", "");
+    if (auto err = can_set_tool_mapping(tool_number, slot_index); !err.success()) {
+        return err;
     }
-    if (slot_index < 0 || slot_index >= CFS_MAX_SLOTS) {
-        return AmsErrorHelper::invalid_slot(slot_index, CFS_MAX_SLOTS - 1);
-    }
-
-    std::string tool_tnn = CfsMaterialDb::slot_to_tnn(tool_number);
-    std::string slot_tnn = CfsMaterialDb::slot_to_tnn(slot_index);
-    if (tool_tnn.empty() || slot_tnn.empty()) {
-        return AmsError(AmsResult::INVALID_TOOL,
-                        "Failed to encode TNN for tool=" + std::to_string(tool_number) +
-                            " slot=" + std::to_string(slot_index),
-                        "Invalid tool/slot", "");
-    }
+    const std::string tool_tnn = CfsMaterialDb::slot_to_tnn(tool_number);
+    const std::string slot_tnn = CfsMaterialDb::slot_to_tnn(slot_index);
 
     // Optimistic local update so get_tool_mapping() reflects the new mapping
     // immediately for UI/restore-snapshot reads. The next box-status websocket
@@ -2561,10 +2969,12 @@ AmsError AmsBackendCfs::set_tool_mapping(int tool_number, int slot_index) {
     // Only lanes the current parse actually knows about can be recorded: a
     // forward entry naming a lane with no SlotInfo has no reverse counterpart
     // to pair with, and resolve_op_button_slot() would hand the filament panel
-    // a slot index that get_slot_global() answers with nullptr. The command is
-    // still dispatched — firmware is the authority, the box may have a unit we
-    // have not parsed a frame for yet, and that frame is what will make the
-    // mapping real in both directions.
+    // a slot index that get_slot_global() answers with nullptr. The guard
+    // above refuses bays past the attached count only once a frame has been
+    // parsed; this re-read catches the two windows the guard cannot — a unit
+    // detaching between that check and this lock, and a remap issued before
+    // the first box frame — where the command still goes out but the local
+    // map stays untouched until a frame confirms where the lanes actually are.
     {
         std::lock_guard<std::mutex> lock(mutex_);
         const int known_slots = system_info_.total_slots;
@@ -2599,7 +3009,7 @@ AmsError AmsBackendCfs::set_tool_mapping(int tool_number, int slot_index) {
         // carrying the updated map ever arrives, which is why
         // reports_firmware_tool_mapping() stays false here. The optimistic local
         // update above is therefore the only confirmation the UI will get.
-        // See docs/devel/CREALITY_CFS_INTERNALS.md § Tool remap.
+        // See docs/devel/printer-research/CREALITY_CFS_K1_INTERNALS.md § Tool remap.
         spdlog::debug("[AMS CFS] K1 firmware: BOX_MODIFY_TN persists silently and applies to "
                       "the slicer's T0-T15 changes; no confirming box frame will follow.");
     }
@@ -2651,7 +3061,7 @@ AmsError AmsBackendCfs::enable_bypass() {
     // supports_bypass itself.
     if (!helix::bypass_available_for(system_info_.supports_bypass)) {
         return AmsError(AmsResult::NOT_SUPPORTED, "Bypass not supported",
-                        "No verified bypass command for this CFS firmware", "");
+                        lv_tr("No verified bypass command for this CFS firmware"), "");
     }
 
     // Filament still loaded from a bay is the caller's problem on backends
@@ -2660,7 +3070,7 @@ AmsError AmsBackendCfs::enable_bypass() {
     // strand bay filament behind an external feed.
     if (system_info_.filament_loaded && system_info_.current_slot >= 0) {
         return AmsError(AmsResult::WRONG_STATE, "Filament is loaded",
-                        "Unload the CFS filament before enabling bypass", "");
+                        lv_tr("Unload the CFS filament before enabling bypass"), "");
     }
 
     if (schema_ == CfsSchema::Flat) {
@@ -2671,7 +3081,7 @@ AmsError AmsBackendCfs::enable_bypass() {
         // for the homing/verification plumbing like every other CFS action.
         if (macro_variant_ != CfsMacroVariant::Fork || external_slot_index_ < 0) {
             return AmsError(AmsResult::NOT_SUPPORTED, "Bypass not supported",
-                            "This CFS firmware exposes no external spool slot", "");
+                            lv_tr("This CFS firmware exposes no external spool slot"), "");
         }
         std::string gcode = "T" + std::to_string(external_slot_index_);
         {
@@ -2797,7 +3207,7 @@ namespace {
 /// loaded at 240°C and taps Load, BOX_SET_TEMP would cool the hotend
 /// mid-op and the subsequent flush would underextrude. A cold extruder
 /// instead surfaces a friendly "Extrude below minimum temp — pre-heat
-/// first" modal via the key111 entry in CFS_ERROR_TABLE.
+/// first" modal via the key111 entry in KlipperErrorTable.
 ///
 /// Klipper macros have no try/finally — if the body raises, steps 7-9
 /// are skipped. Best-effort unwind (independent BOX_RESTORE_FAN +
@@ -2899,10 +3309,7 @@ std::string AmsBackendCfs::slot_set_gcode(int global_slot_index, const std::stri
                       global_slot_index);
         return "";
     }
-    std::string upper = material;
-    for (char& c : upper) {
-        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-    }
+    std::string upper = helix::text_io::to_upper(material);
     char color[10];
     std::snprintf(color, sizeof(color), "#%06X", color_rgb & 0xFFFFFFu);
     return "_BOX_SLOT_SET SLOT=" + std::to_string(global_slot_index) +
@@ -2930,29 +3337,38 @@ std::string AmsBackendCfs::load_gcode(int idx, CfsMacroVariant variant) {
         // K1 official CFS upgrade firmware — fresh load, nozzle empty. The feed
         // steps follow the firmware's BOX_LOAD_MATERIAL_WITHOUT_MATERIAL chain
         //   (M104 → CHECK_MATERIAL → EXTRUDE → EXTRUDER_EXTRUDE → FLUSH),
-        // but this is not a literal mirror of it: we carry explicit TNN= on the
-        // two commands that take it, rather than relying on the box's implicit
-        // "current TN" — addressing the slot explicitly is what keeps this
-        // independent of Tnn_map state), and BOX_GO_TO_EXTRUDE_POS
-        // plus the trailing BOX_NOZZLE_CLEAN are ours — the WITHOUT_MATERIAL
-        // macro has neither. Both commands are defined in box.cfg and used by
-        // the WITH_MATERIAL chain.
+        // carrying explicit TNN= on the two commands that take it rather than
+        // relying on the box's implicit "current TN", which keeps the script
+        // independent of Tnn_map state.
         //
         // BOX_MATERIAL_FLUSH is emitted BARE. It has no TNN parameter: box.cfg
         // documents it as `BOX_MATERIAL_FLUSH LEN=100 VELOCITY=360 TEMP=220`,
-        // and cmd_material_flush reads only LEN/VELOCITY/TEMP, defaulting from
-        // the [box] Tn_retrude / Tn_extrude_velocity / Tn_extrude_temp keys.
+        // and cmd_material_flush reads only LEN/VELOCITY/TEMP/PERCENT,
+        // defaulting from the [box] Tn_retrude / Tn_extrude_velocity /
+        // Tn_extrude_temp keys.
         //
-        // BOX_EXTRUDER_EXTRUDE is the root-cause fix for "no auto-extrude after
-        // load" (#968): the firmware's WITHOUT_MATERIAL chain drives the main
-        // extruder after the cassette feed, and we previously omitted it.
-        // Homing is handled upstream by dispatch_action_script; do NOT add
-        // IF_NEED_HOME here. Envelope (wrap_with_envelope_k1) adds ERROR_CLEAR /
-        // CHECK_MATERIAL / MOVE_TO_SAFE_POS.
+        // The script ends at the flush: cmd_material_flush finishes with a
+        // nozzle clean and a small retract of its own, so a BOX_NOZZLE_CLEAN
+        // after it wipes a nozzle that was just wiped and buys a second trip to
+        // the cleaning positions. The firmware's WITHOUT_MATERIAL chain ends
+        // there for the same reason. A swap wipes explicitly instead, because
+        // there the clean clears the OLD material after the cut, before any
+        // flush has run.
+        //
+        // BOX_GO_TO_EXTRUDE_POS is ours — the WITHOUT_MATERIAL chain carries no
+        // positioning. It stays because the flush purges wherever the toolhead
+        // is standing, and the WITH_MATERIAL chain uses this same command to put
+        // it over the configured extrude position first.
+        //
+        // BOX_EXTRUDER_EXTRUDE drives the toolhead extruder to grab what the
+        // cassette just fed; without it the box feeds and the nozzle never
+        // extrudes. Homing is handled upstream by dispatch_action_script; do NOT
+        // add IF_NEED_HOME here. Envelope (wrap_with_envelope_k1) adds
+        // ERROR_CLEAR / CHECK_MATERIAL / fan save+restore / MOVE_TO_SAFE_POS.
         return wrap_with_envelope_k1("BOX_GO_TO_EXTRUDE_POS\n"
                                      "BOX_EXTRUDE_MATERIAL TNN=" +
                                      tnn + "\nBOX_EXTRUDER_EXTRUDE TNN=" + tnn +
-                                     "\nBOX_MATERIAL_FLUSH\nBOX_NOZZLE_CLEAN");
+                                     "\nBOX_MATERIAL_FLUSH");
     }
     // Use CR_BOX_* commands directly — M8200 macro's Jinja2 `params.I|int` is broken
     // on Creality's Klipper fork (always evaluates to 0, loading T1A regardless of I= value).
@@ -2975,21 +3391,33 @@ std::string AmsBackendCfs::unload_gcode(CfsMacroVariant variant) {
     }
     if (variant == CfsMacroVariant::K1) {
         // K1: the step list follows the firmware's BOX_QUIT_MATERIAL chain
-        // (ERROR_CLEAR → CHECK_MATERIAL → CUT → RETRUDE), but the tail is NOT
-        // a literal mirror: the firmware macro parks at
-        // BOX_GO_TO_BOX_EXTRUDE_POS and has BOX_MOVE_TO_SAFE_POS commented
-        // out, while our shared envelope parks via BOX_MOVE_TO_SAFE_POS.
-        // Deliberate divergence, tracked in #1278 — changing toolhead motion
-        // on K1 hardware nobody on the project owns is the failure class that
-        // opened #968, so the park stays as-is until a K1+CFS owner validates
-        // otherwise. BOX_CUT_MATERIAL handles the cut;
-        // BOX_RETRUDE_MATERIAL is the no-TNN retract primitive (operates on
-        // the currently-loaded slot tracked by the box driver) — same one
-        // BOX_QUIT_MATERIAL uses in box.cfg. Nozzle is empty after the
-        // cut+retract, so no wipe. Homing handled upstream.
+        // (ERROR_CLEAR → CHECK_MATERIAL → CUT → RETRUDE), but parks through the
+        // envelope's BOX_MOVE_TO_SAFE_POS where BOX_QUIT_MATERIAL ends at
+        // BOX_GO_TO_BOX_EXTRUDE_POS. The divergence is intentional (#1278).
+        //
+        // safe_pos_y is the coordinate the firmware designates as clear of the
+        // box and cutter hardware, and BOX_MOVE_TO_SAFE_POS is where every other
+        // box operation parks. BOX_GO_TO_BOX_EXTRUDE_POS moves to the retrude
+        // working position instead; inside BOX_QUIT_MATERIAL it is the setup
+        // move for a BOX_RETRUDE_MATERIAL_WITH_TNN step that ships commented
+        // out, so on stock firmware it leaves the toolhead standing at a work
+        // position with nothing following it. A standalone unload is better off
+        // ending somewhere the firmware calls safe.
+        //
+        // BOX_CUT_MATERIAL handles the cut; BOX_RETRUDE_MATERIAL is the no-TNN
+        // retract primitive (operates on the currently-loaded slot tracked by
+        // the box driver) — the same one BOX_QUIT_MATERIAL uses in box.cfg.
+        // Nozzle is empty after the cut+retract, so no wipe. Homing handled
+        // upstream.
         return wrap_with_envelope_k1("BOX_CUT_MATERIAL\n"
                                      "BOX_RETRUDE_MATERIAL");
     }
+    // The cut is BOX_CUT_MATERIAL, the firmware's own positioned cut. CR_BOX_CUT
+    // is a bare cutter primitive that strikes from wherever the toolhead
+    // stands, and needs the caller to stand at [box] pre_cut_pos first; the
+    // envelope leaves the head at the purge chute, where that strike runs into
+    // the frame on a K2 Pro.
+    //
     // Unload ends with CR_BOX_RETRUDE — the nozzle is empty (cut + retracted),
     // so no wipe needed. Skipping the wipe also avoids the wipe macro pushing
     // anything back into the hotend during a "filament-out" state.
@@ -2997,7 +3425,7 @@ std::string AmsBackendCfs::unload_gcode(CfsMacroVariant variant) {
     // BOX_QUIT_MATERIAL_RETRUDE_MATERIAL sequence (state-machine settle
     // after the cut).
     return wrap_with_park(variant,
-                          "CR_BOX_PRE_OPT\nCR_BOX_CUT\nBOX_MODE_WAIT\n"
+                          "CR_BOX_PRE_OPT\nBOX_CUT_MATERIAL\nBOX_MODE_WAIT\n"
                           "CR_BOX_RETRUDE\nCR_BOX_END_OPT",
                           /*wipe_after=*/false);
 }
@@ -3089,20 +3517,21 @@ std::string AmsBackendCfs::bypass_unload_gcode(CfsMacroVariant variant, bool has
     // Fallback for a CFS printer that does not define QUIT_MATERIAL. Same shape
     // as the vendor macro, built only from primitives this dialect's own unload
     // already emits, so it introduces no new command-presence risk:
-    // BOX_GO_TO_EXTRUDE_POS and BOX_MOVE_TO_SAFE_POS on both, and the dialect's
-    // cut (BOX_CUT_MATERIAL on K1, CR_BOX_CUT on K2 — the latter observed
-    // working under bypass on a K2 Plus, since the cutter is toolhead-side and
-    // needs no bay).
+    // BOX_GO_TO_EXTRUDE_POS and BOX_MOVE_TO_SAFE_POS on both, and
+    // BOX_CUT_MATERIAL, the firmware's positioned cut, on both. The cutter is
+    // toolhead-side and needs no bay. Never the K2's bare CR_BOX_CUT: it
+    // strikes from wherever the toolhead stands, and here that is the purge
+    // chute, not [box] pre_cut_pos.
     //
     // Deliberately NOT wrap_with_park()/wrap_with_envelope_k1(): those envelopes
     // exist to hand the box a bay operation (BOX_MODE_WAIT, CR_BOX_PRE_OPT /
     // CR_BOX_END_OPT, BOX_CHECK_MATERIAL), and a stood-down box is exactly what
     // has no answer for any of them. The vendor macro skips them too.
     //
-    const char* cut = variant == CfsMacroVariant::K1 ? "BOX_CUT_MATERIAL" : "CR_BOX_CUT";
     return std::string("SAVE_GCODE_STATE NAME=helix_cfs_bypass\n"
-                       "BOX_GO_TO_EXTRUDE_POS\n") +
-           cut + "\nM400\n" + long_retract_gcode() +
+                       "BOX_GO_TO_EXTRUDE_POS\n"
+                       "BOX_CUT_MATERIAL\nM400\n") +
+           long_retract_gcode() +
            "\nBOX_MOVE_TO_SAFE_POS\n"
            "RESTORE_GCODE_STATE NAME=helix_cfs_bypass";
 }
@@ -3146,15 +3575,27 @@ std::string AmsBackendCfs::swap_gcode(int idx, CfsMacroVariant variant) {
                                      "\nBOX_MATERIAL_FLUSH");
     }
     // Full swap: unload current (cut+retract) then load new slot, all in one
-    // session. BOX_MODE_WAIT interposed after CR_BOX_CUT (let the cutter
-    // recover) and before CR_BOX_EXTRUDE (new slot's state-machine handoff).
+    // session. The cut is BOX_CUT_MATERIAL for the same reason as unload_gcode:
+    // CR_BOX_CUT strikes from wherever the toolhead stands. BOX_MODE_WAIT
+    // interposed after the cut (let the cutter recover) and before
+    // CR_BOX_EXTRUDE (new slot's state-machine handoff).
     // Ends with flush of the NEW filament so wipe is required, same as load.
     return wrap_with_park(variant,
-                          "CR_BOX_PRE_OPT\nCR_BOX_CUT\nBOX_MODE_WAIT\n"
+                          "CR_BOX_PRE_OPT\nBOX_CUT_MATERIAL\nBOX_MODE_WAIT\n"
                           "CR_BOX_RETRUDE\nBOX_MODE_WAIT\n"
                           "CR_BOX_EXTRUDE TNN=" +
                               tnn + "\nCR_BOX_WASTE\nCR_BOX_FLUSH TNN=" + tnn + "\nCR_BOX_END_OPT",
                           /*wipe_after=*/true);
+}
+
+void AmsBackendCfs::abort_action_state(const MoonrakerError& err) {
+    // Klipper rejection (key849, busy, etc.) and timeouts both land here. Either
+    // way the driver isn't running our script anymore, so flip back to IDLE so
+    // the UI doesn't get stuck on a "loading" spinner.
+    spdlog::error("[AMS CFS] Action script failed: {}", err.message);
+    std::lock_guard<std::mutex> lock(mutex_);
+    system_info_.action = AmsAction::IDLE;
+    end_phase_tracking();
 }
 
 AmsError AmsBackendCfs::dispatch_action_script(std::string gcode) {
@@ -3167,18 +3608,20 @@ AmsError AmsBackendCfs::dispatch_action_script(std::string gcode) {
     auto on_complete = [this]() { finish_action(); };
 
     auto token = lifetime_.token();
+
+    // A failure before the payload ships leaves nothing to unwind: the
+    // envelope's SAVE_GCODE_STATE and BOX_SAVE_FAN never reached the printer.
+    // Sending the restore anyway earns a rejection that Klipper broadcasts on
+    // the `!!` stream, which GcodeErrorRouter renders as a second error toast
+    // stacked on the real one.
+    auto on_predispatch_error = [this, token](const MoonrakerError& err) {
+        token.defer("AmsBackendCfs::predispatch_err", [this, err]() { abort_action_state(err); });
+    };
+
     auto on_error = [this, token](const MoonrakerError& err) {
         // L081 Mechanism C: marshal member writes (system_info_) to main.
         token.defer("AmsBackendCfs::action_err", [this, err]() {
-            // Klipper rejection (key849, busy, etc.) and timeouts both land here.
-            // Either way the driver isn't running our script anymore, so flip back
-            // to IDLE so the UI doesn't get stuck on a "loading" spinner.
-            spdlog::error("[AMS CFS] Action script failed: {}", err.message);
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                system_info_.action = AmsAction::IDLE;
-                end_phase_tracking();
-            }
+            abort_action_state(err);
 
             // Best-effort unwind. The wrap_with_park envelope emits
             // BOX_SAVE_FAN + SAVE_GCODE_STATE upfront and relies on the
@@ -3231,7 +3674,8 @@ AmsError AmsBackendCfs::dispatch_action_script(std::string gcode) {
     return ensure_homed_then(std::move(gcode), std::move(on_complete), std::move(on_error),
                              IMoonrakerAPI::AMS_OPERATION_TIMEOUT_MS,
                              /*skip_homing=*/macro_variant_ == CfsMacroVariant::Fork,
-                             /*silent=*/false, /*caller_surfaces_errors=*/false);
+                             /*silent=*/false, /*caller_surfaces_errors=*/false,
+                             std::move(on_predispatch_error));
 }
 
 // ============================================================================
@@ -3611,8 +4055,8 @@ AmsBackendCfs::classify_error(const std::string& raw_line,
     // above. It asks for far less of the string — only that the line is about
     // refilling — and makes up the difference with machine state: the box itself
     // says there is no filament at the gate (filament_useup / the flat schema's
-    // `runout`) and the job is paused. Weaker evidence, so it surfaces the
-    // firmware's own words rather than a claim about which give-up path ran.
+    // filament_detected) and the job is paused. Weaker evidence, so it surfaces
+    // the firmware's own words rather than a claim about which give-up path ran.
     const bool weak_refill_hint = !no_matching_spool && !refill_disabled && !no_tray_available &&
                                   helix::contains_ci(detail, "refill") &&
                                   system_info_.filament_runout;
@@ -3657,6 +4101,19 @@ helix::printer::EndlessSpoolCapabilities AmsBackendCfs::get_endless_spool_capabi
     std::lock_guard<std::mutex> lock(mutex_);
     using namespace helix::printer;
 
+    // No frame has carried the enable bit yet, so endless_spool_enabled is
+    // still its constructed default. Answering Off from that default states
+    // "will not switch spools on runout" on no evidence, and the real frame
+    // then contradicts it. Unknown says we do not know and NotReady says why,
+    // same as AmsBackendHappyHare::get_endless_spool_capabilities. A unit
+    // being up is no proxy: the box sends units and the bit independently.
+    if (!endless_spool_enable_reported_) {
+        return {.availability = EndlessSpoolAvailability::Available,
+                .enabled = EndlessSpoolEnabled::Unknown,
+                .editability = EndlessSpoolEditability::ReadOnly,
+                .restriction = EndlessSpoolRestriction::NotReady};
+    }
+
     // Honest enablement (#1391): auto_refill on promises a refill ATTEMPT, but
     // the box only swaps between same_material-identical spools, so when every
     // group is a singleton a runout stops the print despite the setting being
@@ -3667,8 +4124,13 @@ helix::printer::EndlessSpoolCapabilities AmsBackendCfs::get_endless_spool_capabi
     // instead of restating it.
     EndlessSpoolEnabled enabled =
         system_info_.endless_spool_enabled ? EndlessSpoolEnabled::On : EndlessSpoolEnabled::Off;
-    if (enabled == EndlessSpoolEnabled::On && system_info_.endless_spool_groups_reported &&
-        endless_spool_config_from_groups(system_info_.endless_spool_group_ids).empty()) {
+    // The fork's swap plan answers the same question for the loaded spool: an
+    // empty chain means a runout now has nothing to swap to.
+    const auto& edges = flat_backup_edges_;
+    if (enabled == EndlessSpoolEnabled::On &&
+        ((system_info_.endless_spool_groups_reported &&
+          endless_spool_config_from_groups(system_info_.endless_spool_group_ids).empty()) ||
+         (edges && endless_spool_config_from_edges(*edges).empty()))) {
         enabled = EndlessSpoolEnabled::OnWithoutBackup;
     }
 
@@ -3676,6 +4138,28 @@ helix::printer::EndlessSpoolCapabilities AmsBackendCfs::get_endless_spool_capabi
             .enabled = enabled,
             .editability = EndlessSpoolEditability::ReadOnly,
             .restriction = EndlessSpoolRestriction::FirmwareManaged};
+}
+
+helix::printer::EndlessSpoolConfig AmsBackendCfs::get_endless_spool_config() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    // A plan published while swapping is off backs nothing up.
+    if (!system_info_.endless_spool_enabled || !flat_backup_edges_) {
+        return {};
+    }
+    return endless_spool_config_from_edges(*flat_backup_edges_);
+}
+
+void AmsBackendCfs::record_auto_refill_sent(bool enable) {
+    // The box resends the bit only when it changes, so a send it accepts as
+    // a no-op is never confirmed, and the status line and switch would go on
+    // showing the old value. A later frame that carries the bit overrides
+    // this.
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        system_info_.endless_spool_enabled = enable;
+        endless_spool_enable_reported_ = true;
+    }
+    emit_event(EVENT_STATE_CHANGED);
 }
 
 std::vector<int> AmsBackendCfs::get_tool_mapping() const {
@@ -3701,71 +4185,97 @@ uint64_t AmsBackendCfs::firmware_tool_mapping_generation() const {
     return firmware_map_generation_;
 }
 
-std::vector<helix::printer::DeviceAction> AmsBackendCfs::get_device_actions() const {
-    using DA = helix::printer::DeviceAction;
-    using AT = helix::printer::ActionType;
-    return {
-        DA{"refresh_rfid",
-           "Refresh RFID",
-           "",
-           "",
-           "Re-read spool RFID tags and remaining length",
-           AT::BUTTON,
-           {},
-           {},
-           0,
-           100,
-           "",
-           -1,
-           true,
-           ""},
-        DA{"toggle_auto_refill",
-           "Toggle Auto-Refill",
-           "",
-           "",
-           "Enable/disable automatic backup spool switching",
-           AT::TOGGLE,
-           {},
-           {},
-           0,
-           100,
-           "",
-           -1,
-           true,
-           ""},
-        DA{"nozzle_clean",
-           "Clean Nozzle",
-           "",
-           "",
-           "Wipe nozzle on silicone cleaning strip",
-           AT::BUTTON,
-           {},
-           {},
-           0,
-           100,
-           "",
-           -1,
-           true,
-           ""},
-        DA{"comm_test",
-           "Communication Test",
-           "",
-           "",
-           "Test RS-485 link to CFS units",
-           AT::BUTTON,
-           {},
-           {},
-           0,
-           100,
-           "",
-           -1,
-           true,
-           ""},
-    };
+namespace {
+
+// Both calibration flows home the toolhead by design (G28 inside
+// BOX_FIND_CUT_POS, XYZ_ZERO for the chute), so PAUSED blocks them too.
+// Stated through print_blocks_filament_op() with self_homes=true so the rule
+// cannot drift from the one greying every filament-op button.
+AmsError refuse_calibration_if_printing(IMoonrakerAPI* api) {
+    if (!api) {
+        // No connection: lifecycle unknown, do not block (mirrors
+        // AmsSubscriptionBackend::refuse_if_printing's null-api path).
+        return AmsErrorHelper::success();
+    }
+    const auto lifecycle = api->printer_state().print_state().get_print_lifecycle();
+    if (print_blocks_filament_op(lifecycle, /*backend_self_homes=*/true)) {
+        return AmsErrorHelper::print_active(lifecycle == PrintState::Paused,
+                                            /*pause_allows_ops=*/false);
+    }
+    return AmsErrorHelper::success();
 }
 
-AmsError AmsBackendCfs::execute_device_action(const std::string& action_id,
-                                              const std::any& /*value*/) {
+// Gcode response lines captured while BOX_FIND_CUT_POS runs. Held by
+// shared_ptr so the WebSocket-thread handler stays valid regardless of the
+// backend's lifetime.
+struct CutterWatch {
+    std::string found_line; // "Found cut position <axis>: <value>"
+    std::string saved_line; // "SAVE_BOX_CFG ok: cut_pos_y=<value>"
+};
+
+std::atomic<int> s_gcode_watch_seq{0};
+
+} // namespace
+
+std::vector<helix::printer::DeviceSection> AmsBackendCfs::get_device_sections() const {
+    // All four box operations are one-shot care commands against the CFS
+    // hardware, so a single maintenance section carries them; a split would be
+    // a taxonomy with one or two members each. The device-operations overlay
+    // renders only actions whose section matches one declared here.
+    using DS = helix::printer::DeviceSection;
+    std::vector<DS> sections = {
+        DS{"maintenance", "Maintenance", 0, "RFID, auto-refill, nozzle and link care"},
+    };
+    if (macro_variant_ == CfsMacroVariant::K1) {
+        sections.push_back(
+            DS{"calibration", "Calibration", 1, "Cutter and purge chute calibration"});
+    }
+    return sections;
+}
+
+std::vector<helix::printer::DeviceAction> AmsBackendCfs::get_device_actions() const {
+    using DA = helix::printer::DeviceAction;
+    // No value until a frame has reported the bit: an unchecked switch would
+    // claim off.
+    std::any auto_refill;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (endless_spool_enable_reported_) {
+            auto_refill = system_info_.endless_spool_enabled;
+        }
+    }
+    std::vector<DA> actions = {
+        DA::button("refresh_rfid", "Refresh RFID", "maintenance", "",
+                   "Re-read spool RFID tags and remaining length"),
+        DA::toggle("toggle_auto_refill", "Toggle Auto-Refill", "maintenance",
+                   std::move(auto_refill), "", "Enable/disable automatic backup spool switching"),
+        DA::button("nozzle_clean", "Clean Nozzle", "maintenance", "",
+                   "Wipe nozzle on silicone cleaning strip"),
+        DA::button("comm_test", "Communication Test", "maintenance", "",
+                   "Test RS-485 link to CFS units"),
+    };
+    if (macro_variant_ == CfsMacroVariant::K1) {
+        // Both actions home the toolhead, so a print that owns the machine
+        // (or a pause it would drag the head through) greys them out; the
+        // execute paths refuse again for anything the list snapshot missed.
+        const bool print_blocks = !refuse_calibration_if_printing(api_).success();
+        std::string reason;
+        if (print_blocks) {
+            reason = "Printer is busy with a print";
+        }
+        for (DA a : {DA::button("calibrate_cutter", "Calibrate Cutter", "calibration", "",
+                                "Home and sweep the cutter to re-find its position"),
+                     DA::button("calibrate_purge_chute", "Calibrate Purge Chute", "calibration", "",
+                                "Guide the toolhead to the chute's extrude position")}) {
+            a.enabled = !print_blocks;
+            a.disable_reason = reason;
+            actions.push_back(std::move(a));
+        }
+    }
+    return actions;
+}
+
+AmsError AmsBackendCfs::execute_device_action(const std::string& action_id, const std::any& value) {
     if (action_id == "refresh_rfid") {
         // Probe every connected CFS unit's RFID tags. Inserting a spool does NOT
         // auto-read its tag: the box reports vender/color/material as sentinels
@@ -3794,19 +4304,35 @@ AmsError AmsBackendCfs::execute_device_action(const std::string& action_id,
     }
 
     if (action_id == "toggle_auto_refill") {
+        if (auto err = reject_if_flat_schema("Auto-refill"); !err.success()) {
+            return err;
+        }
         // Setter, not a toggle: the handler reads ENABLE via gcmd.get_int, and
         // Creality's own master-server sends an explicit ENABLE=1/0 on both
         // families ([A]: string tables in CR4CU220812S11 V2.3.5.34 and
         // CR0CN240110C10 V1.1.4.11). A bare call leaves the argument absent;
         // whether the wrapper then throws or defaults is unverified, so send
-        // the state we want — the inverse of the last box-reported flag.
+        // the state we want: the switch's, or with no switch value the
+        // inverse of the cached flag.
         bool enable;
-        {
+        if (const bool* requested = std::any_cast<bool>(&value)) {
+            enable = *requested;
+        } else {
             std::lock_guard<std::mutex> lock(mutex_);
             enable = !system_info_.endless_spool_enabled;
         }
-        return execute_gcode(enable ? "BOX_ENABLE_AUTO_REFILL ENABLE=1"
-                                    : "BOX_ENABLE_AUTO_REFILL ENABLE=0");
+        // The fork registers its own setter for the same flag.
+        const std::string setter = macro_variant_ == CfsMacroVariant::Fork
+                                       ? "_BOX_SET_RUNOUT_SWAP ENABLE="
+                                       : "BOX_ENABLE_AUTO_REFILL ENABLE=";
+        // Recorded only once Klipper has run it: a dispatch proves nothing, and
+        // a dialect without the command or a rejected send must leave the
+        // cache on the box's last word.
+        auto token = lifetime_.token();
+        return execute_gcode(setter + (enable ? "1" : "0"), [this, token, enable]() {
+            token.defer("AmsBackendCfs::auto_refill_sent",
+                        [this, enable]() { record_auto_refill_sent(enable); });
+        });
     }
 
     if (action_id == "nozzle_clean") {
@@ -3819,73 +4345,302 @@ AmsError AmsBackendCfs::execute_device_action(const std::string& action_id,
         return AmsErrorHelper::success();
     }
 
+    if (action_id == "calibrate_cutter") {
+        return calibrate_cutter();
+    }
+
+    if (action_id == "calibrate_purge_chute") {
+        // The section-detail overlay routes this action to the guided chute
+        // overlay instead of executing it; landing here means the routing
+        // hook did not run (e.g. a future caller bypassing the overlay).
+        return AmsErrorHelper::not_supported(
+            "Purge chute calibration runs through the guided overlay");
+    }
+
     return AmsErrorHelper::not_supported("Unknown action: " + action_id);
+}
+
+// ============================================================================
+// Cutter / purge-chute calibration (K1 stock dialect only)
+// ============================================================================
+//
+// Both flows below are the stock screen's verified choreography for a K1 Max
+// + CFS on fw 2.3.5.33 (prestonbrown/helixscreen#1282). Every entry gates on
+// macro_variant_ == K1: the K2 box firmware ships none of these commands
+// (its cutter check is MOTOR_CHECK_CUT_POS) and the Kalico fork was never
+// observed to expose them either.
+
+AmsError
+AmsBackendCfs::calibrate_cutter(std::function<void(bool ok, const std::string& line)> on_result) {
+    if (macro_variant_ != CfsMacroVariant::K1) {
+        return AmsErrorHelper::not_supported("Cutter calibration is K1-stock only");
+    }
+    if (auto e = refuse_calibration_if_printing(api_); !e.success()) {
+        return e;
+    }
+    if (calibration_in_flight_) {
+        return AmsErrorHelper::busy("calibration");
+    }
+
+    // Klipper reports the result on the gcode response stream, not in the
+    // gcode/script RPC reply: listen for the terminal lines while the macro
+    // runs. The handler touches only the shared watch, so it is safe on the
+    // WebSocket thread and after the backend is gone (the entry then stays
+    // registered on the client until teardown, updating a watch nobody reads).
+    auto watch = std::make_shared<CutterWatch>();
+    std::string handler;
+    if (client_) {
+        handler = "helix_cfs_cutcal_" + std::to_string(++s_gcode_watch_seq);
+        client_->register_method_callback(
+            "notify_gcode_response", handler, [watch](const nlohmann::json& msg) {
+                const auto params = msg.find("params");
+                if (params == msg.end() || !params->is_array() || params->empty()) {
+                    return;
+                }
+                const auto& first = (*params)[0];
+                if (!first.is_string()) {
+                    return;
+                }
+                const std::string line = first.get<std::string>();
+                if (line.rfind("Found cut position", 0) == 0) {
+                    watch->found_line = line;
+                } else if (line.rfind("SAVE_BOX_CFG ok:", 0) == 0) {
+                    watch->saved_line = line;
+                }
+            });
+    }
+    auto unregister = [client = client_, handler]() {
+        if (client && !handler.empty()) {
+            client->unregister_method_callback("notify_gcode_response", handler);
+        }
+    };
+
+    auto token = lifetime_.token();
+    auto on_complete = [this, token, on_result, watch, unregister]() {
+        token.defer("AmsBackendCfs::cutcal_done", [this, token, on_result, watch, unregister]() {
+            calibration_in_flight_ = false;
+            unregister();
+            const std::string& line =
+                !watch->found_line.empty() ? watch->found_line : watch->saved_line;
+            if (on_result) {
+                on_result(true, line);
+            }
+        });
+    };
+    auto on_error = [this, token, on_result, unregister](const MoonrakerError& err) {
+        token.defer("AmsBackendCfs::cutcal_err", [this, token, on_result, unregister, err]() {
+            calibration_in_flight_ = false;
+            unregister();
+            if (on_result) {
+                on_result(false, err.message);
+            }
+        });
+    };
+    const AmsError err =
+        execute_gcode("BOX_FIND_CUT_POS", std::move(on_complete), std::move(on_error));
+    if (!err.success()) {
+        // The send was refused outright; neither callback will fire to drop
+        // the watch, so remove it here rather than leaking the handler.
+        unregister();
+    } else {
+        calibration_in_flight_ = true;
+    }
+    return err;
+}
+
+AmsError AmsBackendCfs::start_chute_calibration(
+    std::function<void()> on_ready, std::function<void(const std::string& klipper_msg)> on_failed,
+    std::shared_ptr<std::atomic<bool>> cancel_requested) {
+    if (macro_variant_ != CfsMacroVariant::K1) {
+        return AmsErrorHelper::not_supported("Purge chute calibration is K1-stock only");
+    }
+    if (auto e = refuse_calibration_if_printing(api_); !e.success()) {
+        return e;
+    }
+    if (calibration_in_flight_) {
+        return AmsErrorHelper::busy("calibration");
+    }
+    auto token = lifetime_.token();
+    // PREPARE having run is what makes leaving the flow require a re-park:
+    // every failure leg re-sends Y_SAFE exactly when this is set.
+    auto prepare_ran = std::make_shared<bool>(false);
+    auto fail = [this, token, on_failed, prepare_ran](const MoonrakerError& err) {
+        token.defer("AmsBackendCfs::chute_failed", [this, token, on_failed, prepare_ran, err]() {
+            calibration_in_flight_ = false;
+            if (*prepare_ran) {
+                execute_gcode("BOX_CUSTOM_COMMAND CMD=Y_SAFE");
+            }
+            if (on_failed) {
+                on_failed(err.message);
+            }
+        });
+    };
+    // XYZ_ZERO is the flow's own full home (~55s incl. PRTouch Z); PREPARE
+    // then parks Y at the box's safe position and extrudes X. Jogging may
+    // only start once both acked. Every step boundary polls the cancel flag:
+    // once the user has left the flow, no further step goes out.
+    const AmsError err = execute_gcode(
+        "BOX_CUSTOM_COMMAND CMD=XYZ_ZERO",
+        [this, token, on_ready = std::move(on_ready), cancel_requested, prepare_ran, fail]() {
+            token.defer("AmsBackendCfs::chute_home_done", [this, token, on_ready, cancel_requested,
+                                                           prepare_ran, fail]() {
+                if (cancel_requested && cancel_requested->load()) {
+                    // Cancelled during the home: the head sits at the
+                    // homed origin and PREPARE never ran, so there is
+                    // nothing to unwind.
+                    calibration_in_flight_ = false;
+                    return;
+                }
+                *prepare_ran = true;
+                execute_gcode(
+                    "BOX_CUSTOM_COMMAND CMD=COORDINATES_ADJUST_PREPARE",
+                    [this, token, on_ready, cancel_requested, fail]() {
+                        token.defer("AmsBackendCfs::chute_prepare_done",
+                                    [this, token, on_ready, cancel_requested, fail]() {
+                                        if (cancel_requested && cancel_requested->load()) {
+                                            // Cancelled while PREPARE ran: the caller
+                                            // is gone, so the backend re-parks itself.
+                                            calibration_in_flight_ = false;
+                                            execute_gcode("BOX_CUSTOM_COMMAND CMD=Y_SAFE");
+                                            return;
+                                        }
+                                        calibration_in_flight_ = false;
+                                        if (on_ready) {
+                                            on_ready();
+                                        }
+                                    });
+                    },
+                    fail);
+            });
+        },
+        fail);
+    if (err.success()) {
+        calibration_in_flight_ = true;
+    }
+    return err;
+}
+
+AmsError AmsBackendCfs::jog_chute_y(float delta_mm) {
+    if (macro_variant_ != CfsMacroVariant::K1) {
+        return AmsErrorHelper::not_supported("Purge chute jog is K1-stock only");
+    }
+    // The stock screen's script form, verbatim: the state save/restore keeps
+    // the caller's absolute/relative mode intact and M400 makes the RPC ack
+    // wait for the move to finish, so back-to-back jogs cannot accumulate
+    // uncommitted travel.
+    const std::string script =
+        fmt::format("SAVE_GCODE_STATE NAME=myMoveState\n G91\n G0 Y{:.3f} F3000\n M400\n"
+                    " RESTORE_GCODE_STATE NAME=myMoveState",
+                    delta_mm);
+    return execute_gcode(script);
+}
+
+AmsError
+AmsBackendCfs::save_chute_position(std::function<void()> on_saved,
+                                   std::function<void(const std::string& klipper_msg)> on_failed) {
+    if (macro_variant_ != CfsMacroVariant::K1) {
+        return AmsErrorHelper::not_supported("Purge chute save is K1-stock only");
+    }
+    // The firmware reports the pair it wrote on the gcode response stream;
+    // capture it the way calibrate_cutter watches its lines, with the same
+    // shared_ptr lifetime so the WebSocket-thread handler stays valid even
+    // after the backend is gone.
+    auto watch = std::make_shared<std::string>();
+    std::string handler;
+    if (client_) {
+        handler = "helix_cfs_chutesave_" + std::to_string(++s_gcode_watch_seq);
+        client_->register_method_callback(
+            "notify_gcode_response", handler, [watch](const nlohmann::json& msg) {
+                const auto params = msg.find("params");
+                if (params == msg.end() || !params->is_array() || params->empty()) {
+                    return;
+                }
+                const auto& first = (*params)[0];
+                if (!first.is_string()) {
+                    return;
+                }
+                const std::string line = first.get<std::string>();
+                if (line.rfind("cmd_save_extrude_pos", 0) == 0 ||
+                    line.rfind("SAVE_BOX_CFG ok: extrude_pos", 0) == 0) {
+                    *watch = line;
+                }
+            });
+    }
+    auto unregister = [client = client_, handler]() {
+        if (client && !handler.empty()) {
+            client->unregister_method_callback("notify_gcode_response", handler);
+        }
+    };
+
+    auto token = lifetime_.token();
+    // SAVE_POS reads the LIVE toolhead position into box.cfg's
+    // extrude_pos_x/y (HelixScreen sends no coordinate); Y_SAFE re-parks
+    // after the save so the flow ends in the parked state. The save only
+    // ever runs after PREPARE, so a failure always re-parks.
+    auto fail = [this, token, on_failed = std::move(on_failed),
+                 unregister](const MoonrakerError& err) {
+        token.defer("AmsBackendCfs::chute_save_failed",
+                    [this, token, on_failed, unregister, err]() {
+                        unregister();
+                        execute_gcode("BOX_CUSTOM_COMMAND CMD=Y_SAFE");
+                        if (on_failed) {
+                            on_failed(err.message);
+                        }
+                    });
+    };
+    const AmsError err = execute_gcode(
+        "BOX_CUSTOM_COMMAND CMD=COORDINATES_ADJUST_SAVE_POS",
+        [this, token, on_saved = std::move(on_saved), watch, unregister]() {
+            token.defer("AmsBackendCfs::chute_saved", [this, token, on_saved, watch, unregister]() {
+                execute_gcode("BOX_CUSTOM_COMMAND CMD=Y_SAFE",
+                              [this, token, on_saved, watch, unregister]() {
+                                  token.defer("AmsBackendCfs::chute_parked",
+                                              [this, on_saved, watch, unregister]() {
+                                                  unregister();
+                                                  last_chute_save_line_ = *watch;
+                                                  if (on_saved)
+                                                      on_saved();
+                                              });
+                              });
+            });
+        },
+        fail);
+    if (!err.success()) {
+        // The send was refused outright; nothing will fire the callbacks that
+        // own the watch, so drop it here rather than leaking the handler.
+        unregister();
+    }
+    return err;
+}
+
+bool AmsBackendCfs::last_chute_saved_position(double& x_mm, double& y_mm) const {
+    return parse_chute_save_line(last_chute_save_line_, x_mm, y_mm);
+}
+
+bool AmsBackendCfs::parse_chute_save_line(const std::string& line, double& x_mm, double& y_mm) {
+    if (sscanf(line.c_str(), "cmd_save_extrude_pos x=%lf y=%lf", &x_mm, &y_mm) == 2) {
+        return true;
+    }
+    return sscanf(line.c_str(), "SAVE_BOX_CFG ok: extrude_pos_x=%lf,extrude_pos_y=%lf", &x_mm,
+                  &y_mm) == 2;
+}
+
+bool AmsBackendCfs::parse_cut_found_line(const std::string& line, char& axis, double& value_mm) {
+    return sscanf(line.c_str(), "Found cut position %c: %lf", &axis, &value_mm) == 2;
+}
+
+AmsError AmsBackendCfs::exit_chute_calibration() {
+    if (macro_variant_ != CfsMacroVariant::K1) {
+        return AmsErrorHelper::not_supported("Purge chute exit is K1-stock only");
+    }
+    // The cancel/back path from PREPARE onward. Before PREPARE the toolhead
+    // is either unhomed or still parked, so the caller sends nothing.
+    return execute_gcode("BOX_CUSTOM_COMMAND CMD=Y_SAFE");
 }
 
 // ============================================================================
 // Override layering (shared FilamentSlotOverrideStore)
 // ============================================================================
-
-void AmsBackendCfs::apply_overrides(SlotInfo& slot, int slot_index) {
-    // Every caller of apply_overrides runs under mutex_ (handle_status_update
-    // post-parse loop). overrides_ writers also hold mutex_, so the map read
-    // here is implicitly lock-protected. Zero-cost hash miss when the slot
-    // has no override — safe in the hot parse path. The whole spec §5 policy
-    // + the re-bind/eject rules live in helix::ams::merge_override — the
-    // single implementation every backend shares. Rule 1 (re-bind) is NOT
-    // gated by printer_reports_spool_ids(): flat-schema CFS (the community
-    // fork) parses a per-slot spoolman_id, so a firmware id disagreeing with
-    // the override fires Rule 1 there — fork users get the #1281 fix. Rule 2
-    // (eject) IS what the capability gates, and it stays inert here (base
-    // false): on stock CFS firmware never reports ids and 0 is the everyday
-    // reading. Our own fork writes are protected by the own-write
-    // expectation recorded in set_slot_info.
-    auto it = overrides_.find(slot_index);
-    if (it == overrides_.end())
-        return;
-    helix::ams::MergeOptions opts;
-    opts.printer_reports_spool_ids = printer_reports_spool_ids();
-    opts.keep_spool_info_on_eject = SettingsManager::instance().get_ams_keep_spool_info_on_eject();
-    // Read the override BEFORE any erase — merge_override below needs it.
-    const auto& o = it->second;
-    // Own-write echo suppression (SlotFingerprintTracker::expect()
-    // semantics): the flat-schema fork re-writes SPOOLMAN_ID via
-    // _BOX_SLOT_SET, and in-flight frames keep reporting the old firmware
-    // id for a poll or two — Rule 1 must not read that as an external
-    // re-bind. Inert on stock CFS (never reports a positive id).
-    const auto [own_old_id, own_new_id] = own_write_expectation(slot_index, slot.spoolman_id);
-    opts.suppress_rebind_firmware_old_id = own_old_id;
-    opts.suppress_rebind_firmware_new_id = own_new_id;
-    const auto result = helix::ams::merge_override(slot, o, opts);
-
-    // Presence is deliberately NOT touched here. An override says what the user
-    // assigned to this bay, which is a permanent fact; presence is a live one.
-    // Deriving the second from the first made presence a one-way function — it
-    // could rise to AVAILABLE and never fall back — so an assigned bay whose
-    // spool had been pulled rendered as a seated spool forever, and the
-    // "assigned, not present" ghost in ui_ams_slot.cpp (EMPTY + retained
-    // identity, LV_OPA_20) became unreachable on CFS.
-    //
-    // The untagged-spool case that motivated the promotion is covered upstream
-    // by the parse: `vender` reads non-sentinel for ANY occupied bay on CFS
-    // 1.1.3, tagged or not (verified on a K2 Plus holding only third-party
-    // spools — both seated bays reported vender "unknown" with no Creality RFID
-    // anywhere), and `untagged_present` still backstops firmware that does not.
-    // Identity survives an empty bay via clear_stale_override_on_removal_locked;
-    // that is what the ghost renders from.
-
-    if (result.cleared_rebind || result.cleared_eject) {
-        overrides_.erase(it);
-        if (override_store_) {
-            const std::string tag = backend_log_tag();
-            override_store_->clear_async(slot_index, [tag, slot_index](bool ok, std::string err) {
-                if (!ok) {
-                    spdlog::warn("{} clear_async failed for slot {}: {}", tag, slot_index, err);
-                }
-            });
-        }
-    }
-}
 
 std::map<int, int> AmsBackendCfs::collect_insert_probes_locked(const nlohmann::json& box) {
     std::map<int, int> probes;
@@ -3908,6 +4663,7 @@ std::map<int, int> AmsBackendCfs::collect_insert_probes_locked(const nlohmann::j
                 continue;
             const int global_idx = (n - 1) * 4 + bay;
             const bool occupied = !is_vender_sentinel(v.get<std::string>());
+            bay_tag_resolved_[global_idx] = occupied && v.get<std::string>() != "unknown";
 
             // First sighting of this bay seeds the map WITHOUT probing. Every
             // occupied bay would otherwise look like an insert on the first
@@ -3984,7 +4740,7 @@ bool AmsBackendCfs::check_hardware_event_clear(SlotInfo& slot, int slot_index,
     // hardware-event clears and user-initiated clears share one field-reset
     // policy. Caller already holds mutex_.
     (void)ovr_it;
-    clear_override_locked(slot_index, slot);
+    clear_override_locked(slot_index, &slot);
     return true;
 }
 
@@ -3997,24 +4753,25 @@ bool AmsBackendCfs::clear_stale_override_on_removal_locked(SlotInfo& slot, int s
         return false;
 
     // A deliberate user assignment survives an empty bay. The user told us what
-    // belongs in this slot; unloading it — or a reader that momentarily can't
-    // see the tag — must not throw that away. Locks are the authoritative
-    // "the user chose this" signal and they round-trip through lane_data, so
-    // this holds across restarts too. Legacy records load with locks defaulted
-    // to true wherever the field has a value, so pre-lock user data is covered.
+    // belongs in this slot, and neither unloading it nor a reader that
+    // momentarily can't see the tag may throw that away. A declared colour or
+    // material is
+    // the authoritative "the user chose this" signal, and it round-trips
+    // through lane_data, so this holds across restarts too.
     const auto& o = it->second;
-    if (o.user_locked_color || o.user_locked_material) {
+    if (helix::ams::declares_color(o) || helix::ams::declares_material(o)) {
         return false;
     }
 
-    // Identity fields are equally authoritative, and locks alone don't cover
-    // them. The FillUnsetOnly auto-mirror writes ONLY color_rgb/color_set and
-    // material (see mirror_firmware_to_lane_data) — it can never populate a
-    // brand, spool name or Spoolman id. So an override carrying any of those
-    // came from a user assignment (or a Spoolman link), which must survive an
-    // empty bay exactly like a locked field does. Without this, a bay that
-    // reads EMPTY for one poll — a genuine unload, but equally a transient
-    // unreadable-tag read — silently destroys the user's Spoolman linkage.
+    // Identity fields are equally authoritative, and the colour and material
+    // declarations alone don't cover them. The FillUnsetOnly auto-mirror writes
+    // ONLY color_rgb/color_set and material (see mirror_firmware_to_lane_data),
+    // so it can never populate a brand, spool name or Spoolman id. An override
+    // carrying any of those came from a user assignment (or a Spoolman link),
+    // which must survive an empty bay exactly like a declared field does.
+    // Without this, a bay that reads EMPTY for one poll (a genuine unload, but
+    // equally a transient unreadable-tag read) silently destroys the user's
+    // Spoolman linkage.
     //
     // catalog_id belongs in the same list and is NOT redundant with brand: a
     // Generic catalog product carries an empty brand, so a user who picked one
@@ -4028,51 +4785,174 @@ bool AmsBackendCfs::clear_stale_override_on_removal_locked(SlotInfo& slot, int s
 
     // What's left in overrides_ for an empty bay is pure firmware auto-mirror
     // residue — color/material describing a spool that is no longer seated.
-    // Erase it so the lane_data record stops advertising a stale color/material
-    // to OrcaSlicer and apply_overrides stops promoting the bay back to
-    // AVAILABLE.
+    // Erase it so the lane_data record stops advertising a stale
+    // color/material to OrcaSlicer, and so the lane stops declaring an identity
+    // the empty bay would go on ghosting.
     spdlog::info("{} Slot {} reads EMPTY — clearing auto-mirrored override for the removed spool",
                  backend_log_tag(), slot_index);
-    clear_override_locked(slot_index, slot);
+    clear_override_locked(slot_index, &slot);
     return true;
 }
 
-void AmsBackendCfs::clear_override_locked(int slot_index, SlotInfo& slot) {
-    // Caller must hold mutex_. Erases the in-memory override, resets STRICTLY
-    // override-exclusive fields on the live SlotInfo so the cleared state is
-    // visible in the very next get_slot_info() read (apply_overrides is a
-    // no-op for this slot afterwards).
-    //
-    // CFS field policy: brand / color_name / total_weight_g come from the
-    // RFID material database (FilamentCatalog::resolve_code lookup in
-    // parse_box_status) — the parse has already written firmware truth for
-    // the current spool, so
-    // we must NOT re-zero those fields. The override's copies disappear with
-    // the erase; firmware's copies stay. Matches Snapmaker policy.
-    overrides_.erase(slot_index);
+namespace {
 
-    slot.spool_name.clear();
-    slot.spoolman_id = 0;
-    slot.spoolman_vendor_id = 0;
+/// The colour a frame states about a bay, as evidence or absent.
+std::optional<uint32_t> stated_color(uint32_t color_rgb) {
+    return helix::ams::is_declarable_color(color_rgb) ? std::optional<uint32_t>{color_rgb}
+                                                      : std::nullopt;
+}
+
+} // namespace
+
+bool AmsBackendCfs::judge_insert_locked(SlotInfo& slot, int slot_index,
+                                        const std::optional<helix::ams::SpoolEvidence>& before,
+                                        const helix::ams::SpoolEvidence& after) {
+    switch (helix::ams::classify_insert(before, after)) {
+    case helix::ams::InsertVerdict::DifferentSpool:
+        spdlog::info("{} Slot {} insert carries a different spool's reading - dropping what "
+                     "described the previous one",
+                     backend_log_tag(), slot_index);
+        clear_override_locked(slot_index, &slot);
+        return true;
+    case helix::ams::InsertVerdict::NoEvidence:
+        // Keep everything and ask. The notice is self-gating, so a lane with
+        // nothing the new spool could contradict stays silent.
+        helix::ui::queue_update("AmsBackendCfs::judge_insert_locked", [slot_index] {
+            helix::ui::offer_clear_after_unverified_insert(slot_index);
+        });
+        return false;
+    case helix::ams::InsertVerdict::SameSpool:
+        break;
+    }
+    return false;
+}
+
+bool AmsBackendCfs::insert_probe_deferred_locked(int slot_index) const {
+    const auto it = deferred_probes_.find(slot_index / 4 + 1);
+    return it != deferred_probes_.end() && (it->second & (1 << (slot_index % 4))) != 0;
+}
+
+bool AmsBackendCfs::note_insert_edge_locked(SlotInfo& slot, int slot_index) {
+    const auto present = slot_status_reports_filament(slot.status);
+    if (!present.has_value()) {
+        return false;
+    }
+
+    // What this frame states about the seated spool, minus the fields that
+    // only repeat our own pushed label: a box restating what we wrote is
+    // remembering the write, not reading the spool, on either schema.
+    helix::ams::Observation scratch(helix::ams::ObservationSource::Sensed);
+    if (!slot.material.empty()) {
+        scratch.material = slot.material;
+    }
+    if (helix::ams::is_declarable_color(slot.color_rgb)) {
+        scratch.color_rgb = slot.color_rgb;
+    }
+    own_write_echoes_.strip_standing(slot_index, scratch);
+
+    helix::ams::SpoolEvidence after;
+    if (scratch.material.has_value()) {
+        after.material = std::move(*scratch.material);
+    }
+    after.color_rgb = scratch.color_rgb;
+    after.tag_read_complete = !after.material.empty() || after.color_rgb.has_value();
+
+    const auto prev = bay_present_.find(slot_index);
+    if (prev == bay_present_.end()) {
+        // The first sighting is the session's baseline, never an edge.
+        bay_present_[slot_index] = *present;
+        if (*present) {
+            bay_evidence_[slot_index] = after;
+        }
+        return false;
+    }
+    if (prev->second == *present) {
+        // No edge for the bay, but a pending stock insert still moves: every
+        // frame is another chance for its probe's answer to land.
+        if (schema_ == CfsSchema::Flat || *present) {
+            const auto pit = pending_inserts_.find(slot_index);
+            if (pit != pending_inserts_.end()) {
+                const PendingInsert pending = pit->second;
+                if (slot.material == pending.edge_material &&
+                    stated_color(slot.color_rgb) == pending.edge_color) {
+                    if (insert_probe_deferred_locked(slot_index)) {
+                        // The probe is parked until the box is idle, so its
+                        // answer has not had its chance: the quiet count holds
+                        // at zero rather than expiring into a verdict the
+                        // deferred probe still owes, and the wait restarts
+                        // once the probe is released.
+                        pit->second.quiet_frames = 0;
+                        return false;
+                    }
+                    if (++pit->second.quiet_frames < kInsertProbeWaitFrames) {
+                        return false;
+                    }
+                    pending_inserts_.erase(pit);
+                    // The probe had its wait. A vender resolved past "unknown"
+                    // is the reader having finished with this seating, and the
+                    // values it left standing are the ones it re-read, so they
+                    // are judged as the inserted spool's own reading - where a
+                    // fingerprint matching the pulled spool's is the same
+                    // spool and stays silent. An unresolved vender means the
+                    // latched values still describe the PULLED spool and the
+                    // reader said nothing about the new one at all.
+                    if (bay_tag_resolved_[slot_index]) {
+                        helix::ams::SpoolEvidence reread;
+                        if (!slot.material.empty()) {
+                            reread.material = slot.material;
+                        }
+                        reread.color_rgb = stated_color(slot.color_rgb);
+                        reread.tag_read_complete = true;
+                        return judge_insert_locked(slot, slot_index, pending.before, reread);
+                    }
+                    return judge_insert_locked(slot, slot_index, pending.before,
+                                               helix::ams::SpoolEvidence{});
+                }
+                // A statement different from the latched one is the probe's
+                // answer about the inserted spool.
+                pending_inserts_.erase(pit);
+                bay_evidence_[slot_index] = after;
+                return judge_insert_locked(slot, slot_index, pending.before, after);
+            }
+        }
+        return false;
+    }
+    prev->second = *present;
+    if (!*present) {
+        // A removal is not an insert. The reading stays filed so the next
+        // insert can be compared against the spool that was just pulled, and
+        // an insert still awaiting its probe is dropped with the spool: there
+        // is nothing in the bay to ask about.
+        pending_inserts_.erase(slot_index);
+        return false;
+    }
+
+    std::optional<helix::ams::SpoolEvidence> before;
+    if (auto it = bay_evidence_.find(slot_index); it != bay_evidence_.end()) {
+        before = it->second;
+    }
+
+    if (schema_ == CfsSchema::Flat) {
+        // The fork states each bay's identity fresh every frame, so the edge
+        // frame itself is the reading.
+        bay_evidence_[slot_index] = after;
+        return judge_insert_locked(slot, slot_index, before, after);
+    }
+
+    // The stock arrays latch: the edge frame restates the pulled spool's
+    // colour and material, so judging it there calls every untagged insert
+    // the same spool. Open a pending insert and judge the first frame that
+    // states something different - the RFID probe's answer.
+    pending_inserts_[slot_index] =
+        PendingInsert{before, slot.material, stated_color(slot.color_rgb), 0};
+    return false;
+}
+
+void AmsBackendCfs::clear_override_fields(SlotInfo& slot) const {
+    slot.clear_spoolman_link();
     slot.remaining_weight_g = -1.0f;
-    // The catalog pick is override-exclusive on every backend — no AMS
-    // firmware carries a branded product id — so a clear always drops it.
-    // Leaving it would re-navigate the editor to the removed spool's
-    // product on the next open.
     slot.catalog_id.clear();
     slot.product_name.clear();
-
-    if (override_store_) {
-        // Capture by value — clear_async's Moonraker callback may fire after
-        // this returns (MR tracker ~60s) and potentially after the backend
-        // itself is gone. Same rationale as save_async.
-        const std::string tag = backend_log_tag();
-        override_store_->clear_async(slot_index, [tag, slot_index](bool ok, std::string err) {
-            if (!ok) {
-                spdlog::warn("{} clear_async failed for slot {}: {}", tag, slot_index, err);
-            }
-        });
-    }
 }
 
 void AmsBackendCfs::update_runout_episode_locked() {
@@ -4134,18 +5014,33 @@ void AmsBackendCfs::strip_spoolman_link_on_runout_locked(SlotInfo& slot, int slo
 
     const int old_id = o.spoolman_id;
     // Drop ONLY the Spoolman handle. Brand, material, color, catalog pick,
-    // lock flags and temperatures describe the lane's contents and survive -
+    // declarations and temperatures describe the lane's contents and survive -
     // the fresh spool the user loads keeps inheriting a correctly-labeled
     // lane while the exhausted spool's id stops being re-asserted onto it.
     o.spoolman_id = 0;
+    o.spoolman_filament_id = 0;
     o.spoolman_vendor_id = 0;
     o.updated_at = std::chrono::system_clock::now();
 
-    // Immediate visibility on the live SlotInfo, same pattern as
-    // clear_override_locked: apply_overrides runs after this and its sentinel
-    // rule (id 0 falls through to firmware truth) keeps the zero in place.
+    // Immediate visibility on the live SlotInfo. apply_resolved_lane runs after
+    // this, so the zeros only survive if no lane source still declares the ids,
+    // which is what the retraction below is for. The three handles die together:
+    // a filament definition id whose spool id is gone names nothing, and the
+    // paint would put it back on the very next poll.
     slot.spoolman_id = 0;
+    slot.spoolman_filament_id = 0;
     slot.spoolman_vendor_id = 0;
+
+    // The lane's own records lose the handle too, and only the handle: #1390 is
+    // exactly that a bay's identity outlives the spool and labels the one
+    // loaded next, so brand, material and colour stay standing. Both declaring
+    // sources carry the retraction, since either can hold the id: the user's
+    // record the binding they chose, the server's the spool it named.
+    helix::ams::retract_lane_declarations(lane_id(slot_index), [](helix::ams::Observation& kept) {
+        kept.spoolman_id.reset();
+        kept.spoolman_filament_id.reset();
+        kept.spoolman_vendor_id.reset();
+    });
 
     spdlog::info("{} slot {} reads empty after a confirmed runout - dropping the remembered "
                  "Spoolman link (spool {}), keeping identity",
@@ -4171,48 +5066,114 @@ void AmsBackendCfs::strip_spoolman_link_on_runout_locked(SlotInfo& slot, int slo
 }
 
 void AmsBackendCfs::clear_slot_override(int slot_index) {
+    int firmware_slot;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto* slot = system_info_.get_slot_global(slot_index);
-        if (!slot) {
-            spdlog::warn("{} clear_slot_override: no slot entry for global index {}",
-                         backend_log_tag(), slot_index);
+        if (!slot || system_info_.slot_absent(slot_index)) {
+            spdlog::warn("{} clear_slot_override: no bay at global index {}", backend_log_tag(),
+                         slot_index);
             return;
         }
         spdlog::info("{} Slot {} override cleared by user request", backend_log_tag(), slot_index);
-        clear_override_locked(slot_index, *slot);
+        clear_override_locked(slot_index, slot);
+        firmware_slot = firmware_slot_locked(slot_index);
     }
 
     emit_event(EVENT_SLOT_CHANGED, std::to_string(slot_index));
-}
-
-void AmsBackendCfs::clear_box_slot_profile(int slot_index) {
     if (macro_variant_ == CfsMacroVariant::Fork) {
-        execute_gcode("_BOX_SLOT_CLEAR SLOT=" + std::to_string(slot_index));
+        if (firmware_slot < 0) {
+            spdlog::warn("{} clear_slot_override: bay {} has no firmware slot - not clearing the "
+                         "Box profile",
+                         backend_log_tag(), slot_index);
+            return;
+        }
+        execute_gcode("_BOX_SLOT_CLEAR SLOT=" + std::to_string(firmware_slot));
     }
 }
 
 void AmsBackendCfs::publish_external_spool_lane(const SlotInfo* spool) {
-    // The external spool as an extra OrcaSlicer-selectable lane. Index is the
-    // 0-based slot count → format_lane_key emits lane{N+1}, one past the last
-    // physical bay — no collision with real lanes (16 on a 4-unit CFS), and a
-    // stable key however many units are attached.
+    // The external spool as an extra OrcaSlicer-selectable lane. OrcaSlicer
+    // sends the lane as the tool, so on Fork the key is the firmware's own
+    // external slot (box.py registers T<that>); stock has no external T
+    // command, so it takes 16 (lane17), past the highest bay a chain numbers.
     //
-    // Deliberately NOT routed through overrides_ (the per-bay override map):
-    // hardware-event clearing and stale-override logic walk that map by real
-    // slot index, and the external spool is not a bay. A one-shot record built
-    // by the shared helper keeps the mirror map untouched.
-    int lane_index = 0;
+    // The Fork key can be a real bay: with box 3 off the bus the external
+    // index is 8, box 3 bay A's key. overrides_ holds every lane_data record
+    // this backend loaded or wrote, so a record there without the mirror mark
+    // belongs to a bay and is neither overwritten nor cleared.
+    constexpr int kStockExternalLane = 16;
+    int lane_index = -1;
     bool supported = false;
+    bool foreign = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         supported = system_info_.supports_bypass && override_store_ != nullptr;
-        lane_index = system_info_.total_slots;
+        lane_index =
+            macro_variant_ == CfsMacroVariant::Fork ? external_slot_index_ : kStockExternalLane;
+        auto it = overrides_.find(lane_index);
+        if (it != overrides_.end() && !it->second.external_mirror) {
+            // An unmarked record that names the spool being published is a
+            // mirror written before the mark existed: adopt it, and from here
+            // on it is ours to update. A bay record matches only when the bay
+            // holds the identical filament, and then the overwrite says what
+            // it already said. `spool` is the external spool saved in settings
+            // (AmsState::get_external_spool_info() at both call sites).
+            if (spool != nullptr && helix::ams::record_describes_spool(it->second, *spool)) {
+                spdlog::info("{} Adopting the unmarked external spool mirror at lane {}",
+                             backend_log_tag(), lane_index);
+                overrides_.erase(it);
+            } else {
+                foreign = true;
+            }
+        }
+        if (!foreign) {
+            external_key_conflict_logged_ = false;
+        } else if (!external_key_conflict_logged_) {
+            external_key_conflict_logged_ = true;
+            spdlog::warn("{} External spool lane {} holds a record that is not ours - not "
+                         "publishing over it",
+                         backend_log_tag(), lane_index);
+        }
     }
-    if (!supported || lane_index <= 0) {
+    if (!supported || lane_index < 0 || foreign) {
         return;
     }
-    helix::ams::publish_external_lane(override_store_.get(), lane_index, spool, backend_log_tag());
+    // The Fork key follows the chain (the top box returning moves it), and the
+    // mirror left at the old key would read as a second external tray. Cleared
+    // only where we still hold our own marked mirror there.
+    int stale_key = -1;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (external_lane_published_ >= 0 && external_lane_published_ != lane_index) {
+            auto old = overrides_.find(external_lane_published_);
+            if (old != overrides_.end() && old->second.external_mirror) {
+                stale_key = external_lane_published_;
+                overrides_.erase(old);
+            }
+        }
+        external_lane_published_ = lane_index;
+    }
+    if (stale_key >= 0) {
+        override_store_->clear_async(
+            stale_key, [tag = backend_log_tag(), stale_key](bool ok, const std::string& err) {
+                if (!ok) {
+                    spdlog::warn("{} clearing the moved external lane {} failed: {}", tag,
+                                 stale_key, err);
+                }
+            });
+    }
+    const bool published = helix::ams::publish_external_lane(override_store_.get(), lane_index,
+                                                             spool, backend_log_tag());
+    // overrides_ is this backend's account of the namespace, so the mirror is
+    // filed there by its mark: the guard above and the old-key clear read it.
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (published) {
+        overrides_[lane_index] = helix::ams::external_lane_record(*spool);
+    } else if (auto it = overrides_.find(lane_index);
+               it != overrides_.end() && it->second.external_mirror) {
+        overrides_.erase(it);
+    }
 }
 
 } // namespace helix::printer

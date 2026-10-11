@@ -150,3 +150,40 @@ TEST_CASE("z-adjust gcode: absolute handles a positive delta and a sign crossing
     CHECK(build_z_adjust_gcode(-10, 0, 60, /*all_homed=*/true) ==
           "SET_GCODE_OFFSET Z=0.050 MOVE=1");
 }
+
+// ============================================================================
+// save_available: the one definition of "is there an offset worth saving"
+// ============================================================================
+
+namespace {
+constexpr SaveAvailability facts(bool supported, bool global_dirty, bool tools_dirty) {
+    return SaveAvailability{supported, global_dirty, tools_dirty};
+}
+} // namespace
+
+TEST_CASE("save_available: nothing dirty offers no save", "[zoffset][save-rule]") {
+    CHECK_FALSE(save_available(facts(true, false, false)));
+}
+
+TEST_CASE("save_available: the machine-wide offset alone is enough", "[zoffset][save-rule]") {
+    CHECK(save_available(facts(true, true, false)));
+}
+
+TEST_CASE("save_available: a dirty tool alone is enough", "[zoffset][save-rule]") {
+    // The case a machine-wide-only test would miss: a tool adjusted while the
+    // global offset stayed at 0. SET_TOOL_PARAMETER is runtime-only, so with no
+    // save offered the adjustment dies at the next Klipper restart.
+    CHECK(save_available(facts(true, false, true)));
+}
+
+TEST_CASE("save_available: both dirty still offers one save", "[zoffset][save-rule]") {
+    CHECK(save_available(facts(true, true, true)));
+}
+
+TEST_CASE("save_available: firmware that persists on its own offers no save",
+          "[zoffset][save-rule]") {
+    CHECK_FALSE(save_available(facts(false, false, false)));
+    CHECK_FALSE(save_available(facts(false, true, false)));
+    CHECK_FALSE(save_available(facts(false, false, true)));
+    CHECK_FALSE(save_available(facts(false, true, true)));
+}

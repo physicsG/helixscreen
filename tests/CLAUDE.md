@@ -4,7 +4,7 @@
 
 | Path | Contents |
 |------|----------|
-| `tests/unit/` | Catch2 unit tests. **Auto-globbed** (`Makefile:904`) — drop a `.cpp` in and it builds |
+| `tests/unit/` | Catch2 unit tests. **Auto-globbed** (`Makefile#TEST_UNIT_DIR`) — drop a `.cpp` in and it builds |
 | `tests/unit/application/` | App-lifecycle tests (separate glob, own include path) |
 | `tests/mocks/` | Mock implementations |
 | `tests/shell/` | `bats` tests — installer, lint gates, packaging |
@@ -12,9 +12,11 @@
 | `tests/test_helpers/` | `*TestAccess` friend classes for reaching private members |
 
 ```bash
+make t F='[tag]'               # build, then run ONE tag or case (the inner loop)
 make test                      # build tests only (does NOT run them)
-make test-run                  # build AND run in parallel
-./build/bin/helix-tests "[tag]"  # run one tag
+make unit-sweep                # build AND run the C++ unit suite, sharded (~50s)
+make full-test-run             # unit-sweep + bats shell suite (~2m) - the completion gate
+./build/bin/helix-tests "[tag]"  # one tag with NO dependency scan, 0.05-0.6s
 ```
 
 `make -j` builds **only** the app binary. Run `make test` before `./build/bin/helix-tests`
@@ -127,6 +129,88 @@ or `(widget, nullptr)` for an intentional lifecycle-less overlay. Tests run with
 
 ---
 
+## What to run when
+
+Key the choice on the question you actually have, not on a phase of work:
+
+| The question you actually have | Command | Cost |
+|---|---|---|
+| Does the thing I just wrote work, and I edited code | `make t F='exact case name'` | 5 to 18s |
+| Same, and nothing has changed since the last build | `./build/bin/helix-tests 'exact case name'` | **0.05s** |
+| Did I break this area | `make t F='[tag]'`, or the binary directly | 5 to 18s, or 0.6s |
+| **Can this test fail at all?** | break the line it covers, rerun that one case, restore | one `make t` cycle |
+| Do any assertions only look like assertions? | `make check-tautology`, `make test-vacuous` | 3s, seconds |
+| Does any test even reach this code? | `make cov-diff` | minutes |
+| Do my changed lines have detection? | `make mutate-diff` | 2-4 min per hunk |
+| Did I break something elsewhere in C++? | `make unit-sweep` | ~50s idle, minutes loaded |
+| Will CI's unit job pass? | `make unit-sweep NPROCS=8`: CI runs `nproc*2` = 8 shards on its 4-core runners, so tests share a process with different neighbours than the local 96 | ~100s |
+| Am I finished - did I break anything, anywhere? | `make full-test-run` | ~2m, **once, at the end** |
+| What does any of this actually cost? | `make dev-timing` | 5s, measured medians |
+
+The rule the table encodes: **a full run cannot tell you your feature works.** It can only
+tell you something else broke, and that question is not interesting until you are done. A
+96-shard run mid-feature costs a minute of attention to answer a question nobody has yet.
+
+`make t` takes a tag, an exact case name, or any Catch2 expression, so one variable covers
+every way of naming what you want. With no `F` it refuses rather than running everything.
+`make test-run` runs nothing: it prints this choice and exits non-zero, because the
+shortest target name is the one people type, so it must not start a full run.
+
+Rows four through seven are the evidence ladder below. "Proving a test can fail" is where
+each one's cost and blind spot is set out; read it there rather than picking from this
+table.
+
+### The wrapper costs more than the test
+
+Measured on the build host at load average 37, with five other sessions compiling:
+
+| | |
+|---|---|
+| `make test`, nothing to rebuild | 11.2s |
+| `make t F='[lane]'`, nothing changed | 5.3 to 6.7s over four runs |
+| `./build/bin/helix-tests '[lane]'`, 223 cases | **0.58s**, four runs, no variance |
+| `./build/bin/helix-tests '<one case>'` | **0.05s**, four runs, no variance |
+
+`make`'s dependency scan over this tree is the entire cost, and it is the part that moves
+with load: the same warm `make t` measures about 4s on an idle box and 18s on a busy one.
+The tests do not move at all. Read these as ratios rather than absolutes.
+
+So `make t` buys exactly one thing, the guarantee that the binary matches your source, and
+that guarantee is what the seconds are for.
+
+**When you have edited code it is not optional.** `make -j` builds only the app binary, so
+running `./build/bin/helix-tests` after an edit silently tests the previous build and
+reports the previous run's numbers. That is a green that means nothing.
+
+**When you have not edited code, skip it.** Re-running a failure, trying a different
+filter, checking a neighbouring tag, reading what an assertion actually said: the binary
+already matches your source, and those are 0.05s questions.
+
+### Four checks the ladder does not make for you
+
+`make mutate-diff` reports that a hunk died or survived. Reading what that verdict means is
+still yours:
+
+1. **Does the test stage the thing it is proving gets produced?** A case that calls a
+   `TestAccess` hook to record the expectation it then asserts stays green when
+   production's own recording is deleted. It graded evidence it wrote itself.
+
+2. **Under your mutation, does an EXISTING test stay green?** A new test going red only
+   shows that it reaches the code. An existing test *not* going red is what shows the new
+   one adds cover rather than duplicating cover that was already there.
+
+3. **For a shared function, does the mutation redden EVERY call site?** One caller's test
+   reddening while another's stays green means the second path is untested. That asymmetry
+   is how an enum parameter no case varies, or a parser no case feeds, becomes visible.
+
+4. **Before trusting "no existing test reddened", does any existing test reach the path?**
+   A gate nothing can reach never reddens, so silence there is absence of a test, not
+   evidence of one. This matters most for a hard stop whose whole justification is that
+   existing tests would catch a regression. `make cov-diff` answers it for one run instead
+   of one build per hunk.
+
+---
+
 ## What counts as a real test
 
 A test must FAIL if the feature is removed. After writing one, **mutate the implementation and
@@ -144,18 +228,22 @@ Prefer extracting the rule as a **pure function** and testing that without LVGL 
 separately (`test_overlay_width_push.cpp`). Pure-logic tests are fast, total, and survive
 refactors of the widget layer.
 
+**A test double may be inert, or it may be the real object; it may not be a copy of the
+logic.** `mk/tests.mk` filters a few objects out of the test link (`TEST_APP_OBJS`), and
+`tests/ui_test_utils.cpp` stands in for them. A stand-in with an empty body or a single
+return cannot lie. One that branches is a second implementation the tests exercise instead
+of production's, and it drifts silently. `scripts/check_test_mirrors.py` flags it as
+`stub-logic` against the `MIRROR_MAX` ratchet (prestonbrown/helixscreen#1220). To test the
+logic, link the real object: drop it from the filter list.
+
 ### Proving a test can fail
 
-"A test must FAIL if the feature is removed" is the rule. It was stated as a
-principle with no mechanism, and the result was 11 production changes in one
-release range that can be reverted with the suite staying green. Every one
-shipped with a test commit. The tests pin an *adjacent invariant* instead of the
-changed line -- they have real assertions, execute the changed function, and
-still cannot fail when it breaks.
-
-Syntax cannot find these. Measured on this tree, 18% of cases look "all-weak" by
-assertion shape and the worst-looking files are all good tests. Four tools, in
-increasing cost, and only the last is an oracle:
+"A test must FAIL if the feature is removed" is the rule, and a green suite is not
+evidence of it. A test can have real assertions, execute the changed function, and
+still pin an *adjacent invariant* instead of the changed line, so the change reverts
+green with a test commit beside it. Assertion shape cannot find these; the
+worst-looking files are often good tests. Five tools, in increasing cost, and only
+the last is an oracle:
 
 | Command | Cost | Answers |
 |---------|------|---------|
@@ -165,17 +253,74 @@ increasing cost, and only the last is an oracle:
 | `make test-order-dependence` | minutes | tests that pass only because of what ran before them |
 | `make mutate-diff` | ~2-4 min per hunk | **changed lines no test detects** |
 
-`make mutate-diff` reverts each changed hunk in turn, rebuilds, and runs the
-suite. A hunk that survives reversion is a change no test detects, whatever the
-diff's test files claim. It is the only tool here that sees the adjacent-invariant
-failure, so scope it (`MUTATE_ARGS="--limit 5"`, or `--tests "[ams]"`) rather
-than skipping it. Verdicts are `killed`, `SURVIVED`, and `uncompilable` -- the
-last is never counted as a kill, because a compiler error proves the code is
-load-bearing for the build, not that anything tests its behaviour.
+`make mutate-diff` reverts each changed hunk in turn, refreshes whatever the
+suite reads, and runs it. A hunk that survives reversion is a change no test
+detects, whatever the diff's test files claim. It is the only tool here that sees
+the adjacent-invariant failure, so scope it (`MUTATE_ARGS="--limit 5"`, or
+`--tests "[ams]"`) rather than skipping it.
+
+**Read the first two lines: they say what the run is about.**
+
+```
+base d9f1c0a4e7b2  <- merge-base with origin/release/1.0 (nearest of 4 candidate upstream(s))
+diff 3 hunk(s) across 2 file(s)
+```
+
+The base is the nearest fork point among the refs this branch could have been cut
+from - its configured upstream, then the release branches, then main - because
+`main` alone is wrong on anything growing out of a maintenance branch. A branch
+cut from `release/1.0` shares with main only where those two parted, so measured
+against main it inherits everything `release/1.0` has done since as its own
+change: dozens of foreign hunks, a build apiece, and verdicts about other
+people's code. Those mostly come back `uncompilable`, which is correctly not a
+kill, so a mis-scoped run has no symptom of its own - it just looks slow and
+stubborn.
+
+A hunk count well above the size of your change is therefore the thing to
+notice, and the run stops and says so rather than spending the builds
+(`--max-hunks`, default 25; exit 4). Settle it with
+`MUTATE_ARGS="--base origin/release/1.0"`, which is taken as given and never
+second-guessed.
+
+Stop a run with **Ctrl-C**, never `kill`. Each mutant is put back by a `finally:`
+that needs the interpreter to keep running; SIGINT unwinds it, SIGTERM does not
+and leaves that hunk reverted in your working tree.
+
+The verdicts are not interchangeable:
+
+| Verdict | Means |
+|---------|-------|
+| `killed` | a test detects the change — the outcome you want |
+| `killed (timeout)` | the mutant hung the suite at a limit derived from the baseline (`max(60s, 5x baseline)`, or `--timeout`) AND hung again when re-run at twice that limit. One stall alone is a machine under load, not a detection. The whole process group dies with each timeout |
+| `SURVIVED` | the mutant ran and the suite stayed green: NO test detects it |
+| `uncompilable` / `unreversible` | a mutant was attempted but no test ever judged it. Never a kill: a compiler error proves the code is load-bearing for the build, not that anything tests its behaviour |
+| `NOT COVERED` | nothing here can mutate that file, so the gate did not look at it |
+
+The run answers `CLEAN` only when every changed hunk was mutated and every mutant
+died. Anything short of that is `INCOMPLETE` (exit 3) and names the paths it did
+not examine, because a clean answer about a file the tool never opened is
+precisely what a commit body would go on to cite as proof.
+
+What it mutates, and what pays for what:
+
+| Path | Refresh per mutant | Suite |
+|------|--------------------|-------|
+| `src/`, `include/` | `make test-build` | `helix-tests` |
+| `ui_xml/*.xml`, `assets/config/*.json` | none — the binary reads these off the tree at run time | `helix-tests` |
+| `scripts/*.py`, `scripts/*.sh` | none | `bats tests/shell` + `pytest tests/python` |
+
+Everything else is `NOT COVERED`, with the reason printed. Two are worth knowing:
+`tests/` itself, because a test is proven by mutating the code it pins rather
+than by reverting itself; and anything under `lib/`, because a superproject diff
+carries only a submodule's pointer and never its content. Clear one by mutating
+it by hand and naming the result in the commit body, or accept it with
+`--allow-incomplete`.
 
 `make cov-diff` is the cheap screen: a changed line the suite never runs cannot
 be tested, and finding that costs one run instead of one build per hunk. The
-converse does not hold, so a clean coverage report is not a substitute.
+converse does not hold, so a clean coverage report is not a substitute. It heads
+its report with the same `base ... <- ...` line, resolved by the same module, so
+the two tools cannot disagree about what the change under test is.
 
 ### A test must pass on its own
 
@@ -187,15 +332,13 @@ This is the one class none of the other tools can see. Such a test asserts real
 computed values, its lines are covered, and reverting the production hunk would
 report it killed -- it simply is not testing what it claims. It stays invisible
 until an unrelated change perturbs ordering, which is the worst moment to find
-it: adding nine test cases elsewhere changed the case count, which changed shard
-composition, which moved one test's accidental prerequisite into another shard,
-and a 96/96 green suite went red with nothing wrong in the changed code.
+it: any change to the case count reshuffles the shards, a test's accidental
+prerequisite lands in another shard, and a green suite goes red with nothing wrong
+in the changed code.
 
-The specimen it was built against is `test_grid_edit_mode.cpp` "build_default_grid
-only sets positions for anchor widgets", which passes in the suite and fails 5/5
-alone. The gate also reports the opposite sign as `pollution` (fails in the
-suite, passes alone) -- same root cause, different fix: the polluter needs
-cleanup, the dependent needs its own setup.
+The gate also reports the opposite sign as `pollution` (fails in the suite, passes
+alone): same root cause, different fix. The polluter needs cleanup, the dependent
+needs its own setup.
 
 ### Assert that the setup reached the branch, first
 
@@ -219,16 +362,20 @@ cannot fail either, for exactly the same reason.
 That case is the one to keep in mind, because it defeats three of the four
 tools above. `make test-vacuous` sees a real assertion (Catch2 expands it to
 `1024 <= 1024`, which differs from the source text). `make cov-diff` is green,
-because the changed line does execute. `-Werror=type-limits` only ever caught
-the version written as `>= 0` on a `size_t` -- fixing the compiler-visible
-tautology moved it to a semantic one, which hides better. Only reverting the
-hunk and watching for red finds it.
+because the changed line does execute. `-Werror=type-limits` catches only the
+compiler-visible form (`>= 0` on a `size_t`); the semantic tautology hides better.
+Only reverting the hunk and watching for red finds it.
 
-### Name the mutation in the commit body
+### When to run it, and where the record goes
+
+Run `make mutate-diff` once, over the whole branch, when the feature or change is done and
+before the final review. Never run it per task or per commit while work is in progress: each
+run costs minutes per hunk, and hunks a later commit rewrites get mutated twice for nothing.
 
 Red-green is invisible after the fact. A test that was mutated and verified is
 indistinguishable from one nobody checked, which is why the discipline decays.
-One line in the commit body fixes that:
+One line per mutation in the body of the branch's last commit (or its merge commit) fixes
+that:
 
 ```
 mutation: flipped >= to > in resolve_slot(); test_ams_topology went red
@@ -243,11 +390,47 @@ It costs a sentence and it is the only record that the cycle happened.
 issue number for bug-fix tests (`[1178]`) so the whole fix runs with
 `./build/bin/helix-tests "[1178]"`.
 
+`[slow]` runs sharded (`SLOW_SHARDS`, default 16) in `test-all` and `test-slow`, in a
+fixed-seed shuffle (`SLOW_ORDER`, default `--order rand --rng-seed 1`), so a `[slow]` test
+must pass whatever runs before it. A failing shard's diagnostics print the exact command,
+order flags included. A `[slow]` test that only fails with sibling shards running gets
+`[serial]` as well, which moves it to a single-process pass after the shards.
+
 ---
 
 ## Shell tests never touch the host
 
-`load helpers` shadows `systemctl` with an inert exit-0 shim (`tests/shell/helpers.bash`).
+`tests/shell/setup_suite.bash` blocks the commands that address the host **by name** -
+`killall`, `pkill`, `pidof`, `reboot`, `mount`, `addr2line` and friends. bats loads it for
+every run of this directory, so a new test is sandboxed without opting in. A blocked call
+is recorded with the test that made it and then fails, and the run fails at the end with
+the list. `kill "$pid"` is deliberately not blocked: a pid is a handle the test already
+holds, so it is scoped by construction, while a name reaches whatever else is running -
+another bats file's app, or yours.
+
+`jobpool` is on the list too, and the suite exports `JOBPOOL=0`, so a make a test runs
+passes straight through the host's jobpool shim and no test draws from or reads the
+machine's build pool. A test of pool handling names a fake through `HELIX_JOBPOOL` and
+unsets `JOBPOOL` (`test_helix_claim_jobs.bats`).
+
+On a host whose bare `make` is older than the Makefile's GNU make 4.2 floor (Apple's
+/usr/bin/make is 3.81; Homebrew's 4.x installs as `gmake`), the sandbox also forwards
+`make` to `gmake` for the whole run — shim plus exported function, like the blocked
+commands, and deferring to a test's own make mock. A Linux make, and the jobpool shim,
+parse as 4.2+ and are left untouched (`test_sandbox_gate.bats`).
+
+To use one of those commands, mock it: `mock_command_script "killall" 'exit 0'` in
+`setup()`. A mock is found first, so the sandbox never sees the call.
+
+The sandbox installs itself as both a PATH shim and an exported bash function, because
+neither survives every boundary: PATH is lost when a callee **replaces** PATH instead of
+prepending (`env PATH="$bin" ...`, or a script that hardens PATH the way
+`install.sh` does), and a bash function is lost at a non-bash callee - which
+installer scripts are, since they are `#!/bin/sh`. `test_sandbox_gate.bats` proves each
+boundary and fails any test that lands in the gap between the two.
+
+`load helpers` additionally shadows `systemctl` with an inert exit-0 shim
+(`tests/shell/helpers.bash`).
 Installer code reaches systemctl through paths a test never names - the update-unit
 stop/disable sweep is not gated on INIT_SYSTEM - and on headless CI the denied call hides
 behind the installer's `|| true` while on a desktop it raises a polkit prompt per call. A
@@ -270,7 +453,9 @@ internals). Each test refreshes them with `init_subjects(true)`.
 
 ## Lint gates
 
-Gates live in `scripts/check_*.py` and run from `scripts/quality-checks.sh`. Every gate gets a
+Gates live in `scripts/check_*.py` and run from `scripts/quality-checks.sh`, each through its own
+`scripts/qc/<gate>.sh` named in the driver's `QC_ALL`. A test that drives a gate sources
+`scripts/qc/_lib.sh` and then that file; `qc_trigger <gate>` (helpers.bash) reads its trigger. Every gate gets a
 **meta-test** in `tests/shell/test_*_gate.bats` pinning both halves of its contract: the shape
 it must catch, and the idioms it must stay quiet about. A gate that fires on legitimate code
 gets switched off, so the silent cases matter as much as the loud ones.

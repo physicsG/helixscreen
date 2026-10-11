@@ -14,14 +14,13 @@
  * through the C setters in ui_filament_path_canvas.h. All per-widget state
  * lives in one FilamentPathData, owned by a registry keyed on the lv_obj_t*.
  *
- * Rendering is split across three layers so per-frame animation never repaints
+ * Rendering is split across two layers so per-frame animation never repaints
  * the expensive tube geometry:
- *   1. static canvas  — lv_canvas child, reserved for state-independent content
- *   2. overlay canvas — lv_canvas child; the full topology render (lanes, hub,
+ *   1. overlay canvas — lv_canvas child; the full topology render (lanes, hub,
  *      sensors, nozzle) painted by the active topology renderer
- *   3. DRAW_POST pass — flow dots / heat glow / moving filament tip, drawn
- *      directly every frame on top of the cached canvases
- * Setters call layered_mark_dirty() which flags the canvases and schedules an
+ *   2. DRAW_POST pass — flow dots / heat glow / moving filament tip, drawn
+ *      directly every frame on top of the cached canvas
+ * Setters call layered_mark_dirty() which flags the canvas and schedules an
  * async repaint (ui_filament_path_layers.cpp). Animation ticks only invalidate
  * the widget, re-running the cheap DRAW_POST pass.
  *
@@ -35,13 +34,15 @@
  * FILE MAP
  *   ui_filament_path_canvas.cpp   widget lifecycle, theme, click dispatch, C API
  *   ui_filament_path_topology.cpp the three topology renderers + DRAW_POST pass
- *   ui_filament_path_glyphs.cpp   sensor dots, hub box, buffer, nozzle, badges
+ *   ui_filament_path_plan.cpp     frames → route plans → layered tube and band paint
+ *   ui_filament_path_glyphs.cpp   hub box, buffer, nozzle, filament tip, badges
  *   ui_filament_path_anim.cpp     the five lv_anim-driven animation systems
  *   ui_filament_path_layers.cpp   canvas buffer management + async refresh
  */
 
 #include "ui_coalesced_timer.h"
 #include "ui_filament_path_canvas.h"
+#include "ui_toolhead_badge.h"
 
 #include "ams_types.h"
 #include "filament_path_geometry.h"
@@ -49,6 +50,7 @@
 #include "lvgl/lvgl.h"
 
 #include <array>
+#include <optional>
 
 namespace helix::ui::fpath {
 
@@ -62,9 +64,6 @@ namespace pg = helix::ui::pathgeo;
 inline constexpr int32_t DEFAULT_WIDTH = 300;
 inline constexpr int32_t DEFAULT_HEIGHT = 200;
 inline constexpr int DEFAULT_SLOT_COUNT = 4;
-
-// Nozzle tip color when no filament is loaded (light charcoal)
-inline constexpr uint32_t NOZZLE_UNLOADED_COLOR = 0x3A3A3A;
 
 // LINEAR/HUB layout ratios (as fraction of widget height)
 // Entry points at very top to connect visually with slot grid above
@@ -87,10 +86,12 @@ inline constexpr float BYPASS_MERGE_Y_RATIO = 0.58f;
 // Buffer element position (between hub output and bypass merge)
 inline constexpr float BUFFER_Y_RATIO = 0.46f;
 
-// PARALLEL topology (tool changer) Y ratios. Shared by the PARALLEL renderer
-// and the PARALLEL branch of the click hit-test so the two never drift.
-inline constexpr float PARALLEL_SENSOR_Y_RATIO = 0.38f;   // Toolhead entry sensor
-inline constexpr float PARALLEL_TOOLHEAD_Y_RATIO = 0.55f; // Nozzle/toolhead per slot
+// PARALLEL topology (tool changer): the toolhead glyphs stand on this line,
+// and each tool's entry sensor sits this fraction of the way from the lane
+// entries down to its toolhead. parallel_rows() turns them into Ys for the
+// renderer and the click hit-test alike.
+inline constexpr float PARALLEL_GLYPH_BOTTOM_RATIO = 0.74f;
+inline constexpr float PARALLEL_SENSOR_FRACTION = 0.75f;
 
 // Slot-entry click hit-test padding (click handler only; no renderer
 // counterpart — these widen the entry band so taps near the spool grid still
@@ -144,19 +145,28 @@ struct ThemeCache {
     lv_color_t color_error;
     lv_color_t color_hub_bg;
     lv_color_t color_hub_border;
-    lv_color_t color_nozzle;
     lv_color_t color_text;
-    lv_color_t color_bg;      // Canvas background (for hollow tube bore)
-    lv_color_t color_success; // Success color (cached for draw callbacks)
+    lv_color_t color_bg;        // Canvas background (for hollow tube bore)
+    lv_color_t color_success;   // Success color (cached for draw callbacks)
+    lv_color_t color_warning;   // Dryer glyph on an off-page stub
+    lv_color_t color_muted;     // Off-page stub label
+    lv_color_t color_accent;    // Active route walls and halo ("primary")
+    lv_color_t color_buffer[3]; // Buffer box by ClogMeterStatus: text_muted, warning, danger
 
     int32_t line_width_idle = LINE_WIDTH_IDLE_BASE;
     int32_t line_width_active = LINE_WIDTH_ACTIVE_BASE;
+    int32_t tube_gauge = LINE_WIDTH_ACTIVE_BASE + 2; // tube outer width, walls included
     int32_t sensor_radius = SENSOR_RADIUS_BASE;
     int32_t hub_width = 60;
     int32_t border_radius = 6;
     int32_t extruder_scale = 10; // Scale unit for extruder (based on space_md)
 
     const lv_font_t* label_font = nullptr;
+
+    // Which theme the colors above were read from (refresh_theme_colors()).
+    bool colors_loaded = false;
+    int generation = 0;
+    bool dark_mode = false;
 };
 
 // State of the five lv_anim-driven animation systems
@@ -188,15 +198,12 @@ struct AnimState {
     bool output_x_active = false;
 };
 
-// Layered renderer state. The widget hosts two lv_canvas children backed by
-// ARGB8888 draw_bufs; LVGL composites them natively under a DRAW_POST
-// animation pass. Managed by ui_filament_path_layers.cpp.
+// Layered renderer state. The widget hosts one lv_canvas child backed by an
+// ARGB8888 draw_buf; LVGL composites it natively under a DRAW_POST animation
+// pass. Managed by ui_filament_path_layers.cpp.
 struct LayerState {
-    lv_obj_t* static_canvas = nullptr;
     lv_obj_t* overlay_canvas = nullptr;
-    lv_draw_buf_t* static_buf = nullptr;
     lv_draw_buf_t* overlay_buf = nullptr;
-    bool static_dirty = true;  // canvas needs repaint of idle topology
     bool overlay_dirty = true; // canvas needs repaint of state-tied content
     int32_t canvas_w = 0;      // current canvas buffer size — tracks widget resize
     int32_t canvas_h = 0;
@@ -207,13 +214,23 @@ struct LayerState {
     // widget's FilamentPathData, and ~CoalescedTimer cancels the timer, so a
     // scheduled repaint can never reach a freed widget.
     helix::ui::CoalescedTimer refresh_timer{0};
+    // Re-attempts a canvas buffer allocation that failed; bounded by
+    // alloc_retries_left so a heap that never frees cannot retry forever. It
+    // reaches -1 once the give-up has been logged.
+    helix::ui::CoalescedTimer alloc_retry_timer{1000};
+    int alloc_retries_left = 0;
+    // Set when a refresh found the widget hidden or out of view and left the
+    // canvas dirty; the next draw of the widget schedules that refresh.
+    bool refresh_deferred = false;
+    int render_count = 0; // full topology repaints, for tests and logs
 };
 
-// Hit rectangles recorded by the renderer (absolute display coords) so the
-// click handler tests against EXACTLY what was drawn. The LINEAR selector's Y
+// Hit rectangles recorded by the renderer (absolute display coords, with the
+// widget's origin at that render) so the click handler tests against EXACTLY
+// what was drawn, wherever the widget has moved since. The LINEAR selector's Y
 // is butted against the prep sensors and its width spans the slot row; the
 // buffer box internally clamps its size; the bypass rect tracks the visibility
-// gate (!hub_only && show_bypass). Any re-derivation in the click handler
+// gate (show_bypass). Any re-derivation in the click handler
 // would drift from the visible geometry. Single source of truth: render
 // writes, click reads. valid flags reset each render.
 struct HitRects {
@@ -223,6 +240,7 @@ struct HitRects {
     bool buffer_valid = false;
     lv_area_t bypass = {0, 0, 0, 0};
     bool bypass_valid = false;
+    lv_point_t origin = {0, 0}; ///< Widget's top-left when the rects were recorded
 };
 
 // LINEAR/HUB active-path cache. Populated by the state-tied renderer;
@@ -254,6 +272,8 @@ struct FilamentPathData {
     // Live slot position measurement: slot_grid pointer + cached spool_container
     // pointers for pixel-perfect lane alignment at any screen size.
     lv_obj_t* slot_grid = nullptr;
+    // The spool box's front edge below slot_grid's top, INT32_MIN when none.
+    int32_t lane_entry_offset = INT32_MIN;
     static constexpr int MAX_SLOTS = 16;
     lv_obj_t* spool_containers[MAX_SLOTS] = {};
 
@@ -262,6 +282,13 @@ struct FilamentPathData {
 
     // Per-slot prep sensor capability (true = slot has prep/pre-gate sensor)
     bool slot_has_prep_sensor[MAX_SLOTS] = {};
+    // Per-slot load sensor between prep and hub (AFC), read as LANE
+    bool slot_has_load_sensor[MAX_SLOTS] = {};
+    // Per-slot error the slot reports (SlotInfo::error at ERROR severity)
+    bool slot_has_error[MAX_SLOTS] = {};
+    // How much of the bowden (OUTPUT) tube a load or unload has filled, in
+    // percent from the hub end; -1 when the backend reports no progress.
+    int bowden_fill = -1;
 
     // Per-slot tool mapping (actual AFC map values, not slot index)
     int mapped_tool[MAX_SLOTS];              // -1 = use slot index as fallback
@@ -279,19 +306,39 @@ struct FilamentPathData {
     bool bypass_has_spool = false;    // true when external spool is assigned
     bool show_bypass = true; // false = hide bypass path/spool entirely (e.g. tool changers)
 
-    // Rendering mode
-    bool hub_only = false; // true = stop rendering at hub (skip downstream)
+    // Paging: units of this hub shown on other pages, before and after the one
+    // on screen (0 = none). The hub draws each side's as one dashed stub.
+    int offpage_before = 0;
+    int offpage_after = 0;
+    bool offpage_before_drying = false;
+    bool offpage_after_drying = false;
+    // Columns kept clear at both ends of the widget (controls overlaid there), over the
+    // rows keepout_y0..keepout_y1 (absolute); an empty range means every row.
+    int32_t edge_reserve = 0;
+    int32_t keepout_y0 = 0;
+    int32_t keepout_y1 = 0;
+    // A hub that stays put: when > 0 the hub, buffer and toolhead stand on the widget's
+    // center line and the hub box is sized for this many lanes, whatever the unit shown.
+    int fixed_hub_lanes = 0;
+    // The lane pitch of that widest unit, 0 to take the shown unit's own.
+    int32_t fixed_hub_pitch = 0;
+
+    // The unit's hub (or selector) output sensor.
+    bool has_hub_sensor = false;
+    bool hub_sensor_triggered = false;
     // Hub co-located with the toolhead: the merge box sits just above the
     // toolhead and the shared hub->nozzle run is a short stub (printers whose
     // combiner mounts on the print head; the per-lane tubes run the whole way).
     bool hub_on_toolhead = false;
-    bool eject_mode = false; // true = allow segment to drop below LANE (past slot sensor)
+    bool eject_mode = false;         // true = allow segment to drop below LANE (past slot sensor)
+    bool has_toolhead_sensor = true; // the unit reports a toolhead filament sensor
 
     // Buffer element (TurtleNeck / eSpooler visualization)
-    int buffer_fault_state = 0;  // 0=healthy, 1=warning/approaching, 2=fault
+    int buffer_fault_state = 0;  // -1=untinted, 0=healthy, 1=warning/approaching, 2=fault
     bool buffer_present = false; // true = draw buffer box between hub and toolhead
     int buffer_state = 0;        // 0=neutral, 1=compressed, 2=tension (coil icon spacing)
     float buffer_bias = -2.0f;   ///< Proportional bias [-1.0,1.0], -2=unavailable (use discrete)
+    const char* buffer_label = "BUF"; ///< Box text; a static string, never translated
 
     // Callbacks
     filament_path_slot_cb_t slot_callback = nullptr;
@@ -363,6 +410,9 @@ struct BaseGeometry {
     int slot_count = 0;
     int32_t slot_x[FilamentPathData::MAX_SLOTS] = {}; // absolute X per slot
     int32_t center_x = 0; // midpoint between first and last slot, or canvas mid
+    // The spool box's front edge, where the lanes enter the path; INT32_MIN
+    // when no box is drawn above the canvas.
+    int32_t lane_entry_y = INT32_MIN;
 };
 
 BaseGeometry compute_base_geometry(lv_obj_t* obj, const FilamentPathData* data);
@@ -376,6 +426,7 @@ struct SlotRenderState {
     bool is_mounted = false;
     bool at_sensor = false; // segment >= TOOLHEAD (consumed by PARALLEL/MIXED)
     bool at_nozzle = false; // segment >= NOZZLE
+    bool has_error = false; // the slot reports an error of its own
 };
 
 using SlotRenderStates = std::array<SlotRenderState, FilamentPathData::MAX_SLOTS>;
@@ -386,7 +437,7 @@ SlotRenderStates compute_slot_render_states(const FilamentPathData* data);
 bool is_segment_active(PathSegment segment, PathSegment filament_segment);
 
 // Color manipulation helpers — thin aliases over the shared stroker color math
-// so the many local call sites (sensor dots, hub tinting, buffer coil) stay
+// so the many local call sites (filament tip, hub tinting, buffer coil) stay
 // terse.
 inline lv_color_t ph_darken(lv_color_t c, uint8_t amt) {
     return helix::ui::tube_darken(c, amt);
@@ -412,15 +463,10 @@ struct RenderCtx {
 // Glyphs (ui_filament_path_glyphs.cpp)
 // ============================================================================
 
-/// Push-to-connect fitting at a sensor position (shadow + body + highlight).
-void draw_sensor_dot(lv_layer_t* layer, int32_t cx, int32_t cy, lv_color_t color, bool filled,
-                     int32_t radius);
-
 /// Labeled rounded box (HUB / SELECTOR / BUF). Text color, font and corner
-/// radius come from the theme cache in ctx. Returns the number of pixels the
-/// interactive gear badge extends to the RIGHT of the box's right edge (0 when
-/// the gear fits inside, or when not interactive) — callers recording a click
-/// hit-rect widen it by this amount.
+/// radius come from the theme cache in ctx. An interactive box carries a gear
+/// inside its right edge and grows about @p cx until the label and gear fit.
+/// Returns the width drawn, for the caller's click hit-rect.
 int32_t draw_hub_box(const RenderCtx& ctx, int32_t cx, int32_t cy, int32_t width, int32_t height,
                      lv_color_t bg_color, lv_color_t border_color, const char* label,
                      lv_opa_t bg_opa = LV_OPA_COVER, bool interactive = false);
@@ -445,16 +491,31 @@ void draw_flow_dots_path(lv_layer_t* layer, const pg::FilamentPath& path, lv_col
                          int32_t flow_offset, bool reverse);
 
 /// Toolhead/extruder glyph in the user's configured style. Applies the A4T
-/// style's 6/5 scale boost internally — pass the base scale.
-void draw_toolhead(lv_layer_t* layer, int32_t cx, int32_t cy, lv_color_t color, int32_t scale,
-                   lv_opa_t opa = LV_OPA_COVER);
+/// style's 6/5 scale boost internally — pass the base scale. @p filament is
+/// the color at the nozzle, or nullopt when nothing is loaded there.
+void draw_toolhead(lv_layer_t* layer, int32_t cx, int32_t cy, std::optional<lv_color_t> filament,
+                   int32_t scale, lv_opa_t opa = LV_OPA_COVER);
 
 /// Y of the nozzle tip for the configured toolhead style (heat glow anchor).
 int32_t toolhead_tip_y(int32_t nozzle_y, int32_t extruder_scale);
+struct BoxColors {
+    lv_color_t bg, border;
+};
+/// The buffer box's fill and border for its fault state and bias.
+BoxColors buffer_box_colors(const FilamentPathData& data, bool has_filament,
+                            lv_color_t filament_color);
 
-/// Tool badge ("T0", "T1", …) beneath a nozzle: rounded rect + centered label.
-void draw_tool_badge(const RenderCtx& ctx, int32_t cx, int32_t badge_top, const char* label,
-                     lv_color_t text_color, lv_opa_t opa);
+/// Drawn bounds of draw_toolhead()'s glyph at (@p cx, @p cy) for the
+/// configured style, at the same base scale.
+helix::ui::GlyphBounds toolhead_glyph_bounds(int32_t cx, int32_t cy, int32_t scale);
+/// Topmost drawn Y of the toolhead glyph for the configured style (its cap or
+/// shroud, above the nozzle inlet at nozzle_y - extruder_scale * 2).
+int32_t toolhead_top_y(int32_t nozzle_y, int32_t extruder_scale);
+
+/// The tool badge ("T0", "T1", …) on the corner of draw_toolhead()'s glyph,
+/// at full opacity. Paint it after every glyph.
+void draw_tool_badge(const RenderCtx& ctx, int32_t cx, int32_t cy, int32_t scale,
+                     const char* label);
 
 // ============================================================================
 // Animations (ui_filament_path_anim.cpp)
@@ -474,6 +535,10 @@ void start_output_x_animation(lv_obj_t* obj, FilamentPathData* data, int32_t fro
 /// Delete every lv_anim this widget may have running (widget teardown).
 void delete_all_animations(lv_obj_t* obj);
 
+/// Re-read the theme-derived colors when the theme or dark mode changed since
+/// they were last read. Returns true when they were re-read.
+bool refresh_theme_colors(FilamentPathData* data);
+
 // ============================================================================
 // Layered canvas machinery (ui_filament_path_layers.cpp)
 // ============================================================================
@@ -483,7 +548,18 @@ bool layered_setup_canvases(lv_obj_t* obj, FilamentPathData* data);
 
 /// Mark which layered surfaces need a repaint and schedule an async refresh.
 /// Use this from setters instead of bare lv_obj_invalidate().
-void layered_mark_dirty(lv_obj_t* obj, bool static_dirty, bool overlay_dirty);
+void layered_mark_dirty(lv_obj_t* obj);
+
+/// Flag the canvas for a repaint and schedule the refresh, without invalidating
+/// the widget: safe to call from inside its draw event.
+void layered_schedule_repaint(lv_obj_t* obj, FilamentPathData* data);
+
+// Called from the widget's draw: runs a refresh that was deferred while the
+// widget could not be seen.
+void layered_on_draw(lv_obj_t* obj, FilamentPathData* data);
+
+// Free the canvas buffer; the next draw allocates it again and repaints.
+void layered_release_buffer(FilamentPathData* data);
 
 /// LV_EVENT_SIZE_CHANGED handler — re-schedules the refresh once layout
 /// assigns a real size (the create-time refresh may have bailed pre-layout).

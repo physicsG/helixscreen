@@ -25,6 +25,20 @@ TIMEOUT_CMD := $(shell command -v timeout 2>/dev/null || command -v gtimeout 2>/
 # Must be generous: some shards with threading tests take 60-90s under load.
 SHARD_TIMEOUT := 300
 
+# Timeout for a single-process run of the binary on a tag or filter (`make t`),
+# which can be a whole tag rather than one shard's slice of the suite.
+TEST_TIMEOUT ?= 900
+# Timeout for a single-process run of the whole suite (test-serial, test-verbose).
+SUITE_TIMEOUT ?= 3600
+
+# Runs the rest of the line under a $(1)-second timeout. SIGTERM first, so
+# Catch2 can name the test that hung; SIGKILL $(TIMEOUT_KILL_AFTER)s later,
+# because a binary whose heap is corrupt can deadlock in Catch2's own signal
+# handler on the malloc lock and never act on SIGTERM. Exits 124 after SIGTERM,
+# 137 after SIGKILL.
+TIMEOUT_KILL_AFTER ?= 30
+timeout_run = $(if $(TIMEOUT_CMD),$(TIMEOUT_CMD) -k $(TIMEOUT_KILL_AFTER) $(1))
+
 # Where per-shard logs land. Kept (not deleted) whenever a shard fails, crashes,
 # or times out, so there is something to read afterwards — see diagnose_shards.
 # Override to collect artifacts elsewhere, e.g. SHARD_ARTIFACT_ROOT=$(PWD)/build
@@ -40,20 +54,62 @@ SHARD_ARTIFACT_ROOT ?= /tmp
 # into an observed rate. Raise it when chasing something rare.
 SHARD_RETRIES ?= 3
 
+# Shard count for the [slow] tier in test-all and test-slow. Deliberately far
+# below NPROCS: most [slow] cases wait on wall-clock deadlines, and a busy box
+# stretches those waits into failures. The tier runs after the fast shards
+# finish, so it competes only with itself. Tests that cannot tolerate even
+# this share of the box carry [serial] and run alone afterwards.
+SLOW_SHARDS ?= 16
+
+# Catch2 shards by position, so declaration order packs a file's slow cases into
+# one shard. A fixed-seed shuffle spreads them and stays reproducible; a failing
+# shard's diagnostics print the exact command, order flags included.
+SLOW_ORDER ?= --order rand --rng-seed 1
+
+# How many shards RUN at once; the shard count itself never changes, because a
+# different count regroups the tests and surfaces cross-test contamination.
+# Three per slot of `helix-claim jobs` (the jobpool's size when one is live),
+# because a shard spends most of its time waiting. With a live pool the shards
+# also run in batches of three, each batch holding one pool token for its whole
+# life, so every sweep on the box together runs at most three shards per token
+# and shares the tokens with compiles. Asked once, when a sweep starts.
+SHARD_CONCURRENCY ?= $(eval SHARD_CONCURRENCY := $(shell echo $$(($(JOBS_CLAIMED) * 3))))$(SHARD_CONCURRENCY)
+
 # Run tests in parallel using Catch2 sharding
-# Args: $(1) = test filter (e.g., "~[.] ~[slow]")
+# Args: $(1) = test filter (e.g., "~[.] ~[slow]"), $(2) = shard count (default NPROCS),
+#       $(3) = Catch2 order flags (default: declaration order)
 # Collects PIDs and waits for all, failing if any shard fails
 # Each shard is wrapped in a timeout to prevent infinite hangs
 # Each shard log starts with a host/nproc/git/ts header so flakes (e.g. #1121)
 # are attributable to a shard/host instead of re-litigated each run.
 # Output is prefixed with [shard N] for clarity
 define run_tests_parallel
-	echo "$(CYAN)Running $(NPROCS) test shards in parallel (timeout=$(SHARD_TIMEOUT)s)...$(RESET)"; \
+	echo "$(CYAN)Running $(or $(2),$(NPROCS)) test shards, at most $(SHARD_CONCURRENCY) at once (timeout=$(SHARD_TIMEOUT)s)...$(RESET)"; \
 	shard_dir=$$(mktemp -d "$(SHARD_ARTIFACT_ROOT)/helix-shards-XXXXXX"); \
+	export shard_dir; \
+	run_shard() { \
+		(echo "=== shard $$1/$(or $(2),$(NPROCS)) host=$$(hostname) nproc=$$(nproc 2>/dev/null || echo '?') git=$$(git rev-parse --short HEAD 2>/dev/null || echo unknown) ts=$$(date -Iseconds) order=$(or $(3),decl seed=0)"; $(call timeout_run,$(SHARD_TIMEOUT)) $(TEST_BIN) $(1) $(3) --shard-count $(or $(2),$(NPROCS)) --shard-index $$1 2>&1; echo $$? > "$$shard_dir/$$1.exit") | \
+			tee "$$shard_dir/$$1.log" | sed "s/^/[shard $$1] /"; \
+	}; \
+	run_batch() { for s in "$$@"; do run_shard "$$s" & done; wait; }; \
+	shards=$(or $(2),$(NPROCS)); batch=1; jp=""; \
+	if scripts/helix-claim pool >/dev/null; then \
+		batch=3; jp=$${HELIX_JOBPOOL:-jobpool}; \
+		echo "$(CYAN)jobpool live: shards run in batches of $$batch, one pool token per batch$(RESET)"; \
+	fi; \
+	slots=$$(( ($(SHARD_CONCURRENCY) + batch - 1) / batch )); \
 	pids=""; \
-	for i in $$(seq 0 $$(($(NPROCS)-1))); do \
-		(echo "=== shard $$i/$(NPROCS) host=$$(hostname) nproc=$$(nproc 2>/dev/null || echo '?') git=$$(git rev-parse --short HEAD 2>/dev/null || echo unknown) ts=$$(date -Iseconds) order=decl seed=0"; $(if $(TIMEOUT_CMD),$(TIMEOUT_CMD) $(SHARD_TIMEOUT)) $(TEST_BIN) $(1) --shard-count $(NPROCS) --shard-index $$i 2>&1; echo $$? > "$$shard_dir/$$i.exit") | \
-			tee "$$shard_dir/$$i.log" | sed "s/^/[shard $$i] /" & \
+	for ((i = 0; i < shards; i += batch)); do \
+		while [ $$(jobs -rp | wc -l) -ge $$slots ]; do \
+			wait -n 2>/dev/null || sleep 0.2; \
+		done; \
+		last=$$(( i + batch - 1 < shards - 1 ? i + batch - 1 : shards - 1 )); \
+		if [ -n "$$jp" ]; then \
+			{ "$$jp" with-token -- bash -c "$$(declare -f run_shard run_batch)"'; touch "$$shard_dir/$$1.started"; run_batch "$$@"' batch $$(seq $$i $$last) || \
+				[ -e "$$shard_dir/$$i.started" ] || run_batch $$(seq $$i $$last); } & \
+		else \
+			run_shard $$i & \
+		fi; \
 		pids="$$pids $$!"; \
 	done; \
 	for pid in $$pids; do \
@@ -61,7 +117,7 @@ define run_tests_parallel
 	done; \
 	failed=0; \
 	suspect=""; \
-	for i in $$(seq 0 $$(($(NPROCS)-1))); do \
+	for i in $$(seq 0 $$(($(or $(2),$(NPROCS))-1))); do \
 		if [ ! -f "$$shard_dir/$$i.exit" ]; then \
 			echo "$(RED)$(BOLD)✗ Shard $$i timed out after $(SHARD_TIMEOUT)s!$(RESET)"; \
 			failed=1; suspect="$$suspect $$i"; \
@@ -83,7 +139,7 @@ define run_tests_parallel
 		fi; \
 	done; \
 	if [ -n "$$suspect" ]; then \
-		$(call diagnose_shards,$$shard_dir,$$suspect,$(1)); \
+		$(call diagnose_shards,$$shard_dir,$$suspect,$(1),$(or $(2),$(NPROCS)),$(3)); \
 	else \
 		rm -rf "$$shard_dir"; \
 	fi; \
@@ -106,7 +162,8 @@ endef
 # removing ANY test reshuffles Catch2's shard composition, so the shard number
 # moving between runs is not evidence either.
 #
-# Args: $(1) = shard dir, $(2) = space-separated shard indices, $(3) = filter
+# Args: $(1) = shard dir, $(2) = space-separated shard indices, $(3) = filter,
+#       $(4) = the shard count the run used, $(5) = its Catch2 order flags
 define diagnose_shards
 	echo ""; \
 	echo "$(CYAN)$(BOLD)── shard diagnostics ──$(RESET)"; \
@@ -114,10 +171,10 @@ define diagnose_shards
 	for s in $(2); do \
 		echo ""; \
 		echo "$(BOLD)shard $$s$(RESET)"; \
-		$(TEST_BIN) $(3) --shard-count $(NPROCS) --shard-index $$s --list-tests 2>/dev/null \
-			| grep -E '^  ' | sed 's/^  //' > "$(1)/$$s.tests" 2>/dev/null || true; \
+		$(TEST_BIN) $(3) $(5) --shard-count $(4) --shard-index $$s --list-tests --reporter xml 2>/dev/null \
+			| python3 scripts/catch2_shard_tests.py > "$(1)/$$s.tests" 2>/dev/null || true; \
 		n=$$(wc -l < "$(1)/$$s.tests" 2>/dev/null | tr -d ' '); \
-		echo "  ran $${n:-?} test case(s) → $(1)/$$s.tests"; \
+		echo "  ran $${n:-?} test case(s) → $(1)/$$s.tests ($(TEST_BIN) --input-file replays it)"; \
 		fails=$$(grep -oE '^[A-Za-z0-9_/.-]+\.cpp:[0-9]+: FAILED' "$(1)/$$s.log" 2>/dev/null \
 			| sed 's/: FAILED$$//' | sort -u | tr '\n' ' '); \
 		if [ -n "$$fails" ]; then \
@@ -125,13 +182,13 @@ define diagnose_shards
 		else \
 			echo "  no FAILED marker — died after its assertions passed (teardown/static dtor)"; \
 		fi; \
-		printf '  reproduce: %s %s --shard-count %s --shard-index %s\n' \
-			"$(TEST_BIN)" '$(3)' "$(NPROCS)" "$$s"; \
+		printf '  reproduce: %s %s %s--shard-count %s --shard-index %s\n' \
+			"$(TEST_BIN)" '$(3)' "$(if $(5),$(5) )" "$(4)" "$$s"; \
 		echo "  $(CYAN)re-running this shard sequentially x$(SHARD_RETRIES)…$(RESET)"; \
 		hits=0; last_rc=0; \
 		for attempt in $$(seq 1 $(SHARD_RETRIES)); do \
-			if $(if $(TIMEOUT_CMD),$(TIMEOUT_CMD) $(SHARD_TIMEOUT)) $(TEST_BIN) $(3) \
-					--shard-count $(NPROCS) --shard-index $$s > "$(1)/$$s.retry.log" 2>&1; then \
+			if $(call timeout_run,$(SHARD_TIMEOUT)) $(TEST_BIN) $(3) $(5) \
+					--shard-count $(4) --shard-index $$s > "$(1)/$$s.retry.log" 2>&1; then \
 				: ; \
 			else \
 				last_rc=$$?; hits=$$((hits+1)); \
@@ -226,7 +283,7 @@ endef
 TEST_CORE_DEPS := $(TEST_MAIN_OBJ) $(CATCH2_OBJ) $(UI_TEST_UTILS_OBJ) $(LVGL_TEST_FIXTURE_OBJ) $(HELIX_TEST_FIXTURE_OBJ) $(TEST_FIXTURES_OBJ) $(LVGL_UI_TEST_FIXTURE_OBJ) $(TEST_OBJS) $(TEST_APP_OBJS_EXTRA)
 
 # LVGL + Graphics stack (required for all UI tests)
-TEST_LVGL_DEPS := $(LVGL_OBJS) $(HELIX_XML_OBJS) $(THORVG_OBJS)
+TEST_LVGL_DEPS := $(LVGL_OBJS) $(HELIX_XML_OBJS) $(THORVG_OBJS) $(SPDLOG_OBJS)
 
 # Platform-specific dependencies (Linux wpa_supplicant, macOS frameworks via LDFLAGS)
 TEST_PLATFORM_DEPS := $(WPA_DEPS)
@@ -334,52 +391,32 @@ TEST_APP_OBJS := $(sort $(TEST_APP_OBJS) $(OBJ_DIR)/system/pwm_sound_backend.o)
 # treatment as the sysfs PWM backend above.
 TEST_APP_OBJS := $(sort $(TEST_APP_OBJS) $(OBJ_DIR)/system/jz_pwm_sound_backend.o)
 
-# The channel auto-export step inside initialize() is ifdef'd
-# (HELIX_PWM_AUTO_EXPORT) so production platform builds opt in deliberately.
-# Host test builds DO opt in: the export tests in test_pwm_sound_backend.cpp
-# exercise the real call site. Guarded by "backend not in APP_SRCS" because a
-# bare target-specific flag would also reach the ad5m/ad5x app build, where the
-# same object file IS the production one — silently switching auto-export on
-# for shipping devices.
-#
-# `override` is load-bearing: test-asan/test-tsan re-invoke make with CXXFLAGS
-# on the command line, and a command-line variable silently discards every
-# makefile assignment to it — including plain target-specific ones. Without
-# `override`, sanitizer builds compile this object without the define, the
-# ifdef drops try_export_channel(), and the export tests fail on the mock's
-# seeded sentinel.
-ifeq (,$(filter $(SRC_DIR)/system/pwm_sound_backend.cpp,$(APP_SRCS)))
-$(OBJ_DIR)/system/pwm_sound_backend.o: override CXXFLAGS += -DHELIX_PWM_AUTO_EXPORT
-endif
-
 # ============================================================================
 # Test Targets
 # ============================================================================
 
-# Clean test artifacts (test objects, PCH, all test binary variants).
+# Clean test artifacts (test objects, all test binary variants).
 #
 # Wipes $(OBJ_DIR)/tests/ recursively so stale .o/.ccj/.d files from
 # prior sanitizer runs, reordered test sources, or removed test files
 # don't linger and pollute the link.
 #
-# Also removes the PCH ($(PCH)).
-#
 # Sanitizer cross-contamination is no longer a concern here: test-asan
-# and test-tsan build into $(ASAN_OBJ_DIR)/$(TSAN_OBJ_DIR) with their
-# own PCH, so they cannot leave instrumented objects or a tainted PCH
-# in this build's paths. Use `make clean-sanitizers` to drop those
+# and test-tsan build into $(ASAN_OBJ_DIR)/$(TSAN_OBJ_DIR), so they
+# cannot leave instrumented objects in this build's paths. Use `make clean-sanitizers` to drop those
 # trees. (Historically they shared $(OBJ_DIR) and a plain `make test`
 # would then fail to link with "undefined reference to __asan_init".)
 clean-tests:
 	$(ECHO) "$(YELLOW)Cleaning test artifacts...$(RESET)"
 	$(Q)rm -rf $(OBJ_DIR)/tests
 	$(Q)rm -f $(TEST_BIN) $(TEST_ASAN_BIN) $(TEST_TSAN_BIN)
-	$(Q)rm -f $(PCH)
 	$(ECHO) "$(GREEN)✓ Test artifacts cleaned$(RESET)"
 
 # Build tests — delegates to $(TEST_BIN) which handles -j detection via Phase 1
 test-build: prune-orphan-test-objs $(TEST_BIN)
-	@true
+ifndef SKIP_COMPILE_COMMANDS
+	@$(MERGE_COMPILE_COMMANDS)
+endif
 
 # Delete object files whose test source no longer exists, and drop the binary so
 # it relinks without them.
@@ -415,40 +452,133 @@ prune-orphan-test-objs:
 # This is Catch2's hidden test convention.
 
 # Build tests only (does not run)
-# Use 'make test-run' to actually execute the tests
 # Delegates to test-build for parallel compilation, then shows usage hint
 test: test-build
-	$(ECHO) "$(CYAN)Run tests with: make test-run$(RESET)"
+	$(ECHO) "$(CYAN)Run one filter with: make t F='[tag]'$(RESET)"
 
-# Run unit tests in PARALLEL (excludes hidden and slow tests for fast iteration)
+# ----------------------------------------------------------------------------
+# t: the inner loop
+# ----------------------------------------------------------------------------
+# Build, then run exactly one Catch2 filter. F takes a tag, an exact case name,
+# or any Catch2 expression, so one variable covers every way of naming a case:
+#
+#   make t F='[ams]'
+#   make t F='AMS lane rebinds on eject'
+#   make t F='[ams] ~[slow]'
+#
+# Quiet on purpose: no banner, no timing line. This is typed dozens of times an
+# hour, and Catch2's own output is the answer.
+#
+# What this costs is make's dependency scan over the tree, 5 to 18s depending on
+# load, against a test run of 0.05 to 0.6s. What it buys is the guarantee that
+# the binary matches your source, which after an edit is not optional: `make -j`
+# builds only the app, so the bare binary would report the previous build's
+# numbers. When nothing has changed, run $(TEST_BIN) directly and skip the scan.
+#
+# An empty F is an error, never a whole-suite run. Falling back to everything is
+# the reflex this target exists to replace, so a typo must not reach it. The
+# guard is a parse-time conditional so a bare `make t` fails without first
+# building a binary it has no filter to run.
+.PHONY: t unit-sweep full-test-run test-run
+ifeq ($(strip $(F)),)
+t:
+	@echo "$(YELLOW)make t needs a filter.$(RESET)"; \
+	echo "  make t F='[tag]'             one tag"; \
+	echo "  make t F='exact case name'   one case"; \
+	echo "  make test-list-tags          what tags exist"; \
+	exit 2
+else
+t: test-build
+	$(Q)rc=0; $(call timeout_run,$(TEST_TIMEOUT)) $(TEST_BIN) "$(F)" || rc=$$?; \
+	if [ $$rc -eq 124 ] || [ $$rc -eq 137 ]; then \
+		echo "$(RED)$(BOLD)✗ $(TEST_BIN) '$(F)' was killed after $(TEST_TIMEOUT)s: a hung test, or a deadlocked crash handler. TEST_TIMEOUT=<seconds> changes the limit.$(RESET)"; \
+	fi; \
+	exit $$rc
+endif
+
+# unit-sweep: every fast unit test, sharded across cores. Answers "did I break
+# something I was not touching" for the C++ suite alone.
 # Uses Catch2 sharding across multiple processes for ~4-8x speedup
 # Use 'make test-serial' for sequential execution (debugging, clean output)
 # Use 'make test-all' to run everything including slow tests
-test-run: test-build
+unit-sweep: test-build
 	$(ECHO) "$(CYAN)$(BOLD)Running unit tests in parallel (excluding slow)...$(RESET)"
 	@START_TIME=$$(date +%s); \
 	$(call run_tests_parallel,"~[.] ~[slow]"); \
 	END_TIME=$$(date +%s); \
 	DURATION=$$((END_TIME - START_TIME)); \
-	echo "$(GREEN)$(BOLD)✓ Tests passed in $${DURATION}s$(RESET)"
+	echo "$(GREEN)$(BOLD)✓ Unit tests passed in $${DURATION}s$(RESET)"
+
+# full-test-run: the completion gate - the C++ unit sweep and the bats shell
+# suite. TEST_HOST=1 sends the sweep to the configured test host while bats
+# runs here, TEST_HOST=0 keeps both local; scripts/full-test-run.sh says what
+# each setting does and holds the automatic default's switch.
+#
+# Ask it once, when a feature is finished. Mid-feature the question is
+# `make t F='[tag]'`, and a full run cannot answer it anyway.
+full-test-run:
+	$(Q)TEST_HOST="$(TEST_HOST)" MAKE="$(MAKE)" scripts/full-test-run.sh
+
+# ----------------------------------------------------------------------------
+# test-run: a signpost that refuses
+# ----------------------------------------------------------------------------
+# The shortest name that runs anything becomes the reflex, and a 96-shard run is
+# the wrong answer to almost every question that prompts it. So this one refuses
+# and routes the question to the target that fits it.
+#
+# It MUST exit non-zero and run nothing. Advice printed above a suite that then
+# proceeds scrolls past while the run works, so it changes no behaviour at all.
+test-run:
+	@echo "$(YELLOW)$(BOLD)make test-run runs nothing. Pick the question you actually have:$(RESET)"; \
+	echo ""; \
+	echo "  $(CYAN)Does the thing I just wrote work?$(RESET)"; \
+	echo "      make t F='exact case name'"; \
+	echo ""; \
+	echo "  $(CYAN)Did I break this area?$(RESET)"; \
+	echo "      make t F='[tag]'"; \
+	echo ""; \
+	echo "  $(CYAN)Nothing has changed since the last build?$(RESET)"; \
+	echo "      $(TEST_BIN) '[tag]'"; \
+	echo "         Skips make's dependency scan (5 to 18s) for a 0.05 to 0.6s run."; \
+	echo "         Correct ONLY when you have not edited code since that build."; \
+	echo ""; \
+	echo "  $(CYAN)Did I break something I was not touching?$(RESET)"; \
+	echo "      make unit-sweep        C++ unit tests only, ~50s"; \
+	echo "      make full-test-run     unit sweep + bats shell suite, ~2m"; \
+	echo "         25s idle, minutes on a loaded box, and only worth asking once"; \
+	echo "         the feature is finished."; \
+	echo ""; \
+	echo "A full run cannot tell you your feature works, only that something else broke."; \
+	echo "Cadence table: tests/CLAUDE.md, 'What to run when'."; \
+	exit 2
+
+# ----------------------------------------------------------------------------
+# dev-timing: what the dev loop actually costs
+# ----------------------------------------------------------------------------
+# Rebuilds a wall-clock ledger of every build, suite and test run from session
+# transcripts, so "is this worth running" is answered from measured medians
+# rather than from a guess. Output is derived and gitignored; regenerating is
+# a few seconds and safe at any time.
+.PHONY: dev-timing
+dev-timing:
+	$(Q)python3 scripts/helix-dev-timing.py
 
 # Run unit tests SEQUENTIALLY (for debugging or clean output)
 # Slower but useful when you need to see exact test ordering or debug failures
 test-serial: test-build
 	$(ECHO) "$(CYAN)$(BOLD)Running unit tests sequentially (excluding slow)...$(RESET)"
 	@START_TIME=$$(date +%s); \
-	$(TEST_BIN) "~[.] ~[slow]"; \
+	$(call timeout_run,$(SUITE_TIMEOUT)) $(TEST_BIN) "~[.] ~[slow]"; \
 	$(call report_test_result,Unit tests)
 
 # Run ALL tests including slow ones (for thorough validation)
-# Fast tests run in parallel shards; [slow] tests run sequentially to avoid
-# deadlocks from thread-based tests (hv::EventLoop, std::thread) under sharding.
+# Three tiers, in order: fast tests across NPROCS shards, [slow] across
+# SLOW_SHARDS, then [serial] alone in one process.
 test-all: test-build
 	$(ECHO) "$(CYAN)$(BOLD)Running fast tests in parallel...$(RESET)"
 	@START_TIME=$$(date +%s); \
 	$(call run_tests_parallel,"~[.] ~[slow]"); \
-	echo "$(CYAN)$(BOLD)Running [slow] tests sequentially...$(RESET)"; \
-	$(TEST_BIN) "[slow]" --durations yes; \
+	$(call run_slow_tiers); \
 	$(call report_test_result,All tests)
 
 # Run the HIDDEN test set — every test whose first tag character is '.'.
@@ -474,7 +604,7 @@ test-all: test-build
 # are timing-sensitive stress harnesses; sharding buys little here and muddies
 # attribution when something goes red.
 #
-# Still NOT part of test-run — these cannot share that run's sharded, parallel,
+# Still NOT part of full-test-run — these cannot share that run's sharded, parallel,
 # arbitrary-cwd execution. scripts/quality-checks.sh does gate on this target
 # now that the set is green, but only when the test binary is already current
 # (it never builds one) — see the "Hidden test set" block there and
@@ -486,7 +616,7 @@ HIDDEN_FILTER ?= [.]
 test-hidden: test-build
 	$(ECHO) "$(CYAN)$(BOLD)Running HIDDEN tests ($(HIDDEN_FILTER)) sequentially from $(CURDIR)...$(RESET)"
 	@START_TIME=$$(date +%s); \
-	cd $(CURDIR) && $(TEST_BIN) "$(HIDDEN_FILTER)"; \
+	cd $(CURDIR) && $(call timeout_run,$(TEST_TIMEOUT)) $(TEST_BIN) "$(HIDDEN_FILTER)"; \
 	$(call report_test_result,Hidden tests)
 
 # List the hidden set without running it — the inventory behind the tracker doc.
@@ -494,7 +624,8 @@ test-hidden-list: test-build
 	$(ECHO) "$(CYAN)$(BOLD)Hidden test cases ($(HIDDEN_FILTER)):$(RESET)"
 	$(Q)cd $(CURDIR) && $(TEST_BIN) "$(HIDDEN_FILTER)" --list-tests
 
-# Alias that rebuilds and runs tests (useful for development)
+# `tests` is the same vague ask as `test-run` and earns the same answer: the
+# signpost, which names the target that fits the question.
 tests: test-run
 
 # ============================================================================
@@ -514,18 +645,35 @@ test-kiauh:
 # Shell/Bats Tests
 # ============================================================================
 
-# Run shell/bats tests for platform hooks and installer scripts
+# Run shell/bats tests for platform hooks and installer scripts. The parallel
+# run holds its -j as jobpool tokens (`helix-claim hold`), so it shares the
+# machine budget with compiles; without jobpool the -j is the cores. The hold
+# waits briefly for a third of the pool (helix-claim hold's default floor), so
+# a saturated pool delays the suite instead of running it serially.
+# A jobpool with `hold --grow` also keeps the live slot count in a file that
+# grows and shrinks with the pool. bats checks --jobs as a number, so it gets
+# one (2: it refuses --no-parallelize-within-files below that) and
+# scripts/parallel-jobs-file.sh as its parallel, which hands GNU parallel the
+# file instead; parallel re-reads it as the suite runs. With no file, one
+# slot runs serially and more run at the fixed count.
 test-shell:
 	$(ECHO) "$(CYAN)$(BOLD)Running shell tests (bats)...$(RESET)"
 	@if command -v bats >/dev/null 2>&1; then \
 		START_TIME=$$(date +%s); \
 		if command -v parallel >/dev/null 2>&1; then \
-			NPROC=$$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4); \
-			bats --jobs "$$NPROC" --no-parallelize-within-files tests/shell/; \
+			jobs_dir=$$(mktemp -d); \
+			HELIX_JOBS_FILE=$$jobs_dir/slots scripts/helix-claim hold --grow "$$jobs_dir/slots" -- \
+				sh -c 'if [ -f "$$HELIX_JOBS_FILE" ]; then \
+					exec bats --jobs 2 --parallel-binary-name "$$PWD/scripts/parallel-jobs-file.sh" \
+						--no-parallelize-within-files "$$@"; fi; \
+				[ "$$JOBPOOL_SLOTS" -gt 1 ] || exec bats "$$@"; \
+				exec bats --jobs "$$JOBPOOL_SLOTS" --no-parallelize-within-files "$$@"' bats tests/shell/; \
+			STATUS=$$?; \
+			rm -f "$$jobs_dir"/*; rmdir "$$jobs_dir"; \
 		else \
 			bats tests/shell/; \
+			STATUS=$$?; \
 		fi; \
-		STATUS=$$?; \
 		END_TIME=$$(date +%s); \
 		DURATION=$$((END_TIME - START_TIME)); \
 		if [ $$STATUS -ne 0 ]; then \
@@ -589,7 +737,7 @@ test-xml:
 		echo "  Log: /tmp/helix_xml_cmake.log"; \
 		exit 1; \
 	}; \
-	cmake --build $(HELIX_XML_TEST_BUILD_DIR) -j $(NPROC) > /tmp/helix_xml_build.log 2>&1 || { \
+	scripts/helix-claim hold -n $(NPROC) -- sh -c 'exec cmake --build "$$0" -j "$$JOBPOOL_SLOTS"' $(HELIX_XML_TEST_BUILD_DIR) > /tmp/helix_xml_build.log 2>&1 || { \
 		cat /tmp/helix_xml_build.log; \
 		echo "$(RED)$(BOLD)✗ helix-xml test build failed$(RESET)"; \
 		echo "  Log: /tmp/helix_xml_build.log"; \
@@ -650,42 +798,14 @@ test-plugin:
 # Run tests with per-test timing (shows slow tests)
 test-verbose: test-build
 	$(ECHO) "$(CYAN)$(BOLD)Running tests with timing...$(RESET)"
-	$(Q)$(TEST_BIN) --durations yes --use-colour yes
-
-# Run G-code related tests
-test-gcode: test-build
-	$(ECHO) "$(CYAN)$(BOLD)Running G-code tests...$(RESET)"
-	@START_TIME=$$(date +%s); \
-	$(TEST_BIN) "[gcode]"; \
-	$(call report_test_result,G-code tests)
+	$(Q)$(call timeout_run,$(SUITE_TIMEOUT)) $(TEST_BIN) --durations yes --use-colour yes
 
 # Run UI-related tests
 test-ui: test-build
 	$(ECHO) "$(CYAN)$(BOLD)Running UI tests...$(RESET)"
 	@START_TIME=$$(date +%s); \
-	$(TEST_BIN) "[navigation],[theme],[wizard]"; \
+	$(call timeout_run,$(TEST_TIMEOUT)) $(TEST_BIN) "[navigation],[theme],[wizard]"; \
 	$(call report_test_result,UI tests)
-
-# Run Moonraker/mock-related tests
-test-moonraker: test-build
-	$(ECHO) "$(CYAN)$(BOLD)Running Moonraker tests...$(RESET)"
-	@START_TIME=$$(date +%s); \
-	$(TEST_BIN) "[mock],[sequencer],[capabilities]"; \
-	$(call report_test_result,Moonraker tests)
-
-# Run network-related tests (WiFi, Ethernet)
-test-network: test-build
-	$(ECHO) "$(CYAN)$(BOLD)Running network tests...$(RESET)"
-	@START_TIME=$$(date +%s); \
-	$(TEST_BIN) "[network],[scan],[connect]"; \
-	$(call report_test_result,Network tests)
-
-# Run security-related tests
-test-security: test-build
-	$(ECHO) "$(CYAN)$(BOLD)Running security tests...$(RESET)"
-	@START_TIME=$$(date +%s); \
-	$(TEST_BIN) "[security],[injection],[safety]"; \
-	$(call report_test_result,Security tests)
 
 # List all available test tags
 test-list-tags: test-build
@@ -696,19 +816,11 @@ test-list-tags: test-build
 test-list: test-build
 	$(Q)$(TEST_BIN) --list-tests
 
-# Backwards compatibility alias
-test-wizard: test
-
 # ============================================================================
 # Test Timing and Performance Targets
 # ============================================================================
 # Use these targets to identify slow tests and optimize test runtime.
 # Tests tagged [slow] are excluded from test-fast for quick iteration.
-
-# Show slowest tests (top 20) - useful for identifying optimization targets
-test-timing: test-build
-	$(ECHO) "$(CYAN)$(BOLD)Slowest tests (top 20):$(RESET)"
-	@$(TEST_BIN) "~[.]" --durations yes 2>&1 | grep -E "^[0-9]+\.[0-9]+ s:" | sort -rn | head -20
 
 # Run only fast tests in PARALLEL (skip hidden and slow tests) - for quick iteration
 # Target: <15s total runtime for rapid development feedback with parallelism
@@ -720,11 +832,20 @@ test-fast: test-build
 	DURATION=$$((END_TIME - START_TIME)); \
 	echo "$(GREEN)$(BOLD)✓ Fast tests passed in $${DURATION}s$(RESET)"
 
+# The [slow] tier sharded, then its [serial] members in one process.
+# Exits non-zero through the recipe when either tier fails.
+define run_slow_tiers
+	echo "$(CYAN)$(BOLD)Running [slow] tests in $(SLOW_SHARDS) shards...$(RESET)"; \
+	$(call run_tests_parallel,"[slow] ~[serial]",$(SLOW_SHARDS),$(SLOW_ORDER)); \
+	echo "$(CYAN)$(BOLD)Running [slow][serial] tests sequentially...$(RESET)"; \
+	$(TEST_BIN) "[slow][serial]" --allow-running-no-tests --durations yes
+endef
+
 # Run only slow tests - for thorough validation before commit
 test-slow: test-build
 	$(ECHO) "$(CYAN)$(BOLD)Running slow tests only...$(RESET)"
 	@START_TIME=$$(date +%s); \
-	$(TEST_BIN) "[slow]"; \
+	$(call run_slow_tiers); \
 	$(call report_test_result,Slow tests)
 
 # Run only eventloop tests - hv::EventLoop network tests (very slow, 5-10 min)
@@ -742,29 +863,6 @@ test-smoke: test-build
 	@START_TIME=$$(date +%s); \
 	$(TEST_BIN) "[config],[navigation],[ui_theme],[parser]" "~[slow]" "~[.]"; \
 	$(call report_test_result,Smoke tests)
-
-# Show test coverage summary by tag area
-test-summary: test-build
-	$(ECHO) "$(CYAN)$(BOLD)=== Test Coverage by Tag (top 25) ===$(RESET)"
-	@$(TEST_BIN) --list-tags 2>&1 | grep -E "^\s+[0-9]+" | sort -rn | head -25
-	$(ECHO) ""
-	$(ECHO) "$(CYAN)$(BOLD)=== Test Count ===$(RESET)"
-	@echo -n "  "; $(TEST_BIN) --list-tests 2>&1 | grep -c "^  " || echo "0"
-
-# Generate timing report for major test categories
-# Updates /tmp/test_timing.md with current timings
-test-timing-report: test-build
-	$(ECHO) "$(CYAN)$(BOLD)Generating test timing report...$(RESET)"
-	@echo "| Tag | Tests | Time |" > /tmp/test_timing.md
-	@echo "|-----|-------|------|" >> /tmp/test_timing.md
-	@for tag in moonraker gcode printer_detector config parser navigation ui_theme security afc wizard mock; do \
-		result=$$($(TEST_BIN) "[$$tag]" "~[.]" "~[slow]" --durations yes 2>&1); \
-		count=$$(echo "$$result" | grep "test cases" | grep -o "[0-9]* passed" | head -1 || echo "0"); \
-		time=$$(echo "$$result" | tail -1); \
-		echo "| [\$$tag] | $$count | - |" >> /tmp/test_timing.md; \
-	done
-	@cat /tmp/test_timing.md
-	$(ECHO) "$(GREEN)See /tmp/test_timing.md for full documentation$(RESET)"
 
 # ============================================================================
 # Slow Test Candidates (>500ms) - Tag with [slow] incrementally
@@ -784,85 +882,6 @@ test-timing-report: test-build
 #
 # ============================================================================
 
-# Run only config tests
-test-config: test-build
-	$(ECHO) "$(CYAN)$(BOLD)Running config tests...$(RESET)"
-	$(Q)$(TEST_BIN) "[config]" || { \
-		echo "$(RED)$(BOLD)✗ Config tests failed!$(RESET)"; \
-		exit 1; \
-	}
-	$(ECHO) "$(GREEN)$(BOLD)✓ Config tests passed!$(RESET)"
-
-# ============================================================================
-# Feature-Based Test Targets (New Taxonomy)
-# ============================================================================
-# Tests are now tagged by FEATURE/IMPORTANCE rather than layer/speed.
-# Use these targets to test specific functional areas.
-
-# CORE tests - Critical functionality that MUST work (<15s, ~18 tests)
-# If these fail, the app is fundamentally broken.
-test-core: test-build
-	$(ECHO) "$(CYAN)$(BOLD)Running core tests...$(RESET)"
-	@START_TIME=$$(date +%s); \
-	$(TEST_BIN) "[core]"; \
-	$(call report_test_result,Core tests)
-
-# CONNECTION tests - Moonraker connection lifecycle, retry, robustness
-test-connection: test-build
-	$(ECHO) "$(CYAN)$(BOLD)Running connection tests...$(RESET)"
-	@START_TIME=$$(date +%s); \
-	$(TEST_BIN) "[connection]" "~[slow]"; \
-	$(call report_test_result,Connection tests)
-
-# STATE tests - PrinterState, subjects, observers
-test-state: test-build
-	$(ECHO) "$(CYAN)$(BOLD)Running state tests...$(RESET)"
-	@START_TIME=$$(date +%s); \
-	$(TEST_BIN) "[state]"; \
-	$(call report_test_result,State tests)
-
-# PRINT tests - Print workflow, start/pause/cancel, exclude object
-test-print: test-build
-	$(ECHO) "$(CYAN)$(BOLD)Running print tests...$(RESET)"
-	@START_TIME=$$(date +%s); \
-	$(TEST_BIN) "[print]" "~[slow]"; \
-	$(call report_test_result,Print tests)
-
-# CALIBRATION tests - Bed mesh, input shaper
-test-calibration: test-build
-	$(ECHO) "$(CYAN)$(BOLD)Running calibration tests...$(RESET)"
-	@START_TIME=$$(date +%s); \
-	$(TEST_BIN) "[calibration]"; \
-	$(call report_test_result,Calibration tests)
-
-# PRINTER tests - Printer detection, capabilities, hardware
-test-printer: test-build
-	$(ECHO) "$(CYAN)$(BOLD)Running printer tests...$(RESET)"
-	@START_TIME=$$(date +%s); \
-	$(TEST_BIN) "[printer]"; \
-	$(call report_test_result,Printer tests)
-
-# AMS tests - All AMS/MMU backends (includes [afc], [ace])
-test-ams: test-build
-	$(ECHO) "$(CYAN)$(BOLD)Running AMS tests...$(RESET)"
-	@START_TIME=$$(date +%s); \
-	$(TEST_BIN) "[ams]"; \
-	$(call report_test_result,AMS tests)
-
-# FILAMENT tests - Spoolman, filament sensors
-test-filament: test-build
-	$(ECHO) "$(CYAN)$(BOLD)Running filament tests...$(RESET)"
-	@START_TIME=$$(date +%s); \
-	$(TEST_BIN) "[filament]"; \
-	$(call report_test_result,Filament tests)
-
-# ASSETS tests - Thumbnails, prerendered images
-test-assets: test-build
-	$(ECHO) "$(CYAN)$(BOLD)Running assets tests...$(RESET)"
-	@START_TIME=$$(date +%s); \
-	$(TEST_BIN) "[assets]"; \
-	$(call report_test_result,Assets tests)
-
 # Unified test binary - uses automatic app object discovery
 # No more manual dependency lists! New source files are automatically included.
 # If you get linker errors, check if the file needs to be excluded (TEST_APP_OBJS filter).
@@ -880,21 +899,25 @@ test-assets: test-build
 # A bounded -jN puts a --jobserver-auth entry in MAKEFLAGS. `exec` replaces the
 # process image but KEEPS open file descriptors, so the jobserver FDs survive and
 # re-invoking without -j inherits the caller's limit instead of overriding it.
-# An explicit -j$(NPROC) is only correct for the other two cases: unlimited `-j`
+# An explicit -j$(JOBS) is only correct for the other two cases: unlimited `-j`
 # (a 'j' in MAKEFLAGS with no jobserver), and no -j at all — the latter because
 # exec'ing with neither would leave Phase 2 at -j1, building hundreds of files
 # serially.
 ifndef _PARALLEL_GUARD
 $(TEST_BIN): FORCE
+	@# Phase 1 has no object prerequisites, so this is the last point at which
+	@# a toolchain swap can still be caught before test objects compile.
+	$(check-toolchain-change)
 	@if echo "$(MAKEFLAGS)" | grep -q 'jobserver'; then \
 		exec $(MAKE) _PARALLEL_GUARD=1 --no-print-directory $@; \
 	else \
+		j=$(JOBS_SH); \
 		if echo "$(MAKEFLAGS)" | grep -q 'j'; then \
 			echo ""; \
-			printf '\033[1;33m⚠️  make -j (unlimited) detected - auto-fixing to -j%s\033[0m\n' "$(NPROC)"; \
+			printf '\033[1;33m⚠️  make -j (unlimited) detected - auto-fixing to -j%s\033[0m\n' "$$j"; \
 			echo ""; \
 		fi; \
-		exec $(MAKE) _PARALLEL_GUARD=1 --no-print-directory -j$(NPROC) $@; \
+		exec $(MAKE) _PARALLEL_GUARD=1 --no-print-directory -j"$$j" $@; \
 	fi
 else
 # $(LIBHV_LIB) and $(LIBHV_JSON_HEADER) are prerequisites for the same reason
@@ -911,15 +934,21 @@ $(TEST_BIN): $(TEST_CORE_DEPS) \
              $(MOCK_OBJS) \
              $(LV_MARKDOWN_OBJS) \
              $(QUIRC_OBJS) \
+             $(LUA_OBJS) \
              $(FONT_OBJS) \
              $(TRANS_OBJS) \
              $(OBJCPP_OBJS) \
              $(LIBHV_LIB) \
              $(LIBHV_JSON_HEADER) \
              $(TEST_PLATFORM_DEPS)
+	$(call check_abi_unchanged)
 	$(Q)mkdir -p $(BIN_DIR)
 	$(ECHO) "$(MAGENTA)$(BOLD)[LD]$(RESET) helix-tests"
-	$(Q)$(CXX) $(CXXFLAGS) $(filter-out %.a %.h %.hh %.hpp %.hxx,$(sort $^)) -o $@ $(LDFLAGS) || { \
+	@# The object list goes through a response file: inline, the recipe line
+	@# exceeds Linux's 128 KB per-argument limit once object paths grow (the
+	@# ASAN build's do), and bash refuses it with "Argument list too long".
+	$(file >$(OBJ_DIR)/$(notdir $@).objs,$(filter-out %.a %.h %.hh %.hpp %.hxx,$(sort $^)))
+	$(Q)$(CXX) $(CXXFLAGS) @$(OBJ_DIR)/$(notdir $@).objs -o $@ $(LDFLAGS) || { \
 		echo "$(RED)$(BOLD)✗ Test linking failed!$(RESET)"; \
 		exit 1; \
 	}
@@ -934,7 +963,7 @@ FORCE:
 
 # Compile test main (Catch2 runner)
 # Note: No DEPFLAGS for Catch2 infrastructure - rarely changes
-$(TEST_MAIN_OBJ): $(TEST_DIR)/test_main.cpp
+$(TEST_MAIN_OBJ): $(TEST_DIR)/test_main.cpp $(ABI_STAMP)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(BLUE)[TEST-MAIN]$(RESET) $<"
 	$(Q)$(CXX) $(CXXFLAGS) -I$(TEST_DIR) -c $< -o $@
@@ -947,45 +976,49 @@ $(CATCH2_OBJ): $(TEST_DIR)/catch_amalgamated.cpp
 	$(Q)$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # Test compile rules depend on libhv-generated headers ($(LIBHV_JSON_HEADER))
-# and the PCH so a fresh `make test-asan` / `make test-tsan` (without a prior
+# and the LVGL patch stamp so a fresh `make test-asan` / `make test-tsan` (without a prior
 # `make`) triggers libhv-build before any .cpp that includes hv/json.hpp.
 #
 # Compile UI test utilities
 # Uses DEPFLAGS to track header dependencies
-$(UI_TEST_UTILS_OBJ): $(TEST_DIR)/ui_test_utils.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(PCH)
+$(UI_TEST_UTILS_OBJ): $(TEST_DIR)/ui_test_utils.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(PATCHES_STAMP) $(ABI_STAMP) | $(PATCH_MARKER_STAMP)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(CYAN)[UI-TEST]$(RESET) $<"
-	$(Q)$(CXX) $(CXXFLAGS) $(TEST_WARN_FLAGS) $(DEPFLAGS) $(PCH_FLAGS) -I$(TEST_DIR) $(INCLUDES) $(LV_CONF) -c $< -o $@
+	$(Q)$(CXX) $(CXXFLAGS) $(TEST_WARN_FLAGS) $(DEPFLAGS) $(FORCED_INCLUDE) -I$(TEST_DIR) $(INCLUDES) $(LV_CONF) -c $< -o $@
+	$(call emit-compile-command,$(CXX),$(CXXFLAGS) $(FORCED_INCLUDE) -I$(TEST_DIR) $(INCLUDES) $(LV_CONF),$<,$@)
 
 # Compile LVGL test fixture (shared base class for UI tests)
 # Uses DEPFLAGS to track header dependencies
-$(LVGL_TEST_FIXTURE_OBJ): $(TEST_DIR)/lvgl_test_fixture.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(PCH)
+$(LVGL_TEST_FIXTURE_OBJ): $(TEST_DIR)/lvgl_test_fixture.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(PATCHES_STAMP) $(ABI_STAMP) | $(PATCH_MARKER_STAMP)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(CYAN)[LVGL-FIXTURE]$(RESET) $<"
-	$(Q)$(CXX) $(CXXFLAGS) $(TEST_WARN_FLAGS) $(DEPFLAGS) $(PCH_FLAGS) -I$(TEST_DIR) $(INCLUDES) $(LV_CONF) -c $< -o $@
+	$(Q)$(CXX) $(CXXFLAGS) $(TEST_WARN_FLAGS) $(DEPFLAGS) $(FORCED_INCLUDE) -I$(TEST_DIR) $(INCLUDES) $(LV_CONF) -c $< -o $@
+	$(call emit-compile-command,$(CXX),$(CXXFLAGS) $(FORCED_INCLUDE) -I$(TEST_DIR) $(INCLUDES) $(LV_CONF),$<,$@)
 
 # Compile HelixScreen test fixture (base class that resets process singletons)
 # Uses DEPFLAGS to track header dependencies
-$(HELIX_TEST_FIXTURE_OBJ): $(TEST_DIR)/helix_test_fixture.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(PCH)
+$(HELIX_TEST_FIXTURE_OBJ): $(TEST_DIR)/helix_test_fixture.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(PATCHES_STAMP) $(ABI_STAMP) | $(PATCH_MARKER_STAMP)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(CYAN)[HELIX-FIXTURE]$(RESET) $<"
-	$(Q)$(CXX) $(CXXFLAGS) $(TEST_WARN_FLAGS) $(DEPFLAGS) $(PCH_FLAGS) -I$(TEST_DIR) $(INCLUDES) $(LV_CONF) -c $< -o $@
+	$(Q)$(CXX) $(CXXFLAGS) $(TEST_WARN_FLAGS) $(DEPFLAGS) $(FORCED_INCLUDE) -I$(TEST_DIR) $(INCLUDES) $(LV_CONF) -c $< -o $@
+	$(call emit-compile-command,$(CXX),$(CXXFLAGS) $(FORCED_INCLUDE) -I$(TEST_DIR) $(INCLUDES) $(LV_CONF),$<,$@)
 
 # Compile test fixtures (reusable fixtures with mock initialization helpers)
 # Uses DEPFLAGS to track header dependencies
-$(TEST_FIXTURES_OBJ): $(TEST_DIR)/test_fixtures.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(PCH)
+$(TEST_FIXTURES_OBJ): $(TEST_DIR)/test_fixtures.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(PATCHES_STAMP) $(ABI_STAMP) | $(PATCH_MARKER_STAMP)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(CYAN)[TEST-FIXTURE]$(RESET) $<"
-	$(Q)$(CXX) $(CXXFLAGS) $(TEST_WARN_FLAGS) $(DEPFLAGS) $(PCH_FLAGS) -I$(TEST_DIR) $(INCLUDES) $(LV_CONF) -c $< -o $@
+	$(Q)$(CXX) $(CXXFLAGS) $(TEST_WARN_FLAGS) $(DEPFLAGS) $(FORCED_INCLUDE) -I$(TEST_DIR) $(INCLUDES) $(LV_CONF) -c $< -o $@
+	$(call emit-compile-command,$(CXX),$(CXXFLAGS) $(FORCED_INCLUDE) -I$(TEST_DIR) $(INCLUDES) $(LV_CONF),$<,$@)
 
 # Compile LVGL UI test fixture (full UI integration test fixture)
 # Uses DEPFLAGS to track header dependencies
 # Emits .ccj fragment for incremental compile_commands.json generation
-$(LVGL_UI_TEST_FIXTURE_OBJ): $(TEST_DIR)/lvgl_ui_test_fixture.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(PCH)
+$(LVGL_UI_TEST_FIXTURE_OBJ): $(TEST_DIR)/lvgl_ui_test_fixture.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(PATCHES_STAMP) $(ABI_STAMP) | $(PATCH_MARKER_STAMP)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(CYAN)[UI-FIXTURE]$(RESET) $<"
-	$(Q)$(CXX) $(CXXFLAGS) $(TEST_WARN_FLAGS) $(DEPFLAGS) $(PCH_FLAGS) -I$(TEST_DIR) $(INCLUDES) $(LV_CONF) -c $< -o $@
-	$(call emit-compile-command,$(CXX),$(CXXFLAGS) $(PCH_FLAGS) -I$(TEST_DIR) $(INCLUDES) $(LV_CONF),$<,$@)
+	$(Q)$(CXX) $(CXXFLAGS) $(TEST_WARN_FLAGS) $(DEPFLAGS) $(FORCED_INCLUDE) -I$(TEST_DIR) $(INCLUDES) $(LV_CONF) -c $< -o $@
+	$(call emit-compile-command,$(CXX),$(CXXFLAGS) $(FORCED_INCLUDE) -I$(TEST_DIR) $(INCLUDES) $(LV_CONF),$<,$@)
 
 # Warnings promoted to errors for TEST code only.
 #
@@ -1004,23 +1037,26 @@ TEST_WARN_FLAGS := -Werror=type-limits
 # Compile test sources
 # Uses DEPFLAGS to track header dependencies for incremental rebuilds
 # Emits .ccj fragment for incremental compile_commands.json generation
-$(OBJ_DIR)/tests/%.o: $(TEST_UNIT_DIR)/%.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(PCH)
+$(OBJ_DIR)/tests/%.o: $(TEST_UNIT_DIR)/%.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(PATCHES_STAMP) $(ABI_STAMP) $(FLAGS_STAMP) | $(PATCH_MARKER_STAMP)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(BLUE)[TEST]$(RESET) $<"
-	$(Q)$(CXX) $(CXXFLAGS) $(TEST_WARN_FLAGS) $(DEPFLAGS) $(PCH_FLAGS) -I$(TEST_DIR) $(INCLUDES) $(LV_CONF) -c $< -o $@
-	$(call emit-compile-command,$(CXX),$(CXXFLAGS) $(PCH_FLAGS) -I$(TEST_DIR) $(INCLUDES) $(LV_CONF),$<,$@)
+	$(Q)$(CXX) $(CXXFLAGS) $(TEST_WARN_FLAGS) $(DEPFLAGS) $(FORCED_INCLUDE) -I$(TEST_DIR) $(INCLUDES) $(LV_CONF) -c $< -o $@
+	$(call emit-compile-command,$(CXX),$(CXXFLAGS) $(FORCED_INCLUDE) -I$(TEST_DIR) $(INCLUDES) $(LV_CONF),$<,$@)
 
 # Compile application subdirectory test sources
 # Emits .ccj fragment for incremental compile_commands.json generation
-$(OBJ_DIR)/tests/application/%.o: $(TEST_UNIT_DIR)/application/%.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(PCH)
+$(OBJ_DIR)/tests/application/%.o: $(TEST_UNIT_DIR)/application/%.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(PATCHES_STAMP) $(ABI_STAMP) $(FLAGS_STAMP) | $(PATCH_MARKER_STAMP)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(BLUE)[TEST-APP]$(RESET) $<"
-	$(Q)$(CXX) $(CXXFLAGS) $(TEST_WARN_FLAGS) $(DEPFLAGS) $(PCH_FLAGS) -I$(TEST_DIR) -I$(TEST_UNIT_DIR)/application $(INCLUDES) $(LV_CONF) -c $< -o $@
-	$(call emit-compile-command,$(CXX),$(CXXFLAGS) $(PCH_FLAGS) -I$(TEST_DIR) -I$(TEST_UNIT_DIR)/application $(INCLUDES) $(LV_CONF),$<,$@)
+	$(Q)$(CXX) $(CXXFLAGS) $(TEST_WARN_FLAGS) $(DEPFLAGS) $(FORCED_INCLUDE) -I$(TEST_DIR) -I$(TEST_UNIT_DIR)/application $(INCLUDES) $(LV_CONF) -c $< -o $@
+	$(call emit-compile-command,$(CXX),$(CXXFLAGS) $(FORCED_INCLUDE) -I$(TEST_DIR) -I$(TEST_UNIT_DIR)/application $(INCLUDES) $(LV_CONF),$<,$@)
 
 # Compile libhv dns_resolv.c for test_dns_resolver
-# dns_resolv.c dependency on PATCHES_STAMP is declared in rules.mk
-$(DNS_RESOLV_OBJ): $(LIBHV_DIR)/base/dns_resolv.c
+# rules.mk makes dns_resolv.c depend on PATCHES_STAMP, which creates it.
+# LIBHV_LIB orders this after libhv's build, which is what generates the
+# hconfig.h that $(LIBHV_INC) pulls in; without it a parallel build can read
+# the header while configure is still writing it.
+$(DNS_RESOLV_OBJ): $(LIBHV_DIR)/base/dns_resolv.c $(LIBHV_LIB)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(BLUE)[TEST-C]$(RESET) $<"
 	$(Q)$(CC) $(CFLAGS) -I$(LIBHV_DIR)/base $(LIBHV_INC) -c $< -o $@
@@ -1028,11 +1064,11 @@ $(DNS_RESOLV_OBJ): $(LIBHV_DIR)/base/dns_resolv.c
 # Compile mock sources
 # Uses DEPFLAGS to track header dependencies
 # Emits .ccj fragment for incremental compile_commands.json generation
-$(OBJ_DIR)/tests/mocks/%.o: $(TEST_MOCK_DIR)/%.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(PCH)
+$(OBJ_DIR)/tests/mocks/%.o: $(TEST_MOCK_DIR)/%.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(PATCHES_STAMP) $(ABI_STAMP) $(FLAGS_STAMP) | $(PATCH_MARKER_STAMP)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(YELLOW)[MOCK]$(RESET) $<"
-	$(Q)$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(PCH_FLAGS) -I$(TEST_MOCK_DIR) $(INCLUDES) $(LV_CONF) -c $< -o $@
-	$(call emit-compile-command,$(CXX),$(CXXFLAGS) $(PCH_FLAGS) -I$(TEST_MOCK_DIR) $(INCLUDES) $(LV_CONF),$<,$@)
+	$(Q)$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(FORCED_INCLUDE) -I$(TEST_MOCK_DIR) $(INCLUDES) $(LV_CONF) -c $< -o $@
+	$(call emit-compile-command,$(CXX),$(CXXFLAGS) $(FORCED_INCLUDE) -I$(TEST_MOCK_DIR) $(INCLUDES) $(LV_CONF),$<,$@)
 
 # ============================================================================
 # Sanitizer Targets (Memory Safety Testing)
@@ -1048,7 +1084,7 @@ $(OBJ_DIR)/tests/mocks/%.o: $(TEST_MOCK_DIR)/%.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEA
 ASAN_FLAGS := -fsanitize=address -fno-omit-frame-pointer -g
 TSAN_FLAGS := -fsanitize=thread -fno-omit-frame-pointer -g
 
-# Sanitizer builds get their own object tree and PCH.
+# Sanitizer builds get their own object tree.
 #
 # They used to compile into $(OBJ_DIR) alongside the normal build, which made
 # `make test-asan` a trap: instrumented .o files landed on top of the ordinary
@@ -1062,17 +1098,21 @@ TSAN_FLAGS := -fsanitize=thread -fno-omit-frame-pointer -g
 # incremental rather than a full rebuild each way.
 ASAN_OBJ_DIR := $(BUILD_DIR)/obj-asan
 TSAN_OBJ_DIR := $(BUILD_DIR)/obj-tsan
-ASAN_PCH := $(BUILD_DIR)/asan-lvgl_pch.h.gch
-TSAN_PCH := $(BUILD_DIR)/tsan-lvgl_pch.h.gch
 
 # Overrides handed to the sanitizer sub-makes. Passed as command-line variables
 # so they beat the `:=` assignments in the top-level Makefile. BIN_DIR is left
 # shared deliberately — the binaries already have distinct names, and keeping it
 # stable means $(TEST_ASAN_BIN) resolves to the same path in both makes.
-ASAN_MAKE_OVERRIDES := OBJ_DIR=$(ASAN_OBJ_DIR) PCH=$(ASAN_PCH) \
+ASAN_MAKE_OVERRIDES := OBJ_DIR=$(ASAN_OBJ_DIR) \
 	CXXFLAGS='$(CXXFLAGS) $(ASAN_FLAGS)' LDFLAGS='$(LDFLAGS) $(ASAN_FLAGS)'
-TSAN_MAKE_OVERRIDES := OBJ_DIR=$(TSAN_OBJ_DIR) PCH=$(TSAN_PCH) \
-	CXXFLAGS='$(CXXFLAGS) $(TSAN_FLAGS)' LDFLAGS='$(LDFLAGS) $(TSAN_FLAGS)'
+# TSan also instruments the submodules. LVGL's draw-task handshake is C atomics in
+# lv_draw.c and lv_draw_sw.c; left uninstrumented, TSan sees none of that ordering
+# but still sees the memcpy and free interceptors either side of it, and reports
+# the render thread's read of a task against the main thread freeing it.
+TSAN_MAKE_OVERRIDES := OBJ_DIR=$(TSAN_OBJ_DIR) \
+	CXXFLAGS='$(CXXFLAGS) $(TSAN_FLAGS)' LDFLAGS='$(LDFLAGS) $(TSAN_FLAGS)' \
+	SUBMODULE_CFLAGS='$(SUBMODULE_CFLAGS) $(TSAN_FLAGS)' \
+	SUBMODULE_CXXFLAGS='$(SUBMODULE_CXXFLAGS) $(TSAN_FLAGS)'
 
 # Patterns that mean "the sanitizer reported something". Kept as variables so
 # the four sanitizer recipes share one definition. No commas — these are passed
@@ -1172,14 +1212,57 @@ TEST_TSAN_BIN := $(BIN_DIR)/helix-tests-tsan
 # variable discards every makefile assignment to it without the keyword.
 $(TEST_BIN): override CXXFLAGS += -DHELIX_HAS_ACE=1 -DHELIX_HAS_QIDI=1 -DHELIX_HAS_SNAPMAKER=1
 
+# Run a sanitizer binary in Catch2 shards, $(3) at a time, each into
+# $$shard_dir/<i>.log with its exit status in <i>.exit. The caller creates
+# $$shard_dir and judges the results.
+# Args: $(1) = env + binary, $(2) = test filter, $(3) = shard count, $(4) = concurrency.
+define launch_sanitizer_shards
+	for i in $$(seq 0 $$(($(3)-1))); do \
+		while [ "$$(jobs -rp | wc -l)" -ge $(4) ]; do sleep 1; done; \
+		( $(1) "$(2)" --shard-count $(3) --shard-index $$i > "$$shard_dir/$$i.log" 2>&1; \
+		  echo $$? > "$$shard_dir/$$i.exit" ) & \
+	done; \
+	wait
+endef
+
 # Build and run tests with AddressSanitizer
-test-asan:
+# The sanitizer build alone. CI runs this as its own step so a slow build
+# cannot eat the test budget, and a timeout names the phase that died.
+test-asan-build:
 	$(ECHO) "$(CYAN)$(BOLD)Building tests with AddressSanitizer...$(RESET)"
 	@$(MAKE) $(ASAN_MAKE_OVERRIDES) TEST_BIN=$(TEST_ASAN_BIN) $(TEST_ASAN_BIN)
-	$(ECHO) "$(CYAN)$(BOLD)Running tests with AddressSanitizer...$(RESET)"
-	@set -o pipefail; \
-	ASAN_OPTIONS=$(ASAN_RUN_OPTIONS) LSAN_OPTIONS=$(LSAN_RUN_OPTIONS) \
-	  $(TEST_ASAN_BIN) "~[.]" 2>&1 | tee /tmp/asan_output.txt; \
+
+test-tsan-build:
+	$(ECHO) "$(CYAN)$(BOLD)Building tests with ThreadSanitizer...$(RESET)"
+	@$(MAKE) $(TSAN_MAKE_OVERRIDES) TEST_BIN=$(TEST_TSAN_BIN) $(TEST_TSAN_BIN)
+
+
+# Sharded so a fatal report (a use-after-free aborts whatever halt_on_error says)
+# costs its own shard, not every case ordered after it (prestonbrown/helixscreen#1728).
+# The count also decides which tests share a process, and so which test first
+# allocates a process-scoped leak: scripts/asan_leak_baseline.txt is keyed to it.
+ASAN_SHARDS ?= 16
+# Each ASAN process carries its own shadow memory, as TSAN's do.
+ASAN_SHARD_JOBS ?= $(shell n=$$(nproc 2>/dev/null || echo 4); if [ $$n -gt 16 ]; then echo 16; else echo $$n; fi)
+ASAN_FILTER ?= ~[.]
+
+test-asan: test-asan-build
+	$(ECHO) "$(CYAN)$(BOLD)Running tests with AddressSanitizer ($(ASAN_SHARDS) shards, $(ASAN_SHARD_JOBS) at a time, filter: $(ASAN_FILTER))...$(RESET)"
+	@shard_dir=$$(mktemp -d "$(SHARD_ARTIFACT_ROOT)/asan-shards-XXXXXX"); \
+	$(call launch_sanitizer_shards,ASAN_OPTIONS=$(ASAN_RUN_OPTIONS) LSAN_OPTIONS=$(LSAN_RUN_OPTIONS) $(TEST_ASAN_BIN),$(ASAN_FILTER),$(ASAN_SHARDS),$(ASAN_SHARD_JOBS)); \
+	rc=0; \
+	for i in $$(seq 0 $$(($(ASAN_SHARDS)-1))); do \
+		ec=$$(cat "$$shard_dir/$$i.exit" 2>/dev/null | tr -d '[:space:]'); \
+		echo "shard $$i: $$(grep -hE 'All tests passed|^test cases:' "$$shard_dir/$$i.log" | tail -1)"; \
+		if [ "$$ec" != "0" ]; then \
+			echo "$(RED)$(BOLD)✗ ASAN shard $$i exited $${ec:-nothing}$(RESET)"; \
+			echo "  reproduce: $(TEST_ASAN_BIN) \"$(ASAN_FILTER)\" --shard-count $(ASAN_SHARDS) --shard-index $$i"; \
+			rc=1; \
+		fi; \
+	done; \
+	cat "$$shard_dir"/*.log > /tmp/asan_output.txt 2>/dev/null; \
+	rm -rf "$$shard_dir"; \
+	( exit $$rc ); \
 	$(call report_sanitizer_result,ASAN,/tmp/asan_output.txt,$(ASAN_REPORT_RE))
 	@python3 scripts/check_asan_leaks.py \
 	  --baseline scripts/asan_leak_baseline.txt /tmp/asan_output.txt
@@ -1207,19 +1290,11 @@ TSAN_SHARD_JOBS ?= $(shell n=$$(nproc 2>/dev/null || echo 4); if [ $$n -gt 16 ];
 # genuine race is never retried, so this cannot turn a real finding green.
 TSAN_SHARD_RETRIES ?= 3
 
-test-tsan:
-	$(ECHO) "$(CYAN)$(BOLD)Building tests with ThreadSanitizer...$(RESET)"
-	@$(MAKE) $(TSAN_MAKE_OVERRIDES) TEST_BIN=$(TEST_TSAN_BIN) $(TEST_TSAN_BIN)
+test-tsan: test-tsan-build
 	$(ECHO) "$(CYAN)$(BOLD)Running tests with ThreadSanitizer ($(TSAN_SHARDS) shards, $(TSAN_SHARD_JOBS) at a time, filter: $(TSAN_FILTER))...$(RESET)"
 	@shard_dir=$$(mktemp -d "$(SHARD_ARTIFACT_ROOT)/tsan-shards-XXXXXX"); \
 	inconclusive=""; \
-	for i in $$(seq 0 $$(($(TSAN_SHARDS)-1))); do \
-		while [ "$$(jobs -rp | wc -l)" -ge $(TSAN_SHARD_JOBS) ]; do sleep 1; done; \
-		( TSAN_OPTIONS="$(TSAN_RUN_OPTIONS)" $(TEST_TSAN_BIN) "$(TSAN_FILTER)" \
-			--shard-count $(TSAN_SHARDS) --shard-index $$i > "$$shard_dir/$$i.log" 2>&1; \
-		  echo $$? > "$$shard_dir/$$i.exit" ) & \
-	done; \
-	wait; \
+	$(call launch_sanitizer_shards,TSAN_OPTIONS="$(TSAN_RUN_OPTIONS)" $(TEST_TSAN_BIN),$(TSAN_FILTER),$(TSAN_SHARDS),$(TSAN_SHARD_JOBS)); \
 	rc=0; \
 	for i in $$(seq 0 $$(($(TSAN_SHARDS)-1))); do \
 		ec=$$(cat "$$shard_dir/$$i.exit" 2>/dev/null | tr -d '[:space:]'); \
@@ -1257,22 +1332,20 @@ test-tsan:
 	$(call report_sanitizer_result,TSAN,/tmp/tsan_output.txt,$(TSAN_REPORT_RE))
 
 # Run specific test with ASAN (usage: make test-asan-one TEST="[streaming]")
-test-asan-one:
-	$(ECHO) "$(CYAN)$(BOLD)Building tests with AddressSanitizer...$(RESET)"
-	@$(MAKE) $(ASAN_MAKE_OVERRIDES) TEST_BIN=$(TEST_ASAN_BIN) $(TEST_ASAN_BIN)
+# SEED=<n> runs it in Catch2's random order with that seed, so a crash that only
+# a --order rand run reaches can be reproduced under ASAN.
+test-asan-one: test-asan-build
 	$(ECHO) "$(CYAN)$(BOLD)Running test '$(TEST)' with AddressSanitizer...$(RESET)"
 	@set -o pipefail; \
 	ASAN_OPTIONS=$(ASAN_RUN_OPTIONS) LSAN_OPTIONS=$(LSAN_RUN_OPTIONS) \
-	  $(TEST_ASAN_BIN) "$(TEST)" 2>&1 | tee /tmp/asan_output.txt; \
+	  $(TEST_ASAN_BIN) "$(TEST)" $(if $(SEED),--order rand --rng-seed $(SEED)) 2>&1 | tee /tmp/asan_output.txt; \
 	$(call report_sanitizer_result,ASAN,/tmp/asan_output.txt,$(ASAN_REPORT_RE))
 # NOTE: no leak ratchet here. The baseline is pinned to the full-suite invocation
 # above; a filtered run leaks a different population, so checking it would fail on
 # a subset and pass on nothing useful.
 
 # Run specific test with TSAN (usage: make test-tsan-one TEST="[streaming]")
-test-tsan-one:
-	$(ECHO) "$(CYAN)$(BOLD)Building tests with ThreadSanitizer...$(RESET)"
-	@$(MAKE) $(TSAN_MAKE_OVERRIDES) TEST_BIN=$(TEST_TSAN_BIN) $(TEST_TSAN_BIN)
+test-tsan-one: test-tsan-build
 	$(ECHO) "$(CYAN)$(BOLD)Running test '$(TEST)' with ThreadSanitizer...$(RESET)"
 	@set -o pipefail; \
 	TSAN_OPTIONS="$(TSAN_RUN_OPTIONS)" $(TEST_TSAN_BIN) "$(TEST)" 2>&1 | tee /tmp/tsan_output.txt; \
@@ -1282,15 +1355,131 @@ test-tsan-one:
 clean-sanitizers:
 	$(ECHO) "$(YELLOW)Cleaning sanitizer binaries and object trees...$(RESET)"
 	$(Q)rm -f $(TEST_ASAN_BIN) $(TEST_TSAN_BIN)
-	$(Q)rm -f $(ASAN_PCH) $(TSAN_PCH)
 	$(Q)rm -rf $(ASAN_OBJ_DIR) $(TSAN_OBJ_DIR)
+	$(Q)rm -rf $(APP_ASAN_BIN_DIR) $(APP_TSAN_BIN_DIR)
+	$(Q)rm -rf $(APP_ASAN_OBJ_DIR) $(APP_TSAN_OBJ_DIR)
 	$(ECHO) "$(GREEN)✓ Sanitizer artifacts cleaned (normal build untouched)$(RESET)"
+
+# ============================================================================
+# App-level sanitizer runs: drive the real binary headlessly
+# ============================================================================
+# The targets above exercise helix-tests; these drive the actual app under
+# a sanitizer, via scripts/screenshot.sh (--test mock data, private socket,
+# recipe-driven navigation, no capture). The verdict reuses
+# report_sanitizer_result - the same two-sided check the suite targets use
+# (log grep for the report regex + exit status under pipefail) - because an
+# app run has the same two blind spots: a report with exit 0 (at-exit abort
+# after a successful drive) and a crash with no report.
+#
+# The drive runs at -vv: a sanitizer report is only actionable next to the
+# app's own debug log, and screenshot.sh otherwise leaves the app at its
+# default warn level, where nothing about the driven path is recorded.
+#
+# Usage:
+#   make asan-app                          # RECIPE=help-qr, REPEAT=25
+#   make tsan-app RECIPE=help-qr REPEAT=50
+
+# The app binary gets its own BIN_DIR so a sanitizer build never replaces
+# build/bin/helix-screen in place. OBJ_DIR is passed explicitly as
+# well: BIN_DIR alone would relink whatever objects are already up to date,
+# and those are uninstrumented (see the Makefile's SANITIZE block for the
+# exact trap).
+#
+# These get their OWN object dirs rather than sharing the test targets'. The
+# two ways of asking for a sanitizer do not produce interchangeable objects:
+# SANITIZE=address is applied in mk/cross.mk after SUBMODULE_CFLAGS merge, so
+# LVGL and helix-xml are instrumented too, and it strips _FORTIFY_SOURCE;
+# ASAN_MAKE_OVERRIDES appends to CXXFLAGS only, adds -g, and reaches no
+# submodule. One object dir for both would let make reuse the other spelling's
+# objects on timestamp alone, and a run whose LVGL is uninstrumented is blind
+# to exactly the draw-thread bugs these targets exist to find — while the
+# instrumentation guard below still passes, because the app's own objects
+# carry the symbols it greps for.
+APP_ASAN_OBJ_DIR := $(BUILD_DIR)/obj-asan-app
+APP_TSAN_OBJ_DIR := $(BUILD_DIR)/obj-tsan-app
+APP_ASAN_BIN_DIR := $(BUILD_DIR)/bin-asan
+APP_TSAN_BIN_DIR := $(BUILD_DIR)/bin-tsan
+APP_ASAN_BIN := $(APP_ASAN_BIN_DIR)/helix-screen
+APP_TSAN_BIN := $(APP_TSAN_BIN_DIR)/helix-screen
+
+# Runtime options for the APP, not the suite; mirrors mk/cross.mk's
+# PI_ASAN_OPTIONS (reliable stacks, first error fatal, no leak gate). Leak
+# detection stays off because the app's panels/widgets/subjects are
+# process-scoped by design and the real WiFi backend leaves an unjoined
+# probe thread at exit. TSan takes the same shape plus the shared
+# suppressions file; leak rules would belong in LSAN_OPTIONS, never in
+# ASAN_OPTIONS:suppressions=.
+APP_ASAN_OPTIONS ?= detect_leaks=0:abort_on_error=1:fast_unwind_on_malloc=0:print_stacktrace=1:halt_on_error=1
+APP_TSAN_OPTIONS ?= detect_leaks=0:halt_on_error=1:abort_on_error=1:print_stacktrace=1:suppressions=$(CURDIR)/tests/tsan_suppressions.txt
+
+RECIPE ?= help-qr
+REPEAT ?= 25
+# An instrumented shutdown flushes an at-exit sanitizer pass; give it room.
+SAN_APP_SHUTDOWN_TIMEOUT ?= 30
+SAN_PASS_RE := ^\[screenshot\] recipe pass [0-9]+/[0-9]+$$
+
+# Assert that a run actually did what it claims: the binary is instrumented,
+# and the recipe completed every requested pass. Each guard names itself and
+# its fix - a run that exercised nothing must not read as a pass. Shared by
+# asan-app and tsan-app.
+#
+# app_instrumentation_check runs BEFORE the drive (fail fast - an
+# uninstrumented binary would otherwise burn a full run to conclude nothing).
+# $(1) = label, $(2) = binary, $(3) = symbol substring.
+define app_instrumentation_check
+	if [ "$$(nm "$(2)" 2>/dev/null | grep -c '$(3)' || true)" -eq 0 ]; then \
+		echo "$(RED)$(BOLD)✗ $(1) vacuity guard [instrumentation]: $(2) carries no $(3) symbols - not instrumented, so this run can prove nothing$(RESET)"; \
+		echo "$(RED)  Fix: build with SANITIZE= and BOTH BIN_DIR= and OBJ_DIR= set; relinking up-to-date objects yields an uninstrumented binary$(RESET)"; \
+		exit 1; \
+	fi
+endef
+
+# app_pass_count_check runs AFTER the drive. $(1) = label, $(2) = run log,
+# $(3) = expected pass count. "Reached the control socket" is not checked
+# here: screenshot.sh hard-fails on a socket timeout or an app that exits
+# before the socket appears, and the app's own exit status is propagated
+# through its EXIT trap into this pipeline.
+define app_pass_count_check
+	passes=$$(grep -cE '$(SAN_PASS_RE)' "$(2)" 2>/dev/null || true); \
+	if [ "$$passes" -ne "$(3)" ]; then \
+		echo "$(RED)$(BOLD)✗ $(1) vacuity guard [pass count]: expected $(3) completed recipe passes, counted $$passes$(RESET)"; \
+		echo "$(RED)  Fix: a pass only counts when every ctl step succeeded; the failed steps are named in $(2)$(RESET)"; \
+		exit 1; \
+	fi
+endef
+
+.PHONY: asan-app tsan-app
+asan-app:
+	$(ECHO) "$(CYAN)$(BOLD)Building the app with AddressSanitizer ($(APP_ASAN_BIN_DIR))...$(RESET)"
+	@$(MAKE) SANITIZE=address BIN_DIR=$(APP_ASAN_BIN_DIR) OBJ_DIR=$(APP_ASAN_OBJ_DIR) $(APP_ASAN_BIN)
+	@$(call app_instrumentation_check,asan-app,$(APP_ASAN_BIN),__asan)
+	$(ECHO) "$(CYAN)$(BOLD)Driving the app under AddressSanitizer (recipe '$(RECIPE)', $(REPEAT) passes)...$(RESET)"
+	@set -o pipefail; \
+	rm -f /tmp/asan-app-run.log /tmp/asan-app-app.log; \
+	ASAN_OPTIONS='$(APP_ASAN_OPTIONS)' scripts/screenshot.sh helix-screen asan-$(RECIPE) "$(RECIPE)" \
+	  --binary-path "$(APP_ASAN_BIN)" --no-capture --repeat "$(REPEAT)" \
+	  --log /tmp/asan-app-app.log --shutdown-timeout "$(SAN_APP_SHUTDOWN_TIMEOUT)" -vv 2>&1 | tee /tmp/asan-app-run.log; \
+	$(call report_sanitizer_result,ASAN app,/tmp/asan-app-app.log,$(ASAN_REPORT_RE)); \
+	$(call app_pass_count_check,asan-app,/tmp/asan-app-run.log,$(REPEAT))
+
+tsan-app:
+	$(ECHO) "$(CYAN)$(BOLD)Building the app with ThreadSanitizer ($(APP_TSAN_BIN_DIR))...$(RESET)"
+	@$(MAKE) SANITIZE=thread BIN_DIR=$(APP_TSAN_BIN_DIR) OBJ_DIR=$(APP_TSAN_OBJ_DIR) $(APP_TSAN_BIN)
+	@$(call app_instrumentation_check,tsan-app,$(APP_TSAN_BIN),__tsan)
+	$(ECHO) "$(CYAN)$(BOLD)Driving the app under ThreadSanitizer (recipe '$(RECIPE)', $(REPEAT) passes)...$(RESET)"
+	@set -o pipefail; \
+	rm -f /tmp/tsan-app-run.log /tmp/tsan-app-app.log; \
+	TSAN_OPTIONS='$(APP_TSAN_OPTIONS)' scripts/screenshot.sh helix-screen tsan-$(RECIPE) "$(RECIPE)" \
+	  --binary-path "$(APP_TSAN_BIN)" --no-capture --repeat "$(REPEAT)" \
+	  --log /tmp/tsan-app-app.log --shutdown-timeout "$(SAN_APP_SHUTDOWN_TIMEOUT)" -vv 2>&1 | tee /tmp/tsan-app-run.log; \
+	$(call report_sanitizer_result,TSAN app,/tmp/tsan-app-app.log,$(TSAN_REPORT_RE)); \
+	$(call app_pass_count_check,tsan-app,/tmp/tsan-app-run.log,$(REPEAT))
 
 # ============================================================================
 # Test Help
 # ============================================================================
 
-.PHONY: help-test test-kiauh test-shell test-xml test-ui-pytest test-plugin test-serial test-hidden test-hidden-list test-asan test-tsan test-asan-one test-tsan-one clean-sanitizers
+.PHONY: help-test test-kiauh test-shell test-xml test-ui-pytest test-plugin test-serial test-hidden test-hidden-list test-asan test-asan-build test-tsan test-tsan-build test-asan-one test-tsan-one clean-sanitizers
 help-test:
 	@if [ -t 1 ] && [ -n "$(TERM)" ] && [ "$(TERM)" != "dumb" ]; then \
 		B='$(BOLD)'; G='$(GREEN)'; Y='$(YELLOW)'; C='$(CYAN)'; X='$(RESET)'; \
@@ -1300,8 +1489,11 @@ help-test:
 	echo "$${B}Test Targets$${X}"; \
 	echo ""; \
 	echo "$${C}Main Test Targets:$${X}"; \
+	echo "  $${G}t F='<filter>'$${X}       - Build, then run ONE tag or case (the inner loop)"; \
 	echo "  $${G}test$${X}                 - Build tests (does not run)"; \
-	echo "  $${G}test-run$${X}             - Run tests in PARALLEL (default, ~4-8x faster)"; \
+	echo "  $${G}unit-sweep$${X}           - C++ unit tests, sharded in PARALLEL"; \
+	echo "  $${G}full-test-run$${X}        - unit-sweep + bats shell suite (the completion gate)"; \
+	echo "  $${G}test-run$${X}             - Signpost only: refuses, names the target that fits"; \
 	echo "  $${G}test-serial$${X}          - Run tests sequentially (for debugging)"; \
 	echo "  $${G}test-smoke$${X}           - Quick smoke test (~30s) for rapid iteration"; \
 	echo "  $${G}test-all$${X}             - Run ALL tests in parallel (including slow)"; \
@@ -1312,14 +1504,10 @@ help-test:
 	echo "  $${G}test-verbose$${X}         - Run with per-test timing (sequential)"; \
 	echo ""; \
 	echo "$${C}Component Tests:$${X}"; \
-	echo "  $${G}test-gcode$${X}           - G-code parsing and geometry tests"; \
 	echo "  $${G}test-ui$${X}              - UI navigation, theme, wizard tests"; \
-	echo "  $${G}test-moonraker$${X}       - Moonraker client and mock tests"; \
-	echo "  $${G}test-network$${X}         - WiFi and Ethernet tests"; \
-	echo "  $${G}test-security$${X}        - Security and injection tests"; \
-	echo "  $${G}test-config$${X}          - Configuration tests"; \
 	echo "  $${G}test-xml$${X}             - helix-xml submodule suite (CMake+Unity)"; \
 	echo "  $${G}test-shell$${X}           - Shell/installer tests (bats)"; \
+	echo "  $${G}dev-timing$${X}           - Measured cost of every build and suite"; \
 	echo "  $${G}test-plugin$${X}          - Moonraker plugin tests (pytest)"; \
 	echo ""; \
 	echo "$${C}Geometry Tests:$${X}"; \
@@ -1327,8 +1515,6 @@ help-test:
 	echo "$${C}Discovery:$${X}"; \
 	echo "  $${G}test-list$${X}            - List all test cases"; \
 	echo "  $${G}test-list-tags$${X}       - List available test tags"; \
-	echo "  $${G}test-timing$${X}          - Show slowest tests (top 20)"; \
-	echo "  $${G}test-summary$${X}         - Test coverage by tag"; \
 	echo ""; \
 	echo "$${C}Sanitizers (Memory/Thread Safety):$${X}"; \
 	echo "  $${G}test-asan$${X}            - Run all tests with AddressSanitizer"; \
@@ -1371,22 +1557,31 @@ SUITE_REPORT ?= $(BUILD_DIR)/suite-report.xml
 # blocked by this, so the report excludes them and they are judged by the suite
 # itself. See prestonbrown/helixscreen#1375.
 VACUOUS_FILTER ?= ~[.]~[slow]~[subprocess]~[socket_discovery]
-# Ratchet. May fall, never rise. 36 no-assertion + 2 literal-tautology.
+# Ratchet. May fall, never rise. Crash canaries and compile-time-only cases are
+# exempted by name in scripts/vacuous_test_baseline.txt, not counted here.
 # The nightly reads this through print-vacuous-max rather than repeating the
 # number, so the gate cannot drift from the value the tree is held to.
-VACUOUS_MAX ?= 38
+VACUOUS_MAX ?= 0
 
 .PHONY: print-vacuous-max
 print-vacuous-max:
 	@echo "$(VACUOUS_MAX)"
 
-# --out is not optional: tests that shell out print ANSI status to stdout, and
-# with the report on stdout too the XML comes back complete but unparseable.
+# Same reason as print-vacuous-max: the nightly produces its own report and must
+# select the same cases this target does, or the two gates judge different runs.
+.PHONY: print-vacuous-filter
+print-vacuous-filter:
+	@echo "$(VACUOUS_FILTER)"
+
+# The run is a single unsharded process with its stdout discarded, so nothing
+# about it is visible from outside except the report growing. run_suite_report.sh
+# owns that: it prints where the run is, and stops it with the name of the case
+# it is sitting in rather than letting every gate downstream wait on a suite
+# that is not coming back. The nightly calls the same script.
 .PHONY: suite-report
 suite-report: test-build
 	$(ECHO) "$(CYAN)$(BOLD)Running suite with per-assertion reporting...$(RESET)"
-	$(Q)$(TEST_BIN) "$(VACUOUS_FILTER)" --reporter xml --success --out $(SUITE_REPORT) >/dev/null 2>&1 || true
-	$(Q)test -s $(SUITE_REPORT) || { echo "no report produced"; exit 1; }
+	$(Q)scripts/run_suite_report.sh $(TEST_BIN) "$(VACUOUS_FILTER)" $(SUITE_REPORT)
 
 .PHONY: test-vacuous
 test-vacuous: suite-report
@@ -1395,11 +1590,8 @@ test-vacuous: suite-report
 # A test that passes only because of what ran before it. Re-runs each source
 # file's cases alone and compares against the full-suite result, so it costs
 # one extra process per test file on top of the shared report.
-# Zero, tree-wide, verified across 922 files. The one finding this gate was
-# built against (test_grid_edit_mode.cpp "build_default_grid only sets positions
-# for anchor widgets") was fixed on main in 6face7cdc, and re-running the gate
-# against that file confirms it. Keep it at 0: the class is closed and any new
-# finding is a regression.
+# Zero, tree-wide, verified across 922 files. Keep it at 0: the class is
+# closed and any new finding is a regression.
 ORDER_DEP_MAX ?= 0
 ORDER_DEP_JOBS ?= 8
 
@@ -1411,10 +1603,17 @@ test-order-dependence: suite-report
 .PHONY: check-tautology
 check-tautology:
 	$(Q)python3 scripts/check_test_tautology.py --max-allowed $(TAUTOLOGY_MAX)
-	$(Q)python3 scripts/check_test_mirrors.py --max-allowed $(MIRROR_MAX)
+	$(Q)python3 scripts/check_test_mirrors.py $(MIRROR_MAX_ARGS)
 
-TAUTOLOGY_MAX ?= 3
-MIRROR_MAX ?= 17
+TAUTOLOGY_MAX ?= 0
+# One ratchet per signal, so fixing one kind cannot buy slack for another. Each
+# may fall, never rise; an unnamed signal (shadow-include, mirror-comment)
+# allows 0. stub-logic is tests/ui_test_utils.cpp standing in for app_globals.o,
+# ui_notification.o and ui_toast_manager.o.
+MIRROR_MAX_REDEFINED_SYMBOL ?= 0
+MIRROR_MAX_STUB_LOGIC ?= 27
+MIRROR_MAX_ARGS = --max redefined-symbol=$(MIRROR_MAX_REDEFINED_SYMBOL) \
+	--max stub-logic=$(MIRROR_MAX_STUB_LOGIC)
 
 # ---- diff coverage ---------------------------------------------------------
 # Its own object tree, so this never disturbs the normal build.
@@ -1422,7 +1621,7 @@ COV_FILTER ?= ~[.]~[slow]
 
 # Its own binary NAME as well as its own object tree, matching TEST_ASAN_BIN.
 # Without this the instrumented binary lands on build/bin/helix-tests and every
-# later `make test-run` silently runs an instrumented build until something
+# later `make full-test-run` silently runs an instrumented build until something
 # forces a relink.
 TEST_COV_BIN := $(BIN_DIR)/helix-tests-cov
 
@@ -1443,12 +1642,11 @@ cov-diff: cov-build cov-run
 	$(Q)python3 scripts/cov_diff.py $(COV_DIFF_ARGS)
 
 # ---- mutation --------------------------------------------------------------
-# Reverts each changed hunk in turn and looks for red. Costs a compile plus a
-# link per hunk, so scope it: --limit N, or --tests to narrow the suite.
+# Reverts each changed hunk in turn and looks for red. A src/ or include/ hunk
+# costs a compile plus a link; a ui_xml/, assets/config/ or scripts/ hunk costs
+# only its suite, since nothing has to be rebuilt to see it. Scope a heavy range
+# with --limit N or --tests. It answers CLEAN only when it examined the whole
+# change: a path it cannot mutate is reported NOT COVERED and the run exits 3.
 .PHONY: mutate-diff
 mutate-diff:
 	$(Q)python3 scripts/mutate_diff.py $(MUTATE_ARGS)
-
-.PHONY: mutate-list
-mutate-list:
-	$(Q)python3 scripts/mutate_diff.py --list-only $(MUTATE_ARGS)

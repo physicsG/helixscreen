@@ -71,10 +71,10 @@ one fired is the first thing to establish on any "my updates are disabled" repor
 The weaker check gate is deliberate. Checking is a manifest fetch that touches no files, so an
 install tree we cannot write is no reason to refuse to look, and knowing a newer version exists
 is the only thing that makes a suppressed install recoverable — the user can still be told to
-re-run the installer. The two shared one predicate through v0.99.96–v0.99.113, and that made a
-false negative in `self_update_supported()` a permanent lockout: the rows vanished wholesale, so
-nothing could tell the user an update existed, and the fix could only ship inside the update
-they were being kept from.
+re-run the installer. Fold this into one predicate and a false negative in
+`self_update_supported()` becomes a permanent lockout: the rows vanish wholesale, nothing can
+tell the user an update exists, and the fix can only ship inside the update they are being
+kept from.
 
 The two underlying reasons, and the notice each raises:
 
@@ -93,11 +93,11 @@ single place any platform is named.
 Today that default is true only for the **Snapmaker U1**. PAXX Extended Firmware ships
 HelixScreen as a selectable component, downloading a pinned, sha256-verified tarball into
 `/oem/apps/helixscreen` via `extended-pkg`; self-updating there rewrites a package the
-firmware believes it owns. Suppression previously depended entirely on the firmware hook
-exporting the flag, which it does not — their lmd hook (<paxx-firmware>/etc/hooks/lmd.d/30-helixscreen.sh) exports `HELIX_DATA_DIR`,
+firmware believes it owns. The default lives here in C++ rather than in the firmware hook
+because the hook exports data paths and nothing else: their lmd hook
+(<paxx-firmware>/etc/hooks/lmd.d/30-helixscreen.sh) exports `HELIX_DATA_DIR`,
 `HELIX_SUPERVISED`, `HELIX_DRM_DEVICE`, `HELIX_CACHE_DIR`, `HELIX_CONFIG_DIR` and
-`HELIX_REMOTE_SCREEN_FB0`, and nothing else. Every U1 install therefore checked for updates
-and raised the update modal.
+`HELIX_REMOTE_SCREEN_FB0`.
 
 The falsy arm is the dev-box escape hatch: `HELIX_DISABLE_AUTO_UPDATES=0` turns self-update
 back on where the platform defaults it off, from the CLI or a deploy script, without a
@@ -159,13 +159,32 @@ Three channels are available. The channel is stored in config at `/update/channe
 |---------|------|-------------|--------|-------------|
 | **Stable** | `UpdateChannel::Stable` | `0` | R2 stable/manifest.json, fallback: GitHub `/releases/latest` | Production releases only. Default for all users. |
 | **Beta** | `UpdateChannel::Beta` | `1` | R2 beta/manifest.json, fallback: GitHub `/releases` array (first prerelease) | Includes pre-release tags (`v1.0.0-beta.1`, `v1.0.0-rc.1`). Falls back to latest stable if no prereleases exist. |
-| **Dev** | `UpdateChannel::Dev` | `2` | R2 dev/manifest.json, or explicit `/update/dev_url` | Cutting-edge builds. Supports custom manifest URLs for local development servers. |
+| **Dev** | `UpdateChannel::Dev` | `2` | R2 dev/manifest.json, or explicit `dev_url` (update_urls.json) | Cutting-edge builds. Supports custom manifest URLs for local development servers. |
 
 ### Channel Selection in UI
 
-The Update Channel dropdown is gated behind **beta features** (7-tap version easter egg in About). It appears in the About Settings overlay (`about_settings_overlay.xml`) and is bound to the `update_channel` LVGL subject managed by `SettingsManager`.
+The Updates settings overlay (`settings_updates_overlay.xml`) carries **two** Update
+Channel rows with complementary conditions, because a dropdown's `options` is a
+static string and the entries on offer differ per install:
 
-Options string: `"Stable\nBeta\nDev"`
+| Row | Options | Visible when |
+|-----|---------|--------------|
+| `row_update_channel` | `"Stable\nBeta"` | `show_beta_features eq 0 and show_update_settings eq 1` |
+| `row_update_channel_dev` | `"Stable\nBeta\nDev"` | `show_beta_features eq 1 and show_update_settings eq 1` |
+
+Index 0 is Stable and index 1 is Beta in both lists, so `/update/channel` and the
+single `on_about_update_channel_changed` callback behind both rows mean the same
+thing whichever row is on screen. Index 2 is reachable only from the beta row.
+
+Dev stays behind the beta gate because it fetches from an arbitrary
+`dev_url` in the root-owned update_urls.json rather than a published channel,
+and because `main` publishes to both the beta and dev channels - the two
+deliver identical builds, so a third entry would offer a stable-line user a
+duplicate of its neighbour.
+
+Neither row binds its selection to a subject; `lv_dropdown` has no such binding in
+the XML engine. `UpdatesSettingsOverlay::sync_update_channel_rows()` seeds both from
+`UpdateChecker::get_channel()` on activate and whenever the 7-tap toggles beta.
 
 ### Switching Channels (and moving backward)
 
@@ -173,7 +192,7 @@ Changing the dropdown calls `UpdateChecker::on_channel_changed()`, which drops t
 cached result, re-snapshots the config for the debug bundle's off-thread reader,
 **clears the rate-limit clock**, and starts a fresh check. The rate-limit reset is
 load-bearing: the limiter predates user-switchable channels, so without it the
-check returns the previous channel's verdict and the About row keeps advertising a
+check returns the previous channel's verdict and the Check for Updates row keeps advertising a
 version the newly selected channel does not serve.
 
 The check is a three-way comparison (`compare_channel_version()`), not the old
@@ -194,28 +213,29 @@ A downgrade is deliberately quieter than an update:
 
 - The auto-check **never** raises it unprompted (a transient bad manifest would
   otherwise push a "go back" prompt to the whole fleet at once).
-- The About row reads *"Switch to vX"*, not *"vX available"*.
+- The Check for Updates row reads *"Switch to vX"*, not *"vX available"*.
 - Tapping install shows a confirmation naming both versions before anything
   downloads.
 
 **Config compatibility.** An older build loading a config written by a newer one
 leaves it entirely alone — `run_versioned_migrations()` returns early when
 `config_version > CURRENT_CONFIG_VERSION` rather than stamping it down. Migration
-gates are all `version < N` so none would fire anyway; the damage was the
-unconditional stamp, which made the newer build re-run already-applied migrations
+gates are all `version < N` so none would fire anyway; an unconditional stamp would make
+the newer build re-run already-applied migrations
 on its next boot. Unknown keys survive because `Config::save()` serializes the
 whole in-memory document. Pinned by `tests/unit/test_config_migration_future.cpp`.
 
 ### Dev Channel Custom URL
 
-The dev channel supports an explicit URL override via config:
+The dev channel supports an explicit URL override. The channel selection stays in
+settings.json; the URL itself lives in the root-owned
+`/var/lib/helixscreen/update_urls.json` (see "R2 Base URL Override" below for the
+trust rules and per-platform location). settings.json's web-editable storage is
+exactly why the app ignores any `dev_url`/`r2_url` key it finds there:
 
 ```json
 {
-  "update": {
-    "channel": 2,
-    "dev_url": "http://192.168.1.100:8080/dev/"
-  }
+  "dev_url": "http://192.168.1.100:8080/dev/"
 }
 ```
 
@@ -236,13 +256,16 @@ consumes its output; nothing is inferred from the tag string.
 Each maintenance line carries its own value, so cutting a release is just tagging
 the right branch (`release/1.0` holds `stable`, `main` holds `beta`).
 
-**Why not derive it from the tag.** The old rule was "tag contains a hyphen ->
-prerelease", which forced every devel build to carry a `-devN` suffix. But
-`helix::version::Version` (`include/version.h`) parses major/minor/patch and
-**discards the prerelease suffix**, so `v1.1.0-dev1` and `v1.1.0-dev2` compare
-EQUAL — `is_update_available()` returns false and the devel channel goes silent
-after the first install. Declaring the channel out-of-band lets the devel track use
-plain monotonic versions (`1.1.0`, `1.1.1`, ...) that the updater actually orders.
+**Why not derive it from the tag.** Routing is a property of the branch, not of the
+version string. Three things break when the tag decides: the `dev` channel cannot
+be spelled in a version at all; a plain `v1.1.0` tag cut from the trunk would reach
+the stable fleet, and the pre-upload guard cannot refuse it because `1.1.0 > 1.0.0`
+is a forward move; and a stable-line release candidate (`1.0.1-rc.1`) could not be
+tested on a prerelease channel while still belonging to the stable line. Declaring
+the channel in a tracked file per branch makes cutting a release nothing but tagging
+the right branch. The version string is then free to say only what it means:
+`1.1.0-beta.3` is the third beta of 1.1, and `helix::version::Version` orders it
+below `1.1.0` on precedence. See `RELEASE_PROCESS.md` § "The trunk's beta line".
 
 **Stable does not publish to `dev`.** The `dev` channel follows the devel line
 alone so its manifest only ever moves forward; a `1.0.x` hotfix publishing to `dev`
@@ -295,7 +318,7 @@ Fields:
   - `sha256` — SHA-256 hash of the tar.gz archive
   - `size` — Size in bytes of the tar.gz archive
   - The update checker prefers `zip_url` / `zip_sha256` when present and falls back to `url` / `sha256` otherwise. The `zip_*` fields are emitted **by default** — telemetry showed only ~0.6% of active devices remained on pre-v0.99.31 builds (which never read `zip_url` and keep using the legacy `url`); v0.99.31+ clients prefer the zip. Pass `generate-manifest.sh --no-include-zip` (documented in the script's `--help`) to restore the old suppression.
-  - **Per-platform zip gate (helixscreen#993).** `zip_url` is withheld from the BusyBox/OpenWrt platforms listed in `ZIP_EXCLUDE_PLATFORMS` (`ad5m ad5x cc1 k1 k2 snapmaker-u1`); they keep a complete tar.gz asset. Pre-v0.99.102 in-app updaters verify a download with `unzip -tqq`, but BusyBox only grew `unzip -t` in 1.32 (K1 ships 1.31.1, AD5M 1.29.3) and the K2 has no unzip at all, so those clients reject a byte-perfect zip as "Corrupt download". **This is the only lever that reaches an already-deployed binary** — v0.99.102 fixes the verifier, but that fix ships inside the very update the broken verifier refuses to install, so a client-side fix cannot bootstrap itself. Shrink the list with `--zip-exclude` once telemetry shows a platform's population is on v0.99.102+; when it is empty, Phase 2 (dropping tar.gz entirely) becomes safe.
+  - **Per-platform zip gate (helixscreen#993).** `zip_url` is withheld from the BusyBox/OpenWrt platforms listed in `ZIP_EXCLUDE_PLATFORMS` (`ad5m ad5x cc1 k1 k2 snapmaker-u1`); they keep a complete tar.gz asset. Pre-v0.99.102 in-app updaters verify a download with `unzip -tqq`, but BusyBox only grew `unzip -t` in 1.32 (K1 ships 1.31.1, AD5M 1.29.3) and the K2 has no unzip at all, so those clients reject a byte-perfect zip as "Corrupt download". **This is the only lever that reaches an already-deployed binary** — v0.99.102 fixes the verifier, but that fix ships inside the very update the broken verifier refuses to install, so a client-side fix cannot bootstrap itself. Shrinking the list is one-way for any client that cannot verify a zip, so confirm with `zip_readiness_by_platform` from `scripts/telemetry-analyze.py` over at least a 90-day window before removing a platform with `--zip-exclude` — a 30-day window reports every platform as converged and cannot see the dormant devices that are exactly the risk. When the list is empty, Phase 2 (dropping tar.gz entirely) becomes safe.
 
 ### URL Structure
 
@@ -325,17 +348,36 @@ https://releases.helixscreen.org/
 
 ### R2 Base URL Override
 
-The R2 base URL can be overridden in config for testing:
+The R2 base URL can be overridden for testing. The override lives in
+`/var/lib/helixscreen/update_urls.json`, NOT in settings.json: the updater
+downloads a payload and runs its install.sh from wherever this URL points, and
+settings.json sits where the web UI can write it. The file only counts when it
+is owned by root or the app's user and has no group or world write bit
+(`chown root:root ... && chmod 644 ...`); anything else is ignored with a
+warning.
 
 ```json
 {
-  "update": {
-    "r2_url": "https://my-test-cdn.example.com"
-  }
+  "r2_url": "https://my-test-cdn.example.com"
 }
 ```
 
 Default: `https://releases.helixscreen.org` (compiled as `DEFAULT_R2_BASE_URL`).
+
+**Where the state dir lives.** `/var/lib/helixscreen` on every platform - Pi, K1,
+K2, AD5M, AD5X, CC1 and U1 all resolve the same compile-time `STATE_DIR_DEFAULT`
+(`include/app_constants.h`); no platform falls back to `~/.helixscreen` for this
+file. systemd units create it via `StateDirectory=helixscreen`
+(`StateDirectoryMode=0700`), and the SysV init script (`config/helixscreen.init`)
+`mkdir -p`s it at boot. On a device where neither has run yet:
+
+```bash
+sudo mkdir -p /var/lib/helixscreen && sudo chown root:root /var/lib/helixscreen && sudo chmod 755 /var/lib/helixscreen
+sudo install -o root -g root -m 644 update_urls.json /var/lib/helixscreen/update_urls.json
+```
+
+The parent must carry no group/world write bit or the file is ignored alongside
+it.
 
 ### GitHub API Fallback
 
@@ -420,7 +462,7 @@ The installer is found by searching these paths in order:
 4. /usr/data/helixscreen/install.sh
 5. /home/biqu/helixscreen/install.sh
 6. /home/pi/helixscreen/install.sh
-7. `scripts/install.sh` (development fallback)
+7. `build/installer/install.sh` (development fallback, from `make installer`)
 
 ### Safe Execution
 
@@ -470,6 +512,12 @@ Key points:
 - A systemd path unit (`helixscreen-update.path`) watches release_info.json and restarts the service after Moonraker extracts an update
 - As a self-healing fallback, `helixscreen.service` runs `refresh-service-units.sh` on every start to re-template systemd units and install missing watcher units
 
+#### Keeping `channel:` in sync
+
+Mainsail and Fluidd offer whatever release the stanza's `channel:` names, so a stanza that disagrees with the app offers a beta install a "stable" downgrade. The installer sets it (`update_manager_web_channel()` / `sync_update_manager_channel()` in `scripts/lib/installer/moonraker.sh`), and the app keeps it in sync after that: `UpdateChecker::sync_moonraker_channel()` runs on every Moonraker discovery (the `moonraker_update_channel` step in `src/application/discovery_steps.cpp`), on a channel change (`UpdateChecker::on_channel_changed()`), and when the beta-features toggle moves a stored Dev channel. It runs only when Moonraker is on this host (`helix::is_moonraker_on_same_host()`) and the stanza's `path:` resolves to this running install's directory (`app_get_install_root()`), so a remote screen or a second instance never imposes its channel on someone else's stanza. It maps the effective channel the same way the installer does (Dev rides `beta`, and Dev without beta features is Stable), downloads `config/moonraker.conf` through the file API and rewrites the line with `MoonrakerConfigManager::set_existing_value()`. Like the installer, it touches only an existing `channel:` line inside a single `[update_manager helixscreen]`: no stanza (AD5M, an unsupported Moonraker), duplicate stanzas, or a hand-written one without the line means nothing is written. Only the value changes; an inline comment, CRLF line endings and a missing final newline are kept.
+
+A rewrite is followed by a Moonraker restart, since Moonraker reads its config only at startup. While a job holds the machine (printing or paused), or `machine.update.status` reports `busy` (or cannot be read), the file is still written but the restart is skipped, so the channel takes effect at Moonraker's next start. `UpdateChecker::detach()`, which runs on every printer teardown, bumps a generation that every hop of the sync checks, so a sync in flight across a printer switch is dropped. The restart drops the app's websocket; the reconnect's discovery runs the sync again, finds the stanza matching and writes nothing, so there is no restart loop.
+
 #### Moonraker version requirement (helixscreen#993)
 
 **This stanza requires Moonraker >= v0.10.0 (or a git checkout newer than 2025-01-19).** The installer probes for the capability and skips writing the stanza when it isn't there — see `moonraker_asset_name_support()` in `scripts/lib/installer/moonraker.sh`, which inspects the installed Moonraker source (found via `find_moonraker_update_manager_dir()`) rather than parsing a version string, since `v0.9.3-73-gfab6c5c1`-style descriptions can't be ordered across branches. It returns three states: `supported` (net_deploy.py containing `asset_name`), `unsupported` (zip_deploy.py/web_deploy.py, or a net_deploy.py without it), and `undetermined` (no source found — preserves the previous behavior and warns, rather than guessing). On `unsupported` the installer also *removes* an already-written stanza.
@@ -496,13 +544,18 @@ Moonraker integration is configured on **all platforms except AD5M** (which typi
 
 ## User-Facing UI
 
-### About Settings Overlay (`about_settings_overlay.xml`)
+### Updates Settings Overlay (`settings_updates_overlay.xml`)
 
-Located under Settings (tap the "About" action row), the About Settings overlay contains:
-- **Current Version** row (7-tap to enable beta features)
+Opened from the **Updates** row in the HELIXSCREEN group of the Settings root (`row_updates`), and from the upgrade banner's Update button. `UpdatesSettingsOverlay` (`src/ui/ui_settings_updates.cpp`) owns it:
+- **Update Channel** dropdown - Stable/Beta on any install, Stable/Beta/Dev with beta features enabled (see [Channel Selection in UI](#channel-selection-in-ui))
 - **Check for Updates** row (triggers manual check, description bound to `update_version_text` subject)
-- **Install Update** row (visible only when `update_status == UpdateAvailable`)
-- **Update Channel** dropdown (visible only when beta features enabled)
+- **Install Update** row (visible only when `show_update_settings == 1`, `updates_unavailable == 0` and `update_status == UpdateAvailable`, in one `bind_flag_if` expression)
+- **Software Updates** notice "Managed by your firmware" (visible when `updates_firmware_managed == 1`; the channel, check and install rows hide)
+- **Software Updates** action row "Not available here. Update from a terminal." (visible when `updates_unavailable == 1`; opens an info QR modal pointing at the docs)
+
+The root row's status line (`settings_status_updates`) summarizes the same state: up to date, `X available`, checking, check failed, the installed version, or managed by firmware. The root row hides only when `show_update_settings`, `updates_firmware_managed` and `updates_unavailable` are all 0.
+
+The **Current Version** row (7-tap to toggle beta features) stays in the About overlay (`about_settings_overlay.xml`, under Help & About). Toggling beta there re-runs `UpdatesSettingsOverlay::sync_update_channel_rows()` so the Updates page shows the right channel row.
 
 ### Update Notification Modal (`update_notify_modal.xml`)
 
@@ -544,14 +597,16 @@ Multi-state modal driven by `download_status` subject:
 
 ## Configuration Reference
 
-All update settings live under the `/update/` key in `settings.json`:
+The channel setting lives under the `/update/` key in `settings.json`; the URL
+overrides live in the root-owned `/var/lib/helixscreen/update_urls.json` (see
+"R2 Base URL Override" above):
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `/update/channel` | int | `0` | Update channel: 0=Stable, 1=Beta, 2=Dev |
-| `/update/dev_url` | string | `""` | Custom manifest URL for dev channel |
-| `/update/r2_url` | string | `""` | R2 base URL override (default: `https://releases.helixscreen.org`) |
-| `/update/dismissed_version` | string | `""` | Version the user chose to ignore |
+| Key | Where | Type | Default | Description |
+|-----|-------|------|---------|-------------|
+| `/update/channel` | settings.json | int | `0` | Update channel: 0=Stable, 1=Beta, 2=Dev |
+| `/update/dismissed_version` | settings.json | string | `""` | Version the user chose to ignore |
+| `r2_url` | update_urls.json | string | `""` | R2 base URL override (default: `https://releases.helixscreen.org`) |
+| `dev_url` | update_urls.json | string | `""` | Custom manifest URL for dev channel |
 
 ---
 
@@ -559,7 +614,7 @@ All update settings live under the `/update/` key in `settings.json`:
 
 ### Adding a New Platform
 
-1. Add a `HELIX_PLATFORM_*` define and update `get_platform_key()` in `update_checker.cpp`
+1. Add a `HELIX_PLATFORM_*` define and update `current_key()` and add a row in `src/system/platform_table.cpp`
 2. Add the platform to the `PLATFORMS` array in `scripts/generate-manifest.sh`
 3. Add a build job in `.github/workflows/release.yml`
 4. Add a `release-{platform}` target in the Makefile
@@ -573,7 +628,7 @@ Run the program with `--test` mode and verbose logging:
 ./build/bin/helix-screen --test -vv
 ```
 
-Navigate to Settings -> About -> Check for Updates. The log output shows the full check flow including R2 fetch, GitHub fallback, and version comparison.
+Navigate to Settings -> Updates -> Check for Updates. The log output shows the full check flow including R2 fetch, GitHub fallback, and version comparison.
 
 ### Testing with a Custom Dev Server
 
@@ -598,11 +653,21 @@ Configure HelixScreen:
 ```json
 {
   "update": {
-    "channel": 2,
-    "dev_url": "http://192.168.1.100:8080/"
+    "channel": 2
   }
 }
 ```
+
+in settings.json, and
+
+```json
+{
+  "dev_url": "http://192.168.1.100:8080/"
+}
+```
+
+in `/var/lib/helixscreen/update_urls.json` (root-owned, mode 644; see "R2 Base
+URL Override" for the trust rules).
 
 ### End-to-End Self-Update Testing on Device
 
@@ -623,7 +688,7 @@ export HELIX_TEST_USERNAME=pi                  # SSH username
 
 | Path | Command | When to use |
 |------|---------|-------------|
-| Via update checker | Trigger from Settings → About → Check for Updates | Tests the full self-update flow |
+| Via update checker | Trigger from Settings → Updates → Check for Updates | Tests the full self-update flow |
 | Direct local install | `ssh USER@PRINTER 'sh /tmp/install.sh --local /tmp/helixscreen-update.zip'` | Tests install.sh in isolation, bypasses update checker |
 
 `--configure-remote` copies `install.sh` to `/tmp/` on the device automatically, enabling the direct path without an extra transfer step.
@@ -648,7 +713,7 @@ it does the new binary take over.
 # Serve the build (--no-build reuses the last archive for fast iteration)
 ./scripts/serve-local-update.sh --no-build
 
-# On device: trigger update from Settings → About → Check for Updates
+# On device: trigger update from Settings → Updates → Check for Updates
 # → install completes, helix-screen restarts (1st install done, new binary running)
 
 # Trigger update again from the UI  ← this is the one that exercises your change
@@ -723,7 +788,7 @@ Run with:
 
 - The release may not have been built for this platform
 - Check the manifest at `https://releases.helixscreen.org/stable/manifest.json`
-- Verify `get_platform_key()` returns the expected value for the device
+- Verify `helix::platform::current_key()` returns the expected value for the device
 
 ### Wrong Architecture
 
@@ -778,13 +843,15 @@ Or for deployed installations, set `HELIX_LOG_LEVEL=debug` in `~/helixscreen/con
 | `include/system/update_checker.h` | UpdateChecker class declaration |
 | `src/system/update_checker.cpp` | Full implementation (check, download, install, auto-check) |
 | `src/system/settings_manager.cpp` | Channel subject and persistence |
-| `src/ui/ui_panel_settings.cpp` | Download modal callbacks, channel change handler |
-| `src/ui/ui_settings_about.cpp` | AboutSettingsOverlay — version info, updates, branding, easter eggs |
+| `src/ui/ui_panel_settings.cpp` | Settings root: the Updates row and its status line |
+| `src/ui/ui_settings_updates.cpp` | UpdatesSettingsOverlay - channel rows, check/install, download modal callbacks, firmware-managed and unavailable notices |
+| `src/ui/ui_settings_about.cpp` | AboutSettingsOverlay - version info, branding, easter eggs, the beta 7-tap |
 | `ui_xml/update_notify_modal.xml` | Auto-check notification modal |
 | `ui_xml/update_download_modal.xml` | Multi-state download/install modal |
-| `ui_xml/about_settings_overlay.xml` | About Settings overlay with update controls, branding, contributors |
+| `ui_xml/settings_updates_overlay.xml` | Updates settings overlay: channel, check, install, notices |
+| `ui_xml/about_settings_overlay.xml` | About overlay: version, branding, contributors |
 | `scripts/generate-manifest.sh` | Manifest generator for CI and dev |
-| `scripts/install.sh` | Bundled installer (used for `--update` mode) |
+| `scripts/bundle-installer.sh` | Builds the bundled `install.sh` (used for `--update` mode) via `make installer` |
 | `scripts/lib/installer/moonraker.sh` | Moonraker update_manager configuration |
 | `.github/workflows/release.yml` | CI: build, release, R2 upload |
 | `tests/unit/test_update_checker.cpp` | UpdateChecker unit tests |

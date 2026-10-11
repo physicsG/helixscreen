@@ -6,36 +6,22 @@
 #include "ui_format_utils.h"
 
 #include "display_settings_manager.h"
-#include "format_utils.h"
+#include "i_moonraker_client.h"
 #include "json_utils.h"
 #include "locale_formats.h"
 #include "moonraker_api_internal.h"
-#include "moonraker_client.h"
+#include "print_history_parse.h"
+#include "try_reserve.h"
 
 #include <spdlog/spdlog.h>
 
 #include <chrono>
-#include <iomanip>
-#include <sstream>
-
-#ifdef __GLIBC__
-#include <malloc.h> // malloc_trim() after dropping the history DOM
-#endif
 
 #include "hv/json.hpp"
 
 using namespace helix;
 
 namespace {
-
-/**
- * @brief Format duration in seconds to human-readable string
- * @param seconds Duration in seconds
- * @return Formatted string like "2h 15m" or "45m" or "30s"
- */
-std::string format_history_duration(double seconds) {
-    return helix::format::duration(static_cast<int>(seconds));
-}
 
 /**
  * @brief Format Unix timestamp to human-readable date
@@ -64,23 +50,9 @@ std::string format_history_filament(double mm) {
     return std::string(buf);
 }
 
-/**
- * @brief Null-safe numeric value extraction from JSON
- *
- * Unlike json::value(), this handles fields that exist but are null.
- * Returns default_val if key is missing OR if value is null/non-numeric.
- */
-template <typename T> T json_number_or(const nlohmann::json& j, const char* key, T default_val) {
-    if (j.contains(key) && j[key].is_number()) {
-        return j[key].get<T>();
-    }
-    return default_val;
-}
+} // anonymous namespace
 
-/**
- * @brief Parse a single job from Moonraker history response
- */
-PrintHistoryJob parse_history_job(const json& job_json) {
+PrintHistoryJob helix::parse_history_job(const nlohmann::json& job_json) {
     PrintHistoryJob job;
 
     // String fields. json::value() is safe for a MISSING key but NOT for a key
@@ -93,30 +65,28 @@ PrintHistoryJob parse_history_job(const json& job_json) {
     job.filename = helix::json_util::safe_string(job_json, "filename", "");
     job.status = parse_job_status(helix::json_util::safe_string(job_json, "status", "unknown"));
 
-    // Numeric fields - use json_number_or() for null-safety
-    // end_time is notably null for in-progress jobs
-    job.start_time = json_number_or(job_json, "start_time", 0.0);
-    job.end_time = json_number_or(job_json, "end_time", 0.0);
-    job.print_duration = json_number_or(job_json, "print_duration", 0.0);
-    job.total_duration = json_number_or(job_json, "total_duration", 0.0);
-    job.filament_used = json_number_or(job_json, "filament_used", 0.0);
+    // end_time is null for in-progress jobs. The safe_* readers also coerce the
+    // JSON strings some Moonraker forks write (prestonbrown/helixscreen#1713).
+    job.start_time = helix::json_util::safe_double(job_json, "start_time");
+    job.end_time = helix::json_util::safe_double(job_json, "end_time");
+    job.print_duration = helix::json_util::safe_double(job_json, "print_duration");
+    job.total_duration = helix::json_util::safe_double(job_json, "total_duration");
+    job.filament_used = helix::json_util::safe_double(job_json, "filament_used");
 
-    // Boolean. There is no existence check here (the old comment claimed one),
-    // and value() throws on a present-but-null "exists" just as it does above.
+    // Boolean. value() throws on a present-but-null "exists" just as it does above.
     job.exists = helix::json_util::safe_bool(job_json, "exists", false);
 
     // Metadata (may be nested or null)
     if (job_json.contains("metadata") && job_json["metadata"].is_object()) {
         const auto& meta = job_json["metadata"];
         job.filament_type = moonraker_internal::json_string_list_or(meta, "filament_type");
-        job.layer_count = json_number_or(meta, "layer_count", 0u);
-        job.layer_height = json_number_or(meta, "layer_height", 0.0);
-        job.nozzle_temp = json_number_or(meta, "first_layer_extr_temp", 0.0);
-        job.bed_temp = json_number_or(meta, "first_layer_bed_temp", 0.0);
+        job.layer_count = moonraker_internal::json_count_or_zero(meta, "layer_count");
+        job.layer_height = helix::json_util::safe_double(meta, "layer_height");
+        job.nozzle_temp = helix::json_util::safe_double(meta, "first_layer_extr_temp");
+        job.bed_temp = helix::json_util::safe_double(meta, "first_layer_bed_temp");
 
         // Parse all available thumbnails with dimensions
         if (meta.contains("thumbnails") && meta["thumbnails"].is_array()) {
-            int best_pixels = 0;
             for (const auto& t : meta["thumbnails"]) {
                 ThumbnailInfo info;
                 info.relative_path = helix::json_util::safe_string(t, "relative_path", "");
@@ -126,34 +96,27 @@ PrintHistoryJob parse_history_job(const json& job_json) {
                 info.height = helix::json_util::safe_int(t, "height", 0);
                 if (!info.relative_path.empty()) {
                     job.thumbnails.push_back(info);
-                    if (info.pixel_count() > best_pixels) {
-                        best_pixels = static_cast<int>(info.pixel_count());
-                        job.thumbnail_path = info.relative_path;
-                    }
                 }
             }
         }
 
         // UUID and file size for precise history matching
         job.uuid = helix::json_util::safe_string(meta, "uuid", "");
-        job.size_bytes = json_number_or(meta, "size", static_cast<size_t>(0));
+        job.size_bytes = helix::json_util::safe_size_t(meta, "size");
 
         // Source gcode mtime. Same field server.files.metadata returns, carried
         // in the history snapshot; it is what tells a thumbnail consumer that a
         // re-slice under the same filename outdated the cached render. Absent
         // means 0, which every consumer reads as "skip freshness validation".
-        job.modified = json_number_or(meta, "modified", 0.0);
+        job.modified = helix::json_util::safe_double(meta, "modified");
     }
 
     // Pre-format display strings
-    job.duration_str = format_history_duration(job.print_duration);
     job.date_str = format_history_date(job.start_time);
     job.filament_str = format_history_filament(job.filament_used);
 
     return job;
 }
-
-} // anonymous namespace
 
 // ============================================================================
 // MoonrakerHistoryAPI Implementation
@@ -180,7 +143,7 @@ void MoonrakerHistoryAPI::get_history_list(int limit, int start, double since, d
 
     client_.send_jsonrpc(
         "server.history.list", params,
-        [on_success](json response) {
+        [on_success, on_error](const json& response) {
             std::vector<PrintHistoryJob> jobs;
             uint64_t total_count = 0;
 
@@ -192,6 +155,15 @@ void MoonrakerHistoryAPI::get_history_list(int limit, int start, double since, d
                 }
 
                 if (result.contains("jobs") && result["jobs"].is_array()) {
+                    // A page's length is the server's to decide; on the firmware
+                    // a vector that cannot grow aborts the board. This covers the
+                    // page's buffer; each job's strings still allocate as parsed.
+                    if (!helix::try_reserve(jobs, result["jobs"].size())) {
+                        moonraker_internal::report_error(on_error, MoonrakerErrorType::UNKNOWN,
+                                                         "get_history_list",
+                                                         "not enough memory for the history page");
+                        return;
+                    }
                     for (const auto& job_json : result["jobs"]) {
                         jobs.push_back(parse_history_job(job_json));
                     }
@@ -200,22 +172,6 @@ void MoonrakerHistoryAPI::get_history_list(int limit, int start, double since, d
 
             spdlog::debug("[HistoryAPI] get_history_list returned {} jobs (total: {})", jobs.size(),
                           total_count);
-
-            // This is the largest response the app parses: 500 jobs measured at
-            // 714 KB of JSON on a printer with real history, which costs ~3.9 MB
-            // of heap as a DOM. Everything worth keeping is already in `jobs`,
-            // so drop the DOM here rather than holding it across the whole
-            // callback chain — on_success() copies the job vector and hands it
-            // to the main thread, so the peak would otherwise stack the DOM, the
-            // vector, and its copy at once.
-            response = json();
-#ifdef __GLIBC__
-            // Freeing the DOM returns its pages to glibc's free lists, not to
-            // the OS — measured at 0 kB of RSS recovered without this call, and
-            // ~3.4 MB with it. Worth the arena walk here because a history fetch
-            // happens at boot and once per finished print, not per message.
-            malloc_trim(0);
-#endif
 
             if (on_success) {
                 on_success(jobs, total_count);
@@ -230,7 +186,7 @@ void MoonrakerHistoryAPI::get_history_totals(HistoryTotalsCallback on_success,
 
     client_.send_jsonrpc(
         "server.history.totals", json::object(),
-        [on_success](json response) {
+        [on_success](const json& response) {
             PrintHistoryTotals totals;
 
             if (response.contains("result") && response["result"].contains("job_totals") &&
@@ -272,7 +228,7 @@ void MoonrakerHistoryAPI::delete_history_job(const std::string& job_id, SuccessC
 
     client_.send_jsonrpc(
         "server.history.delete_job", params,
-        [on_success, job_id](json /*response*/) {
+        [on_success, job_id](const json& /*response*/) {
             spdlog::info("[HistoryAPI] Deleted history job: {}", job_id);
             if (on_success) {
                 on_success();

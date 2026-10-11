@@ -18,6 +18,7 @@
  * implementation: the expectations come from firmware, not from the parser.
  */
 
+#include "test_helpers/afc_test_access.h"
 #include "ams_backend_afc.h"
 
 #include "../catch_amalgamated.hpp"
@@ -105,6 +106,8 @@ TEST_CASE("AFC feature detection accepts any field of the v1.2.0 block",
     }
 }
 
+namespace helix {
+
 /// Drives the real status path so the prefix learner can be asserted.
 class AfcFeatureLevelHelper : public AmsBackendAfc {
   public:
@@ -118,9 +121,10 @@ class AfcFeatureLevelHelper : public AmsBackendAfc {
     }
 
     [[nodiscard]] std::string prefix() const {
-        return lane_object_prefix_;
+        return AfcTestAccess::lane_object_prefix(*this);
     }
 };
+} // namespace helix
 
 TEST_CASE("AFC feature probe learns the lane prefix from a status frame",
           "[ams][afc][feature-level]") {

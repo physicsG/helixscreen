@@ -275,12 +275,9 @@ The base container for all modal dialog cards. Registered as a custom LVGL XML w
 - Zero padding, zero border, zero shadow by default
 - Rounded corner clipping (for full-bleed bottom buttons)
 - Disabled state at 50% opacity
-- `LV_OBJ_FLAG_USER_1` flag for context-aware input styling. `ThemeManager`
-  answers "am I inside a dialog" by walking an object's parents looking for this
-  bit, so **nothing else may set it**, on any object, for any reason. It is one
-  of only four user flag bits; see the ledger in
-  [chapter 09 — Home panel widgets](architecture/09-home-widgets.md) before claiming
-  one
+
+Inputs need no dialog-specific styling: fields are unfilled and outlined, so they read on the
+dialog's `elevated_bg` the same way they read on a card or the screen.
 
 Usage in XML:
 
@@ -314,6 +311,19 @@ Reusable button footer with divider. Provides the standard "secondary | primary"
 | `tertiary_icon` | string | "" | Optional icon for the tertiary button |
 | `tertiary_variant` | string | "secondary" | Tertiary button style variant |
 | `hide_tertiary` | string | "true" | Hidden by default; pass `"false"` to reveal it |
+| `tertiary_show_subject` | string | "" | Subject carrying 0 hides the tertiary button and its divider |
+| `quaternary_text` / `_tag` / `_callback` / `_icon` / `_variant` | string | "" / "secondary" | Optional fourth action, leftmost |
+| `hide_quaternary` | string | "true" | Pass `"false"` to reveal the fourth action |
+| `primary_name` / `secondary_name` / `tertiary_name` / `quaternary_name` | string | `btn_primary` ... | Widget names, for C++ lookups and `wire_*_button()`; set them when a dialog has several rows |
+| `primary_hide_subject` | string | "" | Subject carrying 1 hides the primary button and the divider before it |
+| `primary_disable_subject` | string | "" | Subject carrying 1 disables the primary button (inverse of `primary_enable_subject`) |
+| `primary_accent_subject` | string | "" | Subject carrying 1 rings the primary button with `styles.accent_outline` |
+
+A dialog that shows different buttons per state uses one `modal_button_row` per state, each
+with a `name` and a `bind_flag_if_*` child on the instance (`ui_xml/debug_bundle_modal.xml`).
+Each row carries its own top divider, so there is no shared `divider_horizontal` above them.
+Subject props resolve in `modal_button_row`'s scope plus globals, so a subject declared in
+the calling component's own `<subjects>` cannot be passed in.
 
 Use `primary_variant="danger"` (not a color override) for destructive primaries. The
 tertiary button is hidden by default so existing two-button callers are unaffected; a
@@ -364,12 +374,7 @@ Usage in XML:
 
 ### `modal_dialog`
 
-The generic title + message dialog used by `helix::ui::modal_confirm()` and `helix::ui::modal_alert()`. Uses subject bindings for dynamic content:
-
-- `dialog_severity` -- controls which icon is shown (0=info, 1=warning, 2=error)
-- `dialog_show_cancel` -- toggles cancel button visibility
-- `dialog_primary_text` -- primary button label
-- `dialog_cancel_text` -- cancel button label
+The generic title + message dialog used by `helix::ui::modal_confirm()` and `helix::ui::modal_alert()`. Severity and captions are per-dialog attrs (`hide_info`/`hide_warning`/`hide_error`, `primary_text`, `secondary_text`, `hide_secondary`), built by `helix::ui::ModalDialogAttrs`, so stacked dialogs never share caption state.
 
 You rarely interact with `modal_dialog` directly. Use `helix::ui::modal_confirm()` or `helix::ui::modal_alert()` instead.
 
@@ -433,12 +438,11 @@ Pick the token by the card's chrome shape (values in `ui_xml/globals.xml`):
 |-------|------------|-------------|
 | `#dialog_content_max` | header + divider + scroll area + divider + ONE button row | `modal_dialog` |
 | `#dialog_content_pinned_max` | …plus ONE pinned block below the scroll area (a diagram, a status row) | `ams_loading_error_modal` |
-| `#dialog_content_tall_chrome_max` | …plus a SECOND button row with its divider | `klipper_recovery_dialog` |
+| `#dialog_content_recovery_max` | header + divider + scroll area + ONE button row, measured on that card | `klipper_recovery_dialog` |
 
 - Prefer moving content INSIDE the scroll container over pinning it — then
   `#dialog_content_max` is correct by construction.
-- Never raise a card above 85% to fit extra chrome (klipper_recovery carried
-  90% for a while; #1277 ported it back onto the tall-chrome token). The
+- Never raise a card above 85% to fit extra chrome (#1277). The
   chrome-budget lint gate (`scripts/check_modal_chrome_budget.py`) flags both
   the raised cap and an unbudgeted block below a scroll area.
 - A shape beyond one extra block (action_prompt's diagram + wrapping rows +
@@ -617,7 +621,7 @@ void on_quinary() override {
 ```
 
 **Subject-driven conditional sections.** The six button hooks are only half the story - which
-buttons and rows are even visible is driven by XML bindings on component-scoped subjects that
+buttons and rows are even visible is driven by XML bindings on C++-owned global subjects that
 `RunoutGuidanceModal` sets before each `show()`, not by hiding/showing widgets from C++:
 
 - `runout_autofeed_capable` (0/1) - set from the active backend's `recovers_filament_on_resume()`.
@@ -734,7 +738,6 @@ helix::ui::modal_hide(dialog);
 **Before** (18+ lines):
 ```cpp
 const char* attrs[] = {"title", "Delete?", "message", "Cannot be undone.", nullptr};
-helix::ui::modal_configure(ModalSeverity::Warning, true, "Delete", "Cancel");
 dialog_ = helix::ui::modal_show("modal_dialog", attrs);
 if (!dialog_) return;
 lv_obj_t* cancel = lv_obj_find_by_name(dialog_, "btn_secondary");
@@ -766,12 +769,11 @@ If your XML used `extends="ui_card"`, simply change to `extends="ui_dialog"`. Th
    something shorter-lived than the dialog. Helper otherwise. This is a lifetime question,
    not a question of how many buttons the dialog has.
 2. **Create XML** in `ui_xml/` using `extends="ui_dialog"` and `modal_button_row`
-3. **Register XML** in `src/xml_registration.cpp` (components must be registered before they're used by other components)
-4. **Register callbacks** via `lv_xml_register_event_cb()` in your C++ code
-5. **If subclass**: Create header in `include/`, implement `get_name()` and `component_name()`
-6. **Wire buttons** in `on_show()` using `wire_ok_button()` / `wire_cancel_button()`
-7. **Store the modal** as a member (subclass) or in a `ModalGuard` (static API)
-8. **Test**: Modal should auto-hide when parent panel is destroyed
+3. **Register callbacks** via `lv_xml_register_event_cb()` in your C++ code (the XML itself registers on first use; no list to edit)
+4. **If subclass**: Create header in `include/`, implement `get_name()` and `component_name()`
+5. **Wire buttons** in `on_show()` using `wire_ok_button()` / `wire_cancel_button()`
+6. **Store the modal** as a member (subclass) or in a `ModalGuard` (static API)
+7. **Test**: Modal should auto-hide when parent panel is destroyed
 
 ---
 
@@ -827,7 +829,6 @@ removed.) All live in `include/ui_modal.h`, `namespace helix::ui`:
 | `helix::ui::modal_hide(dialog)` | `Modal::hide(dialog)` |
 | `helix::ui::modal_get_top()` | `Modal::get_top()` |
 | `Modal::any_visible()` | (static method; no free-function wrapper) |
-| `helix::ui::modal_init_subjects()` | subject registration |
-| `helix::ui::modal_configure(...)` | configures the shared `modal_dialog` |
+| `helix::ui::modal_init_subjects()` | modal XML callback registration |
 
 Use the `Modal::` class methods or the `helix::ui::modal_confirm()` / `helix::ui::modal_alert()` helpers; the `lv_event_cb_t` spellings (`modal_show_confirmation()` / `modal_show_alert()`) are gone. Subject to the rule in "Three Ways to Create Modals": if the dialog needs custom content rather than title + message + buttons, own a `Modal` subclass instead.

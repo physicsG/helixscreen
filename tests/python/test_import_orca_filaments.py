@@ -388,3 +388,37 @@ def test_orca_type_overrides_target_only_real_library_types():
             f"override {orca_type!r} -> {target!r} targets a type outside "
             "orca_library_types; orca_match_type would not be idempotent"
         )
+
+
+def test_main_carries_the_types_table_through_a_regen(tmp_path, monkeypatch):
+    # `types` lives only in the output file, so a regen that dropped it would
+    # delete the runtime's per-type table. Its ranges also seed products.
+    types = [{"name": "ABS", "nozzle_min": 245, "nozzle_max": 265, "bed": 100}]
+    out = tmp_path / "filaments.json"
+    out.write_text(json.dumps({"types": types, "filaments": []}))
+    seed = tmp_path / "seed.json"
+    seed.write_text("[]")
+    seen = {}
+
+    def fake_build(orca, cfs_seed, type_ranges, library_marker="x"):
+        seen["ranges"] = type_ranges
+        return [], []
+
+    monkeypatch.setattr(imp, "build_catalog", fake_build)
+    assert imp.main(["--orca", FIX, "--cfs-seed", str(seed), "--out", str(out)]) == 0
+    assert seen["ranges"] == {"ABS": (245, 265)}
+    assert json.loads(out.read_text())["types"] == types
+
+
+def test_main_refuses_an_output_without_a_types_table(tmp_path):
+    out = tmp_path / "filaments.json"
+    out.write_text(json.dumps({"filaments": []}))
+    seed = tmp_path / "seed.json"
+    seed.write_text("[]")
+    try:
+        imp.main(["--orca", FIX, "--cfs-seed", str(seed), "--out", str(out)])
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("main wrote an output with no types table")
+    assert json.loads(out.read_text()) == {"filaments": []}

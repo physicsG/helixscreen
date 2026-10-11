@@ -3,23 +3,24 @@
 
 #pragma once
 
+#include "async_lifetime_guard.h"
 #include "lvgl.h"
-#include "sensor_registry.h"
+#include "sensor_collection.h"
 #include "subject_managed_panel.h"
 #include "width_sensor_types.h"
 
-#include <map>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
+
+#include "hv/json.hpp"
 
 namespace helix::sensors {
 
 /**
  * @brief Manager for filament width sensors (TSL1401CL and Hall-effect based)
  *
- * Implements ISensorManager interface for integration with SensorRegistry.
  * Provides:
  * - Auto-discovery of width sensors from Klipper objects list
  * - Role assignment for flow compensation
@@ -42,7 +43,7 @@ namespace helix::sensors {
  * }
  * @endcode
  */
-class WidthSensorManager : public ISensorManager {
+class WidthSensorManager {
   public:
     /**
      * @brief Get singleton instance
@@ -54,29 +55,26 @@ class WidthSensorManager : public ISensorManager {
     WidthSensorManager& operator=(const WidthSensorManager&) = delete;
 
     // ========================================================================
-    // ISensorManager Interface
+    // Discovery, Status and Config
     // ========================================================================
-
-    /// @brief Get category name for registry
-    [[nodiscard]] std::string category_name() const override;
 
     /**
      * @brief Discover sensors from Klipper objects list
      * @note MUST be called from main LVGL thread (updates subjects directly)
      */
-    void discover(const std::vector<std::string>& klipper_objects) override;
+    void discover(const std::vector<std::string>& klipper_objects);
 
     /// @brief Update state from Moonraker status JSON
-    void update_from_status(const nlohmann::json& status) override;
+    void update_from_status(const nlohmann::json& status);
 
     /**
      * @brief Load sensor configuration from JSON
      * @note MUST be called from main LVGL thread (updates subjects directly)
      */
-    void load_config(const nlohmann::json& config) override;
+    void load_config(const nlohmann::json& config);
 
     /// @brief Save configuration to JSON
-    [[nodiscard]] nlohmann::json save_config() const override;
+    [[nodiscard]] nlohmann::json save_config() const;
 
     /**
      * @brief Save configuration to file (convenience wrapper for UI callbacks)
@@ -185,6 +183,18 @@ class WidthSensorManager : public ISensorManager {
     [[nodiscard]] lv_subject_t* get_diameter_subject();
 
     /**
+     * @brief Death signal for the subjects this WidthSensorManager owns.
+     *
+     * Pass to observe_*() from anything that can outlive this object's
+     * deinit_subjects(): that path frees every observer node without bumping
+     * the ObserverGuard invalidation epoch, so a guard without the token
+     * dereferences a freed observer on its next reset().
+     */
+    [[nodiscard]] SubjectLifetime get_subjects_lifetime() const {
+        return subjects_.get_subjects_lifetime();
+    }
+
+    /**
      * @brief Get subject for sensor count (for conditional UI visibility)
      * @return Subject (int: number of discovered sensors)
      */
@@ -200,7 +210,7 @@ class WidthSensorManager : public ISensorManager {
      * @brief Enable synchronous mode for testing
      *
      * When enabled, update_from_status() calls update_subjects() synchronously
-     * instead of using lv_async_call().
+     * instead of using queue_update().
      */
     void set_sync_mode(bool enabled);
 
@@ -227,19 +237,6 @@ class WidthSensorManager : public ISensorManager {
                             WidthSensorType& type) const;
 
     /**
-     * @brief Find config by Klipper name
-     * @return Pointer to config, or nullptr if not found
-     */
-    WidthSensorConfig* find_config(const std::string& klipper_name);
-    const WidthSensorConfig* find_config(const std::string& klipper_name) const;
-
-    /**
-     * @brief Find config by assigned role
-     * @return Pointer to config, or nullptr if no sensor has this role
-     */
-    const WidthSensorConfig* find_config_by_role(WidthSensorRole role) const;
-
-    /**
      * @brief Update all LVGL subjects from current state
      * @note Internal method - MUST only be called from main LVGL thread
      */
@@ -248,11 +245,7 @@ class WidthSensorManager : public ISensorManager {
     // Recursive mutex for thread-safe state access
     mutable std::recursive_mutex mutex_;
 
-    // Configuration
-    std::vector<WidthSensorConfig> sensors_;
-
-    // Runtime state (keyed by klipper_name)
-    std::map<std::string, WidthSensorState> states_;
+    SensorCollection<WidthSensorConfig, WidthSensorState> sensors_;
 
     // Test mode: when true, update_from_status() calls update_subjects() synchronously
     bool sync_mode_ = false;
@@ -260,9 +253,11 @@ class WidthSensorManager : public ISensorManager {
     // LVGL subjects
     bool subjects_initialized_ = false;
     SubjectManager subjects_;
-    lv_subject_t diameter_;
-    lv_subject_t sensor_count_;
-    lv_subject_t diameter_text_;
+    // Expires deferred subject updates when the subjects are torn down.
+    helix::AsyncLifetimeGuard lifetime_;
+    lv_subject_t diameter_{};
+    lv_subject_t sensor_count_{};
+    lv_subject_t diameter_text_{};
     char diameter_text_buf_[16]; ///< "1.75mm" or "--"
 };
 

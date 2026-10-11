@@ -9,10 +9,12 @@
 #include "capability_matrix.h"
 #include "gcode_file_modifier.h"
 #include "gcode_ops_detector.h"
+#include "gcode_rewrite_block.h"
 #include "i_moonraker_api.h"
 #include "operation_timeout_guard.h"
 #include "preprint_predictor.h"
 #include "print_start_analyzer.h"
+#include "print_start_checks.h"
 #include "printer_detector.h"
 #include "printer_state.h"
 #include "thermal_rate_model.h"
@@ -84,22 +86,6 @@ struct PrePrintOptions {
     bool skip_macro_z_tilt = false;
     bool skip_macro_nozzle_clean = false;
     bool skip_macro_purge_line = false;
-};
-
-/**
- * @brief Result of checking if G-code modification can be performed safely
- *
- * On resource-constrained devices (like AD5M with 512MB RAM), modifying large
- * G-code files can exhaust memory and crash both Moonraker and Klipper.
- * This struct captures whether modification is safe and why (or why not).
- */
-struct ModificationCapability {
-    bool can_modify = false;     ///< True if modification can be done safely
-    bool has_plugin = false;     ///< True if helix_print plugin handles it server-side
-    bool has_disk_space = false; ///< True if enough disk space for streaming fallback
-    std::string reason;          ///< Human-readable reason if modification is disabled
-    size_t available_bytes = 0;  ///< Available disk space in temp directory
-    size_t required_bytes = 0;   ///< Estimated bytes needed for modification
 };
 
 /**
@@ -192,7 +178,8 @@ class PrintPreparationManager {
      * @brief Analyze the printer's PRINT_START macro (async)
      *
      * Fetches macro definition from printer config and detects operations
-     * like bed mesh, QGL, etc. Result is cached and reused.
+     * like bed mesh, QGL, etc. Result is cached and reused until a reconnect
+     * or a Klipper restart, either of which re-reads the macro.
      *
      * Call this once when connecting to the printer or when the detail
      * view needs to show macro-level operations.
@@ -224,29 +211,14 @@ class PrintPreparationManager {
     }
 
     /**
-     * @brief Check if a specific operation in PRINT_START is controllable
+     * @brief The options the detail view shows as rows
      *
-     * @param category The operation category to check
-     * @return true if the operation has a skip parameter in the macro
+     * The printer's option set. When the printer database declares no options
+     * for this printer, one MacroParam row is added per operation the PRINT_START
+     * analysis found controllable; collect_macro_skip_params() sends exactly
+     * those rows' params.
      */
-    [[nodiscard]] bool is_macro_op_controllable(helix::PrintStartOpCategory category) const;
-
-    /**
-     * @brief Get the skip parameter name for a macro operation (if controllable)
-     *
-     * @param category The operation category
-     * @return Parameter name (e.g., "SKIP_BED_MESH") or empty string if not controllable
-     */
-    [[nodiscard]] std::string get_macro_skip_param(helix::PrintStartOpCategory category) const;
-
-    /**
-     * @brief Get the parameter semantic for a macro operation
-     *
-     * @param category The operation category
-     * @return ParameterSemantic (OPT_OUT for SKIP_*, OPT_IN for PERFORM_*)
-     */
-    [[nodiscard]] helix::ParameterSemantic
-    get_macro_param_semantic(helix::PrintStartOpCategory category) const;
+    [[nodiscard]] PrePrintOptionSet displayed_options() const;
 
     // === CapabilityMatrix Integration ===
 
@@ -287,8 +259,11 @@ class PrintPreparationManager {
      *
      * @param filename File name (relative to gcodes root)
      * @param current_path Current directory path (empty = root)
+     * @param local_path The file on this host (a USB stick) when Moonraker has
+     *        no copy; read directly instead of downloaded.
      */
-    void scan_file_for_operations(const std::string& filename, const std::string& current_path);
+    void scan_file_for_operations(const std::string& filename, const std::string& current_path,
+                                  const std::string& local_path = {});
 
     /**
      * @brief Clear cached scan result
@@ -296,9 +271,31 @@ class PrintPreparationManager {
     void clear_scan_cache();
 
     /**
+     * @brief What the last scan of @p filename found about printer-stopping commands
+     *
+     * NotRun until a scan of that file answers, or when its download failed or the
+     * printer's macros had not been read; not_run_reason says which.
+     */
+    [[nodiscard]] helix::PrinterStopCheck printer_stop_check_for(const std::string& filename) const;
+
+    /// Whether a scan of @p filename has answered, whatever the answer.
+    [[nodiscard]] bool has_printer_stop_answer_for(const std::string& filename) const;
+
+    /// Called on the main thread each time a scan answers, success or failure.
+    void set_on_scan_answered(std::function<void()> cb);
+
+    /**
      * @brief Check if scan result is available for a file
      */
     [[nodiscard]] bool has_scan_result_for(const std::string& filename) const;
+
+    /**
+     * @brief The PRINT_START/START_PRINT call the cached scan found in `filename`
+     *
+     * @return nullptr when the cache holds another file, or no call was found.
+     */
+    [[nodiscard]] const gcode::PrintStartCallInfo*
+    print_start_for(const std::string& filename) const;
 
     /**
      * @brief Get cached scan result (if available)
@@ -320,20 +317,25 @@ class PrintPreparationManager {
     void set_cached_file_size(size_t size);
 
     /**
-     * @brief Check if G-code modification can be performed safely
+     * @brief May we print a rewritten copy of the selected G-code file?
      *
-     * Evaluates whether the device has sufficient resources to modify the
-     * currently selected G-code file. Returns detailed information about
-     * what's available and what's needed.
-     *
-     * Safety priority:
-     * 1. If helix_print plugin available → always safe (server-side)
-     * 2. If disk space available for streaming → safe (disk-based modification)
-     * 3. Otherwise → unsafe, modification disabled
-     *
-     * @return ModificationCapability with safety status and details
+     * The HelixPrint plugin is what makes a rewrite survivable as a product
+     * decision rather than a technical one: without it the rewritten copy is
+     * what lands in print history, so finished jobs are filed under names like
+     * modified_1730824_benchy.gcode. Size is not part of the question - the
+     * rewrite streams a line at a time, so a 2GB file costs what a 2KB one does.
+     * It streams through a local copy, though, so a transport that cannot keep
+     * one (ITransfersAPI::supports_local_copies) declines too.
      */
-    [[nodiscard]] ModificationCapability check_modification_capability() const;
+    [[nodiscard]] bool can_modify_gcode() const;
+
+    /// Why a rewrite cannot run right now, or None: the one answer behind
+    /// can_modify_gcode(), the pre-print option rows and the remap pick.
+    [[nodiscard]] GcodeRewriteBlock gcode_rewrite_block() const;
+
+    /// The same answer for a caller with no manager to hand.
+    [[nodiscard]] static GcodeRewriteBlock gcode_rewrite_block_for(PrinterState* printer_state,
+                                                                   IMoonrakerAPI* api);
 
     /**
      * @brief Get the temp directory path for streaming operations
@@ -385,18 +387,17 @@ class PrintPreparationManager {
     /**
      * @brief Rewrite tool commands in a G-code file and print the modified copy.
      *
-     * For RemapStrategy::GcodeRewrite backends (Snapmaker U1, ACE) that own no
-     * internal tool table: the only way to redirect a logical tool to a
+     * For RemapStrategy::GcodeRewrite backends - a tool changer driving its
+     * swaps with its own T<n> macros rather than klipper-toolchanger - that
+     * own no internal tool table: the only way to redirect a logical tool to a
      * different physical head is to rewrite the Tx / ACTIVATE_EXTRUDER /
      * SET_GCODE_VARIABLE lines in the file itself.
      *
-     * Flow (reuses the proven streaming modify+print pipeline):
-     * 1. Download the original to a temp file (streaming, no memory spike).
-     * 2. Read it back, call GcodeToolRemapper::build_line_replacements(content,
-     *    remap) to get exactly the lines that change.
-     * 3. Convert each GcodeLineReplacement -> GCodeFileModifier::replace(line,
-     *    text), apply_streaming() file-to-file.
-     * 4. Upload the modified copy and start it via the HelixPrint plugin's
+     * Flow, streaming end to end - no stage ever holds the file:
+     * 1. Download the original to a temp file (streaming).
+     * 2. GcodeToolRemapper::apply_to_stream() rewrites it to a second temp file
+     *    a line at a time, so peak memory is one line whatever the job's size.
+     * 3. Upload the modified copy and start it via the HelixPrint plugin's
      *    start_modified_print() so print history stays under the ORIGINAL
      *    filename. (This path requires the plugin; callers must guard.)
      *
@@ -416,7 +417,7 @@ class PrintPreparationManager {
      *
      * The print-detail view uses this to HIDE a toggle when the plugin is
      * absent: without the plugin, disabling such an option can't be honored —
-     * start_print() reaches check_modification_capability() and drops the
+     * start_print() reaches can_modify_gcode() and drops the
      * modification with a "Requires HelixPrint plugin" warning.
      *
      * Returns true only when NO pre-start short-circuit in start_print() would
@@ -425,12 +426,12 @@ class PrintPreparationManager {
      *       in the currently-scanned file, OR
      *   (b) the option is a MacroParam whose skip must be rewritten into the
      *       START_PRINT call.
-     * Both are suppressed when the printer has a pre-start mechanism (a
-     * MacroParam skip that triggers `setup_gcode`, or any PreStartGcode line):
-     * in that path start_print() streams / defers to the native macro WITHOUT
-     * the plugin. This is exactly why the K2 Plus PREPARE bed_mesh toggle must
-     * stay visible — see the mirror logic in start_print() (the pre-start block
-     * at the top) and collect_ops_to_disable()/collect_macro_skip_params().
+     * False whenever disabling the option has an effect that needs no plugin,
+     * so the row stays useful: a PreStartGcode option always emits its line,
+     * and a MacroParam skip is carried by a pre-start block (`setup_gcode`, or
+     * any PreStartGcode line). This is why the K2 Plus PREPARE bed_mesh toggle
+     * stays visible. Stripping an embedded op needs the plugin on every start
+     * path, so it alone hides the row.
      *
      * @param opt The option whose disable-cost is being evaluated
      */
@@ -465,11 +466,24 @@ class PrintPreparationManager {
     [[nodiscard]] std::string
     describe_dropped_modifications(const std::vector<gcode::OperationType>& ops_to_disable) const;
 
+    /// Log and toast that this print's modifications are being dropped, naming
+    /// the affected features and why: the HelixPrint plugin is absent, or the
+    /// transport keeps no local copy to rewrite. Every start path that declines
+    /// a modification reports it through here.
+    void warn_modifications_dropped(const std::vector<gcode::OperationType>& ops_to_disable) const;
+
+    /// Whether the transport can write the local copy a rewrite streams through.
+    [[nodiscard]] bool transport_keeps_local_copies() const;
+    [[nodiscard]] static bool keeps_local_copies(IMoonrakerAPI* api);
+    [[nodiscard]] static GcodeRewriteBlock rewrite_block_with(PrinterState* printer_state,
+                                                              bool local_copies);
+
     /**
      * @brief Get the pre-print time estimate subject (seconds)
      *
-     * Updated by recalculate_estimate() whenever checkbox toggles change.
-     * Value is total estimated seconds for all enabled pre-print operations.
+     * Updated by recalculate_estimate() on open and whenever checkbox toggles
+     * change. Value is total estimated seconds for all enabled pre-print
+     * operations.
      */
     lv_subject_t* get_preprint_estimate_subject();
 
@@ -499,6 +513,11 @@ class PrintPreparationManager {
     [[nodiscard]] bool is_print_in_progress() const;
 
   private:
+    /// Tell PrinterState how many of the rows the macro analysis adds to
+    /// displayed_options() will render: rewrite-gated rows hide while a rewrite
+    /// cannot run.
+    void publish_macro_option_count();
+
     friend class ::PrintPreparationManagerTestAccess;
 
     // === Dependencies ===
@@ -518,6 +537,18 @@ class PrintPreparationManager {
     // === Scan Cache ===
     std::optional<gcode::ScanResult> cached_scan_result_;
     std::string cached_scan_filename_;
+    /// Full identity of the file cached_scan_result_ came from (the stick path
+    /// for a USB file, else current_path/filename), so a same-named file
+    /// elsewhere never reuses it.
+    std::string cached_scan_key_;
+    /// Key of the newest scan requested; an older scan's late answer is dropped.
+    std::string requested_scan_key_;
+    helix::PrinterStopCheck printer_stop_check_;
+    std::string printer_stop_check_filename_; ///< The file printer_stop_check_ answers for
+    std::function<void()> on_scan_answered_;
+
+    /// Record the scan's printer-stopping command answer for @p filename and report it.
+    void answer_printer_stop_check(const std::string& filename, helix::PrinterStopCheck check);
     std::optional<size_t> cached_file_size_; ///< File size from Moonraker metadata
     /// Job temps for {bed_temp}/{extruder_temp} come from the scan cache's
     /// print_start call (the file's own START_PRINT line) — see
@@ -545,6 +576,12 @@ class PrintPreparationManager {
     // === PRINT_START Analysis Cache ===
     std::optional<helix::PrintStartAnalysis> macro_analysis_;
     bool macro_analysis_in_progress_ = false;
+    // The config may have changed under the analysis in flight; run again when it lands.
+    bool macro_analysis_stale_ = false;
+    // Last value seen, so a re-subscription is told apart from a real transition.
+    int last_connection_state_ = -1;
+    // Klippy left READY while connected; its return to READY is a restart.
+    bool klippy_restarting_ = false;
 
     // Retry logic for macro analysis
     int macro_analysis_retry_count_ = 0;
@@ -553,9 +590,20 @@ class PrintPreparationManager {
     // === Lifetime Guard for Async Callbacks ===
     helix::AsyncLifetimeGuard lifetime_;
 
-    // === Connection Observer ===
-    // Triggers macro analysis when printer connection becomes CONNECTED
+    // === Connection Observers ===
+    // Analyze on connect; re-read the macro on a reconnect or a Klipper restart.
     ObserverGuard connection_observer_;
+    ObserverGuard klippy_observer_;
+    /// A leveling skip still set while no job holds the machine is reset: on
+    /// the job's release, and on the status frame that reports it pending, so
+    /// a frame landing after the release or a reconnect still clears it and
+    /// the next print, started from anywhere, runs every step.
+    ObserverGuard job_holds_observer_;
+    ObserverGuard plugin_observer_;
+    /// keeps_local_copies(api_), answered by set_dependencies().
+    bool keeps_local_copies_ = true;
+    bool skip_reset_sent_ = false; ///< One reset per pending skip, until it reads clear
+    void reset_pending_skips();
 
     // === Pre-start completion wait ===
     // When the pre-start gcode RPC times out but Klipper still reports
@@ -632,7 +680,9 @@ class PrintPreparationManager {
      * @brief Collect operations that user wants to disable
      *
      * Compares checkbox states against cached scan result to identify
-     * operations that are embedded in the file but disabled by user.
+     * operations that are embedded in the file but disabled by user. An option
+     * whose value a self-storing firmware holds strips nothing: that firmware
+     * gates the file's own command on its setting.
      */
     [[nodiscard]] std::vector<gcode::OperationType> collect_ops_to_disable() const;
 
@@ -709,8 +759,9 @@ class PrintPreparationManager {
     /**
      * @brief Lazy-initialize the prep-time estimate subject.
      *
-     * Called from get_preprint_estimate_subject(); ensures the subject is
-     * ready before any observer wires up.
+     * Called from get_preprint_estimate_subject() and
+     * recalculate_estimate(); ensures the subject is ready before any
+     * observer wires up.
      */
     void ensure_estimate_subject_initialized();
 
@@ -722,13 +773,14 @@ class PrintPreparationManager {
      */
     void analyze_print_start_macro_internal();
 
-    /**
-     * @brief Schedule a deferred retry of macro analysis
-     *
-     * Used when MacroModificationManager is currently analyzing — defers
-     * to its result instead of starting a duplicate PrintStartAnalyzer run.
-     */
-    void schedule_deferred_macro_check();
+    void on_connection_state(int state);
+    void on_klippy_state(int state);
+
+    /// Drop the cached analysis and run a fresh one, or mark the one in flight stale.
+    void refresh_macro_analysis();
+
+    /// When the analysis that just landed is stale, start another and return true.
+    bool restart_stale_macro_analysis();
 
     /**
      * @brief Collect macro skip parameters based on user checkboxes and macro analysis
@@ -754,10 +806,14 @@ class PrintPreparationManager {
      * Lines are returned in the same (category, order) order the option set is
      * sorted in, so callers can fire them sequentially before START_PRINT.
      *
+     * @param with_skip_toggles False leaves out the leveling-skip toggles
+     *        (skip_wrappers::option_for()): those set a flag and carry no
+     *        START_PRINT skip parameter, so they are no delivery path for one.
      * @return Vector of rendered gcode lines, e.g. {"LOAD_AI_RUN SWITCH=1"}.
      */
     [[nodiscard]] std::vector<std::string>
-    collect_pre_start_gcode_lines(const std::string& filename = {}) const;
+    collect_pre_start_gcode_lines(const std::string& filename = {},
+                                  bool with_skip_toggles = true) const;
 
     /**
      * @brief Build the combined pre-start gcode block executed before START_PRINT.

@@ -113,9 +113,10 @@ in a proprietary repo we have neither access to nor the right to copy from.
 
 Practical consequences:
 
-- Any XML bug is **our** bug. `PLUGIN_DEVELOPMENT.md` used to say "LVGL 9.5 does not provide
-  `lv_xml_unregister_subject()`" as though it were an upstream limitation — LVGL 9.5 has no XML at
-  all; that gap is ours to fill or not.
+- Any XML bug is **our** bug. LVGL 9.5 has no XML at all; that gap is ours to fill or not.
+  Plugins build on this engine from sandboxed Lua; the system is documented in
+  `docs/devel/architecture/12-system-services.md` and the author contract in
+  `docs/devel/PLUGIN_DEVELOPMENT.md`.
 - Upstream XML documentation links are dead. `docs.lvgl.io/master/details/xml/` now redirects to
   Pro docs describing a different, closed engine. Do not cite it as authoritative for our syntax.
 - `lib/helix-xml/` is a submodule pointing at
@@ -133,9 +134,37 @@ Practical consequences:
   a conf-guards job that proves the `#if LV_USE_XML` / `LV_USE_TRANSLATION` / `LV_USE_OBJ_NAME`
   guards still hold. Details and the here-vs-there test split: `TESTING.md` § "helix-xml Engine
   Tests".
-- In a worktree, `lib/` is symlinked to the main tree — so editing `lib/helix-xml/` from a
-  worktree edits the main checkout, exactly as for `lib/lvgl/`. Make engine changes in the main
-  tree, or unlink first (`scripts/setup-worktree.sh --unlink`).
+- A worktree gets its own checkout of `lib/helix-xml` (and of `lib/lvgl`, `lib/libhv` and `lib/lua`), so
+  engine changes made in one stay in that branch. The remaining `lib/` submodules are
+  symlinked to the main tree and editing one there edits the main checkout.
+
+### Engine constraints a new construct must respect
+
+These bind any new element or attribute added to `lib/helix-xml/src/xml/lv_xml.c`:
+
+- **SAX streaming, no DOM, no lookahead.** expat drives `view_start_element_handler` /
+  `view_end_element_handler`; a component's `<view>` is kept as a raw string
+  (`scope->view_def`) and re-parsed for every instance. Nothing can see a later sibling, so a
+  construct that depends on one (`<else>` after `<if>`) has to carry state across events.
+- **Expanding a body N times is capture and replay.** `<repeat>` and `<if>` buffer their body as
+  deep-copied SAX events instead of building it (`xml_frag_buffer_event`), then replay it
+  through the real handlers (`xml_frag_expand`). A new looping or conditional construct reuses
+  that machinery instead of growing a second one.
+- **`resolve_params` rewrites the attribute array in place.** The `${...}` compose branch runs
+  first and is the only allocating path (its strings live on the parser state until the parse
+  ends); whole-value `$name` / `$i` come next, then `#const` in `resolve_consts`. No path may
+  both compose and repoint the same slot.
+- **A reactive rebuild runs inside an UpdateQueue drain.** The count or condition observer fires
+  synchronously there, so it never deletes widgets directly and never calls
+  `lv_obj_is_valid()`: `xml_frag_teardown` reparents the old roots into an off-tree, hidden,
+  layout-less container on `lv_layer_top()` and `lv_obj_delete_async()`s that. The engine
+  cannot call `helix::ui::safe_delete_subtree`; this is its C twin.
+- **Observer records belong to the instance, not the component scope.** They are freed from an
+  `LV_EVENT_DELETE` callback on the instance's view root (`xml_frag_instance_delete_cb`). A
+  scope-lifetime observer outlives the instance it rebuilds and is a use-after-free.
+- **A rebuilt body is appended at the end of its parent.** That is why a subject-bound `<repeat>`
+  or `<if>` must be its parent's last child or sit in its own container
+  ([`LVGL9_XML_GUIDE.md`](LVGL9_XML_GUIDE.md)); any new reactive construct inherits the rule.
 
 ### Clean-room rule
 
@@ -200,10 +229,12 @@ gap that actively costs us something today.
 | `<if cond=>` / `<else/>` structural conditionals | Builds only the matching branch |
 | `parts="main,indicator,knob"` on style binds | One line instead of three |
 | `hidden_if_prop_eq` / `hidden_if_not_eq` / `hidden_if_empty` | Prop-driven visibility without a subject |
+| A literal `text=` implying its own `translation_tag`, and `X=` its component's `X_tag` prop | ~1,660 redundant tag attributes gone from `ui_xml/`; each copy was heap in a view definition |
 | Inline PCDATA text auto-synthesizing `translation_tag` | `<text_muted>Foo</text_muted>`; whitespace collapsed to stay byte-identical with `scripts/translations/extractor.py` |
 | `float` and `color` subjects | Upstream Pro docs, July 2026: *"Currently, only integer and string types are supported."* |
 | `bind_src` accepting STRING subjects | Upstream only accepted POINTER |
 | `HELIX_HOT_RELOAD` re-registration | Edit XML, see it in ~500ms, no restart |
+| Authored-color records: `lv_xml_obj_has_authored_style`, `lv_xml_reapply_token_styles`, `lv_xml_reapply_style_tokens` | Inline and `<style>` `#const` colors follow a live theme switch, and bulk recolor code can tell what the XML set (`THEME_SYSTEM.md` § Authored Inline Colors) |
 | `<subject name= type= value=>` convention | Ours; upstream uses tag-per-type (`<int name=…>`). Both parse — `type=` overrides the tag name (`lib/helix-xml/src/xml/lv_xml_component.c#"\"scope; its style storage is held until deinit\","`) |
 
 ## Should we chase parity?

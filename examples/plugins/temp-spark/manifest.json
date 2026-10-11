@@ -1,0 +1,42 @@
+{
+  "id": "temp-spark",
+  "name": "Temperature Sparkline",
+  "version": "1.0.0",
+  "author": "HelixScreen",
+  "description": "One heater's temperature as a home tile sparkline, with a detail overlay showing min, max and target.",
+  "permissions": [],
+  "widgets": [
+    {
+      "id": "temp-spark__tile",
+      "name": "Temperature Sparkline",
+      "icon": "thermometer_lines",
+      "description": "Current temperature and a 30-sample sparkline",
+      "component": "temp-spark__tile",
+      "colspan": 2,
+      "rowspan": 1
+    }
+  ],
+  "settings": [
+    {
+      "key": "heater",
+      "type": "enum",
+      "label": "Heater",
+      "options": ["extruder", "heater_bed", "chamber"],
+      "default": "extruder"
+    },
+    {
+      "key": "interval_s",
+      "type": "int",
+      "label": "Sample interval (s)",
+      "min": 1,
+      "max": 10,
+      "default": 2
+    },
+    {
+      "key": "show_target",
+      "type": "bool",
+      "label": "Show target",
+      "default": true
+    }
+  ]
+}

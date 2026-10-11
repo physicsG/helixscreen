@@ -8,51 +8,24 @@
 
 #include "ui_settings_telemetry_data.h"
 
-#include "ui_event_safety.h"
-#include "ui_nav_manager.h"
+#include "ui_callback_helpers.h"
 #include "ui_toast_manager.h"
 #include "ui_utils.h"
 
 #include "lvgl/src/others/translation/lv_translation.h"
-#include "static_panel_registry.h"
 #include "system/telemetry_manager.h"
 #include "theme_manager.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 
-#include <memory>
-
 namespace helix::settings {
-
-// ============================================================================
-// SINGLETON ACCESSOR
-// ============================================================================
-
-static std::unique_ptr<TelemetryDataOverlay> g_telemetry_data_overlay;
-
-TelemetryDataOverlay& get_telemetry_data_overlay() {
-    if (!g_telemetry_data_overlay) {
-        g_telemetry_data_overlay = std::make_unique<TelemetryDataOverlay>();
-        StaticPanelRegistry::instance().register_destroy(
-            "TelemetryDataOverlay", []() { g_telemetry_data_overlay.reset(); });
-    }
-    return *g_telemetry_data_overlay;
-}
-
-// ============================================================================
-// CONSTRUCTOR / DESTRUCTOR
-// ============================================================================
-
-TelemetryDataOverlay::TelemetryDataOverlay() {
-    spdlog::debug("[{}] Created", get_name());
-}
 
 TelemetryDataOverlay::~TelemetryDataOverlay() {
     if (subjects_initialized_) {
         deinit_subjects_base(subjects_);
     }
-    spdlog::trace("[{}] Destroyed", get_name());
 }
 
 // ============================================================================
@@ -75,68 +48,11 @@ void TelemetryDataOverlay::init_subjects() {
 }
 
 void TelemetryDataOverlay::register_callbacks() {
-    lv_xml_register_event_cb(nullptr, "on_telemetry_clear_queue", on_telemetry_clear_queue);
-
-    spdlog::debug("[{}] Callbacks registered", get_name());
+    register_xml_callbacks({
+        {"on_telemetry_clear_queue",
+         [](lv_event_t*) { get_telemetry_data_overlay().handle_clear_queue(); }},
+    });
 }
-
-// ============================================================================
-// UI CREATION
-// ============================================================================
-
-lv_obj_t* TelemetryDataOverlay::create(lv_obj_t* parent) {
-    if (overlay_root_) {
-        spdlog::warn("[{}] create() called but overlay already exists", get_name());
-        return overlay_root_;
-    }
-
-    spdlog::debug("[{}] Creating overlay...", get_name());
-
-    overlay_root_ =
-        static_cast<lv_obj_t*>(lv_xml_create(parent, "telemetry_data_overlay", nullptr));
-    if (!overlay_root_) {
-        spdlog::error("[{}] Failed to create overlay from XML", get_name());
-        return nullptr;
-    }
-
-    // Initially hidden until show() pushes it
-    lv_obj_add_flag(overlay_root_, LV_OBJ_FLAG_HIDDEN);
-
-    spdlog::info("[{}] Overlay created", get_name());
-    return overlay_root_;
-}
-
-void TelemetryDataOverlay::show(lv_obj_t* parent_screen) {
-    spdlog::debug("[{}] show() called", get_name());
-
-    parent_screen_ = parent_screen;
-
-    // Ensure subjects and callbacks are initialized
-    if (!subjects_initialized_) {
-        init_subjects();
-        register_callbacks();
-    }
-
-    // Lazy create overlay
-    if (!overlay_root_ && parent_screen_) {
-        create(parent_screen_);
-    }
-
-    if (!overlay_root_) {
-        spdlog::error("[{}] Cannot show - overlay not created", get_name());
-        return;
-    }
-
-    // Register for lifecycle callbacks
-    NavigationManager::instance().register_overlay_instance(overlay_root_, this);
-
-    // Push onto navigation stack (on_activate will populate events)
-    NavigationManager::instance().push_overlay(overlay_root_);
-}
-
-// ============================================================================
-// LIFECYCLE HOOKS
-// ============================================================================
 
 void TelemetryDataOverlay::on_activate() {
     OverlayBase::on_activate();
@@ -145,19 +61,11 @@ void TelemetryDataOverlay::on_activate() {
     populate_events();
 }
 
-void TelemetryDataOverlay::on_deactivate() {
-    OverlayBase::on_deactivate();
-}
-
 // ============================================================================
 // INTERNAL METHODS
 // ============================================================================
 
 void TelemetryDataOverlay::update_status() {
-    if (!subjects_initialized_) {
-        return;
-    }
-
     auto& telemetry = TelemetryManager::instance();
     bool enabled = telemetry.is_enabled();
     size_t count = telemetry.queue_size();
@@ -183,13 +91,8 @@ void TelemetryDataOverlay::update_status() {
 }
 
 void TelemetryDataOverlay::populate_events() {
-    if (!overlay_root_) {
-        return;
-    }
-
-    lv_obj_t* event_list = lv_obj_find_by_name(overlay_root_, "event_list");
+    lv_obj_t* event_list = helix::ui::find_required(overlay_root_, "event_list", get_name());
     if (!event_list) {
-        spdlog::warn("[{}] Could not find event_list widget", get_name());
         return;
     }
 
@@ -523,7 +426,8 @@ void TelemetryDataOverlay::populate_events() {
             }
             if (event.contains("build_volume") && event["build_volume"].is_object()) {
                 const auto& bv = event["build_volume"];
-                if (bv.contains("x_mm") && bv.contains("y_mm")) {
+                if (bv.contains("x_mm") && bv["x_mm"].is_number() && bv.contains("y_mm") &&
+                    bv["y_mm"].is_number()) {
                     std::string vol = std::to_string(bv["x_mm"].get<int>()) + "x" +
                                       std::to_string(bv["y_mm"].get<int>());
                     if (bv.contains("z_mm") && bv["z_mm"].is_number()) {
@@ -539,10 +443,12 @@ void TelemetryDataOverlay::populate_events() {
                 if (e.contains("count") && e["count"].is_number_integer()) {
                     line = std::to_string(e["count"].get<int>()) + " " + lv_tr("extruder(s)");
                 }
-                if (e.contains("has_heater_bed") && e["has_heater_bed"].get<bool>()) {
+                if (e.contains("has_heater_bed") && e["has_heater_bed"].is_boolean() &&
+                    e["has_heater_bed"].get<bool>()) {
                     line += ", " + std::string(lv_tr("heated bed"));
                 }
-                if (e.contains("has_chamber_heater") && e["has_chamber_heater"].get<bool>()) {
+                if (e.contains("has_chamber_heater") && e["has_chamber_heater"].is_boolean() &&
+                    e["has_chamber_heater"].get<bool>()) {
                     line += ", " + std::string(lv_tr("chamber heater"));
                 }
                 if (!line.empty()) {
@@ -552,17 +458,20 @@ void TelemetryDataOverlay::populate_events() {
             // Fans, steppers, LEDs summary
             {
                 std::string hw_line;
-                if (event.contains("fans") && event["fans"].contains("total")) {
+                if (event.contains("fans") && event["fans"].contains("total") &&
+                    event["fans"]["total"].is_number()) {
                     hw_line +=
                         std::to_string(event["fans"]["total"].get<int>()) + " " + lv_tr("fans");
                 }
-                if (event.contains("steppers") && event["steppers"].contains("count")) {
+                if (event.contains("steppers") && event["steppers"].contains("count") &&
+                    event["steppers"]["count"].is_number()) {
                     if (!hw_line.empty())
                         hw_line += ", ";
                     hw_line += std::to_string(event["steppers"]["count"].get<int>()) + " " +
                                lv_tr("steppers");
                 }
-                if (event.contains("leds") && event["leds"].contains("count")) {
+                if (event.contains("leds") && event["leds"].contains("count") &&
+                    event["leds"]["count"].is_number()) {
                     if (!hw_line.empty())
                         hw_line += ", ";
                     hw_line +=
@@ -611,7 +520,8 @@ void TelemetryDataOverlay::populate_events() {
                 if (t.contains("count") && t["count"].is_number_integer()) {
                     std::string line =
                         std::to_string(t["count"].get<int>()) + " " + lv_tr("tool(s)");
-                    if (t.contains("is_multi_tool") && t["is_multi_tool"].get<bool>()) {
+                    if (t.contains("is_multi_tool") && t["is_multi_tool"].is_boolean() &&
+                        t["is_multi_tool"].get<bool>()) {
                         line += " " + std::string(lv_tr("(multi-tool)"));
                     }
                     make_label(card, std::string(lv_tr("Tools: ")) + line, "text_subtle");
@@ -634,6 +544,9 @@ void TelemetryDataOverlay::populate_events() {
                 std::string panels;
                 for (auto it = event["panel_time_sec"].begin(); it != event["panel_time_sec"].end();
                      ++it) {
+                    if (!it.value().is_number()) {
+                        continue;
+                    }
                     if (!panels.empty())
                         panels += ", ";
                     panels += it.key() + ": " + std::to_string(it.value().get<int>()) + "s";
@@ -646,6 +559,9 @@ void TelemetryDataOverlay::populate_events() {
                 std::string overlays;
                 for (auto it = event["overlay_visits"].begin(); it != event["overlay_visits"].end();
                      ++it) {
+                    if (!it.value().is_number()) {
+                        continue;
+                    }
                     if (!overlays.empty())
                         overlays += ", ";
                     overlays += it.key() + ": " + std::to_string(it.value().get<int>());
@@ -659,6 +575,9 @@ void TelemetryDataOverlay::populate_events() {
                 std::string visits;
                 for (auto it = event["panel_visits"].begin(); it != event["panel_visits"].end();
                      ++it) {
+                    if (!it.value().is_number()) {
+                        continue;
+                    }
                     if (!visits.empty())
                         visits += ", ";
                     visits += it.key() + ": " + std::to_string(it.value().get<int>());
@@ -680,7 +599,7 @@ void TelemetryDataOverlay::populate_events() {
 
         } else if (type_str == "print_start_context") {
             add_field_str("source", lv_tr("Source"));
-            if (event.contains("has_thumbnail")) {
+            if (event.contains("has_thumbnail") && event["has_thumbnail"].is_boolean()) {
                 make_label(card,
                            std::string(lv_tr("Thumbnail: ")) +
                                (event["has_thumbnail"].get<bool>() ? lv_tr("Yes") : lv_tr("No")),
@@ -690,7 +609,7 @@ void TelemetryDataOverlay::populate_events() {
             add_field_str("estimated_duration_bucket", lv_tr("Est. Duration"));
             add_field_str("slicer", lv_tr("Slicer"));
             add_field_num("tool_count_used", lv_tr("Tools Used"), "");
-            if (event.contains("ams_active")) {
+            if (event.contains("ams_active") && event["ams_active"].is_boolean()) {
                 make_label(card,
                            std::string(lv_tr("AMS Active: ")) +
                                (event["ams_active"].get<bool>() ? lv_tr("Yes") : lv_tr("No")),
@@ -742,16 +661,6 @@ void TelemetryDataOverlay::handle_clear_queue() {
     // Refresh display
     update_status();
     populate_events();
-}
-
-// ============================================================================
-// STATIC CALLBACKS
-// ============================================================================
-
-void TelemetryDataOverlay::on_telemetry_clear_queue(lv_event_t* /*e*/) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[TelemetryDataOverlay] on_telemetry_clear_queue");
-    get_telemetry_data_overlay().handle_clear_queue();
-    LVGL_SAFE_EVENT_CB_END();
 }
 
 } // namespace helix::settings

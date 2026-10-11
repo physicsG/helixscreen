@@ -5,10 +5,11 @@ def versionFile = file("../../VERSION.txt")
 def helix_version = versionFile.text.trim()
 
 // versionCode comes from scripts/android-version-code.sh, which is the single
-// definition of the packing (major * 1000000 + minor * 1000 + patch) and of the
-// lane-overflow guard. scripts/generate-whatsnew.sh and
-// .github/workflows/release.yml read the same number from the same place; the
-// arithmetic used to be written out in all three and they diverged.
+// definition of the packing ((major * 1000000 + minor * 1000 + patch) * 100 +
+// a prerelease ordinal) and of the lane-overflow guard.
+// scripts/generate-whatsnew.sh and .github/workflows/release.yml read the same
+// number from the same place, so a second copy of the arithmetic here drifts
+// from the changelog filename those two agree on.
 // The script's own stderr carries the reason for any rejection, so it is
 // forwarded verbatim rather than restated here.
 def versionCodeScript = file("../../scripts/android-version-code.sh")
@@ -23,16 +24,27 @@ if (vCodeProc.exitValue() != 0) {
 }
 def vCode = vCodeOut.toString().trim().toInteger()
 
+// Native ABIs to build and split into per-ABI APKs. armeabi-v7a covers 32-bit
+// ARM userspace: Amazon's MT8163 Echo Show 5 (2nd gen) running LineageOS 18.1,
+// Fire tablets and older phones. Their SoCs are 64-bit, but the ROMs ship no
+// 64-bit zygote, so an arm64-v8a-only APK fails with INSTALL_FAILED_NO_MATCHING_ABIS.
+//
+// -PhelixAbis=armeabi-v7a (comma-separated) narrows a local build to the ABI
+// on the device in hand; each ABI is a full native build of its own.
+def helixAbis = project.hasProperty('helixAbis')
+    ? project.property('helixAbis').split(',')*.trim().findAll { it }
+    : ['arm64-v8a', 'armeabi-v7a', 'x86_64']
+
 android {
     namespace "org.helixscreen.app"
-    compileSdkVersion 35
+    compileSdkVersion 36
     ndkVersion "29.0.14206865"
 
     defaultConfig {
         applicationId "org.helixscreen.app"
         minSdkVersion 28
-        targetSdkVersion 35
-        versionCode vCode  // 0.99.113 → 99113, 1.0.0 → 1000000
+        targetSdkVersion 36
+        versionCode vCode  // 1.0.0 → 100000099, 1.1.0-beta.1 → 100100031
         versionName helix_version
 
         externalNativeBuild {
@@ -44,8 +56,11 @@ android {
                         "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache"
                     ]
                 }
+                if (System.getenv("ANDROID_KEYSTORE_PATH") || project.hasProperty('helixDiagUploads')) {
+                    cmakeArgs += ["-DHELIX_DIAGNOSTIC_UPLOADS=ON"]
+                }
                 arguments(*cmakeArgs)
-                abiFilters 'arm64-v8a', 'x86_64'
+                abiFilters(*helixAbis)
             }
         }
     }
@@ -79,7 +94,7 @@ android {
         abi {
             enable true
             reset()
-            include "arm64-v8a", "x86_64"
+            include(*helixAbis)
             universalApk true
         }
     }
@@ -170,11 +185,14 @@ gradle.taskGraph.whenReady { graph ->
 //     config/settings.json.template is documentation, not an input.
 //   crash*, .crash_restart_count           resurrect a dismissed crash dialog
 //   tool_spools.json, telemetry_*.json     per-device runtime state
+//   user_filaments.json                    the user's own filament products
+//   filament_slot_overrides.json           this printer's cached slot overrides
 //   .helix-screen.lock, *.corrupt          runtime scratch
 def nonShippableConfig = [
     'settings.json', 'settings-test.json', 'helixconfig*',
     'crash*.txt', 'crash_history.json', '.crash_restart_count',
-    'tool_spools.json', 'telemetry_*.json',
+    'tool_spools.json', 'telemetry_*.json', 'user_filaments.json',
+    'filament_slot_overrides.json',
     '.helix-screen.lock', '*.corrupt'
 ]
 

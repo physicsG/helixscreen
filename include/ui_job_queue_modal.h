@@ -47,6 +47,9 @@ class JobQueueModal : public Modal {
     static JobQueueModal* s_active_instance_;
 
     void populate_job_list();
+    /// Hangs a job's id and filename on a job_queue_row for its callbacks.
+    static void attach_row_data(lv_obj_t* row, const std::string& job_id,
+                                const std::string& filename);
     void update_queue_state_ui();
     void toggle_queue();
     void remove_job(const std::string& job_id);

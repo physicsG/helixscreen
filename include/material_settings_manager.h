@@ -36,9 +36,11 @@ inline std::array<std::string, 4> default_preset_materials() {
 /**
  * @brief Manages user overrides for material temperature settings
  *
- * Loads/saves sparse overrides from settings.json under "material_overrides".
- * The filament::get_material_override() bridge function delegates to this manager,
- * so all callers of filament::find_material() transparently get customized values.
+ * Overrides live in the filament overlay (user_filaments.json) as `types`
+ * entries, the same place a hand-edit puts them; the fields they set are
+ * already merged into filament::materials(). This manager is the sparse view
+ * (which fields the user set) and the writer. Quick-button presets stay in
+ * settings.json.
  *
  * Thread safety: Single-threaded, main LVGL thread only.
  */
@@ -50,16 +52,20 @@ class MaterialSettingsManager {
     MaterialSettingsManager(const MaterialSettingsManager&) = delete;
     MaterialSettingsManager& operator=(const MaterialSettingsManager&) = delete;
 
-    /** @brief Load overrides from config (call at startup before any find_material) */
+    /** @brief Load overrides; moves any left in settings.json into the overlay first */
     void init();
 
     /** @brief Get override for a material (nullptr if none) */
     const filament::MaterialOverride* get_override(const std::string& name) const;
 
-    /** @brief Set override for a material (saves to config) */
+    /** @brief Override for a material named in any case or alias ("abs" finds "ABS") */
+    const filament::MaterialOverride* find_override_for_material(const std::string& name) const;
+
+    /** @brief Set override for a material (saves to the overlay) */
     void set_override(const std::string& name, const filament::MaterialOverride& override);
 
-    /** @brief Remove override for a material (saves to config) */
+    /** @brief Remove override for a material (saves to the overlay). No-op for a
+     *         user-defined type, whose temps are its definition. */
     void clear_override(const std::string& name);
 
     /** @brief Check if a material has any overrides */
@@ -107,8 +113,11 @@ class MaterialSettingsManager {
     MaterialSettingsManager() = default;
     ~MaterialSettingsManager() = default;
 
-    void load_from_config();
-    void save_to_config();
+    void load_from_overlay();
+    bool write_to_overlay(const std::string& name,
+                          const std::optional<filament::MaterialOverride>& ovr);
+    /// @return true when the overlay changed
+    bool migrate_settings_overrides();
     void load_presets_from_config();
     void save_presets_to_config();
     /** @brief Reset all 4 preset slots (in memory only) to DEFAULT_PRESET_MATERIALS */

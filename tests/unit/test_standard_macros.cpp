@@ -1,12 +1,16 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "../helix_test_fixture.h"
+#include "config.h"
 #include "printer_discovery.h"
 #include "standard_macros.h"
+#include "wizard_config_paths.h"
 
 #include "../catch_amalgamated.hpp"
 
 using json = nlohmann::json;
+using namespace helix;
 
 // ============================================================================
 // StandardMacroInfo Tests
@@ -209,6 +213,39 @@ TEST_CASE("StandardMacros - auto-detection", "[standard_macros]") {
         REQUIRE(macros.get(StandardMacroSlot::UnloadFilament).detected_macro == "M702");
         REQUIRE(macros.get(StandardMacroSlot::Pause).detected_macro == "M601");
         REQUIRE(macros.get(StandardMacroSlot::Resume).detected_macro == "M602");
+    }
+
+    SECTION("QIDI's stock M604/M603 fill an otherwise empty slot") {
+        // The macros QIDI's own screen drives. Neither spelling means anything
+        // in stock Klipper, and Marlin has no M604 at all, so a printer that
+        // defines them is running QIDI's convention.
+        //
+        // The set below is the stock Q2 one (the config dump in #1030): it
+        // carries NO LOAD_FILAMENT, LOAD_MATERIAL, M701, UNLOAD_FILAMENT,
+        // UNLOAD_MATERIAL, M702 or QUIT_MATERIAL, so every earlier pattern in
+        // both lists misses and the tail entries are what stands between that
+        // printer and an empty slot.
+        helix::PrinterDiscovery qidi;
+        json objects = {"extruder",          "gcode_macro M604",         "gcode_macro M603",
+                        "gcode_macro _CG28", "gcode_macro CLEAR_NOZZLE", "gcode_macro PRINT_START"};
+        qidi.parse_objects(objects);
+        macros.init(qidi);
+
+        REQUIRE(macros.get(StandardMacroSlot::LoadFilament).detected_macro == "M604");
+        REQUIRE(macros.get(StandardMacroSlot::UnloadFilament).detected_macro == "M603");
+    }
+
+    SECTION("M604/M603 rank last — a conventionally named macro keeps the slot") {
+        // Marlin's M603 configures a filament change rather than running one, so
+        // a printer that has both readings must not have the QIDI one win.
+        helix::PrinterDiscovery mixed;
+        json objects = {"extruder", "gcode_macro LOAD_FILAMENT", "gcode_macro UNLOAD_FILAMENT",
+                        "gcode_macro M604", "gcode_macro M603"};
+        mixed.parse_objects(objects);
+        macros.init(mixed);
+
+        REQUIRE(macros.get(StandardMacroSlot::LoadFilament).detected_macro == "LOAD_FILAMENT");
+        REQUIRE(macros.get(StandardMacroSlot::UnloadFilament).detected_macro == "UNLOAD_FILAMENT");
     }
 
     SECTION("Helix override beats Creality QUIT_MATERIAL, not native macros") {
@@ -438,6 +475,7 @@ TEST_CASE("StandardMacros - all() returns all slots", "[standard_macros]") {
     REQUIRE(all_slots[8].slot == StandardMacroSlot::ScrewsTilt);
     REQUIRE(all_slots[9].slot == StandardMacroSlot::CleanNozzle);
     REQUIRE(all_slots[10].slot == StandardMacroSlot::HeatSoak);
+    REQUIRE(all_slots[11].slot == StandardMacroSlot::ParkToolhead);
 
     // This test exists to make an enum insertion LOUD. It is safe to renumber
     // here only because persistence keys on slot_name, never the index:
@@ -518,4 +556,304 @@ TEST_CASE("StandardMacros - ScrewsTilt slot", "[standard_macros][screws_tilt]") 
         REQUIRE(macros.get(StandardMacroSlot::BedMesh).detected_macro == "BED_MESH_CALIBRATE");
         REQUIRE(macros.get(StandardMacroSlot::ScrewsTilt).is_empty());
     }
+}
+
+// ============================================================================
+// ParkToolhead slot
+// ============================================================================
+
+TEST_CASE("StandardMacros - ParkToolhead slot", "[standard_macros][park_toolhead]") {
+    auto& macros = StandardMacros::instance();
+    macros.reset();
+
+    SECTION("Detects each conventional park name") {
+        for (const char* name : {"PARK", "PARK_TOOLHEAD", "TOOLHEAD_PARK"}) {
+            helix::PrinterDiscovery hw;
+            json objects = json::array({"extruder", std::string("gcode_macro ") + name});
+            hw.parse_objects(objects);
+            macros.init(hw);
+
+            REQUIRE(macros.get(StandardMacroSlot::ParkToolhead).detected_macro == name);
+        }
+    }
+
+    SECTION("An underscore-prefixed park macro is never detected") {
+        // A leading underscore is the config author marking a macro internal;
+        // invoking one is machine motion nobody sanctioned. Detection is
+        // exact-name everywhere, so neither spelling can match a pattern.
+        helix::PrinterDiscovery hw;
+        json objects = {"extruder", "gcode_macro _PARK", "gcode_macro _PARK_TOOLHEAD"};
+        hw.parse_objects(objects);
+        macros.init(hw);
+
+        REQUIRE(macros.get(StandardMacroSlot::ParkToolhead).detected_macro.empty());
+    }
+
+    SECTION("slot_from_name round-trips the settings key") {
+        REQUIRE(StandardMacros::slot_from_name("park_toolhead") == StandardMacroSlot::ParkToolhead);
+        REQUIRE(StandardMacros::slot_to_name(StandardMacroSlot::ParkToolhead) == "park_toolhead");
+    }
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "ParkToolhead user override round-trips through config",
+                 "[standard_macros][park_toolhead]") {
+    auto& macros = StandardMacros::instance();
+
+    // The way Settings persists a pick: the config path, read back by init().
+    helix::Config::get_instance()->set<std::string>("/standard_macros/park_toolhead", "MY_PARK");
+
+    macros.reset();
+    helix::PrinterDiscovery hw;
+    json objects = {"extruder", "gcode_macro MY_PARK"};
+    hw.parse_objects(objects);
+    macros.init(hw);
+
+    REQUIRE(macros.get(StandardMacroSlot::ParkToolhead).configured_macro == "MY_PARK");
+    REQUIRE(macros.get(StandardMacroSlot::ParkToolhead).get_macro() == "MY_PARK");
+    REQUIRE(macros.get(StandardMacroSlot::ParkToolhead).get_source() == MacroSource::CONFIGURED);
+
+    // set_macro saves every slot; the park pick must survive a save of another one.
+    macros.set_macro(StandardMacroSlot::Purge, "PURGE");
+    REQUIRE(helix::Config::get_instance()->get<std::string>("/standard_macros/park_toolhead", "") ==
+            "MY_PARK");
+}
+
+// ============================================================================
+// Shipped tier — the sequence the printer database ships for one machine
+// ============================================================================
+
+TEST_CASE("StandardMacroInfo - shipped outranks detection, configured outranks shipped",
+          "[standard_macros][shipped_macro]") {
+    StandardMacroInfo info;
+    info.fallback_macro = "HELIX_BED_MESH_IF_NEEDED";
+
+    SECTION("fallback alone") {
+        CHECK(info.get_macro() == "HELIX_BED_MESH_IF_NEEDED");
+        CHECK(info.get_source() == MacroSource::FALLBACK);
+    }
+
+    SECTION("detection beats the fallback") {
+        info.detected_macro = "BED_MESH_CALIBRATE";
+        CHECK(info.get_macro() == "BED_MESH_CALIBRATE");
+        CHECK(info.get_source() == MacroSource::DETECTED);
+    }
+
+    SECTION("a shipped sequence beats detection") {
+        // The case this tier exists for: detection resolves to something that
+        // runs, but not to the sequence the machine needs — which tares its
+        // load cell before the mesh means anything.
+        info.detected_macro = "BED_MESH_CALIBRATE";
+        info.shipped_macro = "LOAD_CELL_SAVE_TARE\nBED_MESH_CALIBRATE_WITH_WIPE";
+        CHECK(info.get_macro() == "LOAD_CELL_SAVE_TARE\nBED_MESH_CALIBRATE_WITH_WIPE");
+        CHECK(info.get_source() == MacroSource::SHIPPED);
+    }
+
+    SECTION("the user's own choice beats everything") {
+        // A printer whose shipped sequence is wrong for this user's setup is
+        // exactly why the Settings override exists.
+        info.detected_macro = "BED_MESH_CALIBRATE";
+        info.shipped_macro = "LOAD_CELL_SAVE_TARE\nBED_MESH_CALIBRATE_WITH_WIPE";
+        info.configured_macro = "MY_MESH";
+        CHECK(info.get_macro() == "MY_MESH");
+        CHECK(info.get_source() == MacroSource::CONFIGURED);
+    }
+
+    SECTION("a shipped sequence alone is not an empty slot") {
+        StandardMacroInfo shipped_only;
+        shipped_only.shipped_macro = "BED_MESH_CALIBRATE_WITH_WIPE";
+        CHECK_FALSE(shipped_only.is_empty());
+    }
+}
+
+TEST_CASE("StandardMacros - init fills the shipped tier from the printer database",
+          "[standard_macros][shipped_macro]") {
+    auto& macros = StandardMacros::instance();
+    helix::PrinterDiscovery hardware;
+    json objects = {"extruder", "heater_bed", "gcode_macro BED_MESH_CALIBRATE"};
+    hardware.parse_objects(objects);
+
+    SECTION("a printer with no shipped sequence keeps detection") {
+        macros.init(hardware, "Some Random Printer");
+        const auto& info = macros.get(StandardMacroSlot::BedMesh);
+        CHECK(info.shipped_macro.empty());
+        CHECK(info.get_source() == MacroSource::DETECTED);
+    }
+
+    SECTION("an unnamed printer fills nothing") {
+        // Tests and early startup both reach init() before the printer is known.
+        macros.init(hardware, "");
+        CHECK(macros.get(StandardMacroSlot::BedMesh).shipped_macro.empty());
+    }
+
+    SECTION("the Centauri Carbon's mesh sequence reaches the slot") {
+        macros.init(hardware, "Elegoo Centauri Carbon");
+        const auto& info = macros.get(StandardMacroSlot::BedMesh);
+        REQUIRE_FALSE(info.shipped_macro.empty());
+        // The firmware's own mesh macro prepares the machine, takes the bed
+        // temperature, and stores the mesh wherever PROFILE= names.
+        CHECK(info.shipped_macro.find("BED_TEMP={bed_temp}") != std::string::npos);
+        CHECK(info.shipped_macro.find("{profile_arg}") != std::string::npos);
+        CHECK(info.get_source() == MacroSource::SHIPPED);
+        CHECK(info.get_macro() == info.shipped_macro);
+        CHECK(info.shipped_self_prepares);
+    }
+
+    macros.reset();
+}
+
+TEST_CASE("resolve_macro_script - substitution and self-preparation",
+          "[standard_macros][shipped_macro]") {
+    StandardMacroInfo info;
+
+    SECTION("a plain macro name passes through and prepares nothing itself") {
+        info.detected_macro = "BED_MESH_CALIBRATE";
+        const auto r = resolve_macro_script(info, {.profile_arg = " PROFILE=cold"});
+        CHECK(r.script == "BED_MESH_CALIBRATE");
+        // Not self-preparing: probe_preparation still gets to prepend its tare,
+        // which is the whole reason ZMOD machines probe successfully.
+        CHECK_FALSE(r.self_prepares);
+        // Nothing in it says where a profile argument goes.
+        CHECK_FALSE(r.takes_profile_arg);
+    }
+
+    SECTION("a shipped sequence that its entry marks self-preparing keeps its own preparation") {
+        info.detected_macro = "BED_MESH_CALIBRATE";
+        info.shipped_macro = "LOAD_CELL_TARE\nBED_MESH_CALIBRATE";
+        info.shipped_self_prepares = true;
+        const auto r = resolve_macro_script(info, {});
+        CHECK(r.script == "LOAD_CELL_TARE\nBED_MESH_CALIBRATE");
+        CHECK(r.self_prepares);
+        CHECK(r.shipped);
+    }
+
+    SECTION("a shipped sequence without the flag gets the caller's preparation") {
+        info.detected_macro = "BED_MESH_CALIBRATE";
+        info.shipped_macro = "BED_MESH_CALIBRATE BED_TEMP={bed_temp}";
+        const auto r = resolve_macro_script(info, {.bed_temp_c = 60});
+        CHECK(r.script == "BED_MESH_CALIBRATE BED_TEMP=60");
+        CHECK_FALSE(r.self_prepares);
+        // Still the shipped tier, so a command it names that does not exist fails.
+        CHECK(r.shipped);
+    }
+
+    SECTION("the flag means nothing unless the shipped tier wins") {
+        info.detected_macro = "BED_MESH_CALIBRATE";
+        info.shipped_self_prepares = true;
+        const auto r = resolve_macro_script(info, {});
+        CHECK(r.script == "BED_MESH_CALIBRATE");
+        CHECK_FALSE(r.shipped);
+        CHECK_FALSE(r.self_prepares);
+    }
+
+    SECTION("{profile_arg} is substituted everywhere it appears") {
+        info.shipped_macro = "BED_MESH_CALIBRATE{profile_arg}\nECHO{profile_arg}";
+        const auto r = resolve_macro_script(info, {.profile_arg = " PROFILE=cold"});
+        CHECK(r.script == "BED_MESH_CALIBRATE PROFILE=cold\nECHO PROFILE=cold");
+        CHECK(r.takes_profile_arg);
+    }
+
+    SECTION("an empty profile argument still marks the script as taking one") {
+        info.shipped_macro = "BED_MESH_CALIBRATE{profile_arg} BED_TEMP={bed_temp}";
+        const auto r = resolve_macro_script(info, {.profile_arg = "", .bed_temp_c = 60});
+        CHECK(r.script == "BED_MESH_CALIBRATE BED_TEMP=60");
+        CHECK(r.takes_profile_arg);
+    }
+
+    SECTION("a profile argument containing the placeholder does not loop forever") {
+        info.shipped_macro = "X{profile_arg}";
+        const auto r = resolve_macro_script(info, {.profile_arg = "{profile_arg}x"});
+        CHECK(r.script == "X{profile_arg}x");
+    }
+
+    SECTION("{bed_temp} is substituted with the whole-degree temperature") {
+        info.shipped_macro = "BED_MESH_CALIBRATE BED_TEMP={bed_temp}";
+        const auto r = resolve_macro_script(info, {.bed_temp_c = 105});
+        CHECK(r.script == "BED_MESH_CALIBRATE BED_TEMP=105");
+        CHECK_FALSE(r.takes_profile_arg);
+    }
+
+    SECTION("both placeholders are substituted everywhere they appear") {
+        info.shipped_macro =
+            "M140 S{bed_temp}\nBED_MESH_CALIBRATE{profile_arg} BED_TEMP={bed_temp}";
+        const auto r =
+            resolve_macro_script(info, {.profile_arg = " PROFILE=cold", .bed_temp_c = 72});
+        CHECK(r.script == "M140 S72\nBED_MESH_CALIBRATE PROFILE=cold BED_TEMP=72");
+    }
+
+    SECTION("a profile name that spells a placeholder is inserted verbatim") {
+        info.shipped_macro = "X{profile_arg} T={bed_temp}";
+        const auto r =
+            resolve_macro_script(info, {.profile_arg = " PROFILE={bed_temp}", .bed_temp_c = 60});
+        CHECK(r.script == "X PROFILE={bed_temp} T=60");
+    }
+
+    SECTION("a caller that names no temperature gets the default probe temperature") {
+        info.shipped_macro = "BED_MESH_CALIBRATE BED_TEMP={bed_temp}";
+        const auto r = resolve_macro_script(info, {});
+        CHECK(r.script == "BED_MESH_CALIBRATE BED_TEMP=" +
+                              std::to_string(helix::bed_mesh::DEFAULT_PROBE_BED_TEMP_C));
+    }
+
+    SECTION("a user override is never treated as self-preparing") {
+        // The user picked a bare macro name; assuming it tares would skip the
+        // preparation their machine still needs.
+        info.shipped_macro = "LOAD_CELL_TARE\nBED_MESH_CALIBRATE";
+        info.shipped_self_prepares = true;
+        info.configured_macro = "MY_MESH";
+        const auto r = resolve_macro_script(info, {});
+        CHECK(r.script == "MY_MESH");
+        CHECK_FALSE(r.self_prepares);
+    }
+
+    SECTION("an empty slot resolves to nothing, and the caller decides") {
+        const auto r = resolve_macro_script(info, {});
+        CHECK(r.script.empty());
+        CHECK_FALSE(r.self_prepares);
+        CHECK_FALSE(r.takes_profile_arg);
+    }
+}
+
+TEST_CASE("resolve_macro_script - a conditional fallback is refused when the op must happen",
+          "[standard_macros][shipped_macro]") {
+    // HELIX_BED_MESH_IF_NEEDED reports "using existing mesh" and returns without
+    // probing when a recent one exists. Correct at print start; for a Calibrate
+    // button it would advance the UI to naming and offer to save a mesh nothing
+    // re-measured. Callers that mean "now" must not receive it.
+    StandardMacroInfo info;
+    info.fallback_macro = "HELIX_BED_MESH_IF_NEEDED";
+
+    CHECK(resolve_macro_script(info, {}, /*accept_fallback=*/true).script ==
+          "HELIX_BED_MESH_IF_NEEDED");
+    CHECK(resolve_macro_script(info, {}, /*accept_fallback=*/false).script.empty());
+
+    SECTION("refusing the fallback does not refuse the tiers above it") {
+        info.detected_macro = "BED_MESH_CALIBRATE";
+        CHECK(resolve_macro_script(info, {}, /*accept_fallback=*/false).script ==
+              "BED_MESH_CALIBRATE");
+
+        info.shipped_macro = "LOAD_CELL_SAVE_TARE\nBED_MESH_CALIBRATE_WITH_WIPE";
+        info.shipped_self_prepares = true;
+        const auto r = resolve_macro_script(info, {}, /*accept_fallback=*/false);
+        CHECK(r.script == "LOAD_CELL_SAVE_TARE\nBED_MESH_CALIBRATE_WITH_WIPE");
+        CHECK(r.self_prepares);
+    }
+}
+
+TEST_CASE("get_saved_printer_type - the source populated during discovery",
+          "[standard_macros][shipped_macro]") {
+    // StandardMacros::init() runs inside the discovery callback, BEFORE
+    // auto_detect_and_save sets PrinterState's copy. Reading PrinterState there
+    // yields "" on every run and the shipped tier silently never fills, so the
+    // production call site must read config instead.
+    helix::Config* config = helix::Config::get_instance();
+    const std::string saved =
+        config->get<std::string>(config->df() + helix::wizard::PRINTER_TYPE, "");
+
+    config->set<std::string>(config->df() + helix::wizard::PRINTER_TYPE, "Elegoo Centauri Carbon");
+    CHECK(helix::get_saved_printer_type() == "Elegoo Centauri Carbon");
+
+    config->set<std::string>(config->df() + helix::wizard::PRINTER_TYPE, "");
+    CHECK(helix::get_saved_printer_type().empty());
+
+    config->set<std::string>(config->df() + helix::wizard::PRINTER_TYPE, saved);
 }

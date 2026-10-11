@@ -47,7 +47,11 @@ bool heap_snapshot_age_is_plausible(long age_ms, int uptime_sec);
 
 class CrashReporter {
   public:
-    static CrashReporter& instance();
+    CrashReporter() = default;
+    ~CrashReporter() = default;
+
+    CrashReporter(const CrashReporter&) = delete;
+    CrashReporter& operator=(const CrashReporter&) = delete;
 
     /**
      * @brief Initialize crash reporter with config directory
@@ -170,7 +174,9 @@ class CrashReporter {
         // Key = register name (e.g., "r0", "fp"), value = hex string
         std::vector<std::pair<std::string, std::string>> extra_registers;
 
-        // Additional context (collected at startup)
+        // Additional context (collected at startup, from the one
+        // helix::diagnostics::collect() snapshot; the signal handler never
+        // runs any of this — it only writes crash.txt)
         std::string platform;
         std::string printer_model;
         std::string klipper_version;
@@ -178,6 +184,14 @@ class CrashReporter {
         std::string display_info;
         int ram_total_mb = 0;
         int cpu_cores = 0;
+        // Which firmware population this is: one platform key ("mips") serves
+        // the K1 series and both AD5X firmwares, which only mod_flavor splits.
+        std::string mod_flavor;
+        // Resolved layout: where the config this process read and the cache it
+        // would have used actually live, and which cascade rung won the cache.
+        std::string config_dir;
+        std::string cache_dir;
+        std::string cache_tier; ///< "" for a fall-through rung (XDG, $HOME, /var/tmp, /tmp)
 
         // Share code of a debug bundle uploaded alongside this report. Empty
         // when no bundle was attached (bundle upload failed, disabled, or the
@@ -258,19 +272,10 @@ class CrashReporter {
     /// Worker endpoint for auto-send
     static constexpr const char* CRASH_WORKER_URL = "https://crash.helixscreen.org/v1/report";
 
-    /// Shared ingest API key (same as telemetry — write-only, not a true secret)
-    static constexpr const char* INGEST_API_KEY = "hx-tel-v1-a7f3c9e2d1b84056";
-
     /// GitHub repo for issue URL generation
     static constexpr const char* GITHUB_REPO = "prestonbrown/helixscreen";
 
   private:
-    CrashReporter() = default;
-    ~CrashReporter() = default;
-
-    CrashReporter(const CrashReporter&) = delete;
-    CrashReporter& operator=(const CrashReporter&) = delete;
-
     std::string config_dir_;
     bool initialized_ = false;
     bool isolated_log_paths_ = false; ///< Test-only: skip system log search

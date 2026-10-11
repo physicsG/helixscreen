@@ -10,10 +10,11 @@
 
 #include "ui_print_start_controller.h"
 
+#include "ui_bed_drying_modal.h"
 #include "ui_error_reporting.h"
 #include "ui_event_safety.h"
 #include "ui_modal.h"
-#include "ui_nav_manager.h"
+#include "ui_nav.h"
 #include "ui_panel_print_status.h"
 #include "ui_print_select_detail_view.h"
 #include "ui_update_queue.h"
@@ -25,21 +26,28 @@
 #include "app_globals.h"
 #include "data_root_resolver.h"
 #include "filament_sensor_manager.h"
+#include "helix_fs.h"
 #include "i_moonraker_api.h"
+#include "json_utils.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "observer_factory.h"
+#include "pre_start_exclude.h"
 #include "print_job_ref.h"
 #include "printer_state.h"
+#include "text_io.h"
 
 #include <spdlog/spdlog.h>
 
+#include <cerrno>
 #include <chrono>
-#include <filesystem>
-#include <fstream>
+#include <cstring>
 
 #include "hv/json.hpp"
 
 namespace helix::ui {
+
+namespace tio = helix::text_io;
+namespace hfs = helix::fs;
 
 // ============================================================================
 // Constructor / Destructor
@@ -59,13 +67,14 @@ PrintStartController::~PrintStartController() {
                      saved_tool_mapping_.size(), saved_backend_index_);
     }
 
-    // Clear observers before modal cleanup. All three must be reset here, not
+    // Clear observers before modal cleanup. All four must be reset here, not
     // just the print-state one: each holds a context pointing at this object,
     // and the klippy/AMS guards stay armed across a whole deferred-restore wait
     // (ObserverGuard, never release() — #579).
     print_state_observer_.reset();
     klippy_state_observer_.reset();
     ams_data_observer_.reset();
+    backend_retry_observer_.reset();
 
     // Clean up an open gate dialog - only if LVGL is still initialized
     // (destructor may be called after lv_deinit() during shutdown)
@@ -123,6 +132,13 @@ void PrintStartController::initiate() {
         return;
     }
 
+    if (divert_to_spool_removal()) {
+        if (update_print_button_) {
+            update_print_button_();
+        }
+        return;
+    }
+
     // OPTIMISTIC UI: Disable button IMMEDIATELY to prevent double-clicks.
     // This must happen BEFORE any async work or checks that could allow
     // the user to click again while we're processing.
@@ -131,10 +147,10 @@ void PrintStartController::initiate() {
     }
 
     // Check if a print is already active before allowing a new one to start
-    if (!printer_state_.can_start_new_print()) {
+    if (!printer_state_.print_state().can_start_new_print()) {
         // RAW_PRINT_STATE_OK: the preparing axis is carried separately here by
         // can_start_new_print(); this arm asks only what the printer reports.
-        PrintJobState current_state = printer_state_.get_print_job_state();
+        PrintJobState current_state = printer_state_.print_state().get_print_job_state();
         const char* state_str = print_job_state_to_string(current_state);
         NOTIFY_ERROR(lv_tr("Cannot start print: printer is {}"), state_str);
         spdlog::warn("[PrintStartController] Attempted to start print while printer is in {} state",
@@ -200,6 +216,8 @@ void PrintStartController::execute_print_start() {
 
     // Capture thumbnail path for lambda
     std::string thumbnail_path = thumbnail_path_;
+    std::vector<std::string> exclude_picks = std::move(exclude_picks_);
+    exclude_picks_.clear();
 
     // The actual "start the print" step: navigate to the status panel, then
     // delegate to PrintPreparationManager. Hoisted into a continuation so the
@@ -210,7 +228,7 @@ void PrintStartController::execute_print_start() {
     PrinterState* ps = &printer_state_;
 
     auto start_now = [this, ps, prep_manager, filename_to_print, path = path_, thumbnail_path,
-                      on_started, update_button, show_detail]() {
+                      on_started, update_button, show_detail, exclude_picks]() {
         // Navigate to print status panel IMMEDIATELY (optimistic navigation)
         // The busy overlay will show on top during download/upload operations.
         // On failure, we'll navigate back to the detail overlay.
@@ -218,7 +236,8 @@ void PrintStartController::execute_print_start() {
         // panel answers "which job is this?" from the preparing job rather than
         // from print_stats, which still describes the PREVIOUS job for the whole
         // duration of a host-side pre-start block.
-        printer_state_.begin_preparing(helix::PrintJobRef{filename_to_print, path, ""});
+        printer_state_.print_state().begin_preparing(
+            helix::PrintJobRef{filename_to_print, path, ""});
 
         if (navigate_to_print_status_) {
             spdlog::info("[PrintStartController] Navigating to print status panel (preparing...)");
@@ -234,41 +253,53 @@ void PrintStartController::execute_print_start() {
             // Navigation callback - called when Moonraker confirms print start
             // Sets thumbnail source so PrintStatusPanel loads the correct thumbnail
             // NOTE: Called from background HTTP thread - must defer LVGL calls to main thread
-            [filename_to_print, path, thumbnail_path, on_started]() {
-                // Construct full path for metadata lookup (e.g., usb/flowrate_0.gcode)
-                std::string full_path =
-                    path.empty() ? filename_to_print : path + "/" + filename_to_print;
-                helix::ui::queue_update([full_path, thumbnail_path, on_started]() {
-                    // begin_preparing() already recorded this job's identity, but a
-                    // start that never opened a preparing window still needs it, and
-                    // re-stating it is idempotent.
-                    get_printer_state().set_print_identity_override(full_path);
+            // The object picks follow it: Klipper resets exclude_object as a print starts.
+            helix::ui::with_pre_start_exclusions(
+                [filename_to_print, path, thumbnail_path, on_started]() {
+                    // Construct full path for metadata lookup (e.g., usb/flowrate_0.gcode)
+                    std::string full_path =
+                        path.empty() ? filename_to_print : path + "/" + filename_to_print;
+                    helix::ui::queue_update(
+                        "PrintStartController::execute_print_start",
+                        [full_path, thumbnail_path, on_started]() {
+                            // begin_preparing() already recorded this job's identity, but a
+                            // start that never opened a preparing window still needs it, and
+                            // re-stating it is idempotent.
+                            get_printer_state().print_state().set_print_identity_override(
+                                full_path);
 
-                    // If we have a pre-extracted thumbnail (USB/embedded), set it directly
-                    // This bypasses Moonraker metadata lookup which doesn't have USB file info
-                    if (!thumbnail_path.empty()) {
-                        // Tag it with the same identity handed to
-                        // set_thumbnail_source() above: the manager cannot infer
-                        // it here, since Moonraker may not have reported the
-                        // print filename yet.
-                        helix::get_active_print_media_manager().set_thumbnail_path(full_path,
-                                                                                   thumbnail_path);
-                        spdlog::debug("[PrintStartController] Set extracted thumbnail path: {}",
-                                      thumbnail_path);
-                    }
+                            // If we have a pre-extracted thumbnail (USB/embedded), set it directly
+                            // This bypasses Moonraker metadata lookup which doesn't have USB file
+                            // info
+                            if (!thumbnail_path.empty()) {
+                                // Tag it with the same identity handed to
+                                // set_thumbnail_source() above: the manager cannot infer
+                                // it here, since Moonraker may not have reported the
+                                // print filename yet.
+                                helix::get_active_print_media_manager().set_thumbnail_path(
+                                    full_path, thumbnail_path);
+                                spdlog::debug(
+                                    "[PrintStartController] Set extracted thumbnail path: {}",
+                                    thumbnail_path);
+                            }
 
-                    spdlog::debug(
-                        "[PrintStartController] Print start confirmed, thumbnail source set: {}",
-                        full_path);
-                    if (on_started) {
-                        on_started();
-                    }
-                });
-            },
+                            spdlog::debug("[PrintStartController] Print start confirmed, thumbnail "
+                                          "source set: {}",
+                                          full_path);
+                            if (on_started) {
+                                on_started();
+                            }
+                        });
+                },
+                exclude_picks),
             // Completion callback
             // NOTE: Called from background HTTP thread - must defer LVGL calls to main thread
             [update_button, show_detail, ps](bool success, const std::string& error) {
-                helix::ui::queue_update([success, error, update_button, show_detail, ps]() {
+                helix::ui::queue_update("PrintStartController::execute_print_start", [success,
+                                                                                      error,
+                                                                                      update_button,
+                                                                                      show_detail,
+                                                                                      ps]() {
                     if (success) {
                         // Deliberately does NOT end preparation: the RPC
                         // succeeding is when PRINT_START BEGINS. The printer's
@@ -278,7 +309,7 @@ void PrintStartController::execute_print_start() {
                         NOTIFY_ERROR(lv_tr("Print preparation failed: {}"), error);
                         LOG_ERROR_INTERNAL("[PrintStartController] Print preparation failed: {}",
                                            error);
-                        ps->retire_preparing(helix::PreparingExit::Failed);
+                        ps->print_state().retire_preparing(helix::PreparingExit::Failed);
 
                         // Only unwind the optimistic navigation if the print
                         // status overlay is still what the user is looking at.
@@ -291,11 +322,10 @@ void PrintStartController::execute_print_start() {
                         // actually put on the stack, and it goes null with
                         // destroy-on-close — the same handle the auto-nav gate
                         // checks membership with (print_start_navigation.cpp).
-                        auto& nav = NavigationManager::instance();
-                        if (nav.is_panel_on_top(PrintStatusPanel::get_cached_overlay())) {
+                        if (helix::nav::is_on_top(PrintStatusPanel::get_cached_overlay())) {
                             spdlog::info("[PrintStartController] Navigating back to print select "
                                          "after failure");
-                            nav.go_back(); // Pop print status overlay
+                            helix::nav::go_back(); // Pop print status overlay
 
                             // Re-show the detail view so user can retry
                             if (show_detail) {
@@ -391,12 +421,17 @@ void PrintStartController::send_snapmaker_preprint_then(const std::set<int>& too
         // Better to fail loud than feed an empty head.
         [tok, on_abort](const MoonrakerError& err) mutable {
             std::string msg = err.message;
-            tok.defer("PrintStartController::preprint.err", [msg, on_abort]() {
+            // A refusal HelixScreen raised itself (e.g. spools on the bed) never
+            // reached the printer, so it shows its own reason.
+            std::string local = err.message_tag ? err.localized_message() : std::string{};
+            tok.defer("PrintStartController::preprint.err", [msg, local, on_abort]() {
                 LOG_ERROR_INTERNAL("[PrintStartController] U1 pre-print config rejected: {}", msg);
                 NOTIFY_ERROR_MODAL(
                     lv_tr("Print setup failed"), "{}",
-                    lv_tr("The printer rejected the filament configuration. The print was not "
-                          "started."));
+                    !local.empty()
+                        ? local
+                        : std::string(lv_tr("The printer rejected the filament configuration. "
+                                            "The print was not started.")));
                 // Notify caller to re-enable UI state — do NOT start.
                 if (on_abort) {
                     on_abort();
@@ -404,6 +439,15 @@ void PrintStartController::send_snapmaker_preprint_then(const std::set<int>& too
             });
         },
         15000);
+}
+
+bool PrintStartController::divert_to_spool_removal() {
+    if (!printer_state_.print_state().spool_latch_active()) {
+        return false;
+    }
+    spdlog::warn("[PrintStartController] Print start blocked: spools are latched on the bed");
+    helix::ui::on_bed_drying_banner_clicked();
+    return true;
 }
 
 void PrintStartController::initiate_reprint(const std::string& filename, const std::string& path,
@@ -420,10 +464,19 @@ void PrintStartController::initiate_reprint(const std::string& filename, const s
         return;
     }
 
-    // The reprint path skips the preparation manager, so it used to record no
-    // job identity at all and ran with whatever override the previous print
-    // left behind.
-    printer_state_.begin_preparing(helix::PrintJobRef{filename, path, ""});
+    if (divert_to_spool_removal()) {
+        if (on_error) {
+            on_error();
+        }
+        return;
+    }
+
+    helix::warn_printer_stop_check_skipped("a reprint", filename,
+                                           "a reprint does not scan the file");
+
+    // The reprint path skips the preparation manager, so it records the job
+    // identity itself rather than running with the previous print's override.
+    printer_state_.print_state().begin_preparing(helix::PrintJobRef{filename, path, ""});
 
     // Lightweight start — the file is already on the printer; no upload/prep.
     auto start = [this, filename, on_started, on_error]() {
@@ -438,10 +491,9 @@ void PrintStartController::initiate_reprint(const std::string& filename, const s
                 });
             },
             [tok, on_error, ps = &printer_state_](const MoonrakerError& err) mutable {
-                std::string msg = err.user_message();
-                tok.defer("PrintStartController::reprint.err", [msg, on_error, ps]() {
-                    ps->retire_preparing(helix::PreparingExit::Failed);
-                    NOTIFY_ERROR(lv_tr("Failed to reprint: {}"), msg);
+                tok.defer("PrintStartController::reprint.err", [err, on_error, ps]() {
+                    ps->print_state().retire_preparing(helix::PreparingExit::Failed);
+                    NOTIFY_ERROR(lv_tr("Failed to reprint: {}"), err.localized_message());
                     if (on_error) {
                         on_error();
                     }
@@ -491,7 +543,7 @@ void PrintStartController::initiate_reprint(const std::string& filename, const s
         // print_in_progress is published from it - so can_start_new_print()
         // would refuse every later print until the watchdog fired.
         auto abort = [this, on_error]() {
-            printer_state_.retire_preparing(helix::PreparingExit::Failed);
+            printer_state_.print_state().retire_preparing(helix::PreparingExit::Failed);
             if (on_error) {
                 on_error();
             }
@@ -515,6 +567,7 @@ helix::PrintStartContext PrintStartController::gather_print_start_context() cons
     ctx.ams_available = ams.is_available();
     ctx.any_bypass_active = ams.any_bypass_active();
     ctx.external_spool = ams.get_external_spool_info();
+    ctx.filament_diameter_mm = printer_state_.get_discovery().filament_diameter_mm();
     ctx.has_active_backend = ams.get_backend() != nullptr;
     for (int i = 0; i < ams.backend_count(); ++i) {
         if (auto* backend = ams.get_backend(i)) {
@@ -540,6 +593,13 @@ helix::PrintStartContext PrintStartController::gather_print_start_context() cons
         ctx.tools_used = detail_view_->get_tools_used();
         ctx.effective_remap = detail_view_->get_effective_remap();
         ctx.tool_grams = detail_view_->get_tool_grams();
+        if (auto* prep = detail_view_->get_prep_manager()) {
+            ctx.printer_stop = prep->printer_stop_check_for(filename_);
+        } else {
+            ctx.printer_stop.not_run_reason = "no file scanner";
+        }
+    } else {
+        ctx.printer_stop.not_run_reason = "no file detail view";
     }
     if (ctx.ams_manages_filament && ctx.has_active_backend) {
         ctx.empty_required_lanes =
@@ -556,20 +616,14 @@ helix::PrintStartContext PrintStartController::gather_print_start_context() cons
 
 void PrintStartController::run_gates_from(size_t index) {
     const auto ctx = gather_print_start_context();
+    if (index == 0 && ctx.printer_stop.state == helix::PrinterStopCheck::State::NotRun) {
+        helix::warn_printer_stop_check_skipped("the print select panel", filename_,
+                                               ctx.printer_stop.not_run_reason);
+    }
     for (size_t i = index; i < gate_list_.size(); ++i) {
         const auto result = gate_list_[i].evaluate(ctx);
         if (result.verdict == helix::CheckResult::Verdict::Pass) {
             continue;
-        }
-        if (result.verdict == helix::CheckResult::Verdict::Block) {
-            // No Block gate exists yet (declared for future hard-stops). Fail
-            // closed: do not start, do not offer proceed.
-            spdlog::error("[PrintStartController] Gate '{}' returned Block - aborting print start",
-                          gate_list_[i].name);
-            if (update_print_button_) {
-                update_print_button_();
-            }
-            return;
         }
 
         if (print_gate_modal_) {
@@ -578,11 +632,31 @@ void PrintStartController::run_gates_from(size_t index) {
         }
         gate_resume_index_ = i;
         // The modal closes itself on a button press and deletes itself after
-        // any close. A dismissal resolves like Cancel: the user walked away
-        // from the gate chain, and every other terminal path re-enables the
-        // print button - leaving that to the buttons alone stranded it disabled
-        // on a backdrop tap or ESC, with the handle stale on top.
+        // any close. Every close that is not Proceed resolves like Cancel: the
+        // print button comes back and nothing starts, including a backdrop tap
+        // or ESC.
         auto cancel = [this] { on_gate_cancel(); };
+
+        if (result.verdict == helix::CheckResult::Verdict::Block) {
+            // A hard stop explains itself and offers only OK.
+            spdlog::warn("[PrintStartController] Gate '{}' blocked the print start",
+                         gate_list_[i].name);
+            helix::ui::AlertOptions alert_opts;
+            alert_opts.on_dismiss = cancel;
+            alert_opts.owner_token = lifetime_.token();
+            print_gate_modal_ =
+                helix::ui::modal_alert(result.title.c_str(), result.body.c_str(),
+                                       ModalSeverity::Error, lv_tr("OK"), cancel, alert_opts);
+            if (!print_gate_modal_) {
+                spdlog::error("[PrintStartController] Failed to create gate dialog for '{}'",
+                              gate_list_[i].name);
+                if (update_print_button_) {
+                    update_print_button_();
+                }
+            }
+            return;
+        }
+
         helix::ui::ConfirmOptions opts;
         opts.on_cancel = cancel;
         opts.on_dismiss = cancel;
@@ -699,20 +773,22 @@ bool PrintStartController::apply_filament_remaps() {
         return false;
     }
 
-    // Backends that apply the remap via their firmware-native pre-print path
-    // (Snapmaker U1: requires_preprint_send → build_preprint_gcode emits
-    // SET_PRINT_EXTRUDER_MAP / SET_PRINT_USED_EXTRUDERS) honor the user's choice
-    // even though their tool-mapping capabilities report editable=false. For
-    // those, skip the generic set_tool_mapping() path SILENTLY — the pre-print
-    // send (fired later from execute_print_start) does the work. Only warn when
-    // the backend can NEITHER edit its mapping NOR apply it via a pre-print send.
+    // Two routes honor the user's choice without a mapping table to write, and
+    // both must skip the generic set_tool_mapping() path SILENTLY:
+    //   - a firmware-native pre-print send (Snapmaker U1: requires_preprint_send
+    //     → build_preprint_gcode emits SET_PRINT_EXTRUDER_MAP /
+    //     SET_PRINT_USED_EXTRUDERS), fired later from execute_print_start
+    //   - GcodeRewrite, which rewrites the job file instead of moving a tool
+    //     number in firmware
+    // Only warn when the backend can do NONE of the three.
     if (!helix::printer::can_write_mapping_table(*backend)) {
         if (should_warn_remap_unsupported(*backend)) {
             spdlog::warn("[PrintStartController] Backend (idx={}) does not support editable tool "
                          "mapping — {} explicit remap(s) will be ignored",
                          backend_idx, mappings.size());
-            NOTIFY_WARNING("Filament remap not supported on this printer — print will use "
-                           "the firmware's current tool mapping");
+            NOTIFY_WARNING("{}",
+                           lv_tr("Filament remap not supported on this printer — print will use "
+                                 "the firmware's current tool mapping"));
         } else {
             spdlog::debug("[PrintStartController] Backend (idx={}) applies remap via its "
                           "pre-print path — skipping generic remap send (no warning)",
@@ -721,7 +797,10 @@ bool PrintStartController::apply_filament_remaps() {
         return false;
     }
 
-    // Snapshot current firmware mapping BEFORE sending any remaps
+    // Snapshot current firmware mapping BEFORE sending any remaps. This print's
+    // snapshot replaces a retained one, and a retry still armed for that one
+    // would replay it over the remaps sent below.
+    backend_retry_observer_.reset();
     saved_tool_mapping_ = backend->get_tool_mapping();
     saved_backend_index_ = backend_idx;
 
@@ -777,7 +856,7 @@ bool PrintStartController::apply_filament_remaps() {
 }
 
 void PrintStartController::observe_lifecycle_for_restore() {
-    auto* subject = printer_state_.get_print_lifecycle_subject();
+    auto* subject = printer_state_.print_state().get_print_lifecycle_subject();
     if (!subject) {
         spdlog::warn("[PrintStartController] No print lifecycle subject, cannot auto-restore "
                      "mapping");
@@ -793,7 +872,8 @@ void PrintStartController::observe_lifecycle_for_restore() {
     // job's end (#1386).
     print_active_since_remap_ = false;
     print_state_observer_ = observe_print_lifecycle<PrintStartController>(
-        subject, this, [](PrintStartController* self, PrintState state) {
+        subject, this,
+        [](PrintStartController* self, PrintState state) {
             if (job_holds_machine(state)) {
                 self->print_active_since_remap_ = true;
                 return;
@@ -805,7 +885,8 @@ void PrintStartController::observe_lifecycle_for_restore() {
                 self->restore_filament_mapping();
                 self->print_state_observer_.reset();
             }
-        });
+        },
+        printer_state_.get_subjects_lifetime());
 
     spdlog::debug("[PrintStartController] Observing print lifecycle for mapping restore");
 }
@@ -815,7 +896,7 @@ void PrintStartController::observe_klippy_state_for_restore() {
         return; // Already waiting — a second deferral must not stack observers
     }
 
-    auto* subject = printer_state_.get_klippy_state_subject();
+    auto* subject = printer_state_.network_state().get_klippy_state_subject();
     if (!subject) {
         spdlog::warn("[PrintStartController] No klippy state subject — deferred restore cannot "
                      "self-resolve; pending_remap.json will replay on next startup");
@@ -826,8 +907,9 @@ void PrintStartController::observe_klippy_state_for_restore() {
     // here (we only get called from the not-ready branch), so the first fire is a
     // no-op. Without this the snapshot would sit until a full app restart, which
     // is the only other thing that replays pending_remap.json.
-    klippy_state_observer_ = observe_int_sync<PrintStartController>(
-        subject, this, [](PrintStartController* self, int state_val) {
+    klippy_state_observer_ = observe<int>(
+        subject, this,
+        [](PrintStartController* self, int state_val) {
             if (static_cast<KlippyState>(state_val) != KlippyState::READY) {
                 return;
             }
@@ -835,7 +917,8 @@ void PrintStartController::observe_klippy_state_for_restore() {
                 "[PrintStartController] Klipper ready — retrying deferred mapping restore");
             self->klippy_state_observer_.reset();
             self->restore_filament_mapping();
-        });
+        },
+        printer_state_.get_subjects_lifetime());
 
     spdlog::debug("[PrintStartController] Observing klippy state for deferred mapping restore");
 }
@@ -854,8 +937,8 @@ void PrintStartController::restore_filament_mapping() {
     // the recovery record deleted (#1270), and a halted Klipper at print end is
     // the normal shape of a cancelled or errored print — precisely when restore
     // runs.
-    const auto klippy =
-        static_cast<KlippyState>(lv_subject_get_int(printer_state_.get_klippy_state_subject()));
+    const auto klippy = static_cast<KlippyState>(
+        lv_subject_get_int(printer_state_.network_state().get_klippy_state_subject()));
     if (klippy != KlippyState::READY) {
         spdlog::info("[PrintStartController] Klipper not ready (state={}) — deferring restore of "
                      "{} mapping(s); snapshot and pending_remap.json retained",
@@ -878,15 +961,19 @@ void PrintStartController::restore_filament_mapping() {
     auto current_mapping = backend->get_tool_mapping();
 
     int restores_sent = 0;
+    int restores_refused = 0;
     for (size_t i = 0; i < saved_tool_mapping_.size(); ++i) {
         int saved_slot = saved_tool_mapping_[i];
         int current_slot = (i < current_mapping.size()) ? current_mapping[i] : -1;
 
-        if (saved_slot != current_slot) {
+        // A tool that was unmapped before the print has no lane to go back to;
+        // every backend refuses slot -1.
+        if (saved_slot >= 0 && saved_slot != current_slot) {
             spdlog::info("[PrintStartController] Restoring T{}: slot {} -> slot {}", i,
                          current_slot, saved_slot);
             auto err = backend->set_tool_mapping(static_cast<int>(i), saved_slot);
             if (err.result != AmsResult::SUCCESS) {
+                ++restores_refused;
                 spdlog::error("[PrintStartController] Failed to restore T{}: {}", i,
                               err.technical_msg);
             } else {
@@ -896,6 +983,35 @@ void PrintStartController::restore_filament_mapping() {
     }
 
     spdlog::info("[PrintStartController] Sent {} restore command(s) on print end", restores_sent);
+
+    // A refused entry names a lane the backend does not currently report —
+    // typically a unit that detached since the snapshot was taken. Keep the
+    // snapshot and pending_remap.json: the next replay (once the backend would
+    // accept every entry, or at the next startup) skips the entries that took
+    // and retries the refused ones, so a reattached unit gets its routing back.
+    // Finishing here would turn a temporary detach into a permanent loss of the
+    // pre-print mapping.
+    //
+    // Retention has no clock, but it is bounded: the record ends when a
+    // replay delivers the refused entries, or when a later print start
+    // actually SENDS remaps, since persist_remap_state() rewrites the file
+    // only then. A print whose mappings already match firmware sends nothing
+    // and leaves the file in place, so that start replaces the in-memory
+    // snapshot without clearing the record. A record whose unit never returns
+    // costs one refused command and a warn line per boot; an expiry would cost
+    // the mapping itself, on exactly the user who reattaches after it fired.
+    //
+    // A replay reverts a remap the user made by hand after the refusal. That
+    // is the feature's contract — put the mapping back the way it was before
+    // the print — and it happens when the backend's lanes come back or at
+    // startup, never while a job holds the machine.
+    if (restores_refused > 0) {
+        spdlog::warn("[PrintStartController] {} restore command(s) refused — snapshot and "
+                     "pending_remap.json retained for replay once the backend accepts them",
+                     restores_refused);
+        observe_backend_for_retry();
+        return;
+    }
 
     // Backends that echo their mapping back let us wait for firmware truth
     // instead of trusting a send. Those that don't fall back to "sent to a ready
@@ -922,9 +1038,65 @@ void PrintStartController::restore_filament_mapping() {
     observe_ams_data_for_confirmation();
 }
 
+bool PrintStartController::retained_restore_sendable() const {
+    auto* backend = AmsState::instance().get_backend(saved_backend_index_);
+    if (!backend || saved_tool_mapping_.empty()) {
+        return false;
+    }
+    // Before a backend's first report its bounds are not the printer's: CFS
+    // accepts any encodable bay until a box frame says how many units exist.
+    // Nothing is replayed until the lane set has actually been reported.
+    if (backend->get_system_info().total_slots <= 0) {
+        return false;
+    }
+    const auto current = backend->get_tool_mapping();
+    for (size_t i = 0; i < saved_tool_mapping_.size(); ++i) {
+        const int want = saved_tool_mapping_[i];
+        const int have = (i < current.size()) ? current[i] : -1;
+        if (want >= 0 && want != have &&
+            !backend->can_set_tool_mapping(static_cast<int>(i), want).success()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void PrintStartController::observe_backend_for_retry() {
+    // Refused although the backend would take every entry now: the refusal came
+    // from past the precondition, and retrying on each data tick would repeat it
+    // forever. Startup replays it.
+    if (retained_restore_sendable()) {
+        spdlog::warn("[PrintStartController] Backend accepts the refused entries yet refused "
+                     "them — no in-session retry; pending_remap.json replays on next startup");
+        return;
+    }
+    if (backend_retry_observer_) {
+        return;
+    }
+    auto* subject = AmsState::instance().get_ams_data_revision_subject();
+    if (!subject) {
+        return;
+    }
+    backend_retry_observer_ = observe<int>(
+        subject, this,
+        [](PrintStartController* self, int) {
+            // A remap mid-job re-routes the tools of the print in progress.
+            if (job_holds_machine(self->printer_state_.print_state().get_print_lifecycle()) ||
+                !self->retained_restore_sendable()) {
+                return;
+            }
+            spdlog::info("[PrintStartController] Backend now accepts the retained mapping — "
+                         "retrying restore");
+            self->backend_retry_observer_.reset();
+            self->restore_filament_mapping();
+        },
+        AmsState::instance().get_subjects_lifetime());
+}
+
 void PrintStartController::finish_restore() {
     awaiting_restore_confirmation_ = false;
     ams_data_observer_.reset();
+    backend_retry_observer_.reset();
     saved_tool_mapping_.clear();
     saved_backend_index_ = -1;
     clear_persisted_remap_state();
@@ -940,8 +1112,9 @@ void PrintStartController::observe_ams_data_for_confirmation() {
         return;
     }
 
-    ams_data_observer_ = observe_int_sync<PrintStartController>(
-        subject, this, [](PrintStartController* self, int) { self->check_restore_confirmed(); });
+    ams_data_observer_ = observe<int>(
+        subject, this, [](PrintStartController* self, int) { self->check_restore_confirmed(); },
+        AmsState::instance().get_subjects_lifetime());
 }
 
 void PrintStartController::check_restore_confirmed() {
@@ -997,13 +1170,11 @@ void PrintStartController::check_restore_confirmed() {
 
 static constexpr const char* PENDING_REMAP_FILENAME = "pending_remap.json";
 
-static std::filesystem::path pending_remap_path() {
-    return std::filesystem::path(helix::get_user_config_dir()) / PENDING_REMAP_FILENAME;
+static std::string pending_remap_path() {
+    return hfs::join_path(helix::get_user_config_dir(), PENDING_REMAP_FILENAME);
 }
 
 void PrintStartController::persist_remap_state() {
-    namespace fs = std::filesystem;
-
     if (saved_tool_mapping_.empty() || saved_backend_index_ < 0) {
         return;
     }
@@ -1012,92 +1183,107 @@ void PrintStartController::persist_remap_state() {
     j["backend_index"] = saved_backend_index_;
     j["tool_mapping"] = saved_tool_mapping_;
 
-    auto path = pending_remap_path();
-    try {
-        fs::create_directories(path.parent_path());
-        std::ofstream ofs(path);
-        if (ofs.is_open()) {
-            ofs << j.dump(2);
-            spdlog::debug("[PrintStartController] Persisted remap state to {}", path.string());
-        }
-    } catch (const std::exception& e) {
-        spdlog::warn("[PrintStartController] Failed to persist remap state: {}", e.what());
+    const std::string path = pending_remap_path();
+    if (!hfs::create_directories(std::string(hfs::parent_path(path)))) {
+        spdlog::warn("[PrintStartController] Failed to persist remap state: {}",
+                     std::strerror(errno));
+        return;
+    }
+    if (tio::write_file(path, helix::json_util::safe_dump(j, 2))) {
+        spdlog::debug("[PrintStartController] Persisted remap state to {}", path);
     }
 }
 
 void PrintStartController::clear_persisted_remap_state() {
-    namespace fs = std::filesystem;
-
-    auto path = pending_remap_path();
-    try {
-        if (fs::exists(path)) {
-            fs::remove(path);
-            spdlog::debug("[PrintStartController] Cleared persisted remap state");
-        }
-    } catch (const std::exception& e) {
-        spdlog::warn("[PrintStartController] Failed to clear remap state: {}", e.what());
+    const std::string path = pending_remap_path();
+    if (!hfs::exists(path)) {
+        return;
     }
+    if (!hfs::remove(path)) {
+        spdlog::warn("[PrintStartController] Failed to clear remap state: {}",
+                     std::strerror(errno));
+        return;
+    }
+    spdlog::debug("[PrintStartController] Cleared persisted remap state");
 }
 
 void PrintStartController::recover_pending_remap() {
-    namespace fs = std::filesystem;
-
-    auto path = pending_remap_path();
-    if (!fs::exists(path)) {
+    const std::string path = pending_remap_path();
+    if (!hfs::exists(path)) {
         return;
     }
 
-    try {
-        std::ifstream ifs(path);
-        if (!ifs.is_open()) {
-            return;
-        }
+    auto text = tio::read_file(path);
+    if (!text) {
+        return;
+    }
 
-        auto j = nlohmann::json::parse(ifs);
-        int backend_idx = j.value("backend_index", -1);
-        auto mapping = j.value("tool_mapping", std::vector<int>{});
-
-        if (backend_idx < 0 || mapping.empty()) {
-            spdlog::debug("[PrintStartController] Invalid pending remap file — removing");
-            clear_persisted_remap_state();
-            return;
-        }
-
-        // Load saved state and decide between immediate vs deferred restore.
-        saved_tool_mapping_ = std::move(mapping);
-        saved_backend_index_ = backend_idx;
-
-        // If a print is still active, the user's remap is still LOAD-BEARING —
-        // reverting now would silently swap filament routing under a running
-        // print. Defer the restore until the print reaches a terminal state.
-        // observe_lifecycle_for_restore registers an observer that arms on
-        // the first live lifecycle value and fires restore_filament_mapping on
-        // the terminal value that follows, so the attach-fire on the current
-        // PRINTING/PAUSED value arms it rather than firing early.
-        // RAW_PRINT_STATE_OK: suppresses the observer's registration-fire
-        // while a job runs; a preparing job has no mapping to restore.
-        auto current_state = printer_state_.get_print_job_state();
-        // The mapping is restored on a TERMINAL state; this only suppresses the
-        // observer's immediate registration-fire while a job is running. The wire
-        // question is the right one: a preparing job has no mapping to restore.
-        bool print_active = printer_has_job(current_state);
-
-        if (print_active) {
-            spdlog::info("[PrintStartController] Crash recovery: found pending remap "
-                         "({} tools, backend {}) — print still active (state={}), "
-                         "deferring restore until print ends",
-                         saved_tool_mapping_.size(), saved_backend_index_,
-                         static_cast<int>(current_state));
-            observe_lifecycle_for_restore();
-        } else {
-            spdlog::info("[PrintStartController] Crash recovery: found pending remap "
-                         "({} tools, backend {}) — restoring",
-                         saved_tool_mapping_.size(), saved_backend_index_);
-            restore_filament_mapping();
-        }
-    } catch (const std::exception& e) {
-        spdlog::warn("[PrintStartController] Failed to load pending remap: {}", e.what());
+    auto j = nlohmann::json::parse(*text, nullptr, false);
+    if (j.is_discarded()) {
+        spdlog::warn("[PrintStartController] Failed to load pending remap: invalid JSON");
         clear_persisted_remap_state();
+        return;
+    }
+    int backend_idx = helix::json_util::safe_int(j, "backend_index", -1);
+    std::vector<int> mapping;
+    bool mapping_bad = false;
+    if (const auto* tm = helix::json_util::find_member(j, "tool_mapping")) {
+        if (!tm->is_array()) {
+            mapping_bad = true;
+        } else {
+            mapping.reserve(tm->size());
+            for (const auto& e : *tm) {
+                if (!e.is_number()) {
+                    mapping_bad = true;
+                    break;
+                }
+                mapping.push_back(e.get<int>());
+            }
+        }
+    }
+    if (mapping_bad) {
+        spdlog::warn("[PrintStartController] Failed to load pending remap: bad tool_mapping");
+        clear_persisted_remap_state();
+        return;
+    }
+
+    if (backend_idx < 0 || mapping.empty()) {
+        spdlog::debug("[PrintStartController] Invalid pending remap file — removing");
+        clear_persisted_remap_state();
+        return;
+    }
+
+    // Load saved state and decide between immediate vs deferred restore.
+    saved_tool_mapping_ = std::move(mapping);
+    saved_backend_index_ = backend_idx;
+
+    // If a print is still active, the user's remap is still LOAD-BEARING —
+    // reverting now would silently swap filament routing under a running
+    // print. Defer the restore until the print reaches a terminal state.
+    // observe_lifecycle_for_restore registers an observer that arms on
+    // the first live lifecycle value and fires restore_filament_mapping on
+    // the terminal value that follows, so the attach-fire on the current
+    // PRINTING/PAUSED value arms it rather than firing early.
+    // RAW_PRINT_STATE_OK: suppresses the observer's registration-fire
+    // while a job runs; a preparing job has no mapping to restore.
+    auto current_state = printer_state_.print_state().get_print_job_state();
+    // The mapping is restored on a TERMINAL state; this only suppresses the
+    // observer's immediate registration-fire while a job is running. The wire
+    // question is the right one: a preparing job has no mapping to restore.
+    bool print_active = printer_has_job(current_state);
+
+    if (print_active) {
+        spdlog::info("[PrintStartController] Crash recovery: found pending remap "
+                     "({} tools, backend {}) — print still active (state={}), "
+                     "deferring restore until print ends",
+                     saved_tool_mapping_.size(), saved_backend_index_,
+                     static_cast<int>(current_state));
+        observe_lifecycle_for_restore();
+    } else {
+        spdlog::info("[PrintStartController] Crash recovery: found pending remap "
+                     "({} tools, backend {}) — restoring",
+                     saved_tool_mapping_.size(), saved_backend_index_);
+        restore_filament_mapping();
     }
 }
 

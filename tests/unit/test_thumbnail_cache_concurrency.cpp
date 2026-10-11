@@ -29,6 +29,7 @@
 #include "../../include/thumbnail_processor.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -262,4 +263,30 @@ TEST_CASE("Cache size query is safe while eviction runs on other threads",
 
     REQUIRE(reads.load() > 0);
     REQUIRE(cache.get_cache_size() <= LIMIT);
+}
+
+// A staging file is a write in flight, or debris from a crash mid-write. Neither
+// is a thumbnail: it never counts toward the budget, and debris old enough that
+// no writer can still own it is removed.
+TEST_CASE("Cache scan ignores staging files and removes stale ones", "[assets][cache][thumbnail]") {
+    ScopedCacheDir scoped("staging");
+
+    constexpr size_t FILE_BYTES = 16 * 1024;
+    ThumbnailCache cache(64 * FILE_BYTES);
+    const std::string dir = cache.get_cache_dir();
+    seed_cache_files(dir, 2, FILE_BYTES);
+
+    const std::string payload(4 * FILE_BYTES, 'x');
+    const auto fresh = std::filesystem::path(dir) / "123.png.4242.7.tmp";
+    const auto stale = std::filesystem::path(dir) / "456_120x120_ARGB8888.bin.4242.8.tmp";
+    for (const auto& p : {fresh, stale}) {
+        std::ofstream f(p, std::ios::binary);
+        f.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+    }
+    std::filesystem::last_write_time(stale, std::filesystem::file_time_type::clock::now() -
+                                                std::chrono::hours(2));
+
+    CHECK(cache.get_cache_size() == 2 * FILE_BYTES);
+    CHECK(std::filesystem::exists(fresh));
+    CHECK_FALSE(std::filesystem::exists(stale));
 }

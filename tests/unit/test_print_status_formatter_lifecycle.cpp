@@ -56,8 +56,8 @@ TEST_CASE_METHOD(HelixTestFixture, "Re-created DetailedFormatter keeps its XML s
         PrinterStateTestAccess::get_print_state(ps), true);
 
     // ...and it is the live formatter's subject, not an orphaned record.
-    lv_subject_set_int(ps.get_print_layer_current_subject(), 7);
-    lv_subject_set_int(ps.get_print_layer_total_subject(), 9);
+    lv_subject_set_int(ps.print_state().get_print_layer_current_subject(), 7);
+    lv_subject_set_int(ps.print_state().get_print_layer_total_subject(), 9);
     UpdateQueueTestAccess::drain_all(UpdateQueue::instance());
     CHECK(std::string(lv_subject_get_string(layer_text)) == "Layer 7 / 9");
 }

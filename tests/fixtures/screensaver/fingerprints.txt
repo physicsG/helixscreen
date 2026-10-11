@@ -1,0 +1,3 @@
+# Canvas pixel fingerprints; tests/unit/test_screensaver_fingerprint.cpp
+pipes 6cdb240e07dd63d2
+starfield a9f7f27791f8af84

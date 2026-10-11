@@ -7,7 +7,9 @@
 
 #include "ui_update_queue.h"
 
+#include "helix_thread.h"
 #include "phomemo_protocol.h"
+#include "text_io.h"
 
 #include <spdlog/spdlog.h>
 
@@ -53,6 +55,15 @@ std::vector<uint8_t> PhomemoPrinter::build_raster_commands(const LabelBitmap& bi
     return helix::label::phomemo_build_raster(bitmap, size);
 }
 
+uint16_t PhomemoPrinter::read_sysfs_usb_id(const std::string& path) {
+    std::ifstream f(path);
+    if (!f.is_open())
+        return 0;
+    std::string val;
+    f >> val;
+    return text_io::parse_leading<uint16_t>(val, 16).value_or(0);
+}
+
 // Find the /dev/usb/lp* device node for a given VID:PID by checking sysfs
 static std::string find_usblp_device(uint16_t vid, uint16_t pid) {
 #ifdef __ANDROID__
@@ -67,18 +78,8 @@ static std::string find_usblp_device(uint16_t vid, uint16_t pid) {
         std::string dev_path = fmt::format("/dev/usb/lp{}", i);
         std::string sysfs_path = fmt::format("/sys/class/usbmisc/lp{}/device/../", i);
 
-        // Read VID/PID from sysfs
-        auto read_hex = [](const std::string& path) -> uint16_t {
-            std::ifstream f(path);
-            if (!f.is_open())
-                return 0;
-            std::string val;
-            f >> val;
-            return static_cast<uint16_t>(std::stoul(val, nullptr, 16));
-        };
-
-        uint16_t dev_vid = read_hex(sysfs_path + "idVendor");
-        uint16_t dev_pid = read_hex(sysfs_path + "idProduct");
+        uint16_t dev_vid = PhomemoPrinter::read_sysfs_usb_id(sysfs_path + "idVendor");
+        uint16_t dev_pid = PhomemoPrinter::read_sysfs_usb_id(sysfs_path + "idProduct");
 
         if (dev_vid == vid && dev_pid == pid) {
             spdlog::debug("Phomemo: matched {} to {:04x}:{:04x}", dev_path, vid, pid);
@@ -93,7 +94,7 @@ void PhomemoPrinter::print(const LabelBitmap& bitmap, const LabelSize& size,
                            PrintCallback callback) {
     if (vid_ == 0 || pid_ == 0) {
         spdlog::error("Phomemo: USB device not configured (vid/pid not set)");
-        helix::ui::queue_update([callback]() {
+        helix::ui::queue_update("PhomemoPrinter::print", [callback]() {
             if (callback)
                 callback(false, "USB device not configured");
         });
@@ -110,7 +111,7 @@ void PhomemoPrinter::print(const LabelBitmap& bitmap, const LabelSize& size,
     // ARM (AD5M/CC1) throws std::system_error which aborts with std::terminate
     // if it escapes an LVGL event frame (#724, #837, [L083]).
     try {
-        std::thread([vid, pid, commands = std::move(commands), callback]() {
+        helix::make_thread([vid, pid, commands = std::move(commands), callback]() {
             bool success = false;
             std::string error;
 
@@ -140,12 +141,14 @@ void PhomemoPrinter::print(const LabelBitmap& bitmap, const LabelSize& size,
                 }
             }
 
-            helix::ui::queue_update([callback, success, error]() { callback(success, error); });
+            helix::ui::queue_update("PhomemoPrinter::print",
+                                    [callback, success, error]() { callback(success, error); });
         }).detach();
     } catch (const std::system_error& e) {
         spdlog::error("Phomemo: failed to spawn print thread: {}", e.what());
-        helix::ui::queue_update(
-            [callback]() { callback(false, "System busy — please try again"); });
+        helix::ui::queue_update("PhomemoPrinter::print", [callback]() {
+            callback(false, "System busy — please try again");
+        });
     }
 }
 

@@ -56,10 +56,11 @@ from __future__ import annotations
 
 import argparse
 import re
-import subprocess
 import sys
 from pathlib import Path
 from typing import Iterable
+
+from staged_content import read_index_blobs, staged_paths
 
 # Match `if (token.expired()) return;` or variants:
 #   if (tok.expired()) return;
@@ -147,8 +148,8 @@ REGISTER_CB_RE = re.compile(
 # first WLED discovery, first PRINT_START analysis), the dropped result
 # strands the UI until the next user-triggered fetch — which for fire-once
 # bootstraps never comes. Confirmed regression sweep on 2026-05-11 found
-# 4 sites matching this pattern across PrintHistoryManager, PrintSelectPanel,
-# MacroModificationManager, and LedController.
+# sites matching this pattern across PrintHistoryManager, PrintSelectPanel,
+# and LedController.
 #
 # We match the most common entry shapes:
 #   api_->files().get_*(...) / get_metadata / metascan_file / etc.
@@ -170,7 +171,7 @@ HTTP_CB_ENTRY_RE = re.compile(
 # Plain (non-critical) defer/queue_update inside a register lambda.
 # Match `tok.defer(`, `token.defer(`, `lifetime_.defer(`, and
 # `helix::ui::queue_update(` — but NOT their `_critical` variants. We
-# intentionally exclude observe_int_sync / observe_string callbacks because
+# intentionally exclude observe<int> / observe<const char*> callbacks because
 # those already fire on the main thread (no marshal needed).
 PLAIN_DEFER_RE = re.compile(
     r'\b(?:tok|token|lifetime_)\s*\.\s*defer\s*\('
@@ -242,18 +243,6 @@ def _blank_noise(src: str) -> str:
     return ''.join(out)
 
 
-def code_lines(path: Path) -> list[str]:
-    """`file_lines` with comments and literals blanked, line-for-line aligned.
-
-    Match patterns against these; keep using the raw lines for the `L081_OK`
-    opt-out (which lives in a comment) and for the snippet shown to the user.
-    """
-    try:
-        return _blank_noise(path.read_text(encoding='utf-8', errors='replace')).splitlines()
-    except OSError:
-        return []
-
-
 def is_only_return(line: str) -> bool:
     """True if the line after the expired-check predicate is just `return;` (with optional braces)."""
     s = line.strip()
@@ -301,12 +290,26 @@ def scan_file(path: Path, checks: tuple = LIFETIME_CHECK_RES) -> list[tuple[int,
 
     The `// L081_OK: <reason>` per-line opt-out silences both forms.
     """
-    lines = file_lines(path)
+    try:
+        src = path.read_text(encoding='utf-8', errors='replace')
+    except OSError:
+        return []
+    return scan_source(src, checks)
+
+
+def scan_source(src: str, checks: tuple = LIFETIME_CHECK_RES) -> list[tuple[int, str, str, str]]:
+    """scan_file's body, operating on already-sourced text.
+
+    Split out so a caller with the STAGED blob in hand (the index content, not
+    necessarily what sits on disk) can scan that directly instead of a re-read
+    that would silently prefer the working tree.
+    """
+    lines = src.splitlines()
     if not lines:
         return []
     # Patterns match against `code` (comments/literals blanked); `lines` stays
     # raw so the L081_OK opt-out and the reported snippet still read correctly.
-    code = code_lines(path)
+    code = _blank_noise(src).splitlines()
     hits: list[tuple[int, str, str, str]] = []
     for i, line in enumerate(lines):
         if OPT_OUT in line:
@@ -497,19 +500,12 @@ def scan_file_http_cb_freeze_drop(path: Path) -> list[tuple[int, str]]:
 
 
 def staged_files() -> list[Path]:
-    try:
-        out = subprocess.run(
-            ['git', 'diff', '--cached', '--name-only', '--diff-filter=ACM'],
-            capture_output=True, text=True, check=True,
-        ).stdout
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return []
-    return [Path(p) for p in out.splitlines() if p.endswith(('.cpp', '.h', '.hpp', '.cc'))]
+    return [Path(p) for p in staged_paths(suffixes=('.cpp', '.h', '.hpp', '.cc'))]
 
 
 # Directories scanned for Mechanism C (bg-thread tok.expired() + member access).
 # src/ui/ is intentionally excluded because observer callbacks (queue_update +
-# observe_int_sync) run on the main thread, where `tok.expired()` is fine —
+# observe<int>) run on the main thread, where `tok.expired()` is fine —
 # the script can't tell observer cbs from HTTP cbs without AST-level context.
 DEFAULT_SCAN_DIRS = (
     'src/printer',
@@ -569,17 +565,20 @@ def main() -> int:
     parser.add_argument('files', nargs='*', help='Files to check (default: scan src/)')
     args = parser.parse_args()
 
+    staged_src: dict[str, str] = {}
     if args.staged_only:
         staged = staged_files()
         mech_c_files = [f for f in staged
-                        if f.exists()
-                        and any(str(f).startswith(d) for d in DEFAULT_SCAN_DIRS)]
+                        if any(str(f).startswith(d) for d in DEFAULT_SCAN_DIRS)]
         ctx_only_files = [f for f in staged
-                          if f.exists()
-                          and any(str(f).startswith(d) for d in CTX_ONLY_SCAN_DIRS)]
+                          if any(str(f).startswith(d) for d in CTX_ONLY_SCAN_DIRS)]
         freeze_files = [f for f in staged
-                        if f.exists()
-                        and any(str(f).startswith(d) for d in FREEZE_SCAN_DIRS)]
+                        if any(str(f).startswith(d) for d in FREEZE_SCAN_DIRS)]
+        # The set above is the staged diff; the CONTENT has to come from the
+        # same place - the index, not whatever a re-read of the path finds on
+        # disk, which may have been reverted after staging a violation.
+        staged_src = dict(read_index_blobs(
+            sorted({str(f) for f in mech_c_files + ctx_only_files})))
     elif args.files:
         # An explicitly named file is checked for every pattern regardless of
         # directory — naming it is the request. Keeps `<gate> src/ui/foo.cpp`
@@ -603,7 +602,11 @@ def main() -> int:
     scan_plan = ([(f, LIFETIME_CHECK_RES) for f in mech_c_files]
                  + [(f, (CTX_VALID_CHECK_RE,)) for f in ctx_only_files])
     for f, checks in scan_plan:
-        hits = scan_file(f, checks)
+        if args.staged_only:
+            src = staged_src.get(str(f))
+            hits = scan_source(src, checks) if src is not None else []
+        else:
+            hits = scan_file(f, checks)
         for line_no, snippet, kind, spelling in hits:
             if kind == 'uaf':
                 print(f"{f}:{line_no}: L081 Mechanism C: bg-thread {spelling} "

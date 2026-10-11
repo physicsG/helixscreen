@@ -5,25 +5,24 @@
 
 #include "accel_sensor_types.h"
 #include "lvgl.h"
-#include "sensor_registry.h"
+#include "sensor_collection.h"
 #include "subject_managed_panel.h"
 
-#include <map>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
+
+#include "hv/json.hpp"
 
 namespace helix::sensors {
 
 /**
  * @brief Manager for accelerometer sensors (ADXL345, LIS2DW, LIS3DH, MPU9250, ICM20948)
  *
- * Implements ISensorManager interface for integration with SensorRegistry.
  * Provides:
  * - Auto-discovery of accelerometer sensors from Klipper objects list
  * - Role assignment for input shaping
- * - Real-time state tracking from Moonraker updates
  * - LVGL subjects for reactive UI binding
  *
  * Thread-safe for state updates from Moonraker callbacks.
@@ -35,19 +34,10 @@ namespace helix::sensors {
  * - mpu9250 [name]
  * - icm20948 [name]
  *
- * Status JSON format:
- * @code
- * {
- *   "adxl345": {
- *     "connected": true
- *   },
- *   "adxl345 bed": {
- *     "connected": true
- *   }
- * }
- * @endcode
+ * Klipper accelerometers have no get_status(), so this manager is fed only by
+ * configfile.config sections and never by status frames.
  */
-class AccelSensorManager : public ISensorManager {
+class AccelSensorManager {
   public:
     /**
      * @brief Get singleton instance
@@ -59,11 +49,8 @@ class AccelSensorManager : public ISensorManager {
     AccelSensorManager& operator=(const AccelSensorManager&) = delete;
 
     // ========================================================================
-    // ISensorManager Interface
+    // Discovery, Status and Config
     // ========================================================================
-
-    /// @brief Get category name for registry
-    [[nodiscard]] std::string category_name() const override;
 
     /**
      * @brief Discover sensors from Klipper config keys (configfile.config)
@@ -74,19 +61,19 @@ class AccelSensorManager : public ISensorManager {
      * @param config_keys JSON object where keys are config section names
      * @note MUST be called from main LVGL thread (updates subjects directly)
      */
-    void discover_from_config(const nlohmann::json& config_keys) override;
+    void discover_from_config(const nlohmann::json& config_keys);
 
-    /// @brief Update state from Moonraker status JSON
-    void update_from_status(const nlohmann::json& status) override;
+    /// @brief No-op: accelerometers publish no status. Present for the shared fan-out.
+    void update_from_status(const nlohmann::json& status);
 
     /**
      * @brief Load sensor configuration from JSON
      * @note MUST be called from main LVGL thread (updates subjects directly)
      */
-    void load_config(const nlohmann::json& config) override;
+    void load_config(const nlohmann::json& config);
 
     /// @brief Save configuration to JSON
-    [[nodiscard]] nlohmann::json save_config() const override;
+    [[nodiscard]] nlohmann::json save_config() const;
 
     // ========================================================================
     // Initialization
@@ -168,41 +155,15 @@ class AccelSensorManager : public ISensorManager {
      */
     [[nodiscard]] bool is_sensor_available(AccelSensorRole role) const;
 
-    /**
-     * @brief Check if the input shaper accelerometer is connected
-     *
-     * @return true if input shaper sensor is assigned and connected
-     */
-    [[nodiscard]] bool is_input_shaper_connected() const;
-
     // ========================================================================
     // LVGL Subjects
     // ========================================================================
-
-    /**
-     * @brief Get subject for accelerometer connection status
-     * @return Subject (int: -1=no accel, 0=disconnected, 1=connected)
-     */
-    [[nodiscard]] lv_subject_t* get_connected_subject();
 
     /**
      * @brief Get subject for sensor count (for conditional UI visibility)
      * @return Subject (int: number of discovered sensors)
      */
     [[nodiscard]] lv_subject_t* get_sensor_count_subject();
-
-    /**
-     * @brief Enable synchronous mode for testing
-     *
-     * When enabled, update_from_status() calls update_subjects() synchronously
-     * instead of using lv_async_call().
-     */
-    void set_sync_mode(bool enabled);
-
-    /**
-     * @brief Update subjects on main LVGL thread (called by async callback)
-     */
-    void update_subjects_on_main_thread();
 
     friend class AccelSensorManagerTestAccess;
 
@@ -221,42 +182,15 @@ class AccelSensorManager : public ISensorManager {
     bool parse_klipper_name(const std::string& klipper_name, std::string& sensor_name,
                             AccelSensorType& type) const;
 
-    /**
-     * @brief Find config by Klipper name
-     * @return Pointer to config, or nullptr if not found
-     */
-    AccelSensorConfig* find_config(const std::string& klipper_name);
-    const AccelSensorConfig* find_config(const std::string& klipper_name) const;
-
-    /**
-     * @brief Find config by assigned role
-     * @return Pointer to config, or nullptr if no sensor has this role
-     */
-    const AccelSensorConfig* find_config_by_role(AccelSensorRole role) const;
-
-    /**
-     * @brief Update all LVGL subjects from current state
-     * @note Internal method - MUST only be called from main LVGL thread
-     */
-    void update_subjects();
-
     // Recursive mutex for thread-safe state access
     mutable std::recursive_mutex mutex_;
 
-    // Configuration
-    std::vector<AccelSensorConfig> sensors_;
-
-    // Runtime state (keyed by klipper_name)
-    std::map<std::string, AccelSensorState> states_;
-
-    // Test mode: when true, update_from_status() calls update_subjects() synchronously
-    bool sync_mode_ = false;
+    SensorCollection<AccelSensorConfig, AccelSensorState> sensors_;
 
     // LVGL subjects
     bool subjects_initialized_ = false;
     SubjectManager subjects_;
-    lv_subject_t connected_;
-    lv_subject_t sensor_count_;
+    lv_subject_t sensor_count_{};
 };
 
 } // namespace helix::sensors

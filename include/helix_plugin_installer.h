@@ -32,10 +32,24 @@ namespace helix {
  * @brief State of the plugin installation process
  */
 enum class PluginInstallState {
-    IDLE,       ///< No installation in progress
-    INSTALLING, ///< Installation is running
-    SUCCESS,    ///< Installation completed successfully
-    FAILED      ///< Installation failed
+    IDLE,            ///< No installation in progress
+    INSTALLING,      ///< Installation is running
+    SUCCESS,         ///< Installation completed successfully
+    NEEDS_ATTENTION, ///< Uninstall removed the plugin, but left a config file that needs a look
+    FAILED           ///< Installation failed
+};
+
+/**
+ * @brief Outcome of a local uninstall attempt
+ *
+ * Mirrors install.sh's own --uninstall / --uninstall-auto exit codes: 0
+ * maps to SUCCESS, 2 to NEEDS_ATTENTION, anything else to FAILED.
+ */
+enum class UninstallOutcome {
+    SUCCESS,         ///< Plugin removed; nothing left in the config to clean up
+    NEEDS_ATTENTION, ///< Plugin removed, but a config file was skipped or failed
+                     ///< during the phase-tracking strip and needs a look
+    FAILED           ///< Uninstall failed; the plugin may still be present
 };
 
 // ============================================================================
@@ -46,9 +60,11 @@ enum class PluginInstallState {
  * @brief Manages helix_print plugin detection and installation
  *
  * @note Thread Safety:
- *       - install_local() / uninstall_local(): MUST be called from main thread only.
- *         These methods block during script execution. For non-blocking UI,
- *         wrap in std::thread or std::async.
+ *       - uninstall_local(): MUST be called from main thread only. It blocks
+ *         during script execution and invokes its callback inline. For
+ *         non-blocking UI, wrap in std::thread or std::async.
+ *       - install_local_sync(): Blocks during script execution; invokes no
+ *         callback, so it is safe to call from a worker thread.
  *       - get_state() / is_installing(): Thread-safe (atomic read).
  *       - All other methods: Main thread only.
  *
@@ -56,12 +72,13 @@ enum class PluginInstallState {
  *   1. Create installer and set API
  *   2. Check if plugin is missing: !PrinterState::service_has_helix_plugin()
  *   3. Check if should prompt: installer.should_prompt_install()
- *   4. For local: installer.install_local(callback)
+ *   4. For local: installer.install_local_sync()
  *   5. For remote: show dialog with installer.get_remote_install_command()
  */
 class HelixPluginInstaller {
   public:
-    using InstallCallback = std::function<void(bool success, const std::string& message)>;
+    using UninstallCallback =
+        std::function<void(UninstallOutcome outcome, const std::string& message)>;
 
     HelixPluginInstaller() = default;
     ~HelixPluginInstaller() = default;
@@ -115,31 +132,19 @@ class HelixPluginInstaller {
      * Returns a result struct instead of using callbacks, which avoids
      * std::function-related crashes on ARM/glibc static builds.
      *
-     * @param enable_phase_tracking If true, also installs phase tracking macros
      * @return Result with success flag and message
      */
-    [[nodiscard]] SyncInstallResult install_local_sync(bool enable_phase_tracking = false);
-
-    /**
-     * @brief Attempt local auto-installation
-     *
-     * Runs the bundled install.sh script with --auto flag.
-     * Only works when connected to local Moonraker.
-     *
-     * @param callback Called when installation completes or fails
-     * @param enable_phase_tracking If true, also installs phase tracking macros
-     */
-    void install_local(InstallCallback callback, bool enable_phase_tracking = false);
+    [[nodiscard]] SyncInstallResult install_local_sync();
 
     /**
      * @brief Attempt local auto-uninstallation
      *
-     * Runs the bundled install.sh script with --uninstall flag.
-     * Only works when connected to local Moonraker.
+     * Runs the bundled install.sh script with --uninstall-auto. Only works
+     * when connected to local Moonraker.
      *
-     * @param callback Called when uninstallation completes or fails
+     * @param callback Called with the outcome once the script exits
      */
-    void uninstall_local(InstallCallback callback);
+    void uninstall_local(UninstallCallback callback);
 
     /**
      * @brief Get the curl command for remote installation

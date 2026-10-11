@@ -6,8 +6,10 @@
 #include "ui_observer_guard.h" // SubjectLifetime
 
 #include "lvgl/lvgl.h"
+#include "persisted_setting.h"
 #include "subject_managed_panel.h"
 
+#include <algorithm>
 #include <memory>
 #include <string>
 
@@ -99,7 +101,14 @@ class DisplaySettingsManager {
     void set_display_sleep_sec(int seconds);
 
     /** @brief Get display brightness (10-100) */
-    int get_brightness() const;
+    int get_brightness() const {
+        return settings_.get(Key::Brightness);
+    }
+
+    /** @brief The brightness to restore to the backlight: get_brightness() held to 10-100 */
+    int user_brightness() const {
+        return std::clamp(get_brightness(), 10, 100);
+    }
 
     /**
      * @brief Apply brightness live WITHOUT persisting (clamped 10-100)
@@ -143,11 +152,12 @@ class DisplaySettingsManager {
      */
     bool should_couple_sleep_to_dim() const;
 
-    /** @brief Get sleep while printing state */
-    bool get_sleep_while_printing() const;
-
-    /** @brief Set sleep while printing state (updates subject + persists) */
-    void set_sleep_while_printing(bool enabled);
+    bool get_sleep_while_printing() const {
+        return settings_.get_bool(Key::SleepWhilePrinting);
+    }
+    void set_sleep_while_printing(bool enabled) {
+        settings_.set(Key::SleepWhilePrinting, enabled);
+    }
 
     // =========================================================================
     // UI PREFERENCES
@@ -160,19 +170,65 @@ class DisplaySettingsManager {
     void set_animations_enabled(bool enabled);
 
     /** @brief Use Android system keyboard instead of built-in LVGL keyboard */
-    bool get_use_system_keyboard() const;
+    bool get_use_system_keyboard() const {
+        return settings_.get_bool(Key::UseSystemKeyboard);
+    }
+    void set_use_system_keyboard(bool enabled) {
+        settings_.set(Key::UseSystemKeyboard, enabled);
+    }
 
-    /** @brief Set system keyboard preference (updates subject + persists) */
-    void set_use_system_keyboard(bool enabled);
+    /** @brief Hide the on-screen keyboard while a hardware keyboard is attached */
+    bool get_hide_keyboard_with_hardware() const {
+        return settings_.get_bool(Key::HideKeyboardWithHardware);
+    }
+    void set_hide_keyboard_with_hardware(bool enabled) {
+        settings_.set(Key::HideKeyboardWithHardware, enabled);
+    }
+
+    /**
+     * @brief Record whether the display backend opened a physical keyboard.
+     *
+     * DisplayManager calls this each time it creates its input devices, which
+     * happens before init_subjects(), so the value is held here and seeds the
+     * settings_hardware_keyboard_present subject. Only a backend that opened a
+     * scanned keyboard device answers true: the SDL window keyboard is not one.
+     */
+    void set_hardware_keyboard_present(bool present);
+
+    /** @brief Whether the display backend opened a physical keyboard */
+    bool hardware_keyboard_present() const {
+        return hardware_keyboard_present_;
+    }
+
+    /**
+     * @brief Whether text entry goes to the hardware keyboard alone.
+     *
+     * True only while the preference is on AND a physical keyboard is attached;
+     * the focused textarea still takes that keyboard's keys through the input
+     * group, so nothing but the on-screen keyboard goes away.
+     */
+    bool soft_keyboard_suppressed() const;
 
     /** @brief Page-scroll buttons enabled (auto-injected gutter chevrons) */
-    bool get_page_scroll_buttons() const;
+    bool get_page_scroll_buttons() const {
+        return settings_.get_bool(Key::PageScrollButtons);
+    }
+    void set_page_scroll_buttons(bool enabled) {
+        settings_.set(Key::PageScrollButtons, enabled);
+    }
 
-    /** @brief Set page-scroll buttons preference (updates subject + persists) */
-    void set_page_scroll_buttons(bool enabled);
+    /** @brief Speed/flow readouts lead with mm/s and mm³/s instead of percent */
+    bool get_speed_flow_physical_units() const {
+        return settings_.get_bool(Key::SpeedFlowPhysicalUnits);
+    }
+    void set_speed_flow_physical_units(bool enabled) {
+        settings_.set(Key::SpeedFlowPhysicalUnits, enabled);
+    }
 
     /** @brief Keep Android navigation bar onscreen (issue #908, Android only) */
-    bool get_keep_navbar_visible() const;
+    bool get_keep_navbar_visible() const {
+        return settings_.get_bool(Key::KeepNavbarVisible);
+    }
 
     /** @brief Set keep-navbar-visible preference (updates subject + persists + JNI push) */
     void set_keep_navbar_visible(bool enabled);
@@ -192,23 +248,28 @@ class DisplaySettingsManager {
     /** @brief Set the UI scale setting (persists; takes effect on next start) */
     void set_ui_scale_percent(int percent);
 
-    /** @brief Get bed mesh render mode (0=Auto, 1=3D, 2=2D) */
-    int get_bed_mesh_render_mode() const;
+    /** @brief Bed mesh render mode (0=Auto, 1=3D, 2=2D) */
+    int get_bed_mesh_render_mode() const {
+        return settings_.get(Key::BedMeshRenderMode);
+    }
+    void set_bed_mesh_render_mode(int mode) {
+        settings_.set(Key::BedMeshRenderMode, mode);
+    }
 
-    /** @brief Set bed mesh render mode (updates subject + persists) */
-    void set_bed_mesh_render_mode(int mode);
+    /** @brief G-code render mode (0=Auto, 1=3D, 2=2D, 3=Thumbnail Only) */
+    int get_gcode_render_mode() const {
+        return settings_.get(Key::GcodeRenderMode);
+    }
 
-    /** @brief Get G-code render mode (0=Auto, 1=3D, 2=2D, 3=Thumbnail Only) */
-    int get_gcode_render_mode() const;
-
-    /** @brief Set G-code render mode (updates subject + persists) */
+    /** @brief Set G-code render mode; an explicit pick also clears the GPU crash blocks */
     void set_gcode_render_mode(int mode);
 
-    /** @brief Get time format setting */
-    TimeFormat get_time_format() const;
-
-    /** @brief Set time format (updates subject + persists) */
-    void set_time_format(TimeFormat format);
+    TimeFormat get_time_format() const {
+        return static_cast<TimeFormat>(std::clamp(settings_.get(Key::TimeFormat), 0, 1));
+    }
+    void set_time_format(TimeFormat format) {
+        settings_.set(Key::TimeFormat, static_cast<int>(format));
+    }
 
     /** @brief Get current timezone IANA ID (e.g., "America/New_York") */
     std::string get_timezone() const;
@@ -277,7 +338,7 @@ class DisplaySettingsManager {
     // =========================================================================
 
 #ifdef HELIX_ENABLE_SCREENSAVER
-    /** @brief Get screensaver type (0=Off, 1=Flying Toasters, 2=Starfield, 3=3D Pipes) */
+    /** @brief Get screensaver type (a ScreensaverType value, include/screensaver_registry.h) */
     int get_screensaver_type() const;
 
     /** @brief Set screensaver type (updates subject + persists) */
@@ -348,7 +409,7 @@ class DisplaySettingsManager {
 
     /** @brief Brightness subject (integer: 10-100 percent) */
     lv_subject_t* subject_brightness() {
-        return &brightness_subject_;
+        return settings_.subject(Key::Brightness);
     }
 
     /** @brief Has backlight control subject (integer: 0=no, 1=yes) */
@@ -363,7 +424,7 @@ class DisplaySettingsManager {
 
     /** @brief Sleep while printing subject (integer: 0=inhibit, 1=allow) */
     lv_subject_t* subject_sleep_while_printing() {
-        return &sleep_while_printing_subject_;
+        return settings_.subject(Key::SleepWhilePrinting);
     }
 
     /** @brief Animations enabled subject (integer: 0=off, 1=on) */
@@ -389,17 +450,32 @@ class DisplaySettingsManager {
 
     /** @brief System keyboard subject (integer: 0=built-in, 1=system) */
     lv_subject_t* subject_use_system_keyboard() {
-        return &use_system_keyboard_subject_;
+        return settings_.subject(Key::UseSystemKeyboard);
     }
 
     /** @brief Page-scroll buttons subject (integer: 0=off, 1=on) */
     lv_subject_t* subject_page_scroll_buttons() {
-        return &page_scroll_buttons_subject_;
+        return settings_.subject(Key::PageScrollButtons);
+    }
+
+    /** @brief Speed/flow readout units subject (integer: 0=percent, 1=mm/s + mm³/s) */
+    lv_subject_t* subject_speed_flow_physical_units() {
+        return settings_.subject(Key::SpeedFlowPhysicalUnits);
     }
 
     /** @brief Keep navbar visible subject (integer: 0=immersive, 1=always show) */
     lv_subject_t* subject_keep_navbar_visible() {
-        return &keep_navbar_visible_subject_;
+        return settings_.subject(Key::KeepNavbarVisible);
+    }
+
+    /** @brief Hide-with-hardware-keyboard subject (integer: 0=off, 1=on) */
+    lv_subject_t* subject_hide_keyboard_with_hardware() {
+        return settings_.subject(Key::HideKeyboardWithHardware);
+    }
+
+    /** @brief Physical keyboard presence (integer: 0=none, 1=attached) */
+    lv_subject_t* subject_hardware_keyboard_present() {
+        return &hardware_keyboard_present_subject_;
     }
 
     /** @brief Android platform flag (integer: 0=not Android, 1=Android) */
@@ -414,7 +490,7 @@ class DisplaySettingsManager {
 
     /** @brief Bed mesh render mode subject (integer: 0=auto, 1=3D, 2=2D) */
     lv_subject_t* subject_bed_mesh_render_mode() {
-        return &bed_mesh_render_mode_subject_;
+        return settings_.subject(Key::BedMeshRenderMode);
     }
 
     /** @brief G-code render mode subject (integer: 0=auto, 1=3D, 2=2D, 3=thumbnail only) */
@@ -427,16 +503,16 @@ class DisplaySettingsManager {
      * ObserverGuards keep pointers to observer nodes deinit_all() freed.
      */
     [[nodiscard]] SubjectLifetime get_subjects_lifetime() const {
-        return subjects_lifetime_;
+        return subjects_.get_subjects_lifetime();
     }
 
     lv_subject_t* subject_gcode_render_mode() {
-        return &gcode_render_mode_subject_;
+        return settings_.subject(Key::GcodeRenderMode);
     }
 
     /** @brief Time format subject (integer: 0=12H, 1=24H) */
     lv_subject_t* subject_time_format() {
-        return &time_format_subject_;
+        return settings_.subject(Key::TimeFormat);
     }
 
     /** @brief Timezone subject (integer: index into curated list) */
@@ -445,7 +521,7 @@ class DisplaySettingsManager {
     }
 
 #ifdef HELIX_ENABLE_SCREENSAVER
-    /** @brief Screensaver type subject (integer: 0=off, 1=toasters, 2=starfield, 3=pipes) */
+    /** @brief Screensaver type subject (a ScreensaverType value, include/screensaver_registry.h) */
     lv_subject_t* subject_screensaver_type() {
         return &screensaver_type_subject_;
     }
@@ -456,36 +532,45 @@ class DisplaySettingsManager {
     ~DisplaySettingsManager() = default;
 
     SubjectManager subjects_;
-    /// See get_subjects_lifetime(). Created with the object and REPLACED (never
-    /// nulled) by deinit_subjects(): an empty token reads as "dead" and would
-    /// suppress removal for live observers.
-    SubjectLifetime subjects_lifetime_ = std::make_shared<bool>(true);
 
-    lv_subject_t dark_mode_subject_;
-    lv_subject_t dark_mode_available_subject_;
-    lv_subject_t theme_preset_subject_;
-    lv_subject_t display_dim_subject_;
-    lv_subject_t display_sleep_subject_;
-    lv_subject_t brightness_subject_;
-    lv_subject_t has_backlight_subject_;
-    lv_subject_t has_dimming_subject_;
-    lv_subject_t sleep_while_printing_subject_;
-    lv_subject_t animations_enabled_subject_;
-    lv_subject_t use_system_keyboard_subject_;
-    lv_subject_t page_scroll_buttons_subject_;
-    lv_subject_t keep_navbar_visible_subject_;
-    lv_subject_t is_android_subject_;
-    lv_subject_t rotation_available_subject_;
-    lv_subject_t bed_mesh_render_mode_subject_;
-    lv_subject_t gcode_render_mode_subject_;
-    lv_subject_t time_format_subject_;
-    lv_subject_t timezone_subject_;
+    /// Keeps the XML style engine's transition scale following
+    /// animations_enabled_subject_. See init_subjects().
+    ObserverGuard transition_scale_observer_;
+
+    enum class Key : uint8_t {
+        SleepWhilePrinting,
+        Brightness,
+        UseSystemKeyboard,
+        HideKeyboardWithHardware,
+        PageScrollButtons,
+        SpeedFlowPhysicalUnits,
+        KeepNavbarVisible,
+        BedMeshRenderMode,
+        GcodeRenderMode,
+        TimeFormat,
+        COUNT
+    };
+    settings::PersistedSettings<Key, static_cast<size_t>(Key::COUNT)> settings_;
+
+    lv_subject_t dark_mode_subject_{};
+    lv_subject_t dark_mode_available_subject_{};
+    lv_subject_t theme_preset_subject_{};
+    lv_subject_t display_dim_subject_{};
+    lv_subject_t display_sleep_subject_{};
+    lv_subject_t has_backlight_subject_{};
+    lv_subject_t has_dimming_subject_{};
+    lv_subject_t animations_enabled_subject_{};
+    lv_subject_t hardware_keyboard_present_subject_{};
+    lv_subject_t is_android_subject_{};
+    lv_subject_t rotation_available_subject_{};
+    lv_subject_t timezone_subject_{};
 
 #ifdef HELIX_ENABLE_SCREENSAVER
-    lv_subject_t screensaver_type_subject_;
+    lv_subject_t screensaver_type_subject_{};
 #endif
 
     bool subjects_initialized_ = false;
+    bool hardware_keyboard_present_ = false;
 };
 
 } // namespace helix

@@ -35,6 +35,8 @@ lv_area_t make_area(int32_t x1, int32_t y1, int32_t w, int32_t h) {
     return a;
 }
 
+// TEST_MIRROR_OK: contains() is a one-line assertion utility (area containment), not logic
+// under test
 bool contains(const lv_area_t& outer, const lv_area_t& inner) {
     return inner.x1 >= outer.x1 && inner.y1 >= outer.y1 && inner.x2 <= outer.x2 &&
            inner.y2 <= outer.y2;

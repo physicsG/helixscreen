@@ -117,6 +117,10 @@ void warn_missing_tag(const std::string& tag) {
     LV_LOG_WARN("`%s` tag is not found. Using the tag as translation.", tag.c_str());
 }
 
+void warn_language_not_found(const char* lang, const std::string& tag) {
+    LV_LOG_WARN("`%s` language is not found, using the `%s` as translation.", lang, tag.c_str());
+}
+
 void warn_asset_open_failed(const std::string& path) {
     LV_LOG_WARN("fs_open: Could not open file: %s", path.c_str());
 }
@@ -179,6 +183,23 @@ TEST_CASE("LVGL log handler: a repeated broken-asset retry drops below the ring"
     CHECK(logs.total(path) == 10);
 }
 
+TEST_CASE("LVGL log handler: repeats at different times still dedupe", "[logging][lvgl][bundle]") {
+    helix::logging::register_lvgl_log_handler();
+    LevelCapture logs;
+
+    // LVGL stamps every record with its time and the gap since the previous one,
+    // and a render-frame retry arrives at a different time each frame. Only the
+    // text may decide whether it is a repeat.
+    const std::string path = unique_tag("timed_asset") + ".png";
+    for (int i = 0; i < 10; ++i) {
+        warn_asset_open_failed(path);
+        lv_tick_inc(7);
+    }
+
+    CHECK(logs.in_ring(path) == 1);
+    CHECK(logs.total(path) == 10);
+}
+
 TEST_CASE("LVGL log handler: init-time suppression does not spend a tag's one report",
           "[logging][lvgl][bundle]") {
     helix::logging::register_lvgl_log_handler();
@@ -198,4 +219,47 @@ TEST_CASE("LVGL log handler: init-time suppression does not spend a tag's one re
 
     warn_missing_tag(tag);
     CHECK(logs.in_ring(tag) == 1);
+}
+
+TEST_CASE("LVGL log handler: a retired sink drops LVGL traffic without touching spdlog",
+          "[logging][lvgl][1473]") {
+    helix::logging::register_lvgl_log_handler();
+    LevelCapture logs;
+
+    const std::string tag = unique_tag("retired");
+
+    // The probe reaches spdlog while the sink is armed.
+    warn_missing_tag(tag);
+    REQUIRE(logs.total(tag) == 1);
+
+    // Retired: the record is dropped inside the callback, before any spdlog
+    // call. During static destruction this is what keeps lv_subject_deinit's
+    // LV_LOG_WARN out of a freed logger.
+    helix::logging::retire_lvgl_log_handler();
+    warn_missing_tag(tag);
+    CHECK(logs.total(tag) == 1);
+
+    // Re-armed, the same message routes again (the dedupe class also keeps its
+    // first-occurrence entry from before the retirement, so this is a repeat).
+    helix::logging::register_lvgl_log_handler();
+    warn_missing_tag(tag);
+    CHECK(logs.total(tag) == 2);
+}
+
+TEST_CASE("LVGL log handler: English having no translation pack stays out of the ring",
+          "[logging][lvgl][1733]") {
+    helix::logging::register_lvgl_log_handler();
+    helix::logging::set_suppress_translation_warnings(false);
+    LevelCapture logs;
+
+    // The tags are the English strings, so `en` resolving to the tag is correct.
+    const std::string en_tag = unique_tag("source_language");
+    warn_language_not_found("en", en_tag);
+    CHECK(logs.total(en_tag) == 1);
+    CHECK(logs.in_ring(en_tag) == 0);
+
+    // Any other language without a pack is a real gap: it keeps its debug line.
+    const std::string de_tag = unique_tag("missing_pack");
+    warn_language_not_found("de", de_tag);
+    CHECK(logs.in_ring(de_tag) == 1);
 }

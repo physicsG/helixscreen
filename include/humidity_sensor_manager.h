@@ -3,23 +3,24 @@
 
 #pragma once
 
+#include "async_lifetime_guard.h"
 #include "humidity_sensor_types.h"
 #include "lvgl.h"
-#include "sensor_registry.h"
+#include "sensor_collection.h"
 #include "subject_managed_panel.h"
 
-#include <map>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
+
+#include "hv/json.hpp"
 
 namespace helix::sensors {
 
 /**
  * @brief Manager for humidity sensors (BME280, HTU21D, SHT3X, AHT10/20/20-F)
  *
- * Implements ISensorManager interface for integration with SensorRegistry.
  * Provides:
  * - Auto-discovery of humidity sensors from Klipper objects list
  * - Role assignment for CHAMBER and DRYER monitoring
@@ -51,7 +52,7 @@ namespace helix::sensors {
  * }
  * @endcode
  */
-class HumiditySensorManager : public ISensorManager {
+class HumiditySensorManager {
   public:
     /**
      * @brief Get singleton instance
@@ -63,29 +64,26 @@ class HumiditySensorManager : public ISensorManager {
     HumiditySensorManager& operator=(const HumiditySensorManager&) = delete;
 
     // ========================================================================
-    // ISensorManager Interface
+    // Discovery, Status and Config
     // ========================================================================
-
-    /// @brief Get category name for registry
-    [[nodiscard]] std::string category_name() const override;
 
     /**
      * @brief Discover sensors from Klipper objects list
      * @note MUST be called from main LVGL thread (updates subjects directly)
      */
-    void discover(const std::vector<std::string>& klipper_objects) override;
+    void discover(const std::vector<std::string>& klipper_objects);
 
     /// @brief Update state from Moonraker status JSON
-    void update_from_status(const nlohmann::json& status) override;
+    void update_from_status(const nlohmann::json& status);
 
     /**
      * @brief Load sensor configuration from JSON
      * @note MUST be called from main LVGL thread (updates subjects directly)
      */
-    void load_config(const nlohmann::json& config) override;
+    void load_config(const nlohmann::json& config);
 
     /// @brief Save configuration to JSON
-    [[nodiscard]] nlohmann::json save_config() const override;
+    [[nodiscard]] nlohmann::json save_config() const;
 
     // ========================================================================
     // Initialization
@@ -179,6 +177,18 @@ class HumiditySensorManager : public ISensorManager {
     [[nodiscard]] lv_subject_t* get_chamber_humidity_subject();
 
     /**
+     * @brief Death signal for the subjects this HumiditySensorManager owns.
+     *
+     * Pass to observe_*() from anything that can outlive this object's
+     * deinit_subjects(): that path frees every observer node without bumping
+     * the ObserverGuard invalidation epoch, so a guard without the token
+     * dereferences a freed observer on its next reset().
+     */
+    [[nodiscard]] SubjectLifetime get_subjects_lifetime() const {
+        return subjects_.get_subjects_lifetime();
+    }
+
+    /**
      * @brief Get subject for chamber pressure
      * @return Subject (int: pressure in Pa, -1 if no chamber sensor)
      */
@@ -200,7 +210,7 @@ class HumiditySensorManager : public ISensorManager {
      * @brief Enable synchronous mode for testing
      *
      * When enabled, update_from_status() calls update_subjects() synchronously
-     * instead of using lv_async_call().
+     * instead of using queue_update().
      */
     void set_sync_mode(bool enabled);
 
@@ -228,19 +238,6 @@ class HumiditySensorManager : public ISensorManager {
                             HumiditySensorType& type) const;
 
     /**
-     * @brief Find config by Klipper name
-     * @return Pointer to config, or nullptr if not found
-     */
-    HumiditySensorConfig* find_config(const std::string& klipper_name);
-    const HumiditySensorConfig* find_config(const std::string& klipper_name) const;
-
-    /**
-     * @brief Find config by assigned role
-     * @return Pointer to config, or nullptr if no sensor has this role
-     */
-    const HumiditySensorConfig* find_config_by_role(HumiditySensorRole role) const;
-
-    /**
      * @brief Update all LVGL subjects from current state
      * @note Internal method - MUST only be called from main LVGL thread
      */
@@ -249,11 +246,7 @@ class HumiditySensorManager : public ISensorManager {
     // Recursive mutex for thread-safe state access
     mutable std::recursive_mutex mutex_;
 
-    // Configuration
-    std::vector<HumiditySensorConfig> sensors_;
-
-    // Runtime state (keyed by klipper_name)
-    std::map<std::string, HumiditySensorState> states_;
+    SensorCollection<HumiditySensorConfig, HumiditySensorState> sensors_;
 
     // Test mode: when true, update_from_status() calls update_subjects() synchronously
     bool sync_mode_ = false;
@@ -261,10 +254,12 @@ class HumiditySensorManager : public ISensorManager {
     // LVGL subjects
     bool subjects_initialized_ = false;
     SubjectManager subjects_;
-    lv_subject_t chamber_humidity_;
-    lv_subject_t chamber_pressure_;
-    lv_subject_t dryer_humidity_;
-    lv_subject_t sensor_count_;
+    // Expires deferred subject updates when the subjects are torn down.
+    helix::AsyncLifetimeGuard lifetime_;
+    lv_subject_t chamber_humidity_{};
+    lv_subject_t chamber_pressure_{};
+    lv_subject_t dryer_humidity_{};
+    lv_subject_t sensor_count_{};
 };
 
 } // namespace helix::sensors

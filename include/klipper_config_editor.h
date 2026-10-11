@@ -76,19 +76,20 @@ class KlipperConfigEditor {
     using ErrorCallback = std::function<void(const std::string& error)>;
     using SectionMapCallback = std::function<void(std::map<std::string, SectionLocation>)>;
 
-    ConfigStructure parse_structure(const std::string& content) const;
+    static ConfigStructure parse_structure(const std::string& content);
 
     /// Set a value for an existing key within a file's content
     /// Returns modified content, or std::nullopt if key not found
-    std::optional<std::string> set_value(const std::string& content, const std::string& section,
-                                         const std::string& key,
-                                         const std::string& new_value) const;
+    static std::optional<std::string> set_value(const std::string& content,
+                                                const std::string& section, const std::string& key,
+                                                const std::string& new_value);
 
     /// Add a new key to an existing section
     /// Returns modified content, or std::nullopt if section not found
-    std::optional<std::string> add_key(const std::string& content, const std::string& section,
-                                       const std::string& key, const std::string& value,
-                                       const std::string& delimiter = ": ") const;
+    static std::optional<std::string> add_key(const std::string& content,
+                                              const std::string& section, const std::string& key,
+                                              const std::string& value,
+                                              const std::string& delimiter = ": ");
 
     /// Resolve all includes and build a section -> file mapping
     /// @param files Map of filename -> content (for unit testing without Moonraker)

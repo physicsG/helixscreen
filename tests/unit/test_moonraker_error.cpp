@@ -187,3 +187,23 @@ TEST_CASE("MoonrakerError::connection_lost preserves the default message and all
         CHECK(err.message == "Not connected to Moonraker");
     }
 }
+
+// moonraker/common.py JsonRPC.execute_method sends a ServerError with status
+// 404 as code -32601 and keeps its message; "Method not found" with the same
+// code is an unregistered method.
+TEST_CASE("MoonrakerError::is_not_found reads Moonraker's not-found shapes", "[moonraker][error]") {
+    auto rpc = [](int code, const char* message) {
+        return MoonrakerError::from_json_rpc({{"code", code}, {"message", message}}, "m");
+    };
+    CHECK(rpc(-32601, "Not Found").is_not_found());
+    CHECK(rpc(-32601, "Namespace lane_data not found").is_not_found());
+    CHECK(rpc(-32601, "Key 'x' in namespace 'y' not found").is_not_found());
+    CHECK_FALSE(rpc(-32601, "Method not found").is_not_found());
+    CHECK_FALSE(rpc(-32601, "Method not found for transport WEBSOCKET").is_not_found());
+    CHECK_FALSE(rpc(500, "Internal Server Error").is_not_found());
+    CHECK_FALSE(MoonrakerError::connection_lost("m").is_not_found());
+
+    MoonrakerError http;
+    http.code = 404;
+    CHECK(http.is_not_found());
+}

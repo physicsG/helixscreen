@@ -3,7 +3,7 @@
 
 #include <spdlog/spdlog.h>
 
-#include <cstdio>
+#include <fstream>
 #include <string>
 #include <sys/stat.h>
 #include <sys/utsname.h>
@@ -84,7 +84,14 @@ static std::string rooted(const std::string& probe_root, const char* abs_path) {
     return root + abs_path;
 }
 
-bool ad5x_mod_layout_present(const std::string& probe_root) {
+bool ad5x_mod_layout_present(const std::string& probe_root, const char** flavor_out) {
+    auto found = [&](const char* flavor) {
+        if (flavor_out != nullptr) {
+            *flavor_out = flavor;
+        }
+        return true;
+    };
+
     // ZMOD hosts carry FlashForge's /usr/prog dir or the /ZMOD marker file. A
     // Forge-X chroot has neither — and not even /usr/data, which the chroot
     // binds at /opt — but the mod's git tree stays reachable, and
@@ -94,39 +101,95 @@ bool ad5x_mod_layout_present(const std::string& probe_root) {
     struct ::stat st {};
     if ((::stat(rooted(probe_root, "/ZMOD").c_str(), &st) == 0 && S_ISREG(st.st_mode)) ||
         (::stat(rooted(probe_root, "/usr/prog").c_str(), &st) == 0 && S_ISDIR(st.st_mode))) {
-        return true;
+        return found("ZMOD");
     }
     for (const char* mod_tree : {"/opt/config/mod", "/usr/data/config/mod"}) {
         const std::string probe = rooted(probe_root, mod_tree) + "/.shell/platform.sh";
         if (::stat(probe.c_str(), &st) == 0 && S_ISREG(st.st_mode)) {
-            return true;
+            return found("Forge-X");
         }
     }
     return false;
 }
 
-void log_platform_info() {
-    struct utsname uts {};
-    if (uname(&uts) == 0) {
-        spdlog::info("[Application] Platform: {} {} {} ({})", uts.sysname, uts.release, uts.machine,
-                     uts.nodename);
-    }
+namespace {
 
-    // Total RAM from /proc/meminfo (Linux only)
-    FILE* f = fopen("/proc/meminfo", "r");
-    if (f) {
-        unsigned long mem_total_kb = 0;
-        if (fscanf(f, "MemTotal: %lu kB", &mem_total_kb) == 1 && mem_total_kb > 0) {
-            spdlog::info("[Application] Memory: {} MB", mem_total_kb / 1024);
+/// The last `KEY=` value from @p path, trimmed of whitespace and (for the
+/// os-release arm) shell quoting, or empty when the file is unreadable or
+/// carries no such line. Last-wins mirrors the shell rule (tail -n 1), which
+/// exists because start.sh rewrites its file on every boot.
+std::string last_assignment_value(const std::string& path, const std::string& key,
+                                  bool first_word) {
+    std::ifstream in(path);
+    if (!in.is_open()) {
+        return {};
+    }
+    const std::string needle = key + "=";
+    std::string line;
+    std::string value;
+    while (std::getline(in, line)) {
+        if (line.rfind(needle, 0) == 0) {
+            value = line.substr(needle.size());
         }
-        fclose(f);
     }
+    // Strip os-release's shell quoting and a CR left by CRLF firmware files,
+    // then keep the first word when the caller asked (VERSION_CODENAME's value
+    // is "<MACHINE> <version>" and the version is not part of the board name).
+    if (value.find_first_not_of(" \t") == std::string::npos) {
+        return {};
+    }
+    if (!value.empty() && (value.front() == '"' || value.front() == '\'')) {
+        value.erase(0, 1);
+    }
+    if (!value.empty() && (value.back() == '"' || value.back() == '\'' || value.back() == '\r')) {
+        value.pop_back();
+    }
+    const std::size_t start = value.find_first_not_of(" \t");
+    const std::size_t end = value.find_last_not_of(" \t\r");
+    value = value.substr(start, end - start + 1);
+    if (first_word) {
+        const std::size_t space = value.find_first_of(" \t");
+        if (space != std::string::npos) {
+            value.erase(space);
+        }
+    }
+    return value;
+}
 
-    // Display backend env var (if forced)
-    const char* backend_env = std::getenv("HELIX_DISPLAY_BACKEND");
-    if (backend_env && backend_env[0] != '\0') {
-        spdlog::info("[Application] Display backend (env): {}", backend_env);
+std::optional<FlashForgeMachine> machine_from_name(const std::string& name) {
+    if (name == "AD5X") {
+        return FlashForgeMachine::Ad5x;
     }
+    if (name == "Creator5") {
+        return FlashForgeMachine::Creator5;
+    }
+    if (name == "Creator5Pro") {
+        return FlashForgeMachine::Creator5Pro;
+    }
+    return std::nullopt;
+}
+
+} // namespace
+
+std::optional<FlashForgeMachine> flashforge_machine_id(const std::string& probe_root) {
+    if (auto machine = machine_from_name(last_assignment_value(
+            rooted(probe_root, "/usr/prog/app_startup.sh"), "MACHINE", false))) {
+        return machine;
+    }
+    return machine_from_name(
+        last_assignment_value(rooted(probe_root, "/etc/os-release"), "VERSION_CODENAME", true));
+}
+
+const char* flashforge_machine_display_name(FlashForgeMachine machine) {
+    switch (machine) {
+    case FlashForgeMachine::Ad5x:
+        return "FlashForge Adventurer 5X";
+    case FlashForgeMachine::Creator5:
+        return "FlashForge Creator 5";
+    case FlashForgeMachine::Creator5Pro:
+        return "FlashForge Creator 5 Pro";
+    }
+    return "";
 }
 
 std::string host_arch_string() {

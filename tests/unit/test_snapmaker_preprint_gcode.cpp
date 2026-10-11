@@ -310,7 +310,7 @@ TEST_CASE("reprint_remap: the recorded crossover survives into the reprint gcode
 TEST_CASE("reprint_remap: a routing that cannot answer for every used tool refuses",
           "[snapmaker][preprint][reprint]") {
     SECTION("an entry the parser could not read (-1) poisons the whole answer") {
-        // handle_status_update records an out-of-range or non-integer head as -1
+        // handle_status records an out-of-range or non-integer head as -1
         // rather than clamping to head 0. One unroutable used tool makes the rest
         // a guess, and a partly-guessed map is still written to the firmware in
         // full.
@@ -372,4 +372,43 @@ TEST_CASE("reprint_remap: extended tools follow the table, not the 4-head defaul
     REQUIRE(sm.build_preprint_gcode({5}, {}) ==
             "SET_PRINT_EXTRUDER_MAP CONFIG_EXTRUDER=5 MAP_EXTRUDER=0\n"
             "SET_PRINT_USED_EXTRUDERS EXTRUDERS=0");
+}
+
+// ============================================================================
+// One source for "which head does this tool default to"
+// ============================================================================
+//
+// FilamentMapper::identity_filtered_remap() decides which mappings are genuine
+// remaps worth emitting by asking FirmwareRouting::head(). preprint_gcode()
+// decides which head each emitted tool lands on. They must answer from the same
+// table: if they ever disagree, a tool is filtered out as "identity" by one and
+// resolved to a different head by the other, and the print silently runs from
+// the wrong head.
+
+TEST_CASE("Snapmaker preprint heads come from default_routing, not a second table",
+          "[snapmaker][preprint]") {
+    const auto routing = helix::AmsBackendSnapmaker::default_routing();
+    for (int tool : {0, 1, 2, 3, 4, 17, 31}) {
+        const std::string g = helix::AmsBackendSnapmaker::preprint_gcode({tool}, {});
+        const std::string expect = fmt::format(
+            "SET_PRINT_EXTRUDER_MAP CONFIG_EXTRUDER={} MAP_EXTRUDER={}", tool, routing.head(tool));
+        INFO("tool " << tool);
+        CHECK(g.find(expect) != std::string::npos);
+    }
+}
+
+TEST_CASE("Snapmaker preprint skips a tool the routing gives no head", "[snapmaker][preprint]") {
+    // routing.head(-1) is -1, "this tool has no head". Emitting it would write
+    // MAP_EXTRUDER=-1, which the firmware's bounds check (>= PHYSICAL_EXTRUDER_NUM)
+    // lets through and Python then applies to extruder_map_table[-1] — the LAST
+    // entry. Dropping it is the only safe answer.
+    const std::string g = helix::AmsBackendSnapmaker::preprint_gcode({-1, 2}, {});
+    CHECK(g.find("MAP_EXTRUDER=-1") == std::string::npos);
+    CHECK(g.find("CONFIG_EXTRUDER=-1") == std::string::npos);
+    CHECK(g.find("SET_PRINT_EXTRUDER_MAP CONFIG_EXTRUDER=2 MAP_EXTRUDER=2") != std::string::npos);
+    CHECK(g.find("SET_PRINT_USED_EXTRUDERS EXTRUDERS=2") != std::string::npos);
+}
+
+TEST_CASE("Snapmaker preprint yields nothing when no tool has a head", "[snapmaker][preprint]") {
+    CHECK(helix::AmsBackendSnapmaker::preprint_gcode({-1}, {}).empty());
 }

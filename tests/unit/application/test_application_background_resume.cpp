@@ -29,10 +29,12 @@
 
 #include "ui_nav_manager.h"
 #include "ui_panel_base.h"
+#include "ui_test_utils.h"
 #include "ui_update_queue.h"
 
 #include "app_globals.h"
 #include "application_test_fixture.h"
+#include "display/lv_display_private.h" // inv_en_cnt, restored after every test
 #include "lvgl/lvgl.h"
 #include "panel_lifecycle.h"
 #include "runtime_config.h"
@@ -51,7 +53,7 @@ class CountingOverlay : public IPanelLifecycle {
     void on_activate() override {
         ++activates;
     }
-    void on_deactivate() override {
+    void on_deactivate(DeactivateReason) override {
         ++deactivates;
     }
     const char* get_name() const override {
@@ -78,7 +80,7 @@ class CountingPanel : public PanelBase {
     void on_activate() override {
         ++activates;
     }
-    void on_deactivate() override {
+    void on_deactivating(DeactivateReason) override {
         ++deactivates;
     }
 
@@ -103,22 +105,14 @@ class BackgroundResumeFixture : public ApplicationTestFixture {
         get_runtime_config()->disable_sound = true;
 
         // on_enter_foreground() ends in lv_refr_now(nullptr), which refreshes EVERY
-        // display. Several unrelated test translation units create a bare
-        // lv_display_create() in a static initialiser (test_helix_print_api.cpp,
-        // test_metadata_and_usb_symlink.cpp, test_moonraker_api_domain.cpp, ...) with
-        // no buffers and no flush callback, so their disp->flushing is set and never
-        // cleared and lv_refr.c's wait_for_flushing() busy-waits forever — the hang
-        // tests/test_helpers/display_manager_test_access.h warns about. Giving every
-        // display a no-op flush_wait_cb takes the branch that clears the flag instead
-        // of spinning, so the real production repaint runs here rather than being
-        // stubbed out of the test.
-        for (lv_display_t* d = lv_display_get_next(nullptr); d != nullptr;
-             d = lv_display_get_next(d)) {
-            lv_display_set_flush_wait_cb(d, [](lv_display_t*) {});
-        }
+        // display, including the ones other translation units create with no flush
+        // callback. Re-assert the guarantee here so the real production repaint runs
+        // rather than being stubbed out of the test.
+        ensure_displays_never_block_on_flush();
 
         display_ = lv_display_get_default();
         REQUIRE(display_ != nullptr);
+        saved_inv_en_cnt_ = display_->inv_en_cnt;
         theme_manager_register_responsive_spacing(display_);
 
         auto& nav = NavigationManager::instance();
@@ -147,12 +141,10 @@ class BackgroundResumeFixture : public ApplicationTestFixture {
     }
 
     ~BackgroundResumeFixture() override {
-        // Never leave a test with rendering suppressed for the next one.
-        lv_display_enable_invalidation(nullptr, true);
-        for (lv_display_t* d = lv_display_get_next(nullptr); d != nullptr;
-             d = lv_display_get_next(d)) {
-            lv_display_set_flush_wait_cb(d, nullptr);
-        }
+        // Leave the display's invalidation count as this test found it. An enable with
+        // no disable of its own would raise it past 1, and a single disable anywhere
+        // later in the shard would then no longer suppress rendering.
+        display_->inv_en_cnt = saved_inv_en_cnt_;
         auto& nav = NavigationManager::instance();
         // Leave the suspend latch cleared for the next test, whatever this one did.
         nav.resume_active();
@@ -185,6 +177,7 @@ class BackgroundResumeFixture : public ApplicationTestFixture {
     CountingPanel panel_;
     std::array<lv_obj_t*, UI_PANEL_COUNT> root_panels_{};
     lv_display_t* display_ = nullptr;
+    decltype(lv_display_t::inv_en_cnt) saved_inv_en_cnt_ = 0;
     bool sound_was_disabled_ = false;
 };
 

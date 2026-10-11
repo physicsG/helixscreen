@@ -12,8 +12,11 @@
 #include "ui_filament_path_canvas.h"
 
 #include "ui_filament_path_internal.h"
+#include "ui_filament_path_plan.h"
 #include "ui_fonts.h"
 
+#include "clog_meter_geometry.h"
+#include "display_numbering.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "helix-xml/src/xml/lv_xml_parser.h"
 #include "helix-xml/src/xml/lv_xml_widget.h"
@@ -45,12 +48,19 @@ FilamentPathData* get_data(lv_obj_t* obj) {
 
 } // namespace helix::ui::fpath
 
-// Load theme-aware colors, fonts, and sizes
-static void load_theme_colors(FilamentPathData* data) {
-    bool dark_mode = theme_manager_is_dark_mode();
-    ThemeCache& theme = data->theme;
+namespace helix::ui::fpath {
 
-    // Use theme tokens with dark/light mode awareness
+bool refresh_theme_colors(FilamentPathData* data) {
+    ThemeCache& theme = data->theme;
+    lv_subject_t* changed = theme_manager_get_changed_subject();
+    const int generation = changed ? lv_subject_get_int(changed) : 0;
+    const bool dark_mode = theme_manager_is_dark_mode();
+    if (theme.colors_loaded && theme.generation == generation && theme.dark_mode == dark_mode)
+        return false;
+    theme.colors_loaded = true;
+    theme.generation = generation;
+    theme.dark_mode = dark_mode;
+
     theme.color_idle =
         theme_manager_get_color(dark_mode ? "filament_idle_dark" : "filament_idle_light");
     theme.color_error = theme_manager_get_color("filament_error");
@@ -58,18 +68,34 @@ static void load_theme_colors(FilamentPathData* data) {
         theme_manager_get_color(dark_mode ? "filament_hub_bg_dark" : "filament_hub_bg_light");
     theme.color_hub_border = theme_manager_get_color(dark_mode ? "filament_hub_border_dark"
                                                                : "filament_hub_border_light");
-    theme.color_nozzle = lv_color_hex(NOZZLE_UNLOADED_COLOR);
     theme.color_text = theme_manager_get_color("text");
     theme.color_bg = theme_manager_get_color("card_bg");
     theme.color_success = theme_manager_get_color("success");
+    theme.color_warning = theme_manager_get_color("warning");
+    theme.color_muted = theme_manager_get_color("text_muted");
+    theme.color_accent = helix::ui::tube_accent();
+    for (int s = 0; s < 3; ++s) {
+        theme.color_buffer[s] = theme_manager_get_color(
+            helix::ui::buffer_status_token(static_cast<helix::ui::ClogMeterStatus>(s)));
+    }
+    spdlog::trace("[FilamentPath] Theme colors loaded (dark={}, generation={})", dark_mode,
+                  generation);
+    return true;
+}
 
-    // Get responsive sizing from theme
+} // namespace helix::ui::fpath
+
+// Sizes and the label font are bound to the breakpoint, not the theme, so a
+// theme switch leaves them as read at creation.
+static void load_theme_sizes(FilamentPathData* data) {
+    ThemeCache& theme = data->theme;
     int32_t space_xs = theme_manager_get_spacing("space_xs");
     int32_t space_md = theme_manager_get_spacing("space_md");
 
     // Scale line widths based on spacing (responsive)
     theme.line_width_idle = LV_MAX(2, space_xs / 2);
     theme.line_width_active = LV_MAX(3, space_xs - 3);
+    theme.tube_gauge = tube_gauge_for_spacing(space_xs);
     theme.sensor_radius = LV_MAX(4, space_xs);
     theme.hub_width = LV_MAX(50, space_md * 5);
     theme.border_radius = LV_MAX(4, space_xs);
@@ -78,9 +104,6 @@ static void load_theme_colors(FilamentPathData* data) {
     // Get responsive font from globals.xml (font_small → responsive variant)
     const char* font_name = lv_xml_get_const(nullptr, "font_small");
     theme.label_font = font_name ? lv_xml_get_font(nullptr, font_name) : &noto_sans_12;
-
-    spdlog::trace("[FilamentPath] Theme colors loaded (dark={}, font={})", dark_mode,
-                  font_name ? font_name : "fallback");
 }
 
 // ============================================================================
@@ -130,6 +153,14 @@ bool helix::ui::hub_box_hit(lv_point_t p, int32_t cx, int32_t cy, int32_t w, int
     return (abs(p.x - cx) <= w / 2 + margin) && (abs(p.y - cy) <= h / 2 + margin);
 }
 
+bool helix::ui::recorded_box_hit(lv_point_t p, const lv_area_t& box, lv_point_t rendered_origin,
+                                 lv_point_t current_origin, int32_t margin) {
+    lv_point_t q{p.x + rendered_origin.x - current_origin.x,
+                 p.y + rendered_origin.y - current_origin.y};
+    return hub_box_hit(q, (box.x1 + box.x2) / 2, (box.y1 + box.y2) / 2, box.x2 - box.x1,
+                       box.y2 - box.y1, margin);
+}
+
 // ============================================================================
 // Event handlers
 // ============================================================================
@@ -144,6 +175,11 @@ static void filament_path_draw_cb(lv_event_t* e) {
     if (!data)
         return;
 
+    // A theme or dark-mode switch invalidates the screen; the first draw after
+    // it repaints the canvas, whose tubes still hold the old colors.
+    if (refresh_theme_colors(data))
+        layered_schedule_repaint(obj, data);
+    layered_on_draw(obj, data);
     render_animation_overlay(obj, layer, data);
 }
 
@@ -166,10 +202,11 @@ static void filament_path_click_cb(lv_event_t* e) {
 
     // For PARALLEL topology (tool changers), accept clicks on toolheads AND the
     // filament line/spool area (top half of canvas, above the sensor dots)
-    if (data->topology == static_cast<int>(PathTopology::PARALLEL) && data->slot_callback) {
-        int32_t toolhead_y = y_off + (int32_t)(height * PARALLEL_TOOLHEAD_Y_RATIO);
-        int32_t sensor_y = y_off + (int32_t)(height * PARALLEL_SENSOR_Y_RATIO);
-        int32_t tool_scale = LV_MAX(6, data->theme.extruder_scale * 2 / 3);
+    if (data->topology == static_cast<int>(helix::PathTopology::PARALLEL) && data->slot_callback) {
+        const ParallelRows rows = parallel_rows(*data, compute_base_geometry(obj, data));
+        int32_t toolhead_y = rows.toolhead_y;
+        int32_t sensor_y = rows.sensor_y;
+        int32_t tool_scale = rows.tool_scale;
 
         // Toolhead click area (bottom half). On a toolchanger the nozzle asks a
         // different question from the spool above it — mount/park this head, vs
@@ -218,14 +255,12 @@ static void filament_path_click_cb(lv_event_t* e) {
     }
 
     // Check if buffer coil was clicked. The renderer records the exact drawn
-    // box in data->hits.buffer (absolute coords); reading it avoids
+    // box in data->hits.buffer; reading it avoids
     // re-deriving the clamped box dimensions and slot-midpoint center_x.
     // buffer_valid is set only when the box was actually drawn this pass.
     if (data->buffer_present && data->buffer_callback && data->hits.buffer_valid) {
-        const lv_area_t& r = data->hits.buffer;
-        int32_t cx = (r.x1 + r.x2) / 2;
-        int32_t cy = (r.y1 + r.y2) / 2;
-        if (helix::ui::hub_box_hit(point, cx, cy, r.x2 - r.x1, r.y2 - r.y1, 4)) {
+        if (helix::ui::recorded_box_hit(point, data->hits.buffer, data->hits.origin, {x_off, y_off},
+                                        4)) {
             spdlog::debug("[FilamentPath] Buffer coil clicked");
             data->buffer_callback(data->buffer_user_data);
             return;
@@ -233,15 +268,13 @@ static void filament_path_click_cb(lv_event_t* e) {
     }
 
     // Check if the selector/hub box was clicked. The renderer records the exact
-    // drawn box in data->hits.hub (absolute coords) — the single source of
+    // drawn box in data->hits.hub — the single source of
     // truth — so we never re-derive geometry that could drift from what's on
     // screen. hub_valid is set only when a box was actually drawn this pass
     // (LINEAR selector / HUB), so PARALLEL is naturally excluded.
     if (data->hub_callback && data->hits.hub_valid) {
-        const lv_area_t& r = data->hits.hub;
-        int32_t cx = (r.x1 + r.x2) / 2;
-        int32_t cy = (r.y1 + r.y2) / 2;
-        if (helix::ui::hub_box_hit(point, cx, cy, r.x2 - r.x1, r.y2 - r.y1, 4)) {
+        if (helix::ui::recorded_box_hit(point, data->hits.hub, data->hits.origin, {x_off, y_off},
+                                        4)) {
             spdlog::debug("[FilamentPath] Selector/hub box clicked");
             data->hub_callback(point, data->hub_user_data);
             return;
@@ -249,16 +282,14 @@ static void filament_path_click_cb(lv_event_t* e) {
     }
 
     // Check if bypass spool box was clicked (right side) — check before entry area.
-    // The renderer records the exact hit region in data->hits.bypass
-    // (absolute coords); bypass_valid is set only when the bypass section was
-    // actually drawn (!hub_only && show_bypass), keeping the hit-test in lockstep
+    // The renderer records the exact hit region in data->hits.bypass;
+    // bypass_valid is set only when the bypass section was
+    // actually drawn (show_bypass), keeping the hit-test in lockstep
     // with visibility. The rect's half-extents already encode the original
     // full-extent bounds (sensor_r*3 / sensor_r*4), so read with margin 0.
     if (data->show_bypass && data->bypass_callback && data->hits.bypass_valid) {
-        const lv_area_t& r = data->hits.bypass;
-        int32_t cx = (r.x1 + r.x2) / 2;
-        int32_t cy = (r.y1 + r.y2) / 2;
-        if (helix::ui::hub_box_hit(point, cx, cy, r.x2 - r.x1, r.y2 - r.y1, 0)) {
+        if (helix::ui::recorded_box_hit(point, data->hits.bypass, data->hits.origin, {x_off, y_off},
+                                        0)) {
             spdlog::debug("[FilamentPath] Bypass spool box clicked");
             data->bypass_callback(data->bypass_user_data);
             return;
@@ -314,8 +345,8 @@ static lv_obj_t* create_widget(lv_obj_t* parent) {
     s_registry[obj] = data_ptr.get();
     auto* data = data_ptr.release();
 
-    // Load theme-aware colors, fonts, and sizes
-    load_theme_colors(data);
+    refresh_theme_colors(data);
+    load_theme_sizes(data);
 
     // Configure object
     lv_obj_set_size(obj, DEFAULT_WIDTH, DEFAULT_HEIGHT);
@@ -385,10 +416,10 @@ static void filament_path_xml_apply(lv_xml_parser_state_t* state, const char** a
             data->active_slot = atoi(value);
             needs_redraw = true;
         } else if (strcmp(name, "filament_segment") == 0) {
-            data->filament_segment = LV_CLAMP(atoi(value), 0, PATH_SEGMENT_COUNT - 1);
+            data->filament_segment = LV_CLAMP(atoi(value), 0, helix::PATH_SEGMENT_COUNT - 1);
             needs_redraw = true;
         } else if (strcmp(name, "error_segment") == 0) {
-            data->error_segment = LV_CLAMP(atoi(value), 0, PATH_SEGMENT_COUNT - 1);
+            data->error_segment = LV_CLAMP(atoi(value), 0, helix::PATH_SEGMENT_COUNT - 1);
             needs_redraw = true;
         } else if (strcmp(name, "anim_progress") == 0) {
             data->anim.progress = LV_CLAMP(atoi(value), 0, 100);
@@ -402,14 +433,11 @@ static void filament_path_xml_apply(lv_xml_parser_state_t* state, const char** a
         } else if (strcmp(name, "show_bypass") == 0) {
             data->show_bypass = (strcmp(value, "true") == 0 || strcmp(value, "1") == 0);
             needs_redraw = true;
-        } else if (strcmp(name, "hub_only") == 0) {
-            data->hub_only = (strcmp(value, "true") == 0 || strcmp(value, "1") == 0);
-            needs_redraw = true;
         }
     }
 
     if (needs_redraw) {
-        layered_mark_dirty(obj, true, true);
+        layered_mark_dirty(obj);
     }
 }
 
@@ -444,7 +472,7 @@ void ui_filament_path_canvas_set_topology(lv_obj_t* obj, int topology) {
     if (!data || data->topology == topology)
         return;
     data->topology = topology;
-    layered_mark_dirty(obj, true, true);
+    layered_mark_dirty(obj);
 }
 
 void ui_filament_path_canvas_set_hub_on_toolhead(lv_obj_t* obj, bool on_toolhead) {
@@ -452,7 +480,7 @@ void ui_filament_path_canvas_set_hub_on_toolhead(lv_obj_t* obj, bool on_toolhead
     if (!data || data->hub_on_toolhead == on_toolhead)
         return;
     data->hub_on_toolhead = on_toolhead;
-    layered_mark_dirty(obj, true, true);
+    layered_mark_dirty(obj);
 }
 
 void ui_filament_path_canvas_set_slot_count(lv_obj_t* obj, int count) {
@@ -463,7 +491,7 @@ void ui_filament_path_canvas_set_slot_count(lv_obj_t* obj, int count) {
     if (data->slot_count == clamped)
         return;
     data->slot_count = clamped;
-    layered_mark_dirty(obj, true, true);
+    layered_mark_dirty(obj);
 }
 
 void ui_filament_path_canvas_set_slot_overlap(lv_obj_t* obj, int32_t overlap) {
@@ -475,7 +503,7 @@ void ui_filament_path_canvas_set_slot_overlap(lv_obj_t* obj, int32_t overlap) {
         return;
     data->slot_overlap = clamped;
     spdlog::trace("[FilamentPath] Slot overlap set to {}px", data->slot_overlap);
-    layered_mark_dirty(obj, true, true);
+    layered_mark_dirty(obj);
 }
 
 void ui_filament_path_canvas_set_slot_width(lv_obj_t* obj, int32_t width) {
@@ -487,7 +515,7 @@ void ui_filament_path_canvas_set_slot_width(lv_obj_t* obj, int32_t width) {
         return;
     data->slot_width = clamped;
     spdlog::trace("[FilamentPath] Slot width set to {}px", data->slot_width);
-    layered_mark_dirty(obj, true, true);
+    layered_mark_dirty(obj);
 }
 
 void ui_filament_path_canvas_set_slot_grid(lv_obj_t* obj, lv_obj_t* slot_grid) {
@@ -495,22 +523,32 @@ void ui_filament_path_canvas_set_slot_grid(lv_obj_t* obj, lv_obj_t* slot_grid) {
     if (!data)
         return;
 
-    data->slot_grid = slot_grid;
-
     // Pre-cache spool_container pointers to avoid per-frame lv_obj_find_by_name
-    std::memset(data->spool_containers, 0, sizeof(data->spool_containers));
+    lv_obj_t* containers[FilamentPathData::MAX_SLOTS] = {};
+    int child_count = 0;
     if (slot_grid) {
-        int child_count =
-            LV_MIN((int)lv_obj_get_child_count(slot_grid), FilamentPathData::MAX_SLOTS);
+        child_count = LV_MIN((int)lv_obj_get_child_count(slot_grid), FilamentPathData::MAX_SLOTS);
         for (int i = 0; i < child_count; i++) {
             lv_obj_t* slot = lv_obj_get_child(slot_grid, i);
             if (slot) {
-                data->spool_containers[i] = lv_obj_find_by_name(slot, "spool_container");
+                containers[i] = lv_obj_find_by_name(slot, "spool_container");
             }
         }
+    }
+
+    // The lanes are drawn from these slots' positions, so a different grid, or
+    // different slots in it, needs a repaint even when nothing else changed.
+    if (data->slot_grid == slot_grid &&
+        std::memcmp(data->spool_containers, containers, sizeof(containers)) == 0)
+        return;
+
+    data->slot_grid = slot_grid;
+    std::memcpy(data->spool_containers, containers, sizeof(containers));
+    if (slot_grid) {
         spdlog::debug("[FilamentPath] Cached {} spool_container pointers from slot_grid",
                       child_count);
     }
+    layered_mark_dirty(obj);
 }
 
 void ui_filament_path_canvas_set_active_slot(lv_obj_t* obj, int slot) {
@@ -533,7 +571,7 @@ void ui_filament_path_canvas_set_active_slot(lv_obj_t* obj, int slot) {
         start_output_x_animation(obj, data, old_x, new_x);
     }
 
-    layered_mark_dirty(obj, true, true);
+    layered_mark_dirty(obj);
 }
 
 void ui_filament_path_canvas_set_filament_segment(lv_obj_t* obj, int segment) {
@@ -541,7 +579,7 @@ void ui_filament_path_canvas_set_filament_segment(lv_obj_t* obj, int segment) {
     if (!data)
         return;
 
-    int new_segment = LV_CLAMP(segment, 0, PATH_SEGMENT_COUNT - 1);
+    int new_segment = LV_CLAMP(segment, 0, helix::PATH_SEGMENT_COUNT - 1);
 
     // When not in eject mode and the active slot has a prep sensor, clamp the
     // minimum displayed segment to LANE so the retract animation stops at the
@@ -549,8 +587,8 @@ void ui_filament_path_canvas_set_filament_segment(lv_obj_t* obj, int segment) {
     if (!data->eject_mode && data->active_slot >= 0 &&
         data->active_slot < FilamentPathData::MAX_SLOTS &&
         data->slot_has_prep_sensor[data->active_slot] && new_segment > 0 &&
-        new_segment < static_cast<int>(PathSegment::LANE)) {
-        new_segment = static_cast<int>(PathSegment::LANE);
+        new_segment < static_cast<int>(helix::PathSegment::LANE)) {
+        new_segment = static_cast<int>(helix::PathSegment::LANE);
     }
 
     int old_segment = data->filament_segment;
@@ -568,13 +606,13 @@ void ui_filament_path_canvas_set_filament_segment(lv_obj_t* obj, int segment) {
     // setup) are not real flow operations -- don't stop flow for those.
     if (data->anim.flow_active) {
         int step = std::abs(new_segment - old_segment);
-        bool is_terminal = (new_segment == 0 || new_segment == PATH_SEGMENT_COUNT - 1);
+        bool is_terminal = (new_segment == 0 || new_segment == helix::PATH_SEGMENT_COUNT - 1);
         if (is_terminal && step <= 2) {
             stop_flow_animation(obj, data);
         }
     }
 
-    layered_mark_dirty(obj, true, true);
+    layered_mark_dirty(obj);
 }
 
 void ui_filament_path_canvas_set_error_segment(lv_obj_t* obj, int segment) {
@@ -582,7 +620,7 @@ void ui_filament_path_canvas_set_error_segment(lv_obj_t* obj, int segment) {
     if (!data)
         return;
 
-    int new_error = LV_CLAMP(segment, 0, PATH_SEGMENT_COUNT - 1);
+    int new_error = LV_CLAMP(segment, 0, helix::PATH_SEGMENT_COUNT - 1);
     int old_error = data->error_segment;
 
     if (new_error == old_error)
@@ -601,7 +639,7 @@ void ui_filament_path_canvas_set_error_segment(lv_obj_t* obj, int segment) {
         spdlog::debug("[FilamentPath] Error cleared - stopping pulse");
     }
 
-    layered_mark_dirty(obj, true, true);
+    layered_mark_dirty(obj);
 }
 
 void ui_filament_path_canvas_set_anim_progress(lv_obj_t* obj, int progress) {
@@ -612,7 +650,7 @@ void ui_filament_path_canvas_set_anim_progress(lv_obj_t* obj, int progress) {
     if (data->anim.progress == clamped)
         return;
     data->anim.progress = clamped;
-    layered_mark_dirty(obj, true, true);
+    layered_mark_dirty(obj);
 }
 
 void ui_filament_path_canvas_set_filament_color(lv_obj_t* obj, uint32_t color) {
@@ -620,11 +658,11 @@ void ui_filament_path_canvas_set_filament_color(lv_obj_t* obj, uint32_t color) {
     if (!data || data->filament_color == color)
         return;
     data->filament_color = color;
-    layered_mark_dirty(obj, true, true);
+    layered_mark_dirty(obj);
 }
 
 void ui_filament_path_canvas_refresh(lv_obj_t* obj) {
-    layered_mark_dirty(obj, true, true);
+    layered_mark_dirty(obj);
 }
 
 void ui_filament_path_canvas_set_slot_callback(lv_obj_t* obj, filament_path_slot_cb_t cb,
@@ -642,7 +680,7 @@ void ui_filament_path_canvas_set_mounted_tool(lv_obj_t* obj, int tool_index) {
         return;
     }
     data->mounted_tool = tool_index;
-    layered_mark_dirty(obj, true, true);
+    layered_mark_dirty(obj);
 }
 
 void ui_filament_path_canvas_set_toolhead_callback(lv_obj_t* obj, filament_path_slot_cb_t cb,
@@ -667,8 +705,8 @@ void ui_filament_path_canvas_animate_segment(lv_obj_t* obj, int from_segment, in
     if (!data)
         return;
 
-    int from = LV_CLAMP(from_segment, 0, PATH_SEGMENT_COUNT - 1);
-    int to = LV_CLAMP(to_segment, 0, PATH_SEGMENT_COUNT - 1);
+    int from = LV_CLAMP(from_segment, 0, helix::PATH_SEGMENT_COUNT - 1);
+    int to = LV_CLAMP(to_segment, 0, helix::PATH_SEGMENT_COUNT - 1);
 
     if (from != to) {
         start_segment_animation(obj, data, from, to);
@@ -693,7 +731,7 @@ void ui_filament_path_canvas_stop_animations(lv_obj_t* obj) {
     stop_error_pulse(obj, data);
     stop_flow_animation(obj, data);
     stop_heat_pulse(obj, data);
-    layered_mark_dirty(obj, true, true);
+    layered_mark_dirty(obj);
 }
 
 void ui_filament_path_canvas_set_slot_filament(lv_obj_t* obj, int slot_index, int segment,
@@ -703,21 +741,21 @@ void ui_filament_path_canvas_set_slot_filament(lv_obj_t* obj, int slot_index, in
         return;
 
     auto& state = data->slot_filament_states[slot_index];
-    PathSegment new_segment = static_cast<PathSegment>(segment);
+    helix::PathSegment new_segment = static_cast<helix::PathSegment>(segment);
 
     if (state.segment != new_segment || state.color != color) {
         state.segment = new_segment;
         state.color = color;
         spdlog::trace("[FilamentPath] Slot {} filament: segment={}, color=0x{:06X}", slot_index,
                       segment, color);
-        layered_mark_dirty(obj, true, true);
+        layered_mark_dirty(obj);
     }
 }
 
 int ui_filament_path_canvas_get_slot_filament(lv_obj_t* obj, int slot_index) {
     auto* data = get_data(obj);
     if (!data || slot_index < 0 || slot_index >= FilamentPathData::MAX_SLOTS)
-        return static_cast<int>(PathSegment::NONE);
+        return static_cast<int>(helix::PathSegment::NONE);
     return static_cast<int>(data->slot_filament_states[slot_index].segment);
 }
 
@@ -728,7 +766,30 @@ void ui_filament_path_canvas_set_slot_prep_sensor(lv_obj_t* obj, int slot, bool 
     if (data->slot_has_prep_sensor[slot] != has_sensor) {
         data->slot_has_prep_sensor[slot] = has_sensor;
         spdlog::trace("[FilamentPath] Slot {} prep sensor: {}", slot, has_sensor);
-        layered_mark_dirty(obj, true, true);
+        layered_mark_dirty(obj);
+    }
+}
+
+void ui_filament_path_canvas_set_slot_load_sensor(lv_obj_t* obj, int slot, bool has_sensor) {
+    auto* data = get_data(obj);
+    if (!data || slot < 0 || slot >= FilamentPathData::MAX_SLOTS)
+        return;
+    if (data->slot_has_load_sensor[slot] != has_sensor) {
+        data->slot_has_load_sensor[slot] = has_sensor;
+        spdlog::trace("[FilamentPath] Slot {} load sensor: {}", slot, has_sensor);
+        layered_mark_dirty(obj);
+    }
+}
+
+// NAMESPACE_OK: the widget's C setter API, beside its siblings
+void ui_filament_path_canvas_set_slot_error(lv_obj_t* obj, int slot, bool has_error) {
+    auto* data = get_data(obj);
+    if (!data || slot < 0 || slot >= FilamentPathData::MAX_SLOTS)
+        return;
+    if (data->slot_has_error[slot] != has_error) {
+        data->slot_has_error[slot] = has_error;
+        spdlog::trace("[FilamentPath] Slot {} error: {}", slot, has_error);
+        layered_mark_dirty(obj);
     }
 }
 
@@ -738,7 +799,7 @@ void ui_filament_path_canvas_set_slot_mapped_tool(lv_obj_t* obj, int slot, int t
         return;
     if (data->mapped_tool[slot] != tool) {
         data->mapped_tool[slot] = tool;
-        layered_mark_dirty(obj, true, true);
+        layered_mark_dirty(obj);
     }
 }
 
@@ -748,21 +809,20 @@ namespace helix::ui::fpath {
 
 void format_tool_badge_label(const FilamentPathData* data, int lane, int fallback_tool, char* out,
                              size_t out_size) {
-    // Always "T<n>" — a toolhead is what this labels, and T is what every
-    // surface that talks about one calls it (the U1's own UI, ACE_LOAD_HEAD
-    // HEAD=n, print_task_config's per-tool arrays). "E<n>" said extruder while
-    // pointing at a toolhead, and sat next to spool badges that said T, so the
-    // two letters read as two different numbering schemes for one thing.
+    // Always tool_label()'s "T<n>": a toolhead is what this labels, and T is
+    // what every surface that talks about one calls it. "E<n>" says extruder
+    // while pointing at a toolhead, beside spool badges that say T, so the two
+    // letters read as two numbering schemes for one thing.
     //
-    // The extruder-derived NUMBER is still preferred, which is the half of
-    // #1229 that mattered: AFC's mapped_tool is a *virtual* lane alias and can
-    // disagree with the physical toolhead, while the extruder name cannot.
+    // The extruder-derived NUMBER is still preferred: a mapped_tool can be a
+    // *virtual* lane alias that disagrees with the physical toolhead, while the
+    // extruder name cannot (prestonbrown/helixscreen#1229).
     if (data && data->use_extruder_identity && lane >= 0 && lane < FilamentPathData::MAX_SLOTS &&
         data->extruder_tool[lane] >= 0) {
-        snprintf(out, out_size, "T%d", data->extruder_tool[lane]);
+        snprintf(out, out_size, "%s", helix::ui::tool_label(data->extruder_tool[lane]).c_str());
         return;
     }
-    snprintf(out, out_size, "T%d", fallback_tool);
+    snprintf(out, out_size, "%s", helix::ui::tool_label(fallback_tool).c_str());
 }
 
 } // namespace helix::ui::fpath
@@ -790,7 +850,7 @@ void ui_filament_path_canvas_set_extruder_tools(lv_obj_t* obj, const int* tools,
     }
     data->use_extruder_identity = complete;
     if (changed) {
-        layered_mark_dirty(obj, true, true);
+        layered_mark_dirty(obj);
     }
 }
 
@@ -800,7 +860,7 @@ void ui_filament_path_canvas_set_slot_hub_routed(lv_obj_t* obj, int slot, bool i
         return;
     if (data->slot_is_hub_routed[slot] != is_hub) {
         data->slot_is_hub_routed[slot] = is_hub;
-        layered_mark_dirty(obj, true, true);
+        layered_mark_dirty(obj);
     }
 }
 
@@ -811,6 +871,15 @@ void ui_filament_path_canvas_set_eject_mode(lv_obj_t* obj, bool eject) {
     data->eject_mode = eject;
 }
 
+// NAMESPACE_OK: the widget's C setter API, beside its siblings
+void ui_filament_path_canvas_set_toolhead_sensor(lv_obj_t* obj, bool has_sensor) {
+    auto* data = get_data(obj);
+    if (!data || data->has_toolhead_sensor == has_sensor)
+        return;
+    data->has_toolhead_sensor = has_sensor;
+    layered_mark_dirty(obj);
+}
+
 void ui_filament_path_canvas_clear_slot_filaments(lv_obj_t* obj) {
     auto* data = get_data(obj);
     if (!data)
@@ -818,8 +887,8 @@ void ui_filament_path_canvas_clear_slot_filaments(lv_obj_t* obj) {
 
     bool changed = false;
     for (int i = 0; i < FilamentPathData::MAX_SLOTS; i++) {
-        if (data->slot_filament_states[i].segment != PathSegment::NONE) {
-            data->slot_filament_states[i].segment = PathSegment::NONE;
+        if (data->slot_filament_states[i].segment != helix::PathSegment::NONE) {
+            data->slot_filament_states[i].segment = helix::PathSegment::NONE;
             data->slot_filament_states[i].color = 0x808080;
             changed = true;
         }
@@ -827,7 +896,7 @@ void ui_filament_path_canvas_clear_slot_filaments(lv_obj_t* obj) {
 
     if (changed) {
         spdlog::trace("[FilamentPath] Cleared all slot filament states");
-        layered_mark_dirty(obj, true, true);
+        layered_mark_dirty(obj);
     }
 }
 
@@ -839,7 +908,7 @@ void ui_filament_path_canvas_set_show_bypass(lv_obj_t* obj, bool show) {
     if (data->show_bypass != show) {
         data->show_bypass = show;
         spdlog::debug("[FilamentPath] Show bypass: {}", show ? "yes" : "no");
-        layered_mark_dirty(obj, true, true);
+        layered_mark_dirty(obj);
     }
 }
 
@@ -851,7 +920,7 @@ void ui_filament_path_canvas_set_bypass_active(lv_obj_t* obj, bool active) {
     if (data->bypass_active != active) {
         data->bypass_active = active;
         spdlog::debug("[FilamentPath] Bypass mode: {}", active ? "active" : "inactive");
-        layered_mark_dirty(obj, true, true);
+        layered_mark_dirty(obj);
     }
 }
 
@@ -873,16 +942,32 @@ void ui_filament_path_canvas_set_buffer_callback(lv_obj_t* obj, filament_path_bu
     }
 }
 
-void ui_filament_path_canvas_set_hub_only(lv_obj_t* obj, bool hub_only) {
+// NAMESPACE_OK: the widget's C setter API, beside its siblings
+void ui_filament_path_canvas_set_lane_entry(lv_obj_t* obj, int32_t offset_from_slot_grid) {
     auto* data = get_data(obj);
-    if (!data)
+    if (!data || data->lane_entry_offset == offset_from_slot_grid)
         return;
+    data->lane_entry_offset = offset_from_slot_grid;
+    layered_mark_dirty(obj);
+}
 
-    if (data->hub_only != hub_only) {
-        data->hub_only = hub_only;
-        spdlog::debug("[FilamentPath] Hub-only mode: {}", hub_only ? "on" : "off");
-        layered_mark_dirty(obj, true, true);
-    }
+// NAMESPACE_OK: the widget's C setter API, beside its siblings
+void ui_filament_path_canvas_set_bowden_fill(lv_obj_t* obj, int percent) {
+    auto* data = get_data(obj);
+    const int fill = percent < 0 ? -1 : LV_MIN(percent, 100);
+    if (!data || data->bowden_fill == fill)
+        return;
+    data->bowden_fill = fill;
+    layered_mark_dirty(obj);
+}
+
+void ui_filament_path_canvas_set_hub_sensor(lv_obj_t* obj, bool has_sensor, bool triggered) {
+    auto* data = get_data(obj);
+    if (!data || (data->has_hub_sensor == has_sensor && data->hub_sensor_triggered == triggered))
+        return;
+    data->has_hub_sensor = has_sensor;
+    data->hub_sensor_triggered = triggered;
+    layered_mark_dirty(obj);
 }
 
 void ui_filament_path_canvas_set_heat_active(lv_obj_t* obj, bool active) {
@@ -901,7 +986,7 @@ void ui_filament_path_canvas_set_heat_active(lv_obj_t* obj, bool active) {
             spdlog::debug("[FilamentPath] Heat glow: inactive");
         }
 
-        layered_mark_dirty(obj, true, true);
+        layered_mark_dirty(obj);
     }
 }
 
@@ -913,29 +998,45 @@ void ui_filament_path_canvas_set_buffer_fault_state(lv_obj_t* obj, int state) {
     if (data->buffer_fault_state != state) {
         data->buffer_fault_state = state;
         spdlog::debug("[FilamentPath] Buffer fault state: {}", state);
-        layered_mark_dirty(obj, true, true);
+        layered_mark_dirty(obj);
     }
 }
 
-void ui_filament_path_canvas_set_buffer_info(lv_obj_t* obj, bool present, int state) {
+void helix::ui::filament_path_canvas_release_buffer(lv_obj_t* obj) {
+    if (auto* data = get_data(obj))
+        layered_release_buffer(data);
+}
+
+int helix::ui::filament_path_canvas_buffer_fault_state(lv_obj_t* obj) {
+    auto* data = get_data(obj);
+    return data ? data->buffer_fault_state : 0;
+}
+
+void ui_filament_path_canvas_set_buffer_info(lv_obj_t* obj, bool present, int state,
+                                             const char* label) {
     auto* data = get_data(obj);
     if (!data)
         return;
 
     state = LV_CLAMP(0, state, 2);
-    if (data->buffer_present != present || data->buffer_state != state) {
+    if (!label)
+        label = "BUF";
+    if (data->buffer_present != present || data->buffer_state != state ||
+        std::strcmp(data->buffer_label, label) != 0) {
         data->buffer_present = present;
         data->buffer_state = state;
-        spdlog::debug("[FilamentPath] Buffer info: present={}, state={}", present, state);
-        layered_mark_dirty(obj, true, true);
+        data->buffer_label = label;
+        spdlog::debug("[FilamentPath] Buffer info: present={}, state={}, label={}", present, state,
+                      label);
+        layered_mark_dirty(obj);
     }
 }
 
 void ui_filament_path_canvas_set_buffer_bias(lv_obj_t* obj, float bias) {
     auto* data = get_data(obj);
-    if (data) {
+    if (data && data->buffer_bias != bias) {
         data->buffer_bias = bias;
-        layered_mark_dirty(obj, true, true);
+        layered_mark_dirty(obj);
     }
 }
 
@@ -944,7 +1045,7 @@ void ui_filament_path_canvas_set_bypass_color(lv_obj_t* obj, uint32_t color) {
     if (!data || data->bypass_color == color)
         return;
     data->bypass_color = color;
-    layered_mark_dirty(obj, true, true);
+    layered_mark_dirty(obj);
 }
 
 void ui_filament_path_canvas_set_bypass_has_spool(lv_obj_t* obj, bool has_spool) {
@@ -952,12 +1053,83 @@ void ui_filament_path_canvas_set_bypass_has_spool(lv_obj_t* obj, bool has_spool)
     if (!data || data->bypass_has_spool == has_spool)
         return;
     data->bypass_has_spool = has_spool;
-    layered_mark_dirty(obj, true, true);
+    layered_mark_dirty(obj);
+}
+
+// NAMESPACE_OK: the widget's C setter API, beside its siblings
+void ui_filament_path_canvas_set_offpage_units(lv_obj_t* obj, int before, bool before_drying,
+                                               int after, bool after_drying) {
+    auto* data = get_data(obj);
+    if (!data)
+        return;
+    before = LV_MAX(0, before);
+    after = LV_MAX(0, after);
+    // A drying flag with nothing on that side has nothing to describe.
+    before_drying = before_drying && before > 0;
+    after_drying = after_drying && after > 0;
+    if (data->offpage_before == before && data->offpage_after == after &&
+        data->offpage_before_drying == before_drying && data->offpage_after_drying == after_drying)
+        return;
+    data->offpage_before = before;
+    data->offpage_after = after;
+    data->offpage_before_drying = before_drying;
+    data->offpage_after_drying = after_drying;
+    layered_mark_dirty(obj);
+}
+
+// NAMESPACE_OK: the widget's C setter API, beside its siblings
+void ui_filament_path_canvas_set_fixed_hub(lv_obj_t* obj, int lanes, int32_t lane_pitch) {
+    auto* data = get_data(obj);
+    lanes = LV_CLAMP(lanes, 0, FilamentPathData::MAX_SLOTS);
+    lane_pitch = LV_MAX(0, lane_pitch);
+    if (!data || (data->fixed_hub_lanes == lanes && data->fixed_hub_pitch == lane_pitch))
+        return;
+    data->fixed_hub_lanes = lanes;
+    data->fixed_hub_pitch = lane_pitch;
+    layered_mark_dirty(obj);
+}
+
+// NAMESPACE_OK: the widget's C setter API, beside its siblings
+void ui_filament_path_canvas_set_edge_reserve(lv_obj_t* obj, int32_t px, int32_t y_top,
+                                              int32_t y_bottom) {
+    auto* data = get_data(obj);
+    px = LV_MAX(0, px);
+    if (!data ||
+        (data->edge_reserve == px && data->keepout_y0 == y_top && data->keepout_y1 == y_bottom))
+        return;
+    data->edge_reserve = px;
+    data->keepout_y0 = y_top;
+    data->keepout_y1 = y_bottom;
+    layered_mark_dirty(obj);
+}
+
+// NAMESPACE_OK: the widget's C getter API, beside its siblings
+bool ui_filament_path_canvas_get_hub_box(lv_obj_t* obj, lv_area_t* area_out) {
+    auto* data = get_data(obj);
+    if (!data || !area_out)
+        return false;
+    if (data->topology != static_cast<int>(helix::PathTopology::HUB) &&
+        data->topology != static_cast<int>(helix::PathTopology::LINEAR))
+        return false;
+    lv_obj_update_layout(obj);
+    const BaseGeometry g = compute_base_geometry(obj, data);
+    if (g.width <= 0 || g.height <= 0)
+        return false;
+    refresh_theme_colors(data);
+    const int32_t nozzle_y = g.y_off + (int32_t)(g.height * NOZZLE_Y_RATIO);
+    const LinearHubFrame f =
+        compute_linear_hub_frame(*data, g, toolhead_top_y(nozzle_y, data->theme.extruder_scale));
+    const int32_t w = hub_box_width(*data, g, f);
+    const int32_t y = data->topology == static_cast<int>(helix::PathTopology::LINEAR)
+                          ? f.prep_y + f.sensor_r + f.hub_h / 2
+                          : f.hub_y;
+    *area_out = {f.center_x - w / 2, y - f.hub_h / 2, f.center_x + w / 2, y + f.hub_h / 2};
+    return true;
 }
 
 bool ui_filament_path_canvas_get_bypass_merge_pos(lv_obj_t* obj, int32_t* cx_out, int32_t* cy_out) {
     auto* data = get_data(obj);
-    if (!data || data->hub_only || !data->show_bypass) {
+    if (!data || !data->show_bypass) {
         return false;
     }
     lv_obj_update_layout(obj);

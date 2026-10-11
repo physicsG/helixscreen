@@ -127,35 +127,20 @@ static void parse_device_properties(sd_bus_message* msg, discover_ctx* dctx) {
         }
     }
 
-    // Filter: show device if any of these are true:
-    //  1. Has a known printer UUID (SPP or Phomemo BLE)
-    //  2. Name matches a known label printer brand/pattern
-    //  3. Previously paired (user explicitly set it up)
-    //  4. Has a HID scanner UUID or name matches barcode scanner pattern
-    bool dominated_by_uuid = has_printer_uuid;
-    bool dominated_by_name =
-        has_real_name && helix::bluetooth::is_likely_label_printer(name.c_str());
+    // Show a device that looks like a printer or a scanner, or that the user already paired.
+    const auto traits =
+        helix::bluetooth::classify_device(has_real_name ? name.c_str() : nullptr, uuids);
     bool dominated_by_paired = paired && has_real_name;
-    bool dominated_by_scanner = false;
-    for (const auto& uuid : uuids) {
-        if (helix::bluetooth::is_hid_scanner_uuid(uuid.c_str())) {
-            dominated_by_scanner = true;
-            break;
-        }
-    }
-    if (!dominated_by_scanner && has_real_name) {
-        dominated_by_scanner = helix::bluetooth::is_likely_bt_scanner(name.c_str());
-    }
 
-    if (!dominated_by_uuid && !dominated_by_name && !dominated_by_paired && !dominated_by_scanner) {
+    if (!traits.printer_uuid && !traits.printer_name && !dominated_by_paired && !traits.scanner) {
         fprintf(stderr, "[bt] filtered: %s '%s' (not a likely printer or scanner)\n",
                 address.c_str(), name.c_str());
         return;
     }
 
     fprintf(stderr, "[bt] accept: %s '%s' (uuid=%d name=%d paired=%d scanner=%d)\n",
-            address.c_str(), name.c_str(), dominated_by_uuid, dominated_by_name,
-            dominated_by_paired, dominated_by_scanner);
+            address.c_str(), name.c_str(), traits.printer_uuid, traits.printer_name,
+            dominated_by_paired, traits.scanner);
 
     // Name-based BLE override: some BLE printers (e.g. MakeID/YichipFPGA) also
     // advertise SPP UUID but actually communicate via BLE GATT. The brand table
@@ -172,8 +157,7 @@ static void parse_device_properties(sd_bus_message* msg, discover_ctx* dctx) {
     dev.paired = paired;
     dev.is_ble = is_ble;
     dev.service_uuid = matching_uuid.empty() ? nullptr : matching_uuid.c_str();
-    // Classification mirrored in tests/unit/test_bt_device_classification.cpp
-    dev.is_scanner = dominated_by_scanner && !dominated_by_uuid && !dominated_by_name;
+    dev.is_scanner = traits.is_scanner();
 
     if (dctx->cb) {
         dctx->cb(&dev, dctx->user_data);
@@ -219,8 +203,7 @@ static int on_interfaces_added(sd_bus_message* msg, void* userdata, sd_bus_error
     return 0;
 }
 
-/// Find the BlueZ adapter path (typically /org/bluez/hci0)
-static std::string find_adapter_path(sd_bus* bus) {
+std::string helix::bluetooth::find_adapter_path(sd_bus* bus) {
     sd_bus_error error = SD_BUS_ERROR_NULL;
     sd_bus_message* reply = nullptr;
 
@@ -333,9 +316,18 @@ done:
 // ---------------------------------------------------------------------------
 
 extern "C" int helix_bt_discover(helix_bt_context* ctx, int timeout_ms, helix_bt_discover_cb cb,
-                                 void* user_data) {
+                                 void* user_data, const int* cancel) {
     if (!ctx || !ctx->bus_thread)
         return -EINVAL;
+
+    const unsigned stop_gen = ctx->discover_stop_gen.load();
+    auto stopped = [&] {
+        return (cancel && __atomic_load_n(cancel, __ATOMIC_ACQUIRE) != 0) ||
+               ctx->discover_stop_gen.load() != stop_gen;
+    };
+    std::lock_guard<std::mutex> one_scan(ctx->discover_mutex);
+    if (stopped())
+        return 0; // stopped before it started
 
     auto* dctx = new (std::nothrow) discover_ctx{ctx, cb, user_data};
     if (!dctx)
@@ -348,7 +340,7 @@ extern "C" int helix_bt_discover(helix_bt_context* ctx, int timeout_ms, helix_bt
 
     try {
         ctx->bus_thread->run_sync([&](sd_bus* bus) {
-            adapter = find_adapter_path(bus);
+            adapter = helix::bluetooth::find_adapter_path(bus);
             if (adapter.empty()) {
                 std::lock_guard<std::mutex> lock(ctx->mutex);
                 ctx->last_error = "no BlueZ adapter found";
@@ -399,7 +391,7 @@ extern "C" int helix_bt_discover(helix_bt_context* ctx, int timeout_ms, helix_bt
     // Wait on the UI-side caller thread while the bus thread processes events.
     struct timespec start;
     clock_gettime(CLOCK_MONOTONIC, &start);
-    while (ctx->discovering.load()) {
+    while (!stopped()) {
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
         long elapsed_ms =
@@ -437,6 +429,7 @@ extern "C" int helix_bt_discover(helix_bt_context* ctx, int timeout_ms, helix_bt
 extern "C" void helix_bt_stop_discovery(helix_bt_context* ctx) {
     if (!ctx)
         return;
+    ctx->discover_stop_gen.fetch_add(1);
     ctx->discovering.store(false);
 }
 

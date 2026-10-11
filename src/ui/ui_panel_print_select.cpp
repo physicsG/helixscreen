@@ -12,6 +12,7 @@
 
 #include "ui_panel_print_select.h"
 
+#include "ui_busy_overlay.h"
 #include "ui_callback_helpers.h"
 #include "ui_error_reporting.h"
 #include "ui_event_safety.h"
@@ -29,29 +30,42 @@
 #include "ui_subject_registry.h"
 #include "ui_toast_manager.h"
 #include "ui_update_queue.h"
+#include "ui_utils.h"
 
 #include "ams_backend.h"
 #include "ams_remap.h"
 #include "ams_state.h"
 #include "app_globals.h"
+#include "card_thumbnail_plan.h"
 #include "config.h"
 #include "connection_state.h" // For ConnectionState enum
 #include "display_manager.h"
 #include "display_settings_manager.h"
 #include "format_utils.h"
-#include "gcode_parser.h" // For extract_thumbnails_from_content (USB thumbnail fallback)
+#include "gcode_parser.h"
 #include "helix-xml/src/xml/lv_xml.h"
+#include "helix_fs.h"
 #include "i_moonraker_api.h"
+#include "job_queue_state.h"
+#include "json_utils.h"
 #include "lvgl/src/others/translation/lv_translation.h"
+#include "observe_language.h"
 #include "observer_factory.h"
+#include "pre_start_exclude.h"
 #include "preprint_predictor.h"
 #include "print_history_manager.h"
+#include "print_lifecycle_state.h" // job_holds_machine()
 #include "print_start_analyzer.h"
 #include "printer_state.h"
+#include "published_hold.h"
+#include "queued_job_options.h"
 #include "runtime_config.h"
 #include "static_panel_registry.h"
+#include "text_io.h"
 #include "theme_manager.h"
 #include "thumbnail_cache.h"
+#include "try_reserve.h"
+#include "ui/ui_widget_helpers.h"
 #include "usb_manager.h"
 
 #include <spdlog/spdlog.h>
@@ -59,19 +73,21 @@
 #include <algorithm>
 #include <cmath>
 #include <ctime>
-#include <fstream>
 #include <memory>
 #include <optional>
-#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
+namespace hfs = helix::fs;
+namespace tio = helix::text_io;
+
 using namespace helix;
 using helix::gcode::strip_gcode_extension;
 using helix::ui::format_filament_weight;
 using helix::ui::format_layer_count;
+using helix::ui::format_layer_height;
 using helix::ui::format_print_height;
 using helix::ui::format_print_time;
 
@@ -83,23 +99,21 @@ using helix::ui::format_print_time;
 // which takes PNG bytes rather than a path. Returns empty on any failure — every
 // caller treats that as "no thumbnail" rather than an error worth surfacing.
 static std::vector<uint8_t> read_file_bytes(const std::string& path) {
-    std::ifstream file(path, std::ios::binary | std::ios::ate);
-    if (!file) {
+    auto text = tio::read_file(path);
+    if (!text) {
         return {};
     }
-    std::streamsize size = file.tellg();
-    if (size <= 0) {
-        return {};
-    }
-    file.seekg(0, std::ios::beg);
-    std::vector<uint8_t> data(static_cast<size_t>(size));
-    if (!file.read(reinterpret_cast<char*>(data.data()), size)) {
-        return {};
-    }
-    return data;
+    return std::vector<uint8_t>(text->begin(), text->end());
 }
 
 static std::unique_ptr<PrintSelectPanel> g_print_select_panel;
+
+/// A card's time: the slicer estimate plus the predicted pre-print overhead
+/// (heating, homing, bed mesh, ...), so users see realistic wall-clock time.
+static int card_total_minutes(int print_time_minutes) {
+    const int preprint_seconds = helix::PreprintPredictor::predicted_total_from_config();
+    return print_time_minutes + (preprint_seconds + 30) / 60; // round to nearest minute
+}
 
 PrintSelectPanel* get_print_select_panel(PrinterState& printer_state, IMoonrakerAPI* api) {
     if (!g_print_select_panel) {
@@ -122,77 +136,6 @@ PrintSelectPanel& get_global_print_select_panel() {
 }
 
 // ============================================================================
-// Static XML Event Callbacks (registered via lv_xml_register_event_cb)
-// ============================================================================
-
-static void on_print_select_view_toggle(lv_event_t* e) {
-    (void)e;
-    get_global_print_select_panel().toggle_view();
-}
-
-static void on_print_select_source_printer(lv_event_t* e) {
-    (void)e;
-    get_global_print_select_panel().on_source_printer_clicked();
-}
-
-static void on_print_select_source_usb(lv_event_t* e) {
-    (void)e;
-    get_global_print_select_panel().on_source_usb_clicked();
-}
-
-// Header column sort callbacks
-static void on_print_select_header_filename(lv_event_t* e) {
-    (void)e;
-    get_global_print_select_panel().sort_by(PrintSelectSortColumn::FILENAME);
-}
-
-static void on_print_select_header_size(lv_event_t* e) {
-    (void)e;
-    get_global_print_select_panel().sort_by(PrintSelectSortColumn::SIZE);
-}
-
-static void on_print_select_header_modified(lv_event_t* e) {
-    (void)e;
-    get_global_print_select_panel().sort_by(PrintSelectSortColumn::MODIFIED);
-}
-
-static void on_print_select_header_print_time(lv_event_t* e) {
-    (void)e;
-    get_global_print_select_panel().sort_by(PrintSelectSortColumn::PRINT_TIME);
-}
-
-// Detail view callbacks
-static void on_print_select_print_button(lv_event_t* e) {
-    (void)e;
-    get_global_print_select_panel().start_print();
-}
-
-static void on_print_select_delete_button(lv_event_t* e) {
-    (void)e;
-    get_global_print_select_panel().show_delete_confirmation();
-}
-
-static void on_toggle_sliced_colors(lv_event_t* e) {
-    auto* sw = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
-    bool checked = lv_obj_has_state(sw, LV_STATE_CHECKED);
-    get_global_print_select_panel().forward_sliced_colors_toggle(checked);
-}
-
-static void on_print_select_detail_backdrop(lv_event_t* e) {
-    auto* target = static_cast<lv_obj_t*>(lv_event_get_target(e));
-    auto* current_target = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
-    // Only close if clicking the backdrop itself, not child widgets
-    if (target == current_target) {
-        get_global_print_select_panel().hide_detail_view();
-    }
-}
-
-static void on_print_detail_back_clicked(lv_event_t* e) {
-    (void)e;
-    get_global_print_select_panel().hide_detail_view();
-}
-
-// ============================================================================
 // Constructor / Destructor
 // ============================================================================
 
@@ -206,7 +149,7 @@ PrintSelectPanel::~PrintSelectPanel() {
     // apply callbacks still queued on the UpdateQueue no-op on their next tick
     // instead of dereferencing this freed panel (the guard's own dtor also does
     // this, but doing it first makes cancellation deterministic at teardown start).
-    lifetime_.invalidate();
+    object_lifetime_.invalidate();
 
     // Deinitialize subjects first to disconnect observers [L041]
     deinit_subjects();
@@ -234,13 +177,12 @@ PrintSelectPanel::~PrintSelectPanel() {
     // CRITICAL: During static destruction (app exit), LVGL may already be gone.
     // We check if LVGL is still initialized before calling any LVGL functions.
     if (lv_is_initialized()) {
-        // Remove scroll event callbacks to prevent use-after-free
-        if (card_view_container_) {
-            lv_obj_remove_event_cb(card_view_container_, on_scroll_static);
-        }
-        if (list_rows_container_) {
-            lv_obj_remove_event_cb(list_rows_container_, on_scroll_static);
-        }
+        // The containers can outlive this panel, or die before it; the callbacks
+        // carrying `this` must not outlive the panel.
+        helix::ui::remove_event_cb_if_alive(card_view_container_, on_scroll_static, this);
+        helix::ui::remove_event_cb_if_alive(card_view_container_, on_card_container_resized_static,
+                                            this);
+        helix::ui::remove_event_cb_if_alive(list_rows_container_, on_scroll_static, this);
 
         // Delete pending timers
         if (refresh_timer_) {
@@ -314,6 +256,7 @@ void PrintSelectPanel::init_subjects() {
     // overlay creation doesn't hit LVGL's empty-buffer warning path (#990).
     lv_subject_set_pointer(&selected_detail_thumbnail_subject_,
                            thumbnail_subject_value(selected_detail_thumbnail_buffer_));
+    UI_MANAGED_SUBJECT_INT(selected_has_thumbnail_subject_, 0, "selected_has_thumbnail", subjects_);
 
     UI_MANAGED_SUBJECT_STRING(selected_print_time_subject_, selected_print_time_buffer_, "",
                               "selected_print_time", subjects_);
@@ -335,32 +278,74 @@ void PrintSelectPanel::init_subjects() {
 
     // Initialize can print subject (1 = can print, 0 = print in progress)
     // XML binding disables print button when value is 0
-    bool can_print = printer_state_.can_start_new_print();
+    bool can_print = printer_state_.print_state().can_start_new_print();
     UI_MANAGED_SUBJECT_INT(can_print_subject_, can_print ? 1 : 0, "print_select_can_print",
                            subjects_);
+    UI_MANAGED_SUBJECT_INT(button_mode_subject_, 0, "print_select_button_mode", subjects_);
+    UI_MANAGED_SUBJECT_STRING(button_label_subject_, button_label_buffer_, lv_tr("Print"),
+                              "print_select_button_label", subjects_);
+    UI_MANAGED_SUBJECT_STRING(button_icon_subject_, button_icon_buffer_, "print",
+                              "print_select_button_icon", subjects_);
+    UI_MANAGED_SUBJECT_STRING(blocked_reason_subject_, blocked_reason_buffer_, "",
+                              "print_select_blocked_reason", subjects_);
 
     // Initialize USB source subject (before XML is parsed so bindings resolve)
     helix::ui::PrintSelectUsbSource::init_subjects();
 
     // Register XML event callbacks (must be done BEFORE XML is created)
     register_xml_callbacks({
-        {"on_print_select_view_toggle", on_print_select_view_toggle},
-        {"on_print_select_source_printer", on_print_select_source_printer},
-        {"on_print_select_source_usb", on_print_select_source_usb},
+        {"on_print_select_view_toggle",
+         [](lv_event_t*) { get_global_print_select_panel().toggle_view(); }},
+        {"on_print_select_source_printer",
+         [](lv_event_t*) { get_global_print_select_panel().on_source_printer_clicked(); }},
+        {"on_print_select_source_usb",
+         [](lv_event_t*) { get_global_print_select_panel().on_source_usb_clicked(); }},
         // List header sort callbacks
-        {"on_print_select_header_filename", on_print_select_header_filename},
-        {"on_print_select_header_size", on_print_select_header_size},
-        {"on_print_select_header_modified", on_print_select_header_modified},
-        {"on_print_select_header_print_time", on_print_select_header_print_time},
+        {"on_print_select_header_filename",
+         [](lv_event_t*) {
+             get_global_print_select_panel().sort_by(PrintSelectSortColumn::FILENAME);
+         }},
+        {"on_print_select_header_size",
+         [](lv_event_t*) { get_global_print_select_panel().sort_by(PrintSelectSortColumn::SIZE); }},
+        {"on_print_select_header_modified",
+         [](lv_event_t*) {
+             get_global_print_select_panel().sort_by(PrintSelectSortColumn::MODIFIED);
+         }},
+        {"on_print_select_header_print_time",
+         [](lv_event_t*) {
+             get_global_print_select_panel().sort_by(PrintSelectSortColumn::PRINT_TIME);
+         }},
         // Detail view callbacks
-        {"on_print_select_print_button", on_print_select_print_button},
-        {"on_print_select_delete_button", on_print_select_delete_button},
-        {"on_print_select_detail_backdrop", on_print_select_detail_backdrop},
-        {"on_print_detail_back_clicked", on_print_detail_back_clicked},
-        {"on_toggle_sliced_colors", on_toggle_sliced_colors},
+        {"on_print_select_print_button",
+         [](lv_event_t*) { get_global_print_select_panel().start_print(); }},
+        {"on_print_select_delete_button",
+         [](lv_event_t*) { get_global_print_select_panel().show_delete_confirmation(); }},
+        {"on_print_select_detail_backdrop",
+         [](lv_event_t* e) {
+             // Only close if clicking the backdrop itself, not child widgets
+             if (lv_event_get_target(e) == lv_event_get_current_target(e)) {
+                 get_global_print_select_panel().hide_detail_view();
+             }
+         }},
+        {"on_print_detail_back_clicked",
+         [](lv_event_t*) { get_global_print_select_panel().hide_detail_view(); }},
+        {"on_toggle_sliced_colors",
+         [](lv_event_t* e) {
+             get_global_print_select_panel().forward_sliced_colors_toggle(
+                 helix::ui::event_checked(e));
+         }},
+        {"on_print_select_detail_objects",
+         [](lv_event_t*) { get_global_print_select_panel().toggle_detail_exclude_mode(); }},
+        {"on_color_card_remap_help",
+         [](lv_event_t*) { get_global_print_select_panel().show_remap_help(); }},
     });
 
     subjects_initialized_ = true;
+
+    // Observers only fire on CHANGE, so a panel built mid-print would otherwise
+    // carry the disabled button with no reason until the next state transition.
+    update_print_button_state();
+
     spdlog::debug("[{}] Subjects initialized", get_name());
 }
 
@@ -384,12 +369,18 @@ void PrintSelectPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
         return;
     }
 
+    // A rebuild re-runs setup(); drop the views bound to the condemned tree
+    // first, so an early return below leaves populate_*_view() guarded rather
+    // than writing into it.
+    card_view_.reset();
+    list_view_.reset();
+
     // Find widget references
-    card_view_container_ = lv_obj_find_by_name(panel_, "card_view_container");
-    list_view_container_ = lv_obj_find_by_name(panel_, "list_view_container");
-    list_rows_container_ = lv_obj_find_by_name(panel_, "list_rows_container");
-    empty_state_container_ = lv_obj_find_by_name(panel_, "empty_state_container");
-    view_toggle_btn_ = lv_obj_find_by_name(panel_, "view_toggle_btn");
+    card_view_container_ = helix::ui::find_required(panel_, "card_view_container", get_name());
+    list_view_container_ = helix::ui::find_required(panel_, "list_view_container", get_name());
+    list_rows_container_ = helix::ui::find_required(panel_, "list_rows_container", get_name());
+    empty_state_container_ = helix::ui::find_required(panel_, "empty_state_container", get_name());
+    view_toggle_btn_ = helix::ui::find_required(panel_, "view_toggle_btn", get_name());
     view_toggle_icon_ = lv_obj_find_by_name(panel_, "view_toggle_btn_icon");
 
     if (!card_view_container_ || !list_view_container_ || !list_rows_container_ ||
@@ -401,6 +392,8 @@ void PrintSelectPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
     // Register scroll event handlers for progressive loading
     lv_obj_add_event_cb(card_view_container_, on_scroll_static, LV_EVENT_SCROLL, this);
     lv_obj_add_event_cb(list_rows_container_, on_scroll_static, LV_EVENT_SCROLL, this);
+    lv_obj_add_event_cb(card_view_container_, on_card_container_resized_static,
+                        LV_EVENT_SIZE_CHANGED, this);
 
     // Create and setup virtualized view modules
     auto* self = this;
@@ -411,7 +404,12 @@ void PrintSelectPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
         // File click callback
         [self](size_t file_index) { self->handle_file_click(file_index); },
         // Metadata fetch callback
-        [self](size_t start, size_t end) { self->fetch_metadata_range(start, end); });
+        [self](size_t start, size_t end) {
+            self->fetch_metadata_range(start, end);
+#if defined(HELIX_PLATFORM_ESP32)
+            self->sync_esp_thumbnails(start, end);
+#endif
+        });
 
     // Long-press on a file card → delete confirmation (card view only; list view unchanged).
     card_view_->set_on_file_long_press(
@@ -451,19 +449,21 @@ void PrintSelectPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
         self->apply_sort();
         // Preserve scroll if still in the same directory (e.g., refresh after file changes)
         bool same_dir = (self->current_path_ == self->last_populated_path_);
-        if (self->current_view_mode_ == PrintSelectViewMode::CARD) {
-            self->populate_card_view(same_dir);
-        } else {
-            self->populate_list_view(same_dir);
-        }
+        self->populate_current_view(same_dir);
         self->last_populated_path_ = self->current_path_;
+        self->file_list_loaded_ = true;
         self->update_empty_state();
     });
 
     // Initialize file data provider for Moonraker files
-    file_provider_ = std::make_unique<helix::ui::PrintSelectFileProvider>();
+    // A rebuild re-runs setup(). The provider holds no widgets, and an in-flight
+    // get_directory callback reads the provider it was issued from, so it is
+    // created once and kept (#1616).
+    if (!file_provider_) {
+        file_provider_ = std::make_unique<helix::ui::PrintSelectFileProvider>();
+    }
     file_provider_->set_api(api_);
-    file_provider_->set_on_files_ready([self, token = self->lifetime_.token()](
+    file_provider_->set_on_files_ready([self, token = self->object_lifetime_.token()](
                                            std::vector<PrintFileData>&& files) {
         spdlog::trace("[{}] on_files_ready callback: received {} items from provider",
                       self->get_name(), files.size());
@@ -508,57 +508,27 @@ void PrintSelectPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
             };
             const size_t prev_count = panel->file_list_.size();
             std::vector<FileSnapshot> prev_files;
-            prev_files.reserve(prev_count);
-            for (const auto& f : panel->file_list_) {
-                prev_files.push_back({f.filename, f.modified_timestamp});
+            // Without room for the snapshot, the list counts as changed.
+            const bool have_snapshot = helix::try_reserve(prev_files, prev_count);
+            if (have_snapshot) {
+                for (const auto& f : panel->file_list_) {
+                    prev_files.push_back({f.filename, f.modified_timestamp});
+                }
             }
 
             // Preserve cached metadata from previous file list before replacing.
             // Without this, all metadata resets on every refresh, causing expensive
             // metadata re-fetches and metascans on every scroll cycle (8-15s per
-            // file on AD5M). We carry forward the entire old entry for files that
-            // already had metadata fetched, updating only the file listing fields
-            // (size, modified time) from the fresh data.
-            std::unordered_map<std::string, PrintFileData> old_state;
-            for (auto& f : panel->file_list_) {
-                if (f.metadata_fetched) {
-                    old_state.emplace(f.filename, std::move(f));
-                }
-            }
-
-            // Move data into panel (now safe - on main thread)
+            // file on AD5M).
+            std::vector<PrintFileData> previous = std::move(panel->file_list_);
             panel->file_list_ = std::move(c->files);
+            panel->last_listing_applied_at_ = std::chrono::steady_clock::now();
 
-            // Merge old metadata into new file list
             const bool retry_missing = panel->retry_missing_thumbnails_on_refresh_;
             panel->retry_missing_thumbnails_on_refresh_ = false;
-            for (auto& f : panel->file_list_) {
-                auto it = old_state.find(f.filename);
-                if (it != old_state.end()) {
-                    auto& old = it->second;
-                    // Keep fresh listing data (size, modified time may have changed)
-                    time_t new_modified = f.modified_timestamp;
-                    size_t new_size = f.file_size_bytes;
-
-                    if (should_carry_forward_print_file_metadata(old, new_size, retry_missing)) {
-                        // File unchanged — carry forward all cached metadata
-                        f = std::move(old);
-                        f.modified_timestamp = new_modified;
-                        f.file_size_bytes = new_size;
-                    } else {
-                        // Carry-forward declined (size changed OR retry-missing-
-                        // thumbnail kicked in). The provider already preserved this
-                        // entry's metadata_fetched=true / thumbnail_path before our
-                        // decision ran, so without an explicit reset here the next
-                        // fetch_metadata_range would short-circuit on the stale
-                        // metadata_fetched flag and the placeholder would persist
-                        // (the bug the retry-on-activate flag was meant to fix —
-                        // 8dc2f8fde). Force a fresh fetch.
-                        f.metadata_fetched = false;
-                        f.thumbnail_path.clear();
-                    }
-                }
-            }
+            helix::carry_forward_print_file_metadata(
+                panel->file_list_, previous, retry_missing,
+                helix::ui::PrintPreparationManager::keeps_local_copies(panel->api_));
 
             panel->apply_sort();
 
@@ -589,7 +559,8 @@ void PrintSelectPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
             // populate() invalidates all pool indices and triggers new metadata
             // fetches that race with stale async callbacks.
             bool same_dir = (panel->current_path_ == panel->last_populated_path_);
-            bool list_changed = !same_dir || panel->file_list_.size() != prev_count;
+            bool list_changed =
+                !have_snapshot || !same_dir || panel->file_list_.size() != prev_count;
             if (!list_changed) {
                 for (size_t i = 0; i < panel->file_list_.size(); i++) {
                     if (panel->file_list_[i].filename != prev_files[i].filename ||
@@ -609,15 +580,19 @@ void PrintSelectPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
                         lv_tr("Showing the 50 newest files. See more in the printer's web UI."));
                 }
 #endif
-                if (panel->current_view_mode_ == PrintSelectViewMode::CARD) {
-                    panel->populate_card_view(same_dir);
-                } else {
-                    panel->populate_list_view(same_dir);
-                }
+                panel->populate_current_view(same_dir);
             } else {
                 spdlog::trace("[{}] File list unchanged, skipping repopulation", panel->get_name());
+#if defined(HELIX_PLATFORM_ESP32)
+                // Leaving the panel released the card thumbnails and reset the
+                // card window; rebinding it here fetches them again.
+                if (panel->current_view_mode_ == PrintSelectViewMode::CARD) {
+                    panel->handle_scroll(panel->card_view_container_);
+                }
+#endif
             }
             panel->last_populated_path_ = panel->current_path_;
+            panel->file_list_loaded_ = true;
 
             panel->update_empty_state();
 
@@ -637,7 +612,15 @@ void PrintSelectPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
                 if (!panel->select_file_by_name(pending)) {
                     spdlog::warn("[{}] Pending file selection '{}' not found in file list",
                                  panel->get_name(), pending);
+                    ui_notification_warning("File not found in print list");
                 }
+            }
+
+            // A queued start waiting for a listing: the list is fresh now, so
+            // the file is either found or provably absent.
+            if (panel->pending_queued_start_) {
+                panel->pending_queued_start_->listing_arrived = true;
+                panel->try_open_pending_queued_job();
             }
 
             // Fetch metadata for visible items
@@ -654,27 +637,52 @@ void PrintSelectPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
                                         static_cast<size_t>(visible_end));
         });
     });
-    file_provider_->set_on_error([self, token = self->lifetime_.token()](const std::string& error) {
-        LOG_ERROR_INTERNAL("[{}] File list refresh error: {}", self->get_name(), error);
-        token.defer([self, error]() {
-            self->refresh_guard_.release();
-            if (dir_error_should_reset_to_root(error, self->path_navigator_.is_at_root())) {
-                // The current directory no longer exists on the server (e.g. a
-                // FlashForge path-doubling artifact). Retrying it would wedge the
-                // panel, so fall back to root instead of looping (TJVQDCZ6).
-                spdlog::warn("[{}] Current directory missing ('{}'); falling back to root",
-                             self->get_name(), error);
-                self->path_navigator_.reset();
-                self->current_path_.clear();
-                self->refresh_files(/*force=*/true);
-                return;
-            }
-            NOTIFY_ERROR(lv_tr("Failed to refresh file list"));
+    file_provider_->set_on_error(
+        [self, token = self->object_lifetime_.token()](const std::string& error) {
+            LOG_ERROR_INTERNAL("[{}] File list refresh error: {}", self->get_name(), error);
+            token.defer([self, error]() {
+                self->refresh_guard_.release();
+                if (dir_error_should_reset_to_root(error, self->path_navigator_.is_at_root())) {
+                    // The current directory no longer exists on the server (e.g. a
+                    // FlashForge path-doubling artifact). Retrying it would wedge the
+                    // panel, so fall back to root instead of looping (TJVQDCZ6).
+                    // Naming whether the failed entry came from the rendered listing
+                    // separates a server-side phantom (fresh listing offered it) from
+                    // navigation into a stale index (listing is old or lacks it).
+                    const std::string& failed_path = self->current_path_;
+                    const size_t slash = failed_path.find_last_of('/');
+                    const std::string leaf =
+                        slash == std::string::npos ? failed_path : failed_path.substr(slash + 1);
+                    const bool offered_by_listing = std::any_of(
+                        self->file_list_.begin(), self->file_list_.end(),
+                        [&leaf](const PrintFileData& f) { return f.is_dir && f.filename == leaf; });
+                    std::string listing_age = "no listing yet";
+                    if (self->last_listing_applied_at_.time_since_epoch().count() != 0) {
+                        const auto age_s = std::chrono::duration_cast<std::chrono::seconds>(
+                            std::chrono::steady_clock::now() - self->last_listing_applied_at_);
+                        listing_age = fmt::format("listing {}s old", age_s.count());
+                    }
+                    spdlog::warn("[{}] Current directory missing ('{}'); falling back to root "
+                                 "(entry '{}' {} by prior listing, {})",
+                                 self->get_name(), error, leaf,
+                                 offered_by_listing ? "offered" : "not offered", listing_age);
+                    self->path_navigator_.reset();
+                    self->current_path_.clear();
+                    self->refresh_files(/*force=*/true);
+                    return;
+                }
+                NOTIFY_ERROR(lv_tr("Failed to refresh file list"));
+            });
         });
-    });
 
-    // Create detail view (confirmation dialog created on-demand)
-    create_detail_view();
+    // The controller exists from boot so a crash-recovery remap restores
+    // without a visit; only its detail view is lazy.
+    create_print_controller();
+
+    // The detail view's widget tree is built by the first show_detail_view() /
+    // show_delete_confirmation(); most sessions never open one. Its model exists
+    // now so the PRINT_START analysis runs on connect, not on the first file tap.
+    ensure_detail_view_model();
 
     // Register resize callback
     // Note: register_resize_callback expects a C callback, so we use a static trampoline
@@ -698,7 +706,7 @@ void PrintSelectPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
         // Start in list mode instead of default card mode
         current_view_mode_ = PrintSelectViewMode::LIST;
         lv_subject_set_int(&view_mode_subject_, 1);
-        ui_icon_set_source(view_toggle_icon_, "grid_view");
+        helix::ui::icon::set_source(view_toggle_icon_, "grid_view");
         spdlog::debug("[{}] Starting in list view mode (CLI flag)", get_name());
     }
 
@@ -713,19 +721,19 @@ void PrintSelectPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
 
     // Register observer on connection state to refresh files when printer connects
     // This handles the race condition where panel activates before WebSocket connection
-    using helix::ui::observe_int_sync;
-    lv_subject_t* connection_subject = printer_state_.get_printer_connection_state_subject();
+    using helix::ui::observe;
+    lv_subject_t* connection_subject =
+        printer_state_.network_state().get_printer_connection_state_subject();
     if (connection_subject) {
-        connection_observer_ = observe_int_sync<PrintSelectPanel>(
-            connection_subject, this, [](PrintSelectPanel* self, int state) {
+        connection_observer_ = observe<int>(
+            connection_subject, this,
+            [previous = -1](PrintSelectPanel* self, int state) mutable {
+                const bool reconnected = helix::connection_change_should_refresh(previous, state);
+                previous = state;
                 if (state == static_cast<int>(ConnectionState::CONNECTED)) {
-                    // Always refresh on (re)connect to pick up files uploaded while
-                    // disconnected. The previous guard (file_list_.empty()) silently
-                    // skipped refresh after reconnects on unreliable hardware like
-                    // CB1, leaving newly-uploaded files invisible (#577).
                     bool is_printer_source =
                         !self->usb_source_ || !self->usb_source_->is_usb_active();
-                    if (is_printer_source) {
+                    if (is_printer_source && reconnected) {
                         spdlog::info(
                             "[{}] Connection (re)established, refreshing file list (existing={})",
                             self->get_name(), self->file_list_.size());
@@ -746,7 +754,8 @@ void PrintSelectPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
                     // Note: Plugin detection now happens automatically in discovery flow
                     // (application.cpp). Install prompt is triggered by helix_plugin_observer_.
                 }
-            });
+            },
+            printer_state_.get_subjects_lifetime());
         spdlog::trace("[{}] Registered observer on connection state for auto-refresh", get_name());
     }
 
@@ -755,31 +764,49 @@ void PrintSelectPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
     // NOTE: get_print_state_enum_subject() is INT, get_print_state_subject() is STRING
     // RAW_PRINT_STATE_OK: pairs with the print_filename read below, which still
     // holds the PREVIOUS job during a preparing window.
-    lv_subject_t* print_state_subject = printer_state_.get_print_state_enum_subject();
+    lv_subject_t* print_state_subject = printer_state_.print_state().get_print_state_enum_subject();
     if (print_state_subject) {
-        print_state_observer_ = observe_int_sync<PrintSelectPanel>(
+        print_state_observer_ = observe<int>(
             print_state_subject, this,
-            [](PrintSelectPanel* self, int) { self->update_print_button_state(); });
+            [](PrintSelectPanel* self, int) { self->update_print_button_state(); },
+            printer_state_.get_subjects_lifetime());
         spdlog::trace("[{}] Registered observer on print job state for print button", get_name());
+    }
+
+    // The lifecycle is what the button decision reads: it also moves on
+    // Preparing, which the wire job state cannot express, so queue mode can
+    // engage for the whole committed life of a job rather than from the first
+    // progress frame on.
+    lv_subject_t* print_lifecycle_subject =
+        printer_state_.print_state().get_print_lifecycle_subject();
+    if (print_lifecycle_subject) {
+        print_lifecycle_observer_ = observe<int>(
+            print_lifecycle_subject, this,
+            [](PrintSelectPanel* self, int) { self->update_print_button_state(); },
+            printer_state_.get_subjects_lifetime());
     }
 
     // Also observe print_in_progress subject - this fires immediately when Print is tapped
     // (before Moonraker reports state change, which can take seconds)
-    lv_subject_t* print_in_progress_subject = printer_state_.get_print_in_progress_subject();
+    lv_subject_t* print_in_progress_subject =
+        printer_state_.print_state().get_print_in_progress_subject();
     if (print_in_progress_subject) {
-        print_in_progress_observer_ = observe_int_sync<PrintSelectPanel>(
+        print_in_progress_observer_ = observe<int>(
             print_in_progress_subject, this,
-            [](PrintSelectPanel* self, int) { self->update_print_button_state(); });
+            [](PrintSelectPanel* self, int) { self->update_print_button_state(); },
+            printer_state_.get_subjects_lifetime());
         spdlog::trace("[{}] Registered observer on print_in_progress for print button", get_name());
     }
 
     // Register observer on helix_plugin_installed to show install prompt when plugin not available
     // Subject uses tri-state: -1=unknown (pre-discovery), 0=not installed, 1=installed
     // Only show modal when explicitly 0 (after discovery confirms plugin is missing)
-    lv_subject_t* plugin_subject = printer_state_.get_helix_plugin_installed_subject();
+    lv_subject_t* plugin_subject =
+        printer_state_.plugin_status_state().get_helix_plugin_installed_subject();
     if (plugin_subject) {
-        helix_plugin_observer_ = observe_int_sync<PrintSelectPanel>(
-            plugin_subject, this, [](PrintSelectPanel* self, int plugin_state) {
+        helix_plugin_observer_ = observe<int>(
+            plugin_subject, this,
+            [](PrintSelectPanel* self, int plugin_state) {
                 // Only show modal when state is explicitly 0 (checked and not installed)
                 // Skip if -1 (unknown/pre-discovery) or 1 (installed)
                 if (plugin_state == 0 && self->plugin_installer_.should_prompt_install()) {
@@ -788,7 +815,8 @@ void PrintSelectPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
                     self->plugin_install_modal_.set_installer(&self->plugin_installer_);
                     self->plugin_install_modal_.show(lv_screen_active());
                 }
-            });
+            },
+            printer_state_.get_subjects_lifetime());
         spdlog::trace("[{}] Registered observer on helix_plugin_installed for install prompt",
                       get_name());
     }
@@ -808,6 +836,20 @@ void PrintSelectPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
                       get_name());
     }
 
+    // Each file's time, layer count and height are formatted in the current
+    // language when its metadata lands; a new language formats them again.
+    language_observer_ = helix::ui::observe_language_change(this, [](PrintSelectPanel* self) {
+        for (auto& file : self->file_list_) {
+            if (!file.metadata_fetched) {
+                continue; // metadata not in yet; it formats in the current language
+            }
+            file.print_time_str = format_print_time(card_total_minutes(file.print_time_minutes));
+            file.layer_count_str = format_layer_count(file.layer_count);
+            file.print_height_str = format_print_height(file.object_height, /*tall_suffix=*/true);
+        }
+        self->schedule_view_refresh();
+    });
+
     spdlog::trace("[{}] Setup complete", get_name());
 }
 
@@ -819,12 +861,15 @@ void PrintSelectPanel::toggle_view() {
     if (current_view_mode_ == PrintSelectViewMode::CARD) {
         // Switch to list view
         current_view_mode_ = PrintSelectViewMode::LIST;
+        if (card_view_) {
+            card_view_->stop_prebuild();
+        }
 
         // Update reactive subject - XML bindings handle container visibility
         lv_subject_set_int(&view_mode_subject_, 1);
 
         // Update icon to show grid_view (indicates you can switch back to card view)
-        ui_icon_set_source(view_toggle_icon_, "grid_view");
+        helix::ui::icon::set_source(view_toggle_icon_, "grid_view");
         spdlog::debug("[{}] Switched to list view", get_name());
 
         // Populate list view (initializes pool if needed)
@@ -845,7 +890,7 @@ void PrintSelectPanel::toggle_view() {
         lv_subject_set_int(&view_mode_subject_, 0);
 
         // Update icon to show list (indicates you can switch to list view)
-        ui_icon_set_source(view_toggle_icon_, "list");
+        helix::ui::icon::set_source(view_toggle_icon_, "list");
         spdlog::debug("[{}] Switched to card view", get_name());
 
         // Repopulate card view
@@ -874,12 +919,7 @@ void PrintSelectPanel::sort_by(PrintSelectSortColumn column) {
     apply_sort();
     update_sort_indicators();
 
-    // Repopulate current view
-    if (current_view_mode_ == PrintSelectViewMode::CARD) {
-        populate_card_view();
-    } else {
-        populate_list_view();
-    }
+    populate_current_view();
 
     spdlog::debug("[{}] Sorted by column {}, direction {}", get_name(), static_cast<int>(column),
                   static_cast<int>(current_sort_direction_));
@@ -903,15 +943,11 @@ void PrintSelectPanel::set_sort_recent() {
     apply_sort();
     update_sort_indicators();
 
-    if (current_view_mode_ == PrintSelectViewMode::CARD) {
-        populate_card_view();
-    } else {
-        populate_list_view();
-    }
+    populate_current_view();
 
     // Show "Recently Printed" context banner
     if (panel_) {
-        auto* banner = lv_obj_find_by_name(panel_, "context_banner");
+        auto* banner = helix::ui::find_required(panel_, "context_banner", get_name());
         if (banner) {
             lv_obj_remove_flag(banner, LV_OBJ_FLAG_HIDDEN);
         }
@@ -922,7 +958,7 @@ void PrintSelectPanel::set_sort_recent() {
 
 void PrintSelectPanel::hide_context_banner() {
     if (panel_) {
-        auto* banner = lv_obj_find_by_name(panel_, "context_banner");
+        auto* banner = helix::ui::find_required(panel_, "context_banner", get_name());
         if (banner && !lv_obj_has_flag(banner, LV_OBJ_FLAG_HIDDEN)) {
             lv_obj_add_flag(banner, LV_OBJ_FLAG_HIDDEN);
         }
@@ -930,6 +966,13 @@ void PrintSelectPanel::hide_context_banner() {
 }
 
 void PrintSelectPanel::refresh_files(bool force) {
+    // Listing, metadata and thumbnail traffic waits for the first visit; every
+    // caller before it (setup, set_api, connect edges) is superseded by the
+    // refresh on_activate() issues.
+    if (first_activation_) {
+        spdlog::debug("[{}] refresh_files() deferred until first activation", get_name());
+        return;
+    }
     hide_context_banner();
     if (!file_provider_) {
         spdlog::warn("[{}] Cannot refresh files: file provider not initialized", get_name());
@@ -1004,7 +1047,7 @@ void PrintSelectPanel::fetch_metadata_range(size_t start, size_t end) {
             // No self->member access on bg — everything member-touching is inside tok.defer
             // so the nav-generation check moves into each deferred body. (#L081 Mech-C)
             [self, i, filename, file_path, captured_gen,
-             token = self->lifetime_.token()](const FileMetadata& metadata) {
+             token = self->object_lifetime_.token()](const FileMetadata& metadata) {
                 // Pure local computation — no self access.
                 // Empty metadata means file hasn't been scanned yet (e.g. USB symlinks).
                 bool metadata_empty = metadata.thumbnails.empty() && metadata.estimated_time == 0;
@@ -1040,6 +1083,10 @@ void PrintSelectPanel::fetch_metadata_range(size_t start, size_t end) {
                                         if (self->nav_generation_.load() != captured_gen) {
                                             return;
                                         }
+                                        if (self->refetch_after_connection_loss(i, filename,
+                                                                                error)) {
+                                            return;
+                                        }
                                         spdlog::debug("[{}] Metascan failed for {}: {}, "
                                                       "trying gcode extraction",
                                                       self->get_name(), filename, error.message);
@@ -1061,7 +1108,7 @@ void PrintSelectPanel::fetch_metadata_range(size_t start, size_t end) {
             },
             // Metadata error callback. Same pattern: nav-gen check moves into the defer body.
             [self, i, filename, file_path, captured_gen,
-             token = self->lifetime_.token()](const MoonrakerError& error) {
+             token = self->object_lifetime_.token()](const MoonrakerError& error) {
                 token.defer("PrintSelectPanel::metadata_error_metascan", [self, i, filename,
                                                                           file_path, captured_gen,
                                                                           token, error]() {
@@ -1070,6 +1117,9 @@ void PrintSelectPanel::fetch_metadata_range(size_t start, size_t end) {
                     }
                     spdlog::debug("[{}] Failed to get metadata for {}: {} ({})", self->get_name(),
                                   filename, error.message, error.get_type_string());
+                    if (self->refetch_after_connection_loss(i, filename, error)) {
+                        return;
+                    }
 
                     if (!self->api_) {
                         return;
@@ -1093,6 +1143,10 @@ void PrintSelectPanel::fetch_metadata_range(size_t start, size_t end) {
                                             if (self->nav_generation_.load() != captured_gen) {
                                                 return;
                                             }
+                                            if (self->refetch_after_connection_loss(i, filename,
+                                                                                    scan_error)) {
+                                                return;
+                                            }
                                             spdlog::debug("[{}] Metascan also failed for {}: {}, "
                                                           "trying gcode extraction",
                                                           self->get_name(), filename,
@@ -1111,6 +1165,19 @@ void PrintSelectPanel::fetch_metadata_range(size_t start, size_t end) {
         spdlog::trace("[{}] fetch_metadata_range({}, {}): started {} metadata requests", get_name(),
                       start, end, fetch_count);
     }
+}
+
+bool PrintSelectPanel::refetch_after_connection_loss(size_t i, const std::string& filename,
+                                                     const MoonrakerError& error) {
+    if (error.type != MoonrakerErrorType::CONNECTION_LOST) {
+        return false;
+    }
+    if (i < file_list_.size() && file_list_[i].filename == filename) {
+        file_list_[i].metadata_fetched = false;
+    }
+    spdlog::debug("[{}] Metadata for {} lost with the connection; fetching again after reconnect",
+                  get_name(), filename);
+    return true;
 }
 
 /**
@@ -1135,18 +1202,14 @@ void PrintSelectPanel::process_metadata_result(size_t i, const std::string& file
     // (e.g., "PLA;PLA;PETG" → ["PLA", "PLA", "PETG"])
     std::vector<std::string> filament_types;
     if (!filament_type_raw.empty()) {
-        std::istringstream type_stream(filament_type_raw);
-        std::string token;
-        while (std::getline(type_stream, token, ';')) {
-            filament_types.push_back(token);
+        for (std::string_view sv : tio::lines(filament_type_raw, ';')) {
+            filament_types.emplace_back(sv);
         }
     }
     std::vector<std::string> filament_names;
     if (!filament_name_raw.empty()) {
-        std::istringstream name_stream(filament_name_raw);
-        std::string token;
-        while (std::getline(name_stream, token, ';')) {
-            filament_names.push_back(token);
+        for (std::string_view sv : tio::lines(filament_name_raw, ';')) {
+            filament_names.emplace_back(sv);
         }
     }
 
@@ -1162,40 +1225,21 @@ void PrintSelectPanel::process_metadata_result(size_t i, const std::string& file
     double layer_height = metadata.layer_height;
     std::string uuid = metadata.uuid;
 
-    // Smart thumbnail selection: pick smallest that meets display requirements
-    // This reduces download size while ensuring adequate resolution
     helix::ThumbnailTarget target = helix::ThumbnailProcessor::get_target_for_display();
-    const ThumbnailInfo* best_thumb = metadata.get_best_thumbnail(target.width, target.height);
-    std::string thumb_path =
-        resolve_thumbnail_path(best_thumb ? best_thumb->relative_path : "", current_path_);
-    spdlog::debug("[{}] Metadata thumbnails for {}: count={}, selected='{}' -> '{}'", get_name(),
-                  filename, metadata.thumbnails.size(),
-                  best_thumb ? best_thumb->relative_path : "(none)", thumb_path);
-
-    // Include predicted pre-print overhead (heating, homing, bed mesh, etc.)
-    // in the total time estimate so users see realistic wall-clock time
-    int preprint_seconds = helix::PreprintPredictor::predicted_total_from_config();
-    int total_minutes =
-        print_time_minutes + (preprint_seconds + 30) / 60; // round to nearest minute
+    std::string thumb_path = helix::select_and_resolve_thumbnail(metadata.thumbnails, current_path_,
+                                                                 target.width, target.height);
+    spdlog::debug("[{}] Metadata thumbnails for {}: count={}, selected '{}'", get_name(), filename,
+                  metadata.thumbnails.size(), thumb_path);
 
     // Format strings on background thread (uses standalone helper functions)
-    std::string print_time_str = format_print_time(total_minutes);
+    std::string print_time_str = format_print_time(card_total_minutes(print_time_minutes));
     std::string filament_str = format_filament_weight(filament_grams);
     std::string layer_count_str = format_layer_count(layer_count);
-    std::string print_height_str = format_print_height(object_height) + " " + lv_tr("tall");
-
-    // Format layer height (e.g., "0.24 mm")
-    char layer_height_buf[32];
-    if (layer_height > 0.0) {
-        helix::format::format_distance_mm(layer_height, 2, layer_height_buf,
-                                          sizeof(layer_height_buf));
-    } else {
-        snprintf(layer_height_buf, sizeof(layer_height_buf), "-");
-    }
-    std::string layer_height_str = layer_height_buf;
+    std::string print_height_str = format_print_height(object_height, /*tall_suffix=*/true);
+    std::string layer_height_str = format_layer_height(layer_height);
 
     // Check if thumbnail is a local file (background thread - filesystem OK)
-    bool thumb_is_local = !thumb_path.empty() && std::filesystem::exists(thumb_path);
+    bool thumb_is_local = !thumb_path.empty() && hfs::exists(thumb_path);
 
     // CRITICAL: Dispatch file_list_ modifications to main thread to avoid race
     // conditions with populate_card_view/populate_list_view reading file_list_
@@ -1273,7 +1317,7 @@ void PrintSelectPanel::process_metadata_result(size_t i, const std::string& file
             // UpdateQueue tick; if the panel is torn down before then (e.g. user
             // navigates away mid-scroll), the deferred apply must no-op instead of
             // dereferencing the freed panel (use-after-free → glibc heap abort).
-            auto panel_tok = self->lifetime_.token();
+            auto panel_tok = self->object_lifetime_.token();
 
             // Same hazard, for the pieces the bg-thread callbacks below need.
             // get_name() is virtual, so calling it on a torn-down panel dispatches
@@ -1330,7 +1374,6 @@ void PrintSelectPanel::process_metadata_result(size_t i, const std::string& file
 
                     size_t file_idx = d->index;
                     std::string filename_copy = d->filename;
-                    std::string cache_key = d->thumb_path + "_local";
 
                     // A refresh re-runs this for files that already have their .bin, and
                     // re-reading plus re-staging every PNG to rediscover that is wasted IO.
@@ -1341,10 +1384,15 @@ void PrintSelectPanel::process_metadata_result(size_t i, const std::string& file
                     std::vector<uint8_t> png_data =
                         already_prescaled ? std::vector<uint8_t>{} : read_file_bytes(d->thumb_path);
                     std::string cached_png =
-                        png_data.empty() ? std::string()
-                                         : get_thumbnail_cache().save_raw_png(cache_key, png_data);
+                        png_data.empty()
+                            ? std::string()
+                            : get_thumbnail_cache().save_raw_png(helix::ThumbnailSource::LocalFile,
+                                                                 d->thumb_path, png_data);
 
-                    if (cached_png.empty()) {
+                    if (already_prescaled) {
+                        spdlog::trace("[{}] Keeping prescaled local thumbnail for {}",
+                                      self->get_name(), d->filename);
+                    } else if (cached_png.empty()) {
                         // Could not stage it for prescaling — the raw PNG still beats no
                         // thumbnail at all, even though the card will crop it.
                         self->file_list_[d->index].thumbnail_path = "A:" + d->thumb_path;
@@ -1353,7 +1401,8 @@ void PrintSelectPanel::process_metadata_result(size_t i, const std::string& file
                                       self->file_list_[d->index].thumbnail_path);
                     } else {
                         ThumbnailRequest req;
-                        req.key = cache_key;
+                        req.key = d->thumb_path;
+                        req.source = helix::ThumbnailSource::LocalFile;
                         req.target = helix::ThumbnailProcessor::get_target_for_display();
                         req.api = self->api_;
 
@@ -1457,12 +1506,10 @@ void PrintSelectPanel::process_metadata_result(size_t i, const std::string& file
                                                                            : file.filament_name;
                                             t->panel->set_selected_file(
                                                 file.filename.c_str(), file.thumbnail_path.c_str(),
-                                                file.original_thumbnail_url.c_str(),
                                                 file.print_time_str.c_str(),
                                                 file.filament_str.c_str(),
                                                 file.layer_count_str.c_str(),
                                                 file.print_height_str.c_str(),
-                                                file.modified_timestamp,
                                                 file.layer_height_str.c_str(),
                                                 filament_display.c_str());
                                             spdlog::debug(
@@ -1478,57 +1525,11 @@ void PrintSelectPanel::process_metadata_result(size_t i, const std::string& file
                                          self->get_name(), filename_copy, error);
                         });
 #else
-                    // ESP32 (Task 11 R2): no disk thumbnail cache on this platform
-                    // (Task 10 R6), so bypass ThumbnailCache/ThumbnailProcessor
-                    // entirely and fetch the PNG bytes directly via the HTTP lane,
-                    // decoding into a PSRAM-backed lv_image_dsc_t instead of a
-                    // cache file (see esp_psram_thumbnail.h).
-                    //
-                    // MANDATORY threading: EspHttpLane invokes on_success/on_error
-                    // directly on its own worker thread with no built-in
-                    // marshaling. This callback therefore does only local
-                    // byte-copy/PSRAM work on the worker thread and defers every
-                    // `self`/file_list_ touch via panel_tok.defer() — `self` is
-                    // captured here only to pass into that deferred lambda, never
-                    // dereferenced on this thread.
-                    spdlog::debug("[{}] Fetching PSRAM thumbnail for {}: {}", self->get_name(),
-                                  d->filename, d->thumb_path);
-
-                    size_t file_idx = d->index;
-                    std::string filename_copy = d->filename;
-                    constexpr size_t ESP32_THUMBNAIL_MAX_BYTES = 512 * 1024;
-
-                    self->api_->transfers().download_file_partial(
-                        "gcodes", d->thumb_path, ESP32_THUMBNAIL_MAX_BYTES,
-                        // Success callback — runs on the EspHttpLane worker thread.
-                        [self, panel_tok, file_idx, filename_copy](const std::string& png_bytes) {
-                            auto thumb = helix::ui::EspPsramThumbnail::create(png_bytes);
-                            if (!thumb) {
-                                spdlog::warn("[PrintSelectPanel] PSRAM alloc failed for "
-                                             "thumbnail: {}",
-                                             filename_copy);
-                                return;
-                            }
-                            panel_tok.defer(
-                                "PrintSelectPanel::on_psram_thumbnail_fetched",
-                                [self, file_idx, filename_copy,
-                                 thumb = std::move(thumb)]() mutable {
-                                    if (file_idx < self->file_list_.size() &&
-                                        self->file_list_[file_idx].filename == filename_copy) {
-                                        self->file_list_[file_idx].esp_thumbnail = std::move(thumb);
-                                        self->schedule_view_refresh();
-                                    }
-                                });
-                        },
-                        // Error callback — bg thread, log only, no member access.
-                        [filename_copy](const MoonrakerError& error) {
-                            spdlog::debug(
-                                "[PrintSelectPanel] PSRAM thumbnail fetch failed for {}: {}",
-                                filename_copy, error.message);
-                        });
+                    // ESP32: no disk thumbnail cache; see sync_esp_thumbnails().
+                    self->sync_esp_thumbnails(self->esp_window_first_, self->esp_window_end_);
 #endif
                 }
-            } else if (self->api_) {
+            } else if (self->api_ && helix::gcode_thumbnail_extraction_available()) {
                 // No thumbnail from metadata - try extracting from gcode file directly
                 // This handles USB files where Moonraker can't write .thumbs directory
                 // because the USB mount is read-only.
@@ -1551,106 +1552,53 @@ void PrintSelectPanel::process_metadata_result(size_t i, const std::string& file
                     spdlog::debug("[{}] No thumbnail in metadata for {}, extracting from gcode",
                                   self->get_name(), gcode_path);
 
-                    // Download first 100KB of gcode (thumbnails are always in header)
-                    constexpr size_t THUMBNAIL_HEADER_SIZE = 100 * 1024;
-
-                    // Create context for prescale callback safety. capture(),
-                    // not create(): nav_generation_ belongs to panel
-                    // navigation, so a gcode extraction must observe it, not
-                    // advance it.
+                    // Context for prescale callback safety. capture(), not
+                    // create(): nav_generation_ belongs to panel navigation,
+                    // so a gcode extraction must observe it, not advance it.
                     ThumbnailLoadContext ctx = ThumbnailLoadContext::capture(
                         self->thumbnail_alive_, &self->nav_generation_);
 
-                    self->api_->transfers().download_file_partial(
-                        "gcodes", gcode_path, THUMBNAIL_HEADER_SIZE,
-                        // Success callback - extract thumbnails from gcode content
-                        [self, panel_tok, panel_name, panel_api, file_idx, filename_copy,
-                         gcode_path, ctx](const std::string& content) {
-                            // HttpExecutor worker. The parse and the cache write below
-                            // are deliberately left here — they are the expensive part
-                            // and touch no panel state. What must NOT happen on this
-                            // thread is a `self` dereference, so everything the body
-                            // needs from the panel (name, api, lifetime) was captured
-                            // by value on the main thread instead.
-                            auto thumbnails =
-                                helix::gcode::extract_thumbnails_from_content(content);
-
-                            if (thumbnails.empty()) {
-                                spdlog::debug("[{}] No embedded thumbnails in {}", panel_name,
-                                              gcode_path);
-                                return;
-                            }
-
-                            // Use the largest thumbnail (already sorted largest-first)
-                            const auto& best = thumbnails[0];
-                            spdlog::debug("[{}] Extracted {}x{} thumbnail ({} bytes) from {}",
-                                          panel_name, best.width, best.height, best.png_data.size(),
-                                          gcode_path);
-
-                            // Save to cache using the gcode path as identifier
-                            std::string cache_key = gcode_path + "_extracted";
-                            std::string lvgl_path =
-                                get_thumbnail_cache().save_raw_png(cache_key, best.png_data);
-
-                            if (lvgl_path.empty()) {
-                                spdlog::warn("[{}] Failed to cache extracted thumbnail for {}",
-                                             panel_name, gcode_path);
-                                return;
-                            }
-
-                            // Feed through prescale pipeline for .bin generation
-                            // (avoids runtime 300x300→160x160 scaling on every frame)
-                            ThumbnailRequest req;
-                            req.key = cache_key;
-                            req.target = helix::ThumbnailProcessor::get_target_for_display();
-                            req.api = panel_api;
-
-                            get_thumbnail_cache().fetch(
-                                req, ctx,
-                                [self, panel_tok, file_idx,
-                                 filename_copy](const std::string& optimized, bool /*degraded*/) {
-                                    // Everything that touches the panel happens in the
-                                    // queued apply below, which re-checks the token on
-                                    // the main thread.
-                                    struct ExtractedThumbUpdate {
-                                        PrintSelectPanel* panel;
-                                        helix::LifetimeToken token;
-                                        size_t index;
-                                        std::string filename;
-                                        std::string lvgl_path;
-                                    };
-                                    helix::ui::queue_update<ExtractedThumbUpdate>(
-                                        std::make_unique<ExtractedThumbUpdate>(ExtractedThumbUpdate{
-                                            self, panel_tok, file_idx, filename_copy, optimized}),
-                                        [](ExtractedThumbUpdate* t) {
-                                            // Panel may have been destroyed between the
-                                            // fetch completing and this queued apply.
-                                            if (t->token.expired()) {
-                                                return;
-                                            }
-                                            if (t->index < t->panel->file_list_.size() &&
-                                                t->panel->file_list_[t->index].filename ==
-                                                    t->filename) {
-                                                t->panel->file_list_[t->index].thumbnail_path =
-                                                    t->lvgl_path;
-                                                spdlog::info(
-                                                    "[{}] Extracted thumbnail for {}: {}",
-                                                    t->panel->get_name(), t->filename,
-                                                    t->panel->file_list_[t->index].thumbnail_path);
-                                                t->panel->schedule_view_refresh();
-                                            }
-                                        });
-                                },
-                                [panel_name, filename_copy](const std::string& error) {
-                                    spdlog::warn(
-                                        "[{}] Failed to prescale extracted thumbnail for {}: {}",
-                                        panel_name, filename_copy, error);
+                    helix::fetch_thumbnail_from_gcode(
+                        gcode_path, helix::GCODE_THUMBNAIL_HEADER_BYTES, panel_api,
+                        helix::ThumbnailProcessor::get_target_for_display(), ctx,
+                        [self, panel_tok, file_idx, filename_copy](const std::string& optimized,
+                                                                   bool /*degraded*/) {
+                            // Everything that touches the panel happens in the
+                            // queued apply below, which re-checks the token on
+                            // the main thread.
+                            struct ExtractedThumbUpdate {
+                                PrintSelectPanel* panel;
+                                helix::LifetimeToken token;
+                                size_t index;
+                                std::string filename;
+                                std::string lvgl_path;
+                            };
+                            helix::ui::queue_update<ExtractedThumbUpdate>(
+                                std::make_unique<ExtractedThumbUpdate>(ExtractedThumbUpdate{
+                                    self, panel_tok, file_idx, filename_copy, optimized}),
+                                [](ExtractedThumbUpdate* t) {
+                                    // Panel may have been destroyed between the
+                                    // fetch completing and this queued apply.
+                                    if (t->token.expired()) {
+                                        return;
+                                    }
+                                    if (t->index < t->panel->file_list_.size() &&
+                                        t->panel->file_list_[t->index].filename == t->filename) {
+                                        t->panel->file_list_[t->index].thumbnail_path =
+                                            t->lvgl_path;
+                                        spdlog::info("[{}] Extracted thumbnail for {}: {}",
+                                                     t->panel->get_name(), t->filename,
+                                                     t->panel->file_list_[t->index].thumbnail_path);
+                                        t->panel->schedule_view_refresh();
+                                    }
                                 });
                         },
-                        // Error callback - silent fail (file might be too small or inaccessible)
-                        [panel_name, gcode_path](const MoonrakerError& error) {
-                            spdlog::debug("[{}] Failed to download gcode header for {}: {}",
-                                          panel_name, gcode_path, error.message);
+                        [panel_name, filename_copy](const std::string& error) {
+                            // Silent-fail by design: thumbnail-less folders
+                            // are normal, and a warn here floods the log per
+                            // file per scroll.
+                            spdlog::debug("[{}] Failed to extract thumbnail for {}: {}", panel_name,
+                                          filename_copy, error);
                         });
                 }
             }
@@ -1665,12 +1613,11 @@ void PrintSelectPanel::process_metadata_result(size_t i, const std::string& file
                 // Use filament_name if available, otherwise filament_type
                 const std::string& filament_display =
                     !d->filament_name.empty() ? d->filament_name : d->filament_type;
-                self->set_selected_file(
-                    d->filename.c_str(), self->file_list_[d->index].thumbnail_path.c_str(),
-                    self->file_list_[d->index].original_thumbnail_url.c_str(),
-                    d->print_time_str.c_str(), d->filament_str.c_str(), d->layer_count_str.c_str(),
-                    d->print_height_str.c_str(), self->file_list_[d->index].modified_timestamp,
-                    d->layer_height_str.c_str(), filament_display.c_str());
+                self->set_selected_file(d->filename.c_str(),
+                                        self->file_list_[d->index].thumbnail_path.c_str(),
+                                        d->print_time_str.c_str(), d->filament_str.c_str(),
+                                        d->layer_count_str.c_str(), d->print_height_str.c_str(),
+                                        d->layer_height_str.c_str(), filament_display.c_str());
             }
         };
         apply(d_owned.get());
@@ -1686,8 +1633,10 @@ void PrintSelectPanel::set_api(IMoonrakerAPI* api) {
     }
 
     // Update detail view's dependencies (it was created with nullptr in setup())
-    if (detail_view_) {
+    if (detail_view_built_) {
         detail_view_->set_dependencies(api_, &printer_state_);
+    } else if (detail_view_) {
+        detail_view_->set_analysis_dependencies(api_, &printer_state_);
     }
 
     // Update print controller's API reference
@@ -1711,40 +1660,68 @@ void PrintSelectPanel::set_api(IMoonrakerAPI* api) {
             "print_select_filelist_" + std::to_string(reinterpret_cast<uintptr_t>(this));
         auto* self = this;
         api_->register_method_callback(
-            "notify_filelist_changed", filelist_handler_name_, [self](const json& msg) {
+            "notify_filelist_changed", filelist_handler_name_,
+            [self, tok = object_lifetime_.token()](const json& msg) {
                 // Action + path only, never the raw payload. The full dump ran
                 // ~344 bytes a line, and an AFC printer fires this constantly
                 // (AFC rewrites AFC/AFC.var.unit on every SET_* command), so on
                 // one debug bundle it burned 97 KB of a ring that has to hold
                 // the whole session. Nothing downstream reads the other fields.
+                // Every field here is declared a string by Moonraker and may
+                // still arrive as JSON null; nlohmann's value(key, default)
+                // returns the default only for an ABSENT key and throws on a
+                // present null. The client catches per callback, so one such
+                // frame would cost the panel the whole notification - which is
+                // the stale listing this filter exists to avoid.
                 std::string action = "?";
                 std::string root;
                 std::string path;
-                if (msg.contains("params") && msg["params"].is_array() && !msg["params"].empty()) {
-                    const json& p = msg["params"][0];
-                    action = p.value("action", "?");
-                    if (p.contains("item") && p["item"].is_object()) {
-                        const json& item = p["item"];
-                        root = item.value("root", "");
-                        path = root + ":" + item.value("path", "");
+                std::string source_root;
+                std::string source_path;
+                if (const json* p = helix::json_util::notification_payload(msg)) {
+                    action = helix::json_util::safe_string(*p, "action", "?");
+                    const auto item_it = p->find("item");
+                    if (item_it != p->end() && item_it->is_object()) {
+                        root = helix::json_util::safe_string(*item_it, "root");
+                        path = root + ":" + helix::json_util::safe_string(*item_it, "path");
+                    }
+                    // `item` is the operation's destination; a move out of
+                    // gcodes reports a foreign item root with the gcodes
+                    // origin here.
+                    const auto source_it = p->find("source_item");
+                    if (source_it != p->end() && source_it->is_object()) {
+                        source_root = helix::json_util::safe_string(*source_it, "root");
+                        source_path =
+                            source_root + ":" + helix::json_util::safe_string(*source_it, "path");
                     }
                 }
+
+                // A move's `path` names where the file landed, so logging it
+                // alone makes an admitted move read like a filter bug in the
+                // next debug bundle. Name the origin beside it.
+                const std::string described =
+                    source_path.empty() ? path : source_path + " -> " + path;
 
                 // Roots other than "gcodes" cannot change this list, and the
                 // config root churns constantly on an AFC printer. Log those at
                 // debug so the ring still shows they arrived without one line
                 // per 10 s of print time.
-                if (!filelist_change_affects_gcodes(root)) {
+                if (!helix::json_util::filelist_change_affects_gcodes(root, source_root)) {
                     spdlog::debug("[{}] notify_filelist_changed: {} {} (other root, ignored)",
-                                  self->get_name(), action, path);
+                                  self->get_name(), action, described);
                     return;
                 }
-                spdlog::info("[{}] notify_filelist_changed: {} {}", self->get_name(), action, path);
+                spdlog::info("[{}] notify_filelist_changed: {} {}", self->get_name(), action,
+                             described);
 
-                // Check if we're on the printer source (not USB)
-                bool is_usb_active = self->usb_source_ && self->usb_source_->is_usb_active();
-                if (!is_usb_active) {
-                    // If detail view is open, just mark that files changed - will refresh on return
+                // Everything below reads panel state, so it runs on the main thread.
+                tok.defer("PrintSelectPanel::filelist_changed", [self]() {
+                    // Only the printer source lists these files, not USB
+                    if (self->usb_source_ && self->usb_source_->is_usb_active()) {
+                        return;
+                    }
+                    // If detail view is open, just mark that files changed - will refresh on
+                    // return
                     if (self->detail_view_open_) {
                         self->files_changed_while_detail_open_ = true;
                         spdlog::debug(
@@ -1752,21 +1729,13 @@ void PrintSelectPanel::set_api(IMoonrakerAPI* api) {
                             self->get_name());
                         return;
                     }
-
-                    // Use async call to refresh on main thread
-                    helix::ui::async_call(
-                        [](void* user_data) {
-                            auto* panel = static_cast<PrintSelectPanel*>(user_data);
-                            // Guard against async callback firing after display destruction
-                            if (!panel || !panel->panel_ || !lv_obj_is_valid(panel->panel_)) {
-                                return;
-                            }
-                            spdlog::debug("[{}] Refreshing file list due to external change",
-                                          panel->get_name());
-                            panel->refresh_files();
-                        },
-                        self);
-                }
+                    if (!self->panel_ || !lv_obj_is_valid(self->panel_)) {
+                        return;
+                    }
+                    spdlog::debug("[{}] Refreshing file list due to external change",
+                                  self->get_name());
+                    self->refresh_files();
+                });
             });
         spdlog::debug("[{}] Registered for notify_filelist_changed notifications", get_name());
     }
@@ -1838,7 +1807,23 @@ void PrintSelectPanel::check_moonraker_usb_symlink() {
         });
 }
 
+void PrintSelectPanel::repopulate() {
+    // The rebuilt card/list views start empty, and a refresh returning the same
+    // listing skips repopulation, so re-render the list already held (#1616).
+    if (current_view_mode_ == PrintSelectViewMode::LIST) {
+        helix::ui::icon::set_source(view_toggle_icon_, "grid_view");
+    }
+    populate_current_view();
+    update_sort_indicators();
+    update_empty_state();
+}
+
 void PrintSelectPanel::on_activate() {
+#if defined(HELIX_PLATFORM_ESP32)
+    esp_kept_for_detail_ = false;
+    // Back from the detail view: its image goes, its card keeps its own.
+    release_esp_detail_thumbnail();
+#endif
     // "Print Last" flow: suppress panel flash while detail view is pending/open
     if (return_to_home_on_close_) {
         bool detail_open = detail_view_ && detail_view_->is_visible();
@@ -1865,9 +1850,17 @@ void PrintSelectPanel::on_activate() {
             return_to_home_on_close_ = false;
             return_home_activation_count_ = 0;
             spdlog::info("[{}] Returning to home panel (Print Last flow)", get_name());
-            NavigationManager::instance().set_active(PanelId::Home);
+            helix::nav::set_active(PanelId::Home);
             return;
         }
+    }
+
+    // The per-file badges aggregate every job the printer has ever run, so this
+    // is the one consumer that needs the whole list. ensure_loaded(), not
+    // fetch(): fetch() means "the cached list is wrong", so calling it while a
+    // request is already out queues a second identical one.
+    if (auto* history_manager = get_print_history_manager()) {
+        history_manager->ensure_loaded(HistoryScope::COMPLETE);
     }
 
     // On first activation: skip refresh if files already loaded (connection observer did it)
@@ -1904,6 +1897,13 @@ void PrintSelectPanel::on_activate() {
 
     first_activation_ = false;
 
+    // A card is slow to build on small hardware: build the first screen's
+    // while the listing is on its way, not all at once inside its fill.
+    if (current_view_mode_ == PrintSelectViewMode::CARD && card_view_ && card_view_container_) {
+        card_view_->prebuild(calculate_card_dimensions(),
+                             file_list_loaded_ ? file_list_.size() : SIZE_MAX);
+    }
+
     if (!is_usb_active && api_) {
         // Printer (Moonraker) source — always refresh to pick up external uploads
         spdlog::info("[{}] Panel activated, refreshing file list", get_name());
@@ -1922,7 +1922,19 @@ void PrintSelectPanel::on_activate() {
     }
 }
 
-void PrintSelectPanel::on_deactivate() {
+void PrintSelectPanel::on_deactivating(DeactivateReason) {
+#if defined(HELIX_PLATFORM_ESP32)
+    // Leaving the panel frees the card thumbnails and their slots. The detail
+    // view being pushed over it keeps the window's for the way back. A second
+    // deactivate with no activate between is a navbar switch away from that
+    // detail view, and frees them.
+    const bool detail_opening =
+        !esp_kept_for_detail_ && detail_view_open_ && !(detail_view_ && detail_view_->is_visible());
+    esp_kept_for_detail_ = detail_opening;
+    if (!detail_opening) {
+        release_esp_card_thumbnails();
+    }
+#endif
     // Restore opacity if we were in "Print Last" pass-through mode
     if (return_to_home_on_close_) {
         if (panel_) {
@@ -1934,7 +1946,7 @@ void PrintSelectPanel::on_deactivate() {
 
     // A navbar switch already closes the overlay (NavigationManager tears it down
     // before calling this), so is_visible() is false and clearing the flag is enough.
-    // A rebuild() calls on_deactivate() directly with no stack teardown, so a still-open
+    // A rebuild() calls on_deactivating() directly with no stack teardown, so a still-open
     // overlay needs an explicit hide_detail_view()/go_back() here; gating on is_visible()
     // keeps that from popping the wrong panel_stack_ entry in the navbar case.
     if (detail_view_open_) {
@@ -1945,6 +1957,22 @@ void PrintSelectPanel::on_deactivate() {
             detail_view_open_ = false;
             spdlog::debug("[{}] Cleared detail_view_open_ on deactivate", get_name());
         }
+    }
+
+    // A pending queued start the user never confirmed with a Print tap is
+    // abandoned by leaving: a later visit's on_files_ready would otherwise
+    // reopen the file unasked. One that DID start is removal bookkeeping and
+    // survives to finish_pending_queued_job(). Opening the detail view itself
+    // deactivates this panel (push_overlay covers it), and that deactivation
+    // is mid-open, not a leave — the overlay flag is what tells them apart.
+    if (pending_queued_start_ && !pending_queued_start_->start_attempted &&
+        !NavigationManager::instance().main_panel_deactivated_for_overlay()) {
+        pending_queued_start_.reset();
+        spdlog::debug("[{}] Discarded unconfirmed pending queued start on deactivate", get_name());
+    }
+
+    if (card_view_) {
+        card_view_->stop_prebuild();
     }
 
     // Mark that the panel was fully deactivated so on_activate() knows to refresh
@@ -1991,10 +2019,10 @@ void PrintSelectPanel::navigate_up() {
 }
 
 void PrintSelectPanel::set_selected_file(const char* filename, const char* thumbnail_src,
-                                         const char* original_url, const char* print_time,
-                                         const char* filament_weight, const char* layer_count,
-                                         const char* print_height, time_t modified_timestamp,
+                                         const char* print_time, const char* filament_weight,
+                                         const char* layer_count, const char* print_height,
                                          const char* layer_height, const char* filament_type) {
+    create_detail_view();
     lv_subject_copy_string(&selected_filename_subject_, filename);
 
     // Display filename strips .gcode extension for cleaner UI
@@ -2007,82 +2035,33 @@ void PrintSelectPanel::set_selected_file(const char* filename, const char* thumb
     selected_thumbnail_buffer_[sizeof(selected_thumbnail_buffer_) - 1] = '\0';
     lv_subject_set_pointer(&selected_thumbnail_subject_, selected_thumbnail_buffer_);
 
-    // Detail view thumbnail source selection.
-    //
-    // The pre-scaled card .bin (thumbnail_src) is the AUTHORITATIVE source: it is
-    // the exact image the file-browser card renders successfully, so if it exists
-    // the detail view is guaranteed to show something. The full-resolution PNG is
-    // only an upscaling-quality ENHANCEMENT, and it is fragile: it may have been
-    // evicted while the .bin survives, or may fail to decode at the large detail
-    // size on memory-constrained 2D-only devices (Snapmaker U1, AD5M). On those
-    // platforms the detail preview is the ONLY render (no 3D viewer to mask a
-    // failed thumbnail), so a missing/undecodable PNG showed as an all-black
-    // preview even though the card .bin was right there.
-    //
-    // Resolution order: (1) proven card .bin if present, (2) cached PNG when no
-    // .bin exists yet, (3) nullptr sentinel handled by the has_real block below.
+    // Detail view thumbnail source: the pre-scaled card .bin (thumbnail_src), the
+    // exact image the file-browser card renders successfully. The full-res PNG is
+    // not offered in its place: it may have been evicted while the .bin survives,
+    // or fail to decode at the large detail size on memory-constrained 2D-only
+    // devices (Snapmaker U1, AD5M), where the preview is the only render and a
+    // failed decode shows nothing at all. Without a .bin the placeholder shows.
     const bool have_bin = thumbnail_src && thumbnail_src[0] != '\0' &&
                           !helix::ui::PrintSelectCardView::is_placeholder_thumbnail(thumbnail_src);
-    std::string detail_src;
-    if (have_bin) {
-        detail_src = thumbnail_src;
-        spdlog::debug("[{}] Using pre-scaled .bin for detail view: {}", get_name(), detail_src);
-    } else if (original_url && original_url[0] != '\0') {
-        // No card .bin yet — fall back to the cached full-res PNG so the detail
-        // view still shows the model. FullPng is load-bearing here: a pre-scaled
-        // lookup would answer "not cached" in exactly the case this branch
-        // exists for. Pass modification timestamp to invalidate stale entries.
-        ThumbnailRequest req;
-        req.key = original_url;
-        req.source_modified = modified_timestamp;
-        req.format = ThumbnailRequest::ThumbnailFormat::FullPng;
-        detail_src = get_thumbnail_cache().get_if_cached(req);
-        if (!detail_src.empty()) {
-            spdlog::debug("[{}] No .bin yet — using cached PNG for detail view: {}", get_name(),
-                          detail_src);
-        }
-    }
-    strncpy(selected_detail_thumbnail_buffer_, detail_src.c_str(),
+    strncpy(selected_detail_thumbnail_buffer_, have_bin ? thumbnail_src : "",
             sizeof(selected_detail_thumbnail_buffer_) - 1);
     selected_detail_thumbnail_buffer_[sizeof(selected_detail_thumbnail_buffer_) - 1] = '\0';
     // Publish nullptr for the no-thumbnail sentinel: an empty buffer is misread by
-    // LVGL as a VARIABLE image source and warns/fails to decode (#990). The
-    // has_real block below handles the placeholder-icon/gradient UI toggle.
+    // LVGL as a VARIABLE image source and warns/fails to decode (#990).
     lv_subject_set_pointer(&selected_detail_thumbnail_subject_,
                            thumbnail_subject_value(selected_detail_thumbnail_buffer_));
-
-    // Toggle thumbnail image, no-thumbnail placeholder icon, and gradient background in detail view
-    if (detail_view_ && detail_view_->get_widget()) {
-        lv_obj_t* thumb_img = lv_obj_find_by_name(detail_view_->get_widget(), "detail_thumbnail");
-        lv_obj_t* no_thumb =
-            lv_obj_find_by_name(detail_view_->get_widget(), "detail_no_thumbnail_icon");
-        lv_obj_t* gradient = lv_obj_find_by_name(detail_view_->get_widget(), "gradient_bg");
-        bool has_real = thumbnail_src && thumbnail_src[0] != '\0' &&
-                        !helix::ui::PrintSelectCardView::is_placeholder_thumbnail(thumbnail_src);
-        if (has_real) {
-            if (thumb_img)
-                lv_obj_remove_flag(thumb_img, LV_OBJ_FLAG_HIDDEN);
-            if (no_thumb)
-                lv_obj_add_flag(no_thumb, LV_OBJ_FLAG_HIDDEN);
-            if (gradient)
-                lv_obj_set_style_image_opa(gradient, LV_OPA_COVER, 0);
-        } else {
-            // Hide the lv_image so nothing renders behind the cube icon,
-            // and clear the buffer so LVGL doesn't hold a stale src reference.
-            if (thumb_img)
-                lv_obj_add_flag(thumb_img, LV_OBJ_FLAG_HIDDEN);
-            if (no_thumb)
-                lv_obj_remove_flag(no_thumb, LV_OBJ_FLAG_HIDDEN);
-            // Notify with nullptr, not the buffer: lv_image_src_get_type
-            // classifies a buffer whose byte[0]<0x20 as LV_IMAGE_SRC_VARIABLE,
-            // and decoders then read the leftover bytes past the cleared first
-            // byte as if they were lv_image_dsc_t fields (SEGV in is_jpg).
-            selected_detail_thumbnail_buffer_[0] = '\0';
-            lv_subject_set_pointer(&selected_detail_thumbnail_subject_, nullptr);
-            if (gradient)
-                lv_obj_set_style_image_opa(gradient, LV_OPA_TRANSP, 0);
-        }
+    bool has_image = have_bin;
+#if defined(HELIX_PLATFORM_ESP32)
+    // No disk cache here: the card's decoded image is the only one there is.
+    has_image = has_image || show_esp_detail_thumbnail(filename);
+    if (!has_image) {
+        release_esp_detail_thumbnail();
     }
+#endif
+    // The placeholder glyph and the gradient behind the image bind to this in
+    // print_file_detail.xml, so a detail view rebuilt after it was freed on close
+    // shows the same thing as one that was already up.
+    lv_subject_set_int(&selected_has_thumbnail_subject_, has_image ? 1 : 0);
 
     lv_subject_copy_string(&selected_print_time_subject_, print_time);
     lv_subject_copy_string(&selected_filament_weight_subject_, filament_weight);
@@ -2095,16 +2074,36 @@ void PrintSelectPanel::set_selected_file(const char* filename, const char* thumb
 }
 
 void PrintSelectPanel::show_detail_view() {
+#if defined(HELIX_PLATFORM_ESP32)
+    // The detail view builds its buffers as it opens, from the PSRAM kept
+    // off-screen card thumbnails hold; the window's stay for the way back.
+    sync_esp_thumbnails(esp_window_first_, esp_window_end_, /*keep_off_screen=*/false);
+#endif
+    create_detail_view();
     // Track that detail view is open (for smart refresh skip on return)
     detail_view_open_ = true;
     files_changed_while_detail_open_ = false;
 
     if (detail_view_) {
+        // A queued start for exactly this file hands its saved states to the
+        // rows on every show while it is pending — a failed start re-shows
+        // the view after the rows were reset to defaults. Any other file
+        // discards the pending start: its saved options belong to its own
+        // render, and the job stays queued for its own row tap.
+        if (pending_queued_start_) {
+            if (pending_queued_start_->filename == composed_selected_filename()) {
+                detail_view_->seed_option_states(pending_queued_start_->saved.options);
+                pending_queued_start_->start_attempted = false;
+            } else {
+                pending_queued_start_.reset();
+            }
+        }
+
         std::string filename(selected_filename_buffer_);
         detail_view_->show(filename, current_path_, selected_filament_type_,
                            selected_filament_colors_, selected_filament_materials_,
                            selected_file_size_bytes_, selected_modified_timestamp_,
-                           selected_gcode_end_byte_);
+                           selected_gcode_end_byte_, selected_local_path_);
         // Update history status display in detail view
         detail_view_->update_history_status(selected_history_status_, selected_success_count_);
     }
@@ -2116,9 +2115,28 @@ void PrintSelectPanel::forward_sliced_colors_toggle(bool checked) {
     }
 }
 
+void PrintSelectPanel::toggle_detail_exclude_mode() {
+    if (detail_view_) {
+        detail_view_->toggle_exclude_mode();
+    }
+}
+
+void PrintSelectPanel::discard_pending_queued_start_on_back_out() {
+    // The start pipeline closes the view mid-start (a failed start re-shows
+    // it); that close must not cancel the bookkeeping that removes the job
+    // on success. The filename match keeps an unrelated view's close from
+    // dropping a pending start whose file has not opened yet.
+    if (pending_queued_start_ && !pending_queued_start_->start_attempted &&
+        pending_queued_start_->filename == composed_selected_filename()) {
+        pending_queued_start_.reset();
+    }
+}
+
 void PrintSelectPanel::hide_detail_view() {
     // Clear detail view open flag (on_activate will check files_changed_while_detail_open_)
     detail_view_open_ = false;
+
+    discard_pending_queued_start_on_back_out();
 
     if (detail_view_) {
         // hide() pops the overlay via go_back(), and its only guard is
@@ -2133,12 +2151,22 @@ void PrintSelectPanel::hide_detail_view() {
             detail_view_->hide();
         }
     }
+#if defined(HELIX_PLATFORM_ESP32)
+    // After the hide, so the closing view does not flash the placeholder.
+    release_esp_detail_thumbnail();
+#endif
 }
 
 void PrintSelectPanel::show_delete_confirmation() {
+    create_detail_view();
     if (!detail_view_) {
         spdlog::warn("[{}] Cannot show delete confirmation: detail_view_ not initialized",
                      get_name());
+        return;
+    }
+    // A USB file has no Moonraker path to delete.
+    if (!selected_local_path_.empty()) {
+        spdlog::debug("[{}] Delete refused for USB file {}", get_name(), selected_local_path_);
         return;
     }
     std::string filename(selected_filename_buffer_);
@@ -2168,35 +2196,18 @@ CardDimensions PrintSelectPanel::calculate_card_dimensions() {
         return publish({4, 2, CARD_MIN_WIDTH, CARD_DEFAULT_HEIGHT});
     }
 
-    lv_coord_t container_width = lv_obj_get_content_width(card_view_container_);
     // Read gap from container's XML-defined style (respects design tokens)
     // Note: style_pad_gap in XML sets both pad_row and pad_column; we read pad_column for width
     // calc
     int card_gap = lv_obj_get_style_pad_column(card_view_container_, LV_PART_MAIN);
-    spdlog::trace("[{}] Container content width: {}px (MIN={}, MAX={}, GAP={})", get_name(),
-                  container_width, CARD_MIN_WIDTH, CARD_MAX_WIDTH, card_gap);
-
-    // Calculate available height from parent panel dimensions
-    lv_obj_t* panel_root = lv_obj_get_parent(card_view_container_);
-    if (!panel_root) {
-        spdlog::error("[{}] Cannot find panel root", get_name());
-        return publish({4, 2, CARD_MIN_WIDTH, CARD_DEFAULT_HEIGHT});
-    }
-
-    lv_coord_t panel_height = lv_obj_get_height(panel_root);
-    lv_obj_t* top_bar = lv_obj_get_child(panel_root, 0);
-    lv_coord_t top_bar_height = top_bar ? lv_obj_get_height(top_bar) : 60;
-    lv_coord_t panel_gap = lv_obj_get_style_pad_row(panel_root, LV_PART_MAIN);
-    lv_coord_t container_pad_top = lv_obj_get_style_pad_top(card_view_container_, LV_PART_MAIN);
-    lv_coord_t container_pad_bottom =
-        lv_obj_get_style_pad_bottom(card_view_container_, LV_PART_MAIN);
-    lv_coord_t container_padding = container_pad_top + container_pad_bottom;
-    lv_coord_t available_height = panel_height - top_bar_height - container_padding - panel_gap;
-
-    spdlog::trace("[{}] Height calc: panel={} - top_bar={} - container_pad({}+{})={} - "
-                  "panel_gap={} = available={}",
-                  get_name(), panel_height, top_bar_height, container_pad_top, container_pad_bottom,
-                  container_padding, panel_gap, available_height);
+    // The container's own content box already excludes the header, the context
+    // banner and its padding, whichever of them is showing.
+    lv_obj_update_layout(card_view_container_);
+    lv_coord_t container_width = lv_obj_get_content_width(card_view_container_);
+    lv_coord_t available_height = lv_obj_get_content_height(card_view_container_);
+    sized_for_w_ = container_width;
+    sized_for_h_ = available_height;
+    spdlog::trace("[{}] Card container content height: {}px", get_name(), available_height);
 
     CardDimensions dims;
 
@@ -2240,47 +2251,44 @@ CardDimensions PrintSelectPanel::calculate_card_dimensions() {
 }
 
 void PrintSelectPanel::schedule_view_refresh() {
-    // Use lv_async_call to ensure thread-safety (this may be called from WebSocket thread)
-    helix::ui::async_call(
-        [](void* user_data) {
-            auto* self = static_cast<PrintSelectPanel*>(user_data);
+    object_lifetime_.defer("PrintSelectPanel::schedule_view_refresh", [this]() {
+        auto* self = this;
 
-            // Guard against async callback firing after display destruction
-            if (!self->panel_ || !lv_obj_is_valid(self->panel_)) {
-                return;
-            }
+        // Guard against async callback firing after display destruction
+        if (!self->panel_ || !lv_obj_is_valid(self->panel_)) {
+            return;
+        }
 
-            // If a timer is already pending, reset it (debounce)
-            if (self->refresh_timer_) {
-                lv_timer_reset(self->refresh_timer_);
-                return;
-            }
+        // If a timer is already pending, reset it (debounce)
+        if (self->refresh_timer_) {
+            lv_timer_reset(self->refresh_timer_);
+            return;
+        }
 
-            // Create a one-shot timer to refresh views after debounce period
-            self->refresh_timer_ = lv_timer_create(
-                [](lv_timer_t* timer) {
-                    auto* panel = static_cast<PrintSelectPanel*>(lv_timer_get_user_data(timer));
-                    panel->refresh_timer_ = nullptr; // Clear before callback (timer auto-deletes)
+        // Create a one-shot timer to refresh views after debounce period
+        self->refresh_timer_ = lv_timer_create(
+            [](lv_timer_t* timer) {
+                auto* panel = static_cast<PrintSelectPanel*>(lv_timer_get_user_data(timer));
+                panel->refresh_timer_ = nullptr; // Clear before callback (timer auto-deletes)
 
-                    // Guard against timer firing after display destruction
-                    if (!panel->panel_ || !lv_obj_is_valid(panel->panel_)) {
-                        return;
-                    }
+                // Guard against timer firing after display destruction
+                if (!panel->panel_ || !lv_obj_is_valid(panel->panel_)) {
+                    return;
+                }
 
-                    spdlog::trace("[{}] Debounced metadata refresh - updating visible cards only",
-                                  panel->get_name());
+                spdlog::trace("[{}] Debounced metadata refresh - updating visible cards only",
+                              panel->get_name());
 
-                    // Only refresh CONTENT of currently visible cards - don't reset
-                    // spacers/positions This prevents flashing when metadata/thumbnails arrive
-                    // asynchronously
-                    panel->refresh_visible_content();
-                },
-                REFRESH_DEBOUNCE_MS, self);
+                // Only refresh CONTENT of currently visible cards - don't reset
+                // spacers/positions This prevents flashing when metadata/thumbnails arrive
+                // asynchronously
+                panel->refresh_visible_content();
+            },
+            REFRESH_DEBOUNCE_MS, self);
 
-            // Make it a one-shot timer
-            lv_timer_set_repeat_count(self->refresh_timer_, 1);
-        },
-        this);
+        // Make it a one-shot timer
+        lv_timer_set_repeat_count(self->refresh_timer_, 1);
+    });
 }
 
 void PrintSelectPanel::refresh_visible_content() {
@@ -2371,6 +2379,14 @@ void PrintSelectPanel::populate_list_view(bool preserve_scroll) {
     spdlog::debug("[{}] List view populated with {} files", get_name(), file_list_.size());
 }
 
+void PrintSelectPanel::populate_current_view(bool preserve_scroll) {
+    if (current_view_mode_ == PrintSelectViewMode::CARD) {
+        populate_card_view(preserve_scroll);
+    } else {
+        populate_list_view(preserve_scroll);
+    }
+}
+
 void PrintSelectPanel::apply_sort() {
     file_sorter_.apply_sort(file_list_);
 }
@@ -2382,10 +2398,12 @@ void PrintSelectPanel::merge_history_into_file_list() {
         return;
     }
 
-    // Populate the cache if nobody has yet. ensure_loaded(), not fetch():
-    // fetch() means "the cached list is wrong", so calling it while a request
-    // is already out queues a second identical one.
-    history_manager->ensure_loaded();
+    // No load is triggered here. This runs from the file-list refresh, which
+    // fires at startup and every five seconds whether or not the panel is on
+    // screen, and the whole-history load these badges need is the most
+    // expensive request the app makes. on_activate() asks for it; until it
+    // lands the merge simply finds no stats, and the history observer
+    // re-merges when it does.
 
     // Get currently printing filename (if any)
     std::string current_print_filename;
@@ -2394,9 +2412,9 @@ void PrintSelectPanel::merge_history_into_file_list() {
     // preparing window it still holds the PREVIOUS job. Widening this would
     // badge the wrong file rather than none. Badging the committed file would
     // mean reading preparing_job() instead, which is a feature, not this fold.
-    auto print_state = printer_state_.get_print_job_state();
+    auto print_state = printer_state_.print_state().get_print_job_state();
     if (printer_has_job(print_state)) {
-        if (auto* filename_subject = printer_state_.get_print_filename_subject()) {
+        if (auto* filename_subject = printer_state_.print_state().get_print_filename_subject()) {
             if (const char* filename = lv_subject_get_string(filename_subject);
                 filename && filename[0] != '\0') {
                 current_print_filename =
@@ -2436,29 +2454,46 @@ void PrintSelectPanel::update_empty_state() {
 }
 
 void PrintSelectPanel::update_print_button_state() {
-    // Update the can_print subject based on current print state and macro analysis
-    // XML binding automatically disables button when value is 0
-    bool can_print = printer_state_.can_start_new_print();
-
-    // Also disable if macro analysis is in progress to prevent race conditions
-    // where print starts before we know which skip params to use
-    if (can_print && detail_view_) {
+    // Gather the decision inputs and let the pure view function decide; XML
+    // bindings turn the subjects into button state, label and card visibility.
+    helix::ui::PrintSelectButtonInputs inputs;
+    inputs.machine_busy = job_holds_machine(printer_state_.print_state().get_print_lifecycle());
+    inputs.print_start_committed = printer_state_.print_state().is_print_in_progress();
+    inputs.job_queue_available = printer_state_.is_job_queue_available();
+    inputs.queue_add_in_flight = queue_add_in_flight_;
+    if (detail_view_) {
         if (auto* prep_mgr = detail_view_->get_prep_manager()) {
-            if (prep_mgr->is_macro_analysis_in_progress()) {
-                can_print = false;
-                spdlog::trace("[{}] Print button disabled: macro analysis in progress", get_name());
-            }
+            inputs.macro_analysis_running = prep_mgr->is_macro_analysis_in_progress();
         }
     }
 
-    int new_value = can_print ? 1 : 0;
+    const auto view = helix::ui::compute_print_select_button_view(inputs);
+    const bool queue_mode = view.mode == helix::ui::PrintSelectButtonMode::Queue;
+    const bool enabled = view.blocked_reason[0] == '\0';
+    const bool queue_busy = queue_mode && view.blocked_reason[0] != '\0';
 
+    print_button_mode_ = view.mode;
+    lv_subject_copy_string(&button_label_subject_,
+                           queue_mode ? lv_tr("Add to Queue") : lv_tr("Print"));
+    // The queue operation's clock icon, the one the job queue surfaces use;
+    // the printer icon stays for a direct start.
+    lv_subject_copy_string(&button_icon_subject_, queue_mode ? "progress_clock" : "print");
+    // Queue mode's own caption is contextual (in flight, or waiting for the
+    // current print) rather than a block, so it is mapped here; the pure
+    // function's reason only decides enabled/disabled for it.
+    lv_subject_copy_string(&blocked_reason_subject_, queue_busy ? lv_tr("Adding to queue...")
+                                                     : queue_mode
+                                                         ? lv_tr("Starts after the current print")
+                                                         : lv_tr(view.blocked_reason));
+
+    const int new_value = enabled ? 1 : 0;
     // Only update if value changed (avoid unnecessary subject notifications)
     if (lv_subject_get_int(&can_print_subject_) != new_value) {
         lv_subject_set_int(&can_print_subject_, new_value);
-        spdlog::trace("[{}] Print button {} (can_start_new_print={})", get_name(),
-                      can_print ? "enabled" : "disabled", can_print);
+        spdlog::trace("[{}] Print button {} (mode={}, can_start_new_print={})", get_name(),
+                      enabled ? "enabled" : "disabled", queue_mode ? "queue" : "print", enabled);
     }
+    lv_subject_set_int(&button_mode_subject_, static_cast<int>(view.mode));
 }
 
 void PrintSelectPanel::update_sort_indicators() {
@@ -2561,17 +2596,68 @@ void PrintSelectPanel::update_sort_indicators() {
     }
 }
 
-void PrintSelectPanel::create_detail_view() {
+void PrintSelectPanel::create_print_controller() {
+    if (print_controller_) {
+        return;
+    }
+    // Create and wire up print start controller
+    print_controller_ = std::make_unique<helix::ui::PrintStartController>(printer_state_, api_);
+    print_controller_->set_can_print_subject(&can_print_subject_);
+    print_controller_->set_update_print_button([this]() { update_print_button_state(); });
+    // A start hides details with its picks held, so a failed start comes back to them.
+    print_controller_->set_hide_detail_view([this]() {
+        if (detail_view_) {
+            detail_view_->hold_picks_for_start(true);
+        }
+        hide_detail_view();
+    });
+    print_controller_->set_show_detail_view([this]() { show_detail_view(); });
+    print_controller_->set_navigate_to_print_status(
+        [this]() { PrintStatusPanel::push_overlay(parent_screen_); });
+    // The queued-job start consumes its entry here, on Moonraker's
+    // confirmation that the print actually started — the tap alone proves
+    // nothing (the start can still fail or be backed out).
+    print_controller_->set_on_print_started([this]() {
+        finish_pending_queued_job();
+        // The picks went with the start. A hold already spent means details
+        // has since shown a file, whose picks are not this start's.
+        if (detail_view_ && detail_view_->picks_held_for_start()) {
+            detail_view_->drop_exclude_picks();
+            detail_view_->hold_picks_for_start(false);
+        }
+    });
+
+    // Crash recovery: restore firmware mapping if app restarted mid-print
+    print_controller_->recover_pending_remap();
+}
+
+void PrintSelectPanel::ensure_detail_view_model() {
     if (detail_view_) {
+        return;
+    }
+    detail_view_ = std::make_unique<helix::ui::PrintSelectDetailView>();
+    // ESC / go_back() and a navbar switch pop the overlay without this
+    // panel's hide function; the view's on_deactivating() is the one hook
+    // every close path reaches, so the back-out rule hangs off it.
+    detail_view_->set_on_dismissed([this]() { discard_pending_queued_start_on_back_out(); });
+
+    // Initialize subjects BEFORE create() so XML bindings can find them [L004]
+    detail_view_->init_subjects();
+    detail_view_->set_analysis_dependencies(api_, &printer_state_);
+
+    // Re-enable the print button when macro analysis completes.
+    detail_view_->set_on_macro_analysis(
+        [this](const helix::PrintStartAnalysis& /*analysis*/) { update_print_button_state(); });
+}
+
+void PrintSelectPanel::create_detail_view() {
+    if (detail_view_built_) {
         // The detail overlay lives under parent_screen_, not panel_, so it
         // survives a panel rebuild. setup() is re-entrant; only the first
         // call constructs the view.
         return;
     }
-    detail_view_ = std::make_unique<helix::ui::PrintSelectDetailView>();
-
-    // Initialize subjects BEFORE create() so XML bindings can find them [L004]
-    detail_view_->init_subjects();
+    ensure_detail_view_model();
 
     // create() now returns lv_obj_t* per OverlayBase interface
     if (!detail_view_->create(parent_screen_)) {
@@ -2579,8 +2665,8 @@ void PrintSelectPanel::create_detail_view() {
         detail_view_.reset();
         return;
     }
+    detail_view_built_ = true;
 
-    // Set dependencies and callbacks
     detail_view_->set_dependencies(api_, &printer_state_);
     detail_view_->set_visible_subject(&detail_view_visible_subject_);
     detail_view_->set_on_delete_confirmed([this]() { delete_file(); });
@@ -2590,28 +2676,16 @@ void PrintSelectPanel::create_detail_view() {
     // route their tap here so there is ONE opener and ONE modal instance for
     // every backend — the same entry the preflight "Remap…" button uses.
     detail_view_->set_on_remap_requested([this]() { open_remap_modal(); });
+    // The card's Set up tap. Same modal the boot-time prompt uses, so a user who
+    // dismissed that one still has a way in from the place the refusal is shown.
+    detail_view_->set_on_plugin_setup_requested([this]() {
+        plugin_install_modal_.set_installer(&plugin_installer_);
+        plugin_install_modal_.show(lv_screen_active());
+    });
 
-    // Re-enable the print button when macro analysis completes. The legacy
-    // bullet-text "preprint steps" display has been replaced by the dynamic
-    // PrePrintOption toggle UI in print_file_detail.xml, so no scan/analysis
-    // text refresh is needed here anymore.
-    if (auto* prep_mgr = detail_view_->get_prep_manager()) {
-        prep_mgr->set_macro_analysis_callback(
-            [this](const helix::PrintStartAnalysis& /*analysis*/) { update_print_button_state(); });
+    if (print_controller_) {
+        print_controller_->set_detail_view(detail_view_.get());
     }
-
-    // Create and wire up print start controller
-    print_controller_ = std::make_unique<helix::ui::PrintStartController>(printer_state_, api_);
-    print_controller_->set_detail_view(detail_view_.get());
-    print_controller_->set_can_print_subject(&can_print_subject_);
-    print_controller_->set_update_print_button([this]() { update_print_button_state(); });
-    print_controller_->set_hide_detail_view([this]() { hide_detail_view(); });
-    print_controller_->set_show_detail_view([this]() { show_detail_view(); });
-    print_controller_->set_navigate_to_print_status(
-        [this]() { PrintStatusPanel::push_overlay(parent_screen_); });
-
-    // Crash recovery: restore firmware mapping if app restarted mid-print
-    print_controller_->recover_pending_remap();
 
     spdlog::debug("[{}] Detail view module initialized", get_name());
 }
@@ -2654,14 +2728,14 @@ void PrintSelectPanel::apply_file_selection(const PrintFileData& file) {
     std::string filament_display =
         file.filament_name.empty() ? file.filament_type : file.filament_name;
     set_selected_file(file.filename.c_str(), file.thumbnail_path.c_str(),
-                      file.original_thumbnail_url.c_str(), file.print_time_str.c_str(),
-                      file.filament_str.c_str(), file.layer_count_str.c_str(),
-                      file.print_height_str.c_str(), file.modified_timestamp,
+                      file.print_time_str.c_str(), file.filament_str.c_str(),
+                      file.layer_count_str.c_str(), file.print_height_str.c_str(),
                       file.layer_height_str.c_str(), filament_display.c_str());
     selected_filament_type_ = file.filament_type;
     selected_filament_colors_ = file.filament_colors;
     selected_filament_materials_ = file.filament_types;
     selected_file_size_bytes_ = file.file_size_bytes;
+    selected_local_path_ = file.local_path;
     selected_modified_timestamp_ = file.modified_timestamp;
     selected_gcode_end_byte_ = file.gcode_end_byte;
     selected_history_status_ = file.history_status;
@@ -2722,6 +2796,11 @@ void PrintSelectPanel::on_file_long_pressed(size_t file_index) {
         spdlog::trace("[{}] long-press on directory ignored: {}", get_name(), file.filename);
         return;
     }
+    if (!file.local_path.empty()) {
+        // No delete for a USB file, the same as its hidden detail-view button.
+        spdlog::trace("[{}] long-press on USB file ignored: {}", get_name(), file.filename);
+        return;
+    }
 
     spdlog::info("[{}] Long-press delete requested: {}", get_name(), file.filename);
 
@@ -2736,6 +2815,18 @@ void PrintSelectPanel::on_file_long_pressed(size_t file_index) {
 }
 
 void PrintSelectPanel::start_print(bool force) {
+    if (usb_copy_in_flight_) {
+        return;
+    }
+    if (print_button_mode_ == helix::ui::PrintSelectButtonMode::Queue) {
+        add_to_queue();
+        return;
+    }
+
+    if (refuse_start_with_every_object_picked()) {
+        return;
+    }
+
     if (!print_controller_) {
         spdlog::error("[{}] Cannot start print - controller not initialized", get_name());
         NOTIFY_ERROR(lv_tr("Cannot start print: internal error"));
@@ -2751,7 +2842,8 @@ void PrintSelectPanel::start_print(bool force) {
     // tapped before readiness, defer the attempt; run_when_preflight_ready()
     // carries a safety timeout so a stuck/failed scan can never wedge the print.
     // force=true bypasses (deferred re-entry + "Print Anyway" both call with force).
-    if (!force && detail_view_ && !detail_view_->is_preflight_ready()) {
+    // The wait also covers the file scan's printer-stopping command check.
+    if (!force && detail_view_ && !detail_view_->is_print_start_ready()) {
         spdlog::debug("[{}] Print tapped before pre-flight ready - deferring", get_name());
         detail_view_->run_when_preflight_ready(
             []() { get_global_print_select_panel().start_print(false); });
@@ -2773,13 +2865,421 @@ void PrintSelectPanel::start_print(bool force) {
         }
     }
 
-    // Set the file to print in the controller
+    // Everything about the tapped file is read now: a USB copy lands later,
+    // by when the user may have opened another file.
+    const std::string filename = selected_filename_buffer_;
+    std::vector<std::string> colors = selected_filament_colors_;
+    std::string thumbnail = selected_detail_thumbnail_buffer_;
+    std::vector<std::string> exclude_picks =
+        detail_view_ ? detail_view_->exclude_picks() : std::vector<std::string>{};
+    if (!selected_local_path_.empty()) {
+        copy_usb_file_to_printer([this, colors = std::move(colors),
+                                  thumbnail = std::move(thumbnail),
+                                  exclude_picks](const std::string& dest) {
+            const size_t slash = dest.rfind('/');
+            dispatch_print(dest.substr(slash + 1), dest.substr(0, slash), colors, thumbnail,
+                           exclude_picks);
+        });
+        return;
+    }
+    dispatch_print(filename, current_path_, colors, thumbnail, std::move(exclude_picks));
+}
+
+bool PrintSelectPanel::refuse_start_with_every_object_picked() {
+    if (!detail_view_ || !detail_view_->all_objects_picked()) {
+        return false;
+    }
+    NOTIFY_WARNING(lv_tr("Every object is set to skip, so there is nothing to print"));
+    return true;
+}
+
+void PrintSelectPanel::dispatch_print(const std::string& filename, const std::string& dir,
+                                      const std::vector<std::string>& filament_colors,
+                                      const std::string& thumbnail,
+                                      std::vector<std::string> exclude_picks) {
     // Pass extracted thumbnail path so USB/embedded thumbnails propagate to print status
-    print_controller_->set_file(selected_filename_buffer_, current_path_, selected_filament_colors_,
-                                selected_detail_thumbnail_buffer_);
+    print_controller_->set_file(filename, dir, filament_colors, thumbnail);
+    // The picks seen at the tap: a USB copy can land after another file opened.
+    print_controller_->set_exclude_picks(std::move(exclude_picks));
+
+    // A Print tap for the pending queued file puts the removal bookkeeping
+    // past the reach of hide_detail_view(): from here only a confirmed start
+    // (finish_pending_queued_job) or the user opening a different file
+    // clears it.
+    const std::string composed = dir.empty() ? filename : dir + "/" + filename;
+    if (pending_queued_start_ && pending_queued_start_->filename == composed) {
+        pending_queued_start_->start_attempted = true;
+    }
 
     // Delegate to the print start controller
     print_controller_->initiate();
+}
+
+void PrintSelectPanel::copy_usb_file_to_printer(std::function<void(const std::string& dest)> then) {
+    if (!api_) {
+        NOTIFY_ERROR(lv_tr("Cannot start print: internal error"));
+        return;
+    }
+
+    UsbCopyRequest req{selected_filename_buffer_, selected_local_path_, selected_file_size_bytes_,
+                       ++usb_copy_generation_, std::move(then)};
+    usb_copy_in_flight_ = true;
+    BusyOverlay::show(lv_tr("Copying from USB..."));
+
+    // BusyOverlay has no cancel and the transport's own timeout is an hour,
+    // so a copy that stops making progress is abandoned here instead. One
+    // shot, pushed back by every progress report.
+    lv_timer_t* watchdog = lv_timer_create(
+        [](lv_timer_t* t) {
+            auto* self = static_cast<PrintSelectPanel*>(lv_timer_get_user_data(t));
+            // LVGL deletes a finished one-shot itself.
+            self->usb_copy_watchdog_.release();
+            self->abandon_stalled_usb_copy();
+        },
+        kUsbCopyStallMs, this);
+    lv_timer_set_repeat_count(watchdog, 1);
+    usb_copy_watchdog_.reset(watchdog);
+
+    // What the copy folder already holds decides the name (choose_usb_copy_target).
+    // A listing, not a metadata lookup: one request answers every candidate
+    // name, and its sizes come from the filesystem rather than a metascan.
+    const std::string dir = kUsbCopyDir;
+    auto tok = object_lifetime_.token();
+    api_->files().list_files(
+        "gcodes", dir, false,
+        [this, tok, dir, req](const std::vector<FileInfo>& files) mutable {
+            // Some Moonraker versions answer a missing directory with the root
+            // listing, so only entries directly under dir count.
+            std::map<std::string, uint64_t> existing;
+            const std::string prefix = dir + "/";
+            for (const auto& f : files) {
+                if (!f.is_dir && f.path.rfind(prefix, 0) == 0 &&
+                    f.path.find('/', prefix.size()) == std::string::npos) {
+                    existing[f.path.substr(prefix.size())] = f.size;
+                }
+            }
+            tok.defer("PrintSelectPanel::usb_copy_listed",
+                      [this, req = std::move(req), existing = std::move(existing)]() mutable {
+                          if (usb_copy_current(req.generation)) {
+                              upload_usb_copy(std::move(req), existing);
+                          }
+                      });
+        },
+        [this, tok, req](const MoonrakerError& err) mutable {
+            tok.defer("PrintSelectPanel::usb_copy_list_failed",
+                      [this, req = std::move(req), err]() mutable {
+                          if (!usb_copy_current(req.generation)) {
+                              return;
+                          }
+                          // Moonraker reports a folder that does not exist yet as 404.
+                          if (err.code == 404) {
+                              upload_usb_copy(std::move(req), {});
+                              return;
+                          }
+                          end_usb_copy();
+                          helix::ui::notify_error_tr(TR_NOOP("Could not copy {} from USB: {}"),
+                                                     req.filename, err);
+                      });
+        });
+}
+
+void PrintSelectPanel::upload_usb_copy(UsbCopyRequest req,
+                                       const std::map<std::string, uint64_t>& existing) {
+    const auto target = choose_usb_copy_target(req.filename, req.size, existing);
+    const std::string dest = std::string(kUsbCopyDir) + "/" + target.name;
+    if (target.reuse) {
+        spdlog::info("[{}] gcodes/{} already holds {} ({} bytes); not copying", get_name(), dest,
+                     req.local_path, req.size);
+        end_usb_copy();
+        req.then(dest);
+        return;
+    }
+
+    spdlog::info("[{}] Copying USB file {} to gcodes/{}", get_name(), req.local_path, dest);
+    const std::string filename = req.filename;
+    const uint64_t generation = req.generation;
+    auto tok = object_lifetime_.token();
+    api_->transfers().upload_file_from_path(
+        "gcodes", dest, req.local_path,
+        object_lifetime_.bg_cb("PrintSelectPanel::usb_copy_done",
+                               [this, dest, generation, then = std::move(req.then)]() {
+                                   if (usb_copy_current(generation)) {
+                                       end_usb_copy();
+                                       then(dest);
+                                   }
+                               }),
+        [this, tok, generation, filename](const MoonrakerError& err) {
+            tok.defer("PrintSelectPanel::usb_copy_failed", [this, generation, filename, err]() {
+                if (usb_copy_current(generation)) {
+                    end_usb_copy();
+                    helix::ui::notify_error_tr(TR_NOOP("Could not copy {} from USB: {}"), filename,
+                                               err);
+                }
+            });
+        },
+        // Runs per chunk on the transfer thread: only a whole-percent change
+        // is worth a trip through the UI queue.
+        [this, tok, label = std::string(lv_tr("Copying from USB")),
+         last_pct = -1](size_t done, size_t total) mutable {
+            const int pct = total > 0 ? static_cast<int>(done * 100 / total) : 0;
+            if (pct == last_pct) {
+                return;
+            }
+            last_pct = pct;
+            BusyOverlay::queue_progress(label, done, total);
+            tok.defer("PrintSelectPanel::usb_copy_progress", [this]() {
+                if (lv_timer_t* watchdog = usb_copy_watchdog_.get()) {
+                    lv_timer_reset(watchdog);
+                }
+            });
+        });
+}
+
+bool PrintSelectPanel::usb_copy_current(uint64_t generation) const {
+    return usb_copy_in_flight_ && generation == usb_copy_generation_;
+}
+
+void PrintSelectPanel::end_usb_copy() {
+    usb_copy_in_flight_ = false;
+    usb_copy_watchdog_.reset();
+    BusyOverlay::hide();
+}
+
+void PrintSelectPanel::abandon_stalled_usb_copy() {
+    spdlog::warn("[{}] USB copy made no progress for {}s; abandoning it", get_name(),
+                 kUsbCopyStallMs / 1000);
+    ++usb_copy_generation_; // a late answer from the abandoned copy is ignored
+    end_usb_copy();
+    NOTIFY_ERROR(lv_tr("Copying from USB stopped responding"));
+}
+
+void PrintSelectPanel::add_to_queue() {
+    // One Add in flight at a time: the button is disabled while the request
+    // runs, but a hardware double-tap can still land before the subject
+    // propagates, and a second add_job would queue the file twice.
+    if (queue_add_in_flight_ || usb_copy_in_flight_) {
+        return;
+    }
+
+    if (!api_ || !get_job_queue_state()) {
+        NOTIFY_ERROR(lv_tr("Cannot add to queue: internal error"));
+        return;
+    }
+
+    // Moonraker addresses queued files the same way started ones: relative to
+    // the gcodes root, with any subdirectory prefixed.
+    if (!selected_local_path_.empty()) {
+        copy_usb_file_to_printer([this, tapped = composed_selected_filename()](
+                                     const std::string& dest) { queue_file(dest, tapped); });
+        return;
+    }
+    queue_file(composed_selected_filename(), composed_selected_filename());
+}
+
+void PrintSelectPanel::queue_file(const std::string& filename, const std::string& tapped) {
+    auto* jqs = get_job_queue_state();
+    if (!api_ || !jqs) {
+        NOTIFY_ERROR(lv_tr("Cannot add to queue: internal error"));
+        return;
+    }
+
+    helix::queue::QueuedJobOptions options;
+    options.filename = filename;
+    if (detail_view_) {
+        options.options = detail_view_->collect_option_states();
+    }
+
+    std::vector<std::string> before_ids;
+    for (const auto& job : jqs->get_jobs()) {
+        before_ids.push_back(job.job_id);
+    }
+
+    spdlog::info("[{}] Queueing '{}' ({} option rows)", get_name(), filename,
+                 options.options.size());
+
+    queue_add_in_flight_ = true;
+    update_print_button_state();
+
+    api_->queue().add_job(
+        filename,
+        object_lifetime_.bg_cb(
+            "PrintSelectPanel::add_to_queue",
+            [this, before_ids = std::move(before_ids), options = std::move(options),
+             tapped](const JobQueueStatus& status) {
+                queue_add_in_flight_ = false;
+                update_print_button_state();
+
+                // A queued job carries no picks. Another file opened since the
+                // tap keeps its own.
+                if (detail_view_ && composed_selected_filename() == tapped &&
+                    detail_view_->drop_exclude_picks()) {
+                    NOTIFY_INFO(lv_tr("Object picks apply only to prints started now"));
+                }
+
+                const auto new_id = helix::queue::find_new_job_id(before_ids, status.queued_jobs);
+                if (new_id) {
+                    helix::queue::save_queued_job_options(api_, *new_id, options);
+                } else {
+                    // The job IS queued — only the option
+                    // save is skipped, since a guessed id
+                    // would attach it to another job.
+                    spdlog::warn("[{}] Queue add succeeded but the new job id is "
+                                 "ambiguous; options not saved",
+                                 get_name());
+                }
+
+                int position = static_cast<int>(status.queued_jobs.size());
+                for (size_t i = 0; i < status.queued_jobs.size(); ++i) {
+                    if (new_id && status.queued_jobs[i].job_id == *new_id) {
+                        position = static_cast<int>(i) + 1;
+                        break;
+                    }
+                }
+                if (status.queue_state == "paused") {
+                    NOTIFY_SUCCESS(lv_tr("Added to queue (position {}) - queue is paused"),
+                                   position);
+                } else {
+                    NOTIFY_SUCCESS(lv_tr("Added to queue (position {})"), position);
+                }
+
+                if (auto* jqs_now = get_job_queue_state()) {
+                    jqs_now->fetch();
+                }
+            }),
+        object_lifetime_.bg_cb(
+            "PrintSelectPanel::add_to_queue_failed", [this](const MoonrakerError& err) {
+                spdlog::warn("[PrintSelectPanel] Add to queue failed: {}", err.message);
+                queue_add_in_flight_ = false;
+                update_print_button_state();
+                NOTIFY_ERROR(lv_tr("Could not add to queue"));
+            }));
+}
+
+std::string PrintSelectPanel::composed_selected_filename() const {
+    return current_path_.empty() ? std::string(selected_filename_buffer_)
+                                 : current_path_ + "/" + selected_filename_buffer_;
+}
+
+void PrintSelectPanel::start_queued_job(const JobQueueEntry& job) {
+    if (!printer_state_.print_state().can_start_new_print()) {
+        NOTIFY_WARNING(lv_tr("Printer is busy - {} stays in the queue"), job.filename);
+        return;
+    }
+
+    pending_queued_start_ = PendingQueuedStart{job.job_id, job.filename, {}, false, false};
+    spdlog::info("[{}] Starting queued job {} -> '{}'", get_name(), job.job_id, job.filename);
+
+    // The listing must show the queued file's own directory before
+    // try_open_pending_queued_job matches it: the panel may be browsing a
+    // subdirectory, USB, or anywhere else, and the match is by basename
+    // within current_path_ — composed, it must equal the queued filename.
+    if (usb_source_) {
+        usb_source_->select_printer_source();
+    }
+    path_navigator_.reset();
+    const size_t dir_end = job.filename.rfind('/');
+    if (dir_end != std::string::npos) {
+        const std::string dir = job.filename.substr(0, dir_end);
+        size_t start = 0;
+        while (start <= dir.size()) {
+            const size_t slash = dir.find('/', start);
+            const std::string segment =
+                dir.substr(start, slash == std::string::npos ? std::string::npos : slash - start);
+            if (!segment.empty()) {
+                path_navigator_.navigate_to(segment);
+            }
+            if (slash == std::string::npos) {
+                break;
+            }
+            start = slash + 1;
+        }
+    }
+    current_path_ = path_navigator_.current_path();
+    // In-flight metadata callbacks addressed the directory we just left;
+    // retargeting without bumping the generation lets them land on files
+    // that are no longer listed.
+    ++nav_generation_;
+
+    const std::string job_id = job.job_id;
+    helix::queue::load_queued_job_options(
+        object_lifetime_, api_, job_id,
+        object_lifetime_.bg_cb(
+            "PrintSelectPanel::queued_options_loaded", [this, job_id](auto saved) {
+                if (!pending_queued_start_ || pending_queued_start_->job_id != job_id) {
+                    return; // superseded by another start or a back-out
+                }
+                pending_queued_start_->saved = std::move(saved);
+                pending_queued_start_->saved_loaded = true;
+                try_open_pending_queued_job();
+            }));
+
+    helix::nav::set_active(PanelId::PrintSelect);
+    refresh_files(/*force=*/true);
+}
+
+void PrintSelectPanel::try_open_pending_queued_job() {
+    if (!pending_queued_start_ || !pending_queued_start_->saved_loaded || detail_view_open_ ||
+        pending_queued_start_->start_attempted) {
+        // After a Print tap the pending start is only the bookkeeping that
+        // removes the job on success — the open phase is over, and a later
+        // panel-activation refresh must not re-open the file over a view the
+        // user just backed out of.
+        return;
+    }
+
+    // Match by basename against the listing of current_path_ — the retarget
+    // in start_queued_job put that path at the queued file's directory, so a
+    // hit composes to exactly the queued filename.
+    const std::string& queued = pending_queued_start_->filename;
+    const size_t slash = queued.rfind('/');
+    const std::string name = slash == std::string::npos ? queued : queued.substr(slash + 1);
+
+    if (select_file_by_name(name)) {
+        return; // handle_file_click() opened (and seeded) the detail view
+    }
+
+    if (pending_queued_start_->listing_arrived) {
+        spdlog::warn("[{}] Queued job {} file '{}' not found in file list", get_name(),
+                     pending_queued_start_->job_id, queued);
+        NOTIFY_WARNING(lv_tr("File not found: {}"), queued);
+        pending_queued_start_.reset();
+        return;
+    }
+    // The listing has not answered yet; on_files_ready retries this.
+}
+
+void PrintSelectPanel::finish_pending_queued_job() {
+    if (!pending_queued_start_) {
+        return;
+    }
+    const std::string job_id = pending_queued_start_->job_id;
+    pending_queued_start_.reset();
+    if (!api_) {
+        return;
+    }
+
+    spdlog::info("[{}] Print started for queued job {} - removing from queue", get_name(), job_id);
+    api_->queue().remove_jobs(
+        {job_id},
+        object_lifetime_.bg_cb("PrintSelectPanel::queued_job_started",
+                               [this, job_id]() {
+                                   // Options are deleted only once Moonraker confirms the removal:
+                                   // a refusal (or a stale id after a Moonraker restart) leaves the
+                                   // job queued, and Start next must still find its saved options.
+                                   helix::queue::delete_queued_job_options(api_, job_id);
+                                   if (auto* jqs = get_job_queue_state()) {
+                                       jqs->fetch();
+                                   }
+                               }),
+        object_lifetime_.bg_cb(
+            "PrintSelectPanel::queued_job_removal_failed", [job_id](const MoonrakerError& err) {
+                spdlog::warn("[PrintSelectPanel] Removing queued job {} failed: {}", job_id,
+                             err.message);
+                NOTIFY_WARNING(lv_tr("Could not remove the job from the queue"));
+                if (auto* jqs = get_job_queue_state()) {
+                    jqs->fetch();
+                }
+            }));
 }
 
 void PrintSelectPanel::show_preflight_modal(const helix::PreflightResult& pf) {
@@ -2811,8 +3311,14 @@ void PrintSelectPanel::on_preflight_remap() {
 //
 // The per-backend difference is ONLY in how the chosen mapping is applied — see
 // apply_remap(), dispatched on RemapStrategy. Print-start is likewise already
-// strategy-dispatched (PrintStartController), so Native and SnapmakerNative both
+// strategy-dispatched (PrintStartController), so Native and PrePrintSend both
 // read the same shared card store and need no special opener.
+void PrintSelectPanel::show_remap_help() {
+    if (detail_view_) {
+        detail_view_->show_remap_help_modal();
+    }
+}
+
 void PrintSelectPanel::open_remap_modal() {
     if (!detail_view_) {
         spdlog::warn("[{}] Remap requested with no detail view", get_name());
@@ -2823,23 +3329,15 @@ void PrintSelectPanel::open_remap_modal() {
     if (!backend) {
         return;
     }
-    const auto strategy = backend->get_remap_strategy();
-    if (!helix::printer::can_remap(*backend)) {
-        return;
-    }
 
-    // GcodeRewrite is the generic fallback for backends with no native routing
-    // table: it prints a modified temp copy and relies on the HelixPrint plugin
-    // to patch print history back to the original filename. No backend ships this
-    // strategy today (ACE will adopt it once ACE_CHANGE_TOOL is implemented).
-    // Guard BEFORE opening the modal so the user sees the actionable alert instead
-    // of a picker whose Done would silently fail.
-    if (strategy == AmsBackend::RemapStrategy::GcodeRewrite &&
-        !printer_state_.service_has_helix_plugin()) {
-        helix::ui::modal_alert(lv_tr("Remap needs the HelixPrint plugin"),
-                               lv_tr("Install the HelixPrint plugin in Advanced settings to remap "
-                                     "filament without affecting print history."),
-                               ModalSeverity::Info, lv_tr("OK"));
+    // The same answer the card published, asked again here because this opener
+    // is reachable from the preflight modal too and a subject is only as fresh
+    // as its last publish. Every refusal is already stated on the card, so this
+    // is a guard, not a second place to explain anything.
+    const auto block = detail_view_->current_remap_block();
+    if (block != helix::printer::RemapBlock::None) {
+        spdlog::debug("[{}] Remap opener declined: {}", get_name(),
+                      helix::printer::remap_block_name(block));
         return;
     }
 
@@ -2850,9 +3348,10 @@ void PrintSelectPanel::open_remap_modal() {
     // card instance's tool_info_ is empty.
     auto tool_info = detail_view_->get_used_tool_info();
 
+    // remap_block() already refused an empty job as NothingToRemap, so reaching
+    // here with none means the tool set changed between publish and tap.
     if (tool_info.empty()) {
         spdlog::warn("[{}] Remap: no tools in pre-flight result", get_name());
-        NOTIFY_INFO(lv_tr("Nothing to remap"));
         return;
     }
 
@@ -2875,7 +3374,34 @@ void PrintSelectPanel::open_remap_modal() {
     remap_modal_.set_mappings(mappings);
     remap_modal_.set_on_mappings_updated(
         [this](std::vector<helix::ToolMapping> updated) { apply_remap(updated); });
+    auto* prep = detail_view_->get_prep_manager();
+    remap_modal_.set_start_macro_note(
+        start_macro_remap_note(backend->get_remap_strategy(),
+                               prep ? prep->print_start_for(selected_filename_buffer_) : nullptr));
     remap_modal_.show(lv_screen_active());
+}
+
+// A rewrite that moves the body's tool changes but not a start macro's own
+// per-tool values can select a head the macro never heated. The line comes
+// from the ops scan the detail view runs on every file it opens.
+std::string
+PrintSelectPanel::start_macro_remap_note(AmsBackend::RemapStrategy strategy,
+                                         const helix::gcode::PrintStartCallInfo* start) {
+    if (!start) {
+        return {};
+    }
+    const auto keys = helix::printer::start_params_remap_leaves(strategy, start->raw_line);
+    if (keys.empty()) {
+        return {};
+    }
+    std::string key_list;
+    for (const auto& key : keys) {
+        key_list += (key_list.empty() ? "" : ", ") + key;
+    }
+    return fmt::format(fmt::runtime(lv_tr("Your {} line passes per-tool settings that remapping "
+                                          "does not change ({}). A remapped tool may not be "
+                                          "heated. See Tool Mapping in the user guide.")),
+                       start->macro_name, key_list);
 }
 
 // Strategy-dispatched APPLY — the ONLY place the backends diverge in the UI.
@@ -2887,21 +3413,13 @@ void PrintSelectPanel::apply_remap(const std::vector<helix::ToolMapping>& update
 
     switch (backend->get_remap_strategy()) {
     case AmsBackend::RemapStrategy::GcodeRewrite: {
-        // Generic fallback (no backend ships it yet; ACE once ACE_CHANGE_TOOL
-        // lands): rewrite the Tx / ACTIVATE_EXTRUDER / SET_GCODE_VARIABLE lines in
-        // the gcode and print the modified copy via the HelixPrint plugin (history
-        // stays under the original filename). Plugin presence was already guarded
-        // in open_remap_modal().
-        std::map<int, int> remap;
-        for (const auto& m : updated) {
-            if (m.tool_index < 0 || m.mapped_slot < 0) {
-                continue; // auto / unmapped — leave the gcode's tool number alone
-            }
-            // slot index == physical head for these backends, so mapped_slot is the
-            // head the gcode rewrite targets. A backend where slot != head would
-            // need a slot→head translation here.
-            remap[m.tool_index] = m.mapped_slot;
-        }
+        // Rewrite the job's tool numbers (the families GcodeToolRemapper lists)
+        // and print the modified copy via the HelixPrint plugin (history stays
+        // under the original filename). Plugin presence was already guarded
+        // in open_remap_modal(). Taken by a tool changer driving swaps with its
+        // own T<n> macros rather than klipper-toolchanger; ACE will take it once
+        // its ACE_CHANGE_TOOL family lands, until then ACE stays None.
+        const std::map<int, int> remap = helix::printer::gcode_rewrite_remap(updated);
 
         auto* prep = detail_view_ ? detail_view_->get_prep_manager() : nullptr;
         if (!prep) {
@@ -2915,23 +3433,37 @@ void PrintSelectPanel::apply_remap(const std::vector<helix::ToolMapping>& update
 
         spdlog::info("[{}] Applying gcode remap: {} tool(s) for {}", get_name(), remap.size(),
                      file_path);
+        if (refuse_start_with_every_object_picked()) {
+            return;
+        }
         // The pipeline guards identity remaps internally (prints the original
-        // unmodified when nothing changed).
+        // unmodified when nothing changed). The callback runs once Moonraker
+        // confirms the start, from whichever thread answered.
         prep->modify_and_print_with_remap(
-            file_path, remap, [this]() { PrintStatusPanel::push_overlay(parent_screen_); });
+            file_path, remap,
+            helix::ui::with_pre_start_exclusions(
+                // Print status opening over details is leaving the file, which
+                // clears its picks.
+                object_lifetime_.bg_cb(
+                    "PrintSelectPanel::remap_print_started",
+                    [this]() { PrintStatusPanel::push_overlay(parent_screen_); }),
+                detail_view_ ? detail_view_->exclude_picks() : std::vector<std::string>{}));
         break;
     }
 
-    case AmsBackend::RemapStrategy::SnapmakerNative: {
+    case AmsBackend::RemapStrategy::PrePrintSend: {
         // Snapmaker U1: log each non-identity choice for on-device confirmation,
         // then push the full vector into the shared card store. The backend send
         // (SET_PRINT_EXTRUDER_MAP via build_preprint_gcode) happens at print-start
         // through PrintStartController, which reads get_effective_remap() — that
         // identity-filters, so only changed tools emit a line.
-        auto default_head = [](int tool) { return (tool >= 0 && tool <= 3) ? tool : 0; };
+        // The same routing get_effective_remap()'s identity filter asks, so this
+        // log names exactly the mappings that will actually be emitted rather
+        // than a second opinion about which head a tool defaults to.
+        const helix::FirmwareRouting routing = AmsState::instance().collect_firmware_routing();
         for (const auto& m : updated) {
             if (m.tool_index >= 0 && m.mapped_slot >= 0 &&
-                m.mapped_slot != default_head(m.tool_index)) {
+                m.mapped_slot != routing.head(m.tool_index)) {
                 spdlog::debug("[{}] U1 remap applied: tool {} -> head {}", get_name(), m.tool_index,
                               m.mapped_slot);
             }
@@ -2959,9 +3491,13 @@ void PrintSelectPanel::apply_remap(const std::vector<helix::ToolMapping>& update
 }
 
 void PrintSelectPanel::delete_file() {
+    if (!selected_local_path_.empty()) {
+        hide_delete_confirmation();
+        return;
+    }
     std::string filename_to_delete(selected_filename_buffer_);
     auto* self = this;
-    auto token = lifetime_.token();
+    auto token = object_lifetime_.token();
 
     if (api_) {
         // Construct full path: gcodes/<current_path>/<filename>
@@ -3041,6 +3577,31 @@ void PrintSelectPanel::on_scroll_static(lv_event_t* e) {
     }
 }
 
+void PrintSelectPanel::on_card_container_resized_static(lv_event_t* e) {
+    auto* self = static_cast<PrintSelectPanel*>(lv_event_get_user_data(e));
+    if (!self || self->card_resize_pending_) {
+        return;
+    }
+    // SIZE_CHANGED arrives inside a layout pass; re-populating there would
+    // re-enter the layout and reconfigure pooled cards mid-pass.
+    self->card_resize_pending_ = true;
+    self->object_lifetime_.defer("PrintSelectPanel::card_container_resized", [self]() {
+        self->card_resize_pending_ = false;
+        lv_obj_t* c = self->card_view_container_;
+        if (!c || !lv_obj_is_valid(c) || self->current_view_mode_ != PrintSelectViewMode::CARD) {
+            return;
+        }
+        // Only a content box the cards were not sized for re-populates, so a
+        // re-populate cannot feed its own resize back into another one.
+        lv_obj_update_layout(c);
+        if (lv_obj_get_content_width(c) == self->sized_for_w_ &&
+            lv_obj_get_content_height(c) == self->sized_for_h_) {
+            return;
+        }
+        self->populate_card_view(true);
+    });
+}
+
 void PrintSelectPanel::on_file_clicked_static(lv_event_t* e) {
     auto* self = static_cast<PrintSelectPanel*>(lv_event_get_user_data(e));
     auto* target = static_cast<lv_obj_t*>(lv_event_get_target(e));
@@ -3051,6 +3612,13 @@ void PrintSelectPanel::on_file_clicked_static(lv_event_t* e) {
 }
 
 bool PrintSelectPanel::select_file_by_name(const std::string& filename) {
+    // Before the first listing arrives the file cannot be found yet; the
+    // listing's completion consumes the pending selection.
+    if (!file_list_loaded_) {
+        set_pending_file_selection(filename);
+        return true;
+    }
+
     // Search for the file in the current file list
     for (size_t i = 0; i < file_list_.size(); ++i) {
         const auto& file = file_list_[i];
@@ -3112,3 +3680,246 @@ void PrintSelectPanel::on_usb_drive_removed() {
     // Note: The usb_source_ module handles switching to Printer source if needed,
     // and the on_source_changed callback triggers refresh_files()
 }
+
+#if defined(HELIX_PLATFORM_ESP32)
+// No disk thumbnail cache on this platform, so the PNG bytes come straight off
+// the HTTP lane and are decoded once at the card's size into a PSRAM-backed
+// lv_image_dsc_t (see esp_psram_thumbnail.h), the size a prescaled .bin has
+// elsewhere. A decode that fails leaves the placeholder until the card is next
+// shown (sync_esp_thumbnails).
+// The lane calls back on its own worker thread: the callbacks only build the
+// image there and defer every member touch to the main thread.
+PrintSelectPanel::EspThumbnailFetch
+PrintSelectPanel::fetch_esp_thumbnail(size_t index, const std::string& filename,
+                                      const std::string& thumb_path) {
+    constexpr size_t ESP32_THUMBNAIL_MAX_BYTES = 512 * 1024;
+    // An error reported before download_file_partial() returns means nothing
+    // was started: either the lane's queue was full, or the request was invalid.
+    auto submitting = std::make_shared<std::atomic<bool>>(true);
+    auto refused = std::make_shared<std::atomic<bool>>(false);
+    auto rejected = std::make_shared<std::atomic<bool>>(false);
+    auto tok = object_lifetime_.token();
+    spdlog::debug("[{}] Fetching PSRAM thumbnail for {}: {}", get_name(), filename, thumb_path);
+    const helix::ThumbnailTarget target = helix::ThumbnailProcessor::get_target_for_display();
+
+    auto cancelled = std::make_shared<std::atomic<bool>>(false);
+    api_->transfers().download_file_partial(
+        "gcodes", thumb_path, ESP32_THUMBNAIL_MAX_BYTES,
+        [this, tok, index, filename, target, slots = esp_slots_,
+         cancelled](const std::string& png_bytes) {
+            helix::ThumbnailDecodeFailure failure{};
+            if (cancelled->load()) {
+                // Its card left the screen while this was downloading.
+                tok.defer("PrintSelectPanel::on_psram_thumbnail_cancelled", [this]() {
+                    --esp_thumbnails_in_flight_;
+                    esp_lane_refused_ = false;
+                    sync_esp_thumbnails(esp_window_first_, esp_window_end_);
+                });
+                return;
+            }
+            auto thumb = helix::ui::EspPsramThumbnail::create_decoded(
+                png_bytes, target.width, target.height, slots, failure);
+            if (!thumb) {
+                // Slots in use against the pool's size, and free PSRAM against
+                // the decode floor, say which memory ran out.
+                spdlog::warn("[PrintSelectPanel] Could not decode thumbnail {}: {} (slots {}/{} "
+                             "in use, PSRAM free {})",
+                             filename,
+                             failure == helix::ThumbnailDecodeFailure::OutOfMemory
+                                 ? "out of memory"
+                                 : "corrupt or too large",
+                             slots ? slots->in_use() : 0, slots ? slots->allocated() : 0,
+                             heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+            }
+            tok.defer("PrintSelectPanel::on_psram_thumbnail_fetched",
+                      [this, index, filename, cancelled, thumb = std::move(thumb)]() mutable {
+                          --esp_thumbnails_in_flight_;
+                          esp_lane_refused_ = false; // this fetch's lane slot is free
+                          // Kept only while its card is still on screen and this is
+                          // still the fetch it wants.
+                          if (thumb && !cancelled->load() && index < file_list_.size() &&
+                              file_list_[index].filename == filename &&
+                              file_list_[index].esp_thumbnail_tried) {
+                              file_list_[index].esp_thumbnail = std::move(thumb);
+                              if (card_view_) {
+                                  card_view_->update_thumbnail(index, file_list_[index]);
+                              }
+                              // A detail view opened before its card's image
+                              // arrived shows it now.
+                              // Visibility, not detail_view_open_: Back pops the
+                              // overlay without clearing that flag.
+                              if (detail_view_ && detail_view_->is_visible() &&
+                                  lv_subject_get_int(&selected_has_thumbnail_subject_) == 0 &&
+                                  filename == selected_filename_buffer_ &&
+                                  show_esp_detail_thumbnail(filename.c_str())) {
+                                  lv_subject_set_int(&selected_has_thumbnail_subject_, 1);
+                              }
+                          }
+                          sync_esp_thumbnails(esp_window_first_, esp_window_end_);
+                      });
+        },
+        [this, tok, index, filename, cancelled, submitting, refused,
+         rejected](const MoonrakerError& error) {
+            if (submitting->load()) {
+                if (error.type == MoonrakerErrorType::QUEUE_FULL) {
+                    refused->store(true);
+                } else {
+                    rejected->store(true);
+                    spdlog::debug("[PrintSelectPanel] PSRAM thumbnail fetch failed for {}: {}",
+                                  filename, error.message);
+                }
+                return;
+            }
+            spdlog::debug("[PrintSelectPanel] PSRAM thumbnail fetch failed for {}: {}", filename,
+                          error.message);
+            tok.defer("PrintSelectPanel::on_psram_thumbnail_failed", [this, index, filename,
+                                                                      cancelled]() {
+                --esp_thumbnails_in_flight_;
+                esp_lane_refused_ = false;
+                const bool shown = index < file_list_.size() &&
+                                   file_list_[index].filename == filename &&
+                                   file_list_[index].esp_thumbnail_tried;
+                if (helix::card_thumbnail_refetch_after_error(
+                        shown, cancelled->load(), shown && file_list_[index].esp_fetch_retried)) {
+                    // A stalled or failed download: fetched again below,
+                    // not left a placeholder.
+                    file_list_[index].esp_thumbnail_tried = false;
+                    file_list_[index].esp_fetch_retried = true;
+                }
+                sync_esp_thumbnails(esp_window_first_, esp_window_end_);
+            });
+        },
+        cancelled);
+    submitting->store(false);
+    if (refused->load()) {
+        return EspThumbnailFetch::QueueFull;
+    }
+    if (rejected->load()) {
+        return EspThumbnailFetch::Failed;
+    }
+    file_list_[index].esp_fetch_cancel = std::move(cancelled);
+    ++esp_thumbnails_in_flight_;
+    return EspThumbnailFetch::Started;
+}
+
+void PrintSelectPanel::cancel_esp_fetch(PrintFileData& f) {
+    if (f.esp_fetch_cancel) {
+        f.esp_fetch_cancel->store(true);
+        f.esp_fetch_cancel.reset();
+    }
+}
+
+void PrintSelectPanel::publish_esp_detail_thumbnail(
+    std::shared_ptr<helix::ui::EspPsramThumbnail> next) {
+    helix::republish_held(esp_detail_thumbnail_, std::move(next),
+                          [this](const std::shared_ptr<helix::ui::EspPsramThumbnail>& thumb) {
+                              lv_subject_set_pointer(
+                                  &selected_detail_thumbnail_subject_,
+                                  thumb ? const_cast<lv_image_dsc_t*>(thumb->dsc()) : nullptr);
+                          });
+}
+
+bool PrintSelectPanel::show_esp_detail_thumbnail(const char* filename) {
+    for (const PrintFileData& f : file_list_) {
+        if (f.esp_thumbnail && f.filename == filename) {
+            publish_esp_detail_thumbnail(f.esp_thumbnail);
+            return true;
+        }
+    }
+    return false;
+}
+
+void PrintSelectPanel::release_esp_detail_thumbnail() {
+    if (esp_detail_thumbnail_) {
+        lv_subject_set_int(&selected_has_thumbnail_subject_, 0);
+        publish_esp_detail_thumbnail(nullptr);
+    }
+}
+
+void PrintSelectPanel::release_esp_card_thumbnails() {
+    release_esp_detail_thumbnail();
+    esp_window_first_ = 0;
+    esp_window_end_ = 0;
+    for (PrintFileData& f : file_list_) {
+        cancel_esp_fetch(f);
+        f.esp_thumbnail.reset();
+        f.esp_thumbnail_tried = false;
+        f.esp_fetch_retried = false;
+    }
+    if (card_view_) {
+        card_view_->release_esp_thumbnails();
+    }
+    esp_slots_.reset();
+    esp_lane_refused_ = false;
+    esp_lane_retry_timer_.reset();
+}
+
+void PrintSelectPanel::sync_esp_thumbnails(size_t first, size_t end, bool keep_off_screen) {
+    const helix::ThumbnailTarget target = helix::ThumbnailProcessor::get_target_for_display();
+    const size_t estimate = helix::rgb565a8_size({target.width, target.height});
+    if (esp_slots_ && esp_slots_->slot_bytes() != estimate) {
+        // Thumbnails at the old card size hold the old pool's slots. Kept beside
+        // a new pool, the card budget would be spent twice over.
+        release_esp_card_thumbnails();
+    }
+    esp_window_first_ = first;
+    esp_window_end_ = end;
+    ++esp_show_tick_;
+
+    std::vector<helix::CardThumbnailState> states(file_list_.size());
+    for (size_t i = 0; i < file_list_.size(); ++i) {
+        PrintFileData& f = file_list_[i];
+        if (i >= first && i < end) {
+            f.esp_thumbnail_shown = esp_show_tick_;
+        }
+        states[i].fetchable = !f.is_dir && !f.original_thumbnail_url.empty();
+        states[i].tried = f.esp_thumbnail_tried;
+        states[i].held = f.esp_thumbnail ? f.esp_thumbnail->bytes() : 0;
+        states[i].last_shown = f.esp_thumbnail_shown;
+    }
+    const helix::CardThumbnailPlan plan = helix::plan_card_thumbnails(
+        states, first, end, static_cast<size_t>(std::max(esp_thumbnails_in_flight_, 0)), estimate,
+        helix::CARD_THUMBNAIL_BUDGET, esp_lane_refused_, keep_off_screen);
+    if (!plan.fetch.empty() && !esp_slots_) {
+        // One slot per card the budget allows.
+        esp_slots_ = std::make_shared<helix::ThumbnailSlotPool>(
+            estimate, helix::CARD_THUMBNAIL_BUDGET / estimate,
+            [](size_t n) { return heap_caps_malloc(n, MALLOC_CAP_SPIRAM); },
+            [](void* p) { heap_caps_free(p); });
+    }
+
+    // A card the plan drops fetches again when it comes back.
+    for (size_t i : plan.drop) {
+        cancel_esp_fetch(file_list_[i]);
+        file_list_[i].esp_thumbnail.reset();
+        file_list_[i].esp_thumbnail_tried = false;
+        file_list_[i].esp_fetch_retried = false;
+    }
+    if (!keep_off_screen && esp_slots_) {
+        esp_slots_->trim(); // the memory, not just the thumbnails, goes back
+    }
+    for (size_t i : plan.fetch) {
+        PrintFileData& f = file_list_[i];
+        f.esp_thumbnail_tried = true;
+        if (fetch_esp_thumbnail(i, f.filename, f.original_thumbnail_url) ==
+            EspThumbnailFetch::QueueFull) {
+            // The lane is full: fetch again once one of ours completes, or
+            // after a pause when none is in flight to free a slot.
+            f.esp_thumbnail_tried = false;
+            esp_lane_refused_ = true;
+            if (esp_thumbnails_in_flight_ <= 0 && !esp_lane_retry_timer_) {
+                esp_lane_retry_timer_.reset(lv_timer_create(
+                    [](lv_timer_t* timer) {
+                        auto* self = static_cast<PrintSelectPanel*>(lv_timer_get_user_data(timer));
+                        self->esp_lane_retry_timer_.release(); // one-shot: LVGL deletes it
+                        self->esp_lane_refused_ = false;
+                        self->sync_esp_thumbnails(self->esp_window_first_, self->esp_window_end_);
+                    },
+                    ESP_LANE_RETRY_MS, this));
+                lv_timer_set_repeat_count(esp_lane_retry_timer_.get(), 1);
+            }
+            break;
+        }
+    }
+}
+#endif

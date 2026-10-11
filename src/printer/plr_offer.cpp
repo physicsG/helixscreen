@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "plr_offer.h"
 
-#include "moonraker_client.h" // ConnectionState
+#include "i_moonraker_client.h" // ConnectionState
 
 namespace helix {
 

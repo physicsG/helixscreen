@@ -1,6 +1,7 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "../mock_input_tree.h"
 #include "input_device_scanner.h"
 
 #include <algorithm>
@@ -20,102 +21,9 @@ using helix::input::sysfs_bitmap_word_bits_for_machine;
 
 namespace fs = std::filesystem;
 
-namespace {
-
-// Build a sysfs capability string the way the kernel prints bitmaps at the
-// running machine's word width: space-separated hex words, highest word
-// first, each via %llx with no zero padding, leading zero words stripped.
-// Mock caps built with this parse exactly like real sysfs on whatever machine
-// runs the tests (64-bit dev/CI and 32-bit ARM targets alike).
-std::string caps_string(std::initializer_list<int> bits) {
-    const int word_bits = helix::input::sysfs_bitmap_word_bits();
-    std::map<int, unsigned long long> words; // keyed by word-from-right
-    int highest_nonzero = -1;
-    for (int bit : bits) {
-        const int word = bit / word_bits;
-        words[word] |= 1ULL << (bit % word_bits);
-        highest_nonzero = std::max(highest_nonzero, word);
-    }
-
-    std::string out;
-    for (int word = (highest_nonzero < 0 ? 0 : highest_nonzero); word >= 0; --word) {
-        if (!out.empty())
-            out += ' ';
-        char buf[24];
-        std::snprintf(buf, sizeof(buf), "%llx", words[word]);
-        out += buf;
-    }
-    return out;
-}
-
-// Key caps of a typical USB mouse: BTN_LEFT..BTN_EXTRA (keycodes 272-276).
-// On a 64-bit kernel this prints "1f0000 0 0 0 0", on 32-bit
-// "1f0000 0 0 0 0 0 0 0 0" — both real field strings.
-std::string mouse_key_caps() {
-    return caps_string({272, 273, 274, 275, 276});
-}
-
-struct MockInputTree {
-    std::string base;
-    std::string dev_dir;
-    std::string sysfs_dir;
-
-    explicit MockInputTree(const std::string& label) {
-        base = "/tmp/helix_test_input_" + label + "_" +
-               std::to_string(static_cast<unsigned long>(time(nullptr)));
-        dev_dir = base + "/dev/input";
-        sysfs_dir = base + "/sys/class/input";
-        fs::create_directories(dev_dir);
-        fs::create_directories(sysfs_dir);
-    }
-
-    ~MockInputTree() {
-        std::error_code ec;
-        fs::remove_all(base, ec);
-    }
-
-    // bustype: "0003"=USB, "0005"=Bluetooth, "0019"=host/platform, ""=omit
-    void add_device(int event_num, const std::string& name,
-                    const std::map<std::string, std::string>& caps,
-                    const std::string& bustype = "0003") {
-        std::string dev_path = dev_dir + "/event" + std::to_string(event_num);
-        std::ofstream(dev_path).put('x');
-
-        std::string sysfs_path = sysfs_dir + "/event" + std::to_string(event_num);
-        fs::create_directories(sysfs_path + "/device/capabilities");
-        fs::create_directories(sysfs_path + "/device/id");
-
-        std::ofstream(sysfs_path + "/device/name") << name;
-
-        if (!bustype.empty()) {
-            std::ofstream(sysfs_path + "/device/id/bustype") << bustype;
-        }
-
-        for (const auto& [cap_name, hex_value] : caps) {
-            std::ofstream(sysfs_path + "/device/capabilities/" + cap_name) << hex_value;
-        }
-
-        // Write vendor/product ID files if the bustype is USB or Bluetooth
-        if (bustype == "0003" || bustype == "0005") {
-            std::ofstream(sysfs_path + "/device/id/vendor") << "1a2c";
-            std::ofstream(sysfs_path + "/device/id/product")
-                << std::string("000") + std::to_string(event_num);
-        }
-    }
-
-    void add_device_with_ids(int event_num, const std::string& name,
-                             const std::map<std::string, std::string>& caps,
-                             const std::string& bustype, const std::string& vendor,
-                             const std::string& product) {
-        add_device(event_num, name, caps, bustype);
-        std::string sysfs_path = sysfs_dir + "/event" + std::to_string(event_num);
-        // Overwrite the default IDs written by add_device
-        std::ofstream(sysfs_path + "/device/id/vendor") << vendor;
-        std::ofstream(sysfs_path + "/device/id/product") << product;
-    }
-};
-
-} // namespace
+using helix::test::caps_string;
+using helix::test::MockInputTree;
+using helix::test::mouse_key_caps;
 
 TEST_CASE("check_capability_bit parses sysfs hex bitmasks", "[input]") {
     SECTION("empty string returns false") {
@@ -418,6 +326,162 @@ TEST_CASE("find_mouse_device detects USB HID mice via sysfs", "[input]") {
         auto result = find_mouse_device(tree.dev_dir, tree.sysfs_dir);
         REQUIRE(result.has_value());
         REQUIRE(result->name == "BT Mouse");
+    }
+}
+
+TEST_CASE("find_touch_device picks the touchscreen via sysfs", "[input]") {
+    using helix::input::find_touch_device;
+
+    const std::string mt_only_abs = caps_string({53, 54});
+    auto set_attr = [](MockInputTree& tree, int event_num, const std::string& attr,
+                       const std::string& value) {
+        std::ofstream(tree.sysfs_dir + "/event" + std::to_string(event_num) + "/device/" + attr)
+            << value;
+    };
+
+    SECTION("finds an MT-only touchscreen that the mouse scan skips") {
+        MockInputTree tree("touch_mt_only");
+        tree.add_device(0, "tlsc6x_touch", {{"abs", mt_only_abs}, {"key", caps_string({330})}},
+                        "0018");
+
+        auto result = find_touch_device(tree.dev_dir, tree.sysfs_dir);
+        REQUIRE(result.has_value());
+        CHECK(result->path == tree.dev_dir + "/event0");
+        CHECK(result->event_num == 0);
+        CHECK_FALSE(helix::input::find_mouse_device(tree.dev_dir, tree.sysfs_dir).has_value());
+    }
+
+    SECTION("ignores devices without touch axes") {
+        MockInputTree tree("touch_none");
+        tree.add_device(0, "gpio-keys", {{"abs", "0"}, {"key", caps_string({116})}}, "0019");
+        tree.add_device(1, "USB Mouse", {{"rel", "3"}, {"key", mouse_key_caps()}, {"abs", "0"}});
+
+        CHECK_FALSE(find_touch_device(tree.dev_dir, tree.sysfs_dir).has_value());
+    }
+
+    SECTION("a non-touch device on a lower event number is not taken") {
+        MockInputTree tree("touch_after_keys");
+        tree.add_device(0, "gpio-keys", {{"abs", "0"}, {"key", caps_string({116})}}, "0019");
+        tree.add_device(1, "Generic ABS Panel", {{"abs", "3"}}, "0019");
+
+        auto result = find_touch_device(tree.dev_dir, tree.sysfs_dir);
+        REQUIRE(result.has_value());
+        CHECK(result->event_num == 1);
+    }
+
+    SECTION("a known touchscreen name outranks an unknown one") {
+        MockInputTree tree("touch_known");
+        tree.add_device(0, "Generic ABS Panel", {{"abs", "3"}}, "0019");
+        tree.add_device(3, "Goodix Capacitive TouchScreen", {{"abs", mt_only_abs}}, "0019");
+
+        auto result = find_touch_device(tree.dev_dir, tree.sysfs_dir);
+        REQUIRE(result.has_value());
+        CHECK(result->event_num == 3);
+    }
+
+    SECTION("INPUT_PROP_DIRECT outranks a USB phys") {
+        MockInputTree tree("touch_direct");
+        tree.add_device(0, "USB Digitizer", {{"abs", "3"}});
+        set_attr(tree, 0, "phys", "usb-0000:01:00.0-1.3/input0");
+        tree.add_device(2, "Panel ABS", {{"abs", "3"}}, "0019");
+        set_attr(tree, 2, "properties", "2");
+
+        auto result = find_touch_device(tree.dev_dir, tree.sysfs_dir);
+        REQUIRE(result.has_value());
+        CHECK(result->event_num == 2);
+    }
+
+    SECTION("a USB phys breaks an otherwise equal score") {
+        MockInputTree tree("touch_usb");
+        tree.add_device(0, "Panel A", {{"abs", "3"}}, "0019");
+        tree.add_device(4, "Panel B", {{"abs", "3"}});
+        set_attr(tree, 4, "phys", "usb-0000:01:00.0-1.3/input0");
+
+        auto result = find_touch_device(tree.dev_dir, tree.sysfs_dir);
+        REQUIRE(result.has_value());
+        CHECK(result->event_num == 4);
+    }
+
+    SECTION("equal scores go to the lowest event number") {
+        MockInputTree tree("touch_tie");
+        tree.add_device(5, "Panel A", {{"abs", "3"}}, "0019");
+        tree.add_device(2, "Panel B", {{"abs", "3"}}, "0019");
+        tree.add_device(7, "Panel C", {{"abs", "3"}}, "0019");
+
+        auto result = find_touch_device(tree.dev_dir, tree.sysfs_dir);
+        REQUIRE(result.has_value());
+        CHECK(result->event_num == 2);
+        CHECK(result->name == "Panel B");
+    }
+}
+
+TEST_CASE("pointer devices are classified by how they position themselves", "[input][rotation]") {
+    using helix::input::classify_pointer_capabilities;
+    using helix::input::PointerKind;
+
+    // The Pi 3B's ft5x06 and Logitech M705, as its InputScanner logs them.
+    const std::string ft5x06_abs = caps_string({0, 1, 47, 53, 54, 57});
+    const std::string btn_touch = caps_string({330});
+
+    SECTION("a USB mouse is relative") {
+        CHECK(classify_pointer_capabilities("0", "1943", mouse_key_caps()) ==
+              PointerKind::Relative);
+    }
+
+    SECTION("a touch panel is panel-absolute") {
+        CHECK(classify_pointer_capabilities(ft5x06_abs, "0", btn_touch) ==
+              PointerKind::PanelAbsolute);
+        CHECK(classify_pointer_capabilities("3", "0", "0") == PointerKind::PanelAbsolute);
+        CHECK(classify_pointer_capabilities(caps_string({53, 54}), "0", "0") ==
+              PointerKind::PanelAbsolute);
+    }
+
+    SECTION("touchscreen capabilities win over relative axes") {
+        CHECK(classify_pointer_capabilities("3", "3", mouse_key_caps()) ==
+              PointerKind::PanelAbsolute);
+        CHECK(classify_pointer_capabilities("0", "3", btn_touch) == PointerKind::PanelAbsolute);
+    }
+
+    SECTION("relative motion needs both REL_X and REL_Y") {
+        CHECK(classify_pointer_capabilities("0", "1", mouse_key_caps()) ==
+              PointerKind::PanelAbsolute);
+        CHECK(classify_pointer_capabilities("", "", "") == PointerKind::PanelAbsolute);
+    }
+}
+
+TEST_CASE("pointer_kind_for_device reads the capabilities of the device it names",
+          "[input][rotation]") {
+    using helix::input::pointer_kind_for_device;
+    using helix::input::PointerKind;
+
+    MockInputTree tree("pointer_kind");
+    tree.add_device(
+        2, "generic ft5x06 (79)",
+        {{"abs", caps_string({0, 1, 47, 53, 54, 57})}, {"rel", "0"}, {"key", caps_string({330})}},
+        "0018");
+    tree.add_device(5, "Logitech M705", {{"abs", "0"}, {"rel", "1943"}, {"key", mouse_key_caps()}});
+
+    SECTION("an event node") {
+        CHECK(pointer_kind_for_device(tree.dev_dir + "/event2", tree.sysfs_dir) ==
+              PointerKind::PanelAbsolute);
+        CHECK(pointer_kind_for_device(tree.dev_dir + "/event5", tree.sysfs_dir) ==
+              PointerKind::Relative);
+    }
+
+    SECTION("a link to an event node classifies as its target") {
+        // Configured devices are often named through /dev/input/by-id, whose names
+        // do not start with "event".
+        const std::string by_id = tree.base + "/dev/input/by-id";
+        fs::create_directories(by_id);
+        fs::create_symlink(tree.dev_dir + "/event5", by_id + "/usb-Logitech_M705-event-mouse");
+        CHECK(pointer_kind_for_device(by_id + "/usb-Logitech_M705-event-mouse", tree.sysfs_dir) ==
+              PointerKind::Relative);
+    }
+
+    SECTION("a path whose capabilities cannot be read is panel-absolute") {
+        CHECK(pointer_kind_for_device("", tree.sysfs_dir) == PointerKind::PanelAbsolute);
+        CHECK(pointer_kind_for_device(tree.dev_dir + "/event9", tree.sysfs_dir) ==
+              PointerKind::PanelAbsolute);
     }
 }
 

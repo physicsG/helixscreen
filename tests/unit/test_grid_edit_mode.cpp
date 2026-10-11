@@ -6,6 +6,7 @@
 #include "../lvgl_test_fixture.h"
 #include "../test_fixtures.h"
 #include "../test_helpers/grid_edit_mode_test_access.h"
+#include "../test_helpers/scoped_whole_cell_def.h"
 #include "config.h"
 #include "grid_edit_mode.h"
 #include "grid_layout.h"
@@ -237,19 +238,21 @@ TEST_CASE("GridEditMode: clamp_span respects min/max from registry", "[grid_edit
     CHECK(r3 == 2);
 }
 
-TEST_CASE("GridEditMode: clamp_span non-scalable widget stays fixed", "[grid_edit][resize]") {
-    // "macros" is pinned at one whole cell on both axes: min == max == default.
-    // ("shutdown" is no longer the example — it can shrink to a half column.)
-    const auto* def = find_widget_def("macros");
+TEST_CASE("GridEditMode: clamp_span holds an axis whose min equals its max",
+          "[grid_edit][resize]") {
+    // "preheat" is authored at a fixed row span: min == max on that axis, so a
+    // drag can never change its height. Assert that premise, or a widget that
+    // later gains a range turns this into a test of nothing.
+    const auto* def = find_widget_def("preheat");
     REQUIRE(def != nullptr);
-    REQUIRE_FALSE(def->is_scalable());
+    REQUIRE(def->effective_min_rowspan() == def->effective_max_rowspan());
 
-    auto [c, r] = GridEditMode::clamp_span("macros", 6, 6);
-    CHECK(c == def->effective_min_colspan());
-    CHECK(r == def->effective_min_rowspan());
-    // Both should equal the default colspan/rowspan — one cell, so two tracks.
-    CHECK(c == GridLayout::TRACKS_PER_CELL);
-    CHECK(r == GridLayout::TRACKS_PER_CELL);
+    auto [c, r] = GridEditMode::clamp_span("preheat", 6, 6);
+    CHECK(r == def->rowspan);
+    auto [c2, r2] = GridEditMode::clamp_span("preheat", 6, 1);
+    CHECK(r2 == def->rowspan);
+    (void)c;
+    (void)c2;
 }
 
 TEST_CASE("GridEditMode: clamp_span unknown widget returns at least one track",
@@ -900,104 +903,6 @@ TEST_CASE("Drag collision detection: empty target cell allows placement", "[grid
     CHECK_FALSE(grid.can_place(0, 0, 1, 1));
 }
 
-TEST_CASE("Drag collision detection: occupied target with same size allows swap",
-          "[grid_edit][drag]") {
-    // Simulate swap logic from handle_drag_end
-    std::vector<PanelWidgetEntry> entries = {
-        {"widget_a", true, {}, 2, 1, 1, 1},
-        {"widget_b", true, {}, 4, 1, 1, 1},
-    };
-
-    int drag_cfg_idx = 0;
-    int drag_orig_col = 2, drag_orig_row = 1;
-    int drag_orig_colspan = 1, drag_orig_rowspan = 1;
-    int target_col = 4, target_row = 1;
-
-    // Find occupant at target
-    int occupant_cfg_idx = -1;
-    for (size_t i = 0; i < entries.size(); ++i) {
-        if (static_cast<int>(i) == drag_cfg_idx)
-            continue;
-        if (target_col >= entries[i].col && target_col < entries[i].col + entries[i].colspan &&
-            target_row >= entries[i].row && target_row < entries[i].row + entries[i].rowspan) {
-            occupant_cfg_idx = static_cast<int>(i);
-            break;
-        }
-    }
-
-    REQUIRE(occupant_cfg_idx == 1);
-
-    // Same size allows swap
-    auto& occupant = entries[static_cast<size_t>(occupant_cfg_idx)];
-    bool can_swap =
-        (occupant.colspan == drag_orig_colspan && occupant.rowspan == drag_orig_rowspan);
-    REQUIRE(can_swap);
-
-    // Perform swap
-    occupant.col = drag_orig_col;
-    occupant.row = drag_orig_row;
-    entries[static_cast<size_t>(drag_cfg_idx)].col = target_col;
-    entries[static_cast<size_t>(drag_cfg_idx)].row = target_row;
-
-    // Verify swapped positions
-    CHECK(entries[0].col == 4); // widget_a moved to target
-    CHECK(entries[0].row == 1);
-    CHECK(entries[1].col == 2); // widget_b moved to original
-    CHECK(entries[1].row == 1);
-}
-
-TEST_CASE("Drag collision detection: occupied target with different size rejects swap",
-          "[grid_edit][drag]") {
-    std::vector<PanelWidgetEntry> entries = {
-        {"small_widget", true, {}, 2, 1, 1, 1}, // 1x1
-        {"big_widget", true, {}, 4, 0, 2, 2},   // 2x2
-    };
-
-    int drag_orig_colspan = 1, drag_orig_rowspan = 1;
-    int target_col = 4, target_row = 0;
-
-    // Find occupant at target
-    int occupant_cfg_idx = -1;
-    for (size_t i = 0; i < entries.size(); ++i) {
-        if (static_cast<int>(i) == 0)
-            continue;
-        if (target_col >= entries[i].col && target_col < entries[i].col + entries[i].colspan &&
-            target_row >= entries[i].row && target_row < entries[i].row + entries[i].rowspan) {
-            occupant_cfg_idx = static_cast<int>(i);
-            break;
-        }
-    }
-
-    REQUIRE(occupant_cfg_idx == 1);
-
-    // Different size rejects swap
-    auto& occupant = entries[static_cast<size_t>(occupant_cfg_idx)];
-    bool can_swap =
-        (occupant.colspan == drag_orig_colspan && occupant.rowspan == drag_orig_rowspan);
-    REQUIRE_FALSE(can_swap);
-}
-
-TEST_CASE("Drag: saved cfg_idx is stable across FLOATING flag changes", "[grid_edit][drag]") {
-    // Test the pattern where drag_cfg_idx_ is saved at drag start and
-    // reused at drag end (because find_config_index_for_widget skips FLOATING objects).
-    // This is a pure logic test verifying the pattern works.
-    int drag_cfg_idx = 3; // Saved at drag start
-
-    // At drag end, we use the saved index instead of re-looking up
-    int cfg_idx = drag_cfg_idx;
-    REQUIRE(cfg_idx == 3);
-
-    // Verify the entry can be accessed with the saved index
-    std::vector<PanelWidgetEntry> entries = {
-        {"a", true, {}, 0, 0, 1, 1},
-        {"b", true, {}, 1, 0, 1, 1},
-        {"c", true, {}, 2, 0, 1, 1},
-        {"d", true, {}, 3, 0, 1, 1}, // This is the dragged widget
-    };
-    REQUIRE(static_cast<size_t>(cfg_idx) < entries.size());
-    CHECK(entries[static_cast<size_t>(cfg_idx)].id == "d");
-}
-
 TEST_CASE("Drag: FLOATING position compensation prevents visual shift", "[grid_edit][drag]") {
     // When a grid-managed widget becomes FLOATING, its coordinate reference
     // changes from content area to parent outer coords + padding. Without
@@ -1138,7 +1043,7 @@ TEST_CASE("Drag: occupant detection should skip invisible widgets", "[grid_edit]
 
     int occupant_cfg_idx = -1;
     for (size_t i = 0; i < entries.size(); ++i) {
-        if (!entries[i].enabled || !entries[i].has_grid_position()) {
+        if (!entries[i].is_placed()) {
             continue;
         }
         if (static_cast<int>(i) == drag_idx) {
@@ -1422,29 +1327,44 @@ TEST_CASE("PanelWidgetDef: partially scalable (one axis)", "[grid_edit][sizing]"
 
 TEST_CASE("clamp_span: clamps to widget min/max", "[grid_edit][sizing]") {
     // Spans are in tracks — a track is half a cell (GridLayout::TRACKS_PER_CELL).
-    // Use an existing scalable widget: "temperature" (min 2x2, max 4x4 tracks).
-    auto [c1, r1] = GridEditMode::clamp_span("temperature", 0, 0);
+    // "humidity" is held to min 2x2, max 4x4 tracks, which is what makes a
+    // clamp observable at all; a widget whose maximum is the whole grid would
+    // never reach its ceiling here.
+    ScopedWholeCellDef whole_cell("humidity");
+    const auto* bounded = find_widget_def("humidity");
+    REQUIRE(bounded != nullptr);
+    REQUIRE(bounded->effective_max_colspan() == 4);
+    REQUIRE(bounded->effective_max_rowspan() == 4);
+
+    auto [c1, r1] = GridEditMode::clamp_span("humidity", 0, 0);
     CHECK(c1 == 2); // Clamped to min
     CHECK(r1 == 2);
 
-    auto [c2, r2] = GridEditMode::clamp_span("temperature", 9, 9);
+    auto [c2, r2] = GridEditMode::clamp_span("humidity", 9, 9);
     CHECK(c2 == 4); // Clamped to max
     CHECK(r2 == 4);
 
-    auto [c3, r3] = GridEditMode::clamp_span("temperature", 3, 3);
+    auto [c3, r3] = GridEditMode::clamp_span("humidity", 3, 3);
     CHECK(c3 == 3); // Within range
     CHECK(r3 == 3);
 
-    auto [c4, r4] = GridEditMode::clamp_span("temperature", 4, 4);
+    auto [c4, r4] = GridEditMode::clamp_span("humidity", 4, 4);
     CHECK(c4 == 4); // At max
     CHECK(r4 == 4);
 }
 
-TEST_CASE("clamp_span: non-scalable widget stays fixed", "[grid_edit][sizing]") {
-    // "macros" is one whole cell on both axes and cannot scale on either.
-    auto [c1, r1] = GridEditMode::clamp_span("macros", 6, 6);
-    CHECK(c1 == 2);
-    CHECK(r1 == 2);
+TEST_CASE("clamp_span: a fixed axis stays fixed while the other scales", "[grid_edit][sizing]") {
+    // "preheat" scales its width but not its height. Assert the premise so a
+    // widget that later gains a range does not leave this passing on a clamp
+    // that never happened.
+    const auto* def = find_widget_def("preheat");
+    REQUIRE(def != nullptr);
+    REQUIRE(def->effective_min_rowspan() == def->effective_max_rowspan());
+    REQUIRE(def->effective_max_colspan() > def->effective_min_colspan());
+
+    auto [c1, r1] = GridEditMode::clamp_span("preheat", def->effective_max_colspan(), 8);
+    CHECK(c1 == def->effective_max_colspan());
+    CHECK(r1 == def->rowspan);
 }
 
 TEST_CASE("clamp_span: asymmetric constraints", "[grid_edit][sizing]") {
@@ -1829,11 +1749,23 @@ TEST_CASE("round_to_grid_cell: gutters do not shift the stepped boundary",
 
 TEST_CASE("snap_step_for: whole-cell widgets step by a full cell",
           "[grid_edit][resize][half_cell]") {
-    auto [wc, wr] = GridEditMode::snap_step_for("temperature");
+    // control_buttons is authored around a fixed number of cells on both axes,
+    // so it is the whole-cell fixed point. Picking a widget that later gains a
+    // half flag would turn this into a test of nothing, so assert the premise.
+    const auto* whole = helix::find_widget_def("control_buttons");
+    REQUIRE(whole != nullptr);
+    REQUIRE_FALSE(whole->supports_half_col);
+    REQUIRE_FALSE(whole->supports_half_row);
+    auto [wc, wr] = GridEditMode::snap_step_for("control_buttons");
     CHECK(wc == helix::GridLayout::TRACKS_PER_CELL);
     CHECK(wr == helix::GridLayout::TRACKS_PER_CELL);
 
-    auto [hc, hr] = GridEditMode::snap_step_for("shutdown");
+    // preheat is half on the column only: its row span is authored fixed.
+    const auto* mixed = helix::find_widget_def("preheat");
+    REQUIRE(mixed != nullptr);
+    REQUIRE(mixed->supports_half_col);
+    REQUIRE_FALSE(mixed->supports_half_row);
+    auto [hc, hr] = GridEditMode::snap_step_for("preheat");
     CHECK(hc == 1);
     CHECK(hr == helix::GridLayout::TRACKS_PER_CELL);
 
@@ -1862,7 +1794,9 @@ TEST_CASE_METHOD(LVGLTestFixture,
     CHECK(GridEditMode::dot_count(cols, rows, 1, 1) == (cols + 1) * (rows + 1));
 }
 
-TEST_CASE_METHOD(XMLTestFixture, "dots overlay: rebuilds to match the selected widget's snap step",
+TEST_CASE_METHOD(XMLTestFixture,
+                 "dots overlay: the shield is kept and its lattice rebuilt for the selected "
+                 "widget's snap step",
                  "[grid_edit][half_cell][dots]") {
     // dot_count() above proves the counting formula; this proves GridEditMode
     // actually calls it on every selection change. "temperature" has no
@@ -1909,10 +1843,9 @@ TEST_CASE_METHOD(XMLTestFixture, "dots overlay: rebuilds to match the selected w
     // PanelWidgetConfig::load() appends registry defaults onto the FIRST page
     // parsed (parse_widget_array's append_registry_defaults, gated on
     // pages_.empty() in src/system/panel_widget_config.cpp), so the test's
-    // two widgets live on a second page — same trick test_grid_edit_drag_path
-    // uses. main_page_index points AT that second page so create_dots_overlay()
-    // does not also add a delete_page_btn_ child, which would throw off the
-    // exact child-count checks below.
+    // two widgets live on a second page, the same trick test_grid_edit_drag_path
+    // uses. main_page_index points AT that second page so the lattice does not
+    // also get a delete_page_btn_.
     const std::string panel_id = "test_grid_edit_mode_dots";
     constexpr int kPageIndex = 1;
     auto* cfg = Config::get_instance();
@@ -1945,24 +1878,30 @@ TEST_CASE_METHOD(XMLTestFixture, "dots overlay: rebuilds to match the selected w
 
     GridEditMode em;
     em.enter(container, &config, kPageIndex);
-    lv_obj_t* dots_at_enter = GridEditModeTestAccess::dots_overlay(em);
+    lv_obj_t* dots_at_enter = GridEditModeTestAccess::shield(em);
     REQUIRE(dots_at_enter != nullptr);
 
     em.select_widget(temperature_widget);
-    lv_obj_t* dots_for_temperature = GridEditModeTestAccess::dots_overlay(em);
+    lv_obj_t* dots_for_temperature = GridEditModeTestAccess::shield(em);
     REQUIRE(dots_for_temperature != nullptr);
-    // A new lattice object, not the one enter() built — the selection changed
-    // what is a legal drop target, so the overlay must be rebuilt, not reused.
-    CHECK(dots_for_temperature != dots_at_enter);
-    CHECK(lv_obj_get_child_count(dots_for_temperature) ==
-          static_cast<uint32_t>(GridEditMode::dot_count(ncols, nrows, cell, cell)));
+    // The same shield object: the indev glues a live gesture to its press
+    // target, so the shield must never be destroyed mid-session. What changes
+    // with the selection is the lattice it draws, the legal drop targets.
+    CHECK(dots_for_temperature == dots_at_enter);
+    // Both these tiles snap by a single track now, so the lattice is at its
+    // finest pitch. The two counts must differ, or this case would pass with a
+    // lattice that ignored the selection entirely.
+    REQUIRE(GridEditMode::dot_count(ncols, nrows, 1, 1) !=
+            GridEditMode::dot_count(ncols, nrows, cell, cell));
+    CHECK(GridEditModeTestAccess::drawn_dot_count(em) ==
+          GridEditMode::dot_count(ncols, nrows, 1, 1));
 
     em.select_widget(shutdown_widget);
-    lv_obj_t* dots_for_shutdown = GridEditModeTestAccess::dots_overlay(em);
+    lv_obj_t* dots_for_shutdown = GridEditModeTestAccess::shield(em);
     REQUIRE(dots_for_shutdown != nullptr);
-    CHECK(dots_for_shutdown != dots_for_temperature);
-    CHECK(lv_obj_get_child_count(dots_for_shutdown) ==
-          static_cast<uint32_t>(GridEditMode::dot_count(ncols, nrows, 1, cell)));
+    CHECK(dots_for_shutdown == dots_for_temperature);
+    CHECK(GridEditModeTestAccess::drawn_dot_count(em) ==
+          GridEditMode::dot_count(ncols, nrows, 1, 1));
 
     em.exit();
     mgr.clear_panel_config(panel_id);

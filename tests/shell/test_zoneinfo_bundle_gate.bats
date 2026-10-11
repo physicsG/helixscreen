@@ -23,13 +23,13 @@ BUNDLE="assets/zoneinfo"
 # {"Display (+0:00)", "Area/Location"} pair, between the array's braces.
 extract_ids() {
     sed -n '/^static const TimezoneEntry TIMEZONE_ENTRIES\[\] = {/,/^};/p' "$SRC" |
-        sed -n 's/.*{[[:space:]]*"[^"]*"[[:space:]]*,[[:space:]]*"\([^"]*\)"[[:space:]]*}.*/\1/p'
+        sed -n 's/.*{[[:space:]]*"[^"]*"[[:space:]]*,[[:space:]]*"\([^"]*\)"[[:space:]]*[,}].*/\1/p'
 }
 
 # The display half of each pair — what the user actually reads in the dropdown.
 extract_labels() {
     sed -n '/^static const TimezoneEntry TIMEZONE_ENTRIES\[\] = {/,/^};/p' "$SRC" |
-        sed -n 's/.*{[[:space:]]*"\([^"]*\)"[[:space:]]*,[[:space:]]*"[^"]*"[[:space:]]*}.*/\1/p'
+        sed -n 's/.*{[[:space:]]*"\([^"]*\)"[[:space:]]*,[[:space:]]*"[^"]*"[[:space:]]*[,}].*/\1/p'
 }
 
 @test "TIMEZONE_ENTRIES parses to a non-empty id list" {
@@ -91,6 +91,27 @@ extract_labels() {
     expected=$(extract_ids | LC_ALL=C sort)
     actual=$(printf '%s\n' "$output" | LC_ALL=C sort)
     [ "$expected" = "$actual" ]
+}
+
+@test "each POSIX rule matches its bundled zone's TZif footer" {
+    # The ESP32 firmware applies the POSIX column (newlib reads no zoneinfo), so
+    # a rule that drifts from the bundle shows the wrong time there and nowhere else.
+    local bad="" rows=0
+    while IFS='|' read -r zone posix; do
+        [ -n "$zone" ] || continue
+        rows=$((rows + 1))
+        local footer
+        footer=$(tail -n 1 "$BUNDLE/$zone")
+        [ "$posix" = "$footer" ] || bad="$bad $zone($posix != $footer)"
+    done < <(sed -n '/^static const TimezoneEntry TIMEZONE_ENTRIES\[\] = {/,/^};/p' "$SRC" |
+        sed -n 's/.*{[[:space:]]*"[^"]*"[[:space:]]*,[[:space:]]*"\([^"]*\)"[[:space:]]*,[[:space:]]*"\([^"]*\)"[[:space:]]*}.*/\1|\2/p')
+
+    # A row without a POSIX column parses as an id but not as a triple.
+    [ "$rows" -eq "$(extract_ids | wc -l)" ]
+    if [ -n "$bad" ]; then
+        echo "POSIX rule differs from the bundle:$bad"
+        false
+    fi
 }
 
 @test "no duplicate IANA ids in the picker" {

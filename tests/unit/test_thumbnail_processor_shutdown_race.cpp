@@ -26,6 +26,7 @@
 #include "thumbnail_processor.h"
 
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <string>
 #include <thread>
@@ -75,6 +76,27 @@ helix::ThumbnailTarget target_120() {
     t.width = 120;
     t.height = 120;
     return t;
+}
+
+/// shutdown() joins every pool worker, so a worker that missed stop()'s wakeup
+/// holds it for the pool's whole idle timeout (60s). Load stretches a clean
+/// shutdown to milliseconds, never to this.
+constexpr auto kShutdownBound = std::chrono::seconds(10);
+
+/// The racing stopper: waits for `go`, shuts `raw` down, and folds how long
+/// that took into `slowest_ms`.
+void timed_shutdown(helix::ThumbnailProcessor* raw, const std::atomic<bool>& go,
+                    std::atomic<long long>& slowest_ms) {
+    while (!go.load(std::memory_order_acquire)) {
+    }
+    auto t0 = std::chrono::steady_clock::now();
+    raw->shutdown();
+    long long took =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
+            .count();
+    long long prev = slowest_ms.load();
+    while (took > prev && !slowest_ms.compare_exchange_weak(prev, took)) {
+    }
 }
 
 } // namespace
@@ -210,6 +232,7 @@ TEST_CASE_METHOD(ThumbnailRaceFixture, "process_async racing shutdown never uses
     // eventually faults.
     constexpr int ITERATIONS = 40;
     constexpr int SUBMITTERS = 4;
+    std::atomic<long long> slowest_ms{0};
 
     for (int iter = 0; iter < ITERATIONS; ++iter) {
         ProcHandle proc;
@@ -236,11 +259,7 @@ TEST_CASE_METHOD(ThumbnailRaceFixture, "process_async racing shutdown never uses
             });
         }
 
-        threads.emplace_back([raw, &go] {
-            while (!go.load(std::memory_order_acquire)) {
-            }
-            raw->shutdown();
-        });
+        threads.emplace_back([raw, &go, &slowest_ms] { timed_shutdown(raw, go, slowest_ms); });
 
         go.store(true, std::memory_order_release);
         for (auto& th : threads) {
@@ -257,5 +276,68 @@ TEST_CASE_METHOD(ThumbnailRaceFixture, "process_async racing shutdown never uses
         helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
     }
 
+    INFO("slowest shutdown(): " << slowest_ms.load() << " ms");
+    CHECK(slowest_ms.load() < std::chrono::milliseconds(kShutdownBound).count());
+    SUCCEED("Completed " << ITERATIONS << " shutdown races without faulting");
+}
+
+TEST_CASE_METHOD(ThumbnailRaceFixture, "submit_test_task after shutdown queues nothing",
+                 "[thumbnail][threading][1202]") {
+    ProcHandle proc;
+
+    proc->shutdown();
+
+    std::atomic<int> ran{0};
+    proc->submit_test_task([&ran]() { ++ran; });
+
+    // No pool to commit into after shutdown() - the task must never run, and
+    // must not resurrect the pool (a running task would prove either failure).
+    CHECK(proc->pending_tasks() == 0);
+    CHECK(ran.load() == 0);
+}
+
+TEST_CASE_METHOD(ThumbnailRaceFixture, "submit_test_task racing shutdown never uses a freed pool",
+                 "[thumbnail][threading][1202][slow]") {
+    // Same regression shape as "process_async racing shutdown" above, for
+    // submit_test_task()'s own commit() call.
+    constexpr int ITERATIONS = 40;
+    constexpr int SUBMITTERS = 4;
+    std::atomic<long long> slowest_ms{0};
+
+    for (int iter = 0; iter < ITERATIONS; ++iter) {
+        ProcHandle proc;
+
+        helix::ThumbnailProcessor* raw = proc.get();
+        auto ran = std::make_shared<std::atomic<int>>(0);
+        std::atomic<bool> go{false};
+        std::vector<std::thread> threads;
+        threads.reserve(SUBMITTERS + 1);
+
+        for (int t = 0; t < SUBMITTERS; ++t) {
+            threads.emplace_back([raw, ran, &go] {
+                while (!go.load(std::memory_order_acquire)) {
+                }
+                for (int i = 0; i < 6; ++i) {
+                    raw->submit_test_task([ran]() { ++*ran; });
+                }
+            });
+        }
+
+        threads.emplace_back([raw, &go, &slowest_ms] { timed_shutdown(raw, go, slowest_ms); });
+
+        go.store(true, std::memory_order_release);
+        for (auto& th : threads) {
+            th.join();
+        }
+
+        // The invariant is "no crash, no torn state". Every submission either
+        // ran before shutdown() or was refused after it; shutdown()'s
+        // pool->stop() joins every worker before returning, so by the time
+        // every thread above has joined, no task is still running.
+        CHECK(proc->pending_tasks() == 0);
+    }
+
+    INFO("slowest shutdown(): " << slowest_ms.load() << " ms");
+    CHECK(slowest_ms.load() < std::chrono::milliseconds(kShutdownBound).count());
     SUCCEED("Completed " << ITERATIONS << " shutdown races without faulting");
 }

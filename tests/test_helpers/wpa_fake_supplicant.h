@@ -129,6 +129,10 @@ class WpaFakeSupplicant {
             // Well-formed empty table: header row only.
             return "network id / ssid / bssid / flags\n";
         }
+        if (cmd == "ADD_NETWORK") {
+            // The supplicant allocates the next network id; 0 is the first.
+            return "0\n";
+        }
         // SCAN answers "OK\nOK\n" from real wpa_supplicant (request ack +
         // event-armed ack); classify_scan_reply tolerates the plain form.
         return "OK\n";

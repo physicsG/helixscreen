@@ -10,14 +10,7 @@
 #include "helix-xml/src/xml/lv_xml_widget.h"
 #include "helix-xml/src/xml/parsers/lv_xml_obj_parser.h"
 #include "lvgl/lvgl.h"
-#include "nozzle_renderer_a4t.h"
-#include "nozzle_renderer_anthead.h"
-#include "nozzle_renderer_bambu.h"
-#include "nozzle_renderer_creality_k1.h"
-#include "nozzle_renderer_creality_k2.h"
-#include "nozzle_renderer_jabberwocky.h"
-#include "nozzle_renderer_stealthburner.h"
-#include "settings_manager.h"
+#include "nozzle_renderer_dispatch.h"
 #include "theme_manager.h"
 
 #include <spdlog/spdlog.h>
@@ -238,29 +231,7 @@ static void indicator_draw_cb(lv_event_t* e) {
     int32_t nozzle_scale = LV_CLAMP(5, h / 10, 12);
     lv_color_t nozzle_color = data->color_text;
 
-    switch (helix::SettingsManager::instance().get_effective_toolhead_style()) {
-    case helix::ToolheadStyle::STEALTHBURNER:
-        draw_nozzle_stealthburner(layer, nozzle_cx, nozzle_y, nozzle_color, nozzle_scale);
-        break;
-    case helix::ToolheadStyle::A4T:
-        draw_nozzle_a4t(layer, nozzle_cx, nozzle_y, nozzle_color, nozzle_scale);
-        break;
-    case helix::ToolheadStyle::JABBERWOCKY:
-        draw_nozzle_jabberwocky(layer, nozzle_cx, nozzle_y, nozzle_color, nozzle_scale);
-        break;
-    case helix::ToolheadStyle::ANTHEAD:
-        draw_nozzle_anthead(layer, nozzle_cx, nozzle_y, nozzle_color, nozzle_scale);
-        break;
-    case helix::ToolheadStyle::CREALITY_K1:
-        draw_nozzle_creality_k1(layer, nozzle_cx, nozzle_y, nozzle_color, nozzle_scale);
-        break;
-    case helix::ToolheadStyle::CREALITY_K2:
-        draw_nozzle_creality_k2(layer, nozzle_cx, nozzle_y, nozzle_color, nozzle_scale);
-        break;
-    default:
-        draw_nozzle_bambu(layer, nozzle_cx, nozzle_y, nozzle_color, nozzle_scale);
-        break;
-    }
+    draw_nozzle_for_style(layer, nozzle_cx, nozzle_y, nozzle_color, nozzle_scale);
 
     // --- Direction arrow flash (shaft + V-head, drawn from base to tip) ---
     if (data->arrow_opacity > 0 && data->arrow_progress > 0) {
@@ -340,7 +311,7 @@ static void position_anim_cb(void* var, int32_t value) {
     data->current_pos = value;
 
     // Defer invalidation to avoid calling during render phase
-    helix::ui::async_call(obj, [](void* d) { lv_obj_invalidate(static_cast<lv_obj_t*>(d)); }, obj);
+    helix::ui::queue_invalidate(obj);
 }
 
 static void arrow_progress_anim_cb(void* var, int32_t value) {
@@ -351,7 +322,7 @@ static void arrow_progress_anim_cb(void* var, int32_t value) {
 
     data->arrow_progress = value;
 
-    helix::ui::async_call(obj, [](void* d) { lv_obj_invalidate(static_cast<lv_obj_t*>(d)); }, obj);
+    helix::ui::queue_invalidate(obj);
 }
 
 static void arrow_opacity_anim_cb(void* var, int32_t value) {
@@ -362,7 +333,7 @@ static void arrow_opacity_anim_cb(void* var, int32_t value) {
 
     data->arrow_opacity = value;
 
-    helix::ui::async_call(obj, [](void* d) { lv_obj_invalidate(static_cast<lv_obj_t*>(d)); }, obj);
+    helix::ui::queue_invalidate(obj);
 }
 
 /// Called when draw-in animation completes; starts the fade-out phase

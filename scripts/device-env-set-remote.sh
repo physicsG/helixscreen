@@ -33,13 +33,25 @@ if [ -L "$ENV_FILE" ]; then
     ENV_FILE="$(readlink -f "$ENV_FILE" 2>/dev/null || echo "$ENV_FILE")"
 fi
 
+# Pin the mode on every run, not only where the file is (re)written below: the
+# launcher's trust gate refuses the whole file over a group/world write bit, so
+# an update that landed one would otherwise survive this script's idempotence
+# exit. Best-effort: a missing file (first deploy) or a read-only mount must
+# not fail the key update itself.
+if [ -f "$ENV_FILE" ]; then
+    chmod 644 "$ENV_FILE" 2>/dev/null || true
+fi
+
 if [ -f "$ENV_FILE" ] && grep -q "^${KEY}=${VALUE}\$" "$ENV_FILE"; then
     echo "  ${KEY}=${VALUE} already set in ${ENV_FILE}"
     exit 0
 fi
 
 mkdir -p "$(dirname "$ENV_FILE")"
-[ -f "$ENV_FILE" ] || : > "$ENV_FILE"
+# A newly created env file gets 0644 explicitly: the launcher only evaluates
+# the file when root or its own user owns it and no group/world write bit is
+# set, and the deploy shell's umask decides that otherwise.
+[ -f "$ENV_FILE" ] || { : > "$ENV_FILE"; chmod 644 "$ENV_FILE"; }
 # One backup, taken before the FIRST modification. Re-copying on every deploy
 # would overwrite the pristine original with an already-modified one.
 [ -f "${ENV_FILE}.helix-bak" ] || cp "$ENV_FILE" "${ENV_FILE}.helix-bak"

@@ -42,7 +42,7 @@ TEST_CASE_METHOD(helix::BusyGuardFixture,
     // Anti-vacuity: the payload MUST have been parsed. Without this the next
     // assertion would also hold if update_from_status ignored idle_timeout
     // entirely, which is the failure this test exists to catch.
-    REQUIRE(lv_subject_get_int(state.get_idle_timeout_printing_subject()) == 1);
+    REQUIRE(lv_subject_get_int(state.calibration_state().get_idle_timeout_printing_subject()) == 1);
 
     // Parsed, but not yet blocking — the whole point of the debounce.
     CHECK_FALSE(state.is_blocking_operation_active());
@@ -82,11 +82,13 @@ TEST_CASE_METHOD(helix::BusyGuardFixture,
     for (int cycle = 0; cycle < 3; ++cycle) {
         INFO("cycle " << cycle);
         state.update_from_status(idle_timeout("Printing"));
-        REQUIRE(lv_subject_get_int(state.get_idle_timeout_printing_subject()) == 1);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_idle_timeout_printing_subject()) ==
+                1);
         CHECK_FALSE(state.is_blocking_operation_active());
 
         state.update_from_status(idle_timeout("Ready"));
-        REQUIRE(lv_subject_get_int(state.get_idle_timeout_printing_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_idle_timeout_printing_subject()) ==
+                0);
         CHECK_FALSE(state.is_blocking_operation_active());
     }
 

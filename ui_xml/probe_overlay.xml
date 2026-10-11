@@ -6,9 +6,9 @@
         extends="lv_obj" width="#overlay_width_transient" height="100%" align="right_mid" style_border_width="0"
         style_pad_all="0" style_bg_opa="255" style_bg_color="#card_bg" scrollable="false" flex_flow="column">
     <!-- Header Bar -->
-    <header_bar name="overlay_header" title="Probe" title_tag="Probe"/>
+    <header_bar name="overlay_header" title="Probe"/>
     <!-- Content Area -->
-    <lv_obj name="panel_content"
+    <lv_obj name="overlay_content"
             width="100%" flex_grow="1" style_pad_all="#space_lg" style_pad_gap="#space_md" scrollable="true"
             flex_flow="column">
 
@@ -34,7 +34,7 @@
           <lv_obj width="100%"
                   height="content" style_pad_all="0" style_pad_top="#space_xs" flex_flow="row"
                   style_flex_cross_place="center" style_pad_gap="#space_sm" scrollable="false">
-            <text_small text="Z Offset" translation_tag="Z Offset" style_text_color="#text_muted"/>
+            <text_small text="Z Offset" style_text_color="#text_muted"/>
             <text_body bind_text="probe_z_offset_display" style_text_color="#primary"/>
           </lv_obj>
         </lv_obj>
@@ -48,26 +48,23 @@
       <!-- ============================================================ -->
       <!-- ACTIONS (most used — shown first) -->
       <!-- ============================================================ -->
-      <setting_section_header title="ACTIONS" title_tag="ACTIONS" icon="wrench"/>
+      <setting_section_header title="ACTIONS" icon="wrench"/>
 
       <!-- Action buttons — 3 equal-width in a row -->
       <lv_obj width="100%"
               height="content" style_pad_all="0" flex_flow="row" style_pad_gap="#space_sm" scrollable="false">
         <ui_button name="btn_probe_accuracy"
-                   width="1" height="#button_height" flex_grow="1" variant="secondary" text="Accuracy"
-                   translation_tag="Accuracy" icon="target">
+                   width="1" height="#button_height" flex_grow="1" variant="secondary" text="Accuracy" icon="target">
           <event_cb trigger="clicked" callback="on_probe_accuracy"/>
         </ui_button>
 
         <ui_button name="btn_zoffset"
-                   width="1" height="#button_height" flex_grow="1" variant="secondary" text="Z-Offset"
-                   translation_tag="Z-Offset" icon="z_closer">
+                   width="1" height="#button_height" flex_grow="1" variant="secondary" text="Z-Offset" icon="z_closer">
           <event_cb trigger="clicked" callback="on_zoffset_cal"/>
         </ui_button>
 
         <ui_button name="btn_bedmesh"
-                   width="1" height="#button_height" flex_grow="1" variant="secondary" text="Bed Mesh"
-                   translation_tag="Bed Mesh" icon="grid_large">
+                   width="1" height="#button_height" flex_grow="1" variant="secondary" text="Bed Mesh" icon="grid_large">
           <event_cb trigger="clicked" callback="on_bed_mesh"/>
         </ui_button>
       </lv_obj>
@@ -80,45 +77,39 @@
               scrollable="false">
         <bind_flag_if_eq subject="probe_config_loaded" flag="hidden" ref_value="0"/>
 
-        <setting_section_header title="CONFIGURATION" title_tag="CONFIGURATION" icon="tune"/>
+        <setting_section_header title="CONFIGURATION" icon="tune"/>
 
         <!-- X Offset -->
         <setting_action_row name="btn_cfg_x_offset"
-                            label="X Offset" label_tag="X Offset" icon="arrow_right"
-                            bind_description="probe_cfg_x_offset">
+                            label="X Offset" icon="arrow_right" bind_description="probe_cfg_x_offset">
           <event_cb trigger="clicked" callback="on_probe_cfg_x_offset"/>
         </setting_action_row>
 
         <!-- Y Offset -->
         <setting_action_row name="btn_cfg_y_offset"
-                            label="Y Offset" label_tag="Y Offset" icon="arrow_down"
-                            bind_description="probe_cfg_y_offset">
+                            label="Y Offset" icon="arrow_down" bind_description="probe_cfg_y_offset">
           <event_cb trigger="clicked" callback="on_probe_cfg_y_offset"/>
         </setting_action_row>
 
         <!-- Samples -->
-        <setting_action_row name="btn_cfg_samples"
-                            label="Samples" label_tag="Samples" icon="target" bind_description="probe_cfg_samples">
+        <setting_action_row name="btn_cfg_samples" label="Samples" icon="target" bind_description="probe_cfg_samples">
           <event_cb trigger="clicked" callback="on_probe_cfg_samples"/>
         </setting_action_row>
 
         <!-- Speed -->
-        <setting_action_row name="btn_cfg_speed"
-                            label="Probe Speed" label_tag="Probe Speed" icon="play" bind_description="probe_cfg_speed">
+        <setting_action_row name="btn_cfg_speed" label="Probe Speed" icon="play" bind_description="probe_cfg_speed">
           <event_cb trigger="clicked" callback="on_probe_cfg_speed"/>
         </setting_action_row>
 
         <!-- Sample Retract Distance -->
         <setting_action_row name="btn_cfg_retract"
-                            label="Retract Distance" label_tag="Retract Distance" icon="arrow_up"
-                            bind_description="probe_cfg_retract_dist">
+                            label="Retract Distance" icon="arrow_up" bind_description="probe_cfg_retract_dist">
           <event_cb trigger="clicked" callback="on_probe_cfg_retract"/>
         </setting_action_row>
 
         <!-- Samples Tolerance -->
         <setting_action_row name="btn_cfg_tolerance"
-                            label="Samples Tolerance" label_tag="Samples Tolerance" icon="tune"
-                            bind_description="probe_cfg_tolerance">
+                            label="Samples Tolerance" icon="tune" bind_description="probe_cfg_tolerance">
           <event_cb trigger="clicked" callback="on_probe_cfg_tolerance"/>
         </setting_action_row>
       </lv_obj>

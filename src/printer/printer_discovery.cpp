@@ -11,6 +11,7 @@
 #include "i_moonraker_client.h"
 #include "led/led_auto_state.h"
 #include "led/led_controller.h"
+#include "load_cell_manager.h"
 #include "moonraker_api.h"
 #include "printer_name_sync.h"
 #include "probe_sensor_manager.h"
@@ -21,76 +22,31 @@
 #include "tool_state.h"
 #include "width_sensor_manager.h"
 #include "width_sensor_types.h"
+#include "wizard_config_paths.h"
 
-#include <sstream>
 #include <vector>
 
 namespace helix {
 
-std::string PrinterDiscovery::summary() const {
-    std::ostringstream ss;
-    ss << "Capabilities: ";
-
-    std::vector<std::string> caps;
-
-    if (has_qgl_)
-        caps.push_back("QGL");
-    if (has_z_tilt_)
-        caps.push_back("Z-tilt");
-    if (has_bed_mesh_)
-        caps.push_back("bed_mesh");
-    if (has_chamber_heater_)
-        caps.push_back("chamber_heater");
-    if (has_chamber_sensor_)
-        caps.push_back("chamber_sensor");
-    if (has_exclude_object_)
-        caps.push_back("exclude_object");
-    if (has_probe_)
-        caps.push_back("probe");
-    if (has_heater_bed_)
-        caps.push_back("heater_bed");
-    if (has_led_)
-        caps.push_back("LED");
-    if (has_accelerometer_)
-        caps.push_back("accelerometer");
-    if (has_screws_tilt_)
-        caps.push_back("screws_tilt");
-    if (has_klippain_shaketune_)
-        caps.push_back("Klippain");
-    if (has_speaker_)
-        caps.push_back("speaker");
-    if (has_firmware_retraction_)
-        caps.push_back("firmware_retraction");
-    if (has_mmu_)
-        caps.push_back(ams_type_to_string(mmu_type_));
-    if (has_tool_changer_) {
-        std::string tc_str = "Tool Changer";
-        if (!tool_names_.empty()) {
-            tc_str += " (" + std::to_string(tool_names_.size()) + " tools)";
-        }
-        caps.push_back(tc_str);
+std::vector<std::string> temperature_sensor_objects(const PrinterDiscovery& hardware) {
+    std::vector<std::string> objects = hardware.sensors();
+    for (const auto& heater : hardware.heaters()) {
+        if (heater.rfind("heater_generic ", 0) == 0)
+            objects.push_back(heater);
     }
-    if (has_timelapse_)
-        caps.push_back("timelapse");
-    if (!filament_sensor_names_.empty())
-        caps.push_back("filament_sensors(" + std::to_string(filament_sensor_names_.size()) + ")");
+    return objects;
+}
 
-    if (caps.empty()) {
-        ss << "none";
-    } else {
-        for (size_t i = 0; i < caps.size(); ++i) {
-            if (i > 0)
-                ss << ", ";
-            ss << caps[i];
-        }
+void remember_printer_hostname(const std::string& hostname) {
+    if (hostname.empty() || hostname == "unknown") {
+        return;
     }
-
-    ss << " | " << macros_.size() << " macros";
-    if (!helix_macros_.empty()) {
-        ss << " (" << helix_macros_.size() << " HELIX_*)";
+    Config* config = Config::get_instance();
+    const std::string path = config->df() + helix::wizard::HOSTNAME;
+    if (config->get<std::string>(path, "") != hostname) {
+        config->set<std::string>(path, hostname);
+        config->save();
     }
-
-    return ss.str();
 }
 
 void init_subsystems_from_hardware(const PrinterDiscovery& hardware, IMoonrakerAPI* api,
@@ -100,19 +56,19 @@ void init_subsystems_from_hardware(const PrinterDiscovery& hardware, IMoonrakerA
     // Initialize AMS backend (AFC, Happy Hare, ACE, Tool Changer)
     AmsState::instance().init_backend_from_hardware(hardware, api, client);
 
-    // Initialize filament sensor manager
-    if (hardware.has_filament_sensors()) {
-        auto& fsm = FilamentSensorManager::instance();
-        fsm.discover_sensors(hardware.filament_sensor_names());
-        fsm.load_config_from_file();
-        spdlog::debug("[PrinterDiscovery] Discovered {} filament sensors",
-                      hardware.filament_sensor_names().size());
-    }
+    // Sensor discovery is unconditional: an empty list is what clears the
+    // previous printer's sensors on a switch.
+    auto& fsm = FilamentSensorManager::instance();
+    fsm.discover_sensors(hardware.filament_sensor_names());
+    fsm.load_config_from_file();
 
-    // Initialize temperature sensor manager
-    // hardware.sensors() returns temperature_sensor and temperature_fan objects
     auto& tsm = helix::sensors::TemperatureSensorManager::instance();
-    tsm.discover(hardware.sensors());
+    tsm.discover(temperature_sensor_objects(hardware));
+
+    // Initialize load cell manager
+    // hardware.load_cells() returns load_cell objects
+    auto& lcm = helix::sensors::LoadCellManager::instance();
+    lcm.discover(hardware.load_cells());
 
     // Initialize probe sensor manager
     // Probe sensors (bltouch, cartographer, beacon, etc.) are discovered from the full objects list
@@ -127,25 +83,21 @@ void init_subsystems_from_hardware(const PrinterDiscovery& hardware, IMoonrakerA
 
     // Initialize width sensor manager
     // Width sensors (hall/tsl1401cl filament width) are discovered from Klipper objects
-    if (hardware.has_width_sensors()) {
-        auto& wsm = helix::sensors::WidthSensorManager::instance();
-        wsm.discover(hardware.width_sensor_objects());
-        wsm.load_config_from_file();
-        spdlog::debug("[PrinterDiscovery] Discovered {} width sensors",
-                      hardware.width_sensor_objects().size());
-    }
+    auto& wsm = helix::sensors::WidthSensorManager::instance();
+    wsm.discover(hardware.width_sensor_objects());
+    wsm.load_config_from_file();
 
     // Initialize multi-extruder temperature tracking
     auto& printer_state = get_printer_state();
-    printer_state.init_extruders(hardware.heaters());
+    printer_state.temperature_state().init_extruders(hardware.heaters());
 
     // Initialize tool changer state from discovered hardware
     helix::ToolState::instance().init_tools(hardware);
 
-    // Seed the per-tool z-offsets. Must follow init_tools(): the initial status
+    // Seed the per-tool offsets. Must follow init_tools(): the initial status
     // snapshot arrived before tools_ existed, so it was dropped, and Moonraker
     // republishes only what changes afterwards.
-    helix::ToolState::instance().query_tool_z_offsets(client, hardware);
+    helix::ToolState::instance().query_tool_offsets(client, hardware);
 
     // Restore persisted spool assignments (Moonraker DB primary, local JSON fallback)
     helix::ToolState::instance().load_spool_assignments(api);
@@ -153,11 +105,17 @@ void init_subsystems_from_hardware(const PrinterDiscovery& hardware, IMoonrakerA
     // Sync printer name from Mainsail/Fluidd DB (seeds local config on first connect)
     helix::PrinterNameSync::resolve(api, hardware.hostname());
 
+    remember_printer_hostname(hardware.hostname());
+
     // Initialize standard macros
-    StandardMacros::instance().init(hardware);
+    // Type from Config, NOT PrinterState: this callback runs before
+    // auto_detect_and_save sets PrinterState's copy, so reading that one hands
+    // StandardMacros an empty string and the shipped tier never fills. Same trap
+    // and same remedy as the CFS backend's K1/K2 dialect latch.
+    StandardMacros::instance().init(hardware, helix::get_saved_printer_type());
 
     // Initialize LED controller and discover LED backends.
-    // Application::init_core_subjects ran init(nullptr, nullptr) earlier so the
+    // PrinterSession::init_core_subjects ran init(nullptr, nullptr) earlier so the
     // led_controllable subject was registered before XML instantiation; this call
     // re-runs init() to rebind the real api/client (init() always overwrites
     // api_/client_ + backend api pointers, and the subject path is idempotent).
@@ -168,42 +126,10 @@ void init_subsystems_from_hardware(const PrinterDiscovery& hardware, IMoonrakerA
     // config and (re)subscribes to PrinterState subjects. Because switch_printer()
     // re-runs this discovery path, this also reloads per-printer auto-state config
     // on printer switch automatically. Runs on the main thread (this function is
-    // invoked inside a queue_update() drain), so the observe_int_sync subscriptions
+    // invoked inside a queue_update() drain), so the observe<int> subscriptions
     // are main-thread-safe.
     helix::led::LedAutoState::instance().init(printer_state);
     led_ctrl.discover_wled_strips();
-
-    // Set tracked LED early so the subscription response populates subjects correctly.
-    // LedWidget::bind_led() will also call this (idempotent) when it attaches later.
-    // Only a strip Klipper reports can be tracked — a "macro:" ID or a WLED strip
-    // never appears in a status payload, so tracking one leaves every LED subject
-    // frozen at its default and asks printer.objects for an object that does not exist.
-    const std::string tracked = led_ctrl.status_tracked_strip();
-    if (!tracked.empty()) {
-        printer_state.set_tracked_led(tracked);
-
-        // Query the tracked LED's current state explicitly.
-        // The subscription response may return empty data for LEDs whose state was
-        // set before we subscribed (e.g., LED effects enabled by Klipper macros at
-        // startup).  A direct query always returns the current values.
-        nlohmann::json query_objects = nlohmann::json::object();
-        query_objects[tracked] = nullptr;
-        client->send_jsonrpc("printer.objects.query", {{"objects", query_objects}},
-                             [tracked](nlohmann::json response) {
-                                 if (!response.contains("result") ||
-                                     !response["result"].contains("status")) {
-                                     return;
-                                 }
-                                 const auto& status = response["result"]["status"];
-                                 if (!status.contains(tracked)) {
-                                     return;
-                                 }
-                                 // Feed into PrinterState on the UI thread
-                                 helix::ui::queue_update([status]() {
-                                     get_printer_state().update_from_status(status);
-                                 });
-                             });
-    }
 
     spdlog::info("[PrinterDiscovery] Subsystem initialization complete");
 }

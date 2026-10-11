@@ -64,6 +64,16 @@
 #          setup is scaffolding, while ~30 REQUIREs against a local
 #          is_update_available() are a test of the copy.
 #
+#   4. stub-logic -- a test-support TU (tests/*.cpp, tests/test_helpers/,
+#      tests/mocks/) defines a function that one of the objects mk/tests.mk
+#      filters out of the test link also defines, and the body branches (if,
+#      for, while, switch, ?:). Filtering the real object out is what lets a
+#      copy link in its place, and a copy with branches is logic the tests then
+#      exercise instead of production's. A stub may be inert (empty, or a single
+#      return), or the real object may be linked; it may not be a second copy of
+#      the logic (prestonbrown/helixscreen#1220). Opt out on the definition, as
+#      for signal 3.
+#
 #   2. mirror-comment -- a comment naming a production symbol as being mirrored,
 #      copied, replicated or simulated, where that symbol really exists in
 #      include/ or src/. A comment that names nothing real is not flagged (it is
@@ -118,6 +128,122 @@ FILE_SCOPE_DEF = re.compile(
 # Names that are test scaffolding by convention rather than shadows of shipped
 # code. Kept deliberately short -- every entry here is a hole in the signal.
 SCAFFOLD_NAMES = {'main', 'SetUp', 'TearDown'}
+
+
+# One definition per match, at column 0: an optional return type, an optional
+# Class:: or namespace:: qualifier, the name, the parameter list, then the body.
+QUALIFIED_DEF = re.compile(
+    r'^(?![ \t#/}])(?!(?:namespace|class|struct|enum|union|using|typedef|template|'
+    r'return|static_assert|if|for|while|switch|do|else)\b)'
+    r'[^;{}()\n]*?\b(?P<qual>(?:\w+::)*)(?P<name>~?\w+)\s*\([^;{}]*?\)[^;{}()]*\{', re.M)
+
+NAMESPACE_OPEN = re.compile(r'^\s*namespace\s+(?P<ns>[\w:]+)\s*\{', re.M)
+
+CONTROL_FLOW = re.compile(r'\b(?:if|for|while|switch)\s*\(|\?[^:;?]*:')
+
+FILTERED_OBJ = re.compile(r'\$\(OBJ_DIR\)/(\S+)\.o\b')
+
+
+class GateInputError(Exception):
+    """The gate could not find what it checks, so it cannot vouch for anything."""
+
+
+def filtered_sources(root: Path):
+    """src/ files whose objects mk/tests.mk filters out of the test link.
+
+    Raises GateInputError rather than returning nothing: an unreadable or
+    reshaped filter list would otherwise pass every stub unexamined.
+    """
+    mk = root / 'mk' / 'tests.mk'
+    try:
+        text = mk.read_text(errors='replace')
+    except OSError as e:
+        raise GateInputError(f'cannot read {mk}: {e}')
+    m = re.search(r'^TEST_APP_OBJS\s*:=\s*\$\(filter-out(.*?),', text, re.M | re.S)
+    objs = FILTERED_OBJ.findall(m.group(1)) if m else []
+    if not objs:
+        raise GateInputError(f'no TEST_APP_OBJS := $(filter-out ...) object list in {mk}')
+    return [root / 'src' / f'{obj}.cpp' for obj in objs]
+
+
+def function_body(text: str, open_brace: int) -> str:
+    depth = 0
+    for j in range(open_brace, len(text)):
+        if text[j] == '{':
+            depth += 1
+        elif text[j] == '}':
+            depth -= 1
+            if depth == 0:
+                return text[open_brace:j + 1]
+    return text[open_brace:]
+
+
+def qualified_definitions(text: str):
+    """(fully qualified name, match) for each column-0 definition in @p text."""
+    spans = [(m.end() - 1, m.end() - 1 + len(function_body(text, m.end() - 1)), m.group('ns'))
+             for m in NAMESPACE_OPEN.finditer(text)]
+    for m in QUALIFIED_DEF.finditer(text):
+        outer = [ns for lo, hi, ns in spans if lo < m.start() < hi]
+        yield '::'.join(outer + [m.group('qual') + m.group('name')]), m
+
+
+def same_symbol(a: str, b: str) -> bool:
+    """True when one qualified name is the other seen from an enclosing namespace."""
+    short, long_ = sorted((a, b), key=len)
+    return long_ == short or long_.endswith('::' + short)
+
+
+def strip_comments_and_strings(code: str) -> str:
+    code = re.sub(r'//[^\n]*', '', code)
+    code = re.sub(r'/\*.*?\*/', '', code, flags=re.S)
+    code = re.sub(r"'(?:\\.|[^'\\])'", "''", code)
+    return re.sub(r'"(?:\\.|[^"\\])*"', '""', code)
+
+
+def scan_stub_logic(root: Path):
+    """Signal 4: branching stubs standing in for objects filtered out of the test link."""
+    stubbed = set()
+    for src in filtered_sources(root):
+        try:
+            text = src.read_text(errors='replace')
+        except OSError:
+            continue
+        stubbed.update(q for q, _ in qualified_definitions(text))
+    by_name = {}
+    for q in stubbed:
+        by_name.setdefault(q.rsplit('::', 1)[-1], []).append(q)
+
+    findings = []
+    tests = root / 'tests'
+    support = sorted(set(tests.glob('*.cpp')) | set(tests.glob('test_helpers/*.cpp'))
+                     | set(tests.glob('mocks/*.cpp')))
+    for path in support:
+        if path.name == 'catch_amalgamated.cpp':
+            continue
+        try:
+            text = path.read_text(errors='replace')
+        except OSError:
+            continue
+        lines = text.split('\n')
+        opt_out_lines = {i for i, l in enumerate(lines, 1) if OPT_OUT.search(l)}
+        for qual, m in qualified_definitions(text):
+            name = m.group('name')
+            if not any(same_symbol(qual, q) for q in by_name.get(name, ())):
+                continue
+            body = strip_comments_and_strings(function_body(text, m.end() - 1))
+            if not CONTROL_FLOW.search(body):
+                continue
+            i = text[:m.start()].count('\n') + 1
+            lo = i
+            while lo > 1 and lines[lo - 2].lstrip().startswith('//'):
+                lo -= 1
+            if any(lo <= j <= i + 1 for j in opt_out_lines):
+                continue
+            findings.append((str(path.relative_to(root)), i, 'stub-logic',
+                             f'{qual}() stands in for an object filtered out of the '
+                             f'test link and branches - tests exercise this copy, '
+                             f'not production'))
+    return findings
 
 
 def production_headers(root: Path):
@@ -188,6 +314,8 @@ def scan(root: Path):
     prod_free = production_free_functions(root)
     local_hdrs = test_local_headers(root)
     findings = []
+
+    findings.extend(scan_stub_logic(root))
 
     unit = root / 'tests' / 'unit'
     if not unit.is_dir():
@@ -275,11 +403,24 @@ def main():
     ap.add_argument('--list', action='store_true', help='print every finding')
     ap.add_argument('--summary', action='store_true', help='print counts only')
     ap.add_argument('--max-allowed', type=int, default=None,
-                    help='fail if findings exceed this (ratchet)')
+                    help='fail if the total findings exceed this (ratchet)')
+    ap.add_argument('--max', action='append', default=[], metavar='KIND=N',
+                    help='per-signal ratchet; once any is given, an unnamed kind allows 0')
     args = ap.parse_args()
 
+    per_kind = {}
+    for spec in args.max:
+        kind, _, n = spec.partition('=')
+        if not n.isdigit():
+            ap.error(f'--max wants KIND=N, got {spec!r}')
+        per_kind[kind] = int(n)
+
     root = Path(args.root).resolve()
-    findings = scan(root)
+    try:
+        findings = scan(root)
+    except GateInputError as e:
+        print(f'ERROR: {e}')
+        return 2
 
     if args.list:
         for f, ln, kind, why in findings:
@@ -298,8 +439,12 @@ def main():
     print(f'test-mirror findings: {len(findings)} '
           f'({", ".join(f"{k}={v}" for k, v in sorted(kinds.items())) or "none"})')
 
+    over = [f'{k}={v} exceeds {per_kind.get(k, 0)}' for k, v in sorted(kinds.items())
+            if per_kind and v > per_kind.get(k, 0)]
     if args.max_allowed is not None and len(findings) > args.max_allowed:
-        print(f'FAIL: {len(findings)} exceeds --max-allowed {args.max_allowed}')
+        over.append(f'{len(findings)} exceeds --max-allowed {args.max_allowed}')
+    if over:
+        print(f'FAIL: {"; ".join(over)}')
         print('A unit test must exercise shipped code, not a copy of it.')
         print('Legitimate exception? Annotate the file:')
         print('  // TEST_MIRROR_OK: <why this file cannot include a production header>')

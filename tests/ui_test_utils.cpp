@@ -6,6 +6,7 @@
 #include "ui_modal.h"
 #include "ui_update_queue.h"
 
+#include "env_knobs.h"
 #include "lib/lvgl/src/misc/lv_timer_private.h"
 #include "platform_info.h"
 #include "spdlog/spdlog.h"
@@ -50,6 +51,15 @@ void ensure_headless_display() {
     lv_display_set_flush_cb(
         disp, [](lv_display_t* d, const lv_area_t*, uint8_t*) { lv_display_flush_ready(d); });
     created = true;
+}
+
+void ensure_displays_never_block_on_flush() {
+    if (!lv_is_initialized()) {
+        return;
+    }
+    for (lv_display_t* d = lv_display_get_next(nullptr); d != nullptr; d = lv_display_get_next(d)) {
+        lv_display_set_flush_wait_cb(d, [](lv_display_t*) {});
+    }
 }
 
 uint32_t lv_timer_handler_safe() {
@@ -98,27 +108,8 @@ uint32_t lv_timer_handler_safe() {
             if (t->repeat_count > 0 && (now - t->last_run >= t->period)) {
                 if (t->timer_cb) {
                     t->last_run = now;
-                    if (t->repeat_count > 0) {
-                        t->repeat_count--;
-                    }
-                    const bool exhausted = t->repeat_count == 0;
+                    t->repeat_count--;
                     t->timer_cb(t);
-                    // Match lv_timer_handler(): it deletes a timer whose repeat
-                    // count reached 0 (lv_timer.c:369). Leaving it behind parks
-                    // a spent lv_timer_t in LVGL's list holding the callback's
-                    // user_data, so an owner destroyed later cannot free what it
-                    // no longer has a handle to. Re-find it rather than reusing
-                    // `t`: the callback may already have deleted it (the common
-                    // one-shot pattern nulls its own handle and returns).
-                    if (exhausted) {
-                        for (lv_timer_t* s = lv_timer_get_next(nullptr); s != nullptr;
-                             s = lv_timer_get_next(s)) {
-                            if (s == t) {
-                                lv_timer_delete(t);
-                                break;
-                            }
-                        }
-                    }
                     found = true;
                     break; // Restart iteration since list may have changed
                 }
@@ -127,6 +118,35 @@ uint32_t lv_timer_handler_safe() {
         }
         if (!found)
             break; // No more ready one-shot timers
+    }
+
+    // Reap every one-shot left at repeat_count == 0, matching lv_timer_exec()'s
+    // own cleanup for an exhausted timer (lv_timer.c). The loop above's
+    // readiness check requires repeat_count > 0, so once a timer reaches zero
+    // it is invisible to that loop forever; without this pass it would sit in
+    // LVGL's list holding its callback's user_data until the process exits.
+    //
+    // Read by CURRENT repeat_count on a fresh list walk, never by a pointer
+    // saved before a callback ran. The common one-shot pattern (every
+    // lv_async_call included) deletes itself from inside its own callback
+    // (lib/lvgl/src/misc/lv_async.c#lv_async_timer_cb), so that node is
+    // already gone by the time this runs; a timer freshly created in its
+    // place never starts at repeat_count == 0 (lv_timer_create() defaults to
+    // -1, and lv_async_call sets 1 synchronously before returning), so this
+    // pass can only ever find a timer that is genuinely spent right now, and
+    // deletes it in the same step it is found, with no gap where a nested
+    // callback could invalidate the pointer first.
+    t = lv_timer_get_next(nullptr);
+    while (t) {
+        lv_timer_t* next = lv_timer_get_next(t);
+        if (t->repeat_count == 0) {
+            if (t->auto_delete) {
+                lv_timer_delete(t);
+            } else {
+                lv_timer_pause(t);
+            }
+        }
+        t = next;
     }
 
     // Re-pause ALL timers before calling lv_timer_handler().
@@ -234,6 +254,20 @@ bool press_at(int32_t x, int32_t y) {
     last_data.state = LV_INDEV_STATE_PRESSED;
     lv_indev_read(virtual_indev); // Directly read indev to process press
     wait_ms(50);                  // Minimum press duration
+    return true;
+}
+
+bool move_to(int32_t x, int32_t y) {
+    if (!virtual_indev) {
+        spdlog::error("[UITest] Input device not initialized - call init() first");
+        return false;
+    }
+
+    spdlog::debug("[UITest] Simulating move to ({}, {})", x, y);
+    last_data.point.x = x;
+    last_data.point.y = y;
+    lv_indev_read(virtual_indev);
+    wait_ms(50);
     return true;
 }
 
@@ -548,7 +582,9 @@ helix::TemperatureController* get_temperature_controller() {
 // out in the test build, so warnings would otherwise be invisible).
 namespace {
 std::function<void(const std::string&)> g_test_warning_hook;
+std::function<void(const std::string&)> g_test_sticky_warning_hook;
 std::function<void(const std::string&)> g_test_error_hook;
+std::function<void(const std::string&)> g_test_success_hook;
 std::function<void(const std::string&)> g_test_info_hook;
 } // namespace
 
@@ -557,12 +593,18 @@ namespace ui {
 void set_test_notification_warning_hook(std::function<void(const std::string&)> hook) {
     g_test_warning_hook = std::move(hook);
 }
+void set_test_notification_sticky_warning_hook(std::function<void(const std::string&)> hook) {
+    g_test_sticky_warning_hook = std::move(hook);
+}
 void set_test_notification_error_hook(std::function<void(const std::string&)> hook) {
     g_test_error_hook = std::move(hook);
 }
 
 void set_test_notification_info_hook(std::function<void(const std::string&)> hook) {
     g_test_info_hook = std::move(hook);
+}
+void set_test_notification_success_hook(std::function<void(const std::string&)> hook) {
+    g_test_success_hook = std::move(hook);
 }
 } // namespace ui
 } // namespace helix
@@ -595,11 +637,17 @@ void ui_notification_info_with_action(const char* title, const char* message, co
 
 void ui_notification_success(const char* message) {
     spdlog::debug("[Test Stub] ui_notification_success: {}", message ? message : "(null)");
+    if (g_test_success_hook) {
+        g_test_success_hook(message ? message : "");
+    }
 }
 
 void ui_notification_success(const char* title, const char* message) {
     spdlog::debug("[Test Stub] ui_notification_success: {} - {}", title ? title : "(null)",
                   message ? message : "(null)");
+    if (g_test_success_hook) {
+        g_test_success_hook(message ? message : "");
+    }
 }
 
 void ui_notification_warning(const char* message) {
@@ -666,18 +714,39 @@ void ui_notification_warning_with_detail(const char* message, const char* detail
     }
 }
 
+void ui_notification_warning_sticky(const char* message, const char* detail) {
+    const std::string joined = join_detail(message, detail);
+    spdlog::debug("[Test Stub] ui_notification_warning_sticky: {}", joined);
+    if (g_test_sticky_warning_hook) {
+        g_test_sticky_warning_hook(joined);
+    }
+}
+
 // Stub ToastManager class for tests
 #include "ui_toast_manager.h"
 
 // Fed by the ToastManager stub below, for tests asserting on direct
 // ToastManager::show() calls. See set_test_toast_hook in the header.
-static std::function<void(ToastSeverity, const std::string&)> g_test_toast_hook;
+static std::function<void(ToastSeverity, const std::string&, uint32_t)> g_test_toast_hook;
+static toast_action_callback_t g_last_toast_action = nullptr;
+static void* g_last_toast_action_data = nullptr;
 
 namespace helix {
 namespace ui {
 
-void set_test_toast_hook(std::function<void(ToastSeverity, const std::string&)> hook) {
+void set_test_toast_hook(std::function<void(ToastSeverity, const std::string&, uint32_t)> hook) {
     g_test_toast_hook = std::move(hook);
+    g_last_toast_action = nullptr;
+}
+
+bool fire_last_toast_action() {
+    toast_action_callback_t action = g_last_toast_action;
+    g_last_toast_action = nullptr;
+    if (!action) {
+        return false;
+    }
+    action(g_last_toast_action_data);
+    return true;
 }
 
 } // namespace ui
@@ -700,23 +769,26 @@ ToastManager::~ToastManager() {
 
 void ToastManager::init() {
     spdlog::debug("[Test Stub] ToastManager::init()");
+    initialized_.store(true, std::memory_order_release);
+}
+
+void ToastManager::deinit_subjects() {
+    initialized_.store(false, std::memory_order_release);
 }
 
 void ToastManager::show(ToastSeverity severity, const char* message, uint32_t duration_ms) {
-    (void)duration_ms;
     spdlog::debug("[Test Stub] ToastManager::show: {}", message ? message : "(null)");
     if (g_test_toast_hook) {
-        g_test_toast_hook(severity, message ? message : "");
+        g_test_toast_hook(severity, message ? message : "", duration_ms);
     }
 }
 
 void ToastManager::show_with_detail(ToastSeverity severity, const char* message, const char* detail,
                                     uint32_t duration_ms) {
-    (void)duration_ms;
     const std::string joined = join_detail(message, detail);
     spdlog::debug("[Test Stub] ToastManager::show_with_detail: {}", joined);
     if (g_test_toast_hook) {
-        g_test_toast_hook(severity, joined);
+        g_test_toast_hook(severity, joined, duration_ms);
     }
 }
 
@@ -725,12 +797,11 @@ void ToastManager::show_with_action(ToastSeverity severity, const char* message,
                                     toast_action_callback_t action_callback, void* user_data,
                                     uint32_t duration_ms) {
     (void)action_text;
-    (void)action_callback;
-    (void)user_data;
-    (void)duration_ms;
+    g_last_toast_action = action_callback;
+    g_last_toast_action_data = user_data;
     spdlog::debug("[Test Stub] ToastManager::show_with_action: {}", message ? message : "(null)");
     if (g_test_toast_hook) {
-        g_test_toast_hook(severity, message ? message : "");
+        g_test_toast_hook(severity, message ? message : "", duration_ms);
     }
 }
 
@@ -742,9 +813,9 @@ bool ToastManager::is_visible() const {
     return false;
 }
 
-// refresh_duplicate() is NOT stubbed here — it's defined inline in
-// include/ui_toast_manager.h so the test binary links the same
-// implementation the real app uses. See the comment on that declaration.
+// refresh_duplicate() and find_owning_toast() are NOT stubbed here — they are
+// defined inline in include/ui_toast_manager.h so the test binary links the
+// same implementations the real app uses. See the comments on those declarations.
 
 // Text input widget implementation for tests
 // This is a full implementation, not a stub, because tests need to actually
@@ -759,6 +830,7 @@ bool ToastManager::is_visible() const {
 
 // Stub for notification manager functions (tests don't have notification UI)
 #include "ui_notification.h"
+#include "ui_notification_history.h"
 #include "ui_notification_manager.h"
 #include "ui_printer_status_icon.h"
 
@@ -770,14 +842,28 @@ void helix::ui::notification_update_count(size_t /* count */) {
     // No-op in tests
 }
 
-// Application::tear_down_printer_state() calls both of these; ui_notification.o and
+// PrinterSession::tear_down_printer_state() calls both of these; ui_notification.o and
 // ui_notification_manager.o stay out of the test link (see mk/tests.mk Group 2).
 void ui_notification_deinit() {
     spdlog::debug("[Test Stub] ui_notification_deinit: no-op in tests");
 }
 
+static lv_subject_t s_test_notification_history_version_subject;
+static int32_t s_test_last_published_history_version = 0;
+static bool s_test_notification_subjects_initialized = false;
+
+// Mirrors NotificationManager::publish_history_version(): the real object is
+// out of the test link, but the panel's observer contract (bump revision on
+// add/clear, never on mark_all_read) is what the notification panel tests pin.
 void helix::ui::notification_refresh_from_history() {
-    // No-op in tests
+    if (!s_test_notification_subjects_initialized) {
+        return;
+    }
+    const int32_t narrowed = static_cast<int32_t>(NotificationHistory::instance().version());
+    if (narrowed != s_test_last_published_history_version) {
+        s_test_last_published_history_version = narrowed;
+        lv_subject_set_int(&s_test_notification_history_version_subject, narrowed);
+    }
 }
 
 // Stub for app_request_restart (tests don't restart)
@@ -817,10 +903,16 @@ std::string app_get_install_root() {
     return "";
 }
 
-// Stub for app_get_cache_dir (production reads the cascade; tests do not need a root)
-// Returns empty string — matches the production fallback when cache resolution fails.
+// The production body, minus its memo. app_globals.o is excluded from the test
+// link; a constant "" here would hide every cache decision a caller makes
+// behind a value production almost never returns. Dropping the memo is what
+// lets a test point HELIX_CACHE_DIR somewhere and see the cascade answer for
+// that value rather than for whichever test called first.
 std::string app_get_cache_dir() {
-    return "";
+    std::string p = get_helix_cache_dir(""); // base, no subdir
+    while (p.size() > 1 && p.back() == '/')
+        p.pop_back();
+    return p;
 }
 
 // Stub for app_get_runtime_dir (tests use a writable temp dir)
@@ -836,83 +928,19 @@ std::string app_get_config_dir() {
     return "";
 }
 
-// app_globals.o is excluded from the test link, so mirror the real
-// helix_parse_truthy_env / updates_externally_managed logic here (kept
-// byte-identical to src/app_globals.cpp) so the update-gate tests exercise
-// the genuine parse behavior rather than a hollow stub.
-bool helix_parse_truthy_env(const char* value) {
-    if (!value || value[0] == '\0') {
-        return false;
-    }
-    std::string v(value);
-    auto not_space = [](unsigned char c) { return !std::isspace(c); };
-    v.erase(v.begin(), std::find_if(v.begin(), v.end(), not_space));
-    v.erase(std::find_if(v.rbegin(), v.rend(), not_space).base(), v.end());
-    std::transform(v.begin(), v.end(), v.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return v == "1" || v == "true" || v == "yes" || v == "on";
-}
-
-bool compute_updates_externally_managed(const char* disable_auto_updates, bool platform_default) {
-    // An explicit flag decides it, in either direction. helix_parse_truthy_env()
-    // only answers "is this truthy", which cannot distinguish "0" from unset, so
-    // presence is tested separately and a falsy value force-enables self-update
-    // where the platform would otherwise default it off.
-    //
-    // Blank counts as ABSENT, not as falsy. helixscreen.env values routinely carry
-    // a stray space (which is why parsing trims), and an all-whitespace value read
-    // as an explicit "no" would silently switch self-update back on for a
-    // firmware-managed install — the exact failure this predicate exists to stop.
-    if (disable_auto_updates) {
-        const char* p = disable_auto_updates;
-        while (*p && std::isspace(static_cast<unsigned char>(*p))) {
-            ++p;
-        }
-        if (*p != '\0') {
-            return helix_parse_truthy_env(disable_auto_updates);
-        }
-    }
-    return platform_default;
-}
-
+// app_globals.o is excluded from the test link. The pure predicates these wrap
+// live in src/system/update_gate.cpp, which is linked.
 bool updates_externally_managed() {
     static const bool cached = compute_updates_externally_managed(
         std::getenv("HELIX_DISABLE_AUTO_UPDATES"), helix::platform_defaults_to_external_updates());
     return cached;
 }
 
-// Mirror of src/app_globals.cpp compute_self_update_supported / self_update_supported /
-// update_install_suppressed / update_checks_suppressed (app_globals.o is
-// excluded from the test link).
-//
-// Keep the branch structure identical to the original, comments aside. A mirror that
-// drifts turns the tests below into a test of this file: the parent-only version of
-// this predicate was a false negative that hid the updater on every /opt install, and
-// nothing here would have noticed, because the assertions would have been passing
-// against the same wrong logic.
-#include "system/helix_paths.h"
-
 #include <unistd.h> // geteuid
-bool compute_self_update_supported(const std::string& install_root, bool can_escalate) {
-    if (install_root.empty()) {
-        return true;
-    }
-    const std::string parent = std::filesystem::path(install_root).parent_path().string();
-    if (!parent.empty() && helix::paths::is_writable_dir(parent)) {
-        return true; // atomic swap
-    }
-    if (parent.empty()) {
-        return true;
-    }
-    if (helix::paths::is_writable_dir(install_root)) {
-        return true; // in-place replacement
-    }
-    return can_escalate;
-}
 
 // Deliberately NOT a mirror: the real probe forks `sudo -n true`, and a test
 // binary must not shell out to sudo. euid 0 is the one branch that is free to
-// evaluate honestly. The pure predicate above is what the update-gate tests
+// evaluate honestly. compute_self_update_supported() is what the update-gate tests
 // exercise for both escalation values, so this stub costs no coverage.
 bool root_escalation_available() {
     return geteuid() == 0;
@@ -929,10 +957,6 @@ bool self_update_supported() {
     return cached;
 }
 
-bool compute_update_install_suppressed(bool externally_managed, bool self_update_ok) {
-    return externally_managed || !self_update_ok;
-}
-
 bool update_install_suppressed() {
     return compute_update_install_suppressed(updates_externally_managed(), self_update_supported());
 }
@@ -943,7 +967,7 @@ bool update_checks_suppressed() {
 
 // Stubs for the manager accessors in app_globals.h. Each getter reads a file-static
 // that its matching setter writes, so a test (or production code linked into the test
-// binary, e.g. Application::tear_down_printer_state()) sees the value it installed.
+// binary, e.g. PrinterSession::tear_down_printer_state()) sees the value it installed.
 // Nothing installs one by default, so the default remains nullptr.
 #include "moonraker_manager.h"
 
@@ -1012,22 +1036,31 @@ void app_store_argv(int /*argc*/, char** /*argv*/) {
 // but don't need real network/hardware connections.
 
 // Stub for app_globals_init_subjects (creates test notification + edit mode subjects)
+#include "platform_capabilities.h"
 #include "platform_info.h"
 
 static lv_subject_t s_test_notification_subject;
 static lv_subject_t s_test_home_edit_mode_subject;
 static lv_subject_t s_test_wizard_active_subject;
 static lv_subject_t s_test_host_power_supported_subject;
+static lv_subject_t s_test_platform_tier_subject;
 // Mirrors app_globals.cpp's g_platform_extras_subject: 1 on every non-ESP32
 // build, 0 only on the ESP32 v1 cut. Registered into the XML global scope so
 // bindings like btn_camera's platform_extras_available cond resolve in tests.
 static lv_subject_t s_test_platform_extras_subject;
 static bool s_test_notification_subject_initialized = false;
 
+// Mirror of app_globals.cpp's g_subjects: the token observers of the stub
+// subjects above fetch, expired by app_globals_deinit_subjects() right before
+// those subjects are freed.
+static SubjectManager s_test_app_globals_subjects;
+
 void app_globals_init_subjects() {
     if (!s_test_notification_subject_initialized) {
         lv_subject_init_pointer(&s_test_notification_subject, nullptr);
         lv_subject_init_int(&s_test_home_edit_mode_subject, 0);
+        // Registered by name as app_globals.cpp does, before any panel exists.
+        lv_xml_register_subject(nullptr, "home_edit_mode", &s_test_home_edit_mode_subject);
         lv_subject_init_int(&s_test_wizard_active_subject, 0);
 #if defined(HELIX_PLATFORM_ESP32)
         lv_subject_init_int(&s_test_platform_extras_subject, 0);
@@ -1045,16 +1078,23 @@ void app_globals_init_subjects() {
             lv_xml_register_subject(nullptr, "platform_host_power_supported",
                                     &s_test_host_power_supported_subject);
         }
+        lv_subject_init_int(&s_test_platform_tier_subject,
+                            static_cast<int>(helix::PlatformCapabilities::detect().tier));
+        if (!lv_xml_get_subject(nullptr, "platform_tier")) {
+            lv_xml_register_subject(nullptr, "platform_tier", &s_test_platform_tier_subject);
+        }
         spdlog::debug("[Test Stub] app_globals_init_subjects: subjects initialized");
     }
 }
 
 void app_globals_deinit_subjects() {
     if (s_test_notification_subject_initialized) {
+        s_test_app_globals_subjects.expire_subjects_lifetime();
         lv_subject_deinit(&s_test_notification_subject);
         lv_subject_deinit(&s_test_home_edit_mode_subject);
         lv_subject_deinit(&s_test_wizard_active_subject);
         lv_subject_deinit(&s_test_host_power_supported_subject);
+        lv_subject_deinit(&s_test_platform_tier_subject);
         lv_subject_deinit(&s_test_platform_extras_subject);
         s_test_notification_subject_initialized = false;
         spdlog::debug("[Test Stub] app_globals_deinit_subjects: subjects deinitialized");
@@ -1082,13 +1122,17 @@ lv_subject_t& get_wizard_active_subject() {
     return s_test_wizard_active_subject;
 }
 
+SubjectLifetime get_app_globals_subjects_lifetime() {
+    return s_test_app_globals_subjects.get_subjects_lifetime();
+}
+
 // Stub for ui_notification_init_subjects (creates test subjects for notification badge)
 static lv_subject_t s_test_notification_count_subject;
-static bool s_test_notification_subjects_initialized = false;
 
 void helix::ui::notification_init_subjects() {
     if (!s_test_notification_subjects_initialized) {
         lv_subject_init_int(&s_test_notification_count_subject, 0);
+        lv_subject_init_int(&s_test_notification_history_version_subject, 0);
         s_test_notification_subjects_initialized = true;
         spdlog::debug("[Test Stub] ui_notification_init_subjects: subjects initialized");
     }
@@ -1096,10 +1140,29 @@ void helix::ui::notification_init_subjects() {
 
 void helix::ui::notification_deinit_subjects() {
     if (s_test_notification_subjects_initialized) {
+        NotificationManager::instance().deinit_subjects();
         lv_subject_deinit(&s_test_notification_count_subject);
+        lv_subject_deinit(&s_test_notification_history_version_subject);
         s_test_notification_subjects_initialized = false;
         spdlog::debug("[Test Stub] ui_notification_deinit_subjects: subjects deinitialized");
     }
+}
+
+lv_subject_t* helix::ui::notification_history_version_subject() {
+    return &s_test_notification_history_version_subject;
+}
+
+// The real NotificationManager object is out of the test link; the singleton
+// itself is real, so panels can fetch its subjects' death signal. Its
+// deinit_subjects() is the production body over an empty SubjectManager:
+// expire_subjects_lifetime() inside deinit_all() is the whole effect.
+NotificationManager& NotificationManager::instance() {
+    static NotificationManager instance;
+    return instance;
+}
+
+void NotificationManager::deinit_subjects() {
+    subjects_.deinit_all();
 }
 
 void helix::ui::notification_register_callbacks() {

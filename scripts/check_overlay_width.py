@@ -53,6 +53,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from staged_content import staged_files
+
 SCAN_DIRS = ('ui_xml',)
 
 # android/app/src/main/assets/ui_xml/ is a gradle copy of ui_xml/
@@ -74,18 +76,14 @@ def line_of(text: str, index: int) -> int:
     return text.count('\n', 0, index) + 1
 
 
-def scan_file(path: Path) -> list[tuple[str, int, str]]:
-    """Return (path, line, message) for each violation."""
-    try:
-        text = path.read_text(encoding='utf-8')
-    except (OSError, UnicodeDecodeError):
-        return []
-
+def scan_source(path: str, text: str) -> list[tuple[str, int, str]]:
+    """Return (path, line, message) for each violation. `path` is only carried
+    into the report - `text` is already sourced, from disk or the index."""
     out: list[tuple[str, int, str]] = []
 
     for m in re.finditer(re.escape(DESTINATION_CONST), text):
         out.append((
-            str(path), line_of(text, m.start()),
+            path, line_of(text, m.start()),
             f'names #{DESTINATION_CONST}. Destination width is declared in C++ '
             'by overriding IPanelLifecycle::is_destination(), not in XML.'))
 
@@ -93,7 +91,7 @@ def scan_file(path: Path) -> list[tuple[str, int, str]]:
         w = CLASS_WIDTH_ATTR.search(m.group(0))
         if w:
             out.append((
-                str(path), line_of(text, m.start() + w.start()),
+                path, line_of(text, m.start() + w.start()),
                 'hand-picks a navigation width class on an overlay_panel. '
                 'push_overlay() resolves it from how the user got here; drop the '
                 'width attribute.'))
@@ -101,22 +99,35 @@ def scan_file(path: Path) -> list[tuple[str, int, str]]:
     return out
 
 
-def collect_files(args) -> list[Path]:
+def collect_files(args) -> list[tuple[str, str]]:
+    """Yield (path, text) for every file to scan, content already sourced.
+
+    --staged-only reads each staged XML file's INDEX content - what the
+    commit will contain, not whatever the working tree holds right now.
+    """
     if args.files:
-        return [Path(f) for f in args.files]
+        out = []
+        for f in args.files:
+            try:
+                out.append((f, Path(f).read_text(encoding='utf-8')))
+            except (OSError, UnicodeDecodeError):
+                continue
+        return out
 
     if args.staged_only:
-        res = subprocess.run(['git', 'diff', '--cached', '--name-only', '--diff-filter=ACM'],
-                             capture_output=True, text=True, check=False)
-        return [Path(f) for f in res.stdout.split()
-                if f.endswith('.xml') and not any(p in Path(f).parts for p in SKIP_PARTS)]
+        return [(p, t) for p, t in staged_files(suffixes=('.xml',))
+                if not any(part in SKIP_PARTS for part in Path(p).parts)]
 
-    files: list[Path] = []
+    files = []
     for d in SCAN_DIRS:
-        for p in Path(d).rglob('*.xml'):
-            if not any(part in SKIP_PARTS for part in p.parts):
-                files.append(p)
-    return sorted(files)
+        for p in sorted(Path(d).rglob('*.xml')):
+            if any(part in SKIP_PARTS for part in p.parts):
+                continue
+            try:
+                files.append((str(p), p.read_text(encoding='utf-8')))
+            except (OSError, UnicodeDecodeError):
+                continue
+    return files
 
 
 def main() -> int:
@@ -134,8 +145,8 @@ def main() -> int:
             os.chdir(root)
 
     findings: list[tuple[str, int, str]] = []
-    for path in collect_files(args):
-        findings += scan_file(path)
+    for path, text in collect_files(args):
+        findings += scan_source(path, text)
 
     if not findings:
         return 0

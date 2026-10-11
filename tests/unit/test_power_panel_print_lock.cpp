@@ -44,20 +44,20 @@ class PowerPanelLockFixture : public LVGLUITestFixture {
         // power_panel needs: it extends overlay_panel and pulls in setting_group,
         // the section headers and power_device_row.
         auto& ps = state();
-        if (ps.has_preparing_job()) {
-            ps.retire_preparing(helix::PreparingExit::Superseded);
+        if (ps.print_state().has_preparing_job()) {
+            ps.print_state().retire_preparing(helix::PreparingExit::Superseded);
         }
         helix::test::set_wire_state(ps, PrintJobState::STANDBY);
-        ps.set_print_start_state(PrintStartPhase::IDLE, "", 0);
+        ps.print_state().set_print_start_state(PrintStartPhase::IDLE, "", 0);
         settle();
     }
 
     ~PowerPanelLockFixture() override {
         auto& ps = state();
-        if (ps.has_preparing_job()) {
-            ps.retire_preparing(helix::PreparingExit::Superseded);
+        if (ps.print_state().has_preparing_job()) {
+            ps.print_state().retire_preparing(helix::PreparingExit::Superseded);
         }
-        ps.set_print_start_state(PrintStartPhase::IDLE, "", 0);
+        ps.print_state().set_print_start_state(PrintStartPhase::IDLE, "", 0);
         helix::test::set_wire_state(ps, PrintJobState::STANDBY);
         settle();
     }
@@ -160,11 +160,11 @@ TEST_CASE_METHOD(PowerPanelLockFixture,
     // THE BUG. print_stats still says standby while the app runs the user's own
     // pre-start block, so the PSU toggle stayed live through homing and probing.
     auto& ps = state();
-    ps.begin_preparing(helix::PrintJobRef{"chosen.gcode", "", ""});
-    ps.set_print_start_state(PrintStartPhase::HOMING, "", 0);
+    ps.print_state().begin_preparing(helix::PrintJobRef{"chosen.gcode", "", ""});
+    ps.print_state().set_print_start_state(PrintStartPhase::HOMING, "", 0);
     settle();
-    REQUIRE(ps.get_print_job_state() == PrintJobState::STANDBY);
-    REQUIRE(ps.get_print_lifecycle() == PrintState::Preparing);
+    REQUIRE(ps.print_state().get_print_job_state() == PrintJobState::STANDBY);
+    REQUIRE(ps.print_state().get_print_lifecycle() == PrintState::Preparing);
 
     PowerPanel panel(state(), nullptr);
     lv_obj_t* obj = build(panel);

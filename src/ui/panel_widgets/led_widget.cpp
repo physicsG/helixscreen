@@ -5,18 +5,26 @@
 
 #include "ui_event_safety.h"
 #include "ui_icon.h"
+#include "ui_tile_rung.h"
 #include "ui_toast_manager.h"
 #include "ui_utils.h"
 
 #include "app_globals.h"
+#include "config.h"
 #include "display_settings_manager.h"
+#include "grid_layout.h"
+#include "helix/xml/indexed_subject_pool.h"
 #include "i_moonraker_api.h"
+#include "json_utils.h"
 #include "led/led_controller.h"
+#include "led/ui_led_control_overlay.h"
+#include "light_button_config.h"
 #include "observer_factory.h"
 #include "panel_widget_manager.h"
 #include "panel_widget_registry.h"
 #include "printer_state.h"
-#include "settings_manager.h"
+#include "static_subject_registry.h"
+#include "text_io.h"
 #include "theme_manager.h"
 
 #include <spdlog/spdlog.h>
@@ -26,21 +34,151 @@
 namespace helix {
 
 void register_led_widget() {
-    register_widget_factory("led", [](const std::string&) {
+    register_widget_factory("led", [](const std::string& id) {
         auto& ps = get_printer_state();
         auto* api = PanelWidgetManager::instance().shared_resource<IMoonrakerAPI>();
-        return std::make_unique<LedWidget>(ps, api);
+        return std::make_unique<LedWidget>(id, ps, api);
     });
 
     // Register XML event callbacks at startup (before any XML is parsed)
     lv_xml_register_event_cb(nullptr, "light_toggle_cb", LedWidget::light_toggle_cb);
+    lv_xml_register_event_cb(nullptr, "light_more_cb", LedWidget::light_more_cb);
+    lv_xml_register_event_cb(nullptr, "led_picker_row_cb", LedWidget::led_picker_row_cb);
 }
 
-LedWidget::LedWidget(PrinterState& printer_state, IMoonrakerAPI* api)
-    : printer_state_(printer_state), api_(api) {}
+bool light_tile_is_wide(int colspan) {
+    return colspan >= 2 * GridLayout::TRACKS_PER_CELL;
+}
+
+int light_chevron_reserve_px() {
+    const ui::TileFace widest = ui::tile_rung_face(ui::TileLadder::Icon, kTileRungs - 2);
+    const int glyph =
+        widest.font ? widest.px(static_cast<int>(lv_font_get_line_height(widest.font))) : 0;
+    return std::max(static_cast<int>(theme_manager_get_spacing("button_height")), glyph);
+}
+
+std::vector<led::LedStripInfo> light_picker_devices() {
+    return led::LedController::instance().all_selectable_strips();
+}
+
+LightIconLook light_icon_look(const std::vector<led::DeviceState>& states) {
+    LightIconLook look;
+    for (const auto& s : states) {
+        if (s.power == led::PowerState::Unknown) {
+            continue;
+        }
+        look.unknown = false;
+        if (s.power != led::PowerState::On) {
+            continue;
+        }
+        look.brightness = std::max(look.brightness, std::max(s.brightness, 1));
+        if (s.has_rgb && !look.has_rgb) {
+            look.has_rgb = true;
+            look.rgb = s.rgb;
+        }
+    }
+    return look;
+}
+
+namespace {
+
+/// The picker's rows. One picker is open at a time, so these are process-wide.
+struct PickerSubjects {
+    xml::IndexedSubjectPool names{"led_picker_name", xml::IndexedSubjectPool::Type::String};
+    lv_subject_t count{};
+    lv_subject_t selected{};
+    bool ready = false;
+};
+
+PickerSubjects& picker_subjects() {
+    static PickerSubjects s;
+    if (!s.ready) {
+        lv_subject_init_int(&s.count, 0);
+        lv_xml_register_subject(nullptr, "led_picker_count", &s.count);
+        lv_subject_init_int(&s.selected, -1);
+        lv_xml_register_subject(nullptr, "led_picker_selected", &s.selected);
+        s.ready = true;
+        StaticSubjectRegistry::instance().register_deinit("LedPicker", []() {
+            if (s.ready) {
+                lv_xml_unregister_subject(nullptr, "led_picker_count");
+                lv_xml_unregister_subject(nullptr, "led_picker_selected");
+                lv_subject_deinit(&s.count);
+                lv_subject_deinit(&s.selected);
+                s.names.reclaim();
+                s.ready = false;
+            }
+        });
+    }
+    return s;
+}
+
+} // namespace
+
+// Device state and commands all go through LedController, so the printer state
+// and API are accepted and not kept.
+LedWidget::LedWidget(const std::string& instance_id, PrinterState& /*printer_state*/,
+                     IMoonrakerAPI* /*api*/)
+    : TiledPanelWidget(instance_id, TileSizing::Content{"", "", "Light", false}),
+      instance_id_(instance_id), name_subject_name_(instance_id + "_led_name"),
+      wide_subject_name_(instance_id + "_led_wide") {
+    UI_MANAGED_SUBJECT_STRING(name_subject_, name_buf_, "", name_subject_name_.c_str(), subjects_);
+    UI_MANAGED_SUBJECT_INT(wide_subject_, 0, wide_subject_name_.c_str(), subjects_);
+
+    for (const char** a = sizing_.subject_attrs(); *a != nullptr; ++a) {
+        attr_storage_.emplace_back(*a);
+    }
+    attr_storage_.insert(attr_storage_.end(),
+                         {"name_subject", name_subject_name_, "wide_subject", wide_subject_name_});
+    for (const auto& s : attr_storage_) {
+        attrs_.push_back(s.c_str());
+    }
+    attrs_.push_back(nullptr);
+}
 
 LedWidget::~LedWidget() {
     detach();
+}
+
+std::unordered_set<LedWidget*>& LedWidget::live_instances() {
+    static std::unordered_set<LedWidget*> instances;
+    return instances;
+}
+
+LedWidget* LedWidget::from_event(lv_event_t* e) {
+    for (auto* obj = static_cast<lv_obj_t*>(lv_event_get_current_target(e)); obj != nullptr;
+         obj = lv_obj_get_parent(obj)) {
+        auto* candidate = static_cast<LedWidget*>(lv_obj_get_user_data(obj));
+        if (candidate != nullptr && live_instances().count(candidate) != 0) {
+            return candidate;
+        }
+    }
+    return nullptr;
+}
+
+void LedWidget::set_config(const nlohmann::json& config) {
+    led_key_ = json_util::safe_string(config, "led");
+}
+
+std::vector<std::string> LedWidget::targets() const {
+    return led::LedController::instance().light_targets(led_key_);
+}
+
+std::string LedWidget::overlay_device() const {
+    if (led_key_ == led::LIGHT_BUTTON_ALL) {
+        return led::LedController::instance().chamber_light();
+    }
+    const auto t = targets();
+    return t.empty() ? std::string() : t.front();
+}
+
+void LedWidget::on_size_changed(int colspan, int rowspan, int width_px, int height_px) {
+    (void)rowspan;
+    // A wide tile gives its › zone light_chevron_reserve_px(), so the bulb and
+    // its name draw in what is left.
+    const bool wide = light_tile_is_wide(colspan);
+    const int chevron_w = wide ? light_chevron_reserve_px() : 0;
+    sizing_.measure_and_publish(width_px - chevron_w, height_px);
+    lv_subject_set_int(&wide_subject_, wide ? 1 : 0);
 }
 
 void LedWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
@@ -51,161 +189,130 @@ void LedWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
         return;
     }
 
-    // Set user_data on the root lv_obj, NOT on the ui_button child.
-    // ui_button allocates its own UiButtonData in user_data — overwriting it
-    // leaks memory and breaks button style/contrast auto-updates.
-    lv_obj_set_user_data(widget_obj_, this);
+    live_instances().insert(this);
 
-    // Register click handler via per-callback user_data
-    lv_obj_t* light_btn = lv_obj_find_by_name(widget_obj_, "light_button");
-    if (light_btn) {
-        lv_obj_add_event_cb(light_btn, light_toggle_cb, LV_EVENT_CLICKED, this);
-    }
-
-    // Find light icon for dynamic brightness/color updates
     light_icon_ = lv_obj_find_by_name(widget_obj_, "light_icon");
-    if (light_icon_) {
-        spdlog::debug("[LedWidget] Found light_icon for dynamic brightness/color");
-        update_light_icon();
-    }
 
-    // Observe led_config_version to rebind when LED discovery or settings change.
+    // Rebind when discovery or the macro devices change the set of lights.
     auto token = lifetime_.token();
-    auto& led_ctrl = helix::led::LedController::instance();
-    led_version_observer_ = helix::ui::observe_int_sync<LedWidget>(
-        led_ctrl.get_led_config_version_subject(), this, [token](LedWidget* self, int /*version*/) {
+    auto& led_ctrl = led::LedController::instance();
+    led_version_observer_ = helix::ui::observe<int>(
+        led_ctrl.get_led_config_version_subject(), this,
+        [token](LedWidget* self, int /*version*/) {
             if (token.expired())
                 return;
             self->bind_led();
-        });
+        },
+        led_ctrl.get_subjects_lifetime());
+    // observe<int> delivers through queue_update, so it can fire a tick
+    // late; the tile shows its light's name and state from the first frame.
+    led_state_observer_ = helix::ui::observe<int>(
+        led_ctrl.get_led_state_version_subject(), this,
+        [token](LedWidget* self, int /*version*/) {
+            if (token.expired())
+                return;
+            self->update_light_icon();
+        },
+        led_ctrl.get_subjects_lifetime());
 
-    // Bind immediately rather than waiting for the deferred observer callback.
-    // observe_int_sync defers via queue_update, so the initial fire-on-add
-    // may not run until a later tick.  Calling bind_led() here ensures
-    // state/brightness observers are set up before the first user interaction.
     bind_led();
 
-    spdlog::debug("[LedWidget] Attached");
+    spdlog::debug("[LedWidget] Attached {} (led: '{}')", instance_id_, led_key_);
 }
 
 void LedWidget::detach() {
     lifetime_.invalidate();
+    picker_.hide();
+    live_instances().erase(this);
 
     // Nullify widget pointers BEFORE resetting observers
-    if (widget_obj_) {
-        lv_obj_set_user_data(widget_obj_, nullptr);
-    }
     widget_obj_ = nullptr;
     parent_screen_ = nullptr;
     light_icon_ = nullptr;
 
     led_version_observer_.reset();
     led_state_observer_.reset();
-    led_brightness_observer_.reset();
 
     spdlog::debug("[LedWidget] Detached");
 }
 
 void LedWidget::bind_led() {
-    // Reset existing per-LED observers before rebinding
-    led_state_observer_.reset();
-    led_brightness_observer_.reset();
-
-    auto& led_ctrl = helix::led::LedController::instance();
-    const auto& strips = led_ctrl.selected_strips();
-    // Track the first strip Klipper actually reports, not simply the first
-    // selected one. The settings screen persists the selection from a sorted
-    // set, so a "macro:" ID routinely sorts to the front — and PrinterLedState
-    // can never match a synthetic ID against a status payload, leaving every LED
-    // subject frozen at its default.
-    const std::string tracked = led_ctrl.status_tracked_strip();
-    if (!tracked.empty()) {
-        printer_state_.set_tracked_led(tracked);
-
-        // Create state/brightness observers
-        auto token = lifetime_.token();
-        led_state_observer_ = helix::ui::observe_int_sync<LedWidget>(
-            printer_state_.get_led_state_subject(), this,
-            [token](LedWidget* self, int state) {
-                if (token.expired())
-                    return;
-                self->on_led_state_changed(state);
-            },
-            printer_state_.get_subjects_lifetime());
-        led_brightness_observer_ = helix::ui::observe_int_sync<LedWidget>(
-            printer_state_.get_led_brightness_subject(), this,
-            [token](LedWidget* self, int /*brightness*/) {
-                if (token.expired())
-                    return;
-                self->update_light_icon();
-            },
-            printer_state_.get_subjects_lifetime());
-
-        // Sync light_on_ from current subject value immediately rather than
-        // waiting for the deferred observer callback chain.  This ensures
-        // LedController::light_on_ reflects the actual hardware state as soon
-        // as the widget binds, so the very first toggle sends the right command.
-        int current_state = lv_subject_get_int(printer_state_.get_led_state_subject());
-        light_on_ = (current_state != 0);
-        led_ctrl.sync_light_state(light_on_);
-
-        spdlog::debug("[LedWidget] Bound to LED: {} (initial state: {})", tracked,
-                      light_on_ ? "ON" : "OFF");
-    } else {
-        printer_state_.set_tracked_led("");
-        // Macro devices and WLED strips report nothing, so the controller's own
-        // record of what it last commanded is the only state there is.
-        light_on_ = led_ctrl.light_is_on();
-        spdlog::debug("[LedWidget] No status-reported LED among {} selected strip(s) — "
-                      "tracking controller state ({})",
-                      strips.size(), light_on_ ? "ON" : "OFF");
+    if (led_key_.empty() && !panel_id().empty()) {
+        auto* cfg = Config::get_instance();
+        // A sibling tile's bind may already have written this one's value.
+        auto& home = PanelWidgetManager::instance().get_widget_config(panel_id());
+        adopt_pending_light_button(*cfg, home);
+        led_key_ = json_util::safe_string(home.get_widget_config(id()), "led");
     }
+
+    auto& led_ctrl = led::LedController::instance();
+    std::string name;
+    if (led_key_ == led::LIGHT_BUTTON_ALL) {
+        name = lv_tr("All lights");
+    } else {
+        const auto t = targets();
+        if (!t.empty()) {
+            for (const auto& d : led_ctrl.all_selectable_strips()) {
+                if (d.id == t.front()) {
+                    name = led::device_display_name(d);
+                    break;
+                }
+            }
+        }
+    }
+    lv_subject_copy_string(&name_subject_, name.c_str());
+    sizing_.set_content({"", "", name.empty() ? std::string("Light") : name, false});
+    relayout_for_granted_size();
 
     update_light_icon();
 }
 
-void LedWidget::handle_light_toggle() {
-    spdlog::info("[LedWidget] Light button clicked");
+void LedWidget::select_light(const std::string& key) {
+    led_key_ = key;
+    save_widget_config({{"led", key}});
+    bind_led();
+    spdlog::info("[LedWidget] {} now controls '{}'", instance_id_, key);
+}
 
-    auto& led_ctrl = helix::led::LedController::instance();
+void LedWidget::handle_light_toggle() {
+    auto& led_ctrl = led::LedController::instance();
     if (led_ctrl.light_command_in_flight()) {
         spdlog::debug("[LedWidget] Ignoring toggle — LED command already in flight");
         ToastManager::instance().show(
             ToastSeverity::INFO, lv_tr("Light will switch when the current operation finishes"));
         return;
     }
-    if (led_ctrl.selected_strips().empty()) {
-        spdlog::warn("[LedWidget] Light toggle called but no LED configured");
+    const auto ids = targets();
+    if (ids.empty()) {
+        spdlog::warn("[LedWidget] Light toggle called but no light resolves");
         return;
     }
 
-    // Read current state from Moonraker subject when a selected strip actually
-    // reports one. Otherwise the subject is frozen at its default and asking it
-    // yields "OFF" on every press, so the button sends the ON command forever —
-    // an ON_OFF macro device never turns off, and a native strip selected
-    // alongside a macro is re-lit at full brightness on every press.
-    const bool reported = !led_ctrl.status_tracked_strip().empty();
-    const bool is_on = reported ? (lv_subject_get_int(printer_state_.get_led_state_subject()) != 0)
-                                : led_ctrl.light_is_on();
+    const bool on = led_ctrl.toggle_power(ids);
+    spdlog::info("[LedWidget] {} toggled {} device(s) {}", instance_id_, ids.size(),
+                 on ? "ON" : "OFF");
 
-    spdlog::info("[LedWidget] Toggle: {} says {} -> sending {}",
-                 reported ? "subject" : "controller", is_on ? "ON" : "OFF", is_on ? "OFF" : "ON");
-
-    // Send the opposite command
-    led_ctrl.light_set(!is_on);
-
-    if (!reported) {
-        // No reported strip means no subject observer, so nothing else will
-        // ever call update_light_icon() — refresh it from the state we just set.
-        light_on_ = led_ctrl.light_is_on();
-        update_light_icon();
-    }
-
-    // Icon updates when Moonraker status response arrives via on_led_state_changed.
-    // For non-trackable (TOGGLE macro) backends, flash the icon as feedback.
-    if (!led_ctrl.light_state_trackable()) {
+    // Nothing will report back for devices with no readable state, so the
+    // flash is the only acknowledgement the tap gets.
+    const bool all_unknown = std::all_of(ids.begin(), ids.end(), [&](const std::string& id) {
+        return led_ctrl.device_state(id).power == led::PowerState::Unknown;
+    });
+    if (all_unknown) {
         flash_light_icon();
     }
+}
+
+LightIconLook LedWidget::icon_look() const {
+    auto& led_ctrl = led::LedController::instance();
+    std::vector<led::DeviceState> states;
+    for (const auto& id : targets()) {
+        states.push_back(led_ctrl.device_state(id));
+    }
+    LightIconLook look = light_icon_look(states);
+    if (led_key_ == led::LIGHT_BUTTON_ALL) {
+        look.has_rgb = false;
+    }
+    return look;
 }
 
 void LedWidget::update_light_icon() {
@@ -213,65 +320,29 @@ void LedWidget::update_light_icon() {
         return;
     }
 
-    // With no status-reported strip in the selection (macro devices, WLED) the
-    // brightness and RGBW subjects never leave 0, which would pin the bulb to
-    // its "off" glyph however many times the light was switched — and paint it
-    // pure black if it did light up.
-    auto& led_ctrl = helix::led::LedController::instance();
-    const bool reported = !led_ctrl.status_tracked_strip().empty();
-    int brightness;
-    if (reported) {
-        brightness = lv_subject_get_int(printer_state_.get_led_brightness_subject());
-    } else if (led_ctrl.light_state_trackable()) {
-        // ON_OFF macro devices: what we last commanded is the state, and there
-        // is no color to show, so render a plain full-brightness lamp.
-        brightness = light_on_ ? 100 : 0;
+    const LightIconLook look = icon_look();
+
+    const char* icon_name = ui_brightness_to_lightbulb_icon(look.brightness);
+    helix::ui::icon::set_source(light_icon_, icon_name);
+
+    lv_color_t icon_color;
+    if (look.brightness == 0) {
+        icon_color = theme_manager_get_color("light_icon_off");
+    } else if (!look.has_rgb) {
+        icon_color = theme_manager_get_color("light_icon_on");
     } else {
-        // A TOGGLE macro's real state is unknowable — flash_light_icon() is the
-        // only honest feedback, so leave the bulb muted rather than assert one.
-        brightness = 0;
+        const uint8_t r = (look.rgb >> 16) & 0xFF;
+        const uint8_t g = (look.rgb >> 8) & 0xFF;
+        const uint8_t b = look.rgb & 0xFF;
+        // A white light reads as the theme's lamp color; a bare white glyph
+        // disappears on a light theme.
+        icon_color = (r > 200 && g > 200 && b > 200) ? theme_manager_get_color("light_icon_on")
+                                                     : lv_color_make(r, g, b);
     }
+    helix::ui::icon::set_color(light_icon_, icon_color, LV_OPA_COVER);
 
-    // Set icon based on brightness level
-    const char* icon_name = ui_brightness_to_lightbulb_icon(brightness);
-    ui_icon_set_source(light_icon_, icon_name);
-
-    // Calculate icon color from LED RGBW values
-    if (brightness == 0) {
-        // OFF state - use muted gray from design tokens
-        ui_icon_set_color(light_icon_, theme_manager_get_color("light_icon_off"), LV_OPA_COVER);
-    } else if (!reported) {
-        ui_icon_set_color(light_icon_, theme_manager_get_color("light_icon_on"), LV_OPA_COVER);
-    } else {
-        // Get RGB values from PrinterState
-        int r = lv_subject_get_int(printer_state_.get_led_r_subject());
-        int g = lv_subject_get_int(printer_state_.get_led_g_subject());
-        int b = lv_subject_get_int(printer_state_.get_led_b_subject());
-        int w = lv_subject_get_int(printer_state_.get_led_w_subject());
-
-        lv_color_t icon_color;
-        // If white channel dominant or RGB near white, use gold from design tokens
-        if (w > std::max({r, g, b}) || (r > 200 && g > 200 && b > 200)) {
-            icon_color = theme_manager_get_color("light_icon_on");
-        } else {
-            // Use actual LED color, boost if too dark for visibility
-            int max_val = std::max({r, g, b});
-            if (max_val < 128 && max_val > 0) {
-                float scale = 128.0f / static_cast<float>(max_val);
-                icon_color =
-                    lv_color_make(static_cast<uint8_t>(std::min(255, static_cast<int>(r * scale))),
-                                  static_cast<uint8_t>(std::min(255, static_cast<int>(g * scale))),
-                                  static_cast<uint8_t>(std::min(255, static_cast<int>(b * scale))));
-            } else {
-                icon_color = lv_color_make(static_cast<uint8_t>(r), static_cast<uint8_t>(g),
-                                           static_cast<uint8_t>(b));
-            }
-        }
-
-        ui_icon_set_color(light_icon_, icon_color, LV_OPA_COVER);
-    }
-
-    spdlog::trace("[LedWidget] Light icon: {} at {}%", icon_name, brightness);
+    spdlog::trace("[LedWidget] Light icon: {} at {}%{}", icon_name, look.brightness,
+                  look.unknown ? " (unknown)" : "");
 }
 
 void LedWidget::flash_light_icon() {
@@ -279,7 +350,7 @@ void LedWidget::flash_light_icon() {
         return;
 
     // Flash gold briefly then fade back to muted
-    ui_icon_set_color(light_icon_, theme_manager_get_color("light_icon_on"), LV_OPA_COVER);
+    helix::ui::icon::set_color(light_icon_, theme_manager_get_color("light_icon_on"), LV_OPA_COVER);
 
     if (!DisplaySettingsManager::instance().get_animations_enabled()) {
         // No animations -- the next status update will restore the icon naturally
@@ -299,34 +370,84 @@ void LedWidget::flash_light_icon() {
     lv_anim_set_completed_cb(&anim, [](lv_anim_t* a) {
         auto* icon = static_cast<lv_obj_t*>(a->var);
         lv_obj_set_style_opa(icon, LV_OPA_COVER, 0);
-        ui_icon_set_color(icon, theme_manager_get_color("light_icon_off"), LV_OPA_COVER);
+        helix::ui::icon::set_color(icon, theme_manager_get_color("light_icon_off"), LV_OPA_COVER);
     });
     lv_anim_start(&anim);
 
-    spdlog::debug("[LedWidget] Flash light icon (TOGGLE macro, state unknown)");
+    spdlog::debug("[LedWidget] Flash light icon (state unknown)");
 }
 
-void LedWidget::on_led_state_changed(int state) {
-    // Only bound when status_tracked_strip() found a strip Klipper reports, so
-    // this value is real. A TOGGLE macro elsewhere in the selection makes the
-    // composite state indefinite for display purposes (see flash_light_icon),
-    // but it does not make the reported strip's own state any less true — and
-    // that strip is what light_set() has to aim the next command at.
-    auto& led_ctrl = helix::led::LedController::instance();
-    light_on_ = (state != 0);
-    led_ctrl.sync_light_state(light_on_);
-    spdlog::debug("[LedWidget] LED state changed: {} (from PrinterState)",
-                  light_on_ ? "ON" : "OFF");
-    update_light_icon();
+bool LedWidget::on_edit_configure() {
+    show_led_picker();
+    return false; // no rebuild — the tile rebinds in place
+}
+
+void LedWidget::show_led_picker() {
+    if (picker_.is_visible() || !parent_screen_ || !widget_obj_) {
+        return;
+    }
+
+    auto& subs = picker_subjects();
+    const auto devices = light_picker_devices();
+    subs.names.ensure_size(devices.size());
+    int selected = -1;
+    const auto t = targets();
+    picker_.row_ids.clear();
+    for (size_t i = 0; i < devices.size(); ++i) {
+        picker_.row_ids.push_back(devices[i].id);
+        subs.names.set_string(i, led::device_display_name(devices[i]));
+        if (led_key_ != led::LIGHT_BUTTON_ALL && !t.empty() && devices[i].id == t.front()) {
+            selected = static_cast<int>(i);
+        }
+    }
+    lv_subject_set_int(&subs.selected, selected);
+    lv_subject_set_int(&subs.count, static_cast<int>(devices.size()));
+
+    picker_.show_below_widget(parent_screen_, widget_obj_,
+                              helix::ui::ContextMenu::AnchorAlign::Center);
+}
+
+void LedWidget::LedPicker::on_created(lv_obj_t* menu_obj) {
+    // DECLARATIVE_OK: measured cap. A share of the screen, so a printer with a
+    // dozen lights scrolls the list instead of growing the card past the panel.
+    if (lv_obj_t* list = lv_obj_find_by_name(menu_obj, "led_picker_list")) {
+        lv_obj_set_style_max_height(list, screen_height_pct(66), 0);
+    }
 }
 
 void LedWidget::light_toggle_cb(lv_event_t* e) {
     LVGL_SAFE_EVENT_CB_BEGIN("[LedWidget] light_toggle_cb");
-    auto* self = static_cast<LedWidget*>(lv_event_get_user_data(e));
-    if (self) {
+    if (auto* self = from_event(e)) {
         self->record_interaction();
         self->handle_light_toggle();
     }
+    LVGL_SAFE_EVENT_CB_END();
+}
+
+void LedWidget::light_more_cb(lv_event_t* e) {
+    LVGL_SAFE_EVENT_CB_BEGIN("[LedWidget] light_more_cb");
+    if (auto* self = from_event(e)) {
+        self->record_interaction();
+        open_led_control_overlay(self->parent_screen_, self->overlay_device());
+    }
+    LVGL_SAFE_EVENT_CB_END();
+}
+
+void LedWidget::led_picker_row_cb(lv_event_t* e) {
+    LVGL_SAFE_EVENT_CB_BEGIN("[LedWidget] led_picker_row_cb");
+    auto* picker = helix::ui::ContextMenu::active_as<LedPicker>();
+    const char* ud = static_cast<const char*>(lv_event_get_user_data(e));
+    if (picker == nullptr || ud == nullptr) {
+        return;
+    }
+    const int index = helix::text_io::parse_leading<int>(ud).value_or(-1);
+    std::string key = led::LIGHT_BUTTON_ALL;
+    if (index >= 0 && static_cast<size_t>(index) < picker->row_ids.size()) {
+        key = picker->row_ids[static_cast<size_t>(index)];
+    }
+    LedWidget& owner = picker->owner();
+    picker->hide();
+    owner.select_light(key);
     LVGL_SAFE_EVENT_CB_END();
 }
 

@@ -346,19 +346,19 @@ setup() {
 # These tests ensure it stays in sync with platform.sh.
 
 @test "bundled install.sh has detect_pi_install_dir function" {
-    grep -q 'detect_pi_install_dir()' "$WORKTREE_ROOT/scripts/install.sh"
+    grep -q 'detect_pi_install_dir()' "$INSTALL_BUNDLE"
 }
 
 @test "bundled install.sh has _USER_INSTALL_DIR capture" {
-    grep -q '_USER_INSTALL_DIR="${INSTALL_DIR}"' "$WORKTREE_ROOT/scripts/install.sh"
+    grep -q '_USER_INSTALL_DIR="${INSTALL_DIR}"' "$INSTALL_BUNDLE"
 }
 
 @test "bundled install.sh Pi branch calls detect_pi_install_dir" {
     # After detect_klipper_user, must call detect_pi_install_dir
-    grep -A5 'detect_klipper_user' "$WORKTREE_ROOT/scripts/install.sh" | grep -q 'detect_pi_install_dir'
+    grep -A5 'detect_klipper_user' "$INSTALL_BUNDLE" | grep -q 'detect_pi_install_dir'
 }
 
 @test "bundled install.sh Pi branch does NOT hardcode /opt/helixscreen" {
     # The else branch should NOT set INSTALL_DIR="/opt/helixscreen" directly
-    ! grep -A3 'detect klipper user.*auto-detect' "$WORKTREE_ROOT/scripts/install.sh" | grep -q 'INSTALL_DIR="/opt/helixscreen"'
+    ! grep -A3 'detect klipper user.*auto-detect' "$INSTALL_BUNDLE" | grep -q 'INSTALL_DIR="/opt/helixscreen"'
 }

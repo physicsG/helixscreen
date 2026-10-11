@@ -18,32 +18,12 @@
 // Include the real implementation header
 #include "../../include/printer_state.h"
 #include "../../include/temperature_history_manager.h"
+#include "../../include/temperature_sensor_manager.h"
 #include "../../include/ui_update_queue.h"
 #include "../../lvgl/lvgl.h"
+#include "../test_helpers/temperature_history_manager_test_access.h"
 #include "../test_helpers/update_queue_test_access.h"
 #include "../ui_test_utils.h"
-
-class TemperatureHistoryManagerTestAccess {
-  public:
-    static bool add_sample(TemperatureHistoryManager& m, const std::string& heater_name,
-                           int temp_deci, int target_deci, int64_t timestamp_ms) {
-        bool stored;
-        {
-            std::lock_guard<std::mutex> lock(m.mutex_);
-            stored = m.add_sample_internal(heater_name, temp_deci, target_deci, timestamp_ms);
-        }
-        if (stored) {
-            m.notify_observers(heater_name);
-        }
-        return stored;
-    }
-
-    /// The log-volume policy add_sample_internal() routes its range verdict
-    /// through (#1348).
-    static const helix::InvalidSampleTracker& reject_log(const TemperatureHistoryManager& m) {
-        return m.reject_log_;
-    }
-};
 
 #include <atomic>
 #include <chrono>
@@ -123,7 +103,8 @@ class TemperatureHistoryManagerTestFixture {
      * Value is in decidegrees (temp * 10).
      */
     void set_extruder_temp(int decidegrees) {
-        lv_subject_set_int(printer_state_.get_active_extruder_temp_subject(), decidegrees);
+        lv_subject_set_int(printer_state_.temperature_state().get_active_extruder_temp_subject(),
+                           decidegrees);
         UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
     }
 
@@ -131,7 +112,8 @@ class TemperatureHistoryManagerTestFixture {
      * @brief Set extruder target temperature
      */
     void set_extruder_target(int decidegrees) {
-        lv_subject_set_int(printer_state_.get_active_extruder_target_subject(), decidegrees);
+        lv_subject_set_int(printer_state_.temperature_state().get_active_extruder_target_subject(),
+                           decidegrees);
         UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
     }
 
@@ -139,7 +121,7 @@ class TemperatureHistoryManagerTestFixture {
      * @brief Set bed temperature via PrinterState subject
      */
     void set_bed_temp(int decidegrees) {
-        lv_subject_set_int(printer_state_.get_bed_temp_subject(), decidegrees);
+        lv_subject_set_int(printer_state_.temperature_state().get_bed_temp_subject(), decidegrees);
         UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
     }
 
@@ -147,7 +129,8 @@ class TemperatureHistoryManagerTestFixture {
      * @brief Set bed target temperature
      */
     void set_bed_target(int decidegrees) {
-        lv_subject_set_int(printer_state_.get_bed_target_subject(), decidegrees);
+        lv_subject_set_int(printer_state_.temperature_state().get_bed_target_subject(),
+                           decidegrees);
         UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
     }
 
@@ -593,13 +576,16 @@ TEST_CASE_METHOD(TemperatureHistoryManagerTestFixture,
     // Given: a 3-tool changer discovered AFTER the manager was constructed
     // (the real ordering — the manager is built at startup, discovery lands
     // once the WebSocket connects)
-    printer_state_.init_extruders({"extruder", "extruder1", "extruder2"});
+    printer_state_.temperature_state().init_extruders({"extruder", "extruder1", "extruder2"});
     UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
 
     // When: each extruder reports its own temperature
-    lv_subject_set_int(printer_state_.get_extruder_temp_subject("extruder"), 438);
-    lv_subject_set_int(printer_state_.get_extruder_temp_subject("extruder1"), 419);
-    lv_subject_set_int(printer_state_.get_extruder_temp_subject("extruder2"), 2295);
+    lv_subject_set_int(printer_state_.temperature_state().get_extruder_temp_subject("extruder"),
+                       438);
+    lv_subject_set_int(printer_state_.temperature_state().get_extruder_temp_subject("extruder1"),
+                       419);
+    lv_subject_set_int(printer_state_.temperature_state().get_extruder_temp_subject("extruder2"),
+                       2295);
     UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
 
     // Then: each lands in its own bucket, unmixed
@@ -616,11 +602,12 @@ TEST_CASE_METHOD(TemperatureHistoryManagerTestFixture,
                  "[temperature_history][multi_tool]") {
     // Given: a 5-tool changer printing on T4 (bundle 5ZVLLHK2 — T4 at 229.5C
     // while extruder itself sits cold at 43.8C)
-    printer_state_.init_extruders({"extruder", "extruder1", "extruder2", "extruder3", "extruder4"});
+    printer_state_.temperature_state().init_extruders(
+        {"extruder", "extruder1", "extruder2", "extruder3", "extruder4"});
     UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
 
     // When: the ACTIVE-extruder subject carries T4's hot reading
-    lv_subject_set_int(printer_state_.get_active_extruder_temp_subject(), 2295);
+    lv_subject_set_int(printer_state_.temperature_state().get_active_extruder_temp_subject(), 2295);
     UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
 
     // Then: it does NOT get filed under "extruder" — that bucket belongs to
@@ -631,7 +618,8 @@ TEST_CASE_METHOD(TemperatureHistoryManagerTestFixture,
     }
 
     // And: extruder4's own subject is what feeds extruder4's bucket
-    lv_subject_set_int(printer_state_.get_extruder_temp_subject("extruder4"), 2295);
+    lv_subject_set_int(printer_state_.temperature_state().get_extruder_temp_subject("extruder4"),
+                       2295);
     UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
     REQUIRE(manager_->get_sample_count("extruder4") == 1);
     REQUIRE(manager_->get_samples("extruder4").back().temp_deci == 2295);
@@ -640,17 +628,21 @@ TEST_CASE_METHOD(TemperatureHistoryManagerTestFixture,
 TEST_CASE_METHOD(TemperatureHistoryManagerTestFixture,
                  "TemperatureHistoryManager tracks per-extruder targets independently",
                  "[temperature_history][multi_tool]") {
-    printer_state_.init_extruders({"extruder", "extruder1"});
+    printer_state_.temperature_state().init_extruders({"extruder", "extruder1"});
     UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
 
     // Given: two tools with different setpoints
-    lv_subject_set_int(printer_state_.get_extruder_target_subject("extruder"), 0);
-    lv_subject_set_int(printer_state_.get_extruder_target_subject("extruder1"), 2300);
+    lv_subject_set_int(printer_state_.temperature_state().get_extruder_target_subject("extruder"),
+                       0);
+    lv_subject_set_int(printer_state_.temperature_state().get_extruder_target_subject("extruder1"),
+                       2300);
     UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
 
     // When: both report a temperature
-    lv_subject_set_int(printer_state_.get_extruder_temp_subject("extruder"), 438);
-    lv_subject_set_int(printer_state_.get_extruder_temp_subject("extruder1"), 2295);
+    lv_subject_set_int(printer_state_.temperature_state().get_extruder_temp_subject("extruder"),
+                       438);
+    lv_subject_set_int(printer_state_.temperature_state().get_extruder_temp_subject("extruder1"),
+                       2295);
     UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
 
     // Then: each sample carries its OWN tool's target, not a shared cache
@@ -664,16 +656,16 @@ TEST_CASE_METHOD(TemperatureHistoryManagerTestFixture,
     // Before discovery there are no per-extruder subjects, so the active
     // subject is the only source — keep recording it so a graph opened during
     // startup still has a trace.
-    lv_subject_set_int(printer_state_.get_active_extruder_temp_subject(), 2000);
+    lv_subject_set_int(printer_state_.temperature_state().get_active_extruder_temp_subject(), 2000);
     UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
     REQUIRE(manager_->get_sample_count("extruder") == 1);
 
     // Once discovery lands, the per-extruder subjects take over and the
     // fallback must go away, or a tool change reintroduces the mixing bug.
-    printer_state_.init_extruders({"extruder", "extruder1"});
+    printer_state_.temperature_state().init_extruders({"extruder", "extruder1"});
     UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
 
-    lv_subject_set_int(printer_state_.get_active_extruder_temp_subject(), 2295);
+    lv_subject_set_int(printer_state_.temperature_state().get_active_extruder_temp_subject(), 2295);
     UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
 
     for (const auto& sample : manager_->get_samples("extruder")) {
@@ -742,4 +734,28 @@ TEST_CASE_METHOD(TemperatureHistoryManagerTestFixture,
     TemperatureHistoryManagerTestAccess::add_sample(*manager_, "extruder", 2151, 0,
                                                     base + 31 * 1000);
     CHECK(policy.log_events() == during_run + 1);
+}
+
+TEST_CASE_METHOD(TemperatureHistoryManagerTestFixture,
+                 "TemperatureHistoryManager records a heater_generic's target",
+                 "[temperature_history][heater_generic]") {
+    auto& tsm = helix::sensors::TemperatureSensorManager::instance();
+    tsm.init_subjects();
+    tsm.set_sync_mode(true);
+    tsm.discover({"heater_generic filament_dryer"});
+    // A manager built after discovery subscribes to what discovery found. (The
+    // fixture's was built before the sensor manager's subjects existed here.)
+    manager_ = std::make_unique<TemperatureHistoryManager>(printer_state_);
+    UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
+
+    tsm.update_from_status({{"heater_generic filament_dryer", {{"target", 55.0}}}});
+    tsm.update_from_status({{"heater_generic filament_dryer", {{"temperature", 48.5}}}});
+
+    REQUIRE(wait_for_sample_count("heater_generic filament_dryer", 1, 200));
+    auto samples = manager_->get_samples("heater_generic filament_dryer");
+    CHECK(samples.back().temp_deci == 485);
+    CHECK(samples.back().target_deci == 550);
+
+    tsm.discover({});
+    tsm.set_sync_mode(false);
 }

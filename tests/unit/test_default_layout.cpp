@@ -1,8 +1,11 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "ui_update_queue.h"
+
 #include "../helix_test_fixture.h"
 #include "../test_helpers/scoped_breakpoint.h"
+#include "ams_state.h"
 #include "data_root_resolver.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "helix-xml/src/xml/lv_xml_component.h"
@@ -628,34 +631,32 @@ class AmsSubjectGuard {
     explicit AmsSubjectGuard(int slot_count) {
         if (!lv_xml_component_get_scope("globals"))
             lv_xml_component_init();
-        // Use a static subject so the pointer registered with the XML system
-        // remains valid after this guard is destroyed (avoids dangling pointer).
-        static bool initialized = false;
-        if (!initialized) {
-            lv_subject_init_int(&subject_, 0);
-            lv_xml_register_subject(nullptr, "ams_slot_count", &subject_);
-            initialized = true;
-        }
-        lv_subject_set_int(&subject_, slot_count);
+        // AmsState's own subject, not a private one published under its name: a
+        // panel that attaches to the name carries AmsState's lifetime token, so
+        // an observer left on a foreign subject outlives the context it points to.
+        helix::AmsState::instance().init_subjects(true);
+        subject_ = lv_xml_get_subject(nullptr, "ams_slot_count");
+        REQUIRE(subject_ != nullptr);
+        lv_subject_set_int(subject_, slot_count);
     }
 
     void set(int val) {
-        lv_subject_set_int(&subject_, val);
+        lv_subject_set_int(subject_, val);
     }
 
     ~AmsSubjectGuard() {
         // Reset to 0 so subsequent tests see "no AMS" by default
-        lv_subject_set_int(&subject_, 0);
+        lv_subject_set_int(subject_, 0);
+        // Observers of the subject defer their applies; run them while it is alive.
+        helix::ui::UpdateQueue::instance().drain();
     }
 
     AmsSubjectGuard(const AmsSubjectGuard&) = delete;
     AmsSubjectGuard& operator=(const AmsSubjectGuard&) = delete;
 
   private:
-    static lv_subject_t subject_;
+    lv_subject_t* subject_ = nullptr;
 };
-
-lv_subject_t AmsSubjectGuard::subject_{};
 
 // ============================================================================
 // Helper: set breakpoint and restore on scope exit

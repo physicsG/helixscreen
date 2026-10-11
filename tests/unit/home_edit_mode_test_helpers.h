@@ -50,7 +50,6 @@ class ScopedInputSettings {
     /// No persisted value: assert the documented default (enabled) is in force.
     ScopedInputSettings() {
         helix::Config* config = helix::Config::get_instance();
-        REQUIRE(config != nullptr);
         forget_input_settings();
         REQUIRE_FALSE(config->exists("/input/home_edit_mode_enabled"));
         reload_input_settings();
@@ -60,7 +59,6 @@ class ScopedInputSettings {
     /// Persist an explicit value and assert it survives the load.
     explicit ScopedInputSettings(bool home_edit_mode_enabled) {
         helix::Config* config = helix::Config::get_instance();
-        REQUIRE(config != nullptr);
         forget_input_settings();
         config->set<bool>("/input/home_edit_mode_enabled", home_edit_mode_enabled);
         reload_input_settings();

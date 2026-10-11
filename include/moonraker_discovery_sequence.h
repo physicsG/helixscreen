@@ -5,6 +5,7 @@
 
 #include "json_fwd.h"
 #include "printer_discovery.h"
+#include "webcam_selection.h"
 
 #include <atomic>
 #include <functional>
@@ -80,7 +81,14 @@ class MoonrakerDiscoverySequence {
      */
     void reset_completion() {
         discovery_completed_.store(false);
+        reset_subscription_state();
     }
+
+    /// See IMoonrakerClient::set_subscription_extras_provider.
+    void set_extras_provider(std::function<json()> provider);
+
+    /// See IMoonrakerClient::refresh_subscription.
+    void refresh_subscription();
 
     /** @brief Check if identified to Moonraker */
     [[nodiscard]] bool is_identified() const {
@@ -163,6 +171,9 @@ class MoonrakerDiscoverySequence {
     std::vector<std::string>& sensors() {
         return sensors_;
     }
+    std::vector<std::string>& load_cells() {
+        return load_cells_;
+    }
     std::vector<std::string>& fans() {
         return fans_;
     }
@@ -181,6 +192,9 @@ class MoonrakerDiscoverySequence {
 
     const std::vector<std::string>& heaters() const {
         return heaters_;
+    }
+    const std::vector<std::string>& load_cells() const {
+        return load_cells_;
     }
     const std::vector<std::string>& sensors() const {
         return sensors_;
@@ -289,6 +303,27 @@ class MoonrakerDiscoverySequence {
      */
     void complete_discovery_subscription(uint64_t seq);
 
+    /// Send the discovery subscribe for @p app merged with @p extras. A failure that carried
+    /// extras re-sends @p app alone; only a failure of the app objects themselves is reported.
+    void send_discovery_subscribe(uint64_t seq, const PrinterDiscovery& hw, const json& app,
+                                  const json& extras);
+
+    /// The discovery subscribe's response: initial state, discovery completion.
+    void finish_discovery_subscription(const PrinterDiscovery& hw, size_t num_subscribed,
+                                       const json& sub_response);
+
+    /// The provider's current extras, or an empty object when there is no provider or its
+    /// result is the one Moonraker last refused.
+    json current_extras();
+
+    /// Remember that Moonraker refused @p extras so they are not sent again unchanged.
+    void reject_extras(const json& extras);
+
+    void reset_subscription_state();
+
+    /// Run a refresh that was asked for while none could be sent.
+    void drain_pending_refresh();
+
   public:
     /**
      * @brief Pure helper: build the `printer.objects.subscribe` objects map
@@ -303,8 +338,9 @@ class MoonrakerDiscoverySequence {
      */
     static nlohmann::json build_subscription_objects(
         const PrinterDiscovery& hw, const std::vector<std::string>& heaters,
-        const std::vector<std::string>& sensors, const std::vector<std::string>& fans,
-        const std::vector<std::string>& leds, const std::vector<std::string>& afc_objects,
+        const std::vector<std::string>& sensors, const std::vector<std::string>& load_cells,
+        const std::vector<std::string>& fans, const std::vector<std::string>& leds,
+        const std::vector<std::string>& afc_objects,
         const std::vector<std::string>& filament_sensors, const std::vector<std::string>& mcus);
 
   private:
@@ -318,6 +354,7 @@ class MoonrakerDiscoverySequence {
 
     // Hardware vectors
     std::vector<std::string> heaters_;
+    std::vector<std::string> load_cells_;
     std::vector<std::string> sensors_;
     std::vector<std::string> fans_;
     std::vector<std::string> leds_;
@@ -340,6 +377,21 @@ class MoonrakerDiscoverySequence {
     std::atomic<bool> identified_{false};
     std::atomic<bool> discovery_completed_{false};
 
+    // Plugin objects merged into the union subscription. The provider is called while
+    // extras_mutex_ is held, so clearing it waits out a call in progress.
+    std::mutex extras_mutex_;
+    std::function<json()> extras_provider_;
+    std::string rejected_extras_; // dump of the extras Moonraker last refused
+
+    // Per-connection subscription state, under subscription_mutex_.
+    std::mutex subscription_mutex_;
+    bool subscribed_{false};         // the discovery subscribe of this connection succeeded
+    json last_app_objects_;          // build_subscription_objects() result of this connection
+    json last_sent_objects_;         // objects map of the last subscribe Moonraker accepted
+    uint64_t subscription_epoch_{0}; // moves on with every disconnect and discovery subscribe
+    bool refresh_in_flight_{false};
+    bool refresh_pending_{false};
+
     // Callbacks
     std::function<void(const PrinterDiscovery&)> on_hardware_discovered_;
     std::function<void(const PrinterDiscovery&, const nlohmann::json& initial_status)>
@@ -347,26 +399,6 @@ class MoonrakerDiscoverySequence {
     std::function<void(const json&)> bed_mesh_callback_;
     std::mutex callbacks_mutex_;
 };
-
-/**
- * @brief Decide whether a webcam snapshot_url is a usable image endpoint.
- *
- * Moonraker webcam entries advertise a snapshot_url, but some "services"
- * (e.g. the Creality K2's "iframe" service) point it at an HTML WebRTC viewer
- * page such as "/snapshot.html" or "/camera.html" instead of a real JPEG/PNG.
- * CameraStream would poll such a URL forever and never decode a frame.
- *
- * Accept a URL when it looks like a genuine image/snapshot endpoint:
- *   - contains "action=snapshot" (mjpeg-streamer style), or
- *   - ends in .jpg / .jpeg / .png (case-insensitive)
- * Reject when the path ends in ".html" (case-insensitive) — an HTML page, not
- * an image. (A bare-host or query-only URL with none of these markers is treated
- * conservatively as usable, preserving prior behavior for atypical real endpoints.)
- *
- * @param snapshot_url The snapshot_url from a Moonraker webcam entry.
- * @return true if the URL is a plausible image endpoint, false if it's an HTML page.
- */
-[[nodiscard]] bool is_usable_snapshot_url(const std::string& snapshot_url);
 
 /// Seconds allowed for the TCP connect phase of a snapshot reachability probe.
 /// This is the budget that decides "is anything listening at this address" —

@@ -14,6 +14,7 @@
  * - Config persistence
  */
 
+#include "../test_helpers/update_queue_test_access.h"
 #include "../ui_test_utils.h"
 #include "humidity_sensor_manager.h"
 #include "humidity_sensor_types.h"
@@ -38,7 +39,6 @@ class HumiditySensorManagerTestAccess {
     static void reset(HumiditySensorManager& obj) {
         std::lock_guard<std::recursive_mutex> lock(obj.mutex_);
         obj.sensors_.clear();
-        obj.states_.clear();
         obj.sync_mode_ = true;
         obj.deinit_subjects();
     }
@@ -160,9 +160,9 @@ TEST_CASE("HumiditySensorTypes - type string conversion", "[humidity][types]") {
     }
 
     SECTION("humidity_type_to_string / from_string round-trip") {
-        for (auto t : {HumiditySensorType::BME280, HumiditySensorType::HTU21D,
-                       HumiditySensorType::SHT3X, HumiditySensorType::AHT10,
-                       HumiditySensorType::AHT20, HumiditySensorType::AHT20_F}) {
+        for (auto t :
+             {HumiditySensorType::BME280, HumiditySensorType::HTU21D, HumiditySensorType::SHT3X,
+              HumiditySensorType::AHT10, HumiditySensorType::AHT20, HumiditySensorType::AHT20_F}) {
             REQUIRE(humidity_type_from_string(humidity_type_to_string(t)) == t);
         }
     }
@@ -669,10 +669,6 @@ TEST_CASE_METHOD(HumiditySensorTestFixture, "HumiditySensorManager - edge cases"
         REQUIRE(mgr().is_sensor_available(HumiditySensorRole::CHAMBER));
     }
 
-    SECTION("category_name returns 'humidity'") {
-        REQUIRE(mgr().category_name() == "humidity");
-    }
-
     SECTION("BME280 sensor parses name with space correctly") {
         std::vector<std::string> sensors = {"bme280 my_custom_name"};
         mgr().discover(sensors);
@@ -694,4 +690,24 @@ TEST_CASE_METHOD(HumiditySensorTestFixture, "HumiditySensorManager - edge cases"
         REQUIRE(configs[0].sensor_name == "my_dryer_sensor");
         REQUIRE(configs[0].type == HumiditySensorType::HTU21D);
     }
+}
+
+// A deferral queued before deinit_subjects() must not land on the subjects a
+// later init_subjects() creates.
+TEST_CASE_METHOD(HumiditySensorTestFixture,
+                 "HumiditySensorManager - deferred update dropped after deinit",
+                 "[humidity][lifetime]") {
+    discover_test_sensors();
+    mgr().set_sync_mode(false);
+
+    update_sensor_state("bme280 chamber", 45.0f, 25.0f);
+    mgr().deinit_subjects();
+    mgr().init_subjects();
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+    REQUIRE(lv_subject_get_int(mgr().get_chamber_humidity_subject()) == -1);
+
+    update_sensor_state("bme280 chamber", 50.0f, 25.0f);
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+    REQUIRE(lv_subject_get_int(mgr().get_chamber_humidity_subject()) == 500);
+    mgr().set_sync_mode(true);
 }

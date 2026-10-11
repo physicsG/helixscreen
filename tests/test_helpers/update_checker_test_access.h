@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -45,6 +46,12 @@ class UpdateCheckerTestAccess {
         c.clear_cache();
     }
 
+    /// sync_moonraker_channel() against @p install_root: the test link has no
+    /// resolvable install directory, so the public entry point always skips.
+    static void sync_moonraker_channel_for(UpdateChecker& c, const std::string& install_root) {
+        c.sync_moonraker_channel_for(install_root);
+    }
+
     // ------------------------------------------------------------------
     // Post-install restart sequence
     //
@@ -76,10 +83,24 @@ class UpdateCheckerTestAccess {
         c.restart_initiated_.store(false);
     }
 
+    /// Run the install step on @p tarball_path. Outside test mode this runs
+    /// the tarball's install.sh against the host, so a caller sets
+    /// RuntimeConfig::test_mode first.
+    static void do_install(UpdateChecker& c, const std::string& tarball_path) {
+        c.do_install(tarball_path);
+    }
+
     /// Drive the worker-thread half of the post-install sequence directly.
-    /// do_install() itself runs install.sh and cannot be unit-tested.
     static void finish_install_and_restart(UpdateChecker& c, const std::string& install_root,
                                            const std::string& version) {
         c.finish_install_and_restart(install_root, version);
+    }
+
+    /// Land a check result the way the worker does; its subject writes are
+    /// deferred, so drain the UpdateQueue before reading them.
+    static void report_result(UpdateChecker& c, UpdateChecker::Status status,
+                              std::optional<UpdateChecker::ReleaseInfo> info,
+                              const std::string& error = "") {
+        c.report_result(status, std::move(info), error);
     }
 };

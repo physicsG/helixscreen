@@ -344,12 +344,23 @@ def _dedupe_ids(products):
               file=sys.stderr)
 
 
-def _load_type_ranges(path):
-    if not path:
-        return {}
+def _load_types(path):
+    """The shipped material-type table, carried over from the existing output.
+
+    `types` is hand-maintained inside assets/filaments.json itself (it is the
+    runtime's only copy of the per-type table), so a regen must read it back
+    before overwriting the file. Its nozzle ranges also seed products that do
+    not carry their own.
+    """
     with open(path, encoding="utf-8") as f:
-        raw = json.load(f)
-    return {k: tuple(v) for k, v in raw.items()}
+        types = json.load(f).get("types")
+    if not isinstance(types, list) or not types:
+        raise SystemExit(f"{path} has no `types` table to carry over; refusing to write one without it")
+    return types
+
+
+def _type_ranges(types):
+    return {t["name"]: (t["nozzle_min"], t["nozzle_max"]) for t in types}
 
 
 def main(argv=None):
@@ -357,19 +368,20 @@ def main(argv=None):
     ap.add_argument("--orca", required=True, help="OrcaSlicer resources/profiles root")
     ap.add_argument("--cfs-seed", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--type-ranges", default="")
     ap.add_argument("--orca-tag", default="unknown")
     args = ap.parse_args(argv)
 
     with open(args.cfs_seed, encoding="utf-8") as f:
         seed = json.load(f)
-    catalog, library_types = build_catalog(args.orca, seed, _load_type_ranges(args.type_ranges))
+    types = _load_types(args.out)
+    catalog, library_types = build_catalog(args.orca, seed, _type_ranges(types))
     doc = {
         "_attribution": ("Factual filament data derived from OrcaSlicer "
                          f"(github.com/SoftFever/OrcaSlicer, tag {args.orca_tag}, "
                          "AGPL-3.0). No OrcaSlicer profile files are shipped."),
         "orca_library_types": library_types,
         "orca_type_overrides": ORCA_TYPE_OVERRIDES,
+        "types": types,
         "filaments": catalog,
     }
     with open(args.out, "w", encoding="utf-8") as f:

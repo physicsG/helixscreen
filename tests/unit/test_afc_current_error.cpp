@@ -26,6 +26,7 @@
  * carry byte-identical detail while only the second carries the recovery set.
  */
 
+#include "test_helpers/afc_test_access.h"
 #include "ams_backend_afc.h"
 #include "ams_types.h"
 #include "error_event.h"
@@ -36,11 +37,13 @@
 
 using namespace helix;
 
+namespace helix {
+
 class AfcCurrentErrorHelper : public AmsBackendAfc {
   public:
     AfcCurrentErrorHelper() : AmsBackendAfc(nullptr, nullptr) {
         std::vector<std::string> names{"lane1", "lane2", "lane3", "lane4"};
-        initialize_slots(names);
+        AfcTestAccess::initialize_slots(*this, names);
     }
 
     void feed(const nlohmann::json& params_inner) {
@@ -58,23 +61,24 @@ class AfcCurrentErrorHelper : public AmsBackendAfc {
 
     void set_toolhead_sensor(bool state) {
         std::lock_guard<std::mutex> lock(mutex_);
-        tool_start_sensor_ = state;
+        AfcTestAccess::tool_start_sensor(*this) = state;
     }
 
     void set_current_lane(const std::string& lane) {
         std::lock_guard<std::mutex> lock(mutex_);
-        current_lane_name_ = lane;
+        AfcTestAccess::current_lane_name(*this) = lane;
     }
 
     [[nodiscard]] bool error_latched() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        return error_state_;
+        return AfcTestAccess::error_state(*this);
     }
 
     [[nodiscard]] AmsAction action() const {
         return get_current_action();
     }
 };
+} // namespace helix
 
 namespace {
 

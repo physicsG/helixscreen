@@ -9,7 +9,9 @@
 #include <lvgl.h>
 
 // Forward declaration
+namespace helix {
 class AmsBackend;
+} // namespace helix
 
 namespace helix::ui {
 
@@ -138,5 +140,13 @@ class AmsSelectorMenu : public ContextMenu {
     static void on_gear_sync_cb(lv_event_t* e);
     static void on_recover_cb(lv_event_t* e);
 };
+
+/**
+ * @brief Run a selector-menu action against the active AMS backend.
+ *
+ * Needs nothing from the panel that opened the menu, so it lives here where
+ * a test can reach it.
+ */
+void ams_dispatch_selector_action(AmsSelectorMenu::SelectorAction a);
 
 } // namespace helix::ui

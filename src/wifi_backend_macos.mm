@@ -127,27 +127,6 @@ bool WifiBackendMacOS::is_running() const {
 }
 
 // ============================================================================
-// Event System
-// ============================================================================
-
-void WifiBackendMacOS::register_event_callback(const std::string& name,
-                                               std::function<void(const std::string&)> callback) {
-    std::lock_guard<std::mutex> lock(callbacks_mutex_);
-    callbacks_[name] = callback;
-    spdlog::debug("[WiFiMacOS] Registered callback for event: {}", name);
-}
-
-void WifiBackendMacOS::fire_event(const std::string& event_name, const std::string& data) {
-    std::lock_guard<std::mutex> lock(callbacks_mutex_);
-
-    auto it = callbacks_.find(event_name);
-    if (it != callbacks_.end()) {
-        spdlog::debug("[WiFiMacOS] Firing event: {}", event_name);
-        it->second(data);
-    }
-}
-
-// ============================================================================
 // Network Scanning
 // ============================================================================
 
@@ -193,7 +172,7 @@ void WifiBackendMacOS::scan_timer_callback([[maybe_unused]] lv_timer_t* timer) {
         CWInterface* iface = (__bridge CWInterface*)interface_;
         if (!iface) {
             spdlog::error("[WiFiMacOS] No WiFi interface available for scan");
-            fire_event("SCAN_COMPLETE", "");
+            dispatch_event("SCAN_COMPLETE", "");
             return;
         }
 
@@ -202,7 +181,7 @@ void WifiBackendMacOS::scan_timer_callback([[maybe_unused]] lv_timer_t* timer) {
 
         if (error) {
             spdlog::error("[WiFiMacOS] Scan failed: {}", [[error localizedDescription] UTF8String]);
-            fire_event("SCAN_COMPLETE", "");
+            dispatch_event("SCAN_COMPLETE", "");
             return;
         }
 
@@ -216,7 +195,8 @@ void WifiBackendMacOS::scan_timer_callback([[maybe_unused]] lv_timer_t* timer) {
 
             WiFiNetwork wifi_net;
             wifi_net.ssid = [ssid UTF8String];
-            wifi_net.signal_strength = rssi_to_percentage(static_cast<int>([network rssiValue]));
+            wifi_net.signal_strength =
+                wifi_signal_percent_from_dbm(static_cast<int>([network rssiValue]));
 
             // Determine security type
             bool is_secured = false;
@@ -254,7 +234,7 @@ void WifiBackendMacOS::scan_timer_callback([[maybe_unused]] lv_timer_t* timer) {
         }
 
         spdlog::info("[WiFiMacOS] Scan complete: {} networks found", discovered.size());
-        fire_event("SCAN_COMPLETE", "");
+        dispatch_event("SCAN_COMPLETE", "");
     }
 }
 
@@ -275,7 +255,8 @@ WiFiError WifiBackendMacOS::get_scan_results(std::vector<WiFiNetwork>& networks)
 // Connection Management
 // ============================================================================
 
-WiFiError WifiBackendMacOS::connect_network(const std::string& ssid, const std::string& password) {
+WiFiError WifiBackendMacOS::connect_network(const std::string& ssid, const std::string& password,
+                                            bool) {
     if (!running_) {
         return WiFiError(WiFiResult::NOT_INITIALIZED, "Backend not started",
                          "WiFi system not initialized", "");
@@ -325,7 +306,7 @@ void WifiBackendMacOS::connect_timer_callback([[maybe_unused]] lv_timer_t* timer
         if (!iface) {
             spdlog::error("[WiFiMacOS] No WiFi interface available for connection");
             connection_in_progress_ = false;
-            fire_event("DISCONNECTED", "");
+            dispatch_event("DISCONNECTED", "");
             return;
         }
 
@@ -339,7 +320,7 @@ void WifiBackendMacOS::connect_timer_callback([[maybe_unused]] lv_timer_t* timer
             spdlog::error("[WiFiMacOS] Network not found: {}",
                           helix::redact::ssid(connecting_ssid_));
             connection_in_progress_ = false;
-            fire_event("DISCONNECTED", connecting_ssid_);
+            dispatch_event("DISCONNECTED", connecting_ssid_);
             return;
         }
 
@@ -358,11 +339,11 @@ void WifiBackendMacOS::connect_timer_callback([[maybe_unused]] lv_timer_t* timer
         if (success) {
             spdlog::info("[WiFiMacOS] Successfully connected to: {}",
                          helix::redact::ssid(connecting_ssid_));
-            fire_event("CONNECTED", connecting_ssid_);
+            dispatch_event("CONNECTED", connecting_ssid_);
         } else {
             spdlog::error("[WiFiMacOS] Connection failed: {}",
                           error ? [[error localizedDescription] UTF8String] : "unknown error");
-            fire_event("AUTH_FAILED", connecting_ssid_);
+            dispatch_event("AUTH_FAILED", connecting_ssid_);
         }
 
         connection_in_progress_ = false;
@@ -384,7 +365,7 @@ WiFiError WifiBackendMacOS::disconnect_network() {
 
         [iface disassociate];
         spdlog::info("[WiFiMacOS] Disconnected from network");
-        fire_event("DISCONNECTED", "");
+        dispatch_event("DISCONNECTED", "");
     }
 
     return WiFiErrorHelper::success();
@@ -468,11 +449,13 @@ WifiBackend::ConnectionStatus WifiBackendMacOS::get_status() {
                 status.bssid = [bssid UTF8String];
             }
 
-            status.signal_strength = rssi_to_percentage(static_cast<int>([iface rssiValue]));
+            status.signal_strength =
+                wifi_signal_percent_from_dbm(static_cast<int>([iface rssiValue]));
 
-            // Get IP address (requires additional work, simplified for now)
-            // Would need to query network interfaces via getifaddrs() or similar
-            status.ip_address = ""; // TODO: Implement IP address query
+            // macOS is a development host only, never a deployment target, so
+            // the address stays blank rather than growing a getifaddrs() walk
+            // no user would ever see.
+            status.ip_address = "";
         }
     }
 
@@ -594,20 +577,6 @@ WiFiError WifiBackendMacOS::check_location_permission() {
 // ============================================================================
 // Helper Functions
 // ============================================================================
-
-int WifiBackendMacOS::rssi_to_percentage(int rssi) {
-    // Standard WiFi RSSI to percentage conversion
-    // -50 dBm or better = 100%
-    // -100 dBm or worse = 0%
-
-    if (rssi >= -50)
-        return 100;
-    if (rssi <= -100)
-        return 0;
-
-    // Linear interpolation
-    return 2 * (rssi + 100);
-}
 
 std::string WifiBackendMacOS::extract_security_type(void* network_ptr, bool& is_secured) {
     @autoreleasepool {

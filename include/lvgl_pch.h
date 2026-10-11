@@ -1,17 +1,17 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// Precompiled header for LVGL and common includes
-// This header is precompiled to speed up build times (30-50% faster clean builds)
-//
-// Only include headers that are:
+// Forced include for LVGL and common includes
+// The build passes `-include include/lvgl_pch.h` to every app and test C++
+// source, so everything here is visible without an #include. It is not
+// precompiled: each TU parses it, so keep it to headers that are:
 // 1. Used frequently across many translation units
 // 2. Rarely change (external libraries, stable APIs)
 // 3. Heavy to parse (LVGL, STL containers)
 
 #pragma once
 
-// LVGL core headers (processed 200+ times without PCH)
+// LVGL core headers
 #include "lvgl/lvgl.h"
 
 // Helix XML engine (extracted from LVGL, standalone since v9.5 removed XML)

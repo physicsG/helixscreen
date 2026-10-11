@@ -9,6 +9,10 @@
 #include <cstring>
 #include <random>
 
+#if defined(ESP_PLATFORM)
+#include "esp_random.h"
+#endif
+
 namespace helix::redact {
 
 namespace {
@@ -28,12 +32,16 @@ constexpr uint64_t IP_DOMAIN = 0x4950'0000'0000'0003ULL;
 uint64_t boot_salt() {
     static const uint64_t value = [] {
         uint64_t v = 0;
+#if defined(ESP_PLATFORM)
+        v = (static_cast<uint64_t>(esp_random()) << 32) ^ static_cast<uint64_t>(esp_random());
+#else
         try {
             std::random_device rd;
             v = (static_cast<uint64_t>(rd()) << 32) ^ static_cast<uint64_t>(rd());
         } catch (const std::exception&) {
             v = 0; // fall through to the clock below
         }
+#endif
         if (v == 0) {
             // Some embedded libcs ship a std::random_device that returns a
             // constant. A predictable salt is still far better than none, but

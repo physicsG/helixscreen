@@ -18,12 +18,10 @@
       <!-- Icon -->
       <icon src="refresh" size="lg" variant="primary"/>
       <!-- Title -->
-      <text_heading name="dialog_title"
-                    width="100%" text="Restart Required" translation_tag="Restart Required" style_text_align="center"/>
+      <text_heading name="dialog_title" width="100%" text="Restart Required" style_text_align="center"/>
       <!-- Message -->
       <text_muted name="dialog_message"
-                  width="100%" text="Some settings will take effect after restart."
-                  translation_tag="Some settings will take effect after restart." long_mode="wrap"
+                  width="100%" text="Some settings will take effect after restart." long_mode="wrap"
                   style_text_align="center"/>
     </lv_obj>
     <!-- Button row -->

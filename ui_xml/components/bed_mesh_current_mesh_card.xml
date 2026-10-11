@@ -41,7 +41,7 @@
             style_pad_right="#space_md" style_pad_top="#space_sm" style_pad_bottom="#space_sm" style_pad_gap="#space_sm"
             scrollable="false">
       <icon src="info" size="sm" variant="success"/>
-      <text_body text="Current Mesh" translation_tag="Current Mesh" flex_grow="1"/>
+      <text_body text="Current Mesh" flex_grow="1"/>
     </lv_obj>
     <!-- Divider -->
     <divider_horizontal/>
@@ -50,14 +50,14 @@
             height="content" flex_flow="column" style_pad_all="#space_md" style_pad_gap="#space_xs" scrollable="false">
       <!-- Name row -->
       <lv_obj width="100%" flex_flow="row" style_pad_all="0" scrollable="false">
-        <text_small text="Name" translation_tag="Name"/>
+        <text_small text="Name"/>
         <text_small name="mesh_name_value"
                     bind_text="bed_mesh_profile_name" flex_grow="1" style_text_align="right" style_pad_left="#space_sm"
                     style_text_color="#success"/>
       </lv_obj>
       <!-- Size row -->
       <lv_obj width="100%" flex_flow="row" style_pad_all="0" scrollable="false">
-        <text_small text="Size" translation_tag="Size"/>
+        <text_small text="Size"/>
         <text_small name="mesh_size_value"
                     bind_text="bed_mesh_dimensions" flex_grow="1" style_text_align="right" style_pad_left="#space_sm"
                     style_text_color="#text"/>
@@ -101,7 +101,7 @@
       <lv_obj width="100%" flex_flow="column" style_pad_all="0" scrollable="false">
         <bind_flag_if_eq subject="bed_mesh_hide_stat_rows" flag="hidden" ref_value="1"/>
         <lv_obj width="100%" flex_flow="row" style_pad_all="0" scrollable="false">
-          <text_small name="mesh_max_label" text="Max" translation_tag="Max"/>
+          <text_small name="mesh_max_label" text="Max"/>
           <text_small name="mesh_max_coord_inline" bind_text="bed_mesh_max_coord" style_pad_left="#space_xxs">
             <bind_flag_if_eq subject="ui_is_portrait" flag="hidden" ref_value="1"/>
           </text_small>
@@ -119,7 +119,7 @@
       <lv_obj width="100%" flex_flow="column" style_pad_all="0" scrollable="false">
         <bind_flag_if_eq subject="bed_mesh_hide_stat_rows" flag="hidden" ref_value="1"/>
         <lv_obj width="100%" flex_flow="row" style_pad_all="0" scrollable="false">
-          <text_small name="mesh_min_label" text="Min" translation_tag="Min"/>
+          <text_small name="mesh_min_label" text="Min"/>
           <text_small name="mesh_min_coord_inline" bind_text="bed_mesh_min_coord" style_pad_left="#space_xxs">
             <bind_flag_if_eq subject="ui_is_portrait" flag="hidden" ref_value="1"/>
           </text_small>
@@ -134,7 +134,7 @@
       </lv_obj>
       <!-- Z Range row -->
       <lv_obj width="100%" flex_flow="row" style_pad_all="0" scrollable="false">
-        <text_small text="Z Range" translation_tag="Z Range"/>
+        <text_small text="Z Range"/>
         <text_small name="mesh_range_value"
                     bind_text="bed_mesh_variance" flex_grow="1" style_text_align="right" style_pad_left="#space_sm"
                     style_text_color="#text"/>

@@ -28,6 +28,7 @@
 #include "phomemo_printer.h"
 #include "safe_resolve.h"
 #include "sheet_label_layout.h"
+#include "text_io.h"
 #include "usb_printer_detector.h"
 
 #include <spdlog/spdlog.h>
@@ -35,6 +36,7 @@
 #include <algorithm>
 #include <cctype>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 namespace helix {
@@ -149,34 +151,36 @@ void print_spool_label(const SpoolInfo& spool, PrintCallback callback) {
         ipp_printer.set_label_count(settings.get_label_count());
         ipp_printer.print(bitmap, label_size, callback);
     } else if (is_usb) {
-        auto detected = UsbPrinterDetector().scan();
-        uint16_t vid = settings.get_usb_vid();
-        uint16_t pid = settings.get_usb_pid();
+        // libusb opens every matching device, too slow for the UI thread.
+        UsbPrinterDetector::scan_async(
+            [bitmap, label_size = label_size, callback](std::vector<UsbPrinterInfo> detected) {
+                auto& usb_settings = LabelPrinterSettingsManager::instance();
+                uint16_t vid = usb_settings.get_usb_vid();
+                uint16_t pid = usb_settings.get_usb_pid();
 
-        bool found = false;
-        for (const auto& d : detected) {
-            if (d.vid == vid && d.pid == pid) {
-                found = true;
-                break;
-            }
-        }
+                bool found = false;
+                for (const auto& d : detected) {
+                    if (d.vid == vid && d.pid == pid) {
+                        found = true;
+                        break;
+                    }
+                }
 
-        if (!found && !detected.empty()) {
-            vid = detected[0].vid;
-            pid = detected[0].pid;
-            spdlog::info("[LabelPrinter] Configured USB printer not found, using {}",
-                         detected[0].product_name);
-        } else if (!found) {
-            helix::ui::queue_update([callback]() {
-                if (callback)
-                    callback(false, lv_tr("No USB printer detected"));
+                if (!found && !detected.empty()) {
+                    vid = detected[0].vid;
+                    pid = detected[0].pid;
+                    spdlog::info("[LabelPrinter] Configured USB printer not found, using {}",
+                                 detected[0].product_name);
+                } else if (!found) {
+                    if (callback)
+                        callback(false, lv_tr("No USB printer detected"));
+                    return;
+                }
+
+                static PhomemoPrinter usb_printer;
+                usb_printer.set_device(vid, pid, usb_settings.get_usb_serial());
+                usb_printer.print(bitmap, label_size, callback);
             });
-            return;
-        }
-
-        static PhomemoPrinter usb_printer;
-        usb_printer.set_device(vid, pid, settings.get_usb_serial());
-        usb_printer.print(bitmap, label_size, callback);
     } else if (is_bt) {
         const auto bt_address = settings.get_bt_address();
         const auto bt_name = settings.get_bt_name();
@@ -249,7 +253,7 @@ void print_spool_label(const SpoolInfo& spool, PrintCallback callback) {
 
             auto bitmap = LabelRenderer::render(spool, actual_preset, actual_size);
             if (bitmap.empty()) {
-                helix::ui::queue_update([callback]() {
+                helix::ui::queue_update("label_printer_utils::print_spool_label", [callback]() {
                     if (callback)
                         callback(false, lv_tr("Failed to render label"));
                 });
@@ -271,8 +275,7 @@ std::string friendly_label_printer_error(const std::string& raw) {
     // the intended branch to be skipped (makeid emits "Write failed at chunk"
     // with a capital W; niimbot/phomemo BT emit "BLE write failed" lowercase).
     std::string lower = raw;
-    std::transform(lower.begin(), lower.end(), lower.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
+    lower = helix::text_io::to_lower(lower);
 
     // BR/EDR transport wedged — stale pairing or dual-mode confusion. The
     // ConnectProfile fallback in bt_ble.cpp already retries LE once, so if we

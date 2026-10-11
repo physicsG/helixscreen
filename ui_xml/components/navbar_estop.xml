@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component>
+  <!-- The E-stop that sits over the navbar's nav_estop_slot while a
+       job holds the machine. It lives on the screen rather than in the navbar so
+       it can stay bright and tappable above overlay and modal backdrops, which
+       dim the rest of the navbar (NavigationManager keeps it in place). -->
+  <view extends="ui_button"
+        width="#nav_estop_size" height="#nav_estop_size" style_radius="9999" variant="danger" focusable="false"
+        hidden="true">
+    <bind_flag_if_eq subject="estop_visible" flag="hidden" ref_value="0"/>
+    <icon src="alert_octagon" size="sm" variant="text" align="center" clickable="false" event_bubble="true"/>
+    <event_cb trigger="clicked" callback="emergency_stop_clicked"/>
+  </view>
+</component>

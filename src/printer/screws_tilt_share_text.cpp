@@ -3,24 +3,11 @@
 
 #include "screws_tilt_share_text.h"
 
+#include "text_io.h"
+
 #include <cstdio>
 
 namespace helix {
-
-namespace {
-
-/// Trim leading/trailing ASCII whitespace — Klipper's adjustment strings
-/// occasionally carry padding, and a QR payload should not.
-std::string trimmed(const std::string& in) {
-    const auto first = in.find_first_not_of(" \t\r\n");
-    if (first == std::string::npos) {
-        return {};
-    }
-    const auto last = in.find_last_not_of(" \t\r\n");
-    return in.substr(first, last - first + 1);
-}
-
-} // namespace
 
 std::string format_screw_share_z(const ScrewTiltResult& screw) {
     char buf[32];
@@ -32,7 +19,7 @@ std::string format_screw_share_adjustment(const ScrewTiltResult& screw, const ch
     if (screw.is_reference) {
         return base_label ? base_label : SCREWS_TILT_SHARE_BASE_LABEL;
     }
-    std::string adjustment = trimmed(screw.adjustment);
+    std::string adjustment(helix::text_io::trim(screw.adjustment));
     if (adjustment.empty()) {
         return SCREWS_TILT_SHARE_NO_ADJUSTMENT;
     }

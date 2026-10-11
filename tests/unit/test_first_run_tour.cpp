@@ -1,7 +1,12 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "ui_nav_manager.h"
+#include "ui_wizard.h"
+
 #include "../helix_test_fixture.h"
+#include "../lvgl_ui_test_fixture.h"
+#include "app_globals.h"
 #include "config.h"
 #include "first_run_tour.h"
 #include "tour_steps.h"
@@ -22,6 +27,9 @@ void reset_tour_settings() {
     // In the singleton-without-init test environment, active_printer_id_ is empty,
     // so the root-level key is the one that's read.
     cfg->set<bool>("/wizard_completed", true);
+    // Edit mode gates the tour, and the subject is global, so a case that leaves
+    // it set would decide every case that runs after it.
+    lv_subject_set_int(&get_home_edit_mode_subject(), 0);
     // In-memory singleton state is left clean by the public API used in these
     // tests: start()/skip() always pair, and advance() past the last step calls
     // finish() which resets running_. No explicit reset needed.
@@ -53,6 +61,39 @@ TEST_CASE("FirstRunTour gate: re-triggers when last_seen_version is behind TOUR_
     Config::get_instance()->set<int>("/tour/last_seen_version", 0);
     // TOUR_VERSION is 1; last_seen=0 < 1, so tour should re-trigger.
     REQUIRE(FirstRunTour::should_auto_start() == true);
+}
+
+TEST_CASE("FirstRunTour gate: blocks while home grid edit mode is active", "[tour]") {
+    reset_tour_settings();
+    // Pin that the gate is otherwise open, so a gate stuck at false cannot pass.
+    REQUIRE(FirstRunTour::should_auto_start() == true);
+
+    lv_subject_set_int(&get_home_edit_mode_subject(), 1);
+    REQUIRE(FirstRunTour::should_auto_start() == false);
+
+    lv_subject_set_int(&get_home_edit_mode_subject(), 0);
+    REQUIRE(FirstRunTour::should_auto_start() == true);
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture, "FirstRunTour: wizard completion re-evaluates the gate",
+                 "[tour][wizard]") {
+    reset_tour_settings();
+    Config::get_instance()->set<bool>("/wizard_completed", false);
+
+    // Home is already the active panel while the wizard owns the screen, so the
+    // deferred set_active(PanelId::Home) returns without activating anything.
+    // on_activate() is the tour's other entry point and does not run here.
+    REQUIRE(NavigationManager::instance().get_active() == helix::PanelId::Home);
+    REQUIRE(FirstRunTour::should_auto_start() == false);
+
+    auto& tour = FirstRunTour::instance();
+    REQUIRE(tour.is_running() == false);
+
+    ui_wizard_complete();
+    process_lvgl(200); // past the 100ms nav timer, and drains the async start
+
+    REQUIRE(tour.is_running() == true);
+    tour.skip();
 }
 
 TEST_CASE("FirstRunTour mark_completed writes both flags", "[tour]") {

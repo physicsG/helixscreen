@@ -39,6 +39,7 @@
 
 #include "esp_event.h"
 #include "esp_log.h"
+#include "esp_moonraker_client.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
@@ -46,6 +47,8 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
+#include "wall_clock_esp.h"
+#include "wifi_ap_steering.h"
 #include "wifi_backend.h"
 
 #include <spdlog/spdlog.h>
@@ -54,8 +57,8 @@
 #include <atomic>
 #include <cstdio>
 #include <cstring>
-#include <map>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -82,6 +85,10 @@ constexpr int RETRY_BACKOFF_MAX_SHIFT = 4;             // 2s * 2^4 = 32s (clampe
 // Bounds internal RAM for scan-result caching regardless of how many APs are
 // in range (R constraint: "no unbounded scan-result accumulation").
 constexpr uint16_t MAX_SCAN_RESULTS = 24;
+
+// Disconnects tolerated from an access point steering chose before falling back
+// to joining by signal. One failed association is common and not a verdict.
+constexpr int PINNED_JOIN_ATTEMPTS = 3;
 
 int rssi_to_percent(int8_t rssi) {
     // Common linear mapping: -100dBm floor -> 0%, -50dBm ceiling -> 100%.
@@ -209,11 +216,19 @@ namespace {
 
 static const char* TAG = "wifi_backend_esp";
 
+class WifiBackendEsp;
+
+// The backend the Moonraker client's link-drop reports reach. One station
+// exists per process.
+std::atomic<WifiBackendEsp*> s_steering_backend{nullptr};
+
 class WifiBackendEsp : public WifiBackend {
   public:
     WifiBackendEsp() = default;
 
     ~WifiBackendEsp() override {
+        WifiBackendEsp* self = this;
+        s_steering_backend.compare_exchange_strong(self, nullptr);
         stop();
     }
 
@@ -277,6 +292,10 @@ class WifiBackendEsp : public WifiBackend {
             ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
                                                        &WifiBackendEsp::ip_event_handler, this));
             handlers_registered_ = true;
+            s_steering_backend.store(this);
+            helix::EspMoonrakerClient::set_link_drop_observer(&WifiBackendEsp::on_link_drop);
+
+            helix::wall_clock_esp::start();
         }
 
         if (!assoc_timeout_timer_) {
@@ -285,6 +304,13 @@ class WifiBackendEsp : public WifiBackend {
             assoc_args.arg = this;
             assoc_args.name = "wifi_assoc_to";
             ESP_ERROR_CHECK(esp_timer_create(&assoc_args, &assoc_timeout_timer_));
+        }
+        if (!steer_timer_) {
+            esp_timer_create_args_t steer_args = {};
+            steer_args.callback = &WifiBackendEsp::steer_cb;
+            steer_args.arg = this;
+            steer_args.name = "wifi_steer";
+            ESP_ERROR_CHECK(esp_timer_create(&steer_args, &steer_timer_));
         }
         if (!retry_timer_) {
             esp_timer_create_args_t retry_args = {};
@@ -305,6 +331,14 @@ class WifiBackendEsp : public WifiBackend {
                              std::string("esp_wifi_start: ") + esp_err_to_name(start_rc),
                              "WiFi hardware start failed");
         }
+        // Modem sleep (the driver default) holds traffic until the AP's next DTIM wake-up,
+        // which on a weak link adds seconds of latency and loss, enough to stall a large
+        // Moonraker reply. The panel is mains powered, so it saves nothing that matters.
+        const esp_err_t ps_rc = esp_wifi_set_ps(WIFI_PS_NONE);
+        if (ps_rc != ESP_OK) {
+            spdlog::warn("[WifiBackend] esp32: esp_wifi_set_ps(NONE) failed: {}",
+                         esp_err_to_name(ps_rc));
+        }
 
         running_ = true;
         spdlog::info("[WifiBackend] esp32: station started (ssid configured: {})",
@@ -315,12 +349,12 @@ class WifiBackendEsp : public WifiBackend {
     void start_async() override {
         WiFiError result = start();
         if (result.success()) {
-            fire_event("READY");
+            dispatch_event("READY");
         } else if (result.result != WiFiResult::NOT_INITIALIZED) {
             // NOT_INITIALIZED here means "gate closed" (deferred, not a real
             // failure) — no INIT_FAILED noise for that; the retry_async()
             // after the gate opens is the real attempt.
-            fire_event("INIT_FAILED", result.technical_msg);
+            dispatch_event("INIT_FAILED", result.technical_msg);
         }
     }
 
@@ -330,6 +364,9 @@ class WifiBackendEsp : public WifiBackend {
         }
         if (retry_timer_) {
             esp_timer_stop(retry_timer_);
+        }
+        if (steer_timer_) {
+            esp_timer_stop(steer_timer_);
         }
         if (!running_) {
             return;
@@ -346,18 +383,6 @@ class WifiBackendEsp : public WifiBackend {
 
     bool is_running() const override {
         return running_;
-    }
-
-    void register_event_callback(const std::string& name,
-                                 std::function<void(const std::string&)> callback) override {
-        std::lock_guard<std::mutex> lock(callbacks_mutex_);
-        auto it = callbacks_.find(name);
-        if (it == callbacks_.end()) {
-            callbacks_.insert({name, std::move(callback)});
-        } else {
-            spdlog::warn("[WifiBackend] esp32: callback '{}' already registered (not replacing)",
-                         name);
-        }
     }
 
     WiFiError trigger_scan() override {
@@ -386,7 +411,7 @@ class WifiBackendEsp : public WifiBackend {
         return WiFiErrorHelper::success();
     }
 
-    WiFiError connect_network(const std::string& ssid, const std::string& password) override {
+    WiFiError connect_network(const std::string& ssid, const std::string& password, bool) override {
         if (!running_) {
             return WiFiError(WiFiResult::NOT_INITIALIZED, "Backend not started",
                              "WiFi system not ready");
@@ -414,6 +439,10 @@ class WifiBackendEsp : public WifiBackend {
             own_disconnect_pending_.store(true);
         }
 
+        {
+            std::lock_guard<std::mutex> lock(cfg_mutex_);
+            pinned_bssid_.reset();
+        }
         apply_wifi_config_locked();
 
         retry_count_ = 0;
@@ -460,9 +489,6 @@ class WifiBackendEsp : public WifiBackend {
     esp_netif_t* netif_ = nullptr;
     bool handlers_registered_ = false;
 
-    std::mutex callbacks_mutex_;
-    std::map<std::string, std::function<void(const std::string&)>> callbacks_;
-
     std::mutex networks_mutex_;
     std::vector<WiFiNetwork> cached_networks_;
 
@@ -485,7 +511,26 @@ class WifiBackendEsp : public WifiBackend {
     // the NEW attempt that follows immediately after.
     std::atomic<bool> own_disconnect_pending_{false};
 
-    int retry_count_ = 0;
+    // Access point associations are held to after steering away from a
+    // stalling one; guarded by cfg_mutex_. After PINNED_JOIN_ATTEMPTS
+    // unrequested disconnects in a row it is dropped and the station joins by
+    // signal. That join cannot honour the avoid list: the driver can be held
+    // to one BSSID but cannot exclude one, and finding another first would
+    // need a scan before every rejoin. Landing back on an avoided access point
+    // that still stalls starts the next run of stalled drops.
+    std::optional<helix::WifiApSteering::Bssid> pinned_bssid_;
+    int pinned_join_failures_ = 0;
+
+    // Steering runs on the esp_timer task: the websocket task and the system
+    // event loop that report to it have too little stack left for the logging
+    // and the scan.
+    esp_timer_handle_t steer_timer_ = nullptr;
+    std::atomic<int64_t> pending_drop_silence_ms_{-1};
+    std::mutex steering_mutex_;
+    helix::WifiApSteering steering_;
+    std::optional<std::vector<helix::WifiApSteering::Candidate>> scanned_candidates_;
+
+    std::atomic<int> retry_count_{0};
     esp_timer_handle_t assoc_timeout_timer_ = nullptr;
     esp_timer_handle_t retry_timer_ = nullptr;
 
@@ -568,6 +613,15 @@ class WifiBackendEsp : public WifiBackend {
                      sizeof(wifi_config.sta.password) - 1);
         wifi_config.sta.threshold.authmode =
             current_psk_.empty() ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK;
+        // The driver's default fast scan joins the first AP answering for the
+        // SSID. On a multi-AP network that is often a distant one, where lost
+        // packets stall Moonraker until its 25s pong timeout drops us.
+        wifi_config.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+        wifi_config.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
+        if (pinned_bssid_) {
+            wifi_config.sta.bssid_set = true;
+            std::memcpy(wifi_config.sta.bssid, pinned_bssid_->data(), pinned_bssid_->size());
+        }
         esp_err_t rc = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
         if (rc != ESP_OK) {
             spdlog::warn("[WifiBackend] esp32: esp_wifi_set_config failed: {}",
@@ -583,28 +637,6 @@ class WifiBackendEsp : public WifiBackend {
     bool has_password_configured() {
         std::lock_guard<std::mutex> lock(cfg_mutex_);
         return !current_psk_.empty();
-    }
-
-    // ------------------------------------------------------------------
-    // Event plumbing
-    // ------------------------------------------------------------------
-
-    void fire_event(const std::string& event_name, const std::string& data = "") {
-        std::function<void(const std::string&)> cb;
-        {
-            std::lock_guard<std::mutex> lock(callbacks_mutex_);
-            auto it = callbacks_.find(event_name);
-            if (it == callbacks_.end()) {
-                return;
-            }
-            cb = it->second;
-        }
-        try {
-            cb(data);
-        } catch (const std::exception& e) {
-            spdlog::error("[WifiBackend] esp32: exception in callback '{}': {}", event_name,
-                          e.what());
-        }
     }
 
     void arm_assoc_timeout() {
@@ -625,7 +657,7 @@ class WifiBackendEsp : public WifiBackend {
         if (!retry_timer_ || !has_ssid_configured()) {
             return;
         }
-        int shift = std::min(retry_count_, RETRY_BACKOFF_MAX_SHIFT);
+        int shift = std::min(retry_count_.load(), RETRY_BACKOFF_MAX_SHIFT);
         uint64_t backoff_us =
             std::min<uint64_t>(RETRY_BACKOFF_FLOOR_US << shift, RETRY_BACKOFF_CAP_US);
         esp_timer_stop(retry_timer_);
@@ -637,7 +669,7 @@ class WifiBackendEsp : public WifiBackend {
     // threading rule). We do zero heap-heavy or teardown work here directly;
     // esp_wifi_connect()/disconnect() are lightweight driver calls (the
     // vendor's own reference pattern uses them directly from this context),
-    // and fire_event() just invokes the registered WiFiManager callback,
+    // and dispatch_event() just invokes the registered WiFiManager callback,
     // which marshals real UI/subject work via ui_queue_update itself.
     static void wifi_event_handler(void* arg, esp_event_base_t base, int32_t id, void* data) {
         auto* self = static_cast<WifiBackendEsp*>(arg);
@@ -657,6 +689,15 @@ class WifiBackendEsp : public WifiBackend {
             // Associated (pre-DHCP) — cancel the assoc-timeout; GOT_IP (or a
             // later disconnect) resolves the attempt from here.
             self->cancel_assoc_timeout();
+            // A disconnect we expected and never got must not swallow the next real one.
+            self->own_disconnect_pending_.store(false);
+            if (data) {
+                helix::WifiApSteering::Bssid bssid{};
+                std::memcpy(bssid.data(), static_cast<wifi_event_sta_connected_t*>(data)->bssid,
+                            bssid.size());
+                std::lock_guard<std::mutex> lock(self->steering_mutex_);
+                self->steering_.on_associated(bssid);
+            }
         } else if (id == WIFI_EVENT_STA_DISCONNECTED) {
             self->on_disconnected(data);
         } else if (id == WIFI_EVENT_SCAN_DONE) {
@@ -710,12 +751,26 @@ class WifiBackendEsp : public WifiBackend {
             std::lock_guard<std::mutex> lock(status_mutex_);
             cached_status_.connected = false;
         }
+        bool unpinned = false;
+        {
+            std::lock_guard<std::mutex> lock(cfg_mutex_);
+            if (pinned_bssid_ && ++pinned_join_failures_ >= PINNED_JOIN_ATTEMPTS) {
+                pinned_bssid_.reset();
+                unpinned = true;
+            }
+        }
+        if (unpinned) {
+            spdlog::info("[WifiBackend] esp32: steered-to access point failed {} times; rejoining "
+                         "by signal",
+                         PINNED_JOIN_ATTEMPTS);
+            apply_wifi_config_locked();
+        }
 
         bool was_explicit = explicit_connect_pending_.exchange(false);
         if (was_explicit && has_password_configured()) {
-            fire_event("AUTH_FAILED", "Connection failed");
+            dispatch_event("AUTH_FAILED", "Connection failed");
         } else {
-            fire_event("DISCONNECTED");
+            dispatch_event("DISCONNECTED");
         }
 
         schedule_retry();
@@ -725,6 +780,10 @@ class WifiBackendEsp : public WifiBackend {
         cancel_assoc_timeout();
         explicit_connect_pending_.store(false);
         retry_count_ = 0;
+        {
+            std::lock_guard<std::mutex> lock(cfg_mutex_);
+            pinned_join_failures_ = 0;
+        }
 
         char ip_str[16] = {};
         if (event) {
@@ -761,7 +820,135 @@ class WifiBackendEsp : public WifiBackend {
         }
 
         ESP_LOGI(TAG, "got ip: %s", ip_str);
-        fire_event("CONNECTED");
+        dispatch_event("CONNECTED");
+    }
+
+    // Websocket task: hands a stalled drop to steer_cb().
+    static void on_link_drop(int64_t silence_ms) {
+        WifiBackendEsp* self = s_steering_backend.load();
+        if (!self || !self->steer_timer_ ||
+            silence_ms < helix::WifiApSteering::LINK_STALL_SILENCE_MS) {
+            return;
+        }
+        self->pending_drop_silence_ms_.store(silence_ms);
+        esp_timer_start_once(self->steer_timer_, 1); // already armed: that run takes this drop
+    }
+
+    static void steer_cb(void* arg) {
+        auto* self = static_cast<WifiBackendEsp*>(arg);
+        const int64_t silence_ms = self->pending_drop_silence_ms_.exchange(-1);
+        if (silence_ms >= 0) {
+            self->count_stalled_drop(silence_ms);
+        }
+        std::optional<std::vector<helix::WifiApSteering::Candidate>> candidates;
+        {
+            std::lock_guard<std::mutex> lock(self->steering_mutex_);
+            candidates.swap(self->scanned_candidates_);
+        }
+        if (candidates) {
+            self->steer_to_best_of(*candidates);
+        }
+    }
+
+    // Counts the drop against the current access point and, once it has
+    // stalled often enough, scans for another one.
+    void count_stalled_drop(int64_t silence_ms) {
+        bool leave = false;
+        int drops = 0;
+        std::string ap;
+        {
+            std::lock_guard<std::mutex> lock(steering_mutex_);
+            leave = steering_.on_link_drop(esp_timer_get_time() / 1000, silence_ms);
+            drops = steering_.stalled_drops();
+            ap = helix::redact::mac(helix::format_bssid(steering_.current()));
+        }
+        spdlog::info("[WifiBackend] esp32: Moonraker link silent {}ms before the drop via {} "
+                     "({}/{} stalled drops)",
+                     silence_ms, ap, drops, helix::WifiApSteering::LINK_STALL_DROPS);
+        if (!leave) {
+            return;
+        }
+        // Recorded before the start so a fast SCAN_DONE still finds it.
+        {
+            std::lock_guard<std::mutex> lock(steering_mutex_);
+            steering_.scan_started(esp_timer_get_time() / 1000);
+        }
+        wifi_scan_config_t scan_cfg = {};
+        esp_err_t rc = esp_wifi_scan_start(&scan_cfg, false);
+        if (rc == ESP_OK) {
+            spdlog::info("[WifiBackend] esp32: scanning for another access point than {}", ap);
+        } else {
+            {
+                std::lock_guard<std::mutex> lock(steering_mutex_);
+                steering_.take_scan_request(esp_timer_get_time() / 1000);
+            }
+            // The next stalled drop asks again.
+            spdlog::warn("[WifiBackend] esp32: scan for another access point not started: {}",
+                         esp_err_to_name(rc));
+        }
+    }
+
+    // System event loop task: keeps the SSID's access points for steer_cb().
+    void collect_steering_candidates(const std::vector<wifi_ap_record_t>& records) {
+        std::string ssid;
+        {
+            std::lock_guard<std::mutex> lock(cfg_mutex_);
+            ssid = current_ssid_;
+        }
+        std::vector<helix::WifiApSteering::Candidate> candidates;
+        for (const wifi_ap_record_t& rec : records) {
+            if (ssid != reinterpret_cast<const char*>(rec.ssid)) {
+                continue;
+            }
+            helix::WifiApSteering::Candidate c;
+            std::memcpy(c.bssid.data(), rec.bssid, c.bssid.size());
+            c.rssi = rec.rssi;
+            candidates.push_back(c);
+        }
+        {
+            std::lock_guard<std::mutex> lock(steering_mutex_);
+            scanned_candidates_ = std::move(candidates);
+        }
+        esp_timer_start_once(steer_timer_, 1);
+    }
+
+    void steer_to_best_of(const std::vector<helix::WifiApSteering::Candidate>& candidates) {
+        std::optional<helix::WifiApSteering::Bssid> pick;
+        std::string from;
+        {
+            std::lock_guard<std::mutex> lock(steering_mutex_);
+            from = helix::redact::mac(helix::format_bssid(steering_.current()));
+            pick = steering_.pick_alternative(candidates, esp_timer_get_time() / 1000);
+        }
+        if (!pick) {
+            spdlog::info("[WifiBackend] esp32: no other usable access point among {} for this "
+                         "SSID; staying on {}",
+                         candidates.size(), from);
+            return;
+        }
+        int rssi = 0;
+        for (const auto& c : candidates) {
+            if (c.bssid == *pick) {
+                rssi = c.rssi;
+            }
+        }
+        spdlog::info("[WifiBackend] esp32: steering from {} to {} ({} dBm), avoiding {} for {} min",
+                     from, helix::redact::mac(helix::format_bssid(*pick)), rssi, from,
+                     helix::WifiApSteering::AVOID_MS / 60'000);
+        {
+            std::lock_guard<std::mutex> lock(cfg_mutex_);
+            pinned_bssid_ = *pick;
+            pinned_join_failures_ = 0;
+        }
+        wifi_ap_record_t ap_info = {};
+        const bool associated = esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK;
+        if (esp_wifi_disconnect() == ESP_OK && associated) {
+            own_disconnect_pending_.store(true);
+        }
+        apply_wifi_config_locked();
+        retry_count_ = 0;
+        arm_assoc_timeout();
+        esp_wifi_connect();
     }
 
     void on_scan_done() {
@@ -772,6 +959,15 @@ class WifiBackendEsp : public WifiBackend {
         std::vector<wifi_ap_record_t> records(num);
         if (num > 0) {
             esp_wifi_scan_get_ap_records(&num, records.data());
+        }
+
+        bool steering_scan = false;
+        {
+            std::lock_guard<std::mutex> lock(steering_mutex_);
+            steering_scan = steering_.take_scan_request(esp_timer_get_time() / 1000);
+        }
+        if (steering_scan) {
+            collect_steering_candidates(records);
         }
 
         std::vector<WiFiNetwork> networks;
@@ -815,7 +1011,7 @@ class WifiBackendEsp : public WifiBackend {
             cached_networks_ = std::move(networks);
         }
         ESP_LOGI(TAG, "scan complete: %u networks", static_cast<unsigned>(num));
-        fire_event("SCAN_COMPLETE");
+        dispatch_event("SCAN_COMPLETE");
     }
 };
 

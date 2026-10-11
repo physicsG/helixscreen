@@ -11,8 +11,10 @@
 
 #include "printer_hardware_validation_state.h"
 
+#include "lvgl/src/others/translation/lv_translation.h"
 #include "state/subject_macros.h"
 
+#include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -30,17 +32,15 @@ void PrinterHardwareValidationState::init_subjects(bool register_xml) {
                   register_xml);
 
     // Initialize hardware validation subjects
-    INIT_SUBJECT_INT(hardware_has_issues, 0, subjects_, register_xml);
-    INIT_SUBJECT_INT(hardware_issue_count, 0, subjects_, register_xml);
-    INIT_SUBJECT_INT(hardware_max_severity, 0, subjects_, register_xml);
-    INIT_SUBJECT_INT(hardware_validation_version, 0, subjects_, register_xml);
+    INIT_SUBJECT_INT(hardware_status_level, 0, subjects_, register_xml);
     INIT_SUBJECT_INT(hardware_critical_count, 0, subjects_, register_xml);
     INIT_SUBJECT_INT(hardware_warning_count, 0, subjects_, register_xml);
     INIT_SUBJECT_INT(hardware_info_count, 0, subjects_, register_xml);
     INIT_SUBJECT_INT(hardware_session_count, 0, subjects_, register_xml);
-    INIT_SUBJECT_STRING(hardware_status_title, "Healthy", subjects_, register_xml);
+    INIT_SUBJECT_STRING(hardware_status_title, lv_tr("Healthy"), subjects_, register_xml);
     INIT_SUBJECT_STRING(hardware_status_detail, "", subjects_, register_xml);
-    INIT_SUBJECT_STRING(hardware_issues_label, "No Hardware Issues", subjects_, register_xml);
+    INIT_SUBJECT_STRING(hardware_issues_label, lv_tr("No Hardware Issues"), subjects_,
+                        register_xml);
 
     subjects_initialized_ = true;
     spdlog::trace("[PrinterHardwareValidationState] Subjects initialized successfully");
@@ -60,11 +60,10 @@ void PrinterHardwareValidationState::set_hardware_validation_result(
     const HardwareValidationResult& result) {
     // Store the full result for UI access
     hardware_validation_result_ = result;
+    has_result_ = true;
 
     // Update summary subjects
-    lv_subject_set_int(&hardware_has_issues_, result.has_issues() ? 1 : 0);
-    lv_subject_set_int(&hardware_issue_count_, static_cast<int>(result.total_issue_count()));
-    lv_subject_set_int(&hardware_max_severity_, static_cast<int>(result.max_severity()));
+    lv_subject_set_int(&hardware_status_level_, static_cast<int>(result.headline_level()));
 
     // Update category counts
     lv_subject_set_int(&hardware_critical_count_, static_cast<int>(result.critical_missing.size()));
@@ -75,33 +74,35 @@ void PrinterHardwareValidationState::set_hardware_validation_result(
 
     // Update status text
     if (!result.has_issues()) {
-        snprintf(hardware_status_title_buf_, sizeof(hardware_status_title_buf_), "All Healthy");
-        snprintf(hardware_status_detail_buf_, sizeof(hardware_status_detail_buf_),
-                 "All configured hardware detected");
+        snprintf(hardware_status_title_buf_, sizeof(hardware_status_title_buf_), "%s",
+                 lv_tr("All Healthy"));
+        snprintf(hardware_status_detail_buf_, sizeof(hardware_status_detail_buf_), "%s",
+                 lv_tr("All configured hardware detected"));
     } else {
         size_t total = result.total_issue_count();
-        snprintf(hardware_status_title_buf_, sizeof(hardware_status_title_buf_),
-                 "%zu Issue%s Detected", total, total == 1 ? "" : "s");
+        snprintf(hardware_status_title_buf_, sizeof(hardware_status_title_buf_), "%s",
+                 total == 1 ? lv_tr("1 Issue Detected")
+                            : fmt::format(lv_tr("{} Issues Detected"), total).c_str());
 
         // Build detail string
         std::string detail;
         if (!result.critical_missing.empty()) {
-            detail += std::to_string(result.critical_missing.size()) + " critical";
+            detail += fmt::format(lv_tr("{} critical"), result.critical_missing.size());
         }
         if (!result.expected_missing.empty()) {
             if (!detail.empty())
                 detail += ", ";
-            detail += std::to_string(result.expected_missing.size()) + " missing";
+            detail += fmt::format(lv_tr("{} missing"), result.expected_missing.size());
         }
         if (!result.newly_discovered.empty()) {
             if (!detail.empty())
                 detail += ", ";
-            detail += std::to_string(result.newly_discovered.size()) + " new";
+            detail += fmt::format(lv_tr("{} new"), result.newly_discovered.size());
         }
         if (!result.changed_from_last_session.empty()) {
             if (!detail.empty())
                 detail += ", ";
-            detail += std::to_string(result.changed_from_last_session.size()) + " changed";
+            detail += fmt::format(lv_tr("{} changed"), result.changed_from_last_session.size());
         }
         snprintf(hardware_status_detail_buf_, sizeof(hardware_status_detail_buf_), "%s",
                  detail.c_str());
@@ -112,24 +113,26 @@ void PrinterHardwareValidationState::set_hardware_validation_result(
     // Update issues label for settings panel ("1 Hardware Issue" / "5 Hardware Issues")
     size_t total = result.total_issue_count();
     if (total == 0) {
-        snprintf(hardware_issues_label_buf_, sizeof(hardware_issues_label_buf_),
-                 "No Hardware Issues");
+        snprintf(hardware_issues_label_buf_, sizeof(hardware_issues_label_buf_), "%s",
+                 lv_tr("No Hardware Issues"));
     } else if (total == 1) {
-        snprintf(hardware_issues_label_buf_, sizeof(hardware_issues_label_buf_),
-                 "1 Hardware Issue");
+        snprintf(hardware_issues_label_buf_, sizeof(hardware_issues_label_buf_), "%s",
+                 lv_tr("1 Hardware Issue"));
     } else {
-        snprintf(hardware_issues_label_buf_, sizeof(hardware_issues_label_buf_),
-                 "%zu Hardware Issues", total);
+        snprintf(hardware_issues_label_buf_, sizeof(hardware_issues_label_buf_), "%s",
+                 fmt::format(lv_tr("{} Hardware Issues"), total).c_str());
     }
     lv_subject_copy_string(&hardware_issues_label_, hardware_issues_label_buf_);
 
-    // Increment version to notify UI observers
-    int version = lv_subject_get_int(&hardware_validation_version_);
-    lv_subject_set_int(&hardware_validation_version_, version + 1);
-
     spdlog::debug("[PrinterHardwareValidationState] Hardware validation updated: {} issues, "
-                  "max_severity={}",
-                  result.total_issue_count(), static_cast<int>(result.max_severity()));
+                  "status_level={}",
+                  result.total_issue_count(), static_cast<int>(result.headline_level()));
+}
+
+void PrinterHardwareValidationState::refresh_texts() {
+    if (subjects_initialized_ && has_result_) {
+        set_hardware_validation_result(hardware_validation_result_);
+    }
 }
 
 void PrinterHardwareValidationState::remove_hardware_issue(const std::string& hardware_name) {

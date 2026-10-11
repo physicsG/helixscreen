@@ -34,6 +34,7 @@ FONTS_SMALL := assets/fonts/noto_sans_14.c assets/fonts/noto_sans_20.c \
 
 FONTS_MEDIUM := assets/fonts/noto_sans_18.c assets/fonts/noto_sans_26.c \
                 assets/fonts/noto_sans_bold_28.c \
+                assets/fonts/noto_sans_bold_40.c \
                 assets/fonts/noto_sans_light_16.c \
                 assets/fonts/source_code_pro_14.c \
                 assets/fonts/mdi_icons_16.c assets/fonts/mdi_icons_24.c \
@@ -42,6 +43,7 @@ FONTS_MEDIUM := assets/fonts/noto_sans_18.c assets/fonts/noto_sans_26.c \
 
 FONTS_LARGE := assets/fonts/noto_sans_20.c assets/fonts/noto_sans_28.c \
                assets/fonts/noto_sans_bold_28.c \
+               assets/fonts/noto_sans_bold_40.c \
                assets/fonts/noto_sans_light_14.c assets/fonts/noto_sans_light_18.c \
                assets/fonts/source_code_pro_16.c \
                assets/fonts/mdi_icons_16.c assets/fonts/mdi_icons_24.c \
@@ -50,6 +52,7 @@ FONTS_LARGE := assets/fonts/noto_sans_20.c assets/fonts/noto_sans_28.c \
 
 FONTS_XLARGE := assets/fonts/noto_sans_24.c assets/fonts/noto_sans_32.c \
                 assets/fonts/noto_sans_bold_32.c \
+                assets/fonts/noto_sans_bold_40.c \
                 assets/fonts/noto_sans_light_16.c assets/fonts/noto_sans_light_20.c \
                 assets/fonts/source_code_pro_18.c \
                 assets/fonts/mdi_icons_24.c assets/fonts/mdi_icons_32.c \
@@ -91,7 +94,10 @@ FONTS_XXLARGE := assets/fonts/noto_sans_32.c assets/fonts/noto_sans_40.c \
 #   - cjk_font_manager.cpp REGULAR/BOLD/LIGHT_FONTS tables: adds noto_sans_{26,28},
 #     noto_sans_light_{14,16,18} (xlarge/xxlarge entries are #if-guarded)
 #   - helix_watchdog.cpp: noto_sans_14, noto_sans_bold_{16,24}, mdi_icons_64
-#   - ui_button.cpp / theme_manager.cpp is_icon_font(): mdi_icons_{14,16,24,32,48,64}
+#   - theme_fonts.cpp helix::ui::is_icon_font(): mdi_icons_{14,16,24,32,48,64}
+#     (it also names 80/96/128, each behind its own HELIX_MAX_FONT_TIER guard)
+#   - ui_button.cpp / ui_split_button.cpp / ui_icon.cpp icon-font fallbacks:
+#     mdi_icons_{16,24,32,48,64}
 #   - LVGL default font (lv_conf) resolves to noto_sans_14 on this build
 # The micro-only 8px fonts are included too — they are tiny and simpler to keep
 # in core than to gate the is_micro branch on a separate HELIX_HAS_MICRO define.
@@ -156,6 +162,34 @@ else
     TIER_FONT_SRCS := $(sort $(TIER_FONT_SRCS))
 endif
 
+# Icon faces linked below their own tier, for the home tiles' xxl rung: a tile
+# grown past a cell and a half asks for twice its tier's xl glyph
+# (src/ui/ui_tile_rung.cpp). A build without the face draws the largest linked
+# one scaled up to at most 2x, so a face is linked only where the board has
+# room to spare for it. Measured cost, binary / gzipped package: 80 = +500KB /
+# +69KB, 96 = +708KB / +76KB, 128 = +1.26MB / +114KB. All of it is .rodata, so
+# RAM pays only for the glyph pages a screen touches.
+#   - snapmaker-u1 (a tiny panel, xxl 96): 961MB RAM, 705MB free, the roomiest
+#     board in the fleet.
+#   - k2 (a medium panel, xxl 128): ~512MB RAM, 395MB free, a 27GB user
+#     partition beside the root overlay.
+#   - "all" builds (pi, pi32, x86) link every face already.
+#   - ad5m / ad5m-br scale: the root partition is 91-95% full.
+#   - cc1, k1, k1-dynamic, mips and yocto scale: MIPS or ~110MB boards.
+#   - ESP32 builds its own font set (firmware/helixscreen-esp32) and is untouched.
+EXTRA_ICON_FONTS :=
+ifeq ($(PLATFORM_TARGET),snapmaker-u1)
+    EXTRA_ICON_FONTS := 96
+else ifeq ($(PLATFORM_TARGET),k2)
+    EXTRA_ICON_FONTS := 128
+endif
+ifneq ($(FONT_TIERS),all)
+    TIER_FONT_SRCS := $(sort $(TIER_FONT_SRCS) \
+                      $(foreach n,$(EXTRA_ICON_FONTS),assets/fonts/mdi_icons_$(n).c))
+    CFLAGS += $(foreach n,$(EXTRA_ICON_FONTS),-DHELIX_HAS_MDI_ICONS_$(n)=1)
+    CXXFLAGS += $(foreach n,$(EXTRA_ICON_FONTS),-DHELIX_HAS_MDI_ICONS_$(n)=1)
+endif
+
 # Generate MDI icon fonts using the authoritative regen script
 # Triggered when regen_mdi_fonts.sh changes (single source of truth for icon codepoints)
 .fonts.stamp: scripts/regen_mdi_fonts.sh
@@ -166,7 +200,8 @@ endif
 		touch $@; \
 	else \
 		echo "$(YELLOW)→ Regenerating MDI icon fonts from regen_mdi_fonts.sh...$(RESET)"; \
-		./scripts/regen_mdi_fonts.sh && touch $@ && echo "$(GREEN)✓ Fonts regenerated successfully$(RESET)"; \
+		./scripts/regen_mdi_fonts.sh && ./scripts/esp32_regen_compressed_fonts.sh && touch $@ && \
+			echo "$(GREEN)✓ Fonts regenerated successfully$(RESET)"; \
 	fi
 
 # Fonts depend on stamp file to ensure they're regenerated when needed
@@ -189,12 +224,13 @@ validate-fonts:
 		echo "$(YELLOW)⚠ validate_icon_fonts.sh not found - skipping$(RESET)"; \
 	fi
 
-# Regenerate MDI icon fonts from scratch using the regen script
+# Regenerate MDI icon fonts from scratch using the regen script, and the ESP32
+# firmware's compressed twins, which read the same icon list.
 # Use this when adding new icons to include/ui_icon_codepoints.h
 regen-fonts:
 	$(ECHO) "$(CYAN)Regenerating MDI icon fonts...$(RESET)"
 	$(Q)if [ -f scripts/regen_mdi_fonts.sh ]; then \
-		./scripts/regen_mdi_fonts.sh; \
+		./scripts/regen_mdi_fonts.sh && ./scripts/esp32_regen_compressed_fonts.sh; \
 		echo "$(GREEN)✓ Fonts regenerated - rebuild required$(RESET)"; \
 	else \
 		echo "$(RED)✗ regen_mdi_fonts.sh not found$(RESET)"; \
@@ -244,11 +280,6 @@ update-mdi-cache:
 	$(Q)curl -sL "https://raw.githubusercontent.com/Templarian/MaterialDesign/master/meta.json" | gzip > assets/mdi-icon-metadata.json.gz
 	$(ECHO) "$(GREEN)✓ Updated assets/mdi-icon-metadata.json.gz$(RESET)"
 	@ls -lh assets/mdi-icon-metadata.json.gz | awk '{print "$(CYAN)  Size: " $$5 "$(RESET)"}'
-
-# Verify MDI codepoint labels match official metadata
-verify-mdi-codepoints:
-	$(ECHO) "$(CYAN)Verifying MDI codepoint labels...$(RESET)"
-	$(Q)python3 scripts/verify_mdi_codepoints.py
 
 # Generate macOS .icns icon from source logo
 # Requires: ImageMagick (magick) for image processing

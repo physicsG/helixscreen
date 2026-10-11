@@ -50,7 +50,7 @@ constexpr uint32_t PREHEAT_TIMEOUT_MS = 300000;
 constexpr int TEMP_THRESHOLD_C = 5;
 
 int nozzle_current_c() {
-    auto* subj = get_printer_state().get_active_extruder_temp_subject();
+    auto* subj = get_printer_state().temperature_state().get_active_extruder_temp_subject();
     return subj ? helix::ui::temperature::deci_to_degrees(lv_subject_get_int(subj)) : 0;
 }
 
@@ -89,28 +89,6 @@ bool same_actions(const std::vector<helix::RecoveryAction>& a,
     return true;
 }
 
-/// The prompt modal, plus a report of every hide that runs its on_hide() hook.
-/// ActionPromptModal's dismiss affordance (an action with empty gcode) closes
-/// the dialog without calling the gcode callback, so this hook is the presenter's
-/// only sight of the user saying "I've read it" — and it covers the backdrop tap
-/// and ESC the same way.
-class HideReportingPromptModal : public helix::ui::ActionPromptModal {
-  public:
-    void set_hidden_callback(std::function<void()> cb) {
-        on_hidden_ = std::move(cb);
-    }
-
-  protected:
-    void on_hide() override {
-        helix::ui::ActionPromptModal::on_hide();
-        if (on_hidden_) {
-            on_hidden_();
-        }
-    }
-
-  private:
-    std::function<void()> on_hidden_;
-};
 } // namespace
 
 void RecoveryModalPresenter::mark_handled() {
@@ -126,19 +104,9 @@ void RecoveryModalPresenter::forget_handled_fault() {
     handled_actions_.clear();
 }
 
-void RecoveryModalPresenter::on_modal_hidden() {
-    if (suppress_hide_notice_) {
-        return;
-    }
-    // Nobody in this class asked for that hide, so the user closed it.
-    mark_handled();
-}
-
 void RecoveryModalPresenter::dismiss() {
     if (modal_ && modal_->is_visible()) {
-        suppress_hide_notice_ = true;
         modal_->hide();
-        suppress_hide_notice_ = false;
     }
     shown_detail_.clear();
     // The episode is over (the AMS action left ERROR, or a caller explicitly
@@ -186,10 +154,12 @@ void RecoveryModalPresenter::present(const helix::ErrorEvent& e) {
     }
 
     if (!modal_) {
-        auto modal = std::make_unique<HideReportingPromptModal>();
-        modal->set_gcode_callback([this](const std::string& gcode) { on_recovery_tapped(gcode); });
-        modal->set_hidden_callback([this]() { on_modal_hidden(); });
-        modal_ = std::move(modal);
+        modal_ = std::make_unique<helix::ui::ActionPromptModal>();
+        modal_->set_gcode_callback([this](const std::string& gcode) { on_recovery_tapped(gcode); });
+        // Every close but this class's own hide(): a button (including the
+        // empty-gcode dismiss), backdrop, ESC, or a sweep. The user has
+        // answered this fault.
+        modal_->set_dismiss_callback([this](helix::PromptCloseKind) { mark_handled(); });
     }
 
     // Anything we are about to put on screen is new to the user, so the previous
@@ -224,15 +194,29 @@ void RecoveryModalPresenter::present(const helix::ErrorEvent& e) {
     prompt.severity = "error";
 
     lv_obj_t* screen = lv_screen_active();
-    // Replacing visible content makes Modal::show() hide the old dialog first.
-    // That hide is ours, not the user's, so keep it out of on_modal_hidden().
-    suppress_hide_notice_ = true;
+    // Replacing visible content makes Modal::show() hide the old dialog first,
+    // as a programmatic close, which the dismiss callback does not report.
     const bool shown = screen && modal_->show_prompt(screen, prompt);
-    suppress_hide_notice_ = false;
     if (!shown) {
         spdlog::warn("[RecoveryModal] show_prompt failed; falling back to alert");
         shown_detail_.clear();
         ui_notification_printer_fault(modal_title_for(e), e.detail.c_str());
+        return;
+    }
+
+    // A filament system's own error dialog for this fault would sit behind ours
+    // with a subset of its buttons.
+    if (helix::ActionPromptManager::is_showing()) {
+        const std::string title = helix::ActionPromptManager::current_prompt_name();
+        AmsState& ams = AmsState::instance();
+        for (int i = 0; i < ams.backend_count(); ++i) {
+            const AmsBackend* backend = ams.get_backend(i);
+            if (backend && backend->duplicates_firmware_prompt(title)) {
+                spdlog::debug("[RecoveryModal] closing duplicate firmware prompt: {}", title);
+                helix::ActionPromptManager::dismiss_active();
+                break;
+            }
+        }
     }
 }
 
@@ -280,25 +264,24 @@ void RecoveryModalPresenter::dispatch_recovery(const std::string& gcode, const s
         gcode, [tag]() { spdlog::info("[Recovery] {} completed", tag); },
         [tag](const MoonrakerError& err) {
             spdlog::error("[Recovery] {} failed: {}", tag, err.message);
-            ToastManager::instance().show(ToastSeverity::ERROR,
-                                          ("Recovery failed: " + err.user_message()).c_str(), 6000);
+            // The callback can run on the WebSocket thread; the toast is main-thread only.
+            helix::ui::run_on_main("error_toast", [err]() {
+                ToastManager::instance().show(
+                    ToastSeverity::ERROR,
+                    fmt::format(fmt::runtime(lv_tr("Recovery failed: {}")), err.localized_message())
+                        .c_str(),
+                    6000);
+            });
         },
         IMoonrakerAPI::AMS_OPERATION_TIMEOUT_MS);
 }
 
 bool RecoveryModalPresenter::nozzle_ready_for_extrusion() const {
-    // #978 opt-out: users whose macros heat the nozzle themselves, or who are
-    // deliberately cold-pulling, already bypass this gate on the filament panel.
-    // The recovery modal must not re-impose it.
-    if (helix::SafetySettingsManager::instance().get_allow_cold_extrude()) {
-        return true;
-    }
-    const int min_extrude = static_cast<int>(api_->get_safety_limits().min_extrude_temp_celsius);
-    return helix::ui::temperature::is_extrusion_safe(nozzle_current_c(), min_extrude);
+    return helix::ui::temperature::active_nozzle_ready_for_extrusion(api_->get_safety_limits());
 }
 
 int RecoveryModalPresenter::resolve_preheat_target() const {
-    const int floor_c = static_cast<int>(api_->get_safety_limits().min_extrude_temp_celsius);
+    const int floor_c = helix::ui::temperature::extrusion_floor_c(api_->get_safety_limits());
 
     // 1. What this printer was last told to hold. A filament fault interrupts an
     //    operation that had already chosen a material temperature, and the latch
@@ -306,8 +289,8 @@ int RecoveryModalPresenter::resolve_preheat_target() const {
     //    this gate covers. Same value TemperatureController floors against for
     //    keep_previous_hot, so a deferred recovery reheats to where the failed
     //    operation was running rather than to a guess.
-    int target = static_cast<int>(
-        std::lround(get_printer_state().get_active_extruder_last_nonzero_target()));
+    int target = static_cast<int>(std::lround(
+        get_printer_state().temperature_state().get_active_extruder_last_nonzero_target()));
 
     // 2. Nothing latched (the operation failed before it ever heated, or this is
     //    a fresh session): ask the loaded filament. get_active_material() is the

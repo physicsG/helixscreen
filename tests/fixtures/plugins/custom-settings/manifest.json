@@ -1,0 +1,9 @@
+{
+  "id": "custom-settings",
+  "name": "Custom Settings",
+  "version": "1.0.0",
+  "settings_overlay": "custom-settings__panel",
+  "settings": [
+    {"key": "tone", "type": "string", "label": "Tone", "default": "warm"}
+  ]
+}

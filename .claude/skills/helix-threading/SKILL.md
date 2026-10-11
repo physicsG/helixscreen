@@ -1,68 +1,74 @@
 ---
 name: helix-threading
 description: >
-  HelixScreen threading & lifecycle safety — triggers when editing code in src/ that crosses the
-  main-thread/background-thread boundary: WebSocket/libhv callbacks, src/network/ HTTP workers,
-  src/bluetooth/ DBus threads, or src/printer/ background state updates. Also for UpdateQueue/queue_update
-  (include/ui_update_queue.h), AsyncLifetimeGuard (include/async_lifetime_guard.h), SubjectLifetime,
-  ObserverGuard (include/ui_observer_guard.h), safe_delete_deferred/safe_clean_children (include/ui_utils.h),
-  StaticSubjectRegistry shutdown ordering (include/static_subject_registry.h), HttpExecutor thread pools
-  (include/http_executor.h), or any code touching lv_subject_t from non-main threads.
+  HelixScreen threading & lifecycle safety. Use when writing or reviewing code that crosses the
+  main-thread/background-thread boundary (WebSocket/libhv callbacks, src/network/ HTTP workers,
+  src/bluetooth/ DBus threads, src/printer/ background state updates), observes a subject, deletes
+  widgets from a callback, owns an lv_timer_t, or spawns a thread. Key types: UpdateQueue /
+  queue_update, AsyncLifetimeGuard, SubjectLifetime, ObserverGuard, safe_delete_deferred /
+  safe_clean_children, StaticSubjectRegistry, HttpExecutor, lv_subject_t touched off the main thread.
 ---
 
 # HelixScreen Threading & Lifecycle Safety
 
-**Read `docs/devel/THREADING.md` before writing the code.** It is the single source of truth
-for these rules — full patterns, code examples, enforcement details, and a symptom index.
-This file exists only to surface the invariants when you touch a threading-adjacent file, and
-to route you to the right section.
+`docs/devel/THREADING.md` is the single source of truth: full patterns, code examples,
+enforcement and a symptom index. Read the section for what you are touching before writing
+the code. This skill routes you there.
 
-Threading violations in `src/network/`, `src/bluetooth/`, `src/printer/`, and lifecycle bugs in
-`src/ui/` account for the majority of field crashes on K1/AD5M/CC1. Every rule below cost a
-production crash to learn.
+These bugs compile cleanly and crash later, usually on a customer's printer. Field crashes on
+K1/AD5M/CC1 concentrate in `src/network/`, `src/bluetooth/`, `src/printer/`, and in lifecycle
+code under `src/ui/`.
 
 ## The invariants
 
-Each fails silently at compile time and crashes later, usually on a customer's printer.
+The five core invariants live in `.claude/rules/threading.md`, which loads automatically for
+`src/`, `include/` and `tests/unit/`. In short:
 
-| # | Never | Instead | Section |
-|---|-------|---------|---------|
-| 1 | Call `lv_*` / `lv_subject_set_*` from a background thread | `helix::ui::queue_update(...)` | §1 |
-| 2 | Write bare `if (tok.expired()) return;` on a bg thread, then touch `this` | `lifetime_.bg_cb(tag, fn)` or `tok.defer(tag, fn)` | §2 |
-| 3 | Delete a widget synchronously inside a queued callback | `safe_delete_deferred` / `lv_obj_delete_async` / `safe_clean_children` | §3 |
-| 4 | Observe a dynamic subject without a **member** `SubjectLifetime` | Parallel member `ObserverGuard` + `SubjectLifetime`; reset lifetime first | §5 |
-| 5 | `std::thread(...).detach()` for one-shot work | `HttpExecutor::fast()/slow()`, `BusThread`, or try/catch | §8 |
-| 6 | `ObserverGuard::release()` in normal cleanup | `reset()` | §6 |
-| 7 | Delete container children inside an input event handler | Null the pointer, let the rebuild clean | §9 |
-| 8 | Skip self-registering `deinit_subjects()` in `init_subjects()` | `StaticSubjectRegistry::register_deinit(...)` | §7 |
+1. No LVGL from a background thread, `lv_subject_set_*` included: `helix::ui::queue_update()` (§1).
+2. No bare `if (tok.expired()) return;` before touching `this` on a background thread:
+   `lifetime_.bg_cb(tag, fn)` or `tok.defer(tag, fn)` (§2).
+3. No synchronous deletion inside a queued callback: `safe_delete_deferred`,
+   `lv_obj_delete_async`, `safe_clean_children` (§3).
+4. Hand `observe<V>` the `SubjectLifetime` the accessor filled, never a default-constructed one (§5).
+5. A raw `lv_timer_t*` cancelled in `cleanup()` is cancelled in the destructor too, via a shared
+   `cancel_*_timer()` and `lv_timer_cancel_safe()` (§10).
 
-Two of these are gated at commit time by `scripts/quality-checks.sh`:
-`scripts/check_l081_anti_pattern.py` (#2) and `scripts/check_subscription_null_safety.py`.
+Three more that the rule file covers in one line or not at all:
+
+| Never | Instead | Section |
+|-------|---------|---------|
+| `std::thread(...).detach()` for one-shot work (`EAGAIN` becomes `std::terminate`) | `HttpExecutor::fast()/slow()`, `BusThread`, or try/catch around the spawn where exceptions are allowed | §8 |
+| Delete container children inside an input event handler | Null the pointer and let the rebuild clean | §9 |
+| `ObserverGuard::release()` in normal cleanup | `reset()` | §6 |
+
+Every `init_subjects()` self-registers its `deinit_subjects()` with `StaticSubjectRegistry` (§7).
+
+Commit-time gates (`scripts/quality-checks.sh`): `scripts/check_l081_anti_pattern.py` (#2),
+`scripts/check_timer_destructor_cancel.py` (#5), `scripts/check_subscription_null_safety.py`.
 
 ## Two things that surprise people
 
-**`lifetime_.defer` does NOT escape the UpdateQueue batch.** It is a thin wrapper around
-`queue_update` — the callback fires in the *next* `process_pending` tick, which is still a
-batch that may contain other sync deletions. The generation guard protects `this` from
-use-after-free, not the event list from corruption. (§3)
+**`lifetime_.defer` does not escape the UpdateQueue batch.** It wraps `queue_update`, so the
+callback fires in the next `process_pending` tick, which is still a batch that may hold other
+sync deletions. The generation guard protects `this` from use-after-free, not the event list
+from corruption. (§3)
 
-**From a background thread, `tok.defer()` — never `lifetime_.defer()`.** The latter reads
-`this->lifetime_`, which is the #707 TOCTOU race. `lifetime_.defer()` is only safe on the main
-thread. (§2)
+**From a background thread, use `tok.defer()`, never `lifetime_.defer()`.** The latter reads
+`this->lifetime_`, which is the TOCTOU race (#707). `lifetime_.defer()` is main-thread only. (§2)
 
-## Section map — `docs/devel/THREADING.md`
+## Section map: `docs/devel/THREADING.md`
 
 | Section | Covers |
 |---------|--------|
 | §1 LVGL is single-threaded | UpdateQueue, main-loop order, why not `lv_async_call`, backend pattern, threading model |
 | §2 Async callback safety | `AsyncLifetimeGuard`, `bg_cb` vs `tok.defer`, L081 enforcement layers, release-build carve-out |
-| §3 No sync widget deletion | What counts as queued, banned→replacement table, true escape routes |
-| §4 `ScopedFreeze` | drain+destroy, buffer-not-drop, why `defer_critical` was removed |
-| §5 Subject lifecycle | static vs dynamic, member-pairing rule, reset ordering, collections |
+| §3 No sync widget deletion | What counts as queued, banned-to-replacement table, true escape routes |
+| §4 `ScopedFreeze` | Drain + destroy, buffer-not-drop |
+| §5 Subject lifecycle | Static vs dynamic subjects, local vs member lifetimes, reset ordering, collections |
 | §6 Observers | `observer_factory.h` factories, deferred-by-default (#82), `reset()` vs `release()` (#579) |
-| §7 Shutdown | registries, ordering, self-registration, `deinit_subjects()` |
-| §8 Threads and pools | no detached spawns, workload→pool table |
-| §9 Input event processing | no sync deletion during `indev` dispatch |
-| §10 Timers | `LvglTimerGuard` |
-| §11 Testing | fixture hierarchy, cleanup order, observer immediate-fire gotcha, asan/tsan |
-| §12 Symptom index | "what you're seeing" → cause → fix |
+| §7 Shutdown | Registries, ordering, self-registration, `deinit_subjects()` |
+| §8 Threads and pools | No detached spawns, workload-to-pool table |
+| §9 Input event processing | No sync deletion during `indev` dispatch |
+| §10 Timers | `LvglTimerGuard`, `lv_timer_cancel_safe()` |
+| §11 Testing | Fixture hierarchy, cleanup order, observer immediate-fire gotcha, asan/tsan |
+| §12 Symptom index | What you're seeing, then cause, then fix |

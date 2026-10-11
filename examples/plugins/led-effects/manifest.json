@@ -1,0 +1,24 @@
+{
+  "id": "led-effects",
+  "name": "LED Effects",
+  "version": "1.0.0",
+  "author": "HelixScreen",
+  "description": "Turn one klipper-led_effect effect on or off from a home tile that shows its live state.",
+  "permissions": ["gcode"],
+  "widgets": [
+    {
+      "id": "led-effects__tile",
+      "name": "LED Effect",
+      "icon": "lightbulb_outline",
+      "description": "Toggle an LED effect",
+      "component": "led-effects__tile",
+      "colspan": 1,
+      "rowspan": 1,
+      "max_colspan": 2,
+      "max_rowspan": 1
+    }
+  ],
+  "settings": [
+    {"key": "effect", "type": "string", "label": "Effect name", "default": "rainbow"}
+  ]
+}

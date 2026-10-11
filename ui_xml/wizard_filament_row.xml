@@ -15,8 +15,8 @@
     <style name="selected_style" selector="checked"/>
     <!-- Color swatch circle -->
     <lv_obj name="color_swatch"
-            width="20" height="20" style_radius="10" style_bg_color="#text_muted" style_bg_opa="255"
-            style_border_width="1" style_border_color="#border" clickable="false" scrollable="false"/>
+            width="20" height="20" style_radius="10" style_bg_color="#text_muted" style_bg_opa="255" clickable="false"
+            scrollable="false" style_border_width="#border_width"/>
     <!-- Material - Name (single line) -->
     <text_body name="filament_material" flex_grow="1" text="PLA" long_mode="dots" clickable="false"/>
     <!-- Temperature info -->

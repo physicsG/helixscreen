@@ -44,11 +44,11 @@ TEST_CASE("Motion characterization: non-obvious initial values after init",
     state.init_subjects(false);
 
     SECTION("speed_factor initializes to 100%") {
-        REQUIRE(lv_subject_get_int(state.get_speed_factor_subject()) == 100);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_speed_factor_subject()) == 100);
     }
 
     SECTION("flow_factor initializes to 100%") {
-        REQUIRE(lv_subject_get_int(state.get_flow_factor_subject()) == 100);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_flow_factor_subject()) == 100);
     }
 }
 
@@ -69,36 +69,36 @@ TEST_CASE("Motion characterization: position updates from JSON",
         state.update_from_status(status);
 
         // Positions stored as centimillimeters (mm × 100)
-        REQUIRE(lv_subject_get_int(state.get_position_x_subject()) == 15050);
-        REQUIRE(lv_subject_get_int(state.get_position_y_subject()) == 20030);
-        REQUIRE(lv_subject_get_int(state.get_position_z_subject()) == 1070);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_position_x_subject()) == 15050);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_position_y_subject()) == 20030);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_position_z_subject()) == 1070);
     }
 
     SECTION("whole positions store correctly") {
         json status = {{"toolhead", {{"position", {100.0, 200.0, 50.0}}}}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_position_x_subject()) == 10000);
-        REQUIRE(lv_subject_get_int(state.get_position_y_subject()) == 20000);
-        REQUIRE(lv_subject_get_int(state.get_position_z_subject()) == 5000);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_position_x_subject()) == 10000);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_position_y_subject()) == 20000);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_position_z_subject()) == 5000);
     }
 
     SECTION("zero positions store correctly") {
         json status = {{"toolhead", {{"position", {0.0, 0.0, 0.0}}}}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_position_x_subject()) == 0);
-        REQUIRE(lv_subject_get_int(state.get_position_y_subject()) == 0);
-        REQUIRE(lv_subject_get_int(state.get_position_z_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_position_x_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_position_y_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_position_z_subject()) == 0);
     }
 
     SECTION("large positions store correctly") {
         json status = {{"toolhead", {{"position", {350.0, 350.0, 400.0}}}}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_position_x_subject()) == 35000);
-        REQUIRE(lv_subject_get_int(state.get_position_y_subject()) == 35000);
-        REQUIRE(lv_subject_get_int(state.get_position_z_subject()) == 40000);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_position_x_subject()) == 35000);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_position_y_subject()) == 35000);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_position_z_subject()) == 40000);
     }
 
     SECTION("negative positions store correctly") {
@@ -106,9 +106,9 @@ TEST_CASE("Motion characterization: position updates from JSON",
         json status = {{"toolhead", {{"position", {-10.5, -5.2, 0.0}}}}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_position_x_subject()) == -1050);
-        REQUIRE(lv_subject_get_int(state.get_position_y_subject()) == -520);
-        REQUIRE(lv_subject_get_int(state.get_position_z_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_position_x_subject()) == -1050);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_position_y_subject()) == -520);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_position_z_subject()) == 0);
     }
 }
 
@@ -128,7 +128,7 @@ TEST_CASE("Motion characterization: homed_axes updates from JSON",
         json status = {{"toolhead", {{"homed_axes", ""}}}};
         state.update_from_status(status);
 
-        const char* axes = lv_subject_get_string(state.get_homed_axes_subject());
+        const char* axes = lv_subject_get_string(state.motion_state().get_homed_axes_subject());
         REQUIRE(std::string(axes) == "");
     }
 
@@ -136,7 +136,7 @@ TEST_CASE("Motion characterization: homed_axes updates from JSON",
         json status = {{"toolhead", {{"homed_axes", "x"}}}};
         state.update_from_status(status);
 
-        const char* axes = lv_subject_get_string(state.get_homed_axes_subject());
+        const char* axes = lv_subject_get_string(state.motion_state().get_homed_axes_subject());
         REQUIRE(std::string(axes) == "x");
     }
 
@@ -144,7 +144,7 @@ TEST_CASE("Motion characterization: homed_axes updates from JSON",
         json status = {{"toolhead", {{"homed_axes", "xy"}}}};
         state.update_from_status(status);
 
-        const char* axes = lv_subject_get_string(state.get_homed_axes_subject());
+        const char* axes = lv_subject_get_string(state.motion_state().get_homed_axes_subject());
         REQUIRE(std::string(axes) == "xy");
     }
 
@@ -152,7 +152,7 @@ TEST_CASE("Motion characterization: homed_axes updates from JSON",
         json status = {{"toolhead", {{"homed_axes", "xyz"}}}};
         state.update_from_status(status);
 
-        const char* axes = lv_subject_get_string(state.get_homed_axes_subject());
+        const char* axes = lv_subject_get_string(state.motion_state().get_homed_axes_subject());
         REQUIRE(std::string(axes) == "xyz");
     }
 }
@@ -173,28 +173,93 @@ TEST_CASE("Motion characterization: speed_factor updates from JSON",
         json status = {{"gcode_move", {{"speed_factor", 1.0}}}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_speed_factor_subject()) == 100);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_speed_factor_subject()) == 100);
     }
 
     SECTION("increased speed factor (150%)") {
         json status = {{"gcode_move", {{"speed_factor", 1.5}}}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_speed_factor_subject()) == 150);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_speed_factor_subject()) == 150);
     }
 
     SECTION("decreased speed factor (50%)") {
         json status = {{"gcode_move", {{"speed_factor", 0.5}}}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_speed_factor_subject()) == 50);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_speed_factor_subject()) == 50);
     }
 
     SECTION("maximum speed factor (200%)") {
         json status = {{"gcode_move", {{"speed_factor", 2.0}}}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_speed_factor_subject()) == 200);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_speed_factor_subject()) == 200);
+    }
+}
+
+TEST_CASE("Motion characterization: live_velocity updates from motion_report",
+          "[characterization][motion][speed][tune_units]") {
+    lv_init_safe();
+
+    PrinterState& state = get_printer_state();
+    PrinterStateTestAccess::reset(state);
+    state.init_subjects(false);
+
+    SECTION("rounds the measured toolhead speed to whole mm/s") {
+        json status = {{"motion_report", {{"live_velocity", 148.6}}}};
+        state.update_from_status(status);
+
+        REQUIRE(lv_subject_get_int(state.motion_state().get_live_velocity_subject()) == 149);
+    }
+
+    SECTION("falls back to zero when the toolhead stops") {
+        state.update_from_status({{"motion_report", {{"live_velocity", 120.0}}}});
+        REQUIRE(lv_subject_get_int(state.motion_state().get_live_velocity_subject()) == 120);
+
+        state.update_from_status({{"motion_report", {{"live_velocity", 0.0}}}});
+        REQUIRE(lv_subject_get_int(state.motion_state().get_live_velocity_subject()) == 0);
+    }
+}
+
+TEST_CASE("Motion characterization: live_position updates from motion_report",
+          "[characterization][motion][position]") {
+    lv_init_safe();
+
+    PrinterState& state = get_printer_state();
+    PrinterStateTestAccess::reset(state);
+    state.init_subjects(false);
+
+    SECTION("stores all three axes as centimillimeters") {
+        json status = {{"motion_report", {{"live_position", {150.5, 200.3, 10.7}}}}};
+        state.update_from_status(status);
+
+        REQUIRE(lv_subject_get_int(state.motion_state().get_live_position_x_subject()) == 15050);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_live_position_y_subject()) == 20030);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_live_position_z_subject()) == 1070);
+    }
+
+    SECTION("a malformed array leaves the subjects unchanged") {
+        state.update_from_status(
+            {{"motion_report", {{"live_position", {12.0, 34.0}}}}}); // too short
+        state.update_from_status(
+            {{"motion_report", {{"live_position", {nullptr, 34.0, 56.0}}}}}); // null element
+
+        REQUIRE(lv_subject_get_int(state.motion_state().get_live_position_x_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_live_position_y_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_live_position_z_subject()) == 0);
+    }
+
+    SECTION("a frame without live_position leaves the subjects unchanged") {
+        state.update_from_status({{"motion_report", {{"live_position", {12.0, 34.0, 56.0}}}}});
+        REQUIRE(lv_subject_get_int(state.motion_state().get_live_position_x_subject()) == 1200);
+
+        // Delta frames omit unchanged fields; the next frame carries only
+        // velocity and must not blank what the last one set.
+        state.update_from_status({{"motion_report", {{"live_velocity", 42.0}}}});
+        REQUIRE(lv_subject_get_int(state.motion_state().get_live_position_x_subject()) == 1200);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_live_position_y_subject()) == 3400);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_live_position_z_subject()) == 5600);
     }
 }
 
@@ -210,21 +275,21 @@ TEST_CASE("Motion characterization: flow_factor updates from JSON",
         json status = {{"gcode_move", {{"extrude_factor", 1.0}}}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_flow_factor_subject()) == 100);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_flow_factor_subject()) == 100);
     }
 
     SECTION("decreased flow factor (95%)") {
         json status = {{"gcode_move", {{"extrude_factor", 0.95}}}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_flow_factor_subject()) == 95);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_flow_factor_subject()) == 95);
     }
 
     SECTION("increased flow factor (110%)") {
         json status = {{"gcode_move", {{"extrude_factor", 1.1}}}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_flow_factor_subject()) == 110);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_flow_factor_subject()) == 110);
     }
 }
 
@@ -244,28 +309,28 @@ TEST_CASE("Motion characterization: gcode_z_offset updates from JSON",
         json status = {{"gcode_move", {{"homing_origin", {0.0, 0.0, 0.0}}}}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_gcode_z_offset_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_gcode_z_offset_subject()) == 0);
     }
 
     SECTION("negative Z-offset (-0.15mm = -150 microns)") {
         json status = {{"gcode_move", {{"homing_origin", {0.0, 0.0, -0.15}}}}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_gcode_z_offset_subject()) == -150);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_gcode_z_offset_subject()) == -150);
     }
 
     SECTION("positive Z-offset (0.2mm = 200 microns)") {
         json status = {{"gcode_move", {{"homing_origin", {0.0, 0.0, 0.2}}}}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_gcode_z_offset_subject()) == 200);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_gcode_z_offset_subject()) == 200);
     }
 
     SECTION("small Z-offset (0.025mm = 25 microns)") {
         json status = {{"gcode_move", {{"homing_origin", {0.0, 0.0, 0.025}}}}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_gcode_z_offset_subject()) == 25);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_gcode_z_offset_subject()) == 25);
     }
 }
 
@@ -282,44 +347,45 @@ TEST_CASE("Motion characterization: pending_z_offset_delta methods",
     state.init_subjects(false);
 
     SECTION("initial state has no pending adjustment") {
-        REQUIRE(state.get_pending_z_offset_delta() == 0);
-        REQUIRE(state.has_pending_z_offset_adjustment() == false);
+        REQUIRE(state.motion_state().get_pending_z_offset_delta() == 0);
+        REQUIRE(state.motion_state().has_pending_z_offset_adjustment() == false);
     }
 
     SECTION("add_pending_z_offset_delta accumulates values") {
-        state.add_pending_z_offset_delta(10);
-        REQUIRE(state.get_pending_z_offset_delta() == 10);
-        REQUIRE(state.has_pending_z_offset_adjustment() == true);
+        state.motion_state().add_pending_z_offset_delta(10);
+        REQUIRE(state.motion_state().get_pending_z_offset_delta() == 10);
+        REQUIRE(state.motion_state().has_pending_z_offset_adjustment() == true);
 
-        state.add_pending_z_offset_delta(15);
-        REQUIRE(state.get_pending_z_offset_delta() == 25);
+        state.motion_state().add_pending_z_offset_delta(15);
+        REQUIRE(state.motion_state().get_pending_z_offset_delta() == 25);
     }
 
     SECTION("negative deltas subtract from total") {
-        state.add_pending_z_offset_delta(50);
-        REQUIRE(state.get_pending_z_offset_delta() == 50);
+        state.motion_state().add_pending_z_offset_delta(50);
+        REQUIRE(state.motion_state().get_pending_z_offset_delta() == 50);
 
-        state.add_pending_z_offset_delta(-20);
-        REQUIRE(state.get_pending_z_offset_delta() == 30);
+        state.motion_state().add_pending_z_offset_delta(-20);
+        REQUIRE(state.motion_state().get_pending_z_offset_delta() == 30);
     }
 
     SECTION("clear_pending_z_offset_delta resets to zero") {
-        state.add_pending_z_offset_delta(100);
-        REQUIRE(state.has_pending_z_offset_adjustment() == true);
+        state.motion_state().add_pending_z_offset_delta(100);
+        REQUIRE(state.motion_state().has_pending_z_offset_adjustment() == true);
 
-        state.clear_pending_z_offset_delta();
-        REQUIRE(state.get_pending_z_offset_delta() == 0);
-        REQUIRE(state.has_pending_z_offset_adjustment() == false);
+        state.motion_state().clear_pending_z_offset_delta();
+        REQUIRE(state.motion_state().get_pending_z_offset_delta() == 0);
+        REQUIRE(state.motion_state().has_pending_z_offset_adjustment() == false);
     }
 
     SECTION("subject reflects pending delta changes") {
-        REQUIRE(lv_subject_get_int(state.get_pending_z_offset_delta_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_pending_z_offset_delta_subject()) == 0);
 
-        state.add_pending_z_offset_delta(75);
-        REQUIRE(lv_subject_get_int(state.get_pending_z_offset_delta_subject()) == 75);
+        state.motion_state().add_pending_z_offset_delta(75);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_pending_z_offset_delta_subject()) ==
+                75);
 
-        state.clear_pending_z_offset_delta();
-        REQUIRE(lv_subject_get_int(state.get_pending_z_offset_delta_subject()) == 0);
+        state.motion_state().clear_pending_z_offset_delta();
+        REQUIRE(lv_subject_get_int(state.motion_state().get_pending_z_offset_delta_subject()) == 0);
     }
 }
 
@@ -345,8 +411,8 @@ TEST_CASE("Motion characterization: observer fires when position_x changes",
 
     int user_data[2] = {0, -1}; // [callback_count, last_value]
 
-    lv_observer_t* observer =
-        lv_subject_add_observer(state.get_position_x_subject(), observer_cb, user_data);
+    lv_observer_t* observer = lv_subject_add_observer(state.motion_state().get_position_x_subject(),
+                                                      observer_cb, user_data);
 
     // LVGL auto-notifies observers when first added
     REQUIRE(user_data[0] == 1);
@@ -382,8 +448,8 @@ TEST_CASE("Motion characterization: observer fires when homed_axes changes",
 
     auto user_data = std::make_pair(&callback_count, &last_value);
 
-    lv_observer_t* observer =
-        lv_subject_add_observer(state.get_homed_axes_subject(), observer_cb, &user_data);
+    lv_observer_t* observer = lv_subject_add_observer(state.motion_state().get_homed_axes_subject(),
+                                                      observer_cb, &user_data);
 
     // Initial notification
     REQUIRE(callback_count == 1);
@@ -417,8 +483,8 @@ TEST_CASE("Motion characterization: observer fires when speed_factor changes",
 
     int user_data[2] = {0, -1};
 
-    lv_observer_t* observer =
-        lv_subject_add_observer(state.get_speed_factor_subject(), observer_cb, user_data);
+    lv_observer_t* observer = lv_subject_add_observer(
+        state.motion_state().get_speed_factor_subject(), observer_cb, user_data);
 
     // Initial notification
     REQUIRE(user_data[0] == 1);
@@ -452,9 +518,9 @@ TEST_CASE("Motion characterization: toolhead update does not affect gcode_move s
          {{"speed_factor", 1.5}, {"extrude_factor", 0.95}, {"homing_origin", {0.0, 0.0, -0.1}}}}};
     state.update_from_status(initial);
 
-    REQUIRE(lv_subject_get_int(state.get_speed_factor_subject()) == 150);
-    REQUIRE(lv_subject_get_int(state.get_flow_factor_subject()) == 95);
-    REQUIRE(lv_subject_get_int(state.get_gcode_z_offset_subject()) == -100);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_speed_factor_subject()) == 150);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_flow_factor_subject()) == 95);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_gcode_z_offset_subject()) == -100);
 
     // Update only toolhead
     json toolhead_only = {
@@ -462,15 +528,16 @@ TEST_CASE("Motion characterization: toolhead update does not affect gcode_move s
     state.update_from_status(toolhead_only);
 
     // Positions should update (stored in centimm)
-    REQUIRE(lv_subject_get_int(state.get_position_x_subject()) == 10000);
-    REQUIRE(lv_subject_get_int(state.get_position_y_subject()) == 20000);
-    REQUIRE(lv_subject_get_int(state.get_position_z_subject()) == 5000);
-    REQUIRE(std::string(lv_subject_get_string(state.get_homed_axes_subject())) == "xyz");
+    REQUIRE(lv_subject_get_int(state.motion_state().get_position_x_subject()) == 10000);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_position_y_subject()) == 20000);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_position_z_subject()) == 5000);
+    REQUIRE(std::string(lv_subject_get_string(state.motion_state().get_homed_axes_subject())) ==
+            "xyz");
 
     // gcode_move subjects should be unchanged
-    REQUIRE(lv_subject_get_int(state.get_speed_factor_subject()) == 150);
-    REQUIRE(lv_subject_get_int(state.get_flow_factor_subject()) == 95);
-    REQUIRE(lv_subject_get_int(state.get_gcode_z_offset_subject()) == -100);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_speed_factor_subject()) == 150);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_flow_factor_subject()) == 95);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_gcode_z_offset_subject()) == -100);
 }
 
 TEST_CASE("Motion characterization: gcode_move update does not affect toolhead subjects",
@@ -485,24 +552,26 @@ TEST_CASE("Motion characterization: gcode_move update does not affect toolhead s
     json initial = {{"toolhead", {{"position", {150.0, 200.0, 30.0}}, {"homed_axes", "xy"}}}};
     state.update_from_status(initial);
 
-    REQUIRE(lv_subject_get_int(state.get_position_x_subject()) == 15000);
-    REQUIRE(lv_subject_get_int(state.get_position_y_subject()) == 20000);
-    REQUIRE(lv_subject_get_int(state.get_position_z_subject()) == 3000);
-    REQUIRE(std::string(lv_subject_get_string(state.get_homed_axes_subject())) == "xy");
+    REQUIRE(lv_subject_get_int(state.motion_state().get_position_x_subject()) == 15000);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_position_y_subject()) == 20000);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_position_z_subject()) == 3000);
+    REQUIRE(std::string(lv_subject_get_string(state.motion_state().get_homed_axes_subject())) ==
+            "xy");
 
     // Update only gcode_move
     json gcode_only = {{"gcode_move", {{"speed_factor", 0.75}, {"extrude_factor", 1.1}}}};
     state.update_from_status(gcode_only);
 
     // gcode_move should update
-    REQUIRE(lv_subject_get_int(state.get_speed_factor_subject()) == 75);
-    REQUIRE(lv_subject_get_int(state.get_flow_factor_subject()) == 110);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_speed_factor_subject()) == 75);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_flow_factor_subject()) == 110);
 
     // toolhead subjects should be unchanged (stored in centimm)
-    REQUIRE(lv_subject_get_int(state.get_position_x_subject()) == 15000);
-    REQUIRE(lv_subject_get_int(state.get_position_y_subject()) == 20000);
-    REQUIRE(lv_subject_get_int(state.get_position_z_subject()) == 3000);
-    REQUIRE(std::string(lv_subject_get_string(state.get_homed_axes_subject())) == "xy");
+    REQUIRE(lv_subject_get_int(state.motion_state().get_position_x_subject()) == 15000);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_position_y_subject()) == 20000);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_position_z_subject()) == 3000);
+    REQUIRE(std::string(lv_subject_get_string(state.motion_state().get_homed_axes_subject())) ==
+            "xy");
 }
 
 TEST_CASE("Motion characterization: simultaneous updates work correctly",
@@ -521,13 +590,14 @@ TEST_CASE("Motion characterization: simultaneous updates work correctly",
     state.update_from_status(status);
 
     // All values should be updated independently (positions in centimm)
-    REQUIRE(lv_subject_get_int(state.get_position_x_subject()) == 12050);
-    REQUIRE(lv_subject_get_int(state.get_position_y_subject()) == 18030);
-    REQUIRE(lv_subject_get_int(state.get_position_z_subject()) == 2570);
-    REQUIRE(std::string(lv_subject_get_string(state.get_homed_axes_subject())) == "xyz");
-    REQUIRE(lv_subject_get_int(state.get_speed_factor_subject()) == 125);
-    REQUIRE(lv_subject_get_int(state.get_flow_factor_subject()) == 98);
-    REQUIRE(lv_subject_get_int(state.get_gcode_z_offset_subject()) == -50);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_position_x_subject()) == 12050);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_position_y_subject()) == 18030);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_position_z_subject()) == 2570);
+    REQUIRE(std::string(lv_subject_get_string(state.motion_state().get_homed_axes_subject())) ==
+            "xyz");
+    REQUIRE(lv_subject_get_int(state.motion_state().get_speed_factor_subject()) == 125);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_flow_factor_subject()) == 98);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_gcode_z_offset_subject()) == -50);
 }
 
 // ============================================================================
@@ -548,32 +618,33 @@ TEST_CASE("Motion characterization: subjects survive reset_for_testing cycle",
         {"gcode_move",
          {{"speed_factor", 1.2}, {"extrude_factor", 0.9}, {"homing_origin", {0.0, 0.0, 0.1}}}}};
     state.update_from_status(status);
-    state.add_pending_z_offset_delta(50);
+    state.motion_state().add_pending_z_offset_delta(50);
 
     // Verify values were set (position in centimm)
-    REQUIRE(lv_subject_get_int(state.get_position_x_subject()) == 10000);
-    REQUIRE(lv_subject_get_int(state.get_speed_factor_subject()) == 120);
-    REQUIRE(state.get_pending_z_offset_delta() == 50);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_position_x_subject()) == 10000);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_speed_factor_subject()) == 120);
+    REQUIRE(state.motion_state().get_pending_z_offset_delta() == 50);
 
     // Reset and reinitialize
     PrinterStateTestAccess::reset(state);
     state.init_subjects(false);
 
     // After reset, values should be back to defaults
-    REQUIRE(lv_subject_get_int(state.get_position_x_subject()) == 0);
-    REQUIRE(lv_subject_get_int(state.get_position_y_subject()) == 0);
-    REQUIRE(lv_subject_get_int(state.get_position_z_subject()) == 0);
-    REQUIRE(std::string(lv_subject_get_string(state.get_homed_axes_subject())) == "");
-    REQUIRE(lv_subject_get_int(state.get_speed_factor_subject()) == 100);
-    REQUIRE(lv_subject_get_int(state.get_flow_factor_subject()) == 100);
-    REQUIRE(lv_subject_get_int(state.get_gcode_z_offset_subject()) == 0);
-    REQUIRE(state.get_pending_z_offset_delta() == 0);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_position_x_subject()) == 0);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_position_y_subject()) == 0);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_position_z_subject()) == 0);
+    REQUIRE(std::string(lv_subject_get_string(state.motion_state().get_homed_axes_subject())) ==
+            "");
+    REQUIRE(lv_subject_get_int(state.motion_state().get_speed_factor_subject()) == 100);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_flow_factor_subject()) == 100);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_gcode_z_offset_subject()) == 0);
+    REQUIRE(state.motion_state().get_pending_z_offset_delta() == 0);
 
     // Subjects should still be functional after reset
     json new_status = {{"toolhead", {{"position", {50.0, 75.0, 10.0}}}}};
     state.update_from_status(new_status);
 
-    REQUIRE(lv_subject_get_int(state.get_position_x_subject()) == 5000); // centimm
+    REQUIRE(lv_subject_get_int(state.motion_state().get_position_x_subject()) == 5000); // centimm
 }
 
 TEST_CASE("Motion characterization: subject pointers remain valid after reset",
@@ -585,18 +656,18 @@ TEST_CASE("Motion characterization: subject pointers remain valid after reset",
     state.init_subjects(false);
 
     // Capture subject pointers
-    lv_subject_t* position_x_before = state.get_position_x_subject();
-    lv_subject_t* speed_factor_before = state.get_speed_factor_subject();
-    lv_subject_t* homed_axes_before = state.get_homed_axes_subject();
+    lv_subject_t* position_x_before = state.motion_state().get_position_x_subject();
+    lv_subject_t* speed_factor_before = state.motion_state().get_speed_factor_subject();
+    lv_subject_t* homed_axes_before = state.motion_state().get_homed_axes_subject();
 
     // Reset and reinitialize
     PrinterStateTestAccess::reset(state);
     state.init_subjects(false);
 
     // Pointers should be the same (singleton subjects are reused)
-    lv_subject_t* position_x_after = state.get_position_x_subject();
-    lv_subject_t* speed_factor_after = state.get_speed_factor_subject();
-    lv_subject_t* homed_axes_after = state.get_homed_axes_subject();
+    lv_subject_t* position_x_after = state.motion_state().get_position_x_subject();
+    lv_subject_t* speed_factor_after = state.motion_state().get_speed_factor_subject();
+    lv_subject_t* homed_axes_after = state.motion_state().get_homed_axes_subject();
 
     REQUIRE(position_x_before == position_x_after);
     REQUIRE(speed_factor_before == speed_factor_after);
@@ -623,21 +694,22 @@ TEST_CASE("Motion characterization: partial status updates preserve other values
     state.update_from_status(initial);
 
     // Verify initial values (position in centimm)
-    REQUIRE(lv_subject_get_int(state.get_position_x_subject()) == 10000);
-    REQUIRE(lv_subject_get_int(state.get_speed_factor_subject()) == 150);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_position_x_subject()) == 10000);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_speed_factor_subject()) == 150);
 
     // Update only position - other values should not change
     json partial = {{"toolhead", {{"position", {150.0, 250.0, 40.0}}}}};
     state.update_from_status(partial);
 
-    REQUIRE(lv_subject_get_int(state.get_position_x_subject()) == 15000);
-    REQUIRE(lv_subject_get_int(state.get_position_y_subject()) == 25000);
-    REQUIRE(lv_subject_get_int(state.get_position_z_subject()) == 4000);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_position_x_subject()) == 15000);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_position_y_subject()) == 25000);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_position_z_subject()) == 4000);
     // These should be unchanged:
-    REQUIRE(std::string(lv_subject_get_string(state.get_homed_axes_subject())) == "xyz");
-    REQUIRE(lv_subject_get_int(state.get_speed_factor_subject()) == 150);
-    REQUIRE(lv_subject_get_int(state.get_flow_factor_subject()) == 95);
-    REQUIRE(lv_subject_get_int(state.get_gcode_z_offset_subject()) == -100);
+    REQUIRE(std::string(lv_subject_get_string(state.motion_state().get_homed_axes_subject())) ==
+            "xyz");
+    REQUIRE(lv_subject_get_int(state.motion_state().get_speed_factor_subject()) == 150);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_flow_factor_subject()) == 95);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_gcode_z_offset_subject()) == -100);
 }
 
 TEST_CASE("Motion characterization: empty status does not affect values",
@@ -652,13 +724,13 @@ TEST_CASE("Motion characterization: empty status does not affect values",
     json initial = {{"toolhead", {{"position", {100.0, 200.0, 30.0}}}}};
     state.update_from_status(initial);
 
-    REQUIRE(lv_subject_get_int(state.get_position_x_subject()) == 10000); // centimm
+    REQUIRE(lv_subject_get_int(state.motion_state().get_position_x_subject()) == 10000); // centimm
 
     // Empty status should not change anything
     json empty = json::object();
     state.update_from_status(empty);
 
-    REQUIRE(lv_subject_get_int(state.get_position_x_subject()) == 10000); // centimm
+    REQUIRE(lv_subject_get_int(state.motion_state().get_position_x_subject()) == 10000); // centimm
 }
 
 // ============================================================================
@@ -686,10 +758,10 @@ TEST_CASE("Motion characterization: observers on different subjects are independ
         (*count)++;
     };
 
-    lv_observer_t* position_observer =
-        lv_subject_add_observer(state.get_position_x_subject(), position_cb, &position_count);
-    lv_observer_t* speed_observer =
-        lv_subject_add_observer(state.get_speed_factor_subject(), speed_cb, &speed_count);
+    lv_observer_t* position_observer = lv_subject_add_observer(
+        state.motion_state().get_position_x_subject(), position_cb, &position_count);
+    lv_observer_t* speed_observer = lv_subject_add_observer(
+        state.motion_state().get_speed_factor_subject(), speed_cb, &speed_count);
 
     // Both observers fire on initial add
     REQUIRE(position_count == 1);
@@ -731,12 +803,12 @@ TEST_CASE("Motion characterization: multiple observers on same subject all fire"
         (*count)++;
     };
 
-    lv_observer_t* observer1 =
-        lv_subject_add_observer(state.get_position_x_subject(), observer_cb, &count1);
-    lv_observer_t* observer2 =
-        lv_subject_add_observer(state.get_position_x_subject(), observer_cb, &count2);
-    lv_observer_t* observer3 =
-        lv_subject_add_observer(state.get_position_x_subject(), observer_cb, &count3);
+    lv_observer_t* observer1 = lv_subject_add_observer(
+        state.motion_state().get_position_x_subject(), observer_cb, &count1);
+    lv_observer_t* observer2 = lv_subject_add_observer(
+        state.motion_state().get_position_x_subject(), observer_cb, &count2);
+    lv_observer_t* observer3 = lv_subject_add_observer(
+        state.motion_state().get_position_x_subject(), observer_cb, &count3);
 
     // All observers fire on initial add
     REQUIRE(count1 == 1);
@@ -775,18 +847,18 @@ TEST_CASE("Motion characterization: gcode_position updates from gcode_move.gcode
         state.update_from_status(status);
 
         // Values should be stored as centimillimeters (mm * 100)
-        REQUIRE(lv_subject_get_int(state.get_gcode_position_x_subject()) == 15050);
-        REQUIRE(lv_subject_get_int(state.get_gcode_position_y_subject()) == 20030);
-        REQUIRE(lv_subject_get_int(state.get_gcode_position_z_subject()) == 1070);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_gcode_position_x_subject()) == 15050);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_gcode_position_y_subject()) == 20030);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_gcode_position_z_subject()) == 1070);
     }
 
     SECTION("zero gcode positions store correctly") {
         json status = {{"gcode_move", {{"gcode_position", {0.0, 0.0, 0.0}}}}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_gcode_position_x_subject()) == 0);
-        REQUIRE(lv_subject_get_int(state.get_gcode_position_y_subject()) == 0);
-        REQUIRE(lv_subject_get_int(state.get_gcode_position_z_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_gcode_position_x_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_gcode_position_y_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_gcode_position_z_subject()) == 0);
     }
 
     SECTION("negative gcode positions store correctly") {
@@ -794,18 +866,18 @@ TEST_CASE("Motion characterization: gcode_position updates from gcode_move.gcode
         json status = {{"gcode_move", {{"gcode_position", {-10.5, -5.2, -0.15}}}}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_gcode_position_x_subject()) == -1050);
-        REQUIRE(lv_subject_get_int(state.get_gcode_position_y_subject()) == -520);
-        REQUIRE(lv_subject_get_int(state.get_gcode_position_z_subject()) == -15);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_gcode_position_x_subject()) == -1050);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_gcode_position_y_subject()) == -520);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_gcode_position_z_subject()) == -15);
     }
 
     SECTION("large gcode positions store correctly") {
         json status = {{"gcode_move", {{"gcode_position", {350.0, 350.0, 400.0}}}}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_gcode_position_x_subject()) == 35000);
-        REQUIRE(lv_subject_get_int(state.get_gcode_position_y_subject()) == 35000);
-        REQUIRE(lv_subject_get_int(state.get_gcode_position_z_subject()) == 40000);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_gcode_position_x_subject()) == 35000);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_gcode_position_y_subject()) == 35000);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_gcode_position_z_subject()) == 40000);
     }
 }
 
@@ -833,9 +905,9 @@ TEST_CASE("Motion characterization: gcode_position vs position are independent",
         state.update_from_status(status);
 
         // gcode_position subjects should reflect gcode_position values
-        REQUIRE(lv_subject_get_int(state.get_gcode_position_x_subject()) == 15050);
-        REQUIRE(lv_subject_get_int(state.get_gcode_position_y_subject()) == 20030);
-        REQUIRE(lv_subject_get_int(state.get_gcode_position_z_subject()) == 1070);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_gcode_position_x_subject()) == 15050);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_gcode_position_y_subject()) == 20030);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_gcode_position_z_subject()) == 1070);
     }
 
     SECTION("gcode_position unchanged when only position key updates") {
@@ -843,18 +915,18 @@ TEST_CASE("Motion characterization: gcode_position vs position are independent",
         json initial = {{"gcode_move", {{"gcode_position", {50.0, 60.0, 5.0}}}}};
         state.update_from_status(initial);
 
-        REQUIRE(lv_subject_get_int(state.get_gcode_position_x_subject()) == 5000);
-        REQUIRE(lv_subject_get_int(state.get_gcode_position_y_subject()) == 6000);
-        REQUIRE(lv_subject_get_int(state.get_gcode_position_z_subject()) == 500);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_gcode_position_x_subject()) == 5000);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_gcode_position_y_subject()) == 6000);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_gcode_position_z_subject()) == 500);
 
         // Update only position (not gcode_position) - should NOT change gcode_position subjects
         json update = {{"gcode_move", {{"position", {999.0, 888.0, 777.0}}}}};
         state.update_from_status(update);
 
         // gcode_position subjects should be unchanged
-        REQUIRE(lv_subject_get_int(state.get_gcode_position_x_subject()) == 5000);
-        REQUIRE(lv_subject_get_int(state.get_gcode_position_y_subject()) == 6000);
-        REQUIRE(lv_subject_get_int(state.get_gcode_position_z_subject()) == 500);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_gcode_position_x_subject()) == 5000);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_gcode_position_y_subject()) == 6000);
+        REQUIRE(lv_subject_get_int(state.motion_state().get_gcode_position_z_subject()) == 500);
     }
 }
 
@@ -876,8 +948,8 @@ TEST_CASE("Motion characterization: gcode_position observer fires on update",
 
     int user_data[2] = {0, -1}; // [callback_count, last_value]
 
-    lv_observer_t* observer =
-        lv_subject_add_observer(state.get_gcode_position_x_subject(), observer_cb, user_data);
+    lv_observer_t* observer = lv_subject_add_observer(
+        state.motion_state().get_gcode_position_x_subject(), observer_cb, user_data);
 
     // LVGL auto-notifies observers when first added
     REQUIRE(user_data[0] == 1);

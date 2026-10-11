@@ -3,6 +3,8 @@
 
 #include "socket_server_base.h"
 
+#include "helix_thread.h"
+
 #include <spdlog/spdlog.h>
 
 #include <cerrno>
@@ -53,16 +55,21 @@ bool SocketServerBase::start(RequestHandler handler) {
     }
 
     running_.store(true);
-    accept_thread_ = std::thread(&SocketServerBase::accept_loop, this);
+    accept_thread_ = helix::make_thread(&SocketServerBase::accept_loop, this);
     spdlog::info("[RemoteControl] Transport started on {}", endpoint());
     return true;
 }
 
-void SocketServerBase::stop() {
-    if (!running_.load()) {
-        return;
+SocketServerBase::~SocketServerBase() {
+    // Only when a subclass destructor did not already stop(): a completed stop()
+    // joins the thread, and re-running the teardown would shutdown() a client fd
+    // number the process may have handed to something else by now.
+    if (accept_thread_.joinable()) {
+        halt_accept_thread();
     }
+}
 
+void SocketServerBase::halt_accept_thread() {
     running_.store(false);
 
     // Wake the accept loop.
@@ -98,7 +105,14 @@ void SocketServerBase::stop() {
         close(shutdown_pipe_[1]);
         shutdown_pipe_[1] = -1;
     }
+}
 
+void SocketServerBase::stop() {
+    if (!running_.load()) {
+        return;
+    }
+
+    halt_accept_thread();
     on_stopped();
     spdlog::debug("[RemoteControl] Transport stopped ({})", endpoint());
 }

@@ -28,7 +28,10 @@
  */
 
 #include <cstdint>
+#include <cstdlib>
+#include <cxxabi.h>
 #include <string>
+#include <typeinfo>
 
 #include "hv/json.hpp"
 
@@ -202,6 +205,35 @@ void register_previous_tag_ring(volatile const char* const* ring,
  */
 void register_error_log_ring(const char* ring, unsigned int capacity,
                              volatile const unsigned int* next) noexcept;
+
+/**
+ * @brief Demangled type name of the exception currently being handled
+ *
+ * Reports the type that was THROWN, not the static type of the catch
+ * parameter, via the Itanium ABI's __cxa_current_exception_type() — which
+ * works under -fno-rtti, so firmware builds can name an exception without
+ * typeid. Allocates through __cxa_demangle: call from catch blocks on
+ * normal threads, never from a signal handler.
+ *
+ * @return Human-readable type name (e.g. "std::system_error"); the mangled
+ *         name when demangling fails; "<unknown>" when no exception is in
+ *         flight.
+ */
+// NAMESPACE_OK: crash_handler is a global namespace by design; helper belongs with its siblings.
+inline std::string current_exception_type_name() {
+    const std::type_info* ti = abi::__cxa_current_exception_type();
+    if (ti == nullptr) {
+        return "<unknown>";
+    }
+    int status = 0;
+    char* demangled = abi::__cxa_demangle(ti->name(), nullptr, nullptr, &status);
+    if (demangled == nullptr) {
+        return ti->name();
+    }
+    std::string out(demangled);
+    std::free(demangled);
+    return out;
+}
 
 /**
  * @brief Record the LVGL event currently being dispatched

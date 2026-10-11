@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "sensor_enum_names.h"
+
 #include <string>
 #include <string_view>
 #include <vector>
@@ -18,12 +20,14 @@ enum class HumiditySensorRole {
 
 /// @brief Type of humidity sensor hardware
 enum class HumiditySensorType {
-    BME280 = 1,  ///< BME280 sensor (humidity, pressure, temperature)
-    HTU21D = 2,  ///< HTU21D sensor (humidity, temperature)
-    SHT3X = 3,   ///< SHT3X sensor (humidity, temperature)
-    AHT10 = 4,   ///< AHT10 sensor (humidity, temperature)
-    AHT20 = 5,   ///< AHT20 sensor (humidity, temperature)
-    AHT20_F = 6, ///< AHT20-F sensor (humidity, temperature)
+    BME280 = 1,           ///< BME280 sensor (humidity, pressure, temperature)
+    HTU21D = 2,           ///< HTU21D sensor (humidity, temperature)
+    SHT3X = 3,            ///< SHT3X sensor (humidity, temperature)
+    AHT10 = 4,            ///< AHT10 sensor (humidity, temperature)
+    AHT20 = 5,            ///< AHT20 sensor (humidity, temperature)
+    AHT20_F = 6,          ///< AHT20-F sensor (humidity, temperature)
+    AHT3X = 7,            ///< AHT3x object (humidity, temperature)
+    TEMPERATURE_OAMS = 8, ///< temperature_oams object (humidity, temperature)
 };
 
 /// @brief Descriptor for one humidity-capable Klipper sensor chip.
@@ -48,6 +52,9 @@ struct HumiditySensorChip {
         {HumiditySensorType::AHT10, "aht10 ", "aht10", "AHT10", false},
         {HumiditySensorType::AHT20, "aht20 ", "aht20", "AHT20", false},
         {HumiditySensorType::AHT20_F, "aht20_f ", "aht20_f", "AHT20-F", false},
+        {HumiditySensorType::AHT3X, "aht3x ", "aht3x", "AHT3x", false},
+        {HumiditySensorType::TEMPERATURE_OAMS, "temperature_oams ", "temperature_oams",
+         "temperature_oams", false},
     };
     return chips;
 }
@@ -89,47 +96,22 @@ struct HumiditySensorState {
     bool available = false;   ///< Sensor available in current config
 };
 
-/// @brief Convert role enum to config string
-/// @param role The role to convert
-/// @return Config-safe string for JSON storage
+inline constexpr EnumName<HumiditySensorRole> kHumiditySensorRoles[] = {
+    {HumiditySensorRole::NONE, "none", "Unassigned"},
+    {HumiditySensorRole::CHAMBER, "chamber", "Chamber"},
+    {HumiditySensorRole::DRYER, "dryer", "Dryer"},
+};
+
 [[nodiscard]] inline std::string humidity_role_to_string(HumiditySensorRole role) {
-    switch (role) {
-    case HumiditySensorRole::NONE:
-        return "none";
-    case HumiditySensorRole::CHAMBER:
-        return "chamber";
-    case HumiditySensorRole::DRYER:
-        return "dryer";
-    default:
-        return "none";
-    }
+    return enum_id(kHumiditySensorRoles, role);
 }
 
-/// @brief Parse role string to enum
-/// @param str The config string to parse
-/// @return Parsed role, or NONE if unrecognized
 [[nodiscard]] inline HumiditySensorRole humidity_role_from_string(const std::string& str) {
-    if (str == "chamber")
-        return HumiditySensorRole::CHAMBER;
-    if (str == "dryer")
-        return HumiditySensorRole::DRYER;
-    return HumiditySensorRole::NONE;
+    return enum_from_id(kHumiditySensorRoles, str);
 }
 
-/// @brief Convert role to display string
-/// @param role The role to convert
-/// @return Human-readable role name for UI display
 [[nodiscard]] inline std::string humidity_role_to_display_string(HumiditySensorRole role) {
-    switch (role) {
-    case HumiditySensorRole::NONE:
-        return "Unassigned";
-    case HumiditySensorRole::CHAMBER:
-        return "Chamber";
-    case HumiditySensorRole::DRYER:
-        return "Dryer";
-    default:
-        return "Unassigned";
-    }
+    return enum_display(kHumiditySensorRoles, role);
 }
 
 /// @brief Convert type enum to config string

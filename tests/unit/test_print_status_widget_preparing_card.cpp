@@ -75,10 +75,10 @@ class PreparingCardFixture : public LVGLTestFixture {
 
     ~PreparingCardFixture() override {
         auto& ps = get_printer_state();
-        if (ps.has_preparing_job()) {
-            ps.retire_preparing(PreparingExit::Superseded);
+        if (ps.print_state().has_preparing_job()) {
+            ps.print_state().retire_preparing(PreparingExit::Superseded);
         }
-        ps.set_print_start_state(PrintStartPhase::IDLE, "", 0);
+        ps.print_state().set_print_start_state(PrintStartPhase::IDLE, "", 0);
         settle();
         PrintStatusWidget::destroy_formatter_for_test();
         set_moonraker_api(previous_api_);
@@ -101,7 +101,7 @@ class PreparingCardFixture : public LVGLTestFixture {
     /// publishes a transient Printing on the way to Preparing.
     static void set_lifecycle(PrintJobState wire, PrintStartPhase phase) {
         auto& ps = get_printer_state();
-        ps.set_print_start_state(phase, "", 0);
+        ps.print_state().set_print_start_state(phase, "", 0);
         settle();
         helix::test::set_wire_state(ps, wire);
         settle();
@@ -111,11 +111,11 @@ class PreparingCardFixture : public LVGLTestFixture {
     /// a host-side pre-start block.
     static void enter_host_side_preparing() {
         auto& ps = get_printer_state();
-        ps.begin_preparing(PrintJobRef{"chosen.gcode", "", ""});
-        ps.set_print_start_state(PrintStartPhase::HOMING, "", 0);
+        ps.print_state().begin_preparing(PrintJobRef{"chosen.gcode", "", ""});
+        ps.print_state().set_print_start_state(PrintStartPhase::HOMING, "", 0);
         settle();
-        REQUIRE(ps.get_print_job_state() == PrintJobState::STANDBY);
-        REQUIRE(ps.get_print_lifecycle() == PrintState::Preparing);
+        REQUIRE(ps.print_state().get_print_job_state() == PrintJobState::STANDBY);
+        REQUIRE(ps.print_state().get_print_lifecycle() == PrintState::Preparing);
     }
 
     /// Minimal tree carrying the names attach() looks up. Same shape as
@@ -235,7 +235,7 @@ TEST_CASE_METHOD(PreparingCardFixture, "Print card is active during a firmware-s
     process_lvgl(50);
 
     set_lifecycle(PrintJobState::PRINTING, PrintStartPhase::HOMING);
-    REQUIRE(get_printer_state().get_print_lifecycle() == PrintState::Preparing);
+    REQUIRE(get_printer_state().print_state().get_print_lifecycle() == PrintState::Preparing);
     settle();
     process_lvgl(20);
 

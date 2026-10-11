@@ -8,23 +8,14 @@
 #include "nozzle_renderer_common.h"
 #include "theme_manager.h"
 
-void draw_nozzle_creality_k2(lv_layer_t* layer, int32_t cx, int32_t cy, lv_color_t filament_color,
-                             int32_t scale_unit, lv_opa_t opa) {
+void draw_nozzle_creality_k2(lv_layer_t* layer, int32_t cx, int32_t cy,
+                             std::optional<lv_color_t> filament, int32_t scale_unit, lv_opa_t opa) {
     // Creality K2 toolhead: tall narrow dark tower (~1:2 W:H ratio)
     // Key features: sloped upper section, 13 vertical vent slits, U-cutout at bottom
     // cy is the CENTER of the entire print head assembly.
 
-    // Dim helper: blend color toward black by opa factor (255=full, 0=invisible)
-    auto dim = [opa](lv_color_t c) -> lv_color_t {
-        if (opa >= LV_OPA_COVER)
-            return c;
-        float f = (float)opa / 255.0f;
-        return lv_color_make((uint8_t)(c.red * f), (uint8_t)(c.green * f), (uint8_t)(c.blue * f));
-    };
-
     // Base color — metallic gray (same as K1 / Bambu default)
-    lv_color_t body_base = dim(theme_manager_get_color("filament_metal"));
-    filament_color = dim(filament_color);
+    lv_color_t body_base = helix::nr_dim(theme_manager_get_color("filament_metal"), opa);
 
     // Lighting: light from top-left
     lv_color_t front_light = nr_lighten(body_base, 35);
@@ -65,7 +56,6 @@ void draw_nozzle_creality_k2(lv_layer_t* layer, int32_t cx, int32_t cy, lv_color
     int32_t slope_bottom = body_top + slope_height;
     int32_t vent_bottom = slope_bottom + vent_height;
     int32_t tip_top = body_bottom;
-    int32_t tip_bottom_y = tip_top + tip_height;
 
     // ========================================
     // STEP 0: Sloped upper section (~45% of body)
@@ -100,19 +90,8 @@ void draw_nozzle_creality_k2(lv_layer_t* layer, int32_t cx, int32_t cy, lv_color
             // Gradient from light at top to mid-tone at breakover
             lv_color_t base_color = nr_blend(front_light, front_mid, factor * 0.7f);
 
-            // Per-pixel horizontal shading for rounded bevel effect
-            for (int32_t x = cx - half_w; x <= cx + half_w; x++) {
-                float x_factor = (float)(x - cx) / (float)half_w;
-                lv_color_t pixel_color;
-                if (x_factor < 0) {
-                    pixel_color = nr_lighten(base_color, (int32_t)(-x_factor * 12));
-                } else {
-                    pixel_color = nr_darken(base_color, (int32_t)(x_factor * 12));
-                }
-                fill.color = pixel_color;
-                lv_area_t pixel = {x, y_row, x, y_row};
-                lv_draw_fill(layer, &fill, &pixel);
-            }
+            // Horizontal shading for rounded bevel effect
+            helix::nr_draw_bevel_row(layer, cx, half_w, y_row, base_color, 12);
         }
 
         // === TAPERED RIGHT SIDE ===
@@ -251,7 +230,7 @@ void draw_nozzle_creality_k2(lv_layer_t* layer, int32_t cx, int32_t cy, lv_color
         int32_t cutout_radius = LV_MAX(cutout_half_width / 3, 2);
 
         // Dark cutout background with slightly rounded top corners
-        lv_color_t cutout_color = dim(lv_color_hex(0x0A0A0A));
+        lv_color_t cutout_color = helix::nr_dim(lv_color_hex(0x0A0A0A), opa);
         fill.color = cutout_color;
         fill.radius = cutout_radius;
         lv_area_t cutout_area = {cutout_left, cutout_top, cutout_right, body_bottom};
@@ -273,28 +252,8 @@ void draw_nozzle_creality_k2(lv_layer_t* layer, int32_t cx, int32_t cy, lv_color
     // STEP 4: Nozzle tip (barely protrudes below body)
     // ========================================
     {
-        lv_color_t tip_left = nr_lighten(body_base, 25);
-        lv_color_t tip_right = nr_darken(body_base, 10);
-
-        // Tint nozzle tip with filament color if loaded
-        static constexpr uint32_t NOZZLE_UNLOADED = 0x3A3A3A;
-        if (!lv_color_eq(filament_color, nr_darken(body_base, 10)) &&
-            !lv_color_eq(filament_color, lv_color_hex(NOZZLE_UNLOADED)) &&
-            !lv_color_eq(filament_color, lv_color_hex(0x808080)) &&
-            !lv_color_eq(filament_color, lv_color_black())) {
-            tip_left = nr_blend(tip_left, filament_color, 0.4f);
-            tip_right = nr_blend(tip_right, filament_color, 0.4f);
-        }
-
-        nr_draw_nozzle_tip(layer, cx, tip_top, tip_top_width, tip_bottom_width, tip_height,
-                           tip_left, tip_right);
-
-        // Bright glint at tip
-        lv_draw_fill_dsc_t fill_dsc;
-        lv_draw_fill_dsc_init(&fill_dsc);
-        fill_dsc.color = lv_color_hex(0xFFFFFF);
-        fill_dsc.opa = LV_OPA_70;
-        lv_area_t glint = {cx - 1, tip_bottom_y - 1, cx, tip_bottom_y};
-        lv_draw_fill(layer, &fill_dsc, &glint);
+        helix::nr_draw_tinted_tip(layer, cx, tip_top, tip_top_width, tip_bottom_width, tip_height,
+                                  nr_lighten(body_base, 25), nr_darken(body_base, 10), filament,
+                                  opa, 0);
     }
 }

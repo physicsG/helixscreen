@@ -38,9 +38,10 @@
 
 #include "ams_backend_afc.h"
 #include "ams_types.h"
+#include "test_helpers/afc_test_access.h"
+#include "test_helpers/log_capture.h"
 #include "ui/ams_drawing_utils.h"
 
-#include <spdlog/sinks/ringbuffer_sink.h>
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -95,44 +96,6 @@ std::set<std::string> distinct_lane_extruders(const nlohmann::json& status) {
     return names;
 }
 
-/// RAII spdlog capture, so a warning aimed at the user can be asserted on.
-class LogCapture {
-  public:
-    LogCapture() : sink_(std::make_shared<spdlog::sinks::ringbuffer_sink_mt>(256)) {
-        logger_ = spdlog::default_logger();
-        prev_level_ = logger_->level();
-        sink_->set_level(spdlog::level::trace);
-        logger_->sinks().push_back(sink_);
-        logger_->set_level(spdlog::level::trace);
-    }
-
-    ~LogCapture() {
-        auto& sinks = logger_->sinks();
-        for (auto it = sinks.begin(); it != sinks.end(); ++it) {
-            if (*it == sink_) {
-                sinks.erase(it);
-                break;
-            }
-        }
-        logger_->set_level(prev_level_);
-    }
-
-    [[nodiscard]] int count_containing(const std::string& needle) const {
-        int n = 0;
-        for (const auto& l : sink_->last_formatted(256)) {
-            if (l.find(needle) != std::string::npos) {
-                ++n;
-            }
-        }
-        return n;
-    }
-
-  private:
-    std::shared_ptr<spdlog::sinks::ringbuffer_sink_mt> sink_;
-    std::shared_ptr<spdlog::logger> logger_;
-    spdlog::level::level_enum prev_level_;
-};
-
 /// The reporter's `[AFC_extruder eN] extruder_name:` lines, keyed lowercase the
 /// way Klipper publishes configfile section suffixes.
 std::unordered_map<std::string, std::string> u1_configfile_extruder_names() {
@@ -145,6 +108,8 @@ std::unordered_map<std::string, std::string> u1_configfile_extruder_names() {
 }
 
 } // namespace
+
+namespace helix {
 
 // Not in the anonymous namespace: AmsBackendAfc befriends this by name.
 class AfcSharedExtruderHelper : public AmsBackendAfc {
@@ -185,11 +150,12 @@ class AfcSharedExtruderHelper : public AmsBackendAfc {
     /// query_afc_configfile_topology() never runs.
     void seed_extruder_klipper_names(std::unordered_map<std::string, std::string> names) {
         std::lock_guard<std::mutex> lock(mutex_);
-        extruder_klipper_names_ = std::move(names);
-        configfile_answered_ = true; // stands in for the query having landed
-        extruder_tool_index_warned_.clear();
+        AfcTestAccess::extruder_klipper_names(*this) = std::move(names);
+        AfcTestAccess::configfile_answered(*this) = true; // stands in for the query having landed
+        AfcTestAccess::extruder_tool_index_warned(*this).clear();
     }
 };
+} // namespace helix
 
 TEST_CASE("AFC shared extruders: two units on one extruder draw one toolhead",
           "[ams][afc][toolchanger][topology][shared_extruder]") {
@@ -275,7 +241,7 @@ TEST_CASE("AFC shared extruders: configfile extruder_name gives toolheads T<n> i
     CHECK(labels.prefix == 'T');
     std::vector<int> numbers = labels.numbers;
     std::sort(numbers.begin(), numbers.end());
-    CHECK(numbers == std::vector<int>{0, 1, 2, 3});
+    CHECK(numbers == std::vector<int>{0, 1, 2, 3}); // Klipper tool numbers: T0 is extruder
 }
 
 // ============================================================================
@@ -333,4 +299,85 @@ TEST_CASE("AFC extruder warning: an unparseable extruder_name names the value it
     afc.feed_until_settled(status);
 
     CHECK(log.count_containing("its extruder_name is 'my_extruder_left'") > 0);
+}
+
+TEST_CASE("AFC toolhead sensor: each unit reads its own extruders' pins",
+          "[ams][afc][configfile][toolhead_sensor]") {
+    auto fixture = load_fixture("afc_u1_shared_extruders.json");
+    const auto& status = fixture["status"];
+
+    AfcSharedExtruderHelper afc;
+    afc.discover_from(status);
+    afc.feed_until_settled(status);
+    int state_events = 0;
+    afc.set_event_callback([&](const std::string& event, const std::string&) {
+        state_events += event == AmsBackend::EVENT_STATE_CHANGED;
+    });
+
+    auto sensor_of = [&](const std::string& unit_name) {
+        for (const auto& unit : afc.get_system_info().units) {
+            if (unit.display_name == unit_name)
+                return unit.has_toolhead_sensor;
+        }
+        FAIL("no unit " << unit_name);
+        return false;
+    };
+    const std::vector<std::string> units = {"Turtle_1", "HTLF_claymore_1", "Vivid_1", "EMU_1",
+                                            "Tools"};
+    // Unknown until configfile answers.
+    for (const auto& name : units) {
+        CAPTURE(name);
+        REQUIRE(sensor_of(name));
+    }
+
+    auto section = [](const char* klipper_name, nlohmann::json pins) {
+        pins["extruder_name"] = klipper_name;
+        return pins;
+    };
+    nlohmann::json settings = {
+        {"afc_extruder e0", section("extruder", {{"pin_tool_start", "Turtle_1:PA1"}})},
+        {"afc_extruder e1", section("extruder1", {{"pin_tool_start", "buffer"}})},
+        {"afc_extruder e2", section("extruder2", {{"pin_tool_end", "PB2"}})},
+    };
+
+    SECTION("units on an unfitted extruder report none, the rest keep theirs") {
+        settings["afc_extruder e3"] =
+            section("extruder3", {{"pin_tool_start", "none"}, {"pin_tool_end", ""}});
+        AfcTestAccess::apply_configfile_topology(
+            afc, AmsBackendAfc::parse_configfile_topology(
+                     {{"result", {{"status", {{"configfile", {{"settings", settings}}}}}}}}));
+        CHECK(sensor_of("Turtle_1"));
+        CHECK(sensor_of("HTLF_claymore_1"));
+        CHECK_FALSE(sensor_of("Vivid_1"));
+        CHECK_FALSE(sensor_of("EMU_1"));
+        // Tools feeds e1 (borrowed from the buffer) and e2 (fitted).
+        CHECK(sensor_of("Tools"));
+        CHECK(state_events == 1);
+    }
+    SECTION("a unit whose extruders the config does not describe keeps the default") {
+        // e3 has no section, and the sections that exist disagree.
+        AfcTestAccess::apply_configfile_topology(
+            afc, AmsBackendAfc::parse_configfile_topology(
+                     {{"result", {{"status", {{"configfile", {{"settings", settings}}}}}}}}));
+        CHECK(sensor_of("Vivid_1"));
+        CHECK(sensor_of("EMU_1"));
+        CHECK(state_events == 0);
+    }
+}
+
+TEST_CASE("AFC toolhead sensor: the per-unit rule", "[ams][afc][toolhead_sensor]") {
+    const std::unordered_map<std::string, bool> mixed = {{"e0", true}, {"e1", false}};
+    const std::unordered_map<std::string, bool> none = {{"e0", false}, {"e1", false}};
+    const std::unordered_map<std::string, bool> all = {{"e0", true}, {"e1", true}};
+
+    CHECK(AmsBackendAfc::unit_toolhead_sensor_fitted({"e0"}, mixed));
+    CHECK_FALSE(AmsBackendAfc::unit_toolhead_sensor_fitted({"e1"}, mixed));
+    CHECK(AmsBackendAfc::unit_toolhead_sensor_fitted({"e1", "e0"}, mixed));
+    // Unknown extruders: the sections' common answer, else the default.
+    CHECK(AmsBackendAfc::unit_toolhead_sensor_fitted({}, mixed));
+    CHECK(AmsBackendAfc::unit_toolhead_sensor_fitted({"e9"}, mixed));
+    CHECK_FALSE(AmsBackendAfc::unit_toolhead_sensor_fitted({}, none));
+    CHECK_FALSE(AmsBackendAfc::unit_toolhead_sensor_fitted({"e1", "e9"}, none));
+    CHECK(AmsBackendAfc::unit_toolhead_sensor_fitted({"e9"}, all));
+    CHECK(AmsBackendAfc::unit_toolhead_sensor_fitted({}, {}));
 }

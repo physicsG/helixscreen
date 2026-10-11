@@ -75,7 +75,7 @@ TEST_CASE("Calibration characterization: initial values after init",
 
     SECTION("motors_enabled initializes to 1 (enabled)") {
         // Default is enabled (Ready state) per printer_state.cpp:256
-        lv_subject_t* subject = state.get_motors_enabled_subject();
+        lv_subject_t* subject = state.calibration_state().get_motors_enabled_subject();
         REQUIRE(subject != nullptr);
         REQUIRE(lv_subject_get_int(subject) == 1);
     }
@@ -179,19 +179,22 @@ TEST_CASE("Calibration characterization: manual probe updates from JSON",
         json status = {{"manual_probe", {{"is_active", true}, {"z_position", 0.125}}}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_manual_probe_active_subject()) == 1);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_manual_probe_active_subject()) ==
+                1);
     }
 
     SECTION("manual_probe.is_active false sets subject to 0") {
         // First activate
         json activate = {{"manual_probe", {{"is_active", true}}}};
         state.update_from_status(activate);
-        REQUIRE(lv_subject_get_int(state.get_manual_probe_active_subject()) == 1);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_manual_probe_active_subject()) ==
+                1);
 
         // Then deactivate
         json deactivate = {{"manual_probe", {{"is_active", false}}}};
         state.update_from_status(deactivate);
-        REQUIRE(lv_subject_get_int(state.get_manual_probe_active_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_manual_probe_active_subject()) ==
+                0);
     }
 
     SECTION("manual_probe.z_position converts mm to microns (x1000)") {
@@ -199,24 +202,28 @@ TEST_CASE("Calibration characterization: manual probe updates from JSON",
         state.update_from_status(status);
 
         // 0.125mm * 1000 = 125 microns
-        REQUIRE(lv_subject_get_int(state.get_manual_probe_z_position_subject()) == 125);
+        REQUIRE(lv_subject_get_int(
+                    state.calibration_state().get_manual_probe_z_position_subject()) == 125);
     }
 
     SECTION("various Z positions convert correctly") {
         json status1 = {{"manual_probe", {{"z_position", 0.5}}}};
         state.update_from_status(status1);
         // 0.5mm * 1000 = 500 microns
-        REQUIRE(lv_subject_get_int(state.get_manual_probe_z_position_subject()) == 500);
+        REQUIRE(lv_subject_get_int(
+                    state.calibration_state().get_manual_probe_z_position_subject()) == 500);
 
         json status2 = {{"manual_probe", {{"z_position", 0.025}}}};
         state.update_from_status(status2);
         // 0.025mm * 1000 = 25 microns
-        REQUIRE(lv_subject_get_int(state.get_manual_probe_z_position_subject()) == 25);
+        REQUIRE(lv_subject_get_int(
+                    state.calibration_state().get_manual_probe_z_position_subject()) == 25);
 
         json status3 = {{"manual_probe", {{"z_position", 1.234}}}};
         state.update_from_status(status3);
         // 1.234mm * 1000 = 1234 microns
-        REQUIRE(lv_subject_get_int(state.get_manual_probe_z_position_subject()) == 1234);
+        REQUIRE(lv_subject_get_int(
+                    state.calibration_state().get_manual_probe_z_position_subject()) == 1234);
     }
 
     SECTION("negative Z positions convert correctly") {
@@ -224,23 +231,28 @@ TEST_CASE("Calibration characterization: manual probe updates from JSON",
         state.update_from_status(status);
 
         // -0.05mm * 1000 = -50 microns
-        REQUIRE(lv_subject_get_int(state.get_manual_probe_z_position_subject()) == -50);
+        REQUIRE(lv_subject_get_int(
+                    state.calibration_state().get_manual_probe_z_position_subject()) == -50);
     }
 
     SECTION("missing manual_probe key leaves values unchanged") {
         // First set a known value
         json initial = {{"manual_probe", {{"is_active", true}, {"z_position", 0.5}}}};
         state.update_from_status(initial);
-        REQUIRE(lv_subject_get_int(state.get_manual_probe_active_subject()) == 1);
-        REQUIRE(lv_subject_get_int(state.get_manual_probe_z_position_subject()) == 500);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_manual_probe_active_subject()) ==
+                1);
+        REQUIRE(lv_subject_get_int(
+                    state.calibration_state().get_manual_probe_z_position_subject()) == 500);
 
         // Update with unrelated status
         json unrelated = {{"toolhead", {{"position", {100.0, 200.0, 30.0}}}}};
         state.update_from_status(unrelated);
 
         // Values should remain unchanged
-        REQUIRE(lv_subject_get_int(state.get_manual_probe_active_subject()) == 1);
-        REQUIRE(lv_subject_get_int(state.get_manual_probe_z_position_subject()) == 500);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_manual_probe_active_subject()) ==
+                1);
+        REQUIRE(lv_subject_get_int(
+                    state.calibration_state().get_manual_probe_z_position_subject()) == 500);
     }
 }
 
@@ -265,7 +277,7 @@ TEST_CASE("Calibration characterization: motor state updates from JSON",
                            {"extruder", true}}}}}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 1);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 1);
     }
 
     SECTION("any stepper enabled sets motors_enabled to 1") {
@@ -278,7 +290,7 @@ TEST_CASE("Calibration characterization: motor state updates from JSON",
                            {"extruder", false}}}}}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 1);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 1);
     }
 
     SECTION("all steppers disabled sets motors_enabled to 0") {
@@ -290,7 +302,7 @@ TEST_CASE("Calibration characterization: motor state updates from JSON",
                            {"extruder", false}}}}}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 0);
     }
 
     SECTION("transition from enabled to disabled (M84 simulation)") {
@@ -302,7 +314,7 @@ TEST_CASE("Calibration characterization: motor state updates from JSON",
                             {"stepper_z", true},
                             {"extruder", true}}}}}};
         state.update_from_status(enabled);
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 1);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 1);
 
         // M84 disables all steppers
         json disabled = {{"stepper_enable",
@@ -312,7 +324,7 @@ TEST_CASE("Calibration characterization: motor state updates from JSON",
                              {"stepper_z", false},
                              {"extruder", false}}}}}};
         state.update_from_status(disabled);
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 0);
     }
 
     SECTION("transition from disabled to enabled (homing simulation)") {
@@ -324,7 +336,7 @@ TEST_CASE("Calibration characterization: motor state updates from JSON",
                              {"stepper_z", false},
                              {"extruder", false}}}}}};
         state.update_from_status(disabled);
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 0);
 
         // Homing re-enables steppers
         json enabled = {{"stepper_enable",
@@ -334,7 +346,7 @@ TEST_CASE("Calibration characterization: motor state updates from JSON",
                             {"stepper_z", true},
                             {"extruder", true}}}}}};
         state.update_from_status(enabled);
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 1);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 1);
     }
 
     SECTION("missing stepper_enable key leaves motors_enabled unchanged") {
@@ -346,14 +358,14 @@ TEST_CASE("Calibration characterization: motor state updates from JSON",
                              {"stepper_z", false},
                              {"extruder", false}}}}}};
         state.update_from_status(disabled);
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 0);
 
         // Update with unrelated status
         json unrelated = {{"toolhead", {{"position", {100.0, 200.0, 30.0}}}}};
         state.update_from_status(unrelated);
 
         // Should remain disabled
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 0);
     }
 
     SECTION("idle_timeout does not affect motors_enabled") {
@@ -366,13 +378,13 @@ TEST_CASE("Calibration characterization: motor state updates from JSON",
                             {"stepper_z", true},
                             {"extruder", true}}}}}};
         state.update_from_status(enabled);
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 1);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 1);
 
         // idle_timeout "Idle" should NOT change motors_enabled
         // (idle_timeout is for activity state, not motor state)
         json idle = {{"idle_timeout", {{"state", "Idle"}}}};
         state.update_from_status(idle);
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 1);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 1);
     }
 }
 
@@ -405,11 +417,13 @@ TEST_CASE("Calibration characterization: combined status updates",
         REQUIRE(lv_subject_get_int(get_subject_by_name("unretract_speed")) == 30);
 
         // Verify manual probe values
-        REQUIRE(lv_subject_get_int(state.get_manual_probe_active_subject()) == 1);
-        REQUIRE(lv_subject_get_int(state.get_manual_probe_z_position_subject()) == 250);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_manual_probe_active_subject()) ==
+                1);
+        REQUIRE(lv_subject_get_int(
+                    state.calibration_state().get_manual_probe_z_position_subject()) == 250);
 
         // Verify motor state
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 1);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 1);
     }
 
     SECTION("partial updates only affect specified sections") {
@@ -426,8 +440,9 @@ TEST_CASE("Calibration characterization: combined status updates",
         // Only retract_length should change
         REQUIRE(lv_subject_get_int(get_subject_by_name("retract_length")) == 100);
         // Others should remain unchanged
-        REQUIRE(lv_subject_get_int(state.get_manual_probe_active_subject()) == 1);
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 1);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_manual_probe_active_subject()) ==
+                1);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 1);
     }
 }
 
@@ -453,8 +468,8 @@ TEST_CASE("Calibration characterization: observer fires when manual_probe_active
 
     int user_data[2] = {0, -1}; // [callback_count, last_value]
 
-    lv_observer_t* observer =
-        lv_subject_add_observer(state.get_manual_probe_active_subject(), observer_cb, user_data);
+    lv_observer_t* observer = lv_subject_add_observer(
+        state.calibration_state().get_manual_probe_active_subject(), observer_cb, user_data);
 
     // LVGL auto-notifies observers when first added
     REQUIRE(user_data[0] == 1);
@@ -488,8 +503,8 @@ TEST_CASE("Calibration characterization: observer fires when motors_enabled chan
 
     int user_data[2] = {0, -1};
 
-    lv_observer_t* observer =
-        lv_subject_add_observer(state.get_motors_enabled_subject(), observer_cb, user_data);
+    lv_observer_t* observer = lv_subject_add_observer(
+        state.calibration_state().get_motors_enabled_subject(), observer_cb, user_data);
 
     // Initial notification
     REQUIRE(user_data[0] == 1);
@@ -535,8 +550,8 @@ TEST_CASE("Calibration characterization: subjects survive reset_for_testing cycl
 
     // Verify values were set
     REQUIRE(lv_subject_get_int(get_subject_by_name("retract_length")) == 80);
-    REQUIRE(lv_subject_get_int(state.get_manual_probe_active_subject()) == 1);
-    REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 0);
+    REQUIRE(lv_subject_get_int(state.calibration_state().get_manual_probe_active_subject()) == 1);
+    REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 0);
 
     // Reset and reinitialize
     PrinterStateTestAccess::reset(state);
@@ -547,9 +562,11 @@ TEST_CASE("Calibration characterization: subjects survive reset_for_testing cycl
     REQUIRE(lv_subject_get_int(get_subject_by_name("retract_speed")) == 20);
     REQUIRE(lv_subject_get_int(get_subject_by_name("unretract_extra_length")) == 0);
     REQUIRE(lv_subject_get_int(get_subject_by_name("unretract_speed")) == 10);
-    REQUIRE(lv_subject_get_int(state.get_manual_probe_active_subject()) == 0);
-    REQUIRE(lv_subject_get_int(state.get_manual_probe_z_position_subject()) == 0);
-    REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 1); // Default enabled
+    REQUIRE(lv_subject_get_int(state.calibration_state().get_manual_probe_active_subject()) == 0);
+    REQUIRE(lv_subject_get_int(state.calibration_state().get_manual_probe_z_position_subject()) ==
+            0);
+    REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) ==
+            1); // Default enabled
 
     // Subjects should still be functional after reset
     json new_status = {{"firmware_retraction", {{"retract_length", 0.5}}}};
@@ -589,9 +606,11 @@ TEST_CASE("Calibration characterization: subjects are independent",
         REQUIRE(lv_subject_get_int(get_subject_by_name("retract_speed")) == 50);
 
         // Manual probe and motors should be unchanged
-        REQUIRE(lv_subject_get_int(state.get_manual_probe_active_subject()) == 1);
-        REQUIRE(lv_subject_get_int(state.get_manual_probe_z_position_subject()) == 500);
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_manual_probe_active_subject()) ==
+                1);
+        REQUIRE(lv_subject_get_int(
+                    state.calibration_state().get_manual_probe_z_position_subject()) == 500);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 0);
     }
 
     SECTION("manual_probe update does not affect firmware_retraction or motors") {
@@ -610,12 +629,14 @@ TEST_CASE("Calibration characterization: subjects are independent",
         state.update_from_status(mp_only);
 
         // Manual probe should change
-        REQUIRE(lv_subject_get_int(state.get_manual_probe_active_subject()) == 1);
-        REQUIRE(lv_subject_get_int(state.get_manual_probe_z_position_subject()) == 250);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_manual_probe_active_subject()) ==
+                1);
+        REQUIRE(lv_subject_get_int(
+                    state.calibration_state().get_manual_probe_z_position_subject()) == 250);
 
         // Firmware retraction and motors should be unchanged
         REQUIRE(lv_subject_get_int(get_subject_by_name("retract_length")) == 80);
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 1);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 1);
     }
 
     SECTION("stepper_enable update does not affect firmware_retraction or manual_probe") {
@@ -634,16 +655,17 @@ TEST_CASE("Calibration characterization: subjects are independent",
         state.update_from_status(stepper_only);
 
         // Motors should change
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 0);
 
         // Others should be unchanged
         REQUIRE(lv_subject_get_int(get_subject_by_name("retract_length")) == 60);
-        REQUIRE(lv_subject_get_int(state.get_manual_probe_active_subject()) == 1);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_manual_probe_active_subject()) ==
+                1);
     }
 
     SECTION("idle_timeout does NOT affect motors_enabled (stepper_enable is the source)") {
         // Motors start enabled by default
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 1);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 1);
 
         // idle_timeout "Idle" state should NOT disable motors
         // (idle_timeout is for activity state, not motor driver state)
@@ -651,7 +673,7 @@ TEST_CASE("Calibration characterization: subjects are independent",
         state.update_from_status(idle_status);
 
         // Motors should still be enabled (not affected by idle_timeout)
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 1);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 1);
 
         // Now actually disable motors via stepper_enable
         json stepper_status = {{"stepper_enable",
@@ -663,7 +685,7 @@ TEST_CASE("Calibration characterization: subjects are independent",
         state.update_from_status(stepper_status);
 
         // NOW motors should be disabled
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 0);
     }
 }
 
@@ -688,7 +710,7 @@ TEST_CASE("Calibration characterization: stepper_enable motor state tracking",
                            {"extruder", true}}}}}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 1);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 1);
     }
 
     SECTION("any single stepper enabled = motors_enabled is 1") {
@@ -701,7 +723,7 @@ TEST_CASE("Calibration characterization: stepper_enable motor state tracking",
                            {"extruder", true}}}}}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 1);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 1);
     }
 
     SECTION("all steppers disabled = motors_enabled is 0") {
@@ -713,7 +735,7 @@ TEST_CASE("Calibration characterization: stepper_enable motor state tracking",
                            {"extruder", false}}}}}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 0);
     }
 
     SECTION("M84 simulation: transition from enabled to disabled") {
@@ -725,7 +747,7 @@ TEST_CASE("Calibration characterization: stepper_enable motor state tracking",
                             {"stepper_z", true},
                             {"extruder", true}}}}}};
         state.update_from_status(enabled);
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 1);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 1);
 
         // User presses "Motors Off" button (sends M84)
         // Klipper immediately updates stepper_enable
@@ -736,7 +758,7 @@ TEST_CASE("Calibration characterization: stepper_enable motor state tracking",
                              {"stepper_z", false},
                              {"extruder", false}}}}}};
         state.update_from_status(disabled);
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 0);
     }
 
     SECTION("homing simulation: transition from disabled to enabled") {
@@ -748,7 +770,7 @@ TEST_CASE("Calibration characterization: stepper_enable motor state tracking",
                              {"stepper_z", false},
                              {"extruder", false}}}}}};
         state.update_from_status(disabled);
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 0);
 
         // User initiates homing (G28), steppers get enabled
         json enabled = {{"stepper_enable",
@@ -758,7 +780,7 @@ TEST_CASE("Calibration characterization: stepper_enable motor state tracking",
                             {"stepper_z", true},
                             {"extruder", true}}}}}};
         state.update_from_status(enabled);
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 1);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 1);
     }
 
     SECTION("missing stepper_enable key leaves motors_enabled unchanged") {
@@ -770,14 +792,14 @@ TEST_CASE("Calibration characterization: stepper_enable motor state tracking",
                             {"stepper_z", true},
                             {"extruder", true}}}}}};
         state.update_from_status(enabled);
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 1);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 1);
 
         // Update with unrelated status (no stepper_enable)
         json other_status = {{"print_stats", {{"state", "printing"}}}};
         state.update_from_status(other_status);
 
         // Motors should still be enabled (not affected)
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 1);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 1);
     }
 }
 
@@ -799,51 +821,51 @@ TEST_CASE("Calibration characterization: homed_axes motor state tracking",
         json status = {{"toolhead", {{"homed_axes", "xyz"}}}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 1);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 1);
     }
 
     SECTION("homed_axes empty string sets motors_enabled to 0") {
         json status = {{"toolhead", {{"homed_axes", ""}}}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 0);
     }
 
     SECTION("partial homed_axes still means motors enabled") {
         json status = {{"toolhead", {{"homed_axes", "xy"}}}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 1);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 1);
     }
 
     SECTION("M84 simulation via homed_axes: enabled to disabled") {
         json homed = {{"toolhead", {{"homed_axes", "xyz"}}}};
         state.update_from_status(homed);
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 1);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 1);
 
         json m84 = {{"toolhead", {{"homed_axes", ""}}}};
         state.update_from_status(m84);
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 0);
     }
 
     SECTION("homing after M84: disabled to enabled") {
         json m84 = {{"toolhead", {{"homed_axes", ""}}}};
         state.update_from_status(m84);
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 0);
 
         json homed = {{"toolhead", {{"homed_axes", "xyz"}}}};
         state.update_from_status(homed);
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 1);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 1);
     }
 
     SECTION("toolhead without homed_axes does not affect motors_enabled") {
         json m84 = {{"toolhead", {{"homed_axes", ""}}}};
         state.update_from_status(m84);
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 0);
 
         json position_only = {{"toolhead", {{"position", {100.0, 200.0, 30.0, 0.0}}}}};
         state.update_from_status(position_only);
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 0);
     }
 
     SECTION("homed_axes takes priority over empty stepper_enable") {
@@ -851,6 +873,6 @@ TEST_CASE("Calibration characterization: homed_axes motor state tracking",
         json status = {{"toolhead", {{"homed_axes", ""}}}, {"stepper_enable", json::object()}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_motors_enabled_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.calibration_state().get_motors_enabled_subject()) == 0);
     }
 }

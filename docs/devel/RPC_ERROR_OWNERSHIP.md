@@ -194,8 +194,8 @@ Details that matter when reading that code:
 - **The recorded identity is Klipper's raw wording**, before `clean_error_text()` rewrites it.
   The router therefore looks up `raw_detail` first and falls back to `detail`, so a message
   the cleaner touched ("Must home axis first" → "Must home axes first") still matches.
-- **Only the router's plain-TOAST arm defers and re-checks.** `present_deferred_toast()`
-  (`src/application/gcode_error_router.cpp#present_deferred_toast`) re-runs the lookup when its timer fires,
+- **Only the router's plain-TOAST arm defers and re-checks.** `present_deferred()`
+  (`src/application/gcode_error_router.cpp#present_deferred`) re-runs the lookup when its timer fires,
   which is what catches an RPC reply that lands *after* the `!!` line. A CRITICAL modal fires
   immediately and does not defer — which is the other half of why the generic fallback must
   stand down for `gcode.script` unconditionally rather than racing.
@@ -237,7 +237,7 @@ look for.
 ## The gate
 
 `scripts/check_gcode_error_ownership.py`, run at `--max-allowed 0` from
-`scripts/quality-checks.sh#qc_decl_ui`.
+`scripts/qc/decl_ui.sh#qc_decl_ui`.
 
 It scans `src/` for `execute_gcode()` calls with an inline `[…](const MoonrakerError&)` lambda
 whose body is *entirely* logging or empty, and which pass neither `caller_surfaces_errors` nor

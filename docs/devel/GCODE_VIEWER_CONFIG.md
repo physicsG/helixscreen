@@ -76,9 +76,23 @@ antialiasing off.
 
 ### `tube_sides`
 **Type:** int **Default:** 4 **Values:** 4, 8, 16
-Cross-section of the extruded tube. 4 is a diamond and the cheapest; 16 is
-circular and matches OrcaSlicer. Anything else logs a warning and falls back to
-16. The geometry budget tier can override this downward on constrained devices.
+Cross-section of the extruded tube. 4 is a rectangle and the cheapest; 8 and 16
+are elliptical, 16 matching OrcaSlicer. Anything else logs a warning and falls
+back to 16. In practice the geometry budget tier decides: the viewer's 3D build
+always hands the builder the tier's side count (16, 8 or 4, see
+[the G-code pipeline chapter](architecture/16-gcode-pipeline.md)), which
+replaces this value whatever it is.
+
+The tier ladder gates on memory first, and on slow GPUs also on triangle count:
+`select_tier()` (`src/rendering/geometry_budget_manager.cpp#select_tier`)
+takes a `max_triangles` cap supplied by `gpu_triangle_budget()`
+(`include/gcode_gl_fallback.h#gpu_triangle_budget`), which keys off the kernel
+driver behind the DRM render node. A tier whose estimated triangles
+(`TRIS_PER_SEG_*`, calibrated on a Pi 3B with a 3DBenchy) exceed the cap is
+skipped, so on vc4 (VideoCore IV, Pi 0-3, ~4M tris/s) a 1M-triangle budget
+demotes heavy files to coarser tubes or the 2D fallback instead of drawing
+multi-second frames that wedge the GPU until reboot. Pi 4/5 render through v3d
+and are uncapped.
 
 ## Streaming and pacing (2D)
 
@@ -88,7 +102,8 @@ Whether large files stream layer-by-layer instead of loading whole.
 
 ### `streaming_threshold_percent`
 **Type:** int **Default:** 40
-Share of available memory a file may occupy before streaming engages.
+Share of available memory a file may occupy before streaming engages. Capped at
+15 on boards with 2GB total RAM or less.
 
 ### `layers_per_frame`
 **Type:** int **Default:** 0 (adaptive)

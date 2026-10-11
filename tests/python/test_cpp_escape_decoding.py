@@ -291,35 +291,31 @@ def _write_locale(tmp_path, locale: str, translations: dict):
     )
 
 
-def test_gate_flags_a_key_holding_a_raw_hex_escape(tmp_path, monkeypatch):
+def test_gate_flags_a_key_holding_a_raw_hex_escape(tmp_path):
     gate = _load_gate()
-    monkeypatch.setattr(gate, "TRANS_DIR", tmp_path)
     _write_locale(tmp_path, "de", {r"Rotation: %d\xc2\xb0": "Drehung: %d°"})
-    problems = gate.check_unresolved_escapes()
+    problems = gate.check_unresolved_escapes(tmp_path)
     assert [(loc, kind) for loc, kind, _ in problems] == [("de", "key")]
 
 
-def test_gate_flags_a_value_holding_a_raw_hex_escape(tmp_path, monkeypatch):
+def test_gate_flags_a_value_holding_a_raw_hex_escape(tmp_path):
     gate = _load_gate()
-    monkeypatch.setattr(gate, "TRANS_DIR", tmp_path)
     _write_locale(tmp_path, "fr", {"Rotation: %d°": r"Rotation : %d\xc2\xb0"})
-    problems = gate.check_unresolved_escapes()
+    problems = gate.check_unresolved_escapes(tmp_path)
     assert [(loc, kind) for loc, kind, _ in problems] == [("fr", "value")]
 
 
-def test_gate_flags_a_key_holding_a_literal_backslash_n(tmp_path, monkeypatch):
+def test_gate_flags_a_key_holding_a_literal_backslash_n(tmp_path):
     # The 24-key regression: a stored backslash-n can never match the real
     # newline the compiler emits.
     gate = _load_gate()
-    monkeypatch.setattr(gate, "TRANS_DIR", tmp_path)
     _write_locale(tmp_path, "it", {r"Game Over!\nScore": "Fine partita"})
-    problems = gate.check_unresolved_escapes()
+    problems = gate.check_unresolved_escapes(tmp_path)
     assert [(loc, kind) for loc, kind, _ in problems] == [("it", "key")]
 
 
-def test_gate_flags_other_surviving_c_escapes(tmp_path, monkeypatch):
+def test_gate_flags_other_surviving_c_escapes(tmp_path):
     gate = _load_gate()
-    monkeypatch.setattr(gate, "TRANS_DIR", tmp_path)
     _write_locale(
         tmp_path,
         "pt",
@@ -329,13 +325,13 @@ def test_gate_flags_other_surviving_c_escapes(tmp_path, monkeypatch):
             r"dash \u2014 here": "traco",
         },
     )
-    kinds = sorted(k for _, kind, k in [(a, b, c) for a, b, c in gate.check_unresolved_escapes()])
+    problems = gate.check_unresolved_escapes(tmp_path)
+    kinds = sorted(k for _, kind, k in problems)
     assert len(kinds) == 3
 
 
-def test_gate_accepts_resolved_keys(tmp_path, monkeypatch):
+def test_gate_accepts_resolved_keys(tmp_path):
     gate = _load_gate()
-    monkeypatch.setattr(gate, "TRANS_DIR", tmp_path)
     _write_locale(
         tmp_path,
         "es",
@@ -345,13 +341,14 @@ def test_gate_accepts_resolved_keys(tmp_path, monkeypatch):
             'tap "Check Again"': 'toque "Comprobar"',
         },
     )
-    assert gate.check_unresolved_escapes() == []
+    assert gate.check_unresolved_escapes(tmp_path) == []
 
 
 def test_shipped_locales_carry_no_unresolved_escapes():
     # End-to-end on the real translation set: the field bug was a key that could
     # never match its runtime lookup.
-    assert _load_gate().check_unresolved_escapes() == []
+    gate = _load_gate()
+    assert gate.check_unresolved_escapes(gate.TRANS_DIR) == []
 
 
 # --- acceptance: every lv_tr() key in src/ exists as a tag in en.xml ---------
@@ -382,3 +379,11 @@ def test_every_lv_tr_key_in_src_resolves_to_a_pack_tag():
     assert not misses, "lv_tr() keys with no tag in en.xml:\n" + "\n".join(
         f"  {k!r}  ({site})" for k, site in sorted(misses.items())
     )
+
+
+def test_tr_noop_marks_a_format_string_like_lv_tr_does(tmp_path):
+    # A bare "%dh %dm" is skipped as a format string, but TR_NOOP() is an
+    # explicit mark, so it becomes a key the same as lv_tr() would make it.
+    src = 'snprintf(buf, n, tr(TR_NOOP("%dh %dm")), h, m);\nconst char* s = "%dh %dm";'
+    assert _extract(tmp_path, src) == {"%dh %dm"}
+    assert _extract(tmp_path, 'const char* s = "%dh %dm";') == set()

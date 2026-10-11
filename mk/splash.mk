@@ -41,7 +41,7 @@ ifneq ($(UNAME_S),Darwin)
     # Linux: may need DRM/input libraries
     ifeq ($(DISPLAY_BACKEND),drm)
         SPLASH_LDFLAGS += -ldrm -linput
-        ifeq ($(ENABLE_OPENGLES),yes)
+        ifneq ($(filter yes,$(ENABLE_OPENGLES) $(ENABLE_GLES_3D)),)
             SPLASH_LDFLAGS += -lEGL -lGLESv2 -lgbm -ldl
         endif
     endif
@@ -62,7 +62,7 @@ ifdef SPLASH_BUILD
 
 # Compile splash source (with dependency tracking for header changes)
 # Depends on LIBHV_LIB to ensure libhv headers are installed before compilation
-$(BUILD_DIR)/splash/%.o: src/%.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) | $(BUILD_DIR)/splash
+$(BUILD_DIR)/splash/%.o: src/%.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(ABI_STAMP) | $(BUILD_DIR)/splash
 	@echo "[CXX] $< (splash)"
 	$(Q)$(CXX) $(SPLASH_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
@@ -76,67 +76,97 @@ $(BUILD_DIR)/splash/%.o: src/%.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) | $(BUILD_D
 # dependency-free modules that can be linked into splash as extra objects.
 SPLASH_EXTRA_OBJS := \
     $(BUILD_DIR)/splash/config.o \
+    $(BUILD_DIR)/splash/config_migrations.o \
     $(BUILD_DIR)/splash/config_backup.o \
     $(BUILD_DIR)/splash/config_storage_file.o \
     $(BUILD_DIR)/splash/backlight_backend.o \
     $(BUILD_DIR)/splash/data_root_resolver.o \
     $(BUILD_DIR)/splash/helix_paths.o \
+    $(BUILD_DIR)/splash/text_io.o \
+    $(BUILD_DIR)/splash/helix_fs.o \
     $(BUILD_DIR)/splash/ui_notification_stub.o \
     $(BUILD_DIR)/splash/drm_mode_matching.o \
     $(BUILD_DIR)/splash/fbdev_size_helper.o \
     $(BUILD_DIR)/splash/pending_startup_warnings.o \
     $(BUILD_DIR)/splash/log_redact.o \
+    $(BUILD_DIR)/splash/platform_info.o \
+    $(BUILD_DIR)/splash/prerender_size_class.o \
+    $(BUILD_DIR)/splash/splash_asset_choice.o \
     $(BUILD_DIR)/splash/helix_lvgl_anomaly_stub.o
 
 # Compile config for splash (with HELIX_SPLASH_ONLY to guard get_runtime_config dependency)
-$(BUILD_DIR)/splash/config.o: src/system/config.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) | $(BUILD_DIR)/splash
+$(BUILD_DIR)/splash/config.o: src/system/config.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(ABI_STAMP) | $(BUILD_DIR)/splash
+	@echo "[CXX] $< (splash)"
+	$(Q)$(CXX) $(SPLASH_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
+
+# Compile config_migrations for splash (config.cpp runs the migration ladder)
+$(BUILD_DIR)/splash/config_migrations.o: src/system/config_migrations.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(ABI_STAMP) | $(BUILD_DIR)/splash
 	@echo "[CXX] $< (splash)"
 	$(Q)$(CXX) $(SPLASH_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # Compile config_backup for splash (config.cpp references it)
-$(BUILD_DIR)/splash/config_backup.o: src/system/config_backup.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) | $(BUILD_DIR)/splash
+$(BUILD_DIR)/splash/config_backup.o: src/system/config_backup.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(ABI_STAMP) | $(BUILD_DIR)/splash
 	@echo "[CXX] $< (splash)"
 	$(Q)$(CXX) $(SPLASH_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # Compile config_storage_file for splash (config.cpp's default ConfigStorage backend)
-$(BUILD_DIR)/splash/config_storage_file.o: src/system/config_storage_file.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) | $(BUILD_DIR)/splash
+$(BUILD_DIR)/splash/config_storage_file.o: src/system/config_storage_file.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(ABI_STAMP) | $(BUILD_DIR)/splash
 	@echo "[CXX] $< (splash)"
 	$(Q)$(CXX) $(SPLASH_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # Compile data_root_resolver for splash (zero deps)
-$(BUILD_DIR)/splash/data_root_resolver.o: src/application/data_root_resolver.cpp | $(BUILD_DIR)/splash
+$(BUILD_DIR)/splash/data_root_resolver.o: src/application/data_root_resolver.cpp $(ABI_STAMP) | $(BUILD_DIR)/splash
 	@echo "[CXX] $< (splash)"
 	$(Q)$(CXX) $(SPLASH_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # Compile helix_paths for splash (pure path primitives; data_root_resolver.cpp
 # calls helix::paths::strip_trailing_slash).
-$(BUILD_DIR)/splash/helix_paths.o: src/system/helix_paths.cpp | $(BUILD_DIR)/splash
+$(BUILD_DIR)/splash/helix_paths.o: src/system/helix_paths.cpp $(ABI_STAMP) | $(BUILD_DIR)/splash
 	@echo "[CXX] $< (splash)"
 	$(Q)$(CXX) $(SPLASH_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
+# Compile text_io for splash (config_storage_file.cpp reads and writes through it).
+# Large-file offsets, as in the app build (mk/rules.mk).
+$(BUILD_DIR)/splash/text_io.o: src/system/text_io.cpp $(ABI_STAMP) | $(BUILD_DIR)/splash
+	@echo "[CXX] $< (splash)"
+	$(Q)$(CXX) $(SPLASH_CXXFLAGS) -D_FILE_OFFSET_BITS=64 $(DEPFLAGS) -c $< -o $@
+
+# Compile helix_fs for splash (config, config_backup, config_storage_file and
+# helix_paths query and copy files through it). Large-file offsets, as text_io.
+$(BUILD_DIR)/splash/helix_fs.o: src/system/helix_fs.cpp $(ABI_STAMP) | $(BUILD_DIR)/splash
+	@echo "[CXX] $< (splash)"
+	$(Q)$(CXX) $(SPLASH_CXXFLAGS) -D_FILE_OFFSET_BITS=64 $(DEPFLAGS) -c $< -o $@
+
 # DRM mode-matching helper (pure, referenced by display_backend_drm.cpp). Added for #766.
-$(BUILD_DIR)/splash/drm_mode_matching.o: src/api/drm_mode_matching.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) | $(BUILD_DIR)/splash
+$(BUILD_DIR)/splash/drm_mode_matching.o: src/api/drm_mode_matching.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(ABI_STAMP) | $(BUILD_DIR)/splash
 	@echo "[CXX] $< (splash)"
 	$(Q)$(CXX) $(SPLASH_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # Fbdev kernel-size helper (pure, referenced by display_backend_fbdev.cpp). Added for #766.
-$(BUILD_DIR)/splash/fbdev_size_helper.o: src/api/fbdev_size_helper.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) | $(BUILD_DIR)/splash
+$(BUILD_DIR)/splash/fbdev_size_helper.o: src/api/fbdev_size_helper.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(ABI_STAMP) | $(BUILD_DIR)/splash
 	@echo "[CXX] $< (splash)"
 	$(Q)$(CXX) $(SPLASH_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # PendingStartupWarnings queue (referenced by both display backends). Added for #766.
-$(BUILD_DIR)/splash/pending_startup_warnings.o: src/system/pending_startup_warnings.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) | $(BUILD_DIR)/splash
+$(BUILD_DIR)/splash/pending_startup_warnings.o: src/system/pending_startup_warnings.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(ABI_STAMP) | $(BUILD_DIR)/splash
 	@echo "[CXX] $< (splash)"
 	$(Q)$(CXX) $(SPLASH_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # Compile backlight backend for splash (with HELIX_SPLASH_ONLY to skip runtime_config dependency)
-$(BUILD_DIR)/splash/backlight_backend.o: src/api/backlight_backend.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) | $(BUILD_DIR)/splash
+$(BUILD_DIR)/splash/backlight_backend.o: src/api/backlight_backend.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(ABI_STAMP) | $(BUILD_DIR)/splash
 	@echo "[CXX] $< (splash)"
 	$(Q)$(CXX) $(SPLASH_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # Compile notification stub for splash (with dependency tracking)
-$(BUILD_DIR)/splash/ui_notification_stub.o: tools/ui_notification_stub.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) | $(BUILD_DIR)/splash
+$(BUILD_DIR)/splash/ui_notification_stub.o: tools/ui_notification_stub.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(ABI_STAMP) | $(BUILD_DIR)/splash
 	@echo "[CXX] $< (splash stub)"
+	$(Q)$(CXX) $(SPLASH_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
+
+# touch_calibration.cpp (in DISPLAY_LIB, linked --whole-archive) picks its
+# default fit via the mod-layout probe on the unified MIPS build, so the probe
+# implementation is a hard link dependency here too. Zero deps beyond spdlog.
+$(BUILD_DIR)/splash/platform_info.o: src/system/platform_info.cpp $(ABI_STAMP) | $(BUILD_DIR)/splash
+	@echo "[CXX] $< (splash)"
 	$(Q)$(CXX) $(SPLASH_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # Compile log_redact for splash. Splash calls none of it; input_device_scanner.cpp
@@ -144,13 +174,25 @@ $(BUILD_DIR)/splash/ui_notification_stub.o: tools/ui_notification_stub.cpp $(LIB
 # every object in that archive becomes a hard link dependency whether or not this
 # binary reaches it. Without this the non-LTO targets (pi, pi32, x86) fail to link
 # while the -flto ones drop the unreachable caller and link clean.
-$(BUILD_DIR)/splash/log_redact.o: src/system/log_redact.cpp | $(BUILD_DIR)/splash
+$(BUILD_DIR)/splash/log_redact.o: src/system/log_redact.cpp $(ABI_STAMP) | $(BUILD_DIR)/splash
+	@echo "[CXX] $< (splash)"
+	$(Q)$(CXX) $(SPLASH_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
+
+# Splash and helix-screen must agree on which pre-rendered asset a panel asks
+# for, so both link the one implementation of the rule. Pure, no deps.
+$(BUILD_DIR)/splash/prerender_size_class.o: src/system/prerender_size_class.cpp $(ABI_STAMP) | $(BUILD_DIR)/splash
+	@echo "[CXX] $< (splash)"
+	$(Q)$(CXX) $(SPLASH_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
+
+# The splash artwork decision, shared with helix-screen so the picture cannot
+# change at handoff. Pure, no deps beyond prerender_size_class.
+$(BUILD_DIR)/splash/splash_asset_choice.o: src/system/splash_asset_choice.cpp $(ABI_STAMP) | $(BUILD_DIR)/splash
 	@echo "[CXX] $< (splash)"
 	$(Q)$(CXX) $(SPLASH_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # No-op stub for helix_lvgl_anomaly() — patched LVGL references it but splash
 # has no telemetry pipeline. Real impl lives in src/system/helix_lvgl_anomaly.cpp.
-$(BUILD_DIR)/splash/helix_lvgl_anomaly_stub.o: tools/helix_lvgl_anomaly_stub.cpp | $(BUILD_DIR)/splash
+$(BUILD_DIR)/splash/helix_lvgl_anomaly_stub.o: tools/helix_lvgl_anomaly_stub.cpp $(ABI_STAMP) | $(BUILD_DIR)/splash
 	@echo "[CXX] $< (splash stub)"
 	$(Q)$(CXX) $(SPLASH_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
@@ -158,9 +200,9 @@ $(BUILD_DIR)/splash/helix_lvgl_anomaly_stub.o: tools/helix_lvgl_anomaly_stub.cpp
 # Dependencies: splash object, display library, LVGL objects (compiled from source), fonts
 # Note: Use --whole-archive for DISPLAY_LIB to prevent LTO from stripping create_auto()
 # which is called internally through create() but not directly referenced.
-$(SPLASH_BIN): $(SPLASH_OBJ) $(DISPLAY_LIB) $(LVGL_OBJS) $(LVGL_OPENGLES_OBJS) $(THORVG_OBJS) $(FONT_OBJS) $(SPLASH_EXTRA_OBJS) | $(BUILD_DIR)/bin
+$(SPLASH_BIN): $(SPLASH_OBJ) $(DISPLAY_LIB) $(LVGL_OBJS) $(LVGL_OPENGLES_OBJS) $(THORVG_OBJS) $(SPDLOG_OBJS) $(FONT_OBJS) $(SPLASH_EXTRA_OBJS) | $(BUILD_DIR)/bin
 	@echo "[LD] $@"
-	$(Q)$(CXX) $(SPLASH_OBJ) -Wl,--whole-archive $(DISPLAY_LIB) -Wl,--no-whole-archive $(LVGL_OBJS) $(LVGL_OPENGLES_OBJS) $(THORVG_OBJS) $(FONT_OBJS) $(SPLASH_EXTRA_OBJS) -o $@ $(SPLASH_LDFLAGS)
+	$(Q)$(CXX) $(SPLASH_OBJ) -Wl,--whole-archive $(DISPLAY_LIB) -Wl,--no-whole-archive $(LVGL_OBJS) $(LVGL_OPENGLES_OBJS) $(THORVG_OBJS) $(SPDLOG_OBJS) $(FONT_OBJS) $(SPLASH_EXTRA_OBJS) -o $@ $(SPLASH_LDFLAGS)
 
 # Create build directories
 $(BUILD_DIR)/splash $(BUILD_DIR)/bin:

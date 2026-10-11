@@ -13,50 +13,118 @@
     <prop name="primary_icon" type="string" default=""/>
     <prop name="secondary_icon" type="string" default=""/>
     <prop name="primary_variant" type="string" default="primary"/>
-    <prop name="show_secondary" type="string" default="true"/>
+    <prop name="secondary_variant" type="string" default="secondary"/>
+    <!-- Widget names, for C++ lookups and Modal::wire_*_button(). A dialog with
+         several rows names each row's buttons apart. -->
+    <prop name="primary_name" type="string" default="btn_primary"/>
+    <prop name="secondary_name" type="string" default="btn_secondary"/>
+    <prop name="tertiary_name" type="string" default="btn_tertiary"/>
+    <prop name="quaternary_name" type="string" default="btn_quaternary"/>
+    <!-- Subject-bound captions, for pickers whose button text names a runtime
+         choice (an opening direction, a dialog's computed verb) rather than a
+         literal. Empty default = binding skipped, static text stands. Same
+         mechanism as modal_header's title_subject. -->
+    <prop name="primary_subject" type="string" default=""/>
+    <prop name="secondary_subject" type="string" default=""/>
+    <!-- A subject that carries 1 to show the secondary button (and its
+         divider). For dialogs whose cancel affordance arrives at runtime. -->
+    <prop name="secondary_show_subject" type="string" default=""/>
+    <!-- A subject that carries 1 to hide the primary button (and the divider
+         before it), for a confirm that is withdrawn while it runs. Not combined
+         with secondary_show_subject: both drive that divider. -->
+    <prop name="primary_hide_subject" type="string" default=""/>
+    <prop name="hide_secondary" type="string" default="false"/>
+    <!-- Passing "true" installs the toolhead guard on the primary, for rows
+         whose primary runs a filament op. -->
+    <prop name="primary_moves_machine" type="string" default="false"/>
+    <!-- A subject that carries 1 to enable the primary button; 0 disables it.
+         For dialogs whose confirm waits on an acknowledgement. -->
+    <prop name="primary_enable_subject" type="string" default=""/>
+    <!-- The inverse: a subject that carries 1 to disable the primary button. -->
+    <prop name="primary_disable_subject" type="string" default=""/>
+    <!-- A subject that carries 1 to ring the primary button with styles.accent_outline,
+         for a row whose confirming action gains weight at runtime. -->
+    <prop name="primary_accent_subject" type="string" default=""/>
     <!-- Optional leading (tertiary) action, e.g. "Reset to defaults". Hidden by default
          so the many existing two-button callers are unaffected (a hidden flex child drops
          out of layout entirely). Pass hide_tertiary="false" to reveal it; it renders to the
-         left of the secondary button. Extend this same pattern for a 4th action if needed. -->
+         left of the secondary button. tertiary_show_subject, when given, hides it (and its
+         divider) while the subject carries 0. -->
     <prop name="tertiary_text" type="string" default=""/>
     <prop name="tertiary_tag" type="string" default=""/>
     <prop name="tertiary_callback" type="string" default=""/>
     <prop name="tertiary_icon" type="string" default=""/>
     <prop name="tertiary_variant" type="string" default="secondary"/>
     <prop name="hide_tertiary" type="string" default="true"/>
+    <prop name="tertiary_show_subject" type="string" default=""/>
+    <!-- Optional fourth action, leftmost, same pattern: hide_quaternary="false" reveals it. -->
+    <prop name="quaternary_text" type="string" default=""/>
+    <prop name="quaternary_tag" type="string" default=""/>
+    <prop name="quaternary_callback" type="string" default=""/>
+    <prop name="quaternary_icon" type="string" default=""/>
+    <prop name="quaternary_variant" type="string" default="secondary"/>
+    <prop name="hide_quaternary" type="string" default="true"/>
   </api>
   <view extends="lv_obj" width="100%" height="content" style_pad_all="0" style_pad_gap="0" flex_flow="column">
     <!-- Horizontal divider -->
     <divider_horizontal/>
     <!-- Button row -->
     <lv_obj width="100%" height="#button_height" style_pad_all="0" style_pad_gap="0" flex_flow="row">
-      <!-- Optional leading tertiary button + trailing divider. Both carry hide_tertiary so,
-           when hidden, they drop out of the flex row and the layout is identical to the
-           original two-button row. Same border_width="0" divider treatment as below. -->
-      <ui_button name="btn_tertiary"
+      <!-- Optional leading quaternary and tertiary buttons, each with a trailing divider
+           carrying the same hide flag, so a hidden one drops out of the flex row with its
+           edge. Same border_width="0" divider treatment as below. -->
+      <ui_button name="$quaternary_name"
+                 height="100%" hidden="$hide_quaternary" variant="$quaternary_variant" flex_grow="1" style_radius="0"
+                 style_border_width="0" focusable="false" icon="$quaternary_icon" text="$quaternary_text"
+                 translation_tag="$quaternary_tag">
+        <event_cb trigger="clicked" callback="$quaternary_callback"/>
+      </ui_button>
+      <divider_vertical name="div_quaternary" hidden="$hide_quaternary"/>
+      <ui_button name="$tertiary_name"
                  height="100%" hidden="$hide_tertiary" variant="$tertiary_variant" flex_grow="1" style_radius="0"
                  style_border_width="0" focusable="false" icon="$tertiary_icon" text="$tertiary_text"
                  translation_tag="$tertiary_tag">
+        <bind_flag_if_eq subject="$tertiary_show_subject" flag="hidden" ref_value="0"/>
         <event_cb trigger="clicked" callback="$tertiary_callback"/>
       </ui_button>
-      <divider_vertical name="div_tertiary" hidden="$hide_tertiary"/>
+      <divider_vertical name="div_tertiary" hidden="$hide_tertiary">
+        <bind_flag_if_eq subject="$tertiary_show_subject" flag="hidden" ref_value="0"/>
+      </divider_vertical>
       <!-- Secondary button. style_border_width="0" so the theme's 1px button
            border doesn't stack against divider_vertical (previously looked
-           like a triple-thick edge between Cancel and Save). -->
-      <ui_button name="btn_secondary"
-                 height="100%" flex_grow="1" style_radius="0" style_border_width="0" focusable="false"
-                 icon="$secondary_icon" text="$secondary_text" translation_tag="$secondary_tag">
+           like a triple-thick edge between Cancel and Save). An unsupplied
+           secondary_subject leaves bind_text empty, which ui_button skips when
+           it applies bindings, so the static text set at create stands. -->
+      <ui_button name="$secondary_name"
+                 height="100%" hidden="$hide_secondary" variant="$secondary_variant" flex_grow="1" style_radius="0"
+                 style_border_width="0" focusable="false" bind_text="$secondary_subject" icon="$secondary_icon"
+                 text="$secondary_text" translation_tag="$secondary_tag">
+        <bind_flag_if_eq subject="$secondary_show_subject" flag="hidden" ref_value="0"/>
         <event_cb trigger="clicked" callback="$secondary_callback"/>
       </ui_button>
-      <!-- Vertical divider -->
-      <divider_vertical/>
+      <!-- Vertical divider. Hides with the secondary or the primary button, so
+           either one hidden leaves no orphaned edge. -->
+      <divider_vertical hidden="$hide_secondary">
+        <bind_flag_if_eq subject="$secondary_show_subject" flag="hidden" ref_value="0"/>
+        <bind_flag_if_eq subject="$primary_hide_subject" flag="hidden" ref_value="1"/>
+      </divider_vertical>
       <!-- Primary button (same border-width suppression as secondary).
            variant="primary" by default; pass primary_variant="danger" for
-           destructive actions (Shutdown, Cancel Print, etc.). -->
-      <ui_button name="btn_primary"
+           destructive actions (Shutdown, Cancel Print, etc.). An unsupplied
+           primary_subject leaves the static text standing, as for the
+           secondary.
+           A caller whose primary commands the printer passes the
+           primary_moves_machine prop, which installs the toolhead guard on
+           this button. -->
+      <ui_button name="$primary_name"
                  height="100%" variant="$primary_variant" flex_grow="1" style_radius="0" style_border_width="0"
-                 focusable="false" icon="$primary_icon" text="$primary_text" translation_tag="$primary_tag">
+                 focusable="false" bind_text="$primary_subject" moves_machine="$primary_moves_machine"
+                 icon="$primary_icon" text="$primary_text" translation_tag="$primary_tag">
         <event_cb trigger="clicked" callback="$primary_callback"/>
+        <bind_flag_if_eq subject="$primary_hide_subject" flag="hidden" ref_value="1"/>
+        <bind_state_if_eq subject="$primary_enable_subject" state="disabled" ref_value="0"/>
+        <bind_state_if_eq subject="$primary_disable_subject" state="disabled" ref_value="1"/>
+        <bind_style name="styles.accent_outline" subject="$primary_accent_subject" ref_value="1"/>
       </ui_button>
     </lv_obj>
   </view>

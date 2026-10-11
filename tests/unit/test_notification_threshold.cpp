@@ -25,6 +25,12 @@
  */
 
 #include "ui_notification_threshold.h"
+#include "ui_toast_manager.h"
+
+#include "../ui_test_utils.h"
+
+#include <string>
+#include <vector>
 
 #include "../catch_amalgamated.hpp"
 
@@ -75,4 +81,47 @@ TEST_CASE("'Errors only' shows only ERROR", "[notifications][1213]") {
     CHECK_FALSE(severity_meets_threshold(SUCCESS, 2));
     CHECK_FALSE(severity_meets_threshold(WARNING, 2));
     CHECK(severity_meets_threshold(ERROR_SEV, 2));
+}
+
+TEST_CASE("transient success toast honours init and the minimum severity",
+          "[notifications][1213]") {
+    using helix::ui::notifications::set_min_toast_severity_cache;
+    using helix::ui::notifications::show_transient_success;
+
+    std::vector<std::pair<ToastSeverity, std::string>> shown;
+    helix::ui::set_test_toast_hook(
+        [&](ToastSeverity sev, const std::string& msg, uint32_t) { shown.push_back({sev, msg}); });
+    auto& toasts = ToastManager::instance();
+    const bool was_initialized = toasts.is_initialized();
+
+    SECTION("All shows it as a success toast") {
+        toasts.init();
+        set_min_toast_severity_cache(0);
+        show_transient_success("Connection restored", 3000);
+        REQUIRE(shown.size() == 1);
+        CHECK(shown[0].first == ToastSeverity::SUCCESS);
+        CHECK(shown[0].second == "Connection restored");
+    }
+    SECTION("Warnings and up suppresses it") {
+        toasts.init();
+        for (int index : {1, 2}) {
+            set_min_toast_severity_cache(index);
+            show_transient_success("Connection restored", 3000);
+        }
+        CHECK(shown.empty());
+    }
+    SECTION("Before ToastManager init it does nothing") {
+        toasts.deinit_subjects();
+        set_min_toast_severity_cache(0);
+        show_transient_success("Connection restored", 3000);
+        CHECK(shown.empty());
+    }
+
+    set_min_toast_severity_cache(0);
+    if (was_initialized) {
+        toasts.init();
+    } else {
+        toasts.deinit_subjects();
+    }
+    helix::ui::set_test_toast_hook(nullptr);
 }

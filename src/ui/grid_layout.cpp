@@ -388,4 +388,53 @@ CellMetrics grid_cell_metrics(int content_w, int content_h, int cols, int rows, 
     return m;
 }
 
+std::pair<int, int> grow_span_to_fit(const std::function<bool(int, int)>& fits, int colspan,
+                                     int rowspan, int max_colspan, int max_rowspan, int step_c,
+                                     int step_r, const CellMetrics& metrics) {
+    const int c0 = std::max(colspan, 1);
+    const int r0 = std::max(rowspan, 1);
+    const int sc = std::max(step_c, 1);
+    const int sr = std::max(step_r, 1);
+
+    const auto w_of = [&](int c) {
+        return static_cast<int>(grid_track_extent(metrics.cell_w, metrics.gutter, c));
+    };
+    const auto h_of = [&](int r) {
+        return static_cast<int>(grid_track_extent(metrics.cell_h, metrics.gutter, r));
+    };
+
+    // One axis at a time, width first: a box that is merely too narrow must not
+    // come back taller as well, or a widget resized against one edge silently
+    // claims cells on the other. Stepping by the widget's own snap step keeps
+    // the answer on a span the placement engine can seat.
+    for (int c = c0; c <= max_colspan; c += sc) {
+        if (fits(w_of(c), h_of(r0))) {
+            return {c, r0};
+        }
+    }
+    for (int r = r0; r <= max_rowspan; r += sr) {
+        if (fits(w_of(c0), h_of(r))) {
+            return {c0, r};
+        }
+    }
+
+    // Neither axis alone is enough, so grow both until one accepts. The maxima
+    // bound the walk; a widget that never accepts comes to rest at its ceiling
+    // rather than looping.
+    int c = c0;
+    int r = r0;
+    while (c + sc <= max_colspan || r + sr <= max_rowspan) {
+        if (c + sc <= max_colspan) {
+            c += sc;
+        }
+        if (r + sr <= max_rowspan) {
+            r += sr;
+        }
+        if (fits(w_of(c), h_of(r))) {
+            return {c, r};
+        }
+    }
+    return {c, r};
+}
+
 } // namespace helix

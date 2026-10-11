@@ -18,9 +18,13 @@
 #include "ui_filament_mapping_card.h"
 
 #include "color_utils.h"
+#include "display_numbering.h"
 #include "filament_database.h"
 #include "filament_variants.h"
+#include "gcode_ops_detector.h"
 #include "lvgl/src/others/translation/lv_translation.h"
+#include "macro_param_cache.h"
+#include "operation_patterns.h"
 
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
@@ -86,21 +90,53 @@ CheckResult warn_result(std::string title, std::string body, std::string proceed
     return r;
 }
 
+/// The AvailableSlot for the (slot, backend) pair, resolved the same way
+/// FilamentMapper::resolve_mapped_slot() and the mapping card do. nullptr
+/// when the pair is not among @p available_slots.
+const AvailableSlot* resolve_slot_for_display(const std::vector<AvailableSlot>& available_slots,
+                                              int slot_index, int backend_index) {
+    for (const auto& slot : available_slots) {
+        if (slot.slot_index == slot_index && slot.backend_index == backend_index) {
+            return &slot;
+        }
+    }
+    return nullptr;
+}
+
+/// Label a lane for a print-start dialog: the unit-scoped label the mapping
+/// card and remap modal use when the (slot, backend) pair resolves to a live
+/// AvailableSlot, else a generic Slot label from the global index. A generic
+/// label beats losing the whole warning over one unresolvable lane.
+std::string lane_display_label(const std::vector<AvailableSlot>& available_slots, int slot_index,
+                               int backend_index) {
+    if (const auto* slot = resolve_slot_for_display(available_slots, slot_index, backend_index)) {
+        return helix::ui::lane_label(slot->noun, slot->unit_display_name, slot->local_slot_index);
+    }
+    return helix::ui::lane_label(helix::ui::LaneNoun::Slot, slot_index);
+}
+
 /// Ported verbatim from PrintStartController::build_empty_lane_message.
-std::string build_empty_lane_message(const std::vector<std::pair<int, int>>& empty) {
+///
+/// @p empty pairs always come from FilamentSensorManager::scan_required_lanes(),
+/// which scans backend 0 only (AmsState::get_backend()), so every lookup into
+/// @p available_slots is pinned to that backend.
+std::string build_empty_lane_message(const std::vector<std::pair<int, int>>& empty,
+                                     const std::vector<AvailableSlot>& available_slots) {
     // Name the offending tool(s) and the AMS lane each routes to so the user
-    // knows exactly which lane to load. Lane numbers are 1-based for display
-    // (slot 0 -> "Slot 1") to match the rest of the slot UI.
+    // knows exactly which lane to load. tool_label() spells the gcode tool
+    // ("T0"); lane_display_label() spells the backend's own word for the
+    // position, numbered within its own unit ("Slot 1", "Turtle 2 · Lane 1").
     std::string message;
     if (empty.size() == 1) {
-        message = fmt::format(lv_tr("Tool {} → Slot {}: no filament loaded."), empty[0].first,
-                              empty[0].second + 1);
+        message = fmt::format(lv_tr("{} → {}: no filament loaded."),
+                              helix::ui::tool_label(empty[0].first),
+                              lane_display_label(available_slots, empty[0].second, 0));
     } else {
         message = lv_tr("These tools have no filament loaded:");
         message += "\n\n";
         for (const auto& [tool, slot] : empty) {
-            message += fmt::format("  {} {} {} → {} {}\n", LV_SYMBOL_BULLET, lv_tr("Tool"), tool,
-                                   lv_tr("Slot"), slot + 1);
+            message += fmt::format("  {} {} → {}\n", LV_SYMBOL_BULLET, helix::ui::tool_label(tool),
+                                   lane_display_label(available_slots, slot, 0));
         }
     }
     message += "\n\n";
@@ -135,18 +171,22 @@ CheckResult gate_insufficient_lane_weight(const PrintStartContext& ctx) {
     char body[512];
     if (shortfalls.size() == 1) {
         const auto& sf = shortfalls.front();
-        std::snprintf(body, sizeof(body),
-                      lv_tr("Slot %d has about %.0fg but tool %d needs about %.0fg. "
-                            "Start anyway?"),
-                      sf.mapped_slot + 1, sf.remaining_g, sf.tool_index, sf.needed_g);
+        std::snprintf(
+            body, sizeof(body),
+            lv_tr("%s has about %.0fg but %s needs about %.0fg. "
+                  "Start anyway?"),
+            helix::ui::lane_label(sf.noun, sf.unit_display_name, sf.local_slot_index).c_str(),
+            sf.remaining_g, helix::ui::tool_label(sf.tool_index).c_str(), sf.needed_g);
     } else {
         // Name every short lane: the user's next move is to remap one of them,
         // and a count alone would not say which.
         std::string list;
         for (const auto& sf : shortfalls) {
             char one[128];
-            std::snprintf(one, sizeof(one), lv_tr("Slot %d: %.0fg of %.0fg needed"),
-                          sf.mapped_slot + 1, sf.remaining_g, sf.needed_g);
+            std::snprintf(
+                one, sizeof(one), lv_tr("%s: %.0fg of %.0fg needed"),
+                helix::ui::lane_label(sf.noun, sf.unit_display_name, sf.local_slot_index).c_str(),
+                sf.remaining_g, sf.needed_g);
             if (!list.empty()) {
                 list += "\n";
             }
@@ -231,9 +271,10 @@ CheckResult gate_required_filament_present(const PrintStartContext& ctx) {
             spdlog::info("[PrintStartController] {} required tool(s) have an empty lane - "
                          "showing pre-print warning",
                          ctx.empty_required_lanes.size());
-            return warn_result(lv_tr("No Filament Detected"),
-                               build_empty_lane_message(ctx.empty_required_lanes),
-                               lv_tr("Start Print"));
+            return warn_result(
+                lv_tr("No Filament Detected"),
+                build_empty_lane_message(ctx.empty_required_lanes, ctx.available_slots),
+                lv_tr("Start Print"));
         }
         return pass_result();
     }
@@ -267,8 +308,8 @@ CheckResult gate_unresolved_tools(const PrintStartContext& ctx) {
         const auto* tool = ui::FilamentMappingCard::find_by_tool_index(ctx.tool_info, tool_idx);
         if (tool) {
             std::string color_name = describe_color(tool->color_rgb);
-            message += "  " + std::string(LV_SYMBOL_BULLET) + " T" + std::to_string(tool_idx) +
-                       ": " + color_name;
+            message += "  " + std::string(LV_SYMBOL_BULLET) + " " +
+                       helix::ui::tool_label(tool_idx) + ": " + color_name;
             if (!tool->material.empty()) {
                 message += " (" + tool->material + ")";
             }
@@ -309,9 +350,9 @@ CheckResult grade_change_warning(const std::vector<MaterialMismatchDetail>& mism
         message = lv_tr("These tools have a different filament grade loaded:");
         message += "\n\n";
         for (const auto& m : mismatches) {
-            message += fmt::format("  {} T{}: {} {}: {} {}\n", LV_SYMBOL_BULLET, m.tool_index,
-                                   lv_tr("needs"), m.expected_material, lv_tr("you have"),
-                                   m.loaded_material);
+            message += fmt::format("  {} {}: {} {}: {} {}\n", LV_SYMBOL_BULLET,
+                                   helix::ui::tool_label(m.tool_index), lv_tr("needs"),
+                                   m.expected_material, lv_tr("you have"), m.loaded_material);
         }
     }
 
@@ -374,9 +415,10 @@ CheckResult gate_material_compatibility(const PrintStartContext& ctx) {
             // "needs X (range): You have Y (range)" — clearer than the old
             // "X -> Y" form, which read as a transformation rather than a
             // comparison. Two short clauses joined by a colon scan well.
-            message += fmt::format("  {} T{}: {} {}{}: {} {}{}\n", LV_SYMBOL_BULLET, m.tool_index,
-                                   lv_tr("needs"), m.expected_material, expected_temps,
-                                   lv_tr("you have"), m.loaded_material, loaded_temps);
+            message += fmt::format("  {} {}: {} {}{}: {} {}{}\n", LV_SYMBOL_BULLET,
+                                   helix::ui::tool_label(m.tool_index), lv_tr("needs"),
+                                   m.expected_material, expected_temps, lv_tr("you have"),
+                                   m.loaded_material, loaded_temps);
         }
     }
 
@@ -417,6 +459,65 @@ MaterialMismatchDetail external_spool_mismatch(const SlotInfo& spool, int tool_i
 }
 
 } // namespace
+
+CheckResult gate_printer_stopping_command(const PrintStartContext& ctx) {
+    const PrinterStopCheck& stop = ctx.printer_stop;
+    if (stop.state != PrinterStopCheck::State::Stops) {
+        return pass_result();
+    }
+    CheckResult r;
+    r.verdict = CheckResult::Verdict::Block;
+    r.severity = GateSeverity::Error;
+    r.title = lv_tr("File Will Stop the Printer");
+    r.body = fmt::format(fmt::runtime(lv_tr("Line {} calls {}, which this printer treats as an "
+                                            "emergency stop. Re-slice the file with a profile "
+                                            "made for this printer.")),
+                         stop.line_number, stop.command);
+    if (!stop.stop_message.empty()) {
+        r.body += "\n\n";
+        r.body += fmt::format(fmt::runtime(lv_tr("Printer message: {}")), stop.stop_message);
+    }
+    return r;
+}
+
+PrinterStopCheck printer_stop_check_in(const std::string& content, size_t limit) {
+    PrinterStopCheck check;
+    auto& macros = MacroParamCache::instance();
+    // Read first, so a populate landing mid-scan can only stamp the answer older
+    // than the data it describes. That direction costs a rescan; the reverse
+    // would let a stale answer pass for a current one.
+    check.macro_generation = macros.generation();
+    if (!macros.is_populated()) {
+        check.not_run_reason = "the printer's macros have not been read";
+        return check;
+    }
+    const std::map<std::string, std::string> commands = macros.printer_stop_commands();
+    std::set<std::string> names;
+    for (const auto& [name, message] : commands) {
+        names.insert(name);
+    }
+    std::string_view scanned(content);
+    if (content.size() >= limit) {
+        const size_t last_newline = scanned.rfind('\n');
+        scanned = last_newline == std::string_view::npos ? std::string_view{}
+                                                         : scanned.substr(0, last_newline);
+    }
+    check.state = PrinterStopCheck::State::Clean;
+    if (auto hit = gcode::GCodeOpsDetector::find_first_command(scanned, names)) {
+        check.state = PrinterStopCheck::State::Stops;
+        check.command = hit->command;
+        check.line_number = hit->line_number;
+        check.stop_message = commands.at(helix::text_io::to_upper(hit->command));
+    }
+    return check;
+}
+
+PrinterStopCheck printer_stop_not_run(std::string reason) {
+    PrinterStopCheck check;
+    check.not_run_reason = std::move(reason);
+    check.macro_generation = MacroParamCache::instance().generation();
+    return check;
+}
 
 size_t print_lane_requirement(const std::set<int>& tools_used, size_t filament_color_count) {
     if (!tools_used.empty()) {
@@ -491,8 +592,9 @@ std::optional<std::pair<float, float>> insufficient_spool_weight_in(const PrintS
         // Fall back to length-based estimate using the spool's material.
         auto mat = filament::find_material(spool->material);
         if (mat.has_value() && mat->density_g_cm3 > 0.0f) {
-            needed_g = filament::length_to_weight_g(
-                static_cast<float>(ctx.metadata->filament_total), mat->density_g_cm3, 1.75f);
+            needed_g =
+                filament::length_to_weight_g(static_cast<float>(ctx.metadata->filament_total),
+                                             mat->density_g_cm3, ctx.filament_diameter_mm);
         }
     }
     if (needed_g > 0.0f && needed_g > spool->remaining_weight_g) {
@@ -567,6 +669,12 @@ std::vector<LaneWeightShortfall> insufficient_lane_weights_in(const PrintStartCo
             sf.mapped_backend = m.mapped_backend;
             sf.needed_g = static_cast<float>(needed_g);
             sf.remaining_g = lane->remaining_weight_g;
+            // Carry the lane's display identity forward so the gate dialog
+            // labels it within its own unit instead of re-deriving from the
+            // global mapped_slot.
+            sf.noun = lane->noun;
+            sf.unit_display_name = lane->unit_display_name;
+            sf.local_slot_index = lane->local_slot_index;
             shortfalls.push_back(sf);
             spdlog::info("[PrintStartController] Lane short: tool {} -> slot {} needs {:.0f} g, "
                          "has {:.0f} g",
@@ -737,9 +845,11 @@ std::vector<MaterialMismatchDetail> material_mismatches_in(const PrintStartConte
 }
 
 const std::vector<PrintStartGate>& default_print_start_gates() {
-    // Order is behavior-preserving: the pre-pipeline check order, with the two
-    // new gates (bypass + unaccounted toolhead) ahead of the ported four.
+    // Order is the order the questions are asked in: the file itself first, then
+    // filament supply, then what is at the toolhead, then the mapping.
     static const std::vector<PrintStartGate> gates = {
+        // A file that shuts the printer down outranks every filament question.
+        {"printer_stopping_command", gate_printer_stopping_command},
         {"insufficient_spool_weight", gate_insufficient_spool_weight},
         // The lane-fed counterpart. Mutually exclusive with the spool check by
         // construction: that one returns early on a lane-fed AMS print, this
@@ -752,6 +862,12 @@ const std::vector<PrintStartGate>& default_print_start_gates() {
         {"material_compatibility", gate_material_compatibility},
     };
     return gates;
+}
+
+void warn_printer_stop_check_skipped(std::string_view start_path, std::string_view filename,
+                                     std::string_view reason) {
+    spdlog::warn("[PrintStart] Starting {} from {} without the printer-stopping command check: {}",
+                 filename, start_path, reason);
 }
 
 } // namespace helix

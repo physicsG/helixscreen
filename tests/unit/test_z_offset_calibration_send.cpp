@@ -120,3 +120,44 @@ TEST_CASE_METHOD(CalibrationSendFixture,
 
     CHECK(accept_sends() == "SET_GCODE_OFFSET Z=-0.150");
 }
+
+// ============================================================================
+// Deactivation: only walking away abandons a run
+// ============================================================================
+
+namespace {
+
+/// Deactivate a panel mid-probe for `reason` and return what went on the wire.
+/// FIRMWARE_MANAGED's abort is the G90/G1 retract, so an empty string means no
+/// abort was sent at all.
+std::string abort_sends_for(DeactivateReason reason) {
+    MoonrakerClientMock client(MoonrakerClientMock::PrinterType::VORON_24);
+    MoonrakerAPI api(client, get_printer_state());
+    ZOffsetCalibrationPanel panel;
+    panel.set_api(&api);
+    ZOffsetCalibrationTestAccess::force_state(panel, ZOffsetCalibrationPanel::State::PROBING);
+    panel.on_deactivate(reason);
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+    return client.last_send_script();
+}
+
+} // namespace
+
+TEST_CASE_METHOD(CalibrationSendFixture, "Calibration abort: navigating away cancels a live run",
+                 "[ui_integration][zoffset][1516]") {
+    CHECK(abort_sends_for(DeactivateReason::NavigateAway) == "G90\nG1 Z5 F1000");
+}
+
+TEST_CASE_METHOD(CalibrationSendFixture, "Calibration abort: app shutdown leaves the run alone",
+                 "[ui_integration][zoffset][1516]") {
+    // The printer keeps executing the probe after the UI is gone. Aborting here
+    // would cancel a calibration nobody asked to stop.
+    CHECK(abort_sends_for(DeactivateReason::Shutdown).empty());
+}
+
+TEST_CASE_METHOD(CalibrationSendFixture, "Calibration abort: a hot-reload rebuild leaves it alone",
+                 "[ui_integration][zoffset][1516]") {
+    // Same reasoning as shutdown: the widget tree is being swapped underneath a
+    // run the printer is still executing.
+    CHECK(abort_sends_for(DeactivateReason::Rebuild).empty());
+}

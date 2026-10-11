@@ -1,15 +1,38 @@
 name: esp32-build
+# ESP32 is not a supported target on the 1.0 release line.
 on:
   pull_request:
+    branches-ignore: ["release/1.0"]
   push:
-    branches: [main, "release/**"]
+    branches: [main, "release/**", "!release/1.0"]
+  # release.yml calls this to ship the firmware. A non-empty release_tag adds a
+  # packaging step and uploads the zip as release-esp32-ktouch, which the
+  # release and upload-r2 jobs pick up with every other release-* artifact.
+  workflow_call:
+    inputs:
+      release_tag:
+        type: string
+        default: ""
 
 # A ~25 min job. Superseded pushes to the same PR/branch are cancelled rather
 # than queued behind each other; main is keyed per-SHA so pushes there still
 # each get a build.
 concurrency:
-  group: esp32-build-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
-  cancel-in-progress: true
+  group: esp32-build-${{ github.workflow }}-${{ github.event.pull_request.number || (startsWith(github.ref, 'refs/heads/release/') && github.sha || github.ref) }}
+  # main does not cancel: at ~28 minutes a run is superseded before it finishes
+  # on a busy day, so cancelling leaves main with no firmware result at all
+  # rather than a slightly stale one. Queued runs still collapse to the newest.
+  # fromJSON, or the expression yields the truthy string "false" and main
+  # cancels anyway.
+  cancel-in-progress: ${{ fromJSON(github.ref != 'refs/heads/main') }}
+
+# Every patch is judged from clean here (see build.yml for why the flag is
+# environment-wide rather than per-step).
+env:
+  HELIX_PATCHES_FROM_CLEAN: "1"
+  # Read by the build and packaging steps. The comment on esp_idf_version below
+  # says why it is pinned.
+  ESP_IDF_VERSION: v5.5.5
 
 jobs:
   build:
@@ -45,8 +68,9 @@ jobs:
           # the "flash bloat" this job reported was never the firmware. Note the
           # local dev toolchain has been on a good v5.5 build all along, which is
           # why it fit locally and failed here for weeks with nobody able to see
-          # the difference. Keep both pinned, and re-measure before moving this.
-          esp_idf_version: v5.5.5
+          # the difference. Keep both pinned, and re-measure before moving
+          # ESP_IDF_VERSION.
+          esp_idf_version: ${{ env.ESP_IDF_VERSION }}
           target: esp32s3
           path: firmware/helixscreen-esp32
           # storage_frogfs.bin is a BUILD INPUT, not output: main/CMakeLists.txt
@@ -60,6 +84,9 @@ jobs:
             set -e
             idf.py reconfigure || true
             test -f managed_components/jkent__frogfs/tools/mkfrogfs.py
+            python3 -m venv /tmp/esp32imgs-venv
+            /tmp/esp32imgs-venv/bin/pip install --quiet Pillow
+            /tmp/esp32imgs-venv/bin/python ../../scripts/esp32_printer_images.py
             python3 ../../scripts/esp32_stage_assets.py
             python3 -m venv /tmp/esp32pack-venv
             /tmp/esp32pack-venv/bin/pip install --quiet pyyaml
@@ -84,7 +111,30 @@ jobs:
           /tmp/frogfs-test-venv/bin/python -m pytest tests/python/test_esp32_pack_assets.py -v --tb=short
 
       - name: Size budget gate
+        # The map argument also fails the job if the link pulled libstdc++'s
+        # std::locale machinery back in, naming the object that did.
         run: |
           python3 scripts/check_esp32_size.py \
             firmware/helixscreen-esp32/build/helixscreen_esp32.bin \
-            firmware/helixscreen-esp32/size_budget.json
+            firmware/helixscreen-esp32/size_budget.json \
+            firmware/helixscreen-esp32/build/helixscreen_esp32.map
+
+      - name: Package release firmware
+        if: inputs.release_tag != ''
+        # Same image the build step ran in, so the merge uses the esptool that
+        # ships with this IDF (the action leaves it pulled). Its entrypoint
+        # activates the IDF environment.
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          docker run --rm -e RELEASE_TAG -v "$PWD:/w" -w /w "espressif/idf:$ESP_IDF_VERSION" \
+            bash -c 'scripts/esp32_package_release.sh "$RELEASE_TAG"'
+
+      - name: Upload release firmware
+        if: inputs.release_tag != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-esp32-ktouch
+          path: releases/helixscreen-esp32-ktouch-*.zip
+          if-no-files-found: error
+          retention-days: 7

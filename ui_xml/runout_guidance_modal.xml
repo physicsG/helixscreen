@@ -3,7 +3,7 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <!-- NOTE: Backdrop created programmatically by Modal system -->
 <!--
-  Capability-aware layout (#991), driven by the C++-owned, component-scoped
+  Capability-aware layout (#991), driven by the C++-owned global
   subject `runout_autofeed_capable` (0/1) set at show time from the active
   backend's recovers_filament_on_resume():
     - 0 (basic runout sensor): Load is required before resume, so the manual
@@ -17,7 +17,9 @@
   On autofeed backends Resume is additionally gated on first-gate (port) filament
   presence via the C++-maintained `runout_resume_blocked` subject (1 = block):
   it disables btn_resume until the user re-feeds a spool at the port. Default 0
-  (never blocks) on non-autofeed / unknown backends.
+  (never blocks) on non-autofeed / unknown backends. The same subject picks the
+  message: port empty is a real runout ("Refill the spool"), port still loaded
+  means only the motion sensor tripped ("Motion sensor stuck").
 -->
 <component>
   <api>
@@ -26,11 +28,6 @@
           type="string"
           default="The printer isn't detecting that any filament is currently loaded. What would you like to do?"/>
   </api>
-  <styles>
-    <!-- Resume emphasis when autofeed-capable: an accent outline lifts it above
-         the danger Cancel without hardcoding a fill color. -->
-    <style name="resume_accent" border_color="#primary" border_width="2" border_opa="255"/>
-  </styles>
   <!-- Dialog card (backdrop created programmatically) -->
   <view name="runout_guidance_modal"
         extends="ui_dialog" width="80%" height="content" align="center" flex_flow="column" style_flex_main_place="start"
@@ -63,12 +60,18 @@
                  width="100%" text="$message" translation_tag="$message" style_text_align="left" long_mode="wrap">
         <bind_flag_if_eq subject="runout_autofeed_capable" flag="hidden" ref_value="1"/>
       </text_body>
-      <!-- Autofeed message: Resume alone reloads, so just refill the spool.
-           Shown only when runout_autofeed_capable == 1. -->
+      <!-- Autofeed, port empty: a real runout. Resume alone reloads, so just
+           refill the spool. -->
       <text_body name="dialog_message_autofeed"
-                 width="100%" text="Refill the spool, then Resume." translation_tag="Refill the spool, then Resume."
+                 width="100%" text="Refill the spool, then Resume." style_text_align="left" long_mode="wrap">
+        <bind_flag_if cond="runout_autofeed_capable ne 1 or runout_resume_blocked eq 0" flag="hidden"/>
+      </text_body>
+      <!-- Autofeed, port still sees filament: the motion sensor reported the
+           runout, and the spool is not empty. -->
+      <text_body name="dialog_message_motion_stuck"
+                 width="100%" text="Motion sensor stuck: filament is still at the feeder. Resume to feed it."
                  style_text_align="left" long_mode="wrap">
-        <bind_flag_if_not_eq subject="runout_autofeed_capable" flag="hidden" ref_value="1"/>
+        <bind_flag_if cond="runout_autofeed_capable ne 1 or runout_resume_blocked eq 1" flag="hidden"/>
       </text_body>
     </lv_obj>
     <!-- "Manual" section header. The header was only ever a label for a demoted
@@ -77,8 +80,7 @@
     <lv_obj name="manual_section_header"
             width="100%" height="content" hidden="true" style_pad_left="#space_lg" style_pad_right="#space_lg"
             style_pad_top="0" style_pad_bottom="0" style_pad_gap="0" flex_flow="column">
-      <text_small name="manual_label"
-                  text="Manual" translation_tag="Manual" style_text_color="#text_muted" style_text_align="left"/>
+      <text_small name="manual_label" text="Manual" style_text_color="#text_muted" style_text_align="left"/>
     </lv_obj>
     <!-- ACTION BUTTONS ROW - horizontal, beneath message. Prominent on basic
          sensors (autofeed==0). On an autofeed backend Resume normally reloads by
@@ -95,40 +97,28 @@
       <bind_flag_if cond="(runout_autofeed_capable eq 1 and print_state_enum ne 2) or print_state_enum eq 1"
                     flag="hidden"/>
       <!-- Load button (wired programmatically by RunoutGuidanceModal::on_show → wire_ok_button) -->
-      <ui_button name="btn_load_filament" flex_grow="1" icon="arrow_down" text="Load" translation_tag="Load"/>
+      <ui_button name="btn_load_filament" flex_grow="1" icon="arrow_down" text="Load"/>
       <!-- Unload button (wired programmatically by RunoutGuidanceModal::on_show → wire_quaternary_button) -->
-      <ui_button name="btn_unload_filament" flex_grow="1" icon="arrow_up" text="Unload" translation_tag="Unload"/>
+      <ui_button name="btn_unload_filament" flex_grow="1" icon="arrow_up" text="Unload"/>
       <!-- Purge button (wired programmatically by RunoutGuidanceModal::on_show → wire_quinary_button) -->
-      <ui_button name="btn_purge" flex_grow="1" icon="filament" text="Purge" translation_tag="Purge"/>
+      <ui_button name="btn_purge" flex_grow="1" icon="filament" text="Purge"/>
     </lv_obj>
-    <!-- Horizontal divider above dismiss buttons -->
-    <divider_horizontal/>
-    <!-- CLOSE BUTTON ROW (only when NOT paused - hidden when print_state_enum == 2) -->
-    <lv_obj width="100%" height="#button_height" style_pad_all="0" style_pad_gap="0" flex_flow="row">
+    <!-- CLOSE BUTTON ROW (only when NOT paused - hidden when print_state_enum == 2).
+         Close is wired programmatically by RunoutGuidanceModal::on_show → wire_senary_button. -->
+    <modal_button_row hide_secondary="true" primary_name="btn_ok" primary_text="Close">
       <bind_flag_if_eq subject="print_state_enum" flag="hidden" ref_value="2"/>
-      <!-- Close button (wired programmatically by RunoutGuidanceModal::on_show → wire_senary_button) -->
-      <ui_button name="btn_ok" height="100%" flex_grow="1" style_radius="0" text="Close" translation_tag="Close"/>
-    </lv_obj>
-    <!-- PAUSED BUTTONS ROW (only when paused - hidden when print_state_enum != 2) -->
-    <lv_obj width="100%" height="#button_height" style_pad_all="0" style_pad_gap="0" flex_flow="row">
+    </modal_button_row>
+    <!-- PAUSED BUTTONS ROW (only when paused - hidden when print_state_enum != 2).
+         Wired programmatically by RunoutGuidanceModal::on_show: Cancel Print →
+         wire_tertiary_button, Resume Print → wire_cancel_button.
+         Resume is ringed when the backend autofeeds on resume (it is then the
+         recovery action), and disabled while runout_resume_blocked is 1 (#991):
+         an auto-feed runout with no filament at the active tool's port. -->
+    <modal_button_row secondary_name="btn_cancel_print"
+                      secondary_variant="danger" secondary_text="Cancel Print" primary_name="btn_resume"
+                      primary_text="Resume Print" primary_accent_subject="runout_autofeed_capable"
+                      primary_disable_subject="runout_resume_blocked">
       <bind_flag_if_not_eq subject="print_state_enum" flag="hidden" ref_value="2"/>
-      <!-- Cancel Print button (wired programmatically by RunoutGuidanceModal::on_show → wire_tertiary_button) -->
-      <ui_button name="btn_cancel_print"
-                 height="100%" flex_grow="1" style_radius="0" variant="danger" text="Cancel Print"
-                 translation_tag="Cancel Print"/>
-      <!-- Vertical divider -->
-      <divider_vertical/>
-      <!-- Resume Print button (wired programmatically by RunoutGuidanceModal::on_show → wire_cancel_button).
-           Accent outline added when the backend autofeeds on resume — Resume is
-           then the primary recovery action. -->
-      <ui_button name="btn_resume"
-                 height="100%" flex_grow="1" style_radius="0" text="Resume Print" translation_tag="Resume Print">
-        <bind_style name="resume_accent" subject="runout_autofeed_capable" ref_value="1"/>
-        <!-- Auto-feed runout gate (#991): disabled until filament is present at
-             the active tool's port/first gate. runout_resume_blocked is held at 0
-             except on an auto-feed runout with an empty port. -->
-        <bind_state_if_eq subject="runout_resume_blocked" state="disabled" ref_value="1"/>
-      </ui_button>
-    </lv_obj>
+    </modal_button_row>
   </view>
 </component>

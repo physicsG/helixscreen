@@ -21,7 +21,7 @@
 # FORCE_REBUILD=1 to rebuild unconditionally.
 #
 # Invoked by the `ustreamer-k2` make target (see mk/cross.mk), which wraps
-# this in the docker container under scripts/cross-compile-lock.sh.
+# this in the docker container under scripts/pool-docker.sh.
 
 set -euo pipefail
 
@@ -59,7 +59,8 @@ DEPS_PREFIX="${WORK_DIR}/deps"   # static libjpeg-turbo + libevent install here
 
 OUT_BIN="${OUT_DIR}/ustreamer"
 
-NPROC="$(nproc 2>/dev/null || echo 4)"
+# JOBPOOL_SLOTS is the share pool-docker.sh holds for this container.
+NPROC="${JOBPOOL_SLOTS:-$(nproc 2>/dev/null || echo 4)}"
 
 log()  { printf '\033[36m[ustreamer-k2]\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m[ustreamer-k2]\033[0m %s\n' "$*" >&2; }

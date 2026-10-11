@@ -4,6 +4,8 @@
 
 Access via the **More** icon in the navigation bar.
 
+The panel groups its rows into sections (Tools, Calibration, and so on). A row that does not apply to your printer is hidden, and a section with no rows left disappears along with its heading. Calibration rows, including **Pressure Advance** on printers that can measure it, are covered in [Calibration & Tuning](calibration.md); **Dry Filament** is covered in [Drying Filament on the Bed](temperature.md#drying-filament-on-the-bed).
+
 ---
 
 ## G-code Console
@@ -91,6 +93,19 @@ Some macros accept parameters (variables or arguments defined in your Klipper co
 
 If HelixScreen can't determine the parameters (e.g., complex Jinja2 templates), a freeform text field lets you type raw parameters.
 
+**Saved default values:**
+
+If you type the same values every time, save them once:
+
+1. Open the editor: in the Macros panel, press-and-hold to enter edit mode and tap the **tune icon** on the macro's row — or, on a home panel Macro Button, open **Customize → Options → Default Parameters**
+2. Fill in the values you want remembered
+3. Leave **Ask for parameters** on, or switch it off
+4. Tap **Save**
+
+With **Ask for parameters** on (the default), tapping the macro still opens the form — but every field starts filled with your saved values, so you can adjust one and run. With it off, the macro runs immediately using the saved values, with no form at all.
+
+> **Note:** The dangerous-macro confirmation is never skipped by saved defaults, and a Macro Button with "Require Confirmation?" off runs with the saved values directly. Saved defaults are kept per printer, like your hidden-macro choices.
+
 **Dangerous macro protection:**
 
 These macros show a confirmation dialog before executing:
@@ -116,50 +131,6 @@ If your macro list is cluttered with macros you never run, you can hide them fro
 6. To leave edit mode without saving, tap **Back** — your checkbox changes are discarded and the list is unchanged
 
 > **Note:** Your hidden-macro choices are saved per printer and stick around across restarts, so switching to a different printer profile shows that printer's own macro list.
-
----
-
-## Configure PRINT_START
-
-HelixScreen's [pre-print skip toggles](printing.md#pre-print-options) — Auto bed level, Quad gantry level, Z-tilt adjust, Nozzle clean — can only skip a step if that step is written so it can be turned off. When those operations live *inside* your `PRINT_START` (or `START_PRINT`) macro, they run every time and the toggles can't reach them.
-
-**Configure PRINT_START** reads your own macro, finds those operations, and — with your approval — rewrites the macro so each one becomes optional. Afterward, the matching toggle on the print screen actually skips it.
-
-> **Safety:** This feature **edits your Klipper printer configuration** on the printer. It is a deliberate, consent-based action: nothing is changed until you review each operation and tap **Apply Changes**. A backup of your config is saved automatically before anything is written, and Klipper restarts once the changes are applied.
-
-### Opening the wizard
-
-1. Enable **Beta Features** first (see [Beta Features](beta-features.md)) — this tool lives behind the beta flag.
-2. Navigate to **Advanced → Configure PRINT_START**.
-
-HelixScreen may also prompt you on its own: when it notices skippable steps in your macro, a notification reading **"PRINT_START has N skippable operations"** appears with a **Configure** button that opens the same wizard.
-
-If your macro is already set up (or has nothing that can be made optional), you'll see **"Your print start is already fully configured!"** instead, and the wizard won't open.
-
-### Reviewing each operation
-
-The wizard walks you through one operation at a time (a progress counter like **"1 of 3"** shows your place). For each one — Bed Mesh, Quad Gantry Leveling, Z-Tilt Adjustment, or Nozzle Cleaning — it asks **"Make [operation] Optional?"** and explains in plain language what changes.
-
-You have two choices per operation:
-
-| Button | What it does |
-|--------|--------------|
-| **Keep Required** | Leave this operation alone — it will always run |
-| **Make Optional** | Rewrite it so the pre-print toggle can skip it |
-
-> **Note:** Homing is never offered here — it's required for safe printing and can't be made skippable.
-
-### Applying your changes
-
-After the last operation, a **Ready to Apply** summary lists every change you approved under **"Your PRINT_START macro will be updated to give you control over:"**.
-
-- The **"Create backup of printer.cfg before applying"** option is checked by default.
-- A reminder notes that **"Klipper will restart to apply changes"**.
-- Tap **Cancel** to discard everything, or **Apply Changes** to write them.
-
-While applying, the wizard shows its progress (creating the backup, then writing the changes). When it finishes you'll see a **Setup Complete!** confirmation letting you know a backup was saved and the new skip options are now available in the print details before each print. Tap **Close** to finish.
-
-> **Tip:** The changes are reversible. You can undo them later from the Macro Viewer, or re-run the wizard if you edit your macro again.
 
 ---
 
@@ -220,7 +191,7 @@ A **power-cycle button** appears on the home panel when power devices are config
 
 ### Full Power Panel
 
-1. Navigate to **Advanced > Power Devices**, or **Settings > System > Power Devices** (hidden when no power devices are detected)
+1. Navigate to **Advanced > Power Devices**, or **Settings > Devices > Power Devices** (hidden when no power devices are detected)
 2. Toggle individual devices on/off with switches
 
 **Main Power Button section:**

@@ -1,0 +1,92 @@
+<?xml version="1.0"?>
+<component>
+  <!-- The overlay IS the plugin. The context card mirrors the companion's
+       profile dump; the action card walks the state machine: Start while the
+       calibration is available, a progress line while printing, the picker
+       (dropdown filled from the event, selection written back through
+       bind_value) until answered, the result once Next accepts it. -->
+  <api>
+    <prop name="opts" type="string" default=""/>
+  </api>
+  <view extends="overlay_panel" title="Calibration" title_tag="Calibration" bg_color="#card_bg">
+    <lv_obj name="calibration-bridge__ask_content"
+            width="100%" flex_grow="1" style_pad_all="#space_md" style_pad_gap="#space_sm" flex_flow="column"
+            scrollable="true">
+      <ui_card name="calibration-bridge__context_card"
+               width="100%" height="content" flex_flow="column" style_pad_all="#space_sm" style_pad_gap="#space_xxs">
+        <lv_label name="calibration-bridge__ask_title"
+                  bind_text="calibration-bridge__state_title" style_text_font="#font_body"
+                  style_text_color="#text"/>
+        <text_small name="calibration-bridge__ctx_printer" bind_text="calibration-bridge__ctx_printer"
+                    style_text_color="#text_muted"/>
+        <text_small name="calibration-bridge__ctx_filament" bind_text="calibration-bridge__ctx_filament"
+                    style_text_color="#text_muted"/>
+        <text_small name="calibration-bridge__ctx_current" bind_text="calibration-bridge__ctx_current"
+                    style_text_color="#text_muted"/>
+        <text_xs name="calibration-bridge__status_line" bind_text="calibration-bridge__status_line"
+                 style_text_color="#warning"/>
+      </ui_card>
+      <ui_card name="calibration-bridge__action_card"
+               width="100%" height="content" flex_flow="column" style_pad_all="#space_sm" style_pad_gap="#space_xs">
+        <lv_obj name="calibration-bridge__start_row"
+                width="100%" height="content" flex_flow="row" style_pad_all="0" style_pad_gap="#space_sm"
+                style_flex_cross_place="center" style_flex_main_place="space_between" scrollable="false"
+                style_bg_opa="0" style_border_width="0">
+          <bind_flag_if_eq subject="calibration-bridge__start_on" flag="hidden" ref_value="0"/>
+          <lv_label text="Start the calibration print" translation_tag="Start the calibration print"
+                    style_text_font="#font_body" style_text_color="#text"/>
+          <lv_button name="calibration-bridge__start"
+                     width="content" height="content" style_pad_all="#space_xs">
+            <event_cb trigger="clicked" callback="plugin_event" user_data="calibration-bridge__start"/>
+            <lv_label text="Start" translation_tag="Start" style_text_font="#font_body"
+                      style_text_color="#text"/>
+          </lv_button>
+        </lv_obj>
+        <lv_obj name="calibration-bridge__printing_row"
+                width="100%" height="content" flex_flow="row" style_pad_all="0"
+                style_flex_cross_place="center" scrollable="false" style_bg_opa="0" style_border_width="0">
+          <bind_flag_if_eq subject="calibration-bridge__printing_on" flag="hidden" ref_value="0"/>
+          <lv_label text="Printing..." translation_tag="Printing..." style_text_font="#font_body"
+                    style_text_color="#text_muted"/>
+        </lv_obj>
+        <lv_obj name="calibration-bridge__pick_row"
+                width="100%" height="content" flex_flow="row" style_pad_all="0" style_pad_gap="#space_sm"
+                style_flex_cross_place="center" scrollable="false" style_bg_opa="0" style_border_width="0">
+          <bind_flag_if_eq subject="calibration-bridge__pick_on" flag="hidden" ref_value="0"/>
+          <lv_label text="Which one is best?" translation_tag="Which one is best?" style_text_font="#font_body"
+                    style_text_color="#text"/>
+          <lv_dropdown name="calibration-bridge__pick"
+                       options="$opts" bind_value="calibration-bridge__choice_idx"
+                       width="content" style_min_width="140"/>
+        </lv_obj>
+        <lv_obj name="calibration-bridge__result_row"
+                width="100%" height="content" flex_flow="column" style_pad_all="0" style_pad_gap="#space_xxs"
+                style_flex_cross_place="center" style_bg_opa="0" style_border_width="0">
+          <bind_flag_if_eq subject="calibration-bridge__result_on" flag="hidden" ref_value="0"/>
+          <lv_label name="calibration-bridge__result_value" width="100%" style_text_align="center"
+                    bind_text="calibration-bridge__result_value" style_text_font="#font_xl"
+                    style_text_color="#primary"/>
+          <text_xs name="calibration-bridge__result_sub" width="100%" style_text_align="center"
+                   bind_text="calibration-bridge__result_sub" style_text_color="#text_muted"/>
+        </lv_obj>
+        <lv_obj name="calibration-bridge__button_row"
+                width="100%" height="content" flex_flow="row" style_pad_all="0" style_pad_gap="#space_sm"
+                style_flex_main_place="end" scrollable="false" style_bg_opa="0" style_border_width="0">
+          <lv_button name="calibration-bridge__cancel"
+                     width="content" height="content" style_pad_all="#space_xs">
+            <event_cb trigger="clicked" callback="plugin_event" user_data="calibration-bridge__cancel"/>
+            <lv_label text="Cancel" translation_tag="Cancel" style_text_font="#font_body"
+                      style_text_color="#text"/>
+          </lv_button>
+          <lv_button name="calibration-bridge__next"
+                     width="content" height="content" style_pad_all="#space_sm">
+            <bind_flag_if_eq subject="calibration-bridge__pick_on" flag="hidden" ref_value="0"/>
+            <event_cb trigger="clicked" callback="plugin_event" user_data="calibration-bridge__accept"/>
+            <lv_label text="Next" translation_tag="Next" style_text_font="#font_body"
+                      style_text_color="#text"/>
+          </lv_button>
+        </lv_obj>
+      </ui_card>
+    </lv_obj>
+  </view>
+</component>

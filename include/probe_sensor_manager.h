@@ -3,23 +3,24 @@
 
 #pragma once
 
+#include "async_lifetime_guard.h"
 #include "lvgl.h"
 #include "probe_sensor_types.h"
-#include "sensor_registry.h"
+#include "sensor_collection.h"
 #include "subject_managed_panel.h"
 
-#include <map>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
+
+#include "hv/json.hpp"
 
 namespace helix::sensors {
 
 /**
  * @brief Manager for native Klipper probe sensors
  *
- * Implements ISensorManager interface for integration with SensorRegistry.
  * Provides:
  * - Auto-discovery of probe sensors from Klipper objects list
  * - Role assignment for Z probing
@@ -33,25 +34,18 @@ namespace helix::sensors {
  * - bltouch - BLTouch probe
  * - smart_effector - Duet Smart Effector
  * - probe_eddy_current <name> - Eddy current probe (has a name parameter)
+ * - beacon, cartographer - eddy scanners from their own plugins
  *
- * Status JSON format:
- * @code
- * {
- *   "probe": {
- *     "last_z_result": 0.125,
- *     "z_offset": -1.5
- *   },
- *   "bltouch": {
- *     "last_z_result": 0.130,
- *     "z_offset": -1.52
- *   }
- * }
- * @endcode
+ * Status keys read: last_z_result, last_query (the last QUERY_PROBE result) and
+ * z_offset. Which object carries them differs per type. Mainline modules do not
+ * publish z_offset, so it is seeded from the configfile; the Creality K1/K2 and
+ * QIDI forks publish it on their probe. Per-type table:
+ * docs/devel/SENSOR_MANAGEMENT.md.
  *
  * @note Switch sensors configured as probes are handled by SwitchSensorManager,
  *       not this manager.
  */
-class ProbeSensorManager : public ISensorManager {
+class ProbeSensorManager {
   public:
     /**
      * @brief Get singleton instance
@@ -63,32 +57,40 @@ class ProbeSensorManager : public ISensorManager {
     ProbeSensorManager& operator=(const ProbeSensorManager&) = delete;
 
     // ========================================================================
-    // ISensorManager Interface
+    // Discovery, Status and Config
     // ========================================================================
-
-    /// @brief Get category name for registry
-    [[nodiscard]] std::string category_name() const override;
 
     /**
      * @brief Discover sensors from Klipper objects list
      * @note MUST be called from main LVGL thread (updates subjects directly)
      */
-    void discover(const std::vector<std::string>& klipper_objects) override;
+    void discover(const std::vector<std::string>& klipper_objects);
 
     /// @brief Update state from Moonraker status JSON
-    void update_from_status(const nlohmann::json& status) override;
+    void update_from_status(const nlohmann::json& status);
+
+    /**
+     * @brief Status subscription for every probe object in an objects list
+     *
+     * Maps each probe probes_in() keeps to the object and fields its module
+     * actually publishes: a Cartographer is read from the probe object it
+     * registers, and types without a usable last_query skip it. z_offset is
+     * requested everywhere; a module without it answers null.
+     */
+    [[nodiscard]] static nlohmann::json
+    required_status_objects(const std::vector<std::string>& klipper_objects);
 
     /// @brief Seed initial state from Klipper configfile (e.g., z_offset from [probe])
-    void discover_from_config(const nlohmann::json& config_keys) override;
+    void discover_from_config(const nlohmann::json& config_keys);
 
     /**
      * @brief Load sensor configuration from JSON
      * @note MUST be called from main LVGL thread (updates subjects directly)
      */
-    void load_config(const nlohmann::json& config) override;
+    void load_config(const nlohmann::json& config);
 
     /// @brief Save configuration to JSON
-    [[nodiscard]] nlohmann::json save_config() const override;
+    [[nodiscard]] nlohmann::json save_config() const;
 
     /// @brief Load sensor config (roles, enabled state) from settings.json
     void load_config_from_file();
@@ -222,7 +224,7 @@ class ProbeSensorManager : public ISensorManager {
      * @brief Enable synchronous mode for testing
      *
      * When enabled, update_from_status() calls update_subjects() synchronously
-     * instead of using lv_async_call().
+     * instead of using queue_update().
      */
     void set_sync_mode(bool enabled);
 
@@ -252,21 +254,13 @@ class ProbeSensorManager : public ISensorManager {
      * @param[out] type Detected sensor type
      * @return true if successfully parsed as probe sensor
      */
-    bool parse_klipper_name(const std::string& klipper_name, std::string& sensor_name,
-                            ProbeSensorType& type) const;
+    /// Probe configs for an objects list, one per physical probe: alias objects
+    /// (the generic probe object, an eddy object beside a named scanner) are dropped.
+    static std::vector<ProbeSensorConfig>
+    probes_in(const std::vector<std::string>& klipper_objects);
 
-    /**
-     * @brief Find config by Klipper name
-     * @return Pointer to config, or nullptr if not found
-     */
-    ProbeSensorConfig* find_config(const std::string& klipper_name);
-    const ProbeSensorConfig* find_config(const std::string& klipper_name) const;
-
-    /**
-     * @brief Find config by assigned role
-     * @return Pointer to config, or nullptr if no sensor has this role
-     */
-    const ProbeSensorConfig* find_config_by_role(ProbeSensorRole role) const;
+    static bool parse_klipper_name(const std::string& klipper_name, std::string& sensor_name,
+                                   ProbeSensorType& type);
 
     /**
      * @brief Update all LVGL subjects from current state
@@ -277,11 +271,7 @@ class ProbeSensorManager : public ISensorManager {
     // Recursive mutex for thread-safe state access
     mutable std::recursive_mutex mutex_;
 
-    // Configuration
-    std::vector<ProbeSensorConfig> sensors_;
-
-    // Runtime state (keyed by klipper_name)
-    std::map<std::string, ProbeSensorState> states_;
+    SensorCollection<ProbeSensorConfig, ProbeSensorState> sensors_;
 
     // Test mode: when true, update_from_status() calls update_subjects() synchronously
     bool sync_mode_ = false;
@@ -289,10 +279,12 @@ class ProbeSensorManager : public ISensorManager {
     // LVGL subjects
     bool subjects_initialized_ = false;
     SubjectManager subjects_;
-    lv_subject_t probe_triggered_;
-    lv_subject_t probe_last_z_;
-    lv_subject_t probe_z_offset_;
-    lv_subject_t sensor_count_;
+    // Expires deferred subject updates when the subjects are torn down.
+    helix::AsyncLifetimeGuard lifetime_;
+    lv_subject_t probe_triggered_{};
+    lv_subject_t probe_last_z_{};
+    lv_subject_t probe_z_offset_{};
+    lv_subject_t sensor_count_{};
 };
 
 } // namespace helix::sensors

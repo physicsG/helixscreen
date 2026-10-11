@@ -3,12 +3,14 @@
 
 #pragma once
 
+#include "env_knobs.h"
+#include "text_io.h"
+
 #include <algorithm>
 #include <climits>
 #include <cstdlib>
-#include <cstring>
-#include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace helix {
@@ -21,10 +23,7 @@ namespace helix {
  * Useful for diagnosing resistive touchscreen calibration issues.
  */
 inline bool is_touch_debug_enabled() {
-    static const bool enabled = [] {
-        const char* val = std::getenv("HELIX_DEBUG_TOUCH");
-        return val != nullptr && std::strcmp(val, "1") == 0;
-    }();
+    static const bool enabled = env_flag("HELIX_DEBUG_TOUCH");
     return enabled;
 }
 
@@ -65,14 +64,12 @@ inline AbsCapabilities parse_abs_capabilities(const std::string& caps_hex) {
 
     // Split on spaces into tokens and parse hex values
     std::vector<unsigned long long> words;
-    std::istringstream iss(caps_hex);
-    std::string token;
-    while (iss >> token) {
-        try {
-            words.push_back(std::stoull(token, nullptr, 16));
-        } catch (...) {
+    for (std::string_view token : helix::text_io::split_ws(caps_hex)) {
+        auto word = helix::text_io::parse_int<unsigned long long>(token, 16);
+        if (!word) {
             return result;
         }
+        words.push_back(*word);
     }
 
     if (words.empty()) {
@@ -112,6 +109,36 @@ inline AbsCapabilities parse_abs_capabilities(const std::string& caps_hex) {
     return result;
 }
 
+/**
+ * @brief Test the sysfs input properties bitmap for INPUT_PROP_DIRECT
+ *
+ * Reads /sys/class/input/eventN/device/properties, whose format matches the ABS
+ * capabilities file: space-separated hex words, rightmost = lowest bits.  The
+ * property codes in linux/input-event-codes.h are BIT NUMBERS, not masks, so
+ * INPUT_PROP_DIRECT (0x01) is bit 1 and its mask is 0x2.  Bit 0 is
+ * INPUT_PROP_POINTER, which marks the opposite kind of device: a touchpad or
+ * pointing stick that moves a cursor rather than being touched directly.
+ *
+ * A touchscreen therefore reports "2", not "1".
+ *
+ * @param props_hex Raw hex string from sysfs (e.g. "2", "0", "" when unreadable)
+ * @return true when the device is marked as direct input
+ */
+inline bool parse_input_prop_direct(const std::string& props_hex) {
+    if (props_hex.empty()) {
+        return false;
+    }
+
+    // Lowest bits live in the rightmost word, and INPUT_PROP_DIRECT is bit 1,
+    // so only that word can carry it.
+    size_t last_space = props_hex.rfind(' ');
+    std::string low_word =
+        (last_space != std::string::npos) ? props_hex.substr(last_space + 1) : props_hex;
+
+    const auto props = helix::text_io::parse_leading<unsigned long long>(low_word, 16);
+    return props && (*props & (1ULL << 1)) != 0;
+}
+
 struct Point {
     int x = 0;
     int y = 0;
@@ -121,7 +148,20 @@ struct TouchCalibration {
     bool valid = false;
     float a = 1.0f, b = 0.0f, c = 0.0f; // screen_x = a*x + b*y + c
     float d = 0.0f, e = 1.0f, f = 0.0f; // screen_y = d*x + e*y + f
-    bool axes_swapped = false;          // true if axis swap was auto-corrected
+
+    /// Set when detect_axis_transposition() finds the panel mounted a quarter turn
+    /// from the display. A record of the finding and nothing more: an affine through
+    /// three points is exact, so the matrix above already reproduces the targets
+    /// through its cross terms. Nothing acts on it; the touch-debug log is its only
+    /// reader.
+    bool axes_swapped = false;
+
+    /// Display rotation in effect when this calibration was solved, in degrees.
+    ///
+    /// The wizard solves against targets in LOGICAL (post-rotation) space, so the
+    /// matrix only means anything relative to a rotation. Storing it lets the
+    /// runtime place the matrix in the pre-rotation space it executes in.
+    int capture_rotation = 0;
 };
 
 /**
@@ -168,6 +208,102 @@ bool compute_calibration(const Point screen_points[3], const Point touch_points[
 Point transform_point(const TouchCalibration& cal, Point raw, int max_x = 0, int max_y = 0);
 
 /**
+ * @brief Logical (post-rotation) extent of a panel at a given rotation
+ *
+ * At 90 and 270 the logical width is the panel's height and vice versa.
+ */
+inline void logical_extent(int degrees, int panel_w, int panel_h, int& out_w, int& out_h) {
+    const int deg = ((degrees % 360) + 360) % 360;
+    if (deg == 90 || deg == 270) {
+        out_w = panel_h;
+        out_h = panel_w;
+    } else {
+        out_w = panel_w;
+        out_h = panel_h;
+    }
+}
+
+/**
+ * @brief Rotate a panel-space point into logical space
+ *
+ * Mirrors lv_display_rotate_point() exactly, including its -1 terms, so a point put
+ * through this lands where LVGL will put the same point. `panel_w`/`panel_h` are the
+ * display's unrotated dimensions (LVGL's `hor_res`/`ver_res` fields, not the
+ * accessors, which already swap).
+ */
+inline Point rotate_panel_to_logical(Point p, int degrees, int panel_w, int panel_h) {
+    switch (((degrees % 360) + 360) % 360) {
+    case 90:
+        return Point{panel_h - p.y - 1, p.x};
+    case 180:
+        return Point{panel_w - p.x - 1, panel_h - p.y - 1};
+    case 270:
+        return Point{p.y, panel_w - p.x - 1};
+    default:
+        return p;
+    }
+}
+
+/**
+ * @brief Inverse of rotate_panel_to_logical()
+ *
+ * Round-trips exactly: a point through one and then the other is unchanged.
+ */
+inline Point rotate_logical_to_panel(Point p, int degrees, int panel_w, int panel_h) {
+    switch (((degrees % 360) + 360) % 360) {
+    case 90:
+        return Point{p.y, panel_h - p.x - 1};
+    case 180:
+        return Point{panel_w - p.x - 1, panel_h - p.y - 1};
+    case 270:
+        return Point{panel_w - p.y - 1, p.x};
+    default:
+        return p;
+    }
+}
+
+/**
+ * @brief Place a logical-space affine on a panel-space point
+ *
+ * The touch pipeline applies the affine BEFORE LVGL rotates: the read callback
+ * receives panel-space coordinates, and lv_display_rotate_point() runs afterwards.
+ * The wizard, though, solves the affine against targets in logical space. Feeding a
+ * panel coordinate straight to that matrix evaluates it in the wrong basis, which on
+ * a 90 or 270 display shows up as touches offset by a quarter turn.
+ *
+ * This moves the point into the space the matrix was solved in, applies it there,
+ * and moves the result back, yielding the panel-space correction the matrix always
+ * meant. The rotation in effect NOW does not appear: LVGL applies it downstream to
+ * whatever this returns, so a calibration keeps correcting the same physical
+ * misalignment after the display is rotated instead of being silently voided.
+ *
+ * @param cal Calibration solved in logical space
+ * @param panel_point Point as the read callback receives it, pre-rotation
+ * @param capture_rotation Degrees of rotation when `cal` was solved
+ * @param panel_w Unrotated display width
+ * @param panel_h Unrotated display height
+ * @return Panel-space point, for LVGL's rotation to carry to logical space
+ */
+inline Point apply_calibration_in_panel_space(const TouchCalibration& cal, Point panel_point,
+                                              int capture_rotation, int panel_w, int panel_h) {
+    if (!cal.valid) {
+        return panel_point;
+    }
+
+    const Point logical_in =
+        rotate_panel_to_logical(panel_point, capture_rotation, panel_w, panel_h);
+
+    int logical_w = 0;
+    int logical_h = 0;
+    logical_extent(capture_rotation, panel_w, panel_h, logical_w, logical_h);
+
+    const Point logical_out = transform_point(cal, logical_in, logical_w > 0 ? logical_w - 1 : 0,
+                                              logical_h > 0 ? logical_h - 1 : 0);
+
+    return rotate_logical_to_panel(logical_out, capture_rotation, panel_w, panel_h);
+}
+
+/**
  * @brief Inverse affine transform: screen coordinates back to raw touch coords
  *
  * Given a point in logical screen space and the calibration that produced it,
@@ -209,26 +345,30 @@ bool validate_calibration_result(const TouchCalibration& cal, const Point screen
                                  float max_residual = 10.0f);
 
 /**
- * @brief Detect and correct swapped touch axes in calibration data
+ * @brief Report whether a panel's touch axes are transposed against the display
  *
- * After computing calibration, checks if the off-diagonal (cross-coupling)
- * terms dominate the diagonal (scaling) terms. This indicates the touch
- * controller reports X where Y is expected and vice versa.
+ * Checks whether the off-diagonal (cross-coupling) terms dominate the diagonal
+ * (scaling) terms, then confirms it by re-solving against transposed taps and
+ * requiring the cross-coupling to fall. A panel mounted a quarter turn from its
+ * display reports X where Y is expected, and this is what recognises that.
  *
- * If swap is detected, swaps X/Y in touch_points and recomputes calibration,
- * producing clean diagonal-dominant coefficients. The swap is handled entirely
- * in the affine matrix — no runtime evdev swap is needed.
+ * **It records the finding, it does not change the mapping.** An affine through
+ * three points is exact, so `compute_calibration()` already reproduces the targets
+ * from transposed taps through its cross terms; there is nothing left to correct.
+ * Re-solving against transposed input would produce a matrix that only works on
+ * transposed input, and the read callback has no swap to apply on the way in.
  *
- * Safe for non-swapped screens: only triggers when cross-coupling ratio > 0.5
- * AND swapping produces a measurably better (lower cross-coupling) result.
+ * The evdev-stage swap, which IS applied, is a separate mechanism: it comes from
+ * compute_range_fit()'s own `swap_axes` and reaches the driver through
+ * lv_evdev_set_swap_axes().
  *
- * @param[in,out] cal Calibration to check/fix (recomputed if swap detected)
+ * @param[in,out] cal Calibration to inspect; only `axes_swapped` is written
  * @param[in] screen_points 3 screen coordinate targets
- * @param[in,out] touch_points 3 raw touch coordinates (swapped in-place if needed)
- * @return true if axes were swapped and calibration was recomputed
+ * @param[in] touch_points 3 captured touch coordinates
+ * @return true when the panel's axes are transposed
  */
-bool detect_and_correct_axis_swap(TouchCalibration& cal, const Point screen_points[3],
-                                  Point touch_points[3]);
+bool detect_axis_transposition(TouchCalibration& cal, const Point screen_points[3],
+                               const Point touch_points[3]);
 
 /**
  * @brief Evdev-stage range fit recovered from a three-point calibration
@@ -310,6 +450,8 @@ struct TouchRangeSettings {
     int max_x = 0;
     int min_y = 0;
     int max_y = 0;
+    /// Display rotation the range was solved at; -1 when the record does not say.
+    int capture_rotation = -1;
 };
 
 /**
@@ -325,10 +467,30 @@ enum class TouchRangeSource {
     Declared,    ///< the kernel's EVIOCGABS answer, or the MT-axis fallback
     Stored,      ///< the range a three-point calibration solved and persisted
     Environment, ///< HELIX_TOUCH_MIN_X / MAX_X / MIN_Y / MAX_Y
+    /// The display's own dimensions, programmed because the declared range is the
+    /// display transposed (has_transposed_abs_range). A guess that the
+    /// declaration lies; transposed_range_guess_disproved() tests it per sample.
+    DisplaySize,
 };
 
 /// Stable lowercase name for a range source, for logs and the debug bundle.
 const char* touch_range_source_name(TouchRangeSource source);
+
+/// Which ABS range an evdev touch device runs, loudest first: an environment
+/// override, then a stored calibration range, then the declared one.
+///
+/// lv_evdev scales into the display's native resolution and the rotation runs
+/// after it, so a range solved on an unrotated display is native digitizer space
+/// and holds at any rotation. One solved on a rotated display folds the rotation
+/// into (min,max,swap) and would double-apply it, so a range whose capture
+/// rotation is unknown is programmed only while the display is unrotated
+/// (prestonbrown/helixscreen#1394). Both the programming and the recorded
+/// pipeline go through this, so what the diagnostics (and a calibration
+/// session's range snapshot) report is the range actually live.
+///
+/// @param applied_rotation Rotation the display is at now, from display_rotation_degrees()
+TouchRangeSource resolve_touch_range_source(bool env_range_override,
+                                            const TouchRangeSettings& stored, int applied_rotation);
 
 /**
  * @brief The touch pipeline exactly as the display backend programmed it
@@ -421,9 +583,31 @@ TouchObservedExtremes touch_observed_in_configured_axes(const TouchObservedExtre
  * denominator), so the pair is ordered before comparison. A zero-span configured
  * range is not a range - lv_evdev skips the scale but still clamps, collapsing
  * the panel onto one pixel - so nothing can be said to fall outside it.
+ *
+ * Under a DisplaySize range a reading escapes only when it is outside both the
+ * programmed and the declared range: either one may be the panel's truth.
  */
 TouchRangeViolation touch_range_violation(const TouchObservedExtremes& observed,
                                           const TouchPipelineInfo& configured);
+
+/**
+ * @brief Whether raw readings prove a DisplaySize range guessed wrong
+ *
+ * The transposed-range guess assumes the digitizer emits in framebuffer
+ * orientation despite declaring the display transposed (the FlashForge Creator 5
+ * Pro Goodix, #1450). A panel that really emits what it declares (Waveshare 2.8in
+ * DSI: ABS 640x480 on a 480x640 framebuffer) reaches past the display dimension
+ * on the axis whose declared maximum exceeds it, and stays within that declared
+ * maximum. A lying declaration never reaches past the display on any axis.
+ *
+ * True when, on some configured axis, the observed maximum exceeds the
+ * programmed maximum by more than kAbsRangeTolerance and does not exceed the
+ * declared maximum by more than it. A reading past the declared maximum fits
+ * neither reading of the panel, and is left to touch_range_violation().
+ * Always false unless `pipeline.source` is DisplaySize.
+ */
+bool transposed_range_guess_disproved(const TouchObservedExtremes& observed,
+                                      const TouchPipelineInfo& pipeline);
 
 /**
  * @brief Observed span as a fraction of the configured span, for reporting only
@@ -702,6 +886,10 @@ inline bool is_generic_hid_abs_range(int value) {
  * @param display_height Display height in pixels
  * @return true if ABS range mismatches display resolution beyond tolerance
  */
+/// Slack allowed between an ABS range and the display it is compared to, as a
+/// fraction of the display dimension, for rounding in driver-declared ranges.
+inline constexpr float kAbsRangeTolerance = 0.05f;
+
 inline bool has_abs_display_mismatch(int abs_max_x, int abs_max_y, int display_width,
                                      int display_height) {
     // Can't determine mismatch with invalid ranges
@@ -715,15 +903,41 @@ inline bool has_abs_display_mismatch(int abs_max_x, int abs_max_y, int display_w
         return false;
     }
 
-    // Allow ~5% tolerance for rounding differences in ABS ranges
-    constexpr float TOLERANCE = 0.05f;
-
     float x_ratio =
         static_cast<float>(std::abs(abs_max_x - display_width)) / static_cast<float>(display_width);
     float y_ratio = static_cast<float>(std::abs(abs_max_y - display_height)) /
                     static_cast<float>(display_height);
 
-    return (x_ratio > TOLERANCE) || (y_ratio > TOLERANCE);
+    return (x_ratio > kAbsRangeTolerance) || (y_ratio > kAbsRangeTolerance);
+}
+
+/**
+ * @brief Check whether an advertised ABS range is the display's own dimensions
+ * with the axes swapped
+ *
+ * Some drivers describe the panel in its native orientation rather than the
+ * framebuffer's — a Goodix controller advertising 800x480 on a 480x800 portrait
+ * framebuffer — while still emitting coordinates that span the framebuffer the
+ * normal way round. That is not a resolution mismatch: the numbers are the
+ * display's, only transposed. Scaling by them compresses one axis and clamps the
+ * other, so the caller should scale by the display size instead and leave
+ * rotation to LVGL.
+ *
+ * True requires both halves: the range does NOT describe the display the normal
+ * way round, and it DOES describe it transposed. A square display therefore
+ * never qualifies — its two readings are the same comparison, so a range either
+ * matches both or neither, and "transposed" carries no information.
+ *
+ * @param abs_max_x Maximum ABS_X value from EVIOCGABS
+ * @param abs_max_y Maximum ABS_Y value from EVIOCGABS
+ * @param display_width Display width in pixels
+ * @param display_height Display height in pixels
+ * @return true if the range matches the display only when the axes are swapped
+ */
+inline bool has_transposed_abs_range(int abs_max_x, int abs_max_y, int display_width,
+                                     int display_height) {
+    return has_abs_display_mismatch(abs_max_x, abs_max_y, display_width, display_height) &&
+           !has_abs_display_mismatch(abs_max_x, abs_max_y, display_height, display_width);
 }
 
 /**
@@ -736,6 +950,33 @@ inline bool has_abs_display_mismatch(int abs_max_x, int abs_max_y, int display_w
 inline bool should_invalidate_legacy_calibration(bool recheck_pending, bool is_resistive,
                                                  bool abs_display_mismatch) {
     return recheck_pending && !is_resistive && abs_display_mismatch;
+}
+
+/**
+ * @brief Decide whether a stored affine that records no capture rotation must be
+ * discarded rather than assumed to have been solved square.
+ *
+ * The solve runs against logical, post-rotation targets, so a matrix means nothing
+ * without the rotation it was solved at. A record carrying no rotation states no
+ * basis, and the runtime has to pick one: zero reproduces what such a record did
+ * when it was written, and on an unrotated display that is not an assumption at all.
+ * On a rotated display it is a guess, and a wrong guess lands every tap a quarter
+ * turn out on a screen the user then cannot navigate to Settings to fix
+ * (prestonbrown/helixscreen#1394). One recalibration is recoverable; an unusable
+ * touchscreen is not.
+ *
+ * Deliberately blind to the panel's electrical nature and its declared ABS range:
+ * a resistive panel's matrix sits in the same wrong basis as a capacitive one, so
+ * neither narrows this. That is the whole difference from
+ * should_invalidate_legacy_calibration() above.
+ *
+ * @param has_capture_rotation Whether the record stores a capture rotation at all
+ * @param applied_rotation Rotation the display is at now, from display_rotation_degrees()
+ * @return true when the stored affine must be dropped
+ */
+inline bool should_invalidate_unstamped_calibration(bool has_capture_rotation,
+                                                    int applied_rotation) {
+    return !has_capture_rotation && applied_rotation != 0;
 }
 
 } // namespace helix

@@ -50,21 +50,34 @@ static std::mutex s_dedupe_mutex;
 static std::unordered_set<std::string> s_seen_messages;
 
 /**
- * @brief Strip LVGL's "(timestamp, +delta)\t" prefix from a log message.
+ * @brief Strip LVGL's "(timestamp, +delta)\t" group from a log message.
  *
- * LVGL prepends a timing header like "(33165.838, +7629213)\t" to every
- * log line. The numbers vary per call, so we strip them to compare bodies.
+ * LVGL formats a record as "[Warn]\t(33165.838, +7629213)\t<func>: <text> <file>:<line>".
+ * The timestamp and the delta since the previous record differ on every call, so
+ * they are dropped before comparing bodies; the "[Level]" prefix stays so the
+ * same text at two levels is two messages.
  */
-std::string_view strip_lvgl_timestamp(std::string_view msg) {
-    if (msg.empty() || msg.front() != '(')
-        return msg;
-    size_t close = msg.find(')');
+std::string strip_lvgl_timestamp(std::string_view msg) {
+    size_t group = 0;
+    if (!msg.empty() && msg.front() == '[') {
+        size_t level_end = msg.find(']');
+        if (level_end == std::string_view::npos)
+            return std::string(msg);
+        group = level_end + 1;
+    }
+    while (group < msg.size() && (msg[group] == '\t' || msg[group] == ' '))
+        ++group;
+    if (group >= msg.size() || msg[group] != '(')
+        return std::string(msg);
+    size_t close = msg.find(')', group);
     if (close == std::string_view::npos || close + 1 >= msg.size())
-        return msg;
+        return std::string(msg);
     size_t body = close + 1;
     while (body < msg.size() && (msg[body] == '\t' || msg[body] == ' '))
         ++body;
-    return msg.substr(body);
+    std::string key(msg.substr(0, group));
+    key.append(msg.substr(body));
+    return key;
 }
 
 /**
@@ -85,7 +98,7 @@ bool is_high_frequency_retry(std::string_view msg) {
  *         false if it is the first occurrence (caller logs at original level).
  */
 bool seen_before(const std::string& msg) {
-    std::string key(strip_lvgl_timestamp(msg));
+    std::string key = strip_lvgl_timestamp(msg);
     std::lock_guard<std::mutex> lock(s_dedupe_mutex);
     if (s_seen_messages.size() >= LVGL_DEDUPE_MAX) {
         // Best-effort cap: clear and start over. 256 unique broken-asset
@@ -282,6 +295,31 @@ void log_subject_debug_info(lv_subject_t* ptr) {
     }
 }
 
+/// True while the spdlog-routed sink is in service.
+///
+/// SubjectManager::deinit_all() runs during static destruction and calls
+/// lv_subject_deinit(), whose lv_observer_remove() emits LV_LOG_WARN for a
+/// null-subject observer. spdlog's registry is a lazily constructed
+/// function-local static, so it registers for destruction after load-time
+/// statics and is torn down BEFORE a static SubjectManager takes the full
+/// deinit path — a routed log there reads a freed logger. Zero-initialized
+/// before any dynamic initialization and never destroyed (trivially
+/// destructible), so it stays readable for the whole process; the retirement
+/// anchor below flips it off when the sink's own lifetime ends, which happens
+/// while spdlog is still alive because the anchor is constructed at
+/// registration, after the first spdlog use.
+static std::atomic<bool> s_sink_alive{false};
+
+/// Retired by its destructor when static teardown reaches it. Function-local
+/// so it is constructed at first registration — after spdlog's registry —
+/// and therefore destroyed before it: the window where the sink still routes
+/// into a dead logger never opens in the reverse order.
+struct SinkLifetimeAnchor {
+    ~SinkLifetimeAnchor() {
+        helix::logging::retire_lvgl_log_handler();
+    }
+};
+
 /**
  * @brief LVGL log callback that routes to spdlog
  *
@@ -292,6 +330,13 @@ void log_subject_debug_info(lv_subject_t* ptr) {
  * @param buf Log message buffer (null-terminated)
  */
 void lvgl_log_callback(lv_log_level_t level, const char* buf) {
+    // The sink is retired during static destruction: LVGL can still emit
+    // through it (lv_subject_deinit -> lv_observer_remove -> LV_LOG_WARN)
+    // after spdlog is gone, so drop the record rather than touch a freed
+    // logger.
+    if (!s_sink_alive.load(std::memory_order_acquire)) {
+        return;
+    }
     // Strip trailing newline if present (spdlog adds its own)
     std::string msg(buf);
     while (!msg.empty() && (msg.back() == '\n' || msg.back() == '\r')) {
@@ -308,13 +353,17 @@ void lvgl_log_callback(lv_log_level_t level, const char* buf) {
 
     // Downgrade translation warnings to debug level
     // Expected when languages have incomplete translations - not actionable at runtime
-    // "language is not found" is the no-pack-registered fallback, which English
-    // takes on every boot by design (our tags ARE English — see
-    // helix::ui::ensure_translation_loaded). LVGL emits it once per language.
+    // "language is not found" is the no-pack-registered fallback. LVGL emits it
+    // once per language.
     bool is_translation_warning = (level == LV_LOG_LEVEL_WARN &&
                                    (msg.find("language is missing from tag") != std::string::npos ||
                                     msg.find("tag is not found") != std::string::npos ||
                                     msg.find("language is not found") != std::string::npos));
+
+    // English takes the no-pack fallback on every boot by design: our tags ARE
+    // English (see helix::ui::ensure_translation_loaded), so it is not a gap.
+    bool is_source_language_fallback =
+        is_translation_warning && msg.find("`en` language is not found") != std::string::npos;
 
     // init_translations() silences its own expected noise. Those hits must stay
     // OUT of the dedupe cache: recording them would spend each tag's one
@@ -340,7 +389,7 @@ void lvgl_log_callback(lv_log_level_t level, const char* buf) {
         spdlog::info("[LVGL] {}", msg);
         break;
     case LV_LOG_LEVEL_WARN:
-        if (suppressed_translation || is_repeat_retry) {
+        if (suppressed_translation || is_repeat_retry || is_source_language_fallback) {
             spdlog::trace("[LVGL] {}", msg);
         } else if (is_scroll_boundary_warning || is_translation_warning) {
             spdlog::debug("[LVGL] {}", msg);
@@ -440,12 +489,26 @@ namespace helix {
 namespace logging {
 
 void register_lvgl_log_handler() {
+    // Constructed at first registration, destroyed during static teardown —
+    // after spdlog's registry, so the retirement it performs still runs while
+    // the logger is alive.
+    static const SinkLifetimeAnchor anchor;
+    s_sink_alive.store(true, std::memory_order_release);
     lv_log_register_print_cb(lvgl_log_callback);
     spdlog::trace("[Logging] Registered custom LVGL log handler");
 }
 
+void retire_lvgl_log_handler() {
+    s_sink_alive.store(false, std::memory_order_release);
+}
+
 void set_suppress_translation_warnings(bool suppress) {
     s_suppress_translation_warnings = suppress;
+}
+
+void reset_lvgl_log_dedupe() {
+    std::lock_guard<std::mutex> lock(s_dedupe_mutex);
+    s_seen_messages.clear();
 }
 
 } // namespace logging

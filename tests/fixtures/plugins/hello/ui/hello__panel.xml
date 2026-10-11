@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+<component>
+  <view extends="lv_obj" width="content" height="content">
+    <lv_label name="hello__label" bind_text="hello__status"/>
+    <lv_button name="hello__button">
+      <event_cb trigger="clicked" callback="plugin_event" user_data="hello__press:7"/>
+    </lv_button>
+  </view>
+</component>

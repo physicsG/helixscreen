@@ -27,9 +27,6 @@
 //     only need the symbol to resolve so the address-taking call sites link.
 //   * row-handler / event-callback initializers: no-op — the XML rows that
 //     would fire them are never created.
-//   * parse_shaper_csv: returns a default-constructed (empty) result — only
-//     reachable after a real input-shaper calibration run, which cannot happen
-//     on Stage A.
 //   * PIDCalibrationPanel member methods: no-op — set from subject_initializer
 //     wiring that runs but has no visible effect on the idle path.
 //
@@ -46,15 +43,16 @@
 #include "ui_panel_bed_mesh.h"
 #include "ui_panel_belt_tension.h"
 #include "ui_panel_calibration_pid.h"
+#include "ui_panel_calibration_tool_offset.h"
 #include "ui_panel_calibration_zoffset.h"
 #include "ui_panel_input_shaper.h"
 #include "ui_panel_screws_tilt.h"
 #include "ui_toast_manager.h"
+#include "ui_wizard_preferences.h"
 
-#include "color_sensor_manager.h"
 #include "esp_attr.h"
 #include "esp_log.h"
-#include "shaper_csv_parser.h"
+#include "macro_manager.h"
 #include "timelapse_state.h"
 #include "touch_calibration_wrapper.h"
 
@@ -90,6 +88,16 @@ TimelapseVideosOverlay& get_global_timelapse_videos() {
 void init_global_timelapse_videos(IMoonrakerAPI*) {}
 void open_timelapse_videos() {}
 
+// src/ui/ui_overlay_timelapse_videos.cpp, helix::ui entry points. Kept code calls
+// both: ui_panel_history_list.cpp gates a row on the availability query and opens a
+// job's video from it. Returning false is what makes the row inert here.
+namespace helix::ui {
+void open_timelapse_video(const std::string&) {}
+bool timelapse_viewer_available() {
+    return false;
+}
+} // namespace helix::ui
+
 // ===========================================================================
 // Timelapse install + settings overlays and TimelapseState (dropped
 // 2026-08-12; see app_srcs_excluded.txt for the scope decision).
@@ -112,12 +120,12 @@ void open_timelapse_videos() {}
 //
 // src/ui/ui_overlay_timelapse_install.cpp
 TimelapseInstallOverlay::TimelapseInstallOverlay(IMoonrakerAPI* api) : api_(api) {}
-void TimelapseInstallOverlay::init_subjects() {}
+void TimelapseInstallOverlay::register_callbacks() {}
 lv_obj_t* TimelapseInstallOverlay::create(lv_obj_t*) {
     return nullptr;
 }
 void TimelapseInstallOverlay::on_activate() {}
-void TimelapseInstallOverlay::on_deactivate() {}
+void TimelapseInstallOverlay::on_deactivating(DeactivateReason) {}
 void TimelapseInstallOverlay::cleanup() {}
 
 TimelapseInstallOverlay& get_global_timelapse_install() {
@@ -129,13 +137,11 @@ void open_timelapse_install() {}
 
 // src/ui/ui_overlay_timelapse_settings.cpp
 TimelapseSettingsOverlay::TimelapseSettingsOverlay(IMoonrakerAPI* api) : api_(api) {}
-void TimelapseSettingsOverlay::init_subjects() {}
+void TimelapseSettingsOverlay::register_callbacks() {}
 lv_obj_t* TimelapseSettingsOverlay::create(lv_obj_t*) {
     return nullptr;
 }
 void TimelapseSettingsOverlay::on_activate() {}
-void TimelapseSettingsOverlay::on_deactivate() {}
-void TimelapseSettingsOverlay::cleanup() {}
 
 TimelapseSettingsOverlay& get_global_timelapse_settings() {
     static TimelapseSettingsOverlay overlay(nullptr);
@@ -162,7 +168,6 @@ void TimelapseState::reset() {}
 // ===========================================================================
 
 void PIDCalibrationPanel::set_temp_control_panel(TemperatureService*) {}
-void PIDCalibrationPanel::show() {}
 
 // ===========================================================================
 // More global-scope accessors + wiring initializers. NOTE: these panel classes
@@ -193,7 +198,7 @@ ZOffsetCalibrationPanel& get_global_zoffset_cal_panel() {
     return *reinterpret_cast<ZOffsetCalibrationPanel*>(storage);
 }
 
-// Advanced-panel staged-calibration rows (Input Shaping / Belt Tension / Z-Offset)
+// Advanced-panel staged-calibration rows (Input Shaping / Belt Tension / Z-Offset / Screws Tilt)
 // stay VISIBLE — they are features the user should learn exist — but their panels
 // are excluded from the v1 cut. Instead of the old silent no-op registration,
 // register a real handler that shows the shared "not yet available" toast so the
@@ -212,9 +217,11 @@ void init_input_shaper_row_handler() {
     lv_xml_register_event_cb(nullptr, "on_input_shaper_row_clicked", esp32_staged_feature_row_cb);
 }
 
-// src/ui/ui_panel_screws_tilt.cpp — Advanced screws-tilt row stays a no-op; it is
-// XML-gated on printer_has_screws_tilt and reached crash-safely (unregistered cb).
-void init_screws_tilt_row_handler() {}
+// src/ui/ui_panel_screws_tilt.cpp — the row shows only on printers with
+// screws_tilt_adjust (printer_has_screws_tilt), where a tap needs feedback.
+void init_screws_tilt_row_handler() {
+    lv_xml_register_event_cb(nullptr, "on_screws_tilt_row_clicked", esp32_staged_feature_row_cb);
+}
 
 // src/ui/ui_panel_calibration_zoffset.cpp
 void init_zoffset_row_handler() {
@@ -222,80 +229,27 @@ void init_zoffset_row_handler() {
 }
 void init_zoffset_event_callbacks() {}
 
-// ===========================================================================
-// ColorSensorManager (src/sensors/color_sensor_manager.cpp).
-//
-// The TD-1 colour sensor stack is dead on EVERY platform, not just this one:
-// `sensors_` is only ever filled by discover_from_moonraker(), whose sole
-// caller is SensorRegistry::discover_all() — and nothing in the tree calls
-// that (sensor_registry.cpp is not compiled anywhere). So the shipped
-// behaviour is a permanently empty sensor list, which is exactly what these
-// stubs reproduce.
-//
-// Unlike the panel accessors above, this one CANNOT be raw storage:
-// printer_state.cpp calls update_from_status() on the returned reference for
-// every status frame, and that is a virtual dispatch through the vptr. So
-// instance() constructs a real object, which means defining the ctor/dtor and
-// every ISensorManager override so the vtable emits here with all slots filled.
-// ===========================================================================
-
-namespace helix::sensors {
-
-ColorSensorManager::ColorSensorManager() = default;
-ColorSensorManager::~ColorSensorManager() = default;
-
-ColorSensorManager& ColorSensorManager::instance() {
-    static ColorSensorManager mgr;
-    return mgr;
+// src/ui/ui_panel_calibration_tool_offset.cpp — same staged-row treatment: the
+// row's visibility already tracks a real capability (printer_has_tool_offset_cal
+// is written for real by the KEPT tool_offset_calibration::supported()), so on
+// hardware where it would show, the tap must still give feedback rather than
+// silently doing nothing.
+namespace helix::ui {
+void init_tool_offset_row_handler() {
+    lv_xml_register_event_cb(nullptr, "on_tool_offset_row_clicked", esp32_staged_feature_row_cb);
 }
 
-// sensors_overlay.xml binds `color_sensor_count` to hide the Color Sensors
-// section, so the subjects must exist even though nothing ever fills them.
-// Registering all three keeps the zero-sensor state identical to the real
-// manager's; without this the overlay logs "No subject was found" on open.
-void ColorSensorManager::init_subjects() {
-    if (subjects_initialized_) {
-        return;
-    }
-    UI_MANAGED_SUBJECT_STRING_N(color_hex_, color_hex_buf_.data(), COLOR_HEX_BUF_SIZE, "",
-                                "filament_color_hex", subjects_);
-    UI_MANAGED_SUBJECT_INT(td_value_, -1, "filament_td_value", subjects_);
-    UI_MANAGED_SUBJECT_INT(sensor_count_, 0, "color_sensor_count", subjects_);
-    subjects_initialized_ = true;
+// src/ui/ui_panel_calibration_tool_offset.cpp (DEFINE_GLOBAL_PANEL) — the
+// Controls-panel quick-access button (ui_panel_controls.cpp, KEPT) reaches
+// this the same way handle_calibration_zoffset() reaches
+// get_global_zoffset_cal_panel() above: only non-virtual access is safe on
+// this storage, so that call site must never actually construct/activate it.
+ToolOffsetCalibrationPanel& get_global_tool_offset_cal_panel() {
+    alignas(ToolOffsetCalibrationPanel)
+        EXT_RAM_BSS_ATTR static unsigned char storage[sizeof(ToolOffsetCalibrationPanel)];
+    return *reinterpret_cast<ToolOffsetCalibrationPanel*>(storage);
 }
-
-std::string ColorSensorManager::category_name() const {
-    return "color";
-}
-void ColorSensorManager::discover_from_moonraker(const nlohmann::json&) {}
-void ColorSensorManager::update_from_status(const nlohmann::json&) {}
-void ColorSensorManager::load_config(const nlohmann::json&) {}
-nlohmann::json ColorSensorManager::save_config() const {
-    return nlohmann::json::object();
-}
-
-std::vector<ColorSensorConfig> ColorSensorManager::get_sensors() const {
-    return {};
-}
-size_t ColorSensorManager::sensor_count() const {
-    return 0;
-}
-
-} // namespace helix::sensors
-
-// parse_shaper_csv IS genuinely helix::calibration-namespaced (called qualified
-// from moonraker_advanced_api.cpp).
-namespace helix {
-namespace calibration {
-
-// src/calibration/shaper_csv_parser.cpp — default (empty) result; only reachable
-// after a real shaper calibration run, which cannot happen on Stage A.
-ShaperCsvData parse_shaper_csv(const std::string&, char) {
-    return ShaperCsvData{};
-}
-
-} // namespace calibration
-} // namespace helix
+} // namespace helix::ui
 
 // src/api/touch_calibration_wrapper.cpp is not in the cut, but the touch
 // calibration UI that drives it is (ui_touch_calibration_overlay.cpp,
@@ -317,4 +271,45 @@ bool get_last_raw_touch(Point&) {
 // write config nothing reads back.
 void save_touch_range(const TouchRangeSettings&) {}
 
+// No evdev range stage to hold still during a capture.
+void set_touch_capture_active(bool) {}
+
+// ===========================================================================
+// MacroManager — helper-macro install/update subsystem
+// (src/printer/macro_manager.cpp, not in the v1 Core+AMS cut).
+// ===========================================================================
+// evaluate_status runs at boot from PrinterState::set_hardware on every
+// build; UNKNOWN keeps the plugin-status subject at HelixMacrosStatus::Unknown
+// here. The install/update entry points in ui_panel_advanced.cpp are gated to
+// a feature-unavailable toast on this platform, so the file-operation and
+// restart methods never run and their callbacks never fire.
+MacroManager::MacroManager(IMoonrakerAPI& api, const PrinterDiscovery& hardware)
+    : api_(api), hardware_(hardware) {}
+
+MacroManager::~MacroManager() {}
+
+MacroInstallStatus MacroManager::evaluate_status(const PrinterDiscovery&) {
+    return MacroInstallStatus::UNKNOWN;
+}
+
+void MacroManager::install_files(SuccessCallback, ErrorCallback) {}
+
+void MacroManager::update_files(SuccessCallback, ErrorCallback) {}
+
+void MacroManager::request_restart(SuccessCallback, ErrorCallback) {}
+
+bool MacroManager::stages_skips() const {
+    return false;
+}
+
+void MacroManager::remove_skips(SuccessCallback, ErrorCallback) {}
+
 } // namespace helix
+
+// The firmware runs no first-run wizard, so the registry's Preferences step
+// never runs; the accessor only has to resolve.
+namespace helix::wizard {
+WizardPreferencesStep* get_wizard_preferences_step() {
+    return nullptr;
+}
+} // namespace helix::wizard

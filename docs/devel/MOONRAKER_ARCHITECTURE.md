@@ -68,8 +68,8 @@ The Moonraker integration is split into three distinct layers with clean separat
 
 **Broadcast notifications must be filtered by the consumer, at the edge.** The client fans a method callback out to every registered handler; it does not know which of them cares. `notify_filelist_changed` is the one that bites: Moonraker fires it for *every* registered root, and printers write to `config` constantly — an AFC unit rewrites `AFC/AFC.var.unit` on every `SET_*` command, a `SAVE_VARIABLE` `delayed_gcode` rewrites `saved_variables.cfg`. On bundle L53W5PKG that was one notification per ~10 s for a whole print. Two consumers, two different filters, both required:
 
-- `PrintSelectPanel` lists the `gcodes` root only (`PrintSelectFileProvider` hardcodes it), so it filters on `item.root` — `filelist_change_affects_gcodes()` in `ui_panel_print_select.h`. Without it every config write cost a full `server.files.get_directory` round trip plus a list rebuild, 113 of them in that one session, while the user was on the print-status panel.
-- `PrintHistoryManager` cares about files disappearing, so it filters on *action* instead — `filelist_action_affects_history()`, which admits only `delete_file`/`delete_dir`/`move_file`/`move_dir`.
+- `PrintSelectPanel` lists the `gcodes` root only (`PrintSelectFileProvider` hardcodes it), so it filters on the roots an operation touches — `include/json_utils.h#filelist_change_affects_gcodes` takes both `item.root` and `source_item.root` and counts *either* end as `gcodes`. `item` describes the destination and the origin rides in `source_item`, so a file moved out of `gcodes` reports a foreign item root; both arguments are required, because looking at the item root alone is exactly the case that leaves the listing naming a file that is gone. Without the filter every config write cost a full `server.files.get_directory` round trip plus a list rebuild, 113 of them in that one session, while the user was on the print-status panel.
+- `PrintHistoryManager` cares about files disappearing, so it filters on *action first, then root* — `filelist_change_affects_history()` admits only `delete_file`/`delete_dir`/`move_file`/`move_dir`, and of those only the ones touching `gcodes`. The root half matters as much as the action half: Moonraker's timelapse component moves frame and render artifacts throughout a print, and an unfiltered `move_file` costs a full 500-job refetch, ~1 s of round-trip on a Pi 4. A move counts if *either* end is in `gcodes`; a payload with no `item.root` at all invalidates, because going stale is worse than one extra round-trip.
 
 A new consumer of this notification needs to state which axis it filters on before it registers. Filtering the log line alone is not the fix; the work behind it is the cost.
 
@@ -188,7 +188,7 @@ struct MoonrakerEvent {
 };
 ```
 
-**Emitting an event is not deciding how to show it.** `helix::decide_moonraker_event()` (`moonraker_event_routing.cpp`) owns that, as a pure function so the caller can apply `lv_tr()` on the main thread (#1219). `CONNECTION_FAILED` is the one with real routing rules, because it is latched and fires ~60 s after startup — reliably landing on whatever the user is doing about it:
+**Emitting an event is not deciding how to show it.** `helix::decide_moonraker_event()` (`moonraker_event_routing.cpp`) owns that, as a pure function so the caller can apply `lv_tr()` on the main thread (#1219). The event's own text follows the same split: an emitter builds it with `MoonrakerEvent::translatable()`, which keeps the untranslated template in `message_tag` and its arguments in `message_args` beside the English `message` the logs use, and `MoonrakerManager::present_event()` renders `lv_tr(message_tag)` on the main thread. Text from Klipper or Moonraker stays untagged and is shown as it arrived. `CONNECTION_FAILED` is the one with real routing rules, because it is latched and fires ~60 s after startup — reliably landing on whatever the user is doing about it:
 
 | Context | Route | Why |
 |---|---|---|
@@ -292,7 +292,6 @@ The following methods have been removed from `MoonrakerClient` and are now in `M
 | Connection state | `is_connected()`, `get_connection_state()` | Internal state |
 | Subscriptions | `subscribe_notifications()`, `register_method_callback()` | Direct registration |
 | Database | `database_get_item()`, `database_post_item()` | Raw `send_jsonrpc()` |
-| Plugin RPCs | `get_phase_tracking_status()`, `set_phase_tracking_enabled()` | Raw `send_jsonrpc()` |
 | Thread safety | Delegates to client | Internal mutexes |
 | UI coupling | None | None (events only) |
 

@@ -36,8 +36,8 @@ constexpr int to_int(EndlessSpoolStatusKind kind) {
 // The endless subjects live on the AmsState singleton, which registers them
 // into the global XML scope separately from the fixture's PrinterState.
 lv_subject_t* endless_state_subject() {
-    AmsState::instance().init_subjects(true); // before XML creation so bindings resolve
-    lv_subject_t* subj = AmsState::instance().get_endless_state_subject();
+    helix::AmsState::instance().init_subjects(true); // before XML creation so bindings resolve
+    lv_subject_t* subj = helix::AmsState::instance().get_endless_state_subject();
     REQUIRE(subj != nullptr);
     return subj;
 }

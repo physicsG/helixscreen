@@ -3,15 +3,15 @@
 
 #pragma once
 
+#include "completion_alert_mode.h"
 #include "lvgl/lvgl.h"
+#include "persisted_setting.h"
 #include "subject_managed_panel.h"
 
+#include <algorithm>
 #include <string>
 
 namespace helix {
-
-/** @brief Print completion notification mode (Off=0, Notification=1, Alert=2) */
-enum class CompletionAlertMode { OFF = 0, NOTIFICATION = 1, ALERT = 2 };
 
 /**
  * @brief Domain-specific manager for audio/sound settings
@@ -36,6 +36,9 @@ class AudioSettingsManager {
     /** @brief Initialize LVGL subjects and load from Config */
     void init_subjects();
 
+    /** @brief Re-read every persisted setting from Config; no-op before init_subjects() */
+    void reload_from_config();
+
     /** @brief Deinitialize LVGL subjects (called by StaticSubjectRegistry) */
     void deinit_subjects();
 
@@ -43,20 +46,26 @@ class AudioSettingsManager {
     // GETTERS / SETTERS
     // =========================================================================
 
-    /** @brief Get master sound enabled state */
-    bool get_sounds_enabled() const;
+    /** @brief Master sound switch */
+    bool get_sounds_enabled() const {
+        return settings_.get_bool(Key::SoundsEnabled);
+    }
+    void set_sounds_enabled(bool enabled) {
+        settings_.set(Key::SoundsEnabled, enabled);
+    }
 
-    /** @brief Set master sound enabled state (updates subject + persists) */
-    void set_sounds_enabled(bool enabled);
+    /** @brief UI interaction sounds */
+    bool get_ui_sounds_enabled() const {
+        return settings_.get_bool(Key::UiSoundsEnabled);
+    }
+    void set_ui_sounds_enabled(bool enabled) {
+        settings_.set(Key::UiSoundsEnabled, enabled);
+    }
 
-    /** @brief Get UI interaction sounds enabled state */
-    bool get_ui_sounds_enabled() const;
-
-    /** @brief Set UI interaction sounds enabled state (updates subject + persists) */
-    void set_ui_sounds_enabled(bool enabled);
-
-    /** @brief Get master volume (0-100) */
-    int get_volume() const;
+    /** @brief Master volume (0-100) */
+    int get_volume() const {
+        return settings_.get(Key::Volume);
+    }
 
     /** @brief Get perceptually-scaled volume as 0.0–1.0 float (quadratic curve) */
     float get_volume_scaled() const;
@@ -74,7 +83,9 @@ class AudioSettingsManager {
     int preview_volume(int volume);
 
     /** @brief Set master volume (clamped 0-100, updates subject + persists) */
-    void set_volume(int volume);
+    void set_volume(int volume) {
+        settings_.set(Key::Volume, volume);
+    }
 
     /** @brief Get sound theme name from config */
     std::string get_sound_theme() const;
@@ -88,22 +99,29 @@ class AudioSettingsManager {
     /** @brief Set ALSA output device PCM (persists to config) */
     void set_output_device(const std::string& pcm);
 
-    /** @brief Get completion alert mode */
-    CompletionAlertMode get_completion_alert_mode() const;
+    /** @brief Persisted PWM buzzer channel as "<chip>:<channel>" ("" if unset) */
+    std::string get_pwm_channel() const;
 
-    /** @brief Set completion alert mode (updates subject + persists) */
-    void set_completion_alert_mode(CompletionAlertMode mode);
+    CompletionAlertMode get_completion_alert_mode() const {
+        return static_cast<CompletionAlertMode>(
+            std::clamp(settings_.get(Key::CompletionAlert), 0, 2));
+    }
+    void set_completion_alert_mode(CompletionAlertMode mode) {
+        settings_.set(Key::CompletionAlert, static_cast<int>(mode));
+    }
 
     /**
-     * @brief Refresh the audio-device-available subject from the live backend
+     * @brief Refresh the subjects that describe the live sound backend
      *
-     * `settings_audio_device_available` cannot be seeded in init_subjects()
-     * because subjects are initialized before SoundManager picks its backend.
-     * Called once after SoundManager::initialize() so the value is correct
-     * before any overlay binds to it. The backend is static after init, so a
-     * single refresh is sufficient.
+     * `settings_audio_device_available` (an ALSA device picker applies) and
+     * `settings_music_available` (the backend plays music) cannot be seeded in
+     * init_subjects() because subjects are initialized before SoundManager
+     * picks its backend. Called once after SoundManager::initialize() so the
+     * values are correct before any overlay binds to them. A later M300
+     * takeover only swaps one tones-only backend for another, so a single
+     * refresh is sufficient.
      */
-    void refresh_audio_device_available();
+    void refresh_backend_subjects();
 
     // =========================================================================
     // SUBJECT ACCESSORS (for XML binding)
@@ -111,35 +129,34 @@ class AudioSettingsManager {
 
     /** @brief Sounds enabled subject (integer: 0=off, 1=on) */
     lv_subject_t* subject_sounds_enabled() {
-        return &sounds_enabled_subject_;
+        return settings_.subject(Key::SoundsEnabled);
     }
 
     /** @brief UI sounds enabled subject (integer: 0=off, 1=on) */
     lv_subject_t* subject_ui_sounds_enabled() {
-        return &ui_sounds_enabled_subject_;
+        return settings_.subject(Key::UiSoundsEnabled);
     }
 
     /** @brief Volume subject (integer: 0-100 percent) */
     lv_subject_t* subject_volume() {
-        return &volume_subject_;
+        return settings_.subject(Key::Volume);
     }
 
     /** @brief Completion alert subject (integer: 0=off, 1=notification, 2=alert) */
     lv_subject_t* subject_completion_alert() {
-        return &completion_alert_subject_;
+        return settings_.subject(Key::CompletionAlert);
     }
 
   private:
     AudioSettingsManager();
     ~AudioSettingsManager() = default;
 
-    SubjectManager subjects_;
+    enum class Key : uint8_t { SoundsEnabled, UiSoundsEnabled, Volume, CompletionAlert, COUNT };
 
-    lv_subject_t sounds_enabled_subject_;
-    lv_subject_t ui_sounds_enabled_subject_;
-    lv_subject_t volume_subject_;
-    lv_subject_t completion_alert_subject_;
-    lv_subject_t audio_device_available_subject_;
+    SubjectManager subjects_;
+    settings::PersistedSettings<Key, static_cast<size_t>(Key::COUNT)> settings_;
+    lv_subject_t audio_device_available_subject_{};
+    lv_subject_t music_available_subject_{};
 
     bool subjects_initialized_ = false;
 };

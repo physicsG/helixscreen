@@ -27,7 +27,7 @@ BedDimensions bed_dimensions(IMoonrakerAPI* api, const PrinterState* ps) {
         }
     }
     if (ps) {
-        const auto b = ps->get_axis_bounds();
+        const auto b = ps->motion_state().get_axis_bounds();
         if (b.has_x && b.has_y) {
             return bed_dimensions_from_volume(b.x_min, b.x_max, b.y_min, b.y_max);
         }

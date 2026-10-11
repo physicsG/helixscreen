@@ -5,16 +5,22 @@
 #include "ui_fonts.h"
 #include "ui_icon.h"
 #include "ui_icon_codepoints.h"
+#include "ui_icon_picker.h"
+#include "ui_row_text.h"
 
 #include "app_globals.h"
 #include "device_display_name.h"
 #include "favorite_macro_config.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "i_moonraker_api.h"
+#include "macro_param_cache.h"
+#include "macro_param_defaults.h"
 #include "panel_widget_config.h"
 #include "panel_widget_manager.h"
 #include "static_subject_registry.h"
+#include "subject_managed_panel.h"
 #include "theme_manager.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/spdlog.h>
 
@@ -25,9 +31,13 @@
 namespace helix {
 
 namespace {
-lv_subject_t s_tab_subject;
-lv_subject_t s_require_confirm_subject;
+lv_subject_t s_tab_subject{};
+lv_subject_t s_require_confirm_subject{};
+/// 1 while the configured macro declares a parameter list, so the Options tab
+/// can show the "Default Parameters" row only for macros that have one.
+lv_subject_t s_has_param_defaults_subject{};
 bool s_subjects_registered = false;
+SubjectManager s_subjects;
 
 // Curated icon list for the picker grid (matches FavoriteMacroWidget).
 static const char* const CURATED_ICONS[] = {
@@ -60,20 +70,7 @@ static constexpr uint32_t ICON_COLORS[] = {
 };
 static constexpr size_t ICON_COLOR_COUNT = std::size(ICON_COLORS);
 
-static constexpr int ICON_CELL_SIZE = 36;
 static constexpr int COLOR_SWATCH_SIZE = 28;
-
-void apply_icon_cell_highlight(lv_obj_t* cell, bool selected) {
-    if (selected) {
-        lv_obj_set_style_border_width(cell, 2, 0);
-        lv_obj_set_style_border_color(cell, theme_manager_get_color("primary"), 0);
-        lv_obj_set_style_bg_opa(cell, 20, 0);
-        lv_obj_set_style_bg_color(cell, theme_manager_get_color("primary"), 0);
-    } else {
-        lv_obj_set_style_border_width(cell, 0, 0);
-        lv_obj_set_style_bg_opa(cell, 0, 0);
-    }
-}
 
 void apply_color_swatch_highlight(lv_obj_t* swatch, bool selected) {
     lv_obj_set_style_border_width(swatch, selected ? 2 : 1, 0);
@@ -93,11 +90,12 @@ void register_favorite_macro_config_subjects() {
     // Default 1 mirrors FavoriteMacroConfig::require_confirmation, so the toggle
     // reads correctly even before on_show() loads a widget's config.
     lv_subject_init_int(&s_require_confirm_subject, 1);
-    lv_xml_register_subject(nullptr, "fav_macro_config_tab", &s_tab_subject);
-    lv_xml_register_subject(nullptr, "fav_macro_require_confirm", &s_require_confirm_subject);
+    lv_subject_init_int(&s_has_param_defaults_subject, 0);
+    s_subjects.publish("fav_macro_config_tab", &s_tab_subject);
+    s_subjects.publish("fav_macro_require_confirm", &s_require_confirm_subject);
+    s_subjects.publish("fav_macro_has_param_defaults", &s_has_param_defaults_subject);
     StaticSubjectRegistry::instance().register_deinit("FavoriteMacroConfigSubjects", []() {
-        lv_subject_deinit(&s_tab_subject);
-        lv_subject_deinit(&s_require_confirm_subject);
+        s_subjects.deinit_all();
         s_subjects_registered = false;
     });
     s_subjects_registered = true;
@@ -134,11 +132,12 @@ void FavoriteMacroConfigModal::persist() {
 
 void FavoriteMacroConfigModal::on_show() {
     load_config();
-    macro_list_ = lv_obj_find_by_name(dialog(), "macro_list");
-    icon_grid_ = lv_obj_find_by_name(dialog(), "icon_grid");
-    color_grid_ = lv_obj_find_by_name(dialog(), "color_grid");
+    macro_list_ = helix::ui::find_required(dialog(), "macro_list", get_name());
+    icon_grid_ = helix::ui::find_required(dialog(), "icon_grid", get_name());
+    color_grid_ = helix::ui::find_required(dialog(), "color_grid", get_name());
     lv_subject_set_int(&s_tab_subject, 0);
     lv_subject_set_int(&s_require_confirm_subject, require_confirmation_ ? 1 : 0);
+    refresh_param_defaults_visible();
     populate_macro_list();
     populate_icon_grid();
     populate_color_grid();
@@ -190,6 +189,46 @@ IMoonrakerAPI* FavoriteMacroConfigModal::get_api() const {
     return get_moonraker_api();
 }
 
+void FavoriteMacroConfigModal::refresh_param_defaults_visible() {
+    const bool has_params = macro_name_.empty()
+                                ? false
+                                : helix::MacroParamCache::instance().get(macro_name_).knowledge ==
+                                      helix::MacroParamKnowledge::KNOWN_PARAMS;
+    lv_subject_set_int(&s_has_param_defaults_subject, has_params ? 1 : 0);
+}
+
+void FavoriteMacroConfigModal::defaults_cb(lv_event_t* e) {
+    (void)e;
+    LVGL_SAFE_EVENT_CB_BEGIN("[FavoriteMacroConfigModal] defaults_cb");
+    if (s_active_)
+        s_active_->open_defaults_editor();
+    LVGL_SAFE_EVENT_CB_END();
+}
+
+void FavoriteMacroConfigModal::open_defaults_editor() {
+    auto cached = helix::MacroParamCache::instance().get(macro_name_);
+    if (cached.knowledge != helix::MacroParamKnowledge::KNOWN_PARAMS) {
+        // The Options row is hidden for these macros; this guards a stale
+        // subject value after the configured macro changed.
+        spdlog::debug("[FavoriteMacroConfigModal] No defaults editor for '{}' (no known params)",
+                      macro_name_);
+        return;
+    }
+
+    lv_obj_t* screen = lv_screen_active();
+    if (!screen) {
+        spdlog::warn("[FavoriteMacroConfigModal] No active screen for the defaults editor");
+        return;
+    }
+
+    std::string name = macro_name_;
+    param_modal_.show_for_defaults(screen, name, cached.params,
+                                   helix::MacroParamDefaults::instance().get(name),
+                                   [name](const helix::MacroParamDefaultRecord& record) {
+                                       helix::MacroParamDefaults::instance().set(name, record);
+                                   });
+}
+
 void FavoriteMacroConfigModal::populate_macro_list() {
     if (!macro_list_)
         return;
@@ -210,29 +249,18 @@ void FavoriteMacroConfigModal::populate_macro_list() {
         bool is_selected = (macro == macro_name_);
         std::string display = helix::get_display_name(macro, helix::DeviceType::MACRO);
 
-        lv_obj_t* row = lv_obj_create(macro_list_);
-        lv_obj_set_width(row, LV_PCT(100));
-        lv_obj_set_height(row, LV_SIZE_CONTENT);
-        lv_obj_set_style_pad_all(row, theme_manager_get_spacing("space_xs"), 0);
-        lv_obj_set_style_pad_gap(row, theme_manager_get_spacing("space_xxs"), 0);
-        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-        lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
-
-        lv_obj_set_style_bg_opa(row, is_selected ? 30 : 0, 0);
-
-        lv_obj_set_style_bg_color(row, theme_manager_get_color("text_muted"),
-                                  LV_PART_MAIN | LV_STATE_PRESSED);
-        lv_obj_set_style_bg_opa(row, LV_OPA_20, LV_PART_MAIN | LV_STATE_PRESSED);
-
-        lv_obj_t* label = lv_label_create(row);
-        lv_label_set_text(label, display.c_str());
-        lv_obj_set_flex_grow(label, 1);
-        lv_label_set_long_mode(label, LV_LABEL_LONG_MODE_DOTS);
-        lv_obj_set_style_text_font(label, lv_font_get_default(), 0);
-        lv_obj_remove_flag(label, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_add_flag(label, LV_OBJ_FLAG_EVENT_BUBBLE);
+        const char* attrs[] = {
+            "selected", is_selected ? "true" : "false",
+            "pad_all",  "#space_xs",
+            "pad_gap",  "#space_xxs",
+            nullptr,
+        };
+        lv_obj_t* row =
+            static_cast<lv_obj_t*>(lv_xml_create(macro_list_, "picker_option_row", attrs));
+        if (!row) {
+            continue;
+        }
+        helix::ui::set_row_label_text(row, "option_label", display.c_str());
 
         auto* macro_name_copy = new std::string(macro);
         lv_obj_set_user_data(row, macro_name_copy);
@@ -253,36 +281,8 @@ void FavoriteMacroConfigModal::populate_icon_grid() {
 
     std::string effective = icon_name_.empty() ? "play" : icon_name_;
 
-    for (size_t i = 0; i < CURATED_ICON_COUNT; ++i) {
-        lv_obj_t* cell = lv_obj_create(icon_grid_);
-        lv_obj_set_size(cell, ICON_CELL_SIZE, ICON_CELL_SIZE);
-        lv_obj_remove_flag(cell, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_add_flag(cell, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_set_style_bg_opa(cell, 0, 0);
-        lv_obj_set_style_radius(cell, 4, 0);
-        lv_obj_set_style_pad_all(cell, 0, 0);
-
-        lv_obj_set_style_bg_color(cell, theme_manager_get_color("text_muted"),
-                                  LV_PART_MAIN | LV_STATE_PRESSED);
-        lv_obj_set_style_bg_opa(cell, LV_OPA_20, LV_PART_MAIN | LV_STATE_PRESSED);
-
-        apply_icon_cell_highlight(cell, CURATED_ICONS[i] == effective);
-
-        const char* cp = ui_icon::lookup_codepoint(CURATED_ICONS[i]);
-        if (cp) {
-            lv_obj_t* icon = lv_label_create(cell);
-            lv_label_set_text(icon, cp);
-            lv_obj_set_style_text_font(icon, &mdi_icons_24, 0);
-            lv_obj_set_style_text_color(icon, theme_manager_get_color("text"), 0);
-            lv_obj_center(icon);
-            lv_obj_remove_flag(icon, LV_OBJ_FLAG_CLICKABLE);
-            lv_obj_add_flag(icon, LV_OBJ_FLAG_EVENT_BUBBLE);
-        }
-
-        lv_obj_set_user_data(cell, reinterpret_cast<void*>(static_cast<intptr_t>(i)));
-        lv_obj_add_event_cb(cell, FavoriteMacroConfigModal::icon_cell_cb, LV_EVENT_CLICKED,
-                            nullptr);
-    }
+    helix::ui::populate_icon_grid(icon_grid_, CURATED_ICONS, CURATED_ICON_COUNT, effective,
+                                  [this](const char* name) { select_icon(name); });
 
     spdlog::debug("[FavoriteMacroConfigModal] Populated icon grid ({} icons)", CURATED_ICON_COUNT);
 }
@@ -333,13 +333,7 @@ void FavoriteMacroConfigModal::refresh_highlights() {
 
     if (icon_grid_) {
         std::string effective = icon_name_.empty() ? "play" : icon_name_;
-        uint32_t count = lv_obj_get_child_count(icon_grid_);
-        for (uint32_t i = 0; i < count; ++i) {
-            lv_obj_t* cell = lv_obj_get_child(icon_grid_, i);
-            auto idx = static_cast<size_t>(reinterpret_cast<intptr_t>(lv_obj_get_user_data(cell)));
-            apply_icon_cell_highlight(cell,
-                                      idx < CURATED_ICON_COUNT && CURATED_ICONS[idx] == effective);
-        }
+        helix::ui::refresh_icon_grid(icon_grid_, effective);
     }
 
     if (color_grid_) {
@@ -357,6 +351,9 @@ void FavoriteMacroConfigModal::select_macro(const std::string& name) {
     macro_name_ = name;
     persist();
     refresh_highlights();
+    // The Options tab's "Default Parameters" row follows the new macro's
+    // parameter knowledge.
+    refresh_param_defaults_visible();
     spdlog::info("[FavoriteMacroConfigModal] Selected macro: {}", name);
 }
 
@@ -387,16 +384,6 @@ void FavoriteMacroConfigModal::macro_row_cb(lv_event_t* e) {
     auto* name_ptr = static_cast<std::string*>(lv_obj_get_user_data(target));
     if (name_ptr && s_active_) {
         s_active_->select_macro(*name_ptr);
-    }
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void FavoriteMacroConfigModal::icon_cell_cb(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[FavoriteMacroConfigModal] icon_cell_cb");
-    auto* target = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
-    auto idx = static_cast<size_t>(reinterpret_cast<intptr_t>(lv_obj_get_user_data(target)));
-    if (idx < CURATED_ICON_COUNT && s_active_) {
-        s_active_->select_icon(CURATED_ICONS[idx]);
     }
     LVGL_SAFE_EVENT_CB_END();
 }

@@ -3,17 +3,19 @@
 
 #include "ui_print_select_file_provider.h"
 
+#include "ui_filename_utils.h"
 #include "ui_panel_print_select.h" // For PrintFileData
 #include "ui_print_select_card_view.h"
 #include "ui_update_queue.h"
 
+#include "helix_fs.h"
 #include "i_moonraker_api.h"
 #include "print_file_data.h"
 #include "thumbnail_cache.h"
+#include "try_reserve.h"
 
 #include <spdlog/spdlog.h>
 
-#include <filesystem>
 #include <unordered_map>
 
 namespace helix::ui {
@@ -57,7 +59,17 @@ void PrintSelectFileProvider::refresh_files(const std::string& current_path,
     // Build map of existing file data to preserve thumbnails/metadata
     std::unordered_map<std::string, PrintFileData> existing_data;
     for (const auto& file : existing_files) {
-        existing_data[file.filename] = file;
+        PrintFileData& kept = existing_data[file.filename];
+        kept = file;
+#if defined(HELIX_PLATFORM_ESP32)
+        // The panel's own entry carries its decoded image across the refresh. A
+        // copy held here would keep that image's PSRAM slot taken for as long as
+        // the listing request is in flight, past the card leaving the screen.
+        kept.esp_thumbnail.reset();
+        kept.esp_fetch_cancel.reset();
+        kept.esp_thumbnail_tried = false;
+        kept.esp_fetch_retried = false;
+#endif
     }
 
     auto* self = this;
@@ -88,6 +100,18 @@ void PrintSelectFileProvider::refresh_files(const std::string& current_path,
             }
 
             std::vector<PrintFileData> file_list;
+            // Sized up front: on the firmware a vector that cannot grow aborts
+            // the board. A list whose buffer does not fit keeps the one on
+            // screen. Each entry's strings still allocate as it is added.
+            if (!helix::try_reserve(file_list, files.size() + 1)) {
+                spdlog::error("[FileProvider] No memory for a {}-entry file list; keeping the "
+                              "current one",
+                              files.size());
+                if (on_err) {
+                    on_err("not enough memory to list " + std::to_string(files.size()) + " files");
+                }
+                return;
+            }
 
             // Add ".." parent directory entry if not at root
             if (!path_copy.empty()) {
@@ -118,7 +142,7 @@ void PrintSelectFileProvider::refresh_files(const std::string& current_path,
                                 PrintSelectCardView::get_default_thumbnail()) {
                             // Convert LVGL path to filesystem path and check existence
                             std::string fs_path = preserved.thumbnail_path.substr(2); // Strip "A:"
-                            if (!std::filesystem::exists(fs_path)) {
+                            if (!helix::fs::exists(fs_path)) {
                                 spdlog::debug(
                                     "[FileProvider] Cached thumbnail missing, will re-fetch: {}",
                                     preserved.thumbnail_path);
@@ -131,7 +155,7 @@ void PrintSelectFileProvider::refresh_files(const std::string& current_path,
                         continue;
                     }
                     // File was modified - invalidate cached thumbnails and refetch
-                    spdlog::info(
+                    spdlog::debug(
                         "[FileProvider] File modified, invalidating cache: {} (old: {}, new: {})",
                         file.filename, it->second.modified_timestamp, new_modified);
                     if (!it->second.original_thumbnail_url.empty()) {
@@ -146,18 +170,9 @@ void PrintSelectFileProvider::refresh_files(const std::string& current_path,
                     file_list.push_back(PrintFileData::make_directory(
                         file.filename, PrintSelectCardView::FOLDER_ICON, false));
                 } else {
-                    // Only show printable files (.gcode, .gco, .g, .3mf)
-                    auto has_ext = [](const std::string& name, const char* ext) {
-                        size_t elen = strlen(ext);
-                        if (name.size() <= elen)
-                            return false;
-                        std::string suffix = name.substr(name.size() - elen);
-                        for (auto& c : suffix)
-                            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                        return suffix == ext;
-                    };
-                    if (!has_ext(file.filename, ".gcode") && !has_ext(file.filename, ".gco") &&
-                        !has_ext(file.filename, ".g") && !has_ext(file.filename, ".3mf")) {
+                    // Only show printable files (.gcode, .gco, .g, .3mf) — the
+                    // same predicate the USB stick scanner uses.
+                    if (!gcode::has_printable_extension(file.filename)) {
                         continue;
                     }
 

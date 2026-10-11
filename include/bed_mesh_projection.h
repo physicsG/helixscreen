@@ -32,3 +32,17 @@
 bed_mesh_point_3d_t bed_mesh_projection_project_3d_to_2d(double x, double y, double z,
                                                          int canvas_width, int canvas_height,
                                                          const bed_mesh_view_state_t* view);
+
+/// Pan the magnified view by (dx, dy) canvas px. No-op at BED_MESH_ZOOM_MIN.
+// NAMESPACE_OK: joins this header's global bed_mesh_projection_* free-function API
+void bed_mesh_projection_pan(bed_mesh_view_state_t* view, double dx, double dy);
+
+/// Zoom by factor about canvas-local (anchor_x, anchor_y), clamped to
+/// [BED_MESH_ZOOM_MIN, BED_MESH_ZOOM_MAX]. Reaching the minimum resets pan.
+// NAMESPACE_OK: joins this header's global bed_mesh_projection_* free-function API
+void bed_mesh_projection_zoom_at(bed_mesh_view_state_t* view, double factor, double anchor_x,
+                                 double anchor_y, int canvas_width, int canvas_height);
+
+/// Back to the fitted view: zoom 1, no pan.
+// NAMESPACE_OK: joins this header's global bed_mesh_projection_* free-function API
+void bed_mesh_projection_reset_zoom(bed_mesh_view_state_t* view);

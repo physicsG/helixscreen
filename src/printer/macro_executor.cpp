@@ -8,9 +8,11 @@
 #include "ui_update_queue.h"
 
 #include "device_display_name.h"
+#include "filament_database.h"
 #include "i_moonraker_api.h"
 #include "moonraker_error.h"
 #include "printer_discovery.h"
+#include "text_io.h"
 
 #include <spdlog/spdlog.h>
 
@@ -38,6 +40,13 @@ const std::unordered_set<std::string> HALTING_MACROS = {
     "EMERGENCY_STOP",
 };
 
+// Klipper's own LED commands (SET_LED) and the klipper-led_effect plugin's.
+const std::unordered_set<std::string> LED_COMMANDS = {
+    "SET_LED",
+    "SET_LED_EFFECT",
+    "STOP_LED_EFFECTS",
+};
+
 // The union, and still the set that decides whether to confirm before running:
 // both families are equally worth a confirmation, they differ only in what is
 // said once the rpc comes back dropped.
@@ -47,18 +56,13 @@ const std::unordered_set<std::string> DANGEROUS_MACROS = [] {
     return all;
 }();
 
-std::string upper_copy(std::string s) {
-    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::toupper(c); });
-    return s;
-}
-
 /// Does this error message name a Klippy disconnect?
 ///
 /// Moonraker's wording is "Klippy Disconnected"; matching the two words
 /// independently, uppercased, keeps a "klippy has disconnected" phrasing from
 /// slipping past while still refusing Klipper's own G-code complaints.
 bool contains_klippy_disconnect(const std::string& message) {
-    const std::string upper = upper_copy(message);
+    const std::string upper = helix::text_io::to_upper(message);
     return upper.find("KLIPPY") != std::string::npos &&
            upper.find("DISCONNECT") != std::string::npos;
 }
@@ -104,7 +108,7 @@ std::vector<std::string> command_tokens(const std::string& gcode) {
                    !std::isspace(static_cast<unsigned char>(gcode[tok_end]))) {
                 tok_end++;
             }
-            tokens.push_back(upper_copy(gcode.substr(pos, tok_end - pos)));
+            tokens.push_back(helix::text_io::to_upper(gcode.substr(pos, tok_end - pos)));
         }
         line_start = line_end + 1;
     }
@@ -117,8 +121,7 @@ std::string build_macro_gcode(const std::string& macro_name, const MacroParamRes
     std::string gcode;
     for (const auto& [key, value] : result.variables) {
         std::string var_lower = key;
-        std::transform(var_lower.begin(), var_lower.end(), var_lower.begin(),
-                       [](unsigned char c) { return std::tolower(c); });
+        var_lower = helix::text_io::to_lower(var_lower);
         gcode += "SET_GCODE_VARIABLE MACRO=" + macro_name + " VARIABLE=" + var_lower +
                  " VALUE=" + value + "\n";
     }
@@ -154,7 +157,7 @@ void execute_macro_gcode(IMoonrakerAPI* api, const std::string& macro_name,
         [tag_copy, macro_copy, display_name]() {
             spdlog::info("{} {} executed successfully", tag_copy, macro_copy);
             std::string msg = display_name + " sent";
-            helix::ui::queue_update([msg]() {
+            helix::ui::queue_update("macro_executor::execute_macro_gcode", [msg]() {
                 ToastManager::instance().show(ToastSeverity::SUCCESS, msg.c_str(), 2000);
             });
         },
@@ -191,11 +194,55 @@ void execute_macro_gcode(IMoonrakerAPI* api, const std::string& macro_name,
             }
             spdlog::error("{} {} failed: {}", tag_copy, macro_copy, err.message);
             std::string msg = display_name + " failed";
-            helix::ui::queue_update([msg]() {
+            helix::ui::queue_update("macro_executor::execute_macro_gcode", [msg]() {
                 ToastManager::instance().show(ToastSeverity::ERROR, msg.c_str(), 4000);
             });
         },
         IMoonrakerAPI::MACRO_TIMEOUT_MS);
+}
+
+MaterialPreheatPlan plan_material_preheat(const filament::MaterialOverride* override,
+                                          const PrinterDiscovery& hw) {
+    const std::string macro = override ? override->preheat_macro.value_or("") : "";
+    if (macro.empty()) {
+        return {MaterialPreheatMode::TEMPERATURES, ""};
+    }
+    if (!hw.has_macro(macro)) {
+        return {MaterialPreheatMode::MACRO_MISSING, macro};
+    }
+    return {override->macro_handles_heating.value_or(true)
+                ? MaterialPreheatMode::MACRO_ONLY
+                : MaterialPreheatMode::TEMPERATURES_THEN_MACRO,
+            macro};
+}
+
+void execute_material_preheat(IMoonrakerAPI* api, const MaterialPreheatPlan& plan,
+                              const std::function<void()>& set_temperatures, const char* caller_tag,
+                              const PrinterDiscovery& hw) {
+    if (!api) {
+        spdlog::warn("{} No API available — cannot preheat material", caller_tag);
+        return;
+    }
+
+    switch (plan.mode) {
+    case MaterialPreheatMode::TEMPERATURES:
+        set_temperatures();
+        return;
+    case MaterialPreheatMode::MACRO_MISSING:
+        spdlog::warn("{} Preheat macro '{}' not found on this printer; setting temperatures "
+                     "directly",
+                     caller_tag, plan.macro);
+        set_temperatures();
+        return;
+    case MaterialPreheatMode::TEMPERATURES_THEN_MACRO:
+        set_temperatures();
+        break;
+    case MaterialPreheatMode::MACRO_ONLY:
+        break;
+    }
+    execute_macro_gcode(api, plan.macro, {}, caller_tag, hw);
+    spdlog::info("{} Preheat via macro '{}' (handles_heating={})", caller_tag, plan.macro,
+                 plan.mode == MaterialPreheatMode::MACRO_ONLY);
 }
 
 const std::unordered_set<std::string>& dangerous_command_names() {
@@ -227,7 +274,7 @@ analyze_macros_reaching(const nlohmann::json& config_settings,
         if (gcode == values.end() || !gcode->is_string()) {
             continue;
         }
-        std::string name = upper_copy(section.substr(PREFIX_LEN));
+        std::string name = helix::text_io::to_upper(section.substr(PREFIX_LEN));
         std::vector<std::string> tokens = command_tokens(gcode->get<std::string>());
         for (const auto& token : tokens) {
             if (seed.count(token) > 0) {
@@ -275,6 +322,10 @@ std::unordered_set<std::string> analyze_host_halting_macros(const nlohmann::json
     return analyze_macros_reaching(config_settings, HALTING_MACROS);
 }
 
+std::unordered_set<std::string> analyze_led_driving_macros(const nlohmann::json& config_settings) {
+    return analyze_macros_reaching(config_settings, LED_COMMANDS);
+}
+
 const std::unordered_set<std::string>& host_restarting_command_names() {
     return RESTARTING_MACROS;
 }
@@ -284,15 +335,103 @@ const std::unordered_set<std::string>& host_halting_command_names() {
 }
 
 bool is_dangerous_macro(const std::string& name) {
-    return DANGEROUS_MACROS.count(upper_copy(name)) > 0;
+    return DANGEROUS_MACROS.count(helix::text_io::to_upper(name)) > 0;
 }
 
 bool is_dangerous_macro(const std::string& name, const PrinterDiscovery& hw) {
     return is_dangerous_macro(name) || hw.macro_restarts_host(name);
 }
 
+namespace {
+
+/// Params a plain run (no param modal) sends: the saved values overlaid by the
+/// caller's known_values — the computed one wins where both name a parameter —
+/// each filtered to the names this macro declares. Saved and known keys are
+/// spelled the way the macro declares them, so an exact-name match is the
+/// filter; undeclared names belong to some other macro's signature.
+std::map<std::string, std::string> plain_run_params(const CachedMacroInfo& cached,
+                                                    const MacroRunRequest& req) {
+    std::map<std::string, std::string> out;
+    if (cached.knowledge != MacroParamKnowledge::KNOWN_PARAMS) {
+        return out;
+    }
+    for (const auto& param : cached.params) {
+        if (auto it = req.saved_values.find(param.name); it != req.saved_values.end()) {
+            out.emplace(param.name, it->second);
+        }
+        if (auto it = req.known_values.find(param.name); it != req.known_values.end()) {
+            out.insert_or_assign(param.name, it->second);
+        }
+    }
+    return out;
+}
+
+} // namespace
+
+MacroRunDecision decide_macro_run(const CachedMacroInfo& cached, const MacroRunRequest& req) {
+    if (req.dangerous && !req.dangerous_confirmed) {
+        return {MacroRunAction::ConfirmDangerous, {}};
+    }
+
+    // A click that will raise no param modal - the caller never allows one, or
+    // the macro takes no parameters. A saved record rides along with the
+    // caller's known_values overlaid on it (both filtered to the declared
+    // names), so an ask-off filament load still heats with the temp the
+    // surface computed.
+    if (!req.prompt_for_params || cached.knowledge == MacroParamKnowledge::KNOWN_NO_PARAMS) {
+        // The dangerous-macro confirm already ran; a second "Run X?" on top of
+        // it would ask the same question twice. The confirmed run still sends
+        // the same params.
+        std::map<std::string, std::string> params = plain_run_params(cached, req);
+        if (req.confirm_plain_run && !req.dangerous) {
+            return {MacroRunAction::ConfirmRun, std::move(params)};
+        }
+        return {MacroRunAction::Run, std::move(params)};
+    }
+
+    if (cached.knowledge == MacroParamKnowledge::KNOWN_PARAMS) {
+        // Only names the macro declares can be prefilled; anything else in
+        // known_values or saved_values belongs to some other macro's signature.
+        std::map<std::string, std::string> known;
+        std::map<std::string, std::string> prefill;
+        for (const auto& param : cached.params) {
+            if (auto it = req.known_values.find(param.name); it != req.known_values.end()) {
+                known.emplace(param.name, it->second);
+                prefill.emplace(param.name, it->second); // caller-computed wins
+            } else if (auto it = req.saved_values.find(param.name); it != req.saved_values.end()) {
+                prefill.emplace(param.name, it->second);
+            }
+        }
+        // Saved values deliberately do not count toward this check: they
+        // prefill the modal, they never skip it.
+        if (known.size() == cached.params.size()) {
+            return {MacroRunAction::Run, std::move(known)};
+        }
+        return {MacroRunAction::Prompt, std::move(prefill)};
+    }
+
+    return {MacroRunAction::PromptUnknown, {}};
+}
+
+MacroParamResult macro_param_result_from_values(const std::vector<MacroParam>& params,
+                                                const std::map<std::string, std::string>& values) {
+    MacroParamResult result;
+    for (const auto& [name, value] : values) {
+        const std::string& key = name; // a structured binding is not capturable in C++17
+        const bool is_variable =
+            std::any_of(params.begin(), params.end(),
+                        [&](const MacroParam& p) { return p.name == key && p.is_variable; });
+        if (is_variable) {
+            result.variables[name] = value;
+        } else {
+            result.params[name] = value;
+        }
+    }
+    return result;
+}
+
 MacroHostEffect macro_host_effect(const std::string& name, const PrinterDiscovery& hw) {
-    const std::string upper = upper_copy(name);
+    const std::string upper = helix::text_io::to_upper(name);
     // Halts first: a macro reaching both leaves the host down, and that is the
     // answer the user has to be given.
     if (HALTING_MACROS.count(upper) > 0 || hw.macro_halts_host(name)) {

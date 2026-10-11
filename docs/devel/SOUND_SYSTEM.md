@@ -2,7 +2,7 @@
 
 How the sound system works internally, how to extend it with new themes/backends/sounds, and full reference for the JSON theme schema and C++ API.
 
-**User-facing doc**: [Sound Settings](../user/guide/settings/display-sound.md#sound) (enabling/disabling, choosing themes, troubleshooting)
+**User-facing doc**: [Sound Settings](../user/guide/settings/sound.md) (enabling/disabling, choosing themes, troubleshooting)
 
 ---
 
@@ -65,7 +65,7 @@ LVGL thread (main)                  Sequencer thread              Audio render t
     |                    end_playback() when sequence completes      |
 ```
 
-**NoteEvent publishing**: At step boundaries the sequencer calls `publish_note()`, which writes a complete `NoteEvent` (frequency, amplitude, duty, waveform, ADSR, LFO, sweep, filter) into a `VoiceSlot` and bumps a generation counter. The audio callback detects the new generation, snapshots all parameters at once, and `VoiceSlot::render_sample()` computes envelope + modulation + waveform per-sample. This eliminates timing-dependent pitch variation from independent atomic writes. Backends without note-event rendering (PWM, M300) do not use `publish_note()`; the sequencer continues to drive per-tick computation for them. (PWM's PCM path is a separate render-source mechanism -- see [PWM PCM mode (ad5m)](#pwm-pcm-mode-ad5m) below.)
+**NoteEvent publishing**: At step boundaries the sequencer calls `publish_note()`, which writes a complete `NoteEvent` (frequency, amplitude, duty, waveform, ADSR, LFO, sweep, filter) into a `VoiceSlot` and bumps a generation counter. The audio callback detects the new generation, snapshots all parameters at once, and `VoiceSlot::render_sample()` computes envelope + modulation + waveform per-sample. This eliminates timing-dependent pitch variation from independent atomic writes. Backends without note-event rendering (PWM, M300) do not use `publish_note()`; the sequencer continues to drive per-tick computation for them. (PWM's PCM path is a separate render-source mechanism -- see [PWM PCM machinery](#pwm-pcm-machinery-dormant) below.)
 
 The sequencer thread sleeps on a condition variable when idle (no sound playing, queue empty). When a sound is queued, it wakes and ticks at the backend's `min_tick_ms()` interval until playback completes. Steps advance only on ticks, so every step sounds for at least one `min_tick_ms()` interval — that quantization is the audible floor that keeps sub-floor PWM theme notes from collapsing into clicks (`src/system/sound_sequencer.cpp#min_tick` picks the interval, `src/system/sound_sequencer.cpp#sequencer_loop` sleeps it).
 
@@ -77,10 +77,11 @@ The sequencer thread sleeps on a condition variable when idle (no sound playing,
 
 | Order | Backend | Condition | Target Hardware |
 |-------|---------|-----------|-----------------|
+| 0 | PWM | `/sound/pwm_channel` setting (or the `HELIX_PWM_SOUND` override) names `<chip>:<channel>` (pi, pi32, x86, yocto, native and ad5m builds) and the channel exports | A buzzer the user wired to a PWM pin |
 | 1 | SDL | `#ifdef HELIX_DISPLAY_SDL` + `SDL_OpenAudioDevice` succeeds | Desktop/simulator |
 | 2 | ALSA | `#ifdef HELIX_HAS_ALSA` + ALSA PCM device opens (saved/env device, then `default`) | Linux SBCs with audio hardware |
 | 3 | JzPwm | `#ifdef HELIX_HAS_JZ_PWM` (ad5x builds) + `/dev/jz_pwm` exists and fx-pwm is executable | AD5X piezo (on-rig install) |
-| 4 | PWM | `/sys/class/pwm/pwmchip0` exists (channel auto-exported by `initialize()` on ad5m/ad5m-br) | AD5M hardware buzzer |
+| 4 | PWM | ad5m/ad5m-br builds only, unnamed: `pwmchip0/pwm6`, auto-exported by `initialize()` | AD5M hardware buzzer |
 | 5 | M300 | Printer answers M300 gcode: a beeper `output_pin` or an M300 macro in objects/list, or the `speaker` capability override forced on — plus a `MoonrakerClient` set via `set_moonraker_client()` | Klipper printers with a gcode beeper (no local audio) |
 | 6 | None | All above failed | Sounds silently disabled |
 
@@ -127,7 +128,7 @@ The sequencer adapts to what the backend can do. Features not supported by the b
 |---------|-----------|-----------|--------|-----------|-------------|-------|
 | SDL     | yes       | yes       | yes    | yes       | 1.0         | Full synthesis: 4 waveforms, biquad filter, 64-sample buffer (~1.5ms) |
 | ALSA    | yes       | yes       | yes    | yes       | 1.0         | Same synthesis as SDL, hardware-negotiated buffer size |
-| PWM     | no*       | yes       | no     | no        | 20.0        | Tone mode: waveform approximation via duty cycle ratios, sequencer per-tick. 20 ms is the audible floor (HELIX_PWM_MIN_NOTE_MS, clamped 10-100) — every theme step sounds at least that long. Tracker playback on ad5m rides the same tone path (PC-speaker mode, below) |
+| PWM     | no*       | yes       | no     | no        | 20.0        | Tone mode: waveform approximation via duty cycle ratios, sequencer per-tick. 20 ms is the audible floor (HELIX_PWM_MIN_NOTE_MS, clamped 10-100) — every theme step sounds at least that long. Tones only: [buzzers play no music](#buzzers-play-no-music-pwm-m300) |
 | M300    | no        | no        | no     | no        | 50.0        | Frequency only, 100-10000 Hz, deduplicates commands; sequencer drives per-tick |
 | JzPwm   | yes       | yes       | no     | yes       | 20.0        | AD5X piezo: full per-sample synthesis (ADSR/sweep/LFO/waveforms via VoiceSlot), 4-voice chords, one duty-encoded buffer per theme step; tracker PC-speaker mode drives it through set_voice (mods on the piezo) |
 
@@ -136,20 +137,18 @@ The sequencer adapts to what the backend can do. Features not supported by the b
 ### Tracker playback on ad5x (PC-speaker mode)
 
 `HELIX_HAS_TRACKER` is enabled for ad5x: the tracker's synth fallback
-(the way the AD5M plays modules on its piezo — per-channel note
-frequencies, arpeggio/portamento/vibrato applied) drives the JzPwm
-backend through `set_voice`. Each tracker row's four-voice state is
-captured only at burst starts — a 4 ms gap since the last call marks a
-new burst (`kVoiceBurstGapMs`, `src/system/jz_pwm_sound_backend.cpp#kVoiceBurstGapMs`)
-— and appended to a rolling row history; once that history spans a
+(per-channel note frequencies, arpeggio/portamento/vibrato applied)
+drives the JzPwm backend through `set_voice`. Each tracker row's
+four-voice state is captured only at burst starts (a 4 ms gap since the
+last call marks a new burst, `kVoiceBurstGapMs` in
+`src/system/jz_pwm_sound_backend.cpp#kVoiceBurstGapMs`)
+and appended to a rolling row history; once that history spans a
 phrase (1900 ms, one daemon buffer), it renders into one sustained chord
-phrase. No PCM path is involved — the SCHED_IDLE
-render loop that kept tracker off ad5x is not compiled in. PCM streaming
-on this engine is dead for good, with numbers: the update handler
-refuses buffer swaps while a loop is armed, and the legal chunk cycle
-(disable → copy → arm) costs a FIXED ~500 ms of silence per chunk — a
-`chunks` probe measured 502 ms overhead at both 200 ms and 500 ms
-chunks. Module playback happens as tone language, not audio.
+phrase. No PCM path is involved: the SCHED_IDLE render loop is not
+compiled in, and continuous PCM streaming is unusable on this engine:
+the update handler refuses buffer swaps while a loop is armed, and the
+legal chunk cycle (disable → copy → arm) costs a FIXED ~500 ms of
+silence per chunk. Module playback happens as tone language, not audio.
 
 ### JzPwm one-shot buffer model (ad5x)
 
@@ -176,12 +175,12 @@ Rig-measured properties that shaped the design:
   buffer words at ~30 µs each (3,504 words → 106 ms, 14,024 → 429 ms,
   dead linear). Upload time therefore scales with words-per-second of
   audio: at the 32 kHz carrier, uploading one second of audio takes ~one
-  second. This is the hardware ceiling that settled the AD5X on
-  **UI sounds only** — continuous music needs a duty cycle no code on
-  this driver can reach (50% at an ultrasonic carrier; ~80% only by
-  dropping the carrier into the audible band, whine included). The
-  tracker phrase path (`jz_pwm_render_phrase`) remains in the tree,
-  tested but unused on ad5x: mods do not ship there.
+  second. This is the hardware ceiling that rules out continuous music:
+  streaming needs a duty cycle no code on this driver can reach (50% at
+  an ultrasonic carrier; ~80% only by dropping the carrier into the
+  audible band, whine included). Music on the AD5X is the tracker phrase
+  path (`jz_pwm_render_phrase`): MOD assets ship with the package and
+  play as one sustained chord phrase per ~1900 ms of rows.
 
 #### The sound daemon (`fx-pwm serve`)
 
@@ -219,15 +218,15 @@ The piezo demodulates duty encoding (verified by ear and tuner: chords
 rendered this way are recognizable), with its ~5 kHz mechanical resonance
 coloring the timbre bright.
 
-### PWM tracker playback: PC-speaker mode (ad5m)
+### Buzzers play no music (PWM, M300)
 
-`supports_render_source()` returns **false** on PWM, so tracker playback (MOD/MED music) routes through the note fallback: `TrackerPlayer::apply_to_backend()` computes each channel's note frequency (`3546895 / period`) and calls `set_voice()`, whose base implementation forwards slot 0 to `set_tone()` -- the channel-0 lead line as note-frequency square waves, PC-speaker style. Channels 1-3 are dropped (single sysfs channel), and instrument samples are not reproduced (their note pitches are).
+`SoundManager::can_play_music()` is true only for a backend that renders audio (`supports_render_source()`: SDL, ALSA) or has several voices (`voice_count() > 1`: the AD5X's JzPwm). Everywhere else `play_file()` refuses music and the Test Tracker row hides (`settings_music_available`, set by `AudioSettingsManager::refresh_backend_subjects()`), so a buzzer plays theme tones and alerts only.
+
+A single voice carries one note at a time, and a MOD gives it nothing to choose by. No field says which channel holds the melody, and drums are samples triggered at pitches: Crockett's Theme fires its ride cymbal and snare at periods 160-320, above the tune, so "highest note" picks cymbals. A per-instrument pitch count does not separate drums from synths either (Space Debris plays a snare at 7 pitches and a synth at 2). A single voice renders these songs unrecognizably, whether it plays the highest voice or a Game Boy-style arpeggio (ear-tested on an AD5M).
 
 This is a hardware verdict, not a preference: verified on an AD5M Pro 2026-08-30, the buzzer is a resonant piezo with no reconstruction filter, so a duty-modulated carrier demodulates as static -- an audible beat, not music. Note-frequency square waves are what the transducer is built for.
 
-**Known limitation**: while a tracker melody plays, tone SFX are dropped (the sound manager only layers SFX under a tracker on render-source backends); ALARM-priority sounds still stop the tracker and reclaim the channel.
-
-Tone efficiency: the fallback re-sends the same note every tracker tick, so `set_tone()` deduplicates held tones (keyed on the written period/duty values, mirroring `M300SoundBackend::last_freq_`), and `silence()` guards against the per-tick rest spam (the fallback calls `silence_voice(0)` every sequencer tick — 20 ms at the PWM floor — through rests). The Makefile gates tracker to `PLATFORM_TARGET=ad5m` (`HELIX_HAS_TRACKER` + `HELIX_PWM_AUTO_EXPORT`; ad5m-br and ad5x stay tone-SFX-only pending hardware validation).
+Tracker builds are the Pi family, x86, native and unified MIPS (`mips k1 ad5x`, where the JzPwm backend drives a PC-speaker path with per-note buffers). ad5m/ad5m-br build no tracker: their buzzer could not play it anyway, and the note path runs on the sound thread of a single core. `HELIX_PWM_AUTO_EXPORT` still applies to ad5m/ad5m-br for tone SFX.
 
 ### PWM PCM machinery (dormant)
 
@@ -241,7 +240,7 @@ The PCM render path stays compiled and unit-tested for hardware that can actuall
 - **Silence auto-park** -- 8 consecutive exactly-silent buffers (~512 ms at 64 ms/buffer) park the channel (duty 0, enable 0) and drop to a 10 ms poll. Each poll pulls an 80-frame probe (10 ms @ 8 kHz) from the render source at 1x real time and resumes the moment real audio shows up (`PCM_PARK_SILENT_BUFFERS`, `park_probe_frames()`).
 - **Channel auto-export** -- the stock AD5M kernel ships the beeper channel unexported; nothing materializes pwm6 until `initialize()` writes the channel number to `pwmchip0/export` (`HELIX_PWM_AUTO_EXPORT`, ad5m/ad5m-br only). This one is live for tone mode too: without it the backend never initializes and the AD5M has no audio at all after boot.
 
-History: PCM playback was disabled 2026-04 (003c195ac) because the render loop's busy-wait at normal priority starved the single-core CPU; rewritten printer-safe (b8c141b4a) and verified harmless on-device 2026-08-30 -- then retired from active use the same day by the transducer verdict above.
+The PCM path stays dormant behind the transducer verdict above (nothing installs a render source on the AD5M's piezo), and the render loop's printer-safe shape (SCHED_IDLE, bounded catch-up, silence auto-park) is what keeps it harmless to leave compiled and unit-tested for hardware that can demodulate it.
 
 ### AD5M hardware ceiling: no waveform replay on this PWM IP (verified)
 
@@ -272,7 +271,7 @@ different silicon, not a config difference. Note-rate tones via sysfs (or M300
 through klippy) are the permanent ceiling on the AD5M. A kernel module could
 only be an hrtimer-driven MMIO writer, which is still per-sample CPU — and PCM
 is acoustically dead on this piezo anyway (the transducer verdict in
-[PC-speaker mode](#pwm-tracker-playback-pc-speaker-mode-ad5m) above).
+[Buzzers play no music](#buzzers-play-no-music-pwm-m300) above).
 
 ---
 
@@ -544,20 +543,27 @@ Three settings control sound behavior. All are persisted across restarts.
 
 ### Settings Panel XML
 
-The sound settings live in the Sound section of `settings_display_sound_overlay.xml` (the Display & Sound sub-panel):
+The sound settings are their own page, `settings_sound_overlay.xml` (`SoundSettingsOverlay`), opened from the **Sound** row (`row_sound`) in the SCREEN group of the Settings root. The root row hides when `printer_has_speaker` is 0, and so does the page's `group_sound`.
 
 ```
-SOUND section
-  +-- row_sounds              (master toggle, bound to settings_sounds_enabled)
-  +-- container_ui_sounds     (hidden when master off)
-  |     +-- row_ui_sounds     (UI toggle, bound to settings_ui_sounds_enabled)
-  +-- container_sound_theme   (hidden when master off)
-  |     +-- row_sound_theme   (dropdown, populated from get_available_themes())
-  +-- container_preview_sounds (hidden when master off)
-  |     +-- row_preview_sounds (opens SoundPreviewOverlay with buttons for each sound)
+group_sound                      (hidden when printer_has_speaker is 0)
+  +-- container_sounds
+  |     +-- row_sounds           (master toggle, bound to settings_sounds_enabled)
+  +-- container_volume           (hidden when master off)
+  |     +-- row_volume           (slider)
+  +-- container_ui_sounds        (hidden when master off)
+  |     +-- row_ui_sounds        (UI toggle, bound to settings_ui_sounds_enabled)
+  +-- container_sound_theme      (hidden when master off)
+  |     +-- row_sound_theme      (dropdown, populated from get_available_themes())
+  +-- container_audio_device     (hidden when master off or no ALSA device list)
+  |     +-- row_audio_device     (output device dropdown)
+  +-- container_preview_sounds   (hidden when master off)
+  |     +-- row_preview_sounds   (opens SoundPreviewOverlay with buttons for each sound)
+  +-- container_test_tracker     (hidden when master off)
+        +-- row_test_tracker
 ```
 
-The `container_ui_sounds`, `container_sound_theme`, and test beep button all use `bind_flag_if_eq` to hide when `settings_sounds_enabled` is 0.
+Every container below `container_sounds` uses `bind_flag_if_eq` (or one `bind_flag_if` expression) to hide when `settings_sounds_enabled` is 0.
 
 ### SettingsManager API
 

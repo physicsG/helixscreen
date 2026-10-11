@@ -25,10 +25,8 @@ extern "C" {
  *   - Single output line down from hub
  *   - Simplified nozzle icon at bottom
  *
- * Visual states:
- *   - Inactive unit: Thin gray dashed line
- *   - Active unit: Thick line in filament color
- *   - Filament loaded: Color path from active unit through hub to nozzle
+ * The tubes and sensor bands are planned into the same route plan as the
+ * detail views and painted by the same painter (ui_system_path_plan.h).
  *
  * XML usage:
  * @code{.xml}
@@ -150,16 +148,67 @@ void ui_system_path_canvas_set_unit_hub_sensor(lv_obj_t* obj, int unit_index, bo
                                                bool triggered);
 
 /**
- * @brief Set toolhead sensor state
+ * @brief Set whether the system has a toolhead sensor
  *
- * The toolhead sensor sits on the output line between hub and nozzle.
+ * The toolhead sensor's band sits on the output line between hub and nozzle;
+ * its state follows the filament segment.
  *
  * @param obj The system_path_canvas widget
  * @param has_toolhead_sensor Whether the system has a toolhead entry sensor
- * @param toolhead_sensor_triggered Whether filament is detected at the toolhead sensor
  */
-void ui_system_path_canvas_set_toolhead_sensor(lv_obj_t* obj, bool has_toolhead_sensor,
-                                               bool toolhead_sensor_triggered);
+void ui_system_path_canvas_set_toolhead_sensor(lv_obj_t* obj, bool has_toolhead_sensor);
+
+/**
+ * @brief Set how far the active filament has reached (a PathSegment value)
+ */
+void ui_system_path_canvas_set_filament_segment(lv_obj_t* obj, int segment);
+
+/**
+ * @brief Set where the system reports a filament error (a PathSegment value, 0 = none)
+ *
+ * The error marks the active route's span and sensor band at that segment.
+ */
+void ui_system_path_canvas_set_error_segment(lv_obj_t* obj, int segment);
+
+/**
+ * @brief Set a unit's furthest-loaded lane: how far it reached (a PathSegment
+ *        value) and its filament color (0xRRGGBB)
+ *
+ * An inactive unit whose hub sensor reads filament draws its route and hub
+ * band in this color.
+ */
+void ui_system_path_canvas_set_unit_lane(lv_obj_t* obj, int unit_index, int segment,
+                                         uint32_t color);
+
+/**
+ * @brief Set the buffer on the output line (single-toolhead layout)
+ *
+ * A box between the hub and the nozzle, drawn with the label and tint the unit
+ * view's buffer box has: BufferBoxState::label and ::fault of
+ * ams_detail_buffer_box(info, -1).
+ *
+ * @param obj The system_path_canvas widget
+ * @param present Whether the system reading has a buffer
+ * @param fault Severity: -1 untinted, 0 neutral, 1 warning, 2 danger
+ * @param label Box label ("FPS", "BUF")
+ */
+namespace helix::ui {
+void ui_system_path_canvas_set_buffer(lv_obj_t* obj, bool present, int fault, const char* label);
+
+/**
+ * @brief Set a unit's hub and the buffer under it (several-toolhead layout)
+ *
+ * Units given the same non-zero @p hub_group draw one hub box where their
+ * lanes join; 0 is a unit on a hub of its own. The buffer box under a shared
+ * hub is the one set on its lowest unit.
+ *
+ * @param present Whether the hub has a buffer
+ * @param fault Severity as in ui_system_path_canvas_set_buffer()
+ * @param label Box label
+ */
+void ui_system_path_canvas_set_unit_hub(lv_obj_t* obj, int unit_index, int hub_group, bool present,
+                                        int fault, const char* label);
+} // namespace helix::ui
 
 /**
  * @brief Set per-unit tool routing info
@@ -175,6 +224,16 @@ void ui_system_path_canvas_set_toolhead_sensor(lv_obj_t* obj, bool has_toolhead_
  */
 void ui_system_path_canvas_set_unit_tools(lv_obj_t* obj, int unit_index, int tool_count,
                                           int first_tool);
+
+/**
+ * @brief Mark a unit column as a box that is not on the bus
+ *
+ * An absent unit keeps its column (the card above it stays in place) but
+ * draws no stem, hub or route.
+ */
+namespace helix::ui {
+void ui_system_path_canvas_set_unit_absent(lv_obj_t* obj, int unit_index, bool absent);
+} // namespace helix::ui
 
 /**
  * @brief Set per-unit topology

@@ -13,9 +13,9 @@ You are automating the HelixScreen release process. Follow each step in order. H
 Collect all of these before starting:
 
 ```bash
-git rev-parse --abbrev-ref HEAD          # Must be "main"
+git rev-parse --abbrev-ref HEAD          # "main", or the release/X.Y line this version belongs to
 git status --porcelain | grep -v -E '\.claude-recall/(LESSONS\.md|LESSONS\.md\.lock|CLAUDE\.md|injection-stats\.json|stats\.json)'  # Must be empty (ignoring recall files)
-git fetch origin && git status -sb        # Must be up-to-date with origin/main
+git fetch origin && git status -sb        # Must be up-to-date with this branch's upstream
 cat VERSION.txt                           # Current version
 git describe --tags --abbrev=0 2>/dev/null  # Last tag (e.g., v0.9.3)
 git log $(git describe --tags --abbrev=0 2>/dev/null)..HEAD --oneline  # Commits since last tag
@@ -31,10 +31,22 @@ All of these must pass. If ANY fails, STOP and tell the user why.
 
 | Check | How | Fail action |
 |-------|-----|-------------|
-| On `main` branch | `git rev-parse --abbrev-ref HEAD` = "main" | STOP: "Switch to main first" |
-| Clean working tree | `git status --porcelain` is empty after ignoring `LESSONS.md`, `LESSONS.md.lock`, `CLAUDE.md`, `injection-stats.json`, and `stats.json` in `.claude-recall/`. All five are recall's own state, rewritten by any session; since worktrees route their writes here (`PROJECT_DIR`, see `setup-worktree.sh`), they are dirty most of the time and are not a reason to hold a release. Commit them with it. | STOP: "Uncommitted changes — commit or stash first" |
-| Up to date with origin | `git fetch origin` then check `git status -sb` for "behind" | STOP: "Branch is behind origin/main — pull first" |
+| Branch is releasable | `git rev-parse --abbrev-ref HEAD` is `main` or `release/X.Y`. Store it as `BRANCH`. | STOP: "{branch} is neither main nor a release/X.Y line" |
+| Clean working tree | `git status --porcelain` is empty after ignoring `LESSONS.md`, `LESSONS.md.lock`, `CLAUDE.md`, `injection-stats.json`, and `stats.json` in `.claude-recall/`. All five are recall's own state, rewritten by any session; since worktrees route their writes here (`PROJECT_DIR`, see `setup-worktree.sh`), they are dirty most of the time and are not a reason to hold a release. Commit them with it. | STOP: "Uncommitted changes - commit them first" |
+| Up to date with origin | `git fetch origin` then check `git status -sb` for "behind" | STOP: "Branch is behind origin/$BRANCH — pull first" |
 | Tags fetched | `git fetch --tags origin` | Just do it silently |
+
+**Which branch may release which version.** A patch on a shipped line lives on that
+line's branch, never on `main`, because `main` carries the next minor's development.
+Tagging `1.0.1` from a `main` reading `1.1.0-beta.1` would publish 1.1 work as a 1.0
+patch, and tags only move forward, so there is no taking it back. `main` may release any
+version; a `release/X.Y` branch may release only `X.Y.*`. STEP 1 enforces the pairing
+once the version is resolved.
+
+Every `main` hardcoded below is really `$BRANCH`: the upstream comparison, the CI query,
+and the push. A release-line branch also lags `main`'s own tooling, so check before
+reaching for it - `scripts/version-compare.sh` and `make full-test-run` may not exist
+there. The equivalents are a careful manual semver comparison and `make test-all`.
 
 ---
 
@@ -43,9 +55,17 @@ All of these must pass. If ANY fails, STOP and tell the user why.
 **Argument:** `$ARGUMENTS` (the user's argument to `/release`)
 
 ### If argument is a bump type (`patch`, `minor`, `major`):
-- Parse last tag (strip `v` prefix) into MAJOR.MINOR.PATCH (ignore any prerelease suffix)
-- Bump the appropriate component, reset lower components to 0
-- Example: last tag `v0.9.3` + `patch` = `0.9.4`
+- Parse last tag (strip `v` prefix) into MAJOR.MINOR.PATCH **plus any prerelease suffix**
+- **A prerelease on the last tag means that triple has not shipped.** `patch` finishes
+  the prerelease line and resolves to the triple itself, not to the next patch. Treating
+  the suffix as noise ships the patch of a release that never existed and strands the
+  triple unpublished forever, because tags only move forward.
+- Otherwise bump the named component and reset the lower components to 0
+- Examples:
+  - last tag `v0.9.3` + `patch` = `0.9.4`
+  - last tag `v1.1.0-beta.1` + `patch` = `1.1.0`  (NOT `1.1.1`)
+  - last tag `v1.1.0-beta.1` + `minor` = `1.2.0`
+  - last tag `v1.1.0-beta.1` + `major` = `2.0.0`
 
 ### If argument is an explicit version (e.g., `1.0.0`, `1.0.0-beta`, `1.0.0-rc.1`):
 - Strip leading `v` if present
@@ -63,7 +83,25 @@ All of these must pass. If ANY fails, STOP and tell the user why.
 
 ### Validation (all cases):
 - Must be valid semver: `MAJOR.MINOR.PATCH` with optional `-PRERELEASE`
-- Must be strictly greater than last tag's version (compare without `v` prefix)
+- Must rank strictly above the last tag. Do not eyeball this, and do not reach for
+  `sort -V`: GNU version sort ranks `1.1.0` BELOW `1.1.0-beta.1`, the opposite of
+  semver. Ask the comparator:
+  ```bash
+  scripts/version-compare.sh "$NEW_VERSION" "$(git describe --tags --abbrev=0 | sed 's/^v//')"
+  ```
+  `1` is the only answer that may proceed. `0` or `-1` is a STOP. A non-zero exit
+  means it refused to rank the pair rather than guessing — also a STOP, never read
+  that as agreement.
+- The version must belong to `$BRANCH`. On a `release/X.Y` branch, `NEW_VERSION` must
+  start with `X.Y.`; on `main` anything valid passes:
+  ```bash
+  case "$BRANCH" in
+    release/*) case "$NEW_VERSION" in
+                 "${BRANCH#release/}".*) ;;
+                 *) echo "STOP: $NEW_VERSION does not belong to $BRANCH"; exit 1 ;;
+               esac ;;
+  esac
+  ```
 - If validation fails → STOP with clear error
 
 Store the resolved version as `NEW_VERSION` (without `v` prefix) for all subsequent steps.
@@ -88,49 +126,69 @@ lint/validation failures surface before the long test build.
   failing check. Look for the `❌` lines; `⚠️` lines (clang-format / XML formatting) are
   advisory and do NOT fail the script.
 
-Do not release on a red `main`. Before starting, also confirm CI is green for the commit
+Do not release on a red branch. Before starting, also confirm CI is green for the commit
 being released:
 
 ```bash
-# EVERY workflow, not just Code Quality. Build compiles with clang on Ubuntu while
-# local builds here use g++, so a clang-only diagnostic under -Werror is red on CI
-# and green on the release machine - checking one workflow reads as all-clear.
-gh run list --limit 20 --json conclusion,status,workflowName,headSha \
+# EVERY workflow, not just Code Quality. CI's toolchains and -Werror set differ from
+# the release machine's, so a diagnostic can be red on CI and green locally -
+# checking one workflow reads as all-clear.
+gh run list --branch "$BRANCH" --limit 20 --json conclusion,status,workflowName,headSha \
   --jq '.[] | select(.conclusion == "failure") | "\(.workflowName)\t\(.headSha[0:9])"'
 ```
 
 If ANY workflow's latest run is a `failure`, treat it as a STOP — fix it first.
-(v0.99.92 shipped with Code Quality red for ~10 hours because this gate did not exist.
-v0.99.118 nearly shipped with the Ubuntu `Build` job red for an hour, because the gate
-only looked at Code Quality: `Build Status` even prints "tolerated because this is an
-integration branch", so main stays red without anything stopping a release.)
+`Build Status` prints "tolerated because this is an integration branch" on a red main,
+so nothing else stops a release on a red build.
+
+Without `--branch` this reads whichever branch ran most recently, so on a release line it
+happily reports `main`'s runs as if they were yours. A workflow that does not apply to the
+line being released is not a reason to stop, but say which one you are setting aside and
+why, rather than passing over it silently.
 
 ### C++ tests
 ```bash
-make test-run
+make full-test-run
 ```
 
 - If tests pass → continue
 - If tests fail → STOP: "Tests failed — fix before releasing." Show the failure output.
 
 ### Shell tests
+`make full-test-run` already runs the bats suite. Only on a release line that fell back
+to `make test-all` (see above), also run `make test-shell`. A missing bats or a failure
+is a STOP with the make output shown.
+
+### UI tests
+`make full-test-run` does not run the out-of-process UI suite, and CI does. A stale
+`tests/ui/` case passes every local gate and then reds CI's Test job on the release head.
+Run exactly what CI runs: `make test-ui-pytest` also runs the golden-image tests in
+`tests/ui/test_screens.py`, which CI excludes because they are machine-sensitive.
+
 ```bash
-make test-shell
+make && .venv/bin/python -m pytest tests/ui --ignore=tests/ui/test_screens.py -q
 ```
 
-- If tests pass → continue
-- If bats is not installed → STOP: "bats not found — install it before releasing." Show the installation instructions from the make output.
-- If tests fail → STOP: "Shell tests failed — fix before releasing." Show the failure output.
+- If it passes → continue
+- If it fails → STOP: "UI tests failed — fix before releasing." Show the failing test.
+- A missing `.venv` is `make venv-setup`, not a reason to skip the suite.
 
-### Regenerate bundled installers
+### Release-only builds
+
+Per-push CI links splash and watchdog for x86 only; the Release workflow cross-compiles
+every platform with `HELIX_PACKAGING=1`. A break that only those builds see (a MIPS32
+link needing libatomic, a packaged binary still carrying mocks or the ctl server) shows
+up first on the tag otherwise.
+
 ```bash
-bash scripts/bundle-installer.sh -o scripts/install.sh
-bash scripts/bundle-uninstaller.sh -o scripts/uninstall.sh
+make release-gate TIERS=heavy                              # unified MIPS, the default
+make release-gate TIERS=heavy RELEASE_GATE_TARGETS="mips pi32 k2"   # more targets
 ```
 
-- Run `git diff --name-only` to check if `scripts/install.sh` or `scripts/uninstall.sh` changed
-- If either changed, they will be staged and included in the release commit (Step 6)
-- This ensures bundled installers are always in sync with their source modules
+It runs the packaged docker cross build, `make release-<target>`, and the splash,
+watchdog and mock-symbol checks, under a `heavy:release-gate` claim, and prints a
+PASS/FAIL table. Any FAIL row → STOP: "Release gate failed for {target}." Show the
+table and the tail of the failing step's log (`build/release-gate/<step>.log`).
 
 ### Regenerate the XML linter schema
 
@@ -233,23 +291,28 @@ Write `NEW_VERSION` (just the version string, with trailing newline) to `VERSION
 ### Show summary
 Run `git diff` and show a brief summary of what changed.
 
+### Release gate, fast tier
+
+```bash
+make release-gate TIERS=fast
+```
+
+Checks that `VERSION.txt` has a `## [X.Y.Z] - date` heading and a `[X.Y.Z]:` compare
+link in `CHANGELOG.md`, that the tag does not exist yet, and that the installer bundles
+build. Any FAIL row → STOP and fix it before committing.
+
 ---
 
 ## STEP 6: COMMIT + TAG
 
-### Stage files explicitly
-Per project conventions — NEVER `git add -A` or `git add .`. Stage only the files actually modified:
-
-```bash
-git add VERSION.txt CHANGELOG.md
-# Plus, if Step 2's regeneration changed them:
-#   scripts/install.sh scripts/uninstall.sh tools/xml-linter/schema/schema.json
-# Plus any other files modified in Step 5
-```
-
 ### Commit
+Commit the pathspecs directly; never `git add` in the shared tree (CLAUDE.md § Sharing
+This Tree), where a peer's commit can sweep up whatever sits in the index:
+
 ```bash
-git commit -m "chore(release): v{NEW_VERSION}"
+git commit -m "chore(release): v{NEW_VERSION}" -- VERSION.txt CHANGELOG.md
+# Append tools/xml-linter/schema/schema.json if Step 2's regeneration changed it,
+# and any other file modified in Step 5.
 ```
 
 ### Create annotated tag
@@ -319,7 +382,7 @@ Use AskUserQuestion:
 
 ### If "Push it":
 ```bash
-git push origin main
+git push origin "$BRANCH"
 git push origin "v{NEW_VERSION}"
 ```
 Then show: "Pushed! Watch the build: https://github.com/prestonbrown/helixscreen/actions"
@@ -330,7 +393,7 @@ auto-rebuilding helixscreen.org from the new tag's `docs/user/`. No manual
 website deploy needed. Prereleases skip this.
 
 ### If "Keep local":
-Show: "Release commit and tag created locally. Push when ready:\n`git push origin main && git push origin v{NEW_VERSION}`"
+Show: "Release commit and tag created locally. Push when ready:\n`git push origin $BRANCH && git push origin v{NEW_VERSION}`"
 
 ### If "Undo":
 **Ask for explicit confirmation** before running destructive commands:
@@ -346,11 +409,13 @@ Show: "Undone. Commit removed (changes preserved as staged), tag deleted."
 
 | Error | Action |
 |-------|--------|
-| Not on main | STOP with message, do not offer to switch |
+| Branch neither `main` nor `release/X.Y` | STOP with message, do not offer to switch |
+| Version does not match the release line | STOP: "v{NEW_VERSION} does not belong to {BRANCH}" |
 | Dirty working tree | STOP with message, do not offer to stash |
 | Behind origin | STOP with message, do not offer to pull |
-| Quality checks fail | STOP with the `❌` output — do not release on a red `main` |
+| Quality checks fail | STOP with the `❌` output — do not release on a red branch |
 | Tests fail | STOP with failure output |
+| Release gate fails | STOP with the PASS/FAIL table and the failing step's log tail |
 | Version not greater | STOP: "v{NEW_VERSION} is not greater than v{LAST_TAG}" |
 | User aborts at any checkpoint | STOP cleanly, no partial state |
 | Push fails | Show error, commit+tag remain local for manual retry |

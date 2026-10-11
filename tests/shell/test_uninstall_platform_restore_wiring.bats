@@ -20,7 +20,7 @@
 # both .stock launchers unrestored, and /oem/.debug in place — no bootable stock UI
 # and the firmware's overlay-wipe-on-boot permanently disabled.
 #
-# So this test drives the GENERATED scripts/uninstall.sh through the same entry
+# So this test drives the GENERATED uninstall.sh through the same entry
 # point main() uses. Re-orphaning the platform restores fails it.
 
 WORKTREE_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -50,7 +50,7 @@ setup() {
     sed -e "s|/etc/init\.d|$MOCK_ROOT/etc/init.d|g" \
         -e "s|/usr/bin/gui|$MOCK_ROOT/usr/bin/gui|g" \
         -e "s|/oem/\.debug|$MOCK_ROOT/oem/.debug|g" \
-        "$WORKTREE_ROOT/scripts/uninstall.sh" \
+        "$UNINSTALL_BUNDLE" \
         | sed '/^case "\${0##\*\/}" in$/,+2d' > "$BUNDLE"
     export BUNDLE
 
@@ -82,13 +82,13 @@ _run_reenable() {
     # even when the actual call is gone (verified — it did).
     local body
     body=$(awk '/^reenable_previous_ui\(\) \{/{c=1} c{print} c&&/^\}/{exit}' \
-        "$WORKTREE_ROOT/scripts/uninstall.sh" | sed 's/#.*//')
+        "$UNINSTALL_BUNDLE" | sed 's/#.*//')
     [ -n "$body" ]
     grep -q 'restore_previous_ui_platform' <<< "$body"
 
     # main() must call reenable_previous_ui — the other half of the chain.
     awk '/^main\(\) \{/{c=1} c{print} c&&/^\}/{exit}' \
-        "$WORKTREE_ROOT/scripts/uninstall.sh" | grep -q 'reenable_previous_ui'
+        "$UNINSTALL_BUNDLE" | grep -q 'reenable_previous_ui'
 
     run _run_reenable
     [ "$status" -eq 0 ]

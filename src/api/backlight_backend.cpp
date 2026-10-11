@@ -8,17 +8,17 @@
 #include "spdlog/spdlog.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
+#include <unistd.h>
 
 #ifdef __linux__
-#include <cerrno>
 #include <dirent.h>
-#include <fcntl.h>
 #include <fstream>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
-#include <unistd.h>
 
 // RAII guard for file descriptors to prevent leaks
 class FdGuard {
@@ -45,21 +45,93 @@ class FdGuard {
 
 namespace helix::backlight_internal {
 
+// The compile-time floor belongs to the sysfs panel on community K2 firmware,
+// which renders anything under ~20% as off. The Allwinner /dev/disp panel on
+// stock K2 firmware stays lit down to raw 6 of 255 and takes no floor.
+int build_floor_percent(bool dev_disp_backend, int build_floor) {
+    return dev_disp_backend ? 0 : build_floor;
+}
+
+// Panel's minimum raw brightness as a percent of the raw range: the
+// settings.json /display/backlight_floor_percent override if set (every
+// backend honours it), else @p build_floor.
+int backlight_floor_percent(int build_floor) {
+    int floor = build_floor;
+    auto* config = helix::Config::get_instance();
+    floor = config->get<int>("/display/backlight_floor_percent", floor);
+
+    return std::clamp(floor, 0, 100);
+}
+
+// The brightness slider's minimum, which every configured-brightness path
+// clamps to as well.
+constexpr int kMinUserBrightnessPercent = 10;
+
+// Map a 0-100 brightness percent onto a panel's raw range. 0 is fully off.
+// With no floor it is the plain linear map. With a floor, the user range
+// [kMinUserBrightnessPercent, 100] spans [floor, max], so the dimmest level a
+// user can pick is the dimmest the panel still shows (#1709); lower on-levels
+// land on the floor. A requested-on level never maps below 1: a truncated 0
+// would read as off on the panel (#972).
+int raw_from_percent(int percent, int max_raw, int floor_percent) {
+    if (percent <= 0) {
+        return 0;
+    }
+    const int clamped_floor = std::clamp(floor_percent, 0, 100);
+    int raw = 0;
+    if (clamped_floor == 0) {
+        raw = max_raw * percent / 100;
+    } else {
+        const int floor_raw = clamped_floor * max_raw / 100;
+        const int above_min =
+            std::max(percent, kMinUserBrightnessPercent) - kMinUserBrightnessPercent;
+        raw = floor_raw + (max_raw - floor_raw) * above_min / (100 - kMinUserBrightnessPercent);
+    }
+    return std::clamp(std::max(raw, 1), 0, max_raw);
+}
+
 // Map a 0-100 brightness percent to the Creality Sonic Pad `brightness` helper
 // invocation. <=0 powers the backlight off; otherwise it powers on and sets the
 // level scaled to 0..255 (never truncating a requested-on level to 0). (#972)
-std::string brightness_cli_command(int percent) {
+std::string brightness_cli_command(int percent, int floor_percent) {
     if (percent <= 0) {
         return "brightness -s 0";
     }
-    int level = percent * 255 / 100;
-    if (level < 1) {
-        level = 1; // a requested-on level must never read as "off"
-    }
-    if (level > 255) {
-        level = 255;
-    }
+    int level = raw_from_percent(percent, 255, floor_percent);
     return "brightness -s 1; brightness -d " + std::to_string(level);
+}
+
+// Outcome of a sysfs attribute write, so callers can tell "the file would not
+// open" from "the driver refused the value" and log accordingly.
+enum class SysfsWrite { Ok, OpenFailed, WriteFailed };
+
+// Write an integer to a sysfs attribute and report what the kernel said.
+//
+// A sysfs store handler runs inside write(2), so a rejected value surfaces
+// there. A buffered stream defers the write to flush, which happens after any
+// stream state a caller inspects, so a refused write reads as a success.
+SysfsWrite write_sysfs_int(const std::string& path, int value, int& err) {
+    err = 0;
+    int fd = ::open(path.c_str(), O_WRONLY | O_TRUNC | O_CLOEXEC);
+    if (fd < 0) {
+        err = errno;
+        return SysfsWrite::OpenFailed;
+    }
+
+    const std::string text = std::to_string(value);
+    ssize_t written = ::write(fd, text.c_str(), text.size());
+    int write_err = (written < 0) ? errno : 0;
+
+    if (::close(fd) != 0 && write_err == 0) {
+        write_err = errno;
+        written = -1;
+    }
+
+    if (written != static_cast<ssize_t>(text.size())) {
+        err = write_err;
+        return SysfsWrite::WriteFailed;
+    }
+    return SysfsWrite::Ok;
 }
 
 } // namespace helix::backlight_internal
@@ -141,25 +213,27 @@ class BacklightBackendSysfs : public BacklightBackend {
         if (max_brightness_ <= 1) {
             target = (percent > 0) ? max_brightness_ : 0;
         } else {
-            target = (percent * max_brightness_) / 100;
-            target = std::clamp(target, 0, max_brightness_);
+            target = helix::backlight_internal::raw_from_percent(
+                percent, max_brightness_,
+                helix::backlight_internal::backlight_floor_percent(
+                    helix::backlight_internal::build_floor_percent(false,
+                                                                   HELIX_BACKLIGHT_FLOOR_PERCENT)));
         }
 
         std::string brightness_path = device_path_ + "/brightness";
-        std::ofstream f(brightness_path);
-        if (!f.is_open()) {
-            spdlog::warn("[Backlight-Sysfs] Cannot write to {} (permission denied?)",
-                         brightness_path);
+        int err = 0;
+        switch (helix::backlight_internal::write_sysfs_int(brightness_path, target, err)) {
+        case helix::backlight_internal::SysfsWrite::OpenFailed:
+            spdlog::warn("[Backlight-Sysfs] Cannot write to {}: {}", brightness_path,
+                         strerror(err));
             return false;
-        }
-
-        f << target;
-        if (!f.good()) {
-            spdlog::warn("[Backlight-Sysfs] Failed to write brightness value to {}",
-                         brightness_path);
+        case helix::backlight_internal::SysfsWrite::WriteFailed:
+            spdlog::warn("[Backlight-Sysfs] Driver rejected brightness write to {}: {}",
+                         brightness_path, strerror(err));
             return false;
+        case helix::backlight_internal::SysfsWrite::Ok:
+            break;
         }
-        f.close();
 
         // Control bl_power to fully cut/restore backlight power.
         // On some displays (e.g. Pi 5 DSI), brightness=0 still leaves
@@ -262,20 +336,21 @@ class BacklightBackendSysfs : public BacklightBackend {
      */
     void set_bl_power(bool off) {
         std::string bl_power_path = device_path_ + "/bl_power";
-        std::ofstream f(bl_power_path);
-        if (!f.is_open()) {
-            // Not all backlight drivers expose bl_power, and the udev rule
-            // may not have been installed yet — this is non-fatal.
-            spdlog::debug(
-                "[Backlight-Sysfs] Cannot write to {} (not available or permission denied)",
-                bl_power_path);
-            return;
-        }
-
+        int err = 0;
         // bl_power: 0 = FB_BLANK_UNBLANK (on), 1 = FB_BLANK_POWERDOWN (off)
-        f << (off ? 1 : 0);
-        if (f.good()) {
+        switch (helix::backlight_internal::write_sysfs_int(bl_power_path, off ? 1 : 0, err)) {
+        case helix::backlight_internal::SysfsWrite::OpenFailed:
+            // Not all backlight drivers expose bl_power, and the udev rule may
+            // not have been installed — non-fatal either way.
+            spdlog::debug("[Backlight-Sysfs] Cannot write to {}: {}", bl_power_path, strerror(err));
+            break;
+        case helix::backlight_internal::SysfsWrite::WriteFailed:
+            spdlog::debug("[Backlight-Sysfs] Driver rejected bl_power write to {}: {}",
+                          bl_power_path, strerror(err));
+            break;
+        case helix::backlight_internal::SysfsWrite::Ok:
             spdlog::debug("[Backlight-Sysfs] bl_power {} for {}", off ? "OFF" : "ON", device_name_);
+            break;
         }
     }
 
@@ -390,9 +465,12 @@ class BacklightBackendAllwinner : public BacklightBackend {
             return false;
         }
 
-        // Convert percentage to 0-255 range
-        int brightness = (percent * MAX_BRIGHTNESS) / 100;
-        brightness = std::clamp(brightness, 0, MAX_BRIGHTNESS);
+        // Convert percentage to 0-255 range, honoring the panel floor (#1709)
+        int brightness = helix::backlight_internal::raw_from_percent(
+            percent, MAX_BRIGHTNESS,
+            helix::backlight_internal::backlight_floor_percent(
+                helix::backlight_internal::build_floor_percent(true,
+                                                               HELIX_BACKLIGHT_FLOOR_PERCENT)));
 
         // ioctl args: [screen_id, arg1, 0, 0]
         unsigned long args[4] = {0, 0, 0, 0};
@@ -546,7 +624,10 @@ class BacklightBackendBrightnessCli : public BacklightBackend {
 
     bool set_brightness(int percent) override {
         percent = std::clamp(percent, 0, 100);
-        std::string cmd = helix::backlight_internal::brightness_cli_command(percent);
+        std::string cmd = helix::backlight_internal::brightness_cli_command(
+            percent, helix::backlight_internal::backlight_floor_percent(
+                         helix::backlight_internal::build_floor_percent(
+                             false, HELIX_BACKLIGHT_FLOOR_PERCENT)));
         int rc = std::system(cmd.c_str());
         if (rc != 0) {
             spdlog::warn("[Backlight-BrightnessCLI] '{}' exited {}", cmd, rc);

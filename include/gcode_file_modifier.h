@@ -5,7 +5,6 @@
 
 #include "gcode_ops_detector.h"
 
-#include <filesystem>
 #include <functional>
 #include <string>
 #include <unordered_map>
@@ -13,19 +12,6 @@
 
 namespace helix {
 namespace gcode {
-
-/**
- * @brief Maximum file size (in bytes) to load entirely into memory
- *
- * @deprecated Use StreamingPolicy::should_stream() instead.
- * This constant is retained for backward compatibility with tests.
- * The actual streaming decision is now controlled by StreamingPolicy,
- * which auto-detects based on available RAM or can be configured in
- * settings.json.
- *
- * Default: 5MB (safe for most embedded targets)
- */
-constexpr size_t MAX_BUFFERED_FILE_SIZE = 5 * 1024 * 1024;
 
 /**
  * @brief Type of modification to apply to G-code
@@ -190,7 +176,7 @@ class GCodeFileModifier {
      * @param filepath Path to the source G-code file
      * @return ModificationResult with success status and modified file path
      */
-    [[nodiscard]] ModificationResult apply(const std::filesystem::path& filepath);
+    [[nodiscard]] ModificationResult apply(const std::string& filepath);
 
     /**
      * @brief Apply modifications to G-code content string (for testing)
@@ -218,10 +204,9 @@ class GCodeFileModifier {
      * @param filepath Path to the source G-code file
      * @return ModificationResult with success status and modified file path
      *
-     * @note This method is automatically called by apply() for files larger
-     *       than MAX_BUFFERED_FILE_SIZE.
+     * @note apply() calls this for files should_use_gcode_streaming() says to stream.
      */
-    [[nodiscard]] ModificationResult apply_streaming(const std::filesystem::path& filepath);
+    [[nodiscard]] ModificationResult apply_streaming(const std::string& filepath);
 
     // =========================================================================
     // Convenience methods for common operations
@@ -283,7 +268,7 @@ class GCodeFileModifier {
      * @param original_path The original file path
      * @return Unique temp path like /tmp/helixscreen_mod_XXXXXX.gcode
      */
-    [[nodiscard]] static std::string generate_temp_path(const std::filesystem::path& original_path);
+    [[nodiscard]] static std::string generate_temp_path(const std::string& original_path);
 
     /**
      * @brief Clean up temp files created by this modifier
@@ -330,7 +315,7 @@ class GCodeFileModifier {
      *
      * The original implementation, now factored out for clarity.
      */
-    [[nodiscard]] ModificationResult apply_buffered(const std::filesystem::path& filepath);
+    [[nodiscard]] ModificationResult apply_buffered(const std::string& filepath);
 
     std::vector<Modification> modifications_;
 };

@@ -8,11 +8,11 @@ If you're not using an AMS or multi-material system, you can tell HelixScreen wh
 
 Once configured, the external spool information is used throughout the UI:
 
-- **Spool preset button** — A dynamic preset button appears on the Filament panel with your spool's material name and recommended temperatures. Tap it to pre-heat both the nozzle and bed to the correct temperatures for your loaded filament.
+- **Spool preset button** — A dynamic preset button appears in the Filament panel's preset grid, between TPU and Cool Down, with your spool's material name and recommended temperatures. Tap it to pre-heat both the nozzle and bed to the correct temperatures for your loaded filament.
 - **Temperature panel presets** — The Nozzle and Bed temperature panels also show a spool preset button for quick one-tap heating.
-- **Purge temperature** — When you tap **Purge**, HelixScreen automatically passes the recommended nozzle temperature to the purge macro (as the `PURGE_TEMP` parameter), so macros that support it can heat to the right temperature.
+- **Purge temperature** — When you tap **Purge**, HelixScreen passes a nozzle temperature to the purge macro (as the `PURGE_TEMP` parameter): the nozzle's current target or the spool's recommended temperature, whichever is hotter. A temperature at or below your printer's minimum extrusion temperature, or above your hotend's maximum temperature, is never passed; the parameter dialog asks instead.
 
-The spool preset button only appears when the loaded material differs from the standard presets (PLA, PETG, ABS, TPU). For standard materials, just use the built-in preset buttons.
+The spool preset button only appears when the loaded material differs from the standard presets (PLA, PETG, ABS, TPU). For standard materials, just use the built-in preset buttons. Its place in the grid stays empty when it isn't shown, so the other buttons never move.
 
 > **Tip:** The spool preset updates automatically when you change the external spool configuration — no need to close and reopen panels.
 
@@ -42,11 +42,13 @@ Manual filament control:
 
 The Filament panel has dedicated **Load**, **Unload**, and **Purge** buttons. These run Klipper macros — HelixScreen auto-detects common names like `LOAD_FILAMENT`, `UNLOAD_FILAMENT`, and `PURGE` from your printer config.
 
+On a printer with more than one tool, the picker beside the lane bars chooses which tool these buttons act on. Its label uses your printer's own word for a tool (**Toolhead** on the Snapmaker U1), and the closed picker shows just the tool's number, or the name you gave it; open it to see the full list. When the nozzle is too cold to move filament and HelixScreen doesn't know what is loaded, a warning takes the place of the **Operations** heading until the nozzle is hot enough.
+
 ### Customizing which macro runs
 
 You can override any of these buttons to run a different macro:
 
-1. Go to **Settings > Printer > Macro Buttons**
+1. Go to **Settings > Printing > Macro Buttons**
 2. Scroll to the **Standard Macros** section
 3. Tap the dropdown for **Load Filament**, **Unload Filament**, or **Purge**
 4. Select **(Auto)** to use auto-detection, or pick any macro from your Klipper config
@@ -61,11 +63,19 @@ This works whether or not you have an AMS system. If a slot is left empty (no ma
 
 For manual control without macros, use the **Extrude** and **Retract** buttons on the extrusion widget with selectable amounts (5mm, 10mm, 25mm) and speeds.
 
+### When no preheat happens first
+
+Loading or unloading normally heats the nozzle to the material's temperature before the operation starts. HelixScreen skips that preheat when something else already handles the heat, so the nozzle is not heated twice:
+
+- your filament system heats on its own when it loads,
+- your configured Load/Unload macro heats the hotend itself, or
+- **Allow cold load/unload** is on (Settings > Printing).
+
 ### What happens to the nozzle afterward
 
 Loading or unloading heats the nozzle to material temperature. Two minutes after the operation finishes, HelixScreen turns the extruder heater back off — the delay lets you run several operations in a row without the nozzle cooling in between, and a running print is never touched.
 
-If your filament system already handles this (AFC does), turn off **Settings > Safety & Notifications > Cool nozzle after filament ops** so only one of them is driving the heater. It's a per-printer setting. See [Safety settings](settings/safety.md#cool-nozzle-after-filament-ops).
+If your filament system already handles this (AFC does), turn off **Settings > Printing > Cool nozzle after filament ops** so only one of them is driving the heater. It's a per-printer setting. See [Printing settings](settings/printing.md#cool-nozzle-after-filament-ops).
 
 ---
 
@@ -84,22 +94,30 @@ The left side shows all your filament slots in a visual tray layout:
 - **Status badge** — Slot number with color-coded background (green = loaded, gray = empty, red = error)
 - **Tool badge** — If a slot is assigned to a specific extruder tool (T0, T1, etc.), a badge appears in the corner
 
-Below the slot grid, a **filament path diagram** shows the routing from slots through the hub/selector to the toolhead. This updates in real time during load/unload operations, including eject animations when retracting filament at the slot sensor.
+Below the slot grid, a **filament path diagram** shows the routing from slots through the hub/selector to the toolhead. This updates in real time during load/unload operations, including eject animations when retracting filament at the slot sensor. On the Anycubic ACE the path reads the hub and toolhead sensors the driver publishes, so a strand parked partway down the tube is drawn where it actually sits - short of the hub - rather than back at the spool.
 
-Above the slot view, a **mini temperature graph** shows live nozzle, bed, and chamber temperatures (when a chamber sensor or heater is present) so you can monitor heating during filament operations without switching panels.
+Above the slot view, a **mini temperature graph** shows live nozzle, bed, and chamber temperatures (when a chamber sensor or heater is present) so you can monitor heating during filament operations without switching panels. On small portrait screens there is no room to draw it, so a graph button takes its place next to the filament strip at the bottom - tap it to open the full-screen temperature graph.
 
 #### Reading Error States
 
 When a slot runs into trouble, HelixScreen shows it visually so you don't have to dig through logs:
 
 - **Error dot** — A small colored dot appears at the corner of a slot's spool when that slot reports a problem. **Red** means an error (jam, runout, hardware fault); **amber** means a warning. With animations enabled, the dot gently pulses to draw your eye.
-- **Buffer-health tint** — On systems with a buffer between the slots and the toolhead (AFC TurtleNeck, or Happy Hare with sync feedback), the hub on the filament path diagram changes color as the buffer drifts toward a fault: green when healthy, yellow when approaching the fault threshold, and red when at or past it.
+- **Buffer-health tint**: On systems with a buffer between the slots and the toolhead (an AFC buffer - a TurtleNeck, or a pressure-sensor buffer such as an `FPS_PSF` - an OpenAMS filament pressure sensor, or Happy Hare with sync feedback), the hub on the filament path diagram changes color as the buffer drifts toward a fault: grey on target, amber as it drifts, red near an end stop.
+- **Filament pressure (OpenAMS)**: On OpenAMS running without AFC, each unit's filament pressure sensor appears on the filament path as a box labeled **FPS**. The sensor measures how hard the filament is pressing (compression) only: 0% is no pressure and 100% is fully compressed. The box stays gray while the pressure regulates around its target and turns amber near the top (85% and up) or red (95% and up), or amber near zero while filament is loaded because the feed is not engaging. A sensor with no target is only tinted at those ends. Tap the box to open Buffer Status: an upright gauge that fills from the bottom up to the reading with a tick at the target, the reading against its target (for example "FPS 53%" and "target 50%"), whether it is at, above or below target (within 5 points counts as at target), and the last minute as a line with the target dashed. OpenAMS has no clog detection, so only the pressure reading is shown. AFC pressure-sensor buffers and Happy Hare keep the two-ended slider with its tight and loose wording.
 
 **To recover:**
 
-- Use **Reset** in the sidebar (it reads **Home** on Happy Hare). This clears the error message your system is holding onto and then puts the system back to a known-good state. It is the right first move for almost every jam or fault, including one reported against a single slot.
+- Use **Reset** in the sidebar (it reads **Home** on Happy Hare). This clears the error message your system is holding onto and then puts the system back to a known-good state. It is the right first move for almost every jam or fault, including one reported against a single slot. On Happy Hare it runs `MMU_RECOVER` and then `MMU_HOME`, which unloads any loaded filament before homing, so the button is greyed out while a print is running. On AFC it runs `RESET_FAILURE` and `AFC_CLEAR_MESSAGE`, then `AFC_RESET`.
 - If filament from one slot is stuck partway down the tube, tap that slot. When your system can pull it back, the slot menu's second button changes from **Unload** to **Recover**. Tap it to draw the filament back toward the slot without heating the nozzle.
-- For a system-wide problem that Reset does not shift, use **Recover** in the AMS Management overlay (Settings).
+- For a system-wide problem that Reset does not shift, use **Recover** in the AMS Management overlay (Settings). On Happy Hare this is how you run `MMU_RECOVER` from the screen, and it moves nothing - see [AMS Management](#ams-management-settings-overlay) for what it sends. When a Happy Hare error pops up on screen, its own **Recover** button sends plain `MMU_RECOVER` and lets Happy Hare work out the filament position from its sensors.
+
+**On Happy Hare**, every fault the MMU reports opens a recovery popup showing Happy Hare's own reason, whether it happened during a print or during a load or home you started yourself. Happy Hare's own error prompt closes behind it. The popup offers:
+
+- **Resume** - only when a print is paused, and first in the list there. Heats the nozzle first if it has cooled.
+- **Recover** - lets Happy Hare work out where the filament is with its own sensors. First in the list when nothing is paused. Works on a cold nozzle.
+- **Unload** - when filament is at the toolhead. Heats the nozzle first.
+- **Unlock** - a last resort that clears Happy Hare's pause lock without moving anything.
 
 ### Sidebar (Right)
 
@@ -111,6 +129,7 @@ The right sidebar shows the status of the currently loaded filament and provides
 - **Color swatch** — Large color indicator matching the loaded filament
 - **Material name** — e.g., "Red PLA", "Prusament PETG"
 - **Remaining weight** — Estimated filament remaining (e.g., "750g"), if available
+- **Buffer slider**: When your system has a filament buffer with a proportional reading (a filament pressure sensor, or Happy Hare sync feedback), a small upright gauge sits at the right of the card, with the short reading and, on wider screens, its **FPS** or **Sync** label under it. For Happy Hare and AFC pressure-sensor buffers it is a slider: loose is up and tight is down; the block is gray on target, amber off target and red near an end. For an OpenAMS pressure sensor it is a fill that rises from the bottom with the pressure, with a tick at the target, gray until it nears the top or bottom end. It is the same reading the [Filament Buffer widget](home-panel.md#filament-buffer-widget) shows. Without a target a slider reading shows as a number only, and a fill keeps its gauge with no tick.
 - **Clog detection meter** — When your system has flow monitoring (encoder, FlowGuard, or AFC buffer), an arc meter shows the current reading, with the sensor named underneath. It is the same reading the [Clog Detection widget](home-panel.md#clog-detection-widget) draws as a bar on the dashboard. When the sensor is armed but has nothing to report, the arc is replaced by a check mark
 
 **During load/unload operations**, the sidebar switches to a **step progress display** showing each stage of the operation. The exact steps come from your filament system, so they match what it actually does rather than a generic list.
@@ -138,9 +157,12 @@ Some steps only apply to how your machine is set up. A step your system never re
 | Button | Action |
 |--------|--------|
 | **Bypass** (toggle) | Feed filament directly to the extruder, bypassing the AMS. Shown when your hardware supports bypass, or when you turn on **Enable Bypass Controls** - see [When Bypass Doesn't Appear](#when-bypass-doesnt-appear). The toggle is guarded: it can't be changed while a job holds the machine (a "Bypass cannot be changed while printing" warning appears), if a lane's filament is loaded it is unloaded first before bypass engages, and where a hardware sensor owns the bypass the toggle only reports that the sensor is in control. |
-| **Unload** | Retract the currently loaded filament back to its slot |
+| **Load** | Load a slot's filament into the toolhead. On the Snapmaker U1 it opens a picker instead - see below |
+| **Unload** | Retract the currently loaded filament back to its slot. It also works when filament is stuck in the toolhead and no slot claims it, on systems that can tell. On the Snapmaker U1 it opens a picker instead - see below |
 | **Reset** | Reset the AMS system state (useful after jams or errors) |
 | **Settings** | Open the AMS Management overlay for advanced controls |
+
+**Loading or unloading several heads at once (Snapmaker U1).** The U1 has a toolhead per slot, so **Load** and **Unload** there open a picker listing every head with what it holds - the material and whether it is loaded, ready to load, or empty. Unload comes with the loaded heads already ticked; Load comes with the empty-but-fed heads ticked. Tick the heads you want and confirm: if a ticked head turns out not to take the operation, it is skipped with a warning naming the head and the reason, and the rest continue. The U1 runs its own batch command, which preheats the next head while the current one finishes.
 
 ### When Bypass Doesn't Appear
 
@@ -148,7 +170,7 @@ Some filament systems do not report a bypass position. On those, the Bypass togg
 
 | System | Reason |
 |--------|--------|
-| Anycubic ACE Pro | The ACE protocol has no bypass |
+| Anycubic ACE Pro | The ACE protocol has no bypass position - unless your rig has the fifth-spool master switch (see below) |
 | Snapmaker U1 | Each toolhead has its own path, so there is nothing to bypass |
 | Tool changers (generic Klipper) | Each tool has its own path |
 | QIDI Box | Not implemented in the QIDI backend yet |
@@ -156,17 +178,33 @@ Some filament systems do not report a bypass position. On those, the Bypass togg
 
 The Creality CFS no longer appears here — it has a working external spool. See [CFS and the External Spool](#cfs-and-the-external-spool).
 
-To show the controls anyway, turn on **Enable Bypass Controls** in Settings > Hardware & Devices > Multi-Filament System Management. The setting appears only when your firmware reports no bypass.
+To show the controls anyway, turn on **Enable Bypass Controls** in Settings > Devices > Multi-Filament System Management. The setting appears only when your firmware reports no bypass.
 
 With it on, the external spool appears on the filament path beside your slots. Tap it to set material, color, and brand, or to link a Spoolman spool.
+
+**The ACE Pro's fifth spool is a working bypass.** The ACE protocol has no bypass position of its own, but some rigs have a master switch that turns the whole ACE path off so a fifth spool can be fed to the toolhead by hand. Where the driver publishes that switch, HelixScreen drives it as the bypass: the switch being off *is* bypass engaged. There is no firmware command for it, so the switch is thrown by macros - define `ACE_BYPASS_ON` and `ACE_BYPASS_OFF` on your printer and the Bypass toggle works, with the usual unload-first and never-during-print guards. A rig without the switch, or with only one of the two macros, reports no bypass and the table above applies.
 
 **On Happy Hare, the bypass itself also works.** `MMU_SELECT_BYPASS` does not check `has_bypass` - it deselects the gear steppers and reports gate -2 either way. Turn the setting on if your MMU has a bypass but reports `has_bypass: 0`. That happens with `mmu_vendor: Other` (which includes a QIDI Box driven through Happy Hare) and with a type-A selector whose bypass offset is not calibrated yet.
 
 **On the other systems, the setting changes only what HelixScreen displays.** There is no bypass command to send, so the Bypass toggle reports that the operation is not supported. Use the external spool to record the material and color you loaded by hand: [filament tracking](filament-tracking.md), spool presets, and purge temperatures all read from it. Load and unload with your own macros or from the Extrusion panel.
 
-**On the systems where bypass genuinely engages** (AFC, AD5X IFS, Happy Hare, Creality CFS), it also quiets the pre-print filament checks. Filament fed through the bypass never passes through a slot, so a print started that way would otherwise be flagged for every tool it uses. See [Pre-Print Filament Check](print-monitoring.md#pre-print-filament-check). On the display-only systems above nothing is suppressed, because bypass never actually engages there.
+**On the systems where bypass genuinely engages** (AFC, AD5X IFS, Happy Hare, Creality CFS, and an ACE Pro with its fifth-spool switch), it also quiets the pre-print filament checks. Filament fed through the bypass never passes through a slot, so a print started that way would otherwise be flagged for every tool it uses. See [Pre-Print Filament Check](print-monitoring.md#pre-print-filament-check). On the display-only systems above nothing is suppressed, because bypass never actually engages there.
 
 **Always Show Bypass Spool**, in the same place, keeps the external spool on the filament path while bypass is disengaged. It applies to AFC systems only (Box Turtle, OpenAMS), which report a bypass sensor whether or not one is wired, so the spool is otherwise hidden until bypass is engaged.
+
+### Loading and Unloading the Bypass Spool
+
+> Added in 1.1.
+
+**Tap the external spool** on the filament path. Alongside the spool bookkeeping (Spool Info, Select Spool, Scan QR, Clear) the menu offers **Load** and **Unload**, which feed and retract the bypass spool itself.
+
+Bypass load deliberately does not go through the AMS. It runs your configured **Load Filament** macro — the same one the Filament panel's Load button uses, set in Settings > Printing > Macro Buttons — or a plain feed if you have no macro configured. That is what the reporter of this behavior expected: with bypass engaged, the normal load routine takes over. Unload does go through the AMS on backends that expose a bypass unload, because that is how the filament gets back out of the toolhead.
+
+If bypass is not engaged when you tap **Load**, it is engaged first. On systems that require it, a lane's filament is unloaded before bypass engages, and the load starts once that finishes — the same sequence the Bypass toggle performs, so nothing is fed down the lane path by mistake.
+
+Both entries grey out for the same reasons the Filament panel's buttons do: while a filament operation is already running, while a job holds the machine, and — for Unload — when there is nothing at the toolhead to retract.
+
+> The same Load and Unload are on the **Filament panel**, which acts on the external spool whenever bypass is the current selection.
 
 ### Slot Context Menu
 
@@ -175,12 +213,16 @@ With it on, the external spool appears on the filament path beside your slots. T
 | Action | Description |
 |--------|-------------|
 | **Load** | Feed filament from this slot to the toolhead. Disabled if the slot is empty. |
-| **Unload** | Retract filament from this slot. Only available if this slot is currently loaded. |
+| **Unload** | Retract filament from this slot. Only available if this slot is currently loaded. Greyed out while filament sits in the toolhead that no slot claims, because the slot this menu names may not be the one holding it: use **Unload** in the filament sidebar instead. |
 | **Eject** | Push filament fully out of the lane to release the spool, when the slot has filament in its lane but **not** loaded into the toolhead. Replaces the Unload button in that state. Only on backends that support per-lane eject (AFC and Happy Hare). |
 | **Recover** | Pull filament that is stranded partway down the tube back toward its slot, without heating the nozzle. Takes the place of **Unload** when the system can tell that this slot's filament is stuck past the hub. |
+| **Preload** | Happy Hare only. Feed filament from the spool into its gate, ready for a later load. Greyed out during a print, while any filament is loaded, or while the MMU is busy. |
 | **Spool Info** | Open the filament editor to view or change material, color, vendor, and remaining weight. |
 | **Select Spool** | Assign a saved Spoolman spool to this slot. Only shown when Spoolman is configured. |
 | **Scan QR Code** | Scan a filament QR code to auto-fill spool data. Only shown when Spoolman is configured. |
+| **Clear Spool** | Erase everything HelixScreen and the printer's firmware remember about this slot: your saved edits, the slot's spool details, and the Spoolman link, plus the printer's own record where the firmware lets it be wiped (Happy Hare's whole gate map entry, the QIDI Box's stored slot values). What is left afterwards is only what the hardware can physically read - on the ACE, the Snapmaker U1 and a stock CFS the firmware's record cannot be wiped (read-only, or the RFID tag is simply re-read), so the slot repopulates from it. Shown whenever the slot carries an assignment, loaded or not. Refused on the lane feeding an active, paused or preparing print - the button greys out and says why. |
+
+> **Note:** On a Happy Hare printer that fills its gates from Spoolman (Spoolman pull mode), the firmware side is refused for both edits and Clear Spool, and the reason names Spoolman: make colour, material and spool changes in Spoolman itself. Clear Spool still clears HelixScreen's own copy, so remove the spool in Spoolman to finish the job.
 
 On systems that support **Endless Spool**, the context menu also includes:
 
@@ -219,15 +261,28 @@ Tap **Spool Info** in the slot context menu to open the filament editor. This le
 
 Tap **Save** to apply your changes, or **Cancel** to discard them.
 
+> **Adding brands and products from a file.** The catalog can be extended or corrected by editing `user_filaments.json` instead of using the screen. See [Editing materials and brands by hand](settings/printing.md#editing-materials-and-brands-by-hand).
+
+> **Tip: favourite filaments.** Tap the star on any row in the filament catalog (the brand and material picker). Starred filaments lead the vendor list in a **Favorites** section and float to the top of their own vendor's list too, on every printer. Tap the star again to unstar.
+
 > **Material names with punctuation or spaces.** On AFC and Happy Hare the material is stored
 > by the firmware itself, so the name has to be something Klipper accepts. Names like `PLA+`,
-> `PA6-CF`, `PETG-CF` and `Silk PLA` all save correctly. On older versions they were dropped
-> on the way through - the save reported success and the material never reached the firmware,
-> so it read back blank or kept the old value. If you have a Spoolman spool whose material
-> name contains something HelixScreen cannot send (a semicolon, a quote, a backslash, or a
-> non-English character), the save now tells you so: everything else - color, weight, Spoolman
+> `PA6-CF`, `PETG-CF` and `Silk PLA` all save correctly. If a Spoolman spool's material name
+> contains something HelixScreen cannot send (a semicolon, a quote, a backslash, or a
+> non-English character), the save tells you so: everything else - color, weight, Spoolman
 > link - is still saved, and renaming the material in Spoolman using letters, digits, spaces
 > and `+ - _ . ( ) /` fixes it.
+
+### Where Lane Information Comes From
+
+Every piece of information on a lane - color, material, brand, spool name, remaining weight - can arrive from more than one place: you edit it on the screen, the printer's firmware reports it, or a linked Spoolman spool carries it. HelixScreen remembers which source said what, and the more trustworthy source for each field wins, rather than whichever wrote last:
+
+- **A color you pick yourself beats the linked spool's.** The spool record says what the vendor sells; your pick says what is actually loaded in that lane right now. The color name you chose travels with it, so a swatch is never labelled with a different color's name.
+- **A spool linked from Spoolman owns its brand, material and spool name.** While Spoolman is unreachable those fields are read-only in the editor - the picker shows the spool's own values instead of letting you type over what the server will replace anyway. The spool's remaining weight also comes from the server.
+- **Your edits are marked as yours in the record the printer shares with other tools**, so Mainsail, OrcaSlicer or a macro refreshing that record does not wipe what you entered.
+- **A reading that leaves a field out leaves it standing.** A status frame that says nothing about, say, brand keeps whatever another source already knew.
+
+**Swapping a spool is noticed, even with the screen off.** Each lane remembers a fingerprint of the spool it held, so a spool swapped while HelixScreen was not running clears the old spool's edits instead of painting them onto the new one. This works on the QIDI Box, on the Creality CFS (including community Kalico-based CFS setups), and - by RFID tag - on the Snapmaker U1.
 
 ### Tool Mapping
 
@@ -247,6 +302,39 @@ Tap **Done** to keep your mapping, or **Cancel** to discard it.
 
 > **Note:** The card also hides itself while **bypass is engaged on a single-tool file**, because the print takes its filament from the external spool and the mapping decides nothing — showing it would offer an assignment the print ignores. The **Bypass active** note on the file detail screen appears in its place. A *multi-tool* file with bypass engaged still shows the card: those prints do use the lanes.
 
+### Printers that remap by rewriting the file
+
+Most filament systems carry out your mapping themselves: HelixScreen tells the printer "tool 0 comes from slot 2" and the printer does the rest. A few can't, because their firmware has no mapping table. On those, HelixScreen rewrites a copy of the G-code with the new tool numbers and prints that copy. Today that means a tool changer running without klipper-toolchanger, such as the [MedusaHC fork](#medusahc-hotend-changer) that drops `[toolchanger]`.
+
+This needs the **HelixPrint plugin** on your printer. Without it the mapping card offers to install it instead. With it, the finished job is listed in print history under its original name ([details](print-history.md)).
+
+**What the rewrite changes:**
+
+- Tool changes: `T0`, `T1`, ...
+- Temperature commands for a specific tool: `M104 T1 S220`, `M109 T0 S230`
+- An `INITIAL_TOOL=` or `TOOL=` value on any command line, such as `PRINT_START INITIAL_TOOL=0` or `SET_TOOL_TEMPERATURE TOOL=1`, so a start macro that picks up or primes the first tool picks up the right one
+
+**What it does not change:** any other per-tool value you pass to your start macro, such as `EXTRUDER_TEMP=`, `EXTRUDER1_TEMP=`, `T0_TEMP=`, `TOOL_TEMP=` or `T=`, and a tool given by name rather than number (`TOOL=T0`). Those names are your own macro's, and HelixScreen can't know whether `EXTRUDER_TEMP` means "tool 0" or "the tool this print starts with", so it leaves them as sliced. If your start macro heats tools from those values, a job remapped from tool 0 to tool 1 heats tool 0 and then switches to a cold tool 1.
+
+When the file you picked passes values like these and your picks move at least one tool to a different number, the **Filament Mapping** dialog shows a warning naming them, for example:
+
+> Your PRINT_START line passes per-tool settings that remapping does not change (EXTRUDER_TEMP, EXTRUDER1_TEMP). A remapped tool may not be heated.
+
+The warning appears and disappears as you change the picks: leave every tool on its own number and there is nothing to warn about, because the file prints as sliced. It doesn't stop you remapping; if your macro doesn't use those values to heat anything, you can ignore it.
+
+**Recommended start G-code.** Do the tool heating in plain `M104`/`M109` lines, which the rewrite does change, and keep only the bed, homing and mesh in `PRINT_START`. In OrcaSlicer's **Machine start G-code** (one `M104` line per tool your printer has):
+
+```
+PRINT_START INITIAL_TOOL=[initial_tool] BED_TEMP=[bed_temperature_initial_layer_single]
+{if is_extruder_used[0]}M104 T0 S{idle_temperature[0]}{endif}
+{if is_extruder_used[1]}M104 T1 S{idle_temperature[1]}{endif}
+{if is_extruder_used[2]}M104 T2 S{idle_temperature[2]}{endif}
+{if is_extruder_used[3]}M104 T3 S{idle_temperature[3]}{endif}
+M109 T[initial_tool] S{first_layer_temperature[initial_tool]}
+```
+
+Keep the `M109` for the first tool last. It sets that tool from its idle temperature up to printing temperature and waits, so it has to come after the idle lines. `INITIAL_TOOL=` and `TOOL=` are fine to keep if your macro uses them: the rewrite moves them along with everything else. OrcaSlicer adds a `T[initial_tool]` line right after the start G-code, and that line is remapped too.
+
 ### Syncing with OrcaSlicer (2.3.2 and later, including 2.4.0)
 
 When you edit spool info in HelixScreen — on any supported filament system (AD5X IFS, Snapmaker U1, ACE, CFS) — that information is saved to your printer in the standard location OrcaSlicer 2.3.2 and later reads automatically. Open OrcaSlicer after editing and your slot's vendor, material, color, and temperatures show up in the filament panel with no extra setup.
@@ -265,8 +353,8 @@ Either way, your printer's filament info and OrcaSlicer stay in sync. The sync i
 
 Tap **Settings** in the sidebar to open the AMS Management overlay with advanced controls:
 
-- **Home** — Return the AMS to its home position
-- **Recover** — Attempt to recover from an error state
+- **Home** — Return the AMS to its home position. Sends `MMU_HOME` on Happy Hare (which unloads any loaded filament first) and `AFC_RESET` on AFC. Unlike the sidebar's Reset, it does not clear the error message first.
+- **Recover** — Attempt to recover from an error state. On Happy Hare this runs `MMU_RECOVER`, which tells Happy Hare what is really selected and loaded when its tracking has gone wrong; nothing moves. A dialog asks which gate is actually selected (it starts on the current one; you can also pick **Bypass**, or **Keep current** to leave the gate alone) and whether filament is loaded (**Detect automatically**, the default, lets Happy Hare check its sensors; or choose **Loaded** / **Unloaded**). HelixScreen then sends `MMU_RECOVER` with only what you set: `GATE=` or `BYPASS=1`, plus `LOADED=1` or `LOADED=0`. On AFC, Recover sends `AFC_RESET`, the same as Home.
 - **Abort** — Cancel the current operation immediately
 - **Bypass Mode** — Toggle direct-feed mode (if supported by hardware). The toggle refuses while a filament operation is running, and on systems that require it, while filament is still loaded - unload first. When a hardware sensor owns the bypass, this row becomes a read-only "Controlled by hardware sensor" indicator instead of a toggle. If your machine has no bypass according to its firmware, an **Enable Bypass Controls** toggle appears here instead - see [When Bypass Doesn't Appear](#when-bypass-doesnt-appear)
 - **Always Show Bypass Spool** — Keep the external spool visible on the filament path even while bypass is disengaged (AFC systems only)
@@ -287,6 +375,12 @@ Below the top-level controls, **device-specific settings appear as expandable se
 | **Hub & Cutter** | Cutter enable, cut distance, hub bowden length, assisted retract |
 | **Tip Forming** | Ramming volume, unloading start speed, cooling-tube length and retraction |
 | **Purge & Wipe** | Purge enable/length, brush-wipe enable |
+
+**Happy Hare** groups its controls into Setup, Speed, Toolhead, Accessories and Maintenance. A few worth knowing:
+
+- **Load Extruder** and **Unload Extruder** (Maintenance) run only the extruder part of a load or unload, for filament that is already at the toolhead. Happy Hare heats the nozzle for them. Not available during a print.
+- **Motors** (Maintenance) switches the MMU's motors on or off. Switching them on does not home the MMU.
+- **Refresh Spoolman** (Accessories) asks Happy Hare to re-read its spool details from Spoolman. Greyed out when Spoolman support is off in Happy Hare.
 
 Other backends show their own (usually smaller) set of sections, or none at all.
 
@@ -316,6 +410,7 @@ When multiple backends are detected:
 | **CFS** | Creality Filament System (K2 series, plus K1/K1C/K1 Max with the official CFS upgrade) |
 | **Happy Hare** | MMU2, ERCF, 3MS, Tradrack, EMU |
 | **AFC** | Box Turtle, OpenAMS, ViViD |
+| **OpenAMS** | klipper_openams without AFC. Needs a klipper_openams version that publishes its UI API; Load and Unload also need the `OPENAMS_LOAD` / `OPENAMS_UNLOAD` macros from its `oams_macros.cfg` |
 | **ACE** | Anycubic ACE Pro (via ValgACE/BunnyACE/DuckACE Klipper drivers) |
 | **Tool Changer** | Toolchanger-based filament routing |
 | **AD5X IFS** | FlashForge Adventurer 5X Intelligent Filament Switching (requires ZMOD firmware v1.7.0 or newer) |
@@ -455,10 +550,20 @@ means you'll pick up the newer commands for free if you migrate later.
 
 ### Tool mapping
 
-Tool mapping works the same as on any klipper-toolchanger machine — see
-[Tool Mapping](#tool-mapping) above. You can point a G-code tool number at a different
-physical tool, which is useful when a slicer project expects a different tool order than
-your machine is loaded with.
+You can point a G-code tool number at a different physical tool, which is useful when a
+slicer project expects a different tool order than your machine is loaded with. See
+[Tool Mapping](#tool-mapping) above for the dialog itself.
+
+How the mapping reaches the printer depends on your setup:
+
+- **Original MedusaHC config or the Python controller** (your config has `[toolchanger]`):
+  HelixScreen tells klipper-toolchanger the mapping and the file is printed as sliced,
+  like any klipper-toolchanger machine.
+- **topi314's fork** (no `[toolchanger]`): there is no mapping table to write, so
+  HelixScreen rewrites the file instead. That needs the HelixPrint plugin, and any
+  per-tool temperatures you pass to `PRINT_START` stay as sliced. Read
+  [Printers that remap by rewriting the file](#printers-that-remap-by-rewriting-the-file)
+  before your first remapped print; it has start G-code that heats the right tools.
 
 ### What HelixScreen remembers per tool
 
@@ -491,40 +596,82 @@ Connecting a server, the full spool-inventory panel, the new-spool wizard, and h
 
 ---
 
-## Filament Drying
+## Filament Drying and Humidity
 
-Many filament materials absorb moisture from the air over time. Wet filament prints poorly — you may see popping, stringing, reduced layer adhesion, or a rough surface finish. Drying the filament before or during a print removes that moisture and restores print quality. Hygroscopic materials that benefit most include Nylon, PA-CF, TPU, and PETG; PLA is less sensitive but still benefits after long storage.
+Many filament materials absorb moisture from the air over time. Wet filament prints poorly - you may see popping, stringing, reduced layer adhesion, or a rough surface finish. Drying the filament before or during a print removes that moisture and restores print quality. Hygroscopic materials that benefit most include Nylon, PA-CF, TPU, and PETG; PLA is less sensitive but still benefits after long storage.
+
+HelixScreen groups all of this into **boxes**. A box is one enclosure it can measure, heat, or both. What counts as a box depends on your hardware: a box can be a whole unit, a group of slots inside a unit, or a single lane with its own heater and sensor.
+
+> **A box is not a unit.** The slot range printed under the box name is the only thing that tells you which lanes that box covers. Read it before you start a dry.
 
 ### Supported Systems
 
-Dryer control is available on hardware that includes an integrated heated chamber:
+| System | What you get |
+|--------|--------------|
+| **Anycubic ACE Pro** | Temperature, humidity, and drying (built-in heated chamber) |
+| **QIDI Box** | Temperature, humidity, and drying (PTC heater; QIDI PLUS4, Q2, MAX4) |
+| **Happy Hare** | Temperature and humidity wherever sensors are configured, drying wherever a filament heater is. A setup with per-lane heaters and sensors reports each lane as its own box |
+| **Creality CFS** | Temperature and humidity, one box per unit. The CFS has no heater, so there is nothing to start |
 
-| System | Notes |
-|--------|-------|
-| **Anycubic ACE Pro** | Built-in drying chamber with fan |
-| **Happy Hare** | On MMU setups where a heater is configured |
-| **QIDI Box** | PTC heater in the filament storage unit (QIDI PLUS4, Q2, MAX4) |
+AFC (Box Turtle, OpenAMS), AD5X IFS, Snapmaker U1 and tool changers report no environment data at all, so nothing appears for them.
 
-Systems without a dedicated drying chamber (AFC Box Turtle, Creality CFS, AD5X IFS, Snapmaker U1, tool changers) do not have dryer controls — the option won't appear for those.
+> **QIDI Box note:** QIDI Box drying control requires recent QIDI firmware that exposes the `box_extras` Klipper plugin. On older firmware the heater still works, but the session timer isn't tracked - the heater runs until you tap Stop.
 
-### Using the Dryer
+### Opening a Box
 
-Open the dryer controls from the **multi-filament panel**:
+On the **Filament** panel, any box with a reading or a heater shows a small badge beside its slots: a thermometer with the temperature, and a water drop with the humidity where a sensor exists. Tap the badge. That is the whole route - there is nothing to open under Settings.
 
-1. Open the **Filament** panel from the sidebar.
-2. Tap **Settings** to open the AMS Management overlay.
-3. The dryer controls appear if your hardware supports drying.
+What opens depends on how many boxes that unit has:
 
-From the dryer panel you can:
+| Boxes | What you get |
+|-------|--------------|
+| One | That box's screen |
+| Two to four of the same kind | That box's screen, with a tab per box across the top |
+| More than four, or a mix of heated and unheated boxes | A list of boxes; tap a row to open one |
 
-- **Set target temperature** — Use the slider or tap the value to type a temperature. The target is automatically clamped to the safe maximum for your unit (typically 55–90 °C depending on your hardware and firmware).
-- **Set duration** — Choose how long to dry, in hours. Some systems accept a custom duration; others offer material-based presets.
-- **Pick a material preset** — If presets are available, tap a material name (PLA, PETG, Nylon, etc.) to fill in the recommended temperature and time automatically.
-- **Start drying** — Tap **Start** to begin. The heater activates and the chamber temperature climbs to your target.
-- **Watch the countdown** — While drying, the panel shows the current chamber temperature, humidity (when a sensor is present), and the time remaining.
-- **Stop early** — Tap **Stop** at any time to turn off the heater. Remaining time is discarded; it is safe to stop mid-session.
+Each tab carries a small icon for the box it names, so you can tell which box is heating, which is waiting and which has finished without selecting it first.
 
-> **QIDI Box note:** QIDI Box drying control requires recent QIDI firmware that exposes the `box_extras` Klipper plugin. On older firmware, the heater still works but the session timer won't be tracked — the heater runs until you tap Stop.
+A mix always goes to the list rather than to tabs, because a tab would hide the difference between a box you can heat and one you can only watch behind a selection you have to make first.
+
+When the screen is showing fewer boxes than the printer has, a **View all boxes** line appears above the card. Tap it for the full list across every unit, with a count of units, boxes and dryers under the title. The list itself has no controls: each row gives the box name, its slot range, its current reading and a one-word status. Tap a row to open that box, where the controls are.
+
+### Reading a Box
+
+The title names the box, and the line under it gives its slot range.
+
+- **Temperature** is always shown.
+- **Humidity** is shown only where that box has its own humidity sensor. A box without one reads `--`, and the **Material Comfort** strip is hidden rather than guessed at. That is deliberate: with no humidity reading, a comfort verdict would be a made-up all-clear.
+- **While a cycle runs**, the temperature reads current then target, a countdown gives the time left, and a progress bar fills.
+
+The same rule reaches the status column in the box list: a box with a heater but no humidity sensor reads `--` there instead of a status word, and a box with no heater at all reads **passive**.
+
+A box with no heater says so on its own screen, and points you at a sealed dry box with desiccant instead.
+
+The reverse case also shows up: a heated box with no sensor of its own still gets a badge, with a dash where the temperature would be, so its controls are still one tap away.
+
+### Starting and Stopping a Dry
+
+The controls are on the right of the box's screen:
+
+1. **Pick a preset** from the dropdown. Each entry names a material with its temperature and time, like "PLA 55°C/4h", and fills in both fields below.
+2. **Or set the values yourself.** Tap the temperature field or the minutes field to bring up a keypad.
+3. Tap **Start Drying**.
+
+While a cycle runs, that same button reads **Stop Drying**, and it is also the cancel - there is no separate cancel button. Stopping is safe at any point: the heater goes off and the remaining time is discarded. There is no fan control.
+
+Three things about the fields are worth knowing:
+
+- **The duration field is in minutes**, not hours. Only the preset labels read in hours, so a preset called "4h" puts `240` in the field. Cycles shorter than an hour are fine.
+- **The temperature range is that box's range**, and it is printed in the field's own label - "Temp °C (35-65)". The keypad won't accept anything outside it. A preset whose usual temperature sits above the ceiling is shown and sent clamped, so a 70 °C preset on a 65 °C box reads 65 °C, and 65 °C is what runs.
+- **Your last values come back.** HelixScreen remembers the temperature and duration you last started a dry with, per printer, and fills them in the next time you open a box.
+
+Left alone, HelixScreen picks the preset that suits the filament in that box - the most conservative one, meaning the lowest drying temperature among the materials loaded there, so a mixed box isn't dried at the temperature its most tolerant spool would take. Type a value yourself and that stops for the rest of the visit; pick a preset by hand and it starts again.
+
+### Material Comfort
+
+Where a box has a humidity sensor, a **Material Comfort** strip sits below the readouts. It lists the materials loaded in that box, each with a verdict - **OK**, **Marginal** or **Too humid** - and the humidity ceiling that material is judged against, written as "PLA: OK (< 50%)". Materials differ enormously in what they tolerate: nylon and the high-temperature engineering plastics want a far drier box than PLA does, so the same reading can be comfortable for one spool and too wet for the one beside it. If none of the box's slots report a material, the strip falls back to the materials on your [temperature presets](temperature.md#reassigning-a-presets-filament-type).
+
+The one-word status in the box list is a second, more general scale, applied to the box rather than to any material in it. So a box can read **OK** in the list while a demanding material reads **Marginal** in the strip. For what you actually have loaded, the strip is the one to go by.
 
 ### Typical Drying Parameters
 
@@ -541,11 +688,21 @@ These are general-purpose starting points. Your filament manufacturer's guidance
 
 Filament that has been stored open for a long time may need the longer end of the range.
 
-### Multi-Unit Setups
+Remember that the duration field takes minutes: 4 hours is `240`, 12 hours is `720`.
 
-If you have multiple Box units connected, each unit has its own dryer with independent controls. The panel shows which unit you are controlling. You can run dryers on multiple units at the same time — each unit heats independently.
+### Several Boxes at Once
 
-The humidity readout and the **Material Comfort** guidance below it belong to the unit you opened, and appear only when that unit actually has a humidity sensor. On older versions they followed the *first* unit instead, so a unit with no humidity sensor could show the readout (or a unit that had one could hide it) depending on what the first unit reported.
+Boxes are measured independently, but they aren't always heated independently. Some hardware runs one heater at a time. Where your filament system reports that, starting a dry on a second box doesn't begin heating it - the box waits its turn, and the screen says so:
+
+- A banner with a clock icon reads "Waiting for *box* to finish. One heater at a time." (or just "Waiting for another box to finish." when the box holding the heater can't be named)
+- That box's tab shows a clock instead of the heat symbol
+- No progress bar appears until the box is actually heating
+
+Nothing has gone wrong and there's nothing to retry. When the running cycle ends, the waiting box takes the heater.
+
+Where the hardware has no such limit, boxes heat independently and more than one cycle can run at a time.
+
+Whichever shape you have, the readouts, the Material Comfort strip and the drying controls all belong to the box named in the title - not to the unit, and not to the first box on the printer.
 
 ---
 
@@ -555,7 +712,7 @@ The humidity readout and the **Material Comfort** guidance below it belong to th
 - [Temperature Control](temperature.md) — Preheat presets work with spool material info
 - [Bluetooth Setup](bluetooth-setup.md) — Required for Bluetooth-connected AMS and label printers
 - [Label Printing](label-printing.md) — Print physical spool labels with Spoolman data
-- [Settings: Hardware & Devices](settings/hardware.md) — AMS, Spoolman, and filament sensor configuration
+- [Settings: Devices](settings/devices.md) — AMS, Spoolman, and filament sensor configuration
 
 ---
 

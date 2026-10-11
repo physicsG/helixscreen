@@ -86,7 +86,7 @@ class PrintCompletionTestFixture {
     // Get current print state enum
     PrintJobState get_print_state_enum() {
         return static_cast<PrintJobState>(
-            lv_subject_get_int(state_.get_print_state_enum_subject()));
+            lv_subject_get_int(state_.print_state().get_print_state_enum_subject()));
     }
 
     // Register a test observer that mimics print_completion behavior
@@ -97,7 +97,7 @@ class PrintCompletionTestFixture {
         has_received_first_update_ = false;
 
         observer_ = lv_subject_add_observer(
-            state_.get_print_state_enum_subject(),
+            state_.print_state().get_print_state_enum_subject(),
             [](lv_observer_t* observer, lv_subject_t* subject) {
                 auto* self =
                     static_cast<PrintCompletionTestFixture*>(lv_observer_get_user_data(observer));

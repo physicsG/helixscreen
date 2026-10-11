@@ -4,8 +4,8 @@
 #include "ui_probe_overlay.h"
 
 #include "ui_callback_helpers.h"
+#include "ui_error_reporting.h"
 #include "ui_modal.h"
-#include "ui_nav_manager.h"
 #include "ui_panel_bed_mesh.h"
 #include "ui_panel_calibration_zoffset.h"
 #include "ui_toast_manager.h"
@@ -14,15 +14,19 @@
 #include "app_globals.h"
 #include "i_moonraker_api.h"
 #include "i_moonraker_client.h"
-#include "moonraker_advanced_api.h"
 #include "printer_state.h"
 #include "probe_preparation.h"
 #include "probe_sensor_manager.h"
 #include "probe_sensor_types.h"
 #include "static_panel_registry.h"
+#include "text_io.h"
 #include "toolhead_homing.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/spdlog.h>
+
+#include <atomic>
+#include <memory>
 
 #include "hv/json.hpp"
 
@@ -37,21 +41,9 @@ using helix::sensors::ProbeSensorType;
 // GLOBAL INSTANCE AND ROW CLICK HANDLER
 // ============================================================================
 
-static std::unique_ptr<ProbeOverlay> g_probe_overlay;
-
 // Forward declarations
-static void on_probe_row_clicked(lv_event_t* e);
 IMoonrakerAPI* get_moonraker_api();
 IMoonrakerClient* get_moonraker_client();
-
-ProbeOverlay& get_global_probe_overlay() {
-    if (!g_probe_overlay) {
-        g_probe_overlay = std::make_unique<ProbeOverlay>();
-        StaticPanelRegistry::instance().register_destroy("ProbeOverlay",
-                                                         []() { g_probe_overlay.reset(); });
-    }
-    return *g_probe_overlay;
-}
 
 ProbeOverlay::~ProbeOverlay() {
     if (subjects_initialized_) {
@@ -60,56 +52,64 @@ ProbeOverlay::~ProbeOverlay() {
     }
 
     overlay_root_ = nullptr;
-    parent_screen_ = nullptr;
-
-    if (!StaticPanelRegistry::is_destroyed()) {
-        spdlog::trace("[Probe] Destroyed");
-    }
 }
 
 void init_probe_row_handler() {
-    lv_xml_register_event_cb(nullptr, "on_probe_row_clicked", on_probe_row_clicked);
+    register_xml_callbacks({
+        {"on_probe_row_clicked",
+         [](lv_event_t*) {
+             spdlog::debug("[Probe] Probe row clicked");
+             auto& overlay = get_global_probe_overlay();
+             overlay.set_api(get_moonraker_api());
+             overlay.show(lv_display_get_screen_active(nullptr));
+         }},
+    });
     spdlog::trace("[Probe] Row click callback registered");
-}
-
-static void on_probe_row_clicked(lv_event_t* e) {
-    (void)e;
-    spdlog::debug("[Probe] Probe row clicked");
-
-    auto& overlay = get_global_probe_overlay();
-
-    // Lazy-create the probe overlay
-    if (!overlay.get_root()) {
-        spdlog::debug("[Probe] Creating probe overlay...");
-
-        IMoonrakerAPI* api = get_moonraker_api();
-        overlay.set_api(api);
-
-        lv_obj_t* screen = lv_display_get_screen_active(nullptr);
-        if (!overlay.create(screen)) {
-            spdlog::error("[Probe] Failed to create probe_overlay");
-            return;
-        }
-        spdlog::info("[Probe] Overlay created");
-    }
-
-    overlay.show();
 }
 
 // ============================================================================
 // XML EVENT CALLBACK REGISTRATION
 // ============================================================================
 
-// Helper to send a GCode command via MoonrakerClient
-static void send_probe_gcode(const char* gcode, const char* label) {
-    IMoonrakerClient* client = get_moonraker_client();
-    if (!client) {
-        spdlog::error("[Probe] No client for {} command", label);
-        return;
+/// Probe commands go through the API's send gate like every other machine
+/// command, so the homing-during-print guard and the spools-on-the-bed latch
+/// both apply. Returns false when the gate refused it on the spot; the refusal
+/// reaches the user as a toast.
+namespace helix::ui {
+bool probe_send_gcode(const char* gcode, const char* label) {
+    IMoonrakerAPI* api = get_moonraker_api();
+    if (!api) {
+        spdlog::error("[Probe] No API for {} command", label);
+        return false;
     }
     spdlog::debug("[Probe] Sending {}: {}", label, gcode);
-    client->gcode_script(gcode);
+    // The error callback can run long after this returns (an RPC error or a
+    // timeout), so it owns its flag rather than reaching into this frame. Read
+    // right after the call, the flag says whether the gate refused on the spot.
+    auto refused = std::make_shared<std::atomic<bool>>(false);
+    api->execute_gcode(gcode, nullptr, [refused](const MoonrakerError& err) {
+        refused->store(true);
+        helix::ui::queue_update("Probe::send_refused", [msg = err.message] {
+            ToastManager::instance().show(ToastSeverity::ERROR, msg.c_str(), 6000);
+        });
+    });
+    return !refused->load();
 }
+
+} // namespace helix::ui
+
+namespace {
+void send_probe_gcode(const char* gcode, const char* label) {
+    helix::ui::probe_send_gcode(gcode, label);
+}
+
+// Callable from any thread: the title's lv_tr() runs on the main thread.
+void notify_config_edit_failed(const std::string& field, const std::string& err) {
+    helix::ui::run_on_main("ProbeOverlay::config_edit_failed", [field, err]() {
+        NOTIFY_ERROR_T(lv_tr("Config Edit Failed"), "{}: {}", field, err);
+    });
+}
+} // namespace
 
 void ui_probe_overlay_register_callbacks() {
     register_xml_callbacks({
@@ -149,29 +149,35 @@ void ui_probe_overlay_register_callbacks() {
         // Cartographer controls
         {"on_carto_touch_cal",
          [](lv_event_t* /*e*/) {
-             send_probe_gcode("CARTOGRAPHER_TOUCH_CALIBRATE", "Cartographer Touch Calibrate");
-             ToastManager::instance().show(ToastSeverity::INFO,
-                                           lv_tr("Cartographer touch calibrate sent"));
+             if (helix::ui::probe_send_gcode("CARTOGRAPHER_TOUCH_CALIBRATE",
+                                             "Cartographer Touch Calibrate")) {
+                 ToastManager::instance().show(ToastSeverity::INFO,
+                                               lv_tr("Cartographer touch calibrate sent"));
+             }
          }},
         {"on_carto_scan_cal",
          [](lv_event_t* /*e*/) {
-             send_probe_gcode("CARTOGRAPHER_SCAN_CALIBRATE", "Cartographer Scan Calibrate");
-             ToastManager::instance().show(
-                 ToastSeverity::INFO,
-                 lv_tr("Cartographer scan calibrate sent — use Z-Offset panel to adjust"));
+             if (helix::ui::probe_send_gcode("CARTOGRAPHER_SCAN_CALIBRATE",
+                                             "Cartographer Scan Calibrate")) {
+                 ToastManager::instance().show(
+                     ToastSeverity::INFO,
+                     lv_tr("Cartographer scan calibrate sent — use Z-Offset panel to adjust"));
+             }
          }},
 
         // Beacon controls
         {"on_beacon_calibrate",
          [](lv_event_t* /*e*/) {
-             send_probe_gcode("BEACON_CALIBRATE", "Beacon Calibrate");
-             ToastManager::instance().show(ToastSeverity::INFO, lv_tr("Beacon calibrate sent"));
+             if (helix::ui::probe_send_gcode("BEACON_CALIBRATE", "Beacon Calibrate")) {
+                 ToastManager::instance().show(ToastSeverity::INFO, lv_tr("Beacon calibrate sent"));
+             }
          }},
         {"on_beacon_auto_cal",
          [](lv_event_t* /*e*/) {
-             send_probe_gcode("BEACON_AUTO_CALIBRATE", "Beacon Auto-Calibrate");
-             ToastManager::instance().show(ToastSeverity::INFO,
-                                           lv_tr("Beacon auto-calibrate sent"));
+             if (helix::ui::probe_send_gcode("BEACON_AUTO_CALIBRATE", "Beacon Auto-Calibrate")) {
+                 ToastManager::instance().show(ToastSeverity::INFO,
+                                               lv_tr("Beacon auto-calibrate sent"));
+             }
          }},
 
         // Klicky controls
@@ -346,51 +352,13 @@ void ProbeOverlay::init_subjects() {
 }
 
 lv_obj_t* ProbeOverlay::create(lv_obj_t* parent) {
-    if (overlay_root_) {
-        spdlog::debug("[Probe] Overlay already created");
-        return overlay_root_;
-    }
-
-    parent_screen_ = parent;
-
-    // Ensure subjects are initialized before XML creation
-    if (!subjects_initialized_) {
-        init_subjects();
-    }
-
-    spdlog::debug("[Probe] Creating overlay from XML");
-    overlay_root_ = static_cast<lv_obj_t*>(lv_xml_create(parent, "probe_overlay", nullptr));
-
-    if (!overlay_root_) {
-        spdlog::error("[Probe] Failed to create overlay from XML");
+    if (!OverlayBase::create(parent)) {
         return nullptr;
     }
 
-    // Start hidden (push_overlay will show it)
-    lv_obj_add_flag(overlay_root_, LV_OBJ_FLAG_HIDDEN);
-
     // Cache type panel container for later swapping
-    type_panel_container_ = lv_obj_find_by_name(overlay_root_, "probe_type_panel");
-
-    spdlog::info("[Probe] Overlay created successfully");
+    type_panel_container_ = helix::ui::find_required(overlay_root_, "probe_type_panel", get_name());
     return overlay_root_;
-}
-
-void ProbeOverlay::show() {
-    if (!overlay_root_) {
-        spdlog::error("[Probe] Cannot show: overlay not created");
-        return;
-    }
-
-    spdlog::debug("[Probe] Showing overlay");
-
-    // Register with NavigationManager for lifecycle callbacks
-    NavigationManager::instance().register_overlay_instance(overlay_root_, this);
-
-    // Push onto navigation stack - on_activate() will be called by NavigationManager
-    NavigationManager::instance().push_overlay(overlay_root_);
-
-    spdlog::info("[Probe] Overlay shown");
 }
 
 void ProbeOverlay::on_activate() {
@@ -404,14 +372,6 @@ void ProbeOverlay::on_activate() {
 
     // Load config values from Klipper
     load_config_values();
-}
-
-void ProbeOverlay::on_deactivate() {
-    spdlog::debug("[Probe] Deactivated");
-}
-
-void ProbeOverlay::cleanup() {
-    spdlog::trace("[Probe] Cleanup");
 }
 
 void ProbeOverlay::set_api(IMoonrakerAPI* api) {
@@ -503,9 +463,22 @@ void ProbeOverlay::update_display_subjects() {
 }
 
 void ProbeOverlay::set_accuracy_error(const std::string& msg) {
+    probe_acc_backstop_.end();
     snprintf(probe_acc_error_msg_buf_, sizeof(probe_acc_error_msg_buf_), "%s", msg.c_str());
     lv_subject_copy_string(&probe_acc_error_msg_, probe_acc_error_msg_buf_);
     lv_subject_set_int(&probe_acc_state_, 3); // ERROR
+}
+
+void ProbeOverlay::arm_accuracy_backstop(const std::string& handler_name, uint32_t backstop_ms) {
+    if (probe_acc_handler_name_ != handler_name) {
+        return; // a newer run owns the modal
+    }
+    probe_acc_backstop_.begin(backstop_ms, [this, handler_name]() {
+        if (api_) {
+            api_->unregister_method_callback("notify_gcode_response", handler_name);
+        }
+        set_accuracy_error(lv_tr("Connection lost — probe accuracy result unavailable"));
+    });
 }
 
 // ============================================================================
@@ -580,7 +553,7 @@ void ProbeOverlay::handle_probe_accuracy() {
     std::string gcode;
     if (!all_homed) {
         // Diagnostic-only re-fetch — all_homed above already decided the branch.
-        const char* homed_dbg = lv_subject_get_string(ps.get_homed_axes_subject());
+        const char* homed_dbg = lv_subject_get_string(ps.motion_state().get_homed_axes_subject());
         spdlog::info("[Probe] Axes not homed (homed_axes='{}'), homing first",
                      homed_dbg ? homed_dbg : "");
         gcode = "G28\n";
@@ -630,6 +603,7 @@ void ProbeOverlay::handle_probe_accuracy() {
     }
 
     // Unregister any stale handler from a previous run
+    probe_acc_backstop_.end();
     if (!probe_acc_handler_name_.empty()) {
         api_->unregister_method_callback("notify_gcode_response", probe_acc_handler_name_);
     }
@@ -654,7 +628,7 @@ void ProbeOverlay::handle_probe_accuracy() {
                 // L081_FREEZE_OK: handler is registered when the user taps Probe
                 // Accuracy (post-startup); samples are a high-frequency stream where
                 // a dropped progress tick is harmless.
-                helix::ui::queue_update([z_val]() {
+                helix::ui::queue_update("ProbeOverlay::handle_probe_accuracy", [z_val]() {
                     auto& overlay = get_global_probe_overlay();
                     overlay.probe_acc_sample_count_++;
                     int current = overlay.probe_acc_sample_count_;
@@ -682,8 +656,9 @@ void ProbeOverlay::handle_probe_accuracy() {
                 api->unregister_method_callback("notify_gcode_response", handler_name);
 
                 std::string results = line;
-                helix::ui::queue_update(
-                    [results]() { get_global_probe_overlay().show_accuracy_results(results); });
+                helix::ui::queue_update("ProbeOverlay::handle_probe_accuracy", [results]() {
+                    get_global_probe_overlay().show_accuracy_results(results);
+                });
                 return;
             }
 
@@ -694,8 +669,9 @@ void ProbeOverlay::handle_probe_accuracy() {
                 api->unregister_method_callback("notify_gcode_response", handler_name);
 
                 std::string error_msg = line;
-                helix::ui::queue_update(
-                    [error_msg]() { get_global_probe_overlay().set_accuracy_error(error_msg); });
+                helix::ui::queue_update("ProbeOverlay::handle_probe_accuracy", [error_msg]() {
+                    get_global_probe_overlay().set_accuracy_error(error_msg);
+                });
             }
         });
 
@@ -704,17 +680,35 @@ void ProbeOverlay::handle_probe_accuracy() {
         [handler_name = probe_acc_handler_name_]() {
             spdlog::info("[Probe] PROBE_ACCURACY command completed");
         },
-        [api = api_, handler_name = probe_acc_handler_name_](const MoonrakerError& err) {
-            spdlog::error("[Probe] PROBE_ACCURACY failed: {}", err.user_message());
+        [api = api_, handler_name = probe_acc_handler_name_,
+         backstop_ms =
+             IAdvancedAPI::PROBING_TIMEOUT_MS + prep_timeout_ms](const MoonrakerError& err) {
+            // A dropped socket or an RPC timeout is not a probe result: the
+            // printer may still be measuring, and its result lines arrive on
+            // the same stream the handler is registered on. Keep listening
+            // (prestonbrown/helixscreen#1543); a genuine rejection is still
+            // terminal.
+            if (err.is_transport_loss()) {
+                spdlog::warn("[Probe] PROBE_ACCURACY RPC lost to the transport ({}); still "
+                             "listening for results",
+                             err.type == MoonrakerErrorType::TIMEOUT ? "timeout" : "disconnect");
+                helix::ui::queue_update(
+                    "ProbeOverlay::arm_accuracy_backstop", [handler_name, backstop_ms]() {
+                        get_global_probe_overlay().arm_accuracy_backstop(handler_name, backstop_ms);
+                    });
+                return;
+            }
+            spdlog::error("[Probe] PROBE_ACCURACY failed: {}", err.message);
             api->unregister_method_callback("notify_gcode_response", handler_name);
-            std::string msg = err.user_message();
-            helix::ui::queue_update(
-                [msg]() { get_global_probe_overlay().set_accuracy_error(msg); });
+            helix::ui::queue_update("ProbeOverlay::handle_probe_accuracy", [err]() {
+                get_global_probe_overlay().set_accuracy_error(err.localized_message());
+            });
         },
-        MoonrakerAdvancedAPI::PROBING_TIMEOUT_MS + prep_timeout_ms);
+        IAdvancedAPI::PROBING_TIMEOUT_MS + prep_timeout_ms);
 }
 
 void ProbeOverlay::show_accuracy_results(const std::string& results_line) {
+    probe_acc_backstop_.end();
     // Parse: "probe accuracy results: maximum 1.234, minimum 1.230, range 0.004,
     //         average 1.232, median 1.232, standard deviation 0.001"
     auto extract_value = [&](const std::string& key) -> std::string {
@@ -750,12 +744,8 @@ void ProbeOverlay::show_accuracy_results(const std::string& results_line) {
 
     // Assess quality based on range value
     std::string range_str = extract_value("range ");
-    double range_val = 0.0;
-    try {
-        range_val = std::stod(range_str);
-    } catch (...) {
-        range_val = 1.0; // Unknown = treat as poor
-    }
+    // Unknown = treat as poor
+    const double range_val = helix::text_io::parse_leading<double>(range_str).value_or(1.0);
 
     // quality: 1 = good (range < 0.05mm), 0 = poor
     // < 0.01 = excellent (Cartographer, Beacon, good BLTouch)
@@ -815,15 +805,8 @@ void ProbeOverlay::handle_zoffset_cal() {
 #endif
 
     auto& overlay = get_global_zoffset_cal_panel();
-
-    // Lazy-create z-offset overlay
-    if (!overlay.get_root()) {
-        overlay.init_subjects();
-        overlay.set_api(get_moonraker_api());
-        overlay.create(lv_display_get_screen_active(nullptr));
-    }
-
-    overlay.show();
+    overlay.set_api(get_moonraker_api());
+    overlay.show(lv_display_get_screen_active(nullptr));
 }
 
 void ProbeOverlay::handle_bed_mesh() {
@@ -835,28 +818,38 @@ void ProbeOverlay::handle_bed_mesh() {
     return;
 #endif
 
-    auto& panel = get_global_bed_mesh_panel();
-
-    // Lazy-create bed mesh overlay
-    if (!panel.get_root()) {
-        if (!panel.are_subjects_initialized()) {
-            panel.init_subjects();
-        }
-        panel.register_callbacks();
-        auto* root = panel.create(lv_display_get_screen_active(nullptr));
-        if (root) {
-            NavigationManager::instance().register_overlay_instance(root, &panel);
-        }
-    }
-
-    if (panel.get_root()) {
-        NavigationManager::instance().push_overlay(panel.get_root());
-    }
+    get_global_bed_mesh_panel().show(lv_display_get_screen_active(nullptr));
 }
 
 // ============================================================================
 // CONFIG VALUE LOADING
 // ============================================================================
+
+namespace helix::ui {
+// Klipper's probe.py defaults, shared by [probe], [bltouch] and [smart_effector].
+std::string probe_config_klipper_default(const std::string& key) {
+    if (key == "x_offset" || key == "y_offset")
+        return "0";
+    if (key == "samples")
+        return "1";
+    if (key == "speed")
+        return "5";
+    if (key == "sample_retract_dist")
+        return "2";
+    if (key == "samples_tolerance")
+        return "0.1";
+    return "";
+}
+
+std::string probe_config_display_value(const std::string& key, const std::string& configured) {
+    if (!configured.empty())
+        return configured;
+    const std::string def = probe_config_klipper_default(key);
+    if (def.empty())
+        return lv_tr("Default");
+    return fmt::format("{} ({})", def, lv_tr("Default"));
+}
+} // namespace helix::ui
 
 std::string ProbeOverlay::get_probe_config_section() const {
     auto& mgr = ProbeSensorManager::instance();
@@ -896,30 +889,30 @@ void ProbeOverlay::load_config_values() {
 
             const auto& section = config[probe_section_];
 
-            // Helper to extract string value and copy to subject buffer
-            auto set_cfg = [](const json& sec, const char* key, char* buf, size_t buf_size,
-                              lv_subject_t* subject) {
-                if (sec.contains(key)) {
-                    std::string val = sec[key].get<std::string>();
-                    snprintf(buf, buf_size, "%s", val.c_str());
-                } else {
-                    snprintf(buf, buf_size, "default");
-                }
-                lv_subject_copy_string(subject, buf);
-            };
-
-            lifetime_.defer("ProbeOverlay::load_probe_config", [this, section, set_cfg]() {
-                set_cfg(section, "x_offset", probe_cfg_x_offset_buf_,
-                        sizeof(probe_cfg_x_offset_buf_), &probe_cfg_x_offset_);
-                set_cfg(section, "y_offset", probe_cfg_y_offset_buf_,
-                        sizeof(probe_cfg_y_offset_buf_), &probe_cfg_y_offset_);
-                set_cfg(section, "samples", probe_cfg_samples_buf_, sizeof(probe_cfg_samples_buf_),
+            lifetime_.defer("ProbeOverlay::load_probe_config", [this, section]() {
+                probe_cfg_configured_.clear();
+                auto set_cfg = [&](const char* key, char* buf, size_t buf_size,
+                                   lv_subject_t* subject) {
+                    std::string configured;
+                    if (section.contains(key) && section[key].is_string()) {
+                        configured = section[key].get<std::string>();
+                        probe_cfg_configured_[key] = configured;
+                    }
+                    snprintf(buf, buf_size, "%s",
+                             helix::ui::probe_config_display_value(key, configured).c_str());
+                    lv_subject_copy_string(subject, buf);
+                };
+                set_cfg("x_offset", probe_cfg_x_offset_buf_, sizeof(probe_cfg_x_offset_buf_),
+                        &probe_cfg_x_offset_);
+                set_cfg("y_offset", probe_cfg_y_offset_buf_, sizeof(probe_cfg_y_offset_buf_),
+                        &probe_cfg_y_offset_);
+                set_cfg("samples", probe_cfg_samples_buf_, sizeof(probe_cfg_samples_buf_),
                         &probe_cfg_samples_);
-                set_cfg(section, "speed", probe_cfg_speed_buf_, sizeof(probe_cfg_speed_buf_),
+                set_cfg("speed", probe_cfg_speed_buf_, sizeof(probe_cfg_speed_buf_),
                         &probe_cfg_speed_);
-                set_cfg(section, "sample_retract_dist", probe_cfg_retract_dist_buf_,
+                set_cfg("sample_retract_dist", probe_cfg_retract_dist_buf_,
                         sizeof(probe_cfg_retract_dist_buf_), &probe_cfg_retract_dist_);
-                set_cfg(section, "samples_tolerance", probe_cfg_tolerance_buf_,
+                set_cfg("samples_tolerance", probe_cfg_tolerance_buf_,
                         sizeof(probe_cfg_tolerance_buf_), &probe_cfg_tolerance_);
 
                 lv_subject_set_int(&probe_config_loaded_, 1);
@@ -969,14 +962,20 @@ void ProbeOverlay::handle_config_edit(const std::string& field_key, const std::s
              current_val);
     lv_subject_copy_string(&probe_config_edit_current_, probe_config_edit_current_buf_);
 
-    // Pre-fill edit value with current
-    snprintf(probe_config_edit_value_buf_, sizeof(probe_config_edit_value_buf_), "%s", current_val);
+    // An option not in printer.cfg starts empty, with Klipper's default as the hint
+    auto it = probe_cfg_configured_.find(field_key);
+    const std::string configured = it != probe_cfg_configured_.end() ? it->second : "";
+    snprintf(probe_config_edit_value_buf_, sizeof(probe_config_edit_value_buf_), "%s",
+             configured.c_str());
     lv_subject_copy_string(&probe_config_edit_value_, probe_config_edit_value_buf_);
 
     // Show the modal
     edit_modal_ = Modal::show("probe_config_edit_modal");
     if (!edit_modal_) {
         spdlog::error("[Probe] Failed to show config edit modal");
+    } else if (auto* input = lv_obj_find_by_name(edit_modal_, "probe_config_input")) {
+        lv_textarea_set_placeholder_text(
+            input, helix::ui::probe_config_klipper_default(field_key).c_str());
     }
 }
 
@@ -1002,6 +1001,12 @@ void ProbeOverlay::handle_config_save() {
     std::string field = editing_field_key_;
     std::string section = probe_section_;
 
+    if (new_value.empty()) {
+        spdlog::debug("[Probe] Empty value for {}, nothing to save", field);
+        handle_config_cancel();
+        return;
+    }
+
     spdlog::info("[Probe] Saving config: [{}] {} = {}", section, field, new_value);
 
     // Close the edit modal
@@ -1016,30 +1021,30 @@ void ProbeOverlay::handle_config_save() {
     }
 
     // Use the safe edit flow: backup -> edit -> firmware restart -> monitor -> revert on failure
+    // Both editor calls answer on a background thread.
     config_editor_.load_config_files(
         *api_,
-        [this, section, field,
-         new_value](std::map<std::string, helix::system::SectionLocation> /*section_map*/) {
-            auto token = lifetime_.token();
-            config_editor_.safe_edit_value(
-                *api_, section, field, new_value,
-                [this, token]() {
-                    spdlog::info("[Probe] Config edit saved successfully");
-                    if (token.expired())
-                        return;
-                    token.defer([this]() {
-                        // Reload config values to reflect the change
-                        load_config_values();
-                    });
-                },
-                [](const std::string& err) {
-                    spdlog::error("[Probe] Config edit failed: {}", err);
-                    // TODO: Show error to user via modal
-                });
-        },
-        [](const std::string& err) {
-            spdlog::error("[Probe] Failed to load config files for edit: {}", err);
-        });
+        lifetime_.bg_cb("ProbeOverlay::config_loaded",
+                        [this, section, field, new_value](
+                            std::map<std::string, helix::system::SectionLocation> /*section_map*/) {
+                            auto token = lifetime_.token();
+                            config_editor_.safe_edit_value(
+                                *api_, section, field, new_value,
+                                [this, token]() {
+                                    spdlog::info("[Probe] Config edit saved successfully");
+                                    if (token.expired())
+                                        return;
+                                    token.defer([this]() {
+                                        // Reload config values to reflect the change
+                                        load_config_values();
+                                    });
+                                },
+                                // The safe-edit flow has already reverted the file.
+                                [field](const std::string& err) {
+                                    notify_config_edit_failed(field, err);
+                                });
+                        }),
+        [field](const std::string& err) { notify_config_edit_failed(field, err); });
 }
 
 void ProbeOverlay::handle_config_cancel() {

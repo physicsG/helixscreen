@@ -3,6 +3,15 @@
 
 #pragma once
 
+#include "display_numbering.h"
+
+// config.cpp and config_storage_file.cpp parse this header in the splash
+// build, whose include path reaches lib/lvgl but not lib/ — the lvgl/lvgl.h
+// spelling does not resolve there.
+#include "lvgl.h" // lv_tr()
+
+#include <spdlog/fmt/fmt.h>
+
 #include <string>
 
 /**
@@ -13,6 +22,8 @@
  * including user-friendly messages suitable for UI display and technical
  * details for debugging.
  */
+
+namespace helix {
 
 /**
  * @brief AMS operation result codes
@@ -78,61 +89,61 @@ enum class AmsResult {
 inline const char* ams_result_to_string(AmsResult result) {
     switch (result) {
     case AmsResult::SUCCESS:
-        return "Success";
+        return lv_tr("Success");
     case AmsResult::NOT_CONNECTED:
-        return "Not Connected";
+        return lv_tr("Not Connected");
     case AmsResult::TIMEOUT:
-        return "Timeout";
+        return lv_tr("Timeout");
     case AmsResult::CONNECTION_LOST:
-        return "Connection Lost";
+        return lv_tr("Connection Lost");
     case AmsResult::COMMAND_FAILED:
-        return "Command Failed";
+        return lv_tr("Command Failed");
     case AmsResult::NOT_INITIALIZED:
-        return "Not Initialized";
+        return lv_tr("Not Initialized");
     case AmsResult::NO_AMS_DETECTED:
-        return "No AMS Detected";
+        return lv_tr("No AMS Detected");
     case AmsResult::WRONG_STATE:
-        return "Wrong State";
+        return lv_tr("Wrong State");
     case AmsResult::BUSY:
-        return "Busy";
+        return lv_tr("Busy");
     case AmsResult::FILAMENT_JAM:
-        return "Filament Jam";
+        return lv_tr("Filament Jam");
     case AmsResult::SLOT_BLOCKED:
-        return "Slot Blocked";
+        return lv_tr("Slot Blocked");
     case AmsResult::SENSOR_ERROR:
-        return "Sensor Error";
+        return lv_tr("Sensor Error");
     case AmsResult::ENCODER_ERROR:
-        return "Encoder Error";
+        return lv_tr("Encoder Error");
     case AmsResult::HOMING_FAILED:
-        return "Homing Failed";
+        return lv_tr("Homing Failed");
     case AmsResult::EXTRUDER_COLD:
-        return "Extruder Cold";
+        return lv_tr("Extruder Cold");
     case AmsResult::LOAD_FAILED:
-        return "Load Failed";
+        return lv_tr("Load Failed");
     case AmsResult::UNLOAD_FAILED:
-        return "Unload Failed";
+        return lv_tr("Unload Failed");
     case AmsResult::TOOL_CHANGE_FAILED:
-        return "Tool Change Failed";
+        return lv_tr("Tool Change Failed");
     case AmsResult::TIP_FORMING_FAILED:
-        return "Tip Forming Failed";
+        return lv_tr("Tip Forming Failed");
     case AmsResult::SLOT_NOT_AVAILABLE:
-        return "Slot Not Available";
+        return lv_tr("Slot Not Available");
     case AmsResult::INVALID_SLOT:
-        return "Invalid Slot";
+        return lv_tr("Invalid Slot");
     case AmsResult::INVALID_TOOL:
-        return "Invalid Tool";
+        return lv_tr("Invalid Tool");
     case AmsResult::MAPPING_ERROR:
-        return "Mapping Error";
+        return lv_tr("Mapping Error");
     case AmsResult::SPOOLMAN_NOT_AVAILABLE:
-        return "Spoolman Not Available";
+        return lv_tr("Spoolman Not Available");
     case AmsResult::SPOOL_NOT_FOUND:
-        return "Spool Not Found";
+        return lv_tr("Spool Not Found");
     case AmsResult::NOT_SUPPORTED:
-        return "Not Supported";
+        return lv_tr("Not Supported");
     case AmsResult::RESUME_REQUIRES_RESTART:
-        return "Resume Requires Restart";
+        return lv_tr("Resume Requires Restart");
     default:
-        return "Unknown Error";
+        return lv_tr("Unknown Error");
     }
 }
 
@@ -172,6 +183,10 @@ struct AmsError {
     std::string user_msg;      ///< User-friendly message for UI display
     std::string suggestion;    ///< Suggested recovery action (optional)
     int slot_index = -1;       ///< Slot involved in error (-1 if N/A)
+    /// The operation failed, but writes it made before failing reached the
+    /// backend's stores and stand. A caller that records what the operation
+    /// changed records those too, and still reports the failure.
+    bool partially_applied = false;
 
     /**
      * @brief Construct an AmsError
@@ -244,6 +259,18 @@ struct AmsError {
 class AmsErrorHelper {
   public:
     /**
+     * @brief The position a user sees, in the backend's own word.
+     *
+     * 1-based, because this is a toast and not a log line. An index that is not
+     * a position at all still names its raw value, so a sentinel reaching here
+     * says what was asked for instead of leaving a gap in the sentence.
+     */
+    static std::string position_label(ui::LaneNoun noun, int slot) {
+        const std::string label = ui::lane_label(noun, slot);
+        return label.empty() ? ui::noun_text(noun) + " " + std::to_string(slot) : label;
+    }
+
+    /**
      * @brief Create a success result
      * @return AmsError with SUCCESS result
      */
@@ -259,8 +286,40 @@ class AmsErrorHelper {
     static AmsError not_connected(const std::string& detail = "") {
         return AmsError(AmsResult::NOT_CONNECTED,
                         detail.empty() ? "No Moonraker connection" : detail,
-                        "Printer not connected",
-                        "Check that the printer is powered on and connected to the network");
+                        lv_tr("Printer not connected"),
+                        lv_tr("Check that the printer is powered on and connected to the network"));
+    }
+
+    /**
+     * @brief Create a "nothing discovered yet" error for a backend with no slots
+     * @param noun The backend's word for one position
+     * @return AmsError configured for UI display
+     *
+     * The printer is online; the filament system has not reported its positions.
+     */
+    static AmsError no_slots_discovered(ui::LaneNoun noun) {
+        const char* detail = "No slots discovered";
+        switch (noun) {
+        case ui::LaneNoun::Lane:
+            detail = "No lanes discovered";
+            break;
+        case ui::LaneNoun::Gate:
+            detail = "No gates discovered";
+            break;
+        case ui::LaneNoun::Tool:
+            detail = "No tools discovered";
+            break;
+        case ui::LaneNoun::Feeder:
+            detail = "No feeders discovered";
+            break;
+        case ui::LaneNoun::Toolhead:
+            detail = "No toolheads discovered";
+            break;
+        case ui::LaneNoun::Slot:
+            break;
+        }
+        return AmsError(AmsResult::NOT_CONNECTED, detail, lv_tr("Multi-filament system not ready"),
+                        lv_tr("It has not reported its slots yet. Try again in a moment."));
     }
 
     /**
@@ -269,8 +328,8 @@ class AmsErrorHelper {
      */
     static AmsError no_ams_detected() {
         return AmsError(AmsResult::NO_AMS_DETECTED, "No mmu or afc object found in printer state",
-                        "No multi-filament system detected",
-                        "Ensure Happy Hare or AFC is installed and configured");
+                        lv_tr("No multi-filament system detected"),
+                        lv_tr("Ensure Happy Hare or AFC is installed and configured"));
     }
 
     /**
@@ -279,9 +338,9 @@ class AmsErrorHelper {
      * @return AmsError configured for UI display
      */
     static AmsError timeout(const std::string& operation) {
-        return AmsError(AmsResult::TIMEOUT, operation + " operation timed out",
-                        "Operation timed out",
-                        "Try the operation again. If it persists, check for mechanical issues.");
+        return AmsError(
+            AmsResult::TIMEOUT, operation + " operation timed out", lv_tr("Operation timed out"),
+            lv_tr("Try the operation again. If it persists, check for mechanical issues."));
     }
 
     /**
@@ -291,7 +350,7 @@ class AmsErrorHelper {
      */
     static AmsError busy(const std::string& current_op = "another operation") {
         return AmsError(AmsResult::BUSY, "Cannot start operation: " + current_op + " in progress",
-                        "AMS is busy", "Wait for the current operation to complete");
+                        lv_tr("AMS is busy"), lv_tr("Wait for the current operation to complete"));
     }
 
     /**
@@ -324,19 +383,19 @@ class AmsErrorHelper {
             return AmsError(AmsResult::WRONG_STATE,
                             "Filament operation blocked: print paused mid-job and this printer's "
                             "filament macros home the toolhead themselves",
-                            "Can't move filament while the print is paused",
-                            "Feed filament past the sensor by hand, then press Resume — or cancel "
-                            "the print to use Load/Unload");
+                            lv_tr("Can't move filament while the print is paused"),
+                            lv_tr("Feed filament past the sensor by hand, then press Resume — or "
+                                  "cancel the print to use Load/Unload"));
         }
         // PRINTING. On a backend that permits filament ops while paused, pausing
         // is the cheap recovery — naming "finish or cancel" there would push the
         // user to throw away a print they could have saved.
         return AmsError(AmsResult::WRONG_STATE, "Filament operation blocked: print in progress",
-                        "Cannot run filament operation while printing",
+                        lv_tr("Cannot run filament operation while printing"),
                         pause_allows_ops
-                            ? "Pause the print first, then load, unload, or change filament"
-                            : "Finish or cancel the print before loading, unloading, or changing "
-                              "filament");
+                            ? lv_tr("Pause the print first, then load, unload, or change filament")
+                            : lv_tr("Finish or cancel the print before loading, unloading, or "
+                                    "changing filament"));
     }
 
     /**
@@ -345,7 +404,8 @@ class AmsErrorHelper {
      */
     static AmsError not_loaded() {
         return AmsError(AmsResult::WRONG_STATE, "No filament or tool is currently loaded",
-                        "Nothing loaded", "Load a filament first before trying to unload");
+                        lv_tr("Nothing loaded"),
+                        lv_tr("Load a filament first before trying to unload"));
     }
 
     /**
@@ -357,20 +417,8 @@ class AmsErrorHelper {
     static AmsError filament_jam(int slot, const std::string& location = "") {
         std::string loc_detail = location.empty() ? "" : " at " + location;
         return AmsError(AmsResult::FILAMENT_JAM, "Filament jam detected" + loc_detail,
-                        "Filament jam detected", "Manually clear the jam and retry the operation",
-                        slot);
-    }
-
-    /**
-     * @brief Create a slot blocked error
-     * @param slot Slot index that is blocked
-     * @return AmsError configured for UI display
-     */
-    static AmsError slot_blocked(int slot) {
-        return AmsError(AmsResult::SLOT_BLOCKED,
-                        "Slot " + std::to_string(slot) + " is blocked or inaccessible",
-                        "Slot " + std::to_string(slot) + " blocked",
-                        "Check the slot for obstructions or misaligned filament", slot);
+                        lv_tr("Filament jam detected"),
+                        lv_tr("Manually clear the jam and retry the operation"), slot);
     }
 
     /**
@@ -383,21 +431,10 @@ class AmsErrorHelper {
         return AmsError(AmsResult::EXTRUDER_COLD,
                         "Extruder at " + std::to_string(current_temp) + "°C, need " +
                             std::to_string(required_temp) + "°C",
-                        "Extruder too cold",
-                        "Heat the extruder to at least " + std::to_string(required_temp) +
-                            "°C before loading filament");
-    }
-
-    /**
-     * @brief Create a load failed error
-     * @param slot Slot that failed to load
-     * @param detail Technical detail about the failure
-     * @return AmsError configured for UI display
-     */
-    static AmsError load_failed(int slot, const std::string& detail = "") {
-        return AmsError(AmsResult::LOAD_FAILED, detail.empty() ? "Load operation failed" : detail,
-                        "Failed to load filament from slot " + std::to_string(slot),
-                        "Check filament path and try again", slot);
+                        lv_tr("Extruder too cold"),
+                        fmt::format(lv_tr("Heat the extruder to at least {}°C before loading "
+                                          "filament"),
+                                    required_temp));
     }
 
     /**
@@ -408,34 +445,65 @@ class AmsErrorHelper {
     static AmsError unload_failed(const std::string& detail = "") {
         return AmsError(
             AmsResult::UNLOAD_FAILED, detail.empty() ? "Unload operation failed" : detail,
-            "Failed to unload filament",
-            "Check extruder temperature and try again. Manual removal may be required.");
+            lv_tr("Failed to unload filament"),
+            lv_tr("Check extruder temperature and try again. Manual removal may be required."));
     }
 
     /**
      * @brief Create a slot not available error
+     * @param noun The backend's word for one position
      * @param slot Slot index that has no filament
      * @return AmsError configured for UI display
      */
-    static AmsError slot_not_available(int slot) {
+    static AmsError slot_not_available(ui::LaneNoun noun, int slot) {
+        // The position is a bare prefix, not part of the sentence: every locale
+        // that inflects would otherwise have the predicate agree with a noun
+        // that changes per backend.
         return AmsError(AmsResult::SLOT_NOT_AVAILABLE,
                         "Slot " + std::to_string(slot) + " has no filament loaded",
-                        "Slot " + std::to_string(slot) + " is empty",
-                        "Load filament into the slot before selecting it", slot);
+                        position_label(noun, slot) + ": " + lv_tr("No filament"),
+                        lv_tr("Load filament first"), slot);
     }
 
     /**
      * @brief Create an invalid slot error
+     * @param noun The backend's word for one position
      * @param slot Invalid slot index
-     * @param max_slot Maximum valid slot index
+     * @param max_slot Maximum valid slot index, 0-based
      * @return AmsError configured for UI display
      */
-    static AmsError invalid_slot(int slot, int max_slot) {
+    static AmsError invalid_slot(ui::LaneNoun noun, int slot, int max_slot) {
+        // The bare word, not a composed label: this names the kind of thing the
+        // index was supposed to be, not a position that exists. tool_out_of_range()
+        // below reads the same way. Bare prefix before the colon for the same
+        // reason as slot_not_available(): the frame cannot agree with a noun
+        // that varies per backend, and the suggestion's noun is the body's.
+        const std::string word = ui::noun_text(noun);
+        // 1-based, matching the labels these positions carry everywhere else. A
+        // backend that has reported no positions has no span to offer.
+        const int highest = ui::lane_number(max_slot);
+        const std::string suggestion =
+            highest > 0 ? fmt::format(lv_tr("Select a valid number (1-{})"), highest)
+                        : lv_tr("Select a valid number");
         return AmsError(AmsResult::INVALID_SLOT,
                         "Slot " + std::to_string(slot) + " out of range (0-" +
                             std::to_string(max_slot) + ")",
-                        "Invalid slot number",
-                        "Select a valid slot (0-" + std::to_string(max_slot) + ")", slot);
+                        word + ": " + lv_tr("Invalid number"), suggestion, slot);
+    }
+
+    /**
+     * @brief Create a tool number out of range error
+     * @param tool_number Invalid gcode tool index
+     * @return AmsError configured for UI display
+     */
+    static AmsError tool_out_of_range(int tool_number) {
+        // tool_label() returns empty for a negative index; fall back to the raw
+        // number there so the logged detail still names what was passed in.
+        const std::string label = helix::ui::tool_label(tool_number);
+        return AmsError(AmsResult::INVALID_TOOL,
+                        "Tool " + (label.empty() ? std::to_string(tool_number) : label) +
+                            " out of range",
+                        lv_tr("Invalid tool number"), lv_tr("Select a valid tool"));
     }
 
     /**
@@ -449,8 +517,8 @@ class AmsErrorHelper {
         return AmsError(AmsResult::WRONG_STATE,
                         "Cannot perform operation in state: " + current_state +
                             ", need: " + required_state,
-                        "Cannot perform this action now",
-                        "Wait for the current operation to complete or cancel it first");
+                        lv_tr("Cannot perform this action now"),
+                        lv_tr("Wait for the current operation to complete or cancel it first"));
     }
 
     /**
@@ -461,7 +529,7 @@ class AmsErrorHelper {
      */
     static AmsError command_failed(const std::string& command, const std::string& response) {
         return AmsError(AmsResult::COMMAND_FAILED, "Command '" + command + "' failed: " + response,
-                        "Command failed", "Check Klipper console for details");
+                        lv_tr("Command failed"), lv_tr("Check Klipper console for details"));
     }
 
     /**
@@ -471,8 +539,8 @@ class AmsErrorHelper {
      */
     static AmsError not_supported(const std::string& feature) {
         return AmsError(AmsResult::NOT_SUPPORTED, feature + " is not supported by this backend",
-                        "Feature not available",
-                        "This feature requires different hardware or configuration");
+                        lv_tr("Feature not available"),
+                        lv_tr("This feature requires different hardware or configuration"));
     }
 
     /**
@@ -481,8 +549,8 @@ class AmsErrorHelper {
      * @return AmsError configured for UI display
      */
     static AmsError invalid_parameter(const std::string& detail) {
-        return AmsError(AmsResult::WRONG_STATE, detail, "Invalid parameter",
-                        "Check the provided value and try again");
+        return AmsError(AmsResult::WRONG_STATE, detail, lv_tr("Invalid parameter"),
+                        lv_tr("Check the provided value and try again"));
     }
 
     /**
@@ -497,11 +565,19 @@ class AmsErrorHelper {
      * SDCARD_RESET_FILE + CANCEL_PRINT_BASE + a fresh print start.
      *
      * @param detail Optional technical detail (logged, not user-shown)
+     * @param reason Optional authored explanation of why restart is required
+     *               (e.g. "The bed was reported dirty, so this print cannot
+     *               resume."), shown to the user in place of the raw firmware
+     *               pause text. Empty means the backend has not authored one
+     *               for this cause; the caller falls back to firmware text.
      */
-    static AmsError resume_requires_restart(const std::string& detail = "") {
+    static AmsError resume_requires_restart(const std::string& detail = "",
+                                            const std::string& reason = "") {
         return AmsError(AmsResult::RESUME_REQUIRES_RESTART,
                         detail.empty() ? "virtual_sdcard.is_active=false; RESUME would no-op"
                                        : detail,
-                        "Print Was Terminated", "Restart from the beginning to recover");
+                        reason, lv_tr("Restart from the beginning to recover"));
     }
 };
+
+} // namespace helix

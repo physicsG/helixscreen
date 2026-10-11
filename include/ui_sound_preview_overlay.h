@@ -3,28 +3,24 @@
 
 #pragma once
 
-#include "lvgl/lvgl.h"
 #include "overlay_base.h"
+#include "static_panel_registry.h"
+
+#include <string>
 
 namespace helix::settings {
 
 class SoundPreviewOverlay : public OverlayBase {
   public:
-    SoundPreviewOverlay();
-    ~SoundPreviewOverlay() override = default;
-
-    void init_subjects() override;
-    void register_callbacks() override;
-    lv_obj_t* create(lv_obj_t* parent) override;
-
     const char* get_name() const override {
         return "Preview Sounds";
     }
+    const char* xml_component() const override {
+        return "sound_preview_overlay";
+    }
 
     void on_activate() override;
-    void on_deactivate() override;
-
-    void show(lv_obj_t* parent_screen);
+    void on_deactivating(DeactivateReason reason) override;
 
   private:
     void populate_buttons();
@@ -33,6 +29,8 @@ class SoundPreviewOverlay : public OverlayBase {
     static std::string display_name(const std::string& sound_name);
 };
 
-SoundPreviewOverlay& get_sound_preview_overlay();
+inline SoundPreviewOverlay& get_sound_preview_overlay() {
+    return lazy_global<SoundPreviewOverlay>("SoundPreviewOverlay");
+}
 
 } // namespace helix::settings

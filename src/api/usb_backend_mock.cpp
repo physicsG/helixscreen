@@ -3,6 +3,8 @@
 
 #include "usb_backend_mock.h"
 
+#include "helix_thread.h"
+
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -36,7 +38,7 @@ UsbError UsbBackendMock::start() {
     // Schedule demo drives to be added after UI is ready (1.5s delay)
     // This matches the timing previously done in subject_initializer.cpp
     demo_cancelled_.store(false);
-    demo_thread_ = std::thread([this]() {
+    demo_thread_ = helix::make_thread([this]() {
         // Sleep in small increments to allow cancellation
         for (int i = 0; i < 15 && !demo_cancelled_.load(); ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -92,6 +94,7 @@ UsbError UsbBackendMock::get_connected_drives(std::vector<UsbDrive>& drives) {
 
 UsbError UsbBackendMock::scan_for_gcode(const std::string& mount_path,
                                         std::vector<UsbGcodeFile>& files, int max_depth) {
+    ++scan_count_;
     std::lock_guard<std::mutex> lock(mutex_);
     (void)max_depth; // Unused in mock
 
@@ -194,9 +197,7 @@ void UsbBackendMock::clear_all() {
 
 void UsbBackendMock::add_demo_drives() {
     // Add a demo USB drive with realistic G-code files
-    UsbDrive demo_drive("/media/usb0", "/dev/sda1", "PRINT_FILES",
-                        16ULL * 1024 * 1024 * 1024, // 16 GB total
-                        8ULL * 1024 * 1024 * 1024); // 8 GB available
+    UsbDrive demo_drive("/media/usb0", "/dev/sda1", "PRINT_FILES");
 
     simulate_drive_insert(demo_drive);
 

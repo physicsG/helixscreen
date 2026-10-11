@@ -22,6 +22,14 @@
 namespace helix {
 
 struct FilamentConsumptionTrackerTestAccess {
+    static int warn_unreported_extruder_mappings(FilamentConsumptionTracker& t) {
+        return t.warn_unreported_extruder_mappings();
+    }
+
+    static int unreported_mappings_at_start(const FilamentConsumptionTracker& t) {
+        return t.unreported_mappings_at_start_;
+    }
+
     /// Poke the ExternalSpoolSink's persist-interval throttle in the registry.
     /// Used by tests that want writes on every tick instead of every 60s.
     ///

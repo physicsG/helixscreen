@@ -149,3 +149,70 @@ TEST_CASE_METHOD(MappingCancelFixture, "Cancel without touching the toggle chang
 
     CHECK(persisted());
 }
+
+// The start-macro note is not part of Cancel, but it shares this fixture: the
+// modal needs every XML component registered to build at all.
+TEST_CASE_METHOD(MappingCancelFixture,
+                 "The start macro note shows only while the picks move a tool",
+                 "[filament_mapping][modal][note]") {
+    auto find = [](FilamentMappingModal& modal, const char* name) {
+        lv_obj_t* obj = lv_obj_find_by_name(modal.dialog(), name);
+        REQUIRE(obj != nullptr);
+        return obj;
+    };
+    auto identity = [](FilamentMappingModal& modal) {
+        helix::ToolMapping t0;
+        t0.tool_index = 0;
+        t0.mapped_slot = 0;
+        t0.mapped_backend = 0;
+        helix::ToolMapping t1 = t0;
+        t1.tool_index = 1;
+        t1.mapped_slot = 1;
+        modal.set_mappings({t0, t1});
+    };
+    auto note_hidden = [&](FilamentMappingModal& modal) {
+        return lv_obj_has_flag(find(modal, "start_macro_note_row"), LV_OBJ_FLAG_HIDDEN);
+    };
+
+    {
+        FilamentMappingModal modal;
+        seed(modal);
+        identity(modal);
+        modal.set_start_macro_note("Your PRINT_START line passes EXTRUDER1_TEMP");
+        REQUIRE(modal.show(test_screen()));
+        CHECK(std::string(lv_label_get_text(find(modal, "start_macro_note"))) ==
+              "Your PRINT_START line passes EXTRUDER1_TEMP");
+        // Identity picks rewrite nothing, so nothing is left behind.
+        CHECK(note_hidden(modal));
+
+        // Tool 0 moved onto slot 1: the rewrite now changes a tool number.
+        FilamentMappingModalTestAccess::select_slot(modal, 0, {1, 0, false});
+        CHECK_FALSE(note_hidden(modal));
+
+        // Back to its own slot.
+        FilamentMappingModalTestAccess::select_slot(modal, 0, {0, 0, false});
+        CHECK(note_hidden(modal));
+
+        FilamentMappingModalTestAccess::select_slot(modal, 0, {1, 0, false});
+        REQUIRE_FALSE(note_hidden(modal));
+        FilamentMappingModalTestAccess::cancel(modal);
+        helix::ui::UpdateQueue::instance().drain();
+
+        // Cancel restored identity picks, so a reopen starts hidden.
+        REQUIRE(modal.show(test_screen()));
+        CHECK(note_hidden(modal));
+        FilamentMappingModalTestAccess::cancel(modal);
+        helix::ui::UpdateQueue::instance().drain();
+    }
+
+    // A second caller that never sets a note must not inherit the first one's,
+    // even with a move: the subjects behind the label are shared by every instance.
+    FilamentMappingModal other;
+    seed(other);
+    identity(other);
+    REQUIRE(other.show(test_screen()));
+    FilamentMappingModalTestAccess::select_slot(other, 0, {1, 0, false});
+    CHECK(note_hidden(other));
+    FilamentMappingModalTestAccess::cancel(other);
+    helix::ui::UpdateQueue::instance().drain();
+}

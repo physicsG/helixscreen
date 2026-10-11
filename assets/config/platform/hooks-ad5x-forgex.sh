@@ -8,12 +8,12 @@
 # path as seen from inside the chroot:
 #
 #   - The chroot is $MOD (/usr/data/.mod/.forge-x) and the install root is the
-#     synced payload /opt/config/mod/.bin/helixscreen. init_buildroot
+#     synced payload /opt/config/mod_data/helixscreen. init_buildroot
 #     bind-mounts /opt/config into the chroot at the same path, so these paths
 #     hold on both sides of the chroot.
-#   - Durable state lives under /opt/config/mod_data, beside the mod's own logs
-#     and variables. The payload tree is synced (replaceable), so nothing
-#     runtime-writable belongs in it.
+#   - Durable state lives beside the payload root, under /opt/config/mod_data,
+#     next to the mod's own logs and variables. The payload tree is synced
+#     (replaceable), so nothing runtime-writable belongs in it.
 
 # shellcheck disable=SC3043  # local is supported by BusyBox ash
 
@@ -59,18 +59,19 @@ platform_wait_for_services() {
 }
 
 platform_pre_start() {
-    # Durable cache under mod_data, beside the mod's own state. The payload
-    # tree itself is synced (replaceable), so runtime caches never live in it.
-    export HELIX_CACHE_DIR="/opt/config/mod_data/helixscreen/cache"
+    # Durable cache under mod_data, beside the payload root and the mod's own
+    # state. The payload tree itself is synced (replaceable), so runtime
+    # caches never live in it.
+    export HELIX_CACHE_DIR="${HELIX_CACHE_DIR:-/opt/config/mod_data/helixscreen-state/cache}"
     mkdir -p "$HELIX_CACHE_DIR" 2>/dev/null || true
 
     # The app log lands where the mod's other logs live. helix.log, NOT
     # helixscreen.log: .shell/helixscreen.sh redirects the launcher's stderr
     # stream into helixscreen.log, and reusing a name interleaves two writers.
-    export HELIX_LOG_DEST=file
-    export HELIX_LOG_FILE="/opt/config/mod_data/log/helix.log"
-    export HELIX_LOG_ROTATE_BYTES=1048576
-    export HELIX_LOG_ROTATE_FILES=3
+    export HELIX_LOG_DEST="${HELIX_LOG_DEST:-file}"
+    export HELIX_LOG_FILE="${HELIX_LOG_FILE:-/opt/config/mod_data/log/helix.log}"
+    export HELIX_LOG_ROTATE_BYTES="${HELIX_LOG_ROTATE_BYTES:-1048576}"
+    export HELIX_LOG_ROTATE_FILES="${HELIX_LOG_ROTATE_FILES:-3}"
     mkdir -p "/opt/config/mod_data/log" 2>/dev/null || true
 
     # Remote control (helix-screen ctl) is enabled in config/helixscreen.env,

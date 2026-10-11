@@ -4,6 +4,7 @@
 #include "ui_error_reporting.h"
 #include "ui_notification.h"
 
+#include "json_utils.h"
 #include "moonraker_api.h"
 #include "moonraker_api_internal.h"
 #include "plr_backend.h"
@@ -22,9 +23,10 @@ using namespace moonraker_internal;
 void MoonrakerAPI::is_printer_ready(BoolCallback on_result, ErrorCallback on_error) {
     client_.send_jsonrpc(
         "printer.info", json::object(),
-        [on_result](json response) {
+        [on_result](const json& response) {
             bool ready = false;
-            if (response.contains("result") && response["result"].contains("state")) {
+            if (response.contains("result") && response["result"].contains("state") &&
+                response["result"]["state"].is_string()) {
                 std::string state = response["result"]["state"].get<std::string>();
                 ready = (state == "ready");
             }
@@ -38,11 +40,12 @@ void MoonrakerAPI::get_print_state(StringCallback on_result, ErrorCallback on_er
 
     client_.send_jsonrpc(
         "printer.objects.query", params,
-        [on_result](json response) {
+        [on_result](const json& response) {
             std::string state = "unknown";
             if (response.contains("result") && response["result"].contains("status") &&
                 response["result"]["status"].contains("print_stats") &&
-                response["result"]["status"]["print_stats"].contains("state")) {
+                response["result"]["status"]["print_stats"].contains("state") &&
+                response["result"]["status"]["print_stats"]["state"].is_string()) {
                 state = response["result"]["status"]["print_stats"]["state"].get<std::string>();
             }
             on_result(state);
@@ -63,12 +66,12 @@ void MoonrakerAPI::check_continue_print_state(
 
     client_.send_jsonrpc(
         helix::CREALITY_DETECT_RPC, json::object(),
-        [on_result](json response) {
+        [on_result](const json& response) {
             helix::PlrDetectResult result;
             if (!helix::plr_parse_check_continue_response(response, result)) {
                 // result.completed stays false, which forbids resume downstream.
                 spdlog::warn("[Moonraker API] Unusable check_continue_print_state response: {}",
-                             response.dump());
+                             helix::json_util::safe_dump(response));
             } else {
                 spdlog::info("[Moonraker API] Creality PLR probe: file_state={} eeprom_state={}",
                              result.file_state, result.eeprom_state);

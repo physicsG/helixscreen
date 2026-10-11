@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component>
+  <!-- Bed drying (prestonbrown/helixscreen#1730): shown above every panel from
+       the unload before a run, through the plate move and the run, until the
+       spools are confirmed off, across restarts. Tapping it offers Stop while
+       the flow or the run is going, and the removal once it is over. -->
+  <view name="bed_drying_banner"
+        width="100%" height="content" flex_flow="row" style_pad_all="#space_xs" style_pad_gap="#space_sm"
+        style_bg_opa="40" style_bg_color="#warning" style_flex_cross_place="center" scrollable="false" clickable="true"
+        hidden="true">
+    <bind_flag_if_eq subject="bed_drying_state" flag="hidden" ref_value="0"/>
+    <icon src="heat_wave" size="xs"/>
+    <text_small name="bed_drying_banner_text" bind_text="bed_drying_text" flex_grow="1" long_mode="dots"/>
+    <event_cb trigger="clicked" callback="on_bed_drying_banner_clicked"/>
+  </view>
+</component>

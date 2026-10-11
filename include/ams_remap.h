@@ -3,6 +3,15 @@
 #pragma once
 
 #include "ams_backend.h"
+#include "filament_mapper.h"
+#include "gcode_rewrite_block.h"
+#include "gcode_tool_remapper.h"
+
+#include <cstdint>
+#include <map>
+#include <string>
+#include <string_view>
+#include <vector>
 
 /**
  * @file ams_remap.h
@@ -30,7 +39,7 @@ namespace printer {
  * @brief Does this strategy leave the routing somewhere that outlives the send?
  *
  * Native writes the machine's own mapping table and GcodeRewrite writes the job
- * file, so both survive being sent. SnapmakerNative does not: the firmware is
+ * file, so both survive being sent. PrePrintSend does not: the firmware is
  * told once, before PRINT_START, and nothing persists afterwards.
  *
  * This is the STRATEGY-only half. Callers gating a real write want
@@ -58,12 +67,97 @@ namespace printer {
 }
 
 /**
+ * @brief Why an explicit tool->lane pick cannot be offered, or None if it can.
+ *
+ * can_remap() answers the backend's half. The two terms that decide the rest
+ * live outside the backend - whether a GcodeRewrite can run at all (the
+ * service-side helper, a transport that keeps a local copy), and whether this
+ * job has tools worth mapping - so they
+ * belong here too, where every surface offering the pick reads the same answer.
+ * Held apart from can_remap() because that one is a pure backend question with
+ * callers who have neither term to hand.
+ */
+enum class RemapBlock : uint8_t {
+    None,            ///< The pick can be offered.
+    Probing,         ///< Plugin presence not established yet; ask again shortly.
+    NoStrategy,      ///< Backend has no routing mechanism at all.
+    NotReady,        ///< Backend has a route that is not usable yet.
+    NeedsPlugin,     ///< GcodeRewrite without the HelixPrint plugin.
+    NothingToRemap,  ///< This job uses no tools worth mapping.
+    NotOnThisDevice, ///< GcodeRewrite on a transport that keeps no local copy.
+};
+
+/// Stable spelling for logs and bundles. Not user-facing: a reason a user reads
+/// has to say what it costs them, which is a UI string, not an enum name.
+[[nodiscard]] inline const char* remap_block_name(RemapBlock block) {
+    switch (block) {
+    case RemapBlock::None:
+        return "none";
+    case RemapBlock::Probing:
+        return "probing";
+    case RemapBlock::NoStrategy:
+        return "no-strategy";
+    case RemapBlock::NotReady:
+        return "not-ready";
+    case RemapBlock::NeedsPlugin:
+        return "needs-plugin";
+    case RemapBlock::NothingToRemap:
+        return "nothing-to-remap";
+    case RemapBlock::NotOnThisDevice:
+        return "not-on-this-device";
+    }
+    return "unknown";
+}
+
+/**
+ * @brief The whole availability question, for a given backend and job.
+ *
+ * @param rewrite Whether a job rewrite can run (PrintPreparationManager::
+ *        gcode_rewrite_block()). Only GcodeRewrite consults it. Probing stays
+ *        Probing rather than NeedsPlugin because the plugin probe completes after
+ *        first paint, and a card that cannot tell those apart shows its refusal
+ *        on every boot before withdrawing it.
+ * @param mappable_tools How many tools this job actually uses.
+ */
+[[nodiscard]] inline RemapBlock remap_block(const AmsBackend& backend, GcodeRewriteBlock rewrite,
+                                            int mappable_tools) {
+    const auto strategy = backend.get_remap_strategy();
+    if (strategy == AmsBackend::RemapStrategy::None) {
+        return RemapBlock::NoStrategy;
+    }
+    if (!backend.remap_ready()) {
+        return RemapBlock::NotReady;
+    }
+    // Ahead of the plugin terms deliberately: a job with nothing to map is still
+    // unmappable once the plugin is installed, so naming the plugin here would
+    // send someone off to fix something that changes nothing for this file.
+    if (mappable_tools <= 0) {
+        return RemapBlock::NothingToRemap;
+    }
+    if (strategy == AmsBackend::RemapStrategy::GcodeRewrite) {
+        switch (rewrite) {
+        case GcodeRewriteBlock::None:
+            break;
+        case GcodeRewriteBlock::Probing:
+            return RemapBlock::Probing;
+        case GcodeRewriteBlock::NeedsPlugin:
+            return RemapBlock::NeedsPlugin;
+        case GcodeRewriteBlock::NoLocalCopies:
+            return RemapBlock::NotOnThisDevice;
+        }
+    }
+    return RemapBlock::None;
+}
+
+/**
  * @brief Will a write to this backend's own mapping table land, right now?
  *
  * The question every caller of the generic set_tool_mapping() apply path is
- * really asking: the route has to write a table AND be usable. The U1 answers
- * false and still honors the user's pick, through its pre-print send, which is
- * why this is not can_remap().
+ * really asking: the route has to write a table AND be usable. Native is the
+ * only route that writes one. GcodeRewrite persists its answer in the job file
+ * and the U1 sends it before PRINT_START, so both honor the user's pick with
+ * no table to write and both answer false here - which is why this is neither
+ * can_remap() nor remap_is_persistent().
  *
  * Named rather than left as `remap_is_persistent(b.get_remap_strategy()) &&
  * b.remap_ready()` at each site — three hand-written copies of one two-part
@@ -71,7 +165,66 @@ namespace printer {
  * first place.
  */
 [[nodiscard]] inline bool can_write_mapping_table(const AmsBackend& backend) {
-    return remap_is_persistent(backend.get_remap_strategy()) && backend.remap_ready();
+    return backend.get_remap_strategy() == AmsBackend::RemapStrategy::Native &&
+           backend.remap_ready();
+}
+
+/**
+ * @brief The tool-naming start macro parameters this route's remap leaves as sliced.
+ *
+ * Only GcodeRewrite edits the job file, so only it can leave a stale tool
+ * number behind in the file: a PRINT_START that heats EXTRUDER_TEMP's tool
+ * while the rewritten body selects another prints from a cold head.
+ *
+ * @param start_line The job's PRINT_START/START_PRINT line, or empty when none
+ *        was scanned for this file.
+ * @return Parameter keys to warn about; empty when there is nothing to say.
+ */
+[[nodiscard]] inline std::vector<std::string>
+start_params_remap_leaves(AmsBackend::RemapStrategy strategy, std::string_view start_line) {
+    if (strategy != AmsBackend::RemapStrategy::GcodeRewrite || start_line.empty()) {
+        return {};
+    }
+    return GcodeToolRemapper::unremapped_tool_params(start_line);
+}
+
+/**
+ * @brief The logical->physical tool map a GcodeRewrite applies for these picks.
+ *
+ * Auto and unmapped picks (-1) are left out: the rewrite leaves those tool
+ * numbers as sliced. Slot index is the physical head on every backend that
+ * takes this route.
+ */
+[[nodiscard]] inline std::map<int, int>
+gcode_rewrite_remap(const std::vector<ToolMapping>& mappings) {
+    std::map<int, int> remap;
+    for (const auto& m : mappings) {
+        if (m.tool_index >= 0 && m.mapped_slot >= 0) {
+            remap[m.tool_index] = m.mapped_slot;
+        }
+    }
+    return remap;
+}
+
+/**
+ * @brief Does the start macro warning belong on screen for these picks?
+ *
+ * Only when the rewrite actually changes a tool number: identity picks leave
+ * the start macro's own values consistent with the body.
+ *
+ * @param has_keys Whether start_params_remap_leaves() reported anything.
+ */
+[[nodiscard]] inline bool start_macro_note_shown(bool has_keys,
+                                                 const std::vector<ToolMapping>& mappings) {
+    if (!has_keys) {
+        return false;
+    }
+    for (const auto& [logical, physical] : gcode_rewrite_remap(mappings)) {
+        if (logical != physical) {
+            return true;
+        }
+    }
+    return false;
 }
 
 } // namespace printer

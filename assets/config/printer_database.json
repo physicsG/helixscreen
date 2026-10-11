@@ -6,18 +6,30 @@
     "hostname_exclude": "Exclude this printer if the hostname matches this pattern",
     "kinematics_match": "Match against printer kinematics type (corexy, cartesian, delta, etc.)",
     "kinematics_exclude": "Exclude this printer if kinematics matches (e.g. cartesian excludes corexy-only brands)",
-    "object_exists": "Check if a Klipper object exists in /printer/objects/list",
+    "object_exists": "Check if a Klipper object exists in /printer/objects/list (substring; '^' pins the pattern to the start of a name and '$' to its end, so '^box$' is exactly the object 'box')",
     "stepper_count": "Count of Z steppers (z_count_1, z_count_2, z_count_3, z_count_4)",
     "sensor_match": "Match against temperature_sensor names",
     "fan_match": "Match against fan object names",
     "fan_combo": "Match multiple fan patterns together",
     "led_match": "Match against LED/neopixel object names",
+    "led_required": "Exclude this printer if the LED list was reported and lacks the pattern. Absence as evidence, for a sibling that differs from this entry only by hardware it carries; a list that was not reported yet never excludes.",
+    "sensor_required": "As led_required, over temperature sensor names",
+    "fan_required": "As led_required, over fan object names",
+    "object_required": "As led_required, over the full Klipper object list",
+    "led_exclude": "Exclude this printer if an LED matching the pattern is present. The counterpart of led_required, for the sibling that lacks the hardware.",
+    "sensor_exclude": "As led_exclude, over temperature sensor names",
+    "fan_exclude": "As led_exclude, over fan object names",
+    "object_exclude": "As led_exclude, over the full Klipper object list",
     "mcu_match": "Match against MCU chip type or serial pattern",
-    "build_volume_range": "Match against bed_mesh dimensions",
+    "build_volume_range": "Match against the X/Y stepper travel Klipper resolves from the configfile (position_max minus position_min per axis), not the bed mesh or the advertised print area. Travel is the print area plus whatever overtravel the config allows (the four entries authored from a real config show +10 to +58 mm), so a window drawn tightly around the marketing size misses the machine it describes; author min/max from a real configfile. A heuristic setting \"measure\": \"declared_bed\" matches the bed size the firmware config declares instead of travel",
     "macro_match": "Match against G-code macro names (gcode_macro objects)",
     "macro_exclude": "Exclude this printer if a G-code macro is present",
     "tool_count": "Count of extruder tools (tool_count_1, tool_count_2, tool_count_4)",
-    "cpu_arch_match": "Match against host CPU architecture string"
+    "cpu_arch_match": "Match against host CPU architecture string",
+    "_modifier_corroborating": "Set true on a heuristic whose evidence names a CLASS of printer rather than a model: a chamber thermistor (every enclosed machine has one) or an MCU claimed by more than one model. The flag is per-entry authoring - vendor hostnames stay identifying where an entry authors them as model signals and corroborate where it does not. It can never be the base score and adds nothing to the match bonus, so it cannot identify a printer or separate look-alikes on its own; it supports through match_count and the separator opt-in.",
+    "_modifier_identifying": "Set true on a build_volume_range whose window is distinctive enough to lead. Volumes are corroborating by default because models overlap in the common bands; this opts an unusual size back in. It still needs the entry's kinematics to match, so a size alone never names a printer.",
+    "_modifier_measure": "Set to \"declared_bed\" on a build_volume_range to match its window against the bed size the firmware's own config declares (Creality: gcode_macro product_param variable_bed_size_x and variable_bed_size_y) instead of stepper travel. Travel also covers overtravel to a purge or nozzle-clean position, so a declared bed suits a window that has to tell apart models whose travel overshoots their beds (K2 Plus against K2 Pro). A firmware that declares no bed size never matches such a window; nothing falls back to travel. Any other value matches nothing.",
+    "_modifier_separator": "Set true on a corroborating heuristic whose evidence names the model within a family the entry's other heuristics identify: a bed size (K2 Plus against K2 Pro) or an MCU part number separating vendors whose class evidence ties. A match adds its weight to the uncapped score - the margin between look-alikes - once the entry's non-separator base clears the autosave bar; it never raises the published confidence and never becomes the base, so a rig reporting only that one fact still earns nothing."
   },
   "console_filter_sets": {
     "creality_rs485": {
@@ -92,6 +104,31 @@
       "label": "Zeroing load cell",
       "timeout_s": 60,
       "reason": "ZMOD probes with a load cell whose zero drifts when bed screws or thermal preload change. ZMOD tares on its print path (_PREPARE_PRINT, _START_PRINT) but not on any calibration entry point, so an untared probe reports 'Probe triggered prior to movement'. BED_LEVEL_SCREWS_TUNE tares itself, hence skip_if_macro_in."
+    },
+    {
+      "id": "cosmos_load_cell_tare",
+      "when": [
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "load_cell_probe"
+        },
+        {
+          "type": "macro_match",
+          "field": "macros",
+          "pattern": "_COSMOS_SETTINGS"
+        }
+      ],
+      "operations": [
+        "probe_accuracy",
+        "z_offset_calibrate"
+      ],
+      "gcode": [
+        "LOAD_CELL_TARE"
+      ],
+      "label": "Zeroing load cell",
+      "timeout_s": 60,
+      "reason": "COSMOS probes with a load cell whose zero drifts between calibrations. Its load_cell module registers LOAD_CELL_TARE as a command, never a gcode_macro, so macro_match cannot see it: the load_cell_probe object keys the rule, and COSMOS's _COSMOS_SETTINGS macro keeps it off other firmware whose load cell may not define that command. COSMOS's SCREWS_TILT_CALCULATE and BED_MESH_CALIBRATE tare the load cell themselves, so only probe accuracy and Z-offset calibration get it."
     }
   ],
   "printers": [
@@ -124,6 +161,13 @@
           "pattern": "_IFS_",
           "confidence": 0,
           "reason": "Exclude AD5X ZMOD firmware (private _IFS_* macros are AD5X-only)"
+        },
+        {
+          "type": "led_exclude",
+          "field": "leds",
+          "pattern": "chamber_l",
+          "confidence": 0,
+          "reason": "A chamber light is the Pro's hardware; a machine carrying one is a 5M Pro, not a plain 5M"
         },
         {
           "type": "sensor_match",
@@ -213,6 +257,13 @@
           "reason": "Exclude AD5X ZMOD firmware (private _IFS_* macros are AD5X-only)"
         },
         {
+          "type": "led_exclude",
+          "field": "leds",
+          "pattern": "chamber_l",
+          "confidence": 0,
+          "reason": "A chamber light is the Pro's hardware; a machine carrying one is a 5M Pro, not a plain 5M"
+        },
+        {
           "type": "macro_match",
           "field": "macros",
           "pattern": "SUPPORT_FORGE_X",
@@ -298,6 +349,7 @@
     },
     {
       "id": "flashforge_ad5m_pro",
+      "enclosed": true,
       "name": "FlashForge Adventurer 5M Pro",
       "aliases": [
         "FlashForge AD5M Pro"
@@ -335,6 +387,13 @@
           "pattern": "chamber_l",
           "confidence": 55,
           "reason": "Chamber light LED (corroborating only - 'chamber_light' is a generic name custom rigs use too; with max bonus it stays under the 70% high-confidence bar)"
+        },
+        {
+          "type": "led_required",
+          "field": "leds",
+          "pattern": "chamber_l",
+          "confidence": 0,
+          "reason": "The chamber light is the only hardware that separates a 5M Pro from a plain 5M; a machine reporting no chamber light is not a Pro"
         },
         {
           "type": "sensor_match",
@@ -415,6 +474,7 @@
     },
     {
       "id": "flashforge_ad5m_pro_forgex",
+      "enclosed": true,
       "name": "FlashForge Adventurer 5M Pro (ForgeX)",
       "manufacturer": "FlashForge",
       "image": "flashforge-adventurer-5m-pro.png",
@@ -443,6 +503,13 @@
           "pattern": "chamber_l",
           "confidence": 55,
           "reason": "Chamber light LED (corroborating only - matches stock 'chamber_light' and ForgeX 'chamber_led', but custom rigs use those names too; with max bonus it stays under the 70% high-confidence bar)"
+        },
+        {
+          "type": "led_required",
+          "field": "leds",
+          "pattern": "chamber_l",
+          "confidence": 0,
+          "reason": "The chamber light is the only hardware that separates a 5M Pro from a plain 5M; a machine reporting no chamber light is not a Pro"
         },
         {
           "type": "macro_match",
@@ -591,7 +658,8 @@
           "field": "heaters",
           "pattern": "tool_count_4",
           "confidence": 85,
-          "reason": "4-extruder IFS tool changer"
+          "corroborating": true,
+          "reason": "Supports an IFS identification, never establishes one: a bare AD5X has one extruder, and the four-heater form exists only through the IFS, whose own objects (zmod_ifs, ifs_materials, SET_EXTRUDER_SLOT) name the machine at 95+"
         },
         {
           "type": "sensor_match",
@@ -605,7 +673,8 @@
           "field": "cpu_arch",
           "pattern": "mips",
           "confidence": 70,
-          "reason": "MIPS host architecture (Ingenic X2600)"
+          "corroborating": true,
+          "reason": "MIPS host architecture (Ingenic X2600) - shared with the Creator 5 line (X2000), so it supports a FlashForge identification and never establishes the model"
         },
         {
           "type": "sensor_match",
@@ -627,17 +696,176 @@
           "pattern": "corexy",
           "confidence": 30,
           "reason": "CoreXY kinematics"
+        },
+        {
+          "type": "object_exclude",
+          "field": "printer_objects",
+          "pattern": "gcode_button extruder_grab1",
+          "confidence": 0,
+          "reason": "Exclude FlashForge Creator 5 Pro (head-dock grab sensors on both its firmwares; separate entry)"
+        },
+        {
+          "type": "object_exclude",
+          "field": "printer_objects",
+          "pattern": "zmod_afclite",
+          "confidence": 0,
+          "reason": "Exclude FlashForge Creator 5 on Z-Mod 1.7.4+ (the afclite shim serves its four heads; an AD5X's lanes run through zmod_ifs)"
+        }
+      ]
+    },
+    {
+      "id": "flashforge_creator_5",
+      "enclosed": true,
+      "name": "FlashForge Creator 5",
+      "manufacturer": "FlashForge",
+      "image": "flashforge-creator-5.png",
+      "preset": "creator5",
+      "z_offset_calibration_strategy": "firmware_managed",
+      "heuristics": [
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "ff_toolchange",
+          "confidence": 99,
+          "reason": "[ff_toolchange] tool-changer extra (Klipper4Creator5 port)"
+        },
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "gcode_button extruder_grab1",
+          "confidence": 95,
+          "reason": "Head-dock grab sensor; names Z-Mod C5 (grab1..4) and the stock changer alike (grab0..3)"
+        },
+        {
+          "type": "tool_count",
+          "field": "heaters",
+          "pattern": "tool_count_4",
+          "confidence": 92,
+          "reason": "Four heads are the machine's definition on every firmware; the only other 4-heater FlashForge is an IFS AD5X, excluded here by SET_EXTRUDER_SLOT/zmod_ifs, so a fingerprint-less 4-extruder machine names a Creator 5"
+        },
+        {
+          "type": "macro_exclude",
+          "field": "macros",
+          "pattern": "SET_EXTRUDER_SLOT",
+          "confidence": 0,
+          "reason": "Exclude AD5X (IFS, not a head changer)"
+        },
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "zmod_color",
+          "confidence": 60,
+          "corroborating": true,
+          "reason": "Z-Mod firmware lineage (also on AD5X Z-Mod - support, never establish)"
+        },
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "zmod_afclite",
+          "confidence": 60,
+          "corroborating": true,
+          "reason": "Z-Mod 1.7.4+ publishes the afclite AFC shim for the C5's four heads (bundle 5WSPTZBL); the AD5X Z-Mod carries zmod_ifs instead, so this supports a Creator 5 identification - version-dependent, never an establisher"
+        },
+        {
+          "type": "object_exclude",
+          "field": "printer_objects",
+          "pattern": "zmod_ifs",
+          "confidence": 0,
+          "reason": "Exclude AD5X Z-Mod IFS (object form of the SET_EXTRUDER_SLOT macro exclude)"
+        },
+        {
+          "type": "object_exclude",
+          "field": "printer_objects",
+          "pattern": "heater_generic chamber_heater",
+          "confidence": 0,
+          "reason": "The chamber heater is the Pro's hardware; a machine carrying one is a Creator 5 Pro, not a Creator 5"
+        }
+      ],
+      "toolhead_style": "default"
+    },
+    {
+      "id": "flashforge_creator_5_pro",
+      "enclosed": true,
+      "name": "FlashForge Creator 5 Pro",
+      "manufacturer": "FlashForge",
+      "image": "flashforge-creator-5-pro.png",
+      "preset": "creator5_pro",
+      "z_offset_calibration_strategy": "firmware_managed",
+      "heuristics": [
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "ff_toolchange",
+          "confidence": 99,
+          "reason": "[ff_toolchange] tool-changer extra (Klipper4Creator5 port)"
+        },
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "gcode_button extruder_grab1",
+          "confidence": 95,
+          "reason": "Head-dock grab sensor; names Z-Mod C5 (grab1..4) and the stock changer alike (grab0..3)"
+        },
+        {
+          "type": "tool_count",
+          "field": "heaters",
+          "pattern": "tool_count_4",
+          "confidence": 92,
+          "reason": "Four heads are the machine's definition on every firmware; the only other 4-heater FlashForge is an IFS AD5X, excluded here by SET_EXTRUDER_SLOT/zmod_ifs, so a fingerprint-less 4-extruder machine names a Creator 5"
+        },
+        {
+          "type": "macro_exclude",
+          "field": "macros",
+          "pattern": "SET_EXTRUDER_SLOT",
+          "confidence": 0,
+          "reason": "Exclude AD5X (IFS, not a head changer)"
+        },
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "zmod_color",
+          "confidence": 60,
+          "corroborating": true,
+          "reason": "Z-Mod firmware lineage (also on AD5X Z-Mod - support, never establish)"
+        },
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "zmod_afclite",
+          "confidence": 60,
+          "corroborating": true,
+          "reason": "Z-Mod 1.7.4+ publishes the afclite AFC shim for the C5's four heads (bundle 5WSPTZBL); the AD5X Z-Mod carries zmod_ifs instead, so this supports a Creator 5 identification - version-dependent, never an establisher"
+        },
+        {
+          "type": "object_exclude",
+          "field": "printer_objects",
+          "pattern": "zmod_ifs",
+          "confidence": 0,
+          "reason": "Exclude AD5X Z-Mod IFS (object form of the SET_EXTRUDER_SLOT macro exclude)"
+        },
+        {
+          "type": "object_required",
+          "field": "printer_objects",
+          "pattern": "heater_generic chamber_heater",
+          "confidence": 0,
+          "reason": "The chamber heater is the only hardware that separates a Creator 5 Pro from a Creator 5; a machine reporting none is a Creator 5, and the name itself is shared with other enclosed printers so it never scores on its own"
         }
       ],
       "toolhead_style": "default"
     },
     {
       "id": "voron_2_4",
+      "enclosed": true,
       "name": "Voron 2.4",
       "manufacturer": "Voron",
       "image": "voron-v2.png",
-      "calibration": {
-        "belt_span_offset_mm": 35.0
+      "_print_start_default_phases_comment": "Estimates for a 350mm-class gantry machine with a probe-based mesh: G28 plus a four-point QUAD_GANTRY_LEVEL (the 2.4 levels its gantry, never Z_TILT), then a mesh sweep, a brush wipe and a purge line. Heating is omitted - the thermal model owns those.",
+      "print_start_default_phases": {
+        "HOMING": 30,
+        "QGL": 60,
+        "BED_MESH": 90,
+        "CLEANING": 20,
+        "PURGING": 15
       },
       "heuristics": [
         {
@@ -717,12 +945,20 @@
     },
     {
       "id": "voron_0_1",
+      "enclosed": true,
       "name": "Voron 0.2",
       "aliases": [
         "Voron 0.1"
       ],
       "manufacturer": "Voron",
       "image": "voron-v0.png",
+      "_print_start_default_phases_comment": "Estimates for a 120mm single-Z machine: no gantry to level and no three-point tilt, so G28 leads straight into a short mesh (when a probe is fitted), a wipe and a purge line. Heating is omitted - the thermal model owns those.",
+      "print_start_default_phases": {
+        "HOMING": 20,
+        "BED_MESH": 30,
+        "CLEANING": 15,
+        "PURGING": 10
+      },
       "heuristics": [
         {
           "type": "kinematics_match",
@@ -744,7 +980,8 @@
           "max_x": 130,
           "max_y": 130,
           "confidence": 70,
-          "reason": "Small build volume (~120mm, Voron 0 size)"
+          "reason": "Small build volume (~120mm, Voron 0 size)",
+          "identifying": true
         },
         {
           "type": "object_exists",
@@ -818,7 +1055,8 @@
           "confidence": 75,
           "reason": "4 independent Z steppers (QGL configuration)"
         }
-      ]
+      ],
+      "toolhead_style": "anthead"
     },
     {
       "id": "pfa_stealthfork",
@@ -862,13 +1100,23 @@
           "confidence": 60,
           "reason": "Z tilt adjust present (Trident-style 3-point leveling)"
         }
-      ]
+      ],
+      "toolhead_style": "anthead"
     },
     {
       "id": "voron_trident",
+      "enclosed": true,
       "name": "Voron Trident",
       "manufacturer": "Voron",
       "image": "voron-trident.png",
+      "_print_start_default_phases_comment": "Estimates for a 350mm-class machine with a probe-based mesh: G28 plus a three-point Z_TILT_ADJUST (the Trident tilts its bed, it has no gantry to QGL), then a mesh sweep, a brush wipe and a purge line. Heating is omitted - the thermal model owns those.",
+      "print_start_default_phases": {
+        "HOMING": 30,
+        "Z_TILT": 45,
+        "BED_MESH": 90,
+        "CLEANING": 20,
+        "PURGING": 15
+      },
       "heuristics": [
         {
           "type": "object_exists",
@@ -926,6 +1174,13 @@
       "name": "Voron Switchwire",
       "manufacturer": "Voron",
       "image": "voron-switchwire.png",
+      "_print_start_default_phases_comment": "Estimates for a 250mm bed-slinger with a single Z and a probe-based mesh: neither a gantry to level nor a three-point tilt, so G28 leads into the mesh sweep, a wipe and a purge line. Heating is omitted - the thermal model owns those.",
+      "print_start_default_phases": {
+        "HOMING": 25,
+        "BED_MESH": 60,
+        "CLEANING": 20,
+        "PURGING": 15
+      },
       "heuristics": [
         {
           "type": "kinematics_match",
@@ -966,12 +1221,15 @@
     },
     {
       "id": "creality_k1",
+      "enclosed": true,
       "name": "Creality K1",
       "manufacturer": "Creality",
       "toolhead_style": "creality_k1",
       "image": "creality-k1.png",
       "probe_type": "prtouch_v2",
       "preset": "k1",
+      "preset_default": true,
+      "_preset_default_comment": "The k1 family's default: a K1 preset install whose detection names no K1 machine persists this entry, the base model, rather than database order",
       "print_start_profile": "creality_k1",
       "pre_print_options": {
         "macro_name": "START_PRINT",
@@ -1006,7 +1264,8 @@
           "field": "sensors",
           "pattern": "chamber_temp",
           "confidence": 70,
-          "reason": "Chamber temperature sensor (enclosed printer)"
+          "reason": "Chamber temperature sensor (enclosed printer)",
+          "corroborating": true
         },
         {
           "type": "fan_match",
@@ -1047,6 +1306,41 @@
           "reason": "Hostname contains 'k1'"
         },
         {
+          "type": "hostname_exclude",
+          "field": "hostname",
+          "pattern": "k1c",
+          "confidence": 0,
+          "reason": "'k1' is a substring of every other K1-series hostname; a host naming a sibling is not a plain K1"
+        },
+        {
+          "type": "hostname_exclude",
+          "field": "hostname",
+          "pattern": "k1-max",
+          "confidence": 0,
+          "reason": "'k1' is a substring of every other K1-series hostname; a host naming a sibling is not a plain K1"
+        },
+        {
+          "type": "hostname_exclude",
+          "field": "hostname",
+          "pattern": "k1max",
+          "confidence": 0,
+          "reason": "'k1' is a substring of every other K1-series hostname; a host naming a sibling is not a plain K1"
+        },
+        {
+          "type": "hostname_exclude",
+          "field": "hostname",
+          "pattern": "k1se",
+          "confidence": 0,
+          "reason": "'k1' is a substring of every other K1-series hostname; a host naming a sibling is not a plain K1"
+        },
+        {
+          "type": "hostname_exclude",
+          "field": "hostname",
+          "pattern": "k1-se",
+          "confidence": 0,
+          "reason": "'k1' is a substring of every other K1-series hostname; a host naming a sibling is not a plain K1"
+        },
+        {
           "type": "mcu_match",
           "field": "mcu",
           "pattern": "STM32H723",
@@ -1057,6 +1351,7 @@
     },
     {
       "id": "creality_k1_cfs",
+      "enclosed": true,
       "name": "Creality K1 (with CFS)",
       "manufacturer": "Creality",
       "toolhead_style": "creality_k1",
@@ -1097,7 +1392,8 @@
           "field": "sensors",
           "pattern": "chamber_temp",
           "confidence": 70,
-          "reason": "Chamber temperature sensor (enclosed printer)"
+          "reason": "Chamber temperature sensor (enclosed printer)",
+          "corroborating": true
         },
         {
           "type": "fan_match",
@@ -1117,8 +1413,16 @@
           "type": "object_exists",
           "field": "printer_objects",
           "pattern": "^box$",
-          "confidence": 95,
-          "reason": "CFS filament system detected (K1 official upgrade)"
+          "confidence": 45,
+          "reason": "CFS box object. Every CFS-equipped Creality carries it, so it narrows a machine to the range and never to a model; the model is the hostname's and bed size's to name",
+          "corroborating": true
+        },
+        {
+          "type": "object_required",
+          "field": "printer_objects",
+          "pattern": "^box$",
+          "confidence": 0,
+          "reason": "This entry is the CFS-equipped variant; a reported object list without the box object is the plain machine"
         },
         {
           "type": "build_volume_range",
@@ -1145,6 +1449,41 @@
           "reason": "Hostname contains 'k1'"
         },
         {
+          "type": "hostname_exclude",
+          "field": "hostname",
+          "pattern": "k1c",
+          "confidence": 0,
+          "reason": "'k1' is a substring of every other K1-series hostname; a host naming a sibling is not a plain K1"
+        },
+        {
+          "type": "hostname_exclude",
+          "field": "hostname",
+          "pattern": "k1-max",
+          "confidence": 0,
+          "reason": "'k1' is a substring of every other K1-series hostname; a host naming a sibling is not a plain K1"
+        },
+        {
+          "type": "hostname_exclude",
+          "field": "hostname",
+          "pattern": "k1max",
+          "confidence": 0,
+          "reason": "'k1' is a substring of every other K1-series hostname; a host naming a sibling is not a plain K1"
+        },
+        {
+          "type": "hostname_exclude",
+          "field": "hostname",
+          "pattern": "k1se",
+          "confidence": 0,
+          "reason": "'k1' is a substring of every other K1-series hostname; a host naming a sibling is not a plain K1"
+        },
+        {
+          "type": "hostname_exclude",
+          "field": "hostname",
+          "pattern": "k1-se",
+          "confidence": 0,
+          "reason": "'k1' is a substring of every other K1-series hostname; a host naming a sibling is not a plain K1"
+        },
+        {
           "type": "mcu_match",
           "field": "mcu",
           "pattern": "STM32H723",
@@ -1155,6 +1494,7 @@
     },
     {
       "id": "creality_k1_max",
+      "enclosed": true,
       "name": "Creality K1 Max",
       "manufacturer": "Creality",
       "toolhead_style": "creality_k1",
@@ -1195,7 +1535,8 @@
           "field": "sensors",
           "pattern": "chamber_temp",
           "confidence": 70,
-          "reason": "Chamber temperature sensor (enclosed printer)"
+          "reason": "Chamber temperature sensor (enclosed printer)",
+          "corroborating": true
         },
         {
           "type": "fan_match",
@@ -1253,6 +1594,7 @@
     },
     {
       "id": "creality_k1_max_cfs",
+      "enclosed": true,
       "name": "Creality K1 Max (with CFS)",
       "manufacturer": "Creality",
       "toolhead_style": "creality_k1",
@@ -1293,7 +1635,8 @@
           "field": "sensors",
           "pattern": "chamber_temp",
           "confidence": 70,
-          "reason": "Chamber temperature sensor (enclosed printer)"
+          "reason": "Chamber temperature sensor (enclosed printer)",
+          "corroborating": true
         },
         {
           "type": "fan_match",
@@ -1313,8 +1656,16 @@
           "type": "object_exists",
           "field": "printer_objects",
           "pattern": "^box$",
-          "confidence": 95,
-          "reason": "CFS filament system detected (K1 official upgrade)"
+          "confidence": 45,
+          "reason": "CFS box object. Every CFS-equipped Creality carries it, so it narrows a machine to the range and never to a model; the model is the hostname's and bed size's to name",
+          "corroborating": true
+        },
+        {
+          "type": "object_required",
+          "field": "printer_objects",
+          "pattern": "^box$",
+          "confidence": 0,
+          "reason": "This entry is the CFS-equipped variant; a reported object list without the box object is the plain machine"
         },
         {
           "type": "build_volume_range",
@@ -1358,6 +1709,7 @@
     },
     {
       "id": "creality_k2_plus",
+      "enclosed": true,
       "name": "Creality K2 Plus",
       "manufacturer": "Creality",
       "toolhead_style": "creality_k2",
@@ -1397,6 +1749,13 @@
       },
       "heuristics": [
         {
+          "type": "macro_exclude",
+          "field": "macros",
+          "pattern": "_START_PRINT_VARS",
+          "confidence": 0,
+          "reason": "Exclude the k2-improvements mod (separate entry) - it replaces START_PRINT wholesale"
+        },
+        {
           "type": "kinematics_match",
           "field": "kinematics",
           "pattern": "corexy",
@@ -1408,14 +1767,16 @@
           "field": "sensors",
           "pattern": "chamber_temp",
           "confidence": 70,
-          "reason": "Chamber temperature sensor"
+          "reason": "Chamber temperature sensor",
+          "corroborating": true
         },
         {
           "type": "object_exists",
           "field": "printer_objects",
           "pattern": "^box$",
-          "confidence": 95,
-          "reason": "CFS filament system detected"
+          "confidence": 45,
+          "reason": "CFS box object. Every CFS-equipped Creality carries it, so it narrows a machine to the range and never to a model; the model is the hostname's and bed size's to name",
+          "corroborating": true
         },
         {
           "type": "object_exists",
@@ -1429,7 +1790,7 @@
           "field": "printer_objects",
           "pattern": "fan_feedback",
           "confidence": 65,
-          "reason": "K2-specific fan RPM feedback"
+          "reason": "Creality fan-tachometer module. A captured real K1C reports it too, so it evidences Creality's range and not this model; the model is the hostname's and bed size's to name. Weight left as-is deliberately: re-scoring or dropping it wants a real K2 discovery snapshot, and no fixture has one"
         },
         {
           "type": "hostname_match",
@@ -1476,12 +1837,14 @@
         {
           "type": "build_volume_range",
           "field": "bed_mesh",
+          "measure": "declared_bed",
           "min_x": 340,
           "max_x": 360,
           "min_y": 340,
           "max_y": 360,
           "confidence": 55,
-          "reason": "Build volume ~350mm (K2 Plus size)"
+          "reason": "Declared bed ~350mm (K2 Plus); separates Plus from Pro once the K2 platform is identified. Measures the bed size Creality's product_param macro declares (350x350 on a real K2 Plus) because stepper travel overshoots the bed: that K2 Plus travels -10 to 352.5 in X and -6.2 to 400 in Y",
+          "separator": true
         }
       ],
       "_print_start_default_phases_comment": "Measured on a K2 Plus 2026-08-18 (three captured prints): three homing rail rounds ~15s; nozzle wipe plus both BOX_NOZZLE_CLEAN passes ~60s; the bed-mesh toggle is optional (emit_when_disabled: false) and its check-passed validation runs ~6s - a failed check re-meshes (67-pt adaptive) and the prediction history learns that after the first such print. Heating is omitted - the thermal model owns those.",
@@ -1492,7 +1855,148 @@
       }
     },
     {
+      "id": "creality_k2_plus_k2improvements",
+      "enclosed": true,
+      "name": "Creality K2 Plus (k2-improvements)",
+      "manufacturer": "Creality",
+      "toolhead_style": "creality_k2",
+      "image": "creality-k2-plus.png",
+      "probe_type": "cartographer",
+      "preset": "k2",
+      "print_start_profile": "k2_improvements",
+      "console_filters": [
+        "creality_rs485",
+        "creality_k2_modules"
+      ],
+      "pre_print_options": {
+        "macro_name": "START_PRINT",
+        "setup_gcode": "PRINT_PREPARED",
+        "options": [
+          {
+            "id": "ai_detect",
+            "category": "monitoring",
+            "order": 10,
+            "default_enabled": false,
+            "label_key": "AI detection",
+            "description_key": "Monitor for print abnormalities (K2 Plus camera-based)",
+            "strategy": "pre_start_gcode",
+            "gcode_template": "LOAD_AI_RUN SWITCH={value}",
+            "requires_macro": "LOAD_AI_RUN"
+          }
+        ]
+      },
+      "heuristics": [
+        {
+          "type": "macro_match",
+          "field": "macros",
+          "pattern": "_START_PRINT_VARS",
+          "confidence": 99,
+          "reason": "_START_PRINT_VARS is the k2-improvements START_PRINT's variable holder - definitive, and it is the macro that changes the narration"
+        },
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "^cartographer$",
+          "confidence": 70,
+          "reason": "The mod replaces prtouch_v3 with a Cartographer probe",
+          "corroborating": true
+        },
+        {
+          "type": "kinematics_match",
+          "field": "kinematics",
+          "pattern": "corexy",
+          "confidence": 40,
+          "reason": "CoreXY kinematics"
+        },
+        {
+          "type": "sensor_match",
+          "field": "sensors",
+          "pattern": "chamber_temp",
+          "confidence": 70,
+          "reason": "Chamber temperature sensor",
+          "corroborating": true
+        },
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "^box$",
+          "confidence": 45,
+          "reason": "CFS box object. Every CFS-equipped Creality carries it, so it narrows a machine to the range and never to a model; the model is the hostname's and bed size's to name",
+          "corroborating": true
+        },
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "motor_control",
+          "confidence": 75,
+          "reason": "K2-specific motor control module"
+        },
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "fan_feedback",
+          "confidence": 65,
+          "reason": "Creality fan-tachometer module. A captured real K1C reports it too, so it evidences Creality's range and not this model; the model is the hostname's and bed size's to name. Weight left as-is deliberately: re-scoring or dropping it wants a real K2 discovery snapshot, and no fixture has one"
+        },
+        {
+          "type": "hostname_match",
+          "field": "hostname",
+          "pattern": "creality",
+          "confidence": 60,
+          "reason": "Hostname contains 'creality'"
+        },
+        {
+          "type": "hostname_match",
+          "field": "hostname",
+          "pattern": "k2",
+          "confidence": 85,
+          "reason": "Hostname contains 'k2'"
+        },
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "load_ai",
+          "confidence": 60,
+          "reason": "K2 AI print monitoring"
+        },
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "filament_rack",
+          "confidence": 65,
+          "reason": "K2 filament rack module"
+        },
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "heater_generic chamber_heater",
+          "confidence": 70,
+          "reason": "Active chamber heater"
+        },
+        {
+          "type": "hostname_match",
+          "field": "hostname",
+          "pattern": "k2plus",
+          "confidence": 90,
+          "reason": "Hostname contains 'K2Plus'"
+        },
+        {
+          "type": "build_volume_range",
+          "field": "bed_mesh",
+          "measure": "declared_bed",
+          "min_x": 340,
+          "max_x": 360,
+          "min_y": 340,
+          "max_y": 360,
+          "confidence": 55,
+          "reason": "Declared bed ~350mm (K2 Plus); separates Plus from Pro once the K2 platform is identified. Measures the bed size Creality's product_param macro declares (350x350 on a real K2 Plus) because stepper travel overshoots the bed: that K2 Plus travels -10 to 352.5 in X and -6.2 to 400 in Y",
+          "separator": true
+        }
+      ]
+    },
+    {
       "id": "creality_k2_pro",
+      "enclosed": true,
       "name": "Creality K2 Pro",
       "manufacturer": "Creality",
       "toolhead_style": "creality_k2",
@@ -1532,6 +2036,13 @@
       },
       "heuristics": [
         {
+          "type": "macro_exclude",
+          "field": "macros",
+          "pattern": "_START_PRINT_VARS",
+          "confidence": 0,
+          "reason": "Exclude the k2-improvements mod (separate entry) - it replaces START_PRINT wholesale"
+        },
+        {
           "type": "kinematics_match",
           "field": "kinematics",
           "pattern": "corexy",
@@ -1543,14 +2054,16 @@
           "field": "sensors",
           "pattern": "chamber_temp",
           "confidence": 70,
-          "reason": "Chamber temperature sensor"
+          "reason": "Chamber temperature sensor",
+          "corroborating": true
         },
         {
           "type": "object_exists",
           "field": "printer_objects",
           "pattern": "^box$",
-          "confidence": 95,
-          "reason": "CFS filament system detected"
+          "confidence": 45,
+          "reason": "CFS box object. Every CFS-equipped Creality carries it, so it narrows a machine to the range and never to a model; the model is the hostname's and bed size's to name",
+          "corroborating": true
         },
         {
           "type": "object_exists",
@@ -1564,7 +2077,7 @@
           "field": "printer_objects",
           "pattern": "fan_feedback",
           "confidence": 65,
-          "reason": "K2-specific fan RPM feedback"
+          "reason": "Creality fan-tachometer module. A captured real K1C reports it too, so it evidences Creality's range and not this model; the model is the hostname's and bed size's to name. Weight left as-is deliberately: re-scoring or dropping it wants a real K2 discovery snapshot, and no fixture has one"
         },
         {
           "type": "hostname_match",
@@ -1611,12 +2124,151 @@
         {
           "type": "build_volume_range",
           "field": "bed_mesh",
+          "measure": "declared_bed",
           "min_x": 290,
           "max_x": 310,
           "min_y": 290,
           "max_y": 310,
           "confidence": 55,
-          "reason": "Build volume ~300mm (K2 Pro size)"
+          "reason": "Declared bed ~300mm (K2 Pro); separates Pro from Plus once the K2 platform is identified. Measures the bed size Creality's product_param macro declares; 300 is Creality's spec for the Pro, not a captured value. Stepper travel overshoots the bed: a reported K2 Pro has position_max 302 in X and 332 in Y",
+          "separator": true
+        }
+      ],
+      "_print_start_default_phases_comment": "Measured on a K2 Plus 2026-08-18 (three captured prints): three homing rail rounds ~15s; nozzle wipe plus both BOX_NOZZLE_CLEAN passes ~60s; the bed-mesh toggle is optional (emit_when_disabled: false) and its check-passed validation runs ~6s - a failed check re-meshes (67-pt adaptive) and the prediction history learns that after the first such print. Heating is omitted - the thermal model owns those.",
+      "print_start_default_phases": {
+        "HOMING": 15,
+        "CLEANING": 60,
+        "BED_MESH": 10
+      }
+    },
+    {
+      "id": "creality_k2",
+      "enclosed": true,
+      "name": "Creality K2",
+      "manufacturer": "Creality",
+      "toolhead_style": "creality_k2",
+      "image": "creality-k2.png",
+      "_image_comment": "creality-k2.png is a byte copy of creality-k2-plus.png until a photo of the base K2 exists. It keeps its own filename because detection tells machines apart by image: a shared file would make the base K2 and the K2 Plus one machine to the tie rules",
+      "probe_type": "prtouch_v3",
+      "preset": "k2",
+      "preset_default": true,
+      "_preset_default_comment": "The k2 family's default: a K2 preset install whose detection names no K2 machine persists this entry, by this marker rather than database order",
+      "print_start_profile": "creality_k2",
+      "console_filters": [
+        "creality_rs485",
+        "creality_k2_modules"
+      ],
+      "pre_print_options": {
+        "macro_name": "START_PRINT",
+        "setup_gcode": "PRINT_PREPARED",
+        "options": [
+          {
+            "id": "bed_mesh",
+            "category": "mechanical",
+            "order": 10,
+            "default_enabled": true,
+            "strategy": "pre_start_gcode",
+            "gcode_template": "BED_MESH_CALIBRATE_START_PRINT GCODE_FILE='{file}' BED_TEMP={bed_temp} EXTRUDER_TEMP={extruder_temp}",
+            "emit_when_disabled": false
+          },
+          {
+            "id": "ai_detect",
+            "category": "monitoring",
+            "order": 10,
+            "default_enabled": false,
+            "label_key": "AI detection",
+            "description_key": "Monitor for print abnormalities (camera-based)",
+            "strategy": "pre_start_gcode",
+            "gcode_template": "LOAD_AI_RUN SWITCH={value}",
+            "requires_macro": "LOAD_AI_RUN"
+          }
+        ]
+      },
+      "_heuristics_comment": "The K2 platform heuristics minus the active chamber heater: the base K2 has no chamber heater (docs/devel/printers/CREALITY_K2_SUPPORT.md model table). Nothing documents it without motor_control, fan_feedback, load_ai, filament_rack, a chamber thermistor or the optional CFS box, so those stay",
+      "heuristics": [
+        {
+          "type": "macro_exclude",
+          "field": "macros",
+          "pattern": "_START_PRINT_VARS",
+          "confidence": 0,
+          "reason": "Exclude the k2-improvements mod (separate entry) - it replaces START_PRINT wholesale"
+        },
+        {
+          "type": "kinematics_match",
+          "field": "kinematics",
+          "pattern": "corexy",
+          "confidence": 40,
+          "reason": "CoreXY kinematics"
+        },
+        {
+          "type": "sensor_match",
+          "field": "sensors",
+          "pattern": "chamber_temp",
+          "confidence": 70,
+          "reason": "Chamber temperature sensor",
+          "corroborating": true
+        },
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "^box$",
+          "confidence": 45,
+          "reason": "CFS box object. Every CFS-equipped Creality carries it, so it narrows a machine to the range and never to a model; the model is the hostname's and bed size's to name",
+          "corroborating": true
+        },
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "motor_control",
+          "confidence": 75,
+          "reason": "K2-specific motor control module"
+        },
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "fan_feedback",
+          "confidence": 65,
+          "reason": "Creality fan-tachometer module. A captured real K1C reports it too, so it evidences Creality's range and not this model; the model is the hostname's and bed size's to name. Weight left as-is deliberately: re-scoring or dropping it wants a real K2 discovery snapshot, and no fixture has one"
+        },
+        {
+          "type": "hostname_match",
+          "field": "hostname",
+          "pattern": "creality",
+          "confidence": 60,
+          "reason": "Hostname contains 'creality'"
+        },
+        {
+          "type": "hostname_match",
+          "field": "hostname",
+          "pattern": "k2",
+          "confidence": 85,
+          "reason": "Hostname contains 'k2'"
+        },
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "load_ai",
+          "confidence": 60,
+          "reason": "K2 AI print monitoring"
+        },
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "filament_rack",
+          "confidence": 65,
+          "reason": "K2 filament rack module"
+        },
+        {
+          "type": "build_volume_range",
+          "field": "bed_mesh",
+          "measure": "declared_bed",
+          "min_x": 250,
+          "max_x": 270,
+          "min_y": 250,
+          "max_y": 270,
+          "confidence": 55,
+          "reason": "Declared bed ~260mm (base K2); separates the base K2 from the K2 Pro and K2 Plus once the K2 platform is identified. Measures the bed size Creality's product_param macro declares; 260 is Creality's spec for the base K2, not a captured value. The window is +/-10mm, symmetric like the Pro's 290-310 and the Plus's 340-360",
+          "separator": true
         }
       ],
       "_print_start_default_phases_comment": "Measured on a K2 Plus 2026-08-18 (three captured prints): three homing rail rounds ~15s; nozzle wipe plus both BOX_NOZZLE_CLEAN passes ~60s; the bed-mesh toggle is optional (emit_when_disabled: false) and its check-passed validation runs ~6s - a failed check re-meshes (67-pt adaptive) and the prediction history learns that after the first such print. Heating is omitted - the thermal model owns those.",
@@ -1628,12 +2280,15 @@
     },
     {
       "id": "creality_k1c",
+      "enclosed": true,
       "name": "Creality K1C",
       "manufacturer": "Creality",
       "toolhead_style": "creality_k1",
       "image": "creality-k1c.png",
       "probe_type": "prtouch_v2",
       "preset": "k1c",
+      "preset_default": true,
+      "_preset_default_comment": "The k1c family's default: a K1C preset install whose detection names no K1C machine persists this entry, the base model without CFS, rather than database order",
       "print_start_profile": "creality_k1",
       "_print_start_default_phases_comment": "Measured on a K1C 2026-08-19 (flowrate print, full prep chain): homing via CX_ROUGH_G28 ran 60s vs the 30s generic default; the nozzle wipe (CLEAR_NOZZLE_QUICK rounds) ran ~85s; a check-passed mesh (4-corner validation + 25-point sweep at 5.5s/point) ran 123s. Heating phases are omitted - the thermal model owns those.",
       "print_start_default_phases": {
@@ -1671,7 +2326,8 @@
           "field": "sensors",
           "pattern": "chamber_temp",
           "confidence": 70,
-          "reason": "Chamber temperature sensor (enclosed printer)"
+          "reason": "Chamber temperature sensor (enclosed printer)",
+          "corroborating": true
         },
         {
           "type": "fan_match",
@@ -1705,6 +2361,7 @@
     },
     {
       "id": "creality_k1c_cfs",
+      "enclosed": true,
       "name": "Creality K1C (with CFS)",
       "manufacturer": "Creality",
       "toolhead_style": "creality_k1",
@@ -1748,7 +2405,8 @@
           "field": "sensors",
           "pattern": "chamber_temp",
           "confidence": 70,
-          "reason": "Chamber temperature sensor (enclosed printer)"
+          "reason": "Chamber temperature sensor (enclosed printer)",
+          "corroborating": true
         },
         {
           "type": "fan_match",
@@ -1761,8 +2419,16 @@
           "type": "object_exists",
           "field": "printer_objects",
           "pattern": "^box$",
-          "confidence": 95,
-          "reason": "CFS filament system detected (K1 official upgrade ≥ v2.3.5.33)"
+          "confidence": 45,
+          "reason": "CFS box object. Every CFS-equipped Creality carries it, so it narrows a machine to the range and never to a model; the model is the hostname's and bed size's to name",
+          "corroborating": true
+        },
+        {
+          "type": "object_required",
+          "field": "printer_objects",
+          "pattern": "^box$",
+          "confidence": 0,
+          "reason": "This entry is the CFS-equipped variant; a reported object list without the box object is the plain machine"
         },
         {
           "type": "hostname_match",
@@ -1828,7 +2494,8 @@
           "field": "sensors",
           "pattern": "chamber_temp",
           "confidence": 70,
-          "reason": "Chamber temperature sensor"
+          "reason": "Chamber temperature sensor",
+          "corroborating": true
         },
         {
           "type": "hostname_match",
@@ -1923,7 +2590,8 @@
           "field": "mcu",
           "pattern": "GD32F303",
           "confidence": 30,
-          "reason": "GD32F303 main MCU (Creality CR4NU board)"
+          "reason": "GD32F303 main MCU (Creality CR4NU board)",
+          "corroborating": true
         }
       ]
     },
@@ -2135,7 +2803,8 @@
           "field": "mcu",
           "pattern": "STM32F103",
           "confidence": 30,
-          "reason": "STM32F103 MCU (common Creality board)"
+          "reason": "STM32F103 MCU (common Creality board)",
+          "corroborating": true
         },
         {
           "type": "hostname_match",
@@ -2316,23 +2985,48 @@
           "pattern": "cr-10",
           "confidence": 85,
           "reason": "Hostname contains 'cr-10'"
+        },
+        {
+          "type": "hostname_exclude",
+          "field": "hostname",
+          "pattern": "ducr10",
+          "confidence": 0,
+          "reason": "A DuCR10 hostname contains 'cr10'; it is not a Creality CR-10"
         }
       ]
     },
     {
       "id": "elegoo_centauri_carbon",
+      "enclosed": true,
       "name": "Elegoo Centauri Carbon",
       "manufacturer": "Elegoo",
       "image": "elegoo-centauri-carbon.png",
       "preset": "cc1",
+      "_calibration_comment": "COSMOS's BED_MESH_CALIBRATE is a macro that heats the bed to BED_TEMP, homes, cleans the nozzle, tares the load cell, probes, then measures the Z offset. It needs nothing sent ahead of it (bed_mesh_self_prepares); its M190/M109 wait for a hot bed to cool, so BED_TEMP never asks for less than a bed above 60C already has, even when a lower target is set. {profile_arg} stores the mesh under the chosen name as it completes; the Z-offset step clears the active mesh right after, so it cannot be saved from there.",
       "calibration": {
-        "bed_mesh_gcode": "MOVE_TO_TRAY\nM140 S60\nM104 S220\nM109 S220\nM190 S60\nM729\nG28\nM400\nLOAD_CELL_SAVE_TARE\nG4 P2000\nBED_MESH_CALIBRATE_WITH_WIPE\nBED_MESH_PROFILE SAVE={profile}"
+        "bed_mesh_gcode": "BED_MESH_CALIBRATE{profile_arg} BED_TEMP={bed_temp}",
+        "bed_mesh_self_prepares": true
       },
-      "_print_start_default_phases_comment": "CC1's slicer start-gcode only heats + G28 + loads a stored BED_MESH_PROFILE (<1s). No QGL/Z_TILT/mesh-calibrate/wipe. Loadcell homing is slower than endstop homing, so 30s covers G28 alone.",
+      "print_start_profile": "cosmos_cc1",
+      "_print_start_default_phases_comment": "COSMOS PRINT_START, measured on a CC1 running 26.08 (2026-09-14, cold start, 105C bed / 260C nozzle): both heaters set without waiting, G28 through homing_override ~23s, M190, a heat soak of cosmos.conf heatsoak minutes (60s by default; cosmos_cc1.json holds the pre-print open for the minutes it announces), the stored default mesh loaded in under a second (adaptive_mesh probes a new mesh instead, which the history learns), SMART_PARK, M109, then a KAMP line purge ~13s. Heating is omitted: the thermal model owns it.",
       "print_start_default_phases": {
-        "HOMING": 30
+        "HOMING": 25,
+        "SOAKING": 60,
+        "BED_MESH": 2,
+        "PURGING": 15
+      },
+      "_thermal_rates_comment": "Seconds per degree C for a first print, from the same COSMOS cold start: the bed took ~484s from 24.5C to 105C (about 4.3 s/C below 60C and 8 in the last 20C), the nozzle ~48s from 140C to 260C.",
+      "thermal_rates": {
+        "heater_bed": 6.0,
+        "extruder": 0.4
       },
       "heuristics": [
+        {
+          "type": "kinematics_exclude",
+          "field": "kinematics",
+          "pattern": "cartesian",
+          "reason": "Centauri Carbon is CoreXY; the Elegoo cartesians are not it"
+        },
         {
           "type": "kinematics_match",
           "field": "kinematics",
@@ -2353,16 +3047,31 @@
         {
           "type": "object_exists",
           "field": "printer_objects",
-          "pattern": "lis2dw",
-          "confidence": 70,
-          "reason": "LIS2DW accelerometer (CC1 toolhead input shaper)"
-        },
-        {
-          "type": "object_exists",
-          "field": "printer_objects",
           "pattern": "load_cell_probe",
           "confidence": 70,
           "reason": "Strain-gauge load cell probe"
+        },
+        {
+          "type": "macro_match",
+          "field": "macros",
+          "pattern": "_COSMOS_SETTINGS",
+          "confidence": 90,
+          "reason": "COSMOS firmware settings macro (OpenCentauri)"
+        },
+        {
+          "type": "macro_match",
+          "field": "macros",
+          "pattern": "ELEGOO_PURGE",
+          "confidence": 85,
+          "reason": "ELEGOO_PURGE purge macro (COSMOS kamp.cfg)"
+        },
+        {
+          "type": "hostname_match",
+          "field": "hostname",
+          "pattern": "cosmos",
+          "confidence": 85,
+          "reason": "Hostname is the COSMOS image default (shared across the Centauri range)",
+          "corroborating": true
         },
         {
           "type": "hostname_match",
@@ -2782,6 +3491,7 @@
     },
     {
       "id": "qidi_x_max_3",
+      "enclosed": true,
       "name": "Qidi X-Max 3",
       "manufacturer": "Qidi",
       "image": "qidi-x-max-3.png",
@@ -2800,7 +3510,8 @@
           "field": "sensors",
           "pattern": "chamber",
           "confidence": 70,
-          "reason": "Chamber temperature sensor (enclosed printer)"
+          "reason": "Chamber temperature sensor (enclosed printer)",
+          "corroborating": true
         },
         {
           "type": "object_exists",
@@ -2845,14 +3556,16 @@
           "field": "macros",
           "pattern": "M141",
           "confidence": 75,
-          "reason": "M141 chamber heater macro (QIDI signature)"
+          "reason": "M141 chamber heater macro (QIDI stock firmware, not exclusive)",
+          "corroborating": true
         },
         {
           "type": "macro_match",
           "field": "macros",
           "pattern": "M191",
           "confidence": 80,
-          "reason": "M191 chamber temp wait macro (QIDI signature)"
+          "reason": "M191 chamber temp wait macro (QIDI stock firmware, not exclusive)",
+          "corroborating": true
         },
         {
           "type": "macro_match",
@@ -2866,12 +3579,14 @@
           "field": "mcu",
           "pattern": "rp2040",
           "confidence": 45,
-          "reason": "RP2040 toolhead MCU (QIDI dual-MCU design)"
+          "reason": "RP2040 toolhead MCU (QIDI dual-MCU design)",
+          "corroborating": true
         }
       ]
     },
     {
       "id": "qidi_plus_4",
+      "enclosed": true,
       "name": "Qidi Plus 4",
       "manufacturer": "Qidi",
       "image": "qidi-plus-4.png",
@@ -2891,7 +3606,8 @@
           "field": "sensors",
           "pattern": "chamber",
           "confidence": 70,
-          "reason": "Chamber temperature sensor (enclosed printer)"
+          "reason": "Chamber temperature sensor (enclosed printer)",
+          "corroborating": true
         },
         {
           "type": "object_exists",
@@ -2933,14 +3649,16 @@
           "field": "macros",
           "pattern": "M141",
           "confidence": 75,
-          "reason": "M141 chamber heater macro (QIDI signature)"
+          "reason": "M141 chamber heater macro (QIDI stock firmware, not exclusive)",
+          "corroborating": true
         },
         {
           "type": "macro_match",
           "field": "macros",
           "pattern": "M191",
           "confidence": 80,
-          "reason": "M191 chamber temp wait macro (QIDI signature)"
+          "reason": "M191 chamber temp wait macro (QIDI stock firmware, not exclusive)",
+          "corroborating": true
         },
         {
           "type": "macro_match",
@@ -2961,12 +3679,14 @@
           "field": "mcu",
           "pattern": "rp2040",
           "confidence": 45,
-          "reason": "RP2040 toolhead MCU (QIDI dual-MCU design)"
+          "reason": "RP2040 toolhead MCU (QIDI dual-MCU design)",
+          "corroborating": true
         }
       ]
     },
     {
       "id": "qidi_x_plus_3",
+      "enclosed": true,
       "name": "Qidi X-Plus 3",
       "manufacturer": "Qidi",
       "image": "qidi-x-plus-3.png",
@@ -2985,7 +3705,8 @@
           "field": "sensors",
           "pattern": "chamber",
           "confidence": 70,
-          "reason": "Chamber temperature sensor (enclosed printer)"
+          "reason": "Chamber temperature sensor (enclosed printer)",
+          "corroborating": true
         },
         {
           "type": "object_exists",
@@ -3030,14 +3751,16 @@
           "field": "macros",
           "pattern": "M141",
           "confidence": 75,
-          "reason": "M141 chamber heater macro (QIDI signature)"
+          "reason": "M141 chamber heater macro (QIDI stock firmware, not exclusive)",
+          "corroborating": true
         },
         {
           "type": "macro_match",
           "field": "macros",
           "pattern": "M191",
           "confidence": 80,
-          "reason": "M191 chamber temp wait macro (QIDI signature)"
+          "reason": "M191 chamber temp wait macro (QIDI stock firmware, not exclusive)",
+          "corroborating": true
         },
         {
           "type": "macro_match",
@@ -3051,12 +3774,14 @@
           "field": "mcu",
           "pattern": "rp2040",
           "confidence": 45,
-          "reason": "RP2040 toolhead MCU (QIDI dual-MCU design)"
+          "reason": "RP2040 toolhead MCU (QIDI dual-MCU design)",
+          "corroborating": true
         }
       ]
     },
     {
       "id": "qidi_q1_pro",
+      "enclosed": true,
       "name": "Qidi Q1 Pro",
       "manufacturer": "Qidi",
       "image": "qidi-q1-pro.png",
@@ -3075,7 +3800,8 @@
           "field": "sensors",
           "pattern": "chamber",
           "confidence": 70,
-          "reason": "Chamber temperature sensor (enclosed printer)"
+          "reason": "Chamber temperature sensor (enclosed printer)",
+          "corroborating": true
         },
         {
           "type": "object_exists",
@@ -3103,14 +3829,16 @@
           "field": "macros",
           "pattern": "M141",
           "confidence": 75,
-          "reason": "M141 chamber heater macro (QIDI signature)"
+          "reason": "M141 chamber heater macro (QIDI stock firmware, not exclusive)",
+          "corroborating": true
         },
         {
           "type": "macro_match",
           "field": "macros",
           "pattern": "M191",
           "confidence": 80,
-          "reason": "M191 chamber temp wait macro (QIDI signature)"
+          "reason": "M191 chamber temp wait macro (QIDI stock firmware, not exclusive)",
+          "corroborating": true
         },
         {
           "type": "macro_match",
@@ -3124,12 +3852,14 @@
           "field": "mcu",
           "pattern": "rp2040",
           "confidence": 45,
-          "reason": "RP2040 toolhead MCU (QIDI dual-MCU design)"
+          "reason": "RP2040 toolhead MCU (QIDI dual-MCU design)",
+          "corroborating": true
         }
       ]
     },
     {
       "id": "qidi_x_smart_3",
+      "enclosed": true,
       "name": "Qidi X-Smart 3",
       "manufacturer": "Qidi",
       "image": "qidi-x-smart-3.png",
@@ -3186,12 +3916,14 @@
           "field": "mcu",
           "pattern": "rp2040",
           "confidence": 45,
-          "reason": "RP2040 toolhead MCU (QIDI dual-MCU design)"
+          "reason": "RP2040 toolhead MCU (QIDI dual-MCU design)",
+          "corroborating": true
         }
       ]
     },
     {
       "id": "qidi_max_4",
+      "enclosed": true,
       "name": "Qidi Max 4",
       "manufacturer": "Qidi",
       "image": "qidi-max-4.png",
@@ -3270,7 +4002,8 @@
           "field": "sensors",
           "pattern": "Chamber_Thermal_Protection",
           "confidence": 50,
-          "reason": "Chamber thermal protection sensor (QIDI Max 4 stock config)"
+          "reason": "Chamber thermal protection sensor (QIDI Max 4 stock config)",
+          "corroborating": true
         },
         {
           "type": "hostname_match",
@@ -3298,12 +4031,14 @@
           "field": "mcu",
           "pattern": "STM32F407",
           "confidence": 35,
-          "reason": "STM32F407 main MCU (QIDI new-generation board)"
+          "reason": "STM32F407 main MCU (QIDI new-generation board)",
+          "corroborating": true
         }
       ]
     },
     {
       "id": "qidi_q2",
+      "enclosed": true,
       "name": "Qidi Q2",
       "manufacturer": "Qidi",
       "image": "qidi-q2.png",
@@ -3324,14 +4059,15 @@
           "field": "sensors",
           "pattern": "chamber",
           "confidence": 70,
-          "reason": "Chamber temperature sensor (enclosed printer)"
+          "reason": "Chamber temperature sensor (enclosed printer)",
+          "corroborating": true
         },
         {
           "type": "object_exists",
           "field": "printer_objects",
           "pattern": "heater_generic chamber",
-          "confidence": 75,
-          "reason": "Active chamber heater (Qidi signature)"
+          "confidence": 80,
+          "reason": "Active chamber heater (Qidi enclosed range)"
         },
         {
           "type": "build_volume_range",
@@ -3362,14 +4098,16 @@
           "field": "macros",
           "pattern": "M141",
           "confidence": 75,
-          "reason": "M141 chamber heater macro (QIDI signature)"
+          "reason": "M141 chamber heater macro (QIDI stock firmware, not exclusive)",
+          "corroborating": true
         },
         {
           "type": "macro_match",
           "field": "macros",
           "pattern": "M191",
           "confidence": 80,
-          "reason": "M191 chamber temp wait macro (QIDI signature)"
+          "reason": "M191 chamber temp wait macro (QIDI stock firmware, not exclusive)",
+          "corroborating": true
         },
         {
           "type": "macro_match",
@@ -3390,7 +4128,8 @@
           "field": "mcu",
           "pattern": "STM32F407",
           "confidence": 35,
-          "reason": "STM32F407 main MCU (QIDI new-generation board)"
+          "reason": "STM32F407 main MCU (QIDI new-generation board)",
+          "corroborating": true
         }
       ]
     },
@@ -3429,7 +4168,8 @@
           "field": "hostname",
           "pattern": "flsun",
           "confidence": 90,
-          "reason": "Hostname contains 'flsun'"
+          "reason": "Hostname contains 'flsun'",
+          "corroborating": true
         },
         {
           "type": "hostname_match",
@@ -3443,7 +4183,9 @@
           "field": "mcu",
           "pattern": "GD32F303",
           "confidence": 40,
-          "reason": "GD32F303 MCU (MKS Robin Nano V2 clone)"
+          "reason": "GD32F303 MCU (MKS Robin Nano V2 clone)",
+          "corroborating": true,
+          "separator": true
         }
       ]
     },
@@ -3472,7 +4214,8 @@
           "field": "hostname",
           "pattern": "flsun",
           "confidence": 90,
-          "reason": "Hostname contains 'flsun'"
+          "reason": "Hostname contains 'flsun'",
+          "corroborating": true
         },
         {
           "type": "hostname_match",
@@ -3507,7 +4250,9 @@
           "field": "mcu",
           "pattern": "GD32F303",
           "confidence": 40,
-          "reason": "GD32F303 MCU (MKS Robin Nano)"
+          "reason": "GD32F303 MCU (MKS Robin Nano)",
+          "corroborating": true,
+          "separator": true
         }
       ]
     },
@@ -3543,14 +4288,88 @@
           "field": "hostname",
           "pattern": "flsun",
           "confidence": 90,
-          "reason": "Hostname contains 'flsun'"
+          "reason": "Hostname contains 'flsun'",
+          "corroborating": true
         },
         {
           "type": "hostname_match",
           "field": "hostname",
           "pattern": "delta",
           "confidence": 60,
-          "reason": "Hostname contains 'delta'"
+          "reason": "Hostname contains 'delta'",
+          "corroborating": true
+        }
+      ]
+    },
+    {
+      "id": "flsun_s1",
+      "name": "FLSUN S1 / S1 Pro",
+      "manufacturer": "FLSUN",
+      "image": "flsun-s1.png",
+      "z_offset_calibration_strategy": "endstop",
+      "heuristics": [
+        {
+          "type": "object_required",
+          "field": "printer_objects",
+          "pattern": "delta_calibrate",
+          "reason": "The S1 is a delta; a reported object list without delta_calibrate is another machine"
+        },
+        {
+          "type": "kinematics_match",
+          "field": "kinematics",
+          "pattern": "delta",
+          "confidence": 90,
+          "reason": "Delta kinematics"
+        },
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "delta_calibrate",
+          "confidence": 95,
+          "reason": "Delta calibration present (delta printer signature)"
+        },
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "^gcode_button motor_a$",
+          "confidence": 95,
+          "reason": "Closed-loop motor board status buttons (gcode_button motor_a/b/c, stock FLSUN OS and Open Source Edition)"
+        },
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "drying_box",
+          "confidence": 90,
+          "reason": "Built-in filament drying box (drying_box_heater/drying_box_fan stock, heater_generic drying_box on Open Source Edition)"
+        },
+        {
+          "type": "hostname_match",
+          "field": "hostname",
+          "pattern": "flsun",
+          "confidence": 90,
+          "reason": "Hostname contains 'flsun'",
+          "corroborating": true
+        },
+        {
+          "type": "hostname_match",
+          "field": "hostname",
+          "pattern": "flsun-s1",
+          "confidence": 95,
+          "reason": "Hostname contains 'flsun-s1' (FLSUN OS Open Source Edition names the host FLSUN-S1-XXXX)"
+        },
+        {
+          "type": "hostname_match",
+          "field": "hostname",
+          "pattern": "flsun_s1",
+          "confidence": 95,
+          "reason": "Hostname contains 'flsun_s1'"
+        },
+        {
+          "type": "hostname_match",
+          "field": "hostname",
+          "pattern": "flsuns1",
+          "confidence": 95,
+          "reason": "Hostname contains 'flsuns1'"
         }
       ]
     },
@@ -3586,7 +4405,8 @@
           "field": "hostname",
           "pattern": "doron",
           "confidence": 85,
-          "reason": "Hostname contains 'doron'"
+          "reason": "Hostname contains 'doron'",
+          "corroborating": true
         },
         {
           "type": "hostname_match",
@@ -3646,7 +4466,8 @@
           "field": "hostname",
           "pattern": "venture",
           "confidence": 90,
-          "reason": "Hostname contains 'venture'"
+          "reason": "Hostname contains 'venture'",
+          "corroborating": true
         },
         {
           "type": "build_volume_range",
@@ -4074,7 +4895,8 @@
           "field": "hostname",
           "pattern": "sovol",
           "confidence": 85,
-          "reason": "Hostname contains 'sovol'"
+          "reason": "Hostname contains 'sovol'",
+          "corroborating": true
         },
         {
           "type": "hostname_match",
@@ -4095,7 +4917,8 @@
           "field": "mcu",
           "pattern": "STM32F103",
           "confidence": 25,
-          "reason": "STM32F103 MCU (stock Sovol SV08 board)"
+          "reason": "STM32F103 MCU (stock Sovol SV08 board)",
+          "corroborating": true
         }
       ]
     },
@@ -4155,7 +4978,8 @@
           "field": "hostname",
           "pattern": "sovol",
           "confidence": 85,
-          "reason": "Hostname contains 'sovol'"
+          "reason": "Hostname contains 'sovol'",
+          "corroborating": true
         },
         {
           "type": "hostname_match",
@@ -4201,7 +5025,8 @@
           "field": "hostname",
           "pattern": "sovol",
           "confidence": 85,
-          "reason": "Hostname contains 'sovol'"
+          "reason": "Hostname contains 'sovol'",
+          "corroborating": true
         },
         {
           "type": "hostname_match",
@@ -4254,7 +5079,8 @@
           "field": "hostname",
           "pattern": "sovol",
           "confidence": 85,
-          "reason": "Hostname contains 'sovol'"
+          "reason": "Hostname contains 'sovol'",
+          "corroborating": true
         },
         {
           "type": "hostname_match",
@@ -4270,6 +5096,7 @@
       "name": "Sovol SV06 ACE",
       "manufacturer": "Sovol",
       "image": "sovol-sv06-ace.png",
+      "notes": "smart_effector is weighted as keystone hardware (90) because hostname-free ACE identification rests on it clearing the separator bar. Mainline Klipper also ships smart_effector for Duet3D probe boards, so a rare Duet3D rig reporting it with a 200-240mm bed and no hostname is an accepted collision - it is misidentified as an ACE rather than declined, because a lower weight would leave the load-cell stack below the separator bar and hostname-free ACEs would go ambiguous.",
       "preset": "sovol_sv06_ace",
       "display": {
         "resolution": "480x272",
@@ -4294,13 +5121,14 @@
           "min_y": 200,
           "max_y": 240,
           "confidence": 50,
-          "reason": "Build volume ~220mm (SV06 ACE size)"
+          "reason": "Build volume ~220mm (SV06 ACE size)",
+          "separator": true
         },
         {
           "type": "object_exists",
           "field": "printer_objects",
           "pattern": "smart_effector",
-          "confidence": 72,
+          "confidence": 90,
           "reason": "smart_effector load-cell nozzle probe (ACE; plain SV06 uses inductive probe)"
         },
         {
@@ -4322,7 +5150,8 @@
           "field": "hostname",
           "pattern": "sovol",
           "confidence": 85,
-          "reason": "Hostname contains 'sovol'"
+          "reason": "Hostname contains 'sovol'",
+          "corroborating": true
         },
         {
           "type": "hostname_match",
@@ -4375,7 +5204,8 @@
           "field": "hostname",
           "pattern": "sovol",
           "confidence": 85,
-          "reason": "Hostname contains 'sovol'"
+          "reason": "Hostname contains 'sovol'",
+          "corroborating": true
         },
         {
           "type": "hostname_match",
@@ -4398,6 +5228,7 @@
       "name": "Sovol SV06 Plus ACE",
       "manufacturer": "Sovol",
       "image": "sovol-sv06-plus-ace.png",
+      "notes": "smart_effector is weighted as keystone hardware (90) because hostname-free ACE identification rests on it clearing the separator bar. Mainline Klipper also ships smart_effector for Duet3D probe boards, so a rare Duet3D rig reporting it with a 280-320mm bed and no hostname is an accepted collision - it is misidentified as an ACE rather than declined, because a lower weight would leave the load-cell stack below the separator bar and hostname-free ACEs would go ambiguous.",
       "display": {
         "resolution": "480x272",
         "touch_controller": "goodix",
@@ -4421,13 +5252,14 @@
           "min_y": 280,
           "max_y": 320,
           "confidence": 60,
-          "reason": "Build volume ~300mm (SV06 Plus ACE size)"
+          "reason": "Build volume ~300mm (SV06 Plus ACE size)",
+          "separator": true
         },
         {
           "type": "object_exists",
           "field": "printer_objects",
           "pattern": "smart_effector",
-          "confidence": 72,
+          "confidence": 90,
           "reason": "smart_effector load-cell nozzle probe (ACE; plain SV06 Plus uses inductive probe)"
         },
         {
@@ -4449,7 +5281,8 @@
           "field": "hostname",
           "pattern": "sovol",
           "confidence": 85,
-          "reason": "Hostname contains 'sovol'"
+          "reason": "Hostname contains 'sovol'",
+          "corroborating": true
         },
         {
           "type": "hostname_match",
@@ -4516,7 +5349,8 @@
           "field": "hostname",
           "pattern": "sovol",
           "confidence": 85,
-          "reason": "Hostname contains 'sovol'"
+          "reason": "Hostname contains 'sovol'",
+          "corroborating": true
         },
         {
           "type": "hostname_match",
@@ -4730,6 +5564,8 @@
       "manufacturer": "Anycubic",
       "image": "anycubic-kobra-3.png",
       "preset": "anycubic_kobra_3",
+      "preset_default": true,
+      "_preset_default_comment": "The anycubic_kobra_3 family's default: a preset install whose detection names no Kobra 3 machine persists this entry, the base model rather than the V2, rather than database order",
       "print_start_profile": "anycubic_kobra",
       "heuristics": [
         {
@@ -4845,6 +5681,13 @@
           "pattern": "k3v2",
           "confidence": 96,
           "reason": "Hostname contains 'k3v2'"
+        },
+        {
+          "type": "hostname_match",
+          "field": "hostname",
+          "pattern": "anycubic",
+          "confidence": 80,
+          "reason": "Hostname contains 'anycubic'"
         }
       ]
     },
@@ -5057,6 +5900,7 @@
     },
     {
       "id": "anycubic_kobra_s1",
+      "enclosed": true,
       "name": "Anycubic Kobra S1",
       "manufacturer": "Anycubic",
       "image": "anycubic-kobra-s1.png",
@@ -5126,6 +5970,7 @@
     },
     {
       "id": "anycubic_kobra_s1_max",
+      "enclosed": true,
       "name": "Anycubic Kobra S1 Max",
       "manufacturer": "Anycubic",
       "image": "anycubic-kobra-s1-max.png",
@@ -5693,6 +6538,7 @@
     },
     {
       "id": "snapmaker_u1",
+      "enclosed": true,
       "name": "Snapmaker U1",
       "manufacturer": "Snapmaker",
       "image": "snapmaker-u1.png",
@@ -5846,27 +6692,57 @@
           "reason": "Per-tool fan e3_fan (Snapmaker U1 naming)"
         },
         {
-          "type": "object_exists",
-          "field": "printer_objects",
-          "pattern": "purifier",
-          "confidence": 75,
-          "reason": "Built-in air purifier (Snapmaker U1 feature)"
-        },
-        {
-          "type": "macro_match",
-          "field": "macros",
-          "pattern": "EXTRUDER_OFFSET_ACTION_PROBE_CALIBRATE_ALL",
-          "confidence": 85,
-          "reason": "U1-specific multi-tool probe calibration macro"
-        },
-        {
           "type": "cpu_arch_match",
           "field": "cpu_arch",
           "pattern": "aarch64",
           "confidence": 10,
           "reason": "ARM64 architecture (low confidence, stacks with other signals)"
         }
-      ]
+      ],
+      "pre_print_options": {
+        "options": [
+          {
+            "id": "bed_mesh",
+            "category": "mechanical",
+            "order": 10,
+            "default_enabled": true,
+            "strategy": "pre_start_gcode",
+            "gcode_template": "SET_PRINT_PREFERENCES BED_LEVEL={value}",
+            "emit_when_disabled": true
+          },
+          {
+            "id": "shaper_calibrate",
+            "category": "mechanical",
+            "order": 20,
+            "default_enabled": false,
+            "label_key": "Input Shaper Calibration",
+            "strategy": "pre_start_gcode",
+            "gcode_template": "SET_PRINT_PREFERENCES SHAPER_CALIBRATE={value}",
+            "emit_when_disabled": true
+          },
+          {
+            "id": "flow_calibrate",
+            "category": "quality",
+            "order": 10,
+            "default_enabled": false,
+            "label_key": "Pressure Advance Calibration",
+            "strategy": "pre_start_gcode",
+            "gcode_template": "SET_PRINT_PREFERENCES FLOW_CALIBRATE={value}",
+            "emit_when_disabled": true
+          },
+          {
+            "id": "u1_timelapse",
+            "capability": "timelapse",
+            "category": "monitoring",
+            "order": 10,
+            "default_enabled": false,
+            "label_key": "Record Timelapse",
+            "strategy": "pre_start_gcode",
+            "gcode_template": "SET_PRINT_PREFERENCES TIME_LAPSE_CAMERA={value}",
+            "emit_when_disabled": true
+          }
+        ]
+      }
     },
     {
       "id": "lemontron",
@@ -5893,7 +6769,8 @@
           "field": "mcu",
           "pattern": "rp2040",
           "confidence": 40,
-          "reason": "RP2040 MCU (SKR Pico board)"
+          "reason": "RP2040 MCU (SKR Pico board)",
+          "corroborating": true
         },
         {
           "type": "build_volume_range",
@@ -6087,7 +6964,8 @@
           "field": "sensors",
           "pattern": "chamber",
           "confidence": 60,
-          "reason": "Chamber temperature sensor (enclosed Nebula)"
+          "reason": "Chamber temperature sensor (enclosed Nebula)",
+          "corroborating": true
         }
       ]
     },
@@ -6136,7 +7014,56 @@
           "field": "sensors",
           "pattern": "chamber",
           "confidence": 60,
-          "reason": "Chamber temperature sensor (enclosed Nebula)"
+          "reason": "Chamber temperature sensor (enclosed Nebula)",
+          "corroborating": true
+        }
+      ]
+    },
+    {
+      "id": "vzbot",
+      "name": "VzBot",
+      "aliases": [
+        "VzBot 330",
+        "VzBot 235"
+      ],
+      "manufacturer": "VzBot",
+      "image": "vzbot.png",
+      "heuristics": [
+        {
+          "type": "hostname_match",
+          "field": "hostname",
+          "pattern": "vzbot",
+          "confidence": 80,
+          "reason": "Hostname contains 'vzbot'"
+        },
+        {
+          "type": "hostname_match",
+          "field": "hostname",
+          "pattern": "vz330",
+          "confidence": 85,
+          "reason": "Hostname contains 'vz330' (VzBot 330)"
+        },
+        {
+          "type": "macro_match",
+          "field": "macros",
+          "pattern": "RSCS",
+          "confidence": 60,
+          "reason": "RSCS_on/RSCS_off cooling macros (VzBot default config pack)"
+        },
+        {
+          "type": "macro_match",
+          "field": "macros",
+          "pattern": "RETRACTIONLENGTH",
+          "confidence": 55,
+          "reason": "SET_RETRACTIONLENGTH macro (VzBot default config pack)"
+        },
+        {
+          "type": "kinematics_match",
+          "field": "kinematics",
+          "pattern": "corexy",
+          "confidence": 30,
+          "reason": "CoreXY kinematics",
+          "corroborating": true
         }
       ]
     },

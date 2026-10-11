@@ -80,10 +80,10 @@ class JobQueueStalenessFixture : public LVGLTestFixture {
 TEST_CASE_METHOD(JobQueueStalenessFixture,
                  "JobQueueState marks the queue stale when the connection drops",
                  "[job_queue][staleness]") {
-    lv_subject_t* conn = printer_state_.get_printer_connection_state_subject();
+    lv_subject_t* conn = printer_state_.network_state().get_printer_connection_state_subject();
     REQUIRE(conn != nullptr);
 
-    // Reach the connected steady state BEFORE seeding, and drain. observe_int_sync
+    // Reach the connected steady state BEFORE seeding, and drain. observe<int>
     // defers its registration-time apply through the update queue, so the observer's
     // first call still carries the DISCONNECTED value the subject held when the
     // owner was constructed. set_jobs() writes the cache directly rather than

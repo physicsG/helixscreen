@@ -40,8 +40,16 @@ class HttpExecutor {
     HttpExecutor(const HttpExecutor&) = delete;
     HttpExecutor& operator=(const HttpExecutor&) = delete;
 
-    /// Launch the workers. Idempotent.
+    /// Launch the workers. Idempotent. A no-op on the ESP32 firmware, which
+    /// runs its HTTP through EspHttpLane: each worker's stack comes from
+    /// internal RAM, and a pool of them starves the network task at boot.
+    /// submit() on a pool that never started drops the work.
     void start();
+
+    /// Whether the workers are running. Main thread only.
+    [[nodiscard]] bool running() const {
+        return running_;
+    }
 
     /// Drain currently-executing items up to `join_timeout`, break promises
     /// on queued items, join or detach workers. Idempotent. Safe to call

@@ -7,10 +7,15 @@
 #include "ui_ams_current_tool.h"
 #include "ui_ams_device_operations_overlay.h"
 #include "ui_ams_device_section_detail_overlay.h"
+#include "ui_bed_drying_modal.h"
+#include "ui_belt_path_sketch.h"
+#if HELIX_HAS_CFS
+#include "ui_cfs_chute_calibration_overlay.h"
+#endif
 #include "ui_ams_edit_overlay.h"
-#include "ui_belt_trace.h"
 #include "ui_button.h"
 #include "ui_carousel.h"
+#include "ui_color_picker.h"
 #include "ui_confetti.h"
 #include "ui_context_menu.h"
 #include "ui_event_safety.h"
@@ -19,6 +24,7 @@
 #include "ui_gcode_viewer.h"
 #include "ui_hsv_picker.h"
 #include "ui_icon_codepoints.h"
+#include "ui_leader_line.h"
 #include "ui_lock_screen.h"
 #include "ui_markdown.h"
 #include "ui_notification_badge.h"
@@ -26,7 +32,6 @@
 #include "ui_panel_home.h"
 #include "ui_panel_settings.h"
 #include "ui_pin_entry_modal.h"
-#include "ui_pluck_animation.h"
 #include "ui_printer_switch_menu.h"
 #include "ui_progress_bar.h"
 #include "ui_spinner.h"
@@ -37,7 +42,10 @@
 #include "ui_text_input.h"
 #include "ui_z_offset_indicator.h"
 
+#include "async_lifetime_guard.h"
 #include "boot_yield.h"
+#include "helix-xml/src/xml/lv_xml_component_private.h"
+#include "helix_fs.h"
 #include "layout_manager.h"
 #include "page_scroll_auto_inject.h"
 #include "static_subject_registry.h"
@@ -47,6 +55,8 @@
 #include <spdlog/spdlog.h>
 
 #include <lvgl.h>
+#include <string>
+#include <unordered_set>
 
 namespace helix {
 
@@ -120,7 +130,7 @@ static void register_color_picker_responsive_constants() {
 
 /**
  * Register the responsive HSV-picker constants into a component scope.
- * Must be called AFTER register_xml() for that component so the scope exists.
+ * The scope lookup registers the component if nothing has named it yet.
  *
  * Takes the component name because consts are SCOPE-LOCAL: any component that
  * instantiates <ui_hsv_picker sv_size="#sv_size"> needs its own registration.
@@ -165,65 +175,18 @@ static void register_color_picker_component_constants(const char* component_name
 
     lv_xml_component_scope_t* scope = lv_xml_component_get_scope(component_name);
     if (scope) {
-        // swatch_size ONLY where the component declares a fallback <px> for it.
-        // register_const is first-write-wins, and <consts> are parsed during
-        // register_xml(), so the declaration in color_picker.xml already owns
-        // the name by the time we get here — the responsive 24/28/32 ladder was
-        // silently discarded and every screen got the declared 32. update_const
-        // overwrites, same reason register_swatch_grid_constants() uses it.
-        // Scopes without the declaration are skipped: update_const would log a
-        // "not found for update" warning on every boot for a name they never use.
-        if (lv_xml_get_const_silent(scope, "swatch_size") != nullptr) {
-            lv_xml_update_const(scope, "swatch_size", swatch_size);
-        }
+        keep_xml_component_registered(component_name);
+        // set, not register: register_const is first-write-wins, and <consts>
+        // are parsed during registration, so the fallback <px> in
+        // color_picker.xml already owns the name by the time we get here and
+        // would pin every screen to 32 instead of the responsive 24/28/32.
+        lv_xml_set_const(scope, "swatch_size", swatch_size);
         // Never declared in XML anywhere, so register is silent and correct.
         lv_xml_register_const(scope, "sv_size", sv_buf);
         lv_xml_register_const(scope, "hue_height", hue_buf);
         spdlog::debug("[Color Picker] {}: swatch_size={}, sv_size={}, hue_height={} "
                       "for height {}px",
                       component_name, swatch_size, sv_buf, hue_buf, ver_res);
-    }
-}
-
-/**
- * Register responsive constants into a swatch-grid component scope.
- * Must be called AFTER register_xml() for that component. Shared by
- * color_swatch_grid (general/filament presets) and theme_swatch_grid (theme
- * editor presets) — both are 6-column, 30-swatch grids with identical sizing.
- * Swatch size follows the color_picker ladder (24/28/32 by screen height);
- * grid width is computed as 6 columns so the 30 swatches always form 5 even
- * rows at every breakpoint.
- */
-static void register_swatch_grid_constants(const char* component_name) {
-    lv_display_t* display = lv_display_get_default();
-    // Square-tile grid: size tiles + gap off the constrained axis so the grid
-    // fits a narrow portrait screen instead of overflowing off its tall axis.
-    int32_t resp_res = responsive_dimension(display);
-
-    int32_t swatch = resp_res <= UI_BREAKPOINT_MICRO_MAX   ? 24
-                     : resp_res <= UI_BREAKPOINT_SMALL_MAX ? 28
-                                                           : 32;
-    int32_t gap = resp_res <= UI_BREAKPOINT_MICRO_MAX ? 6 : 8;
-    constexpr int32_t cols = 6;
-    int32_t width = cols * swatch + (cols - 1) * gap;
-
-    static char swatch_buf[8];
-    static char gap_buf[8];
-    static char width_buf[8];
-    snprintf(swatch_buf, sizeof(swatch_buf), "%d", swatch);
-    snprintf(gap_buf, sizeof(gap_buf), "%d", gap);
-    snprintf(width_buf, sizeof(width_buf), "%d", width);
-
-    lv_xml_component_scope_t* scope = lv_xml_component_get_scope(component_name);
-    if (scope) {
-        // update_, NOT register_: the component declares all three as fallback
-        // <consts>, and lv_xml_register_const() is a no-op once the name exists in
-        // the scope, which would pin the grid to those fallbacks at every breakpoint.
-        lv_xml_update_const(scope, "grid_swatch_size", swatch_buf);
-        lv_xml_update_const(scope, "grid_gap", gap_buf);
-        lv_xml_update_const(scope, "grid_width", width_buf);
-        spdlog::debug("[SwatchGrid] {}: registered swatch={} gap={} width={} for min_dim {}px",
-                      component_name, swatch_buf, gap_buf, width_buf, resp_res);
     }
 }
 
@@ -248,7 +211,7 @@ static void on_toggle_password_visibility(lv_event_t* e) {
     // Swap icon: eye_off when hidden (password mode), eye when visible
     auto* icon = (lv_obj_t*)lv_obj_find_by_name(btn, "eye_toggle_icon");
     if (icon) {
-        const char* cp = ui_icon::lookup_codepoint(was_password ? "eye" : "eye_off");
+        const char* cp = helix::ui::icon::lookup_codepoint(was_password ? "eye" : "eye_off");
         if (cp)
             lv_label_set_text(icon, cp);
     }
@@ -284,31 +247,133 @@ static void on_setting_info_clicked(lv_event_t* e) {
     LVGL_SAFE_EVENT_CB_END();
 }
 
-static void register_xml(const char* filename) {
+static bool register_xml(const char* filename) {
     auto& lm = helix::LayoutManager::instance();
     std::string path = "A:" + lm.resolve_xml_path(filename);
-    if (lv_xml_register_component_from_file(path.c_str()) != LV_RESULT_OK) {
+    const bool ok = lv_xml_register_component_from_file(path.c_str()) == LV_RESULT_OK;
+    if (!ok) {
         spdlog::error("[XML Registration] Failed to register: {}", path);
     }
-    // Registering ~300 component templates back-to-back (each a frogfs
-    // decompress + expat parse) is a multi-second stretch that starves the idle
-    // task on ESP; yield every few components so the Task WDT never fires.
-    // No-op on desktop (see boot_yield.h).
+    // Each registration is a frogfs decompress + expat parse; a panel nesting
+    // many first-use components registers them back-to-back on the UI task,
+    // which starves the idle task on ESP. Yield every few so the Task WDT never
+    // fires. No-op on desktop (see boot_yield.h).
     static int s_reg_count = 0;
     if ((++s_reg_count & 0x0F) == 0) {
         HELIX_BOOT_YIELD();
     }
+    return ok;
+}
+
+#if defined(HELIX_PLATFORM_ESP32)
+extern "C" bool helix_on_ui_task(void);
+#endif
+
+/// The LVGL thread on every platform. ESP never records a main thread, so
+/// on_main_thread() is true on every task there; ask the firmware instead.
+static bool on_lvgl_thread() {
+#if defined(HELIX_PLATFORM_ESP32)
+    return helix_on_ui_task();
+#else
+    return helix::internal::on_main_thread();
+#endif
+}
+
+/// Names with no file to load, or whose file failed to register. Lookups also
+/// name widgets and slot prefixes that have no file; each costs one probe.
+static std::unordered_set<std::string> s_no_file;
+/// Components the loader registered: what a geometry change may drop.
+static std::unordered_set<std::string> s_loaded;
+
+/**
+ * The engine's component loader: registers a component the first time a tag,
+ * an extends= base, lv_xml_create() or a C++ scope lookup names it. The file is
+ * <name>.xml at the top of ui_xml/ or under components/, through the same
+ * layout-variant resolution register_xml() applies.
+ */
+static void register_on_first_use(const char* name) {
+    if (!on_lvgl_thread()) {
+        spdlog::error("[XML Registration] '{}' looked up off the LVGL thread; not registering",
+                      name);
+        return;
+    }
+    if (s_no_file.count(name))
+        return;
+    auto& lm = helix::LayoutManager::instance();
+    for (const char* dir : {"", "components/"}) {
+        std::string file = std::string(dir) + name + ".xml";
+        if (helix::fs::exists(lm.resolve_xml_path(file))) {
+            spdlog::debug("[XML Registration] Registering {} on first use", file);
+            // A file that does not parse is not read again on every lookup; the
+            // hot reloader registers a fixed copy from its own buffer.
+            if (register_xml(file.c_str()))
+                s_loaded.emplace(name);
+            else
+                s_no_file.emplace(name);
+            return;
+        }
+    }
+    s_no_file.emplace(name);
+}
+
+/// Components C++ pushed constants into after they registered.
+static std::unordered_set<std::string> s_cpp_extended;
+
+void keep_xml_component_registered(const char* name) {
+    s_cpp_extended.emplace(name);
+}
+
+bool is_xml_component_cpp_extended(const std::string& name) {
+    return name == "globals" || s_cpp_extended.count(name) > 0;
+}
+
+/// A scope C++ has extended (constants or a subject registered into it from
+/// C++) or lent a style to another scope cannot be rebuilt from its file alone.
+static bool scope_holds_cpp_state(const char* name, lv_xml_component_scope_t* scope) {
+    if (scope->styles_borrowed || is_xml_component_cpp_extended(name))
+        return true;
+    for (void* node = lv_ll_get_head(&scope->subjects_ll); node != nullptr;
+         node = lv_ll_get_next(&scope->subjects_ll, node)) {
+        if (!static_cast<lv_xml_subject_t*>(node)->owned)
+            return true;
+    }
+    return false;
+}
+
+void unregister_idle_xml_components() {
+    s_no_file.clear();
+    for (auto it = s_loaded.begin(); it != s_loaded.end();) {
+        lv_xml_component_scope_t* scope = lv_xml_component_find_scope(it->c_str());
+        if (scope && (scope->instance_cnt > 0 || scope_holds_cpp_state(it->c_str(), scope))) {
+            ++it;
+            continue;
+        }
+        if (scope)
+            lv_xml_component_unregister(it->c_str());
+        it = s_loaded.erase(it);
+    }
+}
+
+void register_xml_on_first_use() {
+    lv_xml_set_component_loader(register_on_first_use);
+}
+
+void stop_xml_on_first_use() {
+    lv_xml_set_component_loader(nullptr);
 }
 
 void register_xml_components() {
     spdlog::trace("[XML Registration] Registering XML components...");
+
+    // Every other component registers the first time something names it.
+    register_xml_on_first_use();
 
     // Shared cross-file styles (ui_xml/styles.xml), referenced from any XML as
     // <style name="styles.<name>"/>. Must live here, not in init_theme() with
     // globals.xml: this function runs AFTER theme_manager_init() registered the
     // theme constants, and a style's #const values resolve at registration time
     // (globals.xml is parsed before theme init, so a theme-token style there
-    // registers empty). Registered first so every component below can use it.
+    // registers empty).
     register_xml("styles.xml");
 
     // Register responsive constants (AFTER globals, BEFORE components that use them)
@@ -317,23 +382,15 @@ void register_xml_components() {
 
     // Register semantic text widgets (AFTER theme init, BEFORE components that use them)
     ui_text_init();
-    ui_text_input_init();         // <text_input> with bind_text support
-    ui_spinner_init();            // <spinner> with responsive sizing
-    ui_button_init();             // <ui_button> with variant styles and auto-contrast
-    ui_split_button_init();       // <ui_split_button> with primary action + dropdown
-    ui_markdown_init();           // <ui_markdown> with theme-aware markdown rendering
-    ui_notification_badge_init(); // <notification_badge> with auto-contrast text
-    ui_carousel_init();           // <ui_carousel> horizontal scroll-snap carousel
-    register_xml("carousel.xml"); // <carousel> XML component wrapping ui_carousel
-    ui_confetti_init();           // <ui_confetti> celebration animation canvas
-#if HELIX_HAS_BELT_TUNER
-    helix::ui::register_belt_trace_widget();      // <belt_trace> waveform/spectrum strip, must
-                                                  // precede register_xml("panel_belt_tension.xml")
-    helix::ui::register_pluck_animation_widget(); // <pluck_animation> isometric pluck
-                                                  // illustration, same precedence rule
-#endif
-    register_xml(
-        "components/page_scroll_gutter.xml"); // <page_scroll_gutter> page scroll chevron column
+    ui_text_input_init();                     // <text_input> with bind_text support
+    ui_spinner_init();                        // <spinner> with responsive sizing
+    ui_button_init();                         // <ui_button> with variant styles and auto-contrast
+    ui_split_button_init();                   // <ui_split_button> with primary action + dropdown
+    ui_markdown_init();                       // <ui_markdown> with theme-aware markdown rendering
+    ui_notification_badge_init();             // <notification_badge> with auto-contrast text
+    helix::ui::register_leader_line_widget(); // <leader_line>, a bare lv_line for callouts
+    ui_carousel_init();                       // <ui_carousel> horizontal scroll-snap carousel
+    ui_confetti_init();                       // <ui_confetti> celebration animation canvas
 
     // Register no-op callback and subject for optional handlers in XML components
     // This silences warnings when components use callback/subject props with default=""
@@ -355,12 +412,6 @@ void register_xml_components() {
     // Backdrop tap and close/Done for every context menu — one pair, routed through
     // ContextMenu::active(), rather than a callback per menu.
     helix::ui::ContextMenu::register_shared_callbacks();
-    // <context_menu_backdrop> shared dimmed backdrop root. Every context menu
-    // extends it, so it must be registered before any of them.
-    register_xml("components/context_menu_backdrop.xml");
-    // <context_menu_card> the card every context menu nests inside that backdrop:
-    // elevated panel, title + close/Done header, and the rule under it.
-    register_xml("components/context_menu_card.xml");
     lv_subject_init_int(&s_noop_subject, 0);
     lv_xml_register_subject(nullptr, "", &s_noop_subject);
     s_noop_subject_initialized = true;
@@ -374,446 +425,46 @@ void register_xml_components() {
     ui_hsv_picker_register();         // HSV color picker for edit filament modal
     ui_z_offset_indicator_register(); // Z-offset nozzle indicator
     ui_ams_current_tool_init();       // AMS current tool indicator callbacks
-    // <afc_fault_path> + its afc_fault_segment subject. Both modals that can show
-    // an AFC lane fault embed it, and one of them (ams_loading_error_modal.xml) is
-    // registered lazily by AmsPanel — so this has to come first.
+    // <afc_fault_path> + its afc_fault_segment subject, embedded by both modals
+    // that can show an AFC lane fault.
     helix::ui::afc_fault_path_register();
     // NOTE: Other AMS widgets (ams_slot, filament_path_canvas) are
     // registered lazily in ui_panel_ams.cpp when the AMS panel is first accessed
 
-    // AMS slot editor (MUST be after spool_canvas and hsv_picker registration)
-    // Registered globally so FilamentPanel can use it without AMS panel lazy init
-    register_xml("spoolman_spool_item.xml");
     // AMS slot editor (single overlay, internal views — spec §13)
     helix::ui::get_ams_edit_overlay().register_callbacks();
-    register_xml("components/color_swatch_grid.xml");
-    register_swatch_grid_constants("color_swatch_grid");
-    // Theme-editor preset palette — surface ramp + hue families, sized by the
-    // same ladder as the general grid. Must precede color_picker.xml, whose
-    // <if> picks between the two.
-    register_xml("components/theme_swatch_grid.xml");
-    register_swatch_grid_constants("theme_swatch_grid");
-    register_xml("ams_edit_overlay.xml");
-    // Embeds <ui_hsv_picker sv_size="#sv_size">; consts are scope-local.
+    helix::ui::ensure_swatch_grid_subjects();
+    // Both embed <ui_hsv_picker sv_size="#sv_size">, and consts are scope-local.
+    // Looking the scope up registers the component here, at boot, so the consts
+    // are in place before its first instance.
     register_color_picker_component_constants("ams_edit_overlay");
-
-    // Spoolman components (MUST be after spool_canvas registration)
-    register_xml("spoolman_spool_row.xml");
-    register_xml("spoolman_context_menu.xml");
-    register_xml("spoolman_edit_modal.xml");
-    register_xml("spoolman_panel.xml");
-    register_xml("components/filament_catalog_row.xml");
-    register_xml("components/filament_catalog_add_row.xml");
-    register_xml("components/filament_catalog_selector.xml");
-    register_xml("components/filament_catalog_picker.xml");
-    register_xml("filament_product_edit_modal.xml");
-
-    // Spool wizard components
-    register_xml("wizard_vendor_row.xml");
-    register_xml("wizard_filament_row.xml");
-    register_xml("create_vendor_modal.xml");
-    register_xml("create_filament_modal.xml");
-    register_xml("spool_wizard.xml");
-
-    // Core UI components
-    register_xml("icon.xml");
-    register_xml("status_pill.xml");
-    register_xml("filament_sensor_indicator.xml");
-    register_xml("humidity_indicator.xml");
-    register_xml("width_indicator.xml");
-    register_xml("probe_indicator.xml");
-    register_xml("filament_sensor_row.xml");
-    register_xml("temp_display.xml");
-    register_xml("components/nozzle_icon.xml");
-    register_xml("components/heater_icon.xml");
-    // Chamber-heater diagnostics card — instantiated by temp_graph_overlay's
-    // graph column (must be registered before temp_graph_overlay.xml, which
-    // is loaded later in this function).
-    register_xml("components/chamber_diagnostics_card.xml");
-    // Shared progress arc widget — diameter-driven stroke thickness, see
-    // include/ui_progress_arc.h for the C++ companion (attach_progress_arc).
-    register_xml("components/helix_progress_arc.xml");
-    register_xml("components/perf_metric_row.xml");
-    // G-code preview stack (thumbnail / 2D / 3D) shared by print status and the
-    // file detail view, and the whole print-status preview card shared by the
-    // landscape and portrait status layouts. Registered here, ahead of both
-    // consumers, because a component must exist before the file that nests it.
-    register_xml("components/preview_stack.xml");
-    register_xml("components/print_status_preview_card.xml");
-    register_xml("header_bar.xml");
-    register_xml("overlay_backdrop.xml");
-    register_xml("overlay_panel.xml");
-    register_xml("widget_catalog_overlay.xml");
-    register_xml("widget_catalog_category_overlay.xml");
-    register_xml("toast_notification.xml");
-
-    // Utility components (dividers, button rows, headers - used by modals and other components)
-    register_xml("centered_column.xml");
-    register_xml("divider_horizontal.xml");
-    register_xml("divider_vertical.xml");
-    register_xml("modal_button_row.xml");
-    register_xml("modal_header.xml");
-    register_xml("empty_state.xml");
-    register_xml("connecting_state.xml");
-    register_xml("info_note.xml");
-    register_xml("form_field.xml");
-    register_xml("ui_multiselect.xml");
+    register_color_picker_component_constants("color_picker");
 
     // Shared progress bar component (gradient indicator)
     ui_progress_bar_init();
-    register_xml("components/progress_bar.xml");
-
-    // Beta feature indicators (badge before wrapper - dependency order)
-    register_xml("beta_badge.xml");
-    register_xml("beta_feature.xml");
 
     // Lock screen overlay (full-screen PIN entry on lv_layer_top)
     helix::ui::register_lock_screen_callbacks();
-    register_xml("components/lock_screen.xml");
 
     // PIN entry modal (numeric keypad for security settings PIN set/change/remove)
     helix::ui::PinEntryModal::register_callbacks();
-    register_xml("components/pin_entry_modal.xml");
 
-    // emergency_stop_button.xml removed - E-Stop buttons are now embedded in panels
-    register_xml("estop_confirmation_dialog.xml");
-    register_xml("klipper_recovery_dialog.xml");
-    register_xml("print_cancel_confirm_modal.xml");
-    register_xml("components/spaghetti_detection_modal.xml");
-    register_xml("components/preflight_check_tool_row.xml");
-    register_xml("components/preflight_check_modal.xml");
-    register_xml("print_completion_modal.xml");
-    register_xml("save_z_offset_modal.xml");
-    register_xml("exclude_object_modal.xml");
-
-    // Notification history
-    register_xml("notification_history_panel.xml");
-    register_xml("notification_history_item.xml");
-
-    // Modal dialogs
-    register_xml("filament_mapping_modal.xml");
-    register_xml("crash_report_modal.xml");
-    register_xml("debug_bundle_modal.xml");
-    register_xml("modal_dialog.xml");
-#if HELIX_HAS_LABEL_PRINTER
-    register_xml("components/ipp_print_modal.xml");
-#endif
-    register_xml("numeric_keypad_panel.xml");
-    register_xml("runout_guidance_modal.xml");
-    register_xml("shutdown_modal.xml");
-    register_xml("plugin_install_modal.xml");
-    register_xml("macro_enhance_modal.xml");
-    register_xml("action_prompt_modal.xml");
-    register_xml("info_qr_modal.xml");
-    register_xml("color_picker.xml");
-    register_color_picker_component_constants("color_picker");
-
-    // Print file components
-    register_xml("print_file_card.xml");
-    register_xml("print_file_list_row.xml");
-    register_xml("components/filament_mapping_more_pill.xml");
-    register_xml("components/filament_swatch.xml");
-    register_xml("components/filament_slot_picker_row.xml");
-    register_xml("components/filament_mapping_tool_row.xml");
-    register_xml("components/filament_source_row.xml");
-    register_xml("components/compact_toggle_row.xml");
-    // Endless-spool status line. Registered here, ahead of filament_panel.xml,
-    // because the AMS panel registers itself lazily and would otherwise be the
-    // only consumer guaranteed to find it.
-    register_xml("components/ams_endless_status.xml");
-    register_xml("print_file_detail.xml");
+    helix::ui::register_bed_drying_callbacks();
 
     // Panel widget components (dynamic instantiation from PanelWidgetConfig)
-    register_xml("components/panel_widget_printer_image.xml");
-    register_xml("components/panel_widget_network.xml");
-    register_xml("components/panel_widget_notifications.xml");
-    register_xml("components/panel_widget_firmware_restart.xml");
-    register_xml("components/panel_widget_ams.xml");
-    register_xml("components/panel_widget_camera.xml");
-    register_xml("components/camera_fullscreen.xml");
-    register_xml("components/panel_widget_temperature.xml");
-    register_xml("components/panel_widget_bed_temperature.xml");
-    register_xml("components/panel_widget_chamber_temperature.xml");
-    register_xml("components/panel_widget_temp_stack.xml");
-    register_xml("components/panel_widget_temp_carousel.xml");
-    register_xml("components/panel_widget_preheat.xml");
-    register_xml("components/panel_widget_led.xml");
-    register_xml("components/panel_widget_led_controls.xml");
-    register_xml("components/panel_widget_humidity.xml");
-    register_xml("components/panel_widget_width_sensor.xml");
-    register_xml("components/panel_widget_filament.xml");
-    register_xml("components/panel_widget_bypass.xml");
-    register_xml("components/panel_widget_thermistor.xml");
-    register_xml("components/panel_widget_thermistor_carousel.xml");
-    register_xml("components/panel_widget_temp_graph.xml");
-    register_xml("components/temp_graph_config_modal.xml");
-    register_xml("components/panel_widget_fan.xml");
-    register_xml("components/panel_widget_fan_stack.xml");
-    register_xml("components/panel_widget_fan_carousel.xml");
-    register_xml("components/panel_widget_favorite_macro.xml");
-    register_xml("components/panel_widget_power_device.xml");
-    register_xml("components/power_device_energy_page.xml");
-    register_xml("components/panel_widget_clock.xml");
-    register_xml("components/panel_widget_control_buttons.xml");
-    register_xml("components/panel_widget_tips.xml");
-    register_xml("components/panel_widget_print_status.xml");
-    register_xml("components/print_status_detailed_active.xml");
-    register_xml("components/print_status_detailed_idle.xml");
-    register_xml("components/print_status_fan_row.xml");
-    register_xml("components/panel_widget_shutdown.xml");
-    register_xml("components/panel_widget_lock.xml");
-    register_xml("components/nozzle_temp_row.xml");
-    register_xml("components/nozzle_temp_bed_row.xml");
-    register_xml("components/temp_card_unified.xml");
-    register_xml("components/tool_picker_button.xml");
-    register_xml("components/panel_widget_tool_switcher.xml");
-    register_xml("components/panel_widget_nozzle_temps.xml");
-    register_xml("components/panel_widget_job_queue.xml");
-    register_xml("components/clog_meter_page.xml");
-    register_xml("components/clog_bar_body.xml");
-    register_xml("components/clog_bar_page.xml");
-    register_xml("components/panel_widget_clog_detection.xml");
-    register_xml("components/panel_widget_print_stats.xml");
-    register_xml("components/panel_widget_gcode_console.xml");
-    register_xml("components/panel_widget_active_spool.xml");
-    register_xml("components/panel_widget_macros.xml");
-    register_xml("components/panel_widget_motion.xml");
-    register_xml("components/clog_detection_config_modal.xml");
-    register_xml("components/camera_config_modal.xml");
-    register_xml("components/buffer_status_modal.xml");
-    register_xml("job_queue_modal.xml");
-    register_xml("fan_picker.xml");
-    register_xml("fan_stack_picker.xml");
-    register_xml("tool_switcher_picker.xml");
-    register_xml("thermistor_sensor_picker.xml");
-    register_xml("thermistor_configure_picker.xml");
-    register_xml("filament_source_picker.xml");
-    register_xml("print_status_configure_picker.xml");
-    register_xml("print_status_nozzle_tool_picker.xml");
-    register_xml("favorite_macro_config_modal.xml");
     helix::ui::PrinterSwitchMenu::register_callbacks();
-    register_xml("printer_switch_menu.xml");
-    register_xml("macro_param_modal.xml");
 
-    // Main navigation and panels
-    register_xml("navigation_bar.xml");
-    register_xml("home_panel.xml");
-    register_xml("controls_panel.xml");
-    // The X/Y/Z position card is shared between motion_panel.xml's landscape
-    // and portrait arrangements (see the <if>/<else> there), so it is its own
-    // component rather than markup duplicated per branch. Must be registered
-    // before motion_panel.xml, which uses it.
-    register_xml("components/motion_position_card.xml");
-    register_xml("motion_panel.xml");
-    // TempGraphOverlay is the only temperature overlay; there are no per-heater
-    // nozzle/bed/chamber_temp_panel.xml components. TemperatureService::setup_panel()
-    // and xml_component_name() are residual per-heater machinery — compiled, but with
-    // no callers and no XML behind the names they return, so
-    // lv_xml_component_get_scope() returns nullptr there (guarded).
-    register_xml("temp_graph_overlay.xml");
-    // Register TempGraphOverlay event callbacks at startup (before XML is parsed)
-    lv_xml_register_event_cb(nullptr, "on_temp_graph_preset_clicked",
-                             TempGraphOverlay::on_temp_graph_preset_clicked);
-    lv_xml_register_event_cb(nullptr, "on_temp_graph_custom_clicked",
-                             TempGraphOverlay::on_temp_graph_custom_clicked);
-    register_xml("fan_arc_core.xml");
-    register_xml("fan_dial.xml");
     register_fan_dial_callbacks(); // Register FanDial event callbacks
-    register_xml("fan_status_card.xml");
-    register_xml("fan_control_overlay.xml");
-    register_xml("led_action_chip.xml");
-    register_xml("led_color_swatch.xml");
-    register_xml("led_control_overlay.xml");
-    register_xml("ams_current_tool.xml");
-    register_xml("components/exclude_object_map.xml");
-    register_xml("components/exclude_object_side_list.xml");
-    register_xml("print_status_panel.xml");
-    register_xml("print_tune_panel.xml");
-    register_xml("filament_panel.xml");
 
-    // NOTE: AMS panel (ams_panel.xml) is registered lazily in ui_panel_ams.cpp
     // AMS Device Operations (accessed from Settings > AMS)
     helix::ui::get_ams_device_operations_overlay().register_callbacks();
-    register_xml("ams_device_operations.xml");
     helix::ui::get_ams_device_section_detail_overlay().register_callbacks();
-    register_xml("ams_device_section_detail.xml");
 
-    // Spoolman Settings (accessed from Settings > Spoolman, future)
-    register_xml("spoolman_settings.xml");
-
-    // QR Scanner Overlay (fullscreen camera viewfinder for spool assignment)
-    register_xml("qr_scanner_overlay.xml");
-
-    register_xml("components/barcode_scanner_device_row.xml");
-    // Barcode Scanner Settings Overlay (persistent device selection + keymap)
-    register_xml("barcode_scanner_settings.xml");
-
-    // Feature parity panels
-    register_xml("macro_card.xml");
-    register_xml("macro_panel.xml");
-    register_xml("console_panel.xml");
-    register_xml("power_device_row.xml");
-    register_xml("power_panel.xml");
-    register_xml("screws_tilt_panel.xml");
-    register_xml("screws_tilt_share_modal.xml");
-    register_xml("input_shaper_panel.xml");
-    register_xml("components/belt_result_card.xml");
 #if HELIX_HAS_BELT_TUNER
-    register_xml("panel_belt_tension.xml");
+    helix::ui::register_belt_path_sketch_widget(); // before the panel XML that uses it
 #endif
 
-    // Print history panels
-    register_xml("history_list_row.xml");
-    register_xml("history_list_panel.xml");
-    register_xml("history_detail_overlay.xml");
-    register_xml("history_dashboard_panel.xml");
-
-    // Settings components (must be registered before settings_panel)
-    register_xml("setting_group_header.xml");
-    register_xml("setting_section_header.xml");
-    register_xml("setting_toggle_row.xml");
-    register_xml("setting_dropdown_row.xml");
-    register_xml("setting_action_row.xml");
-    register_xml("setting_info_row.xml");
-    register_xml("setting_slider_row.xml");
-    register_xml("setting_value_field.xml");
-    register_xml("setting_led_chip_row.xml");
-    register_xml("setting_state_row.xml");
-    register_xml("setting_detail_panel.xml");
-    register_xml("setting_form_dropdown.xml");
-    register_xml("setting_form_input.xml");
-    register_xml("setting_form_macro_field.xml");
-    register_xml("setting_macro_card.xml");
     register_settings_panel_callbacks(); // Register callbacks before XML parse [L013]
-    register_xml("settings_panel.xml");
-    register_xml("restart_prompt_dialog.xml");
-    register_xml("factory_reset_modal.xml");
-    register_xml("update_download_modal.xml");
-    register_xml("update_notify_modal.xml");
-    register_xml("change_host_modal.xml");
-
-    // Calibration panels (overlays launched from settings)
-    register_xml("calibration_zoffset_panel.xml");
-    register_xml("calibration_pid_panel.xml");
-
-    // Bed mesh modals (must be registered before bed_mesh_panel which uses them)
-    register_xml("bed_mesh_calibrate_modal.xml");
-    register_xml("bed_mesh_rename_modal.xml");
-    register_xml("bed_mesh_save_config_modal.xml");
-    // The canvas band, and the stats/profiles cards, are shared between
-    // bed_mesh_panel's landscape and portrait arrangements (see the
-    // <if>/<else> in bed_mesh_panel.xml), so they are their own components
-    // rather than inline markup duplicated per branch. Must be registered
-    // before bed_mesh_panel which uses them.
-    register_xml("components/bed_mesh_canvas_band.xml");
-    register_xml("components/bed_mesh_current_mesh_card.xml");
-    register_xml("components/bed_mesh_profiles_card.xml");
-    register_xml("bed_mesh_panel.xml");
-
-    // Settings overlay panels
-    register_xml("sound_preview_overlay.xml");
-    register_xml("settings_display_sound_overlay.xml");
-    register_xml("settings_printing_overlay.xml");
-    register_xml("settings_hardware_overlay.xml");
-    register_xml("settings_safety_overlay.xml");
-    register_xml("settings_system_overlay.xml");
-    register_xml("settings_touch_overlay.xml");
-    register_xml("settings_help_overlay.xml");
-    register_xml("tour_tooltip_card.xml");
-    register_xml("security_settings_overlay.xml");
-#if HELIX_HAS_LABEL_PRINTER
-    register_xml("label_printer_settings.xml");
-#endif
-    register_xml("led_settings_overlay.xml");
-    register_xml("theme_editor_overlay.xml");
-    register_xml("theme_preview_overlay.xml");
-    register_xml("theme_save_as_modal.xml");
-    register_xml("fan_settings_row.xml");
-    register_xml("fan_settings_overlay.xml");
-    register_xml("fan_rename_modal.xml");
-    register_xml("sensors_overlay.xml");
-    // Probe type-specific panels (registered before probe_overlay)
-    register_xml("probe_bltouch_panel.xml");
-    register_xml("probe_cartographer_panel.xml");
-    register_xml("probe_beacon_panel.xml");
-    register_xml("probe_eddy_panel.xml");
-    register_xml("probe_generic_panel.xml");
-    register_xml("probe_config_edit_modal.xml");
-    register_xml("probe_accuracy_modal.xml");
-    register_xml("probe_overlay.xml");
-    register_xml("macro_buttons_overlay.xml");
-    register_xml("hardware_issue_row.xml");
-    register_xml("hardware_health_overlay.xml");
-    register_xml("network_settings_overlay.xml");
-    register_xml("retraction_settings_overlay.xml");
-    register_xml("console_settings_overlay.xml");
-    register_xml("machine_limits_overlay.xml");
-    register_xml("timelapse_settings_overlay.xml");
-    register_xml("timelapse_install_overlay.xml");
-    register_xml("timelapse_video_card.xml");
-    register_xml("timelapse_videos_overlay.xml");
-    register_xml("plugin_card.xml");
-    register_xml("settings_plugins_overlay.xml");
-    register_xml("touch_calibration_overlay.xml");
-    register_xml("printer_image_list_item.xml");
-    register_xml("printer_image_overlay.xml");
-    register_xml("printer_type_overlay.xml");
-    register_xml("hidden_network_modal.xml");
-    register_xml("network_test_modal.xml");
-    register_xml("wifi_network_item.xml");
-    register_xml("telemetry_data_overlay.xml");
-    register_xml("about_settings_overlay.xml");
-    register_xml("performance_overlay.xml");
-    register_xml("material_temps_overlay.xml");
-
-    // Printer manager overlay (launched from home screen printer image)
-    register_xml("printer_manager_overlay.xml");
-    register_xml("printer_list_item.xml");
-    register_xml("printer_list_overlay.xml");
-
-    // Development tools
-    register_xml("memory_stats_overlay.xml");
-
-    // Additional panels
-    register_xml("advanced_panel.xml");
-    register_xml("print_select_panel.xml");
-
-    // Developer-only showcase panels (ENABLE_DEV_PANELS). Their C++ classes are
-    // excluded from release builds, so skip the component registration too —
-    // nothing navigates to them and the XML files are never instantiated.
-#ifdef HELIX_ENABLE_DEV_PANELS
-    register_xml("test_panel.xml");
-    register_xml("gcode_test_panel.xml");
-    register_xml("step_test_panel.xml");
-    register_xml("glyphs_panel.xml");
-#endif
-
-    // App layout
-    register_xml("app_layout.xml");
-
-    // Wizard components
-    register_xml("wizard_touch_calibration.xml");
-    register_xml("wizard_header_bar.xml");
-    register_xml("wizard_container.xml");
-    register_xml("wifi_password_modal.xml");
-    register_xml("wizard_wifi_setup.xml");
-    register_xml("wizard_connection.xml");
-    register_xml("wizard_printer_identify.xml");
-    register_xml("wizard_heater_select.xml");
-    register_xml("wizard_fan_select.xml");
-    register_xml("wizard_ams_identify.xml");
-    register_xml("wizard_led_select.xml");
-    register_xml("wizard_filament_sensor_select.xml");
-    register_xml("wizard_input_shaper.xml");
-    register_xml("wizard_language_chooser.xml");
-    register_xml("wizard_summary.xml");
-    register_xml("wizard_telemetry.xml");
-    register_xml("telemetry_info_modal.xml");
-
-    // Upgrade nudge banner (hidden by default; C++ UpgradeBanner singleton
-    // attaches an instance to lv_layer_top during Application::init and
-    // toggles visibility based on UpgradeNudge state).
-    register_xml("components/upgrade_banner.xml");
 
     // Page-scroll-buttons policy: injects chevron gutters into overflowing
     // scrollable containers. Driven by the NavigationManager on_root_shown() hooks

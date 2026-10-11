@@ -34,6 +34,11 @@
 
 #include "../catch_amalgamated.hpp"
 
+using helix::AmsBackend;
+using helix::AmsBackendSnapmaker;
+using helix::AmsBackendToolChanger;
+using helix::AmsState;
+
 namespace {
 
 /// Install a real changer backend and hand back the raw pointer AmsState owns.
@@ -108,6 +113,6 @@ TEST_CASE_METHOD(LVGLTestFixture, "Every per-tool-assignment backend is bypass-f
         }
         // The capability tracks is_tool_changer() by default; both of these are.
         CHECK(c.backend->supports_per_tool_spool_assignment() ==
-              is_tool_changer(c.backend->get_type()));
+              helix::is_tool_changer(c.backend->get_type()));
     }
 }

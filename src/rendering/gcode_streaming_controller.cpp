@@ -5,6 +5,7 @@
 
 #include "gcode_streaming_controller.h"
 
+#include "helix_thread.h"
 #include "memory_monitor.h"
 #include "memory_utils.h"
 #include "system/crash_handler.h"
@@ -48,7 +49,7 @@ void BackgroundGhostBuilder::start(GCodeStreamingController* controller,
     spdlog::info("[GhostBuilder] Starting background ghost build for {} layers",
                  total_layers_.load());
 
-    worker_ = std::thread(&BackgroundGhostBuilder::worker_thread, this);
+    worker_ = helix::make_thread(&BackgroundGhostBuilder::worker_thread, this);
 }
 
 void BackgroundGhostBuilder::cancel() {
@@ -153,30 +154,19 @@ GCodeStreamingController::GCodeStreamingController()
     : cache_(GCodeLayerCache::DEFAULT_BUDGET_NORMAL) {
     // Select cache budget tier based on total system RAM
     auto mem = get_system_memory_info();
-    size_t budget;
-    const char* tier_name;
+    const GCodeLayerCache::BudgetTier tier =
+        GCodeLayerCache::budget_tier_for_total_ram_kb(mem.total_kb);
 
-    if (mem.is_constrained_device()) {
-        budget = GCodeLayerCache::DEFAULT_BUDGET_CONSTRAINED;
-        tier_name = "constrained";
-    } else if (mem.is_normal_device()) {
-        budget = GCodeLayerCache::DEFAULT_BUDGET_NORMAL;
-        tier_name = "normal";
-    } else {
-        budget = GCodeLayerCache::DEFAULT_BUDGET_GOOD;
-        tier_name = "good";
-    }
-
-    cache_.set_memory_budget(budget);
+    cache_.set_memory_budget(tier.budget_bytes);
 
     // Enable adaptive mode on constrained/normal devices (not desktop)
     if (!mem.is_good_device()) {
-        cache_.set_adaptive_mode(true, 15, MIN_CACHE_BUDGET, budget);
+        cache_.set_adaptive_mode(true, 15, MIN_CACHE_BUDGET, tier.budget_bytes);
     }
 
     spdlog::info("[StreamingController] {} device (total: {}MB, available: {}MB), "
                  "using {}MB cache budget{}",
-                 tier_name, mem.total_mb(), mem.available_mb(), budget / (1024 * 1024),
+                 tier.name, mem.total_mb(), mem.available_mb(), tier.budget_bytes / (1024 * 1024),
                  mem.is_good_device() ? "" : " with adaptive mode");
 
     register_memory_responder();
@@ -188,6 +178,8 @@ GCodeStreamingController::GCodeStreamingController(size_t cache_budget_bytes)
                   static_cast<double>(cache_budget_bytes) / (1024 * 1024));
     register_memory_responder();
 }
+
+std::function<void()> GCodeStreamingController::index_worker_gate;
 
 void GCodeStreamingController::register_memory_responder() {
     // Capture weak_ptr so the callback becomes a no-op after destruction.
@@ -247,7 +239,8 @@ GCodeStreamingController::~GCodeStreamingController() {
 
     // Wait for any async indexing to complete
     if (index_future_.valid()) {
-        indexing_.store(false); // Signal cancellation
+        indexing_.store(false);
+        index_cancel_requested_.store(true, std::memory_order_relaxed);
         try {
             index_future_.wait();
         } catch (...) {
@@ -262,6 +255,7 @@ GCodeStreamingController::~GCodeStreamingController() {
 
 bool GCodeStreamingController::open_file(const std::string& filepath) {
     close();
+    index_cancel_requested_.store(false, std::memory_order_relaxed);
 
     spdlog::info("[StreamingController] Opening file: {}", filepath);
 
@@ -293,6 +287,7 @@ bool GCodeStreamingController::open_file(const std::string& filepath) {
 void GCodeStreamingController::open_file_async(const std::string& filepath,
                                                std::function<void(bool)> on_complete) {
     close();
+    index_cancel_requested_.store(false, std::memory_order_relaxed);
 
     spdlog::info("[StreamingController] Opening file async: {}", filepath);
 
@@ -320,9 +315,13 @@ void GCodeStreamingController::open_file_async(const std::string& filepath,
     // through std::async's noexcept boundary and terminate the process. On
     // constrained devices (AD5M/AD5X) allocations during indexing of a large
     // gcode file can fail — surface that as a failed load, not a crash.
-    index_future_ = std::async(std::launch::async, [this, filepath]() {
+    index_future_ = std::async(std::launch::async, [this, filepath]() { // THREAD_OK: below
+        helix::install_thread_altstack();
         bool success = false;
         try {
+            if (index_worker_gate) {
+                index_worker_gate();
+            }
             success = build_index();
         } catch (const std::exception& e) {
             spdlog::error("[StreamingController] Exception during build_index: {}", e.what());
@@ -373,6 +372,7 @@ void GCodeStreamingController::open_file_async(const std::string& filepath,
 
 bool GCodeStreamingController::open_source(std::unique_ptr<GCodeDataSource> source) {
     close();
+    index_cancel_requested_.store(false, std::memory_order_relaxed);
 
     if (!source || !source->is_valid()) {
         spdlog::error("[StreamingController] Invalid data source");
@@ -399,6 +399,7 @@ void GCodeStreamingController::close() {
     // Wait for async operations
     if (index_future_.valid()) {
         indexing_.store(false);
+        index_cancel_requested_.store(true, std::memory_order_relaxed);
         try {
             index_future_.wait();
         } catch (...) {
@@ -415,12 +416,6 @@ void GCodeStreamingController::close() {
     index_.clear();
     data_source_.reset();
     is_open_.store(false);
-
-    {
-        std::lock_guard<std::mutex> lock(metadata_mutex_);
-        metadata_extracted_ = false;
-        header_metadata_.reset();
-    }
 
     {
         std::lock_guard<std::mutex> lock(name_table_mutex_);
@@ -535,7 +530,7 @@ void GCodeStreamingController::start_prefetch_worker() {
     if (prefetch_thread_.joinable() || stop_prefetch_) {
         return;
     }
-    prefetch_thread_ = std::thread(&GCodeStreamingController::prefetch_worker, this);
+    prefetch_thread_ = helix::make_thread(&GCodeStreamingController::prefetch_worker, this);
 }
 
 void GCodeStreamingController::stop_prefetch_worker(bool permanent) {
@@ -719,15 +714,6 @@ void GCodeStreamingController::respond_to_memory_pressure() {
 }
 
 // =============================================================================
-// Metadata Access
-// =============================================================================
-
-const GCodeHeaderMetadata* GCodeStreamingController::get_header_metadata() const {
-    std::lock_guard<std::mutex> lock(metadata_mutex_);
-    return header_metadata_.get();
-}
-
-// =============================================================================
 // Private Implementation
 // =============================================================================
 
@@ -811,21 +797,6 @@ std::vector<ToolpathSegment> GCodeStreamingController::load_layer(size_t layer_i
     // Get parsed result
     auto result = parser.finalize();
 
-    // Extract metadata from first layer parsed (thread-safe)
-    if (!result.layers.empty()) {
-        std::lock_guard<std::mutex> lock(metadata_mutex_);
-        if (!metadata_extracted_) {
-            header_metadata_ = std::make_unique<GCodeHeaderMetadata>();
-            header_metadata_->slicer = result.slicer_name;
-            header_metadata_->filament_type = result.filament_type;
-            header_metadata_->estimated_time_seconds = result.estimated_print_time_minutes * 60.0;
-            header_metadata_->filament_used_mm = result.total_filament_mm;
-            header_metadata_->layer_count = static_cast<uint32_t>(index_.get_layer_count());
-            header_metadata_->tool_colors = result.tool_color_palette;
-            metadata_extracted_ = true;
-        }
-    }
-
     // Collect all segments from all parsed layers
     // (usually just one layer, but parser may split on Z changes).
     // `result` dies with this call, so steal the single-layer vector rather than copying it.
@@ -864,8 +835,10 @@ bool GCodeStreamingController::build_index() {
         // drive an indeterminate spinner — on a 133MB print that is 69 seconds
         // of a UI that looks hung. Storing an atomic from the scan thread is
         // the whole cost; the UI polls it on its own clock.
-        return index_.build_from_file(file_path,
-                                      [this](float fraction) { index_progress_.store(fraction); });
+        return index_.build_from_file(file_path, [this](float fraction) {
+            index_progress_.store(fraction);
+            return !index_cancel_requested_.load(std::memory_order_relaxed);
+        });
     }
 
     // Sources without file path (e.g., MemoryDataSource) cannot be indexed

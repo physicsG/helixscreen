@@ -44,7 +44,7 @@ class WizardTelemetryStep : public helix::wizard::Step {
     lv_obj_t* root_ = nullptr;
 
     // Telemetry info modal text subject
-    lv_subject_t telemetry_info_text_;
+    lv_subject_t telemetry_info_text_{};
     char telemetry_info_text_buffer_[2048];
     bool subjects_initialized_ = false;
 

@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "ui_buffer_slider.h"
 #include "ui_bypass_toggle_controller.h"
 #include "ui_clog_meter.h"
 #include "ui_observer_guard.h"
@@ -12,10 +13,13 @@
 #include "ams_types.h"
 #include "async_lifetime_guard.h"
 #include "filament_op_dispatch.h"
+#include "filament_op_execute.h"
 #include "filament_op_slot_resolver.h"
 
+#include <chrono>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -44,6 +48,10 @@ namespace helix::ui {
 class AmsOperationSidebar {
   public:
     explicit AmsOperationSidebar(PrinterState& ps);
+
+    /// A sidebar set up on @p panel with its observers registered; what an AMS
+    /// panel attaches while it is open.
+    static std::unique_ptr<AmsOperationSidebar> attach(PrinterState& ps, lv_obj_t* panel);
     ~AmsOperationSidebar();
 
     // Non-copyable, non-movable
@@ -80,20 +88,27 @@ class AmsOperationSidebar {
      * @brief Start an operation with known type and target slot
      *
      * Called BEFORE backend operation to set up step progress and pulse animation.
-     * Sets action to HEATING and shows step progress immediately.
+     * Sets the action of the operation's first step and shows step progress
+     * immediately.
      */
     void start_operation(StepOperationType op_type, int target_slot);
 
     /**
      * @brief Revert a start_operation() whose backend dispatch failed
      *
-     * start_operation() optimistically sets the AmsState action to HEATING and
+     * start_operation() optimistically sets the AmsState action busy and
      * arms the pulse animation before the backend call. If that call returns an
      * error, the backend never left IDLE — surface the error and resync the UI
      * from the backend so the sidebar doesn't freeze in a phantom "Heating"
      * (Vger1700, bundle Z5V4K3NL: dispatch error was silently discarded).
      */
     void fail_started_operation(const AmsError& error);
+
+    /**
+     * @brief Unwind a start_operation() whose backend is not doing anything:
+     *        drop the target pulse, release the held action and resync.
+     */
+    void abandon_started_operation();
 
     /**
      * @brief Handle load request with automatic preheat if needed
@@ -109,6 +124,13 @@ class AmsOperationSidebar {
      * leaving auto-detect to mis-build the stepper as LOAD_SWAP.
      */
     void handle_unload(int slot_index);
+
+    /// This sidebar's bypass controller, for the external-spool menu to drive.
+    /// One controller per surface: a second would own half of the #1229
+    /// unload-first chain and settle against the wrong half.
+    [[nodiscard]] BypassToggleController* bypass_controller() {
+        return &bypass_toggle_;
+    }
 
     /**
      * @brief Update the loaded card swatch color and info
@@ -157,6 +179,7 @@ class AmsOperationSidebar {
 
     // Extracted UI modules
     std::unique_ptr<UiClogMeter> clog_meter_;
+    std::unique_ptr<UiBufferSlider> buffer_slider_;
 
     // Bypass spool observer (updates sidebar if needed)
     ObserverGuard bypass_spool_observer_;
@@ -171,18 +194,18 @@ class AmsOperationSidebar {
     // Watches AmsState's ams_operation_indeterminate subject (#1065 row 14). When
     // 1 the live "Heat 225/230" readout is frozen by a starved status feed, so
     // the Heat step swaps to an indeterminate "Working…" busy label instead of a
-    // number that reads as a hang. Static-lifetime singleton subject (like
-    // ams_operation_phase) — a plain ObserverGuard with no SubjectLifetime is
-    // correct; cleaned up via reset() in cleanup().
+    // number that reads as a hang. AmsState::deinit_subjects() frees this
+    // subject's observer nodes, so the guard carries AmsState's subjects
+    // lifetime; cleaned up via reset() in cleanup().
     ObserverGuard indeterminate_observer_;
 
     // Drives the step bar's current step when the active backend supplies a
     // specialized step model (get_operation_step_index_subject). The subject is
-    // backend-supplied and always a STATIC singleton (firmware-phase subject for
-    // the U1, narration toolchange-step subject for AFC-style backends), so a
-    // member ObserverGuard with no SubjectLifetime is correct — cleaned up via
-    // reset() in cleanup(). When null the sidebar uses the legacy coarse
-    // AmsAction→index fallback.
+    // backend-supplied: AmsState's toolchange_step or ams_operation_phase for
+    // every backend shipping today, which is why recreate_step_progress_for_
+    // operation() passes AmsState's lifetime only when it recognizes one of
+    // those two. Cleaned up via reset() in cleanup(). When null the sidebar uses
+    // the legacy coarse AmsAction→index fallback.
     ObserverGuard step_index_observer_;
     // The subject the step_index_observer_ watches (nullptr => legacy fallback).
     // Set in recreate_step_progress_for_operation from the active backend.
@@ -198,6 +221,8 @@ class AmsOperationSidebar {
     int pending_load_slot_ = -1;
     int pending_load_target_temp_ = 0;
     bool ui_initiated_heat_ = false;
+    // The nozzle target has reached the pending preheat target at least once.
+    bool pending_load_target_seen_ = false;
     AmsAction prev_ams_action_ = AmsAction::IDLE;
 
     // Lifecycle flag — set in setup(), cleared in cleanup().
@@ -217,6 +242,21 @@ class AmsOperationSidebar {
     lv_timer_t* stall_watchdog_timer_ = nullptr;
     static constexpr uint32_t STALL_WATCHDOG_PERIOD_MS = 1500;
     static void stall_watchdog_cb(lv_timer_t* timer);
+
+    // How long the optimistic action outlives backend silence (see
+    // AmsState::hold_optimistic_action): the UI preheat, then the gap between
+    // the backend accepting the command and its first frame, which can include
+    // a G28. Each bounds an operation the backend never reports at all.
+    // A nozzle within this many degrees C of its target counts as hot enough:
+    // the preheat is done, a target counts as reached, the Heat step is over.
+    static constexpr int PREHEAT_MARGIN_C = 5;
+
+    static constexpr std::chrono::minutes OPTIMISTIC_PREHEAT_HOLD{10};
+    static constexpr std::chrono::seconds OPTIMISTIC_DISPATCH_HOLD{90};
+
+    // The backend accepted the operation: restart a held action's budget from
+    // here, and sync so a backend that set its own action at dispatch drives.
+    void hand_operation_to_backend();
 
     // Step progress state
     StepOperationType current_operation_type_ = StepOperationType::LOAD_FRESH;
@@ -276,7 +316,19 @@ class AmsOperationSidebar {
 
     // Preheat methods
     int get_load_temp_for_slot(int slot_index);
+    /// get_load_temp_for_slot() without its default: nullopt when neither the slot
+    /// nor the external spool names a material.
+    std::optional<int> material_load_temp_for_slot(int slot_index);
+    /// Nozzle-temperature parameter values for @p op's macro acting on @p slot_index,
+    /// from the live extruder target and material_load_temp_for_slot(), held above the
+    /// printer's extrusion minimum and at most the hotend's max_temp
+    /// (helix::ui::nozzle_temp_prefill()).
+    std::map<std::string, std::string> macro_temp_prefill(helix::ui::FilamentMacroOp op,
+                                                          int slot_index);
     void check_pending_load();
+    // A preheat whose nozzle target is taken away never reaches temperature, so
+    // check_pending_load() would never fire. Abandons the load instead.
+    void abandon_preheat_if_target_dropped(int target_deci);
     void handle_load_complete();
     void show_preheat_feedback(int slot_index, int target_temp);
 
@@ -301,36 +353,75 @@ class AmsOperationSidebar {
     // Reached when there is no AMS backend, or when bypass hands the load to the
     // user's LOAD_FILAMENT macro. Neither tier has an AMS operation to narrate,
     // so they run without the stepper / pending-target-slot bookkeeping.
-    void dispatch_load_outside_backend(const helix::ui::FilamentOpPlan& plan);
-    void dispatch_unload_outside_backend(const helix::ui::FilamentOpPlan& plan);
+    void dispatch_unload_outside_backend(const helix::ui::FilamentOpPlan& plan, int slot_index);
+    /// This sidebar's half of a shared dispatch: which parameter policy it wants,
+    /// how a rejected dispatch unwinds the stepper, and the lifetime wrapper the
+    /// macro-parameter modal needs (this object dies with the AMS panel, and the
+    /// modal retains its callback past dismissal).
+    ///
+    /// on_begin is deliberately unset: the stepper is armed BEFORE the preheat,
+    /// which is earlier than the executor's dispatch, so re-arming there would
+    /// double-count.
+    ///
+    /// @p slot_index is the lane the op acts on: its material is what
+    /// macro_temp_prefill() offers the macro.
+    [[nodiscard]] helix::ui::FilamentOpSurface op_surface(const char* tag, int slot_index);
+
     void send_standard_filament_macro(bool is_load,
                                       const std::map<std::string, std::string>& params);
     void send_filament_fallback_gcode(bool is_load);
 
-    // ---- Unload button gating (filament_op_slot_resolver.h) -----------------
-    // Recompute the sidebar Unload button's enabled state from the SAME
-    // compute_op_button_gating() rule the filament panel and the AMS context
-    // menu use, and publish it on ams_sidebar_unload_disabled.
-    //
-    // The sidebar had no print-state term at all, so its Unload stayed tappable
-    // through a print or a runout pause, dispatched, and ate the backend's
-    // "Cannot run filament operation while printing" refusal.
-    void refresh_unload_gating();
+    // ---- Action button gating (filament_op_slot_resolver.h) -----------------
+    // Recompute every gated sidebar button and publish the results on
+    // ams_sidebar_unload_disabled, ams_sidebar_load_disabled,
+    // ams_sidebar_reset_disabled and ams_sidebar_check_gates_disabled. Unload
+    // and Load come from the same compute_op_button_gating() rule the filament
+    // panel and the AMS context menu use; Reset and Check slots come from
+    // compute_machine_op_gating().
+    void refresh_button_gating();
 
-    // Live inputs for refresh_unload_gating(), also consulted by handle_unload()
+    // Live inputs for refresh_button_gating(), also consulted by handle_unload()
     // so the dispatch cannot run when the button should have been greyed.
+    // Availability is per-backend: on batch-capable backends it is "some head
+    // can unload" (the same per-head answer the picker's rows read); elsewhere
+    // it is the aggregate ams_filament_loaded flag.
     [[nodiscard]] helix::ui::OpButtonState read_unload_gating_state() const;
 
-    // Observers feeding refresh_unload_gating(). ams_action / current_slot are
+    // The batch Load button's inputs. Load availability is expressed through
+    // the resolver's slot_has_filament semantics: nullopt when some head is
+    // worth feeding (nothing_to_feed stays clear), false when none is.
+    [[nodiscard]] helix::ui::OpButtonState read_batch_load_gating_state() const;
+
+    /// The backend and print reads every filament op's gating starts from.
+    struct OpInputs {
+        bool system_busy = false;
+        PrintState lifecycle{};
+        bool backend_self_homes = false;
+    };
+    [[nodiscard]] OpInputs read_op_inputs() const;
+
+    // The Reset / Check-slots half, likewise re-read by handle_reset() and
+    // handle_check_gates(). Neither backend call asks check_preconditions() for
+    // the print term, so these two reads are the only guard on those paths.
+    [[nodiscard]] helix::ui::MachineOpGating read_machine_op_gating() const;
+
+    // Observers feeding refresh_button_gating(). ams_action / current_slot are
     // already watched above; these two are the terms the sidebar never had.
     ObserverGuard filament_loaded_observer_;
     ObserverGuard print_state_observer_;
 
     // Action handlers
     void handle_unload();
+
+    /// The busy/print refusal every filament-op entry shares. The buttons are
+    /// bound to the gating subjects, but a tap can land in the window between
+    /// an operation starting and the subject settling, so each entry re-checks
+    /// and refuses with copy the user can act on rather than forwarding a
+    /// guaranteed backend rejection. True means "refused, stop here".
+    [[nodiscard]] bool refuse_if_busy_or_printing() const;
+    void handle_bypass_toggle();
     void handle_reset();
     void handle_check_gates();
-    void handle_bypass_toggle();
 
     // Action display (sidebar-relevant parts only)
     void update_action_display(AmsAction action);
@@ -339,11 +430,8 @@ class AmsOperationSidebar {
     static AmsOperationSidebar* get_instance_from_event(lv_event_t* e);
 
     // Static XML callbacks
-    static void on_bypass_toggled_cb(lv_event_t* e);
-    static void on_unload_clicked_cb(lv_event_t* e);
-    static void on_reset_clicked_cb(lv_event_t* e);
-    static void on_check_gates_clicked_cb(lv_event_t* e);
     static void on_settings_clicked_cb(lv_event_t* e);
+    static void on_batch_load_clicked_cb(lv_event_t* e);
 };
 
 } // namespace helix::ui

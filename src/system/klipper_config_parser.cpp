@@ -2,188 +2,80 @@
 
 #include "klipper_config_parser.h"
 
+#include "text_io.h"
+
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
-#include <sstream>
-#include <stdexcept>
 
-std::string KlipperConfigParser::trim(const std::string& s) {
-    auto start = s.find_first_not_of(" \t\r");
-    if (start == std::string::npos)
-        return "";
-    auto end = s.find_last_not_of(" \t\r");
-    return s.substr(start, end - start + 1);
+using helix::system::ConfigKey;
+using helix::system::KlipperConfigEditor;
+
+namespace {
+
+// Klipper ends a value at whitespace followed by `#` or `;`; a bare `#` (a hex
+// colour, say) stays part of the value.
+std::string strip_inline_comment(std::string_view line) {
+    for (size_t i = 1; i < line.size(); ++i) {
+        if ((line[i] == '#' || line[i] == ';') && (line[i - 1] == ' ' || line[i - 1] == '\t')) {
+            line = line.substr(0, i);
+            break;
+        }
+    }
+    return std::string(helix::text_io::trim(line));
 }
 
+bool is_comment(std::string_view trimmed) {
+    return !trimmed.empty() && (trimmed[0] == '#' || trimmed[0] == ';');
+}
+
+} // namespace
+
 bool KlipperConfigParser::parse(const std::string& content) {
-    lines_.clear();
-    section_map_.clear();
-    section_order_.clear();
+    content_ = content;
     modified_ = false;
-
-    if (content.empty()) {
-        return true;
-    }
-
-    // Split content into lines
-    std::istringstream stream(content);
-    std::string line_str;
-    std::vector<std::string> raw_lines;
-    while (std::getline(stream, line_str)) {
-        raw_lines.push_back(line_str);
-    }
-
-    // If content ends with newline, getline won't produce a trailing empty entry,
-    // which is fine since we re-add newlines in serialize.
-
-    std::string current_section;
-    size_t current_kv_idx = std::string::npos; // Index of current key-value line for continuations
-
-    for (size_t i = 0; i < raw_lines.size(); ++i) {
-        const auto& raw = raw_lines[i];
-        Line line;
-        line.raw = raw;
-
-        std::string trimmed = trim(raw);
-
-        if (trimmed.empty()) {
-            line.type = Line::BLANK;
-            current_kv_idx = std::string::npos;
-            lines_.push_back(std::move(line));
-            continue;
-        }
-
-        if (trimmed[0] == '#') {
-            line.type = Line::COMMENT;
-            current_kv_idx = std::string::npos;
-            lines_.push_back(std::move(line));
-            continue;
-        }
-
-        if (trimmed[0] == '[' && trimmed.back() == ']') {
-            line.type = Line::SECTION_HEADER;
-            line.section_name = trimmed.substr(1, trimmed.size() - 2);
-            current_section = line.section_name;
-            current_kv_idx = std::string::npos;
-
-            if (section_map_.find(current_section) == section_map_.end()) {
-                section_map_[current_section] = {};
-                section_order_.push_back(current_section);
-            }
-            lines_.push_back(std::move(line));
-            continue;
-        }
-
-        // Check if this is a continuation line (starts with whitespace)
-        if ((raw[0] == ' ' || raw[0] == '\t') && current_kv_idx != std::string::npos) {
-            line.type = Line::CONTINUATION;
-            lines_.push_back(std::move(line));
-            lines_[current_kv_idx].continuation_indices.push_back(lines_.size() - 1);
-            continue;
-        }
-
-        // Must be a key-value line. Find separator (first `:` or `=`)
-        // Klipper uses ": " or " = " but we need to handle both
-        line.type = Line::KEY_VALUE;
-
-        // Find the separator - prefer ": " first, then " = ", then bare ":" or "="
-        size_t colon_pos = raw.find(": ");
-        size_t equals_pos = raw.find(" = ");
-        size_t sep_pos = std::string::npos;
-
-        if (colon_pos != std::string::npos &&
-            (equals_pos == std::string::npos || colon_pos <= equals_pos)) {
-            sep_pos = colon_pos;
-            line.separator = ':';
-            line.separator_ws = ": ";
-            line.key = trim(raw.substr(0, sep_pos));
-            line.value = trim(raw.substr(sep_pos + 2));
-        } else if (equals_pos != std::string::npos) {
-            sep_pos = equals_pos;
-            line.separator = '=';
-            line.separator_ws = " = ";
-            line.key = trim(raw.substr(0, sep_pos));
-            line.value = trim(raw.substr(sep_pos + 3));
-        } else {
-            // Try bare separators
-            colon_pos = raw.find(':');
-            equals_pos = raw.find('=');
-
-            if (colon_pos != std::string::npos &&
-                (equals_pos == std::string::npos || colon_pos <= equals_pos)) {
-                sep_pos = colon_pos;
-                line.separator = ':';
-                line.separator_ws = ":";
-                line.key = trim(raw.substr(0, sep_pos));
-                line.value = trim(raw.substr(sep_pos + 1));
-            } else if (equals_pos != std::string::npos) {
-                sep_pos = equals_pos;
-                line.separator = '=';
-                line.separator_ws = "=";
-                line.key = trim(raw.substr(0, sep_pos));
-                line.value = trim(raw.substr(sep_pos + 1));
-            } else {
-                // No separator found - treat as comment/unknown
-                spdlog::warn("KlipperConfigParser: unrecognized line: '{}'", raw);
-                line.type = Line::COMMENT;
-                lines_.push_back(std::move(line));
-                continue;
-            }
-        }
-
-        current_kv_idx = lines_.size();
-        if (!current_section.empty()) {
-            section_map_[current_section][line.key] = current_kv_idx;
-        }
-        lines_.push_back(std::move(line));
-    }
-
+    reindex();
     return true;
 }
 
-std::string KlipperConfigParser::get_multiline_value(size_t key_line_idx) const {
-    const auto& kv_line = lines_[key_line_idx];
-    if (kv_line.continuation_indices.empty()) {
-        return kv_line.value;
-    }
+void KlipperConfigParser::reindex() {
+    structure_ = KlipperConfigEditor::parse_structure(content_);
+}
 
-    // Multi-line: first line value (may be empty for "gcode:") plus continuation lines
-    std::string result;
-    if (!kv_line.value.empty()) {
-        result = kv_line.value;
-    }
-    for (size_t ci : kv_line.continuation_indices) {
-        if (!result.empty()) {
-            result += '\n';
-        }
-        result += trim(lines_[ci].raw);
-    }
-    return result;
+const ConfigKey* KlipperConfigParser::find_key(const std::string& section,
+                                               const std::string& key) const {
+    auto sec_it = structure_.sections.find(section);
+    if (sec_it == structure_.sections.end())
+        return nullptr;
+    const std::string wanted = helix::text_io::to_lower(key);
+    const auto& keys = sec_it->second.keys;
+    auto it = std::find_if(keys.rbegin(), keys.rend(),
+                           [&](const ConfigKey& k) { return k.name == wanted; });
+    return it == keys.rend() ? nullptr : &*it;
 }
 
 std::string KlipperConfigParser::get(const std::string& section, const std::string& key,
                                      const std::string& default_val) const {
-    auto sec_it = section_map_.find(section);
-    if (sec_it == section_map_.end())
+    const ConfigKey* k = find_key(section, key);
+    if (!k)
         return default_val;
-    auto key_it = sec_it->second.find(key);
-    if (key_it == sec_it->second.end())
-        return default_val;
-    std::string val = get_multiline_value(key_it->second);
 
-    // Strip inline comments: Klipper treats " #" (space + hash) as comment start.
-    // Bare "#" without preceding space is NOT a comment (e.g. color "#FF0000").
-    auto comment_pos = val.find(" #");
-    if (comment_pos != std::string::npos) {
-        val = val.substr(0, comment_pos);
-        // Trim trailing whitespace left behind
-        while (!val.empty() && (val.back() == ' ' || val.back() == '\t')) {
-            val.pop_back();
-        }
+    std::vector<std::string_view> lines;
+    for (std::string_view sv : helix::text_io::lines(content_))
+        lines.push_back(sv);
+
+    // First line carries the value after the separator; the rest are indented
+    // continuations. Blank lines inside a value stay, comment lines drop out.
+    std::string result = strip_inline_comment(k->value);
+    for (int i = k->line_number + 1; i <= k->end_line && i < static_cast<int>(lines.size()); ++i) {
+        std::string_view trimmed = helix::text_io::trim(lines[i]);
+        if (is_comment(trimmed))
+            continue;
+        if (!result.empty() || i > k->line_number + 1)
+            result += '\n';
+        result += strip_inline_comment(trimmed);
     }
-
-    return val;
+    return result;
 }
 
 bool KlipperConfigParser::get_bool(const std::string& section, const std::string& key,
@@ -191,9 +83,7 @@ bool KlipperConfigParser::get_bool(const std::string& section, const std::string
     std::string val = get(section, key, "");
     if (val.empty())
         return default_val;
-    // Lowercase for comparison
-    std::string lower = val;
-    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    std::string lower = helix::text_io::to_lower(val);
     if (lower == "true" || lower == "yes" || lower == "1")
         return true;
     if (lower == "false" || lower == "no" || lower == "0")
@@ -206,11 +96,7 @@ float KlipperConfigParser::get_float(const std::string& section, const std::stri
     std::string val = get(section, key, "");
     if (val.empty())
         return default_val;
-    try {
-        return std::stof(val);
-    } catch (...) {
-        return default_val;
-    }
+    return helix::text_io::parse_leading<float>(val).value_or(default_val);
 }
 
 int KlipperConfigParser::get_int(const std::string& section, const std::string& key,
@@ -218,110 +104,61 @@ int KlipperConfigParser::get_int(const std::string& section, const std::string& 
     std::string val = get(section, key, "");
     if (val.empty())
         return default_val;
-    try {
-        return std::stoi(val);
-    } catch (...) {
-        return default_val;
-    }
+    return helix::text_io::parse_leading<int>(val).value_or(default_val);
 }
 
 void KlipperConfigParser::set(const std::string& section, const std::string& key,
                               const std::string& value) {
     modified_ = true;
-
-    auto sec_it = section_map_.find(section);
-    if (sec_it == section_map_.end()) {
+    if (!has_section(section)) {
         spdlog::warn("KlipperConfigParser: set() on nonexistent section '{}'", section);
         return;
     }
 
-    auto key_it = sec_it->second.find(key);
-    if (key_it != sec_it->second.end()) {
-        // Update existing key-value line
-        auto& line = lines_[key_it->second];
-        line.value = value;
-        // Rebuild raw line preserving separator style
-        line.raw = line.key + line.separator_ws + value;
-        // Clear continuations (set replaces multi-line with single value)
-        line.continuation_indices.clear();
-    } else {
-        // Append new key to the section. Find last line belonging to this section.
-        // Walk from the section header line to find where to insert.
-        size_t insert_after = std::string::npos;
-        bool in_section = false;
-        for (size_t i = 0; i < lines_.size(); ++i) {
-            if (lines_[i].type == Line::SECTION_HEADER && lines_[i].section_name == section) {
-                in_section = true;
-                insert_after = i;
-                continue;
-            }
-            if (in_section) {
-                if (lines_[i].type == Line::SECTION_HEADER) {
-                    break; // Next section starts
-                }
-                if (lines_[i].type == Line::KEY_VALUE || lines_[i].type == Line::CONTINUATION) {
-                    insert_after = i;
-                }
-            }
-        }
-
-        if (insert_after == std::string::npos)
+    if (const ConfigKey* k = find_key(section, key)) {
+        // Replacing a multi-line value drops its continuation lines.
+        auto edited = KlipperConfigEditor::set_value(content_, section, k->name, value);
+        if (!edited)
             return;
-
-        Line new_line;
-        new_line.type = Line::KEY_VALUE;
-        new_line.key = key;
-        new_line.value = value;
-        new_line.separator = ':';
-        new_line.separator_ws = ": ";
-        new_line.raw = key + ": " + value;
-
-        // Insert after the last key in this section
-        size_t new_idx = insert_after + 1;
-        lines_.insert(lines_.begin() + static_cast<long>(new_idx), std::move(new_line));
-
-        // Rebuild section_map_ since indices shifted
-        rebuild_indices_after_insert(new_idx, section, key);
-    }
-}
-
-void KlipperConfigParser::rebuild_indices_after_insert(size_t inserted_idx,
-                                                       const std::string& section,
-                                                       const std::string& key) {
-    // All indices >= inserted_idx need to be incremented (except the new one)
-    for (auto& [sec_name, keys] : section_map_) {
-        for (auto& [k, idx] : keys) {
-            if (idx >= inserted_idx) {
-                idx++;
-            }
+        std::vector<std::string> out;
+        int line_no = 0;
+        for (std::string_view sv : helix::text_io::lines(*edited)) {
+            if (line_no <= k->line_number || line_no > k->end_line)
+                out.emplace_back(sv);
+            ++line_no;
         }
+        std::string joined;
+        for (const auto& l : out)
+            joined += l + '\n';
+        content_ = std::move(joined);
+    } else if (auto added = KlipperConfigEditor::add_key(content_, section, key, value)) {
+        content_ = std::move(*added);
     }
-    // Also fix continuation indices
-    for (auto& line : lines_) {
-        for (auto& ci : line.continuation_indices) {
-            if (ci >= inserted_idx) {
-                ci++;
-            }
-        }
-    }
-    // Now register the new key
-    section_map_[section][key] = inserted_idx;
+    reindex();
 }
 
 bool KlipperConfigParser::has_section(const std::string& section) const {
-    return section_map_.find(section) != section_map_.end();
+    return structure_.sections.count(section) > 0;
 }
 
 std::vector<std::string> KlipperConfigParser::get_sections() const {
-    return section_order_;
+    std::vector<const helix::system::ConfigSection*> secs;
+    for (const auto& [name, sec] : structure_.sections)
+        secs.push_back(&sec);
+    std::sort(secs.begin(), secs.end(),
+              [](const auto* a, const auto* b) { return a->line_start < b->line_start; });
+    std::vector<std::string> result;
+    for (const auto* sec : secs)
+        result.push_back(sec->name);
+    return result;
 }
 
 std::vector<std::string>
 KlipperConfigParser::get_sections_matching(const std::string& prefix) const {
     std::vector<std::string> result;
-    for (const auto& name : section_order_) {
+    for (const auto& name : get_sections()) {
         if (name == prefix ||
-            (name.size() > prefix.size() && name.substr(0, prefix.size()) == prefix &&
+            (name.size() > prefix.size() && name.compare(0, prefix.size(), prefix) == 0 &&
              name[prefix.size()] == ' ')) {
             result.push_back(name);
         }
@@ -330,35 +167,19 @@ KlipperConfigParser::get_sections_matching(const std::string& prefix) const {
 }
 
 std::vector<std::string> KlipperConfigParser::get_keys(const std::string& section) const {
-    auto sec_it = section_map_.find(section);
-    if (sec_it == section_map_.end())
-        return {};
-
-    // Return keys in order of appearance
-    std::vector<std::pair<size_t, std::string>> indexed_keys;
-    for (const auto& [key, idx] : sec_it->second) {
-        indexed_keys.emplace_back(idx, key);
-    }
-    std::sort(indexed_keys.begin(), indexed_keys.end());
-
     std::vector<std::string> result;
-    result.reserve(indexed_keys.size());
-    for (const auto& [idx, key] : indexed_keys) {
-        result.push_back(key);
+    auto sec_it = structure_.sections.find(section);
+    if (sec_it == structure_.sections.end())
+        return result;
+    for (const auto& k : sec_it->second.keys) {
+        if (std::find(result.begin(), result.end(), k.name) == result.end())
+            result.push_back(k.name);
     }
     return result;
 }
 
 std::string KlipperConfigParser::serialize() const {
-    if (lines_.empty())
-        return "";
-
-    std::string result;
-    for (size_t i = 0; i < lines_.size(); ++i) {
-        result += lines_[i].raw;
-        result += '\n';
-    }
-    return result;
+    return content_;
 }
 
 bool KlipperConfigParser::is_modified() const {

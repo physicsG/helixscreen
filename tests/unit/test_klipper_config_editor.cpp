@@ -637,6 +637,8 @@ TEST_CASE("KlipperConfigEditor::load_config_files still resolves plain includes"
 
     // A .cfg sitting in the config dir that nothing includes must NOT be active.
     CHECK(section_map.count("bed_mesh") == 0);
+    // Nor downloaded: config_backups/ alone holds dozens of these on a real printer.
+    CHECK_FALSE(editor.get_cached_file("orphan.cfg").has_value());
 
     CHECK(editor.get_cached_file("probe.cfg").has_value());
 }
@@ -1004,4 +1006,29 @@ TEST_CASE_METHOD(LVGLTestFixture,
     REQUIRE(wait_until([]() { return helix::http::HttpExecutor::fast().inflight() == 0; }, 8000));
     process_lvgl(1200);
     helix::ui::UpdateQueue::instance().drain();
+}
+
+TEST_CASE("KlipperConfigEditor - duplicate keys edit the last occurrence", "[config][editor]") {
+    KlipperConfigEditor editor;
+
+    SECTION("set_value rewrites the last copy only") {
+        std::string content = "[s]\ncut: False\ncut: True\n";
+        auto result = editor.set_value(content, "s", "cut", "X");
+        REQUIRE(result.has_value());
+        CHECK(*result == "[s]\ncut: False\ncut: X\n");
+    }
+
+    SECTION("remove_key comments out the last copy only") {
+        std::string content = "[s]\ncut: False\ncut: True\n";
+        auto result = editor.remove_key(content, "s", "cut");
+        REQUIRE(result.has_value());
+        CHECK(*result == "[s]\ncut: False\n#cut: True\n");
+    }
+
+    SECTION("a last copy with continuation lines keeps its own range") {
+        std::string content = "[s]\ng: A\ng:\n  B\n  C\n[t]\nx: 1\n";
+        auto removed = editor.remove_key(content, "s", "g");
+        REQUIRE(removed.has_value());
+        CHECK(*removed == "[s]\ng: A\n#g:\n#  B\n#  C\n[t]\nx: 1\n");
+    }
 }

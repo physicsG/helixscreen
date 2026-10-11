@@ -22,7 +22,7 @@ glm::ivec2 project(const ProjectionParams& params, float x, float y, float z) {
 
     switch (params.view_mode) {
     case ViewMode::FRONT: {
-        // Isometric-style view: 45° horizontal rotation + 30° elevation
+        // Corner view: 45° horizontal rotation + 45° elevation
         // Creates a "corner view looking down" perspective
 
         // 90° CCW rotation around Z to match slicer thumbnail orientation
@@ -157,7 +157,7 @@ AutoFitResult compute_auto_fit(const AABB& raw_bb, ViewMode view_mode, int canva
         // Horizontal extent after 45° rotation (cos(-45°) = cos(45°) = 0.7071)
         range_x = (xy_range_x + xy_range_y) * COS_H;
 
-        // Vertical extent: Z * cos(30°) + Y_depth * sin(30°)
+        // Vertical extent: Z * cos(45°) + Y_depth * sin(45°)
         float y_depth = (xy_range_x + xy_range_y) * COS_H;
         range_y = z_range * COS_E + y_depth * SIN_E;
 

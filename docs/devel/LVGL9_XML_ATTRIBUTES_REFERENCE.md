@@ -209,6 +209,8 @@ Define in `<styles>`, apply with child `<style>`. Drop `style_` prefix.
 
 **Combine:** `selector="indicator:pressed"` | **Remove:** `bg_color="remove"` | **Constants:** `bg_color="#primary"`
 
+**Share across files:** a `<styles>` block is file-local. A look two files need lives in `ui_xml/styles.xml` and is borrowed by dotted name: `<style name="styles.press_wash" selector="pressed"/>`, or `<bind_style name="styles.invisible" .../>`. See `LVGL9_XML_GUIDE.md` § "Defining Styles".
+
 **`bind_style` / `bind_style_if_*` — `parts="main,indicator"`:** apply one style to multiple parts in one line (helix-xml extension). State bits from `selector` are preserved per part. See `LVGL9_XML_GUIDE.md` § "Applying One Style to Multiple Parts".
 
 ---

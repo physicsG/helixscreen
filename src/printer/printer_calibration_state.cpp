@@ -53,6 +53,7 @@ void PrinterCalibrationState::init_subjects(bool register_xml) {
                      register_xml); // 1=enabled (Ready/Printing), 0=disabled (Idle)
 
     // idle_timeout.state == "Printing" busy flag (default: not busy)
+    idle_timeout_printing_lifetime_ = std::make_shared<bool>(true);
     INIT_SUBJECT_INT_VOLATILE(idle_timeout_printing, 0, subjects_, volatile_,
                               register_xml); // 1 if idle_timeout.state == "Printing", else 0
 
@@ -67,6 +68,11 @@ void PrinterCalibrationState::deinit_subjects() {
 
     spdlog::debug("[PrinterCalibrationState] Deinitializing subjects");
     volatile_.clear();
+    // Before the subjects are freed: pending observer guards must see the
+    // subject as dead so their removal skips the freed nodes.
+    if (idle_timeout_printing_lifetime_) {
+        *idle_timeout_printing_lifetime_ = false;
+    }
     subjects_.deinit_all();
     subjects_initialized_ = false;
 }
@@ -93,9 +99,7 @@ void PrinterCalibrationState::update_from_status(const nlohmann::json& status) {
             // Store as microns (multiply by 1000) for integer subject with 0.001mm resolution
             double z_mm = mp["z_position"].get<double>();
             int z_microns = static_cast<int>(z_mm * 1000.0);
-            if (lv_subject_get_int(&manual_probe_z_position_) != z_microns) {
-                lv_subject_set_int(&manual_probe_z_position_, z_microns);
-            }
+            lv_subject_set_int(&manual_probe_z_position_, z_microns);
             spdlog::trace("[PrinterCalibrationState] Manual probe Z: {:.3f}mm", z_mm);
         }
     }

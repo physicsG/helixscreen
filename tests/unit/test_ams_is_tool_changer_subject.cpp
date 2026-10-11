@@ -28,32 +28,32 @@ namespace {
 /// A mock that reports an arbitrary AmsType. sync_from_backend() reads
 /// get_system_info().type, so the type must be stamped there, not only on
 /// get_type().
-class TypedBackend : public AmsBackendMock {
+class TypedBackend : public helix::AmsBackendMock {
   public:
-    TypedBackend(AmsType type, int slots) : AmsBackendMock(slots), type_(type) {}
+    TypedBackend(helix::AmsType type, int slots) : helix::AmsBackendMock(slots), type_(type) {}
 
-    [[nodiscard]] AmsType get_type() const override {
+    [[nodiscard]] helix::AmsType get_type() const override {
         return type_;
     }
 
-    [[nodiscard]] AmsSystemInfo get_system_info() const override {
-        AmsSystemInfo info = AmsBackendMock::get_system_info();
+    [[nodiscard]] helix::AmsSystemInfo get_system_info() const override {
+        helix::AmsSystemInfo info = helix::AmsBackendMock::get_system_info();
         info.type = type_;
         return info;
     }
 
   private:
-    AmsType type_;
+    helix::AmsType type_;
 };
 
-lv_subject_t* install(AmsType type) {
+lv_subject_t* install(helix::AmsType type) {
     auto mock = std::make_unique<TypedBackend>(type, 4);
     REQUIRE(mock->start().success());
-    AmsState::instance().set_backend(std::move(mock));
-    AmsState::instance().init_subjects(true);
-    AmsState::instance().sync_from_backend();
+    helix::AmsState::instance().set_backend(std::move(mock));
+    helix::AmsState::instance().init_subjects(true);
+    helix::AmsState::instance().sync_from_backend();
 
-    lv_subject_t* subject = AmsState::instance().get_is_tool_changer_subject();
+    lv_subject_t* subject = helix::AmsState::instance().get_is_tool_changer_subject();
     REQUIRE(subject != nullptr);
     return subject;
 }
@@ -63,21 +63,21 @@ lv_subject_t* install(AmsType type) {
 TEST_CASE_METHOD(LVGLTestFixture, "ams_is_tool_changer follows is_tool_changer(), not type 4",
                  "[ams][toolchanger][subject]") {
     SECTION("klipper-toolchanger reads as a tool changer") {
-        CHECK(lv_subject_get_int(install(AmsType::TOOL_CHANGER)) == 1);
+        CHECK(lv_subject_get_int(install(helix::AmsType::TOOL_CHANGER)) == 1);
     }
 
     SECTION("Snapmaker U1 reads as a tool changer") {
         // The regression: type 7 against a hardcoded ref_value="4" read as 0,
         // so a U1 showed Unload and Reset.
-        CHECK(lv_subject_get_int(install(AmsType::SNAPMAKER)) == 1);
+        CHECK(lv_subject_get_int(install(helix::AmsType::SNAPMAKER)) == 1);
     }
 
     SECTION("a filament system does not") {
-        CHECK(lv_subject_get_int(install(AmsType::AFC)) == 0);
+        CHECK(lv_subject_get_int(install(helix::AmsType::AFC)) == 0);
     }
 
     SECTION("no AMS does not") {
-        CHECK(lv_subject_get_int(install(AmsType::NONE)) == 0);
+        CHECK(lv_subject_get_int(install(helix::AmsType::NONE)) == 0);
     }
 }
 
@@ -85,21 +85,21 @@ TEST_CASE_METHOD(LVGLTestFixture, "ams_is_tool_changer agrees with the predicate
                  "[ams][toolchanger][subject]") {
     // Pin the subject to is_tool_changer() itself rather than a list of types,
     // so a new tool-changer AmsType cannot be added without the subject following.
-    for (int raw = 0; raw <= static_cast<int>(AmsType::QIDI_BOX); ++raw) {
-        auto type = static_cast<AmsType>(raw);
-        CAPTURE(raw, ams_type_to_string(type));
-        CHECK(lv_subject_get_int(install(type)) == (is_tool_changer(type) ? 1 : 0));
+    for (int raw = 0; raw <= static_cast<int>(helix::AmsType::OPENAMS); ++raw) {
+        auto type = static_cast<helix::AmsType>(raw);
+        CAPTURE(raw, helix::ams_type_to_string(type));
+        CHECK(lv_subject_get_int(install(type)) == (helix::is_tool_changer(type) ? 1 : 0));
     }
 }
 
 TEST_CASE_METHOD(LVGLTestFixture, "ams_is_tool_changer clears when the backends go away",
                  "[ams][toolchanger][subject]") {
-    lv_subject_t* subject = install(AmsType::TOOL_CHANGER);
+    lv_subject_t* subject = install(helix::AmsType::TOOL_CHANGER);
     REQUIRE(lv_subject_get_int(subject) == 1);
 
     // A stale 1 after teardown keeps the filament controls hidden on whatever
     // connects next.
-    AmsState::instance().clear_backends();
+    helix::AmsState::instance().clear_backends();
     CHECK(lv_subject_get_int(subject) == 0);
 }
 
@@ -113,13 +113,13 @@ TEST_CASE("No tool changer draws a shared tray", "[ams][toolchanger][tray]") {
     // bowdens into a lane-assist motor unit per side, so there is no container
     // to draw -- but AmsBackendSnapmaker inherited the default `true` and drew
     // one anyway.
-    AmsBackendToolChanger tc(nullptr, nullptr);
+    helix::AmsBackendToolChanger tc(nullptr, nullptr);
     CHECK_FALSE(tc.has_physical_tray());
 
-    AmsBackendSnapmaker sm(nullptr, nullptr);
+    helix::AmsBackendSnapmaker sm(nullptr, nullptr);
     CHECK_FALSE(sm.has_physical_tray());
 
     // A hub/selector system keeps its tray: the spools really do sit in a case.
-    AmsBackendMock hub(4);
+    helix::AmsBackendMock hub(4);
     CHECK(hub.has_physical_tray());
 }

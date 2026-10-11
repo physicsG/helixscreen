@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "ui_observer_guard.h"
 #include "ui_panel_base.h"
 #include "ui_panel_history_dashboard.h"
 #include "ui_plugin_install_modal.h"
@@ -10,6 +11,14 @@
 
 #include "async_lifetime_guard.h"
 #include "helix_plugin_installer.h"
+#include "macro_manager.h"
+
+#include <functional>
+#include <memory>
+
+namespace helix::ui {
+struct AdvancedPanelTestAccess; // test-only friend (tests/test_helpers/)
+} // namespace helix::ui
 
 /**
  * @file ui_panel_advanced.h
@@ -93,6 +102,9 @@ class AdvancedPanel : public PanelBase {
     void on_activate() override;
 
   private:
+    // Test-only access to the plugin uninstall flow.
+    friend struct helix::ui::AdvancedPanelTestAccess;
+
     //
     // === Navigation Handlers ===
     //
@@ -101,12 +113,49 @@ class AdvancedPanel : public PanelBase {
     void handle_macros_clicked();
     void handle_console_clicked();
     void handle_history_clicked();
-    void handle_configure_print_start_clicked();
     void handle_pid_tuning_clicked();
     void handle_timelapse_setup_clicked();
     void handle_helix_plugin_install_clicked();
     void handle_helix_plugin_uninstall_clicked();
-    void handle_phase_tracking_changed(bool enabled);
+
+    void handle_helix_macros_install_clicked();
+    void handle_helix_macros_update_clicked();
+
+    /// job_holds_machine subject as a bool: PRINTING, PAUSED, or a
+    /// host-side Preparing block — everything a Klipper restart would kill.
+    bool macro_job_holds_machine() const;
+
+    /// The confirmed half of the uninstall row: runs the uninstaller and
+    /// reports the outcome. Blocks this thread while the script runs.
+    void run_helix_plugin_uninstall();
+
+    /// The install modal's completion: a successful script run restarts
+    /// Moonraker, and the reconnect's plugin check then reports what loaded.
+    void on_helix_plugin_install_finished(bool success);
+
+    /// Restart Moonraker so a plugin install or uninstall takes effect. The
+    /// script runs under the service's NoNewPrivileges and cannot sudo, so
+    /// Moonraker is asked to restart itself.
+    void restart_moonraker_for_plugin();
+
+    /// The confirmed half of both macro rows: stages the files, then either
+    /// restarts Klipper right away (no active print) or marks the restart
+    /// pending for the print-complete offer.
+    void run_helix_macros_stage(bool update);
+
+    /// Fires a Klipper restart unless a print is active; returns whether it
+    /// fired. The re-check is load-bearing: staging takes seconds of HTTP and
+    /// a print may have started after the confirm dialog.
+    bool restart_helix_macros_when_idle();
+
+    /// The one-shot "restart now?" offer for files staged during a print,
+    /// popped on the job_holds_machine 1->0 transition.
+    void offer_helix_macros_restart();
+
+    /// Attaches the job_holds_machine observer (idempotent). Separate from
+    /// init_subjects() because observe targets need PrinterState subjects
+    /// initialized first.
+    void wire_macro_restart_observer();
 
     // Both POWER rows (Shutdown, Reboot) open the same shared dialog — the
     // dialog itself presents shutdown vs. reboot buttons and, on dual-host
@@ -121,13 +170,13 @@ class AdvancedPanel : public PanelBase {
     static void on_macros_clicked(lv_event_t* e);
     static void on_console_clicked(lv_event_t* e);
     static void on_history_clicked(lv_event_t* e);
-    static void on_configure_print_start_clicked(lv_event_t* e);
     static void on_pid_tuning_clicked(lv_event_t* e);
     static void on_timelapse_videos_clicked(lv_event_t* e);
     static void on_timelapse_setup_clicked(lv_event_t* e);
     static void on_helix_plugin_install_clicked(lv_event_t* e);
     static void on_helix_plugin_uninstall_clicked(lv_event_t* e);
-    static void on_phase_tracking_changed(lv_event_t* e);
+    static void on_helix_macros_install_clicked(lv_event_t* e);
+    static void on_helix_macros_update_clicked(lv_event_t* e);
     static void on_advanced_power_clicked(lv_event_t* e);
 
     //
@@ -137,24 +186,58 @@ class AdvancedPanel : public PanelBase {
     helix::HelixPluginInstaller plugin_installer_;
     PluginInstallModal plugin_install_modal_;
 
+    /// What run_helix_plugin_uninstall() calls once the user has confirmed.
+    /// Empty means the bundled installer's uninstall_local(); a test installs
+    /// a recorder here so the confirm flow can be driven without forking.
+    using UninstallRunner = std::function<void(helix::HelixPluginInstaller::UninstallCallback)>;
+    UninstallRunner uninstall_runner_;
+
+    /// What restart_moonraker_for_plugin() calls. Empty means the API's
+    /// server.restart; a test installs a recorder.
+    using MoonrakerRestarter = std::function<void()>;
+    MoonrakerRestarter moonraker_restarter_;
+
+    //
+    // === Helix Helper Macros (helix_macros.cfg) ===
+    //
+    // Install/update over the Moonraker file API — works for local AND remote
+    // printers, unlike the plugin installer's shell path. The restart queue is
+    // in-memory and one offer deep: losing it to an app restart is fine, the
+    // staged files activate at whatever Klipper restart happens next.
+
+    /// Lazily built on the first install/update (needs a live api_).
+    std::unique_ptr<helix::MacroManager> macro_manager_;
+
+    /// Watches job_holds_machine for the 1->0 edge that pops the restart
+    /// offer — the same predicate the restart guard refuses under.
+    ObserverGuard macro_job_observer_;
+    bool macro_observer_wired_ = false;
+
+    /// One offer per staging: set when the modal pops, cleared when a restart
+    /// activates the macros (status leaves RestartPending).
+    bool macro_restart_offer_made_ = false;
+
+    /// Follows Klipper across the restart that loads a staged helix_skips.cfg.
+    /// A config error there removes the file and restarts once more, never
+    /// re-arming, so a failure that is not ours cannot loop.
+    void on_klippy_state_for_skips(int state);
+    ObserverGuard skips_klippy_observer_;
+    helix::skip_wrappers::LoadWatch skips_load_watch_;
+    bool skips_load_watching_ = false;
+
     //
     // === Shared Power Dialog ===
     //
-    // Reuses the same modal the home-panel power widget shows. The lifetime
-    // guard is required by the "Both" flow (defers screen-side SystemPower
-    // call until the printer-side ack lands on the WS background thread).
+    // Reuses the same modal the home-panel power widget shows. The "Both" flow
+    // defers the screen-side SystemPower call until the printer-side ack lands
+    // on the WS background thread, so it runs on object_lifetime_: the ack is
+    // owed to the machine and must survive the user leaving this panel.
 
     ShutdownModal shutdown_modal_;
-    helix::AsyncLifetimeGuard shutdown_lifetime_;
 
     //
     // === Cached Overlay Panels ===
     //
-
-    lv_obj_t* spoolman_panel_ = nullptr;
-    lv_obj_t* macros_panel_ = nullptr;
-    lv_obj_t* console_panel_ = nullptr;
-    lv_obj_t* history_dashboard_panel_ = nullptr;
 };
 
 /**

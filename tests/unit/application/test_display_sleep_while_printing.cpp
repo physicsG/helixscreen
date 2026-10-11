@@ -79,7 +79,7 @@ class SleepWhilePrintingFixture : public LVGLTestFixture {
     void drive_lifecycle(const char* wire_state,
                          helix::PrintStartPhase phase = helix::PrintStartPhase::IDLE) {
         printer_state.update_from_status(json{{"print_stats", {{"state", wire_state}}}});
-        printer_state.set_print_start_state(phase, "", 0);
+        printer_state.print_state().set_print_start_state(phase, "", 0);
         // set_print_start_state defers; its callback is what publishes.
         process_lvgl(10);
         for (int i = 0; i < 8; ++i) {
@@ -88,7 +88,7 @@ class SleepWhilePrintingFixture : public LVGLTestFixture {
     }
 
     PrintState lifecycle() const {
-        return printer_state.get_print_lifecycle();
+        return printer_state.print_state().get_print_lifecycle();
     }
 
     /// Park a fresh manager past the sleep timeout with the dim stage disabled,

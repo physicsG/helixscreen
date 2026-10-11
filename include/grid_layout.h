@@ -8,6 +8,7 @@
 #include "lvgl/lvgl.h"
 
 #include <cstdint>
+#include <functional>
 #include <iterator>
 #include <optional>
 #include <string>
@@ -55,6 +56,19 @@ inline float grid_track_extent(float cell, int gutter, int span) {
     }
     return static_cast<float>(span) * cell + static_cast<float>(span - 1) * gutter;
 }
+
+/// Smallest span at or above (@p colspan, @p rowspan) whose pixel extent the
+/// widget can actually draw, capped by @p max_colspan / @p max_rowspan.
+///
+/// Both the resize clamp and the load path ask this, so the rule lives once:
+/// two hand-written copies would agree by convention until they silently did
+/// not. `fits` must be MONOTONIC (see PanelWidget::fits_at), which is what
+/// makes the first accepting size the nearest one and bounds the walk.
+///
+/// @param fits  answers whether the widget draws inside a w x h pixel box
+std::pair<int, int> grow_span_to_fit(const std::function<bool(int, int)>& fits, int colspan,
+                                     int rowspan, int max_colspan, int max_rowspan, int step_c,
+                                     int step_r, const CellMetrics& metrics);
 
 /// Number of tracks in an LVGL grid descriptor array.
 ///

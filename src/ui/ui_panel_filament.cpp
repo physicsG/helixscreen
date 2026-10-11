@@ -10,7 +10,6 @@
 #include "ui_event_safety.h"
 #include "ui_icon.h"
 #include "ui_manual_pull_prompt.h"
-#include "ui_nav_manager.h"
 #include "ui_overlay_temp_graph.h"
 #include "ui_panel_ams.h"
 #include "ui_panel_ams_overview.h"
@@ -24,16 +23,20 @@
 #include "app_constants.h"
 #include "app_globals.h"
 #include "config.h"
+#include "display_numbering.h"
 #include "filament_database.h"
 #include "filament_op_dispatch.h"
+#include "filament_op_execute.h"
 #include "filament_op_router.h"
 #include "filament_op_slot_resolver.h"
 #include "filament_sensor_manager.h"
+#include "gcode_unknown_command.h"
 #include "i_moonraker_api.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "macro_executor.h"
 #include "macro_param_cache.h"
 #include "material_settings_manager.h"
+#include "observe_language.h"
 #include "observer_factory.h"
 #include "post_op_cooldown_manager.h"
 #include "preset_materials.h"
@@ -44,9 +47,11 @@
 #include "static_panel_registry.h"
 #include "temperature_controller.h"
 #include "temperature_service.h"
+#include "text_io.h"
 #include "theme_manager.h"
 #include "tool_state.h"
 #include "toolhead_homing.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
@@ -83,8 +88,7 @@ void reset_to_defaults() {
 }
 } // namespace helix::filament_presets
 
-using helix::ui::observe_int_async;
-using helix::ui::observe_int_sync;
+using helix::ui::observe;
 using helix::ui::temperature::deci_to_degrees;
 using helix::ui::temperature::format_target_or_off;
 using helix::ui::temperature::get_heating_state_color;
@@ -95,7 +99,6 @@ using helix::ui::temperature::get_heating_state_color;
 using helix::ui::filament_load_fallback_gcode;
 using helix::ui::filament_purge_fallback_gcode;
 using helix::ui::filament_unload_fallback_gcode;
-using helix::ui::get_filament_param_modal;
 
 // ============================================================================
 // CONSTRUCTOR
@@ -109,8 +112,7 @@ FilamentPanel::FilamentPanel(PrinterState& printer_state, IMoonrakerAPI* api)
     std::snprintf(status_buf_, sizeof(status_buf_), "%s", lv_tr("Select material to begin"));
     std::snprintf(warning_temps_buf_, sizeof(warning_temps_buf_),
                   lv_tr("Current: %d°C | Target: %d°C"), nozzle_current_, nozzle_target_);
-    std::snprintf(safety_warning_text_buf_, sizeof(safety_warning_text_buf_),
-                  lv_tr("Heat to at least %d°C for filament operations"), min_extrude_temp_);
+    update_safety_warning_text();
     format_target_or_off(0, material_nozzle_buf_, sizeof(material_nozzle_buf_));
     format_target_or_off(0, material_bed_buf_, sizeof(material_bed_buf_));
     std::snprintf(nozzle_current_buf_, sizeof(nozzle_current_buf_), "%d°C", nozzle_current_);
@@ -120,57 +122,95 @@ FilamentPanel::FilamentPanel(PrinterState& printer_state, IMoonrakerAPI* api)
 
     // Register XML event callbacks
     register_xml_callbacks({
-        {"filament_manage_slots_cb", on_manage_slots_clicked},
-        {"on_filament_load", on_load_clicked},
-        {"on_filament_unload", on_unload_clicked},
-        {"on_filament_extrude", on_extrude_clicked},
-        {"on_filament_purge", on_purge_clicked},
-        {"on_filament_retract", on_retract_clicked},
+        {"filament_manage_slots_cb",
+         [](lv_event_t*) {
+             spdlog::info("[FilamentPanel] Opening AMS panel overlay");
+             navigate_to_ams_panel();
+         }},
+        {"on_filament_load", [](lv_event_t*) { get_global_filament_panel().handle_load_button(); }},
+        {"on_filament_unload",
+         [](lv_event_t*) { get_global_filament_panel().handle_unload_button(); }},
+        {"on_filament_extrude",
+         [](lv_event_t*) { get_global_filament_panel().handle_extrude_button(); }},
+        {"on_filament_purge",
+         [](lv_event_t*) { get_global_filament_panel().handle_purge_button(); }},
+        {"on_filament_retract",
+         [](lv_event_t*) { get_global_filament_panel().handle_retract_button(); }},
         // Material preset buttons
-        {"on_filament_preset_pla", on_preset_pla_clicked},
-        {"on_filament_preset_petg", on_preset_petg_clicked},
-        {"on_filament_preset_abs", on_preset_abs_clicked},
-        {"on_filament_preset_tpu", on_preset_tpu_clicked},
-        {"on_filament_preset_spool", on_preset_spool_clicked},
+        {"on_filament_preset_pla",
+         [](lv_event_t*) { get_global_filament_panel().handle_preset_button(0); }},
+        {"on_filament_preset_petg",
+         [](lv_event_t*) { get_global_filament_panel().handle_preset_button(1); }},
+        {"on_filament_preset_abs",
+         [](lv_event_t*) { get_global_filament_panel().handle_preset_button(2); }},
+        {"on_filament_preset_tpu",
+         [](lv_event_t*) { get_global_filament_panel().handle_preset_button(3); }},
+        {"on_filament_preset_spool",
+         [](lv_event_t*) { get_global_filament_panel().handle_spool_preset_button(); }},
         // Material preset long-press (opens material picker)
-        {"on_filament_preset_pla_hold", on_preset_pla_hold},
-        {"on_filament_preset_petg_hold", on_preset_petg_hold},
-        {"on_filament_preset_abs_hold", on_preset_abs_hold},
-        {"on_filament_preset_tpu_hold", on_preset_tpu_hold},
+        {"on_filament_preset_pla_hold",
+         [](lv_event_t*) { get_global_filament_panel().handle_preset_longpress(0); }},
+        {"on_filament_preset_petg_hold",
+         [](lv_event_t*) { get_global_filament_panel().handle_preset_longpress(1); }},
+        {"on_filament_preset_abs_hold",
+         [](lv_event_t*) { get_global_filament_panel().handle_preset_longpress(2); }},
+        {"on_filament_preset_tpu_hold",
+         [](lv_event_t*) { get_global_filament_panel().handle_preset_longpress(3); }},
         // Temperature tap targets
-        {"on_filament_nozzle_temp_tap", on_nozzle_temp_tap_clicked},
-        {"on_filament_bed_temp_tap", on_bed_temp_tap_clicked},
-        {"on_filament_nozzle_target_tap", on_nozzle_target_tap_clicked},
-        {"on_filament_bed_target_tap", on_bed_target_tap_clicked},
-        {"on_filament_chamber_target_tap", on_filament_chamber_target_tap},
+        {"on_filament_nozzle_target_tap",
+         [](lv_event_t*) { get_global_filament_panel().handle_nozzle_temp_tap(); }},
+        {"on_filament_bed_target_tap",
+         [](lv_event_t*) { get_global_filament_panel().handle_bed_temp_tap(); }},
+        {"on_filament_chamber_target_tap",
+         [](lv_event_t*) { get_global_filament_panel().handle_chamber_temp_tap(); }},
         // Extrude length buttons
-        {"on_filament_extrude_length_5mm", on_extrude_length_5mm_clicked},
-        {"on_filament_extrude_length_10mm", on_extrude_length_10mm_clicked},
-        {"on_filament_extrude_length_25mm", on_extrude_length_25mm_clicked},
+        {"on_filament_extrude_length_5mm",
+         [](lv_event_t*) { get_global_filament_panel().handle_extrude_length_select(5); }},
+        {"on_filament_extrude_length_10mm",
+         [](lv_event_t*) { get_global_filament_panel().handle_extrude_length_select(10); }},
+        {"on_filament_extrude_length_25mm",
+         [](lv_event_t*) { get_global_filament_panel().handle_extrude_length_select(25); }},
         // Cooldown button
-        {"on_filament_cooldown", on_cooldown_clicked},
+        {"on_filament_cooldown",
+         [](lv_event_t*) { get_global_filament_panel().handle_cooldown(); }},
         // Extruder selector dropdown
-        {"on_extruder_dropdown_changed", on_extruder_dropdown_changed},
+        {"on_extruder_dropdown_changed",
+         [](lv_event_t*) { get_global_filament_panel().handle_extruder_changed(); }},
         // External spool edit
-        {"on_external_spool_edit", on_external_spool_edit_clicked},
+        {"on_external_spool_edit",
+         [](lv_event_t*) { get_global_filament_panel().show_external_spool_edit_modal(); }},
+        // Strip graph button (portrait, when the graph card is a spacer)
+        {"filament_temp_graph_cb",
+         [](lv_event_t*) { get_global_filament_panel().open_temp_graph_overlay(); }},
     });
 
-    // Subscribe to PrinterState temperatures using bundle pattern
-    // NOTE: Observers must defer UI updates via ui_queue_update() to avoid render-phase assertions
-    // [L029]
-    temp_observers_.setup_async(
+    // Subscribe to PrinterState temperatures using bundle pattern. Each handler caches its value
+    // inline and defers the UI update, which must not land in the render phase [L029].
+    temp_observers_.setup_sync(
         this, printer_state_,
-        [](FilamentPanel* self, int raw) { self->nozzle_current_ = deci_to_degrees(raw); },
-        [](FilamentPanel* self, int raw) { self->nozzle_target_ = deci_to_degrees(raw); },
-        [](FilamentPanel* self, int raw) { self->bed_current_ = deci_to_degrees(raw); },
-        [](FilamentPanel* self, int raw) { self->bed_target_ = deci_to_degrees(raw); },
-        [](FilamentPanel* self) { self->update_all_temps(); });
+        [](FilamentPanel* self, int raw) {
+            self->nozzle_current_ = deci_to_degrees(raw);
+            self->defer_temps_update();
+        },
+        [](FilamentPanel* self, int raw) {
+            self->nozzle_target_ = deci_to_degrees(raw);
+            self->defer_temps_update();
+        },
+        [](FilamentPanel* self, int raw) {
+            self->bed_current_ = deci_to_degrees(raw);
+            self->defer_temps_update();
+        },
+        [](FilamentPanel* self, int raw) {
+            self->bed_target_ = deci_to_degrees(raw);
+            self->defer_temps_update();
+        },
+        helix::ui::Dispatch::Immediate);
 
     // Subscribe to chamber temperature (optional - only if printer has chamber)
     // Note: We check are_subjects_initialized() because observers may fire immediately
     // upon registration, but subjects aren't initialized until init_subjects() is called.
-    chamber_temp_observer_ = observe_int_sync<FilamentPanel>(
-        printer_state_.get_chamber_temp_subject(), this,
+    chamber_temp_observer_ = observe<int>(
+        printer_state_.temperature_state().get_chamber_temp_subject(), this,
         [](FilamentPanel* self, int raw) {
             self->chamber_current_ = deci_to_degrees(raw);
             if (self->are_subjects_initialized()) {
@@ -179,8 +219,8 @@ FilamentPanel::FilamentPanel(PrinterState& printer_state, IMoonrakerAPI* api)
             }
         },
         printer_state_.get_subjects_lifetime());
-    chamber_target_observer_ = observe_int_sync<FilamentPanel>(
-        printer_state_.get_chamber_target_subject(), this,
+    chamber_target_observer_ = observe<int>(
+        printer_state_.temperature_state().get_chamber_target_subject(), this,
         [](FilamentPanel* self, int raw) {
             self->chamber_target_ = raw; // Store decidegrees (matches PrinterState format)
             if (self->are_subjects_initialized()) {
@@ -190,18 +230,16 @@ FilamentPanel::FilamentPanel(PrinterState& printer_state, IMoonrakerAPI* api)
         printer_state_.get_subjects_lifetime());
 
     // Subscribe to active tool changes for dynamic nozzle label + dropdown sync.
-    // Also rebind TemperatureService to the new tool's extruder — otherwise
-    // the mini graph stays glued to whatever extruder was active when
-    // TemperatureService::setup_panel last ran (typically T0, since the
-    // temperature overlay panel is rarely created on startup). #9 — without
-    // this re-bind the Snapmaker U1 user sees T0's cold-baseline plot while
-    // the actively-heating T1 ramps invisibly.
-    active_tool_observer_ = observe_int_sync<FilamentPanel>(
+    // TemperatureService binds the mini graph to one extruder, so rebind it
+    // when the active tool changes, or the graph plots an idle extruder while
+    // the active one heats (#9).
+    active_tool_observer_ = observe<int>(
         helix::ToolState::instance().get_active_tool_subject(), this,
         [](FilamentPanel* self, int tool_idx) {
             self->update_nozzle_label();
             if (self->extruder_dropdown_ && tool_idx >= 0) {
                 lv_dropdown_set_selected(self->extruder_dropdown_, static_cast<uint32_t>(tool_idx));
+                self->sync_tool_dropdown_text();
             }
             if (self->temp_control_panel_) {
                 const auto* tool = helix::ToolState::instance().active_tool();
@@ -215,14 +253,25 @@ FilamentPanel::FilamentPanel(PrinterState& printer_state, IMoonrakerAPI* api)
         helix::ToolState::instance().get_subjects_lifetime());
     update_nozzle_label();
 
+    // The status line, nozzle label and warnings are formatted here with
+    // lv_tr(); a new language formats them again. The tool caption follows the
+    // extruder dropdown, which repopulates when ToolState relabels its tools.
+    language_observer_ = helix::ui::observe_language_change(this, [](FilamentPanel* self) {
+        self->last_status_branch_ = StatusBranch::None;
+        self->update_status();
+        self->update_nozzle_label();
+        self->update_warning_text();
+        self->update_safety_warning_text();
+    });
+
     // Re-evaluate Load/Unload/Purge gating whenever live AMS load state changes
     // (Task 5): the aggregate filament_loaded flag and the active-slot index.
     // Both are static AmsState subjects — no SubjectLifetime token needed.
-    ams_loaded_observer_ = observe_int_sync<FilamentPanel>(
+    ams_loaded_observer_ = observe<int>(
         AmsState::instance().get_filament_loaded_subject(), this,
         [](FilamentPanel* self, int) { self->update_filament_op_buttons(); },
         AmsState::instance().get_subjects_lifetime());
-    ams_current_slot_observer_ = observe_int_sync<FilamentPanel>(
+    ams_current_slot_observer_ = observe<int>(
         AmsState::instance().get_current_slot_subject(), this,
         [](FilamentPanel* self, int) { self->update_filament_op_buttons(); },
         AmsState::instance().get_subjects_lifetime());
@@ -238,10 +287,10 @@ FilamentPanel::FilamentPanel(PrinterState& printer_state, IMoonrakerAPI* api)
     // refuses during a host-side pre-print block. The lifetime token is mandatory —
     // PrinterState is a separate singleton whose subjects tests tear down while
     // this guard is alive (#705).
-    print_active_observer_ = observe_int_sync<FilamentPanel>(
-        printer_state_.get_print_lifecycle_subject(), this,
+    print_active_observer_ = observe<int>(
+        printer_state_.print_state().get_print_lifecycle_subject(), this,
         [](FilamentPanel* self, int) { self->update_filament_op_buttons(); },
-        printer_state_.get_static_print_subjects_lifetime());
+        printer_state_.print_state().get_static_subjects_lifetime());
 
     // Note: Chamber temperature display is initialized by observer callbacks
     // and refresh_all_displays() on panel activation.
@@ -250,6 +299,10 @@ FilamentPanel::FilamentPanel(PrinterState& printer_state, IMoonrakerAPI* api)
 }
 
 FilamentPanel::~FilamentPanel() {
+    // The column can outlive this panel; its layout hook must not.
+    if (lv_obj_t* column = portrait_column_wired_.get()) {
+        lv_obj_remove_event_cb_with_user_data(column, on_portrait_column_layout, this);
+    }
     // Also cancels op_revert_timer_ — see deinit_subjects(), which does it first
     // so the timer can't write the subjects it targets after they are gone.
     deinit_subjects();
@@ -301,6 +354,10 @@ void FilamentPanel::init_subjects() {
         UI_MANAGED_SUBJECT_STRING(nozzle_label_subject_, nozzle_label_buf_, lv_tr("Nozzle"),
                                   "filament_nozzle_label", subjects_);
 
+        // Tool selector caption (backend noun: "Tool" / "Toolhead")
+        UI_MANAGED_SUBJECT_STRING(tool_noun_subject_, tool_noun_buf_, lv_tr("Tool"),
+                                  "filament_tool_noun", subjects_);
+
         // Left card temperature subjects (current and target for nozzle/bed)
         UI_MANAGED_SUBJECT_STRING(nozzle_current_subject_, nozzle_current_buf_, nozzle_current_buf_,
                                   "filament_nozzle_current", subjects_);
@@ -326,6 +383,10 @@ void FilamentPanel::init_subjects() {
 
         // Cooldown button visibility (1 when nozzle or bed target > 0)
         UI_MANAGED_SUBJECT_INT(nozzle_heating_subject_, 0, "filament_nozzle_heating", subjects_);
+
+        // Portrait graph spacer state; 1 = the graph card draws nothing and the
+        // strip button replaces it. The XML bindings consume this.
+        UI_MANAGED_SUBJECT_INT(graph_spacer_subject_, 0, "filament_graph_spacer", subjects_);
 
         // Extrude length button active states (boolean: 0=inactive, 1=active)
         // Using separate subjects because bind_style doesn't work well with multiple ref_values
@@ -371,10 +432,7 @@ void FilamentPanel::deinit_subjects() {
     if (pending_preheat_op_ != PreheatOp::NONE) {
         pending_preheat_op_ = PreheatOp::NONE;
         pending_preheat_target_ = 0;
-        // Same leak this abandonment path guards against in cancel_pending_preheat().
-        if (AmsBackend* backend = AmsState::instance().get_backend()) {
-            backend->clear_home_preconfirmed();
-        }
+        home_before_load_macro_ = false;
         // Don't schedule delayed cooldown during teardown — just cool down immediately
         if (prior_nozzle_target_ == 0) {
             if (auto* c = get_temperature_controller()) {
@@ -384,6 +442,7 @@ void FilamentPanel::deinit_subjects() {
         prior_nozzle_target_ = 0;
     }
     external_spool_observer_.reset();
+    orientation_observer_.reset();
     ams_loaded_observer_.reset();
     ams_current_slot_observer_.reset();
     // Watches PrinterState's print_state_enum, a subject tests deinit between
@@ -405,69 +464,15 @@ void FilamentPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
     // Filament macros now resolved via StandardMacros singleton (auto-detected or user-configured)
     spdlog::debug("[{}] Setting up (events handled declaratively via XML)", get_name());
 
-    // Find preset buttons (for visual state updates)
-    const char* preset_names[] = {"preset_pla", "preset_petg", "preset_abs", "preset_tpu"};
-    for (int i = 0; i < 4; i++) {
-        preset_buttons_[i] = lv_obj_find_by_name(panel_, preset_names[i]);
-    }
-
-    // Action buttons (btn_load, btn_unload, btn_purge) - disabled state managed by XML bindings
-
-    // Find safety warning card
-    safety_warning_ = lv_obj_find_by_name(panel_, "safety_warning");
-
-    // Find status icon for dynamic updates
-    status_icon_ = lv_obj_find_by_name(panel_, "status_icon");
-
-    // These are fresh widgets with no status on them, and this panel instance
-    // outlives its widget tree (hot reload, panel rebuild). Forget which arm
-    // update_status() last rendered so the constant-text arms repaint instead of
-    // early-returning against the tree that is already gone.
-    last_status_branch_ = StatusBranch::None;
-
-    // Find temperature labels for color updates
-    nozzle_current_label_ = lv_obj_find_by_name(panel_, "nozzle_current_temp");
-    bed_current_label_ = lv_obj_find_by_name(panel_, "bed_current_temp");
-    chamber_current_label_ = lv_obj_find_by_name(panel_, "chamber_current_temp");
-
-    // Find temp graph for dynamic sizing when bottom card changes
-    temp_graph_card_ = lv_obj_find_by_name(panel_, "temp_graph_card");
-
-    // Find spool card widgets (serves both Multi-Filament and External Spool modes)
-    spool_card_ = lv_obj_find_by_name(panel_, "spool_card");
-    spool_card_header_row_ = lv_obj_find_by_name(panel_, "spool_card_header_row");
-    extruder_selector_group_ = lv_obj_find_by_name(panel_, "extruder_selector_group");
-    extruder_dropdown_ = lv_obj_find_by_name(panel_, "extruder_dropdown");
-    btn_manage_slots_ = lv_obj_find_by_name(panel_, "btn_manage_slots");
-    ams_manage_row_ = lv_obj_find_by_name(panel_, "ams_manage_row");
-
-    // Find external spool row widgets
-    external_spool_row_ = lv_obj_find_by_name(panel_, "external_spool_row");
-    external_spool_container_ = lv_obj_find_by_name(panel_, "external_spool_container");
-    external_spool_material_label_ = lv_obj_find_by_name(panel_, "external_spool_material_label");
-    external_spool_color_label_ = lv_obj_find_by_name(panel_, "external_spool_color_label");
-
-    // Find spool preset widgets
-    spool_preset_row_ = lv_obj_find_by_name(panel_, "spool_preset_row");
-    spool_preset_button_ = lv_obj_find_by_name(panel_, "preset_spool");
-    spool_preset_label_ = lv_obj_find_by_name(panel_, "spool_preset_label");
-    spool_preset_temps_ = lv_obj_find_by_name(panel_, "spool_preset_temps");
-
-    // Setup external spool display (creates canvas, wires observer)
-    setup_external_spool_display();
-
-    // Setup spool preset button (show if active material doesn't match standard presets)
-    update_spool_preset();
-
-    // Populate extruder dropdown and set card visibility
-    populate_extruder_dropdown();
-    update_multi_filament_card_visibility();
-
-    // Seed Load/Unload/Purge gating from current live load state (Task 5).
-    update_filament_op_buttons();
+    // A fresh tree arrives with unknown addresses; drop the rebind guards so
+    // bind_widgets() recreates the canvas and the chart even if the allocator
+    // hands a new widget a freed one's address.
+    external_spool_container_wired_ = nullptr;
+    temp_graph_container_wired_ = nullptr;
+    portrait_column_wired_ = nullptr;
 
     // Rebuild dropdown if tool list changes
-    tools_version_observer_ = observe_int_sync<FilamentPanel>(
+    tools_version_observer_ = observe<int>(
         helix::ToolState::instance().get_tools_version_subject(), this,
         [](FilamentPanel* self, int) {
             self->populate_extruder_dropdown();
@@ -479,7 +484,7 @@ void FilamentPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
     // sizing is owned by apply_left_column_sizing() (called from
     // update_multi_filament_card_visibility). At MICRO/TINY with no AMS the
     // spool card has almost no content, so the graph becomes the flex filler.
-    ams_type_observer_ = observe_int_sync<FilamentPanel>(
+    ams_type_observer_ = observe<int>(
         AmsState::instance().get_ams_type_subject(), this,
         [](FilamentPanel* self, int /*ams_type*/) {
             self->update_multi_filament_card_visibility();
@@ -490,7 +495,7 @@ void FilamentPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
     // means the backend finished; ERROR means it gave up — AFC's stuck-action
     // backstop resolves to ERROR and nothing else, so accepting only IDLE left the
     // guard armed and the button spinning until the 120s timeout (#1183).
-    ams_action_observer_ = observe_int_sync<FilamentPanel>(
+    ams_action_observer_ = observe<int>(
         AmsState::instance().get_ams_action_subject(), this,
         [](FilamentPanel* self, int action) {
             const bool idle = (action == static_cast<int>(AmsAction::IDLE));
@@ -548,6 +553,92 @@ void FilamentPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
     // Populate preset button temperature + name labels from filament database
     helix::presets::refresh_subjects();
 
+    // Bind to this tree — widget pointers, canvas, chart, imperative state —
+    // and keep the binding alive across the orientation <if>'s in-place
+    // rebuilds (SDL dev-window rotations; real hardware picks one orientation
+    // at startup).
+    bind_widgets();
+    setup_orientation_rewire_observer();
+
+    // AMS mini status widget is now created declaratively via XML <ams_mini_status/>
+
+    spdlog::debug("[{}] Setup complete!", get_name());
+}
+
+void FilamentPanel::bind_widgets() {
+    if (!panel_)
+        return;
+
+    // Find preset buttons (for visual state updates)
+    const char* preset_names[] = {"preset_pla", "preset_petg", "preset_abs", "preset_tpu"};
+    for (int i = 0; i < 4; i++) {
+        preset_buttons_[i] = lv_obj_find_by_name(panel_, preset_names[i]);
+    }
+
+    // Action buttons (btn_load, btn_unload, btn_purge) - disabled state managed by XML bindings
+
+    // Find safety warning card
+    safety_warning_ = helix::ui::find_required(panel_, "safety_warning", get_name());
+
+    // Find status icon for dynamic updates
+    status_icon_ = lv_obj_find_by_name(panel_, "status_icon");
+
+    // These are fresh widgets with no status on them, and this panel instance
+    // outlives its widget tree (hot reload, panel rebuild, orientation flip).
+    // Forget which arm update_status() last rendered so the constant-text arms
+    // repaint instead of early-returning against the tree that is already gone.
+    last_status_branch_ = StatusBranch::None;
+
+    // Find temperature labels for color updates. The portrait chips carry the
+    // same names as the landscape rows, so these resolve in either branch.
+    nozzle_current_label_ = lv_obj_find_by_name(panel_, "nozzle_current_temp");
+    bed_current_label_ = lv_obj_find_by_name(panel_, "bed_current_temp");
+    chamber_current_label_ = lv_obj_find_by_name(panel_, "chamber_current_temp");
+
+    // Find temp graph for dynamic sizing when bottom card changes
+    temp_graph_card_ = lv_obj_find_by_name(panel_, "temp_graph_card");
+    // Fresh tree: the graph starts shown, so the spacer bookkeeping does too.
+    portrait_graph_spacer_ = false;
+    lv_subject_set_int(&graph_spacer_subject_, 0);
+    btn_temp_graph_ = helix::ui::find_required(panel_, "btn_temp_graph", get_name());
+
+    // Find spool card widgets (serves both Multi-Filament and External Spool modes)
+    spool_card_ = helix::ui::find_required(panel_, "spool_card", get_name());
+    spool_card_header_row_ = helix::ui::find_required(panel_, "spool_card_header_row", get_name());
+    extruder_selector_group_ =
+        helix::ui::find_required(panel_, "extruder_selector_group", get_name());
+    extruder_dropdown_ = helix::ui::find_required(panel_, "extruder_dropdown", get_name());
+    btn_manage_slots_ = helix::ui::find_required(panel_, "btn_manage_slots", get_name());
+    ams_manage_row_ = helix::ui::find_required(panel_, "ams_manage_row", get_name());
+
+    // Find external spool row widgets
+    external_spool_row_ = helix::ui::find_required(panel_, "external_spool_row", get_name());
+    external_spool_container_ =
+        helix::ui::find_required(panel_, "external_spool_container", get_name());
+    external_spool_material_label_ =
+        helix::ui::find_required(panel_, "external_spool_material_label", get_name());
+    external_spool_color_label_ =
+        helix::ui::find_required(panel_, "external_spool_color_label", get_name());
+
+    // Find spool preset widgets
+    spool_preset_row_ = helix::ui::find_required(panel_, "spool_preset_row", get_name());
+    spool_preset_button_ = helix::ui::find_required(panel_, "preset_spool", get_name());
+    spool_preset_label_ = helix::ui::find_required(panel_, "spool_preset_label", get_name());
+    spool_preset_temps_ = helix::ui::find_required(panel_, "spool_preset_temps", get_name());
+
+    // Setup external spool display (creates canvas, wires observer)
+    setup_external_spool_display();
+
+    // Setup spool preset button (show if active material doesn't match standard presets)
+    update_spool_preset();
+
+    // Populate extruder dropdown and set card visibility
+    populate_extruder_dropdown();
+    update_multi_filament_card_visibility();
+
+    // Seed Load/Unload/Purge gating from current live load state (Task 5).
+    update_filament_op_buttons();
+
     // Initialize visual state
     update_preset_buttons_visual();
     update_temp_display();
@@ -561,35 +652,115 @@ void FilamentPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
     // Trigger initial extrude length selection (notifies bind_style observers)
     handle_extrude_length_select(extrude_length_);
 
-    // Setup combined temperature graph if TemperatureService is available
+    setup_temp_graph();
+    setup_portrait_graph_fit();
+}
+
+void FilamentPanel::setup_portrait_graph_fit() {
+    lv_obj_t* column = lv_obj_find_by_name(panel_, "portrait_column");
+    if (!column || column == portrait_column_wired_)
+        return;
+    portrait_column_wired_ = column;
+    lv_obj_add_event_cb(column, on_portrait_column_layout, LV_EVENT_LAYOUT_CHANGED, this);
+}
+
+void FilamentPanel::on_portrait_column_layout(lv_event_t* e) {
+    auto* self = static_cast<FilamentPanel*>(lv_event_get_user_data(e));
+    self->fit_portrait_graph(static_cast<lv_obj_t*>(lv_event_get_current_target(e)));
+}
+
+void FilamentPanel::fit_portrait_graph(lv_obj_t* column) {
+    if (!temp_graph_card_ || lv_obj_get_parent(temp_graph_card_) != column)
+        return;
+
+    const int32_t gap = lv_obj_get_style_pad_row(column, LV_PART_MAIN);
+    int32_t used = 0;
+    const uint32_t count = lv_obj_get_child_count(column);
+    for (uint32_t i = 0; i < count; i++) {
+        lv_obj_t* child = lv_obj_get_child(column, static_cast<int32_t>(i));
+        if (child == temp_graph_card_ || lv_obj_has_flag(child, LV_OBJ_FLAG_HIDDEN))
+            continue;
+        // Each visible sibling brings its own height plus one gap to the graph's side.
+        used += lv_obj_get_height(child) + gap;
+    }
+    const int32_t remainder = lv_obj_get_content_height(column) - used;
+    const bool fits = remainder >= kPortraitGraphMinHeight;
+    // Toggle only on change: the spacer state touches nothing outside the
+    // card, so applying it cannot re-fire this callback in a loop.
+    if (fits != portrait_graph_spacer_)
+        return;
+    set_portrait_graph_spacer(!fits);
+    spdlog::debug("[{}] Portrait graph {} (remainder {}px)", get_name(),
+                  fits ? "shown" : "replaced by spacer", remainder);
+}
+
+void FilamentPanel::set_portrait_graph_spacer(bool spacer) {
+    portrait_graph_spacer_ = spacer;
+    // The card keeps its flex_grow slot either way — the XML bindings on the
+    // card, its container and the strip button swap only what it draws and
+    // accepts, so the column's other rows never move.
+    lv_subject_set_int(&graph_spacer_subject_, spacer ? 1 : 0);
+}
+
+void FilamentPanel::setup_temp_graph() {
+    // Setup combined temperature graph if TemperatureService is available.
+    // Guarded on the container so an orientation flip rebinds once per tree,
+    // never twice into the same one.
+    lv_obj_t* graph_container = lv_obj_find_by_name(panel_, "temp_graph_container");
+    if (!graph_container || graph_container == temp_graph_container_wired_)
+        return;
+    temp_graph_container_wired_ = graph_container;
+
     if (temp_control_panel_) {
-        lv_obj_t* graph_container = lv_obj_find_by_name(panel_, "temp_graph_container");
-        if (graph_container) {
-            temp_control_panel_->setup_mini_combined_graph(graph_container);
-            spdlog::debug("[{}] Temperature graph initialized", get_name());
-        } else {
-            spdlog::warn("[{}] temp_graph_container not found in XML", get_name());
-        }
+        temp_control_panel_->setup_mini_combined_graph(graph_container);
+        spdlog::debug("[{}] Temperature graph initialized", get_name());
     }
 
-    // Make the graph card clickable to open the unified temp graph overlay
+    // Click-to-open overlay: the CLICKABLE flag itself comes from the XML
+    // (bind_flag_if_eq on filament_graph_spacer); only the handler is wired
+    // here, once per tree.
     if (temp_graph_card_) {
-        lv_obj_add_flag(temp_graph_card_, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(
             temp_graph_card_,
             [](lv_event_t* e) {
                 auto* self = static_cast<FilamentPanel*>(lv_event_get_user_data(e));
                 if (self) {
-                    get_global_temp_graph_overlay().open(TempGraphOverlay::Mode::GraphOnly,
-                                                         self->parent_screen_);
+                    self->open_temp_graph_overlay();
                 }
             },
             LV_EVENT_CLICKED, this);
     }
+}
 
-    // AMS mini status widget is now created declaratively via XML <ams_mini_status/>
+void FilamentPanel::open_temp_graph_overlay() {
+    get_global_temp_graph_overlay().open(TempGraphOverlay::Mode::GraphOnly, parent_screen_);
+}
 
-    spdlog::debug("[{}] Setup complete!", get_name());
+void FilamentPanel::setup_orientation_rewire_observer() {
+    lv_subject_t* portrait_subject = lv_xml_get_subject(nullptr, "ui_is_portrait");
+    if (!portrait_subject) {
+        spdlog::warn("[{}] ui_is_portrait subject not found; an orientation flip would leave "
+                     "widget pointers on the condemned branch",
+                     get_name());
+        return;
+    }
+
+    // Dispatch::Immediate, deliberately not the usual deferred default:
+    // filament_panel.xml's <if cond="ui_is_portrait eq 1"> is ALSO bound to
+    // this subject and its rebuild (xml_frag_rebuild) runs synchronously
+    // inside lv_subject_set_int(). LVGL notifies a subject's observers in
+    // registration order, and the <if>'s observer was added when the panel's
+    // XML tree was created — strictly before setup() registered this one — so
+    // the rebuild always finishes before this callback re-finds the fresh
+    // widgets. A deferred observer would run a tick later, after updates
+    // queued against the panel had already dereferenced the condemned branch.
+    // The immediate registration fire is harmless: bind_widgets() is
+    // idempotent (creation steps compare their container), so re-running it
+    // against the tree setup() just bound creates nothing twice.
+    orientation_observer_ = helix::ui::observe<int>(
+        portrait_subject, this,
+        [](FilamentPanel* self, int /*is_portrait*/) { self->bind_widgets(); },
+        subject_never_freed(), helix::ui::Dispatch::Immediate);
 }
 
 // ============================================================================
@@ -607,8 +778,8 @@ void FilamentPanel::update_status_icon(const char* icon_name, const char* varian
         return;
 
     // Update icon imperatively using ui_icon API
-    ui_icon_set_source(status_icon_, icon_name);
-    ui_icon_set_variant(status_icon_, variant);
+    helix::ui::icon::set_source(status_icon_, icon_name);
+    helix::ui::icon::set_variant(status_icon_, variant);
 }
 
 void FilamentPanel::update_status() {
@@ -677,14 +848,22 @@ void FilamentPanel::update_warning_text() {
     lv_subject_copy_string(&warning_temps_subject_, warning_temps_buf_);
 }
 
+void FilamentPanel::update_safety_warning_text() {
+    std::snprintf(safety_warning_text_buf_, sizeof(safety_warning_text_buf_),
+                  lv_tr("Heat to at least %d°C for filament operations"), min_extrude_temp_);
+    if (subjects_initialized_) {
+        lv_subject_copy_string(&safety_warning_text_subject_, safety_warning_text_buf_);
+    }
+}
+
 void FilamentPanel::update_safety_state() {
     // Route through is_extrusion_allowed() so the cold-extrude override (#978)
     // both enables the buttons and hides the "heat first" warning.
     bool allowed = is_extrusion_allowed();
 
-    // Hide the safety warning (and enable buttons) if we have a known spool material,
-    // since the load/unload handlers will auto-preheat to the correct temperature.
-    bool has_known_spool = has_active_spool_material();
+    // Hide the safety warning (and enable buttons) when the slot the op acts on
+    // names a material, since the handlers preheat for it.
+    bool has_known_spool = has_known_op_material();
     bool show_warning = !allowed && !has_known_spool;
 
     lv_subject_set_int(&extrusion_allowed_subject_, allowed ? 1 : 0);
@@ -759,6 +938,33 @@ void FilamentPanel::update_nozzle_label() {
     }
 }
 
+void FilamentPanel::update_tool_noun() {
+    auto noun = helix::ui::noun_text(helix::ui::active_tool_noun());
+    std::snprintf(tool_noun_buf_, sizeof(tool_noun_buf_), "%s", noun.c_str());
+    if (subjects_initialized_) {
+        lv_subject_copy_string(&tool_noun_subject_, tool_noun_buf_);
+    }
+}
+
+void FilamentPanel::sync_tool_dropdown_text() {
+    // The closed dropdown shows the short label, not the full option string the
+    // open list carries; every selection change routes through here so the two
+    // can never disagree.
+    if (!extruder_dropdown_)
+        return;
+    const auto& tools = helix::ToolState::instance().tools();
+    const int selected = static_cast<int>(lv_dropdown_get_selected(extruder_dropdown_));
+    std::string label;
+    if (selected >= 0 && selected < static_cast<int>(tools.size())) {
+        label = helix::ui::tool_short_label(tools[selected].name, selected);
+    }
+    lv_dropdown_set_text(extruder_dropdown_, label.c_str());
+}
+
+void FilamentPanel::defer_temps_update() {
+    object_lifetime_.defer("FilamentPanel::temps", [this]() { update_all_temps(); });
+}
+
 void FilamentPanel::update_all_temps() {
     // Unified update handler for temperature observer bundle.
     // Called on UI thread after any temperature value changes.
@@ -818,31 +1024,39 @@ void FilamentPanel::handle_preset_button(int material_id) {
         }
     }
 
-    // Send temperature commands to printer (nozzle, bed, and chamber if applicable)
+    // An explicit preheat applies the selected material, not a filament-swap
+    // temperature floor. A configured heating macro owns all heater commands.
     if (selected_material_ == material_id) {
-        if (auto* c = get_temperature_controller()) {
-            // Switching material: hold the previous filament's temp if hotter so
-            // the old material still purges cleanly (keep_previous_hot).
-            c->set_target(helix::HeaterType::Nozzle, static_cast<double>(nozzle_target_),
-                          {.toast = true,
-                           .keep_previous_hot = true,
-                           .on_success = [target = nozzle_target_]() {
-                               NOTIFY_SUCCESS(lv_tr("Nozzle target set to {}°C"), target);
-                           }});
-            c->set_target(helix::HeaterType::Bed, static_cast<double>(bed_target_),
-                          {.toast = true, .on_success = [target = bed_target_]() {
-                               NOTIFY_SUCCESS(lv_tr("Bed target set to {}°C"), target);
-                           }});
+        const auto& hw = printer_state_.get_discovery();
+        execute_material_preheat(
+            api_,
+            plan_material_preheat(
+                helix::MaterialSettingsManager::instance().find_override_for_material(
+                    helix::presets::name(material_id)),
+                hw),
+            [this]() {
+                if (auto* c = get_temperature_controller()) {
+                    c->set_target(helix::HeaterType::Nozzle, static_cast<double>(nozzle_target_),
+                                  {.toast = true, .on_success = [target = nozzle_target_]() {
+                                       NOTIFY_SUCCESS(lv_tr("Nozzle target set to {}°C"), target);
+                                   }});
+                    c->set_target(helix::HeaterType::Bed, static_cast<double>(bed_target_),
+                                  {.toast = true, .on_success = [target = bed_target_]() {
+                                       NOTIFY_SUCCESS(lv_tr("Bed target set to {}°C"), target);
+                                   }});
 
-            // Set chamber temperature if preset specifies one
-            if (chamber_target_ > 0) {
-                int target = deci_to_degrees(chamber_target_);
-                c->set_target(helix::HeaterType::Chamber, static_cast<double>(target),
-                              {.toast = true, .on_success = [target]() {
-                                   NOTIFY_SUCCESS(lv_tr("Chamber target set to {}°C"), target);
-                               }});
-            }
-        }
+                    // Set chamber temperature if preset specifies one
+                    if (chamber_target_ > 0) {
+                        int target = deci_to_degrees(chamber_target_);
+                        c->set_target(helix::HeaterType::Chamber, static_cast<double>(target),
+                                      {.toast = true, .on_success = [target]() {
+                                           NOTIFY_SUCCESS(lv_tr("Chamber target set to {}°C"),
+                                                          target);
+                                       }});
+                    }
+                }
+            },
+            "[FilamentPanel]", hw);
     }
 }
 
@@ -926,24 +1140,20 @@ void FilamentPanel::apply_preset_pick(int slot, const helix::printer::EffectiveF
 /// (prestonbrown/helixscreen#1355). ensure_limits() is a no-op once the
 /// heater's section has been read.
 float FilamentPanel::keypad_max_for(helix::HeaterType type, int fallback_deg) {
-    if (auto* c = get_temperature_controller()) {
-        c->ensure_limits(type);
-        const float configured = c->keypad_range(type).max;
-        if (configured > 0.0f) {
-            return configured;
-        }
-    }
-    return static_cast<float>(fallback_deg);
+    return helix::keypad_ceiling(get_temperature_controller(), type,
+                                 static_cast<float>(fallback_deg));
 }
 
 void FilamentPanel::handle_nozzle_temp_tap() {
     spdlog::debug("[{}] Opening custom nozzle temperature keypad", get_name());
 
+    const std::string title =
+        helix::ui::temperature::heater_keypad_title(helix::HeaterType::Nozzle);
     ui_keypad_config_t config = {
         .initial_value = static_cast<float>(nozzle_target_ > 0 ? nozzle_target_ : 200),
         .min_value = 0.0f,
         .max_value = keypad_max_for(helix::HeaterType::Nozzle, nozzle_max_temp_),
-        .title_label = lv_tr("Nozzle Temperature"),
+        .title_label = title.c_str(),
         .unit_label = "°C",
         .allow_decimal = false,
         .allow_negative = false,
@@ -956,11 +1166,12 @@ void FilamentPanel::handle_nozzle_temp_tap() {
 void FilamentPanel::handle_bed_temp_tap() {
     spdlog::debug("[{}] Opening custom bed temperature keypad", get_name());
 
+    const std::string title = helix::ui::temperature::heater_keypad_title(helix::HeaterType::Bed);
     ui_keypad_config_t config = {.initial_value =
                                      static_cast<float>(bed_target_ > 0 ? bed_target_ : 60),
                                  .min_value = 0.0f,
                                  .max_value = keypad_max_for(helix::HeaterType::Bed, bed_max_temp_),
-                                 .title_label = lv_tr("Bed Temperature"),
+                                 .title_label = title.c_str(),
                                  .unit_label = "°C",
                                  .allow_decimal = false,
                                  .allow_negative = false,
@@ -973,12 +1184,14 @@ void FilamentPanel::handle_bed_temp_tap() {
 void FilamentPanel::handle_chamber_temp_tap() {
     spdlog::debug("[{}] Opening custom chamber temperature keypad", get_name());
 
+    const std::string title =
+        helix::ui::temperature::heater_keypad_title(helix::HeaterType::Chamber);
     ui_keypad_config_t config = {
         .initial_value =
             static_cast<float>(chamber_target_ > 0 ? deci_to_degrees(chamber_target_) : 50),
         .min_value = 0.0f,
         .max_value = keypad_max_for(helix::HeaterType::Chamber, chamber_max_temp_),
-        .title_label = lv_tr("Chamber Temperature"),
+        .title_label = title.c_str(),
         .unit_label = "°C",
         .allow_decimal = false,
         .allow_negative = false,
@@ -1136,9 +1349,8 @@ void FilamentPanel::handle_extrude_length_select(int amount) {
 // int subject bound to ui_button bind_op_state, replacing the old stacked
 // start/complete toasts. Errors/timeouts keep their toast. All setters below run
 // on the main thread (op_started from the click handler; op_succeeded/op_failed
-// inside the helix::ui::async_call bodies already used to marshal off the
-// WebSocket background thread). FilamentPanel is a global singleton, so `this` is
-// always valid — no AsyncLifetimeGuard needed here [L012].
+// inside the object_lifetime_.bg_cb bodies that marshal off the WebSocket
+// background thread).
 // ============================================================================
 
 constexpr uint32_t OP_DONE_REVERT_MS = 1500;     ///< how long the "done" checkmark shows
@@ -1292,6 +1504,13 @@ void FilamentPanel::fail_op_on_unknown_command(const std::string& command) {
     if (!op_showing_busy_) {
         return; // nothing on screen to invalidate
     }
+    if (helix::is_template_residue(command)) {
+        // Klipper ran the rest of the macro, so the op stands; the macro's own
+        // template is what the user has to fix.
+        NOTIFY_WARNING(lv_tr("A macro printed stray template text '{}': check its Jinja tags"),
+                       command);
+        return;
+    }
     const FilamentOp op = *op_showing_busy_;
 
     op_aborted_ = op; // swallow the `ok` that is still coming
@@ -1320,43 +1539,30 @@ void FilamentPanel::handle_load_button() {
 
     snapshot_prior_heater_target();
 
-    if (!is_extrusion_allowed()) {
-        // Ask "home printer first?" BEFORE the preheat, not after: the
-        // physical G28 still fires later, inside
-        // AmsSubscriptionBackend::ensure_homed_then() right before the tier-1
-        // dispatch (unchanged) -- only the confirmation moves earlier, so a
-        // decline never wastes a preheat cycle (#1235-adjacent).
-        //
-        // Skipped when a backend positively declares it never emits that G28
-        // (Snapmaker U1, ACE: they dispatch to firmware directly), and when the
-        // printer side homes for itself (AFC with auto_home), where the G28 is
-        // redundant rather than absent. With no AMS backend at all the load runs
-        // the user's own macro, which may well home, so the question stands --
-        // absence of a backend is not evidence.
-        AmsBackend* ams = AmsState::instance().get_backend();
-        const bool load_may_home =
-            !ams || (ams->filament_ops_may_home() && !ams->delegates_homing_to_printer());
-        if (!helix::toolhead_is_homed(printer_state_) && load_may_home) {
-            spdlog::info("[{}] Toolhead not homed -- asking before starting preheat for load",
-                         get_name());
-            // FilamentPanel is an immortal singleton [L012] -- capturing
-            // [this] directly is safe with no AsyncLifetimeGuard token.
-            helix::ui::request_home_confirmation(
-                [this]() {
-                    if (AmsBackend* backend = AmsState::instance().get_backend()) {
-                        backend->arm_home_preconfirmed();
-                    }
-                    start_preheat_for_op(PreheatOp::LOAD);
-                },
-                [this]() {
-                    spdlog::info("[{}] User declined pre-load home; no heat commanded", get_name());
-                });
-            return;
-        }
+    // One plan for both questions: they are about the same dispatch, and a
+    // second call could answer them against different backend state.
+    const helix::ui::FilamentOpPlan plan = current_load_plan();
+    const bool preheat = needs_ui_preheat(plan, StandardMacroSlot::LoadFilament);
+
+    // Decided independently of the preheat: a backend or macro that heats for us
+    // removes the reason to pause without homing anything. A backend load homes
+    // inside its own ensure_homed_then(); only the macro tier needs us to send the
+    // G28, which execute_load() does right before the macro, after any preheat.
+    home_before_load_macro_ =
+        plan.tier == helix::ui::FilamentTier::Macro &&
+        helix::ui::needs_prerequisite_home(plan, StandardMacroSlot::LoadFilament,
+                                           AmsState::instance().get_backend(),
+                                           helix::toolhead_is_homed(printer_state_));
+
+    if (preheat) {
         start_preheat_for_op(PreheatOp::LOAD);
         return;
     }
 
+    continue_load_after_checks();
+}
+
+void FilamentPanel::continue_load_after_checks() {
     // Check if toolhead sensor shows filament already present
     auto& sensor_mgr = helix::FilamentSensorManager::instance();
     if (sensor_mgr.is_master_enabled() &&
@@ -1387,7 +1593,7 @@ void FilamentPanel::handle_unload_button() {
 
     snapshot_prior_heater_target();
 
-    if (!is_extrusion_allowed()) {
+    if (needs_ui_preheat(current_unload_plan(), StandardMacroSlot::UnloadFilament)) {
         start_preheat_for_op(PreheatOp::UNLOAD);
         return;
     }
@@ -1444,29 +1650,22 @@ void FilamentPanel::execute_extrude() {
 
     api_->execute_gcode(
         gcode,
-        [this]() {
-            helix::ui::async_call(
-                [](void* ud) {
-                    auto* self = static_cast<FilamentPanel*>(ud);
-                    self->operation_guard_.end();
-                    self->op_succeeded(FilamentOp::Extrude); // checkmark, then auto-revert
-                },
-                this);
-        },
-        [this](const MoonrakerError& error) {
-            helix::ui::async_call(
-                [](void* ud) {
-                    auto* self = static_cast<FilamentPanel*>(ud);
-                    self->operation_guard_.end();
-                    self->op_failed(FilamentOp::Extrude);
-                },
-                this);
-            if (error.type == MoonrakerErrorType::TIMEOUT) {
-                NOTIFY_WARNING(lv_tr("Extrude may still be running — response timed out"));
-            } else {
-                NOTIFY_ERROR(lv_tr("Extrude failed: {}"), error.user_message());
-            }
-        },
+        object_lifetime_.bg_cb("FilamentPanel::extrude_ok",
+                               [this]() {
+                                   operation_guard_.end();
+                                   op_succeeded(FilamentOp::Extrude); // checkmark, then auto-revert
+                               }),
+        object_lifetime_.bg_cb(
+            "FilamentPanel::extrude_err",
+            [this](const MoonrakerError& error) {
+                operation_guard_.end();
+                op_failed(FilamentOp::Extrude);
+                if (error.type == MoonrakerErrorType::TIMEOUT) {
+                    NOTIFY_WARNING(lv_tr("Extrude may still be running — response timed out"));
+                } else {
+                    helix::ui::notify_error_tr(TR_NOOP("Extrude failed: {}"), error);
+                }
+            }),
         IMoonrakerAPI::EXTRUSION_TIMEOUT_MS);
 }
 
@@ -1502,56 +1701,14 @@ void FilamentPanel::execute_purge() {
     const auto& info = StandardMacros::instance().get(StandardMacroSlot::Purge);
     if (!info.is_empty()) {
         std::string macro_name = info.get_macro();
-        auto cached = MacroParamCache::instance().get(macro_name);
-
-        // Pre-fill PURGE_TEMP from active material if available
-        std::string purge_temp_default;
-        auto active = helix::get_active_material();
-        if (active) {
-            int recommended = active->material_info.nozzle_recommended();
-            if (recommended > 0) {
-                purge_temp_default = std::to_string(recommended);
-                spdlog::info("[{}] Active material '{}' recommends PURGE_TEMP={}", get_name(),
-                             active->display_name, recommended);
-            }
-        }
-
-        if (cached.knowledge == MacroParamKnowledge::KNOWN_PARAMS) {
-            // Override PURGE_TEMP default with active material temp
-            auto params = cached.params;
-            if (!purge_temp_default.empty()) {
-                for (auto& p : params) {
-                    if (p.name == "PURGE_TEMP") {
-                        p.default_value = purge_temp_default;
-                        break;
-                    }
-                }
-            }
-            spdlog::info("[{}] Purge macro '{}' has params, showing modal", get_name(), macro_name);
-            get_filament_param_modal().show_for_macro(
-                lv_screen_active(), macro_name, params,
-                [this, macro_name](const MacroParamResult& result) {
-                    run_filament_macro(macro_name, "Purg", result);
-                });
-            return;
-        }
-
-        if (cached.knowledge == MacroParamKnowledge::UNKNOWN) {
-            spdlog::info("[{}] Purge macro '{}' params unknown, showing raw input", get_name(),
-                         macro_name);
-            get_filament_param_modal().show_for_unknown_params(
-                lv_screen_active(), macro_name, [this, macro_name](const MacroParamResult& result) {
-                    run_filament_macro(macro_name, "Purg", result);
-                });
-            return;
-        }
-
-        // KNOWN_NO_PARAMS — auto-pass PURGE_TEMP and execute directly
-        MacroParamResult result;
-        if (!purge_temp_default.empty()) {
-            result.params["PURGE_TEMP"] = purge_temp_default;
-        }
-        run_filament_macro(macro_name, "Purg", result);
+        // FilamentPanel is an immortal singleton, so [this] outlives the shared
+        // param modal's retained callback [L012].
+        helix::ui::dispatch_filament_macro(
+            macro_name, helix::ui::ParamPolicy::Prompt,
+            [this, macro_name](const MacroParamResult& result) {
+                run_filament_macro(macro_name, "Purg", result);
+            },
+            macro_temp_prefill(helix::ui::FilamentMacroOp::Purge));
         return;
     }
 
@@ -1561,32 +1718,25 @@ void FilamentPanel::execute_purge() {
     std::string gcode = filament_purge_fallback_gcode();
     op_started(FilamentOp::Purge); // on-button spinner replaces the start toast
 
-    api_->execute_gcode(
-        gcode,
-        [this]() {
-            helix::ui::async_call(
-                [](void* ud) {
-                    auto* self = static_cast<FilamentPanel*>(ud);
-                    self->operation_guard_.end();
-                    self->op_succeeded(FilamentOp::Purge);
-                },
-                this);
-        },
-        [this](const MoonrakerError& error) {
-            helix::ui::async_call(
-                [](void* ud) {
-                    auto* self = static_cast<FilamentPanel*>(ud);
-                    self->operation_guard_.end();
-                    self->op_failed(FilamentOp::Purge);
-                },
-                this);
-            if (error.type == MoonrakerErrorType::TIMEOUT) {
-                NOTIFY_WARNING(lv_tr("Purge may still be running — response timed out"));
-            } else {
-                NOTIFY_ERROR(lv_tr("Purge failed: {}"), error.user_message());
-            }
-        },
-        IMoonrakerAPI::EXTRUSION_TIMEOUT_MS);
+    api_->execute_gcode(gcode,
+                        object_lifetime_.bg_cb("FilamentPanel::purge_ok",
+                                               [this]() {
+                                                   operation_guard_.end();
+                                                   op_succeeded(FilamentOp::Purge);
+                                               }),
+                        object_lifetime_.bg_cb(
+                            "FilamentPanel::purge_err",
+                            [this](const MoonrakerError& error) {
+                                operation_guard_.end();
+                                op_failed(FilamentOp::Purge);
+                                if (error.type == MoonrakerErrorType::TIMEOUT) {
+                                    NOTIFY_WARNING(
+                                        lv_tr("Purge may still be running — response timed out"));
+                                } else {
+                                    helix::ui::notify_error_tr(TR_NOOP("Purge failed: {}"), error);
+                                }
+                            }),
+                        IMoonrakerAPI::EXTRUSION_TIMEOUT_MS);
 }
 
 void FilamentPanel::handle_retract_button() {
@@ -1626,29 +1776,22 @@ void FilamentPanel::execute_retract() {
 
     api_->execute_gcode(
         gcode,
-        [this]() {
-            helix::ui::async_call(
-                [](void* ud) {
-                    auto* self = static_cast<FilamentPanel*>(ud);
-                    self->operation_guard_.end();
-                    self->op_succeeded(FilamentOp::Retract);
-                },
-                this);
-        },
-        [this](const MoonrakerError& error) {
-            helix::ui::async_call(
-                [](void* ud) {
-                    auto* self = static_cast<FilamentPanel*>(ud);
-                    self->operation_guard_.end();
-                    self->op_failed(FilamentOp::Retract);
-                },
-                this);
-            if (error.type == MoonrakerErrorType::TIMEOUT) {
-                NOTIFY_WARNING(lv_tr("Retract may still be running — response timed out"));
-            } else {
-                NOTIFY_ERROR(lv_tr("Retract failed: {}"), error.user_message());
-            }
-        },
+        object_lifetime_.bg_cb("FilamentPanel::retract_ok",
+                               [this]() {
+                                   operation_guard_.end();
+                                   op_succeeded(FilamentOp::Retract);
+                               }),
+        object_lifetime_.bg_cb(
+            "FilamentPanel::retract_err",
+            [this](const MoonrakerError& error) {
+                operation_guard_.end();
+                op_failed(FilamentOp::Retract);
+                if (error.type == MoonrakerErrorType::TIMEOUT) {
+                    NOTIFY_WARNING(lv_tr("Retract may still be running — response timed out"));
+                } else {
+                    helix::ui::notify_error_tr(TR_NOOP("Retract failed: {}"), error);
+                }
+            }),
         IMoonrakerAPI::EXTRUSION_TIMEOUT_MS);
 }
 
@@ -1700,13 +1843,14 @@ void FilamentPanel::update_multi_filament_card_visibility() {
         }
     }
 
-    // Header row (icon + title) hidden in external spool mode
+    // Header row (icon + title) hidden in external spool mode, and in
+    // portrait where the card is a bottom strip that cannot afford the title
+    // line (320x480 leaves it no room above the AMS row).
+    lv_subject_t* portrait_subject = lv_xml_get_subject(nullptr, "ui_is_portrait");
+    const bool portrait = portrait_subject && lv_subject_get_int(portrait_subject) != 0;
     if (spool_card_header_row_) {
-        if (external_spool_mode) {
-            lv_obj_add_flag(spool_card_header_row_, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_remove_flag(spool_card_header_row_, LV_OBJ_FLAG_HIDDEN);
-        }
+        lv_obj_set_flag(spool_card_header_row_, LV_OBJ_FLAG_HIDDEN,
+                        external_spool_mode || portrait);
     }
 
     // Center the external spool row within the card when in external spool mode
@@ -1736,12 +1880,19 @@ void FilamentPanel::setup_external_spool_display() {
     if (!external_spool_container_)
         return;
 
+    // bind_widgets() also runs after an orientation flip's in-place rebuild;
+    // only (re)create the canvas and its observer for a container that is not
+    // the one already wired (setup() clears the guard for each fresh tree).
+    if (external_spool_container_ == external_spool_container_wired_)
+        return;
+
     // Create 48x48 spool canvas inside the container
     external_spool_canvas_ = ui_spool_canvas_create(external_spool_container_, 48);
     if (!external_spool_canvas_) {
         spdlog::warn("[{}] Failed to create external spool canvas", get_name());
         return;
     }
+    external_spool_container_wired_ = external_spool_container_;
     // L071: Canvas absorbs clicks — pass through to parent row's event_cb
     lv_obj_remove_flag(external_spool_canvas_, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(external_spool_canvas_, LV_OBJ_FLAG_EVENT_BUBBLE);
@@ -1750,7 +1901,7 @@ void FilamentPanel::setup_external_spool_display() {
     update_external_spool_from_state();
 
     // Observe external spool color changes to reactively update display
-    external_spool_observer_ = observe_int_sync<FilamentPanel>(
+    external_spool_observer_ = observe<int>(
         AmsState::instance().get_external_spool_color_subject(), this,
         [](FilamentPanel* self, int /*color_int*/) {
             self->update_external_spool_from_state();
@@ -1842,36 +1993,34 @@ void FilamentPanel::show_external_spool_edit_modal() {
         });
 }
 
-void FilamentPanel::on_external_spool_edit_clicked(lv_event_t* /*e*/) {
-    get_global_filament_panel().show_external_spool_edit_modal();
-}
-
 void FilamentPanel::populate_extruder_dropdown() {
     if (!extruder_dropdown_)
         return;
 
     auto& ts = helix::ToolState::instance();
-    bool has_ams = (lv_subject_get_int(AmsState::instance().get_ams_type_subject()) != 0);
-    if (!ts.is_multi_tool() || !has_ams) {
-        if (extruder_selector_group_)
-            lv_obj_add_flag(extruder_selector_group_, LV_OBJ_FLAG_HIDDEN);
-        if (btn_manage_slots_)
-            lv_obj_remove_flag(btn_manage_slots_, LV_OBJ_FLAG_HIDDEN);
-        return;
-    }
 
-    // Multi-tool with AMS: show dropdown group, hide Manage button
+    // The manage row holds one control or the other, and the tool count alone
+    // decides which. Manage navigates to the AMS panel, so it is the single-tool
+    // affordance. Every multi-tool printer gets the selector instead: the options
+    // come from ToolState, and handle_extruder_changed() issues a gcode Tn when no
+    // AMS backend claims the tool, so the selector works without one.
+    // update_multi_filament_card_visibility() hides the whole row when the printer
+    // has neither an AMS nor a second tool.
+    const bool multi_tool = ts.is_multi_tool();
     if (extruder_selector_group_)
-        lv_obj_remove_flag(extruder_selector_group_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_flag(extruder_selector_group_, LV_OBJ_FLAG_HIDDEN, !multi_tool);
     if (btn_manage_slots_)
-        lv_obj_add_flag(btn_manage_slots_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_flag(btn_manage_slots_, LV_OBJ_FLAG_HIDDEN, multi_tool);
 
-    // Build options string ("T0\nT1\nT2")
+    if (!multi_tool)
+        return;
+
+    // Build options string ("Tool 1\nTool 2\nTool 3")
     std::string options;
     for (const auto& tool : ts.tools()) {
         if (!options.empty())
             options += '\n';
-        options += tool.name;
+        options += tool.display_label;
     }
     lv_dropdown_set_options(extruder_dropdown_, options.c_str());
 
@@ -1880,6 +2029,8 @@ void FilamentPanel::populate_extruder_dropdown() {
     if (active >= 0 && active < ts.tool_count()) {
         lv_dropdown_set_selected(extruder_dropdown_, static_cast<uint32_t>(active));
     }
+    update_tool_noun();
+    sync_tool_dropdown_text();
 
     spdlog::debug("[{}] Extruder dropdown populated: {} tools, active=T{}", get_name(),
                   ts.tool_count(), active);
@@ -1914,6 +2065,9 @@ void FilamentPanel::update_filament_op_buttons() {
         return;
     }
 
+    // The "heat first" warning follows the selected slot's material too.
+    update_safety_state();
+
     // Recompute Load/Unload/Purge gating from the SELECTED tool's LIVE load
     // state (Task 5). Without an AMS backend (single-extruder / external-spool
     // mode) we have no per-slot load signal, so leave both enabled — the only
@@ -1940,7 +2094,7 @@ void FilamentPanel::update_filament_op_buttons() {
     // IFS). Reading the raw print_active subject here would grey the buttons
     // through every runout pause on every other backend — i.e. exactly when the
     // user needs them.
-    const auto lifecycle = printer_state_.get_print_lifecycle();
+    const auto lifecycle = printer_state_.print_state().get_print_lifecycle();
     const bool print_blocks_op =
         helix::ui::print_blocks_filament_op(lifecycle, backend->filament_ops_self_home());
 
@@ -1968,10 +2122,19 @@ void FilamentPanel::update_filament_op_buttons() {
         // keeps Load reachable so the user can feed the next external spool.
         state.slot_has_filament = helix::ui::slot_presence(backend->get_slot_info(slot));
     }
-    // Unload/Purge act on whatever is at the toolhead for this slot, and the
-    // panel's Unload is always the heated toolhead unload — the cold lane ops
-    // (Eject / Recover) live on the AMS context menu, not here.
-    state.unload_available = state.slot_is_loaded;
+    // Unload/Purge act on whatever is at the toolhead for this slot, loaded or
+    // parked short of the nozzle, and the panel's Unload is always the heated
+    // toolhead unload. The cold lane ops (Eject / Recover) live on the AMS
+    // context menu, not here.
+    //
+    // The active-head sentinel adds the one target the narrow lane rule above
+    // cannot answer: filament at the toolhead that no lane claims, where the
+    // backend's unaccounted answer is the only evidence. It enables Unload
+    // only - Load keeps its slot-picker redirect for an unresolved slot.
+    state.unload_available = state.slot_is_loaded ||
+                             backend->slot_filament_parked_in_toolhead(slot) ||
+                             (slot == helix::ui::ACTIVE_HEAD_SLOT &&
+                              backend->toolhead_filament_unaccounted().value_or(false));
     state.unload_is_cold_lane_op = false;
 
     const auto gating = helix::ui::compute_op_button_gating(state);
@@ -1992,6 +2155,7 @@ void FilamentPanel::handle_extruder_changed() {
 
     int selected = static_cast<int>(lv_dropdown_get_selected(extruder_dropdown_));
     auto& ts = helix::ToolState::instance();
+    sync_tool_dropdown_text();
 
     // Re-evaluate button gating for the newly-selected tool immediately, even if
     // it's already the active tool (no tool change issued below).
@@ -2022,142 +2186,21 @@ void FilamentPanel::handle_extruder_changed() {
     spdlog::info("[{}] User selected tool T{}", get_name(), selected);
 
     ts.request_tool_change(
-        selected, api_, [selected]() { NOTIFY_SUCCESS(lv_tr("Switched to T{}"), selected); },
-        [this](const std::string& error) {
+        selected, api_,
+        [label = ts.tools()[selected].display_label]() {
+            NOTIFY_SUCCESS(lv_tr("Switched to {}"), label);
+        },
+        object_lifetime_.bg_cb("FilamentPanel::tool_change_err", [this](const std::string& error) {
             NOTIFY_ERROR(lv_tr("Tool change failed: {}"), error);
-            // Revert dropdown to actual active tool on UI thread
-            helix::ui::async_call(
-                [](void* ctx) {
-                    auto* panel = static_cast<FilamentPanel*>(ctx);
-                    if (panel->extruder_dropdown_) {
-                        int active = helix::ToolState::instance().active_tool_index();
-                        if (active >= 0) {
-                            lv_dropdown_set_selected(panel->extruder_dropdown_,
-                                                     static_cast<uint32_t>(active));
-                        }
-                    }
-                },
-                this);
-        });
-}
-
-void FilamentPanel::on_extruder_dropdown_changed(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[FilamentPanel] on_extruder_dropdown_changed");
-    LV_UNUSED(e);
-    get_global_filament_panel().handle_extruder_changed();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-// ============================================================================
-// STATIC TRAMPOLINES
-// ============================================================================
-
-void FilamentPanel::on_manage_slots_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[FilamentPanel] on_manage_slots_clicked");
-    LV_UNUSED(e);
-
-    spdlog::info("[FilamentPanel] Opening AMS panel overlay");
-    navigate_to_ams_panel();
-
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void FilamentPanel::on_load_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[FilamentPanel] on_load_clicked");
-    LV_UNUSED(e);
-    get_global_filament_panel().handle_load_button();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void FilamentPanel::on_unload_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[FilamentPanel] on_unload_clicked");
-    LV_UNUSED(e);
-    get_global_filament_panel().handle_unload_button();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void FilamentPanel::on_extrude_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[FilamentPanel] on_extrude_clicked");
-    LV_UNUSED(e);
-    get_global_filament_panel().handle_extrude_button();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void FilamentPanel::on_purge_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[FilamentPanel] on_purge_clicked");
-    LV_UNUSED(e);
-    get_global_filament_panel().handle_purge_button();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void FilamentPanel::on_retract_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[FilamentPanel] on_retract_clicked");
-    LV_UNUSED(e);
-    get_global_filament_panel().handle_retract_button();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-// Material preset callbacks (XML event_cb - use global singleton)
-void FilamentPanel::on_preset_pla_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[FilamentPanel] on_preset_pla_clicked");
-    LV_UNUSED(e);
-    get_global_filament_panel().handle_preset_button(0);
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void FilamentPanel::on_preset_petg_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[FilamentPanel] on_preset_petg_clicked");
-    LV_UNUSED(e);
-    get_global_filament_panel().handle_preset_button(1);
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void FilamentPanel::on_preset_abs_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[FilamentPanel] on_preset_abs_clicked");
-    LV_UNUSED(e);
-    get_global_filament_panel().handle_preset_button(2);
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void FilamentPanel::on_preset_tpu_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[FilamentPanel] on_preset_tpu_clicked");
-    LV_UNUSED(e);
-    get_global_filament_panel().handle_preset_button(3);
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void FilamentPanel::on_preset_pla_hold(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[FilamentPanel] on_preset_pla_hold");
-    LV_UNUSED(e);
-    get_global_filament_panel().handle_preset_longpress(0);
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void FilamentPanel::on_preset_petg_hold(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[FilamentPanel] on_preset_petg_hold");
-    LV_UNUSED(e);
-    get_global_filament_panel().handle_preset_longpress(1);
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void FilamentPanel::on_preset_abs_hold(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[FilamentPanel] on_preset_abs_hold");
-    LV_UNUSED(e);
-    get_global_filament_panel().handle_preset_longpress(2);
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void FilamentPanel::on_preset_tpu_hold(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[FilamentPanel] on_preset_tpu_hold");
-    LV_UNUSED(e);
-    get_global_filament_panel().handle_preset_longpress(3);
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void FilamentPanel::on_preset_spool_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[FilamentPanel] on_preset_spool_clicked");
-    get_global_filament_panel().handle_spool_preset_button();
-    LVGL_SAFE_EVENT_CB_END();
+            // Revert dropdown to actual active tool
+            if (extruder_dropdown_) {
+                int active = helix::ToolState::instance().active_tool_index();
+                if (active >= 0) {
+                    lv_dropdown_set_selected(extruder_dropdown_, static_cast<uint32_t>(active));
+                }
+                sync_tool_dropdown_text();
+            }
+        }));
 }
 
 void FilamentPanel::handle_spool_preset_button() {
@@ -2182,23 +2225,27 @@ void FilamentPanel::handle_spool_preset_button() {
     update_material_temp_display();
     update_status();
 
-    // Send temperature commands
-    if (auto* c = get_temperature_controller()) {
-        // Switching material via spool preset: hold the previous filament's temp
-        // if hotter so the old material still purges cleanly (keep_previous_hot).
-        c->set_target(
-            helix::HeaterType::Nozzle, static_cast<double>(nozzle_target_),
-            {.toast = true, .keep_previous_hot = true, .on_success = [t = nozzle_target_]() {
-                 NOTIFY_SUCCESS(lv_tr("Nozzle target set to {}°C"), t);
-             }});
-        c->set_target(helix::HeaterType::Bed, static_cast<double>(bed_target_),
-                      {.toast = true, .on_success = [t = bed_target_]() {
-                           NOTIFY_SUCCESS(lv_tr("Bed target set to {}°C"), t);
-                       }});
-    }
-
-    spdlog::info("[{}] Spool preset applied: {} (nozzle={}°C, bed={}°C)", get_name(),
-                 cached_active_material_->display_name, nozzle_target_, bed_target_);
+    const auto& hw = printer_state_.get_discovery();
+    execute_material_preheat(
+        api_,
+        plan_material_preheat(helix::MaterialSettingsManager::instance().find_override_for_material(
+                                  cached_active_material_->material_name),
+                              hw),
+        [this]() {
+            if (auto* c = get_temperature_controller()) {
+                c->set_target(helix::HeaterType::Nozzle, static_cast<double>(nozzle_target_),
+                              {.toast = true, .on_success = [t = nozzle_target_]() {
+                                   NOTIFY_SUCCESS(lv_tr("Nozzle target set to {}°C"), t);
+                               }});
+                c->set_target(helix::HeaterType::Bed, static_cast<double>(bed_target_),
+                              {.toast = true, .on_success = [t = bed_target_]() {
+                                   NOTIFY_SUCCESS(lv_tr("Bed target set to {}°C"), t);
+                               }});
+            }
+            spdlog::info("[{}] Spool preset applied: {} (nozzle={}°C, bed={}°C)", get_name(),
+                         cached_active_material_->display_name, nozzle_target_, bed_target_);
+        },
+        "[FilamentPanel]", hw);
 }
 
 void FilamentPanel::update_spool_preset() {
@@ -2218,8 +2265,8 @@ void FilamentPanel::update_spool_preset() {
     for (int i = 0; i < PRESET_COUNT; i++) {
         std::string preset_lower(helix::presets::name(i));
         std::string mat_lower(active.material_name);
-        std::transform(preset_lower.begin(), preset_lower.end(), preset_lower.begin(), ::tolower);
-        std::transform(mat_lower.begin(), mat_lower.end(), mat_lower.begin(), ::tolower);
+        preset_lower = helix::text_io::to_lower(preset_lower);
+        mat_lower = helix::text_io::to_lower(mat_lower);
         if (preset_lower == mat_lower) {
             lv_obj_add_flag(spool_preset_button_, LV_OBJ_FLAG_HIDDEN);
             return;
@@ -2250,20 +2297,6 @@ void FilamentPanel::update_spool_preset() {
 }
 
 // Temperature tap callbacks (XML event_cb - use global singleton)
-void FilamentPanel::on_nozzle_temp_tap_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[FilamentPanel] on_nozzle_temp_tap_clicked");
-    LV_UNUSED(e);
-    get_global_filament_panel().handle_nozzle_temp_tap();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void FilamentPanel::on_bed_temp_tap_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[FilamentPanel] on_bed_temp_tap_clicked");
-    LV_UNUSED(e);
-    get_global_filament_panel().handle_bed_temp_tap();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
 void FilamentPanel::custom_nozzle_keypad_cb(float value, void* user_data) {
     auto* self = static_cast<FilamentPanel*>(user_data);
     if (self) {
@@ -2278,86 +2311,15 @@ void FilamentPanel::custom_bed_keypad_cb(float value, void* user_data) {
     }
 }
 
-void FilamentPanel::on_nozzle_target_tap_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[FilamentPanel] on_nozzle_target_tap_clicked");
-    LV_UNUSED(e);
-    spdlog::debug("[FilamentPanel] on_nozzle_target_tap_clicked TRIGGERED");
-    get_global_filament_panel().handle_nozzle_temp_tap();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void FilamentPanel::on_bed_target_tap_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[FilamentPanel] on_bed_target_tap_clicked");
-    LV_UNUSED(e);
-    spdlog::debug("[FilamentPanel] on_bed_target_tap_clicked TRIGGERED");
-    get_global_filament_panel().handle_bed_temp_tap();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void FilamentPanel::on_filament_chamber_target_tap(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[FilamentPanel] on_filament_chamber_target_tap");
-    LV_UNUSED(e);
-    spdlog::debug("[FilamentPanel] on_filament_chamber_target_tap TRIGGERED");
-    get_global_filament_panel().handle_chamber_temp_tap();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-// Extrude length callbacks (XML event_cb - use global singleton)
-void FilamentPanel::on_extrude_length_5mm_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[FilamentPanel] on_extrude_length_5mm_clicked");
-    LV_UNUSED(e);
-    get_global_filament_panel().handle_extrude_length_select(5);
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void FilamentPanel::on_extrude_length_10mm_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[FilamentPanel] on_extrude_length_10mm_clicked");
-    LV_UNUSED(e);
-    get_global_filament_panel().handle_extrude_length_select(10);
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void FilamentPanel::on_extrude_length_25mm_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[FilamentPanel] on_extrude_length_25mm_clicked");
-    LV_UNUSED(e);
-    get_global_filament_panel().handle_extrude_length_select(25);
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void FilamentPanel::on_cooldown_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[FilamentPanel] on_cooldown_clicked");
-    LV_UNUSED(e);
-    get_global_filament_panel().handle_cooldown();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
 void FilamentPanel::handle_cooldown() {
     spdlog::info("[{}] Cooldown requested - turning off heaters", get_name());
 
     if (api_) {
-        // Build default cooldown gcode, including chamber if printer has one
-        std::string default_gcode = "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=0\n"
-                                    "SET_HEATER_TEMPERATURE HEATER=heater_bed TARGET=0";
-
-        const auto& discovery = printer_state_.get_discovery();
-        if (discovery.has_chamber_heater()) {
-            char chamber_gcode[128];
-            if (helix::ui::temperature::build_heater_off_gcode(
-                    discovery.chamber_heater_name(), chamber_gcode, sizeof(chamber_gcode))) {
-                default_gcode += "\n";
-                default_gcode += chamber_gcode;
-            }
-        }
-
-        // Use configured cooldown macro (user-overridable in settings.json)
-        auto* cfg = helix::Config::get_instance();
-        helix::MacroConfig default_cooldown{"Cool Down", default_gcode};
-        auto cooldown = cfg ? cfg->get_macro("cooldown", default_cooldown) : default_cooldown;
-
         api_->execute_gcode(
-            cooldown.gcode, []() { NOTIFY_SUCCESS(lv_tr("Heaters off")); },
+            helix::ui::temperature::resolve_cooldown_gcode(printer_state_.temperature_state()),
+            []() { helix::ui::notify_tr(ToastSeverity::SUCCESS, TR_NOOP("Heaters off")); },
             [](const MoonrakerError& error) {
-                NOTIFY_ERROR(lv_tr("Failed to turn off heaters: {}"), error.user_message());
+                helix::ui::notify_error_tr(TR_NOOP("Failed to turn off heaters: {}"), error);
             });
     }
 
@@ -2412,7 +2374,7 @@ void FilamentPanel::set_material(int material_id) {
     bed_target_ = mat->bed_temp;
 
     // Set chamber target from material preset (clear if material has no chamber requirement)
-    if (printer_state_.get_discovery().has_chamber_heater()) {
+    if (!printer_state_.temperature_state().chamber_heater_name().empty()) {
         chamber_target_ = mat->chamber_temp_c > 0
                               ? helix::ui::temperature::degrees_to_deci(mat->chamber_temp_c)
                               : 0;
@@ -2430,6 +2392,28 @@ void FilamentPanel::set_material(int material_id) {
                  mat->chamber_temp_c);
 }
 
+bool FilamentPanel::needs_ui_preheat(const helix::ui::FilamentOpPlan& plan,
+                                     StandardMacroSlot slot) const {
+    if (is_extrusion_allowed()) {
+        return false;
+    }
+    // The nozzle is cold, but something downstream may bring it up on its own —
+    // an AMS backend that auto-heats, or a stock macro that heats in its body.
+    // Preheating in front of one of those makes the user wait twice, and settles
+    // on OUR material temperature before the macro commands its own
+    // (prestonbrown/helixscreen#1494).
+    //
+    // The plan is what decides: the macro tier's answer is about a macro that
+    // only runs on that tier.
+    const auto skip =
+        helix::ui::preheat_skip_reason(plan, slot, AmsState::instance().get_backend());
+    if (skip != helix::ui::PreheatSkip::None) {
+        spdlog::info("[{}] Skipping preheat — {}", get_name(), helix::ui::preheat_skip_name(skip));
+        return false;
+    }
+    return true;
+}
+
 bool FilamentPanel::is_extrusion_allowed() const {
     // Opt-in override (#978): users whose load/unload macros heat the nozzle
     // themselves — or perform a deliberate cold pull — can bypass the
@@ -2440,29 +2424,13 @@ bool FilamentPanel::is_extrusion_allowed() const {
     return helix::ui::temperature::is_extrusion_safe(nozzle_current_, min_extrude_temp_);
 }
 
-bool FilamentPanel::has_active_spool_material() const {
-    // Check if there's a known spool with valid material info (external spool or AMS active slot)
-    auto ext = AmsState::instance().get_external_spool_info();
-    if (ext.has_value()) {
-        auto active = helix::build_active_material(*ext);
-        if (active.material_info.nozzle_min > 0) {
-            return true;
-        }
-    }
-
-    AmsBackend* backend = AmsState::instance().get_backend();
-    if (backend) {
-        AmsSystemInfo sys_info = backend->get_system_info();
-        const SlotInfo* active_slot = sys_info.get_active_slot();
-        if (active_slot) {
-            auto active = helix::build_active_material(*active_slot);
-            if (active.material_info.nozzle_min > 0) {
-                return true;
-            }
-        }
-    }
-
-    return false;
+bool FilamentPanel::has_known_op_material() const {
+    // Load/Unload heat for the selected lane, Purge/Extrude/Retract for the
+    // loaded one, and all of them share the warning.
+    const int selected = selected_op_slot();
+    const int loaded = preheat_slot_for_op(PreheatOp::PURGE);
+    return slot_preheat_material(selected).has_value() &&
+           (loaded < 0 || loaded == selected || slot_preheat_material(loaded).has_value());
 }
 
 int FilamentPanel::preheat_slot_for_op(PreheatOp op) const {
@@ -2486,15 +2454,8 @@ int FilamentPanel::preheat_slot_for_op(PreheatOp op) const {
     }
 }
 
-FilamentPanel::PreheatTempResult FilamentPanel::resolve_preheat_temp(int target_slot) const {
-    // Priorities 1 and 2 (target slot, then the external spool as the fallback
-    // for a load with no lane of its own) are shared with
-    // AmsOperationSidebar::get_load_temp_for_slot() via
-    // resolve_load_preheat_material(). This used to consult the external spool
-    // FIRST and unconditionally, then the *loaded* slot rather than the selected
-    // one — so a PETG lane selected while PLA was loaded preheated to PLA, and
-    // any printer with an external spool assigned preheated every load to that
-    // spool. Both were silent and both cause jams.
+std::optional<FilamentPanel::PreheatTempResult>
+FilamentPanel::slot_preheat_material(int target_slot) const {
     AmsBackend* backend = AmsState::instance().get_backend();
     SlotInfo slot;
     const SlotInfo* slot_ptr = nullptr;
@@ -2502,11 +2463,22 @@ FilamentPanel::PreheatTempResult FilamentPanel::resolve_preheat_temp(int target_
         slot = backend->get_slot_info(target_slot);
         slot_ptr = &slot;
     }
-
     auto ext = AmsState::instance().get_external_spool_info();
     if (auto resolved = helix::ui::resolve_load_preheat_material(
             target_slot, slot_ptr, ext.has_value() ? &ext.value() : nullptr)) {
-        return {resolved->temp_c, resolved->material_name};
+        return PreheatTempResult{resolved->temp_c, resolved->material_name};
+    }
+    return std::nullopt;
+}
+
+std::optional<FilamentPanel::PreheatTempResult>
+FilamentPanel::resolve_material_preheat_temp(int target_slot) const {
+    // Priorities 1 and 2 (target slot, then the external spool as the fallback
+    // for a load with no lane of its own) are shared with
+    // AmsOperationSidebar::get_load_temp_for_slot() via
+    // resolve_load_preheat_material().
+    if (auto resolved = slot_preheat_material(target_slot)) {
+        return resolved;
     }
 
     // Priority 3: the panel's selected material preset. The sidebar has no
@@ -2516,12 +2488,43 @@ FilamentPanel::PreheatTempResult FilamentPanel::resolve_preheat_temp(int target_
     if (selected_material_ >= 0 && selected_material_ < PRESET_COUNT) {
         auto mat = filament::find_material(helix::presets::name(selected_material_));
         if (mat) {
-            return {helix::ui::load_preheat_temp(*mat), helix::presets::name(selected_material_)};
+            return PreheatTempResult{helix::ui::load_preheat_temp(*mat),
+                                     helix::presets::name(selected_material_)};
         }
     }
 
+    return std::nullopt;
+}
+
+FilamentPanel::PreheatTempResult FilamentPanel::resolve_preheat_temp(int target_slot) const {
+    if (auto material = resolve_material_preheat_temp(target_slot)) {
+        return *material;
+    }
     // Priority 4: Fallback to min_extrude_temp_
     return {min_extrude_temp_, ""};
+}
+
+std::map<std::string, std::string>
+FilamentPanel::macro_temp_prefill(helix::ui::FilamentMacroOp op) const {
+    PreheatOp preheat_op = PreheatOp::LOAD;
+    switch (op) {
+    case helix::ui::FilamentMacroOp::Load:
+        preheat_op = PreheatOp::LOAD;
+        break;
+    case helix::ui::FilamentMacroOp::Unload:
+        preheat_op = PreheatOp::UNLOAD;
+        break;
+    case helix::ui::FilamentMacroOp::Purge:
+        preheat_op = PreheatOp::PURGE;
+        break;
+    }
+    const int slot = preheat_slot_for_op(preheat_op);
+    const auto material = resolve_material_preheat_temp(slot);
+    const helix::ui::OpNozzle nozzle = helix::ui::resolve_op_nozzle(
+        AmsState::instance().get_backend(), slot, printer_state_, limits_);
+    return helix::ui::nozzle_temp_prefill(
+        op, nozzle.target_c, material ? std::optional<int>(material->temp) : std::nullopt,
+        nozzle.floor_c, nozzle.ceiling_c);
 }
 
 const char* FilamentPanel::preheat_op_name(PreheatOp op) {
@@ -2545,7 +2548,7 @@ const char* FilamentPanel::preheat_op_name(PreheatOp op) {
 // nozzle_target_ member — set_material() overwrites nozzle_target_ with
 // the preset's preview temperature, so it's unreliable here.
 int FilamentPanel::current_extruder_target() const {
-    auto* subj = printer_state_.get_active_extruder_target_subject();
+    auto* subj = printer_state_.temperature_state().get_active_extruder_target_subject();
     return subj ? deci_to_degrees(lv_subject_get_int(subj)) : 0;
 }
 
@@ -2631,13 +2634,7 @@ void FilamentPanel::cancel_pending_preheat() {
     pending_preheat_op_ = PreheatOp::NONE;
     pending_preheat_target_ = 0;
 
-    // A confirmed-then-abandoned load must not leave home consent armed for a
-    // later, unrelated dispatch on this backend. Harmless no-op when nothing
-    // was armed (e.g. cancelling an UNLOAD/EXTRUDE/RETRACT/PURGE preheat,
-    // which never arms this).
-    if (AmsBackend* backend = AmsState::instance().get_backend()) {
-        backend->clear_home_preconfirmed();
-    }
+    home_before_load_macro_ = false;
 
     // Cancel any pending cooldown timer
     PostOpCooldownManager::instance().cancel();
@@ -2665,23 +2662,26 @@ void FilamentPanel::restore_heater_after_preheat() {
     // the pre-start block is about to heat the nozzle, and the comment above
     // already gives "a real print re-heats or cancels the pending cooldown" as
     // the reason this is safe. Preparing is that case, one step earlier.
-    const auto lifecycle = printer_state_.get_print_lifecycle();
+    const auto lifecycle = printer_state_.print_state().get_print_lifecycle();
     if (!job_holds_machine(lifecycle)) {
         PostOpCooldownManager::instance().schedule();
     }
     prior_nozzle_target_ = 0;
 }
 
-void FilamentPanel::set_limits(int min_temp, int max_temp, int min_extrude_temp) {
+void FilamentPanel::set_limits(const SafetyLimits& limits) {
+    limits_ = limits;
+    const int min_temp = static_cast<int>(limits.min_temperature_celsius);
+    const int max_temp = helix::ui::temperature::nozzle_max_temp_c(limits);
+    const int min_extrude_temp = helix::ui::temperature::extrusion_floor_c(limits);
+
     nozzle_min_temp_ = min_temp;
     nozzle_max_temp_ = max_temp;
 
     // Update min_extrude_temp and safety warning text if changed
     if (min_extrude_temp_ != min_extrude_temp) {
         min_extrude_temp_ = min_extrude_temp;
-        std::snprintf(safety_warning_text_buf_, sizeof(safety_warning_text_buf_),
-                      lv_tr("Heat to at least %d°C for filament operations"), min_extrude_temp_);
-        lv_subject_copy_string(&safety_warning_text_subject_, safety_warning_text_buf_);
+        update_safety_warning_text();
         spdlog::info("[{}] Min extrusion temp updated: {}°C", get_name(), min_extrude_temp_);
     }
 
@@ -2783,7 +2783,7 @@ FilamentPanelOutcome panel_unload_outcome(const FilamentOpPlan& plan, bool backe
 // FILAMENT SENSOR WARNING HELPERS
 // ============================================================================
 
-void FilamentPanel::execute_load() {
+helix::ui::FilamentOpPlan FilamentPanel::current_load_plan() const {
     // The three-tier routing (AMS backend → configured macro → raw gcode) lives
     // in plan_load(), the shared answer for every dispatch surface — it also
     // carries the already-mounted guard and the load-vs-swap rule that only
@@ -2796,143 +2796,93 @@ void FilamentPanel::execute_load() {
     const int target_slot = selected_op_slot();
 
     AmsSystemInfo sys;
-    helix::ui::BackendCaps caps;
-    if (backend) {
-        sys = backend->get_system_info();
-        caps.present = true;
-        caps.requires_slot_selection_for_load = backend->requires_slot_selection_for_load();
-        caps.needs_unload_before_load = backend->needs_unload_before_load(sys, target_slot);
-        caps.change_tool_completes_load = backend->change_tool_completes_load(target_slot);
-        caps.is_tool_changer = backend->get_type() == AmsType::TOOL_CHANGER;
-        // Distinct from !requires_slot_selection_for_load(): plan_load() needs to
-        // tell "bypass is suppressing the lane tier" apart from "this backend
-        // never wanted a slot", because a named lane wants opposite treatment.
-        caps.bypass_active = backend->is_bypass_active();
-    }
+    const helix::ui::BackendCaps caps = helix::ui::read_backend_caps(backend, sys, target_slot);
+    return helix::ui::plan_live_load(sys, caps, target_slot);
+}
 
-    const auto& info = StandardMacros::instance().get(StandardMacroSlot::LoadFilament);
-    const helix::ui::FilamentOpPlan plan = helix::ui::plan_load(
-        sys, caps, target_slot, !info.is_empty(), info.get_source() == MacroSource::CONFIGURED);
-    // What to DO with the plan — the backend entry point, the refusal copy, the
-    // slot-picker redirect — is named once in panel_load_outcome(), so the panel
-    // and anything that checks the panel answer it from the same place.
-    const helix::ui::FilamentPanelOutcome outcome = helix::ui::panel_load_outcome(plan);
+helix::ui::FilamentOpSurface FilamentPanel::op_surface(FilamentOp op) {
+    helix::ui::FilamentOpSurface surface;
+    surface.log_tag = "[FilamentPanel]";
+    // The user pressed a button on this panel and is looking at it, so a
+    // parameter modal belongs on top rather than being suppressed.
+    surface.param_policy = helix::ui::ParamPolicy::Prompt;
 
-    switch (plan.tier) {
-    case helix::ui::FilamentTier::AmsBackend: {
-        // Backend load is fire-and-forget: completion is signaled by
-        // ams_action_observer_ when AmsAction reaches IDLE or ERROR. Start the
-        // guard + on-button spinner here; backend_op_active_ gates the observer
-        // so it only completes backend ops (never gcode/macro ops).
+    surface.on_begin = [this, op](const helix::ui::FilamentOpPlan& plan) {
         begin_operation_guard();
-        backend_op_active_ = true;
-        op_in_flight_ = FilamentOp::Load;
-        op_started(FilamentOp::Load);
-        AmsError err;
-        switch (outcome.call) {
-        case helix::ui::AmsCall::ChangeTool:
-            spdlog::info("[{}] Filament seated — swapping to selected slot via tool change T{}",
-                         get_name(), outcome.arg);
-            err = backend->change_tool(outcome.arg);
-            break;
-        case helix::ui::AmsCall::Load:
-        default: // plan_load yields no other tier-1 call
-            spdlog::info("[{}] Loading filament directly into selected slot {} (no redirect)",
-                         get_name(), outcome.arg);
-            err = backend->load_filament(outcome.arg);
-            break;
-        }
-        if (!err.success()) {
-            operation_guard_.end();
-            backend_op_active_ = false;
-            op_in_flight_.reset();
-            op_failed(FilamentOp::Load);
-            helix::ui::notify_ams_error(err);
-        }
-        return;
-    }
+        // backend_op_active_ gates ams_action_observer_ so it completes ONLY
+        // backend ops; a macro or fallback finishes on its own reply instead,
+        // and letting the observer claim those would end the guard on an
+        // unrelated AmsAction edge.
+        backend_op_active_ = plan.tier == helix::ui::FilamentTier::AmsBackend;
+        op_in_flight_ = op;
+        op_started(op); // on-button spinner replaces the start toast
+    };
 
-    case helix::ui::FilamentTier::Refused:
-        // The copy and the redirect come from panel_load_outcome(); these lines
-        // only record what the app saw, which is what differs per refusal. Guard
-        // and spinner stay unarmed either way — that is the fix for 9KRXZ62P.
-        switch (plan.refusal) {
-        case helix::ui::FilamentRefusal::AlreadyMounted:
-            spdlog::info("[{}] Selected tool is already mounted — refusing load", get_name());
-            break;
-        case helix::ui::FilamentRefusal::BypassLoaded:
-            spdlog::info("[{}] Bypass spool still at the toolhead — refusing lane load",
-                         get_name());
-            break;
-        case helix::ui::FilamentRefusal::SelectSlot:
-        default:
-            spdlog::info("[{}] AMS backend active ({}), no active slot — redirecting to AMS panel",
-                         get_name(), ams_type_to_string(backend->get_type()));
-            break;
-        }
+    surface.on_failed = [this, op](const helix::ui::FilamentOpPlan&, const AmsError&,
+                                   bool& /*reported*/) {
+        operation_guard_.end();
+        backend_op_active_ = false;
+        op_in_flight_.reset();
+        op_failed(op);
+        // reported stays false: the executor raises the AMS-error toast, which
+        // is the same one this panel used to raise itself.
+    };
+
+    surface.on_async_failed = [this, op](const helix::ui::FilamentOpPlan&) {
+        operation_guard_.end();
+        op_in_flight_.reset();
+        op_failed(op);
+    };
+
+    surface.on_async_success = [this, op]() {
+        operation_guard_.end();
+        // Only on success: a failed op leaves the heater where the user can see
+        // what happened rather than dropping it out from under a retry.
+        restore_heater_after_preheat();
+        op_in_flight_.reset();
+        op_succeeded(op);
+    };
+
+    surface.macro_prefill = [this](helix::ui::FilamentMacroOp macro_op) {
+        return macro_temp_prefill(macro_op);
+    };
+
+    // No guard: FilamentPanel is an immortal singleton [L012], so a macro
+    // parameter modal answered arbitrarily later still finds a live panel.
+    return surface;
+}
+
+void FilamentPanel::execute_load() {
+    AmsBackend* backend = AmsState::instance().get_backend();
+    const int target_slot = selected_op_slot();
+
+    helix::ui::FilamentOpSurface surface = op_surface(FilamentOp::Load);
+    // The refusal copy and the slot-picker redirect are this panel's, and only
+    // this panel's: the surfaces layered under a live dialog must not navigate
+    // out from under it. panel_load_outcome() still owns which is which.
+    surface.on_refused = [this](const helix::ui::FilamentOpPlan& refused) {
+        const helix::ui::FilamentPanelOutcome outcome = helix::ui::panel_load_outcome(refused);
+        spdlog::info("[{}] Load refused ({})", get_name(), static_cast<int>(refused.refusal));
         NOTIFY_INFO(fmt::runtime(outcome.toast.c_str()));
         if (outcome.navigate_to_ams) {
             navigate_to_ams_panel();
         }
-        return;
+    };
 
-    case helix::ui::FilamentTier::Macro: {
-        std::string macro_name = info.get_macro();
-        // FilamentPanel is a global singleton, so `this` survives any modal
-        // dismissal the shared param modal outlives [L012]. Surfaces with a
-        // bounded lifetime must guard this callback with a LifetimeToken.
-        helix::ui::dispatch_filament_macro(macro_name, helix::ui::ParamPolicy::Prompt,
-                                           [this, macro_name](const MacroParamResult& result) {
-                                               run_filament_macro(macro_name, "Load", result);
-                                           });
-        return;
+    if (home_before_load_macro_) {
+        home_before_load_macro_ = false;
+        // Homing waits until now so it follows any preheat; object-scoped so the
+        // macro still goes out if the user leaves the panel during the G28.
+        surface.before_macro = [this](std::function<void()> send,
+                                      std::function<void(const MoonrakerError&)> fail) {
+            helix::ensure_homed_then(api_, object_lifetime_, std::move(send), std::move(fail));
+        };
     }
 
-    case helix::ui::FilamentTier::RawGcode:
-        break;
-    }
-
-    // Fallback: the shared tier-3 load sequence (bowden fast move + slow melt-zone push).
-    begin_operation_guard();
-    std::string gcode = filament_load_fallback_gcode();
-    spdlog::info("[{}] Load fallback: {}", get_name(), gcode);
-    op_started(FilamentOp::Load); // on-button spinner replaces the start toast
-
-    api_->execute_gcode(
-        gcode,
-        [this]() {
-            helix::ui::async_call(
-                [](void* ud) {
-                    auto* self = static_cast<FilamentPanel*>(ud);
-                    self->operation_guard_.end();
-                    self->restore_heater_after_preheat();
-                    self->op_succeeded(FilamentOp::Load);
-                },
-                this);
-        },
-        [this](const MoonrakerError& error) {
-            helix::ui::async_call(
-                [](void* ud) {
-                    auto* self = static_cast<FilamentPanel*>(ud);
-                    self->operation_guard_.end();
-                    self->op_failed(FilamentOp::Load);
-                },
-                this);
-            if (error.type == MoonrakerErrorType::TIMEOUT) {
-                NOTIFY_WARNING(lv_tr("Load may still be running — response timed out"));
-            } else {
-                NOTIFY_ERROR(lv_tr("Filament load failed: {}"), error.user_message());
-            }
-        },
-        IMoonrakerAPI::EXTRUSION_TIMEOUT_MS);
+    helix::ui::execute_filament_load(backend, target_slot, surface);
 }
 
-void FilamentPanel::execute_unload() {
-    // Filament is being pulled — nothing left to purge, so drop the swap-preheat
-    // latch. The next load computes its hold-temp fresh instead of inheriting this
-    // material's target.
-    printer_state_.clear_nozzle_load_latch();
-
+FilamentPanel::UnloadContext FilamentPanel::current_unload_context() const {
     // When an AMS backend is active, route unload through it so the backend's
     // tool change sequence runs (retract, cut, purge) instead of raw extrusion.
     // plan_unload() gates tier 1 on the backend merely existing — deliberately
@@ -2942,113 +2892,55 @@ void FilamentPanel::execute_unload() {
     // Single source of truth: act on the dropdown-selected tool's slot, the same
     // one the button gating uses — never a divergent current_slot read.
     const int slot = selected_op_slot();
-    helix::ui::BackendCaps caps;
-    bool loaded = false;
-    if (backend) {
-        // Only `present` matters to plan_unload; the remaining caps answer the
-        // load-vs-swap question, which unload does not ask.
-        caps.present = true;
-        const AmsSystemInfo sys = backend->get_system_info();
-        loaded = helix::ui::unload_target_is_loaded(slot, backend->slot_is_actively_loaded(slot),
-                                                    backend->slot_has_filament_at_toolhead(slot),
-                                                    sys.current_slot == slot, sys.filament_loaded);
-    }
 
-    const auto& info = StandardMacros::instance().get(StandardMacroSlot::UnloadFilament);
-    const helix::ui::FilamentOpPlan plan = helix::ui::plan_unload(
-        caps, slot, loaded, !info.is_empty(), info.get_source() == MacroSource::CONFIGURED);
-    // See execute_load(): what the panel does with the plan is named once, in
-    // panel_unload_outcome().
+    AmsSystemInfo sys;
+    if (backend) {
+        sys = backend->get_system_info();
+    }
+    // Only `present` and the unaccounted flag matter to plan_unload; the
+    // remaining caps answer the load-vs-swap question, which unload does not
+    // ask.
+    helix::ui::BackendCaps caps;
+    caps.present = backend != nullptr;
+    caps.toolhead_unaccounted = backend && backend->toolhead_filament_unaccounted().value_or(false);
+
+    const bool loaded = helix::ui::read_unload_target_loaded(backend, sys, slot);
+    return {helix::ui::plan_live_unload(caps, slot, loaded), loaded};
+}
+
+helix::ui::FilamentOpPlan FilamentPanel::current_unload_plan() const {
+    return current_unload_context().plan;
+}
+
+void FilamentPanel::execute_unload() {
+    // Filament is being pulled — nothing left to purge, so drop the swap-preheat
+    // latch. The next load computes its hold-temp fresh instead of inheriting this
+    // material's target.
+    printer_state_.temperature_state().clear_load_latch();
+
+    AmsBackend* backend = AmsState::instance().get_backend();
+    const int slot = selected_op_slot();
+    // One system-info read for the whole dispatch: the plan, the loaded answer
+    // and the manual-pull question are all about the same instant.
+    const UnloadContext ctx = current_unload_context();
     const helix::ui::FilamentPanelOutcome outcome =
-        helix::ui::panel_unload_outcome(plan, backend != nullptr, slot);
+        helix::ui::panel_unload_outcome(ctx.plan, backend != nullptr, slot);
 
     // Armed before dispatch so the toolhead sensor's clear edge is already being
-    // watched when the retract starts; op_succeeded/op_failed close it out for
-    // every tier below.
+    // watched when the retract starts; the op hooks close it out for every tier.
     if (outcome.arm_manual_pull) {
         helix::ui::arm_manual_pull_prompt();
     }
 
-    switch (plan.tier) {
-    case helix::ui::FilamentTier::AmsBackend: {
-        begin_operation_guard();
-        spdlog::info("[{}] Unloading filament from selected slot {} via AMS backend ({})",
-                     get_name(), outcome.arg, ams_type_to_string(backend->get_type()));
-        // On-button spinner replaces the start toast. Completion is signaled by
-        // ams_action_observer_ when AmsAction reaches IDLE or ERROR;
-        // backend_op_active_ gates that observer to backend ops only.
-        backend_op_active_ = true;
-        op_in_flight_ = FilamentOp::Unload;
-        op_started(FilamentOp::Unload);
-        // Pass the panel's single-source selected_op_slot() explicitly rather than
-        // letting the backend re-resolve current_slot: the callsite's intended slot
-        // is authoritative, so the unload can never diverge from the gating or the
-        // "is anything loaded?" guard above. Re-reading current_slot in the backend
-        // was the U1 Filament-panel-unload wrong-tool bug.
-        AmsError err = backend->unload_filament(outcome.arg);
-        if (!err.success()) {
-            operation_guard_.end();
-            backend_op_active_ = false;
-            op_in_flight_.reset();
-            op_failed(FilamentOp::Unload);
-            helix::ui::notify_ams_error(err);
-        }
-        // Guard ends via ams_action_observer_ (AmsAction IDLE/ERROR) or timeout.
-        return;
-    }
+    helix::ui::FilamentOpSurface surface = op_surface(FilamentOp::Unload);
+    surface.on_refused = [this](const helix::ui::FilamentOpPlan& refused) {
+        const helix::ui::FilamentPanelOutcome refusal =
+            helix::ui::panel_unload_outcome(refused, false, -1);
+        spdlog::info("[{}] Unload refused — nothing loaded", get_name());
+        NOTIFY_WARNING(fmt::runtime(refusal.toast.c_str()));
+    };
 
-    case helix::ui::FilamentTier::Refused:
-        NOTIFY_WARNING(fmt::runtime(outcome.toast.c_str()));
-        return;
-
-    case helix::ui::FilamentTier::Macro: {
-        std::string macro_name = info.get_macro();
-        // See execute_load(): [this] is safe here only because the panel is
-        // immortal [L012].
-        helix::ui::dispatch_filament_macro(macro_name, helix::ui::ParamPolicy::Prompt,
-                                           [this, macro_name](const MacroParamResult& result) {
-                                               run_filament_macro(macro_name, "Unload", result);
-                                           });
-        return;
-    }
-
-    case helix::ui::FilamentTier::RawGcode:
-        break;
-    }
-
-    // Fallback: the shared tier-3 unload sequence (tip-shape then long retract).
-    begin_operation_guard();
-    std::string gcode = filament_unload_fallback_gcode();
-    spdlog::info("[{}] Unload fallback: {}", get_name(), gcode);
-    op_started(FilamentOp::Unload); // on-button spinner replaces the start toast
-
-    api_->execute_gcode(
-        gcode,
-        [this]() {
-            helix::ui::async_call(
-                [](void* ud) {
-                    auto* self = static_cast<FilamentPanel*>(ud);
-                    self->operation_guard_.end();
-                    self->restore_heater_after_preheat();
-                    self->op_succeeded(FilamentOp::Unload);
-                },
-                this);
-        },
-        [this](const MoonrakerError& error) {
-            helix::ui::async_call(
-                [](void* ud) {
-                    auto* self = static_cast<FilamentPanel*>(ud);
-                    self->operation_guard_.end();
-                    self->op_failed(FilamentOp::Unload);
-                },
-                this);
-            if (error.type == MoonrakerErrorType::TIMEOUT) {
-                NOTIFY_WARNING(lv_tr("Unload may still be running — response timed out"));
-            } else {
-                NOTIFY_ERROR(lv_tr("Filament unload failed: {}"), error.user_message());
-            }
-        },
-        IMoonrakerAPI::EXTRUSION_TIMEOUT_MS);
+    helix::ui::execute_filament_unload(backend, slot, ctx.target_loaded, surface);
 }
 
 void FilamentPanel::run_filament_macro(const std::string& macro_name, const std::string& op_label,
@@ -3079,38 +2971,30 @@ void FilamentPanel::run_filament_macro(const std::string& macro_name, const std:
     }
 
     std::string gcode = helix::build_macro_gcode(macro_name, params);
-    // FilamentPanel is a global singleton, so `this` capture is safe [L012]
-    api_->execute_gcode(
-        gcode,
-        [this]() {
-            helix::ui::async_call(
-                [](void* ud) {
-                    auto* self = static_cast<FilamentPanel*>(ud);
-                    self->operation_guard_.end();
-                    self->restore_heater_after_preheat();
-                    if (self->op_in_flight_) {
-                        self->op_succeeded(*self->op_in_flight_);
-                    }
-                },
-                this);
-        },
-        [this](const MoonrakerError& error) {
-            helix::ui::async_call(
-                [](void* ud) {
-                    auto* self = static_cast<FilamentPanel*>(ud);
-                    self->operation_guard_.end();
-                    if (self->op_in_flight_) {
-                        self->op_failed(*self->op_in_flight_);
-                    }
-                },
-                this);
-            if (error.type == MoonrakerErrorType::TIMEOUT) {
-                NOTIFY_WARNING(lv_tr("Macro may still be running — response timed out"));
-            } else {
-                NOTIFY_ERROR(lv_tr("Macro failed: {}"), error.user_message());
-            }
-        },
-        IMoonrakerAPI::EXTRUSION_TIMEOUT_MS);
+    api_->execute_gcode(gcode,
+                        object_lifetime_.bg_cb("FilamentPanel::macro_ok",
+                                               [this]() {
+                                                   operation_guard_.end();
+                                                   restore_heater_after_preheat();
+                                                   if (op_in_flight_) {
+                                                       op_succeeded(*op_in_flight_);
+                                                   }
+                                               }),
+                        object_lifetime_.bg_cb(
+                            "FilamentPanel::macro_err",
+                            [this](const MoonrakerError& error) {
+                                operation_guard_.end();
+                                if (op_in_flight_) {
+                                    op_failed(*op_in_flight_);
+                                }
+                                if (error.type == MoonrakerErrorType::TIMEOUT) {
+                                    NOTIFY_WARNING(
+                                        lv_tr("Macro may still be running — response timed out"));
+                                } else {
+                                    helix::ui::notify_error_tr(TR_NOOP("Macro failed: {}"), error);
+                                }
+                            }),
+                        IMoonrakerAPI::EXTRUSION_TIMEOUT_MS);
 }
 
 void FilamentPanel::show_load_warning() {
@@ -3128,7 +3012,7 @@ void FilamentPanel::show_load_warning() {
         spdlog::debug("[FilamentPanel] Load cancelled by user");
     };
     opts.on_dismiss = drop_handle;
-    opts.owner_token = lifetime_.token();
+    opts.owner_token = object_lifetime_.token();
     load_warning_dialog_ = helix::ui::modal_confirm(
         lv_tr("Filament Detected"),
         lv_tr("The toolhead sensor indicates filament is already loaded. "
@@ -3162,7 +3046,7 @@ void FilamentPanel::show_unload_warning() {
         spdlog::debug("[FilamentPanel] Unload cancelled by user");
     };
     opts.on_dismiss = drop_unload_handle;
-    opts.owner_token = lifetime_.token();
+    opts.owner_token = object_lifetime_.token();
     unload_warning_dialog_ = helix::ui::modal_confirm(
         lv_tr("No Filament Detected"),
         lv_tr("The toolhead sensor indicates no filament is present. "
@@ -3186,23 +3070,15 @@ void FilamentPanel::show_unload_warning() {
 // GLOBAL INSTANCE (needed by main.cpp)
 // ============================================================================
 
-static std::unique_ptr<FilamentPanel> g_filament_panel;
-
 FilamentPanel& get_global_filament_panel() {
-    if (!g_filament_panel) {
-        g_filament_panel = std::make_unique<FilamentPanel>(get_printer_state(), nullptr);
-        StaticPanelRegistry::instance().register_destroy("FilamentPanel",
-                                                         []() { g_filament_panel.reset(); });
-    }
-    return *g_filament_panel;
+    return helix::lazy_global<FilamentPanel>("FilamentPanel", get_printer_state(), nullptr);
 }
 
 void filament_panel_report_unknown_command(const std::string& command) {
-    // Reads g_filament_panel directly rather than going through
-    // get_global_filament_panel(): the caller is GcodeNarrationRouter on a
+    // Does not go through get_global_filament_panel(): the caller is GcodeNarrationRouter on a
     // gcode-response line, and a console message must not be what causes a panel
     // to be constructed.
-    if (g_filament_panel) {
-        g_filament_panel->fail_op_on_unknown_command(command);
+    if (auto* panel = helix::lazy_global_if_exists<FilamentPanel>()) {
+        panel->fail_op_on_unknown_command(command);
     }
 }

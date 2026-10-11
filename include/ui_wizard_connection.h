@@ -172,12 +172,12 @@ class WizardConnectionStep : public helix::wizard::Step {
     lv_obj_t* screen_root_ = nullptr;
 
     // Subjects (6 total)
-    lv_subject_t connection_ip_;
-    lv_subject_t connection_port_;
-    lv_subject_t connection_status_icon_;
-    lv_subject_t connection_status_text_;
-    lv_subject_t connection_testing_;
-    lv_subject_t connection_discovering_;
+    lv_subject_t connection_ip_{};
+    lv_subject_t connection_port_{};
+    lv_subject_t connection_status_icon_{};
+    lv_subject_t connection_status_text_{};
+    lv_subject_t connection_testing_{};
+    lv_subject_t connection_discovering_{};
 
     // String buffers (must be persistent)
     char connection_ip_buffer_[128];
@@ -309,7 +309,7 @@ class WizardConnectionStep : public helix::wizard::Step {
     std::vector<helix::DiscoveredPrinter> discovered_printers_;
 
     // Subjects for mDNS UI
-    lv_subject_t mdns_status_; ///< "Scanning..." / "Found N printer(s)"
+    lv_subject_t mdns_status_{}; ///< "Scanning..." / "Found N printer(s)"
     char mdns_status_buffer_[64];
 
     // mDNS callbacks

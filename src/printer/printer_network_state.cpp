@@ -12,7 +12,8 @@
 #include "printer_network_state.h"
 
 #include "connection_state.h" // For ConnectionState enum
-#include "printer_state.h"    // For KlippyState enum
+#include "json_utils.h"
+#include "printer_state.h" // For KlippyState enum
 #include "state/subject_macros.h"
 
 #include <spdlog/spdlog.h>
@@ -60,6 +61,8 @@ void PrinterNetworkState::init_subjects(bool register_xml) {
     // resolve to this host. Set on CONNECTED edges by MoonrakerManager; the
     // UI-facing mirror of helix::is_moonraker_on_same_host().
     INIT_SUBJECT_INT(moonraker_is_remote, 0, subjects_, register_xml);
+
+    INIT_SUBJECT_INT(klippy_state_message_seq, 0, subjects_, register_xml);
 
     subjects_initialized_ = true;
     spdlog::trace("[PrinterNetworkState] Subjects initialized successfully");
@@ -120,6 +123,114 @@ void PrinterNetworkState::set_network_status(int status) {
     lv_subject_set_int(&network_status_, status);
 }
 
+bool PrinterNetworkState::apply_webhooks(const nlohmann::json& webhooks, double eventtime,
+                                         bool from_cached_snapshot,
+                                         std::optional<uint64_t> frame_epoch) {
+    // Klippy state is a liveness signal written by two queues that are not ordered
+    // against each other: live WebSocket frames, and the discovery subscription
+    // snapshot replayed at the end of discovery. Last-write-wins would let the replay
+    // resurrect READY over a live SHUTDOWN: nav re-enabled, the recovery dialog
+    // auto-dismissed, and the gcode guards re-opened against a dead printer.
+    //
+    // The state_message is gated with the state because they arrive in the same
+    // blob: a snapshot too stale to set the state carries an equally stale reason.
+    //
+    // Provenance is STATED by the caller, never inferred from a zero eventtime:
+    // the mock client drives its simulated shutdown/recovery through the same
+    // untimestamped dispatch, and those are the current truth for their session.
+    // The eventtime watermark covers the other case — two genuinely live frames
+    // arriving out of order across the queues.
+    bool changed = false;
+    double watermark;
+    {
+        std::lock_guard<std::mutex> lock(klippy_freshness_mutex_);
+        watermark = klippy_state_eventtime_;
+    }
+    const bool stale = (from_cached_snapshot && klippy_state_from_live_.load()) ||
+                       (eventtime > 0.0 && eventtime < watermark);
+
+    if (stale) {
+        spdlog::debug("[PrinterNetworkState] Ignoring stale klippy webhooks (state='{}', "
+                      "eventtime={} vs watermark={}, cached_snapshot={})",
+                      helix::json_util::safe_string(webhooks, "state", "<absent>"), eventtime,
+                      watermark, from_cached_snapshot);
+    } else {
+        bool applied_state = false;
+        auto message_describes = static_cast<KlippyState>(lv_subject_get_int(&klippy_state_));
+
+        if (webhooks.contains("state") && webhooks["state"].is_string()) {
+            std::string klippy_state_str = webhooks["state"].get<std::string>();
+            KlippyState new_state = KlippyState::READY;
+            bool recognized = true;
+
+            if (klippy_state_str == "ready") {
+                new_state = KlippyState::READY;
+            } else if (klippy_state_str == "startup") {
+                new_state = KlippyState::STARTUP;
+            } else if (klippy_state_str == "shutdown") {
+                new_state = KlippyState::SHUTDOWN;
+            } else if (klippy_state_str == "error") {
+                new_state = KlippyState::ERROR;
+            } else {
+                // Klipper documents exactly ready/startup/shutdown/error.
+                // Resolving anything else to READY would be fail-OPEN on a
+                // liveness signal: nav re-enabled and the gcode guards re-opened.
+                // Leave the current state alone instead; a stale-but-known
+                // state is safer than an invented READY. Deduped on the string so a value Klipper
+                // repeats every frame warns once, not per frame.
+                recognized = false;
+                if (last_unknown_klippy_state_ != klippy_state_str) {
+                    last_unknown_klippy_state_ = klippy_state_str;
+                    spdlog::warn("[PrinterNetworkState] Unrecognised webhooks.state '{}' — leaving "
+                                 "klippy state unchanged",
+                                 klippy_state_str);
+                }
+            }
+
+            if (recognized) {
+                changed = set_klippy_state_internal(new_state);
+                applied_state = true;
+                message_describes = new_state;
+            }
+        }
+
+        // Capture state_message (error/shutdown reason text)
+        if (webhooks.contains("state_message") && webhooks["state_message"].is_string()) {
+            set_klippy_state_message(webhooks["state_message"].get<std::string>(),
+                                     message_describes);
+        }
+
+        // Only a frame that actually carried a usable state moves the guard.
+        // A delta carrying just state_message must not latch "live seen" and
+        // lock out the snapshot that still has to seed the state.
+        if (applied_state) {
+            // A frame received before the last reset belongs to the previous
+            // session, whose clock the watermark no longer measures, so it does
+            // not move the guard. Checked under the lock the reset takes.
+            std::lock_guard<std::mutex> lock(klippy_freshness_mutex_);
+            if (!frame_epoch || *frame_epoch == klippy_epoch_.load()) {
+                if (eventtime > 0.0) {
+                    klippy_state_eventtime_ = eventtime;
+                }
+                if (!from_cached_snapshot) {
+                    klippy_state_from_live_ = true;
+                }
+            }
+        }
+    }
+    return changed;
+}
+
+void PrinterNetworkState::reset_klippy_state_freshness() {
+    // Synchronous on the caller's thread: the next session's frames arrive
+    // through a different queue than deferred UI work, so a queued reset could
+    // land after them and wipe their watermark.
+    std::lock_guard<std::mutex> lock(klippy_freshness_mutex_);
+    klippy_state_eventtime_ = 0.0;
+    klippy_state_from_live_.store(false);
+    ++klippy_epoch_;
+}
+
 bool PrinterNetworkState::set_klippy_state_internal(KlippyState state) {
     const char* state_names[] = {"READY", "STARTUP", "SHUTDOWN", "ERROR"};
     int state_int = static_cast<int>(state);
@@ -132,13 +243,29 @@ bool PrinterNetworkState::set_klippy_state_internal(KlippyState state) {
 
     // Clear state message when returning to READY (error is resolved)
     if (state == KlippyState::READY) {
-        klippy_state_message_.clear();
+        set_klippy_state_message("", state);
     }
     return true;
 }
 
-void PrinterNetworkState::set_klippy_state_message(const std::string& message) {
+std::string PrinterNetworkState::get_klippy_fault_message() const {
+    if (klippy_state_message_describes_ == KlippyState::READY ||
+        klippy_state_message_describes_ == KlippyState::STARTUP) {
+        return {};
+    }
+    return klippy_state_message_;
+}
+
+void PrinterNetworkState::set_klippy_state_message(const std::string& message,
+                                                   std::optional<KlippyState> describes) {
+    const bool changed =
+        message != klippy_state_message_ || describes != klippy_state_message_describes_;
     klippy_state_message_ = message;
+    klippy_state_message_describes_ = describes;
+    if (changed && subjects_initialized_) {
+        lv_subject_set_int(&klippy_state_message_seq_,
+                           lv_subject_get_int(&klippy_state_message_seq_) + 1);
+    }
     if (!message.empty()) {
         spdlog::info("[PrinterNetworkState] Klippy state message: {}", message);
     }

@@ -126,7 +126,7 @@ The app log's path is set by `platform_pre_start` in
 rather than `/data` because ZMOD's `TAR_CONFIG` archiver collects
 `/opt/config/ /usr/prog/config/ /usr/data/logs/ /usr/prog/app_startup.sh
 /tmp/*.txt` on AD5X and `/opt/config/ /data/logFiles/ /tmp/*.txt` on AD5M —
-`/data/helixscreen/` is in neither, so an app log written there never reached a
+`/data/.helixscreen/` is in neither, so an app log written there never reached a
 support archive (issue #1249). Auto-detection is **not** what puts the log in a
 file: `detect_best_target()` returns `Syslog` on Linux and never `File`, so
 without the hook's `HELIX_LOG_DEST=file` the app log goes to `/var/log/messages`.
@@ -211,9 +211,11 @@ shipping one.
 
 **Mitigation in helix:**
 
-- `HELIX_HAS_CAMERA=0` is already set for `HELIX_PLATFORM_AD5X` in
-  `lv_conf.h:856-863` — the camera widget, `CameraStream`, QR scanner
-  overlay, and camera-config modal are all compile-time excluded.
+- `HELIX_HAS_CAMERA=0` is set for `HELIX_PLATFORM_AD5X` in `lv_conf.h`,
+  so the camera widget, `CameraStream` and the camera-config modal are
+  compile-time excluded. The QR scanner overlay is not: without a camera
+  it polls the webcam's HTTP snapshot URL, or listens to a USB barcode
+  scanner alone, and neither path opens `/dev/video*`.
 - Pending fix: gate the webcam *discovery* code in
   `moonraker_discovery_sequence.cpp` on `HELIX_HAS_CAMERA` so we don't
   even probe `server.webcams.list` on platforms that can't render it.
@@ -254,7 +256,7 @@ The `core file size = 0` means **no automatic core dumps** for crash analysis
 
 ## Installer Caveats
 
-`scripts/install.sh` `check_disk_space()` runs `df` on
+`check_disk_space()` (`scripts/lib/installer/requirements.sh`) runs `df` on
 `dirname(INSTALL_DIR)`. On AD5X (`INSTALL_DIR=/srv/helixscreen`), that's
 `/srv` — which on this overlay setup either doesn't exist as its own mount
 or inherits from the **read-only `/dev/root` (12.5 MB, 100 % used)**.

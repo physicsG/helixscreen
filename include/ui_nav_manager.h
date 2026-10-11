@@ -3,14 +3,21 @@
 
 #pragma once
 
+#include "ui_nav.h"
+#include "ui_nav_backdrop.h"
+#include "ui_nav_panel_registry.h"
+#include "ui_nav_printer_badge.h"
+#include "ui_navbar_button.h"
 #include "ui_observer_guard.h"
-#include "ui_printer_switch_menu.h"
+#include "ui_widget_ref.h"
 
 #include "lvgl/lvgl.h"
+#include "panel_lifecycle.h"
 #include "subject_managed_panel.h"
 
 #include <array>
 #include <functional>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -18,46 +25,6 @@
 // Forward declarations for lifecycle dispatch
 class PanelBase;
 class OverlayBase;
-class IPanelLifecycle;
-
-namespace helix {
-/// Callback type for overlay close notifications
-using OverlayCloseCallback = std::function<void()>;
-} // namespace helix
-
-/**
- * @brief Navigation panel identifiers
- *
- * Order matches app_layout.xml panel children for index-based access.
- */
-namespace helix {
-enum class PanelId {
-    Home = 0,    ///< Panel 0: Home
-    PrintSelect, ///< Panel 1: Print Select (beneath Home)
-    Controls,    ///< Panel 2: Controls
-    Filament,    ///< Panel 3: Filament
-    Settings,    ///< Panel 4: Settings
-    Advanced,    ///< Panel 5: Advanced
-    Count        ///< Total number of panels
-};
-
-/**
- * @brief Whether overlays pushed from a nav root are destinations by default.
- *
- * Settings is the one root users navigate *within* rather than launch things
- * from: Settings > Network is a sub-screen of Settings, not a layer over it, so
- * it renders at destination width (iOS push semantics). Every other root
- * launches tools you return from, which get the gapped transient width.
- *
- * See include/overlay_class.h and prestonbrown/helixscreen#1178.
- */
-constexpr bool nav_root_is_destination(PanelId id) {
-    return id == PanelId::Settings;
-}
-} // namespace helix
-
-// Legacy aliases for backward compatibility
-constexpr int UI_PANEL_COUNT = static_cast<int>(helix::PanelId::Count);
 
 /**
  * @brief Singleton manager for navigation and panel management
@@ -143,6 +110,26 @@ class NavigationManager {
      */
     void wire_events(lv_obj_t* navbar);
 
+    /// The panel button under @p point, or nullptr. How a tap on the
+    /// backdrop's snapshot of the navbar reaches the live navbar under an overlay.
+    [[nodiscard]] static lv_obj_t* navbar_target_at(lv_obj_t* navbar, const lv_point_t& point);
+
+    /// The keyboard's top edge in screen coordinates while it is open, or -1
+    /// once it closes. Beside a side navbar the E-stop moves up the navbar column
+    /// to clear it and back to its slot after; under a portrait bottom navbar the
+    /// keyboard covers it.
+    void set_navbar_estop_keyboard_top(int32_t top);
+
+    /// The E-stop kept over the navbar's nav_estop_slot, or nullptr.
+    [[nodiscard]] lv_obj_t* navbar_estop() const {
+        return navbar_estop_.widget();
+    }
+
+    /// The spools-on-the-bed button kept over the navbar's nav_drying_slot, or nullptr.
+    [[nodiscard]] lv_obj_t* navbar_drying() const {
+        return navbar_drying_.widget();
+    }
+
     /**
      * @brief Wire up status icons in navbar
      *
@@ -209,7 +196,7 @@ class NavigationManager {
     /**
      * @brief Find the PanelId owned by a given PanelBase instance
      *
-     * Searches panel_instances_ for a matching pointer. Used by
+     * Searches the registered panel instances for a matching pointer. Used by
      * hot-reload rebuild to let panels locate themselves without
      * needing per-subclass get_panel_id() overrides.
      *
@@ -225,7 +212,7 @@ class NavigationManager {
      * caller is responsible for teardown (via safe_delete_deferred).
      *
      * @param id Panel identifier
-     * @param new_widget New widget to register in panel_widgets_[id]
+     * @param new_widget New widget to register as panel @p id
      */
     void replace_panel_widget(helix::PanelId id, lv_obj_t* new_widget);
 
@@ -258,8 +245,8 @@ class NavigationManager {
      * @brief Re-key overlay maps: swap old_widget → new_widget for the same lifecycle.
      *
      * Used by hot-reload overlay rebuild. Touches overlay_instances_,
-     * persistent_overlay_instances_, overlay_backdrops_, overlay_close_callbacks_,
-     * zoom_source_rects_, and panel_stack_. Does NOT free either widget —
+     * persistent_overlay_instances_, the nested backdrops, overlay_close_callbacks_,
+     * and panel_stack_. Does NOT free either widget —
      * caller handles old widget teardown.
      */
     void rekey_overlay_widget(lv_obj_t* old_widget, lv_obj_t* new_widget);
@@ -294,7 +281,10 @@ class NavigationManager {
      * When overlays are pushed/popped, the corresponding on_activate() and
      * on_deactivate() methods will be called automatically.
      *
-     * Call this after create() returns the overlay's root widget.
+     * Call this after create() returns the overlay's root widget. The pairing
+     * lives as long as the widget does: a navbar panel switch does not drop it,
+     * and the widget's delete hook removes it. One call per created overlay is
+     * enough, and repeat calls are harmless.
      *
      * @param widget Root widget of the overlay (from create())
      * @param overlay Pointer to IPanelLifecycle-implementing instance (OverlayBase or PanelBase)
@@ -338,7 +328,7 @@ class NavigationManager {
      *
      * Safe to call multiple times — tracks suspended state internally.
      */
-    void suspend_active();
+    void suspend_active(DeactivateReason reason = DeactivateReason::Suspended);
 
     /**
      * @brief Resume the previously suspended panel/overlay lifecycle
@@ -372,6 +362,18 @@ class NavigationManager {
     }
 
     /**
+     * @brief Death signal for the subjects this NavigationManager owns.
+     *
+     * Pass to observe_*() from anything that can outlive this object's
+     * deinit_subjects(): that path frees every observer node without bumping
+     * the ObserverGuard invalidation epoch, so a guard without the token
+     * dereferences a freed observer on its next reset().
+     */
+    [[nodiscard]] SubjectLifetime get_subjects_lifetime() const {
+        return subjects_.get_subjects_lifetime();
+    }
+
+    /**
      * @brief Register panel widgets for show/hide management
      *
      * @param panels Array of panel widgets (size: UI_PANEL_COUNT)
@@ -389,16 +391,18 @@ class NavigationManager {
     void push_overlay(lv_obj_t* overlay_panel, bool hide_previous = true);
 
     /**
-     * @brief Push overlay with zoom-from-rect animation
+     * @brief Whether this deactivation is the active panel being covered by
+     * an overlay rather than left for another screen.
      *
-     * Shows the overlay panel with a zoom animation originating from the
-     * source rectangle (e.g., a clicked card). Falls back to instant show
-     * if animations are disabled.
-     *
-     * @param overlay_panel Overlay panel widget to show
-     * @param source_rect Screen coordinates of the source element to zoom from
+     * push_overlay() deactivates the main panel it covers — the panel's own
+     * on_deactivating() then runs with NavigateAway just like a real leave,
+     * so state that must survive its own overlay (an in-flight open of the
+     * detail view) needs this to tell the two apart. True only between the
+     * cover and the next main-panel activation.
      */
-    void push_overlay_zoom_from(lv_obj_t* overlay_panel, lv_area_t source_rect);
+    bool main_panel_deactivated_for_overlay() const {
+        return main_panel_deactivated_for_overlay_;
+    }
 
     /**
      * @brief Re-apply every live overlay's width after a resolution change
@@ -435,6 +439,11 @@ class NavigationManager {
     void register_overlay_close_callback(lv_obj_t* overlay_panel,
                                          helix::OverlayCloseCallback callback);
 
+    /// True when a close callback is registered for @p overlay_panel.
+    bool has_overlay_close_callback(lv_obj_t* overlay_panel) const {
+        return overlay_close_callbacks_.count(overlay_panel) > 0;
+    }
+
     /**
      * @brief Remove a registered close callback for an overlay
      *
@@ -450,6 +459,32 @@ class NavigationManager {
     bool go_back();
 
     /**
+     * @brief Pop a specific overlay, decided in queue order
+     *
+     * Like go_back(), the decision runs deferred, when the operation's turn in
+     * the UpdateQueue comes: by then other pushes may have landed on top of
+     * `overlay_panel`. If it is still on top it is popped with the normal
+     * back animation and restore path; if it is buried it is removed from the
+     * stack without disturbing what covers it; if it already left the stack
+     * (or was deleted) this is a no-op. Either removal path fires its
+     * registered close callback.
+     *
+     * @param overlay_panel the overlay root to remove
+     */
+    void close_overlay(lv_obj_t* overlay_panel);
+
+    /**
+     * @brief Run @p build, which blocks the UI thread to create an overlay, under
+     * the "Loading..." pill a slow panel switch paints
+     *
+     * On the limited tiers only: a standard-tier build finishes inside a frame. The
+     * pill is painted before @p build starts and lifted from the UpdateQueue, after
+     * the push and on_activate() that @p build queued have run. A pill already up
+     * for a panel switch covers the build instead.
+     */
+    void build_under_loading_pill(const std::function<void()>& build);
+
+    /**
      * @brief Check if a panel is in the overlay stack
      *
      * Used to determine if a specific panel (like PrintStatusPanel) is currently
@@ -459,6 +494,11 @@ class NavigationManager {
      * @return true if panel is in the overlay stack
      */
     bool is_panel_in_stack(lv_obj_t* panel) const;
+
+    /// True from push_overlay(panel) until its queued push runs. A caller that
+    /// guards against opening twice must ask this too: until then the panel is
+    /// neither visible nor in the stack.
+    bool is_push_pending(lv_obj_t* panel) const;
 
     /**
      * @brief Check if a panel is the top of the overlay stack
@@ -539,8 +579,8 @@ class NavigationManager {
     void set_backdrop_visible(bool visible);
 
     /// Callback type for printer switch/add actions from the navbar badge menu
-    using PrinterSwitchCallback = std::function<void(const std::string& printer_id)>;
-    using AddPrinterCallback = std::function<void()>;
+    using PrinterSwitchCallback = helix::ui::PrinterBadgeMenu::SwitchCallback;
+    using AddPrinterCallback = helix::ui::PrinterBadgeMenu::AddCallback;
 
     /**
      * @brief Register callbacks for printer switching from navbar badge menu
@@ -588,20 +628,33 @@ class NavigationManager {
     // Check if klippy is in READY state
     bool is_klippy_ready() const;
 
+    // Tear down what an overlay leaving the stack owns: its nested-overlay
+    // backdrop is deleted and its close callback runs, both on the next tick.
+    void retire_overlay(lv_obj_t* overlay);
+
+    // Run @p callback on the next tick, unless @p overlay's owner unregistered
+    // in the meantime.
+    void defer_close_callback(helix::OverlayCloseCallback callback, lv_obj_t* overlay);
+    bool is_overlay_registered(lv_obj_t* overlay) const;
+
     // Clear overlay stack (used during connection loss)
     void clear_overlay_stack();
 
     // Internal panel switch implementation (called via ui_queue_update)
     void switch_to_panel_impl(int panel_id);
 
+    // The body behind go_back()'s queued operation: pop panel_stack_.back()
+    // with the full deactivate/animate/restore sequence. Runs on the UI thread
+    // inside a queue callback (go_back, close_overlay).
+    void go_back_now();
+
+    // Cancel every queued push of @p panel and retire it as if it had closed.
+    void cancel_pending_push(lv_obj_t* panel);
+
     // Animation helpers
     void overlay_animate_slide_in(lv_obj_t* panel);
     void overlay_animate_slide_out(lv_obj_t* panel);
     static void overlay_slide_out_complete_cb(lv_anim_t* anim);
-
-    // Zoom animation helpers
-    void overlay_animate_zoom_in(lv_obj_t* panel, lv_area_t source_rect);
-    void overlay_animate_zoom_out(lv_obj_t* panel, lv_area_t source_rect);
 
     // Activate the panel/overlay an overlay close restored, at most once per
     // close. go_back() arms restore_activation_pending_ and consumes it after
@@ -623,20 +676,22 @@ class NavigationManager {
     // When LVGL deletes a tracked widget through ANY path (e.g. a teardown that
     // bypasses go_back), LV_EVENT_DELETE fires synchronously just before the
     // memory is freed. scrub_deleted_widget() erases the widget from every
-    // widget-keyed bookkeeping container — plus the scalars overlay_backdrop_,
-    // app_layout_widget_ and the matching panel_widgets_ slots — so neither
-    // panel_stack_.back() on the next push_overlay() nor the show/hide sweep in
-    // handle_active_panel_change() can dereference freed memory.
+    // widget-keyed bookkeeping container, so panel_stack_.back() on the next
+    // push_overlay() cannot dereference freed memory. The scalars
+    // (app_layout_widget_, the panel slots) are WidgetRefs
+    // and clear themselves.
     void scrub_deleted_widget(lv_obj_t* widget);
     // Attach the LV_EVENT_DELETE scrub callback to a widget exactly once.
     void ensure_delete_hook(lv_obj_t* widget);
     static void overlay_delete_event_cb(lv_event_t* e);
     // Create the darkened backdrop over `screen` and adopt it as
-    // overlay_backdrop_, wiring its click handlers and the delete scrub. The
-    // backdrop is a child of `screen`, so any path that deletes the screen frees
-    // it without going through go_back(); the scrub hook is what keeps
-    // overlay_backdrop_ from outliving it.
-    void adopt_overlay_backdrop(lv_obj_t* screen);
+    // the primary backdrop, wiring its click handlers. `arriving` (the overlay
+    // being pushed) and the navbar E-stop are hidden for the snapshot: both sit
+    // above the backdrop, and a dimmed copy baked into the image would trail
+    // the live overlay wherever it does not cover it. The backdrop is a child
+    // of `screen`, so any path that deletes the screen frees it without going
+    // through go_back(); the backdrop clears itself when that happens.
+    void adopt_overlay_backdrop(lv_obj_t* screen, lv_obj_t* arriving);
     /**
      * @brief Re-take the overlay backdrop snapshot from the live widget tree
      *
@@ -656,6 +711,10 @@ class NavigationManager {
      */
     void refresh_overlay_backdrop();
 
+    helix::ui::NavbarButton navbar_estop_{"nav_estop_slot", "navbar_estop", "nav_btn_estop", true};
+    helix::ui::NavbarButton navbar_drying_{"nav_drying_slot", "navbar_drying", "nav_btn_drying",
+                                           false};
+
     // Event callbacks
     static void backdrop_click_event_cb(lv_event_t* e);
 
@@ -665,7 +724,7 @@ class NavigationManager {
      * Destinations render full width, transient layers render gapped. Which one
      * an overlay gets depends on how the user reached it — the same
      * fan_control_overlay is a transient layer from Controls and a drill-down
-     * from Settings > Fans — so this cannot live in XML. See
+     * from Settings > Devices > Fans — so this cannot live in XML. See
      * include/overlay_class.h and prestonbrown/helixscreen#1178.
      *
      * Must be called BEFORE the overlay is pushed onto panel_stack_, while
@@ -685,27 +744,12 @@ class NavigationManager {
     helix::PanelId active_panel_ = helix::PanelId::Home;
     bool suspended_ = false; // True when screensaver has suspended lifecycle
 
-    // Panel widget tracking for show/hide
-    lv_obj_t* panel_widgets_[UI_PANEL_COUNT] = {nullptr};
-
-    // C++ panel instances for lifecycle dispatch (on_activate/on_deactivate)
-    std::array<PanelBase*, UI_PANEL_COUNT> panel_instances_ = {};
-
-    // Lazy panel builder (ESP32 deferred-panel bring-up). Empty on desktop.
-    // Invoked by switch_to_panel_impl() when a target panel's widget slot is
-    // still null, to build it on first navigation. See set_deferred_panel_builder().
-    std::function<void(int)> deferred_panel_builder_;
-    bool building_deferred_panel_ = false; // re-entrancy guard for the builder
+    // Main panel widgets, their lifecycle instances and the lazy builder
+    helix::ui::PanelRegistry panels_;
     // Outermost-transition guard for the ESP32 nav busy scrim (NavTransitionScrim
     // in ui_nav_manager.cpp): switch_to_panel_impl can cascade into
     // handle_active_panel_change, and only the outer one owns/tears down a scrim.
     bool nav_scrim_active_ = false;
-
-    // If panel_id has no widget yet and a deferred builder is set, build it now
-    // (first-navigation lazy bring-up). No-op on desktop (builder unset) and for
-    // already-built panels. Guarded against re-entrancy. Called from both
-    // navigation choke points (switch_to_panel_impl + handle_active_panel_change).
-    void ensure_panel_built(int panel_id);
 
     // C++ overlay instances for lifecycle dispatch (on_activate/on_deactivate)
     std::unordered_map<lv_obj_t*, IPanelLifecycle*> overlay_instances_;
@@ -715,31 +759,24 @@ class NavigationManager {
     std::unordered_map<lv_obj_t*, IPanelLifecycle*> persistent_overlay_instances_;
 
     // App layout widget reference
-    lv_obj_t* app_layout_widget_ = nullptr;
+    helix::ui::WidgetRef app_layout_widget_;
 
     // Panel stack: tracks ALL visible panels in z-order
     std::vector<lv_obj_t*> panel_stack_;
+    // push_overlay() targets not yet pushed. A queued push runs only while its
+    // serial is still listed, so removing an entry cancels that push.
+    struct PendingPush {
+        lv_obj_t* panel;
+        uint64_t serial;
+    };
+    std::vector<PendingPush> pending_pushes_;
+    uint64_t next_push_serial_ = 0;
 
     // Overlay close callbacks (called when overlay is popped from stack)
     std::unordered_map<lv_obj_t*, helix::OverlayCloseCallback> overlay_close_callbacks_;
 
-    // Shared overlay backdrop widget (for first overlay)
-    lv_obj_t* overlay_backdrop_ = nullptr;
-
-    // Latched at the dismiss-backdrop's LV_EVENT_PRESSED with the on-screen
-    // keyboard's visibility. LVGL's click-focus DEFOCUS (which hides the
-    // keyboard) fires between PRESSED and CLICKED, so is_visible() is already
-    // false by the time backdrop_click_event_cb handles CLICKED — the visibility
-    // must be captured at press time. Consumed one-shot by
-    // take_backdrop_keyboard_dismiss(): a tap that hides the keyboard must not
-    // also dismiss the overlay behind it.
-    bool backdrop_press_keyboard_visible_ = false;
-
-    // Dynamic backdrops for nested overlays (overlay → its backdrop)
-    std::unordered_map<lv_obj_t*, lv_obj_t*> overlay_backdrops_;
-
-    // Zoom animation source rects (overlay → source rect for reverse animation)
-    std::unordered_map<lv_obj_t*, lv_area_t> zoom_source_rects_;
+    // The dismiss backdrop behind the overlay stack, and its bookkeeping
+    helix::ui::OverlayBackdrop backdrop_;
 
     // Resolved width class per overlay (overlay → is_destination). Written by
     // apply_overlay_width() on every push, read by the next push to inherit and
@@ -750,6 +787,23 @@ class NavigationManager {
     // Overlays exempt from push-time width management (deliberate custom
     // widths, e.g. the 70% widget catalog). #1178
     std::unordered_set<lv_obj_t*> overlay_width_unmanaged_;
+
+    // Rebuilt overlays (replaced root -> its live successor). Callers cache an
+    // overlay's root and keep registering and pushing it after a hot-reload
+    // rebuild has freed it, so every widget-taking entry point resolves through
+    // this. An entry is dropped when its successor is deleted, and when a
+    // different object is deleted at, or arrives live at, its key's address.
+    std::unordered_map<lv_obj_t*, lv_obj_t*> rebuilt_overlays_;
+    // Replaced roots still awaiting their deferred delete. Still valid objects,
+    // but never handed back: they resolve to their successor.
+    std::unordered_set<lv_obj_t*> condemned_roots_;
+
+    /// @p widget, or the live overlay that replaced it when a rebuild replaced it.
+    lv_obj_t* resolve_rebuilt(lv_obj_t* widget) const;
+    /// resolve_rebuilt() for a widget arriving to be registered or pushed: a
+    /// live object at a replaced root's address is a new object there, so its
+    /// forwarding entry ends.
+    lv_obj_t* resolve_arriving(lv_obj_t* widget);
 
     // Widgets that already have the LV_EVENT_DELETE scrub hook attached.
     // Prevents double-registering the callback and is itself scrubbed on delete.
@@ -762,11 +816,8 @@ class NavigationManager {
     ObserverGuard active_panel_observer_;
     ObserverGuard connection_state_observer_;
     ObserverGuard klippy_state_observer_;
-    ObserverGuard printer_dot_observer_;
     ObserverGuard printer_switcher_observer_;
-
-    // Printer connection status dot widget
-    lv_obj_t* printer_dot_widget_ = nullptr;
+    ObserverGuard theme_observer_;
 
     // Track previous states for detecting transitions
     int previous_connection_state_ = -1;
@@ -792,7 +843,6 @@ class NavigationManager {
     // Animation constants
     static constexpr uint32_t OVERLAY_ANIM_DURATION_MS = 200;
     static constexpr int32_t OVERLAY_SLIDE_OFFSET = 400;
-    static constexpr uint32_t ZOOM_ANIM_DURATION_MS = 250;
 
     // Subject management via RAII
     SubjectManager subjects_;
@@ -804,9 +854,6 @@ class NavigationManager {
     // Shutdown flag — overlays should skip destructive actions (e.g. ABORT)
     bool shutting_down_ = false;
 
-    // Printer badge menu
-    helix::ui::PrinterSwitchMenu printer_switch_menu_;
-    void on_printer_badge_clicked();
-    PrinterSwitchCallback printer_switch_cb_;
-    AddPrinterCallback add_printer_cb_;
+    // Printer badge: connection dot and the switch/add menu
+    helix::ui::PrinterBadgeMenu printer_badge_;
 };

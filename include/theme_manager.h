@@ -34,6 +34,7 @@ enum class StyleRole {
     InputBg,
     Disabled,
     Pressed,
+    CardPressed,
     Focused,
     TextPrimary,
     TextMuted,
@@ -91,6 +92,7 @@ struct ThemePalette {
     lv_color_t danger{};
     lv_color_t focus{};
     int border_radius = 8;
+    int button_radius = 8;
     int border_width = 1;
     int border_opacity = 40;
     int shadow_width = 0;
@@ -99,8 +101,19 @@ struct ThemePalette {
 };
 
 namespace helix {
+enum class PlatformTier;
+
 /// Style configure function type - applies palette colors to a style.
 using StyleConfigureFn = void (*)(lv_style_t* style, const ThemePalette& palette);
+
+/// Pressed state: a scale-down where full_style_effects_allowed(tier). Elsewhere a
+/// non-null `ring` palette adds a primary outline, which renders without
+/// a layer; null adds nothing (buttons keep the LVGL theme's recolor).
+void configure_pressed_for_tier(lv_style_t* style, PlatformTier tier,
+                                const ThemePalette* ring = nullptr);
+
+/// The card Pressed role: configure_pressed_for_tier with the primary ring.
+void configure_card_pressed(lv_style_t* style, const ThemePalette& palette);
 
 /**
  * @brief Breakpoint suffix for the nav_width token, e.g. "_small".
@@ -127,9 +140,10 @@ struct OverlayWidths {
  * Both widths give up the horizontal extent the navigation bar occupies.
  * Landscape puts the bar on the leading edge as a full-height vertical strip,
  * so that is nav_width px. Portrait puts it along the bottom at width="100%"
- * (ui_xml/portrait/navigation_bar.xml), where it costs an overlay nothing
- * horizontally — reserving nav_width there strands a column of dead backdrop
- * beside every overlay, 54px of 320 on the Waveshare 11.9".
+ * (the nav_bar_portrait style in ui_xml/navigation_bar.xml), where it costs
+ * an overlay nothing horizontally — reserving nav_width there strands a
+ * column of dead backdrop beside every overlay, 54px of 320 on the
+ * Waveshare 11.9".
  *
  * The transient class's "you will return from this" gap follows the same
  * rule: it is spent on whichever axis the nav bar occupies. In landscape
@@ -156,7 +170,8 @@ OverlayWidths compute_overlay_widths(int32_t hor_res, int32_t ver_res, int32_t n
  * The vertical twin of OverlayWidths. In landscape the navigation bar is a
  * full-height vertical strip, so it consumes no vertical extent and both
  * classes span the whole display. In portrait it is a full-width bottom strip
- * (ui_xml/portrait/navigation_bar.xml), so both classes must stop short of it.
+ * (the nav_bar_portrait style in ui_xml/navigation_bar.xml), so both classes
+ * must stop short of it.
  */
 struct OverlayHeights {
     int32_t transient;   ///< A layer you will return from — leaves the gap above the nav bar.
@@ -323,17 +338,44 @@ class ThemeManager {
  * Creates and applies LVGL theme with light or dark mode.
  * Must be called before creating any widgets.
  *
+ * When called again with the same display (same pointer and resolution) and
+ * the same mode while nothing deinitialized the theme in between, this is a
+ * no-op: the registration pass re-reads and parses the whole ui_xml/ tree,
+ * which is exactly the cost the test suite paid once per fixture instance for
+ * a theme that never changed between them. The runtime dark-mode toggle goes
+ * through theme_manager_apply_theme(), and responsive republishing through
+ * theme_manager_refresh_*(), so a skipped repeat is always a true repeat.
+ *
  * @param display LVGL display instance
  * @param use_dark_mode true for dark theme, false for light theme
  */
 void theme_manager_init(lv_display_t* display, bool use_dark_mode);
 
 /**
- * @brief Deinitialize theme subjects before lv_deinit()
+ * @brief How many times theme_manager_init() performed a full rebuild
  *
- * Must be called during shutdown BEFORE lv_deinit() to prevent crash
- * in lv_observer_remove(). Deinits theme_changed_subject and swatch
- * description subjects, removing all observer callbacks from widgets.
+ * The no-op path above does not count. Exists so tests can pin the guard
+ * without timing anything.
+ */
+// NAMESPACE_OK: joins the global theme_manager_init/deinit family
+int theme_manager_full_init_count();
+
+/**
+ * @brief Deinitialize the theme subjects, after the XML engine is gone
+ *
+ * Deinits theme_changed_subject, the breakpoint/orientation subjects and the
+ * swatch description subjects, removing every observer callback from them.
+ *
+ * **Ordering is a precondition, not a preference: this runs LAST**, after
+ * lv_deinit() and after lv_xml_deinit() (Application::shutdown() gets that by
+ * calling it after m_display.reset()). A `<subject_expr>` record keeps raw
+ * observer pointers on its input subjects and detaches them when its component
+ * scope is retired, which requires those subjects to still be alive. Deinitializing
+ * them first frees the observers underneath the record, so the next scope
+ * retire - a component re-registration is enough - removes a freed observer.
+ *
+ * The same precondition makes this unsafe to call while the app is running or
+ * mid-test: there is no way to put the XML scopes back.
  */
 void theme_manager_deinit();
 
@@ -470,6 +512,18 @@ void theme_manager_refresh_orientation(lv_display_t* display = nullptr);
  * @param display LVGL display instance
  */
 void theme_manager_register_responsive_fonts(lv_display_t* display);
+
+/**
+ * @brief Whether a font token is a responsive base token
+ *
+ * True for tokens like font_body that theme_manager_register_responsive_fonts
+ * re-points per breakpoint, false for size-suffixed variants (font_body_large)
+ * and non-font names. A suffixed variant names one tier's face, which
+ * AssetManager registers only at that tier and above, so below it the XML
+ * engine silently substitutes the default font.
+ */
+// NAMESPACE_OK: joins this header's global theme_manager_* free-function API
+bool theme_manager_font_token_is_base(const char* token);
 
 /**
  * @brief Toggle between light and dark themes
@@ -672,6 +726,96 @@ lv_color_t theme_get_accent_color();
 lv_color_t theme_manager_get_contrast_color(lv_color_t bg_color);
 
 /**
+ * @brief Get a foreground guaranteed readable on a saturated fill
+ *
+ * Returns pure black or pure white, whichever has the higher WCAG contrast
+ * ratio against @p fill. Use this when pure maximum contrast matters more
+ * than keeping the theme's tint — non-text chrome such as divider lines, or
+ * the fallback when a tinted colour cannot reach the contrast bar.
+ *
+ * Deliberately NOT theme_manager_get_contrast_color(). That one answers a
+ * different question: it hands back the palette's own text color for the
+ * lightness of the background, which keeps a surface visually consistent with
+ * the theme. Palette text colors are muted on purpose, so against a saturated
+ * mid-tone accent they land far below readable — over the shipped theme set,
+ * that choice bottoms out near 1.7:1 on a primary fill, while black-or-white
+ * never drops below 4.66:1.
+ *
+ * @param fill Background fill the content sits on
+ * @return Black or white, whichever reads better on @p fill
+ */
+lv_color_t theme_manager_get_readable_on(lv_color_t fill);
+
+namespace helix {
+/// WCAG contrast ratio between two colors (1.0 = identical, 21 = black on white).
+double contrast_ratio(lv_color_t a, lv_color_t b);
+
+/// Contrast a field outline must reach on every surface a field can sit on:
+/// WCAG 1.4.11 non-text contrast for a component boundary.
+inline constexpr double kFieldOutlineContrastThreshold = 3.0;
+
+/// Outline colour for unfilled input fields. Starts from the palette's
+/// text_subtle and shifts it the least amount needed to clear 3:1 against the
+/// screen, overlay, card and elevated (dialog) surfaces, since a field has no
+/// fill of its own and shows whichever one is behind it.
+lv_color_t field_outline_color(lv_color_t text_subtle, lv_color_t screen_bg, lv_color_t overlay_bg,
+                               lv_color_t card_bg, lv_color_t elevated_bg);
+} // namespace helix
+
+/// Contrast a text colour must reach on its fill: 4:1, between WCAG AA
+/// large-text (3:1) and AA body text (4.5:1). Around fill luminance 0.18 no
+/// colour at all reaches 4.5, and light text is capped below 4.5 on every fill
+/// above 0.183, so a 4.5 bar would leave a light palette no way to keep its
+/// tint on its accents.
+// NAMESPACE_OK: joins this header's global theme_manager_* free-function API
+inline constexpr double kThemeTextContrastThreshold = 4.0;
+
+/**
+ * @brief Shift a palette text colour just enough to read on a fill
+ *
+ * Keeps the theme's own text colour wherever it already clears a 4:1 WCAG
+ * contrast ratio against @p fill (returned byte-for-byte). Otherwise blends
+ * @p text toward the pole on its own side of the fill — light text toward
+ * white, dark text toward black — by the smallest amount that reaches 4:1,
+ * so the theme's tint survives instead of snapping to pure black or white.
+ * When no colour on the text's own side can reach 4:1, falls back to
+ * theme_manager_get_readable_on().
+ *
+ * Use this for text and text-coloured glyphs on an accent fill where the
+ * palette's text colour is the intended starting point.
+ *
+ * @param text Palette text colour intended for this context
+ * @param fill Background fill the text sits on
+ * @return @p text unchanged, or the nearest tint toward its pole that clears 4:1
+ */
+// NAMESPACE_OK: joins this header's global theme_manager_* free-function API
+lv_color_t theme_manager_get_contrast_adjusted_text(lv_color_t text, lv_color_t fill);
+
+/**
+ * @brief Contrast helper for a fill drawn below full opacity
+ *
+ * A translucent fill lands on screen as a mix of its own colour and whatever
+ * is behind it, so contrast must be judged against that composite, not the
+ * raw fill colour. Composites @p fill over @p backing at @p fill_opa and
+ * hands the result to the opaque-fill overload.
+ *
+ * Use this wherever an object's bg_opa sits below LV_OPA_COVER (chrome
+ * pills, scrims, badges). Contrast computed against the raw fill of a
+ * translucent object answers a colour that never reaches the screen.
+ *
+ * @param text Palette text colour intended for this context
+ * @param fill Fill colour as set on the object
+ * @param backing Colour the fill is drawn over
+ * @param fill_opa Opacity the fill is drawn at
+ * @param min_ratio WCAG ratio the result must reach on the composited fill
+ * @return Colour readable on the fill as it actually renders
+ */
+// NAMESPACE_OK: joins this header's global theme_manager_* free-function API
+lv_color_t theme_manager_get_contrast_adjusted_text(lv_color_t text, lv_color_t fill,
+                                                    lv_color_t backing, lv_opa_t fill_opa,
+                                                    double min_ratio = kThemeTextContrastThreshold);
+
+/**
  * @brief Apply palette colors to a single widget based on its type
  *
  * Styles the widget appropriately for its class type using colors from the
@@ -737,6 +881,19 @@ void theme_apply_current_palette_to_tree(lv_obj_t* root);
 lv_color_t theme_manager_get_color(const char* base_name);
 
 /**
+ * @brief Whether a color token resolves
+ *
+ * True when theme_manager_get_color would find the token: both _light and _dark
+ * variants, or a plain constant. Plugin canvas code uses this to reject an
+ * unknown token before committing a display list.
+ *
+ * @param base_name Color constant base name (e.g., "screen_bg", "warning")
+ * @return True when the token exists in the loaded theme
+ */
+// NAMESPACE_OK: joins this header's global theme_manager_* free-function API
+bool theme_manager_has_color(const char* base_name);
+
+/**
  * @brief Look up the Nth color from the rotating `object_color_1..8` palette.
  *
  * Cycles every 8 (`(index % 8) + 1`). Used by exclude-object visuals so the
@@ -768,11 +925,32 @@ void theme_manager_apply_bg_color(lv_obj_t* obj, const char* base_name,
  */
 int32_t theme_manager_get_font_height(const lv_font_t* font);
 
+namespace helix::ui {
+
+/**
+ * @brief Whether a font is one of the compiled MDI icon faces
+ *
+ * Icons carry their colour through the variant styles, so the theme walk and
+ * the button contrast pass both use this to leave them alone; a face it does
+ * not recognise falls through into code that writes inline colours over the
+ * variant and over HeatingIconAnimator's tint.
+ *
+ * Which faces exist is a build-time question — HELIX_MAX_FONT_TIER says how
+ * far up the ladder this build linked, and the faces above 64px are absent
+ * below tier 5.
+ *
+ * @param font Font pointer to test; nullptr is not an icon font
+ * @return true if the font is an MDI icon face linked into this build
+ */
+bool is_icon_font(const lv_font_t* font);
+
+} // namespace helix::ui
+
 /**
  * @brief Apply an overlay's navigation geometry at push time.
  *
  * Sets width always. In portrait also sets height and top alignment, because
- * ui_xml/portrait/navigation_bar.xml is a bottom strip that a full-height
+ * navigation_bar.xml's portrait style makes it a bottom strip that a full-height
  * overlay would cover. Landscape leaves height and alignment to the XML.
  *
  * The sole writer of overlay geometry — see OverlayClass for why the class is
@@ -872,12 +1050,16 @@ void theme_manager_parse_xml_file_for_suffix(
  * Files are sorted alphabetically to ensure deterministic processing order
  * (important for last-wins precedence).
  *
- * Does NOT recurse into subdirectories.
+ * Recurses into subdirectories only when @p recursive is set. Token discovery
+ * never does: it is last-wins across files, so a variant directory's token
+ * would shadow the base one globally.
  *
  * @param directory Directory path to search
+ * @param recursive Also collect *.xml from every subdirectory
  * @return Sorted vector of full file paths, empty if directory doesn't exist
  */
-std::vector<std::string> theme_manager_find_xml_files(const char* directory);
+std::vector<std::string> theme_manager_find_xml_files(const char* directory,
+                                                      bool recursive = false);
 
 /**
  * @brief Parse all XML files in a directory for constants with a specific suffix
@@ -916,6 +1098,9 @@ theme_manager_parse_all_xml_for_element(const char* directory, const char* eleme
  * Checks for incomplete sets:
  * - Responsive px: If ANY of foo_small, foo_medium, foo_large exist but NOT ALL -> warn
  * - Themed colors: If ONLY bar_light OR ONLY bar_dark exists -> warn
+ *
+ * Undefined `#name` references are `make lint-xml`'s check (unknown-const-ref),
+ * which also knows the theme tokens and the constants registered from C++.
  *
  * This function is useful for:
  * - Unit tests to catch incomplete constant sets

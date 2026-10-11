@@ -4,6 +4,7 @@
 #pragma once
 
 #include "overlay_base.h"
+#include "static_panel_registry.h"
 
 #include <string>
 
@@ -14,9 +15,9 @@ namespace helix::settings {
  * @brief Overlay for correcting the printer model
  *
  * Detection declines to persist a type it is not confident about, and it can
- * still land on the wrong near-neighbour when it is. Before this existed the
- * only way to change a model was to delete the printer and add it back, so
- * users either did that or lived with the wrong name (prestonbrown/helixscreen#1284).
+ * still land on the wrong near-neighbour when it is. This is the in-place
+ * correction, so a wrong model never forces deleting and re-adding the
+ * printer (prestonbrown/helixscreen#1284).
  *
  * Picking a model here goes through PrinterDetector::apply_type_choice(), the
  * same call the wizard's identify step makes, so the preset merge behaves
@@ -31,38 +32,26 @@ namespace helix::settings {
  */
 class PrinterTypeOverlay : public OverlayBase {
   public:
-    PrinterTypeOverlay();
-    ~PrinterTypeOverlay() override;
-
-    //
-    // === OverlayBase Interface ===
-    //
-
-    void init_subjects() override;
-    void register_callbacks() override;
-
     const char* get_name() const override {
         return "Printer Model";
     }
+    const char* xml_component() const override {
+        return "printer_type_overlay";
+    }
 
+    void register_callbacks() override;
     void on_activate() override;
 
     //
-    // === UI Creation ===
-    //
-
-    lv_obj_t* create(lv_obj_t* parent) override;
-    void show(lv_obj_t* parent_screen);
-
-    //
-    // === Event Handlers (public for static callbacks) ===
+    // === Event Handlers (public for the callback table) ===
     //
 
     void handle_type_selected(const std::string& type_name);
 
-  private:
-    static void on_type_row_clicked(lv_event_t* e);
+  protected:
+    void before_show() override;
 
+  private:
     void populate_type_list();
     void update_selection_indicator(const std::string& active_type);
 
@@ -70,9 +59,8 @@ class PrinterTypeOverlay : public OverlayBase {
     std::string kinematics_filter_;
 };
 
-/**
- * @brief Get the singleton printer type overlay instance
- */
-PrinterTypeOverlay& get_printer_type_overlay();
+inline PrinterTypeOverlay& get_printer_type_overlay() {
+    return lazy_global<PrinterTypeOverlay>("PrinterTypeOverlay");
+}
 
 } // namespace helix::settings

@@ -3,7 +3,7 @@
 
 #include "print_start_navigation.h"
 
-#include "ui_nav_manager.h"
+#include "ui_nav.h"
 #include "ui_panel_print_status.h"
 #include "ui_update_queue.h"
 
@@ -50,9 +50,9 @@ bool print_start_nav_should_navigate(PrintJobState prev, PrintJobState current) 
 // is_panel_in_stack() check has to run on the UI thread, so it lives
 // inside the queue_update lambda.
 static void queue_push_print_status_overlay() {
-    helix::ui::queue_update([]() {
+    helix::ui::queue_update("print_start_navigation::queue_push_print_status_overlay", []() {
         auto* cached = PrintStatusPanel::get_cached_overlay();
-        if (cached && NavigationManager::instance().is_panel_in_stack(cached)) {
+        if (cached && helix::nav::is_in_stack(cached)) {
             spdlog::debug("[PrintStartNav] Print status already on stack — skip auto-nav");
             return;
         }
@@ -100,7 +100,7 @@ static void on_print_state_changed_for_navigation(lv_observer_t* observer, lv_su
 ObserverGuard init_print_start_navigation_observer() {
     // Initialize prev_print_state to current state to prevent false trigger on startup
     // RAW_PRINT_STATE_OK: see the first-tick contract on prev_print_state.
-    prev_print_state = get_printer_state().get_print_job_state();
+    prev_print_state = get_printer_state().print_state().get_print_job_state();
     spdlog::debug("[PrintStartNav] Observer registered (initial state={})",
                   static_cast<int>(prev_print_state));
 
@@ -117,7 +117,7 @@ ObserverGuard init_print_start_navigation_observer() {
     }
 
     // RAW_PRINT_STATE_OK: navigation must NOT fire on Idle -> Preparing.
-    return ObserverGuard(get_printer_state().get_print_state_enum_subject(),
+    return ObserverGuard(get_printer_state().print_state().get_print_state_enum_subject(),
                          on_print_state_changed_for_navigation, nullptr);
 }
 

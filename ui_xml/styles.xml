@@ -13,9 +13,12 @@
 <component>
   <styles>
     <!-- Pressed feedback for clickable cards/rows: a primary-color wash while
-         the widget is pressed. Radius included so a use site needs exactly one
-         child element; an inline style_radius on the site overrides it. -->
-    <style name="press_wash" bg_color="#primary" bg_opa="30%" radius="#border_radius"/>
+         the widget is pressed. It sets no radius, so the wash takes the
+         element's own shape: a pill chip washes as a pill, a card with
+         style_radius="#border_radius" as a rounded card. A site with no radius
+         of its own gets the LVGL default, which ignores the theme's corner
+         setting, so give it one. -->
+    <style name="press_wash" bg_color="#primary" bg_opa="30%"/>
     <!-- The translucent metadata strip that rides at the bottom of a g-code
          preview card. Print status stacks it as a flex sibling under the art;
          the file detail view floats it over the art with align="bottom_mid".
@@ -34,6 +37,89 @@
          panel-local style; the dotted styles.invisible form crosses that
          boundary. -->
     <style name="invisible" opa="0"/>
+
+    <!-- Heater status-area duty text. Two mutually exclusive bindings partition
+         the state space (heating vs everything else); the pair lives here so
+         every heater surface colors the duty identically. -->
+    <style name="heater_duty_heating" text_color="#warning"/>
+    <style name="heater_duty_muted" text_color="#text_muted"/>
+
+    <!-- The count-badge box paired with each tile icon rung: 2/5 of
+         the glyph (tile_badge_* tokens), the proportion the AMS lane badge
+         uses on its spool. Only the box rides here; the circle radius lives
+         on the badge widget's own default style, so it tracks whatever size
+         these land on. -->
+    <style name="tile_badge_xs" width="#tile_badge_xs" height="#tile_badge_xs"/>
+    <style name="tile_badge_sm" width="#tile_badge_sm" height="#tile_badge_sm"/>
+    <style name="tile_badge_md" width="#tile_badge_md" height="#tile_badge_md"/>
+    <style name="tile_badge_lg" width="#tile_badge_lg" height="#tile_badge_lg"/>
+    <style name="tile_badge_xl" width="#tile_badge_xl" height="#tile_badge_xl"/>
+    <style name="tile_badge_xxl" width="#tile_badge_xxl" height="#tile_badge_xxl"/>
+
+    <!-- A style carrying flex_flow must also carry layout="flex": the inline
+         attribute path sets both, the style path does not, and a container
+         with no active layout piles every child onto the first while
+         lv_obj_get_style_flex_flow still reports the flow. -->
+    <!-- A style that owns the layout owns its placement too: binding one that
+         sets only the flow leaves the container packing its children at the
+         start, so a centred tile silently becomes left-justified. -->
+    <style name="tile_column"
+           layout="flex" flex_flow="column" flex_main_place="center" flex_cross_place="center" flex_track_place="center"
+           pad_left="0" pad_right="0"/>
+    <!-- A row tile insets its sides, so a text column that fills the width
+         beside the glyph (tile_fill) leaves the glyph off the tile's edge. -->
+    <style name="tile_row"
+           layout="flex" flex_flow="row" flex_main_place="center" flex_cross_place="center" flex_track_place="center"
+           pad_left="#space_sm" pad_right="#space_sm"/>
+    <!-- The text column beside a glyph in a row tile takes the width the glyph
+         leaves, so a long name ellipsizes instead of running off the tile. -->
+    <style name="tile_fill" flex_grow="1"/>
+
+    <!-- The printer-image callout pill: a card-colored, bordered chip that
+         lays its children out icon-first (row_reverse, so a nested icon
+         renders left of a template-declared label). Shared so an icon-only
+         chip (no label) still looks identical to a labeled one. -->
+    <style name="activity_chip"
+           layout="flex" flex_flow="row_reverse" flex_main_place="center" flex_cross_place="center" pad_hor="#space_xs"
+           pad_ver="#space_xxs" pad_column="#space_xxs" radius="#space_md" bg_color="#card_bg" bg_opa="220"
+           border_width="1" border_color="#border"/>
+
+    <!-- LEDs overlay: the running effect/preset or the chosen level fills its
+         chip, and the chosen swatch or white tone wears a ring. -->
+    <!-- A hairline for a shape that would otherwise vanish into the surface under
+         it (a white lamp or tone preview on a light panel, a dark swatch on a dark
+         dialog). Thinner than the selection ring, so the ring stays the strongest
+         mark. -->
+    <style name="contrast_edge" border_width="#border_width" border_color="#border" border_opa="255"/>
+    <!-- A thinner ring for the dense preset grids, so their discs keep their size. -->
+    <style name="grid_swatch_ring" border_width="#swatch_grid_ring_width" border_color="#text" border_opa="255"/>
+    <!-- A filament color swatch's edge, so black reads on a dark card and white
+         on a light one. apply_swatch_color() repaints the color and opacity of
+         the swatches it fills; this supplies the width they all need. -->
+    <style name="contrast_edge_outline"
+           outline_width="#border_width" outline_color="#border" outline_opa="255" outline_pad="0"/>
+    <!-- Emphasis ring for a full-bleed button whose own border is zeroed
+         (modal_button_row): an inset outline, which the inline border_width
+         cannot override, and which the dialog's edge cannot clip. -->
+    <style name="accent_outline" outline_width="2" outline_color="#card_bg" outline_opa="255" outline_pad="-4"/>
+    <style name="led_chip_idle" bg_color="#card_bg" bg_opa="255" border_width="#border_width" border_color="#border"/>
+    <style name="led_chip_active" bg_color="#primary" bg_opa="28%" border_color="#primary"/>
+    <!-- A swatch is its whole touch target: a transparent circle whose padding
+         is the ring's reach, holding the colored disc. The selection ring is its
+         border, so it draws inside the swatch and no container can clip it. -->
+    <style name="led_ring_holder" radius="9999" bg_opa="0" border_width="0" pad_all="#led_ring_reach"/>
+    <style name="led_swatch_ring" border_width="#led_ring_width" border_color="#text" border_opa="255"/>
+    <!-- A row of a single-choice picker list, and the chosen one. -->
+    <style name="picker_row" bg_opa="0" border_width="0" radius="#border_radius" pad_hor="#space_sm" pad_ver="0"/>
+    <style name="selected_row" bg_color="#primary" bg_opa="40"/>
+    <!-- A filament buffer reading's colour by its status (buffer_status,
+         buf_status): the slider block's colours, so the number and the block
+         always agree. Bind exactly one per status value. -->
+    <style name="buffer_ok" text_color="#text_muted"/>
+    <style name="buffer_warning" text_color="#warning"/>
+    <style name="buffer_danger" text_color="#danger"/>
+    <!-- The inset a buffer trace draws into: no fill, so only the line shows. -->
+    <style name="buffer_trace_area" bg_opa="0" border_width="0" pad_all="#space_xxs"/>
   </styles>
   <!-- Registration requires a <view>; nothing ever instantiates this
        component, so an empty lv_obj keeps it harmless. -->

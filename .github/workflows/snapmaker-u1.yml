@@ -38,6 +38,11 @@ concurrency:
   # A tag build ends in a published release — never cancel one of those.
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
+# Every patch is judged from clean here (see build.yml for why the flag is
+# environment-wide rather than per-step).
+env:
+  HELIX_PATCHES_FROM_CLEAN: "1"
+
 jobs:
   build:
     name: Build (Snapmaker U1)
@@ -122,6 +127,7 @@ jobs:
             -v "${{ github.workspace }}":/src \
             -v /tmp/.ccache-snapmaker-u1:/root/.cache/ccache \
             -w /src \
+            -e HELIX_PATCHES_FROM_CLEAN \
             helixscreen/toolchain-snapmaker-u1 \
             make PLATFORM_TARGET=snapmaker-u1 SKIP_OPTIONAL_DEPS=1 $PACKAGING -j$(nproc)
 
@@ -244,8 +250,10 @@ jobs:
       # releases/latest/download/ first, so the installer that runs is the one
       # that built the binary it installs — and it exists exactly when there is
       # something to install, unlike a branch's raw file.
+      # install.sh is generated, not committed: `make release-snapmaker-u1` built
+      # it into build/installer/ as a prerequisite of the package.
       - name: Stage the installers
-        run: cp scripts/install-fork.sh scripts/install.sh release-files/
+        run: cp scripts/install-fork.sh build/installer/install.sh release-files/
 
       - name: Checksums
         run: |

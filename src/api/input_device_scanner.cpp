@@ -4,13 +4,16 @@
 
 #include "config.h"
 #include "log_redact.h"
+#include "text_io.h"
 #include "touch_calibration.h"
 
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <cctype>
+#include <climits>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <dirent.h>
@@ -33,6 +36,25 @@ std::string read_sysfs_capability(const std::string& sysfs_base, int event_num,
                                   const std::string& cap_name) {
     return helix::input::read_sysfs_line(
         sysfs_device_path(sysfs_base, event_num, "capabilities/" + cap_name));
+}
+
+bool read_touch_capabilities(const std::string& sysfs_base, int event_num,
+                             helix::AbsCapabilities* caps_out) {
+    std::string caps = read_sysfs_capability(sysfs_base, event_num, "abs");
+    if (caps.empty())
+        return false;
+
+    auto result = helix::parse_abs_capabilities(caps);
+    if (caps_out)
+        *caps_out = result;
+
+    if (result.has_multitouch && !result.has_single_touch) {
+        spdlog::debug("[InputScanner] event{}: MT-only touchscreen detected "
+                      "(no legacy ABS_X/ABS_Y)",
+                      event_num);
+    }
+
+    return result.has_single_touch || result.has_multitouch;
 }
 
 std::string read_device_name(const std::string& sysfs_base, int event_num) {
@@ -72,8 +94,7 @@ std::string normalize_hex_id(const std::string& s) {
     std::string out = s.substr(start, end - start);
     if (out.size() >= 2 && out[0] == '0' && (out[1] == 'x' || out[1] == 'X'))
         out = out.substr(2);
-    std::transform(out.begin(), out.end(), out.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
+    out = helix::text_io::to_lower(out);
     return out;
 }
 
@@ -167,16 +188,63 @@ std::vector<std::string> read_device_blacklist_from_config() {
     // runs during display backend init, before SettingsManager::init_subjects().
     try {
         Config* config = Config::get_instance();
-        if (config) {
-            // Top-level "/input/..." path (not df()/per-printer) to match the
-            // template placement and sibling keys like /input/touch_device.
-            return config->get<std::vector<std::string>>("/input/device_blacklist", {});
-        }
+        // Top-level "/input/..." path (not df()/per-printer) to match the
+        // template placement and sibling keys like /input/touch_device.
+        return config->get<std::vector<std::string>>("/input/device_blacklist", {});
+
     } catch (...) {
         // Config may not be initialized yet during very early startup, or the key
         // may hold an unexpected type. Treat as no blacklist.
     }
     return {};
+}
+
+const char* pointer_kind_name(PointerKind kind) {
+    return kind == PointerKind::Relative ? "relative" : "panel";
+}
+
+PointerKind classify_pointer_capabilities(const std::string& abs_caps, const std::string& rel_caps,
+                                          const std::string& key_caps) {
+    // Touchscreens:
+    //   - Legacy single-touch: ABS_X (bit 0) + ABS_Y (bit 1)
+    //   - MT-only (e.g. Goodix gt9xxnew_ts): ABS_MT_POSITION_X (bit 53) +
+    //     ABS_MT_POSITION_Y (bit 54) without legacy ABS_X/ABS_Y
+    //   - Any device with BTN_TOUCH (bit 330)
+    const bool has_legacy_abs =
+        check_capability_bit(abs_caps, 0) && check_capability_bit(abs_caps, 1);
+    const bool has_mt_abs =
+        check_capability_bit(abs_caps, 53) && check_capability_bit(abs_caps, 54);
+    const bool has_btn_touch = check_capability_bit(key_caps, 330);
+    if (has_legacy_abs || has_mt_abs || has_btn_touch) {
+        return PointerKind::PanelAbsolute;
+    }
+
+    // REL_X (bit 0) + REL_Y (bit 1)
+    if (check_capability_bit(rel_caps, 0) && check_capability_bit(rel_caps, 1)) {
+        return PointerKind::Relative;
+    }
+    return PointerKind::PanelAbsolute;
+}
+
+PointerKind pointer_kind_for_device(const std::string& device_path, const std::string& sysfs_base) {
+    // Resolve links such as /dev/input/by-id/*, whose names say nothing about the node.
+    char resolved[PATH_MAX];
+    const char* node_path =
+        ::realpath(device_path.c_str(), resolved) != nullptr ? resolved : device_path.c_str();
+    const char* slash = std::strrchr(node_path, '/');
+    const char* node = slash != nullptr ? slash + 1 : node_path;
+
+    int event_num = -1;
+    if (sscanf(node, "event%d", &event_num) != 1 || event_num < 0) {
+        return PointerKind::PanelAbsolute;
+    }
+    return classify_pointer_capabilities(read_sysfs_capability(sysfs_base, event_num, "abs"),
+                                         read_sysfs_capability(sysfs_base, event_num, "rel"),
+                                         read_sysfs_capability(sysfs_base, event_num, "key"));
+}
+
+PointerKind pointer_kind_for_device(const std::string& device_path) {
+    return pointer_kind_for_device(device_path, "/sys/class/input");
 }
 
 std::optional<ScannedDevice> find_mouse_device(const std::string& dev_base,
@@ -211,26 +279,10 @@ std::optional<ScannedDevice> find_mouse_device(const std::string& dev_base,
         spdlog::debug("[InputScanner] Scanning {} ({}) abs=[{}] rel=[{}] key=[{}]", device_path,
                       name, abs_caps, rel_caps, key_caps);
 
-        // Skip touchscreens:
-        //   - Legacy single-touch: ABS_X (bit 0) + ABS_Y (bit 1)
-        //   - MT-only (e.g. Goodix gt9xxnew_ts): ABS_MT_POSITION_X (bit 53) +
-        //     ABS_MT_POSITION_Y (bit 54) without legacy ABS_X/ABS_Y
-        //   - Any device with BTN_TOUCH (bit 330) — touchscreens, not mice
-        bool has_legacy_abs =
-            check_capability_bit(abs_caps, 0) && check_capability_bit(abs_caps, 1);
-        bool has_mt_abs = check_capability_bit(abs_caps, 53) && check_capability_bit(abs_caps, 54);
-        bool has_btn_touch = check_capability_bit(key_caps, 330);
-
-        if (has_legacy_abs || has_mt_abs || has_btn_touch) {
-            spdlog::debug("[InputScanner] Skipping {} (touchscreen: legacy_abs={} mt_abs={} "
-                          "btn_touch={})",
-                          device_path, has_legacy_abs, has_mt_abs, has_btn_touch);
-            continue;
-        }
-
-        // Require REL_X (bit 0) + REL_Y (bit 1)
-        if (!check_capability_bit(rel_caps, 0) || !check_capability_bit(rel_caps, 1)) {
-            spdlog::debug("[InputScanner] Skipping {} (no REL_X/REL_Y)", device_path);
+        // Touchscreen capabilities win over relative axes, so a touch panel that
+        // also reports REL_X/REL_Y is never taken for a mouse.
+        if (classify_pointer_capabilities(abs_caps, rel_caps, key_caps) != PointerKind::Relative) {
+            spdlog::debug("[InputScanner] Skipping {} (not a relative pointer)", device_path);
             continue;
         }
 
@@ -259,6 +311,67 @@ std::optional<ScannedDevice> find_mouse_device(const std::string& dev_base,
 
 std::optional<ScannedDevice> find_mouse_device() {
     return find_mouse_device("/dev/input", "/sys/class/input");
+}
+
+std::optional<ScannedDevice> find_touch_device(const std::string& dev_base,
+                                               const std::string& sysfs_base) {
+    auto dir = std::unique_ptr<DIR, decltype(&closedir)>(opendir(dev_base.c_str()), closedir);
+    if (!dir) {
+        spdlog::debug("[InputScanner] Cannot open {}", dev_base);
+        return std::nullopt;
+    }
+
+    std::optional<ScannedDevice> best;
+    int best_score = -1;
+
+    struct dirent* entry;
+    while ((entry = readdir(dir.get())) != nullptr) {
+        if (strncmp(entry->d_name, "event", 5) != 0) {
+            continue;
+        }
+
+        int event_num = -1;
+        if (sscanf(entry->d_name, "event%d", &event_num) != 1 || event_num < 0) {
+            continue;
+        }
+
+        std::string device_path = dev_base + "/" + entry->d_name;
+        if (access(device_path.c_str(), R_OK) != 0) {
+            continue;
+        }
+
+        std::string name = read_device_name(sysfs_base, event_num);
+        if (!read_touch_capabilities(sysfs_base, event_num, nullptr)) {
+            spdlog::trace("[InputScanner] {} ({}) - no touch capabilities", device_path, name);
+            continue;
+        }
+
+        bool is_known = helix::is_known_touchscreen_name(name);
+        bool is_direct = helix::parse_input_prop_direct(
+            read_sysfs_line(sysfs_device_path(sysfs_base, event_num, "properties")));
+        std::string phys = read_sysfs_line(sysfs_device_path(sysfs_base, event_num, "phys"));
+        bool is_usb = helix::is_usb_input_phys(phys);
+        int score = (is_known ? 2 : 0) + (is_direct ? 2 : 0) + (is_usb ? 1 : 0);
+
+        spdlog::debug("[InputScanner] {} ({}) touch score={} [known={} direct={} usb={} phys='{}']",
+                      device_path, name, score, is_known, is_direct, is_usb, phys);
+
+        // Best score wins; ties broken by lowest event number
+        if (score > best_score || (score == best_score && event_num < best->event_num)) {
+            best = ScannedDevice{device_path, name, event_num};
+            best_score = score;
+        }
+    }
+
+    if (best) {
+        spdlog::info("[InputScanner] Found touchscreen: {} ({}) [score={}]", best->path, best->name,
+                     best_score);
+    }
+    return best;
+}
+
+std::optional<ScannedDevice> find_touch_device() {
+    return find_touch_device("/dev/input", "/sys/class/input");
 }
 
 std::optional<ScannedDevice> find_keyboard_device(const std::string& dev_base,
@@ -329,8 +442,7 @@ std::optional<ScannedDevice> find_keyboard_device(const std::string& dev_base,
         // Skip devices with "barcode" or "scanner" in the name — these are
         // barcode scanners that happen to present as USB HID keyboards.
         std::string lower_name = name;
-        std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(),
-                       [](unsigned char c) { return std::tolower(c); });
+        lower_name = helix::text_io::to_lower(lower_name);
         if (lower_name.find("barcode") != std::string::npos ||
             lower_name.find("scanner") != std::string::npos) {
             spdlog::info("[InputScanner] Skipping scanner device for keyboard: {} ({})",
@@ -363,9 +475,8 @@ std::optional<ScannedDevice> find_keyboard_device() {
     std::string exclude_id;
     try {
         Config* config = Config::get_instance();
-        if (config) {
-            exclude_id = config->get<std::string>("/scanner/usb_vendor_product", "");
-        }
+        exclude_id = config->get<std::string>("/scanner/usb_vendor_product", "");
+
     } catch (...) {
         // Config may not be initialized yet during very early startup
     }
@@ -439,8 +550,7 @@ std::vector<ScannedDevice> find_hid_keyboard_devices(const std::string& dev_base
 
         // Prioritize devices with "barcode" or "scanner" in the name
         std::string lower_name = name;
-        std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(),
-                       [](unsigned char c) { return std::tolower(c); });
+        lower_name = helix::text_io::to_lower(lower_name);
         if (lower_name.find("barcode") != std::string::npos ||
             lower_name.find("scanner") != std::string::npos) {
             spdlog::info("[InputScanner] Found named scanner device: {} ({})", device_path, name);
@@ -666,23 +776,7 @@ std::vector<UsbHidDevice> enumerate_usb_hid_devices() {
 }
 
 bool get_input_touch_capabilities(int event_num, helix::AbsCapabilities* caps_out) {
-    std::string path =
-        "/sys/class/input/event" + std::to_string(event_num) + "/device/capabilities/abs";
-    std::string caps = read_sysfs_line(path);
-    if (caps.empty())
-        return false;
-
-    auto result = helix::parse_abs_capabilities(caps);
-    if (caps_out)
-        *caps_out = result;
-
-    if (result.has_multitouch && !result.has_single_touch) {
-        spdlog::debug("[InputScanner] event{}: MT-only touchscreen detected "
-                      "(no legacy ABS_X/ABS_Y)",
-                      event_num);
-    }
-
-    return result.has_single_touch || result.has_multitouch;
+    return read_touch_capabilities("/sys/class/input", event_num, caps_out);
 }
 
 } // namespace helix::input

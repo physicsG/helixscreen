@@ -31,7 +31,7 @@
             style_pad_bottom="#space_md" scrollable="false">
 
       <!-- BACK BUTTON (hidden on step 0 via conditional binding) -->
-      <ui_button name="btn_back" width="#wizard_button_width" text="Back" translation_tag="Back">
+      <ui_button name="btn_back" width="#wizard_button_width" text="Back">
         <event_cb trigger="clicked" callback="on_back_clicked"/>
         <!-- Hide when wizard_back_visible == 0 (at first visible step) -->
         <bind_flag_if_eq subject="wizard_back_visible" flag="hidden" ref_value="0"/>
@@ -51,7 +51,7 @@
         <bind_flag_if_eq subject="wizard_is_final_step" flag="hidden" ref_value="1"/>
 
         <!-- NEXT BUTTON - visible when NOT showing skip -->
-        <ui_button name="btn_next" width="100%" height="100%" text="Next" translation_tag="Next">
+        <ui_button name="btn_next" width="100%" height="100%" text="Next">
           <event_cb trigger="clicked" callback="on_next_clicked"/>
           <bind_state_if_not_eq subject="connection_test_passed" state="disabled" ref_value="1"/>
           <bind_flag_if_eq subject="connection_test_passed" flag="clickable" ref_value="1"/>
@@ -59,15 +59,14 @@
         </ui_button>
 
         <!-- SKIP BUTTON - visible only when wizard_show_skip=1 -->
-        <ui_button name="btn_skip" width="100%" height="100%" text="Skip" translation_tag="Skip">
+        <ui_button name="btn_skip" width="100%" height="100%" text="Skip">
           <event_cb trigger="clicked" callback="on_next_clicked"/>
           <bind_flag_if_not_eq subject="wizard_show_skip" flag="hidden" ref_value="1"/>
         </ui_button>
       </lv_obj>
 
       <!-- FINISH BUTTON - visible ONLY on final step -->
-      <ui_button name="btn_finish"
-                 width="#wizard_button_width" height="#button_height" text="Finish" translation_tag="Finish">
+      <ui_button name="btn_finish" width="#wizard_button_width" height="#button_height" text="Finish">
         <event_cb trigger="clicked" callback="on_next_clicked"/>
         <!-- Button is enabled when connection_test_passed == 1 (disabled otherwise) -->
         <bind_state_if_not_eq subject="connection_test_passed" state="disabled" ref_value="1"/>

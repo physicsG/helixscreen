@@ -4,11 +4,10 @@
 #include "ui_sound_preview_overlay.h"
 
 #include "ui_event_safety.h"
-#include "ui_nav_manager.h"
 #include "ui_utils.h"
 
 #include "sound_manager.h"
-#include "static_panel_registry.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/spdlog.h>
 
@@ -17,85 +16,12 @@
 
 namespace helix::settings {
 
-// ==========================================================================
-// Singleton
-// ==========================================================================
-
-static std::unique_ptr<SoundPreviewOverlay> g_sound_preview_overlay;
-
-SoundPreviewOverlay& get_sound_preview_overlay() {
-    if (!g_sound_preview_overlay) {
-        g_sound_preview_overlay = std::make_unique<SoundPreviewOverlay>();
-        StaticPanelRegistry::instance().register_destroy("SoundPreviewOverlay",
-                                                         []() { g_sound_preview_overlay.reset(); });
-    }
-    return *g_sound_preview_overlay;
-}
-
-// ==========================================================================
-// Lifecycle
-// ==========================================================================
-
-SoundPreviewOverlay::SoundPreviewOverlay() {
-    spdlog::debug("[{}] Created", get_name());
-}
-
-void SoundPreviewOverlay::init_subjects() {
-    init_subjects_guarded(
-        [this]() { spdlog::debug("[{}] Subjects initialized (none needed)", get_name()); });
-}
-
-void SoundPreviewOverlay::register_callbacks() {
-    spdlog::debug("[{}] Callbacks registered (none needed)", get_name());
-}
-
-lv_obj_t* SoundPreviewOverlay::create(lv_obj_t* parent) {
-    if (overlay_root_) {
-        spdlog::warn("[{}] create() called but overlay already exists", get_name());
-        return overlay_root_;
-    }
-
-    overlay_root_ = static_cast<lv_obj_t*>(lv_xml_create(parent, "sound_preview_overlay", nullptr));
-    if (!overlay_root_) {
-        spdlog::error("[{}] Failed to create overlay from XML", get_name());
-        return nullptr;
-    }
-
-    lv_obj_add_flag(overlay_root_, LV_OBJ_FLAG_HIDDEN);
-    spdlog::info("[{}] Overlay created", get_name());
-    return overlay_root_;
-}
-
-void SoundPreviewOverlay::show(lv_obj_t* parent_screen) {
-    spdlog::debug("[{}] show() called", get_name());
-
-    parent_screen_ = parent_screen;
-
-    if (!subjects_initialized_) {
-        init_subjects();
-        register_callbacks();
-    }
-
-    if (!overlay_root_ && parent_screen_) {
-        create(parent_screen_);
-    }
-
-    if (!overlay_root_) {
-        spdlog::error("[{}] Cannot show - overlay not created", get_name());
-        return;
-    }
-
-    NavigationManager::instance().register_overlay_instance(overlay_root_, this);
-    NavigationManager::instance().push_overlay(overlay_root_);
-}
-
 void SoundPreviewOverlay::on_activate() {
     OverlayBase::on_activate();
     populate_buttons();
 }
 
-void SoundPreviewOverlay::on_deactivate() {
-    OverlayBase::on_deactivate();
+void SoundPreviewOverlay::on_deactivating(DeactivateReason) {
     clear_buttons();
 }
 
@@ -142,9 +68,8 @@ std::string SoundPreviewOverlay::display_name(const std::string& sound_name) {
 }
 
 void SoundPreviewOverlay::populate_buttons() {
-    lv_obj_t* grid = lv_obj_find_by_name(overlay_root_, "sound_button_grid");
+    lv_obj_t* grid = helix::ui::find_required(overlay_root_, "sound_button_grid", get_name());
     if (!grid) {
-        spdlog::error("[{}] Could not find sound_button_grid", get_name());
         return;
     }
 
@@ -191,7 +116,7 @@ void SoundPreviewOverlay::populate_buttons() {
 }
 
 void SoundPreviewOverlay::clear_buttons() {
-    lv_obj_t* grid = lv_obj_find_by_name(overlay_root_, "sound_button_grid");
+    lv_obj_t* grid = helix::ui::find_required(overlay_root_, "sound_button_grid", get_name());
     if (grid) {
         helix::ui::safe_clean_children(grid);
     }

@@ -4,7 +4,9 @@
 
 #include "ui_update_queue.h"
 
+#include "helix_thread.h"
 #include "layout_manager.h"
+#include "xml_registration.h"
 
 #include <spdlog/spdlog.h>
 
@@ -21,30 +23,6 @@ extern "C" {
 namespace fs = std::filesystem;
 
 namespace {
-
-/// Components whose registered scope is extended from C++ after startup, so
-/// re-registering them from XML alone cannot reproduce the live scope.
-///
-/// - globals: not a UI component at all. It owns every XML subject in the app
-///   (~1000 of them, most backed by C++-owned storage) plus the runtime theme
-///   constants ThemeManager injects. Those constants are pushed in from C++
-///   after registration, so a fresh registration from globals.xml resolves every
-///   theme token to nothing across the entire UI. (Scope teardown itself is now
-///   safe — `lv_xml_component_unregister` skips borrowed subjects instead of
-///   free()ing C++ storage — but the constants are not recoverable.)
-/// - color_picker / color_swatch_grid: register_xml_components() pushes
-///   breakpoint-computed constants into their scopes after registration. A
-///   fresh registration would resolve those tokens to nothing.
-constexpr const char* NON_RELOADABLE_COMPONENTS[] = {"globals", "color_picker",
-                                                     "color_swatch_grid"};
-
-bool is_non_reloadable(const std::string& component) {
-    for (const auto* name : NON_RELOADABLE_COMPONENTS) {
-        if (component == name)
-            return true;
-    }
-    return false;
-}
 
 /// Read a file into `out`. Returns false on open/read failure (e.g. file is
 /// mid-rename, briefly empty, or permission-denied). Sets `err_out` for logging.
@@ -95,7 +73,7 @@ bool xml_is_well_formed(const std::string& xml_def, std::string& err_out) {
 void count_scope_subjects(const char* component_name, size_t& owned_out, size_t& borrowed_out) {
     owned_out = 0;
     borrowed_out = 0;
-    lv_xml_component_scope_t* scope = lv_xml_component_get_scope(component_name);
+    lv_xml_component_scope_t* scope = lv_xml_component_find_scope(component_name);
     if (!scope)
         return;
     // LV_LL_READ is a C macro that relies on implicit void* conversion — expand it manually
@@ -115,7 +93,7 @@ namespace helix {
 
 std::vector<BorrowedSubject> snapshot_borrowed_subjects(const char* component_name) {
     std::vector<BorrowedSubject> borrowed;
-    lv_xml_component_scope_t* scope = lv_xml_component_get_scope(component_name);
+    lv_xml_component_scope_t* scope = lv_xml_component_find_scope(component_name);
     if (!scope)
         return borrowed;
     for (void* node = lv_ll_get_head(&scope->subjects_ll); node != nullptr;
@@ -167,7 +145,7 @@ void XmlHotReloader::start(const std::vector<std::string>& xml_dirs, int poll_in
                  file_mtimes_.size(), xml_dirs.size(), poll_interval_ms_);
 
     running_.store(true);
-    poll_thread_ = std::thread(&XmlHotReloader::poll_loop, this);
+    poll_thread_ = helix::make_thread(&XmlHotReloader::poll_loop, this);
 }
 
 void XmlHotReloader::stop() {
@@ -328,7 +306,9 @@ void XmlHotReloader::scan_and_reload() {
         auto comp_name = component_name_from_path(fs::path(abs_path));
         auto lvgl_path = file_to_lvgl_path_[abs_path];
 
-        if (is_non_reloadable(comp_name)) {
+        // A fresh registration from the file alone would lose what C++ pushed
+        // into the scope (globals: the theme constants).
+        if (helix::is_xml_component_cpp_extended(comp_name)) {
             cached_mtime = current_mtime;
             spdlog::warn("[HotReload] '{}' cannot be hot-reloaded (its scope is extended from "
                          "C++ after registration) — restart to pick up the change",
@@ -387,64 +367,67 @@ void XmlHotReloader::scan_and_reload() {
             auto reload_name = comp_name;
             auto reload_buf = std::move(xml_buf);
             auto after_cb = after_reload_callback_;
-            helix::ui::queue_update([reload_name, reload_buf = std::move(reload_buf), after_cb]() {
-                auto start = std::chrono::steady_clock::now();
+            helix::ui::queue_update(
+                "XmlHotReloader::scan_and_reload",
+                [reload_name, reload_buf = std::move(reload_buf), after_cb]() {
+                    auto start = std::chrono::steady_clock::now();
 
-                size_t owned_subjects = 0;
-                size_t borrowed_subjects = 0;
-                count_scope_subjects(reload_name.c_str(), owned_subjects, borrowed_subjects);
-                if (owned_subjects > 0 || borrowed_subjects > 0) {
-                    spdlog::debug("[HotReload] '{}' scope holds {} XML-declared subject(s) "
-                                  "(freed and re-parsed; observers detached, so live widgets "
-                                  "bound to them go inert until rebuilt below) and {} "
-                                  "C++-registered subject(s) (kept alive by C++ and carried "
-                                  "across into the new scope)",
-                                  reload_name, owned_subjects, borrowed_subjects);
-                }
+                    size_t owned_subjects = 0;
+                    size_t borrowed_subjects = 0;
+                    count_scope_subjects(reload_name.c_str(), owned_subjects, borrowed_subjects);
+                    if (owned_subjects > 0 || borrowed_subjects > 0) {
+                        spdlog::debug("[HotReload] '{}' scope holds {} XML-declared subject(s) "
+                                      "(freed and re-parsed; observers detached, so live widgets "
+                                      "bound to them go inert until rebuilt below) and {} "
+                                      "C++-registered subject(s) (kept alive by C++ and carried "
+                                      "across into the new scope)",
+                                      reload_name, owned_subjects, borrowed_subjects);
+                    }
 
-                // Subjects the scope only borrows are registered from C++ once at
-                // startup. Unregister destroys the scope and with it those
-                // registrations, and re-parsing the XML cannot recreate them — so
-                // snapshot them here and put them back below, or the component
-                // comes back live but with every bind_* naming one resolving to
-                // nothing.
-                auto borrowed = snapshot_borrowed_subjects(reload_name.c_str());
+                    // Subjects the scope only borrows are registered from C++ once at
+                    // startup. Unregister destroys the scope and with it those
+                    // registrations, and re-parsing the XML cannot recreate them — so
+                    // snapshot them here and put them back below, or the component
+                    // comes back live but with every bind_* naming one resolving to
+                    // nothing.
+                    auto borrowed = snapshot_borrowed_subjects(reload_name.c_str());
 
-                // Unregister old component definition
-                auto result = lv_xml_component_unregister(reload_name.c_str());
-                if (result != LV_RESULT_OK) {
-                    spdlog::warn("[HotReload] Failed to unregister '{}' — registering fresh",
-                                 reload_name);
-                }
+                    // Unregister old component definition
+                    auto result = lv_xml_component_unregister(reload_name.c_str());
+                    if (result != LV_RESULT_OK) {
+                        spdlog::warn("[HotReload] Failed to unregister '{}' — registering fresh",
+                                     reload_name);
+                    }
 
-                // Re-register from the pre-validated buffer (NOT from file —
-                // file could change again between pre-flight and now).
-                result =
-                    lv_xml_register_component_from_data(reload_name.c_str(), reload_buf.c_str());
-                if (result != LV_RESULT_OK) {
-                    // Shouldn't happen — pre-flight already parsed this exact
-                    // buffer successfully. If we ever get here, the component
-                    // is unregistered and live widgets are inert; log loudly.
-                    spdlog::error("[HotReload] Post-pre-flight parse failure for '{}' — "
-                                  "component is now unregistered; fix and save again",
-                                  reload_name);
-                    return;
-                }
+                    // Re-register from the pre-validated buffer (NOT from file —
+                    // file could change again between pre-flight and now).
+                    result = lv_xml_register_component_from_data(reload_name.c_str(),
+                                                                 reload_buf.c_str());
+                    if (result != LV_RESULT_OK) {
+                        // Shouldn't happen — pre-flight already parsed this exact
+                        // buffer successfully. If we ever get here, the component
+                        // is unregistered and live widgets are inert; log loudly.
+                        spdlog::error("[HotReload] Post-pre-flight parse failure for '{}' — "
+                                      "component is now unregistered; fix and save again",
+                                      reload_name);
+                        return;
+                    }
 
-                size_t restored = restore_borrowed_subjects(reload_name.c_str(), borrowed);
-                if (restored > 0) {
-                    spdlog::debug("[HotReload] '{}': carried {} C++-registered subject(s) into "
-                                  "the new scope",
-                                  reload_name, restored);
-                }
+                    size_t restored = restore_borrowed_subjects(reload_name.c_str(), borrowed);
+                    if (restored > 0) {
+                        spdlog::debug("[HotReload] '{}': carried {} C++-registered subject(s) into "
+                                      "the new scope",
+                                      reload_name, restored);
+                    }
 
-                auto elapsed = std::chrono::steady_clock::now() - start;
-                auto us = std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count();
-                spdlog::info("[HotReload] Reloaded: {} ({:.1f}ms)", reload_name, us / 1000.0);
+                    auto elapsed = std::chrono::steady_clock::now() - start;
+                    auto us =
+                        std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count();
+                    spdlog::info("[HotReload] Reloaded: {} ({:.1f}ms)", reload_name, us / 1000.0);
 
-                if (after_cb)
-                    after_cb(reload_name);
-            });
+                    if (after_cb)
+                        after_cb(reload_name);
+                });
         }
     }
 }

@@ -16,8 +16,9 @@ namespace helix {
  * Thread-safe: sends stamp from the main thread, acks/errors from the websocket
  * thread.
  *
- * SCOPE: consulted ONLY by the busy-toast decision in
- * IMoonrakerAPI::execute_gcode. Neither PrinterState::is_blocking_operation_active()
+ * SCOPE: consulted by the busy-toast decision in IMoonrakerAPI::execute_gcode
+ * and by FilamentInsertWatcher (to tell an app-driven load from a hand-fed
+ * one). Neither PrinterState::is_blocking_operation_active()
  * nor is_external_blocking_operation_active() reads it, and neither may start:
  * those predicates also gate motion, and letting a late jog through during a
  * filament op is a toolhead-collision hazard (#1108). Blast radius is one

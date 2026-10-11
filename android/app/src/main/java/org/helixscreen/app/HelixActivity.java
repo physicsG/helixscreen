@@ -1,5 +1,7 @@
 package org.helixscreen.app;
 
+import android.content.Context;
+import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.graphics.Color;
 import android.os.Build;
@@ -17,7 +19,6 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.nio.charset.StandardCharsets;
 import java.util.Scanner;
 
 import org.helixscreen.app.BuildConfig;
@@ -544,6 +545,32 @@ public class HelixActivity extends SDLActivity {
         });
     }
 
+    /**
+     * Package name of whatever installed this app ("com.android.vending" for Play),
+     * or "" when Android reports none, which is normal for an APK sideloaded
+     * through adb or a file manager. Native code picks the update destination
+     * from this.
+     */
+    @SuppressWarnings("deprecation")
+    public static String getInstallerPackage() {
+        try {
+            Context ctx = SDLActivity.getContext();
+            if (ctx == null) return "";
+            PackageManager pm = ctx.getPackageManager();
+            String pkg = ctx.getPackageName();
+            String installer;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                installer = pm.getInstallSourceInfo(pkg).getInstallingPackageName();
+            } else {
+                installer = pm.getInstallerPackageName(pkg);
+            }
+            return installer != null ? installer : "";
+        } catch (Exception e) {
+            Log.w("HelixInstaller", "Installer lookup failed: " + errorText(e));
+            return "";
+        }
+    }
+
     // =========================================================================
     // JNI HTTPS bridge — called from native crash reporter
     // =========================================================================
@@ -625,51 +652,10 @@ public class HelixActivity extends SDLActivity {
     }
 
     /**
-     * Perform an HTTPS POST using Android's built-in TLS stack.
-     * Called from native code via JNI when libhv lacks SSL support.
+     * HTTPS POST with a raw binary body, so gzip-compressed payloads survive.
+     * Called from native code via JNI because libhv lacks SSL support here.
      *
-     * @param url         Full HTTPS URL
-     * @param body        JSON request body
-     * @param userAgent   User-Agent header value
-     * @param apiKey      X-API-Key header value
-     * @param timeoutSec  Connection + read timeout in seconds
-     * @return            "STATUS_CODE\nRESPONSE_BODY" on success,
-     *                    "0\nERROR_MESSAGE" on failure
-     */
-    public static String httpsPost(String url, String body, String userAgent,
-                                   String apiKey, int timeoutSec) {
-        HttpURLConnection conn = null;
-        try {
-            conn = (HttpURLConnection) new URL(url).openConnection();
-            conn.setRequestMethod("POST");
-            conn.setDoOutput(true);
-            conn.setConnectTimeout(timeoutSec * 1000);
-            conn.setReadTimeout(timeoutSec * 1000);
-            conn.setRequestProperty("Content-Type", "application/json");
-            conn.setRequestProperty("User-Agent", userAgent);
-            conn.setRequestProperty("X-API-Key", apiKey);
-
-            byte[] payload = body.getBytes(StandardCharsets.UTF_8);
-            conn.setFixedLengthStreamingMode(payload.length);
-
-            try (OutputStream os = conn.getOutputStream()) {
-                os.write(payload);
-            }
-
-            int status = conn.getResponseCode();
-            return status + "\n" + readResponseBody(conn, status);
-        } catch (Exception e) {
-            Log.w("HelixHTTPS", "POST failed: " + errorText(e));
-            return "0\n" + errorText(e);
-        } finally {
-            if (conn != null) conn.disconnect();
-        }
-    }
-
-    /**
-     * HTTPS POST with a raw binary body — for gzip-compressed payloads where
-     * round-tripping bytes through a Java String would corrupt them (debug
-     * bundle upload). Same STATUS\nBODY / 0\nERROR contract as httpsPost.
+     * @return "STATUS_CODE\nRESPONSE_BODY" on success, "0\nERROR_MESSAGE" on failure
      */
     public static String httpsPostBinary(String url, byte[] body, String contentType,
                                          String contentEncoding, String userAgent,

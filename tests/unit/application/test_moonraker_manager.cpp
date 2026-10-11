@@ -20,6 +20,8 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "../../catch_amalgamated.hpp"
 
@@ -113,89 +115,49 @@ using namespace helix;
 // HELIX_MOCK_PRINTER authoritative-over-saved-type contract
 // ============================================================================
 // PrinterDetector::auto_detect_and_save() short-circuits when a printer type is
-// already persisted in config. Under HELIX_MOCK_PRINTER, MoonrakerManager::init()
-// clears the saved type (gated strictly on the env var) BEFORE detection runs so
-// the mock's reported identity re-resolves every launch. These tests pin that
-// clear-vs-preserve behavior against a real Config without spinning up the full
-// (LVGL-heavy) MoonrakerManager init path. They mirror exactly the production
-// guard in moonraker_manager.cpp::init().
+// already persisted in config, so MoonrakerManager::init() settles the saved
+// type from HELIX_MOCK_PRINTER before detection runs.
 
 #include "config.h"
 #include "wizard_config_paths.h"
 
-namespace {
-
-// Replays the production env-gated clear from MoonrakerManager::init(). Kept in
-// lockstep with that block — if the seam moves, update both.
-void apply_mock_printer_type_clear(Config& cfg) {
-    if (std::getenv("HELIX_MOCK_PRINTER")) {
-        const std::string type_path = cfg.df() + helix::wizard::PRINTER_TYPE;
-        const std::string prev = cfg.get<std::string>(type_path, "");
-        if (!prev.empty()) {
-            cfg.set<std::string>(type_path, "");
-        }
-    }
-}
-
-// RAII helper: set HELIX_MOCK_PRINTER for the scope, restore prior value after.
-struct ScopedMockPrinterEnv {
-    std::string saved;
-    bool had = false;
-    explicit ScopedMockPrinterEnv(const char* value) {
-        if (const char* prev = std::getenv("HELIX_MOCK_PRINTER")) {
-            saved = prev;
-            had = true;
-        }
-        if (value) {
-            setenv("HELIX_MOCK_PRINTER", value, 1);
-        } else {
-            unsetenv("HELIX_MOCK_PRINTER");
-        }
-    }
-    ~ScopedMockPrinterEnv() {
-        if (had) {
-            setenv("HELIX_MOCK_PRINTER", saved.c_str(), 1);
-        } else {
-            unsetenv("HELIX_MOCK_PRINTER");
-        }
-    }
-};
-
-} // namespace
-
-TEST_CASE("HELIX_MOCK_PRINTER clears a stale saved printer type",
-          "[application][mock_printer][regression]") {
-    // No active printer set → df() routes to the "default" section; the test
-    // only needs a single consistent path for the set/clear/get round-trip.
+TEST_CASE("apply_mock_printer_identity settles the saved type", "[application][mock_printer]") {
     Config cfg;
     const std::string type_path = cfg.df() + helix::wizard::PRINTER_TYPE;
 
-    // Simulate a stale persisted type from a previous (non-mock) run.
-    cfg.set<std::string>(type_path, "Voron 2.4");
-    REQUIRE(cfg.get<std::string>(type_path, "") == "Voron 2.4");
-
-    SECTION("Env set → saved type is cleared so detection re-resolves") {
-        ScopedMockPrinterEnv env("ad5m");
-        apply_mock_printer_type_clear(cfg);
-        REQUIRE(cfg.get<std::string>(type_path, "") == "");
+    SECTION("a detecting persona clears a stale type") {
+        cfg.set<std::string>(type_path, "Voron 2.4");
+        CHECK(helix::apply_mock_printer_identity(cfg, "ad5m"));
+        CHECK(cfg.get<std::string>(type_path, "x").empty());
     }
-
-    SECTION("Env unset → saved type is preserved (zero behavior change)") {
-        ScopedMockPrinterEnv env(nullptr);
-        apply_mock_printer_type_clear(cfg);
-        REQUIRE(cfg.get<std::string>(type_path, "") == "Voron 2.4");
+    SECTION("a declaring persona overwrites a stale type") {
+        cfg.set<std::string>(type_path, "Voron 2.4");
+        CHECK(helix::apply_mock_printer_identity(cfg, "k1max"));
+        CHECK(cfg.get<std::string>(type_path, "") == "Creality K1 Max");
     }
-}
-
-TEST_CASE("HELIX_MOCK_PRINTER clear is a no-op when no type is saved",
-          "[application][mock_printer][regression]") {
-    Config cfg;
-    const std::string type_path = cfg.df() + helix::wizard::PRINTER_TYPE;
-    REQUIRE(cfg.get<std::string>(type_path, "") == "");
-
-    ScopedMockPrinterEnv env("voron_24");
-    apply_mock_printer_type_clear(cfg);
-    REQUIRE(cfg.get<std::string>(type_path, "") == "");
+    SECTION("a declaring persona writes into an empty config") {
+        CHECK(helix::apply_mock_printer_identity(cfg, "k1"));
+        CHECK(cfg.get<std::string>(type_path, "") == "Creality K1C");
+    }
+    SECTION("snapmaker_u1 declares nothing and clears a stale type") {
+        cfg.set<std::string>(type_path, "Voron 2.4");
+        CHECK(helix::apply_mock_printer_identity(cfg, "snapmaker_u1"));
+        CHECK(cfg.get<std::string>(type_path, "x").empty());
+    }
+    SECTION("an unrecognised value still clears (it runs as voron_24)") {
+        cfg.set<std::string>(type_path, "Creality K1C");
+        CHECK(helix::apply_mock_printer_identity(cfg, "AD5M"));
+        CHECK(cfg.get<std::string>(type_path, "x").empty());
+    }
+    SECTION("unset and empty leave config alone") {
+        cfg.set<std::string>(type_path, "Voron 2.4");
+        CHECK_FALSE(helix::apply_mock_printer_identity(cfg, nullptr));
+        CHECK_FALSE(helix::apply_mock_printer_identity(cfg, ""));
+        CHECK(cfg.get<std::string>(type_path, "") == "Voron 2.4");
+    }
+    SECTION("nothing saved and nothing declared is no change") {
+        CHECK_FALSE(helix::apply_mock_printer_identity(cfg, "voron_24"));
+    }
 }
 
 TEST_CASE("should_start_print_collector - fresh print start", "[application][print_start]") {
@@ -586,14 +548,14 @@ std::set<std::string> extract_observer_guard_members(const std::string& header) 
     return members;
 }
 
-std::set<std::string> extract_released_members_in_method(const std::string& impl,
-                                                         const std::string& class_name,
-                                                         const std::string& method_name) {
-    // Find the body of <ClassName>::<methodName>() and extract `member.release();`
-    // calls. Body starts at the function signature and ends at the matching
-    // closing brace via a simple brace-balance state machine.
+// Body of <ClassName>::<methodName>(), from the signature's opening brace to its
+// match via a brace-balance state machine. Empty when the signature is not found.
+// Nested lambdas are included, which is what callers parsing registration sites
+// need — those live inside the discovery lambdas, not at statement level.
+std::string extract_method_body(const std::string& impl, const std::string& class_name,
+                                const std::string& method_name) {
     std::regex sig_re("(?:void|bool|int)\\s+" + class_name + "::" + method_name +
-                      R"(\s*\(\s*\)\s*(?:noexcept)?\s*\{)");
+                      R"(\s*\([^)]*\)\s*(?:noexcept)?\s*\{)");
     std::smatch m;
     if (!std::regex_search(impl, m, sig_re)) {
         return {};
@@ -608,7 +570,17 @@ std::set<std::string> extract_released_members_in_method(const std::string& impl
             --depth;
         ++pos;
     }
-    std::string body = impl.substr(start, pos - start - 1);
+    return impl.substr(start, pos - start - 1);
+}
+
+std::set<std::string> extract_released_members_in_method(const std::string& impl,
+                                                         const std::string& class_name,
+                                                         const std::string& method_name) {
+    // Extract `member.release();` calls from the method body.
+    std::string body = extract_method_body(impl, class_name, method_name);
+    if (body.empty()) {
+        return {};
+    }
 
     std::set<std::string> released;
     std::regex rel_re(R"(([A-Za-z][A-Za-z0-9_]*)\.release\s*\(\s*\)\s*;)");
@@ -638,6 +610,53 @@ const std::vector<ShutdownObserverContract>& shutdown_observer_classes() {
          /*min_expected_members=*/6},
     };
     return contracts;
+}
+
+// A (method, handler) pair as written at a register/unregister_method_callback site.
+using MethodHandler = std::pair<std::string, std::string>;
+
+std::set<MethodHandler> extract_method_callback_pairs(const std::string& body, bool unregister) {
+    // The \b keeps the register scan from also matching unregister_method_callback:
+    // the 'n' preceding "register" there is a word character, so no boundary exists.
+    std::regex re(std::string(unregister ? R"(\bunregister)" : R"(\bregister)") +
+                  R"RX(_method_callback\s*\(\s*"([^"]+)"\s*,\s*"([^"]+)")RX");
+    std::set<MethodHandler> pairs;
+    auto begin = std::sregex_iterator(body.begin(), body.end(), re);
+    auto end = std::sregex_iterator();
+    for (auto it = begin; it != end; ++it) {
+        pairs.insert({(*it)[1].str(), (*it)[2].str()});
+    }
+    return pairs;
+}
+
+// Method callbacks registered by name inside application.cpp whose body reaches a panel, a
+// subject, or a manager-owned pointer that teardown destroys before it releases the
+// MoonrakerClient. The shared PrinterSession::teardown_printer_scope() must drop these.
+// Registration is not confined to setup_discovery_callbacks - layer_tracker and
+// action_prompt_manager install from GcodeResponseRouting::attach - so the registration scan below
+// covers both files.
+//
+// Subscriptions owned by a feature's attach()/detach() pair are not listed: their
+// registration lives in the feature, and tests/unit/test_discovery_attach_detach.cpp proves
+// detach() leaves nothing behind. detach_calls_required_in_teardown() below pins that the
+// teardown calls each one.
+const std::vector<MethodHandler>& handlers_requiring_teardown() {
+    static const std::vector<MethodHandler> handlers = {
+        {"notify_gcode_response", "layer_tracker"},
+        {"notify_gcode_response", "action_prompt_manager"},
+    };
+    return handlers;
+}
+
+// The detach half of every attach()/detach() pair discovery installs.
+const std::vector<std::string>& detach_calls_required_in_teardown() {
+    static const std::vector<std::string> calls = {
+        "TimelapseState::instance().detach(",
+        "UpdateChecker::instance().detach(",
+        "detach_print_hours(",
+        "spoolman_sync::detach(",
+    };
+    return calls;
 }
 
 } // namespace
@@ -672,6 +691,105 @@ TEST_CASE("Shutdown observer release contract — every ObserverGuard member is 
             }
         }
     }
+}
+
+TEST_CASE("Method callbacks are unregistered by the shared teardown",
+          "[application][shutdown][regression]") {
+    // The unit is the (method, handler) pair, not the method. notify_history_changed
+    // carries AboutOverlay_print_hours alongside PrintHistoryManager's own handler,
+    // released by that manager's destructor, so the method appearing in an unregister
+    // call is no evidence that a particular handler is released. notify_gcode_response
+    // is the same shape: action_prompt_manager and layer_tracker are independent.
+    //
+    // Registration re-runs on every reconnect, and on the printer-switch path on a
+    // fresh client. MoonrakerClient::register_method_callback inserts into a std::map
+    // keyed by handler name, and std::map::insert does not overwrite, so a repeat is a
+    // no-op rather than a second live handler.
+    //
+    // Neither teardown path can be driven at runtime (see application_test_access.h),
+    // so this is a source-level contract in the same shape as the ObserverGuard release
+    // contract above.
+    const std::string impl = read_file("src/application/application.cpp");
+    REQUIRE_FALSE(impl.empty());
+
+    const std::string session_impl = read_file("src/application/printer_session.cpp");
+    REQUIRE_FALSE(session_impl.empty());
+    const std::string tear_down =
+        extract_method_body(session_impl, "PrinterSession", "tear_down_printer_state");
+    const std::string shutdown = extract_method_body(impl, "Application", "shutdown");
+    const std::string scope =
+        extract_method_body(session_impl, "PrinterSession", "teardown_printer_scope");
+    REQUIRE_FALSE(tear_down.empty());
+    REQUIRE_FALSE(shutdown.empty());
+    REQUIRE_FALSE(scope.empty());
+
+    // Both paths run the one ordered teardown, so one body holds every unregister.
+    CHECK(tear_down.find("teardown_printer_scope(TeardownScope::PrinterSwitch)") !=
+          std::string::npos);
+    CHECK(shutdown.find("TeardownScope::ProcessExit") != std::string::npos);
+
+    // The G-code response handlers register and unregister inside GcodeResponseRouting;
+    // the teardown must call both of its detach halves.
+    const std::string routing = read_file("src/application/gcode_response_routing.cpp");
+    REQUIRE_FALSE(routing.empty());
+    const std::string detach_handlers =
+        extract_method_body(routing, "GcodeResponseRouting", "detach_handlers");
+    REQUIRE_FALSE(detach_handlers.empty());
+    CHECK(scope.find("m_routing.detach_handlers(") != std::string::npos);
+    CHECK(scope.find("m_routing.release_routers()") != std::string::npos);
+
+    // Registration sites are spread across setup_discovery_callbacks and
+    // GcodeResponseRouting::attach, so scan whole translation units rather than one body.
+    auto registered = extract_method_callback_pairs(session_impl, /*unregister=*/false);
+    registered.merge(extract_method_callback_pairs(routing, /*unregister=*/false));
+    auto dropped = extract_method_callback_pairs(scope, /*unregister=*/true);
+    dropped.merge(extract_method_callback_pairs(detach_handlers, /*unregister=*/true));
+
+    // Guard the parser: a regex matching nothing would satisfy every check below.
+    REQUIRE(registered.size() >= handlers_requiring_teardown().size());
+    REQUIRE_FALSE(dropped.empty());
+
+    for (const auto& call : detach_calls_required_in_teardown()) {
+        DYNAMIC_SECTION("teardown calls " << call) {
+            CHECK(scope.find(call) != std::string::npos);
+        }
+    }
+
+    for (const auto& handler : handlers_requiring_teardown()) {
+        DYNAMIC_SECTION(handler.first << " / " << handler.second) {
+            {
+                INFO(
+                    "Not registered in application.cpp or gcode_response_routing.cpp. The table in "
+                    "handlers_requiring_teardown() is stale.");
+                CHECK(registered.count(handler) == 1);
+            }
+            {
+                INFO("teardown_printer_scope must unregister this handler. "
+                     "StaticPanelRegistry::destroy_all() and StaticSubjectRegistry::"
+                     "deinit_all() both run before the client is released.");
+                CHECK(dropped.count(handler) == 1);
+            }
+        }
+    }
+}
+
+TEST_CASE("A printer switch freezes the UpdateQueue before it disconnects the client",
+          "[application][shutdown][regression]") {
+    // Work the WebSocket thread enqueues after the disconnect must be buffered and then
+    // discarded by update_queue_shutdown(), not run after the objects it touches are gone.
+    // Teardown cannot be driven at runtime (see application_test_access.h), so this is a
+    // source-level contract.
+    const std::string impl = read_file("src/application/printer_session.cpp");
+    const std::string scope = extract_method_body(impl, "PrinterSession", "teardown_printer_scope");
+    REQUIRE_FALSE(scope.empty());
+    const auto freeze = scope.find("queue_freeze.emplace(");
+    const auto disconnect = scope.find("client()->disconnect()");
+    const auto drain = scope.find("helix::ui::update_queue_shutdown();");
+    REQUIRE(freeze != std::string::npos);
+    REQUIRE(disconnect != std::string::npos);
+    REQUIRE(drain != std::string::npos);
+    CHECK(freeze < disconnect);
+    CHECK(disconnect < drain);
 }
 
 TEST_CASE("should_complete_preprint - completes when the layer-zero sample is never delivered",
@@ -845,4 +963,133 @@ TEST_CASE("should_stop_collector_on_retirement stops unless the printer took the
         REQUIRE(MoonrakerManager::should_stop_collector_on_retirement(PrintJobState::CANCELLED));
         REQUIRE(MoonrakerManager::should_stop_collector_on_retirement(PrintJobState::ERROR));
     }
+}
+
+// ============================================================================
+// Klippy leaving READY ends the pre-print window
+//
+// A verify_heater shutdown mid-PRINT_START leaves print_stats reporting PAUSED
+// on some firmware (Snapmaker U1), and should_stop_print_collector() spares
+// every state that has a job, so the print-state observer alone keeps the
+// collector posting ETA updates for a print that can no longer run.
+// ============================================================================
+
+TEST_CASE("should_stop_collector_on_klippy_state stops on shutdown and error",
+          "[application][print_start_collector]") {
+    SECTION("a dead Klipper ends the pre-print window whatever print_stats says") {
+        REQUIRE(MoonrakerManager::should_stop_collector_on_klippy_state(KlippyState::SHUTDOWN));
+        REQUIRE(MoonrakerManager::should_stop_collector_on_klippy_state(KlippyState::ERROR));
+        // The print-state axis alone would keep it running in exactly this case.
+        REQUIRE_FALSE(MoonrakerManager::should_stop_print_collector(PrintJobState::PAUSED, false));
+    }
+
+    SECTION("ready and startup leave the collector alone") {
+        REQUIRE_FALSE(MoonrakerManager::should_stop_collector_on_klippy_state(KlippyState::READY));
+        REQUIRE_FALSE(
+            MoonrakerManager::should_stop_collector_on_klippy_state(KlippyState::STARTUP));
+    }
+}
+
+// ============================================================================
+// Printer-edge collector arming — the observer path, not the pure predicate
+// ============================================================================
+// Every case above pins should_start_print_collector() as a function; none
+// drives the print-state observer that wires it to a live collector. That
+// observer is the path a print started by ANOTHER client (Mainsail) takes,
+// where print_stats moving to PRINTING is the only signal, and it is the
+// load-bearing assumption behind the print-start arm of the discretionary-gcode
+// busy gate: a jog during a START macro is refused because is_in_print_start()
+// is true, and it is true because this observer drove the phase subject off
+// IDLE. Drives the real manager with its mock client.
+
+#include "../../test_helpers/update_queue_test_access.h"
+#include "ams_state.h"
+#include "app_globals.h"
+#include "application_test_fixture.h"
+#include "filament_sensor_manager.h"
+#include "print_start_collector.h"
+#include "print_start_phase.h"
+#include "spoolman_manager.h"
+
+namespace {
+
+class ManagerCollectorArmingFixture : public ApplicationTestFixture {
+  public:
+    ManagerCollectorArmingFixture() {
+        // The global PrinterState the observer registers on; park it in
+        // STANDBY so the write below is a real no-job -> PRINTING edge.
+        auto& ps = get_printer_state();
+        ps.init_subjects(false);
+        lv_subject_set_int(ps.print_state().get_print_state_enum_subject(),
+                           static_cast<int>(PrintJobState::STANDBY));
+
+        REQUIRE(mgr.init(config(), nullptr));
+        mgr.init_print_start_collector();
+    }
+
+    ~ManagerCollectorArmingFixture() override {
+        mgr.shutdown();
+        // create_api() handed this manager's API to app_globals and three
+        // singletons; null them so nothing later in the binary dereferences
+        // the freed instance.
+        set_moonraker_api(nullptr);
+        AmsState::instance().set_moonraker_api(nullptr);
+        FilamentSensorManager::instance().set_moonraker_api(nullptr);
+        SpoolmanManager::instance().set_api(nullptr);
+        helix::ui::UpdateQueue::instance().drain();
+    }
+
+    MoonrakerManager mgr;
+};
+
+} // namespace
+
+TEST_CASE_METHOD(ManagerCollectorArmingFixture, "shutdown clears the global client it installed",
+                 "[application][moonraker_manager]") {
+    REQUIRE(get_moonraker_client() != nullptr);
+    mgr.shutdown();
+    CHECK(get_moonraker_client() == nullptr);
+}
+
+TEST_CASE_METHOD(ManagerCollectorArmingFixture,
+                 "print-state observer arms the collector off IDLE on a printer-edge start",
+                 "[application][print_start]") {
+    auto& ps = get_printer_state();
+    auto* phase_subject = ps.print_state().get_print_start_phase_subject();
+    REQUIRE(lv_subject_get_int(phase_subject) == static_cast<int>(PrintStartPhase::IDLE));
+    REQUIRE_FALSE(ps.print_state().is_in_print_start());
+
+    // A print started from another frontend: only print_stats moves.
+    lv_subject_set_int(ps.print_state().get_print_state_enum_subject(),
+                       static_cast<int>(PrintJobState::PRINTING));
+    helix::ui::UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
+
+    // The collector started and published its first phase (deferred through
+    // the UpdateQueue, hence the drain above): the phase left IDLE, which is
+    // what is_in_print_start() reads.
+    CHECK(mgr.print_start_collector()->is_active());
+    CHECK(lv_subject_get_int(phase_subject) != static_cast<int>(PrintStartPhase::IDLE));
+    CHECK(ps.print_state().is_in_print_start());
+}
+
+TEST_CASE_METHOD(ManagerCollectorArmingFixture,
+                 "a homed_axes change reaches the armed collector without a timer tick",
+                 "[application][print_start]") {
+    auto& ps = get_printer_state();
+    lv_subject_copy_string(ps.motion_state().get_homed_axes_subject(), "");
+    // Armed directly: an earlier fixture's print-state observer is released,
+    // not removed, at shutdown and would complete this collector on the edge.
+    auto collector = mgr.print_start_collector();
+    collector->start();
+    collector->enable_fallbacks();
+    // The active flag a phase past INITIALIZING needs to publish.
+    lv_subject_set_int(ps.print_state().get_print_active_subject(), 1);
+    helix::ui::UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
+
+    // A cold G28 moves no heater target; only homed_axes changes.
+    lv_subject_copy_string(ps.motion_state().get_homed_axes_subject(), "xy");
+    helix::ui::UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
+    CHECK(lv_subject_get_int(ps.print_state().get_print_start_phase_subject()) ==
+          static_cast<int>(PrintStartPhase::HOMING));
+    collector->stop();
 }

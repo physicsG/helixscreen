@@ -16,7 +16,10 @@
 
 #include <atomic>
 #include <chrono>
+#include <future>
+#include <memory>
 #include <string>
+#include <thread>
 
 #include "../catch_amalgamated.hpp"
 
@@ -109,8 +112,8 @@ TEST_CASE_METHOD(HelixTestFixture, "MoonrakerClientMock: discover_printer error 
 
         // Verify the error message is descriptive
         REQUIRE(error_reason.empty() == false);
-        REQUIRE(error_reason.find("Klippy") != std::string::npos);
-        REQUIRE(error_reason.find("not connected") != std::string::npos);
+        REQUIRE(error_reason.find("Klippy not ready") != std::string::npos);
+        REQUIRE(error_reason.find("startup") != std::string::npos);
     }
 
     SECTION("No crash when error callback is nullptr") {
@@ -178,5 +181,34 @@ TEST_CASE_METHOD(HelixTestFixture, "MoonrakerClientMock: discover_printer regres
         // Hardware should have been populated
         // Default mock has heaters, sensors, etc.
         REQUIRE(client.hardware().heaters().empty() == false);
+    }
+}
+
+TEST_CASE_METHOD(HelixTestFixture,
+                 "MoonrakerClientMock: discovery callbacks may touch the mock's hardware lists",
+                 "[moonraker][discovery][mock]") {
+    // Each discovery runs on a detached thread so a self-deadlock fails the
+    // test instead of hanging it; the thread shares ownership of the client.
+    auto run_discovery = [](MoonrakerClientMock::KlippyState state) {
+        auto client = std::make_shared<MoonrakerClientMock>();
+        client->set_klippy_state(state);
+        auto finished = std::make_shared<std::promise<void>>();
+        auto done = finished->get_future();
+        std::thread([client, finished]() {
+            // Raw pointer: the client keeps its completion callback, so a
+            // shared_ptr captured there would keep the client alive forever.
+            MoonrakerClientMock* raw = client.get();
+            client->discover_printer([raw]() { raw->set_fans({"fan"}); },
+                                     [raw](const std::string&) { raw->set_heaters({"extruder"}); });
+            finished->set_value();
+        }).detach();
+        return done.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+    };
+
+    SECTION("on_complete") {
+        CHECK(run_discovery(MoonrakerClientMock::KlippyState::READY));
+    }
+    SECTION("on_error") {
+        CHECK(run_discovery(MoonrakerClientMock::KlippyState::STARTUP));
     }
 }

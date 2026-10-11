@@ -3,7 +3,9 @@
 #include "touch_calibration_wrapper.h"
 
 #include "config.h"
+#include "display_backend.h"
 #include "helix_display_telemetry.h"
+#include "pointer_frame_hook.h"
 
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
@@ -44,44 +46,105 @@ CalibrationContext* s_active_ctx = nullptr;
 // call, so this is a few dozen uncontended locks a second at most.
 std::mutex s_diag_mutex;
 
-/// Fold one CHANGED raw digitizer reading into the observed extremes, and raise
-/// telemetry the first time one of them proves the configured range wrong.
+/// Replace a disproved DisplaySize range with the declared one, live and stored.
+///
+/// The declared range is native digitizer space (lv_evdev scales into the
+/// display's native resolution and rotation runs after it), so it is stored
+/// stamped with capture rotation 0 and the next boot programs it at any rotation.
+void correct_transposed_guess(CalibrationContext& ctx, const TouchRangeSettings& range,
+                              const std::string& evidence) {
+    ctx.reprogram_range(range.min_x, range.min_y, range.max_x, range.max_y);
+    save_touch_range(range);
+    Config::get_instance()->save();
+    spdlog::warn("[TouchCal] Digitizer reached past the display on a transposed-looking ABS "
+                 "range, so the range is the panel's own - re-programmed and stored X({}..{}) "
+                 "Y({}..{}) ({})",
+                 range.min_x, range.max_x, range.min_y, range.max_y, evidence);
+}
+
+/// Fold one CHANGED raw digitizer reading into the observed extremes, correct a
+/// DisplaySize range the reading disproves, and otherwise raise telemetry the
+/// first time one of them proves the configured range wrong.
 ///
 /// Out-of-range is the only signal that fires telemetry. A compressed span is
 /// reported in the debug bundle and never judged here: a user who simply never
 /// touched the edges of the panel produces exactly that on healthy hardware.
 void note_raw_sample(CalibrationContext& ctx, int raw_x, int raw_y) {
     std::string detail;
+    TouchRangeSettings corrected;
     {
         std::lock_guard<std::mutex> lock(s_diag_mutex);
         ctx.observed.observe(raw_x, raw_y);
+        TouchPipelineInfo& pipe = ctx.pipeline;
 
-        if (ctx.range_violation_reported) {
+        // Judged per sample, not on the extremes, which would keep one outlier
+        // voting forever.
+        TouchObservedExtremes sample;
+        sample.observe(raw_x, raw_y);
+        if (ctx.reprogram_range && !ctx.capture_active &&
+            transposed_range_guess_disproved(sample, pipe) &&
+            ++ctx.transposed_guess_votes >= kTransposedGuessCorroboration) {
+            detail = fmt::format("cfg_x={}..{} cfg_y={}..{} obs_x={}..{} obs_y={}..{} samples={}",
+                                 pipe.min_x, pipe.max_x, pipe.min_y, pipe.max_y, ctx.observed.min_x,
+                                 ctx.observed.max_x, ctx.observed.min_y, ctx.observed.max_y,
+                                 ctx.observed.distinct_samples);
+            corrected.valid = true;
+            corrected.swap_axes = pipe.swap_axes;
+            corrected.min_x = pipe.declared_min_x;
+            corrected.max_x = pipe.declared_max_x;
+            corrected.min_y = pipe.declared_min_y;
+            corrected.max_y = pipe.declared_max_y;
+            corrected.capture_rotation = 0;
+            // Recorded as Stored because it now is: a recalibration that installs
+            // no range of its own keeps a live stored range, and drops anything
+            // else.
+            pipe.source = TouchRangeSource::Stored;
+            pipe.configured_valid = true;
+            pipe.min_x = corrected.min_x;
+            pipe.max_x = corrected.max_x;
+            pipe.min_y = corrected.min_y;
+            pipe.max_y = corrected.max_y;
+            pipe.stored = corrected;
+        } else if (!ctx.range_violation_reported) {
+            const TouchRangeViolation violation = touch_range_violation(ctx.observed, pipe);
+            if (!violation.any()) {
+                return;
+            }
+            ctx.range_violation_reported = true;
+
+            const TouchObservedExtremes seen =
+                touch_observed_in_configured_axes(ctx.observed, pipe.swap_axes);
+            detail =
+                fmt::format("axis={} src={} swap={} cfg_x={}..{} obs_x={}..{} "
+                            "cfg_y={}..{} obs_y={}..{} samples={} dev={}",
+                            violation.x && violation.y ? "xy" : (violation.x ? "x" : "y"),
+                            touch_range_source_name(pipe.source), pipe.swap_axes, pipe.min_x,
+                            pipe.max_x, seen.min_x, seen.max_x, pipe.min_y, pipe.max_y, seen.min_y,
+                            seen.max_y, ctx.observed.distinct_samples, pipe.device_name);
+        } else {
             return;
         }
-        const TouchRangeViolation violation = touch_range_violation(ctx.observed, ctx.pipeline);
-        if (!violation.any()) {
-            return;
-        }
-        ctx.range_violation_reported = true;
-
-        const TouchObservedExtremes seen =
-            touch_observed_in_configured_axes(ctx.observed, ctx.pipeline.swap_axes);
-        detail = fmt::format("axis={} src={} swap={} cfg_x={}..{} obs_x={}..{} "
-                             "cfg_y={}..{} obs_y={}..{} samples={} dev={}",
-                             violation.x && violation.y ? "xy" : (violation.x ? "x" : "y"),
-                             touch_range_source_name(ctx.pipeline.source), ctx.pipeline.swap_axes,
-                             ctx.pipeline.min_x, ctx.pipeline.max_x, seen.min_x, seen.max_x,
-                             ctx.pipeline.min_y, ctx.pipeline.max_y, seen.min_y, seen.max_y,
-                             ctx.observed.distinct_samples, ctx.pipeline.device_name);
     }
 
-    // Outside the lock: the telemetry bridge takes TelemetryManager's own mutex,
-    // and nothing there needs a consistent view of the diagnostics.
+    // Outside the lock: nothing below needs a consistent view of the
+    // diagnostics, and the telemetry bridge takes TelemetryManager's own mutex.
+    if (corrected.valid) {
+        correct_transposed_guess(ctx, corrected, detail);
+        return;
+    }
     spdlog::warn("[TouchCal] Digitizer emitted a reading outside the configured evdev range - "
                  "the declared range cannot be what this panel produces ({})",
                  detail);
     helix_display_telemetry_error("display", "touch-range-declared-too-narrow", detail.c_str());
+}
+
+/// A driver point with the calibration in @p ctx applied. The point is PANEL space,
+/// ahead of lv_display_rotate_point(); the affine was solved against logical,
+/// post-rotation targets, so it is placed rather than applied directly.
+Point calibrate_panel_point(const CalibrationContext& ctx, Point panel_point) {
+    return apply_calibration_in_panel_space(ctx.calibration, panel_point,
+                                            ctx.calibration.capture_rotation, ctx.screen_width,
+                                            ctx.screen_height);
 }
 
 } // namespace
@@ -97,6 +160,13 @@ void calibrated_read_cb(lv_indev_t* indev, lv_indev_data_t* data) {
         ctx->original_read_cb(indev, data);
     }
 
+    // Corroboration against a DisplaySize range counts within one press. Only
+    // this thread writes the count, so the unlocked read cannot miss a vote.
+    if (data->state == LV_INDEV_STATE_RELEASED && ctx->transposed_guess_votes != 0) {
+        std::lock_guard<std::mutex> lock(s_diag_mutex);
+        ctx->transposed_guess_votes = 0;
+    }
+
     // Stash the pre-swap, pre-scale digitizer reading behind the coordinate we
     // just got, before the affine below rewrites it. Calibration needs this to
     // solve for the evdev range; the clamped coordinate alone cannot tell it what
@@ -110,11 +180,15 @@ void calibrated_read_cb(lv_indev_t* indev, lv_indev_data_t* data) {
             // a CHANGED reading is a sample: counting calls would report hundreds
             // of them for one press and make the count worthless as the
             // confidence signal a bundle reader needs.
+            //
+            // Only a PRESSED reading is a sample. lv_evdev reports root (0,0) with
+            // has_last_raw set on its first poll, before any EV_ABS arrives, and a
+            // declared range that does not include 0 flags that as out-of-range.
             const bool changed =
                 !ctx->last_raw_valid || rx != ctx->last_raw.x || ry != ctx->last_raw.y;
             ctx->last_raw = helix::Point{rx, ry};
             ctx->last_raw_valid = true;
-            if (changed) {
+            if (changed && data->state == LV_INDEV_STATE_PRESSED) {
                 note_raw_sample(*ctx, rx, ry);
             }
         }
@@ -123,8 +197,7 @@ void calibrated_read_cb(lv_indev_t* indev, lv_indev_data_t* data) {
     // Apply affine calibration if valid (for both PRESSED and RELEASED states)
     if (ctx->calibration.valid) {
         helix::Point raw{static_cast<int>(data->point.x), static_cast<int>(data->point.y)};
-        helix::Point transformed = helix::transform_point(
-            ctx->calibration, raw, ctx->screen_width - 1, ctx->screen_height - 1);
+        helix::Point transformed = calibrate_panel_point(*ctx, raw);
         data->point.x = transformed.x;
         data->point.y = transformed.y;
 
@@ -137,6 +210,21 @@ void calibrated_read_cb(lv_indev_t* indev, lv_indev_data_t* data) {
             }
         }
     }
+}
+
+lv_point_t map_touch_point_to_screen(lv_indev_t* indev, lv_point_t driver_point) {
+    Point point{static_cast<int>(driver_point.x), static_cast<int>(driver_point.y)};
+    // One calibrated touch indev per process (see s_active_ctx), and a multi-touch
+    // gesture only ever comes from that touch panel.
+    if (const CalibrationContext* ctx = s_active_ctx) {
+        point = calibrate_panel_point(*ctx, point);
+    }
+    const PointerXY turned = PointerFrameHook::map_panel_point(indev, PointerXY{point.x, point.y});
+    lv_point_t screen{turned.x, turned.y};
+    if (lv_display_t* disp = lv_indev_get_display(indev)) {
+        lv_display_rotate_point(disp, &screen);
+    }
+    return screen;
 }
 
 void set_touch_pipeline_info(const TouchPipelineInfo& info) {
@@ -168,6 +256,13 @@ void set_touch_configured_range(bool swap_axes, int min_x, int min_y, int max_x,
     // programmed.
     s_active_ctx->observed = TouchObservedExtremes{};
     s_active_ctx->range_violation_reported = false;
+}
+
+void set_touch_capture_active(bool active) {
+    std::lock_guard<std::mutex> lock(s_diag_mutex);
+    if (s_active_ctx) {
+        s_active_ctx->capture_active = active;
+    }
 }
 
 bool get_touch_range_diagnostics(TouchRangeDiagnostics& out) {
@@ -206,9 +301,6 @@ bool get_last_raw_touch(Point& out) {
 TouchRangeSettings load_touch_range() {
     TouchRangeSettings range;
     helix::Config* cfg = helix::Config::get_instance();
-    if (!cfg) {
-        return range;
-    }
 
     if (!cfg->get<bool>("/input/touch_range/valid", false)) {
         return range;
@@ -219,6 +311,11 @@ TouchRangeSettings load_touch_range() {
     range.max_x = cfg->get<int>("/input/touch_range/max_x", 0);
     range.min_y = cfg->get<int>("/input/touch_range/min_y", 0);
     range.max_y = cfg->get<int>("/input/touch_range/max_y", 0);
+    // A range saved without its own stamp was saved by the same commit that
+    // stamped the calibration record.
+    range.capture_rotation =
+        cfg->get<int>("/input/touch_range/rotation",
+                      cfg->get<int>("/input/calibration/rotation", range.capture_rotation));
 
     // min == max is not a passthrough in lv_evdev: the scale is skipped but the
     // clamp is not, so every coordinate would collapse onto one pixel. Refuse it.
@@ -234,10 +331,6 @@ TouchRangeSettings load_touch_range() {
 
 void save_touch_range(const TouchRangeSettings& range) {
     helix::Config* cfg = helix::Config::get_instance();
-    if (!cfg) {
-        spdlog::warn("[TouchCal] Config not available - touch range not saved");
-        return;
-    }
 
     cfg->set<bool>("/input/touch_range/valid", range.valid);
     if (!range.valid) {
@@ -253,20 +346,26 @@ void save_touch_range(const TouchRangeSettings& range) {
     cfg->set<int>("/input/touch_range/max_x", range.max_x);
     cfg->set<int>("/input/touch_range/min_y", range.min_y);
     cfg->set<int>("/input/touch_range/max_y", range.max_y);
-    spdlog::info("[TouchCal] Touch range saved: swap={} X({}..{}) Y({}..{})", range.swap_axes,
-                 range.min_x, range.max_x, range.min_y, range.max_y);
+    cfg->set<int>("/input/touch_range/rotation", range.capture_rotation);
+    spdlog::info("[TouchCal] Touch range saved: swap={} X({}..{}) Y({}..{}) rotation={}",
+                 range.swap_axes, range.min_x, range.max_x, range.min_y, range.max_y,
+                 range.capture_rotation);
 }
 
 TouchCalibration load_touch_calibration() {
     helix::Config* cfg = helix::Config::get_instance();
     TouchCalibration cal;
 
-    if (!cfg) {
-        spdlog::debug("[TouchCal] Config not available for calibration load");
-        return cal;
-    }
-
     cal.valid = cfg->get<bool>("/input/calibration/valid", false);
+    // Every save writes the rotation key (touch_calibration_session.cpp#write_affine),
+    // so a record without one states no basis. Zero reproduces what such a record did
+    // when it was written - the matrix was handed panel-space points directly - and it
+    // is the exact answer for as long as nothing rotates underneath it. Taking the
+    // rotation in effect NOW instead would re-place a working matrix into a basis it
+    // was never solved in, a quarter turn out for anyone who rotated the display after
+    // calibrating.
+    const bool has_capture_rotation = cfg->exists("/input/calibration/rotation");
+    cal.capture_rotation = cfg->get<int>("/input/calibration/rotation", cal.capture_rotation);
     if (!cal.valid) {
         // A stored evdev range IS a stored user calibration, even when it left no
         // affine behind - the common outcome on a panel square to the display, where
@@ -302,6 +401,24 @@ TouchCalibration load_touch_calibration() {
     if (!helix::is_calibration_valid(cal)) {
         spdlog::warn("[TouchCal] Stored calibration failed validation");
         cal.valid = false;
+        return cal;
+    }
+
+    // A rotated display turns the zero above from a faithful reading into a guess,
+    // and the record's real basis is unrecoverable. Drop it and let the user pay one
+    // recalibration instead of owning a screen they cannot navigate to fix. Asked of
+    // the display rather than `/display/rotate` for the reasons on
+    // display_rotation_degrees(); both backends call this from create_input_pointer(),
+    // after DisplayManager has applied rotation.
+    const int applied_rotation = display_rotation_degrees();
+    if (helix::should_invalidate_unstamped_calibration(has_capture_rotation, applied_rotation)) {
+        spdlog::warn("[TouchCal] Discarding a stored calibration that records no capture "
+                     "rotation on a {}°-rotated display - recalibration required "
+                     "(prestonbrown/helixscreen#1394)",
+                     applied_rotation);
+        cal.valid = false;
+        cfg->set<bool>("/input/calibration/valid", false);
+        cfg->save();
         return cal;
     }
 

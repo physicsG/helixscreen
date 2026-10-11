@@ -58,7 +58,7 @@ QIDI uses two generations of mainboard:
 
 No QIDI-side install is needed. Run HelixScreen on a Raspberry Pi, repurposed Android tablet, or any other supported device, and add the QIDI printer by hostname or IP. Auto-detection identifies the model from Klipper objects, macros, hostname, and build volume. The right print start profile and capabilities load automatically.
 
-This works on **stock firmware** (Q2, Max 4 all run standard Moonraker) and on **community stacks** like [FreeDi](https://github.com/Phil1988/FreeDi), [FreeQIDI](https://github.com/Phil1988/FreeQIDI), or [53Aries/Q2-Firmware](https://github.com/53Aries/Q2-Firmware) -- anything that exposes Moonraker on port 7125.
+This works on **stock firmware** (Q2 and Max 4 ship a customized Moonraker — its `/server/files/metadata` path is broken stock, so HelixScreen self-serves print thumbnails from the gcode header; everything else speaks standard Moonraker on port 7125) and on **community stacks** like [FreeDi](https://github.com/Phil1988/FreeDi), [FreeQIDI](https://github.com/Phil1988/FreeQIDI), or [53Aries/Q2-Firmware](https://github.com/53Aries/Q2-Firmware) -- anything that exposes Moonraker on port 7125.
 
 For the older 3-series (X-Smart 3, X-Plus 3, X-Max 3, Q1 Pro, Plus 4), FreeDi is the easy path to a clean Klipper + Moonraker + Mainsail stack. FreeDi's own `FreeDiLCD` keeps the printer's local TJC display alive; HelixScreen runs separately on your touchscreen device and controls the printer over the network.
 
@@ -99,7 +99,7 @@ This section is for replacing the printer's built-in display with HelixScreen ru
 The standard HelixScreen installer works on QIDI hardware out of the box. SSH into the printer and run:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/prestonbrown/helixscreen/main/scripts/install.sh | sh
+curl -sSL https://releases.helixscreen.org/install.sh | sh
 ```
 
 The installer auto-detects QIDI-class SBCs (hostname `linaro-alip` + `/home/mks` on stock Q2; the same Pi/aarch64 binary covers Max 4) and sets up the systemd service, launcher, and config under the correct user.
@@ -117,8 +117,22 @@ scp build-pi/bin/helix-screen root@<qidi-ip>:/usr/local/bin/
 
 # SSH into the printer and run
 ssh root@<qidi-ip>
+
+# Stop the stock screen FIRST (see below) -- the unit is makerbase-client on
+# firmware 1.1.x, qidi-client on 01.01.02+
+systemctl stop makerbase-client qidi-client
+
 helix-screen
 ```
+
+**Stop the stock screen before running HelixScreen by hand.** `/dev/fb0` is not exclusive and
+HelixScreen does not grab the touchscreen, so a stock screen left running shares both: the two
+UIs paint over each other in the same framebuffer and both act on every touch. Nothing errors,
+which makes it look like a HelixScreen rendering bug rather than two programs on one display.
+
+The one-line installer stops and disables the stock screen for you, and records it so
+`uninstall.sh` puts it back. By hand, `systemctl stop` lasts until reboot; add `systemctl
+disable` to make it stick, and `systemctl enable` to restore the stock UI when you are done.
 
 For verbose output during first-time setup, add `-vv` for DEBUG-level logging:
 
@@ -140,7 +154,7 @@ ls /dev/input/event*
 
 Ensure the user running HelixScreen has read permissions on the event device. Running as root (common on QIDI printers) avoids permission issues.
 
-The Q2's digitizer needs its affine calibration (see [Known Limitations](#known-limitations)); the first-run wizard applies it, and recalibrating from Settings → Touch Calibration re-derives it. Diagnostic env vars: [`HELIX_DEBUG_TOUCH`, `HELIX_TOUCH_*`](../ENVIRONMENT_VARIABLES.md#touch-calibration).
+The Q2's digitizer needs its affine calibration (see [Known Limitations](#known-limitations)); the first-run wizard applies it, and recalibrating from Settings → Touch & Input → Touch Calibration re-derives it. Diagnostic env vars: [`HELIX_DEBUG_TOUCH`, `HELIX_TOUCH_*`](../ENVIRONMENT_VARIABLES.md#touch-calibration).
 
 ## Auto-Detection
 
@@ -220,6 +234,7 @@ HelixScreen ships a **Q2 Happy Hare preset** (`presets/qidi_q2.json`) for exactl
 
 ## Known Limitations
 
+- **On-device install disables the stock client, and with it the slicer and cloud link** -- On new-firmware QIDIs (field-observed on one Max 4; the Q2 and Plus 4 share the firmware family) the stock `qidi-client` is more than the screen: it supplies the credentials QIDI's Moonraker uses for its MQTT link, and the QIDI Box filament state. While it is disabled, QIDI Studio stops seeing the QIDI Box and will not send prints, QIDI cloud is unavailable, and QIDI Box filament edits do not stick (from Fluidd or HelixScreen alike). The symptom signature in the Moonraker log is `[QDC_400_004_010_001]: MQTT account/password/ip decryption returned EMPTY result`, followed by `MQTT Connection Failed: Not authorized`. The installer warns about this when it disables the stock client. Recovery is `sudo systemctl enable --now qidi-client`, or uninstalling HelixScreen, which restores the unit.
 - **Most QIDI models have TJC HMI serial displays** -- The X-Max 3, X-Plus 3, Q1 Pro, X-Smart 3, and **Plus 4** all use TJC (Nextion-compatible) displays connected via serial UART. HelixScreen cannot drive these. For on-device install, a physical screen replacement (HDMI or DSI touchscreen) is required. Remote-control mode is unaffected.
 - **Q2 resolution is very small** -- The Q2's 480x272 display uses the MICRO layout. Some UI elements may be cramped but the layout is functional.
 - **Q2 digitizer over-reports its touch range** -- Advertises 800x480, emits ~460x237, so pre-calibration touches land in the top-left ~55%x49% of the screen (see Hardware Details below). First-run calibration fixes it permanently; `HELIX_TOUCH_MIN/MAX_X/Y` with the *emitted* range is the env-level alternative ([#943](https://github.com/prestonbrown/helixscreen/issues/943)).
@@ -239,7 +254,8 @@ Gathered from firmware analysis and user reports:
 - **Touch digitizer (measured, #943):** `Goodix Capacitive TouchScreen` on `/dev/input/event0` (phys `input/ts`), reporting both legacy ABS_X/Y and MT position axes. It **over-reports its ABS range**: EVIOCGABS advertises 0..799 x 0..479 (an 800x480 panel) but the glass only emits ~460x237, so evdev's linear scale delivers touches compressed to ~0.57x/0.49y of the screen — until first calibration only the top-left ~55%x49% of the UI is reachable. The affine calibration absorbs the compression fully (a≈1.74, e≈1.93); calibration working "correctly" can look broken mid-capture because raw capture space is that compressed space. Evidence: debug bundle N4ZN3YY2 (v0.99.114); the calibration span-check logs the captured/target ratio on every run. A controller that reports honestly needs no affine — don't copy this fix class elsewhere without the span-check evidence.
 - **WiFi:** USB dongle, Realtek RTL8188GU (Tenda), 2.4 GHz only
 - **SSH:** user `mks`, password `makerbase`
-- **Klipper stack:** Standard Klipper + Moonraker (port 7125) + Fluidd, managed via systemd
+- **Klipper stack:** Standard Klipper + Moonraker (port 7125) + Fluidd, managed via systemd. The Moonraker is a QIDI-customized fork: `/server/files/metadata` 404s for every file (a whitelist drops `thumbnails`, and a firmware-only mmu_server.py component calls `metadata.main(config)` across a signature mismatch), so HelixScreen extracts print thumbnails from the gcode header client-side instead of trusting metadata.
+- **.3mf plate thumbnails:** the stock screen client is what materialised the plate images QIDI's Moonraker hardcodes metadata at (`gcodes/.thumbs/<subdir>/<stem>/plate_N.png`), so stopping it leaves every uploaded `.3mf` thumbnail 404ing for Fluidd and HelixScreen alike (prestonbrown/helixscreen#1713). HelixScreen's installer installs a replacement helper: `config/qidi_3mf_thumbs.py` (stdlib Python, extracts `Metadata/plate_N.png` from each `.3mf`) driven by the `helixscreen-3mf-thumbs.path`/`.service` units, running as the Klipper user on gcodes changes and once at boot. Only installed where Moonraker's file_manager metadata.py contains the `generate_thumb_path` function; older QIDI firmware extracts thumbnails itself. The gate and unit install live in `config/qidi-3mf-thumbs-units.sh`, called both by the installer and by the post-Moonraker-update refresh (an in-app update runs under NoNewPrivileges and cannot write /etc itself), so an updating machine gains the units without a reinstall.
 - **Stock UI:** Closed-source binary at `/home/mks/QD_Q2/bin/client`, pinned to CPU core 0 via `taskset`
 
 Firmware source reference: [53Aries/Q2-Firmware](https://github.com/53Aries/Q2-Firmware)

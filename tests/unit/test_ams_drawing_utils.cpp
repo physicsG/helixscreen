@@ -1,9 +1,8 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#include "ui_spool_canvas.h"
-
 #include "../lvgl_test_fixture.h"
+#include "../ui_test_utils.h"
 #include "ams_state.h"
 #include "ams_types.h"
 #include "config.h"
@@ -11,6 +10,12 @@
 #include "ui/ams_drawing_utils.h"
 
 #include "../catch_amalgamated.hpp"
+
+using helix::AmsSystemInfo;
+using helix::AmsUnit;
+using helix::SlotError;
+using helix::SlotInfo;
+using helix::SlotStatus;
 
 // ============================================================================
 // SlotInfo::is_present tests
@@ -131,6 +136,14 @@ TEST_CASE("ams_draw::worst_unit_severity returns INFO for no errors", "[ams_draw
     REQUIRE(ams_draw::worst_unit_severity(unit) == SlotError::INFO);
 }
 
+TEST_CASE("ams_draw::worst_unit_severity reads a BLOCKED lane as ERROR", "[ams_draw][severity]") {
+    AmsUnit unit;
+    SlotInfo jammed;
+    jammed.status = SlotStatus::BLOCKED;
+    unit.slots.push_back(jammed);
+    REQUIRE(ams_draw::worst_unit_severity(unit) == SlotError::ERROR);
+}
+
 TEST_CASE("ams_draw::worst_unit_severity finds ERROR among warnings", "[ams_draw][severity]") {
     AmsUnit unit;
     unit.slots.resize(4);
@@ -183,8 +196,7 @@ TEST_CASE("ams_draw::fill_percent_from_slot metadata-only falls back to full", "
 }
 
 TEST_CASE("ams_draw::fill_percent_from_slot empty lane renders empty", "[ams_draw][fill]") {
-    // Not-present lane → 0 ratio, clamped up to min_pct (matches prior behavior
-    // for a 0% present slot; style_slot_bar gates the bar on is_present anyway).
+    // Not-present lane → 0 ratio, clamped up to min_pct.
     SlotInfo slot;
     slot.status = SlotStatus::EMPTY;
     REQUIRE(ams_draw::fill_percent_from_slot(slot, 0) == 0);
@@ -356,59 +368,6 @@ TEST_CASE_METHOD(LVGLTestFixture, "ams_draw::create_slot_column creates all part
     REQUIRE(lv_obj_get_parent(col.status_line) == col.container);
 }
 
-TEST_CASE_METHOD(LVGLTestFixture, "ams_draw::style_slot_bar loaded state", "[ams_draw][slot_bar]") {
-    auto col = ams_draw::create_slot_column(test_screen(), 10, 40, 4);
-
-    ams_draw::BarStyleParams params;
-    params.color_rgb = 0xFF0000;
-    params.fill_pct = 75;
-    params.is_present = true;
-    params.is_loaded = true;
-    params.has_error = false;
-    ams_draw::style_slot_bar(col, params, 4);
-
-    // Loaded: 2px border, text color, 80% opacity
-    REQUIRE(lv_obj_get_style_border_width(col.bar_bg, LV_PART_MAIN) == 2);
-    REQUIRE(lv_obj_get_style_border_opa(col.bar_bg, LV_PART_MAIN) == LV_OPA_80);
-
-    // Fill visible
-    REQUIRE_FALSE(lv_obj_has_flag(col.bar_fill, LV_OBJ_FLAG_HIDDEN));
-
-    // Status line hidden (loaded shown via border, not status line)
-    REQUIRE(lv_obj_has_flag(col.status_line, LV_OBJ_FLAG_HIDDEN));
-}
-
-TEST_CASE_METHOD(LVGLTestFixture, "ams_draw::style_slot_bar error state shows status line",
-                 "[ams_draw][slot_bar]") {
-    auto col = ams_draw::create_slot_column(test_screen(), 10, 40, 4);
-
-    ams_draw::BarStyleParams params;
-    params.color_rgb = 0x00FF00;
-    params.fill_pct = 50;
-    params.is_present = true;
-    params.is_loaded = false;
-    params.has_error = true;
-    params.severity = SlotError::ERROR;
-    ams_draw::style_slot_bar(col, params, 4);
-
-    // Error: status line visible
-    REQUIRE_FALSE(lv_obj_has_flag(col.status_line, LV_OBJ_FLAG_HIDDEN));
-}
-
-TEST_CASE_METHOD(LVGLTestFixture, "ams_draw::style_slot_bar empty state ghosted",
-                 "[ams_draw][slot_bar]") {
-    auto col = ams_draw::create_slot_column(test_screen(), 10, 40, 4);
-
-    ams_draw::BarStyleParams params;
-    params.is_present = false;
-    ams_draw::style_slot_bar(col, params, 4);
-
-    // Empty: 20% border opacity, fill hidden, status line hidden
-    REQUIRE(lv_obj_get_style_border_opa(col.bar_bg, LV_PART_MAIN) == LV_OPA_20);
-    REQUIRE(lv_obj_has_flag(col.bar_fill, LV_OBJ_FLAG_HIDDEN));
-    REQUIRE(lv_obj_has_flag(col.status_line, LV_OBJ_FLAG_HIDDEN));
-}
-
 // ============================================================================
 // Logo Helper
 // ============================================================================
@@ -427,7 +386,7 @@ TEST_CASE("AmsState::get_logo_path resolves AFC's composite unit names", "[ams][
     // AFC hands the UI "<Type> <Instance>"; only the type carries a logo, so
     // without the leading-token retry every AFC unit fell through to the
     // generic AFC mark — Box Turtles included.
-    const char* box_turtle = AmsState::get_logo_path("Box_Turtle Turtle_1");
+    const char* box_turtle = helix::AmsState::get_logo_path("Box_Turtle Turtle_1");
     REQUIRE(box_turtle != nullptr);
     CHECK(std::string(box_turtle).find("box_turtle_64") != std::string::npos);
 
@@ -435,13 +394,13 @@ TEST_CASE("AmsState::get_logo_path resolves AFC's composite unit names", "[ams][
     for (const char* unit_name :
          {"HTLF HTLF_1", "OpenAMS OAMS_1", "Claymore Clay_1", "EMU EMU_1"}) {
         INFO(unit_name);
-        const char* path = AmsState::get_logo_path(unit_name);
+        const char* path = helix::AmsState::get_logo_path(unit_name);
         REQUIRE(path != nullptr);
         CHECK(std::string(path).find("afc_64") != std::string::npos);
     }
 
     // A leading token that means nothing still yields no logo at all.
-    CHECK(AmsState::get_logo_path("Nonexistent Thing") == nullptr);
+    CHECK(helix::AmsState::get_logo_path("Nonexistent Thing") == nullptr);
 }
 
 TEST_CASE_METHOD(LVGLTestFixture, "ams_draw::apply_logo with unit fallback", "[ams_draw][logo]") {
@@ -457,85 +416,28 @@ TEST_CASE_METHOD(LVGLTestFixture, "ams_draw::apply_logo with unit fallback", "[a
     REQUIRE(lv_obj_has_flag(img, LV_OBJ_FLAG_HIDDEN));
 }
 
-// ============================================================================
-// Spool Visual (shared overlay/widget spool drawing)
-// ============================================================================
+TEST_CASE("ams_draw::unit_logo_path: the unit's own name first, then the system's",
+          "[ams_draw][logo]") {
+    AmsUnit unit;
+    AmsSystemInfo info;
 
-TEST_CASE_METHOD(LVGLTestFixture, "create_spool_visual: 3D produces a canvas",
-                 "[ui][ams][spool_visual]") {
-    helix::Config::get_instance()->set<std::string>("/ams/spool_style", "3d");
-    lv_obj_t* host = lv_obj_create(test_screen());
-    ams_draw::SpoolVisual sv = ams_draw::create_spool_visual(host, 48);
-    REQUIRE(sv.container == host);
-    REQUIRE(sv.use_3d == true);
-    REQUIRE(sv.canvas != nullptr);
-    REQUIRE(sv.color_swatch == nullptr);      // flat-only handle
-    REQUIRE(sv.empty_placeholder != nullptr); // dashed-circle placeholder always built
-    lv_obj_delete(host);
-}
+    // Neither name has a logo: none.
+    unit.name = "NonExistent";
+    info.type_name = "AlsoNonExistent";
+    CHECK(ams_draw::unit_logo_path(unit, info) == nullptr);
 
-TEST_CASE_METHOD(LVGLTestFixture, "create_spool_visual: flat produces concentric rings",
-                 "[ui][ams][spool_visual]") {
-    helix::Config::get_instance()->set<std::string>("/ams/spool_style", "flat");
-    lv_obj_t* host = lv_obj_create(test_screen());
-    ams_draw::SpoolVisual sv = ams_draw::create_spool_visual(host, 48);
-    REQUIRE(sv.use_3d == false);
-    REQUIRE(sv.canvas == nullptr);
-    REQUIRE(sv.spool_outer != nullptr);
-    REQUIRE(sv.color_swatch != nullptr);
-    REQUIRE(sv.spool_hub != nullptr);
-    lv_obj_delete(host);
-}
+    // The system's logo stands in for a unit that has none of its own.
+    info.type_name = "Happy Hare";
+    const char* system_logo = helix::AmsState::get_logo_path("Happy Hare");
+    REQUIRE(system_logo != nullptr);
+    CHECK(std::string(ams_draw::unit_logo_path(unit, info)) == system_logo);
 
-TEST_CASE_METHOD(LVGLTestFixture, "spool_visual_set_fill: 3D updates canvas fill",
-                 "[ui][ams][spool_visual]") {
-    helix::Config::get_instance()->set<std::string>("/ams/spool_style", "3d");
-    lv_obj_t* host = lv_obj_create(test_screen());
-    ams_draw::SpoolVisual sv = ams_draw::create_spool_visual(host, 48);
-    ams_draw::spool_visual_set_fill(sv, 0.5f);
-    REQUIRE(ui_spool_canvas_get_fill_level(sv.canvas) == Catch::Approx(0.5f));
-    lv_obj_delete(host);
-}
-
-TEST_CASE_METHOD(LVGLTestFixture, "spool_visual_set_empty: toggles placeholder vs spool",
-                 "[ui][ams][spool_visual]") {
-    helix::Config::get_instance()->set<std::string>("/ams/spool_style", "3d");
-    lv_obj_t* host = lv_obj_create(test_screen());
-    ams_draw::SpoolVisual sv = ams_draw::create_spool_visual(host, 48);
-    ams_draw::spool_visual_set_empty(sv, true);
-    REQUIRE_FALSE(lv_obj_has_flag(sv.empty_placeholder, LV_OBJ_FLAG_HIDDEN));
-    REQUIRE(lv_obj_has_flag(sv.canvas, LV_OBJ_FLAG_HIDDEN));
-    ams_draw::spool_visual_set_empty(sv, false);
-    REQUIRE(lv_obj_has_flag(sv.empty_placeholder, LV_OBJ_FLAG_HIDDEN));
-    REQUIRE_FALSE(lv_obj_has_flag(sv.canvas, LV_OBJ_FLAG_HIDDEN));
-    lv_obj_delete(host);
-}
-
-TEST_CASE_METHOD(LVGLTestFixture, "spool_visual flat: set_color tints swatch + darkens outer",
-                 "[ui][ams][spool_visual]") {
-    helix::Config::get_instance()->set<std::string>("/ams/spool_style", "flat");
-    lv_obj_t* host = lv_obj_create(test_screen());
-    ams_draw::SpoolVisual sv = ams_draw::create_spool_visual(host, 48);
-
-    ams_draw::spool_visual_set_color(sv, lv_color_hex(0xFF0000));
-    REQUIRE(lv_color_eq(lv_obj_get_style_bg_color(sv.color_swatch, LV_PART_MAIN),
-                        lv_color_hex(0xFF0000)));
-    REQUIRE(lv_color_eq(lv_obj_get_style_bg_color(sv.spool_outer, LV_PART_MAIN),
-                        ams_draw::darken_color(lv_color_hex(0xFF0000), 50)));
-
-    ams_draw::spool_visual_set_empty(sv, true);
-    REQUIRE(lv_obj_has_flag(sv.spool_outer, LV_OBJ_FLAG_HIDDEN));
-    REQUIRE(lv_obj_has_flag(sv.color_swatch, LV_OBJ_FLAG_HIDDEN));
-    REQUIRE(lv_obj_has_flag(sv.spool_hub, LV_OBJ_FLAG_HIDDEN));
-    REQUIRE_FALSE(lv_obj_has_flag(sv.empty_placeholder, LV_OBJ_FLAG_HIDDEN));
-
-    ams_draw::spool_visual_set_empty(sv, false);
-    REQUIRE_FALSE(lv_obj_has_flag(sv.spool_outer, LV_OBJ_FLAG_HIDDEN));
-    REQUIRE_FALSE(lv_obj_has_flag(sv.color_swatch, LV_OBJ_FLAG_HIDDEN));
-    REQUIRE_FALSE(lv_obj_has_flag(sv.spool_hub, LV_OBJ_FLAG_HIDDEN));
-    REQUIRE(lv_obj_has_flag(sv.empty_placeholder, LV_OBJ_FLAG_HIDDEN));
-
-    lv_obj_delete(host);
+    // A unit with its own logo keeps it over the system's.
+    unit.name = "Box Turtle 1";
+    const char* unit_logo = helix::AmsState::get_logo_path("Box Turtle 1");
+    REQUIRE(unit_logo != nullptr);
+    REQUIRE(std::string(unit_logo) != std::string(system_logo));
+    CHECK(std::string(ams_draw::unit_logo_path(unit, info)) == unit_logo);
 }
 
 TEST_CASE_METHOD(LVGLTestFixture, "create_lane_badge: shows 1-based number", "[ui][ams][badge]") {
@@ -545,5 +447,53 @@ TEST_CASE_METHOD(LVGLTestFixture, "create_lane_badge: shows 1-based number", "[u
     lv_obj_t* lbl = lv_obj_get_child(badge, 0);
     REQUIRE(lbl != nullptr);
     REQUIRE(std::string(lv_label_get_text(lbl)) == "3");
+    lv_obj_delete(host);
+}
+
+// The pooled-cell update path recolors one badge object in place instead of
+// recreating it; pin both directions of the flip.
+TEST_CASE_METHOD(LVGLTestFixture, "set_lane_badge_active recolors without recreating",
+                 "[ui][ams][badge]") {
+    lv_obj_t* host = lv_obj_create(test_screen());
+    lv_obj_t* badge = ams_draw::create_lane_badge(host, 2, 16, false);
+    REQUIRE(badge != nullptr);
+    lv_obj_t* lbl = lv_obj_get_child(badge, 0);
+    REQUIRE(lbl != nullptr);
+    CHECK(lv_color_eq(lv_obj_get_style_bg_color(badge, LV_PART_MAIN),
+                      theme_manager_get_color("ams_badge_bg")));
+    ams_draw::set_lane_badge_active(badge, true);
+    CHECK(lv_color_eq(lv_obj_get_style_bg_color(badge, LV_PART_MAIN),
+                      theme_manager_get_color("success")));
+    CHECK(lv_color_eq(lv_obj_get_style_text_color(lbl, LV_PART_MAIN),
+                      theme_manager_get_contrast_adjusted_text(
+                          theme_manager_get_color("text"), theme_manager_get_color("success"))));
+    ams_draw::set_lane_badge_active(badge, false);
+    CHECK(lv_color_eq(lv_obj_get_style_bg_color(badge, LV_PART_MAIN),
+                      theme_manager_get_color("ams_badge_bg")));
+    lv_obj_delete(host);
+}
+
+// The number sits on a success or grey fill; the palette's text colour is not
+// chosen against either, so the label shifts toward its own pole until it
+// reads at 4:1.
+TEST_CASE_METHOD(LVGLTestFixture, "create_lane_badge: number is readable on its fill",
+                 "[ui][ams][badge][1648]") {
+    lv_obj_t* host = lv_obj_create(test_screen());
+    for (bool active : {true, false}) {
+        lv_obj_t* badge = ams_draw::create_lane_badge(host, 1, 16, active);
+        REQUIRE(badge != nullptr);
+        lv_obj_t* lbl = lv_obj_get_child(badge, 0);
+        REQUIRE(lbl != nullptr);
+        lv_color_t fill = lv_obj_get_style_bg_color(badge, LV_PART_MAIN);
+        lv_color_t text = lv_obj_get_style_text_color(lbl, LV_PART_MAIN);
+        lv_color_t palette_text = theme_manager_get_color("text");
+        CAPTURE(active, lv_color_to_u32(fill) & 0xFFFFFF, lv_color_to_u32(text) & 0xFFFFFF,
+                lv_color_to_u32(palette_text) & 0xFFFFFF);
+        CHECK(wcag::contrast(text, fill) >= 4.0);
+        if (wcag::own_pole_reaches_4_1(palette_text, fill)) {
+            CHECK((wcag::luminance(text) > wcag::luminance(fill)) ==
+                  (wcag::luminance(palette_text) > wcag::luminance(fill)));
+        }
+    }
     lv_obj_delete(host);
 }

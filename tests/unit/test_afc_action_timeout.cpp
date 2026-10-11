@@ -19,6 +19,7 @@
 
 #include "ams_backend_afc.h"
 #include "ams_types.h"
+#include "test_helpers/afc_test_access.h"
 
 #include <chrono>
 #include <mutex>
@@ -30,6 +31,8 @@
 using namespace helix;
 using namespace std::chrono;
 
+namespace helix {
+
 class AfcActionTimeoutHelper : public AmsBackendAfc {
   public:
     /// @param with_lanes false leaves the slot registry uninitialized, which is
@@ -37,12 +40,12 @@ class AfcActionTimeoutHelper : public AmsBackendAfc {
     explicit AfcActionTimeoutHelper(bool with_lanes = true) : AmsBackendAfc(nullptr, nullptr) {
         if (with_lanes) {
             std::vector<std::string> lanes{"lane1", "lane2"};
-            initialize_slots(lanes);
+            AfcTestAccess::initialize_slots(*this, lanes);
         }
     }
 
     /// Feed a status frame carrying only AFC.current_state, the authoritative
-    /// state field. Goes through the real handle_status_update() path.
+    /// state field. Goes through the real handle_status() path.
     void feed_state(const std::string& current_state) {
         nlohmann::json afc;
         afc["current_state"] = current_state;
@@ -60,7 +63,7 @@ class AfcActionTimeoutHelper : public AmsBackendAfc {
     /// Back-date the action clock so the budget has "elapsed" without sleeping.
     void age_action(seconds elapsed) {
         std::lock_guard<std::mutex> lock(mutex_);
-        action_start_time_ = steady_clock::now() - elapsed;
+        AfcTestAccess::action_start_time(*this) = steady_clock::now() - elapsed;
     }
 
     [[nodiscard]] AmsAction action() const {
@@ -75,14 +78,15 @@ class AfcActionTimeoutHelper : public AmsBackendAfc {
 
     [[nodiscard]] bool latched() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        return timed_out_state_.has_value();
+        return AfcTestAccess::timed_out_state(*this).has_value();
     }
 
     [[nodiscard]] steady_clock::time_point action_stamp() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        return action_start_time_;
+        return AfcTestAccess::action_start_time(*this);
     }
 };
+} // namespace helix
 
 namespace {
 

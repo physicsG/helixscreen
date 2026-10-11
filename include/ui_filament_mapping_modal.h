@@ -24,6 +24,8 @@ namespace helix::ui {
  */
 class FilamentMappingModal : public Modal {
   public:
+    FilamentMappingModal();
+
     const char* get_name() const override {
         return "Filament Mapping";
     }
@@ -43,6 +45,10 @@ class FilamentMappingModal : public Modal {
     /// Callback when user clicks "Done" — receives updated mappings
     using MappingsUpdatedCallback = std::function<void(std::vector<helix::ToolMapping>)>;
     void set_on_mappings_updated(MappingsUpdatedCallback cb);
+
+    /// A warning shown above the rows, or empty for none. Applies to the next
+    /// show() only when set before it; a caller that never sets it shows none.
+    void set_start_macro_note(std::string note);
 
   protected:
     void on_show() override;
@@ -72,6 +78,7 @@ class FilamentMappingModal : public Modal {
     std::vector<helix::ToolMapping> mappings_;
     std::vector<helix::ToolMapping> original_mappings_;
     MappingsUpdatedCallback on_updated_cb_;
+    std::string start_macro_note_;
     bool auto_color_map_ = false;
     /// The persisted preference as it stood when the modal opened.
     ///

@@ -25,8 +25,9 @@
 // migrations rewrite data on the way through.
 //
 // Driven through the public Config::init() path (the migration runner is a
-// static function in config.cpp), same as the v18/v21 migration tests.
+// static function in config_migrations.cpp), same as the v18/v21 migration tests.
 
+#include "../test_helpers/mock_config_storage.h"
 #include "config.h"
 #include "config_testing.h"
 #include "platform_capabilities.h"
@@ -34,6 +35,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <optional>
 #include <string>
 #include <unistd.h>
@@ -157,8 +159,6 @@ json future_config(int version) {
 ///
 /// Several values are deliberately set to what a migration's trigger looks for,
 /// so a replay is visible rather than a no-op:
-///   brightness 50              — the v6→v7 / v8→v9 "still on the old default" bump
-///   toolhead_style 2 and 3     — POST-v8 values that the v7→v8 remap also matches
 ///   screensaver_type 1         — the v15→v16 Flying Toasters disable
 ///   sleep_backlight_off/hardware_blank — the v12→v13 / v14→v15 AD5X repair
 /// A user who deliberately chose any of these is indistinguishable, in the
@@ -204,7 +204,7 @@ json populated_config() {
         {"calibration", {{"pid_history", {{"extruder", {{"oscillation_duration", 12.5}}}}}}},
         {"print_start_history",
          {{"entries",
-           json::array({json{{"total", 88.0}, {"phases", {{"0", 3.0}, {"5", 40.0}}}}})}}},
+           json::array({json{{"total", 88.0}, {"phases", {{"HOMING", 3.0}, {"QGL", 40.0}}}}})}}},
         {"console", {{"filter_temps", true}, {"filter_user_add", json::array({"prefix:KEEP"})}}},
         {"scanner", {{"usb_vendor_product", "1a2b:3c4d"}, {"keymap", "qwerty"}}},
         {"printers",
@@ -275,7 +275,7 @@ const std::vector<std::pair<std::string, json>>& untargeted_settings() {
         {"/thermal/rates/extruder/heat_rate", 2.75},
         {"/calibration/pid_history/extruder/oscillation_duration", 12.5},
         {"/print_start_history/entries/0/total", 88.0},
-        {"/print_start_history/entries/0/phases/5", 40.0},
+        {"/print_start_history/entries/0/phases/QGL", 40.0},
         {"/console/filter_user_add/0", "prefix:KEEP"},
         {"/scanner/usb_vendor_product", "1a2b:3c4d"},
         {"/scanner/keymap", "qwerty"},
@@ -449,7 +449,10 @@ TEST_CASE_METHOD(MigrationFutureFixture,
 // two months and to 8 within the last five, so the replay depths below are not
 // hypothetical.
 //
-// Stamp 0 is deliberately excluded: config.cpp:1681 treats config_version == 0
+// Stamps below MIN_MIGRATABLE_CONFIG_VERSION are not replayed at all: init()
+// sets the document aside and starts from defaults.
+//
+// Stamp 0 is deliberately excluded: Config::init() treats config_version == 0
 // as "tarball default" and replaces the whole document from backup before any
 // migration runs, so it is a different code path, not a replay.
 
@@ -458,7 +461,7 @@ TEST_CASE_METHOD(MigrationFutureFixture,
                  "[config][migration][roundtrip]") {
     const json baseline = boot(populated_config());
 
-    for (int stamp = CURRENT_CONFIG_VERSION - 1; stamp >= 1; --stamp) {
+    for (int stamp = CURRENT_CONFIG_VERSION - 1; stamp >= MIN_MIGRATABLE_CONFIG_VERSION; --stamp) {
         const json replayed = replay_from(baseline, stamp);
 
         // The replay must re-stamp to current; a config stuck at an old version
@@ -488,7 +491,7 @@ TEST_CASE_METHOD(MigrationFutureFixture,
 TEST_CASE_METHOD(MigrationFutureFixture,
                  "Config round trip: a rollback past v18 re-arms the touch calibration recheck",
                  "[config][migration][roundtrip]") {
-    // FINDING. migrate_v17_to_v18() (config.cpp:812-827) writes
+    // FINDING. migrate_v17_to_v18() writes
     // recheck_pending = true unconditionally — it has no "already done" guard,
     // because at the time it was written the version stamp was the guard.
     //
@@ -516,71 +519,15 @@ TEST_CASE_METHOD(MigrationFutureFixture,
 }
 
 TEST_CASE_METHOD(MigrationFutureFixture,
-                 "Config round trip: a rollback past v9 overwrites a deliberate brightness of 50",
-                 "[config][migration][roundtrip]") {
-    // FINDING. migrate_v6_to_v7() (config.cpp:446) and migrate_v8_to_v9()
-    // (config.cpp:488) both bump brightness 50 -> 80 on the assumption that 50
-    // can only be the old default. After a rollback that is no longer true: a
-    // user who chose 50 has it silently raised.
-    const json baseline = boot(populated_config());
-    REQUIRE(baseline["brightness"] == 50);
-
-    CHECK(replay_from(baseline, 9)["brightness"] == 50); // v8→v9 gate not crossed
-    CHECK(replay_from(baseline, 8)["brightness"] == 80);
-    CHECK(replay_from(baseline, 6)["brightness"] == 80);
-}
-
-TEST_CASE_METHOD(MigrationFutureFixture,
-                 "Config round trip: a rollback past v8 corrupts toolhead_style",
-                 "[config][migration][roundtrip]") {
-    // FINDING, and the worst of the four: migrate_v7_to_v8() (config.cpp:457)
-    // remaps the toolhead enum 2 -> 5 and 3 -> 2. The NEW values overlap the old
-    // ones, so the remap is not idempotent — it is a rotation. Replaying it
-    // turns an already-correct A4T (2) into Stealthburner (5) and an Anthead (3)
-    // into A4T (2), and a further replay would move them again.
-    //
-    // Unlike the other three this produces a value the user never chose and
-    // cannot be explained as "an old default got bumped".
-    const json baseline = boot(populated_config());
-    REQUIRE(baseline["printers"]["voronv2"]["appearance"]["toolhead_style"] == 2);
-    REQUIRE(baseline["printers"]["prusamk4"]["appearance"]["toolhead_style"] == 3);
-
-    const json safe = replay_from(baseline, 8); // v7→v8 gate not crossed
-    CHECK(safe["printers"]["voronv2"]["appearance"]["toolhead_style"] == 2);
-    CHECK(safe["printers"]["prusamk4"]["appearance"]["toolhead_style"] == 3);
-
-    const json replayed = replay_from(baseline, 7);
-    CHECK(replayed["printers"]["voronv2"]["appearance"]["toolhead_style"] == 5);
-    CHECK(replayed["printers"]["prusamk4"]["appearance"]["toolhead_style"] == 2);
-}
-
-TEST_CASE_METHOD(MigrationFutureFixture,
-                 "Config round trip: a rollback past v3 no longer rewrites jitter_threshold",
-                 "[config][migration][roundtrip]") {
-    // migrate_v2_to_v3() used to read 15 as "the old default" and drop it to 5,
-    // which was the narrowest of the four replay findings: 15 was the one value
-    // affected, and a user on a genuinely noisy panel is exactly who would have
-    // set it back. The setting it retuned never reached the input pipeline and
-    // has since been removed (prestonbrown/helixscreen#1358), so the step is now
-    // empty and a rollback past v3 leaves the stored value alone. The key itself
-    // is inert; what this pins is that the retired migration does not touch it.
-    const json baseline = boot(populated_config());
-    REQUIRE(baseline["input"]["jitter_threshold"] == 15);
-
-    CHECK(replay_from(baseline, 3)["input"]["jitter_threshold"] == 15);
-    CHECK(replay_from(baseline, 2)["input"]["jitter_threshold"] == 15);
-}
-
-TEST_CASE_METHOD(MigrationFutureFixture,
                  "Config round trip: a rollback past v16 re-disables the screensaver on a "
                  "constrained tier",
                  "[config][migration][roundtrip]") {
-    // The fifth replay, invisible to the sweep above: migrate_v15_to_v16()
-    // (config.cpp:740) returns early on STANDARD hardware, which is what a
+    // A replay invisible to the sweep above: migrate_v15_to_v16()
+    // returns early on STANDARD hardware, which is what a
     // desktop test host detects, so every other test in this file exercises the
     // no-op branch. Forcing the tier is the only way to see the real one.
     //
-    // Milder than the other four — it re-fires only for a user who deliberately
+    // Milder than the v17→v18 replay — it re-fires only for a user who deliberately
     // re-selected Flying Toasters after the first migration, and the migration
     // is arguably right that the setting breaks prints on this hardware. Pinned
     // so the behaviour is a decision rather than an accident.
@@ -624,8 +571,94 @@ TEST_CASE_METHOD(MigrationFutureFixture,
 
     // The values they would have moved are already at their modern paths and
     // stay there across a replay of the full ladder.
-    const json replayed = replay_from(baseline, 1);
+    const json replayed = replay_from(baseline, MIN_MIGRATABLE_CONFIG_VERSION);
     CHECK(replayed["display"]["rotate"] == 0);
     CHECK(replayed["input"]["touch_device"] == "/dev/input/event3");
     CHECK(replayed["input"]["calibration"]["a"] == 1.0021);
+}
+
+// ============================================================================
+// Pre-migration snapshot (#1305): a migrating boot keeps the document it
+// started from beside settings.json, since the save that follows refreshes the
+// rolling backup with the migrated one.
+// ============================================================================
+
+namespace {
+
+std::string read_bytes(const std::string& file) {
+    std::ifstream f(file, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+}
+
+} // namespace
+
+TEST_CASE_METHOD(MigrationFutureFixture,
+                 "Config: a migrating boot snapshots the original document first",
+                 "[config][migration][backup]") {
+    json old_doc = populated_config();
+    old_doc["config_version"] = CURRENT_CONFIG_VERSION - 1;
+    const std::string original = old_doc.dump(2);
+    std::ofstream(config_path) << original;
+    config.init(config_path);
+
+    const std::string snapshot = config_path + ".pre-migration";
+    REQUIRE(fs::exists(snapshot));
+    CHECK(read_bytes(snapshot) == original);
+    CHECK(read_raw()["config_version"] == CURRENT_CONFIG_VERSION);
+}
+
+TEST_CASE_METHOD(MigrationFutureFixture,
+                 "Config: a boot with nothing to migrate writes no snapshot",
+                 "[config][migration][backup]") {
+    SECTION("current version") {
+        write_and_init(populated_config());
+    }
+    SECTION("future version") {
+        write_and_init(future_config(CURRENT_CONFIG_VERSION + 1));
+    }
+    SECTION("unversioned packaged default") {
+        json packaged = populated_config();
+        packaged.erase("config_version");
+        write_and_init(packaged);
+    }
+    CHECK_FALSE(fs::exists(config_path + ".pre-migration"));
+}
+
+TEST_CASE_METHOD(MigrationFutureFixture,
+                 "Config: a snapshot is only taken when the storage is the settings file",
+                 "[config][migration][backup]") {
+    // A file at the config path that the injected storage does not read.
+    std::ofstream(config_path) << populated_config().dump(2);
+    json old_doc = populated_config();
+    old_doc["config_version"] = CURRENT_CONFIG_VERSION - 1;
+    config.set_storage(std::make_unique<helix::test::MockConfigStorage>(old_doc.dump()));
+    config.init(config_path);
+
+    CHECK_FALSE(fs::exists(config_path + ".pre-migration"));
+}
+
+TEST_CASE_METHOD(MigrationFutureFixture,
+                 "Config: a snapshot at the starting version outlives a repeat migrating boot",
+                 "[config][migration][backup]") {
+    // A migration that throws leaves settings.json partly migrated but still
+    // stamped with its starting version, so the next boot migrates from that
+    // version again. The copy taken before the first attempt is the original.
+    const std::string snapshot = config_path + ".pre-migration";
+    json old_doc = populated_config();
+    old_doc["config_version"] = CURRENT_CONFIG_VERSION - 1;
+
+    SECTION("a snapshot at the same version is kept") {
+        const std::string original =
+            json{{"config_version", CURRENT_CONFIG_VERSION - 1}, {"marker", "original"}}.dump();
+        std::ofstream(snapshot) << original;
+        write_and_init(old_doc);
+        CHECK(read_bytes(snapshot) == original);
+    }
+    SECTION("a snapshot from an older version is replaced") {
+        std::ofstream(snapshot) << json{
+            {"config_version", CURRENT_CONFIG_VERSION - 2},
+            {"marker", "older"}}.dump();
+        write_and_init(old_doc);
+        CHECK(read_bytes(snapshot) == old_doc.dump(2));
+    }
 }

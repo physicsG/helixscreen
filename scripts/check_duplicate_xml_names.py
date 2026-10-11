@@ -67,6 +67,8 @@ import sys
 from pathlib import Path
 from typing import Iterable
 
+from staged_content import staged_files
+
 SCAN_DIR = 'ui_xml'
 OPT_OUT = 'DUPLICATE_NAME_OK'
 
@@ -120,16 +122,12 @@ def _has_index(value: str) -> bool:
     return '$i' in value or '${i}' in value
 
 
-def scan_file(path: Path) -> list[tuple[str, str, str, list[int]]]:
+def scan_source(rel: str, src: str) -> list[tuple[str, str, str, list[int]]]:
     """Return [(key, kind, name, lines)] for every collision in this file.
 
     kind is 'duplicate' (the same name on N elements) or 'repeat' (one literal
-    name inside a <repeat>, materialized count times)."""
-    try:
-        src = path.read_text(errors='replace')
-    except OSError:
-        return []
-
+    name inside a <repeat>, materialized count times). `rel` is only carried
+    into the report - `src` is already sourced, from disk or the index."""
     clean = _blank_comments(src)
     src_lines = src.splitlines()
 
@@ -202,7 +200,6 @@ def scan_file(path: Path) -> list[tuple[str, str, str, list[int]]]:
             elif tag == 'repeat':
                 repeat_counts.append(a.get('count', ''))
 
-    rel = path.as_posix()
     findings: list[tuple[str, str, str, list[int]]] = []
 
     for name, occurrences in hits.items():
@@ -231,24 +228,29 @@ def scan_file(path: Path) -> list[tuple[str, str, str, list[int]]]:
     return findings
 
 
-def collect_files(args: argparse.Namespace) -> Iterable[Path]:
+def collect_files(args: argparse.Namespace) -> Iterable[tuple[str, str]]:
+    """Yield (path, text) for every file to scan, content already sourced.
+
+    --staged-only reads each staged XML file's INDEX content - what the
+    commit will contain, not whatever the working tree holds right now.
+    """
     if args.staged_only:
-        out = subprocess.run(
-            ['git', 'diff', '--cached', '--name-only', '--diff-filter=ACM'],
-            capture_output=True, text=True, check=False,
-        )
-        for line in out.stdout.splitlines():
-            p = Path(line)
-            if p.suffix == '.xml' and p.exists():
-                yield p
+        yield from staged_files(suffixes=('.xml',))
         return
     if args.files:
         for f in args.files:
             p = Path(f)
             if p.suffix == '.xml' and p.exists():
-                yield p
+                try:
+                    yield (str(p), p.read_text(errors='replace'))
+                except OSError:
+                    continue
         return
-    yield from sorted(Path(SCAN_DIR).rglob('*.xml'))
+    for p in sorted(Path(SCAN_DIR).rglob('*.xml')):
+        try:
+            yield (str(p), p.read_text(errors='replace'))
+        except OSError:
+            continue
 
 
 def report(findings: list[tuple[str, str, str, list[int]]],
@@ -320,8 +322,8 @@ def main() -> int:
         os.chdir(repo_root)
 
     findings: list[tuple[str, str, str, list[int]]] = []
-    for path in collect_files(args):
-        findings += scan_file(path)
+    for path, src in collect_files(args):
+        findings += scan_source(path, src)
 
     if args.list:
         for key, kind, name, lines in sorted(findings):

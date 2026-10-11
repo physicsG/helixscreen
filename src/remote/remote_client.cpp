@@ -37,6 +37,7 @@
 
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -79,7 +80,8 @@ static const HelpEntry HELP[] = {
     {nullptr, "current, pwd", "Show the panel, overlay stack, and working directory", nullptr},
     {nullptr, "resolve <target>", "Print the absolute locator a target resolves to", nullptr},
     {nullptr, "list_panels", "List available panels", nullptr},
-    {nullptr, "list_components", "List every registered XML component (live registry)", nullptr},
+    {nullptr, "list_components",
+     "List XML components registered so far (they register on first use)", nullptr},
     {nullptr, "list_callbacks", "List every registered event-callback name", nullptr},
     {nullptr, "screenshot [path] [--target W] [--stable]", "Capture the screen",
      "a .png path encodes PNG; default is a timestamped .bmp in the\n"
@@ -116,12 +118,28 @@ static const HelpEntry HELP[] = {
      "array, plus hidden/clickable/scrollable flags. Descends a composite\n"
      "row to its control, matching what click/set_value act on. A hidden\n"
      "widget still resolves — assert bind_flag_if contracts here."},
-    {nullptr, "click <target>", "Click (toggles switches/checkboxes)",
-     "On a composite row, descends to the control inside it."},
-    {nullptr, "set_value <target> <v>", "Set value (slider, switch, dropdown, textarea)", nullptr},
+    {nullptr, "click <target> [--force]", "Click (toggles switches/checkboxes)",
+     "On a composite row, descends to the control inside it. Refuses a target a\n"
+     "real tap could not reach - hidden, not clickable, or disabled - because a\n"
+     "synthetic CLICKED lands on anything and reports success either way.\n"
+     "--force sends it regardless and reports what was bypassed."},
+    {nullptr, "set_value <target> <v> [--force]", "Set value (slider, switch, dropdown, textarea)",
+     "Refuses a disabled control, which the user could not have changed.\n"
+     "--force sets it anyway."},
     {nullptr, "scroll <target> [dx dy]", "Scroll into view, or by a delta", nullptr},
     {nullptr, "focus <target>", "Focus a widget through its input group",
      "Raises the on-screen keyboard for a textarea (click does not)."},
+    {nullptr, "overflow [target]", "List widgets whose content spills past their box",
+     "Per widget: px past each edge, and whether it scrolls (else it\n"
+     "clips). Catches a stray scrollbar or a clipped row in one call."},
+
+    {"Home grid (positions and spans in cells; 1.5 for half cells)", "home [list]",
+     "Every page's grid size and placed widgets", nullptr},
+    {nullptr, "home place <id> <col> <row> <w> <h> [page]", "Put a widget at a cell rectangle",
+     "Checked like an Edit Mode drop: the widget's span limits, half-cell\n"
+     "support and free cells. Adds a widget not yet on the grid."},
+    {nullptr, "home resize <id> <w> <h>", "Resize a placed widget in place", nullptr},
+    {nullptr, "home remove <id>", "Take a widget off the grid, as Edit Mode's trash does", nullptr},
 
     {"Synthetic pointer (drives LVGL's real input pipeline — gestures, long-press,\n"
      "scroll-vs-tap — unlike `click`, which sends a bare widget event)",
@@ -129,6 +147,7 @@ static const HelpEntry HELP[] = {
     {nullptr, "move <x> <y>", "Move it (a drag while pressed, a hover while not)", nullptr},
     {nullptr, "release [x y]", "Lift it, at x,y if given, else where it is",
      "e.g. long-press: press 100 300; sleep 0.6; release"},
+    {nullptr, "tap <x> <y>", "Press and release at x,y (also: click <x> <y>)", nullptr},
 
     {"Diagnostics & lifecycle", "wait_idle [--timeout N]",
      "Block until UpdateQueue and HttpExecutor are both quiet",
@@ -187,8 +206,12 @@ static void print_usage() {
     printf("  -h, --help              Show this help\n");
     printf("\nSocket path resolution:\n");
     printf("  1. --socket <path>  (explicit)\n");
-    printf("  2. $XDG_RUNTIME_DIR/helixscreen-control.sock\n");
-    printf("  3. /tmp/helixscreen-control.sock\n");
+    printf("  2. the one live socket among, in order:\n");
+    printf("       $RUNTIME_DIRECTORY/  (systemd units)\n");
+    printf("       $XDG_RUNTIME_DIR/\n");
+    printf("       /run/helixscreen/\n");
+    printf("       /tmp/\n");
+    printf("     more than one live socket refuses to guess; pass -s\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -200,33 +223,25 @@ static std::string resolve_socket_path(const std::string& override_path) {
         return override_path;
     }
 
-    const char* xdg_runtime = getenv("XDG_RUNTIME_DIR");
-    const std::string dir =
-        (xdg_runtime && xdg_runtime[0] != '\0') ? std::string(xdg_runtime) : std::string("/tmp");
-    const std::string well_known = dir + "/helixscreen-control.sock";
+    // Search every candidate directory rather than resolving one: the server runs
+    // under systemd with $RUNTIME_DIRECTORY, this client usually runs from an ssh
+    // session with only $XDG_RUNTIME_DIR, and picking a single directory finds
+    // nothing the other context created. resolve_client_socket_path applies one
+    // ambiguity policy to whatever it finds, well-known or pid-suffixed alike.
+    const helix::ClientSocketResolution resolution =
+        helix::resolve_client_socket_path(helix::control_socket_search_dirs());
 
-    // Liveness, not mere existence: a crashed instance leaves the file behind, and
-    // connecting to it fails with a confusing error instead of finding the app that
-    // is actually running on a pid-suffixed path.
-    if (helix::UnixSocketTransport::path_is_live(well_known)) {
-        return well_known;
+    if (resolution.status != helix::ClientSocketResolution::Status::Ambiguous) {
+        return resolution.path;
     }
 
-    std::vector<std::string> instances = helix::UnixSocketTransport::discover_instances(dir);
-    if (instances.size() == 1) {
-        return instances[0];
+    // Guessing here would silently drive the wrong app, exactly the failure
+    // this whole search exists to prevent. Make the user choose.
+    fprintf(stderr, "Error: several HelixScreen instances are running. Pick one with -s:\n");
+    for (const std::string& path : resolution.candidates) {
+        fprintf(stderr, "  --socket %s\n", path.c_str());
     }
-    if (instances.size() > 1) {
-        // Guessing here would silently drive the wrong app — exactly the failure
-        // this whole change exists to prevent. Make the user choose.
-        fprintf(stderr, "Error: several HelixScreen instances are running. Pick one with -s:\n");
-        for (const std::string& path : instances) {
-            fprintf(stderr, "  --socket %s\n", path.c_str());
-        }
-        exit(1);
-    }
-
-    return well_known; // Nothing running; report against the expected path.
+    exit(1);
 }
 
 static int connect_to_server(const std::string& socket_path) {
@@ -478,6 +493,13 @@ static nlohmann::json target_param(const std::string& t) {
 
 /// Build a JSON-RPC request from a command + args vector.
 /// Returns empty json on parse error (with error printed to stderr).
+/// A token that is a whole decimal number, so `click 427 133` reads as coordinates.
+static bool is_int(const std::string& t) {
+    char* end = nullptr;
+    std::strtol(t.c_str(), &end, 10);
+    return !t.empty() && end && *end == '\0';
+}
+
 static nlohmann::json build_request_from_tokens(const std::vector<std::string>& tokens) {
     if (tokens.empty())
         return {};
@@ -606,12 +628,53 @@ static nlohmann::json build_request_from_tokens(const std::vector<std::string>& 
         return build_request("freeze");
     } else if (cmd == "unfreeze") {
         return build_request("unfreeze");
+    } else if (cmd == "tap" ||
+               (cmd == "click" && tokens.size() >= 3 && is_int(tokens[1]) && is_int(tokens[2]))) {
+        if (tokens.size() < 3) {
+            fprintf(stderr, "Error: tap requires x and y coordinates\n");
+            return {};
+        }
+        return build_request("pointer_tap", {{"x", std::atoi(tokens[1].c_str())},
+                                             {"y", std::atoi(tokens[2].c_str())}});
+    } else if (cmd == "overflow") {
+        return build_request("overflow", tokens.size() >= 2 ? target_param(tokens[1])
+                                                            : nlohmann::json::object());
+    } else if (cmd == "home") {
+        const std::string action = tokens.size() >= 2 ? tokens[1] : "list";
+        const auto num = [](const std::string& t) { return std::atof(t.c_str()); };
+        if (action == "list") {
+            return build_request("home", {{"action", "list"}});
+        } else if (action == "remove" && tokens.size() >= 3) {
+            return build_request("home", {{"action", "remove"}, {"id", tokens[2]}});
+        } else if (action == "resize" && tokens.size() >= 5) {
+            return build_request("home", {{"action", "place"},
+                                          {"id", tokens[2]},
+                                          {"w", num(tokens[3])},
+                                          {"h", num(tokens[4])}});
+        } else if (action == "place" && tokens.size() >= 7) {
+            nlohmann::json params = {{"action", "place"},     {"id", tokens[2]},
+                                     {"col", num(tokens[3])}, {"row", num(tokens[4])},
+                                     {"w", num(tokens[5])},   {"h", num(tokens[6])}};
+            if (tokens.size() >= 8) {
+                params["page"] = std::atoi(tokens[7].c_str());
+            }
+            return build_request("home", params);
+        }
+        fprintf(stderr, "Error: home [list] | place <id> <col> <row> <w> <h> [page] | "
+                        "resize <id> <w> <h> | remove <id>\n");
+        return {};
     } else if (cmd == "click") {
         if (tokens.size() < 2) {
             fprintf(stderr, "Error: click requires a widget name or @path\n");
             return {};
         }
-        return build_request("click", target_param(tokens[1]));
+        nlohmann::json params = target_param(tokens[1]);
+        for (size_t i = 2; i < tokens.size(); ++i) {
+            if (tokens[i] == "--force") {
+                params["force"] = true;
+            }
+        }
+        return build_request("click", params);
     } else if (cmd == "focus") {
         if (tokens.size() < 2) {
             fprintf(stderr, "Error: focus requires a widget name or @path\n");
@@ -656,6 +719,11 @@ static nlohmann::json build_request_from_tokens(const std::vector<std::string>& 
         }
         nlohmann::json p = target_param(tokens[1]);
         p["value"] = parse_value(tokens[2]);
+        for (size_t i = 3; i < tokens.size(); ++i) {
+            if (tokens[i] == "--force") {
+                p["force"] = true;
+            }
+        }
         return build_request("set_widget_value", p);
     } else if (cmd == "scenario") {
         if (tokens.size() < 2) {
@@ -782,6 +850,9 @@ static const char* REPL_COMMANDS[] = {"ping",
                                       "click",
                                       "set_value",
                                       "focus",
+                                      "tap",
+                                      "overflow",
+                                      "home",
                                       "press",
                                       "move",
                                       "release",

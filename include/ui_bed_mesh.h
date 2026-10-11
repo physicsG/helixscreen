@@ -72,7 +72,7 @@ void ui_bed_mesh_set_bounds(lv_obj_t* canvas, double bed_x_min, double bed_x_max
 /**
  * @brief Force redraw of mesh visualization
  *
- * Clears the canvas and re-renders the mesh with current rotation angles.
+ * Asks the render thread for a new frame; a no-op while rendering is off.
  *
  * @param canvas The bed_mesh canvas widget
  */
@@ -121,34 +121,24 @@ void ui_bed_mesh_set_zero_plane_visible(lv_obj_t* canvas, bool visible);
 void ui_bed_mesh_set_z_display_offset(lv_obj_t* canvas, double offset_mm);
 
 /**
- * @brief Enable or disable async rendering mode
+ * @brief Turn rendering on or off
  *
- * When enabled, the widget creates a background render thread that produces
- * pre-rendered frames. The DRAW_POST callback blits the ready buffer instead
- * of calling the renderer synchronously. When disabled, falls back to the
- * original synchronous rendering path.
+ * On, the widget runs a background render thread whose frames the DRAW_POST
+ * callback blits. Off, the thread and both frame buffers are freed and the
+ * widget draws nothing; the panel turns it off while hidden.
  *
  * @param widget The bed_mesh widget
- * @param enabled true to enable async mode, false for synchronous
+ * @param enabled true to start the render thread, false to stop it
  */
 void ui_bed_mesh_set_async_mode(lv_obj_t* widget, bool enabled);
 
 /**
- * @brief Check if async rendering mode is enabled
+ * @brief Check if the render thread is running
  *
  * @param widget The bed_mesh widget
- * @return true if async mode is active, false otherwise
+ * @return true if rendering is on, false otherwise
  */
 bool ui_bed_mesh_is_async_mode(lv_obj_t* widget);
-
-/**
- * @brief Request the render thread to produce a new frame
- *
- * Only effective when async mode is enabled. In synchronous mode this is a no-op.
- *
- * @param widget The bed_mesh widget
- */
-void ui_bed_mesh_request_async_render(lv_obj_t* widget);
 
 /**
  * @brief Check if the renderer has mesh data loaded

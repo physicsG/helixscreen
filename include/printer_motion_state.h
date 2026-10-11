@@ -24,6 +24,43 @@ struct AxisBounds {
     bool has_z = false;
 };
 
+/// Shift machine-space bounds into G-code space. machine = gcode + homing_origin
+/// (SET_GCODE_OFFSET, saved Z offset, toolchanger tool offsets), so the valid
+/// G-code range per axis is [min - origin, max - origin]. Has-bits are untouched.
+/// Resolution of the stored gcode_position subjects: centimillimetres,
+/// truncated, so a reading sits up to this far below the real position.
+inline constexpr double POSITION_RESOLUTION_MM = 0.01;
+
+/// Clamps stop this far inside the G-code envelope. Klipper adds the offset to
+/// a target in doubles and range-checks the sum, so a target exactly at a
+/// shifted edge can land a hair past the machine limit and be refused (Z
+/// 274.94 + 0.06 on a Snapmaker U1); and a relative jog computed from a
+/// truncated reading can overshoot by up to POSITION_RESOLUTION_MM.
+inline constexpr double GCODE_EDGE_MARGIN_MM = 2 * POSITION_RESOLUTION_MM;
+
+/// Shrink each axis's range by `margin` from both ends. Has-bits are untouched.
+inline AxisBounds inset_bounds(const AxisBounds& b, double margin) {
+    AxisBounds r = b;
+    r.x_min = static_cast<float>(b.x_min + margin);
+    r.x_max = static_cast<float>(b.x_max - margin);
+    r.y_min = static_cast<float>(b.y_min + margin);
+    r.y_max = static_cast<float>(b.y_max - margin);
+    r.z_min = static_cast<float>(b.z_min + margin);
+    r.z_max = static_cast<float>(b.z_max - margin);
+    return r;
+}
+
+inline AxisBounds to_gcode_space(const AxisBounds& machine, double ox, double oy, double oz) {
+    AxisBounds g = machine;
+    g.x_min = static_cast<float>(machine.x_min - ox);
+    g.x_max = static_cast<float>(machine.x_max - ox);
+    g.y_min = static_cast<float>(machine.y_min - oy);
+    g.y_max = static_cast<float>(machine.y_max - oy);
+    g.z_min = static_cast<float>(machine.z_min - oz);
+    g.z_max = static_cast<float>(machine.z_max - oz);
+    return g;
+}
+
 /**
  * @brief Manages motion-related subjects for printer state
  *
@@ -83,6 +120,19 @@ class PrinterMotionState {
         return &gcode_position_z_;
     }
 
+    // Live position accessors - where the nozzle physically is mid-move
+    // (centimillimeters, from motion_report.live_position: includes bed mesh
+    // and z-offset, updates during moves)
+    lv_subject_t* get_live_position_x_subject() {
+        return &live_position_x_;
+    }
+    lv_subject_t* get_live_position_y_subject() {
+        return &live_position_y_;
+    }
+    lv_subject_t* get_live_position_z_subject() {
+        return &live_position_z_;
+    }
+
     lv_subject_t* get_homed_axes_subject() {
         return &homed_axes_;
     }
@@ -96,14 +146,14 @@ class PrinterMotionState {
     }
 
     // Actual speed/velocity accessors
-    lv_subject_t* get_gcode_speed_subject() {
-        return &gcode_speed_;
-    }
     lv_subject_t* get_max_velocity_subject() {
         return &max_velocity_;
     }
     lv_subject_t* get_live_extruder_velocity_subject() {
         return &live_extruder_velocity_;
+    }
+    lv_subject_t* get_live_velocity_subject() {
+        return &live_velocity_;
     }
 
     // Z-offset accessors (microns)
@@ -132,6 +182,14 @@ class PrinterMotionState {
         return axis_bounds_;
     }
 
+    /// The envelope in G-code coordinates: the machine envelope shifted by
+    /// minus gcode_move.homing_origin. Everything the motion panel compares
+    /// against gcode_move.gcode_position (jog clamps, keypad limits, Z-button
+    /// blocking) must use these, not the machine bounds.
+    [[nodiscard]] AxisBounds get_gcode_axis_bounds() const {
+        return to_gcode_space(axis_bounds_, homing_origin_x_, homing_origin_y_, homing_origin_z_);
+    }
+
   private:
     friend class PrinterMotionStateTestAccess;
 
@@ -148,6 +206,11 @@ class PrinterMotionState {
     lv_subject_t gcode_position_y_{};
     lv_subject_t gcode_position_z_{};
 
+    // Live position subjects (physical position mid-move, motion_report)
+    lv_subject_t live_position_x_{};
+    lv_subject_t live_position_y_{};
+    lv_subject_t live_position_z_{};
+
     lv_subject_t homed_axes_{};
     char homed_axes_buf_[8]{};
 
@@ -156,9 +219,9 @@ class PrinterMotionState {
     lv_subject_t flow_factor_{};
 
     // Actual speed/velocity subjects
-    lv_subject_t gcode_speed_{};            // mm/s (from gcode_move.speed)
     lv_subject_t max_velocity_{};           // mm/s (from toolhead.max_velocity)
     lv_subject_t live_extruder_velocity_{}; // centimm/s (from motion_report, ×100 for precision)
+    lv_subject_t live_velocity_{};          // mm/s, measured toolhead speed (from motion_report)
 
     // Z-offset subjects
     lv_subject_t gcode_z_offset_{};
@@ -171,6 +234,11 @@ class PrinterMotionState {
 
     // Kinematic envelope (not subjects — read on demand by jog clamping etc.)
     AxisBounds axis_bounds_{};
+
+    // gcode_move.homing_origin per axis (mm): machine = gcode + origin
+    double homing_origin_x_ = 0.0;
+    double homing_origin_y_ = 0.0;
+    double homing_origin_z_ = 0.0;
 };
 
 } // namespace helix

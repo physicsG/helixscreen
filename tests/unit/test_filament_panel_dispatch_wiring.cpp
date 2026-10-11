@@ -41,6 +41,10 @@
 
 #include "../catch_amalgamated.hpp"
 
+using helix::AmsSystemInfo;
+using helix::AmsUnit;
+using helix::SlotInfo;
+
 using helix::ui::AmsCall;
 using helix::ui::BackendCaps;
 using helix::ui::EXTERNAL_SPOOL_SLOT;

@@ -53,10 +53,6 @@ static void* ui_dialog_xml_create(lv_xml_parser_state_t* state, const char** att
     // Clip children to rounded corners (for full-bleed buttons at bottom)
     lv_obj_set_style_clip_corner(obj, true, LV_PART_MAIN);
 
-    // Mark as dialog container for context-aware input styling
-    // Inputs inside dialogs use overlay_bg for contrast against elevated_bg dialog background
-    lv_obj_add_flag(obj, LV_OBJ_FLAG_USER_1);
-
     spdlog::trace("[Dialog] Created ui_dialog with theme-aware defaults");
     return (void*)obj;
 }

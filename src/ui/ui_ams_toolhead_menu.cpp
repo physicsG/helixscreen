@@ -12,13 +12,16 @@
 #include "ams_types.h"
 #include "app_globals.h"
 #include "data_root_resolver.h"
+#include "display_numbering.h"
 #include "filament_op_slot_resolver.h"
 #include "printer_state.h"
 #include "static_subject_registry.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/spdlog.h>
 
 #include <cstdio>
+#include <string>
 
 namespace helix::ui {
 
@@ -29,7 +32,7 @@ lv_subject_t AmsToolheadMenu::s_show_park_subject_;
 lv_subject_t AmsToolheadMenu::s_show_load_subject_;
 lv_subject_t AmsToolheadMenu::s_show_unload_subject_;
 lv_subject_t AmsToolheadMenu::s_title_subject_;
-char AmsToolheadMenu::s_title_buf_[32] = {0};
+char AmsToolheadMenu::s_title_buf_[64] = {0};
 bool AmsToolheadMenu::s_subjects_initialized_ = false;
 
 // ============================================================================
@@ -144,8 +147,10 @@ void AmsToolheadMenu::publish_model() {
     lv_subject_set_int(&s_show_load_subject_, model_.show_load ? 1 : 0);
     lv_subject_set_int(&s_show_unload_subject_, model_.show_unload ? 1 : 0);
 
-    snprintf(s_title_buf_, sizeof(s_title_buf_), "%s T%d", lv_tr("Toolhead"),
-             tool_index_ >= 0 ? tool_index_ : 0);
+    // The head as its badge reads: tool_label() is the one spelling of a tool
+    // number, so the title cannot disagree with the nozzle that was tapped.
+    snprintf(s_title_buf_, sizeof(s_title_buf_), "%s %s", lv_tr("Toolhead"),
+             tool_label(tool_index_ >= 0 ? tool_index_ : 0).c_str());
     lv_subject_copy_string(&s_title_subject_, s_title_buf_);
 }
 
@@ -191,7 +196,7 @@ bool AmsToolheadMenu::show_at(lv_obj_t* parent, lv_obj_t* anchor, lv_point_t cli
     // raw print_active subject instead would suppress the menu through the
     // runout pause that is precisely when these actions are needed.
     const bool print_blocks_ops =
-        helix::ui::print_blocks_filament_op(get_printer_state().get_print_lifecycle(),
+        helix::ui::print_blocks_filament_op(get_printer_state().print_state().get_print_lifecycle(),
                                             backend && backend->filament_ops_self_home());
 
     // Same question the per-slot menu asks: is this position's filament
@@ -231,11 +236,10 @@ void AmsToolheadMenu::on_created(lv_obj_t* menu_obj) {
     // Name the head on the button that acts on it. ui_button_set_text is the
     // widget's own setter (the custom-XML-widget exception), not a raw
     // lv_label_set_text on someone else's label.
-    if (lv_obj_t* btn = lv_obj_find_by_name(menu_obj, "btn_select_tool")) {
-        char label[32];
-        snprintf(label, sizeof(label), "%s T%d", lv_tr("Select"),
-                 tool_index_ >= 0 ? tool_index_ : 0);
-        ui_button_set_text(btn, label);
+    if (lv_obj_t* btn = find_required(menu_obj, "btn_select_tool", "AmsToolheadMenu")) {
+        const std::string label =
+            std::string(lv_tr("Select")) + " " + tool_label(tool_index_ >= 0 ? tool_index_ : 0);
+        ui_button_set_text(btn, label.c_str());
     }
 }
 
@@ -290,11 +294,9 @@ void AmsToolheadMenu::register_callbacks() {
     }
 
     // The menu owns its own component registration rather than relying on a
-    // panel to have done it. Two panels open this menu now, and the overview is
-    // reachable without ever visiting the detail panel — which is exactly how
-    // this shipped broken: the XML was registered only in AmsPanel, so a tap on
-    // the overview logged "not a known widget/element/component" and no menu
-    // appeared. Registration is idempotent and this whole function runs once.
+    // panel to have done it: two panels open this menu, and the overview is
+    // reachable without ever visiting the detail panel. Registration is
+    // idempotent and this whole function runs once.
     lv_xml_register_component_from_file(
         helix::asset_component_uri("ui_xml/ams_toolhead_menu.xml").c_str());
 

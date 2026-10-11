@@ -96,7 +96,9 @@ struct PrintStartAnalysis {
     bool found = false;      ///< A print start macro was found
     std::string macro_name;  ///< Actual name found (e.g., "PRINT_START", "START_PRINT")
     std::string source_file; ///< Config file containing the macro (e.g., "macros.cfg")
-    std::string raw_gcode;   ///< Full macro gcode content
+    /// Every macro whose body was analyzed, in call order: a wrapper's chain is
+    /// {"PRINT_START", "START_PRINT"}. Operations from all of them are merged.
+    std::vector<std::string> macro_chain;
 
     // === Detected Operations ===
     std::vector<PrintStartOperation> operations;
@@ -120,11 +122,6 @@ struct PrintStartAnalysis {
      * @brief Get operation by category (or nullptr if not found)
      */
     [[nodiscard]] const PrintStartOperation* get_operation(PrintStartOpCategory category) const;
-
-    /**
-     * @brief Get all operations that are NOT yet controllable
-     */
-    [[nodiscard]] std::vector<const PrintStartOperation*> get_uncontrollable_operations() const;
 
     /**
      * @brief Generate a summary string for logging/debugging
@@ -183,16 +180,18 @@ class PrintStartAnalyzer {
     /**
      * @brief Analyze PRINT_START macro from pre-downloaded config content
      *
-     * Searches the provided file contents directly for PRINT_START macro variants.
+     * Reads the config from ROOT_CONFIG_FILE through its includes, in Klipper's
+     * read order, and analyzes the macro definitions Klipper would run.
      * No HTTP requests are made -- this is a synchronous operation.
      *
-     * @param active_files Set of active config file paths (from include resolution)
      * @param file_contents Map of filename -> content (already downloaded)
      * @param on_complete Callback with analysis result (called synchronously)
      */
-    void analyze(const std::set<std::string>& active_files,
-                 const std::map<std::string, std::string>& file_contents,
+    void analyze(const std::map<std::string, std::string>& file_contents,
                  AnalysisCallback on_complete);
+
+    /// The config file Klipper starts reading from.
+    static constexpr const char* ROOT_CONFIG_FILE = "printer.cfg";
 
     // === Static Parsing Methods (for unit testing) ===
 
@@ -209,20 +208,15 @@ class PrintStartAnalyzer {
                                                         const std::string& gcode);
 
     /**
-     * @brief Get the standard skip parameter name for an operation
-     *
-     * @param op_name Operation name (e.g., "BED_MESH_CALIBRATE")
-     * @return Suggested skip parameter name (e.g., "SKIP_BED_MESH")
-     */
-    [[nodiscard]] static std::string get_suggested_skip_param(const std::string& op_name);
-
-    /**
      * @brief Get the operation category for a G-code command
      *
      * @param command G-code command (e.g., "BED_MESH_CALIBRATE", "G29")
      * @return Category (or UNKNOWN if not recognized)
      */
     [[nodiscard]] static PrintStartOpCategory categorize_operation(const std::string& command);
+
+    /// How many macro calls deep analyze() follows from the print start macro.
+    static constexpr int MAX_FOLLOW_DEPTH = 8;
 
     // === Macro Name Candidates (public for helper functions) ===
     static constexpr const char* MACRO_NAMES[] = {"PRINT_START", "START_PRINT", "_PRINT_START",
@@ -257,15 +251,6 @@ class PrintStartAnalyzer {
                                                       const std::string& op_name,
                                                       std::string& out_param_name,
                                                       ParameterSemantic& out_semantic);
-
-    /**
-     * @brief Extract known parameters from macro gcode
-     *
-     * Looks for patterns like:
-     *   {% set BED = params.BED|default(60)|float %}
-     *   params.EXTRUDER
-     */
-    [[nodiscard]] static std::vector<std::string> extract_parameters(const std::string& gcode);
 };
 
 } // namespace helix

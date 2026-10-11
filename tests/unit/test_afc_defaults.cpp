@@ -191,7 +191,6 @@ TEST_CASE("AFC default BUTTON actions have correct defaults", "[defaults][afc]")
         REQUIRE_FALSE(a.current_value.has_value());
         REQUIRE(a.options.empty());
         REQUIRE(a.min_value == 0);
-        REQUIRE(a.max_value == 0);
         REQUIRE(a.unit.empty());
         REQUIRE(a.slot_index == -1);
         REQUIRE(a.enabled);
@@ -252,5 +251,5 @@ TEST_CASE("AFC default capabilities are correct", "[defaults][afc]") {
     REQUIRE(caps.supports_endless_spool);
     REQUIRE(caps.supports_bypass);
     REQUIRE(caps.supports_purge);
-    REQUIRE(caps.tip_method == TipMethod::CUT);
+    REQUIRE(caps.tip_method == helix::TipMethod::CUT);
 }

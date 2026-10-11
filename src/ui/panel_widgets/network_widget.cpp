@@ -4,7 +4,6 @@
 #include "network_widget.h"
 
 #include "ui_event_safety.h"
-#include "ui_nav_manager.h"
 #include "ui_overlay_network_settings.h"
 #include "ui_timer_guard.h"
 
@@ -14,6 +13,7 @@
 #include "panel_widget_registry.h"
 #include "static_subject_registry.h"
 #include "subject_debug_registry.h"
+#include "subject_managed_panel.h"
 #include "wifi_manager.h"
 
 #include <spdlog/spdlog.h>
@@ -24,6 +24,7 @@ static constexpr uint32_t SIGNAL_POLL_INTERVAL_MS = 5000;
 // Subjects owned by NetworkWidget module — created before XML bindings resolve
 static lv_subject_t s_network_icon_state;
 static bool s_subjects_initialized = false;
+static SubjectManager s_subjects;
 
 static void network_widget_init_subjects() {
     if (s_subjects_initialized) {
@@ -32,7 +33,7 @@ static void network_widget_init_subjects() {
 
     // Integer subject: 0=disconnected, 1-4=wifi strength, 5=ethernet
     lv_subject_init_int(&s_network_icon_state, 0);
-    lv_xml_register_subject(nullptr, "home_network_icon_state", &s_network_icon_state);
+    s_subjects.publish("home_network_icon_state", &s_network_icon_state);
     SubjectDebugRegistry::instance().register_subject(
         &s_network_icon_state, "home_network_icon_state", LV_SUBJECT_TYPE_INT, __FILE__, __LINE__);
 
@@ -42,7 +43,7 @@ static void network_widget_init_subjects() {
     // Subjects must be deinitialized AFTER panels remove their observers (Phase 2)
     StaticSubjectRegistry::instance().register_deinit("NetworkWidgetSubjects", []() {
         if (s_subjects_initialized && lv_is_initialized()) {
-            lv_subject_deinit(&s_network_icon_state);
+            s_subjects.deinit_all();
             s_subjects_initialized = false;
             spdlog::trace("[NetworkWidget] Subjects deinitialized");
         }
@@ -64,7 +65,8 @@ void register_network_widget() {
 
 using namespace helix;
 
-NetworkWidget::NetworkWidget() = default;
+NetworkWidget::NetworkWidget()
+    : TiledPanelWidget("network", TileSizing::Content{"", "", "Network", false}) {}
 
 NetworkWidget::~NetworkWidget() {
     detach();
@@ -73,11 +75,7 @@ NetworkWidget::~NetworkWidget() {
 void NetworkWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
     widget_obj_ = widget_obj;
     parent_screen_ = parent_screen;
-
-    // Set user_data on the root lv_obj, NOT on the ui_button child.
-    // ui_button allocates its own UiButtonData in user_data — overwriting it
-    // leaks memory and breaks button style/contrast auto-updates.
-    lv_obj_set_user_data(widget_obj_, this);
+    active_ = true;
 
     // Register click handler via per-callback user_data
     lv_obj_t* btn = lv_obj_find_by_name(widget_obj_, "network_btn");
@@ -88,8 +86,10 @@ void NetworkWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
     // Use module-owned subjects (initialized via network_widget_init_subjects)
     network_icon_state_ = &s_network_icon_state;
 
-    // Get WiFiManager for signal strength queries
+    // Get WiFiManager for connection and signal status reads
     wifi_manager_ = get_wifi_manager();
+
+    install_delete_hook(widget_obj_);
 
     // Initialize EthernetManager for Ethernet status detection
     ethernet_manager_ = std::make_unique<EthernetManager>();
@@ -110,22 +110,13 @@ void NetworkWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
             // re-check WiFi status even if current_network_ != Unknown.
             backend_ready_ = true;
             detect_network_type(true);
-            if (!signal_poll_timer_ && current_network_ == NetworkType::Wifi) {
-                signal_poll_timer_ =
-                    lv_timer_create(signal_poll_timer_cb, SIGNAL_POLL_INTERVAL_MS, this);
-            }
+            ensure_signal_poll_timer();
         });
     }
 
     // Detect actual network type (Ethernet vs WiFi vs disconnected)
     detect_network_type();
-
-    // Start signal polling timer if on WiFi
-    if (!signal_poll_timer_ && current_network_ == NetworkType::Wifi) {
-        signal_poll_timer_ = lv_timer_create(signal_poll_timer_cb, SIGNAL_POLL_INTERVAL_MS, this);
-        spdlog::debug("[NetworkWidget] Started signal polling timer ({}ms)",
-                      SIGNAL_POLL_INTERVAL_MS);
-    }
+    ensure_signal_poll_timer();
 
     spdlog::debug("[NetworkWidget] Attached");
 }
@@ -137,6 +128,33 @@ void NetworkWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
 // the list LVGL is currently walking (#750, #751). lv_timer_cancel_safe() also
 // self-guards on lv_is_initialized(), which is what makes it safe from the
 // destructor after lv_deinit().
+void NetworkWidget::on_hooked_root_deleted() {
+    // Runs inside LVGL's delete event: pointer drops, timer stop, guard expiry.
+    //
+    // The poll timer is the reason this needs more than pointer drops. It
+    // carries `this`, and the widget outlives the tree on this path, so its
+    // `self` check still passes and nulling the root does not stop it. Its body
+    // writes a module-owned static subject rather than the tree, so it is not a
+    // use-after-free on its own — but it keeps polling a screen that is gone,
+    // and at process teardown that subject dies before the timer does.
+    // lv_timer_cancel_safe() neuters rather than unlinks, which is what makes
+    // stopping it safe from inside a delete event.
+    lifetime_.invalidate();
+    cancel_signal_poll_timer();
+    network_icon_state_ = nullptr;
+    widget_obj_ = nullptr;
+    parent_screen_ = nullptr;
+}
+
+void NetworkWidget::ensure_signal_poll_timer() {
+    // A WiFi answer can land after on_deactivate(); a hidden tile never polls.
+    if (!active_ || signal_poll_timer_ || current_network_ != NetworkType::Wifi) {
+        return;
+    }
+    signal_poll_timer_ = lv_timer_create(signal_poll_timer_cb, SIGNAL_POLL_INTERVAL_MS, this);
+    spdlog::debug("[NetworkWidget] Started signal polling timer ({}ms)", SIGNAL_POLL_INTERVAL_MS);
+}
+
 void NetworkWidget::cancel_signal_poll_timer() {
     if (!signal_poll_timer_) {
         return;
@@ -148,6 +166,7 @@ void NetworkWidget::cancel_signal_poll_timer() {
 void NetworkWidget::detach() {
     // Expire pending async ethernet callbacks before tearing down subjects.
     lifetime_.invalidate();
+    uninstall_delete_hook();
 
     cancel_signal_poll_timer();
 
@@ -156,7 +175,6 @@ void NetworkWidget::detach() {
     network_icon_state_ = nullptr;
 
     if (widget_obj_) {
-        lv_obj_set_user_data(widget_obj_, nullptr);
         widget_obj_ = nullptr;
     }
     parent_screen_ = nullptr;
@@ -165,18 +183,16 @@ void NetworkWidget::detach() {
 }
 
 void NetworkWidget::on_activate() {
+    active_ = true;
     // Re-detect network type in case it changed while on another panel
     detect_network_type();
 
     // Start signal polling timer when panel becomes visible (only for WiFi)
-    if (!signal_poll_timer_ && current_network_ == NetworkType::Wifi) {
-        signal_poll_timer_ = lv_timer_create(signal_poll_timer_cb, SIGNAL_POLL_INTERVAL_MS, this);
-        spdlog::debug("[NetworkWidget] Started signal polling timer ({}ms interval)",
-                      SIGNAL_POLL_INTERVAL_MS);
-    }
+    ensure_signal_poll_timer();
 }
 
 void NetworkWidget::on_deactivate() {
+    active_ = false;
     // Stop signal polling timer when panel is hidden (saves CPU)
     if (signal_poll_timer_) {
         cancel_signal_poll_timer();
@@ -188,19 +204,19 @@ void NetworkWidget::detect_network_type(bool force) {
     // Priority: Ethernet > WiFi > Disconnected
     // Ensures users on wired connections see the Ethernet icon even if WiFi is also available.
     //
-    // The Ethernet probe can block (libhv ifconfig + sysfs reads) so it runs
-    // asynchronously. Until the probe returns, fall back to WiFi/Disconnected
-    // detection; the callback upgrades to Ethernet if one is connected.
+    // Both probes can block (a wpa_supplicant round trip; libhv ifconfig and
+    // sysfs reads for Ethernet), so both run asynchronously. The WiFi answer
+    // applies WiFi or Disconnected; the Ethernet answer upgrades to Ethernet.
 
     auto apply_wifi_fallback = [this]() {
-        if (wifi_manager_ && wifi_manager_->is_connected()) {
-            spdlog::info("[NetworkWidget] Detected WiFi connection ({})",
-                         helix::redact::ssid(wifi_manager_->get_connected_ssid()));
-            set_network(NetworkType::Wifi);
-        } else {
+        if (!wifi_manager_) {
             spdlog::info("[NetworkWidget] No network connection detected");
             set_network(NetworkType::Disconnected);
+            return;
         }
+        wifi_manager_->get_status_async(
+            lifetime_.token(),
+            [this](const WifiBackend::ConnectionStatus& status) { apply_wifi_status(status); });
     };
 
     if (!ethernet_manager_) {
@@ -208,10 +224,10 @@ void NetworkWidget::detect_network_type(bool force) {
         return;
     }
 
-    // Provisional state until the async probe lands.
+    // Which calls refresh WiFi.
     //
-    // On first activation (Unknown), always apply the WiFi fallback so we show
-    // a sensible provisional state while the Ethernet probe runs.
+    // On first activation (Unknown), always refresh WiFi so WiFi or
+    // Disconnected shows whenever there is no Ethernet.
     //
     // On re-activation, keep the last-known state instead of blindly falling
     // back to WiFi/Disconnected — otherwise Ethernet-only hosts flicker
@@ -229,10 +245,10 @@ void NetworkWidget::detect_network_type(bool force) {
     // initial connection detection (prestonbrown/helixscreen#1059).
     //
     // But do NOT force when we're already on Ethernet: Ethernet is the highest
-    // priority state, and synchronously applying the WiFi/Disconnected fallback
-    // would flip the icon away from Ethernet until the async probe re-upgrades
-    // it — a visible Ethernet -> (WiFi/Disconnected) -> Ethernet flicker on
-    // every WiFi event. The async probe below still keeps Ethernet current.
+    // priority state, and applying the WiFi/Disconnected fallback would flip
+    // the icon away from Ethernet until the async probe re-upgrades it — a
+    // visible Ethernet -> (WiFi/Disconnected) -> Ethernet flicker on every WiFi
+    // event. The async probe below still keeps Ethernet current.
     if ((force && current_network_ != NetworkType::Ethernet) ||
         current_network_ == NetworkType::Unknown ||
         (backend_ready_ && current_network_ == NetworkType::Disconnected)) {
@@ -256,17 +272,48 @@ void NetworkWidget::detect_network_type(bool force) {
     });
 }
 
+void NetworkWidget::apply_wifi_status(const WifiBackend::ConnectionStatus& status) {
+    // The Ethernet probe can land first; Ethernet outranks anything WiFi says.
+    if (current_network_ == NetworkType::Ethernet) {
+        return;
+    }
+    last_wifi_signal_ = status.signal_strength;
+    if (status.connected) {
+        spdlog::info("[NetworkWidget] Detected WiFi connection ({})",
+                     helix::redact::ssid(status.ssid));
+        set_network(NetworkType::Wifi);
+        ensure_signal_poll_timer();
+    } else {
+        spdlog::info("[NetworkWidget] No network connection detected");
+        set_network(NetworkType::Disconnected);
+    }
+}
+
+void NetworkWidget::poll_wifi_signal() {
+    if (!wifi_manager_) {
+        return;
+    }
+    wifi_manager_->get_status_async(lifetime_.token(),
+                                    [this](const WifiBackend::ConnectionStatus& status) {
+                                        if (current_network_ != NetworkType::Wifi) {
+                                            return;
+                                        }
+                                        last_wifi_signal_ = status.signal_strength;
+                                        update_network_icon_state();
+                                    });
+}
+
 void NetworkWidget::set_network(NetworkType type) {
     current_network_ = type;
 
-    // Update the icon state (will query WiFi signal strength if connected)
+    // Update the icon state from the cached WiFi signal
     update_network_icon_state();
 
     spdlog::debug("[NetworkWidget] Network type set to {} (icon state computed)",
                   static_cast<int>(type));
 }
 
-int NetworkWidget::compute_network_icon_state() {
+int NetworkWidget::compute_network_icon_state() const {
     // State values:
     // 0 = Disconnected (wifi_off, disabled variant)
     // 1 = WiFi strength 1 (<=25%, warning variant)
@@ -285,14 +332,8 @@ int NetworkWidget::compute_network_icon_state() {
         return 5;
     }
 
-    // WiFi - get signal strength from WiFiManager
-    int signal = 0;
-    if (wifi_manager_) {
-        signal = wifi_manager_->get_signal_strength();
-        spdlog::trace("[NetworkWidget] WiFi signal strength: {}%", signal);
-    } else {
-        spdlog::warn("[NetworkWidget] WiFiManager not available for signal query");
-    }
+    // WiFi - the signal strength the last status read returned
+    const int signal = last_wifi_signal_;
 
     // Map signal percentage to icon state (1-4)
     int state;
@@ -327,21 +368,13 @@ void NetworkWidget::handle_network_clicked() {
     spdlog::info("[NetworkWidget] Network icon clicked - opening network settings directly");
 
     // Open Network settings overlay directly (same as Settings panel's Network row)
-    auto& overlay = get_network_settings_overlay();
-
-    if (!overlay.is_created()) {
-        overlay.init_subjects();
-        overlay.register_callbacks();
-        overlay.create(parent_screen_);
-    }
-
-    overlay.show();
+    get_network_settings_overlay().show(parent_screen_);
 }
 
 void NetworkWidget::signal_poll_timer_cb(lv_timer_t* timer) {
     auto* self = static_cast<NetworkWidget*>(lv_timer_get_user_data(timer));
     if (self && self->current_network_ == NetworkType::Wifi) {
-        self->update_network_icon_state();
+        self->poll_wifi_signal();
     }
 }
 

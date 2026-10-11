@@ -49,7 +49,7 @@ struct EstopVisibilityFixture : public LVGLUITestFixture {
     }
 
     void set_phase(helix::PrintStartPhase phase) {
-        state().set_print_start_state(phase, "", 0);
+        state().print_state().set_print_start_state(phase, "", 0);
         drain();
     }
 

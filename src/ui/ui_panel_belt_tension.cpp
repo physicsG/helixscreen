@@ -6,34 +6,29 @@
 #include "ui_callback_helpers.h"
 #include "ui_frequency_response_chart.h"
 #include "ui_modal.h"
-#include "ui_nav_manager.h"
+#include "ui_nav.h"
+#include "ui_timer_guard.h"
 #include "ui_update_queue.h"
 
-#include "accel_sensor_manager.h"
 #include "app_globals.h"
-#include "belt_capture.h"
-#include "belt_dsp_probe.h"
-#include "belt_gating.h"
-#include "belt_listen_session.h"
-#include "belt_live_data.h"
 #include "belt_stream_client.h"
 #include "i_moonraker_api.h"
 #include "i_moonraker_client.h"
+#include "memory_utils.h"
 #include "observer_factory.h"
-#include "pitch_estimator.h"
-#include "printer_detector.h"
 #include "printer_state.h"
+#include "resonance_console.h"
 #include "static_panel_registry.h"
 #include "static_subject_registry.h"
-#include "toolhead_homing.h"
+#include "theme_manager.h"
+#include "ui/ui_widget_helpers.h"
 
+#include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
-#include <fstream>
-#include <sstream>
 
 using namespace helix;
 
@@ -41,54 +36,20 @@ using namespace helix;
 // GLOBAL INSTANCE AND ROW CLICK HANDLER
 // ============================================================================
 
-static std::unique_ptr<BeltTensionPanel> g_belt_tension_panel;
-
-// State subject (0=START, 1=POSITION, 2=LISTEN, 3=COMPARE, 4=ERROR)
+// State subject (0=START, 1=RUNNING, 2=RESULTS, 3=ERROR)
 static lv_subject_t s_belt_tension_state;
 
-namespace {
-/// How far either side of the target still counts as correct. The target
-/// itself is not a constant: it is expected_frequency_for_span(listen_span_mm_),
-/// recomputed by publish_target_frequency() whenever the span changes, because
-/// 110 Hz is only the answer at the 150 mm reference span. Only used when the
-/// model has a measured span offset - without one the span is unknown and an
-/// absolute target means nothing.
-constexpr float TARGET_TOLERANCE_HZ = 10.0f;
-} // namespace
-
-// Forward declarations
-static void on_belt_tension_row_clicked(lv_event_t* e);
-
-BeltTensionPanel& get_global_belt_tension_panel() {
-    if (!g_belt_tension_panel) {
-        g_belt_tension_panel = std::make_unique<BeltTensionPanel>();
-        StaticPanelRegistry::instance().register_destroy("BeltTensionPanel",
-                                                         []() { g_belt_tension_panel.reset(); });
-    }
-    return *g_belt_tension_panel;
-}
-
 BeltTensionPanel::~BeltTensionPanel() {
-    // lifetime_ destructor auto-invalidates all outstanding tokens
+    // lifetime_'s destructor auto-invalidates all outstanding tokens.
 
-    // Before anything else: a live stream is a background thread calling
-    // on_batch_bg() on members that are about to be destroyed.
-    stop_listening();
-
-    // Backstop for a BeltTrace observer that outlives deinit_subjects() (e.g.
-    // torn down after StaticPanelRegistry::destroy_all() but before this
-    // object's own subjects field is destroyed) - same reasoning as
-    // PrinterState::~PrinterState().
-    if (subjects_lifetime_) {
-        *subjects_lifetime_ = false;
-    }
+    stall_guard_.end();
 
     accel_observer_.reset();
     print_active_observer_.reset();
     connected_observer_.reset();
+    klippy_observer_.reset();
     gate_observers_wired_ = false;
 
-    // Deinitialize subjects to disconnect observers before destruction
     if (subjects_initialized_) {
         subjects_.deinit_all();
         subjects_initialized_ = false;
@@ -96,46 +57,21 @@ BeltTensionPanel::~BeltTensionPanel() {
 
     // Clear widget pointers (owned by LVGL)
     overlay_root_ = nullptr;
-    parent_screen_ = nullptr;
-
-    if (!StaticPanelRegistry::is_destroyed()) {
-        spdlog::trace("[BeltTension] Destroyed");
-    }
+    chart_host_running_ = nullptr;
+    chart_host_results_ = nullptr;
 }
 
 void init_belt_tension_row_handler() {
-    lv_xml_register_event_cb(nullptr, "on_belt_tension_row_clicked", on_belt_tension_row_clicked);
+    register_xml_callbacks({
+        {"on_belt_tension_row_clicked",
+         [](lv_event_t*) {
+             spdlog::debug("[BeltTension] Belt Tension row clicked");
+             auto& panel = get_global_belt_tension_panel();
+             panel.set_api(get_moonraker_client(), get_moonraker_api());
+             panel.show(lv_display_get_screen_active(nullptr));
+         }},
+    });
     spdlog::trace("[BeltTension] Row click callback registered");
-}
-
-/**
- * @brief Row click handler for opening belt tension from Advanced panel
- */
-static void on_belt_tension_row_clicked(lv_event_t* e) {
-    (void)e;
-    spdlog::debug("[BeltTension] Belt Tension row clicked");
-
-    auto& panel = get_global_belt_tension_panel();
-
-    // Lazy-create the panel
-    if (!panel.get_root()) {
-        spdlog::debug("[BeltTension] Creating belt tension panel...");
-
-        // Set API references before create
-        auto* client = get_moonraker_client();
-        IMoonrakerAPI* api = get_moonraker_api();
-        panel.set_api(client, api);
-
-        lv_obj_t* screen = lv_display_get_screen_active(nullptr);
-        if (!panel.create(screen)) {
-            spdlog::error("[BeltTension] Failed to create panel_belt_tension");
-            return;
-        }
-        spdlog::info("[BeltTension] Panel created");
-    }
-
-    // Show the overlay
-    panel.show();
 }
 
 // ============================================================================
@@ -146,35 +82,29 @@ void ui_panel_belt_tension_register_callbacks() {
     register_xml_callbacks({
         {"belt_tension_start_cb",
          [](lv_event_t* /*e*/) { get_global_belt_tension_panel().handle_start_clicked(); }},
-        {"belt_tension_cancel_cb",
-         [](lv_event_t* /*e*/) { get_global_belt_tension_panel().handle_cancel_clicked(); }},
+        {"belt_tension_stop_cb",
+         [](lv_event_t* /*e*/) { get_global_belt_tension_panel().handle_stop_clicked(); }},
         {"belt_tension_retry_cb",
          [](lv_event_t* /*e*/) { get_global_belt_tension_panel().handle_retry_clicked(); }},
-        {"belt_tension_listen_cb",
-         [](lv_event_t* /*e*/) { get_global_belt_tension_panel().handle_position_confirmed(); }},
-        {"belt_tension_next_belt_cb",
-         [](lv_event_t* /*e*/) { get_global_belt_tension_panel().handle_advance_clicked(); }},
+        {"belt_tension_retest_a_cb",
+         [](lv_event_t* /*e*/) {
+             get_global_belt_tension_panel().handle_retest_clicked(calibration::BeltPath::PATH_A);
+         }},
+        {"belt_tension_retest_b_cb",
+         [](lv_event_t* /*e*/) {
+             get_global_belt_tension_panel().handle_retest_clicked(calibration::BeltPath::PATH_B);
+         }},
         {"belt_tension_help_cb",
          [](lv_event_t* /*e*/) {
              helix::ui::modal_alert(
                  lv_tr("Belt Tension Check"),
-                 lv_tr("Uneven belt tension causes print artifacts like layer shifts, "
-                       "VFAs (vertical fine artifacts), and ringing.\n\n"
-                       "This tool vibrates each belt path and measures the resonant "
-                       "frequency \u2014 matched frequencies mean balanced tension.\n\n"
-                       "For CoreXY, Path A and B should be within a few Hz of each other."),
+                 lv_tr("This check runs Klipper's resonance test along each belt "
+                       "path and compares the two responses. Balanced belts give "
+                       "curves of the same shape, with peaks at the same "
+                       "frequencies.\n\n"
+                       "Each sweep takes a few minutes and moves the toolhead; keep "
+                       "clear of the printer while it runs."),
                  ModalSeverity::Info, lv_tr("Got it"));
-         }},
-        {"belt_tension_results_help_cb",
-         [](lv_event_t* /*e*/) {
-             helix::ui::modal_alert(lv_tr("Understanding Results"),
-                                    lv_tr("Frequency Delta: Difference between Path A and B. "
-                                          "Anything under 2 Hz is below what this measurement can "
-                                          "resolve, so it counts as matched.\n\n"
-                                          "Match: How close the two belts are, as a percentage of "
-                                          "belt A's frequency. Above 95% is excellent; below 90% "
-                                          "is worth adjusting."),
-                                    ModalSeverity::Info, lv_tr("Got it"));
          }},
     });
 
@@ -197,91 +127,47 @@ void BeltTensionPanel::init_subjects() {
     // View state subject for state machine visibility
     UI_MANAGED_SUBJECT_INT(s_belt_tension_state, 0, "belt_tension_state", subjects_);
 
-    // Start screen subjects
+    // Gate subjects - START's action is bound to these, not to a hidden menu row
+    UI_MANAGED_SUBJECT_INT(can_start_subject_, 0, "bt_can_start", subjects_);
+    UI_MANAGED_SUBJECT_STRING(gate_message_subject_, gate_message_buf_, "", "bt_gate_message",
+                              subjects_);
+
+    // Hardware summary
     UI_MANAGED_SUBJECT_STRING(hw_kinematics_subject_, hw_kinematics_buf_, lv_tr("Detecting..."),
                               "bt_hw_kinematics", subjects_);
-    UI_MANAGED_SUBJECT_STRING(hw_adxl_subject_, hw_adxl_buf_, lv_tr("Detecting..."), "bt_hw_adxl",
-                              subjects_);
-    // Empty, not a literal frequency: the target is a property of the belt
-    // span, and the span is not known until handle_park_gantry() runs. Both
-    // rows that show it are hidden behind bt_has_target until then.
-    UI_MANAGED_SUBJECT_STRING(target_freq_subject_, target_freq_buf_, "", "bt_target_freq",
-                              subjects_);
+    UI_MANAGED_SUBJECT_STRING(hw_accel_subject_, hw_accel_buf_, lv_tr("Detecting..."),
+                              "bt_hw_accel", subjects_);
+    UI_MANAGED_SUBJECT_STRING(hw_sweep_subject_, hw_sweep_buf_, "-", "bt_hw_sweep", subjects_);
 
-    // Gate subjects
-    UI_MANAGED_SUBJECT_INT(can_start_subject_, 0, "bt_can_start", subjects_);
-    UI_MANAGED_SUBJECT_STRING(
-        gate_message_subject_, gate_message_buf_,
-        lv_tr(helix::calibration::belt_gate_message(helix::calibration::BeltGate::NOT_CONNECTED)),
-        "bt_gate_message", subjects_);
+    // Running state
+    UI_MANAGED_SUBJECT_STRING(run_title_subject_, run_title_buf_, "", "bt_run_title", subjects_);
+    UI_MANAGED_SUBJECT_STRING(run_detail_subject_, run_detail_buf_, "", "bt_run_detail", subjects_);
+    UI_MANAGED_SUBJECT_INT(running_path_subject_, 0, "bt_running_path", subjects_);
 
-    // Positioning subjects
-    UI_MANAGED_SUBJECT_INT(has_target_subject_, 0, "bt_has_target", subjects_);
-    UI_MANAGED_SUBJECT_STRING(park_status_subject_, park_status_buf_, lv_tr("Preparing..."),
-                              "bt_park_status", subjects_);
-    UI_MANAGED_SUBJECT_STRING(current_belt_subject_, current_belt_buf_, lv_tr("Belt A"),
-                              "bt_current_belt", subjects_);
+    // Results
+    UI_MANAGED_SUBJECT_STRING(note_a_subject_, note_a_buf_, "", "bt_note_a", subjects_);
+    UI_MANAGED_SUBJECT_STRING(note_b_subject_, note_b_buf_, "", "bt_note_b", subjects_);
+    UI_MANAGED_SUBJECT_INT(verdict_subject_, 0, "bt_verdict", subjects_);
+    UI_MANAGED_SUBJECT_STRING(verdict_text_subject_, verdict_text_buf_, "", "bt_verdict_text",
+                              subjects_);
+    UI_MANAGED_SUBJECT_STRING(similarity_subject_, similarity_buf_, "--", "bt_similarity",
+                              subjects_);
+    UI_MANAGED_SUBJECT_STRING(facts_subject_, facts_buf_, "", "bt_facts", subjects_);
+    UI_MANAGED_SUBJECT_STRING(unpaired_subject_, unpaired_buf_, "", "bt_unpaired", subjects_);
+    UI_MANAGED_SUBJECT_INT(has_unpaired_subject_, 0, "bt_has_unpaired", subjects_);
+    UI_MANAGED_SUBJECT_INT(chart_available_subject_, 0, "bt_chart_available", subjects_);
 
-    // Live meter subjects
-    UI_MANAGED_SUBJECT_STRING(live_freq_subject_, live_freq_buf_, "--", "bt_live_freq", subjects_);
-    UI_MANAGED_SUBJECT_STRING(median_freq_subject_, median_freq_buf_, "", "bt_median_freq",
-                              subjects_);
-    UI_MANAGED_SUBJECT_STRING(pluck_count_subject_, pluck_count_buf_, "0 / 5", "bt_pluck_count",
-                              subjects_);
-    UI_MANAGED_SUBJECT_STRING(hint_subject_, hint_buf_, lv_tr("Hold still"), "bt_hint", subjects_);
-    UI_MANAGED_SUBJECT_INT(committed_subject_, 0, "bt_committed", subjects_);
-    UI_MANAGED_SUBJECT_INT(match_percent_subject_, 0, "bt_match_percent", subjects_);
-    UI_MANAGED_SUBJECT_INT(live_tick_subject_, 0, "bt_live_tick", subjects_);
-    UI_MANAGED_SUBJECT_STRING(replay_path_subject_, replay_path_buf_, "", "bt_replay_path",
-                              subjects_);
-    ensure_replay_observer();
-    UI_MANAGED_SUBJECT_STRING(reference_freq_subject_, reference_freq_buf_, "--",
-                              "bt_reference_freq", subjects_);
-    UI_MANAGED_SUBJECT_INT(has_reference_subject_, 0, "bt_has_reference", subjects_);
-    UI_MANAGED_SUBJECT_STRING(advance_label_subject_, advance_label_buf_, lv_tr("Next belt"),
-                              "bt_advance_label", subjects_);
-
-    // Result subjects
-    UI_MANAGED_SUBJECT_STRING(result_a_freq_subject_, result_a_freq_buf_, "--", "bt_result_a_freq",
-                              subjects_);
-    UI_MANAGED_SUBJECT_STRING(result_a_status_subject_, result_a_status_buf_, "",
-                              "bt_result_a_status", subjects_);
-    UI_MANAGED_SUBJECT_STRING(result_b_freq_subject_, result_b_freq_buf_, "--", "bt_result_b_freq",
-                              subjects_);
-    UI_MANAGED_SUBJECT_STRING(result_b_status_subject_, result_b_status_buf_, "",
-                              "bt_result_b_status", subjects_);
-    UI_MANAGED_SUBJECT_STRING(result_delta_subject_, result_delta_buf_, "", "bt_result_delta",
-                              subjects_);
-    UI_MANAGED_SUBJECT_STRING(result_similarity_subject_, result_similarity_buf_, "",
-                              "bt_result_similarity", subjects_);
-    UI_MANAGED_SUBJECT_STRING(result_recommendation_subject_, result_recommendation_buf_, "",
-                              "bt_result_recommendation", subjects_);
-    UI_MANAGED_SUBJECT_INT(has_results_subject_, 0, "bt_has_results", subjects_);
-
-    // Error subject
-    UI_MANAGED_SUBJECT_STRING(error_message_subject_, error_message_buf_,
-                              lv_tr("An error occurred during measurement."), "bt_error_message",
+    // Error
+    UI_MANAGED_SUBJECT_STRING(error_message_subject_, error_message_buf_, "", "bt_error_message",
                               subjects_);
 
     subjects_initialized_ = true;
 
-    // Register cleanup for shutdown safety
-    StaticSubjectRegistry::instance().register_deinit("BeltTensionPanel", []() {
-        if (g_belt_tension_panel) {
-            g_belt_tension_panel->deinit_subjects();
-        }
-    });
-
-    spdlog::debug("[BeltTension] Subjects initialized and registered");
+    StaticSubjectRegistry::instance().register_deinit(
+        "BeltTensionPanel", []() { get_global_belt_tension_panel().deinit_subjects(); });
 }
 
 void BeltTensionPanel::deinit_subjects() {
-    // A live stream keeps deferring publish_live_values() at 10 Hz. Tearing the
-    // subjects out from under it would leave those callbacks writing into
-    // deinited subjects; the generation bump below drops them, but there is no
-    // reason to keep producing them either.
-    stop_listening();
-
     // Expire outstanding async tokens here, not only in cleanup()/on_deactivate():
     // subjects can be torn down and re-inited on a LIVE panel (shutdown registry,
     // test isolation), and a queued callback would otherwise write into a subject
@@ -293,23 +179,8 @@ void BeltTensionPanel::deinit_subjects() {
     accel_observer_.reset();
     print_active_observer_.reset();
     connected_observer_.reset();
+    klippy_observer_.reset();
     gate_observers_wired_ = false;
-    // replay_observer_ watches this panel's own replay_path_subject_, which
-    // subjects_.deinit_all() below is about to tear down - drop it first for
-    // the same reason.
-    replay_observer_.reset();
-
-    // Signal death of every subject below BEFORE it is torn down, so a
-    // BeltTrace observer still holding a copy of the old token sees it is
-    // gone and skips lv_observer_remove() on the observer node
-    // subjects_.deinit_all() is about to free (#705). Install a fresh live
-    // token rather than clearing the member - an empty token reads as "dead"
-    // in ObserverGuard::reset() and would make every observer registered
-    // after this point skip its removal too.
-    if (subjects_lifetime_) {
-        *subjects_lifetime_ = false;
-    }
-    subjects_lifetime_ = std::make_shared<bool>(true);
 
     if (subjects_initialized_) {
         subjects_.deinit_all();
@@ -322,37 +193,163 @@ void BeltTensionPanel::deinit_subjects() {
 // ============================================================================
 
 lv_obj_t* BeltTensionPanel::create(lv_obj_t* parent) {
-    if (overlay_root_) {
-        spdlog::debug("[BeltTension] Panel already created");
-        return overlay_root_;
-    }
-
-    parent_screen_ = parent;
-
-    spdlog::debug("[BeltTension] Creating overlay from XML");
-    overlay_root_ = static_cast<lv_obj_t*>(lv_xml_create(parent, "panel_belt_tension", nullptr));
-
-    if (!overlay_root_) {
-        spdlog::error("[BeltTension] Failed to create overlay from XML");
+    if (!OverlayBase::create(parent)) {
         return nullptr;
     }
 
-    // Start hidden (push_overlay will show it)
-    lv_obj_add_flag(overlay_root_, LV_OBJ_FLAG_HIDDEN);
+    // The chart is created imperatively inside these hosts; cache them once
+    // per view build, the same contract create() gives overlay_root_.
+    chart_host_running_ = helix::ui::find_required(overlay_root_, "chart_host_running", get_name());
+    chart_host_results_ = helix::ui::find_required(overlay_root_, "chart_host_results", get_name());
 
     ensure_gate_observers();
-    // cleanup() drops this observer along with the gate ones, and unlike them
-    // it is created in init_subjects(), which early-returns once the subjects
-    // exist. Without re-arming it here, replay - the primary instrument for a
-    // hardware session - stops working silently after the first cleanup().
-    ensure_replay_observer();
     refresh_gate();
 
     // Set initial state
     set_view_state(ViewState::START);
-
-    spdlog::info("[BeltTension] Overlay created successfully");
     return overlay_root_;
+}
+
+// ============================================================================
+// SHOW / LIFECYCLE
+// ============================================================================
+
+void BeltTensionPanel::set_api(helix::IMoonrakerClient* client, IMoonrakerAPI* api) {
+    client_ = client;
+    api_ = api;
+
+    calibrator_ = std::make_unique<helix::calibration::BeltTensionCalibrator>(api_);
+    spdlog::debug("[BeltTension] Calibrator created");
+}
+
+void BeltTensionPanel::set_render_tier_for_test(helix::PlatformTier tier,
+                                                bool supports_animations) {
+    tier_override_ = tier;
+    tier_animations_ = supports_animations;
+}
+
+void BeltTensionPanel::set_memory_for_test(const helix::MemoryInfo& mem) {
+    mem_override_ = mem;
+}
+
+void BeltTensionPanel::show() {
+    if (!overlay_root_) {
+        spdlog::error("[BeltTension] Cannot show: overlay not created");
+        return;
+    }
+
+    spdlog::debug("[BeltTension] Showing overlay");
+
+    // Register with NavigationManager for lifecycle callbacks
+    helix::nav::register_overlay(overlay_root_, this);
+
+    // Push onto navigation stack
+    helix::nav::push_overlay(overlay_root_);
+
+    spdlog::info("[BeltTension] Overlay shown");
+}
+
+void BeltTensionPanel::on_activate() {
+    OverlayBase::on_activate();
+
+    spdlog::debug("[BeltTension] on_activate()");
+
+    set_view_state(ViewState::START);
+    refresh_notes();
+
+    // Re-evaluate the gate on every entry, and probe co-location once here
+    // rather than on each gate refresh - the gate recomputes on every subject
+    // change and a connect() syscall per change would be waste.
+    ensure_gate_observers();
+    refresh_gate();
+    // theme_changed is a file-static theme global, deinited only after LVGL is gone.
+    theme_observer_ = helix::ui::observe<int>(
+        theme_manager_get_changed_subject(), this,
+        [](BeltTensionPanel* self, int) { self->apply_path_colors(); }, subject_never_freed());
+    probe_klippy_socket();
+    query_hw_facts();
+
+    // Detect hardware capabilities
+    if (calibrator_) {
+        detection_pending_ = true;
+        calibrator_->detect_hardware(
+            lifetime_.bg_cb("BeltTensionPanel::detect_hardware",
+                            [this](const helix::calibration::BeltTensionHardware& hw) {
+                                on_hardware_detected(hw);
+                            }),
+            lifetime_.bg_cb("BeltTensionPanel::detect_hw_error", [this](const std::string& msg) {
+                spdlog::warn("[BeltTension] Hardware detection failed: {}", msg);
+                snprintf(hw_kinematics_buf_, sizeof(hw_kinematics_buf_), "%s", lv_tr("Unknown"));
+                lv_subject_notify(&hw_kinematics_subject_);
+                snprintf(hw_accel_buf_, sizeof(hw_accel_buf_), "%s", lv_tr("Not detected"));
+                lv_subject_notify(&hw_accel_subject_);
+                // detected_hw_ is now known-bad, so the gate must be recomputed
+                // against it rather than left on a stale pass.
+                detected_hw_ = {};
+                detection_pending_ = false;
+                refresh_gate();
+            }));
+    }
+}
+
+void BeltTensionPanel::on_deactivating(DeactivateReason reason) {
+    spdlog::debug("[BeltTension] on_deactivating({})", deactivate_reason_name(reason));
+
+    // An idle screen is not a walk-away. A sweep means nobody is touching the
+    // screen, so the screensaver lands mid-measurement; the run has to survive
+    // it.
+    if (reason == DeactivateReason::Suspended) {
+        return;
+    }
+    theme_observer_.reset();
+
+    // A rebuild frees the whole widget tree without firing on_ui_destroyed(),
+    // and the chart's object is a child of a host inside that tree. Drop it
+    // here while the tree is still alive; create() re-caches the hosts and the
+    // next run rebuilds the chart lazily.
+    if (reason == DeactivateReason::Rebuild) {
+        on_ui_destroyed();
+    }
+
+    // Abandon an in-progress run. The printer keeps sweeping (stopping it is
+    // what Stop is for), but this panel stops listening and returns to START.
+    if (static_cast<ViewState>(lv_subject_get_int(&s_belt_tension_state)) == ViewState::RUNNING) {
+        spdlog::info("[BeltTension] Cancelling measurement on deactivate");
+    }
+    cancel_run();
+    set_view_state(ViewState::START);
+}
+
+void BeltTensionPanel::cleanup() {
+    spdlog::debug("[BeltTension] Cleaning up");
+
+    cancel_run();
+
+    // Expire all outstanding async tokens
+    lifetime_.invalidate();
+
+    // ObserverGuard::reset(), never release() (#579)
+    accel_observer_.reset();
+    print_active_observer_.reset();
+    connected_observer_.reset();
+    klippy_observer_.reset();
+    theme_observer_.reset();
+    gate_observers_wired_ = false;
+
+    destroy_chart();
+
+    // Unregister from NavigationManager
+    if (overlay_root_) {
+        helix::nav::unregister_overlay(overlay_root_);
+    }
+
+    OverlayBase::cleanup();
+}
+
+void BeltTensionPanel::on_ui_destroyed() {
+    destroy_chart();
+    chart_host_running_ = nullptr;
+    chart_host_results_ = nullptr;
 }
 
 // ============================================================================
@@ -366,17 +363,484 @@ void BeltTensionPanel::set_view_state(ViewState state) {
     // Update subject - XML bindings handle visibility automatically
     lv_subject_set_int(&s_belt_tension_state, static_cast<int>(state));
 
-    // Show restart action button in header only when results are displayed
-    if (overlay_root_) {
-        lv_obj_t* action_btn = lv_obj_find_by_name(overlay_root_, "action_button");
-        if (action_btn) {
-            if (state == ViewState::COMPARE) {
-                lv_obj_remove_flag(action_btn, LV_OBJ_FLAG_HIDDEN);
-            } else {
-                lv_obj_add_flag(action_btn, LV_OBJ_FLAG_HIDDEN);
-            }
+    if (state == ViewState::RESULTS) {
+        if (chart_ && chart_host_results_) {
+            lv_obj_set_parent(ui_frequency_response_chart_get_obj(chart_), chart_host_results_);
+        }
+    } else if (state == ViewState::RUNNING) {
+        if (chart_ && chart_host_running_) {
+            lv_obj_set_parent(ui_frequency_response_chart_get_obj(chart_), chart_host_running_);
         }
     }
+}
+
+// ============================================================================
+// HARDWARE DETECTION CALLBACK
+// ============================================================================
+
+void BeltTensionPanel::on_hardware_detected(const helix::calibration::BeltTensionHardware& hw) {
+    detected_hw_ = hw;
+    detection_pending_ = false;
+
+    const char* kin_label = lv_tr("Unknown");
+    switch (hw.kinematics) {
+    case helix::calibration::KinematicsType::COREXY:
+        kin_label = "CoreXY";
+        break;
+    case helix::calibration::KinematicsType::CARTESIAN:
+        kin_label = "Cartesian";
+        break;
+    default:
+        kin_label = hw.kinematics_name.empty() ? lv_tr("Unknown") : hw.kinematics_name.c_str();
+        break;
+    }
+    snprintf(hw_kinematics_buf_, sizeof(hw_kinematics_buf_), "%s", kin_label);
+    lv_subject_notify(&hw_kinematics_subject_);
+
+    snprintf(hw_accel_buf_, sizeof(hw_accel_buf_), "%s",
+             hw.has_adxl ? lv_tr("Connected") : lv_tr("Not detected"));
+    lv_subject_notify(&hw_accel_subject_);
+
+    spdlog::info("[BeltTension] Hardware: {} ADXL={}", kin_label, hw.has_adxl);
+
+    // Kinematics feeds BeltGateInputs::is_corexy, so the gate is only truthful
+    // once detection has landed.
+    refresh_gate();
+}
+
+void BeltTensionPanel::on_error(const std::string& message) {
+    spdlog::warn("[BeltTension] Error: {}", message);
+    cancel_run();
+    snprintf(error_message_buf_, sizeof(error_message_buf_), "%s", message.c_str());
+    lv_subject_copy_string(&error_message_subject_, error_message_buf_);
+    set_view_state(ViewState::ERROR);
+}
+
+// ============================================================================
+// RUN ORCHESTRATION
+// ============================================================================
+
+void BeltTensionPanel::handle_start_clicked() {
+    spdlog::info("[BeltTension] Start clicked");
+
+    // The XML binding already disables this button while the gate is shut. This
+    // is the same check on the action itself, so a stale binding or a
+    // programmatic click cannot get past it.
+    refresh_gate();
+    if (lv_subject_get_int(&can_start_subject_) == 0) {
+        spdlog::warn("[BeltTension] Start refused: {}",
+                     lv_subject_get_string(&gate_message_subject_));
+        return;
+    }
+
+    run_after_ram_check([this]() {
+        begin_run({helix::calibration::BeltPath::PATH_A, helix::calibration::BeltPath::PATH_B},
+                  /*clear_previous=*/true);
+    });
+}
+
+void BeltTensionPanel::handle_retest_clicked(helix::calibration::BeltPath path) {
+    spdlog::info("[BeltTension] Re-test clicked for path {}",
+                 helix::calibration::BeltTensionCalibrator::output_name(path));
+
+    run_after_ram_check([this, path]() {
+        const int idx = path == helix::calibration::BeltPath::PATH_A ? 0 : 1;
+        auto& run = runs_[idx];
+
+        // The curve being replaced becomes the ghost this run compares against,
+        // and the similarity the last comparison showed becomes the note's "was".
+        run.previous = std::move(run.curve);
+        run.curve.clear();
+        run.has_previous = run.has;
+        run.has = false;
+        was_similarity_percent_ = similarity_percent_;
+
+        begin_run({path}, /*clear_previous=*/false);
+    });
+}
+
+void BeltTensionPanel::run_after_ram_check(std::function<void()> go) {
+    const helix::MemoryInfo mem = mem_override_.value_or(helix::get_system_memory_info());
+    const auto verdict = helix::resonance_memory_check(mem);
+    if (verdict == helix::ResonanceMemory::OK) {
+        go();
+        return;
+    }
+    if (verdict == helix::ResonanceMemory::REFUSE) {
+        helix::ui::show_resonance_memory_refusal(mem.headroom_mb());
+        return;
+    }
+    // Klipper analyses the sweep on this same host, and on a small board that
+    // analysis can run out of memory and leave Klipper stuck.
+    if (low_ram_dialog_) {
+        return; // the warning is already up
+    }
+    helix::ui::ConfirmOptions opts;
+    opts.owner_token = lifetime_.token();
+    helix::ui::show_low_ram_resonance_warning(mem.total_mb(), &low_ram_dialog_, go, opts);
+    if (!low_ram_dialog_) {
+        go(); // the modal failed to build; do not silently block the check
+    }
+}
+
+void BeltTensionPanel::handle_stop_clicked() {
+    spdlog::info("[BeltTension] Stop clicked");
+
+    helix::ui::ConfirmOptions opts;
+    // Nothing is held across the dialog: the sweep keeps running whether the
+    // user confirms or not, and both exits leave the panel as it was.
+    opts.on_dismiss = [] {};
+    helix::ui::modal_confirm(
+        lv_tr("Stop the check?"),
+        lv_tr("This is an emergency stop: the printer halts and Klipper restarts."),
+        ModalSeverity::Warning, lv_tr("Stop"),
+        [this]() {
+            spdlog::warn("[BeltTension] Emergency abort confirmed");
+            if (calibrator_) {
+                calibrator_->emergency_abort();
+            }
+            back_to_start();
+        },
+        opts);
+}
+
+void BeltTensionPanel::handle_retry_clicked() {
+    spdlog::info("[BeltTension] Retry clicked");
+    // A failed calibrator stays in its ERROR state and would keep Start
+    // disabled forever; reset it so the gate can open again.
+    if (calibrator_) {
+        calibrator_->reset();
+    }
+    back_to_start();
+}
+
+void BeltTensionPanel::begin_run(const std::vector<helix::calibration::BeltPath>& queue,
+                                 bool clear_previous) {
+    if (queue.empty()) {
+        return;
+    }
+
+    if (clear_previous) {
+        for (auto& run : runs_) {
+            run.previous.clear();
+            run.has_previous = false;
+        }
+        was_similarity_percent_ = 0.0f;
+    }
+
+    // Markers belong to the comparison being replaced.
+    if (chart_) {
+        for (int idx = 0; idx < 2; ++idx) {
+            ui_frequency_response_chart_set_markers(chart_, series_[idx], nullptr, 0);
+        }
+    }
+
+    queue_ = queue;
+    run_queue_total_ = queue_.size();
+    run_started_ms_ = lv_tick_get();
+    run_active_ = true;
+
+    chart_to_running_host();
+    refresh_notes();
+    set_view_state(ViewState::RUNNING);
+    start_elapsed_timer();
+    start_next_measurement();
+}
+
+void BeltTensionPanel::start_next_measurement() {
+    if (queue_.empty()) {
+        finish_run();
+        return;
+    }
+
+    const auto path = queue_.front();
+    const int idx = path == helix::calibration::BeltPath::PATH_A ? 0 : 1;
+    lv_subject_set_int(&running_path_subject_, idx);
+    // A single-path run is a re-test: the path already has a result.
+    const char* title =
+        run_queue_total_ == 1 ? lv_tr("Re-measuring Path {}") : lv_tr("Measuring Path {}");
+    lv_subject_copy_string(&run_title_subject_,
+                           fmt::format(fmt::runtime(title), static_cast<char>('A' + idx)).c_str());
+    refresh_run_detail();
+    refresh_notes();
+
+    // One guard spans the whole queue: every progress line re-arms it, so it
+    // measures silence, not sweep length.
+    stall_guard_.begin(STALL_TIMEOUT_MS, [this]() { on_stall(); });
+
+    if (!calibrator_) {
+        on_error(lv_tr("No printer connection"));
+        return;
+    }
+
+    calibrator_->measure_path(
+        path, [this](int percent, float freq_hz) { on_sweep_progress(percent, freq_hz); },
+        [this, path](helix::calibration::BeltCurve curve) {
+            on_sweep_complete(path, std::move(curve));
+        },
+        [this](const std::string& message) { on_sweep_error(message); });
+}
+
+void BeltTensionPanel::on_sweep_progress(int /*percent*/, float freq_hz) {
+    if (!run_active_) {
+        return; // a cancelled run's transcript is stale the moment it lands
+    }
+    // Re-arm on every line: the guard fires only on true silence.
+    stall_guard_.end();
+    stall_guard_.begin(STALL_TIMEOUT_MS, [this]() { on_stall(); });
+
+    if (chart_) {
+        ui_frequency_response_chart_set_cursor(chart_, freq_hz, path_color(queue_.front()));
+    }
+    refresh_run_detail();
+}
+
+void BeltTensionPanel::on_sweep_complete(helix::calibration::BeltPath path,
+                                         helix::calibration::BeltCurve curve) {
+    if (!run_active_) {
+        return; // a cancelled run's transcript is stale the moment it lands
+    }
+    stall_guard_.end();
+
+    auto& run = runs_[path == helix::calibration::BeltPath::PATH_A ? 0 : 1];
+    run.curve = std::move(curve);
+    run.has = true;
+    run.measured_at_ms = lv_tick_get();
+
+    if (chart_) {
+        ui_frequency_response_chart_clear_cursor(chart_);
+    }
+
+    if (!queue_.empty() && queue_.front() == path) {
+        queue_.erase(queue_.begin());
+    }
+
+    refresh_notes();
+
+    if (queue_.empty()) {
+        finish_run();
+    } else {
+        start_next_measurement();
+    }
+}
+
+void BeltTensionPanel::on_sweep_error(const std::string& message) {
+    if (!run_active_) {
+        return;
+    }
+    on_error(message);
+}
+
+void BeltTensionPanel::on_stall() {
+    spdlog::warn("[BeltTension] Stall guard fired: no progress for {} ms", STALL_TIMEOUT_MS);
+    on_error(lv_tr("Klipper stopped reporting progress. Its analysis can run out of memory on "
+                   "small printers and leave Klipper stuck, where a firmware restart cannot "
+                   "reach it. Power-cycle the printer (or restart Klipper over SSH), then try "
+                   "again."));
+}
+
+void BeltTensionPanel::finish_run() {
+    elapsed_timer_.reset();
+
+    auto& a = runs_[0];
+    auto& b = runs_[1];
+    if (!a.has || !b.has) {
+        // Cannot happen through the queue logic, but a half-cleared runs_ table
+        // must not reach the comparison math.
+        on_error(lv_tr("Measurement incomplete. Try again."));
+        return;
+    }
+
+    const auto cmp = helix::calibration::compare_belt_paths(a.curve, b.curve, sweep_cfg_.min_freq,
+                                                            sweep_cfg_.max_freq);
+    if (!cmp.valid) {
+        on_error(lv_tr("Not enough frequency data from the sweeps. Try again."));
+        return;
+    }
+
+    populate_results(cmp);
+    set_view_state(ViewState::RESULTS);
+    spdlog::info("[BeltTension] Results: similarity={:.0f}% verdict={} pairs={} unpaired={}/{}",
+                 cmp.similarity_percent, static_cast<int>(cmp.verdict), cmp.peaks.pairs.size(),
+                 cmp.peaks.unpaired_a.size(), cmp.peaks.unpaired_b.size());
+}
+
+void BeltTensionPanel::populate_results(const helix::calibration::BeltComparison& cmp) {
+    lv_subject_set_int(&verdict_subject_, static_cast<int>(cmp.verdict));
+    const char* verdict_label = lv_tr("Poor match");
+    switch (cmp.verdict) {
+    case helix::calibration::BeltVerdict::MATCHED:
+        verdict_label = lv_tr("Good match");
+        break;
+    case helix::calibration::BeltVerdict::CLOSE:
+        verdict_label = lv_tr("Fair match");
+        break;
+    case helix::calibration::BeltVerdict::ADJUST:
+        break;
+    }
+    snprintf(verdict_text_buf_, sizeof(verdict_text_buf_), "%s", verdict_label);
+    lv_subject_copy_string(&verdict_text_subject_, verdict_text_buf_);
+
+    snprintf(similarity_buf_, sizeof(similarity_buf_), "%.0f%%",
+             static_cast<double>(cmp.similarity_percent));
+    lv_subject_copy_string(&similarity_subject_, similarity_buf_);
+    similarity_percent_ = cmp.similarity_percent;
+
+    // Paired peaks, strongest first: "Peaks 35/36 · 133/132 Hz" (A/B).
+    const auto& pairs = cmp.peaks.pairs;
+    std::string pair_list;
+    for (size_t i = 0; i < pairs.size() && i < MAX_LISTED_PEAKS; ++i) {
+        pair_list += fmt::format("{}{:.0f}/{:.0f}", i == 0 ? "" : " · ", pairs[i].a.freq_hz,
+                                 pairs[i].b.freq_hz);
+    }
+    const std::string facts = pair_list.empty()
+                                  ? std::string(lv_tr("No shared peaks"))
+                                  : fmt::format(fmt::runtime(lv_tr("Peaks {} Hz")), pair_list);
+    snprintf(facts_buf_, sizeof(facts_buf_), "%s", facts.c_str());
+    lv_subject_copy_string(&facts_subject_, facts_buf_);
+
+    // Unpaired peaks, the strongest few per path, in frequency order:
+    // "Only on A: 120, 129 Hz".
+    const auto listed = [](std::vector<helix::calibration::BeltPeak> peaks) {
+        std::sort(peaks.begin(), peaks.end(),
+                  [](const auto& l, const auto& r) { return l.amplitude > r.amplitude; });
+        if (peaks.size() > MAX_LISTED_PEAKS) {
+            peaks.resize(MAX_LISTED_PEAKS);
+        }
+        std::sort(peaks.begin(), peaks.end(),
+                  [](const auto& l, const auto& r) { return l.freq_hz < r.freq_hz; });
+        return peaks;
+    };
+    const auto join_freqs = [](const std::vector<helix::calibration::BeltPeak>& peaks) {
+        std::string out;
+        for (size_t i = 0; i < peaks.size(); ++i) {
+            out += fmt::format("{}{:.0f}", i == 0 ? "" : ", ", peaks[i].freq_hz);
+        }
+        return out;
+    };
+    const auto only_a = listed(cmp.peaks.unpaired_a);
+    const auto only_b = listed(cmp.peaks.unpaired_b);
+    std::string unpaired;
+    if (!only_a.empty()) {
+        unpaired = fmt::format(fmt::runtime(lv_tr("Only on A: {} Hz")), join_freqs(only_a));
+    }
+    if (!only_b.empty()) {
+        unpaired += (unpaired.empty() ? "" : " · ") +
+                    fmt::format(fmt::runtime(lv_tr("Only on B: {} Hz")), join_freqs(only_b));
+    }
+    snprintf(unpaired_buf_, sizeof(unpaired_buf_), "%s", unpaired.c_str());
+    lv_subject_copy_string(&unpaired_subject_, unpaired_buf_);
+    lv_subject_set_int(&has_unpaired_subject_, unpaired.empty() ? 0 : 1);
+
+    push_chart_markers(cmp);
+    refresh_notes();
+}
+
+void BeltTensionPanel::push_chart_markers(const helix::calibration::BeltComparison& cmp) {
+    if (!chart_) {
+        return;
+    }
+    // Numbered dots on the listed pairs (the same number on both curves),
+    // hollow rings on the listed unpaired peaks.
+    std::vector<FrChartMarker> markers[2];
+    const auto& pairs = cmp.peaks.pairs;
+    for (size_t i = 0; i < pairs.size() && i < MAX_LISTED_PEAKS; ++i) {
+        const int number = static_cast<int>(i) + 1;
+        markers[0].push_back({pairs[i].a.freq_hz, number});
+        markers[1].push_back({pairs[i].b.freq_hz, number});
+    }
+    const auto add_unpaired = [](std::vector<helix::calibration::BeltPeak> peaks,
+                                 std::vector<FrChartMarker>& out) {
+        std::sort(peaks.begin(), peaks.end(),
+                  [](const auto& l, const auto& r) { return l.amplitude > r.amplitude; });
+        for (size_t i = 0; i < peaks.size() && i < MAX_LISTED_PEAKS; ++i) {
+            out.push_back({peaks[i].freq_hz, 0});
+        }
+    };
+    add_unpaired(cmp.peaks.unpaired_a, markers[0]);
+    add_unpaired(cmp.peaks.unpaired_b, markers[1]);
+    for (int idx = 0; idx < 2; ++idx) {
+        ui_frequency_response_chart_set_markers(chart_, series_[idx], markers[idx].data(),
+                                                markers[idx].size());
+    }
+}
+
+void BeltTensionPanel::cancel_run() {
+    run_active_ = false;
+    if (calibrator_) {
+        calibrator_->cancel();
+    }
+    queue_.clear();
+    stall_guard_.end();
+    elapsed_timer_.reset();
+    if (chart_) {
+        ui_frequency_response_chart_clear_cursor(chart_);
+    }
+}
+
+void BeltTensionPanel::back_to_start() {
+    cancel_run();
+    refresh_gate();
+    set_view_state(ViewState::START);
+}
+
+// ============================================================================
+// SUBJECT REFRESH
+// ============================================================================
+
+void BeltTensionPanel::refresh_notes() {
+    const bool running =
+        static_cast<ViewState>(lv_subject_get_int(&s_belt_tension_state)) == ViewState::RUNNING;
+
+    for (int idx = 0; idx < 2; ++idx) {
+        const auto& run = runs_[idx];
+        auto& note_subject = idx == 0 ? note_a_subject_ : note_b_subject_;
+        auto& note_buf = idx == 0 ? note_a_buf_ : note_b_buf_;
+
+        std::string note = "--";
+        if (running && !queue_.empty() &&
+            (queue_.front() == (idx == 0 ? helix::calibration::BeltPath::PATH_A
+                                         : helix::calibration::BeltPath::PATH_B))) {
+            note = lv_tr("sweeping");
+        } else if (run.has) {
+            const uint32_t age_s = (lv_tick_get() - run.measured_at_ms) / 1000;
+            note = age_s < 60 ? lv_tr("just now")
+                              : fmt::format(fmt::runtime(lv_tr("{} min ago")), age_s / 60);
+        }
+        if (run.has_previous) {
+            note += fmt::format(fmt::runtime(lv_tr(" · was {:.0f}%")), was_similarity_percent_);
+        }
+
+        snprintf(note_buf, idx == 0 ? sizeof(note_a_buf_) : sizeof(note_b_buf_), "%s",
+                 note.c_str());
+        lv_subject_copy_string(&note_subject, note_buf);
+    }
+    push_chart_data();
+}
+
+void BeltTensionPanel::refresh_run_detail() {
+    if (run_queue_total_ > 1) {
+        snprintf(run_detail_buf_, sizeof(run_detail_buf_), "%zu of %zu · %u:%02u",
+                 run_queue_total_ - queue_.size() + 1, run_queue_total_,
+                 (lv_tick_get() - run_started_ms_) / 1000 / 60,
+                 (lv_tick_get() - run_started_ms_) / 1000 % 60);
+    } else {
+        snprintf(run_detail_buf_, sizeof(run_detail_buf_), "%s",
+                 fmt::format(lv_tr("{}:{:02} elapsed"),
+                             (lv_tick_get() - run_started_ms_) / 1000 / 60,
+                             (lv_tick_get() - run_started_ms_) / 1000 % 60)
+                     .c_str());
+    }
+    lv_subject_copy_string(&run_detail_subject_, run_detail_buf_);
+}
+
+void BeltTensionPanel::start_elapsed_timer() {
+    elapsed_timer_.reset(lv_timer_create(
+        [](lv_timer_t* t) {
+            auto* self = static_cast<BeltTensionPanel*>(lv_timer_get_user_data(t));
+            self->refresh_run_detail();
+        },
+        1000, this));
 }
 
 // ============================================================================
@@ -393,44 +857,49 @@ void BeltTensionPanel::refresh_gate() {
     lv_subject_t* accel_subj = lv_xml_get_subject(nullptr, "printer_has_accelerometer");
 
     helix::calibration::BeltGateInputs in;
-    in.connected = lv_subject_get_int(ps.get_nav_buttons_enabled_subject()) != 0;
+    // "Connected" has to mean commands will actually run: Moonraker up but
+    // klippy down (an emergency stop, a crash) refuses gcode, so a sweep
+    // started then would stall until the guard fired.
+    in.connected = lv_subject_get_int(ps.network_state().get_nav_buttons_enabled_subject()) != 0 &&
+                   lv_subject_get_int(ps.network_state().get_klippy_state_subject()) ==
+                       static_cast<int>(KlippyState::READY);
     in.has_accelerometer = accel_subj && lv_subject_get_int(accel_subj) != 0;
     in.is_corexy = detected_hw_.kinematics == helix::calibration::KinematicsType::COREXY;
+    in.detecting = detection_pending_ &&
+                   detected_hw_.kinematics == helix::calibration::KinematicsType::UNKNOWN;
     in.klippy_socket_reachable = klippy_socket_reachable_;
-    in.dsp_capable = helix::calibration::cached_dsp_probe().capable;
-    in.print_active = lv_subject_get_int(ps.get_print_active_subject()) != 0;
+    in.print_active = lv_subject_get_int(ps.print_state().get_print_active_subject()) != 0;
 
     const auto gate = helix::calibration::evaluate_belt_gate(in);
-    lv_subject_set_int(&can_start_subject_, gate == helix::calibration::BeltGate::OK ? 1 : 0);
-    lv_subject_copy_string(&gate_message_subject_,
-                           lv_tr(helix::calibration::belt_gate_message(gate)));
+    const bool calibrator_idle =
+        !calibrator_ ||
+        calibrator_->get_state() == helix::calibration::BeltTensionCalibrator::State::IDLE;
+    lv_subject_set_int(&can_start_subject_,
+                       gate == helix::calibration::BeltGate::OK && calibrator_idle ? 1 : 0);
+    if (gate == helix::calibration::BeltGate::NOT_COREXY && !detected_hw_.kinematics_name.empty()) {
+        // Name what the printer is, so the user can tell a wrong machine from
+        // a missing detection.
+        lv_subject_copy_string(&gate_message_subject_,
+                               fmt::format(lv_tr("Belt Tension needs a CoreXY printer. "
+                                                 "This one is {}."),
+                                           detected_hw_.kinematics_name)
+                                   .c_str());
+    } else {
+        lv_subject_copy_string(&gate_message_subject_,
+                               lv_tr(helix::calibration::belt_gate_message(gate)));
+    }
     spdlog::debug("[BeltTension] gate = {}", helix::calibration::belt_gate_message(gate));
 
     // A precondition that fails mid-measurement ends the measurement. The case
-    // that makes this real is a print starting while the user is plucking: the
-    // toolhead moves, every later reading is garbage, and leaving the meter
-    // running would present that garbage as a result.
+    // that makes this real is a print starting while the user is measuring: the
+    // toolhead is now doing two jobs at once, and every later reading is
+    // garbage from both.
     if (gate != helix::calibration::BeltGate::OK &&
-        static_cast<ViewState>(lv_subject_get_int(&s_belt_tension_state)) == ViewState::LISTEN) {
+        static_cast<ViewState>(lv_subject_get_int(&s_belt_tension_state)) == ViewState::RUNNING) {
         spdlog::warn("[BeltTension] Gate closed mid-measurement: {}",
                      helix::calibration::belt_gate_message(gate));
-        stop_listening();
         on_error(lv_tr(helix::calibration::belt_gate_message(gate)));
     }
-}
-
-void BeltTensionPanel::ensure_replay_observer() {
-    if (replay_observer_) {
-        return;
-    }
-    replay_observer_ = helix::ui::observe_string<BeltTensionPanel>(
-        &replay_path_subject_, this,
-        [](BeltTensionPanel* self, const char* value) {
-            if (value && value[0] != '\0') {
-                self->replay_capture(value);
-            }
-        },
-        get_subjects_lifetime());
 }
 
 void BeltTensionPanel::ensure_gate_observers() {
@@ -449,14 +918,17 @@ void BeltTensionPanel::ensure_gate_observers() {
         return;
     }
 
-    accel_observer_ = helix::ui::observe_int_sync<BeltTensionPanel>(
+    accel_observer_ = helix::ui::observe<int>(
         accel_subj, this, [](BeltTensionPanel* self, int) { self->refresh_gate(); },
         ps.get_subjects_lifetime());
-    print_active_observer_ = helix::ui::observe_int_sync<BeltTensionPanel>(
-        ps.get_print_active_subject(), this,
+    print_active_observer_ = helix::ui::observe<int>(
+        ps.print_state().get_print_active_subject(), this,
         [](BeltTensionPanel* self, int) { self->refresh_gate(); }, ps.get_subjects_lifetime());
-    connected_observer_ = helix::ui::observe_int_sync<BeltTensionPanel>(
-        ps.get_nav_buttons_enabled_subject(), this,
+    connected_observer_ = helix::ui::observe<int>(
+        ps.network_state().get_nav_buttons_enabled_subject(), this,
+        [](BeltTensionPanel* self, int) { self->refresh_gate(); }, ps.get_subjects_lifetime());
+    klippy_observer_ = helix::ui::observe<int>(
+        ps.network_state().get_klippy_state_subject(), this,
         [](BeltTensionPanel* self, int) { self->refresh_gate(); }, ps.get_subjects_lifetime());
 
     gate_observers_wired_ = true;
@@ -505,875 +977,176 @@ void BeltTensionPanel::probe_klippy_socket() {
         }));
 }
 
-void BeltTensionPanel::publish_target_frequency() {
-    // No measured span offset means the span behind listen_span_mm_ is a
-    // fallback, not a measurement, so there is no honest absolute target. Same
-    // rule populate_comparison() applies to the GOOD/WARNING/BAD verdict.
-    const auto offset = span_offset_for_current_printer();
-    target_frequency_hz_ = offset.has_value()
-                               ? helix::calibration::expected_frequency_for_span(listen_span_mm_)
-                               : 0.0f;
-
-    // Sole writer of bt_has_target, which is what hides the row on both cards.
-    // Visibility and value are set together here so they cannot disagree: a
-    // shown row with an empty value misleads exactly as much as a wrong number.
-    lv_subject_set_int(&has_target_subject_, target_frequency_hz_ > 0.0f ? 1 : 0);
-
-    if (target_frequency_hz_ > 0.0f) {
-        // Whole Hz, matching every other frequency the panel shows.
-        snprintf(target_freq_buf_, sizeof(target_freq_buf_), "%.0f Hz",
-                 static_cast<double>(target_frequency_hz_));
-    } else {
-        target_freq_buf_[0] = '\0';
-    }
-    lv_subject_notify(&target_freq_subject_);
-}
-
-std::optional<float> BeltTensionPanel::span_offset_for_current_printer() const {
-    const double mm =
-        PrinterDetector::get_belt_span_offset_mm(get_printer_state().get_printer_type());
-    // Negative means the model has no measured offset. Do not guess one: a 10 mm
-    // error moves the 110 Hz target by about 7 Hz. Returning nullopt makes the
-    // panel fall back to span-independent A-vs-B matching, which stays correct.
-    return mm >= 0.0 ? std::optional<float>(static_cast<float>(mm)) : std::nullopt;
-}
-
-void BeltTensionPanel::handle_park_gantry() {
-    const auto offset = span_offset_for_current_printer();
-
-    const auto bounds = get_printer_state().get_axis_bounds();
-    const auto target =
-        helix::calibration::park_y_for_span(helix::calibration::TARGET_SPAN_MM, offset, bounds);
-
-    // Fall back to the span implied by wherever the gantry is now. The search
-    // window the session builds around it only has to bracket the real
-    // frequency, so a stale Y is far better than pretending we parked.
-    listen_span_mm_ = helix::calibration::TARGET_SPAN_MM;
-    if (offset.has_value()) {
-        // position_y is a whole-mm int subject. A millimetre of rounding moves
-        // the search window by well under a Hz, so int is enough here.
-        const float span =
-            static_cast<float>(lv_subject_get_int(get_printer_state().get_position_y_subject())) +
-            *offset;
-        if (span > 0.0f) {
-            listen_span_mm_ = span;
-        }
-    }
-    publish_target_frequency();
-
-    if (!target.valid) {
-        // Matching is span-independent, so the feature still works - we just
-        // cannot show an absolute target or park for the user.
-        lv_subject_copy_string(&park_status_subject_,
-                               lv_tr("Position the gantry yourself, then continue"));
+void BeltTensionPanel::query_hw_facts() {
+    if (!client_) {
         return;
     }
 
-    if (!api_) {
-        lv_subject_copy_string(&park_status_subject_,
-                               lv_tr("Position the gantry yourself, then continue"));
-        return;
-    }
-
-    lv_subject_copy_string(&park_status_subject_, lv_tr("Moving gantry"));
-
-    // Y sets the free span - on a CoreXY it runs front idler to rear along
-    // each side rail, so gantry Y sets it and the toolhead's X position
-    // changes neither span. X still has to move: left wherever it happened
-    // to be, it sits over one of the two belts (park_center_x() below).
-    helix::ensure_homed_then(
-        api_, lifetime_,
-        [this, y = static_cast<double>(target.y_mm)]() {
-            api_->motion().move_to_position(
-                'Y', y, PARK_FEEDRATE_MM_MIN,
-                lifetime_.bg_cb("BeltTension::parked_y",
-                                [this]() {
-                                    // The park landed, so the span is the one we
-                                    // asked for rather than one inferred from a
-                                    // position that may be stale.
-                                    listen_span_mm_ = helix::calibration::TARGET_SPAN_MM;
-                                    publish_target_frequency();
-                                    park_center_x();
-                                }),
-                lifetime_.bg_cb("BeltTension::park_failed",
-                                [this](const MoonrakerError& e) { on_error(e.message); }));
-        },
-        lifetime_.bg_cb("BeltTension::home_failed",
-                        [this](const MoonrakerError& e) { on_error(e.message); }));
-}
-
-void BeltTensionPanel::park_center_x() {
-    // has_x is false until the first axis-bounds subscription update
-    // arrives; fetched fresh here (not reused from handle_park_gantry())
-    // because this runs after an async Y move, by which point a subscription
-    // update may have landed. Skip rather than guess X=0 on a cold start.
-    const auto bounds = get_printer_state().get_axis_bounds();
-    const auto x = helix::calibration::park_x_center(bounds);
-    if (!api_ || !x.has_value()) {
-        lv_subject_copy_string(&park_status_subject_, lv_tr("Ready to pluck"));
-        return;
-    }
-
-    api_->motion().move_to_position(
-        'X', static_cast<double>(*x), PARK_FEEDRATE_MM_MIN,
+    helix::calibration::query_resonance_tester_config(
+        *client_,
         lifetime_.bg_cb(
-            "BeltTension::parked_x",
-            [this]() { lv_subject_copy_string(&park_status_subject_, lv_tr("Ready to pluck")); }),
-        lifetime_.bg_cb("BeltTension::park_failed",
-                        [this](const MoonrakerError& e) { on_error(e.message); }));
-}
-
-// ============================================================================
-// SHOW / LIFECYCLE
-// ============================================================================
-
-void BeltTensionPanel::set_api(helix::IMoonrakerClient* client, IMoonrakerAPI* api) {
-    client_ = client;
-    api_ = api;
-
-    // Create calibrator with API
-    calibrator_ = std::make_unique<helix::calibration::BeltTensionCalibrator>(api_);
-    spdlog::debug("[BeltTension] Calibrator created");
-}
-
-void BeltTensionPanel::show() {
-    if (!overlay_root_) {
-        spdlog::error("[BeltTension] Cannot show: overlay not created");
-        return;
-    }
-
-    spdlog::debug("[BeltTension] Showing overlay");
-
-    // Register with NavigationManager for lifecycle callbacks
-    NavigationManager::instance().register_overlay_instance(overlay_root_, this);
-
-    // Push onto navigation stack
-    NavigationManager::instance().push_overlay(overlay_root_);
-
-    spdlog::info("[BeltTension] Overlay shown");
-}
-
-void BeltTensionPanel::on_activate() {
-    OverlayBase::on_activate();
-
-    spdlog::debug("[BeltTension] on_activate()");
-
-    // Reset to start state
-    set_view_state(ViewState::START);
-
-    // Reset subjects to defaults
-    lv_subject_set_int(&has_results_subject_, 0);
-    reference_hz_ = 0.0f;
-    belt_a_hz_ = 0.0f;
-    belt_b_hz_ = 0.0f;
-    listening_belt_ = 'A';
-    reset_live_subjects();
-    lv_subject_set_int(&has_reference_subject_, 0);
-    lv_subject_copy_string(&reference_freq_subject_, "--");
-    lv_subject_copy_string(&advance_label_subject_, lv_tr("Next belt"));
-
-    // START shows the target for the span the park will aim at. Recomputed
-    // from the real span once handle_park_gantry() knows it; hidden entirely
-    // on a model with no measured span offset, where there is no target to
-    // show and pretending otherwise is the invention this panel forbids.
-    listen_span_mm_ = helix::calibration::TARGET_SPAN_MM;
-    publish_target_frequency();
-
-    // Re-evaluate the gate on every entry, and probe co-location once here
-    // rather than on each gate refresh - the gate recomputes on every subject
-    // change and a connect() syscall per change would be waste.
-    ensure_gate_observers();
-    // cleanup() drops this observer along with the gate ones, and unlike them
-    // it is created in init_subjects(), which early-returns once the subjects
-    // exist. Without re-arming it here, replay - the primary instrument for a
-    // hardware session - stops working silently after the first cleanup().
-    ensure_replay_observer();
-    refresh_gate();
-    probe_klippy_socket();
-    query_accel_chip();
-
-    // Detect hardware capabilities
-    if (calibrator_) {
-        calibrator_->detect_hardware(
-            lifetime_.bg_cb("BeltTensionPanel::detect_hardware",
-                            [this](const helix::calibration::BeltTensionHardware& hw) {
-                                on_hardware_detected(hw);
-                            }),
-            lifetime_.bg_cb("BeltTensionPanel::detect_hw_error", [this](const std::string& msg) {
-                spdlog::warn("[BeltTension] Hardware detection failed: {}", msg);
-                // Show defaults, user can still try
-                snprintf(hw_kinematics_buf_, sizeof(hw_kinematics_buf_), "%s", lv_tr("Unknown"));
-                lv_subject_notify(&hw_kinematics_subject_);
-                snprintf(hw_adxl_buf_, sizeof(hw_adxl_buf_), "%s", lv_tr("Not detected"));
-                lv_subject_notify(&hw_adxl_subject_);
-                // detected_hw_ is now known-bad, so the gate must be recomputed
-                // against it rather than left on a stale pass.
-                detected_hw_ = {};
-                refresh_gate();
+            "BeltTension::resonance_cfg", [this](helix::calibration::ResonanceTesterConfig cfg) {
+                sweep_cfg_ = cfg;
+                push_chart_data();
+                // Both paths sweep once each, hence the 2x.
+                const int minutes =
+                    std::max(1, static_cast<int>(std::ceil(2.0f * cfg.sweep_seconds() / 60.0f)));
+                snprintf(hw_sweep_buf_, sizeof(hw_sweep_buf_), "%s",
+                         fmt::format(lv_tr("{:.0f}-{:.0f} Hz · about {} min"), cfg.min_freq,
+                                     cfg.max_freq, minutes)
+                             .c_str());
+                lv_subject_copy_string(&hw_sweep_subject_, hw_sweep_buf_);
             }));
-    }
-}
-
-void BeltTensionPanel::on_deactivate() {
-    spdlog::debug("[BeltTension] on_deactivate()");
-
-    // Abandon an in-progress run. POSITION may have a park move outstanding and
-    // LISTEN is the live meter; both must not survive the panel going away.
-    stop_listening();
-
-    auto state = static_cast<ViewState>(lv_subject_get_int(&s_belt_tension_state));
-    if (state == ViewState::POSITION || state == ViewState::LISTEN) {
-        spdlog::info("[BeltTension] Cancelling measurement on deactivate");
-        if (calibrator_) {
-            calibrator_->reset();
-        }
-        set_view_state(ViewState::START);
-    }
-
-    OverlayBase::on_deactivate();
-}
-
-void BeltTensionPanel::cleanup() {
-    spdlog::debug("[BeltTension] Cleaning up");
-
-    stop_listening();
-
-    // Expire all outstanding async tokens
-    lifetime_.invalidate();
-
-    // ObserverGuard::reset(), never release() (#579)
-    accel_observer_.reset();
-    print_active_observer_.reset();
-    connected_observer_.reset();
-    replay_observer_.reset();
-    gate_observers_wired_ = false;
-
-    // Unregister from NavigationManager
-    if (overlay_root_) {
-        NavigationManager::instance().unregister_overlay_instance(overlay_root_);
-    }
-
-    OverlayBase::cleanup();
-}
-
-void BeltTensionPanel::on_ui_destroyed() {
-    // Destroy chart if created
-    if (chart_) {
-        ui_frequency_response_chart_destroy(chart_);
-        chart_ = nullptr;
-    }
-    chart_series_a_ = -1;
-    chart_series_b_ = -1;
 }
 
 // ============================================================================
-// HARDWARE DETECTION CALLBACK
+// CHART
 // ============================================================================
 
-void BeltTensionPanel::on_hardware_detected(const helix::calibration::BeltTensionHardware& hw) {
-    detected_hw_ = hw;
-
-    // Update kinematics display
-    const char* kin_label = lv_tr("Unknown");
-    switch (hw.kinematics) {
-    case helix::calibration::KinematicsType::COREXY:
-        kin_label = "CoreXY";
-        break;
-    case helix::calibration::KinematicsType::CARTESIAN:
-        kin_label = "Cartesian";
-        break;
-    default:
-        kin_label = hw.kinematics_name.empty() ? lv_tr("Unknown") : hw.kinematics_name.c_str();
-        break;
-    }
-    snprintf(hw_kinematics_buf_, sizeof(hw_kinematics_buf_), "%s", kin_label);
-    lv_subject_notify(&hw_kinematics_subject_);
-
-    // Update ADXL status
-    snprintf(hw_adxl_buf_, sizeof(hw_adxl_buf_), "%s",
-             hw.has_adxl ? lv_tr("Connected") : lv_tr("Not detected"));
-    lv_subject_notify(&hw_adxl_subject_);
-
-    spdlog::info("[BeltTension] Hardware: {} ADXL={}", kin_label, hw.has_adxl);
-
-    // Kinematics feeds BeltGateInputs::is_corexy, so the gate is only truthful
-    // once detection has landed.
-    refresh_gate();
+lv_color_t BeltTensionPanel::path_color(helix::calibration::BeltPath path) {
+    return theme_manager_get_color(path == helix::calibration::BeltPath::PATH_A ? "belt_path_a"
+                                                                                : "belt_path_b");
 }
 
-// ============================================================================
-// EVENT HANDLERS
-// ============================================================================
+ui_frequency_response_chart_t* BeltTensionPanel::ensure_chart() {
+    const auto tier = tier_override_.value_or(PlatformCapabilities::detect().tier);
+    if (tier == helix::PlatformTier::EMBEDDED || chart_) {
+        return chart_;
+    }
+    if (!chart_host_running_) {
+        return nullptr;
+    }
 
-void BeltTensionPanel::handle_start_clicked() {
-    spdlog::info("[BeltTension] Start clicked");
+    chart_ = ui_frequency_response_chart_create(chart_host_running_);
+    if (!chart_) {
+        return nullptr;
+    }
+    ui_frequency_response_chart_configure_for_platform(chart_, tier, tier_animations_);
+    // Relative response: both curves share one 0-100% scale (push_chart_data).
+    ui_frequency_response_chart_set_y_labels_visible(chart_, true);
+    ui_frequency_response_chart_set_y_labels_percent(chart_, true);
 
-    // The XML binding already disables this button while the gate is shut. This
-    // is the same check on the action itself, so a stale binding or a
-    // programmatic click cannot get past it.
-    refresh_gate();
-    if (lv_subject_get_int(&can_start_subject_) == 0) {
-        spdlog::warn("[BeltTension] Start refused: {}",
-                     lv_subject_get_string(&gate_message_subject_));
+    for (int idx = 0; idx < 2; ++idx) {
+        const char letter = 'A' + idx;
+        series_[idx] = ui_frequency_response_chart_add_series(
+            chart_, fmt::format(lv_tr("Path {}"), letter).c_str(),
+            path_color(idx == 0 ? helix::calibration::BeltPath::PATH_A
+                                : helix::calibration::BeltPath::PATH_B));
+        ui_frequency_response_chart_set_series_style(chart_, series_[idx], {3, true, true});
+
+        ghost_series_[idx] = ui_frequency_response_chart_add_series(
+            chart_, fmt::format(lv_tr("Path {} before"), letter).c_str(),
+            path_color(idx == 0 ? helix::calibration::BeltPath::PATH_A
+                                : helix::calibration::BeltPath::PATH_B));
+        ui_frequency_response_chart_set_series_muted(chart_, ghost_series_[idx], true);
+        ui_frequency_response_chart_show_series(chart_, ghost_series_[idx], false);
+    }
+
+    push_chart_data();
+    lv_subject_set_int(&chart_available_subject_, 1);
+    spdlog::debug("[BeltTension] Chart created (tier {})", helix::platform_tier_to_string(tier));
+    return chart_;
+}
+
+void BeltTensionPanel::apply_path_colors() {
+    if (!chart_) {
         return;
     }
-
-    set_view_state(ViewState::POSITION);
-    handle_park_gantry();
-}
-
-void BeltTensionPanel::handle_position_confirmed() {
-    spdlog::info("[BeltTension] Position confirmed, listening");
-
-    reference_hz_ = 0.0f;
-    belt_a_hz_ = 0.0f;
-    belt_b_hz_ = 0.0f;
-    lv_subject_set_int(&has_reference_subject_, 0);
-    start_listening('A');
-}
-
-void BeltTensionPanel::handle_cancel_clicked() {
-    spdlog::info("[BeltTension] Cancel clicked");
-
-    stop_listening();
-    if (calibrator_) {
-        calibrator_->reset();
-    }
-    set_view_state(ViewState::START);
-}
-
-void BeltTensionPanel::handle_retry_clicked() {
-    spdlog::info("[BeltTension] Retry clicked");
-    stop_listening();
-    set_view_state(ViewState::START);
-}
-
-void BeltTensionPanel::handle_advance_clicked() {
-    if (listening_belt_ == 'A') {
-        handle_next_belt_clicked();
-    } else {
-        handle_compare_clicked();
+    for (int idx = 0; idx < 2; ++idx) {
+        const lv_color_t color = path_color(idx == 0 ? helix::calibration::BeltPath::PATH_A
+                                                     : helix::calibration::BeltPath::PATH_B);
+        ui_frequency_response_chart_set_series_color(chart_, series_[idx], color);
+        ui_frequency_response_chart_set_series_color(chart_, ghost_series_[idx], color);
     }
 }
 
-void BeltTensionPanel::handle_next_belt_clicked() {
-    float median = 0.0f;
-    bool may_advance = false;
-    {
-        std::lock_guard<std::mutex> lock(listen_mutex_);
-        if (session_) {
-            median = session_->median_hz();
-            may_advance = session_->may_advance();
-        }
-    }
-    // The XML binding already disables this button until the median commits.
-    // This is the same check on the action itself, so a stale binding or a
-    // programmatic click (ctl click sends LV_EVENT_CLICKED with no disabled
-    // check) cannot get past it - same reasoning as handle_start_clicked().
-    // It is load-bearing beyond the UI: MIN_HARMONIC_CONCENTRATION is set as
-    // low as it is because the committed number is a median of five, so
-    // committing on fewer would quietly invalidate that argument.
-    if (!may_advance) {
-        spdlog::warn("[BeltTension] Next belt refused: belt A has not committed a median yet");
+void BeltTensionPanel::push_chart_data() {
+    if (!chart_) {
         return;
     }
-
-    spdlog::info("[BeltTension] Belt A committed at {:.2f} Hz, moving to belt B", median);
-    belt_a_hz_ = median;
-    reference_hz_ = median;
-
-    stop_listening();
-
-    snprintf(reference_freq_buf_, sizeof(reference_freq_buf_), "%.0f Hz",
-             static_cast<double>(median));
-    lv_subject_notify(&reference_freq_subject_);
-    lv_subject_set_int(&has_reference_subject_, 1);
-
-    start_listening('B');
-}
-
-void BeltTensionPanel::handle_compare_clicked() {
-    float median = 0.0f;
-    bool may_advance = false;
-    {
-        std::lock_guard<std::mutex> lock(listen_mutex_);
-        if (session_) {
-            median = session_->median_hz();
-            may_advance = session_->may_advance();
-        }
-    }
-    // Same guard as handle_next_belt_clicked(), for the same reason: this is
-    // the number the comparison and every verdict string are built from.
-    if (!may_advance) {
-        spdlog::warn("[BeltTension] Compare refused: belt B has not committed a median yet");
-        return;
-    }
-
-    spdlog::info("[BeltTension] Belt B committed at {:.2f} Hz", median);
-    belt_b_hz_ = median;
-
-    stop_listening();
-    populate_comparison(belt_a_hz_, belt_b_hz_);
-    set_view_state(ViewState::COMPARE);
-}
-
-// ============================================================================
-// RESULT CALLBACKS
-// ============================================================================
-
-void BeltTensionPanel::on_error(const std::string& message) {
-    spdlog::error("[BeltTension] Error: {}", message);
-
-    snprintf(error_message_buf_, sizeof(error_message_buf_), "%s", message.c_str());
-    lv_subject_notify(&error_message_subject_);
-    set_view_state(ViewState::ERROR);
-}
-
-void BeltTensionPanel::populate_comparison(float a_hz, float b_hz) {
-    // Both halves must hold: the model must have a measured span offset, and a
-    // target must actually have been derived from the span we listened at.
-    const bool have_target =
-        lv_subject_get_int(&has_target_subject_) != 0 && target_frequency_hz_ > 0.0f;
-    const float delta = std::fabs(a_hz - b_hz);
-    const bool matched = helix::calibration::belt_frequencies_match(a_hz, b_hz);
-
-    // Whole Hz, never a decimal: see BELT_RESOLUTION_HZ.
-    snprintf(result_a_freq_buf_, sizeof(result_a_freq_buf_), "%.0f Hz", static_cast<double>(a_hz));
-    lv_subject_notify(&result_a_freq_subject_);
-    snprintf(result_b_freq_buf_, sizeof(result_b_freq_buf_), "%.0f Hz", static_cast<double>(b_hz));
-    lv_subject_notify(&result_b_freq_subject_);
-
-    // An absolute GOOD/WARNING/BAD verdict only means something when the span
-    // is known, because the target frequency is a property of the span. With
-    // no measured span offset for this model the panel does matching only, and
-    // an absolute verdict would be an invention.
-    const char* a_status = "";
-    const char* b_status = "";
-    if (have_target) {
-        a_status =
-            helix::calibration::belt_status_to_string(helix::calibration::evaluate_belt_status(
-                a_hz, target_frequency_hz_, TARGET_TOLERANCE_HZ));
-        b_status =
-            helix::calibration::belt_status_to_string(helix::calibration::evaluate_belt_status(
-                b_hz, target_frequency_hz_, TARGET_TOLERANCE_HZ));
-    }
-    snprintf(result_a_status_buf_, sizeof(result_a_status_buf_), "%s", a_status);
-    lv_subject_notify(&result_a_status_subject_);
-    snprintf(result_b_status_buf_, sizeof(result_b_status_buf_), "%s", b_status);
-    lv_subject_notify(&result_b_status_subject_);
-
-    if (matched) {
-        snprintf(result_delta_buf_, sizeof(result_delta_buf_), "%s",
-                 lv_tr("Within measurement resolution"));
-    } else {
-        snprintf(result_delta_buf_, sizeof(result_delta_buf_), lv_tr("%.0f Hz difference"),
-                 static_cast<double>(delta));
-    }
-    lv_subject_notify(&result_delta_subject_);
-
-    const float match = helix::calibration::belt_match_percent(a_hz, b_hz);
-    snprintf(result_similarity_buf_, sizeof(result_similarity_buf_), "%.0f%%",
-             static_cast<double>(match));
-    lv_subject_notify(&result_similarity_subject_);
-    lv_subject_set_int(&match_percent_subject_, static_cast<int>(std::lround(match)));
-
-    // Matching alone is not advice. Two belts can match each other perfectly and
-    // both be far off the target, and "loosen the tighter one" is actively wrong
-    // when both are already below it - it moves the machine further from where it
-    // should be. So whenever the span is known, the target drives the wording and
-    // matching is the secondary concern. Only a printer with no measured span
-    // offset falls back to pure matching, because there the target is unknown
-    // rather than merely unmet.
-    const float need_a = target_frequency_hz_ - a_hz; // positive means "tighten"
-    const float need_b = target_frequency_hz_ - b_hz;
-    const bool a_in_band = std::fabs(need_a) <= TARGET_TOLERANCE_HZ;
-    const bool b_in_band = std::fabs(need_b) <= TARGET_TOLERANCE_HZ;
-    const char* looser = need_a > need_b ? lv_tr("A") : lv_tr("B");
-
-    if (!have_target) {
-        if (matched) {
-            snprintf(result_recommendation_buf_, sizeof(result_recommendation_buf_), "%s",
-                     lv_tr("Both belts read the same to within what this measurement can "
-                           "resolve. Nothing to adjust."));
-        } else if (a_hz > b_hz) {
-            snprintf(result_recommendation_buf_, sizeof(result_recommendation_buf_),
-                     lv_tr("Belt A (front right) is tighter by %.0f Hz. Tighten belt B, on the "
-                           "front left, or loosen belt A."),
-                     static_cast<double>(delta));
-        } else {
-            snprintf(result_recommendation_buf_, sizeof(result_recommendation_buf_),
-                     lv_tr("Belt B (front left) is tighter by %.0f Hz. Tighten belt A, on the "
-                           "front right, or loosen belt B."),
-                     static_cast<double>(delta));
-        }
-    } else if (a_in_band && b_in_band && matched) {
-        snprintf(result_recommendation_buf_, sizeof(result_recommendation_buf_),
-                 lv_tr("Both belts are on the %.0f Hz target and match each other. "
-                       "Nothing to adjust."),
-                 static_cast<double>(target_frequency_hz_));
-    } else if (need_a > 0.0f && need_b > 0.0f) {
-        snprintf(result_recommendation_buf_, sizeof(result_recommendation_buf_),
-                 lv_tr("Both belts are below the %.0f Hz target - A by %.0f Hz, B by %.0f Hz. "
-                       "Tighten both, %s more."),
-                 static_cast<double>(target_frequency_hz_), static_cast<double>(need_a),
-                 static_cast<double>(need_b), looser);
-    } else if (need_a < 0.0f && need_b < 0.0f) {
-        snprintf(result_recommendation_buf_, sizeof(result_recommendation_buf_),
-                 lv_tr("Both belts are above the %.0f Hz target - A by %.0f Hz, B by %.0f Hz. "
-                       "Loosen both."),
-                 static_cast<double>(target_frequency_hz_), static_cast<double>(-need_a),
-                 static_cast<double>(-need_b));
-    } else {
-        // One side of the target each, so they cannot be brought together by
-        // moving only one belt.
-        snprintf(result_recommendation_buf_, sizeof(result_recommendation_buf_),
-                 lv_tr("Target is %.0f Hz. Tighten belt %s and loosen belt %s."),
-                 static_cast<double>(target_frequency_hz_), need_a > 0.0f ? "A" : "B",
-                 need_a > 0.0f ? "B" : "A");
-    }
-    lv_subject_notify(&result_recommendation_subject_);
-
-    lv_subject_set_int(&has_results_subject_, 1);
-
-    spdlog::info("[BeltTension] Compare: A={:.2f} Hz B={:.2f} Hz delta={:.2f} Hz match={:.0f}%",
-                 a_hz, b_hz, delta, match);
-}
-
-// ============================================================================
-// LIVE MEASUREMENT
-// ============================================================================
-
-void BeltTensionPanel::query_accel_chip() {
-    // Fall back before asking, so the panel is never left with no sensor name
-    // if the query fails or the config has no resonance_tester section.
-    const auto sensors = helix::sensors::AccelSensorManager::instance().get_sensors();
-    if (!sensors.empty()) {
-        sensor_name_ = sensors.front().klipper_name;
-    }
-
-    if (!api_) {
-        return;
-    }
-
-    api_->query_configfile(
-        lifetime_.bg_cb("BeltTension::accel_chip",
-                        [this](const json& config) {
-                            if (!config.is_object() || !config.contains("resonance_tester") ||
-                                !config["resonance_tester"].is_object()) {
-                                spdlog::debug(
-                                    "[BeltTension] No resonance_tester section; sensor stays '{}'",
-                                    sensor_name_);
-                                return;
-                            }
-                            const json& rt = config["resonance_tester"];
-                            // accel_chip is the single-sensor form; accel_chip_x/_y is the
-                            // per-axis form. Either names a config section, and both belts
-                            // are measured from the same toolhead sensor, so the X one is
-                            // as good as the Y one.
-                            for (const char* key : {"accel_chip", "accel_chip_x"}) {
-                                if (rt.contains(key) && rt[key].is_string()) {
-                                    std::string chip = rt[key].get<std::string>();
-                                    if (!chip.empty()) {
-                                        sensor_name_ = std::move(chip);
-                                        break;
-                                    }
-                                }
-                            }
-                            spdlog::info("[BeltTension] Accelerometer section '{}'", sensor_name_);
-                        }),
-        lifetime_.bg_cb("BeltTension::accel_chip_err", [this](const MoonrakerError& err) {
-            spdlog::debug("[BeltTension] configfile query failed ({}); sensor stays '{}'",
-                          err.message, sensor_name_);
-        }));
-}
-
-void BeltTensionPanel::reset_live_subjects() {
-    lv_subject_copy_string(&current_belt_subject_,
-                           listening_belt_ == 'B' ? lv_tr("Belt B") : lv_tr("Belt A"));
-    lv_subject_copy_string(&live_freq_subject_, "--");
-    lv_subject_copy_string(&median_freq_subject_, "");
-    snprintf(pluck_count_buf_, sizeof(pluck_count_buf_), "0 / %zu",
-             helix::calibration::PluckAggregator::COMMIT_AFTER);
-    lv_subject_notify(&pluck_count_subject_);
-    lv_subject_copy_string(&hint_subject_, lv_tr("Hold still"));
-    lv_subject_set_int(&committed_subject_, 0);
-    lv_subject_set_int(&match_percent_subject_, 0);
-    helix::calibration::BeltLiveData::instance().clear();
-}
-
-void BeltTensionPanel::start_listening(char belt) {
-    stop_listening();
-
-    listening_belt_ = belt;
-    reset_live_subjects();
-    lv_subject_copy_string(&advance_label_subject_,
-                           belt == 'B' ? lv_tr("Compare") : lv_tr("Next belt"));
-    set_view_state(ViewState::LISTEN);
-
-    if (klippy_socket_path_.empty() || sensor_name_.empty()) {
-        on_error(lv_tr("No accelerometer stream available. Check that Klipper is running "
-                       "and an accelerometer is configured, then retry."));
-        return;
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(listen_mutex_);
-        session_.reset();
-        noise_prefix_.clear();
-        had_reject_ = false;
-        last_event_tp_ = std::chrono::steady_clock::now();
-    }
-
-    if (!stream_) {
-        stream_ = std::make_unique<helix::calibration::BeltStreamClient>();
-    }
-
-    spdlog::info("[BeltTension] Listening on belt {} via '{}' at {} (span {:.0f} mm)", belt,
-                 sensor_name_, klippy_socket_path_, listen_span_mm_);
-
-    // on_batch is deliberately NOT wrapped in lifetime_.bg_cb: bg_cb defers the
-    // whole body to the main thread, which would put a 2048-point pitch
-    // estimate on the LVGL thread ten times a second. The DSP stays here, and
-    // lifetime safety comes from stop_listening() joining the loop thread on
-    // every exit path plus stream_ being the first member destroyed.
-    const bool ok = stream_->start(
-        klippy_socket_path_, sensor_name_,
-        [this, tok = lifetime_.token()](const helix::calibration::AccelBatch& batch) {
-            on_batch_bg(batch, tok);
-        },
-        lifetime_.bg_cb("BeltTension::stream_error",
-                        [this](const std::string& msg) { on_stream_error(msg); }));
-
-    if (!ok) {
-        on_error(lv_tr("Could not open Klipper's accelerometer stream. Check that Klipper "
-                       "is running, then retry."));
-    }
-}
-
-void BeltTensionPanel::stop_listening() {
-    // Close the socket and join the loop thread FIRST. After this returns no
-    // batch callback can be in flight, so clearing the session below cannot
-    // pull the buffer out from under a running DSP pass.
-    if (stream_) {
-        stream_->stop();
-    }
-
-    std::lock_guard<std::mutex> lock(listen_mutex_);
-    session_.reset();
-    noise_prefix_.clear();
-    noise_prefix_.shrink_to_fit();
-    had_reject_ = false;
-    reject_not_a_pluck_ = false;
-}
-
-void BeltTensionPanel::on_batch_bg(const helix::calibration::AccelBatch& batch,
-                                   const helix::LifetimeToken& tok) {
-    LiveSnapshot snap;
-
-    {
-        std::lock_guard<std::mutex> lock(listen_mutex_);
-
-        if (!session_) {
-            // Noise-floor phase. Nothing is published, so the "Hold still"
-            // hint set by start_listening() stays up for its duration.
-            noise_prefix_.insert(noise_prefix_.end(), batch.samples.begin(), batch.samples.end());
-            if (noise_prefix_.size() < NOISE_FLOOR_SAMPLES) {
-                return;
+    const float lo = sweep_cfg_.min_freq;
+    const float hi = sweep_cfg_.max_freq;
+    const auto in_band = [lo, hi](const helix::calibration::BeltCurve& curve) {
+        helix::calibration::BeltCurve out;
+        for (const auto& bin : curve) {
+            if (bin.first >= lo && bin.first <= hi) {
+                out.push_back(bin);
             }
+        }
+        return out;
+    };
 
-            // The session needs the measured rate, not the configured one, and
-            // the stream only knows it once samples have arrived - which is
-            // exactly now. Build the session here rather than in
-            // start_listening() for that reason.
-            float rate = stream_ ? stream_->sample_rate_hz() : 0.0f;
-            if (rate <= 0.0f) {
-                rate = 3200.0f;
+    // The chart shows the sweep band only (bins past the ceiling carry no
+    // excitation) as a percentage of the tallest in-band point of any curve on
+    // screen, so the two paths share one scale and the axis reads 0-100%.
+    helix::calibration::BeltCurve current[2], previous[2];
+    float tallest = 0.0f;
+    for (int idx = 0; idx < 2; ++idx) {
+        if (runs_[idx].has) {
+            current[idx] = in_band(runs_[idx].curve);
+        }
+        if (runs_[idx].has_previous) {
+            previous[idx] = in_band(runs_[idx].previous);
+        }
+        for (const auto* curve : {&current[idx], &previous[idx]}) {
+            for (const auto& bin : *curve) {
+                tallest = std::max(tallest, bin.second);
             }
-            session_ =
-                std::make_unique<helix::calibration::BeltListenSession>(listen_span_mm_, rate);
-            const bool learned = session_->learn_noise_floor(noise_prefix_);
-            spdlog::info("[BeltTension] Noise floor learned={} from {} samples at {:.0f} Hz",
-                         learned, noise_prefix_.size(), rate);
-            noise_prefix_.clear();
-            noise_prefix_.shrink_to_fit();
-            last_event_tp_ = std::chrono::steady_clock::now();
+        }
+    }
+
+    // Points are placed by index across the plot, so the axis must span
+    // exactly the data's first and last bin; with no data yet the printer's
+    // band keeps the running cursor honest.
+    float f_lo = lo;
+    float f_hi = hi;
+    for (const auto* curve : {&current[0], &current[1], &previous[0], &previous[1]}) {
+        if (!curve->empty()) {
+            f_lo = curve->front().first;
+            f_hi = curve->back().first;
+            break;
+        }
+    }
+    ui_frequency_response_chart_set_freq_range(chart_, f_lo, f_hi);
+    ui_frequency_response_chart_set_amplitude_range(chart_, 0.0f, 100.0f);
+
+    const auto push = [this, tallest](int series_id, const helix::calibration::BeltCurve& curve) {
+        if (curve.empty() || tallest <= 0.0f) {
+            ui_frequency_response_chart_show_series(chart_, series_id, false);
             return;
         }
-
-        // The DSP runs here, on the loop thread. Only finished numbers cross.
-        const auto event = session_->push(batch);
-        const auto now = std::chrono::steady_clock::now();
-
-        if (event) {
-            last_event_tp_ = now;
-            if (event->accepted) {
-                snap.last_hz = event->frequency_hz;
-                snap.spectrum = session_->last_spectrum();
-                // A good pluck answers the "too soft" prompt, so retire it now
-                // rather than letting it sit out its REJECT_HINT_MS window. It
-                // would otherwise still be telling the user to pluck harder
-                // while the accepted count ticks up in front of them.
-                had_reject_ = false;
-            } else {
-                had_reject_ = true;
-                reject_not_a_pluck_ = event->reject == helix::calibration::PluckReject::NOT_A_PLUCK;
-                last_reject_tp_ = now;
-            }
+        std::vector<float> freqs, amps;
+        freqs.reserve(curve.size());
+        amps.reserve(curve.size());
+        for (const auto& [f, a] : curve) {
+            freqs.push_back(f);
+            amps.push_back(100.0f * a / tallest);
         }
-
-        snap.accepted = session_->accepted_count();
-        snap.median_hz = session_->median_hz();
-        snap.committed = session_->committed();
-        snap.window = session_->window();
-        snap.ms_since_event = static_cast<uint32_t>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(now - last_event_tp_).count());
-        if (had_reject_) {
-            snap.ms_since_reject = static_cast<uint32_t>(
-                std::chrono::duration_cast<std::chrono::milliseconds>(now - last_reject_tp_)
-                    .count());
-            snap.reject_not_a_pluck = reject_not_a_pluck_;
-        }
-    }
-
-    // Not lifetime_.defer(): that one is main-thread only. LifetimeToken::defer
-    // holds its own shared_ptr to the generation counter, so it is safe to call
-    // from the loop thread and it never reads `this` to decide whether to run.
-    tok.defer("BeltTension::batch_ui",
-              [this, snap = std::move(snap)]() { publish_live_values(snap); });
-}
-
-void BeltTensionPanel::publish_live_values(const LiveSnapshot& snap) {
-    // live_freq_subject_ is snap.last_hz - the single most recent accepted
-    // pluck, unfiltered - falling back to snap.median_hz only when there is
-    // no last value yet. That is deliberate, not an oversight: see
-    // MIN_HARMONIC_CONCENTRATION's note in pitch_estimator.h for why a rare
-    // false accept here is harmless (self-corrects on the next pluck; the
-    // committed median beside it is what the user actually acts on).
-    if (snap.last_hz > 0.0f) {
-        snprintf(live_freq_buf_, sizeof(live_freq_buf_), "%.0f Hz",
-                 static_cast<double>(snap.last_hz));
-        lv_subject_notify(&live_freq_subject_);
-    } else if (snap.median_hz > 0.0f) {
-        snprintf(live_freq_buf_, sizeof(live_freq_buf_), "%.0f Hz",
-                 static_cast<double>(snap.median_hz));
-        lv_subject_notify(&live_freq_subject_);
-    }
-
-    if (snap.median_hz > 0.0f) {
-        snprintf(median_freq_buf_, sizeof(median_freq_buf_), lv_tr("Median %.0f Hz"),
-                 static_cast<double>(snap.median_hz));
-    } else {
-        median_freq_buf_[0] = '\0';
-    }
-    lv_subject_notify(&median_freq_subject_);
-
-    snprintf(pluck_count_buf_, sizeof(pluck_count_buf_), "%zu / %zu", snap.accepted,
-             helix::calibration::PluckAggregator::COMMIT_AFTER);
-    lv_subject_notify(&pluck_count_subject_);
-
-    lv_subject_set_int(&committed_subject_, snap.committed ? 1 : 0);
-
-    if (reference_hz_ > 0.0f && snap.median_hz > 0.0f) {
-        const float match = helix::calibration::belt_match_percent(reference_hz_, snap.median_hz);
-        lv_subject_set_int(&match_percent_subject_, static_cast<int>(std::lround(match)));
-    }
-
-    // Hint priority: a recent rejection is the most actionable thing we can
-    // say, then a long silence, then the neutral "we are listening".
-    const char* hint = nullptr;
-    if (snap.ms_since_reject < helix::calibration::REJECT_HINT_MS) {
-        hint = snap.reject_not_a_pluck ? lv_tr("That did not sound like a pluck - try again")
-                                       : lv_tr("Too soft - pluck harder");
-    } else if (helix::calibration::belt_should_show_idle_hint(snap.ms_since_event)) {
-        // Front-left is belt B, front-right is belt A (design spec, confirmed
-        // against photographs of the machine).
-        hint = listening_belt_ == 'B' ? lv_tr("Pluck the front belt on the left")
-                                      : lv_tr("Pluck the front belt on the right");
-    } else {
-        hint = lv_tr("Listening");
-    }
-    lv_subject_copy_string(&hint_subject_, hint);
-
-    helix::calibration::BeltLiveData::instance().set_waveform(snap.window);
-    // Only a freshly accepted pluck carries a new spectrum (see
-    // BeltListenSession::last_spectrum()) - an empty snap.spectrum here means
-    // "nothing new," and the strip is left holding whatever it last drew.
-    if (!snap.spectrum.empty()) {
-        // snap.last_hz is the estimate resolved from this very spectrum (both
-        // are set together in on_batch_bg on an accepted pluck), so the strip
-        // marks the fundamental the panel is reporting, not a stale one.
-        helix::calibration::BeltLiveData::instance().set_spectrum(snap.spectrum, snap.last_hz);
-    }
-
-    // Drives BeltTrace's redraw. Bumped every publish, not only when the
-    // spectrum changes, because the waveform trace has fresh data every
-    // batch even between plucks.
-    lv_subject_set_int(&live_tick_subject_, lv_subject_get_int(&live_tick_subject_) + 1);
-}
-
-void BeltTensionPanel::replay_capture(const std::string& path) {
-    std::ifstream in(path);
-    if (!in.good()) {
-        spdlog::warn("[BeltTension] replay: cannot open {}", path);
-        return;
-    }
-    std::stringstream ss;
-    ss << in.rdbuf();
-    const std::string text = ss.str();
-
-    auto samples = helix::calibration::parse_accel_csv(text);
-    if (samples.empty()) {
-        spdlog::warn("[BeltTension] replay: no samples parsed from {}", path);
-        return;
-    }
-    const float rate = helix::calibration::parse_capture_sample_rate(text);
-    if (rate <= 0.0f) {
-        spdlog::warn("[BeltTension] replay: no sample_rate_hz= header in {}", path);
-        return;
-    }
-
-    // listen_span_mm_ is whatever the panel currently has - TARGET_SPAN_MM
-    // unless a live session already parked and set it. A capture from a
-    // different span will search the wrong harmonic window; this is a
-    // diagnostic replay, not a general-purpose file importer, and the span
-    // mismatch is visible immediately as an implausible peak label.
-    std::vector<std::pair<float, float>> psd;
-    const auto est = helix::calibration::estimate_pitch_for_span(
-        samples, rate, listen_span_mm_, helix::calibration::DEFAULT_HARMONICS, &psd);
-
-    helix::calibration::BeltLiveData::instance().set_waveform(samples);
-    if (!psd.empty()) {
-        helix::calibration::BeltLiveData::instance().set_spectrum(psd, est.valid ? est.frequency_hz
-                                                                                 : 0.0f);
-    }
-    // Bumps BeltTrace's redraw even if LISTEN was never entered this
-    // activation - the subject was initialised at startup (init_subjects()
-    // runs from ui_panel_belt_tension_register_callbacks(), not on first
-    // navigation), and BeltLiveData is a singleton the trace widget reads
-    // fresh on its next draw regardless of when that data arrived.
-    lv_subject_set_int(&live_tick_subject_, lv_subject_get_int(&live_tick_subject_) + 1);
-
-    if (est.valid) {
-        spdlog::info("[BeltTension] replayed {} samples from {} ({:.1f} Hz stream, estimate "
-                     "{:.1f} Hz)",
-                     samples.size(), path, rate, est.frequency_hz);
-    } else {
-        spdlog::info("[BeltTension] replayed {} samples from {} ({:.1f} Hz stream, no estimate)",
-                     samples.size(), path, rate);
+        ui_frequency_response_chart_set_data(chart_, series_id, freqs.data(), amps.data(),
+                                             freqs.size());
+        ui_frequency_response_chart_show_series(chart_, series_id, true);
+    };
+    for (int idx = 0; idx < 2; ++idx) {
+        push(series_[idx], current[idx]);
+        push(ghost_series_[idx], previous[idx]);
     }
 }
 
-void BeltTensionPanel::on_stream_error(const std::string& message) {
-    spdlog::error("[BeltTension] Stream failed: {}", message);
+void BeltTensionPanel::destroy_chart() {
+    if (!chart_) {
+        return;
+    }
+    ui_frequency_response_chart_destroy(chart_);
+    chart_ = nullptr;
+    series_[0] = series_[1] = -1;
+    ghost_series_[0] = ghost_series_[1] = -1;
+    lv_subject_set_int(&chart_available_subject_, 0);
+}
 
-    // A dead stream must not leave the last good frequency on screen: the
-    // number would keep reading as live while nothing is being measured.
-    stop_listening();
-
-    char buf[256];
-    snprintf(buf, sizeof(buf),
-             lv_tr("The accelerometer stream stopped: %s. Check that "
-                   "Klipper is running, then retry."),
-             message.c_str());
-    on_error(buf);
+void BeltTensionPanel::chart_to_running_host() {
+    ensure_chart();
+    if (chart_ && chart_host_running_ &&
+        lv_obj_get_parent(ui_frequency_response_chart_get_obj(chart_)) != chart_host_running_) {
+        lv_obj_set_parent(ui_frequency_response_chart_get_obj(chart_), chart_host_running_);
+    }
 }

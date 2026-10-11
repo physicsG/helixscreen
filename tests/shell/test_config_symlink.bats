@@ -380,12 +380,47 @@ setup() {
     done
 }
 
+# --- pin_env_file: the env file's owner/mode is stated, not inherited ---
+
+@test "pin_env_file normalizes a group-writable env file behind a symlink to 0644 owned by KLIPPER_USER" {
+    local install="$BATS_TEST_TMPDIR/helixscreen"
+    local data="$BATS_TEST_TMPDIR/printer_data/config/helixscreen"
+    mkdir -p "$install/config" "$data"
+    printf 'HELIX_LOG_LEVEL=info\n' > "$data/helixscreen.env"
+    chmod 0666 "$data/helixscreen.env"
+    ln -s "$data/helixscreen.env" "$install/config/helixscreen.env"
+    INSTALL_DIR="$install"
+    KLIPPER_USER="$(id -un)"
+
+    run pin_env_file
+    [ "$status" -eq 0 ]
+
+    # The pin lands on the printer_data real file the symlink points at, and
+    # the symlink itself survives.
+    [ "$(stat -c '%a' "$data/helixscreen.env")" = "644" ]
+    [ "$(stat -c '%u' "$data/helixscreen.env")" = "$(id -u)" ]
+    [ -L "$install/config/helixscreen.env" ]
+}
+
+@test "pin_env_file without KLIPPER_USER pins the mode and leaves ownership alone" {
+    local install="$BATS_TEST_TMPDIR/helixscreen"
+    mkdir -p "$install/config"
+    printf 'HELIX_LOG_LEVEL=info\n' > "$install/config/helixscreen.env"
+    chmod 0666 "$install/config/helixscreen.env"
+    INSTALL_DIR="$install"
+    KLIPPER_USER=""
+
+    run pin_env_file
+    [ "$status" -eq 0 ]
+    [ "$(stat -c '%a' "$install/config/helixscreen.env")" = "644" ]
+}
+
 # --- Bundled installer parity ---
 
 @test "bundled install.sh has setup_config_symlink function" {
-    grep -q 'setup_config_symlink()' "$WORKTREE_ROOT/scripts/install.sh"
+    grep -q 'setup_config_symlink()' "$INSTALL_BUNDLE"
 }
 
 @test "bundled install.sh calls setup_config_symlink in main flow" {
-    grep -q 'setup_config_symlink' "$WORKTREE_ROOT/scripts/install.sh"
+    grep -q 'setup_config_symlink' "$INSTALL_BUNDLE"
 }

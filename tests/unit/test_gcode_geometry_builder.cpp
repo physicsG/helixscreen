@@ -6,6 +6,9 @@
 #include "gcode_selection_style.h"
 
 #include <glm/gtc/matrix_transform.hpp>
+#include <limits>
+#include <set>
+#include <utility>
 
 #include "../catch_amalgamated.hpp"
 
@@ -190,6 +193,7 @@ TEST_CASE("Geometry Builder: RibbonGeometry - clear", "[gcode][geometry][ribbon]
     geometry.strip_color_index.push_back(0);
     geometry.color_palette.push_back(0xFF0000);
     geometry.extrusion_triangle_count = 10;
+    geometry.moving_mesh = std::make_unique<RibbonGeometry>();
 
     geometry.clear();
 
@@ -198,6 +202,7 @@ TEST_CASE("Geometry Builder: RibbonGeometry - clear", "[gcode][geometry][ribbon]
     REQUIRE(geometry.strip_color_index.empty());
     REQUIRE(geometry.color_palette.empty());
     REQUIRE(geometry.extrusion_triangle_count == 0);
+    REQUIRE(geometry.moving_mesh == nullptr);
 }
 
 TEST_CASE("Geometry Builder: RibbonGeometry - memory usage", "[gcode][geometry][ribbon]") {
@@ -219,6 +224,14 @@ TEST_CASE("Geometry Builder: RibbonGeometry - memory usage", "[gcode][geometry][
     size_t before_colors = geometry.memory_usage();
     geometry.strip_color_index.resize(1000, 0);
     REQUIRE(geometry.memory_usage() == before_colors + 999);
+
+    // A moving mesh counts toward the owning geometry's usage: it is live
+    // memory while the viewer holds both.
+    auto mesh = std::make_unique<RibbonGeometry>();
+    mesh->vertices.resize(256);
+    size_t before_mesh = geometry.memory_usage();
+    geometry.moving_mesh = std::move(mesh);
+    REQUIRE(geometry.memory_usage() == before_mesh + 256 * sizeof(RibbonVertex));
 }
 
 // ============================================================================
@@ -392,52 +405,43 @@ TEST_CASE("Geometry Builder: Color computation - hex parsing", "[gcode][geometry
     }
 }
 
-TEST_CASE("Geometry Builder: Color computation - Z-height gradient", "[gcode][geometry][color]") {
+TEST_CASE("Geometry Builder: Color computation - no palette or color is one color at every Z",
+          "[gcode][geometry][color]") {
+    // The 2D renderer paints a file with no palette and no filament color in one
+    // color, so the 3D mesh must not shade it by height.
     GeometryBuilder builder;
-    builder.set_use_height_gradient(true);
 
-    // Create a simple G-code file with two layers
     ParsedGCodeFile gcode;
     gcode.global_bounding_box.min = glm::vec3(0, 0, 0);
     gcode.global_bounding_box.max = glm::vec3(100, 100, 10);
 
-    Layer layer1;
-    layer1.z_height = 0.2f;
-    ToolpathSegment seg1;
-    seg1.start = glm::vec3(0, 0, 0.2f);
-    seg1.end = glm::vec3(10, 0, 0.2f);
-    seg1.is_extrusion = true;
-    seg1.extrusion_amount = 1.0f;
-    seg1.width = 0.4f;
-    layer1.segments.push_back(seg1);
-    gcode.layers.push_back(layer1);
-
-    Layer layer2;
-    layer2.z_height = 5.0f;
-    ToolpathSegment seg2;
-    seg2.start = glm::vec3(0, 0, 5.0f);
-    seg2.end = glm::vec3(10, 0, 5.0f);
-    seg2.is_extrusion = true;
-    seg2.extrusion_amount = 1.0f;
-    seg2.width = 0.4f;
-    layer2.segments.push_back(seg2);
-    gcode.layers.push_back(layer2);
+    for (float z : {0.2f, 5.0f, 10.0f}) {
+        Layer layer;
+        layer.z_height = z;
+        ToolpathSegment seg;
+        seg.start = glm::vec3(0, 0, z);
+        seg.end = glm::vec3(10, 0, z);
+        seg.is_extrusion = true;
+        seg.extrusion_amount = 1.0f;
+        seg.width = 0.4f;
+        layer.segments.push_back(seg);
+        gcode.layers.push_back(layer);
+    }
 
     SimplificationOptions options;
     options.enable_merging = false;
 
     RibbonGeometry geometry = builder.build(gcode, options);
 
-    // Should have generated geometry
     REQUIRE(geometry.vertices.size() > 0);
-    REQUIRE(geometry.color_palette.size() > 0);
+    REQUIRE(geometry.color_palette.size() == 1);
+    CHECK((geometry.color_palette[0] & 0xFFFFFFu) == 0x26A69Au);
 }
 
 TEST_CASE("Geometry Builder: Color computation - solid filament color",
           "[gcode][geometry][color]") {
     GeometryBuilder builder;
     builder.set_filament_color("#ED1C24"); // Red
-    builder.set_use_height_gradient(false);
 
     ParsedGCodeFile gcode;
     gcode.global_bounding_box.min = glm::vec3(0, 0, 0);
@@ -1353,12 +1357,18 @@ TEST_CASE("Geometry Builder: moving RibbonGeometry preserves every member",
                          0x666666, 0x777777, 0x888888, 0x999999, 0xAAAAAA};
     src.object_runs = {ObjectRun{0, 12, 3}, ObjectRun{12, 6, 5}};
     src.layer_object_run_ranges = {{0, 1}, {1, 1}};
+    src.moving_mesh = std::make_unique<RibbonGeometry>();
+    src.moving_mesh->max_layer_index = 4;
 
     SECTION("move construction") {
         RibbonGeometry dst(std::move(src));
         CHECK(dst.layer_height_mm == Approx(0.32f));
         CHECK(dst.max_layer_index == 7);
         CHECK(dst.quantization.scale_factor == Approx(123.5f));
+        // Dropping moving_mesh on a move would silently disable the weak-GPU
+        // moving view even though the mesh was built.
+        REQUIRE(dst.moving_mesh != nullptr);
+        CHECK(dst.moving_mesh->max_layer_index == 4);
         REQUIRE(dst.prepared_buffers.size() == 3);
         CHECK(dst.prepared_buffers[1].vertex_count == 42);
         CHECK(dst.prepared_buffers[1].data.size() == 42 * PackedVertex::stride());
@@ -1383,6 +1393,8 @@ TEST_CASE("Geometry Builder: moving RibbonGeometry preserves every member",
         CHECK(dst.layer_height_mm == Approx(0.32f));
         CHECK(dst.max_layer_index == 7);
         CHECK(dst.quantization.scale_factor == Approx(123.5f));
+        REQUIRE(dst.moving_mesh != nullptr);
+        CHECK(dst.moving_mesh->max_layer_index == 4);
         REQUIRE(dst.prepared_buffers.size() == 3);
         CHECK(dst.prepared_buffers[1].vertex_count == 42);
         REQUIRE(dst.strip_color_index.size() == dst.strips.size());
@@ -1588,9 +1600,8 @@ TEST_CASE("Geometry Builder: a file with no exclude-object metadata allocates no
 TEST_CASE("Geometry Builder: every feature type of a selected object joins a run",
           "[gcode][geometry][objectruns]") {
     // The runs are what render_selection_tag() draws, and the rim is derived from
-    // the boundary of the tagged region. Restricting collection to walls (the
-    // selection::halo_feature() set — OuterWall, OverhangWall, Unknown) leaves the
-    // interior untagged on any ;TYPE-annotated file, which is most of them: the
+    // the boundary of the tagged region. Restricting collection to walls leaves
+    // the interior untagged on any ;TYPE-annotated file, which is most of them: the
     // top face reads as a hole, every real hole gets its own ring, and the
     // silhouette fragments when the object is viewed from above.
     const std::vector<FeatureType> features{FeatureType::OuterWall,   FeatureType::InnerWall,
@@ -1625,19 +1636,9 @@ TEST_CASE("Geometry Builder: every feature type of a selected object joins a run
 
     const size_t layer_vertices = geometry.layer_strip_ranges[0].second * 6;
     REQUIRE(layer_vertices > 0);
+    // Seven of the eight segments are not walls, so a wall-only filter still
+    // yields one run but drops vertex_count to an eighth of the layer.
     CHECK(runs.first[0].vertex_count == layer_vertices);
-
-    // Non-wall features carry almost all of those vertices: seven of the eight
-    // segments above are outside halo_feature(), only OuterWall inside it.
-    // Restoring the filter still yields runs.count == 1, so vertex_count against
-    // the layer total is the assertion that bites — it drops to an eighth of it.
-    size_t wall_only_segments = 0;
-    for (FeatureType f : features) {
-        if (selection::halo_feature(f)) {
-            ++wall_only_segments;
-        }
-    }
-    REQUIRE(wall_only_segments < features.size());
 }
 
 TEST_CASE("Geometry Builder: segments outside any object do not join a run",
@@ -1705,4 +1706,263 @@ TEST_CASE("quantization slack preserves the historical 1.5x margin", "[gcode][ge
     // And it must stay strictly larger than the exact reach, or the bounds stop
     // being conservative and vertices can quantize out of range.
     CHECK(margin > helix::gcode::tube_half_diagonal(width));
+}
+
+TEST_CASE("Geometry Builder: a cancelled build emits no geometry", "[gcode][geometry][cancel]") {
+    // The viewer's build thread runs this pass after parsing; leaving the
+    // preview joins that thread on the UI thread, so the pass must be
+    // stoppable rather than costing a full build's wall clock (#1706).
+    // The predicate fires from the first check, so a build that honours it
+    // returns at once and empty.
+    auto make_gcode = []() {
+        ParsedGCodeFile gcode;
+        Layer layer;
+        layer.z_height = 0.2f;
+        layer.segment_count_extrusion = 50000;
+        for (int i = 0; i < 50000; ++i) {
+            ToolpathSegment seg;
+            seg.start = glm::vec3(i % 100, (i / 100) % 100, 0.2f);
+            seg.end = seg.start + glm::vec3(1.0f, 0.3f, 0.0f);
+            seg.is_extrusion = true;
+            seg.extrusion_amount = 1.0f;
+            seg.width = 0.4f;
+            layer.segments.push_back(seg);
+        }
+        gcode.layers.push_back(std::move(layer));
+        gcode.total_segments = 50000;
+        gcode.drawable_segments = 50000;
+        return gcode;
+    };
+
+    SimplificationOptions options;
+    options.enable_merging = false;
+
+    GeometryBuilder full_builder;
+    RibbonGeometry full = full_builder.build(make_gcode(), options);
+    REQUIRE_FALSE(full.vertices.empty());
+
+    GeometryBuilder cancelled_builder;
+    RibbonGeometry cancelled = cancelled_builder.build(make_gcode(), options, [] { return true; });
+    REQUIRE(cancelled.vertices.empty());
+}
+
+// ============================================================================
+// Moving mesh band layers
+// ============================================================================
+//
+// The weak-GPU moving mesh is this builder run with set_band_layers(n): exterior
+// shells are kept on every n-th layer, counted from the first printed layer, and
+// drawn n layer-heights tall so consecutive bands touch with no gaps. The first
+// printed layer and the horizontal skins are kept one layer tall.
+
+namespace {
+
+/// 9 layers of one outer wall plus one sparse-infill extrusion each, 0.2 mm layers.
+ParsedGCodeFile make_banded_gcode(int layer_count) {
+    ParsedGCodeFile gcode;
+    gcode.global_bounding_box.min = glm::vec3(0, 0, 0);
+    gcode.global_bounding_box.max = glm::vec3(100, 100, 4);
+    for (int li = 0; li < layer_count; ++li) {
+        Layer layer;
+        layer.z_height = 0.2f * static_cast<float>(li + 1);
+
+        ToolpathSegment wall;
+        wall.start = glm::vec3(10, 10, layer.z_height);
+        wall.end = glm::vec3(60, 10, layer.z_height);
+        wall.is_extrusion = true;
+        wall.extrusion_amount = 1.0f;
+        wall.width = 0.4f;
+        wall.feature_type = FeatureType::OuterWall;
+        layer.segments.push_back(wall);
+
+        ToolpathSegment infill;
+        infill.start = glm::vec3(10, 20, layer.z_height);
+        infill.end = glm::vec3(60, 20, layer.z_height);
+        infill.is_extrusion = true;
+        infill.extrusion_amount = 1.0f;
+        infill.width = 0.4f;
+        infill.feature_type = FeatureType::SparseInfill;
+        layer.segments.push_back(infill);
+
+        gcode.layers.push_back(layer);
+        gcode.total_segments += 2;
+    }
+    return gcode;
+}
+
+SimplificationOptions band_options() {
+    SimplificationOptions opts;
+    opts.enable_merging = false;
+    return opts;
+}
+
+ToolpathSegment band_extrusion(float y, float z, FeatureType type) {
+    ToolpathSegment seg;
+    seg.start = glm::vec3(10, y, z);
+    seg.end = glm::vec3(60, y, z);
+    seg.is_extrusion = true;
+    seg.extrusion_amount = 1.0f;
+    seg.width = 0.4f;
+    seg.feature_type = type;
+    return seg;
+}
+
+/// Dequantized Z extent of the strips built from one source layer.
+std::pair<float, float> layer_z_extent(const RibbonGeometry& geometry, uint16_t layer) {
+    float lo = std::numeric_limits<float>::max();
+    float hi = std::numeric_limits<float>::lowest();
+    for (size_t s = 0; s < geometry.strips.size(); ++s) {
+        if (geometry.strip_layer_index[s] != layer) {
+            continue;
+        }
+        for (uint32_t vi : geometry.strips[s]) {
+            const float z = geometry.quantization.dequantize_vec3(geometry.vertices[vi].position).z;
+            lo = std::min(lo, z);
+            hi = std::max(hi, z);
+        }
+    }
+    return {lo, hi};
+}
+
+} // namespace
+
+TEST_CASE("Geometry Builder: band layers keep only exterior features of every n-th layer",
+          "[gcode][geometry][bands]") {
+    GeometryBuilder builder;
+    builder.set_band_layers(3);
+    RibbonGeometry geometry = builder.build(make_banded_gcode(9), band_options());
+
+    // Layers 0, 3 and 6 survive with their outer walls. Infill is collected
+    // only on the first printed layer, which the mesh keeps whole.
+    REQUIRE(builder.last_stats().input_segments == 4);
+    std::set<uint16_t> layers(geometry.strip_layer_index.begin(), geometry.strip_layer_index.end());
+    REQUIRE(layers == std::set<uint16_t>{0, 3, 6});
+
+    // The original layer index survives: the renderer's solid/ghost split by
+    // progress layer reads strip_layer_index, not position in the mesh.
+    REQUIRE(geometry.layer_strip_ranges.size() == 9);
+    REQUIRE(geometry.layer_strip_ranges[3].second > 0);
+    REQUIRE(geometry.layer_strip_ranges[1].second == 0);
+}
+
+TEST_CASE("Geometry Builder: a band is n layer heights tall and bands touch",
+          "[gcode][geometry][bands]") {
+    GeometryBuilder builder;
+    builder.set_band_layers(3);
+    RibbonGeometry geometry = builder.build(make_banded_gcode(9), band_options());
+    REQUIRE_FALSE(geometry.strips.empty());
+
+    // A tube's top edge sits at the layer's Z, so layer 0's band spans 0.0 to
+    // 0.6 mm and layer 3's starts exactly where it ends.
+    const auto [lo0, hi0] = layer_z_extent(geometry, 0);
+    const auto [lo3, hi3] = layer_z_extent(geometry, 3);
+    REQUIRE(hi0 - lo0 == Approx(0.6f).margin(0.02f)); // 3 * 0.2 mm
+    REQUIRE(lo0 == Approx(0.0f).margin(0.02f));
+    REQUIRE(lo3 == Approx(hi0).margin(0.02f));
+}
+
+TEST_CASE("Geometry Builder: bands keep every extrusion when the file names no feature types",
+          "[gcode][geometry][bands]") {
+    ParsedGCodeFile gcode = make_banded_gcode(4);
+    for (auto& layer : gcode.layers) {
+        for (auto& seg : layer.segments) {
+            seg.feature_type = FeatureType::Unknown; // no ;TYPE: comments in the file
+        }
+    }
+
+    GeometryBuilder builder;
+    builder.set_band_layers(2);
+    RibbonGeometry geometry = builder.build(gcode, band_options());
+
+    // Layers 0 and 2, both segments each: Unknown is not "known interior".
+    REQUIRE(builder.last_stats().input_segments == 4);
+    REQUIRE(geometry.strip_layer_index.size() == geometry.strips.size());
+}
+
+TEST_CASE("Geometry Builder: bands count from the first printed layer, not a purge layer",
+          "[gcode][geometry][bands]") {
+    // Start-gcode purge alone on layer 0, the model on layers 1..9.
+    ParsedGCodeFile gcode = make_banded_gcode(10);
+    gcode.layers[0].segments = {band_extrusion(5, 0.2f, FeatureType::Custom)};
+
+    GeometryBuilder builder;
+    builder.set_band_layers(3);
+    RibbonGeometry geometry = builder.build(gcode, band_options());
+
+    std::set<uint16_t> layers(geometry.strip_layer_index.begin(), geometry.strip_layer_index.end());
+    REQUIRE(layers == std::set<uint16_t>{1, 4, 7});
+    // Layer 1's wall and infill, then the walls of 4 and 7.
+    REQUIRE(builder.last_stats().input_segments == 4);
+}
+
+TEST_CASE("Geometry Builder: skins survive the band stride, one layer tall",
+          "[gcode][geometry][bands]") {
+    // A top surface on layer 4 (not a band layer at n=3) and a bottom surface
+    // on layer 6 (a band layer).
+    ParsedGCodeFile gcode = make_banded_gcode(9);
+    gcode.layers[4].segments.push_back(
+        band_extrusion(30, gcode.layers[4].z_height, FeatureType::TopSurface));
+    gcode.layers[6].segments.push_back(
+        band_extrusion(30, gcode.layers[6].z_height, FeatureType::BottomSurface));
+
+    SECTION("every layer") {
+        GeometryBuilder builder;
+        builder.set_band_layers(3);
+        RibbonGeometry geometry = builder.build(gcode, band_options());
+        REQUIRE(geometry.layer_strip_ranges[4].second > 0);
+
+        // One layer tall, top edge at the layer's Z: 0.8 to 1.0 mm.
+        const auto [lo, hi] = layer_z_extent(geometry, 4);
+        REQUIRE(hi - lo == Approx(0.2f).margin(0.02f));
+        REQUIRE(hi == Approx(gcode.layers[4].z_height).margin(0.02f));
+    }
+
+    SECTION("band layers only") {
+        GeometryBuilder builder;
+        builder.set_band_layers(3, false);
+        RibbonGeometry geometry = builder.build(gcode, band_options());
+        REQUIRE(geometry.layer_strip_ranges[4].second == 0);
+        REQUIRE(geometry.layer_strip_ranges[6].second > 0); // on a band layer it stays
+    }
+}
+
+TEST_CASE("Geometry Builder: a band shell and a skin never merge into one tube",
+          "[gcode][geometry][bands]") {
+    // On band layer 3, a wall runs straight on into a top surface: the same
+    // line, width and layer, so plain merging would fuse them.
+    ParsedGCodeFile gcode = make_banded_gcode(6);
+    const float z = gcode.layers[3].z_height;
+    ToolpathSegment skin = band_extrusion(10, z, FeatureType::TopSurface);
+    skin.start = glm::vec3(60, 10, z);
+    skin.end = glm::vec3(90, 10, z);
+    gcode.layers[3].segments.insert(gcode.layers[3].segments.begin() + 1, skin);
+
+    SimplificationOptions merging;
+    merging.enable_merging = true;
+    GeometryBuilder builder;
+    builder.set_band_layers(3);
+    RibbonGeometry geometry = builder.build(gcode, merging);
+
+    // The wall's band rises two layers above its path; the skin's top edge is
+    // the path itself. Fused, the skin's span would rise with the band.
+    float skin_hi = std::numeric_limits<float>::lowest();
+    for (size_t s = 0; s < geometry.strips.size(); ++s) {
+        if (geometry.strip_layer_index[s] != 3) {
+            continue;
+        }
+        for (uint32_t vi : geometry.strips[s]) {
+            const glm::vec3 p =
+                geometry.quantization.dequantize_vec3(geometry.vertices[vi].position);
+            if (p.x > 70.0f) {
+                skin_hi = std::max(skin_hi, p.z);
+            }
+        }
+    }
+    REQUIRE(skin_hi == Approx(z).margin(0.03f));
+}
+
+TEST_CASE("Geometry Builder: band layers default to off", "[gcode][geometry][bands]") {
+    GeometryBuilder builder;
+    RibbonGeometry geometry = builder.build(make_banded_gcode(3), band_options());
+    REQUIRE(builder.last_stats().input_segments == 6); // every layer, every feature
 }

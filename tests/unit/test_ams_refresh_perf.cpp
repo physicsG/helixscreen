@@ -5,6 +5,7 @@
 #include "ui_spool_canvas.h"
 
 #include "../lvgl_test_fixture.h"
+#include "../test_helpers/backend_user_edit.h"
 #include "../test_helpers/update_queue_test_access.h"
 #include "ams_backend_mock.h"
 #include "ams_state.h"
@@ -57,7 +58,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "AMS slots_version does not increment on ident
         // Modify a slot color in the mock backend
         auto slot = mock_ptr->get_slot_info(0);
         slot.color_rgb = 0x00FF00; // Change from default to green
-        mock_ptr->set_slot_info(0, slot);
+        helix::test::apply_edit(*mock_ptr, 0, slot);
 
         ams.sync_from_backend();
         drain();

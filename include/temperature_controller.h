@@ -3,6 +3,7 @@
 #pragma once
 
 #include "ui_heater_config.h" // helix::HeaterType, HEATER_TYPE_COUNT
+#include "ui_observer_guard.h"
 
 #include "async_lifetime_guard.h"
 #include "heater_limits.h"
@@ -12,10 +13,15 @@
 #include <array>
 #include <functional>
 #include <string>
+#include <vector>
 
 namespace helix {
 class PrinterState;
+struct DryerInfo;
+namespace chamber {
+class ChamberHeaterBackend;
 }
+} // namespace helix
 class IMoonrakerAPI;
 
 namespace helix {
@@ -39,7 +45,7 @@ HeaterPresets compute_heater_presets(HeaterType type);
 
 /// Options for a heater set-target call.
 /// - toast: show the standard error toast on failure (default true).
-/// - on_success / on_error: optional caller hooks fired after the RPC completes.
+/// - on_success / on_error: optional caller hooks fired on the main thread after the RPC completes.
 struct SendOptions {
     bool toast = true;
     /// Swap-preheat guard (nozzle only). When true, the requested target is floored
@@ -81,6 +87,19 @@ class TemperatureController {
     /// otherwise the heater default).
     KeypadRange keypad_range(HeaterType type) const;
 
+    /// The effective ceiling for ANY temperature-input surface, in one place:
+    /// ensure_limits() then keypad_range(). While the configfile cap is still
+    /// unknown the heater default applies (not the caller's fallback); the
+    /// fallback only covers a controller reporting no ceiling at all. Every
+    /// keypad/edit view must ask this rather than composing the primitives
+    /// itself, so no two input surfaces can disagree about the ceiling.
+    float effective_keypad_max(HeaterType type, float fallback_deg);
+
+    /// Keypad ceiling for a heater named by its Klipper object (e.g. "heater_generic
+    /// filament_dryer"): its configfile max_temp when the printer reported one,
+    /// otherwise @p fallback_deg.
+    float keypad_max_for(const std::string& klipper_name, float fallback_deg) const;
+
     /// Fetch the Klipper configfile max_temp for this heater if not yet known.
     /// No-op if api_ is null or the value is already populated.
     void ensure_limits(HeaterType type);
@@ -120,6 +139,40 @@ class TemperatureController {
     /// backend has no filter pin or the api is gone.
     void set_chamber_filter_fan(bool on);
 
+    /// Chamber filament dryer (#1299): the matched backend whose drying cycle
+    /// the actions below drive. nullptr, or a backend without one, disables it.
+    /// @p has_heated_bed enables the bed assist.
+    void set_chamber_dryer(const chamber::ChamberHeaterBackend* backend,
+                           bool has_heated_bed = false);
+
+    /// What the chamber's drying cycle accepts; supported=false when none.
+    [[nodiscard]] DryerInfo chamber_dryer() const;
+
+    /// Bed target the assist sets, in C; 0 when there is no heated bed.
+    [[nodiscard]] int chamber_dryer_bed_assist_c() const;
+
+    /// Start a drying cycle, clamped to chamber_dryer(). No-op without a dryer.
+    /// @p heat_bed also heats the bed to chamber_dryer_bed_assist_c(), which the
+    /// cycle ending turns back off; refused while a job holds the machine.
+    /// @p hold_idle false leaves Klipper's idle timeout to a caller that holds
+    /// it for a longer run of its own.
+    void start_chamber_drying(float temp_c, int duration_min, bool heat_bed = false,
+                              bool hold_idle = true);
+
+    /// End the running drying cycle, and the bed assist with it. No-op without
+    /// a dryer.
+    void stop_chamber_drying();
+
+    /// First tokens of the chamber dryer's start and stop commands, for the
+    /// spools-on-the-bed allowlist; empty without a dryer.
+    [[nodiscard]] std::vector<std::string> chamber_dryer_tokens() const;
+
+    /// Klipper's configured idle_timeout.timeout in seconds (600 when the
+    /// section is absent), handed to @p on_main on the main thread. Nothing is
+    /// called when configfile cannot be read, since then there is no value to
+    /// restore.
+    void read_configured_idle_timeout(std::function<void(int)> on_main);
+
   private:
     friend struct TemperatureControllerTestAccess;
     void set_configured_max(HeaterType type, int deg);
@@ -143,6 +196,35 @@ class TemperatureController {
     std::string chamber_reset_gcode_;
     std::string chamber_filter_fan_pin_;
     double conservative_chamber_max_ = 0;
+    const chamber::ChamberHeaterBackend* chamber_dryer_backend_ = nullptr;
+    bool chamber_dryer_has_bed_ = false;
+
+    /// A drying cycle we started, owed its cleanup when it ends. seen_running
+    /// holds the cleanup back until the cycle has actually been reported
+    /// running, so the idle frames before the appliance picks up the start do
+    /// not end it. bed_c is the bed it heated (0: none); idle_restore_s is the
+    /// configured idle timeout it held off (0: none held yet).
+    struct DryRun {
+        bool armed = false;
+        bool seen_running = false;
+        int bed_c = 0;
+        int idle_restore_s = 0;
+        uint32_t id = 0;
+    } dry_run_;
+    uint32_t next_dry_run_id_ = 0;
+    ObserverGuard dryer_active_observer_;
+    void on_chamber_dryer_active(bool running);
+    void hold_idle_timeout(uint32_t run_id, int run_s);
+    void end_dry_run(const char* why);
 };
+
+/// Null-safe face of TemperatureController::effective_keypad_max(): the shared
+/// ceiling when a controller is reachable, the caller's own fallback otherwise.
+/// Every keypad/edit surface asks this — never composes ensure_limits +
+/// keypad_range at its call site — so no two input surfaces can disagree about
+/// the ceiling (#1615, #1619).
+inline float keypad_ceiling(TemperatureController* c, HeaterType type, float fallback_deg) {
+    return c ? c->effective_keypad_max(type, fallback_deg) : fallback_deg;
+}
 
 } // namespace helix

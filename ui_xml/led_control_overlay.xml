@@ -1,175 +1,278 @@
 <?xml version="1.0"?>
 <!-- Copyright (C) 2025-2026 356C LLC -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- LED Control Overlay: Full-width overlay for controlling LED strips -->
-<!-- Sections auto-hide based on available backends -->
+<!-- LEDs overlay: one tab per device, and one page for the focused device.
+     The page is two columns: the lamp (power and brightness, or the macro
+     buttons) on the left, the look (White, Color, Effects/Presets/Levels) on
+     the right. Every section shows only when the focused device can use it;
+     LedControlOverlay publishes which through the led_page_* subjects, whose
+     values are the DevicePage enums (include/led/led_device_page.h). -->
 <component>
-  <api>
-    <prop name="title" type="string" default="LED Control"/>
-  </api>
+  <gradients>
+    <conical name="led_rainbow" center="50% 50%" angle="0 360">
+      <stop color="#FF4D4D" offset="0"/>
+      <stop color="#FFB347" offset="36"/>
+      <stop color="#FFF35C" offset="72"/>
+      <stop color="#4CD787" offset="109"/>
+      <stop color="#3DD6F5" offset="145"/>
+      <stop color="#4D7CFF" offset="182"/>
+      <stop color="#A66BFF" offset="218"/>
+      <stop color="#FF4D4D" offset="255"/>
+    </conical>
+  </gradients>
   <styles>
-    <style name="wled_btn_on" bg_color="#danger" text_color="#screen_bg"/>
-    <style name="wled_btn_off" bg_color="#card_bg" text_color="#text"/>
+    <!-- Power: filled with the light's color when on, an outline otherwise. -->
+    <style name="power_on" bg_opa="255" border_width="0"/>
+    <style name="power_off" bg_opa="0" border_width="#led_ring_width" border_color="#text_muted"/>
+    <!-- One PowerOnly lamp (a non-PWM pin) spans the page, so its button centers. -->
+    <style name="lamp_wide" flex_grow="1" flex_main_place="center"/>
+    <!-- The brightness pill: a rounded track, a square-cornered fill that the
+         track's radius clips (lv_bar masks an indicator whose radius is smaller
+         than the track's), so the fill's top edge stays flat. No knob. -->
+    <style name="pill_track" bg_color="#elevated_bg" bg_opa="255" radius="#led_pill_radius" border_width="0" pad_all="0"/>
+    <style name="pill_fill" radius="0" bg_opa="255"/>
+    <style name="pill_knob" bg_opa="0" border_width="0" shadow_width="0" outline_width="0" pad_all="0"/>
+    <style name="section_label" text_color="#text_muted"/>
+    <!-- The static look (White, Color) sits a step closer together than the
+         animated modes below it; a section's gap applies only under another. -->
+    <style name="gap_look" margin_top="#space_md"/>
+    <style name="gap_modes" margin_top="#space_lg"/>
   </styles>
-  <!-- Component-local constants -->
-  <px name="preset_swatch_size" value="40"/>
-  <view name="led_control_overlay" extends="overlay_panel" title="$title" bg_color="#screen_bg">
-    <!-- Scrollable content area -->
-    <lv_obj name="content_area"
-            width="100%" flex_grow="1" style_pad_all="#space_lg" style_pad_top="0" flex_flow="column"
-            style_pad_gap="#space_md">
+  <view name="led_control_overlay" extends="overlay_panel" title="LEDs" title_transform="none" bg_color="#screen_bg">
+    <lv_obj name="overlay_content"
+            width="100%" flex_grow="1" flex_flow="column" scrollable="false" style_pad_all="#space_md" style_pad_top="0"
+            style_pad_gap="#space_sm">
 
-      <!-- Strip selector chips (wrapping row above the heading) -->
-      <lv_obj name="strip_selector_section"
-              width="100%" height="content" flex_flow="row_wrap" style_pad_gap="#space_sm" style_flex_main_place="start"
-              style_flex_cross_place="center" style_pad_all="0">
-        <bind_flag_if_eq subject="led_strip_selector_visible" flag="hidden" ref_value="0"/>
+      <!-- Tabs: a sideways row, faded on the right while more tabs sit past the edge. -->
+      <lv_obj name="led_tab_strip"
+              width="100%" height="content" style_pad_all="0" scrollable="false" style_border_width="#border_width"
+              style_border_side="bottom" style_border_color="#border">
+        <bind_flag_if_eq subject="led_tab_count" flag="hidden" ref_value="0"/>
+        <lv_obj name="led_tab_row"
+                width="100%" height="content" flex_flow="row" scrollable="true" scroll_dir="hor" scrollbar_mode="off"
+                style_pad_all="0" style_pad_gap="#space_xxs">
+          <event_cb trigger="scroll" callback="led_tabs_scrolled_cb"/>
+          <event_cb trigger="size_changed" callback="led_tabs_scrolled_cb"/>
+          <event_cb trigger="layout_changed" callback="led_tabs_scrolled_cb"/>
+          <repeat count="led_tab_count">
+            <zone_tab name="led_tab_${i}"
+                      label_subject="led_tab_name_${i}" active_subject="led_focused_tab" active_value="${i}"
+                      tab_index="${i}" cross_place="center" callback="led_tab_clicked_cb"
+                      selected_style="zone_tab_underline_selected" idle_style="zone_tab_underline_idle"
+                      label_idle_style="zone_tab_label_muted" radius="0" light_subject="led_tab_dot_${i}"
+                      light_color_subject="led_tab_dot_color_${i}"/>
+          </repeat>
+        </lv_obj>
+        <lv_obj name="led_tab_fade"
+                width="#led_fade_width" height="100%" floating="true" align="right_mid" clickable="false"
+                scrollable="false" style_border_width="0" style_radius="0" style_bg_opa="255"
+                style_bg_color="#screen_bg" style_bg_grad_color="#screen_bg" style_bg_grad_dir="hor"
+                style_bg_main_opa="0" style_bg_grad_opa="255">
+          <bind_flag_if_eq subject="led_tabs_fade" flag="hidden" ref_value="0"/>
+        </lv_obj>
       </lv_obj>
 
-      <!-- Active strip name heading -->
-      <text_heading name="strip_name_label" text="LED" bind_text="led_active_strip_name"/>
+      <!-- Device page: lamp column | look column -->
+      <lv_obj name="led_page"
+              width="100%" flex_grow="1" flex_flow="row" scrollable="false" style_pad_all="0" style_pad_gap="#space_lg">
+        <bind_flag_if_eq subject="led_tab_count" flag="hidden" ref_value="0"/>
 
-      <divider_horizontal name="divider_strip_header"/>
-
-      <!-- Native color section -->
-      <lv_obj name="native_section" width="100%" flex_flow="column" style_pad_gap="#space_md" style_pad_all="0">
-        <bind_flag_if_eq subject="led_native_visible" flag="hidden" ref_value="0"/>
-
-        <!-- Color + current swatch + Presets + preset swatches — one wrapping row -->
-        <lv_obj name="color_presets_container"
-                width="100%" flex_flow="row_wrap" style_pad_gap="#space_sm" style_flex_cross_place="center"
-                style_pad_all="0">
-          <bind_flag_if_eq subject="led_color_visible" flag="hidden" ref_value="0"/>
-          <text_small text="Color" translation_tag="Color" style_text_color="#text_muted"/>
-          <lv_obj name="current_color_swatch"
-                  width="#preset_swatch_size" height="#preset_swatch_size" style_radius="#border_radius"
-                  style_bg_opa="255" style_border_width="#border_width" style_border_color="#border"
-                  style_border_opa="#border_opacity" scrollable="false"/>
-          <lv_obj width="1" height="1" flex_grow="1" style_pad_all="0"/>
-          <text_small text="Presets" translation_tag="Presets" style_text_color="#text_muted"/>
-          <led_color_swatch name="swatch_white" swatch_color="0xFFFFFF">
-            <event_cb trigger="clicked" callback="led_color_preset_cb"/>
-          </led_color_swatch>
-          <led_color_swatch name="swatch_warm" swatch_color="0xFFD700">
-            <event_cb trigger="clicked" callback="led_color_preset_cb"/>
-          </led_color_swatch>
-          <led_color_swatch name="swatch_orange" swatch_color="0xFF6B35">
-            <event_cb trigger="clicked" callback="led_color_preset_cb"/>
-          </led_color_swatch>
-          <led_color_swatch name="swatch_blue" swatch_color="0x4FC3F7">
-            <event_cb trigger="clicked" callback="led_color_preset_cb"/>
-          </led_color_swatch>
-          <led_color_swatch name="swatch_red" swatch_color="0xFF4444">
-            <event_cb trigger="clicked" callback="led_color_preset_cb"/>
-          </led_color_swatch>
-          <led_color_swatch name="swatch_green" swatch_color="0x66BB6A">
-            <event_cb trigger="clicked" callback="led_color_preset_cb"/>
-          </led_color_swatch>
-          <led_color_swatch name="swatch_purple" swatch_color="0x9C27B0">
-            <event_cb trigger="clicked" callback="led_color_preset_cb"/>
-          </led_color_swatch>
-          <led_color_swatch name="swatch_cyan" swatch_color="0x00BCD4">
-            <event_cb trigger="clicked" callback="led_color_preset_cb"/>
-          </led_color_swatch>
-          <ui_button name="custom_color_btn" height="#preset_swatch_size" variant="outline" focusable="false">
-            <text_small text="Custom" translation_tag="Custom"/>
-            <event_cb trigger="clicked" callback="led_custom_color_cb"/>
-          </ui_button>
-        </lv_obj>
-
-        <!-- Turn Off button + brightness (label + slider) on same row -->
-        <lv_obj width="100%"
-                flex_flow="row" style_pad_gap="#space_lg" style_pad_all="0" style_pad_left="#space_lg"
-                style_pad_right="#space_lg" style_flex_cross_place="center">
-          <ui_button name="native_turn_off_btn"
-                     height="#button_height" variant="danger" text="Turn Off" translation_tag="Turn Off"
-                     focusable="false">
-            <event_cb trigger="clicked" callback="led_native_turn_off_cb"/>
-          </ui_button>
-          <lv_obj width="#space_sm" height="1" style_pad_all="0"/>
-          <lv_obj flex_grow="1"
-                  flex_flow="column" style_pad_gap="#space_xs" style_pad_all="0" style_pad_left="#space_lg"
-                  style_pad_right="#space_lg" style_pad_bottom="#space_md">
-            <lv_obj width="100%"
-                    flex_flow="row" style_pad_all="0" style_flex_main_place="space_between"
-                    style_flex_cross_place="center">
-              <text_small text="Brightness" translation_tag="Brightness" style_text_color="#text_muted"/>
-              <text_small name="brightness_label" bind_text="led_brightness_text" style_text_color="#text_muted"/>
-            </lv_obj>
-            <lv_slider name="brightness_slider" width="100%" min_value="0" max_value="100" bind_value="led_brightness">
-              <event_cb trigger="value_changed" callback="led_brightness_changed_cb"/>
-            </lv_slider>
+        <lv_obj name="led_lamp_col"
+                width="#led_lamp_width" height="100%" flex_flow="column" scrollable="false" style_pad_all="0"
+                style_pad_gap="#space_sm" style_flex_cross_place="center">
+          <!-- LampControl: 0 power+brightness, 1 power only, 2 on/off, 3 toggle, 4 none -->
+          <bind_flag_if_eq subject="led_page_lamp" flag="hidden" ref_value="4"/>
+          <bind_style_if_eq name="lamp_wide" subject="led_page_lamp" ref_value="1"/>
+          <lv_obj name="led_power_btn"
+                  width="#led_power_size" height="#led_power_size" style_radius="9999" clickable="true"
+                  scrollable="false" style_pad_all="0">
+            <bind_flag_if_gt subject="led_page_lamp" flag="hidden" ref_value="1"/>
+            <bind_style_if_eq name="power_on" subject="led_page_on" ref_value="1"/>
+            <bind_style_if_not_eq name="power_off" subject="led_page_on" ref_value="1"/>
+            <bind_style_prop prop="bg_color" subject="led_page_color"/>
+            <bind_style_if name="styles.contrast_edge" cond="settings_dark_mode eq 0 and led_page_on eq 1"/>
+            <icon name="led_power_icon_on" src="power" size="md" align="center" clickable="false" event_bubble="true">
+              <bind_style_prop prop="text_color" subject="led_page_fill_text"/>
+              <bind_flag_if_not_eq subject="led_page_on" flag="hidden" ref_value="1"/>
+            </icon>
+            <icon name="led_power_icon_off"
+                  src="power" size="md" variant="muted" align="center" clickable="false" event_bubble="true">
+              <bind_flag_if_eq subject="led_page_on" flag="hidden" ref_value="1"/>
+            </icon>
+            <event_cb trigger="clicked" callback="led_power_cb"/>
           </lv_obj>
+          <lv_slider name="led_brightness_slider"
+                     width="100%" flex_grow="1" min_value="0" max_value="100" bind_value="led_page_brightness">
+            <style name="pill_track"/>
+            <style name="pill_fill" selector="indicator"/>
+            <style name="pill_knob" selector="knob"/>
+            <bind_style_if name="styles.contrast_edge_outline" cond="settings_dark_mode eq 0"/>
+            <bind_flag_if_not_eq subject="led_page_lamp" flag="hidden" ref_value="0"/>
+            <bind_style_prop prop="bg_color" selector="indicator" subject="led_page_color"/>
+            <!-- The percentage sits near the top of the pill: in the theme's text
+                 color over the empty track, in the fill's contrast color once the
+                 fill reaches it. -->
+            <text_heading name="led_brightness_pct"
+                          bind_text="led_page_brightness_text" align="top_mid" style_translate_y="#space_md"
+                          clickable="false" event_bubble="true">
+              <bind_flag_if_ge subject="led_page_brightness" flag="hidden" ref_value="91"/>
+            </text_heading>
+            <text_heading name="led_brightness_pct_on_fill"
+                          bind_text="led_page_brightness_text" align="top_mid" style_translate_y="#space_md"
+                          clickable="false" event_bubble="true">
+              <bind_style_prop prop="text_color" subject="led_page_fill_text"/>
+              <bind_flag_if_lt subject="led_page_brightness" flag="hidden" ref_value="91"/>
+            </text_heading>
+            <event_cb trigger="value_changed" callback="led_brightness_changed_cb"/>
+          </lv_slider>
+          <!-- Macro devices: HelixScreen cannot read their state, so they get
+               explicit buttons where the slider would be. -->
+          <led_action_chip name="led_macro_on" width="100%" label="On" flex_grow="1">
+            <bind_flag_if_not_eq subject="led_page_lamp" flag="hidden" ref_value="2"/>
+            <event_cb trigger="clicked" callback="led_macro_on_cb"/>
+          </led_action_chip>
+          <led_action_chip name="led_macro_off" width="100%" label="Off" flex_grow="1">
+            <bind_flag_if_not_eq subject="led_page_lamp" flag="hidden" ref_value="2"/>
+            <event_cb trigger="clicked" callback="led_macro_off_cb"/>
+          </led_action_chip>
+          <led_action_chip name="led_macro_toggle" width="100%" label="Toggle" flex_grow="1">
+            <bind_flag_if_not_eq subject="led_page_lamp" flag="hidden" ref_value="3"/>
+            <event_cb trigger="clicked" callback="led_macro_toggle_cb"/>
+          </led_action_chip>
         </lv_obj>
-      </lv_obj>
 
-      <!-- Effects section (tied to selected strip) -->
-      <lv_obj name="effects_section" width="100%" flex_flow="column" style_pad_gap="#space_sm" style_pad_all="0">
-        <bind_flag_if_eq subject="led_effects_visible" flag="hidden" ref_value="0"/>
-        <text_small text="Effects" translation_tag="Effects" style_text_color="#text_muted"/>
-        <lv_obj name="effects_container"
-                width="100%" flex_flow="row_wrap" style_pad_gap="#space_sm" style_flex_main_place="center"
-                style_pad_all="0">
-          <!-- Effect chips created dynamically via led_action_chip -->
-        </lv_obj>
-      </lv_obj>
+        <lv_obj name="led_look_col"
+                height="100%" flex_grow="1" flex_flow="column" scrollable="false" style_pad_all="0" style_pad_gap="0">
+          <bind_flag_if_eq subject="led_page_lamp" flag="hidden" ref_value="1"/>
 
-      <!-- WLED section -->
-      <lv_obj name="wled_section" width="100%" flex_flow="column" style_pad_gap="#space_sm" style_pad_all="0">
-        <bind_flag_if_eq subject="led_wled_visible" flag="hidden" ref_value="0"/>
-        <text_small text="WLED" style_text_color="#text_muted" style_pad_bottom="#space_xs"/>
-
-        <!-- Turn Off/On button + brightness (label + slider) on same row -->
-        <lv_obj width="100%"
-                flex_flow="row" style_pad_gap="#space_lg" style_pad_all="0" style_pad_left="#space_lg"
-                style_pad_right="#space_lg" style_flex_cross_place="center">
-          <ui_button name="wled_turn_off_btn" height="#button_height" focusable="false">
-            <bind_style name="wled_btn_on" subject="led_wled_is_on" ref_value="1"/>
-            <bind_style name="wled_btn_off" subject="led_wled_is_on" ref_value="0"/>
-            <text_small text="Turn On" translation_tag="Turn On">
-              <bind_flag_if_eq subject="led_wled_is_on" flag="hidden" ref_value="1"/>
+          <!-- White: WhiteMode 0 none, 1 W channel, 2 mixed from RGB -->
+          <lv_obj name="led_white_section"
+                  width="100%" height="content" flex_flow="column" scrollable="false" style_pad_all="0"
+                  style_pad_gap="#space_xs">
+            <bind_flag_if_eq subject="led_page_white" flag="hidden" ref_value="0"/>
+            <text_small text="White" text_transform="uppercase">
+              <style name="section_label"/>
             </text_small>
-            <text_small text="Turn Off" translation_tag="Turn Off">
-              <bind_flag_if_eq subject="led_wled_is_on" flag="hidden" ref_value="0"/>
-            </text_small>
-            <event_cb trigger="clicked" callback="led_wled_toggle_cb"/>
-          </ui_button>
-          <lv_obj width="#space_sm" height="1" style_pad_all="0"/>
-          <lv_obj flex_grow="1"
-                  flex_flow="column" style_pad_gap="#space_xs" style_pad_all="0" style_pad_left="#space_lg"
-                  style_pad_right="#space_lg" style_pad_bottom="#space_md">
             <lv_obj width="100%"
-                    flex_flow="row" style_pad_all="0" style_flex_main_place="space_between"
-                    style_flex_cross_place="center">
-              <text_small text="Brightness" translation_tag="Brightness" style_text_color="#text_muted"/>
-              <text_small name="wled_brightness_label"
-                          bind_text="led_wled_brightness_text" style_text_color="#text_muted"/>
+                    height="content" flex_flow="row" scrollable="false" style_pad_all="0"
+                    style_pad_gap="#led_swatch_gap">
+              <led_white_tone name="led_white_cool" tone="0" label="Cool" color="#led_white_cool"/>
+              <led_white_tone name="led_white_neutral" tone="1" label="Neutral" color="#led_white_neutral"/>
+              <led_white_tone name="led_white_warm" tone="2" label="Warm" color="#led_white_warm"/>
             </lv_obj>
-            <lv_slider name="wled_brightness_slider"
-                       width="100%" min_value="0" max_value="100" bind_value="led_wled_brightness"/>
           </lv_obj>
-        </lv_obj>
 
-        <!-- Presets (below brightness) -->
-        <text_small text="Presets" translation_tag="Presets" style_text_color="#text_muted"/>
-        <lv_obj name="wled_presets_container"
-                width="100%" flex_flow="row_wrap" style_pad_gap="#space_sm" style_flex_main_place="center"
-                style_pad_all="0">
-          <!-- WLED preset chips created dynamically via led_action_chip -->
+          <!-- Color: the presets, then Custom as the last swatch -->
+          <lv_obj name="led_color_section"
+                  width="100%" height="content" flex_flow="column" scrollable="false" style_pad_all="0"
+                  style_pad_gap="#space_xs">
+            <bind_flag_if_eq subject="led_page_color_vis" flag="hidden" ref_value="0"/>
+            <bind_style_if name="gap_look" cond="led_page_white ne 0"/>
+            <text_small text="Color" text_transform="uppercase">
+              <style name="section_label"/>
+            </text_small>
+            <lv_obj width="100%"
+                    height="content" flex_flow="row" scrollable="false" style_pad_all="0"
+                    style_pad_gap="#led_swatch_gap" style_flex_cross_place="center">
+              <!-- A subject-bound repeat must be its container's only child. -->
+              <lv_obj name="led_swatch_list"
+                      width="content" height="content" flex_flow="row" scrollable="false" style_pad_all="0"
+                      style_pad_gap="#led_swatch_gap">
+                <repeat count="led_swatch_count">
+                  <color_swatch name="led_swatch_${i}"
+                                index="${i}" color_subject="led_swatch_color_${i}" edge_subject="led_swatch_edge_${i}"
+                                selected_subject="led_selected_swatch" callback="led_swatch_cb"/>
+                </repeat>
+              </lv_obj>
+              <lv_obj name="led_custom_swatch"
+                      width="#led_swatch_size" height="#led_swatch_size" clickable="true" scrollable="false"
+                      ext_click_area="#led_swatch_gap_half">
+                <style name="styles.led_ring_holder"/>
+                <bind_style_if_eq name="styles.led_swatch_ring" subject="led_selected_swatch" ref_value="-2"/>
+                <lv_obj name="disc"
+                        width="100%" height="100%" style_radius="9999" style_bg_opa="255" style_bg_grad="led_rainbow"
+                        style_border_width="0" style_pad_all="0" clickable="false" event_bubble="true"
+                        scrollable="false">
+                  <lv_obj width="50%"
+                          height="50%" align="center" style_radius="9999" style_bg_opa="255" style_bg_color="#screen_bg"
+                          style_border_width="0" clickable="false" event_bubble="true" scrollable="false">
+                    <icon src="plus" size="xs" align="center" clickable="false" event_bubble="true"/>
+                  </lv_obj>
+                </lv_obj>
+                <event_cb trigger="clicked" callback="led_custom_color_cb"/>
+              </lv_obj>
+            </lv_obj>
+          </lv_obj>
+
+          <!-- ListKind: 0 none, 1 effects, 2 presets, 3 level chips -->
+          <lv_obj name="led_list_section"
+                  width="100%" height="content" flex_flow="column" scrollable="false" style_pad_all="0"
+                  style_pad_gap="#space_xs">
+            <bind_flag_if_eq subject="led_page_list" flag="hidden" ref_value="0"/>
+            <bind_style_if name="gap_modes" cond="led_page_white ne 0 or led_page_color_vis ne 0"/>
+            <text_small name="led_list_title" bind_text="led_page_list_title" text_transform="uppercase">
+              <style name="section_label"/>
+              <bind_flag_if_eq subject="led_page_list" flag="hidden" ref_value="3"/>
+            </text_small>
+            <text_small name="led_level_title" text="Level" text_transform="uppercase">
+              <style name="section_label"/>
+              <bind_flag_if_not_eq subject="led_page_list" flag="hidden" ref_value="3"/>
+            </text_small>
+            <lv_obj name="led_chip_scroller"
+                    width="100%" height="content" flex_flow="row" scrollable="true" scroll_dir="hor"
+                    scrollbar_mode="off" style_pad_all="0" style_pad_gap="#led_chip_gap">
+              <bind_flag_if_eq subject="led_page_list" flag="hidden" ref_value="3"/>
+              <led_action_chip name="led_chip_none" label="None" active_subject="led_active_chip" active_value="-1">
+                <bind_flag_if_not_eq subject="led_page_list" flag="hidden" ref_value="1"/>
+                <event_cb trigger="clicked" callback="led_effects_none_cb"/>
+              </led_action_chip>
+              <!-- A subject-bound repeat must be its container's only child. -->
+              <lv_obj name="led_chip_row"
+                      width="content" height="content" flex_flow="row" scrollable="false" style_pad_all="0"
+                      style_pad_gap="#led_chip_gap">
+                <repeat count="led_chip_count">
+                  <led_list_chip name="led_chip_${i}" index="${i}" label_subject="led_chip_label_${i}"/>
+                </repeat>
+              </lv_obj>
+            </lv_obj>
+            <lv_obj name="led_level_row"
+                    width="100%" height="content" flex_flow="row_wrap" scrollable="false" style_pad_all="0"
+                    style_pad_gap="#led_chip_gap">
+              <bind_flag_if_not_eq subject="led_page_list" flag="hidden" ref_value="3"/>
+              <!-- One per LEVEL_CHIPS value (include/led/led_device_page.h). -->
+              <led_action_chip name="led_level_10" label="10%" active_subject="led_page_level" active_value="10">
+                <event_cb trigger="clicked" callback="led_level_cb" user_data="10"/>
+              </led_action_chip>
+              <led_action_chip name="led_level_25" label="25%" active_subject="led_page_level" active_value="25">
+                <event_cb trigger="clicked" callback="led_level_cb" user_data="25"/>
+              </led_action_chip>
+              <led_action_chip name="led_level_50" label="50%" active_subject="led_page_level" active_value="50">
+                <event_cb trigger="clicked" callback="led_level_cb" user_data="50"/>
+              </led_action_chip>
+              <led_action_chip name="led_level_75" label="75%" active_subject="led_page_level" active_value="75">
+                <event_cb trigger="clicked" callback="led_level_cb" user_data="75"/>
+              </led_action_chip>
+              <led_action_chip name="led_level_100" label="100%" active_subject="led_page_level" active_value="100">
+                <event_cb trigger="clicked" callback="led_level_cb" user_data="100"/>
+              </led_action_chip>
+            </lv_obj>
+          </lv_obj>
+
+          <!-- Empty unless the model has something to say (a macro's commands);
+               an empty line at the column's foot takes no visible room. -->
+          <text_small name="led_page_note_label" width="100%" bind_text="led_page_note" long_mode="wrap">
+            <style name="section_label"/>
+          </text_small>
         </lv_obj>
       </lv_obj>
 
-      <!-- Macro section -->
-      <lv_obj name="macro_section" width="100%" flex_flow="column" style_pad_gap="#space_sm" style_pad_all="0">
-        <bind_flag_if_eq subject="led_macro_visible" flag="hidden" ref_value="0"/>
-        <text_small text="Macros" translation_tag="Macros" style_text_color="#text_muted" style_pad_bottom="#space_xs"/>
-        <lv_obj name="macro_buttons_container"
-                width="100%" flex_flow="row_wrap" style_pad_gap="#space_sm" style_flex_main_place="center"
-                style_pad_all="0">
-          <!-- Macro chips created dynamically via led_action_chip -->
-        </lv_obj>
+      <lv_obj name="led_empty_state"
+              width="100%" flex_grow="1" flex_flow="column" style_flex_main_place="center"
+              style_flex_cross_place="center" style_pad_all="0" style_pad_gap="#space_md" scrollable="false">
+        <bind_flag_if_not_eq subject="led_tab_count" flag="hidden" ref_value="0"/>
+        <icon src="lightbulb_outline" size="xl" variant="muted"/>
+        <text_muted width="content" text="No LEDs found" style_text_align="center"/>
       </lv_obj>
-
     </lv_obj>
   </view>
 </component>

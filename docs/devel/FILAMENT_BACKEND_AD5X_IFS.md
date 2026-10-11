@@ -259,7 +259,9 @@ wording, the runout-warning log, and the longer confirm delay.
 
 **The matching rule the hint text promises is strict and must stay strict**: a backup port qualifies only when its filament **type** and **colour** both equal the active spool's *and* its own port sensor reads filament present (`find_backup_slot_locked()`). This mirrors exactly what `ANALOG_PRUTOK` (zmod_ifs.py:663-667) and `_RUNOUT_HEAD` enforce on the device.
 
-> **PAUSE-reason follow-up, not implemented:** bambufy and lessWaste both emit `PAUSE REASON=` with one of `jam`, `broken`, `runout`, `empty`, `backup`, `loading`, `nobackup` (the last on a backup-enabled runout with no same-type+colour match — bambufy-only; verified from `bambufy.cfg`). That is a direct, unambiguous runout signal — but only on the plugin path, which is precisely the case the sensor-based detector above is *not* needed for. Parsing it would let the plugin path skip the dwell entirely.
+> **PAUSE-reason follow-up, not implemented:** bambufy and lessWaste both emit `PAUSE REASON=` with one of `jam`, `broken`, `runout`, `empty`, `backup`, `loading`, `nobackup` (the last on a backup-enabled runout with no same-type+colour match — bambufy-only; verified from `bambufy.cfg`). That is a direct, unambiguous runout signal — but only on the plugin path, which is precisely the case the sensor-based detector above is *not* needed for. Parsing it would let the plugin path skip the dwell entirely. The
+zmod analogue would be parsing `_PRINT_HEAD INFO=0` (its "no backup match" respond_raw
+marker) as the same kind of direct signal.
 
 ### G-code Commands
 
@@ -323,6 +325,14 @@ IFS_F39 PRUTOK={port}                          # unclamp — filament is free to
 | 2 | Active pointer lost, seated channel known, tapped slot is not it | cold eject of the tapped lane | Chan is the seated authority; the alternative is a wrong-lane heat+cut (`5HR3HHS6`) |
 | 3 | Toolhead reads empty | cold eject (of the tapped slot, else the seated one, else the active one; hard error if none) | `_IFS_REMOVE_CURRENT_PRUTOK` early-returns on an empty extruder sensor, so the cut would home and do nothing (`7AC4SDEX`) |
 | 4 | otherwise | heated toolhead cut | Includes the unknown-origin recovery case (both authorities lost, head loaded) |
+
+**Row 4's unknown-origin case is the UI's only door in that state.** When both authorities are lost
+(`current_slot == -1` with the head switch present: the power-cycle state, and exactly what
+`toolhead_filament_unaccounted()` keys on), the lane context menus withdraw their Unload/Eject
+entirely: the lane a menu names may not be the seated one, and a cold eject of the seated lane
+grinds un-cut filament. The AMS sidebar's panel-level Unload and the Filament panel's Unload stay
+live instead, dispatching `unload_filament(-1)`; `do_unload_filament()` takes the row-4 heated
+cut, so the firmware resolves the real channel, not the screen.
 
 **"Empty" for row 3 is the switch pair, not `head_filament_`** (`head_empty_for_unload_routing_locked()`):
 

@@ -1,0 +1,567 @@
+# GPU Acceleration
+
+What the GPU can and cannot do for HelixScreen, measured on real boards rather
+than argued from source. Read this before proposing work on the rendering path.
+
+**HelixScreen rasterizes on the CPU on every target.** What differs per board
+is how those pixels reach the screen: the `pi` target ships a GPU presentation
+binary alongside the software one and picks between them at boot, everything
+else presents through DRM dumb buffers or fbdev. The nanovg draw unit, which
+would move rasterization itself onto the GPU, is unusable upstream. The
+sections below say how much each is worth and what blocks it.
+
+---
+
+## The four rungs
+
+LVGL 9.5 offers four ways to put pixels on a DRM screen. They are not
+alternatives — each rung builds on the one below.
+
+| Rung | What it does | State here |
+|------|--------------|-----------|
+| `lv_draw_sw` into a dumb buffer | CPU rasterizes, kernel scans out | **ships** |
+| `lv_draw_sw` into a GBM/EGL surface | CPU rasterizes, GPU composites and presents | **ships on `pi`**, probe-gated |
+| `lv_draw_nanovg` | GPU rasterizes widgets | **broken upstream**, see below |
+| `lv_draw_opengles` | GPU rasterizes, different unit | not evaluated |
+
+The EGL rung's CPU numbers below were first recorded against a build that was
+rendering incorrectly - see "The alpha trap" - so treat any measurement of this
+path as provisional until someone has looked at the panel.
+
+The config chain matters and is easy to get wrong: `LV_USE_OPENGLES` is the
+macro that counts. `lv_conf_internal.h` derives `LV_LINUX_DRM_USE_EGL` from it
+and `LV_USE_EGL` from that in turn, so setting `LV_LINUX_DRM_USE_EGL` directly
+does nothing — the derive overwrites it. In this tree `LV_USE_OPENGLES` comes
+from `HELIX_ENABLE_OPENGLES`, which `mk/cross.mk` defines for
+`ENABLE_OPENGLES=yes`. Resolve these with the preprocessor, never by reading
+`lv_conf.h`.
+
+---
+
+## Measured: what EGL is worth
+
+Same binary, same panel, same scene; only `ENABLE_OPENGLES` differs. Measured
+2026-09-11.
+
+| | Pi 5 (V3D, 4 GB) | CB1 (Mali-G31, 969 MB) |
+|---|---|---|
+| CPU, software | 39.7% | 87% |
+| CPU, EGL | 24.7% | 78.9% |
+| CPU delta | **−38%** | **−9%** |
+| Throughput | **+24%** | **+91%** |
+| RSS cost | +16 MB | **+70 MB** |
+
+Two things to carry forward:
+
+**The CB1 gains the most throughput and the least CPU relief, at the highest
+memory cost.** It is a 969 MB board. How much of that +70 MB is a cost the
+board cannot get back is the next section, and the answer decides what can be
+done about it.
+
+**nanovg's remaining headroom is small.** Profiling the EGL build shows roughly
+31% of its remaining 24.7% CPU is software rasterization — so a perfect GPU
+draw unit could recover about **7.7 CPU points**, against the ~15 EGL already
+delivers. nanovg was assumed to be the bigger prize; it is not, and it is not
+close.
+
+### What the RSS number is made of
+
+Same method on both boards, measured 2026-09-12: force the DRM rung through a
+systemd drop-in, restart, idle 100 s at the home panel, read
+`/proc/<pid>/status` and `/proc/<pid>/smaps`; remove the drop-in and repeat on
+the EGL rung. Figures are MiB.
+
+| | Pi 5 (4 GB, V3D) | Pi 3B (856 MB, vc4) | CB1 (970 MB, Mali-G31) |
+|---|---|---|---|
+| VmRSS, DRM rung | 105.7 | 51.2 | 53.1 |
+| VmRSS, EGL rung | 122.1 | 117.0 | 121.4 |
+| **VmRSS delta** | **+16.4** | **+65.8** | **+68.4** |
+| RssAnon delta | +11.3 | +20.5 | +19.8 |
+| RssFile delta | +5.1 | +45.3 | +48.6 |
+
+The boards differ by 4x on the headline and agree closely on the part that
+cannot be reclaimed. The gap is Mesa's text, and which binary faults it in.
+
+The CB1 settles the question its GPU family raised. Panfrost holds no GPU
+memory as shmem - `RssShmem` is 0 on both rungs - so its anonymous delta lands
+with vc4's and V3D's rather than near its own RSS headline.
+
+The EGL process on every board holds `libLLVM` resident (39.8 MiB on the Pi 5,
+38.5 on the Pi 3B, 41.1 on the CB1) plus `libgallium` (9.7 / 10.8 / 11.4). That
+is roughly 50 MiB of shared, file-backed library text.
+
+**The base DRM binary links the same three GL libraries** - `ENABLE_GLES_3D=yes`
+builds the 3D gcode viewer into it, so `libEGL`, `libGLESv2` and `libgbm` are on
+both binaries' `ldd` output, and the two files differ by 56 bytes. Whether it
+pays Mesa's residency therefore depends only on whether GL initialises. On the
+Pi 5 it does, unprompted, within 100 s of boot: the DRM process already holds
+`libLLVM` resident and maps `/dev/dri/card1`. On the Pi 3B it does not, with
+zero `libLLVM` mappings.
+
+So the Pi 5's +16 MB is not a cheaper GPU path. It is a board that had already
+paid for Mesa on the rung below. **The durable cost of the EGL rung is the
+anonymous delta, +11 to +21 MiB, on all three boards and both GPU families.** The rest is shared library text, which the
+kernel evicts under pressure and which the DRM rung pays too the moment anything
+initialises GL.
+
+Reproduce with `tools/drm_gpu_probe.c` (build instructions in its header) for
+plane masks and renderer strings, then an A/B of `ENABLE_OPENGLES=no|yes`.
+
+---
+
+## How a board gets the EGL rung
+
+Three binaries, selected by `scripts/helix-launcher.sh#select_binary` at boot:
+
+```
+helix-screen-egl     GPU presentation      taken only if --probe-egl exits 0
+helix-screen         DRM dumb buffers      the default
+helix-screen-fbdev   /dev/fb0              when the DRM binary's libs are missing
+```
+
+Which of LVGL's two DRM drivers a binary carries is a compile-time choice, so
+this is a choice of binary and not a runtime mode. `mk/egl-link.mk` builds the
+third one from the DRM build's objects, recompiling only the translation units
+that read the EGL config macros — `src/api/display_backend_drm.cpp` and LVGL's
+own DRM and OpenGL ES drivers.
+
+That sharing is measured, not assumed. Building the `pi` target twice, once per
+`ENABLE_OPENGLES` value, and comparing all 1465 objects: **811 differ as raw
+bytes, but only 14 differ once debug info is stripped**, and one of those is
+`libhv`'s `htime.o`, which embeds `__DATE__`/`__TIME__` and so differs between
+any two builds. The remaining 13:
+
+| Object | Belongs to |
+|---|---|
+| `api/display_backend_drm.o` | the app — the only file under `src/` or `include/` that reads an EGL config macro |
+| `lvgl/.../drm/lv_linux_drm.o`, `lv_linux_drm_egl.o` | which DRM back end compiles at all |
+| `lvgl/.../opengles/` ×9 | empty translation units without the config |
+| `display/display_backend_drm.o` | `libhelix-display.a`, which only the splash and watchdog link — not part of this rung |
+
+The raw-byte number is the trap here: comparing objects without stripping says
+811 files changed and implies the EGL binary needs a full second build. It
+does not. Strip the debug info and the answer is 12 objects in the main binary.
+
+**Selection is a probe, not a crash.** A failed EGL init inside one binary
+would fall through to fbdev in-process and skip the middle rung entirely,
+silently demoting a board from dumb buffers to `/dev/fb0`. So the probe is a
+separate process: `helix-screen-egl --probe-egl` does the bring-up
+(`gbm_create_device`, `eglInitialize`, `eglChooseConfig`, `eglCreateContext`),
+prints what answered, and exits 0 or non-zero. A bring-up that aborts inside
+the driver takes down only the probe. A board whose probe declines runs the DRM
+binary; it never drops two rungs at once.
+
+**The probe refuses a software renderer.** The CB1's original failure was a
+stale Mesa in `/opt/panfrost` missing `kms_swrast`/`swrast`; the inverse —
+succeeding into llvmpipe — is worse than failing, because every pixel is still
+rasterized by the CPU and the handoff to a GPU that is not there costs extra on
+top. `gl_renderer_is_software()` in `include/gcode_gl_fallback.h` is the
+predicate. It is deliberately a different question from
+`gl_renderer_is_denylisted()` beside it: that one names hardware whose driver
+faults during 3D draws, and Panfrost is on it while still presenting through
+EGL correctly.
+
+**Verifying the binary is the one you think it is.** A build that links the base
+objects into the EGL binary produces something that runs fine and presents
+through dumb buffers, while the launcher believes it is on the GPU. There is no
+other symptom, so `make verify-egl` checks for `lv_opengles_init` — defined only
+inside `#if LV_USE_OPENGLES` — in the EGL binary and asserts its absence from
+the base one. The trap it guards is real: `lv_opengles_shader.c` holds its GLSL
+in C++11 raw string literals, so it compiles as C++ when the config is on and as
+plain C when it is off, and the stock rules put both at the same object path.
+
+**Overrides.** `HELIX_DISPLAY_BACKEND=egl` skips the probe and forces the rung;
+`=drm` and `=fbdev` force the rungs below it. `HELIX_DRM_DEVICE` pins the node
+the probe opens, exactly as it pins the one the display backend opens.
+
+---
+
+## Board capability
+
+Measured per board, not inferred from the SoC.
+
+| Board | Renderer | Rotation-capable plane | Notes |
+|-------|----------|------------------------|-------|
+| Pi 5 | V3D | no (DSI panel reports mask `0x0`) | a `0x0` mask passes any rotation test vacuously — never verify rotation here |
+| Pi 3B | vc4 | **yes** (mask `0x35`) | the only board with a rotation-capable plane, a connected panel, and working EGL at once |
+| CB1 | Mali-G31 (Panfrost) | not measured | EGL rung verified rendering 2026-09-12 on Mesa 25.0.7; the vendor Mesa 21.3.9 in `/opt/panfrost` fails `gbm_create_device` for want of `kms_swrast`/`swrast`, so this needs Mesa 25.x |
+| Mi 4 (MSM8974, `pi32`) | Adreno 330 (freedreno) | not measured | EGL rung verified rendering 2026-09-29 on Ubuntu 24.04 armhf: every angle rotates on the GPU (`DrmRotationStrategy::GPU`) with touch matching. The only 32-bit board on the rung so far |
+
+The CB1's `gbm_create_device` failure was a stale userspace Mesa, not a hardware
+limit. On current Armbian it reports `GL_RENDERER = Mali-G31 (Panfrost)`.
+
+### What bounds this, beyond the owned boards
+
+- **The Snapmaker U1 is permanently excluded.** It carries no `libEGL`,
+  `libGLESv2` or `libgbm`, and its `card1` is an RKNPU rather than a GPU. Its
+  plane mask `0x21` is rotate-0 plus reflect-y, which is not rotation.
+- **The fleet is not the product.** `x86_64` with `amdgpu` reports plane mask
+  `0xf`, full 90/180/270, and `x86`/`x86-both` are shipped targets. Nobody here
+  owns such a board, so "no owned board advertises 90 or 270" is not a safety
+  argument for anything.
+- **The Pi 5 splits render and scanout** (`v3d` render node, `drm-rp1-dsi`
+  scanout) and depends on Mesa kmsro to pair them.
+- **The sysroot Mesa is 20.3 (Bullseye) against a 24.2/25.0 runtime.** That is
+  why `LV_USE_LINUX_DRM_GBM_BUFFERS` is off; leave it off unless that changes.
+- **The Pi 4 is unowned.** Any claim about it is untested.
+
+All three owned boards have now rendered the EGL rung correctly: Pi 5 (V3D), Pi
+3B (vc4) and CB1 (Panfrost), each confirmed by eye on the panel rather than by
+log lines alone. That matters here more than usual, because the defect this path
+shipped with was invisible to every automated signal available (see "The alpha
+trap" below).
+
+---
+
+## What EGL costs you
+
+Selecting the EGL driver compiles the dumb-buffer driver to nothing, so symbols
+that live in it disappear. Three of the six `lv_linux_drm_*` entry points this
+app calls vanish; the one that matters in practice is
+`lv_linux_drm_set_preferred_mode()`.
+
+**Forced mode selection is unavailable on the EGL path.** The connector's own
+preferred mode is what you get. `src/api/display_backend_drm.cpp` guards the
+call and warns rather than failing to link.
+
+No shipped per-board config sets a mode override, so this reaches only an install
+whose resolution was chosen by hand - which the CB1's is, at 800x480. On the EGL
+rung that choice is logged and ignored, and the panel comes up at its preferred
+mode instead. It is harmless there only because the connector prefers the same
+mode. Whether a configured resolution should make the launcher decline the rung is
+a per-board policy question, not a probe question - the probe cannot see the
+config.
+
+**Rotation stays on this rung.**
+The EGL flush presents LVGL's completed display texture through
+`lv_opengles_render_display()`. Its vertex geometry handles 90, 180, and 270
+degrees, so rotation remains on DRM/EGL even when the KMS plane has no rotation
+property. Quarter turns swap the OpenGL viewport dimensions while scanout remains
+at the panel's native mode. There is no CPU transpose and no MDP/KMS rotator
+dependency. Partial upload still sends only the flushed areas on a rotated display:
+LVGL draws at the rotated resolution the texture is reshaped to, so each area is
+already where the texture expects it (`lv_linux_drm_egl_upload_in_place()`).
+
+LVGL owns the display angle on this path, so absolute touch coordinates follow the
+rotated UI automatically. The relative-pointer hook prevents LVGL from rotating an
+already accumulated mouse cursor position (`include/pointer_frame_hook.h`).
+
+---
+
+## Pi 3B screensaver pacing (2026-09-14)
+
+A Raspberry Pi 3B (1 GB) running the screensavers on the EGL build unless a row says otherwise, with each arm also run under a load gate (`cyclictest` wake latency beside `stress-ng --cpu 2`). The shipped defaults are the "+ both" row: a 16 ms screensaver period, vsync, a 1 ms main-loop floor while a saver runs, partial upload and an XRGB8888 display.
+
+| Arm | Toasters fps / CPU | Starfield fps / CPU | Frame gap p50 / p90 (ms) | Load gate |
+|---|---|---|---|---|
+| default 33 ms period | 28.6 / 12.4% | 28.5 / 23.7% | 35 / 38 | pass |
+| screensaver period 16 ms | 48.0 / 22.0% | 48.1 / 43.5% | 20 / 30 (16 and 33 mixed) | pass |
+| + vsync + 1 ms loop floor | 58.6 / 23.3% | 58.7 / 45.9% | 16.7 / 17.3 | pass, max 7.9 ms |
+| EGL control (16 ms, vsync, 1 ms floor) | 59.0 / 22.2% | 59.5 / 43.1% | 16.7 / 17 | pass |
+| + partial upload | 58.9 / 8.2% | 59.2 / 42.5% | 16.7 / 18 | pass, worst max 15.7 ms |
+| + XRGB8888 display | 59.2 / 22.1% | 59.6 / 37.5% | 16.7 / 17 | pass |
+| + both | 58.6 / 8.1% | 59.7 / 36.9% | 16.7 / 17-18 | pass, worst max 7.7 ms |
+| dumb DRM binary, matched (16 ms, 1 ms floor) | 58.6 / 6.1% | 58.8 / 15.7% | 16.7 / 17.4-20.1 | pass, worst p99 1.5 ms |
+
+Partial upload cuts toaster CPU to about a third, and the XRGB8888 display helps full-screen redraws such as starfield. With both, EGL is within about 2 points of the dumb DRM binary everywhere except starfield, which redraws nearly the whole screen each frame.
+
+Under the load gate the 3B reaches 80-84 C and its firmware caps the ARM clock (818 of 1200 MHz at 83.8 C, `throttled=0x20002`, visible in `vcgencmd measure_clock arm` but not in `scaling_cur_freq`), so its load-gate results come from a throttled CPU.
+
+The same defaults double the frame rate on a Pi 5 (4 GB, 60 Hz DSI panel) as well, on both binaries (`HELIX_DISPLAY_BACKEND=drm` and `=egl` alike): starfield 30.1 to 60.0 fps at 2.4-2.5% of a core (frame gap p50/p90 16.7 ms), toasters with 49 sprites 29.8 to 59.5 fps at 4.5%, pipes and idle unchanged at about 1% and 0.7%. The load gate passes everywhere (p99 under 0.2 ms, max about 6 ms) and the board never throttles: 66 C at the full 2400 MHz.
+
+### EGL against the dumb-DRM binary on the same Pi 3B (2026-09-15)
+
+Which binary is cheaper depends on the workload, so this rung is not a single win or loss for a
+board. Same install, same panel, two runs per arm, board at 62-65 C and unthrottled
+throughout. Figures are percent of one core.
+
+| Workload | EGL binary | DRM binary |
+|---|---|---|
+| idle home panel | 2.3 / 2.6 | 2.2 / 2.4 |
+| panel navigation, continuous swaps | **6.0 / 5.9** | 10.5 / 10.3 |
+| starfield | 37.4 / 36.2 | **16.2 / 15.8** |
+
+EGL is about 1.75x cheaper for active UI, because the GPU composites what a panel swap redraws.
+The DRM binary is about 2.3x cheaper for the starfield, because that saver changes nearly every
+pixel every frame and EGL pays a full-frame texture upload for it.
+
+**Where the cost lands matters as much as its size.** The starfield's EGL cost sits on the MAIN
+thread (`cpu_main` 25.6-26.4 of the 36-37 total); on the DRM binary the same work is off it
+(`cpu_main` 5.4-5.9 of 16). A saver that spends the UI thread is worse than its percentage looks.
+
+So a board is not simply "better on DRM". Defaulting a Pi 3B to the DRM binary would buy ~21
+points on a screensaver and give back ~4.5 on the interface people actually touch. The starfield's
+upload is the thing to attack, not the rung.
+
+### Fireworks quality ladder on the Pi 3B (2026-09-16)
+
+Each rung pinned with `HELIX_SCREENSAVER_LEVEL`, three runs per arm, idle sampled in the same
+arm as the baseline. Figures are percent of one core.
+
+| Level | Fireworks | Idle | Net | Flips |
+|---|---|---|---|---|
+| 0 | 10.8 | 2.8 | **8.1** | 59.5 fps |
+| 1 | 7.4 | 3.0 | 4.3 | 29.9 fps |
+| 2 | 6.7 | 3.3 | 3.4 | 29.9 fps |
+| 3 | 5.1 | 3.0 | 2.1 | 19.8 fps |
+
+With `/display/screensaver_levels` cleared the gate started fireworks seven times and chose level
+0 every time (`[Screensaver] Type 5 running at level 0`). 8% against a 50% budget leaves the
+ladder unused here; it is the BASIC and EMBEDDED boards that need the lower rungs.
+
+**This board frequency-caps mid-arm.** Each run begins near 70 C at 1200 MHz and reaches 82-84 C,
+where `vcgencmd get_throttled` reads `0x20002` and the ARM clock falls to 926-1141 MHz. The CPU
+and flip passes finish before the cap engages, so the rungs are comparable with each other; the
+gate's own sampling window does not, so the gate settled on level 0 while measuring itself on a
+downclocked core. Treat absolute figures from this board accordingly.
+
+## The 3D G-code preview on vc4 (2026-09-28)
+
+What a VideoCore IV is worth to the GLES gcode renderer, measured on a Pi 3B
+(856 MB, 368x390 viewer, 3DBenchy). Raw whole-scene draw cost first; these are
+the numbers that decide whether a frame may submit the whole scene at all:
+
+| Drawn triangles | Draw | Frame |
+|---|---|---|
+| 115k (4 tube sides, every 8th layer) | 27.6 ms | 39 ms |
+| 271k (8 sides, every 8th layer) | 53 ms | 65 ms |
+| 923k (4 sides, every layer) | 233 ms | 245 ms |
+| 4.66M (tier 1, 168 MB of VBOs) | 2.1-4.0 s | GPU hang check trips |
+
+Throughput is about 4M triangles/s up to ~1M triangles and roughly 3x slower at
+168 MB of VBOs; readback is a fixed ~11 ms; a `glFinish` between slices (the
+tiled GPU stores and reloads its tiles) costs ~1.3 ms. Multi-second submissions
+trip the kernel's GPU hang check, and the GPU then resets about once a second
+until a reboot. That constraint, not elegance, is why the renderer time-slices
+still frames into ~12 ms submissions and never draws a whole scene on a board
+this slow (`docs/devel/architecture/16-gcode-pipeline.md` § "The GLES 3D render
+path").
+
+What the shipped renderer achieves on the same board:
+
+| Workload | Cost |
+|---|---|
+| Benchy tier 3, 762k tris, release to sharp image | 550-660 ms |
+| Moving frame (finger down, moving mesh) | ~22 ms |
+| Incremental print layer onto the retained image | 5-8 ms median |
+| Draw rate at 2x supersampling | ~2.2-2.7k tris/ms |
+
+MSAA is unavailable (`GL_EXT_multisampled_render_to_texture` is absent on vc4),
+which is why still frames supersample 2x into a larger FBO and box-filter down
+on readback instead.
+
+**The renderer learns its rate rather than looking it up.** No GPU-name table:
+each finished slice folds its triangles-per-millisecond into a smoothed session
+rate (`include/gcode_render_schedule.h#update_rate`), seeded at 4k tris/ms, a
+VideoCore IV, so the first slice and the first moving frame stay short on the
+weakest GPU the app plans for. Slice quotas, the moving plan and the moving
+mesh's band depth all derive from that one measured number.
+
+**Why the vc4 triangle cap stays 1,000,000.** Time-slicing removes the long
+submissions, so the cap now bounds only memory and time-to-sharp, and it was
+re-measured for a raise. A 2M and a 3M build of exclude_object_test (1.31M
+triangles, sharp in ~1.0 s) pass the timing gates, but the GPU allocates from
+the 256 MB CMA pool, of which ~99 MB is free with the app idle, and the bigger
+builds left 9 MB and 3 MB of it free. Free CMA that low starves anything else
+asking the GPU for memory, so the cap stays at 1M
+(`include/gcode_gl_fallback.h#VC4_TRIANGLE_BUDGET`).
+
+A file the cap alone refuses (its bytes fit tier 3) still gets 3D: a banded
+still, the moving mesh's banding sized to the cap
+(`include/gcode_render_schedule.h#plan_still_bands`). Walls are drawn from every
+n-th layer, each band n layers tall so bands touch with no gaps; the first layer
+and every top, bottom and bridge skin stay one layer tall. Slopes become steps n
+layers high, under a pixel at fit zoom for n = 2 (the Eiffel Tower test print).
+Past 4-layer bands (`kMaxStillBandLayers`) the steps read at fit zoom and the
+viewer stays 2D.
+
+## nanovg: why it is unusable
+
+Three independent defects, all upstream in LVGL 9.5. The first alone is
+disqualifying.
+
+### 1. It corrupts rendering whenever more than one layer is alive
+
+nanovg is a deferred renderer: work between `nvgBeginFrame` and `nvgEndFrame`
+accumulates in a batch submitted against whatever framebuffer is bound **at
+flush time**. `lib/lvgl/src/draw/nanovg/lv_draw_nanovg.c` rebinds
+and clears the framebuffer on a layer change without ending the frame first,
+and `glViewport`/`nvgBeginFrame` are gated behind `is_started`, so an open batch
+keeps the previous layer's projection and viewport. `lv_draw_dispatch`
+round-robins layers while nanovg executes one task per dispatch, so with two
+layers it hops between them constantly, re-clearing each time.
+
+The trigger in this app is `src/ui/setting_group.cpp#setting_group_xml_create`
+setting `clip_corner`; with a non-zero theme radius, `lv_refr.c` allocates two
+ARGB8888 band layers per card per refresh. The home panel has no `clip_corner`
+container and renders perfectly; the settings panel loses every background fill
+and the nav bar.
+
+Confirmed by setting the theme radius to 0, which makes LVGL skip the band
+layers (`if(radius == 0) clip_corner = false;`) — the settings panel then
+renders correctly under nanovg.
+
+### 2. The FBO cache collides sibling layers
+
+`lv_nanovg_fbo_cache.c` keys on `(width, height, flags, format)` with a capacity
+of 4. A card's top and bottom clip bands have the same width and the same
+height, so they hash to one entry and share a framebuffer; the second band's
+`glClear` wipes the first.
+
+### 3. The glyph path assumes a tight stride
+
+`lv_nanovg_reshape_global_image()` allocates a deliberately tight stride —
+correct for its image-cache caller, which does a stride-aware copy, and for
+`nvgCreateImage()`, which takes no stride and reads `w * h` contiguous bytes.
+But the label caller hands that buffer to `lv_font_get_glyph_bitmap()`, which
+ignores the buffer's declared stride and writes rows at
+`lv_draw_buf_width_to_stride(box_w, A8)`.
+
+With `LV_DRAW_BUF_STRIDE_ALIGN 1` those are the same number and nothing happens.
+Above 1 it is a heap overflow on every glyph — ASAN reports a write past a
+`w * h` region allocated by `lv_nanovg_reshape_global_image`, and glibc aborts
+with `malloc(): invalid size` about 1.5 s in.
+
+Note the trap: padding the *height* silences ASAN without fixing anything,
+because the buffer is a shared high-water-mark allocation that later glyphs hide
+inside. The text still renders sheared, because the two consumers disagree about
+pitch. A real fix has to allocate at the font engine's pitch and repack to tight
+before upload.
+
+### Also worth knowing
+
+- **Gradient fills silently draw nothing** unless `LV_USE_VECTOR_GRAPHIC` is on,
+  which it is not. One `LV_LOG_WARN` and an empty rect.
+- **Anything that falls back to the software unit is invisible** on this path:
+  `lv_linux_drm_egl.c`'s flush callback ignores `px_map` entirely, so SW output
+  is rasterized into a buffer nobody presents.
+
+---
+
+## The alpha trap, and why nothing automated caught it
+
+**LVGL's 32bpp native format is `XRGB8888`, and it does not keep the X byte.**
+That byte is don't-care by contract. A plain full-opacity fill writes `0xFF`
+there. On aarch64 the NEON blends that mix through a mask or partial opacity
+(`lv_color_24_24_mix_4_internal` and its siblings under
+`src/draw/sw/blend/neon/`) write `0`, fully covered pixels included, while the
+C blends an x86 build uses leave the byte alone. So masked and antialiased
+pixels carry `X=0x00` on the device and never in the unit tests. An `XRGB8888`
+image drawn into an `ARGB8888` layer is copied byte for byte, so those pixels
+render transparent there as well: the pipes screensaver draws into an
+`ARGB8888` canvas for that reason, and starfield writes every pixel itself and
+stays `XRGB8888`.
+
+The EGL path gives it meaning. `lv_linux_drm_egl.c` uploads the buffer as
+`GL_RGBA`, so X arrives as alpha, and the fragment shader in
+`lv_opengles_shader.c` computes `texColor.rgb * combinedAlpha`. Every pixel LVGL
+did not leave fully opaque is multiplied to black. Measured on a Pi 3B: 4.9% of
+pixels carried `X=0x00`, and the light-blue nav icon read
+`R=58 G=124 B=200 X=0`. On screen that is icons, borders, shading and
+antialiased text rendering black while flat fills look perfect.
+
+`DisplayBackendDRM::create_display` forces `ARGB8888` on the EGL path so LVGL
+maintains the byte. `DisplayBackendFbdev::init` already did the same thing for
+the AD5M, whose LCD controller read that byte as alpha and produced a magenta
+ghost. Same defect, two different consumers. fbdev, DRM dumb buffers and SDL are
+all immune because they ignore the fourth byte of XRGB.
+
+`HELIX_EGL_XRGB=1` takes the other exit: the display stays `XRGB8888`, and
+`lv_opengles_render_display()` draws it as 24-bit so both display shaders ignore
+the fourth byte (`patches/lvgl-egl-xrgb-shader.patch`). It is off by default.
+
+**This is the part worth remembering.** Every automated signal said the broken
+build was healthy:
+
+| Check | What it said |
+|---|---|
+| Process liveness | running, stable |
+| CPU | down 38%, the measured win |
+| `ctl ping` / `ctl current` | responsive |
+| GL errors (`LV_USE_OPENGLES_DEBUG` is 1) | none |
+| `ctl screenshot` | **clean** - `lv_snapshot_take()` re-renders the widget tree and never reads the presented buffer |
+
+The screenshot is the trap: it looks like proof and is not, because the fault is
+downstream of where it samples. The only detector was a person looking at the
+panel. **A visual check is therefore mandatory when changing this rung, not
+advisory** - and to inspect the presented buffer rather than a re-render, dump
+`ctx->texture.fb1` from the flush callback and read the bytes.
+
+---
+
+## The stride invariant
+
+**`LV_DRAW_BUF_STRIDE_ALIGN` must stay 1.** This is load-bearing and easy to
+"fix" wrongly.
+
+LVGL's software blenders, NEON paths included, address pixels with byte-element
+loads and stores (`vst3q_u8`/`vld3q_u8` for 3-byte pixels), whose alignment
+requirement is one byte. The 4-byte paths use `vld1q_u32` on buffers whose
+stride is `w * 4` and therefore already aligned. What SIMD and DMA actually care
+about is the **start address**, and `LV_DRAW_BUF_ALIGN` covers that — it is 16
+here, and upstream's own NXP porting guide pairs a 64-byte `LV_DRAW_BUF_ALIGN`
+with a stride align of **1**.
+
+Raising it breaks every consumer that reads a buffer as tightly packed. Known
+casualties: SDL texture uploads (`SDL_UpdateTexture` given `w * 4`), the
+backdrop blur pipeline, the fbdev buffer path, the nanovg glyph upload, and
+`esp_lcd_panel_draw_bitmap` on the ESP32 port. Each surfaced as a different
+symptom — bus error, diagonal shear, smearing, trapezoid artifacts, heap
+overflow — which is what made the shared cause hard to see.
+
+If you are here because of a NEON crash: check the signal first. An unaligned
+access raises `SIGBUS` with `BUS_ADRALN`. A `SIGSEGV`/`SEGV_ACCERR` in a blender
+is an out-of-bounds write, and the fix is bounds clipping —
+`patches/lvgl_blend_buf_bounds_clip.patch` clips the blend area to the layer's
+buffer, which is what `lv_draw_sw_blend` was missing.
+
+**Code that consumes a draw buffer must read `header.stride`**, never recompute
+a pitch from width. `src/application/color_transform.cpp#apply_area` takes the stride
+as a parameter for exactly this reason.
+
+---
+
+## Verification recipe
+
+Anything claimed here is reproducible. The pattern that works:
+
+1. Build variants into separate object trees with `BUILD_SUBDIR`, one
+   `ENABLE_OPENGLES`/`ENABLE_NANOVG` combination each. Changing `lv_conf.h`
+   invalidates every object, so expect a cold ccache per config.
+2. Deploy and drive with `helix-screen ctl` over a pinned socket. `ctl` works on
+   dev cross-builds; a packaged release has no server (`HELIX_PACKAGING=1`
+   forces `ENABLE_REMOTE_CONTROL=no`).
+3. **Take a screenshot and look at it.** A process that stays alive and answers
+   `ping` can still be rendering garbage — that is exactly how the nanovg glyph
+   bug presents once its crash is papered over.
+4. **Run a control.** A config change that produces a byte-identical screenshot
+   did not take effect. Two of the experiments behind this document were no-ops
+   on the first attempt — one edited a theme file shadowed by a user copy — and
+   both would have read as evidence without a control run.
+
+---
+
+## Per-area render profiling
+
+`tools/lvgl-area-profiler.patch` turns the cost of an invalidated area into a
+per-tag nanosecond profile. Apply it to a worktree, build, then run with
+`HELIX_LVGL_PROFILE=<delay_s>:<run_s>`; the trace goes to stderr.
+
+**It must not be merged.** Its `lv_conf.h` hunk sets `LV_USE_PROFILER 1`, which
+would ship an enabled profiler. Apply, measure, discard.
+
+It answers "which part of the pipeline costs that" — the question the rungs above
+cannot. Profiling an AD5X against a K1C with it showed the per-area gap is a
+uniform ~1.65x across every render-side tag rather than one expensive call, and
+splits into ~1.22x dynamic-linkage overhead (recovered by linking the AD5X
+statically) and a ~1.40x residual that is the build family or the SoC.
+
+Four things about it are easy to get wrong, and the patch header repeats them:
+the default 16 KB trace buffer wraps mid-frame at ~60 areas, the default tick is
+1 ms rather than nanoseconds, the profiler roughly doubles CPU while enabled so
+only ratios between instrumented runs mean anything, and medians must be reported
+rather than means because a buffer flush pauses the thread.
+
+The tag sites inside `lib/lvgl` are not in the patch: that submodule is managed
+through `patches/`, so a diff there entangles with our own. The header names the
+two functions to re-tag by hand.

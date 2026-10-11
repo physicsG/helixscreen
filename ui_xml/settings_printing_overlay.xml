@@ -2,88 +2,75 @@
 <!-- Copyright (C) 2025-2026 356C LLC -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <!-- Printing Settings Overlay Panel -->
-<!-- Configures toolhead appearance, G-code preview, Z movement, machine limits, -->
-<!-- retraction, material temperatures, and timelapse settings -->
+<!-- Machine limits/motion/retraction/enclosure, filament temperature and cooldown -->
+<!-- behaviour, and print extras (timelapse, macro buttons) -->
 <!-- Uses setting_* components for consistency with main settings panel -->
 <component>
-  <view name="settings_printing_overlay"
-        extends="overlay_panel" title="Printing" title_tag="Printing" bg_color="#screen_bg">
+  <view name="settings_printing_overlay" extends="overlay_panel" title="Printing" bg_color="#screen_bg">
     <!-- Content Area - no padding, rows handle their own -->
     <lv_obj name="overlay_content"
             width="100%" flex_grow="1" style_pad_top="0" style_pad_left="0" style_pad_right="0"
             style_pad_bottom="#space_lg" scrollable="true" flex_flow="column">
-      <!-- All printing settings live in a single grouped-list card (no section
-           headers in this overlay); the card owns the horizontal inset. -->
-      <setting_group name="group_printing">
-        <!-- ================================================================== -->
-        <!-- TOOLHEAD STYLE -->
-        <!-- ================================================================== -->
-        <setting_dropdown_row name="row_toolhead_style"
-                              label="Toolhead Style" label_tag="Toolhead Style" icon="palette"
-                              description="How the toolhead icon appears"
-                              description_tag="How the toolhead icon appears" options="Auto"
-                              callback="on_toolhead_style_changed"/>
-        <!-- ================================================================== -->
-        <!-- G-CODE PREVIEW -->
-        <!-- ================================================================== -->
-        <setting_dropdown_row name="row_gcode_mode"
-                              label="G-code Preview" label_tag="G-code Preview" icon="printer_3d"
-                              description="Choose rendering mode for G-code visualization"
-                              description_tag="Choose rendering mode for G-code visualization"
-                              options="Auto&#10;3D View&#10;2D Layers&#10;Thumbnail Only"
-                              options_tag="Auto&#10;3D View&#10;2D Layers&#10;Thumbnail Only"
-                              callback="on_gcode_mode_changed"/>
-        <!-- ================================================================== -->
-        <!-- Z MOVEMENT -->
-        <!-- ================================================================== -->
-        <setting_dropdown_row name="row_z_movement_style"
-                              label="Z Movement" label_tag="Z Movement" icon="arrow_up_down"
-                              description="How Z-axis movement is displayed"
-                              description_tag="How Z-axis movement is displayed"
-                              options="Auto&#10;Bed Moves&#10;Nozzle Moves"
-                              options_tag="Auto&#10;Bed Moves&#10;Nozzle Moves" callback="on_z_movement_style_changed"/>
-        <!-- ================================================================== -->
-        <!-- MACHINE LIMITS -->
-        <!-- ================================================================== -->
+      <!-- ================================================================== -->
+      <!-- MACHINE -->
+      <!-- ================================================================== -->
+      <setting_group name="group_machine">
+        <setting_group_header title="MACHINE"/>
         <setting_action_row name="row_machine_limits"
-                            label="Machine Limits" label_tag="Machine Limits" icon="dashboard"
-                            description="Velocity and acceleration limits"
-                            description_tag="Velocity and acceleration limits" callback="on_machine_limits_clicked"/>
-        <!-- ================================================================== -->
+                            label="Machine Limits" icon="dashboard" description="Velocity and acceleration limits"
+                            callback="on_machine_limits_clicked"/>
+        <setting_action_row name="row_motion"
+                            label="Motion" icon="axis_arrow" description="Jog speeds and step distances"
+                            callback="on_motion_settings_clicked"/>
         <!-- RETRACTION SETTINGS (conditional) -->
-        <!-- ================================================================== -->
         <lv_obj name="container_firmware_retraction" width="100%" style_pad_all="0" scrollable="false">
           <bind_flag_if_eq subject="printer_has_firmware_retraction" flag="hidden" ref_value="0"/>
           <setting_action_row name="row_firmware_retraction"
-                              label="Retraction Settings" label_tag="Retraction Settings" icon="arrow_up_right"
-                              description="Configure G10/G11 firmware retraction"
-                              description_tag="Configure G10/G11 firmware retraction"
-                              callback="on_retraction_row_clicked"/>
+                              label="Retraction Settings" icon="arrow_up_right"
+                              description="Configure G10/G11 firmware retraction" callback="on_retraction_row_clicked"/>
         </lv_obj>
-        <!-- ================================================================== -->
-        <!-- MATERIAL TEMPERATURES -->
-        <!-- ================================================================== -->
+        <!-- ENCLOSURE (drying on the heated bed needs one) -->
+        <setting_dropdown_row name="row_enclosure_style"
+                              label="Enclosure" icon="heat_wave" description="Mark a printer you enclosed yourself"
+                              options="Auto&#10;Enclosed&#10;Open frame" options_tag="Auto&#10;Enclosed&#10;Open frame"
+                              bind_selected="settings_enclosure_style" callback="on_enclosure_style_changed"/>
+      </setting_group>
+      <!-- ================================================================== -->
+      <!-- FILAMENT -->
+      <!-- ================================================================== -->
+      <setting_group name="group_filament">
+        <setting_group_header title="FILAMENT"/>
         <setting_action_row name="row_material_temps"
-                            label="Material Temperatures" label_tag="Material Temperatures" icon="thermometer"
-                            description="Customize preset temperatures" description_tag="Customize preset temperatures"
+                            label="Material Temperatures" icon="thermometer" description="Customize preset temperatures"
                             callback="on_material_temps_clicked"/>
-        <!-- ================================================================== -->
+        <setting_toggle_row name="row_allow_cold_extrude"
+                            label="Allow cold load/unload" icon="cooldown"
+                            description="Run filament load/unload even when the nozzle is cold (for macros that heat the nozzle themselves)"
+                            subject="settings_allow_cold_extrude" callback="on_allow_cold_extrude_changed"/>
+        <setting_toggle_row name="row_filament_auto_cooldown"
+                            label="Cool nozzle after filament ops" icon="cooldown"
+                            description="Turn the extruder heater off after a load or unload finishes"
+                            subject="filament_auto_cooldown" callback="on_filament_auto_cooldown_changed"/>
+        <setting_toggle_row name="row_filament_auto_open_editor"
+                            label="Edit filament on insert" icon="filament"
+                            description="Open the slot editor when you load a new spool"
+                            subject="filament_auto_open_editor" callback="on_filament_auto_open_editor_changed"/>
+      </setting_group>
+      <!-- ================================================================== -->
+      <!-- EXTRAS -->
+      <!-- ================================================================== -->
+      <setting_group name="group_extras">
+        <setting_group_header title="EXTRAS"/>
         <!-- TIMELAPSE (conditional) -->
-        <!-- ================================================================== -->
         <lv_obj name="container_timelapse_settings" width="100%" style_pad_all="0" scrollable="false">
           <bind_flag_if_eq subject="printer_has_timelapse" flag="hidden" ref_value="0"/>
           <setting_action_row name="row_timelapse_settings"
-                              label="Timelapse" label_tag="Timelapse" icon="camera_timer"
-                              description="Configure timelapse recording"
-                              description_tag="Configure timelapse recording" callback="on_timelapse_settings_clicked"/>
+                              label="Timelapse" icon="camera_timer" description="Configure timelapse recording"
+                              callback="on_timelapse_settings_clicked"/>
         </lv_obj>
-        <!-- ================================================================== -->
-        <!-- MACRO BUTTONS -->
-        <!-- ================================================================== -->
         <setting_action_row name="row_macro_buttons"
-                            label="Macro Buttons" label_tag="Macro Buttons" icon="script_text"
+                            label="Macro Buttons" icon="script_text"
                             description="Configure quick buttons and standard macros"
-                            description_tag="Configure quick buttons and standard macros"
                             callback="on_macro_buttons_clicked"/>
       </setting_group>
     </lv_obj>

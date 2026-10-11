@@ -2,24 +2,58 @@
 <!-- Copyright (C) 2025-2026 356C LLC -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <component>
+  <api>
+    <!-- Per-instance subject names, supplied by the widget at creation. They
+         must exist before this component is parsed: a binding whose subject is
+         missing at parse time is dropped permanently and silently. -->
+    <prop name="tile_icon_subject" type="string" default=""/>
+    <prop name="tile_label_subject" type="string" default=""/>
+    <prop name="tile_dir_subject" type="string" default=""/>
+    <prop name="tile_target_subject" type="string" default=""/>
+    <prop name="temp_subject" type="string" default=""/>
+    <prop name="target_subject" type="string" default=""/>
+    <prop name="available_subject" type="string" default=""/>
+  </api>
   <view name="panel_widget_thermistor"
-        extends="lv_obj" height="100%" flex_grow="1" style_pad_all="0" scrollable="false" flex_flow="column"
-        style_flex_main_place="center" style_flex_cross_place="center" style_flex_track_place="center" clickable="true">
+        extends="lv_obj" height="100%" flex_grow="1" style_pad_ver="0" style_pad_gap="#space_xxs" scrollable="false"
+        clickable="true" style_radius="#border_radius">
+    <style name="styles.press_wash" selector="pressed"/>
     <bind_state_if_not_eq subject="printer_connection_state" state="disabled" ref_value="2"/>
     <event_cb trigger="clicked" callback="thermistor_clicked_cb"/>
-    <!-- Top row: icon + temperature. Tighter gap than the sibling widgets use:
-         a sensor reading can hit 7 glyphs ("110.0°C"), and at 1x1 the icon plus
-         that string spends the whole 115px cell width at the medium breakpoint. -->
-    <lv_obj width="100%"
-            height="content" style_pad_all="0" scrollable="false" flex_flow="row" style_flex_main_place="center"
-            style_flex_cross_place="center" style_pad_gap="#space_xxs" clickable="false" event_bubble="true">
-      <icon name="thermistor_icon"
-            src="thermometer" size="#icon_size" variant="secondary" clickable="false" event_bubble="true"/>
-      <text_body name="thermistor_temp" text="--°C" clickable="false" event_bubble="true"/>
+    <!-- The glyph over its reading and name, or beside them when the box is
+         too short to stack: the same two shapes TileSizing measures. Tight
+         gaps: a reading can run to seven glyphs ("110.0°C"). -->
+    <style name="styles.tile_column"/>
+    <bind_style_if_eq name="styles.tile_row" subject="$tile_dir_subject" ref_value="1"/>
+    <icon name="thermistor_icon"
+          src="thermometer" size="#icon_size" variant="secondary" clickable="false" event_bubble="true">
+      <bind_tile_rung ladder="icon" subject="$tile_icon_subject"/>
+    </icon>
+    <lv_obj name="thermistor_text_col"
+            width="100%" height="content" style_pad_all="0" style_pad_gap="#space_xxs" scrollable="false"
+            clickable="false" event_bubble="true">
+      <style name="styles.tile_column"/>
+      <bind_style_if_eq name="styles.tile_fill" subject="$tile_dir_subject" ref_value="1"/>
+      <!-- A read-only sensor's target stays 0, so hide_target_when_off leaves
+           it the bare reading; a heater with a target reads "current / target". -->
+      <temp_display name="thermistor_temp"
+                    size_target_subject="$tile_target_subject" rung_subject="$tile_icon_subject" size="sm"
+                    show_target="true" hide_target_when_off="true" hide_target_below_bp="small"
+                    bind_current="$temp_subject" bind_target="$target_subject" align="center" clickable="false"
+                    event_bubble="true">
+        <bind_flag_if_eq subject="$available_subject" flag="hidden" ref_value="0"/>
+      </temp_display>
+      <!-- No sensor selected, or the saved one is not reported (yet). -->
+      <text_body name="thermistor_unavailable" text="--°C" clickable="false" event_bubble="true">
+        <bind_tile_rung ladder="value" subject="$tile_icon_subject"/>
+        <bind_flag_if_eq subject="$available_subject" flag="hidden" ref_value="1"/>
+      </text_body>
+      <text_tiny name="thermistor_name"
+                 width="100%" text="Select sensor" style_text_align="center" long_mode="dots" clickable="false"
+                 event_bubble="true">
+        <bind_tile_rung ladder="label" subject="$tile_icon_subject" one_line="true"/>
+        <bind_flag_if_eq subject="$tile_label_subject" flag="hidden" ref_value="0"/>
+      </text_tiny>
     </lv_obj>
-    <!-- Sensor name label -->
-    <text_tiny name="thermistor_name"
-               width="100%" text="Select sensor" translation_tag="Select sensor" style_text_align="center"
-               long_mode="dots" clickable="false" event_bubble="true"/>
   </view>
 </component>

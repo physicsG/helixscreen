@@ -94,7 +94,7 @@ SUDOEOF
     output="$(install_permission_rules "pi" 2>&1)" || status=$?
 
     [ "$status" -eq 0 ]
-    [[ "$output" == *"NoNewPrivileges"* ]]
+    contains "NoNewPrivileges" "$output"
     [[ "$output" != *"need repair"* ]]
 }
 
@@ -107,7 +107,7 @@ SUDOEOF
     output="$(install_permission_rules "pi" 2>&1)" || status=$?
 
     [ "$status" -eq 0 ]
-    [[ "$output" == *"need repair"* ]]
+    contains "need repair" "$output"
     [[ "$output" == *"Wi-Fi may not work"* ]]
 }
 
@@ -612,13 +612,13 @@ _stub_installer_steps() {
     for fn in $(grep -h '^[A-Za-z_][A-Za-z0-9_]*[[:space:]]*()[[:space:]]*{' \
                     "$WORKTREE_ROOT"/scripts/lib/installer/*.sh \
                 | sed 's/[[:space:]]*().*//' | sort -u); do
-        [ "$fn" = "main" ] && continue
+        case "$fn" in main|apply_install) continue ;; esac
         eval "${fn}() { printf '%s %s\n' '$fn' \"\$*\" >> \"\$FLOW_LOG\"; }"
     done
 }
 
-# Source main.sh, stub everything under it, and answer the few calls main()
-# actually branches on.
+# Source main.sh, stub everything under main() and apply_install(), and answer
+# the few calls they actually branch on.
 _setup_install_flow() {
     FLOW_LOG="$BATS_TEST_TMPDIR/flow.log"
     : > "$FLOW_LOG"
@@ -687,7 +687,7 @@ _flow_line() {
 }
 
 @test "install flow: bundled install.sh carries the call site" {
-    # scripts/install.sh is generated from the modules; a stale bundle would
+    # install.sh is generated from the modules; a stale bundle would
     # ship the old flow to every curl|sh user even with main.sh fixed.
-    grep -q '^    install_permission_rules "\$platform"$' "$WORKTREE_ROOT/scripts/install.sh"
+    grep -q '^    install_permission_rules "\$platform"$' "$INSTALL_BUNDLE"
 }

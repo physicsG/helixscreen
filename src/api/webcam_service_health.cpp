@@ -3,6 +3,8 @@
 
 #include "webcam_service_health.h"
 
+#include "text_io.h"
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -95,21 +97,14 @@ std::string string_field(const nlohmann::json& obj, const char* key) {
     return it->get<std::string>();
 }
 
-std::string lower(std::string_view s) {
-    std::string out(s);
-    std::transform(out.begin(), out.end(), out.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return out;
-}
-
 /// Classify one service_state entry. Only the terminal systemd states count as
 /// Down; "activating", "reloading" and systemd's own "unknown" are transient or
 /// uninformative and must not hide a camera.
 Health health_of(const nlohmann::json& entry) {
     if (!entry.is_object())
         return Health::Unknown;
-    const std::string active = lower(string_field(entry, "active_state"));
-    const std::string sub = lower(string_field(entry, "sub_state"));
+    const std::string active = helix::text_io::to_lower(string_field(entry, "active_state"));
+    const std::string sub = helix::text_io::to_lower(string_field(entry, "sub_state"));
     if (active.empty() && sub.empty())
         return Health::Unknown;
     if (active == "failed" || active == "inactive" || sub == "failed" || sub == "dead")

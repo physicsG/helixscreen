@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include <cctype>
 #include <string>
 #include <vector>
 
@@ -19,7 +20,8 @@ enum class ErrorSource {
     HAPPY_HARE,
     SNAPMAKER,
     ACE,
-    TOOLCHANGER
+    TOOLCHANGER,
+    OPENAMS
 };
 
 /// A one-tap fix offered alongside an error, rendered as a button by
@@ -72,5 +74,37 @@ struct ClassifyContext {
     bool is_paused = false;   ///< print currently paused (pause_resume.is_paused)
     bool is_printing = false; ///< print active (print_stats.state == "printing")
 };
+
+/// Which error shape a gcode-response line carries. The two mark different
+/// failures — `!!` is a broadcast, `Error:` a command response — and
+/// classification keys off which one.
+enum class GcodeErrorPrefix { None, Bang, Error };
+
+struct GcodeErrorLine {
+    GcodeErrorPrefix prefix = GcodeErrorPrefix::None;
+    /// The line with its error prefix and one following space stripped.
+    std::string text;
+};
+
+/// Split one gcode-response line into its error prefix (if any) and the text
+/// after it. `None` for every non-error line — `//` comments, `ok` acks,
+/// status — the single rule every classifier applies before reading a line,
+/// so a comment quoting an error's wording can never classify.
+[[nodiscard]] inline GcodeErrorLine parse_gcode_error_line(const std::string& line) {
+    if (line.size() >= 2 && line[0] == '!' && line[1] == '!') {
+        return {GcodeErrorPrefix::Bang,
+                (line.size() >= 3 && line[2] == ' ') ? line.substr(3) : line.substr(2)};
+    }
+    if (line.size() >= 6) {
+        std::string p = line.substr(0, 5);
+        for (auto& c : p)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (p == "error" && line[5] == ':') {
+            return {GcodeErrorPrefix::Error,
+                    (line.size() >= 7 && line[6] == ' ') ? line.substr(7) : line.substr(6)};
+        }
+    }
+    return {};
+}
 
 } // namespace helix

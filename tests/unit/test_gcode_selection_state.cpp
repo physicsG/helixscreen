@@ -92,11 +92,9 @@ TEST_CASE("selection applied after the index map is built still classifies",
 }
 
 // ---------------------------------------------------------------------------
-// Invalidation scope. A highlight change currently calls invalidate_cache(),
-// which also clears the ghost cache and resets ghost_rendered_up_to_, restarting
-// a multi-second background ghost render — even though the ghost pass never
-// renders highlight at all (it handles exclusion only). Exclusion must still
-// invalidate ghost, because the ghost pass does dim excluded objects.
+// Invalidation scope. A real change to either set invalidates both caches,
+// since the ghost pass dims exclusions and draws the selection; an unchanged
+// set invalidates nothing.
 // ---------------------------------------------------------------------------
 
 TEST_CASE("an unchanged selection requires no invalidation", "[gcode_selection_state]") {
@@ -107,10 +105,8 @@ TEST_CASE("an unchanged selection requires no invalidation", "[gcode_selection_s
     REQUIRE(s.set_excluded({"cube_2"}) == InvalidationScope::Nothing);
 }
 
-// This used to be SolidCache, on the reasoning that the ghost pass never drew
-// highlight and so could keep a multi-second render. It draws one now: the ghost
-// is what is visible for most of a print, so a selection cue that skipped it
-// would be a cue you cannot see while the print is running.
+// The ghost is what is visible for most of a print, so a selection cue that
+// skipped it would be a cue you cannot see while the print is running.
 TEST_CASE("a highlight change invalidates the ghost cache too", "[gcode_selection_state]") {
     SelectionState s;
     REQUIRE(s.set_highlighted({"cube_1"}) == InvalidationScope::SolidAndGhost);

@@ -56,7 +56,8 @@
         "fan_generic external_fan",
         "led chamber_led",
         "fan_generic pcb_fan",
-        "filament_switch_sensor e0_sensor"
+        "filament_switch_sensor e0_sensor",
+        "filament_switch_sensor e1_sensor"
       ]
     },
     "default_macros": {

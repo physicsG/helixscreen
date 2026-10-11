@@ -27,8 +27,8 @@
 
 namespace {
 
-AmsSystemInfo make_info(int current_slot, bool filament_loaded) {
-    AmsSystemInfo info;
+helix::AmsSystemInfo make_info(int current_slot, bool filament_loaded) {
+    helix::AmsSystemInfo info;
     info.current_slot = current_slot;
     info.filament_loaded = filament_loaded;
     return info;
@@ -68,7 +68,7 @@ TEST_CASE("should_unload_before_bypass truth table", "[ams][afc][1229][bypass]")
 
     for (const auto& row : rows) {
         CAPTURE(row.name);
-        AmsSystemInfo info = make_info(row.current_slot, row.filament_loaded);
+        helix::AmsSystemInfo info = make_info(row.current_slot, row.filament_loaded);
         CHECK(helix::should_unload_before_bypass(info, row.allows_chaining) == row.expect_unload);
     }
 }
@@ -94,7 +94,7 @@ TEST_CASE("AFC and Happy Hare refuse implicit chaining", "[ams][afc][1229][bypas
     CHECK_FALSE(hh.allows_implicit_chaining());
 
     // And the pure function must honour that even with filament loaded.
-    AmsSystemInfo loaded = make_info(0, true);
+    helix::AmsSystemInfo loaded = make_info(0, true);
     CHECK_FALSE(helix::should_unload_before_bypass(loaded, afc.allows_implicit_chaining()));
     CHECK_FALSE(helix::should_unload_before_bypass(loaded, hh.allows_implicit_chaining()));
 }
@@ -110,12 +110,12 @@ TEST_CASE("OEM backends keep implicit chaining", "[ams][afc][1229][bypass]") {
     CHECK(ace.allows_implicit_chaining());
 
     // With a slot loaded, chaining backends do prompt the unload-first path.
-    AmsSystemInfo loaded = make_info(1, true);
+    helix::AmsSystemInfo loaded = make_info(1, true);
     CHECK(helix::should_unload_before_bypass(loaded, cfs.allows_implicit_chaining()));
     CHECK(helix::should_unload_before_bypass(loaded, ace.allows_implicit_chaining()));
 
     // But an unloaded system still goes straight to enable_bypass().
-    AmsSystemInfo empty = make_info(-1, false);
+    helix::AmsSystemInfo empty = make_info(-1, false);
     CHECK_FALSE(helix::should_unload_before_bypass(empty, cfs.allows_implicit_chaining()));
     CHECK_FALSE(helix::should_unload_before_bypass(empty, ace.allows_implicit_chaining()));
 }

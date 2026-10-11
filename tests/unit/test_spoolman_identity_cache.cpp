@@ -22,11 +22,15 @@
 #include "ui_update_queue.h"
 
 #include "../lvgl_test_fixture.h"
+#include "../test_helpers/backend_user_edit.h"
+#include "../test_helpers/mock_bypass.h"
 #include "ams_backend_mock.h"
 #include "ams_state.h"
 #include "ams_types.h"
 #include "app_globals.h"
 #include "filament_display_name.h"
+#include "lane_resolver.h"
+#include "lane_source_store.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "moonraker_api_mock.h"
 #include "moonraker_client_mock.h"
@@ -160,7 +164,7 @@ class IdentityCacheFixture : public LVGLTestFixture {
     }
 
     void set_spoolman_available(bool available) {
-        get_printer_state().set_spoolman_available(available);
+        get_printer_state().capabilities_state().set_spoolman_available(available);
         helix::ui::UpdateQueue::instance().drain();
     }
 
@@ -265,25 +269,13 @@ TEST_CASE_METHOD(IdentityCacheFixture, "SpoolmanManager identity: invalidate dro
 TEST_CASE_METHOD(IdentityCacheFixture,
                  "SpoolmanManager identity: cleared when printer_has_spoolman goes 0",
                  "[spoolman][identity]") {
-    // SpoolmanManager binds its availability observer to the XML-scope subject
-    // named "printer_has_spoolman". PrinterState only publishes that name under
-    // init_subjects(register_xml=true), which most of the suite does not do, so
-    // publish a subject under the name here — static, because XML scope outlives
-    // the test — and re-init the manager so it observes this one deterministically
-    // rather than whatever an earlier test file left behind.
-    static lv_subject_t availability;
-    static bool availability_ready = false;
-    if (!availability_ready) {
-        lv_subject_init_int(&availability, 1);
-        lv_xml_register_subject(nullptr, "printer_has_spoolman", &availability);
-        availability_ready = true;
-    }
-    lv_subject_set_int(&availability, 1);
-    REQUIRE(lv_xml_get_subject(nullptr, "printer_has_spoolman") == &availability);
-
-    SpoolmanManager::instance().deinit_subjects();
-    SpoolmanManager::instance().init_subjects();
+    // Start from a Spoolman that is available, whatever an earlier case left
+    // behind: the observer fires on attach, and a 0 delivered there would clear
+    // the cache before the transition under test ever happens.
+    set_spoolman_available(true);
+    IdTA::rewire_subjects(SpoolmanManager::instance());
     REQUIRE(IdTA::observes_availability(SpoolmanManager::instance()));
+    drain();
 
     SpoolmanManager::cache_identity(make_spool(1, "Polymaker", "Ambrosia Pink", "PLA"));
     SpoolmanManager::note_identity_unresolvable(2);
@@ -293,15 +285,12 @@ TEST_CASE_METHOD(IdentityCacheFixture,
     // Spoolman disappeared — the same force-stop path that kills the poll timer
     // must drop the cache, or a printer switch would keep serving names from the
     // previous Spoolman.
-    lv_subject_set_int(&availability, 0);
-    drain(); // observe_int_sync() defers its handler through the UpdateQueue
+    set_spoolman_available(false);
+    drain(); // the setter defers the subject write, and observe<int>() defers the handler
 
     CHECK_FALSE(SpoolmanManager::find_identity(1).has_value());
     CHECK_FALSE(SpoolmanManager::is_identity_unresolvable(2));
     CHECK(IdTA::cache_size(SpoolmanManager::instance()) == 0);
-
-    // Leave the shared XML-scope name reading "available" for whatever runs next.
-    lv_subject_set_int(&availability, 1);
 }
 
 TEST_CASE_METHOD(IdentityCacheFixture,
@@ -376,7 +365,7 @@ TEST_CASE_METHOD(
     before.spoolman_id = 1; // mock spool 1: Polymaker / "Jet Black" / PLA
     before.remaining_weight_g = 111.0f;
     before.total_weight_g = 111.0f;
-    h.backend->set_slot_info(0, before);
+    helix::test::apply_edit(*h.backend, 0, before);
     before = h.backend->get_slot_info(0);
 
     REQUIRE_FALSE(SpoolmanManager::find_identity(1).has_value());
@@ -390,10 +379,14 @@ TEST_CASE_METHOD(
     CHECK(id->filament_name == "Jet Black");
     CHECK(id->material == "PLA");
 
-    // Weight — the thing the poll is actually for — still updated.
+    // Weight, the thing the poll is actually for, still landed. The lane's
+    // Spoolman record is where: the mock keeps no cached slot to repaint, so
+    // the slot struct itself is not a render of the lane.
     SlotInfo after = h.backend->get_slot_info(0);
-    CHECK(after.remaining_weight_g == Catch::Approx(850.0f));
-    CHECK(after.total_weight_g == Catch::Approx(1000.0f));
+    const auto shown = helix::ams::resolve(helix::ams::lane_sources(h.backend->lane_id(0)));
+    REQUIRE(shown.remaining_weight_g.has_value());
+    CHECK(*shown.remaining_weight_g == Catch::Approx(850.0f));
+    CHECK(shown.total_weight_g == Catch::Approx(1000.0f));
 
     // ...and NOTHING Spoolman-derived reached the slot. Identity in SlotInfo
     // would re-enter the persist=false quarantine the weight poll depends on.
@@ -415,15 +408,17 @@ TEST_CASE_METHOD(IdentityCacheFixture,
     SlotInfo slot = h.backend->get_slot_info(0);
     slot.spoolman_id = 1;
     slot.remaining_weight_g = 111.0f;
-    h.backend->set_slot_info(0, slot);
+    helix::test::apply_edit(*h.backend, 0, slot);
 
     h.poll();
     REQUIRE(SpoolmanManager::find_identity(1).has_value());
-    REQUIRE(h.backend->get_slot_info(0).remaining_weight_g == Catch::Approx(850.0f));
+    REQUIRE(
+        helix::ams::resolve(helix::ams::lane_sources(h.backend->lane_id(0))).remaining_weight_g ==
+        Catch::Approx(850.0f));
 
     // Spoolman reports a lower remaining weight on the next cycle. The cached
     // identity must not short-circuit that: the two have separate cadences.
-    for (auto& spool : h.api.spoolman_mock().get_mock_spools()) {
+    for (auto& spool : h.client.spoolman_mock().get_mock_spools()) {
         if (spool.id == 1) {
             spool.remaining_weight_g = 610.0;
         }
@@ -431,7 +426,8 @@ TEST_CASE_METHOD(IdentityCacheFixture,
 
     h.poll();
 
-    CHECK(h.backend->get_slot_info(0).remaining_weight_g == Catch::Approx(610.0f));
+    CHECK(helix::ams::resolve(helix::ams::lane_sources(h.backend->lane_id(0))).remaining_weight_g ==
+          Catch::Approx(610.0f));
     auto id = SpoolmanManager::find_identity(1);
     REQUIRE(id.has_value());
     CHECK(id->vendor == "Polymaker"); // still the first extraction
@@ -447,7 +443,7 @@ TEST_CASE_METHOD(IdentityCacheFixture,
     slot.spoolman_id = 900; // no such spool in the mock inventory
     slot.remaining_weight_g = 111.0f;
     slot.total_weight_g = 111.0f;
-    h.backend->set_slot_info(0, slot);
+    helix::test::apply_edit(*h.backend, 0, slot);
 
     h.poll();
 
@@ -455,21 +451,22 @@ TEST_CASE_METHOD(IdentityCacheFixture,
     CHECK_FALSE(SpoolmanManager::find_identity(900).has_value());
 
     // Make the id resolvable behind the manager's back. If the second poll still
-    // issued a request, the weight below would change — it must not, because a
+    // issued a request, a Spoolman record would file. It must not, because a
     // known-dead id is skipped before the request is made.
-    h.api.spoolman_mock().get_mock_spools().push_back(
+    h.client.spoolman_mock().get_mock_spools().push_back(
         make_spool(900, "Polymaker", "Ambrosia Pink", "PLA"));
 
     h.poll();
 
-    CHECK(h.backend->get_slot_info(0).remaining_weight_g == Catch::Approx(111.0f));
+    CHECK_FALSE(helix::ams::lane_sources(h.backend->lane_id(0)).spoolman.has_value());
     CHECK_FALSE(SpoolmanManager::find_identity(900).has_value());
 
     // The escape hatch: an explicit invalidation lets it be polled again.
     SpoolmanManager::invalidate_identity(900);
     h.poll();
 
-    CHECK(h.backend->get_slot_info(0).remaining_weight_g == Catch::Approx(850.0f));
+    CHECK(helix::ams::resolve(helix::ams::lane_sources(h.backend->lane_id(0))).remaining_weight_g ==
+          Catch::Approx(850.0f));
     CHECK(SpoolmanManager::find_identity(900).has_value());
 }
 
@@ -489,7 +486,7 @@ void make_afc_slot(AmsBackendMock* backend, int spoolman_id) {
     slot.brand.clear();
     slot.material = "PLA";
     slot.color_rgb = 0xFFB6C1; // the hex whose algorithmic name is the bug
-    backend->set_slot_info(0, slot);
+    helix::test::apply_edit(*backend, 0, slot);
 }
 
 } // namespace
@@ -548,7 +545,7 @@ TEST_CASE_METHOD(IdentityCacheFixture,
     SECTION("no spool id — unchanged from firmware-only behaviour") {
         SlotInfo slot = backend->get_slot_info(0);
         slot.spoolman_id = 0;
-        backend->set_slot_info(0, slot);
+        helix::test::apply_edit(*backend, 0, slot);
 
         // A cached identity for the id the slot no longer carries must not leak in.
         SpoolmanManager::cache_identity(make_spool(77, "Polymaker", "Ambrosia Pink", "PLA"));
@@ -562,7 +559,7 @@ TEST_CASE_METHOD(IdentityCacheFixture,
         slot.spool_name.clear();
         slot.color_name.clear();
         slot.brand.clear();
-        backend->set_slot_info(0, slot);
+        helix::test::apply_edit(*backend, 0, slot);
 
         ams.sync_current_loaded_from_backend();
 
@@ -576,7 +573,7 @@ TEST_CASE_METHOD(IdentityCacheFixture,
         slot.brand.clear();
         slot.material.clear();
         slot.color_rgb = 0;
-        backend->set_slot_info(0, slot);
+        helix::test::apply_edit(*backend, 0, slot);
 
         ams.sync_current_loaded_from_backend();
 
@@ -589,7 +586,7 @@ TEST_CASE_METHOD(IdentityCacheFixture,
         SlotInfo slot = backend->get_slot_info(0);
         slot.spool_name = "Shop Reload";
         slot.brand = "House Brand";
-        backend->set_slot_info(0, slot);
+        helix::test::apply_edit(*backend, 0, slot);
 
         SpoolmanManager::cache_identity(make_spool(77, "Polymaker", "Ambrosia Pink", "PLA"));
         ams.sync_current_loaded_from_backend();
@@ -613,6 +610,7 @@ TEST_CASE_METHOD(IdentityCacheFixture,
     // enable_bypass() needs a started backend; the default "idle" scenario
     // spawns no thread, so this stays a synchronous test.
     REQUIRE(backend->start().success());
+    REQUIRE(helix::test::unload_for_bypass(*backend));
     REQUIRE(backend->enable_bypass().success());
     REQUIRE(backend->is_bypass_active());
 
@@ -679,7 +677,7 @@ TEST_CASE_METHOD(IdentityCacheFixture,
     SlotInfo slot = h.backend->get_slot_info(0);
     slot.spoolman_id = 1;
     slot.remaining_weight_g = 111.0f;
-    h.backend->set_slot_info(0, slot);
+    helix::test::apply_edit(*h.backend, 0, slot);
 
     SpoolmanManager::instance().start_spoolman_polling();
     drain();
@@ -712,7 +710,7 @@ TEST_CASE_METHOD(IdentityCacheFixture,
     // Exactly what mock spool 1 reports, so the early return fires.
     slot.remaining_weight_g = 850.0f;
     slot.total_weight_g = 1000.0f;
-    h.backend->set_slot_info(0, slot);
+    helix::test::apply_edit(*h.backend, 0, slot);
 
     const int before = lv_subject_get_int(AmsState::instance().get_slots_version_subject());
     // Precondition WITHOUT find_identity(): that call is lookup-OR-FETCH, and
@@ -740,7 +738,7 @@ TEST_CASE_METHOD(IdentityCacheFixture,
     slot.spoolman_id = 1;
     slot.remaining_weight_g = 850.0f;
     slot.total_weight_g = 1000.0f;
-    h.backend->set_slot_info(0, slot);
+    helix::test::apply_edit(*h.backend, 0, slot);
 
     h.poll();
     REQUIRE(SpoolmanManager::find_identity(1).has_value());

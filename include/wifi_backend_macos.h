@@ -8,7 +8,6 @@
 #include "lvgl/lvgl.h"
 #include "wifi_backend.h"
 
-#include <map>
 #include <mutex>
 
 // Use void* for Objective-C objects to avoid mixing C++ and Objective-C in header
@@ -47,12 +46,10 @@ class WifiBackendMacOS : public WifiBackend {
     void stop() override;
     bool is_running() const override;
 
-    void register_event_callback(const std::string& name,
-                                 std::function<void(const std::string&)> callback) override;
-
     WiFiError trigger_scan() override;
     WiFiError get_scan_results(std::vector<WiFiNetwork>& networks) override;
-    WiFiError connect_network(const std::string& ssid, const std::string& password) override;
+    WiFiError connect_network(const std::string& ssid, const std::string& password,
+                              bool is_hidden) override;
     WiFiError disconnect_network() override;
     // Real CoreWLAN radio power. Without these the base-class defaults apply —
     // a silent-success no-op plus an is_radio_enabled() that always answers
@@ -70,10 +67,6 @@ class WifiBackendMacOS : public WifiBackend {
     bool running_;
     void* wifi_client_; ///< CoreWLAN client (CWWiFiClient*, cast in .mm file)
     void* interface_;   ///< Primary WiFi interface (CWInterface*, cast in .mm file)
-
-    // Event system
-    std::mutex callbacks_mutex_; ///< Protects callbacks map from race conditions
-    std::map<std::string, std::function<void(const std::string&)>> callbacks_;
 
     // LVGL timers for async operation completion
     lv_timer_t* scan_timer_;
@@ -134,29 +127,6 @@ class WifiBackendMacOS : public WifiBackend {
     // ========================================================================
     // Internal Helpers
     // ========================================================================
-
-    /**
-     * @brief Fire event to registered callbacks
-     *
-     * Thread-safe event dispatch with mutex protection.
-     *
-     * @param event_name Event type ("SCAN_COMPLETE", "CONNECTED", etc.)
-     * @param data Optional event data
-     */
-    void fire_event(const std::string& event_name, const std::string& data = "");
-
-    /**
-     * @brief Convert CoreWLAN RSSI to percentage (0-100)
-     *
-     * Uses standard WiFi RSSI to percentage conversion:
-     * - RSSI >= -50 dBm → 100%
-     * - RSSI <= -100 dBm → 0%
-     * - Linear interpolation between
-     *
-     * @param rssi Signal strength in dBm
-     * @return Signal percentage (0-100)
-     */
-    int rssi_to_percentage(int rssi);
 
     /**
      * @brief Extract security type from CoreWLAN network

@@ -3,6 +3,7 @@
 
 #include "ui_wizard_touch_calibration.h"
 
+#include "ui_callback_helpers.h"
 #include "ui_effects.h"
 #include "ui_subject_registry.h"
 #include "ui_utils.h"
@@ -15,6 +16,7 @@
 #include "theme_manager.h"
 #include "touch_calibration_layout.h"
 #include "touch_calibration_wrapper.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/spdlog.h>
 
@@ -38,8 +40,6 @@ extern lv_subject_t wizard_subtitle;
 // Global Instance
 // ============================================================================
 
-static std::unique_ptr<WizardTouchCalibrationStep> g_wizard_touch_calibration_step;
-
 // Flag to force touch calibration step to show (for visual testing on SDL)
 static bool g_force_touch_calibration_step = false;
 
@@ -51,12 +51,7 @@ void force_touch_calibration_step(bool force) {
 }
 
 WizardTouchCalibrationStep* get_wizard_touch_calibration_step() {
-    if (!g_wizard_touch_calibration_step) {
-        g_wizard_touch_calibration_step = std::make_unique<WizardTouchCalibrationStep>();
-        StaticPanelRegistry::instance().register_destroy(
-            "WizardTouchCalibrationStep", []() { g_wizard_touch_calibration_step.reset(); });
-    }
-    return g_wizard_touch_calibration_step.get();
+    return &helix::lazy_global<WizardTouchCalibrationStep>("WizardTouchCalibrationStep");
 }
 
 // ============================================================================
@@ -64,28 +59,19 @@ WizardTouchCalibrationStep* get_wizard_touch_calibration_step() {
 // ============================================================================
 
 WizardTouchCalibrationStep::WizardTouchCalibrationStep() {
-    // Create the calibration panel
-    panel_ = std::make_unique<helix::TouchCalibrationPanel>();
-
-    // Set screen size from DisplayManager
-    DisplayManager* display_mgr = DisplayManager::instance();
-    if (display_mgr && display_mgr->is_initialized()) {
-        panel_->set_screen_size(display_mgr->width(), display_mgr->height());
-        spdlog::debug("[{}] Screen size set to {}x{}", get_name(), display_mgr->width(),
-                      display_mgr->height());
-    } else {
-        // Fallback to defaults
-        panel_->set_screen_size(800, 480);
-        spdlog::warn("[{}] DisplayManager not available, using default 800x480", get_name());
-    }
+    controller_.attach(*this);
+    // The screen size is NOT sampled here. This step is a singleton built when
+    // the wizard registry is, and a display rotated after that would leave every
+    // crosshair at the wrong ratio. The controller re-samples on each begin().
+    helix::TouchCalibrationPanel* panel = controller_.panel();
 
     // Set completion callback
-    panel_->set_completion_callback(
+    panel->set_completion_callback(
         [this](const helix::TouchCalibration* cal) { on_calibration_complete(cal); });
 
     // Set failure callback for degenerate points (collinear/duplicate)
     // Panel auto-restarts to POINT_1, we show error with step instruction
-    panel_->set_failure_callback([this](const char* reason) {
+    panel->set_failure_callback([this](const char* reason) {
         spdlog::warn("[{}] Calibration failed: {}", get_name(), reason);
 
         if (screen_root_) {
@@ -97,7 +83,7 @@ WizardTouchCalibrationStep::WizardTouchCalibrationStep() {
     });
 
     // Set up sample progress callback for UI updates
-    panel_->set_sample_progress_callback([this]() { update_instruction_text(); });
+    panel->set_sample_progress_callback([this]() { update_instruction_text(); });
 
     // Auto-accept the instant the panel enters VERIFY. Wired to the panel's
     // verify-entry hook (NOT the press handler) so it fires on whichever commit
@@ -106,7 +92,7 @@ WizardTouchCalibrationStep::WizardTouchCalibrationStep() {
     // the press edge to on_release()/stall; the old press-handler-only check then
     // never ran on clean capacitive panels (Goodix/Q2), hanging the wizard forever
     // on "Computing calibration..." (#1029).
-    panel_->set_verify_entry_callback([this]() { on_verify_entered(); });
+    panel->set_verify_entry_callback([this]() { on_verify_entered(); });
 
     // Note: No countdown/timeout/fast-revert callbacks needed for wizard mode.
     // The wizard auto-accepts calibration immediately upon entering VERIFY state
@@ -153,12 +139,16 @@ void WizardTouchCalibrationStep::init_subjects() {
 void WizardTouchCalibrationStep::register_callbacks() {
     spdlog::debug("[{}] Registering callbacks", get_name());
 
-    lv_xml_register_event_cb(nullptr, "on_touch_cal_accept_clicked", on_accept_clicked_static);
-    lv_xml_register_event_cb(nullptr, "on_touch_cal_retry_clicked", on_retry_clicked_static);
-    lv_xml_register_event_cb(nullptr, "on_touch_cal_screen_touched", on_screen_touched_static);
-    lv_xml_register_event_cb(nullptr, "on_touch_cal_screen_released", on_screen_released_static);
-    lv_xml_register_event_cb(nullptr, "on_touch_cal_test_area_touched",
-                             on_test_area_touched_static);
+    register_xml_callbacks({
+        {"on_wizard_touch_cal_retry_clicked",
+         [](lv_event_t*) { get_wizard_touch_calibration_step()->handle_retry_clicked(); }},
+        {"on_touch_cal_screen_touched",
+         [](lv_event_t* e) { get_wizard_touch_calibration_step()->handle_screen_touched(e); }},
+        {"on_touch_cal_screen_released",
+         [](lv_event_t*) { get_wizard_touch_calibration_step()->handle_screen_released(); }},
+        {"on_touch_cal_test_area_touched",
+         [](lv_event_t* e) { get_wizard_touch_calibration_step()->handle_test_area_touched(e); }},
+    });
 }
 
 // ============================================================================
@@ -201,8 +191,9 @@ lv_obj_t* WizardTouchCalibrationStep::create(lv_obj_t* parent) {
     raised_skip_ = helix::ui::raise_control_above_capture(lv_screen_active(), "next_skip_group");
 
     // Find test area widgets (shown in COMPLETE state)
-    test_area_container_ = lv_obj_find_by_name(screen_root_, "test_area_container");
-    test_touch_area_ = lv_obj_find_by_name(screen_root_, "test_touch_area");
+    test_area_container_ =
+        helix::ui::find_required(screen_root_, "test_area_container", get_name());
+    test_touch_area_ = helix::ui::find_required(screen_root_, "test_touch_area", get_name());
 
     // Center the wizard subtitle for this step (keeps it clear of crosshair targets)
     lv_obj_t* subtitle = lv_obj_find_by_name(lv_screen_active(), "wizard_subtitle");
@@ -212,10 +203,10 @@ lv_obj_t* WizardTouchCalibrationStep::create(lv_obj_t* parent) {
 
     // Re-set callbacks (cleanup() clears completion callback to prevent
     // updates to destroyed UI, so we must restore it for each create cycle)
-    if (panel_) {
-        panel_->set_completion_callback(
+    if (controller_.panel()) {
+        controller_.panel()->set_completion_callback(
             [this](const helix::TouchCalibration* cal) { on_calibration_complete(cal); });
-        panel_->set_failure_callback([this](const char* reason) {
+        controller_.panel()->set_failure_callback([this](const char* reason) {
             spdlog::warn("[{}] Calibration failed: {}", get_name(), reason);
             if (screen_root_) {
                 calibration_failed_ = true;
@@ -226,21 +217,16 @@ lv_obj_t* WizardTouchCalibrationStep::create(lv_obj_t* parent) {
         });
         // Re-arm auto-accept (mirrors completion/failure above; the panel's
         // verify-entry hook drives VERIFY->COMPLETE on every commit path, #1029).
-        panel_->set_verify_entry_callback([this]() { on_verify_entered(); });
-        panel_->cancel(); // Reset to IDLE
+        controller_.panel()->set_verify_entry_callback([this]() { on_verify_entered(); });
     }
 
-    // Snapshot the active calibration and disable affine so we capture raw
-    // (post-LVGL-linear) coordinates. Without disabling, an existing bad
-    // calibration transforms the coordinates, making recalibration produce
-    // garbage (feedback loop). session_.restore() (in cleanup) re-enables it.
-    DisplayManager* dm = DisplayManager::instance();
-    if (dm) {
-        session_.begin_capture(*dm);
-        // Suppress the global debug-touches ripple during the wizard step — it
-        // would draw raw (Y-inverted) coords while affine is off (#943).
-        dm->set_touch_calibration_active(true);
-    }
+    // Re-sample the screen, snapshot the live calibration and disable the affine
+    // so capture sees raw (post-LVGL-linear) coordinates: leaving a bad calibration
+    // in place would transform them and make recalibration produce garbage. This step
+    // accepts as soon as VERIFY is reached (on_verify_entered) and defers writing
+    // until 'Next', so it neither runs an interactive verify phase nor commits here.
+    // end() (in cleanup) puts it all back.
+    controller_.begin();
 
     // Enable Next button and set initial text to "Skip"
     lv_subject_set_int(&connection_test_passed, 1);
@@ -288,28 +274,19 @@ void WizardTouchCalibrationStep::cleanup() {
     test_touch_area_ = nullptr;
     screen_root_ = nullptr;
 
-    // Restore the pre-session calibration and re-enable the affine transform.
-    DisplayManager* dm = DisplayManager::instance();
-    if (dm) {
-        session_.restore(*dm);
-        dm->set_touch_calibration_active(false);
+    // Drop the callbacks BEFORE unwinding: they capture `this` and a stall timer
+    // left armed by a mid-press navigation would otherwise reach a torn-down UI
+    // (#1029). end() then restores the pre-session calibration, re-enables the
+    // affine and fully disarms the panel.
+    if (controller_.panel()) {
+        controller_.panel()->set_completion_callback(nullptr);
+        controller_.panel()->set_verify_entry_callback(nullptr);
+        controller_.panel()->reset();
     }
-
-    // Reset panel state - clear callbacks before reset to prevent updates to
-    // destroyed UI widgets (callbacks would call update_instruction_text() etc.).
-    // Clear the verify-entry callback too: it captures `this` and could otherwise
-    // be invoked by a stall timer left armed if the user navigated away mid-press
-    // (#1029). reset() (not cancel()) stops that stall timer and clears the
-    // pending-press state, fully disarming the panel on teardown.
-    if (panel_) {
-        panel_->set_completion_callback(nullptr);
-        panel_->set_verify_entry_callback(nullptr);
-        panel_->reset();
-    }
+    controller_.end();
 
     // Clear pending calibration (user skipped or went back)
-    has_pending_calibration_ = false;
-    pending_range_fit_ = helix::TouchRangeFit{};
+    controller_.clear_pending();
 }
 
 // ============================================================================
@@ -317,35 +294,19 @@ void WizardTouchCalibrationStep::cleanup() {
 // ============================================================================
 
 bool WizardTouchCalibrationStep::commit_calibration() {
-    if (!has_pending_calibration_) {
+    if (!controller_.has_pending()) {
         spdlog::debug("[{}] No pending calibration to commit", get_name());
         return false;
     }
 
-    Config* config = Config::get_instance();
-    if (!config) {
-        spdlog::error("[{}] Cannot commit calibration: Config not available", get_name());
+    // Re-installs the previewed mapping (idempotent) and persists it.
+    const helix::ui::CommitOutcome outcome = controller_.commit();
+    if (outcome == helix::ui::CommitOutcome::NoCalibration) {
         return false;
     }
-
-    // Persist and install. Shared with the Settings overlay so the two cannot
-    // drift on which of the two calibration shapes gets written (#1259, #1276).
-    // This is also where the evdev range is first re-programmed: everything up to
-    // 'Next' is revertible through session_.restore(), which only handles the
-    // affine.
-    helix::commit_calibration_result(calibration_sink(), pending_calibration_, pending_range_fit_);
-    config->save();
-
     spdlog::info("[{}] Calibration committed to config", get_name());
-    has_pending_calibration_ = false;
-    pending_range_fit_ = helix::TouchRangeFit{};
-    session_.commit(); // Calibration committed, no need to revert on teardown
     return true;
 }
-
-// ============================================================================
-// Skip Logic
-// ============================================================================
 
 bool WizardTouchCalibrationStep::should_skip() const {
     // Force show if explicitly requested (for visual testing on SDL)
@@ -376,7 +337,7 @@ bool WizardTouchCalibrationStep::should_skip() const {
 
     // Skip if already calibrated
     Config* config = Config::get_instance();
-    if (config && config->get<bool>("/input/calibration/valid", false)) {
+    if (config->get<bool>("/input/calibration/valid", false)) {
         spdlog::info("[{}] Skipping touch calibration: already calibrated", get_name());
         return true;
     }
@@ -386,58 +347,13 @@ bool WizardTouchCalibrationStep::should_skip() const {
 }
 
 // ============================================================================
-// Static Event Handlers (Trampolines)
-// ============================================================================
-
-void WizardTouchCalibrationStep::on_accept_clicked_static(lv_event_t* e) {
-    (void)e;
-    get_wizard_touch_calibration_step()->handle_accept_clicked();
-}
-
-void WizardTouchCalibrationStep::on_retry_clicked_static(lv_event_t* e) {
-    (void)e;
-    get_wizard_touch_calibration_step()->handle_retry_clicked();
-}
-
-void WizardTouchCalibrationStep::on_screen_touched_static(lv_event_t* e) {
-    get_wizard_touch_calibration_step()->handle_screen_touched(e);
-}
-
-void WizardTouchCalibrationStep::on_screen_released_static(lv_event_t* e) {
-    (void)e;
-    get_wizard_touch_calibration_step()->handle_screen_released();
-}
-
-void WizardTouchCalibrationStep::on_test_area_touched_static(lv_event_t* e) {
-    get_wizard_touch_calibration_step()->handle_test_area_touched(e);
-}
-
-// ============================================================================
 // Instance Event Handlers
 // ============================================================================
-
-helix::ICalibrationSink* WizardTouchCalibrationStep::calibration_sink() {
-    if (calibration_sink_override_) {
-        return calibration_sink_override_;
-    }
-    return DisplayManager::instance();
-}
-
-void WizardTouchCalibrationStep::handle_accept_clicked() {
-    spdlog::info("[{}] Accept calibration clicked", get_name());
-
-    if (!panel_) {
-        return;
-    }
-
-    // Accept triggers the completion callback with calibration data
-    panel_->accept();
-}
 
 void WizardTouchCalibrationStep::handle_retry_clicked() {
     spdlog::info("[{}] Retry calibration clicked", get_name());
 
-    if (!panel_) {
+    if (!controller_.panel()) {
         return;
     }
 
@@ -447,19 +363,7 @@ void WizardTouchCalibrationStep::handle_retry_clicked() {
     // recalibration produce garbage. Mirrors the Settings overlay retry
     // (ui_touch_calibration_overlay.cpp) and the begin_capture() disable in
     // create() (#943). The backup is retained across retry.
-    if (helix::ICalibrationSink* sink = calibration_sink()) {
-        session_.revert_for_retry(*sink);
-    }
-
-    // Use cancel()+start() rather than retry() because the wizard auto-accepts
-    // calibration, so the panel may already be in COMPLETE state where retry()
-    // (which guards on VERIFY) would be a no-op.
-    panel_->cancel();
-    panel_->start();
-
-    // Clear pending calibration since user is recalibrating
-    has_pending_calibration_ = false;
-    pending_range_fit_ = helix::TouchRangeFit{};
+    controller_.retry();
 
     // Reset button text back to "Skip" since calibration is starting over
     lv_subject_set_int(&wizard_show_skip, 1);
@@ -472,68 +376,34 @@ void WizardTouchCalibrationStep::handle_retry_clicked() {
 }
 
 void WizardTouchCalibrationStep::handle_screen_touched(lv_event_t* e) {
-    (void)e; // Event not used directly - we get touch position from active input device
-
-    if (!panel_ || !screen_root_) {
+    (void)e; // The controller reads the position from the active input device
+    if (!screen_root_) {
         return;
     }
+    controller_.on_press();
+}
 
-    // Get click position relative to the screen
-    lv_point_t point;
-    lv_indev_get_point(lv_indev_active(), &point);
+void WizardTouchCalibrationStep::handle_screen_released() {
+    controller_.on_release();
+}
 
-    auto state_before = panel_->get_state();
-    spdlog::debug("[{}] Screen touched at ({}, {}) during state {}", get_name(), point.x, point.y,
-                  static_cast<int>(state_before));
-
-    // on_press() captures the press; commit happens on release / stall (#943).
-    // Handles IDLE→POINT_1 auto-start and sample collection.
-    // Pair the press with the untouched digitizer reading behind it, when the
-    // backend can supply one. Fetched here, at the press edge, so it belongs to
-    // this coordinate and not to some later motion event (#1259, #1276).
-    helix::Point device_raw{};
-    const bool has_device_raw = helix::get_last_raw_touch(device_raw);
-    panel_->on_press({point.x, point.y}, has_device_raw ? &device_raw : nullptr);
-
-    // Flash crosshair for visual tap feedback (only during calibration points,
-    // not on the initial "tap anywhere to begin" transition from IDLE)
-    auto state = panel_->get_state();
-    if (crosshair_ && state_before != helix::TouchCalibrationPanel::State::IDLE &&
-        (state == helix::TouchCalibrationPanel::State::POINT_1 ||
-         state == helix::TouchCalibrationPanel::State::POINT_2 ||
-         state == helix::TouchCalibrationPanel::State::POINT_3)) {
-        helix::ui::flash_object(crosshair_, 200, true);
-    }
-
-    // Auto-accept on reaching VERIFY is handled by on_verify_entered() via the
-    // panel's verify-entry callback — it fires on whichever commit path actually
-    // reaches VERIFY (release / stall / legacy press), not just this press edge
-    // (#1029). Do not re-check state here: with debounce on, the 3rd point
-    // commits on release, so VERIFY is never reached inside this press handler.
-
-    // Update UI for next step
+void WizardTouchCalibrationStep::on_progress() {
     update_instruction_text();
     update_crosshair_position();
     update_button_visibility();
 }
 
-void WizardTouchCalibrationStep::handle_screen_released() {
-    // Forward finger-lift to the panel so the pending press commits
-    // (issue #943). No-op when debounce is disabled. Main-thread input only.
-    if (!panel_) {
-        return;
+void WizardTouchCalibrationStep::on_capture_feedback(helix::Point landed) {
+    // The wizard marks the tap on the crosshair only; the lingering dot the
+    // Settings overlay draws is a feature of that view, not of calibration.
+    (void)landed;
+    if (crosshair_) {
+        helix::ui::flash_object(crosshair_, 200, true);
     }
-    panel_->on_release();
-
-    // The commit happens here (not on press), so refresh the UI now that the
-    // sample count / state may have advanced — otherwise the instruction label
-    // keeps showing the pre-commit "touch N of 3" until the next press.
-    update_instruction_text();
-    update_crosshair_position();
 }
 
 void WizardTouchCalibrationStep::on_verify_entered() {
-    if (!panel_) {
+    if (!controller_.panel()) {
         return;
     }
 
@@ -542,7 +412,7 @@ void WizardTouchCalibrationStep::on_verify_entered() {
     // runs on every commit path (#1029), so this is the single place auto-accept
     // happens regardless of how POINT_3 committed (release / stall / press).
     spdlog::info("[{}] Auto-accepting calibration (wizard mode)", get_name());
-    panel_->accept();
+    controller_.panel()->accept();
 
     // Refresh UI only when a live screen exists. accept()'s completion callback
     // (on_calibration_complete) is itself screen_root_-guarded; mirror that here
@@ -613,7 +483,7 @@ void WizardTouchCalibrationStep::on_calibration_complete(const helix::TouchCalib
             lv_subject_set_int(&calibration_valid_, 0);
             lv_subject_set_int(&wizard_show_skip, 1);
 
-            panel_->start();
+            controller_.panel()->start();
             update_instruction_text(); // Will concatenate error + step
             update_crosshair_position();
             update_button_visibility();
@@ -623,23 +493,19 @@ void WizardTouchCalibrationStep::on_calibration_complete(const helix::TouchCalib
         spdlog::info("[{}] Calibration complete and valid", get_name());
 
         // Store calibration for later commit (saved only when user clicks 'Next')
-        pending_calibration_ = *cal;
-        pending_range_fit_ = panel_->get_range_fit();
-        has_pending_calibration_ = true;
+        const helix::TouchRangeFit& fit = controller_.panel()->get_range_fit();
+        controller_.stash_pending(*cal, fit);
         spdlog::debug("[{}] Calibration stored (will save when 'Next' is clicked)", get_name());
 
-        // The pre-session calibration was already snapshotted in create() via
-        // session_.begin_capture(); apply the new one immediately (no restart
-        // required). session_.restore() reverts it if the user backs out before
-        // committing on 'Next'.
-        DisplayManager* dm = DisplayManager::instance();
-        if (dm) {
-            if (dm->apply_touch_calibration(*cal)) {
-                spdlog::info("[{}] Calibration applied to touch input", get_name());
-            } else {
-                spdlog::debug("[{}] Could not apply calibration immediately (may require restart)",
-                              get_name());
-            }
+        // Install the same two-stage mapping 'Next' will persist, so the preview is
+        // what the user keeps and 'Next' is reachable under it. The session
+        // snapshotted the pre-session range and affine in create(); end() reverts
+        // both if the user backs out before committing.
+        if (helix::apply_calibration_result(controller_.sink(), *cal, fit)) {
+            spdlog::info("[{}] Calibration applied to touch input", get_name());
+        } else {
+            spdlog::debug("[{}] Could not apply calibration immediately (may require restart)",
+                          get_name());
         }
 
         lv_subject_set_int(&calibration_valid_, 1);
@@ -664,11 +530,11 @@ void WizardTouchCalibrationStep::on_calibration_complete(const helix::TouchCalib
 // ============================================================================
 
 void WizardTouchCalibrationStep::update_instruction_text() {
-    if (!panel_) {
+    if (!controller_.panel()) {
         return;
     }
 
-    auto p = panel_->get_progress();
+    auto p = controller_.panel()->get_progress();
 
     // Clear failure flag once user successfully captures a point (moved past POINT_1)
     if (p.state != helix::TouchCalibrationPanel::State::POINT_1 &&
@@ -719,14 +585,14 @@ void WizardTouchCalibrationStep::ensure_skip_on_top() {
 }
 
 void WizardTouchCalibrationStep::update_crosshair_position() {
-    if (!panel_) {
+    if (!controller_.panel()) {
         return;
     }
 
     // Touch overlay was reparented to screen for full-screen capture
     lv_obj_t* touch_overlay = lv_obj_find_by_name(lv_screen_active(), "touch_capture_overlay");
 
-    auto state = panel_->get_state();
+    auto state = controller_.panel()->get_state();
 
     // IDLE: show touch overlay (for "tap anywhere to begin") but hide crosshair
     if (state == helix::TouchCalibrationPanel::State::IDLE) {
@@ -763,22 +629,11 @@ void WizardTouchCalibrationStep::update_crosshair_position() {
     }
     ensure_skip_on_top();
 
-    int step = 0;
-    switch (state) {
-    case helix::TouchCalibrationPanel::State::POINT_1:
-        step = 0;
-        break;
-    case helix::TouchCalibrationPanel::State::POINT_2:
-        step = 1;
-        break;
-    case helix::TouchCalibrationPanel::State::POINT_3:
-        step = 2;
-        break;
-    default:
+    const int step = controller_.active_target_index();
+    if (step < 0) {
         return;
     }
-
-    helix::Point target = panel_->get_target_position(step);
+    const helix::Point target = controller_.active_target_position();
 
     // Crosshair is a direct child of the screen, so we can use screen-absolute coordinates
     if (crosshair_) {
@@ -791,11 +646,11 @@ void WizardTouchCalibrationStep::update_crosshair_position() {
 }
 
 void WizardTouchCalibrationStep::update_button_visibility() {
-    if (!screen_root_ || !panel_) {
+    if (!screen_root_ || !controller_.panel()) {
         return;
     }
 
-    auto state = panel_->get_state();
+    auto state = controller_.panel()->get_state();
     bool is_complete = (state == helix::TouchCalibrationPanel::State::COMPLETE);
 
     // Show test area container only in COMPLETE state

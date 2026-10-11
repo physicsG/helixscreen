@@ -37,18 +37,15 @@ Mutation checks (measured 2026-08-14, not assumed):
 The three assertions catch different failure modes, and none subsumes another:
 
   test_recovery_card_fits_the_screen   card grows past the screen (chrome too tall)
-  test_dismiss_button_stays_inside     card pinned AT its cap, contents overflow it
+  test_last_row_stays_inside_the_card card pinned AT its cap, contents overflow it
   test_recovery_card_honors_the_standard_cap
                                       card raised ABOVE the shared 85% cap, the
                                       per-dialog patch #1277 retired
 
 The second does NOT fail on a screen-overflow layout: there the card and its
 buttons run off the screen together, so the button is still within the card's
-own bounds. It exists for the case that actually bit during this fix — a card
-clamped at max_height whose last child lands past the clamped edge, unreachable
-because the card is scrollable=false. That was 4px at 85%, which this dialog
-first papered over with a 90% card cap; the tall-chrome ladder now budgets the
-second button row instead (#1277).
+own bounds. It exists for a card clamped at max_height whose last child lands past the
+clamped edge, unreachable because the card is scrollable=false (#1277).
 """
 
 from __future__ import annotations
@@ -151,23 +148,36 @@ def test_recovery_card_fits_the_screen(shutdown_app):
 
 
 @pytest.mark.parametrize("shutdown_app", _SIZES, indirect=True)
-def test_dismiss_button_stays_inside_the_card(shutdown_app):
+def test_last_row_stays_inside_the_card(shutdown_app):
     """The last child is what a capped card clips first.
 
     The card is `scrollable=false`, so anything past its bottom edge is not
-    merely off-view, it is unreachable — the user cannot dismiss the dialog.
+    merely off-view, it is unreachable — the user cannot restart Klipper.
     """
     app, size = shutdown_app
 
     card = _geom(app, "klipper_recovery_card")
-    dismiss = _geom(app, "recovery_dismiss_btn")
-    assert card is not None and dismiss is not None
+    row = _geom(app, "recovery_restart_actions")
+    assert card is not None and row is not None
 
     card_bottom = card["y"] + card["h"]
-    dismiss_bottom = dismiss["y"] + dismiss["h"]
-    assert dismiss_bottom <= card_bottom, (
-        f"{size}: Dismiss runs {dismiss_bottom - card_bottom}px past the card "
-        f"(card y={card['y']} h={card['h']}, button y={dismiss['y']} h={dismiss['h']})")
+    row_bottom = row["y"] + row["h"]
+    assert row_bottom <= card_bottom, (
+        f"{size}: restart row runs {row_bottom - card_bottom}px past the card "
+        f"(card y={card['y']} h={card['h']}, row y={row['y']} h={row['h']})")
+
+
+@pytest.mark.parametrize("shutdown_app", _SIZES, indirect=True)
+def test_close_x_is_inside_the_card(shutdown_app):
+    """The header X is the only exit when the restart row is hidden."""
+    app, size = shutdown_app
+
+    card = _geom(app, "klipper_recovery_card")
+    close = _geom(app, "recovery_dismiss_btn")
+    assert card is not None and close is not None
+    assert close["y"] >= card["y"], f"{size}: close X starts above the card"
+    assert close["x"] + close["w"] <= card["x"] + card["w"], (
+        f"{size}: close X runs past the card's right edge")
 
 
 @pytest.mark.parametrize("shutdown_app", _SIZES, indirect=True)
@@ -176,9 +186,8 @@ def test_recovery_card_honors_the_standard_cap(shutdown_app):
 
     #dialog_content_max and its sibling ladders are derived from ONE card cap —
     85% of the screen — at every breakpoint. Raising a single card above that
-    (this dialog carried 90% for a while) unsizes every ladder it shares and is
-    how the clipped-button family keeps coming back: the extra chrome belongs
-    in the budget, via #dialog_content_tall_chrome_max, not in a taller card.
+    unsizes every ladder it shares: extra chrome belongs in the content budget,
+    not in a taller card.
     """
     app, size = shutdown_app
     screen_h = int(size.split("x")[1])
@@ -188,8 +197,8 @@ def test_recovery_card_honors_the_standard_cap(shutdown_app):
     cap = screen_h * 85 // 100  # LVGL floors the percentage
     assert card["h"] <= cap, (
         f"{size}: card is {card['h']}px against the shared {cap}px cap "
-        f"(85% of {screen_h}) — extra chrome belongs in "
-        f"#dialog_content_tall_chrome_max, not a raised card")
+        f"(85% of {screen_h}) — extra chrome belongs in the content "
+        f"budget, not a raised card")
 
 
 @pytest.mark.parametrize("shutdown_app", _SIZES, indirect=True)

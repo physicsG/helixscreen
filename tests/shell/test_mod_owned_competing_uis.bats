@@ -111,7 +111,7 @@ _logging_kill() {
 
 @test "install.sh (bundled) carries the mod-owned short-circuit" {
     grep -qF '[ "$HOST_OWNS_COMPETING_UIS" = "1" ] && return 0' \
-        "$WORKTREE_ROOT/scripts/install.sh"
+        "$INSTALL_BUNDLE"
 }
 
 # ============================================================================

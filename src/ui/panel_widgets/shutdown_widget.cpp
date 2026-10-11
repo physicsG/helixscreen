@@ -3,6 +3,7 @@
 
 #include "shutdown_widget.h"
 
+#include "ui_callback_helpers.h"
 #include "ui_event_safety.h"
 #include "ui_shutdown_modal.h"
 #include "ui_split_button.h"
@@ -201,7 +202,9 @@ void execute_both_shutdown(IMoonrakerAPI* api, AsyncLifetimeGuard& lifetime) {
             spdlog::error(
                 "[ShutdownDialog] Printer shutdown failed: {} — proceeding with screen anyway",
                 err.message);
-            ToastManager::instance().show(ToastSeverity::ERROR, lv_tr("Shutdown failed"), 6000);
+            helix::ui::run_on_main("ShutdownDialog::shutdown_failed", []() {
+                ToastManager::instance().show(ToastSeverity::ERROR, lv_tr("Shutdown failed"), 6000);
+            });
             if (tok.expired())
                 return;
             tok.defer([]() { execute_screen_shutdown(); });
@@ -225,27 +228,13 @@ void execute_both_reboot(IMoonrakerAPI* api, AsyncLifetimeGuard& lifetime) {
             spdlog::error(
                 "[ShutdownDialog] Printer reboot failed: {} — proceeding with screen anyway",
                 err.message);
-            ToastManager::instance().show(ToastSeverity::ERROR, lv_tr("Reboot failed"), 6000);
+            helix::ui::run_on_main("ShutdownDialog::reboot_failed", []() {
+                ToastManager::instance().show(ToastSeverity::ERROR, lv_tr("Reboot failed"), 6000);
+            });
             if (tok.expired())
                 return;
             tok.defer([]() { execute_screen_reboot(); });
         });
-}
-
-// Single-scope mode uses these directly (XML modal_button_row callbacks
-// in the ref_value=0 button row). Dual-scope dispatches via the split-button
-// callbacks below.
-void on_shutdown_printer_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[ShutdownModal] shutdown_printer");
-    if (auto* m = find_shutdown_modal(e))
-        m->fire_printer_shutdown();
-    LVGL_SAFE_EVENT_CB_END();
-}
-void on_reboot_printer_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[ShutdownModal] reboot_printer");
-    if (auto* m = find_shutdown_modal(e))
-        m->fire_printer_reboot();
-    LVGL_SAFE_EVENT_CB_END();
 }
 
 // Split-button dispatchers (dual-scope mode). The split button's selected
@@ -298,14 +287,28 @@ void register_shutdown_widget() {
     });
 
     // Register XML event callback at startup (before any XML is parsed)
-    lv_xml_register_event_cb(nullptr, "shutdown_clicked_cb", ShutdownWidget::shutdown_clicked_cb);
-    lv_xml_register_event_cb(nullptr, "on_shutdown_printer_clicked", on_shutdown_printer_clicked);
-    lv_xml_register_event_cb(nullptr, "on_reboot_printer_clicked", on_reboot_printer_clicked);
-    lv_xml_register_event_cb(nullptr, "on_restart_split_clicked", on_restart_split_clicked);
-    lv_xml_register_event_cb(nullptr, "on_shutdown_split_clicked", on_shutdown_split_clicked);
+    register_xml_callbacks({
+        {"shutdown_clicked_cb", ShutdownWidget::shutdown_clicked_cb},
+        // Single-scope mode uses these two directly (XML modal_button_row callbacks
+        // in the ref_value=0 button row). Dual-scope dispatches via the split-button
+        // callbacks below.
+        {"on_shutdown_printer_clicked",
+         [](lv_event_t* e) {
+             if (auto* m = find_shutdown_modal(e))
+                 m->fire_printer_shutdown();
+         }},
+        {"on_reboot_printer_clicked",
+         [](lv_event_t* e) {
+             if (auto* m = find_shutdown_modal(e))
+                 m->fire_printer_reboot();
+         }},
+        {"on_restart_split_clicked", on_restart_split_clicked},
+        {"on_shutdown_split_clicked", on_shutdown_split_clicked},
+    });
 }
 
-ShutdownWidget::ShutdownWidget(IMoonrakerAPI* api) : api_(api) {}
+ShutdownWidget::ShutdownWidget(IMoonrakerAPI* api)
+    : TiledPanelWidget("shutdown", TileSizing::Content{"", "", "Shutdown", false}), api_(api) {}
 
 ShutdownWidget::~ShutdownWidget() {
     detach();
@@ -315,27 +318,33 @@ void ShutdownWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
     widget_obj_ = widget_obj;
     parent_screen_ = parent_screen;
 
-    // Set user_data on the root lv_obj, NOT on the ui_button child.
-    // ui_button allocates its own UiButtonData in user_data — overwriting it
-    // leaks memory and breaks button style/contrast auto-updates.
-    lv_obj_set_user_data(widget_obj_, this);
-
     shutdown_btn_ = lv_obj_find_by_name(widget_obj_, "shutdown_button");
     if (shutdown_btn_) {
         lv_obj_add_event_cb(shutdown_btn_, shutdown_clicked_cb, LV_EVENT_CLICKED, this);
     }
+
+    install_delete_hook(widget_obj_);
 }
 
 void ShutdownWidget::detach() {
     lifetime_.invalidate();
+    uninstall_delete_hook();
 
     if (shutdown_modal_.is_visible()) {
         shutdown_modal_.hide();
     }
 
-    if (widget_obj_) {
-        lv_obj_set_user_data(widget_obj_, nullptr);
-    }
+    shutdown_btn_ = nullptr;
+    widget_obj_ = nullptr;
+    parent_screen_ = nullptr;
+}
+
+void ShutdownWidget::on_hooked_root_deleted() {
+    // Runs inside LVGL's delete event: pointer drops and guard expiry only.
+    // The modal is deliberately left alone — it lives on the modal layer rather
+    // than in this tile tree, so it is still alive here and hiding it needs a
+    // non-delete context. detach() still runs later and does that.
+    lifetime_.invalidate();
     shutdown_btn_ = nullptr;
     widget_obj_ = nullptr;
     parent_screen_ = nullptr;
@@ -390,8 +399,7 @@ void show_shutdown_dialog(IMoonrakerAPI* api, ShutdownModal& modal, AsyncLifetim
     // its default (local), which on a remote screen would silently collapse
     // the dual dialog into screen-only power actions.
     Config* cfg = Config::get_instance();
-    const std::string host =
-        cfg ? cfg->get<std::string>(cfg->df() + "moonraker_host", "localhost") : "localhost";
+    const std::string host = cfg->get<std::string>(cfg->df() + "moonraker_host", "localhost");
     const bool same_host = api->is_connected() ? !get_printer_state().is_moonraker_remote()
                                                : helix::is_moonraker_on_same_host(host);
     if (same_host) {

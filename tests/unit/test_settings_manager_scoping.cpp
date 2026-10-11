@@ -28,7 +28,7 @@
 //   * Cached readers — everything subject-backed, plus the chamber/scanner
 //     strings, is loaded once in init_subjects(). Those only follow the active
 //     printer across the deinit/init cycle that a real switch performs:
-//     Application::switch_printer() -> tear_down_printer_state() (step 16,
+//     PrinterSession::switch_printer() -> tear_down_printer_state() (step 16,
 //     StaticSubjectRegistry::deinit_all(), which runs the deinit_subjects()
 //     SettingsManager self-registers at settings_manager.cpp:225) ->
 //     init_printer_state() -> init_subjects() against the new df().
@@ -43,6 +43,8 @@
 
 #include "../helix_test_fixture.h"
 #include "../test_helpers/config_test_access.h"
+#include "ams_backend_cfs.h"
+#include "ams_state.h"
 #include "config.h"
 #include "settings_manager.h"
 #include "wizard_config_paths.h"
@@ -635,3 +637,29 @@ TEST_CASE_METHOD(SettingsPersistenceFixture,
 }
 
 } // namespace
+
+TEST_CASE_METHOD(SettingsScopeFixture,
+                 "SettingsManager: AUTO toolhead style comes from the DB, then the AMS backend",
+                 "[settings][toolhead]") {
+    auto effective = [&](const char* type) {
+        cfg->set<std::string>(a(wizard::PRINTER_TYPE), type);
+        return sm.get_effective_toolhead_style();
+    };
+    AmsState::instance().set_backend(nullptr);
+
+    SECTION("the database names the style") {
+        CHECK(effective("PFA Micron") == ToolheadStyle::ANTHEAD);
+        CHECK(effective("PFA Stealthfork") == ToolheadStyle::ANTHEAD);
+        CHECK(effective("Creality K1") == ToolheadStyle::CREALITY_K1);
+        CHECK(effective("Voron 2.4") == ToolheadStyle::DEFAULT);
+    }
+
+    SECTION("a backend hint applies only where the database has no style") {
+        AmsState::instance().set_backend(
+            std::make_unique<helix::printer::AmsBackendCfs>(nullptr, nullptr));
+        CHECK(effective("Some Custom Printer") == ToolheadStyle::CREALITY_K2);
+        CHECK(effective("PFA Micron") == ToolheadStyle::ANTHEAD);
+    }
+
+    AmsState::instance().set_backend(nullptr);
+}

@@ -15,6 +15,7 @@
 #include "ui_update_queue.h"
 #include "ui_wizard_filament_sensor_select.h"
 
+#include "../test_helpers/filament_sensor_manager_test_access.h"
 #include "../test_helpers/update_queue_test_access.h"
 #include "../ui_test_utils.h"
 #include "app_globals.h"
@@ -30,34 +31,6 @@
 #include "../catch_amalgamated.hpp"
 
 using json = nlohmann::json;
-
-// Test access helper — avoids polluting production API with test methods
-namespace helix {
-class FilamentSensorManagerTestAccess {
-  public:
-    static void reset(FilamentSensorManager& mgr) {
-        std::lock_guard<std::recursive_mutex> lock(mgr.mutex_);
-
-        mgr.sensors_.clear();
-        mgr.states_.clear();
-        mgr.master_enabled_ = true;
-        mgr.state_change_callback_ = nullptr;
-        mgr.sync_mode_ = true;
-        mgr.startup_time_ = std::chrono::steady_clock::now() - std::chrono::seconds(10);
-
-        if (mgr.subjects_initialized_) {
-            lv_subject_set_int(&mgr.runout_detected_, -1);
-            lv_subject_set_int(&mgr.toolhead_detected_, -1);
-            lv_subject_set_int(&mgr.entry_detected_, -1);
-            lv_subject_set_int(&mgr.probe_triggered_, -1);
-            lv_subject_set_int(&mgr.any_runout_, 0);
-            lv_subject_set_int(&mgr.motion_active_, 0);
-            lv_subject_set_int(&mgr.master_enabled_subject_, 1);
-            lv_subject_set_int(&mgr.sensor_count_, 0);
-        }
-    }
-};
-} // namespace helix
 
 using namespace helix;
 

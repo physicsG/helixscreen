@@ -3,7 +3,8 @@
 #
 # Meta-tests for the two source-level test-quality gates:
 #   scripts/check_test_tautology.py   assertions that cannot fail
-#   scripts/check_test_mirrors.py     signal 3, a test redefining shipped code
+#   scripts/check_test_mirrors.py     signal 3, a test redefining shipped code;
+#                                     signal 4, a branching stub for a filtered object
 #
 # Both are narrow on purpose. The broad versions of these rules fire on good
 # tests: name-collision alone yields 109 mirror findings on this tree (mostly a
@@ -15,6 +16,8 @@
 # case is a shape that a looser gate reported and that a reviewer confirmed was
 # a real test.
 
+load helpers
+
 TAUT="scripts/check_test_tautology.py"
 MIRROR="scripts/check_test_mirrors.py"
 
@@ -24,6 +27,12 @@ setup() {
     WORK="${BATS_TEST_TMPDIR:-$(mktemp -d)}/repo"
     rm -rf "$WORK"; mkdir -p "$WORK/scripts" "$WORK/include" "$WORK/src" "$WORK/tests/unit"
     cp "$REPO_ROOT/$TAUT" "$REPO_ROOT/$MIRROR" "$WORK/scripts/"
+    mkdir -p "$WORK/mk"
+    cat > "$WORK/mk/tests.mk" <<'EOF'
+TEST_APP_OBJS := $(filter-out \
+    $(OBJ_DIR)/main.o \
+    ,$(APP_OBJS))
+EOF
 
     cat > "$WORK/include/led.h" <<'EOF'
 #pragma once
@@ -146,7 +155,7 @@ TEST_CASE("strip") {
 }
 EOF
     run mirror
-    [[ "$output" == *"redefined-symbol"* ]]
+    contains "redefined-symbol" "$output"
     [[ "$output" == *"strip_version_prefix"* ]]
 }
 
@@ -194,4 +203,102 @@ TEST_CASE("strip") { REQUIRE(strip_version_prefix("v1.2") == "1.2"); }
 EOF
     run mirror
     [[ "$output" != *"redefined-symbol"* ]]
+}
+
+# ------------------------------------------------- mirror signal 4: stub-logic
+
+stub_fixture() {
+    mkdir -p "$WORK/mk" "$WORK/src/ui"
+    cat > "$WORK/mk/tests.mk" <<'EOF'
+TEST_APP_OBJS := $(filter-out \
+    $(OBJ_DIR)/main.o \
+    $(OBJ_DIR)/ui/ui_toast_manager.o \
+    ,$(APP_OBJS))
+EOF
+    cat > "$WORK/src/ui/ui_toast_manager.cpp" <<'EOF'
+namespace helix {
+void ToastManager::show(int severity, const char* msg) {
+    if (severity > 0) { render(msg); }
+}
+void ToastManager::hide() { dismiss(); }
+} // namespace helix
+EOF
+}
+
+@test "a branching stub for an object filtered out of the test link is flagged" {
+    stub_fixture
+    cat > "$WORK/tests/ui_test_utils.cpp" <<'EOF'
+using namespace helix;
+void ToastManager::show(int severity, const char* msg) {
+    if (severity > 1) { g_last = msg; }
+}
+EOF
+    run mirror
+    [[ "$output" == *"tests/ui_test_utils.cpp:2: [stub-logic] ToastManager::show()"* ]] \
+        || fail "$output"
+}
+
+@test "an inert stub for a filtered object is NOT flagged" {
+    stub_fixture
+    cat > "$WORK/tests/ui_test_utils.cpp" <<'EOF'
+void helix::ToastManager::show(int, const char*) {}
+void helix::ToastManager::hide() { return; }
+EOF
+    run mirror
+    [[ "$output" != *"stub-logic"* ]] || fail "$output"
+}
+
+@test "a branching helper that stubs nothing filtered is NOT flagged" {
+    stub_fixture
+    cat > "$WORK/tests/ui_test_utils.cpp" <<'EOF'
+void MockToastSink::show(int severity, const char* msg) {
+    if (severity > 1) { last = msg; }
+}
+EOF
+    run mirror
+    [[ "$output" != *"stub-logic"* ]] || fail "$output"
+}
+
+@test "the TEST_MIRROR_OK annotation silences signal 4" {
+    stub_fixture
+    cat > "$WORK/tests/ui_test_utils.cpp" <<'EOF'
+// TEST_MIRROR_OK: records the call for assertions, renders nothing
+void helix::ToastManager::show(int severity, const char* msg) {
+    if (g_hook) { g_hook(severity, msg); }
+}
+EOF
+    run mirror
+    [[ "$output" != *"stub-logic"* ]] || fail "$output"
+}
+
+@test "signal 4 refuses to run without the test link's filter list" {
+    rm "$WORK/mk/tests.mk"
+    run mirror
+    [ "$status" -eq 2 ] || fail "expected exit 2, got $status: $output"
+    [[ "$output" == *"cannot read"* ]] || fail "$output"
+}
+
+@test "signal 4 refuses a filter list it cannot parse" {
+    printf 'TEST_APP_OBJS := $(APP_OBJS)\n' > "$WORK/mk/tests.mk"
+    run mirror
+    [ "$status" -eq 2 ] || fail "expected exit 2, got $status: $output"
+    [[ "$output" == *"no TEST_APP_OBJS"* ]] || fail "$output"
+}
+
+@test "each signal is held to its own ceiling" {
+    stub_fixture
+    cat > "$WORK/tests/ui_test_utils.cpp" <<'EOF'
+void helix::ToastManager::show(int severity, const char* msg) {
+    if (severity > 1) { g_last = msg; }
+}
+EOF
+    # One stub-logic finding: a generous redefined-symbol ceiling buys it no room.
+    run bash -c "cd '$WORK' && python3 scripts/check_test_mirrors.py --summary \
+        --max redefined-symbol=5 --max stub-logic=0"
+    [ "$status" -eq 1 ] || fail "expected exit 1, got $status: $output"
+    [[ "$output" == *"stub-logic=1 exceeds 0"* ]] || fail "$output"
+
+    run bash -c "cd '$WORK' && python3 scripts/check_test_mirrors.py --summary \
+        --max redefined-symbol=0 --max stub-logic=1"
+    [ "$status" -eq 0 ] || fail "$output"
 }

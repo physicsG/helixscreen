@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component>
+  <!-- One printer in the printer switch menu: [check] [printer name ....].
+       C++ creates one per configured printer, names the row after the printer
+       id and wires the click; everything visual lives here. check_text is the
+       check glyph on the active printer and empty elsewhere, while min_width
+       keeps every name in the same column. C++ sets the printer name, which is
+       user text and so cannot travel as a prop: a leading '#' reads as a const. -->
+  <api>
+    <prop name="check_text" type="string" default=""/>
+  </api>
+  <view extends="lv_obj"
+        width="100%" height="content" flex_flow="row" style_flex_main_place="start" style_flex_cross_place="center"
+        style_flex_track_place="center" style_pad_all="#space_sm" style_pad_gap="#space_xs"
+        style_radius="#border_radius" scrollable="false" clickable="true">
+    <style name="styles.press_wash" selector="pressed"/>
+    <lv_label name="indicator"
+              text="$check_text" style_text_font="#icon_font_xs" style_min_width="16" style_text_color="#text"
+              clickable="false" event_bubble="true"/>
+    <lv_label name="printer_name"
+              text="" flex_grow="1" long_mode="dots" style_text_font="#font_body" style_text_color="#text"
+              clickable="false" event_bubble="true"/>
+  </view>
+</component>

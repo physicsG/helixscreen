@@ -34,16 +34,16 @@ namespace helix::ui {
  * @brief Per-row widget data for declarative text binding
  */
 struct ListRowWidgetData {
-    lv_subject_t filename_subject;
+    lv_subject_t filename_subject{};
     char filename_buf[128] = {0};
 
-    lv_subject_t size_subject;
+    lv_subject_t size_subject{};
     char size_buf[16] = {0};
 
-    lv_subject_t modified_subject;
+    lv_subject_t modified_subject{};
     char modified_buf[32] = {0};
 
-    lv_subject_t time_subject;
+    lv_subject_t time_subject{};
     char time_buf[32] = {0};
 
     // Observer handles (saved for cleanup before DELETE)
@@ -169,6 +169,7 @@ class PrintSelectListView : public ContainerDeleteNet {
     // === Visible Range ===
     int visible_start_ = -1;
     int visible_end_ = -1;
+    int total_items_ = 0;
 
     // === Cached Dimensions (set once after first layout) ===
     int cached_row_height_ = 0;

@@ -28,6 +28,10 @@
 
 #include "../catch_amalgamated.hpp"
 
+using helix::AmsError;
+using helix::AmsErrorHelper;
+using helix::AmsResult;
+
 namespace {
 
 struct AmsErrorRenderFixture : public HelixTestFixture {

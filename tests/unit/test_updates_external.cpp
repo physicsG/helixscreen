@@ -5,7 +5,7 @@
  * @file test_updates_external.cpp
  * @brief Tests for the in-app-update gates (firmware flag + physical writability).
  *
- * Covers helix_parse_truthy_env() (the pure parse that feeds the cached
+ * Covers helix::env_truthy() (the pure parse that feeds the cached
  * updates_externally_managed() helper) and confirms the cached predicate is
  * consistent with the process environment. The cache is deliberately NOT
  * exercised for both true/false in one process — the parse function is the
@@ -19,6 +19,7 @@
  */
 
 #include "app_globals.h"
+#include "env_knobs.h"
 #include "platform_info.h"
 
 #include <cstdlib>
@@ -29,31 +30,34 @@
 
 #include "../catch_amalgamated.hpp"
 
-TEST_CASE("helix_parse_truthy_env recognizes truthy values", "[update][external]") {
+TEST_CASE("env_truthy recognizes truthy values", "[update][external][env]") {
     // Truthy — case-insensitive
-    CHECK(helix_parse_truthy_env("1"));
-    CHECK(helix_parse_truthy_env("true"));
-    CHECK(helix_parse_truthy_env("TRUE"));
-    CHECK(helix_parse_truthy_env("True"));
-    CHECK(helix_parse_truthy_env("yes"));
-    CHECK(helix_parse_truthy_env("YES"));
-    CHECK(helix_parse_truthy_env("on"));
-    CHECK(helix_parse_truthy_env("ON"));
+    CHECK(helix::env_truthy("1"));
+    CHECK(helix::env_truthy("true"));
+    CHECK(helix::env_truthy("TRUE"));
+    CHECK(helix::env_truthy("True"));
+    CHECK(helix::env_truthy("yes"));
+    CHECK(helix::env_truthy("YES"));
+    CHECK(helix::env_truthy("on"));
+    CHECK(helix::env_truthy("ON"));
     // Surrounding whitespace tolerated (helixscreen.env may carry a stray space)
-    CHECK(helix_parse_truthy_env("  1  "));
-    CHECK(helix_parse_truthy_env("\ttrue\n"));
+    CHECK(helix::env_truthy("  1  "));
+    CHECK(helix::env_truthy("\ttrue\n"));
 }
 
-TEST_CASE("helix_parse_truthy_env rejects falsy and empty values", "[update][external]") {
-    CHECK_FALSE(helix_parse_truthy_env(nullptr));
-    CHECK_FALSE(helix_parse_truthy_env(""));
-    CHECK_FALSE(helix_parse_truthy_env("0"));
-    CHECK_FALSE(helix_parse_truthy_env("false"));
-    CHECK_FALSE(helix_parse_truthy_env("no"));
-    CHECK_FALSE(helix_parse_truthy_env("off"));
-    CHECK_FALSE(helix_parse_truthy_env("2"));
-    CHECK_FALSE(helix_parse_truthy_env("enabled"));
-    CHECK_FALSE(helix_parse_truthy_env("   "));
+TEST_CASE("env_truthy rejects falsy and empty values", "[update][external][env]") {
+    CHECK_FALSE(helix::env_truthy(nullptr));
+    CHECK_FALSE(helix::env_truthy(""));
+    CHECK_FALSE(helix::env_truthy("0"));
+    CHECK_FALSE(helix::env_truthy("false"));
+    CHECK_FALSE(helix::env_truthy("no"));
+    CHECK_FALSE(helix::env_truthy("off"));
+    CHECK_FALSE(helix::env_truthy("2"));
+    CHECK_FALSE(helix::env_truthy("10"));
+    CHECK_FALSE(helix::env_truthy("1abc"));
+    CHECK_FALSE(helix::env_truthy("y"));
+    CHECK_FALSE(helix::env_truthy("enabled"));
+    CHECK_FALSE(helix::env_truthy("   "));
 }
 
 TEST_CASE("compute_updates_externally_managed: explicit flag beats the platform default",

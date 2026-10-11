@@ -26,28 +26,29 @@ const char* HeaterIconBinder::default_icon_name(HeaterType heater) {
     return "nozzle_icon_glyph";
 }
 
-bool HeaterIconBinder::bind(lv_obj_t* root, PrinterState& state, HeaterType heater) {
+bool HeaterIconBinder::bind(lv_obj_t* root, PrinterState& state, HeaterType heater,
+                            const char* icon_name) {
     unbind();
     if (!root) {
         return false;
     }
 
-    lv_obj_t* icon = lv_obj_find_by_name(root, default_icon_name(heater));
+    const char* name = icon_name ? icon_name : default_icon_name(heater);
+    lv_obj_t* icon = lv_obj_find_by_name(root, name);
     if (!icon) {
-        spdlog::debug("[HeaterIconBinder] Icon '{}' not found under root",
-                      default_icon_name(heater));
+        spdlog::debug("[HeaterIconBinder] Icon '{}' not found under root", name);
         return false;
     }
 
     switch (heater) {
     case HeaterType::Nozzle:
         // Active-extruder subjects are singleton-lifetime; no tokens needed.
-        current_subject_ = state.get_active_extruder_temp_subject();
-        target_subject_ = state.get_active_extruder_target_subject();
+        current_subject_ = state.temperature_state().get_active_extruder_temp_subject();
+        target_subject_ = state.temperature_state().get_active_extruder_target_subject();
         break;
     case HeaterType::Bed:
-        current_subject_ = state.get_bed_temp_subject(current_lifetime_);
-        target_subject_ = state.get_bed_target_subject(target_lifetime_);
+        current_subject_ = state.temperature_state().get_bed_temp_subject(current_lifetime_);
+        target_subject_ = state.temperature_state().get_bed_target_subject(target_lifetime_);
         break;
     case HeaterType::Chamber:
         // Effective target, not the raw heater target: in Maintaining mode the
@@ -55,9 +56,10 @@ bool HeaterIconBinder::bind(lv_obj_t* root, PrinterState& state, HeaterType heat
         // Mode subject makes Maintaining resolve to Cooling/Neutral instead of
         // the plain classifier's Off/Heating/AtTemp — same as the temp_display
         // label chamber binds (see classify_heat_state_with_mode()).
-        current_subject_ = state.get_chamber_temp_subject(current_lifetime_);
-        target_subject_ = state.get_chamber_effective_target_subject(target_lifetime_);
-        mode_subject_ = state.get_chamber_mode_subject(mode_lifetime_);
+        current_subject_ = state.temperature_state().get_chamber_temp_subject(current_lifetime_);
+        target_subject_ =
+            state.temperature_state().get_chamber_effective_target_subject(target_lifetime_);
+        mode_subject_ = state.temperature_state().get_chamber_mode_subject(mode_lifetime_);
         break;
     }
 
@@ -109,7 +111,7 @@ bool HeaterIconBinder::attach_and_observe(lv_obj_t* icon) {
     auto token = lifetime_.token();
 
     if (current_subject_) {
-        current_observer_ = observe_int_sync<HeaterIconBinder>(
+        current_observer_ = observe<int>(
             current_subject_, this,
             [token](HeaterIconBinder* self, int value) {
                 if (token.expired())
@@ -120,7 +122,7 @@ bool HeaterIconBinder::attach_and_observe(lv_obj_t* icon) {
             current_lifetime_);
     }
     if (target_subject_) {
-        target_observer_ = observe_int_sync<HeaterIconBinder>(
+        target_observer_ = observe<int>(
             target_subject_, this,
             [token](HeaterIconBinder* self, int value) {
                 if (token.expired())
@@ -131,7 +133,7 @@ bool HeaterIconBinder::attach_and_observe(lv_obj_t* icon) {
             target_lifetime_);
     }
     if (mode_subject_) {
-        mode_observer_ = observe_int_sync<HeaterIconBinder>(
+        mode_observer_ = observe<int>(
             mode_subject_, this,
             [token](HeaterIconBinder* self, int value) {
                 if (token.expired())

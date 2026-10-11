@@ -139,18 +139,18 @@ TEST_CASE("Mock returns data_store accelerometer files", "[accel_csv][mock]") {
     REQUIRE(result.is_array());
     REQUIRE(result.size() >= 2);
 
-    // Verify belt path CSV files are present
-    bool found_path_a = false;
-    bool found_path_b = false;
+    // Verify accelerometer CSV files are present
+    bool found_x = false;
+    bool found_y = false;
     for (const auto& file : result) {
         std::string path = file.value("path", "");
-        if (path.find("belt_path_a") != std::string::npos)
-            found_path_a = true;
-        if (path.find("belt_path_b") != std::string::npos)
-            found_path_b = true;
+        if (path.find("raw_data_x") != std::string::npos)
+            found_x = true;
+        if (path.find("raw_data_y") != std::string::npos)
+            found_y = true;
     }
-    CHECK(found_path_a);
-    CHECK(found_path_b);
+    CHECK(found_x);
+    CHECK(found_y);
 }
 
 // ============================================================================
@@ -205,63 +205,5 @@ TEST_CASE("Mock get_file returns error for missing filename", "[accel_csv][mock]
             CHECK(err.type == MoonrakerErrorType::VALIDATION_ERROR);
         });
 
-    REQUIRE(error_called);
-}
-
-// ============================================================================
-// 5. End-to-end: download_accel_csv via mock
-// ============================================================================
-
-TEST_CASE("download_accel_csv finds and downloads belt CSV via mock", "[accel_csv][e2e]") {
-    PrinterState state;
-    state.init_subjects(false);
-    MoonrakerClientMock client(MoonrakerClientMock::PrinterType::GENERIC_COREXY);
-    MoonrakerAPI api(client, state);
-
-    MoonrakerAdvancedAPI advanced(client, api);
-
-    std::string captured_csv;
-    bool complete_called = false;
-    bool error_called = false;
-    std::string error_msg;
-
-    advanced.download_accel_csv(
-        "belt_path_a",
-        [&](const std::string& csv_data) {
-            complete_called = true;
-            captured_csv = csv_data;
-        },
-        [&](const MoonrakerError& err) {
-            error_called = true;
-            error_msg = err.message;
-        });
-
-    INFO("Error message: " << error_msg);
-    REQUIRE_FALSE(error_called);
-    REQUIRE(complete_called);
-    // CSV content from mock has accelerometer header
-    REQUIRE(captured_csv.find("#time,accel_x,accel_y,accel_z") != std::string::npos);
-}
-
-TEST_CASE("download_accel_csv reports error for missing CSV name", "[accel_csv][e2e]") {
-    PrinterState state;
-    state.init_subjects(false);
-    MoonrakerClientMock client(MoonrakerClientMock::PrinterType::GENERIC_COREXY);
-    MoonrakerAPI api(client, state);
-
-    MoonrakerAdvancedAPI advanced(client, api);
-
-    bool complete_called = false;
-    bool error_called = false;
-
-    // Use a name that won't match any mock files
-    advanced.download_accel_csv(
-        "nonexistent_axis_zzz", [&](const std::string&) { complete_called = true; },
-        [&](const MoonrakerError& err) {
-            error_called = true;
-            CHECK(err.message.find("No accelerometer data file found") != std::string::npos);
-        });
-
-    REQUIRE_FALSE(complete_called);
     REQUIRE(error_called);
 }

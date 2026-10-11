@@ -11,7 +11,7 @@ extern "C" {
 
 /**
  * Register responsive constants for switch sizing based on screen dimensions
- * Must be called AFTER globals.xml is registered and BEFORE test_panel.xml
+ * Must be called AFTER globals.xml is registered and BEFORE any XML that uses switches
  */
 void ui_switch_register_responsive_constants(void);
 

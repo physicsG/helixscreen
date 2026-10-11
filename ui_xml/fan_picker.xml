@@ -5,7 +5,7 @@
   <!-- Full-screen backdrop overlay - tap to dismiss -->
   <view name="context_backdrop" extends="context_menu_backdrop">
     <!-- Context menu card - positioned by C++ -->
-    <context_menu_card title="Select Fan" title_tag="Select Fan" pad_gap="#space_xs">
+    <context_menu_card title="Select Fan" pad_gap="#space_xs">
       <!-- Fan rows populated dynamically by C++ -->
       <!-- max_height set dynamically by C++ to ~2/3 screen height -->
       <lv_obj name="fan_list"

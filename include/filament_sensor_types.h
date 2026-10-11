@@ -3,9 +3,23 @@
 
 #pragma once
 
+#include "sensor_enum_names.h"
+
+#include <chrono>
 #include <string>
 
 namespace helix {
+
+/// How long a runout-role sensor must stay clear -- while a job holds the machine
+/// and an AMS backend is present -- before the removal toast fires.
+///
+/// A tool change drags filament off the toolhead sensor and feeds the next lane
+/// past it, which is identical to a runout at the edge and tells them apart only
+/// by duration: a swap leaves the sensor clear for 26-33s and then refills, a
+/// runout never refills. Anything shorter than a swap reports every tool change
+/// as a runout. Detection and the runout subjects still fire on the edge; only
+/// the toast waits.
+constexpr std::chrono::seconds RUNOUT_TOAST_DWELL{45};
 
 /**
  * @brief Role that a filament sensor can be assigned to.
@@ -46,6 +60,9 @@ struct FilamentSensorConfig {
     FilamentSensorRole role;  ///< User-assigned role
     FilamentSensorType type;  ///< Type of sensor (switch or motion)
     bool enabled;             ///< Whether this sensor is actively monitored
+    /// AMS slot / toolhead this sensor watches, from the "lane" config key. -1
+    /// leaves it to the sensor name (see lane_index_for_sensor).
+    int lane = -1;
 
     FilamentSensorConfig()
         : role(FilamentSensorRole::NONE), type(FilamentSensorType::SWITCH), enabled(true) {}
@@ -66,100 +83,47 @@ struct FilamentSensorState {
     bool enabled;           ///< Klipper-level enabled state (motion sensors)
     int detection_count;    ///< Motion sensors: cumulative detection events
     bool available;         ///< Whether the sensor exists in current Klipper config
+    bool reported;          ///< A status frame for it has arrived since discovery
 
     FilamentSensorState()
-        : filament_detected(true), enabled(true), detection_count(0), available(false) {}
-    // filament_detected defaults to TRUE (optimistic "present until proven empty"). The
-    // false default meant that any read before Moonraker's first status update arrived
-    // saw every sensor as a runout — a false positive that hit FilamentRunoutHandler
-    // on print-status panel construction within ~5s of helix-screen startup. The
-    // FilamentSensorManager startup-grace-period gate (formerly in has_any_runout)
-    // was a band-aid for this default; now redundant and removed.
+        : filament_detected(true), enabled(true), detection_count(0), available(false),
+          reported(false) {}
+    // filament_detected defaults to true ("present until proven empty"): the runout
+    // queries ignore the startup grace period and can run before Moonraker's first
+    // status frame, which must never read as a runout.
 };
 
-/**
- * @brief Convert FilamentSensorRole to display string.
- * @param role The role to convert
- * @return Human-readable role name for UI display
- */
+inline constexpr sensors::EnumName<FilamentSensorRole> kFilamentSensorRoles[] = {
+    {FilamentSensorRole::NONE, "none", "Unassigned"},
+    {FilamentSensorRole::RUNOUT, "runout", "Runout Sensor"},
+    {FilamentSensorRole::TOOLHEAD, "toolhead", "Toolhead Sensor"},
+    {FilamentSensorRole::ENTRY, "entry", "Entry Sensor"},
+    {FilamentSensorRole::Z_PROBE, "z_probe", "Z Probe"},
+};
+
+inline constexpr sensors::EnumName<FilamentSensorType> kFilamentSensorTypes[] = {
+    {FilamentSensorType::SWITCH, "switch", "Switch"},
+    {FilamentSensorType::MOTION, "motion", "Motion"},
+};
+
 inline const char* role_to_display_string(FilamentSensorRole role) {
-    switch (role) {
-    case FilamentSensorRole::RUNOUT:
-        return "Runout Sensor";
-    case FilamentSensorRole::TOOLHEAD:
-        return "Toolhead Sensor";
-    case FilamentSensorRole::ENTRY:
-        return "Entry Sensor";
-    case FilamentSensorRole::Z_PROBE:
-        return "Z Probe";
-    case FilamentSensorRole::NONE:
-    default:
-        return "Unassigned";
-    }
+    return sensors::enum_display(kFilamentSensorRoles, role);
 }
 
-/**
- * @brief Convert FilamentSensorRole to config string.
- * @param role The role to convert
- * @return Config-safe string for settings.json storage
- */
 inline const char* role_to_config_string(FilamentSensorRole role) {
-    switch (role) {
-    case FilamentSensorRole::RUNOUT:
-        return "runout";
-    case FilamentSensorRole::TOOLHEAD:
-        return "toolhead";
-    case FilamentSensorRole::ENTRY:
-        return "entry";
-    case FilamentSensorRole::Z_PROBE:
-        return "z_probe";
-    case FilamentSensorRole::NONE:
-    default:
-        return "none";
-    }
+    return sensors::enum_id(kFilamentSensorRoles, role);
 }
 
-/**
- * @brief Parse FilamentSensorRole from config string.
- * @param str The config string to parse
- * @return Parsed role, or NONE if unrecognized
- */
 inline FilamentSensorRole role_from_config_string(const std::string& str) {
-    if (str == "runout")
-        return FilamentSensorRole::RUNOUT;
-    if (str == "toolhead")
-        return FilamentSensorRole::TOOLHEAD;
-    if (str == "entry")
-        return FilamentSensorRole::ENTRY;
-    if (str == "z_probe")
-        return FilamentSensorRole::Z_PROBE;
-    return FilamentSensorRole::NONE;
+    return sensors::enum_from_id(kFilamentSensorRoles, str);
 }
 
-/**
- * @brief Convert FilamentSensorType to config string.
- * @param type The type to convert
- * @return Config-safe string
- */
 inline const char* type_to_config_string(FilamentSensorType type) {
-    switch (type) {
-    case FilamentSensorType::MOTION:
-        return "motion";
-    case FilamentSensorType::SWITCH:
-    default:
-        return "switch";
-    }
+    return sensors::enum_id(kFilamentSensorTypes, type);
 }
 
-/**
- * @brief Parse FilamentSensorType from config string.
- * @param str The config string to parse
- * @return Parsed type, defaults to SWITCH if unrecognized
- */
 inline FilamentSensorType type_from_config_string(const std::string& str) {
-    if (str == "motion")
-        return FilamentSensorType::MOTION;
-    return FilamentSensorType::SWITCH;
+    return sensors::enum_from_id(kFilamentSensorTypes, str);
 }
 
 } // namespace helix

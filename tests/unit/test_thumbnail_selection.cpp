@@ -3,7 +3,7 @@
 
 /**
  * @file test_thumbnail_selection.cpp
- * @brief Unit tests for ThumbnailInfo and FileMetadata::get_largest_thumbnail()
+ * @brief Unit tests for ThumbnailInfo and the unmeasured-box (largest) thumbnail choice
  *
  * Tests the thumbnail selection logic that picks the largest available
  * thumbnail by pixel count for best display quality.
@@ -46,13 +46,17 @@ TEST_CASE("ThumbnailInfo pixel_count calculation", "[assets]") {
 }
 
 // ============================================================================
-// FileMetadata::get_largest_thumbnail Tests
+// Largest thumbnail for an unmeasured box
 // ============================================================================
 
-TEST_CASE("FileMetadata get_largest_thumbnail", "[assets]") {
+static std::string largest(const FileMetadata& metadata) {
+    return helix::select_and_resolve_thumbnail(metadata.thumbnails, "", 0, 0);
+}
+
+TEST_CASE("FileMetadata thumbnails: an unmeasured box takes the largest", "[assets]") {
     SECTION("Returns empty string when no thumbnails") {
         FileMetadata metadata;
-        REQUIRE(metadata.get_largest_thumbnail().empty());
+        REQUIRE(largest(metadata).empty());
     }
 
     SECTION("Returns only thumbnail when one available") {
@@ -63,7 +67,7 @@ TEST_CASE("FileMetadata get_largest_thumbnail", "[assets]") {
         thumb.height = 300;
         metadata.thumbnails.push_back(thumb);
 
-        REQUIRE(metadata.get_largest_thumbnail() == ".thumbnails/test-300x300.png");
+        REQUIRE(largest(metadata) == ".thumbnails/test-300x300.png");
     }
 
     SECTION("Selects largest thumbnail by pixel count") {
@@ -90,7 +94,7 @@ TEST_CASE("FileMetadata get_largest_thumbnail", "[assets]") {
         large.height = 300;
         metadata.thumbnails.push_back(large);
 
-        REQUIRE(metadata.get_largest_thumbnail() == ".thumbnails/test-300x300.png");
+        REQUIRE(largest(metadata) == ".thumbnails/test-300x300.png");
     }
 
     SECTION("Handles thumbnails in any order") {
@@ -110,7 +114,7 @@ TEST_CASE("FileMetadata get_largest_thumbnail", "[assets]") {
         small.height = 32;
         metadata.thumbnails.push_back(small);
 
-        REQUIRE(metadata.get_largest_thumbnail() == ".thumbnails/test-300x300.png");
+        REQUIRE(largest(metadata) == ".thumbnails/test-300x300.png");
     }
 
     SECTION("Handles rectangular thumbnails correctly") {
@@ -130,7 +134,7 @@ TEST_CASE("FileMetadata get_largest_thumbnail", "[assets]") {
         square.height = 300;
         metadata.thumbnails.push_back(square);
 
-        REQUIRE(metadata.get_largest_thumbnail() == ".thumbnails/test-400x300.png");
+        REQUIRE(largest(metadata) == ".thumbnails/test-400x300.png");
     }
 
     SECTION("Falls back to first thumbnail when dimensions are zero") {
@@ -151,7 +155,7 @@ TEST_CASE("FileMetadata get_largest_thumbnail", "[assets]") {
         metadata.thumbnails.push_back(second);
 
         // When all have 0 pixels, returns first (stable selection)
-        REQUIRE(metadata.get_largest_thumbnail() == ".thumbnails/test-first.png");
+        REQUIRE(largest(metadata) == ".thumbnails/test-first.png");
     }
 
     SECTION("Prefers thumbnail with dimensions over ones without") {
@@ -171,7 +175,7 @@ TEST_CASE("FileMetadata get_largest_thumbnail", "[assets]") {
         with_dims.height = 300;
         metadata.thumbnails.push_back(with_dims);
 
-        REQUIRE(metadata.get_largest_thumbnail() == ".thumbnails/test-300x300.png");
+        REQUIRE(largest(metadata) == ".thumbnails/test-300x300.png");
     }
 }
 

@@ -173,7 +173,7 @@ The timelapse settings overlay (Phase 1) was extended with video management capa
 
 ### Video Browser Overlay
 
-`TimelapseVideosOverlay` provides a dedicated overlay for browsing, rendering, and playing timelapse videos. Accessed from **Settings > Timelapse Videos** row.
+`TimelapseVideosOverlay` provides a dedicated overlay for browsing, rendering, and playing timelapse videos. Accessed from the **Advanced > Timelapse Videos** row.
 
 **Features:**
 - **Responsive thumbnail grid** — cards auto-size to fit 2 rows on screen using `calculate_card_dimensions()` (same pattern as print file selection)

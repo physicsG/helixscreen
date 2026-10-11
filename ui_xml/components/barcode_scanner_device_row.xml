@@ -26,8 +26,7 @@
     </lv_obj>
     <icon name="selected_check"
           src="check" size="md" variant="accent" hidden="$hide_check" clickable="false" event_bubble="true"/>
-    <ui_button name="btn_forget"
-               width="100" text="Forget" translation_tag="Forget" variant="secondary" hidden="$hide_forget">
+    <ui_button name="btn_forget" width="100" text="Forget" variant="secondary" hidden="$hide_forget">
       <event_cb trigger="clicked" callback="on_bs_row_forget"/>
     </ui_button>
   </view>

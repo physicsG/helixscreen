@@ -50,21 +50,21 @@ TEST_CASE_METHOD(ClockWidgetFixture, "ClockWidget: factory registration", "[cloc
     REQUIRE(std::string(widget->id()) == "clock");
 }
 
-TEST_CASE_METHOD(ClockWidgetFixture, "ClockWidget: attach sets user_data", "[clock_widget]") {
+TEST_CASE_METHOD(ClockWidgetFixture, "ClockWidget: attach_tile binds user_data", "[clock_widget]") {
     ClockWidget widget;
     lv_obj_t* container = create_mock_clock(test_screen());
 
-    widget.attach(container, test_screen());
+    widget.attach_tile(container, test_screen());
     REQUIRE(lv_obj_get_user_data(container) == &widget);
 
-    widget.detach();
+    widget.detach_tile();
     REQUIRE(lv_obj_get_user_data(container) == nullptr);
 }
 
 TEST_CASE_METHOD(ClockWidgetFixture, "ClockWidget: timer lifecycle", "[clock_widget]") {
     ClockWidget widget;
     lv_obj_t* container = create_mock_clock(test_screen());
-    widget.attach(container, test_screen());
+    widget.attach_tile(container, test_screen());
 
     SECTION("no timer before activation") {
         // Timer should not exist until on_activate() is called
@@ -109,20 +109,30 @@ TEST_CASE_METHOD(ClockWidgetFixture, "ClockWidget: timer lifecycle", "[clock_wid
         widget.on_deactivate();
     }
 
-    widget.detach();
+    widget.detach_tile();
 }
 
 TEST_CASE_METHOD(ClockWidgetFixture, "ClockWidget: detach stops timer", "[clock_widget]") {
     ClockWidget widget;
     lv_obj_t* container = create_mock_clock(test_screen());
-    widget.attach(container, test_screen());
+    widget.attach_tile(container, test_screen());
     widget.on_activate();
 
-    // Detach should stop the timer even if on_deactivate() wasn't called
-    widget.detach();
+    // The clock timer carries the widget as its user_data.
+    auto timer_count = [&widget]() {
+        int n = 0;
+        for (lv_timer_t* t = lv_timer_get_next(nullptr); t; t = lv_timer_get_next(t)) {
+            if (lv_timer_get_user_data(t) == &widget) {
+                ++n;
+            }
+        }
+        return n;
+    };
+    REQUIRE(timer_count() == 1);
 
-    // Processing LVGL timers after detach should not crash
-    process_lvgl(100);
+    // Detach stops the timer even if on_deactivate() wasn't called
+    widget.detach_tile();
+    REQUIRE(timer_count() == 0);
 }
 
 TEST_CASE_METHOD(ClockWidgetFixture, "ClockWidget: subjects populated on attach",
@@ -131,7 +141,7 @@ TEST_CASE_METHOD(ClockWidgetFixture, "ClockWidget: subjects populated on attach"
     lv_obj_t* container = create_mock_clock(test_screen());
 
     // attach() calls update_clock() which populates subjects immediately
-    widget.attach(container, test_screen());
+    widget.attach_tile(container, test_screen());
 
     auto* time_subj = lv_xml_get_subject(nullptr, "clock_time_text");
     auto* date_subj = lv_xml_get_subject(nullptr, "clock_date_text");
@@ -151,14 +161,14 @@ TEST_CASE_METHOD(ClockWidgetFixture, "ClockWidget: subjects populated on attach"
     std::string uptime = lv_subject_get_string(uptime_subj);
     REQUIRE(uptime.find("Up: ") == 0);
 
-    widget.detach();
+    widget.detach_tile();
 }
 
 TEST_CASE_METHOD(ClockWidgetFixture, "ClockWidget: timer fires during LVGL processing",
                  "[clock_widget]") {
     ClockWidget widget;
     lv_obj_t* container = create_mock_clock(test_screen());
-    widget.attach(container, test_screen());
+    widget.attach_tile(container, test_screen());
     widget.on_activate();
 
     // Processing LVGL for longer than the timer interval (1000ms) should
@@ -170,14 +180,14 @@ TEST_CASE_METHOD(ClockWidgetFixture, "ClockWidget: timer fires during LVGL proce
     REQUIRE(std::string(lv_subject_get_string(time_subj)) != "--:--");
 
     widget.on_deactivate();
-    widget.detach();
+    widget.detach_tile();
 }
 
 // ---------------------------------------------------------------------------
 // Locale-aware date formatting tests
 // ---------------------------------------------------------------------------
 
-TEST_CASE("Locale date formatting", "[clock_widget][i18n]") {
+TEST_CASE_METHOD(HelixTestFixture, "Locale date formatting", "[clock_widget][i18n]") {
     // Fixed time: Friday, February 28, 2026 14:30:00
     struct tm test_tm = {};
     test_tm.tm_year = 126; // 2026 - 1900
@@ -244,7 +254,8 @@ TEST_CASE("Locale date formatting", "[clock_widget][i18n]") {
     helix::ui::locale_set_language("en");
 }
 
-TEST_CASE("Locale date formatting: all months cycle", "[clock_widget][i18n]") {
+TEST_CASE_METHOD(HelixTestFixture, "Locale date formatting: all months cycle",
+                 "[clock_widget][i18n]") {
     helix::SystemSettingsManager::instance().set_language("en");
     helix::ui::locale_set_language("en");
 
@@ -263,7 +274,8 @@ TEST_CASE("Locale date formatting: all months cycle", "[clock_widget][i18n]") {
     }
 }
 
-TEST_CASE("Locale date formatting: all days of week", "[clock_widget][i18n]") {
+TEST_CASE_METHOD(HelixTestFixture, "Locale date formatting: all days of week",
+                 "[clock_widget][i18n]") {
     helix::SystemSettingsManager::instance().set_language("en");
     helix::ui::locale_set_language("en");
 
@@ -280,7 +292,8 @@ TEST_CASE("Locale date formatting: all days of week", "[clock_widget][i18n]") {
     }
 }
 
-TEST_CASE("Locale date formatting: Spanish and Portuguese", "[clock_widget][i18n]") {
+TEST_CASE_METHOD(HelixTestFixture, "Locale date formatting: Spanish and Portuguese",
+                 "[clock_widget][i18n]") {
     struct tm test_tm = {};
     test_tm.tm_year = 126;
     test_tm.tm_mon = 1;
@@ -314,7 +327,7 @@ TEST_CASE("Locale date formatting: Spanish and Portuguese", "[clock_widget][i18n
     helix::ui::locale_set_language("en");
 }
 
-TEST_CASE("Locale modified date formatting", "[clock_widget][i18n]") {
+TEST_CASE_METHOD(HelixTestFixture, "Locale modified date formatting", "[clock_widget][i18n]") {
     struct tm test_tm = {};
     test_tm.tm_year = 126;
     test_tm.tm_mon = 1; // February
@@ -354,7 +367,8 @@ TEST_CASE("Locale modified date formatting", "[clock_widget][i18n]") {
     helix::ui::locale_set_language("en");
 }
 
-TEST_CASE("Locale date formatting: boundary day values", "[clock_widget][i18n]") {
+TEST_CASE_METHOD(HelixTestFixture, "Locale date formatting: boundary day values",
+                 "[clock_widget][i18n]") {
     helix::SystemSettingsManager::instance().set_language("en");
     helix::ui::locale_set_language("en");
 
@@ -379,7 +393,8 @@ TEST_CASE("Locale date formatting: boundary day values", "[clock_widget][i18n]")
     }
 }
 
-TEST_CASE("Locale date formatting: CJK single-digit month", "[clock_widget][i18n]") {
+TEST_CASE_METHOD(HelixTestFixture, "Locale date formatting: CJK single-digit month",
+                 "[clock_widget][i18n]") {
     helix::SystemSettingsManager::instance().set_language("ja");
     helix::ui::locale_set_language("ja");
 
@@ -407,7 +422,7 @@ TEST_CASE("Locale date formatting: CJK single-digit month", "[clock_widget][i18n
     helix::ui::locale_set_language("en");
 }
 
-TEST_CASE("format_modified_date integration", "[clock_widget][i18n]") {
+TEST_CASE_METHOD(HelixTestFixture, "format_modified_date integration", "[clock_widget][i18n]") {
     // Verify the public API format_modified_date() uses locale formatting
     helix::SystemSettingsManager::instance().set_language("en");
     helix::ui::locale_set_language("en");
@@ -433,7 +448,7 @@ TEST_CASE("Locale default 24h", "[clock_widget][i18n]") {
     REQUIRE_FALSE(helix::ui::locale_default_24h(""));   // empty = en default
 }
 
-TEST_CASE("Locale set language caching", "[clock_widget][i18n]") {
+TEST_CASE_METHOD(HelixTestFixture, "Locale set language caching", "[clock_widget][i18n]") {
     // Setting the same language twice shouldn't break anything
     helix::ui::locale_set_language("fr");
     helix::ui::locale_set_language("fr");

@@ -2,19 +2,31 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "../lvgl_test_fixture.h"
+#include "../test_helpers/backend_user_edit.h"
+#include "../test_helpers/filament_slot_override_store_test_access.h"
+#include "../test_helpers/mock_printer.h"
 #include "../test_helpers/print_state_test_drivers.h"
 #include "ams_backend_qidi.h"
 #include "ams_error.h"
 #include "ams_types.h"
+#include "filament_slot_override.h"
+#include "filament_slot_override_store.h"
+#include "lane_source_store.h"
 #include "moonraker_api_mock.h"
 #include "moonraker_client_mock.h"
 #include "printer_state.h"
 #include "settings_manager.h"
 #include "test_helpers/qidi_box_test_access.h"
+#include "test_helpers/registered_backend.h"
+#include "test_helpers/seeded_override.h"
 #include "test_helpers/update_queue_test_access.h"
+#include "ui/ams_drawing_utils.h"
 
+#include <algorithm>
 #include <cstdint>
+#include <filesystem>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -22,17 +34,33 @@
 #include "../catch_amalgamated.hpp"
 #include "hv/json.hpp"
 
+using helix::AMS_DEFAULT_SLOT_COLOR;
+using helix::AmsAction;
+using helix::AmsBackendQidi;
+using helix::AmsType;
+using helix::DryerInfo;
+using helix::PathTopology;
+using helix::QidiBoxTestAccess;
+using helix::SlotInfo;
+using helix::SlotStatus;
+
 using json = nlohmann::json;
 
 // Subclass that captures execute_gcode() invocations so write-path tests
 // can assert the exact gcode emitted without needing a real Moonraker.
 class RecordingQidiBackend : public AmsBackendQidi {
   public:
-    RecordingQidiBackend() : AmsBackendQidi(nullptr, nullptr) {}
-    AmsError execute_gcode(const std::string& gcode) override {
+    explicit RecordingQidiBackend(IMoonrakerAPI* api = nullptr) : AmsBackendQidi(api, nullptr) {}
+    helix::AmsError execute_gcode(const std::string& gcode) override {
+        if (fail_dispatch) {
+            return helix::AmsErrorHelper::not_supported("fixture dispatch failure");
+        }
         sent.push_back(gcode);
-        return AmsErrorHelper::success();
+        return helix::AmsErrorHelper::success();
     }
+    // While set, every dispatch fails - for the writes whose echo can never
+    // arrive because the command never reached the box.
+    bool fail_dispatch = false;
     std::vector<std::string> sent;
 };
 
@@ -62,8 +90,9 @@ TEST_CASE("QIDI Box default system_info shape", "[ams][qidi_box]") {
     REQUIRE(info.units.size() == 1);
     REQUIRE(info.units[0].slot_count == 4);
     REQUIRE(info.units[0].topology == PathTopology::HUB);
-    // Unit must report as disconnected until enable_box=1 arrives.
-    REQUIRE_FALSE(info.units[0].connected);
+    // Only an explicit enable_box=0 disconnects the unit; one that has not
+    // reported yet reads connected, so the UI does not flash "Disconnected".
+    REQUIRE(info.units[0].connected);
 }
 
 // =====================================================================
@@ -73,13 +102,17 @@ TEST_CASE("QIDI Box default system_info shape", "[ams][qidi_box]") {
 // 0 as "Box installed but disabled" / 1 as "Box active." Mirror that
 // onto AmsUnit::connected so the UI can show the right state.
 
-TEST_CASE("QIDI Box parse_save_variables: enable_box=1 connects the unit", "[ams][qidi_box]") {
+TEST_CASE("QIDI Box parse_save_variables: enable_box drives the unit's connection",
+          "[ams][qidi_box]") {
     AmsBackendQidi backend(nullptr, nullptr);
+    QidiBoxTestAccess::parse_vars(backend, json{{"enable_box", 0}});
     REQUIRE_FALSE(backend.get_system_info().units[0].connected);
 
     QidiBoxTestAccess::parse_vars(backend, json{{"enable_box", 1}});
 
     REQUIRE(backend.get_system_info().units[0].connected);
+    // The box publishes no toolhead sensor.
+    CHECK_FALSE(backend.get_system_info().units[0].has_toolhead_sensor);
 }
 
 // =====================================================================
@@ -137,6 +170,23 @@ TEST_CASE("QIDI Box parse_save_variables: box_count=4 expands to sixteen slots",
     for (int unit = 0; unit < 4; ++unit) {
         REQUIRE(info.units[static_cast<size_t>(unit)].slot_count == 4);
         REQUIRE(info.units[static_cast<size_t>(unit)].first_slot_global_index == unit * 4);
+    }
+}
+
+// Every QIDI Box feeds the printer's one extruder, so the overview draws one
+// toolhead with each box routed into it.
+TEST_CASE("QIDI Box: four boxes converge on one toolhead in the system path layout",
+          "[ams][qidi_box][tool_layout][ams_draw]") {
+    AmsBackendQidi backend(nullptr, nullptr);
+    QidiBoxTestAccess::parse_vars(backend, json{{"box_count", 4}});
+
+    const auto layout = ams_draw::compute_system_tool_layout(backend.get_system_info(), &backend);
+
+    CHECK(layout.total_physical_tools == 1);
+    REQUIRE(layout.units.size() == 4);
+    for (const auto& unit : layout.units) {
+        CHECK(unit.tool_count == 1);
+        CHECK(unit.first_physical_tool == 0);
     }
 }
 
@@ -212,7 +262,7 @@ TEST_CASE("QIDI Box parse_save_variables: value_t<N>=slot<M> maps tool N to slot
 }
 
 // =====================================================================
-// handle_status_update routes save_variables changes through to parse
+// handle_status routes save_variables changes through to parse
 // =====================================================================
 // Moonraker delivers save_variables changes inside notify_status_update as
 // `{"save_variables": {"variables": {...}}}`. The backend must extract the
@@ -221,6 +271,7 @@ TEST_CASE("QIDI Box parse_save_variables: value_t<N>=slot<M> maps tool N to slot
 
 TEST_CASE("QIDI Box handle_status_update applies save_variables changes", "[ams][qidi_box]") {
     AmsBackendQidi backend(nullptr, nullptr);
+    QidiBoxTestAccess::parse_vars(backend, json{{"enable_box", 0}});
     REQUIRE_FALSE(backend.get_system_info().units[0].connected);
 
     QidiBoxTestAccess::handle_status(backend, make_save_variables_notification(json{
@@ -242,7 +293,7 @@ TEST_CASE("QIDI Box handle_status_update ignores unrelated keys", "[ams][qidi_bo
     QidiBoxTestAccess::handle_status(backend,
                                      json{{"toolhead", {{"position", json::array({0, 0, 0, 0})}}}});
 
-    REQUIRE_FALSE(backend.get_system_info().units[0].connected);
+    REQUIRE(backend.get_system_info().units[0].connected);
     REQUIRE(backend.get_system_info().total_slots == 4);
 }
 
@@ -348,7 +399,7 @@ TEST_CASE("QIDI Box RFID side-table resizes with box_count", "[ams][qidi_box]") 
 }
 
 // =====================================================================
-// handle_status_update: heater_box drying state + aht20_f humidity
+// handle_status: heater_box drying state + aht20_f humidity
 // =====================================================================
 // The QIDI Box has per-box drying: heater_generic heater_box<N> provides
 // temperature + target, aht20_f heater_box<N> provides humidity. Each physical
@@ -454,11 +505,12 @@ TEST_CASE("QIDI Box humidity is read from any matched box object", "[ams][qidi_b
 // of save_variables (and per-box heater objects when they exist). The
 // response shape is `{result: {status: {save_variables: {...}, ...}}}`.
 // apply_query_response unwraps the result.status envelope and feeds the
-// inner object through handle_status_update, reusing every parser we
+// inner object through handle_status, reusing every parser we
 // already test.
 
 TEST_CASE("QIDI Box apply_query_response unwraps result.status and parses", "[ams][qidi_box]") {
     AmsBackendQidi backend(nullptr, nullptr);
+    QidiBoxTestAccess::parse_vars(backend, json{{"enable_box", 0}});
     REQUIRE_FALSE(backend.get_system_info().units[0].connected);
 
     json response = json{
@@ -483,6 +535,7 @@ TEST_CASE("QIDI Box apply_query_response unwraps result.status and parses", "[am
 TEST_CASE("QIDI Box apply_query_response handles missing result gracefully", "[ams][qidi_box]") {
     AmsBackendQidi backend(nullptr, nullptr);
 
+    QidiBoxTestAccess::parse_vars(backend, json{{"enable_box", 0}});
     // Wrong-shape response — must not crash, must not mutate state.
     QidiBoxTestAccess::apply_query(backend, json{{"error", "timed out"}});
 
@@ -866,10 +919,9 @@ TEST_CASE("QIDI Box Max 4 dialect still rejects an out-of-range slot",
 
 TEST_CASE("QIDI Box on_started dispatches printer.objects.query (integration)",
           "[ams][qidi_box][integration]") {
-    MoonrakerClientMock client(MoonrakerClientMock::PrinterType::VORON_24);
-    helix::PrinterState state;
-    state.init_subjects(false);
-    MoonrakerAPIMock api(client, state);
+    MockPrinter mock_printer;
+    auto& client = mock_printer.client;
+    auto& api = mock_printer.api;
 
     AmsBackendQidi backend(&api, &client);
     REQUIRE(client.last_send_method().empty());
@@ -1452,7 +1504,7 @@ TEST_CASE("QIDI Box read-path resolution survives before filas list loads", "[am
 }
 
 // =====================================================================
-// Reverse lookups (pure) for set_slot_info()
+// Reverse lookups (pure) for apply_user_edit()
 // =====================================================================
 
 TEST_CASE("QIDI Box resolve_fila_id matches name then falls back to type", "[ams][qidi_box]") {
@@ -1501,10 +1553,10 @@ TEST_CASE("QIDI Box resolve_vendor_id matches name, falls back to Generic", "[am
 }
 
 // =====================================================================
-// set_slot_info: write reverse-mapped ids back to save_variables
+// apply_user_edit: write reverse-mapped ids back to save_variables
 // =====================================================================
 
-TEST_CASE("QIDI Box set_slot_info emits SAVE_VARIABLE for all three ids",
+TEST_CASE("QIDI Box apply_user_edit emits SAVE_VARIABLE for all three ids",
           "[ams][qidi_box][write_path]") {
     RecordingQidiBackend backend;
     QidiBoxTestAccess::apply_filas_list(backend, STOCK_FILAS_EXCERPT);
@@ -1514,7 +1566,7 @@ TEST_CASE("QIDI Box set_slot_info emits SAVE_VARIABLE for all three ids",
     info.brand = "eSUN";
     info.color_rgb = 0xFF362D;
 
-    auto err = backend.set_slot_info(0, info, /*persist=*/true);
+    auto err = helix::test::apply_edit(backend, 0, info);
     REQUIRE(err.success());
 
     // Three writes: filament_slot0 / color_slot0 / vendor_slot0 — integers
@@ -1535,7 +1587,39 @@ TEST_CASE("QIDI Box set_slot_info emits SAVE_VARIABLE for all three ids",
     REQUIRE(saw_vendor);
 }
 
-TEST_CASE("QIDI Box set_slot_info skips fields with no mapping", "[ams][qidi_box][write_path]") {
+TEST_CASE("QIDI Box weight update writes none of the box's identity variables",
+          "[ams][qidi_box][write_path][1652]") {
+    RecordingQidiBackend backend;
+    QidiBoxTestAccess::apply_filas_list(backend, STOCK_FILAS_EXCERPT);
+    // A loaded vendor table makes apply_user_edit write vendor_slot for any slot,
+    // so a weight that reached it would show up in what was sent.
+    REQUIRE(QidiBoxTestAccess::vendor_count(backend) > 0);
+
+    // What the consumption meter's pause and completion flushes do.
+    backend.update_slot_weight(0, 500.0f, -1.0f, /*persist=*/true);
+
+    CHECK(backend.sent.empty());
+}
+
+TEST_CASE("QIDI Box identity sync writes none of the box's identity variables",
+          "[ams][qidi_box][write_path][1652]") {
+    RecordingQidiBackend backend;
+    QidiBoxTestAccess::apply_filas_list(backend, STOCK_FILAS_EXCERPT);
+    // Values that resolve to all three ids, so a sync that reached the write
+    // path would show up in what was sent.
+    REQUIRE(QidiBoxTestAccess::vendor_count(backend) > 0);
+
+    SlotInfo info;
+    info.material = "ABS";
+    info.brand = "eSUN";
+    info.color_rgb = 0xFF362D;
+
+    REQUIRE(backend.sync_external_identity(0, info).success());
+
+    CHECK(backend.sent.empty());
+}
+
+TEST_CASE("QIDI Box apply_user_edit skips fields with no mapping", "[ams][qidi_box][write_path]") {
     RecordingQidiBackend backend;
     QidiBoxTestAccess::apply_filas_list(backend, STOCK_FILAS_EXCERPT);
 
@@ -1545,7 +1629,7 @@ TEST_CASE("QIDI Box set_slot_info skips fields with no mapping", "[ams][qidi_box
     info.brand = "QIDI";
     info.color_rgb = 0xFAFAFA;
 
-    auto err = backend.set_slot_info(1, info, /*persist=*/true);
+    auto err = helix::test::apply_edit(backend, 1, info);
     REQUIRE(err.success());
     // No filament_slot write (unmapped), but color + vendor present.
     for (const auto& g : backend.sent) {
@@ -1562,18 +1646,19 @@ TEST_CASE("QIDI Box set_slot_info skips fields with no mapping", "[ams][qidi_box
     REQUIRE(saw_vendor);
 }
 
-TEST_CASE("QIDI Box set_slot_info rejects out-of-range slot index", "[ams][qidi_box][write_path]") {
+TEST_CASE("QIDI Box apply_user_edit rejects out-of-range slot index",
+          "[ams][qidi_box][write_path]") {
     RecordingQidiBackend backend;
     QidiBoxTestAccess::apply_filas_list(backend, STOCK_FILAS_EXCERPT);
 
     SlotInfo info;
     info.material = "PLA";
-    REQUIRE_FALSE(backend.set_slot_info(-1, info, true).success());
-    REQUIRE_FALSE(backend.set_slot_info(99, info, true).success());
+    REQUIRE_FALSE(helix::test::apply_edit(backend, -1, info).success());
+    REQUIRE_FALSE(helix::test::apply_edit(backend, 99, info).success());
     REQUIRE(backend.sent.empty());
 }
 
-TEST_CASE("QIDI Box set_slot_info accepts global slots from later boxes",
+TEST_CASE("QIDI Box apply_user_edit accepts global slots from later boxes",
           "[ams][qidi_box][write_path]") {
     RecordingQidiBackend backend;
     QidiBoxTestAccess::parse_vars(backend, json{{"box_count", 2}});
@@ -1584,7 +1669,7 @@ TEST_CASE("QIDI Box set_slot_info accepts global slots from later boxes",
     info.brand = "eSUN";
     info.color_rgb = 0xFF362D;
 
-    auto err = backend.set_slot_info(5, info, true);
+    auto err = helix::test::apply_edit(backend, 5, info);
     REQUIRE(err.success());
 
     bool saw_fila = false;
@@ -1594,7 +1679,7 @@ TEST_CASE("QIDI Box set_slot_info accepts global slots from later boxes",
     REQUIRE(saw_fila);
 }
 
-TEST_CASE("QIDI Box set_slot_info with no palette/vendor data still writes fila",
+TEST_CASE("QIDI Box apply_user_edit with no palette/vendor data still writes fila",
           "[ams][qidi_box][write_path]") {
     RecordingQidiBackend backend;
     // Only fila profiles loaded — no colordict / vendor_list.
@@ -1605,11 +1690,88 @@ TEST_CASE("QIDI Box set_slot_info with no palette/vendor data still writes fila"
     info.brand = "eSUN";
     info.color_rgb = 0x123456;
 
-    auto err = backend.set_slot_info(0, info, true);
+    auto err = helix::test::apply_edit(backend, 0, info);
     REQUIRE(err.success());
     // Only the filament_slot write — empty palette/vendor skip cleanly.
     REQUIRE(backend.sent.size() == 1);
     REQUIRE(backend.sent[0] == "SAVE_VARIABLE VARIABLE=filament_slot0 VALUE=1");
+}
+
+TEST_CASE("QIDI Box apply_user_edit carries an explicit zero for a cleared field",
+          "[ams][qidi_box][write_path][1633]") {
+    RecordingQidiBackend backend;
+    QidiBoxTestAccess::apply_filas_list(backend, STOCK_FILAS_EXCERPT);
+    // The Box states a full identity for slot 0, so the edit has an id to
+    // clear and the fingerprint baseline the echo is judged against.
+    QidiBoxTestAccess::parse_vars(
+        backend,
+        json{{"box_count", 1}, {"filament_slot0", 11}, {"color_slot0", 18}, {"vendor_slot0", 2}});
+
+    auto sent_fila = [&backend] {
+        for (const auto& g : backend.sent) {
+            if (g.rfind("SAVE_VARIABLE VARIABLE=filament_slot0", 0) == 0) {
+                return g;
+            }
+        }
+        return std::string{};
+    };
+    auto sent_color = [&backend] {
+        for (const auto& g : backend.sent) {
+            if (g.rfind("SAVE_VARIABLE VARIABLE=color_slot0", 0) == 0) {
+                return g;
+            }
+        }
+        return std::string{};
+    };
+
+    SECTION("material cleared alone writes fila zero") {
+        SlotInfo info = backend.get_slot_info(0);
+        info.material.clear();
+
+        REQUIRE(helix::test::apply_edit(backend, 0, info).success());
+        // The zero is the whole point: without it the Box keeps restating
+        // fila 11 forever and the user's clear never reaches the variables.
+        REQUIRE(sent_fila() == "SAVE_VARIABLE VARIABLE=filament_slot0 VALUE=0");
+        // The untouched colour still resolves to its row.
+        REQUIRE(sent_color() == "SAVE_VARIABLE VARIABLE=color_slot0 VALUE=18");
+
+        // The zero echoes back as a fingerprint change; the guard the same
+        // edit staged must read it as ours, not as a spool swap.
+        QidiBoxTestAccess::parse_vars(backend, json{{"box_count", 1},
+                                                    {"filament_slot0", 0},
+                                                    {"color_slot0", 18},
+                                                    {"vendor_slot0", 2}});
+        CHECK(QidiBoxTestAccess::get_override(backend, 0).has_value());
+    }
+
+    SECTION("colour cleared alone writes color zero") {
+        SlotInfo info = backend.get_slot_info(0);
+        info.color_rgb = AMS_DEFAULT_SLOT_COLOR;
+
+        REQUIRE(helix::test::apply_edit(backend, 0, info).success());
+        REQUIRE(sent_color() == "SAVE_VARIABLE VARIABLE=color_slot0 VALUE=0");
+        // The untouched material still resolves to its row.
+        REQUIRE(sent_fila() == "SAVE_VARIABLE VARIABLE=filament_slot0 VALUE=11");
+
+        QidiBoxTestAccess::parse_vars(backend, json{{"box_count", 1},
+                                                    {"filament_slot0", 11},
+                                                    {"color_slot0", 0},
+                                                    {"vendor_slot0", 2}});
+        CHECK(QidiBoxTestAccess::get_override(backend, 0).has_value());
+    }
+
+    SECTION("a cleared field the Box never held writes no zero") {
+        // No fila was ever stated for slot 1, so an empty material has
+        // nothing to clear and must not invent a write.
+        SlotInfo info;
+        info.material.clear();
+        info.color_rgb = 0xFF362D;
+
+        REQUIRE(helix::test::apply_edit(backend, 1, info).success());
+        for (const auto& g : backend.sent) {
+            CHECK(g.rfind("SAVE_VARIABLE VARIABLE=filament_slot1", 0) != 0);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1652,7 +1814,9 @@ TEST_CASE("QIDI Box current_error returns CRITICAL event for first blocked slot"
     CHECK(ev->source == helix::ErrorSource::QIDI);
     CHECK(ev->severity == helix::ErrorSeverity::CRITICAL);
     CHECK_FALSE(ev->title.empty());
-    CHECK(ev->detail.find("2") != std::string::npos); // 1-based: slot index 1 → lane 2
+    // The whole label, not just the digit: the noun comes from the backend's
+    // lane_noun() and the number from lane_number(), and a user reads both.
+    CHECK(ev->detail.find("Slot 2") != std::string::npos);
     CHECK(ev->sticky);
     // Recovery has one dismiss affordance — a button-less modal is a non-dismissible
     // UI trap (RecoveryModalPresenter with 0 buttons hides the button container).
@@ -1672,7 +1836,7 @@ TEST_CASE("QIDI Box current_error scans slots from later boxes", "[ams][qidi_box
 
     auto ev = backend.current_error();
     REQUIRE(ev.has_value());
-    CHECK(ev->detail.find("6") != std::string::npos); // 1-based: global slot 5 → lane 6
+    CHECK(ev->detail.find("Slot 6") != std::string::npos); // 1-based: global slot 5
 }
 
 TEST_CASE("QIDI Box current_error picks the first blocked slot when multiple blocked",
@@ -1690,7 +1854,7 @@ TEST_CASE("QIDI Box current_error picks the first blocked slot when multiple blo
     auto ev = backend.current_error();
     REQUIRE(ev.has_value());
     // First blocked slot is index 0 → lane 1
-    CHECK(ev->detail.find("1") != std::string::npos);
+    CHECK(ev->detail.find("Slot 1") != std::string::npos);
 }
 
 TEST_CASE("QIDI Box current_error clears when slot unblocks", "[ams][qidi_box][error-center]") {
@@ -1768,14 +1932,15 @@ class RecordingQidiWithApi : public AmsBackendQidi {
   public:
     RecordingQidiWithApi(MoonrakerAPI* api, helix::MoonrakerClient* client)
         : AmsBackendQidi(api, client) {}
-    AmsError execute_gcode(const std::string& gcode) override {
+    helix::AmsError execute_gcode(const std::string& gcode) override {
         sent.push_back(gcode);
-        return AmsErrorHelper::success();
+        return helix::AmsErrorHelper::success();
     }
-    AmsError execute_gcode(const std::string& gcode, std::function<void()> on_complete) override {
+    helix::AmsError execute_gcode(const std::string& gcode,
+                                  std::function<void()> on_complete) override {
         sent.push_back(gcode);
         (void)on_complete;
-        return AmsErrorHelper::success();
+        return helix::AmsErrorHelper::success();
     }
     std::vector<std::string> sent;
 };
@@ -1804,10 +1969,10 @@ struct QidiHomingGuardFixture : public LVGLTestFixture {
 TEST_CASE_METHOD(QidiHomingGuardFixture,
                  "QIDI load/unload/change_tool refuse while PRINTING, proceed while PAUSED",
                  "[ams][qidi_box][homing_guard]") {
-    auto check_refused = [](AmsError err, const std::vector<std::string>& sent,
+    auto check_refused = [](helix::AmsError err, const std::vector<std::string>& sent,
                             const std::string& expected_msg) {
         CHECK_FALSE(err.success());
-        CHECK(err.result == AmsResult::WRONG_STATE);
+        CHECK(err.result == helix::AmsResult::WRONG_STATE);
         CHECK(err.user_msg == expected_msg);
         CHECK(sent.empty());
     };
@@ -1871,4 +2036,710 @@ TEST_CASE_METHOD(QidiHomingGuardFixture,
         REQUIRE(backend->load_filament(2).success());
         CHECK_FALSE(backend->sent.empty());
     }
+}
+
+TEST_CASE("QIDI adjusts live on a plain heater and not once the box owns the timer",
+          "[ams][qidi][dryer][capability]") {
+    AmsBackendQidi backend(nullptr, nullptr);
+    QidiBoxTestAccess::parse_vars(backend, nlohmann::json{{"box_count", 1}});
+
+    SECTION("plain heater_generic: SET_HEATER_TEMPERATURE retargets, we own the clock") {
+        auto d = backend.get_dryer_info(0);
+        REQUIRE(d.supported);
+        CHECK(d.supports_live_temp);
+        CHECK(d.supports_live_duration);
+    }
+
+    SECTION("box_extras timer: ENABLE_BOX_DRY owns the cycle, END_TIME is whole hours") {
+        QidiBoxTestAccess::apply_box_extras(
+            backend, nlohmann::json{{"box_drying_state", {{"box1", {{"end_time", 0}}}}}});
+        auto d = backend.get_dryer_info(0);
+        CHECK_FALSE(d.supports_live_temp);
+        CHECK_FALSE(d.supports_live_duration);
+    }
+}
+
+// =====================================================================
+// Spool-swap detection: a changed RFID fingerprint outranks edits made
+// for the previous spool, the same contract CFS and Snapmaker enforce
+// through the shared SlotFingerprintTracker.
+// =====================================================================
+
+namespace {
+// Per-test tmp cache dir, same idiom as test_ams_backend_cfs.cpp.
+struct QidiTmpCacheDir {
+    std::filesystem::path path;
+    explicit QidiTmpCacheDir(const std::string& suffix) {
+        path = std::filesystem::temp_directory_path() /
+               ("qidi_cache_" + suffix + "_" + std::to_string(::getpid()));
+        std::filesystem::remove_all(path);
+        std::filesystem::create_directories(path);
+    }
+    ~QidiTmpCacheDir() {
+        std::error_code ec;
+        std::filesystem::remove_all(path, ec);
+    }
+};
+} // namespace
+
+TEST_CASE("QIDI Box tag fingerprint change clears a prior user edit", "[ams][qidi_box]") {
+    QidiTmpCacheDir tmp("swap_clears");
+    MockPrinter mock_printer;
+    auto& api = mock_printer.api;
+
+    helix::test::RegisteredBackend<AmsBackendQidi> harness(&api, nullptr);
+    AmsBackendQidi& backend = *harness;
+    auto store = std::make_unique<helix::ams::FilamentSlotOverrideStore>(&api, "qidi");
+    FilamentSlotOverrideStoreTestAccess::set_cache_directory(*store, tmp.path);
+    QidiBoxTestAccess::inject_override_store(backend, std::move(store));
+
+    QidiBoxTestAccess::apply_filas_list(backend, STOCK_FILAS_EXCERPT);
+    mock_printer.client.mock_db_set(
+        "lane_data", "lane1",
+        json{{"vendor", "Polymaker"}, {"spool_id", 42}, {"material", "PLA"}, {"color", "#FF362D"}});
+
+    helix::ams::FilamentSlotOverride ovr;
+    ovr.brand = "Polymaker";
+    ovr.spool_name = "PolyLite Red";
+    ovr.spoolman_id = 42;
+    QidiBoxTestAccess::seed_override(backend, 0, ovr);
+
+    // First observation establishes the baseline whatever the override says.
+    QidiBoxTestAccess::parse_vars(
+        backend, json{{"filament_slot0", 1}, {"color_slot0", 18}, {"vendor_slot0", 1}});
+    REQUIRE(QidiBoxTestAccess::last_fingerprint(backend, 0) == "1|18");
+    REQUIRE(QidiBoxTestAccess::get_override(backend, 0).has_value());
+
+    // A different spool's tag: new ids on all three fields.
+    QidiBoxTestAccess::parse_vars(
+        backend, json{{"filament_slot0", 11}, {"color_slot0", 2}, {"vendor_slot0", 2}});
+
+    CHECK_FALSE(QidiBoxTestAccess::get_override(backend, 0).has_value());
+    CHECK(mock_printer.client.mock_db_get("lane_data", "lane1").is_null());
+    const auto lane = helix::ams::lane_sources(harness.lane(0));
+    CHECK_FALSE(lane.local_user.has_value());
+    CHECK_FALSE(lane.remembered.has_value());
+
+    // The new tag's identity is what the slot shows now.
+    const auto info = backend.get_slot_info(0);
+    CHECK(info.material == "ABS");
+    CHECK(info.brand == "eSUN");
+    REQUIRE(helix::QidiBoxTestAccess::get_color(backend, 2).has_value());
+    CHECK(info.color_rgb == *helix::QidiBoxTestAccess::get_color(backend, 2));
+}
+
+TEST_CASE("QIDI Box unchanged tag fingerprint keeps a user edit", "[ams][qidi_box]") {
+    MockPrinter mock_printer;
+    auto& api = mock_printer.api;
+
+    helix::test::RegisteredBackend<AmsBackendQidi> harness(&api, nullptr);
+    AmsBackendQidi& backend = *harness;
+
+    QidiBoxTestAccess::apply_filas_list(backend, STOCK_FILAS_EXCERPT);
+    helix::ams::FilamentSlotOverride ovr;
+    ovr.brand = "Polymaker";
+    ovr.spoolman_id = 42;
+    QidiBoxTestAccess::seed_override(backend, 0, ovr);
+
+    const json tag{{"filament_slot0", 1}, {"color_slot0", 18}, {"vendor_slot0", 1}};
+    QidiBoxTestAccess::parse_vars(backend, tag);
+    REQUIRE(QidiBoxTestAccess::last_fingerprint(backend, 0) == "1|18");
+
+    // The same spool re-observed on a later poll.
+    QidiBoxTestAccess::parse_vars(backend, tag);
+
+    CHECK(QidiBoxTestAccess::get_override(backend, 0).has_value());
+}
+
+TEST_CASE("QIDI Box first tag observation is a baseline, not a clear", "[ams][qidi_box]") {
+    MockPrinter mock_printer;
+    auto& api = mock_printer.api;
+
+    helix::test::RegisteredBackend<AmsBackendQidi> harness(&api, nullptr);
+    AmsBackendQidi& backend = *harness;
+
+    QidiBoxTestAccess::apply_filas_list(backend, STOCK_FILAS_EXCERPT);
+    helix::ams::FilamentSlotOverride ovr;
+    ovr.brand = "Polymaker";
+    ovr.spoolman_id = 42;
+    QidiBoxTestAccess::seed_override(backend, 0, ovr);
+
+    // The very first fingerprint the Box reports disagrees with the restored
+    // override, and still must not clear it: nothing was swapped, the screen
+    // just started watching.
+    QidiBoxTestAccess::parse_vars(
+        backend, json{{"filament_slot0", 1}, {"color_slot0", 18}, {"vendor_slot0", 1}});
+
+    REQUIRE(QidiBoxTestAccess::last_fingerprint(backend, 0) == "1|18");
+    CHECK(QidiBoxTestAccess::get_override(backend, 0).has_value());
+}
+
+TEST_CASE("QIDI Box own identity push echo does not clear the edit", "[ams][qidi_box]") {
+    // execute_gcode must succeed for the echo to be expected at all, and the
+    // null-API backend refuses it, so the recording subclass stands in.
+    helix::test::RegisteredBackend<RecordingQidiBackend> harness;
+    RecordingQidiBackend& backend = *harness;
+
+    QidiBoxTestAccess::apply_filas_list(backend, STOCK_FILAS_EXCERPT);
+    QidiBoxTestAccess::parse_vars(
+        backend, json{{"filament_slot0", 1}, {"color_slot0", 18}, {"vendor_slot0", 1}});
+    REQUIRE(QidiBoxTestAccess::last_fingerprint(backend, 0) == "1|18");
+
+    // The user's edit resolves to fila 11 (ABS), palette row 2 (the exact
+    // 0x060606 entry), vendor 2 (eSUN).
+    auto info = backend.get_slot_info(0);
+    info.material = "ABS";
+    info.brand = "eSUN";
+    info.color_rgb = 0x060606u;
+    helix::test::edit_slot_as_user(backend, 0, info);
+
+    REQUIRE(QidiBoxTestAccess::get_override(backend, 0).has_value());
+    bool wrote_fila = false, wrote_color = false, wrote_vendor = false;
+    for (const auto& g : backend.sent) {
+        wrote_fila |= g.find("VARIABLE=filament_slot0 VALUE=11") != std::string::npos;
+        wrote_color |= g.find("VARIABLE=color_slot0 VALUE=2") != std::string::npos;
+        wrote_vendor |= g.find("VARIABLE=vendor_slot0 VALUE=2") != std::string::npos;
+    }
+    REQUIRE(wrote_fila);
+    REQUIRE(wrote_color);
+    REQUIRE(wrote_vendor);
+
+    // Firmware echoes the written ids back: same composite the edit just
+    // pushed, which must read as our own echo rather than a swap.
+    QidiBoxTestAccess::parse_vars(
+        backend, json{{"filament_slot0", 11}, {"color_slot0", 2}, {"vendor_slot0", 2}});
+
+    CHECK(QidiBoxTestAccess::get_override(backend, 0).has_value());
+}
+
+TEST_CASE("QIDI Box colour and vendor writes keep the echo expectation alive", "[ams][qidi_box]") {
+    // A material no fila profile matches still pushes colour and vendor, and
+    // the echo of those two writes must not be mistaken for a spool swap.
+    helix::test::RegisteredBackend<RecordingQidiBackend> harness;
+    RecordingQidiBackend& backend = *harness;
+
+    QidiBoxTestAccess::apply_filas_list(backend, STOCK_FILAS_EXCERPT);
+    QidiBoxTestAccess::parse_vars(
+        backend, json{{"filament_slot0", 1}, {"color_slot0", 18}, {"vendor_slot0", 1}});
+    REQUIRE(QidiBoxTestAccess::last_fingerprint(backend, 0) == "1|18");
+
+    auto info = backend.get_slot_info(0);
+    info.material = "Woodfill"; // matches no profile by name or type
+    info.brand = "eSUN";
+    info.color_rgb = 0x060606u;
+    helix::test::edit_slot_as_user(backend, 0, info);
+
+    bool wrote_fila = false, wrote_color = false, wrote_vendor = false;
+    for (const auto& g : backend.sent) {
+        wrote_fila |= g.find("VARIABLE=filament_slot0 VALUE=") != std::string::npos;
+        wrote_color |= g.find("VARIABLE=color_slot0 VALUE=2") != std::string::npos;
+        wrote_vendor |= g.find("VARIABLE=vendor_slot0 VALUE=2") != std::string::npos;
+    }
+    REQUIRE_FALSE(wrote_fila);
+    REQUIRE(wrote_color);
+    REQUIRE(wrote_vendor);
+    REQUIRE(QidiBoxTestAccess::get_override(backend, 0).has_value());
+
+    // Firmware echoes back only the two writes that were dispatched.
+    QidiBoxTestAccess::parse_vars(
+        backend, json{{"filament_slot0", 1}, {"color_slot0", 2}, {"vendor_slot0", 2}});
+
+    CHECK(QidiBoxTestAccess::get_override(backend, 0).has_value());
+}
+
+TEST_CASE("QIDI Box a write that never dispatched leaves no echo expectation", "[ams][qidi_box]") {
+    // No API connection: every SAVE_VARIABLE dispatch fails, so no echo is
+    // coming and the next fingerprint change must read as a real swap.
+    helix::test::RegisteredBackend<AmsBackendQidi> harness(nullptr, nullptr);
+    AmsBackendQidi& backend = *harness;
+
+    QidiBoxTestAccess::apply_filas_list(backend, STOCK_FILAS_EXCERPT);
+    QidiBoxTestAccess::parse_vars(
+        backend, json{{"filament_slot0", 1}, {"color_slot0", 18}, {"vendor_slot0", 1}});
+    REQUIRE(QidiBoxTestAccess::last_fingerprint(backend, 0) == "1|18");
+
+    auto info = backend.get_slot_info(0);
+    info.material = "ABS";
+    info.brand = "eSUN";
+    info.color_rgb = 0x060606u;
+    helix::test::edit_slot_as_user(backend, 0, info);
+    REQUIRE(QidiBoxTestAccess::get_override(backend, 0).has_value());
+
+    // The ids the failed push would have written, arriving from outside.
+    QidiBoxTestAccess::parse_vars(
+        backend, json{{"filament_slot0", 11}, {"color_slot0", 2}, {"vendor_slot0", 2}});
+
+    CHECK_FALSE(QidiBoxTestAccess::get_override(backend, 0).has_value());
+}
+
+TEST_CASE("QIDI Box a failed dispatch drops only its own echo expectations", "[ams][qidi_box]") {
+    // Edit A dispatches; edit B fails to dispatch entirely. B's forget must
+    // release only the composites B staged - A's echo is still in flight,
+    // and dropping its expectation too would make A's echo read as a spool
+    // swap that wipes the override the user just staged.
+    helix::test::RegisteredBackend<RecordingQidiBackend> harness;
+    RecordingQidiBackend& backend = *harness;
+
+    QidiBoxTestAccess::apply_filas_list(backend, STOCK_FILAS_EXCERPT);
+    QidiBoxTestAccess::parse_vars(
+        backend, json{{"filament_slot0", 1}, {"color_slot0", 18}, {"vendor_slot0", 1}});
+    REQUIRE(QidiBoxTestAccess::last_fingerprint(backend, 0) == "1|18");
+
+    // Edit A: ABS / eSUN / 0x060606 -> fila 11, colour 2, vendor 2. It lands.
+    auto info_a = backend.get_slot_info(0);
+    info_a.material = "ABS";
+    info_a.brand = "eSUN";
+    info_a.color_rgb = 0x060606u;
+    helix::test::edit_slot_as_user(backend, 0, info_a);
+    REQUIRE(backend.sent.size() == 3);
+
+    // Edit B: PETG-CF / Generic / 0xB87F2B -> fila 42, colour 24, vendor 0.
+    // None of its writes reach the box.
+    backend.fail_dispatch = true;
+    auto info_b = backend.get_slot_info(0);
+    info_b.material = "PETG-CF";
+    info_b.brand = "Generic";
+    info_b.color_rgb = 0xB87F2Bu;
+    helix::test::edit_slot_as_user(backend, 0, info_b);
+    backend.fail_dispatch = false;
+    REQUIRE(backend.sent.size() == 3);
+
+    // B staged an override despite the failed push; it must survive A's echo.
+    auto staged = QidiBoxTestAccess::get_override(backend, 0);
+    REQUIRE(staged.has_value());
+    CHECK(staged->material == "PETG-CF");
+
+    // Firmware never heard B, so it echoes A's ids back. A's expectation
+    // survived B's forget, so this reads as our own echo, not a swap.
+    QidiBoxTestAccess::parse_vars(
+        backend, json{{"filament_slot0", 11}, {"color_slot0", 2}, {"vendor_slot0", 2}});
+    CHECK(QidiBoxTestAccess::get_override(backend, 0).has_value());
+
+    // A different spool afterwards is still a genuine swap.
+    QidiBoxTestAccess::parse_vars(
+        backend, json{{"filament_slot0", 1}, {"color_slot0", 18}, {"vendor_slot0", 1}});
+    CHECK_FALSE(QidiBoxTestAccess::get_override(backend, 0).has_value());
+}
+
+TEST_CASE("QIDI Box a user edit persists its override to the lane_data record", "[ams][qidi_box]") {
+    QidiTmpCacheDir tmp("edit_persists");
+    MockPrinter mock_printer;
+    auto& api = mock_printer.api;
+
+    helix::test::RegisteredBackend<AmsBackendQidi> harness(&api, nullptr);
+    AmsBackendQidi& backend = *harness;
+    auto store = std::make_unique<helix::ams::FilamentSlotOverrideStore>(&api, "qidi");
+    FilamentSlotOverrideStoreTestAccess::set_cache_directory(*store, tmp.path);
+    QidiBoxTestAccess::inject_override_store(backend, std::move(store));
+
+    QidiBoxTestAccess::apply_filas_list(backend, STOCK_FILAS_EXCERPT);
+    QidiBoxTestAccess::parse_vars(
+        backend, json{{"filament_slot0", 1}, {"color_slot0", 18}, {"vendor_slot0", 1}});
+
+    auto info = backend.get_slot_info(0);
+    info.material = "ABS";
+    info.brand = "eSUN";
+    info.color_rgb = 0x060606u;
+    helix::test::edit_slot_as_user(backend, 0, info);
+
+    // Round-trip through the wire format rather than asserting field spellings.
+    const auto rec = mock_printer.client.mock_db_get("lane_data", "lane1");
+    REQUIRE_FALSE(rec.is_null());
+    const auto parsed = helix::ams::from_lane_data_record(rec);
+    REQUIRE(parsed.has_value());
+    CHECK(parsed->first == 0);
+    CHECK(parsed->second.brand == "eSUN");
+}
+
+TEST_CASE("QIDI Box startup loads persisted overrides from the database", "[ams][qidi_box]") {
+    MockPrinter mock_printer;
+    auto& api = mock_printer.api;
+
+    helix::test::RegisteredBackend<AmsBackendQidi> harness(&api, nullptr);
+    AmsBackendQidi& backend = *harness;
+
+    helix::ams::FilamentSlotOverride ovr;
+    ovr.brand = "Polymaker";
+    ovr.spoolman_id = 42;
+    mock_printer.client.mock_db_set("lane_data", "lane1", helix::ams::to_lane_data_record(0, ovr));
+
+    QidiBoxTestAccess::start_load(backend);
+
+    const auto loaded = QidiBoxTestAccess::get_override(backend, 0);
+    REQUIRE(loaded.has_value());
+    CHECK(loaded->brand == "Polymaker");
+    CHECK(loaded->spoolman_id == 42);
+}
+
+TEST_CASE("QIDI Box clear_slot_override erases the edit, its lane record and the persisted copy",
+          "[ams][qidi_box]") {
+    QidiTmpCacheDir tmp("clear_request");
+    MockPrinter mock_printer;
+    auto& api = mock_printer.api;
+
+    helix::test::RegisteredBackend<AmsBackendQidi> harness(&api, nullptr);
+    AmsBackendQidi& backend = *harness;
+    auto store = std::make_unique<helix::ams::FilamentSlotOverrideStore>(&api, "qidi");
+    FilamentSlotOverrideStoreTestAccess::set_cache_directory(*store, tmp.path);
+    QidiBoxTestAccess::inject_override_store(backend, std::move(store));
+
+    QidiBoxTestAccess::apply_filas_list(backend, STOCK_FILAS_EXCERPT);
+    QidiBoxTestAccess::parse_vars(backend, json{{"vendor_slot0", 2}});
+    mock_printer.client.mock_db_set("lane_data", "lane1",
+                                    json{{"vendor", "Polymaker"}, {"spool_id", 42}});
+
+    helix::ams::FilamentSlotOverride ovr;
+    ovr.brand = "Polymaker";
+    ovr.spoolman_id = 42;
+    QidiBoxTestAccess::seed_override(backend, 0, ovr);
+    REQUIRE(backend.get_slot_info(0).brand == "eSUN");
+
+    backend.clear_slot_override(0);
+
+    CHECK_FALSE(QidiBoxTestAccess::get_override(backend, 0).has_value());
+    CHECK(mock_printer.client.mock_db_get("lane_data", "lane1").is_null());
+    const auto lane = helix::ams::lane_sources(harness.lane(0));
+    CHECK_FALSE(lane.local_user.has_value());
+    CHECK_FALSE(lane.remembered.has_value());
+    // The clear resets what the slot showed from the tag too; the next parse
+    // re-states it.
+    CHECK(backend.get_slot_info(0).brand.empty());
+}
+
+TEST_CASE("QIDI Box a poll between the edit and its echo keeps the edit on screen",
+          "[ams][qidi_box]") {
+    helix::test::RegisteredBackend<RecordingQidiBackend> harness;
+    RecordingQidiBackend& backend = *harness;
+
+    QidiBoxTestAccess::apply_filas_list(backend, STOCK_FILAS_EXCERPT);
+    QidiBoxTestAccess::parse_vars(
+        backend, json{{"filament_slot0", 1}, {"color_slot0", 18}, {"vendor_slot0", 1}});
+    REQUIRE(QidiBoxTestAccess::last_fingerprint(backend, 0) == "1|18");
+
+    auto info = backend.get_slot_info(0);
+    info.material = "ABS";
+    info.brand = "eSUN";
+    info.color_rgb = 0x060606u;
+    helix::test::edit_slot_as_user(backend, 0, info);
+    REQUIRE(backend.get_slot_info(0).material == "ABS");
+
+    // The poll races the SAVE_VARIABLE echo: the Box still reports the old
+    // ids, which the fingerprint reads as the same spool. The frame's tag
+    // paint must not overwrite the fields the user just declared.
+    QidiBoxTestAccess::parse_vars(
+        backend, json{{"filament_slot0", 1}, {"color_slot0", 18}, {"vendor_slot0", 1}});
+
+    const auto shown = backend.get_slot_info(0);
+    CHECK(shown.material == "ABS");
+    CHECK(shown.brand == "eSUN");
+    CHECK(shown.color_rgb == 0x060606u);
+}
+
+TEST_CASE("QIDI Box a stored edit shows again after a restart", "[ams][qidi_box]") {
+    QidiTmpCacheDir tmp("restart_shows");
+    MockPrinter mock_printer;
+    auto& api = mock_printer.api;
+
+    // First run: the user edits slot 0 and the record lands in the database.
+    {
+        helix::test::RegisteredBackend<AmsBackendQidi> harness(&api, nullptr);
+        AmsBackendQidi& first = *harness;
+        auto store = std::make_unique<helix::ams::FilamentSlotOverrideStore>(&api, "qidi");
+        FilamentSlotOverrideStoreTestAccess::set_cache_directory(*store, tmp.path);
+        QidiBoxTestAccess::inject_override_store(first, std::move(store));
+
+        QidiBoxTestAccess::apply_filas_list(first, STOCK_FILAS_EXCERPT);
+        QidiBoxTestAccess::parse_vars(
+            first, json{{"filament_slot0", 1}, {"color_slot0", 18}, {"vendor_slot0", 1}});
+
+        auto info = first.get_slot_info(0);
+        info.material = "ABS";
+        info.brand = "eSUN";
+        info.color_rgb = 0x060606u;
+        helix::test::edit_slot_as_user(first, 0, info);
+        REQUIRE_FALSE(mock_printer.client.mock_db_get("lane_data", "lane1").is_null());
+    }
+
+    // Restart: the lane store died with the process, the database record did
+    // not. A fresh backend loads it at startup, then meets the same poll.
+    helix::test::RegisteredBackend<AmsBackendQidi> harness(&api, nullptr);
+    AmsBackendQidi& backend = *harness;
+    auto store = std::make_unique<helix::ams::FilamentSlotOverrideStore>(&api, "qidi");
+    FilamentSlotOverrideStoreTestAccess::set_cache_directory(*store, tmp.path);
+    QidiBoxTestAccess::inject_override_store(backend, std::move(store));
+    QidiBoxTestAccess::apply_filas_list(backend, STOCK_FILAS_EXCERPT);
+    QidiBoxTestAccess::start_load(backend);
+    REQUIRE(QidiBoxTestAccess::get_override(backend, 0).has_value());
+
+    QidiBoxTestAccess::parse_vars(
+        backend, json{{"filament_slot0", 1}, {"color_slot0", 18}, {"vendor_slot0", 1}});
+
+    const auto shown = backend.get_slot_info(0);
+    CHECK(shown.material == "ABS");
+    CHECK(shown.brand == "eSUN");
+    CHECK(shown.color_rgb == 0x060606u);
+}
+
+// =====================================================================
+// Clear Spool: the Box has no clear command, so erasing what the firmware
+// remembers is three bare-int SAVE_VARIABLEs (row ids start at 1, so 0
+// names no row and reads as unset).
+// =====================================================================
+
+TEST_CASE("QIDI Box clearing a spool writes the three identity zeros", "[ams][qidi_box]") {
+    helix::test::RegisteredBackend<RecordingQidiBackend> harness;
+    RecordingQidiBackend& backend = *harness;
+
+    QidiBoxTestAccess::apply_filas_list(backend, STOCK_FILAS_EXCERPT);
+    QidiBoxTestAccess::parse_vars(
+        backend, json{{"filament_slot0", 1}, {"color_slot0", 18}, {"vendor_slot0", 1}});
+    REQUIRE(QidiBoxTestAccess::last_fingerprint(backend, 0) == "1|18");
+
+    backend.clear_slot_override(0);
+
+    for (const char* gcode : {"SAVE_VARIABLE VARIABLE=filament_slot0 VALUE=0",
+                              "SAVE_VARIABLE VARIABLE=color_slot0 VALUE=0",
+                              "SAVE_VARIABLE VARIABLE=vendor_slot0 VALUE=0"}) {
+        CAPTURE(gcode);
+        REQUIRE(std::find(backend.sent.begin(), backend.sent.end(), std::string(gcode)) !=
+                backend.sent.end());
+    }
+}
+
+TEST_CASE("QIDI Box a cleared slot reads as no identity once the zero echo lands",
+          "[ams][qidi_box]") {
+    helix::test::RegisteredBackend<RecordingQidiBackend> harness;
+    RecordingQidiBackend& backend = *harness;
+
+    QidiBoxTestAccess::apply_filas_list(backend, STOCK_FILAS_EXCERPT);
+    QidiBoxTestAccess::parse_vars(
+        backend, json{{"filament_slot0", 1}, {"color_slot0", 18}, {"vendor_slot0", 1}});
+    REQUIRE(backend.get_slot_info(0).material == "PLA");
+    REQUIRE(backend.get_slot_info(0).brand == "QIDI");
+    REQUIRE(backend.get_slot_info(0).color_rgb == 0xFF362Du);
+
+    backend.clear_slot_override(0);
+    // The request blanks the slot immediately; the Box still remembers until
+    // the zero writes land.
+    CHECK(backend.get_slot_info(0).material.empty());
+    CHECK(backend.get_slot_info(0).brand.empty());
+    CHECK(backend.get_slot_info(0).color_rgb == 0);
+
+    // The zero writes race the polls: the next poll still carries the old ids
+    // and repaints the tag.
+    QidiBoxTestAccess::parse_vars(
+        backend, json{{"filament_slot0", 1}, {"color_slot0", 18}, {"vendor_slot0", 1}});
+    REQUIRE(backend.get_slot_info(0).material == "PLA");
+
+    // The echo: all three ids read back as unset, and the slot must not keep
+    // the last paint.
+    QidiBoxTestAccess::parse_vars(
+        backend, json{{"filament_slot0", 0}, {"color_slot0", 0}, {"vendor_slot0", 0}});
+    const auto shown = backend.get_slot_info(0);
+    CHECK(shown.material.empty());
+    CHECK(shown.brand.empty());
+    CHECK(shown.color_rgb == 0);
+}
+
+TEST_CASE("QIDI Box an edit racing the clear's zero echoes survives them", "[ams][qidi_box]") {
+    helix::test::RegisteredBackend<RecordingQidiBackend> harness;
+    RecordingQidiBackend& backend = *harness;
+
+    QidiBoxTestAccess::apply_filas_list(backend, STOCK_FILAS_EXCERPT);
+    QidiBoxTestAccess::parse_vars(
+        backend, json{{"filament_slot0", 1}, {"color_slot0", 18}, {"vendor_slot0", 1}});
+    REQUIRE(QidiBoxTestAccess::last_fingerprint(backend, 0) == "1|18");
+
+    backend.clear_slot_override(0);
+
+    // The user re-edits before the zero writes land: the edit stages a fresh
+    // override and queues its own SAVE_VARIABLEs behind the clear's.
+    auto info = backend.get_slot_info(0);
+    info.material = "ABS";
+    info.brand = "eSUN";
+    info.color_rgb = 0x060606u;
+    helix::test::edit_slot_as_user(backend, 0, info);
+    REQUIRE(QidiBoxTestAccess::get_override(backend, 0).has_value());
+
+    // A mixed echo: the clear's filament write landed, its colour and vendor
+    // writes have not. Reading that as a spool swap would erase an edit the
+    // user made moments ago.
+    QidiBoxTestAccess::parse_vars(
+        backend, json{{"filament_slot0", 0}, {"color_slot0", 18}, {"vendor_slot0", 1}});
+
+    CHECK(QidiBoxTestAccess::get_override(backend, 0).has_value());
+    CHECK(backend.get_slot_info(0).material == "ABS");
+}
+
+TEST_CASE("QIDI Box clear writes the firmware zeros while a print is active", "[ams][qidi_box]") {
+    MockPrinter mock_printer;
+    auto& state = mock_printer.state;
+    auto& api = mock_printer.api;
+
+    helix::test::RegisteredBackend<RecordingQidiBackend> harness(&api);
+    RecordingQidiBackend& backend = *harness;
+
+    QidiBoxTestAccess::apply_filas_list(backend, STOCK_FILAS_EXCERPT);
+    QidiBoxTestAccess::parse_vars(
+        backend, json{{"filament_slot0", 1}, {"color_slot0", 18}, {"vendor_slot0", 1}});
+
+    helix::ams::FilamentSlotOverride ovr;
+    ovr.brand = "Polymaker";
+    QidiBoxTestAccess::seed_override(backend, 0, ovr);
+    REQUIRE(QidiBoxTestAccess::get_override(backend, 0).has_value());
+
+    helix::test::set_wire_state(state, helix::PrintJobState::PRINTING);
+    for (int i = 0; i < 8; ++i) {
+        helix::ui::UpdateQueue::instance().drain();
+    }
+    REQUIRE(state.print_state().get_print_lifecycle() == PrintState::Printing);
+
+    backend.clear_slot_override(0);
+
+    // SAVE_VARIABLE moves nothing, so the print does not hold the writes back;
+    // without them the next poll repaints the old ids over the clear.
+    for (const char* gcode : {"SAVE_VARIABLE VARIABLE=filament_slot0 VALUE=0",
+                              "SAVE_VARIABLE VARIABLE=color_slot0 VALUE=0",
+                              "SAVE_VARIABLE VARIABLE=vendor_slot0 VALUE=0"}) {
+        CAPTURE(gcode);
+        CHECK(std::find(backend.sent.begin(), backend.sent.end(), std::string(gcode)) !=
+              backend.sent.end());
+    }
+    CHECK_FALSE(QidiBoxTestAccess::get_override(backend, 0).has_value());
+    CHECK(backend.get_slot_info(0).material.empty());
+}
+
+TEST_CASE("QIDI Box a quoted SAVE_VARIABLE value paints the slot", "[ams][qidi_box]") {
+    helix::test::RegisteredBackend<RecordingQidiBackend> harness;
+    RecordingQidiBackend& backend = *harness;
+
+    QidiBoxTestAccess::apply_filas_list(backend, STOCK_FILAS_EXCERPT);
+    // Qidi Studio writes VALUE="5"; save_variables.py evaluates the literal,
+    // so the id arrives as a JSON string rather than an int.
+    QidiBoxTestAccess::parse_vars(
+        backend, json{{"filament_slot0", "1"}, {"color_slot0", "18"}, {"vendor_slot0", "1"}});
+
+    REQUIRE(QidiBoxTestAccess::last_fingerprint(backend, 0) == "1|18");
+    REQUIRE(backend.get_slot_info(0).material == "PLA");
+    REQUIRE(backend.get_slot_info(0).brand == "QIDI");
+    REQUIRE(backend.get_slot_info(0).color_rgb == 0xFF362Du);
+}
+
+TEST_CASE("QIDI Box a non-integer slot id keeps the last stated id", "[ams][qidi_box]") {
+    AmsBackendQidi backend(nullptr, nullptr);
+
+    QidiBoxTestAccess::parse_vars(backend, json{
+                                               {"filament_slot0", 42},
+                                               {"color_slot1", 3},
+                                           });
+    // A value that is neither an int nor digits is ignored - the previously
+    // stated id stays. Whitespace around the digits is still digits.
+    QidiBoxTestAccess::parse_vars(backend, json{
+                                               {"filament_slot0", "PLA"},
+                                               {"color_slot1", " 4 "},
+                                           });
+    CHECK(QidiBoxTestAccess::filament_id(backend, 0) == 42);
+    CHECK(QidiBoxTestAccess::color_id(backend, 1) == 4);
+    // A negative id names no palette row, in either spelling.
+    QidiBoxTestAccess::parse_vars(backend, json{
+                                               {"filament_slot0", -7},
+                                               {"color_slot1", "-7"},
+                                           });
+    CHECK(QidiBoxTestAccess::filament_id(backend, 0) == 42);
+    CHECK(QidiBoxTestAccess::color_id(backend, 1) == 4);
+}
+TEST_CASE("QIDI Box a restart compares against the fingerprint the record carried",
+          "[ams][qidi_box]") {
+    MockPrinter mock_printer;
+    auto& api = mock_printer.api;
+
+    // A record as a session running older code left it: a user override with
+    // no fingerprint. Session 1 boots on it, observes the tag, and the
+    // observation must persist into the record - two backends over one mock
+    // DB stand in for two app lifetimes.
+    helix::ams::FilamentSlotOverride saved;
+    saved.brand = "Polymaker";
+    saved.spoolman_id = 42;
+    mock_printer.client.mock_db_set("lane_data", "lane1",
+                                    helix::ams::to_lane_data_record(0, saved));
+    {
+        helix::test::RegisteredBackend<AmsBackendQidi> session1(&api, nullptr);
+        QidiBoxTestAccess::apply_filas_list(*session1, STOCK_FILAS_EXCERPT);
+        QidiBoxTestAccess::start_load(*session1);
+        REQUIRE(QidiBoxTestAccess::get_override(*session1, 0).has_value());
+        QidiBoxTestAccess::parse_vars(
+            *session1, json{{"filament_slot0", 1}, {"color_slot0", 18}, {"vendor_slot0", 1}});
+        const auto stored = mock_printer.client.mock_db_get("lane_data", "lane1");
+        REQUIRE(!stored.is_null());
+        REQUIRE(stored.contains("helix_fingerprint"));
+        CHECK(stored.at("helix_fingerprint") == "1|18");
+    }
+
+    SECTION("a swap made while the app was down clears the override") {
+        helix::test::RegisteredBackend<AmsBackendQidi> session2(&api, nullptr);
+        QidiBoxTestAccess::apply_filas_list(*session2, STOCK_FILAS_EXCERPT);
+        QidiBoxTestAccess::start_load(*session2);
+        // The loaded record's fingerprint is the baseline, so the first frame
+        // after restart is a comparison, not a first observation.
+        REQUIRE(QidiBoxTestAccess::get_override(*session2, 0).has_value());
+        QidiBoxTestAccess::parse_vars(
+            *session2, json{{"filament_slot0", 11}, {"color_slot0", 2}, {"vendor_slot0", 2}});
+        CHECK_FALSE(QidiBoxTestAccess::get_override(*session2, 0).has_value());
+        CHECK(mock_printer.client.mock_db_get("lane_data", "lane1").is_null());
+        // The new tag's identity is what the slot shows.
+        CHECK(session2->get_slot_info(0).material == "ABS");
+        CHECK(session2->get_slot_info(0).brand == "eSUN");
+    }
+
+    SECTION("the same spool across a restart keeps the override") {
+        helix::test::RegisteredBackend<AmsBackendQidi> session2(&api, nullptr);
+        QidiBoxTestAccess::apply_filas_list(*session2, STOCK_FILAS_EXCERPT);
+        QidiBoxTestAccess::start_load(*session2);
+        QidiBoxTestAccess::parse_vars(
+            *session2, json{{"filament_slot0", 1}, {"color_slot0", 18}, {"vendor_slot0", 1}});
+        const auto ovr = QidiBoxTestAccess::get_override(*session2, 0);
+        REQUIRE(ovr.has_value());
+        CHECK(ovr->brand == "Polymaker");
+        CHECK(!mock_printer.client.mock_db_get("lane_data", "lane1").is_null());
+    }
+}
+
+TEST_CASE("clearing a QIDI Box slot takes the linked spool's brand off it",
+          "[ams][qidi_box][lane]") {
+    MockPrinter mock_printer;
+    auto& api = mock_printer.api;
+
+    helix::test::RegisteredBackend<RecordingQidiBackend> harness(&api);
+    RecordingQidiBackend& backend = *harness;
+
+    // A linked Spoolman spool states brand and spool name as lane records.
+    SpoolInfo spool;
+    spool.id = 1;
+    spool.vendor = "Polymaker";
+    spool.filament_name = "PolyLite Red";
+    helix::test::spool_states(backend, 0, spool);
+    backend.repaint_slot_from_lane(0);
+    REQUIRE(backend.get_slot_info(0).brand == "Polymaker");
+    REQUIRE(backend.get_slot_info(0).spool_name == "PolyLite Red");
+
+    // Field for field what ui_ams_detail does on CLEAR_SPOOL: blank the
+    // identity fields, drop the Spoolman handles, commit as a user edit. The
+    // lane no longer states brand or spool name and apply_resolved() cannot
+    // retire a field no source observes - and nothing on this Box ever
+    // restates either - so only the repaint's clear takes them off.
+    SlotInfo cleared = backend.get_slot_info(0);
+    cleared.material.clear();
+    cleared.color_rgb = AMS_DEFAULT_SLOT_COLOR;
+    cleared.color_name.clear();
+    cleared.multi_color_hexes.clear();
+    cleared.brand.clear();
+    cleared.catalog_id.clear();
+    cleared.product_name.clear();
+    cleared.clear_spoolman_link();
+    cleared.remaining_weight_g = -1;
+    cleared.total_weight_g = -1;
+    helix::test::edit_slot_as_user(backend, 0, cleared);
+
+    CHECK(backend.get_slot_info(0).brand.empty());
+    CHECK(backend.get_slot_info(0).spool_name.empty());
 }

@@ -9,8 +9,11 @@
 #include "ui_callback_helpers.h"
 
 #include "../lvgl_test_fixture.h"
+#include "../test_helpers/log_capture.h"
 
 #include <spdlog/spdlog.h>
+
+#include <stdexcept>
 
 #include "../catch_amalgamated.hpp"
 
@@ -105,4 +108,94 @@ TEST_CASE_METHOD(LVGLTestFixture,
 
     REQUIRE(g_callback_b_count == 1);
     REQUIRE(g_callback_a_count == 0);
+}
+
+// ============================================================================
+// Table lambdas: the exception guard and the event readers
+// ============================================================================
+
+TEST_CASE_METHOD(LVGLTestFixture, "a lambda table entry resolves and fires like a function entry",
+                 "[callback_helpers]") {
+    static int lambda_hits = 0;
+    lambda_hits = 0;
+    register_xml_callbacks({
+        {"test_cb_fn_entry", test_callback_a},
+        {"test_cb_lambda_entry", [](lv_event_t*) { ++lambda_hits; }},
+    });
+    CHECK(lv_xml_get_event_cb(nullptr, "test_cb_fn_entry") == test_callback_a);
+    lv_event_cb_t cb = lv_xml_get_event_cb(nullptr, "test_cb_lambda_entry");
+    REQUIRE(cb != nullptr);
+
+    lv_obj_t* btn = lv_obj_create(test_screen());
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
+    lv_obj_send_event(btn, LV_EVENT_CLICKED, nullptr);
+    lv_obj_send_event(btn, LV_EVENT_CLICKED, nullptr);
+    CHECK(lambda_hits == 2);
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "two lambda entries in one table each run their own body",
+                 "[callback_helpers]") {
+    static int first_hits = 0;
+    static int second_hits = 0;
+    first_hits = 0;
+    second_hits = 0;
+    register_xml_callbacks({
+        {"test_cb_lambda_first", [](lv_event_t*) { ++first_hits; }},
+        {"test_cb_lambda_second", [](lv_event_t*) { ++second_hits; }},
+    });
+
+    lv_obj_t* btn = lv_obj_create(test_screen());
+    lv_obj_add_event_cb(btn, lv_xml_get_event_cb(nullptr, "test_cb_lambda_first"), LV_EVENT_CLICKED,
+                        nullptr);
+    lv_obj_send_event(btn, LV_EVENT_CLICKED, nullptr);
+    CHECK(first_hits == 1);
+    CHECK(second_hits == 0);
+
+    lv_obj_t* other = lv_obj_create(test_screen());
+    lv_obj_add_event_cb(other, lv_xml_get_event_cb(nullptr, "test_cb_lambda_second"),
+                        LV_EVENT_CLICKED, nullptr);
+    lv_obj_send_event(other, LV_EVENT_CLICKED, nullptr);
+    CHECK(first_hits == 1);
+    CHECK(second_hits == 1);
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "a throwing lambda entry logs its callback name and returns",
+                 "[callback_helpers]") {
+    register_xml_callbacks({
+        {"test_cb_throwing_entry",
+         [](lv_event_t*) { throw std::runtime_error("boom from the handler"); }},
+    });
+    lv_obj_t* btn = lv_obj_create(test_screen());
+    lv_obj_add_event_cb(btn, lv_xml_get_event_cb(nullptr, "test_cb_throwing_entry"),
+                        LV_EVENT_CLICKED, nullptr);
+
+    helix::LogCapture log;
+    REQUIRE_NOTHROW(lv_obj_send_event(btn, LV_EVENT_CLICKED, nullptr));
+    CHECK(log.has_line_with({"test_cb_throwing_entry", "boom from the handler"}));
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "event_checked and event_selected read the event's widget",
+                 "[callback_helpers]") {
+    static bool checked = false;
+    static int selected = -1;
+
+    lv_obj_t* toggle = lv_obj_create(test_screen());
+    lv_obj_add_event_cb(
+        toggle, [](lv_event_t* e) { checked = helix::ui::event_checked(e); }, LV_EVENT_CLICKED,
+        nullptr);
+    lv_obj_add_state(toggle, LV_STATE_CHECKED);
+    lv_obj_send_event(toggle, LV_EVENT_CLICKED, nullptr);
+    CHECK(checked);
+    lv_obj_remove_state(toggle, LV_STATE_CHECKED);
+    lv_obj_send_event(toggle, LV_EVENT_CLICKED, nullptr);
+    CHECK_FALSE(checked);
+
+    lv_obj_t* dropdown = lv_dropdown_create(test_screen());
+    lv_dropdown_set_options(dropdown, "a\nb\nc");
+    lv_dropdown_set_selected(dropdown, 2);
+    lv_obj_add_event_cb(
+        dropdown, [](lv_event_t* e) { selected = helix::ui::event_selected(e); },
+        LV_EVENT_VALUE_CHANGED, nullptr);
+    lv_obj_send_event(dropdown, LV_EVENT_VALUE_CHANGED, nullptr);
+    CHECK(selected == 2);
 }

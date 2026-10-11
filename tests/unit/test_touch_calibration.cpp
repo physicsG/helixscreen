@@ -629,9 +629,8 @@ TEST_CASE("TouchCalibration: device_needs_calibration",
 // Touch Device Scoring Scenario Tests
 // ============================================================================
 // These test the individual scoring factors (name recognition, USB detection)
-// that auto_detect_touch_device() uses. The actual scoring loop requires sysfs
-// access, but these verify the building blocks produce correct results for the
-// scenarios described in issue #117.
+// that find_touch_device() combines; its scoring loop is tested against a mock
+// sysfs tree in test_input_device_scanner.cpp. Scenarios from issue #117.
 
 TEST_CASE("TouchCalibration: phantom SPI vs real USB touchscreen scoring factors",
           "[touch-calibration][scoring]") {
@@ -755,6 +754,61 @@ TEST_CASE("TouchCalibration: has_abs_display_mismatch", "[touch-calibration][abs
     SECTION("Goodix on Nebula Pad: 800x480 ABS on 480x272 display") {
         // Real panel resolution that doesn't match display — should trigger
         REQUIRE(has_abs_display_mismatch(800, 480, 480, 272) == true);
+    }
+}
+
+// ============================================================================
+// Transposed ABS Range Detection Tests (has_transposed_abs_range)
+// ============================================================================
+
+TEST_CASE("TouchCalibration: has_transposed_abs_range", "[touch-calibration][abs-mismatch]") {
+    SECTION("Creator 5 Goodix: ABS 800x480 advertised on a 480x800 framebuffer") {
+        REQUIRE(has_transposed_abs_range(800, 480, 480, 800) == true);
+    }
+
+    SECTION("landscape display with a portrait-advertised range") {
+        REQUIRE(has_transposed_abs_range(480, 800, 800, 480) == true);
+    }
+
+    SECTION("transposed within the 5% tolerance still counts") {
+        // 810x470 reads as 480x800 the other way round, inside tolerance
+        REQUIRE(has_transposed_abs_range(810, 470, 480, 800) == true);
+    }
+
+    SECTION("range matching the display the normal way round is not transposed") {
+        REQUIRE(has_transposed_abs_range(800, 480, 800, 480) == false);
+        REQUIRE(has_transposed_abs_range(480, 800, 480, 800) == false);
+        REQUIRE(has_transposed_abs_range(832, 480, 800, 480) == false);
+    }
+
+    SECTION("a range matching neither orientation is a plain mismatch, not a transposition") {
+        // Goodix 800x480 on a 480x272 panel — the calibration wizard case
+        REQUIRE(has_transposed_abs_range(800, 480, 480, 272) == false);
+        REQUIRE(has_transposed_abs_range(1024, 768, 800, 480) == false);
+        REQUIRE(has_transposed_abs_range(800, 600, 800, 480) == false);
+    }
+
+    SECTION("square display: the two readings are the same, so nothing is transposed") {
+        REQUIRE(has_transposed_abs_range(480, 480, 480, 480) == false);
+        // A square range that misses a square display is a plain mismatch
+        REQUIRE(has_transposed_abs_range(720, 720, 480, 480) == false);
+        // A non-square range on a square display misses both readings equally
+        REQUIRE(has_transposed_abs_range(800, 480, 480, 480) == false);
+    }
+
+    SECTION("generic HID ranges are resolution-independent") {
+        REQUIRE(has_transposed_abs_range(4095, 4095, 480, 800) == false);
+        REQUIRE(has_transposed_abs_range(32767, 32767, 800, 480) == false);
+        REQUIRE(has_transposed_abs_range(65535, 65535, 480, 272) == false);
+    }
+
+    SECTION("invalid ranges and display sizes return false") {
+        REQUIRE(has_transposed_abs_range(0, 480, 480, 800) == false);
+        REQUIRE(has_transposed_abs_range(800, 0, 480, 800) == false);
+        REQUIRE(has_transposed_abs_range(-1, 480, 480, 800) == false);
+        REQUIRE(has_transposed_abs_range(800, -1, 480, 800) == false);
+        REQUIRE(has_transposed_abs_range(800, 480, 0, 800) == false);
+        REQUIRE(has_transposed_abs_range(800, 480, 480, 0) == false);
     }
 }
 
@@ -1125,6 +1179,49 @@ TEST_CASE("TouchCalibration: parse_abs_capabilities edge cases",
 }
 
 // ============================================================================
+// Input Properties Parsing Tests (parse_input_prop_direct)
+// ============================================================================
+
+TEST_CASE("TouchCalibration: parse_input_prop_direct", "[touch-calibration][capabilities]") {
+    SECTION("touchscreen reports INPUT_PROP_DIRECT as bit 1") {
+        // Real value from a Creality K2 Plus and K2 Pro (Goodix gt9xxnew_ts).
+        REQUIRE(parse_input_prop_direct("2") == true);
+    }
+
+    SECTION("INPUT_PROP_POINTER is not direct input") {
+        // Bit 0 marks a cursor-moving device: a touchpad or pointing stick.
+        REQUIRE(parse_input_prop_direct("1") == false);
+    }
+
+    SECTION("both POINTER and DIRECT set") {
+        REQUIRE(parse_input_prop_direct("3") == true);
+    }
+
+    SECTION("no properties") {
+        REQUIRE(parse_input_prop_direct("0") == false);
+    }
+
+    SECTION("unreadable sysfs file") {
+        REQUIRE(parse_input_prop_direct("") == false);
+    }
+
+    SECTION("non-hex garbage") {
+        REQUIRE(parse_input_prop_direct("xyz") == false);
+    }
+
+    SECTION("multi-word: the rightmost word carries the low bits") {
+        REQUIRE(parse_input_prop_direct("0 2") == true);
+        REQUIRE(parse_input_prop_direct("2 0") == false);
+    }
+
+    SECTION("higher property bits alone are not direct input") {
+        // INPUT_PROP_BUTTONPAD is bit 2, INPUT_PROP_SEMI_MT bit 3.
+        REQUIRE(parse_input_prop_direct("4") == false);
+        REQUIRE(parse_input_prop_direct("8") == false);
+    }
+}
+
+// ============================================================================
 // Calibration Decision with MT-only devices
 // ============================================================================
 
@@ -1216,7 +1313,7 @@ TEST_CASE("TouchCalibration: device_supports_calibration", "[touch-calibration][
 // Axis Swap Detection and Correction Tests
 // ============================================================================
 
-TEST_CASE("TouchCalibration: detect_and_correct_axis_swap with swapped 800x480 screen",
+TEST_CASE("TouchCalibration: detect_axis_transposition with swapped 800x480 screen",
           "[touch-calibration][axis-swap]") {
     // Simulate a touchscreen where the controller reports X/Y swapped.
     // Screen targets are at the standard calibration positions for 800x480.
@@ -1245,17 +1342,13 @@ TEST_CASE("TouchCalibration: detect_and_correct_axis_swap with swapped 800x480 s
     REQUIRE(orig_off_diag / orig_diagonal > 0.5f);
 
     // Now detect and correct
-    bool swapped = detect_and_correct_axis_swap(cal, screen_points, touch_points);
+    bool swapped = detect_axis_transposition(cal, screen_points, touch_points);
     REQUIRE(swapped == true);
     REQUIRE(cal.axes_swapped == true);
 
-    // After correction, diagonal should dominate
-    float new_diagonal = std::abs(cal.a) + std::abs(cal.e);
-    float new_off_diag = std::abs(cal.b) + std::abs(cal.d);
-    REQUIRE(new_off_diag / new_diagonal < 0.5f);
-
-    // The corrected calibration should produce correct screen coordinates
-    // touch_points were swapped in-place, so transform them
+    // The transposition stays in the cross terms, where the exact solve put it,
+    // and the matrix keeps mapping the taps as reported onto their targets. The
+    // taps are not rewritten, so these are the coordinates the runtime supplies.
     Point p0 = transform_point(cal, touch_points[0]);
     REQUIRE(p0.x == Approx(screen_points[0].x).margin(2));
     REQUIRE(p0.y == Approx(screen_points[0].y).margin(2));
@@ -1265,7 +1358,7 @@ TEST_CASE("TouchCalibration: detect_and_correct_axis_swap with swapped 800x480 s
     REQUIRE(p1.y == Approx(screen_points[1].y).margin(2));
 }
 
-TEST_CASE("TouchCalibration: detect_and_correct_axis_swap with non-swapped screen",
+TEST_CASE("TouchCalibration: detect_axis_transposition with non-swapped screen",
           "[touch-calibration][axis-swap]") {
     // Normal (non-swapped) calibration — should NOT trigger swap
     Point screen_points[3] = {{120, 96}, {400, 374}, {680, 96}};
@@ -1278,7 +1371,7 @@ TEST_CASE("TouchCalibration: detect_and_correct_axis_swap with non-swapped scree
 
     // Should NOT detect swap — diagonal is already dominant
     Point original_touch[3] = {touch_points[0], touch_points[1], touch_points[2]};
-    bool swapped = detect_and_correct_axis_swap(cal, screen_points, touch_points);
+    bool swapped = detect_axis_transposition(cal, screen_points, touch_points);
     REQUIRE(swapped == false);
     REQUIRE(cal.axes_swapped == false);
 
@@ -1289,7 +1382,7 @@ TEST_CASE("TouchCalibration: detect_and_correct_axis_swap with non-swapped scree
     }
 }
 
-TEST_CASE("TouchCalibration: detect_and_correct_axis_swap with ADC-range swapped axes",
+TEST_CASE("TouchCalibration: detect_axis_transposition with ADC-range swapped axes",
           "[touch-calibration][axis-swap]") {
     // Simulate resistive touchscreen with 12-bit ADC and swapped axes
     // on 800x480 screen
@@ -1305,7 +1398,7 @@ TEST_CASE("TouchCalibration: detect_and_correct_axis_swap with ADC-range swapped
     TouchCalibration cal;
     REQUIRE(compute_calibration(screen_points, touch_points, cal));
 
-    bool swapped = detect_and_correct_axis_swap(cal, screen_points, touch_points);
+    bool swapped = detect_axis_transposition(cal, screen_points, touch_points);
     REQUIRE(swapped == true);
     REQUIRE(cal.axes_swapped == true);
 
@@ -1336,7 +1429,7 @@ TEST_CASE("TouchCalibration: axis swap with Ender 5 Max-like coefficients",
     float ratio = off_diag / diag;
 
     if (ratio > 0.5f) {
-        bool swapped = detect_and_correct_axis_swap(cal, screen_points, touch_points);
+        bool swapped = detect_axis_transposition(cal, screen_points, touch_points);
         REQUIRE(swapped == true);
 
         // After swap, the calibration should produce valid screen coords
@@ -1362,7 +1455,7 @@ TEST_CASE("TouchCalibration: axis swap detection does not trigger on slight rota
     TouchCalibration cal;
     REQUIRE(compute_calibration(screen_points, touch_points, cal));
 
-    bool swapped = detect_and_correct_axis_swap(cal, screen_points, touch_points);
+    bool swapped = detect_axis_transposition(cal, screen_points, touch_points);
     REQUIRE(swapped == false);
 }
 
@@ -1405,7 +1498,7 @@ TEST_CASE("TouchCalibration: detect axis swap on 480x272 with swapped ADC and di
     REQUIRE(ratio < 3.0f);
 
     // Swap should be detected and corrected
-    bool swapped = detect_and_correct_axis_swap(cal, screen_points, touch_points);
+    bool swapped = detect_axis_transposition(cal, screen_points, touch_points);
     REQUIRE(swapped == true);
     REQUIRE(cal.axes_swapped == true);
 
@@ -1441,13 +1534,30 @@ TEST_CASE("TouchCalibration: no false axis swap on well-aligned 480x272 screen",
     INFO("Cross-coupling ratio: " << ratio);
     REQUIRE(ratio < 0.3f);
 
-    bool swapped = detect_and_correct_axis_swap(cal, screen_points, touch_points);
+    bool swapped = detect_axis_transposition(cal, screen_points, touch_points);
     REQUIRE(swapped == false);
 }
 
 // ============================================================================
 // Legacy calibration invalidation (post-#943 upgrade) — truth table
 // ============================================================================
+
+TEST_CASE("TouchCalibration: should_invalidate_unstamped_calibration truth table",
+          "[touch-calibration][rotation][provenance][1394]") {
+    // The only combination that discards: no recorded basis, and a rotation that
+    // makes the assumed zero a guess.
+    REQUIRE(should_invalidate_unstamped_calibration(/*has_capture_rotation*/ false,
+                                                    /*applied_rotation*/ 270));
+    REQUIRE(should_invalidate_unstamped_calibration(false, 90));
+    REQUIRE(should_invalidate_unstamped_calibration(false, 180));
+
+    // Unrotated: zero is what the record meant, so it is left completely alone.
+    REQUIRE_FALSE(should_invalidate_unstamped_calibration(false, 0));
+
+    // A record that names its own basis is placeable at any rotation.
+    REQUIRE_FALSE(should_invalidate_unstamped_calibration(true, 270));
+    REQUIRE_FALSE(should_invalidate_unstamped_calibration(true, 0));
+}
 
 TEST_CASE("TouchCalibration: should_invalidate_legacy_calibration truth table",
           "[touch-calibration][migration]") {
@@ -1606,20 +1716,18 @@ TEST_CASE("shipped AD5X and AD5M fits describe the same panel", "[touch][calibra
 }
 
 // On a build that HAS a measured default, the shipped function must return one of
-// the fits above rather than something invalid.
+// the fits above rather than something invalid. The unified MIPS build picks the
+// AD5X fit at runtime (mod-layout probe), so it cannot be asserted at compile
+// time; the fits themselves are checked as data above.
 TEST_CASE("platform_default_calibration agrees with the shipped table", "[touch][calibration]") {
     helix::TouchCalibration cal = helix::platform_default_calibration();
-#if defined(HELIX_PLATFORM_AD5X) || defined(HELIX_PLATFORM_AD5M)
+#if defined(HELIX_PLATFORM_AD5M)
     REQUIRE(cal.valid);
     CHECK(helix::is_calibration_valid(cal));
 
     // Close the loop between the table above and the shipped function, so the two
     // cannot drift apart on the platforms that actually carry a default.
-#if defined(HELIX_PLATFORM_AD5X)
-    const helix::TouchCalibration& expected = kShippedFits[0].cal;
-#else
     const helix::TouchCalibration& expected = kShippedFits[1].cal;
-#endif
     CHECK(cal.a == Catch::Approx(expected.a));
     CHECK(cal.b == Catch::Approx(expected.b));
     CHECK(cal.c == Catch::Approx(expected.c));
@@ -1630,4 +1738,59 @@ TEST_CASE("platform_default_calibration agrees with the shipped table", "[touch]
     // Desktop and uncharacterised printers must decline to guess.
     CHECK_FALSE(cal.valid);
 #endif
+}
+
+// ============================================================================
+// The stored matrix has to work on the input the RUNTIME supplies
+//
+// calibrated_read_cb() feeds the affine the coordinate that arrives from evdev.
+// Nothing swaps its axes on the way. A matrix that only reproduces the targets
+// from pre-swapped input is therefore wrong wherever it actually runs.
+// ============================================================================
+
+TEST_CASE("a transposed panel is exact from the plain three-point solve",
+          "[touch-calibration][axis-swap]") {
+    const Point screen_points[3] = {{120, 96}, {400, 374}, {680, 96}};
+    // A panel mounted a quarter turn from the display: the tap arrives transposed.
+    Point touch_points[3];
+    for (int i = 0; i < 3; i++) {
+        touch_points[i] = {screen_points[i].y, screen_points[i].x};
+    }
+
+    TouchCalibration cal;
+    REQUIRE(compute_calibration(screen_points, touch_points, cal));
+
+    // An affine through three points is exact, so the transposition is already
+    // carried by the cross terms. No separate swap is needed to reproduce it.
+    for (int i = 0; i < 3; i++) {
+        const Point out = transform_point(cal, touch_points[i]);
+        INFO("point " << i);
+        REQUIRE(out.x == Approx(screen_points[i].x).margin(2));
+        REQUIRE(out.y == Approx(screen_points[i].y).margin(2));
+    }
+}
+
+TEST_CASE("the calibration left behind maps unswapped taps onto the targets",
+          "[touch-calibration][axis-swap]") {
+    const Point screen_points[3] = {{120, 96}, {400, 374}, {680, 96}};
+
+    Point touch_points[3];
+    for (int i = 0; i < 3; i++) {
+        touch_points[i] = {screen_points[i].y, screen_points[i].x};
+    }
+    // Keep what the digitizer actually reports, before anything mutates it.
+    const Point as_reported[3] = {touch_points[0], touch_points[1], touch_points[2]};
+
+    TouchCalibration cal;
+    REQUIRE(compute_calibration(screen_points, touch_points, cal));
+    detect_axis_transposition(cal, screen_points, touch_points);
+
+    // Whatever the wizard decided, the matrix it leaves has to land a real tap on
+    // its target: the read callback has no swap to apply on the way in.
+    for (int i = 0; i < 3; i++) {
+        const Point out = transform_point(cal, as_reported[i]);
+        INFO("point " << i << " reported (" << as_reported[i].x << "," << as_reported[i].y << ")");
+        REQUIRE(out.x == Approx(screen_points[i].x).margin(2));
+        REQUIRE(out.y == Approx(screen_points[i].y).margin(2));
+    }
 }

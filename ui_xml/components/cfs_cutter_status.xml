@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!--
+  Cutter calibration status line (prestonbrown/helixscreen#1282): the sentence
+  under the calibration buttons while a cutter sweep runs and after it ends.
+
+  Entirely subject-driven: ui_ams_device_section_detail_overlay.cpp publishes
+  cfs_cutter_phase (0 nothing to report, 1 sweep running, 2 result or failure)
+  and cfs_cutter_status (the text), so this component is one bound label and
+  needs no C++ of its own.
+-->
+<component>
+  <view extends="lv_obj" width="100%" height="content" style_pad_all="0" scrollable="false" clickable="false">
+    <bind_flag_if_eq subject="cfs_cutter_phase" flag="hidden" ref_value="0"/>
+    <text_small name="cfs_cutter_status_line"
+                width="100%" long_mode="wrap" bind_text="cfs_cutter_status" style_text_color="#text_muted"/>
+  </view>
+</component>

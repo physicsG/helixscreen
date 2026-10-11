@@ -60,7 +60,6 @@ struct bed_mesh_renderer {
     double bed_min_y;
     double bed_max_x;
     double bed_max_y;
-    bool has_bed_bounds;
 
     // Mesh XY bounds (probe area in mm - used for positioning mesh surface)
     double mesh_area_min_x;

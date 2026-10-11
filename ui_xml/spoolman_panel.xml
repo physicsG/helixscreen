@@ -8,12 +8,11 @@
         style_pad_all="0" style_bg_opa="255" style_bg_color="#card_bg" scrollable="false" flex_flow="column">
     <!-- Header Bar with back button -->
     <header_bar name="overlay_header"
-                title="Spoolman" title_tag="Spoolman" hide_action_button="false" action_button_icon="refresh"
-                hide_action_button_text="true" action_button_callback="on_spoolman_refresh_clicked"
-                action_button_bg_color="#elevated_bg" action_button_width="40" action_button_height="40"
-                action_button_radius="9999" hide_action_button_2="false" action_button_2_text="+ Add"
-                action_button_2_text_tag="+ Add" action_button_2_callback="on_spoolman_add_spool_clicked"
-                action_button_2_bg_color="#primary"/>
+                title="Spoolman" hide_action_button="false" action_button_icon="refresh" hide_action_button_text="true"
+                action_button_callback="on_spoolman_refresh_clicked" action_button_bg_color="#elevated_bg"
+                action_button_width="40" action_button_height="40" action_button_radius="9999"
+                hide_action_button_2="false" action_button_2_text="+ Add"
+                action_button_2_callback="on_spoolman_add_spool_clicked" action_button_2_bg_color="#primary"/>
     <!-- Search Row -->
     <lv_obj name="search_row"
             width="100%" height="content" flex_flow="row" style_flex_main_place="start" style_flex_cross_place="center"
@@ -26,8 +25,7 @@
         <event_cb trigger="value_changed" callback="on_spoolman_search_changed"/>
       </text_input>
       <lv_dropdown name="location_filter"
-                   height="#input_height" options="" style_min_width="100" style_radius="#border_radius"
-                   style_border_width="0" hidden="true">
+                   height="#input_height" options="" style_min_width="100" style_radius="#border_radius" hidden="true">
         <event_cb trigger="value_changed" callback="on_spoolman_location_filter_changed"/>
       </lv_dropdown>
     </lv_obj>
@@ -49,17 +47,14 @@
         <!-- Empty inbox icon -->
         <icon name="empty_icon" src="inbox_outline" size="xl" variant="secondary"/>
         <!-- Empty message -->
-        <text_heading name="empty_title" text="No Spools" translation_tag="No Spools" style_text_align="center"/>
-        <text_small name="empty_subtitle"
-                    text="Spoolman has no spools configured" translation_tag="Spoolman has no spools configured"
-                    style_text_align="center"/>
+        <text_heading name="empty_title" text="No Spools" style_text_align="center"/>
+        <text_small name="empty_subtitle" text="Spoolman has no spools configured" style_text_align="center"/>
       </centered_column>
       <!-- Loading indicator - visible when state = LOADING (0) -->
       <centered_column name="loading_state" flex_grow="1" hidden="true">
         <bind_flag_if_not_eq subject="spoolman_panel_state" flag="hidden" ref_value="0"/>
         <spinner name="loading_spinner" size="lg"/>
-        <text_small name="loading_text"
-                    text="Loading spools..." translation_tag="Loading spools..." style_text_align="center"/>
+        <text_small name="loading_text" text="Loading spools..." style_text_align="center"/>
       </centered_column>
     </lv_obj>
   </view>

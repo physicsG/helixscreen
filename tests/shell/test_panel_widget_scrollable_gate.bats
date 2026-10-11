@@ -58,7 +58,7 @@ run_gate() {
 </component>'
     [ "$status" -eq 1 ]
     run python3 "$GATE" --list "$FIXTURE_DIR/panel_widget_root.xml"
-    [[ "$output" == *"[root]"* ]]
+    contains "[root]" "$output"
     refute_sh "printf '%s' \"\$output\" | grep -q '\[child\]'"
 }
 
@@ -232,7 +232,7 @@ run_gate() {
 
 @test "quality-checks.sh wires the gate in at the same baseline" {
     run grep -E "check_panel_widget_scrollable.py --max-allowed $BASELINE" \
-        scripts/quality-checks.sh
+        scripts/qc/design_pixels.sh
     [ "$status" -eq 0 ]
 }
 
@@ -283,7 +283,7 @@ setup_tmp_repo() {
     printf '%s\n' "$DIRTY_XML" > ui_xml/components/panel_widget_wip.xml
     run python3 "$GATE_ABS" --staged-only --list
     [ "$status" -eq 0 ]
-    [[ "$output" != *"panel_widget_wip"* ]]
+    lacks "panel_widget_wip" "$output"
     [[ "$output" != *"[child]"* ]]
 }
 
@@ -293,7 +293,7 @@ setup_tmp_repo() {
     git add ui_xml/components/panel_widget_new.xml
     run python3 "$GATE_ABS" --staged-only --list
     [ "$status" -eq 1 ]
-    [[ "$output" == *"[child]"* ]]
+    contains "[child]" "$output"
     [[ "$output" == *"panel_widget_new.xml"* ]]
 }
 
@@ -310,7 +310,7 @@ setup_tmp_repo() {
     git add ui_xml/components/panel_widget_new.xml
     run python3 "$GATE_ABS" --staged-only --list
     [ "$status" -eq 1 ]
-    [[ "$output" == *"panel_widget_old.xml"* ]]
+    contains "panel_widget_old.xml" "$output"
     [[ "$output" == *"TOTAL"*"1"* ]]
 }
 
@@ -368,17 +368,17 @@ setup_tmp_repo() {
     git init -q
     run python3 "$GATE_ABS" --staged-only --summary
     [ "$status" -eq 0 ]
-    [[ "$output" != *"Traceback"* ]]
+    lacks "Traceback" "$output"
     [[ "$output" == *"TOTAL"*"0"* ]]
 }
 
 @test "quality-checks.sh passes --staged-only through when STAGED_ONLY is true" {
     # A mode nothing passes is dead code. Pin both halves: the STAGED_ONLY
     # branch that sets the args, and the invocation that expands them.
-    run grep -B2 'PW_SCROLLABLE_ARGS="--staged-only"' scripts/quality-checks.sh
+    run grep -B2 'PW_SCROLLABLE_ARGS="--staged-only"' scripts/qc/design_pixels.sh
     [ "$status" -eq 0 ]
-    [[ "$output" == *'STAGED_ONLY'* ]]
+    contains 'STAGED_ONLY' "$output"
     run grep -E 'check_panel_widget_scrollable\.py --max-allowed [0-9]+ --summary \$PW_SCROLLABLE_ARGS' \
-        scripts/quality-checks.sh
+        scripts/qc/design_pixels.sh
     [ "$status" -eq 0 ]
 }

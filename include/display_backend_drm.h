@@ -11,6 +11,7 @@
 #ifdef HELIX_DISPLAY_DRM
 
 #include "display_backend.h"
+#include "pointer_frame_hook.h"
 #include "touch_calibration_wrapper.h"
 
 #include <string>
@@ -63,12 +64,25 @@ class DisplayBackendDRM : public DisplayBackend {
     // Input device creation
     lv_indev_t* create_input_pointer() override;
     lv_indev_t* create_input_keyboard() override;
+    bool has_hardware_keyboard() const override {
+        return keyboard_ != nullptr;
+    }
 
     // Display rotation via DRM plane property
-    void set_display_rotation(lv_display_rotation_t rot, int phys_w, int phys_h) override;
+    void set_display_rotation(lv_display_t* disp, lv_display_rotation_t rot, int phys_w,
+                              int phys_h) override;
 
-    /// Check if DRM plane supports hardware rotation for the given angle
+    /// Check whether DRM can rotate efficiently using EGL or the KMS plane
     bool supports_hardware_rotation(lv_display_rotation_t rot) const override;
+
+    /**
+     * @brief The angle the picture is presented at, plane rotation included
+     *
+     * When the scanout plane carries the rotation, LVGL's own is cleared to
+     * zero and stops describing the panel. This reports what the viewer sees,
+     * which is what the touch pipeline has to reason about.
+     */
+    int applied_rotation_degrees(lv_display_t* disp = nullptr) const override;
 
     // Backend info
     DisplayBackendType type() const override {
@@ -113,6 +127,9 @@ class DisplayBackendDRM : public DisplayBackend {
         return using_egl_;
     }
 
+    /// The EGL driver uploads the whole buffer on the next frame; dumb buffers need nothing
+    void request_full_upload() override;
+
     // Touch calibration
     bool set_calibration(const helix::TouchCalibration& cal) override;
     helix::TouchCalibration get_calibration() const override {
@@ -127,7 +144,8 @@ class DisplayBackendDRM : public DisplayBackend {
     void disable_affine_calibration() override;
     void enable_affine_calibration() override;
     void clear_calibration() override;
-    bool apply_touch_range(bool swap_axes, int min_x, int min_y, int max_x, int max_y) override;
+    bool apply_touch_range(bool swap_axes, int min_x, int min_y, int max_x, int max_y,
+                           helix::TouchRangeSource source) override;
 
   private:
     /// Switch VT to KD_GRAPHICS so fbcon stops painting over DRM output.
@@ -160,6 +178,28 @@ class DisplayBackendDRM : public DisplayBackend {
     /// reinterpret that driver's private data as an lv_evdev_t and write through
     /// it.
     bool pointer_is_evdev_ = false;
+
+    /// Non-zero only while the scanout plane carries the rotation. It is the
+    /// discriminator for both applied_rotation_degrees() and the pointer frame
+    /// hook, so the plane path and LVGL's own rotation can never both transform
+    /// a sample (prestonbrown/helixscreen#1275).
+    int plane_rotation_degrees_ = 0;
+    int32_t panel_w_ = 0;
+    int32_t panel_h_ = 0;
+
+    /// Fronts every pointer device this backend opens, each with the
+    /// evdev/libinput read callback it replaced, and gives each sample the
+    /// transform its kind of device needs: a touch panel turns with the plane,
+    /// a relative pointer does not.
+    helix::PointerFrameHook pointer_frames_;
+
+    /// The paths pointer_ and mouse_ were opened on, which decide their kind.
+    std::string pointer_path_;
+    std::string mouse_path_;
+
+    /// Opens the touch pointer and the mouse on whichever path finds them. Only
+    /// create_input_pointer() calls it, so every device it opens gets the hook.
+    void open_pointer_devices();
     /// Auto-fire the first-run wizard (resistive controllers, broken ABS ranges)
     bool needs_calibration_ = false;
     /// Offer the manual Settings entry point (any real touch panel)

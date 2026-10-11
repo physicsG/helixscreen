@@ -135,7 +135,7 @@ In `globals.xml`, you define the suffixed variants of each token:
 
 At startup, `theme_manager` measures the axis that token follows, picks the matching suffix, and registers the **base name** (`space_lg`) pointing to the correct value. So when your XML says `style_pad_all="#space_lg"`, it resolves to 12, 16, or 20 depending on the screen.
 
-One function does the choosing for every token: `theme_manager_resolve_px_tokens()` (`src/ui/theme_manager.cpp`). Both the startup registration and the resize path apply its output verbatim, so a token cannot get one tier at boot and another after a rotation.
+One function does the choosing for every token: `theme_manager_resolve_px_tokens()` (`src/ui/theme_responsive.cpp`). Both the startup registration and the resize path apply its output verbatim, so a token cannot get one tier at boot and another after a rotation.
 
 ### CRITICAL: Never define the base name in globals.xml
 
@@ -224,10 +224,10 @@ You almost never need to reference font tokens directly. Use the semantic `<text
 | `#temp_card_height` | vertical | 64px | 72px | 80px | Temperature card in print status |
 | `#dialog_content_max` | vertical | 260px | 320px | 440px | Max height of a modal's scrollable body |
 | `#dialog_content_pinned_max` | vertical | 164px | 207px | 272px | Same, plus one pinned block below the scroll area (measured 85% cap − chrome, #1277) |
-| `#dialog_content_tall_chrome_max` | vertical | 176px | 229px | 282px | Same, plus a second button row with its divider (measured 85% cap − chrome, #1277) |
+| `#dialog_content_recovery_max` | vertical | 218px | 276px | 352px | `klipper_recovery_dialog`'s message (measured 85% cap − chrome, #1277) |
 | `#badge_size` | neutral | 16px | 18px | 20px | Status badge diameter |
 | `#nav_width` | horizontal | 76px | 104px | 132px | Nav bar width — see note below |
-| `#icon_size` | neutral | md | lg | xl | Responsive icon size string |
+| `#icon_size` | neutral | md | lg | lg | Responsive icon size string |
 | `#spinner_lg` | neutral | 48px | 56px | 64px | Large spinner |
 | `#spinner_md` | neutral | 24px | 28px | 32px | Standard spinner |
 | `#spinner_sm` | neutral | 16px | 18px | 20px | Small spinner |
@@ -254,7 +254,7 @@ Two tokens in that list do not follow the ordinary rules:
 
 How the choice is expressed in code:
 
-- **vertical** — add the exact base name to `VERTICAL_AXIS_TOKENS` in `src/ui/theme_manager.cpp`. That array is the single classification list; `theme_manager_token_uses_vertical_axis()` reads it, and `theme_manager_resolve_px_tokens()` is the only thing that calls it, so both registration sites stay in step automatically. Exact names, not a `*_height` convention — `dialog_content_max` is a vertical maximum that does not end in `_height`.
+- **vertical** — add the exact base name to `VERTICAL_AXIS_TOKENS` in `src/ui/theme_responsive.cpp`. That array is the single classification list; `theme_manager_token_uses_vertical_axis()` reads it, and `theme_manager_resolve_px_tokens()` is the only thing that calls it, so both registration sites stay in step automatically. Exact names, not a `*_height` convention — `dialog_content_max` is a vertical maximum that does not end in `_height`.
 - **horizontal** and **axis-neutral** — nothing to do. Both resolve from the cramped axis, which is correct for widths (in portrait the cramped axis *is* the width) and is the deliberate compromise for neutrals.
 
 `space_*` stays neutral on purpose. It feeds `pad_top`/`pad_bottom` and `pad_left`/`pad_right` alike, so splitting it means classifying every `#space_*` reference site across `ui_xml/` — that reference count, not the declarations, is the cost driver.
@@ -447,6 +447,14 @@ Color variants: `text`, `muted`, `primary`, `secondary`, `tertiary`, `success`, 
 <icon src="settings" size="#icon_size" variant="muted"/>  <!-- Responsive sizing -->
 ```
 
+An icon's font face is applied as a shared style, so a bound style can retier it; this is
+how a home tile scales its glyph with its size, through
+`<bind_tile_rung ladder="icon" subject="..."/>` (`include/ui_tile_rung.h`). Each rung
+names an `#icon_font_*` token rather than a literal face (a literal face a platform did
+not link renders tofu). An
+inline `style_text_font` attribute still outranks a bound style (see
+`LVGL9_XML_GUIDE.md` § Conditional Style Bindings).
+
 ### spinner
 
 Responsive loading spinner. Sizes adapt per breakpoint.
@@ -548,7 +556,7 @@ lender, and a marked scope is held instead of freed. The mark is one-way, so a f
 that lends styles is held until `lv_xml_component_deinit()` -- one retained scope per
 hot-reload save of `styles.xml`, which is why the library is worth keeping small.
 
-**Registration order matters.** `styles.xml` is registered from
+**Registration order matters.** `styles.xml` is the one component registered eagerly, from
 `register_xml_components()` (`src/xml_registration.cpp`), which runs *after*
 `theme_manager_init()` has injected the theme constants. Style `#token` values resolve
 at registration time, so a theme-token style placed in `globals.xml` (parsed before
@@ -690,14 +698,14 @@ dock:
 | **Transient layer** | `screen - nav - space_lg` | a gap showing the dimmed backdrop; you'll go back |
 
 Settings is a destination, so everything you reach *inside* Settings is flush —
-Settings › Network is a sub-screen of Settings, not a layer over it. AMS and
+Settings › Connection › Network is a sub-screen of Settings, not a layer over it. AMS and
 Print Status are destinations too: people live on those screens. Console, Bed
 Mesh, Motion and the calibration panels are transient layers — tools you open
 and return from.
 
 **Which one you get is not yours to choose in XML.** It depends on how the user
 reached the overlay, and the same overlay can be reached both ways: Fan Control
-opened from Controls is a transient layer, and opened from Settings › Fans it's
+opened from Controls is a transient layer, and opened from Settings › Devices › Fans it's
 a drill-down. `NavigationManager::push_overlay()` resolves it against the live
 navigation stack on every push, so just leave `width` off:
 
@@ -754,7 +762,9 @@ ui_xml/
     controls_panel.xml
     header_bar.xml
     ...
-  portrait/                <-- Portrait overrides (4 files)
+  portrait/                <-- Portrait overrides (2 files)
+    print_status_panel.xml
+    print_tune_panel.xml
   micro_portrait/          <-- Micro-portrait overrides (dir present, empty)
   ultrawide/               <-- Does NOT exist yet (no overrides created)
   tiny/, tiny_portrait/    <-- Do NOT exist yet
@@ -803,9 +813,13 @@ You're free to rearrange the visual hierarchy, change flex directions, adjust si
 
 **Ultrawide (1920x480):** Tons of horizontal space, very little vertical. Favor `flex_flow="row"` to spread content across columns. Aim for everything visible at once with no scrolling. Think "dashboard with columns" -- put related info side by side instead of stacking it.
 
-**Portrait (480x800):** Lots of vertical space, narrow width. Content stacks naturally with `flex_flow="column"`. The navbar probably needs to move to the bottom of the screen. Consider overriding `navigation_bar.xml` and `app_layout.xml` to change the overall chrome.
+**Portrait (480x800):** Lots of vertical space, narrow width. Content stacks naturally with `flex_flow="column"`. The navbar and app shell already move to the bottom automatically (`ui_is_portrait`) — no override needed.
 
 **Tiny (480x320):** Very limited in both directions. Reduce information density, use bigger touch targets (48px minimum), show fewer labels. Hide optional elements with conditional visibility or just remove decorative content.
+
+### One tree, restyled for portrait
+
+A panel usually needs no portrait override. The print file detail view is the pattern: one widget tree, with complementary `bind_style` pairs keyed on `ui_is_portrait` carrying every restyle that is a style property (row vs column, which side grows, the button tier). The inline attribute for a restyled property must come off the widget, because an inline attribute beats a bound style and freezes one orientation. What styles cannot express (a size measured from runtime pixels) is measured in C++: `src/ui/ui_print_select_detail_view.cpp#fit_portrait_preview` reads the options column's real content height and sets the preview card's height from `include/print_detail_layout.h#decide_detail_portrait_preview`. See `ui_xml/print_file_detail.xml` for the whole shape.
 
 ### Priority panels to override
 
@@ -814,12 +828,14 @@ Start with the panels that matter most:
 | Priority | Panel | Why |
 |----------|-------|-----|
 | High | `home_panel.xml` | First thing users see |
-| High | `app_layout.xml` | Overall chrome (navbar + content area) |
-| High | `navigation_bar.xml` | Nav position/orientation differs per layout |
 | Medium | `controls_panel.xml` | Multiple cards that benefit from rearranging |
 | Medium | `print_status_panel.xml` | Important during active prints |
-| Medium | `settings_panel.xml` | Compact 6-row category menu; sub-panels may benefit from multi-column |
+| Medium | `settings_panel.xml` | Grouped single-column list of 12 rows; sub-panels may benefit from multi-column |
 | Low | Overlays | Usually modal dialogs that adapt reasonably well |
+
+`app_layout.xml` and `navigation_bar.xml` are not in this table: both already adapt their
+chrome and nav position to `ui_is_portrait` in place, so a new layout family only needs to
+override them if its chrome is a genuinely different design, not just a different axis.
 
 ### Responsive Setting Rows (no micro/ overrides)
 
@@ -900,6 +916,10 @@ velocity stores tenths so it can reach 5.5, retraction distances store
 hundredths. Match the display precision to the slider's resolution, or a typed
 0.85 renders as "0.8" and reads as though it was ignored.
 
+### Settings structure
+
+The Settings root (`ui_xml/settings_panel.xml`) is one grouped list: SCREEN (Display, Appearance, Touch & Input, Sound), PRINTER (Printing, Devices, Safety & Alerts, Connection) and HELIXSCREEN (Language & Time, System, Updates, Help & About). Each page owns one concern, so a new setting goes on the page whose concern it is, never into a catch-all. A root row is a label plus an optional live status line: its `bind_description` subject is filled by `SettingsPanel::refresh_status_lines()` (`src/ui/ui_panel_settings.cpp#refresh_status_lines`) from pure formatters in `src/ui/settings_root_status.cpp`, and refreshed each time the root activates rather than observed. A row with nothing worth summarizing has no description. The user guide mirrors the tree, one page per file under `docs/user/guide/settings/`.
+
 ---
 
 ## 8. What Needs Work
@@ -913,7 +933,7 @@ These cut across many screens and are high-value fixes:
 - **Numeric keypad overlay** doesn't fit vertically at 480x320 -- bottom rows are cut off. This affects every panel that uses the keypad for numeric input.
 - **Many modals** don't respect viewport height -- content clips at top and bottom on small screens.
 - **Navbar icons** are clipped at 480x320, outlines overlap, and click targets may overlap each other.
-- **Temperature labels** collide with values on the controls and filament panels.
+- **Temperature labels** collide with values on the controls panel.
 - **Settings dropdown menus** are hardcoded too wide for small screens.
 
 ### Broken / Needs Major Rework (at 480x320)
@@ -922,7 +942,6 @@ These are the most impactful fixes:
 
 - **Print Select list view** -- The most broken screen. Padding is wrong, row sizing is off, horizontal overflow everywhere.
 - **Print Status overlay** -- Action buttons, temperature cards, and metadata are all fighting for space. Nothing fits.
-- **Filament panel** -- Multi-filament card is invisible, material buttons crush the operations section.
 
 ### Needs Moderate Fixes (at 480x320)
 
@@ -947,6 +966,8 @@ Things that work but could look better:
 These panels work well and can serve as reference for how to do things right:
 
 - Motion overlay
+- Filament panel (landscape and portrait; `ui_xml/filament_panel.xml#filament_panel` branches in
+  place on `ui_is_portrait`)
 - Advanced settings
 - Settings panel (except dropdown widths)
 - Theme view and edit
@@ -960,8 +981,9 @@ These panels work well and can serve as reference for how to do things right:
 
 ### Portrait / Micro Status
 
-- `ui_xml/portrait/` exists with four overrides (`app_layout.xml`,
-  `navigation_bar.xml`, `print_status_panel.xml`, `print_tune_panel.xml`).
+- `ui_xml/portrait/` exists with two overrides (`print_status_panel.xml`,
+  `print_tune_panel.xml`); the app shell and navigation bar are single files that
+  adapt via `ui_is_portrait` instead.
 - `ui_xml/micro/` exists with four overrides (`controls_panel.xml`, `header_bar.xml`,
   `theme_editor_overlay.xml`, `theme_preview_overlay.xml`).
 - `ui_xml/micro_portrait/` exists as a directory but has no overrides yet.

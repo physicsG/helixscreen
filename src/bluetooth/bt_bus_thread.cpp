@@ -2,12 +2,13 @@
 
 #include "bt_bus_thread.h"
 
-#include "spdlog/spdlog.h"
+#include "helix_thread.h"
 
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
 #include <poll.h>
+#include <system_error>
 #include <unistd.h>
 
 namespace helix::bluetooth {
@@ -34,16 +35,15 @@ void BusThread::start() {
     stopping_.store(false);
     // Wrap — EAGAIN under thread exhaustion throws std::system_error ([L083]).
     try {
-        thread_ = std::thread([this] {
-            // Publish our id from inside the worker BEFORE any work runs, so
-            // on_thread() always sees a valid id — the parent thread used to
-            // write thread_id_ after std::thread construction, which races the
-            // worker's first on_thread() check.
+        thread_ = helix::make_thread([this] {
+            // Published from inside the worker before any work runs: a write
+            // from the parent after construction would race the worker's
+            // first on_thread() check.
             thread_id_.store(std::this_thread::get_id(), std::memory_order_release);
             loop();
         });
     } catch (const std::system_error& e) {
-        spdlog::error("[BusThread] Failed to spawn worker thread: {}", e.what());
+        fprintf(stderr, "[bt] BusThread failed to spawn worker thread: %s\n", e.what());
         running_.store(false);
     }
 }

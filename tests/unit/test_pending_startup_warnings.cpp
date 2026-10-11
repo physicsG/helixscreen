@@ -30,6 +30,7 @@ namespace {
 struct CapturedWarning {
     PendingStartupWarnings::Severity severity;
     std::string message;
+    uint32_t duration_ms;
 };
 } // namespace
 
@@ -38,8 +39,8 @@ TEST_CASE("PendingStartupWarnings: empty queue drains to empty", "[startup_warni
     q.clear();
 
     std::vector<CapturedWarning> captured;
-    q.drain([&](PendingStartupWarnings::Severity s, const std::string& m) {
-        captured.push_back({s, m});
+    q.drain([&](PendingStartupWarnings::Severity s, const std::string& m, uint32_t d) {
+        captured.push_back({s, m, d});
     });
     REQUIRE(captured.empty());
 }
@@ -53,8 +54,8 @@ TEST_CASE("PendingStartupWarnings: enqueue preserves FIFO order", "[startup_warn
     q.enqueue(PendingStartupWarnings::Severity::INFO, "third");
 
     std::vector<CapturedWarning> captured;
-    q.drain([&](PendingStartupWarnings::Severity s, const std::string& m) {
-        captured.push_back({s, m});
+    q.drain([&](PendingStartupWarnings::Severity s, const std::string& m, uint32_t d) {
+        captured.push_back({s, m, d});
     });
 
     REQUIRE(captured.size() == 3);
@@ -78,8 +79,8 @@ TEST_CASE("PendingStartupWarnings: deduplicates identical pending entries", "[st
     q.enqueue(PendingStartupWarnings::Severity::WARNING, "same message");
 
     std::vector<CapturedWarning> captured;
-    q.drain([&](PendingStartupWarnings::Severity s, const std::string& m) {
-        captured.push_back({s, m});
+    q.drain([&](PendingStartupWarnings::Severity s, const std::string& m, uint32_t d) {
+        captured.push_back({s, m, d});
     });
 
     REQUIRE(captured.size() == 1);
@@ -95,7 +96,7 @@ TEST_CASE("PendingStartupWarnings: same text at different severity is not dedupl
     q.enqueue(PendingStartupWarnings::Severity::ERROR, "dup text");
 
     int count = 0;
-    q.drain([&](auto, auto&) { count++; });
+    q.drain([&](auto, auto&, auto) { count++; });
     REQUIRE(count == 2);
 }
 
@@ -106,11 +107,11 @@ TEST_CASE("PendingStartupWarnings: drain empties the queue", "[startup_warnings]
     q.enqueue(PendingStartupWarnings::Severity::ERROR, "only");
 
     int count1 = 0;
-    q.drain([&](auto, auto&) { count1++; });
+    q.drain([&](auto, auto&, auto) { count1++; });
     REQUIRE(count1 == 1);
 
     int count2 = 0;
-    q.drain([&](auto, auto&) { count2++; });
+    q.drain([&](auto, auto&, auto) { count2++; });
     REQUIRE(count2 == 0);
 }
 
@@ -123,8 +124,27 @@ TEST_CASE("PendingStartupWarnings: clear() removes all entries", "[startup_warni
     q.clear();
 
     int count = 0;
-    q.drain([&](auto, auto&) { count++; });
+    q.drain([&](auto, auto&, auto) { count++; });
     REQUIRE(count == 0);
+}
+
+TEST_CASE("PendingStartupWarnings: drain hands back each entry's duration", "[startup_warnings]") {
+    auto& q = PendingStartupWarnings::instance();
+    q.clear();
+
+    q.enqueue(PendingStartupWarnings::Severity::WARNING, "timed");
+    q.enqueue(PendingStartupWarnings::Severity::WARNING, "sticky", 0);
+
+    std::vector<uint32_t> durations;
+    q.drain([&](PendingStartupWarnings::Severity, const std::string& m, uint32_t d) {
+        if (m == "timed" || m == "sticky") {
+            durations.push_back(d);
+        }
+    });
+
+    REQUIRE(durations.size() == 2);
+    REQUIRE(durations[0] == 8000); // default
+    REQUIRE(durations[1] == 0);    // stays until closed
 }
 
 TEST_CASE("PendingStartupWarnings: concurrent enqueue is safe", "[startup_warnings]") {
@@ -150,7 +170,7 @@ TEST_CASE("PendingStartupWarnings: concurrent enqueue is safe", "[startup_warnin
     }
 
     int count = 0;
-    q.drain([&](auto, auto&) { count++; });
+    q.drain([&](auto, auto&, auto) { count++; });
     REQUIRE(count == THREADS * PER_THREAD);
 }
 
@@ -165,7 +185,9 @@ TEST_CASE("PendingStartupWarnings: drops past cap, preserves earlier entries",
     }
 
     std::vector<std::string> captured;
-    q.drain([&](PendingStartupWarnings::Severity, const std::string& m) { captured.push_back(m); });
+    q.drain([&](PendingStartupWarnings::Severity, const std::string& m, uint32_t) {
+        captured.push_back(m);
+    });
 
     // Cap is an implementation detail; we only assert it's bounded and FIFO.
     REQUIRE(captured.size() >= 1);

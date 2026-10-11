@@ -40,7 +40,7 @@ class FakeOverlay : public IPanelLifecycle {
         : name_(name), destination_(destination) {}
 
     void on_activate() override {}
-    void on_deactivate() override {}
+    void on_deactivate(DeactivateReason) override {}
     const char* get_name() const override {
         return name_;
     }
@@ -185,11 +185,11 @@ TEST_CASE_METHOD(OverlayWidthFixture, "A drill-down never renders wider than its
 
 TEST_CASE_METHOD(OverlayWidthFixture, "Drill-downs inside Settings stay destinations",
                  "[overlay][width][1178]") {
-    // Settings > Display & Sound > Theme Editor
+    // Settings > Appearance > Theme Editor
     NavigationManager::instance().set_active(PanelId::Settings);
 
-    FakeOverlay display_sound("settings_display_sound_overlay");
-    push(display_sound);
+    FakeOverlay appearance("settings_appearance_overlay");
+    push(appearance);
 
     FakeOverlay theme_editor("theme_editor_overlay");
     lv_obj_t* child = push(theme_editor);

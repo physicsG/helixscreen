@@ -50,10 +50,10 @@ generate_bundle() {
 # HelixScreen Installer
 #
 # Usage:
-#   curl -sSL https://raw.githubusercontent.com/prestonbrown/helixscreen/main/scripts/install.sh | sh
+#   curl -sSL https://releases.helixscreen.org/install.sh | sh
 #
 # Or download and run:
-#   wget https://raw.githubusercontent.com/prestonbrown/helixscreen/main/scripts/install.sh
+#   wget https://releases.helixscreen.org/install.sh
 #   chmod +x install.sh
 #   ./install.sh
 #
@@ -90,7 +90,7 @@ HEADER
     # Order matters: common.sh first (logging/colors), then host_profile.sh
     # (its guard calls log_error), uninstall.sh and main.sh last (they
     # reference functions defined elsewhere in this list).
-    for module in common.sh host_profile.sh platform.sh permissions.sh requirements.sh forgex.sh competing_uis.sh printer_seed.sh klipper_include.sh release.sh service.sh audio.sh moonraker.sh camera.sh recovery.sh kiauh.sh uninstall.sh main.sh; do
+    for module in common.sh logo.sh host_profile.sh platform.sh permissions.sh requirements.sh forgex.sh competing_uis.sh printer_seed.sh klipper_include.sh release.sh service.sh audio.sh moonraker.sh camera.sh recovery.sh kiauh.sh uninstall.sh plan.sh main.sh; do
         module_path="$LIB_DIR/$module"
         if [ ! -f "$module_path" ]; then
             echo "ERROR: Module not found: $module_path" >&2

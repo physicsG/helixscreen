@@ -3,6 +3,12 @@
 
 #include "ui_temperature_utils.h"
 
+#include "config.h"
+#include "moonraker_types.h"
+
+#include <string>
+#include <vector>
+
 #include "../catch_amalgamated.hpp"
 
 using namespace helix::ui::temperature;
@@ -523,13 +529,13 @@ TEST_CASE("Temperature Utils: the status word never contradicts the number shown
     SECTION("Above the band: the rounded reading is what gets classified") {
         auto result = heater_display(2229, 2200);
         REQUIRE(result.temp == "223 / 220°C");
-        REQUIRE(result.status == "Cooling");
+        REQUIRE(result.state == HeatState::Cooling);
     }
 
     SECTION("Just under target: the number reads as the target and so does the state") {
         auto result = heater_display(2196, 2200);
         REQUIRE(result.temp == "220 / 220°C");
-        REQUIRE(result.status == "Ready");
+        REQUIRE(result.state == HeatState::AtTemp);
     }
 
     // The invariant behind both cases: whenever the current and target render as
@@ -546,7 +552,7 @@ TEST_CASE("Temperature Utils: the status word never contradicts the number shown
             }
             INFO("current decidegrees " << deci << " renders as " << cur_buf);
             auto result = heater_display(deci, target_deci);
-            REQUIRE(result.status == "Ready");
+            REQUIRE(result.state == HeatState::AtTemp);
         }
     }
 }
@@ -625,7 +631,7 @@ TEST_CASE("Temperature Utils: format_temperature_pair_f - float pair formatting"
 }
 
 // ============================================================================
-// format_temperature_range() Tests (NEW - range formatting for AMS)
+// format_temperature_range() Tests
 // ============================================================================
 
 TEST_CASE("Temperature Utils: format_temperature_range - AMS material temps",
@@ -647,13 +653,165 @@ TEST_CASE("Temperature Utils: format_temperature_range - AMS material temps",
         REQUIRE(std::string(buf) == "55-65°C");
     }
 
-    SECTION("Same min and max") {
+    SECTION("Same min and max is one temperature") {
         format_temperature_range(60, 60, buf, sizeof(buf));
-        REQUIRE(std::string(buf) == "60-60°C");
+        REQUIRE(std::string(buf) == "60°C");
+    }
+
+    SECTION("Unset min is one temperature") {
+        format_temperature_range(0, 215, buf, sizeof(buf));
+        REQUIRE(std::string(buf) == "215°C");
+    }
+
+    SECTION("Ends in the wrong order are swapped") {
+        format_temperature_range(230, 200, buf, sizeof(buf));
+        REQUIRE(std::string(buf) == "200-230°C");
+    }
+
+    SECTION("Unset max is the single min") {
+        format_temperature_range(205, 0, buf, sizeof(buf));
+        REQUIRE(std::string(buf) == "205°C");
     }
 
     SECTION("Zero range") {
         format_temperature_range(0, 0, buf, sizeof(buf));
-        REQUIRE(std::string(buf) == "0-0°C");
+        REQUIRE(std::string(buf) == "0°C");
+    }
+
+    SECTION("Without the unit, for a caller that states it") {
+        format_temperature_range(35, 70, buf, sizeof(buf), false);
+        REQUIRE(std::string(buf) == "35-70");
+        format_temperature_range(60, 60, buf, sizeof(buf), false);
+        REQUIRE(std::string(buf) == "60");
+    }
+}
+
+// ============================================================================
+// SafetyLimits in whole degrees
+// ============================================================================
+
+TEST_CASE("Temperature Utils: extrusion_floor_c rounds a fractional minimum up",
+          "[temp_utils][safety]") {
+    SafetyLimits limits;
+    limits.min_extrude_temp_celsius = 180.5;
+    CHECK(extrusion_floor_c(limits) == 181);
+
+    limits.min_extrude_temp_celsius = 180.0;
+    CHECK(extrusion_floor_c(limits) == 180);
+
+    limits.min_extrude_temp_celsius = 0.0;
+    CHECK(extrusion_floor_c(limits) == 0);
+}
+
+TEST_CASE("Temperature Utils: nozzle_max_temp_c is the extruder's own max_temp",
+          "[temp_utils][safety]") {
+    SafetyLimits limits;
+    limits.set_max_temp_for("heater_bed", 120.0);
+    REQUIRE(limits.max_temperature_celsius > 290.0);
+
+    SECTION("before the extruder section is read, the global ceiling") {
+        CHECK(nozzle_max_temp_c(limits) == static_cast<int>(limits.max_temperature_celsius));
+    }
+    SECTION("the extruder's max_temp, not the global ceiling or another heater's") {
+        limits.set_max_temp_for("extruder", 280.0);
+        CHECK(nozzle_max_temp_c(limits) == 280);
+    }
+    SECTION("a fractional max_temp rounds down, so a whole degree never exceeds it") {
+        limits.set_max_temp_for("extruder", 280.5);
+        CHECK(nozzle_max_temp_c(limits) == 280);
+    }
+}
+
+TEST_CASE("Temperature Utils: floor and ceiling for a named extruder", "[temp_utils][safety]") {
+    SafetyLimits limits;
+    limits.min_extrude_temp_celsius = 170.0;
+    limits.set_min_extrude_temp_for("extruder", 170.0);
+    limits.set_max_temp_for("extruder", 300.0);
+    limits.set_min_extrude_temp_for("extruder1", 200.5);
+    limits.set_max_temp_for("extruder1", 250.5);
+
+    SECTION("an extruder whose section was read answers with its own numbers") {
+        CHECK(extrusion_floor_c(limits, "extruder1") == 201);
+        CHECK(nozzle_max_temp_c(limits, "extruder1") == 250);
+    }
+    SECTION("with no extruder named, the primary one") {
+        CHECK(extrusion_floor_c(limits) == 170);
+        CHECK(nozzle_max_temp_c(limits) == 300);
+    }
+    SECTION("an extruder whose section was never read: the primary floor, the global ceiling") {
+        CHECK(extrusion_floor_c(limits, "extruder2") == 170);
+        CHECK(nozzle_max_temp_c(limits, "extruder2") ==
+              static_cast<int>(limits.max_temperature_celsius));
+    }
+}
+
+TEST_CASE("Temperature Utils: keypad titles are the heater's short name", "[temp_utils][keypad]") {
+    using helix::HeaterType;
+    using helix::ui::temperature::heater_keypad_title;
+    CHECK(heater_keypad_title(HeaterType::Nozzle) == "Nozzle");
+    CHECK(heater_keypad_title(HeaterType::Bed) == "Bed");
+    CHECK(heater_keypad_title(HeaterType::Chamber) == "Chamber");
+}
+
+// ============================================================================
+// build_cooldown_gcode() Tests (#1768)
+// ============================================================================
+
+TEST_CASE("Temperature Utils: default cooldown turns off every extruder heater",
+          "[temp_utils][cooldown]") {
+    using helix::kDefaultCooldownGcode;
+    using helix::ui::temperature::build_cooldown_gcode;
+
+    SECTION("a six-tool printer gets one off line per extruder, in tool order") {
+        // Unordered on purpose: PrinterTemperatureState keeps extruders in a hash map.
+        const std::vector<std::string> extruders = {"extruder3", "extruder",  "extruder5",
+                                                    "extruder1", "extruder4", "extruder2"};
+        CHECK(build_cooldown_gcode(kDefaultCooldownGcode, extruders, "") ==
+              std::string(kDefaultCooldownGcode) +
+                  "\nSET_HEATER_TEMPERATURE HEATER=extruder1 TARGET=0"
+                  "\nSET_HEATER_TEMPERATURE HEATER=extruder2 TARGET=0"
+                  "\nSET_HEATER_TEMPERATURE HEATER=extruder3 TARGET=0"
+                  "\nSET_HEATER_TEMPERATURE HEATER=extruder4 TARGET=0"
+                  "\nSET_HEATER_TEMPERATURE HEATER=extruder5 TARGET=0");
+    }
+
+    SECTION("extruder10 sorts after extruder9") {
+        const std::vector<std::string> extruders = {"extruder10", "extruder9", "extruder"};
+        CHECK(build_cooldown_gcode(kDefaultCooldownGcode, extruders, "") ==
+              std::string(kDefaultCooldownGcode) +
+                  "\nSET_HEATER_TEMPERATURE HEATER=extruder9 TARGET=0"
+                  "\nSET_HEATER_TEMPERATURE HEATER=extruder10 TARGET=0");
+    }
+
+    SECTION("a single-extruder printer sends the default text unchanged") {
+        CHECK(build_cooldown_gcode(kDefaultCooldownGcode, {"extruder"}, "") ==
+              kDefaultCooldownGcode);
+        CHECK(build_cooldown_gcode(kDefaultCooldownGcode, {}, "") == kDefaultCooldownGcode);
+    }
+
+    SECTION("the primary extruder is never named twice") {
+        const std::string out =
+            build_cooldown_gcode(kDefaultCooldownGcode, {"extruder", "extruder1"}, "");
+        const std::string line = "HEATER=extruder TARGET=0";
+        CHECK(out.find(line) != std::string::npos);
+        CHECK(out.find(line, out.find(line) + 1) == std::string::npos);
+    }
+
+    SECTION("the resolved chamber heater is still appended, after the extruders") {
+        CHECK(build_cooldown_gcode(kDefaultCooldownGcode, {"extruder", "extruder1"},
+                                   "heater_generic chamber") ==
+              std::string(kDefaultCooldownGcode) +
+                  "\nSET_HEATER_TEMPERATURE HEATER=extruder1 TARGET=0"
+                  "\nSET_HEATER_TEMPERATURE HEATER=chamber TARGET=0");
+        CHECK(build_cooldown_gcode(kDefaultCooldownGcode, {"extruder"}, "heater_generic chamber") ==
+              std::string(kDefaultCooldownGcode) +
+                  "\nSET_HEATER_TEMPERATURE HEATER=chamber TARGET=0");
+    }
+
+    SECTION("a customized macro runs exactly as written") {
+        CHECK(build_cooldown_gcode("MY_COOLDOWN", {"extruder", "extruder1", "extruder2"},
+                                   "heater_generic chamber") == "MY_COOLDOWN");
+        const std::string edited = std::string(kDefaultCooldownGcode) + "\nM107";
+        CHECK(build_cooldown_gcode(edited, {"extruder", "extruder1"}, "") == edited);
     }
 }

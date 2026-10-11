@@ -1,0 +1,47 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- One pre-print option as a checkable tile: icon + label (2 lines, then
+     ellipsis) in an outline. The whole tile is the tap target. Checked draws
+     the #primary outline, tints the icon and fills the check box in the
+     bottom-left corner under the icon; state_trickle hands the tile's
+     checked state to its children so each child styles itself with a
+     -checked state style (dash form; the colon form is dropped, see
+     CONTRIBUTOR_GOTCHAS.md). Created by PrePrintOptionsRenderer, which binds
+     the option subject to the tile's checked state and wires value_changed. -->
+<component>
+  <api>
+    <prop name="label" type="string" default="Option"/>
+    <prop name="label_tag" type="string" default=""/>
+    <prop name="icon" type="string" default="tune"/>
+    <prop name="callback" type="string" default=""/>
+  </api>
+  <view name="option_tile"
+        extends="lv_obj" width="48%" height="#option_tile_height" flex_flow="row" style_flex_cross_place="start"
+        style_pad_hor="#space_xs" style_pad_ver="0" style_pad_gap="#space_xs" style_radius="#border_radius"
+        style_border_width="1" style_border_color="#border" style_border_color-checked="#primary"
+        style_bg_color="#card_bg" style_bg_opa="255" checkable="true" state_trickle="true" scrollable="false">
+    <event_cb trigger="value_changed" callback="$callback"/>
+    <icon name="icon" src="$icon" size="xs" variant="muted" clickable="false" style_text_color-checked="#primary"/>
+    <text_small name="label"
+                text="$label" translation_tag="$label_tag" flex_grow="1" long_mode="dots" style_max_height="100%"
+                style_text_color="#text_muted" style_text_color-checked="#text" clickable="false"/>
+    <!-- Corner check box: an empty outline unchecked, filled #primary with the
+         check when checked, so both states read at a glance; the label is muted
+         while unchecked. Styles, not the hidden flag: a style can follow state,
+         a flag cannot. Bottom-left corner: the
+         label's box spans the full content height on the right, so any tab
+         on the right edge would sit over its first line; the bottom of the
+         icon column is the only band the label never enters. The row is
+         cross-place start so the icon clears the tab too. The y offset lifts
+         it off the outline so it floats inside the border, not flush on it. -->
+    <lv_obj name="check_tab"
+            width="#option_tile_tab" height="#option_tile_tab" align="bottom_left" y="#option_tile_tab_lift"
+            ignore_layout="true" style_radius="#border_radius" style_bg_color="#primary" style_bg_opa="0"
+            style_bg_opa-checked="255" style_border_width="2" style_border_color="#text_muted"
+            style_border_color-checked="#primary" style_pad_all="0" clickable="false" scrollable="false"
+            state_trickle="true">
+      <icon src="check" size="xs" variant="text" align="center" clickable="false" style_opa="0" style_opa-checked="255"/>
+    </lv_obj>
+  </view>
+</component>

@@ -33,9 +33,9 @@
 
 #include "ui_update_queue.h"
 
-#include "ams_backend_toolchanger.h"
+#include "../test_helpers/toolchanger_test_helper.h"
 #include "ams_state.h"
-#include "ams_types.h"
+#include "error_event.h"
 #include "printer_discovery.h"
 #include "toolchanger_addon.h"
 
@@ -47,53 +47,9 @@
 
 using json = nlohmann::json;
 using namespace helix;
+using helix::test::ToolChangerHelper;
 
 namespace {
-
-/// Real backend with gcode captured. client_ is null, so ensure_homed_then()
-/// routes straight to execute_gcode().
-class ToolChangerHelper : public AmsBackendToolChanger {
-  public:
-    explicit ToolChangerHelper(int tool_count) : AmsBackendToolChanger(nullptr, nullptr) {
-        std::vector<std::string> names;
-        for (int i = 0; i < tool_count; ++i) {
-            names.push_back("T" + std::to_string(i));
-        }
-        set_discovered_tools(std::move(names));
-        running_ = true;
-    }
-
-    ~ToolChangerHelper() override {
-        helix::ui::UpdateQueue::instance().drain();
-    }
-
-    AmsError execute_gcode(const std::string& gcode) override {
-        sent_.push_back(gcode);
-        return AmsErrorHelper::success();
-    }
-
-    AmsError execute_gcode(const std::string& gcode, std::function<void()> on_complete) override {
-        sent_.push_back(gcode);
-        (void)on_complete;
-        return AmsErrorHelper::success();
-    }
-
-    void feed(const json& status) {
-        handle_status_update(
-            json{{"method", "notify_status_update"}, {"params", json::array({status, 0.0})}});
-    }
-
-    void feed_status(const char* status, int tool_number) {
-        feed(json{{"toolchanger", {{"status", status}, {"tool_number", tool_number}}}});
-    }
-
-    [[nodiscard]] const std::vector<std::string>& sent() const {
-        return sent_;
-    }
-
-  private:
-    std::vector<std::string> sent_;
-};
 
 /// A stock upstream MedusaHC object list — see test_medusahc_detection.cpp.
 PrinterDiscovery medusahc_discovery() {
@@ -463,6 +419,58 @@ TEST_CASE("A controller that names the direction gets the four-step bar",
           std::vector<std::string>{"Release filament", "Dock tool", "Grip filament"});
 }
 
+TEST_CASE("A tool changer's steps project SELECTING, and docking projects UNLOADING",
+          "[ams][toolchanger][coarse]") {
+    ToolChangerHelper tc(4);
+    tc.set_tool_sensor(toolchanger_addon::resolve_tool_sensor(medusahc_discovery()));
+    tc.feed(
+        json{{"medusahc", {{"operation", "idle"}, {"current_tool", 0}, {"feeder_open", false}}}});
+
+    const auto swap = tc.get_operation_step_model(StepOperationType::LOAD_SWAP);
+    REQUIRE(swap.steps.size() == 4);
+    CHECK(swap.action_at(0) == AmsAction::SELECTING); // Release filament
+    CHECK(swap.action_at(1) == AmsAction::UNLOADING); // Dock tool
+    CHECK(swap.action_at(2) == AmsAction::SELECTING); // Pick up tool
+    CHECK(swap.action_at(3) == AmsAction::SELECTING); // Grip filament
+}
+
+TEST_CASE("A running swap publishes its step's action, and the closing grip reads IDLE",
+          "[ams][toolchanger][coarse]") {
+    // The unmount dispatches as UNLOADING, but its first step releases the
+    // filament, which projects SELECTING. The grip that closes the swap lands
+    // on the frame that ends it, and a finished swap reads IDLE whatever step
+    // index it left behind.
+    ToolChangerHelper tc(4);
+    tc.set_tool_sensor(toolchanger_addon::resolve_tool_sensor(medusahc_discovery()));
+    // The active operation is process-wide; later cases here expect the default.
+    struct RestoreStepOperation {
+        ~RestoreStepOperation() {
+            AmsState::instance().set_active_step_operation(StepOperationType::LOAD_SWAP);
+        }
+    } restore_step_operation;
+    AmsState::instance().set_active_step_operation(StepOperationType::UNLOAD);
+    tc.feed(
+        json{{"medusahc", {{"operation", "idle"}, {"current_tool", 0}, {"feeder_open", false}}}});
+    REQUIRE(tc.unload_filament(0).success());
+
+    tc.feed(
+        json{{"medusahc", {{"operation", "idle"}, {"current_tool", 0}, {"feeder_open", true}}}});
+    REQUIRE(tc.get_system_info().operation_phase == 0); // Release filament
+    CHECK(tc.get_system_info().action == AmsAction::SELECTING);
+    CHECK(tc.get_current_action() == AmsAction::SELECTING);
+
+    tc.feed(json{
+        {"medusahc", {{"operation", "dropping"}, {"current_tool", 0}, {"feeder_open", true}}}});
+    REQUIRE(tc.get_system_info().operation_phase == 1); // Dock tool
+    CHECK(tc.get_system_info().action == AmsAction::UNLOADING);
+
+    tc.feed(
+        json{{"medusahc", {{"operation", "idle"}, {"current_tool", -1}, {"feeder_open", false}}}});
+    REQUIRE(tc.get_system_info().operation_phase == 2); // Grip filament
+    CHECK(tc.get_system_info().action == AmsAction::IDLE);
+    CHECK(tc.get_current_action() == AmsAction::IDLE);
+}
+
 TEST_CASE("A controller with only 'changing' gets one middle step", "[ams][toolchanger][steps]") {
     ToolChangerHelper tc(4);
     tc.set_tool_sensor(toolchanger_addon::resolve_tool_sensor(standalone_medusahc_discovery(4)));
@@ -565,7 +573,7 @@ TEST_CASE("A phase-less frame leaves the step alone", "[ams][toolchanger][steps]
 
 TEST_CASE("The step index stays pinned to the model actually on screen",
           "[ams][toolchanger][steps]") {
-    // get_operation_step_model() and step_index_for_phase_locked() both derive
+    // get_operation_step_model() and resolve_step_locked() both derive
     // their sequence from tc_step_sequence(), but the model is captured once
     // (by the sidebar, at operation start) while the index is recomputed on
     // EVERY frame from whatever feeder_state_reported_/direction_reported_
@@ -827,4 +835,126 @@ TEST_CASE("A dock-sensor fault reaches the LIVE half of the loaded signal too",
     // Withdrawn, not blanked: the tool comes back when the sensors do.
     tc.feed(json{{"medusahc", {{"operation", "idle"}, {"current_tool", 1}}}});
     CHECK(tc.slot_is_actively_loaded(1));
+}
+
+// ============================================================================
+// Partial status frames
+// ============================================================================
+
+TEST_CASE("A partial medusahc frame leaves the mounted tool alone",
+          "[ams][toolchanger][medusahc]") {
+    ToolChangerHelper tc(4);
+    tc.set_tool_sensor(toolchanger_addon::resolve_tool_sensor(medusahc_discovery()));
+
+    tc.feed(json{{"medusahc", {{"state", "ready"}, {"current_tool", 1}, {"tool_count", 4}}}});
+    REQUIRE(tc.get_current_slot() == 1);
+    REQUIRE(tc.slot_is_actively_loaded(1));
+
+    // Moonraker republishes only the fields that CHANGED, so a frame carrying
+    // the gripper alone says nothing about the carriage.
+    tc.feed(json{{"medusahc", {{"feeder_open", true}}}});
+
+    CHECK(tc.get_current_slot() == 1);
+    CHECK(tc.is_filament_loaded());
+    CHECK(tc.slot_is_actively_loaded(1));
+    CHECK(tc.can_unload_from_toolhead(1));
+}
+
+TEST_CASE("A partial medusahc frame does not empty the mounted tool's slot",
+          "[ams][toolchanger][medusahc]") {
+    ToolChangerHelper tc(4);
+    tc.set_tool_sensor(toolchanger_addon::resolve_tool_sensor(medusahc_discovery()));
+
+    // The mounted tool's own dock reads vacant: that is where the tool came from.
+    tc.feed(json{{"medusahc",
+                  {{"state", "ready"},
+                   {"current_tool", 1},
+                   {"tool0_docked", true},
+                   {"tool1_docked", false},
+                   {"tool2_docked", true},
+                   {"tool3_docked", true}}}});
+    REQUIRE(tc.get_slot_info(1).status == SlotStatus::LOADED);
+
+    tc.feed(json{{"medusahc", {{"feeder_open", true}}}});
+
+    CHECK(tc.get_slot_info(1).status == SlotStatus::LOADED);
+}
+
+// ============================================================================
+// The overloaded -2
+// ============================================================================
+
+TEST_CASE("A -2 during a swap is transitional, not a sensor fault",
+          "[ams][toolchanger][medusahc]") {
+    ToolChangerHelper tc(4);
+    tc.set_tool_sensor(toolchanger_addon::resolve_tool_sensor(medusahc_discovery()));
+
+    tc.feed(json{{"medusahc", {{"state", "ready"}, {"current_tool", 1}}}});
+    REQUIRE(tc.slot_is_actively_loaded(1));
+
+    // The tool is now between its dock and the head, where no settled switch
+    // pattern exists and the firmware answers -2 for want of anything better.
+    tc.feed(json{{"medusahc", {{"state", "changing"}, {"current_tool", 1}}}});
+    REQUIRE(tc.get_system_info().action == AmsAction::SELECTING);
+
+    tc.feed(json{{"medusahc", {{"state", "changing"}, {"current_tool", -2}}}});
+
+    CHECK(tc.get_system_info().action != AmsAction::ERROR);
+    CHECK(tc.get_current_slot() == 1);
+    CHECK_FALSE(tc.current_error().has_value());
+}
+
+TEST_CASE("A published sensor_error is a fault whatever the phase",
+          "[ams][toolchanger][medusahc]") {
+    ToolChangerHelper tc(4);
+    tc.set_tool_sensor(toolchanger_addon::resolve_tool_sensor(medusahc_discovery()));
+
+    tc.feed(json{{"medusahc", {{"operation", "picking"}, {"current_tool", 1}}}});
+    REQUIRE(tc.get_system_info().action == AmsAction::SELECTING);
+
+    // Irbis3D publishes the flag itself; that is the firmware's own verdict and
+    // outranks the phase.
+    tc.feed(json{
+        {"medusahc", {{"operation", "picking"}, {"current_tool", 1}, {"sensor_error", true}}}});
+
+    CHECK(tc.get_system_info().action == AmsAction::ERROR);
+    CHECK(tc.current_error().has_value());
+}
+
+TEST_CASE("A -2 at rest is still a fault, and names the docks", "[ams][toolchanger][medusahc]") {
+    ToolChangerHelper tc(4);
+    tc.set_tool_sensor(toolchanger_addon::resolve_tool_sensor(medusahc_discovery()));
+
+    tc.feed(json{{"medusahc", {{"state", "ready"}, {"current_tool", 1}}}});
+    tc.feed(json{{"medusahc", {{"state", "ready"}, {"current_tool", -2}}}});
+
+    auto err = tc.current_error();
+    REQUIRE(err.has_value());
+    CHECK(err->source == helix::ErrorSource::TOOLCHANGER);
+    CHECK_FALSE(err->title.empty());
+}
+
+// ============================================================================
+// Filament in the tube
+// ============================================================================
+
+TEST_CASE("An ejected tool draws no filament in its tube", "[ams][toolchanger][medusahc]") {
+    ToolChangerHelper tc(4);
+    tc.set_tool_sensor(toolchanger_addon::resolve_tool_sensor(medusahc_discovery()));
+
+    // T0 on the head (its own dock therefore vacant), T3 off the rack entirely.
+    tc.feed(json{{"medusahc",
+                  {{"state", "ready"},
+                   {"current_tool", 0},
+                   {"tool0_docked", false},
+                   {"tool1_docked", true},
+                   {"tool2_docked", true},
+                   {"tool3_docked", false}}}});
+
+    REQUIRE(tc.get_slot_info(3).status == SlotStatus::EMPTY);
+    CHECK(tc.get_slot_filament_segment(3) == PathSegment::NONE);
+
+    // A docked tool carries its own hot end and its own strand, so it keeps one.
+    CHECK(tc.get_slot_filament_segment(1) == PathSegment::NOZZLE);
+    CHECK(tc.get_slot_filament_segment(0) == PathSegment::NOZZLE);
 }

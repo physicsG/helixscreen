@@ -136,7 +136,7 @@ If you want to add a language HelixScreen doesn't ship with yet:
 cp translations/en.yml translations/<locale>.yml
 ```
 
-Use the [ISO 639-1 code](https://en.wikipedia.org/wiki/List_of_ISO_639-1_codes) for `<locale>` — `pl` for Polish, `ko` for Korean, `nl` for Dutch, etc. For variants (`pt-BR` vs `pt-PT`), open a Discussion first — HelixScreen doesn't currently support locale variants, and adding one has implications.
+Use the [ISO 639-1 code](https://en.wikipedia.org/wiki/List_of_ISO_639-1_codes) for `<locale>` — `pl` for Polish, `ko` for Korean, `nl` for Dutch, etc. For variants (`pt-BR` vs `pt-PT`), open an issue first — HelixScreen doesn't currently support locale variants, and adding one has implications.
 
 ### Step 2: Change `locale:` at the top
 
@@ -226,7 +226,7 @@ You don't need a build setup to edit YAML. You do need a build to see your trans
 ```bash
 make -j                              # rebuild with regenerated translation packs
 ./build/bin/helix-screen --test -vv  # run with mock printer
-# Settings → Display & Sound → Language → <your language>
+# Settings → Language & Time → Language → <your language>
 ```
 
 ### If you don't want to set up the full dev environment

@@ -3,16 +3,15 @@
 #pragma once
 
 #include "async_lifetime_guard.h"
+#include "bt_discovery_run.h"
 #include "input_device_scanner.h"
 #include "overlay_base.h"
+#include "static_panel_registry.h"
+#include "subject_managed_panel.h"
 
-#include <atomic>
 #include <memory>
-#include <optional>
 #include <string>
 #include <vector>
-
-struct helix_bt_context;
 
 namespace helix::ui {
 
@@ -22,22 +21,21 @@ namespace helix::ui {
 /// settings "Barcode Scanner" row. Replaces the former ScannerPickerModal.
 class BarcodeScannerSettingsOverlay : public OverlayBase {
   public:
-    BarcodeScannerSettingsOverlay();
     ~BarcodeScannerSettingsOverlay() override;
 
     const char* get_name() const override {
         return "Barcode Scanner Settings";
     }
+    const char* xml_component() const override {
+        return "barcode_scanner_settings";
+    }
 
     void init_subjects() override;
     void register_callbacks() override;
 
-    lv_obj_t* create(lv_obj_t* parent) override;
-    void show(lv_obj_t* parent_screen);
-
   protected:
     void on_activate() override;
-    void on_deactivate() override;
+    void on_deactivating(DeactivateReason reason) override;
 
   private:
     void refresh_current_selection_label();
@@ -54,22 +52,15 @@ class BarcodeScannerSettingsOverlay : public OverlayBase {
     void start_bt_discovery();
     void stop_bt_discovery();
     void populate_bt_dropdown();
+    /// Merges BlueZ's known scanners into bt_devices_ from a worker thread.
+    void seed_known_bt_devices();
     void update_bt_action_buttons();
     void pair_bt_device(const std::string& mac, const std::string& name);
     void handle_bt_forget(const std::string& mac);
     int selected_bt_index() const;
 
-    // XML event handlers
-    static void on_bs_scan_bluetooth(lv_event_t* e);
-    static void on_bs_refresh_usb(lv_event_t* e);
-    static void on_bs_keymap_changed(lv_event_t* e);
-    static void on_bs_row_clicked(lv_event_t* e);
-    static void on_bs_row_forget(lv_event_t* e);
-    static void on_bs_bt_scanner_selected(lv_event_t* e);
-    static void on_bs_bt_pair(lv_event_t* e);
-    static void on_bs_bt_forget(lv_event_t* e);
-
     // Subjects (global scope — single-instance overlay)
+    SubjectManager subjects_; // declared ahead: tears down after the subjects it owns
     lv_subject_t bt_available_subject_{};
     lv_subject_t bt_discovering_subject_{};
     lv_subject_t keymap_index_subject_{};
@@ -91,22 +82,17 @@ class BarcodeScannerSettingsOverlay : public OverlayBase {
         bool is_ble = false;
     };
 
-    struct BtDiscoveryContext {
-        std::atomic<bool> alive{true};
-        BarcodeScannerSettingsOverlay* overlay = nullptr;
-        std::optional<LifetimeToken> token;
-    };
-
-    helix_bt_context* bt_ctx_ = nullptr;
-    std::shared_ptr<BtDiscoveryContext> bt_discovery_ctx_;
+    std::shared_ptr<helix::bluetooth::SharedContext> bt_ctx_ =
+        std::make_shared<helix::bluetooth::SharedContext>();
+    helix::bluetooth::DiscoveryRun bt_discovery_;
     std::vector<BtDeviceInfo> bt_devices_;
     bool bt_discovering_ = false;
 
     static BarcodeScannerSettingsOverlay* s_active_instance_;
-
-    friend BarcodeScannerSettingsOverlay& get_barcode_scanner_settings_overlay();
 };
 
-BarcodeScannerSettingsOverlay& get_barcode_scanner_settings_overlay();
+inline BarcodeScannerSettingsOverlay& get_barcode_scanner_settings_overlay() {
+    return lazy_global<BarcodeScannerSettingsOverlay>("BarcodeScannerSettingsOverlay");
+}
 
 } // namespace helix::ui

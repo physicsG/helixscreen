@@ -6,8 +6,14 @@
 #include "ui_modal.h"
 #include "ui_observer_guard.h"
 
+#include "mdns_discovery.h"
+
+#include <cstdint>
 #include <functional>
+#include <memory>
+#include <optional>
 #include <string>
+#include <vector>
 
 /**
  * @file ui_change_host_modal.h
@@ -43,11 +49,24 @@ namespace helix::ui {
 void show_change_host_modal(std::function<void(bool changed)> extra_on_complete = nullptr);
 
 /**
+ * @brief Show the same modal for adding a printer
+ *
+ * Starts from an empty host and writes nothing to the active printer's config: Save hands
+ * the tested host and port to `on_add`, deferred past the modal's exit. Leaving any other way
+ * reconnects the saved printer if Test Connection moved the client.
+ */
+void show_add_printer_modal(std::function<bool(const std::string& host, int port)> on_add);
+
+/// A printer chooser closed on a selection: the prompt it was holding belongs to the
+/// connection the user just moved away from, so it is dropped rather than shown.
+void drop_held_connection_failed();
+
+/**
  * @brief Prompt that the printer is unreachable, offering to fix the address
  *
  * Replaces an OK-only error modal for CONNECTION_FAILED: on a stale address,
  * acknowledging the error leaves the user exactly where they started, and the
- * setting itself is buried under Settings > System > Printer Host.
+ * setting itself is buried under Settings > Connection > Host.
  *
  * Safe to call from any thread — marshals itself to the main thread, which the
  * libhv event-loop thread relies on.
@@ -57,11 +76,34 @@ void show_change_host_modal(std::function<void(bool changed)> extra_on_complete 
  */
 void show_connection_failed_modal(const std::string& title, const std::string& message);
 
+/// How long the connection-failed prompt browses mDNS before it shows.
+/// Under MdnsDiscovery's 3.5s query cycle, so the stop lands in its idle wait rather than
+/// a socket read, and the first query's answers are all in.
+constexpr uint32_t REDISCOVERY_WINDOW_MS = 3000;
+
+/**
+ * @brief The one discovered Moonraker that is the saved printer at another address
+ *
+ * A printer is recognised by hostname, compared without case, ".local" or a trailing dot.
+ * Empty when no printer carries any of @p identities, when more than one does, when one
+ * still answers at the saved address (the address is not what is wrong), or when the saved
+ * host is a name rather than an IP literal.
+ */
+std::optional<DiscoveredPrinter> find_moved_printer(const std::vector<DiscoveredPrinter>& found,
+                                                    const std::string& saved_host, int saved_port,
+                                                    const std::vector<std::string>& identities);
+
+/// Where the connection-failed prompt gets its one-shot mDNS browse. Unset, it does not
+/// browse at all; the app sets it at startup, outside --test.
+void set_printer_rediscovery_source(std::function<std::unique_ptr<IMdnsDiscovery>()> source);
+
 } // namespace helix::ui
 
 class ChangeHostModal : public Modal {
   public:
     using CompletionCallback = std::function<void(bool changed)>;
+    /// Returns whether it switched to a printer: a switch retargets the client itself.
+    using AddCallback = std::function<bool(const std::string& host, int port)>;
 
     ChangeHostModal();
     ~ChangeHostModal() override;
@@ -75,7 +117,8 @@ class ChangeHostModal : public Modal {
      * @param parent Parent screen for the modal
      * @return true if modal was created successfully
      */
-    bool show_modal(lv_obj_t* parent);
+    /// With `on_add` set the modal adds a printer instead of changing the active one's host.
+    bool show_modal(lv_obj_t* parent, AddCallback on_add = nullptr);
 
     /**
      * @brief Set callback for when modal closes
@@ -98,17 +141,24 @@ class ChangeHostModal : public Modal {
   private:
     // === Subjects for XML binding ===
     SubjectManager subjects_;
-    lv_subject_t host_ip_subject_;
-    lv_subject_t host_port_subject_;
-    lv_subject_t testing_subject_;
-    lv_subject_t validated_subject_;
+    lv_subject_t host_ip_subject_{};
+    lv_subject_t host_port_subject_{};
+    lv_subject_t testing_subject_{};
+    lv_subject_t validated_subject_{};
+    lv_subject_t adding_subject_{};
+    /// Save is held disabled: changing a host needs a passed test, adding one does not.
+    lv_subject_t save_locked_subject_{};
 
     char host_ip_buf_[256] = {0};
     char host_port_buf_[8] = {0};
     bool subjects_initialized_ = false;
 
+    /// Test Connection moved the live client to the typed host.
+    bool client_borrowed_ = false;
+
     // === Completion callback ===
     CompletionCallback completion_callback_;
+    AddCallback add_callback_;
 
     // === Input change observers (reset validation on edit) ===
     ObserverGuard host_ip_observer_;
@@ -119,8 +169,12 @@ class ChangeHostModal : public Modal {
     void deinit_subjects();
     void handle_test_connection();
     void handle_save();
+    void update_save_lock();
+    void commit_add(const std::string& host, int port);
     void handle_cancel();
     void set_status(const char* icon_name, const char* color_token, const char* text);
+    /// Shows the reason and returns false when the host or port cannot be used.
+    bool input_valid(const char* ip, const std::string& port_clean);
     void on_test_success();
     void on_test_failure();
     static void on_input_changed_cb(lv_observer_t* observer, lv_subject_t* subject);

@@ -75,9 +75,6 @@ struct TrackerModule {
 /// Parse a ProTracker MOD file from memory
 std::optional<TrackerModule> parse_mod(const uint8_t* data, size_t size);
 
-/// Parse an OctaMED MED file from memory (stub — not yet implemented)
-std::optional<TrackerModule> parse_med(const uint8_t* data, size_t size);
-
 } // namespace helix::audio
 
 #endif // HELIX_HAS_TRACKER

@@ -81,3 +81,33 @@ lv_draw_buf_t* ui_gradient_canvas_create_buf(int32_t width, int32_t height, bool
 #ifdef __cplusplus
 }
 #endif
+
+#ifdef __cplusplus
+namespace helix::ui {
+/**
+ * @brief Create the same gradient flattened onto a solid background color
+ *
+ * The rounded-corner pixels are composited against @p behind and the result is
+ * stored in the display's native color format with no alpha, so LVGL draws it
+ * as a plain copy instead of a per-pixel blend. Identical on screen to
+ * ui_gradient_canvas_create_buf() only where the area behind the image is that
+ * solid color.
+ *
+ * @param behind The solid color the image's corners sit on
+ * @param under  The color of the rounded background drawn under the image, whose
+ *               anti-aliased edge shows through the corner fringe
+ * @return Owned lv_draw_buf_t*, or nullptr on allocation failure
+ */
+lv_draw_buf_t* gradient_canvas_create_opaque_buf(int32_t width, int32_t height, bool dark_mode,
+                                                 int32_t radius, lv_color_t behind,
+                                                 lv_color_t under);
+
+/**
+ * @brief Render the diagonal gradient into an existing buffer
+ *
+ * @p start is the top-right color, @p end the bottom-left. Writes every pixel
+ * opaque; @p buf may be ARGB8888, XRGB8888 or RGB565.
+ */
+void gradient_canvas_render(lv_draw_buf_t* buf, lv_color_t start, lv_color_t end, bool dither);
+} // namespace helix::ui
+#endif

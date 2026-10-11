@@ -36,13 +36,12 @@
 #include "../../include/rpc_error_correlation.h"
 #include "../lvgl_test_fixture.h"
 #include "../test_helpers/gcode_error_router_test_access.h"
+#include "../test_helpers/log_capture.h"
+#include "../test_helpers/moonraker_request_tracker_test_access.h"
 #include "gcode_error_router.h"
 #include "moonraker_request.h"
 #include "moonraker_request_tracker.h"
 #include "recovery_modal_presenter.h"
-
-#include <spdlog/sinks/ringbuffer_sink.h>
-#include <spdlog/spdlog.h>
 
 #include <atomic>
 #include <memory>
@@ -54,62 +53,7 @@
 
 using namespace helix;
 
-/// Friend-class test accessor (L065 / test_code_lint.bats). Definition is kept
-/// byte-identical to the one in test_moonraker_request_tracker_silent.cpp --
-/// the friend declaration in moonraker_request_tracker.h names this exact
-/// global-scope class, so it cannot live in an anonymous namespace.
-class MoonrakerRequestTrackerTestAccess {
-  public:
-    static void inject_request(MoonrakerRequestTracker& tracker, RequestId id,
-                               PendingRequest request) {
-        std::lock_guard<std::mutex> lock(tracker.requests_mutex_);
-        tracker.pending_requests_[id] = std::move(request);
-    }
-};
-
 namespace {
-
-/// RAII spdlog capture: collects formatted log lines so the test can count the
-/// toasts the user would actually have seen.
-class LogCapture {
-  public:
-    LogCapture() : sink_(std::make_shared<spdlog::sinks::ringbuffer_sink_mt>(512)) {
-        logger_ = spdlog::default_logger();
-        prev_level_ = logger_->level();
-        sink_->set_level(spdlog::level::trace);
-        logger_->sinks().push_back(sink_);
-        logger_->set_level(spdlog::level::trace);
-    }
-
-    ~LogCapture() {
-        auto& sinks = logger_->sinks();
-        for (auto it = sinks.begin(); it != sinks.end(); ++it) {
-            if (*it == sink_) {
-                sinks.erase(it);
-                break;
-            }
-        }
-        logger_->set_level(prev_level_);
-    }
-
-    std::vector<std::string> lines() const {
-        return sink_->last_formatted(512);
-    }
-
-    int count_containing(const std::string& needle) const {
-        int n = 0;
-        for (const auto& l : lines()) {
-            if (l.find(needle) != std::string::npos)
-                ++n;
-        }
-        return n;
-    }
-
-  private:
-    std::shared_ptr<spdlog::sinks::ringbuffer_sink_mt> sink_;
-    std::shared_ptr<spdlog::logger> logger_;
-    spdlog::level::level_enum prev_level_;
-};
 
 /// A PendingRequest shaped like a jog: the caller raises its own error toast, so
 /// the tracker treats it as caller-handles-UI and records the correlation.
@@ -164,7 +108,7 @@ class CorrelationFixture : public LVGLTestFixture {
 
         ChannelResult out;
         {
-            LogCapture log;
+            LogCapture log(512);
 
             // ---- Channel (a): the REAL request tracker routes the RPC error ----
             MoonrakerRequestTracker tracker;
@@ -172,8 +116,7 @@ class CorrelationFixture : public LVGLTestFixture {
             MoonrakerRequestTrackerTestAccess::inject_request(
                 tracker, /*id=*/700, make_caller_handled_request(err_fired));
             tracker.route_response(
-                make_error_response(700, klipper_message),
-                [](MoonrakerEventType, const std::string&, bool, const std::string&) {}, nullptr);
+                make_error_response(700, klipper_message), [](const MoonrakerEvent&) {}, nullptr);
             out.caller_cb_fired = err_fired->load();
 
             // ---- Channel (b): the REAL router handles the `!!` broadcast ----
@@ -211,7 +154,7 @@ class CorrelationFixture : public LVGLTestFixture {
 
         ChannelResult out;
         {
-            LogCapture log;
+            LogCapture log(512);
 
             MoonrakerRequestTracker tracker;
             PendingRequest req;
@@ -229,8 +172,8 @@ class CorrelationFixture : public LVGLTestFixture {
             int generic = 0;
             tracker.route_response(
                 make_error_response(701, klipper_message),
-                [&generic](MoonrakerEventType t, const std::string&, bool, const std::string&) {
-                    if (t == MoonrakerEventType::RPC_ERROR) {
+                [&generic](const MoonrakerEvent& evt) {
+                    if (evt.type == MoonrakerEventType::RPC_ERROR) {
                         ++generic;
                     }
                 },

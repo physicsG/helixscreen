@@ -3,6 +3,10 @@
 
 #pragma once
 
+#include "ui_exclude_object_badges.h"
+
+#include "gcode_pause_scan.h"
+
 #include <lvgl/lvgl.h>
 
 #ifdef __cplusplus
@@ -25,7 +29,7 @@ enum class GcodeViewerState {
  * - Auto: Uses GLES 3D if available, falls back to 2D layer view.
  *         Can be overridden via HELIX_GCODE_MODE env var.
  * - Render3D: Forces 3D GLES renderer (isometric ribbon view with full camera control).
- * - Layer2D: Forces 2D orthographic layer view (front/top view, single layer at a time)
+ * - Layer2D: Forces the 2D software renderer (orthographic corner view)
  *
  * Environment variable override (checked at widget creation):
  * - HELIX_GCODE_MODE=3D  -> Use 3D GLES renderer
@@ -58,10 +62,11 @@ extern "C" {
  * @brief Custom LVGL widget for 3D G-code visualization
  *
  * Provides an interactive 3D viewer widget for G-code files. Integrates
- * GCodeParser, GCodeCamera, and GCodeRenderer for complete visualization.
+ * GCodeParser, GCodeCamera, the 2D GCodeLayerRenderer and, on ENABLE_GLES_3D
+ * builds, the 3D GCodeGLESRenderer.
  *
  * Features:
- * - 3D wireframe rendering of toolpaths
+ * - 2D isometric and (GLES builds) 3D rendering of toolpaths
  * - Interactive camera control (rotate, pan, zoom)
  * - Layer filtering and LOD support
  * - Object highlighting for Klipper exclusion
@@ -113,6 +118,9 @@ void ui_gcode_viewer_load_file(lv_obj_t* obj, const char* file_path);
  * The callback will be invoked from the main LVGL thread after async
  * geometry building completes. Use this to update UI elements that
  * depend on the loaded file data.
+ *
+ * Only the newest ui_gcode_viewer_load_file() reports: a load superseded by a
+ * later one never invokes the callback, on success or on failure.
  */
 void ui_gcode_viewer_set_load_callback(lv_obj_t* obj, gcode_viewer_load_callback_t callback,
                                        void* user_data);
@@ -251,7 +259,7 @@ void ui_gcode_viewer_force_redraw(lv_obj_t* obj);
  *
  * - AUTO: Uses GLES 3D if available, falls back to 2D layer view
  * - 3D: Forces 3D GLES renderer with full camera control
- * - 2D_LAYER: Forces top-down orthographic single-layer view (fast on AD5M)
+ * - 2D_LAYER: Forces the 2D software renderer (orthographic corner view, fast on AD5M)
  *
  * Default is AUTO. Settings are persisted in SettingsManager.
  */
@@ -278,107 +286,10 @@ void ui_gcode_viewer_disable_streaming(lv_obj_t* obj);
 // ==============================================
 
 /**
- * @brief Zoom camera
- * @param obj Viewer widget
- * @param factor Zoom factor (>1.0 = zoom in, <1.0 = zoom out)
- */
-void ui_gcode_viewer_zoom(lv_obj_t* obj, float factor);
-
-/**
  * @brief Reset camera to default view
  * @param obj Viewer widget
  */
 void ui_gcode_viewer_reset_camera(lv_obj_t* obj);
-
-/**
- * @brief Set camera to preset view
- * @param obj Viewer widget
- * @param preset Preset view type
- */
-void ui_gcode_viewer_set_view(lv_obj_t* obj, helix::GcodeViewerPresetView preset);
-
-/**
- * @brief Set camera azimuth angle directly
- * @param obj Viewer widget
- * @param azimuth Horizontal rotation in degrees (0-360)
- */
-void ui_gcode_viewer_set_camera_azimuth(lv_obj_t* obj, float azimuth);
-
-/**
- * @brief Set camera elevation angle directly
- * @param obj Viewer widget
- * @param elevation Vertical rotation in degrees (-90 to 90)
- */
-void ui_gcode_viewer_set_camera_elevation(lv_obj_t* obj, float elevation);
-
-/**
- * @brief Set camera zoom level directly
- * @param obj Viewer widget
- * @param zoom Zoom factor (>0, 1.0 = default)
- */
-void ui_gcode_viewer_set_camera_zoom(lv_obj_t* obj, float zoom);
-
-/**
- * @brief Enable/disable per-face debug coloring
- * @param obj Viewer widget
- * @param enable true to enable debug colors, false for normal rendering
- */
-void ui_gcode_viewer_set_debug_colors(lv_obj_t* obj, bool enable);
-
-// ==============================================
-// Rendering Options
-// ==============================================
-
-/**
- * @brief Show/hide travel moves
- * @param obj Viewer widget
- * @param show true to show, false to hide
- */
-void ui_gcode_viewer_set_show_travels(lv_obj_t* obj, bool show);
-
-// ==============================================
-// Object Picking (for exclusion UI)
-// ==============================================
-
-/**
- * @brief Pick object at screen coordinates
- * @param obj Viewer widget
- * @param x Screen X coordinate
- * @param y Screen Y coordinate
- * @return Object name or NULL if no object picked
- *
- * Result is only valid until next call to this function.
- */
-const char* ui_gcode_viewer_pick_object(lv_obj_t* obj, int x, int y);
-
-// ==============================================
-// Color & Rendering Control
-// ==============================================
-
-/**
- * @brief Set custom extrusion color
- * @param obj Viewer widget
- * @param color Color for extrusion moves
- *
- * Overrides theme default color for extrusions.
- */
-void ui_gcode_viewer_set_extrusion_color(lv_obj_t* obj, lv_color_t color);
-
-/**
- * @brief Set material specular lighting parameters (3D only)
- * @param obj Viewer widget
- * @param intensity Specular intensity (0.0-0.2, where 0.0 = matte, 0.075 = OrcaSlicer default)
- * @param shininess Specular shininess/focus (5.0-50.0, where 20.0 = OrcaSlicer default)
- *
- * Controls the appearance of reflective highlights on G-code extrusion surfaces.
- * Higher intensity = brighter highlights. Higher shininess = tighter/sharper highlights.
- * Only affects 3D GLES renderer; ignored by 2D renderer.
- */
-void ui_gcode_viewer_set_specular(lv_obj_t* obj, float intensity, float shininess);
-
-// ==============================================
-// Layer Control Extensions
-// ==============================================
 
 // ==============================================
 // Print Progress / Ghost Layer Visualization
@@ -399,19 +310,6 @@ void ui_gcode_viewer_set_specular(lv_obj_t* obj, float intensity, float shinines
  * Performance: Layer changes are instant (<1ms) - no geometry rebuild needed.
  */
 void ui_gcode_viewer_set_print_progress(lv_obj_t* obj, int current_layer);
-
-/**
- * @brief Set ghost layer rendering mode
- * @param obj Viewer widget
- * @param mode Rendering mode: 0=Dimmed, 1=Stipple, 2=Wireframe, 4=DepthOnly
- *
- * Controls how ghost (unprinted) layers are rendered:
- * - 0 (Dimmed): Darker color but fully opaque (default)
- * - 1 (Stipple): Screen-door transparency pattern
- * - 2 (Wireframe): Only edges visible
- * - 4 (DepthOnly): No depth write - see through to solid layers
- */
-void ui_gcode_viewer_set_ghost_mode(lv_obj_t* obj, int mode);
 
 /**
  * @brief Name the widget that covers the bottom of this viewer.
@@ -438,17 +336,6 @@ void ui_gcode_viewer_set_bottom_occluder(lv_obj_t* obj, lv_obj_t* occluder);
  * @return Max layer index (0-based), or -1 if no geometry loaded
  */
 int ui_gcode_viewer_get_max_layer(lv_obj_t* obj);
-
-// ==============================================
-// Metadata Access
-// ==============================================
-
-/**
- * @brief Get filament type from metadata
- * @param obj Viewer widget
- * @return Filament type (e.g., "PLA", "PETG") or NULL if not available
- */
-const char* ui_gcode_viewer_get_filament_type(lv_obj_t* obj);
 
 // ==============================================
 // Statistics
@@ -513,35 +400,6 @@ void ui_gcode_viewer_register(void);
 void ui_gcode_viewer_set_tool_colors(lv_obj_t* obj, const std::vector<uint32_t>& colors);
 
 /**
- * @brief Drop the per-tool AMS overrides and go back to the file's own colors
- * @param obj Viewer widget
- *
- * The retraction counterpart of ui_gcode_viewer_set_tool_colors(). It needs its
- * own entry point because an empty color vector means "nothing knowable" to
- * every layer below - and each one deliberately ignores it, so that a first
- * apply with no AMS data leaves the slicer palette alone instead of painting
- * over it. Passing {} therefore cannot express "stop overriding".
- *
- * For 2D: rebuilds the palette from the parsed file.
- * For 3D: restores the palette snapshot the renderer took before its first
- * override, since overrides are written into the baked palette in place.
- *
- * No-op when no overrides are applied.
- */
-void ui_gcode_viewer_clear_tool_colors(lv_obj_t* obj);
-
-/**
- * @brief The per-tool AMS color overrides currently applied to this viewer
- * @param obj Viewer widget
- * @return RGB colors indexed by tool (0xRRGGBB); empty when the renderers are
- *         on the file's own slicer palette
- *
- * This is the viewer's record of what it pushed at the renderers, and therefore
- * what ui_gcode_viewer_clear_tool_colors() retracts.
- */
-std::vector<uint32_t> ui_gcode_viewer_get_tool_colors(lv_obj_t* obj);
-
-/**
  * @brief Apply AMS filament colors to the viewer from AmsState
  * @param obj Viewer widget
  * @return true if AMS colors were applied, false if no AMS backend or all defaults
@@ -573,6 +431,26 @@ void ui_gcode_viewer_set_highlighted_objects(lv_obj_t* obj,
  */
 void ui_gcode_viewer_set_excluded_objects(lv_obj_t* obj,
                                           const std::unordered_set<std::string>& object_names);
+
+/**
+ * @brief Numbered badges drawn over each object while exclude mode is open
+ * @param obj Viewer widget
+ * @param badges From helix::ui::compute_object_badges(); empty hides them
+ *
+ * Drawn after the 2D/3D render at each anchor's projected point, so they follow
+ * pan, zoom and rotation. A tap on a badge picks the object it labels.
+ */
+// NAMESPACE_OK: joins this file's global ui_gcode_viewer_* API
+void ui_gcode_viewer_set_object_badges(lv_obj_t* obj, std::vector<helix::ui::ObjectBadge> badges);
+
+/**
+ * @brief Whether a tap on an excluded badge picks its object
+ *
+ * Print details sets this while exclude mode is open, so a pick can be undone
+ * from the render. Off by default.
+ */
+// NAMESPACE_OK: joins this file's global ui_gcode_viewer_* API
+void ui_gcode_viewer_set_excluded_badges_pickable(lv_obj_t* obj, bool pickable);
 
 /**
  * @brief Callback type for object tap events
@@ -639,32 +517,14 @@ struct ParsedGCodeFile;
 const helix::gcode::ParsedGCodeFile* ui_gcode_viewer_get_parsed_file(lv_obj_t* obj);
 
 /**
- * @brief Per-tool color palette the viewer recovered from the file it loaded.
- *
- * Mode-independent, which is the point: full-load reads the palette off the
- * parsed file, streaming reads it off the layer index, which already scans the
- * header and then the trailing 32KB for exactly this (OrcaSlicer writes its
- * palette in the footer). Both were always available; only the parsed-file half
- * was ever exposed, so callers that reached for it went empty-handed on every
- * streamed file — i.e. on every file large enough for streaming to be chosen.
- *
- * @param obj Viewer widget
- * @return Palette hex strings, or empty when nothing is loaded / the file
- *         carried no palette. Returned BY VALUE: the streaming half lives
- *         behind the controller's index and must not outlive a reload.
- */
-std::vector<std::string> ui_gcode_viewer_get_tool_palette(lv_obj_t* obj);
-
-/**
  * @brief The set of tools the loaded file actually prints with.
  *
- * Mode-independent for the same reason ui_gcode_viewer_get_tool_palette() is:
- * full-load reads ParsedGCodeFile::tools_used_indices, streaming reads the
+ * Mode-independent: full-load reads ParsedGCodeFile::tools_used_indices, streaming reads the
  * used-tool set the layer index accumulates during its scan. Callers that went
  * straight to the parsed file got an empty answer on every streamed file — and
- * a tool changer (Snapmaker U1, 961MB RAM) is forced to stream by
- * MemoryInfo::should_force_streaming(), so on that printer it was empty 100% of
- * the time and the whole model rendered in one tool's colour.
+ * a tool changer (Snapmaker U1, 961MB RAM) streams everything above a few MB,
+ * so on that printer it was empty on every large print and the whole model
+ * rendered in one tool's colour.
  *
  * Both halves answer identically, including ParsedGCodeFile's single-extruder
  * convention: a file with a colour palette but no `Tn` at all reports {0}.
@@ -674,6 +534,27 @@ std::vector<std::string> ui_gcode_viewer_get_tool_palette(lv_obj_t* obj);
  *         names no tools and carries no palette.
  */
 std::set<int> ui_gcode_viewer_get_tools_used(lv_obj_t* obj);
+
+/**
+ * @brief The scheduled pauses of the loaded file, with its progress axis.
+ *
+ * Mode-independent like the tool queries: the streaming layer-index scan and
+ * the full-load parse loop both collect the pauses on the pass they already
+ * make over the file (see gcode_pause_scan.h). @p out_axis reports which
+ * function of the file its progress bar fills on, so the caller can place each
+ * pause on the axis the bar actually uses.
+ *
+ * @param obj        Viewer widget
+ * @param out_pauses Receives the pauses (cleared when none/not loaded)
+ * @param out_axis   Receives the file's progress axis
+ * @return true when a scan result exists (empty pauses = pause-free file);
+ *         false when nothing is loaded, so callers degrade to no markers.
+ */
+namespace helix {
+bool ui_gcode_viewer_get_scheduled_pauses(lv_obj_t* obj,
+                                          std::vector<helix::gcode::ScheduledPause>& out_pauses,
+                                          helix::gcode::ProgressAxis& out_axis);
+} // namespace helix
 
 /**
  * @brief Adopt the viewer's recovered palette into @p colors when @p colors is
@@ -707,5 +588,114 @@ bool ui_gcode_viewer_adopt_palette_if_empty(lv_obj_t* obj, std::vector<std::stri
  * @return Progress fraction; 1.0 when idle or complete, 0.0 when unknown.
  */
 float ui_gcode_viewer_get_load_progress(lv_obj_t* obj);
+
+/**
+ * @brief Advance a hidden 2D preview's build; true once it can be revealed.
+ *
+ * The viewer normally builds as a side effect of being drawn, so a widget kept
+ * hidden until it has real content would never start. A caller that stacks a
+ * thumbnail over the viewer and swaps on readiness drives this from a timer
+ * instead, then shows the viewer when it returns true.
+ *
+ * 2D only, and it returns false for a 3D viewer rather than claiming
+ * readiness: 3D uploads its VBOs during the draw pass, so it is never hidden
+ * and reveals from its own first-frame callback instead.
+ *
+ * @param obj Viewer widget
+ * @return true when there is content worth swapping in.
+ */
+bool ui_gcode_viewer_pump_offscreen_2d(lv_obj_t* obj);
+
+// ==============================================
+// Test Seam
+// ==============================================
+
+#include <memory>
+
+namespace helix::gcode {
+class GCodeLayerRenderer;
+class GCodeGLESRenderer;
+} // namespace helix::gcode
+
+namespace helix::test_access {
+/**
+ * @brief Run the viewer's budget-forced 2D fallback over @p file.
+ *
+ * Production reaches that branch only when GeometryBudgetManager refuses to
+ * build 3D geometry for a file, which a test on a machine with free memory
+ * cannot arrange. This enters the same branch body with @p file standing in for
+ * the completed load, and takes ownership of it the way a load does.
+ *
+ * @return the 2D renderer the fallback left on the viewer, or nullptr if it
+ *         created none.
+ */
+const helix::gcode::GCodeLayerRenderer*
+gcode_viewer_budget_force_2d(lv_obj_t* viewer, std::unique_ptr<helix::gcode::ParsedGCodeFile> file);
+
+/// Hand @p file to the viewer as a completed full load that built no 3D
+/// geometry, the state a file loaded in 2D is in.
+void gcode_viewer_install_loaded_file(lv_obj_t* viewer,
+                                      std::unique_ptr<helix::gcode::ParsedGCodeFile> file);
+
+/// Wait for the viewer's build thread to finish without cancelling it, so the
+/// result it queued is still delivered.
+void gcode_viewer_wait_for_build(lv_obj_t* viewer);
+
+/// The per-tool AMS color overrides the viewer has pushed at its renderers
+/// (0xRRGGBB by tool); empty when they are on the file's own slicer palette.
+std::vector<uint32_t> gcode_viewer_tool_colors(lv_obj_t* viewer);
+
+/// Drop those overrides and return to the file's own colors. No-op when none
+/// are applied. set_tool_colors() cannot express this: an empty vector means
+/// "nothing knowable" to every layer below.
+void gcode_viewer_clear_tool_colors(lv_obj_t* viewer);
+
+/// The viewer's current load generation (0 for a non-viewer).
+uint64_t gcode_viewer_load_generation(lv_obj_t* viewer);
+
+/// The viewer's 2D layer renderer, or null while it has none.
+const helix::gcode::GCodeLayerRenderer* gcode_viewer_2d_renderer(lv_obj_t* viewer);
+
+/// The viewer's 3D renderer; null in a build without one.
+helix::gcode::GCodeGLESRenderer* gcode_viewer_3d_renderer(lv_obj_t* viewer);
+
+/// The 3D renderer's geometry palette; empty with no geometry or no 3D renderer.
+std::vector<uint32_t> gcode_viewer_3d_palette(lv_obj_t* viewer);
+
+/// The render mode last set on the viewer, before per-file fallbacks.
+helix::GcodeViewerRenderMode gcode_viewer_render_mode(lv_obj_t* viewer);
+
+/// What the stall watchdog carries between ticks (-2 = never sampled).
+struct GcodeViewerWatchdogTrack {
+    int prev_cached = -2;
+    int prev_target = -2;
+    int stall_streak = 0;
+};
+
+/// Read or seed the watchdog's between-tick state, which production only
+/// reaches through a 2D render stalling on a live print.
+GcodeViewerWatchdogTrack gcode_viewer_watchdog_track(lv_obj_t* viewer);
+void gcode_viewer_set_watchdog_track(lv_obj_t* viewer, const GcodeViewerWatchdogTrack& track);
+
+/// Install @p file as a finished load drawn by the 2D renderer, past the first
+/// frame, so the next refresh runs the real draw pass. Returns that renderer.
+helix::gcode::GCodeLayerRenderer*
+gcode_viewer_show_2d(lv_obj_t* viewer, std::unique_ptr<helix::gcode::ParsedGCodeFile> file);
+
+/// The exclude badges the viewer holds and the fill colour it resolved for each.
+std::vector<helix::ui::ObjectBadge> gcode_viewer_object_badges(lv_obj_t* viewer);
+/// Invoke the registered object tap callback as a tap on @p name would.
+void gcode_viewer_fire_object_tap(lv_obj_t* viewer, const char* name);
+bool gcode_viewer_excluded_badges_pickable(lv_obj_t* viewer);
+std::vector<lv_color_t> gcode_viewer_badge_fills(lv_obj_t* viewer);
+std::vector<lv_color_t> gcode_viewer_badge_texts(lv_obj_t* viewer);
+
+/// A badge the last frame drew: its object and widget-local centre.
+struct GcodeViewerDrawnBadge {
+    std::string name;
+    glm::vec2 center{0.0f, 0.0f};
+};
+std::vector<GcodeViewerDrawnBadge> gcode_viewer_drawn_badges(lv_obj_t* viewer);
+} // namespace helix::test_access
 
 #endif

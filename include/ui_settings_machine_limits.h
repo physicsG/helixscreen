@@ -14,7 +14,7 @@
  * Z-axis limits (max_z_velocity, max_z_accel) are displayed read-only since they
  * require config file changes and cannot be set via SET_VELOCITY_LIMIT.
  *
- * @pattern Overlay (two-phase init: init_subjects -> create -> callbacks)
+ * @pattern Overlay (lazy init)
  * @threading Main thread only
  *
  * @see IMoonrakerAPI::set_machine_limits for gcode generation
@@ -24,8 +24,8 @@
 #pragma once
 
 #include "calibration_types.h"
-#include "lvgl/lvgl.h"
 #include "overlay_base.h"
+#include "static_panel_registry.h"
 #include "subject_managed_panel.h"
 
 // Forward declarations
@@ -59,11 +59,6 @@ namespace helix::settings {
  */
 class MachineLimitsOverlay : public OverlayBase {
   public:
-    /**
-     * @brief Default constructor
-     */
-    MachineLimitsOverlay();
-
     /**
      * @brief Destructor - cleans up subjects
      */
@@ -111,33 +106,13 @@ class MachineLimitsOverlay : public OverlayBase {
     void register_callbacks() override;
 
     //
-    // === UI Creation ===
-    //
-
-    /**
-     * @brief Create the overlay UI (called lazily)
-     *
-     * @param parent Parent widget to attach overlay to (usually screen)
-     * @return Root object of overlay, or nullptr on failure
-     */
-    lv_obj_t* create(lv_obj_t* parent) override;
-
-    /**
-     * @brief Show the overlay (queries current limits first)
-     *
-     * This method:
-     * 1. Ensures overlay is created
-     * 2. Queries API for current machine limits
-     * 3. Updates sliders and displays
-     * 4. Pushes overlay onto navigation stack
-     *
-     * @param parent_screen The parent screen for overlay creation
-     */
-    void show(lv_obj_t* parent_screen);
-
-    //
     // === OverlayBase Interface ===
     //
+
+    /// show() builds the overlay; on_activate() then queries the printer's current limits.
+    const char* xml_component() const override {
+        return "machine_limits_overlay";
+    }
 
     /**
      * @brief Get human-readable overlay name
@@ -156,20 +131,14 @@ class MachineLimitsOverlay : public OverlayBase {
 
     /**
      * @brief Called when overlay is being hidden
+     *
+     * Flushes a pending debounced apply.
      */
-    void on_deactivate() override;
+    void on_deactivating(DeactivateReason reason) override;
 
     //
     // === Accessors ===
     //
-
-    /**
-     * @brief Check if overlay has been created
-     * @return true if create() was called successfully
-     */
-    bool is_created() const {
-        return overlay_root_ != nullptr;
-    }
 
     //
     // === Event Handlers (public for static callbacks) ===
@@ -337,16 +306,6 @@ class MachineLimitsOverlay : public OverlayBase {
     // === Static Callbacks ===
     //
 
-    static void on_velocity_changed(lv_event_t* e);
-    static void on_accel_changed(lv_event_t* e);
-    static void on_a2d_changed(lv_event_t* e);
-    static void on_scv_changed(lv_event_t* e);
-    static void on_reset(lv_event_t* e);
-    static void on_extrude_speed_changed(lv_event_t* e);
-
-    /// Tap on a setting_value_field. user_data carries the Field index as text.
-    static void on_field_clicked(lv_event_t* e);
-
     /// ui_keypad_callback_t; user_data carries the Field index.
     static void on_keypad_value(float value, void* user_data);
 };
@@ -359,7 +318,9 @@ class MachineLimitsOverlay : public OverlayBase {
  *
  * @return Reference to singleton MachineLimitsOverlay
  */
-MachineLimitsOverlay& get_machine_limits_overlay();
+inline MachineLimitsOverlay& get_machine_limits_overlay() {
+    return lazy_global<MachineLimitsOverlay>("MachineLimitsOverlay");
+}
 
 /**
  * @brief Initialize the global overlay with API

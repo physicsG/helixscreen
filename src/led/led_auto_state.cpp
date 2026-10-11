@@ -4,12 +4,15 @@
 
 #include "color_utils.h"
 #include "config.h"
+#include "json_utils.h"
 #include "led/led_color_utils.h"
 #include "led/led_controller.h"
 #include "observer_factory.h"
 #include "printer_state.h"
 
 #include <spdlog/spdlog.h>
+
+#include <algorithm>
 
 namespace helix::led {
 
@@ -44,6 +47,7 @@ void LedAutoState::deinit() {
     enabled_ = false;
     last_applied_key_.clear();
     mappings_.clear();
+    strips_.clear();
 
     spdlog::info("[LedAutoState] Deinitialized");
 }
@@ -115,7 +119,7 @@ std::string LedAutoState::compute_state_key() const {
     }
 
     // Check klippy state first — error takes priority
-    auto* klippy_subj = printer_state_->get_klippy_state_subject();
+    auto* klippy_subj = printer_state_->network_state().get_klippy_state_subject();
     if (klippy_subj) {
         auto klippy = static_cast<KlippyState>(lv_subject_get_int(klippy_subj));
         if (klippy == KlippyState::ERROR) {
@@ -129,7 +133,7 @@ std::string LedAutoState::compute_state_key() const {
         // themes), not internal state. There is no "preparing" key, and a
         // pre-print block already falls through to "heating" below, which is
         // what the machine is in fact doing.
-        auto print_state = printer_state_->get_print_job_state();
+        auto print_state = printer_state_->print_state().get_print_job_state();
         switch (print_state) {
         case PrintJobState::PRINTING:
             return "printing";
@@ -147,7 +151,8 @@ std::string LedAutoState::compute_state_key() const {
     }
 
     // Check if heating (extruder target > 0 and not printing)
-    auto* ext_target_subj = printer_state_->get_active_extruder_target_subject();
+    auto* ext_target_subj =
+        printer_state_->temperature_state().get_active_extruder_target_subject();
     if (ext_target_subj) {
         int target_deci = lv_subject_get_int(ext_target_subj);
         if (target_deci > 0) {
@@ -158,28 +163,41 @@ std::string LedAutoState::compute_state_key() const {
     return "idle";
 }
 
+std::vector<std::string> LedAutoState::targets() const {
+    auto& ctrl = LedController::instance();
+    const auto switchable = ctrl.switchable_ids();
+    std::vector<std::string> out;
+    for (const auto& id : strips_) {
+        if (std::find(switchable.begin(), switchable.end(), id) != switchable.end()) {
+            out.push_back(id);
+        }
+    }
+    return out.empty() ? ctrl.light_targets("") : out;
+}
+
 void LedAutoState::apply_action(const LedStateAction& action) {
     auto& ctrl = LedController::instance();
 
+    // silent=true on every send: these fire on printer-state transitions, not
+    // user input, so the busy-queue toast (which exists to explain a command
+    // the user made) must not be claimed by them — and the print-state change
+    // at every print start lands squarely inside the busy gate's window.
     if (action.action_type == "off") {
-        ctrl.turn_off_all();
+        ctrl.set_power(targets(), false, /*silent=*/true);
     } else if (action.action_type == "color") {
-        double r = 0.0, g = 0.0, b = 0.0;
-        unpack_rgb(action.color, r, g, b);
-        double scale = action.brightness / 100.0;
-        ctrl.set_color_all(r * scale, g * scale, b * scale, 0.0);
+        ctrl.set_look(targets(), action.color, 0.0, action.brightness, /*silent=*/true);
     } else if (action.action_type == "brightness") {
-        ctrl.set_brightness_all(action.brightness);
+        ctrl.set_brightness(targets(), action.brightness, /*silent=*/true);
     } else if (action.action_type == "effect") {
-        ctrl.effects().activate_effect(action.effect_name);
-        ctrl.sync_light_state(true);
+        ctrl.effects().activate_effect(action.effect_name, nullptr, nullptr, nullptr, true,
+                                       /*silent=*/true);
     } else if (action.action_type == "wled_preset") {
-        for (const auto& strip : ctrl.wled().strips()) {
-            ctrl.wled().set_preset(strip.name, action.wled_preset);
+        for (const auto& id : targets()) {
+            if (ctrl.backend_for_strip(id) == LedBackendType::WLED) {
+                ctrl.wled().set_preset(id, action.wled_preset);
+            }
         }
-        ctrl.sync_light_state(true);
     } else if (action.action_type == "macro") {
-        // Custom G-code — resulting light state is unknowable, skip sync
         ctrl.macro().execute_custom_action(action.macro_gcode);
     } else {
         spdlog::warn("[LedAutoState] Unknown action type: '{}'", action.action_type);
@@ -200,26 +218,30 @@ void LedAutoState::subscribe_observers() {
         return;
     }
 
-    using helix::ui::observe_int_sync;
+    using helix::ui::observe;
 
     // RAW_PRINT_STATE_OK: the LED state names are theme keys keyed off what the
     // printer reports; see state_name_for_theme() below.
-    auto* print_subj = printer_state_->get_print_state_enum_subject();
+    auto* print_subj = printer_state_->print_state().get_print_state_enum_subject();
     if (print_subj) {
-        print_state_observer_ = observe_int_sync<LedAutoState>(
-            print_subj, this, [](LedAutoState* self, int) { self->on_state_changed(); });
+        print_state_observer_ = observe<int>(
+            print_subj, this, [](LedAutoState* self, int) { self->on_state_changed(); },
+            printer_state_->get_subjects_lifetime());
     }
 
-    auto* klippy_subj = printer_state_->get_klippy_state_subject();
+    auto* klippy_subj = printer_state_->network_state().get_klippy_state_subject();
     if (klippy_subj) {
-        klippy_state_observer_ = observe_int_sync<LedAutoState>(
-            klippy_subj, this, [](LedAutoState* self, int) { self->on_state_changed(); });
+        klippy_state_observer_ = observe<int>(
+            klippy_subj, this, [](LedAutoState* self, int) { self->on_state_changed(); },
+            printer_state_->get_subjects_lifetime());
     }
 
-    auto* ext_target_subj = printer_state_->get_active_extruder_target_subject();
+    auto* ext_target_subj =
+        printer_state_->temperature_state().get_active_extruder_target_subject();
     if (ext_target_subj) {
-        extruder_target_observer_ = observe_int_sync<LedAutoState>(
-            ext_target_subj, this, [](LedAutoState* self, int) { self->on_state_changed(); });
+        extruder_target_observer_ = observe<int>(
+            ext_target_subj, this, [](LedAutoState* self, int) { self->on_state_changed(); },
+            printer_state_->get_subjects_lifetime());
     }
 
     spdlog::debug("[LedAutoState] Subscribed to printer state observers");
@@ -239,10 +261,6 @@ void LedAutoState::unsubscribe_observers() {
 
 void LedAutoState::load_config() {
     auto* cfg = Config::get_instance();
-    if (!cfg) {
-        setup_default_mappings();
-        return;
-    }
 
     // NOTE: the one-time fold of the legacy /led/auto_state/ block into the
     // active printer lives in migrate_v19_to_v20() (config.cpp). It used to run
@@ -251,6 +269,7 @@ void LedAutoState::load_config() {
 
     // Enabled flag
     enabled_ = cfg->get<bool>(cfg->df() + "leds/auto_state/enabled", false);
+    strips_ = cfg->get_string_array(cfg->df() + AUTO_STATE_STRIPS_PATH);
 
     // Mappings
     mappings_.clear();
@@ -261,7 +280,7 @@ void LedAutoState::load_config() {
                 continue;
             }
             LedStateAction action;
-            action.action_type = it.value().value("action", "color");
+            action.action_type = helix::json_util::safe_string(it.value(), "action", "color");
             // Color: accept both integer (legacy) and "#RRGGBB" string
             auto color_it = it.value().find("color");
             if (color_it != it.value().end()) {
@@ -274,10 +293,10 @@ void LedAutoState::load_config() {
                     }
                 }
             }
-            action.brightness = it.value().value("brightness", 100);
-            action.effect_name = it.value().value("effect_name", "");
-            action.wled_preset = it.value().value("wled_preset", 0);
-            action.macro_gcode = it.value().value("macro_gcode", "");
+            action.brightness = helix::json_util::safe_int(it.value(), "brightness", 100);
+            action.effect_name = helix::json_util::safe_string(it.value(), "effect_name", "");
+            action.wled_preset = helix::json_util::safe_int(it.value(), "wled_preset", 0);
+            action.macro_gcode = helix::json_util::safe_string(it.value(), "macro_gcode", "");
             mappings_[it.key()] = action;
         }
     }
@@ -293,9 +312,6 @@ void LedAutoState::load_config() {
 
 void LedAutoState::save_config() {
     auto* cfg = Config::get_instance();
-    if (!cfg) {
-        return;
-    }
 
     cfg->set(cfg->df() + "leds/auto_state/enabled", enabled_);
 
@@ -318,8 +334,30 @@ void LedAutoState::save_config() {
     }
     cfg->set(cfg->df() + "leds/auto_state/mappings", mappings_json);
 
+    // An absent key already means the chamber light, and an array there marks the
+    // legacy selection as migrated, so an empty list is only written over an array.
+    const nlohmann::json* saved_strips = cfg->try_get_json(cfg->df() + AUTO_STATE_STRIPS_PATH);
+    if (!strips_.empty() || (saved_strips != nullptr && saved_strips->is_array())) {
+        cfg->set(cfg->df() + AUTO_STATE_STRIPS_PATH, nlohmann::json(strips_));
+    }
+
     cfg->save();
     spdlog::debug("[LedAutoState] Saved config");
+}
+
+void stage_light_selection(const SelectionMigration& m) {
+    auto* cfg = Config::get_instance();
+    // Written directly: LedAutoState::save_config() on an uninitialised instance
+    // would save empty mappings over the user's.
+    cfg->set(cfg->df() + AUTO_STATE_STRIPS_PATH, nlohmann::json(m.auto_state_strips));
+    if (!m.light_button.empty()) {
+        cfg->set(cfg->df() + LIGHT_BUTTON_PENDING_PATH, m.light_button);
+    }
+    auto& auto_state = LedAutoState::instance();
+    if (auto_state.is_initialized()) {
+        auto_state.set_strips(m.auto_state_strips);
+    }
+    cfg->save();
 }
 
 } // namespace helix::led

@@ -59,14 +59,6 @@ class EnvironmentConfig {
     static std::optional<int> get_int_scaled(const char* name, int min, int max, int divisor);
 
     /**
-     * @brief Check if environment variable equals "1"
-     *
-     * @param name Environment variable name
-     * @return true if value is exactly "1", false otherwise
-     */
-    static bool get_bool(const char* name);
-
-    /**
      * @brief Check if environment variable exists (regardless of value)
      *
      * @param name Environment variable name
@@ -120,10 +112,15 @@ class EnvironmentConfig {
     static bool get_benchmark_mode();
 
     /**
-     * @brief Get screen size override from HELIX_SCREEN_SIZE
+     * @brief Get screen resolution override from HELIX_SCREEN_SIZE
      *
      * Accepts named presets (micro, tiny, small, medium, large, xlarge)
      * or WxH format (e.g., "480x400", "1920x1080").
+     *
+     * Despite the variable's name this is a pixel resolution, not a UI scale
+     * factor: the value picks the display mode, and the layout tier is
+     * classified from the resulting display by breakpoint_for() in
+     * ui_breakpoint.h. HELIX_DPI is the separate knob for interface scale.
      *
      * @return Size string, or nullopt if not set
      */

@@ -9,7 +9,8 @@
   <view name="print_status_fan_row_root"
         extends="lv_obj" width="100%" height="content" style_pad_all="0" style_pad_left="#space_xs"
         style_pad_right="#space_xs" flex_flow="row" style_flex_main_place="center" style_flex_cross_place="center"
-        style_pad_gap="#space_xs" scrollable="false" clickable="true">
+        style_pad_gap="#space_xs" scrollable="false" clickable="true" style_radius="#border_radius">
+    <style name="styles.press_wash" selector="pressed"/>
 
     <!-- Hide whole row when adaptive-fit calc says no -->
     <bind_flag_if_eq subject="print_status_fans_fit" flag="hidden" ref_value="0"/>
@@ -22,8 +23,7 @@
       <bind_flag_if_not_eq subject="print_status_fan_row_density" flag="hidden" ref_value="0"/>
     </icon>
     <!-- Part fan: full label (density 0 or 1) -->
-    <text_small name="part_fan_label_full"
-                text="Part" translation_tag="Part" style_text_color="#primary" clickable="false" event_bubble="true">
+    <text_small name="part_fan_label_full" text="Part" style_text_color="#primary" clickable="false" event_bubble="true">
       <bind_flag_if_eq subject="print_status_fan_row_density" flag="hidden" ref_value="2"/>
     </text_small>
     <!-- Part fan: short label (density 2 only) -->
@@ -38,7 +38,7 @@
     </icon>
     <!-- Hotend fan: full label (density 0 or 1) -->
     <text_small name="hotend_fan_label_full"
-                text="Hotend" translation_tag="Hotend" style_text_color="#primary" clickable="false" event_bubble="true">
+                text="Hotend" style_text_color="#primary" clickable="false" event_bubble="true">
       <bind_flag_if_eq subject="print_status_fan_row_density" flag="hidden" ref_value="2"/>
     </text_small>
     <!-- Hotend fan: short label (density 2 only) -->
@@ -53,8 +53,7 @@
       <bind_flag_if_eq subject="print_status_aux_icon_visible" flag="hidden" ref_value="0"/>
     </icon>
     <!-- Aux full label: composite subject = aux_present AND density!=2 -->
-    <text_small name="aux_fan_label_full"
-                text="Aux" translation_tag="Aux" style_text_color="#primary" clickable="false" event_bubble="true">
+    <text_small name="aux_fan_label_full" text="Aux" style_text_color="#primary" clickable="false" event_bubble="true">
       <bind_flag_if_eq subject="print_status_aux_full_visible" flag="hidden" ref_value="0"/>
     </text_small>
     <!-- Aux short label: composite subject = aux_present AND density==2 -->

@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "text_io.h"
+
 #include <algorithm>
 #include <cctype>
 #include <string>
@@ -41,8 +43,7 @@ inline bool device_needs_clock_keepalive(const std::string& device_name,
                                          const std::string& pcm_name) {
     auto lowered = [](const std::string& s) {
         std::string out = s;
-        std::transform(out.begin(), out.end(), out.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        out = helix::text_io::to_lower(out);
         return out;
     };
     const std::string haystack = lowered(device_name) + " " + lowered(pcm_name);

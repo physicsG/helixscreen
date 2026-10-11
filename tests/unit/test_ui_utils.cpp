@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "ui_format_utils.h"
-#include "ui_image_helpers.h"
 #include "ui_utils.h"
 
 #include "../lvgl_test_fixture.h"
@@ -19,8 +18,6 @@ using helix::ui::format_file_size;
 using helix::ui::format_modified_date;
 using helix::ui::format_print_time;
 using helix::ui::format_relative_time;
-using helix::ui::image_scale_to_contain;
-using helix::ui::image_scale_to_cover;
 
 // ============================================================================
 // format_print_time() Tests
@@ -288,22 +285,6 @@ TEST_CASE("UI Utils: ui_get_responsive_header_height - boundary values",
 }
 
 // ============================================================================
-// Image Scaling Tests (require LVGL)
-// ============================================================================
-
-TEST_CASE("UI Utils: image_scale_to_cover - null widget", "[ui_utils][image][error]") {
-    REQUIRE(image_scale_to_cover(nullptr, 100, 100) == false);
-}
-
-TEST_CASE("UI Utils: image_scale_to_contain - null widget", "[ui_utils][image][error]") {
-    REQUIRE(image_scale_to_contain(nullptr, 100, 100) == false);
-}
-
-// Note: Testing actual image scaling requires creating LVGL image widgets
-// with valid image data, which is more complex. The basic error handling
-// is tested above. Full integration tests would go in a separate test file.
-
-// ============================================================================
 // ui_brightness_to_lightbulb_icon() Tests
 // ============================================================================
 
@@ -557,4 +538,32 @@ TEST_CASE_METHOD(LVGLTestFixture,
     lv_obj_t* obj = lv_obj_create(other_screen);
     REQUIRE_FALSE(helix::ui::is_on_active_screen(obj));
     lv_obj_delete(other_screen);
+}
+
+namespace {
+int g_layout_passes = 0;
+void count_layout_pass(lv_event_t*) {
+    ++g_layout_passes;
+}
+} // namespace
+
+TEST_CASE_METHOD(LVGLTestFixture,
+                 "UI Utils: safe_clean_children - an empty container runs no layout pass",
+                 "[ui_utils][safe_clean]") {
+    lv_display_t* disp = lv_obj_get_display(test_screen());
+    lv_display_add_event_cb(disp, count_layout_pass, LV_EVENT_UPDATE_LAYOUT_COMPLETED, nullptr);
+    lv_obj_t* container = lv_obj_create(test_screen());
+
+    g_layout_passes = 0;
+    helix::ui::safe_clean_children(container);
+    CHECK(g_layout_passes == 0);
+
+    lv_obj_create(container);
+    lv_obj_create(container);
+    g_layout_passes = 0;
+    helix::ui::safe_clean_children(container);
+    CHECK(g_layout_passes >= 1);
+    CHECK(lv_obj_get_child_count(container) == 0);
+
+    lv_display_remove_event_cb_with_user_data(disp, count_layout_pass, nullptr);
 }

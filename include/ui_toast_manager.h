@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "ui_notification_threshold.h"
+
 #include "lvgl.h"
 
 #include <atomic>
@@ -53,13 +55,16 @@ class ToastManager {
      * user should DO about it.
      *
      * Separate entry point rather than a defaulted parameter on show(), so no
-     * existing caller changes shape and a literal 0 duration can never become
-     * ambiguous with a null detail. An empty or null @p detail renders exactly
+     * existing caller changes shape. An empty or null @p detail renders exactly
      * as show() would.
      *
      * Longer default duration than show(): a two-part message is roughly twice
      * the reading time, and the whole point of the detail line is that the user
      * acts on it rather than glancing past it.
+     *
+     * @p duration_ms of 0 means the toast never auto-dismisses: it stays until
+     * its close button is tapped. For a warning the user must act on (a refused
+     * helixscreen.env means every setting in it is being ignored).
      */
     void show_with_detail(ToastSeverity severity, const char* message, const char* detail,
                           uint32_t duration_ms = 8000);
@@ -109,10 +114,13 @@ class ToastManager {
                                const char* action_text);
     void ensure_stack_container();
     ToastList::iterator find_by_widget(lv_obj_t* widget);
-    /** If a non-exiting, non-action toast with identical severity+message is
-     *  visible, reset its dismiss timer and return true (caller skips
-     *  creating a duplicate). Rapid-fire error paths (jog spam, reconnect
-     *  storms) otherwise stack N identical widgets in one queue drain.
+    /** If a non-exiting toast with identical severity+message is visible,
+     *  reset its dismiss timer and return true (caller skips creating a
+     *  duplicate). Rapid-fire error paths (jog spam, reconnect storms, a
+     *  flapping sensor re-raising one notice) otherwise stack N identical
+     *  widgets. An action toast only folds into one whose button runs the
+     *  same callback on the same user_data: two toasts with one message but
+     *  different targets are two questions, and merging them would drop one.
      *
      *  Defined inline (header-only): mk/tests.mk excludes
      *  ui_toast_manager.o from the test build and tests/ui_test_utils.cpp
@@ -123,12 +131,15 @@ class ToastManager {
      *  app binary and the test binary link the same code; only LVGL's
      *  lv_timer_reset() is needed, which is available in both. Do not
      *  move this back to ui_toast_manager.cpp or add a stub override. */
-    bool refresh_duplicate(ToastSeverity severity, const char* message) {
+    bool refresh_duplicate(ToastSeverity severity, const char* message,
+                           toast_action_callback_t action_cb = nullptr,
+                           void* action_user_data = nullptr) {
         if (!message) {
             return false;
         }
         for (auto& t : active_) {
-            if (!t.is_exiting && t.action_cb == nullptr && t.severity == severity &&
+            if (!t.is_exiting && t.action_cb == action_cb &&
+                t.action_user_data == action_user_data && t.severity == severity &&
                 t.message == message) {
                 if (t.dismiss_timer) {
                     lv_timer_reset(t.dismiss_timer);
@@ -138,15 +149,36 @@ class ToastManager {
         }
         return false;
     }
+    /** Resolve the toast that owns @p node: @p node itself or any descendant
+     *  of a widget in active_. Returns active_.end() when the node lives
+     *  outside every registered toast — the safe no-op answer for event
+     *  callbacks that can fire after their toast's list entry is gone
+     *  (deinit_subjects runs on printer switches, not only before lv_deinit).
+     *
+     *  Defined inline for the same reason as refresh_duplicate() above:
+     *  mk/tests.mk excludes ui_toast_manager.o from the test build and
+     *  tests/ui_test_utils.cpp stubs the class, so an out-of-line definition
+     *  would never be linked into helix-tests and the unit tests would
+     *  exercise a stub, not the real walk. Depends only on lvgl.h; do not
+     *  move it to ui_toast_manager.cpp or add includes here. */
+    ToastList::iterator find_owning_toast(lv_obj_t* node) {
+        while (node) {
+            for (auto it = active_.begin(); it != active_.end(); ++it) {
+                if (it->widget == node)
+                    return it;
+            }
+            node = lv_obj_get_parent(node);
+        }
+        return active_.end();
+    }
     void begin_exit(ToastList::iterator it);
     void force_remove(ToastList::iterator it); // no animation
     void finalize_remove(lv_obj_t* widget);    // called from exit-anim completion
 
-    // Detach a toast that is being torn down from any input device that has it
-    // (or a child) as a cached press/scroll target, and make its action button
-    // unclickable. Prevents a stale release/click from dispatching to the
-    // soon-to-be-freed widget — SIGBUS in event_send_core (#850; bundle
-    // A5V73UV4).
+    // Take a toast that is being torn down away from any pointer pressing or
+    // scrolling inside it, and make its action button unclickable, so no press
+    // on the button completes into a dismissed toast (#850; bundle A5V73UV4).
+    // A press anywhere else keeps its gesture.
     static void detach_from_input(lv_obj_t* widget);
     void update_notification_bell();
     size_t visible_count() const; // active_ minus those already exiting
@@ -184,5 +216,27 @@ namespace ui {
  */
 void show_feature_unavailable_toast();
 
+namespace notifications {
+
+/**
+ * @brief Success toast for good news that is not history: no history row, no
+ *        bell count.
+ *
+ * Honours the user's minimum toast severity, and drops the toast before
+ * ToastManager::init() since there is no history row to fall back on.
+ * Main thread only. Inline so the test binary runs this code against its
+ * ToastManager stub.
+ */
+inline void show_transient_success(const char* text, uint32_t duration_ms) {
+    auto& toasts = ToastManager::instance();
+    if (!toasts.is_initialized() ||
+        !severity_meets_threshold(static_cast<int>(ToastSeverity::SUCCESS),
+                                  get_min_toast_severity_cache())) {
+        return;
+    }
+    toasts.show(ToastSeverity::SUCCESS, text, duration_ms);
+}
+
+} // namespace notifications
 } // namespace ui
 } // namespace helix

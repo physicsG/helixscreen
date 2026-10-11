@@ -19,6 +19,8 @@
  *
  *  2. Given a classified failure and how many have piled up, should the
  *     supervisor retry soon, retry slowly, or surrender to the service manager?
+ *
+ *  3. Which display rotation does each launch of helix-screen get?
  */
 
 #ifndef HELIX_WATCHDOG_RESTART_POLICY_H
@@ -194,13 +196,50 @@ struct RestartDecision {
 inline constexpr int RESTART_LOOP_MAX_FAILURES = 5;
 
 /**
+ * @brief Consecutive launch-failure counters feeding decide_restart_action().
+ *
+ * Counting is consecutive, never windowed. The restart backoff spaces failures
+ * further apart as they accumulate, and the child's own time-to-fail adds to
+ * every gap without bound, so any fixed window forgets earlier failures faster
+ * than the backoff delivers new ones and the budget is never spent. A launch
+ * that actually ran clears the history instead.
+ *
+ * The two budgets are separate so a transient exec failure cannot spend the
+ * small deliberate-failure budget and strand the user at a black screen.
+ */
+struct RestartFailureCounters {
+    int transient = 0;
+    int deliberate = 0;
+    int cooldown_rounds = 0;
+
+    /// Record one failed launch. Returns the count for @p cls including this
+    /// one, ready to hand to decide_restart_action().
+    int record(ExecFailureClass cls) {
+        if (cls == ExecFailureClass::TRANSIENT) {
+            return ++transient;
+        }
+        // A deliberate exit proves the binary ran, so no exec squeeze is in
+        // progress and the transient pressure history is stale.
+        transient = 0;
+        cooldown_rounds = 0;
+        return ++deliberate;
+    }
+
+    /// A launch that ran, whether it exited cleanly or crashed afterwards,
+    /// clears every budget: whatever was blocking startup is gone.
+    void on_launch_succeeded() {
+        transient = 0;
+        deliberate = 0;
+        cooldown_rounds = 0;
+    }
+};
+
+/**
  * @brief Decide how to respond to a failed child launch.
  *
  * @param cls                   Classification of this failure.
- * @param consecutive_failures  For TRANSIENT: consecutive transient exec/fork
- *                              failures including this one. For everything
- *                              else: failures inside the rolling window,
- *                              including this one.
+ * @param consecutive_failures  Consecutive failures of this class including
+ *                              this one, as counted by RestartFailureCounters.
  * @param cooldown_rounds_used  Cooldown rounds already consumed (TRANSIENT only).
  */
 inline RestartDecision decide_restart_action(ExecFailureClass cls, int consecutive_failures,
@@ -232,6 +271,54 @@ inline RestartDecision decide_restart_action(ExecFailureClass cls, int consecuti
     decision.action = RestartAction::RETRY_BACKOFF;
     decision.delay_seconds = restart_backoff_seconds(consecutive_failures);
     return decision;
+}
+
+// =============================================================================
+// Clean exits
+// =============================================================================
+
+/**
+ * @brief Whether a clean child exit should end the watchdog instead of respawning.
+ *
+ * An update replaces the install dir, and under systemd the root-privileged
+ * unit refresh (helixscreen.service's ExecStartPre) only runs when the service
+ * itself restarts. Respawning the child inside the running service skips it,
+ * so a release's unit changes never reach the machine until a reboot
+ * (prestonbrown/helixscreen#1713). Exiting lets Restart=always restart the
+ * whole service.
+ *
+ * Only a service manager that restarts on a clean exit can take that over, so
+ * the unit has to say so: helixscreen.service sets HELIX_SERVICE_RESTARTS
+ * beside Restart=always. INVOCATION_ID is not enough, because systemd also sets
+ * it for an init script wrapped by systemd-sysv-generator, whose unit does not
+ * restart. Every other clean exit respawns in place.
+ *
+ * @param was_update_restart  The child left the update-restart marker.
+ * @param service_restarts    getenv("HELIX_SERVICE_RESTARTS").
+ */
+inline bool hand_clean_exit_to_service_manager(bool was_update_restart,
+                                               const char* service_restarts) {
+    return was_update_restart && service_restarts != nullptr && service_restarts[0] != '\0';
+}
+
+// =============================================================================
+// Rotation
+// =============================================================================
+
+/**
+ * @brief Rotation in degrees for one launch of helix-screen and its splash.
+ *
+ * An explicit `-r` holds for the watchdog's whole lifetime. Without one, the
+ * saved setting is read again for every launch: changing the rotation in
+ * Settings restarts helix-screen through this supervisor, not the supervisor
+ * itself, and helix-screen's `--rotate` outranks its own settings.json.
+ *
+ * @param cli_rotation  The watchdog's `-r` value, 0 when none was given.
+ * @param read_saved    Returns the saved /display/rotate (read_config_rotation()).
+ */
+template <typename ReadSaved>
+inline int rotation_for_launch(int cli_rotation, ReadSaved read_saved) {
+    return cli_rotation != 0 ? cli_rotation : read_saved();
 }
 
 } // namespace helix::watchdog

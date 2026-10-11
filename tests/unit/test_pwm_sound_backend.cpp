@@ -1,6 +1,7 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "../test_helpers/live_thread_count.h"
 #include "../test_helpers/pwm_sound_backend_test_access.h"
 #include "../test_helpers/scoped_env.h"
 #include "pwm_sound_backend.h"
@@ -371,10 +372,23 @@ TEST_CASE("initialize writes channel number to export when channel missing", "[s
     auto base = create_mock_sysfs_unexported(0);
 
     PWMSoundBackend backend(base, 0, 6);
+    backend.set_auto_export(true);
     // The mock never materializes pwm6, so the outcome stays failure — but the
     // export write must have happened.
     REQUIRE_FALSE(backend.initialize());
     REQUIRE(read_sysfs_file(base + "/pwmchip0/export") == "6");
+
+    cleanup_mock_sysfs(base);
+}
+
+TEST_CASE("set_auto_export(false) leaves a missing channel unexported", "[sound][pwm]") {
+    auto base = create_mock_sysfs_unexported(0);
+    std::ofstream(base + "/pwmchip0/export") << "42";
+
+    PWMSoundBackend backend(base, 0, 6);
+    backend.set_auto_export(false);
+    REQUIRE_FALSE(backend.initialize());
+    REQUIRE(read_sysfs_file(base + "/pwmchip0/export") == "42");
 
     cleanup_mock_sysfs(base);
 }
@@ -386,6 +400,7 @@ TEST_CASE("initialize does not touch export when channel exists", "[sound][pwm]"
     std::ofstream(base + "/pwmchip0/export") << "42";
 
     PWMSoundBackend backend(base, 0, 6);
+    backend.set_auto_export(true);
     REQUIRE(backend.initialize());
     REQUIRE(read_sysfs_file(base + "/pwmchip0/export") == "42");
 
@@ -401,6 +416,7 @@ TEST_CASE("initialize tolerates unwritable export when channel already present",
     REQUIRE(system(mkdir_cmd.c_str()) == 0);
 
     PWMSoundBackend backend(base, 0, 6);
+    backend.set_auto_export(true);
     REQUIRE(backend.initialize());
 
     cleanup_mock_sysfs(base);
@@ -413,6 +429,7 @@ TEST_CASE("initialize returns false when no pwmchip exists", "[sound][pwm]") {
     std::string base(dir);
 
     PWMSoundBackend backend(base, 0, 6);
+    backend.set_auto_export(true);
     REQUIRE_FALSE(backend.initialize());
 
     cleanup_mock_sysfs(base);
@@ -1125,6 +1142,47 @@ TEST_CASE("a render source that fills nothing parks - stale buffer content is no
     REQUIRE(wait_for([&] { return PWMSoundBackendTestAccess::parked(*run.backend); }));
 }
 
+TEST_CASE("clear_render_source joins the render thread even while parked", "[sound][pwm]") {
+    // stop_render_thread() unconditionally joins render_thread_, so once
+    // clear_render_source() returns the render thread has already run to
+    // completion - join() only returns after that. A freshly joined pthread's
+    // entry under /proc/<pid>/task can still be visible for a brief window
+    // after join() returns (kernel task teardown trails the join wakeup), so
+    // this settles on the thread count rather than asserting it drops the
+    // instant clear_render_source() does.
+    const int before = helix::test::live_thread_count();
+    REQUIRE(before >= 0);
+
+    std::atomic<int> full_buffers{0};
+    PwmVirtualRun run(2);
+    run.backend->set_render_source([&full_buffers](float* buf, size_t frames, int) {
+        if (frames != static_cast<size_t>(PWMSoundBackend::PCM_RENDER_BUFFER_FRAMES)) {
+            return;
+        }
+        if (full_buffers.fetch_add(1) == 0) {
+            for (size_t i = 0; i < frames; i++) {
+                buf[i] = 0.5f;
+            }
+        }
+    });
+
+    // Parked: the render loop polls through the same virtual-clock
+    // wait_until() this test drives, which returns instantly instead of
+    // sleeping, so any stop-latency regression shows up immediately rather
+    // than hiding behind a real sleep interval.
+    REQUIRE(wait_for([&] { return PWMSoundBackendTestAccess::parked(*run.backend); }));
+    run.backend->clear_render_source();
+
+    // The tid lingers in /proc/<pid>/task after join() returns: kernel task
+    // teardown trails the join wakeup. This asserts the thread exits, not how
+    // quickly, and a sharded run oversubscribes every core and stretches that
+    // tail well past any fixed budget worth hardcoding.
+    REQUIRE(wait_for([&] { return helix::test::live_thread_count() == before; }));
+}
+
+// SCHED_IDLE is a Linux scheduling policy. On a host that has no such policy
+// there is no behaviour here to assert.
+#ifdef SCHED_IDLE
 TEST_CASE("render thread applies SCHED_IDLE", "[sound][pwm]") {
     PwmVirtualRun run(8);
     run.backend->set_render_source([](float* buf, size_t frames, int) {
@@ -1139,6 +1197,7 @@ TEST_CASE("render thread applies SCHED_IDLE", "[sound][pwm]") {
     // loop logs that and continues at SCHED_OTHER (policy stays -1).
     CHECK(PWMSoundBackendTestAccess::applied_sched_policy(*run.backend) == SCHED_IDLE);
 }
+#endif // SCHED_IDLE
 
 // ============================================================================
 // PCM render loop (real clock) — [slow], excluded from make test-run
@@ -1149,6 +1208,13 @@ TEST_CASE("render loop paces near 8 kHz with real clock", "[sound][pwm][slow]") 
     PWMSoundBackend backend(base, 0, 6);
     REQUIRE(backend.initialize());
 
+    // Times a fixed number of writes rather than counting writes in a fixed
+    // window: the thread is SCHED_IDLE, so a loaded host legitimately starves
+    // it, and load can only make these writes slower. A loop that stops
+    // pacing bursts them in a few ms; an over-sleep of orders of magnitude
+    // (a unit error in the deadline) misses wait_for's timeout.
+    constexpr uint64_t WRITES = 800; // 100 ms of audio at 8 kHz
+    const auto start = std::chrono::steady_clock::now();
     backend.set_render_source([](float* buf, size_t frames, int sr) {
         for (size_t i = 0; i < frames; i++) {
             buf[i] = 0.4f * std::sin(2.0f * 3.14159265f * 440.0f * static_cast<float>(i) /
@@ -1156,17 +1222,11 @@ TEST_CASE("render loop paces near 8 kHz with real clock", "[sound][pwm][slow]") 
         }
     });
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    uint64_t writes = PWMSoundBackendTestAccess::duty_writes(backend);
+    REQUIRE(wait_for([&] { return PWMSoundBackendTestAccess::duty_writes(backend) >= WRITES; }));
+    const auto elapsed = std::chrono::steady_clock::now() - start;
     backend.clear_render_source();
 
-    // 0.5 s at 8 kHz = 4000 writes. Far undershooting means over-sleeping;
-    // overshooting means the deadline pacing broke and the loop bursts. The
-    // generous lower bound: the thread is SCHED_IDLE, so a heavily loaded
-    // host legitimately starves it well below real time (observed once under
-    // 19 concurrent compiles); 1500 still proves pacing vs an unpaced burst.
-    REQUIRE(writes >= 1500);
-    REQUIRE(writes <= 9000);
+    REQUIRE(elapsed >= std::chrono::milliseconds(50));
 
     cleanup_mock_sysfs(base);
 }
@@ -1192,4 +1252,98 @@ TEST_CASE("clear_render_source joins promptly while parked", "[sound][pwm][slow]
     REQUIRE(elapsed_ms < 250);
 
     cleanup_mock_sysfs(base);
+}
+
+// ============================================================================
+// Channel never left sounding
+// ============================================================================
+
+TEST_CASE("set_tone keeps a quiet tone audible", "[sound][pwm]") {
+    // Master volume arrives squared in the amplitude (a 25% slider is 0.06),
+    // so the backend must not gate small amplitudes itself.
+    auto base = create_mock_sysfs(0, 6);
+    std::string pwm_dir = base + "/pwmchip0/pwm6";
+
+    PWMSoundBackend backend(base, 0, 6);
+    REQUIRE(backend.initialize());
+
+    backend.set_tone(587.0f, 0.06f, 0.5f);
+    REQUIRE(read_sysfs_file(pwm_dir + "/enable") == "1");
+
+    cleanup_mock_sysfs(base);
+}
+
+TEST_CASE("initialize disables a channel left sounding", "[sound][pwm]") {
+    auto base = create_mock_sysfs(0, 6);
+    std::string pwm_dir = base + "/pwmchip0/pwm6";
+    std::ofstream(pwm_dir + "/enable") << "1";
+
+    PWMSoundBackend backend(base, 0, 6);
+    REQUIRE(backend.initialize());
+    REQUIRE(read_sysfs_file(pwm_dir + "/enable") == "0");
+
+    cleanup_mock_sysfs(base);
+}
+
+TEST_CASE("silence_signal_safe disables the live channel until shutdown", "[sound][pwm]") {
+    auto base = create_mock_sysfs(0, 6);
+    std::string pwm_dir = base + "/pwmchip0/pwm6";
+
+    PWMSoundBackend backend(base, 0, 6);
+    REQUIRE(backend.initialize());
+    backend.set_tone(587.0f, 0.5f, 0.5f);
+    REQUIRE(read_sysfs_file(pwm_dir + "/enable") == "1");
+
+    PWMSoundBackend::silence_signal_safe();
+    REQUIRE(read_sysfs_file(pwm_dir + "/enable") == "0");
+
+    backend.set_tone(880.0f, 0.5f, 0.5f);
+    backend.shutdown();
+    std::ofstream(pwm_dir + "/enable") << "1";
+    PWMSoundBackend::silence_signal_safe(); // no backend: touches nothing
+    REQUIRE(read_sysfs_file(pwm_dir + "/enable") == "1");
+
+    cleanup_mock_sysfs(base);
+}
+
+// ============================================================================
+// Named buzzer channel: setting, with the env var as an override
+// ============================================================================
+
+TEST_CASE("resolve_channel reads the setting when no override is set", "[sound][pwm]") {
+    int chip = -1;
+    int channel = -1;
+    REQUIRE(PWMSoundBackend::resolve_channel("0:1", nullptr, chip, channel));
+    CHECK(chip == 0);
+    CHECK(channel == 1);
+
+    chip = channel = -1;
+    REQUIRE(PWMSoundBackend::resolve_channel("2:3", "", chip, channel));
+    CHECK(chip == 2);
+    CHECK(channel == 3);
+}
+
+TEST_CASE("resolve_channel lets the env override win over the setting", "[sound][pwm]") {
+    int chip = -1;
+    int channel = -1;
+    REQUIRE(PWMSoundBackend::resolve_channel("0:1", "1:0", chip, channel));
+    CHECK(chip == 1);
+    CHECK(channel == 0);
+}
+
+TEST_CASE("resolve_channel skips a malformed value", "[sound][pwm]") {
+    int chip = -1;
+    int channel = -1;
+    // Bad override falls through to a good setting
+    REQUIRE(PWMSoundBackend::resolve_channel("0:0", "0:0x", chip, channel));
+    CHECK(chip == 0);
+    CHECK(channel == 0);
+
+    chip = channel = -1;
+    for (const char* bad : {"0", "0:", ":0", "a:b", "-1:0", "0:0:1"}) {
+        CAPTURE(bad);
+        CHECK_FALSE(PWMSoundBackend::resolve_channel(bad, nullptr, chip, channel));
+    }
+    CHECK(chip == -1); // a rejected value never half-writes the outputs
+    CHECK_FALSE(PWMSoundBackend::resolve_channel("", nullptr, chip, channel));
 }

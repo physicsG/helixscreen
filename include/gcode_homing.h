@@ -13,9 +13,11 @@
 
 #pragma once
 
+#include "text_io.h"
+
 #include <cctype>
-#include <sstream>
 #include <string>
+#include <string_view>
 
 namespace helix {
 
@@ -27,9 +29,8 @@ namespace helix {
 /// command), or the empty string. The whole-token comparison is what keeps
 /// "G280" and "G1 X28" out — a substring match would wrongly trip on both.
 inline bool is_homing_gcode(const std::string& script) {
-    std::istringstream lines(script);
-    std::string line;
-    while (std::getline(lines, line)) {
+    for (std::string_view line_view : helix::text_io::lines(script)) {
+        const std::string line(line_view);
         // First non-blank character on the line.
         const size_t start = line.find_first_not_of(" \t\r");
         if (start == std::string::npos) {

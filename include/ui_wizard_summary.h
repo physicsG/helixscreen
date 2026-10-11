@@ -130,24 +130,24 @@ class WizardSummaryStep : public helix::wizard::Step {
     lv_obj_t* screen_root_ = nullptr;
 
     // Subjects (14 total)
-    lv_subject_t printer_name_;
-    lv_subject_t printer_type_;
-    lv_subject_t wifi_ssid_;
-    lv_subject_t moonraker_connection_;
-    lv_subject_t bed_;
-    lv_subject_t hotend_;
-    lv_subject_t part_fan_;
-    lv_subject_t part_fan_visible_;
-    lv_subject_t hotend_fan_;
-    lv_subject_t hotend_fan_visible_;
-    lv_subject_t led_strip_;
-    lv_subject_t led_strip_visible_;
-    lv_subject_t filament_sensor_;
-    lv_subject_t filament_sensor_visible_;
-    lv_subject_t ams_type_;
-    lv_subject_t ams_visible_;
-    lv_subject_t input_shaper_;
-    lv_subject_t input_shaper_visible_;
+    lv_subject_t printer_name_{};
+    lv_subject_t printer_type_{};
+    lv_subject_t wifi_ssid_{};
+    lv_subject_t moonraker_connection_{};
+    lv_subject_t bed_{};
+    lv_subject_t hotend_{};
+    lv_subject_t part_fan_{};
+    lv_subject_t part_fan_visible_{};
+    lv_subject_t hotend_fan_{};
+    lv_subject_t hotend_fan_visible_{};
+    lv_subject_t led_strip_{};
+    lv_subject_t led_strip_visible_{};
+    lv_subject_t filament_sensor_{};
+    lv_subject_t filament_sensor_visible_{};
+    lv_subject_t ams_type_{};
+    lv_subject_t ams_visible_{};
+    lv_subject_t input_shaper_{};
+    lv_subject_t input_shaper_visible_{};
 
     // String buffers (must be persistent for subject lifetimes)
     char printer_name_buffer_[128];
@@ -164,7 +164,7 @@ class WizardSummaryStep : public helix::wizard::Step {
     char input_shaper_buffer_[128];
 
     // Telemetry info modal text
-    lv_subject_t telemetry_info_text_;
+    lv_subject_t telemetry_info_text_{};
     char telemetry_info_text_buffer_[2048];
 
     // Track initialization

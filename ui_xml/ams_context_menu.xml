@@ -18,7 +18,7 @@
   <view name="context_backdrop" extends="context_menu_backdrop">
     <!-- Context menu card - positioned by C++. Header reads "Slot N", rewritten
          from C++ through slot_header. -->
-    <context_menu_card title="Slot 1" title_tag="Slot 1" title_name="slot_header" pad_gap="#space_md">
+    <context_menu_card title="Slot 1" title_name="slot_header" pad_gap="#space_md">
       <!-- Action columns. Stacked (flex_flow="column") by default so a short menu
            reads as one list; ContextMenu::fit_card_to_screen() flips this to a row
            when the stacked card would not fit the screen, at which point the two
@@ -41,21 +41,27 @@
             <!-- Two fixed headings rather than one rewritten from C++: on a
                  changer this column mounts and unmounts tools, and nothing
                  about it is filament. -->
-            <text_small name="col_filament_label"
-                        text="Filament" translation_tag="Filament" style_text_color="#text_muted">
+            <text_small name="col_filament_label" text="Filament" style_text_color="#text_muted">
               <bind_flag_if_eq subject="ams_slot_mounts_tool" flag="hidden" ref_value="1"/>
             </text_small>
-            <text_small name="col_tool_label" text="Tool" translation_tag="Tool" style_text_color="#text_muted">
+            <text_small name="col_tool_label" text="Tool" style_text_color="#text_muted">
               <bind_flag_if_eq subject="ams_slot_mounts_tool" flag="hidden" ref_value="0"/>
             </text_small>
             <lv_obj width="100%"
                     height="1" style_bg_color="#text_muted" style_bg_opa="38" style_pad_all="0" scrollable="false"
                     clickable="false"/>
           </lv_obj>
+          <!-- Bypass toggle (external spool only; hidden for lanes). Text is set
+               from C++ because it names the action, not the state. -->
+          <ui_button name="btn_bypass_toggle"
+                     height="#button_height_sm" icon="arrow_left_right" text="Enable Bypass" variant="ghost"
+                     clickable="true" style_flex_main_place="start" hidden="true">
+            <event_cb trigger="clicked" callback="ams_context_bypass_toggle_cb"/>
+          </ui_button>
           <!-- Load Button -->
           <ui_button name="btn_load"
-                     height="#button_height_sm" icon="z_closer" text="Load" translation_tag="Load" variant="ghost"
-                     clickable="true" style_flex_main_place="start">
+                     height="#button_height_sm" icon="z_closer" text="Load" variant="ghost" clickable="true"
+                     style_flex_main_place="start">
             <bind_state_if_eq subject="ams_slot_can_load" state="disabled" ref_value="0"/>
             <!-- Withdrawn entirely for a position fed from another unit, not
                  merely greyed: loading an ACE-fed head takes ACE_LOAD_HEAD
@@ -67,17 +73,24 @@
           </ui_button>
           <!-- Unload Button (disabled when slot is not loaded) -->
           <ui_button name="btn_unload"
-                     height="#button_height_sm" icon="z_farther" text="Unload" translation_tag="Unload" variant="ghost"
-                     clickable="true" style_flex_main_place="start">
+                     height="#button_height_sm" icon="z_farther" text="Unload" variant="ghost" clickable="true"
+                     style_flex_main_place="start">
             <bind_state_if_eq subject="ams_slot_is_loaded" state="disabled" ref_value="0"/>
             <event_cb trigger="clicked" callback="ams_context_unload_cb"/>
+          </ui_button>
+          <!-- Purge (external spool only; hidden for lanes). The lane menu has no
+               purge action - purging is about what is at the nozzle, not a lane. -->
+          <ui_button name="btn_purge"
+                     height="#button_height_sm" icon="water" text="Purge" variant="ghost" clickable="true"
+                     style_flex_main_place="start" hidden="true">
+            <bind_state_if_eq subject="ams_slot_can_purge" state="disabled" ref_value="0"/>
+            <event_cb trigger="clicked" callback="ams_context_purge_cb"/>
           </ui_button>
           <!-- Eject hint (QIDI Box): a lane has ejectable filament but
                [force_move] enable_force_move is off, so eject is unavailable.
                Revealed from C++ instead of silently omitting the action (#1041). -->
           <text_small name="eject_force_move_hint"
                       width="100%" long_mode="wrap" text="Eject needs [force_move] enabled in printer config"
-                      translation_tag="Eject needs [force_move] enabled in printer config"
                       style_text_color="#text_muted" hidden="true"/>
           <!-- Unload/Unmount refusal the user can act on (e.g. a tool changer
                whose dock sensors cannot identify the mounted tool). Text and
@@ -88,15 +101,23 @@
           </text_small>
           <!-- Select Slot Button (hidden unless backend supports direct slot select, e.g. Happy Hare MMU_SELECT) -->
           <ui_button name="btn_gate_select"
-                     height="#button_height_sm" icon="target" text="Select slot" translation_tag="Select slot"
-                     variant="ghost" clickable="true" style_flex_main_place="start" hidden="true">
+                     height="#button_height_sm" icon="target" text="Select slot" variant="ghost" clickable="true"
+                     style_flex_main_place="start" hidden="true">
             <event_cb trigger="clicked" callback="ams_context_gate_select_cb"/>
           </ui_button>
           <!-- Check Slot Button (hidden unless backend supports slot check, e.g. Happy Hare MMU_CHECK_GATE) -->
           <ui_button name="btn_gate_check"
-                     height="#button_height_sm" icon="refresh" text="Check slot" translation_tag="Check slot"
-                     variant="ghost" clickable="true" style_flex_main_place="start" hidden="true">
+                     height="#button_height_sm" icon="refresh" text="Check slot" variant="ghost" clickable="true"
+                     style_flex_main_place="start" hidden="true">
             <event_cb trigger="clicked" callback="ams_context_gate_check_cb"/>
+          </ui_button>
+          <!-- Preload Button (hidden unless the backend supports lane preload) -->
+          <ui_button name="btn_preload"
+                     height="#button_height_sm" icon="download" text="Preload" variant="ghost" clickable="true"
+                     style_flex_main_place="start">
+            <bind_flag_if_eq subject="ams_slot_preload" flag="hidden" ref_value="0"/>
+            <bind_state_if_eq subject="ams_slot_preload" state="disabled" ref_value="1"/>
+            <event_cb trigger="clicked" callback="ams_context_preload_cb"/>
           </ui_button>
         </lv_obj>
         <!-- Spool identity / Spoolman actions -->
@@ -108,22 +129,22 @@
           <lv_obj name="col_heading"
                   width="100%" height="content" style_pad_all="0" style_pad_gap="#space_xs" flex_flow="column"
                   scrollable="false" clickable="false">
-            <text_small name="col_spool_label" text="Spool" translation_tag="Spool" style_text_color="#text_muted"/>
+            <text_small name="col_spool_label" text="Spool" style_text_color="#text_muted"/>
             <lv_obj width="100%"
                     height="1" style_bg_color="#text_muted" style_bg_opa="38" style_pad_all="0" scrollable="false"
                     clickable="false"/>
           </lv_obj>
           <!-- Select Spool Button (Spoolman quick-assign, hidden by default) -->
           <ui_button name="btn_spoolman"
-                     height="#button_height_sm" icon="spoolman" text="Select Spool" translation_tag="Select Spool"
-                     variant="ghost" clickable="true" style_flex_main_place="start" hidden="true">
+                     height="#button_height_sm" icon="spoolman" text="Select Spool" variant="ghost" clickable="true"
+                     style_flex_main_place="start" hidden="true">
             <bind_flag_if_eq subject="ams_slot_source_external" flag="hidden" ref_value="1"/>
             <event_cb trigger="clicked" callback="ams_context_spoolman_cb"/>
           </ui_button>
           <!-- Scan QR Code Button (hidden by default, shown when Spoolman enabled) -->
           <ui_button name="btn_scan_qr"
-                     height="#button_height_sm" icon="qrcode_scan" text="Scan QR Code" translation_tag="Scan QR Code"
-                     variant="ghost" clickable="true" style_flex_main_place="start" hidden="true">
+                     height="#button_height_sm" icon="qrcode_scan" text="Scan QR Code" variant="ghost" clickable="true"
+                     style_flex_main_place="start" hidden="true">
             <bind_flag_if_eq subject="ams_slot_source_external" flag="hidden" ref_value="1"/>
             <event_cb trigger="clicked" callback="ams_context_scan_qr_cb"/>
           </ui_button>
@@ -131,24 +152,33 @@
                (multiACE: an ACE-fed U1 head). Replaces the edit actions above
                rather than sitting beside them — see AmsContextMenu::on_created. -->
           <ui_button name="btn_open_source"
-                     height="#button_height_sm" icon="arrow_right" text="Open in ACE" translation_tag="Open in ACE"
-                     variant="ghost" clickable="true" style_flex_main_place="start">
+                     height="#button_height_sm" icon="arrow_right" text="Open in ACE" variant="ghost" clickable="true"
+                     style_flex_main_place="start">
             <bind_flag_if_eq subject="ams_slot_source_external" flag="hidden" ref_value="0"/>
             <event_cb trigger="clicked" callback="ams_context_open_source_cb"/>
           </ui_button>
           <!-- Spool Info Button — always opens edit modal -->
           <ui_button name="btn_edit"
-                     height="#button_height_sm" icon="tune" text="Spool Info" translation_tag="Spool Info"
-                     variant="ghost" clickable="true" style_flex_main_place="start">
+                     height="#button_height_sm" icon="tune" text="Spool Info" variant="ghost" clickable="true"
+                     style_flex_main_place="start">
             <bind_flag_if_eq subject="ams_slot_source_external" flag="hidden" ref_value="1"/>
             <event_cb trigger="clicked" callback="ams_context_edit_cb"/>
           </ui_button>
           <!-- Clear Spool Button — shown only when the slot has a Spoolman assignment -->
           <ui_button name="btn_clear_spool"
-                     height="#button_height_sm" icon="close" text="Clear Spool" translation_tag="Clear Spool"
-                     variant="ghost" clickable="true" style_flex_main_place="start" hidden="true">
+                     height="#button_height_sm" icon="close" text="Clear Spool" variant="ghost" clickable="true"
+                     style_flex_main_place="start" hidden="true">
+            <bind_state_if_eq subject="ams_slot_can_clear" state="disabled" ref_value="0"/>
             <event_cb trigger="clicked" callback="ams_context_clear_spool_cb"/>
           </ui_button>
+          <!-- Clear Spool refusal the user can act on: this lane is what the
+               current print is drawing from. Text and visibility come from the
+               same update that disables the button. -->
+          <text_small name="clear_blocked_hint"
+                      width="100%" long_mode="wrap" bind_text="ams_slot_clear_hint" style_text_color="#text_muted"
+                      hidden="true">
+            <bind_flag_if_eq subject="ams_slot_clear_hint_visible" flag="hidden" ref_value="0"/>
+          </text_small>
         </lv_obj>
       </lv_obj>
       <!-- Divider before dropdowns -->
@@ -161,10 +191,9 @@
               width="100%" height="content" style_pad_all="0" style_pad_left="#space_sm" style_pad_right="#space_sm"
               flex_flow="row" style_flex_main_place="space_between" style_flex_cross_place="center" scrollable="false"
               hidden="true">
-        <text_small text="Tool" translation_tag="Tool"/>
+        <text_small text="Tool"/>
         <lv_dropdown name="tool_dropdown"
-                     width="#ams_context_dropdown_w" height="#button_height_sm" style_radius="#border_radius"
-                     style_border_width="0">
+                     width="#ams_context_dropdown_w" height="#button_height_sm" style_radius="#border_radius">
           <event_cb trigger="value_changed" callback="ams_context_tool_changed_cb"/>
         </lv_dropdown>
       </lv_obj>
@@ -175,8 +204,7 @@
               hidden="true">
         <lv_label name="backup_icon" text="#icon_infinity" style_text_font="mdi_icons_16" style_text_color="#text_muted"/>
         <lv_dropdown name="backup_dropdown"
-                     width="#ams_context_dropdown_w" height="#button_height_sm" style_radius="#border_radius"
-                     style_border_width="0">
+                     width="#ams_context_dropdown_w" height="#button_height_sm" style_radius="#border_radius">
           <event_cb trigger="value_changed" callback="ams_context_backup_changed_cb"/>
         </lv_dropdown>
       </lv_obj>

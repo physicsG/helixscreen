@@ -16,7 +16,8 @@ namespace helix {
  *                                               from it are destinations too
  *                                               (iOS push semantics: you are
  *                                               still inside Settings when you
- *                                               open Settings > Network).
+ *                                               open Settings > Connection >
+ *                                               Network).
  *
  *   transient layer  screen - nav - space_lg    the backdrop shows at the
  *                                               leading edge. Something you
@@ -24,7 +25,7 @@ namespace helix {
  *
  * Which one an overlay gets is a property of *how the user reached it*, not of
  * the overlay itself — fan_control_overlay is a transient layer when opened
- * from Controls and a drill-down when opened from Settings > Fans. That is why
+ * from Controls and a drill-down when opened from Settings > Devices > Fans. That is why
  * the class is resolved at push time rather than baked into XML.
  *
  * See prestonbrown/helixscreen#1178.

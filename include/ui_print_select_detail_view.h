@@ -3,16 +3,20 @@
 
 #pragma once
 
+#include "ui_exclude_mode_controller.h"
 #include "ui_filament_mapping_card.h"
 #include "ui_observer_guard.h"
 #include "ui_pre_print_options_renderer.h"
 #include "ui_print_preparation_manager.h"
 
+#include "ams_remap.h"
 #include "gcode_footer_summary.h"
+#include "gcode_preview_fetcher.h"
 #include "moonraker_types.h"
 #include "overlay_base.h"
 #include "preflight_validator.h"
 #include "print_file_data.h" // For FileHistoryStatus
+#include "printer_excluded_objects_state.h"
 #include "subject_managed_panel.h"
 #include "tools_used_cache.h"
 
@@ -26,6 +30,8 @@
 
 // Forward declarations
 class IMoonrakerAPI;
+class PrintSelectDetailViewTestAccess; // NAMESPACE_OK: test seam befriended below, defined in the
+                                       // unit test
 namespace helix {
 class PrinterState;
 }
@@ -125,7 +131,7 @@ class PrintSelectDetailView : public OverlayBase {
      *
      * Closes any open modals, pauses gcode viewer.
      */
-    void on_deactivate() override;
+    void on_deactivating(DeactivateReason reason) override;
 
     /**
      * @brief Clean up resources for async-safe destruction
@@ -146,6 +152,14 @@ class PrintSelectDetailView : public OverlayBase {
     void set_dependencies(IMoonrakerAPI* api, PrinterState* printer_state);
 
     /**
+     * @brief Wire only the PRINT_START analysis, for before the first open
+     *
+     * Asks Moonraker nothing else: at panel setup the connection is usually
+     * still coming up. set_dependencies() does the rest when a file opens.
+     */
+    void set_analysis_dependencies(IMoonrakerAPI* api, PrinterState* printer_state);
+
+    /**
      * @brief Set callback for delete confirmation
      */
     void set_on_delete_confirmed(DeleteConfirmedCallback callback) {
@@ -156,12 +170,41 @@ class PrintSelectDetailView : public OverlayBase {
      * @brief Set callback fired when the filament card is tapped.
      *
      * The panel wires this to the one remap opener every entry point shares.
-     * The tap is only offered on backends that can actually remap - see
-     * color_card_opens_remap(), which drives both the chevron and the card's
-     * clickable flag.
+     * The tap is only offered when current_remap_block() answers None, which
+     * also drives the chevron and the card's clickable flag.
      */
     void set_on_remap_requested(std::function<void()> callback) {
         on_remap_requested_ = std::move(callback);
+    }
+
+    /**
+     * @brief Set callback fired when the card's Set up affordance is tapped.
+     *
+     * Only reachable while current_remap_block() is NeedsPlugin. Wired by the
+     * panel to the plugin install modal, so a card that refuses a remap offers
+     * the one action that would make it work instead of dead-ending.
+     */
+    void set_on_plugin_setup_requested(std::function<void()> callback) {
+        on_plugin_setup_requested_ = std::move(callback);
+    }
+
+    /**
+     * @brief Set callback fired from on_deactivating().
+     *
+     * Every close path funnels through that hook — the back button and
+     * backdrop via hide(), but also ESC / go_back() and a navbar switch,
+     * which pop the overlay without the owning panel's hide function. The
+     * panel wires its back-out bookkeeping (a pending queued start) here so
+     * those paths cannot miss it.
+     */
+    void set_on_dismissed(std::function<void()> callback) {
+        on_dismissed_cb_ = std::move(callback);
+    }
+
+    /// Set callback fired when a PRINT_START analysis completes, after the view
+    /// has rebuilt its option rows from it.
+    void set_on_macro_analysis(MacroAnalysisCallback callback) {
+        on_macro_analysis_cb_ = std::move(callback);
     }
 
     /**
@@ -177,17 +220,30 @@ class PrintSelectDetailView : public OverlayBase {
     void on_color_card_clicked();
 
     /**
-     * @brief Does a tap on the filament card open the remap picker?
+     * @brief Why a tap on the filament card cannot open the picker, or None.
      *
-     * The single predicate behind both the chevron and the card's clickable
-     * flag, and the same one on_color_card_clicked() guards on. Split out
-     * because the card is the only way into the picker from this screen, and it
-     * used to be a bare "FILAMENTS" strip of chips with nothing saying it could
-     * be tapped — the picker existed and worked and no user could find it. On a
-     * backend that cannot remap, the same predicate stops the card claiming a
-     * tap it would silently drop.
+     * The single answer behind the chevron, the card's clickable flag, the
+     * disabled look, the stated reason and the tap guard, so none of them can
+     * describe a different state from the others. An instance method because
+     * two of its three terms are per-job: the tools this file uses, and the
+     * service-side plugin a rewrite needs.
+     *
+     * The card is the only way into the picker from this screen, so a chevron
+     * that lights on an unavailable backend is a tap the user is invited to
+     * make and then refused.
      */
-    [[nodiscard]] static bool color_card_opens_remap();
+    [[nodiscard]] helix::printer::RemapBlock current_remap_block() const;
+
+    /**
+     * @brief Explain the card's remap state, and offer the fix when there is one.
+     *
+     * Opened from the card's help icon. The icon is its own clickable object
+     * rather than a chip that bubbles to the card, because LVGL refuses
+     * PRESSED/PRESSING/CLICKED on anything carrying LV_STATE_DISABLED - a greyed
+     * card takes no taps at all, so the explanation has to hang off something
+     * that is still enabled.
+     */
+    void show_remap_help_modal();
 
     /**
      * @brief Set the visible subject for XML binding
@@ -214,12 +270,15 @@ class PrintSelectDetailView : public OverlayBase {
      * @param modified_timestamp File mtime (tools-used cache validation)
      * @param gcode_end_byte Offset where the G-code body ends (Moonraker
      *        metadata); 0 when unknown. Sizes the footer read.
+     * @param local_path The file on this host when Moonraker has no copy (a
+     *        USB stick); every read then comes from it and none from Moonraker.
      */
     void show(const std::string& filename, const std::string& current_path,
               const std::string& filament_type,
               const std::vector<std::string>& filament_colors = {},
               const std::vector<std::string>& filament_materials = {}, size_t file_size_bytes = 0,
-              time_t modified_timestamp = 0, uint64_t gcode_end_byte = 0);
+              time_t modified_timestamp = 0, uint64_t gcode_end_byte = 0,
+              const std::string& local_path = {});
 
     /**
      * @brief Hide the detail view overlay
@@ -261,6 +320,15 @@ class PrintSelectDetailView : public OverlayBase {
     }
 
     /**
+     * @brief Whether a Print tap can be evaluated now.
+     *
+     * is_preflight_ready(), and the file scan has answered the printer-stopping
+     * command question for this file (or the wait for it timed out). The mapping
+     * card keys on is_preflight_ready() alone.
+     */
+    [[nodiscard]] bool is_print_start_ready() const;
+
+    /**
      * @brief Run @p cb once the gcode parse + pre-flight validation complete.
      *
      * If the gcode is already loaded, @p cb is invoked synchronously (main
@@ -272,16 +340,58 @@ class PrintSelectDetailView : public OverlayBase {
     void run_when_loaded(std::function<void()> cb);
 
     /**
-     * @brief Run @p cb once pre-flight inputs are ready (is_preflight_ready()).
+     * @brief Run @p cb once a Print tap can be evaluated (is_print_start_ready()).
      *
      * Unlike run_when_loaded() this fires when EITHER the viewer parse OR the
-     * headless tools_used scan completes — so it never hangs on 2D-only
-     * platforms. If already ready, runs @p cb synchronously. A safety timeout
-     * (see PREFLIGHT_READY_TIMEOUT_MS) fires @p cb anyway if neither signal
-     * arrives, so a stuck/failed scan can never wedge the print: the print
-     * proceeds without Part A's optimization rather than never starting.
+     * headless tools_used scan completes, and the file scan has answered — so it
+     * never hangs on 2D-only platforms. If already ready, runs @p cb
+     * synchronously. A safety timeout (see PREFLIGHT_READY_TIMEOUT_MS) fires
+     * @p cb anyway if the answers do not arrive, so a stuck/failed scan can never
+     * wedge the print: the print proceeds without those checks rather than never
+     * starting.
      */
     void run_when_preflight_ready(std::function<void()> cb);
+
+    // === Pre-start object picks ===
+
+    /// Re-read the file's objects: the scan's list, extended by the full parse
+    /// once the viewer has it. Publishes whether the skip button shows.
+    void refresh_exclude_objects();
+
+    /// Pick or un-pick a defined object (matched upper-case). A name the
+    /// printer cannot be sent is refused with a toast.
+    void toggle_exclude_pick(const std::string& name);
+
+    /// Picked objects, in defined order; none while the skip option is not offered.
+    [[nodiscard]] std::vector<std::string> exclude_picks() const;
+
+    /// Clear every pick; true when any of them was offered.
+    bool drop_exclude_picks();
+
+    /// Whether the picks cover every object, which would print nothing.
+    [[nodiscard]] bool all_objects_picked() const;
+
+    [[nodiscard]] const helix::PrinterExcludedObjectsState& exclude_objects() const {
+        return exclude_objects_;
+    }
+
+    /// Keep the picks while the view is hidden for a print start, so a start
+    /// that fails comes back to the same file with them intact. The next
+    /// show() spends the hold: the same file keeps its picks, another file
+    /// clears them.
+    void hold_picks_for_start(bool hold) {
+        picks_held_for_start_ = hold;
+    }
+    [[nodiscard]] bool picks_held_for_start() const {
+        return picks_held_for_start_;
+    }
+
+    /// Open or close exclude mode over the preview: map + list in thumbnail
+    /// mode, render badges + list in 2D/3D. Taps toggle picks.
+    void toggle_exclude_mode();
+    [[nodiscard]] bool is_exclude_mode_open() const {
+        return exclude_mode_.is_open();
+    }
 
     // Note: is_visible() inherited from OverlayBase
 
@@ -322,6 +432,27 @@ class PrintSelectDetailView : public OverlayBase {
     [[nodiscard]] PrintPreparationManager* get_prep_manager() const {
         return prep_manager_.get();
     }
+
+    /**
+     * @brief Current toggle state of every rendered option row (id -> on)
+     *
+     * The queue path's snapshot of the detail view's option rows: what gets
+     * stored with the queued job so it can be re-applied when the job starts.
+     */
+    [[nodiscard]] std::map<std::string, bool> collect_option_states() const;
+
+    /**
+     * @brief Override the NEXT render's initial option-row states
+     *
+     * The queued-job start path's counterpart of collect_option_states():
+     * states are handed back before show() so the rows for that one file open
+     * as they were saved, not at default_enabled. Applied in on_activate()
+     * right after populate_option_rows() re-initializes the rows, then
+     * consumed — a later show starts from defaults again. Ids with no row are
+     * dropped by the renderer's set_state(); ids the seed does not mention
+     * keep their defaults.
+     */
+    void seed_option_states(std::map<std::string, bool> overrides);
 
     /**
      * @brief Get current filament mappings from the mapping card
@@ -397,8 +528,8 @@ class PrintSelectDetailView : public OverlayBase {
      *
      * Built from the mapping card's current mappings. Contains ONLY real
      * remaps: an entry tool_index → mapped_slot is included only when
-     * mapped_slot >= 0 AND mapped_slot != default_head(tool_index), where
-     * default_head(t) = (t in [0,3]) ? t : 0. Tools mapped to their identity
+     * mapped_slot >= 0 AND mapped_slot != the head the backend's FirmwareRouting
+     * gives that tool. Tools mapped to their identity
      * head are omitted (the firmware default already routes them).
      *
      * On Snapmaker U1 today the mapping card is hidden so get_mappings() is
@@ -507,6 +638,10 @@ class PrintSelectDetailView : public OverlayBase {
         return &prep_time_estimate_subject_;
     }
 
+    void set_prep_estimate_visible(int visible) {
+        lv_subject_set_int(&preprint_estimate_visible_, visible);
+    }
+
     // === Resize Handling ===
 
     /**
@@ -536,6 +671,56 @@ class PrintSelectDetailView : public OverlayBase {
     void on_ui_destroyed() override;
 
   private:
+    friend class ::PrintSelectDetailViewTestAccess;
+
+    /**
+     * @brief LV_EVENT_DELETE hook on the detail root: the only notice this view
+     *        gets when the tree is deleted by anything other than
+     *        destroy_overlay_ui()
+     *
+     * Queued observers, timers and load callbacks would otherwise reach the
+     * freed children through the cached pointers. Drops them via
+     * forget_cached_widgets() and marks the tree dead; the teardown proper
+     * waits for reclaim_deleted_tree(), outside LVGL's delete event.
+     */
+    static void on_root_deleted(lv_event_t* e);
+
+    /**
+     * @brief Finish the teardown of a tree on_root_deleted() marked dead
+     *
+     * Drops the navigation registration and overlay_root_, then runs
+     * on_ui_destroyed(), so the next show() re-creates the tree. A no-op while
+     * the tree is alive. show(), hide() and cleanup() call it first.
+     */
+    void reclaim_deleted_tree();
+
+    /// overlay_root_ is set and still names a live tree.
+    [[nodiscard]] bool tree_alive() const {
+        return overlay_root_ != nullptr && !tree_deleted_;
+    }
+
+    /**
+     * @brief Drop every cached pointer to a child of the detail tree
+     *
+     * Idempotent, and touches no LVGL object, so it is safe from inside LVGL's
+     * delete event. Called by on_root_deleted() and on_ui_destroyed(). Leaves
+     * overlay_root_ alone: reclaim_deleted_tree() needs it to drop the
+     * navigation registration keyed on it.
+     */
+    void forget_cached_widgets();
+
+    /// Take the delete hook off delete_hook_root_, if that widget is still alive.
+    void uninstall_root_delete_hook();
+
+    /// The root on_root_deleted() is installed on. Cleared only by the hook firing
+    /// or by uninstall_root_delete_hook(), so a replaced root's late delete event
+    /// is told apart from the live tree's.
+    lv_obj_t* delete_hook_root_ = nullptr;
+
+    /// Set by on_root_deleted(): overlay_root_ names freed memory until
+    /// reclaim_deleted_tree() runs.
+    bool tree_deleted_ = false;
+
     // === Dependencies ===
     IMoonrakerAPI* api_ = nullptr;
     PrinterState* printer_state_ = nullptr;
@@ -587,9 +772,23 @@ class PrintSelectDetailView : public OverlayBase {
     // (which sits on top of the viewer in z-order) stays visible until this
     // flips, covering the gray viewer during the load-to-render gap.
     lv_subject_t detail_viewer_first_frame_{};
+
+    /// Whether the viewer widget is hidden, per preview_viewer_hidden(). Bound
+    /// by print_file_detail.xml; kept in step by refresh_viewer_visibility().
+    lv_subject_t detail_viewer_hidden_{};
+
+    /// Recompute detail_viewer_hidden from the render mode and first-frame
+    /// state. Call after either changes - they are written from several places
+    /// and the rule must not be restated at any of them.
+    void refresh_viewer_visibility();
     // 1 = show slicer-intended colors instead of loaded AMS slot colors.
     // View-local, resets to 0 (actual) on every show().
     lv_subject_t detail_prefer_sliced_colors_{};
+    // 1 = the options scroll area has content below its visible bottom edge.
+    // Drives the bottom fade cue's visibility binding in print_file_detail.xml;
+    // updated by update_options_more_below() from the scroll area's
+    // scroll/size/layout events and after the option rows are populated.
+    lv_subject_t detail_options_more_below_{};
     // 0 = mapping/swatch chips not authoritative yet (XML shows skeletons),
     // 1 = authoritative chip state rendered. Mirrors is_preflight_ready() —
     // the same readiness the print-start gate waits on. Flips 0→1 at show()
@@ -597,8 +796,26 @@ class PrintSelectDetailView : public OverlayBase {
     // parse completes; back to 0 in on_deactivate(). Published ONLY via
     // publish_mapping_ready().
     lv_subject_t detail_mapping_ready_{};
+    /// The file's objects with the pending picks as its excluded set. Private
+    /// to this view: init_subjects(false) keeps it off the XML registry.
+    helix::PrinterExcludedObjectsState exclude_objects_;
+    /// Exclude mode over this view's preview.
+    helix::ui::ExcludeModeController exclude_mode_;
+    ObserverGuard exclude_picks_observer_;
+    ObserverGuard exclude_capability_observer_;
+    /// See hold_picks_for_start().
+    bool picks_held_for_start_ = false;
+    /// 1 when the skip button shows (pre_start_exclude_available()).
+    lv_subject_t detail_exclude_available_{};
+    lv_subject_t detail_exclude_pick_count_{};
+    lv_subject_t detail_exclude_pick_count_text_{};
+    char detail_exclude_pick_count_text_buf_[8]{};
+    /// Push the pick count and the viewer's faded set from the picks.
+    void publish_exclude_picks();
     std::string temp_gcode_path_; // Cached downloaded gcode file path
     bool gcode_loaded_ = false;   // Whether gcode file has been loaded into viewer
+    /// The file whose G-code the viewer was last given; its parse belongs to it.
+    std::string viewer_file_;
     // Pending print-attempt (or other) callback registered via run_when_loaded()
     // while a parse was still in flight. Fired once from the load callback after
     // preflight_result_ is fresh, then cleared. Reset on show().
@@ -606,11 +823,9 @@ class PrintSelectDetailView : public OverlayBase {
 
     // --- Shared gcode download (ONE file + ONE download per open) ---
     // The headless tools scan and the viewer preview share a single canonical
-    // file (canonical_gcode_path()) and a single in-flight transfer;
-    // concurrent callers queue in gcode_download_waiters_ and are fanned out
-    // (main thread) when the transfer resolves.
-    bool gcode_download_in_flight_ = false;
-    std::vector<std::function<void(bool, std::string)>> gcode_download_waiters_;
+    // file (canonical_gcode_path()) and a single in-flight transfer; the fetcher
+    // fans the result out to every caller waiting on it (main thread).
+    helix::ui::GcodePreviewFetcher gcode_fetcher_{"DetailView"};
 
     // Absolute path of Moonraker's `gcodes` root, but ONLY when Moonraker runs
     // on this machine — "" whenever the file must come over HTTP. Resolved once
@@ -658,6 +873,8 @@ class PrintSelectDetailView : public OverlayBase {
     // scan would make the scanner see "no file" ≡ "no tools" and persist an
     // authoritative-empty tools set (the Finding-1 poison).
     bool headless_scan_settled_ = false;
+    /// The wait for the file scan's printer-stopping command answer timed out.
+    bool printer_stop_wait_timed_out_ = false;
     // Pending callback registered via run_when_preflight_ready() while neither the
     // viewer parse nor the headless scan had completed. Fired once when readiness
     // arrives (or on the safety timeout), then cleared. Reset on show().
@@ -679,7 +896,22 @@ class PrintSelectDetailView : public OverlayBase {
     // card that cues a tap and a card that answers one can never disagree.
     // Published with filament_mapping_visible_ by publish_card_visibility().
     lv_subject_t color_card_remappable_{};
+    // The rest of the card's remap story, published from the same place. One
+    // RemapBlock decides all four, so the greyed card, its stated reason and the
+    // affordance that fixes it cannot describe different states.
+    // 1 = the one case where the card would otherwise lie: a job this printer
+    // could remap, refused only because the plugin is absent. Drives the
+    // disabled look AND the Set up affordance, because they are one condition.
+    lv_subject_t color_card_remap_needs_setup_{};
+    // 1 = the card carries something worth explaining, so show the help icon.
+    // Covers both the refusal and the "this will misfile your history" advisory;
+    // the copy is chosen when the icon is tapped, not when it is published.
+    lv_subject_t color_card_remap_help_visible_{};
     lv_subject_t empty_tools_warning_{}; // 1 = at least one used tool's slot is empty
+    // Whether a job rewrite can run, in the tri-state the pre-print option rows
+    // that need one bind their visibility to: 1 yes, 0 no, -1 not known yet.
+    // Published by publish_rewrite_availability().
+    lv_subject_t gcode_rewrite_available_{};
     // Cached backend-agnostic pre-flight validation result for the current file.
     // Computed in try_extract_gcode_colors() once the gcode is parsed; the single
     // source of truth driving filament_mismatch_ + empty_tools_warning_ (works
@@ -687,6 +919,7 @@ class PrintSelectDetailView : public OverlayBase {
     // print-start gate and the enriched pre-print modal. Empty until a file parses.
     helix::PreflightResult preflight_result_{};
     lv_subject_t prep_time_estimate_subject_{}; // formatted prep time string for bind_text
+    lv_subject_t preprint_estimate_visible_{};  // 1 while the estimate line has text
     char prep_time_estimate_buf_[64]{};         // buffer backing the string subject
     SubjectManager subjects_;                   // RAII manager for subject cleanup
     // Note: subjects_initialized_ inherited from OverlayBase
@@ -695,6 +928,11 @@ class PrintSelectDetailView : public OverlayBase {
     // Observes the STATIC AmsState::slots_version subject — no SubjectLifetime
     // token (singleton, not a per-slot dynamic subject).
     ObserverGuard slots_version_observer_;
+    // The plugin probe completes after first paint and the Moonraker version
+    // lands with discovery, so both arrive after the card has already published.
+    // Without these the card would sit in its Probing look for the session.
+    ObserverGuard plugin_installed_observer_;
+    ObserverGuard moonraker_degraded_observer_;
 
     // Print preparation manager (owns it)
     std::unique_ptr<PrintPreparationManager> prep_manager_;
@@ -707,11 +945,27 @@ class PrintSelectDetailView : public OverlayBase {
     // printer type changes. Owns per-option state subjects.
     PrePrintOptionsRenderer option_rows_renderer_;
     lv_obj_t* pre_print_options_container_ = nullptr;
-    std::string last_rendered_printer_type_;
+    // The scroll area wrapping the four option cards; owns the scroll cue's
+    // data (see detail_options_more_below_) and half of the portrait preview
+    // measurement (see fit_portrait_preview()). The card is the other half of
+    // that measurement; both are children of overlay_root_ and die with it.
+    // fit_pending_ dedupes the deferred fit (one queued run at a time); it is
+    // cleared when the run fires and on every teardown path, where a queued
+    // run dies with its token.
+    lv_obj_t* options_scroll_ = nullptr;
+    lv_obj_t* detail_card_ = nullptr;
+    bool fit_pending_ = false;
+    /// Printer type and option ids the rows were last built for.
+    std::string last_rendered_rows_;
+
+    // States handed over by seed_option_states(), applied over the freshly
+    // populated rows by the next on_activate() and consumed there.
+    std::map<std::string, bool> pending_option_seed_;
 
     // === Cached show() parameters (used by on_activate) ===
     std::string current_filename_;
     std::string current_path_;
+    std::string current_local_path_; ///< USB file's path on this host; empty for Moonraker files
     std::string current_filament_type_;
     std::vector<std::string> current_filament_colors_;
     std::vector<std::string> current_filament_materials_;
@@ -739,6 +993,9 @@ class PrintSelectDetailView : public OverlayBase {
     // "Remap…" button uses. Empty on backends where the card is purely
     // informational.
     std::function<void()> on_remap_requested_;
+    std::function<void()> on_plugin_setup_requested_;
+    std::function<void()> on_dismissed_cb_;
+    MacroAnalysisCallback on_macro_analysis_cb_;
 
     // === Internal Methods ===
 
@@ -754,10 +1011,11 @@ class PrintSelectDetailView : public OverlayBase {
     /**
      * @brief Canonical shared download path for the current file's gcode
      *
-     * `<cache>/gcode_temp/detail_<hash(full relative path)>.gcode` — hashed on
-     * the FULL path (dir + filename), so same-name files in different
-     * directories never collide. The headless tools scan and the viewer
-     * preview load from this ONE file.
+     * `<cache>/gcode_temp/detail_<hash(printer, full relative path)>.gcode` —
+     * hashed on the FULL path (dir + filename), so same-name files in different
+     * directories never collide, and on the connected printer, so a same-named
+     * file on another one is never taken for it. The headless tools scan and the
+     * viewer preview load from this ONE file.
      */
     [[nodiscard]] std::string canonical_gcode_path() const;
 
@@ -779,10 +1037,10 @@ class PrintSelectDetailView : public OverlayBase {
     /**
      * @brief Absolute path of this file on local disk, or "" if unreachable.
      *
-     * Non-empty only when Moonraker runs on this machine AND the file is there
-     * at the size the metadata promised. The returned path is Moonraker's own
-     * print file — it is deliberately never adopted into temp_gcode_path_, and
-     * reclaim_download() refuses it on top of that.
+     * The USB file's own path, or Moonraker's copy when Moonraker runs on this
+     * machine; either way only while the file is there at the expected size.
+     * The returned path is the user's print file: it is deliberately never
+     * adopted into temp_gcode_path_, and reclaim_download() refuses it too.
      */
     [[nodiscard]] std::string local_gcode_source() const;
 
@@ -821,6 +1079,8 @@ class PrintSelectDetailView : public OverlayBase {
      * and post-download paths; it lives here once now.
      */
     void begin_viewer_load(const std::string& path);
+    /// Clear every viewer callback that carries `this`.
+    void disarm_viewer_callbacks();
 
     /**
      * @brief Apply a finished headless tools-scan result (callable from any thread)
@@ -980,6 +1240,22 @@ class PrintSelectDetailView : public OverlayBase {
      */
     void populate_option_rows();
 
+    /// Refresh the more-below subject and the portrait fit on the next
+    /// main-loop tick, when the layout pass that triggered the refresh has
+    /// settled. Entry point for the scroll area's scroll/size/layout events
+    /// and the content container's layout event.
+    void defer_detail_fit();
+
+    /// Publish detail_options_more_below_ from the scroll area's current
+    /// overflow state (lv_obj_get_scroll_bottom > 0).
+    void update_options_more_below();
+
+    /// Measured portrait layout: size the preview card so the scroll area's
+    /// visible bottom edge cuts a tile row through its middle half
+    /// (decide_detail_portrait_preview). Landscape drops any measured height
+    /// and lets the card's flex_grow govern.
+    void fit_portrait_preview();
+
     /**
      * @brief Static callback for delete confirmation
      */
@@ -1002,6 +1278,9 @@ class PrintSelectDetailView : public OverlayBase {
      * backfill, a fresh used-tool set) must run `update()` BEFORE this.
      */
     void publish_card_visibility();
+    /// Why a job rewrite cannot run right now, or None.
+    [[nodiscard]] helix::GcodeRewriteBlock rewrite_block() const;
+    void publish_rewrite_availability();
 
     /**
      * @brief Render the authoritative chip state for a known used-tool set.

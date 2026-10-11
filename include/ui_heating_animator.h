@@ -9,6 +9,8 @@
 #include "lvgl/lvgl.h"
 #include "printer_temperature_state.h" // helix::ChamberMode
 
+namespace helix::ui {
+
 /**
  * @brief Tints heating icons with the shared 4-state thermal color and pulse effect
  *
@@ -231,3 +233,5 @@ class HeatingIconAnimator {
      */
     static void icon_delete_cb(lv_event_t* e);
 };
+
+} // namespace helix::ui

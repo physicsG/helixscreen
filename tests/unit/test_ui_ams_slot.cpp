@@ -20,13 +20,26 @@
 #include "ui_spool_canvas.h"
 
 #include "../lvgl_ui_test_fixture.h"
+#include "../test_helpers/backend_user_edit.h"
 #include "../ui_test_utils.h"
 #include "ams_backend_mock.h"
+#include "ams_lane_state.h"
 #include "ams_state.h"
 #include "config.h"
+#include "display_settings_manager.h"
+#include "lvgl/src/core/lv_obj_draw_private.h"
 #include "printer_state.h"
+#include "ui/ams_drawing_utils.h"
+
+#include <array>
 
 #include "../catch_amalgamated.hpp"
+
+using helix::AmsBackend;
+using helix::AmsBackendMock;
+using helix::AmsState;
+using helix::SlotInfo;
+using helix::SlotStatus;
 
 // ============================================================================
 // Helper: Create an ams_slot widget with specified slot index
@@ -71,10 +84,10 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_slot: flat style builds spool rings",
     ui_ams_slot_register();
     lv_obj_t* slot = create_ams_slot(test_screen(), 0);
     REQUIRE(slot != nullptr);
-    lv_obj_t* spool_container = UITest::find_by_name(slot, "spool_container");
-    REQUIRE(spool_container != nullptr);
-    REQUIRE(lv_obj_get_child_count(spool_container) >=
-            4); // outer/filament/hub + placeholder + error (+badges)
+    lv_obj_t* lane_spool = UITest::find_by_name(slot, "lane_spool");
+    REQUIRE(lane_spool != nullptr);
+    REQUIRE(lv_obj_get_child_count(lane_spool) >=
+            4); // outer/filament/hub + placeholder + error dot
     lv_obj_delete(slot);
     // Restore default so sibling tests (which assume 3D) are not affected.
     helix::Config::get_instance()->set<std::string>("/ams/spool_style", "3d");
@@ -223,10 +236,14 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_slot: material renders from subject wit
     // register_xml=true for the shared-singleton reason in the fill test above.
     AmsState::instance().init_subjects(true);
 
-    // Seed the per-slot material subject exactly as sync_from_backend would.
+    // Seed the per-slot material + lane_state subjects exactly as
+    // sync_from_backend would (one sync writes both, so they agree).
     lv_subject_t* mat = AmsState::instance().get_slot_material_subject(0);
     REQUIRE(mat != nullptr);
     lv_subject_copy_string(mat, "PLA");
+    lv_subject_t* lane_state = AmsState::instance().get_slot_lane_state_subject(0);
+    REQUIRE(lane_state != nullptr);
+    lv_subject_set_int(lane_state, static_cast<int>(helix::ui::LaneState::Present));
 
     // Creating the widget runs setup_slot_observers, which applies the CURRENT
     // subject value synchronously — no panel pushes material.
@@ -321,7 +338,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_slot: material label binds to subject",
     info.material = "PLA";
     info.color_rgb = 0xFF0000; // Red
     info.status = SlotStatus::AVAILABLE;
-    mock_ptr->set_slot_info(0, info);
+    helix::test::apply_edit(*mock_ptr, 0, info);
 
     // Connect backend to AmsState
     AmsState::instance().set_backend(std::move(mock));
@@ -347,20 +364,18 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_slot: material label binds to subject",
     lv_obj_delete(slot);
 }
 
-// Find the spool visual whose color the slot updates. In the default 3D style
-// the filament color lives on the lv_canvas child of spool_container (read via
-// ui_spool_canvas_get_color); apply_slot_color() writes there, NOT to
-// spool_container itself. Returns the canvas, or nullptr if not in 3D style.
+// Find the spool visual whose color the lane widget updates. In the default 3D
+// style the filament color lives on the lv_canvas the embedded ams_lane_spool
+// creates (read via ui_spool_canvas_get_color), NOT on spool_container itself.
+// The search is recursive because the canvas sits inside the lane_spool widget.
+// Returns the canvas, or nullptr if not in 3D style.
 static lv_obj_t* find_spool_canvas(lv_obj_t* spool_container) {
     if (!spool_container) {
         return nullptr;
     }
-    uint32_t child_count = lv_obj_get_child_count(spool_container);
-    for (uint32_t i = 0; i < child_count; i++) {
-        lv_obj_t* child = lv_obj_get_child(spool_container, i);
-        if (child && lv_obj_check_type(child, &lv_canvas_class)) {
-            return child;
-        }
+    lv_obj_t* graphic = lv_obj_find_by_name(spool_container, "spool_graphic");
+    if (graphic && lv_obj_check_type(graphic, &lv_canvas_class)) {
+        return graphic;
     }
     return nullptr;
 }
@@ -383,7 +398,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_slot: color subject updates spool",
     info.material = "PLA";
     info.color_rgb = 0xFF0000; // Red
     info.status = SlotStatus::AVAILABLE;
-    mock_ptr->set_slot_info(0, info);
+    helix::test::apply_edit(*mock_ptr, 0, info);
 
     AmsState::instance().set_backend(std::move(mock));
     AmsState::instance().sync_from_backend();
@@ -397,9 +412,9 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_slot: color subject updates spool",
     lv_obj_t* spool_container = UITest::find_by_name(slot, "spool_container");
     REQUIRE(spool_container != nullptr);
 
-    // apply_slot_color() writes the filament color to the spool_canvas (default
-    // 3D style), not to spool_container. Read the color from the canvas where
-    // the widget actually applies it.
+    // The embedded ams_lane_spool writes the filament color to the spool_canvas
+    // (default 3D style), not to spool_container. Read the color from the
+    // canvas where the widget actually applies it.
     lv_obj_t* canvas = find_spool_canvas(spool_container);
     REQUIRE(canvas != nullptr);
 
@@ -410,9 +425,9 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_slot: color subject updates spool",
     REQUIRE(color_subj != nullptr);
     lv_subject_set_int(color_subj, 0x0000FF); // Blue
 
-    // observe_int_sync defers callbacks via queue_update (#82), so the color
+    // observe<int> defers callbacks via queue_update (#82), so the color
     // observer fires on a later tick. process_lvgl() drains the UpdateQueue via
-    // lv_timer_handler_safe(), so the deferred apply_slot_color() runs here.
+    // lv_timer_handler_safe(), so the deferred color apply runs here.
     process_lvgl(50);
 
     lv_color_t updated_color = ui_spool_canvas_get_color(canvas);
@@ -586,8 +601,11 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_slot: refresh updates from AmsState",
     info.slot_index = 0;
     info.material = "PLA";
     info.status = SlotStatus::AVAILABLE;
-    mock_ptr->set_slot_info(0, info);
+    helix::test::apply_edit(*mock_ptr, 0, info);
 
+    // The slot reads its material from AmsState's subjects, which exist only
+    // once init_subjects() has run in this process.
+    AmsState::instance().init_subjects(true);
     AmsState::instance().set_backend(std::move(mock));
     AmsState::instance().sync_from_backend();
     process_lvgl(50);
@@ -693,34 +711,30 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_slot: get_fill_level returns 1.0 for no
 //
 // When a slot is physically empty but the user has configured a filament
 // override (brand, spool_name, material, or linked Spoolman spool), the slot
-// should render the spool visual at 20% opacity ("ghosted") instead of showing
-// the empty placeholder. This lets users see at a glance which empty slots
-// are "assigned" and waiting for a reload vs truly unused.
+// renders the spool visual at 20% opacity ("ghosted") instead of showing the
+// empty placeholder. This lets users see at a glance which empty slots are
+// "assigned" and waiting for a reload vs truly unused.
 //
-// Prior behavior only treated spoolman_id>0 or !material.empty() as assigned.
-// Brand/spool_name were missed for backends (IFS-style) where a user-configured
-// override exists without a Spoolman link.
+// The ghost/hidden decision itself is AmsState's classify_lane() (unit-tested
+// in test_ams_lane_state.cpp, covering brand/spool_name for IFS-style
+// backends where an override exists without a Spoolman link). These tests
+// verify the RENDERING contract: lane_state Ghosted -> ghosted spool,
+// lane_state Empty -> placeholder.
 
 namespace {
 
 /// Result of examining the spool visual after status update.
 struct SpoolVisualState {
-    bool any_ghosted = false;      ///< true if any child has opa/bg_opa == LV_OPA_20
+    bool any_ghosted = false;      ///< true if any child has opa/bg_opa == LV_OPA_30
     bool any_spool_hidden = false; ///< true if spool_canvas or spool rings are hidden
     int child_count = 0;           ///< For diagnostic purposes
 };
 
 /// Inspect spool_container children to determine the ghost/placeholder state.
 ///
-/// After ui_ams_slot creates the widget, the spool_container child order is:
-///   [0] status_badge (XML, named)
-///   [1] spool_canvas (3d) or spool_outer (flat) — the "main spool visual"
-///   [2] empty_placeholder (unnamed, transparent)
-///   [3] tool_badge (XML, named, moved to end via move_to_index)
-///   [4] error_indicator (unnamed, moved to end)
-/// The spool visual (spool_canvas in the 3d branch, or the filament_ring in
-/// the flat branch) is named "spool_graphic" by create_spool_visual(), so we
-/// look it up by name rather than by position.
+/// The spool visual lives inside the embedded ams_lane_spool widget; it is
+/// named "spool_graphic" by the drawing utils, so we look it up by name
+/// (recursively) rather than by child position.
 SpoolVisualState inspect_spool_state(lv_obj_t* spool_container) {
     SpoolVisualState st;
     uint32_t n = lv_obj_get_child_count(spool_container);
@@ -734,7 +748,7 @@ SpoolVisualState inspect_spool_state(lv_obj_t* spool_container) {
     lv_opa_t bg_opa = lv_obj_get_style_bg_opa(spool_visual, LV_PART_MAIN);
     bool hidden = lv_obj_has_flag(spool_visual, LV_OBJ_FLAG_HIDDEN);
 
-    if (opa == LV_OPA_20 || bg_opa == LV_OPA_20) {
+    if (opa == LV_OPA_30 || bg_opa == LV_OPA_30) {
         st.any_ghosted = true;
     }
     if (hidden) {
@@ -744,13 +758,21 @@ SpoolVisualState inspect_spool_state(lv_obj_t* spool_container) {
 }
 
 /// Drive slot 0 EMPTY in AmsState and create the widget.
-lv_obj_t* create_empty_slot(lv_obj_t* parent, AmsBackendMock* mock_ptr) {
+/// lane_state is seeded to what classify_lane() derives from the same SlotInfo
+/// (Ghosted when the lane retains an identity, Empty when it has none).
+lv_obj_t* create_empty_slot(lv_obj_t* parent, AmsBackendMock* mock_ptr,
+                            helix::ui::LaneState lane_state) {
     mock_ptr->force_slot_status(0, SlotStatus::EMPTY);
 
     // Seed status subject to EMPTY so observer fires correctly on widget creation.
     lv_subject_t* status_subj = AmsState::instance().get_slot_status_subject(0);
     REQUIRE(status_subj != nullptr);
     lv_subject_set_int(status_subj, static_cast<int>(SlotStatus::EMPTY));
+
+    // Seed the lane classification the embedded ams_lane_spool renders from.
+    lv_subject_t* lane_subj = AmsState::instance().get_slot_lane_state_subject(0);
+    REQUIRE(lane_subj != nullptr);
+    lv_subject_set_int(lane_subj, static_cast<int>(lane_state));
 
     char index_str[4];
     snprintf(index_str, sizeof(index_str), "%d", 0);
@@ -774,19 +796,23 @@ TEST_CASE_METHOD(LVGLUITestFixture, "AMS slot ghosts empty slot with brand-only 
     SlotInfo info;
     info.slot_index = 0;
     info.brand = "Polymaker";
-    mock_ptr->set_slot_info(0, info);
+    helix::test::apply_edit(*mock_ptr, 0, info);
 
     AmsState::instance().set_backend(std::move(mock));
 
-    lv_obj_t* slot = create_empty_slot(test_screen(), mock_ptr);
+    lv_obj_t* slot = create_empty_slot(test_screen(), mock_ptr, helix::ui::LaneState::Ghosted);
     lv_obj_t* spool_container = UITest::find_by_name(slot, "spool_container");
     REQUIRE(spool_container != nullptr);
 
     // Brand-only override triggers ghost render: spool is visible at 20% opacity,
-    // and the main spool visual should NOT be hidden (placeholder mode).
+    // and the main spool visual should NOT be hidden (placeholder mode). The
+    // material label dims in lockstep with the spool ("assigned, not present").
     auto st = inspect_spool_state(spool_container);
     REQUIRE(st.any_ghosted);
     REQUIRE_FALSE(st.any_spool_hidden);
+    lv_obj_t* label = UITest::find_by_name(slot, "material_label");
+    REQUIRE(label != nullptr);
+    REQUIRE(lv_obj_get_style_text_opa(label, LV_PART_MAIN) == ams_draw::GHOST_OPA);
 
     AmsState::instance().clear_backends();
 }
@@ -803,11 +829,11 @@ TEST_CASE_METHOD(LVGLUITestFixture, "AMS slot ghosts empty slot with spool_name-
     SlotInfo info;
     info.slot_index = 0;
     info.spool_name = "Shop Floor #7";
-    mock_ptr->set_slot_info(0, info);
+    helix::test::apply_edit(*mock_ptr, 0, info);
 
     AmsState::instance().set_backend(std::move(mock));
 
-    lv_obj_t* slot = create_empty_slot(test_screen(), mock_ptr);
+    lv_obj_t* slot = create_empty_slot(test_screen(), mock_ptr, helix::ui::LaneState::Ghosted);
     lv_obj_t* spool_container = UITest::find_by_name(slot, "spool_container");
     REQUIRE(spool_container != nullptr);
 
@@ -829,11 +855,11 @@ TEST_CASE_METHOD(LVGLUITestFixture, "AMS slot hides empty slot with no metadata 
     // Truly empty — no brand, spool_name, material, or spoolman_id.
     SlotInfo info;
     info.slot_index = 0;
-    mock_ptr->set_slot_info(0, info);
+    helix::test::apply_edit(*mock_ptr, 0, info);
 
     AmsState::instance().set_backend(std::move(mock));
 
-    lv_obj_t* slot = create_empty_slot(test_screen(), mock_ptr);
+    lv_obj_t* slot = create_empty_slot(test_screen(), mock_ptr, helix::ui::LaneState::Empty);
     lv_obj_t* spool_container = UITest::find_by_name(slot, "spool_container");
     REQUIRE(spool_container != nullptr);
 
@@ -846,7 +872,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "AMS slot hides empty slot with no metadata 
     AmsState::instance().clear_backends();
 }
 
-TEST_CASE("SlotInfo::display_fill_level renders ghost lanes empty, present lanes by weight",
+TEST_CASE("SlotInfo::display_fill_level: a real weight wins, an unweighed ghost reads empty",
           "[ams][slot][1071][1367]") {
     // Ghost lane: EMPTY status, but a Spoolman link + material were RETAINED
     // across an eject (#1071), so has_filament_info() is true. The fill bar must
@@ -861,6 +887,18 @@ TEST_CASE("SlotInfo::display_fill_level renders ghost lanes empty, present lanes
     auto gfill = ghost.display_fill_level();
     REQUIRE(gfill.has_value());
     CHECK(*gfill == Catch::Approx(0.0f));
+
+    // Ghost lane WITH a recorded weight: the weight wins. An absent tool on a
+    // changer took its filament with it, so the spool still shows what is on it
+    // and the ghost alone says it is not in the machine.
+    SlotInfo ghost_weighed;
+    ghost_weighed.status = SlotStatus::EMPTY;
+    ghost_weighed.material = "ABS";
+    ghost_weighed.total_weight_g = 1000.0f;
+    ghost_weighed.remaining_weight_g = 750.0f;
+    auto gwfill = ghost_weighed.display_fill_level();
+    REQUIRE(gwfill.has_value());
+    CHECK(*gwfill == Catch::Approx(0.75f));
 
     // Present lane, both weights known: real remaining/total ratio.
     SlotInfo weighed;
@@ -919,4 +957,316 @@ TEST_CASE("SlotInfo::display_fill_level renders ghost lanes empty, present lanes
     auto ucfill = unknown_color.display_fill_level();
     REQUIRE(ucfill.has_value());
     CHECK(*ucfill == Catch::Approx(1.0f));
+}
+
+// An ams_slot showing a secondary backend paints that backend's lane, not the
+// primary's lane with the same index.
+TEST_CASE_METHOD(LVGLUITestFixture, "ams_slot: a secondary backend's slot paints its own lane",
+                 "[ui][ams_slot][multi_backend]") {
+    ui_ams_slot_register();
+    auto& ams = AmsState::instance();
+    ams.init_subjects(true);
+    ams.set_backend(std::make_unique<AmsBackendMock>(4));
+    const int second = ams.add_backend(std::make_unique<AmsBackendMock>(4));
+    REQUIRE(second == 1);
+
+    // Primary lane 0: present and 80% full. Secondary lane 0: empty, 30%.
+    lv_subject_set_int(ams.get_slot_lane_state_subject(0),
+                       static_cast<int>(helix::ui::LaneState::Present));
+    lv_subject_set_int(ams.get_slot_fill_subject(0), 80);
+    SubjectLifetime lt;
+    lv_subject_t* sec_state = ams.get_slot_lane_state_subject(second, 0, lt);
+    lv_subject_t* sec_fill = ams.get_slot_fill_subject(second, 0, lt);
+    REQUIRE(sec_state != nullptr);
+    REQUIRE(sec_fill != nullptr);
+    lv_subject_set_int(sec_state, static_cast<int>(helix::ui::LaneState::Empty));
+    lv_subject_set_int(sec_fill, 30);
+
+    ams.set_active_backend(second);
+    lv_obj_t* slot = create_ams_slot(test_screen(), 0);
+    REQUIRE(slot != nullptr);
+
+    CHECK(ui_ams_slot_get_fill_level(slot) == Catch::Approx(0.30f));
+    lv_obj_t* graphic = lv_obj_find_by_name(slot, "spool_graphic");
+    REQUIRE(graphic != nullptr);
+    CHECK(lv_obj_has_flag(graphic, LV_OBJ_FLAG_HIDDEN)); // secondary lane is Empty
+
+    // A later change on the secondary lane flows through.
+    lv_subject_set_int(sec_state, static_cast<int>(helix::ui::LaneState::Present));
+    process_lvgl(50);
+    CHECK_FALSE(lv_obj_has_flag(graphic, LV_OBJ_FLAG_HIDDEN));
+
+    lv_obj_delete(slot);
+    ams.set_active_backend(0);
+    ams.clear_backends();
+}
+
+// An ams_slot showing a secondary backend shows that backend's material, not
+// the primary's material for the same slot index.
+TEST_CASE_METHOD(LVGLUITestFixture, "ams_slot: a secondary backend's slot shows its own material",
+                 "[ui][ams_slot][multi_backend]") {
+    ui_ams_slot_register();
+    auto& ams = AmsState::instance();
+    ams.init_subjects(true);
+    ams.set_backend(std::make_unique<AmsBackendMock>(4));
+    const int second = ams.add_backend(std::make_unique<AmsBackendMock>(4));
+    REQUIRE(second == 1);
+
+    // Primary slot 0 is PETG; secondary slot 0 is PLA. Both lanes Present so
+    // the label reads the material rather than "Empty".
+    lv_subject_copy_string(ams.get_slot_material_subject(0), "PETG");
+    lv_subject_set_int(ams.get_slot_lane_state_subject(0),
+                       static_cast<int>(helix::ui::LaneState::Present));
+    SubjectLifetime lt;
+    lv_subject_t* sec_mat = ams.get_slot_material_subject(second, 0, lt);
+    lv_subject_t* sec_state = ams.get_slot_lane_state_subject(second, 0, lt);
+    REQUIRE(sec_mat != nullptr);
+    REQUIRE(sec_state != nullptr);
+    lv_subject_copy_string(sec_mat, "PLA");
+    lv_subject_set_int(sec_state, static_cast<int>(helix::ui::LaneState::Present));
+
+    ams.set_active_backend(second);
+    lv_obj_t* slot = create_ams_slot(test_screen(), 0);
+    REQUIRE(slot != nullptr);
+    lv_obj_t* material_label = UITest::find_by_name(slot, "material_label");
+    REQUIRE(material_label != nullptr);
+    CHECK(std::string(UITest::get_text(material_label)) == "PLA");
+
+    // A material change on the secondary lane repaints through the observer.
+    lv_subject_copy_string(sec_mat, "TPU");
+    process_lvgl(50);
+    CHECK(std::string(UITest::get_text(material_label)) == "TPU");
+
+    lv_obj_delete(slot);
+    ams.set_active_backend(0);
+    ams.clear_backends();
+}
+
+// An ams_slot showing a secondary backend shows that backend's tool mapping in
+// its badge, not backend 0's mapping for the same lane index.
+TEST_CASE_METHOD(LVGLUITestFixture, "ams_slot: a secondary backend's slot shows its own tool badge",
+                 "[ui][ams_slot][multi_backend]") {
+    ui_ams_slot_register();
+    auto& ams = AmsState::instance();
+    ams.init_subjects(true);
+
+    auto primary = AmsBackend::create_mock(4);
+    auto secondary = AmsBackend::create_mock(4);
+    auto* secondary_ptr = static_cast<AmsBackendMock*>(secondary.get());
+    SlotInfo sec = secondary_ptr->get_slot_info(0);
+    sec.mapped_tool = 3;
+    helix::test::apply_edit(*secondary_ptr, 0, sec);
+
+    ams.set_backend(std::move(primary));
+    const int second = ams.add_backend(std::move(secondary));
+    REQUIRE(second == 1);
+    ams.sync_from_backend();
+    ams.sync_backend(second);
+
+    ams.set_active_backend(second);
+    process_lvgl(50);
+    lv_obj_t* slot = create_ams_slot(test_screen(), 0);
+    REQUIRE(slot != nullptr);
+    process_lvgl(50);
+
+    // The two backends really disagree on lane 0's tool.
+    REQUIRE(ams.get_backend(0)->get_slot_info(0).mapped_tool == 0);
+    REQUIRE(ams.get_backend(second)->get_slot_info(0).mapped_tool == 3);
+
+    lv_obj_t* badge_bg = UITest::find_by_name(slot, "tool_badge");
+    REQUIRE(badge_bg != nullptr);
+    CHECK_FALSE(lv_obj_has_flag(badge_bg, LV_OBJ_FLAG_HIDDEN));
+    lv_obj_t* badge_label = UITest::find_by_name(slot, "tool_badge_label");
+    REQUIRE(badge_label != nullptr);
+    CHECK(std::string(UITest::get_text(badge_label)) == "T3");
+
+    lv_obj_delete(slot);
+    ams.set_active_backend(0);
+    ams.clear_backends();
+}
+
+// ============================================================================
+// Current-slot highlight - the spool glows; the slot draws no box
+// ============================================================================
+
+namespace {
+
+lv_obj_t* make_present_slot(lv_obj_t* parent) {
+    ui_ams_slot_register();
+    AmsState::instance().init_subjects(true);
+    lv_subject_set_int(AmsState::instance().get_slot_lane_state_subject(0),
+                       static_cast<int>(helix::ui::LaneState::Present));
+    lv_obj_t* slot = create_ams_slot(parent, 0);
+    REQUIRE(slot != nullptr);
+    return slot;
+}
+
+lv_obj_t* glow_of(lv_obj_t* slot) {
+    lv_obj_t* glow = UITest::find_by_name(slot, "spool_glow");
+    REQUIRE(glow != nullptr);
+    return glow;
+}
+
+bool shown(lv_obj_t* o) {
+    return !lv_obj_has_flag(o, LV_OBJ_FLAG_HIDDEN);
+}
+
+void check_no_box(lv_obj_t* o) {
+    CHECK(lv_obj_get_style_border_width(o, LV_PART_MAIN) == 0);
+    CHECK(lv_obj_get_style_shadow_width(o, LV_PART_MAIN) == 0);
+    CHECK(lv_obj_get_style_outline_width(o, LV_PART_MAIN) == 0);
+}
+
+} // namespace
+
+TEST_CASE_METHOD(LVGLUITestFixture, "ams_slot: current slot glows the spool, draws no box",
+                 "[ui][ams_slot][highlight]") {
+    lv_obj_t* slot = make_present_slot(test_screen());
+    process_lvgl(20);
+    lv_obj_t* spool_container = UITest::find_by_name(slot, "spool_container");
+    lv_obj_t* canvas = find_spool_canvas(spool_container);
+    REQUIRE(canvas != nullptr);
+    lv_obj_t* glow = glow_of(slot);
+    REQUIRE_FALSE(shown(glow));
+
+    lv_subject_set_int(AmsState::instance().get_slot_active_loaded_subject(0), 1);
+    process_lvgl(20);
+    CHECK(shown(glow));
+    check_no_box(slot);
+    check_no_box(spool_container);
+    // The glow is its own layer behind the spool; the spool keeps its buffer.
+    CHECK(lv_obj_get_index(glow) < lv_obj_get_index(canvas));
+    lv_obj_update_layout(canvas);
+    CHECK(lv_canvas_get_draw_buf(canvas)->header.w == lv_obj_get_width(canvas));
+    // The glow overhangs its layer; every ancestor up to the slot carries it
+    // or LVGL clips it at that ancestor's edge.
+    const int32_t overhang = lv_obj_get_ext_draw_size(glow);
+    CHECK(overhang > 0);
+    CHECK(lv_obj_get_ext_draw_size(lv_obj_get_parent(glow)) >= overhang);
+    CHECK(lv_obj_get_ext_draw_size(spool_container) >= overhang);
+    CHECK(lv_obj_get_ext_draw_size(slot) >= overhang);
+
+    lv_subject_set_int(AmsState::instance().get_slot_active_loaded_subject(0), 0);
+    process_lvgl(20);
+    CHECK_FALSE(shown(glow));
+    CHECK(lv_image_get_src(glow) == nullptr);
+    check_no_box(slot);
+    check_no_box(spool_container);
+    // A hidden glow reserves no overhang anywhere up the chain.
+    CHECK(lv_obj_get_ext_draw_size(spool_container) == 0);
+
+    lv_obj_delete(slot);
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture, "ams_slot: a load pulses the glow's opacity, never a box",
+                 "[ui][ams_slot][highlight]") {
+    lv_obj_t* slot = make_present_slot(test_screen());
+    process_lvgl(20);
+    lv_obj_t* spool_container = UITest::find_by_name(slot, "spool_container");
+    lv_obj_t* glow = glow_of(slot);
+
+    ui_ams_slot_set_pulsing(slot, true);
+    REQUIRE(shown(glow));
+    REQUIRE(lv_anim_get(glow, nullptr) != nullptr);
+    int lo = 255, hi = 0;
+    for (int i = 0; i < 40; i++) {
+        process_lvgl(30);
+        const int opa = lv_obj_get_style_opa(glow, LV_PART_MAIN);
+        lo = std::min(lo, opa);
+        hi = std::max(hi, opa);
+        check_no_box(slot);
+        check_no_box(spool_container);
+    }
+    CHECK(hi - lo > 80);
+    CHECK(lo >= LV_OPA_40 - 2);
+
+    // Ending the load with the lane not current: animation gone, glow hidden.
+    ui_ams_slot_set_pulsing(slot, false);
+    CHECK(lv_anim_get(glow, nullptr) == nullptr);
+    CHECK_FALSE(shown(glow));
+    CHECK(lv_obj_get_style_opa(glow, LV_PART_MAIN) == LV_OPA_COVER);
+
+    lv_obj_delete(slot);
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture, "ams_slot: clear_highlight drops the spool glow",
+                 "[ui][ams_slot][highlight]") {
+    lv_obj_t* slot = make_present_slot(test_screen());
+    lv_subject_set_int(AmsState::instance().get_slot_active_loaded_subject(0), 1);
+    process_lvgl(20);
+    lv_obj_t* glow = glow_of(slot);
+    REQUIRE(shown(glow));
+
+    ui_ams_slot_clear_highlight(slot);
+    CHECK_FALSE(shown(glow));
+
+    lv_obj_delete(slot);
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture, "ams_slot: flat style glows too", "[ui][ams_slot][highlight]") {
+    helix::Config::get_instance()->set<std::string>("/ams/spool_style", "flat");
+    lv_obj_t* slot = make_present_slot(test_screen());
+    lv_subject_set_int(AmsState::instance().get_slot_active_loaded_subject(0), 1);
+    process_lvgl(20);
+    REQUIRE(find_spool_canvas(UITest::find_by_name(slot, "spool_container")) == nullptr);
+
+    lv_obj_t* glow = glow_of(slot);
+    CHECK(shown(glow));
+    CHECK(lv_obj_get_ext_draw_size(glow) > 0);
+    const auto* buf = static_cast<const lv_draw_buf_t*>(lv_image_get_src(glow));
+    REQUIRE(buf != nullptr);
+    CHECK(buf->header.w > static_cast<uint32_t>(lv_obj_get_width(glow)));
+
+    lv_obj_delete(slot);
+    helix::Config::get_instance()->set<std::string>("/ams/spool_style", "3d");
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture, "ams_slot: a load pulses the current and target slots only",
+                 "[ui][ams_slot][highlight]") {
+    ui_ams_slot_register();
+    AmsState& ams = AmsState::instance();
+    ams.init_subjects(true);
+    auto& display = DisplaySettingsManager::instance();
+    const bool animations_were = display.get_animations_enabled();
+
+    for (bool animations : {true, false}) {
+        CAPTURE(animations);
+        display.set_animations_enabled(animations);
+        lv_subject_set_int(ams.get_ams_action_subject(), static_cast<int>(AmsAction::IDLE));
+        std::array<lv_obj_t*, 4> slots{};
+        for (int i = 0; i < 4; i++) {
+            lv_subject_set_int(ams.get_slot_lane_state_subject(i),
+                               static_cast<int>(helix::ui::LaneState::Present));
+            lv_subject_set_int(ams.get_slot_active_loaded_subject(i), 0);
+            slots[i] = create_ams_slot(test_screen(), i);
+            REQUIRE(slots[i] != nullptr);
+        }
+        process_lvgl(20);
+
+        // Swapping from slot 0 into slot 2.
+        lv_subject_set_int(ams.get_current_slot_subject(), 0);
+        lv_subject_set_int(ams.get_pending_target_slot_subject(), 2);
+        lv_subject_set_int(ams.get_ams_action_subject(), static_cast<int>(AmsAction::LOADING));
+        process_lvgl(20);
+
+        for (int i = 0; i < 4; i++) {
+            CAPTURE(i);
+            lv_obj_t* glow = glow_of(slots[i]);
+            const bool should_pulse = animations && (i == 0 || i == 2);
+            CHECK((lv_anim_get(glow, nullptr) != nullptr) == should_pulse);
+            CHECK(shown(glow) == should_pulse);
+            check_no_box(slots[i]);
+            check_no_box(UITest::find_by_name(slots[i], "spool_container"));
+        }
+
+        lv_subject_set_int(ams.get_ams_action_subject(), static_cast<int>(AmsAction::IDLE));
+        process_lvgl(20);
+        for (lv_obj_t* slot : slots) {
+            CHECK(lv_anim_get(glow_of(slot), nullptr) == nullptr);
+            lv_obj_delete(slot);
+        }
+    }
+    display.set_animations_enabled(animations_were);
+    lv_subject_set_int(ams.get_pending_target_slot_subject(), -1);
+    lv_subject_set_int(ams.get_current_slot_subject(), -1);
 }

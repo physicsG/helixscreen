@@ -8,6 +8,7 @@
  */
 
 #include "../lvgl_test_fixture.h"
+#include "../test_helpers/scoped_pointer_indev.h"
 #include "app_constants.h"
 #include "config.h"
 #include "input_settings_manager.h"
@@ -64,8 +65,9 @@ class InputSettingsFixture : public LVGLTestFixture {
 
 TEST_CASE_METHOD(InputSettingsFixture, "InputSettingsManager default values after init",
                  "[input_settings]") {
-    SECTION("scroll_throw defaults to 25") {
-        REQUIRE(input().get_scroll_throw() == 25);
+    SECTION("scroll_throw defaults to the platform constant, 25 off ESP32") {
+        CHECK(InputSettingsManager::DEFAULT_SCROLL_THROW == 25);
+        REQUIRE(input().get_scroll_throw() == InputSettingsManager::DEFAULT_SCROLL_THROW);
     }
 
     SECTION("scroll_limit defaults to 10") {
@@ -140,26 +142,51 @@ TEST_CASE_METHOD(InputSettingsFixture, "InputSettingsManager scroll_limit set/ge
 
 TEST_CASE_METHOD(InputSettingsFixture, "InputSettingsManager restart pending flag",
                  "[input_settings]") {
-    SECTION("restart pending after scroll_throw change") {
-        REQUIRE(input().is_restart_pending() == false);
-
+    SECTION("scroll_throw and scroll_limit are live-applied: no restart is demanded") {
         input().set_scroll_throw(30);
-        REQUIRE(input().is_restart_pending() == true);
-    }
-
-    SECTION("restart pending after scroll_limit change") {
-        REQUIRE(input().is_restart_pending() == false);
-
         input().set_scroll_limit(15);
-        REQUIRE(input().is_restart_pending() == true);
+        REQUIRE(input().is_restart_pending() == false);
     }
 
     SECTION("clear_restart_pending resets flag") {
-        input().set_scroll_throw(30);
+        input().set_scroll_guard(true);
         REQUIRE(input().is_restart_pending() == true);
 
         input().clear_restart_pending();
         REQUIRE(input().is_restart_pending() == false);
+    }
+}
+
+TEST_CASE_METHOD(InputSettingsFixture,
+                 "InputSettingsManager applies scroll and long-press to pointers",
+                 "[input_settings][scroll]") {
+    // The firmware creates its touch indev outside DisplayManager, so the
+    // manager itself has to reach every pointer, at load and on each setter.
+    helix_test::ScopedPointerIndev pointer;
+    lv_indev_t* indev = pointer.indev();
+
+    SECTION("loading applies the persisted values to an existing pointer") {
+        Config::get_instance()->set<int>("/input/scroll_throw", 40);
+        Config::get_instance()->set<int>("/input/scroll_limit", 7);
+        Config::get_instance()->set<int>("/input/long_press_time", 800);
+        restart();
+        CHECK(indev->scroll_throw == 40);
+        CHECK(indev->scroll_limit == 7);
+        CHECK(indev->long_press_time == 800);
+    }
+
+    SECTION("setters reach the live pointer") {
+        input().set_scroll_throw(45);
+        input().set_scroll_limit(3);
+        input().set_long_press_time(1000);
+        CHECK(indev->scroll_throw == 45);
+        CHECK(indev->scroll_limit == 3);
+        CHECK(indev->long_press_time == 1000);
+    }
+
+    SECTION("the clamped value is what the pointer gets") {
+        input().set_scroll_throw(99);
+        CHECK(indev->scroll_throw == 50);
     }
 }
 
@@ -293,7 +320,6 @@ TEST_CASE_METHOD(InputSettingsFixture, "InputSettingsManager long_press_time def
 TEST_CASE_METHOD(InputSettingsFixture, "InputSettingsManager long_press_time persistence",
                  "[input_settings][long_press][1245]") {
     Config* config = Config::get_instance();
-    REQUIRE(config != nullptr);
 
     SECTION("the setter writes Config, and the next load reads it back") {
         input().set_long_press_time(750);
@@ -346,7 +372,6 @@ TEST_CASE_METHOD(InputSettingsFixture, "InputSettingsManager long_press_time per
 TEST_CASE_METHOD(InputSettingsFixture, "InputSettingsManager home_edit_mode_enabled persistence",
                  "[input_settings][edit_mode][1245]") {
     Config* config = Config::get_instance();
-    REQUIRE(config != nullptr);
 
     SECTION("defaults to enabled on a fresh install") {
         REQUIRE_FALSE(config->exists("/input/home_edit_mode_enabled"));

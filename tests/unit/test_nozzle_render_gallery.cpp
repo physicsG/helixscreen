@@ -32,6 +32,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -50,7 +51,8 @@ constexpr int32_t SCALE_UNIT = 40;
 constexpr uint32_t BG_HEX = 0x1A1A1A;       // dark neutral, matches app dark theme
 constexpr uint32_t FILAMENT_HEX = 0xFF6A00; // visible orange
 
-using DrawFn = void (*)(lv_layer_t*, int32_t, int32_t, lv_color_t, int32_t, lv_opa_t);
+using DrawFn = void (*)(lv_layer_t*, int32_t, int32_t, std::optional<lv_color_t>, int32_t,
+                        lv_opa_t);
 
 struct RendererEntry {
     const char* name;

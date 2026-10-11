@@ -13,6 +13,8 @@
  * from AmsPanel for testability. No LVGL or UI dependencies.
  */
 
+namespace helix {
+
 /// Operation types for dynamic step progress.
 ///
 /// Backend-specific step models (e.g. the Snapmaker U1's firmware Home / Select
@@ -192,3 +194,5 @@ inline StepOperationResult detect_step_operation(AmsAction action, AmsAction pre
 
     return result; // No change needed
 }
+
+} // namespace helix

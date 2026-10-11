@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "gcode_layer_index.h"
+#include "test_helpers/unique_temp_dir.h"
 
 #include <fstream>
 #include <sstream>
+#include <unistd.h>
 
 #include "../catch_amalgamated.hpp"
 
@@ -15,7 +17,7 @@ using Catch::Approx;
 class TempGCodeFile {
   public:
     explicit TempGCodeFile(const std::string& content) {
-        path_ = "/tmp/test_layer_index_" + std::to_string(rand()) + ".gcode";
+        path_ = helix::test::unique_temp_file("test_layer_index", "gcode");
         std::ofstream file(path_);
         file << content;
         file.close();

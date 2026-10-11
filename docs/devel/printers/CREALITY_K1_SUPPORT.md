@@ -59,7 +59,7 @@ All K1 models use the Ingenic X2000E MIPS32r2 dual-core processor running Creali
 - **480x800 display** — Portrait framebuffer, same as K2 series. Requires software rotation to landscape (800x480). Uses the `standard` breakpoint.
 - **No stock Moonraker** — Must install community firmware (Simple AF or Guilouz) for Moonraker access.
 - **K1C 2025 hardware revision** — Some units removed the root access option from the touchscreen menu.
-- **Stock "unload" is not an unload** — `QUIT_MATERIAL` (what the firmware offers) purges ~100mm of filament FORWARD and retracts only ~62mm with anti-clog wiggles: net ~38mm deeper into the hotend. Creality expects you to cut the filament at the inlet and let it clear the residue (same philosophy as the Adventurer 5M). Install the HelixScreen macro pack (Settings → Advanced → HelixScreen Macros → Install) and `HELIX_UNLOAD_FILAMENT` takes the unload slot: heat to the firmware's default extruder temp, renew the melt (E10), then pull E-110 fully out of the direct-drive gears in two stages. On a CFS-equipped machine it handles the toolhead side; the box retract is driven by the filament system.
+- **Stock "unload" is not an unload** — `QUIT_MATERIAL` (what the firmware offers) purges ~100mm of filament FORWARD and retracts only ~62mm with anti-clog wiggles: net ~38mm deeper into the hotend. Creality expects you to cut the filament at the inlet and let it clear the residue (same philosophy as the Adventurer 5M). Install the HelixScreen macro pack (Advanced → Install Helper Macros) and `HELIX_UNLOAD_FILAMENT` takes the unload slot: heat to the firmware's default extruder temp, renew the melt (E10), then pull E-110 fully out of the direct-drive gears in two stages. On a CFS-equipped machine it handles the toolhead side; the box retract is driven by the filament system.
 
 ## Firmware Prerequisites
 
@@ -222,6 +222,8 @@ chmod +x /etc/init.d/S99start_app   # Re-enable stock UI
 /etc/init.d/S99start_app start      # Start stock UI now
 ```
 
+This lasts until the next boot. `config/helixscreen.init` calls `platform_stop_competing_uis` on every start, which re-applies `chmod a-x`, and `S99helixscreen` sorts ahead of `S99start_app` so it runs first. To make the revert stick, either uninstall HelixScreen (`install.sh --uninstall`, which re-enables the services the installer recorded) or disable the HelixScreen service before re-enabling `S99start_app`.
+
 ## Platform Hooks
 
 Platform hooks are in `config/platform/hooks-k1.sh`. Key behaviors:
@@ -232,7 +234,9 @@ The stock K1 UI is managed by `/etc/init.d/S99start_app`, which launches `displa
 
 1. Stop `S99start_app` via its init script
 2. `chmod a-x` the init script to prevent reboot respawn (reversible)
-3. Kill all lingering stock processes
+3. Kill only the lingering framebuffer contenders (`Monitor` first, then `display-server`)
+
+Only `display-server`, `Monitor` and `boot_display` contend for the framebuffer. The backend servers (`master-server`, `app-server`, `web-server`) are what Creality Print and the Creality Cloud app talk to, so the hooks spare them and the installer deploys `/etc/init.d/S99creality-backend` (`config/creality-backend.init` in the repo) to start the trio at boot ([#1468](https://github.com/prestonbrown/helixscreen/issues/1468)). `Monitor` dies before `display-server` because it is a watchdog that respawns `display-server`. Uninstall removes the backend init script and re-enables `S99start_app`, so the whole stock stack returns.
 
 ### SSH Safety
 
@@ -320,7 +324,7 @@ Community open-source K1 firmwares (Guilouz, Simple AF, Guppy Mod) do not bundle
 For the firmware side — what each `BOX_*` command actually does, the tn_data.json
 persistence contract, and the deferred-failure/resume traps that make a successful-looking
 gcode sequence do nothing — see
-[CREALITY_CFS_INTERNALS.md](../CREALITY_CFS_INTERNALS.md). **Read it before changing anything
+[CREALITY_CFS_K1_INTERNALS.md](../printer-research/CREALITY_CFS_K1_INTERNALS.md). **Read it before changing anything
 the CFS backend emits on K1.**
 
 ## Known Limitations

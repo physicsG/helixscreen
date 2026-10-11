@@ -10,6 +10,7 @@
 #include <chrono>
 #include <memory>
 #include <thread>
+#include <vector>
 
 #include "../catch_amalgamated.hpp"
 
@@ -35,6 +36,7 @@ using namespace helix;
 // Global LVGL Initialization (called once)
 // ============================================================================
 
+namespace {
 struct LVGLInitializer {
     LVGLInitializer() {
         lv_init_safe();
@@ -43,6 +45,7 @@ struct LVGLInitializer {
         lv_display_set_buffers(disp, buf, NULL, sizeof(buf), LV_DISPLAY_RENDER_MODE_PARTIAL);
     }
 };
+} // namespace
 
 static LVGLInitializer lvgl_init;
 
@@ -317,7 +320,7 @@ TEST_CASE_METHOD(MoonrakerAPITestFixture, "set_temperature validates temperature
         REQUIRE(error_called);
         REQUIRE_FALSE(success_called);
         REQUIRE(captured_error.type == MoonrakerErrorType::VALIDATION_ERROR);
-        REQUIRE(captured_error.message.find("0-400") != std::string::npos);
+        REQUIRE(captured_error.message.find("0°C to 400°C") != std::string::npos);
     }
 
     SECTION("Zero temperature accepted") {
@@ -384,7 +387,7 @@ TEST_CASE_METHOD(MoonrakerAPITestFixture, "set_fan_speed validates speed range",
         REQUIRE(error_called);
         REQUIRE_FALSE(success_called);
         REQUIRE(captured_error.type == MoonrakerErrorType::VALIDATION_ERROR);
-        REQUIRE(captured_error.message.find("0-100") != std::string::npos);
+        REQUIRE(captured_error.message.find("0% to 100%") != std::string::npos);
     }
 
     SECTION("Zero speed accepted (fan off)") {
@@ -440,7 +443,7 @@ TEST_CASE_METHOD(MoonrakerAPITestFixture, "move_axis validates feedrate range",
         REQUIRE(error_called);
         REQUIRE_FALSE(success_called);
         REQUIRE(captured_error.type == MoonrakerErrorType::VALIDATION_ERROR);
-        REQUIRE(captured_error.message.find("0-50000") != std::string::npos);
+        REQUIRE(captured_error.message.find("0 to 50000mm/min") != std::string::npos);
     }
 
     SECTION("Zero feedrate accepted (use default)") {
@@ -496,7 +499,7 @@ TEST_CASE_METHOD(MoonrakerAPITestFixture, "move_axis validates distance range",
         REQUIRE(error_called);
         REQUIRE_FALSE(success_called);
         REQUIRE(captured_error.type == MoonrakerErrorType::VALIDATION_ERROR);
-        REQUIRE(captured_error.message.find("-1000") != std::string::npos);
+        REQUIRE(captured_error.message.find("-1000.0mm to 1000.0mm") != std::string::npos);
     }
 
     SECTION("Minimum distance accepted (-1000mm)") {
@@ -561,7 +564,7 @@ TEST_CASE_METHOD(MoonrakerAPITestFixture, "move_to_position validates position r
         REQUIRE(error_called);
         REQUIRE_FALSE(success_called);
         REQUIRE(captured_error.type == MoonrakerErrorType::VALIDATION_ERROR);
-        REQUIRE(captured_error.message.find("0-1000") != std::string::npos);
+        REQUIRE(captured_error.message.find("0.0mm to 1000.0mm") != std::string::npos);
     }
 
     SECTION("Zero position accepted") {
@@ -795,7 +798,7 @@ TEST_CASE_METHOD(MoonrakerAPITestFixture, "Validation errors provide descriptive
             [this](const MoonrakerError& err) { this->error_callback(err); });
 
         REQUIRE(error_called);
-        REQUIRE(captured_error.message.find("0-100") != std::string::npos);
+        REQUIRE(captured_error.message.find("0% to 100%") != std::string::npos);
     }
 
     SECTION("Invalid identifier error explains character restriction") {
@@ -805,7 +808,7 @@ TEST_CASE_METHOD(MoonrakerAPITestFixture, "Validation errors provide descriptive
             [this](const MoonrakerError& err) { this->error_callback(err); });
 
         REQUIRE(error_called);
-        REQUIRE(captured_error.message.find("illegal") != std::string::npos);
+        REQUIRE(captured_error.message.find("unsafe characters") != std::string::npos);
     }
 
     SECTION("Invalid axis error shows the character") {
@@ -1173,4 +1176,35 @@ TEST_CASE("MoonrakerClient cleanup_pending_requests is exception-safe",
         // whether exception handling stops iteration. The important
         // thing is no crash/memory corruption.
     }
+}
+
+TEST_CASE_METHOD(MoonrakerAPITestFixture,
+                 "A rejected argument is reported once: to on_error if given, else as a toast",
+                 "[api][security][validation]") {
+    std::vector<std::string> toasts;
+    helix::ui::set_test_notification_error_hook(
+        [&toasts](const std::string& msg) { toasts.push_back(msg); });
+
+    std::vector<std::string> shown;
+    auto on_error = [&shown](const MoonrakerError& err) {
+        CHECK(err.type == MoonrakerErrorType::VALIDATION_ERROR);
+        shown.push_back(err.user_message());
+    };
+
+    SECTION("with on_error, no toast, and the caller gets the user-facing text") {
+        api->motion().move_axis('A', 10.0, 3000.0, nullptr, on_error);
+        api->set_fan_speed("fan;M112", 50.0, nullptr, on_error);
+        REQUIRE(shown.size() == 2);
+        CHECK(shown[0] == "Invalid axis 'A'. Must be X, Y, Z, or E.");
+        CHECK(shown[1] == "Invalid fan name 'fan;M112'. Contains unsafe characters.");
+        CHECK(toasts.empty());
+    }
+
+    SECTION("without on_error, one toast each") {
+        api->motion().move_axis('A', 10.0, 3000.0, nullptr, nullptr);
+        api->set_fan_speed("fan;M112", 50.0, nullptr, nullptr);
+        CHECK(toasts.size() == 2);
+    }
+
+    helix::ui::set_test_notification_error_hook(nullptr);
 }

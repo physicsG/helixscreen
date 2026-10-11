@@ -5,7 +5,6 @@
 
 #include "ui_error_reporting.h"
 #include "ui_event_safety.h"
-#include "ui_nav_manager.h"
 #include "ui_temperature_utils.h"
 #include "ui_utils.h"
 
@@ -28,8 +27,8 @@ const HeaterTempWidget::Config& nozzle_temp_config() {
         "nozzle_icon_glyph",
         "[NozzleTempWidget]",
         TempGraphOverlay::Mode::Nozzle,
-        [](PrinterState& p) { return p.get_active_extruder_temp_subject(); },
-        [](PrinterState& p) { return p.get_active_extruder_target_subject(); },
+        [](PrinterState& p) { return p.temperature_state().get_active_extruder_temp_subject(); },
+        [](PrinterState& p) { return p.temperature_state().get_active_extruder_target_subject(); },
         HeaterType::Nozzle};
     return cfg;
 }
@@ -41,8 +40,8 @@ const HeaterTempWidget::Config& bed_temp_config() {
         "bed_icon_glyph",
         "[BedTempWidget]",
         TempGraphOverlay::Mode::Bed,
-        [](PrinterState& p) { return p.get_bed_temp_subject(); },
-        [](PrinterState& p) { return p.get_bed_target_subject(); },
+        [](PrinterState& p) { return p.temperature_state().get_bed_temp_subject(); },
+        [](PrinterState& p) { return p.temperature_state().get_bed_target_subject(); },
         HeaterType::Bed};
     return cfg;
 }
@@ -54,8 +53,8 @@ const HeaterTempWidget::Config& chamber_temp_config() {
         "chamber_icon_glyph",
         "[ChamberTempWidget]",
         TempGraphOverlay::Mode::Chamber,
-        [](PrinterState& p) { return p.get_chamber_temp_subject(); },
-        [](PrinterState& p) { return p.get_chamber_target_subject(); },
+        [](PrinterState& p) { return p.temperature_state().get_chamber_temp_subject(); },
+        [](PrinterState& p) { return p.temperature_state().get_chamber_target_subject(); },
         HeaterType::Chamber};
     return cfg;
 }
@@ -87,9 +86,22 @@ void register_chamber_temperature_widget() {
 
 } // namespace helix
 
+// The three heaters draw the same shape, so one worst-case budget covers them.
+// temp_display draws the unit as its own label beside the value, so the budget
+// carries it too: a value measured without the unit is narrower than the row
+// that renders. Below 100 the reading carries a decimal, which makes "88.8" the
+// widest current. No label is drawn. The nozzle glyph carries a tool digit
+// whenever a second tool appears, which can happen after this tile was sized,
+// so it is always budgeted. The glyph pulses while heating, so it is never
+// scaled.
 HeaterTempWidget::HeaterTempWidget(PrinterState& printer_state, TemperatureService* temp_panel,
                                    const Config& config)
-    : printer_state_(printer_state), temp_control_panel_(temp_panel), cfg_(config) {}
+    : TiledPanelWidget(config.widget_id,
+                       TileSizing::Content{"88.8 / 888\u00B0C", "88.8\u00B0C", "", true,
+                                           config.heater == HeaterType::Nozzle ? "8" : "",
+                                           /*label_always_drawn=*/false, TileSizing::IconBox::Glyph,
+                                           /*icon_animates=*/true}),
+      printer_state_(printer_state), temp_control_panel_(temp_panel), cfg_(config) {}
 
 HeaterTempWidget::~HeaterTempWidget() {
     detach();
@@ -98,11 +110,6 @@ HeaterTempWidget::~HeaterTempWidget() {
 void HeaterTempWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
     widget_obj_ = widget_obj;
     parent_screen_ = parent_screen;
-
-    // Set user_data on the root lv_obj, NOT on the ui_button child.
-    // ui_button allocates its own UiButtonData in user_data — overwriting it
-    // leaks memory and breaks button style/contrast auto-updates.
-    lv_obj_set_user_data(widget_obj_, this);
 
     temp_btn_ = lv_obj_find_by_name(widget_obj_, cfg_.button_name);
     if (temp_btn_) {
@@ -121,9 +128,6 @@ void HeaterTempWidget::detach() {
     lifetime_.invalidate();
     icon_binder_.unbind();
 
-    if (widget_obj_) {
-        lv_obj_set_user_data(widget_obj_, nullptr);
-    }
     temp_btn_ = nullptr;
     widget_obj_ = nullptr;
     parent_screen_ = nullptr;

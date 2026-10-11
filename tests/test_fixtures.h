@@ -341,15 +341,20 @@ class XMLTestFixture : public LVGLTestFixture {
      */
     lv_obj_t* create_component(const char* component_name, const char** attrs);
 
-  private:
     /**
      * @brief One-time global XML registrations shared across all XMLTestFixture tests
      *
      * Registers XML widget classes, fonts, globals.xml, event-cb no-ops, and
      * initializes the theme. These are process-wide side effects on the LVGL XML
      * registry that only need to happen once. Guarded by s_global_registered.
+     *
+     * A fixture built on LVGLTestFixture calls it too when it creates XML
+     * components that use design tokens or HelixScreen widgets. Call it with no
+     * screen present: theme initialization hangs when one exists.
      */
-    void setup_global_xml_registrations_once();
+    static void setup_global_xml_registrations_once();
+
+  private:
     static bool s_global_registered;
 
     PrinterState m_state;

@@ -4,6 +4,7 @@
 #include "hardware_role_registry.h"
 #include "moonraker_client_mock.h"
 #include "printer_discovery.h"
+#include "printer_fan_state.h"
 #include "wizard_config_paths.h"
 
 #include <algorithm>
@@ -94,9 +95,68 @@ TEST_CASE("registry integrity: every descriptor has a usable config key", "[hwro
     }
 }
 
+TEST_CASE("resolve_role: stale aux fan heals to a live aux-vocabulary fan", "[hwrole][resolve]") {
+    const auto* desc = role_descriptor(HardwareRoleId::AuxFan);
+    REQUIRE(desc != nullptr);
+    auto r = resolve_role(*desc, "fan_generic gone", {"fan_generic internal_fan"});
+    REQUIRE(r.status == RoleResolutionStatus::AutoHealed);
+    REQUIRE(r.object == "fan_generic internal_fan");
+}
+
+TEST_CASE("aux fan role: descriptor is fans/aux, resolves live value, never invents one",
+          "[hwrole][config]") {
+    const auto* desc = role_descriptor(HardwareRoleId::AuxFan);
+    REQUIRE(desc != nullptr);
+    REQUIRE(std::string(desc->config_key) == "fans/aux");
+    REQUIRE(std::string(desc->canonical_default).empty());
+
+    Config* cfg = Config::get_instance();
+    const std::string key = cfg->df() + helix::wizard::AUX_FAN;
+    const std::string orig = cfg->get<std::string>(key, "");
+
+    cfg->set<std::string>(key, std::string("fan_generic internal_fan"));
+    std::string r =
+        resolve_role_from_config(HardwareRoleId::AuxFan, cfg, {"fan_generic internal_fan"}, false);
+    REQUIRE(r == "fan_generic internal_fan");
+
+    // An empty saved value means the role is unconfigured — no heuristic guess.
+    cfg->set<std::string>(key, std::string(""));
+    r = resolve_role_from_config(HardwareRoleId::AuxFan, cfg, {"fan_generic internal_fan"}, false);
+    REQUIRE(r.empty());
+
+    cfg->set<std::string>(key, orig); // restore
+}
+
+// FanRoleConfig::from_config is the batch the discovery sequence actually calls. A role
+// the registry knows about but that batch never asks for stays unresolved forever.
+TEST_CASE("FanRoleConfig::from_config resolves the aux fan role", "[hwrole][config]") {
+    Config* cfg = Config::get_instance();
+
+    const char* keys[] = {helix::wizard::PART_FAN, helix::wizard::HOTEND_FAN,
+                          helix::wizard::CHAMBER_FAN, helix::wizard::EXHAUST_FAN,
+                          helix::wizard::AUX_FAN};
+    std::vector<std::string> saved;
+    for (const char* k : keys) {
+        saved.push_back(cfg->get<std::string>(cfg->df() + k, ""));
+    }
+    // Leave every other role empty so from_config has nothing it would persist: this
+    // test shares the process-wide Config and must not write the caller's settings.
+    for (const char* k : keys) {
+        cfg->set<std::string>(cfg->df() + k, std::string(""));
+    }
+    cfg->set<std::string>(cfg->df() + helix::wizard::AUX_FAN,
+                          std::string("fan_generic internal_fan"));
+
+    auto roles = FanRoleConfig::from_config(cfg, {"fan", "fan_generic internal_fan"});
+    REQUIRE(roles.aux_fan == "fan_generic internal_fan");
+
+    for (size_t i = 0; i < saved.size(); ++i) {
+        cfg->set<std::string>(cfg->df() + keys[i], saved[i]);
+    }
+}
+
 TEST_CASE("resolve_role_from_config: unconfigured optional role stays empty", "[hwrole][config]") {
     Config* cfg = Config::get_instance();
-    REQUIRE(cfg != nullptr);
     const std::string key = cfg->df() + helix::wizard::CHAMBER_FAN;
     const std::string orig = cfg->get<std::string>(key, "");
     cfg->set<std::string>(key, std::string(""));
@@ -133,16 +193,17 @@ TEST_CASE("resolve_role_from_config: no persist leaves config untouched", "[hwro
 // unresolved_guided_steps: routes unresolvable guided roles to the targeted wizard
 // ---------------------------------------------------------------------------
 
-// Save/restore helper for the six guided role keys so each [reconfig] test starts
+// Save/restore helper for the seven guided role keys so each [reconfig] test starts
 // from a known clean slate regardless of residual singleton Config state.
 namespace {
 struct GuidedKeyStash {
     Config* cfg;
     std::vector<std::pair<std::string, std::string>> saved;
     explicit GuidedKeyStash(Config* c) : cfg(c) {
-        for (const char* suffix : {helix::wizard::PART_FAN, helix::wizard::HOTEND_FAN,
-                                   helix::wizard::CHAMBER_FAN, helix::wizard::EXHAUST_FAN,
-                                   helix::wizard::HOTEND_HEATER, helix::wizard::BED_HEATER}) {
+        for (const char* suffix :
+             {helix::wizard::PART_FAN, helix::wizard::HOTEND_FAN, helix::wizard::CHAMBER_FAN,
+              helix::wizard::EXHAUST_FAN, helix::wizard::AUX_FAN, helix::wizard::HOTEND_HEATER,
+              helix::wizard::BED_HEATER}) {
             std::string k = cfg->df() + suffix;
             saved.push_back({k, cfg->get<std::string>(k, "")});
         }
@@ -294,4 +355,86 @@ TEST_CASE("decline_unresolved_guided_roles: present unsatisfiable role becomes \
 
     // Idempotent: a second pass with the role now declined ("") changes nothing.
     REQUIRE_FALSE(helix::decline_unresolved_guided_roles(cfg, client.hardware()));
+}
+
+TEST_CASE("settle_targeted_reconfig: finishing declines guided roles the session's steps "
+          "cannot show",
+          "[hwrole][reconfig]") {
+    // A preset can save a role the current printer cannot satisfy (ForgeX/zmod
+    // AD5M Pro: fans/aux = "fan_generic internal_fan" with no such fan live).
+    // FanSelect has no aux dropdown, so finishing the session can never resolve
+    // the aux role — without the settlement the wizard relaunches every boot.
+    Config* cfg = Config::get_instance();
+    GuidedKeyStash stash(cfg);
+    stash.clear_all();
+    stash.set(helix::wizard::AUX_FAN, "fan_generic internal_fan");
+    stash.set(helix::wizard::PART_FAN, "fan"); // resolvable: the step has a control for it
+
+    MoonrakerClientMock client;
+    client.set_fans({"fan"}); // live part fan; nothing matches the aux vocabulary
+    client.set_heaters({});
+
+    // Discovery routes the unresolved aux role into a FanSelect session...
+    std::vector<helix::wizard::StepId> expected = {helix::wizard::StepId::FanSelect};
+    REQUIRE(helix::unresolved_guided_steps(cfg, client.hardware()) == expected);
+
+    // ...the user finishes it (the app's on_complete runs the settlement)...
+    REQUIRE(helix::settle_targeted_reconfig(cfg, client.hardware()));
+
+    // ...and the next boot must not relaunch the wizard.
+    REQUIRE(helix::unresolved_guided_steps(cfg, client.hardware()).empty());
+}
+
+// ---------------------------------------------------------------------------
+// heal_heater_roles: the discovery-time batch over the hotend and bed roles.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// Saves the two heater role keys, restores them on scope exit.
+struct HeaterRoleKeys {
+    Config* cfg = Config::get_instance();
+    std::string hotend_key = cfg->df() + helix::wizard::HOTEND_HEATER;
+    std::string bed_key = cfg->df() + helix::wizard::BED_HEATER;
+    std::string hotend_orig = cfg->get<std::string>(hotend_key, "");
+    std::string bed_orig = cfg->get<std::string>(bed_key, "");
+    ~HeaterRoleKeys() {
+        cfg->set<std::string>(hotend_key, hotend_orig);
+        cfg->set<std::string>(bed_key, bed_orig);
+    }
+    void set(const std::string& hotend, const std::string& bed) {
+        cfg->set<std::string>(hotend_key, hotend);
+        cfg->set<std::string>(bed_key, bed);
+    }
+};
+
+} // namespace
+
+TEST_CASE("heal_heater_roles: a stale saved role is replaced and persisted", "[hwrole][config]") {
+    HeaterRoleKeys keys;
+    keys.set("extruder9", "heater_bed");
+
+    REQUIRE(helix::heal_heater_roles(keys.cfg, {"extruder", "heater_bed"}));
+    CHECK(keys.cfg->get<std::string>(keys.hotend_key, "") == "extruder");
+    CHECK(keys.cfg->get<std::string>(keys.bed_key, "") == "heater_bed");
+}
+
+TEST_CASE("heal_heater_roles: roles that already resolve change nothing", "[hwrole][config]") {
+    HeaterRoleKeys keys;
+    keys.set("extruder", "heater_bed");
+
+    CHECK_FALSE(helix::heal_heater_roles(keys.cfg, {"extruder", "heater_bed"}));
+    CHECK(keys.cfg->get<std::string>(keys.hotend_key, "") == "extruder");
+}
+
+TEST_CASE("heal_heater_roles: a bed-less printer keeps its saved bed role", "[hwrole][config]") {
+    HeaterRoleKeys keys;
+    keys.set("extruder", "heater_bed");
+
+    CHECK_FALSE(helix::heal_heater_roles(keys.cfg, {"extruder"}));
+    CHECK(keys.cfg->get<std::string>(keys.bed_key, "") == "heater_bed");
+}
+
+TEST_CASE("heal_heater_roles: no config is not a heal", "[hwrole][config]") {
+    CHECK_FALSE(helix::heal_heater_roles(nullptr, {"extruder"}));
 }

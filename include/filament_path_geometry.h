@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <vector>
+
 /**
  * @file filament_path_geometry.h
  * @brief Pure-geometry foundation for AMS filament-path rendering.
@@ -77,6 +79,11 @@ float path_length(const FilamentPath& p);
  */
 PathPoint path_point_at(const FilamentPath& p, float d, PathPoint* tangent_out = nullptr);
 
+/// Split @p p at arc-length @p d (clamped to the path): @p head gets the part
+/// before it, @p tail the rest, each continuing where the other stops. A
+/// segment the cut falls inside becomes one piece on either side.
+void split_path(const FilamentPath& p, float d, FilamentPath& head, FilamentPath& tail);
+
 /**
  * @brief Orthogonal lane routing from (x0,y0) DOWN to (x1,y1), y1 > y0.
  *
@@ -142,14 +149,35 @@ struct MergeLaneOut {
     PathPoint pts[4];
 };
 
+/// Fit the hub width to the perpendicular spacing of its incoming tubes, not
+/// just the horizontal spacing of their entries. Sources are ordered left to
+/// right, as in a spool row. Returns a width in [min_width, max_width]; if the
+/// available bounds cannot provide min_separation, returns max_width.
+float merge_fan_width(const MergeLaneIn* lanes, int n, float hub_cx, float hub_top, float min_width,
+                      float max_width, float entry_margin, float fillet_r, float max_slope,
+                      float min_separation, int reserve_each_side = 0);
+
+/// What a fan build worked out beyond the lane routes: the numbers a route that
+/// joins the fan without being one of its lanes needs to stay parallel to it.
+struct MergeFanInfo {
+    float approach_y = 0.0f;  ///< Y every lane's last vertical drops from
+    float min_bend_y = 0.0f;  ///< highest Y a diagonal may start at
+    float slope_left = 0.0f;  ///< dy/dx common to the diagonals landing left of the center
+    float slope_right = 0.0f; ///< the same for the right side
+    float entry_left = 0.0f;  ///< X of the entry reserved left of lane 0 (reserve > 0)
+    float entry_right = 0.0f; ///< X of the entry reserved right of the last lane
+    float entry_step = 0.0f;  ///< distance between neighboring entries
+};
+
 /**
- * @brief Separation-by-construction hub merge fan (parallel diagonals per side).
+ * @brief Hub merge fan with parallel diagonals per side.
  *
- * Computes non-overlapping, non-pinching routes for @p n lanes converging onto a
+ * Computes centerline routes for @p n lanes converging onto a
  * hub box. Lanes on each side of the hub center (left: slot_x < hub_cx, right:
  * mirrored) all run their long diagonal at ONE common slope, so parallel runs
  * cannot converge — perpendicular separation = entry_spacing * sin(atan(m_side)),
- * which the widened entry spread keeps comfortably above the tube gauge.
+ * which can be much smaller than the entry spacing on a short canvas. Callers
+ * must allow enough width/height for their stroke gauge (see merge_fan_width).
  *
  * Construction:
  *   - Entry x positions spread evenly across the hub box top edge using most of
@@ -178,9 +206,34 @@ struct MergeLaneOut {
  * @param fillet_r   fillet radius the caller will route with (sets approach gap).
  * @param max_slope  per-side slope ceiling (1.2 keeps angles sane on tall hubs).
  * @param out        per-lane waypoints (size @p n).
+ * @param reserve_each_side entry positions left empty at each end of the hub top: the entries
+ *                   spread over n + 2 * reserve positions and the lanes take the middle n.
+ *                   A route that wants its own entry beside the outermost lanes finds it in
+ *                   @p info.
+ * @param info       optional: the fan's shared numbers.
  */
 void build_merge_fan(const MergeLaneIn* lanes, int n, float hub_cx, float hub_top, float hub_w,
-                     float entry_margin, float fillet_r, float max_slope, MergeLaneOut* out);
+                     float entry_margin, float fillet_r, float max_slope, MergeLaneOut* out,
+                     int reserve_each_side = 0, MergeFanInfo* info = nullptr);
+
+/// One straight piece of a dash. A dash that crosses a bend of the polyline is two or more
+/// pieces sharing @p dash, each ending where the next begins.
+struct DashPiece {
+    PathPoint a;
+    PathPoint b;
+    int dash = 0; ///< index of the dash this piece belongs to
+};
+
+/**
+ * @brief Cut a polyline into dashes with ONE phase along its whole length.
+ *
+ * Starts with a dash and alternates @p dash_len on, @p gap_len off, measured along the
+ * path, so the pattern flows through every bend instead of restarting on each segment. The
+ * last dash is clipped where the path ends; a path shorter than one dash gives one partial
+ * dash. Fewer than two points, a zero-length path or a non-positive @p dash_len give none.
+ * A non-positive @p gap_len draws the path solid.
+ */
+std::vector<DashPiece> dash_polyline(const PathPoint* pts, int n, float dash_len, float gap_len);
 
 } // namespace pathgeo
 } // namespace ui

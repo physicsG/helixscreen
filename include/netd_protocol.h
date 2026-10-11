@@ -166,6 +166,13 @@ std::string binary_path();
  */
 bool available();
 
+/// True iff binary_path() is executable: the firmware ships netd, whatever the
+/// daemon is doing right now. Distinguishes "this machine has no netd" from
+/// "netd is installed and currently down", which decide different things -
+/// netd owns the WiFi driver, so with it merely down there is no interface for
+/// another supplicant to take.
+bool binary_present();
+
 // --- one-shot query. ----------------------------------------------------------
 
 /**

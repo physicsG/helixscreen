@@ -30,9 +30,9 @@ static struct MockQueueState {
     void reset() {
         double now = static_cast<double>(time(nullptr));
         jobs = {
-            {"0001", "benchy_v2.gcode", now - 3600},
-            {"0002", "calibration_cube.gcode", now - 1800},
-            {"0003", "phone_stand.gcode", now - 300},
+            {"0001", "3DBenchy.gcode", now - 3600},
+            {"0002", "xyz-10mm-calibration-cube.gcode", now - 1800},
+            {"0003", "stand_s.gcode", now - 300},
         };
         queue_state = "ready";
         next_id = 4; // Next-available ID; preserves 4-digit zero-padded format.
@@ -45,6 +45,23 @@ static struct MockQueueState {
     }
 } s_mock_queue;
 
+/// Builds the `queue_state` + `queued_jobs` result Moonraker returns from
+/// both server.job_queue.status and post_job.
+static json build_queue_result() {
+    double now = static_cast<double>(time(nullptr));
+    json result;
+    result["queue_state"] = s_mock_queue.queue_state;
+    json jobs_arr = json::array();
+    for (const auto& job : s_mock_queue.jobs) {
+        jobs_arr.push_back({{"job_id", job.job_id},
+                            {"filename", job.filename},
+                            {"time_added", job.time_added},
+                            {"time_in_queue", now - job.time_added}});
+    }
+    result["queued_jobs"] = jobs_arr;
+    return result;
+}
+
 void register_queue_handlers(std::unordered_map<std::string, MethodHandler>& registry) {
     // Reset state on every handler registration — ensures each MoonrakerClientMock
     // instance sees a fresh queue, preventing leakage between tests (L053).
@@ -55,17 +72,7 @@ void register_queue_handlers(std::unordered_map<std::string, MethodHandler>& reg
         []([[maybe_unused]] MoonrakerClientMock* self, [[maybe_unused]] const json& params,
            std::function<void(const json&)> success_cb,
            [[maybe_unused]] std::function<void(const MoonrakerError&)> error_cb) -> bool {
-        double now = static_cast<double>(time(nullptr));
-        json result;
-        result["queue_state"] = s_mock_queue.queue_state;
-        json jobs_arr = json::array();
-        for (const auto& job : s_mock_queue.jobs) {
-            jobs_arr.push_back({{"job_id", job.job_id},
-                                {"filename", job.filename},
-                                {"time_added", job.time_added},
-                                {"time_in_queue", now - job.time_added}});
-        }
-        result["queued_jobs"] = jobs_arr;
+        json result = build_queue_result();
 
         spdlog::debug("[MoonrakerClientMock] Returning mock job queue: {} jobs ({})",
                       s_mock_queue.jobs.size(), s_mock_queue.queue_state);
@@ -129,7 +136,9 @@ void register_queue_handlers(std::unordered_map<std::string, MethodHandler>& reg
             spdlog::info("[MoonrakerClientMock] Added job {} to queue: {}", id, filename);
         }
         if (success_cb) {
-            success_cb(json::object());
+            // Real Moonraker answers post_job with the resulting queue, which
+            // is how the caller learns the new job's id.
+            success_cb(json{{"result", build_queue_result()}});
         }
         return true;
     };

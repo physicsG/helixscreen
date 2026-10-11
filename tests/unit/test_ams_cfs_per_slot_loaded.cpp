@@ -15,12 +15,12 @@
  * The seated slot is the intersection of two signals that arrive on separate
  * Moonraker frames: the per-unit `T{n}.filament` letter names the lane, and
  * `filament_switch_sensor filament_sensor.filament_detected` says whether
- * anything actually reached the toolhead. handle_status_update now derives
+ * anything actually reached the toolhead. handle_status now derives
  * SlotStatus::LOADED from that pair on every frame, so the per-slot status and
  * the aggregate can no longer disagree.
  *
  * Fixture values follow the K2 Plus box shape documented in
- * CREALITY_K2_SUPPORT.md: per-unit `vender`/`remain_len`/`material_type`/
+ * CREALITY_CFS_K2_INTERNALS.md: per-unit `vender`/`remain_len`/`material_type`/
  * `color_value` arrays of 4, and the active-lane letter in `T{n}.filament`.
  */
 
@@ -39,7 +39,7 @@ using json = nlohmann::json;
 
 namespace {
 
-/// Feeds the production Moonraker status path (handle_status_update ->
+/// Feeds the production Moonraker status path (handle_status ->
 /// parse_box_status), so the parse chain under test is the real one.
 class CfsPerSlotLoadedHelper : public AmsBackendCfs {
   public:
@@ -231,7 +231,7 @@ TEST_CASE("CFS drops the LOADED stamp when no unit names an active lane", "[ams]
     REQUIRE(cfs.get_slot_info(1).status == SlotStatus::LOADED);
 
     // T1.filament goes "None" — parse_box_status leaves current_slot at -1 and
-    // handle_status_update clears the aggregate. The switch is still closed
+    // handle_status clears the aggregate. The switch is still closed
     // (filament in the tube), but no bay owns it, so no bay may claim LOADED.
     cfs.feed_box(make_box("None"));
 

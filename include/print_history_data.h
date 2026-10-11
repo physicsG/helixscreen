@@ -41,6 +41,9 @@ struct PrintHistoryJob {
     double total_duration = 0.0; ///< Total job time including pauses
     double filament_used = 0.0;  ///< Filament in mm
     bool exists = false;         ///< File still exists on disk
+    /// Printed from a copy this app rewrote: `filename` and the file fields
+    /// below describe the recovered original, not what the printer ran.
+    bool from_rewrite = false;
 
     // Metadata from G-code file
     std::string filament_type; ///< PLA, PETG, ABS, etc.
@@ -48,7 +51,6 @@ struct PrintHistoryJob {
     double layer_height = 0.0;
     double nozzle_temp = 0.0;
     double bed_temp = 0.0;
-    std::string thumbnail_path; ///< Largest thumbnail relative path (for simple consumers)
     std::vector<ThumbnailInfo> thumbnails; ///< All available thumbnails with dimensions
     std::string uuid;                      ///< Slicer-generated UUID (from metadata.uuid)
     size_t size_bytes = 0;                 ///< File size in bytes (from metadata.size)
@@ -58,7 +60,6 @@ struct PrintHistoryJob {
     double modified = 0.0;
 
     // Pre-formatted strings for display (set during parsing)
-    std::string duration_str; ///< "2h 15m"
     std::string date_str;     ///< "Dec 1, 14:30"
     std::string filament_str; ///< "12.5m"
 
@@ -67,6 +68,29 @@ struct PrintHistoryJob {
         timelapse_filename;     ///< Associated timelapse file (e.g., "timelapse/print_2024...mp4")
     bool has_timelapse = false; ///< True if timelapse file was found for this job
 };
+
+namespace helix {
+
+/**
+ * @brief When a job happened, for ageing and bucketing it
+ *
+ * Moonraker leaves end_time null, parsed as 0, on in_progress rows and on rows
+ * it marks interrupted at startup, so those fall back to start_time
+ * (prestonbrown/helixscreen#1713). 0 when neither is known.
+ */
+[[nodiscard]] inline double job_timestamp(const PrintHistoryJob& job) {
+    return job.end_time > 0 ? job.end_time : job.start_time;
+}
+
+/**
+ * @brief Count jobs into trend buckets, oldest first, the newest ending at @p now
+ * @param span_all Stretch the buckets from the oldest job to now instead of
+ *                 using @p period_seconds
+ */
+std::vector<int> count_trend_buckets(const std::vector<PrintHistoryJob>& jobs, double now,
+                                     int period_count, double period_seconds, bool span_all);
+
+} // namespace helix
 
 /**
  * @brief Aggregated history statistics
@@ -120,6 +144,26 @@ struct FilamentUsageByType {
     if (status == "in_progress" || status == "printing")
         return PrintJobStatus::IN_PROGRESS;
     return PrintJobStatus::UNKNOWN;
+}
+
+/**
+ * @brief Get the display word for a status
+ * @param status Job status
+ * @return Untranslated label, which is also its translation tag ("Completed", "Failed", ...)
+ */
+[[nodiscard]] inline const char* status_to_label(PrintJobStatus status) {
+    switch (status) {
+    case PrintJobStatus::COMPLETED:
+        return "Completed";
+    case PrintJobStatus::CANCELLED:
+        return "Cancelled";
+    case PrintJobStatus::ERROR:
+        return "Failed";
+    case PrintJobStatus::IN_PROGRESS:
+        return "In Progress";
+    default:
+        return "Unknown";
+    }
 }
 
 /**

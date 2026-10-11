@@ -1,14 +1,23 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// Pure gcode tool remapper for Snapmaker U1 / ACE.
+// Pure gcode tool remapper: rewrites the tool numbers baked into a sliced
+// file, for printers whose firmware has no tool-mapping table of its own and
+// so remap by printing a rewritten copy (AmsBackend::RemapStrategy::GcodeRewrite).
 //
-// On the U1 the logical->physical tool mapping is IDENTITY-baked across three
-// command families in a sliced file. A remap of logical tool a -> physical head
-// b must rewrite ALL THREE consistently:
+// A sliced file bakes the logical->physical tool mapping into four command
+// families. A remap of logical tool a -> physical head b must rewrite ALL FOUR
+// consistently:
 //   1. Prestart:  SM_PRINT_AUTO_FEED / SM_PRINT_EXTRUDER_PREHEAT /
-//                 SM_PRINT_FLOW_CALIBRATE  with  EXTRUDER=<n>
+//                 SM_PRINT_FLOW_CALIBRATE  with  EXTRUDER=<n>  (Snapmaker U1)
 //   2. Body:      a bare "T<n>" toolchange line
 //   3. Temps:     M104 / M109 lines carrying a "T<n>" tool token
+//   4. Params:    an INITIAL_TOOL=<n> or TOOL=<n> parameter on any command
+//                 line. INITIAL_TOOL is the slicer placeholder a start macro is
+//                 handed the first tool by; TOOL=<n> is the common spelling of
+//                 "this tool" across tool-changer macros
+//
+// Any other tool-naming parameter a start macro takes is the user's own
+// convention; unremapped_tool_params() reports those instead of guessing.
 //
 // Matching is deliberately conservative so comment lines and unrelated commands
 // are never touched. Each line is transformed from its ORIGINAL text only, so a
@@ -18,7 +27,12 @@
 
 #include "gcode_tool_remapper.h"
 
+#include "gcode_parser.h"
+#include "text_io.h"
+
+#include <algorithm>
 #include <cctype>
+#include <string_view>
 
 namespace helix {
 
@@ -50,31 +64,21 @@ bool starts_with(const std::string& s, const char* prefix) {
     return true;
 }
 
-// --- Family 2: bare toolchange line "T<digits>" (optional trailing whitespace) ---
-// Returns true and fills `out` if `line` is a bare toolchange whose index is
-// remapped. The trailing whitespace (if any) is preserved.
+// --- Family 2: standalone toolchange line, as helix::gcode::tool_index_for_line reads it ---
+// Returns true and fills `out` if `line` is a toolchange whose index is
+// remapped. Everything around the tool number is preserved byte for byte.
 bool try_bare_toolchange(const std::string& line, const std::map<int, int>& remap,
                          std::string& out) {
-    if (line.size() < 2 || line[0] != 'T') {
+    std::pair<size_t, size_t> digits;
+    const int idx = helix::gcode::tool_index_for_line(line, &digits);
+    if (idx < 0) {
         return false;
     }
-    size_t pos = 1;
-    if (!std::isdigit(static_cast<unsigned char>(line[pos]))) {
-        return false;
-    }
-    int idx = parse_uint(line, pos);
-    // Whatever remains must be whitespace only (e.g. trailing \r or spaces).
-    std::string tail = line.substr(pos);
-    for (char c : tail) {
-        if (!std::isspace(static_cast<unsigned char>(c))) {
-            return false; // e.g. "T1X" or "TOOL" -- not a bare toolchange
-        }
-    }
-    int m = mapped(idx, remap);
+    const int m = mapped(idx, remap);
     if (m == idx) {
         return false; // unmapped: leave untouched (preserves exact bytes)
     }
-    out = "T" + std::to_string(m) + tail;
+    out = line.substr(0, digits.first) + std::to_string(m) + line.substr(digits.second);
     return true;
 }
 
@@ -142,6 +146,108 @@ bool try_temp(const std::string& line, const std::map<int, int>& remap, std::str
     return false;
 }
 
+// --- Family 4: "<KEY>=<digits>" tool parameters, whole key case-insensitive ---
+constexpr std::string_view TOOL_PARAM_KEYS[] = {"INITIAL_TOOL", "TOOL"};
+
+bool iequals(std::string_view a, std::string_view b) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (std::toupper(static_cast<unsigned char>(a[i])) !=
+            std::toupper(static_cast<unsigned char>(b[i]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool icontains(std::string_view haystack, std::string_view needle) {
+    for (size_t i = 0; i + needle.size() <= haystack.size(); ++i) {
+        if (iequals(haystack.substr(i, needle.size()), needle)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Visits each whitespace-delimited KEY=VALUE token before any ';' comment.
+// `key_begin` is the token's offset in `line`.
+template <typename Visit> void for_each_param(std::string_view line, Visit&& visit) {
+    const size_t end = std::min(line.find(';'), line.size());
+    size_t i = 0;
+    while (i < end) {
+        while (i < end && std::isspace(static_cast<unsigned char>(line[i]))) {
+            ++i;
+        }
+        const size_t token_begin = i;
+        while (i < end && !std::isspace(static_cast<unsigned char>(line[i]))) {
+            ++i;
+        }
+        const std::string_view token = line.substr(token_begin, i - token_begin);
+        const size_t eq = token.find('=');
+        if (eq != std::string_view::npos && eq > 0) {
+            visit(token.substr(0, eq), token.substr(eq + 1), token_begin);
+        }
+    }
+}
+
+bool is_tool_param_key(std::string_view key) {
+    for (std::string_view tool_key : TOOL_PARAM_KEYS) {
+        if (iequals(key, tool_key)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The values the rewrite maps: a plain tool number. "T0" names a tool and
+// "1x" is not a number, so both are left, and reported.
+bool is_tool_number(std::string_view value) {
+    if (value.empty()) {
+        return false;
+    }
+    for (char c : value) {
+        if (!std::isdigit(static_cast<unsigned char>(c))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool try_tool_params(const std::string& line, const std::map<int, int>& remap, std::string& out) {
+    // The command word itself is never a parameter.
+    const size_t first_space = line.find_first_of(" \t");
+    if (line.empty() || line[0] == ';' || first_space == std::string::npos) {
+        return false;
+    }
+    // Every value is read from `line` and spliced into `out` in order, so two
+    // parameters on one line are each mapped from their original number.
+    std::string rewritten;
+    size_t copied = 0;
+    for_each_param(std::string_view(line).substr(first_space),
+                   [&](std::string_view key, std::string_view value, size_t key_begin) {
+                       if (!is_tool_param_key(key) || !is_tool_number(value)) {
+                           return;
+                       }
+                       const size_t value_begin = first_space + key_begin + key.size() + 1;
+                       size_t pos = value_begin;
+                       int idx = parse_uint(line, pos);
+                       int m = mapped(idx, remap);
+                       if (m == idx) {
+                           return;
+                       }
+                       rewritten.append(line, copied, value_begin - copied);
+                       rewritten += std::to_string(m);
+                       copied = pos;
+                   });
+    if (copied == 0) {
+        return false;
+    }
+    out = rewritten + line.substr(copied);
+    return true;
+}
+
 // Shared per-line transform. Returns the rewritten line, or `line` unchanged.
 // `line` must NOT contain a trailing '\n' (callers split on newlines first).
 std::string transform_line(const std::string& line, const std::map<int, int>& remap) {
@@ -155,55 +261,116 @@ std::string transform_line(const std::string& line, const std::map<int, int>& re
     if (try_temp(line, remap, out)) {
         return out;
     }
+    if (try_tool_params(line, remap, out)) {
+        return out;
+    }
     return line;
+}
+
+// Rewrites each record `next` yields and hands the output to `emit`. A newline
+// is emitted BEFORE every line but the first, so the final one is written only
+// when the source's last record carried its delimiter.
+template <typename NextLine, typename Emit>
+size_t remap_lines(NextLine&& next, Emit&& emit, const std::map<int, int>& remap) {
+    size_t changed = 0;
+    std::string line;
+    bool first = true;
+    bool had_delim = false;
+    bool source_ended_with_newline = false;
+    while (next(line, had_delim)) {
+        source_ended_with_newline = had_delim;
+        if (!first) {
+            emit(std::string_view("\n"));
+        }
+        std::string rewritten = transform_line(line, remap);
+        if (rewritten != line) {
+            ++changed;
+        }
+        emit(std::string_view(rewritten));
+        first = false;
+    }
+    if (source_ended_with_newline) {
+        emit(std::string_view("\n"));
+    }
+    return changed;
 }
 
 } // namespace
 
-std::string GcodeToolRemapper::apply_to_string(const std::string& gcode,
-                                               const std::map<int, int>& remap) {
-    std::string result;
-    result.reserve(gcode.size());
-
-    size_t start = 0;
-    const size_t n = gcode.size();
-    while (start < n) {
-        size_t nl = gcode.find('\n', start);
-        if (nl == std::string::npos) {
-            // Final line with no trailing newline.
-            result += transform_line(gcode.substr(start), remap);
-            break;
-        }
-        result += transform_line(gcode.substr(start, nl - start), remap);
-        result += '\n';
-        start = nl + 1;
+std::optional<size_t> GcodeToolRemapper::apply_to_file(const std::string& in_path,
+                                                       const std::string& out_path,
+                                                       const std::map<int, int>& remap) {
+    text_io::LineReader in(in_path);
+    if (!in) {
+        return std::nullopt;
     }
-    return result;
+    text_io::File out = text_io::open_file(out_path, "wb");
+    if (!out) {
+        return std::nullopt;
+    }
+    bool write_ok = true;
+    const size_t changed = remap_lines(
+        [&](std::string& line, bool& had_delim) {
+            if (!in.next(line)) {
+                return false;
+            }
+            had_delim = in.last_had_delimiter();
+            return true;
+        },
+        [&](std::string_view piece) {
+            write_ok = text_io::write_all(out.get(), piece) && write_ok;
+        },
+        remap);
+    if (!text_io::close(out) || !write_ok) {
+        return std::nullopt;
+    }
+    return changed;
 }
 
-std::vector<GcodeLineReplacement>
-GcodeToolRemapper::build_line_replacements(const std::string& gcode,
-                                           const std::map<int, int>& remap) {
-    std::vector<GcodeLineReplacement> out;
-
-    size_t start = 0;
-    const size_t n = gcode.size();
-    int line_number = 0;
-    while (start < n) {
-        ++line_number;
-        size_t nl = gcode.find('\n', start);
-        std::string line =
-            (nl == std::string::npos) ? gcode.substr(start) : gcode.substr(start, nl - start);
-        std::string rewritten = transform_line(line, remap);
-        if (rewritten != line) {
-            out.push_back(GcodeLineReplacement{line_number, std::move(rewritten)});
-        }
-        if (nl == std::string::npos) {
-            break;
-        }
-        start = nl + 1;
-    }
+std::string GcodeToolRemapper::apply_to_string(const std::string& gcode,
+                                               const std::map<int, int>& remap) {
+    const std::string_view text(gcode);
+    auto records = text_io::lines(text);
+    auto it = records.begin();
+    std::string out;
+    out.reserve(gcode.size());
+    remap_lines(
+        [&](std::string& line, bool& had_delim) {
+            if (it == records.end()) {
+                return false;
+            }
+            const std::string_view rec = *it;
+            line.assign(rec);
+            had_delim = rec.data() + rec.size() < text.data() + text.size();
+            ++it;
+            return true;
+        },
+        [&](std::string_view piece) { out.append(piece); }, remap);
     return out;
+}
+
+std::vector<std::string> GcodeToolRemapper::unremapped_tool_params(std::string_view line) {
+    std::vector<std::string> keys;
+    for_each_param(line, [&](std::string_view key, std::string_view value, size_t) {
+        if (is_tool_param_key(key)) {
+            if (!is_tool_number(value)) {
+                keys.emplace_back(key); // a tool name such as TOOL=T0 is not rewritten
+            }
+            return;
+        }
+        const bool t_numbered = key.size() >= 2 && (key[0] == 'T' || key[0] == 't') &&
+                                std::isdigit(static_cast<unsigned char>(key[1]));
+        size_t after_digits = 1;
+        while (t_numbered && after_digits < key.size() &&
+               std::isdigit(static_cast<unsigned char>(key[after_digits]))) {
+            ++after_digits;
+        }
+        const bool t_key = t_numbered && (after_digits == key.size() || key[after_digits] == '_');
+        if (t_key || iequals(key, "T") || icontains(key, "EXTRUDER") || icontains(key, "TOOL")) {
+            keys.emplace_back(key);
+        }
+    });
+    return keys;
 }
 
 } // namespace helix

@@ -48,8 +48,8 @@ TEST_CASE("Temperature characterization: observer fires when extruder_temp chang
 
     int user_data[2] = {0, -1}; // [callback_count, last_value]
 
-    lv_observer_t* observer =
-        lv_subject_add_observer(state.get_active_extruder_temp_subject(), observer_cb, user_data);
+    lv_observer_t* observer = lv_subject_add_observer(
+        state.temperature_state().get_active_extruder_temp_subject(), observer_cb, user_data);
 
     // LVGL auto-notifies observers when first added (fires immediately with current value)
     REQUIRE(user_data[0] == 1);
@@ -91,8 +91,8 @@ TEST_CASE("Temperature characterization: observer fires when extruder_target cha
 
     int user_data[2] = {0, -1};
 
-    lv_observer_t* observer =
-        lv_subject_add_observer(state.get_active_extruder_target_subject(), observer_cb, user_data);
+    lv_observer_t* observer = lv_subject_add_observer(
+        state.temperature_state().get_active_extruder_target_subject(), observer_cb, user_data);
 
     // Initial notification
     REQUIRE(user_data[0] == 1);
@@ -126,8 +126,8 @@ TEST_CASE("Temperature characterization: observer fires when bed_temp changes",
 
     int user_data[2] = {0, -1};
 
-    lv_observer_t* observer =
-        lv_subject_add_observer(state.get_bed_temp_subject(), observer_cb, user_data);
+    lv_observer_t* observer = lv_subject_add_observer(
+        state.temperature_state().get_bed_temp_subject(), observer_cb, user_data);
 
     // Initial notification
     REQUIRE(user_data[0] == 1);
@@ -162,8 +162,8 @@ TEST_CASE("Temperature characterization: observer fires when bed_target changes"
 
     int user_data[2] = {0, -1};
 
-    lv_observer_t* observer =
-        lv_subject_add_observer(state.get_bed_target_subject(), observer_cb, user_data);
+    lv_observer_t* observer = lv_subject_add_observer(
+        state.temperature_state().get_bed_target_subject(), observer_cb, user_data);
 
     // Initial notification
     REQUIRE(user_data[0] == 1);
@@ -197,26 +197,30 @@ TEST_CASE("Temperature characterization: subjects survive reset_for_testing cycl
     state.update_from_status(status);
 
     // Verify values were set
-    REQUIRE(lv_subject_get_int(state.get_active_extruder_temp_subject()) == 2000);
-    REQUIRE(lv_subject_get_int(state.get_active_extruder_target_subject()) == 2100);
-    REQUIRE(lv_subject_get_int(state.get_bed_temp_subject()) == 550);
-    REQUIRE(lv_subject_get_int(state.get_bed_target_subject()) == 600);
+    REQUIRE(lv_subject_get_int(state.temperature_state().get_active_extruder_temp_subject()) ==
+            2000);
+    REQUIRE(lv_subject_get_int(state.temperature_state().get_active_extruder_target_subject()) ==
+            2100);
+    REQUIRE(lv_subject_get_int(state.temperature_state().get_bed_temp_subject()) == 550);
+    REQUIRE(lv_subject_get_int(state.temperature_state().get_bed_target_subject()) == 600);
 
     // Reset and reinitialize
     PrinterStateTestAccess::reset(state);
     state.init_subjects(false);
 
     // After reset, values should be back to defaults (0)
-    REQUIRE(lv_subject_get_int(state.get_active_extruder_temp_subject()) == 0);
-    REQUIRE(lv_subject_get_int(state.get_active_extruder_target_subject()) == 0);
-    REQUIRE(lv_subject_get_int(state.get_bed_temp_subject()) == 0);
-    REQUIRE(lv_subject_get_int(state.get_bed_target_subject()) == 0);
+    REQUIRE(lv_subject_get_int(state.temperature_state().get_active_extruder_temp_subject()) == 0);
+    REQUIRE(lv_subject_get_int(state.temperature_state().get_active_extruder_target_subject()) ==
+            0);
+    REQUIRE(lv_subject_get_int(state.temperature_state().get_bed_temp_subject()) == 0);
+    REQUIRE(lv_subject_get_int(state.temperature_state().get_bed_target_subject()) == 0);
 
     // Subjects should still be functional after reset
     json new_status = {{"extruder", {{"temperature", 150.0}}}};
     state.update_from_status(new_status);
 
-    REQUIRE(lv_subject_get_int(state.get_active_extruder_temp_subject()) == 1500);
+    REQUIRE(lv_subject_get_int(state.temperature_state().get_active_extruder_temp_subject()) ==
+            1500);
 }
 
 // ============================================================================
@@ -232,49 +236,58 @@ TEST_CASE("Temperature characterization: all 4 temp subjects are independent",
     state.init_subjects(false);
 
     // All subjects should start at 0
-    REQUIRE(lv_subject_get_int(state.get_active_extruder_temp_subject()) == 0);
-    REQUIRE(lv_subject_get_int(state.get_active_extruder_target_subject()) == 0);
-    REQUIRE(lv_subject_get_int(state.get_bed_temp_subject()) == 0);
-    REQUIRE(lv_subject_get_int(state.get_bed_target_subject()) == 0);
+    REQUIRE(lv_subject_get_int(state.temperature_state().get_active_extruder_temp_subject()) == 0);
+    REQUIRE(lv_subject_get_int(state.temperature_state().get_active_extruder_target_subject()) ==
+            0);
+    REQUIRE(lv_subject_get_int(state.temperature_state().get_bed_temp_subject()) == 0);
+    REQUIRE(lv_subject_get_int(state.temperature_state().get_bed_target_subject()) == 0);
 
     SECTION("changing extruder_temp does not affect others") {
         json status = {{"extruder", {{"temperature", 100.0}}}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_active_extruder_temp_subject()) == 1000);
-        REQUIRE(lv_subject_get_int(state.get_active_extruder_target_subject()) == 0);
-        REQUIRE(lv_subject_get_int(state.get_bed_temp_subject()) == 0);
-        REQUIRE(lv_subject_get_int(state.get_bed_target_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.temperature_state().get_active_extruder_temp_subject()) ==
+                1000);
+        REQUIRE(lv_subject_get_int(
+                    state.temperature_state().get_active_extruder_target_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.temperature_state().get_bed_temp_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.temperature_state().get_bed_target_subject()) == 0);
     }
 
     SECTION("changing extruder_target does not affect others") {
         json status = {{"extruder", {{"target", 200.0}}}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_active_extruder_temp_subject()) == 0);
-        REQUIRE(lv_subject_get_int(state.get_active_extruder_target_subject()) == 2000);
-        REQUIRE(lv_subject_get_int(state.get_bed_temp_subject()) == 0);
-        REQUIRE(lv_subject_get_int(state.get_bed_target_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.temperature_state().get_active_extruder_temp_subject()) ==
+                0);
+        REQUIRE(lv_subject_get_int(
+                    state.temperature_state().get_active_extruder_target_subject()) == 2000);
+        REQUIRE(lv_subject_get_int(state.temperature_state().get_bed_temp_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.temperature_state().get_bed_target_subject()) == 0);
     }
 
     SECTION("changing bed_temp does not affect others") {
         json status = {{"heater_bed", {{"temperature", 50.0}}}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_active_extruder_temp_subject()) == 0);
-        REQUIRE(lv_subject_get_int(state.get_active_extruder_target_subject()) == 0);
-        REQUIRE(lv_subject_get_int(state.get_bed_temp_subject()) == 500);
-        REQUIRE(lv_subject_get_int(state.get_bed_target_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.temperature_state().get_active_extruder_temp_subject()) ==
+                0);
+        REQUIRE(lv_subject_get_int(
+                    state.temperature_state().get_active_extruder_target_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.temperature_state().get_bed_temp_subject()) == 500);
+        REQUIRE(lv_subject_get_int(state.temperature_state().get_bed_target_subject()) == 0);
     }
 
     SECTION("changing bed_target does not affect others") {
         json status = {{"heater_bed", {{"target", 75.0}}}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_active_extruder_temp_subject()) == 0);
-        REQUIRE(lv_subject_get_int(state.get_active_extruder_target_subject()) == 0);
-        REQUIRE(lv_subject_get_int(state.get_bed_temp_subject()) == 0);
-        REQUIRE(lv_subject_get_int(state.get_bed_target_subject()) == 750);
+        REQUIRE(lv_subject_get_int(state.temperature_state().get_active_extruder_temp_subject()) ==
+                0);
+        REQUIRE(lv_subject_get_int(
+                    state.temperature_state().get_active_extruder_target_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.temperature_state().get_bed_temp_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.temperature_state().get_bed_target_subject()) == 750);
     }
 }
 
@@ -292,10 +305,12 @@ TEST_CASE("Temperature characterization: simultaneous updates work correctly",
     state.update_from_status(status);
 
     // All values should be updated independently
-    REQUIRE(lv_subject_get_int(state.get_active_extruder_temp_subject()) == 2055);
-    REQUIRE(lv_subject_get_int(state.get_active_extruder_target_subject()) == 2100);
-    REQUIRE(lv_subject_get_int(state.get_bed_temp_subject()) == 605);
-    REQUIRE(lv_subject_get_int(state.get_bed_target_subject()) == 650);
+    REQUIRE(lv_subject_get_int(state.temperature_state().get_active_extruder_temp_subject()) ==
+            2055);
+    REQUIRE(lv_subject_get_int(state.temperature_state().get_active_extruder_target_subject()) ==
+            2100);
+    REQUIRE(lv_subject_get_int(state.temperature_state().get_bed_temp_subject()) == 605);
+    REQUIRE(lv_subject_get_int(state.temperature_state().get_bed_target_subject()) == 650);
 }
 
 // ============================================================================
@@ -313,31 +328,35 @@ TEST_CASE("Temperature characterization: decidegree storage precision",
     SECTION("0.1C precision is preserved") {
         json status = {{"extruder", {{"temperature", 205.1}}}};
         state.update_from_status(status);
-        REQUIRE(lv_subject_get_int(state.get_active_extruder_temp_subject()) == 2051);
+        REQUIRE(lv_subject_get_int(state.temperature_state().get_active_extruder_temp_subject()) ==
+                2051);
     }
 
     SECTION("whole degrees store correctly") {
         json status = {{"extruder", {{"temperature", 200.0}}}};
         state.update_from_status(status);
-        REQUIRE(lv_subject_get_int(state.get_active_extruder_temp_subject()) == 2000);
+        REQUIRE(lv_subject_get_int(state.temperature_state().get_active_extruder_temp_subject()) ==
+                2000);
     }
 
     SECTION("zero temperature stores correctly") {
         json status = {{"extruder", {{"temperature", 0.0}}}};
         state.update_from_status(status);
-        REQUIRE(lv_subject_get_int(state.get_active_extruder_temp_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.temperature_state().get_active_extruder_temp_subject()) ==
+                0);
     }
 
     SECTION("high temperature stores correctly") {
         json status = {{"extruder", {{"temperature", 300.0}}}};
         state.update_from_status(status);
-        REQUIRE(lv_subject_get_int(state.get_active_extruder_temp_subject()) == 3000);
+        REQUIRE(lv_subject_get_int(state.temperature_state().get_active_extruder_temp_subject()) ==
+                3000);
     }
 
     SECTION("bed temperature precision") {
         json status = {{"heater_bed", {{"temperature", 60.7}}}};
         state.update_from_status(status);
-        REQUIRE(lv_subject_get_int(state.get_bed_temp_subject()) == 607);
+        REQUIRE(lv_subject_get_int(state.temperature_state().get_bed_temp_subject()) == 607);
     }
 }
 
@@ -367,9 +386,9 @@ TEST_CASE("Temperature characterization: observers on different subjects are ind
     };
 
     lv_observer_t* extruder_observer = lv_subject_add_observer(
-        state.get_active_extruder_temp_subject(), extruder_cb, &extruder_count);
-    lv_observer_t* bed_observer =
-        lv_subject_add_observer(state.get_bed_temp_subject(), bed_cb, &bed_count);
+        state.temperature_state().get_active_extruder_temp_subject(), extruder_cb, &extruder_count);
+    lv_observer_t* bed_observer = lv_subject_add_observer(
+        state.temperature_state().get_bed_temp_subject(), bed_cb, &bed_count);
 
     // Both observers fire on initial add
     REQUIRE(extruder_count == 1);
@@ -410,12 +429,12 @@ TEST_CASE("Temperature characterization: multiple observers on same subject all 
         (*count)++;
     };
 
-    lv_observer_t* observer1 =
-        lv_subject_add_observer(state.get_active_extruder_temp_subject(), observer_cb, &count1);
-    lv_observer_t* observer2 =
-        lv_subject_add_observer(state.get_active_extruder_temp_subject(), observer_cb, &count2);
-    lv_observer_t* observer3 =
-        lv_subject_add_observer(state.get_active_extruder_temp_subject(), observer_cb, &count3);
+    lv_observer_t* observer1 = lv_subject_add_observer(
+        state.temperature_state().get_active_extruder_temp_subject(), observer_cb, &count1);
+    lv_observer_t* observer2 = lv_subject_add_observer(
+        state.temperature_state().get_active_extruder_temp_subject(), observer_cb, &count2);
+    lv_observer_t* observer3 = lv_subject_add_observer(
+        state.temperature_state().get_active_extruder_temp_subject(), observer_cb, &count3);
 
     // All observers fire on initial add
     REQUIRE(count1 == 1);
@@ -453,20 +472,24 @@ TEST_CASE("Temperature characterization: partial status updates preserve other v
     state.update_from_status(initial);
 
     // Verify initial values
-    REQUIRE(lv_subject_get_int(state.get_active_extruder_temp_subject()) == 2000);
-    REQUIRE(lv_subject_get_int(state.get_active_extruder_target_subject()) == 2100);
-    REQUIRE(lv_subject_get_int(state.get_bed_temp_subject()) == 600);
-    REQUIRE(lv_subject_get_int(state.get_bed_target_subject()) == 650);
+    REQUIRE(lv_subject_get_int(state.temperature_state().get_active_extruder_temp_subject()) ==
+            2000);
+    REQUIRE(lv_subject_get_int(state.temperature_state().get_active_extruder_target_subject()) ==
+            2100);
+    REQUIRE(lv_subject_get_int(state.temperature_state().get_bed_temp_subject()) == 600);
+    REQUIRE(lv_subject_get_int(state.temperature_state().get_bed_target_subject()) == 650);
 
     // Update only extruder temp - other values should not change
     json partial = {{"extruder", {{"temperature", 205.0}}}};
     state.update_from_status(partial);
 
-    REQUIRE(lv_subject_get_int(state.get_active_extruder_temp_subject()) == 2050);
+    REQUIRE(lv_subject_get_int(state.temperature_state().get_active_extruder_temp_subject()) ==
+            2050);
     // These should be unchanged:
-    REQUIRE(lv_subject_get_int(state.get_active_extruder_target_subject()) == 2100);
-    REQUIRE(lv_subject_get_int(state.get_bed_temp_subject()) == 600);
-    REQUIRE(lv_subject_get_int(state.get_bed_target_subject()) == 650);
+    REQUIRE(lv_subject_get_int(state.temperature_state().get_active_extruder_target_subject()) ==
+            2100);
+    REQUIRE(lv_subject_get_int(state.temperature_state().get_bed_temp_subject()) == 600);
+    REQUIRE(lv_subject_get_int(state.temperature_state().get_bed_target_subject()) == 650);
 }
 
 TEST_CASE("Temperature characterization: empty status does not affect values",
@@ -481,13 +504,15 @@ TEST_CASE("Temperature characterization: empty status does not affect values",
     json initial = {{"extruder", {{"temperature", 200.0}}}};
     state.update_from_status(initial);
 
-    REQUIRE(lv_subject_get_int(state.get_active_extruder_temp_subject()) == 2000);
+    REQUIRE(lv_subject_get_int(state.temperature_state().get_active_extruder_temp_subject()) ==
+            2000);
 
     // Empty status should not change anything
     json empty = json::object();
     state.update_from_status(empty);
 
-    REQUIRE(lv_subject_get_int(state.get_active_extruder_temp_subject()) == 2000);
+    REQUIRE(lv_subject_get_int(state.temperature_state().get_active_extruder_temp_subject()) ==
+            2000);
 }
 
 // ============================================================================
@@ -720,13 +745,12 @@ TEST_CASE("Multi-extruder: re-init with different count works cleanly",
     temp.update_from_status(status);
     REQUIRE(lv_subject_get_int(temp.get_extruder_temp_subject("extruder1")) == 2200);
 
-    // Re-init with 3 extruders - old subjects cleaned up, new ones at 0
+    // Re-init with 3 extruders - survivors keep their subjects, the new one starts at 0
     temp.init_extruders({"extruder", "extruder1", "extruder2"});
     REQUIRE(temp.extruder_count() == 3);
 
-    // New subjects should start at 0
-    REQUIRE(lv_subject_get_int(temp.get_extruder_temp_subject("extruder")) == 0);
-    REQUIRE(lv_subject_get_int(temp.get_extruder_temp_subject("extruder1")) == 0);
+    REQUIRE(lv_subject_get_int(temp.get_extruder_temp_subject("extruder")) == 2000);
+    REQUIRE(lv_subject_get_int(temp.get_extruder_temp_subject("extruder1")) == 2200);
     REQUIRE(lv_subject_get_int(temp.get_extruder_temp_subject("extruder2")) == 0);
 }
 

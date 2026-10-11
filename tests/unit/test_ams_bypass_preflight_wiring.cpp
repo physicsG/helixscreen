@@ -19,6 +19,7 @@
  */
 
 #include "../lvgl_test_fixture.h"
+#include "../test_helpers/mock_bypass.h"
 #include "ams_backend_mock.h"
 #include "ams_state.h"
 #include "ams_types.h"
@@ -37,6 +38,7 @@ AmsBackendMock* install_mock(AmsState& ams, int slots) {
     auto* raw = mock.get();
     ams.set_backend(std::move(mock));
     raw->start();
+    REQUIRE(helix::test::unload_for_bypass(*raw));
     return raw;
 }
 
@@ -96,6 +98,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "engaging bypass bumps slots_version so the ch
     auto* backend = secondary_owned.get();
     REQUIRE(ams.add_backend(std::move(secondary_owned)) == 1);
     backend->start();
+    REQUIRE(helix::test::unload_for_bypass(*backend));
 
     // slots_version is the ONLY thing that re-runs PrintSelectDetailView's cached
     // pre-flight result. Without an explicit bump, engaging bypass with a file
@@ -139,6 +142,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "AmsState bypass check covers every backend, n
     auto* secondary = secondary_owned.get();
     REQUIRE(ams.add_backend(std::move(secondary_owned)) == 1);
     secondary->start();
+    REQUIRE(helix::test::unload_for_bypass(*secondary));
 
     REQUIRE_FALSE(ams.any_bypass_active());
 

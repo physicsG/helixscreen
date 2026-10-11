@@ -64,7 +64,7 @@ class InputShaperPanelProgressFixture : public LVGLTestFixture {
         // read as fully homed so the calibrator goes straight to the command.
         PrinterStateTestAccess::reset(get_printer_state());
         get_printer_state().init_subjects(false);
-        lv_subject_copy_string(get_printer_state().get_homed_axes_subject(), "xyz");
+        lv_subject_copy_string(get_printer_state().motion_state().get_homed_axes_subject(), "xyz");
 
         panel_ = &get_global_input_shaper_panel();
         panel_->init_subjects();
@@ -77,7 +77,8 @@ class InputShaperPanelProgressFixture : public LVGLTestFixture {
     }
 
     ~InputShaperPanelProgressFixture() override {
-        panel_->on_deactivate(); // cancels a running calibration + the elapsed timer
+        panel_->on_deactivate(
+            DeactivateReason::NavigateAway); // cancels a running calibration + the elapsed timer
         helix::ui::UpdateQueue::instance().drain();
         api_.reset();
     }
@@ -208,7 +209,7 @@ TEST_CASE_METHOD(InputShaperPanelProgressFixture,
     REQUIRE(elapsed_timer != nullptr);
     lv_timer_set_repeat_count(elapsed_timer, 1000);
 
-    panel_->on_deactivate();
+    panel_->on_deactivate(DeactivateReason::NavigateAway);
 
     // Fixed drain, not pump_until: the mock transcript must fully play out so
     // no timer outlives the fixture, even while we assert the label froze.

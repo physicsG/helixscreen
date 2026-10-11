@@ -6,9 +6,7 @@
   <view name="thermistor_configure_picker" extends="context_menu_backdrop">
     <!-- Card positioned and height-capped by ContextMenu. The rows apply live,
          so the header offers Done rather than an X. -->
-    <context_menu_card title="Select Sensors"
-                       title_tag="Select Sensors" close_icon="check" close_text="Done" close_text_tag="Done"
-                       scrollable="true">
+    <context_menu_card title="Select Sensors" close_icon="check" close_text="Done" scrollable="true">
       <!-- Sensor rows populated dynamically by C++ -->
       <lv_obj name="sensor_list"
               width="100%" height="content" flex_flow="column" style_pad_all="#space_xs" style_pad_gap="0"

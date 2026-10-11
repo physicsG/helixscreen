@@ -46,6 +46,19 @@ setup() {
     HOST_MOD_ROOT="$MOD_ROOT"
 }
 
+# Source configure_platform's module (main.sh) with its source-time traps
+# stripped: an ERR trap left armed inside bats fires on the first failing
+# assertion into an undefined error_handler and swallows bats' result line
+# (same approach as test_mod_owned_competing_uis.bats).
+source_main_platform() {
+    local main_patched="$BATS_TEST_TMPDIR/main.sh"
+    sed -e "/^trap /d" \
+        "$WORKTREE_ROOT/scripts/lib/installer/main.sh" > "$main_patched"
+    unset _HELIX_MAIN_SOURCED
+    # shellcheck disable=SC1090
+    . "$main_patched"
+}
+
 # Lay out a mod tree at $1 and point the path variables at it.
 use_mod_root() {
     MOD_ROOT="$1"
@@ -53,6 +66,7 @@ use_mod_root() {
     SCREEN_SH="$MOD_ROOT/.shell/screen.sh"
     VAR_CFG="$MOD_DATA/variables.cfg"
     PREV_DISPLAY_F="$MOD_DATA/helixscreen_prev_display"
+    FORGEX_PRINTER_CFG="$(dirname "$MOD_ROOT")/printer.cfg"
 
     mkdir -p "$MOD_ROOT/.shell" \
              "$MOD_ROOT/.root" \
@@ -77,6 +91,19 @@ write_variables_cfg() {
 backlight = 100
 display = '$1'
 sound = 1
+EOF
+}
+
+# printer.cfg beside the mod tree, with the display include the mod's own
+# tooling keeps there (S00init at boot, zdisplay.sh on a SET_MOD). $1 is the
+# include basename without .cfg: stock, feather, guppy or headless. The decoy
+# includes mirror a real printer.cfg, which carries plenty of others.
+write_printer_cfg() {
+    cat > "$FORGEX_PRINTER_CFG" <<EOF
+# Forge-X printer.cfg
+[include ./mod/config/macros.cfg]
+[include ./mod/config/$1.cfg]
+[include ./mod/config/leds.cfg]
 EOF
 }
 
@@ -459,6 +486,175 @@ EOF
     [ "$(current_display_mode)" = "TFT" ]
 }
 
+@test "a record write that fails fails the takeover instead of proceeding" {
+    # Without the record, uninstall cannot know the printer's real pre-install
+    # mode and restores the GUPPY fallback -- a mode this printer never had.
+    # The takeover must not move the display to HEADLESS when it cannot write
+    # the record that undoes the move.
+    write_variables_cfg FEATHER
+    local shim="$BATS_TEST_TMPDIR/sudo-fail-record"
+    cat > "$shim" <<EOF
+#!/bin/sh
+if [ "\$1" = "tee" ] && [ "\$2" = "$PREV_DISPLAY_F" ]; then
+    exit 1
+fi
+exec "\$@"
+EOF
+    chmod +x "$shim"
+    SUDO="$shim"
+    export SUDO
+
+    run configure_forgex_display
+    [ "$status" -ne 0 ] || fail "takeover reported success without a record"
+    [ "$(current_display_mode)" = "FEATHER" ] \
+        || fail "display moved to HEADLESS with no record to restore it"
+    [ ! -e "$PREV_DISPLAY_F" ]
+}
+
+# --- configure_forgex_display: the record is what the machine RUNS ---
+#
+# ForgeX keeps display state in two files that agree only after a reboot:
+# variables.cfg's display variable (what the machine will run next boot) and
+# printer.cfg's `[include ./mod/config/<mode>.cfg]` (what it runs now - only
+# the mod's S00init/zdisplay.sh ever writes that line). Recording the variable
+# while the two disagree stores a mode the printer is not running, and an
+# uninstall then restores a UI that was never the one displaced.
+
+@test "an arrival whose printer.cfg runs a different mode than variables.cfg refuses the takeover" {
+    # The install must stop and say so: rebooting lets the mod's boot tooling
+    # reconcile the include to the variable, and the re-run then records a
+    # mode that is actually running.
+    write_variables_cfg GUPPY
+    write_printer_cfg stock
+    log_error() { echo "[ERROR] $1"; }
+
+    run configure_forgex_display
+
+    [ "$status" -ne 0 ] || fail "takeover accepted a variables.cfg/printer.cfg pair that disagrees"
+    [ "$(current_display_mode)" = "GUPPY" ] \
+        || fail "the refused takeover still rewrote the display mode"
+    [ ! -e "$PREV_DISPLAY_F" ] \
+        || fail "the refused takeover still wrote a record"
+    contains "GUPPY" "$output"
+    contains "STOCK" "$output"
+    contains "Reboot" "$output"
+}
+
+@test "an arrival confirmed by printer.cfg records the running mode" {
+    # The include and the variable agree here, so either spelling would name
+    # the same mode; the assertion pins that a confirmed arrival still lands
+    # in the record and the takeover proceeds.
+    write_variables_cfg GUPPY
+    write_printer_cfg guppy
+
+    run configure_forgex_display
+
+    [ "$status" -eq 0 ] || fail "takeover refused an agreeing pair: $output"
+    [ "$(cat "$PREV_DISPLAY_F")" = "GUPPY" ]
+    [ "$(current_display_mode)" = "HEADLESS" ]
+}
+
+@test "a commented-out display include does not answer for the running mode" {
+    # The include is read for what the printer actually runs, so a line its
+    # config parser never acts on must not answer for it. A disabled include
+    # read as live refuses an install whose two files agree.
+    write_variables_cfg GUPPY
+    cat > "$FORGEX_PRINTER_CFG" <<EOF
+# Forge-X printer.cfg
+[include ./mod/config/macros.cfg]
+#[include ./mod/config/stock.cfg]
+[include ./mod/config/guppy.cfg]
+EOF
+
+    [ "$(forgex_running_display_mode)" = "GUPPY" ] \
+        || fail "a commented include answered: $(forgex_running_display_mode)"
+
+    run configure_forgex_display
+    [ "$status" -eq 0 ] \
+        || fail "takeover refused an agreeing pair over a commented include: $output"
+}
+
+@test "a printer.cfg naming no display include records the variables.cfg mode with a warning" {
+    # Other firmware layouts put the display include elsewhere or spell it
+    # differently; they must keep installing. The record falls back to the
+    # variable's mode and says so.
+    write_variables_cfg FEATHER
+    printf '[include ./mod/config/printer_vars.cfg]\n' > "$FORGEX_PRINTER_CFG"
+    log_warn() { echo "[WARN] $1"; }
+
+    run configure_forgex_display
+
+    [ "$status" -eq 0 ] || fail "takeover failed on a layout whose printer.cfg carries no display include: $output"
+    [ "$(cat "$PREV_DISPLAY_F")" = "FEATHER" ]
+    contains "could not be confirmed" "$output"
+}
+
+@test "an existing record skips the running-mode check on a re-run" {
+    # An install leaves variables.cfg on HEADLESS while printer.cfg's include
+    # still names the arrival mode until the next boot. A re-run (upgrade)
+    # therefore always meets a disagreeing pair that our own first run
+    # created, and must take its answer from the record instead of comparing
+    # the two files - or every upgrade after an unrebooted install fails.
+    write_variables_cfg FEATHER
+    write_printer_cfg feather
+    configure_forgex_display
+    [ "$(current_display_mode)" = "HEADLESS" ]
+    [ "$(cat "$PREV_DISPLAY_F")" = "FEATHER" ]
+
+    run configure_forgex_display
+
+    [ "$status" -eq 0 ] || fail "upgrade re-run refused over a disagreement the record already answers: $output"
+    [ "$(cat "$PREV_DISPLAY_F")" = "FEATHER" ] \
+        || fail "re-run rewrote the pre-install record"
+}
+
+# --- configure_platform: a failed takeover fails the install ---
+
+@test "configure_platform propagates a failed display takeover" {
+    # configure_forgex_display returns non-zero only when the vendor UI keeps
+    # the display slot; an install that continued past that would report
+    # success while two UIs fight over the framebuffer. The wiring must reach
+    # the bundled installer too -- that copy is what a device actually runs.
+    source_main_platform
+    AD5M_FIRMWARE=forge_x
+    configure_forgex_display() { return 1; }
+    dismiss_forgex_feather_promo() { :; }
+    patch_forgex_screen_sh() { :; }
+    patch_forgex_screen_drawing() { :; }
+    install_forgex_logged_wrapper() { :; }
+    disable_stock_firmware_ui() { :; }
+
+    # helpers.bash stubs the log helpers silent; re-arm log_error so the
+    # operator-facing message is assertable.
+    log_error() { echo "[ERROR] $1"; }
+    run configure_platform
+    [ "$status" -ne 0 ] || fail "configure_platform masked the failed takeover"
+    contains "display takeover failed" "$output"
+
+    grep -qF 'configure_forgex_display || {' \
+        "$WORKTREE_ROOT/scripts/lib/installer/main.sh" \
+        || fail "main.sh does not propagate the takeover failure"
+    grep -qF 'configure_forgex_display || {' \
+        "$INSTALL_BUNDLE" \
+        || fail "bundled install.sh does not carry the propagation"
+}
+
+@test "configure_platform proceeds when the display takeover succeeds" {
+    # Positive control for the test above: without it, a forge_x arm that
+    # fails everything would pass it.
+    source_main_platform
+    AD5M_FIRMWARE=forge_x
+    configure_forgex_display() { return 0; }
+    dismiss_forgex_feather_promo() { :; }
+    patch_forgex_screen_sh() { :; }
+    patch_forgex_screen_drawing() { :; }
+    install_forgex_logged_wrapper() { :; }
+    disable_stock_firmware_ui() { :; }
+
+    run configure_platform
+    [ "$status" -eq 0 ] || fail "configure_platform failed after a successful takeover: $output"
+}
+
 # --- patch_forgex_screen_sh: the smart backlight guard ---
 
 @test "backlight patch guards the backlight case and keeps screen.sh valid (1.4.2)" {
@@ -726,12 +922,42 @@ EOF
     [ "$(current_display_mode)" = "STOCK" ]
 }
 
-@test "uninstall falls back to GUPPY when no prior mode was recorded" {
-    # Older HelixScreen installs left no record. GUPPY is the historical
-    # restore target and still exists in every supported Forge-X.
+@test "uninstall restores the mode printer.cfg runs when no record exists" {
+    # Installs from before the record existed leave uninstall without a
+    # recorded mode. printer.cfg's display include is what the printer is
+    # configured to run, so it is evidence of the mode to restore - not a
+    # guess.
     write_variables_cfg HEADLESS
+    write_printer_cfg feather
+    unset restored_ui
     uninstall_forgex
-    [ "$(current_display_mode)" = "GUPPY" ]
+
+    [ "$(current_display_mode)" = "FEATHER" ] \
+        || fail "restore ignored the printer.cfg include: $(current_display_mode)"
+    case "${restored_ui:-}" in
+        *Feather*) ;;
+        *) fail "restored_ui does not name Feather: ${restored_ui:-<empty>}";;
+    esac
+}
+
+@test "uninstall names GUPPY as a fallback when no mode evidence exists" {
+    # No record and no readable display include: refusing would leave
+    # variables.cfg on HEADLESS, and HEADLESS with no HelixScreen is a
+    # printer with no UI at all, so a spoken fallback goes in instead of a
+    # loud failure.
+    write_variables_cfg HEADLESS
+    log_warn() { echo "[WARN] $1"; }
+    unset restored_ui
+    uninstall_forgex >"$BATS_TEST_TMPDIR/uninstall.log" 2>&1
+
+    [ "$(current_display_mode)" = "GUPPY" ] \
+        || fail "the fallback must still land: $(current_display_mode)"
+    grep -q "could not be determined" "$BATS_TEST_TMPDIR/uninstall.log" \
+        || fail "no warning says the prior mode is unknown"
+    grep -q "fallback" "$BATS_TEST_TMPDIR/uninstall.log" \
+        || fail "no warning names GUPPY as a fallback"
+    grep -q "SET_MOD" "$BATS_TEST_TMPDIR/uninstall.log" \
+        || fail "no warning names the SET_MOD route for changing it"
 }
 
 @test "uninstall_forgex restores the display once per run (stacked callers)" {
@@ -749,6 +975,59 @@ EOF
     [ "$(current_display_mode)" = "HEADLESS" ] \
         || fail "a stacked second call rewrote HEADLESS to $(current_display_mode)"
     [ ! -e "$PREV_DISPLAY_F" ]
+}
+
+@test "a display moved off HEADLESS keeps its pre-install record" {
+    # ForgeX's own tooling can move the display while HelixScreen is installed
+    # (zdisplay.sh on a SET_MOD, an accepted Feather promo). The record is the
+    # only copy of the printer's real pre-install mode, so an uninstall that
+    # finds a foreign mode must leave it for a later restore instead of
+    # deleting it unused.
+    write_variables_cfg FEATHER
+    configure_forgex_display
+    [ "$(cat "$PREV_DISPLAY_F")" = "FEATHER" ]
+    write_variables_cfg GUPPY
+
+    # helpers.bash stubs the log helpers silent; re-arm log_warn so the
+    # operator-facing explanation is assertable.
+    log_warn() { echo "[WARN] $1"; }
+    unset restored_ui
+    uninstall_forgex >"$BATS_TEST_TMPDIR/uninstall.log" 2>&1
+
+    [ "$(current_display_mode)" = "GUPPY" ] \
+        || fail "uninstall rewrote a display mode it did not install"
+    [ "$(cat "$PREV_DISPLAY_F")" = "FEATHER" ] \
+        || fail "pre-install record destroyed without being used"
+    [ -z "${restored_ui:-}" ] \
+        || fail "uninstall claimed a restore that did not happen: $restored_ui"
+    grep -q "no longer HEADLESS" "$BATS_TEST_TMPDIR/uninstall.log" \
+        || fail "no log line explains the skipped restore"
+}
+
+@test "a restore that cannot rewrite variables.cfg keeps the record" {
+    # A restore consumes the record only when the rewrite it drives lands;
+    # a failed sed must not take the printer's only record of its pre-install
+    # mode down with it.
+    write_variables_cfg FEATHER
+    configure_forgex_display
+    local shim="$BATS_TEST_TMPDIR/sudo-fail-sed"
+    cat > "$shim" <<EOF
+#!/bin/sh
+if [ "\$1" = "sed" ]; then
+    exit 1
+fi
+exec "\$@"
+EOF
+    chmod +x "$shim"
+    SUDO="$shim"
+    export SUDO
+
+    uninstall_forgex
+
+    [ "$(current_display_mode)" = "HEADLESS" ] \
+        || fail "variables.cfg was rewritten despite the failed restore"
+    [ "$(cat "$PREV_DISPLAY_F")" = "FEATHER" ] \
+        || fail "record consumed by a restore that did not happen"
 }
 
 # --- the restored-UI report must name what was actually restored ---
@@ -805,6 +1084,7 @@ EOF
     [ "$(forgex_mod_root)" = "$MOD_ROOT" ]
     [ "$(forgex_mod_data)" = "$MOD_DATA" ]
     [ "$(forgex_prev_display_f)" = "$PREV_DISPLAY_F" ]
+    [ "$(forgex_printer_cfg)" = "$FORGEX_PRINTER_CFG" ]
 }
 
 @test "host_profile_probe drives the forgex paths end to end" {
@@ -844,4 +1124,5 @@ EOF
     [ "$(forgex_mod_root)" = "/opt/config/mod" ]
     [ "$(forgex_mod_data)" = "/opt/config/mod_data" ]
     [ "$(forgex_prev_display_f)" = "/opt/config/mod_data/helixscreen_prev_display" ]
+    [ "$(forgex_printer_cfg)" = "/opt/config/printer.cfg" ]
 }

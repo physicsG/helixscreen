@@ -50,7 +50,7 @@ class MoonrakerFileTransferAPI : public ITransfersAPI {
      * @brief Progress callback for file transfer operations
      *
      * Called periodically during download/upload with bytes transferred and total.
-     * NOTE: Called from background HTTP thread - use helix::ui::async_call() for UI updates.
+     * NOTE: Called from background HTTP thread - use helix::ui::queue_update() for UI updates.
      *
      * @param current Bytes transferred so far
      * @param total Total bytes to transfer
@@ -122,7 +122,8 @@ class MoonrakerFileTransferAPI : public ITransfersAPI {
                             StringCallback on_success, ErrorCallback on_error) override;
 
     void download_file_partial(const std::string& root, const std::string& path, size_t max_bytes,
-                               StringCallback on_success, ErrorCallback on_error) override;
+                               StringCallback on_success, ErrorCallback on_error,
+                               CancelFlag cancelled = nullptr) override;
 
     /**
      * @brief Download a file directly to disk (streaming, low memory)
@@ -144,6 +145,11 @@ class MoonrakerFileTransferAPI : public ITransfersAPI {
                                const std::string& dest_path, StringCallback on_success,
                                ErrorCallback on_error,
                                ProgressCallback on_progress = nullptr) override;
+
+    /// Defined per transport: the desktop HTTP client writes local copies and
+    /// reads suffix ranges; the ESP32 lane does neither.
+    bool supports_local_copies() const override;
+    bool supports_tail_reads() const override;
 
     /**
      * @brief Download a thumbnail image and cache it locally

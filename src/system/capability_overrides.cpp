@@ -6,6 +6,7 @@
 #include "config.h"
 #include "sound_manager.h"
 #include "standard_macros.h"
+#include "text_io.h"
 
 #include <spdlog/spdlog.h>
 
@@ -15,10 +16,6 @@ using namespace helix;
 
 void CapabilityOverrides::load_from_config() {
     Config* cfg = Config::get_instance();
-    if (!cfg) {
-        spdlog::warn("[CapabilityOverrides] Config not available, using defaults");
-        return;
-    }
 
     // Get printer-specific path prefix
     std::string prefix = cfg->df();
@@ -114,10 +111,6 @@ bool CapabilityOverrides::get_auto_value(const std::string& name) const {
 
 bool CapabilityOverrides::save_to_config() {
     Config* cfg = Config::get_instance();
-    if (!cfg) {
-        spdlog::error("[CapabilityOverrides] Cannot save - Config not available");
-        return false;
-    }
 
     std::string prefix = cfg->df();
 
@@ -169,7 +162,7 @@ std::string CapabilityOverrides::summary() const {
 
 OverrideState CapabilityOverrides::parse_state(const std::string& str) {
     std::string lower = str;
-    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    lower = helix::text_io::to_lower(lower);
 
     if (lower == "enable" || lower == "enabled" || lower == "on" || lower == "true" ||
         lower == "yes" || lower == "1") {

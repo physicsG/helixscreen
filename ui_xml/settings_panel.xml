@@ -2,7 +2,8 @@
 <!-- Copyright (C) 2025-2026 356C LLC -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <!-- Settings Panel - Category Navigation -->
-<!-- Six category rows that open sub-panel overlays for grouped settings -->
+<!-- Three groups (Screen, Printer, HelixScreen) of rows that open sub-panel overlays -->
+<!-- for grouped settings -->
 <!-- All styling controlled via XML - C++ only handles callbacks -->
 <component>
   <styles>
@@ -13,52 +14,51 @@
         extends="lv_obj" width="100%" height="100%" style_bg_opa="0" style_border_width="0" style_pad_all="0"
         style_pad_gap="0" flex_flow="column" scrollable="true" style_bg_color="#screen_bg">
     <!-- Panel Title (plain heading, not carded — this is the top-level menu) -->
-    <setting_section_header title="SETTINGS" title_tag="SETTINGS" icon="settings"/>
-    <!-- Category navigation rows grouped in one card -->
-    <setting_group name="group_settings">
-      <!-- ================================================================== -->
-      <!-- DISPLAY & SOUND -->
-      <!-- ================================================================== -->
-      <setting_action_row name="row_display_sound"
-                          label="Display &amp; Sound" label_tag="Display &amp; Sound" icon="light"
-                          description="Language, theme, brightness, and sound"
-                          description_tag="Language, theme, brightness, and sound" callback="on_display_sound_clicked"/>
-      <!-- ================================================================== -->
-      <!-- PRINTING -->
-      <!-- ================================================================== -->
-      <setting_action_row name="row_printing"
-                          label="Printing" label_tag="Printing" icon="printer_3d"
-                          description="Toolhead, G-code, limits, and materials"
-                          description_tag="Toolhead, G-code, limits, and materials" callback="on_printing_clicked"/>
-      <!-- ================================================================== -->
-      <!-- HARDWARE & DEVICES -->
-      <!-- ================================================================== -->
-      <setting_action_row name="row_hardware"
-                          label="Hardware &amp; Devices" label_tag="Hardware &amp; Devices" icon="sysinfo"
-                          description="Printers, Multi-Filament System, fans, sensors, and LEDs"
-                          description_tag="Printers, Multi-Filament System, fans, sensors, and LEDs"
-                          callback="on_hardware_clicked"/>
-      <!-- ================================================================== -->
-      <!-- SAFETY & NOTIFICATIONS -->
-      <!-- ================================================================== -->
+    <setting_section_header title="SETTINGS" icon="settings"/>
+    <setting_group name="group_screen">
+      <setting_group_header title="SCREEN"/>
+      <setting_action_row name="row_display"
+                          label="Display" icon="light" callback="on_display_clicked"
+                          bind_description="settings_status_display" description_min_bp="0"/>
+      <setting_action_row name="row_appearance"
+                          label="Appearance" icon="palette" callback="on_appearance_clicked"
+                          bind_description="settings_status_appearance" description_min_bp="0"/>
+      <setting_action_row name="row_touch_input"
+                          label="Touch &amp; Input" icon="cursor_move" callback="on_touch_input_clicked"/>
+      <setting_action_row name="row_sound"
+                          label="Sound" icon="volume_high" callback="on_sound_clicked"
+                          bind_description="settings_status_sound" description_min_bp="0">
+        <bind_flag_if_eq subject="printer_has_speaker" flag="hidden" ref_value="0"/>
+      </setting_action_row>
+    </setting_group>
+    <setting_group name="group_printer">
+      <setting_group_header title="PRINTER"/>
+      <setting_action_row name="row_printing" label="Printing" icon="printer_3d" callback="on_printing_clicked"/>
+      <setting_action_row name="row_devices"
+                          label="Devices" icon="sysinfo" callback="on_devices_clicked"
+                          bind_description="settings_status_devices" description_min_bp="0"/>
       <setting_action_row name="row_safety"
-                          label="Safety &amp; Notifications" label_tag="Safety &amp; Notifications" icon="alert_octagon"
-                          description="Emergency stop and print alerts"
-                          description_tag="Emergency stop and print alerts" callback="on_safety_clicked"/>
-      <!-- ================================================================== -->
-      <!-- SYSTEM -->
-      <!-- ================================================================== -->
-      <setting_action_row name="row_system"
-                          label="System" label_tag="System" icon="settings"
-                          description="Security, network, host, and administration"
-                          description_tag="Security, network, host, and administration" callback="on_system_clicked"/>
-      <!-- ================================================================== -->
-      <!-- HELP & ABOUT -->
-      <!-- ================================================================== -->
-      <setting_action_row name="row_help"
-                          label="Help &amp; About" label_tag="Help &amp; About" icon="help"
-                          description="Support, documentation, and version info"
-                          description_tag="Support, documentation, and version info" callback="on_help_clicked"/>
+                          label="Safety &amp; Alerts" icon="alert_octagon" callback="on_safety_clicked"/>
+      <setting_action_row name="row_connection"
+                          label="Connection" icon="lan" callback="on_connection_clicked"
+                          bind_description="settings_status_connection" description_min_bp="0"/>
+    </setting_group>
+    <setting_group name="group_helixscreen">
+      <setting_group_header title="HELIXSCREEN"/>
+      <setting_action_row name="row_language_time"
+                          label="Language &amp; Time" icon="translate" callback="on_language_time_clicked"
+                          bind_description="settings_status_language_time" description_min_bp="0"/>
+      <setting_action_row name="row_system" label="System" icon="settings" callback="on_system_clicked"/>
+      <setting_action_row name="row_updates"
+                          label="Updates" icon="download" callback="on_updates_clicked"
+                          bind_description="settings_status_updates" description_min_bp="0">
+        <bind_flag_if cond="show_update_settings eq 0 and updates_firmware_managed eq 0 and updates_unavailable eq 0"
+                      flag="hidden"/>
+      </setting_action_row>
+      <setting_action_row name="row_plugins" label="Plugins" icon="puzzle_outline" callback="on_plugins_clicked">
+        <bind_flag_if_eq subject="settings_plugins_available" flag="hidden" ref_value="0"/>
+      </setting_action_row>
+      <setting_action_row name="row_help" label="Help &amp; About" icon="help" callback="on_help_clicked"/>
     </setting_group>
     <!-- Bottom padding for scroll -->
     <lv_obj width="100%" scrollable="false">

@@ -86,17 +86,17 @@ TEST_CASE("every AFC diagram-bearing message maps to a position", "[afc][fault][
     struct Case {
         const char* name;
         const std::string* message;
-        PathSegment expected;
+        helix::PathSegment expected;
     };
 
     // Table-driven over all five real producers plus the lane-prefixed form.
     const Case cases[] = {
-        {"AFC.py:1469 lane not loaded", &MSG_NOT_LOADED, PathSegment::SPOOL},
-        {"AFC_BoxTurtle.py:527 failed at trigger", &MSG_TRIGGER, PathSegment::SPOOL},
-        {"AFC.py:1294 no hub sensor", &MSG_HUB, PathSegment::HUB},
-        {"AFC.py:1345 pre extruder gear", &MSG_PRE_GEAR, PathSegment::OUTPUT},
-        {"AFC.py:1370 post extruder gear", &MSG_POST_GEAR, PathSegment::TOOLHEAD},
-        {"AFC.py:1345 with lane prefix", &MSG_PRE_GEAR_WITH_LANE, PathSegment::OUTPUT},
+        {"AFC.py:1469 lane not loaded", &MSG_NOT_LOADED, helix::PathSegment::SPOOL},
+        {"AFC_BoxTurtle.py:527 failed at trigger", &MSG_TRIGGER, helix::PathSegment::SPOOL},
+        {"AFC.py:1294 no hub sensor", &MSG_HUB, helix::PathSegment::HUB},
+        {"AFC.py:1345 pre extruder gear", &MSG_PRE_GEAR, helix::PathSegment::OUTPUT},
+        {"AFC.py:1370 post extruder gear", &MSG_POST_GEAR, helix::PathSegment::TOOLHEAD},
+        {"AFC.py:1345 with lane prefix", &MSG_PRE_GEAR_WITH_LANE, helix::PathSegment::OUTPUT},
     };
 
     for (const auto& c : cases) {
@@ -118,18 +118,18 @@ TEST_CASE("identical art, different positions", "[afc][fault][position]") {
     REQUIRE(pre.has_value());
     REQUIRE(post.has_value());
     REQUIRE(static_cast<int>(*pre) != static_cast<int>(*post));
-    REQUIRE(*pre == PathSegment::OUTPUT);    // past hub, short of the toolhead
-    REQUIRE(*post == PathSegment::TOOLHEAD); // at toolhead, short of the gears
+    REQUIRE(*pre == helix::PathSegment::OUTPUT);    // past hub, short of the toolhead
+    REQUIRE(*post == helix::PathSegment::TOOLHEAD); // at toolhead, short of the gears
 }
 
 TEST_CASE("the `!!` prefix and case do not change the position", "[afc][fault][position]") {
     REQUIRE(afc_fault_position("!! lane1 filament did not trigger hub sensor, CHECK FILAMENT PATH")
-                .value() == PathSegment::HUB);
+                .value() == helix::PathSegment::HUB);
     REQUIRE(afc_fault_position("LANE1 FILAMENT DID NOT TRIGGER HUB SENSOR").value() ==
-            PathSegment::HUB);
+            helix::PathSegment::HUB);
     REQUIRE(
         afc_fault_position("lane1 Current lane not loaded, load trigger not triggered").value() ==
-        PathSegment::SPOOL);
+        helix::PathSegment::SPOOL);
 }
 
 TEST_CASE("unrelated console text is not a fault position", "[afc][fault][position]") {

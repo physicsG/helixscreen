@@ -95,8 +95,34 @@ setup() {
 }
 
 @test "resolve_platform_hook_key: pi32 shares the pi hook" {
+    _is_qidi_class_sbc() { return 1; }
     run resolve_platform_hook_key "pi32"
     [ "$output" = "pi" ]
+}
+
+@test "resolve_platform_hook_key: a QIDI-class pi selects the qidi hook" {
+    _is_qidi_class_sbc() { return 0; }
+    run resolve_platform_hook_key "pi"
+    [ "$status" -eq 0 ]
+    [ "$output" = "qidi" ]
+}
+
+@test "resolve_platform_hook_key: a QIDI-class pi32 selects the qidi hook too" {
+    _is_qidi_class_sbc() { return 0; }
+    run resolve_platform_hook_key "pi32"
+    [ "$output" = "qidi" ]
+}
+
+@test "resolve_platform_hook_key: a plain pi keeps the pi hook" {
+    _is_qidi_class_sbc() { return 1; }
+    run resolve_platform_hook_key "pi"
+    [ "$output" = "pi" ]
+}
+
+@test "resolve_platform_hook_key: the qidi key names a hook file that exists" {
+    _is_qidi_class_sbc() { return 0; }
+    run resolve_platform_hook_key "pi"
+    [ -f "$WORKTREE_ROOT/assets/config/platform/hooks-$output.sh" ]
 }
 
 @test "resolve_platform_hook_key: an unknown platform names no hook" {

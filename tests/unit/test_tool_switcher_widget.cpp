@@ -63,9 +63,9 @@ TEST_CASE("ToolSwitcherWidget: supports scaling from one cell to 2x2 cells",
     REQUIRE(def->effective_max_colspan() == 4);
     REQUIRE(def->effective_max_rowspan() == 4);
 
-    // Minimum is one whole cell
-    REQUIRE(def->effective_min_colspan() == 2);
-    REQUIRE(def->effective_min_rowspan() == 2);
+    // Minimum is one track; fits_at refuses what neither form can draw
+    REQUIRE(def->effective_min_colspan() == 1);
+    REQUIRE(def->effective_min_rowspan() == 1);
 
     REQUIRE(def->is_scalable());
 }

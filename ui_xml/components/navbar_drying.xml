@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component>
+  <!-- Spools on the bed: sits over the navbar's nav_drying_slot while
+       a bed-drying run has them latched there, so the state stays visible and
+       tappable above overlay and modal backdrops, which cover the banner over
+       the panels (NavigationManager keeps it in place). Tapping does what the
+       banner does. -->
+  <view extends="ui_button"
+        width="#nav_estop_size" height="#nav_estop_size" style_radius="9999" variant="warning" focusable="false"
+        hidden="true">
+    <bind_flag_if_eq subject="bed_drying_state" flag="hidden" ref_value="0"/>
+    <icon src="heat_wave" size="sm" variant="text" align="center" clickable="false" event_bubble="true"/>
+    <event_cb trigger="clicked" callback="on_bed_drying_banner_clicked"/>
+  </view>
+</component>

@@ -12,17 +12,11 @@ Flip here when stuck. Search by symptom.
 
 ### My new XML component doesn't render — the `<my_component/>` tag is just nothing.
 
-**Cause:** The component isn't registered. XML components must be registered in C++ before they can be instantiated.
+**Cause:** The engine found no XML file for the tag. Components register on first use, by file name: the tag `<my_component/>` loads `ui_xml/<my_component>.xml` or `ui_xml/components/<my_component>.xml` (resolved through the active layout variant).
 
-**Fix:** Add a line to `register_xml_components()` in `src/xml_registration.cpp`:
+**Fix:** Name the file exactly `<component>.xml` and put it in `ui_xml/` or `ui_xml/components/`. There is no registration list to edit, and no ordering between components. A C++ widget, callback or subject the XML uses still has to be registered before the XML is created.
 
-```cpp
-register_xml("my_component.xml");
-```
-
-Order matters if your component depends on a custom widget or another component — register dependencies first. The file is already grouped by category; find a similar component and put yours near it.
-
-**Why silent?** The XML parser treats an unregistered component as a no-op. No log, no error — the container just ends up empty.
+**Check the log:** A name with no file makes `lv_xml_create()` return NULL and log an error. A tag nested in a view whose file is missing leaves its container empty.
 
 ---
 
@@ -47,6 +41,41 @@ Order matters if your component depends on a custom widget or another component 
 ```
 
 Reference: lesson **L040**.
+
+---
+
+### My `<style name="...">` or `bind_style` has no effect inside a component, but works in the parent file.
+
+**Cause:** A `<styles>` block is file-local. A bare style name resolves in the file that declares it, then in `globals`, so a component in its own XML file cannot see the `<styles>` of the panel that embeds it. The log carries a `No style found with <name> name` warning.
+
+**Fix:** When more than one file needs the style, move it into `ui_xml/styles.xml` and reference it by dotted name everywhere, including the file that used to own it:
+
+```xml
+<!-- ui_xml/styles.xml -->
+<style name="press_wash" bg_color="#primary" bg_opa="30%" radius="#border_radius"/>
+
+<!-- ✓ any file -->
+<style name="styles.press_wash" selector="pressed"/>
+<bind_style name="styles.invisible" subject="preparing_visible" ref_value="1"/>
+```
+
+Do not move it into `globals.xml` instead: that file parses before theme init, so a style there that uses a `#token` registers empty. Details: `UI_CONTRIBUTOR_GUIDE.md` § "Shared styles".
+
+---
+
+### My `style_*:checked` (colon) state style does nothing.
+
+**Cause:** The engine reads state and part selectors only in dash form. `lv_xml_style_string_process` (`lib/helix-xml/src/xml/lv_xml_style.c`) splits every style attribute name on `-`, so `style_opa-checked` is property `style_opa` with selector `checked`. The colon form never splits: `style_opa:checked` stays one property name, matches nothing in the property table, and the attribute is dropped. The engine logs `` `style_opa:checked` is ignored: style selectors follow '-' `` and `make lint-xml` fails on it.
+
+**Fix:** Write the dash form:
+
+```xml
+<!-- ✗ Dropped: the colon form never splits -->
+<lv_obj style_opa:checked="255"/>
+
+<!-- ✓ Parsed as style_opa with a checked selector -->
+<lv_obj style_opa-checked="255"/>
+```
 
 ---
 
@@ -251,6 +280,18 @@ Gate: `scripts/check_responsive_token_scope.py` (prestonbrown/helixscreen#1211).
 
 ---
 
+### An attribute like `y="-#space_md"` does nothing.
+
+**Cause:** The const resolver substitutes only values that start with `#`, so there is no way to negate a token in place. `resolve_consts` (`lib/helix-xml/src/xml/lv_xml.c`) drops a `-#` value with a warning (`` `-#space_md` ... negates a const, which is not supported ``) and the widget keeps its default; a style property takes the same path in `lv_xml_style.c`. `make lint-xml` fails on it.
+
+**Fix:** Give the token the negative value and reference it bare. `ui_xml/globals.xml` carries negated spacing ladders (`space_md_neg`, `space_xxs_neg`, `space_2xl_neg`), so an inward offset reads `y="#space_md_neg"`. Add a ladder there when a tier you need has none:
+
+```xml
+<px name="space_md_neg_large" value="-12"/>
+```
+
+---
+
 ## Translations
 
 ### `lv_tr()` on a product name is generating a translation key that shouldn't exist.
@@ -262,7 +303,7 @@ Gate: `scripts/check_responsive_token_scope.py` (prestonbrown/helixscreen#1211).
 - **Product names:** HelixScreen, Klipper, Moonraker, Spoolman, Mainsail, Fluidd, OrcaSlicer.
 - **URLs / domains:** `https://helixscreen.org`, `github.com/prestonbrown/helixscreen`.
 - **Technical abbreviations as standalone labels:** AMS, QGL, ADXL, PID, IFS, CFS.
-- **Material codes:** PLA, PETG, ABS, TPU, PA. (Also: no `translation_tag` on these in XML.)
+- **Material codes:** PLA, PETG, ABS, TPU, PA. (In XML a literal is looked up anyway and renders as itself when the catalog has no key for it.)
 - **Universal terms:** OK, WiFi.
 
 Add a comment when you skip translation: `// i18n: do not translate (product name)`.
@@ -287,7 +328,7 @@ Reference: lesson **L064**.
 
 ### The app crashes on reconnect, or on panel rebuild, in an observer callback.
 
-**Cause:** You're observing a **dynamic** subject (per-fan, per-sensor, per-extruder) and its `SubjectLifetime` token never reached the `observe_*` factory. The factory's `lifetime` parameter defaults to `{}`, so fetching a token and forgetting to pass it compiles silently — and then the guard has no way to learn the subject was freed, so `reset()` calls `lv_observer_remove()` on freed memory.
+**Cause:** You're observing a **dynamic** subject (per-fan, per-sensor, per-extruder) and its `SubjectLifetime` token never reached the `observe_*` factory. The factory's `lifetime` parameter is required, but nothing stops you passing `{}` (or `subject_never_freed()`) instead of the token you fetched, and then the guard has no way to learn the subject was freed, so `reset()` calls `lv_observer_remove()` on freed memory.
 
 **Fix:**
 
@@ -302,7 +343,7 @@ ObserverGuard   temp_observer_;
 
 // Rebind
 auto* s = tsm.get_temp_subject(name, temp_lifetime_);
-temp_observer_ = observe_int_sync<Panel>(s, this, handler, temp_lifetime_);  // <- token, not omitted
+temp_observer_ = observe<int>(s, this, handler, temp_lifetime_);  // <- token, not omitted
 ```
 
 Reference: lessons **L077**, **L084**, `include/ui_observer_guard.h`, and `docs/devel/THREADING.md` § 5 (which explains why the older "local lifetime = UAF" phrasing was wrong).
@@ -335,7 +376,7 @@ api->fetch([this, tok]() {
 });
 ```
 
-Reference: CLAUDE.md § "Async callback safety", issue #707.
+Reference: `THREADING.md` § "2. Async callback safety", issue #707.
 
 ---
 
@@ -347,7 +388,7 @@ Reference: CLAUDE.md § "Async callback safety", issue #707.
 
 **Fix:** Use a managed pool. For HTTP work, use `helix::http::HttpExecutor::fast()` or `::slow()`. For sd-bus/BlueZ, use `helix::bluetooth::BusThread::run_sync()`. For the narrow cases where you genuinely need a one-shot thread (device discovery, QR decode, USB print), wrap in `try { std::thread([...]{}).detach(); } catch (const std::system_error&) { /* toast + error callback */ }`.
 
-Reference: CLAUDE.md § "Threading & Lifecycle", lesson **L083**.
+Reference: `THREADING.md` § "No `std::thread(...).detach()` for fire-and-forget work", lesson **L083**.
 
 ---
 
@@ -363,7 +404,7 @@ Reference: CLAUDE.md § "Threading & Lifecycle", lesson **L083**.
 | `lv_obj_delete(obj)` | `lv_obj_delete_async(obj)` |
 | `lv_obj_clean(container)` | `helix::ui::safe_clean_children(container)` |
 
-Reference: CLAUDE.md § "No sync widget deletion in queued callbacks", **L081**.
+Reference: `THREADING.md` § "3. No synchronous widget deletion inside queued callbacks", **L081**.
 
 ---
 
@@ -373,12 +414,12 @@ Run through this before opening a PR:
 
 - [ ] **XML-only change?** Confirm hot reload or plain relaunch shows your changes. No rebuild needed.
 - [ ] **Added an icon?** Ran `make regen-fonts` and rebuilt.
-- [ ] **Added a new XML component?** Registered in `src/xml_registration.cpp`.
+- [ ] **Added a new XML component?** File is `ui_xml/<name>.xml` or `ui_xml/components/<name>.xml`, named for the component.
 - [ ] **Added an event callback?** Registered with `lv_xml_register_event_cb()`.
 - [ ] **Any hardcoded colors or pixel values?** Swap for design tokens.
-- [ ] **Any new user-visible strings?** Wrapped for translation — `lv_tr()` in C++, or `translation_tag` in XML (the path most first contributions use) — *except* product names, URLs, material codes.
+- [ ] **Any new user-visible strings?** Wrapped for translation — `lv_tr()` in C++, or a literal `text=` in XML, which is its own translation key (the path most first contributions use) — *except* product names, URLs, material codes.
 - [ ] **Modified translation YAML?** Rebuild, then `git add` the regenerated `ui_xml/translations/translations.xml`.
-- [ ] **Added an observer on a dynamic subject?** The `SubjectLifetime` you fetched is passed to the `observe_*` factory, not left at its `{}` default.
+- [ ] **Added an observer on a dynamic subject?** The `SubjectLifetime` you fetched is passed to the `observe<V>` factory, not swapped for `{}` or `subject_never_freed()`.
 - [ ] **Tested at multiple sizes?** At minimum: `480x320`, `800x480`, `1024x600`. See `docs/devel/UI_CONTRIBUTOR_GUIDE.md` § Screen Breakpoints.
 - [ ] **`make test-run` passes.**
 

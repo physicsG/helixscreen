@@ -11,7 +11,7 @@
  * - Cleanup on widget deletion
  */
 
-#include "ui_nav_manager.h"
+#include "ui_callback_helpers.h"
 #include "ui_observer_guard.h"
 #include "ui_panel_ams.h"
 #include "ui_panel_ams_overview.h"
@@ -50,13 +50,6 @@ static void on_delete(lv_event_t* e) {
     }
 }
 
-// Click callback - opens AMS panel (overview for multi-unit, detail for single)
-static void on_clicked(lv_event_t* e) {
-    (void)e;
-    spdlog::debug("[AmsCurrentTool] Clicked - opening AMS panel");
-    navigate_to_ams_panel();
-}
-
 // Post-create hook called after XML creates the widget
 static void on_widget_created(lv_obj_t* widget) {
     if (!widget)
@@ -74,8 +67,8 @@ static void on_widget_created(lv_obj_t* widget) {
 
     // Set initial color from current subject value
     // Using observer factory for type-safe lambda observer
-    using helix::ui::observe_int_sync;
-    lv_subject_t* color_subject = AmsState::instance().get_current_color_subject();
+    using helix::ui::observe;
+    lv_subject_t* color_subject = helix::AmsState::instance().get_current_color_subject();
     if (color_subject) {
         int color_int = lv_subject_get_int(color_subject);
         lv_color_t color = lv_color_hex(static_cast<uint32_t>(color_int));
@@ -84,8 +77,9 @@ static void on_widget_created(lv_obj_t* widget) {
         // Capture widget (lv_obj_t*) instead of data pointer to prevent
         // use-after-free when deferred callback executes after widget deletion.
         // The registry lookup acts as a validity check. (fixes #83)
-        data->color_observer =
-            observe_int_sync<lv_obj_t>(color_subject, widget, [](lv_obj_t* obj, int color_int) {
+        data->color_observer = observe<int>(
+            color_subject, widget,
+            [](lv_obj_t* obj, int color_int) {
                 auto it = s_registry.find(obj);
                 if (it == s_registry.end() || !it->second)
                     return;
@@ -95,7 +89,8 @@ static void on_widget_created(lv_obj_t* widget) {
                 lv_color_t color = lv_color_hex(static_cast<uint32_t>(color_int));
                 lv_obj_set_style_bg_color(d->color_swatch, color, 0);
                 spdlog::trace("[AmsCurrentTool] Color updated to 0x{:06X}", color_int);
-            });
+            },
+            helix::AmsState::instance().get_subjects_lifetime());
     }
 
     // Register cleanup callback
@@ -112,7 +107,13 @@ static void on_widget_created(lv_obj_t* widget) {
 // Module initialization - call once during app startup
 void ui_ams_current_tool_init() {
     // Register click callback for XML event_cb [L007]
-    lv_xml_register_event_cb(nullptr, "on_ams_current_tool_clicked", on_clicked);
+    register_xml_callbacks({
+        {"on_ams_current_tool_clicked",
+         [](lv_event_t*) {
+             spdlog::debug("[AmsCurrentTool] Clicked - opening AMS panel");
+             navigate_to_ams_panel();
+         }},
+    });
 
     spdlog::debug("[AmsCurrentTool] Callbacks registered");
 }

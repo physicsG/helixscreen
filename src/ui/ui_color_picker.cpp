@@ -8,10 +8,14 @@
 #include "ui_modal.h"
 
 #include "color_utils.h"
+#include "helix/xml/indexed_subject_pool.h"
+#include "lane_translation.h"
 #include "static_subject_registry.h"
 #include "theme_manager.h"
 
 #include <spdlog/spdlog.h>
+
+#include <algorithm>
 
 namespace helix {
 
@@ -51,7 +55,7 @@ namespace {
 // rather than per-instance: only one picker is visible at a time, and the XML
 // name must outlive any individual ColorPicker (the LED overlay holds a static
 // one, the theme editor a unique_ptr).
-lv_subject_t s_palette_subject;
+lv_subject_t s_palette_subject{};
 bool s_palette_subject_ready = false;
 
 void ensure_palette_subject() {
@@ -65,13 +69,111 @@ void ensure_palette_subject() {
     // Self-register cleanup so the subject is torn down before lv_deinit().
     StaticSubjectRegistry::instance().register_deinit("ColorPickerPalette", []() {
         if (s_palette_subject_ready) {
+            lv_xml_unregister_subject(nullptr, "color_picker_palette");
             lv_subject_deinit(&s_palette_subject);
             s_palette_subject_ready = false;
         }
     });
 }
 
+lv_subject_t s_selected_swatch_subject{};
+bool s_swatch_subjects_ready = false;
+helix::xml::IndexedSubjectPool s_general_colors{"general_swatch_color",
+                                                helix::xml::IndexedSubjectPool::Type::Color};
+helix::xml::IndexedSubjectPool s_general_edges{"general_swatch_edge",
+                                               helix::xml::IndexedSubjectPool::Type::Int};
+helix::xml::IndexedSubjectPool s_theme_colors{"theme_swatch_color",
+                                              helix::xml::IndexedSubjectPool::Type::Color};
+helix::xml::IndexedSubjectPool s_theme_edges{"theme_swatch_edge",
+                                             helix::xml::IndexedSubjectPool::Type::Int};
+
+/// Below this WCAG contrast ratio a swatch blends into its surface: black on a
+/// dark navy panel sits near 1.6, a mid gray on a dark dialog near 1.9.
+constexpr double EDGE_CONTRAST_RATIO = 1.75;
+
+uint32_t rgb_of(lv_color_t c) {
+    return lv_color_to_u32(c) & 0xFFFFFF;
+}
+
+void fill_palette(helix::xml::IndexedSubjectPool& colors, helix::xml::IndexedSubjectPool& edges,
+                  const std::vector<uint32_t>& palette) {
+    colors.ensure_size(palette.size());
+    edges.ensure_size(palette.size());
+    for (size_t i = 0; i < palette.size(); ++i) {
+        colors.set_color(i, palette[i]);
+        edges.set_int(i, swatch_needs_edge_here(palette[i]) ? 1 : 0);
+    }
+}
+
+/// The preset swatch currently ringed in the picker's grids, -1 for none.
+void set_selected_swatch(int index) {
+    ensure_swatch_grid_subjects();
+    lv_subject_set_int(&s_selected_swatch_subject, index);
+}
+
 } // namespace
+
+const std::vector<uint32_t>& swatch_palette(ColorPicker::Palette palette) {
+    // Grays, warm, cool, purple/pink/special, more colors.
+    static const std::vector<uint32_t> general = {
+        0x1A1A1A, 0x4A4A4A, 0x7F7F7F, 0xB0B0B0, 0xE8E8E8, 0xFFFFFF, 0xE53935, 0xFF9800,
+        0xFFEB3B, 0xD4AF37, 0xCD7F32, 0x8B4513, 0x43A047, 0xAEEA00, 0x009688, 0x00BCD4,
+        0x1E88E5, 0x1A237E, 0x7B1FA2, 0xE91E63, 0xF48FB1, 0xFF7043, 0xC0C0C0, 0xE0D5C7,
+        0x00E676, 0x18FFFF, 0x536DFE, 0xEA80FC, 0xFF80AB, 0xBCAAA4,
+    };
+    // Rows 1-2: a 12-step surface ramp, dark to light. Rows 3-5: six hue
+    // families (red, amber, green, teal, blue, violet) by column, in muted, mid
+    // and deep tones by row. Drawn from the tones the shipped themes occupy.
+    static const std::vector<uint32_t> theme = {
+        0x0B0D14, 0x1E1E2E, 0x282828, 0x2E3440, 0x3D484D, 0x565F89, 0x6C6F85, 0x8A8980,
+        0xA9B1D6, 0xD3C6AA, 0xE5E5E5, 0xFFFFFF, 0xE06C75, 0xE0AF68, 0x9ECE6A, 0x7FBBB3,
+        0x7AA2F7, 0xBB9AF7, 0xD9455F, 0xD79921, 0x689D6A, 0x2AA198, 0x268BD2, 0x8839EF,
+        0xA02030, 0x8F6A0A, 0x40A02B, 0x0F7B78, 0x1E4FA8, 0x5B3FBF,
+    };
+    return palette == ColorPicker::Palette::Theme ? theme : general;
+}
+
+bool swatch_needs_edge(uint32_t rgb, uint32_t surface) {
+    return helix::contrast_ratio(lv_color_hex(rgb), lv_color_hex(surface)) < EDGE_CONTRAST_RATIO;
+}
+
+bool swatch_needs_edge_here(uint32_t rgb) {
+    // Swatches sit on panels (screen_bg) and in dialogs (elevated_bg).
+    return swatch_needs_edge(rgb, rgb_of(theme_manager_get_color("screen_bg"))) ||
+           swatch_needs_edge(rgb, rgb_of(theme_manager_get_color("elevated_bg")));
+}
+
+void refresh_swatch_edges() {
+    if (!s_swatch_subjects_ready) {
+        return;
+    }
+    fill_palette(s_general_colors, s_general_edges, swatch_palette(ColorPicker::Palette::General));
+    fill_palette(s_theme_colors, s_theme_edges, swatch_palette(ColorPicker::Palette::Theme));
+}
+
+void ensure_swatch_grid_subjects() {
+    if (s_swatch_subjects_ready) {
+        return;
+    }
+    lv_subject_init_int(&s_selected_swatch_subject, -1);
+    lv_xml_register_subject(nullptr, "color_picker_selected_swatch", &s_selected_swatch_subject);
+    fill_palette(s_general_colors, s_general_edges, swatch_palette(ColorPicker::Palette::General));
+    fill_palette(s_theme_colors, s_theme_edges, swatch_palette(ColorPicker::Palette::Theme));
+    s_swatch_subjects_ready = true;
+
+    // Torn down before lv_deinit(), like the palette subject.
+    StaticSubjectRegistry::instance().register_deinit("SwatchGridSubjects", []() {
+        if (s_swatch_subjects_ready) {
+            lv_xml_unregister_subject(nullptr, "color_picker_selected_swatch");
+            lv_subject_deinit(&s_selected_swatch_subject);
+            s_general_colors.reclaim();
+            s_general_edges.reclaim();
+            s_theme_colors.reclaim();
+            s_theme_edges.reclaim();
+            s_swatch_subjects_ready = false;
+        }
+    });
+}
 
 // ============================================================================
 // Construction / Destruction
@@ -116,6 +218,8 @@ bool ColorPicker::show_with_color(lv_obj_t* parent, uint32_t initial_color) {
     // Select the preset grid BEFORE Modal::show() builds the tree — the <if>
     // in color_picker.xml reads this subject as it constructs the view.
     ensure_palette_subject();
+    ensure_swatch_grid_subjects();
+    refresh_swatch_edges();
     lv_subject_set_int(&s_palette_subject, static_cast<int>(palette_));
 
     // Show the modal via Modal
@@ -221,9 +325,7 @@ void ColorPicker::on_show() {
 
     // Highlight the preset that matches the initial color, if any. Done after
     // layout selection so we search the correct (visible) swatch grid.
-    if (lv_obj_t* match = find_swatch_for_color(selected_color_)) {
-        highlight_swatch(match);
-    }
+    highlight_preset(selected_color_);
 }
 
 void ColorPicker::on_hide() {
@@ -247,7 +349,6 @@ void ColorPicker::on_hide() {
     custom_content_ = nullptr;
     btn_tab_presets_ = nullptr;
     btn_tab_custom_ = nullptr;
-    selected_swatch_ = nullptr;
     is_tiny_mode_ = false;
 
     // Call dismiss callback if set (fires on any close - select, cancel, or backdrop)
@@ -339,7 +440,7 @@ void ColorPicker::update_preview(uint32_t color_rgb, bool from_hsv_picker, bool 
     // Any color change from HSV/hex means the user has diverged from the
     // preset grid — clear the preset selection outline.
     if (from_hsv_picker || from_hex_input) {
-        highlight_swatch(nullptr);
+        set_selected_swatch(-1);
     }
 }
 
@@ -352,77 +453,19 @@ void ColorPicker::handle_swatch_clicked(lv_obj_t* swatch) {
     lv_color_t color = lv_obj_get_style_bg_color(swatch, LV_PART_MAIN);
     uint32_t rgb = lv_color_to_u32(color) & 0xFFFFFF;
 
-    highlight_swatch(swatch);
+    highlight_preset(rgb);
     update_preview(rgb);
 }
 
-void ColorPicker::highlight_swatch(lv_obj_t* swatch) {
-    if (selected_swatch_ == swatch) {
-        return;
-    }
-
-    // Clear outline on previously selected swatch (if still alive)
-    if (selected_swatch_ && lv_obj_is_valid(selected_swatch_)) {
-        lv_obj_set_style_outline_width(selected_swatch_, 0, LV_PART_MAIN);
-        lv_obj_set_style_outline_opa(selected_swatch_, 0, LV_PART_MAIN);
-    }
-
-    selected_swatch_ = swatch;
-
-    if (swatch) {
-        // Outline sits outside the swatch and does not affect layout, so it
-        // works regardless of whether the swatch already has an XML border.
-        lv_obj_set_style_outline_color(swatch, theme_manager_get_color("primary"), LV_PART_MAIN);
-        lv_obj_set_style_outline_width(swatch, 3, LV_PART_MAIN);
-        lv_obj_set_style_outline_opa(swatch, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_set_style_outline_pad(swatch, 1, LV_PART_MAIN);
-    }
-}
-
-static void find_swatch_recursive(lv_obj_t* root, uint32_t color_rgb, lv_obj_t*& out) {
-    if (!root || out) {
-        return;
-    }
-    const uint32_t count = lv_obj_get_child_count(root);
-    for (uint32_t i = 0; i < count; i++) {
-        lv_obj_t* child = lv_obj_get_child(root, i);
-        if (!child) {
-            continue;
-        }
-        if (lv_obj_has_flag(child, LV_OBJ_FLAG_CLICKABLE)) {
-            lv_color_t bg = lv_obj_get_style_bg_color(child, LV_PART_MAIN);
-            if ((lv_color_to_u32(bg) & 0xFFFFFF) == color_rgb) {
-                // Skip HSV picker children — identify swatches by their small
-                // radius token match would be nicer, but bg-color equality plus
-                // clickable is sufficient given HSV children don't use solid bg.
-                out = child;
-                return;
-            }
-        }
-        find_swatch_recursive(child, color_rgb, out);
-        if (out) {
-            return;
-        }
-    }
-}
-
-lv_obj_t* ColorPicker::find_swatch_for_color(uint32_t color_rgb) {
-    if (!dialog_) {
-        return nullptr;
-    }
-    // Both the standard and tiny preset grids live in the tree — scope the
-    // search to whichever is visible for the current breakpoint so we don't
-    // highlight a swatch the user can't see.
-    lv_obj_t* root = is_tiny_mode_ ? presets_content_ : find_widget("standard_content");
-    if (!root) {
-        return nullptr;
-    }
-    lv_obj_t* found = nullptr;
-    find_swatch_recursive(root, color_rgb, found);
-    return found;
+void ColorPicker::highlight_preset(uint32_t color_rgb) {
+    // Both preset grids bind their ring to color_picker_selected_swatch.
+    const auto& palette = swatch_palette(palette_);
+    const auto it = std::find(palette.begin(), palette.end(), color_rgb);
+    set_selected_swatch(it == palette.end() ? -1 : static_cast<int>(it - palette.begin()));
 }
 
 void ColorPicker::handle_select() {
+    selected_color_ = helix::ams::picked_color(selected_color_);
     std::string color_name = helix::get_color_name_from_hex(selected_color_);
     spdlog::info("[ColorPicker] Color selected: #{:06X} ({})", selected_color_, color_name);
 
@@ -481,14 +524,49 @@ void ColorPicker::register_callbacks() {
     }
 
     register_xml_callbacks({
-        {"color_picker_close_cb", on_close_cb},
+        {"color_picker_close_cb",
+         [](lv_event_t* e) {
+             if (auto* self = get_instance_from_event(e)) {
+                 self->hide();
+             }
+         }},
         {"color_swatch_clicked_cb", on_swatch_cb},
-        {"color_picker_cancel_cb", on_cancel_cb},
-        {"color_picker_select_cb", on_select_cb},
-        {"hex_input_changed_cb", on_hex_input_changed_cb},
-        {"hex_input_defocused_cb", on_hex_input_defocused_cb},
-        {"color_picker_tab_presets_cb", on_tab_presets_cb},
-        {"color_picker_tab_custom_cb", on_tab_custom_cb},
+        {"color_picker_cancel_cb",
+         [](lv_event_t* e) {
+             if (auto* self = get_instance_from_event(e)) {
+                 self->on_cancel();
+             }
+         }},
+        {"color_picker_select_cb",
+         [](lv_event_t* e) {
+             if (auto* self = get_instance_from_event(e)) {
+                 self->handle_select();
+             }
+         }},
+        {"hex_input_changed_cb",
+         [](lv_event_t* e) {
+             if (auto* self = get_instance_from_event(e)) {
+                 self->handle_hex_input_changed();
+             }
+         }},
+        {"hex_input_defocused_cb",
+         [](lv_event_t* e) {
+             if (auto* self = get_instance_from_event(e)) {
+                 self->handle_hex_input_defocused();
+             }
+         }},
+        {"color_picker_tab_presets_cb",
+         [](lv_event_t* e) {
+             if (auto* self = get_instance_from_event(e)) {
+                 self->switch_tab(false);
+             }
+         }},
+        {"color_picker_tab_custom_cb",
+         [](lv_event_t* e) {
+             if (auto* self = get_instance_from_event(e)) {
+                 self->switch_tab(true);
+             }
+         }},
     });
 
     callbacks_registered_ = true;
@@ -549,59 +627,12 @@ ColorPicker* ColorPicker::get_instance_from_event(lv_event_t* e) {
     return active_instance_;
 }
 
-void ColorPicker::on_close_cb(lv_event_t* e) {
-    auto* self = get_instance_from_event(e);
-    if (self) {
-        self->hide();
-    }
-}
-
 void ColorPicker::on_swatch_cb(lv_event_t* e) {
     auto* self = get_instance_from_event(e);
     if (self) {
         auto* swatch = static_cast<lv_obj_t*>(lv_event_get_target(e));
         self->handle_swatch_clicked(swatch);
     }
-}
-
-void ColorPicker::on_cancel_cb(lv_event_t* e) {
-    auto* self = get_instance_from_event(e);
-    if (self) {
-        self->on_cancel();
-    }
-}
-
-void ColorPicker::on_select_cb(lv_event_t* e) {
-    auto* self = get_instance_from_event(e);
-    if (self) {
-        self->handle_select();
-    }
-}
-
-void ColorPicker::on_hex_input_changed_cb(lv_event_t* e) {
-    auto* self = get_instance_from_event(e);
-    if (self) {
-        self->handle_hex_input_changed();
-    }
-}
-
-void ColorPicker::on_hex_input_defocused_cb(lv_event_t* e) {
-    auto* self = get_instance_from_event(e);
-    if (self) {
-        self->handle_hex_input_defocused();
-    }
-}
-
-void ColorPicker::on_tab_presets_cb(lv_event_t* e) {
-    auto* self = get_instance_from_event(e);
-    if (self)
-        self->switch_tab(false);
-}
-
-void ColorPicker::on_tab_custom_cb(lv_event_t* e) {
-    auto* self = get_instance_from_event(e);
-    if (self)
-        self->switch_tab(true);
 }
 
 } // namespace helix::ui

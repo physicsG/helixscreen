@@ -6,7 +6,8 @@
 #include "ui_callback_helpers.h"
 #include "ui_emergency_stop.h"
 #include "ui_event_safety.h"
-#include "ui_nav_manager.h"
+#include "ui_modal.h"
+#include "ui_nav.h"
 #include "ui_temperature_utils.h"
 #include "ui_timer_guard.h"
 
@@ -22,6 +23,7 @@
 #include "static_subject_registry.h"
 #include "temperature_service.h"
 #include "thermal_rate_model.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
@@ -74,8 +76,6 @@ PIDCalibrationPanel::PIDCalibrationPanel() {
     std::memset(buf_mpc_fan_transfer_, 0, sizeof(buf_mpc_fan_transfer_));
     std::memset(buf_fan_speed_text_, 0, sizeof(buf_fan_speed_text_));
     std::memset(buf_wattage_display_, 0, sizeof(buf_wattage_display_));
-
-    spdlog::trace("[PIDCal] Instance created");
 }
 
 PIDCalibrationPanel::~PIDCalibrationPanel() {
@@ -89,12 +89,6 @@ PIDCalibrationPanel::~PIDCalibrationPanel() {
 
     // Clear widget pointers (owned by LVGL)
     overlay_root_ = nullptr;
-    parent_screen_ = nullptr;
-
-    // Guard against static destruction order fiasco (spdlog may be gone)
-    if (!StaticPanelRegistry::is_destroyed()) {
-        spdlog::trace("[PIDCal] Destroyed");
-    }
 }
 
 // ============================================================================
@@ -121,6 +115,9 @@ void PIDCalibrationPanel::init_subjects() {
 
     UI_MANAGED_SUBJECT_STRING(subj_calibrating_heater_, buf_calibrating_heater_,
                               "Extruder PID Tuning", "pid_calibrating_heater", subjects_);
+
+    UI_MANAGED_SUBJECT_STRING(subj_migration_notice_, buf_migration_notice_, "",
+                              "cal_migration_notice", subjects_);
 
     UI_MANAGED_SUBJECT_STRING(subj_pid_kp_, buf_pid_kp_, "0.000", "pid_kp", subjects_);
 
@@ -192,26 +189,39 @@ void PIDCalibrationPanel::init_subjects() {
     // Register XML event callbacks (once globally)
     if (!s_callbacks_registered) {
         register_xml_callbacks({
-            {"on_pid_heater_extruder", on_heater_extruder_clicked},
-            {"on_pid_heater_bed", on_heater_bed_clicked},
-            {"on_pid_temp_up", on_temp_up},
-            {"on_pid_temp_down", on_temp_down},
-            {"on_pid_start", on_start_clicked},
-            {"on_pid_abort", on_abort_clicked},
-            {"on_pid_done", on_done_clicked},
-            {"on_pid_retry", on_retry_clicked},
-            // Material preset callbacks — one per heater, slot read from the
-            // button name (replaces 8 per-material trampolines).
+            {"on_pid_heater_extruder",
+             [](lv_event_t*) { get_global_pid_cal_panel().handle_heater_extruder_clicked(); }},
+            {"on_pid_heater_bed",
+             [](lv_event_t*) { get_global_pid_cal_panel().handle_heater_bed_clicked(); }},
+            {"on_pid_temp_up", [](lv_event_t*) { get_global_pid_cal_panel().handle_temp_up(); }},
+            {"on_pid_temp_down",
+             [](lv_event_t*) { get_global_pid_cal_panel().handle_temp_down(); }},
+            {"on_pid_start",
+             [](lv_event_t*) { get_global_pid_cal_panel().handle_start_clicked(); }},
+            {"on_pid_abort",
+             [](lv_event_t*) { get_global_pid_cal_panel().handle_abort_clicked(); }},
+            {"on_pid_done", [](lv_event_t*) { get_global_pid_cal_panel().handle_done_clicked(); }},
+            {"on_pid_retry",
+             [](lv_event_t*) { get_global_pid_cal_panel().handle_retry_clicked(); }},
+            // Material preset callbacks: one per heater, slot read from the
+            // button name.
             {"on_pid_preset_material", on_pid_preset_material},
             {"on_pid_preset_bed_material", on_pid_preset_bed_material},
             // MPC method/config callbacks
-            {"on_cal_method_pid", on_method_pid_clicked},
-            {"on_cal_method_mpc", on_method_mpc_clicked},
-            {"on_cal_wattage_up", on_wattage_up},
-            {"on_cal_wattage_down", on_wattage_down},
-            {"on_cal_fan_quick", on_fan_quick_clicked},
-            {"on_cal_fan_detailed", on_fan_detailed_clicked},
-            {"on_cal_fan_thorough", on_fan_thorough_clicked},
+            {"on_cal_method_pid",
+             [](lv_event_t*) { get_global_pid_cal_panel().handle_method_pid_clicked(); }},
+            {"on_cal_method_mpc",
+             [](lv_event_t*) { get_global_pid_cal_panel().handle_method_mpc_clicked(); }},
+            {"on_cal_wattage_up",
+             [](lv_event_t*) { get_global_pid_cal_panel().handle_wattage_up(); }},
+            {"on_cal_wattage_down",
+             [](lv_event_t*) { get_global_pid_cal_panel().handle_wattage_down(); }},
+            {"on_cal_fan_quick",
+             [](lv_event_t*) { get_global_pid_cal_panel().handle_fan_quick_clicked(); }},
+            {"on_cal_fan_detailed",
+             [](lv_event_t*) { get_global_pid_cal_panel().handle_fan_detailed_clicked(); }},
+            {"on_cal_fan_thorough",
+             [](lv_event_t*) { get_global_pid_cal_panel().handle_fan_thorough_clicked(); }},
         });
         s_callbacks_registered = true;
     }
@@ -235,29 +245,10 @@ void PIDCalibrationPanel::deinit_subjects() {
 // ============================================================================
 
 lv_obj_t* PIDCalibrationPanel::create(lv_obj_t* parent) {
-    if (overlay_root_) {
-        spdlog::debug("[PIDCal] Overlay already created");
-        return overlay_root_;
-    }
-
-    parent_screen_ = parent;
-
-    spdlog::debug("[PIDCal] Creating overlay from XML");
-
-    // Create from XML
-    overlay_root_ = static_cast<lv_obj_t*>(lv_xml_create(parent, "calibration_pid_panel", nullptr));
-    if (!overlay_root_) {
-        spdlog::error("[PIDCal] Failed to create panel from XML");
+    if (!OverlayBase::create(parent)) {
         return nullptr;
     }
-
-    // Initially hidden (will be shown by show())
-    lv_obj_add_flag(overlay_root_, LV_OBJ_FLAG_HIDDEN);
-
-    // Setup widget references
     setup_widgets();
-
-    spdlog::info("[PIDCal] Overlay created");
     return overlay_root_;
 }
 
@@ -269,7 +260,7 @@ void PIDCalibrationPanel::setup_widgets() {
 
     // Fan speed slider — imperative lv_obj_add_event_cb is required here because
     // XML event_cb does not support VALUE_CHANGED events (continuous slider updates).
-    fan_slider_ = lv_obj_find_by_name(overlay_root_, "fan_speed_slider");
+    fan_slider_ = helix::ui::find_required(overlay_root_, "fan_speed_slider", get_name());
     if (fan_slider_) {
         lv_obj_add_event_cb(fan_slider_, on_fan_slider_changed, LV_EVENT_VALUE_CHANGED, this);
     }
@@ -286,27 +277,6 @@ void PIDCalibrationPanel::setup_widgets() {
 }
 
 // ============================================================================
-// SHOW
-// ============================================================================
-
-void PIDCalibrationPanel::show() {
-    if (!overlay_root_) {
-        spdlog::error("[PIDCal] Cannot show: overlay not created");
-        return;
-    }
-
-    spdlog::debug("[PIDCal] Showing overlay");
-
-    // Register with NavigationManager for lifecycle callbacks
-    NavigationManager::instance().register_overlay_instance(overlay_root_, this);
-
-    // Push onto navigation stack - on_activate() will be called by NavigationManager
-    NavigationManager::instance().push_overlay(overlay_root_);
-
-    spdlog::info("[PIDCal] Overlay shown");
-}
-
-// ============================================================================
 // LIFECYCLE HOOKS
 // ============================================================================
 
@@ -315,6 +285,16 @@ void PIDCalibrationPanel::on_activate() {
     OverlayBase::on_activate();
 
     spdlog::debug("[PIDCal] on_activate()");
+
+    // A run still in flight owns this panel's state. Reactivation happens on
+    // waking from the screensaver too, and resetting there would drop the UI to
+    // idle under a live calibration - whose results on_mpc_result() then
+    // discards, because it only accepts them while the state says CALIBRATING.
+    if (state_ == State::CALIBRATING || state_ == State::MIGRATING) {
+        spdlog::info("[PIDCal] Reactivated during a run - keeping state {}",
+                     static_cast<int>(state_));
+        return;
+    }
 
     // Reset to idle state with default values
     set_state(State::IDLE);
@@ -343,20 +323,18 @@ void PIDCalibrationPanel::on_activate() {
     update_wattage_display();
     needs_migration_ = false;
     is_kalico_ = false;
+    current_control_ = ControlType::UNKNOWN;
+    lv_subject_copy_string(&subj_migration_notice_, "");
 
     update_fan_section_visibility();
 
     // Fetch current PID values now (while no gcode traffic) for delta display later
     fetch_old_pid_values();
 
-    // Check PrinterDiscovery for Kalico detection (primary source)
-    if (get_printer_state().get_capability_overrides().is_kalico()) {
+    // Discovery's capability answer is the primary source; the control-type query refines it
+    if (get_printer_state().get_capability_overrides().supports_mpc_calibration()) {
         is_kalico_ = true;
-        // Only expose MPC UI to beta users
-        lv_subject_t* beta = lv_xml_get_subject(nullptr, "show_beta_features");
-        if (beta && lv_subject_get_int(beta) == 1) {
-            lv_subject_set_int(&subj_is_kalico_, 1);
-        }
+        lv_subject_set_int(&subj_is_kalico_, 1);
     }
 
     // Detect heater control type (only relevant for Kalico/MPC)
@@ -371,14 +349,22 @@ void PIDCalibrationPanel::on_activate() {
     }
 }
 
-void PIDCalibrationPanel::on_deactivate() {
-    spdlog::debug("[PIDCal] on_deactivate()");
+void PIDCalibrationPanel::on_deactivating(DeactivateReason reason) {
+    spdlog::debug("[PIDCal] on_deactivating({})", deactivate_reason_name(reason));
 
     // Stop progress tracking
     stop_progress_tracking();
 
     // Teardown graph before deactivating
     teardown_pid_graph();
+
+    // An idle screen is not a walk-away: this panel stays on the stack and is
+    // reactivated on the next touch, so the run keeps its fan curve and its
+    // heaters and goes on reporting here. A calibration runs for minutes with
+    // nobody touching the screen, which is exactly when the screensaver fires.
+    if (reason == DeactivateReason::Suspended) {
+        return;
+    }
 
     // Turn off fan if it was running
     turn_off_fan();
@@ -391,9 +377,6 @@ void PIDCalibrationPanel::on_deactivate() {
             api_->execute_gcode("TURN_OFF_HEATERS", nullptr, nullptr);
         }
     }
-
-    // Call base class
-    OverlayBase::on_deactivate();
 }
 
 void PIDCalibrationPanel::cleanup() {
@@ -407,7 +390,7 @@ void PIDCalibrationPanel::cleanup() {
 
     // Unregister from NavigationManager before cleaning up
     if (overlay_root_) {
-        NavigationManager::instance().unregister_overlay_instance(overlay_root_);
+        helix::nav::unregister_overlay(overlay_root_);
     }
 
     // Clear slider references
@@ -417,7 +400,14 @@ void PIDCalibrationPanel::cleanup() {
     OverlayBase::cleanup();
 
     // Clear references
-    parent_screen_ = nullptr;
+}
+
+void PIDCalibrationPanel::on_ui_destroyed() {
+    // The tree is gone: the graph, the slider and anything ticking against them go
+    // with it. on_deactivating() already stopped these on a normal pop.
+    stop_progress_tracking();
+    teardown_pid_graph();
+    fan_slider_ = nullptr;
 }
 
 // ============================================================================
@@ -516,10 +506,10 @@ void PIDCalibrationPanel::update_temp_hint() {
         if (mat) {
             char hint[64];
             if (selected_heater_ == Heater::EXTRUDER) {
-                snprintf(hint, sizeof(hint),
-                         "%s: %d-%d\xC2\xB0"
-                         "C range",
-                         selected_material_.c_str(), mat->nozzle_min, mat->nozzle_max);
+                char range[24];
+                helix::ui::temperature::format_temperature_range(mat->nozzle_min, mat->nozzle_max,
+                                                                 range, sizeof(range));
+                snprintf(hint, sizeof(hint), "%s: %s range", selected_material_.c_str(), range);
             } else {
                 snprintf(hint, sizeof(hint),
                          "%s: bed temp %d\xC2\xB0"
@@ -543,10 +533,11 @@ void PIDCalibrationPanel::set_temp_control_panel(TemperatureService* tcp) {
 }
 
 void PIDCalibrationPanel::setup_pid_graph() {
-    if (pid_graph_)
-        return; // Already set up
+    if (pid_graph_ || !overlay_root_)
+        return; // Already set up, or no tree to draw into
 
-    lv_obj_t* container = lv_obj_find_by_name(overlay_root_, "pid_temp_graph_container");
+    lv_obj_t* container =
+        helix::ui::find_required(overlay_root_, "pid_temp_graph_container", get_name());
     if (!container) {
         spdlog::warn("[{}] pid_temp_graph_container not found", get_name());
         return;
@@ -575,7 +566,7 @@ void PIDCalibrationPanel::setup_pid_graph() {
     lv_color_t color = is_extruder ? lv_color_hex(0xFF4444) : lv_color_hex(0x00CED1);
     pid_graph_series_id_ = ui_temp_graph_add_series(pid_graph_, heater_name, color);
 
-    if (pid_graph_series_id_ >= 0) {
+    if (pid_graph_series_id_ != SeriesId::None) {
         // Show target temperature line
         ui_temp_graph_set_series_target(pid_graph_, pid_graph_series_id_,
                                         static_cast<float>(target_temp_), true);
@@ -602,7 +593,7 @@ void PIDCalibrationPanel::teardown_pid_graph() {
 
     ui_temp_graph_destroy(pid_graph_);
     pid_graph_ = nullptr;
-    pid_graph_series_id_ = -1;
+    pid_graph_series_id_ = SeriesId::None;
 
     spdlog::debug("[{}] PID temp graph destroyed", get_name());
 }
@@ -639,8 +630,6 @@ void PIDCalibrationPanel::send_pid_calibrate() {
     api_->advanced().start_pid_calibrate(
         heater_name, target_temp_,
         [this, token](float kp, float ki, float kd) {
-            if (token.expired())
-                return;
             // Callback from background thread - marshal to UI thread
             token.defer([this, kp, ki, kd]() {
                 // Ignore results if user already aborted
@@ -654,8 +643,6 @@ void PIDCalibrationPanel::send_pid_calibrate() {
             });
         },
         [this, token](const MoonrakerError& err) {
-            if (token.expired())
-                return;
             std::string msg = err.message;
             token.defer([this, msg]() {
                 if (state_ != State::CALIBRATING) {
@@ -668,8 +655,6 @@ void PIDCalibrationPanel::send_pid_calibrate() {
             });
         },
         [this, token](int sample, float tolerance) {
-            if (token.expired())
-                return;
             token.defer([this, sample, tolerance]() { on_pid_progress(sample, tolerance); });
         });
 }
@@ -719,8 +704,6 @@ void PIDCalibrationPanel::fetch_old_pid_values() {
     api_->advanced().get_heater_pid_values(
         heater_name,
         [this, token](float kp, float ki, float kd) {
-            if (token.expired())
-                return;
             token.defer([this, kp, ki, kd]() {
                 old_kp_ = kp;
                 old_ki_ = ki;
@@ -757,6 +740,9 @@ void PIDCalibrationPanel::handle_heater_extruder_clicked() {
     if (is_kalico_) {
         heater_wattage_ = WATTAGE_DEFAULT_EXTRUDER;
         update_wattage_display();
+        // The new heater's control type is unread until the query answers
+        current_control_ = ControlType::UNKNOWN;
+        update_migration_notice();
         detect_heater_control_type();
     }
 }
@@ -781,7 +767,9 @@ void PIDCalibrationPanel::handle_heater_bed_clicked() {
     if (is_kalico_) {
         heater_wattage_ = WATTAGE_DEFAULT_BED;
         update_wattage_display();
-        update_fan_section_visibility();
+        // The new heater's control type is unread until the query answers
+        current_control_ = ControlType::UNKNOWN;
+        update_migration_notice();
         detect_heater_control_type();
     }
 }
@@ -817,18 +805,45 @@ void PIDCalibrationPanel::handle_temp_down() {
 void PIDCalibrationPanel::handle_start_clicked() {
     spdlog::debug("[PIDCal] Start clicked (method={})",
                   selected_method_ == CalibMethod::MPC ? "MPC" : "PID");
-    if (selected_method_ == CalibMethod::MPC) {
-        if (needs_migration_) {
-            set_state(State::MIGRATING);
-            start_migration();
-        } else {
-            set_state(State::CALIBRATING);
-            send_mpc_calibrate();
-        }
+    if (needs_migration_) {
+        confirm_migration();
+        return;
+    }
+
+    begin_calibration(selected_method_);
+}
+
+void PIDCalibrationPanel::begin_calibration(CalibMethod method) {
+    set_state(State::CALIBRATING);
+    if (method == CalibMethod::MPC) {
+        send_mpc_calibrate();
     } else {
-        set_state(State::CALIBRATING);
         send_pid_calibrate();
     }
+}
+
+void PIDCalibrationPanel::confirm_migration() {
+    const bool to_mpc = selected_method_ == CalibMethod::MPC;
+
+    // Start looks like the dangerous button, but Cancel is the one that bites:
+    // aborting a running calibration is M112 plus a firmware restart. Confirm
+    // before the config is touched, so declining costs nothing.
+    const char* what =
+        to_mpc ? lv_tr("Switching to MPC changes how this heater is controlled, then calibrates "
+                       "it. That takes several minutes at temperature.")
+               : lv_tr("Switching back to PID changes how this heater is controlled, then "
+                       "calibrates it. That takes several minutes at temperature.");
+
+    helix::ui::ConfirmOptions opts;
+    opts.owner_token = lifetime_.token();
+
+    helix::ui::confirm_config_rewrite(
+        lv_tr("Change heater control?"), what, lv_tr("Continue"),
+        [this]() {
+            set_state(State::MIGRATING);
+            start_migration(selected_method_);
+        },
+        opts);
 }
 
 void PIDCalibrationPanel::handle_abort_clicked() {
@@ -874,7 +889,7 @@ void PIDCalibrationPanel::handle_preset_clicked(int temp, const char* material_n
 void PIDCalibrationPanel::handle_done_clicked() {
     spdlog::debug("[PIDCal] Done clicked");
     set_state(State::IDLE);
-    NavigationManager::instance().go_back();
+    helix::nav::go_back();
 }
 
 void PIDCalibrationPanel::handle_retry_clicked() {
@@ -1020,9 +1035,10 @@ void PIDCalibrationPanel::start_progress_tracking() {
                                                               : PidProgressTracker::Heater::BED;
 
     if (selected_heater_ == Heater::EXTRUDER) {
-        temp_subj = state.get_extruder_temp_subject("extruder", progress_temp_lifetime_);
+        temp_subj = state.temperature_state().get_extruder_temp_subject("extruder",
+                                                                        progress_temp_lifetime_);
     } else {
-        temp_subj = state.get_bed_temp_subject(progress_temp_lifetime_);
+        temp_subj = state.temperature_state().get_bed_temp_subject(progress_temp_lifetime_);
     }
 
     if (!temp_subj) {
@@ -1035,27 +1051,25 @@ void PIDCalibrationPanel::start_progress_tracking() {
 
     // Load historical data if available
     auto* config = helix::Config::get_instance();
-    if (config) {
-        const char* heater_key = (selected_heater_ == Heater::EXTRUDER) ? "extruder" : "heater_bed";
+    const char* heater_key = (selected_heater_ == Heater::EXTRUDER) ? "extruder" : "heater_bed";
 
-        // Heat rate from shared ThermalRateManager (ensure loaded from config)
-        auto& thermal_mgr = ThermalRateManager::instance();
-        thermal_mgr.load_from_config(*config);
-        float heat_rate = thermal_mgr.get_model(heater_key).best_rate();
+    // Heat rate from shared ThermalRateManager (ensure loaded from config)
+    auto& thermal_mgr = ThermalRateManager::instance();
+    thermal_mgr.load_from_config(*config);
+    float heat_rate = thermal_mgr.get_model(heater_key).best_rate();
 
-        // Oscillation duration from PID-specific config path
-        std::string osc_path =
-            std::string("/calibration/pid_history/") + heater_key + "/oscillation_duration";
-        float osc_dur = config->get<float>(osc_path, 0.0f);
-        if (heat_rate > 0 && osc_dur > 0) {
-            progress_tracker_.set_history(heat_rate, osc_dur);
-            spdlog::info("[PIDCal] Loaded historical rates: heat={:.2f} s/deg, osc={:.0f}s",
-                         heat_rate, osc_dur);
-        }
+    // Oscillation duration from PID-specific config path
+    std::string osc_path =
+        std::string("/calibration/pid_history/") + heater_key + "/oscillation_duration";
+    float osc_dur = config->get<float>(osc_path, 0.0f);
+    if (heat_rate > 0 && osc_dur > 0) {
+        progress_tracker_.set_history(heat_rate, osc_dur);
+        spdlog::info("[PIDCal] Loaded historical rates: heat={:.2f} s/deg, osc={:.0f}s", heat_rate,
+                     osc_dur);
     }
 
     // Observe temperature for phase tracking (both extruder and bed need lifetime tokens)
-    progress_temp_observer_ = helix::ui::observe_int_sync<PIDCalibrationPanel>(
+    progress_temp_observer_ = helix::ui::observe<int>(
         temp_subj, this,
         [](PIDCalibrationPanel* self, int value) { self->on_progress_temperature(value); },
         progress_temp_lifetime_);
@@ -1174,8 +1188,6 @@ void PIDCalibrationPanel::on_eta_timer_tick(lv_timer_t* timer) {
 
 void PIDCalibrationPanel::save_calibration_history() {
     auto* config = helix::Config::get_instance();
-    if (!config)
-        return;
 
     float heat_rate = progress_tracker_.measured_heat_rate();
     float osc_duration = progress_tracker_.measured_oscillation_duration();
@@ -1219,7 +1231,63 @@ void PIDCalibrationPanel::save_calibration_history() {
 // MPC: DETECTION, MIGRATION, CALIBRATION
 // ============================================================================
 
-void PIDCalibrationPanel::detect_heater_control_type() {
+bool PIDCalibrationPanel::needs_control_migration(ControlType current, CalibMethod target) {
+    if (current == ControlType::UNKNOWN)
+        return false;
+    return (current == ControlType::MPC) != (target == CalibMethod::MPC);
+}
+
+std::vector<helix::system::ConfigEdit>
+PIDCalibrationPanel::build_control_migration_edits(CalibMethod target, int heater_wattage) {
+    using helix::system::ConfigEdit;
+
+    // ADD_KEY, not SET_VALUE: SAVE_CONFIG writes `control` into the autosave
+    // block, so a real section often names it only in a comment - and SET_VALUE
+    // on an absent key fails the whole edit list. ADD_KEY sets it where it
+    // exists and adds it where it does not.
+    if (target == CalibMethod::MPC) {
+        return {
+            {ConfigEdit::Type::ADD_KEY, "control", "mpc"},
+            {ConfigEdit::Type::ADD_KEY, "heater_power", std::to_string(heater_wattage)},
+        };
+    }
+
+    // heater_power is ours, written by the forward migration. MPC_CALIBRATE's
+    // results land in Klipper's autosave block instead, which we never edit and
+    // which tolerates them under PID control. The other four REMOVE_KEYs cover
+    // the hand-written case: an MPC key left active in the section itself fails
+    // Klipper's unused-option check once no MPC object reads it.
+    return {
+        {ConfigEdit::Type::ADD_KEY, "control", "pid"},
+        {ConfigEdit::Type::REMOVE_KEY, "heater_power", ""},
+        {ConfigEdit::Type::REMOVE_KEY, "block_heat_capacity", ""},
+        {ConfigEdit::Type::REMOVE_KEY, "sensor_responsiveness", ""},
+        {ConfigEdit::Type::REMOVE_KEY, "ambient_transfer", ""},
+        {ConfigEdit::Type::REMOVE_KEY, "fan_ambient_transfer", ""},
+    };
+}
+
+void PIDCalibrationPanel::update_migration_notice() {
+    needs_migration_ = needs_control_migration(current_control_, selected_method_);
+    lv_subject_set_int(&subj_needs_migration_, needs_migration_ ? 1 : 0);
+
+    // Heater wattage is an MPC model input, so it is only collected on the way in.
+    const bool to_mpc = selected_method_ == CalibMethod::MPC;
+    lv_subject_set_int(&subj_show_wattage_, (needs_migration_ && to_mpc) ? 1 : 0);
+
+    if (needs_migration_) {
+        lv_subject_copy_string(
+            &subj_migration_notice_,
+            to_mpc ? lv_tr("Switching to MPC requires a config change and Klipper restart.")
+                   : lv_tr("Switching back to PID requires a config change and Klipper restart."));
+    } else {
+        lv_subject_copy_string(&subj_migration_notice_, "");
+    }
+
+    update_fan_section_visibility();
+}
+
+void PIDCalibrationPanel::detect_heater_control_type(bool preselect_mpc) {
     if (!api_)
         return;
 
@@ -1229,84 +1297,67 @@ void PIDCalibrationPanel::detect_heater_control_type() {
     auto token = lifetime_.token();
     api_->advanced().get_heater_control_type(
         heater,
-        [this, token](const std::string& type) {
-            if (token.expired())
-                return;
-            token.defer([this, type]() {
+        [this, token, preselect_mpc](const std::string& type) {
+            token.defer([this, type, preselect_mpc]() {
                 // Query succeeded, firmware supports control type query (Kalico)
                 is_kalico_ = true;
-                // Only expose MPC UI to beta users
-                lv_subject_t* beta = lv_xml_get_subject(nullptr, "show_beta_features");
-                if (beta && lv_subject_get_int(beta) == 1) {
-                    lv_subject_set_int(&subj_is_kalico_, 1);
-                }
+                lv_subject_set_int(&subj_is_kalico_, 1);
 
-                if (type == "mpc") {
-                    // Already MPC, no migration needed
+                current_control_ = (type == "mpc") ? ControlType::MPC : ControlType::PID;
+
+                if (preselect_mpc) {
+                    // MPC is the recommended method on firmware that offers it
                     selected_method_ = CalibMethod::MPC;
-                    needs_migration_ = false;
                     lv_subject_set_int(&subj_method_is_mpc_, 1);
-                    lv_subject_set_int(&subj_needs_migration_, 0);
-                    lv_subject_set_int(&subj_show_wattage_, 0);
-                    update_fan_section_visibility();
-                    spdlog::info("[PIDCal] Heater already using MPC control");
-                } else {
-                    // PID mode — MPC needs migration, pre-select MPC (recommended)
-                    selected_method_ = CalibMethod::MPC;
-                    needs_migration_ = true;
-                    lv_subject_set_int(&subj_method_is_mpc_, 1);
-                    lv_subject_set_int(&subj_needs_migration_, 1);
-                    lv_subject_set_int(&subj_show_wattage_, 1);
-                    update_fan_section_visibility();
-                    spdlog::info("[PIDCal] Heater using '{}' control, MPC migration available",
-                                 type);
                 }
+                update_migration_notice();
+
+                spdlog::info("[PIDCal] Heater using '{}' control", type);
             });
         },
         [this, token](const MoonrakerError&) {
-            if (token.expired())
-                return;
             // Can't determine control type, not Kalico — default to PID
             token.defer([this]() {
                 is_kalico_ = false;
+                current_control_ = ControlType::UNKNOWN;
                 lv_subject_set_int(&subj_is_kalico_, 0);
+                update_migration_notice();
                 spdlog::debug("[PIDCal] Heater control type query failed, defaulting to PID");
             });
         });
 }
 
-void PIDCalibrationPanel::start_migration() {
+void PIDCalibrationPanel::start_migration(CalibMethod target) {
     if (!api_)
         return;
 
     const char* section = (selected_heater_ == Heater::EXTRUDER) ? "extruder" : "heater_bed";
-    std::vector<helix::system::ConfigEdit> edits = {
-        {helix::system::ConfigEdit::Type::SET_VALUE, "control", "mpc"},
-        {helix::system::ConfigEdit::Type::ADD_KEY, "heater_power", std::to_string(heater_wattage_)},
-    };
+    const bool to_mpc = target == CalibMethod::MPC;
+    std::vector<helix::system::ConfigEdit> edits =
+        build_control_migration_edits(target, heater_wattage_);
 
-    spdlog::info("[PIDCal] Starting PID->MPC migration for '{}' with heater_power={}W", section,
-                 heater_wattage_);
+    if (to_mpc) {
+        spdlog::info("[PIDCal] Starting PID->MPC migration for '{}' with heater_power={}W", section,
+                     heater_wattage_);
+    } else {
+        spdlog::info("[PIDCal] Starting MPC->PID migration for '{}'", section);
+    }
 
     EmergencyStopOverlay::instance().suppress_recovery_dialog(RecoverySuppression::EXTRA);
 
     auto token = lifetime_.token();
     config_editor_.safe_multi_edit(
         *api_, section, edits,
-        [this, token]() {
-            if (token.expired())
-                return;
-            token.defer([this]() {
-                needs_migration_ = false;
-                lv_subject_set_int(&subj_needs_migration_, 0);
-                spdlog::info("[PIDCal] Migration complete, starting MPC calibration");
-                set_state(State::CALIBRATING);
-                send_mpc_calibrate();
+        [this, token, target]() {
+            token.defer([this, target]() {
+                current_control_ =
+                    (target == CalibMethod::MPC) ? ControlType::MPC : ControlType::PID;
+                update_migration_notice();
+                spdlog::info("[PIDCal] Migration complete, starting calibration");
+                begin_calibration(target);
             });
         },
         [this, token](const std::string& err) {
-            if (token.expired())
-                return;
             token.defer([this, err]() {
                 spdlog::error("[PIDCal] Migration failed: {}", err);
                 lv_subject_copy_string(&subj_error_message_, err.c_str());
@@ -1337,8 +1388,6 @@ void PIDCalibrationPanel::send_mpc_calibrate() {
     api_->advanced().start_mpc_calibrate(
         heater, target_temp_, fan_breakpoints_,
         [this, token](const MoonrakerAdvancedAPI::MPCResult& result) {
-            if (token.expired())
-                return;
             token.defer([this, result]() {
                 if (state_ != State::CALIBRATING)
                     return;
@@ -1346,8 +1395,6 @@ void PIDCalibrationPanel::send_mpc_calibrate() {
             });
         },
         [this, token](const MoonrakerError& err) {
-            if (token.expired())
-                return;
             std::string msg = err.message;
             token.defer([this, msg]() {
                 if (state_ != State::CALIBRATING)
@@ -1358,8 +1405,6 @@ void PIDCalibrationPanel::send_mpc_calibrate() {
             });
         },
         [this, token](int phase, int total, const std::string& desc) {
-            if (token.expired())
-                return;
             token.defer([this, phase, total, desc]() { on_mpc_progress(phase, total, desc); });
         });
 }
@@ -1420,11 +1465,8 @@ void PIDCalibrationPanel::handle_method_pid_clicked() {
         return;
     spdlog::debug("[PIDCal] PID method selected");
     selected_method_ = CalibMethod::PID;
-    needs_migration_ = false;
     lv_subject_set_int(&subj_method_is_mpc_, 0);
-    lv_subject_set_int(&subj_show_wattage_, 0);
-    lv_subject_set_int(&subj_needs_migration_, 0);
-    update_fan_section_visibility();
+    update_migration_notice();
 }
 
 void PIDCalibrationPanel::handle_method_mpc_clicked() {
@@ -1433,9 +1475,9 @@ void PIDCalibrationPanel::handle_method_mpc_clicked() {
     spdlog::debug("[PIDCal] MPC method selected");
     selected_method_ = CalibMethod::MPC;
     lv_subject_set_int(&subj_method_is_mpc_, 1);
-    update_fan_section_visibility();
-    // Re-detect to determine migration needs
-    detect_heater_control_type();
+    update_migration_notice();
+    // Re-read the control type in case the config changed since activation
+    detect_heater_control_type(false);
 }
 
 void PIDCalibrationPanel::handle_wattage_up() {
@@ -1489,64 +1531,8 @@ void PIDCalibrationPanel::handle_fan_thorough_clicked() {
 }
 
 // ============================================================================
-// STATIC TRAMPOLINES (for XML event_cb)
+// EVENT CALLBACKS
 // ============================================================================
-
-void PIDCalibrationPanel::on_heater_extruder_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[PIDCal] on_heater_extruder_clicked");
-    (void)e;
-    get_global_pid_cal_panel().handle_heater_extruder_clicked();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void PIDCalibrationPanel::on_heater_bed_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[PIDCal] on_heater_bed_clicked");
-    (void)e;
-    get_global_pid_cal_panel().handle_heater_bed_clicked();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void PIDCalibrationPanel::on_temp_up(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[PIDCal] on_temp_up");
-    (void)e;
-    get_global_pid_cal_panel().handle_temp_up();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void PIDCalibrationPanel::on_temp_down(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[PIDCal] on_temp_down");
-    (void)e;
-    get_global_pid_cal_panel().handle_temp_down();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void PIDCalibrationPanel::on_start_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[PIDCal] on_start_clicked");
-    (void)e;
-    get_global_pid_cal_panel().handle_start_clicked();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void PIDCalibrationPanel::on_abort_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[PIDCal] on_abort_clicked");
-    (void)e;
-    get_global_pid_cal_panel().handle_abort_clicked();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void PIDCalibrationPanel::on_done_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[PIDCal] on_done_clicked");
-    (void)e;
-    get_global_pid_cal_panel().handle_done_clicked();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void PIDCalibrationPanel::on_retry_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[PIDCal] on_retry_clicked");
-    (void)e;
-    get_global_pid_cal_panel().handle_retry_clicked();
-    LVGL_SAFE_EVENT_CB_END();
-}
 
 void PIDCalibrationPanel::on_fan_slider_changed(lv_event_t* e) {
     auto* panel = static_cast<PIDCalibrationPanel*>(lv_event_get_user_data(e));
@@ -1624,71 +1610,10 @@ void PIDCalibrationPanel::on_pid_preset_bed_material(lv_event_t* e) {
     LVGL_SAFE_EVENT_CB_END();
 }
 
-// MPC method/config trampolines
-void PIDCalibrationPanel::on_method_pid_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[PIDCal] on_method_pid_clicked");
-    (void)e;
-    get_global_pid_cal_panel().handle_method_pid_clicked();
-    LVGL_SAFE_EVENT_CB_END();
+static PIDCalibrationPanel* existing_pid_cal_panel() {
+    return helix::lazy_global_if_exists<PIDCalibrationPanel>();
 }
-
-void PIDCalibrationPanel::on_method_mpc_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[PIDCal] on_method_mpc_clicked");
-    (void)e;
-    get_global_pid_cal_panel().handle_method_mpc_clicked();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void PIDCalibrationPanel::on_wattage_up(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[PIDCal] on_wattage_up");
-    (void)e;
-    get_global_pid_cal_panel().handle_wattage_up();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void PIDCalibrationPanel::on_wattage_down(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[PIDCal] on_wattage_down");
-    (void)e;
-    get_global_pid_cal_panel().handle_wattage_down();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void PIDCalibrationPanel::on_fan_quick_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[PIDCal] on_fan_quick_clicked");
-    (void)e;
-    get_global_pid_cal_panel().handle_fan_quick_clicked();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void PIDCalibrationPanel::on_fan_detailed_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[PIDCal] on_fan_detailed_clicked");
-    (void)e;
-    get_global_pid_cal_panel().handle_fan_detailed_clicked();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void PIDCalibrationPanel::on_fan_thorough_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[PIDCal] on_fan_thorough_clicked");
-    (void)e;
-    get_global_pid_cal_panel().handle_fan_thorough_clicked();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-// ============================================================================
-// GLOBAL INSTANCE
-// ============================================================================
-
-static std::unique_ptr<PIDCalibrationPanel> g_pid_cal_panel;
 
 PIDCalibrationPanel& get_global_pid_cal_panel() {
-    if (!g_pid_cal_panel) {
-        g_pid_cal_panel = std::make_unique<PIDCalibrationPanel>();
-        StaticPanelRegistry::instance().register_destroy("PIDCalibrationPanel",
-                                                         []() { g_pid_cal_panel.reset(); });
-    }
-    return *g_pid_cal_panel;
-}
-
-static PIDCalibrationPanel* existing_pid_cal_panel() {
-    return g_pid_cal_panel.get();
+    return helix::lazy_global<PIDCalibrationPanel>("PIDCalibrationPanel");
 }

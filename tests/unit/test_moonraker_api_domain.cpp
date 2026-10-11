@@ -19,6 +19,7 @@
 #include "../../include/printer_hardware.h"
 #include "../../lvgl/lvgl.h"
 #include "../helix_test_fixture.h"
+#include "../test_helpers/mock_personas.h"
 #include "../ui_test_utils.h"
 
 #include <chrono>
@@ -67,12 +68,10 @@ class MoonrakerAPIDomainTestFixture {
         // Connect mock client (required for discovery)
         mock_client.connect("ws://mock/websocket", []() {}, []() {});
 
-        // Create API with mock client BEFORE discovery
-        // (API registers hardware discovered callback in constructor)
         api = std::make_unique<MoonrakerAPI>(mock_client, state);
 
-        // Run discovery to populate hardware lists (triggers API callback)
-        mock_client.discover_printer([]() {});
+        // Run discovery, then hand the hardware to the API as Application does
+        mock_client.discover_printer([this]() { api->hardware() = mock_client.hardware(); });
     }
 
     ~MoonrakerAPIDomainTestFixture() {
@@ -227,19 +226,10 @@ TEST_CASE_METHOD(HelixTestFixture,
     PrinterState state;
     state.init_subjects(false);
 
-    std::vector<MoonrakerClientMock::PrinterType> printer_types = {
-        MoonrakerClientMock::PrinterType::VORON_24,
-        MoonrakerClientMock::PrinterType::VORON_TRIDENT,
-        MoonrakerClientMock::PrinterType::CREALITY_K1,
-        MoonrakerClientMock::PrinterType::FLASHFORGE_AD5M,
-        MoonrakerClientMock::PrinterType::GENERIC_COREXY,
-        MoonrakerClientMock::PrinterType::GENERIC_BEDSLINGER,
-        MoonrakerClientMock::PrinterType::MULTI_EXTRUDER,
-    };
-
-    for (auto printer_type : printer_types) {
-        DYNAMIC_SECTION("Printer type " << static_cast<int>(printer_type)) {
-            MoonrakerClientMock mock(printer_type);
+    for (const auto* persona : helix::test::personas_one_per_type()) {
+        DYNAMIC_SECTION(persona->id) {
+            helix::test::PersonaEnv env(persona->id);
+            MoonrakerClientMock mock(persona->type);
             mock.connect("ws://mock/websocket", []() {}, []() {});
             mock.discover_printer([]() {});
 
@@ -268,41 +258,18 @@ TEST_CASE_METHOD(HelixTestFixture,
     }
 }
 
-// ============================================================================
-// Hardware Discovery Access via MoonrakerAPI Tests
-// ============================================================================
+TEST_CASE_METHOD(MoonrakerAPIDomainTestFixture,
+                 "bed-mesh presence reads Klipper's empty mesh as absent",
+                 "[bed_mesh][print_start]") {
+    std::vector<bool> verdicts;
+    api->set_bed_mesh_presence_observer([&verdicts](bool present) { verdicts.push_back(present); });
 
-TEST_CASE_METHOD(HelixTestFixture,
-                 "MoonrakerAPI hardware() returns discovery data after discovery completes",
-                 "[api][hardware]") {
-    PrinterState state;
-    state.init_subjects(false);
+    mock_client.dispatch_status_update(
+        {{"bed_mesh", {{"probed_matrix", {{0.1, 0.2}, {0.3, 0.4}}}}}});
+    // What Klipper and Kalico publish after BED_MESH_CLEAR.
+    mock_client.dispatch_status_update(
+        {{"bed_mesh", {{"probed_matrix", nlohmann::json::array({nlohmann::json::array()})}}}});
 
-    MoonrakerClientMock mock(MoonrakerClientMock::PrinterType::VORON_24);
-    mock.connect("ws://mock/websocket", []() {}, []() {});
-
-    // Create API before discovery so callbacks are registered
-    MoonrakerAPI api(mock, state);
-
-    // Run discovery - this fires callbacks that populate api.hardware_
-    mock.discover_printer([]() {});
-
-    // Verify hardware data is accessible through API
-    // After discovery, the API should have hardware data populated
-    const auto& hw = api.hardware();
-
-    // VORON_24 should have hostname populated from mock
-    // Note: Mock sets hostname during discovery
-    REQUIRE_FALSE(hw.hostname().empty());
-
-    // Should have expected hardware for VORON_24
-    REQUIRE_FALSE(hw.heaters().empty());
-    REQUIRE_FALSE(hw.fans().empty());
-
-    // Check capabilities that VORON_24 should have
-    REQUIRE(hw.has_heater_bed() == true);
-    REQUIRE(hw.has_qgl() == true); // Voron 2.4 has QGL
-
-    mock.stop_temperature_simulation();
-    mock.disconnect();
+    CHECK(verdicts == std::vector<bool>{true, false});
+    api->set_bed_mesh_presence_observer(nullptr);
 }

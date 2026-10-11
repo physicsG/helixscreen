@@ -213,6 +213,11 @@ _ACTION_FIELDS = (1, 4)
 _PHASE_TEMPLATE_RE = re.compile(r"::toolchange_phase_template\s*\([^)]*\)[^{]*")
 _PHASE_FIELDS = (1,)
 
+# `DeviceAction::button(id, label, section, icon, description)` and its siblings:
+# the label is always argument 1, the description follows the type-specific fields.
+_DEVICE_ACTION_FACTORY_RE = re.compile(r"\b(?:DA|DeviceAction)\s*::\s*(button|toggle|slider|dropdown)\s*\(")
+_FACTORY_FIELDS = {"button": (1, 4), "toggle": (1, 5), "slider": (1, 8), "dropdown": (1, 6)}
+
 # Designated-initializer records (afc_defaults.cpp style) name their fields, so
 # position does not apply. Only these two are user-visible.
 _DESIGNATED_FIELDS = {"label", "description"}
@@ -272,6 +277,14 @@ def _extract_device_actions(content: str) -> Set[str]:
         if close == -1:
             continue
         found |= _positional(content[brace + 1 : close], _ACTION_FIELDS)
+
+    # Factory calls: `DA::slider("id", "Label", "section", ...)`.
+    for m in _DEVICE_ACTION_FACTORY_RE.finditer(content):
+        paren = m.end() - 1
+        close = _find_matching(content, paren)
+        if close == -1:
+            continue
+        found |= _positional(content[paren + 1 : close], _FACTORY_FIELDS[m.group(1)])
 
     # Designated initializers inside `actions.push_back({...})`
     # (afc_defaults.cpp / hh_defaults.cpp style). Scoping to the push_back call

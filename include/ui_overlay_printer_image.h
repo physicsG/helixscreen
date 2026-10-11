@@ -4,8 +4,11 @@
 #pragma once
 
 #include "overlay_base.h"
+#include "single_flight_walk.h"
+#include "static_panel_registry.h"
 
 #include <string>
+#include <vector>
 
 class UsbManager;
 
@@ -28,7 +31,6 @@ namespace helix::settings {
  */
 class PrinterImageOverlay : public OverlayBase {
   public:
-    PrinterImageOverlay();
     ~PrinterImageOverlay() override;
 
     //
@@ -41,19 +43,14 @@ class PrinterImageOverlay : public OverlayBase {
     const char* get_name() const override {
         return "Printer Image";
     }
+    const char* xml_component() const override {
+        return "printer_image_overlay";
+    }
 
     void on_activate() override;
-    void on_deactivate() override;
 
     //
-    // === UI Creation ===
-    //
-
-    lv_obj_t* create(lv_obj_t* parent) override;
-    void show(lv_obj_t* parent_screen);
-
-    //
-    // === Event Handlers (public for static callbacks) ===
+    // === Event Handlers (public for the callback table) ===
     //
 
     void handle_auto_detect();
@@ -65,15 +62,12 @@ class PrinterImageOverlay : public OverlayBase {
     /// Re-populate custom images list (public for async callback)
     void refresh_custom_images();
 
+    /// A stick image walk is running or its result has not been shown yet.
+    [[nodiscard]] bool usb_scan_in_flight() const {
+        return usb_walk_.in_flight();
+    }
+
   private:
-    //
-    // === Static Callbacks ===
-    //
-
-    static void on_auto_detect(lv_event_t* e);
-    static void on_image_card_clicked(lv_event_t* e);
-    static void on_usb_image_clicked(lv_event_t* e);
-
     //
     // === Internal Methods ===
     //
@@ -81,7 +75,7 @@ class PrinterImageOverlay : public OverlayBase {
     void populate_shipped_images();
     void populate_custom_images();
     void scan_usb_drives();
-    void populate_usb_images(const std::string& mount_path);
+    void populate_usb_images(const std::vector<std::string>& image_paths);
     void handle_usb_import(const std::string& source_path);
     lv_obj_t* create_list_row(lv_obj_t* parent, const std::string& image_id,
                               const std::string& display_name, const char* callback_name);
@@ -89,12 +83,20 @@ class PrinterImageOverlay : public OverlayBase {
     void update_preview(const std::string& image_id, const std::string& display_name,
                         const std::string& preview_path);
     std::string get_preview_path_for_id(const std::string& image_id);
+    /// printer_image_tag_state for the displayed image.
+    void update_tag_state();
+    void handle_tag_parts();
+    void handle_reset_tags();
+    /// Delete the user's tags for `key`, after the reset is confirmed.
+    void reset_tags(const std::string& key);
 
     //
     // === Members ===
     //
 
     UsbManager* usb_manager_ = nullptr;
+    /// Walks the stick for images off the UI thread.
+    helix::SingleFlightWalk usb_walk_;
 
     // RAII subject manager for automatic cleanup
     SubjectManager subjects_;
@@ -110,16 +112,11 @@ class PrinterImageOverlay : public OverlayBase {
     lv_subject_t preview_name_subject_{}; // string: display name
     char preview_name_buf_[128] = {};
     lv_subject_t has_preview_subject_{}; // int: 0=no preview, 1=has preview
+    lv_subject_t tag_state_subject_{};   // int: 0=untaggable, 1=untagged by user, 2=user tags
 };
 
-/**
- * @brief Global instance accessor
- *
- * Creates the overlay on first access and registers it for cleanup
- * with StaticPanelRegistry.
- *
- * @return Reference to singleton PrinterImageOverlay
- */
-PrinterImageOverlay& get_printer_image_overlay();
+inline PrinterImageOverlay& get_printer_image_overlay() {
+    return lazy_global<PrinterImageOverlay>("PrinterImageOverlay");
+}
 
 } // namespace helix::settings

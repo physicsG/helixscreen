@@ -2,21 +2,41 @@
 <!-- Copyright (C) 2025-2026 356C LLC -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <component>
+  <api>
+    <!-- Per-instance subject names, supplied by the widget at creation. Two fan
+         tiles size independently, so these cannot be type-global. -->
+    <prop name="tile_icon_subject" type="string" default=""/>
+    <prop name="tile_label_subject" type="string" default=""/>
+    <prop name="tile_dir_subject" type="string" default=""/>
+    <prop name="tile_target_subject" type="string" default=""/>
+  </api>
   <view name="panel_widget_fan"
-        extends="lv_obj" height="100%" flex_grow="1" style_pad_all="0" scrollable="false" flex_flow="column"
-        style_flex_main_place="center" style_flex_cross_place="center" style_flex_track_place="center" clickable="true">
+        extends="lv_obj" height="100%" flex_grow="1" style_pad_ver="0" style_pad_gap="#space_xxs" scrollable="false"
+        clickable="true" style_radius="#border_radius">
+    <style name="styles.press_wash" selector="pressed"/>
     <bind_state_if_not_eq subject="printer_connection_state" state="disabled" ref_value="2"/>
     <event_cb trigger="clicked" callback="fan_widget_clicked_cb"/>
-    <!-- Top row: icon + speed -->
-    <lv_obj width="100%"
-            height="content" style_pad_all="0" scrollable="false" flex_flow="row" style_flex_main_place="center"
-            style_flex_cross_place="center" style_pad_gap="#space_xs" clickable="false" event_bubble="true">
-      <icon name="fan_widget_icon" src="fan" size="#icon_size" variant="secondary" clickable="false" event_bubble="true"/>
-      <text_body name="fan_speed" text="--" clickable="false" event_bubble="true"/>
+    <!-- The glyph over its reading and name, or beside them when the box is
+         too short to stack: the same two shapes TileSizing measures. -->
+    <style name="styles.tile_column"/>
+    <bind_style_if_eq name="styles.tile_row" subject="$tile_dir_subject" ref_value="1"/>
+    <icon name="fan_widget_icon" src="fan" size="#icon_size" variant="secondary" clickable="false" event_bubble="true">
+      <bind_tile_rung ladder="icon" subject="$tile_icon_subject"/>
+    </icon>
+    <lv_obj name="fan_text_col"
+            width="100%" height="content" style_pad_all="0" style_pad_gap="#space_xxs" scrollable="false"
+            clickable="false" event_bubble="true">
+      <style name="styles.tile_column"/>
+      <bind_style_if_eq name="styles.tile_fill" subject="$tile_dir_subject" ref_value="1"/>
+      <text_body name="fan_speed" text="--" clickable="false" event_bubble="true">
+        <bind_tile_rung ladder="value" subject="$tile_icon_subject"/>
+      </text_body>
+      <text_tiny name="fan_name"
+                 width="100%" text="Select fan" style_text_align="center" long_mode="dots" clickable="false"
+                 event_bubble="true">
+        <bind_tile_rung ladder="label" subject="$tile_icon_subject" one_line="true"/>
+        <bind_flag_if_eq subject="$tile_label_subject" flag="hidden" ref_value="0"/>
+      </text_tiny>
     </lv_obj>
-    <!-- Fan name label -->
-    <text_tiny name="fan_name"
-               width="100%" text="Select fan" translation_tag="Select fan" style_text_align="center" long_mode="dots"
-               clickable="false" event_bubble="true"/>
   </view>
 </component>

@@ -21,7 +21,8 @@ class TemperatureService;
 class UsbManager;
 namespace helix {
 class TemperatureController;
-}
+class BedDryingController;
+} // namespace helix
 namespace helix::ui {
 class PlrOfferController;
 }
@@ -143,10 +144,11 @@ class SubjectInitializer {
     std::unique_ptr<UsbManager> m_usb_manager;
     std::unique_ptr<helix::ui::PlrOfferController> m_plr_offer_controller;
     std::unique_ptr<helix::TemperatureController> m_temp_controller;
+    std::unique_ptr<helix::BedDryingController> m_bed_drying;
     std::unique_ptr<TemperatureService> m_temp_control_panel;
 
-    // Alive guard for USB callback — invalidated on destruction to prevent
-    // use-after-free when queued callbacks fire after panel destruction
+    // Alive guard for the USB drive callback: its weak_ptrs expire when this
+    // object is destroyed, so queued callbacks that land later do nothing
     std::shared_ptr<bool> m_usb_callback_alive = std::make_shared<bool>(true);
 
     // Panels that need deferred API injection (not owned)

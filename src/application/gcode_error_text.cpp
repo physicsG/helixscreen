@@ -7,11 +7,7 @@
 // .cpp drags along — the same seam-driven split as moonraker_api_power.cpp.
 
 #include "gcode_error_router.h"
-
-#if HELIX_HAS_CFS
-#include "ams_backend_cfs.h"
-#endif
-
+#include "klipper_error_table.h"
 #include "lvgl.h"
 
 #include "hv/json.hpp"
@@ -64,38 +60,55 @@ void GcodeErrorRouter::clean_error_text(std::string& text, std::string& out_code
 
         if (obj_end != std::string::npos) {
             std::string json_str = text.substr(json_start, obj_end - json_start);
+#if defined(__cpp_exceptions)
             try {
-                auto j = nlohmann::json::parse(json_str);
-                // Read the firmware's msg once: table entries that prefer it
-                // (key843: one code, several causes) decode with the real
-                // wording, and the uncoded fallback below reuses it.
-                std::string fw_msg;
-                if (j.contains("msg") && j["msg"].is_string()) {
-                    fw_msg = j["msg"].get<std::string>();
-                }
-                if (j.contains("code") && j["code"].is_string()) {
-                    out_code = j["code"].get<std::string>();
-                    nlohmann::json values = nlohmann::json::array();
-                    if (j.contains("values")) {
-                        values = j["values"];
-                    }
-#if HELIX_HAS_CFS
-                    if (auto friendly = printer::CfsErrorDecoder::lookup_message_with_values(
-                            out_code, values, fw_msg)) {
-                        text = friendly->first + ". " + friendly->second;
-                        return;
-                    }
 #else
-                    (void)values;
+            {
 #endif
+                auto j = nlohmann::json::parse(json_str, nullptr, false);
+                if (!j.is_discarded()) {
+                    // Read the firmware's msg once: table entries that prefer it
+                    // (key843: one code, several causes) decode with the real
+                    // wording, and the uncoded fallback below reuses it.
+                    std::string fw_msg;
+                    if (j.contains("msg") && j["msg"].is_string()) {
+                        fw_msg = j["msg"].get<std::string>();
+                    }
+                    if (j.contains("code") && j["code"].is_string()) {
+                        out_code = j["code"].get<std::string>();
+                        nlohmann::json values = nlohmann::json::array();
+                        if (j.contains("values")) {
+                            values = j["values"];
+                        }
+                        // Not behind HELIX_HAS_CFS: key111/key298/key585 are
+                        // Klipper-layer faults a machine reports with no filament
+                        // hardware, and a build without CFS still has to translate
+                        // them rather than show the raw firmware string.
+                        if (const printer::KlipperErrorEntry* entry =
+                                printer::klipper_error_lookup(out_code)) {
+                            std::string message = (entry->prefer_fw_msg && !fw_msg.empty())
+                                                      ? fw_msg
+                                                      : std::string(lv_tr(entry->message));
+                            if (entry->format_values) {
+                                message += entry->format_values(values);
+                            }
+                            text = message + ". " + lv_tr(entry->hint);
+                            return;
+                        }
+                    }
+                    if (!fw_msg.empty()) {
+                        text = fw_msg;
+                    }
                 }
-                if (!fw_msg.empty()) {
-                    text = fw_msg;
-                }
+#if defined(__cpp_exceptions)
             } catch (...) {
-                // Malformed JSON despite the {"code" prefix -- leave text
-                // untouched and fall through to heuristic patterns.
+                // A throw from the error-table formatters (fmt::runtime over a
+                // translated format string) -- leave text untouched and fall
+                // through to heuristic patterns.
             }
+#else
+            }
+#endif
         }
     }
 

@@ -142,7 +142,8 @@ class BackgroundGhostBuilder {
  * @brief Orchestrates streaming G-code loading for memory-constrained devices
  *
  * The streaming controller provides on-demand layer loading by coordinating:
- * - GCodeLayerIndex: Maps layer numbers to file byte offsets (~24 bytes/layer)
+ * - GCodeLayerIndex: Maps layer numbers to file byte offsets (one 40-byte
+ *   StreamingLayerEntry per layer)
  * - GCodeDataSource: Reads byte ranges from file or network
  * - GCodeLayerCache: LRU cache for parsed segment data
  * - GCodeParser: Converts raw G-code bytes to ToolpathSegments
@@ -164,7 +165,7 @@ class BackgroundGhostBuilder {
  *   }
  * @endcode
  *
- * Memory usage: Index (~24 bytes × layers) + Cache (configurable budget)
+ * Memory usage: Index (sizeof(StreamingLayerEntry) × layers) + Cache (configurable budget)
  */
 class GCodeStreamingController {
   public:
@@ -231,6 +232,12 @@ class GCodeStreamingController {
      * @return true if successful
      */
     bool open_source(std::unique_ptr<GCodeDataSource> source);
+
+    /// Test seam: when set, the async index worker calls it as its first
+    /// statement, before build_index() runs. Lets a test park the worker in
+    /// the launch window and prove a close() that lands there still cancels
+    /// the build. Null (and inert) outside tests.
+    static std::function<void()> index_worker_gate;
 
     /**
      * @brief Close current file and release resources
@@ -439,15 +446,6 @@ class GCodeStreamingController {
     // =========================================================================
 
     /**
-     * @brief Get header metadata (slicer info, print time, etc.)
-     *
-     * Only populated after first layer is parsed.
-     *
-     * @return Pointer to metadata, or nullptr if not available
-     */
-    const GCodeHeaderMetadata* get_header_metadata() const;
-
-    /**
      * @brief Resolve an object name index to a string
      *
      * Uses the merged string table built from all parsed layers.
@@ -540,13 +538,19 @@ class GCodeStreamingController {
     std::future<bool> index_future_;
     std::atomic<bool> indexing_{false};
     std::atomic<float> index_progress_{0.0f};
+    // Set by close()/destructor before joining index_future_: the progress
+    // callback withdraws consent and the scan unwinds, so the join costs one
+    // progress interval instead of the rest of the build. Cleared when a new
+    // build starts.
+    // Arming discipline: close() and the destructor arm this before joining
+    // the worker; the openers disarm it on the CALLING thread, after close()
+    // has joined the prior worker. build_index() never writes it - a
+    // worker-side reset would wipe a cancel that lands between the async
+    // launch and the worker's first poll, and the close() holding the future
+    // would then wait out the whole build it asked to stop.
+    std::atomic<bool> index_cancel_requested_{false};
     mutable std::mutex callback_mutex_; // Protects index_complete_callback_
     std::function<void(bool)> index_complete_callback_;
-
-    // Metadata (populated lazily)
-    mutable std::mutex metadata_mutex_;
-    std::unique_ptr<GCodeHeaderMetadata> header_metadata_;
-    bool metadata_extracted_{false};
 
     // State
     std::atomic<bool> is_open_{false};

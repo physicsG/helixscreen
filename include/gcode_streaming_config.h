@@ -76,7 +76,9 @@ struct MemoryInfo; // forward declaration
  * @brief Testable overload that accepts explicit memory info
  *
  * Used by unit tests to inject specific memory configurations without
- * depending on the real system memory state.
+ * depending on the real system memory state. On a low-RAM board
+ * (MemoryInfo::is_low_ram_device(), <= 2GB total) the threshold percentage is
+ * capped below the configured default, so small files still full-parse.
  *
  * @param file_size_bytes Size of the G-code file
  * @param mem System memory information

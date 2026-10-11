@@ -32,7 +32,9 @@
 using json = nlohmann::json;
 using namespace helix;
 
-/// Feeds the production Moonraker status path (handle_status_update ->
+namespace helix {
+
+/// Feeds the production Moonraker status path (handle_status ->
 /// parse_save_variables / parse_port_sensor / parse_head_sensor ->
 /// recompute_current_slot_locked -> update_slot_from_state), so the parse chain
 /// under test is the one the device drives.
@@ -48,9 +50,10 @@ class Ad5xPerSlotLoadedHelper : public AmsBackendAd5xIfs {
     }
 
     void feed(const json& status) {
-        handle_status_update(status);
+        handle_status(status);
     }
 };
+} // namespace helix
 
 namespace {
 

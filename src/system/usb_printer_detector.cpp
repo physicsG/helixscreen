@@ -3,6 +3,10 @@
 
 #include "usb_printer_detector.h"
 
+#include "ui_update_queue.h"
+
+#include "http_executor.h"
+
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -20,8 +24,7 @@ namespace helix {
 // ============================================================================
 
 static const std::vector<KnownUsbPrinter> s_known_printers = {
-    {0x0483, 0x5740, "Phomemo M110"}, // STM32 CDC-ACM variant
-    {0x0493, 0x8760, "Phomemo M110"}, // Original USB variant
+    {0x0493, 0x8760, "Phomemo M110"},
     // Future printers added here
 };
 
@@ -136,19 +139,50 @@ std::vector<UsbPrinterInfo> UsbPrinterDetector::scan() {
 
 void UsbPrinterDetector::poll_timer_cb(_lv_timer_t* timer) {
     auto* self = static_cast<UsbPrinterDetector*>(lv_timer_get_user_data(timer));
-    if (!self || !self->callback_) {
+    if (self && self->callback_) {
+        self->request_scan();
+    }
+}
+
+void UsbPrinterDetector::scan_async(ScanCallback on_done) {
+    auto& executor = helix::http::HttpExecutor::fast();
+    if (!executor.running()) {
+        on_done(scan());
         return;
     }
+    executor.submit([on_done = std::move(on_done)]() {
+        auto detected = scan();
+        helix::ui::queue_update(
+            "UsbPrinterDetector::scan",
+            [on_done, detected = std::move(detected)]() mutable { on_done(std::move(detected)); });
+    });
+}
 
-    auto detected = self->scan();
+void UsbPrinterDetector::request_scan() {
+    if (scan_in_flight_) {
+        return;
+    }
+    scan_in_flight_ = true;
+    scan_async([this, tok = poll_lifetime_.token()](std::vector<UsbPrinterInfo> detected) {
+        if (tok.expired()) {
+            return;
+        }
+        scan_in_flight_ = false;
+        apply_scan(std::move(detected));
+    });
+}
 
+void UsbPrinterDetector::apply_scan(std::vector<UsbPrinterInfo> detected) {
+    if (!callback_) {
+        return;
+    }
     // Always fire on first scan (so "Searching..." updates to "No printers found"),
     // then only fire on subsequent changes
-    if (self->first_scan_ || !results_equal(detected, self->last_detected_)) {
-        self->first_scan_ = false;
-        self->last_detected_ = detected;
-        auto cb = self->callback_;
-        cb(detected); // Already on UI thread via LVGL timer
+    if (first_scan_ || !results_equal(detected, last_detected_)) {
+        first_scan_ = false;
+        last_detected_ = detected;
+        auto cb = callback_;
+        cb(detected);
     }
 }
 
@@ -164,8 +198,8 @@ void UsbPrinterDetector::start_polling(DetectionCallback callback, int interval_
 
     spdlog::debug("usb-detect: started polling every {}ms", interval_ms);
 
-    // Do an immediate scan so the caller gets results right away
-    poll_timer_cb(poll_timer_);
+    // Scan now rather than one interval from now
+    request_scan();
 }
 
 void UsbPrinterDetector::stop_polling() {

@@ -4,197 +4,162 @@
 #include "ui_settings_system.h"
 
 #include "ui_callback_helpers.h"
-#include "ui_event_safety.h"
-#include "ui_nav_manager.h"
-#include "ui_panel_settings.h"
+#include "ui_nav.h"
+#include "ui_overlay_performance.h"
+#include "ui_panel_common.h"
+#include "ui_settings_security.h"
+#include "ui_settings_telemetry_data.h"
+#include "ui_toast_manager.h"
+#include "ui_update_queue.h"
+#include "ui_utils.h"
 
+#include "app_globals.h"
 #include "config.h"
-#include "static_panel_registry.h"
+#include "lvgl/src/others/translation/lv_translation.h"
 #include "system_settings_manager.h"
 
 #include <spdlog/spdlog.h>
 
-#include <memory>
-
 namespace helix::settings {
 
-// ============================================================================
-// SINGLETON ACCESSOR
-// ============================================================================
-
-static std::unique_ptr<SystemSettingsOverlay> g_system_settings_overlay;
-
-SystemSettingsOverlay& get_system_settings_overlay() {
-    if (!g_system_settings_overlay) {
-        g_system_settings_overlay = std::make_unique<SystemSettingsOverlay>();
-        StaticPanelRegistry::instance().register_destroy(
-            "SystemSettingsOverlay", []() { g_system_settings_overlay.reset(); });
-    }
-    return *g_system_settings_overlay;
-}
-
-// ============================================================================
-// CONSTRUCTOR / DESTRUCTOR
-// ============================================================================
-
-SystemSettingsOverlay::SystemSettingsOverlay() {
-    spdlog::debug("[{}] Created", get_name());
-}
-
 SystemSettingsOverlay::~SystemSettingsOverlay() {
-    spdlog::trace("[{}] Destroyed", get_name());
-}
-
-// ============================================================================
-// INITIALIZATION
-// ============================================================================
-
-void SystemSettingsOverlay::init_subjects() {
-    if (subjects_initialized_) {
-        return;
+    if (lv_is_initialized() && factory_reset_dialog_) {
+        // Unregister so the close callback cannot fire on a dead 'this'.
+        helix::nav::clear_on_close(factory_reset_dialog_);
     }
-
-    // All subjects used by the system overlay XML are already registered
-    // by SettingsPanel (show_network_settings, show_touch_calibration,
-    // hardware_has_issues, settings_telemetry_enabled, etc.)
-    subjects_initialized_ = true;
-    spdlog::debug("[{}] Subjects initialized", get_name());
 }
 
 void SystemSettingsOverlay::register_callbacks() {
-    // All callbacks used in settings_system_overlay.xml are already registered
-    // globally by SettingsPanel in init_subjects() and register_settings_panel_callbacks().
-    // No additional registrations needed here.
-    spdlog::debug("[{}] Callbacks registered (delegated to SettingsPanel)", get_name());
+    using helix::ui::event_selected;
+    register_xml_callbacks({
+        {"on_security_clicked",
+         [](lv_event_t*) {
+             get_security_settings_overlay().show(get_system_settings_overlay().parent_screen_);
+         }},
+        {"on_telemetry_view_data",
+         [](lv_event_t*) {
+             get_telemetry_data_overlay().show(get_system_settings_overlay().parent_screen_);
+         }},
+        {"on_telemetry_changed",
+         [](lv_event_t* e) {
+             bool on = helix::ui::event_checked(e);
+             SystemSettingsManager::instance().set_telemetry_enabled(on);
+             if (on) {
+                 ToastManager::instance().show(
+                     ToastSeverity::SUCCESS,
+                     lv_tr("Thanks! TOTALLY anonymous usage data helps improve HelixScreen."),
+                     4000);
+             }
+         }},
+        {"on_log_level_changed",
+         [](lv_event_t* e) {
+             SystemSettingsManager::instance().set_log_level_by_index(event_selected(e));
+         }},
+        {"on_system_performance_clicked",
+         [](lv_event_t*) { get_system_settings_overlay().open_performance(); }},
+        {"on_restart_helix_settings_clicked",
+         [](lv_event_t*) { get_system_settings_overlay().handle_restart_helix_clicked(); }},
+        {"on_factory_reset_clicked",
+         [](lv_event_t*) { get_system_settings_overlay().handle_factory_reset_clicked(); }},
+        {"on_factory_reset_confirm",
+         [](lv_event_t*) { get_system_settings_overlay().perform_factory_reset(); }},
+        {"on_factory_reset_cancel",
+         [](lv_event_t*) {
+             if (get_system_settings_overlay().factory_reset_dialog_) {
+                 helix::nav::go_back(); // Animation + callback clean up
+             }
+         }},
+    });
 }
 
-// ============================================================================
-// UI CREATION
-// ============================================================================
+void SystemSettingsOverlay::open_performance() {
+    spdlog::debug("[{}] Performance clicked - opening overlay", get_name());
 
-lv_obj_t* SystemSettingsOverlay::create(lv_obj_t* parent) {
-    if (overlay_root_) {
-        spdlog::warn("[{}] create() called but overlay already exists", get_name());
-        return overlay_root_;
-    }
-
-    spdlog::debug("[{}] Creating overlay...", get_name());
-
-    overlay_root_ =
-        static_cast<lv_obj_t*>(lv_xml_create(parent, "settings_system_overlay", nullptr));
-    if (!overlay_root_) {
-        spdlog::error("[{}] Failed to create overlay from XML", get_name());
-        return nullptr;
-    }
-
-    lv_obj_add_flag(overlay_root_, LV_OBJ_FLAG_HIDDEN);
-
-    spdlog::info("[{}] Overlay created", get_name());
-    return overlay_root_;
-}
-
-void SystemSettingsOverlay::show(lv_obj_t* parent_screen) {
-    spdlog::debug("[{}] show() called", get_name());
-
-    parent_screen_ = parent_screen;
-
-    if (!subjects_initialized_) {
-        init_subjects();
-        register_callbacks();
-    }
-
-    if (!overlay_root_ && parent_screen_) {
-        create(parent_screen_);
-    }
-
-    if (!overlay_root_) {
-        spdlog::error("[{}] Cannot show - overlay not created", get_name());
+    auto* overlay = helix::ui::UiOverlayPerformance::instance().create(lv_screen_active());
+    if (!overlay) {
+        spdlog::error("[{}] Failed to create Performance overlay", get_name());
         return;
     }
 
-    NavigationManager::instance().register_overlay_instance(overlay_root_, this);
-    NavigationManager::instance().push_overlay(overlay_root_);
+    // UiOverlayPerformance carries no IPanelLifecycle, so it registers with a null
+    // lifecycle: that is what separates an intentional lifecycle-less overlay from a
+    // caller who forgot to register. Without it the push is recorded as "unreg" in
+    // panel telemetry and crash breadcrumbs, and strict mode aborts.
+    helix::nav::register_overlay(overlay, nullptr);
+    helix::nav::push_overlay(overlay);
 }
 
-// ============================================================================
-// LIFECYCLE
-// ============================================================================
+void SystemSettingsOverlay::handle_restart_helix_clicked() {
+    spdlog::info("[{}] Restart HelixScreen requested", get_name());
+    ToastManager::instance().show(ToastSeverity::INFO, lv_tr("Restarting HelixScreen..."), 1500);
 
-void SystemSettingsOverlay::on_activate() {
-    OverlayBase::on_activate();
-
-    init_telemetry_toggle();
-    init_touch_cal_description();
-    init_host_description();
-    init_log_level_dropdown();
+    // Schedule restart after brief delay to let toast display
+    helix::ui::queue_update("SystemSettingsOverlay::restart", []() {
+        spdlog::info("[SystemSettingsOverlay] Initiating restart...");
+        app_request_restart_service();
+    });
 }
 
-void SystemSettingsOverlay::on_deactivate() {
-    OverlayBase::on_deactivate();
-}
+void SystemSettingsOverlay::handle_factory_reset_clicked() {
+    spdlog::debug("[{}] Factory Reset clicked - showing confirmation dialog", get_name());
 
-// ============================================================================
-// INTERNAL INITIALIZATION
-// ============================================================================
+    // Create dialog on first use (lazy initialization)
+    if (!factory_reset_dialog_ && parent_screen_) {
+        spdlog::debug("[{}] Creating factory reset dialog...", get_name());
 
-void SystemSettingsOverlay::init_telemetry_toggle() {
-    if (!overlay_root_)
-        return;
+        // Create self-contained factory_reset_modal component
+        // Callbacks are already wired via XML event_cb elements
+        factory_reset_dialog_ = helix::ui::create_xml_hidden(parent_screen_, "factory_reset_modal");
 
-    lv_obj_t* telemetry_row = lv_obj_find_by_name(overlay_root_, "row_telemetry");
-    if (telemetry_row) {
-        lv_obj_t* toggle = lv_obj_find_by_name(telemetry_row, "toggle");
-        if (toggle) {
-            if (SystemSettingsManager::instance().get_telemetry_enabled()) {
-                lv_obj_add_state(toggle, LV_STATE_CHECKED);
-            } else {
-                lv_obj_remove_state(toggle, LV_STATE_CHECKED);
-            }
-            spdlog::trace("[{}] Telemetry toggle initialized", get_name());
+        if (factory_reset_dialog_) {
+            // Register as a function-based (nullptr-lifecycle) overlay so
+            // crash crumbs show "anon" instead of "unreg".
+            helix::nav::register_overlay(factory_reset_dialog_, nullptr);
+
+            // Register close callback to delete dialog when animation completes.
+            // Must use safe_delete_deferred — this lambda runs inside
+            // UpdateQueue::process_pending(), and synchronous deletion
+            // during a batch corrupts LVGL's event linked list (#356, #491).
+            helix::nav::on_close(factory_reset_dialog_, [this]() {
+                helix::ui::safe_delete_deferred(factory_reset_dialog_);
+            });
+
+            spdlog::info("[{}] Factory reset dialog created", get_name());
+        } else {
+            spdlog::error("[{}] Failed to create factory reset dialog", get_name());
+            return;
         }
     }
-}
 
-void SystemSettingsOverlay::init_touch_cal_description() {
-    if (!overlay_root_)
-        return;
-
-    // Touch calibration row description is already bound to the
-    // touch_cal_status subject via SettingsPanel's setup_action_handlers().
-    // For the system overlay, we bind it here if the row exists.
-    lv_obj_t* touch_cal_row = lv_obj_find_by_name(overlay_root_, "row_touch_calibration");
-    if (touch_cal_row) {
-        spdlog::trace("[{}] Touch calibration row present", get_name());
+    // Show the dialog via navigation stack
+    if (factory_reset_dialog_) {
+        helix::nav::push_overlay(factory_reset_dialog_);
     }
 }
 
-void SystemSettingsOverlay::init_host_description() {
-    if (!overlay_root_)
-        return;
+void SystemSettingsOverlay::perform_factory_reset() {
+    spdlog::warn("[{}] Performing factory reset - resetting config!", get_name());
 
-    // Host row description is already bound to printer_host_value subject
-    // via SettingsPanel's populate_info_rows(). The subject updates reactively.
-    lv_obj_t* host_row = lv_obj_find_by_name(overlay_root_, "row_printer_host");
-    if (host_row) {
-        spdlog::trace("[{}] Host row present", get_name());
+    // Get config instance and reset
+    Config* config = Config::get_instance();
+    config->reset_to_defaults();
+    config->save();
+    spdlog::info("[{}] Config reset to defaults", get_name());
+
+    // Hide the dialog - animation + callback will handle cleanup
+    if (factory_reset_dialog_) {
+        helix::nav::go_back();
     }
-}
 
-void SystemSettingsOverlay::init_log_level_dropdown() {
-    if (!overlay_root_)
-        return;
+    // Show confirmation toast and restart
+    ToastManager::instance().show(ToastSeverity::INFO,
+                                  lv_tr("Settings reset to defaults. Restarting..."), 1500);
 
-    lv_obj_t* row = lv_obj_find_by_name(overlay_root_, "row_log_level");
-    if (!row)
-        return;
-
-    lv_obj_t* dropdown = lv_obj_find_by_name(row, "dropdown");
-    if (dropdown) {
-        // Options are populated + translated by the XML options_tag on row_log_level.
-        int index = SystemSettingsManager::instance().get_log_level_index();
-        lv_dropdown_set_selected(dropdown, static_cast<uint32_t>(index));
-        spdlog::trace("[{}] Log level dropdown initialized (index={})", get_name(), index);
-    }
+    // Schedule restart after brief delay to let toast display
+    helix::ui::queue_update("SystemSettingsOverlay::factory_reset_restart", []() {
+        spdlog::info("[SystemSettingsOverlay] Restarting after factory reset...");
+        app_request_restart_service();
+    });
 }
 
 } // namespace helix::settings

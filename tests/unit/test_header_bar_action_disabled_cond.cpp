@@ -68,7 +68,7 @@ TEST_CASE_METHOD(XMLTestFixture, "header_bar action button disables via cond exp
                  "[header_bar][xml][calibration_gate]") {
     REQUIRE(register_component("header_bar"));
 
-    lv_subject_t* nav = state().get_nav_buttons_enabled_subject();
+    lv_subject_t* nav = state().network_state().get_nav_buttons_enabled_subject();
     REQUIRE(nav != nullptr);
     lv_subject_set_int(nav, 1); // connected + klippy ready
 
@@ -112,7 +112,7 @@ TEST_CASE_METHOD(XMLTestFixture, "calibration panels gate their header action bu
     lv_xml_register_subject(nullptr, "pid_cal_not_idle", &pid_not_idle);
     lv_xml_register_subject(nullptr, "is_calibrate_all_disabled", &is_calibrate_all_disabled);
 
-    lv_subject_t* nav = state().get_nav_buttons_enabled_subject();
+    lv_subject_t* nav = state().network_state().get_nav_buttons_enabled_subject();
     REQUIRE(nav != nullptr);
 
     struct PanelCase {

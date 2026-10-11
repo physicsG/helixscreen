@@ -87,6 +87,31 @@ class TestCrossRefStyleRefs:
         ]
         assert any("missing_style" in d.message for d in style_errors)
 
+    def test_param_style_ref_not_flagged(
+        self, schema: Schema, tmp_path: Path
+    ) -> None:
+        """A `$param` style name resolves at instantiation time, not statically.
+
+        zone_tab binds `name="$selected_style"`; the linter cannot know which
+        style the instantiating element passes, so the reference is skipped —
+        the same allowance subject references already get.
+        """
+        xml = tmp_path / "param_style.xml"
+        xml.write_text(
+            '<component><subjects><subject name="tab_active" type="int" value="0"/></subjects>'
+            '<styles><style name="tab_on" bg_opa="255"/></styles>'
+            '<view extends="lv_obj">'
+            '<bind_style_if_eq name="$selected_style" subject="tab_active" ref_value="1"/>'
+            '</view></component>',
+            encoding="utf-8",
+        )
+        linter = Linter(schema, LinterConfig(enable_xref=True))
+        result = linter.lint_file(xml)
+        style_errors = [
+            d for d in result.diagnostics if d.check == CheckType.UNKNOWN_STYLE_REF
+        ]
+        assert style_errors == []
+
     def test_dotted_style_ref_resolves_across_files(
         self, schema: Schema, tmp_path: Path
     ) -> None:

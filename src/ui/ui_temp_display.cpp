@@ -6,12 +6,14 @@
 #include "ui_breakpoint.h"
 #include "ui_fonts.h"
 #include "ui_temperature_utils.h"
+#include "ui_tile_rung.h"
 
 #include "helix-xml/src/xml/lv_xml.h"
 #include "helix-xml/src/xml/lv_xml_parser.h"
 #include "helix-xml/src/xml/lv_xml_utils.h"
 #include "helix-xml/src/xml/lv_xml_widget.h"
 #include "helix-xml/src/xml/parsers/lv_xml_obj_parser.h"
+#include "helix/ui/shared_font_style.h"
 #include "lvgl/lvgl.h"
 #include "printer_temperature_state.h" // helix::ChamberMode
 #include "theme_manager.h"
@@ -65,6 +67,10 @@ struct TempDisplayData {
     bool has_mode_binding = false;                  // True if bind_mode was set
     // Responsive hide of separator+target labels below this breakpoint (-1 = never).
     int hide_target_below_bp = -1;
+    /// Subject a sizing tile publishes its target-half verdict on: 1 draw, 0
+    /// drop. When one is supplied it SUPERSEDES the breakpoint rule, so the two
+    /// never fight over one flag. -1 means no tile owns this decision.
+    int size_allows_target = -1;
     // Last value seen from the ui_breakpoint subject. Only meaningful when
     // hide_target_below_bp >= 0 — that is the only case that subscribes.
     int current_bp = 0;
@@ -76,8 +82,8 @@ struct TempDisplayData {
     lv_obj_t* unit_label = nullptr;
 
     // String subjects for reactive text binding
-    lv_subject_t current_text_subject;
-    lv_subject_t target_text_subject;
+    lv_subject_t current_text_subject{};
+    lv_subject_t target_text_subject{};
 
     // Observers from lv_label_bind_text (must be removed before freeing subjects)
     lv_observer_t* current_text_observer = nullptr;
@@ -115,9 +121,12 @@ static const lv_font_t* get_font_for_size(const char* size) {
 static void apply_target_visibility(TempDisplayData* data) {
     if (!data)
         return;
-    bool hide =
-        (data->hide_target_below_bp >= 0 && data->current_bp < data->hide_target_below_bp) ||
-        (data->hide_target_when_off && data->target_temp == 0);
+    // A tile that measured its own box owns this outright: it knows the widest
+    // value it can ever draw, which a breakpoint threshold only approximates.
+    const bool size_hides = data->size_allows_target == 0;
+    const bool bp_hides = data->size_allows_target < 0 && data->hide_target_below_bp >= 0 &&
+                          data->current_bp < data->hide_target_below_bp;
+    bool hide = size_hides || bp_hides || (data->hide_target_when_off && data->target_temp == 0);
     if (data->separator_label) {
         if (hide)
             lv_obj_add_flag(data->separator_label, LV_OBJ_FLAG_HIDDEN);
@@ -130,6 +139,16 @@ static void apply_target_visibility(TempDisplayData* data) {
         else
             lv_obj_remove_flag(data->target_label, LV_OBJ_FLAG_HIDDEN);
     }
+}
+
+/** Observer callback on the owning tile's target-half verdict subject. */
+static void size_target_observer_cb(lv_observer_t* observer, lv_subject_t* subject) {
+    lv_obj_t* container = static_cast<lv_obj_t*>(lv_observer_get_target(observer));
+    auto* data = get_data(container);
+    if (!data)
+        return;
+    data->size_allows_target = lv_subject_get_int(subject);
+    apply_target_visibility(data);
 }
 
 /** Observer callback on the ui_breakpoint subject — toggles target+separator
@@ -435,21 +454,29 @@ static void* ui_temp_display_create_cb(lv_xml_parser_state_t* state, const char*
     const char* hide_below_str = lv_xml_get_value_of(attrs, "hide_target_below_bp");
     data_ptr->hide_target_below_bp = breakpoint_from_name(hide_below_str);
 
+    // size_target_subject names a subject the owning tile publishes its
+    // measured verdict on. Empty means no tile owns the decision and the
+    // breakpoint rule stands.
+    const char* size_subject_name = lv_xml_get_value_of(attrs, "size_target_subject");
+
     // Create current temp label
     data_ptr->current_label = lv_label_create(container);
-    lv_obj_set_style_text_font(data_ptr->current_label, font, LV_PART_MAIN);
+    // All four labels carry the face as a shared ADDED style, so a style bound
+    // from XML can retier them. Written locally the face would outrank every
+    // bound style and the size attribute would be the last word.
+    helix::ui::apply_font_style(data_ptr->current_label, font);
     lv_obj_set_style_text_color(data_ptr->current_label, text_color, LV_PART_MAIN);
 
     if (data_ptr->show_target) {
         // Create separator label " / "
         data_ptr->separator_label = lv_label_create(container);
         lv_label_set_text(data_ptr->separator_label, " / ");
-        lv_obj_set_style_text_font(data_ptr->separator_label, font, LV_PART_MAIN);
+        helix::ui::apply_font_style(data_ptr->separator_label, font);
         lv_obj_set_style_text_color(data_ptr->separator_label, muted_color, LV_PART_MAIN);
 
         // Create target temp label
         data_ptr->target_label = lv_label_create(container);
-        lv_obj_set_style_text_font(data_ptr->target_label, font, LV_PART_MAIN);
+        helix::ui::apply_font_style(data_ptr->target_label, font);
         lv_obj_set_style_text_color(data_ptr->target_label, text_color, LV_PART_MAIN);
 
         // Initialize target text subject
@@ -464,7 +491,7 @@ static void* ui_temp_display_create_cb(lv_xml_parser_state_t* state, const char*
     // Create unit label "°C"
     data_ptr->unit_label = lv_label_create(container);
     lv_label_set_text(data_ptr->unit_label, "°C");
-    lv_obj_set_style_text_font(data_ptr->unit_label, font, LV_PART_MAIN);
+    helix::ui::apply_font_style(data_ptr->unit_label, font);
     lv_obj_set_style_text_color(data_ptr->unit_label, muted_color, LV_PART_MAIN);
 
     // Initialize current text subject
@@ -490,6 +517,36 @@ static void* ui_temp_display_create_cb(lv_xml_parser_state_t* state, const char*
             registered->current_bp = lv_subject_get_int(bp_subj);
         }
     }
+
+    // A tile that sizes itself supersedes the breakpoint rule entirely.
+    if (size_subject_name && size_subject_name[0] != '\0') {
+        lv_subject_t* size_subj = lv_xml_get_subject(nullptr, size_subject_name);
+        if (size_subj) {
+            registered->size_allows_target = lv_subject_get_int(size_subj);
+            lv_subject_add_observer_obj(size_subj, size_target_observer_cb, container, nullptr);
+        } else {
+            spdlog::warn("[temp_display] size_target_subject '{}' does not exist; the target half "
+                         "will follow the breakpoint rule instead",
+                         size_subject_name);
+        }
+    }
+    // A sizing tile's rung retiers all four labels together, so the reading
+    // grows and shrinks with the glyph beside it in the face the tile measured.
+    const char* rung_subject_name = lv_xml_get_value_of(attrs, "rung_subject");
+    if (rung_subject_name && rung_subject_name[0] != '\0') {
+        lv_subject_t* rung_subj = lv_xml_get_subject(nullptr, rung_subject_name);
+        if (rung_subj) {
+            for (lv_obj_t* label : {registered->current_label, registered->separator_label,
+                                    registered->target_label, registered->unit_label}) {
+                helix::ui::bind_tile_rung(label, rung_subj, helix::ui::TileLadder::Value);
+            }
+        } else {
+            spdlog::warn("[temp_display] rung_subject '{}' does not exist; the face stays as "
+                         "authored",
+                         rung_subject_name);
+        }
+    }
+
     // Seed visibility from the initial state — with hide_target_when_off that
     // means starting hidden, since target_temp is 0 until the first update.
     apply_target_visibility(registered);

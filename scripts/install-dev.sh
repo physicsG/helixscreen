@@ -5,7 +5,7 @@
 # HelixScreen Installer (Development/Modular Version)
 #
 # This script requires the lib/installer/ modules and must be run from a repo checkout.
-# For end-user installation via curl, use scripts/install.sh instead.
+# For end-user installation via curl, use the bundled install.sh (make installer).
 #
 # Usage (from repo root):
 #   ./scripts/install-dev.sh [options]
@@ -13,7 +13,9 @@
 # Options:
 #   --update    Update existing installation (preserves config)
 #   --uninstall Remove HelixScreen
-#   --clean     Remove old installation completely before installing (no config backup)
+#   --clean     Remove old installation completely before installing (no config
+#               backup; the disabled-services ledger is kept so uninstall can
+#               still re-enable a stock UI this install disabled)
 #   --version   Specify version (default: latest)
 #
 
@@ -40,6 +42,7 @@ if [ -z "${_HELIX_BUNDLED_INSTALLER:-}" ]; then
     LIB_DIR="$SCRIPT_DIR/lib/installer"
 
     . "$LIB_DIR/common.sh"
+    . "$LIB_DIR/logo.sh"
     . "$LIB_DIR/host_profile.sh"
     . "$LIB_DIR/platform.sh"
     . "$LIB_DIR/permissions.sh"
@@ -56,6 +59,7 @@ if [ -z "${_HELIX_BUNDLED_INSTALLER:-}" ]; then
     . "$LIB_DIR/recovery.sh"
     . "$LIB_DIR/kiauh.sh"
     . "$LIB_DIR/uninstall.sh"  # uses functions from other modules
+    . "$LIB_DIR/plan.sh"
     . "$LIB_DIR/main.sh"       # must be last - defines main() that calls everything
 fi
 

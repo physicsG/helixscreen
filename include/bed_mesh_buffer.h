@@ -20,8 +20,18 @@
 namespace helix {
 namespace mesh {
 
+/// What a rendered frame shows. The main thread draws overlays and hit-tests touches
+/// against the frame on screen, which can lag a mode or mesh change by one render.
+struct FrameInfo {
+    bool heatmap = false; ///< 2D heatmap cells, not the 3D view
+    int rows = 0;         ///< Mesh dimensions the frame was rendered from
+    int cols = 0;
+};
+
 class PixelBuffer {
   public:
+    FrameInfo info; ///< Set by bed_mesh_renderer_render_to_buffer()
+
     /**
      * Create a pixel buffer with the given dimensions.
      * Buffer is zero-initialized (transparent black).

@@ -35,9 +35,8 @@ The retraction settings overlay is about as small as a real contribution gets: f
 | `include/ui_overlay_retraction_settings.h` | 162 | Class declaration, subject + widget references |
 | `src/ui/ui_overlay_retraction_settings.cpp` | 293 | Lifecycle, event handlers, G-code send |
 
-You'll also touch four *other* files to wire it into the app:
+You'll also touch three *other* files to wire it into the app:
 
-- `src/xml_registration.cpp` — register the XML component
 - `src/application/subject_initializer.cpp` — construct the global instance at boot
 - `ui_xml/settings_printing_overlay.xml` — add a row that opens the overlay
 - (optional) translation YAML if you added user-visible strings
@@ -84,9 +83,8 @@ Inside the content area, each setting is structured consistently (lines 40–66 
           flex_flow="row" style_flex_main_place="space_between"
           style_flex_cross_place="center">
     <lv_obj height="content" flex_flow="column" style_pad_gap="#space_xxs">
-      <text_body text="Retract Length" translation_tag="Retract Length"/>
-      <text_small text="0.4-2mm direct drive, 4-6mm bowden"
-                  translation_tag="0.4-2mm direct drive, 4-6mm bowden"/>
+      <text_body text="Retract Length"/>
+      <text_small text="0.4-2mm direct drive, 4-6mm bowden"/>
     </lv_obj>
     <text_body name="retract_length_label" bind_text="retract_length_display"/>
   </lv_obj>
@@ -98,7 +96,7 @@ Inside the content area, each setting is structured consistently (lines 40–66 
                min_value="0" max_value="600" value="80">
       <event_cb trigger="value_changed" callback="on_retraction_setting_changed"/>
     </lv_slider>
-    <text_small width="40" text="6mm" translation_tag="6mm"/>
+    <text_small width="40" text="6mm"/>
   </lv_obj>
 </lv_obj>
 <divider_horizontal/>
@@ -109,7 +107,7 @@ Things worth noticing:
 - **`bind_text="retract_length_display"`** — this label's text comes from a subject named `retract_length_display`. The C++ side owns that subject and writes to it when the slider moves.
 - **`<event_cb trigger="value_changed" callback="on_retraction_setting_changed"/>`** — when the slider value changes, call the C++ function registered under the name `on_retraction_setting_changed`. **No `lv_obj_add_event_cb()` in C++ — ever.**
 - **Callback naming** — the convention is `on_<component>_<action>`. Generic names like `on_changed` will collide. (See lesson **L039**.)
-- **`translation_tag` on every user-visible string.** Exception: product names, material codes, universal terms. (See `CONTRIBUTOR_GOTCHAS.md`.)
+- **A literal `text=` is translated as written.** The text is its own translation key, so no `translation_tag` is needed; write one only when the key differs from the text. (See `TRANSLATION_SYSTEM.md`.)
 - **`<divider_horizontal/>`** — a semantic widget that applies the standard divider style. Don't roll your own with `lv_obj` + `border_width`.
 
 ### Step 2: The class declaration (`include/ui_overlay_retraction_settings.h`)
@@ -129,8 +127,10 @@ class RetractionSettingsOverlay : public OverlayBase {
         return "Retraction Settings";
     }
     void on_activate() override;
-    void on_deactivate() override;
     void cleanup() override;
+
+  protected:
+    void on_deactivating(DeactivateReason reason) override;
 
   private:
     void send_retraction_settings();
@@ -234,7 +234,7 @@ void RetractionSettingsOverlay::on_activate() {
 }
 ```
 
-`on_activate()` runs every time the overlay becomes visible. For a settings overlay, this is where you pull the current values from `PrinterState` and seed the UI. `on_deactivate()` runs when it's dismissed — clean up timers, stop polling, etc.
+`on_activate()` runs every time the overlay becomes visible. For a settings overlay, this is where you pull the current values from `PrinterState` and seed the UI. `on_deactivating(reason)` runs when it's dismissed — clean up timers, stop polling, etc. It is a hook, not an override of `on_deactivate()`: the base calls it and then invalidates `lifetime_` on its own, so there is no base call to make. `reason` says whether the user navigated away, the app is shutting down, or XML hot-reload is rebuilding the widget tree.
 
 **3d. Event handlers**
 
@@ -271,17 +271,9 @@ Lazy-create on first open (fast boot), reuse thereafter. `NavigationManager::pus
 
 ### Step 4: Wire it into the app
 
-Four one-line edits:
+Three edits. The XML component itself needs no registration: `lv_xml_create("retraction_settings_overlay", ...)` loads `ui_xml/retraction_settings_overlay.xml` on first use.
 
-**4a. Register the XML component** — `src/xml_registration.cpp`:
-
-```cpp
-register_xml("retraction_settings_overlay.xml");
-```
-
-Without this, `lv_xml_create("retraction_settings_overlay", ...)` returns null. Put it near similar overlays, not at random.
-
-**4b. Construct the global instance at boot** — `src/application/subject_initializer.cpp`:
+**4a. Construct the global instance at boot** — `src/application/subject_initializer.cpp`:
 
 ```cpp
 init_global_retraction_settings(api);
@@ -289,7 +281,7 @@ init_global_retraction_settings(api);
 
 This is where every overlay's `init_global_*()` gets called during app startup. Order can matter if overlays depend on each other — follow the pattern of siblings.
 
-**4c. Add the row that opens it** — `ui_xml/settings_printing_overlay.xml`:
+**4b. Add the row that opens it** — `ui_xml/settings_printing_overlay.xml`:
 
 ```xml
 <lv_obj name="container_firmware_retraction" width="100%" style_pad_all="0" scrollable="false">
@@ -306,7 +298,7 @@ This is where every overlay's `init_global_*()` gets called during app startup. 
 
 The `<bind_flag_if_eq>` wrapper hides the row on printers that don't support firmware retraction — this is how you conditionally expose features without a runtime C++ check.
 
-**4d. Run it**
+**4c. Run it**
 
 ```bash
 make -j
@@ -329,7 +321,6 @@ src/ui/
   ui_overlay_retraction_settings.cpp     ← your impl
 
 src/
-  xml_registration.cpp                   ← edit to register_xml()
   application/subject_initializer.cpp    ← edit to call init_global_*()
 ```
 
@@ -349,7 +340,7 @@ The retraction overlay is the pattern the codebase *has*. Here's the pattern it'
 **What stays the same:**
 
 - Inheriting `OverlayBase`.
-- The `init_subjects()` / `create()` / `on_activate()` / `on_deactivate()` / `cleanup()` lifecycle.
+- The `init_subjects()` / `create()` / `on_activate()` / `on_deactivating()` / `cleanup()` lifecycle.
 - The XML structure — this is purely a C++ pattern change.
 - `SubjectManager` for subject cleanup.
 
@@ -503,4 +494,4 @@ codebase is organized the same way — one subsystem per chapter, about an hour
 each to read. Find yours:
 
 → **[architecture/README.md](architecture/README.md)** — the "I want to work
-on..." index into the 15-chapter architecture guide.
+on..." index into the 17-chapter architecture guide.

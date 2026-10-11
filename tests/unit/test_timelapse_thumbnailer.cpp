@@ -7,25 +7,6 @@
 
 using namespace helix::timelapse;
 
-TEST_CASE("Thumbnailer: cache key generation", "[timelapse][thumbnailer]") {
-    SECTION("different videos produce different keys") {
-        auto key1 = cache_key("benchy_20260312.mp4");
-        auto key2 = cache_key("vase_spiral.mp4");
-        REQUIRE(key1 != key2);
-    }
-
-    SECTION("same video produces same key") {
-        auto key1 = cache_key("benchy.mp4");
-        auto key2 = cache_key("benchy.mp4");
-        REQUIRE(key1 == key2);
-    }
-
-    SECTION("key has timelapse prefix") {
-        auto key = cache_key("test.mp4");
-        REQUIRE(key.find("tl_") == 0);
-    }
-}
-
 TEST_CASE("Thumbnailer: companion filename", "[timelapse][thumbnailer]") {
     SECTION("mp4 gets .thumb.jpg companion") {
         REQUIRE(companion_filename("benchy.mp4") == "benchy.thumb.jpg");
@@ -40,7 +21,7 @@ TEST_CASE("Thumbnailer: ffmpeg argument list construction", "[timelapse][thumbna
     auto args = ffmpeg_extract_args("/home/pi/printer_data/timelapse/benchy.mp4",
                                     "/home/pi/printer_data/timelapse/benchy.thumb.jpg");
 
-    REQUIRE(args.size() == 9);
+    REQUIRE(args.size() == 11);
     REQUIRE(args[0] == "ffmpeg");
     REQUIRE(args[1] == "-y");
     REQUIRE(args[2] == "-i");
@@ -49,7 +30,10 @@ TEST_CASE("Thumbnailer: ffmpeg argument list construction", "[timelapse][thumbna
     REQUIRE(args[5] == "1");
     REQUIRE(args[6] == "-q:v");
     REQUIRE(args[7] == "3");
-    REQUIRE(args[8] == "/home/pi/printer_data/timelapse/benchy.thumb.jpg");
+    // Small enough that pre-scaling it is a cheap decode.
+    REQUIRE(args[8] == "-vf");
+    REQUIRE(args[9] == "scale=480:-2");
+    REQUIRE(args[10] == "/home/pi/printer_data/timelapse/benchy.thumb.jpg");
 }
 
 TEST_CASE("Thumbnailer: ffmpeg args are safe from shell injection", "[timelapse][thumbnailer]") {

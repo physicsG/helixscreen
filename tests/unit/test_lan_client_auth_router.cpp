@@ -72,8 +72,7 @@ json request_frame(const std::string& client_id, const std::string& app_id) {
 class LanAuthRouterFixture : public XMLTestFixture {
   public:
     LanAuthRouterFixture() {
-        // modal_configure() silently no-ops without these, leaving the button
-        // captions at their defaults — the app does this at startup.
+        // The app registers the modal callbacks at startup.
         helix::ui::modal_init_subjects();
         REQUIRE(register_component("modal_dialog"));
     }

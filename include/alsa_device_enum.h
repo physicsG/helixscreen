@@ -34,8 +34,13 @@ std::string make_label(const std::string& card_id, const std::string& card_name)
 /// then one entry per playback-capable card, deduped by pcm.
 std::vector<AudioOutputDevice> assemble(const std::vector<RawCard>& cards);
 
-/// Precedence resolver. env wins, then settings, then "default".
-/// env may be nullptr/"".
+/// True for the PCM names HelixScreen opens: `default`, `sysdefault[:...]`,
+/// `hw:...`, `plughw:...` or `dmix:...`, with no `|`, `file` or `tee` anywhere.
+/// ALSA's file plugin popen()s a `|cmd` target, so any other name is code.
+bool is_safe_pcm_name(const std::string& pcm);
+
+/// Precedence resolver. env wins, then settings, then "default"; a value
+/// is_safe_pcm_name() rejects is skipped. env may be nullptr/"".
 std::string resolve_alsa_device(const std::string& settings_device, const char* env_device);
 
 // --- Live wrappers (read real ALSA / settings / env) ---

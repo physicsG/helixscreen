@@ -46,18 +46,20 @@
  * ## Initialization Order (CRITICAL):
  *
  *   1. Register XML components (network_settings_overlay.xml, wifi_network_item.xml)
- *   2. init_subjects()
- *   3. register_callbacks()
- *   4. create(parent_screen)
- *   5. show() when ready to display
+ *   2. show(parent_screen) runs init_subjects(), register_callbacks() and create()
+ *      on first use, then pushes the overlay
  */
 
 #pragma once
 
+#include "ui_widget_ref.h"
+
 #include "lvgl/lvgl.h"
 #include "network_tester.h"
 #include "overlay_base.h"
+#include "static_panel_registry.h"
 #include "subject_managed_panel.h"
+#include "wifi_backend.h"
 
 #include <memory>
 #include <string>
@@ -110,7 +112,9 @@ class NetworkSettingsOverlay : public OverlayBase {
      * - on_refresh_clicked
      * - on_test_network_clicked
      * - on_add_other_clicked
-     * - on_network_item_clicked
+     * - on_network_settings_item_clicked
+     * - on_network_settings_password_cancel
+     * - on_network_settings_password_connect
      * - on_network_settings_forget
      */
     void register_callbacks() override;
@@ -130,6 +134,9 @@ class NetworkSettingsOverlay : public OverlayBase {
     const char* get_name() const override {
         return "Network Settings";
     }
+    const char* xml_component() const override {
+        return "network_settings_overlay";
+    }
 
     /**
      * @brief Called when overlay becomes visible
@@ -143,7 +150,7 @@ class NetworkSettingsOverlay : public OverlayBase {
      *
      * Stops WiFi scanning, cancels network tests.
      */
-    void on_deactivate() override;
+    void on_deactivating(DeactivateReason reason) override;
 
     /**
      * @brief Clean up resources for async-safe destruction
@@ -153,22 +160,6 @@ class NetworkSettingsOverlay : public OverlayBase {
     //
     // === Public API ===
     //
-
-    /**
-     * @brief Show overlay panel
-     *
-     * Pushes overlay onto navigation stack and registers with NavigationManager.
-     * on_activate() will be called automatically after animation completes.
-     */
-    void show();
-
-    /**
-     * @brief Hide overlay panel
-     *
-     * Pops overlay from navigation stack via NavigationManager::go_back().
-     * on_deactivate() will be called automatically before animation starts.
-     */
-    void hide();
 
     /**
      * @brief Check if overlay is created
@@ -183,37 +174,41 @@ class NetworkSettingsOverlay : public OverlayBase {
   private:
     // Widget references (minimal - prefer subjects)
     // Note: overlay_root_ inherited from OverlayBase
-    lv_obj_t* parent_screen_ = nullptr;
     lv_obj_t* networks_list_ = nullptr;
 
     // Subject manager for automatic cleanup
     SubjectManager subjects_;
 
     // WiFi subjects
-    lv_subject_t wifi_hardware_available_; // 0=unavailable, 1=available
-    lv_subject_t wifi_enabled_;
-    lv_subject_t wifi_connected_;
-    lv_subject_t wifi_only_24ghz_; // 1 if hardware only supports 2.4GHz
-    lv_subject_t connected_ssid_;
-    lv_subject_t ip_address_;
-    lv_subject_t mac_address_;
-    lv_subject_t network_count_;
-    lv_subject_t wifi_scanning_;
+    lv_subject_t wifi_hardware_available_{}; // 0=unavailable, 1=available
+    lv_subject_t wifi_enabled_{};
+    lv_subject_t wifi_connected_{};
+    lv_subject_t wifi_only_24ghz_{};       // 1 if hardware only supports 2.4GHz
+    lv_subject_t wifi_can_forget_{};       // 1 if the backend can forget a saved network
+    lv_subject_t wifi_can_toggle_radio_{}; // 1 if the backend can move the radio
+    lv_subject_t connected_ssid_{};
+    lv_subject_t ip_address_{};
+    lv_subject_t mac_address_{};
+    lv_subject_t network_count_{};
+    lv_subject_t wifi_scanning_{};
 
     // Ethernet subjects
-    lv_subject_t eth_connected_;
-    lv_subject_t eth_ip_address_;
-    lv_subject_t eth_mac_address_;
+    lv_subject_t eth_connected_{};
+    lv_subject_t eth_ip_address_{};
+    lv_subject_t eth_mac_address_{};
 
     // Network test subjects
-    lv_subject_t any_network_connected_; // 1 if wifi OR ethernet connected
-    lv_subject_t test_running_;
-    lv_subject_t test_gateway_status_;
-    lv_subject_t test_internet_status_;
+    lv_subject_t any_network_connected_{}; // 1 if wifi OR ethernet connected
+    lv_subject_t test_running_{};
+    lv_subject_t test_gateway_status_{};
+    lv_subject_t test_internet_status_{};
 
     // Password modal subjects
-    lv_subject_t wifi_connecting_;          // 0=idle, 1=connecting (toggles modal form)
-    lv_subject_t wifi_password_modal_ssid_; // SSID displayed in password modal
+    lv_subject_t wifi_connecting_{};          // 0=idle, 1=connecting (toggles modal form)
+    lv_subject_t wifi_password_modal_ssid_{}; // SSID displayed in password modal
+
+    // Hidden-network modal subject
+    lv_subject_t hidden_connecting_{}; // 0=idle, 1=connecting (toggles modal form)
 
     // String buffers (subjects need stable char* pointers)
     char ssid_buffer_[64];
@@ -231,18 +226,17 @@ class NetworkSettingsOverlay : public OverlayBase {
 
     // State tracking
     // Note: subjects_initialized_, visible_, cleanup_called_ inherited from OverlayBase
-    bool callbacks_registered_ = false;
 
     // Network test modal
-    lv_obj_t* test_modal_ = nullptr;
-    lv_obj_t* step_widget_ = nullptr;
-    lv_subject_t test_complete_; // Controls close button enabled state
+    helix::ui::WidgetRef test_modal_;
+    helix::ui::WidgetRef step_widget_;
+    lv_subject_t test_complete_{}; // Controls close button enabled state
 
     // Hidden network modal (visibility controlled by Modal system)
-    lv_obj_t* hidden_network_modal_ = nullptr;
+    helix::ui::WidgetRef hidden_network_modal_;
 
     // Password modal for secured networks
-    lv_obj_t* password_modal_ = nullptr;
+    helix::ui::WidgetRef password_modal_;
 
     friend class NetworkSettingsOverlayTestAccess;
 
@@ -261,6 +255,15 @@ class NetworkSettingsOverlay : public OverlayBase {
 
     // Cached networks for async UI update
     std::vector<WiFiNetwork> cached_networks_;
+
+    // Bumped (main thread) on toggle, connect start, forget and cleanup. A
+    // status answer issued under an older value describes a state the user has
+    // since replaced, so it is dropped.
+    uint32_t status_generation_ = 0;
+    // A Forget tap's status read is in flight: further taps issue none, so one
+    // tap opens at most one confirm dialog. Cleared by the answer, and by
+    // on_activate() since deactivation drops an answer still in flight.
+    bool forget_read_pending_ = false;
 
     // Event handler implementations
     void handle_wlan_toggle_changed(lv_event_t* e);
@@ -308,43 +311,28 @@ class NetworkSettingsOverlay : public OverlayBase {
     bool eth_refresh_in_flight_ = false;
     bool eth_refresh_trailing_ = false;
     void update_test_state(NetworkTester::TestState state, const NetworkTester::TestResult& result);
+    // Caches the scan and rebuilds the rows once an async status read says
+    // which network is connected: a status read can block for seconds on
+    // wpa_supplicant, so none happens on the UI thread.
     void populate_network_list(const std::vector<WiFiNetwork>& networks);
+    void build_network_list(const std::vector<WiFiNetwork>& networks,
+                            const WifiBackend::ConnectionStatus& status);
+    void apply_wifi_status(const WifiBackend::ConnectionStatus& status);
+    void confirm_forget(const std::string& ssid);
     void clear_network_list();
     void show_placeholder(bool show);
     void update_signal_icons(lv_obj_t* item, int icon_state);
 
-    // Static trampolines for LVGL callbacks
-    static void on_wlan_toggle_changed(lv_event_t* e);
-    static void on_refresh_clicked(lv_event_t* e);
-    static void on_test_network_clicked(lv_event_t* e);
-    static void on_add_other_clicked(lv_event_t* e);
-    static void on_network_item_clicked(lv_event_t* e);
-    // Scoped per [L039] to avoid colliding with other overlays' forget flows
-    // (barcode scanner, label printer) in the flat XML callback namespace.
-    static void on_network_settings_forget(lv_event_t* e);
-
-    // Network test modal callbacks
-    static void on_network_test_close(lv_event_t* e);
     void handle_network_test_close();
 
     // Hidden network modal callbacks
-    static void on_hidden_cancel_clicked(lv_event_t* e);
-    static void on_hidden_connect_clicked(lv_event_t* e);
-    static void on_security_changed(lv_event_t* e);
     void handle_hidden_cancel_clicked();
     void handle_hidden_connect_clicked();
-    void handle_security_changed(lv_event_t* e);
 
     // Password modal methods
     void show_password_modal(const char* ssid);
     void hide_password_modal();
 
-    // Password modal callbacks
-    /// Nulls whichever cached modal pointer matches the object being destroyed,
-    /// including destruction this class does not drive itself (#1341).
-    static void on_modal_deleted(lv_event_t* e);
-    static void on_wifi_password_cancel(lv_event_t* e);
-    static void on_wifi_password_connect(lv_event_t* e);
     void handle_password_cancel_clicked();
     void handle_password_connect_clicked();
 };
@@ -353,9 +341,7 @@ class NetworkSettingsOverlay : public OverlayBase {
 // Global Instance Access
 // ============================================================================
 
-/**
- * @brief Get the global NetworkSettingsOverlay instance
- *
- * Creates the instance on first call. Singleton pattern.
- */
-NetworkSettingsOverlay& get_network_settings_overlay();
+/// The process-wide NetworkSettingsOverlay, built on first use.
+inline NetworkSettingsOverlay& get_network_settings_overlay() {
+    return helix::lazy_global<NetworkSettingsOverlay>("NetworkSettingsOverlay");
+}

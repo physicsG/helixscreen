@@ -397,3 +397,34 @@ TEST_CASE("NotificationHistory: Empty action field by default", "[ui][action]") 
     REQUIRE(entries.size() == 1);
     REQUIRE(entries[0].action[0] == '\0');
 }
+
+// ============================================================================
+// Revision counter (prestonbrown/helixscreen#1525)
+// ============================================================================
+
+TEST_CASE("NotificationHistory: version increments on add and clear", "[ui][version]") {
+    NotificationHistory& history = NotificationHistory::instance();
+    history.clear();
+
+    uint64_t base = history.version();
+    history.add(make_entry(ToastSeverity::INFO, "first"));
+    REQUIRE(history.version() == base + 1);
+
+    history.add(make_entry(ToastSeverity::WARNING, "second"));
+    base = history.version();
+    history.clear();
+    REQUIRE(history.version() == base + 1);
+    REQUIRE(history.count() == 0);
+}
+
+TEST_CASE("NotificationHistory: mark_all_read does not bump the version", "[ui][version]") {
+    // The panel refreshes on revision change and its refresh marks everything
+    // read — a read-only operation must not re-trigger the observer.
+    NotificationHistory& history = NotificationHistory::instance();
+    history.clear();
+    history.add(make_entry(ToastSeverity::INFO, "unread"));
+
+    uint64_t before = history.version();
+    history.mark_all_read();
+    REQUIRE(history.version() == before);
+}

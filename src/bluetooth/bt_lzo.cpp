@@ -2,8 +2,9 @@
 
 #include "bluetooth_plugin.h"
 
-#include <cstring>
+#include <memory>
 #include <minilzo.h>
+#include <new>
 
 static bool s_lzo_initialized = false;
 
@@ -17,14 +18,16 @@ extern "C" int helix_bt_lzo_compress(const uint8_t* in, int in_len, uint8_t* out
         s_lzo_initialized = true;
     }
 
-    // LZO1X-1 requires a work memory buffer
-    lzo_align_t work_mem[LZO1X_1_MEM_COMPRESS / sizeof(lzo_align_t) + 1];
-    std::memset(work_mem, 0, sizeof(work_mem));
+    // Heap, not stack: LZO1X_1_MEM_COMPRESS is 64KB on 32-bit targets and 128KB on 64-bit.
+    std::unique_ptr<lzo_align_t[]> work_mem(
+        new (std::nothrow) lzo_align_t[LZO1X_1_MEM_COMPRESS / sizeof(lzo_align_t) + 1]());
+    if (!work_mem)
+        return -4;
 
     lzo_uint dst_len = static_cast<lzo_uint>(out_len);
     int r =
         lzo1x_1_compress(reinterpret_cast<const unsigned char*>(in), static_cast<lzo_uint>(in_len),
-                         reinterpret_cast<unsigned char*>(out), &dst_len, work_mem);
+                         reinterpret_cast<unsigned char*>(out), &dst_len, work_mem.get());
 
     if (r != LZO_E_OK)
         return -3;

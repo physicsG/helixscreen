@@ -19,7 +19,9 @@
  * init() cannot be called directly: it initializes LVGL and opens real devices.
  */
 
+#include "../test_helpers/config_dir_guard.h"
 #include "display_backend.h"
+#include "text_io.h"
 
 #include "../catch_amalgamated.hpp"
 
@@ -399,4 +401,99 @@ TEST_CASE("Backend fallback: all backends exhausted returns failure",
 
     // Both exhausted — this is the "all backends exhausted" path
     REQUIRE(display == nullptr);
+}
+
+TEST_CASE("read_config_rotation takes the first \"rotate\": <digits> in settings.json",
+          "[display][rotation]") {
+    helix::ConfigDirGuard guard("rotation_scan");
+    const std::string settings = (guard.dir / "settings.json").string();
+    auto rotation_for = [&](const std::string& json) {
+        REQUIRE(helix::text_io::write_file(settings, json));
+        return read_config_rotation(-1);
+    };
+
+    CHECK(rotation_for(R"({"display": {"rotate": 90}})") == 90);
+    CHECK(rotation_for(R"({"display":{"rotate":180}})") == 180);
+    CHECK(rotation_for("{\"display\": {\"rotate\"\n :\t270}}") == 270);
+    // A "rotate" key without a number does not stop the search.
+    CHECK(rotation_for(R"({"a": {"rotate": "x"}, "display": {"rotate": 90}})") == 90);
+    // Digits with no colon before them are not a value.
+    CHECK(rotation_for(R"({"rotate" 45, "display": {"rotate": 180}})") == 180);
+    // A number that is not a quarter turn means no rotation.
+    CHECK(rotation_for(R"({"display": {"rotate": 45}})") == 0);
+    // No key: the caller's default.
+    CHECK(rotation_for(R"({"display": {}})") == -1);
+}
+
+TEST_CASE("read_settings_scalar returns the value token and falls through to legacy files",
+          "[display][rotation]") {
+    helix::ConfigDirGuard guard("settings_scan");
+    const std::string settings = (guard.dir / "settings.json").string();
+    const std::string legacy = (guard.dir / "helixconfig.json").string();
+
+    REQUIRE(helix::text_io::write_file(settings, R"({"brightness": 75, "dark_mode" : false})"));
+    CHECK(helix::read_settings_int("brightness") == 75);
+    CHECK(helix::read_settings_scalar("dark_mode") == "false");
+    CHECK_FALSE(helix::read_settings_scalar("auto_restart_sec").has_value());
+
+    // A key settings.json lacks is looked up in the legacy file.
+    REQUIRE(helix::text_io::write_file(legacy, R"({"auto_restart_sec": 12})"));
+    std::string from;
+    CHECK(helix::read_settings_int("auto_restart_sec", &from) == 12);
+    CHECK(from == legacy);
+
+    // A string value is not a scalar token; a non-numeric token is not an int.
+    REQUIRE(helix::text_io::write_file(settings, R"({"brightness": "80", "dark_mode": true})"));
+    CHECK_FALSE(helix::read_settings_int("brightness").has_value());
+    CHECK_FALSE(helix::read_settings_int("dark_mode").has_value());
+}
+
+TEST_CASE("typed settings reads skip an occurrence whose value does not parse",
+          "[display][rotation]") {
+    helix::ConfigDirGuard guard("settings_scan_skip");
+    const std::string settings = (guard.dir / "settings.json").string();
+
+    REQUIRE(helix::text_io::write_file(
+        settings, R"({"leds": {"brightness": null}, "display": {"brightness": 60}})"));
+    CHECK(helix::read_settings_int("brightness") == 60);
+
+    REQUIRE(
+        helix::text_io::write_file(settings, R"({"a": {"dark_mode": null}, "dark_mode": false})"));
+    CHECK(helix::read_settings_bool("dark_mode") == false);
+
+    REQUIRE(helix::text_io::write_file(settings, R"({"a": {"rotate": null}, "rotate": 270})"));
+    CHECK(read_config_rotation(-1) == 270);
+}
+
+TEST_CASE("standalone_rotation prefers the CLI value, then the configured one",
+          "[display][rotation]") {
+    helix::ConfigDirGuard guard("standalone_rotation");
+    REQUIRE(helix::text_io::write_file((guard.dir / "settings.json").string(),
+                                       R"({"display": {"rotate": 180}})"));
+    CHECK(helix::standalone_rotation(90) == 90);
+    CHECK(helix::standalone_rotation(0) == 180);
+}
+
+// The kernel's panel_orientation has to reach DisplayManager::init() as the
+// startup rotation: the backends gate the stored touch range and calibration on
+// the display's rotation inside create_input_pointer(), so a rotation applied
+// after init() leaves a range fit to the unrotated frame
+// (prestonbrown/helixscreen#1428).
+TEST_CASE("startup_rotation hands a first-boot panel_orientation to display init",
+          "[display][rotation]") {
+    SECTION("first boot adopts the kernel orientation") {
+        CHECK(helix::startup_rotation(0, true, 90) == 90);
+        CHECK(helix::startup_rotation(0, true, 270) == 270);
+    }
+    SECTION("an explicit request wins over the kernel") {
+        CHECK(helix::startup_rotation(180, true, 90) == 180);
+        CHECK(helix::startup_rotation(180, false, 90) == 180);
+    }
+    SECTION("a configured or already-probed boot ignores the kernel") {
+        CHECK(helix::startup_rotation(0, false, 90) == 0);
+    }
+    SECTION("no orientation, or Normal, leaves the display unrotated") {
+        CHECK(helix::startup_rotation(0, true, -1) == 0);
+        CHECK(helix::startup_rotation(0, true, 0) == 0);
+    }
 }

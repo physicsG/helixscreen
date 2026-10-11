@@ -5,6 +5,7 @@
 
 #include "device_display_name.h"
 #include "lvgl/lvgl.h"
+#include "subject_managed_panel.h"
 
 #include <functional>
 #include <optional>
@@ -24,6 +25,12 @@ class PrinterHardware;
 namespace helix {
 namespace ui {
 namespace wizard {
+/// Maps a Klipper object name to the label its dropdown row shows.
+using ItemNamer = std::function<std::string(const std::string&)>;
+
+/// The ItemNamer that applies get_display_name() for @p type.
+ItemNamer display_name_for(helix::DeviceType type);
+
 /**
  * @brief Build dropdown options string from items vector
  *
@@ -33,15 +40,13 @@ namespace wizard {
  * @param items Vector of item names to include
  * @param filter Optional filter function (return true to include item)
  * @param include_none Whether to append "None" option at end
- * @param device_type Optional device type for display name transformation.
- *                    When provided, transforms technical names to friendly names
- *                    (e.g., "heater_fan hotend_fan" -> "Hotend Fan")
+ * @param display_name Optional label for each item; items show as-is without one
+ *                     (e.g., "heater_fan hotend_fan" -> "Hotend Fan")
  * @return Newline-delimited dropdown options string
  */
 std::string build_dropdown_options(const std::vector<std::string>& items,
                                    std::function<bool(const std::string&)> filter = nullptr,
-                                   bool include_none = true,
-                                   std::optional<helix::DeviceType> device_type = std::nullopt);
+                                   bool include_none = true, ItemNamer display_name = nullptr);
 
 /**
  * @brief Find item index in vector by name
@@ -100,8 +105,11 @@ bool save_dropdown_selection(lv_subject_t* subject, const std::vector<std::strin
  * @param subject Subject to initialize
  * @param initial_value Initial value
  * @param subject_name XML registration name (e.g., "bed_heater_selected")
+ *
+ * Registers with @p subjects, whose deinit_all() withdraws the XML name.
  */
-void init_int_subject(lv_subject_t* subject, int32_t initial_value, const char* subject_name);
+void init_int_subject(SubjectManager& subjects, lv_subject_t* subject, int32_t initial_value,
+                      const char* subject_name);
 } // namespace wizard
 } // namespace ui
 } // namespace helix

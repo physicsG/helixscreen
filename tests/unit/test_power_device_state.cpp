@@ -125,18 +125,18 @@ TEST_CASE_METHOD(LVGLTestFixture, "PowerDeviceState locks a device during a host
     drain_queue();
 
     helix::test::set_wire_state(ps, helix::PrintJobState::STANDBY);
-    ps.reset_print_start_state();
+    ps.print_state().reset_print_start_state();
     drain_queue();
     REQUIRE(effective_status(state, "psu") == 1); // on, reachable
 
     // A host-side block: the wire still says standby.
-    ps.set_print_start_state(helix::PrintStartPhase::BED_MESH, "", 0);
+    ps.print_state().set_print_start_state(helix::PrintStartPhase::BED_MESH, "", 0);
     drain_queue();
     CHECK(effective_status(state, "psu") == 2); // locked
 
     // And it unlocks when the block is abandoned — a latched lock would strand
     // the user's PSU control for the rest of the session.
-    ps.reset_print_start_state();
+    ps.print_state().reset_print_start_state();
     drain_queue();
     CHECK(effective_status(state, "psu") == 1);
 }
@@ -182,10 +182,10 @@ TEST_CASE_METHOD(LVGLTestFixture, "PowerDeviceState leaves unflagged devices rea
     state.set_devices({{"light", "gpio", "on", false}});
     drain_queue();
 
-    ps.set_print_start_state(helix::PrintStartPhase::BED_MESH, "", 0);
+    ps.print_state().set_print_start_state(helix::PrintStartPhase::BED_MESH, "", 0);
     drain_queue();
     CHECK(effective_status(state, "light") == 1);
 
-    ps.reset_print_start_state();
+    ps.print_state().reset_print_start_state();
     drain_queue();
 }

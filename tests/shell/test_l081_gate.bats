@@ -121,7 +121,8 @@ run_gate() {
         });
 }'
     [ "$status" -eq 1 ]
-    [[ "$output" == *'uaf'* || "$output" == *'member access'* ]]
+    [[ "$output" == *'uaf'* || "$output" == *'member access'* ]] \
+        || fail "neither wording appeared: $output"
     # The report must quote the guard the author wrote. Calling this a bare
     # `tok.expired()` reads as a false positive and gets dismissed.
     [[ "$output" == *'ctx.is_valid()'* ]]
@@ -162,6 +163,7 @@ run_gate() {
     # pin the narrower scope rather than the directory list as a whole.
     run python3 -c "
 import importlib.util, sys
+sys.path.insert(0, 'scripts')  # the gate imports staged_content as a sibling
 spec = importlib.util.spec_from_file_location('gate', 'scripts/check_l081_anti_pattern.py')
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 assert 'src/ui' in m.CTX_ONLY_SCAN_DIRS, m.CTX_ONLY_SCAN_DIRS
@@ -176,5 +178,50 @@ print('ok')
 
 @test "the default scan of the real tree is clean" {
     run python3 "$GATE"
+    [ "$status" -eq 0 ]
+}
+
+# ------------------------------------------------------- --staged-only content
+#
+# --staged-only picks its file SET from `git diff --cached`, but must read
+# each file's STAGED content (the index blob), not the working tree. Stage a
+# violation and then revert the working file to something clean, and a gate
+# that reads the working tree reports nothing while the bad blob commits.
+
+GATE_ABS="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)/scripts/check_l081_anti_pattern.py"
+
+setup_tmp_repo() {
+    TMP_REPO="$(mktemp -d "${BATS_TEST_TMPDIR:-${BATS_TMPDIR:-/tmp}}/l081-XXXXXX")"
+    cd "$TMP_REPO" || return 1
+    git init -q
+    git config user.email "test@example.com"
+    git config user.name "Test"
+    mkdir -p src/printer
+    printf 'void f() {\n    if (tok.expired()) return;\n}\n' > src/printer/foo.cpp
+    git add -A && git commit -qm base
+}
+
+@test "--staged-only catches a violation in the STAGED blob, not a reverted working file" {
+    setup_tmp_repo
+    printf 'void f() {\n    if (tok.expired()) {\n        this->value_ = 1;\n    }\n}\n' \
+        > src/printer/foo.cpp
+    git add src/printer/foo.cpp
+    printf 'void f() {\n    if (tok.expired()) return;\n}\n' > src/printer/foo.cpp
+    run python3 "$GATE_ABS" --staged-only
+    [ "$status" -eq 1 ]
+    contains "Mechanism C" "$output"
+}
+
+@test "--staged-only stays silent on a clean staged file with a dirty violation on disk" {
+    setup_tmp_repo
+    # Genuinely different from the base commit (an added clean function), so
+    # the file shows up as staged at all - content byte-identical to HEAD
+    # stages nothing for git to report, which would pass this test for free.
+    printf 'void f() {\n    if (tok.expired()) return;\n}\nvoid g() {}\n' \
+        > src/printer/foo.cpp
+    git add src/printer/foo.cpp
+    printf 'void f() {\n    if (tok.expired()) {\n        this->value_ = 1;\n    }\n}\n' \
+        > src/printer/foo.cpp
+    run python3 "$GATE_ABS" --staged-only
     [ "$status" -eq 0 ]
 }

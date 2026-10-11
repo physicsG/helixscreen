@@ -11,13 +11,22 @@ namespace helix {
 /// construction and restores it (or unsets it) on destruction. For tests
 /// that setenv() a knob under test — a variable left set leaks into every
 /// later test in the same shard.
+///
+/// The two-argument constructor owns the set as well as the restore: pass the
+/// value to install (nullptr unsets the variable), so the guard is one line
+/// and no raw setenv() sits beside it.
 class ScopedEnv {
   public:
     explicit ScopedEnv(const char* name) : name_(name) {
-        const char* val = std::getenv(name);
-        was_set_ = (val != nullptr);
-        if (was_set_) {
-            original_ = val;
+        capture();
+    }
+
+    ScopedEnv(const char* name, const char* value) : name_(name) {
+        capture();
+        if (value != nullptr) {
+            setenv(name_.c_str(), value, 1);
+        } else {
+            unsetenv(name_.c_str());
         }
     }
 
@@ -33,6 +42,17 @@ class ScopedEnv {
     ScopedEnv& operator=(const ScopedEnv&) = delete;
 
   private:
+    // The original value is copied into storage this guard owns: a bare
+    // getenv() pointer dangles once the setenv() below replaces it
+    // (prestonbrown/helixscreen#1537).
+    void capture() {
+        const char* val = std::getenv(name_.c_str());
+        was_set_ = (val != nullptr);
+        if (was_set_) {
+            original_ = val;
+        }
+    }
+
     std::string name_;
     std::string original_;
     bool was_set_ = false;

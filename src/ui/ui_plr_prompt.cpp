@@ -9,6 +9,7 @@
 #include "ui_update_queue.h"
 
 #include "app_globals.h"
+#include "exception_policy.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "moonraker_api.h"
 #include "moonraker_error.h"
@@ -54,29 +55,26 @@ PlrRecoveryPlan g_active_plan;
 // log_tag must be a string LITERAL: it is captured by pointer into a callback
 // that outlives this frame. Never pass plan.resume_gcode.c_str().
 void run_recovery_gcode(IMoonrakerAPI* api, const std::string& gcode, const char* fail_fmt_tr,
-                        const char* log_tag) {
+                        const char* log_tag, uint32_t timeout_ms = 0) {
     api->execute_gcode(
         gcode, [log_tag]() { spdlog::info("[PLR] {} accepted by firmware", log_tag); },
         [fail_fmt_tr, log_tag](const MoonrakerError& err) {
             spdlog::error("[PLR] {} failed: {}", log_tag, err.message);
-            std::string detail =
-                helix::snapmaker_extract_coded_msg(err.message, err.user_message());
-            helix::ui::queue_update("ui_plr_prompt::recovery_error",
-                                    [fail_fmt_tr, detail = std::move(detail)]() {
-                                        NOTIFY_ERROR(fmt::runtime(fail_fmt_tr), detail);
-                                    });
-        });
+            helix::ui::queue_update("ui_plr_prompt::recovery_error", [fail_fmt_tr, err]() {
+                NOTIFY_ERROR(fmt::runtime(fail_fmt_tr), helix::snapmaker_extract_coded_msg(
+                                                            err.message, err.localized_message()));
+            });
+        },
+        timeout_ms);
 }
 
 /// Report a discard/resume failure that arrived from a non-gcode (JSON-RPC)
 /// path. Same thread discipline as run_recovery_gcode's error leg.
 void report_action_error(const MoonrakerError& err, const char* fail_fmt_tr, const char* log_tag) {
     spdlog::error("[PLR] {} failed: {}", log_tag, err.message);
-    std::string detail = err.user_message();
-    helix::ui::queue_update("ui_plr_prompt::recovery_error",
-                            [fail_fmt_tr, detail = std::move(detail)]() {
-                                NOTIFY_ERROR(fmt::runtime(fail_fmt_tr), detail);
-                            });
+    helix::ui::queue_update("ui_plr_prompt::recovery_error", [fail_fmt_tr, err]() {
+        NOTIFY_ERROR(fmt::runtime(fail_fmt_tr), err.localized_message());
+    });
 }
 
 void run_plr_resume(IMoonrakerAPI* api) {
@@ -95,7 +93,13 @@ void run_plr_resume(IMoonrakerAPI* api) {
         return;
     }
     spdlog::info("[PLR] User chose Resume — running '{}'", g_active_plan.resume_gcode);
-    run_recovery_gcode(api, g_active_plan.resume_gcode, lv_tr("Recovery failed: {}"), "Resume");
+    // MACRO_TIMEOUT_MS, not the 60s default: resume macros rebuild and replay
+    // the interrupted job (Qidi's RESUME_INTERRUPTED rewrites the gcode via a
+    // shell pipeline over the whole file before printing it), so a big file can
+    // legitimately run past a minute. A timeout toast here would be a lie - the
+    // firmware keeps executing the resume.
+    run_recovery_gcode(api, g_active_plan.resume_gcode, lv_tr("Recovery failed: {}"), "Resume",
+                       IMoonrakerAPI::MACRO_TIMEOUT_MS);
 }
 
 void run_plr_discard(IMoonrakerAPI* api) {
@@ -131,14 +135,12 @@ std::string plr_prompt_body(const std::string& file_path, const char* with_file_
     if (name.empty()) {
         return generic;
     }
-    try {
-        return fmt::format(fmt::runtime(with_file_fmt), name);
-    } catch (const std::exception& ex) {
-        // A mistranslated placeholder must never abort through the LVGL C
-        // dispatch frame — fall back to the generic body.
-        spdlog::warn("[PLR] body format failed: {}", ex.what());
-        return generic;
-    }
+    // A mistranslated placeholder must never abort through the LVGL C dispatch
+    // frame: the generic body stands in if formatting fails.
+    std::string body = generic;
+    helix::contain_exceptions("[PLR] Body format",
+                              [&] { body = fmt::format(fmt::runtime(with_file_fmt), name); });
+    return body;
 }
 
 PlrPromptStrings plr_prompt_strings(PlrBackendType backend, const PlrPromptStrings& creality,

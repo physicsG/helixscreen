@@ -6,8 +6,7 @@
 #include "ui_callback_helpers.h"
 #include "ui_emergency_stop.h"
 #include "ui_error_reporting.h"
-#include "ui_event_safety.h"
-#include "ui_nav_manager.h"
+#include "ui_nav.h"
 #include "ui_temperature_utils.h"
 #include "ui_z_offset_indicator.h"
 
@@ -22,6 +21,7 @@
 #include "probe_sensor_types.h"
 #include "static_panel_registry.h"
 #include "toolhead_homing.h"
+#include "ui/ui_widget_helpers.h"
 #include "z_offset_persistence.h"
 #include "z_offset_utils.h"
 
@@ -33,7 +33,7 @@
 #include <memory>
 
 using namespace helix;
-using helix::ui::observe_int_sync;
+using helix::ui::observe;
 
 // ============================================================================
 // STATIC STATE
@@ -52,10 +52,6 @@ static constexpr int DEFAULT_WARM_BED_TEMP = 45;
 // CONSTRUCTOR / DESTRUCTOR
 // ============================================================================
 
-ZOffsetCalibrationPanel::ZOffsetCalibrationPanel() {
-    spdlog::trace("[ZOffsetCal] Instance created");
-}
-
 ZOffsetCalibrationPanel::~ZOffsetCalibrationPanel() {
     // Applying [L011]: No mutex in destructors
 
@@ -69,16 +65,10 @@ ZOffsetCalibrationPanel::~ZOffsetCalibrationPanel() {
 
     // Clear widget pointers (owned by LVGL)
     overlay_root_ = nullptr;
-    parent_screen_ = nullptr;
     saved_z_offset_display_ = nullptr;
     z_position_display_ = nullptr;
     final_offset_label_ = nullptr;
     error_message_ = nullptr;
-
-    // Guard against static destruction order fiasco (spdlog may be gone)
-    if (!StaticPanelRegistry::is_destroyed()) {
-        spdlog::trace("[ZOffsetCal] Destroyed");
-    }
 }
 
 // ============================================================================
@@ -103,13 +93,28 @@ void ZOffsetCalibrationPanel::init_subjects() {
     // Register XML event callbacks (once globally)
     if (!s_callbacks_registered) {
         register_xml_callbacks({
-            {"on_zoffset_start_clicked", on_start_clicked},
-            {"on_zoffset_abort_clicked", on_abort_clicked},
-            {"on_zoffset_accept_clicked", on_accept_clicked},
-            {"on_zoffset_done_clicked", on_done_clicked},
-            {"on_zoffset_retry_clicked", on_retry_clicked},
-            {"on_zoffset_z_adjust", on_z_adjust},
-            {"on_zoffset_warm_bed_toggled", on_warm_bed_toggled},
+            {"on_zoffset_start_clicked",
+             [](lv_event_t*) { get_global_zoffset_cal_panel().handle_start_clicked(); }},
+            {"on_zoffset_abort_clicked",
+             [](lv_event_t*) { get_global_zoffset_cal_panel().handle_abort_clicked(); }},
+            {"on_zoffset_accept_clicked",
+             [](lv_event_t*) { get_global_zoffset_cal_panel().handle_accept_clicked(); }},
+            {"on_zoffset_done_clicked",
+             [](lv_event_t*) { get_global_zoffset_cal_panel().handle_done_clicked(); }},
+            {"on_zoffset_retry_clicked",
+             [](lv_event_t*) { get_global_zoffset_cal_panel().handle_retry_clicked(); }},
+            {"on_zoffset_z_adjust",
+             [](lv_event_t* e) {
+                 const char* delta_str = static_cast<const char*>(lv_event_get_user_data(e));
+                 if (delta_str) {
+                     float delta = strtof(delta_str, nullptr);
+                     spdlog::debug("[ZOffsetCal] Z adjust: {} (from user_data \"{}\")", delta,
+                                   delta_str);
+                     get_global_zoffset_cal_panel().handle_z_adjust(delta);
+                 }
+             }},
+            {"on_zoffset_warm_bed_toggled",
+             [](lv_event_t*) { get_global_zoffset_cal_panel().handle_warm_bed_toggled(); }},
         });
 
         s_callbacks_registered = true;
@@ -123,30 +128,10 @@ void ZOffsetCalibrationPanel::init_subjects() {
 // ============================================================================
 
 lv_obj_t* ZOffsetCalibrationPanel::create(lv_obj_t* parent) {
-    if (overlay_root_) {
-        spdlog::debug("[ZOffsetCal] Overlay already created");
-        return overlay_root_;
-    }
-
-    parent_screen_ = parent;
-
-    spdlog::debug("[ZOffsetCal] Creating overlay from XML");
-
-    // Create from XML
-    overlay_root_ =
-        static_cast<lv_obj_t*>(lv_xml_create(parent, "calibration_zoffset_panel", nullptr));
-    if (!overlay_root_) {
-        spdlog::error("[ZOffsetCal] Failed to create panel from XML");
+    if (!OverlayBase::create(parent)) {
         return nullptr;
     }
-
-    // Initially hidden (will be shown by show())
-    lv_obj_add_flag(overlay_root_, LV_OBJ_FLAG_HIDDEN);
-
-    // Setup widget references
     setup_widgets();
-
-    spdlog::info("[ZOffsetCal] Overlay created");
     return overlay_root_;
 }
 
@@ -160,10 +145,11 @@ void ZOffsetCalibrationPanel::setup_widgets() {
     // Event handlers are registered via init_subjects() before XML creation
 
     // Find display elements (for programmatic updates not covered by subject bindings)
-    saved_z_offset_display_ = lv_obj_find_by_name(overlay_root_, "saved_z_offset_display");
-    z_position_display_ = lv_obj_find_by_name(overlay_root_, "z_position_display");
-    final_offset_label_ = lv_obj_find_by_name(overlay_root_, "final_offset_label");
-    error_message_ = lv_obj_find_by_name(overlay_root_, "error_message");
+    saved_z_offset_display_ =
+        helix::ui::find_required(overlay_root_, "saved_z_offset_display", get_name());
+    z_position_display_ = helix::ui::find_required(overlay_root_, "z_position_display", get_name());
+    final_offset_label_ = helix::ui::find_required(overlay_root_, "final_offset_label", get_name());
+    error_message_ = helix::ui::find_required(overlay_root_, "error_message", get_name());
 
     // Set initial state
     set_state(State::IDLE);
@@ -172,8 +158,8 @@ void ZOffsetCalibrationPanel::setup_widgets() {
     // This replaces the fake timer with real state tracking
     PrinterState& ps = get_printer_state();
 
-    manual_probe_active_observer_ = observe_int_sync<ZOffsetCalibrationPanel>(
-        ps.get_manual_probe_active_subject(), this,
+    manual_probe_active_observer_ = observe<int>(
+        ps.calibration_state().get_manual_probe_active_subject(), this,
         [](ZOffsetCalibrationPanel* self, int is_active) {
             spdlog::debug("[ZOffsetCal] manual_probe_active changed: {}", is_active);
 
@@ -206,8 +192,8 @@ void ZOffsetCalibrationPanel::setup_widgets() {
         },
         ps.get_subjects_lifetime());
 
-    manual_probe_z_observer_ = observe_int_sync<ZOffsetCalibrationPanel>(
-        ps.get_manual_probe_z_position_subject(), this,
+    manual_probe_z_observer_ = observe<int>(
+        ps.calibration_state().get_manual_probe_z_position_subject(), this,
         [](ZOffsetCalibrationPanel* self, int z_microns) {
             // Only update Z display when in ADJUSTING state
             if (self->state_ != State::ADJUSTING)
@@ -218,30 +204,10 @@ void ZOffsetCalibrationPanel::setup_widgets() {
 
             spdlog::trace("[ZOffsetCal] Z position from Klipper: {:.3f}mm", z_mm);
             self->update_z_position(z_mm);
-        });
+        },
+        ps.get_subjects_lifetime());
 
     spdlog::debug("[ZOffsetCal] Widget setup complete");
-}
-
-// ============================================================================
-// SHOW
-// ============================================================================
-
-void ZOffsetCalibrationPanel::show() {
-    if (!overlay_root_) {
-        spdlog::error("[ZOffsetCal] Cannot show: overlay not created");
-        return;
-    }
-
-    spdlog::debug("[ZOffsetCal] Showing overlay");
-
-    // Register with NavigationManager for lifecycle callbacks
-    NavigationManager::instance().register_overlay_instance(overlay_root_, this);
-
-    // Push onto navigation stack - on_activate() will be called by NavigationManager
-    NavigationManager::instance().push_overlay(overlay_root_);
-
-    spdlog::info("[ZOffsetCal] Overlay shown");
 }
 
 // ============================================================================
@@ -257,9 +223,10 @@ void ZOffsetCalibrationPanel::on_activate() {
     // If manual probe is already active (e.g., started from Mainsail before HelixScreen
     // launched), skip to ADJUSTING with the current Z position instead of resetting to IDLE
     auto& ps = get_printer_state();
-    if (lv_subject_get_int(ps.get_manual_probe_active_subject()) == 1) {
+    if (lv_subject_get_int(ps.calibration_state().get_manual_probe_active_subject()) == 1) {
         spdlog::info("[ZOffsetCal] Manual probe already active, resuming in ADJUSTING state");
-        int z_microns = lv_subject_get_int(ps.get_manual_probe_z_position_subject());
+        int z_microns =
+            lv_subject_get_int(ps.calibration_state().get_manual_probe_z_position_subject());
         current_z_ = z_microns / 1000.0f;
         set_state(State::ADJUSTING);
         update_z_position(current_z_);
@@ -279,33 +246,33 @@ void ZOffsetCalibrationPanel::on_activate() {
 
     // Reset the visual indicator
     if (overlay_root_) {
-        lv_obj_t* indicator = lv_obj_find_by_name(overlay_root_, "z_offset_indicator");
+        lv_obj_t* indicator =
+            helix::ui::find_required(overlay_root_, "z_offset_indicator", get_name());
         if (indicator) {
             ui_z_offset_indicator_set_value(indicator, 0);
         }
     }
 }
 
-void ZOffsetCalibrationPanel::on_deactivate() {
-    spdlog::debug("[ZOffsetCal] on_deactivate()");
+void ZOffsetCalibrationPanel::on_deactivating(DeactivateReason reason) {
+    spdlog::debug("[ZOffsetCal] on_deactivating({})", deactivate_reason_name(reason));
 
-    // If calibration is in progress, abort it — but NOT during app shutdown
-    // (shutdown calls on_deactivate on all overlays; we don't want to cancel
-    // an in-progress calibration just because the UI is restarting)
+    // A run in progress is abandoned only when the user walks away from it.
+    // Shutdown and hot-reload take the UI out from under a calibration that
+    // the printer is still executing; cancelling on those would abort a run
+    // nobody asked to stop.
     if (state_ == State::ADJUSTING || state_ == State::PROBING) {
-        if (!NavigationManager::instance().is_shutting_down()) {
+        if (reason == DeactivateReason::NavigateAway) {
             spdlog::info("[ZOffsetCal] Aborting calibration on deactivate");
             send_abort(); // send_abort() calls turn_off_bed_if_needed()
         } else {
-            spdlog::info("[ZOffsetCal] Skipping abort during app shutdown");
+            spdlog::info("[ZOffsetCal] Leaving calibration running ({})",
+                         deactivate_reason_name(reason));
         }
     } else {
         // Safety net: turn off bed if navigating away after completion/error
         turn_off_bed_if_needed();
     }
-
-    // Call base class
-    OverlayBase::on_deactivate();
 }
 
 void ZOffsetCalibrationPanel::cleanup() {
@@ -316,7 +283,7 @@ void ZOffsetCalibrationPanel::cleanup() {
 
     // Unregister from NavigationManager while overlay_root_ is still valid
     if (overlay_root_) {
-        NavigationManager::instance().unregister_overlay_instance(overlay_root_);
+        helix::nav::unregister_overlay(overlay_root_);
     }
 
     // Nullify widget pointers BEFORE resetting observers — any cascading
@@ -335,8 +302,17 @@ void ZOffsetCalibrationPanel::cleanup() {
 
     // Call base class to set cleanup_called_ flag
     OverlayBase::cleanup();
+}
 
-    parent_screen_ = nullptr;
+void ZOffsetCalibrationPanel::on_ui_destroyed() {
+    // The tree is gone: no observer or late result may reach its labels. The
+    // run itself lives in state_ and the state subject.
+    saved_z_offset_display_ = nullptr;
+    z_position_display_ = nullptr;
+    final_offset_label_ = nullptr;
+    error_message_ = nullptr;
+    manual_probe_active_observer_.reset();
+    manual_probe_z_observer_.reset();
 }
 
 // ============================================================================
@@ -358,7 +334,7 @@ void ZOffsetCalibrationPanel::set_state(State new_state) {
         });
         break;
     case State::PROBING:
-        operation_guard_.begin(PROBING_TIMEOUT_MS, [this] {
+        operation_guard_.begin(IAdvancedAPI::PROBING_TIMEOUT_MS, [this] {
             set_state(State::ERROR);
             NOTIFY_WARNING(lv_tr("Z-offset calibration timed out"));
         });
@@ -393,8 +369,8 @@ void ZOffsetCalibrationPanel::begin_saving_restart_watch() {
     //     notify_klippy_disconnected(), so its success callback often never
     //     fires — without this the panel burns the full extension budget and
     //     then fails a save that actually succeeded.
-    klippy_state_observer_ = observe_int_sync<ZOffsetCalibrationPanel>(
-        get_printer_state().get_klippy_state_subject(), this,
+    klippy_state_observer_ = observe<int>(
+        get_printer_state().network_state().get_klippy_state_subject(), this,
         [](ZOffsetCalibrationPanel* self, int state) {
             if (self->state_ != State::SAVING) {
                 return; // Stale fire after the save settled
@@ -416,7 +392,8 @@ void ZOffsetCalibrationPanel::begin_saving_restart_watch() {
                     }
                 });
             }
-        });
+        },
+        get_printer_state().get_subjects_lifetime());
 }
 
 void ZOffsetCalibrationPanel::end_saving_restart_watch() {
@@ -493,8 +470,8 @@ void ZOffsetCalibrationPanel::start_calibration() {
         set_state(State::WARMING);
 
         PrinterState& ps = get_printer_state();
-        bed_temp_observer_ = observe_int_sync<ZOffsetCalibrationPanel>(
-            ps.get_bed_temp_subject(bed_temp_lifetime_), this,
+        bed_temp_observer_ = observe<int>(
+            ps.temperature_state().get_bed_temp_subject(bed_temp_lifetime_), this,
             [](ZOffsetCalibrationPanel* self, int temp_deci) {
                 if (self->state_ != State::WARMING)
                     return;
@@ -520,7 +497,7 @@ void ZOffsetCalibrationPanel::begin_probe_sequence() {
     set_state(State::PROBING);
 
     PrinterState& ps = get_printer_state();
-    auto strategy = ps.get_z_offset_calibration_strategy();
+    auto strategy = ps.profile_state().z_offset_calibration_strategy();
 
     // Check homing state (shared across all strategies)
     const bool all_homed = helix::toolhead_is_homed(ps);
@@ -559,10 +536,12 @@ void ZOffsetCalibrationPanel::begin_probe_sequence() {
             },
             [this, tok](const MoonrakerError& err) {
                 // No bg-thread tok.expired() — tok.defer()/NOTIFY_* gate on the main thread (L081).
-                if (err.type == MoonrakerErrorType::TIMEOUT) {
-                    spdlog::warn("[ZOffsetCal] Move to position timed out (may still be running)");
-                    NOTIFY_WARNING(
-                        lv_tr("Calibration move may still be running — response timed out"));
+                if (err.type == MoonrakerErrorType::TIMEOUT ||
+                    err.type == MoonrakerErrorType::CONNECTION_LOST) {
+                    spdlog::warn("[ZOffsetCal] Move to position lost to the transport (may still "
+                                 "be running)");
+                    NOTIFY_WARNING(lv_tr("Calibration move may still be running — printer "
+                                         "connection was interrupted"));
                 } else {
                     spdlog::error("[ZOffsetCal] Failed to move to position: {}", err.message);
                     tok.defer(
@@ -571,13 +550,14 @@ void ZOffsetCalibrationPanel::begin_probe_sequence() {
                         });
                 }
             },
-            MoonrakerAdvancedAPI::PROBING_TIMEOUT_MS);
+            IAdvancedAPI::PROBING_TIMEOUT_MS);
     } else {
         // Probe calibrate or endstop strategy
         std::string gcode;
         if (!all_homed) {
             // Diagnostic-only re-fetch — all_homed above already decided the branch.
-            const char* homed_dbg = lv_subject_get_string(ps.get_homed_axes_subject());
+            const char* homed_dbg =
+                lv_subject_get_string(ps.motion_state().get_homed_axes_subject());
             spdlog::info("[ZOffsetCal] Axes not homed (homed_axes='{}'), homing first",
                          homed_dbg ? homed_dbg : "");
             gcode = "G28\n";
@@ -622,10 +602,12 @@ void ZOffsetCalibrationPanel::begin_probe_sequence() {
             },
             [this, tok](const MoonrakerError& err) {
                 // No bg-thread tok.expired() — tok.defer()/NOTIFY_* gate on the main thread (L081).
-                if (err.type == MoonrakerErrorType::TIMEOUT) {
-                    spdlog::warn(
-                        "[ZOffsetCal] Calibration response timed out (may still be running)");
-                    NOTIFY_WARNING(lv_tr("Calibration may still be running — response timed out"));
+                if (err.type == MoonrakerErrorType::TIMEOUT ||
+                    err.type == MoonrakerErrorType::CONNECTION_LOST) {
+                    spdlog::warn("[ZOffsetCal] Calibration response lost to the transport (may "
+                                 "still be running)");
+                    NOTIFY_WARNING(lv_tr("Calibration may still be running — printer connection "
+                                         "was interrupted"));
                 } else {
                     spdlog::error("[ZOffsetCal] Failed to start calibration: {}", err.message);
                     tok.defer("ZOffsetCalibrationPanel::on_calibration_result(cal_fail)", [this]() {
@@ -633,7 +615,7 @@ void ZOffsetCalibrationPanel::begin_probe_sequence() {
                     });
                 }
             },
-            MoonrakerAdvancedAPI::PROBING_TIMEOUT_MS + prep_timeout_ms);
+            IAdvancedAPI::PROBING_TIMEOUT_MS + prep_timeout_ms);
     }
 }
 
@@ -641,7 +623,7 @@ void ZOffsetCalibrationPanel::adjust_z(float delta) {
     if (!api_)
         return;
 
-    auto strategy = get_printer_state().get_z_offset_calibration_strategy();
+    auto strategy = get_printer_state().profile_state().z_offset_calibration_strategy();
 
     if (strategy == ZOffsetCalibrationStrategy::FIRMWARE_MANAGED) {
         // Direct G1 move using relative positioning
@@ -688,7 +670,7 @@ void ZOffsetCalibrationPanel::send_accept() {
     if (!api_)
         return;
 
-    auto strategy = get_printer_state().get_z_offset_calibration_strategy();
+    auto strategy = get_printer_state().profile_state().z_offset_calibration_strategy();
     final_offset_ = current_z_;
     on_calibration_result(true, "");
 
@@ -705,7 +687,7 @@ void ZOffsetCalibrationPanel::send_accept() {
         // an accept ever fires under a running print, where the subtraction
         // excludes the live transient and is correct.
         std::string cmd = fmt::format("SET_GCODE_OFFSET Z={:.3f}", cumulative_z_delta_);
-        if (lv_subject_get_int(get_printer_state().get_print_active_subject()) == 0) {
+        if (lv_subject_get_int(get_printer_state().print_state().get_print_active_subject()) == 0) {
             std::string clear =
                 helix::zoffset::stale_probe_delta_clear_gcode(get_printer_state().get_discovery());
             if (!clear.empty()) {
@@ -759,9 +741,12 @@ void ZOffsetCalibrationPanel::send_accept() {
             },
             [this, token = lifetime_.token()](const MoonrakerError& err) {
                 // No bg-thread token.expired() — token.defer() gates on the main thread (L081).
-                std::string msg = "ACCEPT failed: " + err.user_message();
                 token.defer("ZOffsetCalibrationPanel::on_calibration_result(accept_fail)",
-                            [this, msg = std::move(msg)]() { on_calibration_result(false, msg); });
+                            [this, err]() {
+                                on_calibration_result(
+                                    false, fmt::format(fmt::runtime(lv_tr("ACCEPT failed: {}")),
+                                                       err.localized_message()));
+                            });
             });
     }
 }
@@ -778,7 +763,7 @@ void ZOffsetCalibrationPanel::send_abort() {
         return;
     }
 
-    auto strategy = get_printer_state().get_z_offset_calibration_strategy();
+    auto strategy = get_printer_state().profile_state().z_offset_calibration_strategy();
 
     if (strategy == ZOffsetCalibrationStrategy::FIRMWARE_MANAGED) {
         // Retract nozzle without applying any offset
@@ -822,7 +807,8 @@ void ZOffsetCalibrationPanel::handle_z_adjust(float delta) {
 
     // Flash the direction indicator
     if (overlay_root_) {
-        lv_obj_t* indicator = lv_obj_find_by_name(overlay_root_, "z_offset_indicator");
+        lv_obj_t* indicator =
+            helix::ui::find_required(overlay_root_, "z_offset_indicator", get_name());
         if (indicator) {
             ui_z_offset_indicator_flash_direction(indicator, delta > 0 ? 1 : -1);
         }
@@ -842,7 +828,7 @@ void ZOffsetCalibrationPanel::handle_abort_clicked() {
 void ZOffsetCalibrationPanel::handle_done_clicked() {
     spdlog::debug("[ZOffsetCal] Done clicked");
     set_state(State::IDLE);
-    NavigationManager::instance().go_back();
+    helix::nav::go_back();
 }
 
 void ZOffsetCalibrationPanel::handle_retry_clicked() {
@@ -887,7 +873,8 @@ void ZOffsetCalibrationPanel::update_z_position(float z_position) {
 
     // Update the visual indicator (convert mm to microns)
     if (overlay_root_) {
-        lv_obj_t* indicator = lv_obj_find_by_name(overlay_root_, "z_offset_indicator");
+        lv_obj_t* indicator =
+            helix::ui::find_required(overlay_root_, "z_offset_indicator", get_name());
         if (indicator) {
             int microns = static_cast<int>(z_position * 1000.0f);
             ui_z_offset_indicator_set_value(indicator, microns);
@@ -914,82 +901,19 @@ void ZOffsetCalibrationPanel::on_calibration_result(bool success, const std::str
 }
 
 // ============================================================================
-// STATIC TRAMPOLINES
-// ============================================================================
-
-void ZOffsetCalibrationPanel::on_start_clicked(lv_event_t* e) {
-    (void)e;
-    LVGL_SAFE_EVENT_CB_BEGIN("[ZOffsetCal] on_start_clicked");
-    get_global_zoffset_cal_panel().handle_start_clicked();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void ZOffsetCalibrationPanel::on_z_adjust(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[ZOffsetCal] on_z_adjust");
-    const char* delta_str = static_cast<const char*>(lv_event_get_user_data(e));
-    if (delta_str) {
-        float delta = strtof(delta_str, nullptr);
-        spdlog::debug("[ZOffsetCal] Z adjust: {} (from user_data \"{}\")", delta, delta_str);
-        get_global_zoffset_cal_panel().handle_z_adjust(delta);
-    }
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void ZOffsetCalibrationPanel::on_accept_clicked(lv_event_t* e) {
-    (void)e;
-    LVGL_SAFE_EVENT_CB_BEGIN("[ZOffsetCal] on_accept_clicked");
-    get_global_zoffset_cal_panel().handle_accept_clicked();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void ZOffsetCalibrationPanel::on_abort_clicked(lv_event_t* e) {
-    (void)e;
-    LVGL_SAFE_EVENT_CB_BEGIN("[ZOffsetCal] on_abort_clicked");
-    get_global_zoffset_cal_panel().handle_abort_clicked();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void ZOffsetCalibrationPanel::on_done_clicked(lv_event_t* e) {
-    (void)e;
-    LVGL_SAFE_EVENT_CB_BEGIN("[ZOffsetCal] on_done_clicked");
-    get_global_zoffset_cal_panel().handle_done_clicked();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void ZOffsetCalibrationPanel::on_retry_clicked(lv_event_t* e) {
-    (void)e;
-    LVGL_SAFE_EVENT_CB_BEGIN("[ZOffsetCal] on_retry_clicked");
-    get_global_zoffset_cal_panel().handle_retry_clicked();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void ZOffsetCalibrationPanel::on_warm_bed_toggled(lv_event_t* e) {
-    (void)e;
-    LVGL_SAFE_EVENT_CB_BEGIN("[ZOffsetCal] on_warm_bed_toggled");
-    get_global_zoffset_cal_panel().handle_warm_bed_toggled();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-// ============================================================================
 // GLOBAL INSTANCE AND ROW CLICK HANDLER
 // ============================================================================
 
-static std::unique_ptr<ZOffsetCalibrationPanel> g_zoffset_cal_panel;
-
-// Forward declarations
-static void on_zoffset_row_clicked(lv_event_t* e);
-
-ZOffsetCalibrationPanel& get_global_zoffset_cal_panel() {
-    if (!g_zoffset_cal_panel) {
-        g_zoffset_cal_panel = std::make_unique<ZOffsetCalibrationPanel>();
-        StaticPanelRegistry::instance().register_destroy("ZOffsetCalibrationPanel",
-                                                         []() { g_zoffset_cal_panel.reset(); });
-    }
-    return *g_zoffset_cal_panel;
-}
-
 void init_zoffset_row_handler() {
-    lv_xml_register_event_cb(nullptr, "on_zoffset_row_clicked", on_zoffset_row_clicked);
+    register_xml_callbacks({
+        {"on_zoffset_row_clicked",
+         [](lv_event_t*) {
+             spdlog::debug("[ZOffsetCal] Z-Offset row clicked");
+             auto& overlay = get_global_zoffset_cal_panel();
+             overlay.set_api(get_moonraker_api());
+             overlay.show(lv_display_get_screen_active(nullptr));
+         }},
+    });
     spdlog::trace("[ZOffsetCal] Row click callback registered");
 }
 
@@ -1004,24 +928,6 @@ void init_zoffset_event_callbacks() {
     spdlog::debug("[ZOffsetCal] Event callbacks registration verified");
 }
 
-/**
- * @brief Row click handler for opening Z-Offset calibration from Advanced panel
- *
- * Registered via init_zoffset_row_handler().
- * Uses OverlayBase pattern with lazy creation.
- */
-static void on_zoffset_row_clicked(lv_event_t* e) {
-    (void)e;
-    spdlog::debug("[ZOffsetCal] Z-Offset row clicked");
-
-    auto& overlay = get_global_zoffset_cal_panel();
-
-    // Lazy-create the Z-Offset calibration panel
-    if (!overlay.get_root()) {
-        overlay.init_subjects();
-        overlay.set_api(get_moonraker_api());
-        overlay.create(lv_display_get_screen_active(nullptr));
-    }
-
-    overlay.show();
+ZOffsetCalibrationPanel& get_global_zoffset_cal_panel() {
+    return helix::lazy_global<ZOffsetCalibrationPanel>("ZOffsetCalibrationPanel");
 }

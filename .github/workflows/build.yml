@@ -2,14 +2,60 @@ name: Build
 
 on:
   push:
-    branches: [ main, "claude/**", "release/**" ]
+    branches:
+      - main
+      - "claude/**"
+      # Report branches carry a worker's STATUS.md over a full tree. Nothing
+      # in them is code, and each push otherwise queues a whole build.
+      - "!claude/report-*"
+      - "release/**"
   pull_request:
     branches: [ main, "release/**" ]
+
+# A push to a claude/** work branch is superseded within minutes on a busy day,
+# and this workflow can hold a runner for hours, so a topic branch and a PR key
+# their group on the ref and let a newer push cancel the older run. release/**
+# keys on the SHA instead, so every commit that lands there keeps its own run.
+#
+# main keys on the ref and does NOT cancel: the in-flight run finishes and of
+# the runs queued behind it only the newest survives, so a burst of pushes
+# leaves one completing result and one pending rather than a queue of 2-hour
+# runs. Cancelling instead means a busy hour completes nothing and main reads
+# green because it was never measured. tests/shell/test_workflow_concurrency_gate.bats
+# pins both halves.
+#
+# cancel-in-progress needs fromJSON to get an actual boolean: a bare
+# `${{ github.ref != 'refs/heads/main' }}` yields the STRING "false", which is
+# non-empty and therefore truthy, so the guard reads as disabled and main
+# cancels anyway.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || (startsWith(github.ref, 'refs/heads/release/') && github.sha || github.ref) }}
+  cancel-in-progress: ${{ fromJSON(github.ref != 'refs/heads/main') }}
+
+# Every patch application in this workflow is judged from clean: a runner is a
+# fresh clone, so a patch that can neither apply nor reverse is dead, and the
+# build must stop rather than link unpatched code. The flag rides the
+# environment rather than individual steps because the apply that matters
+# usually runs inside `make -j` - a step-level flag on a later apply step finds
+# the stamp current and judges nothing.
+env:
+  HELIX_PATCHES_FROM_CLEAN: "1"
+  # No DWARF in CI builds. At -g2 the objects are ~99% debug info and an app +
+  # test build overflows the 2G ccache, so every run recompiles what the last
+  # one evicted. -g0 keeps the symbol table, so a crash still names functions;
+  # nothing here ships, and file:line debugging happens locally or on a test host.
+  DBGLEVEL: "0"
 
 jobs:
   compile-ubuntu:
     name: Compile (Ubuntu 22.04)
     runs-on: ubuntu-22.04
+    # Gated on the two jobs that need no build. A shell, gate or lint failure is
+    # knowable in minutes; this job runs for well over an hour, so starting it
+    # anyway spends a runner to re-learn what the fast suite already said. The
+    # cost is that a green run's long pole starts after the shell suite, and the
+    # benefit is that a red one reports in minutes instead of two hours.
+    needs: [test-shell, test-telemetry-worker]
     # Sized to cover the step budgets below plus setup, rather than silently
     # undercutting them: a job cap shorter than the sum kills the job before
     # either step reaches its own timeout.
@@ -21,7 +67,7 @@ jobs:
     # -- a timed-out step cancels the job, so "Save ccache" never runs and the
     # next run is cold for the same reason. A cold run has to be able to FINISH
     # once for the cache to exist at all.
-    timeout-minutes: 200
+    timeout-minutes: 260
 
     steps:
     - name: Checkout repository
@@ -48,6 +94,7 @@ jobs:
         timeout_minutes: 20
         max_attempts: 3
         command: |
+          sudo rm -f /etc/apt/sources.list.d/google-chrome*.list
           sudo apt-get update
           sudo apt-get install -y \
             libsdl2-dev \
@@ -111,10 +158,18 @@ jobs:
         git submodule status
         echo "Submodules initialized"
 
+    - name: Cache npm downloads
+      uses: actions/cache@v5
+      with:
+        path: ~/.npm
+        key: npm-${{ runner.os }}-${{ hashFiles('package.json') }}
+        restore-keys: |
+          npm-${{ runner.os }}-
+
     - name: Install Node.js dependencies
       uses: nick-fields/retry@v4
       with:
-        timeout_minutes: 2
+        timeout_minutes: 6
         max_attempts: 3
         command: npm install
 
@@ -146,8 +201,8 @@ jobs:
         ccache -s
 
     - name: Build tests
-      # The larger half, and the one that actually timed out cold at 70.
-      timeout-minutes: 95
+      # The larger half. It has to finish cold once for the ccache to exist.
+      timeout-minutes: 150
       env:
         CC: ccache clang
         CXX: ccache clang++
@@ -158,8 +213,14 @@ jobs:
 
     # `always()`: banking a partial ccache after a failed/timed-out build is the
     # whole point — see the restore step above.
+    #
+    # Only main and release/** save. The repo shares one 10 GB Actions cache and
+    # GitHub evicts LRU across all of it, so a 1.7 GB generation per work branch
+    # crowds out the entries every push restores from. A work branch still gets a
+    # warm start: the `ccache-ubuntu-22.04-` prefix above resolves to the default
+    # branch's generation, which is readable from every ref.
     - name: Save ccache
-      if: always()
+      if: always() && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/'))
       uses: actions/cache/save@v5
       with:
         path: ~/.cache/ccache
@@ -229,6 +290,7 @@ jobs:
     # first log line, which surfaces as every pytest UI test erroring in setup.
     - name: Install runtime dependencies
       run: |
+        sudo rm -f /etc/apt/sources.list.d/google-chrome*.list
         sudo apt-get update
         sudo apt-get install -y libsdl2-2.0-0 libgles2 libfmt-dev libcairo2 libpango-1.0-0 libpangocairo-1.0-0 libpng16-16 libjpeg8
 
@@ -311,13 +373,32 @@ jobs:
       timeout-minutes: 2
       run: pytest moonraker-plugin/tests/ -v
 
+    # -m "not slow" leaves the minutes-long screen sweeps to nightly.yml.
     - name: Run out-of-process UI tests (pytest, excluding goldens)
       timeout-minutes: 5
-      run: pytest tests/ui/ -v --ignore=tests/ui/test_screens.py
+      run: pytest tests/ui/ -v --ignore=tests/ui/test_screens.py -m "not slow"
+
+    # tests/ui/conftest.py writes a screenshot, an app log and a state dump per
+    # failing case. Without this they die with the runner, which is what makes a
+    # UI failure that does not reproduce locally undiagnosable.
+    - name: Upload UI failure artifacts
+      if: failure()
+      uses: actions/upload-artifact@v7
+      with:
+        name: ui-artifacts-${{ github.run_id }}
+        path: ui-artifacts/
+        if-no-files-found: ignore
+        retention-days: 7
 
   build-macos:
     name: Build (macOS 14)
     runs-on: macos-14
+    # Gated on the two jobs that need no build. A shell, gate or lint failure is
+    # knowable in minutes; this job runs for well over an hour, so starting it
+    # anyway spends a runner to re-learn what the fast suite already said. The
+    # cost is that a green run's long pole starts after the shell suite, and the
+    # benefit is that a red one reports in minutes instead of two hours.
+    needs: [test-shell, test-telemetry-worker]
     timeout-minutes: 65
 
     steps:
@@ -347,8 +428,13 @@ jobs:
         restore-keys: |
           deps-macos-14-
 
-    - name: Cache ccache
-      uses: actions/cache@v5
+    # Restore and save are split so the save can be limited to one ref. macOS is
+    # a development platform, never a deployment target, so this job is a
+    # portability check rather than something a release depends on - it does not
+    # earn a slice of the shared 10 GB cache on every long-lived branch. A
+    # release/** run still restores the default branch's generation.
+    - name: Restore ccache
+      uses: actions/cache/restore@v5
       with:
         path: ~/Library/Caches/ccache
         key: ccache-macos-14-${{ github.sha }}
@@ -361,10 +447,18 @@ jobs:
         git submodule status
         echo "Submodules initialized"
 
+    - name: Cache npm downloads
+      uses: actions/cache@v5
+      with:
+        path: ~/.npm
+        key: npm-${{ runner.os }}-${{ hashFiles('package.json') }}
+        restore-keys: |
+          npm-${{ runner.os }}-
+
     - name: Install Node.js dependencies
       uses: nick-fields/retry@v4
       with:
-        timeout_minutes: 2
+        timeout_minutes: 6
         max_attempts: 3
         command: npm install
 
@@ -389,6 +483,13 @@ jobs:
         echo "HelixScreen built successfully"
         ccache -s
 
+    - name: Save ccache
+      if: always() && github.ref == 'refs/heads/main'
+      uses: actions/cache/save@v5
+      with:
+        path: ~/Library/Caches/ccache
+        key: ccache-macos-14-${{ github.sha }}
+
     - name: Verify binary
       run: |
         ./build/bin/helix-screen --help || true
@@ -404,7 +505,20 @@ jobs:
   build-android:
     name: Build (Android)
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    # Gated on the two jobs that need no build. A shell, gate or lint failure is
+    # knowable in minutes; this job runs for well over an hour, so starting it
+    # anyway spends a runner to re-learn what the fast suite already said. The
+    # cost is that a green run's long pole starts after the shell suite, and the
+    # benefit is that a red one reports in minutes instead of two hours.
+    needs: [test-shell, test-telemetry-worker]
+    # The job itself runs 26-29 minutes with a warm Gradle cache, so a 30-minute
+    # cap is a coin flip: it timed out at exactly 30:02 on one commit and passed
+    # in 26 on the next. The ceiling is for a hung Gradle or NDK fetch, not for
+    # the build, so it sits well clear of the build's own spread.
+    # The build is narrowed to the two 64-bit ABIs: armeabi-v7a is a third full
+    # native build, roughly half again on the job, and only the release workflow
+    # builds it.
+    timeout-minutes: 50
 
     steps:
     - name: Checkout repository
@@ -440,7 +554,7 @@ jobs:
 
     - name: Build Android APK (debug)
       working-directory: android
-      run: ./gradlew assembleDebug
+      run: ./gradlew assembleDebug -PhelixAbis=arm64-v8a,x86_64
 
     - name: Upload APK
       uses: actions/upload-artifact@v7
@@ -471,6 +585,12 @@ jobs:
   link-aux-binaries:
     name: Link splash + watchdog (non-LTO)
     runs-on: ubuntu-22.04
+    # Gated on the two jobs that need no build. A shell, gate or lint failure is
+    # knowable in minutes; this job runs for well over an hour, so starting it
+    # anyway spends a runner to re-learn what the fast suite already said. The
+    # cost is that a green run's long pole starts after the shell suite, and the
+    # benefit is that a red one reports in minutes instead of two hours.
+    needs: [test-shell, test-telemetry-worker]
     timeout-minutes: 60
 
     steps:
@@ -492,6 +612,7 @@ jobs:
         timeout_minutes: 20
         max_attempts: 3
         command: |
+          sudo rm -f /etc/apt/sources.list.d/google-chrome*.list
           sudo apt-get update
           sudo apt-get install -y \
             clang \
@@ -517,10 +638,18 @@ jobs:
         restore-keys: |
           ccache-x86-fbdev-
 
+    - name: Cache npm downloads
+      uses: actions/cache@v5
+      with:
+        path: ~/.npm
+        key: npm-${{ runner.os }}-${{ hashFiles('package.json') }}
+        restore-keys: |
+          npm-${{ runner.os }}-
+
     - name: Install Node.js dependencies
       uses: nick-fields/retry@v4
       with:
-        timeout_minutes: 2
+        timeout_minutes: 6
         max_attempts: 3
         command: npm install
 
@@ -557,7 +686,7 @@ jobs:
   test-shell:
     name: Shell Tests (BATS)
     runs-on: ubuntu-22.04
-    timeout-minutes: 15
+    timeout-minutes: 30
 
     steps:
     - name: Checkout repository

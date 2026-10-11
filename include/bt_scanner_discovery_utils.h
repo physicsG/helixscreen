@@ -12,6 +12,8 @@
 #include "bt_discovery_utils.h"
 
 #include <cstring>
+#include <string>
+#include <vector>
 
 #ifdef _WIN32
 #define strncasecmp _strnicmp
@@ -65,6 +67,33 @@ inline bool is_likely_bt_scanner(const char* name) {
     }
 
     return false;
+}
+
+/// What a device's name and advertised UUIDs say it is. Discovery reports a device when any
+/// trait holds, or when it is paired.
+struct DeviceTraits {
+    bool printer_uuid = false; ///< Advertises a label-printer service UUID
+    bool printer_name = false; ///< Name matches the label-printer brand table
+    bool scanner = false;      ///< HID UUID, or a scanner-looking name
+
+    /// A scanner trait and no printer trait: the scanner list keeps the device and the label
+    /// printer list skips it.
+    bool is_scanner() const {
+        return scanner && !printer_uuid && !printer_name;
+    }
+};
+
+/// @param name the device's real name, or null/empty when BlueZ has only its address
+inline DeviceTraits classify_device(const char* name, const std::vector<std::string>& uuids) {
+    DeviceTraits t;
+    const bool has_name = name && name[0];
+    for (const auto& uuid : uuids) {
+        t.printer_uuid = t.printer_uuid || is_label_printer_uuid(uuid.c_str());
+        t.scanner = t.scanner || is_hid_scanner_uuid(uuid.c_str());
+    }
+    t.printer_name = has_name && is_likely_label_printer(name);
+    t.scanner = t.scanner || (has_name && is_likely_bt_scanner(name));
+    return t;
 }
 
 } // namespace helix::bluetooth

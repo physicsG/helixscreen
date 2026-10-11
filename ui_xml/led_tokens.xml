@@ -1,0 +1,106 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!--
+  LEDs overlay tokens. theme_manager scans ui_xml/*.xml for suffixed <px> ladders
+  and <color> elements and registers the base names globally, so the overlay and
+  its components under ui_xml/components/ resolve these the same way.
+
+  The white-tone colors are static previews of what Cool, Neutral and Warm look
+  like on the strip; they describe the light, not the UI theme.
+-->
+<component>
+  <consts>
+    <!-- Touch targets. Each floor is the app's #button_height at that tier; larger
+         screens get larger targets. A swatch's size is its whole target: the
+         colored disc sits inside it, inset by the selection ring's reach. -->
+    <px name="led_swatch_size_micro" value="32"/>
+    <px name="led_swatch_size_tiny" value="36"/>
+    <px name="led_swatch_size_small" value="48"/>
+    <px name="led_swatch_size_medium" value="62"/>
+    <px name="led_swatch_size_large" value="80"/>
+    <px name="led_swatch_size_xlarge" value="100"/>
+
+    <!-- Gap between swatches, and half of it: each swatch's hit area reaches
+         half the gap to each side, so a row has no dead gaps and no overlap. -->
+    <px name="led_swatch_gap_micro" value="4"/>
+    <px name="led_swatch_gap_tiny" value="2"/>
+    <px name="led_swatch_gap_small" value="8"/>
+    <px name="led_swatch_gap_medium" value="8"/>
+    <px name="led_swatch_gap_large" value="12"/>
+    <px name="led_swatch_gap_xlarge" value="14"/>
+    <px name="led_swatch_gap_half_micro" value="2"/>
+    <px name="led_swatch_gap_half_tiny" value="1"/>
+    <px name="led_swatch_gap_half_small" value="4"/>
+    <px name="led_swatch_gap_half_medium" value="4"/>
+    <px name="led_swatch_gap_half_large" value="6"/>
+    <px name="led_swatch_gap_half_xlarge" value="7"/>
+
+    <px name="led_power_size_micro" value="34"/>
+    <px name="led_power_size_small" value="48"/>
+    <px name="led_power_size_medium" value="60"/>
+    <px name="led_power_size_large" value="76"/>
+    <px name="led_power_size_xlarge" value="88"/>
+
+    <px name="led_lamp_width_micro" value="60"/>
+    <px name="led_lamp_width_small" value="80"/>
+    <px name="led_lamp_width_medium" value="104"/>
+    <px name="led_lamp_width_large" value="132"/>
+    <px name="led_lamp_width_xlarge" value="156"/>
+
+    <px name="led_chip_height_micro" value="26"/>
+    <px name="led_chip_height_small" value="40"/>
+    <px name="led_chip_height_medium" value="52"/>
+    <px name="led_chip_height_large" value="64"/>
+    <px name="led_chip_height_xlarge" value="72"/>
+
+    <px name="led_chip_min_width_micro" value="40"/>
+    <px name="led_chip_min_width_small" value="52"/>
+    <px name="led_chip_min_width_medium" value="60"/>
+    <px name="led_chip_min_width_large" value="72"/>
+    <px name="led_chip_min_width_xlarge" value="84"/>
+
+    <!-- Gap between chips, and half of it for each chip's hit area. -->
+    <px name="led_chip_gap_micro" value="4"/>
+    <px name="led_chip_gap_small" value="6"/>
+    <px name="led_chip_gap_medium" value="8"/>
+    <px name="led_chip_gap_large" value="10"/>
+    <px name="led_chip_gap_xlarge" value="12"/>
+    <px name="led_chip_gap_half_micro" value="2"/>
+    <px name="led_chip_gap_half_small" value="3"/>
+    <px name="led_chip_gap_half_medium" value="4"/>
+    <px name="led_chip_gap_half_large" value="5"/>
+    <px name="led_chip_gap_half_xlarge" value="6"/>
+
+    <px name="led_fade_width_micro" value="28"/>
+    <px name="led_fade_width_small" value="36"/>
+    <px name="led_fade_width_medium" value="48"/>
+    <px name="led_fade_width_large" value="56"/>
+    <px name="led_fade_width_xlarge" value="64"/>
+
+    <!-- Corner radius of the brightness pill. -->
+    <px name="led_pill_radius_micro" value="15"/>
+    <px name="led_pill_radius_small" value="18"/>
+    <px name="led_pill_radius_medium" value="26"/>
+    <px name="led_pill_radius_large" value="32"/>
+    <px name="led_pill_radius_xlarge" value="36"/>
+
+    <!-- The selection ring: its width, the gap between it and the disc, and
+         their sum, the reach by which a disc is inset inside its swatch. -->
+    <px name="led_ring_width_micro" value="2"/>
+    <px name="led_ring_width_small" value="2"/>
+    <px name="led_ring_width_medium" value="3"/>
+    <px name="led_ring_width_large" value="3"/>
+    <px name="led_ring_width_xlarge" value="4"/>
+    <px name="led_ring_reach_micro" value="4"/>
+    <px name="led_ring_reach_small" value="4"/>
+    <px name="led_ring_reach_medium" value="5"/>
+    <px name="led_ring_reach_large" value="6"/>
+    <px name="led_ring_reach_xlarge" value="7"/>
+
+    <color name="led_white_cool" value="#EAF2FF"/>
+    <color name="led_white_neutral" value="#FFF3DE"/>
+    <color name="led_white_warm" value="#FFD9A0"/>
+  </consts>
+  <view extends="lv_obj"/>
+</component>

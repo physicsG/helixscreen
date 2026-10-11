@@ -6,12 +6,10 @@
  * @brief Regression guard for prestonbrown/helixscreen#1262
  *
  * AccelSensorManager's sensor list is only ever filled by
- * discover_from_config(). Its intended caller — SensorRegistry::discover_all()
- * — has no production callers, so the manager stayed permanently empty on real
- * printers: Settings > Sensors showed an empty accelerometer list with a 0
- * badge, telemetry reported accel:0, and detect_belt_hardware() sourced
- * has_adxl from the same empty manager while claiming to be the single source
- * of truth.
+ * discover_from_config(), which the discovery sequence must call itself: left
+ * uncalled, Settings > Sensors shows an empty accelerometer list with a 0
+ * badge, telemetry reports accel:0, and detect_belt_hardware() sources has_adxl
+ * from the same empty manager.
  *
  * These tests drive the REAL discovery sequence (not the mock override) against
  * a mock transport whose configfile.config carries [adxl345], and assert the

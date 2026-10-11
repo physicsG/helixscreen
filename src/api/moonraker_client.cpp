@@ -5,7 +5,7 @@
  * @brief WebSocket client for Moonraker printer API communication
  *
  * @pattern libhv WebSocketClient with atomic state machine
- * @threading Callbacks run on libhv event loop thread - use helix::ui::async_call() for LVGL
+ * @threading Callbacks run on libhv event loop thread - use helix::ui::queue_update() for LVGL
  * @gotchas is_destroying_ flag blocks callbacks during destruction; skip cleanup during static
  * destruction
  *
@@ -20,10 +20,12 @@
 #include "abort_manager.h"
 #include "app_globals.h"
 #include "callback_drain.h"
+#include "helix_thread.h"
 #include "helix_version.h"
 #include "host_identity.h"
 #include "printer_state.h"
 #include "system/telemetry_manager.h"
+#include "translation_loader.h"
 
 using namespace helix;
 
@@ -32,7 +34,6 @@ using namespace hv;
 // Anonymous namespace for file-scoped state
 namespace {
 // Rate limiting flags for reconnection notifications
-std::atomic<bool> g_already_notified_max_attempts{false};
 std::atomic<bool> g_already_notified_disconnect{false};
 
 // How long disconnect() waits for in-flight callbacks to drain before giving up.
@@ -42,7 +43,7 @@ constexpr std::chrono::milliseconds CALLBACK_DRAIN_TIMEOUT{3000};
 
 // "ws://192.168.1.171:7125/websocket" -> "192.168.1.171:7125". The bare
 // host:port is what a user can act on: compare it against the printer, or find
-// it under Settings > System > Printer Host. Falls back to the input unchanged
+// it under Settings > Connection > Host. Falls back to the input unchanged
 // if it does not look like a URL.
 std::string format_ws_endpoint(const std::string& url) {
     std::string s = url;
@@ -77,7 +78,6 @@ std::string host_of_endpoint(const std::string& endpoint) {
 
 // Reset notification flags on successful connection
 void reset_notification_flags() {
-    g_already_notified_max_attempts.store(false);
     g_already_notified_disconnect.store(false);
 }
 
@@ -124,8 +124,7 @@ void MoonrakerClient::start_health_timer() {
                 spdlog::error("[Moonraker Client] Reconnection stalled for {}ms, giving up",
                               elapsed);
                 set_connection_state(ConnectionState::FAILED);
-                emit_event(MoonrakerEventType::CONNECTION_FAILED,
-                           "Unable to reach printer. Check power and network connection.", true);
+                emit_event(moonraker_event::reconnect_stalled());
             }
         }
     });
@@ -159,10 +158,10 @@ MoonrakerClient::~MoonrakerClient() {
         std::unique_lock<std::shared_mutex> lk(callback_lifecycle_mutex_);
     } // Release immediately — just needed to wait for in-flight callbacks
 
-    // Now safe to reset lifetime guards (no callbacks can be mid-execution).
-    // destruction_guard_ signals object destruction to SubscriptionGuard and
-    // other external holders; lifetime_guard_ covers WS callbacks.
-    lifetime_guard_.reset();
+    // Now safe to reset the guard (no callbacks can be mid-execution). This is the
+    // only place it is reset, so resetting it here is what signals object destruction
+    // to everything that gates on it: the WS trampolines, which hold a weak_ptr, and
+    // SubscriptionGuard and other external holders, which reach it via lifetime_weak().
     destruction_guard_.reset();
 
     // Disable auto-reconnect BEFORE closing - prevents libhv from attempting
@@ -227,29 +226,6 @@ void MoonrakerClient::set_connection_state(ConnectionState new_state) {
             if (old_state != ConnectionState::RECONNECTING) {
                 reconnect_started_at_.store(steady_ticks_now(), std::memory_order_relaxed);
             }
-            reconnect_attempts_++;
-            if (max_reconnect_attempts_ > 0 && reconnect_attempts_ >= max_reconnect_attempts_) {
-                spdlog::error("[Moonraker Client] Max reconnect attempts ({}) exceeded",
-                              max_reconnect_attempts_);
-                TelemetryManager::instance().record_error(
-                    "websocket", "reconnect_failed",
-                    fmt::format("max attempts ({}) exceeded", max_reconnect_attempts_));
-
-                // Emit event only once during reconnect sequence
-                if (!g_already_notified_max_attempts.load()) {
-                    emit_event(MoonrakerEventType::CONNECTION_FAILED,
-                               fmt::format("Unable to reach printer after {} attempts. "
-                                           "Check power and network connection.",
-                                           max_reconnect_attempts_),
-                               true);
-                    g_already_notified_max_attempts.store(true);
-                }
-
-                set_connection_state(ConnectionState::FAILED);
-                return;
-            }
-        } else if (new_state == ConnectionState::CONNECTED) {
-            reconnect_attempts_ = 0; // Reset on successful connection
         }
 
         // Copy callback under lock to prevent race with destructor clearing it
@@ -292,21 +268,19 @@ void MoonrakerClient::disconnect() {
 
     // Arm a short suppression window so the close that THIS intentional disconnect
     // triggers does not produce a "connection lost / reconnecting" toast. on_ws_close()
-    // checks is_disconnect_modal_suppressed() to gate the reconnect side-effects. This
-    // replicates the old lifetime_guard_-reset suppression for the common case.
+    // checks is_disconnect_modal_suppressed() to gate the reconnect side-effects.
+    // Nothing here cancels the close callback, so suppressing its side effects is the
+    // only way an intentional disconnect stays quiet.
     suppress_disconnect_modal(2000);
 
-    // Disable auto-reconnect BEFORE invalidation to prevent spurious reconnection
+    // Disable auto-reconnect before closing, so libhv does not immediately undo the
+    // close() below with a retry.
     setReconnect(nullptr);
 
-    // Invalidate lifetime guard so any in-flight or future callbacks on the event loop
-    // thread will see weak_guard.lock() fail and early-return. Then create a fresh guard
-    // for the next connect() call.
-    // NOTE: Do NOT replace onopen/onmessage/onclose with no-op lambdas here — that's a
-    // data race with the event loop thread which may be mid-call on the std::function.
-    // The invalidated weak_ptr is the safe cancellation mechanism.
-    lifetime_guard_.reset();
-    lifetime_guard_ = std::make_shared<bool>(true);
+    // Do NOT replace onopen/onmessage/onclose with no-op lambdas here. Reassigning an
+    // inherited std::function that the event loop thread may be mid-call on frees the
+    // running lambda's storage. The trampolines are installed once and stay installed
+    // for the life of the client; a later connect() reuses them as they are.
 
     // Wait for any in-flight callbacks to finish before we modify shared state.
     // Callbacks hold a shared lock; acquiring exclusive waits until they complete.
@@ -327,17 +301,21 @@ void MoonrakerClient::disconnect() {
     // A callback still running after this long is wedged, not slow, and blocking
     // on it forever is the worse failure either way.
     //
-    // Proceeding after a timeout does race that callback. lifetime_guard_ was
-    // already invalidated above, so it early-returns at its next guard check, but
-    // the window is real — hence the error log rather than a silent carry-on.
+    // On timeout the drain gives up and disconnect() proceeds while that callback is
+    // still running — and nothing below stops it. The trampolines gate only on
+    // destruction_guard_ (reset in the destructor), callback_lifecycle_mutex_ and
+    // is_destroying_; disconnect() changes none of the three, so a callback that
+    // outlasts the drain keeps running straight through the close() below and a
+    // dispatch arriving afterwards is admitted as usual. The error log is the only
+    // signal that happened, which is why it is an error rather than a silent carry-on.
     if (!helix::drain_shared_holders(callback_lifecycle_mutex_, CALLBACK_DRAIN_TIMEOUT)) {
         spdlog::error("[Moonraker Client] In-flight callbacks still running after {}ms — "
                       "proceeding with disconnect anyway",
                       CALLBACK_DRAIN_TIMEOUT.count());
     }
 
-    // Now safe to stop timer and close — no callbacks can restart the timer or
-    // access our state because the lifetime guard is invalidated.
+    // Stop the timer and close. A successful drain means no callback is running at
+    // this point; a timed-out drain means one still is, and close() races it.
     stop_health_timer();
     close();
 
@@ -350,7 +328,6 @@ void MoonrakerClient::disconnect() {
 
     // Reset connection state
     set_connection_state(ConnectionState::DISCONNECTED);
-    reconnect_attempts_ = 0;
 }
 
 void MoonrakerClient::force_reconnect() {
@@ -449,7 +426,7 @@ int MoonrakerClient::connect(const char* url, std::function<void()> on_connected
 
     // Connect
     http_headers headers;
-    headers["User-Agent"] = std::string("HelixScreen/") + HELIX_VERSION;
+    headers["User-Agent"] = HELIX_USER_AGENT;
     return open(url, headers);
 }
 
@@ -476,6 +453,10 @@ void MoonrakerClient::install_ws_callbacks() {
     // before any `this` deref, so a callback firing during the hv::WebSocketClient base-class
     // destructor (after destruction_guard_.reset()) bails without touching destroyed members.
     onopen = [this, dg = std::weak_ptr<bool>(destruction_guard_)]() {
+        // libhv owns this loop thread, so its signal stack is installed from
+        // the first callback that runs on it: onopen, or onclose when the
+        // connection never comes up.
+        helix::install_thread_altstack();
         // Liveness check that never dereferences `this`: a null lock() means the destructor
         // already ran (it resets destruction_guard_ before the base-class dtor). See above.
         auto live = dg.lock();
@@ -512,6 +493,7 @@ void MoonrakerClient::install_ws_callbacks() {
     };
 
     onclose = [this, dg = std::weak_ptr<bool>(destruction_guard_)]() {
+        helix::install_thread_altstack();
         // Liveness check that never dereferences `this`: a null lock() means the destructor
         // already ran (it resets destruction_guard_ before the base-class dtor). See above.
         auto live = dg.lock();
@@ -546,7 +528,7 @@ void MoonrakerClient::on_ws_open() {
     // Check if this is a reconnection (was_connected_ is true from previous session)
     // Emit RECONNECTED event BEFORE updating was_connected_
     if (was_connected_.load()) {
-        emit_event(MoonrakerEventType::RECONNECTED, "Connection restored", false);
+        emit_event(moonraker_event::reconnected());
     }
 
     was_connected_ = true;
@@ -557,10 +539,13 @@ void MoonrakerClient::on_ws_open() {
 
     // Reset notification flags on successful connection
     reset_notification_flags();
-    // Re-arm the initial-connection escalation. A session that came up and later
-    // dies is the health timer's problem, but if this client is pointed at a new
-    // host that never answers, that streak deserves its own notification.
-    initial_failure_notified_.store(false, std::memory_order_relaxed);
+    // The initial connection this escalation tracks has been achieved. Only
+    // connect() re-arms it (new host, wizard, force_reconnect); libhv's own
+    // auto-reconnect never re-enters connect(), so a session that came up and
+    // later dies must not re-fire the never-connected notification with an
+    // elapsed time measured from the original connect() — that window belongs
+    // to the health timer's stall check.
+    initial_failure_notified_.store(true, std::memory_order_relaxed);
 
     invoke_connected_callback(on_connected, "WebSocket opened");
 }
@@ -586,11 +571,11 @@ void MoonrakerClient::on_ws_message(const std::string& msg) {
                           MAX_MESSAGE_SIZE);
 
             // Emit event - this indicates a protocol problem
-            emit_event(MoonrakerEventType::MESSAGE_OVERSIZED,
-                       fmt::format("Received oversized data from printer ({} bytes). "
-                                   "This may indicate a communication error.",
-                                   msg.size()),
-                       true);
+            emit_event(MoonrakerEvent::translatable(
+                MoonrakerEventType::MESSAGE_OVERSIZED,
+                TR_NOOP("Received oversized data from printer ({} bytes). "
+                        "This may indicate a communication error."),
+                {std::to_string(msg.size())}, true));
 
             // Deferred, not inline. disconnect() takes callback_lifecycle_mutex_
             // exclusively, and the onmessage trampoline that called us still holds
@@ -639,11 +624,7 @@ void MoonrakerClient::on_ws_message(const std::string& msg) {
         // Route responses with request IDs through the tracker
         if (j.contains("id")) {
             tracker_.route_response(
-                j,
-                [this](MoonrakerEventType type, const std::string& msg_str, bool is_error,
-                       const std::string& details) {
-                    emit_event(type, msg_str, is_error, details);
-                },
+                j, [this](const MoonrakerEvent& evt) { emit_event(evt); },
                 []() { return AbortManager::instance().is_handling_shutdown(); });
         }
 
@@ -719,10 +700,11 @@ void MoonrakerClient::on_ws_message(const std::string& msg) {
                 tracker_.cleanup_all();
 
                 // Emit event for UI layer to handle
-                emit_event(MoonrakerEventType::KLIPPY_DISCONNECTED,
-                           "Klipper has disconnected from Moonraker. Check for errors in your "
-                           "printer interface.",
-                           true);
+                emit_event(MoonrakerEvent::translatable(
+                    MoonrakerEventType::KLIPPY_DISCONNECTED,
+                    TR_NOOP("Klipper has disconnected from Moonraker. Check for errors in your "
+                            "printer interface."),
+                    {}, true));
 
                 // Invoke user callback with exception safety
                 if (on_disconnected) {
@@ -748,8 +730,9 @@ void MoonrakerClient::on_ws_message(const std::string& msg) {
                 });
 
                 // Emit event for UI layer — recovery dialog will show
-                emit_event(MoonrakerEventType::KLIPPY_SHUTDOWN,
-                           "Klipper has entered shutdown state.", true);
+                emit_event(MoonrakerEvent::translatable(
+                    MoonrakerEventType::KLIPPY_SHUTDOWN,
+                    TR_NOOP("Klipper has entered shutdown state."), {}, true));
 
                 // Shutdown is a valid gate state for discovery. If we never
                 // completed one on this connection (Klippy was unreachable
@@ -817,9 +800,9 @@ void MoonrakerClient::on_ws_close() {
         // uptime, so a reboot (or a switch to a different printer) restarts it near
         // zero; carrying the old watermark across would make the next session's
         // genuinely-current frames look older than the last session's and be
-        // rejected for the life of the process. Touches two POD members under
-        // PrinterState's own mutex — no LVGL, safe from this event-loop thread.
-        get_printer_state().reset_klippy_state_freshness();
+        // rejected for the life of the process. Touches two POD fields under their
+        // own lock, no LVGL: safe from this event-loop thread.
+        get_printer_state().network_state().reset_klippy_state_freshness();
 
         if (was_connected_) {
             spdlog::warn("[Moonraker Client] WebSocket connection closed");
@@ -833,8 +816,7 @@ void MoonrakerClient::on_ws_close() {
             if (!suppressed) {
                 // Emit event with rate limiting to prevent spam during reconnect loop
                 if (!g_already_notified_disconnect.load()) {
-                    emit_event(MoonrakerEventType::CONNECTION_LOST,
-                               "Connection to printer lost - attempting to reconnect...", false);
+                    emit_event(moonraker_event::connection_lost_reconnecting());
                     g_already_notified_disconnect.store(true);
                 }
 
@@ -904,17 +886,15 @@ void MoonrakerClient::on_ws_close() {
                     // refusals on 127.0.0.1:7125 for two boots running, and a
                     // dialog telling the user to check the address and offering
                     // to change it.
-                    emit_event(
+                    emit_event(MoonrakerEvent::translatable(
                         MoonrakerEventType::CONNECTION_FAILED,
                         helix::is_moonraker_on_same_host(host_of_endpoint(endpoint))
-                            ? fmt::format("Moonraker is not responding at {}. It runs on this "
-                                          "printer, so check that the Klipper and Moonraker "
-                                          "services started.",
-                                          endpoint)
-                            : fmt::format("Unable to reach printer at {}. Check that the printer "
-                                          "is powered on and that this address is correct.",
-                                          endpoint),
-                        true);
+                            ? TR_NOOP("Moonraker is not responding at {}. It runs on this "
+                                      "printer, so check that the Klipper and Moonraker "
+                                      "services started.")
+                            : TR_NOOP("Unable to reach printer at {}. Check that the printer "
+                                      "is powered on and that this address is correct."),
+                        {endpoint}, true));
                 }
             }
 
@@ -993,6 +973,10 @@ bool MoonrakerClient::is_disconnect_modal_suppressed() const {
 
 void MoonrakerClient::emit_event(MoonrakerEventType type, const std::string& message, bool is_error,
                                  const std::string& details) {
+    emit_event(MoonrakerEvent{type, message, details, is_error});
+}
+
+void MoonrakerClient::emit_event(const MoonrakerEvent& evt) {
     MoonrakerEventCallback handler;
     {
         std::lock_guard<std::mutex> lock(event_handler_mutex_);
@@ -1000,7 +984,6 @@ void MoonrakerClient::emit_event(MoonrakerEventType type, const std::string& mes
     }
 
     if (handler) {
-        MoonrakerEvent evt{type, message, details, is_error};
         try {
             handler(evt);
         } catch (const std::exception& e) {
@@ -1008,15 +991,16 @@ void MoonrakerClient::emit_event(MoonrakerEventType type, const std::string& mes
         }
     } else {
         // No handler registered - just log the event
-        if (is_error) {
-            spdlog::error("[Moonraker Event] {}: {}", static_cast<int>(type), message);
+        if (evt.is_error) {
+            spdlog::error("[Moonraker Event] {}: {}", static_cast<int>(evt.type), evt.message);
         } else {
-            spdlog::warn("[Moonraker Event] {}: {}", static_cast<int>(type), message);
+            spdlog::warn("[Moonraker Event] {}: {}", static_cast<int>(evt.type), evt.message);
         }
     }
 }
 
-void MoonrakerClient::dispatch_status_update(const json& status, bool from_cached_snapshot) {
+void MoonrakerClient::dispatch_status_update(const json& status, bool from_cached_snapshot,
+                                             bool whole_objects) {
     // Parse bed mesh data before dispatching (mirrors WebSocket handler behavior)
     // This ensures bed mesh is populated on initial subscription response,
     // not just on subsequent notify_status_update messages
@@ -1038,17 +1022,7 @@ void MoonrakerClient::dispatch_status_update(const json& status, bool from_cache
         }
     }
 
-    // Wrap raw status into notify_status_update format. There is no eventtime to
-    // carry — a synthetic dispatch is not a Klipper frame — so 0.0 stands for
-    // "untimestamped", which is why replay provenance has to be stated separately
-    // rather than inferred from the clock value.
-    json notification = {
-        {"method", "notify_status_update"},
-        {"params", json::array({status, 0.0})} // [status, eventtime]
-    };
-    if (from_cached_snapshot) {
-        notification[CACHED_SNAPSHOT_MARKER] = true;
-    }
+    const json notification = make_status_notification(status, from_cached_snapshot, whole_objects);
 
     // Dispatch to all registered callbacks
     // Two-phase: copy under lock, invoke outside to avoid deadlock
@@ -1222,7 +1196,7 @@ void MoonrakerClient::get_gcode_store(
 
     send_jsonrpc(
         "server.gcode_store", params,
-        [on_success](json response) {
+        [on_success](const json& response) {
             std::vector<GcodeStoreEntry> entries;
 
             // Parse response: {"result": {"gcode_store": [...]}}
@@ -1288,7 +1262,7 @@ void MoonrakerClient::get_temperature_store(std::function<void(const Temperature
 
     send_jsonrpc(
         "server.temperature_store", params,
-        [on_success](json response) {
+        [on_success](const json& response) {
             TemperatureStore store;
             if (response.contains("result")) {
                 store = parse_temperature_store(response["result"]);

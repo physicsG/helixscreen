@@ -3,24 +3,25 @@
 
 #include "hardware_validator.h"
 
-#include "ui_nav_manager.h"
+#include "ui_nav.h"
 #include "ui_panel_settings.h"
 #include "ui_toast_manager.h"
 
 #include "config.h"
 #include "hardware_role_registry.h"
+#include "json_utils.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "printer_discovery.h"
 #include "printer_hardware.h"
 #include "spdlog/fmt/fmt.h"
 #include "spdlog/spdlog.h"
+#include "text_io.h"
+#include "translation_loader.h"
 #include "wizard_config_paths.h"
 
 #include <algorithm>
 #include <chrono>
 #include <ctime>
-#include <iomanip>
-#include <sstream>
 
 using namespace helix;
 
@@ -44,6 +45,52 @@ std::string json_string_member(const json& obj, const char* key) {
     return it->get<std::string>();
 }
 
+/// Whether a configured strip id is something printer.objects can report.
+/// A configured strip list spans every LED backend: macro devices are synthetic
+/// "macro:NAME" ids and WLED strips are served over Moonraker's HTTP proxy, so
+/// neither ever appears in a Klipper object list. Only a Klipper-object strip can
+/// be judged present or absent against discovery.
+bool led_strip_is_klipper_object(const std::string& strip_id) {
+    if (strip_id.find(':') != std::string::npos) {
+        return false;
+    }
+    return strip_id.rfind("wled ", 0) != 0;
+}
+
+/// The configured LED strips, in precedence order: leds/auto_state/strips, then
+/// the legacy selection keys an older config may still hold (leds/selected_strips,
+/// leds/selected array, leds/strip single string). Empty when no LED is
+/// configured. Both validators ask this one question through here — a configured
+/// LED must read as configured whichever key it was saved under.
+std::vector<std::string> configured_led_strips(Config* config) {
+    std::vector<std::string> strips;
+    if (config == nullptr) {
+        return strips;
+    }
+    auto prune_empty = [](std::vector<std::string>& v) {
+        v.erase(std::remove_if(v.begin(), v.end(), [](const std::string& n) { return n.empty(); }),
+                v.end());
+    };
+    strips = config->get_string_array(config->df() + helix::wizard::LED_AUTO_STATE_STRIPS);
+    prune_empty(strips);
+    if (strips.empty()) {
+        strips = config->get_string_array(config->df() + helix::wizard::LED_SELECTED_STRIPS);
+        prune_empty(strips);
+    }
+    if (strips.empty()) {
+        strips = config->get_string_array(config->df() + helix::wizard::LED_SELECTED);
+        prune_empty(strips);
+    }
+    if (strips.empty()) {
+        const json* led_strip = config->try_get_json(config->df() + helix::wizard::LED_STRIP);
+        if (led_strip != nullptr && led_strip->is_string() &&
+            !led_strip->get<std::string>().empty()) {
+            strips.push_back(led_strip->get<std::string>());
+        }
+    }
+    return strips;
+}
+
 } // namespace
 
 // =============================================================================
@@ -59,28 +106,33 @@ json HardwareSnapshot::to_json() const {
 HardwareSnapshot HardwareSnapshot::from_json(const json& j) {
     HardwareSnapshot snapshot;
 
-    try {
-        if (j.contains("timestamp") && j["timestamp"].is_string()) {
-            snapshot.timestamp = j["timestamp"].get<std::string>();
+    if (j.contains("timestamp") && j["timestamp"].is_string()) {
+        snapshot.timestamp = j["timestamp"].get<std::string>();
+    }
+
+    // An absent or non-array field leaves that list empty; an array holding a
+    // non-string element discards the whole snapshot, so the caller never acts
+    // on a half-populated one.
+    const auto read_string_array = [&j](const char* key, std::vector<std::string>& out) -> bool {
+        const json* v = helix::json_util::find_member(j, key);
+        if (v == nullptr || !v->is_array()) {
+            return true;
         }
-        if (j.contains("heaters") && j["heaters"].is_array()) {
-            snapshot.heaters = j["heaters"].get<std::vector<std::string>>();
+        for (const auto& elem : *v) {
+            if (!elem.is_string()) {
+                return false;
+            }
         }
-        if (j.contains("sensors") && j["sensors"].is_array()) {
-            snapshot.sensors = j["sensors"].get<std::vector<std::string>>();
-        }
-        if (j.contains("fans") && j["fans"].is_array()) {
-            snapshot.fans = j["fans"].get<std::vector<std::string>>();
-        }
-        if (j.contains("leds") && j["leds"].is_array()) {
-            snapshot.leds = j["leds"].get<std::vector<std::string>>();
-        }
-        if (j.contains("filament_sensors") && j["filament_sensors"].is_array()) {
-            snapshot.filament_sensors = j["filament_sensors"].get<std::vector<std::string>>();
-        }
-    } catch (const std::exception& e) {
-        spdlog::warn("[HardwareValidator] Failed to parse snapshot: {}", e.what());
-        return HardwareSnapshot{}; // Return empty snapshot on error
+        out = v->get<std::vector<std::string>>();
+        return true;
+    };
+
+    if (!read_string_array("heaters", snapshot.heaters) ||
+        !read_string_array("sensors", snapshot.sensors) ||
+        !read_string_array("fans", snapshot.fans) || !read_string_array("leds", snapshot.leds) ||
+        !read_string_array("filament_sensors", snapshot.filament_sensors)) {
+        spdlog::warn("[HardwareValidator] Snapshot field unreadable; discarding snapshot");
+        return HardwareSnapshot{};
     }
 
     return snapshot;
@@ -179,7 +231,7 @@ HardwareValidationResult HardwareValidator::validate(Config* config,
 // Static callback for toast action button - navigates to Settings and opens overlay
 static void on_hardware_toast_view_clicked(void* /*user_data*/) {
     spdlog::debug("[HardwareValidator] Toast 'View' clicked - opening Hardware Health overlay");
-    NavigationManager::instance().set_active(PanelId::Settings);
+    helix::nav::set_active(PanelId::Settings);
     get_global_settings_panel().handle_hardware_health_clicked();
 }
 
@@ -255,20 +307,17 @@ void HardwareValidator::save_session_snapshot(Config* config,
     // Generate ISO 8601 timestamp
     auto now = std::chrono::system_clock::now();
     auto time_t_now = std::chrono::system_clock::to_time_t(now);
-    std::stringstream ss;
-    ss << std::put_time(std::gmtime(&time_t_now), "%Y-%m-%dT%H:%M:%SZ");
-    snapshot.timestamp = ss.str();
+    std::tm tm_buf{};
+    gmtime_r(&time_t_now, &tm_buf);
+    char ts_buf[32];
+    std::strftime(ts_buf, sizeof(ts_buf), "%Y-%m-%dT%H:%M:%SZ", &tm_buf);
+    snapshot.timestamp = ts_buf;
 
     // Save to config
-    try {
-        config->set<json>(config->df() + "hardware/last_snapshot", snapshot.to_json());
-        config->save();
-        spdlog::debug(
-            "[HardwareValidator] Saved session snapshot with {} heaters, {} fans, {} leds",
-            snapshot.heaters.size(), snapshot.fans.size(), snapshot.leds.size());
-    } catch (const std::exception& e) {
-        spdlog::warn("[HardwareValidator] Failed to save session snapshot: {}", e.what());
-    }
+    config->set<json>(config->df() + "hardware/last_snapshot", snapshot.to_json());
+    config->save();
+    spdlog::debug("[HardwareValidator] Saved session snapshot with {} heaters, {} fans, {} leds",
+                  snapshot.heaters.size(), snapshot.fans.size(), snapshot.leds.size());
 }
 
 HardwareSnapshot HardwareValidator::create_snapshot(const helix::PrinterDiscovery& hardware) {
@@ -288,26 +337,19 @@ std::optional<HardwareSnapshot> HardwareValidator::load_session_snapshot(Config*
         return std::nullopt;
     }
 
-    // from_json() parses untrusted on-disk data — keep the catch.
-    try {
-        const json* snapshot_json = config->try_get_json(config->df() + "hardware/last_snapshot");
-        if (snapshot_json == nullptr || snapshot_json->is_null() || snapshot_json->empty()) {
-            spdlog::debug("[HardwareValidator] No previous session snapshot found");
-            return std::nullopt;
-        }
-
-        auto snapshot = HardwareSnapshot::from_json(*snapshot_json);
-        if (snapshot.is_empty()) {
-            return std::nullopt;
-        }
-
-        spdlog::debug("[HardwareValidator] Loaded previous snapshot from {}", snapshot.timestamp);
-        return snapshot;
-
-    } catch (const std::exception& e) {
-        spdlog::debug("[HardwareValidator] Failed to load session snapshot: {}", e.what());
+    const json* snapshot_json = config->try_get_json(config->df() + "hardware/last_snapshot");
+    if (snapshot_json == nullptr || snapshot_json->is_null() || snapshot_json->empty()) {
+        spdlog::debug("[HardwareValidator] No previous session snapshot found");
         return std::nullopt;
     }
+
+    auto snapshot = HardwareSnapshot::from_json(*snapshot_json);
+    if (snapshot.is_empty()) {
+        return std::nullopt;
+    }
+
+    spdlog::debug("[HardwareValidator] Loaded previous snapshot from {}", snapshot.timestamp);
+    return snapshot;
 }
 
 bool HardwareValidator::is_hardware_optional(Config* config, const std::string& hardware_name) {
@@ -327,32 +369,27 @@ void HardwareValidator::set_hardware_optional(Config* config, const std::string&
         return;
     }
 
-    try {
-        // Ensure the hardware/optional array exists
-        json& optional_list = config->get_json(config->df() + "hardware/optional");
-        if (optional_list.is_null() || !optional_list.is_array()) {
-            optional_list = json::array();
-        }
-
-        // Find if already in list
-        auto it = std::find(optional_list.begin(), optional_list.end(), hardware_name);
-        bool in_list = (it != optional_list.end());
-
-        if (optional && !in_list) {
-            // Add to list
-            optional_list.push_back(hardware_name);
-            spdlog::info("[HardwareValidator] Marked '{}' as optional", hardware_name);
-        } else if (!optional && in_list) {
-            // Remove from list
-            optional_list.erase(it);
-            spdlog::info("[HardwareValidator] Unmarked '{}' as optional", hardware_name);
-        }
-
-        config->save();
-
-    } catch (const std::exception& e) {
-        spdlog::warn("[HardwareValidator] Failed to set optional status: {}", e.what());
+    // Ensure the hardware/optional array exists
+    json& optional_list = config->get_json(config->df() + "hardware/optional");
+    if (optional_list.is_null() || !optional_list.is_array()) {
+        optional_list = json::array();
     }
+
+    // Find if already in list
+    auto it = std::find(optional_list.begin(), optional_list.end(), hardware_name);
+    bool in_list = (it != optional_list.end());
+
+    if (optional && !in_list) {
+        // Add to list
+        optional_list.push_back(hardware_name);
+        spdlog::info("[HardwareValidator] Marked '{}' as optional", hardware_name);
+    } else if (!optional && in_list) {
+        // Remove from list
+        optional_list.erase(it);
+        spdlog::info("[HardwareValidator] Unmarked '{}' as optional", hardware_name);
+    }
+
+    config->save();
 }
 
 void HardwareValidator::add_expected_hardware(Config* config, const std::string& hardware_name) {
@@ -360,25 +397,20 @@ void HardwareValidator::add_expected_hardware(Config* config, const std::string&
         return;
     }
 
-    try {
-        // Ensure the hardware/expected array exists
-        json& expected_list = config->get_json(config->df() + "hardware/expected");
-        if (expected_list.is_null() || !expected_list.is_array()) {
-            expected_list = json::array();
-        }
+    // Ensure the hardware/expected array exists
+    json& expected_list = config->get_json(config->df() + "hardware/expected");
+    if (expected_list.is_null() || !expected_list.is_array()) {
+        expected_list = json::array();
+    }
 
-        // Check if already in list
-        auto it = std::find(expected_list.begin(), expected_list.end(), hardware_name);
-        if (it == expected_list.end()) {
-            expected_list.push_back(hardware_name);
-            spdlog::info("[HardwareValidator] Added '{}' to expected hardware", hardware_name);
-            config->save();
-        } else {
-            spdlog::debug("[HardwareValidator] '{}' already in expected list", hardware_name);
-        }
-
-    } catch (const std::exception& e) {
-        spdlog::warn("[HardwareValidator] Failed to add expected hardware: {}", e.what());
+    // Check if already in list
+    auto it = std::find(expected_list.begin(), expected_list.end(), hardware_name);
+    if (it == expected_list.end()) {
+        expected_list.push_back(hardware_name);
+        spdlog::info("[HardwareValidator] Added '{}' to expected hardware", hardware_name);
+        config->save();
+    } else {
+        spdlog::debug("[HardwareValidator] '{}' already in expected list", hardware_name);
     }
 }
 
@@ -404,37 +436,30 @@ size_t HardwareValidator::acknowledge_discovered_hardware(Config* config,
         names.push_back(sensor);
     }
 
-    try {
-        json& expected_list = config->get_json(config->df() + "hardware/expected");
-        if (expected_list.is_null() || !expected_list.is_array()) {
-            expected_list = json::array();
-        }
-
-        size_t added = 0;
-        for (const auto& name : names) {
-            if (name.empty()) {
-                continue;
-            }
-            if (std::find(expected_list.begin(), expected_list.end(), name) !=
-                expected_list.end()) {
-                continue;
-            }
-            expected_list.push_back(name);
-            ++added;
-        }
-
-        if (added > 0) {
-            spdlog::info("[HardwareValidator] Accepted {} discovered object(s) as expected", added);
-            if (!config->save()) {
-                spdlog::warn("[HardwareValidator] Failed to save accepted hardware");
-            }
-        }
-        return added;
-
-    } catch (const std::exception& e) {
-        spdlog::warn("[HardwareValidator] Failed to accept discovered hardware: {}", e.what());
-        return 0;
+    json& expected_list = config->get_json(config->df() + "hardware/expected");
+    if (expected_list.is_null() || !expected_list.is_array()) {
+        expected_list = json::array();
     }
+
+    size_t added = 0;
+    for (const auto& name : names) {
+        if (name.empty()) {
+            continue;
+        }
+        if (std::find(expected_list.begin(), expected_list.end(), name) != expected_list.end()) {
+            continue;
+        }
+        expected_list.push_back(name);
+        ++added;
+    }
+
+    if (added > 0) {
+        spdlog::info("[HardwareValidator] Accepted {} discovered object(s) as expected", added);
+        if (!config->save()) {
+            spdlog::warn("[HardwareValidator] Failed to save accepted hardware");
+        }
+    }
+    return added;
 }
 
 // =============================================================================
@@ -473,9 +498,9 @@ void HardwareValidator::validate_critical_hardware(const helix::PrinterDiscovery
         }
     }
     if (!has_extruder) {
-        result.critical_missing.push_back(
-            HardwareIssue::critical("extruder", HardwareType::HEATER,
-                                    "No extruder heater found. Check [extruder] in printer.cfg"));
+        result.critical_missing.push_back(HardwareIssue::critical(
+            "extruder", HardwareType::HEATER,
+            TR_NOOP("No extruder heater found. Check [extruder] in printer.cfg")));
     }
 
     // Check for heater_bed (note: not all printers have heated beds)
@@ -501,79 +526,62 @@ void HardwareValidator::validate_configured_hardware(Config* config,
     // Bypasses is_hardware_optional for role targets: a configured role pointing at
     // an optional object is a stale role, not a silent drop.
     for (const auto& desc : helix::hardware_role_registry()) {
-        try {
-            const std::vector<std::string>* discovered = nullptr;
-            if (desc.category == helix::HardwareCategory::Fan)
-                discovered = &hardware.fans();
-            else if (desc.category == helix::HardwareCategory::Heater)
-                discovered = &hardware.heaters();
-            if (!discovered)
-                continue;
+        const std::vector<std::string>* discovered = nullptr;
+        if (desc.category == helix::HardwareCategory::Fan)
+            discovered = &hardware.fans();
+        else if (desc.category == helix::HardwareCategory::Heater)
+            discovered = &hardware.heaters();
+        if (!discovered)
+            continue;
 
-            const std::string key = config->df() + desc.config_key;
-            // Read with an EMPTY default (NOT the canonical default): an absent key
-            // means this role is not configured for THIS printer (a bed-less printer
-            // has no heaters/bed key). Absent is legitimate, not a problem to flag.
-            std::string saved = config->get<std::string>(key, "");
-            if (saved.empty())
-                continue; // unconfigured role
+        const std::string key = config->df() + desc.config_key;
+        // Read with an EMPTY default (NOT the canonical default): an absent key
+        // means this role is not configured for THIS printer (a bed-less printer
+        // has no heaters/bed key). Absent is legitimate, not a problem to flag.
+        std::string saved = config->get<std::string>(key, "");
+        if (saved.empty())
+            continue; // unconfigured role
 
-            auto res = helix::resolve_role(desc, saved, *discovered);
-            // Confident heals are resolved+persisted upstream (FanRoleConfig::from_config and the
-            // heater heal block in the discovery sequence) BEFORE validate() runs, so an AutoHealed
-            // role is already Resolved here. We surface ONLY Unresolved NON-GUIDED roles as a
-            // warning. Guided roles (every current registry role) are routed to the targeted
-            // reconfig wizard via helix::unresolved_guided_steps()/the collector — toasting them
-            // here too would double-notify (spec §3.4: guided → reconfig only; non-guided →
-            // warning). After this change the validator surfaces none of the current registry
-            // roles by design; the collector + wizard are the authority. Do not re-add an
-            // AutoHealed branch here without moving the upstream pre-heal, or you reintroduce an
-            // every-boot toast.
-            if (res.status == helix::RoleResolutionStatus::Unresolved && !desc.guided) {
-                result.expected_missing.push_back(HardwareIssue::warning(
-                    saved, hardware_type_for(desc.category),
-                    "Configured hardware no longer present", /*optional=*/false));
-            }
-        } catch (...) {
-        }
-    }
-
-    // Check configured fan (aux) — not in the registry; kept as a bespoke check.
-    // Some presets (e.g. AD5M Pro ForgeX) map a fifth fan role; without this check a
-    // missing aux fan would silently disappear rather than surface as a hardware issue.
-    try {
-        std::string aux_fan = config->get<std::string>(config->df() + "fans/aux", "");
-        if (!aux_fan.empty() && !contains_name(fans, aux_fan) &&
-            !is_hardware_optional(config, aux_fan)) {
+        auto res = helix::resolve_role(desc, saved, *discovered);
+        // Confident heals are resolved+persisted upstream (FanRoleConfig::from_config and the
+        // heater heal block in the discovery sequence) BEFORE validate() runs, so an AutoHealed
+        // role is already Resolved here. We surface ONLY Unresolved NON-GUIDED roles as a
+        // warning. Guided roles (every current registry role) are routed to the targeted
+        // reconfig wizard via helix::unresolved_guided_steps()/the collector — toasting them
+        // here too would double-notify (spec §3.4: guided → reconfig only; non-guided →
+        // warning). After this change the validator surfaces none of the current registry
+        // roles by design; the collector + wizard are the authority. Do not re-add an
+        // AutoHealed branch here without moving the upstream pre-heal, or you reintroduce an
+        // every-boot toast.
+        if (res.status == helix::RoleResolutionStatus::Unresolved && !desc.guided) {
             result.expected_missing.push_back(
-                HardwareIssue::warning(aux_fan, HardwareType::FAN, "Configured aux fan not found"));
+                HardwareIssue::warning(saved, hardware_type_for(desc.category),
+                                       TR_NOOP("Configured hardware no longer present"),
+                                       /*optional=*/false));
         }
-    } catch (...) {
     }
 
-    // Check configured LEDs (array format: LED_SELECTED, legacy single: LED_STRIP)
-    {
-        // Try new array format first
-        std::vector<std::string> configured_leds =
-            config->get_string_array(config->df() + helix::wizard::LED_SELECTED);
-        configured_leds.erase(std::remove_if(configured_leds.begin(), configured_leds.end(),
-                                             [](const std::string& n) { return n.empty(); }),
-                              configured_leds.end());
+    // Check configured fan (aux). AuxFan is a GUIDED registry role, so the loop above
+    // routes a stale key to the reconfig wizard instead of warning here; this check is
+    // what keeps a missing aux fan visible as a hardware issue. Some presets (e.g.
+    // AD5M Pro ForgeX) map a fifth fan role; without it the fan would silently
+    // disappear.
+    std::string aux_fan = config->get<std::string>(config->df() + "fans/aux", "");
+    if (!aux_fan.empty() && !contains_name(fans, aux_fan) &&
+        !is_hardware_optional(config, aux_fan)) {
+        result.expected_missing.push_back(HardwareIssue::warning(
+            aux_fan, HardwareType::FAN, TR_NOOP("Configured aux fan not found")));
+    }
 
-        // Fall back to legacy single string
-        if (configured_leds.empty()) {
-            const json* led_strip = config->try_get_json(config->df() + helix::wizard::LED_STRIP);
-            if (led_strip != nullptr && led_strip->is_string() &&
-                !led_strip->get<std::string>().empty()) {
-                configured_leds.push_back(led_strip->get<std::string>());
-            }
+    // Check configured LEDs. Synthetic strips are skipped: discovery cannot see them,
+    // so their absence from it is not evidence of anything.
+    for (const auto& led_name : configured_led_strips(config)) {
+        if (!led_strip_is_klipper_object(led_name)) {
+            continue;
         }
-
-        for (const auto& led_name : configured_leds) {
-            if (!contains_name(leds, led_name) && !is_hardware_optional(config, led_name)) {
-                result.expected_missing.push_back(HardwareIssue::warning(
-                    led_name, HardwareType::LED, "Configured LED strip not found"));
-            }
+        if (!contains_name(leds, led_name) && !is_hardware_optional(config, led_name)) {
+            result.expected_missing.push_back(HardwareIssue::warning(
+                led_name, HardwareType::LED, TR_NOOP("Configured LED strip not found")));
         }
     }
 
@@ -594,7 +602,7 @@ void HardwareValidator::validate_configured_hardware(Config* config,
                     !is_hardware_optional(config, sensor_name)) {
                     result.expected_missing.push_back(
                         HardwareIssue::warning(sensor_name, HardwareType::FILAMENT_SENSOR,
-                                               "Configured filament sensor not found"));
+                                               TR_NOOP("Configured filament sensor not found")));
                 }
             }
         }
@@ -627,7 +635,7 @@ void HardwareValidator::validate_configured_hardware(Config* config,
 
                     if (!found && !is_hardware_optional(config, hw_name)) {
                         result.expected_missing.push_back(HardwareIssue::warning(
-                            hw_name, HardwareType::OTHER, "AMS/MMU system not detected"));
+                            hw_name, HardwareType::OTHER, TR_NOOP("AMS/MMU system not detected")));
                         spdlog::debug("[HardwareValidator] Expected AMS hardware '{}' not found",
                                       hw_name);
                     }
@@ -651,18 +659,7 @@ void HardwareValidator::validate_new_hardware(Config* config,
 
     // Check for LEDs not in config
     // Only suggest if user hasn't configured any LED yet
-    bool has_configured_led = false;
-    if (config) {
-        // Try new array format first
-        has_configured_led =
-            !config->get_string_array(config->df() + helix::wizard::LED_SELECTED).empty();
-        // Fall back to legacy single string
-        if (!has_configured_led) {
-            const json* led_strip = config->try_get_json(config->df() + helix::wizard::LED_STRIP);
-            has_configured_led = led_strip != nullptr && led_strip->is_string() &&
-                                 !led_strip->get<std::string>().empty();
-        }
-    }
+    const bool has_configured_led = !configured_led_strips(config).empty();
 
     if (!has_configured_led && !leds.empty()) {
         // User has no LED configured but printer has some
@@ -670,7 +667,7 @@ void HardwareValidator::validate_new_hardware(Config* config,
         std::string suggested;
         for (const auto& led : leds) {
             std::string lower = led;
-            std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+            lower = helix::text_io::to_lower(lower);
             if (lower.find("chamber") != std::string::npos ||
                 lower.find("case") != std::string::npos ||
                 lower.find("light") != std::string::npos) {
@@ -683,9 +680,9 @@ void HardwareValidator::validate_new_hardware(Config* config,
         }
 
         if (!suggested.empty() && !contains_name(expected_hardware, suggested)) {
-            result.newly_discovered.push_back(
-                HardwareIssue::info(suggested, HardwareType::LED,
-                                    "LED strip available. Add to config for lighting control?"));
+            result.newly_discovered.push_back(HardwareIssue::info(
+                suggested, HardwareType::LED,
+                TR_NOOP("LED strip available. Add to config for lighting control?")));
         }
     }
 
@@ -697,13 +694,9 @@ void HardwareValidator::validate_new_hardware(Config* config,
     if (config) {
         // Collect all fans assigned to roles
         auto add_fan = [&](const std::string& key, const std::string& default_val) {
-            try {
-                std::string name =
-                    config->get<std::string>(config->df() + "fans/" + key, default_val);
-                if (!name.empty()) {
-                    configured_fans.push_back(name);
-                }
-            } catch (...) {
+            std::string name = config->get<std::string>(config->df() + "fans/" + key, default_val);
+            if (!name.empty()) {
+                configured_fans.push_back(name);
             }
         };
         add_fan("part", "fan");
@@ -716,7 +709,7 @@ void HardwareValidator::validate_new_hardware(Config* config,
     for (const auto& fan : discovered_fans) {
         if (!contains_name(configured_fans, fan) && !contains_name(expected_hardware, fan)) {
             result.newly_discovered.push_back(HardwareIssue::info(
-                fan, HardwareType::FAN, "Fan available but not assigned to any role"));
+                fan, HardwareType::FAN, TR_NOOP("Fan available but not assigned to any role")));
         }
     }
 
@@ -753,7 +746,7 @@ void HardwareValidator::validate_new_hardware(Config* config,
         if (!contains_name(configured_names, sensor) && !contains_name(expected_hardware, sensor)) {
             result.newly_discovered.push_back(HardwareIssue::info(
                 sensor, HardwareType::FILAMENT_SENSOR,
-                "Filament sensor available. Add to config for runout detection?"));
+                TR_NOOP("Filament sensor available. Add to config for runout detection?")));
         }
     }
 }
@@ -779,8 +772,8 @@ void HardwareValidator::validate_session_changes(const HardwareSnapshot& previou
             if (!is_optional) {
                 HardwareType type = guess_hardware_type(name);
                 result.changed_from_last_session.push_back(HardwareIssue::warning(
-                    name, type, "Hardware was present in previous session but is now missing",
-                    false));
+                    name, type,
+                    TR_NOOP("Hardware was present in previous session but is now missing"), false));
             }
         }
     }
@@ -797,11 +790,11 @@ bool HardwareValidator::contains_name(const std::vector<std::string>& vec,
                                       const std::string& name) {
     // Case-insensitive comparison
     std::string lower_name = name;
-    std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), ::tolower);
+    lower_name = helix::text_io::to_lower(lower_name);
 
     for (const auto& item : vec) {
         std::string lower_item = item;
-        std::transform(lower_item.begin(), lower_item.end(), lower_item.begin(), ::tolower);
+        lower_item = helix::text_io::to_lower(lower_item);
         if (lower_item == lower_name) {
             return true;
         }
@@ -811,7 +804,7 @@ bool HardwareValidator::contains_name(const std::vector<std::string>& vec,
 
 HardwareType HardwareValidator::guess_hardware_type(const std::string& name) {
     std::string lower = name;
-    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    lower = helix::text_io::to_lower(lower);
 
     if (lower.find("extruder") != std::string::npos ||
         lower.find("heater_bed") != std::string::npos ||
@@ -851,13 +844,13 @@ void HardwareValidator::log_ignored_hardware(Config* config) {
         return;
     }
 
-    std::stringstream joined;
+    std::string joined;
     for (size_t i = 0; i < names.size(); ++i) {
         if (i > 0) {
-            joined << ", ";
+            joined += ", ";
         }
-        joined << names[i];
+        joined += names[i];
     }
     spdlog::info("[HardwareValidator] {} hardware item(s) silenced (ignored): {}", names.size(),
-                 joined.str());
+                 joined);
 }

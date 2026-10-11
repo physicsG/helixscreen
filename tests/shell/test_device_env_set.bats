@@ -21,15 +21,37 @@ setup() {
     [ "$output" -eq 1 ]
 }
 
+@test "a newly created env file lands at 0644 regardless of the shell's umask" {
+    # The launcher refuses to evaluate a group-writable env file, so the deploy
+    # path must not let a permissive umask decide the mode of a file it creates.
+    run sh -c 'umask 0002; exec sh "$1" "$2" "$3" "$4"' \
+        sh "$ENVSET" "$WORK/umask.env" HELIX_REMOTE_CONTROL 1
+    [ "$status" -eq 0 ]
+    [ -f "$WORK/umask.env" ]
+    [ "$(stat -c '%a' "$WORK/umask.env")" = "644" ]
+}
+
 @test "is a no-op when the key already holds that value" {
     printf 'HELIX_REMOTE_CONTROL=1\n' > "$WORK/a.env"
     run sh "$ENVSET" "$WORK/a.env" HELIX_REMOTE_CONTROL 1
     [ "$status" -eq 0 ]
-    [[ "$output" == *"already set"* ]]
+    contains "already set" "$output"
     # No backup: nothing was modified, so there is no pristine copy to preserve.
     [ ! -f "$WORK/a.env.helix-bak" ]
     run grep -c '^HELIX_REMOTE_CONTROL=' "$WORK/a.env"
     [ "$output" -eq 1 ]
+}
+
+@test "an already-set key still pins a group-writable env file to 0644" {
+    # The pin runs before the idempotence exit, so a deploy heals a mode an
+    # update or unpack landed even when the key itself needs no change; the
+    # launcher refuses the whole file over that bit.
+    printf 'HELIX_REMOTE_CONTROL=1\n' > "$WORK/pin.env"
+    chmod 664 "$WORK/pin.env"
+    run sh "$ENVSET" "$WORK/pin.env" HELIX_REMOTE_CONTROL 1
+    [ "$status" -eq 0 ]
+    contains "already set" "$output"
+    [ "$(stat -c '%a' "$WORK/pin.env")" = "644" ]
 }
 
 @test "flips a commented-out key in place rather than appending a duplicate" {

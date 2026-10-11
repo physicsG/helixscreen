@@ -18,6 +18,21 @@ const VALID_CHANNELS = new Set(["stable", "beta", "dev"]);
 /** Pattern for allowed tarball filenames. */
 const TARBALL_PATTERN = /^helixscreen-[a-zA-Z0-9._-]+\.tar\.gz$/;
 
+/**
+ * Retired board keys whose tarballs became the unified MIPS package. A
+ * deployed binary keeps requesting helixscreen-{k1,ad5x}-v*.tar.gz until the
+ * fleet turns over, so those URLs rewrite to the single mips object instead
+ * of R2 carrying byte-identical copies under three keys. The version's 'v'
+ * anchors the split: helixscreen-k1-dynamic-* is a genuinely different
+ * artifact and must NOT be rewritten.
+ */
+function rewriteRetiredMipsAlias(filename: string): string {
+  const match = /^helixscreen-(k1|ad5x)-(v[0-9][a-zA-Z0-9.+-]*\.tar\.gz)$/.exec(
+    filename,
+  );
+  return match ? `helixscreen-mips-${match[2]}` : filename;
+}
+
 /** Worker environment bindings. */
 interface Env {
   RELEASES_BUCKET: R2Bucket;
@@ -136,7 +151,7 @@ function resolvePath(path: string): ResolvedPath | null {
     // {channel}/helixscreen-*.tar.gz
     if (TARBALL_PATTERN.test(filename)) {
       return {
-        r2Key: trimmed,
+        r2Key: `${channel}/${rewriteRetiredMipsAlias(filename)}`,
         contentType: "application/gzip",
         cacheControl: "public, max-age=86400, immutable",
       };
@@ -158,7 +173,7 @@ function resolvePath(path: string): ResolvedPath | null {
 
     if (TARBALL_PATTERN.test(filename)) {
       return {
-        r2Key: trimmed,
+        r2Key: `releases/${version}/${rewriteRetiredMipsAlias(filename)}`,
         contentType: "application/gzip",
         cacheControl: "public, max-age=86400, immutable",
       };

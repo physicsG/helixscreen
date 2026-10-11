@@ -116,6 +116,15 @@ class FilamentConsumptionTracker {
     /// Snapshot every registered sink. Called on PRINTING transition.
     void snapshot_all_sinks(float filament_used_mm);
 
+    /// Log, once per print start, every backend slot mapped to an extruder
+    /// index Klipper does not report; such a slot receives no deltas. Returns
+    /// the number of mappings reported. Quiet before extruder discovery.
+    int warn_unreported_extruder_mappings();
+
+    /// Mappings warn_unreported_extruder_mappings() reported at the last
+    /// print start; read by tests, since the warning itself is only a log line.
+    int unreported_mappings_at_start_ = 0;
+
     /// Flush every registered sink. Called on COMPLETE / CANCELLED / ERROR / PAUSED.
     void flush_all_sinks();
 

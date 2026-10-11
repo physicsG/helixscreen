@@ -65,9 +65,8 @@ class ExpectedRestartFixture : public LVGLTestFixture {
     ExpectedRestartFixture() {
         state.init_subjects(false);
         set_moonraker_api(&api);
-        helix::ui::set_test_toast_hook([this](ToastSeverity severity, const std::string& m) {
-            toasts.push_back({severity, m});
-        });
+        helix::ui::set_test_toast_hook([this](ToastSeverity severity, const std::string& m,
+                                              uint32_t) { toasts.push_back({severity, m}); });
         auto note = [this](const std::string& m) { notifications.push_back(m); };
         helix::ui::set_test_notification_info_hook(note);
         helix::ui::set_test_notification_warning_hook(note);
@@ -129,6 +128,28 @@ TEST_CASE_METHOD(ExpectedRestartFixture,
     CHECK(toasts[0].severity == ToastSeverity::INFO);
     CHECK(toasts[0].message == "Saving config... Klipper will restart.");
     CHECK(notifications.empty()); // direct toast - no history row
+}
+
+TEST_CASE_METHOD(ExpectedRestartFixture, "the recovery window outlasts a real config-write restart",
+                 "[recovery][expectedrestart]") {
+    // A K2 Plus takes ~17s from SAVE_CONFIG to klippy READY. A window that
+    // expires first puts a "Printer Shutdown" dialog on screen in the middle of
+    // a Save that succeeded, then dismisses it a couple of seconds later when
+    // klippy reports ready.
+    //
+    // lv_tick_inc() rather than process_lvgl(): is_recovery_suppressed() only
+    // reads the tick, so no timer needs to come due and 17s of virtual time
+    // costs nothing here.
+    helix::ui::begin_expected_klippy_restart("Saving config... Klipper will restart.");
+    settle();
+    REQUIRE(EmergencyStopOverlay::instance().is_recovery_suppressed());
+
+    lv_tick_inc(17000);
+    CHECK(EmergencyStopOverlay::instance().is_recovery_suppressed());
+
+    // ...and still lets go, so a host that goes down and stays down is reported.
+    lv_tick_inc(4000);
+    CHECK_FALSE(EmergencyStopOverlay::instance().is_recovery_suppressed());
 }
 
 TEST_CASE_METHOD(ExpectedRestartFixture, "z-offset apply-and-save initiates the restart contract",
@@ -194,6 +215,7 @@ TEST_CASE_METHOD(ExpectedRestartFixture,
 TEST_CASE_METHOD(ExpectedRestartFixture, "bed-mesh SAVE_CONFIG initiates the restart contract",
                  "[expectedrestart][bedmesh][1359]") {
     BedMeshPanel panel;
+    panel.init_subjects();
     helix::ui::BedMeshPanelTestAccess::save_config(panel);
     settle();
 
@@ -284,6 +306,7 @@ TEST_CASE_METHOD(ExpectedRestartFixture, "input-shaper SAVE_CONFIG initiates the
 TEST_CASE_METHOD(ExpectedRestartFixture, "PID SAVE_CONFIG initiates the restart contract",
                  "[expectedrestart][1359]") {
     PIDCalibrationPanel panel;
+    panel.init_subjects();
     panel.set_api(&api);
     helix::ui::PIDCalibrationPanelTestAccess::send_save_config(panel);
     settle();

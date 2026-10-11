@@ -68,13 +68,13 @@ class PrintActiveTestFixture {
 
     // Get current print_active value
     int get_print_active() {
-        return lv_subject_get_int(state_.get_print_active_subject());
+        return lv_subject_get_int(state_.print_state().get_print_active_subject());
     }
 
     // Get current print_state_enum value
     PrintJobState get_print_state_enum() {
         return static_cast<PrintJobState>(
-            lv_subject_get_int(state_.get_print_state_enum_subject()));
+            lv_subject_get_int(state_.print_state().get_print_state_enum_subject()));
     }
 
   private:

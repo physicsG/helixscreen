@@ -21,13 +21,18 @@
  * latch. The watchdog bounds the wait.
  */
 
+// Subject TU is Linux-only (wifi_backend_wpa_supplicant.h guards __APPLE__ too).
+#if !defined(__APPLE__)
+
 #include "../test_helpers/wpa_fake_supplicant.h"
+#include "netd_test_server.h" // helix_test::EnvVarGuard
 #include "wifi_backend_wpa_supplicant.h"
 
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <filesystem>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -171,3 +176,46 @@ TEST_CASE("wpa stop with a scan outstanding stays silent and reusable", "[networ
     fx.fake->push_event("<3>CTRL-EVENT-SCAN-RESULTS \n");
     REQUIRE(events.wait_for(1));
 }
+
+// A hidden AP broadcasts no SSID, so it never matches the supplicant's
+// beacon-based scan selection: the join only completes when the backend asks
+// for a directed probe via scan_ssid=1. The visible join must not ask, or
+// every ordinary connect pays a full-channel probe sweep.
+TEST_CASE("wpa hidden join sends scan_ssid 1; a visible join omits it", "[network][wpa][hidden]") {
+    WpaFakeFixture fx;
+
+    // Arm before start(): the backend reconciles HelixScreen's own network
+    // store at start, and the connect path saves credentials there when
+    // SAVE_CONFIG cannot be verified against the fake. Pointing it at a
+    // throwaway dir keeps both off the developer's real config dir.
+    const std::string cfg_dir = fx.dir + "/cfg";
+    std::filesystem::create_directories(cfg_dir);
+    helix_test::EnvVarGuard config_dir("HELIX_CONFIG_DIR");
+    config_dir.set(cfg_dir);
+
+    WifiBackendWpaSupplicant backend(kWatchdogMs);
+    REQUIRE(backend.start().success());
+    REQUIRE(backend.is_running());
+
+    REQUIRE(backend.connect_network("StealthNet", "pw12345", /*is_hidden=*/true).success());
+    const std::vector<std::string> hidden_cmds = fx.fake->commands();
+    REQUIRE(1 == std::count(hidden_cmds.begin(), hidden_cmds.end(), "SET_NETWORK 0 scan_ssid 1"));
+
+    // commands() accumulates across both joins, so the visible assertions
+    // look only at what arrived after the hidden join's slice.
+    const size_t after_hidden = fx.fake->commands().size();
+    REQUIRE(backend.connect_network("VisibleNet", "pw12345", /*is_hidden=*/false).success());
+    const std::vector<std::string> all_cmds = fx.fake->commands();
+    const std::vector<std::string> visible_cmds(all_cmds.begin() + static_cast<long>(after_hidden),
+                                                all_cmds.end());
+    CHECK(0 == std::count(visible_cmds.begin(), visible_cmds.end(), "SET_NETWORK 0 scan_ssid 1"));
+    // The visible join really ran end to end, so the zero above is not an
+    // empty slice.
+    REQUIRE(1 == std::count(visible_cmds.begin(), visible_cmds.end(),
+                            "SET_NETWORK 0 ssid \"VisibleNet\""));
+
+    std::error_code ec;
+    std::filesystem::remove_all(cfg_dir, ec);
+}
+
+#endif // !__APPLE__

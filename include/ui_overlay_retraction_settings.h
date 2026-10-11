@@ -5,6 +5,7 @@
 
 #include "lvgl.h"
 #include "overlay_base.h"
+#include "static_panel_registry.h"
 #include "subject_managed_panel.h"
 
 class IMoonrakerAPI;
@@ -31,71 +32,25 @@ class IMoonrakerAPI;
 class RetractionSettingsOverlay : public OverlayBase {
   public:
     /**
-     * @brief Construct RetractionSettingsOverlay
-     * @param api Pointer to IMoonrakerAPI for sending G-code
+     * @param api IMoonrakerAPI for sending G-code (may be nullptr until set_api())
      */
-    explicit RetractionSettingsOverlay(IMoonrakerAPI* api);
+    explicit RetractionSettingsOverlay(IMoonrakerAPI* api = nullptr);
     ~RetractionSettingsOverlay() override;
 
-    //
-    // === OverlayBase Implementation ===
-    //
-
-    /**
-     * @brief Initialize subjects for XML binding
-     */
     void init_subjects() override;
+    void register_callbacks() override;
 
-    /**
-     * @brief Create overlay UI from XML
-     *
-     * @param parent Parent widget to attach overlay to (usually screen)
-     * @return Root object of overlay, or nullptr on failure
-     */
+    /// Builds the overlay and caches the slider and switch widgets.
     lv_obj_t* create(lv_obj_t* parent) override;
 
-    /**
-     * @brief Get human-readable overlay name
-     * @return "Retraction Settings"
-     */
     [[nodiscard]] const char* get_name() const override {
         return "Retraction Settings";
     }
-
-    /**
-     * @brief Called when overlay becomes visible
-     */
-    void on_activate() override;
-
-    /**
-     * @brief Called when overlay is hidden
-     */
-    void on_deactivate() override;
-
-    /**
-     * @brief Clean up resources for async-safe destruction
-     */
-    void cleanup() override;
-
-    //
-    // === Legacy Compatibility ===
-    //
-
-    /**
-     * @brief Get XML component name for lv_xml_create()
-     * @return "retraction_settings_overlay"
-     */
-    [[nodiscard]] const char* get_xml_component_name() const {
+    const char* xml_component() const override {
         return "retraction_settings_overlay";
     }
 
-    /**
-     * @brief Get root panel object (alias for get_root())
-     * @return Panel object, or nullptr if not yet created
-     */
-    lv_obj_t* get_panel() const {
-        return overlay_root_;
-    }
+    void on_activate() override;
 
     /**
      * @brief Update IMoonrakerAPI pointer
@@ -136,13 +91,6 @@ class RetractionSettingsOverlay : public OverlayBase {
      */
     void sync_from_printer_state();
 
-    // Event handlers
-    static void on_enabled_changed(lv_event_t* e);
-    static void on_setting_changed(lv_event_t* e);
-
-    /// Tap on a setting_value_field. user_data carries the Field index as text.
-    static void on_field_clicked(lv_event_t* e);
-
     /// ui_keypad_callback_t; user_data is the owning overlay.
     static void on_keypad_value(float value, void* user_data);
 
@@ -173,10 +121,10 @@ class RetractionSettingsOverlay : public OverlayBase {
     SubjectManager subjects_;
 
     // Display label subjects
-    lv_subject_t retract_length_display_;
-    lv_subject_t retract_speed_display_;
-    lv_subject_t unretract_extra_display_;
-    lv_subject_t unretract_speed_display_;
+    lv_subject_t retract_length_display_{};
+    lv_subject_t retract_speed_display_{};
+    lv_subject_t unretract_extra_display_{};
+    lv_subject_t unretract_speed_display_{};
 
     // Static buffers for subject strings
     char retract_length_buf_[16];
@@ -194,6 +142,11 @@ class RetractionSettingsOverlay : public OverlayBase {
     bool syncing_from_state_ = false;
 };
 
-// Global accessor
-RetractionSettingsOverlay& get_global_retraction_settings();
-void init_global_retraction_settings(IMoonrakerAPI* api);
+inline RetractionSettingsOverlay& get_global_retraction_settings() {
+    return helix::lazy_global<RetractionSettingsOverlay>("RetractionSettingsOverlay", nullptr);
+}
+
+/// Points the overlay at the API it sends G-code through.
+inline void init_global_retraction_settings(IMoonrakerAPI* api) {
+    get_global_retraction_settings().set_api(api);
+}

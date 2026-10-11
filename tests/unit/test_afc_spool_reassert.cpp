@@ -19,6 +19,9 @@
 #include "ams_backend_afc.h"
 #include "ams_types.h"
 #include "settings_manager.h"
+#include "test_helpers/afc_test_access.h"
+#include "test_helpers/registered_backend.h"
+#include "test_helpers/seeded_override.h"
 
 #include <algorithm>
 #include <string>
@@ -28,16 +31,22 @@
 
 using namespace helix;
 
+namespace helix {
+
 class AfcReassertHelper : public AmsBackendAfc {
   public:
     AfcReassertHelper() : AmsBackendAfc(nullptr, nullptr) {
         std::vector<std::string> names{"lane1", "lane2"};
-        initialize_slots(names);
+        AfcTestAccess::initialize_slots(*this, names);
     }
 
     void set_override(int slot_index, const helix::ams::FilamentSlotOverride& o) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        overrides_[slot_index] = o;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            AfcTestAccess::overrides(*this)[slot_index] = o;
+        }
+        // The backend's own init files both stores together.
+        helix::test::file_override_as_lane_records(*this, slot_index, o);
     }
 
     /// Drive the live status path, so assertions see what the UI would paint.
@@ -80,7 +89,7 @@ class AfcReassertHelper : public AmsBackendAfc {
 
     [[nodiscard]] bool has_override(int slot_index) const {
         std::lock_guard<std::mutex> lock(mutex_);
-        return overrides_.count(slot_index) > 0;
+        return AfcTestAccess::overrides(*this).count(slot_index) > 0;
     }
 
     /// Consult the pending own-write expectation under mutex_ (as
@@ -91,8 +100,16 @@ class AfcReassertHelper : public AmsBackendAfc {
         return own_write_expectation(slot_index, firmware_id);
     }
 
+    /// Overwrite the global_index copy on a lane's SlotInfo, so a test can tell
+    /// a store keyed by registry position from one keyed by that field.
+    void stamp_global_index(int slot_index, int global_index) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        AfcTestAccess::slots(*this).get_mut(slot_index)->info.global_index = global_index;
+    }
+
     std::vector<std::string> captured_gcodes;
 };
+} // namespace helix
 
 namespace {
 
@@ -111,7 +128,8 @@ TEST_CASE_METHOD(LVGLTestFixture, "AFC re-asserts retained binding on empty->loa
     SettingsManager::instance().init_subjects();
     SettingsManager::instance().set_ams_keep_spool_info_on_eject(true);
 
-    AfcReassertHelper afc;
+    helix::test::RegisteredBackend<AfcReassertHelper> afc_reg;
+    AfcReassertHelper& afc = *afc_reg;
     afc.set_override(0, spool_override(42));
 
     // Spool present and linked: firmware echoes our id. Even though a rising
@@ -153,7 +171,8 @@ TEST_CASE_METHOD(LVGLTestFixture, "AFC re-assert skipped when firmware reports a
     SettingsManager::instance().init_subjects();
     SettingsManager::instance().set_ams_keep_spool_info_on_eject(true);
 
-    AfcReassertHelper afc;
+    helix::test::RegisteredBackend<AfcReassertHelper> afc_reg;
+    AfcReassertHelper& afc = *afc_reg;
     afc.set_override(0, spool_override(42));
 
     afc.feed_stepper("lane1", nlohmann::json{{"status", "None"}, {"spool_id", nullptr}});
@@ -169,7 +188,8 @@ TEST_CASE_METHOD(LVGLTestFixture, "AFC re-assert never fires with retention off 
     settings.init_subjects();
     settings.set_ams_keep_spool_info_on_eject(false);
 
-    AfcReassertHelper afc;
+    helix::test::RegisteredBackend<AfcReassertHelper> afc_reg;
+    AfcReassertHelper& afc = *afc_reg;
     // Retention off holds by two overlapping locks: the merge's eject rule
     // (Rule 2) drops the in-memory record on the next frame after an eject
     // clear, and the re-assert gate independently refuses to push while the
@@ -196,7 +216,8 @@ TEST_CASE_METHOD(LVGLTestFixture,
     SettingsManager::instance().init_subjects();
     SettingsManager::instance().set_ams_keep_spool_info_on_eject(true);
 
-    AfcReassertHelper afc;
+    helix::test::RegisteredBackend<AfcReassertHelper> afc_reg;
+    AfcReassertHelper& afc = *afc_reg;
     afc.set_override(0, spool_override(42));
 
     // A spool bouncing in and out: two empty -> loaded transitions, at most
@@ -210,4 +231,43 @@ TEST_CASE_METHOD(LVGLTestFixture,
     afc.feed_stepper("lane1", nlohmann::json{{"status", "Loaded"}}); // transition 2
     afc.feed_stepper("lane1", nlohmann::json{{"status", "Loaded"}}); // level: no write
     CHECK(afc.gcode_count("SET_SPOOL_ID LANE=lane1 SPOOL_ID=42") == 2);
+}
+
+TEST_CASE_METHOD(LVGLTestFixture,
+                 "AFC re-assert keys the lane by registry position, not SlotInfo::global_index "
+                 "(#1644)",
+                 "[1644][ams][afc]") {
+    SettingsManager::instance().init_subjects();
+    SettingsManager::instance().set_ams_keep_spool_info_on_eject(true);
+
+    helix::test::RegisteredBackend<AfcReassertHelper> afc_reg;
+    AfcReassertHelper& afc = *afc_reg;
+    afc.set_override(1, spool_override(42));
+    // The registry stamps global_index equal to the lane's position, so the two
+    // keys only come apart when the field is forced; every store must follow
+    // the position regardless.
+    afc.stamp_global_index(1, 7);
+
+    afc.feed_stepper("lane2", nlohmann::json{{"status", "None"}, {"spool_id", nullptr}});
+    afc.feed_stepper("lane2", nlohmann::json{{"status", "Loaded"}});
+    CHECK(afc.gcode_count("SET_SPOOL_ID LANE=lane2 SPOOL_ID=42") == 1);
+    CHECK(afc.peek_expectation(1, 0) == std::make_pair(0, 42));
+
+    // A frame still naming the pre-push id (none) holds the binding and keeps
+    // the expectation pending.
+    afc.feed_stepper("lane2", nlohmann::json{{"status", "Loaded"}, {"spool_id", nullptr}});
+    CHECK(afc.has_override(1));
+    CHECK(afc.visible_spool_id(1) == 42);
+    CHECK(afc.peek_expectation(1, 0) == std::make_pair(0, 42));
+
+    // The echo lands under the same key the push was recorded under.
+    afc.feed_stepper("lane2", nlohmann::json{{"spool_id", 42}});
+    CHECK(afc.has_override(1));
+    CHECK(afc.visible_spool_id(1) == 42);
+    CHECK(afc.peek_expectation(1, 42) == std::make_pair(0, 0));
+
+    // Another writer re-binds the lane: the break clears the override filed
+    // under the same key.
+    afc.feed_stepper("lane2", nlohmann::json{{"spool_id", 99}});
+    CHECK_FALSE(afc.has_override(1));
 }

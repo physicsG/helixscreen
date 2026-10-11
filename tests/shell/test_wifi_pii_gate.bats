@@ -379,3 +379,63 @@ run_gate() {
 }'
     [ "$status" -eq 1 ]
 }
+
+# ------------------------------------------------------- --staged-only content
+#
+# --staged-only picks its file SET from `git diff --cached`, but must read
+# each file's STAGED content (the index blob), not the working tree. Stage a
+# violation and then revert the working file to something clean, and a gate
+# that reads the working tree reports nothing while the bad blob commits.
+
+GATE_ABS="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)/scripts/check_wifi_pii_logging.py"
+
+setup_tmp_repo() {
+    TMP_REPO="$(mktemp -d "${BATS_TEST_TMPDIR:-${BATS_TMPDIR:-/tmp}}/wifi-pii-XXXXXX")"
+    cd "$TMP_REPO" || return 1
+    git init -q
+    git config user.email "test@example.com"
+    git config user.name "Test"
+    mkdir -p src/network
+    printf 'void f() { spdlog::info("status: {}", 1); }\n' > src/network/foo.cpp
+    git add -A && git commit -qm base
+}
+
+@test "--staged-only catches a violation in the STAGED blob, not a reverted working file" {
+    setup_tmp_repo
+    printf 'void f() { spdlog::info("ssid: {}", wifi_ssid); }\n' > src/network/foo.cpp
+    git add src/network/foo.cpp
+    printf 'void f() { spdlog::info("status: {}", 1); }\n' > src/network/foo.cpp
+    run python3 "$GATE_ABS" --staged-only
+    [ "$status" -eq 1 ]
+    contains "SSID logged" "$output"
+}
+
+@test "--staged-only stays silent on a clean staged file with a dirty violation on disk" {
+    setup_tmp_repo
+    # Genuinely different from the base commit (a second clean log call), so
+    # the file shows up as staged at all - content byte-identical to HEAD
+    # stages nothing for git to report, which would pass this test for free.
+    printf 'void f() { spdlog::info("status: {}", 1); spdlog::info("status2: {}", 2); }\n' \
+        > src/network/foo.cpp
+    git add src/network/foo.cpp
+    printf 'void f() { spdlog::info("ssid: {}", wifi_ssid); }\n' > src/network/foo.cpp
+    run python3 "$GATE_ABS" --staged-only
+    [ "$status" -eq 0 ]
+}
+
+@test "--staged-only still catches a violation staged then deleted from disk" {
+    # `rm` without staging the deletion leaves the index (and so the commit)
+    # holding the violating content, with `git status` showing MD. A gate
+    # that drops staged paths on Path.is_file() sees no file at all and
+    # reports clean, even though `git show :path` proves the commit will
+    # carry exactly the content it should have flagged.
+    setup_tmp_repo
+    printf 'void f() { spdlog::info("ssid: {}", wifi_ssid); }\n' > src/network/foo.cpp
+    git add src/network/foo.cpp
+    rm src/network/foo.cpp
+    run git status --short
+    contains "MD src/network/foo.cpp" "$output"
+    run python3 "$GATE_ABS" --staged-only
+    [ "$status" -eq 1 ]
+    contains "SSID logged" "$output"
+}

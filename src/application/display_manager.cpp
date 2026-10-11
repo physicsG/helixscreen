@@ -26,22 +26,27 @@
 #include "config.h"
 #include "display/lv_display_private.h"
 #include "display_settings_manager.h"
+#include "flush_stride.h"
 #include "helix-xml/src/xml/lv_xml.h"
+#include "lvgl/src/misc/cache/instance/lv_image_cache.h"        // not in the lvgl.h umbrella
+#include "lvgl/src/misc/cache/instance/lv_image_header_cache.h" // not in the lvgl.h umbrella
+#include "lvgl/src/misc/lv_timer_private.h" // lv_timer_t::period; LVGL has no period getter
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "lvgl_log_handler.h"
 #include "printer_state.h"
+#include "refresh_period_hold.h"
+#include "refresh_timing_env.h"
 #include "remote_screen_fb0_sink.h"
+#include "rotation_probe.h"
 #include "runtime_config.h"
+#include "screen_hide_hold.h"
 #include "tap_latch.h"
+#include "touch_calibration_wrapper.h"
 #ifdef HELIX_ENABLE_SCREENSAVER
-#include "ui_nav_manager.h"
 
 #include "screensaver.h"
 #endif
 
-#include "ui_lock_screen.h"
-
-#include "lock_manager.h"
 #include "pending_startup_warnings.h"
 #include "system/telemetry_manager.h"
 
@@ -62,77 +67,6 @@
 #ifndef HELIX_DISPLAY_SDL
 #include <time.h>
 #endif
-
-#ifdef __ANDROID__
-#include "system/android_jni.h"
-
-#include <SDL_system.h>
-#include <jni.h>
-
-// ---------------------------------------------------------------------------
-// JNI bridge to HelixActivity's window flags (#1245)
-//
-// Mirrors android_set_navbar_always_visible() in display_settings_manager.cpp —
-// same guard shape, same ExceptionClear() on every failure path, and the same
-// shared helix_activity_class() for class resolution. It lives HERE rather than
-// being exported from display_settings_manager.h because DisplayManager is the
-// only caller: which mechanism cuts the panel is display-output policy, not a
-// persisted setting.
-// Putting an Android-only declaration in the settings header to reach it would
-// file the API under the wrong owner. There is exactly one copy of each helper.
-//
-// Note we do NOT use SDL_EnableScreenSaver()/SDL_DisableScreenSaver(), which
-// reach the same window flag via COMMAND_SET_KEEP_SCREEN_ON: they early-return
-// when SDL's cached suspend_screensaver already matches, so a re-assert after
-// Android recreates the window is silently dropped. HelixActivity keeps the
-// desired state in a static and re-applies it from onResume(), which is the
-// behaviour we actually need.
-// ---------------------------------------------------------------------------
-
-/// Ask HelixActivity to add/clear FLAG_KEEP_SCREEN_ON (applied on the UI thread).
-static void android_set_keep_screen_on(bool keep_on) {
-    JNIEnv* env = static_cast<JNIEnv*>(SDL_AndroidGetJNIEnv());
-    if (!env)
-        return;
-
-    // Cached global ref owned by helix_activity_class() — never released here.
-    jclass cls = helix::android::helix_activity_class(env);
-    if (!cls)
-        return;
-
-    jmethodID method = env->GetStaticMethodID(cls, "setKeepScreenOn", "(Z)V");
-    if (!method) {
-        env->ExceptionClear();
-        return;
-    }
-
-    env->CallStaticVoidMethod(cls, method, static_cast<jboolean>(keep_on));
-}
-
-/// Read HelixActivity's onResume counter. Returns 0 when the bridge is
-/// unavailable; both the sleep-entry capture and the idle poll go through this
-/// same function, so a bridge that is uniformly broken reads 0 == 0 and simply
-/// never self-wakes. A bridge that breaks *between* the two reads costs one
-/// spurious wake, which is the harmless direction (the panel is already lit).
-static int android_get_resume_seq() {
-    JNIEnv* env = static_cast<JNIEnv*>(SDL_AndroidGetJNIEnv());
-    if (!env)
-        return 0;
-
-    jclass cls = helix::android::helix_activity_class(env);
-    if (!cls)
-        return 0;
-
-    jmethodID method = env->GetStaticMethodID(cls, "getResumeSeq", "()I");
-    if (!method) {
-        env->ExceptionClear();
-        return 0;
-    }
-
-    jint seq = env->CallStaticIntMethod(cls, method);
-    return static_cast<int>(seq);
-}
-#endif // __ANDROID__
 
 using namespace helix;
 
@@ -167,11 +101,52 @@ static int sdl_event_filter(void* /*userdata*/, SDL_Event* event) {
 }
 #endif
 
-DisplayManager::DisplayManager() = default;
+DisplayManager::DisplayManager()
+    : m_sleep(DisplaySleepHost{m_backend, m_backlight, m_display, m_shutting_down,
+                               [this] { disable_input_briefly(); },
+                               [this](lv_display_flush_cb_t cb) { restore_flush_cb(cb); }}) {}
 
 DisplayManager::~DisplayManager() {
     shutdown();
 }
+
+namespace {
+
+/// Reads a non-negative integer env var, or `fallback` when unset or malformed.
+long env_count(const char* name, long fallback) {
+    const char* v = std::getenv(name);
+    if (!v || !v[0]) {
+        return fallback;
+    }
+    char* end = nullptr;
+    const long parsed = std::strtol(v, &end, 10);
+    if (end == v || *end != '\0' || parsed < 0) {
+        spdlog::warn("[DisplayManager] {}='{}' is not a non-negative integer, ignoring", name, v);
+        return fallback;
+    }
+    return parsed;
+}
+
+/// Sizes LVGL's decoded-image cache from the environment. 0, the default, leaves it off.
+///
+/// Any size is safe. An image whose decoded size exceeds the whole cache cannot be
+/// stored - LVGL reports that before it evicts anything - and
+/// `patches/lvgl-image-cache-oversize-uncached.patch` makes the decoder draw those
+/// uncached instead of discarding the decode. Sizing below the working set therefore
+/// buys less, it does not blank anything.
+///
+/// Decoded size is the source asset's w*h*4: lodepng always produces ARGB8888, so a
+/// 16bpp panel does not shrink it. Shipped printer PNGs reach 18 MB decoded, well beyond
+/// any cache worth giving an embedded board.
+void apply_image_cache_env() {
+    const long cache_kb = env_count("HELIX_IMAGE_CACHE_KB", 0);
+    if (cache_kb > 0) {
+        lv_image_cache_resize(static_cast<uint32_t>(cache_kb) * 1024u, false);
+        spdlog::info("[DisplayManager] Image cache: {} KB", cache_kb);
+    }
+}
+
+} // namespace
 
 bool DisplayManager::init(const Config& config) {
     if (m_initialized) {
@@ -181,6 +156,11 @@ bool DisplayManager::init(const Config& config) {
 
     // Initialize LVGL library
     lv_init();
+
+    // lv_init() builds both cache objects even when lv_conf.h sizes them at 0,
+    // so they can be sized here rather than at compile time. Both default to 0,
+    // which is the behaviour every board ships with today.
+    apply_image_cache_env();
 
     // Register LVGL log handler immediately after lv_init() so that DRM/fbdev
     // driver errors are captured via spdlog (lv_init resets callbacks, so this
@@ -343,9 +323,9 @@ bool DisplayManager::init(const Config& config) {
             rotation_degrees = helix::Config::get_instance()->get<int>("/display/rotate", 0);
         }
 
-        // Kernel auto-detection and interactive probing are handled by
-        // Application::run_rotation_probe_and_layout(), which checks both
-        // rotation_probed and has_rotate_key before overwriting config.
+        // A first-boot kernel panel_orientation arrives as config.rotation
+        // (Application::init_display()). The interactive probe runs later, from
+        // Application::run_rotation_probe_and_layout().
 
         // Apply rotation from config, env, or CLI
         if (rotation_degrees != 0) {
@@ -365,7 +345,7 @@ bool DisplayManager::init(const Config& config) {
             // If DRM backend can't do hardware rotation, fall back to fbdev
             // which handles software rotation flicker-free via LVGL's native path.
             if (!try_drm_to_fbdev_fallback(lv_rot, config.splash_active)) {
-                // Fallback failed (EGL/DSI display without fbdev).
+                // Fallback failed (a DSI display on a non-EGL build, with no fbdev).
                 // Continue without rotation rather than aborting — a
                 // working unrotated display is better than no display.
                 // lv_display_set_rotation() is deliberately NOT called, which
@@ -374,28 +354,22 @@ bool DisplayManager::init(const Config& config) {
                 // gate believing the key would throw away a perfectly good
                 // stored touch range on every boot of such a unit.
                 spdlog::warn("[DisplayManager] Continuing without rotation. "
-                             "For DSI/EGL displays, use panel_orientation in "
+                             "On a non-EGL build, use panel_orientation in "
                              "/boot/firmware/cmdline.txt instead.");
                 rotation_degrees = 0;
             } else {
-                lv_display_set_rotation(m_display, lv_rot);
-
-                // Update tracked dimensions to match rotated resolution
-                m_width = lv_display_get_horizontal_resolution(m_display);
-                m_height = lv_display_get_vertical_resolution(m_display);
-
-                // Auto-rotate touch coordinates to match display rotation
-                m_backend->set_display_rotation(lv_rot, phys_w, phys_h);
+                // After the fallback, which may have swapped m_backend.
+                settle_display_rotation(lv_rot, phys_w, phys_h);
             }
 
             spdlog::info("[DisplayManager] Display rotated {}° — effective resolution: {}x{}",
-                         rotation_degrees, m_width, m_height);
+                         rotation_degrees, width(), height());
 #endif
         }
     }
 
     // Initialize UI update queue for thread-safe async updates
-    // Must be done AFTER display is created - registers LV_EVENT_REFR_START handler
+    // Creates the queue's drain timer, which needs lv_init() but not a display
     helix::ui::update_queue_init();
 
 #ifdef HELIX_DISPLAY_SDL
@@ -448,29 +422,19 @@ bool DisplayManager::init(const Config& config) {
     }
 
     // Configure scroll behavior and sleep-aware wrapper
-    if (m_pointer) {
-        configure_scroll(config.scroll_throw, config.scroll_limit);
-        // Long-press threshold — user-configurable global setting (#1245), default
-        // AppConstants::Input::LONG_PRESS_MS. Applied here and on backend swap;
-        // InputSettingsManager::set_long_press_time live-applies changes.
-        const int long_press_ms = helix::Config::get_instance()->get<int>(
-            "/input/long_press_time", static_cast<int>(AppConstants::Input::LONG_PRESS_MS));
-        lv_indev_set_long_press_time(m_pointer, long_press_ms);
-#ifndef HELIX_DISPLAY_SDL
-        // Only install on embedded - SDL's event handler identifies the mouse device
-        // by checking if read_cb == sdl_mouse_read, which our wrapper breaks.
-        // Callback chain: sleep_aware_read_cb -> calibrated_read_cb -> evdev_read_cb
-        // (calibrated_read installed by backend, sleep wrapper installed here)
-        install_sleep_aware_input_wrapper();
-#endif
-    }
+    m_refresh_timing = helix::refresh_timing_from_env();
+    finish_input_setup(config.scroll_throw, config.scroll_limit);
+    spdlog::info("[DisplayManager] Refresh pacing: period {} ms (0 = LVGL default, scope {}), "
+                 "screensaver {} ms (0 = global period), loop floor {} ms, {} ms while a "
+                 "screensaver runs",
+                 m_refresh_timing.refr_period_ms, m_refresh_timing.scope_all ? "all" : "display",
+                 m_refresh_timing.screensaver_refr_period_ms, m_refresh_timing.loop_min_sleep_ms,
+                 m_refresh_timing.screensaver_loop_min_sleep_ms);
 
-    // Create keyboard input device (optional)
-    m_keyboard = m_backend->create_input_keyboard();
-    if (m_keyboard) {
-        setup_keyboard_group();
-        spdlog::trace("[DisplayManager] Physical keyboard input enabled");
-    }
+#ifdef HELIX_ENABLE_SCREENSAVER
+    // The gate halves the screensaver budget during prints and keys stored levels by display path.
+    ScreensaverManager::instance().set_host(screensaver_host(m_backend.get()));
+#endif
 
     // Create backlight backend (auto-detects hardware)
     m_backlight = BacklightBackend::create();
@@ -479,41 +443,49 @@ bool DisplayManager::init(const Config& config) {
 
     // Resolve hardware vs software blank strategy.
     // Config override: /display/hardware_blank (0 or 1). Missing (-1) = auto-detect.
+    bool use_hardware_blank = false;
     {
         int hw_blank_override =
             helix::Config::get_instance()->get<int>("/display/hardware_blank", -1);
         if (hw_blank_override >= 0) {
-            m_use_hardware_blank = (hw_blank_override != 0);
+            use_hardware_blank = (hw_blank_override != 0);
             spdlog::info("[DisplayManager] Hardware blank: {} (config override)",
-                         m_use_hardware_blank);
+                         use_hardware_blank);
         } else {
-            m_use_hardware_blank = m_backlight && m_backlight->supports_hardware_blank();
+            use_hardware_blank = m_backlight && m_backlight->supports_hardware_blank();
             spdlog::info("[DisplayManager] Hardware blank: {} (auto-detected from {})",
-                         m_use_hardware_blank, m_backlight ? m_backlight->name() : "none");
+                         use_hardware_blank, m_backlight ? m_backlight->name() : "none");
         }
     }
 
-    // Real panel power-off path (#1049): LAST RESORT only — for devices with NO
-    // controllable backlight (generic HDMI panels / Backlight-None, like the
-    // original #1049 reporter and the CB1). On those, FB_BLANK_POWERDOWN / DRM
-    // connector DPMS-off is the only way to actually cut the panel.
+    // Real panel power-off (FB_BLANK_POWERDOWN / DRM connector DPMS-off) is the
+    // last resort for a panel with no controllable backlight. A device with a
+    // usable backlight sleeps by writing brightness 0 in enter_sleep(), because a
+    // power-down its driver does not expect can wedge the display engine or leave
+    // the panel lit on a no-signal pattern. See should_use_power_off().
     //
-    // Any device WITH a usable backlight turns the backlight off instead (the
-    // set_brightness(0) call in enter_sleep()). That is safer and avoids
-    // driver-specific CRTC-disable wedges: on the Snapmaker U1 (working pwm
-    // backlight, but Hardware blank: false + a DPMS-capable DRM connector), DRM
-    // DPMS-off disables the Rockchip VOP2 CRTC and the panel goes PERMANENTLY
-    // black — wake's DPMS-on does NOT reliably re-enable VOP2 (see
-    // assets/config/platform/hooks-snapmaker-u1.sh "DRM CRTC keepalive"). So
-    // gate power-off on having NEITHER a hardware blank NOR a usable backlight.
+    // Config override: /display/panel_power_off (0 or 1). Missing (-1) = auto.
+    // 1 cuts the panel on hardware whose backlight write leaves the LEDs lit
+    // (#1594); 0 keeps it powered on a panel that does not recover from it.
     bool has_usable_backlight = m_backlight && m_backlight->is_available();
     bool backend_can_power_off = m_backend && m_backend->supports_power_off();
-    m_use_power_off =
-        should_use_power_off(m_use_hardware_blank, has_usable_backlight, backend_can_power_off);
-    spdlog::info("[DisplayManager] Display power-off: {} ({})", m_use_power_off,
-                 m_use_power_off ? m_backend->name()
-                                 : (has_usable_backlight ? "backlight off (no panel power-off)"
-                                                         : "software overlay fallback"));
+    bool use_power_off = false;
+    {
+        int power_off_override =
+            helix::Config::get_instance()->get<int>("/display/panel_power_off", -1);
+        if (power_off_override >= 0) {
+            use_power_off = (power_off_override != 0) && backend_can_power_off;
+            spdlog::info("[DisplayManager] Display power-off: {} (config override)", use_power_off);
+        } else {
+            use_power_off = helix::should_use_power_off(use_hardware_blank, has_usable_backlight,
+                                                        backend_can_power_off);
+            spdlog::info("[DisplayManager] Display power-off: {} ({})", use_power_off,
+                         use_power_off
+                             ? m_backend->name()
+                             : (has_usable_backlight ? "backlight off (no panel power-off)"
+                                                     : "software overlay fallback"));
+        }
+    }
 
     // Force backlight ON at startup - ensures display is visible even if
     // previous instance left it off or in an unknown state
@@ -531,8 +503,7 @@ bool DisplayManager::init(const Config& config) {
                 [](lv_timer_t* t) {
                     auto* dm = static_cast<DisplayManager*>(lv_timer_get_user_data(t));
                     if (dm && dm->m_backlight && dm->m_backlight->is_available()) {
-                        int brightness = DisplaySettingsManager::instance().get_brightness();
-                        brightness = std::clamp(brightness, 10, 100);
+                        const int brightness = DisplaySettingsManager::instance().user_brightness();
                         dm->m_backlight->set_brightness(brightness);
                         spdlog::info("[DisplayManager] Delayed brightness override: {}%",
                                      brightness);
@@ -543,67 +514,33 @@ bool DisplayManager::init(const Config& config) {
         }
     }
 
-    // Load dim settings from config
+    // Dim and sleep behavior
     helix::Config* cfg = helix::Config::get_instance();
-    m_dim_timeout_sec = cfg->get<int>("/display/dim_sec", 600);
-    m_dim_brightness_percent = std::clamp(cfg->get<int>("/display/dim_brightness", 30), 1, 100);
-    spdlog::debug("[DisplayManager] Display dim: {}s timeout, {}% brightness", m_dim_timeout_sec,
-                  m_dim_brightness_percent);
+    DisplaySleepConfig sleep_config;
+    sleep_config.use_hardware_blank = use_hardware_blank;
+    sleep_config.use_power_off = use_power_off;
+    sleep_config.dim_timeout_sec = cfg->get<int>("/display/dim_sec", 600);
+    sleep_config.dim_brightness_percent =
+        std::clamp(cfg->get<int>("/display/dim_brightness", 30), 1, 100);
+    spdlog::debug("[DisplayManager] Display dim: {}s timeout, {}% brightness",
+                  sleep_config.dim_timeout_sec, sleep_config.dim_brightness_percent);
 
     // Whether to power off the backlight during display sleep.
     // Default true (most platforms). Set to false on platforms where backlight
     // power-off prevents wake-on-touch (e.g. AD5X). When false, the software
     // overlay makes the screen appear off while the backlight stays powered.
-    m_sleep_backlight_off = cfg->get<bool>("/display/sleep_backlight_off", true);
-    if (!m_sleep_backlight_off) {
+    sleep_config.sleep_backlight_off = cfg->get<bool>("/display/sleep_backlight_off", true);
+    if (!sleep_config.sleep_backlight_off) {
         spdlog::info("[DisplayManager] Backlight will stay on during sleep (config override)");
     }
+    m_sleep.configure(sleep_config);
 
     // Debug touch visualization: draw ripple at each touch point.
-    // Timer runs unconditionally; flag is checked inside so the Settings
-    // toggle takes effect without a restart.
-    if (m_pointer) {
-        lv_timer_create(
-            [](lv_timer_t* t) {
-                if (!RuntimeConfig::debug_touches())
-                    return;
+    install_debug_touch_timer();
 
-                // Suppress while the touch-calibration UI is active: it draws
-                // its own (correct) ripple, and during point capture affine is
-                // disabled — so lv_indev_get_point() returns RAW coords and this
-                // would draw a Y-inverted ripple, which looks like a calibration
-                // bug but isn't (prestonbrown/helixscreen#943).
-                auto* cal_dm = DisplayManager::instance();
-                if (cal_dm && cal_dm->is_touch_calibration_active())
-                    return;
-
-                auto* indev = static_cast<lv_indev_t*>(lv_timer_get_user_data(t));
-                if (!indev)
-                    return;
-
-                lv_indev_state_t state = lv_indev_get_state(indev);
-                if (state != LV_INDEV_STATE_PRESSED)
-                    return;
-
-                lv_point_t point;
-                lv_indev_get_point(indev, &point);
-
-                static lv_coord_t last_x = -100, last_y = -100;
-                lv_coord_t dx = point.x - last_x;
-                lv_coord_t dy = point.y - last_y;
-                if (dx * dx + dy * dy < 25) // <5px movement
-                    return;
-
-                last_x = point.x;
-                last_y = point.y;
-                helix::ui::create_ripple(lv_layer_top(), point.x, point.y, 10, 40, 300);
-            },
-            30, m_pointer);
-    }
-
-    spdlog::trace("[DisplayManager] Initialized: {}x{}", m_width, m_height);
+    spdlog::trace("[DisplayManager] Initialized: {}x{}", width(), height());
     m_initialized = true;
-    s_instance = this;
+    set_active_instance(this);
 
     // Install framebuffer color transform hook AFTER the backend's flush_cb
     // is set, so the splash-suspend path captures our wrapper (#803).
@@ -641,13 +578,17 @@ DisplayManager* DisplayManager::instance() {
     return s_instance;
 }
 
+void DisplayManager::set_active_instance(DisplayManager* dm) {
+    s_instance = dm;
+}
+
 void DisplayManager::shutdown() {
     if (!m_initialized) {
         return;
     }
 
     m_shutting_down = true;
-    s_instance = nullptr;
+    set_active_instance(nullptr);
     spdlog::debug("[DisplayManager] Shutting down");
 
     // Stop the remote-screen mirror FIRST so no sink write races a freed
@@ -669,18 +610,7 @@ void DisplayManager::shutdown() {
     // Manually deleting first causes double-free crash.
     m_display = nullptr;
 
-    // Sleep overlay is an LVGL object freed by lv_deinit() — just clear the pointer.
-    // Don't call destroy_sleep_overlay() here because lv_obj_delete() ordering
-    // relative to other LVGL teardown is fragile.
-    m_sleep_overlay = nullptr;
-    m_use_hardware_blank = false;
-    m_use_power_off = false;
-    // Back to the startup truth (#1245): SDL re-asserts FLAG_KEEP_SCREEN_ON the
-    // next time it initializes video, so a re-init must not think we still owe
-    // Android a release.
-    m_last_sleep_mechanism = SleepMechanism::SoftwareOverlay;
-    m_keep_screen_on = true;
-    m_resume_seq_at_sleep = 0;
+    m_sleep.abandon_lvgl_state();
 
     // Release backends
     m_backlight.reset();
@@ -726,10 +656,6 @@ void DisplayManager::shutdown() {
 }
 
 void DisplayManager::configure_scroll(int scroll_throw, int scroll_limit) {
-    // Remember the values so a post-swap input rebuild (rotation fallback) can
-    // reapply them to the freshly-created pointer without re-reading config.
-    m_scroll_throw = scroll_throw;
-    m_scroll_limit = scroll_limit;
     if (!m_pointer) {
         return;
     }
@@ -739,44 +665,123 @@ void DisplayManager::configure_scroll(int scroll_throw, int scroll_limit) {
     spdlog::trace("[DisplayManager] Scroll config: throw={}, limit={}", scroll_throw, scroll_limit);
 }
 
-void DisplayManager::rebuild_input_after_backend_swap() {
-    // A backend swap (DRM→fbdev rotation fallback) deleted the display and freed
-    // the old backend. lv_display_delete() only detaches indevs (sets their
-    // display to NULL) — it does not free them — so m_pointer/m_keyboard still
-    // point at indevs bound to the gone backend, whose read_cb/user_data now
-    // reference freed memory. Delete them and recreate on the current backend,
-    // mirroring init()'s input setup so scroll/long-press/sleep-wrapper/keyboard
-    // behavior is preserved.
-    if (m_pointer) {
-        lv_indev_delete(m_pointer); // NOTE: swap, not shutdown
-        m_pointer = nullptr;
-    }
-    if (m_keyboard) {
-        lv_indev_delete(m_keyboard); // NOTE: swap, not shutdown
-        m_keyboard = nullptr;
-    }
-    // The saved read callback belonged to the deleted pointer; drop it so the
-    // sleep-aware wrapper re-captures the new pointer's callback on reinstall.
-    m_original_pointer_read_cb = nullptr;
+void DisplayManager::configure_pointer(int scroll_throw, int scroll_limit) {
+    watch_pointer();
+    configure_scroll(scroll_throw, scroll_limit);
+    // Long-press threshold — user-configurable global setting (#1245), default
+    // AppConstants::Input::LONG_PRESS_MS. InputSettingsManager::set_long_press_time
+    // live-applies changes.
+    auto* cfg = helix::Config::get_instance();
+    const int long_press_ms = cfg->get<int>("/input/long_press_time",
+                                            static_cast<int>(AppConstants::Input::LONG_PRESS_MS));
+    lv_indev_set_long_press_time(m_pointer, long_press_ms);
 
-    m_pointer = m_backend->create_input_pointer();
-    if (m_pointer) {
-        configure_scroll(m_scroll_throw, m_scroll_limit);
-        const int long_press_ms = helix::Config::get_instance()->get<int>(
-            "/input/long_press_time", static_cast<int>(AppConstants::Input::LONG_PRESS_MS));
-        lv_indev_set_long_press_time(m_pointer, long_press_ms);
-#ifndef HELIX_DISPLAY_SDL
+    // Config rather than InputSettingsManager: this runs before its subjects exist.
+    // Both read the same key; the Settings toggle asks for a restart.
+    m_scroll_guard = helix::ScrollClickGuard::from_settings(
+        cfg->get<bool>("/input/scroll_guard", false),
+        cfg->get<int>("/input/scroll_guard_cooldown_ms",
+                      static_cast<int>(helix::ScrollClickGuard::DEFAULT_COOLDOWN_MS)),
+        std::getenv("HELIX_SCROLL_GUARD"), std::getenv("HELIX_SCROLL_GUARD_COOLDOWN_MS"),
+        scroll_limit);
+
+    // SDL's event handler identifies the mouse device by checking if
+    // read_cb == sdl_mouse_read, which a wrapper breaks.
+    // Callback chain: sleep_aware_read_cb (runs the scroll guard) -> calibrated_read_cb
+    // -> evdev_read_cb (calibrated_read installed by backend, sleep wrapper installed here)
+    if (m_backend->type() != DisplayBackendType::SDL) {
         install_sleep_aware_input_wrapper();
-#endif
+    }
+    if (m_scroll_guard.enabled && !m_original_pointer_read_cb) {
+        spdlog::info("[DisplayManager] Post-scroll click guard not applied: the {} pointer "
+                     "has no input wrapper",
+                     m_backend->name());
+    } else if (m_scroll_guard.enabled) {
+        spdlog::info("[DisplayManager] Post-scroll click guard: {} ms cooldown, {} px scroll limit",
+                     m_scroll_guard.cooldown_ms, m_scroll_guard.scroll_limit_px);
+    }
+}
+
+void DisplayManager::watch_pointer() {
+    m_indev_delete_watch.watch(m_pointer, &m_pointer);
+}
+
+void DisplayManager::watch_keyboard() {
+    m_indev_delete_watch.watch(m_keyboard, &m_keyboard);
+}
+
+void DisplayManager::debug_touch_tick(lv_timer_t* /*t*/) {
+    if (!RuntimeConfig::debug_touches())
+        return;
+
+    auto* dm = DisplayManager::instance();
+    if (!dm)
+        return;
+
+    // Suppress while the touch-calibration UI is active: it draws its own
+    // (correct) ripple, and during point capture affine is disabled — so
+    // lv_indev_get_point() returns RAW coords and this would draw a
+    // Y-inverted ripple, which looks like a calibration bug but isn't
+    // (prestonbrown/helixscreen#943).
+    if (dm->is_touch_calibration_active())
+        return;
+
+    // Read the current pointer through the manager rather than a copy
+    // captured at timer-creation time, so an unplug (which clears m_pointer)
+    // is seen here too instead of reading a freed indev.
+    auto* indev = dm->pointer_input();
+    if (!indev)
+        return;
+
+    lv_indev_state_t state = lv_indev_get_state(indev);
+    if (state != LV_INDEV_STATE_PRESSED)
+        return;
+
+    lv_point_t point;
+    lv_indev_get_point(indev, &point);
+
+    static lv_coord_t last_x = -100, last_y = -100;
+    lv_coord_t dx = point.x - last_x;
+    lv_coord_t dy = point.y - last_y;
+    if (dx * dx + dy * dy < 25) // <5px movement
+        return;
+
+    last_x = point.x;
+    last_y = point.y;
+    helix::ui::create_ripple(lv_layer_top(), point.x, point.y, 10, 40, 300);
+}
+
+lv_timer_t* DisplayManager::install_debug_touch_timer() {
+    if (!m_pointer) {
+        return nullptr;
+    }
+    // Timer runs unconditionally; flag is checked inside so the Settings
+    // toggle takes effect without a restart.
+    return lv_timer_create(&DisplayManager::debug_touch_tick, 30, nullptr);
+}
+
+void DisplayManager::finish_input_setup(int scroll_throw, int scroll_limit) {
+    if (m_pointer) {
+        configure_pointer(scroll_throw, scroll_limit);
     }
 
+    // Create keyboard input device (optional)
+    create_keyboard_input();
+
+    // Refresh pacing overrides, now that the refresh, animation, input and update-queue
+    // timers they set all exist.
+    helix::apply_refresh_timing(m_refresh_timing);
+}
+
+void DisplayManager::create_keyboard_input() {
     m_keyboard = m_backend->create_input_keyboard();
+    DisplaySettingsManager::instance().set_hardware_keyboard_present(
+        m_backend->has_hardware_keyboard());
     if (m_keyboard) {
+        watch_keyboard();
         setup_keyboard_group();
+        spdlog::trace("[DisplayManager] Keyboard input enabled");
     }
-
-    spdlog::info("[DisplayManager] Input rebuilt after backend swap (pointer={}, keyboard={})",
-                 m_pointer ? "ok" : "null", m_keyboard ? "ok" : "null");
 }
 
 void DisplayManager::setup_keyboard_group() {
@@ -814,556 +819,56 @@ void DisplayManager::delay(uint32_t ms) {
 #endif
 }
 
-// ============================================================================
-// Sleep Entry
-// ============================================================================
-
-void DisplayManager::enter_sleep(int timeout_sec) {
-#ifdef HELIX_ENABLE_SCREENSAVER
-    // Stop screensaver before entering full sleep
-    if (m_screensaver_active) {
-        ScreensaverManager::instance().stop();
-        m_screensaver_active = false;
-    }
-#endif
-    m_display_sleeping = true;
-
-    SleepMechanism mechanism =
-        select_sleep_mechanism(platform_is_android(), m_use_hardware_blank,
-                               m_use_power_off && m_backend != nullptr, timeout_sec);
-
-    switch (mechanism) {
-    case SleepMechanism::HardwareBlank:
-        if (m_backend) {
-            m_backend->blank_display();
-        }
-        break;
-
-    case SleepMechanism::PanelPowerOff:
-        // Real panel power-off (fbdev FB_BLANK_POWERDOWN / DRM DPMS off) for
-        // HDMI/fbdev devices with no hardware backlight blank (#1049). The panel
-        // is actually powered down, so no software overlay is needed. wake_display()
-        // restores power BEFORE lv_refr_now() to honor the #303 wake-race.
-        if (m_backend->power_off()) {
-            // Neutralize the flush so the next page-flip can't re-assert DPMS-on
-            // and relight the panel on the home screen. Without this, stopping the
-            // screensaver above (or any later Klipper-driven invalidation) renders
-            // a frame whose DRM commit turns the connector back ON — the
-            // user-reported regression where an idle HDMI panel "comes back on at
-            // the home screen".
-            suppress_flush_for_sleep();
-        } else {
-            // The capability probe disagreed with reality; degrade to the overlay
-            // rather than leaving a lit panel with no visual sleep at all.
-            mechanism = SleepMechanism::SoftwareOverlay;
-            create_sleep_overlay();
-        }
-        break;
-
-    case SleepMechanism::HostSleep:
-        // Android (#1245): no backlight sysfs and no backend blank/power-off, so
-        // the only way to genuinely darken the panel is to stop asserting
-        // FLAG_KEEP_SCREEN_ON and let Android's own display timeout run. Painting
-        // a black overlay instead (what we used to do) left the panel fully lit
-        // and blocked the device from ever sleeping. Deliberately no overlay: the
-        // OS is about to power the panel, and the app gets paused with it.
-        //
-        // Remember the resume counter so the pause/resume round trip that follows
-        // can be told apart from "still waiting for Android's timeout".
-#ifdef __ANDROID__
-        m_resume_seq_at_sleep = android_get_resume_seq();
-#endif
-        set_keep_screen_on(false);
-        break;
-
-    case SleepMechanism::SoftwareOverlay:
-        // Software overlay path: do NOT call FBIOBLANK — the overlay alone is
-        // sufficient and FBIOBLANK can cause a race condition on wake where the
-        // framebuffer isn't ready before LVGL renders, leaving a black screen
-        // even after the overlay is removed (#303).
-        create_sleep_overlay();
-        break;
-    }
-    m_last_sleep_mechanism = mechanism;
-
-    if (m_backlight && m_backlight->is_available() && m_sleep_backlight_off) {
-        m_backlight->set_brightness(0);
-    }
-    spdlog::info("[DisplayManager] Display sleeping ({}{}) after {}s",
-                 sleep_mechanism_name(mechanism),
-                 m_sleep_backlight_off ? "" : ", backlight kept on", timeout_sec);
-
-    // Notify subscribers (camera stream, etc.) to suspend background work
-    for (auto& cb : m_sleep_callbacks) {
-        cb(true);
-    }
-}
-
-// ============================================================================
-// Host keep-screen-on (Android, #1245)
-// ============================================================================
-
-void DisplayManager::set_keep_screen_on(bool keep_on) {
-#ifdef __ANDROID__
-    if (m_keep_screen_on == keep_on) {
-        return; // transition-guarded: don't cross JNI to re-say the same thing
-    }
-    m_keep_screen_on = keep_on;
-    android_set_keep_screen_on(keep_on);
-    spdlog::info("[DisplayManager] Android keep-screen-on: {}", keep_on);
-#else
-    // Nothing else runs a display timeout behind our back — we own the panel on
-    // every non-Android target, so the flag has no meaning and stays asserted.
-    (void)keep_on;
-#endif
-}
-
-// ============================================================================
-// Software Sleep Overlay
-// ============================================================================
-
-void DisplayManager::create_sleep_overlay() {
-    if (m_sleep_overlay) {
+void DisplayManager::restore_flush_cb(lv_display_flush_cb_t flush_cb) {
+    if (!m_display || !flush_cb) {
         return;
     }
-    m_sleep_overlay = lv_obj_create(lv_layer_top());
-    lv_obj_set_size(m_sleep_overlay, lv_pct(100), lv_pct(100));
-    lv_obj_set_style_bg_color(m_sleep_overlay, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(m_sleep_overlay, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(m_sleep_overlay, 0, 0);
-    lv_obj_set_style_pad_all(m_sleep_overlay, 0, 0);
-    lv_obj_remove_flag(m_sleep_overlay, LV_OBJ_FLAG_CLICKABLE);
-    spdlog::debug("[DisplayManager] Software sleep overlay created");
-}
-
-void DisplayManager::destroy_sleep_overlay() {
-    if (!m_sleep_overlay) {
-        return;
+    lv_display_set_flush_cb(m_display, flush_cb);
+    if (m_backend) {
+        m_backend->request_full_upload();
     }
-    lv_obj_delete(m_sleep_overlay);
-    m_sleep_overlay = nullptr;
-    spdlog::debug("[DisplayManager] Software sleep overlay destroyed");
 }
 
 // ============================================================================
-// Power-off flush suppression (#1049)
-// ============================================================================
-
-namespace {
-// No-op flush used while the panel is powered off: it must still signal "ready"
-// or LVGL stalls waiting for the flush to complete, but it commits nothing to the
-// framebuffer — so no DRM page-flip happens to re-assert DPMS-on.
-void sleep_noop_flush_cb(lv_display_t* disp, const lv_area_t* /*area*/, uint8_t* /*px*/) {
-    lv_display_flush_ready(disp);
-}
-} // namespace
-
-void DisplayManager::suppress_flush_for_sleep() {
-    if (m_flush_suppressed_for_sleep || !m_display) {
-        return;
-    }
-    // Stop invalidations from scheduling renders AND swap the flush callback for a
-    // no-op. Pausing the refresh timer alone is insufficient: any invalidation
-    // fires LV_EVENT_REFR_REQUEST, which resumes the timer (see the identical note
-    // in Application's splash suppression). With the flush neutralized, even a
-    // render that slips through commits nothing, so the powered-off panel can't be
-    // relit by a stray page-flip (#1049).
-    lv_display_enable_invalidation(m_display, false);
-    m_saved_flush_cb_for_sleep = m_display->flush_cb;
-    lv_display_set_flush_cb(m_display, sleep_noop_flush_cb);
-    m_flush_suppressed_for_sleep = true;
-    spdlog::debug("[DisplayManager] Flush suppressed while panel powered off");
-}
-
-void DisplayManager::restore_flush_after_sleep() {
-    if (!m_flush_suppressed_for_sleep) {
-        return;
-    }
-    m_flush_suppressed_for_sleep = false;
-    if (m_display) {
-        if (m_saved_flush_cb_for_sleep) {
-            lv_display_set_flush_cb(m_display, m_saved_flush_cb_for_sleep);
-        }
-        lv_display_enable_invalidation(m_display, true);
-    }
-    m_saved_flush_cb_for_sleep = nullptr;
-    spdlog::debug("[DisplayManager] Flush restored on wake");
-}
-
-// ============================================================================
-// Display Sleep Management
+// Display sleep forwarders
 // ============================================================================
 
 void DisplayManager::check_display_sleep() {
-#ifdef HELIX_ENABLE_SCREENSAVER
-    // HELIX_SCREENSAVER_NOW — force-start screensaver immediately (for testing)
-    // Values: "1" (configured type, defaults to toasters), "starfield", "pipes"
-    static bool screensaver_force_checked = false;
-    if (!screensaver_force_checked) {
-        screensaver_force_checked = true;
-        const char* env = std::getenv("HELIX_SCREENSAVER_NOW");
-        if (env) {
-            std::string val(env);
-            ScreensaverType force_type = ScreensaverType::FLYING_TOASTERS;
-            if (val == "starfield") {
-                force_type = ScreensaverType::STARFIELD;
-            } else if (val == "pipes") {
-                force_type = ScreensaverType::PIPES_3D;
-            } else {
-                // "1" or any other value: use configured type, fallback to toasters
-                auto configured = ScreensaverManager::configured_type();
-                force_type = (configured != ScreensaverType::OFF)
-                                 ? configured
-                                 : ScreensaverType::FLYING_TOASTERS;
-            }
-            spdlog::info("[DisplayManager] HELIX_SCREENSAVER_NOW={}, forcing screensaver type {}",
-                         val, static_cast<int>(force_type));
-            m_display_dimmed = true;
-            ScreensaverManager::instance().start(force_type);
-            m_screensaver_active = true;
-            return;
-        }
-    }
-#endif
-
-    // If sleep-while-printing is disabled, inhibit *entering* sleep/dim during
-    // active prints. We still need to honor wake-from-sleep touches: the
-    // display may have entered sleep BEFORE the print started, and bailing out
-    // here would strand the user on a blank screen for the duration of the
-    // print (debug bundle RYAQGL6C: 8 touch events, 18-minute wake delay).
-    bool inhibit_sleep_entry = false;
-    if (!DisplaySettingsManager::instance().get_sleep_while_printing()) {
-        // Lifecycle: a user who turned off sleep-while-printing wants the
-        // screen up through the pre-print homing too, which is when they are
-        // most likely to be watching.
-        const auto lifecycle = get_printer_state().get_print_lifecycle();
-        if (job_holds_machine(lifecycle)) {
-            // Reset LVGL activity timer so we don't immediately sleep when print ends
-            lv_display_trigger_activity(nullptr);
-            inhibit_sleep_entry = true;
-        }
-    }
-
-    // Get configured sleep timeout from settings (0 = disabled)
-    int sleep_timeout_sec = DisplaySettingsManager::instance().get_display_sleep_sec();
-
-    // Get LVGL inactivity time (milliseconds since last touch/input)
-    uint32_t inactive_ms = lv_display_get_inactive_time(nullptr);
-    uint32_t dim_timeout_ms =
-        (m_dim_timeout_sec > 0) ? static_cast<uint32_t>(m_dim_timeout_sec) * 1000U : UINT32_MAX;
-    uint32_t sleep_timeout_ms =
-        (sleep_timeout_sec > 0) ? static_cast<uint32_t>(sleep_timeout_sec) * 1000U : UINT32_MAX;
-
-    // Periodic debug logging (every 30 seconds when inactive > 10s)
-    static uint32_t last_log_time = 0;
-    uint32_t now = get_ticks();
-    if (inactive_ms > 10000 && (now - last_log_time) >= 30000) {
-        spdlog::trace(
-            "[DisplayManager] Sleep check: inactive={}s, dim_timeout={}s, sleep_timeout={}s, "
-            "dimmed={}, sleeping={}, backlight={}",
-            inactive_ms / 1000, m_dim_timeout_sec, sleep_timeout_sec, m_display_dimmed,
-            m_display_sleeping, m_backlight ? "yes" : "no");
-        last_log_time = now;
-    }
-
-    // Check for activity (touch detected within last 500ms)
-    bool activity_detected = (inactive_ms < 500);
-
-    // Android host sleep (#1245): Android pauses the app when it powers the panel
-    // down and resumes it when the panel comes back, and neither transition is a
-    // touch — so the activity check below never fires and the display would stay
-    // logically asleep with keep-screen-on still cleared, re-sleeping forever and
-    // never resuming the sleep callbacks. This function only runs while
-    // foregrounded (the run loop short-circuits on m_backgrounded), so a bumped
-    // resume counter means the panel is on again.
-    //
-    // The awake case is the matching invariant: the host must never be left free
-    // to sleep while we consider the display awake, whatever path cleared
-    // m_display_sleeping. set_keep_screen_on() is transition-guarded, so an awake
-    // tick costs one member compare.
-    bool resumed_from_host_sleep = false;
-    if (!m_display_sleeping) {
-        set_keep_screen_on(true);
-    }
-#ifdef __ANDROID__
-    else if (m_last_sleep_mechanism == SleepMechanism::HostSleep) {
-        resumed_from_host_sleep =
-            host_sleep_needs_wake(true, m_resume_seq_at_sleep, android_get_resume_seq());
-    }
-#endif
-
-    if (m_display_sleeping) {
-        // Wake via sleep_aware_read_cb (embedded) or LVGL activity detection (SDL).
-        // On SDL, the sleep-aware wrapper isn't installed because it breaks SDL's
-        // mouse device identification, so we fall back to LVGL activity tracking.
-        if (m_wake_requested || activity_detected || resumed_from_host_sleep) {
-            m_wake_requested = false;
-            wake_display();
-        }
-    } else if (m_display_dimmed) {
-        // Currently dimmed - wake on touch, or go to sleep if timeout exceeded.
-        // During a screensaver preview, skip activity-based dismiss for a brief
-        // grace window — otherwise the click that *launched* the preview is
-        // still fresh in lv_display_get_inactive_time() and closes it instantly.
-        bool dismiss_on_activity = activity_detected;
-#ifdef HELIX_ENABLE_SCREENSAVER
-        if (m_screensaver_is_preview) {
-            constexpr uint32_t PREVIEW_GRACE_MS = 750;
-            uint32_t elapsed = get_ticks() - m_preview_start_tick_ms;
-            if (elapsed < PREVIEW_GRACE_MS) {
-                dismiss_on_activity = false;
-            }
-        }
-#endif
-        if (m_wake_requested || dismiss_on_activity) {
-            m_wake_requested = false;
-            wake_display();
-        } else if (!inhibit_sleep_entry && sleep_timeout_sec > 0 &&
-                   inactive_ms >= sleep_timeout_ms) {
-            // Transition from dimmed to sleeping
-            enter_sleep(sleep_timeout_sec);
-        }
-    } else {
-        // Currently awake - check if we should dim, start screensaver, or sleep.
-        // Inhibited during prints when sleep_while_printing=false.
-        if (inhibit_sleep_entry) {
-            return;
-        }
-        bool can_dim = m_backlight && m_backlight->supports_dimming();
-#ifdef HELIX_ENABLE_SCREENSAVER
-        bool has_screensaver = ScreensaverManager::configured_type() != ScreensaverType::OFF;
-#else
-        bool has_screensaver = false;
-#endif
-        // Two-stage idle (#1049), both timeouts measured from the same idle clock:
-        //   Dim   → dim the backlight and/or start the screensaver (intermediate)
-        //   Sleep → enter full sleep / power-off (final)
-        // The Sleep>=Dim ordering is guaranteed by DisplaySettingsManager's
-        // coupling (now also enforced on no-backlight + screensaver devices), so
-        // the dim/screensaver branch is reachable before sleep even on the
-        // reporter's no-backlight Pi.
-        if (sleep_timeout_sec > 0 && inactive_ms >= sleep_timeout_ms) {
-            // Sleep timeout reached — go to full sleep (blank / power-off).
-            enter_sleep(sleep_timeout_sec);
-        } else if (m_dim_timeout_sec > 0 && inactive_ms >= dim_timeout_ms &&
-                   (can_dim || has_screensaver)) {
-            // Dim timeout reached — start screensaver and/or dim backlight.
-            // On devices without backlight dimming, screensaver alone provides
-            // the idle visual state (instead of skipping to sleep).
-            m_display_dimmed = true;
-#ifdef HELIX_ENABLE_SCREENSAVER
-            if (!m_screensaver_active && has_screensaver) {
-                // Suspend active panel lifecycle to stop widget timers (clock, etc.)
-                // that would otherwise invalidate underlying UI and bleed through
-                NavigationManager::instance().suspend_active();
-                ScreensaverManager::instance().start(ScreensaverManager::configured_type());
-                m_screensaver_active = true;
-                if (m_backlight) {
-                    // Screensaver needs enough brightness to see the toasters,
-                    // but respect user's dim setting if it's higher
-                    m_backlight->set_brightness(std::max(m_dim_brightness_percent, 50));
-                }
-                spdlog::info("[DisplayManager] Screensaver started after {}s inactivity",
-                             m_dim_timeout_sec);
-            } else
-#endif
-            {
-                if (m_backlight) {
-                    m_backlight->set_brightness(m_dim_brightness_percent);
-                }
-                spdlog::info("[DisplayManager] Display dimmed to {}% after {}s inactivity",
-                             m_dim_brightness_percent, m_dim_timeout_sec);
-            }
-        }
-    }
-}
-
-void DisplayManager::restore_display_output() {
-    // Re-assert the host's keep-screen-on request first (#1245). Unconditional and
-    // transition-guarded: if enter_sleep() handed the panel to Android we take it
-    // back here, and on every other path (including all non-Android targets) this
-    // is a no-op because the flag was never released.
-    set_keep_screen_on(true);
-
-    // Undo whatever enter_sleep() did to the panel output, mirroring its branches.
-    // This must run BEFORE the post-wake lv_refr_now() (#303 wake-race).
-    if (m_use_hardware_blank) {
-        // Hardware path: unblank framebuffer (FBIOBLANK was used during sleep).
-        if (m_backend) {
-            m_backend->unblank_display();
-        }
-    } else if (m_use_power_off && m_backend) {
-        // Power-off path: re-enable rendering, then power the panel back on. The
-        // flush must be restored BEFORE the post-wake lv_refr_now() (in
-        // wake_display) so that synchronous render actually reaches the panel.
-        // A software overlay may also exist if a prior power_off() failed and fell
-        // back — remove it defensively. restore_flush_after_sleep() is a no-op if
-        // suppression was never engaged (overlay fallback).
-        restore_flush_after_sleep();
-        m_backend->power_on();
-        destroy_sleep_overlay();
-    } else {
-        // Software path: remove the black overlay (no FBIOBLANK to undo).
-        destroy_sleep_overlay();
-    }
+    m_sleep.tick();
 }
 
 void DisplayManager::wake_display() {
-    if (m_shutting_down) {
-        return; // Shutdown in progress — avoid touching LVGL objects
-    }
-
-    if (!m_display_sleeping && !m_display_dimmed) {
-        return; // Already fully awake
-    }
-
-    bool was_sleeping = m_display_sleeping;
-    bool was_dimmed = m_display_dimmed;
-    m_display_sleeping = false;
-    m_display_dimmed = false;
-
-#ifdef HELIX_ENABLE_SCREENSAVER
-    bool was_preview = m_screensaver_is_preview;
-    m_screensaver_is_preview = false;
-    m_preview_start_tick_ms = 0;
-    // Stop screensaver on wake
-    if (m_screensaver_active) {
-        ScreensaverManager::instance().stop();
-        m_screensaver_active = false;
-        // Resume active panel lifecycle to restart widget timers
-        NavigationManager::instance().resume_active();
-    }
-#else
-    constexpr bool was_preview = false;
-#endif
-
-    // Gate input if waking from full sleep (not dim)
-    // This prevents the wake touch from triggering UI actions
-    if (was_sleeping) {
-        disable_input_briefly();
-
-        // Restore the panel output (unblank / power-on / remove overlay) BEFORE
-        // the synchronous render below so the framebuffer is ready when LVGL
-        // paints — honoring the #303 black-screen-on-wake race.
-        restore_display_output();
-
-        // Force immediate full render after wake. lv_obj_invalidate() alone only
-        // marks dirty regions — the actual render happens on the next timer tick,
-        // which can race with framebuffer state changes and leave a black screen
-        // on some hardware (#303). lv_refr_now() renders synchronously.
-        lv_obj_invalidate(lv_screen_active());
-        lv_refr_now(nullptr);
-
-        // Reset LVGL's inactivity timer so we don't immediately go back to sleep.
-        // When touch is absorbed by sleep_aware_read_cb, LVGL doesn't register activity,
-        // so without this the display would wake and immediately sleep again.
-        lv_display_trigger_activity(nullptr);
-    }
-
-    // Restore configured brightness from settings
-    int brightness = DisplaySettingsManager::instance().get_brightness();
-    brightness = std::clamp(brightness, 10, 100);
-
-    if (m_backlight) {
-        m_backlight->set_brightness(brightness);
-    }
-    spdlog::info("[DisplayManager] Display woken from {}, brightness restored to {}%",
-                 was_sleeping ? "sleep" : "dim", brightness);
-
-    // Auto-lock: show lock screen when waking from sleep or screensaver/dim.
-    // Screensaver previews are user-initiated from settings — they didn't go
-    // idle, so engaging auto-lock on preview dismiss would be surprising.
-    if ((was_sleeping || was_dimmed) && !was_preview &&
-        helix::LockManager::instance().auto_lock_enabled() &&
-        helix::LockManager::instance().has_pin()) {
-        spdlog::info("[DisplayManager] Auto-lock engaged on wake");
-        helix::LockManager::instance().lock();
-        helix::ui::LockScreenOverlay::instance().show();
-    }
-
-    // Notify subscribers (camera stream, etc.) to resume background work
-    for (auto& cb : m_sleep_callbacks) {
-        cb(false);
-    }
+    m_sleep.wake();
 }
-
-#ifdef HELIX_ENABLE_SCREENSAVER
-void DisplayManager::preview_screensaver(int type) {
-    if (m_shutting_down || m_screensaver_active) {
-        return;
-    }
-    auto ss_type = static_cast<ScreensaverType>(type);
-    if (ss_type == ScreensaverType::OFF) {
-        return;
-    }
-
-    spdlog::info("[DisplayManager] Previewing screensaver type {}", type);
-    // Suspend active panel so widget timers stop updating the background
-    NavigationManager::instance().suspend_active();
-    ScreensaverManager::instance().start(ss_type);
-    // Mark display as dimmed so wake_display() runs on touch; is_preview
-    // flag suppresses auto-lock on dismiss.
-    m_display_dimmed = true;
-    m_screensaver_active = true;
-    m_screensaver_is_preview = true;
-    m_preview_start_tick_ms = get_ticks();
-}
-#endif
 
 void DisplayManager::ensure_display_on() {
-    // Force display awake at startup regardless of previous state
-    restore_flush_after_sleep(); // defensive: never start up with flush suppressed
-    set_keep_screen_on(true);    // #1245: never inherit a released host sleep lock
-    m_display_sleeping = false;
-    m_display_dimmed = false;
-
-    // Get configured brightness (or default to 50%)
-    int brightness = DisplaySettingsManager::instance().get_brightness();
-    brightness = std::clamp(brightness, 10, 100);
-
-    // Apply to hardware - this ensures display is visible
-    if (m_backlight) {
-        m_backlight->set_brightness(brightness);
-    }
-    spdlog::info("[DisplayManager] Startup: forcing display ON at {}% brightness", brightness);
+    m_sleep.ensure_on();
 }
 
 void DisplayManager::set_dim_timeout(int seconds) {
-    m_dim_timeout_sec = seconds;
-    spdlog::debug("[DisplayManager] Dim timeout set to {}s", seconds);
+    m_sleep.set_dim_timeout(seconds);
 }
 
 void DisplayManager::restore_display_on_shutdown() {
-    // Clean up software sleep overlay if active
-    destroy_sleep_overlay();
-
-    // Re-enable rendering before the framebuffer clear / final brightness below,
-    // otherwise the clear is committed through the no-op flush and never reaches
-    // the panel (#1049). No-op if flush was never suppressed.
-    restore_flush_after_sleep();
-
-    // If we powered the panel down (#1049), bring it back on so the next app
-    // doesn't inherit a powered-off panel.
-    if (m_use_power_off && m_backend) {
-        m_backend->power_on();
-    }
-
-    // Clear framebuffer to black so the last rendered frame doesn't persist
-    // after the process exits (SIGTERM/SIGINT graceful shutdown)
-    if (m_backend) {
-        m_backend->clear_framebuffer(0x00000000);
-    }
-
-    // Ensure display is awake before exiting so next app doesn't start with black screen
-    int brightness = DisplaySettingsManager::instance().get_brightness();
-    brightness = std::clamp(brightness, 10, 100);
-
-    if (m_backlight) {
-        m_backlight->set_brightness(brightness);
-    }
-    m_display_sleeping = false;
-    spdlog::debug("[DisplayManager] Shutdown: restoring display to {}% brightness", brightness);
+    m_sleep.restore_on_shutdown();
 }
+
+#ifdef HELIX_ENABLE_SCREENSAVER
+helix::ui::SaverHost DisplayManager::screensaver_host(const DisplayBackend* backend) {
+    helix::ui::SaverHost host;
+    host.is_printing = [] {
+        return job_holds_machine(get_printer_state().print_state().get_print_lifecycle());
+    };
+    host.display_backend =
+        backend ? helix::ui::display_backend_key(backend->type(), backend->is_gpu_accelerated())
+                : "unknown";
+    return host;
+}
+
+void DisplayManager::preview_screensaver(int type) {
+    m_sleep.preview_screensaver(type);
+}
+#endif
 
 void DisplayManager::set_backlight_brightness(int percent) {
     percent = std::clamp(percent, 0, 100);
@@ -1382,7 +887,7 @@ bool DisplayManager::has_dimming_control() const {
 
 bool DisplayManager::is_software_rotated() const {
     return m_display && m_backend && m_backend->type() == DisplayBackendType::FBDEV &&
-           lv_display_get_rotation(m_display) != LV_DISPLAY_ROTATION_0;
+           m_backend->applied_rotation_degrees(m_display) != 0;
 }
 
 // ============================================================================
@@ -1398,6 +903,24 @@ bool DisplayManager::apply_touch_calibration(const helix::TouchCalibration& cal)
         return false;
     }
     return m_backend->set_calibration(cal);
+}
+
+helix::LiveTouchRange DisplayManager::current_touch_range() const {
+    helix::TouchRangeDiagnostics diag;
+    helix::LiveTouchRange live;
+    if (helix::get_touch_range_diagnostics(diag) && diag.pipeline.configured_valid) {
+        live.range.valid = true;
+        live.range.swap_axes = diag.pipeline.swap_axes;
+        live.range.min_x = diag.pipeline.min_x;
+        live.range.max_x = diag.pipeline.max_x;
+        live.range.min_y = diag.pipeline.min_y;
+        live.range.max_y = diag.pipeline.max_y;
+        live.source = diag.pipeline.source;
+        if (live.source == helix::TouchRangeSource::Stored) {
+            live.range.capture_rotation = diag.pipeline.stored.capture_rotation;
+        }
+    }
+    return live;
 }
 
 helix::TouchCalibration DisplayManager::get_current_calibration() const {
@@ -1499,25 +1022,16 @@ void DisplayManager::sleep_aware_read_cb(lv_indev_t* indev, lv_indev_data_t* dat
         dm->m_original_pointer_read_cb(indev, data);
     }
 
-    // If sleeping or dimmed and touch detected, request wake.
-    // During sleep: absorb the touch so it doesn't trigger UI actions.
-    // During dim: let the touch pass through but still flag for wake.
-    // This is necessary because LVGL only updates last_activity_time on PRESSED,
-    // but evdev drains all buffered events in one read — if press+release both
-    // arrive in one poll (quick tap or slow main loop), the final state is
-    // RELEASED and LVGL never registers activity.
-    if (data->state == LV_INDEV_STATE_PRESSED) {
-        if (dm->m_display_sleeping) {
-            dm->m_wake_requested = true;
-            data->state = LV_INDEV_STATE_RELEASED; // Absorb - LVGL sees no press
-            spdlog::info("[DisplayManager] Wake touch absorbed at ({},{}) while sleeping",
-                         data->point.x, data->point.y);
-        } else if (dm->m_display_dimmed) {
-            dm->m_wake_requested = true;
-            spdlog::info("[DisplayManager] Wake touch at ({},{}) while dim — passing through",
-                         data->point.x, data->point.y);
-        }
+    // A press while asleep is absorbed so LVGL sees no press; while dimmed it passes
+    // through but still requests the wake. Decided on the raw press, because LVGL only
+    // updates its activity time on PRESSED and evdev can drain press+release in one read.
+    if (data->state == LV_INDEV_STATE_PRESSED &&
+        dm->m_sleep.note_press(data->point.x, data->point.y)) {
+        data->state = LV_INDEV_STATE_RELEASED;
     }
+
+    // After the wake handling, so a suppressed press can never cost a wake request.
+    dm->m_scroll_guard.filter(data->state, data->point, lv_tick_get());
 }
 
 void DisplayManager::install_sleep_aware_input_wrapper() {
@@ -1548,16 +1062,19 @@ bool DisplayManager::try_drm_to_fbdev_fallback(lv_display_rotation_t rot, bool s
         return true; // No fallback needed
     }
 
-    // If input devices were already created (apply_rotation runs this fallback
-    // after init()), they are bound to the DRM backend we are about to free and
-    // to the display we are about to delete — they must be rebuilt on the fbdev
-    // backend below. At init time m_pointer is still null and init() creates the
-    // input devices after this returns, so nothing to rebuild there.
-    const bool had_input_devices = (m_pointer != nullptr);
+    // Input devices are bound to the DRM backend and the display freed below, so
+    // the swap is only safe before init() creates them.
+    if (m_pointer || m_keyboard) {
+        spdlog::error("[DisplayManager] fbdev fallback requested after input devices exist; "
+                      "continuing without rotation");
+        return false;
+    }
 
     spdlog::warn("[DisplayManager] DRM lacks hardware rotation for {}°, "
                  "falling back to fbdev (flicker-free software rotation)",
                  static_cast<int>(rot) * 90);
+    // m_sleep reads m_backend and m_display through references, so the swap below needs no
+    // retarget.
     lv_display_delete(m_display); // intentional: switching backend before lv_deinit
     m_display = nullptr;
     m_backend.reset();
@@ -1571,7 +1088,7 @@ bool DisplayManager::try_drm_to_fbdev_fallback(lv_display_rotation_t rot, bool s
     }
     if (!m_display) {
         spdlog::error("[DisplayManager] Fbdev fallback for rotation also failed. "
-                      "For DSI/EGL displays, use the kernel panel_orientation parameter "
+                      "On a non-EGL build, use the kernel panel_orientation parameter "
                       "instead: add panel_orientation=right_side_up (or left_side_up, "
                       "upside_down) to /boot/firmware/cmdline.txt and remove the "
                       "\"rotate\" key from settings.json.");
@@ -1579,15 +1096,6 @@ bool DisplayManager::try_drm_to_fbdev_fallback(lv_display_rotation_t rot, bool s
     }
     spdlog::info("[DisplayManager] Fbdev fallback succeeded at {}x{}", m_width, m_height);
     warn_fbdev_high_dpi();
-
-    // Recreate the input devices on the new backend. lv_display_delete() only
-    // detached them (their display is now NULL) and m_backend.reset() freed the
-    // DRM backend their read_cb/user_data pointed into — leaving m_pointer as a
-    // display-less indev referencing freed memory and the fbdev backend with no
-    // input at all. Rebuild only when they already existed (post-init swap).
-    if (had_input_devices) {
-        rebuild_input_after_backend_swap();
-    }
     return true;
 }
 
@@ -1614,42 +1122,6 @@ void DisplayManager::warn_fbdev_high_dpi() {
 // ============================================================================
 // Rotation Probe (first-boot auto-detect)
 // ============================================================================
-
-void DisplayManager::apply_rotation(int degrees) {
-    if (!m_display || !m_backend) {
-        spdlog::warn("[DisplayManager] Cannot apply rotation — display not initialized");
-        return;
-    }
-    if (degrees == 0)
-        return;
-
-#ifdef HELIX_DISPLAY_SDL
-    spdlog::warn("[DisplayManager] Rotation {}° not supported on SDL backend", degrees);
-#else
-    int phys_w = m_width;
-    int phys_h = m_height;
-
-    lv_display_rotation_t lv_rot = degrees_to_lv_rotation(degrees);
-
-    // DRM backend may not support hardware rotation for this angle —
-    // fall back to fbdev. Note: splash_active=false since apply_rotation()
-    // is only called after init() completes (splash is already managed).
-    if (!try_drm_to_fbdev_fallback(lv_rot, false)) {
-        spdlog::error("[DisplayManager] Cannot apply {}° rotation — DRM fallback failed", degrees);
-        return;
-    }
-
-    lv_display_set_rotation(m_display, lv_rot);
-
-    m_width = lv_display_get_horizontal_resolution(m_display);
-    m_height = lv_display_get_vertical_resolution(m_display);
-
-    m_backend->set_display_rotation(lv_rot, phys_w, phys_h);
-
-    spdlog::info("[DisplayManager] Display rotated {}° — effective resolution: {}x{}", degrees,
-                 m_width, m_height);
-#endif
-}
 
 void DisplayManager::run_rotation_probe() {
     if (!m_display || !m_pointer) {
@@ -1685,309 +1157,25 @@ void DisplayManager::run_rotation_probe() {
                      "but UI and tap detection work for testing");
     }
 
-    // Fonts for probe UI (compiled-in, available before XML/theme init)
-    extern const lv_font_t noto_sans_24;
-    extern const lv_font_t noto_sans_16;
-
-    // Physical dimensions: m_width/m_height are pre-rotation at this point
-    // because the probe runs before any rotation is applied in init().
-    int phys_w = m_width;
-    int phys_h = m_height;
-
-    const lv_display_rotation_t rotations[] = {LV_DISPLAY_ROTATION_0, LV_DISPLAY_ROTATION_90,
-                                               LV_DISPLAY_ROTATION_180, LV_DISPLAY_ROTATION_270};
-    const int rotation_degrees[] = {0, 90, 180, 270};
-    const int num_rotations = 4;
-    const int scan_timeout_ms = 5000;
-    const int confirm_timeout_ms = 10000;
+    // m_width/m_height hold the unrotated size requested of the backend.
+    const int phys_w = m_width;
+    const int phys_h = m_height;
 
     spdlog::info("[DisplayManager] Starting rotation probe (physical={}x{})", phys_w, phys_h);
 
-    // Lambda to create probe screen UI. subtitle_cb generates the subtitle text
-    // given rotation degrees and seconds remaining.
-    using SubtitleFn = std::function<std::string(int rot_deg, int secs)>;
+    helix::RotationProbeHost host{
+        m_pointer, is_sdl,
+        [this, phys_w, phys_h](lv_display_rotation_t rot) {
+            settle_display_rotation(rot, phys_w, phys_h);
+        },
+        [this](bool suspended) { set_resize_fanout_suspended(suspended); }};
+    helix::RotationProbe(std::move(host)).run();
+}
 
-    auto create_probe_screen = [&](const char* main_text, const char* help_text,
-                                   SubtitleFn subtitle_fn, int rot_deg, int timeout_ms,
-                                   lv_color_t bg_color) -> std::pair<lv_obj_t*, SubtitleFn> {
-        lv_obj_t* scr = lv_screen_active();
-        lv_obj_clean(scr);
-        lv_obj_set_style_bg_color(scr, bg_color, 0);
-        lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
-
-        // Main text — constrain width for narrow screens
-        lv_obj_t* main_lbl = lv_label_create(scr);
-        lv_label_set_text(main_lbl, main_text);
-        lv_obj_set_width(main_lbl, lv_pct(90));
-        lv_label_set_long_mode(main_lbl, LV_LABEL_LONG_WRAP);
-        lv_obj_set_style_text_color(main_lbl, lv_color_white(), 0);
-        lv_obj_set_style_text_font(main_lbl, &noto_sans_24, 0);
-        lv_obj_set_style_text_align(main_lbl, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_align(main_lbl, LV_ALIGN_CENTER, 0, -30);
-
-        // Help text (smaller, below main)
-        if (help_text && help_text[0] != '\0') {
-            lv_obj_t* help_lbl = lv_label_create(scr);
-            lv_label_set_text(help_lbl, help_text);
-            lv_obj_set_width(help_lbl, lv_pct(90));
-            lv_label_set_long_mode(help_lbl, LV_LABEL_LONG_WRAP);
-            lv_obj_set_style_text_color(help_lbl, lv_color_hex(0x888888), 0);
-            lv_obj_set_style_text_font(help_lbl, &noto_sans_16, 0);
-            lv_obj_set_style_text_align(help_lbl, LV_TEXT_ALIGN_CENTER, 0);
-            lv_obj_align(help_lbl, LV_ALIGN_CENTER, 0, 5);
-        }
-
-        // Subtitle (countdown updated externally)
-        lv_obj_t* sub_lbl = lv_label_create(scr);
-        std::string initial = subtitle_fn(rot_deg, timeout_ms / 1000);
-        lv_label_set_text(sub_lbl, initial.c_str());
-        lv_obj_set_width(sub_lbl, lv_pct(90));
-        lv_label_set_long_mode(sub_lbl, LV_LABEL_LONG_WRAP);
-        lv_obj_set_style_text_color(sub_lbl, lv_color_hex(0xaaaaaa), 0);
-        lv_obj_set_style_text_font(sub_lbl, &noto_sans_16, 0);
-        lv_obj_set_style_text_align(sub_lbl, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_align(sub_lbl, LV_ALIGN_CENTER, 0, 35);
-
-        return {sub_lbl, subtitle_fn};
-    };
-
-    // Disable LVGL's automatic input processing during probe — we read
-    // the touch device directly. Without this, both lv_timer_handler() and
-    // our direct read_cb call would consume evdev events, causing missed taps.
-    lv_indev_enable(m_pointer, false);
-
-    // Suppress the debounced resize fanout for the whole probe. Each rotation
-    // resizes the screen, and the registered theme/layout refresh runs inside
-    // the lv_timer_handler() call the tap poll below makes every iteration -
-    // seconds of it on a slow panel, during which no touch sample is taken.
-    // The confirmed rotation is re-applied at the end and Application refreshes
-    // the theme and LayoutManager once the probe returns.
-    struct ResizeFanoutSuspension {
-        explicit ResizeFanoutSuspension(DisplayManager* dm) : m_dm(dm) {
-            m_dm->set_resize_fanout_suspended(true);
-        }
-        ~ResizeFanoutSuspension() {
-            m_dm->set_resize_fanout_suspended(false);
-        }
-        ResizeFanoutSuspension(const ResizeFanoutSuspension&) = delete;
-        ResizeFanoutSuspension& operator=(const ResizeFanoutSuspension&) = delete;
-        DisplayManager* m_dm;
-    } resize_suspension(this);
-
-    // Latch presses on their edge instead of sampling the level. evdev drains
-    // its whole fd per read and reports only the final state, so a press and
-    // its release arriving between two polls would otherwise vanish. The
-    // coordinate half of the latch is contact-driven-device only: an SDL mouse
-    // reports motion with no button down and would latch on every wiggle.
-    helix::TapLatch tap_latch(!is_sdl);
-
-    // Sample the pointer once and feed the latch. Safe to call as often as we
-    // like; each call drains whatever evdev has buffered since the last one.
-    // The read callback is looked up per call, matching how the backend may
-    // replace the pointer device while the probe is running.
-    auto poll_pointer = [&]() {
-        lv_indev_read_cb_t read_cb = m_pointer ? lv_indev_get_read_cb(m_pointer) : nullptr;
-        if (!read_cb) {
-            return;
-        }
-        lv_indev_data_t data = {};
-        read_cb(m_pointer, &data);
-        tap_latch.feed(data);
-    };
-
-    // Poll until the contact lifts (or the deadline passes). Returns when the
-    // pointer reads RELEASED so a held finger cannot carry into the next screen.
-    auto drain_until_release = [&]() {
-        uint32_t release_deadline = get_ticks() + 2000; // 2s max
-        while (get_ticks() < release_deadline) {
-            lv_timer_handler();
-            delay(10);
-            lv_indev_read_cb_t read_cb = m_pointer ? lv_indev_get_read_cb(m_pointer) : nullptr;
-            if (!read_cb) {
-                break;
-            }
-            lv_indev_data_t release_data = {};
-            read_cb(m_pointer, &release_data);
-            if (release_data.state == LV_INDEV_STATE_RELEASED) {
-                break;
-            }
-        }
-    };
-
-    // Lambda for mini event loop that watches for tap.
-    // Returns immediately on confirmed tap (no post-tap delay).
-    auto wait_for_tap = [&](int timeout_ms, lv_obj_t* countdown_lbl, SubtitleFn subtitle_fn,
-                            int rot_deg) -> bool {
-        uint32_t start = get_ticks();
-        int last_sec = -1;
-
-        // Drop anything latched by the previous screen, and re-baseline the
-        // coordinate so the position left behind by the last tap cannot read as
-        // a fresh one. A contact that is still down here (a screen that timed
-        // out mid-press) is drained to its release rather than counted as a tap
-        // on this screen.
-        tap_latch.reset();
-        poll_pointer();
-        if (tap_latch.consume()) {
-            spdlog::debug("[DisplayManager] Rotation probe: contact still down at {}° entry, "
-                          "waiting for release",
-                          rot_deg);
-            drain_until_release();
-            tap_latch.reset();
-        }
-
-        // A tap detected here is drained to its release before returning, so a
-        // finger still down does not carry into the next screen as a phantom.
-        auto accept_tap = [&]() {
-            spdlog::info("[DisplayManager] Rotation probe: tap detected at {}° ({})", rot_deg,
-                         tap_latch.from_collapsed_read() ? "recovered from collapsed read"
-                                                         : "press observed");
-            tap_latch.consume();
-            drain_until_release();
-            tap_latch.reset();
-        };
-
-        while (true) {
-            uint32_t elapsed = get_ticks() - start;
-            if (elapsed >= static_cast<uint32_t>(timeout_ms)) {
-                return false;
-            }
-
-            // Sample either side of lv_timer_handler(): whatever it costs on
-            // this hardware, a tap that lands during it is still seen on the
-            // very next sample rather than after another full poll interval.
-            poll_pointer();
-            if (tap_latch.latched()) {
-                accept_tap();
-                return true;
-            }
-
-            lv_timer_handler();
-            delay(10);
-
-            poll_pointer();
-            if (tap_latch.latched()) {
-                accept_tap();
-                return true;
-            }
-
-            // Update countdown label
-            int remaining_sec = static_cast<int>((timeout_ms - elapsed + 999) / 1000);
-            if (remaining_sec != last_sec && countdown_lbl) {
-                std::string text = subtitle_fn(rot_deg, remaining_sec);
-                lv_label_set_text(countdown_lbl, text.c_str());
-                last_sec = remaining_sec;
-            }
-        }
-    };
-
-    int confirmed_rotation = -1;
-    const int max_cycles = 3;
-    int cycle = 0;
-
-    // Loop until user confirms a rotation. On real hardware, the wrong rotation
-    // renders unreadable text so the user can only tap the correct one.
-    // Safety: give up after max_cycles full sweeps to avoid infinite loop
-    // (e.g. uncalibrated resistive touchscreen that can't register taps).
-    while (confirmed_rotation < 0 && cycle < max_cycles) {
-        cycle++;
-        for (int i = 0; i < num_rotations; i++) {
-            // Apply rotation (skip on SDL — DIRECT render mode can't rotate)
-            if (!is_sdl) {
-                // Set the LVGL display rotation so the rendering actually
-                // changes on screen, then let the backend handle any
-                // hardware-specific adjustments (touch coords, etc.).
-                lv_display_set_rotation(m_display, rotations[i]);
-                m_backend->set_display_rotation(rotations[i], phys_w, phys_h);
-                m_width = lv_display_get_horizontal_resolution(m_display);
-                m_height = lv_display_get_vertical_resolution(m_display);
-            }
-
-            spdlog::info("[DisplayManager] Rotation probe: testing {}° ({}x{})",
-                         rotation_degrees[i], m_width, m_height);
-
-            // PHASE 1: Show "tap if readable"
-            auto scan_subtitle = [&](int rot_deg, int secs) -> std::string {
-                char buf[128];
-                snprintf(buf, sizeof(buf),
-                         lv_tr("Testing rotation: %d\xc2\xb0 (%d/%d) - %ds remaining"), rot_deg,
-                         i + 1, num_rotations, secs);
-                return buf;
-            };
-            auto [sub, sub_fn] = create_probe_screen(
-                lv_tr("Tap anywhere if this text is right-side up"),
-                lv_tr("HelixScreen is detecting your display orientation"), scan_subtitle,
-                rotation_degrees[i], scan_timeout_ms, lv_color_hex(0x1a1a2e));
-
-            bool tapped = wait_for_tap(scan_timeout_ms, sub, sub_fn, rotation_degrees[i]);
-
-            if (!tapped) {
-                continue;
-            }
-
-            // PHASE 2: Confirm
-            spdlog::info("[DisplayManager] Rotation probe: {}° tapped, confirming...",
-                         rotation_degrees[i]);
-
-            auto confirm_subtitle = [](int rot_deg, int secs) -> std::string {
-                char buf[128];
-                snprintf(buf, sizeof(buf),
-                         lv_tr("Rotation: %d\xc2\xb0 - %ds remaining (or wait to retry)"), rot_deg,
-                         secs);
-                return buf;
-            };
-            auto [confirm_sub, confirm_fn] = create_probe_screen(
-                lv_tr("Tap again to confirm this orientation"), "", confirm_subtitle,
-                rotation_degrees[i], confirm_timeout_ms, lv_color_hex(0x1a2e1a));
-
-            bool confirmed =
-                wait_for_tap(confirm_timeout_ms, confirm_sub, confirm_fn, rotation_degrees[i]);
-
-            if (confirmed) {
-                confirmed_rotation = rotation_degrees[i];
-                spdlog::info("[DisplayManager] Rotation probe: {}° confirmed!", confirmed_rotation);
-                break;
-            }
-
-            spdlog::info("[DisplayManager] Rotation probe: {}° not confirmed, continuing scan",
-                         rotation_degrees[i]);
-        }
-    }
-
-    // If probe timed out without confirmation, default to 0°
-    if (confirmed_rotation < 0) {
-        spdlog::warn("[DisplayManager] Rotation probe: no confirmation after {} cycles, "
-                     "defaulting to 0°",
-                     max_cycles);
-        confirmed_rotation = 0;
-    }
-
-    // Save confirmed rotation
-    helix::Config* cfg = helix::Config::get_instance();
-    cfg->set("/display/rotation_probed", true);
-    cfg->set("/display/rotate", confirmed_rotation);
-    cfg->save();
-    spdlog::info("[DisplayManager] Rotation probe saved: {}°", confirmed_rotation);
-
-    // Ensure display is at the confirmed rotation
-    if (!is_sdl) {
-        lv_display_rotation_t confirmed_lv_rot = degrees_to_lv_rotation(confirmed_rotation);
-        lv_display_set_rotation(m_display, confirmed_lv_rot);
-        m_backend->set_display_rotation(confirmed_lv_rot, phys_w, phys_h);
-        m_width = lv_display_get_horizontal_resolution(m_display);
-        m_height = lv_display_get_vertical_resolution(m_display);
-    }
-
-    // Re-enable LVGL input processing for normal operation
-    lv_indev_enable(m_pointer, true);
-
-    // Clean screen and reset background for normal UI init.
-    // lv_obj_clean() only removes children — the screen's own bg style
-    // (set by the probe) must be explicitly cleared so the theme can apply.
-    lv_obj_t* scr = lv_screen_active();
-    lv_obj_clean(scr);
-    lv_obj_remove_local_style_prop(scr, LV_STYLE_BG_COLOR, LV_PART_MAIN);
-    lv_obj_remove_local_style_prop(scr, LV_STYLE_BG_OPA, LV_PART_MAIN);
+void DisplayManager::settle_display_rotation(lv_display_rotation_t rot, int phys_w, int phys_h) {
+    // The backend may clear LVGL's rotation when the scanout plane rotates instead (#1275,
+    // #1587), which is why width()/height() read the display rather than a cache.
+    m_backend->set_display_rotation(m_display, rot, phys_w, phys_h);
 }
 
 // ============================================================================
@@ -2010,20 +1198,9 @@ void DisplayManager::resize_timer_cb(lv_timer_t* timer) {
         return;
     }
 
-    // Refresh cached dimensions from LVGL before fanning out callbacks.
-    // lv_display_set_resolution() (e.g. from the Android SDL window resize
-    // path on fold/unfold) does not update m_width/m_height, so without
-    // this any callback that reads dm->width()/height() would see stale
-    // startup values.  Reordering also catches non-rotation resizes from
-    // any future code path that calls lv_display_set_resolution directly.
-    if (self->m_display) {
-        self->m_width = lv_display_get_horizontal_resolution(self->m_display);
-        self->m_height = lv_display_get_vertical_resolution(self->m_display);
-    }
-
     spdlog::debug(
         "[DisplayManager] Resize debounce complete: {}x{}, calling {} registered callbacks",
-        self->m_width, self->m_height, self->m_resize_callbacks.size());
+        self->width(), self->height(), self->m_resize_callbacks.size());
 
     // Call all registered callbacks
     for (auto callback : self->m_resize_callbacks) {
@@ -2132,8 +1309,10 @@ void DisplayManager::install_color_transform_hook() {
                 const lv_color_format_t cf = lv_display_get_color_format(d);
                 const int w = lv_area_get_width(area);
                 const int h = lv_area_get_height(area);
-                const int stride = lv_draw_buf_width_to_stride(w, cf);
-                self->m_color_transform.apply(px_map, w, h, stride, cf);
+                const auto reg = helix::ColorTransform::select_flush_region(
+                    lv_display_get_buf_active(d), *area, cf, lv_display_get_render_mode(d));
+                self->m_color_transform.apply_area(px_map, reg.stride_bytes, reg.x, reg.y, w, h,
+                                                   cf);
             }
             // Mirror the (post-transform) pixels to any remote-screen sink. Runs
             // on every flush regardless of the color transform (the U1 has none).
@@ -2148,15 +1327,10 @@ void DisplayManager::install_color_transform_hook() {
                 f.disp_w = lv_display_get_horizontal_resolution(d);
                 f.disp_h = lv_display_get_vertical_resolution(d);
                 f.color_format = (int)cf;
-                // Use the ACTUAL draw-buffer stride, not width_to_stride(area_w):
-                // the DRM backend renders into dumb buffers whose pitch is aligned
-                // and may exceed the area width (direct/full render mode). Reading
-                // px_map with the wrong stride mis-tracks rows. Fall back to the
-                // computed stride only if the active buffer can't be queried.
+                // Same dbuf-stride-or-fallback rule the colour-transform walk
+                // uses; the shared helper owns the derivation (#1610).
                 lv_draw_buf_t* dbuf = lv_display_get_buf_active(d);
-                f.src_stride = (dbuf && dbuf->header.stride > 0)
-                                   ? static_cast<uint32_t>(dbuf->header.stride)
-                                   : lv_draw_buf_width_to_stride(lv_area_get_width(area), cf);
+                f.src_stride = helix::flush_px_map_stride(dbuf, lv_area_get_width(area), cf);
                 // Hand the sink the real readable length so it never has to guess
                 // one from stride * disp_h. Only claim it when px_map IS the active
                 // draw buffer: with screen rotation (and any other backend that
@@ -2208,6 +1382,10 @@ void DisplayManager::set_color_transform(float gamma, int warmth, int tint) {
     if (m_display) {
         // Force a full repaint so the new LUT is visible immediately.
         lv_obj_invalidate(lv_display_get_screen_active(m_display));
+        // Every pixel the backend already holds carries the previous transform.
+        if (m_backend) {
+            m_backend->request_full_upload();
+        }
     }
     spdlog::info("[DisplayManager] Color transform: gamma={:.2f}, warmth={}, tint={} (identity={})",
                  gamma, warmth, tint, m_color_transform.is_identity());

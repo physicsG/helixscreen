@@ -17,6 +17,7 @@ namespace helix::gcode {
  *   ; filament_colour = "#FF0000"
  *   ; filament_colour = #800080,#63A5BB,#000000,#FFFFFF
  *   ;extruder_color = #00FF00
+ *   ; filament_colour: #FF0000;#00FF00
  *
  * Recognized keys (case-insensitive): `extruder_colour`, `extruder_color`,
  * `filament_colour`, `filament_color`.

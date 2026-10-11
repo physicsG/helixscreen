@@ -4,9 +4,11 @@
 #pragma once
 
 #include "ui_observer_guard.h"
+#include "ui_widget_ref.h"
 
 #include "async_lifetime_guard.h"
-#include "panel_widget.h"
+#include "src/ui/panel_widgets/tiled_panel_widget.h"
+#include "subject_managed_panel.h"
 
 #include <memory>
 
@@ -14,7 +16,7 @@ class IMoonrakerAPI;
 
 namespace helix {
 
-class ActiveSpoolWidget : public PanelWidget {
+class ActiveSpoolWidget : public TiledPanelWidget {
   public:
     explicit ActiveSpoolWidget(IMoonrakerAPI* api);
     ~ActiveSpoolWidget() override;
@@ -25,27 +27,31 @@ class ActiveSpoolWidget : public PanelWidget {
     const char* id() const override {
         return "active_spool";
     }
-
+    /// The wide row lays itself out in any box it is given; the compact form
+    /// is a sized tile and refuses what TileSizing cannot draw.
+    bool fits_at(int width_px, int height_px) const override {
+        return is_wide_at(width_px, height_px) || sizing_.fits(width_px, height_px);
+    }
     static void clicked_cb(lv_event_t* e);
 
   private:
     IMoonrakerAPI* api_;
 
-    lv_obj_t* widget_obj_ = nullptr;
-    lv_obj_t* parent_screen_ = nullptr;
+    helix::ui::WidgetRef widget_obj_;
+    helix::ui::WidgetRef parent_screen_;
 
     // Compact mode elements
-    lv_obj_t* spool_compact_ = nullptr;
+    helix::ui::WidgetRef spool_compact_;
 
     // Wide mode elements
-    lv_obj_t* wide_layout_ = nullptr;
-    lv_obj_t* spool_wide_ = nullptr;
-    lv_obj_t* material_label_ = nullptr;
-    lv_obj_t* brand_color_label_ = nullptr;
-    lv_obj_t* weight_label_ = nullptr;
+    helix::ui::WidgetRef spool_wide_;
+    helix::ui::WidgetRef material_label_;
+    helix::ui::WidgetRef brand_color_label_;
+    helix::ui::WidgetRef weight_label_;
 
-    // No-spool label
-    lv_obj_t* no_spool_label_ = nullptr;
+    lv_subject_t wide_subject_{};   ///< 1 while the wide row is shown
+    lv_subject_t loaded_subject_{}; ///< 1 while a spool is active
+    SubjectManager subjects_;
 
     ObserverGuard spool_color_observer_;
     ObserverGuard current_slot_observer_;
@@ -61,9 +67,12 @@ class ActiveSpoolWidget : public PanelWidget {
 
     bool is_wide_ = false;
 
+    /// Wide once the box holds the text row beside a full-size spool.
+    static bool is_wide_at(int width_px, int height_px);
+    static int wide_spool_edge();
+
     void update_spool_display();
     void resize_spool_canvases();
-    void apply_layout_visibility();
     void handle_clicked();
     void open_external_spool_edit();
 };

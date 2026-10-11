@@ -22,8 +22,8 @@
     <style name="pad_micro"
            pad_left="#space_md" pad_right="#space_md" pad_top="#space_sm" pad_bottom="#space_sm" pad_gap="#space_sm"/>
   </styles>
-  <view extends="lv_obj"
-        width="100%" height="content" flex_flow="row" style_flex_cross_place="center"
+  <view name="setting_group_header"
+        extends="lv_obj" width="100%" height="content" flex_flow="row" style_flex_cross_place="center"
         style_flex_main_place="space_between" style_bg_opa="0" style_border_width="0" scrollable="false">
     <bind_style_if_eq name="pad_micro" subject="ui_breakpoint" ref_value="0"/>
     <bind_style_if_ge name="pad_standard" subject="ui_breakpoint" ref_value="1"/>

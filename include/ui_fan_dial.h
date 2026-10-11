@@ -155,6 +155,6 @@ class FanDial {
  * @brief Register fan dial XML event callbacks
  *
  * Must be called before creating any FanDial widgets via XML.
- * Registers: on_fan_dial_value_changed, on_fan_dial_switch_changed
+ * Registers: on_fan_dial_switch_changed
  */
 void register_fan_dial_callbacks();

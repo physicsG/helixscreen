@@ -15,7 +15,7 @@ VENV_PIP := $(VENV)/bin/pip3
 # The script is organized into functions by dependency category:
 #   - check_essential: CC, CXX, make, pkg-config
 #   - check_submodules: LVGL, spdlog, libhv, wpa_supplicant
-#   - check_libraries: fmt, OpenSSL
+#   - check_libraries: fmt, OpenSSL, libhv, libnl, libusb (required on Linux), ALSA (warns on Linux)
 #   - check_desktop_tools: SDL2, npm, python venv, clang-format (--minimal skips)
 #   - check_canvas_libs: cairo, pango, libpng (--minimal skips)
 #
@@ -115,6 +115,12 @@ install-deps:
 			openssl:brew) echo "openssl";; \
 			openssl:apt) echo "libssl-dev";; \
 			openssl:dnf) echo "openssl-devel";; \
+			libusb:brew) echo "libusb";; \
+			libusb:apt) echo "libusb-1.0-0-dev";; \
+			libusb:dnf) echo "libusb1-devel";; \
+			alsa:brew) echo "";; \
+			alsa:apt) echo "libasound2-dev";; \
+			alsa:dnf) echo "alsa-lib-devel";; \
 			shellcheck:brew|shellcheck:apt) echo "shellcheck";; \
 			shellcheck:dnf) echo "ShellCheck";; \
 			bats:brew) echo "bats-core";; \
@@ -171,6 +177,12 @@ install-deps:
 		fi; \
 		if ! pkg-config --exists librsvg-2.0 2>/dev/null; then \
 			INSTALL_NEEDED=1; TO_INSTALL="$$TO_INSTALL $$(add_pkg librsvg)"; \
+		fi; \
+		if ! pkg-config --exists libusb-1.0 2>/dev/null; then \
+			INSTALL_NEEDED=1; TO_INSTALL="$$TO_INSTALL $$(add_pkg libusb)"; \
+		fi; \
+		if [ "$(UNAME_S)" = "Linux" ] && ! pkg-config --exists alsa 2>/dev/null; then \
+			INSTALL_NEEDED=1; TO_INSTALL="$$TO_INSTALL $$(add_pkg alsa)"; \
 		fi; \
 		if [ "$(UNAME_S)" != "Darwin" ]; then \
 			if ! pkg-config --exists openssl 2>/dev/null && ! pkg-config --exists libssl 2>/dev/null; then \
@@ -343,6 +355,26 @@ libs-clean: libhv-clean sdl2-clean lvgl-clean libnl-clean wpa-clean
 # clean step below and the cross-compile lock (mk/cross.mk).
 LIBHV_OBJDIR := $(abspath $(BUILD_DIR)/libhv-objs)
 
+# libhv's `make libhv` copies every header into include/hv/ on each run, and
+# $(LIBHV_JSON_HEADER) is a prerequisite of every C++ object, so a fresh mtime
+# there rebuilds the whole tree. This wrapper restores the mtime of each header
+# whose bytes did not change, so a cross build in this tree leaves native
+# objects up to date.
+LIBHV_KEEP_MTIMES := scripts/keep-unchanged-mtimes.sh $(LIBHV_DIR)/include/hv --
+# The cross recipe clears MAKEFLAGS for libhv's sub-make, which also drops -n;
+# make runs any recipe line naming $(MAKE) even under -n, so without this a
+# `make -n PLATFORM_TARGET=...` really compiles libhv.
+LIBHV_DRY_RUN = $(if $(findstring n,$(firstword -$(MAKEFLAGS))),-n)
+
+# libhv's Makefile takes `CXXFLAGS ?=` and `CFLAGS ?=`, so any flags reaching it
+# replace its own. test-asan/test-tsan re-invoke make with a sanitizer CXXFLAGS
+# on the command line, and make hands a command-line variable to every sub-make
+# twice: in MAKEFLAGS and as an exported environment variable. Either one alone
+# instruments $(BUILD_DIR)/lib/libhv.a, which is shared by every flavour, and a
+# plain build then fails to link on undefined __asan_* symbols. The empty
+# MAKEOVERRIDES drops the MAKEFLAGS copy while keeping the jobserver; `env -u`
+# on the native recipes drops the environment copy.
+libhv-build: MAKEOVERRIDES :=
 libhv-build:
 	$(ECHO) "$(CYAN)Building libhv...$(RESET)"
 	$(Q)mkdir -p $(BUILD_DIR)/lib $(LIBHV_OBJDIR)/lib
@@ -353,23 +385,15 @@ ifneq ($(CROSS_COMPILE),)
 	$(Q)OPENSSL_PREFIX=""; \
 	OPENSSL_INC=""; \
 	OPENSSL_LIB_DIR=""; \
-	OPENSSL_ARCHIVES=""; \
 	if [ "$(ENABLE_SSL)" = "yes" ]; then \
 		case "$(PLATFORM_TARGET)" in \
 			ad5m|cc1) OPENSSL_PREFIX="/opt/arm-toolchain/arm-none-linux-gnueabihf" ;; \
-			ad5x) OPENSSL_PREFIX="/opt/mipsel-zmod-ad5x/mipsel-buildroot-linux-gnu/sysroot/usr" ;; \
-			mips|k1) OPENSSL_PREFIX="/opt/mips-toolchain/mipsel-buildroot-linux-musl/sysroot/usr" ;; \
+			mips|k1|ad5x) OPENSSL_PREFIX="/opt/k1-toolchain/mipsel-k1-linux-musl/sysroot/usr" ;; \
 			k2) OPENSSL_PREFIX="/opt/arm-musl-toolchain/arm-buildroot-linux-musleabihf/sysroot/usr" ;; \
 		esac; \
 		if [ -n "$$OPENSSL_PREFIX" ]; then \
 			OPENSSL_INC=" -I$$OPENSSL_PREFIX/include"; \
 			OPENSSL_LIB_DIR="-L$$OPENSSL_PREFIX/lib"; \
-			if [ -f "$$OPENSSL_PREFIX/lib/libssl.a" ] && [ -f "$$OPENSSL_PREFIX/lib/libcrypto.a" ]; then \
-				OPENSSL_ARCHIVES="$$OPENSSL_PREFIX/lib/libssl.a $$OPENSSL_PREFIX/lib/libcrypto.a"; \
-			fi; \
-			case "$(PLATFORM_TARGET)" in \
-				ad5x) OPENSSL_ARCHIVES="" ;; \
-			esac; \
 		fi; \
 	fi; \
 	(cd $(LIBHV_DIR) && \
@@ -377,7 +401,7 @@ ifneq ($(CROSS_COMPILE),)
 		CFLAGS="$(TARGET_CFLAGS) $(SANITIZE_FLAGS)$$OPENSSL_INC" \
 		CXXFLAGS="$(TARGET_CFLAGS) $(SANITIZE_FLAGS)$$OPENSSL_INC" \
 		LDFLAGS="$$OPENSSL_LIB_DIR $(SANITIZE_FLAGS)" \
-		./configure --with-http-client $(if $(filter yes,$(ENABLE_SSL)),--with-openssl)); \
+		./configure --with-http-client $(if $(filter yes,$(ENABLE_SSL)),--with-openssl))
 	# libhv's nested make has been flaky under cross toolchains when run with
 	# inherited/parallel jobserver flags; keep only this sub-build serialized.
 	# LDFLAGS= override prevents the parent's link flags (which on this project
@@ -385,11 +409,9 @@ ifneq ($(CROSS_COMPILE),)
 	# `build/lib/libwpa_client.a`) from leaking in via the environment — those
 	# paths resolve relative to libhv's own working directory, where they don't
 	# exist, breaking libhv's internal example/test links under test-asan/tsan.
-	if [ -n "$$OPENSSL_ARCHIVES" ]; then \
-		CC="$(CC)" CXX="$(CXX)" AR="$(AR)" MAKEFLAGS= $(MAKE) -j1 -C $(LIBHV_DIR) OBJDIR="$(LIBHV_OBJDIR)" LIBDIR="$(LIBHV_OBJDIR)/lib" LDFLAGS= LIBHV_TARGET_TYPE=STATIC OPENSSL_LIBS="$$OPENSSL_ARCHIVES" libhv; \
-	else \
-		CC="$(CC)" CXX="$(CXX)" AR="$(AR)" MAKEFLAGS= $(MAKE) -j1 -C $(LIBHV_DIR) OBJDIR="$(LIBHV_OBJDIR)" LIBDIR="$(LIBHV_OBJDIR)/lib" LDFLAGS= LIBHV_TARGET_TYPE=STATIC libhv; \
-	fi
+	# OpenSSL reaches the binary at the app link (-lssl -lcrypto in the
+	# Makefile); a STATIC libhv is an `ar` of objects and links nothing.
+	$(Q)CC="$(CC)" CXX="$(CXX)" AR="$(AR)" MAKEFLAGS= $(LIBHV_KEEP_MTIMES) $(MAKE) -j1 $(LIBHV_DRY_RUN) -C $(LIBHV_DIR) OBJDIR="$(LIBHV_OBJDIR)" LIBDIR="$(LIBHV_OBJDIR)/lib" LDFLAGS= LIBHV_TARGET_TYPE=STATIC libhv
 else ifeq ($(UNAME_S),Darwin)
 	$(Q)cd $(LIBHV_DIR) && \
 		MACOSX_DEPLOYMENT_TARGET=$(MACOS_MIN_VERSION) \
@@ -400,13 +422,13 @@ else ifeq ($(UNAME_S),Darwin)
 	# because libhv's Makefile doesn't pass `-framework CoreFoundation -framework
 	# Security` (needed by ssl/appletls.o). We only consume libhv as a static
 	# archive anyway, so the dylib is just dead weight that breaks the build.
-	$(Q)MACOSX_DEPLOYMENT_TARGET=$(MACOS_MIN_VERSION) $(MAKE) -C $(LIBHV_DIR) OBJDIR="$(LIBHV_OBJDIR)" LIBDIR="$(LIBHV_OBJDIR)/lib" LDFLAGS= LIBHV_TARGET_TYPE=STATIC libhv
+	$(Q)$(LIBHV_KEEP_MTIMES) env -u CFLAGS -u CXXFLAGS MACOSX_DEPLOYMENT_TARGET=$(MACOS_MIN_VERSION) $(MAKE) -C $(LIBHV_DIR) OBJDIR="$(LIBHV_OBJDIR)" LIBDIR="$(LIBHV_OBJDIR)/lib" LDFLAGS= LIBHV_TARGET_TYPE=STATIC libhv
 else
-	$(Q)cd $(LIBHV_DIR) && ./configure --with-http-client $(if $(filter yes,$(ENABLE_SSL)),--with-openssl)
+	$(Q)cd $(LIBHV_DIR) && env -u CFLAGS -u CXXFLAGS ./configure --with-http-client $(if $(filter yes,$(ENABLE_SSL)),--with-openssl)
 	# LDFLAGS= override: see cross-compile branch above for rationale. Critical
 	# for test-asan/test-tsan where the parent invokes us with the project's
 	# full LDFLAGS containing `build/lib/lib*.a` paths.
-	$(Q)$(MAKE) -C $(LIBHV_DIR) OBJDIR="$(LIBHV_OBJDIR)" LIBDIR="$(LIBHV_OBJDIR)/lib" LDFLAGS= libhv
+	$(Q)$(LIBHV_KEEP_MTIMES) env -u CFLAGS -u CXXFLAGS $(MAKE) -C $(LIBHV_DIR) OBJDIR="$(LIBHV_OBJDIR)" LIBDIR="$(LIBHV_OBJDIR)/lib" LDFLAGS= libhv
 endif
 	# Copy built library from the per-arch out-of-tree objdir to the architecture-
 	# specific output directory. Falls back to the legacy in-tree locations so an
@@ -414,6 +436,9 @@ endif
 	$(Q)cp $(LIBHV_OBJDIR)/lib/libhv.a $(BUILD_DIR)/lib/libhv.a 2>/dev/null || \
 		cp $(LIBHV_DIR)/lib/libhv.a $(BUILD_DIR)/lib/libhv.a 2>/dev/null || \
 		cp $(LIBHV_DIR)/libhv.a $(BUILD_DIR)/lib/libhv.a
+	@# libhv's own build installs the include/hv/ copies our -isystem path
+	@# resolves to, so the tracked header set is only complete once this ran.
+	$(call record_abi_stamp)
 	$(ECHO) "$(GREEN)✓ libhv built: $(BUILD_DIR)/lib/libhv.a$(RESET)"
 
 # Build libnl from submodule (autotools)
@@ -539,6 +564,34 @@ $(SDL2_LIB):
 # NOTE: Make conditionals (ifneq/else/endif) CANNOT be used inside recipes!
 # They are processed at parse time, not run time. Use shell conditionals instead.
 
+# wpa_supplicant builds its objects INSIDE the submodule tree, which every target
+# in this checkout shares, and nothing on that path is platform-qualified. So the
+# second target to build re-archives the first one's objects: an ARM object lands
+# in an x86 libwpa_client.a and ld reports "relocations in generic ELF (EM: 40)",
+# or links quietly when the two arches are close enough to fool it.
+#
+# The stamp records who owns the objects currently in the tree; a different owner
+# cleans before building. The key is PLATFORM_TARGET *and* the compiler triple,
+# and it needs both halves: pi, pi-fbdev and pi-both all resolve to
+# aarch64-linux-gnu so the triple alone would let them inherit each other's
+# objects built under different -march flags, while PLATFORM_TARGET alone would
+# not notice the toolchain under one platform name being swapped.
+# (prestonbrown/helixscreen#1481)
+WPA_TOOLCHAIN_STAMP := $(WPA_DIR)/.helix-toolchain
+define wpa-clean-if-foreign
+	$(Q)want="$(PLATFORM_TARGET)|$$($(CC) -dumpmachine 2>/dev/null || echo unknown)"; \
+	have=$$(cat $(WPA_TOOLCHAIN_STAMP) 2>/dev/null || echo none); \
+	if [ "$$want" != "$$have" ]; then \
+		if [ "$$have" != none ]; then \
+			echo "$(YELLOW)→ wpa_supplicant objects belong to $$have — cleaning for $$want$(RESET)"; \
+		fi; \
+		$(MAKE) -C $(WPA_DIR)/wpa_supplicant clean >/dev/null 2>&1 || true; \
+		rm -rf $(WPA_DIR)/build; \
+		rm -f $(WPA_DIR)/wpa_supplicant/libwpa_client.a; \
+		echo "$$want" > $(WPA_TOOLCHAIN_STAMP); \
+	fi
+endef
+
 # Linux native build (not macOS, not cross-compiling)
 ifeq ($(UNAME_S),Linux)
 ifndef CROSS_COMPILE
@@ -554,6 +607,7 @@ $(WPA_CLIENT_LIB): | $(BUILD_DIR)/lib
 			exit 1; \
 		fi; \
 	fi
+	$(call wpa-clean-if-foreign)
 	$(Q)$(MAKE) -C $(WPA_DIR)/wpa_supplicant libwpa_client.a
 	$(Q)rm -f $(BUILD_DIR)/lib/libwpa_client.a 2>/dev/null || true
 	$(Q)cp $(WPA_DIR)/wpa_supplicant/libwpa_client.a $(BUILD_DIR)/lib/libwpa_client.a
@@ -586,11 +640,7 @@ $(WPA_CLIENT_LIB): | $(BUILD_DIR)/lib libnl-build
 			exit 1; \
 		fi; \
 	fi
-	$(Q)if [ -f "$(WPA_DIR)/wpa_supplicant/libwpa_client.a" ] || [ -d "$(WPA_DIR)/build" ]; then \
-		echo "$(YELLOW)→ Cleaning wpa_supplicant in-tree artifacts for cross-compilation...$(RESET)"; \
-		$(MAKE) -C $(WPA_DIR)/wpa_supplicant clean; \
-		rm -rf $(WPA_DIR)/build; \
-	fi
+	$(call wpa-clean-if-foreign)
 	@# Use env -u to unset inherited CFLAGS from parent make, then set clean values
 	@# wpa_supplicant uses EXTRA_CFLAGS for additional flags
 	@# LIBNL_INC/LIBNL_LIB point to our cross-compiled libnl
@@ -683,7 +733,7 @@ help-build:
 	echo "  $${G}setup-hooks$${X}         - Enable git pre-commit hooks (clang-format)"; \
 	echo ""; \
 	echo "$${C}Patches:$${X}"; \
-	echo "  $${G}apply-patches$${X}       - Apply LVGL/libhv patches (idempotent)"; \
+	echo "  $${G}apply-patches$${X}       - Apply LVGL/libhv/Lua patches (idempotent)"; \
 	echo "  $${G}reset-patches$${X}       - Reset patched files to upstream"; \
 	echo "  $${G}reapply-patches$${X}     - Force reapply all patches"; \
 	echo ""; \

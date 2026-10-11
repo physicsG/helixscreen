@@ -10,6 +10,7 @@
   <view name="row"
         extends="lv_obj" width="100%" height="content" flex_flow="row" style_flex_cross_place="center"
         style_pad_all="#space_md" style_pad_gap="#space_md" style_radius="#space_sm" scrollable="false" clickable="true">
+    <style name="styles.press_wash" selector="pressed"/>
     <!-- Color swatch (filled for a mapped slot, warning-bordered transparent
          for an empty slot — handled by C++ post-config). -->
     <lv_obj name="swatch"

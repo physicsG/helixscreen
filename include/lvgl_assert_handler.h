@@ -17,6 +17,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -73,10 +74,14 @@ static inline void helix_print_backtrace(int fd) {
  */
 static inline void helix_lvgl_assert_handler(const char* file, int line, const char* func) {
     // Get timestamp
+    // LVGL's lv_assert.h pulls this header into C translation units too, so the
+    // zeroing cannot use an empty brace initializer.
     time_t now = time(NULL);
-    struct tm* tm_info = localtime(&now);
+    struct tm tm_buf;
+    memset(&tm_buf, 0, sizeof(tm_buf));
+    localtime_r(&now, &tm_buf);
     char time_buf[32];
-    strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", tm_info);
+    strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &tm_buf);
 
     // Log to stderr (captured by syslog on embedded)
     fprintf(stderr,
@@ -92,7 +97,7 @@ static inline void helix_lvgl_assert_handler(const char* file, int line, const c
             "║ Common causes:                                               ║\n"
             "║   1. lv_obj_invalidate() during render phase                 ║\n"
             "║   2. Subject observers triggering UI updates                 ║\n"
-            "║   3. Async callbacks not using helix::ui::async_call()               ║\n"
+            "║   3. Async callbacks not using helix::ui::queue_update()             ║\n"
             "║   4. NULL font/text/attributes in text operations            ║\n"
             "╚══════════════════════════════════════════════════════════════╝\n",
             time_buf, file, line, func);

@@ -10,6 +10,7 @@
 #include "printer_state.h"
 #include "static_panel_registry.h"
 #include "theme_manager.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <lvgl/lvgl.h>
 #include <spdlog/spdlog.h>
@@ -27,10 +28,10 @@ extern lv_font_t mdi_icons_48;
  * @brief Create a single icon display item
  *
  * @param parent Parent container for the item
- * @param icon Icon mapping from ui_icon::ICON_MAP
+ * @param icon Icon mapping from helix::ui::icon::ICON_MAP
  * @return lv_obj_t* The created item container
  */
-static lv_obj_t* create_icon_item(lv_obj_t* parent, const ui_icon::IconMapping& icon) {
+static lv_obj_t* create_icon_item(lv_obj_t* parent, const helix::ui::icon::IconMapping& icon) {
     // Container for this icon item
     lv_obj_t* item = lv_obj_create(parent);
     lv_obj_set_width(item, LV_PCT(100));
@@ -109,10 +110,10 @@ void GlyphsPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
 
 void GlyphsPanel::populate_glyphs() {
     // Update icon count in header
-    lv_obj_t* count_label = lv_obj_find_by_name(panel_, "glyph_count_label");
+    lv_obj_t* count_label = helix::ui::find_required(panel_, "glyph_count_label", get_name());
     if (count_label) {
         char count_text[32];
-        snprintf(count_text, sizeof(count_text), "%zu icons", ui_icon::ICON_MAP_SIZE);
+        snprintf(count_text, sizeof(count_text), "%zu icons", helix::ui::icon::ICON_MAP_SIZE);
         lv_label_set_text(count_label, count_text);
     }
 
@@ -132,30 +133,24 @@ void GlyphsPanel::populate_glyphs() {
 
     // Add all MDI icon items to the content area
     spdlog::debug("[{}] Adding {} MDI icon items to content area", get_name(),
-                  ui_icon::ICON_MAP_SIZE);
-    for (size_t i = 0; i < ui_icon::ICON_MAP_SIZE; i++) {
-        create_icon_item(content_area, ui_icon::ICON_MAP[i]);
+                  helix::ui::icon::ICON_MAP_SIZE);
+    for (size_t i = 0; i < helix::ui::icon::ICON_MAP_SIZE; i++) {
+        create_icon_item(content_area, helix::ui::icon::ICON_MAP[i]);
     }
 
     // Force layout update to ensure scrolling works correctly
     lv_obj_update_layout(panel_);
 
-    spdlog::info("[{}] Setup complete with {} MDI icons", get_name(), ui_icon::ICON_MAP_SIZE);
+    spdlog::info("[{}] Setup complete with {} MDI icons", get_name(),
+                 helix::ui::icon::ICON_MAP_SIZE);
 }
 
 // ============================================================================
 // GLOBAL INSTANCE (needed by main.cpp)
 // ============================================================================
 
-static std::unique_ptr<GlyphsPanel> g_glyphs_panel;
-
 GlyphsPanel& get_global_glyphs_panel() {
-    if (!g_glyphs_panel) {
-        g_glyphs_panel = std::make_unique<GlyphsPanel>(get_printer_state(), nullptr);
-        StaticPanelRegistry::instance().register_destroy("GlyphsPanel",
-                                                         []() { g_glyphs_panel.reset(); });
-    }
-    return *g_glyphs_panel;
+    return helix::lazy_global<GlyphsPanel>("GlyphsPanel", get_printer_state(), nullptr);
 }
 
 // Legacy create wrapper (test panel - still used by main.cpp)

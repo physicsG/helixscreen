@@ -26,7 +26,8 @@
 namespace {
 
 // Rendering opacity values
-constexpr lv_opa_t GRID_LINE_OPACITY = LV_OPA_70; // 70% opacity for grid overlay
+constexpr lv_opa_t GRID_LINE_OPACITY = LV_OPA_70;      // Wireframe over the mesh surface
+constexpr lv_opa_t REFERENCE_GRID_OPACITY = LV_OPA_60; // Floor and wall grids
 
 // Visibility margin for partially visible geometry
 constexpr int VISIBILITY_MARGIN_PX = 10;
@@ -100,29 +101,6 @@ static inline bool is_line_visible(int x1, int y1, int x2, int y2, int canvas_wi
 }
 
 /**
- * Draw a single axis line from 3D start to 3D end point
- * Projects coordinates to 2D screen space and renders the line.
- * LVGL's layer system handles clipping automatically - no manual clipping needed.
- */
-static void draw_axis_line(lv_layer_t* layer, lv_draw_line_dsc_t* line_dsc, double start_x,
-                           double start_y, double start_z, double end_x, double end_y, double end_z,
-                           int canvas_width, int canvas_height,
-                           const bed_mesh_view_state_t* view_state) {
-    bed_mesh_point_3d_t start = bed_mesh_projection_project_3d_to_2d(
-        start_x, start_y, start_z, canvas_width, canvas_height, view_state);
-    bed_mesh_point_3d_t end = bed_mesh_projection_project_3d_to_2d(
-        end_x, end_y, end_z, canvas_width, canvas_height, view_state);
-
-    // Let LVGL handle clipping via the layer's clip area (same as mesh wireframe)
-    // The projected coordinates include layer_offset_x/y for screen positioning
-    line_dsc->p1.x = static_cast<lv_value_precise_t>(start.screen_x);
-    line_dsc->p1.y = static_cast<lv_value_precise_t>(start.screen_y);
-    line_dsc->p2.x = static_cast<lv_value_precise_t>(end.screen_x);
-    line_dsc->p2.y = static_cast<lv_value_precise_t>(end.screen_y);
-    lv_draw_line(layer, line_dsc);
-}
-
-/**
  * Draw a single axis line from 3D start to 3D end point into a pixel buffer.
  * Projects coordinates to 2D screen space and renders the line.
  * No LVGL calls — safe for background threads.
@@ -148,195 +126,136 @@ static void draw_axis_line_to_buffer(helix::mesh::PixelBuffer& buf, uint8_t r, u
 namespace helix {
 namespace mesh {
 
-void render_grid_lines(lv_layer_t* layer, const bed_mesh_renderer_t* renderer, int canvas_width,
-                       int canvas_height) {
-    if (!renderer || !renderer->has_mesh_data) {
+BedExtent compute_bed_extent(const bed_mesh_renderer_t* renderer) {
+    BedExtent ext{};
+    // geometry_computed is what makes bed_center/coord_scale meaningful; it is set
+    // together with the bed bounds by bed_mesh_renderer_set_bounds().
+    if (renderer->geometry_computed) {
+        ext.x_min_mm = renderer->bed_min_x;
+        ext.x_max_mm = renderer->bed_max_x;
+        ext.y_min_mm = renderer->bed_min_y;
+        ext.y_max_mm = renderer->bed_max_y;
+        ext.center_x = renderer->bed_center_x;
+        ext.center_y = renderer->bed_center_y;
+        ext.coord_scale = renderer->coord_scale;
+    } else {
+        ext.x_min_mm = 0.0;
+        ext.x_max_mm = (renderer->cols - 1) * BED_MESH_SCALE;
+        ext.y_min_mm = 0.0;
+        ext.y_max_mm = (renderer->rows - 1) * BED_MESH_SCALE;
+        ext.center_x = ext.x_max_mm / 2.0;
+        ext.center_y = ext.y_max_mm / 2.0;
+        ext.coord_scale = 1.0;
+    }
+    ext.half_width = (ext.x_max_mm - ext.x_min_mm) / 2.0 * ext.coord_scale;
+    ext.half_height = (ext.y_max_mm - ext.y_min_mm) / 2.0 * ext.coord_scale;
+
+    double z_min_world = mesh_z_to_world_z(renderer->mesh_min_z, renderer->cached_z_center,
+                                           renderer->view_state.z_scale);
+    double z_max_world = mesh_z_to_world_z(renderer->mesh_max_z, renderer->cached_z_center,
+                                           renderer->view_state.z_scale);
+    ext.walls = compute_wall_bounds(z_min_world, z_max_world, ext.half_width, ext.half_height);
+    return ext;
+}
+
+HeatmapLayout compute_heatmap_layout(int rows, int cols, int canvas_width, int canvas_height) {
+    constexpr int PADDING = 8;
+    HeatmapLayout l{};
+    l.cells_x = cols - 1;
+    l.cells_y = rows - 1;
+    if (l.cells_x <= 0 || l.cells_y <= 0) {
+        return l;
+    }
+    int grid_width = canvas_width - 2 * PADDING;
+    int grid_height = canvas_height - 2 * PADDING;
+    l.cell_w = std::max(1, grid_width / l.cells_x);
+    l.cell_h = std::max(1, grid_height / l.cells_y);
+    l.grid_x = PADDING + (grid_width - l.cell_w * l.cells_x) / 2;
+    l.grid_y = PADDING + (grid_height - l.cell_h * l.cells_y) / 2;
+    l.valid = true;
+    return l;
+}
+
+void render_heatmap_overlay(lv_layer_t* layer, const bed_mesh_renderer_t* renderer,
+                            const HeatmapLayout& l, int offset_x, int offset_y) {
+    if (!renderer || !l.valid) {
+        return;
+    }
+    const int grid_x = offset_x + l.grid_x;
+    const int grid_y = offset_y + l.grid_y;
+
+    // Subtle border around the entire grid
+    lv_draw_rect_dsc_t border_dsc;
+    lv_draw_rect_dsc_init(&border_dsc);
+    border_dsc.bg_opa = LV_OPA_TRANSP;
+    border_dsc.border_color = theme_manager_get_color("elevated_bg");
+    border_dsc.border_width = 1;
+    border_dsc.border_opa = LV_OPA_60;
+    border_dsc.radius = 2;
+
+    lv_area_t border_area;
+    border_area.x1 = grid_x - 1;
+    border_area.y1 = grid_y - 1;
+    border_area.x2 = grid_x + l.cells_x * l.cell_w + 1;
+    border_area.y2 = grid_y + l.cells_y * l.cell_h + 1;
+    lv_draw_rect(layer, &border_dsc, &border_area);
+
+    if (!renderer->touch_valid) {
         return;
     }
 
-    // Configure line drawing style
-    lv_draw_line_dsc_t line_dsc;
-    lv_draw_line_dsc_init(&line_dsc);
-    line_dsc.color = theme_manager_get_color("elevated_bg");
-    line_dsc.width = 1;
-    line_dsc.opa = GRID_LINE_OPACITY;
+    // Highlight the touched mesh cell
+    lv_draw_rect_dsc_t highlight_dsc;
+    lv_draw_rect_dsc_init(&highlight_dsc);
+    highlight_dsc.bg_opa = LV_OPA_20;
+    highlight_dsc.bg_color = lv_color_white();
+    highlight_dsc.border_color = lv_color_white();
+    highlight_dsc.border_width = 2;
+    highlight_dsc.border_opa = LV_OPA_COVER;
+    highlight_dsc.radius = 2;
 
-    // Use cached projected screen coordinates (SOA arrays - already computed in render function)
-    // This eliminates ~400 redundant projections for 20×20 mesh
-    const auto& screen_x = renderer->projected_screen_x;
-    const auto& screen_y = renderer->projected_screen_y;
+    lv_area_t highlight_area;
+    highlight_area.x1 = grid_x + renderer->touched_col * l.cell_w;
+    highlight_area.y1 = grid_y + renderer->touched_row * l.cell_h;
+    highlight_area.x2 = highlight_area.x1 + l.cell_w - 1;
+    highlight_area.y2 = highlight_area.y1 + l.cell_h - 1;
+    lv_draw_rect(layer, &highlight_dsc, &highlight_area);
 
-    // Draw horizontal grid lines (connect points in same row)
-    for (int row = 0; row < renderer->rows; row++) {
-        for (int col = 0; col < renderer->cols - 1; col++) {
-            int p1_x = screen_x[static_cast<size_t>(row)][static_cast<size_t>(col)];
-            int p1_y = screen_y[static_cast<size_t>(row)][static_cast<size_t>(col)];
-            int p2_x = screen_x[static_cast<size_t>(row)][static_cast<size_t>(col + 1)];
-            int p2_y = screen_y[static_cast<size_t>(row)][static_cast<size_t>(col + 1)];
+    // Z value tooltip, with the display offset added back to show the original probe height
+    char z_text[32];
+    snprintf(z_text, sizeof(z_text), "%.3f mm",
+             static_cast<double>(renderer->touched_z) + renderer->z_display_offset);
 
-            // Bounds check (allow some margin for partially visible lines)
-            if (is_line_visible(p1_x, p1_y, p2_x, p2_y, canvas_width, canvas_height)) {
-                // Set line endpoints in descriptor
-                line_dsc.p1.x = static_cast<lv_value_precise_t>(p1_x);
-                line_dsc.p1.y = static_cast<lv_value_precise_t>(p1_y);
-                line_dsc.p2.x = static_cast<lv_value_precise_t>(p2_x);
-                line_dsc.p2.y = static_cast<lv_value_precise_t>(p2_y);
-                lv_draw_line(layer, &line_dsc);
-            }
-        }
+    // Above the cell, or below it when the cell is near the top
+    int tooltip_x = highlight_area.x1 + l.cell_w / 2 - 30;
+    int tooltip_y = highlight_area.y1 - 24;
+    if (tooltip_y < offset_y + 5) {
+        tooltip_y = highlight_area.y2 + 5;
     }
 
-    // Draw vertical grid lines (connect points in same column)
-    for (int col = 0; col < renderer->cols; col++) {
-        for (int row = 0; row < renderer->rows - 1; row++) {
-            int p1_x = screen_x[static_cast<size_t>(row)][static_cast<size_t>(col)];
-            int p1_y = screen_y[static_cast<size_t>(row)][static_cast<size_t>(col)];
-            int p2_x = screen_x[static_cast<size_t>(row + 1)][static_cast<size_t>(col)];
-            int p2_y = screen_y[static_cast<size_t>(row + 1)][static_cast<size_t>(col)];
+    lv_draw_rect_dsc_t tooltip_bg;
+    lv_draw_rect_dsc_init(&tooltip_bg);
+    tooltip_bg.bg_color = theme_manager_get_color("card_bg");
+    tooltip_bg.bg_opa = LV_OPA_90;
+    tooltip_bg.radius = 6;
+    tooltip_bg.border_color = theme_manager_get_color("elevated_bg");
+    tooltip_bg.border_width = 1;
+    tooltip_bg.border_opa = LV_OPA_60;
 
-            // Bounds check
-            if (is_line_visible(p1_x, p1_y, p2_x, p2_y, canvas_width, canvas_height)) {
-                line_dsc.p1.x = static_cast<lv_value_precise_t>(p1_x);
-                line_dsc.p1.y = static_cast<lv_value_precise_t>(p1_y);
-                line_dsc.p2.x = static_cast<lv_value_precise_t>(p2_x);
-                line_dsc.p2.y = static_cast<lv_value_precise_t>(p2_y);
-                lv_draw_line(layer, &line_dsc);
-            }
-        }
-    }
-}
+    lv_area_t tooltip_area = {tooltip_x - 8, tooltip_y - 4, tooltip_x + 68, tooltip_y + 18};
+    lv_draw_rect(layer, &tooltip_bg, &tooltip_area);
 
-void render_reference_floor(lv_layer_t* layer, const bed_mesh_renderer_t* renderer,
-                            int canvas_width, int canvas_height) {
-    // Render all reference grids (floor + walls) BEFORE mesh surface
-    // The mesh surface is rendered on top, naturally occluding the floor grid
-    render_reference_grids(layer, renderer, canvas_width, canvas_height);
-}
+    lv_draw_label_dsc_t label_dsc;
+    lv_draw_label_dsc_init(&label_dsc);
+    label_dsc.color = theme_manager_get_color("text");
+    label_dsc.font = &noto_sans_14;
+    label_dsc.text = z_text;
+    label_dsc.text_local = 1; // z_text is a stack buffer; the draw is deferred
+    label_dsc.align = LV_TEXT_ALIGN_CENTER;
 
-void render_reference_walls(lv_layer_t* layer, const bed_mesh_renderer_t* renderer,
-                            int canvas_width, int canvas_height) {
-    // Stub - merged into render_reference_grids
-    (void)layer;
-    (void)renderer;
-    (void)canvas_width;
-    (void)canvas_height;
-}
-
-void render_reference_grids(lv_layer_t* layer, const bed_mesh_renderer_t* renderer,
-                            int canvas_width, int canvas_height) {
-    if (!renderer || !renderer->has_mesh_data) {
-        return;
-    }
-
-    // Use PRINTER BED bounds for grid extent (not mesh bounds)
-    // This makes the floor/walls larger than the mesh, so the mesh "floats" inside
-    double bed_half_width, bed_half_height;
-    if (renderer->has_bed_bounds) {
-        // Use actual bed dimensions, centered
-        bed_half_width = (renderer->bed_max_x - renderer->bed_min_x) / 2.0 * renderer->coord_scale;
-        bed_half_height = (renderer->bed_max_y - renderer->bed_min_y) / 2.0 * renderer->coord_scale;
-    } else {
-        // Fallback to mesh dimensions if no bed bounds
-        bed_half_width = (renderer->cols - 1) / 2.0 * BED_MESH_SCALE;
-        bed_half_height = (renderer->rows - 1) / 2.0 * BED_MESH_SCALE;
-    }
-
-    // Get printer-mm coordinate ranges to align walls with grid lines
-    double x_min_mm, x_max_mm, y_min_mm, y_max_mm;
-    double bed_center_x, bed_center_y, coord_scale;
-    if (renderer->has_bed_bounds && renderer->geometry_computed) {
-        x_min_mm = renderer->bed_min_x;
-        x_max_mm = renderer->bed_max_x;
-        y_min_mm = renderer->bed_min_y;
-        y_max_mm = renderer->bed_max_y;
-        bed_center_x = renderer->bed_center_x;
-        bed_center_y = renderer->bed_center_y;
-        coord_scale = renderer->coord_scale;
-    } else {
-        x_min_mm = 0.0;
-        x_max_mm = (renderer->cols - 1) * BED_MESH_SCALE;
-        y_min_mm = 0.0;
-        y_max_mm = (renderer->rows - 1) * BED_MESH_SCALE;
-        bed_center_x = x_max_mm / 2.0;
-        bed_center_y = y_max_mm / 2.0;
-        coord_scale = 1.0;
-    }
-
-    // Round to first/last grid line positions (aligned to GRID_SPACING_MM)
-    double x_grid_start = std::ceil(x_min_mm / GRID_SPACING_MM) * GRID_SPACING_MM;
-    double x_grid_end = std::floor(x_max_mm / GRID_SPACING_MM) * GRID_SPACING_MM;
-    double y_grid_start = std::ceil(y_min_mm / GRID_SPACING_MM) * GRID_SPACING_MM;
-    double y_grid_end = std::floor(y_max_mm / GRID_SPACING_MM) * GRID_SPACING_MM;
-
-    // Convert grid bounds to world coordinates for wall positioning
-    double x_min = helix::mesh::printer_x_to_world_x(x_grid_start, bed_center_x, coord_scale);
-    double x_max = helix::mesh::printer_x_to_world_x(x_grid_end, bed_center_x, coord_scale);
-    double y_min =
-        helix::mesh::printer_y_to_world_y(y_grid_end, bed_center_y, coord_scale); // Y inverted
-    double y_max =
-        helix::mesh::printer_y_to_world_y(y_grid_start, bed_center_y, coord_scale); // Y inverted
-
-    // Calculate Z range and wall bounds using centralized function
-    double z_min_world = helix::mesh::mesh_z_to_world_z(
-        renderer->mesh_min_z, renderer->cached_z_center, renderer->view_state.z_scale);
-    double z_max_world = helix::mesh::mesh_z_to_world_z(
-        renderer->mesh_max_z, renderer->cached_z_center, renderer->view_state.z_scale);
-
-    auto bounds =
-        helix::mesh::compute_wall_bounds(z_min_world, z_max_world, bed_half_width, bed_half_height);
-    double z_floor = bounds.floor_z;
-    double z_ceiling = bounds.ceiling_z;
-
-    // Configure grid line drawing style
-    lv_draw_line_dsc_t grid_line_dsc;
-    lv_draw_line_dsc_init(&grid_line_dsc);
-    grid_line_dsc.color = theme_manager_get_color("elevated_bg");
-    grid_line_dsc.width = 1;
-    grid_line_dsc.opa = LV_OPA_60;
-
-    // ========== 1. BOTTOM GRID (XY plane at Z=z_floor) ==========
-    // Draw Y-parallel lines at printer-mm X positions (converted to world coords)
-    for (double x_mm = x_grid_start; x_mm <= x_max_mm + 0.001; x_mm += GRID_SPACING_MM) {
-        double x_world = helix::mesh::printer_x_to_world_x(x_mm, bed_center_x, coord_scale);
-        draw_axis_line(layer, &grid_line_dsc, x_world, y_min, z_floor, x_world, y_max, z_floor,
-                       canvas_width, canvas_height, &renderer->view_state);
-    }
-    // Draw X-parallel lines at printer-mm Y positions (converted to world coords)
-    for (double y_mm = y_grid_start; y_mm <= y_max_mm + 0.001; y_mm += GRID_SPACING_MM) {
-        double y_world = helix::mesh::printer_y_to_world_y(y_mm, bed_center_y, coord_scale);
-        draw_axis_line(layer, &grid_line_dsc, x_min, y_world, z_floor, x_max, y_world, z_floor,
-                       canvas_width, canvas_height, &renderer->view_state);
-    }
-
-    // ========== 2. BACK WALL GRID (XZ plane at Y=y_min) ==========
-    // Vertical lines at printer-mm X positions
-    for (double x_mm = x_grid_start; x_mm <= x_max_mm + 0.001; x_mm += GRID_SPACING_MM) {
-        double x_world = helix::mesh::printer_x_to_world_x(x_mm, bed_center_x, coord_scale);
-        draw_axis_line(layer, &grid_line_dsc, x_world, y_min, z_floor, x_world, y_min, z_ceiling,
-                       canvas_width, canvas_height, &renderer->view_state);
-    }
-    // Horizontal lines (constant Z, varying X) - keep as world coords (Z isn't in printer-mm)
-    double wall_z_range = z_ceiling - z_floor;
-    double wall_z_spacing = wall_z_range / Z_AXIS_SEGMENT_COUNT;
-    if (wall_z_spacing < 0.5)
-        wall_z_spacing = wall_z_range / 3.0;
-    for (double z = z_floor; z <= z_ceiling + 0.01; z += wall_z_spacing) {
-        draw_axis_line(layer, &grid_line_dsc, x_min, y_min, z, x_max, y_min, z, canvas_width,
-                       canvas_height, &renderer->view_state);
-    }
-
-    // ========== 3. LEFT WALL GRID (YZ plane at X=x_min) ==========
-    // Vertical lines at printer-mm Y positions
-    for (double y_mm = y_grid_start; y_mm <= y_max_mm + 0.001; y_mm += GRID_SPACING_MM) {
-        double y_world = helix::mesh::printer_y_to_world_y(y_mm, bed_center_y, coord_scale);
-        draw_axis_line(layer, &grid_line_dsc, x_min, y_world, z_floor, x_min, y_world, z_ceiling,
-                       canvas_width, canvas_height, &renderer->view_state);
-    }
-    // Horizontal lines (constant Z, varying Y)
-    for (double z = z_floor; z <= z_ceiling + 0.01; z += wall_z_spacing) {
-        draw_axis_line(layer, &grid_line_dsc, x_min, y_min, z, x_min, y_max, z, canvas_width,
-                       canvas_height, &renderer->view_state);
-    }
+    // Full box width: a negative value plus " mm" is wider than the box's inner 60px
+    lv_area_t label_area = {tooltip_area.x1, tooltip_y, tooltip_area.x2, tooltip_y + 14};
+    lv_draw_label(layer, &label_dsc, &label_area);
 }
 
 void render_axis_labels(lv_layer_t* layer, const bed_mesh_renderer_t* renderer, int canvas_width,
@@ -345,56 +264,19 @@ void render_axis_labels(lv_layer_t* layer, const bed_mesh_renderer_t* renderer, 
         return;
     }
 
-    // Get printer-mm coordinate ranges to compute grid-aligned positions
-    double x_min_mm, x_max_mm, y_min_mm, y_max_mm;
-    double bed_center_x, bed_center_y, coord_scale;
-    if (renderer->geometry_computed) {
-        x_min_mm = renderer->bed_min_x;
-        x_max_mm = renderer->bed_max_x;
-        y_min_mm = renderer->bed_min_y;
-        y_max_mm = renderer->bed_max_y;
-        bed_center_x = renderer->bed_center_x;
-        bed_center_y = renderer->bed_center_y;
-        coord_scale = renderer->coord_scale;
-    } else {
-        x_min_mm = 0.0;
-        x_max_mm = (renderer->cols - 1) * BED_MESH_SCALE;
-        y_min_mm = 0.0;
-        y_max_mm = (renderer->rows - 1) * BED_MESH_SCALE;
-        bed_center_x = x_max_mm / 2.0;
-        bed_center_y = y_max_mm / 2.0;
-        coord_scale = 1.0;
-    }
+    const BedExtent ext = compute_bed_extent(renderer);
 
     // Round to first/last grid line positions (must match wall positions)
-    double x_grid_start = std::ceil(x_min_mm / GRID_SPACING_MM) * GRID_SPACING_MM;
-    double x_grid_end = std::floor(x_max_mm / GRID_SPACING_MM) * GRID_SPACING_MM;
-    double y_grid_start = std::ceil(y_min_mm / GRID_SPACING_MM) * GRID_SPACING_MM;
+    double x_grid_start = std::ceil(ext.x_min_mm / GRID_SPACING_MM) * GRID_SPACING_MM;
+    double x_grid_end = std::floor(ext.x_max_mm / GRID_SPACING_MM) * GRID_SPACING_MM;
+    double y_grid_start = std::ceil(ext.y_min_mm / GRID_SPACING_MM) * GRID_SPACING_MM;
 
     // Convert grid bounds to world coordinates (must match wall positioning)
-    double x_min_world = helix::mesh::printer_x_to_world_x(x_grid_start, bed_center_x, coord_scale);
-    double x_max_world = helix::mesh::printer_x_to_world_x(x_grid_end, bed_center_x, coord_scale);
+    double x_min_world = printer_x_to_world_x(x_grid_start, ext.center_x, ext.coord_scale);
+    double x_max_world = printer_x_to_world_x(x_grid_end, ext.center_x, ext.coord_scale);
     double y_max_world =
-        helix::mesh::printer_y_to_world_y(y_grid_start, bed_center_y, coord_scale); // Y inverted
-
-    // Calculate bed half dimensions for wall bounds calculation
-    double bed_half_width = (renderer->bed_max_x - renderer->bed_min_x) / 2.0 * coord_scale;
-    double bed_half_height = (renderer->bed_max_y - renderer->bed_min_y) / 2.0 * coord_scale;
-    if (!renderer->geometry_computed) {
-        bed_half_width = (renderer->cols - 1) / 2.0 * BED_MESH_SCALE;
-        bed_half_height = (renderer->rows - 1) / 2.0 * BED_MESH_SCALE;
-    }
-
-    // Use cached z_center for world-space Z coordinates
-    double z_min_world = helix::mesh::mesh_z_to_world_z(
-        renderer->mesh_min_z, renderer->cached_z_center, renderer->view_state.z_scale);
-    double z_max_world = helix::mesh::mesh_z_to_world_z(
-        renderer->mesh_max_z, renderer->cached_z_center, renderer->view_state.z_scale);
-
-    // Calculate wall bounds using centralized function
-    auto bounds =
-        helix::mesh::compute_wall_bounds(z_min_world, z_max_world, bed_half_width, bed_half_height);
-    double floor_z = bounds.floor_z;
+        printer_y_to_world_y(y_grid_start, ext.center_y, ext.coord_scale); // Y inverted
+    double floor_z = ext.walls.floor_z;
 
     // Configure label drawing style. On a small canvas the letters drop to the
     // same 10px font the tick numbers use and are pushed further out, so the
@@ -405,7 +287,7 @@ void render_axis_labels(lv_layer_t* layer, const bed_mesh_renderer_t* renderer, 
 
     lv_draw_label_dsc_t label_dsc;
     lv_draw_label_dsc_init(&label_dsc);
-    label_dsc.color = lv_color_white();
+    label_dsc.color = theme_manager_get_color("text");
     label_dsc.font = small_canvas ? &noto_sans_10 : &noto_sans_14;
     label_dsc.opa = LV_OPA_90;
     label_dsc.align = LV_TEXT_ALIGN_CENTER;
@@ -450,7 +332,8 @@ void render_axis_labels(lv_layer_t* layer, const bed_mesh_renderer_t* renderer, 
 
     // Z label: At the top of Z axis, ABOVE the wall ceiling where tick labels end
     // Position at front-left corner (grid-aligned)
-    double z_axis_top = bounds.ceiling_z + Z_LABEL_ABOVE_CEILING; // Position above the highest tick
+    double z_axis_top =
+        ext.walls.ceiling_z + Z_LABEL_ABOVE_CEILING; // Position above the highest tick
     bed_mesh_point_3d_t z_pos = bed_mesh_projection_project_3d_to_2d(
         x_min_world, y_max_world, z_axis_top, canvas_width, canvas_height, &renderer->view_state);
 
@@ -503,64 +386,30 @@ void render_numeric_axis_ticks(lv_layer_t* layer, const bed_mesh_renderer_t* ren
         return;
     }
 
-    // Get actual BED coordinate range (full bed, not just mesh probe area)
-    double x_min_mm, x_max_mm, y_min_mm, y_max_mm;
-    double bed_center_x, bed_center_y, coord_scale;
-    if (renderer->geometry_computed) {
-        x_min_mm = renderer->bed_min_x;
-        x_max_mm = renderer->bed_max_x;
-        y_min_mm = renderer->bed_min_y;
-        y_max_mm = renderer->bed_max_y;
-        bed_center_x = renderer->bed_center_x;
-        bed_center_y = renderer->bed_center_y;
-        coord_scale = renderer->coord_scale;
-    } else {
-        x_min_mm = 0.0;
-        x_max_mm = static_cast<double>(renderer->cols - 1) * BED_MESH_SCALE;
-        y_min_mm = 0.0;
-        y_max_mm = static_cast<double>(renderer->rows - 1) * BED_MESH_SCALE;
-        bed_center_x = x_max_mm / 2.0;
-        bed_center_y = y_max_mm / 2.0;
-        coord_scale = 1.0;
-    }
+    const BedExtent ext = compute_bed_extent(renderer);
+    const double bed_center_x = ext.center_x;
+    const double bed_center_y = ext.center_y;
+    const double coord_scale = ext.coord_scale;
+    const WallBounds& bounds = ext.walls;
 
     // Round to first/last grid line positions (must match wall positions from
     // render_reference_grids)
-    double x_grid_start = std::ceil(x_min_mm / GRID_SPACING_MM) * GRID_SPACING_MM;
-    double x_grid_end = std::floor(x_max_mm / GRID_SPACING_MM) * GRID_SPACING_MM;
-    double y_grid_start = std::ceil(y_min_mm / GRID_SPACING_MM) * GRID_SPACING_MM;
-    double y_grid_end = std::floor(y_max_mm / GRID_SPACING_MM) * GRID_SPACING_MM;
+    double x_grid_start = std::ceil(ext.x_min_mm / GRID_SPACING_MM) * GRID_SPACING_MM;
+    double x_grid_end = std::floor(ext.x_max_mm / GRID_SPACING_MM) * GRID_SPACING_MM;
+    double y_grid_start = std::ceil(ext.y_min_mm / GRID_SPACING_MM) * GRID_SPACING_MM;
+    double y_grid_end = std::floor(ext.y_max_mm / GRID_SPACING_MM) * GRID_SPACING_MM;
 
     // Convert grid bounds to world coordinates (must match wall positioning)
     double x_min_world = helix::mesh::printer_x_to_world_x(x_grid_start, bed_center_x, coord_scale);
     double x_max_world = helix::mesh::printer_x_to_world_x(x_grid_end, bed_center_x, coord_scale);
-    // y_min_world not needed for grid lines — only x_min/x_max and y_max used
     double y_max_world =
         helix::mesh::printer_y_to_world_y(y_grid_start, bed_center_y, coord_scale); // Y inverted
-
-    // Calculate bed half dimensions for wall bounds calculation
-    double bed_half_width = (renderer->bed_max_x - renderer->bed_min_x) / 2.0 * coord_scale;
-    double bed_half_height = (renderer->bed_max_y - renderer->bed_min_y) / 2.0 * coord_scale;
-    if (!renderer->geometry_computed) {
-        bed_half_width = (renderer->cols - 1) / 2.0 * BED_MESH_SCALE;
-        bed_half_height = (renderer->rows - 1) / 2.0 * BED_MESH_SCALE;
-    }
-
-    // Use cached z_center for world-space Z coordinates
-    double z_min_world = helix::mesh::mesh_z_to_world_z(
-        renderer->mesh_min_z, renderer->cached_z_center, renderer->view_state.z_scale);
-    double z_max_world = helix::mesh::mesh_z_to_world_z(
-        renderer->mesh_max_z, renderer->cached_z_center, renderer->view_state.z_scale);
-
-    // Calculate wall bounds using centralized function
-    auto bounds =
-        helix::mesh::compute_wall_bounds(z_min_world, z_max_world, bed_half_width, bed_half_height);
     double floor_z = bounds.floor_z;
 
     // Configure label drawing style (smaller font than axis letters)
     lv_draw_label_dsc_t label_dsc;
     lv_draw_label_dsc_init(&label_dsc);
-    label_dsc.color = lv_color_white();
+    label_dsc.color = theme_manager_get_color("text");
     label_dsc.font = &noto_sans_10; // Smaller font for numeric labels
     label_dsc.opa = LV_OPA_80;      // Slightly more transparent than axis letters
     label_dsc.align = LV_TEXT_ALIGN_CENTER;
@@ -637,7 +486,7 @@ void render_numeric_axis_ticks(lv_layer_t* layer, const bed_mesh_renderer_t* ren
 }
 
 // ============================================================================
-// Buffer-targeted overloads (no LVGL calls — safe for background threads)
+// Pixel-buffer drawing (no LVGL calls - runs on the render thread)
 // ============================================================================
 
 void render_grid_lines(PixelBuffer& buf, const bed_mesh_renderer_t* renderer, int canvas_width,
@@ -646,8 +495,7 @@ void render_grid_lines(PixelBuffer& buf, const bed_mesh_renderer_t* renderer, in
         return;
     }
 
-    // Opacity: 70% = ~178/255
-    constexpr uint8_t grid_alpha = 178;
+    constexpr uint8_t grid_alpha = GRID_LINE_OPACITY;
 
     // Use cached projected screen coordinates (SOA arrays)
     const auto& screen_x = renderer->projected_screen_x;
@@ -682,83 +530,35 @@ void render_grid_lines(PixelBuffer& buf, const bed_mesh_renderer_t* renderer, in
     }
 }
 
-void render_reference_floor(PixelBuffer& buf, const bed_mesh_renderer_t* renderer, int canvas_width,
-                            int canvas_height, uint8_t line_r, uint8_t line_g, uint8_t line_b) {
-    render_reference_grids(buf, renderer, canvas_width, canvas_height, line_r, line_g, line_b);
-}
-
-void render_reference_walls(PixelBuffer& buf, const bed_mesh_renderer_t* renderer,
-                            int /*canvas_width*/, int /*canvas_height*/, uint8_t /*line_r*/,
-                            uint8_t /*line_g*/, uint8_t /*line_b*/) {
-    // Stub - merged into render_reference_grids
-    (void)buf;
-    (void)renderer;
-}
-
 void render_reference_grids(PixelBuffer& buf, const bed_mesh_renderer_t* renderer, int canvas_width,
                             int canvas_height, uint8_t line_r, uint8_t line_g, uint8_t line_b) {
     if (!renderer || !renderer->has_mesh_data) {
         return;
     }
 
-    // Opacity: 60% = ~153/255
-    constexpr uint8_t ref_alpha = 153;
+    constexpr uint8_t ref_alpha = REFERENCE_GRID_OPACITY;
 
-    // Use PRINTER BED bounds for grid extent (not mesh bounds)
-    double bed_half_width, bed_half_height;
-    if (renderer->has_bed_bounds) {
-        bed_half_width = (renderer->bed_max_x - renderer->bed_min_x) / 2.0 * renderer->coord_scale;
-        bed_half_height = (renderer->bed_max_y - renderer->bed_min_y) / 2.0 * renderer->coord_scale;
-    } else {
-        bed_half_width = (renderer->cols - 1) / 2.0 * BED_MESH_SCALE;
-        bed_half_height = (renderer->rows - 1) / 2.0 * BED_MESH_SCALE;
-    }
-
-    // Get printer-mm coordinate ranges
-    double x_min_mm, x_max_mm, y_min_mm, y_max_mm;
-    double bed_center_x, bed_center_y, coord_scale;
-    if (renderer->has_bed_bounds && renderer->geometry_computed) {
-        x_min_mm = renderer->bed_min_x;
-        x_max_mm = renderer->bed_max_x;
-        y_min_mm = renderer->bed_min_y;
-        y_max_mm = renderer->bed_max_y;
-        bed_center_x = renderer->bed_center_x;
-        bed_center_y = renderer->bed_center_y;
-        coord_scale = renderer->coord_scale;
-    } else {
-        x_min_mm = 0.0;
-        x_max_mm = (renderer->cols - 1) * BED_MESH_SCALE;
-        y_min_mm = 0.0;
-        y_max_mm = (renderer->rows - 1) * BED_MESH_SCALE;
-        bed_center_x = x_max_mm / 2.0;
-        bed_center_y = y_max_mm / 2.0;
-        coord_scale = 1.0;
-    }
+    // Printer-bed extent, not mesh extent: the mesh floats inside the walls
+    const BedExtent ext = compute_bed_extent(renderer);
+    const double x_max_mm = ext.x_max_mm;
+    const double y_max_mm = ext.y_max_mm;
+    const double bed_center_x = ext.center_x;
+    const double bed_center_y = ext.center_y;
+    const double coord_scale = ext.coord_scale;
 
     // Round to first/last grid line positions (aligned to GRID_SPACING_MM)
-    double x_grid_start = std::ceil(x_min_mm / GRID_SPACING_MM) * GRID_SPACING_MM;
+    double x_grid_start = std::ceil(ext.x_min_mm / GRID_SPACING_MM) * GRID_SPACING_MM;
     double x_grid_end = std::floor(x_max_mm / GRID_SPACING_MM) * GRID_SPACING_MM;
-    double y_grid_start = std::ceil(y_min_mm / GRID_SPACING_MM) * GRID_SPACING_MM;
+    double y_grid_start = std::ceil(ext.y_min_mm / GRID_SPACING_MM) * GRID_SPACING_MM;
     double y_grid_end = std::floor(y_max_mm / GRID_SPACING_MM) * GRID_SPACING_MM;
 
     // Convert grid bounds to world coordinates for wall positioning
-    double x_min = helix::mesh::printer_x_to_world_x(x_grid_start, bed_center_x, coord_scale);
-    double x_max = helix::mesh::printer_x_to_world_x(x_grid_end, bed_center_x, coord_scale);
-    double y_min =
-        helix::mesh::printer_y_to_world_y(y_grid_end, bed_center_y, coord_scale); // Y inverted
-    double y_max =
-        helix::mesh::printer_y_to_world_y(y_grid_start, bed_center_y, coord_scale); // Y inverted
-
-    // Calculate Z range and wall bounds
-    double z_min_world = helix::mesh::mesh_z_to_world_z(
-        renderer->mesh_min_z, renderer->cached_z_center, renderer->view_state.z_scale);
-    double z_max_world = helix::mesh::mesh_z_to_world_z(
-        renderer->mesh_max_z, renderer->cached_z_center, renderer->view_state.z_scale);
-
-    auto bounds =
-        helix::mesh::compute_wall_bounds(z_min_world, z_max_world, bed_half_width, bed_half_height);
-    double z_floor = bounds.floor_z;
-    double z_ceiling = bounds.ceiling_z;
+    double x_min = printer_x_to_world_x(x_grid_start, bed_center_x, coord_scale);
+    double x_max = printer_x_to_world_x(x_grid_end, bed_center_x, coord_scale);
+    double y_min = printer_y_to_world_y(y_grid_end, bed_center_y, coord_scale);   // Y inverted
+    double y_max = printer_y_to_world_y(y_grid_start, bed_center_y, coord_scale); // Y inverted
+    double z_floor = ext.walls.floor_z;
+    double z_ceiling = ext.walls.ceiling_z;
 
     // ========== 1. BOTTOM GRID (XY plane at Z=z_floor) ==========
     for (double x_mm = x_grid_start; x_mm <= x_max_mm + 0.001; x_mm += GRID_SPACING_MM) {

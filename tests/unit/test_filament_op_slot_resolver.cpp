@@ -22,6 +22,10 @@
 
 #include "../catch_amalgamated.hpp"
 
+using helix::AmsSystemInfo;
+using helix::SlotInfo;
+using helix::SlotStatus;
+
 using helix::ui::resolve_op_button_slot;
 
 namespace {
@@ -306,6 +310,90 @@ TEST_CASE("compute_op_button_gating: print state gates Load and Unload",
     }
 }
 
+// The AMS sidebar's Reset and Check-slots buttons have no backend guard behind
+// them at all: reset() asks check_preconditions() with the default
+// requires_toolhead_motion = false, and check_all_gates() checks only that the
+// backend is running. Whatever this rule says is the entire protection
+// (prestonbrown/helixscreen#1523).
+//
+// Mutation check: drop `&& reset_moves_filament` and "a state-only Reset stays
+// live" fails; drop `print_blocks_op &&` and "an idle machine gates nothing"
+// fails; hardcode check_gates_disabled false and "PRINTING blocks Check slots"
+// fails.
+TEST_CASE("compute_machine_op_gating: Reset greys per backend, Check slots always",
+          "[filament][op_slot][print_guard]") {
+    using helix::ui::compute_machine_op_gating;
+    using helix::ui::print_blocks_filament_op;
+
+    // The sidebar's own read: the shared print predicate, plus the backend's
+    // answer about its own reset G-code.
+    auto sidebar = [](PrintState lifecycle, bool self_homes, bool reset_moves_filament) {
+        return compute_machine_op_gating(print_blocks_filament_op(lifecycle, self_homes),
+                                         reset_moves_filament);
+    };
+
+    SECTION("an idle machine gates nothing, whatever the backend claims") {
+        for (bool moves : {false, true}) {
+            CAPTURE(moves);
+            auto g = sidebar(PrintState::Idle, /*self_homes=*/false, moves);
+            CHECK_FALSE(g.reset_disabled);
+            CHECK_FALSE(g.check_gates_disabled);
+        }
+    }
+
+    SECTION("PRINTING blocks Check slots and a filament-moving Reset") {
+        // Happy Hare: bare MMU_HOME unloads before homing the selector.
+        auto hh = sidebar(PrintState::Printing, /*self_homes=*/false,
+                          /*reset_moves_filament=*/true);
+        CHECK(hh.reset_disabled);
+        CHECK(hh.check_gates_disabled);
+    }
+
+    SECTION("a state-only Reset stays live through a print") {
+        // CFS BOX_ERROR_CLEAR / AFC's lane-picker prompt: the lever that clears
+        // a latched fault, which is reached for mid-job precisely.
+        auto other = sidebar(PrintState::Printing, /*self_homes=*/false,
+                             /*reset_moves_filament=*/false);
+        CHECK_FALSE(other.reset_disabled);
+        // Check slots is not shown on those backends, but the rule does not
+        // depend on that: probing is physical wherever it is offered.
+        CHECK(other.check_gates_disabled);
+    }
+
+    SECTION("PREPARING blocks exactly as PRINTING does") {
+        auto g = sidebar(PrintState::Preparing, /*self_homes=*/false,
+                         /*reset_moves_filament=*/true);
+        CHECK(g.reset_disabled);
+        CHECK(g.check_gates_disabled);
+    }
+
+    SECTION("a PAUSED print releases both on a backend that does not self-home") {
+        // Pause-then-fix is the recovery workflow, and Happy Hare's own
+        // MMU_CHECK_GATE parks and restores the loaded tool around the probe.
+        auto g = sidebar(PrintState::Paused, /*self_homes=*/false,
+                         /*reset_moves_filament=*/true);
+        CHECK_FALSE(g.reset_disabled);
+        CHECK_FALSE(g.check_gates_disabled);
+    }
+
+    SECTION("a PAUSED print still blocks both on a self-homing backend") {
+        auto g = sidebar(PrintState::Paused, /*self_homes=*/true,
+                         /*reset_moves_filament=*/true);
+        CHECK(g.reset_disabled);
+        CHECK(g.check_gates_disabled);
+    }
+
+    SECTION("terminal job states gate nothing") {
+        for (PrintState terminal :
+             {PrintState::Complete, PrintState::Cancelled, PrintState::Error}) {
+            CAPTURE(static_cast<int>(terminal));
+            auto g = sidebar(terminal, /*self_homes=*/false, /*reset_moves_filament=*/true);
+            CHECK_FALSE(g.reset_disabled);
+            CHECK_FALSE(g.check_gates_disabled);
+        }
+    }
+}
+
 // The panel's rule had NO system_busy term, so an AMS op started from the AMS
 // panel (or by the printer itself) left the filament panel's Load button lit the
 // whole time it ran — and every tap produced a backend "busy" refusal.
@@ -464,4 +552,57 @@ TEST_CASE("compute_op_button_gating: the AMS sidebar Unload answers the same rul
     // PAUSED: the live Discord report. Offered on every backend but AD5X.
     CHECK_FALSE(sidebar(true, false, false, /*paused=*/true, /*self_homes=*/false).unload_disabled);
     CHECK(sidebar(true, false, false, /*paused=*/true, /*self_homes=*/true).unload_disabled);
+}
+
+TEST_CASE("compute_op_button_gating: Purge asks less than Load", "[filament][op_slot][op_gating]") {
+    using helix::ui::compute_op_button_gating;
+    using helix::ui::OpButtonState;
+
+    // Purge is about the nozzle, not a lane: an empty lane and an already-loaded
+    // toolhead both block Load and neither has anything to say about Purge.
+    OpButtonState s;
+    s.slot_is_loaded = true;
+    s.slot_has_filament = false;
+    CHECK(compute_op_button_gating(s).load_disabled);
+    CHECK_FALSE(compute_op_button_gating(s).purge_disabled);
+
+    // What Purge does ask is whether the machine is free to extrude at all.
+    OpButtonState busy;
+    busy.system_busy = true;
+    CHECK(compute_op_button_gating(busy).purge_disabled);
+
+    OpButtonState printing;
+    printing.print_blocks_op = true;
+    CHECK(compute_op_button_gating(printing).purge_disabled);
+}
+
+TEST_CASE("build_external_spool_gating_state: the bypass spool's fixed answers",
+          "[filament][op_slot][op_gating]") {
+    using helix::ui::build_external_spool_gating_state;
+    using helix::ui::compute_op_button_gating;
+
+    auto bypass = [](bool loaded, bool busy, bool printing, bool paused, bool self_homes) {
+        return compute_op_button_gating(build_external_spool_gating_state(
+            loaded, busy, helix::test::lifecycle_from_bools(printing, paused), self_homes));
+    };
+
+    // Nothing reports whether a spool sits on the external holder, so Load stays
+    // reachable and lets the dispatch explain itself. A surface that answered
+    // "no filament" here would grey out Load on a spool the user is looking at.
+    CHECK_FALSE(build_external_spool_gating_state(false, false, PrintState::Idle, false)
+                    .slot_has_filament.has_value());
+    CHECK_FALSE(bypass(false, false, false, false, false).load_disabled);
+
+    // Loaded: nothing to load into, something to unload.
+    CHECK(bypass(true, false, false, false, false).load_disabled);
+    CHECK_FALSE(bypass(true, false, false, false, false).unload_disabled);
+    CHECK(bypass(false, false, false, false, false).unload_disabled);
+
+    // A bypass unload pulls filament back through a heated toolhead, so it is
+    // NOT one of the cold lane ops that stay reachable mid-print.
+    CHECK(bypass(true, false, /*printing=*/true, false, false).unload_disabled);
+
+    // A busy AMS blocks everything, including the purge.
+    CHECK(bypass(true, /*busy=*/true, false, false, false).load_disabled);
+    CHECK(bypass(true, /*busy=*/true, false, false, false).purge_disabled);
 }

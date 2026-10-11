@@ -1,30 +1,25 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "moonraker_config_manager.h"
 
+#include "text_io.h"
+
 #include <algorithm>
+#include <cctype>
 #include <cstddef>
-#include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace helix {
 
-// Trim leading and trailing whitespace (spaces, tabs, carriage returns)
-static std::string trim(const std::string& s) {
-    size_t start = s.find_first_not_of(" \t\r\n");
-    if (start == std::string::npos)
-        return "";
-    size_t end = s.find_last_not_of(" \t\r\n");
-    return s.substr(start, end - start + 1);
-}
+namespace tio = ::helix::text_io;
 
 bool MoonrakerConfigManager::has_section(const std::string& content,
                                          const std::string& section_name) {
     const std::string target = "[" + section_name + "]";
-    std::istringstream stream(content);
-    std::string line;
-    while (std::getline(stream, line)) {
-        std::string t = trim(line);
+    for (std::string_view sv : tio::lines(content)) {
+        std::string line(sv);
+        std::string t(helix::text_io::trim(line));
         if (t.empty() || t[0] == '#')
             continue;
         if (t == target)
@@ -35,13 +30,12 @@ bool MoonrakerConfigManager::has_section(const std::string& content,
 
 std::vector<std::string> MoonrakerConfigManager::list_sections(const std::string& content) {
     std::vector<std::string> sections;
-    std::istringstream stream(content);
-    std::string line;
-    while (std::getline(stream, line)) {
-        std::string t = trim(line);
+    for (std::string_view sv : tio::lines(content)) {
+        std::string line(sv);
+        std::string t(helix::text_io::trim(line));
         if (t.size() < 2 || t[0] != '[' || t.back() != ']')
             continue;
-        std::string name = trim(t.substr(1, t.size() - 2));
+        std::string name(helix::text_io::trim(t.substr(1, t.size() - 2)));
         if (!name.empty())
             sections.push_back(name);
     }
@@ -152,7 +146,7 @@ ConfigPathInfo
 MoonrakerConfigManager::config_path_from_relative(const std::string& filename,
                                                   const std::string& config_root_abs) {
     ConfigPathInfo info;
-    std::string rel = trim(filename);
+    std::string rel(helix::text_io::trim(filename));
 
     if (rel.empty()) {
         info.error = "Moonraker did not report the name of its configuration file.";
@@ -163,7 +157,7 @@ MoonrakerConfigManager::config_path_from_relative(const std::string& filename,
         // config's own directory. Such a file is still reachable when it happens to sit
         // under the file manager's config root, so strip that root and carry on through
         // the relative logic below — which keeps the `..` and subdir handling.
-        std::string root = trim(config_root_abs);
+        std::string root(helix::text_io::trim(config_root_abs));
         while (root.size() > 1 && root.back() == '/')
             root.pop_back();
         // The prefix must end on a path component boundary, or ".../config" would
@@ -216,7 +210,7 @@ MoonrakerConfigManager::candidate_config_paths(const std::string& reported_filen
                                                const std::string& config_root_abs) {
     std::vector<std::string> out;
 
-    const std::string reported = trim(reported_filename);
+    const std::string reported(helix::text_io::trim(reported_filename));
     if (reported.empty())
         return out;
     // A traversal is discarded whole rather than sanitised: there is no reading of
@@ -238,7 +232,7 @@ MoonrakerConfigManager::candidate_config_paths(const std::string& reported_filen
     }
 
     // Case 2: absolute, and inside the file manager's config root.
-    std::string root = trim(config_root_abs);
+    std::string root(helix::text_io::trim(config_root_abs));
     while (root.size() > 1 && root.back() == '/')
         root.pop_back();
 
@@ -275,7 +269,7 @@ MoonrakerConfigManager::candidate_config_paths(const std::string& reported_filen
 
 bool MoonrakerConfigManager::candidates_are_speculative(const std::string& reported_filename,
                                                         const std::string& config_root_abs) {
-    const std::string reported = trim(reported_filename);
+    const std::string reported(helix::text_io::trim(reported_filename));
 
     // Nothing to grade: candidate_config_paths() returns an empty list for these, so
     // there is no candidate whose trustworthiness the caller could be asking about.
@@ -286,7 +280,7 @@ bool MoonrakerConfigManager::candidates_are_speculative(const std::string& repor
     if (reported.front() != '/')
         return false;
 
-    std::string root = trim(config_root_abs);
+    std::string root(helix::text_io::trim(config_root_abs));
     while (root.size() > 1 && root.back() == '/')
         root.pop_back();
     if (root.empty())
@@ -333,9 +327,6 @@ std::string MoonrakerConfigManager::upsert_section(
         return add_section(content, section_name, entries, comment);
 
     const std::string target = "[" + section_name + "]";
-    std::istringstream stream(content);
-    std::string line;
-
     std::vector<std::string> out;
     std::vector<bool> applied(entries.size(), false);
 
@@ -358,8 +349,9 @@ std::string MoonrakerConfigManager::upsert_section(
         }
     };
 
-    while (std::getline(stream, line)) {
-        std::string t = trim(line);
+    for (std::string_view sv : tio::lines(content)) {
+        std::string line(sv);
+        std::string t(helix::text_io::trim(line));
 
         if (!in_section && !section_done && t == target) {
             in_section = true;
@@ -386,7 +378,7 @@ std::string MoonrakerConfigManager::upsert_section(
 
             size_t colon = t.find(':');
             if (colon != std::string::npos) {
-                std::string key = trim(t.substr(0, colon));
+                std::string key(helix::text_io::trim(t.substr(0, colon)));
                 bool replaced = false;
                 for (size_t i = 0; i < entries.size(); ++i) {
                     if (applied[i] || entries[i].first != key)
@@ -429,8 +421,8 @@ MoonrakerConfigManager::resolve_config_upload_location(const std::string& config
                                                        const std::string& data_path) {
     ConfigPathInfo info;
 
-    std::string config_file = trim(config_file_abs);
-    std::string data = trim(data_path);
+    std::string config_file(helix::text_io::trim(config_file_abs));
+    std::string data(helix::text_io::trim(data_path));
 
     if (config_file.empty()) {
         info.error = "Moonraker did not report the path of its configuration file.";
@@ -479,8 +471,6 @@ std::string MoonrakerConfigManager::remove_section(const std::string& content,
         return content;
 
     const std::string target = "[" + section_name + "]";
-    std::istringstream stream(content);
-    std::string line;
 
     // Lines before target section (excluding its preceding comment block)
     std::vector<std::string> result_lines;
@@ -488,8 +478,9 @@ std::string MoonrakerConfigManager::remove_section(const std::string& content,
     std::vector<std::string> pending_comment;
     bool in_target = false;
 
-    while (std::getline(stream, line)) {
-        std::string t = trim(line);
+    for (std::string_view sv : tio::lines(content)) {
+        std::string line(sv);
+        std::string t(helix::text_io::trim(line));
 
         if (in_target) {
             // Skip lines until the next section header
@@ -532,7 +523,7 @@ std::string MoonrakerConfigManager::remove_section(const std::string& content,
     // If we ended inside the target, discard pending_comment (already cleared when entering target)
 
     // Build result string, stripping trailing blank lines
-    while (!result_lines.empty() && trim(result_lines.back()).empty()) {
+    while (!result_lines.empty() && helix::text_io::trim(result_lines.back()).empty()) {
         result_lines.pop_back();
     }
 
@@ -556,11 +547,10 @@ std::string MoonrakerConfigManager::add_include_line(const std::string& moonrake
     const std::string include_block = "[include " + include_target + "]\n\n";
 
     // Find the first non-comment section header and insert before it
-    std::istringstream stream(moonraker_content);
-    std::string line;
     size_t pos = 0;
-    while (std::getline(stream, line)) {
-        std::string t = trim(line);
+    for (std::string_view sv : tio::lines(moonraker_content)) {
+        std::string line(sv);
+        std::string t(helix::text_io::trim(line));
         if (!t.empty() && t[0] == '[') {
             // Insert before this section header
             std::string result = moonraker_content.substr(0, pos);
@@ -583,12 +573,11 @@ std::string MoonrakerConfigManager::get_section_value(const std::string& content
                                                       const std::string& section_name,
                                                       const std::string& key) {
     const std::string target_section = "[" + section_name + "]";
-    std::istringstream stream(content);
-    std::string line;
     bool in_section = false;
 
-    while (std::getline(stream, line)) {
-        std::string t = trim(line);
+    for (std::string_view sv : tio::lines(content)) {
+        std::string line(sv);
+        std::string t(helix::text_io::trim(line));
         if (t.empty() || t[0] == '#')
             continue;
 
@@ -604,12 +593,66 @@ std::string MoonrakerConfigManager::get_section_value(const std::string& content
         size_t colon = t.find(':');
         if (colon == std::string::npos)
             continue;
-        std::string k = trim(t.substr(0, colon));
+        std::string k(helix::text_io::trim(t.substr(0, colon)));
         if (k != key)
             continue;
-        return trim(t.substr(colon + 1));
+        return std::string(helix::text_io::trim(t.substr(colon + 1)));
     }
     return "";
+}
+
+std::string MoonrakerConfigManager::set_existing_value(const std::string& content,
+                                                       const std::string& section_name,
+                                                       const std::string& key,
+                                                       const std::string& value) {
+    const std::string header = "[" + section_name + "]";
+    int headers = 0;
+    bool in_section = false;
+    // Byte span of the first matching value, excluding any inline comment and the
+    // whitespace before it, so a rewrite keeps the comment and the line ending.
+    size_t value_begin = std::string::npos;
+    size_t value_end = 0;
+
+    size_t pos = 0;
+    while (pos < content.size()) {
+        size_t eol = content.find('\n', pos);
+        if (eol == std::string::npos)
+            eol = content.size();
+        const std::string_view line(content.data() + pos, eol - pos);
+        const std::string_view t = tio::trim(line);
+
+        if (!t.empty() && t[0] == '[') {
+            in_section = (t == header);
+            if (in_section)
+                ++headers;
+        } else if (in_section && value_begin == std::string::npos && !line.empty() &&
+                   line[0] != ' ' && line[0] != '\t' && line[0] != '#' && line[0] != ';') {
+            // Column 0 only: an indented line continues the previous value.
+            const size_t colon = line.find(':');
+            if (colon != std::string_view::npos && tio::trim(line.substr(0, colon)) == key) {
+                size_t b = colon + 1;
+                size_t e = line.find_first_of("#;", b);
+                if (e == std::string_view::npos)
+                    e = line.size();
+                while (b < e && (line[b] == ' ' || line[b] == '\t'))
+                    ++b;
+                while (e > b && std::isspace(static_cast<unsigned char>(line[e - 1])))
+                    --e;
+                value_begin = pos + b;
+                value_end = pos + e;
+            }
+        }
+        pos = eol + 1;
+    }
+
+    // Duplicate stanzas are the operator's to untangle: editing one of them guesses.
+    if (headers != 1 || value_begin == std::string::npos || value_begin == value_end)
+        return content;
+    if (content.compare(value_begin, value_end - value_begin, value) == 0)
+        return content;
+    std::string out = content;
+    out.replace(value_begin, value_end - value_begin, value);
+    return out;
 }
 
 } // namespace helix

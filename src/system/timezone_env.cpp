@@ -64,7 +64,17 @@ const char* configure_tzdir(const char* system_probe, const char* bundled_subdir
     return active_tzdir_.c_str();
 }
 
-void apply(const char* iana_id) {
+void apply(const char* iana_id, const char* posix_tz) {
+#ifdef ESP_PLATFORM
+    // newlib reads no zoneinfo: an IANA name parses as UTC.
+    if (posix_tz) {
+        ::setenv("TZ", posix_tz, 1);
+        ::tzset();
+        return;
+    }
+#else
+    (void)posix_tz;
+#endif
     configure_tzdir();
     ::setenv("TZ", iana_id, 1);
     ::tzset();

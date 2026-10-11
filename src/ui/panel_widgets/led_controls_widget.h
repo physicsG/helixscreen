@@ -5,16 +5,17 @@
 
 #include "ui_observer_guard.h"
 
-#include "panel_widget.h"
+#include "src/ui/panel_widgets/tiled_panel_widget.h"
 
 namespace helix {
 
-class LedControlsWidget : public PanelWidget {
+class LedControlsWidget : public TiledPanelWidget {
   public:
     // The widget only opens the LED overlay, which reaches LedController and
     // NavigationManager through their own singletons — it needs no printer state
     // or API handle of its own.
-    LedControlsWidget() = default;
+    LedControlsWidget()
+        : TiledPanelWidget("led_controls", TileSizing::Content{"", "", "LEDs", false}) {}
     ~LedControlsWidget() override;
 
     void attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) override;
@@ -30,7 +31,6 @@ class LedControlsWidget : public PanelWidget {
 
     lv_obj_t* widget_obj_ = nullptr;
     lv_obj_t* parent_screen_ = nullptr;
-    lv_obj_t* led_control_panel_ = nullptr;
 };
 
 } // namespace helix

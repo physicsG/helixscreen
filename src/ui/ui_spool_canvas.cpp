@@ -5,16 +5,21 @@
 
 #include "ui_utils.h"
 
+#include "ams_tray_projection.h"
+#include "filament_tube_stroker.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "helix-xml/src/xml/lv_xml_parser.h"
 #include "helix-xml/src/xml/lv_xml_widget.h"
 #include "helix-xml/src/xml/parsers/lv_xml_obj_parser.h"
+#include "lv_draw_buf_guard.h"
 #include "lvgl/lvgl.h"
+#include "lvgl/src/misc/cache/instance/lv_image_cache.h" // not in the lvgl.h umbrella
 #include "theme_manager.h"
 #include "ui/ams_drawing_utils.h"
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstring>
@@ -27,13 +32,27 @@
 // Geometry constants for Bambu-style 3D spool (SIDE VIEW)
 // Spool axis is HORIZONTAL - we view from an angle
 // Shows: back flange (left), filament cylinder (middle), front flange (right), hub hole (center)
-static constexpr float FLANGE_RADIUS = 0.42f; // Flange radius (vertical)
-static constexpr float ELLIPSE_RATIO =
-    0.45f;                                  // Horizontal compression (narrower = more angled view)
-static constexpr float HUB_RADIUS = 0.10f;  // Center hub hole radius
-static constexpr float SPOOL_DEPTH = 0.35f; // Depth/width of spool (distance between flanges)
+// Flange size, depth skew and flange spacing are the tray's camera
+// (ams_tray_projection.h), shared with the box and lid.
+static constexpr float HUB_RADIUS = 0.10f; // Center hub hole radius
 static constexpr int32_t DEFAULT_SIZE = 64;
 static constexpr uint32_t DEFAULT_COLOR = 0xE0E0E0; // Default white/light filament
+
+// Current-spool glow layer, grown from the spool's silhouette. Capable
+// hardware gets a soft halo and a tight rim; reduced effects a solid outline.
+namespace {
+enum class SpoolGlow : uint8_t { None, Outline, Halo };
+} // namespace
+static constexpr int GLOW_HALO_DILATE = 3;
+static constexpr int GLOW_HALO_BOX_R = 4; // three box passes ~ Gaussian sigma 4.5
+static constexpr int GLOW_HALO_PASSES = 3;
+static constexpr int GLOW_RIM_DILATE = 1;
+static constexpr int GLOW_RIM_BOX_R = 1; // one box pass ~ Gaussian sigma 0.8
+static constexpr uint8_t GLOW_RIM_LIGHTEN = 60;
+static constexpr lv_opa_t GLOW_HALO_SECOND_OPA = 153; // 60%
+static constexpr int32_t GLOW_MARGIN = GLOW_HALO_DILATE + GLOW_HALO_PASSES * GLOW_HALO_BOX_R;
+static constexpr int32_t OUTLINE_PX = 2;
+static constexpr uint8_t GLOW_DISC_SHAPE = 0xFF; // fill_bucket of a flat-style (disc) glow
 
 // Note: Spool body colors now come from theme tokens in globals.xml:
 // - spool_body: Front flange color
@@ -83,9 +102,11 @@ struct SpoolCacheKey {
     uint32_t color_rgb; // 0x00RRGGBB
     uint16_t size;
     uint8_t fill_bucket; // 0..FILL_BUCKETS
+    SpoolGlow glow;
 
     bool operator==(const SpoolCacheKey& o) const {
-        return color_rgb == o.color_rgb && size == o.size && fill_bucket == o.fill_bucket;
+        return color_rgb == o.color_rgb && size == o.size && fill_bucket == o.fill_bucket &&
+               glow == o.glow;
     }
 };
 
@@ -93,7 +114,8 @@ struct SpoolCacheKeyHash {
     size_t operator()(const SpoolCacheKey& k) const {
         // Mix: color is the high-cardinality field, so weight it.
         return (static_cast<size_t>(k.color_rgb) * 0x9E3779B1u) ^
-               (static_cast<size_t>(k.size) << 17) ^ static_cast<size_t>(k.fill_bucket);
+               (static_cast<size_t>(k.size) << 17) ^ (static_cast<size_t>(k.glow) << 8) ^
+               static_cast<size_t>(k.fill_bucket);
     }
 };
 
@@ -151,7 +173,7 @@ struct SpoolCanvasData {
     float fill_level = 1.0f;
 
     // Last-rendered key, for dedup (idea #1). Valid only when has_rendered.
-    SpoolCacheKey last_key{0, 0, 0};
+    SpoolCacheKey last_key{0, 0, 0, SpoolGlow::None};
     bool has_rendered = false;
 };
 
@@ -162,9 +184,88 @@ static SpoolCanvasData* get_data(lv_obj_t* obj) {
     return (it != s_registry.end()) ? it->second : nullptr;
 }
 
+// Size @p canvas's draw buffer to @p size plus @p margin on every side. The
+// object keeps @p size so layout never moves; the image is centred on it and
+// the overhang draws in the ext draw area.
+static bool sync_canvas_buf(lv_obj_t* canvas, lv_draw_buf_t*& draw_buf, int32_t size,
+                            int32_t margin) {
+    const int32_t dim = size + 2 * margin;
+    if (!draw_buf || static_cast<int32_t>(draw_buf->header.w) != dim ||
+        static_cast<int32_t>(draw_buf->header.h) != dim) {
+        lv_draw_buf_t* buf = lv_draw_buf_create(dim, dim, LV_COLOR_FORMAT_ARGB8888, 0);
+        if (!buf) {
+            spdlog::error("[SpoolCanvas] Failed to create draw buffer for size {}", dim);
+            return false;
+        }
+        // Cleared before set_draw_buf: its image-source format probe reads the pixels.
+        lv_draw_buf_clear(buf, nullptr);
+        // Set the new buffer BEFORE destroying the old one: lv_canvas_set_draw_buf
+        // drops the old image source from LVGL's cache, which reads its header.
+        lv_draw_buf_t* old_buf = draw_buf;
+        draw_buf = buf;
+        lv_canvas_set_draw_buf(canvas, buf);
+        helix::safe_draw_buf_destroy(old_buf, "spool");
+    }
+    // An image larger than its object is overhang, not scrollable content.
+    lv_obj_remove_flag(canvas, LV_OBJ_FLAG_SCROLLABLE);
+    lv_image_set_inner_align(canvas, LV_IMAGE_ALIGN_CENTER);
+    lv_obj_set_size(canvas, size, size);
+    lv_obj_refresh_ext_draw_size(canvas);
+    return true;
+}
+
+static bool sync_draw_buf(SpoolCanvasData* d) {
+    const lv_draw_buf_t* before = d->draw_buf;
+    if (!sync_canvas_buf(d->canvas, d->draw_buf, d->size, 0))
+        return false;
+    if (d->draw_buf != before)
+        d->has_rendered = false; // a fresh buffer holds no render yet
+    return true;
+}
+
+// The spool is drawn as one fill per row span, hundreds per render. They are
+// blended straight into the canvas's ARGB8888 buffer with the arithmetic of
+// LVGL's software fill: queued as LVGL draw tasks, each one is checked against
+// every earlier overlapping task before dispatch, which cost ~30ms per 64px
+// spool on an ESP32-S3.
+namespace {
+struct SpoolLayer {
+    lv_draw_buf_t* buf;
+};
+} // namespace
+
+// lv_color_32_32_mix() from LVGL's ARGB8888 blender, which is file-static there.
+static inline lv_color32_t spool_blend(lv_color32_t fg, lv_color32_t bg) {
+    if (fg.alpha >= LV_OPA_MAX || bg.alpha <= LV_OPA_MIN)
+        return fg;
+    if (bg.alpha == 255)
+        return lv_color_mix32(fg, bg);
+    uint8_t res_alpha = 255 - LV_OPA_MIX2(255 - fg.alpha, 255 - bg.alpha);
+    fg.alpha = static_cast<uint8_t>((static_cast<uint32_t>(fg.alpha) * 255) / res_alpha);
+    lv_color32_t res = lv_color_mix32(fg, bg);
+    res.alpha = res_alpha;
+    return res;
+}
+
+static void spool_fill(SpoolLayer* l, const lv_draw_fill_dsc_t* dsc, const lv_area_t* area) {
+    if (dsc->opa <= LV_OPA_MIN)
+        return;
+    const lv_image_header_t& h = l->buf->header;
+    int32_t x1 = LV_MAX(area->x1, 0);
+    int32_t x2 = LV_MIN(area->x2, static_cast<int32_t>(h.w) - 1);
+    int32_t y1 = LV_MAX(area->y1, 0);
+    int32_t y2 = LV_MIN(area->y2, static_cast<int32_t>(h.h) - 1);
+    lv_color32_t fg = lv_color_to_32(dsc->color, dsc->opa >= LV_OPA_MAX ? LV_OPA_COVER : dsc->opa);
+    for (int32_t y = y1; y <= y2; y++) {
+        auto* row = reinterpret_cast<lv_color32_t*>(l->buf->data + y * h.stride);
+        for (int32_t x = x1; x <= x2; x++)
+            row[x] = spool_blend(fg, row[x]);
+    }
+}
+
 // Draw ellipse with vertical gradient (top_color at top, bottom_color at bottom)
 // Includes coverage-based anti-aliasing at left/right edges
-static void draw_gradient_ellipse(lv_layer_t* layer, int32_t cx, int32_t cy, int32_t rx, int32_t ry,
+static void draw_gradient_ellipse(SpoolLayer* layer, int32_t cx, int32_t cy, int32_t rx, int32_t ry,
                                   lv_color_t top_color, lv_color_t bottom_color) {
     lv_draw_fill_dsc_t fill_dsc;
     lv_draw_fill_dsc_init(&fill_dsc);
@@ -184,7 +285,7 @@ static void draw_gradient_ellipse(lv_layer_t* layer, int32_t cx, int32_t cy, int
             float pole_opa = (x_extent > 0.01f) ? (x_extent * 2.0f) : 0.3f;
             fill_dsc.opa = (lv_opa_t)(pole_opa * 255.0f);
             lv_area_t pole_pixel = {cx, cy + y, cx, cy + y};
-            lv_draw_fill(layer, &fill_dsc, &pole_pixel);
+            spool_fill(layer, &fill_dsc, &pole_pixel);
             continue;
         }
 
@@ -196,22 +297,22 @@ static void draw_gradient_ellipse(lv_layer_t* layer, int32_t cx, int32_t cy, int
         if (x_frac > 0.01f) {
             fill_dsc.opa = (lv_opa_t)(x_frac * 255.0f);
             lv_area_t left_edge = {cx - x_inner - 1, cy + y, cx - x_inner - 1, cy + y};
-            lv_draw_fill(layer, &fill_dsc, &left_edge);
+            spool_fill(layer, &fill_dsc, &left_edge);
             lv_area_t right_edge = {cx + x_inner + 1, cy + y, cx + x_inner + 1, cy + y};
-            lv_draw_fill(layer, &fill_dsc, &right_edge);
+            spool_fill(layer, &fill_dsc, &right_edge);
         }
 
         // Draw fully opaque interior
         if (x_inner > 0) {
             fill_dsc.opa = LV_OPA_COVER;
             lv_area_t line_area = {cx - x_inner, cy + y, cx + x_inner, cy + y};
-            lv_draw_fill(layer, &fill_dsc, &line_area);
+            spool_fill(layer, &fill_dsc, &line_area);
         }
     }
 }
 
 // Draw rectangle with vertical gradient (top_color at top, bottom_color at bottom)
-static void draw_gradient_rect(lv_layer_t* layer, int32_t x1, int32_t y1, int32_t x2, int32_t y2,
+static void draw_gradient_rect(SpoolLayer* layer, int32_t x1, int32_t y1, int32_t x2, int32_t y2,
                                lv_color_t top_color, lv_color_t bottom_color) {
     lv_draw_fill_dsc_t fill_dsc;
     lv_draw_fill_dsc_init(&fill_dsc);
@@ -228,13 +329,13 @@ static void draw_gradient_rect(lv_layer_t* layer, int32_t x1, int32_t y1, int32_
         fill_dsc.color = ams_draw::blend_color(top_color, bottom_color, gradient_factor);
 
         lv_area_t line = {x1, y, x2, y};
-        lv_draw_fill(layer, &fill_dsc, &line);
+        spool_fill(layer, &fill_dsc, &line);
     }
 }
 
 // Draw a highlight edge along the LEFT side of an ellipse (simulates 3D thickness)
 // width_px: how many pixels wide the highlight band is
-static void draw_ellipse_left_edge(lv_layer_t* layer, int32_t cx, int32_t cy, int32_t rx,
+static void draw_ellipse_left_edge(SpoolLayer* layer, int32_t cx, int32_t cy, int32_t rx,
                                    int32_t ry, lv_color_t top_color, lv_color_t bottom_color,
                                    int32_t width_px) {
     lv_draw_fill_dsc_t fill_dsc;
@@ -261,7 +362,73 @@ static void draw_ellipse_left_edge(lv_layer_t* layer, int32_t cx, int32_t cy, in
             right_edge = cx; // Don't go past center
 
         lv_area_t edge = {left_edge, cy + y, right_edge, cy + y};
-        lv_draw_fill(layer, &fill_dsc, &edge);
+        spool_fill(layer, &fill_dsc, &edge);
+    }
+}
+
+// One axis of a separable filter over an alpha plane: max (dilate) or box
+// mean (blur). Outside the plane reads as transparent.
+static void alpha_pass(std::vector<uint8_t>& a, int32_t w, int32_t h, int r, bool horizontal,
+                       bool dilate) {
+    std::vector<uint8_t> out(a.size());
+    const int32_t len = horizontal ? w : h;
+    for (int32_t y = 0; y < h; y++) {
+        for (int32_t x = 0; x < w; x++) {
+            const int32_t pos = horizontal ? x : y;
+            uint32_t acc = 0;
+            uint8_t mx = 0;
+            for (int32_t k = std::max<int32_t>(0, pos - r);
+                 k <= std::min<int32_t>(len - 1, pos + r); k++) {
+                const uint8_t v = horizontal ? a[y * w + k] : a[k * w + x];
+                acc += v;
+                mx = std::max(mx, v);
+            }
+            out[y * w + x] = dilate ? mx : static_cast<uint8_t>(acc / (2 * r + 1));
+        }
+    }
+    a.swap(out);
+}
+
+static std::vector<uint8_t> grow_and_soften(std::vector<uint8_t> a, int32_t w, int32_t h,
+                                            int dilate_r, int box_r, int passes) {
+    alpha_pass(a, w, h, dilate_r, true, true);
+    alpha_pass(a, w, h, dilate_r, false, true);
+    for (int i = 0; i < passes; i++) {
+        alpha_pass(a, w, h, box_r, true, false);
+        alpha_pass(a, w, h, box_r, false, false);
+    }
+    return a;
+}
+
+// Paint the glow for a padded alpha mask into @p buf (same dimensions): two
+// accent halo passes (100%, then 60%) and a lighter tight rim, or under
+// reduced effects the mask grown by OUTLINE_PX in solid accent.
+static void paint_glow(lv_draw_buf_t* buf, const std::vector<uint8_t>& mask, SpoolGlow glow,
+                       lv_color_t accent) {
+    const int32_t w = buf->header.w;
+    const int32_t h = buf->header.h;
+    auto over = [](lv_color32_t fg, lv_color32_t bg) {
+        return fg.alpha <= LV_OPA_MIN ? bg : spool_blend(fg, bg);
+    };
+    std::vector<uint8_t> halo, rim;
+    if (glow == SpoolGlow::Halo) {
+        halo = grow_and_soften(mask, w, h, GLOW_HALO_DILATE, GLOW_HALO_BOX_R, GLOW_HALO_PASSES);
+        rim = grow_and_soften(mask, w, h, GLOW_RIM_DILATE, GLOW_RIM_BOX_R, 1);
+    } else {
+        halo = grow_and_soften(mask, w, h, OUTLINE_PX, 0, 0);
+    }
+    const lv_color_t rim_color = ams_draw::lighten_color(accent, GLOW_RIM_LIGHTEN);
+    for (int32_t y = 0; y < h; y++) {
+        auto* row = reinterpret_cast<lv_color32_t*>(buf->data + y * buf->header.stride);
+        for (int32_t x = 0; x < w; x++) {
+            const size_t i = static_cast<size_t>(y * w + x);
+            lv_color32_t px = lv_color_to_32(accent, halo[i]);
+            if (glow == SpoolGlow::Halo) {
+                px = over(lv_color_to_32(accent, LV_OPA_MIX2(halo[i], GLOW_HALO_SECOND_OPA)), px);
+                px = over(lv_color_to_32(rim_color, rim[i]), px);
+            }
+            row[x] = px;
+        }
     }
 }
 
@@ -272,11 +439,11 @@ static void render_spool_pixels(SpoolCanvasData* data) {
     int32_t cy = size / 2; // Vertical center
 
     // Calculate dimensions - vertical radius and horizontal (compressed) radius
-    int32_t flange_ry = (int32_t)(size * FLANGE_RADIUS);      // Vertical radius
-    int32_t flange_rx = (int32_t)(flange_ry * ELLIPSE_RATIO); // Horizontal (narrower)
+    int32_t flange_ry = (int32_t)(size * helix::ui::tray::SPOOL_FLANGE_RADIUS); // Vertical radius
+    int32_t flange_rx = (int32_t)(flange_ry * helix::ui::tray::DEPTH_SKEW); // Horizontal (narrower)
     int32_t hub_ry = (int32_t)(size * HUB_RADIUS);
-    int32_t hub_rx = (int32_t)(hub_ry * ELLIPSE_RATIO);
-    int32_t spool_width = (int32_t)(size * SPOOL_DEPTH);
+    int32_t hub_rx = (int32_t)(hub_ry * helix::ui::tray::DEPTH_SKEW);
+    int32_t spool_width = (int32_t)(size * helix::ui::tray::SPOOL_WIDTH);
 
     // X positions for left (back) and right (front) flanges
     int32_t center_x = size / 2;
@@ -288,7 +455,7 @@ static void render_spool_pixels(SpoolCanvasData* data) {
     float fill = LV_CLAMP(data->fill_level, 0.0f, 1.0f);
     int32_t max_filament_ry = (int32_t)(flange_ry * 0.85f); // Flanges 15% taller than full filament
     int32_t filament_ry = hub_ry + (int32_t)((max_filament_ry - hub_ry) * fill);
-    int32_t filament_rx = (int32_t)(filament_ry * ELLIPSE_RATIO);
+    int32_t filament_rx = (int32_t)(filament_ry * helix::ui::tray::DEPTH_SKEW);
 
     // Colors (from theme tokens)
     lv_color_t back_color = theme_manager_get_color("spool_body_shade");
@@ -299,8 +466,7 @@ static void render_spool_pixels(SpoolCanvasData* data) {
     // Clear canvas
     lv_canvas_fill_bg(data->canvas, lv_color_black(), LV_OPA_TRANSP);
 
-    lv_layer_t layer;
-    lv_canvas_init_layer(data->canvas, &layer);
+    SpoolLayer layer{data->draw_buf};
 
     // ========================================
     // STEP 1: Draw BACK FLANGE (left side) with gradient + edge highlight
@@ -367,25 +533,38 @@ static void render_spool_pixels(SpoolCanvasData* data) {
         theme_manager_get_color("spool_hub_bottom"); // Noticeably lighter at bottom (light hits it)
     draw_gradient_ellipse(&layer, right_x, cy, hub_rx, hub_ry, hub_top, hub_bottom);
 
-    lv_canvas_finish_layer(data->canvas, &layer);
+    lv_obj_invalidate(data->canvas);
 
     spdlog::trace("[SpoolCanvas] Redrawn: size={}, fill={:.0f}%", size, fill * 100.0f);
 }
 
-// Cache-aware redraw entry point. Handles:
+static void repaint_bound_glows(lv_obj_t* spool_canvas);
+static void unbind_glows(lv_obj_t* spool_canvas);
+static void clear_glow_cache();
+
+static bool redraw_spool_pixels(SpoolCanvasData* data);
+
+// Redraw entry point. A new silhouette repaints the glows bound to this spool.
+static void redraw_spool(SpoolCanvasData* data) {
+    if (redraw_spool_pixels(data))
+        repaint_bound_glows(data->canvas);
+}
+
+// Cache-aware render. Handles:
 //   - dedup (idea #1): same state as last render → no-op
 //   - cache hit (idea #2): memcpy cached pixels into draw_buf
 //   - cache miss: full render + capture into cache
-static void redraw_spool(SpoolCanvasData* data) {
+// Returns true when the buffer now holds a different render.
+static bool redraw_spool_pixels(SpoolCanvasData* data) {
     if (!data || !data->canvas || !data->draw_buf)
-        return;
+        return false;
 
     SpoolCacheKey key{color_to_rgb24(data->color), static_cast<uint16_t>(data->size),
-                      compute_fill_bucket(data->fill_level)};
+                      compute_fill_bucket(data->fill_level), SpoolGlow::None};
 
     // Dedup: already rendered this bucketed state, nothing to do.
     if (data->has_rendered && data->last_key == key) {
-        return;
+        return false;
     }
 
     // Cache hit: copy rendered pixels into the canvas buffer.
@@ -397,7 +576,7 @@ static void redraw_spool(SpoolCanvasData* data) {
             data->has_rendered = true;
             spdlog::trace("[SpoolCanvas] cache hit (size={} bucket={} color=0x{:06X})", key.size,
                           key.fill_bucket, key.color_rgb);
-            return;
+            return true;
         }
     }
 
@@ -412,6 +591,7 @@ static void redraw_spool(SpoolCanvasData* data) {
 
     data->last_key = key;
     data->has_rendered = true;
+    return true;
 }
 
 static void spool_canvas_event_cb(lv_event_t* e) {
@@ -420,9 +600,12 @@ static void spool_canvas_event_cb(lv_event_t* e) {
         auto it = s_registry.find(obj);
         if (it != s_registry.end()) {
             std::unique_ptr<SpoolCanvasData> data(it->second);
-            if (data && data->draw_buf) {
-                lv_draw_buf_destroy(data->draw_buf);
+            // The canvas was a composite source until this delete; a blend of
+            // it may still be in flight.
+            if (data) {
+                helix::safe_draw_buf_destroy(data->draw_buf, "spool");
             }
+            unbind_glows(obj);
             lv_obj_set_user_data(obj, nullptr);
             s_registry.erase(it);
             // data automatically freed
@@ -444,14 +627,7 @@ static void* spool_canvas_xml_create(lv_xml_parser_state_t* state, const char** 
     data_ptr->color = lv_color_hex(DEFAULT_COLOR);
     data_ptr->fill_level = 1.0f;
 
-    // Create draw buffer
-    data_ptr->draw_buf =
-        lv_draw_buf_create(data_ptr->size, data_ptr->size, LV_COLOR_FORMAT_ARGB8888, 0);
-    if (data_ptr->draw_buf) {
-        lv_canvas_set_draw_buf(canvas, data_ptr->draw_buf);
-    }
-
-    lv_obj_set_size(canvas, data_ptr->size, data_ptr->size);
+    sync_draw_buf(data_ptr.get());
     s_registry[canvas] = data_ptr.get();
     lv_obj_add_event_cb(canvas, spool_canvas_event_cb, LV_EVENT_DELETE, nullptr);
 
@@ -494,19 +670,7 @@ static void spool_canvas_xml_apply(lv_xml_parser_state_t* state, const char** at
             int32_t new_size = atoi(value);
             if (new_size != data->size && new_size > 0) {
                 data->size = new_size;
-
-                // Recreate draw buffer with new size
-                if (data->draw_buf) {
-                    lv_draw_buf_destroy(data->draw_buf);
-                }
-                data->draw_buf =
-                    lv_draw_buf_create(new_size, new_size, LV_COLOR_FORMAT_ARGB8888, 0);
-                if (data->draw_buf) {
-                    lv_canvas_set_draw_buf(data->canvas, data->draw_buf);
-                }
-                lv_obj_set_size(data->canvas, new_size, new_size);
-                // Draw buffer was recreated; previous render state no longer applies.
-                data->has_rendered = false;
+                sync_draw_buf(data);
                 needs_redraw = true;
                 spdlog::debug("[SpoolCanvas] Set size={}", new_size);
             }
@@ -546,22 +710,10 @@ lv_obj_t* ui_spool_canvas_create(lv_obj_t* parent, int32_t size) {
     data_ptr->color = lv_color_hex(DEFAULT_COLOR);
     data_ptr->fill_level = 1.0f;
 
-    // Create draw buffer
-    data_ptr->draw_buf = lv_draw_buf_create(size, size, LV_COLOR_FORMAT_ARGB8888, 0);
-    if (data_ptr->draw_buf) {
-        // lv_draw_buf_create leaves the pixels uninitialised; clear before
-        // set_draw_buf, whose image-source format probe (is_jpg) would otherwise
-        // read uninitialised bytes, and so the canvas starts from a clean state
-        // even if redraw_spool doesn't cover every pixel.
-        lv_draw_buf_clear(data_ptr->draw_buf, nullptr);
-        lv_canvas_set_draw_buf(canvas, data_ptr->draw_buf);
-    } else {
-        spdlog::error("[SpoolCanvas] Failed to create draw buffer");
+    if (!sync_draw_buf(data_ptr.get())) {
         helix::ui::safe_delete(canvas);
         return nullptr;
     }
-
-    lv_obj_set_size(canvas, size, size);
     s_registry[canvas] = data_ptr.get();
     lv_obj_add_event_cb(canvas, spool_canvas_event_cb, LV_EVENT_DELETE, nullptr);
 
@@ -604,22 +756,12 @@ void ui_spool_canvas_set_size(lv_obj_t* canvas, int32_t size) {
     if (!data || size <= 0 || size == data->size)
         return;
 
+    const int32_t old_size = data->size;
     data->size = size;
-    auto* old_buf = data->draw_buf;
-    data->draw_buf = lv_draw_buf_create(size, size, LV_COLOR_FORMAT_ARGB8888, 0);
-    if (!data->draw_buf) {
-        data->draw_buf = old_buf;
-        spdlog::error("[SpoolCanvas] Failed to create draw buffer for size {}", size);
+    if (!sync_draw_buf(data)) {
+        data->size = old_size;
         return;
     }
-    /* Set new buffer BEFORE destroying old — lv_canvas_set_draw_buf drops the
-     * old image source from LVGL's cache, which reads its header.  Destroying
-     * the old buffer first leaves a dangling pointer that corrupts the heap. */
-    lv_canvas_set_draw_buf(data->canvas, data->draw_buf);
-    if (old_buf) {
-        lv_draw_buf_destroy(old_buf);
-    }
-    lv_obj_set_size(data->canvas, size, size);
     redraw_spool(data);
 }
 
@@ -643,6 +785,7 @@ lv_color_t ui_spool_canvas_get_color(lv_obj_t* canvas) {
 void ui_spool_canvas_invalidate_cache(void) {
     s_cache_list.clear();
     s_cache_index.clear();
+    clear_glow_cache();
     for (auto& [canvas, data] : s_registry) {
         if (data) {
             data->has_rendered = false;
@@ -650,3 +793,198 @@ void ui_spool_canvas_invalidate_cache(void) {
     }
     spdlog::debug("[SpoolCanvas] Render cache invalidated");
 }
+
+// ----------------------------------------------------------------------------
+// Glow layer
+// ----------------------------------------------------------------------------
+// A glow is one image per (shape, accent, simple), shared by every layer that
+// shows it: the cache and the layers hold references, so a buffer lives
+// exactly as long as something needs it. Glows keep their own small LRU so
+// they never evict spool renders.
+static constexpr size_t GLOW_CACHE_MAX_ENTRIES = 4;
+
+namespace {
+using GlowImage = std::shared_ptr<lv_draw_buf_t>;
+
+struct GlowCacheEntry {
+    SpoolCacheKey key;
+    GlowImage image;
+};
+
+struct SpoolGlowData {
+    lv_obj_t* spool = nullptr; ///< bound 3D spool canvas; null = disc (flat style)
+    int32_t size = 0;
+    bool simple = false;
+    bool lit = false; ///< painted, or waiting on the spool's first render
+    GlowImage image;
+    int32_t margin = 0;
+};
+} // namespace
+
+static std::list<GlowCacheEntry> s_glow_cache;
+static std::unordered_map<lv_obj_t*, SpoolGlowData> s_glow_registry;
+
+static GlowImage make_glow_image(int32_t dim) {
+    lv_draw_buf_t* buf = lv_draw_buf_create(dim, dim, LV_COLOR_FORMAT_ARGB8888, 0);
+    if (!buf)
+        return nullptr;
+    return GlowImage(buf, [](lv_draw_buf_t* b) {
+        if (!lv_is_initialized())
+            return; // process teardown: LVGL's image cache is already gone
+        // A layer that showed it may still be in an in-flight blend.
+        lv_image_cache_drop(b);
+        helix::safe_draw_buf_destroy(b, "spool_glow");
+    });
+}
+
+static GlowImage glow_cache_get(const SpoolCacheKey& key) {
+    for (auto it = s_glow_cache.begin(); it != s_glow_cache.end(); ++it) {
+        if (it->key == key) {
+            s_glow_cache.splice(s_glow_cache.begin(), s_glow_cache, it);
+            return it->image;
+        }
+    }
+    return nullptr;
+}
+
+static void glow_cache_put(const SpoolCacheKey& key, GlowImage image) {
+    s_glow_cache.push_front({key, std::move(image)});
+    if (s_glow_cache.size() > GLOW_CACHE_MAX_ENTRIES)
+        s_glow_cache.pop_back();
+}
+
+// Layers keep the images they show; only the cache's references go.
+static void clear_glow_cache() {
+    s_glow_cache.clear();
+}
+
+static void set_glow_image(lv_obj_t* glow, SpoolGlowData& g, GlowImage image, int32_t margin) {
+    g.image = std::move(image);
+    g.margin = g.image ? margin : 0;
+    lv_image_set_src(glow, g.image.get());
+    if (g.size > 0)
+        lv_obj_set_size(glow, g.size, g.size);
+    helix::ui::refresh_overhang_chain(glow);
+}
+
+// The silhouette, padded by @p m: the 3D canvas's own alpha, or a disc of
+// diameter @p size for the flat style.
+static std::vector<uint8_t> silhouette_mask(SpoolCanvasData* spool, int32_t size, int32_t m) {
+    const int32_t dim = size + 2 * m;
+    std::vector<uint8_t> mask(static_cast<size_t>(dim * dim), 0);
+    if (spool && spool->draw_buf) {
+        const lv_image_header_t& h = spool->draw_buf->header;
+        for (int32_t y = 0; y < std::min<int32_t>(h.h, size); y++) {
+            const auto* row =
+                reinterpret_cast<const lv_color32_t*>(spool->draw_buf->data + y * h.stride);
+            for (int32_t x = 0; x < std::min<int32_t>(h.w, size); x++)
+                mask[(y + m) * dim + x + m] = row[x].alpha;
+        }
+        return mask;
+    }
+    const float c = static_cast<float>(dim - 1) / 2.0f;
+    const float r = static_cast<float>(size) / 2.0f;
+    for (int32_t y = 0; y < dim; y++) {
+        for (int32_t x = 0; x < dim; x++) {
+            const float d = sqrtf((x - c) * (x - c) + (y - c) * (y - c));
+            mask[y * dim + x] = static_cast<uint8_t>(LV_CLAMP(r - d + 0.5f, 0.0f, 1.0f) * 255.0f);
+        }
+    }
+    return mask;
+}
+
+// Show the glow for the layer's bound shape. A 3D spool that has not rendered
+// yet has no silhouette to read: the layer stays empty until its first render.
+static void paint_glow_layer(lv_obj_t* glow, SpoolGlowData& g) {
+    SpoolCanvasData* spool = get_data(g.spool);
+    if (g.spool && (!spool || !spool->has_rendered)) {
+        set_glow_image(glow, g, nullptr, 0);
+        return;
+    }
+    const SpoolGlow mode = g.simple ? SpoolGlow::Outline : SpoolGlow::Halo;
+    const int32_t margin = g.simple ? OUTLINE_PX : GLOW_MARGIN;
+    const lv_color_t accent = helix::ui::tube_accent();
+    // A glow depends only on the silhouette, never the filament color, so the
+    // key carries the accent where a spool render carries its color.
+    const SpoolCacheKey key{color_to_rgb24(accent), static_cast<uint16_t>(g.size),
+                            spool ? spool->last_key.fill_bucket : GLOW_DISC_SHAPE, mode};
+    GlowImage image = glow_cache_get(key);
+    if (!image) {
+        image = make_glow_image(g.size + 2 * margin);
+        if (!image) {
+            spdlog::error("[SpoolCanvas] Failed to create glow buffer for size {}", g.size);
+            return;
+        }
+        paint_glow(image.get(), silhouette_mask(spool, g.size, margin), mode, accent);
+        glow_cache_put(key, image);
+    }
+    if (image != g.image)
+        set_glow_image(glow, g, std::move(image), margin);
+}
+
+static void repaint_bound_glows(lv_obj_t* spool_canvas) {
+    for (auto& [glow, g] : s_glow_registry)
+        if (g.lit && g.spool == spool_canvas)
+            paint_glow_layer(glow, g);
+}
+
+static void unbind_glows(lv_obj_t* spool_canvas) {
+    for (auto& [glow, g] : s_glow_registry) {
+        if (g.spool == spool_canvas) {
+            g.spool = nullptr;
+            g.lit = false;
+            set_glow_image(glow, g, nullptr, 0);
+        }
+    }
+}
+
+static void spool_glow_event_cb(lv_event_t* e) {
+    lv_obj_t* obj = lv_event_get_target_obj(e);
+    auto it = s_glow_registry.find(obj);
+    if (it == s_glow_registry.end())
+        return;
+    if (lv_event_get_code(e) == LV_EVENT_REFR_EXT_DRAW_SIZE) {
+        lv_event_set_ext_draw_size(e, it->second.margin);
+    } else if (lv_event_get_code(e) == LV_EVENT_DELETE) {
+        s_glow_registry.erase(it);
+    }
+}
+
+namespace helix::ui {
+
+lv_obj_t* spool_glow_create(lv_obj_t* parent) {
+    lv_obj_t* glow = lv_image_create(parent);
+    if (!glow)
+        return nullptr;
+    lv_obj_remove_flag(glow, LV_OBJ_FLAG_CLICKABLE);
+    // An image larger than its object is overhang, not scrollable content.
+    lv_obj_remove_flag(glow, LV_OBJ_FLAG_SCROLLABLE);
+    lv_image_set_inner_align(glow, LV_IMAGE_ALIGN_CENTER);
+    s_glow_registry[glow] = SpoolGlowData{};
+    lv_obj_add_event_cb(glow, spool_glow_event_cb, LV_EVENT_DELETE, nullptr);
+    lv_obj_add_event_cb(glow, spool_glow_event_cb, LV_EVENT_REFR_EXT_DRAW_SIZE, nullptr);
+    return glow;
+}
+
+void spool_glow_paint(lv_obj_t* glow, lv_obj_t* spool_canvas, int32_t size, bool simple) {
+    auto it = s_glow_registry.find(glow);
+    if (it == s_glow_registry.end() || size <= 0)
+        return;
+    SpoolGlowData& g = it->second;
+    g.spool = spool_canvas;
+    g.size = size;
+    g.simple = simple;
+    g.lit = true;
+    paint_glow_layer(glow, g);
+}
+
+void spool_glow_clear(lv_obj_t* glow) {
+    auto it = s_glow_registry.find(glow);
+    if (it == s_glow_registry.end())
+        return;
+    it->second.lit = false;
+    it->second.spool = nullptr;
+    set_glow_image(glow, it->second, nullptr, 0);
+}
+
+} // namespace helix::ui

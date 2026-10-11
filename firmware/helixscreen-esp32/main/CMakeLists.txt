@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 idf_component_register(SRCS "app_main.c" "board_display.c" "lvgl_glue.c" "touch_input.c" "ota_health.c"
-                             "storage_mount.c" "net_hil.cpp" "font_registration.c"
-                       PRIV_REQUIRES esp_timer app_update esp_lcd driver helixcore helixnet helixapp pthread
+                             "storage_mount.c" "net_hil.cpp" "font_registration.c" "serial_snapshot.c"
+                       PRIV_REQUIRES esp_timer esp_mm esp_hw_support app_update esp_lcd driver helixcore helixnet helixapp pthread
+                                     mbedtls
                                      esp_wifi esp_netif esp_event nvs_flash joltwallet__littlefs
                                      jkent__frogfs
                        INCLUDE_DIRS "." "../boards")

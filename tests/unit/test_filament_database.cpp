@@ -330,7 +330,7 @@ TEST_CASE("MaterialInfo::needs_drying - every material except the known non-hygr
     const std::set<std::string_view> INTENTIONALLY_NOT_DRIED{"PE", "EVA"};
 
     std::set<std::string_view> seen_not_dried;
-    for (const auto& mat : MATERIALS) {
+    for (const auto& mat : *shipped_materials()) {
         INFO("Checking material: " << mat.name);
         if (INTENTIONALLY_NOT_DRIED.count(mat.name) > 0) {
             // Pin the exception: if someone later gives PE or EVA a real dry
@@ -416,16 +416,7 @@ TEST_CASE("get_categories - returns all categories", "[filament][database]") {
 
 TEST_CASE("get_all_material_names - returns all materials", "[filament][database]") {
     auto names = get_all_material_names();
-    CHECK(names.size() == MATERIAL_COUNT);
-}
-
-TEST_CASE("MATERIAL_COUNT matches array size", "[filament][database]") {
-    size_t count = 0;
-    for (const auto& mat : MATERIALS) {
-        (void)mat;
-        count++;
-    }
-    CHECK(count == MATERIAL_COUNT);
+    CHECK(names.size() == shipped_materials()->size());
 }
 
 // ============================================================================
@@ -505,14 +496,14 @@ TEST_CASE("Phase 1 - PC-GF exists", "[filament][database][phase1]") {
 
 TEST_CASE("Phase 1 - Material count increased", "[filament][database][phase1]") {
     // After Phase 1, should have ~50 materials (35 original + ~15 new)
-    CHECK(MATERIAL_COUNT >= 48);
+    CHECK(shipped_materials()->size() >= 48);
 }
 
 TEST_CASE("Phase 1 - All compat groups have representatives", "[filament][database][phase1]") {
     // Verify each compatibility group has at least one material
     std::set<std::string_view> groups_found;
 
-    for (const auto& mat : MATERIALS) {
+    for (const auto& mat : *shipped_materials()) {
         if (mat.compat_group != nullptr) {
             groups_found.insert(mat.compat_group);
         }
@@ -535,7 +526,7 @@ TEST_CASE("Phase 1 - All compat groups have representatives", "[filament][databa
 TEST_CASE("Phase 2 - get_default_drying_presets covers all compat groups",
           "[filament][database][phase2][ams]") {
     // get_default_drying_presets() should return one preset per compat group
-    auto presets = get_default_drying_presets();
+    auto presets = helix::get_default_drying_presets();
 
     // Should have presets for all 7 compat groups
     CHECK(presets.size() >= 7);
@@ -560,7 +551,7 @@ TEST_CASE("Phase 2 - get_default_drying_presets covers all compat groups",
 
 TEST_CASE("Phase 2 - get_default_drying_presets matches filament database",
           "[filament][database][phase2][ams]") {
-    auto ams_presets = get_default_drying_presets();
+    auto ams_presets = helix::get_default_drying_presets();
     auto filament_presets = get_drying_presets_by_group();
 
     // For each filament preset, there should be a matching ams preset with same temp/time
@@ -583,7 +574,7 @@ TEST_CASE("Phase 2 - get_default_drying_presets matches filament database",
 
 TEST_CASE("Phase 2 - get_default_drying_presets includes fan_pct",
           "[filament][database][phase2][ams]") {
-    auto presets = get_default_drying_presets();
+    auto presets = helix::get_default_drying_presets();
 
     // All presets should have reasonable fan_pct values (0-100)
     for (const auto& p : presets) {
@@ -651,14 +642,14 @@ TEST_CASE("semi-flexibles are not interchangeable with TPU", "[filament][databas
 
 TEST_CASE("no duplicate material names in database", "[filament][database]") {
     std::set<std::string> seen;
-    for (const auto& mat : MATERIALS) {
+    for (const auto& mat : *shipped_materials()) {
         INFO("material: " << mat.name);
         CHECK(seen.insert(mat.name).second);
     }
 }
 
 TEST_CASE("every material row is internally consistent", "[filament][database]") {
-    for (const auto& mat : MATERIALS) {
+    for (const auto& mat : *shipped_materials()) {
         INFO("material: " << mat.name);
         CHECK(mat.nozzle_min > 0);
         CHECK(mat.nozzle_max >= mat.nozzle_min);
@@ -680,7 +671,7 @@ TEST_CASE("no material alias shadows a real material name", "[filament][database
     for (const auto& alias : MATERIAL_ALIASES) {
         INFO("alias: " << alias.alias);
         bool shadows = false;
-        for (const auto& mat : MATERIALS) {
+        for (const auto& mat : *shipped_materials()) {
             std::string a(alias.alias), m(mat.name);
             std::transform(a.begin(), a.end(), a.begin(), ::tolower);
             std::transform(m.begin(), m.end(), m.begin(), ::tolower);
@@ -690,7 +681,7 @@ TEST_CASE("no material alias shadows a real material name", "[filament][database
         CHECK_FALSE(shadows);
         // ...and every alias must point at something real.
         bool resolves = false;
-        for (const auto& mat : MATERIALS)
+        for (const auto& mat : *shipped_materials())
             if (std::string_view(mat.name) == std::string_view(alias.canonical))
                 resolves = true;
         CHECK(resolves);

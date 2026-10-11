@@ -11,6 +11,7 @@
 #include "ui_color_picker.h"
 
 #include "overlay_base.h"
+#include "static_panel_registry.h"
 #include "theme_loader.h"
 
 #include <array>
@@ -25,22 +26,12 @@
  */
 class ThemeEditorOverlay : public OverlayBase {
   public:
-    ThemeEditorOverlay();
-    ~ThemeEditorOverlay() override;
-
     //
     // === OverlayBase Implementation ===
     //
 
     /**
-     * @brief Initialize subjects for XML binding
-     *
-     * No local subjects needed for initial implementation.
-     */
-    void init_subjects() override;
-
-    /**
-     * @brief Create overlay UI from XML
+     * @brief Create overlay UI from XML, rewire the back button and find the swatches
      * @param parent Parent widget to attach overlay to (usually screen)
      * @return Root object of overlay, or nullptr on failure
      */
@@ -61,20 +52,21 @@ class ThemeEditorOverlay : public OverlayBase {
         return "Theme Editor";
     }
 
+    /// Freed on close; the next open rebuilds it.
+    bool destroy_on_close() const override {
+        return true;
+    }
+
     /**
      * @brief Called when overlay becomes visible
      */
     void on_activate() override;
 
     /**
-     * @brief Called when overlay is hidden
-     */
-    void on_deactivate() override;
-
-    /**
      * @brief Clean up resources for async-safe destruction
      */
     void cleanup() override;
+    void on_ui_destroyed() override;
 
     //
     // === Theme Editor API ===
@@ -111,7 +103,6 @@ class ThemeEditorOverlay : public OverlayBase {
     void set_editing_dark_mode(bool is_dark);
 
   private:
-    void setup_callbacks();
     void update_swatch_colors();
     void update_property_sliders();
     void update_slider_value_label(const char* row_name, int value);
@@ -119,29 +110,8 @@ class ThemeEditorOverlay : public OverlayBase {
     void mark_dirty();
     void clear_dirty();
 
-    // Static callbacks for XML event_cb registration
-    static void on_swatch_clicked(lv_event_t* e);
-    static void on_slider_changed(lv_event_t* e);
-    static void on_close_requested(lv_event_t* e);
+    // Back button handler, attached in create() to guard unsaved changes
     static void on_back_clicked(lv_event_t* e);
-
-    // Unified slider property callback (uses user_data to identify property)
-    static void on_property_changed(lv_event_t* e);
-
-    // Action button callbacks (registered with XML)
-    static void on_theme_save_clicked(lv_event_t* e);
-    static void on_theme_save_as_clicked(lv_event_t* e);
-    static void on_theme_reset_clicked(lv_event_t* e);
-
-    // Save As dialog callbacks
-    static void on_save_as_confirm(lv_event_t* e);
-    static void on_save_as_cancel(lv_event_t* e);
-
-    // Theme preset dropdown callback
-    static void on_theme_preset_changed(lv_event_t* e);
-
-    // Preview button callback
-    static void on_theme_preview_clicked(lv_event_t* e);
 
     // Instance handlers for slider property changes
     void handle_border_radius_changed(int value);
@@ -155,9 +125,7 @@ class ThemeEditorOverlay : public OverlayBase {
     void handle_reset_clicked();
     void perform_reset_to_default();
 
-    // Legacy handlers (to be refactored)
     void handle_swatch_click(int palette_index);
-    void handle_slider_change(const char* slider_name, int value);
     void show_color_picker(int palette_index);
     void show_save_as_dialog();
     void show_discard_confirmation(std::function<void()> on_discard);
@@ -166,13 +134,6 @@ class ThemeEditorOverlay : public OverlayBase {
 
     // Save As dialog handlers
     void handle_save_as_confirm();
-
-    // Theme preset handlers
-    void init_theme_preset_dropdown();
-    void handle_theme_preset_changed(int index);
-
-    // Preview handler
-    void handle_preview_clicked();
 
     // Filename helpers
     static std::string sanitize_filename(const std::string& name);
@@ -207,4 +168,6 @@ class ThemeEditorOverlay : public OverlayBase {
  * @brief Get global ThemeEditorOverlay instance
  * @return Reference to singleton instance (auto-initializes on first access)
  */
-ThemeEditorOverlay& get_theme_editor_overlay();
+inline ThemeEditorOverlay& get_theme_editor_overlay() {
+    return helix::lazy_global<ThemeEditorOverlay>("ThemeEditorOverlay");
+}

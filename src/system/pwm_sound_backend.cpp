@@ -4,12 +4,15 @@
 #include "pwm_sound_backend.h"
 
 #include "env_knobs.h"
+#include "helix_thread.h"
 
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <fcntl.h>
 #include <filesystem>
@@ -17,10 +20,16 @@
 #include <pthread.h>
 #include <sched.h>
 #include <string>
-#include <sys/prctl.h>
 #include <sys/syscall.h>
+#include <system_error>
 #include <time.h>
 #include <unistd.h>
+
+// PR_SET_TIMERSLACK lives in prctl.h, which only Linux ships.
+#if __has_include(<sys/prctl.h>)
+#include <sys/prctl.h>
+#define HELIX_HAVE_PRCTL 1
+#endif
 
 // Floor division for signed int64. C++ '/' truncates toward zero, but sample
 // arithmetic needs floor so a partial-sample deficit counts as a full sample
@@ -49,16 +58,76 @@ static int64_t monotonic_now_ns() {
 /// without burning real CPU across the whole sample interval. CLOCK_MONOTONIC
 /// is used directly here; the now seam WRAPS this whole function (virtual
 /// clock tests replace wait_until_fn_ entirely, so this never runs there).
+///
+/// A host without clock_nanosleep sleeps the remaining interval instead. That
+/// is what the spin budget below exists to absorb, and no PWM device is driven
+/// on such a host — the backend is a device build.
 static void default_wait_until(int64_t deadline_ns, const std::function<int64_t()>& now) {
     const int64_t sleep_target = deadline_ns - PWMSoundBackend::PCM_SPIN_BUDGET_NS;
     if (now() < sleep_target) {
+#ifdef TIMER_ABSTIME
         struct timespec ts = to_timespec_ns(sleep_target);
         while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, nullptr) == EINTR) {
             // retry on signal
         }
+#else
+        struct timespec ts = to_timespec_ns(sleep_target - now());
+        // nanosleep reports the unslept remainder, so a signal resumes where
+        // it left off rather than restarting the full interval.
+        while (nanosleep(&ts, &ts) == -1 && errno == EINTR) {
+            // retry on signal
+        }
+#endif
     }
     while (now() < deadline_ns) {
         // spin — at SCHED_IDLE the scheduler preempts this against any real work
+    }
+}
+
+namespace {
+// enable fd of the initialized backend, for the SIGTERM handler: the kernel
+// keeps a PWM channel running after its writer dies.
+std::atomic<int> s_signal_enable_fd{-1};
+} // namespace
+
+namespace {
+bool parse_channel(const char* spec, int& chip, int& channel) {
+    int c = -1;
+    int ch = -1;
+    char extra = 0;
+    if (std::sscanf(spec, "%d:%d%c", &c, &ch, &extra) != 2 || c < 0 || ch < 0) {
+        return false;
+    }
+    chip = c;
+    channel = ch;
+    return true;
+}
+} // namespace
+
+bool PWMSoundBackend::resolve_channel(const std::string& setting, const char* env, int& chip,
+                                      int& channel) {
+    if (env && env[0] != '\0') {
+        if (parse_channel(env, chip, channel)) {
+            return true;
+        }
+        spdlog::warn("[PWMSoundBackend] HELIX_PWM_SOUND={} is not <chip>:<channel>, ignored", env);
+    }
+    if (!setting.empty()) {
+        if (parse_channel(setting.c_str(), chip, channel)) {
+            return true;
+        }
+        spdlog::warn("[PWMSoundBackend] sound.pwm_channel '{}' is not <chip>:<channel>, ignored",
+                     setting);
+    }
+    return false;
+}
+
+void PWMSoundBackend::silence_signal_safe() {
+    const int fd = s_signal_enable_fd.load(std::memory_order_relaxed);
+    if (fd >= 0) {
+        ::lseek(fd, 0, SEEK_SET);
+        ssize_t n = ::write(fd, "0", 1);
+        (void)n;
     }
 }
 
@@ -138,7 +207,7 @@ float PWMSoundBackend::min_tick_ms() const {
 }
 
 bool PWMSoundBackend::owns_sysfs_pwm_channel() const {
-    return true;
+    return klippy_shares_channel_;
 }
 
 bool PWMSoundBackend::is_enabled() const {
@@ -176,11 +245,12 @@ bool PWMSoundBackend::try_export_channel() {
 bool PWMSoundBackend::initialize() {
     std::string path = channel_path();
     if (!std::filesystem::exists(path)) {
-#ifdef HELIX_PWM_AUTO_EXPORT
-        // The stock AD5M kernel ships the beeper channel unexported: nothing
-        // materializes pwm6 until its number is written to pwmchip0/export.
-        try_export_channel();
-#endif
+        // The stock AD5M kernel ships the beeper channel unexported, and a Pi's
+        // pwm-2chan overlay channels stay unexported until something asks:
+        // nothing materializes pwmN until its number is written to export.
+        if (auto_export_) {
+            try_export_channel();
+        }
         if (!std::filesystem::exists(path)) {
             return false;
         }
@@ -212,6 +282,12 @@ bool PWMSoundBackend::initialize() {
     spdlog::debug("[PWMSoundBackend] min note floor: {} ms", min_note_ms_);
 
     initialized_ = true;
+    // The channel may still be sounding from a writer that died mid-note.
+    enabled_ = true;
+    silence();
+    if (fd_enable_ >= 0) {
+        s_signal_enable_fd.store(fd_enable_, std::memory_order_relaxed);
+    }
     return true;
 }
 
@@ -222,6 +298,8 @@ void PWMSoundBackend::shutdown() {
 
     stop_render_thread();
     silence();
+    int expected = fd_enable_;
+    s_signal_enable_fd.compare_exchange_strong(expected, -1, std::memory_order_relaxed);
 
     if (fd_duty_ >= 0)
         ::close(fd_duty_);
@@ -431,6 +509,9 @@ void PWMSoundBackend::exit_pcm_mode() {
 }
 
 void PWMSoundBackend::apply_render_thread_priority() {
+    // Both knobs are Linux scheduling APIs. A host without them runs the render
+    // thread at its default priority, which is what a desktop test build wants.
+#ifdef SCHED_IDLE
     // SCHED_IDLE: this thread runs only when nothing else wants the CPU, so
     // its pacing can never starve klippy — the failure that got PCM playback
     // pulled from ad5m in the first place. Setting it needs no privileges.
@@ -443,9 +524,12 @@ void PWMSoundBackend::apply_render_thread_priority() {
         spdlog::debug("[PWMSoundBackend] SCHED_IDLE refused (errno {}) - staying SCHED_OTHER",
                       errno);
     }
+#endif // SCHED_IDLE
+#ifdef HELIX_HAVE_PRCTL
     // Timerslack only affects relative sleeps (the 1 ms no-source poll); the
     // render loop paces with TIMER_ABSTIME, so this is belt-and-suspenders.
     prctl(PR_SET_TIMERSLACK, 1UL);
+#endif
 }
 
 void PWMSoundBackend::park_output() {
@@ -478,7 +562,18 @@ void PWMSoundBackend::start_render_thread() {
         return;
 
     render_running_.store(true);
-    render_thread_ = std::thread(&PWMSoundBackend::render_loop, this);
+    // Wrap — EAGAIN under thread exhaustion throws std::system_error, and this
+    // backend runs on the two-core boards where that is the documented failure.
+    // An escaping exception would terminate the process from inside a sound
+    // call; sound is optional, the printer is not. Clearing the flag also keeps
+    // stop_render_thread() away from a thread that was never created.
+    try {
+        render_thread_ = helix::make_thread(&PWMSoundBackend::render_loop, this);
+    } catch (const std::system_error& e) {
+        render_running_.store(false);
+        spdlog::error("[PWMSoundBackend] Failed to spawn PCM render thread: {}", e.what());
+        return;
+    }
     spdlog::info("[PWMSoundBackend] PCM render thread started");
 }
 

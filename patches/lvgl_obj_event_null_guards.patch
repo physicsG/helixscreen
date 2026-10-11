@@ -1,31 +1,27 @@
 diff --git a/src/core/lv_obj_event.c b/src/core/lv_obj_event.c
 --- a/src/core/lv_obj_event.c
 +++ b/src/core/lv_obj_event.c
-@@ -20,6 +20,13 @@
-                                                           const void * original_target,
-                                                           unsigned int code);
+@@ -26,6 +26,12 @@
+ __attribute__((weak)) extern void helix_crash_note_event_target_id(const char * class_name,
+                                                                     const char * obj_name);
  
-+/* HelixScreen telemetry hook for unrecoverable conditions we converted into
-+ * recoverable bails. Same pattern as lvgl_observer_null_guards.patch and
-+ * lv_event_mark_deleted's stack-bounds guards. Weak so standalone LVGL
-+ * builds (demos, tests outside the helix tree) link without it; calls below
-+ * are guarded with `if(helix_lvgl_anomaly)`. */
++/* HelixScreen telemetry hook for conditions LVGL treats as unrecoverable and
++ * that we convert into recoverable bails. Weak so standalone LVGL builds
++ * (demos, tests outside the helix tree) link without it; every call below is
++ * guarded with `if(helix_lvgl_anomaly)`. */
 +extern void helix_lvgl_anomaly(const char * code, const char * context) __attribute__((weak));
 +
  /*********************
   *      DEFINES
   *********************/
-@@ -127,36 +134,60 @@
+@@ -133,36 +139,57 @@
  
  uint32_t lv_obj_get_event_count(lv_obj_t * obj)
  {
 -    LV_ASSERT_NULL(obj);
-+    /* HelixScreen: bundle VHTR49QJ (v0.99.53/ad5x, 2026-05-04) crashed here
-+     * with fault_addr=0x0 reaching this read path. Release-mode LV_ASSERT_NULL
-+     * is a no-op, so a freed/zeroed widget pointer arriving via a deferred
-+     * callback (post-token-check) faulted in the field load. Convert to a
-+     * recoverable bail with telemetry — matches the established pattern in
-+     * lvgl_observer_null_guards.patch and lv_event_mark_deleted. */
++    /* Release builds compile LV_ASSERT_NULL to nothing, so a NULL obj arriving
++     * from a deferred callback faults on the spec_attr load below. Bail with
++     * telemetry instead, matching lvgl_observer_null_guards.patch. */
 +    if(obj == NULL) {
 +        if(helix_lvgl_anomaly) helix_lvgl_anomaly("obj_event_null_obj", "lv_obj_get_event_count");
 +        return 0;
@@ -82,7 +78,7 @@ diff --git a/src/core/lv_obj_event.c b/src/core/lv_obj_event.c
  
      uint32_t event_cnt = lv_obj_get_event_count(obj);
      uint32_t removed_count = 0;
-@@ -177,7 +208,10 @@
+@@ -183,7 +210,10 @@
  
  uint32_t lv_obj_remove_event_cb_with_user_data(lv_obj_t * obj, lv_event_cb_t event_cb, void * user_data)
  {

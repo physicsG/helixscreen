@@ -25,16 +25,17 @@ writing twice; that is the cost of a maintenance line and it is expected.
 
 `RELEASE_CHANNEL` is a file at the repo root, read by `scripts/release-channel.sh`
 and consumed by `.github/workflows/release.yml`. It is declared per branch rather
-than derived from the tag string, because `helix::version::Version` discards
-prerelease suffixes — so `v1.1.0-dev1` and `v1.1.0-dev2` compare EQUAL and the
-in-app updater stops offering builds after the first install.
+than derived from the tag string, because routing is a property of the branch: the
+`dev` channel cannot be spelled in a version at all, and a plain `vX.Y.Z` tag cut
+from the trunk would reach the stable fleet if the tag decided. The version string
+carries precedence only, and `helix::version::Version` orders a `-beta.N` build
+below the release it names.
 
 **`main` must never declare `stable`.** It carries versions ahead of the released
 line, so a tag there would publish over the stable manifest for every user, and
 `release.yml`'s pre-upload downgrade guard cannot refuse it — a higher version is
 a *forward* move. Cutting a new maintenance line and flipping the trunk's channel
-belong to one change, never two. See `RELEASE_1_0_CHECKLIST.md` § "The atomic
-branch cut".
+belong to one change, never two.
 
 Nothing about moving a branch publishes anything: `release.yml` triggers only on
 `push: tags: v*`, and the R2 workflows are `workflow_dispatch` only. A release is

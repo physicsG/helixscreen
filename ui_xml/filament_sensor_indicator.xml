@@ -4,6 +4,10 @@
 <!-- Filament sensor indicator - nozzle icon showing sensor state -->
 <component>
   <api>
+    <!-- Per-instance rung subject from the owning tile. Empty by default, so
+         a call site that does not size itself installs no binding and keeps
+         whatever `size` selects. -->
+    <prop name="rung_subject" type="string" default=""/>
     <prop name="size" type="string" default="sm"/>
     <!-- Which runout subject drives the indicator. Defaults to the global,
          all-sensors-aggregate "filament_runout_detected". The in-print status
@@ -17,14 +21,20 @@
     <bind_flag_if_eq subject="$subject" flag="hidden" ref_value="-1"/>
     <!-- Loaded: green nozzle -->
     <icon src="filament" size="$size" variant="success">
+      <bind_tile_rung ladder="icon" subject="$rung_subject"/>
+
       <bind_flag_if_not_eq subject="$subject" flag="hidden" ref_value="1"/>
     </icon>
     <!-- Empty: red nozzle-alert -->
     <icon src="filament_alert" size="$size" variant="danger">
+      <bind_tile_rung ladder="icon" subject="$rung_subject"/>
+
       <bind_flag_if_not_eq subject="$subject" flag="hidden" ref_value="0"/>
     </icon>
     <!-- Sensor disabled: muted nozzle (runout protection is off) -->
     <icon src="filament" size="$size" variant="disabled">
+      <bind_tile_rung ladder="icon" subject="$rung_subject"/>
+
       <bind_flag_if_not_eq subject="$subject" flag="hidden" ref_value="2"/>
     </icon>
   </view>

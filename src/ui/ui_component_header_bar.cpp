@@ -96,13 +96,11 @@ void ui_component_header_bar_setup(lv_obj_t* header, lv_obj_t* screen) {
         }
         lv_obj_add_style(back_btn, &back_pressed, LV_PART_MAIN | LV_STATE_PRESSED);
 
-        // NOTE: this function is currently unreachable — its only caller,
+        // NOTE: this function is currently unreachable: its only caller,
         // ui_panel_setup_header() (ui_panel_common.cpp), has no callers of its
         // own. Every real overlay panel goes through
         // ui_overlay_panel_setup_standard() instead (directly, or via
-        // OverlayBase), which is where the portrait back-icon swap
-        // (chevron_up) actually lives. Don't "fix" the icon here and wonder
-        // why nothing changes at runtime.
+        // OverlayBase).
     }
 
     spdlog::trace("[HeaderBar] Setup complete: height={}px", header_height);

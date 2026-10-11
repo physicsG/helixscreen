@@ -18,11 +18,17 @@ set -e
 # Get script directory (POSIX-compatible)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_FILE="$SCRIPT_DIR/helix_print.py"
-# Legacy name, kept only so --uninstall can clean up installs that predate
-# 0d5bc370d (which merged helix_phase_tracking.cfg into helix_macros.cfg)
-LEGACY_PHASE_TRACKING_CFG="helix_phase_tracking.cfg"
 AUTO_MODE=false
-ENABLE_PHASE_TRACKING=false
+
+# Exit codes for --uninstall and --uninstall-auto:
+#   0 - uninstalled; nothing left in the config to clean up
+#   2 - the plugin was removed, but the phase-tracking strip skipped or
+#       failed a config file, which needs a human to look at it
+#   1 (or any other nonzero) - the uninstall itself failed; the plugin may
+#       still be present
+EXIT_UNINSTALL_OK=0
+EXIT_UNINSTALL_FAILED=1
+EXIT_UNINSTALL_NEEDS_ATTENTION=2
 
 # Colors for output (works with printf)
 RED='\033[0;31m'
@@ -155,6 +161,7 @@ Please remove it manually before installing."
 # Uninstall function (interactive)
 uninstall() {
     info "Uninstalling HelixPrint plugin..."
+    exit_status=$EXIT_UNINSTALL_OK
 
     moonraker_path=$(find_moonraker "$1")
 
@@ -174,14 +181,25 @@ uninstall() {
         info "Plugin symlink not found (already uninstalled?)"
     fi
 
+    config_dir=$(find_config_dir)
+    if [ -n "$config_dir" ]; then
+        # The plugin itself is already gone at this point, so any nonzero
+        # here - a skipped file or a failed one - is "needs attention", not
+        # a failed uninstall.
+        strip_phase_tracking_instrumentation "$config_dir" || exit_status=$EXIT_UNINSTALL_NEEDS_ATTENTION
+    fi
+
     printf '\n'
     printf '%s\n' "Don't forget to:"
     printf '%s\n' "  1. Remove [helix_print] section from moonraker.conf"
     printf '%s\n' "  2. Restart Moonraker: sudo systemctl restart moonraker"
+
+    return "$exit_status"
 }
 
 # Wait for Moonraker to become available after restart
 wait_for_moonraker() {
+    [ "$NO_RESTART" = "true" ] && return 0
     max_attempts=30
     attempt=0
     moonraker_url="${MOONRAKER_URL:-http://localhost:7125}"
@@ -201,125 +219,14 @@ wait_for_moonraker() {
     return 1
 }
 
-# Locate the shipped helix_macros.cfg
-#
-# It defines the HELIX_PHASE_* and HELIX_READY macros that the plugin injects
-# into PRINT_START. The sibling layout holds in both a git checkout and a
-# deployed HelixScreen - mk/cross.mk ships assets/ and moonraker-plugin/ side by
-# side (DEPLOY_ASSET_DIRS).
-find_helix_macros_cfg() {
-    for candidate in \
-        "$SCRIPT_DIR/../assets/config/helix_macros.cfg" \
-        "$SCRIPT_DIR/../config/helix_macros.cfg" \
-        "/opt/helixscreen/config/helix_macros.cfg"
-    do
-        if [ -f "$candidate" ]; then
-            printf '%s\n' "$candidate"
-            return 0
-        fi
-    done
-    return 1
-}
-
-# Install phase tracking macros and optionally instrument PRINT_START
-install_phase_tracking() {
-    config_dir="$1"
-    moonraker_url="${MOONRAKER_URL:-http://localhost:7125}"
-
-    if [ -z "$config_dir" ]; then
-        warn "Config directory not found - skipping phase tracking setup"
-        return 1
-    fi
-
-    info "Setting up detailed print preparation tracking..."
-
-    # Install helix_macros.cfg BEFORE instrumenting. Instrumenting first would
-    # leave PRINT_START calling macros that do not exist, which Klipper does not
-    # catch at config load - it fails at print start with "Unknown command".
-    if ! macros_cfg=$(find_helix_macros_cfg); then
-        warn "helix_macros.cfg not found alongside the plugin"
-        warn "Skipping phase tracking - PRINT_START will be left untouched"
-        return 1
-    fi
-
-    cp "$macros_cfg" "$config_dir/helix_macros.cfg"
-    info "Installed helix_macros.cfg"
-
-    # Add include to printer.cfg if not already present
-    printer_cfg="$config_dir/printer.cfg"
-    if [ -f "$printer_cfg" ]; then
-        if ! grep -q '\[include helix_macros.cfg\]' "$printer_cfg"; then
-            # Create backup
-            backup_file="${printer_cfg}.bak.$(date +%Y%m%d_%H%M%S)"
-            cp "$printer_cfg" "$backup_file"
-            info "Created backup: $backup_file"
-
-            # Append include at end of file (safe, simple approach)
-            printf '\n' >> "$printer_cfg"
-            printf '%s\n' "[include helix_macros.cfg]" >> "$printer_cfg"
-
-            info "Added [include helix_macros.cfg] to printer.cfg"
-        else
-            info "Helix macros include already present in printer.cfg"
-        fi
-    else
-        warn "printer.cfg not found - please add [include helix_macros.cfg] manually"
-        return 1
-    fi
-
-    # Call plugin API to instrument PRINT_START macro
-    info "Instrumenting PRINT_START macro..."
-    response=$(curl -s -X POST "$moonraker_url/server/helix/phase_tracking/enable" 2>/dev/null || printf '%s' '{"error": "API call failed"}')
-
-    if printf '%s' "$response" | grep -q '"success".*true'; then
-        info "PRINT_START macro instrumented successfully"
-    else
-        warn "Could not auto-instrument PRINT_START macro"
-        warn "You can enable this later from HelixScreen Settings"
-        warn "Or manually add HELIX_PRINT_COMPLETE to the end of your PRINT_START macro"
-    fi
-
-    return 0
-}
-
-# Remove phase tracking from printer config
-remove_phase_tracking() {
-    config_dir="$1"
-    moonraker_url="${MOONRAKER_URL:-http://localhost:7125}"
-
-    if [ -z "$config_dir" ]; then
-        return 0
-    fi
-
-    info "Removing phase tracking..."
-
-    # Call plugin API to strip instrumentation first (while Moonraker is still running)
-    curl -s -X POST "$moonraker_url/server/helix/phase_tracking/disable" 2>/dev/null || true
-
-    # helix_macros.cfg and its include are deliberately left in place: it is the
-    # shared HelixScreen helper macro file (HELIX_START_PRINT, HELIX_CLEAN_NOZZLE
-    # and friends), not a phase-tracking artifact. Removing it here would break
-    # features the user never uninstalled. Stripping the instrumentation above is
-    # what actually disables phase tracking.
-
-    # Clean up the legacy pre-0d5bc370d file, which nothing uses any more
-    printer_cfg="$config_dir/printer.cfg"
-    if [ -f "$printer_cfg" ] && grep -q "\[include $LEGACY_PHASE_TRACKING_CFG\]" "$printer_cfg"; then
-        backup_file="${printer_cfg}.bak.$(date +%Y%m%d_%H%M%S)"
-        cp "$printer_cfg" "$backup_file"
-        grep -v "\[include $LEGACY_PHASE_TRACKING_CFG\]" "$printer_cfg" > "$printer_cfg.tmp"
-        mv "$printer_cfg.tmp" "$printer_cfg"
-        info "Removed legacy phase tracking include from printer.cfg"
-    fi
-
-    if [ -f "$config_dir/$LEGACY_PHASE_TRACKING_CFG" ]; then
-        rm "$config_dir/$LEGACY_PHASE_TRACKING_CFG"
-        info "Removed legacy $LEGACY_PHASE_TRACKING_CFG"
-    fi
-}
-
 # Restart Moonraker service
 restart_moonraker() {
+    # A caller under systemd's NoNewPrivileges (the HelixScreen service) cannot
+    # sudo, so it passes --no-restart and asks Moonraker to restart itself.
+    if [ "$NO_RESTART" = "true" ]; then
+        info "Leaving the Moonraker restart to the caller"
+        return 0
+    fi
     info "Restarting Moonraker..."
     if command -v systemctl > /dev/null 2>&1 && systemctl list-units --type=service 2>/dev/null | grep -q moonraker; then
         sudo systemctl restart moonraker || warn "Failed to restart Moonraker via systemctl"
@@ -330,10 +237,42 @@ restart_moonraker() {
     fi
 }
 
+# Strip phase-tracking instrumentation from PRINT_START via the bundled
+# strip_phase_tracking.py, which owns the marker format and the safety
+# contract around editing a printer's config (matched blocks only, a
+# verified backup, symlinks and modes preserved). python3 is what Moonraker
+# itself runs on; its absence here means something else on this printer is
+# already broken. Either way this never aborts the rest of uninstall - it
+# reports the outcome and returns it, so the caller can fold it into its own
+# exit status instead of claiming success it cannot back up.
+#
+# Returns strip_phase_tracking.py's own exit status unchanged (0 clean, 2
+# needs attention, 1 failed) so a caller can wire it straight through; a
+# missing python3 is reported as EXIT_UNINSTALL_NEEDS_ATTENTION since
+# PRINT_START could not be checked at all.
+strip_phase_tracking_instrumentation() {
+    scan_dir="$1"
+
+    if ! command -v python3 > /dev/null 2>&1; then
+        warn "python3 not found - could not check PRINT_START for phase-tracking instrumentation"
+        warn "If a previous HelixScreen instrumented PRINT_START, remove any block between"
+        warn "'# <<< HELIX_TRACKING v2 >>>' and '# <<< /HELIX_TRACKING >>>' by hand, then restart Klipper"
+        return "$EXIT_UNINSTALL_NEEDS_ATTENTION"
+    fi
+
+    strip_status=$EXIT_UNINSTALL_OK
+    python3 "$SCRIPT_DIR/strip_phase_tracking.py" "$scan_dir" || strip_status=$?
+    if [ "$strip_status" -ne 0 ]; then
+        warn "Phase-tracking strip reported a failure - see the output above"
+    fi
+    return "$strip_status"
+}
+
 # Auto-uninstall function (non-interactive, for HelixScreen integration)
 auto_uninstall() {
     info "HelixPrint Auto-Uninstall Mode"
     printf '\n'
+    exit_status=$EXIT_UNINSTALL_OK
 
     # Find Moonraker (auto-detect only)
     moonraker_path=$(find_moonraker "")
@@ -347,9 +286,6 @@ auto_uninstall() {
     # Find config directory
     config_dir=$(find_config_dir)
 
-    # Remove phase tracking BEFORE removing plugin (need API access)
-    remove_phase_tracking "$config_dir"
-
     # Remove symlink
     if [ -L "$target" ]; then
         rm "$target"
@@ -360,35 +296,65 @@ auto_uninstall() {
         info "Plugin symlink not found (already uninstalled?)"
     fi
 
-    # Remove config section if possible
+    # helix_macros.cfg and its printer.cfg include are left in place: the
+    # macros are shared HelixScreen helpers (HELIX_START_PRINT,
+    # HELIX_CLEAN_NOZZLE and friends) that keep working without this plugin.
+    # Any HELIX_PHASE_*/HELIX_READY calls this plugin's own instrumentation
+    # left in PRINT_START are removed, with a backup, by the call below. The
+    # plugin itself is already gone at this point, so any nonzero here - a
+    # skipped file or a failed one - is "needs attention", not a failed
+    # uninstall.
+    if [ -n "$config_dir" ]; then
+        strip_phase_tracking_instrumentation "$config_dir" || exit_status=$EXIT_UNINSTALL_NEEDS_ATTENTION
+    fi
+
+    # Remove config section if possible. The plugin itself is already gone
+    # at this point, so a failure backing up or editing moonraker.conf here
+    # is "needs attention", not a failed uninstall, and must not trip set -e
+    # and skip the rest of this function.
     if [ -n "$config_dir" ] && [ -f "$config_dir/moonraker.conf" ]; then
         moonraker_conf="$config_dir/moonraker.conf"
 
         if grep -q '^\[helix_print\]' "$moonraker_conf"; then
-            # Create backup before modifying config
             backup_file="${moonraker_conf}.bak.$(date +%Y%m%d_%H%M%S)"
-            cp "$moonraker_conf" "$backup_file"
-            info "Created backup: $backup_file"
+            if cp "$moonraker_conf" "$backup_file"; then
+                info "Created backup: $backup_file"
 
-            info "Removing [helix_print] section from moonraker.conf"
-            # Use awk for cross-platform config section removal
-            # This correctly handles helix_print as the last section in the file
-            awk '
-                /^\[helix_print\]/ { skip = 1; next }
-                /^\[/ { skip = 0 }
-                !skip { print }
-            ' "$moonraker_conf" > "$moonraker_conf.tmp" && mv "$moonraker_conf.tmp" "$moonraker_conf"
+                info "Removing [helix_print] section from moonraker.conf"
+                # Use awk for cross-platform config section removal
+                # This correctly handles helix_print as the last section in the file
+                if ! (awk '
+                    /^\[helix_print\]/ { skip = 1; next }
+                    /^\[/ { skip = 0 }
+                    !skip { print }
+                ' "$moonraker_conf" > "$moonraker_conf.tmp" && mv "$moonraker_conf.tmp" "$moonraker_conf"); then
+                    warn "Could not remove [helix_print] from moonraker.conf - see $backup_file"
+                    exit_status=$EXIT_UNINSTALL_NEEDS_ATTENTION
+                fi
+            else
+                warn "Could not back up moonraker.conf - leaving the [helix_print] section in place"
+                exit_status=$EXIT_UNINSTALL_NEEDS_ATTENTION
+            fi
         fi
     fi
 
     # Restart Moonraker
     restart_moonraker
 
-    # Wait for Moonraker to come back up
-    wait_for_moonraker
+    # Wait for Moonraker to come back up. A slow or unreachable restart here
+    # must not turn a completed uninstall into a reported failure: the
+    # plugin is already gone, and this timeout is about restart timing, not
+    # the uninstall's own outcome.
+    wait_for_moonraker || warn "Moonraker did not come back up in time, but the plugin removal itself completed"
 
     printf '\n'
-    info "Auto-uninstall complete!"
+    if [ "$exit_status" -eq "$EXIT_UNINSTALL_OK" ]; then
+        info "Auto-uninstall complete!"
+    else
+        warn "Auto-uninstall complete, but PRINT_START needs a look - see the warnings above"
+    fi
+
+    return "$exit_status"
 }
 
 # Auto-install function (non-interactive, for HelixScreen integration)
@@ -417,9 +383,6 @@ auto_install() {
 
     info "Moonraker: $moonraker_path"
     info "Config: ${config_dir:-not found}"
-    if [ "$ENABLE_PHASE_TRACKING" = "true" ]; then
-        info "Phase tracking: ENABLED"
-    fi
     printf '\n'
 
     # Pre-flight permission checks
@@ -472,19 +435,6 @@ auto_install() {
     # Wait for Moonraker to come back up
     wait_for_moonraker
 
-    # Install phase tracking if requested
-    if [ "$ENABLE_PHASE_TRACKING" = "true" ]; then
-        install_phase_tracking "$config_dir"
-
-        # Need to restart Klipper to load the new macros
-        info "Restarting Klipper to load phase tracking macros..."
-        moonraker_url="${MOONRAKER_URL:-http://localhost:7125}"
-        curl -s -X POST "$moonraker_url/printer/restart" 2>/dev/null || warn "Could not restart Klipper via API"
-
-        # Give Klipper time to restart
-        sleep 5
-    fi
-
     printf '\n'
     info "Auto-install complete!"
 }
@@ -494,10 +444,20 @@ show_help() {
     printf '\n'
     printf '%s\n' "Options:"
     printf '%s\n' "  --auto, -a              Full auto-install (updates config, restarts Moonraker)"
-    printf '%s\n' "  --with-phase-tracking   Enable detailed print preparation tracking"
-    printf '%s\n' "  --uninstall, -u         Remove the plugin symlink (interactive)"
-    printf '%s\n' "  --uninstall-auto        Full auto-uninstall (removes config, restarts Moonraker)"
+    printf '%s\n' "  --no-restart            Before --auto/--uninstall-auto: skip the Moonraker restart;"
+    printf '%s\n' "                          the caller restarts it (e.g. via Moonraker's server.restart)"
+    printf '%s\n' "  --uninstall, -u         Remove the plugin symlink and strip PRINT_START"
+    printf '%s\n' "                          instrumentation, if any (interactive)"
+    printf '%s\n' "  --uninstall-auto        Full auto-uninstall: removes the symlink and config"
+    printf '%s\n' "                          section, strips PRINT_START instrumentation, restarts"
+    printf '%s\n' "                          Moonraker"
     printf '%s\n' "  --help, -h              Show this help message"
+    printf '\n'
+    printf '%s\n' "Exit codes for --uninstall and --uninstall-auto:"
+    printf '%s\n' "  0   uninstalled; nothing left in the config to clean up"
+    printf '%s\n' "  2   the plugin was removed, but a config file was skipped or failed during"
+    printf '%s\n' "      the phase-tracking strip and needs a human to look at it"
+    printf '%s\n' "  1   (or any other nonzero) the uninstall itself failed"
     printf '\n'
     printf '%s\n' "Arguments:"
     printf '%s\n' "  MOONRAKER_PATH     Path to Moonraker installation (auto-detected if not provided)"
@@ -508,28 +468,28 @@ show_help() {
     printf '%s\n' "                     Example: MOONRAKER_URL=http://192.168.1.100:7125 ./install.sh --auto"
     printf '\n'
     printf '%s\n' "Examples:"
-    printf '%s\n' "  ./install.sh --auto                         # Auto-install without phase tracking"
-    printf '%s\n' "  ./install.sh --auto --with-phase-tracking   # Auto-install with phase tracking"
+    printf '%s\n' "  ./install.sh --auto      # Auto-install (updates moonraker.conf, restarts Moonraker)"
 }
 
 # Parse arguments
+NO_RESTART=false
 while [ $# -gt 0 ]; do
     case "$1" in
+        --no-restart)
+            NO_RESTART=true
+            shift
+            ;;
         --auto|-a)
             AUTO_MODE=true
             shift
             ;;
-        --with-phase-tracking)
-            ENABLE_PHASE_TRACKING=true
-            shift
-            ;;
         --uninstall|-u)
             uninstall "$2"
-            exit 0
+            exit $?
             ;;
         --uninstall-auto)
             auto_uninstall
-            exit 0
+            exit $?
             ;;
         --help|-h)
             show_help

@@ -3,16 +3,21 @@
 
 #include "lvgl_image_writer.h"
 
+#include "helix_fs.h"
 #include "lvgl/lvgl.h"
+#include "text_io.h"
 
 #include <spdlog/spdlog.h>
 
 #include <atomic>
-#include <filesystem>
-#include <fstream>
+#include <cerrno>
+#include <cstring>
+#include <string_view>
 #include <unistd.h>
 
 namespace helix {
+
+namespace hfs = helix::fs;
 
 bool write_lvgl_bin(const std::string& path, int width, int height, uint8_t color_format,
                     const uint8_t* pixel_data, size_t data_size) {
@@ -50,7 +55,7 @@ bool write_lvgl_bin(const std::string& path, int width, int height, uint8_t colo
                                   std::to_string(seq.fetch_add(1, std::memory_order_relaxed)) +
                                   ".tmp";
 
-    std::ofstream file(temp_path, std::ios::binary);
+    helix::text_io::File file = helix::text_io::open_file(temp_path, "wb");
     if (!file) {
         spdlog::warn("[LvglImageWriter] Cannot open {} for writing", temp_path);
         return false;
@@ -75,26 +80,24 @@ bool write_lvgl_bin(const std::string& path, int width, int height, uint8_t colo
     header.stride = static_cast<uint16_t>(stride);
     header.reserved_2 = 0;
 
-    // Write header using the actual struct (guarantees correct layout)
-    file.write(reinterpret_cast<const char*>(&header), sizeof(header));
-
-    // Write pixel data
-    file.write(reinterpret_cast<const char*>(pixel_data), data_size);
-
-    if (!file.good()) {
+    // Write header using the actual struct (guarantees correct layout), then pixels
+    bool write_ok = helix::text_io::write_all(
+        file.get(), std::string_view(reinterpret_cast<const char*>(&header), sizeof(header)));
+    write_ok =
+        helix::text_io::write_all(
+            file.get(), std::string_view(reinterpret_cast<const char*>(pixel_data), data_size)) &&
+        write_ok;
+    if (!helix::text_io::close(file) || !write_ok) {
         spdlog::warn("[LvglImageWriter] Write error for {}", temp_path);
-        file.close();
-        std::filesystem::remove(temp_path); // Clean up partial file
+        hfs::remove(temp_path); // Clean up partial file
         return false;
     }
-    file.close();
 
     // Atomic rename - if this fails, the temp file is left but no corrupted final file
-    try {
-        std::filesystem::rename(temp_path, path);
-    } catch (const std::filesystem::filesystem_error& e) {
-        spdlog::warn("[LvglImageWriter] Atomic rename failed: {}", e.what());
-        std::filesystem::remove(temp_path);
+    if (!hfs::rename(temp_path, path)) {
+        spdlog::warn("[LvglImageWriter] Atomic rename failed: {}: {}", temp_path,
+                     std::strerror(errno));
+        hfs::remove(temp_path);
         return false;
     }
 

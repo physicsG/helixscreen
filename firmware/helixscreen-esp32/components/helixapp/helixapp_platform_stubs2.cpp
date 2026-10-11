@@ -15,6 +15,7 @@
 #include "ethernet_manager.h"
 #include "filament_display_name.h"
 #include "gcode_data_source.h"
+#include "helix_psram_attr.h"
 #include "host_identity.h"
 #include "hv/WebSocketClient.h"
 #include "ipp_printer.h"
@@ -22,7 +23,6 @@
 #include "makeid_bt_printer.h"
 #include "mdns_discovery.h"
 #include "platform_info.h"
-#include "plugin_manager.h"
 #include "snapshot_qr_scanner.h"
 #include "spoolman_manager.h"
 #include "spoolman_slot_saver.h"
@@ -74,6 +74,7 @@ void note(const char*, const char*, long) noexcept {}
 void TelemetryManager::record_error(const std::string&, const std::string&, const std::string&) {}
 void TelemetryManager::notify_overlay_opened(const std::string&) {}
 void TelemetryManager::notify_connection_state_changed(int) {}
+void TelemetryManager::record_hardware_profile() {}
 
 // --- UsbManager readers (udev/sysfs USB storage; no USB host on the slice) --
 // ctor/dtor/start/stop/set_drive_callback live in audit_stubs.cpp.
@@ -82,6 +83,9 @@ std::vector<UsbDrive> UsbManager::get_drives() const {
 }
 bool UsbManager::is_running() const {
     return false;
+}
+std::shared_ptr<UsbBackend> UsbManager::backend_snapshot() const {
+    return nullptr;
 }
 
 // --- host identity / platform info (gethostname/getifaddrs; Android JNI) ----
@@ -134,8 +138,8 @@ lv_obj_t* SpoolmanOverlay::create(lv_obj_t*) {
 }
 void SpoolmanOverlay::on_ui_destroyed() {}
 void SpoolmanOverlay::on_activate() {}
-void SpoolmanOverlay::on_deactivate() {}
-void SpoolmanOverlay::show(lv_obj_t*) {}
+void SpoolmanOverlay::on_deactivating(DeactivateReason) {}
+void SpoolmanOverlay::before_show() {}
 SpoolmanOverlay& get_spoolman_overlay() {
     static SpoolmanOverlay overlay;
     return overlay;
@@ -158,9 +162,10 @@ SpoolmanOverlay& get_spoolman_overlay() {
 // value in ui_ams_edit_overlay.cpp, so it needs a real ctor.
 //
 // SpoolmanPanel CANNOT be raw storage: two kept call sites
-// (ui_panel_advanced.cpp handle_spoolman_clicked, ui_printer_manager_overlay
-// .cpp on_chip_spoolman_clicked) hand it to lazy_create_and_push_overlay,
-// which dispatches init_subjects(), register_callbacks() and create() on it.
+// (ui_panel_advanced.cpp handle_spoolman_clicked, the pm_chip_spoolman_clicked
+// entry in ui_printer_manager_overlay.cpp PrinterManagerOverlay::register_callbacks)
+// hand it to lazy_create_and_push_overlay, which dispatches init_subjects(),
+// register_callbacks() and create() on it.
 // Those are virtual, so raw storage would fault (LoadProhibited) the moment
 // the capability gate that hides both rows is lifted. So the accessor
 // constructs a real object, which requires defining the ctor and every
@@ -187,7 +192,7 @@ lv_obj_t* SpoolmanPanel::create(lv_obj_t*) {
     return nullptr;
 }
 void SpoolmanPanel::on_activate() {}
-void SpoolmanPanel::on_deactivate() {}
+void SpoolmanPanel::on_deactivating(DeactivateReason) {}
 
 SpoolmanPanel& get_global_spoolman_panel() {
     static SpoolmanPanel panel;
@@ -247,18 +252,28 @@ void SpoolmanManager::invalidate_identity(int) {}
 std::optional<helix::SpoolIdentity> SpoolmanManager::find_identity(int) {
     return std::nullopt;
 }
+// No identity cache exists here, so a spool a save just wrote has nothing to be
+// re-read onto.
+void SpoolmanManager::refresh_spool(int) {}
 
 // src/spoolman/spoolman_slot_saver.cpp — the AMS edit overlay compiles calls to
 // these, but reaches them only from the Spoolman-gated save path. "No change"
 // and "not complete" are the answers that make that path a no-op if entered.
 namespace helix {
-SpoolmanSlotSaver::SpoolmanSlotSaver(IMoonrakerAPI* api) : api_(api) {}
+SpoolmanSlotSaver::SpoolmanSlotSaver(IMoonrakerAPI* api, float filament_diameter_mm)
+    : api_(api), filament_diameter_mm_(filament_diameter_mm) {}
 
 ChangeSet SpoolmanSlotSaver::detect_changes(const SlotInfo&, const SlotInfo&) {
     return ChangeSet{};
 }
 bool SpoolmanSlotSaver::is_filament_complete(const SlotInfo&) {
     return false;
+}
+// Every field a filament write needs reads as absent, the same answer
+// is_filament_complete() gives: a save reaching here stops at the caller's
+// missing-field check instead of continuing into save().
+MissingFilamentFields SpoolmanSlotSaver::missing_filament_fields(const SlotInfo&) {
+    return MissingFilamentFields{true, true, true};
 }
 void SpoolmanSlotSaver::build_spool_patches(const SpoolInfo&, const SpoolInfo&, nlohmann::json&,
                                             nlohmann::json&) {}
@@ -337,9 +352,6 @@ void ThumbnailProcessor::process_async(const std::vector<uint8_t>&, const std::s
                                        const ThumbnailTarget&, ProcessSuccessCallback,
                                        ProcessErrorCallback) {}
 void ThumbnailProcessor::set_cache_dir(const std::string&) {}
-ThumbnailTarget ThumbnailProcessor::get_target_for_display(ThumbnailSize) {
-    return {};
-}
 
 } // namespace helix
 
@@ -396,6 +408,9 @@ void DebugBundleCollector::upload_async(const BundleOptions&, ResultCallback cal
 std::string host_arch_string() {
     return std::string("xtensa");
 }
+bool ad5x_mod_layout_present(const std::string&, const char**) {
+    return false;
+}
 
 // --- IppPrinter (IPP/PWG-Raster over libhv HTTP; detached print thread) ------
 // The slice UI constructs one before calling the setters, so ctor/dtor and
@@ -435,8 +450,15 @@ spdlog::level::level_enum parse_level(const std::string&, spdlog::level::level_e
     return default_level;
 }
 void set_runtime_level(spdlog::level::level_enum) {}
+spdlog::level::level_enum effective_log_level() {
+    // No file/syslog sinks here, so the logger's own level is the level that runs.
+    return spdlog::get_level();
+}
 std::string effective_destination() {
     return std::string("console");
+}
+std::string effective_log_file_path() {
+    return {};
 }
 
 } // namespace logging
@@ -468,15 +490,26 @@ void TelemetryManager::notify_setting_changed(const std::string&, const std::str
 
 // --- UpdateChecker (libhv HTTPS to GitHub/R2; worker thread) -----------------
 // Private ctor is header-inline (= default); only the declared dtor needs a
-// definition for the function-local static.
+// definition for the function-local static, which lives in PSRAM: ~3.4KB of
+// members no checker uses here.
 UpdateChecker& UpdateChecker::instance() {
-    static UpdateChecker checker;
+    static HELIX_PSRAM_BSS UpdateChecker checker;
     return checker;
 }
 UpdateChecker::~UpdateChecker() = default;
+// No checker runs here; init() only registers the shared subjects
+// (update_checker_subjects.cpp) so the update rows bind to Idle.
+void UpdateChecker::init() {
+    init_subjects();
+}
+void UpdateChecker::on_language_changed() {}
 void UpdateChecker::clear_cache() {}
 void UpdateChecker::start_download() {}
 void UpdateChecker::cancel_download() {}
+// Firmware updates are flashed whole; there is no tarball to stage.
+std::string UpdateChecker::compute_update_staging_dir(const std::string&, const std::string&) {
+    return {};
+}
 
 // --- hv::WebSocketClient audit stand-in (shim hv_stub/hv/WebSocketClient.h) --
 // The shim declares these; Phase 2 replaces the seam with
@@ -534,6 +567,11 @@ std::string app_get_config_dir() {
 std::string get_helix_cache_dir(const std::string& subdir) {
     return subdir.empty() ? std::string("/config/cache") : "/config/cache/" + subdir;
 }
+std::string peek_helix_cache_dir(const std::string& subdir, const char** tier_out) {
+    if (tier_out)
+        *tier_out = "ESP32";
+    return get_helix_cache_dir(subdir);
+}
 
 namespace helix {
 
@@ -546,15 +584,11 @@ namespace helix {
 
 // --- ThumbnailProcessor, third batch (see round 2) ----------------------------
 void ThumbnailProcessor::set_write_journal(std::weak_ptr<ThumbnailWriteJournal>) {}
-void ThumbnailProcessor::set_card_size_hint(int, int) {}
 // Callbacks intentionally never invoked — same contract as process_async above.
 void ThumbnailProcessor::process_file_async(const std::string&, const std::string&,
                                             const ThumbnailTarget&,
                                             std::function<void(const std::string&)>,
                                             std::function<void(const std::string&)>) {}
-ThumbnailTarget ThumbnailProcessor::get_target_for_resolution(int, int, ThumbnailSize) {
-    return {};
-}
 std::string ThumbnailProcessor::get_if_processed(const std::string&, const ThumbnailTarget&) const {
     return {}; // empty string = "not cached", the documented miss value
 }
@@ -578,21 +612,6 @@ SnapshotQrScanner::SnapshotQrScanner() = default;
 SnapshotQrScanner::~SnapshotQrScanner() = default;
 #endif // HELIX_HAS_CAMERA
 
-} // namespace helix
-
-// --- PluginManager readers (dlopen plugin loading; no dynamic linking on
-// ESP-IDF). Empty containers = "no plugins discovered, no errors".
-namespace helix {
-namespace plugin {
-
-std::vector<PluginInfo> PluginManager::get_discovered_plugins() const {
-    return {};
-}
-std::vector<PluginError> PluginManager::get_load_errors() const {
-    return {};
-}
-
-} // namespace plugin
 } // namespace helix
 
 // --- FileDataSource (fopen/fseek/fread streaming; lives in the libhv HTTP
@@ -671,7 +690,17 @@ void UpdateChecker::refresh_config_snapshot() {}
 void UpdateChecker::check_for_updates(Callback) {}
 // Release-channel switch: the real body re-checks and re-stamps the config from
 // the network, which this slice has no updater for.
+// The About overlay seeds its channel rows from the effective channel. This
+// slice has no updater, so the effective channel is always the default.
+UpdateChecker::UpdateChannel UpdateChecker::get_channel() const {
+    return UpdateChannel::Stable;
+}
 void UpdateChecker::on_channel_changed() {}
+// No Moonraker update_manager stanza names this firmware, so there is nothing to sync.
+void UpdateChecker::sync_moonraker_channel() {}
+// The notification history panel's "show update" action. Nothing posts an
+// update notification in this slice, so the action is never dispatched.
+void UpdateChecker::show_update_notification() {}
 void UpdateChecker::report_download_status(DownloadStatus, int, const std::string&,
                                            const std::string&) {}
 std::optional<UpdateChecker::ReleaseInfo> UpdateChecker::get_cached_update() const {

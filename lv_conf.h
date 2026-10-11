@@ -84,6 +84,12 @@
 /*Default display refresh, input device read and animation step period.*/
 #define LV_DEF_REFR_PERIOD  33      /*[ms]*/
 
+/*Pending invalid areas kept per display. A frame that needs more areas than this makes
+ *LVGL drop every pending area and invalidate the whole screen, and the screensavers
+ *invalidate one area per moving object (helix::ui::SAVER_MAX_DIRTY_AREAS caps them at
+ *160), so the buffer sits above that cap with headroom for UI invalidations of its own.*/
+#define LV_INV_BUF_SIZE 192
+
 /*Default Dot Per Inch. Used to initialize default sizes such as widgets sized, style paddings.
  *(Not so important, you can adjust it to modify default sizes and spaces)*/
 #define LV_DPI_DEF 160     /*[px/inch]*/
@@ -100,7 +106,26 @@
  * - LV_OS_WINDOWS
  * - LV_OS_MQX
  * - LV_OS_CUSTOM */
-#define LV_USE_OS   LV_OS_PTHREAD
+/* Every shipping board renders inline: a render thread costs a thread synchronisation per
+ * invalidated area and can win nothing back. LV_DRAW_SW_DRAW_UNIT_CNT is 1, so no second
+ * unit exists to overlap with, and raising it does not help either - a unit may only take a
+ * task that lv_draw.c's is_independent() finds non-overlapping, and a full-screen canvas
+ * emits about one image-draw task per area, so there is never a second task to hand out.
+ * Measured on a CB1 (4x Cortex-A53, cores free), starfield settled: 20.0% of a core inline,
+ * 25.4% with one draw unit, 25.4% with two. Per invalidated area on a K1C, with a thread
+ * then without: 0.32% then 0.24%. On an AD5X the starfield's top rung falls 83.4% -> 61.3%,
+ * the difference between exhausting the ladder and settling on it.
+ *
+ * The desktop dev build keeps the thread deliberately: a draw task reading a buffer the main
+ * thread has already freed can only happen while a real render thread exists, so only then
+ * can tests/unit/test_info_qr_modal_stress (under ASAN) and test_draw_buf_guard's drain
+ * assertion fail. Its CPU cost is irrelevant on a dev machine. HELIX_DISPLAY_SDL is set only for the sdl backend, which only
+ * the native target uses. */
+#ifdef HELIX_DISPLAY_SDL
+    #define LV_USE_OS   LV_OS_PTHREAD
+#else
+    #define LV_USE_OS   LV_OS_NONE
+#endif
 
 #if LV_USE_OS == LV_OS_CUSTOM
     #define LV_OS_CUSTOM_INCLUDE <stdint.h>
@@ -119,9 +144,12 @@
  *========================*/
 
 /*Align the stride of all layers and images to this bytes.
- *16-byte alignment required for ARM NEON vld1q/vst1q SIMD operations.
- *RGB888 (3 bytes/pixel) with stride_align=1 causes unaligned access crashes.*/
-#define LV_DRAW_BUF_STRIDE_ALIGN                16
+ *Keep this at 1. The software blenders, NEON paths included, address pixels
+ *with byte-element loads and stores, so padded rows buy nothing; the start
+ *address is what SIMD and DMA care about, and LV_DRAW_BUF_ALIGN covers that.
+ *Padding rows here breaks every consumer that reads a buffer as tightly
+ *packed - nanovg's glyph upload and SDL_UpdateTexture among them.*/
+#define LV_DRAW_BUF_STRIDE_ALIGN                1
 
 /*Align the start address of draw_buf addresses to this bytes*/
 #define LV_DRAW_BUF_ALIGN                       16
@@ -129,8 +157,10 @@
 /*Using matrix for transformations.
  *Requirements:
     `LV_USE_MATRIX = 1`.
-    The rendering engine needs to support 3x3 matrix transformations.*/
-#define LV_DRAW_TRANSFORM_USE_MATRIX            1
+    The rendering engine needs to support 3x3 matrix transformations.
+ *Derived from the active draw unit further down this file, next to the
+ *LV_USE_DRAW_* switches it depends on. Defining it here would read those as
+ *unset, because they are configured below this point.*/
 
 /* If a widget has `style_opa < 255` (not `bg_opa`, `text_opa` etc) or not NORMAL blend mode
  * it is buffered into a "simple" layer before rendering. The widget can be buffered in smaller chunks.
@@ -266,6 +296,34 @@
 
 /* Use VG-Lite GPU. */
 #define LV_USE_DRAW_VG_LITE 0
+
+/* NanoVG draw unit: rasterizes widgets on the GPU instead of the CPU.
+ * Requires a GL-backed display - it renders into the layer's bound GL
+ * surface and has no readback path onto a dumb-buffer or fbdev framebuffer,
+ * so it is only reachable on the DRM+EGL presentation path.
+ * LV_USE_NANOVG builds the vendored library; LV_USE_DRAW_NANOVG builds the
+ * draw unit that uses it. The draw unit alone links with undefined nvg*. */
+#ifdef HELIX_ENABLE_NANOVG
+    #define LV_USE_NANOVG       1
+    #define LV_USE_DRAW_NANOVG  1
+#else
+    #define LV_USE_NANOVG       0
+    #define LV_USE_DRAW_NANOVG  0
+#endif
+
+/* Apply widget transforms (scale/rotate/skew) by handing the draw unit a 3x3
+ * matrix instead of rasterizing into a layer and resampling that bitmap.
+ *
+ * Only vg_lite and nanovg read the per-draw-task matrix. lv_draw_sw ignores
+ * it, and a widget whose transform is ignored still gets an inverse-scaled
+ * clip area: scaling up crops it, scaling down does nothing, and nothing
+ * warns. So this tracks the draw unit rather than standing on its own -
+ * LV_USE_MATRIX stays available either way for lv_obj_set_transform(). */
+#if LV_USE_DRAW_VG_LITE || LV_USE_DRAW_NANOVG
+    #define LV_DRAW_TRANSFORM_USE_MATRIX 1
+#else
+    #define LV_DRAW_TRANSFORM_USE_MATRIX 0
+#endif
 
 #if LV_USE_DRAW_VG_LITE
     /* Enable VG-Lite custom external 'gpu_init()' function */
@@ -791,7 +849,10 @@
 #if LV_USE_FS_POSIX
     #define LV_FS_POSIX_LETTER 'A'     /*Set an upper cased letter on which the drive will accessible (e.g. 'A')*/
     #define LV_FS_POSIX_PATH ""         /*Set the working directory. File/directory paths will be appended to it.*/
-    #define LV_FS_POSIX_CACHE_SIZE 0    /*>0 to cache this number of bytes in lv_fs_read()*/
+    /* The binfont loader reads a few bytes per lv_fs_read(); unbuffered, one CJK
+     * load is ~6M read() syscalls. Keep it <= 65535: lv_fs_read_cached() copies a
+     * refill through a uint16_t length. */
+    #define LV_FS_POSIX_CACHE_SIZE 4096 /*>0 to cache this number of bytes in lv_fs_read()*/
 #endif
 
 /*API for CreateFile, ReadFile, etc*/
@@ -847,12 +908,13 @@
 #define LV_USE_TJPGD 1
 
 /* libjpeg-turbo decoder library.
- * Disabled — we use TJPGD (built-in) for LVGL image decoding and
- * stb_image (lib/stb) for camera JPEG frames. No external deps needed. */
+ * Disabled: LVGL image decoding uses TJPGD (built-in). Camera frames
+ * decode outside LVGL, see the camera block below. */
 #define LV_USE_LIBJPEG_TURBO 0
 
 /* Camera support — enabled on platforms with networking and enough RAM.
- * Camera uses stb_image for JPEG decoding (header-only, zero deps). */
+ * Camera JPEG frames decode via libturbojpeg when it is present at runtime
+ * (dlopen), otherwise via stb_image (header-only, zero deps). */
 #if !defined(HELIX_PLATFORM_AD5M) && !defined(HELIX_PLATFORM_CC1) && \
     !defined(HELIX_PLATFORM_MIPS) && !defined(HELIX_PLATFORM_K1) && \
     !defined(HELIX_PLATFORM_AD5X) && !defined(HELIX_PLATFORM_K2) && \
@@ -1133,13 +1195,6 @@
     /* GBM buffers for the dumb-buffer DRM driver (requires Mesa 21.1+).
      * Disabled: Bullseye sysroot has Mesa 20.3, missing gbm_bo_get_fd_for_plane. */
     #define LV_USE_LINUX_DRM_GBM_BUFFERS 0
-
-    /* EGL rendering via lv_linux_drm_egl.c (GPU-accelerated, legacy modesetting) */
-    #ifdef HELIX_ENABLE_OPENGLES
-        #define LV_LINUX_DRM_USE_EGL     1
-    #else
-        #define LV_LINUX_DRM_USE_EGL     0
-    #endif
 #else
     #define LV_USE_LINUX_DRM        0
 #endif
@@ -1187,10 +1242,17 @@
 /* LVGL Windows backend */
 #define LV_USE_WINDOWS    0
 
-/* Use OpenGL ES display driver (GLAD-based, desktop only).
- * NOT for DRM+EGL — the DRM EGL path uses lv_linux_drm_egl.c instead.
- * This is a desktop display driver that creates its own window. */
-#define LV_USE_OPENGLES   0
+/* Compiles LVGL's GL helper layer (lv_opengles_driver.c, lv_opengles_texture.c).
+ * Window creation lives behind LV_USE_GLFW, so this pulls in no windowing code.
+ *
+ * This is the macro that matters for EGL: lv_conf_internal.h derives
+ * LV_LINUX_DRM_USE_EGL from it, and LV_USE_EGL from that in turn. Setting
+ * LV_LINUX_DRM_USE_EGL directly does nothing - the derive overrides it. */
+#ifdef HELIX_ENABLE_OPENGLES
+    #define LV_USE_OPENGLES   1
+#else
+    #define LV_USE_OPENGLES   0
+#endif
 
 /* QNX Screen display and input drivers */
 #define LV_USE_QNX              0

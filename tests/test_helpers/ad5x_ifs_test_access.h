@@ -12,6 +12,7 @@
 #include "ams_types.h"
 #include "filament_slot_override.h"
 #include "filament_slot_override_store.h"
+#include "test_helpers/seeded_override.h"
 
 #include <array>
 #include <chrono>
@@ -27,11 +28,33 @@
 
 using json = nlohmann::json;
 
+namespace helix {
+
 // Test access helper — friend class for accessing internals
 class Ad5xIfsTestAccess {
   public:
+    /// Takes a notify frame or a bare status object (a query result).
     static void handle_status(AmsBackendAd5xIfs& b, const json& n) {
-        b.handle_status_update(n);
+        if (n.contains("params")) {
+            b.handle_status_update(n);
+        } else {
+            b.handle_status(n);
+        }
+    }
+    // Put a whole Spoolman link on the live slot — the shape a linked slot
+    // carries. The persisted override record has no filament-id field, so
+    // the live slot is the only half of a link a test can seed whole.
+    static bool seed_live_spoolman_link(AmsBackendAd5xIfs& b, int slot_index, int spool_id,
+                                        int filament_id, int vendor_id) {
+        std::lock_guard<std::mutex> lock(b.mutex_);
+        helix::printer::SlotEntry* entry = b.slots_.get_mut(slot_index);
+        if (!entry)
+            return false;
+        entry->info.spoolman_id = spool_id;
+        entry->info.spoolman_filament_id = filament_id;
+        entry->info.spoolman_vendor_id = vendor_id;
+        entry->info.spool_name = "Linked Spool";
+        return true;
     }
     // Standalone IFS module surface (ifs / ifs_materials objects).
     static bool module_live(const AmsBackendAd5xIfs& b) {
@@ -123,7 +146,7 @@ class Ad5xIfsTestAccess {
         b.head_filament_ = detected;
     }
     // Pin the toolhead SWITCH pair independently of the conflated head_filament_.
-    // Production latches these only in the switch branch of handle_status_update();
+    // Production latches these only in the switch branch of handle_status();
     // tests need to express "switch says X while motion says Y", which is the
     // whole point of the pair existing. `seen=false` models motion-only firmware
     // that never publishes a switch sensor at all.
@@ -170,6 +193,17 @@ class Ad5xIfsTestAccess {
     }
     static bool has_per_port_sensors(const AmsBackendAd5xIfs& b) {
         return b.has_per_port_sensors_;
+    }
+    // Latched once IFS_STATUS "Ports" has been parsed. While set, the RS-485
+    // silk sensors own port_presence_ and no metadata path may move it.
+    static bool ifs_status_ports_seen(const AmsBackendAd5xIfs& b) {
+        return b.ifs_status_ports_seen_.load();
+    }
+    // Latch the same flag a parsed "Ports" line latches, so a test can express
+    // "the silk sensors have spoken" without replaying an IFS_STATUS frame.
+    // Drives no parse of its own: pair it with one of the seeders below.
+    static void set_ifs_status_ports_seen(AmsBackendAd5xIfs& b, bool seen) {
+        b.ifs_status_ports_seen_.store(seen);
     }
     static size_t external_sync_count(const AmsBackendAd5xIfs& b) {
         std::lock_guard<std::mutex> lock(b.mutex_);
@@ -304,8 +338,13 @@ class Ad5xIfsTestAccess {
     // the fixtures instantiate the backend with nullptr api/client.
     static void seed_override(AmsBackendAd5xIfs& b, int slot_index,
                               const helix::ams::FilamentSlotOverride& ovr) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        b.overrides_[slot_index] = ovr;
+        {
+            std::lock_guard<std::mutex> lock(b.mutex_);
+            b.overrides_[slot_index] = ovr;
+        }
+        // The backend's own init files both stores together; a fixture that
+        // wrote only this map would leave the lane reading empty.
+        helix::test::file_override_as_lane_records(b, slot_index, ovr);
     }
     // Read the override currently staged for a slot (empty optional if none).
     // Lets tests assert what set_slot_info(persist=true) wrote into the
@@ -319,7 +358,7 @@ class Ad5xIfsTestAccess {
             return std::nullopt;
         return it->second;
     }
-    // Inject an override store so persist=true set_slot_info has somewhere to
+    // Inject an override store so apply_user_edit has somewhere to
     // write. Production creates the store inside on_started(); tests that
     // build the backend with a concrete MoonrakerAPIMock but never call
     // on_started() need this shim to populate override_store_.
@@ -376,6 +415,14 @@ class Ad5xIfsTestAccess {
         return it->second;
     }
     // Listener feedback fix (v0.99.51 spam loop) + JSON-poll watcher hooks.
+    // The two burst counters the coalesced re-read reports. Counted apart
+    // because an edit and a menu render mean opposite things.
+    static int external_change_burst_count(const AmsBackendAd5xIfs& b) {
+        return b.external_change_burst_count_;
+    }
+    static int menu_render_burst_count(const AmsBackendAd5xIfs& b) {
+        return b.menu_render_burst_count_;
+    }
     static bool on_gcode_response_line(AmsBackendAd5xIfs& b, const std::string& line) {
         return b.on_gcode_response_line(line);
     }
@@ -408,9 +455,13 @@ class Ad5xIfsTestAccess {
         return b.local_adventurer_json_path_;
     }
     // Drive the local read-modify-write path directly so tests can assert
-    // file content without going through the full set_slot_info pipeline.
-    static AmsError write_adventurer_json_local(AmsBackendAd5xIfs& b, int slot_index) {
-        return b.write_adventurer_json_local(slot_index);
+    // file content without going through the full apply_user_edit pipeline.
+    // The values are the caller's own, as production passes them: the writer
+    // takes no reading from the firmware-truth caches.
+    static AmsError write_adventurer_json_local(AmsBackendAd5xIfs& b, int slot_index,
+                                                const std::string& hex,
+                                                const std::string& material) {
+        return b.write_adventurer_json_local(slot_index, hex, material);
     }
     // tool_map snapshot: copy out for comparison without holding mutex_.
     static std::array<int, AmsBackendAd5xIfs::TOOL_MAP_SIZE> tool_map(const AmsBackendAd5xIfs& b) {
@@ -530,7 +581,7 @@ class Ad5xIfsTestAccess {
         std::lock_guard<std::mutex> lock(b.mutex_);
         return b.last_filament_op_dispatch_;
     }
-    // Run the predicate against the current clock, exactly as handle_status_update
+    // Run the predicate against the current clock, exactly as handle_status
     // does after check_action_timeout(). Returns whether it changed state.
     static bool evaluate_runout(AmsBackendAd5xIfs& b) {
         std::lock_guard<std::mutex> lock(b.mutex_);
@@ -570,4 +621,18 @@ class Ad5xIfsTestAccess {
         std::lock_guard<std::mutex> lock(b.mutex_);
         return b.backup_state_locked();
     }
+    // Drive the "the macro is gone" verdict recheck_ifs_vars_macro() applies
+    // after a FIRMWARE_RESTART. Its own callback needs a live client to reach,
+    // so this is how a test exercises a plugin uninstalled mid-session.
+    static void apply_ifs_vars_macro_absent(AmsBackendAd5xIfs& b) {
+        std::lock_guard<std::mutex> lock(b.mutex_);
+        b.apply_ifs_vars_macro_absent_locked();
+    }
+    // Fire the post-FIRMWARE_RESTART macro re-query. The reply lands on
+    // whatever client the backend was built with, so pair this with a
+    // FakeMoonrakerClient and invoke the recorded success callback.
+    static void recheck_ifs_vars_macro(AmsBackendAd5xIfs& b) {
+        b.recheck_ifs_vars_macro();
+    }
 };
+} // namespace helix

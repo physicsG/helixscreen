@@ -6,7 +6,7 @@ Your printer's touchscreen should show you more than temperatures and a progress
 
 - **A real dashboard** — Drag-and-drop widgets across multiple pages. Temperature graphs, fan controls, camera feeds, power toggles, favorite macros. You decide what's on screen, not the developer.
 - **3D visualization** — Rotate your bed mesh with your finger. Preview G-code layers before printing. See input shaper frequency response charts right on the screen.
-- **Multi-material that works** — AFC, Happy Hare, ACE, CFS, AD5X IFS, Snapmaker U1, tool changers. Seven backends, tested on real hardware. Per-unit dryer controls, environment monitoring, Spoolman integration.
+- **Multi-material that works** — AFC, Happy Hare, ACE, CFS, AD5X IFS, Snapmaker U1, tool changers. Seven backends, tested on real hardware. Per-box drying controls and humidity monitoring, Spoolman integration.
 - **Exclude objects** — Tap the failing part on an overhead map to exclude it mid-print. No more scrapping an entire plate for one bad object.
 - **Runs on hardware you already own** — ~15MB RAM on embedded targets (a few times more on 64-bit Pi, still well under what other touchscreen UIs need). No X11, no browser, no desktop environment. Directly on the framebuffer. From a Creality K1 to a Pi Zero 2 W to a random mini-ITX box with an HDMI touchscreen.
 - **Looks good** — 17 theme presets with a live editor, responsive layouts from 480x320 to 1024x600, GPU-accelerated blur. Light and dark modes. (Ultrawide and portrait screens are alpha — see [Which displays are supported?](FAQ.md#which-displays-are-supported).)
@@ -39,7 +39,7 @@ Navigation basics, touch gestures, connection status, first-time setup wizard, W
 Which printers get deep, model-specific integration — and exactly what works on each. Covers the FlashForge Adventurer 5M/5X (IFS), Creality K1/K2 (CFS), QIDI Box, Snapmaker U1, Anycubic ACE, and how every other Klipper printer is auto-detected.
 
 ### [Home Panel](guide/home-panel.md)
-Your printer dashboard — status area, configurable home widgets (temperature, network, LED, AMS, power, notifications, and more), active tool badge for toolchanger printers, emergency stop, and the Printer Manager with custom images. Long-press the widget grid to enter Edit Mode, where you can add, move, resize, and configure widgets across up to 8 pages. Add the LED Controls widget and tap it for full LED controls with color, brightness, effects, and WLED presets; the lightbulb widget is a plain on/off toggle.
+Your printer dashboard: status area, configurable home widgets (temperature, network, LED, AMS, power, notifications, and more), active tool badge for toolchanger printers, emergency stop, and the Printer Manager with custom images. Long-press the widget grid to enter Edit Mode, where you can add, move, resize, and configure widgets across up to 8 pages; the Add page tile one swipe past your last page gives you a new one with a tap, or drag a widget past either edge of your pages. Each Light button picks its own light, or All lights, from the gear icon in Edit Mode; tap to toggle, or use its arrow (or the separate LED Controls widget) for full color, brightness, and effects in the LEDs overlay.
 
 ### [Printing](guide/printing.md)
 The full printing workflow — file selection, preview, pre-print options, monitoring active prints, tune overlay, Z-offset baby steps, pressure advance, exclude object, and post-print summary.
@@ -53,12 +53,12 @@ The pre-print filament check that catches an empty slot before a multi-color pri
 Nozzle and bed temperature panels, multi-extruder selector for printers with multiple extruders, material presets, and live temperature graphs.
 
 ### [Motion & Positioning](guide/motion.md)
-Jog pad controls, homing, distance increments, and emergency stop.
+Jog, Move and Bed tabs, tap-to-move coordinates, bed position grid, tap-the-plate bed map, park, homing, distance increments, and emergency stop.
 
 ![Motion Controls](../images/screenshot-motion-panel.png)
 
 ### [Filament Management](guide/filament.md)
-Extrusion controls, load/unload procedures, AMS multi-material systems with multi-backend support (run Happy Hare, AFC, ACE, or Tool Changer simultaneously), Spoolman integration, and dryer control.
+Extrusion controls, load/unload procedures, AMS multi-material systems with multi-backend support (run Happy Hare, AFC, ACE, or Tool Changer simultaneously), Spoolman integration, and filament drying and humidity monitoring.
 
 ![AMS Panel](../images/user/ams.png)
 
@@ -75,7 +75,7 @@ Print spool labels to Brother QL, Phomemo, Niimbot, or MakeID thermal printers v
 Set up a USB or Bluetooth barcode scanner to read Spoolman QR codes. Includes the `ClassicBondedOnly=false` fix for Bluetooth HID scanners that fail the "bonded device" check.
 
 ### [Calibration & Tuning](guide/calibration.md)
-Bed mesh visualization, screws tilt adjust, input shaper resonance testing, Z-offset calibration, and PID tuning.
+Bed mesh visualization, screws tilt adjust, input shaper resonance testing, Z-offset calibration, pressure advance measurement, and PID tuning.
 
 ![Bed Mesh](../images/screenshot-bed-mesh-panel.png)
 
@@ -83,12 +83,15 @@ Bed mesh visualization, screws tilt adjust, input shaper resonance testing, Z-of
 Fix taps that land in the wrong spot — run the calibration wizard from Settings, force it on any touchscreen, or recalibrate from the command line.
 
 ### [Settings](guide/settings.md)
-Display, theme, sound, LED, network, sensors, touch calibration, hardware issues, safety, machine limits, factory reset, help & support (debug bundles, Discord, docs), and About sub-overlay (version info, updates, branding, contributors).
+Twelve pages in three groups. Screen: display, appearance and themes, touch & input, sound. Printer: printing, devices, safety & alerts, connection. HelixScreen: language & time, system, updates, help & about.
 
 ![Settings](../images/screenshot-settings-panel.png)
 
 ### [Fans](guide/fans.md)
 Discovered fans grouped by controllable vs. automatic, fan types, live speed control via animated dials, RPM readouts, and per-fan renaming.
+
+### [Add-On Chamber Heater Setup](guide/chamber-heater.md)
+Getting a BIGTREETECH Panda Breath working with Klipper so HelixScreen can see it — putting it on the network, choosing between stock and DragonBreath firmware, the module and config each one needs, the Snapmaker U1 one-menu shortcut, and what to do when it goes offline.
 
 ### [Sensors](guide/sensors.md)
 Filament switch and motion sensors with per-sensor role assignment (None, Runout, Toolhead, Entry), read-only probe/width/humidity/accelerometer/color/temperature sensors, and chamber heater/sensor assignment.

@@ -12,6 +12,9 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
+#include <cstdlib>
+
 #include "../catch_amalgamated.hpp"
 
 using namespace helix;
@@ -19,7 +22,7 @@ using namespace helix;
 // Test fixture for navigation tests.
 //
 // Derives from HelixTestFixture so the UpdateQueue is drained on the way out:
-// panel switching notifies subjects, and observe_int_sync defers every apply,
+// panel switching notifies subjects, and observe<int> defers every apply,
 // so a hand-rolled fixture returns with those applies still queued and hands
 // them to whichever test runs next (tests/CLAUDE.md, "inherit, don't hand-roll").
 class NavigationTestFixture : public HelixTestFixture {
@@ -155,6 +158,28 @@ TEST_CASE_METHOD(NavigationTestFixture, "lv_indev_reset(NULL, NULL) clears in-fl
 #include "../lvgl_ui_test_fixture.h"
 #include "printer_state.h"
 
+/// Puts an int subject back the way it was found, on every exit path. Catch2
+/// aborts a case at its first failed REQUIRE, so a restore written as the last
+/// statement of the case is skipped exactly when it matters and leaves the
+/// subject raised for every test that follows in the shard.
+class ScopedSubjectInt {
+  public:
+    explicit ScopedSubjectInt(lv_subject_t* subject)
+        : subject_(subject), saved_(subject ? lv_subject_get_int(subject) : 0) {}
+    ~ScopedSubjectInt() {
+        if (subject_ != nullptr) {
+            lv_subject_set_int(subject_, saved_);
+        }
+    }
+
+    ScopedSubjectInt(const ScopedSubjectInt&) = delete;
+    ScopedSubjectInt& operator=(const ScopedSubjectInt&) = delete;
+
+  private:
+    lv_subject_t* subject_;
+    int32_t saved_;
+};
+
 /**
  * @brief Test fixture for navbar XML binding tests
  *
@@ -222,10 +247,23 @@ class NavbarIconTestFixture : public LVGLUITestFixture {
     }
 
     /**
+     * @brief Check whether an icon carries LV_STATE_CHECKED
+     */
+    bool is_checked(const char* name) {
+        lv_obj_t* obj = lv_obj_find_by_name(navbar_, name);
+        if (!obj) {
+            spdlog::warn("[NavbarIconTestFixture] Could not find object: {}", name);
+            return false;
+        }
+        return lv_obj_has_state(obj, LV_STATE_CHECKED);
+    }
+
+    /**
      * @brief Set nav buttons enabled state directly (combined subject)
      */
     void set_nav_buttons_enabled(bool enabled) {
-        lv_subject_set_int(state().get_nav_buttons_enabled_subject(), enabled ? 1 : 0);
+        lv_subject_set_int(state().network_state().get_nav_buttons_enabled_subject(),
+                           enabled ? 1 : 0);
     }
 
     /**
@@ -238,32 +276,39 @@ class NavbarIconTestFixture : public LVGLUITestFixture {
     lv_obj_t* navbar_ = nullptr;
 };
 
-TEST_CASE_METHOD(NavbarIconTestFixture, "Navbar: Only one icon visible per button",
+TEST_CASE_METHOD(NavbarIconTestFixture, "Navbar: checked state marks the active icon",
                  "[navbar][ui_integration]") {
     REQUIRE(navbar_ != nullptr);
 
-    SECTION("Enabled + On Home: shows inactive icons") {
+    SECTION("Enabled + On Home: inactive icon is checked") {
         set_nav_buttons_enabled(true);
         set_active_panel(PanelId::Home); // Not on controls or filament
 
-        // Controls button: inactive should be visible, others hidden
+        // Both icons of a pair resolve and stay unhidden; the inactive one
+        // carries the checked state.
         REQUIRE(is_visible("nav_icon_controls_inactive"));
-        REQUIRE(is_hidden("nav_icon_controls_active"));
+        REQUIRE(is_visible("nav_icon_controls_active"));
+        REQUIRE(is_checked("nav_icon_controls_inactive"));
+        REQUIRE_FALSE(is_checked("nav_icon_controls_active"));
         REQUIRE(is_hidden("nav_icon_controls_disabled"));
 
         // Filament button: same pattern
         REQUIRE(is_visible("nav_icon_filament_inactive"));
-        REQUIRE(is_hidden("nav_icon_filament_active"));
+        REQUIRE(is_visible("nav_icon_filament_active"));
+        REQUIRE(is_checked("nav_icon_filament_inactive"));
+        REQUIRE_FALSE(is_checked("nav_icon_filament_active"));
         REQUIRE(is_hidden("nav_icon_filament_disabled"));
     }
 
-    SECTION("Enabled + On Controls: shows active icon") {
+    SECTION("Enabled + On Controls: active icon is checked") {
         set_nav_buttons_enabled(true);
         set_active_panel(PanelId::Controls);
 
-        // Controls button: active should be visible
+        // Controls button: active icon carries the checked state.
         REQUIRE(is_visible("nav_icon_controls_active"));
-        REQUIRE(is_hidden("nav_icon_controls_inactive"));
+        REQUIRE(is_visible("nav_icon_controls_inactive"));
+        REQUIRE(is_checked("nav_icon_controls_active"));
+        REQUIRE_FALSE(is_checked("nav_icon_controls_inactive"));
         REQUIRE(is_hidden("nav_icon_controls_disabled"));
     }
 
@@ -310,19 +355,252 @@ TEST_CASE_METHOD(NavbarIconTestFixture, "Navbar: State transitions work correctl
         set_nav_buttons_enabled(true);
         set_active_panel(PanelId::Home);
 
+        // Neither icon is ever hidden; checked state carries which
+        // one reads as active.
         REQUIRE(is_visible("nav_icon_controls_inactive"));
-        REQUIRE(is_hidden("nav_icon_controls_active"));
+        REQUIRE(is_visible("nav_icon_controls_active"));
+        REQUIRE(is_checked("nav_icon_controls_inactive"));
+        REQUIRE_FALSE(is_checked("nav_icon_controls_active"));
 
         // Switch to controls panel
         set_active_panel(PanelId::Controls);
-        REQUIRE(is_hidden("nav_icon_controls_inactive"));
-        REQUIRE(is_visible("nav_icon_controls_active"));
+        REQUIRE(is_checked("nav_icon_controls_active"));
+        REQUIRE_FALSE(is_checked("nav_icon_controls_inactive"));
 
         // Switch back to home
         set_active_panel(PanelId::Home);
-        REQUIRE(is_visible("nav_icon_controls_inactive"));
-        REQUIRE(is_hidden("nav_icon_controls_active"));
+        REQUIRE(is_checked("nav_icon_controls_inactive"));
+        REQUIRE_FALSE(is_checked("nav_icon_controls_active"));
     }
+}
+
+TEST_CASE_METHOD(NavbarIconTestFixture, "Navbar: icon visibility holds in portrait",
+                 "[navbar][ui_integration]") {
+    REQUIRE(navbar_ != nullptr);
+
+    lv_subject_t* portrait = lv_xml_get_subject(nullptr, "ui_is_portrait");
+    REQUIRE(portrait != nullptr);
+    ScopedSubjectInt restore_portrait(portrait);
+    lv_subject_set_int(portrait, 1);
+
+    set_nav_buttons_enabled(true);
+    set_active_panel(PanelId::Home);
+
+    // One component serves both orientations, so every invariant the landscape
+    // cases assert has to hold with ui_is_portrait raised too. Neither icon of
+    // a pair is ever hidden; checked state carries which one is active.
+    REQUIRE(is_visible("nav_icon_controls_inactive"));
+    REQUIRE(is_visible("nav_icon_controls_active"));
+    REQUIRE(is_checked("nav_icon_controls_inactive"));
+    REQUIRE_FALSE(is_checked("nav_icon_controls_active"));
+    REQUIRE(is_hidden("nav_icon_controls_disabled"));
+
+    REQUIRE(is_visible("nav_icon_filament_inactive"));
+    REQUIRE(is_visible("nav_icon_filament_active"));
+    REQUIRE(is_checked("nav_icon_filament_inactive"));
+    REQUIRE_FALSE(is_checked("nav_icon_filament_active"));
+    REQUIRE(is_hidden("nav_icon_filament_disabled"));
+
+    set_active_panel(PanelId::Controls);
+    REQUIRE(is_checked("nav_icon_controls_active"));
+    REQUIRE_FALSE(is_checked("nav_icon_controls_inactive"));
+}
+
+TEST_CASE_METHOD(NavbarIconTestFixture, "Navbar: the bar swaps axes with ui_is_portrait",
+                 "[navbar][ui_integration]") {
+    REQUIRE(navbar_ != nullptr);
+
+    lv_subject_t* portrait = lv_xml_get_subject(nullptr, "ui_is_portrait");
+    REQUIRE(portrait != nullptr);
+    ScopedSubjectInt restore_portrait(portrait);
+
+    // nav_btn_controls is the next visible child after nav_btn_home: the two
+    // edit-mode buttons ahead of them and the printer badge behind them are
+    // hidden until their subjects say otherwise.
+    lv_obj_t* home = lv_obj_find_by_name(navbar_, "nav_btn_home");
+    lv_obj_t* controls = lv_obj_find_by_name(navbar_, "nav_btn_controls");
+    REQUIRE(home != nullptr);
+    REQUIRE(controls != nullptr);
+
+    // Orientation reaches the bar as two complementary bound styles. An inline
+    // width/height/flex_flow on the view would be a local style, which outranks
+    // both and pins the bar to one axis while every other assertion still
+    // passes. Measuring the boxes is what catches that.
+    lv_subject_set_int(portrait, 0);
+    lv_obj_update_layout(navbar_);
+    const int32_t land_w = lv_obj_get_width(navbar_);
+    const int32_t land_h = lv_obj_get_height(navbar_);
+    const int32_t land_btn_w = lv_obj_get_width(home);
+    const int32_t land_btn_h = lv_obj_get_height(home);
+    const int32_t land_step = lv_obj_get_y(controls) - lv_obj_get_y(home);
+
+    lv_subject_set_int(portrait, 1);
+    lv_obj_update_layout(navbar_);
+    const int32_t port_w = lv_obj_get_width(navbar_);
+    const int32_t port_h = lv_obj_get_height(navbar_);
+    const int32_t port_btn_w = lv_obj_get_width(home);
+    const int32_t port_btn_h = lv_obj_get_height(home);
+    const int32_t port_step = lv_obj_get_x(controls) - lv_obj_get_x(home);
+
+    INFO("bar: landscape " << land_w << "x" << land_h << ", portrait " << port_w << "x" << port_h);
+    INFO("home button: landscape " << land_btn_w << "x" << land_btn_h << " step " << land_step
+                                   << ", portrait " << port_btn_w << "x" << port_btn_h << " step "
+                                   << port_step);
+
+    REQUIRE(land_h > land_w); // vertical strip down one edge
+    REQUIRE(port_w > port_h); // horizontal bar across the bottom
+    REQUIRE(port_w > land_w);
+    REQUIRE(port_h < land_h);
+
+    // A grow item spans the bar's cross axis and takes a share of its main axis,
+    // so the home button's box swaps with the bar's.
+    REQUIRE(land_btn_w == land_w);
+    REQUIRE(port_btn_h == port_h);
+    REQUIRE(land_btn_h < land_h);
+    REQUIRE(port_btn_w < port_w);
+
+    // Only a flex container distributes its children along an axis. Without a
+    // layout every child sits at the content origin, so the next button starting
+    // where this one ends is what proves the bar is laying them out at all, and
+    // on the axis the live orientation style asks for.
+    REQUIRE(land_step >= land_btn_h);
+    REQUIRE(port_step >= port_btn_w);
+}
+
+// ui_button_create() writes a local height, which outranks any bound style, so
+// the landscape edit buttons cap their inline height with max_height instead.
+// Unclamped, the + button fills the whole nav strip (#1553).
+TEST_CASE_METHOD(NavbarIconTestFixture, "Navbar: landscape edit buttons clamp to button_height",
+                 "[navbar][ui_integration]") {
+    REQUIRE(navbar_ != nullptr);
+
+    lv_subject_t* portrait = lv_xml_get_subject(nullptr, "ui_is_portrait");
+    REQUIRE(portrait != nullptr);
+    ScopedSubjectInt restore_portrait(portrait);
+    lv_subject_set_int(portrait, 0);
+
+    const char* token = lv_xml_get_const(nullptr, "button_height");
+    REQUIRE(token != nullptr);
+    const int32_t button_height = std::atoi(token);
+    REQUIRE(button_height > 0);
+
+    // Hidden objects take no part in flex layout; edit mode is what shows them.
+    lv_obj_t* add = lv_obj_find_by_name(navbar_, "nav_btn_edit_add");
+    lv_obj_t* done = lv_obj_find_by_name(navbar_, "nav_btn_edit_done");
+    REQUIRE(add != nullptr);
+    REQUIRE(done != nullptr);
+    lv_obj_remove_flag(add, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(done, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_update_layout(navbar_);
+
+    const int32_t bar_h = lv_obj_get_height(navbar_);
+    INFO("bar " << bar_h << ", button_height " << button_height << ", add "
+                << lv_obj_get_height(add) << ", done " << lv_obj_get_height(done));
+
+    // min_height is the touch-target floor and wins where button_height sits below it.
+    const int32_t add_floor = lv_obj_get_style_min_height(add, LV_PART_MAIN);
+    const int32_t done_floor = lv_obj_get_style_min_height(done, LV_PART_MAIN);
+    REQUIRE(add_floor > 0);
+    REQUIRE(done_floor > 0);
+    CHECK(lv_obj_get_height(add) <= std::max(button_height, add_floor));
+    CHECK(lv_obj_get_height(done) <= std::max(button_height, done_floor));
+    CHECK(lv_obj_get_height(add) < bar_h);
+    CHECK(lv_obj_get_height(done) < bar_h);
+}
+
+/**
+ * @brief Test fixture for the app shell, built from ui_xml/app_layout.xml
+ *
+ * One component serves both orientations, so the shell's axis and the order it
+ * places the nav bar in are bound styles rather than two files. Only the shell
+ * root is instantiated here; the panel subtrees come with it.
+ */
+class AppShellTestFixture : public LVGLUITestFixture {
+  public:
+    AppShellTestFixture() {
+        shell_ = static_cast<lv_obj_t*>(lv_xml_create(test_screen(), "app_layout", nullptr));
+        if (shell_ == nullptr) {
+            spdlog::error("[AppShellTestFixture] Failed to create app_layout!");
+        }
+    }
+
+    ~AppShellTestFixture() override {
+        if (shell_ != nullptr) {
+            lv_obj_delete(shell_);
+            shell_ = nullptr;
+        }
+    }
+
+    lv_obj_t* shell_ = nullptr;
+};
+
+TEST_CASE_METHOD(AppShellTestFixture, "App shell: the nav bar changes edges with ui_is_portrait",
+                 "[navbar][ui_integration]") {
+    REQUIRE(shell_ != nullptr);
+
+    lv_subject_t* portrait = lv_xml_get_subject(nullptr, "ui_is_portrait");
+    REQUIRE(portrait != nullptr);
+    ScopedSubjectInt restore_portrait(portrait);
+
+    lv_obj_t* navbar = lv_obj_find_by_name(shell_, "navbar");
+    lv_obj_t* content = lv_obj_find_by_name(shell_, "content_area");
+    REQUIRE(navbar != nullptr);
+    REQUIRE(content != nullptr);
+
+    // Where each child LANDS is the only thing that separates a working shell
+    // from the three ways this can break: no layout at all leaves both children
+    // at the content origin, a row flow in portrait starves content_area to zero
+    // width, and a forward column flow puts the bar at the top. Sizes alone hold
+    // in all three.
+    lv_subject_set_int(portrait, 0);
+    lv_obj_update_layout(shell_);
+    // The shell is width/height 100%, so its own box only resolves once a layout
+    // pass has run.
+    const int32_t shell_w = lv_obj_get_width(shell_);
+    const int32_t shell_h = lv_obj_get_height(shell_);
+    const int32_t land_nav_x = lv_obj_get_x(navbar);
+    const int32_t land_nav_y = lv_obj_get_y(navbar);
+    const int32_t land_nav_w = lv_obj_get_width(navbar);
+    const int32_t land_content_x = lv_obj_get_x(content);
+    const int32_t land_content_y = lv_obj_get_y(content);
+    const int32_t land_content_w = lv_obj_get_width(content);
+    const int32_t land_content_h = lv_obj_get_height(content);
+
+    lv_subject_set_int(portrait, 1);
+    lv_obj_update_layout(shell_);
+    const int32_t port_nav_x = lv_obj_get_x(navbar);
+    const int32_t port_nav_y = lv_obj_get_y(navbar);
+    const int32_t port_nav_h = lv_obj_get_height(navbar);
+    const int32_t port_content_x = lv_obj_get_x(content);
+    const int32_t port_content_y = lv_obj_get_y(content);
+    const int32_t port_content_w = lv_obj_get_width(content);
+    const int32_t port_content_h = lv_obj_get_height(content);
+
+    INFO("shell " << shell_w << "x" << shell_h);
+    INFO("landscape navbar at " << land_nav_x << "," << land_nav_y << " w " << land_nav_w
+                                << "; content at " << land_content_x << "," << land_content_y << " "
+                                << land_content_w << "x" << land_content_h);
+    INFO("portrait navbar at " << port_nav_x << "," << port_nav_y << " h " << port_nav_h
+                               << "; content at " << port_content_x << "," << port_content_y << " "
+                               << port_content_w << "x" << port_content_h);
+
+    // Landscape: strip on the leading edge, content filling the rest of the row.
+    REQUIRE(land_nav_x == 0);
+    REQUIRE(land_nav_y == 0);
+    REQUIRE(land_content_y == 0);
+    REQUIRE(land_content_x >= land_nav_x + land_nav_w);
+    REQUIRE(land_content_x + land_content_w == shell_w);
+    REQUIRE(land_content_h == shell_h);
+
+    // Portrait: content on top, bar flush against the bottom edge. The reverse
+    // flow is what puts the first-declared child last, so the bar starting below
+    // where content_area ends is the assertion that proves it.
+    REQUIRE(port_content_x == 0);
+    REQUIRE(port_content_y == 0);
+    REQUIRE(port_content_w == shell_w);
+    REQUIRE(port_nav_x == 0);
+    REQUIRE(port_nav_y >= port_content_y + port_content_h);
+    REQUIRE(port_nav_y + port_nav_h == shell_h);
 }
 
 // ============================================================================
@@ -344,7 +622,7 @@ class MockPanelLifecycle : public IPanelLifecycle {
     void on_activate() override {
         activate_count_++;
     }
-    void on_deactivate() override {
+    void on_deactivate(DeactivateReason) override {
         deactivate_count_++;
     }
     const char* get_name() const override {
@@ -415,9 +693,8 @@ TEST_CASE_METHOD(NavbarIconTestFixture, "Out-of-band backdrop deletion scrubs ov
     // does exactly that), which frees it with no go_back() involved.
     lv_obj_delete(backdrop);
 
-    // Regression assertion: overlay_backdrop_ is a scalar, so scrub_deleted_widget()
-    // must clear it explicitly. Without that, deinit_subjects() reaches
-    // lv_obj_del(overlay_backdrop_) on freed memory — a heap-use-after-free that
+    // overlay_backdrop_ must clear itself, or deinit_subjects() reaches
+    // lv_obj_del(overlay_backdrop_) on freed memory, a heap-use-after-free that
     // detonates in whatever unrelated test runs next.
     REQUIRE(NavigationManagerTestAccess::overlay_backdrop(nav) == nullptr);
 
@@ -482,6 +759,51 @@ TEST_CASE_METHOD(NavbarIconTestFixture, "Out-of-band widget deletion scrubs pane
     // is not delete-hooked; the fixture's deinit_subjects() clears panel_stack_
     // without dereferencing, so leaving a stale base pointer is harmless.
     lv_obj_delete(base);
+}
+
+// A hot-reload rebuild of the main panel under an open overlay swaps its widget
+// through replace_panel_widget(); the stack entry beneath the overlay must follow,
+// or go_back() reveals the displaced widget and leaves the rebuilt one hidden (#1294).
+TEST_CASE_METHOD(NavbarIconTestFixture,
+                 "replace_panel_widget rekeys the main panel beneath an open overlay",
+                 "[navigation][overlay][hot_reload]") {
+    auto& nav = NavigationManager::instance();
+
+    lv_obj_t* base = lv_obj_create(test_screen());
+    REQUIRE(base != nullptr);
+    lv_obj_t* panels[UI_PANEL_COUNT] = {nullptr};
+    panels[static_cast<int>(PanelId::Home)] = base;
+    nav.set_panels(panels);
+
+    MockPanelLifecycle mock_panel;
+    lv_obj_t* overlay = lv_obj_create(test_screen());
+    REQUIRE(overlay != nullptr);
+    lv_obj_add_flag(overlay, LV_OBJ_FLAG_HIDDEN);
+    nav.register_overlay_instance(overlay, &mock_panel);
+    nav.push_overlay(overlay);
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+    REQUIRE(nav.is_panel_on_top(overlay));
+
+    // PanelBase::rebuild() creates the successor with the old widget's visibility.
+    lv_obj_t* rebuilt = lv_obj_create(test_screen());
+    REQUIRE(rebuilt != nullptr);
+    lv_obj_add_flag(rebuilt, LV_OBJ_FLAG_HIDDEN);
+    nav.replace_panel_widget(PanelId::Home, rebuilt);
+
+    CHECK(nav.is_panel_in_stack(rebuilt));
+    CHECK_FALSE(nav.is_panel_in_stack(base));
+    CHECK(nav.is_panel_on_top(overlay));
+
+    nav.go_back();
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+
+    CHECK_FALSE(nav.is_panel_in_stack(overlay));
+    CHECK(nav.is_panel_on_top(rebuilt));
+    CHECK_FALSE(lv_obj_has_flag(rebuilt, LV_OBJ_FLAG_HIDDEN));
+
+    lv_obj_delete(overlay);
+    lv_obj_delete(base);
+    lv_obj_delete(rebuilt);
 }
 
 // ============================================================================

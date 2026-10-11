@@ -7,13 +7,112 @@ log_info() { :; }
 log_warn() { :; }
 log_error() { :; }
 log_success() { :; }
-export -f log_info log_warn log_error log_success
+log_note() { :; }
+export -f log_info log_warn log_error log_success log_note
+# The installer's log_info prints to the terminal only when verbose; tests
+# assert on its text, so they run verbose unless a test unsets this.
+export HELIX_INSTALL_VERBOSE=1
 
 # Ensure BATS_TEST_TMPDIR exists (added in bats 1.4.1, Ubuntu 22.04 ships 1.2.1)
 # Each bats test runs in a subshell, so this creates a fresh dir per test.
 if [ -z "$BATS_TEST_TMPDIR" ]; then
     BATS_TEST_TMPDIR=$(mktemp -d "${BATS_TMPDIR:-/tmp}/bats-test-XXXXXX")
 fi
+
+# Where the installer writes systemd drop-ins. A test run as root (the CI and
+# zeus containers) would otherwise write into the real /etc/systemd/system.
+export HELIX_SYSTEMD_UNIT_DIR="$BATS_TEST_TMPDIR/etc/systemd/system"
+# A per-test build-hosts file (scripts/lib/build_hosts.sh), absent until a test writes it.
+export HELIX_BUILD_HOSTS_FILE="$BATS_TEST_TMPDIR/build-hosts.env"
+
+# Where the installer reads process ancestry. Absent until mock_proc fills it,
+# so the desktop session a developer runs bats from never reads as the
+# installer's own. Source time runs builtins only: some tests source this
+# file under a PATH with no coreutils.
+export HELIX_PROC_ROOT="$BATS_TEST_TMPDIR/proc"
+
+# Where the installer opens the controlling terminal to ask a question. A
+# developer running bats from a terminal would otherwise be prompted, and the
+# test would wait on them. A test that wants an answer writes this file.
+export HELIX_TTY_DEVICE="$BATS_TEST_TMPDIR/no-tty"
+
+# Fake one process under HELIX_PROC_ROOT. The comm carries a space and a ')'
+# because the real field can, and the parser must split after the LAST ')'.
+# Args: $1 = pid, $2 = ppid, $3.. = environment entries (KEY=value)
+mock_proc() {
+    local pid="$1" ppid="$2"
+    shift 2
+    mkdir -p "$HELIX_PROC_ROOT/$pid"
+    printf '%s (sh (x) y) S %s 1 1 0 -1\n' "$pid" "$ppid" > "$HELIX_PROC_ROOT/$pid/stat"
+    if [ $# -gt 0 ]; then
+        printf '%s\0' "$@" > "$HELIX_PROC_ROOT/$pid/environ"
+    else
+        : > "$HELIX_PROC_ROOT/$pid/environ"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Release-target derivation from mk/cross.mk
+# ---------------------------------------------------------------------------
+
+# Real release packaging targets: every `release-<plat>:` target minus
+# aggregates (release-all, release-clean*) minus pure aliases - a target whose
+# recipe is only `release-x: release-y` delegates to a target this list
+# already covers. Shared by test_release_packaging_artifacts.bats and
+# test_symbol_ci.bats; a second hand-written copy is how the two drift.
+# Args: $1 = path to mk/cross.mk (default: mk/cross.mk)
+release_targets() {
+    local cross_mk="${1:-mk/cross.mk}"
+    grep -oE '^release-[a-z0-9-]+:' "$cross_mk" \
+        | sed 's/:$//' \
+        | grep -vxE 'release-all|release-clean|release-clean-assets' \
+        | while IFS= read -r t; do
+            grep -qE "^${t}: *release-[a-z0-9-]+$" "$cross_mk" || echo "$t"
+        done \
+        | sort -u
+}
+
+# Platforms release.yml builds: the plan job's FULL_MATRIX, one per line.
+# Shared by test_symbol_ci.bats and test_update_platform_coverage.bats.
+# Args: $1 = path to release.yml (default: .github/workflows/release.yml)
+release_matrix_platforms() {
+    python3 - "${1:-.github/workflows/release.yml}" <<'PY'
+import json, sys, yaml
+with open(sys.argv[1]) as fh:
+    doc = yaml.safe_load(fh)
+for step in doc["jobs"]["plan"]["steps"]:
+    matrix = (step.get("env") or {}).get("FULL_MATRIX")
+    if matrix:
+        for entry in json.loads(matrix):
+            print(entry["platform"])
+PY
+}
+
+# Mocking a command: which mechanism, and where each one stops
+#
+# The suite has two, and they fail at different boundaries. Pick by asking what
+# runs the command, not by what reads better:
+#
+#   mock_command* (this file)   A file on PATH. Reaches a callee in any
+#                               language, which is what installer scripts need
+#                               because they are #!/bin/sh and sh does not
+#                               import bash functions. Lost the moment a callee
+#                               REPLACES PATH rather than prepending to it -
+#                               `env PATH="$bin" ...`, or a script that hardens
+#                               PATH by putting the stock system directories
+#                               first, as install.sh does.
+#
+#   name() { :; }; export -f    A bash function. Outranks PATH, so it survives
+#                               both of those. Lost at a non-bash callee, and
+#                               at `env -i`.
+#
+# Neither is a safety net. tests/shell/setup_suite.bash blocks the commands that
+# address the host by name for the whole suite, in both mechanisms at once, and
+# fails the run when a test reaches one. A mock here is how a test opts out of
+# that block for a command it means to exercise: it is found first, so the
+# sandbox shim never runs and nothing is recorded against the test.
+# ---------------------------------------------------------------------------
 
 # Create a mock command that outputs specific text
 # Usage: mock_command "systemctl" "User=biqu"
@@ -243,6 +342,46 @@ refute_grep() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# Positive assertions
+#
+# bash 3.2 is what macOS ships, and it does not apply errexit to a failing
+# `[[ ]]` or `(( ))`. bats runs each @test body under `set -e`, so a mid-body
+# `[[ ]]` assertion is inert on a Mac: when it should fail, the status is
+# swallowed and whichever statement runs LAST decides the test result. Under
+# bash 5 in CI the same line fails the test, so the two hosts disagree about
+# what a test pins, and the Mac is the one that reports green.
+#
+#     [[ "$output" == *"ready"* ]]     # inert unless it is the last statement
+#     contains "ready" "$output"       # fails the test, as intended
+#
+# Going through a function makes the failure a failing simple command, which
+# every shell honours. A `[[ ]]` that genuinely IS the last statement of its
+# body works everywhere and needs no wrapper.
+#
+# The needle is matched as a LITERAL substring - the case patterns quote it, so
+# a `*` or `?` inside it means itself. An assertion that needs a real glob
+# (anchored at either end, or several ordered segments) or any other compound
+# condition keeps its `[[ ]]` and appends `|| fail "..."`, which ends the list
+# in a simple command and is therefore honoured too.
+# ---------------------------------------------------------------------------
+
+# Assert that $2 contains the literal substring $1.
+contains() {
+    case "$2" in
+        *"$1"*) return 0 ;;
+        *) printf 'expected to find: %s\nin:\n%s\n' "$1" "$2" >&2; return 1 ;;
+    esac
+}
+
+# Assert that $2 does NOT contain the literal substring $1.
+lacks() {
+    case "$2" in
+        *"$1"*) printf 'expected NOT to find: %s\nin:\n%s\n' "$1" "$2" >&2; return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
 # --- GNU sed on a BSD host (macOS) ----------------------------------------
 #
 # BSD sed differs from GNU/BusyBox sed in two ways this suite trips over: it
@@ -315,3 +454,174 @@ install_systemctl_shim() {
 }
 
 [ -z "${HELIX_TEST_REAL_SYSTEMCTL:-}" ] && install_systemctl_shim
+
+# ---------------------------------------------------------------------------
+# The shared app lock: serialising the files that own a live helix-screen
+#
+# bats runs FILES in parallel, and only one of them may own a running app at a
+# time - the instance lock in the config dir is per-config-dir, so it does not
+# stop a sibling file from stopping, starting or killing an app the other file
+# is driving. Tests that bring an instance up hold this lock for as long as
+# they drive it.
+#
+# The lock is a DIRECTORY. mkdir is atomic on every POSIX filesystem, needs no
+# binary outside the shell, and behaves identically on a developer Mac and in
+# CI, so the path CI exercises is the path a developer runs. The alternatives
+# each lose a host: `flock` is util-linux and absent from macOS, and the
+# `exec {fd}>file` form that opens a descriptor for it needs bash 4.1 while
+# macOS ships bash 3.2; `shlock` is the mirror image, present on macOS and
+# absent from most Linux distributions, and it polls rather than blocks, so it
+# needs this same wait loop around it anyway. A perl wrapper would get a
+# kernel-backed lock released automatically when the holder dies, but holding
+# one across setup() -> test -> teardown() needs a background co-process and a
+# readiness handshake, and bash 3.2 has no `coproc` to build it with.
+#
+# What a directory costs is that a holder killed outright leaves it behind, so
+# the owner's pid inside it is the recovery handle: a waiter that finds a dead
+# owner breaks the lock and retries.
+# ---------------------------------------------------------------------------
+HELIX_APP_LOCK_DIR="${TMPDIR:-/tmp}/helix-bats-app.lock.d"
+HELIX_APP_LOCK_HELD=""
+
+# Drop a lock directory whose owner is gone.
+#
+# Serialised through a second mkdir so two waiters cannot both decide to clear
+# the same lock, and the ownership test is repeated inside that guard: by the
+# time a waiter gets here the pid may belong to a live process that acquired
+# the lock while it waited.
+helix_app_lock_break() {
+    local breaker="${HELIX_APP_LOCK_DIR}.break" owner
+    mkdir "$breaker" 2>/dev/null || return 0
+    owner="$(cat "$HELIX_APP_LOCK_DIR/pid" 2>/dev/null || true)"
+    if [ -z "$owner" ] || ! kill -0 "$owner" 2>/dev/null; then
+        rm -rf "$HELIX_APP_LOCK_DIR"
+    fi
+    rmdir "$breaker" 2>/dev/null || true
+    return 0
+}
+
+# Take the shared app lock, waiting up to $1 seconds (default 600).
+# Returns 0 holding it, 1 on timeout.
+helix_app_lock_acquire() {
+    local timeout="${1:-600}"
+    local deadline owner blank=0
+
+    [ -n "$HELIX_APP_LOCK_HELD" ] && return 0
+    deadline=$(( $(date +%s) + timeout ))
+
+    while :; do
+        if mkdir "$HELIX_APP_LOCK_DIR" 2>/dev/null; then
+            echo $$ > "$HELIX_APP_LOCK_DIR/pid"
+            HELIX_APP_LOCK_HELD=1
+            return 0
+        fi
+
+        owner="$(cat "$HELIX_APP_LOCK_DIR/pid" 2>/dev/null || true)"
+        if [ -n "$owner" ]; then
+            blank=0
+            kill -0 "$owner" 2>/dev/null || helix_app_lock_break
+        else
+            # An owner that has taken the directory but not yet written its pid
+            # is indistinguishable from one that died in that window. The write
+            # follows the mkdir immediately, so only the second is still blank
+            # after a couple of seconds of polling.
+            blank=$(( blank + 1 ))
+            [ "$blank" -ge 20 ] && helix_app_lock_break
+        fi
+
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            echo "helix_app_lock_acquire: gave up after ${timeout}s waiting for" \
+                 "$HELIX_APP_LOCK_DIR (owner=${owner:-unknown})" >&2
+            return 1
+        fi
+        sleep 0.1
+    done
+}
+
+# Give the shared app lock back. Safe to call from a file-level teardown that
+# runs after tests which never took it, and it drops only a lock this process
+# still owns, so a stale-breaker that already handed it on is not disturbed.
+helix_app_lock_release() {
+    [ -n "$HELIX_APP_LOCK_HELD" ] || return 0
+    local owner
+    owner="$(cat "$HELIX_APP_LOCK_DIR/pid" 2>/dev/null || true)"
+    [ "$owner" = "$$" ] && rm -rf "$HELIX_APP_LOCK_DIR"
+    HELIX_APP_LOCK_HELD=""
+    return 0
+}
+
+# A SUDO stand-in that runs everything for real except an rm outside $1.
+#
+# clean_old_installation rm -f's real /etc paths (polkit and udev rules) that a
+# test user cannot touch and that no test here asserts on. Letting those through
+# fails the run on permissions; dropping every rm would also drop the sandbox
+# writes the tests do assert on. So an rm whose arguments name a path under the
+# given root runs, any other rm is a no-op, and everything else runs.
+#
+# The dispatch is `exec "$@"`, never `exec rm "$@"`: the incoming argv already
+# begins with rm, so naming it again passes rm its own name as the first
+# operand. GNU rm permutes options that follow an operand and -f suppresses the
+# nonexistent one, which hides the duplicate on Linux; BSD rm stops option
+# parsing at the first operand, so -rf is read as a filename and the directory
+# survives.
+install_sudo_rm_shim() {
+    local root="$1"
+    local shim="$BATS_TEST_TMPDIR/sudo-rm-neutral"
+    cat > "$shim" <<SHIM
+#!/bin/sh
+if [ "\$1" = "rm" ]; then
+    case " \$* " in
+        *"$root"/*) exec "\$@" ;;
+        *) exit 0 ;;
+    esac
+fi
+exec "\$@"
+SHIM
+    chmod +x "$shim"
+    SUDO="$shim"
+    export SUDO
+}
+
+# ---------------------------------------------------------------------------
+# The quality gate is scripts/quality-checks.sh (the driver) plus one file per
+# gate under scripts/qc/: the gate's qc_<gate> function and its
+# QC_TRIGGER_qc_<gate> staged-path regex. Helpers every gate calls live in
+# scripts/qc/_lib.sh, so a test sources that before the gate it drives.
+
+# Prints a gate's staged-path trigger regex, read by sourcing the gate file.
+# Empty means the gate runs on every commit.
+qc_trigger() {
+    bash -c '. scripts/qc/_lib.sh && . "scripts/qc/$1.sh" && v="QC_TRIGGER_qc_$1" && printf "%s\n" "${!v:-}"' _ "$1"
+}
+
+# A gate body lifted out and run standalone needs qc_note/qc_count in scope, or
+# its pass verdict is status 127 under `set -e` and the block dies mid-gate.
+#
+# Emits the real definitions rather than stubs, so assertions about what a gate
+# prints on its pass path stay honest. Callers eval the output, or prepend it to
+# an extracted block.
+qc_verdict_defs() {
+    local script="${1:-scripts/qc/_lib.sh}"
+    local defs
+    defs="$(grep -E '^qc_(note|count)\(\) \{' "$script")"
+    [ "$(printf '%s\n' "$defs" | wc -l)" -eq 2 ] \
+        || fail "expected one-line qc_note and qc_count definitions in $script, got: $defs"
+    printf '%s\n' "$defs"
+}
+
+# ---------------------------------------------------------------------------
+# Print one platform's branch of set_install_paths.
+#
+# The branches are an if/elif chain, so a fixed `grep -A N` window stops
+# covering a branch the moment it grows a line, and the assertion inside it
+# then passes or fails for the wrong reason. This reads to the next branch
+# instead, whatever the length.
+platform_branch() {
+    local id="$1"
+    local script="${2:-scripts/lib/installer/platform.sh}"
+    awk -v start='[ "$platform" = "'"$1"'" ]' '
+        index($0, start) { inside = 1; next }
+        inside && /\[ "\$platform" = "/ && /\]; then/ { inside = 0 }
+        inside
+    ' "$script"
+}

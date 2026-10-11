@@ -10,18 +10,10 @@
  * with a single structured result.
  */
 
-#include "ui_nav_manager.h" // For ui_panel_id_t
-
 #include <optional>
 #include <string>
 
 namespace helix {
-
-/**
- * @brief Screen size presets (match responsive breakpoints)
- * MICRO=480x272, TINY=480x320, SMALL=480x400, MEDIUM=800x480, LARGE=1024x600, XLARGE=1280x720
- */
-enum class ScreenSize { MICRO, TINY, SMALL, MEDIUM, LARGE, XLARGE };
 
 /**
  * @brief Parsed command-line arguments
@@ -30,7 +22,6 @@ enum class ScreenSize { MICRO, TINY, SMALL, MEDIUM, LARGE, XLARGE };
  */
 struct CliArgs {
     // Screen settings
-    ScreenSize screen_size = ScreenSize::MEDIUM;
     bool size_was_explicit = false; ///< True if -s/--size was specified on the CLI
     int dpi = -1;                   // -1 = use default
     int display_num = -1;           // -1 = not set
@@ -106,15 +97,14 @@ bool parse_cli_args(int argc, char** argv, CliArgs& args, int& screen_width, int
  *
  * Accepts named sizes: micro, tiny, small, medium, large, xlarge
  * Or custom WxH format: "480x400", "1920x1080"
+ * Matching is case-insensitive.
  *
  * @param size_str The size string to parse
  * @param out_width Output: parsed width
  * @param out_height Output: parsed height
- * @param out_size Output: corresponding ScreenSize breakpoint
  * @return true on success, false if format is invalid
  */
-bool parse_screen_size_string(const char* size_str, int& out_width, int& out_height,
-                              ScreenSize& out_size);
+bool parse_screen_size_string(const char* size_str, int& out_width, int& out_height);
 
 /**
  * @brief Print test mode configuration banner

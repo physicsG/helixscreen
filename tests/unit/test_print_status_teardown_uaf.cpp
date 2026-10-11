@@ -6,7 +6,7 @@
  *
  * PrintStatusPanel caches raw pointers into a widget tree whose lifetime it does
  * not own, and every PrinterState observer it registers lands as a queued
- * observe_int_sync lambda. The TSan nightly (08-30 and 08-31) died in exactly
+ * observe<int> lambda. The TSan nightly (08-30 and 08-31) died in exactly
  * that gap: a queued print-start-progress apply drained from a fixture
  * destructor AFTER lv_obj_delete(root) had freed the tree, so
  * on_print_start_progress_changed() ran lv_bar_set_value() on the freed
@@ -23,6 +23,9 @@
 #include "ui_update_queue.h"
 
 #include "../lvgl_ui_test_fixture.h"
+#include "../test_helpers/print_status_panel_fixture.h"
+#include "ams_state.h"
+#include "filament_sensor_manager.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "printer_state.h"
 #include "test_helpers/print_status_panel_test_access.h"
@@ -33,69 +36,9 @@
 #include "../catch_amalgamated.hpp"
 
 using helix::ui::UpdateQueue;
+using print_status_panel_test::PrintStatusPanelFixture;
 
 namespace {
-
-/// Owns a real PrintStatusPanel built from production XML (same shape as
-/// test_print_status_metadata_strip_fit.cpp's fixture).
-///
-/// A local PrintStatusPanel whose destructor runs leaves its helix-xml
-/// subject registrations dangling for the rest of the process; poking
-/// production's process-lifetime singleton re-registers every name against
-/// stable storage, healing the entries this fixture's teardown dangles.
-class PrintStatusTeardownFixture : public LVGLUITestFixture {
-  public:
-    PrintStatusTeardownFixture() {
-        heal_global_print_status_panel_subjects();
-        panel_ = std::make_unique<PrintStatusPanel>(state(), nullptr);
-        panel_->init_subjects();
-        root_ = panel_->create(test_screen());
-        REQUIRE(root_ != nullptr);
-    }
-
-    ~PrintStatusTeardownFixture() override {
-        if (root_ && lv_obj_is_valid(root_)) {
-            lv_obj_delete(root_);
-        }
-        root_ = nullptr;
-        UpdateQueue::instance().drain();
-        panel_.reset();
-        UpdateQueue::instance().drain();
-        heal_global_print_status_panel_subjects();
-    }
-
-    /// Delete the panel's widget tree the way a screen teardown does: the panel
-    /// gets no call, only LVGL's own delete event.
-    void delete_widget_tree() {
-        REQUIRE(root_ != nullptr);
-        lv_obj_delete(root_);
-        root_ = nullptr;
-    }
-
-    /// Destroy the panel while its widget tree is still alive, the way
-    /// StaticPanelRegistry::destroy_all() does before lv_deinit().
-    void panel_release() {
-        UpdateQueue::instance().drain();
-        panel_.reset();
-    }
-
-    PrintStatusPanel& panel() {
-        return *panel_;
-    }
-
-  protected:
-    lv_obj_t* root_ = nullptr;
-
-  private:
-    void heal_global_print_status_panel_subjects() {
-        auto& global = get_global_print_status_panel();
-        if (!global.are_subjects_initialized()) {
-            global.init_subjects();
-        }
-    }
-
-    std::unique_ptr<PrintStatusPanel> panel_;
-};
 
 /// Is the panel's delete hook still installed on `obj` for this panel instance?
 ///
@@ -115,7 +58,7 @@ bool delete_hook_installed(lv_obj_t* obj, const void* panel) {
 
 } // namespace
 
-TEST_CASE_METHOD(PrintStatusTeardownFixture,
+TEST_CASE_METHOD(PrintStatusPanelFixture,
                  "PrintStatusPanel drops cached widget pointers when its tree is deleted",
                  "[print_status][teardown][uaf]") {
     // The tree must have actually populated the pointers under test, or the
@@ -131,15 +74,15 @@ TEST_CASE_METHOD(PrintStatusTeardownFixture,
 }
 
 TEST_CASE_METHOD(
-    PrintStatusTeardownFixture,
+    PrintStatusPanelFixture,
     "PrintStatusPanel queued print-start progress survives a drain after the tree dies",
     "[print_status][teardown][uaf]") {
     REQUIRE(PrintStatusPanelTestAccess::preparing_progress_widget(panel()) != nullptr);
 
-    // A print-start-progress change fires the panel's observe_int_sync observer
+    // A print-start-progress change fires the panel's observe<int> observer
     // synchronously; the handler itself is queued. This is the pending lambda
     // the nightly drained after the tree was already gone.
-    lv_subject_set_int(state().get_print_start_progress_subject(), 42);
+    lv_subject_set_int(state().print_state().get_print_start_progress_subject(), 42);
 
     // Tree dies while the handler is still sitting in the queue.
     delete_widget_tree();
@@ -159,7 +102,7 @@ TEST_CASE_METHOD(
 // then deleted with the panel already freed. If ~PrintStatusPanel() leaves its
 // LV_EVENT_DELETE hook installed, that teardown calls on_root_deleted() on
 // freed memory.
-TEST_CASE_METHOD(PrintStatusTeardownFixture,
+TEST_CASE_METHOD(PrintStatusPanelFixture,
                  "PrintStatusPanel uninstalls its delete hook when destroyed before its tree",
                  "[print_status][teardown][uaf]") {
     lv_obj_t* tree = panel().get_panel();
@@ -187,7 +130,7 @@ TEST_CASE_METHOD(PrintStatusTeardownFixture,
 // The delete hook must come off THERE too, or the deferred delete reaches a
 // freed panel, and the pointers must drop on this path exactly as they do on a
 // raw delete.
-TEST_CASE_METHOD(PrintStatusTeardownFixture,
+TEST_CASE_METHOD(PrintStatusPanelFixture,
                  "PrintStatusPanel explicit teardown drops pointers and disarms the hook",
                  "[print_status][teardown][uaf]") {
     lv_obj_t* tree = panel().get_panel();
@@ -219,7 +162,7 @@ TEST_CASE_METHOD(PrintStatusTeardownFixture,
 // delete_hook_root_, which by then names the successor. A hot-reload rebuild
 // followed by shutdown before the async delete tick then fires on_root_deleted()
 // through a freed `this`.
-TEST_CASE_METHOD(PrintStatusTeardownFixture,
+TEST_CASE_METHOD(PrintStatusPanelFixture,
                  "PrintStatusPanel moves its delete hook off the root it replaces",
                  "[print_status][teardown][uaf]") {
     lv_obj_t* old_root = panel().get_panel();
@@ -251,7 +194,7 @@ TEST_CASE_METHOD(PrintStatusTeardownFixture,
 // OverlayBase::rebuild() deletes the replaced root after overlay_root_ already
 // points at the successor. That late delete event must not blank the successor's
 // cached pointers.
-TEST_CASE_METHOD(PrintStatusTeardownFixture,
+TEST_CASE_METHOD(PrintStatusPanelFixture,
                  "PrintStatusPanel ignores a replaced root's late delete event",
                  "[print_status][teardown][uaf]") {
     lv_obj_t* old_root = panel().get_panel();
@@ -271,4 +214,53 @@ TEST_CASE_METHOD(PrintStatusTeardownFixture,
     lv_obj_delete(new_root);
     UpdateQueue::instance().drain();
     root_ = nullptr;
+}
+
+// PrintStatusPanel observes subjects owned by two other singletons. Each of
+// them frees every observer node it holds in its own deinit_subjects(), so the
+// panel's guards have to carry that owner's SubjectLifetime: without it a guard
+// stays truthy with a dangling lv_observer_t* and its reset() removes an
+// observer that no longer exists. The panel is a process-global, so any test
+// that tears one of those singletons down leaves the trap armed for whoever
+// destroys the panel next.
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "PrintStatusPanel guards survive an owner singleton's subject teardown",
+                 "[print_status][teardown][uaf][observer]") {
+    // Both singletons are process-globals whose subjects every later test in
+    // this binary resolves by XML name, and deinit_subjects() withdraws those
+    // names. Restoring from a destructor, not from the end of the test body,
+    // means a failed CHECK or a throw between here and there cannot leave the
+    // rest of the shard with a nameless AmsState. AmsState::deinit_subjects()
+    // also runs clear_backends(); zero registered backends is the state
+    // RegisteredBackend leaves behind, so that side of it needs no restoring.
+    struct SubjectOwnerRestore {
+        ~SubjectOwnerRestore() {
+            helix::AmsState::instance().init_subjects(true);
+            helix::FilamentSensorManager::instance().init_subjects();
+        }
+    } restore_owner_subjects;
+
+    helix::AmsState::instance().init_subjects(true);
+    helix::FilamentSensorManager::instance().init_subjects();
+
+    // The lookups the panel performs must resolve, or it attaches nothing and
+    // the teardown below would be trivially safe.
+    REQUIRE(lv_xml_get_subject(nullptr, "ams_slot_count") != nullptr);
+    REQUIRE(lv_xml_get_subject(nullptr, "toolchange_visible") != nullptr);
+    REQUIRE(lv_xml_get_subject(nullptr, "filament_sensor_count") != nullptr);
+
+    auto panel = std::make_unique<PrintStatusPanel>(state(), nullptr);
+    panel->init_subjects();
+
+    // Frees the observer nodes the panel just attached to both singletons.
+    helix::AmsState::instance().deinit_subjects();
+    helix::FilamentSensorManager::instance().deinit_subjects();
+
+    // Every guard reset() lands here. Each one that never learned its subject
+    // died calls lv_observer_remove() on a freed node.
+    panel->deinit_subjects();
+    panel.reset();
+    UpdateQueue::instance().drain();
+
+    SUCCEED("panel teardown completed without walking freed observer nodes");
 }

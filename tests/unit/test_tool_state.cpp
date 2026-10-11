@@ -6,7 +6,10 @@
  * @brief Tests for ToolInfo struct, DetectState enum, and ToolState singleton
  */
 
+#include "../fake_moonraker_client.h"
 #include "../helix_test_fixture.h"
+#include "../test_helpers/backend_user_edit.h"
+#include "../test_helpers/config_test_access.h"
 #include "../test_helpers/tool_state_test_access.h"
 #include "../test_helpers/update_queue_test_access.h"
 #include "../ui_test_utils.h"
@@ -15,12 +18,18 @@
 #include "ams_backend_snapmaker.h"
 #include "ams_backend_toolchanger.h"
 #include "ams_state.h"
+#include "app_globals.h"
+#include "config.h"
+#include "moonraker_api.h"
+#include "printer_cache_registry.h"
 #include "printer_discovery.h"
 #include "tool_state.h"
 
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
+#include <sys/stat.h>
 
 #include "../catch_amalgamated.hpp"
 
@@ -52,9 +61,11 @@ TEST_CASE_METHOD(ToolStateFixture, "ToolInfo: default construction", "[tool][too
     REQUIRE(info.extruder_name.value() == "extruder");
     REQUIRE_FALSE(info.heater_name.has_value());
     REQUIRE_FALSE(info.fan_name.has_value());
-    REQUIRE(info.gcode_x_offset == 0.0f);
-    REQUIRE(info.gcode_y_offset == 0.0f);
-    REQUIRE(info.gcode_z_offset == 0.0f);
+    for (helix::Axis axis : helix::kAllAxes) {
+        REQUIRE(info.gcode_offset(axis).mm == 0.0f);
+        REQUIRE_FALSE(info.gcode_offset(axis).known);
+        REQUIRE_FALSE(info.gcode_offset(axis).dirty());
+    }
     REQUIRE_FALSE(info.active);
     REQUIRE_FALSE(info.mounted);
     REQUIRE(info.detect_state == DetectState::UNAVAILABLE);
@@ -228,6 +239,28 @@ TEST_CASE_METHOD(ToolStateFixture, "ToolState: init_tools with toolchanger creat
     REQUIRE(tools[2].extruder_name.value() == "extruder2");
 }
 
+TEST_CASE_METHOD(ToolStateFixture, "ToolState: extruder_name_for_tool", "[tool][tool-state]") {
+    lv_init_safe();
+
+    ToolState& ts = ToolState::instance();
+    ts.deinit_subjects();
+    ts.init_subjects(false);
+
+    helix::PrinterDiscovery hw;
+    nlohmann::json objects = nlohmann::json::array(
+        {"toolchanger", "tool T0", "tool T1", "tool T2", "extruder", "extruder1", "gcode_move"});
+    hw.parse_objects(objects);
+    ts.init_tools(hw);
+    REQUIRE(ts.tool_count() == 3);
+
+    CHECK(ts.extruder_name_for_tool(0) == "extruder");
+    CHECK(ts.extruder_name_for_tool(1) == "extruder1");
+    // Three tools on two extruders: T2 names none.
+    CHECK(ts.extruder_name_for_tool(2).empty());
+    CHECK(ts.extruder_name_for_tool(3).empty());
+    CHECK(ts.extruder_name_for_tool(-1).empty());
+}
+
 TEST_CASE_METHOD(ToolStateFixture, "ToolState: active_tool accessors", "[tool][tool-state]") {
     lv_init_safe();
 
@@ -343,9 +376,9 @@ TEST_CASE_METHOD(ToolStateFixture, "ToolState: update_from_status parses offsets
         {"tool T1", {{"gcode_x_offset", 1.5}, {"gcode_y_offset", -2.3}, {"gcode_z_offset", 0.15}}}};
     ts.update_from_status(status);
 
-    REQUIRE(ts.tools()[1].gcode_x_offset == Catch::Approx(1.5f));
-    REQUIRE(ts.tools()[1].gcode_y_offset == Catch::Approx(-2.3f));
-    REQUIRE(ts.tools()[1].gcode_z_offset == Catch::Approx(0.15f));
+    REQUIRE(ts.tools()[1].gcode_offset(helix::Axis::X).mm == Catch::Approx(1.5f));
+    REQUIRE(ts.tools()[1].gcode_offset(helix::Axis::Y).mm == Catch::Approx(-2.3f));
+    REQUIRE(ts.tools()[1].gcode_offset(helix::Axis::Z).mm == Catch::Approx(0.15f));
 }
 
 TEST_CASE_METHOD(ToolStateFixture, "ToolState: update_from_status with no tools is safe",
@@ -357,8 +390,12 @@ TEST_CASE_METHOD(ToolStateFixture, "ToolState: update_from_status with no tools 
     ts.init_subjects(false);
 
     // No init_tools called, tools_ is empty
+    const int before = ts.active_tool_index();
     nlohmann::json status = {{"toolchanger", {{"tool_number", 1}}}};
-    ts.update_from_status(status); // Should not crash
+    ts.update_from_status(status);
+
+    // With no tools there is nothing for tool_number to select.
+    REQUIRE(ts.active_tool_index() == before);
 }
 
 TEST_CASE_METHOD(ToolStateFixture, "ToolState: update_from_status tool_number -1 means no tool",
@@ -434,14 +471,26 @@ TEST_CASE_METHOD(ToolStateFixture, "ToolState: detect_state parsed from status",
     hw.parse_objects(objects);
     ts.init_tools(hw);
 
-    nlohmann::json status = {{"tool T0", {{"detect_state", "present"}}}};
+    // klipper-toolchanger spells DETECT_PRESENT "mounted" (klipper/extras/
+    // toolchanger.py); a stock machine never sends "present".
+    nlohmann::json status = {{"tool T0", {{"detect_state", "mounted"}}}};
     ts.update_from_status(status);
     REQUIRE(ts.tools()[0].detect_state == DetectState::PRESENT);
 
-    // Also test "absent"
     nlohmann::json status2 = {{"tool T0", {{"detect_state", "absent"}}}};
     ts.update_from_status(status2);
     REQUIRE(ts.tools()[0].detect_state == DetectState::ABSENT);
+
+    // DETECT_UNAVAILABLE, and any value we do not recognise, read as unavailable.
+    nlohmann::json status3 = {{"tool T0", {{"detect_state", "unavailable"}}}};
+    ts.update_from_status(status3);
+    REQUIRE(ts.tools()[0].detect_state == DetectState::UNAVAILABLE);
+
+    // "present" is no firmware's spelling upstream, but forks that copied the
+    // older wording still send it, and it means the same thing.
+    nlohmann::json status4 = {{"tool T0", {{"detect_state", "present"}}}};
+    ts.update_from_status(status4);
+    REQUIRE(ts.tools()[0].detect_state == DetectState::PRESENT);
 
     ts.deinit_subjects();
 }
@@ -671,7 +720,7 @@ TEST_CASE_METHOD(ToolStateFixture, "ToolState: multi-extruder tracks active via 
 
     REQUIRE(ts.active_tool_index() == 1);
     REQUIRE(lv_subject_get_int(ts.get_active_tool_subject()) == 1);
-    REQUIRE(ts.nozzle_label() == "Nozzle T1");
+    REQUIRE(ts.nozzle_label() == "Nozzle 2");
 
     ts.deinit_subjects();
 }
@@ -925,6 +974,14 @@ TEST_CASE_METHOD(
 // ============================================================================
 
 namespace {
+/// The assignment set the spool file holds for the printer this test runs as: the sandboxed
+/// Config has no active printer, which the file keys as "default".
+nlohmann::json spools_of_active_printer(const nlohmann::json& file) {
+    REQUIRE(file.contains("printers"));
+    REQUIRE(file["printers"].contains("default"));
+    return file["printers"]["default"];
+}
+
 struct TempDir {
     std::filesystem::path path;
     TempDir() {
@@ -1157,7 +1214,7 @@ TEST_CASE_METHOD(ToolStateFixture,
         SlotInfo s = raw->get_slot_info(0);
         s.spoolman_id = 137;
         s.spool_name = "Elegoo Black ASA";
-        REQUIRE(raw->set_slot_info(0, s).success());
+        REQUIRE(helix::test::apply_edit(*raw, 0, s).success());
     }
     AmsState::instance().sync_from_backend();
     REQUIRE(raw->get_slot_info(0).mapped_tool == 0);
@@ -1169,7 +1226,7 @@ TEST_CASE_METHOD(ToolStateFixture,
         SlotInfo s = raw->get_slot_info(0);
         s.clear_spoolman_link();
         s.spool_name.clear();
-        REQUIRE(raw->set_slot_info(0, s).success());
+        REQUIRE(helix::test::apply_edit(*raw, 0, s).success());
     }
     REQUIRE(raw->get_slot_info(0).spoolman_id == 0);
 
@@ -1233,7 +1290,7 @@ TEST_CASE_METHOD(ToolStateFixture, "ToolState: save/load JSON round-trip",
 
     // Read and verify JSON structure
     std::ifstream ifs(json_path);
-    auto data = nlohmann::json::parse(ifs);
+    auto data = spools_of_active_printer(nlohmann::json::parse(ifs));
     REQUIRE(data.is_object());
     REQUIRE(data.contains("0"));
     REQUIRE(data["0"]["spoolman_id"] == 42);
@@ -1254,6 +1311,41 @@ TEST_CASE_METHOD(ToolStateFixture, "ToolState: save/load JSON round-trip",
     REQUIRE(ts.tools()[2].spoolman_id == 99);
     REQUIRE(ts.tools()[2].spool_name == "Blue PETG");
     REQUIRE(ts.tools()[1].spoolman_id == 0); // still unassigned
+
+    ts.deinit_subjects();
+}
+
+TEST_CASE_METHOD(ToolStateFixture, "ToolState: an unchanged spool save leaves the file alone",
+                 "[tool][tool-state][spool]") {
+    lv_init_safe();
+    auto& ts = ToolState::instance();
+    ts.deinit_subjects();
+    ts.init_subjects(false);
+
+    TempDir tmp;
+    ts.set_config_dir(tmp.str());
+    PrinterDiscovery hw;
+    hw.parse_objects(nlohmann::json::array({"extruder", "extruder1", "heater_bed"}));
+    ts.init_tools(hw);
+    ts.assign_spool(0, 42, "Red PLA", 750.0f, 1000.0f);
+
+    // The save goes through an atomic rename, so a real write always lands on a
+    // new inode; a skipped one keeps the old.
+    const auto json_path = std::filesystem::path(tmp.str()) / "tool_spools.json";
+    auto inode = [&] {
+        struct stat st {};
+        REQUIRE(::stat(json_path.c_str(), &st) == 0);
+        return st.st_ino;
+    };
+    ts.save_spool_assignments(nullptr);
+    const auto first = inode();
+
+    ts.save_spool_assignments(nullptr);
+    CHECK(inode() == first);
+
+    ts.assign_spool(1, 99, "Blue PETG", 200.0f, 500.0f);
+    ts.save_spool_assignments(nullptr);
+    CHECK(inode() != first);
 
     ts.deinit_subjects();
 }
@@ -1301,7 +1393,7 @@ TEST_CASE_METHOD(ToolStateFixture, "ToolState: save with no assigned spools writ
     REQUIRE(std::filesystem::exists(json_path));
 
     std::ifstream ifs(json_path);
-    auto data = nlohmann::json::parse(ifs);
+    auto data = spools_of_active_printer(nlohmann::json::parse(ifs));
     REQUIRE(data.is_object());
     REQUIRE(data.empty());
 
@@ -1329,7 +1421,7 @@ TEST_CASE_METHOD(ToolStateFixture, "ToolState: weight fields omitted from JSON w
 
     auto json_path = std::filesystem::path(tmp.str()) / "tool_spools.json";
     std::ifstream ifs(json_path);
-    auto data = nlohmann::json::parse(ifs);
+    auto data = spools_of_active_printer(nlohmann::json::parse(ifs));
     REQUIRE(data["0"]["spoolman_id"] == 42);
     REQUIRE_FALSE(data["0"].contains("remaining_weight_g"));
     REQUIRE_FALSE(data["0"].contains("total_weight_g"));
@@ -1475,6 +1567,27 @@ TEST_CASE_METHOD(ToolStateFixture, "ToolState: spool_assignments_loaded set afte
     ts.deinit_subjects();
 }
 
+TEST_CASE_METHOD(ToolStateFixture,
+                 "ToolState: a printer switch lets the next printer load its own spools",
+                 "[tool][tool-state][spool][multi-printer]") {
+    lv_init_safe();
+    auto& ts = ToolState::instance();
+    ts.deinit_subjects();
+    ts.init_subjects(false);
+
+    ts.load_spool_assignments(nullptr);
+    REQUIRE(ts.spool_assignments_loaded());
+
+    // printer_switch_flow fires every registered invalidator on a switch, on desktop and
+    // the firmware alike. Only ToolState's fires here: other tests leave entries that
+    // point at objects they have since destroyed.
+    REQUIRE(helix::PrinterCacheRegistry::instance().invalidate_one("ToolState"));
+
+    CHECK_FALSE(ts.spool_assignments_loaded());
+
+    ts.deinit_subjects();
+}
+
 // ============================================================================
 // Toolchanger reverse-sync: ToolState → AmsBackend slot propagation
 // ============================================================================
@@ -1508,7 +1621,7 @@ TEST_CASE_METHOD(ToolStateFixture,
         SlotInfo empty_slot = mock_ptr->get_slot_info(i);
         empty_slot.spoolman_id = 0;
         empty_slot.spool_name.clear();
-        mock_ptr->set_slot_info(i, empty_slot, false);
+        mock_ptr->sync_external_identity(i, empty_slot);
     }
 
     auto& ams = AmsState::instance();
@@ -1576,9 +1689,9 @@ TEST_CASE_METHOD(ToolStateFixture,
         SlotInfo s = mock_ptr->get_slot_info(i);
         s.spoolman_id = 0;
         s.spool_name.clear();
-        mock_ptr->set_slot_info(i, s, false);
-        // Status is firmware-derived, so set_slot_info() ignores it outright —
-        // this is the staging API for it.
+        mock_ptr->sync_external_identity(i, s);
+        // Status is firmware-derived, so sync_external_identity() ignores it
+        // outright — this is the staging API for it.
         mock_ptr->force_slot_status(i, (i == 0) ? SlotStatus::EMPTY : SlotStatus::UNKNOWN);
     }
     REQUIRE(mock_ptr->get_slot_info(0).status == SlotStatus::EMPTY);
@@ -1661,7 +1774,7 @@ TEST_CASE_METHOD(ToolStateFixture,
         SlotInfo empty_slot = mock_ptr->get_slot_info(i);
         empty_slot.spoolman_id = 0;
         empty_slot.spool_name.clear();
-        mock_ptr->set_slot_info(i, empty_slot, false);
+        mock_ptr->sync_external_identity(i, empty_slot);
     }
 
     auto& ams = AmsState::instance();
@@ -1678,6 +1791,101 @@ TEST_CASE_METHOD(ToolStateFixture,
 
     // The tool should still have its original assignment
     REQUIRE(ts.tools()[0].spoolman_id == 99);
+
+    ams.set_backend(nullptr);
+    ams.deinit_subjects();
+    ts.deinit_subjects();
+}
+
+namespace {
+
+/// A two-tool changer in ToolState, and a mock tool changer behind AmsState
+/// whose slots name no spool and carry no weight. AmsState owns the mock.
+AmsBackendMock* install_unassigned_tool_changer() {
+    auto& ts = ToolState::instance();
+    ts.deinit_subjects();
+    ts.init_subjects(false);
+
+    PrinterDiscovery hw;
+    hw.parse_objects(nlohmann::json::array({"toolchanger", "tool T0", "tool T1", "extruder",
+                                            "extruder1", "heater_bed", "gcode_move"}));
+    ts.init_tools(hw);
+    REQUIRE(ts.tool_count() == 2);
+
+    auto mock = std::make_unique<AmsBackendMock>(2);
+    mock->set_tool_changer_mode(true);
+    mock->set_operation_delay(0);
+    auto* mock_ptr = mock.get();
+    for (int i = 0; i < 2; ++i) {
+        SlotInfo empty_slot = mock_ptr->get_slot_info(i);
+        empty_slot.spoolman_id = 0;
+        empty_slot.spool_name.clear();
+        empty_slot.remaining_weight_g = -1.0f;
+        empty_slot.total_weight_g = -1.0f;
+        mock_ptr->sync_external_identity(i, empty_slot);
+    }
+
+    auto& ams = AmsState::instance();
+    ams.set_moonraker_api(nullptr);
+    ams.deinit_subjects();
+    ams.init_subjects(false);
+    ams.set_backend(std::move(mock));
+    REQUIRE(ams.get_backend()->supports_per_tool_spool_assignment());
+    return mock_ptr;
+}
+
+} // namespace
+
+TEST_CASE_METHOD(
+    ToolStateFixture,
+    "ToolState: a reverse-synced toolchanger slot shows its spool by the end of the sync",
+    "[tool][tool-state][spool][ams]") {
+    lv_init_safe();
+    AmsBackendMock* mock_ptr = install_unassigned_tool_changer();
+    auto& ams = AmsState::instance();
+    auto& ts = ToolState::instance();
+
+    ams.sync_from_backend();
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+    REQUIRE(lv_subject_get_int(ams.get_slot_fill_subject(0)) != 75);
+
+    ts.assign_spool(0, 42, "Red PLA", 750.0f, 1000.0f);
+    ams.sync_from_backend();
+
+    // The reverse sync wrote the slot inside this pass.
+    REQUIRE(mock_ptr->get_slot_info(0).spoolman_id == 42);
+    REQUIRE(mock_ptr->get_slot_info(0).remaining_weight_g == 750.0f);
+
+    // Read with no drain in between, so these are the pass's own writes and not
+    // an update the backend's slot event queued.
+    CHECK(lv_subject_get_int(ams.get_slot_fill_subject(0)) == 75);
+
+    ams.set_backend(nullptr);
+    ams.deinit_subjects();
+    ts.deinit_subjects();
+}
+
+TEST_CASE_METHOD(
+    ToolStateFixture,
+    "ToolState: an unlinked toolchanger slot does not take its spool back from ToolState",
+    "[tool][tool-state][spool][ams][commit]") {
+    lv_init_safe();
+    AmsBackendMock* mock_ptr = install_unassigned_tool_changer();
+    auto& ams = AmsState::instance();
+    auto& ts = ToolState::instance();
+
+    ts.assign_spool(0, 42, "Red PLA", 750.0f, 1000.0f);
+    ams.sync_from_backend();
+    REQUIRE(mock_ptr->get_slot_info(0).spoolman_id == 42);
+
+    const SlotInfo original = mock_ptr->get_slot_info(0);
+    SlotInfo unlinked = original;
+    unlinked.spoolman_id = 0;
+    unlinked.spool_name.clear();
+    REQUIRE(ams.commit_slot_edit(0, original, unlinked).success());
+
+    CHECK(mock_ptr->get_slot_info(0).spoolman_id == 0);
+    CHECK(ts.tools()[0].spoolman_id == 0);
 
     ams.set_backend(nullptr);
     ams.deinit_subjects();
@@ -1733,10 +1941,10 @@ TEST_CASE_METHOD(ToolStateFixture, "ToolState: saving through a symlink preserve
     CHECK(std::filesystem::is_symlink(link_path));
 
     // ...and the write must have gone through it to the real file, not beside it.
-    // Shape is a flat object keyed by tool index: {"0": {"spoolman_id": ...}}
     std::ifstream in(real_file);
-    nlohmann::json written;
-    in >> written;
+    nlohmann::json file;
+    in >> file;
+    const auto written = spools_of_active_printer(file);
     REQUIRE(written.contains("0"));
     CHECK(written["0"]["spoolman_id"].get<int>() == 4242);
     CHECK(written["0"]["spool_name"].get<std::string>() == "Symlink PLA");
@@ -1753,11 +1961,11 @@ TEST_CASE_METHOD(ToolStateFixture, "ToolState: saving through a symlink preserve
 // ============================================================================
 
 namespace {
-/// Exposes handle_status_update so a frame can be fed in directly.
+/// Exposes handle_status so a bare status object can be fed in directly.
 class SyncMultiAce : public AmsBackendMultiAce {
   public:
     SyncMultiAce() : AmsBackendMultiAce(nullptr, nullptr) {}
-    using AmsBackendMultiAce::handle_status_update;
+    using AmsBackendMultiAce::handle_status;
 };
 
 /// One ACE bound to head 3 with three bays holding spools. `seated` is the bay
@@ -1822,7 +2030,7 @@ TEST_CASE_METHOD(ToolStateFixture, "ToolState: the SEATED bay claims a tool seve
     SECTION("bay 1 seated: tool 3 gets bay 1's spool, not the last bay's") {
         auto backend = std::make_unique<SyncMultiAce>();
         auto* raw = backend.get();
-        raw->handle_status_update(ace_frame_with_seat(1));
+        raw->handle_status(ace_frame_with_seat(1));
         ams.set_backend(std::move(backend));
         ams.sync_from_backend();
 
@@ -1838,13 +2046,13 @@ TEST_CASE_METHOD(ToolStateFixture, "ToolState: the SEATED bay claims a tool seve
     SECTION("nothing seated: the tool is cleared, not given an arbitrary bay") {
         auto backend = std::make_unique<SyncMultiAce>();
         auto* raw = backend.get();
-        raw->handle_status_update(ace_frame_with_seat(1));
+        raw->handle_status(ace_frame_with_seat(1));
         ams.set_backend(std::move(backend));
         ams.sync_from_backend();
         REQUIRE(ts.tools()[3].spoolman_id == 10);
 
         // The filament leaves the head; the bays still hold their spools.
-        raw->handle_status_update(ace_frame_with_seat(-1));
+        raw->handle_status(ace_frame_with_seat(-1));
         ams.sync_from_backend();
         CHECK(ts.tools()[3].spoolman_id == 0);
     }
@@ -1859,7 +2067,7 @@ TEST_CASE_METHOD(ToolStateFixture, "ToolState: the SEATED bay claims a tool seve
         // "Orange" and is not.
         auto backend = std::make_unique<SyncMultiAce>();
         auto* raw = backend.get();
-        raw->handle_status_update(ace_frame_with_seat(1));
+        raw->handle_status(ace_frame_with_seat(1));
         ams.set_backend(std::move(backend));
         ams.sync_from_backend();
         REQUIRE(ts.tools()[3].spoolman_id == 10);
@@ -1871,7 +2079,7 @@ TEST_CASE_METHOD(ToolStateFixture, "ToolState: the SEATED bay claims a tool seve
         REQUIRE(edited.is_present());
         edited.spoolman_id = 99;
         edited.spool_name = "Edited Orange";
-        REQUIRE(raw->set_slot_info(7, edited, /*persist=*/false).success());
+        REQUIRE(raw->sync_external_identity(7, edited).success());
         ams.update_slot(7);
 
         // Tool 3 still belongs to the seated bay.
@@ -1882,7 +2090,7 @@ TEST_CASE_METHOD(ToolStateFixture, "ToolState: the SEATED bay claims a tool seve
         SlotInfo seated = raw->get_slot_info(5);
         seated.spoolman_id = 42;
         seated.spool_name = "Edited Gray";
-        REQUIRE(raw->set_slot_info(5, seated, /*persist=*/false).success());
+        REQUIRE(raw->sync_external_identity(5, seated).success());
         ams.update_slot(5);
         CHECK(ts.tools()[3].spoolman_id == 42);
         CHECK(ts.tools()[3].spool_name == "Edited Gray");
@@ -1891,4 +2099,480 @@ TEST_CASE_METHOD(ToolStateFixture, "ToolState: the SEATED bay claims a tool seve
     ams.set_backend(nullptr);
     ams.deinit_subjects();
     ts.deinit_subjects();
+}
+
+// ============================================================================
+// Per-tool offsets: X/Y/Z bookkeeping
+// ============================================================================
+
+namespace {
+
+/// A stock klipper-toolchanger with @p tool_count tools, plus the extra objects.
+helix::PrinterDiscovery toolchanger_hw(int tool_count = 2,
+                                       std::initializer_list<const char*> extra = {}) {
+    nlohmann::json objects = nlohmann::json::array({"toolchanger", "gcode_move"});
+    for (int i = 0; i < tool_count; ++i) {
+        objects.push_back("tool T" + std::to_string(i));
+        objects.push_back(i == 0 ? "extruder" : "extruder" + std::to_string(i));
+    }
+    for (const char* o : extra) {
+        objects.push_back(o);
+    }
+    helix::PrinterDiscovery hw;
+    hw.parse_objects(objects);
+    return hw;
+}
+
+ToolState& fresh_tool_state(const helix::PrinterDiscovery& hw) {
+    ToolState& ts = ToolState::instance();
+    ts.deinit_subjects();
+    ts.init_subjects(false);
+    ts.init_tools(hw);
+    return ts;
+}
+
+int subj(lv_subject_t* s) {
+    return lv_subject_get_int(s);
+}
+
+} // namespace
+
+TEST_CASE_METHOD(ToolStateFixture, "ToolState offsets: a toolchanger supports all three axes",
+                 "[tool][tool-state][tool-offsets]") {
+    lv_init_safe();
+    ToolState& ts = fresh_tool_state(toolchanger_hw());
+
+    for (Axis axis : kAllAxes) {
+        CAPTURE(axis_letter(axis));
+        CHECK(subj(ts.get_per_tool_axis_supported_subject(axis)) == 1);
+        // Nothing reported yet: not known, not dirty, reads as 0.
+        CHECK_FALSE(ts.tool_offset_known(0, axis));
+        CHECK(ts.tool_offset_mm(0, axis) == 0.0f);
+    }
+    CHECK(subj(ts.get_any_tool_offset_dirty_subject()) == 0);
+}
+
+TEST_CASE_METHOD(ToolStateFixture, "ToolState offsets: a frame seeds every axis as persisted",
+                 "[tool][tool-state][tool-offsets]") {
+    // The first value seen is the config value, so a fresh connect must not
+    // claim unsaved work - on any axis.
+    lv_init_safe();
+    ToolState& ts = fresh_tool_state(toolchanger_hw());
+
+    ts.update_from_status(
+        {{"tool T0",
+          {{"gcode_x_offset", 1.5}, {"gcode_y_offset", -0.25}, {"gcode_z_offset", 0.1}}}});
+
+    CHECK(ts.tool_offset_known(0, Axis::X));
+    CHECK(ts.tool_offset_mm(0, Axis::X) == Catch::Approx(1.5f));
+    CHECK(ts.tool_offset_mm(0, Axis::Y) == Catch::Approx(-0.25f));
+    CHECK(ts.tool_offset_mm(0, Axis::Z) == Catch::Approx(0.1f));
+    // Seeded, not dirty.
+    CHECK(ts.dirty_tool_indices().empty());
+    CHECK(subj(ts.get_any_tool_offset_dirty_subject()) == 0);
+}
+
+TEST_CASE_METHOD(ToolStateFixture, "ToolState offsets: a local X change dirties X and only X",
+                 "[tool][tool-state][tool-offsets]") {
+    lv_init_safe();
+    ToolState& ts = fresh_tool_state(toolchanger_hw());
+    ts.update_from_status(
+        {{"tool T1", {{"gcode_x_offset", 0.0}, {"gcode_y_offset", 0.0}, {"gcode_z_offset", 0.0}}}});
+
+    ts.set_tool_offset_local(1, Axis::X, 500);
+
+    CHECK(ts.tool_offset_mm(1, Axis::X) == Catch::Approx(0.5f));
+    CHECK(ts.dirty_tool_indices() == std::vector<int>{1});
+    // Only X: the save affordance must not offer to flush axes that never
+    // moved.
+    CHECK(ts.tool_offset_dirty(1, Axis::X));
+    CHECK_FALSE(ts.tool_offset_dirty(1, Axis::Y));
+    CHECK_FALSE(ts.tool_offset_dirty(1, Axis::Z));
+    CHECK(subj(ts.get_any_tool_offset_dirty_subject()) == 1);
+
+    // Saving the tool clears every axis of it.
+    ts.mark_tool_offsets_saved(1);
+    CHECK(ts.dirty_tool_indices().empty());
+    CHECK_FALSE(ts.tool_offset_dirty(1, Axis::X));
+    CHECK(subj(ts.get_any_tool_offset_dirty_subject()) == 0);
+}
+
+TEST_CASE_METHOD(
+    ToolStateFixture,
+    "ToolState offsets: a tool with an unreported axis reads unknown on that axis only",
+    "[tool][tool-state][tool-offsets]") {
+    // Known is per axis: switching to a tool whose X was never reported must
+    // read unknown on X while its Z, which was, stays known - otherwise the
+    // previous tool's X would sit on screen beside the new tool's Z.
+    lv_init_safe();
+    ToolState& ts = fresh_tool_state(toolchanger_hw());
+    ts.update_from_status({{"tool T0", {{"gcode_x_offset", 1.5}, {"gcode_z_offset", 0.1}}},
+                           {"tool T1", {{"gcode_z_offset", -0.2}}}});
+    REQUIRE(ts.tool_offset_known(0, Axis::X));
+
+    ts.update_from_status({{"toolchanger", {{"tool_number", 1}}}});
+
+    REQUIRE(ts.active_tool_index() == 1);
+    CHECK_FALSE(ts.tool_offset_known(1, Axis::X));
+    CHECK(ts.tool_offset_mm(1, Axis::X) == 0.0f);
+    CHECK(ts.tool_offset_known(1, Axis::Z));
+    CHECK(ts.tool_offset_mm(1, Axis::Z) == Catch::Approx(-0.2f));
+}
+
+TEST_CASE_METHOD(ToolStateFixture, "ToolState offsets: a Z-only delta frame leaves X alone",
+                 "[tool][tool-state][tool-offsets]") {
+    // Moonraker republishes per field. A frame that only carries Z must not
+    // reset X's value, its known flag, or its saved baseline.
+    lv_init_safe();
+    ToolState& ts = fresh_tool_state(toolchanger_hw());
+    ts.update_from_status({{"tool T0", {{"gcode_x_offset", 1.5}, {"gcode_z_offset", 0.1}}}});
+    ts.set_tool_offset_local(0, Axis::X, 1750);
+    REQUIRE(ts.tool_offset_dirty(0, Axis::X));
+
+    ts.update_from_status({{"tool T0", {{"gcode_z_offset", 0.15}}}});
+
+    CHECK(ts.tool_offset_mm(0, Axis::X) == Catch::Approx(1.75f));
+    CHECK(ts.tool_offset_dirty(0, Axis::X));
+    CHECK(ts.tool_offset_mm(0, Axis::Z) == Catch::Approx(0.15f));
+    // Z was seeded at 0.1 and moved by the printer, not by us, so it is dirty
+    // too - a runtime change is a runtime change whoever made it.
+    CHECK(ts.tool_offset_dirty(0, Axis::Z));
+}
+
+TEST_CASE_METHOD(ToolStateFixture, "ToolState offsets: a Z-only firmware never learns X or Y",
+                 "[tool][tool-state][tool-offsets]") {
+    // The MedusaHC shape: klipper-toolchanger objects plus the TOOL_OFFSET
+    // macro, whose provider row keeps only Z. The tool object still carries
+    // gcode_x_offset, and it must be ignored: that store is not the authority
+    // on this machine, and offering X controls would promise a write the
+    // module refuses to emit.
+    lv_init_safe();
+    ToolState& ts = fresh_tool_state(toolchanger_hw(2, {"gcode_macro TOOL_OFFSET"}));
+
+    CHECK(subj(ts.get_per_tool_axis_supported_subject(Axis::X)) == 0);
+    CHECK(subj(ts.get_per_tool_axis_supported_subject(Axis::Y)) == 0);
+    CHECK(subj(ts.get_per_tool_axis_supported_subject(Axis::Z)) == 1);
+
+    ts.update_from_status({{"gcode_macro TOOL_OFFSET", {{"t0_off_z", -0.2}}},
+                           {"tool T0", {{"gcode_x_offset", 1.5}, {"gcode_z_offset", 0.1}}}});
+
+    CHECK_FALSE(ts.tool_offset_known(0, Axis::X));
+    CHECK(ts.tool_offset_mm(0, Axis::Z) == Catch::Approx(-0.2f));
+}
+
+TEST_CASE_METHOD(ToolStateFixture, "ToolState offsets: a topology rebuild carries every axis",
+                 "[tool][tool-state][tool-offsets]") {
+    // set_ams_topology() rebuilds tools_ from the backend's view; the offsets
+    // and their bookkeeping are facts about the toolhead and must survive it.
+    lv_init_safe();
+    ToolState& ts = fresh_tool_state(toolchanger_hw(4));
+    ts.update_from_status(
+        {{"tool T1",
+          {{"gcode_x_offset", 1.5}, {"gcode_y_offset", -0.25}, {"gcode_z_offset", 0.1}}}});
+    ts.set_tool_offset_local(1, Axis::Y, -500);
+
+    ToolTopology topo;
+    topo.tool_count = 4;
+    topo.active_tool = 0;
+    topo.tool_to_slot = {0, 1, 2, 3};
+    ts.set_ams_topology(topo);
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+
+    REQUIRE(ts.tools().size() == 4);
+    CHECK(ts.tool_offset_mm(1, Axis::X) == Catch::Approx(1.5f));
+    CHECK(ts.tool_offset_mm(1, Axis::Y) == Catch::Approx(-0.5f));
+    CHECK(ts.tool_offset_dirty(1, Axis::Y));
+    CHECK_FALSE(ts.tool_offset_dirty(1, Axis::X));
+    CHECK(ts.tool_offset_known(1, Axis::Z));
+}
+
+// ============================================================================
+// Spool assignments are kept per printer
+// ============================================================================
+
+namespace {
+
+/// Two configured printers, alpha active, restored on exit.
+struct TwoPrinterSpoolFixture : public ToolStateFixture {
+    helix::Config* cfg = helix::Config::get_instance();
+    nlohmann::json saved_data = helix::ConfigTestAccess::data(*cfg);
+    std::string saved_active = helix::ConfigTestAccess::active_printer_id(*cfg);
+    helix::test::FakeMoonrakerClient client;
+    MoonrakerAPI api{client, get_printer_state()};
+    TempDir tmp;
+    PrinterDiscovery hw;
+
+    TwoPrinterSpoolFixture() {
+        nlohmann::json data;
+        data["config_version"] = 3;
+        data["active_printer_id"] = "alpha";
+        data["printers"]["alpha"]["printer_name"] = "Alpha";
+        data["printers"]["bravo"]["printer_name"] = "Bravo";
+        helix::ConfigTestAccess::data(*cfg) = data;
+        helix::ConfigTestAccess::active_printer_id(*cfg) = "alpha";
+
+        lv_init_safe();
+        auto& ts = ToolState::instance();
+        ts.deinit_subjects();
+        ts.init_subjects(false);
+        ts.set_config_dir(tmp.str());
+        hw.parse_objects(nlohmann::json::array({"extruder", "extruder1", "heater_bed"}));
+        ts.init_tools(hw);
+    }
+
+    ~TwoPrinterSpoolFixture() override {
+        helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+        ToolState::instance().deinit_subjects();
+        helix::ConfigTestAccess::data(*cfg) = saved_data;
+        helix::ConfigTestAccess::active_printer_id(*cfg) = saved_active;
+    }
+
+    /// What a switch does to ToolState: the next printer's scope, fresh tools.
+    void switch_to(const std::string& id) {
+        helix::ConfigTestAccess::active_printer_id(*cfg) = id;
+        REQUIRE(helix::PrinterCacheRegistry::instance().invalidate_one("ToolState"));
+        ToolState::instance().init_tools(hw);
+    }
+
+    /// Load through Moonraker with the printer's DB holding no assignments.
+    void load_with_empty_db() {
+        client.rpc_calls.clear();
+        ToolState::instance().load_spool_assignments(&api);
+        REQUIRE(client.rpc_calls.size() == 1);
+        REQUIRE(client.rpc_calls[0].method == "server.database.get_item");
+        MoonrakerError not_found;
+        not_found.message = "Key 'tool_spool_assignments' in namespace 'helix-screen' not found";
+        not_found.code = 404;
+        client.rpc_calls[0].error_cb(not_found);
+        helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+    }
+
+    /// Issue a load through Moonraker; its reply is still in flight.
+    helix::test::FakeMoonrakerClient::RpcCall& start_load() {
+        client.rpc_calls.clear();
+        ToolState::instance().load_spool_assignments(&api);
+        REQUIRE(client.rpc_calls.size() == 1);
+        REQUIRE(client.rpc_calls[0].method == "server.database.get_item");
+        return client.rpc_calls[0];
+    }
+
+    nlohmann::json spool_file_json() const {
+        std::ifstream in(spool_file());
+        return nlohmann::json::parse(in, nullptr, false);
+    }
+
+    /// Every spool assignment value written to Moonraker's DB since the last load.
+    std::vector<nlohmann::json> db_writes() const {
+        std::vector<nlohmann::json> writes;
+        for (const auto& call : client.rpc_calls) {
+            if (call.method == "server.database.post_item") {
+                writes.push_back(call.params["value"]);
+            }
+        }
+        return writes;
+    }
+
+    std::filesystem::path spool_file() const {
+        return std::filesystem::path(tmp.str()) / "tool_spools.json";
+    }
+};
+
+int assigned_tools() {
+    int n = 0;
+    for (const auto& tool : ToolState::instance().tools()) {
+        n += tool.spoolman_id > 0 ? 1 : 0;
+    }
+    return n;
+}
+
+} // namespace
+
+TEST_CASE_METHOD(TwoPrinterSpoolFixture,
+                 "ToolState: a printer with an empty DB does not inherit the previous printer's "
+                 "local spools",
+                 "[tool][tool-state][spool][multi-printer]") {
+    auto& ts = ToolState::instance();
+    ts.assign_spool(0, 42, "Red PLA", 750.0f, 1000.0f);
+    ts.save_spool_assignments(nullptr);
+    REQUIRE(std::filesystem::exists(spool_file()));
+
+    switch_to("bravo");
+    load_with_empty_db();
+
+    CHECK(assigned_tools() == 0);
+    // A 404 seeds the printer's DB with its own (empty) set, once.
+    REQUIRE(db_writes().size() == 1);
+    CHECK(db_writes()[0].empty());
+
+    // Alpha's own assignments are still there for alpha.
+    switch_to("alpha");
+    load_with_empty_db();
+    CHECK(ts.tools()[0].spoolman_id == 42);
+}
+
+TEST_CASE_METHOD(TwoPrinterSpoolFixture,
+                 "ToolState: a single-printer spool file belongs to the first printer that loads "
+                 "it",
+                 "[tool][tool-state][spool][multi-printer]") {
+    {
+        std::ofstream legacy(spool_file());
+        legacy << R"({"1": {"spoolman_id": 7, "spool_name": "Old PETG"}})";
+    }
+
+    load_with_empty_db();
+    REQUIRE(ToolState::instance().tools()[1].spoolman_id == 7);
+
+    switch_to("bravo");
+    load_with_empty_db();
+    CHECK(assigned_tools() == 0);
+    // A 404 seeds the printer's DB with its own (empty) set, once.
+    REQUIRE(db_writes().size() == 1);
+    CHECK(db_writes()[0].empty());
+
+    switch_to("alpha");
+    load_with_empty_db();
+    CHECK(ToolState::instance().tools()[1].spoolman_id == 7);
+}
+
+TEST_CASE_METHOD(TwoPrinterSpoolFixture,
+                 "ToolState: a load answered after a switch is dropped, not saved as the next "
+                 "printer's",
+                 "[tool][tool-state][spool][multi-printer]") {
+    auto& ts = ToolState::instance();
+    ts.assign_spool(0, 42, "Red PLA", 750.0f, 1000.0f);
+    ts.save_spool_assignments(nullptr);
+
+    auto load = start_load();
+    // The K-Touch retargets in place: the active id moves and the cache is invalidated,
+    // but alpha's tools are still in place when alpha's reply finally fails.
+    helix::ConfigTestAccess::active_printer_id(*cfg) = "bravo";
+    REQUIRE(helix::PrinterCacheRegistry::instance().invalidate_one("ToolState"));
+    MoonrakerError lost;
+    lost.type = MoonrakerErrorType::CONNECTION_LOST;
+    lost.code = 404;
+    client.rpc_calls.clear();
+    load.error_cb(lost);
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+
+    CHECK(db_writes().empty());
+    CHECK_FALSE(spool_file_json()["printers"].contains("bravo"));
+    CHECK_FALSE(ts.spool_assignments_loaded());
+}
+
+TEST_CASE_METHOD(TwoPrinterSpoolFixture,
+                 "ToolState: a DB load that times out does not overwrite the DB",
+                 "[tool][tool-state][spool][multi-printer]") {
+    auto load = start_load();
+    MoonrakerError timeout;
+    timeout.type = MoonrakerErrorType::TIMEOUT;
+    timeout.message = "Request timed out";
+    client.rpc_calls.clear();
+    load.error_cb(timeout);
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+
+    REQUIRE(db_writes().size() == 0);
+}
+
+TEST_CASE_METHOD(TwoPrinterSpoolFixture, "ToolState: a spool file it cannot read is left alone",
+                 "[tool][tool-state][spool][multi-printer]") {
+    {
+        std::ofstream broken(spool_file());
+        broken << R"({"printers": {"bravo": {"0": {"spoolman_id": 9)";
+    }
+    ToolState::instance().assign_spool(0, 42, "Red PLA", 750.0f, 1000.0f);
+    ToolState::instance().save_spool_assignments(nullptr);
+
+    std::ifstream in(spool_file());
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    CHECK(text == R"({"printers": {"bravo": {"0": {"spoolman_id": 9)");
+}
+
+TEST_CASE_METHOD(TwoPrinterSpoolFixture, "ToolState: a removed printer's spools go with it",
+                 "[tool][tool-state][spool][multi-printer]") {
+    ToolState::instance().assign_spool(0, 42, "Red PLA", 750.0f, 1000.0f);
+    ToolState::instance().save_spool_assignments(nullptr);
+    REQUIRE(spool_file_json()["printers"].contains("alpha"));
+
+    cfg->remove_printer("alpha");
+
+    CHECK_FALSE(spool_file_json()["printers"].contains("alpha"));
+}
+
+TEST_CASE_METHOD(TwoPrinterSpoolFixture,
+                 "ToolState: unsaved spool changes do not follow a switch to the next printer",
+                 "[tool][tool-state][spool][multi-printer]") {
+    ToolState::instance().assign_spool(0, 42, "Red PLA", 750.0f, 1000.0f);
+
+    helix::ConfigTestAccess::active_printer_id(*cfg) = "bravo";
+    REQUIRE(helix::PrinterCacheRegistry::instance().invalidate_one("ToolState"));
+    client.rpc_calls.clear();
+    ToolState::instance().save_spool_assignments_if_dirty(&api);
+
+    CHECK(db_writes().empty());
+    CHECK_FALSE(std::filesystem::exists(spool_file()));
+}
+
+TEST_CASE_METHOD(TwoPrinterSpoolFixture,
+                 "ToolState: a failed DB load with a local set restores it into the DB",
+                 "[tool][tool-state][spool][multi-printer]") {
+    ToolState::instance().assign_spool(1, 7, "Blue PETG", 200.0f, 500.0f);
+    ToolState::instance().save_spool_assignments(nullptr);
+    switch_to("alpha");
+
+    auto load = start_load();
+    MoonrakerError timeout;
+    timeout.type = MoonrakerErrorType::TIMEOUT;
+    client.rpc_calls.clear();
+    load.error_cb(timeout);
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+
+    CHECK(ToolState::instance().tools()[1].spoolman_id == 7);
+    REQUIRE(db_writes().size() == 1);
+    CHECK(db_writes()[0]["1"]["spoolman_id"] == 7);
+}
+
+TEST_CASE_METHOD(TwoPrinterSpoolFixture,
+                 "ToolState: spools adopted from a single-printer file never seed the DB",
+                 "[tool][tool-state][spool][multi-printer]") {
+    // The single-printer file holds whichever printer saved last, which need not be the
+    // printer that adopts it.
+    {
+        std::ofstream legacy(spool_file());
+        legacy << R"({"0": {"spoolman_id": 42, "spool_name": "Someone else's PLA"}})";
+    }
+    switch_to("bravo");
+
+    const auto fail_load = [this](const MoonrakerError& err) {
+        auto load = start_load();
+        client.rpc_calls.clear();
+        load.error_cb(err);
+        helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+    };
+    MoonrakerError timeout;
+    timeout.type = MoonrakerErrorType::TIMEOUT;
+    fail_load(timeout);
+    CHECK(ToolState::instance().tools()[0].spoolman_id == 42);
+    CHECK(db_writes().empty());
+
+    // Still adopted once the in-memory state is gone: the next load reads the mark back.
+    switch_to("bravo");
+    fail_load(timeout);
+    CHECK(db_writes().empty());
+
+    MoonrakerError not_found;
+    not_found.code = 404;
+    switch_to("bravo");
+    fail_load(not_found);
+    CHECK(db_writes().empty());
+
+    // Once bravo has loaded from its own DB, its local set is its own.
+    switch_to("bravo");
+    auto load = start_load();
+    load.success_cb(nlohmann::json{
+        {"result", {{"value", {{"1", {{"spoolman_id", 7}, {"spool_name", "Bravo PETG"}}}}}}}});
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+    switch_to("bravo");
+    fail_load(timeout);
+    REQUIRE(db_writes().size() == 1);
+    CHECK(db_writes()[0]["1"]["spoolman_id"] == 7);
 }

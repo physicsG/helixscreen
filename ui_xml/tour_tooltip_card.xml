@@ -21,8 +21,8 @@
         <!-- Buttons wired programmatically from TourOverlay::build_tree — the -->
         <!-- click handlers need the per-instance `this` pointer, which XML    -->
         <!-- event_cb registration doesn't support. -->
-        <ui_button name="tour_skip_btn" variant="ghost" text="Skip" translation_tag="Skip"/>
-        <ui_button name="tour_next_btn" variant="primary" text="Next" translation_tag="Next"/>
+        <ui_button name="tour_skip_btn" variant="ghost" text="Skip"/>
+        <ui_button name="tour_next_btn" variant="primary" text="Next"/>
       </lv_obj>
     </lv_obj>
   </view>

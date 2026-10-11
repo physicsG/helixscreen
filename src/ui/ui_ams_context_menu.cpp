@@ -3,23 +3,36 @@
 
 #include "ui_ams_context_menu.h"
 
+#include "ui_ams_detail.h"
+#include "ui_ams_edit_overlay.h"
+#include "ui_ams_sidebar.h"
 #include "ui_button.h"
 #include "ui_callback_helpers.h"
 #include "ui_error_reporting.h"
+#include "ui_overlay_qr_scanner.h"
 #include "ui_toast_manager.h"
 
 #include "ams_backend.h"
+#include "ams_bypass_policy.h"
 #include "ams_state.h"
 #include "ams_types.h"
 #include "app_globals.h"
+#include "display_numbering.h"
 #include "filament_database.h"
+#include "filament_op_execute.h"
 #include "filament_op_slot_resolver.h"
 #include "filament_variants.h"
+#include "i_moonraker_api.h"
 #include "printer_state.h"
+#include "spoolman_types.h"
 #include "static_subject_registry.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
+
+#include <algorithm>
+#include <optional>
 
 namespace helix::ui {
 
@@ -28,16 +41,21 @@ bool AmsContextMenu::callbacks_registered_ = false;
 bool AmsContextMenu::subjects_initialized_ = false;
 lv_subject_t AmsContextMenu::slot_is_loaded_subject_;
 lv_subject_t AmsContextMenu::slot_can_load_subject_;
+lv_subject_t AmsContextMenu::slot_can_purge_subject_;
 lv_subject_t AmsContextMenu::slot_mounts_tool_subject_;
 lv_subject_t AmsContextMenu::slot_unload_hint_subject_;
 lv_subject_t AmsContextMenu::slot_unload_hint_visible_subject_;
 char AmsContextMenu::slot_unload_hint_buf_[128];
+lv_subject_t AmsContextMenu::slot_can_clear_subject_;
+lv_subject_t AmsContextMenu::slot_clear_hint_subject_;
+lv_subject_t AmsContextMenu::slot_clear_hint_visible_subject_;
+char AmsContextMenu::slot_clear_hint_buf_[192];
+lv_subject_t AmsContextMenu::slot_preload_subject_;
 lv_subject_t AmsContextMenu::slot_source_external_subject_;
 
 // ============================================================================
 // Construction / Destruction
 // ============================================================================
-
 
 AmsContextMenu::AmsContextMenu() {
     init_subjects();
@@ -48,27 +66,34 @@ void AmsContextMenu::init_subjects() {
     if (subjects_initialized_ || !lv_is_initialized()) {
         return;
     }
-    // Subjects for button enabled states -- one set for every instance; see the
-    // header for why.
+    // One set for every instance; see the header for why.
     lv_subject_init_int(&slot_is_loaded_subject_, 0);
-    lv_xml_register_subject(nullptr, "ams_slot_is_loaded", &slot_is_loaded_subject_);
-
     lv_subject_init_int(&slot_can_load_subject_, 1);
-    lv_xml_register_subject(nullptr, "ams_slot_can_load", &slot_can_load_subject_);
-
-    lv_subject_init_int(&slot_source_external_subject_, 0);
-    lv_xml_register_subject(nullptr, "ams_slot_source_external", &slot_source_external_subject_);
-
+    lv_subject_init_int(&slot_can_purge_subject_, 1);
     lv_subject_init_int(&slot_mounts_tool_subject_, 0);
-    lv_xml_register_subject(nullptr, "ams_slot_mounts_tool", &slot_mounts_tool_subject_);
-
     lv_subject_init_int(&slot_unload_hint_visible_subject_, 0);
-    lv_xml_register_subject(nullptr, "ams_slot_unload_hint_visible",
-                            &slot_unload_hint_visible_subject_);
-
     lv_subject_init_string(&slot_unload_hint_subject_, slot_unload_hint_buf_, nullptr,
                            sizeof(slot_unload_hint_buf_), "");
+    lv_subject_init_int(&slot_can_clear_subject_, 1);
+    lv_subject_init_int(&slot_clear_hint_visible_subject_, 0);
+    lv_subject_init_string(&slot_clear_hint_subject_, slot_clear_hint_buf_, nullptr,
+                           sizeof(slot_clear_hint_buf_), "");
+    lv_subject_init_int(&slot_preload_subject_, 0);
+    lv_subject_init_int(&slot_source_external_subject_, 0);
+
+    lv_xml_register_subject(nullptr, "ams_slot_is_loaded", &slot_is_loaded_subject_);
+    lv_xml_register_subject(nullptr, "ams_slot_can_load", &slot_can_load_subject_);
+    lv_xml_register_subject(nullptr, "ams_slot_can_purge", &slot_can_purge_subject_);
+    lv_xml_register_subject(nullptr, "ams_slot_mounts_tool", &slot_mounts_tool_subject_);
     lv_xml_register_subject(nullptr, "ams_slot_unload_hint", &slot_unload_hint_subject_);
+    lv_xml_register_subject(nullptr, "ams_slot_unload_hint_visible",
+                            &slot_unload_hint_visible_subject_);
+    lv_xml_register_subject(nullptr, "ams_slot_can_clear", &slot_can_clear_subject_);
+    lv_xml_register_subject(nullptr, "ams_slot_clear_hint", &slot_clear_hint_subject_);
+    lv_xml_register_subject(nullptr, "ams_slot_clear_hint_visible",
+                            &slot_clear_hint_visible_subject_);
+    lv_xml_register_subject(nullptr, "ams_slot_preload", &slot_preload_subject_);
+    lv_xml_register_subject(nullptr, "ams_slot_source_external", &slot_source_external_subject_);
 
     subjects_initialized_ = true;
     // Torn down with every other static subject: after the panels (and so every
@@ -82,19 +107,24 @@ void AmsContextMenu::deinit_subjects() {
     }
     lv_subject_deinit(&slot_is_loaded_subject_);
     lv_subject_deinit(&slot_can_load_subject_);
-    lv_subject_deinit(&slot_source_external_subject_);
+    lv_subject_deinit(&slot_can_purge_subject_);
     lv_subject_deinit(&slot_mounts_tool_subject_);
     lv_subject_deinit(&slot_unload_hint_subject_);
     lv_subject_deinit(&slot_unload_hint_visible_subject_);
+    lv_subject_deinit(&slot_can_clear_subject_);
+    lv_subject_deinit(&slot_clear_hint_subject_);
+    lv_subject_deinit(&slot_clear_hint_visible_subject_);
+    lv_subject_deinit(&slot_preload_subject_);
+    lv_subject_deinit(&slot_source_external_subject_);
     subjects_initialized_ = false;
 }
 
 AmsContextMenu::~AmsContextMenu() {
     // The subjects are the class's, not this instance's, and outlive it; the
-    // base destructor takes the widget tree down. Deiniting them HERE is what
-    // left the XML registry resolving "ams_slot_can_load" to dead storage once
-    // any one of the three owners went away, whether or not another was still
-    // using the name — StaticSubjectRegistry retires them at shutdown instead.
+    // base destructor takes the widget tree down. Deiniting them here would
+    // leave the XML registry resolving "ams_slot_can_load" to dead storage while
+    // another owner still serves the name; StaticSubjectRegistry retires them
+    // at shutdown instead.
     spdlog::trace("[AmsContextMenu] Destroyed");
 }
 
@@ -119,8 +149,11 @@ bool AmsContextMenu::show_near_widget(lv_obj_t* parent, int slot_index, lv_obj_t
     external_spool_mode_ = false;
 
     // Get total slots from backend
+    bays_.clear();
     if (backend_) {
-        total_slots_ = backend_->get_system_info().total_slots;
+        const AmsSystemInfo info = backend_->get_system_info();
+        total_slots_ = info.total_slots;
+        bays_ = info.present_slots();
     } else {
         total_slots_ = 0;
     }
@@ -133,7 +166,8 @@ bool AmsContextMenu::show_near_widget(lv_obj_t* parent, int slot_index, lv_obj_t
     return result;
 }
 
-bool AmsContextMenu::show_for_external_spool(lv_obj_t* parent, lv_obj_t* anchor_widget) {
+bool AmsContextMenu::show_for_external_spool(lv_obj_t* parent, lv_obj_t* anchor_widget,
+                                             bool offer_toggle) {
     // Register callbacks and the class's subjects once (both idempotent)
     register_callbacks();
     init_subjects();
@@ -142,7 +176,9 @@ bool AmsContextMenu::show_for_external_spool(lv_obj_t* parent, lv_obj_t* anchor_
     backend_ = nullptr;
     pending_is_loaded_ = false;
     total_slots_ = 0;
+    bays_.clear();
     external_spool_mode_ = true;
+    external_offer_toggle_ = offer_toggle;
 
     // Base class handles: XML creation, on_created callback, positioning, and
     // claiming the active-menu slot the static callbacks resolve through.
@@ -172,8 +208,9 @@ void AmsContextMenu::on_created(lv_obj_t* menu_obj) {
     // ACE-fed U1 head's material/colour/spool are the ACE's to state, and
     // editing them here would write print_task_config only for the ACE to
     // overwrite it on its next report. The edit actions bind to this subject and
-    // hide themselves; "Open in <unit>" binds to its inverse. Load and Unload
-    // are untouched — they act on the head, which is still the U1's job.
+    // hide themselves; "Open in <unit>" binds to its inverse. Unload is
+    // untouched: it acts on the head, which is still the U1's job. The external
+    // spool has no backend here and so no owner.
     source_owner_unit_ = -1;
     if (!external_spool_mode_ && backend_) {
         if (auto owner = backend_->slot_identity_owner_unit(slot_index)) {
@@ -181,22 +218,71 @@ void AmsContextMenu::on_created(lv_obj_t* menu_obj) {
         }
     }
     lv_subject_set_int(&slot_source_external_subject_, source_owner_unit_ >= 0 ? 1 : 0);
-    spdlog::debug("[AmsContextMenu] slot {} identity owner unit = {} (backend={})", slot_index,
-                  source_owner_unit_, backend_ ? "yes" : "null");
 
-    // External spool mode: hide backend-related buttons, show only EDIT/CLEAR
+    // Hidden until the lane path below says otherwise; the external spool
+    // has no gate to preload.
+    lv_subject_set_int(&slot_preload_subject_, 0);
+
+    // External spool mode: the lane dropdowns do not apply, but Load and Unload
+    // do — EXTERNAL_SPOOL_SLOT is a target plan_load()/plan_unload() both
+    // resolve, and this menu is where a user looking at the bypass spool goes
+    // for them (prestonbrown/helixscreen#1486).
     if (external_spool_mode_) {
-        // Hide Load/Unload buttons (not applicable to external spool)
-        lv_obj_t* btn_load = lv_obj_find_by_name(menu_obj, "btn_load");
-        if (btn_load)
-            lv_obj_add_flag(btn_load, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_t* btn_unload = lv_obj_find_by_name(menu_obj, "btn_unload");
-        if (btn_unload)
-            lv_obj_add_flag(btn_unload, LV_OBJ_FLAG_HIDDEN);
+        // backend_ is deliberately null in this mode, so the gating terms come
+        // off the live backend instead. Same predicate as every other surface:
+        // a bypass Load offered here and refused by the Filament panel would be
+        // the divergence compute_op_button_gating() exists to prevent.
+        AmsBackend* const backend = AmsState::instance().get_backend();
+        AmsSystemInfo ext_sys;
+        if (backend) {
+            ext_sys = backend->get_system_info();
+        }
+        const bool bypass_loaded =
+            helix::ui::read_unload_target_loaded(backend, ext_sys, helix::ui::EXTERNAL_SPOOL_SLOT);
 
-        // Disable subject-driven states so hidden buttons stay hidden
-        lv_subject_set_int(&slot_is_loaded_subject_, 0);
-        lv_subject_set_int(&slot_can_load_subject_, 0);
+        const helix::ui::OpButtonState ext_state = helix::ui::build_external_spool_gating_state(
+            bypass_loaded, backend && ext_sys.is_busy(),
+            get_printer_state().print_state().get_print_lifecycle(),
+            backend && backend->filament_ops_self_home());
+
+        const helix::ui::OpButtonGating ext_gating = helix::ui::compute_op_button_gating(ext_state);
+        lv_subject_set_int(&slot_can_load_subject_, ext_gating.load_disabled ? 0 : 1);
+        lv_subject_set_int(&slot_is_loaded_subject_, ext_gating.unload_disabled ? 0 : 1);
+        // The lane menu retitles Unload per UnloadMode; bypass has only the one.
+        unload_mode_ = UnloadMode::Unload;
+
+        // These subjects are static and outlive any one show, while the widget
+        // tree is rebuilt from XML each time. A lane menu shown earlier leaves
+        // its answers behind, so a bypass menu that did not clear them would
+        // render that lane's unload refusal under the bypass spool's own Unload.
+        lv_subject_set_int(&slot_mounts_tool_subject_, 0);
+        lv_subject_copy_string(&slot_unload_hint_subject_, "");
+        lv_subject_set_int(&slot_unload_hint_visible_subject_, 0);
+
+        lv_subject_set_int(&slot_can_purge_subject_, ext_gating.purge_disabled ? 0 : 1);
+        if (lv_obj_t* btn_purge =
+                helix::ui::find_required(menu_obj, "btn_purge", "AmsContextMenu")) {
+            lv_obj_remove_flag(btn_purge, LV_OBJ_FLAG_HIDDEN);
+        }
+
+        // The bypass toggle is on this menu so the external spool answers every
+        // question asked of it in one place. bypass_toggle_offered() is the same
+        // answer BypassToggleController refuses on, asked before the button is
+        // drawn rather than after the user taps it.
+        if (lv_obj_t* btn_bypass =
+                helix::ui::find_required(menu_obj, "btn_bypass_toggle", "AmsContextMenu")) {
+            const bool bypass_offered =
+                backend &&
+                helix::bypass_toggle_offered(helix::bypass_available_for(ext_sys.supports_bypass),
+                                             ext_sys.has_hardware_bypass_sensor);
+            if (bypass_offered) {
+                lv_obj_remove_flag(btn_bypass, LV_OBJ_FLAG_HIDDEN);
+                // Names the action, not the state, so it reads as a command.
+                ui_button_set_text(btn_bypass, backend->is_bypass_active()
+                                                   ? lv_tr("Disable Bypass")
+                                                   : lv_tr("Enable Bypass"));
+            }
+        }
 
         // Set header to "External Spool"
         lv_obj_t* slot_header = lv_obj_find_by_name(menu_obj, "slot_header");
@@ -210,21 +296,31 @@ void AmsContextMenu::on_created(lv_obj_t* menu_obj) {
         bool has_assignment =
             ext_info.has_value() && (ext_info->spoolman_id > 0 || !ext_info->material.empty());
 
-        lv_obj_t* btn_clear = lv_obj_find_by_name(menu_obj, "btn_clear_spool");
+        lv_obj_t* btn_clear =
+            helix::ui::find_required(menu_obj, "btn_clear_spool", "AmsContextMenu");
         if (btn_clear && has_assignment) {
             lv_obj_clear_flag(btn_clear, LV_OBJ_FLAG_HIDDEN);
         }
+
+        // The bypass clear erases the external spool's own assignment, not a
+        // lane's metadata, so a print never blocks it. The subjects are shared
+        // with the lane menu (one menu on screen at a time), so a lane's
+        // refusal must not bleed into this menu's button and hint.
+        lv_subject_set_int(&slot_can_clear_subject_, 1);
+        lv_subject_copy_string(&slot_clear_hint_subject_, "");
+        lv_subject_set_int(&slot_clear_hint_visible_subject_, 0);
 
         // Show "Select Spool" and "Scan QR Code" if Spoolman is available
         auto* spoolman_subj = lv_xml_get_subject(nullptr, "printer_has_spoolman");
         bool has_spoolman = spoolman_subj && lv_subject_get_int(spoolman_subj) == 1;
 
-        lv_obj_t* btn_spoolman = lv_obj_find_by_name(menu_obj, "btn_spoolman");
+        lv_obj_t* btn_spoolman =
+            helix::ui::find_required(menu_obj, "btn_spoolman", "AmsContextMenu");
         if (btn_spoolman && has_spoolman) {
             lv_obj_clear_flag(btn_spoolman, LV_OBJ_FLAG_HIDDEN);
         }
 
-        lv_obj_t* btn_scan_qr = lv_obj_find_by_name(menu_obj, "btn_scan_qr");
+        lv_obj_t* btn_scan_qr = helix::ui::find_required(menu_obj, "btn_scan_qr", "AmsContextMenu");
         if (btn_scan_qr && has_spoolman) {
 #if !defined(HELIX_PLATFORM_ESP32)
             // No camera on the v1 Core+AMS cut — keep Scan QR hidden (default).
@@ -241,7 +337,7 @@ void AmsContextMenu::on_created(lv_obj_t* menu_obj) {
     // only on a backend whose filament macro homes itself (AD5X IFS). Reading
     // the raw print_active subject here — which is 1 for both — would keep the
     // menu greyed through the runout pause that is the whole recovery workflow.
-    const auto lifecycle = get_printer_state().get_print_lifecycle();
+    const auto lifecycle = get_printer_state().print_state().get_print_lifecycle();
     const bool print_blocks_op = helix::ui::print_blocks_filament_op(
         lifecycle, backend_ && backend_->filament_ops_self_home());
 
@@ -259,60 +355,14 @@ void AmsContextMenu::on_created(lv_obj_t* menu_obj) {
         }
     }
 
-    // Get slot info for filament presence check. Tri-state: slot_presence()
-    // reports SlotStatus::UNKNOWN as "unanswerable" rather than "empty", so a
-    // backend that publishes no per-lane presence does not grey Load.
-    std::optional<bool> slot_has_filament;
-    // LIVE load state (Task 3): firmware seated+loaded OR filament at this slot's
-    // toolhead sensor — drives Load/Unload availability instead of static RFID
-    // presence so the menu matches real load state the moment a sensor flips.
-    bool slot_is_loaded_live = false;
-    if (backend_) {
-        SlotInfo slot_info = backend_->get_slot_info(slot_index);
-        slot_has_filament = helix::ui::slot_presence(slot_info);
-        slot_is_loaded_live = backend_->slot_is_actively_loaded(slot_index) ||
-                              backend_->slot_has_filament_at_toolhead(slot_index);
-    }
+    const SlotOpDecision ops =
+        decide_slot_ops(backend_, slot_index, pending_is_loaded_, system_busy, print_blocks_op,
+                        backend_ && backend_->toolhead_filament_unaccounted().value_or(false));
+    // The dispatched action, not just the label: handle_unload() reads this.
+    unload_mode_ = ops.unload_mode;
+    lv_subject_set_int(&slot_is_loaded_subject_, ops.unload_enabled ? 1 : 0);
 
-    // Treat the slot as loaded if EITHER the caller's snapshot (can_unload_from_
-    // toolhead, computed at open) OR the live per-slot accessors say so. The OR
-    // keeps Unload available for the firmware's active slot even after a runout
-    // clears the head sensor (#995), while live signals enable real-time accuracy.
-    const bool is_loaded = pending_is_loaded_ || slot_is_loaded_live;
-
-    // Whether this slot's unload action is a heated toolhead unload (true) or a
-    // cold per-lane eject (false). Defaults to is_loaded for most backends; AD5X
-    // IFS refines it with seated-channel authority so a NON-seated lane reads
-    // "Eject" even when the firmware dropped its active-slot pointer and
-    // is_loaded was broadened by the recovery clause (raza616, 5HR3HHS6). This
-    // drives both the button label and the dispatched action (handle_unload).
-    const bool toolhead_unload =
-        backend_ ? backend_->slot_unloads_to_toolhead(slot_index, is_loaded) : is_loaded;
-
-    // Select the Unload button's operation, most specific first. Each mode has a
-    // distinct label and a distinct dispatch; see UnloadMode and decide_unload_mode().
-    //
-    // The unload-mode decision keeps the strict reading of presence — "is there
-    // something to eject" has no useful third answer, and an unknown lane must
-    // not grow an Eject button out of nowhere. Only the Load gate treats UNKNOWN
-    // as unanswerable.
-    const bool slot_filament_present = slot_has_filament.value_or(false);
-    const bool slot_empty = !slot_filament_present;
-    const bool supports_eject = backend_ && backend_->supports_lane_eject();
-    const bool can_recover = backend_ && backend_->can_recover_lane_position(slot_index);
-    const bool recovery_attributed = backend_ && backend_->lane_recovery_is_attributed();
-    const bool supports_force_eject = backend_ && backend_->supports_force_eject();
-
-    unload_mode_ =
-        decide_unload_mode(toolhead_unload, can_recover, recovery_attributed, supports_eject,
-                           slot_filament_present, supports_force_eject, slot_empty);
-
-    const bool unload_enabled =
-        decide_unload_enabled(system_busy, unload_mode_, print_blocks_op,
-                              backend_ && backend_->cold_lane_ops_refused_during_print());
-    lv_subject_set_int(&slot_is_loaded_subject_, unload_enabled ? 1 : 0);
-
-    lv_obj_t* btn_unload = lv_obj_find_by_name(menu_obj, "btn_unload");
+    lv_obj_t* btn_unload = helix::ui::find_required(menu_obj, "btn_unload", "AmsContextMenu");
     if (btn_unload) {
         switch (unload_mode_) {
         case UnloadMode::RecoverPosition:
@@ -342,7 +392,7 @@ void AmsContextMenu::on_created(lv_obj_t* menu_obj) {
     const bool mounts_tool = backend_ && backend_->load_mounts_tool();
     lv_subject_set_int(&slot_mounts_tool_subject_, mounts_tool ? 1 : 0);
     if (mounts_tool) {
-        if (lv_obj_t* btn_load = lv_obj_find_by_name(menu_obj, "btn_load")) {
+        if (lv_obj_t* btn_load = helix::ui::find_required(menu_obj, "btn_load", "AmsContextMenu")) {
             ui_button_set_text(btn_load, lv_tr("Mount"));
         }
     }
@@ -350,8 +400,9 @@ void AmsContextMenu::on_created(lv_obj_t* menu_obj) {
     // A disabled button with no stated reason reads as a bug. Only populated
     // when the backend has something actionable to say - "nothing is loaded" is
     // not worth a line, because there is visibly nothing to unload.
-    const std::string unload_hint =
-        (!unload_enabled && backend_) ? backend_->unload_blocked_reason(slot_index) : std::string();
+    const std::string unload_hint = (!ops.unload_enabled && backend_)
+                                        ? backend_->unload_blocked_reason(slot_index)
+                                        : std::string();
     // Already translated by the backend, which had the literal to extract.
     lv_subject_copy_string(&slot_unload_hint_subject_, unload_hint.c_str());
     lv_subject_set_int(&slot_unload_hint_visible_subject_, unload_hint.empty() ? 0 : 1);
@@ -361,37 +412,28 @@ void AmsContextMenu::on_created(lv_obj_t* menu_obj) {
     // one-line hint pointing at the config instead of silently omitting the
     // action — for QIDI, !supports_eject here can only mean force_move is off
     // (the box always supports eject otherwise). See #1041.
-    if (backend_ && backend_->get_type() == AmsType::QIDI_BOX && !supports_eject &&
-        !pending_is_loaded_ && slot_filament_present) {
-        lv_obj_t* hint = lv_obj_find_by_name(menu_obj, "eject_force_move_hint");
+    if (backend_ && backend_->get_type() == AmsType::QIDI_BOX && !backend_->supports_lane_eject() &&
+        !pending_is_loaded_ && ops.presence.value_or(false)) {
+        lv_obj_t* hint =
+            helix::ui::find_required(menu_obj, "eject_force_move_hint", "AmsContextMenu");
         if (hint) {
             lv_obj_remove_flag(hint, LV_OBJ_FLAG_HIDDEN);
         }
     }
 
-    // Determine if slot has filament for Load button state.
-    // Gate on ACTUAL toolhead-loaded state (toolhead_unload), NOT the broadened
-    // is_loaded recovery signal. is_loaded folds in can_unload_from_toolhead, which
-    // reads true for the firmware's seated channel regardless of whether filament
-    // actually reached the head. A cold-lane-eject lane (filament parked in the
-    // lane but NOT at the toolhead) is a valid Load target, so it must stay
-    // enabled. For non-AD5X backends slot_unloads_to_toolhead() returns the hint
-    // unchanged, so !toolhead_unload == !is_loaded and behavior is unaffected.
-    // Disable Load if: system busy, slot empty, OR filament is already at the head.
-    bool can_load = decide_can_load(system_busy, toolhead_unload, slot_has_filament,
-                                    print_blocks_op, source_owner_unit_ >= 0);
-    lv_subject_set_int(&slot_can_load_subject_, can_load ? 1 : 0);
-    if (!can_load) {
+    lv_subject_set_int(&slot_can_load_subject_, ops.can_load ? 1 : 0);
+    if (!ops.can_load) {
         spdlog::debug("[AmsContextMenu] Load disabled for slot {}: busy={}, loaded={} "
-                      "(live={}), has_filament={}, print_blocks_op={}",
-                      slot_index, system_busy, is_loaded, slot_is_loaded_live,
-                      slot_has_filament ? (*slot_has_filament ? "yes" : "no") : "unknown",
-                      print_blocks_op);
+                      "(live={}), has_filament={}, print_blocks_op={}, source_external={}",
+                      slot_index, system_busy, ops.is_loaded, ops.live_loaded,
+                      ops.presence ? (*ops.presence ? "yes" : "no") : "unknown", print_blocks_op,
+                      ops.source_external);
     }
 
     // Show Select Gate button if backend supports it (e.g. Happy Hare)
     if (backend_ && backend_->supports_gate_select()) {
-        lv_obj_t* btn_gate_select = lv_obj_find_by_name(menu_obj, "btn_gate_select");
+        lv_obj_t* btn_gate_select =
+            helix::ui::find_required(menu_obj, "btn_gate_select", "AmsContextMenu");
         if (btn_gate_select) {
             lv_obj_remove_flag(btn_gate_select, LV_OBJ_FLAG_HIDDEN);
             if (system_busy) {
@@ -402,13 +444,23 @@ void AmsContextMenu::on_created(lv_obj_t* menu_obj) {
 
     // Show Check Gate button if backend supports it (e.g. Happy Hare)
     if (backend_ && backend_->supports_gate_check()) {
-        lv_obj_t* btn_gate_check = lv_obj_find_by_name(menu_obj, "btn_gate_check");
+        lv_obj_t* btn_gate_check =
+            helix::ui::find_required(menu_obj, "btn_gate_check", "AmsContextMenu");
         if (btn_gate_check) {
             lv_obj_remove_flag(btn_gate_check, LV_OBJ_FLAG_HIDDEN);
             if (system_busy) {
                 lv_obj_add_state(btn_gate_check, LV_STATE_DISABLED);
             }
         }
+    }
+
+    // Preload moves filament only between spool and gate, but the firmware
+    // refuses it mid-print and while any filament is loaded, and reports that
+    // refusal only to its console.
+    if (backend_ && backend_->supports_lane_preload()) {
+        const bool preload_blocked =
+            system_busy || print_blocks_op || backend_->is_filament_loaded();
+        lv_subject_set_int(&slot_preload_subject_, preload_blocked ? 1 : 2);
     }
 
     // Show Clear Spool whenever the slot carries an assignment, present or not
@@ -421,53 +473,65 @@ void AmsContextMenu::on_created(lv_obj_t* menu_obj) {
     // cannot reach them — a clear_flag after the binding simply wins. Naming the
     // condition once keeps the three in step.
     const bool source_external = source_owner_unit_ >= 0;
-    if (backend_ && !source_external) {
+    if (backend_) {
         SlotInfo slot_info = backend_->get_slot_info(slot_index);
-        lv_obj_t* btn_clear = lv_obj_find_by_name(menu_obj, "btn_clear_spool");
-        if (btn_clear && should_show_clear_spool(slot_info)) {
+        lv_obj_t* btn_clear =
+            helix::ui::find_required(menu_obj, "btn_clear_spool", "AmsContextMenu");
+        if (btn_clear && !source_external && should_show_clear_spool(slot_info)) {
             lv_obj_clear_flag(btn_clear, LV_OBJ_FLAG_HIDDEN);
         }
+
+        // The lane feeding the running print is the lane whose material and
+        // colour the print's own surfaces are displaying; clearing it mid-job
+        // deletes that out from under the job. The button greys out with the
+        // reason beside it, and ams_dispatch_backend_action() refuses the same
+        // case independently: a menu rendered before the print started keeps
+        // its old subject values until it is rebuilt. A slot with no Clear
+        // button has no refusal to explain, and these subjects outlive the
+        // menu, so that case writes the cleared values rather than skipping.
+        const bool clear_blocked =
+            !source_external && helix::ui::clear_spool_blocked_by_print(
+                                    lifecycle, backend_->slot_is_actively_loaded(slot_index));
+        lv_subject_set_int(&slot_can_clear_subject_, clear_blocked ? 0 : 1);
+        const std::string clear_hint =
+            clear_blocked ? helix::ui::clear_spool_blocked_hint(backend_->lane_noun(), slot_index)
+                          : std::string();
+        lv_subject_copy_string(&slot_clear_hint_subject_, clear_hint.c_str());
+        lv_subject_set_int(&slot_clear_hint_visible_subject_, clear_hint.empty() ? 0 : 1);
     }
 
-    // Update the slot header text. Uses the SPOOL number the slot's badge shows,
-    // not slot_index + 1 — those diverge once one slot views another's spool, and
-    // a menu headed "Slot 5" opened from a badge reading "4" names nothing the
-    // user can see. A single number rather than the badge's range: the menu acts
-    // on this one slot.
+    // The header names the position in the backend's own word ("Lane 3",
+    // "Gate 3"), numbered as the slot's badge is. lane_label() owns both halves,
+    // so there is no buffer here a translated noun can overrun.
     //
     // A position fed from ANOTHER unit is headed with that unit instead. It has
-    // no slot number of its own — its badge is a range ("4-7"), because in head
-    // mode every bay of the bound ACE feeds it — so "Slot 4" named a spool
-    // position that does not exist. The unit's own display name ("ACE 2 Pro",
-    // or "ACE 2" when several are attached) is the thing the user can point at.
+    // no number of its own: its badge is a range, because every bay of the
+    // owning unit that maps to this tool can feed it. The unit's display name
+    // is the thing the user can point at.
     lv_obj_t* slot_header = lv_obj_find_by_name(menu_obj, "slot_header");
     if (slot_header) {
-        char header_text[48];
-        std::string owner_name;
-        if (backend_ && source_owner_unit_ >= 0) {
+        std::string header;
+        if (backend_ && source_external) {
             const AmsSystemInfo info = backend_->get_system_info();
             if (source_owner_unit_ < static_cast<int>(info.units.size())) {
-                owner_name = info.units[static_cast<size_t>(source_owner_unit_)].display_name;
+                header = info.units[static_cast<size_t>(source_owner_unit_)].display_name;
             }
         }
-        if (!owner_name.empty()) {
-            snprintf(header_text, sizeof(header_text), "%s", owner_name.c_str());
-        } else {
-            const int shown =
-                backend_ ? backend_->spool_display_number(slot_index) : slot_index + 1;
-            snprintf(header_text, sizeof(header_text), lv_tr("Slot %d"), shown);
+        if (header.empty()) {
+            header = backend_ ? helix::ui::backend_lane_label(*backend_, slot_index)
+                              : helix::ui::lane_label(menu_lane_noun(), slot_index);
         }
-        lv_label_set_text(slot_header, header_text);
+        lv_label_set_text(slot_header, header.c_str());
     }
 
     // Show "Select Spool" and "Scan QR Code" buttons if Spoolman is available
     auto* spoolman_subj = lv_xml_get_subject(nullptr, "printer_has_spoolman");
     bool has_spoolman = spoolman_subj && lv_subject_get_int(spoolman_subj) == 1;
-    lv_obj_t* btn_spoolman = lv_obj_find_by_name(menu_obj, "btn_spoolman");
+    lv_obj_t* btn_spoolman = helix::ui::find_required(menu_obj, "btn_spoolman", "AmsContextMenu");
     if (btn_spoolman && has_spoolman && !source_external) {
         lv_obj_clear_flag(btn_spoolman, LV_OBJ_FLAG_HIDDEN);
     }
-    lv_obj_t* btn_scan_qr = lv_obj_find_by_name(menu_obj, "btn_scan_qr");
+    lv_obj_t* btn_scan_qr = helix::ui::find_required(menu_obj, "btn_scan_qr", "AmsContextMenu");
     if (btn_scan_qr && has_spoolman && !source_external) {
 #if !defined(HELIX_PLATFORM_ESP32)
         // No camera on the v1 Core+AMS cut — keep Scan QR hidden (default).
@@ -527,6 +591,16 @@ void AmsContextMenu::handle_unload() {
     }
 }
 
+void AmsContextMenu::handle_purge() {
+    spdlog::info("[AmsContextMenu] Purge requested");
+    dispatch_ams_action(MenuAction::PURGE);
+}
+
+void AmsContextMenu::handle_bypass_toggle() {
+    spdlog::info("[AmsContextMenu] Bypass toggle requested");
+    dispatch_ams_action(MenuAction::TOGGLE_BYPASS);
+}
+
 void AmsContextMenu::handle_gate_select() {
     spdlog::info("[AmsContextMenu] Select gate requested for slot {}", get_item_index());
     dispatch_ams_action(MenuAction::SELECT_GATE);
@@ -535,6 +609,11 @@ void AmsContextMenu::handle_gate_select() {
 void AmsContextMenu::handle_gate_check() {
     spdlog::info("[AmsContextMenu] Check gate requested for slot {}", get_item_index());
     dispatch_ams_action(MenuAction::CHECK_GATE);
+}
+
+void AmsContextMenu::handle_preload() {
+    spdlog::info("[AmsContextMenu] Preload requested for slot {}", get_item_index());
+    dispatch_ams_action(MenuAction::PRELOAD);
 }
 
 void AmsContextMenu::handle_edit() {
@@ -578,6 +657,75 @@ AmsContextMenu::decide_unload_mode(bool toolhead_unload, bool can_recover, bool 
         return UnloadMode::ForceEject;
     }
     return UnloadMode::Unavailable;
+}
+
+AmsContextMenu::SlotOpDecision
+AmsContextMenu::decide_slot_ops(const AmsBackend* backend, int slot_index, bool pending_is_loaded,
+                                bool system_busy, bool print_blocks_op, bool toolhead_unaccounted) {
+    SlotOpDecision d;
+
+    if (backend) {
+        // Tri-state: slot_presence() reports SlotStatus::UNKNOWN as
+        // "unanswerable" rather than "empty", so a backend that publishes no
+        // per-lane presence does not grey Load.
+        d.presence = helix::ui::slot_presence(backend->get_slot_info(slot_index));
+        // Firmware seated+loaded OR filament at this slot's toolhead sensor, so
+        // the gates follow real load state the moment a sensor flips instead of
+        // static RFID presence.
+        d.live_loaded = backend->slot_is_actively_loaded(slot_index) ||
+                        backend->slot_has_filament_at_toolhead(slot_index);
+    }
+
+    // Loaded if EITHER the caller's open-time snapshot or the live accessors say
+    // so. The OR keeps Unload available for the firmware's active slot even
+    // after a runout clears the head sensor (#995).
+    d.is_loaded = pending_is_loaded || d.live_loaded;
+
+    // Whether this slot's unload is a heated toolhead unload (true) or a cold
+    // per-lane eject (false). Most backends return the hint unchanged; AD5X IFS
+    // refines it with seated-channel authority so a NON-seated lane reads
+    // "Eject" even where the recovery clause broadened is_loaded.
+    d.toolhead_unload =
+        backend ? backend->slot_unloads_to_toolhead(slot_index, d.is_loaded) : d.is_loaded;
+
+    // The unload mode keeps the STRICT reading of presence - "is there something
+    // to eject" has no useful third answer, and an unknown lane must not grow an
+    // Eject button out of nowhere. Only the Load gate below treats UNKNOWN as
+    // unanswerable.
+    const bool present = d.presence.value_or(false);
+    // Filament parked in the toolhead is not loaded (Load keeps reading
+    // toolhead_unload) but still has a heated unload to run.
+    d.parked_in_toolhead = backend && backend->slot_filament_parked_in_toolhead(slot_index);
+    d.unload_mode = decide_unload_mode(d.toolhead_unload || d.parked_in_toolhead,
+                                       backend && backend->can_recover_lane_position(slot_index),
+                                       backend && backend->lane_recovery_is_attributed(),
+                                       backend && backend->supports_lane_eject(), present,
+                                       backend && backend->supports_force_eject(), !present);
+
+    d.unload_enabled =
+        decide_unload_enabled(system_busy, d.unload_mode, print_blocks_op,
+                              backend && backend->cold_lane_ops_refused_during_print());
+
+    // Filament at the toolhead that no lane claims: the lane this menu names
+    // may not be the seated one, so its Unload is a guess and a cold Eject of
+    // the lane that IS seated grinds un-cut filament. Withdraw the button
+    // without touching the mode - the sidebar's active-head Unload covers the
+    // state, letting the firmware resolve the real channel.
+    if (toolhead_unaccounted) {
+        d.unload_enabled = false;
+    }
+
+    // Load gates on the NARROWED signal (toolhead_unload), never the broadened
+    // is_loaded: is_loaded folds in the open-time snapshot, which reads true for
+    // the firmware's seated channel whether or not filament reached the head. A
+    // cold-lane-eject lane - filament parked in the lane but NOT at the toolhead
+    // - is a valid Load target and has to stay enabled.
+    // A position fed from another unit has no Load of its own; see
+    // decide_can_load().
+    d.source_external = backend && backend->slot_identity_owner_unit(slot_index).has_value();
+    d.can_load = decide_can_load(system_busy, d.toolhead_unload, d.presence, print_blocks_op,
+                                 d.source_external);
+    return d;
 }
 
 bool AmsContextMenu::decide_can_load(bool system_busy, bool toolhead_unload,
@@ -646,11 +794,14 @@ void AmsContextMenu::register_callbacks() {
         {"ams_context_unload_cb", on_unload_cb},
         {"ams_context_gate_select_cb", on_gate_select_cb},
         {"ams_context_gate_check_cb", on_gate_check_cb},
+        {"ams_context_preload_cb", on_preload_cb},
         {"ams_context_edit_cb", on_edit_cb},
         {"ams_context_clear_spool_cb", on_clear_spool_cb},
         {"ams_context_spoolman_cb", on_spoolman_cb},
         {"ams_context_open_source_cb", on_open_source_cb},
         {"ams_context_scan_qr_cb", on_scan_qr_cb},
+        {"ams_context_purge_cb", on_purge_cb},
+        {"ams_context_bypass_toggle_cb", on_bypass_toggle_cb},
         {"ams_context_tool_changed_cb", on_tool_changed_cb},
         {"ams_context_backup_changed_cb", on_backup_changed_cb},
     });
@@ -699,10 +850,31 @@ void AmsContextMenu::on_gate_check_cb(lv_event_t* /*e*/) {
     }
 }
 
+void AmsContextMenu::on_preload_cb(lv_event_t* /*e*/) {
+    auto* self = get_active_instance();
+    if (self) {
+        self->handle_preload();
+    }
+}
+
 void AmsContextMenu::on_edit_cb(lv_event_t* /*e*/) {
     auto* self = get_active_instance();
     if (self) {
         self->handle_edit();
+    }
+}
+
+void AmsContextMenu::on_purge_cb(lv_event_t* /*e*/) {
+    auto* self = get_active_instance();
+    if (self) {
+        self->handle_purge();
+    }
+}
+
+void AmsContextMenu::on_bypass_toggle_cb(lv_event_t* /*e*/) {
+    auto* self = get_active_instance();
+    if (self) {
+        self->handle_bypass_toggle();
     }
 }
 
@@ -771,7 +943,14 @@ void AmsContextMenu::handle_tool_changed() {
             if (static_cast<int>(i) != tool_number && mapping[i] == get_item_index()) {
                 spdlog::warn("[AmsContextMenu] Tool {} will share slot {} with tool {}",
                              tool_number, get_item_index(), i);
-                std::string msg = fmt::format(lv_tr("T{} shares slot with T{}"), tool_number, i);
+                // The position is a bare prefix, not part of the sentence:
+                // every locale that inflects would otherwise have the verb or a
+                // preposition agree with a noun that changes per backend.
+                std::string msg = helix::ui::lane_label(backend_->lane_noun(), get_item_index()) +
+                                  ": " +
+                                  fmt::format(lv_tr("{} and {} are both mapped here"),
+                                              helix::ui::tool_label(tool_number),
+                                              helix::ui::tool_label(static_cast<int>(i)));
                 ToastManager::instance().show(ToastSeverity::WARNING, msg.c_str());
                 break;
             }
@@ -793,21 +972,11 @@ void AmsContextMenu::handle_backup_changed() {
 
     int selected = static_cast<int>(lv_dropdown_get_selected(backup_dropdown_));
 
-    // Convert dropdown index back to actual slot index
-    // Dropdown: None=0, then all slots except current slot
+    // Dropdown: None=0, then each backup candidate in order.
+    const std::vector<int> candidates = backup_candidates_for(bays_, get_item_index());
     int backup_slot = -1; // Default to None
-    if (selected > 0) {
-        // Find the actual slot index by counting through slots (skipping current)
-        int dropdown_idx = 0;
-        for (int i = 0; i < total_slots_; ++i) {
-            if (i != get_item_index()) {
-                dropdown_idx++;
-                if (dropdown_idx == selected) {
-                    backup_slot = i;
-                    break;
-                }
-            }
-        }
+    if (selected > 0 && selected <= static_cast<int>(candidates.size())) {
+        backup_slot = candidates[static_cast<size_t>(selected - 1)];
     }
 
     // Ask the BACKEND whether this pairing is allowed. Same rule that tagged the
@@ -863,13 +1032,14 @@ void AmsContextMenu::configure_dropdowns() {
     }
 
     // Find dropdown widgets
-    tool_dropdown_ = lv_obj_find_by_name(menu(), "tool_dropdown");
-    backup_dropdown_ = lv_obj_find_by_name(menu(), "backup_dropdown");
+    tool_dropdown_ = helix::ui::find_required(menu(), "tool_dropdown", "AmsContextMenu");
+    backup_dropdown_ = helix::ui::find_required(menu(), "backup_dropdown", "AmsContextMenu");
 
     // Find row containers and divider
-    lv_obj_t* tool_row = lv_obj_find_by_name(menu(), "tool_dropdown_row");
-    lv_obj_t* backup_row = lv_obj_find_by_name(menu(), "backup_dropdown_row");
-    lv_obj_t* divider = lv_obj_find_by_name(menu(), "dropdown_divider");
+    lv_obj_t* tool_row = helix::ui::find_required(menu(), "tool_dropdown_row", "AmsContextMenu");
+    lv_obj_t* backup_row =
+        helix::ui::find_required(menu(), "backup_dropdown_row", "AmsContextMenu");
+    lv_obj_t* divider = helix::ui::find_required(menu(), "dropdown_divider", "AmsContextMenu");
 
     bool show_any_dropdown = false;
 
@@ -883,8 +1053,8 @@ void AmsContextMenu::configure_dropdowns() {
     // Configure endless spool dropdown — see decide_show_backup_row().
     if (backend_) {
         auto es_caps = backend_->get_endless_spool_capabilities();
-        const bool has_relation = !backend_->get_endless_spool_config().empty();
-        if (decide_show_backup_row(es_caps, has_relation)) {
+        if (decide_show_backup_row(es_caps, backend_->get_endless_spool_config(),
+                                   get_item_index())) {
             populate_backup_dropdown();
             if (backup_row) {
                 lv_obj_remove_flag(backup_row, LV_OBJ_FLAG_HIDDEN);
@@ -897,8 +1067,9 @@ void AmsContextMenu::configure_dropdowns() {
             spdlog::debug("[AmsContextMenu] Endless spool row shown (editable={})",
                           es_caps.editable());
         } else if (es_caps.available()) {
-            spdlog::debug("[AmsContextMenu] Endless spool available but has no per-slot "
-                          "relation to show - row stays hidden");
+            spdlog::debug("[AmsContextMenu] Endless spool available but slot {} has no "
+                          "backup to show - row stays hidden",
+                          get_item_index());
         }
     }
 
@@ -909,12 +1080,13 @@ void AmsContextMenu::configure_dropdowns() {
 }
 
 bool AmsContextMenu::decide_show_backup_row(const helix::printer::EndlessSpoolCapabilities& caps,
-                                            bool has_relation) {
+                                            const helix::printer::EndlessSpoolConfig& cfg,
+                                            int slot) {
     if (!caps.available()) {
         return false;
     }
     // Editable implies there is something to write even before anything is set.
-    return caps.editable() || has_relation;
+    return caps.editable() || helix::printer::endless_spool_backup_for(cfg, slot) >= 0;
 }
 
 void AmsContextMenu::populate_tool_dropdown() {
@@ -943,18 +1115,12 @@ void AmsContextMenu::populate_backup_dropdown() {
     lv_dropdown_set_options(backup_dropdown_, options.c_str());
 
     int current_backup = get_current_backup_for_slot();
-    // Map backup slot to dropdown index, accounting for skipped current slot
-    // Dropdown: None=0, then all slots except current slot
+    // Dropdown: None=0, then each backup candidate in order.
+    const std::vector<int> candidates = backup_candidates_for(bays_, get_item_index());
     int selected_index = 0; // Default to None
-    if (current_backup >= 0) {
-        // Count how many slots appear before the backup slot in the dropdown
-        // (which skips the current slot)
-        selected_index = 1; // Start after "None"
-        for (int i = 0; i < current_backup; ++i) {
-            if (i != get_item_index()) {
-                selected_index++;
-            }
-        }
+    if (auto it = std::find(candidates.begin(), candidates.end(), current_backup);
+        it != candidates.end()) {
+        selected_index = 1 + static_cast<int>(it - candidates.begin());
     }
     lv_dropdown_set_selected(backup_dropdown_, static_cast<uint32_t>(selected_index));
 
@@ -966,7 +1132,7 @@ std::string AmsContextMenu::build_tool_options() const {
     std::string options = lv_tr("None");
     // Add tool options T0, T1, T2... based on total slots
     for (int i = 0; i < total_slots_; ++i) {
-        options += "\nT" + std::to_string(i);
+        options += "\n" + helix::ui::tool_label(i);
     }
     return options;
 }
@@ -986,31 +1152,45 @@ AmsContextMenu::BackupEligibleFn AmsContextMenu::backend_eligible_fn() const {
 AmsContextMenu::SlotDisplayNumberFn AmsContextMenu::backend_display_number_fn() const {
     AmsBackend* backend = backend_;
     if (backend == nullptr) {
-        return [](int slot) { return slot + 1; };
+        return [](int slot) { return helix::ui::lane_number(slot); };
     }
     return [backend](int slot) { return backend->spool_display_number(slot); };
 }
 
-std::string AmsContextMenu::build_backup_options() const {
-    return build_backup_options_for(total_slots_, get_item_index(), backend_eligible_fn(),
-                                    backend_display_number_fn());
+LaneNoun AmsContextMenu::menu_lane_noun() const {
+    return backend_ ? backend_->lane_noun() : helix::ui::active_lane_noun();
 }
 
-std::string AmsContextMenu::build_backup_options_for(int total_slots, int item_index,
+std::string AmsContextMenu::build_backup_options() const {
+    return build_backup_options_for(
+        menu_lane_noun(), backup_candidates_for(bays_, get_item_index()), get_item_index(),
+        backend_eligible_fn(), backend_display_number_fn());
+}
+
+std::vector<int> AmsContextMenu::backup_candidates_for(const std::vector<int>& bays,
+                                                       int item_index) {
+    std::vector<int> candidates;
+    for (int bay : bays) {
+        if (bay != item_index) {
+            candidates.push_back(bay);
+        }
+    }
+    return candidates;
+}
+
+std::string AmsContextMenu::build_backup_options_for(LaneNoun noun,
+                                                     const std::vector<int>& candidates,
+                                                     int item_index,
                                                      const BackupEligibleFn& eligible,
                                                      const SlotDisplayNumberFn& display_number) {
     std::string options = lv_tr("None");
 
-    // Add slot options Slot 1, Slot 2... based on total slots.
-    // Skip the current slot (can't be backup for itself).
-    for (int i = 0; i < total_slots; ++i) {
-        if (i == item_index) {
-            continue;
-        }
-        // The same number the badge shows — a list offering "Slot 8" when no
-        // badge reads 8 names nothing the user can point at.
-        const int shown = display_number ? display_number(i) : i + 1;
-        options += "\n" + fmt::format(lv_tr("Slot {}"), shown);
+    // One option per candidate, in the backend's own word ("Lane 1", "Gate 1"),
+    // carrying the number the candidate's badge shows: an option naming a
+    // number no badge reads points at nothing. lane_label() takes the 0-based
+    // position, hence the step back from the 1-based badge number.
+    for (int i : candidates) {
+        options += "\n" + helix::ui::lane_label(noun, display_number ? display_number(i) - 1 : i);
         if (item_index >= 0 && eligible) {
             switch (eligible(item_index, i)) {
             case helix::printer::BackupEligibility::Incompatible:
@@ -1063,11 +1243,174 @@ int AmsContextMenu::get_current_backup_for_slot() const {
     }
 
     // One shared projection for the group relation — see
-    // helix::printer::endless_spool_backup_for(). A backend with no per-slot
-    // relation at all (CFS) yields -1 here, which is why configure_dropdowns()
-    // hides the row rather than rendering a permanent "None".
+    // helix::printer::endless_spool_backup_for(). decide_show_backup_row() makes
+    // the same call, so a read-only row is only ever shown where this is >= 0.
     return helix::printer::endless_spool_backup_for(backend_->get_endless_spool_config(),
                                                     get_item_index());
+}
+
+void open_slot_editor(lv_obj_t* parent_screen, IMoonrakerAPI* api, int slot_index,
+                      bool open_on_picker) {
+    if (!parent_screen) {
+        spdlog::warn("[AMS] Cannot show slot editor - no parent screen");
+        return;
+    }
+
+    AmsBackend* backend = AmsState::instance().get_backend();
+    if (!backend) {
+        NOTIFY_WARNING(lv_tr("Multi-Filament System not available"));
+        return;
+    }
+
+    get_ams_edit_overlay().show_for_slot(
+        parent_screen, slot_index, backend->get_slot_info(slot_index), api,
+        [](const AmsEditOverlay::EditResult& result) {
+            if (!result.saved || result.slot_index < 0) {
+                return;
+            }
+            AmsBackend* backend = AmsState::instance().get_backend();
+            if (!backend) {
+                return;
+            }
+            // Capture the pre-edit slot BEFORE the commit: its unlink arm (clear the
+            // server active spool) needs the old link.
+            SlotInfo original = backend->get_slot_info(result.slot_index);
+            AmsError err = AmsState::instance().commit_slot_edit(result.slot_index, original,
+                                                                 result.slot_info);
+            if (!err.success()) {
+                notify_ams_error(err);
+                return;
+            }
+            NOTIFY_INFO(lv_tr("{} updated"), backend_lane_label(*backend, result.slot_index));
+        },
+        open_on_picker);
+}
+
+namespace {
+
+void scan_qr_into_slot(const SlotMenuHost& host, int slot) {
+    spdlog::info("{} SCAN_QR action for slot {}", host.log_tag, slot);
+#if !defined(                                                                                      \
+    HELIX_PLATFORM_ESP32) // the ESP32 build has no QR scanner overlay; its button stays hidden
+    const std::string tag = host.log_tag;
+    get_qr_scanner_overlay().show(host.parent_screen, slot, [slot, tag](const SpoolInfo& spool) {
+        AmsBackend* be = AmsState::instance().get_backend();
+        if (!be) {
+            return;
+        }
+        // Capture the pre-edit slot BEFORE the commit: its unlink arm (clear the
+        // server active spool) needs the old link.
+        SlotInfo original = be->get_slot_info(slot);
+        SlotInfo applied = original;
+        apply_spool_to_slot(applied, spool);
+        AmsError err = AmsState::instance().commit_slot_edit(slot, original, applied);
+        if (!err.success()) {
+            notify_ams_error(err);
+            return;
+        }
+        spdlog::info("{} QR scan assigned spool #{} to slot {}", tag, spool.id, slot);
+    });
+#endif
+}
+
+void dispatch_slot_menu_action(const SlotMenuHost& host, AmsContextMenu::MenuAction action,
+                               int slot) {
+    using MenuAction = AmsContextMenu::MenuAction;
+
+    // EJECT / RECOVER_POSITION / SELECT_GATE / CHECK_GATE / CLEAR_SPOOL are pure backend
+    // calls; see ams_dispatch_backend_action().
+    if (ams_dispatch_backend_action(action, slot,
+                                    host.path_canvas ? host.path_canvas() : nullptr)) {
+        return;
+    }
+
+    AmsBackend* backend = AmsState::instance().get_backend();
+    AmsOperationSidebar* sidebar = host.sidebar ? host.sidebar() : nullptr;
+
+    switch (action) {
+    case MenuAction::LOAD:
+        if (!backend) {
+            NOTIFY_WARNING(lv_tr("Multi-Filament System not available"));
+            return;
+        }
+        if (const AmsSystemInfo info = backend->get_system_info();
+            info.action != AmsAction::IDLE && info.action != AmsAction::ERROR) {
+            NOTIFY_WARNING(lv_tr("Multi-Filament System is busy: {}"),
+                           ams_action_to_string(info.action));
+            return;
+        }
+        // Preheat-aware load goes through the sidebar rather than a direct load.
+        if (sidebar) {
+            sidebar->handle_load_with_preheat(slot);
+        }
+        break;
+
+    case MenuAction::UNLOAD:
+        if (!backend) {
+            NOTIFY_WARNING(lv_tr("Multi-Filament System not available"));
+            return;
+        }
+        // Through the sidebar so start_operation(UNLOAD) builds the correct stepper
+        // (mirrors how LOAD routes via handle_load_with_preheat).
+        if (sidebar) {
+            sidebar->handle_unload(slot);
+        } else if (AmsError error = backend->unload_filament(slot);
+                   error.result != AmsResult::SUCCESS) {
+            notify_ams_error(error);
+        }
+        break;
+
+    case MenuAction::EDIT:
+        open_slot_editor(host.parent_screen, host.api, slot);
+        break;
+
+    case MenuAction::SPOOLMAN:
+        open_slot_editor(host.parent_screen, host.api, slot, /*open_on_picker=*/true);
+        break;
+
+    case MenuAction::SCAN_QR:
+        scan_qr_into_slot(host, slot);
+        break;
+
+    case MenuAction::OPEN_SOURCE_UNIT:
+        // The host decides what "open that unit" means: only it knows whether
+        // it can show another unit's view in place or has to navigate to one.
+        if (const auto owner = backend ? backend->slot_identity_owner_unit(slot) : std::nullopt;
+            owner && host.open_source_unit) {
+            host.open_source_unit(*owner);
+        }
+        break;
+
+    default:
+        break;
+    }
+}
+
+} // namespace
+
+void open_slot_context_menu(AmsContextMenu& menu, const SlotMenuHost& host, int slot_index,
+                            lv_obj_t* near_widget, lv_point_t click_pt) {
+    if (!host.parent_screen || !near_widget) {
+        return;
+    }
+    AmsBackend* backend = AmsState::instance().get_backend();
+    // A bay of a box that is not on the bus offers nothing to act on.
+    if (backend && backend->get_system_info().slot_absent(slot_index)) {
+        spdlog::debug("{} Slot {} belongs to an absent unit - no menu", host.log_tag, slot_index);
+        return;
+    }
+
+    menu.set_action_callback([host](AmsContextMenu::MenuAction action, int slot) {
+        dispatch_slot_menu_action(host, action, slot);
+    });
+
+    // Whether to offer Unload is decoupled from the display LOADED status, so a runout
+    // that clears the head sensor does not disable Unload on the firmware's active slot
+    // (#995).
+    const bool is_loaded = backend && backend->can_unload_from_toolhead(slot_index);
+
+    menu.set_click_point(click_pt);
+    menu.show_near_widget(host.parent_screen, slot_index, near_widget, is_loaded, backend);
 }
 
 } // namespace helix::ui

@@ -3,15 +3,17 @@
 //
 // Layered canvas machinery for the filament_path_canvas widget.
 //
-// The widget hosts two lv_canvas children (static topology + state overlay)
-// backed by cached ARGB8888 draw_bufs. LVGL composites them natively; the
-// per-frame animation pass paints separately in DRAW_POST so animation ticks
-// never repaint the heavyweight tube geometry. Setters mark static_dirty /
-// overlay_dirty via layered_mark_dirty(), which schedules layered_refresh() to
-// (re)allocate buffers on resize and repaint whichever surfaces are dirty.
+// The widget hosts one lv_canvas child backed by a cached ARGB8888 draw_buf
+// holding the full topology render. LVGL composites it natively; the per-frame
+// animation pass paints separately in DRAW_POST so animation ticks never
+// repaint the heavyweight tube geometry. Setters call layered_mark_dirty(),
+// which schedules layered_refresh() to (re)allocate the buffer on resize and
+// repaint it.
 // See ui_filament_path_internal.h for the full architecture.
 
 #include "ui_filament_path_internal.h"
+
+#include "lv_draw_buf_guard.h"
 
 #include <spdlog/spdlog.h>
 
@@ -20,8 +22,8 @@ namespace helix::ui::fpath {
 namespace {
 
 // The topology renderers paint entry-lane segments above the widget's top edge
-// (entry_y = y_off + height × -0.12, gestures up at the spool grid). Canvas
-// children are extended above the widget by this much so absolute-coord
+// (entry_y = y_off + height × -0.12, gestures up at the spool grid). The canvas
+// child is extended above the widget by this much so absolute-coord
 // draws land in the buffer instead of being clipped.
 constexpr float CANVAS_TOP_OVERHANG_RATIO = 0.15f;
 
@@ -29,64 +31,82 @@ int32_t layered_overhang(int32_t widget_h) {
     return LV_MAX(50, static_cast<int32_t>(widget_h * CANVAS_TOP_OVERHANG_RATIO));
 }
 
-void layered_destroy_buffers(FilamentPathData* data) {
-    if (data->layers.static_buf) {
-        lv_draw_buf_destroy(data->layers.static_buf);
-        data->layers.static_buf = nullptr;
+// A 1x1 transparent buffer the canvas points at while it owns no real one, so
+// freeing the old buffer never leaves the canvas reading freed memory.
+lv_draw_buf_t* empty_canvas_buf() {
+    alignas(64) static uint8_t px[128] = {};
+    static lv_draw_buf_t buf;
+    if (buf.data == nullptr) {
+        lv_draw_buf_init(&buf, 1, 1, LV_COLOR_FORMAT_ARGB8888, 0, px, sizeof(px));
     }
-    if (data->layers.overlay_buf) {
-        lv_draw_buf_destroy(data->layers.overlay_buf);
-        data->layers.overlay_buf = nullptr;
-    }
+    return &buf;
 }
 
-// (Re)allocate canvas buffers to match widget dims. Returns true on success.
-// Buffers swapped in BEFORE destroying old ones — `lv_canvas_set_draw_buf`
-// reads the old header to drop the cached image source.
-bool layered_ensure_buffers(FilamentPathData* data, int32_t w, int32_t h) {
+void layered_destroy_buffers(FilamentPathData* data) {
+    helix::safe_draw_buf_destroy(data->layers.overlay_buf, "fp_ovl");
+}
+
+constexpr int ALLOC_RETRIES = 5;
+
+// Size the canvas buffer to w x h. Returns true when the canvas has a buffer of
+// exactly that size.
+//
+// Reuses the current allocation when the new shape fits in it, so the resizes a
+// panel goes through while its layout settles cost no allocation. Otherwise the
+// old buffer is freed BEFORE the new one is allocated, so the peak is one buffer,
+// not two. This all runs on the main thread outside the render pass, so no render
+// can read the old buffer between the swap to the placeholder and its free.
+bool layered_ensure_buffers(lv_obj_t* obj, FilamentPathData* data, int32_t w, int32_t h) {
     if (w <= 0 || h <= 0)
         return false;
-    if (data->layers.canvas_w == w && data->layers.canvas_h == h && data->layers.static_buf &&
-        data->layers.overlay_buf) {
+    LayerState& ls = data->layers;
+    if (ls.canvas_w == w && ls.canvas_h == h && ls.overlay_buf) {
         return true;
     }
 
-    auto* new_static = lv_draw_buf_create(w, h, LV_COLOR_FORMAT_ARGB8888, 0);
-    auto* new_overlay = lv_draw_buf_create(w, h, LV_COLOR_FORMAT_ARGB8888, 0);
-    if (!new_static || !new_overlay) {
-        if (new_static)
-            lv_draw_buf_destroy(new_static);
-        if (new_overlay)
-            lv_draw_buf_destroy(new_overlay);
-        return false;
+    if (ls.overlay_buf && lv_draw_buf_reshape(ls.overlay_buf, LV_COLOR_FORMAT_ARGB8888, w, h, 0)) {
+        if (ls.overlay_canvas)
+            lv_canvas_set_draw_buf(ls.overlay_canvas, ls.overlay_buf);
+    } else {
+        if (ls.overlay_canvas)
+            lv_canvas_set_draw_buf(ls.overlay_canvas, empty_canvas_buf());
+        layered_destroy_buffers(data);
+        ls.canvas_w = 0;
+        ls.canvas_h = 0;
+
+        ls.overlay_buf = lv_draw_buf_create(w, h, LV_COLOR_FORMAT_ARGB8888, 0);
+        if (!ls.overlay_buf) {
+            // The canvas stays on the empty placeholder: drawing nothing beats
+            // drawing a topology scaled for some other size. After the timed
+            // retries, only a state change or resize asks again (one attempt per
+            // coalesced refresh), and only the first failure of each run warns.
+            const int kb = w * h * 4 / 1024;
+            if (ls.alloc_retries_left > 0) {
+                if (ls.alloc_retries_left == ALLOC_RETRIES)
+                    spdlog::warn("[FilamentPath] No memory for a {}x{} path canvas ({} KB); "
+                                 "retrying",
+                                 w, h, kb);
+                --ls.alloc_retries_left;
+                ls.alloc_retry_timer.schedule_once([obj]() { layered_mark_dirty(obj); });
+            } else if (ls.alloc_retries_left == 0) {
+                spdlog::warn("[FilamentPath] No memory for a {}x{} path canvas ({} KB); giving up "
+                             "until the next state change",
+                             w, h, kb);
+                ls.alloc_retries_left = -1;
+            } else {
+                spdlog::debug("[FilamentPath] No memory for a {}x{} path canvas ({} KB)", w, h, kb);
+            }
+            return false;
+        }
+        if (ls.overlay_canvas)
+            lv_canvas_set_draw_buf(ls.overlay_canvas, ls.overlay_buf);
     }
 
-    auto* old_static = data->layers.static_buf;
-    auto* old_overlay = data->layers.overlay_buf;
-    data->layers.static_buf = new_static;
-    data->layers.overlay_buf = new_overlay;
-    if (data->layers.static_canvas)
-        lv_canvas_set_draw_buf(data->layers.static_canvas, new_static);
-    if (data->layers.overlay_canvas)
-        lv_canvas_set_draw_buf(data->layers.overlay_canvas, new_overlay);
-    if (old_static)
-        lv_draw_buf_destroy(old_static);
-    if (old_overlay)
-        lv_draw_buf_destroy(old_overlay);
-
-    data->layers.canvas_w = w;
-    data->layers.canvas_h = h;
-    data->layers.static_dirty = true;
-    data->layers.overlay_dirty = true;
+    ls.alloc_retries_left = ALLOC_RETRIES;
+    ls.canvas_w = w;
+    ls.canvas_h = h;
+    ls.overlay_dirty = true;
     return true;
-}
-
-// Static layer renderer — idle topology only. Currently clears transparent;
-// per-topology static painting can move here once split out of the overlay.
-void layered_render_static(lv_obj_t* /*obj*/, FilamentPathData* data) {
-    if (!data->layers.static_canvas)
-        return;
-    lv_canvas_fill_bg(data->layers.static_canvas, lv_color_black(), LV_OPA_TRANSP);
 }
 
 // Build buf_area covering the widget bounds + top overhang. The canvas
@@ -104,6 +124,8 @@ lv_area_t layered_compute_buf_area(lv_obj_t* obj, int32_t overhang) {
 void layered_render_overlay(lv_obj_t* obj, FilamentPathData* data) {
     if (!data->layers.overlay_canvas)
         return;
+    ++data->layers.render_count;
+    refresh_theme_colors(data);
     lv_canvas_fill_bg(data->layers.overlay_canvas, lv_color_black(), LV_OPA_TRANSP);
 
     int32_t overhang = layered_overhang(lv_obj_get_height(obj));
@@ -128,8 +150,17 @@ void layered_render_overlay(lv_obj_t* obj, FilamentPathData* data) {
 // layered_mark_dirty() below for how a burst of setters collapses onto it.
 void layered_refresh(lv_obj_t* obj) {
     auto* data = get_data(obj);
-    if (!data || !data->layers.static_canvas)
+    if (!data || !data->layers.overlay_canvas)
         return;
+
+    // A widget nobody can see is painted when it is first drawn, at whatever
+    // size it has settled to by then, not at every size it passes through
+    // while hidden.
+    if (!lv_obj_is_visible(obj)) {
+        data->layers.refresh_deferred = true;
+        return;
+    }
+    data->layers.refresh_deferred = false;
 
     int32_t w = lv_obj_get_width(obj);
     int32_t h = lv_obj_get_height(obj);
@@ -140,23 +171,16 @@ void layered_refresh(lv_obj_t* obj) {
     int32_t total_h = h + overhang;
 
     if (w != data->layers.canvas_w || total_h != data->layers.canvas_h) {
-        if (!layered_ensure_buffers(data, w, total_h))
+        if (!layered_ensure_buffers(obj, data, w, total_h))
             return;
-        lv_obj_set_size(data->layers.static_canvas, w, total_h);
         lv_obj_set_size(data->layers.overlay_canvas, w, total_h);
-        lv_obj_set_pos(data->layers.static_canvas, 0, -overhang);
         lv_obj_set_pos(data->layers.overlay_canvas, 0, -overhang);
         // Force layout recompute so canvas's content_coords reflect the new
         // size immediately (otherwise the canvas's own coords stay stale
         // until LVGL's next layout pass — would clip subsequent draws).
-        lv_obj_update_layout(data->layers.static_canvas);
         lv_obj_update_layout(data->layers.overlay_canvas);
     }
 
-    if (data->layers.static_dirty) {
-        layered_render_static(obj, data);
-        data->layers.static_dirty = false;
-    }
     if (data->layers.overlay_dirty) {
         layered_render_overlay(obj, data);
         data->layers.overlay_dirty = false;
@@ -165,10 +189,10 @@ void layered_refresh(lv_obj_t* obj) {
 
 } // namespace
 
-// Mark which layered surfaces need a repaint and schedule an async refresh.
+// Mark the canvas for a repaint and schedule an async refresh.
 // Use this from setters instead of bare `lv_obj_invalidate(obj)` so the
-// dirty flags get set before refresh runs AND the canvas refresh actually
-// gets scheduled. When layered is off (no canvases), this just performs a
+// dirty flag gets set before refresh runs AND the canvas refresh actually
+// gets scheduled. When layered is off (no canvas), this just performs a
 // widget invalidate.
 //
 // LV_EVENT_INVALIDATE_AREA is a display-level event (not dispatched to
@@ -181,24 +205,57 @@ void layered_refresh(lv_obj_t* obj) {
 // Animation callbacks call lv_obj_invalidate(obj) directly without going
 // through this helper — their per-frame paint happens via the DRAW_POST
 // animation overlay; no canvas content changed, so no refresh is needed.
-void layered_mark_dirty(lv_obj_t* obj, bool static_dirty, bool overlay_dirty) {
+void layered_mark_dirty(lv_obj_t* obj) {
     auto* data = get_data(obj);
     if (data) {
-        if (static_dirty)
-            data->layers.static_dirty = true;
-        if (overlay_dirty)
-            data->layers.overlay_dirty = true;
+        data->layers.overlay_dirty = true;
         // The active-path cache becomes stale on any state change that could
         // affect lane geometry — flag it for refresh on next state-tied draw.
-        if (overlay_dirty)
-            data->path_cache.valid = false;
-        if (data->layers.static_canvas)
+        data->path_cache.valid = false;
+        if (data->layers.overlay_canvas)
             data->layers.refresh_timer.schedule_once([obj]() { layered_refresh(obj); });
     }
     lv_obj_invalidate(obj);
 }
 
-// Create the two canvas children, configure styles, schedule the first render.
+void layered_schedule_repaint(lv_obj_t* obj, FilamentPathData* data) {
+    data->layers.overlay_dirty = true;
+    if (data->layers.overlay_canvas)
+        data->layers.refresh_timer.schedule_once([obj]() { layered_refresh(obj); });
+}
+
+void layered_release_buffer(FilamentPathData* data) {
+    LayerState& ls = data->layers;
+    ls.refresh_timer.cancel();
+    ls.alloc_retry_timer.cancel();
+    if (ls.overlay_canvas)
+        lv_canvas_set_draw_buf(ls.overlay_canvas, empty_canvas_buf());
+    layered_destroy_buffers(data);
+    ls.canvas_w = 0;
+    ls.canvas_h = 0;
+    ls.overlay_dirty = true;
+    ls.refresh_deferred = true;
+}
+
+void layered_on_draw(lv_obj_t* obj, FilamentPathData* data) {
+    if (data->layers.refresh_deferred)
+        data->layers.refresh_timer.schedule_once([obj]() { layered_refresh(obj); });
+}
+
+// Create the canvas child, configure styles, schedule the first render. The
+// canvas starts on the empty placeholder: its buffer is allocated by the first
+// refresh that sees the widget's laid-out size.
+namespace {
+
+// REFR_EXT_DRAW_SIZE on the widget and on its container: room for the
+// overlay canvas's overhang above the widget (user data = the widget).
+void overhang_ext_draw_cb(lv_event_t* e) {
+    auto* widget = static_cast<lv_obj_t*>(lv_event_get_user_data(e));
+    lv_event_set_ext_draw_size(e, layered_overhang(lv_obj_get_height(widget)));
+}
+
+} // namespace
+
 bool layered_setup_canvases(lv_obj_t* obj, FilamentPathData* data) {
     int32_t w = lv_obj_get_width(obj);
     int32_t h = lv_obj_get_height(obj);
@@ -209,39 +266,30 @@ bool layered_setup_canvases(lv_obj_t* obj, FilamentPathData* data) {
     int32_t overhang = layered_overhang(h);
     int32_t total_h = h + overhang;
 
-    if (!layered_ensure_buffers(data, w, total_h))
-        return false;
-
-    // Canvases extend above the widget — needs OVERFLOW_VISIBLE on parent so
-    // LVGL doesn't clip them to the widget's bounds.
+    // Canvases extend above the widget, into the spool box above it: LVGL
+    // draws a child outside its parent only within the parent's ext draw size,
+    // so the widget and its (overflow-visible) container both report the
+    // overhang.
     lv_obj_add_flag(obj, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+    lv_obj_add_event_cb(obj, overhang_ext_draw_cb, LV_EVENT_REFR_EXT_DRAW_SIZE, obj);
+    if (lv_obj_t* parent = lv_obj_get_parent(obj))
+        lv_obj_add_event_cb(parent, overhang_ext_draw_cb, LV_EVENT_REFR_EXT_DRAW_SIZE, obj);
 
-    data->layers.static_canvas = lv_canvas_create(obj);
-    data->layers.overlay_canvas = lv_canvas_create(obj);
-    if (!data->layers.static_canvas || !data->layers.overlay_canvas) {
-        if (data->layers.static_canvas)
-            lv_obj_delete(data->layers.static_canvas);
-        if (data->layers.overlay_canvas)
-            lv_obj_delete(data->layers.overlay_canvas);
-        data->layers.static_canvas = nullptr;
-        data->layers.overlay_canvas = nullptr;
-        layered_destroy_buffers(data);
+    lv_obj_t* c = lv_canvas_create(obj);
+    if (!c) {
         return false;
     }
+    data->layers.overlay_canvas = c;
+    data->layers.alloc_retries_left = ALLOC_RETRIES;
 
-    for (auto* c : {data->layers.static_canvas, data->layers.overlay_canvas}) {
-        lv_obj_set_size(c, w, total_h);
-        lv_obj_set_pos(c, 0, -overhang);
-        lv_obj_set_style_bg_opa(c, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(c, 0, 0);
-        lv_obj_set_style_pad_all(c, 0, 0);
-        lv_obj_clear_flag(c, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_clear_flag(c, LV_OBJ_FLAG_SCROLLABLE);
-    }
-    lv_canvas_set_draw_buf(data->layers.static_canvas, data->layers.static_buf);
-    lv_canvas_set_draw_buf(data->layers.overlay_canvas, data->layers.overlay_buf);
-    lv_canvas_fill_bg(data->layers.static_canvas, lv_color_black(), LV_OPA_TRANSP);
-    lv_canvas_fill_bg(data->layers.overlay_canvas, lv_color_black(), LV_OPA_TRANSP);
+    lv_obj_set_size(c, w, total_h);
+    lv_obj_set_pos(c, 0, -overhang);
+    lv_obj_set_style_bg_opa(c, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(c, 0, 0);
+    lv_obj_set_style_pad_all(c, 0, 0);
+    lv_obj_clear_flag(c, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(c, LV_OBJ_FLAG_SCROLLABLE);
+    lv_canvas_set_draw_buf(c, empty_canvas_buf());
 
     // Schedule initial render — layout may not be complete yet at create
     // time; the deferred callback retries when layout has settled.
@@ -251,26 +299,30 @@ bool layered_setup_canvases(lv_obj_t* obj, FilamentPathData* data) {
 
 // The initial refresh scheduled at create time runs before layout assigns the
 // widget a real size; layered_refresh() then early-returns on its w<=0 guard
-// and nothing else retries it, leaving the canvases permanently blank. When
-// layout finally gives the widget a non-zero size, re-mark both layers dirty
+// and nothing else retries it, leaving the canvas permanently blank. When
+// layout finally gives the widget a non-zero size, re-mark the canvas dirty
 // and re-schedule the refresh so it paints. layered_refresh() handles the
 // canvas buffer (re)allocation for the new size itself.
 void layered_size_changed_cb(lv_event_t* e) {
     lv_obj_t* obj = lv_event_get_target_obj(e);
     if (lv_obj_get_width(obj) <= 0 || lv_obj_get_height(obj) <= 0)
         return;
-    layered_mark_dirty(obj, true, true);
+    lv_obj_refresh_ext_draw_size(obj);
+    if (lv_obj_t* parent = lv_obj_get_parent(obj))
+        lv_obj_refresh_ext_draw_size(parent);
+    layered_mark_dirty(obj);
 }
 
 // Widget teardown: cancel any pending refresh (it would fire with a stale obj)
-// and free the canvas buffers. The lv_canvas children themselves are deleted by
-// LVGL as the parent tears down. ~LayerState cancels the timer too — this is the
+// and free the canvas buffer. The lv_canvas child itself is deleted by
+// LVGL as the parent tears down. ~LayerState cancels the timers too — this is the
 // explicit half of the pair, so teardown order stays readable at the call site.
 void layered_teardown(lv_obj_t* obj, FilamentPathData* data) {
-    LV_UNUSED(obj);
+    if (lv_obj_t* parent = lv_obj_get_parent(obj))
+        lv_obj_remove_event_cb_with_user_data(parent, overhang_ext_draw_cb, obj);
     data->layers.refresh_timer.cancel();
+    data->layers.alloc_retry_timer.cancel();
     layered_destroy_buffers(data);
-    data->layers.static_canvas = nullptr;
     data->layers.overlay_canvas = nullptr;
 }
 

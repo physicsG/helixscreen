@@ -14,7 +14,7 @@
 // that drives placement order survives, a deliberate hide survives, and the old
 // grid's row cache is carried onto the panel instead of being dropped.
 //
-// The migration is a static function in config.cpp, so it is driven through the
+// The migration is a static function in config_migrations.cpp, so it is driven through the
 // public Config::init() path exactly as the v21 tests do. A sandboxed
 // HELIX_CONFIG_DIR keeps backup-restore search paths inside the temp dir.
 
@@ -139,7 +139,7 @@ TEST_CASE_METHOD(MigrationV24Fixture, "Config migration v24: preserves every coo
     // reads cell counts as track counts.
     auto panel = panel_of();
     CHECK(panel["layout_units"] == "cells_v21");
-    CHECK(config.get<int>("/config_version", 0) == 24);
+    CHECK(config.get<int>("/config_version", 0) == helix::CURRENT_CONFIG_VERSION);
 }
 
 TEST_CASE_METHOD(MigrationV24Fixture,
@@ -316,7 +316,7 @@ TEST_CASE_METHOD(MigrationV24Fixture, "Config migration v24: survives every miss
     // a string; a widgets value that is an object. Each must migrate and stamp
     // rather than throw.
     write_and_init({{"config_version", 23}});
-    CHECK(config.get<int>("/config_version", 0) == 24);
+    CHECK(config.get<int>("/config_version", 0) == helix::CURRENT_CONFIG_VERSION);
 
     TearDown();
     SetUp();
@@ -324,7 +324,7 @@ TEST_CASE_METHOD(MigrationV24Fixture, "Config migration v24: survives every miss
         {{"config_version", 23},
          {"printers",
           {{"default", {{"panel_widgets", {{"home", {{"pages", json::array({"main"})}}}}}}}}}});
-    CHECK(config.get<int>("/config_version", 0) == 24);
+    CHECK(config.get<int>("/config_version", 0) == helix::CURRENT_CONFIG_VERSION);
 
     TearDown();
     SetUp();
@@ -335,10 +335,10 @@ TEST_CASE_METHOD(MigrationV24Fixture, "Config migration v24: survives every miss
                          {{"home",
                            {{"pages", json::array({json{{"id", "main"},
                                                         {"widgets", json::object()}}})}}}}}}}}}});
-    CHECK(config.get<int>("/config_version", 0) == 24);
+    CHECK(config.get<int>("/config_version", 0) == helix::CURRENT_CONFIG_VERSION);
 
     TearDown();
     SetUp();
     write_and_init({{"config_version", 23}, {"printers", "not-an-object"}});
-    CHECK(config.get<int>("/config_version", 0) == 24);
+    CHECK(config.get<int>("/config_version", 0) == helix::CURRENT_CONFIG_VERSION);
 }

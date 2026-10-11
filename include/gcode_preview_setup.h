@@ -19,6 +19,9 @@
 
 #include "lvgl.h"
 
+#include <cstddef>
+#include <cstdint>
+
 namespace helix::ui {
 
 /**
@@ -36,6 +39,18 @@ namespace helix::ui {
 bool apply_preview_render_mode(lv_obj_t* viewer, const char* log_tag);
 
 /**
+ * @brief Is the G-code viewer used at all, per the live ladder?
+ *
+ * Same sources and same precedence as apply_preview_render_mode(), without
+ * touching a widget or logging, so a caller can ask the question before it has
+ * (or needs) a viewer. Thumbnail Only is the one answer of false, and it covers
+ * the whole pipeline: no download, no layer index, no render pass.
+ *
+ * @return true when the viewer will be used, false for Thumbnail Only.
+ */
+bool preview_viewer_enabled();
+
+/**
  * @brief Tell a preview which widget covers the bottom of it.
  *
  * The metadata strip is translucent and sits over the bottom of the preview in
@@ -51,5 +66,15 @@ bool apply_preview_render_mode(lv_obj_t* viewer, const char* log_tag);
  * @param occluder Widget overlapping the viewer's bottom edge, or null.
  */
 void set_preview_bottom_occluder(lv_obj_t* viewer, lv_obj_t* occluder);
+
+/**
+ * @brief May a cached download of a print's G-code be rendered as is?
+ *
+ * The cache is keyed by file name, so a same-name re-slice or a transfer cut
+ * short by a crash leaves bytes that do not belong to the file now on the
+ * server. A copy is usable only when it is non-empty and, when the server size
+ * is known (@p expected_bytes > 0), exactly that size.
+ */
+bool preview_cache_is_current(size_t on_disk_bytes, uint64_t expected_bytes);
 
 } // namespace helix::ui

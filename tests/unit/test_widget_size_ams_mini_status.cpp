@@ -35,7 +35,7 @@ namespace {
 void fill_slots(lv_obj_t* w, int count) {
     ui_ams_mini_status_set_slot_count(w, count);
     for (int i = 0; i < count; ++i) {
-        ui_ams_mini_status_set_slot_full(w, i, 0xFF0000 + i, 50 + i, true, "PLA", 50 + i);
+        ui_ams_mini_status_set_slot_label(w, i, "PLA", 50 + i);
     }
 }
 
@@ -44,7 +44,7 @@ void fill_slots(lv_obj_t* w, int count) {
 void fill_slots_material(lv_obj_t* w, int count, const char* material) {
     ui_ams_mini_status_set_slot_count(w, count);
     for (int i = 0; i < count; ++i) {
-        ui_ams_mini_status_set_slot_full(w, i, 0xFF0000 + i, 50 + i, true, material, 50 + i);
+        ui_ams_mini_status_set_slot_label(w, i, material, 50 + i);
     }
 }
 
@@ -62,7 +62,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini bar mode: width bands pick bar wid
     lv_obj_update_layout(w);
     fill_slots(w, 8);
 
-    // Tight band: width_px < 100 -> 8px bars, at most 6 of the 8 slots shown.
+    // width_px < 100: bar cap is width_px / 8 (11px), at most 6 of the 8 slots shown.
     ui_ams_mini_status_set_width(w, 90);
     helix::ui::UpdateQueue::instance().drain();
     lv_obj_update_layout(w);
@@ -70,7 +70,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini bar mode: width bands pick bar wid
     lv_obj_t* bars = UITest::find_by_name(w, "ams_bars_container");
     REQUIRE(bars != nullptr);
     REQUIRE_FALSE(lv_obj_has_flag(bars, LV_OBJ_FLAG_HIDDEN));
-    REQUIRE(lv_obj_get_width(lv_obj_get_child(bars, 0)) == 8);
+    REQUIRE(lv_obj_get_width(lv_obj_get_child(bars, 0)) == 11);
 
     // 8 slots, max 6 visible -> "+2" overflow badge, visible and non-empty.
     // overflow_label isn't named, so find it by type among the container's children.
@@ -86,14 +86,12 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini bar mode: width bands pick bar wid
     REQUIRE_FALSE(lv_obj_has_flag(label, LV_OBJ_FLAG_HIDDEN));
     REQUIRE(std::string(lv_label_get_text(label)) == "+2");
 
-    // Medium band: 100 <= width_px < w_normal() -> 10px bars, all 8 slots shown
-    // (the old <150 branch's min(max_visible, 8) was a no-op; removing it
-    // must not change this — max_visible was already clamped to 8).
+    // 100 <= width_px < w_normal(): 13px bar cap, all 8 slots shown.
     ui_ams_mini_status_set_width(w, 110);
     helix::ui::UpdateQueue::instance().drain();
     lv_obj_update_layout(w);
 
-    REQUIRE(lv_obj_get_width(lv_obj_get_child(bars, 0)) == 10);
+    REQUIRE(lv_obj_get_width(lv_obj_get_child(bars, 0)) == 13);
     REQUIRE(lv_obj_has_flag(label, LV_OBJ_FLAG_HIDDEN)); // no overflow: all 8 fit
 
     lv_obj_delete(w);
@@ -348,31 +346,36 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini: every shipping panel gets the bar
     }
 }
 
-// The bar-width bands are absolute pixels (8 below 100, 10 below 150, else 16)
-// while the widget's box scales with the tier, so the SAME widget is drawn at a
-// different fraction of its box on each panel. This pins that ratio per panel
-// rather than the constant, because the constant is not the thing that reads
-// wrong on a screen.
+// The bar-width cap is a fixed fraction of the widget's box, so four lanes fill
+// the same share of their tile on every panel. Pinned per shipping panel because
+// a step back to absolute pixel bands reads wrong on some screens and fine on
+// others.
 TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini: bar width band per shipping panel",
                  "[ui][ams_mini][widget_size][1126]") {
     ui_ams_mini_status_init();
 
     struct Expect {
         const char* name;
+        UiBreakpoint bp;
         int width_px;
         int bar_w;
     };
-    // Derived from effective_max_bar_width()'s bands against the measured
-    // widths above; the bar can come out NARROWER if the box cannot fit four
-    // of them, which is why this asserts <= rather than ==.
+    // width_px / 8 against the measured widths above. Four lanes always fit
+    // under that cap, so the cap is exactly what renders. Each case runs at its
+    // own tier: the widest width is spool mode at the test binary's default.
     const std::vector<Expect> cases = {
-        {"micro 480x272", 70, 8},     {"micro portrait 272x480", 64, 8},
-        {"small 480x400", 79, 8},     {"ultrawide 1920x440", 75, 8},
-        {"medium 800x480", 114, 10},  {"large 1024x600", 107, 10},
-        {"xlarge 1280x720", 134, 10}, {"xxlarge 1920x1080", 182, 16},
+        {"micro 480x272", UiBreakpoint::Micro, 70, 8},
+        {"micro portrait 272x480", UiBreakpoint::Micro, 64, 8},
+        {"small 480x400", UiBreakpoint::Small, 79, 9},
+        {"ultrawide 1920x440", UiBreakpoint::Small, 75, 9},
+        {"medium 800x480", UiBreakpoint::Medium, 114, 14},
+        {"large 1024x600", UiBreakpoint::Large, 107, 13},
+        {"xlarge 1280x720", UiBreakpoint::XLarge, 134, 16},
+        {"xxlarge 1920x1080", UiBreakpoint::XXLarge, 182, 22},
     };
 
     for (const auto& c : cases) {
+        BreakpointGuard bp_guard(c.bp);
         lv_obj_t* parent = lv_obj_create(test_screen());
         lv_obj_remove_flag(parent, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_style_pad_all(parent, 0, LV_PART_MAIN);
@@ -389,11 +392,11 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini: bar width band per shipping panel
 
         lv_obj_t* bars = UITest::find_by_name(w, "ams_bars_container");
         REQUIRE(bars != nullptr);
+        REQUIRE_FALSE(lv_obj_has_flag(bars, LV_OBJ_FLAG_HIDDEN));
         REQUIRE(lv_obj_get_child_count(bars) >= 1);
 
-        INFO(c.name << " width " << c.width_px << "px expects <= " << c.bar_w << "px bars");
-        CHECK(lv_obj_get_width(lv_obj_get_child(bars, 0)) <= c.bar_w);
-        CHECK(lv_obj_get_width(lv_obj_get_child(bars, 0)) >= 3); // MIN_BAR_WIDTH_PX
+        INFO(c.name << " width " << c.width_px << "px expects " << c.bar_w << "px bars");
+        CHECK(lv_obj_get_width(lv_obj_get_child(bars, 0)) == c.bar_w);
 
         lv_obj_delete(w);
         lv_obj_delete(parent);
@@ -409,7 +412,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini: bar width band per shipping panel
  *
  * Where the name goes depends on how hard the row had to squeeze to seat every
  * lane, so each outcome is pinned here: a column beside the spool holds its
- * label on one line, a cell too narrow for one stacks the name underneath at
+ * label on one line, a cell too narrow for one stacks the name over the spool at
  * full cell width, and a row too short for even that drops the name rather than
  * hiding lanes behind a scrollbar.
  */
@@ -418,9 +421,9 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini spool mode: material label fits it
     lv_display_t* disp = lv_display_get_default();
     REQUIRE(disp != nullptr);
 
-    // Narrow axis 1080 -> XXLarge, where font_small is noto_sans_light_26.
-    // The refresh is what actually moves the font tokens and the breakpoint
-    // subject; ScopedResolution alone only changes the pixel dimensions.
+    // Narrow axis 1080 -> XXLarge, where font_small is noto_sans_light_26. The
+    // refresh moves the font tokens and the breakpoint subject to match; the
+    // guard's destructor puts both back.
     ScopedResolution xxlarge(disp, 1080, 1920);
     theme_manager_refresh_layout_constants(disp);
     ui_ams_mini_status_init();
@@ -477,7 +480,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini spool mode: material label fits it
         lv_obj_delete(r.parent);
     }
 
-    SECTION("a squeezed row stacks the name under the spool") {
+    SECTION("a squeezed row stacks the name over the spool") {
         // Eight lanes in 480px at 26px type: no column fits BESIDE a spool, so
         // the cell turns vertical and the name takes the full cell width.
         Row r = row_of(120, 8);
@@ -490,7 +493,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini spool mode: material label fits it
             lv_obj_t* mat =
                 UITest::find_by_name(r.w, ("spool_material_" + std::to_string(i)).c_str());
             REQUIRE(mat != nullptr);
-            // Under the spool, not beside it: as wide as the cell, which a
+            // Over the spool, not beside it: as wide as the cell, which a
             // side-by-side column never is.
             CHECK(lv_obj_get_width(mat) == lv_obj_get_width(cell));
             // A column-flow cell spaces its children by pad_row, and the height
@@ -505,14 +508,11 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini spool mode: material label fits it
         lv_obj_delete(r.w);
         lv_obj_delete(r.parent);
     }
-
-    // Put the token table back where the rest of the suite expects it.
-    theme_manager_refresh_layout_constants(disp);
 }
 
 /**
- * Under the spool is the last place a name can go. A row with no height for a
- * line of text beneath a spool has nowhere left to put one, so it spends the
+ * Over the spool is the last place a name can go. A row with no height for a
+ * line of text over a spool has nowhere left to put one, so it spends the
  * width on the spools and every lane still gets a cell rather than some lanes
  * getting a name and the rest getting a scrollbar.
  */
@@ -544,7 +544,11 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini spool mode: a row too short to sta
     for (int i = 0; i < 8; ++i) {
         INFO("lane " << i);
         REQUIRE(UITest::find_by_name(w, ("spool_cell_" + std::to_string(i)).c_str()) != nullptr);
-        CHECK(UITest::find_by_name(w, ("spool_material_" + std::to_string(i)).c_str()) == nullptr);
+        // Cells are pooled, so a row with no width for text hides the column
+        // rather than never creating it.
+        lv_obj_t* col = UITest::find_by_name(w, ("spool_text_" + std::to_string(i)).c_str());
+        REQUIRE(col != nullptr);
+        CHECK(lv_obj_has_flag(col, LV_OBJ_FLAG_HIDDEN));
     }
     CHECK(lv_obj_get_scroll_right(sc) <= 0);
 
@@ -679,5 +683,173 @@ TEST_CASE_METHOD(LVGLUITestFixture,
 
     lv_obj_delete(w);
     lv_obj_delete(parent);
+}
+
+/**
+ * Where the name sits is decided by which placement leaves the larger spool,
+ * with ties going above. A one-cell tile at 800x480 is 113px tall: tall enough
+ * that the spool tops out either way, so every width stacks the name over the
+ * spool and shares the row out to all six lanes. A 54px row stacking would
+ * shrink the spool to fit the text, so a row wide enough for the name in full
+ * keeps it beside a full-height spool instead.
+ */
+TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini spool mode: the name goes where the spool is largest",
+                 "[ui][ams_mini][widget_size]") {
+    lv_display_t* disp = lv_display_get_default();
+    REQUIRE(disp != nullptr);
+    ScopedResolution medium(disp, 800, 480);
+    theme_manager_refresh_layout_constants(disp);
+    ui_ams_mini_status_init();
+
+    struct Case {
+        int w, h;
+        bool above;
+    };
+    for (const Case c :
+         {Case{228, 113, true}, Case{342, 113, true}, Case{470, 113, true}, Case{470, 54, false}}) {
+        lv_obj_t* parent = lv_obj_create(test_screen());
+        lv_obj_remove_flag(parent, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_pad_all(parent, 0, LV_PART_MAIN);
+        lv_obj_set_style_border_width(parent, 0, LV_PART_MAIN);
+        lv_obj_set_size(parent, c.w, c.h);
+
+        lv_obj_t* w = ui_ams_mini_status_create(parent, c.h);
+        helix::ui::UpdateQueue::instance().drain();
+        lv_obj_update_layout(parent);
+        fill_slots(w, 6);
+        ui_ams_mini_status_set_width(w, c.w);
+        helix::ui::UpdateQueue::instance().drain();
+        lv_obj_update_layout(parent);
+
+        lv_obj_t* sc = UITest::find_by_name(w, "ams_spools_container");
+        REQUIRE(sc != nullptr);
+        lv_obj_t* cell = UITest::find_by_name(w, "spool_cell_0");
+        // A cell is [spool wrap][text column]; the wrap is the spool and its badge.
+        lv_obj_t* spool = cell ? lv_obj_get_child(cell, 0) : nullptr;
+        lv_obj_t* mat = UITest::find_by_name(w, "spool_material_0");
+        REQUIRE(spool != nullptr);
+        REQUIRE(mat != nullptr);
+        lv_area_t sa, ma;
+        lv_obj_get_coords(spool, &sa);
+        lv_obj_get_coords(mat, &ma);
+        INFO(c.w << "x" << c.h << ": spool " << sa.x1 << "," << sa.y1 << " name " << ma.x1 << ","
+                 << ma.y1 << " scroll_right " << lv_obj_get_scroll_right(sc));
+
+        if (c.above) {
+            CHECK(ma.y2 <= sa.y1);
+        } else {
+            CHECK(ma.x1 >= sa.x2);
+        }
+        for (int i = 0; i < 6; ++i)
+            CHECK(UITest::find_by_name(w, ("spool_cell_" + std::to_string(i)).c_str()) != nullptr);
+        CHECK(lv_obj_get_scroll_right(sc) <= 0);
+
+        lv_obj_delete(w);
+        lv_obj_delete(parent);
+    }
+    theme_manager_refresh_layout_constants(disp);
+}
+
+/**
+ * The container's SIZE_CHANGED fires before its children are laid out, so the
+ * spool row is still at its old width when the container announces the new
+ * one. Cells sized there fit the old row: a row that narrowed scrolls by the
+ * difference, and one that lost height to the widget label keeps a percent it
+ * no longer has room for. The row's own size change is what resizes the cells.
+ */
+TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini spool mode: cells follow a row that resizes",
+                 "[ui][ams_mini][widget_size]") {
+    lv_display_t* disp = lv_display_get_default();
+    REQUIRE(disp != nullptr);
+    ScopedResolution medium(disp, 800, 480);
+    theme_manager_refresh_layout_constants(disp);
+    ui_ams_mini_status_init();
+
+    lv_obj_t* parent = lv_obj_create(test_screen());
+    lv_obj_remove_flag(parent, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_all(parent, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_width(parent, 0, LV_PART_MAIN);
+    lv_obj_set_size(parent, 336, 113);
+
+    lv_obj_t* w = ui_ams_mini_status_create(parent, 113);
+    // Hosted the way the home tile hosts it, with the row's height given by the
+    // tile rather than by its contents.
+    lv_obj_set_height(w, lv_pct(100));
+    helix::ui::UpdateQueue::instance().drain();
+    lv_obj_update_layout(parent);
+    fill_slots(w, 6);
+    ui_ams_mini_status_set_width(w, 336);
+    helix::ui::UpdateQueue::instance().drain();
+    lv_obj_update_layout(parent);
+
+    lv_obj_t* sc = UITest::find_by_name(w, "ams_spools_container");
+    REQUIRE(sc != nullptr);
+    REQUIRE(lv_obj_get_scroll_right(sc) <= 0);
+
+    lv_obj_set_width(parent, 328);
+    lv_obj_update_layout(parent);
+    INFO("row " << lv_obj_get_content_width(sc) << "px, cell "
+                << lv_obj_get_width(UITest::find_by_name(w, "spool_cell_0")) << "px, scroll_right "
+                << lv_obj_get_scroll_right(sc));
+    CHECK(lv_obj_get_scroll_right(sc) <= 0);
+
+    lv_obj_t* pct = UITest::find_by_name(w, "spool_pct_0");
+    REQUIRE(pct != nullptr);
+    REQUIRE_FALSE(lv_obj_has_flag(pct, LV_OBJ_FLAG_HIDDEN));
+    lv_obj_set_height(parent, 81);
+    lv_obj_update_layout(parent);
+    CHECK(lv_obj_has_flag(pct, LV_OBJ_FLAG_HIDDEN));
+
+    lv_obj_delete(w);
+    lv_obj_delete(parent);
+    theme_manager_refresh_layout_constants(disp);
+}
+
+/**
+ * The spool already draws how full it is, so the percent line under a stacked
+ * name is the first thing given up when keeping it would shrink the spool. A
+ * one-cell tile at 800x480 whose spools are width-bound keeps it; the same row
+ * with the widget label under it has height for the name or the percent, not
+ * both, and drops the percent.
+ */
+TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini spool mode: the percent never costs spool size",
+                 "[ui][ams_mini][widget_size]") {
+    lv_display_t* disp = lv_display_get_default();
+    REQUIRE(disp != nullptr);
+    ScopedResolution medium(disp, 800, 480);
+    theme_manager_refresh_layout_constants(disp);
+    ui_ams_mini_status_init();
+
+    for (const auto& [h, keeps_pct] : {std::pair{113, true}, std::pair{81, false}}) {
+        lv_obj_t* parent = lv_obj_create(test_screen());
+        lv_obj_remove_flag(parent, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_pad_all(parent, 0, LV_PART_MAIN);
+        lv_obj_set_style_border_width(parent, 0, LV_PART_MAIN);
+        lv_obj_set_size(parent, 328, h);
+
+        lv_obj_t* w = ui_ams_mini_status_create(parent, h);
+        helix::ui::UpdateQueue::instance().drain();
+        lv_obj_update_layout(parent);
+        fill_slots(w, 6);
+        ui_ams_mini_status_set_width(w, 328);
+        helix::ui::UpdateQueue::instance().drain();
+        lv_obj_update_layout(parent);
+
+        lv_obj_t* pct = UITest::find_by_name(w, "spool_pct_0");
+        lv_obj_t* mat = UITest::find_by_name(w, "spool_material_0");
+        REQUIRE(pct != nullptr);
+        REQUIRE(mat != nullptr);
+        lv_obj_t* wrap = lv_obj_get_child(UITest::find_by_name(w, "spool_cell_0"), 0);
+        lv_area_t ma, sa;
+        lv_obj_get_coords(mat, &ma);
+        lv_obj_get_coords(wrap, &sa);
+        INFO(h << "px row: spool wrap " << lv_obj_get_height(wrap) << "px, percent "
+               << (lv_obj_has_flag(pct, LV_OBJ_FLAG_HIDDEN) ? "hidden" : "shown"));
+        CHECK(lv_obj_has_flag(pct, LV_OBJ_FLAG_HIDDEN) != keeps_pct);
+        CHECK(ma.y2 <= sa.y1); // still above the spool
+
+        lv_obj_delete(w);
+        lv_obj_delete(parent);
+    }
     theme_manager_refresh_layout_constants(disp);
 }

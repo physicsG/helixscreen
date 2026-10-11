@@ -26,6 +26,7 @@
 
 #include "lvgl/lvgl.h"
 #include "overlay_base.h"
+#include "static_panel_registry.h"
 
 #include <memory>
 #include <string>
@@ -57,7 +58,7 @@ namespace helix::settings {
  * @code
  * auto& overlay = helix::settings::get_hardware_health_overlay();
  * overlay.set_printer_state(&printer_state);
- * overlay.show(parent_screen);  // Creates overlay if needed, populates issues, shows
+ * overlay.show(parent_screen);  // Creates overlay if needed, shows; on_activate populates issues
  * @endcode
  *
  * ## Note on Dynamic Row Creation:
@@ -68,50 +69,12 @@ namespace helix::settings {
  */
 class HardwareHealthOverlay : public OverlayBase {
   public:
-    /**
-     * @brief Default constructor
-     */
-    HardwareHealthOverlay();
-
-    /**
-     * @brief Destructor
-     */
-    ~HardwareHealthOverlay() override;
-
-    // Non-copyable (inherited from OverlayBase)
-
-    //
-    // === OverlayBase Interface ===
-    //
-
-    /**
-     * @brief Initialize subjects (empty - no subjects needed)
-     */
-    void init_subjects() override {}
-
-    /**
-     * @brief Create the overlay UI (called lazily)
-     *
-     * @param parent Parent widget to attach overlay to (usually screen)
-     * @return Root object of overlay, or nullptr on failure
-     */
-    lv_obj_t* create(lv_obj_t* parent) override;
-
-    /**
-     * @brief Get human-readable overlay name
-     * @return "Hardware Health"
-     */
     const char* get_name() const override {
         return "Hardware Health";
     }
-
-    /**
-     * @brief Register event callbacks with lv_xml system
-     *
-     * Registers callbacks for:
-     * - on_hardware_health_clicked (entry point from SettingsPanel)
-     */
-    void register_callbacks() override;
+    const char* xml_component() const override {
+        return "hardware_health_overlay";
+    }
 
     /**
      * @brief Called when overlay becomes visible
@@ -125,7 +88,7 @@ class HardwareHealthOverlay : public OverlayBase {
      *
      * Cleans up any open modal dialogs.
      */
-    void on_deactivate() override;
+    void on_deactivating(DeactivateReason reason) override;
 
     //
     // === Initialization ===
@@ -138,18 +101,6 @@ class HardwareHealthOverlay : public OverlayBase {
     void set_printer_state(PrinterState* printer_state) {
         printer_state_ = printer_state;
     }
-
-    /**
-     * @brief Show the overlay (populates issues first)
-     *
-     * This method:
-     * 1. Ensures overlay is created
-     * 2. Populates issue lists from validation result
-     * 3. Pushes overlay onto navigation stack
-     *
-     * @param parent_screen The parent screen for overlay creation
-     */
-    void show(lv_obj_t* parent_screen);
 
     //
     // === Accessors ===
@@ -209,20 +160,10 @@ class HardwareHealthOverlay : public OverlayBase {
 
     /// Save confirmation dialog
     lv_obj_t* hardware_save_dialog_{nullptr};
-
-    //
-    // === Static Callbacks ===
-    //
 };
 
-/**
- * @brief Global instance accessor
- *
- * Creates the overlay on first access and registers it for cleanup
- * with StaticPanelRegistry.
- *
- * @return Reference to singleton HardwareHealthOverlay
- */
-HardwareHealthOverlay& get_hardware_health_overlay();
+inline HardwareHealthOverlay& get_hardware_health_overlay() {
+    return lazy_global<HardwareHealthOverlay>("HardwareHealthOverlay");
+}
 
 } // namespace helix::settings

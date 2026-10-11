@@ -34,8 +34,12 @@
     <prop name="viewer_name" type="string" default="preview_viewer"/>
     <prop name="thumbnail_name" type="string" default="preview_thumbnail"/>
     <prop name="hint_name" type="string" default="preview_rotate_hint"/>
-    <!-- Per-layer hide conditions, as bind_flag_if expressions. -->
-    <prop name="gradient_hidden" type="string"/>
+    <!-- Per-layer hide conditions, as bind_flag_if expressions. gradient_hidden
+         carries an empty default so a host can omit it (nothing ever covers the
+         gradient): an unset no-default prop drops the cond attribute entirely,
+         which the engine reports as a warning, while an empty cond is its
+         explicit "no binding" path and stays silent. -->
+    <prop name="gradient_hidden" type="string" default=""/>
     <prop name="viewer_hidden" type="string"/>
     <prop name="thumbnail_hidden" type="string"/>
     <prop name="hint_hidden" type="string"/>
@@ -50,8 +54,10 @@
   <view extends="lv_obj"
         width="100%" height="100%" style_pad_all="0" style_bg_opa="0" style_border_width="0" scrollable="false">
 
-    <!-- Pre-rendered gradient backdrop. Hidden under the 3D viewer so it gets a
-         clean black background; shown behind the 2D view and the thumbnail. -->
+    <!-- Pre-rendered gradient backdrop. The 2D and 3D images are both
+         transparent where nothing was drawn, so both sit on it. A host hides
+         it only when other art covers the stack (the print-status exclude
+         map). -->
     <ui_gradient_canvas name="$gradient_name" width="100%" height="100%">
       <bind_flag_if cond="$gradient_hidden" flag="hidden"/>
     </ui_gradient_canvas>

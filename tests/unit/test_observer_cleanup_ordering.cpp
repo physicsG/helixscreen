@@ -20,6 +20,7 @@
 #include "ui_update_queue.h"
 
 #include "../lvgl_test_fixture.h"
+#include "../test_helpers/chaining_mock_backend.h"
 #include "../test_helpers/update_queue_test_access.h"
 #include "ams_backend_mock.h"
 #include "ams_state.h"
@@ -29,6 +30,8 @@
 
 #include <atomic>
 #include <memory>
+#include <optional>
+#include <utility>
 
 #include "../catch_amalgamated.hpp"
 
@@ -45,6 +48,7 @@ static void drain() {
 // active_ guard, and observer guards whose callbacks reference widgets.
 // ============================================================================
 
+namespace {
 class MockPanel {
   public:
     // Simulated widget pointers (would be lv_obj_t* in real code)
@@ -76,21 +80,25 @@ class MockPanel {
     }
 
     void init_observers() {
-        observer_a_ =
-            observe_int_sync<MockPanel>(&subject_, this, [](MockPanel* self, int /*val*/) {
+        observer_a_ = observe<int>(
+            &subject_, this,
+            [](MockPanel* self, int /*val*/) {
                 if (!self->active_ || !self->widget_a_)
                     return;
                 // In a real panel, this would call lv_label_set_text or similar
                 // on widget_a_. If widget_a_ is freed, this is a UAF crash.
                 self->callback_invocations_after_cleanup_++;
-            });
+            },
+            subject_never_freed());
 
-        observer_b_ =
-            observe_int_sync<MockPanel>(&subject_, this, [](MockPanel* self, int /*val*/) {
+        observer_b_ = observe<int>(
+            &subject_, this,
+            [](MockPanel* self, int /*val*/) {
                 if (!self->active_ || !self->widget_b_)
                     return;
                 self->callback_invocations_after_cleanup_++;
-            });
+            },
+            subject_never_freed());
     }
 
     // CORRECT cleanup ordering: nullify widgets BEFORE resetting observers
@@ -121,6 +129,7 @@ class MockPanel {
         lv_subject_deinit(&subject_);
     }
 };
+} // namespace
 
 // ============================================================================
 // Tests for cleanup ordering
@@ -254,16 +263,16 @@ TEST_CASE_METHOD(LVGLTestFixture, "Observer cleanup: cleanup resets all pending 
     // controller resolves its backend through AmsState, so the mock must be
     // installed there (same idiom as test_bypass_toggle_controller.cpp).
     get_printer_state().init_subjects(false);
-    auto& ams = AmsState::instance();
+    auto& ams = helix::AmsState::instance();
     ams.init_subjects(false);
-    auto owned = std::make_unique<AmsBackendMock>(4);
-    AmsBackendMock* backend = owned.get();
+    auto owned = std::make_unique<helix::test::ChainingMockBackend>(4);
+    helix::AmsBackendMock* backend = owned.get();
     backend->set_operation_delay(0);
     ams.set_backend(std::move(owned));
     REQUIRE(backend->start());
-    lv_subject_set_int(get_printer_state().get_print_state_enum_subject(),
+    lv_subject_set_int(get_printer_state().print_state().get_print_state_enum_subject(),
                        static_cast<int>(helix::PrintJobState::STANDBY));
-    REQUIRE(backend->load_filament(0).result == AmsResult::SUCCESS);
+    REQUIRE(backend->load_filament(0).result == helix::AmsResult::SUCCESS);
     backend->wait_for_operation_thread();
     drain();
 
@@ -337,12 +346,14 @@ TEST_CASE_METHOD(LVGLTestFixture, "Observer cleanup: subjects_initialized flag p
         }
 
         void init_observers() {
-            action_observer_ = observe_int_sync<AmsPanelLike>(
-                &subject_, this, [](AmsPanelLike* self, int /*val*/) {
+            action_observer_ = observe<int>(
+                &subject_, this,
+                [](AmsPanelLike* self, int /*val*/) {
                     if (!self->subjects_initialized_ || !self->panel_)
                         return;
                     self->callback_count_++;
-                });
+                },
+                subject_never_freed());
         }
 
         void clear_panel_reference() {
@@ -446,61 +457,75 @@ class MockHomePanel {
 
     void init_observers() {
         // on_extruder_temp_changed pattern
-        temp_observer_ = observe_int_sync<MockHomePanel>(&temp_subject_, this,
-                                                         [](MockHomePanel* self, int /*val*/) {
-                                                             if (!self->subjects_initialized_)
-                                                                 return;
-                                                             self->temp_callback_count_++;
-                                                         });
+        temp_observer_ = observe<int>(
+            &temp_subject_, this,
+            [](MockHomePanel* self, int /*val*/) {
+                if (!self->subjects_initialized_)
+                    return;
+                self->temp_callback_count_++;
+            },
+            subject_never_freed());
 
         // on_extruder_target_changed pattern
-        target_observer_ = observe_int_sync<MockHomePanel>(&target_subject_, this,
-                                                           [](MockHomePanel* self, int /*val*/) {
-                                                               if (!self->subjects_initialized_)
-                                                                   return;
-                                                               self->target_callback_count_++;
-                                                           });
+        target_observer_ = observe<int>(
+            &target_subject_, this,
+            [](MockHomePanel* self, int /*val*/) {
+                if (!self->subjects_initialized_)
+                    return;
+                self->target_callback_count_++;
+            },
+            subject_never_freed());
 
         // on_print_state_changed pattern (guards with subjects_initialized_ + widget)
-        state_observer_ = observe_int_sync<MockHomePanel>(
-            &state_subject_, this, [](MockHomePanel* self, int /*val*/) {
+        state_observer_ = observe<int>(
+            &state_subject_, this,
+            [](MockHomePanel* self, int /*val*/) {
                 if (!self->subjects_initialized_ || !self->print_card_thumb_ ||
                     !self->print_card_label_)
                     return;
                 self->state_callback_count_++;
-            });
+            },
+            subject_never_freed());
 
         // on_print_progress_or_time_changed pattern
-        progress_observer_ = observe_int_sync<MockHomePanel>(&progress_subject_, this,
-                                                             [](MockHomePanel* self, int /*val*/) {
-                                                                 if (!self->subjects_initialized_)
-                                                                     return;
-                                                                 self->progress_callback_count_++;
-                                                             });
+        progress_observer_ = observe<int>(
+            &progress_subject_, this,
+            [](MockHomePanel* self, int /*val*/) {
+                if (!self->subjects_initialized_)
+                    return;
+                self->progress_callback_count_++;
+            },
+            subject_never_freed());
 
         // on_print_thumbnail_path_changed pattern
-        thumbnail_observer_ = observe_int_sync<MockHomePanel>(
-            &thumbnail_subject_, this, [](MockHomePanel* self, int /*val*/) {
+        thumbnail_observer_ = observe<int>(
+            &thumbnail_subject_, this,
+            [](MockHomePanel* self, int /*val*/) {
                 if (!self->subjects_initialized_ || !self->print_card_thumb_)
                     return;
                 self->thumbnail_callback_count_++;
-            });
+            },
+            subject_never_freed());
 
         // on_led_state_changed pattern
-        led_observer_ = observe_int_sync<MockHomePanel>(&led_subject_, this,
-                                                        [](MockHomePanel* self, int /*val*/) {
-                                                            if (!self->subjects_initialized_)
-                                                                return;
-                                                            self->led_callback_count_++;
-                                                        });
+        led_observer_ = observe<int>(
+            &led_subject_, this,
+            [](MockHomePanel* self, int /*val*/) {
+                if (!self->subjects_initialized_)
+                    return;
+                self->led_callback_count_++;
+            },
+            subject_never_freed());
 
         // refresh_printer_image pattern (guards with subjects_initialized_ + panel_)
-        printer_image_observer_ = observe_int_sync<MockHomePanel>(
-            &printer_image_subject_, this, [](MockHomePanel* self, int /*val*/) {
+        printer_image_observer_ = observe<int>(
+            &printer_image_subject_, this,
+            [](MockHomePanel* self, int /*val*/) {
                 if (!self->subjects_initialized_ || !self->panel_)
                     return;
                 self->printer_image_callback_count_++;
-            });
+            },
+            subject_never_freed());
     }
 
     void deinit_subjects() {
@@ -684,28 +709,34 @@ class MockTemperatureService {
 
     void init_observers() {
         // on_temp_changed pattern — guards after throttle logic
-        temp_observer_ = observe_int_sync<MockTemperatureService>(
-            &temp_subject_, this, [](MockTemperatureService* self, int /*val*/) {
+        temp_observer_ = observe<int>(
+            &temp_subject_, this,
+            [](MockTemperatureService* self, int /*val*/) {
                 if (!self->subjects_initialized_)
                     return;
                 self->on_temp_count_++;
-            });
+            },
+            subject_never_freed());
 
         // on_target_changed pattern
-        target_observer_ = observe_int_sync<MockTemperatureService>(
-            &target_subject_, this, [](MockTemperatureService* self, int /*val*/) {
+        target_observer_ = observe<int>(
+            &target_subject_, this,
+            [](MockTemperatureService* self, int /*val*/) {
                 if (!self->subjects_initialized_)
                     return;
                 self->on_target_count_++;
-            });
+            },
+            subject_never_freed());
 
         // rebuild_extruder_segments_impl / select_extruder pattern
-        extruder_observer_ = observe_int_sync<MockTemperatureService>(
-            &extruder_subject_, this, [](MockTemperatureService* self, int /*val*/) {
+        extruder_observer_ = observe<int>(
+            &extruder_subject_, this,
+            [](MockTemperatureService* self, int /*val*/) {
                 if (!self->subjects_initialized_)
                     return;
                 self->rebuild_segments_count_++;
-            });
+            },
+            subject_never_freed());
     }
 
     // CORRECT deinit ordering: set flag BEFORE deinit
@@ -822,7 +853,7 @@ TEST_CASE_METHOD(
 }
 
 // ============================================================================
-// HeatingIconAnimator cleanup ordering pattern
+// helix::ui::HeatingIconAnimator cleanup ordering pattern
 //
 // The fix ensures icon_ = nullptr BEFORE theme_observer_.reset() in detach().
 // This prevents cascading theme observer callbacks from accessing a freed icon.
@@ -843,14 +874,16 @@ class MockAnimator {
 
     void attach(lv_obj_t* icon) {
         icon_ = icon;
-        theme_observer_ = observe_int_sync<MockAnimator>(&theme_subject_, this,
-                                                         [](MockAnimator* self, int /*val*/) {
-                                                             if (!self->icon_)
-                                                                 return;
-                                                             // In real code this calls
-                                                             // refresh_theme() which touches icon_
-                                                             self->theme_callback_count_++;
-                                                         });
+        theme_observer_ = observe<int>(
+            &theme_subject_, this,
+            [](MockAnimator* self, int /*val*/) {
+                if (!self->icon_)
+                    return;
+                // In real code this calls
+                // refresh_theme() which touches icon_
+                self->theme_callback_count_++;
+            },
+            subject_never_freed());
     }
 
     // CORRECT detach: null icon BEFORE resetting observer
@@ -992,7 +1025,7 @@ TEST_CASE_METHOD(LVGLTestFixture,
     struct DummyPanel {
         int count = 0;
     } panel;
-    ObserverGuard guard_a = observe_int_sync<DummyPanel>(
+    ObserverGuard guard_a = observe<int>(
         &subject, &panel, [](DummyPanel* self, int) { self->count++; }, service_a_lifetime);
     drain();
 
@@ -1027,7 +1060,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "SubjectLifetime: guard still removes when sub
     struct DummyPanel {
         int count = 0;
     } panel;
-    ObserverGuard guard = observe_int_sync<DummyPanel>(
+    ObserverGuard guard = observe<int>(
         &subject, &panel, [](DummyPanel* self, int) { self->count++; }, observer_lifetime);
     drain();
 
@@ -1042,5 +1075,73 @@ TEST_CASE_METHOD(LVGLTestFixture, "SubjectLifetime: guard still removes when sub
     REQUIRE(panel.count == 0);
 
     lifetime.reset();
+    lv_subject_deinit(&subject);
+}
+
+// A moved-from ObserverGuard must not run the cleanup its destination now owns.
+//
+// std::function's moved-from state is valid but UNSPECIFIED. libc++ keeps the
+// target when the callable fits its small-object buffer, and the observer
+// factories' `[ctx]() { delete ctx; }` does - one captured pointer. A source
+// that kept the cleanup frees the observer's context from its own destructor
+// while the destination keeps the observer attached to a live subject, so the
+// next lv_subject_notify() reads freed memory inside the synchronous observer
+// body. libstdc++ empties the source and hides it (prestonbrown/helixscreen#1446).
+TEST_CASE_METHOD(LVGLTestFixture, "ObserverGuard: a moved-from guard runs no cleanup",
+                 "[observer_cleanup][crash_hardening][1446]") {
+    lv_subject_t subject;
+    lv_subject_init_int(&subject, 0);
+    auto noop = [](lv_observer_t*, lv_subject_t*) {};
+    int cleanups = 0;
+
+    SECTION("move construction") {
+        std::optional<ObserverGuard> dst;
+        {
+            ObserverGuard src(&subject, noop, &cleanups, [&cleanups]() { cleanups++; });
+            dst.emplace(std::move(src));
+        }
+        // src is gone; the context it was constructed with belongs to dst now.
+        CHECK(cleanups == 0);
+        dst.reset();
+        CHECK(cleanups == 1);
+    }
+
+    SECTION("move assignment") {
+        ObserverGuard dst;
+        {
+            ObserverGuard src(&subject, noop, &cleanups, [&cleanups]() { cleanups++; });
+            dst = std::move(src);
+        }
+        CHECK(cleanups == 0);
+        dst.reset();
+        CHECK(cleanups == 1);
+    }
+
+    lv_subject_deinit(&subject);
+}
+
+// The shape the crash actually took: a factory returns its guard by value, so
+// the context outlives every temporary along the way and is still valid when
+// the subject notifies.
+TEST_CASE_METHOD(LVGLTestFixture,
+                 "ObserverGuard: a factory-returned guard survives its temporaries",
+                 "[observer_cleanup][crash_hardening][1446]") {
+    lv_subject_t subject;
+    lv_subject_init_int(&subject, 0);
+
+    struct DummyPanel {
+        int count = 0;
+    } panel;
+
+    ObserverGuard guard = observe<int>(
+        &subject, &panel, [](DummyPanel* self, int) { self->count++; }, subject_never_freed());
+    drain();
+
+    panel.count = 0;
+    lv_subject_set_int(&subject, 7);
+    drain();
+    CHECK(panel.count == 1);
+
+    guard.reset();
     lv_subject_deinit(&subject);
 }

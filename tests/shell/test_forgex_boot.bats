@@ -39,9 +39,9 @@ setup() {
 # --- Bundled install.sh parity ---
 
 @test "bundled install.sh calls all three ForgeX patches" {
-    grep -q 'patch_forgex_screen_sh' "$WORKTREE_ROOT/scripts/install.sh"
-    grep -q 'patch_forgex_screen_drawing' "$WORKTREE_ROOT/scripts/install.sh"
-    grep -q 'install_forgex_logged_wrapper' "$WORKTREE_ROOT/scripts/install.sh"
+    grep -q 'patch_forgex_screen_sh' "$INSTALL_BUNDLE"
+    grep -q 'patch_forgex_screen_drawing' "$INSTALL_BUNDLE"
+    grep -q 'install_forgex_logged_wrapper' "$INSTALL_BUNDLE"
 }
 
 @test "bundle-installer.sh sources main.sh which holds ForgeX patches" {
@@ -211,22 +211,22 @@ forgex_draw_commands_decl() {
 # --- Bundled install.sh uninstall parity ---
 
 @test "bundled install.sh has unpatch_forgex_screen_drawing function" {
-    grep -q 'unpatch_forgex_screen_drawing()' "$WORKTREE_ROOT/scripts/install.sh"
+    grep -q 'unpatch_forgex_screen_drawing()' "$INSTALL_BUNDLE"
 }
 
 @test "bundled install.sh uninstall_forgex calls unpatch_forgex_screen_drawing" {
-    awk '/^uninstall_forgex\(\)/,/^}/' "$WORKTREE_ROOT/scripts/install.sh" \
+    awk '/^uninstall_forgex\(\)/,/^}/' "$INSTALL_BUNDLE" \
         | grep -q 'unpatch_forgex_screen_drawing'
 }
 
 @test "bundled install.sh logged wrapper uses string accumulation for args" {
     # The active path must use $args (string accumulation) — the old set-- pattern
     # was broken because set-- clears positional params before the loop iterates
-    sed -n '/WRAPPER_EOF/,/WRAPPER_EOF/p' "$WORKTREE_ROOT/scripts/install.sh" | grep 'exec.*/logged-real' | head -1 | grep -q '\$args'
+    sed -n '/WRAPPER_EOF/,/WRAPPER_EOF/p' "$INSTALL_BUNDLE" | grep 'exec.*/logged-real' | head -1 | grep -q '\$args'
 }
 
 @test "uninstall.sh calls unpatch_forgex_screen_drawing" {
-    grep -q 'unpatch_forgex_screen_drawing' "$WORKTREE_ROOT/scripts/uninstall.sh"
+    grep -q 'unpatch_forgex_screen_drawing' "$UNINSTALL_BUNDLE"
 }
 
 # --- helixscreen_active flag coordination ---
@@ -429,7 +429,7 @@ promo_fixture() {
 
 @test "installer wires dismiss_forgex_feather_promo into configure_platform" {
     grep -q 'dismiss_forgex_feather_promo' "$WORKTREE_ROOT/scripts/lib/installer/main.sh"
-    grep -q 'dismiss_forgex_feather_promo' "$WORKTREE_ROOT/scripts/install.sh"
+    grep -q 'dismiss_forgex_feather_promo' "$INSTALL_BUNDLE"
 }
 
 # --- GuppyScreen launcher must be disabled, not just its init script ---
@@ -491,7 +491,7 @@ wpa_fixture() {
     rm -f "$FORGEX_NETD_BIN"
     run platform_start_wpa_supplicant
     [ "$status" -eq 0 ]
-    [[ "$output" == *"Starting wpa_supplicant"* ]]
+    contains "Starting wpa_supplicant" "$output"
     [[ "$output" == *"FAKE_WPA_RAN"* ]]
 }
 
@@ -501,7 +501,7 @@ wpa_fixture() {
     chmod +x "$FORGEX_NETD_BIN"
     run platform_start_wpa_supplicant
     [ "$status" -eq 0 ]
-    [[ "$output" != *"Starting wpa_supplicant"* ]]
+    lacks "Starting wpa_supplicant" "$output"
     [[ "$output" != *"FAKE_WPA_RAN"* ]]
 }
 
@@ -622,4 +622,70 @@ stage_hook_candidates() {
     cmp -s "$INSTALL_DIR/assets/config/platform/hooks-ad5m-forgex.sh" \
            "$INSTALL_DIR/platform/hooks.sh" \
         || fail "ad5m + forge_x must deploy hooks-ad5m-forgex.sh"
+}
+
+# --- netd restore: first-run WiFi setup must stay reachable -------------------
+#
+# S55boot starts netd and, when the network does not come up inside its 180s
+# wait, kills it and unlinks the socket. netd loads the WiFi driver and owns the
+# radio, so a carrier-less boot reaches S90 with no daemon and no wlan0: the
+# wizard has nothing to configure and the owner cannot get the printer online
+# from the only UI we left them.
+
+netd_restore_fixture() {
+    export FORGEX_NETD_BIN="$BATS_TEST_TMPDIR/netd"
+    export FORGEX_NETD_SOCK="$BATS_TEST_TMPDIR/netd.sock"
+    export FORGEX_NETWORK_CONF="$BATS_TEST_TMPDIR/network.conf"
+    printf '#!/bin/sh\n' > "$FORGEX_NETD_BIN"
+    chmod +x "$FORGEX_NETD_BIN"
+    mock_command_script start-stop-daemon "echo \"\$@\" >> $BATS_TEST_TMPDIR/ssd.log"
+}
+
+@test "ForgeX netd restore starts the daemon when it is installed but down" {
+    netd_restore_fixture
+    mock_command_script pidof "exit 1"   # nothing running
+    . "$WORKTREE_ROOT/assets/config/platform/hooks-ad5m-forgex.sh"
+    platform_start_netd
+    grep -q -- "--exec $FORGEX_NETD_BIN" "$BATS_TEST_TMPDIR/ssd.log"
+}
+
+@test "ForgeX netd restore leaves a running daemon alone" {
+    netd_restore_fixture
+    mock_command_script pidof "echo 1234"   # already running
+    . "$WORKTREE_ROOT/assets/config/platform/hooks-ad5m-forgex.sh"
+    platform_start_netd
+    [ ! -f "$BATS_TEST_TMPDIR/ssd.log" ]
+}
+
+@test "ForgeX netd restore is a no-op on releases without netd" {
+    netd_restore_fixture
+    rm -f "$FORGEX_NETD_BIN"             # pre-1.4.2: no daemon ships
+    mock_command_script pidof "exit 1"
+    . "$WORKTREE_ROOT/assets/config/platform/hooks-ad5m-forgex.sh"
+    platform_start_netd
+    [ ! -f "$BATS_TEST_TMPDIR/ssd.log" ]
+}
+
+@test "ForgeX netd restore adopts an existing link when network.conf is present" {
+    netd_restore_fixture
+    printf 'mode=ETHERNET\n' > "$FORGEX_NETWORK_CONF"
+    mock_command_script pidof "exit 1"
+    . "$WORKTREE_ROOT/assets/config/platform/hooks-ad5m-forgex.sh"
+    platform_start_netd
+    grep -q -- "--adopt-existing" "$BATS_TEST_TMPDIR/ssd.log"
+}
+
+@test "ForgeX netd restore bootstraps without adoption when there is no network.conf" {
+    netd_restore_fixture
+    rm -f "$FORGEX_NETWORK_CONF"
+    mock_command_script pidof "exit 1"
+    . "$WORKTREE_ROOT/assets/config/platform/hooks-ad5m-forgex.sh"
+    platform_start_netd
+    run grep -c -- "--adopt-existing" "$BATS_TEST_TMPDIR/ssd.log"
+    [ "$(last_line)" = "0" ]
+}
+
+@test "ForgeX pre-start restores netd" {
+    awk '/^platform_pre_start\(\)/,/^}/' \
+        "$WORKTREE_ROOT/assets/config/platform/hooks-ad5m-forgex.sh" | grep -q 'platform_start_netd'
 }

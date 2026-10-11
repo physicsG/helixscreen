@@ -1,9 +1,9 @@
 # Power-Loss Recovery (PLR)
 
-HelixScreen offers to resume an interrupted print at connect time. Two printer
+HelixScreen offers to resume an interrupted print at connect time. Three printer
 firmware families expose a recovery mechanism, and they work in fundamentally
-different ways: one is **passive** (a status field tells us a snapshot exists),
-the other is **active** (we have to ask, and asking has side effects).
+different ways: two are **passive** (a status field tells us a snapshot exists),
+one is **active** (we have to ask, and asking has side effects).
 
 Code map:
 
@@ -11,17 +11,22 @@ Code map:
 |------|------|
 | `include/plr_backend.h`, `src/printer/plr_backend.cpp` | Pure backend strategy: capability selection, probe-response parsing, resume/discard plan building. No LVGL, no network. |
 | `include/plr_offer.h`, `src/printer/plr_offer.cpp` | Pure offer decision (`plr_should_offer`) and latch re-arm rule (`plr_should_rearm`). |
-| `include/plr_offer_controller.h`, `src/ui/ui_plr_offer_controller.cpp` | App-lifetime controller. Observers, one-shot latch, the Creality probe, normalization of both backends into one "recovery available" signal. |
+| `include/plr_offer_controller.h`, `src/ui/ui_plr_offer_controller.cpp` | App-lifetime controller. Observers, one-shot latch, the Creality probe, normalization of the backends into one "recovery available" signal. |
 | `src/ui/ui_plr_prompt.{h,cpp}` | The modal and its two button actions. Backend-agnostic — it executes a `PlrRecoveryPlan`. |
-| `src/printer/printer_print_state.cpp` | Parses both capability markers out of the status payload. |
+| `src/printer/printer_print_state.cpp` | Parses the capability markers out of the status payload. |
 | `src/api/moonraker_api_print.cpp` | `check_continue_print_state()` / `cancel_continue_print()` JSON-RPC calls. |
 
 Tests: `tests/unit/test_plr_backend.cpp`, `test_plr_offer.cpp`, `test_plr_state.cpp`,
 `test_plr_prompt.cpp`, `test_plr_error.cpp`.
 
+Backend precedence in `plr_select_backend()`: SNAPMAKER first, then QIDI, then
+CREALITY. No firmware carries more than one marker set, so the order only makes a
+hypothetical tie deterministic - and it puts both passive signals ahead of the
+probe-based one, so a marker chosen by mistake never costs a side-effectful probe.
+
 ---
 
-## The two backends
+## The three backends
 
 ### Snapmaker U1 — passive
 
@@ -43,6 +48,57 @@ on an AFC-modded U1 (bundle UDZJQVQZ) whose backend is not the Snapmaker one.
 | Resume | gcode `SDCARD_PRINT_PL_RESTORE` |
 | Discard | gcode `SDCARD_PRINT_PL_CLEAR_ENV` |
 | Errors | JSON-coded; `snapmaker_extract_coded_msg()` pulls out the human `msg` |
+
+### Qidi Q2 / Q1 Pro / Plus 4 - passive
+
+Qidi's stock firmware keeps its recovery state in a save variable. The stock
+macros maintain it: `PRINT_START` runs `save_last_file`, which sets
+`SAVE_VARIABLE VARIABLE=was_interrupted VALUE=True`; a normal end or cancel runs
+`CLEAR_LAST_FILE`, which sets it back to False. After power loss the print never
+reaches either, so `save_variables.variables.was_interrupted` reads true at boot.
+That is the whole signal - nothing is probed and nothing is asked.
+
+Two halves gate the backend, because the variable name alone proves nothing:
+
+* **Capability**: discovery found the `DETECT_INTERRUPTION` or `RESUME_INTERRUPTED`
+  macro (`plr_resume_macro_present()`, `PrinterDiscovery::has_macro`). Newer
+  firmware (Q2 01.01.02.03 at least) registers `RESUME_INTERRUPTED` and `CLEAR_LAST_FILE` as Python
+  commands, invisible to discovery, so `DETECT_INTERRUPTION` is the macro every
+  generation carries. Either identifies Qidi's stock firmware; `was_interrupted` is a user-writable name on ANY
+  Klipper, so the variable alone must never select the backend.
+* **Availability**: `save_variables.variables.was_interrupted` arrived as a JSON
+  boolean and is true.
+
+| | |
+|---|---|
+| Capability | `DETECT_INTERRUPTION` or `RESUME_INTERRUPTED` macro present (discovery) |
+| Availability | `save_variables.variables.was_interrupted` is JSON boolean `true` |
+| Recovery filename | `virtual_sdcard.file_path` when non-empty; the prompt falls back to its generic body when empty (no filesystem scan) |
+| Resume | gcode `RESUME_INTERRUPTED` (rebuilds the resume gcode from the `.temp/` backup, lifts Z clear of the part before homing X/Y, then prints it) |
+| Discard | gcode `CLEAR_LAST_FILE` |
+| Errors | plain Klipper error strings; the prompt surfaces the message unchanged |
+
+Two disciplines the parser owes the delta protocol, same shape as the Creality
+capability latch:
+
+1. **Booleans only.** `save_variables` values are Python literals Klipper
+   re-parses; another type under this name is not our signal. A non-boolean
+   value is not-available, and also never a clear: after a `true`, a `1` or
+   `"True"` arriving later must not drop the flag.
+2. **Deltas must not clear.** Moonraker notifies at top-level-field
+   granularity, so a frame without `save_variables`, or a `variables` dict
+   without the key, leaves the flag alone. Only a boolean `false` (the
+   `CLEAR_LAST_FILE` discard path) or the disconnect edge (the offer controller
+   forces the subjects to 0, like `pl_env_valid`) resets it.
+
+The flag is ALSO true during every normal print - it stays true from
+`PRINT_START` until the job ends. That is by design of the stock macros, and the
+offer decision's `printer_idle` input is what scopes it to a boot after power
+loss: mid-print the printer is not idle, so no offer fires. The subscription
+(`save_variables` when the macro exists) is added in
+`MoonrakerDiscoverySequence::build_subscription_objects()` via the
+`plr_required_status_objects()` capability question - no vendor name reaches the
+subscription builder.
 
 ### Creality K1 / K1C / K1 Max / K2 Plus / Ender 3 V3 / Hi / i7 — active
 
@@ -170,12 +226,12 @@ Therefore the probe is issued:
 
 ## Normalization and reuse
 
-Both backends collapse into one internal signal so the existing latch / re-arm /
-wizard logic is reused unchanged:
+All three backends collapse into one internal signal so the existing latch /
+re-arm / wizard logic is reused unchanged:
 
 ```
 Snapmaker:  pl_env_valid subject ──────────────────────┐
-                                                        ├──> recovery_available ──> plr_should_offer()
+Qidi:       DETECT_INTERRUPTION macro + was_interrupted ┤──> recovery_available ──> plr_should_offer()
 Creality:   power_loss key ──> one-shot probe ──> both ─┘
                                (standby only)    states
 ```
@@ -303,11 +359,13 @@ suppressed entirely rather than showing a Resume button that cannot work.
 
 ## Threading
 
-`update_from_status()` runs on the libhv WebSocket thread; both capability
-parsers only mutate an already-initialized `lv_subject_t` int in place, matching
-the surrounding code in `printer_print_state.cpp`.
+Status notifications arrive on the libhv WebSocket thread, but
+`MoonrakerManager` queues them and its main-thread drain calls
+`update_from_status()`, so the capability parsers (which only mutate an
+already-initialized `lv_subject_t` int in place) execute on the main thread,
+matching the surrounding code in `printer_print_state.cpp`.
 
-`PlrOfferController`'s observers are registered with `observe_int_sync`, which
+`PlrOfferController`'s observers are registered with `observe<int>`, which
 defers through `UpdateQueue`, so every callback body runs on the main thread.
 The one place that genuinely crosses the boundary is the probe response — a
 JSON-RPC callback that arrives on the WebSocket thread — so it is wrapped in

@@ -224,13 +224,42 @@ describe("GET /{channel}/helixscreen-*.tar.gz", () => {
     );
     expect(res.status).toBe(404);
   });
+
+  it("serves retired k1/ad5x tarball names from the unified mips object", async () => {
+    // One binary serves the K1 series and the AD5X; the board keys live on
+    // only as URL aliases so deployed binaries keep finding an update.
+    const env = createEnv();
+    env.RELEASES_BUCKET.seed("stable/helixscreen-mips-v1.1.0.tar.gz", "mips-bytes");
+    for (const retired of ["k1", "ad5x"]) {
+      const res = await worker.fetch(
+        makeRequest(`/stable/helixscreen-${retired}-v1.1.0.tar.gz`),
+        env,
+      );
+      expect(res.status, retired).toBe(200);
+      expect(await res.text(), retired).toBe("mips-bytes");
+    }
+    // Only the mips key exists in the bucket; the aliases are rewrites.
+    expect(env.RELEASES_BUCKET._storage.has("stable/helixscreen-k1-v1.1.0.tar.gz")).toBe(false);
+  });
+
+  it("does not rewrite k1-dynamic, a different artifact that shares the k1 prefix", async () => {
+    const env = createEnv();
+    env.RELEASES_BUCKET.seed("stable/helixscreen-mips-v0.99.31.tar.gz", "mips-bytes");
+    const res = await worker.fetch(
+      makeRequest("/stable/helixscreen-k1-dynamic-v0.99.31.tar.gz"),
+      env,
+    );
+    expect(res.status).toBe(404);
+  });
 });
 
 describe("GET /releases/{version}/helixscreen-*.tar.gz", () => {
   it("returns tarball with correct content type and cache headers", async () => {
+    // k1 here exercises the retired-alias rewrite: the request names the
+    // board key, the bucket holds only the unified mips object.
     const env = createEnv();
     env.RELEASES_BUCKET.seed(
-      "releases/v0.99.25/helixscreen-k1-v0.99.25.tar.gz",
+      "releases/v0.99.25/helixscreen-mips-v0.99.25.tar.gz",
       "binary-data",
     );
     const res = await worker.fetch(

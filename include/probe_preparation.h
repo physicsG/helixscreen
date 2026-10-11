@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <string>
 #include <unordered_set>
+#include <vector>
 
 #include "hv/json.hpp"
 
@@ -70,13 +71,15 @@ struct Preparation {
  *
  * @param rules             The `probe_preparation` array (any other type = no match)
  * @param macros_upper      Available macro names, ALREADY uppercased
+ * @param objects           Klipper object names for `object_exists` predicates
  * @param op                Operation being prepared for
  * @param resolved_macro    The macro the operation will actually run, for
  *                          `skip_if_macro_in`. May be empty.
  */
 [[nodiscard]] Preparation resolve_from_rules(const nlohmann::json& rules,
                                              const std::unordered_set<std::string>& macros_upper,
-                                             Operation op, const std::string& resolved_macro = "");
+                                             const std::vector<std::string>& objects, Operation op,
+                                             const std::string& resolved_macro = "");
 
 /**
  * @brief The `probe_preparation` array from the loaded printer database.

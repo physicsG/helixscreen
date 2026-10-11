@@ -11,6 +11,7 @@
 #include "overlay_base.h"
 #include "print_history_data.h"
 #include "print_history_manager.h"
+#include "static_panel_registry.h"
 #include "subject_managed_panel.h"
 
 #include <atomic>
@@ -76,6 +77,19 @@ enum class HistorySortDirection {
     ASC   ///< Ascending (oldest first, shortest first, A-Z)
 };
 
+namespace helix {
+
+/**
+ * @brief Whether @p a sorts before @p b in the history list
+ *
+ * A strict weak ordering in both directions, as std::sort requires: equal keys
+ * never sort before each other.
+ */
+[[nodiscard]] bool history_sort_before(const PrintHistoryJob& a, const PrintHistoryJob& b,
+                                       HistorySortColumn column, HistorySortDirection direction);
+
+} // namespace helix
+
 /**
  * @brief Status filter options (maps to dropdown indices)
  */
@@ -120,17 +134,12 @@ class HistoryListPanel : public OverlayBase {
      */
     void deinit_subjects();
 
-    /**
-     * @brief Register XML event callbacks
-     */
     void register_callbacks() override;
 
-    /**
-     * @brief Create the list panel from XML
-     *
-     * @param parent Parent widget (screen)
-     * @return Root widget of the overlay
-     */
+    const char* xml_component() const override {
+        return "history_list_panel";
+    }
+
     lv_obj_t* create(lv_obj_t* parent) override;
 
     [[nodiscard]] const char* get_name() const override {
@@ -151,7 +160,7 @@ class HistoryListPanel : public OverlayBase {
     /**
      * @brief Called when panel is hidden
      */
-    void on_deactivate() override;
+    void on_deactivating(DeactivateReason reason) override;
 
     //
     // === Public API ===
@@ -220,6 +229,7 @@ class HistoryListPanel : public OverlayBase {
     bool jobs_received_ = false;                     ///< True if jobs were set externally
     bool is_active_ = false;                         ///< True if panel is currently visible
     bool detail_overlay_open_ = false;               ///< True while detail overlay is showing
+    lv_obj_t* delete_confirmation_dialog_ = nullptr; ///< Live delete confirmation, or null
     bool history_changed_while_detail_open_ = false; ///< True if history changed while detail open
 
     // Connection state observer to auto-refresh when connected (ObserverGuard handles cleanup)
@@ -236,15 +246,8 @@ class HistoryListPanel : public OverlayBase {
     /// Observer callback for history manager changes
     helix::HistoryChangedCallback history_observer_;
 
-    // Parent screen reference
-    lv_obj_t* parent_screen_ = nullptr;
-
-    // Callback registration tracking
-    bool callbacks_registered_ = false;
-
     // Pagination state for infinite scroll
-    static constexpr int PAGE_SIZE = 50; ///< Jobs per API request
-    uint64_t total_job_count_ = 0;       ///< Total jobs on server (from API)
+    static constexpr int JOBS_PER_PAGE = 50; ///< Jobs per API request
     /// Single-flight guard for the "load next page" fetch, with a 30s self-heal
     /// so a silently-lost response can't permanently block infinite scroll.
     helix::InFlightGuard load_more_guard_{std::chrono::milliseconds(30000)};
@@ -269,14 +272,14 @@ class HistoryListPanel : public OverlayBase {
     // === Subject for panel state binding ===
     //
 
-    lv_subject_t subject_panel_state_;      ///< 0 = LOADING, 1 = EMPTY, 2 = HAS_JOBS
-    lv_subject_t subject_filters_expanded_; ///< 0 = filter dropdowns collapsed, 1 = expanded
-    lv_subject_t subject_filter_active_; ///< 1 when a status/search/sort filter is active (drives
-                                         ///< funnel accent)
+    lv_subject_t subject_panel_state_{};      ///< 0 = LOADING, 1 = EMPTY, 2 = HAS_JOBS
+    lv_subject_t subject_filters_expanded_{}; ///< 0 = filter dropdowns collapsed, 1 = expanded
+    lv_subject_t subject_filter_active_{}; ///< 1 when a status/search/sort filter is active (drives
+                                           ///< funnel accent)
 
     // Empty state message subjects (for dynamic text based on filter state)
-    lv_subject_t subject_empty_message_; ///< Empty state message text
-    lv_subject_t subject_empty_hint_;    ///< Empty state hint text
+    lv_subject_t subject_empty_message_{}; ///< Empty state message text
+    lv_subject_t subject_empty_hint_{};    ///< Empty state hint text
 
     // Buffers for empty state string subjects
     char empty_message_buf_[64] = {};
@@ -294,22 +297,22 @@ class HistoryListPanel : public OverlayBase {
     std::atomic<uint32_t> detail_overlay_generation_{0};
 
     // Detail overlay subjects (string subjects for reactive binding)
-    lv_subject_t detail_filename_;
-    lv_subject_t detail_status_;
-    lv_subject_t detail_status_icon_;
-    lv_subject_t detail_status_variant_;
-    lv_subject_t detail_start_time_;
-    lv_subject_t detail_end_time_;
-    lv_subject_t detail_duration_;
-    lv_subject_t detail_layers_;
-    lv_subject_t detail_layer_height_;
-    lv_subject_t detail_nozzle_temp_;
-    lv_subject_t detail_bed_temp_;
-    lv_subject_t detail_filament_;
-    lv_subject_t detail_filament_type_;
-    lv_subject_t detail_can_reprint_;   ///< 1 if file exists, 0 otherwise
-    lv_subject_t detail_status_code_;   ///< 0=completed, 1=cancelled, 2=error, 3=in_progress
-    lv_subject_t detail_has_timelapse_; ///< 1 if timelapse available, 0 otherwise
+    lv_subject_t detail_filename_{};
+    lv_subject_t detail_status_{};
+    lv_subject_t detail_status_icon_{};
+    lv_subject_t detail_status_variant_{};
+    lv_subject_t detail_start_time_{};
+    lv_subject_t detail_end_time_{};
+    lv_subject_t detail_duration_{};
+    lv_subject_t detail_layers_{};
+    lv_subject_t detail_layer_height_{};
+    lv_subject_t detail_nozzle_temp_{};
+    lv_subject_t detail_bed_temp_{};
+    lv_subject_t detail_filament_{};
+    lv_subject_t detail_filament_type_{};
+    lv_subject_t detail_can_reprint_{};   ///< 1 if file exists, 0 otherwise
+    lv_subject_t detail_status_code_{};   ///< 0=completed, 1=cancelled, 2=error, 3=in_progress
+    lv_subject_t detail_has_timelapse_{}; ///< 1 if timelapse available, 0 otherwise
 
     // Buffers for string subjects (LVGL 9.4 requires pre-allocated buffers)
     static constexpr size_t DETAIL_BUF_SIZE = 128;
@@ -337,7 +340,11 @@ class HistoryListPanel : public OverlayBase {
      *
      * Clears existing rows and creates new ones from filtered_jobs_ vector.
      */
-    void populate_list();
+    void populate_list(bool preserve_scroll = false);
+
+    /// Re-read the shared cache after it changed (an older page, a history
+    /// event) without moving the user's scroll position.
+    void refresh_from_manager();
 
     /**
      * @brief Clear all row widgets from the list
@@ -356,7 +363,7 @@ class HistoryListPanel : public OverlayBase {
      *
      * Chain: search → status filter → sort → populate_list()
      */
-    void apply_filters_and_sort();
+    void apply_filters_and_sort(bool preserve_scroll = false);
 
     /**
      * @brief Apply search filter to jobs
@@ -390,14 +397,6 @@ class HistoryListPanel : public OverlayBase {
      * @return Hex color string (e.g., "#00C853")
      */
     static const char* get_status_color(PrintJobStatus status);
-
-    /**
-     * @brief Get display text for a job status
-     *
-     * @param status Job status enum
-     * @return Display string (e.g., "Completed", "Failed")
-     */
-    static const char* get_status_text(PrintJobStatus status);
 
     //
     // === Click Handlers ===
@@ -530,9 +529,7 @@ class HistoryListPanel : public OverlayBase {
     void append_rows(size_t start_index);
 };
 
-/**
- * @brief Get global HistoryListPanel instance
- *
- * Creates instance on first call. Used by static callbacks.
- */
-HistoryListPanel& get_global_history_list_panel();
+/// Lazy singleton shared by the callbacks and the panels that open it.
+inline HistoryListPanel& get_global_history_list_panel() {
+    return helix::lazy_global<HistoryListPanel>("HistoryListPanel");
+}

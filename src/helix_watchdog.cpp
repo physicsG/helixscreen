@@ -37,6 +37,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
@@ -47,7 +48,6 @@
 #include <filesystem>
 #include <fstream>
 #include <lvgl.h>
-#include <regex>
 #include <signal.h>
 #include <string>
 #include <sys/reboot.h>
@@ -82,9 +82,9 @@ static constexpr int DEFAULT_AUTO_RESTART_SEC = 30;
 // far larger budget — see watchdog_restart_policy.h. Under memory pressure
 // execv() of an intact binary can fail with ENOEXEC/ENOMEM; spending the small
 // budget above on those turns a passing squeeze into a permanently black screen.
-// The budget itself (RESTART_LOOP_MAX_FAILURES) and the pacing live in the
-// policy header so they can be unit tested on hosts that never build this binary.
-static constexpr int RESTART_LOOP_WINDOW_SEC = 60;
+// The budget itself (RESTART_LOOP_MAX_FAILURES), the counting and the pacing
+// live in the policy header so they can be unit tested on hosts that never
+// build this binary.
 static constexpr int RESTART_LOOP_EXIT_CODE = 42;
 
 // Crash-loop detection (separate window from non-zero-exit loops above).
@@ -171,71 +171,21 @@ static void setup_signal_handlers() {
  * @return Timeout in seconds (0 = disabled), or default on failure
  */
 static int read_auto_restart_timeout() {
-    // writable_path honors HELIX_CONFIG_DIR (Yocto) or "config/" (tarball);
-    // legacy paths are kept for AD5M-style installs that predate either env.
-    std::vector<std::string> paths{
-        helix::writable_path("settings.json"),
-        helix::writable_path("helixconfig.json"),
-        "helixconfig.json",
-        "/opt/helixscreen/helixconfig.json",
-    };
-
-    for (const std::string& path : paths) {
-        std::ifstream file(path);
-        if (!file.is_open()) {
-            continue;
-        }
-
-        std::string content((std::istreambuf_iterator<char>(file)),
-                            std::istreambuf_iterator<char>());
-
-        // Look for "watchdog" section with "auto_restart_sec"
-        // Simple regex parsing to avoid JSON library dependency
-        std::regex timeout_regex(R"("auto_restart_sec"\s*:\s*(\d+))");
-        std::smatch match;
-        if (std::regex_search(content, match, timeout_regex) && match.size() > 1) {
-            int timeout = std::stoi(match[1].str());
-            spdlog::debug("[Watchdog] Read auto_restart_sec={} from {}", timeout, path);
-            return timeout;
-        }
+    std::string path;
+    const auto timeout = helix::read_settings_int("auto_restart_sec", &path);
+    if (!timeout) {
+        return DEFAULT_AUTO_RESTART_SEC;
     }
-
-    return DEFAULT_AUTO_RESTART_SEC;
+    spdlog::debug("[Watchdog] Read auto_restart_sec={} from {}", *timeout, path);
+    return *timeout;
 }
 
 /**
- * @brief Read brightness from settings.json (same as splash)
+ * @brief Configured brightness clamped to 10-100 (same as splash)
  */
 static int read_config_brightness(int default_value = 100) {
-    std::vector<std::string> paths{
-        helix::writable_path("settings.json"),
-        helix::writable_path("helixconfig.json"),
-        "helixconfig.json",
-        "/opt/helixscreen/helixconfig.json",
-    };
-
-    for (const std::string& path : paths) {
-        std::ifstream file(path);
-        if (!file.is_open()) {
-            continue;
-        }
-
-        std::string content((std::istreambuf_iterator<char>(file)),
-                            std::istreambuf_iterator<char>());
-
-        std::regex brightness_regex(R"("brightness"\s*:\s*(\d+))");
-        std::smatch match;
-        if (std::regex_search(content, match, brightness_regex) && match.size() > 1) {
-            int brightness = std::stoi(match[1].str());
-            if (brightness < 10)
-                brightness = 10;
-            if (brightness > 100)
-                brightness = 100;
-            return brightness;
-        }
-    }
-
-    return default_value;
+    const auto brightness = helix::read_settings_int("brightness");
+    return brightness ? std::clamp(*brightness, 10, 100) : default_value;
 }
 
 // =============================================================================
@@ -245,7 +195,8 @@ static int read_config_brightness(int default_value = 100) {
 struct WatchdogArgs {
     int width = 0; // 0 = auto-detect from display hardware
     int height = 0;
-    int rotation = 0;          // Display rotation in degrees (0, 90, 180, 270)
+    int rotation = 0;          // Display rotation for the current launch (0, 90, 180, 270)
+    int cli_rotation = 0;      // -r value; 0 = read the saved setting before each launch
     std::string splash_binary; // Optional: --splash-bin=<path>
     pid_t splash_pid = 0;      // Optional: --splash-pid=N (externally started splash)
     std::string child_binary;
@@ -283,7 +234,7 @@ static bool parse_args(int argc, char** argv, WatchdogArgs& args) {
         } else if (strcmp(argv[i], "-h") == 0 && i + 1 < argc) {
             args.height = atoi(argv[++i]);
         } else if (strcmp(argv[i], "-r") == 0 && i + 1 < argc) {
-            args.rotation = atoi(argv[++i]);
+            args.cli_rotation = atoi(argv[++i]);
         } else if (strncmp(argv[i], "--splash-bin=", 13) == 0) {
             args.splash_binary = argv[i] + 13;
         } else if (strncmp(argv[i], "--splash-pid=", 13) == 0) {
@@ -1096,7 +1047,7 @@ static void backoff_sleep(int seconds) {
     }
 }
 
-static int run_watchdog(const WatchdogArgs& args) {
+static int run_watchdog(WatchdogArgs args) {
     spdlog::info("[Watchdog] Starting watchdog supervisor");
     spdlog::info("[Watchdog] Child binary: {}", args.child_binary);
     if (!args.splash_binary.empty()) {
@@ -1108,17 +1059,7 @@ static int run_watchdog(const WatchdogArgs& args) {
 
     bool first_launch = true;
 
-    // Rolling window of recent non-zero deliberate-exit timestamps. See the
-    // RESTART_LOOP_* constants at the top of this file for rationale.
-    std::deque<std::chrono::steady_clock::time_point> recent_failures;
-
-    // TRANSIENT exec/fork failures get their own counters, deliberately NOT
-    // windowed: with exponential backoff a fixed window would drain faster than
-    // failures arrive and the budget would never bite. Consecutive-count
-    // semantics instead — any launch that actually reached helix-screen clears
-    // them, so a single successful start wipes the history.
-    int consecutive_transient_failures = 0;
-    int transient_cooldown_rounds = 0;
+    helix::watchdog::RestartFailureCounters launch_failures;
 
     // Rolling window of recent crash signatures (signal_num for SIGNAL crashes,
     // or exit_code for crash-handler 128..159 exits). Detecting the same
@@ -1132,6 +1073,14 @@ static int run_watchdog(const WatchdogArgs& args) {
     std::deque<CrashEvent> recent_crashes;
 
     while (!g_quit) {
+        const int launch_rotation = helix::watchdog::rotation_for_launch(
+            args.cli_rotation, [] { return read_config_rotation(0); });
+        if (launch_rotation != args.rotation) {
+            spdlog::info("[Watchdog] Display rotation: {}° (was {}°)", launch_rotation,
+                         args.rotation);
+            args.rotation = launch_rotation;
+        }
+
         // Start or adopt splash screen before launching helix-screen.
         // On first launch, prefer an externally-started splash (args.splash_pid)
         // over starting a new one. On restarts, always start fresh (the original
@@ -1197,15 +1146,23 @@ static int run_watchdog(const WatchdogArgs& args) {
                                     ? helix::watchdog::ExecFailureClass::NONE
                                     : helix::watchdog::classify_child_exit_code(crash.exit_code);
 
-        // Any launch that got past exec ends the transient streak, so one
-        // successful start wipes the accumulated pressure history.
-        if (exec_class != helix::watchdog::ExecFailureClass::TRANSIENT) {
-            consecutive_transient_failures = 0;
-            transient_cooldown_rounds = 0;
+        // A launch that ran, whether it exited cleanly or crashed once up,
+        // clears every budget: the condition that was blocking startup is gone.
+        const bool launch_ran = crash.was_signaled || crash.exit_code == 0 ||
+                                (crash.exit_code > 128 && crash.exit_code < 160);
+        if (launch_ran) {
+            launch_failures.on_launch_succeeded();
         }
 
         // Normal exit (code 0) - just restart silently
         if (!crash.was_signaled && crash.exit_code == 0) {
+            if (helix::watchdog::hand_clean_exit_to_service_manager(
+                    was_update_restart, getenv("HELIX_SERVICE_RESTARTS"))) {
+                spdlog::info(
+                    "[Watchdog] Update restart under a restarting service - exiting so the "
+                    "service restarts and refreshes its units");
+                break;
+            }
             spdlog::info("[Watchdog] Child exited normally, restarting");
             continue;
         }
@@ -1237,11 +1194,12 @@ static int run_watchdog(const WatchdogArgs& args) {
                 // FFT, a large upload — anything that pushes a small board into
                 // swap). Counted on its own so it cannot spend the small
                 // non-transient budget and strand the user at a black screen.
-                failure_count = ++consecutive_transient_failures;
+                failure_count = launch_failures.record(exec_class);
                 spdlog::warn("[Watchdog] Child launch failed transiently (exit {}); "
                              "consecutive transient failures: {}/{}, cooldown rounds used {}/{}",
                              crash.exit_code, failure_count,
-                             helix::watchdog::TRANSIENT_MAX_FAILURES, transient_cooldown_rounds,
+                             helix::watchdog::TRANSIENT_MAX_FAILURES,
+                             launch_failures.cooldown_rounds,
                              helix::watchdog::TRANSIENT_MAX_COOLDOWN_ROUNDS);
             } else {
                 // Genuine non-zero exit (no crash): deliberate exit() with a
@@ -1249,21 +1207,15 @@ static int run_watchdog(const WatchdogArgs& args) {
                 // CLI arg error — or a PERMANENT exec failure (missing binary,
                 // no execute permission, path is a directory).
                 //
-                // Tracked in a rolling window: if they keep happening, the
+                // Counted consecutively: if they keep happening, the
                 // underlying problem won't fix itself by retrying, so bail out
                 // and let the service manager (or a human) see the failure
                 // rather than spamming logs forever.
-                auto now = std::chrono::steady_clock::now();
-                const auto window = std::chrono::seconds(RESTART_LOOP_WINDOW_SEC);
-                while (!recent_failures.empty() && (now - recent_failures.front()) > window) {
-                    recent_failures.pop_front();
-                }
-                recent_failures.push_back(now);
-                failure_count = static_cast<int>(recent_failures.size());
+                failure_count = launch_failures.record(exec_class);
             }
 
-            const auto decision = helix::watchdog::decide_restart_action(exec_class, failure_count,
-                                                                         transient_cooldown_rounds);
+            const auto decision = helix::watchdog::decide_restart_action(
+                exec_class, failure_count, launch_failures.cooldown_rounds);
 
             if (decision.action == RestartAction::GIVE_UP) {
                 if (exec_class == ExecFailureClass::TRANSIENT) {
@@ -1271,26 +1223,25 @@ static int run_watchdog(const WatchdogArgs& args) {
                         "[Watchdog] Transient launch failures never cleared: {} cooldown "
                         "rounds exhausted (last exit code: {}). Exiting watchdog with code "
                         "{} so the service manager sees it.",
-                        transient_cooldown_rounds, crash.exit_code, RESTART_LOOP_EXIT_CODE);
+                        launch_failures.cooldown_rounds, crash.exit_code, RESTART_LOOP_EXIT_CODE);
                 } else {
                     spdlog::critical(
                         "[Watchdog] Restart loop detected: child exited non-zero {} times "
-                        "in the last {}s (last exit code: {}). Giving up to avoid busy-loop; "
+                        "in a row (last exit code: {}). Giving up to avoid busy-loop; "
                         "exiting watchdog with code {}. Investigate the underlying failure "
                         "(another instance running, bad config, missing library, etc.).",
-                        failure_count, RESTART_LOOP_WINDOW_SEC, crash.exit_code,
-                        RESTART_LOOP_EXIT_CODE);
+                        failure_count, crash.exit_code, RESTART_LOOP_EXIT_CODE);
                 }
                 cleanup_splash(g_splash_pid);
                 return RESTART_LOOP_EXIT_CODE;
             }
 
             if (decision.action == RestartAction::COOLDOWN_RETRY) {
-                ++transient_cooldown_rounds;
-                consecutive_transient_failures = 0;
+                ++launch_failures.cooldown_rounds;
+                launch_failures.transient = 0;
                 spdlog::warn("[Watchdog] Transient launch failures outlasted the backoff "
                              "budget; cooling down {}s before retrying (round {}/{})",
-                             decision.delay_seconds, transient_cooldown_rounds,
+                             decision.delay_seconds, launch_failures.cooldown_rounds,
                              helix::watchdog::TRANSIENT_MAX_COOLDOWN_ROUNDS);
             } else {
                 spdlog::warn("[Watchdog] Child exited with code {} ({}, not a crash), "
@@ -1357,8 +1308,11 @@ static int run_watchdog(const WatchdogArgs& args) {
         spdlog::warn("[Watchdog] Crash detected, showing recovery dialog{}",
                      crash_loop_detected ? " (loop detected)" : "");
 
+        // standalone_rotation adds the kernel's panel_orientation, which args.rotation
+        // leaves out: forwarding it to the app would override the app's own probe.
         DialogChoice choice =
-            show_crash_dialog(args.width, args.height, args.rotation, crash, crash_loop_detected);
+            show_crash_dialog(args.width, args.height, helix::standalone_rotation(args.rotation),
+                              crash, crash_loop_detected);
 
         if (choice == DialogChoice::RESTART_SYSTEM) {
             perform_system_restart();
@@ -1436,10 +1390,8 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Read display rotation from config if not set via CLI
-    if (args.rotation == 0) {
-        args.rotation = read_config_rotation(0);
-    }
+    args.rotation = helix::watchdog::rotation_for_launch(args.cli_rotation,
+                                                         [] { return read_config_rotation(0); });
     if (args.rotation != 0) {
         spdlog::info("[Watchdog] Display rotation: {}°", args.rotation);
     }

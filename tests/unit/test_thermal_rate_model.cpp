@@ -124,6 +124,49 @@ TEST_CASE("ThermalRateModel blended_rate_for_save", "[thermal_rate]") {
     REQUIRE(blended == Catch::Approx(1.3f).margin(0.05f));
 }
 
+TEST_CASE("ThermalRateModel leaves a hold between two climbs out of the rate it keeps",
+          "[thermal_rate]") {
+    // A nozzle heated to a probing temperature, held there for five minutes,
+    // then heated to print temperature: 0.5 s/C on both climbs, sampled every
+    // 5s as the pre-print collector does.
+    ThermalRateModel model;
+    model.reset(30.0f);
+    uint32_t tick = 5000;
+    float temp = 30.0f;
+    for (; temp < 130.0f; tick += 5000, temp += 10.0f) {
+        model.record_sample(temp, tick);
+    }
+    for (int i = 0; i < 60; ++i, tick += 5000) {
+        model.record_sample(130.0f + ((i % 2 == 0) ? 0.3f : -0.3f), tick);
+    }
+    for (temp = 140.0f; temp <= 230.0f; tick += 5000, temp += 10.0f) {
+        model.record_sample(temp, tick);
+    }
+
+    CAPTURE(model.blended_rate_for_save(), model.measured_rate().value_or(-1.0f));
+    REQUIRE(model.blended_rate_for_save() == Catch::Approx(0.5f).margin(0.1f));
+    REQUIRE(model.measured_rate().value_or(0.0f) == Catch::Approx(0.5f).margin(0.1f));
+}
+
+TEST_CASE("ThermalRateModel keeps the rate of the whole climb, not its last approach",
+          "[thermal_rate]") {
+    // A bed climbs 60C at 0.5 s/C, then crawls its last 10C at 5 s/C: 80s for
+    // 70C over the whole climb.
+    ThermalRateModel model;
+    model.reset(30.0f);
+    uint32_t tick = 5000;
+    for (float temp = 30.0f; temp <= 90.0f; tick += 5000, temp += 10.0f) {
+        model.record_sample(temp, tick);
+    }
+    tick += 5000;
+    for (float temp = 92.0f; temp <= 100.0f; tick += 10000, temp += 2.0f) {
+        model.record_sample(temp, tick);
+    }
+
+    CAPTURE(model.blended_rate_for_save());
+    REQUIRE(model.blended_rate_for_save() == Catch::Approx(80.0f / 70.0f).margin(0.15f));
+}
+
 TEST_CASE("ThermalRateModel no measurement returns 0 for save", "[thermal_rate]") {
     ThermalRateModel model;
     model.reset(25.0f);
@@ -160,13 +203,40 @@ TEST_CASE("ThermalRateManager estimate_heating_seconds", "[thermal_rate]") {
 
 TEST_CASE("ThermalRateManager apply_archetype_defaults", "[thermal_rate]") {
     ThermalRateManager manager;
-    manager.apply_archetype_defaults(350.0f);
+    manager.apply_archetype_defaults(350.0f, "");
     REQUIRE(manager.get_model("extruder").best_rate() == Catch::Approx(0.25f));
     REQUIRE(manager.get_model("heater_bed").best_rate() == Catch::Approx(2.0f));
 
     ThermalRateManager manager2;
-    manager2.apply_archetype_defaults(235.0f);
+    manager2.apply_archetype_defaults(235.0f, "");
     REQUIRE(manager2.get_model("heater_bed").best_rate() == Catch::Approx(1.0f));
+}
+
+TEST_CASE("ThermalRateManager takes measured rates from the printer database", "[thermal_rate]") {
+    // A 256mm bed reads as a medium bed (1.5 s/C) to the size guess.
+    constexpr float BED_X_MAX = 256.0f;
+
+    SECTION("Centauri Carbon: 24.5 to 105C took ~484s on the printer") {
+        ThermalRateManager manager;
+        manager.apply_archetype_defaults(BED_X_MAX, "Elegoo Centauri Carbon");
+        REQUIRE(manager.estimate_heating_seconds("heater_bed", 24.5f, 105.0f) >= 400.0f);
+        REQUIRE(manager.get_model("heater_bed").best_rate() == Catch::Approx(6.0f));
+        REQUIRE(manager.get_model("extruder").best_rate() == Catch::Approx(0.4f));
+    }
+
+    SECTION("A printer without measured rates keeps the size guess") {
+        ThermalRateManager manager;
+        manager.apply_archetype_defaults(BED_X_MAX, "Voron 2.4");
+        REQUIRE(manager.get_model("heater_bed").best_rate() == Catch::Approx(1.5f));
+        REQUIRE(manager.get_model("extruder").best_rate() == Catch::Approx(0.25f));
+    }
+
+    SECTION("A rate learned on the printer still wins") {
+        ThermalRateManager manager;
+        manager.get_model("heater_bed").load_history(4.0f);
+        manager.apply_archetype_defaults(BED_X_MAX, "Elegoo Centauri Carbon");
+        REQUIRE(manager.get_model("heater_bed").best_rate() == Catch::Approx(4.0f));
+    }
 }
 
 // ============================================================================
@@ -190,9 +260,6 @@ TEST_CASE("ThermalRateManager composite estimate without predictor history", "[t
     REQUIRE_FALSE(predictor.has_predictions());
     auto defaults = predictor.predicted_phases();
     REQUIRE_FALSE(defaults.empty());
-
-    // remaining_seconds returns 0 without history — collector uses thermal model instead
-    REQUIRE(predictor.remaining_seconds({}, 0, 0) == 0);
 
     // Composite total = heating + operation defaults
     float total = ext_heat + bed_heat;
@@ -219,10 +286,6 @@ TEST_CASE("ThermalRateManager composite estimate with predictor history", "[ther
     REQUIRE(predictor.has_predictions());
     auto phases = predictor.predicted_phases();
     REQUIRE(phases[mesh_phase] == 166); // learned, not default 90
-
-    // remaining_seconds works with history
-    int remaining = predictor.remaining_seconds({}, 0, 0);
-    REQUIRE(remaining == 171); // 5 + 166
 
     // Learned bed mesh (166s) should be larger than default (90s)
     helix::PreprintPredictor predictor_default;

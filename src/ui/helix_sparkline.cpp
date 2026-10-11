@@ -42,7 +42,7 @@ lv_obj_t* HelixSparkline::create(lv_obj_t* parent, const std::string& source) {
     // freed subject → UAF at lv_observer.c:584.
     lv_subject_t* tick = lv_xml_get_subject(nullptr, "perf_history_tick");
     if (tick) {
-        impl->tick_observer_ = helix::ui::observe_int_sync<HelixSparkline>(
+        impl->tick_observer_ = helix::ui::observe<int>(
             tick, impl, [](HelixSparkline* self, int /*value*/) { self->invalidate_self(); },
             helix::perf::PerformanceState::instance().subjects_lifetime());
     } else {

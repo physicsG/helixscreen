@@ -1,8 +1,10 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "../test_helpers/config_dir_guard.h"
 #include "../test_helpers/config_test_access.h"
 #include "../test_helpers/scoped_breakpoint.h"
+#include "../test_helpers/scoped_runtime_config.h"
 #include "config.h"
 #include "data_root_resolver.h"
 #include "panel_widget_config.h"
@@ -11,6 +13,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <map>
 #include <set>
 #include <utility>
 
@@ -41,6 +44,28 @@ static bool default_enabled_for(const std::string& id) {
         }
     }
     return false;
+}
+
+/// What a save-and-reload must preserve: every widget's enabled state, and the
+/// order of the enabled ones. Disabled unplaced widgets may come back in
+/// registry order, since nothing reads their position.
+static void require_same_widget_state(const std::vector<PanelWidgetEntry>& a,
+                                      const std::vector<PanelWidgetEntry>& b) {
+    REQUIRE(a.size() == b.size());
+    std::map<std::string, bool> state_a, state_b;
+    std::vector<std::string> enabled_a, enabled_b;
+    for (const auto& e : a) {
+        state_a[e.id] = e.enabled;
+        if (e.enabled)
+            enabled_a.push_back(e.id);
+    }
+    for (const auto& e : b) {
+        state_b[e.id] = e.enabled;
+        if (e.enabled)
+            enabled_b.push_back(e.id);
+    }
+    REQUIRE(state_a == state_b);
+    REQUIRE(enabled_a == enabled_b);
 }
 
 // ============================================================================
@@ -249,7 +274,16 @@ TEST_CASE_METHOD(PanelWidgetConfigFixture,
 
     auto& saved = root["pages"][0]["widgets"];
     REQUIRE(saved.is_array());
-    REQUIRE(saved.size() == default_grid_widget_count());
+    // A widget that is off by default and unplaced is left out: the reader
+    // appends it from the registry, so writing it costs bytes and says nothing.
+    REQUIRE(saved.size() < default_grid_widget_count());
+    for (const auto& item : saved) {
+        const auto* def = find_widget_def(item["id"].get<std::string>());
+        REQUIRE(def != nullptr);
+        CAPTURE(def->id);
+        REQUIRE_FALSE(
+            (!def->default_enabled && !item["enabled"].get<bool>() && item["col"].get<int>() < 0));
+    }
 
     // Each entry should have id and enabled
     for (const auto& item : saved) {
@@ -260,7 +294,51 @@ TEST_CASE_METHOD(PanelWidgetConfigFixture,
     }
 
     // The third entry should be disabled
-    REQUIRE(saved[2]["enabled"].get<bool>() == false);
+    const std::string third = wc.entries()[2].id;
+    auto it = std::find_if(saved.begin(), saved.end(),
+                           [&](const json& item) { return item["id"] == third; });
+    REQUIRE(it != saved.end());
+    REQUIRE((*it)["enabled"].get<bool>() == false);
+}
+
+TEST_CASE_METHOD(
+    PanelWidgetConfigFixture,
+    "PanelWidgetConfig: crash-loop safe mode shows defaults and keeps the saved layout",
+    "[panel_widget][widget_config][crash_loop]") {
+    json widgets = json::array({
+        {{"id", "temperature"}, {"enabled", true}, {"col", 0}, {"row", 0}},
+        {{"id", "led"}, {"enabled", false}, {"col", 1}, {"row", 0}},
+        {{"id", "network"}, {"enabled", true}, {"col", 2}, {"row", 0}},
+    });
+    setup_with_widgets(widgets);
+    const json saved_before = get_saved_root();
+
+    {
+        ScopedRuntimeConfig scoped_config;
+        get_runtime_config()->crash_loop_safe_mode = true;
+
+        PanelWidgetConfig wc("home", config);
+        wc.load();
+        const auto defaults = PanelWidgetConfig::build_default_grid();
+        REQUIRE(wc.entries().size() == defaults.size());
+        for (size_t i = 0; i < defaults.size(); ++i) {
+            CHECK(wc.entries()[i].id == defaults[i].id);
+            CHECK(wc.entries()[i].enabled == defaults[i].enabled);
+        }
+
+        // Edits made in safe mode are not persisted over the user's layout.
+        wc.set_enabled(0, !wc.entries()[0].enabled);
+        wc.save();
+        CHECK(get_saved_root() == saved_before);
+    }
+
+    // Normal mode reads the saved layout again.
+    PanelWidgetConfig wc("home", config);
+    wc.load();
+    REQUIRE_FALSE(wc.entries().empty());
+    CHECK(wc.entries()[0].id == "temperature");
+    CHECK(wc.entries()[1].id == "led");
+    CHECK_FALSE(wc.entries()[1].enabled);
 }
 
 // ============================================================================
@@ -283,14 +361,64 @@ TEST_CASE_METHOD(PanelWidgetConfigFixture,
     PanelWidgetConfig wc2("home", config);
     wc2.load();
 
-    const auto& e1 = wc1.entries();
-    const auto& e2 = wc2.entries();
-    REQUIRE(e1.size() == e2.size());
+    require_same_widget_state(wc1.entries(), wc2.entries());
+}
 
-    for (size_t i = 0; i < e1.size(); ++i) {
-        REQUIRE(e1[i].id == e2[i].id);
-        REQUIRE(e1[i].enabled == e2[i].enabled);
+// ============================================================================
+// Config tests: add_page
+// ============================================================================
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture,
+                 "PanelWidgetConfig: add_page inserts at a position, appends by default, and "
+                 "refuses at the cap",
+                 "[panel_widget][widget_config]") {
+    setup_empty_config();
+    PanelWidgetConfig wc("home", config);
+    wc.load();
+    REQUIRE(wc.page_count() == 1);
+
+    // An append, then an insert before the first page. Names sit outside the
+    // page_N series generate_page_id() mints, so no id repeats.
+    REQUIRE(wc.add_page("extra_a") == 1);
+    const std::string first_id = wc.page_id(0);
+    const size_t main_before = wc.main_page_index();
+
+    REQUIRE(wc.add_page("extra_b", 0) == 0);
+    REQUIRE(wc.page_count() == 3);
+    REQUIRE(wc.page_id(0) == "extra_b");
+    REQUIRE(wc.page_id(1) == first_id);
+    // The main page keeps its place in the numbering when a page lands before it.
+    REQUIRE(wc.main_page_index() == main_before + 1);
+    // The entry the first page held shifted with its page.
+    REQUIRE_FALSE(wc.page_entries(1).empty());
+    REQUIRE(wc.page_entries(0).empty());
+
+    // A position past the end appends; a negative one is the default append.
+    REQUIRE(wc.add_page("extra_c", 99) == 3);
+    REQUIRE(wc.add_page("extra_d", -1) == 4);
+
+    // Removing the prepended page shifts the main page's index back down.
+    REQUIRE(wc.remove_page(0));
+    REQUIRE(wc.main_page_index() == main_before);
+    REQUIRE(wc.page_id(0) == first_id);
+
+    while (wc.add_page() >= 0) {
     }
+    REQUIRE(wc.page_count() == MAX_PAGES);
+    // At the cap nothing is added, wherever it would land.
+    REQUIRE(wc.add_page() == -1);
+    REQUIRE(wc.add_page("", 0) == -1);
+    REQUIRE(wc.main_page_index() == main_before);
+
+    // A prepended page survives a save and reload in order.
+    wc.save();
+    PanelWidgetConfig reloaded("home", config);
+    reloaded.load();
+    REQUIRE(reloaded.page_count() == wc.page_count());
+    for (size_t i = 0; i < wc.page_count(); ++i) {
+        REQUIRE(reloaded.page_id(i) == wc.page_id(i));
+    }
+    REQUIRE(reloaded.main_page_index() == wc.main_page_index());
 }
 
 // ============================================================================
@@ -724,6 +852,10 @@ TEST_CASE("PanelWidgetRegistry: every category has at least one widget",
           "[panel_widget][widget_config]") {
     const auto& defs = get_all_widget_defs();
     for (const auto& cat : get_widget_categories()) {
+        // Plugins holds only runtime definitions, so a printer with no plugin
+        // widgets has an empty category; the catalog hides the row.
+        if (cat.id == WidgetCategory::Plugins)
+            continue;
         CAPTURE(cat.display_name);
         auto count = std::count_if(defs.begin(), defs.end(), [&cat](const PanelWidgetDef& def) {
             return def.category == cat.id;
@@ -880,12 +1012,7 @@ TEST_CASE_METHOD(PanelWidgetConfigFixture,
     PanelWidgetConfig wc2("home", config);
     wc2.load();
 
-    REQUIRE(wc1.entries().size() == wc2.entries().size());
-    for (size_t i = 0; i < wc1.entries().size(); ++i) {
-        CAPTURE(i);
-        REQUIRE(wc1.entries()[i].id == wc2.entries()[i].id);
-        REQUIRE(wc1.entries()[i].enabled == wc2.entries()[i].enabled);
-    }
+    require_same_widget_state(wc1.entries(), wc2.entries());
 }
 
 // ============================================================================
@@ -1312,7 +1439,7 @@ TEST_CASE("PanelWidgetConfig: build_default_grid produces correct layout",
     std::vector<PanelWidgetEntry> placed;
     std::vector<PanelWidgetEntry> disabled;
     for (const auto& e : entries) {
-        if (e.enabled && e.has_grid_position()) {
+        if (e.is_placed()) {
             placed.push_back(e);
         } else if (!e.enabled) {
             disabled.push_back(e);
@@ -1391,7 +1518,7 @@ TEST_CASE("PanelWidgetConfig: build_default_grid produces correct layout",
     {
         std::set<std::pair<int, int>> occupied;
         for (const auto& e : entries) {
-            if (!e.enabled || !e.has_grid_position())
+            if (!e.is_placed())
                 continue;
             for (int dc = 0; dc < e.colspan; ++dc) {
                 for (int dr = 0; dr < e.rowspan; ++dr) {
@@ -1559,6 +1686,25 @@ TEST_CASE_METHOD(PanelWidgetConfigFixture, "PanelWidgetConfig: add_page refuses 
     REQUIRE(wc.page_count() == MAX_PAGES);
 }
 
+TEST_CASE_METHOD(PanelWidgetConfigFixture,
+                 "PanelWidgetConfig: can_add_page holds until the page cap",
+                 "[panel_widget][widget_config][multipage][1638]") {
+    setup_empty_config();
+    PanelWidgetConfig wc("home", config);
+    wc.load();
+    REQUIRE(wc.page_count() == 1);
+    CHECK(wc.can_add_page());
+
+    while (wc.page_count() < MAX_PAGES) {
+        REQUIRE(wc.add_page() >= 0);
+    }
+    CHECK_FALSE(wc.can_add_page());
+
+    REQUIRE(wc.remove_page(wc.page_count() - 1));
+    REQUIRE(wc.page_count() == MAX_PAGES - 1);
+    CHECK(wc.can_add_page());
+}
+
 TEST_CASE_METHOD(PanelWidgetConfigFixture, "PanelWidgetConfig: remove_page removes non-main page",
                  "[panel_widget][widget_config][multipage]") {
     setup_empty_config();
@@ -1664,6 +1810,32 @@ TEST_CASE_METHOD(PanelWidgetConfigFixture, "PanelWidgetConfig: delete_entry sear
     REQUIRE(wc.page_entries(0)[0].id == "shutdown");
 }
 
+TEST_CASE_METHOD(PanelWidgetConfigFixture,
+                 "PanelWidgetConfig: remove_from_page deletes an added instance, parks a built-in",
+                 "[panel_widget][widget_config][multipage]") {
+    json w0 = json::array({{{"id", "shutdown"}, {"enabled", true}, {"col", 0}, {"row", 0}}});
+    json w1 = json::array({
+        {{"id", "shutdown"}, {"enabled", true}, {"col", 0}, {"row", 0}},
+        {{"id", "thermistor:1"}, {"enabled", true}, {"col", 2}, {"row", 0}},
+    });
+    setup_with_pages({{"p0", w0}, {"p1", w1}}, 0, 2);
+    PanelWidgetConfig wc("home", config);
+    wc.load();
+    REQUIRE(wc.page_entries(1).size() == 2);
+
+    wc.remove_from_page(1, 1);
+    REQUIRE(wc.page_entries(1).size() == 1);
+    CHECK(wc.page_entries(1)[0].id == "shutdown");
+
+    // A built-in stays listed for the catalog, off the grid, and only on the
+    // page it was removed from.
+    wc.remove_from_page(1, 0);
+    REQUIRE(wc.page_entries(1).size() == 1);
+    CHECK_FALSE(wc.page_entries(1)[0].enabled);
+    CHECK_FALSE(wc.page_entries(1)[0].is_placed());
+    CHECK(wc.page_entries(0)[0].enabled);
+}
+
 TEST_CASE_METHOD(PanelWidgetConfigFixture, "PanelWidgetConfig: mint_instance_id scans all pages",
                  "[panel_widget][widget_config][multipage]") {
     json w0 = json::array({
@@ -1729,6 +1901,269 @@ TEST_CASE_METHOD(PanelWidgetConfigFixture,
     wc.set_widget_config("thermistor:1", {{"sensor", "extruder"}});
     auto cfg2 = wc.get_widget_config("thermistor:1");
     REQUIRE(cfg2["sensor"] == "extruder");
+}
+
+// ============================================================================
+// Multi-page tests — placement and page population
+// ============================================================================
+
+/// The page of every entry named @p id, one element per entry, in page order.
+static std::vector<size_t> pages_holding(const PanelWidgetConfig& wc, const std::string& id) {
+    std::vector<size_t> found;
+    for (size_t p = 0; p < wc.page_count(); ++p) {
+        for (const auto& e : wc.page_entries(p)) {
+            if (e.id == id) {
+                found.push_back(p);
+            }
+        }
+    }
+    return found;
+}
+
+TEST_CASE("PanelWidgetEntry: is_placed needs both enabled and a grid cell",
+          "[panel_widget][widget_config][multipage][1638]") {
+    CHECK(PanelWidgetEntry{"a", true, {}, 0, 0, 1, 1}.is_placed());
+    CHECK_FALSE(PanelWidgetEntry{"b", true, {}, -1, -1, 1, 1}.is_placed()); // enabled, no cell
+    CHECK_FALSE(PanelWidgetEntry{"c", false, {}, 0, 0, 1, 1}.is_placed());  // a cell, disabled
+    CHECK_FALSE(PanelWidgetEntry{"d", true, {}, 2, -1, 1, 1}.is_placed());  // half a coordinate
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture,
+                 "PanelWidgetConfig: page_is_populated asks for a placed entry",
+                 "[panel_widget][widget_config][multipage][1638]") {
+    json w0 = json::array({{{"id", "shutdown"}, {"enabled", true}, {"col", 0}, {"row", 0}}});
+    json w1 = json::array({
+        {{"id", "thermistor:1"}, {"enabled", false}, {"col", 0}, {"row", 0}},
+        {{"id", "thermistor:2"}, {"enabled", true}},
+    });
+    setup_with_pages({{"p0", w0}, {"p1", w1}, {"p2", json::array()}}, 0, 3);
+
+    PanelWidgetConfig wc("home", config);
+    wc.load();
+    REQUIRE(wc.page_count() == 3);
+    // Page 1 holds entries, and none of them is placed.
+    REQUIRE(wc.page_entries(1).size() == 2);
+    REQUIRE(wc.page_entries(1)[1].enabled);
+    REQUIRE_FALSE(wc.page_entries(1)[1].has_grid_position());
+
+    CHECK(wc.page_is_populated(0));
+    CHECK_FALSE(wc.page_is_populated(1)); // a disabled entry with a cell, an enabled one without
+    CHECK_FALSE(wc.page_is_populated(2)); // no entries at all
+    CHECK_FALSE(wc.page_is_populated(3)); // past the last page
+
+    wc.page_entries_mut(1)[1].col = 1;
+    wc.page_entries_mut(1)[1].row = 0;
+    CHECK(wc.page_is_populated(1));
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture,
+                 "PanelWidgetConfig: page_entries reads a page past the last as empty",
+                 "[panel_widget][widget_config][multipage][1638]") {
+    json w0 = json::array({{{"id", "shutdown"}, {"enabled", true}, {"col", 0}, {"row", 0}}});
+    json w1 = json::array({{{"id", "thermistor:1"}, {"enabled", true}, {"col", 0}, {"row", 0}}});
+    setup_with_pages({{"p0", w0}, {"p1", w1}}, 0, 2);
+
+    PanelWidgetConfig wc("home", config);
+    wc.load();
+    REQUIRE(wc.page_count() == 2);
+    // The last page holds an entry, so a read past it that lands on a real
+    // page shows up as a non-empty result.
+    REQUIRE_FALSE(wc.page_entries(1).empty());
+
+    CHECK(wc.page_entries(2).empty());  // the next-page slot's index
+    CHECK(wc.page_entries(10).empty()); // further out
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture,
+                 "PanelWidgetConfig: place_entry moves an entry to another page",
+                 "[panel_widget][widget_config][multipage][1638]") {
+    json w0 = json::array({
+        {{"id", "shutdown"}, {"enabled", true}, {"col", 0}, {"row", 0}},
+        {{"id", "thermistor:1"}, {"enabled", true}, {"col", 1}, {"row", 0}},
+    });
+    json w1 = json::array({{{"id", "thermistor:2"}, {"enabled", true}, {"col", 0}, {"row", 0}}});
+    setup_with_pages({{"p0", w0}, {"p1", w1}}, 0, 2);
+
+    PanelWidgetConfig wc("home", config);
+    wc.load();
+    REQUIRE(pages_holding(wc, "thermistor:1") == std::vector<size_t>{0});
+
+    const int landed = wc.place_entry("thermistor:1", 1, 2, 1, 2, 2);
+
+    CHECK(pages_holding(wc, "thermistor:1") == std::vector<size_t>{1});
+    REQUIRE(landed == 1);
+    const auto& e = wc.page_entries(1)[1];
+    CHECK(e.id == "thermistor:1");
+    CHECK(e.enabled);
+    CHECK(e.col == 2);
+    CHECK(e.row == 1);
+    CHECK(e.colspan == 2);
+    CHECK(e.rowspan == 2);
+    // The origin page loses only the moved entry.
+    CHECK(wc.page_entries(0).front().id == "shutdown");
+    CHECK(wc.page_entries(1).front().id == "thermistor:2");
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture,
+                 "PanelWidgetConfig: place_entry updates an entry already on the page",
+                 "[panel_widget][widget_config][multipage][1638]") {
+    json w0 = json::array({{{"id", "shutdown"}, {"enabled", true}, {"col", 0}, {"row", 0}}});
+    json w1 = json::array({
+        {{"id", "thermistor:1"}, {"enabled", false}, {"col", -1}, {"row", -1}},
+        {{"id", "thermistor:2"}, {"enabled", true}, {"col", 0}, {"row", 0}},
+    });
+    setup_with_pages({{"p0", w0}, {"p1", w1}}, 0, 2);
+
+    PanelWidgetConfig wc("home", config);
+    wc.load();
+    REQUIRE(wc.page_entries(1).size() == 2);
+    REQUIRE_FALSE(wc.page_entries(1)[0].enabled);
+
+    const int landed = wc.place_entry("thermistor:1", 1, 3, 2, 2, 1);
+
+    CHECK(landed == 0);
+    CHECK(wc.page_entries(1).size() == 2); // updated where it stands, not appended
+    CHECK(pages_holding(wc, "thermistor:1") == std::vector<size_t>{1});
+    const auto& e = wc.page_entries(1)[0];
+    CHECK(e.id == "thermistor:1");
+    CHECK(e.enabled);
+    CHECK(e.col == 3);
+    CHECK(e.row == 2);
+    CHECK(e.colspan == 2);
+    CHECK(e.rowspan == 1);
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture,
+                 "PanelWidgetConfig: place_entry creates an entry no page holds",
+                 "[panel_widget][widget_config][multipage][1638]") {
+    json w0 = json::array({{{"id", "shutdown"}, {"enabled", true}, {"col", 0}, {"row", 0}}});
+    json w1 = json::array({{{"id", "thermistor:2"}, {"enabled", true}, {"col", 0}, {"row", 0}}});
+    setup_with_pages({{"p0", w0}, {"p1", w1}}, 0, 2);
+
+    PanelWidgetConfig wc("home", config);
+    wc.load();
+    REQUIRE(pages_holding(wc, "thermistor:7").empty());
+
+    const int landed = wc.place_entry("thermistor:7", 1, 1, 0, 1, 1);
+
+    REQUIRE(landed == 1);
+    CHECK(pages_holding(wc, "thermistor:7") == std::vector<size_t>{1});
+    const auto& e = wc.page_entries(1)[1];
+    CHECK(e.id == "thermistor:7");
+    CHECK(e.enabled);
+    CHECK(e.col == 1);
+    CHECK(e.row == 0);
+    CHECK(e.colspan == 1);
+    CHECK(e.rowspan == 1);
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture,
+                 "PanelWidgetConfig: place_entry keeps the widget's config with it",
+                 "[panel_widget][widget_config][multipage][1638]") {
+    const json shutdown = json{{"id", "shutdown"}, {"enabled", true}, {"col", 0}, {"row", 0}};
+
+    SECTION("a moved entry brings its config") {
+        json w0 = json::array({shutdown,
+                               {{"id", "thermistor:1"},
+                                {"enabled", true},
+                                {"config", {{"sensor", "bed"}}},
+                                {"col", 1},
+                                {"row", 0}}});
+        setup_with_pages({{"p0", w0}, {"p1", json::array()}}, 0, 2);
+        PanelWidgetConfig wc("home", config);
+        wc.load();
+
+        const int landed = wc.place_entry("thermistor:1", 1, 0, 0, 1, 1);
+
+        REQUIRE(landed == 0);
+        CHECK(wc.page_entries(1)[0].config.value("sensor", "") == "bed");
+    }
+
+    SECTION("an entry on the landing page keeps its own config over a duplicate's") {
+        json w0 = json::array({shutdown,
+                               {{"id", "thermistor:1"},
+                                {"enabled", true},
+                                {"config", {{"sensor", "bed"}}},
+                                {"col", 1},
+                                {"row", 0}}});
+        json w1 = json::array({{{"id", "thermistor:1"},
+                                {"enabled", false},
+                                {"config", {{"sensor", "chamber"}}},
+                                {"col", -1},
+                                {"row", -1}}});
+        setup_with_pages({{"p0", w0}, {"p1", w1}}, 0, 2);
+        PanelWidgetConfig wc("home", config);
+        wc.load();
+
+        const int landed = wc.place_entry("thermistor:1", 1, 0, 0, 1, 1);
+
+        REQUIRE(landed == 0);
+        CHECK(wc.page_entries(1)[0].config.value("sensor", "") == "chamber");
+    }
+
+    SECTION("an unconfigured entry on the landing page takes a duplicate's config") {
+        json w0 = json::array({shutdown,
+                               {{"id", "thermistor:1"},
+                                {"enabled", true},
+                                {"config", {{"sensor", "bed"}}},
+                                {"col", 1},
+                                {"row", 0}}});
+        json w1 =
+            json::array({{{"id", "thermistor:1"}, {"enabled", false}, {"col", -1}, {"row", -1}}});
+        setup_with_pages({{"p0", w0}, {"p1", w1}}, 0, 2);
+        PanelWidgetConfig wc("home", config);
+        wc.load();
+
+        const int landed = wc.place_entry("thermistor:1", 1, 0, 0, 1, 1);
+
+        REQUIRE(landed == 0);
+        CHECK(wc.page_entries(1)[0].config.value("sensor", "") == "bed");
+    }
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture,
+                 "PanelWidgetConfig: place_entry leaves one entry per id across pages",
+                 "[panel_widget][widget_config][multipage][1638]") {
+    const json twin = json{{"id", "thermistor:1"}, {"enabled", false}, {"col", -1}, {"row", -1}};
+    json w0 = json::array({{{"id", "shutdown"}, {"enabled", true}, {"col", 0}, {"row", 0}}, twin});
+    json w1 = json::array({twin, {{"id", "thermistor:2"}, {"enabled", true}}});
+    json w2 = json::array({twin});
+    setup_with_pages({{"p0", w0}, {"p1", w1}, {"p2", w2}}, 0, 3);
+
+    PanelWidgetConfig wc("home", config);
+    wc.load();
+    // load() drops an id repeated within one page, so the landing page's own
+    // twin is added in memory.
+    wc.page_entries_mut(1).push_back({"thermistor:1", false, json::object(), -1, -1, 1, 1});
+    REQUIRE(pages_holding(wc, "thermistor:1") == std::vector<size_t>{0, 1, 1, 2});
+
+    const int landed = wc.place_entry("thermistor:1", 1, 0, 0, 1, 1);
+
+    CHECK(pages_holding(wc, "thermistor:1") == std::vector<size_t>{1});
+    REQUIRE(landed == 0);
+    CHECK(wc.page_entries(1)[0].is_placed());
+    CHECK(wc.page_entries(1).size() == 2); // the landing page's own twin is gone too
+    CHECK(wc.page_entries(2).empty());
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture,
+                 "PanelWidgetConfig: place_entry refuses a page past the last",
+                 "[panel_widget][widget_config][multipage][1638]") {
+    json w0 = json::array({
+        {{"id", "shutdown"}, {"enabled", true}, {"col", 0}, {"row", 0}},
+        {{"id", "thermistor:1"}, {"enabled", true}, {"col", 1}, {"row", 0}},
+    });
+    setup_with_pages({{"p0", w0}, {"p1", json::array()}}, 0, 2);
+
+    PanelWidgetConfig wc("home", config);
+    wc.load();
+    const auto page0_before = wc.page_entries(0);
+
+    CHECK(wc.place_entry("thermistor:1", 2, 0, 0, 1, 1) == -1);
+
+    CHECK(wc.page_count() == 2);
+    CHECK(wc.page_entries(0) == page0_before); // the entry was not taken from its page
+    CHECK(wc.page_entries(1).empty());
 }
 
 // ============================================================================
@@ -2137,4 +2572,488 @@ TEST_CASE("preset seeds: placed widgets do not overlap", "[panel_widget_config][
             }
         }
     }
+}
+
+// ============================================================================
+// A layout that names no coordinate system
+// ============================================================================
+//
+// From config version 24 on, a panel node that places widgets also says which
+// system its numbers count in: `grid` for tracks, `layout_units` for pre-v22
+// cells. A node carrying `pages` with a placed widget and neither key is one a
+// build older than its own version stamp re-serialized — those builds write
+// `pages`/`main_page_index`/`next_page_id` and drop everything else, leaving
+// coordinates behind with nothing to read them against.
+//
+// Detection is conservative in one direction: a missed case scrambles a
+// dashboard, but a false one resets a dashboard that was fine. The negatives
+// below are the shapes that legitimately reach load() and must be left alone.
+
+namespace {
+
+/// A widget the defaults builder turns ON, so a saved layout that turns it OFF
+/// reads differently depending on whether the layout survived the load.
+std::string an_enabled_default_widget() {
+    for (const auto& e : PanelWidgetConfig::build_default_grid()) {
+        if (e.enabled) {
+            return e.id;
+        }
+    }
+    return {};
+}
+
+/// One home node in the pages format, placing @p id at (3,5) and hiding it.
+json placed_home_node(const std::string& id) {
+    json widgets = json::array({json{
+        {"id", id}, {"enabled", false}, {"col", 3}, {"row", 5}, {"colspan", 2}, {"rowspan", 2}}});
+    return json{{"main_page_index", 0},
+                {"next_page_id", 1},
+                {"pages", json::array({json{{"id", "main"}, {"widgets", widgets}}})}};
+}
+
+} // namespace
+
+TEST_CASE("PanelWidgetConfig: a placed layout naming no coordinate system is detected",
+          "[panel_widget_config][unnamed_units]") {
+    const json node = placed_home_node("printer_image");
+    CHECK(PanelWidgetConfig::has_uninterpretable_coordinates(node, 24));
+    // The keys stay mandatory as the version climbs, so a later stamp is the
+    // same shape and not an escape from the check.
+    CHECK(PanelWidgetConfig::has_uninterpretable_coordinates(node, 30));
+}
+
+TEST_CASE("PanelWidgetConfig: a named coordinate system is left alone",
+          "[panel_widget_config][unnamed_units]") {
+    SECTION("a grid signature names the tracks") {
+        json node = placed_home_node("printer_image");
+        node["grid"] = "12x24";
+        CHECK_FALSE(PanelWidgetConfig::has_uninterpretable_coordinates(node, 24));
+    }
+    SECTION("a cells tag names pre-v22 units") {
+        json node = placed_home_node("printer_image");
+        node["layout_units"] = "cells_v21";
+        node["legacy_rows"] = 14;
+        CHECK_FALSE(PanelWidgetConfig::has_uninterpretable_coordinates(node, 24));
+    }
+}
+
+TEST_CASE("PanelWidgetConfig: a layout below version 24 names nothing and is expected to",
+          "[panel_widget_config][unnamed_units]") {
+    const json node = placed_home_node("printer_image");
+    CHECK_FALSE(PanelWidgetConfig::has_uninterpretable_coordinates(node, 23));
+    CHECK_FALSE(PanelWidgetConfig::has_uninterpretable_coordinates(node, 0));
+}
+
+TEST_CASE("PanelWidgetConfig: a node with nothing to read is not this shape",
+          "[panel_widget_config][unnamed_units]") {
+    SECTION("a fresh install has no panel node") {
+        CHECK_FALSE(PanelWidgetConfig::has_uninterpretable_coordinates(json(), 24));
+        CHECK_FALSE(PanelWidgetConfig::has_uninterpretable_coordinates(json::object(), 24));
+        CHECK_FALSE(PanelWidgetConfig::has_uninterpretable_coordinates(json::array(), 24));
+    }
+    SECTION("a layout that places nothing carries no coordinate to misread") {
+        json node = placed_home_node("printer_image");
+        node["pages"][0]["widgets"][0].erase("col");
+        node["pages"][0]["widgets"][0].erase("row");
+        CHECK_FALSE(PanelWidgetConfig::has_uninterpretable_coordinates(node, 24));
+    }
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture,
+                 "PanelWidgetConfig: a layout naming no coordinate system re-anchors from defaults",
+                 "[panel_widget_config][unnamed_units]") {
+    const std::string id = an_enabled_default_widget();
+    REQUIRE_FALSE(id.empty());
+
+    setup_with_widgets(placed_home_node(id));
+    get_data()["config_version"] = 24;
+
+    PanelWidgetConfig wc("home", config);
+    wc.load();
+
+    // The saved layout is gone, replaced by the defaults: the widget it hid is
+    // back on, and the anchors are pending because no grid has been measured.
+    CHECK(wc.is_enabled(id));
+    CHECK(wc.has_pending_anchors());
+    CHECK(wc.grid_signature().empty());
+
+    // ...and the rebuild is what a later load reads, not a one-run repair.
+    auto root = get_saved_root();
+    REQUIRE(root.is_object());
+    CHECK(root.value("anchors", "") == "pending");
+    bool found = false;
+    for (const auto& w : get_saved_page0_widgets()) {
+        if (w.value("id", "") == id) {
+            found = true;
+            CHECK(w.value("enabled", false));
+        }
+    }
+    CHECK(found);
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture,
+                 "PanelWidgetConfig: a grid signature keeps the saved layout",
+                 "[panel_widget_config][unnamed_units]") {
+    const std::string id = an_enabled_default_widget();
+    REQUIRE_FALSE(id.empty());
+
+    json node = placed_home_node(id);
+    node["grid"] = "12x24";
+    setup_with_widgets(node);
+    get_data()["config_version"] = 24;
+
+    PanelWidgetConfig wc("home", config);
+    wc.load();
+
+    CHECK_FALSE(wc.is_enabled(id));
+    CHECK_FALSE(wc.has_pending_anchors());
+    CHECK(wc.grid_signature() == "12x24");
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture, "PanelWidgetConfig: a cells tag keeps the saved layout",
+                 "[panel_widget_config][unnamed_units]") {
+    const std::string id = an_enabled_default_widget();
+    REQUIRE_FALSE(id.empty());
+
+    json node = placed_home_node(id);
+    node["layout_units"] = "cells_v21";
+    node["legacy_rows"] = 14;
+    setup_with_widgets(node);
+    get_data()["config_version"] = 24;
+
+    PanelWidgetConfig wc("home", config);
+    wc.load();
+
+    CHECK_FALSE(wc.is_enabled(id));
+    CHECK(wc.has_legacy_units());
+    CHECK_FALSE(wc.has_pending_anchors());
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture,
+                 "PanelWidgetConfig: a layout below version 24 keeps the saved layout",
+                 "[panel_widget_config][unnamed_units]") {
+    const std::string id = an_enabled_default_widget();
+    REQUIRE_FALSE(id.empty());
+
+    setup_with_widgets(placed_home_node(id));
+    get_data()["config_version"] = 23;
+
+    PanelWidgetConfig wc("home", config);
+    wc.load();
+
+    CHECK_FALSE(wc.is_enabled(id));
+    CHECK_FALSE(wc.has_pending_anchors());
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture,
+                 "PanelWidgetConfig: a fresh install at version 24 still seeds defaults",
+                 "[panel_widget_config][unnamed_units]") {
+    setup_empty_config();
+    get_data()["config_version"] = 24;
+
+    PanelWidgetConfig wc("home", config);
+    wc.load();
+
+    CHECK(wc.entries().size() == default_grid_widget_count());
+    CHECK(wc.has_pending_anchors());
+}
+
+// ============================================================================
+// A node that outlived the build that wrote it
+// ============================================================================
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture,
+                 "PanelWidgetConfig: save keeps panel keys this build does not know",
+                 "[panel_widget_config][migration][1460]") {
+    // A newer build keeps its layout state as siblings of "pages" in this same
+    // node, and a config it wrote reaches this build whenever someone rolls
+    // back an update channel. Nothing above this level protects the subtree:
+    // the version guard leaves the document unmigrated, but save() runs on
+    // roughly the first populate of every panel, so a node assigned wholesale
+    // here drops those keys with no user action at all
+    // (prestonbrown/helixscreen#1460).
+    json node = placed_home_node("printer_image");
+    node["grid"] = "12x24";
+    node["future_layout_v99"] = json{{"rails", json::array({1, 2, 3})}, {"origin", "centre"}};
+    node["future_scalar"] = 7;
+    setup_with_widgets(node);
+
+    PanelWidgetConfig wc("home", config);
+    wc.load();
+    wc.save();
+
+    // Each key is proven present before it is read: operator[] on a missing key
+    // of a const object aborts, which would bury the name that went missing.
+    const json saved = get_saved_root();
+    REQUIRE(saved.contains("future_layout_v99"));
+    CHECK(saved["future_layout_v99"]["origin"] == "centre");
+    CHECK(saved["future_layout_v99"]["rails"].size() == 3);
+    REQUIRE(saved.contains("future_scalar"));
+    CHECK(saved["future_scalar"] == 7);
+
+    // The keys this build owns still come from its own state, not from what
+    // the node happened to arrive holding.
+    REQUIRE(saved.contains("grid"));
+    CHECK(saved["grid"] == "12x24");
+    REQUIRE(saved.contains("pages"));
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture,
+                 "PanelWidgetConfig: save drops an owned key its state no longer justifies",
+                 "[panel_widget_config][migration][1460]") {
+    // Editing the node in place is only correct while every key this build owns
+    // is still rewritten from member state. load() ignores a "parked_grids"
+    // that is not an object, so member state says there are none, and a copy
+    // left in the node would outlive the condition that wrote it.
+    json node = placed_home_node("printer_image");
+    node["grid"] = "12x24";
+    node["parked_grids"] = "not-an-object";
+    setup_with_widgets(node);
+
+    PanelWidgetConfig wc("home", config);
+    wc.load();
+    wc.save();
+
+    CHECK_FALSE(get_saved_root().contains("parked_grids"));
+    // The rest of the node is still written, so the absence above is a dropped
+    // key and not a save that did nothing.
+    CHECK(get_saved_root().contains("pages"));
+}
+
+// ============================================================================
+// Unknown widget ids: a plugin's placement outlives the plugin
+// ============================================================================
+//
+// A plugin widget id (gone-plug__tile) has a definition only while its plugin
+// is loaded. The layout must keep the entry verbatim across any number of
+// saves, so the widget returns to its cell when the plugin comes back.
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture, "an unknown widget id survives load and save",
+                 "[panel_widget][widget_config]") {
+    json unknown = {{"id", "gone-plug__tile"},
+                    {"enabled", true},
+                    {"col", 2},
+                    {"row", 0},
+                    {"colspan", 2},
+                    {"rowspan", 2}};
+    setup_with_pages(
+        {{"main", json::array({{{"id", "print_status"}, {"enabled", true}}, unknown})}});
+    PanelWidgetConfig wc("home", config);
+    wc.load();
+    for (const auto& e : wc.page_entries(0))
+        CHECK(e.id != "gone-plug__tile"); // not rendered
+    wc.save();
+
+    const json& saved =
+        ConfigTestAccess::data(config)["printers"]["default"]["panel_widgets"]["home"];
+    bool kept = false;
+    for (const auto& item : saved["pages"][0]["widgets"])
+        kept = kept || item == unknown;
+    CHECK(kept);
+
+    PanelWidgetConfig again("home", config);
+    again.load();
+    again.save();
+    int count = 0;
+    for (const auto& item : ConfigTestAccess::data(
+             config)["printers"]["default"]["panel_widgets"]["home"]["pages"][0]["widgets"])
+        count += item["id"] == "gone-plug__tile";
+    CHECK(count == 1); // kept once, not duplicated per save
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture, "removing a page keeps its unknown ids",
+                 "[panel_widget][widget_config]") {
+    json unknown = {{"id", "gone-plug__tile"}, {"enabled", true}, {"col", 0}, {"row", 0}};
+    setup_with_pages({{"main", json::array()}, {"extra", json::array({unknown})}});
+    PanelWidgetConfig wc("home", config);
+    wc.load();
+    REQUIRE(wc.remove_page(1));
+    wc.save();
+    bool kept = false;
+    for (const auto& page :
+         ConfigTestAccess::data(config)["printers"]["default"]["panel_widgets"]["home"]["pages"])
+        for (const auto& item : page["widgets"])
+            kept = kept || item["id"] == "gone-plug__tile";
+    CHECK(kept);
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture, "restoring a parked layout keeps its unknown ids",
+                 "[panel_widget][widget_config]") {
+    json unknown = {{"id", "gone-plug__tile"},
+                    {"enabled", true},
+                    {"col", 2},
+                    {"row", 0},
+                    {"colspan", 2},
+                    {"rowspan", 2}};
+    setup_with_pages(
+        {{"main", json::array({{{"id", "print_status"}, {"enabled", true}}, unknown})}});
+    // Stamp the grid the layout was arranged on, or the first switch adopts it
+    // without parking anything.
+    ConfigTestAccess::data(config)["printers"]["default"]["panel_widgets"]["home"]["grid"] =
+        "24x12";
+    PanelWidgetConfig wc("home", config);
+    wc.load();
+    wc.switch_to_grid(12, 6);  // parks the 24x12 arrangement, seeds 12x6 from it
+    wc.switch_to_grid(24, 12); // restores the parked 24x12 arrangement
+    bool kept = false;
+    for (const auto& item : get_saved_page0_widgets())
+        kept = kept || item == unknown;
+    CHECK(kept);
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture, "a preset seed keeps unknown ids",
+                 "[panel_widget][widget_config]") {
+    ConfigDirGuard guard("preset-retain");
+    json unknown = {{"id", "gone-plug__tile"},
+                    {"enabled", true},
+                    {"col", 2},
+                    {"row", 0},
+                    {"colspan", 2},
+                    {"rowspan", 2}};
+    json seed;
+    seed["pages"] = json::array(
+        {json{{"id", "main"},
+              {"widgets", json::array({{{"id", "print_status"}, {"enabled", true}}, unknown})}}});
+    seed["main_page_index"] = 0;
+    seed["next_page_id"] = 1;
+    std::filesystem::create_directories(guard.dir / "panel_widgets" / "testp");
+    {
+        std::ofstream out(guard.dir / "panel_widgets" / "testp" / "home.json");
+        out << seed.dump();
+    }
+    setup_empty_config();
+    ConfigTestAccess::data(config)["printers"]["default"]["preset"] = "testp";
+
+    PanelWidgetConfig wc("home", config);
+    wc.load(); // no saved layout: seeds from panel_widgets/testp/home.json and saves
+
+    bool kept = false;
+    for (const auto& item : get_saved_page0_widgets())
+        kept = kept || item == unknown;
+    CHECK(kept);
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture,
+                 "PanelWidgetConfig: a new printer's saved defaults read back without a rebuild",
+                 "[panel_widget_config][unnamed_units][multi-printer]") {
+    // A printer added at run time gets the defaults saved on its first load, before any
+    // grid has been measured; the next load (a live switch reloads Home) must read them.
+    setup_empty_config();
+    get_data()["config_version"] = 30;
+    PanelWidgetConfig first("home", config);
+    first.load();
+    const json saved = get_printer_data()["panel_widgets"]["home"];
+    REQUIRE(saved.value("anchors", "") == "pending");
+    REQUIRE_FALSE(saved.contains("grid"));
+
+    CHECK_FALSE(PanelWidgetConfig::has_uninterpretable_coordinates(saved, 30));
+}
+
+// ============================================================================
+// Save omits only what the reader re-appends
+// ============================================================================
+
+namespace {
+const PanelWidgetDef* first_def_where(bool default_enabled, bool multi_instance) {
+    for (const auto& def : get_all_widget_defs()) {
+        if (def.default_enabled == default_enabled && def.multi_instance == multi_instance) {
+            return &def;
+        }
+    }
+    return nullptr;
+}
+
+json widget_json(const std::string& id, bool enabled, int col, int row, int colspan, int rowspan,
+                 const json& config = json()) {
+    json item = {{"id", id},   {"enabled", enabled}, {"col", col},
+                 {"row", row}, {"colspan", colspan}, {"rowspan", rowspan}};
+    if (!config.is_null()) {
+        item["config"] = config;
+    }
+    return item;
+}
+} // namespace
+
+// Each case breaks exactly one condition of the omitted shape (off by default,
+// disabled, unplaced, unconfigured, registry spans, base id, first page), so the
+// entry carries information and must survive a save and reload field for field.
+TEST_CASE_METHOD(PanelWidgetConfigFixture,
+                 "PanelWidgetConfig: save keeps every entry that differs from the appended default",
+                 "[panel_widget][widget_config]") {
+    const auto* off_def = first_def_where(false, false);
+    const auto* on_def = first_def_where(true, false);
+    const auto* multi_def = first_def_where(false, true);
+    REQUIRE(off_def != nullptr);
+    REQUIRE(on_def != nullptr);
+    REQUIRE(multi_def != nullptr);
+    const std::string off = off_def->id;
+    const int cs = off_def->colspan;
+    const int rs = off_def->rowspan;
+
+    struct Case {
+        const char* why;
+        json entry;
+        size_t page;
+    };
+    const std::vector<Case> cases = {
+        {"enabled, awaiting auto-place", widget_json(off, true, -1, -1, cs, rs), 0},
+        {"column only", widget_json(off, false, 0, -1, cs, rs), 0},
+        {"row only", widget_json(off, false, -1, 0, cs, rs), 0},
+        {"configured", widget_json(off, false, -1, -1, cs, rs, {{"k", "v"}}), 0},
+        {"non-default colspan", widget_json(off, false, -1, -1, cs + 1, rs), 0},
+        {"non-default rowspan", widget_json(off, false, -1, -1, cs, rs + 1), 0},
+        {"on by default", widget_json(on_def->id, false, -1, -1, on_def->colspan, on_def->rowspan),
+         0},
+        {"multi-instance id",
+         widget_json(std::string(multi_def->id) + ":3", false, -1, -1, multi_def->colspan,
+                     multi_def->rowspan),
+         0},
+        {"second page", widget_json(off, false, -1, -1, cs, rs), 1},
+    };
+
+    for (const auto& c : cases) {
+        CAPTURE(c.why);
+        const std::string id = c.entry["id"].get<std::string>();
+        json page0 = json::array();
+        json page1 = json::array();
+        (c.page == 0 ? page0 : page1).push_back(c.entry);
+        setup_with_pages({{"main", page0}, {"p2", page1}});
+
+        PanelWidgetConfig wc1("home", config);
+        wc1.load();
+        wc1.save();
+
+        const json saved = get_saved_root()["pages"][c.page]["widgets"];
+        auto in_saved = std::find_if(saved.begin(), saved.end(),
+                                     [&](const json& item) { return item["id"] == id; });
+        REQUIRE(in_saved != saved.end());
+
+        PanelWidgetConfig wc2("home", config);
+        wc2.load();
+        const auto& entries = wc2.page_entries(c.page);
+        auto it = std::find_if(entries.begin(), entries.end(),
+                               [&](const PanelWidgetEntry& e) { return e.id == id; });
+        REQUIRE(it != entries.end());
+        CHECK(it->enabled == c.entry["enabled"].get<bool>());
+        CHECK(it->col == c.entry["col"].get<int>());
+        CHECK(it->row == c.entry["row"].get<int>());
+        CHECK(it->colspan == c.entry["colspan"].get<int>());
+        CHECK(it->rowspan == c.entry["rowspan"].get<int>());
+        CHECK(it->config == c.entry.value("config", json::object()));
+    }
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture,
+                 "PanelWidgetConfig: save omits a default-off widget left at its appended default",
+                 "[panel_widget][widget_config]") {
+    const auto* off_def = first_def_where(false, false);
+    REQUIRE(off_def != nullptr);
+    setup_with_pages({{"main", json::array({widget_json(off_def->id, false, -1, -1,
+                                                        off_def->colspan, off_def->rowspan)})}});
+    PanelWidgetConfig wc("home", config);
+    wc.load();
+    wc.save();
+    const auto saved = get_saved_page0_widgets();
+    CHECK(std::none_of(saved.begin(), saved.end(),
+                       [&](const json& item) { return item["id"] == off_def->id; }));
 }

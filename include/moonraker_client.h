@@ -431,7 +431,7 @@ class MoonrakerClient : public hv::WebSocketClient, public IMoonrakerClient {
      * Increments on each connect() call. Can be used to detect stale
      * callbacks from previous connections.
      */
-    uint64_t connection_generation() const {
+    uint64_t connection_generation() const override {
         return connection_generation_.load();
     }
 
@@ -607,9 +607,7 @@ class MoonrakerClient : public hv::WebSocketClient, public IMoonrakerClient {
      * Typically called every 1-5 seconds.
      */
     void process_timeouts() override {
-        tracker_.check_timeouts(
-            [this](MoonrakerEventType type, const std::string& msg, bool is_error,
-                   const std::string& details) { emit_event(type, msg, is_error, details); });
+        tracker_.check_timeouts([this](const MoonrakerEvent& evt) { emit_event(evt); });
     }
 
     // ========== Simulation Methods (for testing) ==========
@@ -634,10 +632,10 @@ class MoonrakerClient : public hv::WebSocketClient, public IMoonrakerClient {
      * the shared_ptr is reset first, so weak_ptr::lock() returns nullptr.
      * Used by SubscriptionGuard to avoid calling into a destroyed client.
      *
-     * This is distinct from the internal WebSocket-callback guard (which is
-     * also reset on disconnect to cancel in-flight libhv callbacks). Clients
-     * of SubscriptionGuard only care about *object* destruction, not
-     * disconnect/reconnect cycles.
+     * The guard is reset in exactly one place, the destructor, so it answers
+     * "the client object is gone" and never "the client dropped a connection".
+     * disconnect() leaves it intact, which is what keeps a reconnect cycle from
+     * reading as destruction to SubscriptionGuard.
      */
     std::weak_ptr<bool> lifetime_weak() const override {
         return destruction_guard_;
@@ -658,6 +656,7 @@ class MoonrakerClient : public hv::WebSocketClient, public IMoonrakerClient {
      */
     void emit_event(MoonrakerEventType type, const std::string& message, bool is_error = false,
                     const std::string& details = "");
+    void emit_event(const MoonrakerEvent& evt);
 
     /**
      * @brief Dispatch printer status to all registered notify callbacks
@@ -671,7 +670,16 @@ class MoonrakerClient : public hv::WebSocketClient, public IMoonrakerClient {
      * @param from_cached_snapshot true when replaying a snapshot captured earlier
      *        (see IMoonrakerClient::dispatch_status_update)
      */
-    void dispatch_status_update(const json& status, bool from_cached_snapshot = false) override;
+    void dispatch_status_update(const json& status, bool from_cached_snapshot = false,
+                                bool whole_objects = false) override;
+
+    void set_subscription_extras_provider(std::function<json()> provider) override {
+        discovery_.set_extras_provider(std::move(provider));
+    }
+
+    void refresh_subscription() override {
+        discovery_.refresh_subscription();
+    }
 
     /**
      * @brief Invoke an on_connected-style callback with exception safety.
@@ -762,8 +770,6 @@ class MoonrakerClient : public hv::WebSocketClient, public IMoonrakerClient {
     std::function<void(ConnectionState, ConnectionState)> state_change_callback_;
     mutable std::mutex state_callback_mutex_; // Protect state_change_callback_ during destruction
     uint32_t connection_timeout_ms_;
-    uint32_t reconnect_attempts_ = 0;
-    uint32_t max_reconnect_attempts_ = 0; // 0 = infinite
 
     // Connection parameters (from config)
     uint32_t keepalive_interval_ms_;
@@ -856,15 +862,13 @@ class MoonrakerClient : public hv::WebSocketClient, public IMoonrakerClient {
     std::atomic<bool> initial_failure_notified_{false};
     uint32_t initial_connect_failure_ms_{60000};
 
-    // WebSocket callback cancellation guard. Reset on BOTH disconnect and
-    // destruction so in-flight libhv callbacks (onopen/onmessage/onclose)
-    // early-return on either event. Internal use only.
-    std::shared_ptr<bool> lifetime_guard_ = std::make_shared<bool>(true);
-
-    // Object-destruction guard. Reset ONLY in the destructor. Exposed via
-    // lifetime_weak() for SubscriptionGuard and other holders that need to
-    // detect that the MoonrakerClient instance itself is gone — not that it
-    // merely dropped a WebSocket connection.
+    // Object-destruction guard, and the only liveness guard this client has. Reset
+    // ONLY in the destructor. The install-once WS trampolines capture a weak_ptr to
+    // it and check it before touching `this`; lifetime_weak() exposes it to
+    // SubscriptionGuard and other holders that need to detect that the
+    // MoonrakerClient instance itself is gone. There is no second, disconnect-scoped
+    // guard beside it: disconnect() does not stop callback dispatch, so there would
+    // be nothing for one to signal.
     std::shared_ptr<bool> destruction_guard_ = std::make_shared<bool>(true);
 
     friend class MoonrakerClientTestAccess;

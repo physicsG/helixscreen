@@ -12,6 +12,7 @@
         extends="lv_obj" width="100%" height="content" flex_flow="row" style_flex_cross_place="center"
         style_pad_hor="#space_md" style_pad_ver="#space_sm" style_pad_gap="#space_md" style_radius="#space_sm"
         style_bg_color="#elevated_bg" style_bg_opa="255" scrollable="false" clickable="true">
+    <style name="styles.press_wash" selector="pressed"/>
     <!-- Expected (gcode) color swatch. For multi-tool files the Tx label is
          centered inside it (mirrors the print-details pill). -->
     <lv_obj name="expected_swatch"

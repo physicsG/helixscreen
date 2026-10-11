@@ -33,7 +33,7 @@ TEST_CASE("PrinterState: per-extruder filament_used subject returns non-null for
 
     SubjectLifetime lifetime;
     for (int i = 0; i < 4; ++i) {
-        auto* subj = state.get_extruder_filament_used_subject(i, lifetime);
+        auto* subj = state.print_state().get_extruder_filament_used_subject(i, lifetime);
         REQUIRE(subj != nullptr);
         REQUIRE(static_cast<bool>(lifetime));
     }
@@ -48,7 +48,7 @@ TEST_CASE("PrinterState: per-extruder subject reflects status update for extrude
     state.init_subjects(false);
 
     SubjectLifetime lifetime;
-    auto* subj = state.get_extruder_filament_used_subject(1, lifetime);
+    auto* subj = state.print_state().get_extruder_filament_used_subject(1, lifetime);
     REQUIRE(subj != nullptr);
 
     // Simulate a Klipper status update for extruder1 (key matches Klipper object name).
@@ -69,7 +69,7 @@ TEST_CASE("PrinterState: extruder idx 0 maps to Klipper 'extruder' key",
     state.init_subjects(false);
 
     SubjectLifetime lifetime;
-    auto* subj0 = state.get_extruder_filament_used_subject(0, lifetime);
+    auto* subj0 = state.print_state().get_extruder_filament_used_subject(0, lifetime);
     REQUIRE(subj0 != nullptr);
 
     json status;
@@ -88,8 +88,8 @@ TEST_CASE("PrinterState: per-extruder subjects are independent", "[printer_state
     state.init_subjects(false);
 
     SubjectLifetime lt0, lt2;
-    auto* subj0 = state.get_extruder_filament_used_subject(0, lt0);
-    auto* subj2 = state.get_extruder_filament_used_subject(2, lt2);
+    auto* subj0 = state.print_state().get_extruder_filament_used_subject(0, lt0);
+    auto* subj2 = state.print_state().get_extruder_filament_used_subject(2, lt2);
     REQUIRE(subj0 != nullptr);
     REQUIRE(subj2 != nullptr);
     REQUIRE(subj0 != subj2);
@@ -116,7 +116,7 @@ TEST_CASE("PrinterState: per-extruder SubjectLifetime expires on deinit_subjects
     // contract says tearing down the owner must signal death so ObserverGuard
     // skips lv_observer_remove() on the about-to-be-freed subject.
     SubjectLifetime lifetime;
-    auto* subj = state.get_extruder_filament_used_subject(1, lifetime);
+    auto* subj = state.print_state().get_extruder_filament_used_subject(1, lifetime);
     REQUIRE(subj != nullptr);
     REQUIRE(static_cast<bool>(lifetime));
     REQUIRE(*lifetime == true);
@@ -139,7 +139,7 @@ TEST_CASE("PrinterState: per-extruder SubjectLifetime expires on deinit_subjects
     // reused, but a new accessor returns a valid (non-null) subject.
     state.init_subjects(false);
     SubjectLifetime new_lifetime;
-    auto* new_subj = state.get_extruder_filament_used_subject(1, new_lifetime);
+    auto* new_subj = state.print_state().get_extruder_filament_used_subject(1, new_lifetime);
     REQUIRE(new_subj != nullptr);
     REQUIRE(static_cast<bool>(new_lifetime));
 }

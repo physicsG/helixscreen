@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
-// Tool-changer add-ons: hardware bolted onto klipper-toolchanger that it does
-// not model.
+// Tool-changer dialects: the one place that knows each tool changer's extras -
+// the add-on hardware klipper-toolchanger does not model (MedusaHC), and changer
+// firmware that has no klipper-toolchanger at all (Z-Mod on the Creator 5 Pro).
 //
-// klipper-toolchanger swaps a whole toolhead, and `toolchanger.tool_number` is
-// simply whatever SELECT_TOOL last set. A hotend changer swaps only the hot end,
-// which brings two things the toolchanger object cannot answer:
+// MedusaHC bolts a hotend changer onto klipper-toolchanger, which swaps a whole
+// toolhead, and `toolchanger.tool_number` is simply whatever SELECT_TOOL last
+// set. A hotend changer swaps only the hot end, which brings two things the
+// toolchanger object cannot answer:
 //
 //   1. Which tool is PHYSICALLY on the head. MedusaHC ships toolchanger.cfg with
 //      `verify_tool_pickup: False`, so klipper-toolchanger never checks; the
@@ -15,15 +17,17 @@
 //   2. A filament feeder. Only the hot end travels, so the filament is held by a
 //      servo gripper on the frame that has to be released around a swap.
 //
-// This module is the ONLY place that knows which machines have those, what their
-// status objects are called, and what gcode drives them. AmsBackendToolChanger
-// and the subscription builder ask these functions and never name a machine.
+// This module is the ONLY place that knows each machine's status objects and
+// swap commands. AmsBackendToolChanger and the subscription builder ask these
+// functions and never name a machine.
 //
 // Adding a machine means adding one Provider to the table in
 // toolchanger_addon.cpp - no call site changes.
 
+#include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "hv/json.hpp"
@@ -62,10 +66,19 @@ struct Feeder {
 /// `toolchanger.tool_number` when a provider is present.
 struct ToolReading {
     /// 0..N-1 mounted, -1 nothing on the head, -2 the sensors cannot tell.
-    int current_tool = -1;
+    /// nullopt when this frame did not name it. Moonraker republishes only the
+    /// fields that CHANGED, so a frame silent about the carriage is not a frame
+    /// reporting an empty one - the same rule `docks` below is written to.
+    std::optional<int> current_tool;
     /// current_tool == -2. A distinct state from "no tool": the machine does not
     /// KNOW, and acting on a guess would drive the carriage into a dock.
     bool sensor_error = false;
+    /// The controller published `sensor_error` itself rather than us deriving it
+    /// from -2. Only Irbis3D publishes the flag, and only the flag is a fault on
+    /// its own: -2 is one value for two answers, a pin fault and "the switch
+    /// pattern matches no settled configuration". A swap in flight is always the
+    /// second, because the tool is between its dock and the head.
+    bool sensor_error_reported = false;
     /// The machine's phase word, or empty when the frame did not say.
     ///
     /// The two controllers do NOT share a vocabulary, and this is deliberately
@@ -127,8 +140,98 @@ struct ToolSensor {
     std::string provider_name;
 };
 
+/// Material and colour for one slot, as the firmware stores them.
+struct SlotMaterial {
+    std::string material;             ///< Empty when the firmware has none set
+    std::optional<std::uint32_t> rgb; ///< nullopt when unset or unparseable
+    /// Per-head filament presence, nullopt when the frame did not say.
+    std::optional<bool> filament_present;
+};
+
+/// What a firmware material source said in one status frame. Each field is
+/// nullopt when the frame did not carry it: Moonraker republishes only what
+/// CHANGED, so absence is never "cleared".
+struct MaterialReading {
+    std::optional<std::vector<std::optional<SlotMaterial>>> slots;
+    std::optional<std::vector<std::string>> valid_types;
+    std::optional<std::vector<std::pair<int, std::uint32_t>>> palette; ///< (index, 0xRRGGBB)
+};
+
+/// A changer whose firmware stores each slot's material and colour itself.
+/// Default-constructed means HelixScreen's own store is the only one.
+struct MaterialSource {
+    bool present = false;
+    std::string provider_name;
+    /// Gcode that stores @p type and @p rgb for @p slot_index (0-based). @p type
+    /// must already be one of the firmware's valid types, safe for a gcode line,
+    /// and @p rgb one of its palette colours.
+    std::string (*write_gcode)(int slot_index, const std::string& type,
+                               std::uint32_t rgb) = nullptr;
+};
+
+/// The firmware material source this printer has, or an absent capability.
+MaterialSource resolve_material_source(const PrinterDiscovery& hw);
+
+/// Pull a material reading out of a status frame. nullopt means no news.
+std::optional<MaterialReading> read_materials(const nlohmann::json& status, int max_slots);
+
 /// Whether any provider claims this printer.
 bool present(const PrinterDiscovery& hw);
+
+/// Whether the Z-Mod Creator 5 changer row claims this printer: `zmod_color`
+/// plus the carriage grab buttons. The AD5X Z-Mod also publishes `zmod_color`
+/// but has no carriage buttons, so it cannot match. Backend selection asks this
+/// to tell Z-Mod's afclite AFC shim (which publishes the `AFC` objects an AFC
+/// panel wants) from a machine that is really a head changer.
+bool zmod_c5_present(const PrinterDiscovery& hw);
+
+/// The Z-Mod Creator 5 provider row's name, so callers holding machine_name()
+/// or a ToolSensor's provider_name can ask whether the active row speaks the
+/// Z-Mod dialect — whose swap phases arrive as gcode-response markers rather
+/// than a status object's phase word.
+inline constexpr const char* kZmodC5ProviderName = "Creator 5 Pro";
+
+/// Classify one gcode-response line from Z-Mod's Creator 5 changer macros into
+/// the phase word the changer state machine consumes. Z-Mod narrates a swap
+/// through respond_info lines — the grab/unload retry loops ("Grab attempt for
+/// T0: 1 of 5...") and the per-head offset echoes that bracket `_T_IN` /
+/// `_T_OUT` ("X-Offset: 0.0000 _T_IN") — and each marker spells the swap
+/// direction, so each maps onto the picking/dropping vocabulary the MedusaHC
+/// controllers publish. nullopt for every other console line. If a firmware
+/// build does not echo the markers, nothing matches and the operation step bar
+/// stays suppressed — a marker that never arrives cannot paint a wrong step.
+std::optional<ToolReading> parse_zmod_marker(const std::string& line);
+
+/// Classify one line of Z-Mod's T_INFO output (`T_INFO` is read-only: it
+/// answers state, it moves nothing). Each tool row is one dock/carriage fact —
+/// "T1: HEAD" puts tool 1 on the carriage, "T0: home" seats it in its dock,
+/// "ERROR (both)" is a sensor fault, "?" is no news for that tool — so each
+/// line applies on its own and no block buffering is needed. The `Offset:`
+/// line closes the block (it is always last), which is the only place the
+/// answer "nothing is on the carriage" can be stated: every tool row said
+/// `home` and none said HEAD. nullopt for every other console line.
+std::optional<ToolReading> parse_zmod_tinfo_line(const std::string& line, bool& block_ended_out);
+
+/// What Z-Mod's afclite shim said in one status frame. The object is the
+/// firmware's own AFC compat surface; the fields read here are the ones whose
+/// semantics a boolean or the bundle evidence fixes. `current_state` is
+/// deliberately carried as an opaque word: its vocabulary beyond "idle" is
+/// unverified, so callers log it rather than act on it.
+struct AfcStateReading {
+    std::string current_state; ///< As published; empty when the frame did not say
+    bool error_state = false;  ///< The shim's own fault flag
+    std::string message;       ///< Its fault text, when it sent one
+    /// `lanes[].map` verbatim ("T0", "T2", ...), indexed by lane; empty when
+    /// the frame carried no lane table. Read-only visibility: the lane→tool
+    /// relation is the firmware's own, and what it means for head indices is
+    /// exactly what a field capture has to settle before anything acts on it.
+    std::vector<std::string> lane_maps;
+};
+
+/// Pull an AfcStateReading out of a Moonraker status frame carrying the
+/// `zmod_afclite` (or its `AFC` alias) object. nullopt when the frame carried
+/// neither object.
+std::optional<AfcStateReading> read_afc_state(const nlohmann::json& status);
 
 /// The dock sensor this printer exposes, or an absent capability.
 ToolSensor resolve_tool_sensor(const PrinterDiscovery& hw);
@@ -164,5 +267,16 @@ std::vector<std::string> required_status_objects(const PrinterDiscovery& hw);
 /// none of its fields. Callers must treat nullopt as no news, never as cleared:
 /// Moonraker only republishes fields whose value CHANGED.
 std::optional<ToolReading> read_tool(const nlohmann::json& status);
+
+/// Whether a reading's sensor_error names a fault the user must act on, rather
+/// than the transitional geometry every swap produces.
+///
+/// `current_tool == -2` is one value for two answers upstream: a pin that read
+/// neither 0 nor 1, and a switch pattern matching none of the settled
+/// configurations. A tool in transit between its dock and the head is always the
+/// second. So only a flag the controller published itself, or a -2 it still
+/// reports once at rest, is a fault. topi314's controller draws the same line,
+/// escalating -2 to state:"error" only while its machine state is ready.
+[[nodiscard]] bool sensor_error_is_fault(const ToolReading& reading, bool swap_in_flight);
 
 } // namespace helix::toolchanger_addon

@@ -4,6 +4,7 @@
 #include "ams_backend_afc.h"
 
 #include "ui_error_reporting.h"
+#include "ui_insert_notice.h"
 #include "ui_modal.h"
 #include "ui_notification.h"
 #include "ui_update_queue.h"
@@ -13,11 +14,17 @@
 #include "ams_bypass_policy.h"
 #include "ams_fault_event.h"
 #include "config.h"
+#include "humidity_sensor_types.h"
 #include "i_moonraker_api.h"
+#include "lane_legacy_migration.h"
+#include "lane_source_store.h"
+#include "lane_translation.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "operation_patterns.h" // helix::contains_ci
 #include "printer_discovery.h"
 #include "settings_manager.h"
+#include "system/afc_message_dedup.h"
+#include "text_io.h"
 
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
@@ -28,10 +35,9 @@
 #include <cmath>
 #include <cstring>
 #include <optional>
-#include <sstream>
 #include <vector>
 
-using namespace helix;
+namespace helix {
 
 namespace {
 
@@ -41,7 +47,8 @@ int trailing_number(const std::string& s) {
     auto pos = s.find_last_not_of("0123456789");
     if (pos == std::string::npos || pos == s.size() - 1)
         return INT_MAX;
-    return std::stoi(s.substr(pos + 1));
+    // An out-of-int-range suffix sorts last, same as a non-numeric name.
+    return helix::text_io::parse_leading<int>(s.substr(pos + 1)).value_or(INT_MAX);
 }
 
 // Natural sort by trailing number, then lexicographic tiebreak.
@@ -74,9 +81,10 @@ bool natural_less(const std::string& a, const std::string& b) {
 // differs from the color/material handling above: #808 is unimplemented, so we do
 // not know whether an unlinked lane will omit the key or publish "". Guessing
 // wrong in the clearing direction wipes a brand nothing re-supplies. A user's
-// override is safe either way — both callers run apply_overrides() after this
-// reader (#1195 closed that gap on the lane_data path) — so the exposure is lanes
-// with no override at all. Revisit once #808 ships and the payload is observable.
+// declaration is safe either way — both callers run apply_resolved_lane() after
+// this reader (#1195 closed that gap on the lane_data path) — so the exposure is
+// lanes with nothing declared at all. Revisit once #808 ships and the payload is
+// observable.
 bool read_vendor(const nlohmann::json& src, std::string& out) {
     for (const char* key : {"vendor_name", "spool_vendor", "vendor", "brand"}) {
         auto it = src.find(key);
@@ -181,6 +189,32 @@ void afc_state_translation_hints_() {
 }
 // clang-format on
 
+// Run the echo guard over one frame's own statement of a lane's identity and
+// keep what it withholds out of the accumulator copy about to be filed.
+// @p stated is the statement, the fields the frame itself carried, and is
+// filtered in place; a field the guard removed is told from one the frame
+// never mentioned by snapshotting the statement before the call. Only colour
+// and material are tracked: those are the identity fields an AFC write sends,
+// so a declaration can never exist for any other. @p cleared names the keys
+// the frame carried and read as a clear, which release a declaration rather
+// than riding as silence. The accumulator copy is then stripped of any field
+// still equal to a standing declaration, since it re-states an echoed value
+// on every later frame the producer is silent about it; strip_standing
+// removes equals without releasing anything, so the pre-edit values the
+// accumulator also holds still file as readings.
+int withhold_echoes(ams::OwnWriteEchoes& echoes, int slot_index, ams::Observation& stated,
+                    ams::Observation& filed, const ams::Observation& cleared) {
+    const ams::Observation judged = stated;
+    const int withheld = echoes.withhold(slot_index, std::string{}, stated, cleared);
+    if (judged.color_rgb && !stated.color_rgb) {
+        filed.color_rgb.reset();
+    }
+    if (judged.material && !stated.material) {
+        filed.material.reset();
+    }
+    return withheld + echoes.strip_standing(slot_index, filed);
+}
+
 } // namespace
 
 // ============================================================================
@@ -204,11 +238,19 @@ AmsBackendAfc::AmsBackendAfc(IMoonrakerAPI* api, IMoonrakerClient* client)
     // which checks for "filament_switch_sensor virtual_bypass" in the Klipper objects list.
     system_info_.has_hardware_bypass_sensor = true;
 
+    // Seed the error dedup with the last error text a previous session
+    // surfaced. AFC latches printer.AFC.message across our restarts, so an
+    // unseeded dedup treats the latched text as new and re-toasts it at
+    // every connect.
+    dedup_seed_ = AfcMessageDedup::instance().last_error_text();
+
     spdlog::debug("[AMS AFC] Backend created");
 }
 
 AmsBackendAfc::~AmsBackendAfc() {
-    // lifetime_ destructor calls invalidate() automatically
+    // Expire queued callbacks before this class's members are destroyed; the
+    // base guard itself outlives them.
+    lifetime_.invalidate();
 }
 
 // ============================================================================
@@ -267,15 +309,17 @@ void AmsBackendAfc::on_started() {
     // namespace on every boot), so sharing it would both lose our records and
     // ingest AFC's as if the user had authored them.
     if (api_) {
-        override_store_ = std::make_unique<helix::ams::FilamentSlotOverrideStore>(
-            api_, "afc", helix::ams::lane_key_style_for(get_type()), OVERRIDE_NAMESPACE);
-        auto loaded = override_store_->load_blocking();
-        const auto loaded_count = loaded.size();
+        auto loaded = helix::ams::make_loaded_override_store(api_, "afc", get_type(),
+                                                             backend_log_tag(), OVERRIDE_NAMESPACE);
+        if (loaded.store) {
+            helix::ams::ingest_legacy_records(*loaded.store, helix::ams::LegacyLockKeys::LaneData,
+                                              backend_index());
+        }
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            overrides_ = std::move(loaded);
+            override_store_ = std::move(loaded.store);
+            overrides_ = std::move(loaded.overrides);
         }
-        spdlog::info("[AMS AFC] Loaded {} slot overrides", loaded_count);
     }
 
     detect_afc_version();
@@ -315,6 +359,74 @@ void AmsBackendAfc::on_started() {
     load_afc_configs();
 }
 
+nlohmann::json AmsBackendAfc::required_status_objects(const std::vector<std::string>& afc_objects) {
+    using nlohmann::json;
+    static const json state_fields = json::array({"connected",
+                                                  "bypass_state",
+                                                  "quiet_mode",
+                                                  "current_load",
+                                                  "current_lane",
+                                                  "current_state",
+                                                  "current_tool",
+                                                  "current_toolchange",
+                                                  "error_state",
+                                                  "filament_loaded",
+                                                  "lane_loaded",
+                                                  "led_state",
+                                                  "message",
+                                                  "name",
+                                                  "number_of_toolchanges",
+                                                  "num_extruders",
+                                                  "status",
+                                                  "system",
+                                                  "tool_sensor_after_extruder",
+                                                  "tool_stn",
+                                                  "tool_stn_unload",
+                                                  "type",
+                                                  "units",
+                                                  "lanes",
+                                                  "hubs",
+                                                  "extruders",
+                                                  "buffers"});
+    // "current_map" (AFC virtual tools) names which of a multi-tool lane's
+    // T-commands is active. Older AFC does not publish it and Moonraker omits
+    // what an object does not have, so asking for it is safe against every
+    // version.
+    static const json stepper_fields =
+        json::array({"buffer_status",   "color",         "current_map", "dist_hub",      "extruder",
+                     "filament_status", "hub",           "load",        "loaded_to_hub", "map",
+                     "material",        "prep",          "runout_lane", "spool_id",      "status",
+                     "td1_color",       "td1_scan_time", "td1_td",      "tool_loaded",   "weight"});
+    static const json hub_fields = json::array({"state", "afc_bowden_length"});
+    static const json buffer_fields = json::array(
+        {"state", "distance_to_fault", "error_sensitivity", "fault_detection_enabled", "lanes"});
+    static const json extruder_fields =
+        json::array({"lane_loaded", "tool_end_status", "tool_start_status"});
+    // Unit-level objects (AFC_BoxTurtle, AFC_OpenAMS, AFC_vivid, ...) are read
+    // for their topology arrays only.
+    static const json unit_fields = json::array({"lanes", "extruders", "hubs", "buffers"});
+
+    json objects = json::object();
+    for (const auto& name : afc_objects) {
+        if (name == "AFC" || name == "afc") {
+            objects[name] = state_fields;
+        } else if (name.rfind("AFC_stepper ", 0) == 0 || name.rfind("AFC_lane ", 0) == 0) {
+            objects[name] = stepper_fields;
+        } else if (name.rfind("AFC_hub ", 0) == 0) {
+            objects[name] = hub_fields;
+        } else if (name.rfind("AFC_buffer ", 0) == 0) {
+            objects[name] = buffer_fields;
+        } else if (name.rfind("AFC_extruder ", 0) == 0) {
+            objects[name] = extruder_fields;
+        } else if (name.rfind("AFC_led ", 0) == 0) {
+            continue;
+        } else {
+            objects[name] = unit_fields;
+        }
+    }
+    return objects;
+}
+
 void AmsBackendAfc::set_discovered_lanes(const std::vector<std::string>& lane_names,
                                          const std::vector<std::string>& hub_names) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -330,6 +442,11 @@ void AmsBackendAfc::set_discovered_lanes(const std::vector<std::string>& lane_na
         hub_names_ = hub_names;
         spdlog::debug("[AMS AFC] Set {} discovered hubs", hub_names_.size());
     }
+}
+
+void AmsBackendAfc::set_discovery(const helix::PrinterDiscovery& discovery) {
+    set_discovered_lanes(discovery.afc_lane_names(), discovery.afc_hub_names());
+    set_discovered_sensors(discovery.filament_sensor_names());
 }
 
 void AmsBackendAfc::set_discovered_sensors(const std::vector<std::string>& sensor_names) {
@@ -384,57 +501,7 @@ AmsSystemInfo AmsBackendAfc::get_system_info() const {
         return system_info_;
     }
 
-    // Build slot data from registry, then overlay non-slot metadata from system_info_
-    auto info = slots_.build_system_info();
-
-    // Copy system-level fields not managed by registry
-    info.type = system_info_.type;
-    info.type_name = system_info_.type_name;
-    info.version = system_info_.version;
-    info.action = system_info_.action;
-    info.operation_detail = system_info_.operation_detail;
-    info.current_slot = system_info_.current_slot;
-    info.current_tool = system_info_.current_tool;
-    info.pending_target_slot = system_info_.pending_target_slot;
-    info.current_toolchange = system_info_.current_toolchange;
-    info.number_of_toolchanges = system_info_.number_of_toolchanges;
-    info.next_slot = system_info_.next_slot;
-    info.position_saved = system_info_.position_saved;
-    info.spoolman_url = system_info_.spoolman_url;
-    info.filament_loaded = system_info_.filament_loaded;
-    info.endless_spool_enabled = system_info_.endless_spool_enabled;
-    info.supports_bypass = system_info_.supports_bypass;
-    info.has_hardware_bypass_sensor = system_info_.has_hardware_bypass_sensor;
-    info.tip_method = system_info_.tip_method;
-    info.supports_purge = system_info_.supports_purge;
-
-    // Copy unit-level metadata not managed by registry
-    for (size_t u = 0; u < info.units.size() && u < system_info_.units.size(); ++u) {
-        info.units[u].name = system_info_.units[u].name;
-        info.units[u].display_name = system_info_.units[u].display_name;
-        info.units[u].connected = system_info_.units[u].connected;
-        info.units[u].has_hub_sensor = system_info_.units[u].has_hub_sensor;
-        info.units[u].hub_sensor_triggered = system_info_.units[u].hub_sensor_triggered;
-        info.units[u].buffer_health = system_info_.units[u].buffer_health;
-        info.units[u].topology = system_info_.units[u].topology;
-        info.units[u].lane_is_hub_routed = system_info_.units[u].lane_is_hub_routed;
-        info.units[u].hub_tool_label = system_info_.units[u].hub_tool_label;
-        info.units[u].has_encoder = system_info_.units[u].has_encoder;
-        info.units[u].has_toolhead_sensor = system_info_.units[u].has_toolhead_sensor;
-        info.units[u].has_slot_sensors = system_info_.units[u].has_slot_sensors;
-    }
-
-    // An FPS_PSF buffer measures the same thing Happy Hare's sync_feedback_bias
-    // does, so publish it the same way and every consumer of that signal (the
-    // buffer meter, the path-canvas tint, the widget's second carousel page)
-    // works on AFC without knowing which backend fed it. A switched TurtleNeck
-    // reports no pressure, leaves the -1.5 "no data" sentinel, and is unchanged.
-    for (const auto& unit : info.units) {
-        if (unit.buffer_health && unit.buffer_health->has_fps()) {
-            info.sync_feedback_bias = unit.buffer_health->afc_fps_to_bias();
-            break;
-        }
-    }
+    auto info = slots_.build_system_info(system_info_);
 
     return info;
 }
@@ -551,27 +618,34 @@ void AmsBackendAfc::maybe_drain_message_queue() {
     clear_message_queue();
 }
 
-SlotInfo AmsBackendAfc::get_slot_info(int slot_index) const {
-    std::lock_guard<std::mutex> lock(mutex_);
-
-    const auto* entry = slots_.get(slot_index);
-    if (entry) {
-        return entry->info;
-    }
-
-    // Return empty slot info for invalid index
-    SlotInfo empty;
-    empty.slot_index = -1;
-    empty.global_index = -1;
-    return empty;
+SlotInfo* AmsBackendAfc::cached_slot_locked(int slot_index) {
+    auto* entry = slots_.get_mut(slot_index);
+    return entry ? &entry->info : nullptr;
 }
 
 // get_current_action(), get_current_tool(), get_current_slot(), is_filament_loaded()
 // provided by AmsSubscriptionBackend
 
+PathTopology AmsBackendAfc::compute_topology_unlocked() const {
+    // AFC mixes hardware within one installation, so the system-wide answer is
+    // its units' only where they agree. HUB when the roster is empty: unit
+    // objects carry the lane/extruder membership topology is inferred from, and
+    // lane-only frames arrive before them.
+    if (unit_infos_.empty()) {
+        return PathTopology::HUB;
+    }
+    const PathTopology first = unit_infos_.front().topology;
+    for (const auto& ui : unit_infos_) {
+        if (ui.topology != first) {
+            return PathTopology::MIXED;
+        }
+    }
+    return first;
+}
+
 PathTopology AmsBackendAfc::get_topology() const {
-    // AFC uses a hub topology (Box Turtle / Armored Turtle style)
-    return PathTopology::HUB;
+    std::lock_guard<std::mutex> lock(mutex_);
+    return compute_topology_unlocked();
 }
 
 PathTopology AmsBackendAfc::get_unit_topology(int unit_index) const {
@@ -588,7 +662,7 @@ PathTopology AmsBackendAfc::get_unit_topology(int unit_index) const {
         }
         return system_info_.units[unit_index].topology;
     }
-    return get_topology(); // Fallback to system-wide topology
+    return compute_topology_unlocked(); // Fallback to system-wide topology
 }
 
 PathSegment AmsBackendAfc::get_filament_segment() const {
@@ -610,7 +684,7 @@ PathSegment AmsBackendAfc::get_slot_filament_segment(int slot_index) const {
         return PathSegment::NONE;
     }
 
-    const auto& sensors = entry->sensors;
+    const auto& sensors = lane_sensors_for(entry->backend_name);
 
     // Check sensors from furthest to nearest. PathSegment::HUB is deliberately
     // unreachable here: AFC's per-lane loaded_to_hub is latched at prep and
@@ -642,6 +716,12 @@ PathSegment AmsBackendAfc::infer_error_segment() const {
 bool AmsBackendAfc::slot_has_prep_sensor(int slot_index) const {
     std::lock_guard<std::mutex> lock(mutex_);
     // AFC always has prep sensors on all lanes
+    return slot_index >= 0 && slot_index < system_info_.total_slots;
+}
+
+bool AmsBackendAfc::slot_has_load_sensor(int slot_index) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    // Every AFC lane publishes its `load` sensor
     return slot_index >= 0 && slot_index < system_info_.total_slots;
 }
 
@@ -904,14 +984,6 @@ std::vector<std::string> split_lower_words(const std::string& line) {
     return out;
 }
 
-std::string to_lower_copy(const std::string& s) {
-    std::string out;
-    out.reserve(s.size());
-    for (unsigned char c : s)
-        out.push_back(static_cast<char>(std::tolower(c)));
-    return out;
-}
-
 /// Highest tool number a lane may claim. Anything above this is treated as
 /// garbage rather than grown into, so a malformed field cannot size a vector.
 constexpr int AFC_MAX_TOOL_NUMBER = 64;
@@ -941,13 +1013,10 @@ std::vector<int> parse_afc_lane_map(const nlohmann::json& map_value) {
         if (!std::all_of(digits.begin(), digits.end(),
                          [](unsigned char c) { return std::isdigit(c) != 0; }))
             return;
-        try {
-            const int tool = std::stoi(digits);
-            if (tool >= 0 && tool <= AFC_MAX_TOOL_NUMBER)
-                out.push_back(tool);
-        } catch (...) {
-            // Out of int range — skip
-        }
+        // Out of int range — skip
+        const auto tool = helix::text_io::parse_leading<int>(digits);
+        if (tool && *tool >= 0 && *tool <= AFC_MAX_TOOL_NUMBER)
+            out.push_back(*tool);
     };
 
     std::vector<int> tools;
@@ -1008,7 +1077,7 @@ AmsBackendAfc::match_bare_narration_phase(const std::string& line) const {
 }
 
 bool AmsBackendAfc::is_narration_drift_candidate(const std::string& line) const {
-    const std::string s = to_lower_copy(line);
+    const std::string s = helix::text_io::to_lower(line);
 
     // Every AFC narration line either names the system (`AFC_Cut:`, `AFC_Brush:`)
     // or names a lane. Looser than the matchers on purpose: the hint exists to
@@ -1080,7 +1149,7 @@ PathSegment AmsBackendAfc::compute_filament_segment_unlocked() const {
     if (lane_to_check >= 0) {
         const auto* entry = slots_.get(lane_to_check);
         if (entry) {
-            const auto& sensors = entry->sensors;
+            const auto& sensors = lane_sensors_for(current_lane_name_);
 
             if (sensors.load) {
                 return PathSegment::LANE;
@@ -1097,7 +1166,7 @@ PathSegment AmsBackendAfc::compute_filament_segment_unlocked() const {
         const auto* entry = slots_.get(i);
         if (!entry)
             continue;
-        const auto& sensors = entry->sensors;
+        const auto& sensors = lane_sensors_for(slots_.name_of(i));
 
         if (sensors.load) {
             return PathSegment::LANE;
@@ -1121,19 +1190,7 @@ PathSegment AmsBackendAfc::compute_filament_segment_unlocked() const {
 // Moonraker Status Update Handling
 // ============================================================================
 
-void AmsBackendAfc::handle_status_update(const nlohmann::json& notification) {
-    // notify_status_update has format: { "method": "notify_status_update", "params": [{ ... },
-    // timestamp] }
-    if (!notification.contains("params") || !notification["params"].is_array() ||
-        notification["params"].empty()) {
-        return;
-    }
-
-    const auto& params = notification["params"][0];
-    if (!params.is_object()) {
-        return;
-    }
-
+void AmsBackendAfc::handle_status(const nlohmann::json& params) {
     bool state_changed = false;
     std::string deferred_error_event; // Collect error event to emit outside lock
 
@@ -1256,6 +1313,10 @@ void AmsBackendAfc::handle_status_update(const nlohmann::json& notification) {
                 parse_afc_hub(hub_name, params[key]);
                 state_changed = true;
             }
+        }
+
+        if (parse_oams_environment(params)) {
+            state_changed = true;
         }
 
         // Parse AFC_extruder for toolhead sensors (multi-extruder support)
@@ -1579,37 +1640,6 @@ uint64_t AmsBackendAfc::begin_dispatch_locked(AmsAction action) {
     return generation;
 }
 
-void AmsBackendAfc::on_home_confirmation_declined() {
-    // The confirmation modal is exclusive -- nothing else can begin a new
-    // dispatch while it's up -- so the pending dispatch is always the one
-    // that just prompted; that exclusivity is what makes this call correct,
-    // not the generation compare inside abandon_dispatch(). abandon_dispatch()
-    // takes an explicit generation to share its guard with dispatch_operation()'s
-    // own `if (!result)` failure path, which captures a real, independent
-    // value before this exclusivity window even opens. Here there is no such
-    // independent capture: the value handed in is dispatch_generation_ itself,
-    // so the compare is trivially true and abandon_dispatch() always proceeds
-    // when a dispatch is pending. Read it under mutex_ rather than as a bare
-    // member access (every write to dispatch_generation_ is mutex_-guarded,
-    // in begin_dispatch_locked()) so this stays race-free even though nothing
-    // can invalidate it today. abandon_dispatch() clears pending_dispatch_
-    // action_/operation_detail and resets action_start_time_ in addition to
-    // the action -> IDLE reset the base class's default performs; skip the
-    // base call entirely here since abandon_dispatch() already emits
-    // EVENT_STATE_CHANGED.
-    //
-    // If this hook ever gains a non-modal caller, this guard alone will not
-    // protect a genuinely newer dispatch from being abandoned -- that would
-    // need the generation captured at prompt time and threaded through here
-    // instead of re-read live.
-    uint64_t generation;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        generation = dispatch_generation_;
-    }
-    abandon_dispatch(generation);
-}
-
 void AmsBackendAfc::abandon_dispatch(uint64_t generation) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1882,16 +1912,33 @@ void AmsBackendAfc::parse_afc_state(const nlohmann::json& afc_data,
                 last_seen_message_.clear();
                 last_error_msg_.clear();
                 last_message_type_.clear();
+                dedup_seed_.clear();
                 message_drain_budget_ = 0;
                 message_drain_pending_ = false;
+                // The next occurrence of any text is a new event, including
+                // in a later session.
+                AfcMessageDedup::instance().record_cleared();
             } else if (msg_text != last_seen_message_) {
                 // New or changed message - update dedup tracker
                 last_seen_message_ = msg_text;
 
+                // The seed answers one question — is the text at the queue head
+                // the one a previous session already surfaced — so it is spent
+                // on the first message this session judges. Anything later is
+                // this session's own event, even when the queue never reported
+                // empty in between (the drain can stop on its budget or its
+                // deadline and leave the message field populated forever).
+                const bool surfaced_by_previous_session = (msg_text == dedup_seed_);
+                dedup_seed_.clear();
+
                 // Defer error event for emission outside lock (avoids deadlock)
-                if (msg_type == "error" && msg_text != last_error_msg_) {
+                if (msg_type == "error" && msg_text != last_error_msg_ &&
+                    !surfaced_by_previous_session) {
                     last_error_msg_ = msg_text;
                     deferred_error_event = msg_text;
+                    // Persist for the next session's dedup seed: this text has
+                    // now been surfaced, and a restart must not re-toast it.
+                    AfcMessageDedup::instance().record_error(msg_text);
                 }
 
                 // Suppress toasts when:
@@ -1913,6 +1960,13 @@ void AmsBackendAfc::parse_afc_state(const nlohmann::json& afc_data,
                     spdlog::debug("[AMS AFC] Toast suppressed (prompt={}, op={}): {}",
                                   afc_prompt_active, operation_active, msg_text);
                     ui_notification_info_with_action("AFC", msg_text.c_str(), "afc_message");
+                } else if (msg_type == "error" && surfaced_by_previous_session) {
+                    // A previous session already surfaced this text and AFC
+                    // latched it; recorded in operation_detail above, not
+                    // re-toasted.
+                    spdlog::debug("[AMS AFC] Latched message already surfaced by a previous "
+                                  "session, not toasted: {}",
+                                  msg_text);
                 } else {
                     // Show toast based on message type
                     if (msg_type == "error") {
@@ -2022,7 +2076,7 @@ void AmsBackendAfc::parse_afc_state(const nlohmann::json& afc_data,
         }
 
         // If we got unit-lane data from object format, re-organize into multi-unit layout.
-        // NOTE: This runs under mutex_ lock (held by handle_status_update caller),
+        // NOTE: This runs under mutex_ lock (held by handle_status caller),
         // so system_info_ modifications are safe from concurrent get_system_info() reads.
         if (!unit_lane_map_.empty()) {
             if (!slots_.is_initialized() && !discovered_lane_names_.empty()) {
@@ -2279,6 +2333,45 @@ void AmsBackendAfc::parse_afc_state(const nlohmann::json& afc_data,
 // AFC Object Parsing (AFC_stepper, AFC_hub, AFC_extruder)
 // ============================================================================
 
+bool AmsBackendAfc::restates_unlinked_spool(int slot_index, int firmware_id) {
+    const auto it = overrides_.find(slot_index);
+    if (it == overrides_.end() || it->second.unlinked_spool_id <= 0) {
+        return false;
+    }
+    if (it->second.unlinked_spool_id == firmware_id) {
+        return true;
+    }
+    set_unlinked_spool(slot_index, 0);
+    return false;
+}
+
+void AmsBackendAfc::set_unlinked_spool(int slot_index, int spool_id) {
+    const auto it = overrides_.find(slot_index);
+    if (spool_id <= 0 && (it == overrides_.end() || it->second.unlinked_spool_id <= 0)) {
+        return;
+    }
+    helix::ams::FilamentSlotOverride& record = overrides_[slot_index];
+    record.unlinked_spool_id = spool_id;
+    if (override_store_) {
+        helix::ams::save_override_async(override_store_.get(), slot_index, record,
+                                        backend_log_tag(), "unlink");
+    }
+}
+
+void AmsBackendAfc::invalidate_broken_binding(int slot_index, int firmware_spool_id) {
+    if (reconcile_lane_binding(slot_index, firmware_spool_id) == ams::BindingVerdict::Holds) {
+        return;
+    }
+    // A broken binding is this backend's auto-clear signal, and it is the one
+    // boundary an echo suppression can end on: the lane no longer holds what
+    // the write was made against, so what we wrote there has stopped
+    // explaining what is read now. Unconditional by design - the verdict
+    // describes the lane, not whichever edit armed the guard.
+    own_write_echoes_.abandon(slot_index);
+    helix::ams::clear_persisted_override(override_store_.get(), overrides_, slot_index,
+                                         backend_log_tag());
+}
+
 void AmsBackendAfc::parse_afc_stepper(int slot_index, const std::string& lane_name,
                                       const nlohmann::json& data) {
     // Parse AFC_stepper lane{N} object for sensor states and filament info
@@ -2301,7 +2394,7 @@ void AmsBackendAfc::parse_afc_stepper(int slot_index, const std::string& lane_na
     }
 
     // Update sensor state for this lane
-    auto& sensors = entry->sensors;
+    auto& sensors = lane_sensors_for(lane_name);
     if (data.contains("prep") && data["prep"].is_boolean()) {
         sensors.prep = data["prep"].get<bool>();
     }
@@ -2342,42 +2435,85 @@ void AmsBackendAfc::parse_afc_stepper(int slot_index, const std::string& lane_na
     // Get slot info for filament data update
     auto& slot = entry->info;
 
-    // Parse color.
-    //
-    // An EMPTY value is a deliberate clear, not a parse failure. AFC's
-    // clear_values() sets color='' on eject, and SET_COLOR with an empty value
-    // stores the literal '#'. Both strip to "" here. Previously std::stoul("")
-    // threw and was swallowed as "keep existing", so an ejected lane kept
-    // painting the previous spool's colour. Genuinely malformed input still
-    // keeps the old value — only emptiness clears.
+    // Firmware's own running account of this lane, which every block below
+    // updates alongside its write to `slot`. The lane observations at the end
+    // of this function are built from this and never from `slot`: the two
+    // agree on what AFC reported, and only this one is safe from the override
+    // merge that runs in between.
+    auto& firmware = lane_firmware_readings_[lane_name];
+
+    // The colour and material this frame itself stated, gathered as the blocks
+    // below amend the accumulator. Colour and material are the two identity
+    // fields an AFC write sends, so the only two the echo guard can hold a
+    // declaration for. The guard
+    // judges this record rather than `firmware.cache`: the accumulator carries
+    // firmware's last word on every key, so a frame silent about material would
+    // otherwise offer the pre-edit material as this frame's statement and
+    // release the material declaration before its echo lands.
+    ams::Observation stated{ams::ObservationSource::VendorCache};
+
+    // The keys this frame carried and read as a clear, for the echo guard:
+    // a key published empty is firmware stating the value is gone, which
+    // releases a declaration where silence would leave it standing. Presence
+    // is the signal; the values are never read.
+    ams::Observation cleared{ams::ObservationSource::VendorCache};
+
+    // Parse color. AFC's clear_values() writes color='' on eject and its
+    // SET_COLOR with no value stores the bare '#', both of which read as a
+    // clear; anything else that will not parse is a value we cannot read
+    // rather than a lane with no colour, so it changes nothing.
     if (data.contains("color") && data["color"].is_string()) {
-        std::string color_str = data["color"].get<std::string>();
-        // Remove '#' prefix if present
-        if (!color_str.empty() && color_str[0] == '#') {
-            color_str = color_str.substr(1);
-        }
-        if (color_str.empty()) {
+        const auto reading = ams::read_lane_color(data["color"].get<std::string>());
+        if (reading.kind == ams::ColorReadingKind::Observed) {
+            slot.color_rgb = reading.rgb;
+            firmware.cache.color_rgb = reading.rgb;
+        } else if (reading.kind == ams::ColorReadingKind::Cleared) {
             slot.color_rgb = AMS_DEFAULT_SLOT_COLOR;
-        } else {
-            try {
-                slot.color_rgb = std::stoul(color_str, nullptr, 16);
-            } catch (...) {
-                // Keep existing color on parse failure
-            }
+            firmware.cache.color_rgb.reset();
+            cleared.color_rgb = 0u;
         }
+        stated.color_rgb = firmware.cache.color_rgb;
+    }
+
+    // TD-1 scanner reading. Empty strings mean no scan; the colour is a bare hex.
+    if (data.contains("td1_color") && data["td1_color"].is_string()) {
+        const auto scan = ams::read_lane_color(data["td1_color"].get<std::string>());
+        if (scan.kind == ams::ColorReadingKind::Observed) {
+            slot.scanned_color_rgb = scan.rgb;
+        } else if (scan.kind == ams::ColorReadingKind::Cleared) {
+            slot.scanned_color_rgb.reset();
+        }
+    }
+    if (data.contains("td1_td")) {
+        slot.scanned_td = data["td1_td"].is_number() ? data["td1_td"].get<float>() : -1.0f;
+    }
+    if (data.contains("td1_scan_time") && data["td1_scan_time"].is_string()) {
+        slot.scanned_time = data["td1_scan_time"].get<std::string>();
     }
 
     // Parse material
     if (data.contains("material") && data["material"].is_string()) {
         slot.material = data["material"].get<std::string>();
+        if (slot.material.empty()) {
+            firmware.cache.material.reset();
+            cleared.material = std::string{};
+        } else {
+            firmware.cache.material = slot.material;
+        }
+        stated.material = firmware.cache.material;
     }
 
     // Filament name, as AFC copied it out of Spoolman's filament record
     // (AFC v1.2.0+). Empty is a deliberate clear — clear_values() sets
     // filament_name="" on eject — matching how `color` is handled above.
-    // apply_overrides() runs below, so a user-entered name still wins.
+    // apply_resolved_lane() runs below, so a user-entered name still wins.
     if (data.contains("filament_name") && data["filament_name"].is_string()) {
         slot.spool_name = data["filament_name"].get<std::string>();
+        if (slot.spool_name.empty()) {
+            firmware.cache.spool_name.reset();
+        } else {
+            firmware.cache.spool_name = slot.spool_name;
+        }
     }
 
     // Multi-colour hexes (AFC v1.2.0+). Firmware carries these as a list of BARE
@@ -2445,23 +2581,38 @@ void AmsBackendAfc::parse_afc_stepper(int slot_index, const std::string& lane_na
 
     // Parse Spoolman ID.
     //
-    // JSON null is AFC telling us the link is GONE — clear_values() sets
-    // spool_id=None on eject. is_number_integer() is false for null, so this
-    // previously retained the old id and an ejected lane stayed "linked",
-    // which is what later aimed an edit's Spoolman write at the wrong spool.
-    // An ABSENT key still means "unchanged": these are deltas, not snapshots.
+    // JSON null is AFC telling us the link is GONE - clear_values() sets
+    // spool_id=None on eject. is_number_integer() is false for null, so null
+    // needs an arm of its own; without one an ejected lane keeps reading as
+    // linked and a later edit's Spoolman write aims at the wrong spool. An
+    // ABSENT key still means "unchanged": these are deltas, not snapshots.
+    //
+    // Remember firmware's own word separately from the merged slot: the §5
+    // merge below re-supplies the retained override id, so slot.spoolman_id
+    // alone cannot tell whether AFC itself still holds a link. The spool-id
+    // re-assert (see maybe_reassert_retained_spool_link) keys off this, not
+    // the merge. Both records are written INSIDE the two arms: a value that is
+    // neither an integer nor null assigns nothing, and reading slot.spoolman_id
+    // outside the statement that set it would file the user's own id as
+    // firmware's word.
     if (data.contains("spool_id")) {
         if (data["spool_id"].is_number_integer()) {
-            slot.spoolman_id = data["spool_id"].get<int>();
+            const int firmware_id = data["spool_id"].get<int>();
+            if (!restates_unlinked_spool(slot_index, firmware_id)) {
+                slot.spoolman_id = firmware_id;
+                lane_firmware_spool_id_[lane_name] = firmware_id;
+                if (firmware_id > 0) {
+                    firmware.cache.spoolman_id = firmware_id;
+                } else {
+                    firmware.cache.spoolman_id.reset();
+                }
+            }
         } else if (data["spool_id"].is_null()) {
+            set_unlinked_spool(slot_index, 0);
             slot.spoolman_id = 0;
+            lane_firmware_spool_id_[lane_name] = 0;
+            firmware.cache.spoolman_id.reset();
         }
-        // Remember firmware's own word separately from the merged slot: the
-        // §5 merge below re-supplies the retained override id, so
-        // slot.spoolman_id alone can no longer tell whether AFC itself still
-        // holds a link. The spool-id re-assert (see
-        // maybe_reassert_retained_spool_link) keys off this, not the merge.
-        lane_firmware_spool_id_[lane_name] = slot.spoolman_id;
     }
 
     // Parse weight.
@@ -2469,8 +2620,20 @@ void AmsBackendAfc::parse_afc_stepper(int slot_index, const std::string& lane_na
     // This is the ONLY weight source for AFC. AFC_lane.get_status() has carried a
     // live `weight` since v1.1.0, on every release, so no version gate is needed
     // and none of the lane_data staleness (see parse_lane_data) can reach us here.
+    //
+    // A zero beside no material and no colour is the state AFC's own
+    // clear_values() and a Clear Spool leave behind, so it reads as unknown
+    // rather than an empty spool. A spool metered down to zero keeps its
+    // material and stays at zero.
     if (data.contains("weight") && data["weight"].is_number()) {
-        slot.remaining_weight_g = data["weight"].get<float>();
+        const float weight = data["weight"].get<float>();
+        if (weight == 0.0f && !firmware.cache.material && !firmware.cache.color_rgb) {
+            slot.remaining_weight_g = -1.0f;
+            firmware.metered.remaining_weight_g.reset();
+        } else {
+            slot.remaining_weight_g = weight;
+            firmware.metered.remaining_weight_g = weight;
+        }
     }
 
     // Full-spool weight (AFC v1.2.0+), ONLY for lanes with a Spoolman link.
@@ -2479,18 +2642,25 @@ void AmsBackendAfc::parse_afc_stepper(int slot_index, const std::string& lane_na
     // constant (config `full_weight`, else the unit's) that Spoolman overwrites
     // with the spool's real initial_weight when a spool is linked. Every lane
     // reports it, empty ones included, so adopting it ungated would give an
-    // ejected lane a total_weight_g of 1000 and render it as "0 / 1000 g" —
-    // total_weight_g's convention is -1 for unknown. spool_id was parsed just
-    // above, so slot.spoolman_id is this frame's value.
+    // ejected lane a total_weight_g of 1000 and render it as "0 / 1000 g" -
+    // total_weight_g's convention is -1 for unknown.
     //
     // Deliberately does NOT clear on unlink: total_weight_g also comes from the
     // Spoolman weight poll and from user overrides, and neither should be wiped
     // because AFC dropped its own link.
+    //
+    // On a frame carrying no spool_id key the gate reads the merged id, which
+    // may be the user's retained link rather than AFC's. The value admitted is
+    // still this frame's own, so nothing user-authored is filed; the lane can
+    // simply carry a firmware total while AFC's own link is gone. The slot
+    // write and the observation share the one gate rather than answering the
+    // same question two ways.
     if (slot.spoolman_id > 0 && data.contains("initial_weight") &&
         data["initial_weight"].is_number()) {
         float full = data["initial_weight"].get<float>();
         if (full > 0.0f) {
             slot.total_weight_g = full;
+            firmware.metered.total_weight_g = full;
         }
     }
 
@@ -2509,14 +2679,13 @@ void AmsBackendAfc::parse_afc_stepper(int slot_index, const std::string& lane_na
     // only refreshes when AFC decides to push. Inert on older firmware; harmless
     // there.
     //
-    // apply_overrides() runs directly below, so a user's brand override still wins
-    // over whatever firmware reports. The lane_data path does the same since #1195.
-    read_vendor(data, slot.brand);
-
-    // Re-supply the user's attached identity on top of firmware truth. This is
-    // what keeps a lane's spool across an eject now that the parser honours
-    // AFC's clears.
-    apply_overrides(slot, slot.global_index >= 0 ? slot.global_index : slot.slot_index);
+    // apply_resolved_lane() runs directly below, so a user's declared brand still
+    // wins over whatever firmware reports. The lane_data path does the same since #1195.
+    // read_vendor() writes only when it returns true, so slot.brand is the
+    // value it just stored and no key of its ladder is read a second time.
+    if (read_vendor(data, slot.brand)) {
+        firmware.cache.brand = slot.brand;
+    }
 
     // Derive slot status from sensors and status string.
     // Only recompute status when at least one status-related field is present
@@ -2530,7 +2699,14 @@ void AmsBackendAfc::parse_afc_stepper(int slot_index, const std::string& lane_na
     // lane's prior state, and slot.status is that state until rewritten.
     const SlotStatus status_at_frame_start = slot.status;
 
-    if (has_tool_loaded || has_status || data.contains("prep") || data.contains("load")) {
+    // Whether this frame says anything about where the filament is. Named
+    // because the lane's sensed observation below is filed on exactly the
+    // frames that recompute the status, and a second spelling of that could
+    // drift from this one.
+    const bool has_presence_reading =
+        has_tool_loaded || has_status || data.contains("prep") || data.contains("load");
+
+    if (has_presence_reading) {
         bool tool_loaded = has_tool_loaded && data["tool_loaded"].get<bool>();
         std::string status_str = has_status ? data["status"].get<std::string>() : "";
 
@@ -2571,9 +2747,85 @@ void AmsBackendAfc::parse_afc_stepper(int slot_index, const std::string& lane_na
         slot.status == SlotStatus::LOADED || slot.status == SlotStatus::AVAILABLE;
     const bool filament_present_before = status_at_frame_start == SlotStatus::LOADED ||
                                          status_at_frame_start == SlotStatus::AVAILABLE;
+    // A remember_spool lane keeps its spool_id through an eject too, so the
+    // next spool inserted would inherit the unlinked id; only a lane AFC
+    // clears on eject ends the unlink here.
+    if (filament_present_before && !filament_present_now) {
+        const auto remembers = lane_remember_spool_.find(lane_name);
+        if (remembers == lane_remember_spool_.end() || !remembers->second) {
+            set_unlinked_spool(slot_index, 0);
+        }
+    }
     if (filament_present_now && !filament_present_before) {
         maybe_reassert_retained_spool_link(slot_index, lane_name);
+        // The same edge is also an insert, and the spool_id binding is AFC's
+        // only word on what went in: a lane the plugin names keeps its
+        // details silently (same spool, or the re-bind verdict swaps them),
+        // and a lane it leaves unnamed asks. The notice re-checks its own
+        // guards (print-feeding lane, lane with nothing to clear) on the UI
+        // thread (prestonbrown/helixscreen#1710). An insert is an edge out
+        // of an OBSERVED empty: initialize_slots() writes UNKNOWN, so a
+        // loaded lane's first frame at boot or reconnect is a baseline
+        // sighting, and asking "same spool?" per lane per boot would train
+        // the notice away.
+        auto fw_it = lane_firmware_spool_id_.find(lane_name);
+        const int firmware_id = fw_it != lane_firmware_spool_id_.end() ? fw_it->second : 0;
+        if (firmware_id <= 0 && status_at_frame_start == SlotStatus::EMPTY) {
+            helix::ui::queue_update("AmsBackendAfc::parse_afc_stepper", [slot_index] {
+                helix::ui::offer_clear_after_unverified_insert(slot_index);
+            });
+        }
     }
+
+    // Translate what AFC has reported into the lane source model. Every value
+    // read here comes from `firmware`, never from `slot`: `slot` is entry->info,
+    // which persists across frames, and apply_resolved_lane() has rewritten it
+    // with the user's own declarations on every previous frame (and does so
+    // again further down). Filing one of those as something a vendor store
+    // remembers is the confusion this model exists to end.
+    //
+    // The cache and the meter are filed on every frame because they are
+    // accumulated rather than assembled from this frame. Re-filing them
+    // unchanged is what lets a delta naming one key leave the rest of the lane
+    // alone, where a record built from the frame would narrow it.
+    const ams::LaneId lane = lane_id(slot_index);
+    // The guard filters a copy of the frame's statement, so the accumulator
+    // stays firmware's own account of what it holds and every later frame
+    // files from that account. An empty boundary is the frame naming no spool,
+    // which is not a change.
+    ams::Observation filed = firmware.cache;
+    const int withheld = withhold_echoes(own_write_echoes_, slot_index, stated, filed, cleared);
+    if (withheld > 0) {
+        spdlog::debug("[AMS AFC] withheld {} echoed field(s) on lane {}", withheld, lane_name);
+    }
+    ams::ingest(lane, filed);
+    ams::ingest(lane, firmware.metered);
+
+    // Does the identity declared on this lane still describe what is in it?
+    // The id compared comes from `firmware`, never from `slot`, for the same
+    // reason the ingests above do: `slot` carries the stored record's id back
+    // after the override merge, so comparing against it would compare a record
+    // with itself and no binding could ever look broken. The own-write
+    // expectation is consulted inside reconcile_lane_binding(), so a frame
+    // still naming the id we just overwrote suppresses the re-bind.
+    invalidate_broken_binding(slot_index, firmware.cache.spoolman_id.value_or(0));
+
+    // Presence is the one reading AFC can stop having: prep, load and
+    // tool_loaded are real sensors, and a frame naming none of them is not a
+    // sensor reporting an empty lane. A record is written whole, so filing one
+    // here would erase a reading instead of repeating it. No frame, no ingest -
+    // the lane keeps what the sensors last said.
+    if (has_presence_reading) {
+        ams::Observation sensed(ams::ObservationSource::Sensed);
+        sensed.present = filament_present_now;
+        ams::ingest(lane, sensed);
+    }
+
+    // Last, because this READS the lane model: every ingest above has to have
+    // landed, the binding has to have been reconciled, and slot.status has to
+    // be this frame's, or the lane paints a reading one frame stale or a
+    // binding that was just dropped.
+    apply_resolved_lane(slot, slot_index);
 
     // Populate or clear per-slot error based on lane status
     if (has_status) {
@@ -2673,7 +2925,7 @@ void AmsBackendAfc::parse_afc_stepper(int slot_index, const std::string& lane_na
 
                 // Firmware-sourced: this is AFC's own `map` field coming back over
                 // the subscription, which is the only write here that proves the
-                // printer applied a mapping (#1270). set_slot_info()'s write is NOT
+                // printer applied a mapping (#1270). apply_user_edit()'s write is NOT
                 // this — that one is our own intent, sent as SET_MAP a few lines
                 // later.
                 slots_.set_tool_mapping(slot_index, chosen,
@@ -2775,7 +3027,7 @@ bool AmsBackendAfc::printer_retains_spool_info() const {
 
 void AmsBackendAfc::maybe_reassert_retained_spool_link(int slot_index,
                                                        const std::string& lane_name) {
-    // Callers hold mutex_ (parse_afc_stepper via handle_status_update).
+    // Callers hold mutex_ (parse_afc_stepper via handle_status).
     //
     // The #1289 convergence gap: with "Keep Spool Info on Eject" on we keep
     // a lane's spool identity in our override namespace, but AFC itself —
@@ -2791,15 +3043,10 @@ void AmsBackendAfc::maybe_reassert_retained_spool_link(int slot_index,
     // eject/re-insert cycle is the retry. That is the whole debounce: a
     // bouncing spool costs one write per transition, never a stream.
     //
-    // The write rides record_own_spool_write() like set_slot_info's own
+    // The write rides record_own_spool_write() like apply_user_edit's own
     // re-link, so the firmware echo of OUR push cannot be misread by the
     // merge's re-bind rule as another writer's statement.
-    const int override_key = [=]() {
-        // Same key convention as the apply_overrides() call above us.
-        auto* entry = slots_.get_mut(slot_index);
-        return entry && entry->info.global_index >= 0 ? entry->info.global_index : slot_index;
-    }();
-    auto it = overrides_.find(override_key);
+    auto it = overrides_.find(slot_index);
     if (it == overrides_.end() || it->second.spoolman_id <= 0) {
         return; // nothing retained for this lane — no identity to re-assert
     }
@@ -2820,9 +3067,9 @@ void AmsBackendAfc::maybe_reassert_retained_spool_link(int slot_index,
     const int retained_id = it->second.spoolman_id;
     spdlog::info("[AMS AFC] Lane {} (slot {}): re-asserting retained spool id {} into AFC",
                  lane_name, slot_index, retained_id);
-    // Record before dispatching, exactly like set_slot_info's SET_SPOOL_ID
+    // Record before dispatching, exactly like apply_user_edit's SET_SPOOL_ID
     // path: firmware_id (0 here) is what firmware last reported.
-    record_own_spool_write(override_key, retained_id, firmware_id);
+    record_own_spool_write(slot_index, retained_id, firmware_id);
     AmsError err =
         execute_gcode(fmt::format("SET_SPOOL_ID LANE={} SPOOL_ID={}", lane_name, retained_id));
     if (!err) {
@@ -3015,6 +3262,75 @@ void AmsBackendAfc::parse_afc_buffer(const std::string& buffer_name, const nlohm
     // Buffer health lives at unit level — the buffer sits between hub and
     // toolhead, not per-lane.
     apply_buffer_health_to_units();
+}
+
+bool AmsBackendAfc::parse_oams_environment(const nlohmann::json& params) {
+    bool any = false;
+    for (auto it = params.begin(); it != params.end(); ++it) {
+        if (!it.value().is_object()) {
+            continue;
+        }
+        // OpenAMS publishes its HDC1080 as "aht3x <name>" by default and as
+        // "temperature_oams <name>" when the alias is switched off.
+        const auto* chip = helix::sensors::humidity_chip_for_object(it.key());
+        if (!chip || (chip->type != helix::sensors::HumiditySensorType::AHT3X &&
+                      chip->type != helix::sensors::HumiditySensorType::TEMPERATURE_OAMS)) {
+            continue;
+        }
+        auto& env =
+            oams_env_[helix::text_io::to_lower(it.key().substr(chip->klipper_prefix.size()))];
+        const auto temp = it.value().find("temperature");
+        if (temp != it.value().end() && temp->is_number()) {
+            env.temperature_c = temp->get<float>();
+        }
+        const auto hum = it.value().find("humidity");
+        if (hum != it.value().end() && hum->is_number()) {
+            env.humidity_pct = hum->get<float>();
+            env.has_humidity = true;
+        }
+        any = true;
+    }
+    if (any) {
+        apply_unit_environment();
+    }
+    return any;
+}
+
+void AmsBackendAfc::apply_unit_environment() {
+    if (oams_env_.empty()) {
+        return;
+    }
+    const auto openams_units =
+        std::count_if(unit_infos_.begin(), unit_infos_.end(),
+                      [](const AfcUnitInfo& u) { return u.type == "OpenAMS"; });
+    for (auto& unit : system_info_.units) {
+        const AfcUnitInfo* info = nullptr;
+        for (const auto& ui : unit_infos_) {
+            if (ui.type == "OpenAMS" &&
+                (ui.type + " " + ui.name == unit.name ||
+                 (unit_infos_.size() == 1 && system_info_.units.size() == 1))) {
+                info = &ui;
+                break;
+            }
+        }
+        if (!info) {
+            continue;
+        }
+        // The sensor is named after the [AFC_OAMS] controller the unit's `oams`
+        // option points at; the unit's own name is the fallback when
+        // configfile has not answered, and a lone unit with a lone sensor needs
+        // no name to pair them.
+        const std::string unit_key = helix::text_io::to_lower(info->name);
+        const auto cfg = unit_oams_names_.find(unit_key);
+        auto env = oams_env_.find(cfg != unit_oams_names_.end() ? cfg->second : unit_key);
+        if (env == oams_env_.end() && openams_units == 1 && oams_env_.size() == 1) {
+            env = oams_env_.begin();
+        }
+        if (env != oams_env_.end()) {
+            unit.environment = env->second;
+            has_unit_environment_ = true;
+        }
+    }
 }
 
 void AmsBackendAfc::apply_buffer_health_to_units() {
@@ -3447,9 +3763,6 @@ void AmsBackendAfc::check_afc_feature_level(const nlohmann::json& lane_status) {
                  modern ? "publishes" : "does NOT publish");
 
     auto* config = Config::get_instance();
-    if (!config) {
-        return;
-    }
     constexpr const char* NOTICE_SHOWN_KEY = "/ams/afc_upgrade_notice_shown";
 
     if (modern) {
@@ -3599,17 +3912,13 @@ void AmsBackendAfc::query_initial_state() {
     client_->send_jsonrpc(
         "printer.objects.query", params,
         [this, token](const nlohmann::json& response) {
-            // L081 Mechanism C: handle_status_update mutates members + emits events.
+            // L081 Mechanism C: handle_status mutates members + emits events.
             token.defer("AmsBackendAfc::query_initial_state_success", [this, response]() {
                 // Response structure:
                 // {"jsonrpc": "2.0", "result": {"eventtime": ..., "status": {...}}, "id": ...}
                 if (response.contains("result") && response["result"].contains("status") &&
                     response["result"]["status"].is_object()) {
-                    // The status object format is the same as notify_status_update params
-                    // Wrap it in a format that handle_status_update expects
-                    nlohmann::json notification = {
-                        {"params", nlohmann::json::array({response["result"]["status"]})}};
-                    handle_status_update(notification);
+                    handle_status(response["result"]["status"]);
                     spdlog::info("[AMS AFC] Initial state loaded");
                 } else {
                     spdlog::warn("[AMS AFC] Initial state query returned unexpected format");
@@ -3677,8 +3986,182 @@ bool AmsBackendAfc::has_toolchanger() const {
     return std::any_of(unit_infos_.begin(), unit_infos_.end(), [](const AfcUnitInfo& u) {
         // `type` is user-overridable (`config.get("type", "Toolchanger")`), so
         // compare case-insensitively rather than pinning the exact spelling.
-        return to_lower_copy(u.type) == "toolchanger";
+        return helix::text_io::to_lower(u.type) == "toolchanger";
     });
+}
+
+AmsBackendAfc::ConfigfileTopology
+AmsBackendAfc::parse_configfile_topology(const nlohmann::json& response) {
+    ConfigfileTopology topo;
+    const auto result = response.find("result");
+    if (result == response.end() || !result->is_object()) {
+        return topo;
+    }
+    const auto status = result->find("status");
+    if (status == result->end() || !status->is_object()) {
+        return topo;
+    }
+    const auto configfile = status->find("configfile");
+    if (configfile == status->end() || !configfile->is_object()) {
+        return topo;
+    }
+    const auto settings = configfile->find("settings");
+    if (settings == configfile->end() || !settings->is_object()) {
+        return topo;
+    }
+    topo.answered = true;
+
+    // Klipper lowercases both section headers and option keys in
+    // configfile.settings, so `[AFC_extruder T1]` arrives as
+    // "afc_extruder t1". The section suffix is matched
+    // case-insensitively against the names AFC.extruders publishes.
+    static constexpr const char* EXTRUDER_PREFIX = "afc_extruder ";
+    static constexpr const char* TOOLCHANGER_PREFIX = "afc_toolchanger ";
+    static constexpr const char* OPENAMS_PREFIX = "afc_openams ";
+    for (auto it = settings->begin(); it != settings->end(); ++it) {
+        const std::string key = helix::text_io::to_lower(it.key());
+        if (key.rfind(TOOLCHANGER_PREFIX, 0) == 0) {
+            topo.saw_toolchanger = true;
+            continue;
+        }
+        if (key.rfind(OPENAMS_PREFIX, 0) == 0 && it.value().is_object()) {
+            const auto oams = it.value().find("oams");
+            if (oams != it.value().end() && oams->is_string()) {
+                topo.oams_names[key.substr(std::strlen(OPENAMS_PREFIX))] =
+                    helix::text_io::to_lower(oams->get<std::string>());
+            }
+            continue;
+        }
+        if (key.rfind(EXTRUDER_PREFIX, 0) != 0 || !it.value().is_object()) {
+            continue;
+        }
+        // `buffer` borrows the buffer's ram sensor: no sensor at the toolhead.
+        auto wired = [&](const char* option) {
+            const auto pin = it.value().find(option);
+            if (pin == it.value().end() || !pin->is_string())
+                return false;
+            const std::string v = helix::text_io::to_lower(pin->get<std::string>());
+            return !v.empty() && v != "buffer" && v != "none" && v != "unknown";
+        };
+        topo.extruder_sensor_fitted[key.substr(std::strlen(EXTRUDER_PREFIX))] =
+            wired("pin_tool_start") || wired("pin_tool_end");
+        const auto name = it.value().find("extruder_name");
+        if (name == it.value().end() || !name->is_string()) {
+            continue;
+        }
+        topo.extruder_names[key.substr(std::strlen(EXTRUDER_PREFIX))] = name->get<std::string>();
+    }
+    return topo;
+}
+
+void AmsBackendAfc::apply_configfile_topology(ConfigfileTopology topo) {
+    if (!topo.answered) {
+        spdlog::debug("[AMS AFC] configfile.settings absent — AFC_extruder tool "
+                      "indices stay derived from section names");
+        return;
+    }
+    bool sensor_changed = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        extruder_klipper_names_ = std::move(topo.extruder_names);
+        unit_oams_names_ = std::move(topo.oams_names);
+        if (!topo.extruder_sensor_fitted.empty()) {
+            extruder_sensor_fitted_ = std::move(topo.extruder_sensor_fitted);
+            sensor_changed = refresh_unit_toolhead_sensors_unlocked();
+        }
+        apply_unit_environment();
+        // Settings were read. Only now does an absent extruder_name
+        // mean the config lacks one rather than that we have not asked.
+        configfile_answered_ = true;
+        // A newly-arrived mapping can resolve a name that already
+        // warned; let it warn again if it still cannot be resolved.
+        extruder_tool_index_warned_.clear();
+        // Latch only on presence. A config we could not read, or one
+        // read before a section was added, must not be taken as proof
+        // that no toolchanger exists.
+        if (topo.saw_toolchanger) {
+            configfile_has_toolchanger_ = true;
+        }
+        spdlog::debug("[AMS AFC] configfile: {} AFC_extruder -> Klipper extruder names, "
+                      "toolchanger section {}",
+                      extruder_klipper_names_.size(), topo.saw_toolchanger ? "present" : "absent");
+
+        // This query races the first status frames — on the reporter's
+        // machine it landed 17ms after the units were first mapped, so
+        // every toolhead label was derived from names it could not yet
+        // resolve. Redo that derivation now rather than carrying wrong
+        // labels until AFC happens to push another unit frame.
+        if (!extruder_klipper_names_.empty() && !unit_infos_.empty()) {
+            rebuild_unit_map_from_klipper();
+        }
+    }
+    // The units already reported the old answer; repaint now rather than at
+    // the next status frame.
+    if (sensor_changed)
+        emit_event(EVENT_STATE_CHANGED);
+}
+
+bool AmsBackendAfc::unit_toolhead_sensor_fitted(
+    const std::vector<std::string>& unit_extruders,
+    const std::unordered_map<std::string, bool>& fitted) {
+    bool any_unknown = unit_extruders.empty();
+    for (const auto& name : unit_extruders) {
+        const auto it = fitted.find(name);
+        if (it == fitted.end())
+            any_unknown = true;
+        else if (it->second)
+            return true;
+    }
+    if (!any_unknown)
+        return false;
+    if (fitted.empty())
+        return true;
+    const bool first = fitted.begin()->second;
+    const bool agree = std::all_of(fitted.begin(), fitted.end(),
+                                   [first](const auto& entry) { return entry.second == first; });
+    return agree ? first : true;
+}
+
+bool AmsBackendAfc::refresh_unit_toolhead_sensors_unlocked() {
+    // A unit status names AFC_extruder sections; a lane names its extruder by
+    // Klipper name once configfile has answered, so map those back to sections.
+    auto section_of = [this](const std::string& extruder) {
+        std::string name = helix::text_io::to_lower(extruder);
+        if (extruder_sensor_fitted_.count(name))
+            return name;
+        for (const auto& [section, klipper_name] : extruder_klipper_names_) {
+            if (helix::text_io::to_lower(klipper_name) == name)
+                return section;
+        }
+        return name;
+    };
+
+    bool changed = false;
+    for (auto& unit : system_info_.units) {
+        std::vector<std::string> extruders;
+        auto add = [&](const std::string& extruder) {
+            if (extruder.empty())
+                return;
+            std::string section = section_of(extruder);
+            if (std::find(extruders.begin(), extruders.end(), section) == extruders.end())
+                extruders.push_back(std::move(section));
+        };
+        for (const auto& info : unit_infos_) {
+            if (info.type + " " + info.name == unit.name || info.name == unit.name) {
+                for (const auto& extruder : info.extruders)
+                    add(extruder);
+                break;
+            }
+        }
+        for (int i = 0; i < unit.slot_count; ++i) {
+            if (const auto* entry = slots_.get(unit.first_slot_global_index + i))
+                add(entry->info.extruder_name);
+        }
+        const bool fitted = unit_toolhead_sensor_fitted(extruders, extruder_sensor_fitted_);
+        changed |= unit.has_toolhead_sensor != fitted;
+        unit.has_toolhead_sensor = fitted;
+    }
+    return changed;
 }
 
 void AmsBackendAfc::query_afc_configfile_topology() {
@@ -3696,76 +4179,13 @@ void AmsBackendAfc::query_afc_configfile_topology() {
     client_->send_jsonrpc(
         "printer.objects.query", params,
         [this, token](const nlohmann::json& response) {
+            // WS thread: reduce the whole resolved config to a few names here so
+            // the deferred body carries only those, not a copy of the DOM.
             // L081 Mechanism C: the body mutates members under mutex_.
-            token.defer("AmsBackendAfc::query_afc_configfile_topology_success", [this, response]() {
-                if (!response.contains("result") || !response["result"].contains("status") ||
-                    !response["result"]["status"].is_object()) {
-                    return;
-                }
-                const auto& status = response["result"]["status"];
-                if (!status.contains("configfile") || !status["configfile"].is_object() ||
-                    !status["configfile"].contains("settings") ||
-                    !status["configfile"]["settings"].is_object()) {
-                    spdlog::debug("[AMS AFC] configfile.settings absent — AFC_extruder tool "
-                                  "indices stay derived from section names");
-                    return;
-                }
-                const auto& settings = status["configfile"]["settings"];
-
-                // Klipper lowercases both section headers and option keys in
-                // configfile.settings, so `[AFC_extruder T1]` arrives as
-                // "afc_extruder t1". The section suffix is matched
-                // case-insensitively against the names AFC.extruders publishes.
-                static constexpr const char* EXTRUDER_PREFIX = "afc_extruder ";
-                static constexpr const char* TOOLCHANGER_PREFIX = "afc_toolchanger ";
-                std::unordered_map<std::string, std::string> found;
-                bool saw_toolchanger = false;
-                for (auto it = settings.begin(); it != settings.end(); ++it) {
-                    const std::string key = to_lower_copy(it.key());
-                    if (key.rfind(TOOLCHANGER_PREFIX, 0) == 0) {
-                        saw_toolchanger = true;
-                        continue;
-                    }
-                    if (key.rfind(EXTRUDER_PREFIX, 0) != 0 || !it.value().is_object()) {
-                        continue;
-                    }
-                    const auto& section = it.value();
-                    if (!section.contains("extruder_name") ||
-                        !section["extruder_name"].is_string()) {
-                        continue;
-                    }
-                    found[key.substr(std::strlen(EXTRUDER_PREFIX))] =
-                        section["extruder_name"].get<std::string>();
-                }
-
-                std::lock_guard<std::mutex> lock(mutex_);
-                extruder_klipper_names_ = std::move(found);
-                // Settings were read. Only now does an absent extruder_name
-                // mean the config lacks one rather than that we have not asked.
-                configfile_answered_ = true;
-                // A newly-arrived mapping can resolve a name that already
-                // warned; let it warn again if it still cannot be resolved.
-                extruder_tool_index_warned_.clear();
-                // Latch only on presence. A config we could not read, or one
-                // read before a section was added, must not be taken as proof
-                // that no toolchanger exists.
-                if (saw_toolchanger) {
-                    configfile_has_toolchanger_ = true;
-                }
-                spdlog::debug("[AMS AFC] configfile: {} AFC_extruder -> Klipper extruder names, "
-                              "toolchanger section {}",
-                              extruder_klipper_names_.size(),
-                              saw_toolchanger ? "present" : "absent");
-
-                // This query races the first status frames — on the reporter's
-                // machine it landed 17ms after the units were first mapped, so
-                // every toolhead label was derived from names it could not yet
-                // resolve. Redo that derivation now rather than carrying wrong
-                // labels until AFC happens to push another unit frame.
-                if (!extruder_klipper_names_.empty() && !unit_infos_.empty()) {
-                    rebuild_unit_map_from_klipper();
-                }
-            });
+            token.defer("AmsBackendAfc::query_afc_configfile_topology_success",
+                        [this, topo = parse_configfile_topology(response)]() mutable {
+                            apply_configfile_topology(std::move(topo));
+                        });
         },
         [](const MoonrakerError& err) {
             spdlog::debug("[AMS AFC] Failed to query configfile: {} — tool indices stay derived "
@@ -3781,7 +4201,7 @@ std::string AmsBackendAfc::klipper_extruder_name_unlocked(const std::string& sec
     // containing "extruder" (AFC_extruder.py:384), so a config can carry one
     // that no numbering can read, and the section name is the better guess
     // then. Checking here rather than at each caller keeps one fallback chain.
-    const auto it = extruder_klipper_names_.find(to_lower_copy(section_name));
+    const auto it = extruder_klipper_names_.find(helix::text_io::to_lower(section_name));
     if (it != extruder_klipper_names_.end() && helix::tool_number_for_extruder(it->second)) {
         return it->second;
     }
@@ -3832,7 +4252,7 @@ int AmsBackendAfc::tool_index_for_extruder_unlocked(const std::string& ext_name)
     }
 
     if (extruder_tool_index_warned_.insert(ext_name).second) {
-        const auto it = extruder_klipper_names_.find(to_lower_copy(ext_name));
+        const auto it = extruder_klipper_names_.find(helix::text_io::to_lower(ext_name));
         if (it != extruder_klipper_names_.end()) {
             spdlog::warn("[AMS AFC] Cannot determine a tool number for AFC_extruder '{}': its "
                          "extruder_name is '{}', which is not a Klipper extruder object name "
@@ -3895,11 +4315,8 @@ void AmsBackendAfc::parse_lane_data(const nlohmann::json& lane_data) {
         if (key.size() >= 2 && key[0] == 'T' &&
             std::all_of(key.begin() + 1, key.end(),
                         [](unsigned char c) { return std::isdigit(c) != 0; })) {
-            try {
-                tool = std::stoi(key.substr(1));
-            } catch (...) {
-                tool = -1; // out of int range — not a usable tool number
-            }
+            // Out of int range — not a usable tool number
+            tool = helix::text_io::parse_leading<int>(key.substr(1)).value_or(-1);
         }
 
         if (tool < 0 || tool > AFC_MAX_TOOL_NUMBER) {
@@ -3989,25 +4406,50 @@ void AmsBackendAfc::parse_lane_data(const nlohmann::json& lane_data) {
         }
         auto& slot = entry->info;
 
+        // The same per-lane account of firmware's own word the status parser
+        // keeps. Both parsers describe one lane, so they accumulate into one
+        // record: a field this snapshot does not carry stands on whatever the
+        // subscription last said about it, and the other way round.
+        auto& firmware = lane_firmware_readings_[slots_.name_of(i)];
+
+        // The colour and material this snapshot itself stated, for the echo
+        // guard the same way parse_afc_stepper() keeps them: the accumulator's
+        // silent fields are firmware's last word, not this snapshot's claim,
+        // and must not release a declaration.
+        ams::Observation stated{ams::ObservationSource::VendorCache};
+
+        // Keys this snapshot carried and read as a clear, same as the status
+        // path: a key published empty releases a declaration where silence
+        // would leave it standing.
+        ams::Observation cleared{ams::ObservationSource::VendorCache};
+
         // Parse color. AFC writes "#RRGGBB" here (verified against a live
-        // BoxTurtle's lane_data namespace); std::stoul cannot parse the '#', so
-        // without stripping it every lane fell back to the default grey. Bare hex
-        // is also accepted. Matches the handling in parse_afc_stepper.
+        // BoxTurtle's lane_data namespace); bare hex is accepted too. One
+        // decision with the status path, so the two parsers cannot answer the
+        // same string differently.
         if (lane.contains("color") && lane["color"].is_string()) {
-            std::string color_str = lane["color"].get<std::string>();
-            if (!color_str.empty() && color_str[0] == '#') {
-                color_str = color_str.substr(1);
-            }
-            try {
-                slot.color_rgb = static_cast<uint32_t>(std::stoul(color_str, nullptr, 16));
-            } catch (...) {
+            const auto reading = ams::read_lane_color(lane["color"].get<std::string>());
+            if (reading.kind == ams::ColorReadingKind::Observed) {
+                slot.color_rgb = reading.rgb;
+                firmware.cache.color_rgb = reading.rgb;
+            } else if (reading.kind == ams::ColorReadingKind::Cleared) {
                 slot.color_rgb = AMS_DEFAULT_SLOT_COLOR;
+                firmware.cache.color_rgb.reset();
+                cleared.color_rgb = 0u;
             }
+            stated.color_rgb = firmware.cache.color_rgb;
         }
 
         // Parse material
         if (lane.contains("material") && lane["material"].is_string()) {
             slot.material = lane["material"].get<std::string>();
+            if (slot.material.empty()) {
+                firmware.cache.material.reset();
+                cleared.material = std::string{};
+            } else {
+                firmware.cache.material = slot.material;
+            }
+            stated.material = firmware.cache.material;
         }
 
         // Filament name, as AFC copied it out of Spoolman's filament record.
@@ -4016,7 +4458,7 @@ void AmsBackendAfc::parse_lane_data(const nlohmann::json& lane_data) {
         // is adopted as-is rather than treated as "keep existing". Without this
         // a lane whose data only ever arrived through the DB path had no name at
         // all, and the loaded card fell back to the algorithmic colour
-        // description. apply_overrides() runs below, so a user-entered name
+        // description. apply_resolved_lane() runs below, so a user-entered name
         // still wins.
         //
         // Key ladder mirrors read_vendor(): `name` is the shared lane_data
@@ -4027,6 +4469,11 @@ void AmsBackendAfc::parse_lane_data(const nlohmann::json& lane_data) {
             auto it = lane.find(key);
             if (it != lane.end() && it->is_string()) {
                 slot.spool_name = it->get<std::string>();
+                if (slot.spool_name.empty()) {
+                    firmware.cache.spool_name.reset();
+                } else {
+                    firmware.cache.spool_name = slot.spool_name;
+                }
                 break;
             }
         }
@@ -4077,22 +4524,53 @@ void AmsBackendAfc::parse_lane_data(const nlohmann::json& lane_data) {
         // key still means "unchanged"; these are deltas, not snapshots.
         if (lane.contains("spool_id")) {
             if (lane["spool_id"].is_number_integer()) {
-                slot.spoolman_id = lane["spool_id"].get<int>();
+                const int firmware_id = lane["spool_id"].get<int>();
+                if (!restates_unlinked_spool(i, firmware_id)) {
+                    slot.spoolman_id = firmware_id;
+                    if (firmware_id > 0) {
+                        firmware.cache.spoolman_id = firmware_id;
+                    } else {
+                        firmware.cache.spoolman_id.reset();
+                    }
+                }
             } else if (lane["spool_id"].is_null()) {
+                set_unlinked_spool(i, 0);
                 slot.spoolman_id = 0;
+                firmware.cache.spoolman_id.reset();
             }
         }
 
         // Vendor/brand — see read_vendor(). Arrives as `vendor_name` here; inert
-        // on firmware predating #833.
-        read_vendor(lane, slot.brand);
+        // on firmware predating #833. It writes only when it returns true, so
+        // slot.brand inside the branch is the value it just stored.
+        if (read_vendor(lane, slot.brand)) {
+            firmware.cache.brand = slot.brand;
+        }
+
+        // File what this snapshot has added to firmware's account of the lane.
+        // The values come from `firmware`, never from `slot`:
+        // apply_resolved_lane() below rewrites that struct with the user's own
+        // declarations, and those are not readings.
+        //
+        // No Sensed record and no Metered one. lane_data reads no sensor, and
+        // the weight comment at the end of this loop is why no weight is read
+        // from it on any AFC version. The echo guard filters a copy of this
+        // snapshot's statement, the same way the status parse above does: the
+        // accumulator stays firmware's own word for the next frame.
+        ams::Observation filed = firmware.cache;
+        withhold_echoes(own_write_echoes_, i, stated, filed, cleared);
+        ams::ingest(lane_id(i), filed);
+
+        // The same binding check parse_afc_stepper() runs, on the id this
+        // parser read.
+        invalidate_broken_binding(i, firmware.cache.spoolman_id.value_or(0));
 
         // Re-supply the user's attached identity on top of firmware truth, the
         // same way parse_afc_stepper() does. Without this, which parser ran last
         // decided whether an override was visible: the status path applied it,
         // the DB path silently dropped it. Must follow every firmware read above
         // so the override still wins.
-        apply_overrides(slot, slot.global_index >= 0 ? slot.global_index : slot.slot_index);
+        apply_resolved_lane(slot, i);
 
         // NO WEIGHT IS READ FROM lane_data, on any AFC version. This is deliberate.
         //
@@ -4339,11 +4817,22 @@ void AmsBackendAfc::apply_mount_state(bool extruder_set_active_slot, bool afc_st
     }
 }
 
+AfcLaneSensors& AmsBackendAfc::lane_sensors_for(const std::string& lane_name) {
+    return lane_sensors_[lane_name];
+}
+
+const AfcLaneSensors& AmsBackendAfc::lane_sensors_for(const std::string& lane_name) const {
+    static const AfcLaneSensors kUnobserved;
+    auto it = lane_sensors_.find(lane_name);
+    return it != lane_sensors_.end() ? it->second : kUnobserved;
+}
+
 void AmsBackendAfc::initialize_slots(const std::vector<std::string>& lane_names) {
     int lane_count = static_cast<int>(lane_names.size());
 
     // Initialize registry (sets is_initialized = true, creates SlotEntry per lane)
     slots_.initialize("AFC Box Turtle", lane_names);
+    lane_sensors_.clear();
 
     // Set up system_info_ for non-slot fields (unit-level metadata)
     AmsUnit unit;
@@ -4352,10 +4841,9 @@ void AmsBackendAfc::initialize_slots(const std::vector<std::string>& lane_names)
     unit.slot_count = lane_count;
     unit.first_slot_global_index = 0;
     unit.connected = true;
-    unit.has_encoder = false;        // AFC typically uses optical sensors, not encoders
-    unit.has_toolhead_sensor = true; // Most AFC setups have toolhead sensor
-    unit.has_slot_sensors = true;    // AFC has per-lane sensors
-    unit.has_hub_sensor = true;      // AFC hubs have filament sensors
+    unit.has_encoder = false;     // AFC typically uses optical sensors, not encoders
+    unit.has_slot_sensors = true; // AFC has per-lane sensors
+    unit.has_hub_sensor = true;   // AFC hubs have filament sensors
 
     // Initialize slots with defaults
     for (int i = 0; i < lane_count; ++i) {
@@ -4371,6 +4859,7 @@ void AmsBackendAfc::initialize_slots(const std::vector<std::string>& lane_names)
     system_info_.units.clear();
     system_info_.units.push_back(unit);
     system_info_.total_slots = lane_count;
+    refresh_unit_toolhead_sensors_unlocked();
 
     // Initialize tool-to-lane mapping (1:1 default) in the registry.
     // The registry is the single source of truth for tool mappings — lane
@@ -4396,7 +4885,7 @@ void AmsBackendAfc::initialize_slots(const std::vector<std::string>& lane_names)
  * Rebuilds system_info_.units from unit_lane_map_ (unit_name → [lane_names]),
  * preserving existing slot data (colors, materials, status) by matching lane names.
  *
- * @pre mutex_ must be held by caller (via handle_status_update → parse_afc_state)
+ * @pre mutex_ must be held by caller (via handle_status → parse_afc_state)
  * @pre slots_ must be initialized (slots exist in system_info_.units[0])
  */
 void AmsBackendAfc::reorganize_slots() {
@@ -4414,6 +4903,8 @@ void AmsBackendAfc::reorganize_slots() {
                 }
             }
         }
+        refresh_unit_toolhead_sensors_unlocked();
+        apply_unit_environment();
         return;
     }
 
@@ -4462,7 +4953,6 @@ void AmsBackendAfc::reorganize_slots() {
         unit.slot_count = static_cast<int>(lanes.size());
         unit.first_slot_global_index = global_slot_offset;
         unit.connected = true;
-        unit.has_toolhead_sensor = true;
         unit.has_slot_sensors = true;
 
         // Set hub sensor state — two strategies:
@@ -4524,6 +5014,8 @@ void AmsBackendAfc::reorganize_slots() {
     // on every one of them. Re-derive it from what AFC last reported — the buffer
     // parser will not run again until a buffer field actually changes.
     apply_buffer_health_to_units();
+    refresh_unit_toolhead_sensors_unlocked();
+    apply_unit_environment();
 
     spdlog::info("[AMS AFC] Reorganized into {} units, {} total slots", system_info_.units.size(),
                  system_info_.total_slots);
@@ -4534,13 +5026,6 @@ void AmsBackendAfc::reorganize_slots() {
 // ============================================================================
 
 // check_preconditions() provided by AmsSubscriptionBackend
-
-AmsError AmsBackendAfc::validate_slot_index(int slot_index) const {
-    if (slot_index < 0 || slot_index >= system_info_.total_slots) {
-        return AmsErrorHelper::invalid_slot(slot_index, system_info_.total_slots - 1);
-    }
-    return AmsErrorHelper::success();
-}
 
 // execute_gcode() provided by AmsSubscriptionBackend
 
@@ -4553,7 +5038,7 @@ AmsError AmsBackendAfc::execute_gcode_notify(const std::string& gcode,
 
     spdlog::info("[AMS AFC] Executing G-code: {}", gcode);
 
-    // Capture messages by value for async callbacks (thread-safe via ui_queue_update())
+    // Both callbacks run on the WebSocket thread; the toasts queue themselves to main.
     api_->execute_gcode(
         gcode,
         [success_msg]() {
@@ -4566,7 +5051,8 @@ AmsError AmsBackendAfc::execute_gcode_notify(const std::string& gcode,
                 spdlog::warn("[AMS AFC] G-code response timed out (may still be running): {}",
                              gcode);
                 if (!error_prefix.empty()) {
-                    NOTIFY_WARNING(lv_tr("{} — response timed out"), error_prefix);
+                    helix::ui::notify_tr(ToastSeverity::WARNING, TR_NOOP("{} — response timed out"),
+                                         error_prefix);
                 }
             } else if (!error_prefix.empty()) {
                 NOTIFY_ERROR("{}: {}", error_prefix, err.message);
@@ -4584,7 +5070,7 @@ AmsError AmsBackendAfc::do_load_filament(int slot_index) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
 
-        AmsError gate_valid = validate_slot_index(slot_index);
+        AmsError gate_valid = validate_slot_index_locked(slot_index);
         if (!gate_valid) {
             return gate_valid;
         }
@@ -4592,12 +5078,13 @@ AmsError AmsBackendAfc::do_load_filament(int slot_index) {
         // Check if lane has filament available
         const auto* entry = slots_.get(slot_index);
         if (entry && entry->info.status == SlotStatus::EMPTY) {
-            return AmsErrorHelper::slot_not_available(slot_index);
+            return AmsErrorHelper::slot_not_available(lane_noun(), slot_index);
         }
 
         lane_name = slots_.name_of(slot_index);
         if (lane_name.empty()) {
-            return AmsErrorHelper::invalid_slot(slot_index, system_info_.total_slots - 1);
+            return AmsErrorHelper::invalid_slot(lane_noun(), slot_index,
+                                                system_info_.total_slots - 1);
         }
     }
 
@@ -4627,11 +5114,10 @@ AmsError AmsBackendAfc::do_load_filament(int slot_index) {
     // unit: CHANGE_TOOL resolves the lane's own extruder object
     // (cur_lane.extruder_obj) and loads through it, so naming the LANE is
     // sufficient and needs no per-tool selection verb.
-    std::ostringstream cmd;
-    cmd << "CHANGE_TOOL LANE=" << lane_name;
+    std::string cmd = "CHANGE_TOOL LANE=" + lane_name;
 
     spdlog::info("[AMS AFC] Loading from lane {} (slot {})", lane_name, slot_index);
-    return dispatch_operation(cmd.str(), AmsAction::LOADING);
+    return dispatch_operation(cmd, AmsAction::LOADING);
 }
 
 AmsError AmsBackendAfc::do_unload_filament(int slot_index) {
@@ -4640,8 +5126,7 @@ AmsError AmsBackendAfc::do_unload_filament(int slot_index) {
         std::lock_guard<std::mutex> lock(mutex_);
 
         if (!system_info_.filament_loaded) {
-            return AmsError(AmsResult::WRONG_STATE, "No filament loaded", "No filament to unload",
-                            "Load filament first");
+            return AmsErrorHelper::not_loaded();
         }
 
         // Resolve the requested lane so AFC unloads THAT lane, picking up its
@@ -4671,14 +5156,15 @@ AmsError AmsBackendAfc::do_select_slot(int slot_index) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
 
-        AmsError gate_valid = validate_slot_index(slot_index);
+        AmsError gate_valid = validate_slot_index_locked(slot_index);
         if (!gate_valid) {
             return gate_valid;
         }
 
         lane_name = slots_.name_of(slot_index);
         if (lane_name.empty()) {
-            return AmsErrorHelper::invalid_slot(slot_index, system_info_.total_slots - 1);
+            return AmsErrorHelper::invalid_slot(lane_noun(), slot_index,
+                                                system_info_.total_slots - 1);
         }
     }
 
@@ -4693,9 +5179,7 @@ AmsError AmsBackendAfc::do_change_tool(int tool_number) {
         std::lock_guard<std::mutex> lock(mutex_);
 
         if (tool_number < 0 || tool_number >= slots_.slot_count()) {
-            return AmsError(AmsResult::INVALID_TOOL,
-                            "Tool " + std::to_string(tool_number) + " out of range",
-                            "Invalid tool number", "Select a valid tool");
+            return AmsErrorHelper::tool_out_of_range(tool_number);
         }
     }
 
@@ -4756,56 +5240,11 @@ AmsError AmsBackendAfc::reset() {
                                 lv_tr("AFC reset failed"));
 }
 
-void AmsBackendAfc::apply_overrides(SlotInfo& slot, int slot_index) {
-    // Callers hold mutex_. The whole spec §5 policy + the re-bind/eject rules
-    // live in helix::ams::merge_override — the single implementation every
-    // backend shares.
-    auto it = overrides_.find(slot_index);
-    if (it == overrides_.end())
-        return;
-    helix::ams::MergeOptions opts;
-    opts.printer_reports_spool_ids = printer_reports_spool_ids();
-    opts.keep_spool_info_on_eject = SettingsManager::instance().get_ams_keep_spool_info_on_eject();
-    // Own-write echo suppression (SlotFingerprintTracker::expect()
-    // semantics): if we just re-linked this lane's spool id, in-flight
-    // frames keep reporting the old firmware id for a poll or two — Rule 1
-    // must not read that stale frame as an external re-bind.
-    const auto [own_old_id, own_new_id] = own_write_expectation(slot_index, slot.spoolman_id);
-    opts.suppress_rebind_firmware_old_id = own_old_id;
-    opts.suppress_rebind_firmware_new_id = own_new_id;
-    const auto result = helix::ams::merge_override(slot, it->second, opts);
-    if (result.cleared_rebind || result.cleared_eject) {
-        overrides_.erase(it);
-        if (override_store_) {
-            override_store_->clear_async(slot_index, [slot_index](bool ok, const std::string& err) {
-                if (!ok)
-                    spdlog::warn("[AMS AFC] override clear persist failed for slot {}: {}",
-                                 slot_index, err);
-            });
-        }
-    }
-}
-
-void AmsBackendAfc::persist_override(int slot_index, const SlotInfo& info) {
+void AmsBackendAfc::persist_override(int slot_index, const SlotInfo& info,
+                                     const helix::ams::Observation& declared) {
     // Callers hold mutex_.
-    helix::ams::FilamentSlotOverride o;
-    o.brand = info.brand;
-    o.spool_name = info.spool_name;
-    o.spoolman_id = info.spoolman_id;
-    o.spoolman_vendor_id = info.spoolman_vendor_id;
-    o.remaining_weight_g = info.remaining_weight_g;
-    o.total_weight_g = info.total_weight_g;
-    o.color_name = info.color_name;
-    o.material = info.material;
-    // Catalog product identity — see apply_overrides(). Never auto-mirrored;
-    // a non-empty value is always a user pick.
-    o.catalog_id = info.catalog_id;
-    o.product_name = info.product_name;
-    if (info.color_rgb != 0 && info.color_rgb != AMS_DEFAULT_SLOT_COLOR) {
-        o.color_rgb = info.color_rgb;
-        o.color_set = true;
-    }
-    overrides_[slot_index] = o;
+    const helix::ams::FilamentSlotOverride o =
+        helix::ams::stage_user_override(overrides_, slot_index, info, declared);
 
     if (override_store_) {
         override_store_->save_async(slot_index, o, [slot_index](bool ok, std::string err) {
@@ -4817,42 +5256,25 @@ void AmsBackendAfc::persist_override(int slot_index, const SlotInfo& info) {
 }
 
 void AmsBackendAfc::clear_slot_override(int slot_index) {
+    std::string lane_name;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        overrides_.erase(slot_index);
-
-        // Also reset the override-exclusive fields on the live slot, so the
-        // clear shows up in the very next get_slot_info(). AFC has no concept
-        // of brand / spool_name / total weight / colour name, so no firmware
-        // update will ever clear them for us — dropping only the store entry
-        // would leave the previous spool's identity on screen indefinitely.
-        // colour and material are left alone: those DO come from the parse, so
-        // the lane's actual firmware values should surface.
-        if (helix::printer::SlotEntry* entry = slots_.get_mut(slot_index)) {
-            entry->info.brand.clear();
-            entry->info.spool_name.clear();
-            entry->info.spoolman_id = 0;
-            entry->info.spoolman_vendor_id = 0;
-            entry->info.spoolman_filament_id = 0;
-            entry->info.remaining_weight_g = -1.0f;
-            entry->info.total_weight_g = -1.0f;
-            entry->info.color_name.clear();
-            // The catalog pick is override-exclusive on every backend — no AMS
-            // firmware carries a branded product id — so a clear always drops it.
-            // Leaving it would re-navigate the editor to the removed spool's
-            // product on the next open.
-            entry->info.catalog_id.clear();
-            entry->info.product_name.clear();
-        }
+        lane_name = slots_.name_of(slot_index);
+        helix::printer::SlotEntry* entry = slots_.get_mut(slot_index);
+        clear_override_locked(slot_index, entry ? &entry->info : nullptr);
+    }
+    // An empty SET_SPOOL_ID only runs AFC's clear_values() when AFC has
+    // Spoolman configured and the lane does not remember its spool, so an
+    // unlinked lane keeps what SET_MATERIAL / SET_COLOR / SET_WEIGHT stored
+    // unless it is emptied field by field. An empty COLOR stores a bare '#',
+    // which the parse reads as no colour; WEIGHT=0 is what clear_values()
+    // writes.
+    if (!lane_name.empty()) {
+        execute_gcode(fmt::format("SET_MATERIAL LANE={} MATERIAL=", lane_name));
+        execute_gcode(fmt::format("SET_COLOR LANE={} COLOR=", lane_name));
+        execute_gcode(fmt::format("SET_WEIGHT LANE={} WEIGHT=0", lane_name));
     }
     emit_event(EVENT_SLOT_CHANGED, std::to_string(slot_index));
-    if (override_store_) {
-        override_store_->clear_async(slot_index, [slot_index](bool ok, std::string err) {
-            if (!ok) {
-                spdlog::warn("[AMS AFC] override clear failed for slot {}: {}", slot_index, err);
-            }
-        });
-    }
 }
 
 void AmsBackendAfc::publish_external_spool_lane(const SlotInfo* spool) {
@@ -4942,7 +5364,7 @@ bool AmsBackendAfc::can_recover_lane_position(int slot_index) const {
     // It also matches cmd_AFC_RESET's own picker, which builds its candidate
     // list from lanes with raw_load_state true. AFC publishes that as `load`.
     const helix::printer::SlotEntry* entry = slots_.get(slot_index);
-    if (!entry || !entry->sensors.load) {
+    if (!entry || !lane_sensors_for(entry->backend_name).load) {
         return false;
     }
 
@@ -5116,8 +5538,7 @@ AmsError AmsBackendAfc::recover_lane_position(int slot_index) {
 
         lane_name = slots_.name_of(slot_index);
         if (lane_name.empty()) {
-            return AmsErrorHelper::invalid_slot(
-                slot_index, slots_.slot_count() > 0 ? slots_.slot_count() - 1 : 0);
+            return AmsErrorHelper::invalid_slot(lane_noun(), slot_index, slots_.slot_count() - 1);
         }
     }
 
@@ -5157,14 +5578,15 @@ AmsError AmsBackendAfc::eject_lane(int slot_index) {
             return printing;
         }
 
-        AmsError slot_err = validate_slot_index(slot_index);
+        AmsError slot_err = validate_slot_index_locked(slot_index);
         if (!slot_err) {
             return slot_err;
         }
 
         lane_name = slots_.name_of(slot_index);
         if (lane_name.empty()) {
-            return AmsErrorHelper::invalid_slot(slot_index, system_info_.total_slots - 1);
+            return AmsErrorHelper::invalid_slot(lane_noun(), slot_index,
+                                                system_info_.total_slots - 1);
         }
     }
 
@@ -5284,7 +5706,32 @@ AmsError AmsBackendAfc::cancel() {
 // Configuration Operations
 // ============================================================================
 
-AmsError AmsBackendAfc::set_slot_info(int slot_index, const SlotInfo& info, bool persist) {
+namespace {
+
+/// SET_WEIGHT for a lane, in whole grams. The edit path and a weight persist
+/// both send it, so they share one spelling.
+std::string set_weight_command(const std::string& lane_name, float remaining_weight_g) {
+    return fmt::format("SET_WEIGHT LANE={} WEIGHT={:.0f}", lane_name, remaining_weight_g);
+}
+
+} // namespace
+
+void AmsBackendAfc::write_lane_locked(int slot_index, SlotInfo& slot, const SlotInfo& info) {
+    const int old_mapped_tool = slot.mapped_tool;
+    const bool changed = slot.assign_filament_fields(info) || info.mapped_tool != old_mapped_tool;
+    // Tool mapping change goes through registry so reverse maps stay consistent.
+    if (info.mapped_tool != old_mapped_tool && info.mapped_tool >= 0) {
+        slots_.set_tool_mapping(slot_index, info.mapped_tool);
+    }
+
+    if (changed) {
+        spdlog::info("[AMS AFC] Updated slot {} info: {} {}", slot_index, info.material,
+                     info.color_name);
+    }
+}
+
+AmsError AmsBackendAfc::apply_user_edit(int slot_index, const SlotInfo& info,
+                                        const helix::ams::Observation& declared) {
     // Set when the material could not be expressed as a G-code parameter. Reported
     // after every other write has gone out, so a name AFC cannot store costs the user
     // only the material rather than the whole save — but is never silent.
@@ -5295,134 +5742,161 @@ AmsError AmsBackendAfc::set_slot_info(int slot_index, const SlotInfo& info, bool
 
         auto* entry = slots_.get_mut(slot_index);
         if (!entry) {
-            return AmsErrorHelper::invalid_slot(slot_index, system_info_.total_slots - 1);
+            return AmsErrorHelper::invalid_slot(lane_noun(), slot_index,
+                                                system_info_.total_slots - 1);
         }
-        auto& slot = entry->info;
 
         // Capture old spoolman_id before updating for clear detection
-        int old_spoolman_id = slot.spoolman_id;
-        int old_mapped_tool = slot.mapped_tool;
+        const int old_spoolman_id = entry->info.spoolman_id;
+        const int old_mapped_tool = entry->info.mapped_tool;
+        write_lane_locked(slot_index, entry->info, info);
 
-        // Detect whether anything actually changed
-        bool changed = slot.color_name != info.color_name || slot.color_rgb != info.color_rgb ||
-                       slot.material != info.material || slot.brand != info.brand ||
-                       slot.catalog_id != info.catalog_id ||
-                       slot.product_name != info.product_name ||
-                       slot.spoolman_id != info.spoolman_id || slot.spool_name != info.spool_name ||
-                       slot.remaining_weight_g != info.remaining_weight_g ||
-                       slot.total_weight_g != info.total_weight_g ||
-                       slot.nozzle_temp_min != info.nozzle_temp_min ||
-                       slot.nozzle_temp_max != info.nozzle_temp_max ||
-                       slot.bed_temp != info.bed_temp || slot.mapped_tool != info.mapped_tool;
-
-        // Update local state
-        slot.color_name = info.color_name;
-        slot.color_rgb = info.color_rgb;
-        slot.material = info.material;
-        slot.brand = info.brand;
-        // Carry the catalog product identity through preview writes too — a
-        // persist=false preview that dropped it would make the editor snap
-        // back to a different variant on the next get_slot_info().
-        slot.catalog_id = info.catalog_id;
-        slot.product_name = info.product_name;
-        slot.spoolman_id = info.spoolman_id;
-        slot.spool_name = info.spool_name;
-        slot.remaining_weight_g = info.remaining_weight_g;
-        slot.total_weight_g = info.total_weight_g;
-        slot.nozzle_temp_min = info.nozzle_temp_min;
-        slot.nozzle_temp_max = info.nozzle_temp_max;
-        slot.bed_temp = info.bed_temp;
-        // Tool mapping change goes through registry so reverse maps stay consistent.
-        if (info.mapped_tool != old_mapped_tool && info.mapped_tool >= 0) {
-            slots_.set_tool_mapping(slot_index, info.mapped_tool);
-        }
-
-        if (changed) {
-            spdlog::info("[AMS AFC] Updated slot {} info: {} {}", slot_index, info.material,
-                         info.color_name);
-        }
-
-        // Persist via G-code commands when persist=true.
-        // Skip persistence when persist=false — this is used by Spoolman weight
-        // polling (refresh_spoolman_weights) to update in-memory state without
-        // sending G-code back to AFC firmware. Without this guard, each weight
-        // update would fire SET_COLOR/SET_MATERIAL/SET_WEIGHT/SET_SPOOL_ID G-codes,
-        // which trigger AFC status_update WebSocket events, which call
-        // sync_from_backend → refresh_spoolman_weights → set_slot_info again,
-        // creating an infinite feedback loop that saturates the CPU.
-        //
         // Record the user's identity in the override store as well. AFC cannot
         // hold brand / spool_name / total_weight / colour name / filament+vendor
         // ids at all, and the fields it DOES hold get cleared by its own
         // clear_values() on eject.
-        if (persist) {
-            persist_override(slot_index, info);
-        }
+        persist_override(slot_index, info, declared);
 
         // Persistence is never version-gated. These SET_* commands have existed
         // since well before any version we would recognize, and the version string
         // is not a usable signal (AFC stopped writing it — see
         // apply_afc_version_response). Skipping gcode on an unrecognized version
         // caused issue #644, where spool assignment silently bypassed AFC.
-        if (persist) {
-            std::string lane_name = slots_.name_of(slot_index);
-            if (!lane_name.empty()) {
-                // Spoolman ID FIRST — both branches of AFC's set_spoolID() rewrite the
-                // lane's material/color/weight/temps, so this must precede our own
-                // writes or it clobbers them:
-                //   valid id  -> AFC fetches the spool from Spoolman and overwrites
-                //               material, color, weight, temps, density, diameter
-                //   empty id  -> AFC runs clear_values() and wipes all of the above
-                // Emitting it last made a single save set the data and then destroy it,
-                // which is why an edit needed two passes to stick.
-                //
-                // Record the write before dispatching: in-flight status frames
-                // keep reporting old_spoolman_id until the echo lands, and
-                // Rule 1 must not read those as an external re-bind. An
-                // unlink (id 0) erases the pending expectation instead.
-                record_own_spool_write(slot_index, info.spoolman_id, old_spoolman_id);
-                if (info.spoolman_id > 0) {
-                    execute_gcode(fmt::format("SET_SPOOL_ID LANE={} SPOOL_ID={}", lane_name,
-                                              info.spoolman_id));
-                } else if (info.spoolman_id == 0 && old_spoolman_id > 0) {
-                    // Clear Spoolman link with empty string (not -1)
-                    execute_gcode(fmt::format("SET_SPOOL_ID LANE={} SPOOL_ID=", lane_name));
+        std::string lane_name = slots_.name_of(slot_index);
+        if (!lane_name.empty()) {
+            // Remember what the user declared, pruned to what the SET_*
+            // commands below actually carry, so the parse can tell firmware
+            // repeating their choice back from AFC's own readings. Staged
+            // before the first dispatch: the guard has to be standing before
+            // any echo can arrive.
+            //
+            // No boundary token: an AFC status frame names no spool the way
+            // an RFID read names a tag, so suppression ends on a differing
+            // value or on the re-bind verdict in invalidate_broken_binding(),
+            // which is this backend's auto-clear signal.
+            const std::uint64_t staged_sequence = own_write_echoes_.stage(slot_index, declared);
+            if (auto* staged = own_write_echoes_.staged(slot_index)) {
+                // SET_COLOR is skipped for the no-colour sentinel and
+                // SET_MATERIAL for an unsafe name: a field the write omitted
+                // is firmware's to keep, so its echo is a reading.
+                if (!ams::is_declarable_color(info.color_rgb)) {
+                    staged->color_rgb.reset();
                 }
+                if (info.material.empty() ||
+                    !IMoonrakerAPI::is_safe_material_param(info.material)) {
+                    staged->material.reset();
+                }
+                // No SET_* carries brand, spool name, a colour name or a
+                // product line, so any value firmware reports for them is its
+                // own. Weight goes to a meter and the spool id to the binding
+                // machinery; the guard's own roster exempts both. An inert
+                // field left declared would arm nothing but keep the entry
+                // alive after the real fields are all released.
+                staged->brand.reset();
+                staged->spool_name.reset();
+                staged->color_name.reset();
+                staged->product_name.reset();
+            }
+            own_write_echoes_.arm(slot_index, std::string{});
 
-                // Color (only if changed and valid - not 0 or default grey)
-                if (info.color_rgb != 0 && info.color_rgb != AMS_DEFAULT_SLOT_COLOR) {
-                    char color_hex[8];
-                    snprintf(color_hex, sizeof(color_hex), "%06X", info.color_rgb & 0xFFFFFF);
-                    execute_gcode(fmt::format("SET_COLOR LANE={} COLOR={}", lane_name, color_hex));
-                }
+            // A SET_COLOR or SET_MATERIAL Moonraker refused never reached
+            // firmware, so no echo of the REFUSED command is coming: its
+            // fields come off the guard, which would otherwise withhold the
+            // next genuine reading that happens to equal their declaration.
+            // The other command went out, so its fields keep the guard a
+            // whole abandon would drop. A TIMEOUT is "may still be running"
+            // - the write can still land and echo - so there every field
+            // stands. The release is matched to this staging and deferred
+            // off the callback's background thread: apply_user_edit holds
+            // mutex_ across the dispatches, and an inline lock here would
+            // deadlock a synchronous error callback.
+            const auto tok = lifetime_.token();
+            const auto release_refused_fields = [tok, this, slot_index,
+                                                 staged_sequence](ams::Observation refused) {
+                return
+                    [tok, this, slot_index, staged_sequence, refused](const MoonrakerError& err) {
+                        if (err.type == MoonrakerErrorType::TIMEOUT) {
+                            return;
+                        }
+                        tok.defer("AmsBackendAfc::apply_user_edit.abandon_echo",
+                                  [this, slot_index, staged_sequence, refused]() {
+                                      std::lock_guard<std::mutex> lock(mutex_);
+                                      own_write_echoes_.abandon_fields(slot_index, staged_sequence,
+                                                                       refused);
+                                  });
+                    };
+            };
 
-                // Material (validate to prevent command injection). The material
-                // charset is deliberately wider than an identifier's: `PLA+`,
-                // `PA6-CF` and `Silk PLA` are all in our own filament database, and
-                // gating this on is_safe_gcode_param() dropped every one of them.
-                if (!info.material.empty() &&
-                    IMoonrakerAPI::is_safe_material_param(info.material)) {
-                    execute_gcode(fmt::format("SET_MATERIAL LANE={} MATERIAL={}", lane_name,
-                                              IMoonrakerAPI::gcode_param_value(info.material)));
-                } else if (!info.material.empty()) {
-                    spdlog::warn("[AMS AFC] Skipping SET_MATERIAL - unsafe characters in: {}",
-                                 info.material);
-                    rejected_material = info.material;
+            // Spoolman ID FIRST — both branches of AFC's set_spoolID() rewrite the
+            // lane's material/color/weight/temps, so this must precede our own
+            // writes or it clobbers them:
+            //   valid id  -> AFC fetches the spool from Spoolman and overwrites
+            //               material, color, weight, temps, density, diameter
+            //   empty id  -> AFC runs clear_values() and wipes all of the above
+            // Emitting it last made a single save set the data and then destroy it,
+            // which is why an edit needed two passes to stick.
+            //
+            // Record the write before dispatching: in-flight status frames
+            // keep reporting old_spoolman_id until the echo lands, and
+            // Rule 1 must not read those as an external re-bind. An
+            // unlink (id 0) erases the pending expectation instead.
+            record_own_spool_write(slot_index, info.spoolman_id, old_spoolman_id);
+            if (info.spoolman_id > 0) {
+                execute_gcode(
+                    fmt::format("SET_SPOOL_ID LANE={} SPOOL_ID={}", lane_name, info.spoolman_id));
+            } else if (info.spoolman_id == 0 && old_spoolman_id > 0) {
+                // AFC keeps the id on a lane with remember_spool and restates
+                // it in every full snapshot; persist that id as unlinked until
+                // the lane reports something else. Armed only when the clear
+                // is sent. A link needs no call here: persist_override above
+                // already dropped the unlink from the record it staged.
+                const auto fw = lane_firmware_spool_id_.find(lane_name);
+                if (fw != lane_firmware_spool_id_.end() && fw->second > 0) {
+                    set_unlinked_spool(slot_index, fw->second);
+                    fw->second = 0;
+                    lane_firmware_readings_[lane_name].cache.spoolman_id.reset();
                 }
+                // Clear Spoolman link with empty string (not -1)
+                execute_gcode(fmt::format("SET_SPOOL_ID LANE={} SPOOL_ID=", lane_name));
+            }
 
-                // Weight (if valid)
-                if (info.remaining_weight_g > 0) {
-                    execute_gcode(fmt::format("SET_WEIGHT LANE={} WEIGHT={:.0f}", lane_name,
-                                              info.remaining_weight_g));
-                }
+            // A deliberate pure black (#000000) dispatches to AFC; the
+            // "no color reading" sentinel does not.
+            if (ams::is_declarable_color(info.color_rgb)) {
+                char color_hex[8];
+                snprintf(color_hex, sizeof(color_hex), "%06X", info.color_rgb & 0xFFFFFF);
+                ams::Observation color_fields{ams::ObservationSource::LocalUser};
+                color_fields.color_rgb = info.color_rgb;
+                execute_gcode(fmt::format("SET_COLOR LANE={} COLOR={}", lane_name, color_hex),
+                              nullptr, release_refused_fields(color_fields));
+            }
 
-                // Tool mapping (lane → tool number) via SET_MAP.
-                // Mirrors set_tool_mapping() but is reachable from the slot edit modal,
-                // which routes all changes through set_slot_info().
-                if (info.mapped_tool != old_mapped_tool && info.mapped_tool >= 0) {
-                    execute_gcode(
-                        fmt::format("SET_MAP LANE={} MAP=T{}", lane_name, info.mapped_tool));
-                }
+            // Material (validate to prevent command injection). The material
+            // charset is deliberately wider than an identifier's: `PLA+`,
+            // `PA6-CF` and `Silk PLA` are all in our own filament database, and
+            // gating this on is_safe_gcode_param() dropped every one of them.
+            if (!info.material.empty() && IMoonrakerAPI::is_safe_material_param(info.material)) {
+                ams::Observation material_fields{ams::ObservationSource::LocalUser};
+                material_fields.material = info.material;
+                execute_gcode(fmt::format("SET_MATERIAL LANE={} MATERIAL={}", lane_name,
+                                          IMoonrakerAPI::gcode_param_value(info.material)),
+                              nullptr, release_refused_fields(material_fields));
+            } else if (!info.material.empty()) {
+                spdlog::warn("[AMS AFC] Skipping SET_MATERIAL - unsafe characters in: {}",
+                             info.material);
+                rejected_material = info.material;
+            }
+
+            // Weight (if valid)
+            if (info.remaining_weight_g > 0) {
+                execute_gcode(set_weight_command(lane_name, info.remaining_weight_g));
+            }
+
+            // Tool mapping (lane → tool number) via SET_MAP.
+            // Mirrors set_tool_mapping() but is reachable from the slot edit modal,
+            // which routes all changes through apply_user_edit().
+            if (info.mapped_tool != old_mapped_tool && info.mapped_tool >= 0) {
+                execute_gcode(fmt::format("SET_MAP LANE={} MAP=T{}", lane_name, info.mapped_tool));
             }
         }
     }
@@ -5431,31 +5905,80 @@ AmsError AmsBackendAfc::set_slot_info(int slot_index, const SlotInfo& info, bool
     emit_event(EVENT_SLOT_CHANGED, std::to_string(slot_index));
 
     if (!rejected_material.empty()) {
-        return AmsError(AmsResult::COMMAND_FAILED,
-                        "Material '" + rejected_material +
-                            "' contains characters that cannot be "
-                            "sent as a G-code parameter",
-                        "Couldn't save the material name",
-                        "Everything else was saved. Rename the material using letters, digits, "
-                        "spaces, and + - _ . ( ) /");
+        AmsError partial(AmsResult::COMMAND_FAILED,
+                         "Material '" + rejected_material +
+                             "' contains characters that cannot be "
+                             "sent as a G-code parameter",
+                         lv_tr("Couldn't save the material name"),
+                         lv_tr("Everything else was saved. Rename the material using letters, "
+                               "digits, spaces, and + - _ . ( ) /"));
+        // Every other write above has already gone out, the spool id included.
+        partial.partially_applied = true;
+        return partial;
     }
 
     return AmsErrorHelper::success();
 }
 
-AmsError AmsBackendAfc::set_tool_mapping(int tool_number, int slot_index) {
+AmsError AmsBackendAfc::sync_external_identity(int slot_index, const SlotInfo& info) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        auto* entry = slots_.get_mut(slot_index);
+        if (!entry) {
+            return AmsErrorHelper::invalid_slot(lane_noun(), slot_index,
+                                                system_info_.total_slots - 1);
+        }
+        write_lane_locked(slot_index, entry->info, info);
+    }
+
+    // Emit OUTSIDE the lock to avoid deadlock with callbacks
+    emit_event(EVENT_SLOT_CHANGED, std::to_string(slot_index));
+    return AmsErrorHelper::success();
+}
+
+void AmsBackendAfc::persist_external_identity_impl(int slot_index,
+                                                   const helix::ams::Observation& spoolman) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    helix::ams::persist_override_external_identity(override_store_.get(), overrides_, slot_index,
+                                                   spoolman, "[AMS AFC]");
+}
+
+void AmsBackendAfc::persist_slot_weight(int slot_index, float remaining_weight_g,
+                                        float total_weight_g) {
+    std::string lane_name;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        helix::ams::persist_override_weight(override_store_.get(), overrides_, slot_index,
+                                            remaining_weight_g, total_weight_g, "[AMS AFC]");
+        lane_name = slots_.name_of(slot_index);
+    }
+    // AFC keeps a lane's weight itself, and SET_WEIGHT is the one SET_* command
+    // a meter has anything to say to.
+    if (!lane_name.empty() && remaining_weight_g > 0) {
+        execute_gcode(set_weight_command(lane_name, remaining_weight_g));
+    }
+}
+
+AmsError AmsBackendAfc::can_set_tool_mapping(int tool_number, int slot_index) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return can_set_tool_mapping_locked(tool_number, slot_index);
+}
+
+AmsError AmsBackendAfc::can_set_tool_mapping_locked(int tool_number, int slot_index) const {
+    if (tool_number < 0 || tool_number >= slots_.slot_count()) {
+        return AmsErrorHelper::tool_out_of_range(tool_number);
+    }
+    return validate_slot_index_locked(slot_index);
+}
+
+AmsError AmsBackendAfc::set_tool_mapping_impl(int tool_number, int slot_index) {
     std::string lane_name; // Declare outside lock for use after release
     {
         std::lock_guard<std::mutex> lock(mutex_);
 
-        if (tool_number < 0 || tool_number >= slots_.slot_count()) {
-            return AmsError(AmsResult::INVALID_TOOL,
-                            "Tool " + std::to_string(tool_number) + " out of range",
-                            "Invalid tool number", "");
-        }
-
-        if (!slots_.is_valid_index(slot_index)) {
-            return AmsErrorHelper::invalid_slot(slot_index, system_info_.total_slots - 1);
+        if (auto err = can_set_tool_mapping_locked(tool_number, slot_index); !err.success()) {
+            return err;
         }
 
         // Update registry tool mapping (handles clearing old mappings internally)
@@ -5468,11 +5991,10 @@ AmsError AmsBackendAfc::set_tool_mapping(int tool_number, int slot_index) {
     // AFC may use a G-code command to set tool mapping
     // This varies by AFC version/configuration
     if (!lane_name.empty()) {
-        std::ostringstream cmd;
-        cmd << "SET_MAP LANE=" << lane_name << " MAP=T" << tool_number;
+        std::string cmd = fmt::format("SET_MAP LANE={} MAP=T{}", lane_name, tool_number);
         spdlog::info("[AMS AFC] Mapping T{} to lane {} (slot {})", tool_number, lane_name,
                      slot_index);
-        return execute_gcode(cmd.str());
+        return execute_gcode(cmd);
     }
 
     return AmsErrorHelper::success();
@@ -5493,7 +6015,7 @@ AmsError AmsBackendAfc::enable_bypass() {
 
         if (!helix::bypass_available_for(system_info_.supports_bypass)) {
             return AmsError(AmsResult::WRONG_STATE, "Bypass not supported",
-                            "This AFC system does not support bypass mode", "");
+                            lv_tr("This AFC system does not support bypass mode"), "");
         }
 
         // Explicit precondition, not a redundant guard. AmsSubscriptionBackend::
@@ -5504,7 +6026,8 @@ AmsError AmsBackendAfc::enable_bypass() {
         // longer unloads on AFC's behalf, so AFC has to give the answer (#1229).
         if (system_info_.filament_loaded) {
             return AmsError(AmsResult::WRONG_STATE, "Unload filament first",
-                            "Filament is loaded at the toolhead. Unload it before enabling bypass.",
+                            lv_tr("Filament is loaded at the toolhead. Unload it before enabling "
+                                  "bypass."),
                             "");
         }
     }
@@ -5529,7 +6052,7 @@ AmsError AmsBackendAfc::disable_bypass() {
 
         if (!bypass_active_) {
             return AmsError(AmsResult::WRONG_STATE, "Bypass not active",
-                            "Bypass mode is not currently active", "");
+                            lv_tr("Bypass mode is not currently active"), "");
         }
 
         sensor = system_info_.has_hardware_bypass_sensor ? "bypass" : "virtual_bypass";
@@ -5598,13 +6121,15 @@ AmsError AmsBackendAfc::apply_endless_spool_backup(int slot_index, int backup_sl
     if (lane_name.empty() || !IMoonrakerAPI::is_safe_gcode_param(lane_name)) {
         spdlog::warn("[AMS AFC] Unsafe lane name characters in endless spool config");
         return AmsError(AmsResult::MAPPING_ERROR, "Invalid lane name",
-                        "Lane name contains invalid characters", "Check AFC configuration");
+                        lv_tr("Lane name contains invalid characters"),
+                        lv_tr("Check AFC configuration"));
     }
     if (backup_slot >= 0 &&
         (backup_lane_name.empty() || !IMoonrakerAPI::is_safe_gcode_param(backup_lane_name))) {
         spdlog::warn("[AMS AFC] Unsafe backup lane name characters");
         return AmsError(AmsResult::MAPPING_ERROR, "Invalid backup lane name",
-                        "Backup lane name contains invalid characters", "Check AFC configuration");
+                        lv_tr("Backup lane name contains invalid characters"),
+                        lv_tr("Check AFC configuration"));
     }
 
     // Build and send G-code command
@@ -5696,8 +6221,9 @@ void AmsBackendAfc::load_afc_configs() {
             spdlog::info("[AMS AFC] Config files loaded");
 
             // Detect tip method from AFC config.
-            // TODO: Replace with direct Moonraker status query once AFC exposes
-            // tool_cut/form_tip in get_status() (upstream AFC enhancement pending).
+            // MARKER(AFCProject/AFC-Klipper-Add-On#863): parse configs until
+            // upstream exposes tool_cut/form_tip in get_status(), then read
+            // the status field instead.
             update_tip_method_from_config();
 
             emit_event(EVENT_STATE_CHANGED);
@@ -5800,6 +6326,26 @@ std::vector<helix::printer::DeviceAction> AmsBackendAfc::get_device_actions() co
     // Start from shared defaults for static actions
     auto actions = helix::printer::afc_default_actions();
 
+    // get_device_sections() drops the tip_forming section unless tip forming
+    // is the active method; the section's actions go with it. An action whose
+    // section is not declared renders nowhere.
+    if (system_info_.tip_method != TipMethod::TIP_FORM) {
+        actions.erase(
+            std::remove_if(actions.begin(), actions.end(),
+                           [](const DeviceAction& a) { return a.section == "tip_forming"; }),
+            actions.end());
+    }
+
+    // SET_BOWDEN_LENGTH is HUB-keyed, and a hub-less topology (PARALLEL /
+    // direct_load lanes) has nothing the slider could address — the control
+    // cannot succeed there. The execute path keeps its not_supported as
+    // defense.
+    if (hub_names_.empty()) {
+        actions.erase(std::remove_if(actions.begin(), actions.end(),
+                                     [](const DeviceAction& a) { return a.id == "bowden_length"; }),
+                      actions.end());
+    }
+
     // Overlay dynamic values onto default actions
     for (auto& a : actions) {
         if (a.id == "bowden_length") {
@@ -5835,21 +6381,9 @@ std::vector<helix::printer::DeviceAction> AmsBackendAfc::get_device_actions() co
             std::string id = "bowden_T" + std::to_string(i);
             std::string label = "Bowden Length (T" + std::to_string(i) + ")";
             std::string desc = "Bowden tube length for tool " + std::to_string(i);
-            actions.push_back(
-                DeviceAction{id,
-                             label,
-                             "ruler",
-                             "setup",
-                             desc,
-                             ActionType::SLIDER,
-                             bowden_length_, // shared default until per-extruder tracking
-                             {},
-                             100.0f,
-                             std::max(2000.0f, bowden_length_ * 1.5f),
-                             "mm",
-                             -1,
-                             true,
-                             ""});
+            actions.push_back(DeviceAction::slider(
+                id, label, "setup", bowden_length_, // shared default until per-extruder tracking
+                100.0f, std::max(2000.0f, bowden_length_ * 1.5f), "mm", "ruler", desc));
         }
     }
 
@@ -5867,49 +6401,18 @@ std::vector<helix::printer::DeviceAction> AmsBackendAfc::get_device_actions() co
             std::string suffix = "_T" + std::to_string(i);
             std::string tool_label = " (T" + std::to_string(i) + ")";
 
+            actions.push_back(DeviceAction::slider(
+                "tool_stn" + suffix, "Sensor to Nozzle" + tool_label, "toolhead",
+                std::any(ext.tool_stn), 0.0f, 200.0f, "mm", "ruler",
+                "Distance from toolhead sensor to nozzle for T" + std::to_string(i)));
             actions.push_back(
-                DeviceAction{"tool_stn" + suffix,
-                             "Sensor to Nozzle" + tool_label,
-                             "ruler",
-                             "toolhead",
-                             "Distance from toolhead sensor to nozzle for T" + std::to_string(i),
-                             ActionType::SLIDER,
-                             std::any(ext.tool_stn),
-                             {},
-                             0.0f,
-                             200.0f,
-                             "mm",
-                             -1,
-                             true,
-                             ""});
-            actions.push_back(DeviceAction{"tool_stn_unload" + suffix,
-                                           "Unload Distance" + tool_label,
-                                           "ruler",
-                                           "toolhead",
-                                           "Retraction distance for T" + std::to_string(i),
-                                           ActionType::SLIDER,
-                                           std::any(ext.tool_stn_unload),
-                                           {},
-                                           0.0f,
-                                           200.0f,
-                                           "mm",
-                                           -1,
-                                           true,
-                                           ""});
-            actions.push_back(DeviceAction{"tool_sensor_after_extruder" + suffix,
-                                           "Post-Sensor Clear" + tool_label,
-                                           "ruler",
-                                           "toolhead",
-                                           "Extra clear distance for T" + std::to_string(i),
-                                           ActionType::SLIDER,
-                                           std::any(ext.tool_sensor_after_extruder),
-                                           {},
-                                           0.0f,
-                                           100.0f,
-                                           "mm",
-                                           -1,
-                                           true,
-                                           ""});
+                DeviceAction::slider("tool_stn_unload" + suffix, "Unload Distance" + tool_label,
+                                     "toolhead", std::any(ext.tool_stn_unload), 0.0f, 200.0f, "mm",
+                                     "ruler", "Retraction distance for T" + std::to_string(i)));
+            actions.push_back(DeviceAction::slider(
+                "tool_sensor_after_extruder" + suffix, "Post-Sensor Clear" + tool_label, "toolhead",
+                std::any(ext.tool_sensor_after_extruder), 0.0f, 100.0f, "mm", "ruler",
+                "Extra clear distance for T" + std::to_string(i)));
         }
     }
 
@@ -5921,21 +6424,11 @@ std::vector<helix::printer::DeviceAction> AmsBackendAfc::get_device_actions() co
         for (int i = 0; i < static_cast<int>(extruders_.size()); ++i) {
             auto it = toolhead_led_state_.find(i);
             bool led_on = (it != toolhead_led_state_.end()) && it->second;
-            actions.push_back(DeviceAction{
+            actions.push_back(DeviceAction::button(
                 fmt::format("led_extruder_T{}", i),
-                fmt::format("{} Toolhead LED (T{})", led_on ? "Turn Off" : "Turn On", i),
+                fmt::format("{} Toolhead LED (T{})", led_on ? "Turn Off" : "Turn On", i), "setup",
                 led_on ? "lightbulb-off" : "lightbulb-on",
-                "setup",
-                fmt::format("Toggle toolhead LED for T{}", i),
-                ActionType::BUTTON,
-                {},
-                {},
-                0,
-                0,
-                "",
-                -1,
-                true,
-                ""});
+                fmt::format("Toggle toolhead LED for T{}", i)));
         }
     }
 
@@ -5947,22 +6440,13 @@ std::vector<helix::printer::DeviceAction> AmsBackendAfc::get_device_actions() co
         std::string lane_name = slots_.name_of(i);
         std::string id = "dist_hub_" + lane_name;
         std::string label = "Hub Distance (" + lane_name + ")";
-        float current = entry->sensors.dist_hub;
+        float current = lane_sensors_for(lane_name).dist_hub;
 
-        actions.push_back(DeviceAction{id,
-                                       label,
-                                       "ruler",
-                                       "hub",
-                                       "Distance from lane extruder to hub",
-                                       ActionType::SLIDER,
-                                       std::any(current),
-                                       {},
-                                       0.0f,
-                                       std::max(500.0f, current * 1.5f),
-                                       "mm",
-                                       i,
-                                       true,
-                                       ""});
+        DeviceAction a = DeviceAction::slider(id, label, "hub", std::any(current), 0.0f,
+                                              std::max(500.0f, current * 1.5f), "mm", "ruler",
+                                              "Distance from lane extruder to hub");
+        a.slot_index = i;
+        actions.push_back(std::move(a));
     }
 
     // ---- Overlay dynamic values from config onto default actions ----
@@ -6107,102 +6591,102 @@ AmsError AmsBackendAfc::execute_device_action(const std::string& action_id, cons
         return execute_gcode("AFC_CALIBRATION");
     } else if (action_id == "bowden_length") {
         if (!value.has_value()) {
-            return AmsError(AmsResult::WRONG_STATE, "Bowden length value required", "Missing value",
-                            "Provide a bowden length value");
+            return AmsError(AmsResult::WRONG_STATE, "Bowden length value required",
+                            lv_tr("Missing value"), lv_tr("Provide a bowden length value"));
         }
-        try {
-            float length = std::any_cast<float>(value);
-            std::lock_guard<std::mutex> lock(mutex_);
-            float max_len = std::max(2000.0f, bowden_length_ * 1.5f);
-            if (length < 100.0f || length > max_len) {
-                return AmsError(AmsResult::WRONG_STATE,
-                                fmt::format("Bowden length must be 100-{:.0f}mm", max_len),
-                                "Invalid value",
-                                fmt::format("Enter a length between 100 and {:.0f}mm", max_len));
-            }
-            // AFC uses SET_BOWDEN_LENGTH HUB={hub_name} LENGTH={mm}
-            if (!hub_names_.empty()) {
-                std::string hub_name = hub_names_[0];
-                return execute_gcode("SET_BOWDEN_LENGTH HUB=" + hub_name +
-                                     " LENGTH=" + std::to_string(static_cast<int>(length)));
-            }
-            return AmsErrorHelper::not_supported("No AFC hubs configured");
-        } catch (const std::bad_any_cast&) {
+        const float* length_p = std::any_cast<float>(&value);
+        if (!length_p) {
             return AmsError(AmsResult::WRONG_STATE, "Invalid bowden length type",
-                            "Invalid value type", "Provide a numeric value");
+                            lv_tr("Invalid value type"), lv_tr("Provide a numeric value"));
         }
+        const float length = *length_p;
+        std::lock_guard<std::mutex> lock(mutex_);
+        float max_len = std::max(2000.0f, bowden_length_ * 1.5f);
+        if (length < 100.0f || length > max_len) {
+            return AmsError(AmsResult::WRONG_STATE,
+                            fmt::format("Bowden length must be 100-{:.0f}mm", max_len),
+                            lv_tr("Invalid value"),
+                            fmt::format(lv_tr("Enter a length between 100 and {:.0f}mm"), max_len));
+        }
+        // AFC uses SET_BOWDEN_LENGTH HUB={hub_name} LENGTH={mm}
+        if (!hub_names_.empty()) {
+            std::string hub_name = hub_names_[0];
+            return execute_gcode("SET_BOWDEN_LENGTH HUB=" + hub_name +
+                                 " LENGTH=" + std::to_string(static_cast<int>(length)));
+        }
+        return AmsErrorHelper::not_supported("No AFC hubs configured");
     } else if (action_id.rfind("bowden_T", 0) == 0) {
         // Per-extruder bowden length (toolchanger): bowden_T0, bowden_T1, etc.
         if (!value.has_value()) {
-            return AmsError(AmsResult::WRONG_STATE, "Bowden length value required", "Missing value",
-                            "Provide a bowden length value");
+            return AmsError(AmsResult::WRONG_STATE, "Bowden length value required",
+                            lv_tr("Missing value"), lv_tr("Provide a bowden length value"));
         }
-        try {
-            float length = std::any_cast<float>(value);
-            std::lock_guard<std::mutex> lock(mutex_);
-            float max_len = std::max(2000.0f, bowden_length_ * 1.5f);
-            if (length < 100.0f || length > max_len) {
-                return AmsError(AmsResult::WRONG_STATE,
-                                fmt::format("Bowden length must be 100-{:.0f}mm", max_len),
-                                "Invalid value",
-                                fmt::format("Enter a length between 100 and {:.0f}mm", max_len));
-            }
-            // Extract tool index from action_id (e.g., "bowden_T0" -> 0)
-            int tool_idx = std::stoi(action_id.substr(8));
-            if (tool_idx >= 0 && tool_idx < static_cast<int>(extruders_.size())) {
-                // Find the hub for this extruder by matching unit membership
-                std::string hub_name;
-                const std::string& ext_name = extruders_[tool_idx].name;
-                for (const auto& unit : unit_infos_) {
-                    auto it = std::find(unit.extruders.begin(), unit.extruders.end(), ext_name);
-                    if (it != unit.extruders.end() && !unit.hubs.empty()) {
-                        hub_name = unit.hubs[0];
-                        break;
-                    }
-                }
-                // Fall back to first known hub
-                if (hub_name.empty() && !hub_names_.empty()) {
-                    hub_name = hub_names_[0];
-                }
-                if (hub_name.empty()) {
-                    return AmsErrorHelper::not_supported("No AFC hub found for extruder");
-                }
-                return execute_gcode("SET_BOWDEN_LENGTH HUB=" + hub_name +
-                                     " LENGTH=" + std::to_string(static_cast<int>(length)));
-            }
-            return AmsErrorHelper::not_supported("Invalid extruder index: " +
-                                                 std::to_string(tool_idx));
-        } catch (const std::bad_any_cast&) {
+        const float* length_p = std::any_cast<float>(&value);
+        if (!length_p) {
             return AmsError(AmsResult::WRONG_STATE, "Invalid bowden length type",
-                            "Invalid value type", "Provide a numeric value");
+                            lv_tr("Invalid value type"), lv_tr("Provide a numeric value"));
         }
+        const float length = *length_p;
+        std::lock_guard<std::mutex> lock(mutex_);
+        float max_len = std::max(2000.0f, bowden_length_ * 1.5f);
+        if (length < 100.0f || length > max_len) {
+            return AmsError(AmsResult::WRONG_STATE,
+                            fmt::format("Bowden length must be 100-{:.0f}mm", max_len),
+                            lv_tr("Invalid value"),
+                            fmt::format(lv_tr("Enter a length between 100 and {:.0f}mm"), max_len));
+        }
+        // Extract tool index from action_id (e.g., "bowden_T0" -> 0)
+        const int tool_idx = helix::text_io::parse_leading<int>(action_id.substr(8)).value_or(-1);
+        if (tool_idx >= 0 && tool_idx < static_cast<int>(extruders_.size())) {
+            // Find the hub for this extruder by matching unit membership
+            std::string hub_name;
+            const std::string& ext_name = extruders_[tool_idx].name;
+            for (const auto& unit : unit_infos_) {
+                auto it = std::find(unit.extruders.begin(), unit.extruders.end(), ext_name);
+                if (it != unit.extruders.end() && !unit.hubs.empty()) {
+                    hub_name = unit.hubs[0];
+                    break;
+                }
+            }
+            // Fall back to first known hub
+            if (hub_name.empty() && !hub_names_.empty()) {
+                hub_name = hub_names_[0];
+            }
+            if (hub_name.empty()) {
+                return AmsErrorHelper::not_supported("No AFC hub found for extruder");
+            }
+            return execute_gcode("SET_BOWDEN_LENGTH HUB=" + hub_name +
+                                 " LENGTH=" + std::to_string(static_cast<int>(length)));
+        }
+        return AmsErrorHelper::not_supported("Invalid extruder index: " + std::to_string(tool_idx));
     } else if (action_id == "speed_fwd" || action_id == "speed_rev") {
         if (!value.has_value()) {
             return AmsError(AmsResult::WRONG_STATE, "Speed multiplier value required",
-                            "Missing value", "Provide a speed multiplier value");
+                            lv_tr("Missing value"), lv_tr("Provide a speed multiplier value"));
         }
-        try {
-            float multiplier = std::any_cast<float>(value);
-            if (multiplier < 0.5f || multiplier > 2.0f) {
-                return AmsError(AmsResult::WRONG_STATE, "Speed multiplier must be 0.5-2.0x",
-                                "Invalid value", "Enter a multiplier between 0.5 and 2.0");
-            }
-            // AFC SET_LONG_MOVE_SPEED is per-lane; apply to all lanes
-            std::string param = (action_id == "speed_fwd") ? "FWD_SPEED" : "RWD_FACTOR";
-            if (slots_.slot_count() == 0) {
-                return AmsErrorHelper::not_supported("No AFC lanes configured");
-            }
-            for (int i = 0; i < slots_.slot_count(); ++i) {
-                AmsError err = execute_gcode("SET_LONG_MOVE_SPEED LANE=" + slots_.name_of(i) + " " +
-                                             param + "=" + std::to_string(multiplier));
-                if (!err)
-                    return err; // Return first error
-            }
-            return AmsErrorHelper::success();
-        } catch (const std::bad_any_cast&) {
+        const float* multiplier_p = std::any_cast<float>(&value);
+        if (!multiplier_p) {
             return AmsError(AmsResult::WRONG_STATE, "Invalid speed multiplier type",
-                            "Invalid value type", "Provide a numeric value");
+                            lv_tr("Invalid value type"), lv_tr("Provide a numeric value"));
         }
+        const float multiplier = *multiplier_p;
+        if (multiplier < 0.5f || multiplier > 2.0f) {
+            return AmsError(AmsResult::WRONG_STATE, "Speed multiplier must be 0.5-2.0x",
+                            lv_tr("Invalid value"),
+                            lv_tr("Enter a multiplier between 0.5 and 2.0"));
+        }
+        // AFC SET_LONG_MOVE_SPEED is per-lane; apply to all lanes
+        std::string param = (action_id == "speed_fwd") ? "FWD_SPEED" : "RWD_FACTOR";
+        if (slots_.slot_count() == 0) {
+            return AmsErrorHelper::not_supported("No AFC lanes configured");
+        }
+        for (int i = 0; i < slots_.slot_count(); ++i) {
+            AmsError err = execute_gcode("SET_LONG_MOVE_SPEED LANE=" + slots_.name_of(i) + " " +
+                                         param + "=" + std::to_string(multiplier));
+            if (!err)
+                return err; // Return first error
+        }
+        return AmsErrorHelper::success();
     } else if (action_id == "test_lanes") {
         return execute_gcode("AFC_TEST_LANES");
     } else if (action_id == "change_blade") {
@@ -6243,48 +6727,62 @@ AmsError AmsBackendAfc::execute_device_action(const std::string& action_id, cons
         // value we want rather than asking for a toggle AFC has no verb for.
         return execute_gcode(afc_quiet_mode_ ? "AFC_QUIET_MODE ENABLE=0"
                                              : "AFC_QUIET_MODE ENABLE=1");
+    } else if (action_id == "led_extruder") {
+        // Single-extruder toolhead LED toggle. A multi-extruder topology is
+        // served per-extruder instead: get_device_actions() replaces this
+        // action with led_extruder_T<n> when it can see the extruders.
+        std::lock_guard<std::mutex> lock(mutex_);
+        const std::string name = extruders_.empty() ? "extruder" : extruders_[0].name;
+        bool currently_on = toolhead_led_state_[0];
+        int turn_on = currently_on ? 0 : 1;
+        auto err = execute_gcode(
+            fmt::format("AFC_SET_EXTRUDER_LED EXTRUDER={} TURN_ON={}", name, turn_on));
+        if (err) {
+            toolhead_led_state_[0] = !currently_on;
+        }
+        return err;
     } else if (action_id.rfind("led_extruder_T", 0) == 0) {
         // Per-extruder toolhead LED toggle: led_extruder_T0, led_extruder_T1, etc.
-        try {
-            int tool_idx = std::stoi(action_id.substr(14));
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (tool_idx < 0 || tool_idx >= static_cast<int>(extruders_.size())) {
-                return AmsErrorHelper::not_supported("Invalid extruder index: " +
-                                                     std::to_string(tool_idx));
-            }
-            bool currently_on = toolhead_led_state_[tool_idx];
-            int turn_on = currently_on ? 0 : 1;
-            auto err = execute_gcode(fmt::format("AFC_SET_EXTRUDER_LED EXTRUDER={} TURN_ON={}",
-                                                 extruders_[tool_idx].name, turn_on));
-            if (err) {
-                toolhead_led_state_[tool_idx] = !currently_on;
-            }
-            return err;
-        } catch (const std::exception&) {
+        const int tool_idx = helix::text_io::parse_leading<int>(action_id.substr(14)).value_or(-1);
+        if (tool_idx < 0) {
             return AmsErrorHelper::not_supported("Invalid LED action: " + action_id);
         }
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (tool_idx >= static_cast<int>(extruders_.size())) {
+            return AmsErrorHelper::not_supported("Invalid extruder index: " +
+                                                 std::to_string(tool_idx));
+        }
+        bool currently_on = toolhead_led_state_[tool_idx];
+        int turn_on = currently_on ? 0 : 1;
+        auto err = execute_gcode(fmt::format("AFC_SET_EXTRUDER_LED EXTRUDER={} TURN_ON={}",
+                                             extruders_[tool_idx].name, turn_on));
+        if (err) {
+            toolhead_led_state_[tool_idx] = !currently_on;
+        }
+        return err;
     }
 
     // Per-lane dist_hub actions
     if (action_id.rfind("dist_hub_", 0) == 0) {
         std::string lane_name = action_id.substr(9);
         if (!value.has_value()) {
-            return AmsError(AmsResult::WRONG_STATE, "Value required", "Missing value", "");
+            return AmsError(AmsResult::WRONG_STATE, "Value required", lv_tr("Missing value"), "");
         }
-        try {
-            float val = std::any_cast<float>(value);
-            AmsError err =
-                execute_gcode(fmt::format("SET_HUB_DIST LANE={} LENGTH={:g}", lane_name, val));
-            if (!err)
-                return err;
-            AmsError save_err = execute_gcode("SAVE_HUB_DIST LANE=" + lane_name);
-            if (!save_err) {
-                spdlog::warn("[AMS AFC] SAVE_HUB_DIST failed (runtime value was set)");
-            }
-            return AmsErrorHelper::success();
-        } catch (const std::bad_any_cast&) {
-            return AmsError(AmsResult::WRONG_STATE, "Invalid value type", "Expected float", "");
+        const float* val_p = std::any_cast<float>(&value);
+        if (!val_p) {
+            return AmsError(AmsResult::WRONG_STATE, lv_tr("Invalid value type"),
+                            lv_tr("Expected float"), "");
         }
+        const float val = *val_p;
+        AmsError err =
+            execute_gcode(fmt::format("SET_HUB_DIST LANE={} LENGTH={:g}", lane_name, val));
+        if (!err)
+            return err;
+        AmsError save_err = execute_gcode("SAVE_HUB_DIST LANE=" + lane_name);
+        if (!save_err) {
+            spdlog::warn("[AMS AFC] SAVE_HUB_DIST failed (runtime value was set)");
+        }
+        return AmsErrorHelper::success();
     }
 
     // ---- Toolhead distance actions (single + multi-extruder) ----
@@ -6297,10 +6795,9 @@ AmsError AmsBackendAfc::execute_device_action(const std::string& action_id, cons
                 return {field, 0};
             }
             if (id.rfind(field + "_T", 0) == 0) {
-                try {
-                    int idx = std::stoi(id.substr(field.size() + 2));
-                    return {field, idx};
-                } catch (...) {
+                const auto idx = helix::text_io::parse_leading<int>(id.substr(field.size() + 2));
+                if (idx) {
+                    return {field, *idx};
                 }
             }
         }
@@ -6310,48 +6807,49 @@ AmsError AmsBackendAfc::execute_device_action(const std::string& action_id, cons
     auto [th_field, th_tool] = parse_toolhead_action(action_id);
     if (!th_field.empty()) {
         if (!value.has_value()) {
-            return AmsError(AmsResult::WRONG_STATE, "Value required", "Missing value", "");
+            return AmsError(AmsResult::WRONG_STATE, "Value required", lv_tr("Missing value"), "");
         }
-        try {
-            float val = std::any_cast<float>(value);
-
-            // UPDATE_TOOLHEAD_SENSORS / SAVE_EXTRUDER_VALUES are mux commands
-            // keyed on the AFC_extruder SECTION name (AFC_extruder.py:364-369,
-            // muxed on self.name = the section suffix), not on the Klipper
-            // extruder name. Rebuilding "extruder<N>" here addressed a mux key
-            // that does not exist on a renamed config, so both commands failed.
-            // Same key the sibling AFC_SET_EXTRUDER_LED action already uses.
-            std::string ext_name;
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                ext_name = afc_extruder_section_for_tool_unlocked(th_tool);
-            }
-            if (ext_name.empty()) {
-                ext_name = (th_tool > 0) ? "extruder" + std::to_string(th_tool) : "extruder";
-            }
-
-            std::string param;
-            if (th_field == "tool_stn")
-                param = "TOOL_STN";
-            else if (th_field == "tool_stn_unload")
-                param = "TOOL_STN_UNLOAD";
-            else if (th_field == "tool_sensor_after_extruder")
-                param = "TOOL_AFTER_EXTRUDER";
-
-            std::string cmd =
-                fmt::format("UPDATE_TOOLHEAD_SENSORS EXTRUDER={} {}={:g}", ext_name, param, val);
-            AmsError err = execute_gcode(cmd);
-            if (!err)
-                return err;
-
-            AmsError save_err = execute_gcode("SAVE_EXTRUDER_VALUES EXTRUDER=" + ext_name);
-            if (!save_err) {
-                spdlog::warn("[AMS AFC] SAVE_EXTRUDER_VALUES failed (runtime value was set)");
-            }
-            return AmsErrorHelper::success();
-        } catch (const std::bad_any_cast&) {
-            return AmsError(AmsResult::WRONG_STATE, "Invalid value type", "Expected float", "");
+        const float* val_p = std::any_cast<float>(&value);
+        if (!val_p) {
+            return AmsError(AmsResult::WRONG_STATE, lv_tr("Invalid value type"),
+                            lv_tr("Expected float"), "");
         }
+        const float val = *val_p;
+
+        // UPDATE_TOOLHEAD_SENSORS / SAVE_EXTRUDER_VALUES are mux commands
+        // keyed on the AFC_extruder SECTION name (AFC_extruder.py:364-369,
+        // muxed on self.name = the section suffix), not on the Klipper
+        // extruder name. Rebuilding "extruder<N>" here addressed a mux key
+        // that does not exist on a renamed config, so both commands failed.
+        // Same key the sibling AFC_SET_EXTRUDER_LED action already uses.
+        std::string ext_name;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ext_name = afc_extruder_section_for_tool_unlocked(th_tool);
+        }
+        if (ext_name.empty()) {
+            ext_name = (th_tool > 0) ? "extruder" + std::to_string(th_tool) : "extruder";
+        }
+
+        std::string param;
+        if (th_field == "tool_stn")
+            param = "TOOL_STN";
+        else if (th_field == "tool_stn_unload")
+            param = "TOOL_STN_UNLOAD";
+        else if (th_field == "tool_sensor_after_extruder")
+            param = "TOOL_AFTER_EXTRUDER";
+
+        std::string cmd =
+            fmt::format("UPDATE_TOOLHEAD_SENSORS EXTRUDER={} {}={:g}", ext_name, param, val);
+        AmsError err = execute_gcode(cmd);
+        if (!err)
+            return err;
+
+        AmsError save_err = execute_gcode("SAVE_EXTRUDER_VALUES EXTRUDER=" + ext_name);
+        if (!save_err) {
+            spdlog::warn("[AMS AFC] SAVE_EXTRUDER_VALUES failed (runtime value was set)");
+        }
+        return AmsErrorHelper::success();
     }
 
     // ---- Config-backed hub actions (afc_config_) ----
@@ -6359,57 +6857,53 @@ AmsError AmsBackendAfc::execute_device_action(const std::string& action_id, cons
         action_id == "hub_bowden_length" || action_id == "assisted_retract") {
         if (!afc_config_ || !afc_config_->is_loaded()) {
             return AmsError(AmsResult::WRONG_STATE, "AFC config not loaded",
-                            "Configuration not available", "Wait for config to load");
+                            lv_tr("Configuration not available"), lv_tr("Wait for config to load"));
         }
 
         auto hubs = afc_config_->parser().get_sections_matching("AFC_hub");
         if (hubs.empty()) {
             return AmsError(AmsResult::WRONG_STATE, "No hub section found in AFC config",
-                            "No hub configured", "Check AFC configuration");
+                            lv_tr("No hub configured"), lv_tr("Check AFC configuration"));
         }
         const std::string& hub_section = hubs[0];
 
         if (action_id == "hub_cut_enabled") {
-            try {
-                bool val = std::any_cast<bool>(value);
-                afc_config_->parser().set(hub_section, "cut", val ? "True" : "False");
-                afc_config_->mark_dirty();
-                return AmsErrorHelper::success();
-            } catch (const std::bad_any_cast&) {
+            const bool* val_p = std::any_cast<bool>(&value);
+            if (!val_p) {
                 return AmsError(AmsResult::WRONG_STATE, "Invalid value type for toggle",
-                                "Expected boolean", "");
+                                lv_tr("Expected boolean"), "");
             }
+            afc_config_->parser().set(hub_section, "cut", *val_p ? "True" : "False");
+            afc_config_->mark_dirty();
+            return AmsErrorHelper::success();
         } else if (action_id == "hub_cut_dist") {
-            try {
-                float val = std::any_cast<float>(value);
-                afc_config_->parser().set(hub_section, "cut_dist", fmt::format("{:g}", val));
-                afc_config_->mark_dirty();
-                return AmsErrorHelper::success();
-            } catch (const std::bad_any_cast&) {
+            const float* val_p = std::any_cast<float>(&value);
+            if (!val_p) {
                 return AmsError(AmsResult::WRONG_STATE, "Invalid value type for slider",
-                                "Expected float", "");
+                                lv_tr("Expected float"), "");
             }
+            afc_config_->parser().set(hub_section, "cut_dist", fmt::format("{:g}", *val_p));
+            afc_config_->mark_dirty();
+            return AmsErrorHelper::success();
         } else if (action_id == "hub_bowden_length") {
-            try {
-                float val = std::any_cast<float>(value);
-                afc_config_->parser().set(hub_section, "afc_bowden_length",
-                                          fmt::format("{:g}", val));
-                afc_config_->mark_dirty();
-                return AmsErrorHelper::success();
-            } catch (const std::bad_any_cast&) {
+            const float* val_p = std::any_cast<float>(&value);
+            if (!val_p) {
                 return AmsError(AmsResult::WRONG_STATE, "Invalid value type for slider",
-                                "Expected float", "");
+                                lv_tr("Expected float"), "");
             }
+            afc_config_->parser().set(hub_section, "afc_bowden_length",
+                                      fmt::format("{:g}", *val_p));
+            afc_config_->mark_dirty();
+            return AmsErrorHelper::success();
         } else if (action_id == "assisted_retract") {
-            try {
-                bool val = std::any_cast<bool>(value);
-                afc_config_->parser().set(hub_section, "assisted_retract", val ? "True" : "False");
-                afc_config_->mark_dirty();
-                return AmsErrorHelper::success();
-            } catch (const std::bad_any_cast&) {
+            const bool* val_p = std::any_cast<bool>(&value);
+            if (!val_p) {
                 return AmsError(AmsResult::WRONG_STATE, "Invalid value type for toggle",
-                                "Expected boolean", "");
+                                lv_tr("Expected boolean"), "");
             }
+            afc_config_->parser().set(hub_section, "assisted_retract", *val_p ? "True" : "False");
+            afc_config_->mark_dirty();
+            return AmsErrorHelper::success();
         }
     }
 
@@ -6424,59 +6918,60 @@ AmsError AmsBackendAfc::execute_device_action(const std::string& action_id, cons
     if (auto it = macro_var_slider_keys.find(action_id); it != macro_var_slider_keys.end()) {
         if (!macro_vars_config_ || !macro_vars_config_->is_loaded()) {
             return AmsError(AmsResult::WRONG_STATE, "Macro vars config not loaded",
-                            "Configuration not available", "Wait for config to load");
+                            lv_tr("Configuration not available"), lv_tr("Wait for config to load"));
         }
-        try {
-            float val = std::any_cast<float>(value);
-            macro_vars_config_->parser().set("gcode_macro AFC_MacroVars", it->second,
-                                             fmt::format("{:g}", val));
-            macro_vars_config_->mark_dirty();
-            return AmsErrorHelper::success();
-        } catch (const std::bad_any_cast&) {
+        const float* val_p = std::any_cast<float>(&value);
+        if (!val_p) {
             return AmsError(AmsResult::WRONG_STATE, "Invalid value type for slider",
-                            "Expected float", "");
+                            lv_tr("Expected float"), "");
         }
+        macro_vars_config_->parser().set("gcode_macro AFC_MacroVars", it->second,
+                                         fmt::format("{:g}", *val_p));
+        macro_vars_config_->mark_dirty();
+        return AmsErrorHelper::success();
     }
 
     // ---- Purge/wipe toggles — immediate via AFC_TOGGLE_MACRO G-code ----
     if (action_id == "purge_enabled") {
-        try {
-            bool val = std::any_cast<bool>(value);
-            execute_gcode(fmt::format("AFC_TOGGLE_MACRO POOP={}", val ? 1 : 0));
-            return AmsErrorHelper::success();
-        } catch (const std::bad_any_cast&) {
-            return AmsError(AmsResult::WRONG_STATE, "Invalid value type", "Expected boolean", "");
+        const bool* val_p = std::any_cast<bool>(&value);
+        if (!val_p) {
+            return AmsError(AmsResult::WRONG_STATE, lv_tr("Invalid value type"),
+                            lv_tr("Expected boolean"), "");
         }
+        execute_gcode(fmt::format("AFC_TOGGLE_MACRO POOP={}", *val_p ? 1 : 0));
+        return AmsErrorHelper::success();
     }
     if (action_id == "brush_enabled") {
-        try {
-            bool val = std::any_cast<bool>(value);
-            execute_gcode(fmt::format("AFC_TOGGLE_MACRO WIPE={}", val ? 1 : 0));
-            return AmsErrorHelper::success();
-        } catch (const std::bad_any_cast&) {
-            return AmsError(AmsResult::WRONG_STATE, "Invalid value type", "Expected boolean", "");
+        const bool* val_p = std::any_cast<bool>(&value);
+        if (!val_p) {
+            return AmsError(AmsResult::WRONG_STATE, lv_tr("Invalid value type"),
+                            lv_tr("Expected boolean"), "");
         }
+        execute_gcode(fmt::format("AFC_TOGGLE_MACRO WIPE={}", *val_p ? 1 : 0));
+        return AmsErrorHelper::success();
     }
 
     // ---- Purge length — config-backed, no runtime G-code available ----
     if (action_id == "purge_length") {
         if (!afc_config_ || !afc_config_->is_loaded()) {
             return AmsError(AmsResult::WRONG_STATE, "AFC config not loaded",
-                            "Configuration not available", "Wait for config to load");
+                            lv_tr("Configuration not available"), lv_tr("Wait for config to load"));
         }
-        try {
-            float val = std::any_cast<float>(value);
-            afc_config_->parser().set("AFC_poop", "purge_length", fmt::format("{:g}", val));
-            afc_config_->mark_dirty();
-            afc_config_->save("AFC/AFC.cfg", [](bool ok, const std::string& err) {
-                if (!ok)
-                    spdlog::error("[AMS AFC] Failed to save purge_length: {}", err);
-            });
-            return AmsErrorHelper::success();
-        } catch (const std::bad_any_cast&) {
-            return AmsError(AmsResult::WRONG_STATE, "Invalid value type", "Expected float", "");
+        const float* val_p = std::any_cast<float>(&value);
+        if (!val_p) {
+            return AmsError(AmsResult::WRONG_STATE, lv_tr("Invalid value type"),
+                            lv_tr("Expected float"), "");
         }
+        afc_config_->parser().set("AFC_poop", "purge_length", fmt::format("{:g}", *val_p));
+        afc_config_->mark_dirty();
+        afc_config_->save("AFC/AFC.cfg", [](bool ok, const std::string& err) {
+            if (!ok)
+                spdlog::error("[AMS AFC] Failed to save purge_length: {}", err);
+        });
+        return AmsErrorHelper::success();
     }
 
     return AmsErrorHelper::not_supported("Unknown action: " + action_id);
 }
+
+} // namespace helix

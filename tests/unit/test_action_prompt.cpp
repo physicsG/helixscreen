@@ -6,7 +6,6 @@
  * @brief Unit tests for ActionPromptManager - Klipper's action:prompt protocol
  *
  * Tests the parsing of action:prompt messages from Klipper's notify_gcode_response.
- * Written TDD-style before implementation exists.
  *
  * Protocol specification (from Klipper docs):
  * - Messages arrive via `notify_gcode_response` with "// action:" prefix
@@ -14,8 +13,13 @@
  *   prompt_button_group_start/end, prompt_show, prompt_end, notify
  */
 
+#include "ui_update_queue.h"
+
+#include "../lvgl_test_fixture.h"
 #include "action_prompt_manager.h"
 
+#include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -974,6 +978,22 @@ TEST_CASE("ActionPromptManager: Callbacks", "[action_prompt][callback]") {
         // After full lifecycle with null callbacks, state returns to IDLE
         REQUIRE_FALSE(manager2.has_active_prompt());
     }
+
+    SECTION("Each of several back-to-back prompts shows and closes once") {
+        int show_count = 0;
+        int close_count = 0;
+        manager.set_on_show([&show_count](const PromptData&) { show_count++; });
+        manager.set_on_close([&close_count]() { close_count++; });
+
+        for (int i = 0; i < 5; i++) {
+            manager.process_line("// action:prompt_begin Prompt " + std::to_string(i));
+            manager.process_line("// action:prompt_show");
+            manager.process_line("// action:prompt_end");
+        }
+
+        REQUIRE(show_count == 5);
+        REQUIRE(close_count == 5);
+    }
 }
 
 // ============================================================================
@@ -1076,178 +1096,6 @@ TEST_CASE("PromptData: Default values", "[action_prompt][data]") {
     REQUIRE(prompt.buttons.empty());
     REQUIRE(prompt.current_group_id == -1);
 }
-
-// ============================================================================
-// ActionPromptModal Tests
-// ============================================================================
-//
-// These tests validate the ActionPromptModal class which displays prompts
-// from the Klipper action:prompt protocol as modal dialogs.
-//
-// Note: These tests are written TDD-style before implementation exists.
-// Many will fail until ActionPromptModal is implemented.
-// ============================================================================
-
-// Forward declaration for ActionPromptModal (header doesn't exist yet)
-// #include "ui_action_prompt_modal.h"
-
-// ============================================================================
-// Button Click Callback Tests
-// ============================================================================
-
-TEST_CASE("ActionPromptModal: Button click fires callback with gcode",
-          "[action_prompt][modal][callback]") {
-    SECTION("Click callback receives correct gcode") {
-        PromptData data;
-        data.title = "Test";
-        data.buttons.push_back({"Continue", "RESUME_PRINT", "primary", "", false, -1});
-
-        std::string received_gcode;
-        // When implemented, the modal should support setting a button callback:
-        // ActionPromptModal modal;
-        // modal.set_button_callback([&received_gcode](const std::string& gcode) {
-        //     received_gcode = gcode;
-        // });
-        // modal.set_prompt_data(data);
-        // modal.simulate_button_click(0);
-        // REQUIRE(received_gcode == "RESUME_PRINT");
-
-        // For now, verify the data is correct
-        REQUIRE(data.buttons[0].gcode == "RESUME_PRINT");
-    }
-
-    SECTION("Each button sends its own gcode") {
-        PromptData data;
-        data.title = "Choose";
-        data.buttons.push_back({"Resume", "RESUME_PRINT", "", "", false, -1});
-        data.buttons.push_back({"Cancel", "CANCEL_PRINT", "", "", false, -1});
-        data.buttons.push_back({"Retry", "RETRY_ACTION", "", "", false, -1});
-
-        // Each button has distinct gcode
-        REQUIRE(data.buttons[0].gcode == "RESUME_PRINT");
-        REQUIRE(data.buttons[1].gcode == "CANCEL_PRINT");
-        REQUIRE(data.buttons[2].gcode == "RETRY_ACTION");
-    }
-
-    SECTION("Button with empty gcode uses label as gcode") {
-        // Per parse_button_spec, if gcode is empty, it equals the label
-        PromptButton btn = ActionPromptManager::parse_button_spec("OK");
-        REQUIRE(btn.label == "OK");
-        REQUIRE(btn.gcode == "OK");
-    }
-}
-
-// ============================================================================
-// Modal Lifecycle Tests
-// ============================================================================
-
-TEST_CASE("ActionPromptModal: Modal closes after button click",
-          "[action_prompt][modal][lifecycle]") {
-    SECTION("Default behavior: modal closes on button click") {
-        PromptData data;
-        data.title = "Confirm";
-        data.buttons.push_back({"OK", "CONFIRM", "primary", "", false, -1});
-
-        // By default, clicking any button should close the modal
-        // The callback fires first, then the modal closes
-
-        // When implemented:
-        // ActionPromptModal modal;
-        // modal.set_prompt_data(data);
-        // modal.show(parent);
-        // REQUIRE(modal.is_visible());
-        // modal.simulate_button_click(0);
-        // REQUIRE_FALSE(modal.is_visible());
-
-        REQUIRE(data.buttons.size() == 1);
-    }
-
-    SECTION("Modal closes when prompt_end is received") {
-        // The modal should also close when the Klipper sends prompt_end
-        // This happens externally via ActionPromptManager::on_close callback
-
-        ActionPromptManager manager;
-        bool close_called = false;
-        manager.set_on_close([&close_called]() { close_called = true; });
-
-        manager.process_line("// action:prompt_begin Test");
-        manager.process_line("// action:prompt_show");
-        REQUIRE(manager.has_active_prompt());
-
-        manager.process_line("// action:prompt_end");
-        REQUIRE_FALSE(manager.has_active_prompt());
-        REQUIRE(close_called);
-    }
-}
-
-// ============================================================================
-// Edge Cases
-// ============================================================================
-
-TEST_CASE("ActionPromptModal: Edge cases", "[action_prompt][modal][edge]") {
-    SECTION("Modal with no buttons displays correctly") {
-        PromptData data;
-        data.title = "Information Only";
-        data.text_lines.push_back("This is a notification");
-        // No buttons - user must use prompt_end to close
-
-        REQUIRE(data.buttons.empty());
-        REQUIRE(data.text_lines.size() == 1);
-    }
-
-    SECTION("Modal with many buttons") {
-        PromptData data;
-        data.title = "Many Options";
-        for (int i = 0; i < 10; i++) {
-            data.buttons.push_back({"Button " + std::to_string(i), "ACTION_" + std::to_string(i),
-                                    i % 2 == 0 ? "primary" : "secondary", "", false, -1});
-        }
-
-        REQUIRE(data.buttons.size() == 10);
-    }
-
-    SECTION("Modal with very long text") {
-        PromptData data;
-        data.title = "Long Text Test";
-        std::string long_text(500, 'x');
-        data.text_lines.push_back(long_text);
-
-        REQUIRE(data.text_lines[0].length() == 500);
-    }
-
-    SECTION("Modal with special characters in text") {
-        PromptData data;
-        data.title = "Special Characters";
-        data.text_lines.push_back("Temperature: 200°C");
-        data.text_lines.push_back("Progress: 50%");
-        data.text_lines.push_back("Status: OK ✓");
-
-        REQUIRE(data.text_lines.size() == 3);
-    }
-
-    SECTION("Rapid show/hide cycles") {
-        // Multiple prompts in quick succession should not cause issues
-        ActionPromptManager manager;
-        int show_count = 0;
-        int close_count = 0;
-
-        manager.set_on_show([&show_count](const PromptData&) { show_count++; });
-        manager.set_on_close([&close_count]() { close_count++; });
-
-        for (int i = 0; i < 5; i++) {
-            manager.process_line("// action:prompt_begin Prompt " + std::to_string(i));
-            manager.process_line("// action:prompt_show");
-            manager.process_line("// action:prompt_end");
-        }
-
-        REQUIRE(show_count == 5);
-        REQUIRE(close_count == 5);
-    }
-}
-
-// ============================================================================
-// Integration with ActionPromptManager
-// ============================================================================
 
 // ============================================================================
 // Test/Development Helper Tests
@@ -1360,8 +1208,8 @@ TEST_CASE("ActionPromptManager: trigger_test_notify sends notification",
 // Integration with ActionPromptManager
 // ============================================================================
 
-TEST_CASE("ActionPromptModal: Integration with ActionPromptManager",
-          "[action_prompt][modal][integration]") {
+TEST_CASE("ActionPromptManager: on_show receives the complete prompt",
+          "[action_prompt][integration]") {
     SECTION("on_show callback receives complete PromptData") {
         ActionPromptManager manager;
         PromptData received_data;
@@ -1383,24 +1231,6 @@ TEST_CASE("ActionPromptModal: Integration with ActionPromptManager",
         REQUIRE(received_data.buttons[0].color == "primary");
         REQUIRE(received_data.buttons[1].label == "Cancel");
         REQUIRE(received_data.buttons[1].color == "error");
-    }
-
-    SECTION("Modal can be shown from on_show callback") {
-        ActionPromptManager manager;
-        bool modal_would_show = false;
-
-        manager.set_on_show([&modal_would_show](const PromptData& data) {
-            // In real code, this would create and show the modal:
-            // auto modal = std::make_unique<ActionPromptModal>();
-            // modal->set_prompt_data(data);
-            // modal->show(lv_screen_active());
-            modal_would_show = !data.title.empty();
-        });
-
-        manager.process_line("// action:prompt_begin Test");
-        manager.process_line("// action:prompt_show");
-
-        REQUIRE(modal_would_show);
     }
 }
 
@@ -1473,4 +1303,183 @@ TEST_CASE("ActionPromptManager: Static current_prompt_name() accessor", "[action
         ActionPromptManager::set_instance(nullptr);
         REQUIRE(ActionPromptManager::current_prompt_name().empty());
     }
+}
+
+TEST_CASE("ActionPromptManager: accessors read nothing once the registered manager is gone",
+          "[action_prompt][static]") {
+    // A reader on the WebSocket thread can call the accessors while the main
+    // thread tears the manager down, so they must never reach into it.
+    auto manager = std::make_unique<ActionPromptManager>();
+    ActionPromptManager::set_instance(manager.get());
+    manager->process_line("// action:prompt_begin AFC Lane Error");
+    manager->process_line("// action:prompt_show");
+    REQUIRE(ActionPromptManager::is_showing());
+
+    manager.reset();
+
+    CHECK_FALSE(ActionPromptManager::is_showing());
+    CHECK(ActionPromptManager::current_prompt_name().empty());
+    ActionPromptManager::set_instance(nullptr);
+}
+
+TEST_CASE("ActionPromptManager: registering a manager publishes the prompt it is showing",
+          "[action_prompt][static]") {
+    ActionPromptManager manager;
+    manager.process_line("// action:prompt_begin AFC Lane Error");
+    manager.process_line("// action:prompt_show");
+    REQUIRE_FALSE(ActionPromptManager::is_showing()); // not registered yet
+
+    ActionPromptManager::set_instance(&manager);
+    CHECK(ActionPromptManager::current_prompt_name() == "AFC Lane Error");
+
+    ActionPromptManager::set_instance(nullptr);
+    CHECK_FALSE(ActionPromptManager::is_showing());
+}
+
+// ============================================================================
+// Closing on screen (closed_on_screen)
+// ============================================================================
+
+namespace {
+/// A manager whose prompt "AFC Lane Error" is SHOWING, registered as the instance.
+struct ShowingPrompt {
+    ActionPromptManager manager;
+    int close_count = 0;
+    int show_count = 0;
+    ShowingPrompt() {
+        ActionPromptManager::set_instance(&manager);
+        manager.set_on_close([this]() { close_count++; });
+        manager.set_on_show([this](const PromptData&) { show_count++; });
+        manager.process_line("// action:prompt_begin AFC Lane Error");
+        manager.process_line("// action:prompt_show");
+    }
+    ~ShowingPrompt() {
+        ActionPromptManager::set_instance(nullptr);
+    }
+    bool ended() const {
+        return manager.get_state() == ActionPromptManager::State::IDLE &&
+               !ActionPromptManager::is_showing() &&
+               ActionPromptManager::current_prompt_name().empty();
+    }
+};
+} // namespace
+
+TEST_CASE("ActionPromptManager: closed_on_screen per close kind", "[action_prompt][state]") {
+    ShowingPrompt p;
+    REQUIRE(ActionPromptManager::is_showing());
+
+    SECTION("a button that sent its gcode ends locally and sends nothing more") {
+        CHECK_FALSE(p.manager.closed_on_screen(PromptCloseKind::ButtonWithGcode));
+        CHECK(p.ended());
+    }
+    SECTION("a button without a gcode ends and asks for prompt_end") {
+        CHECK(p.manager.closed_on_screen(PromptCloseKind::ButtonWithoutGcode));
+        CHECK(p.ended());
+    }
+    SECTION("a backdrop tap or ESC ends and asks for prompt_end") {
+        CHECK(p.manager.closed_on_screen(PromptCloseKind::UserDismiss));
+        CHECK(p.ended());
+    }
+    SECTION("an external sweep ends locally and sends nothing") {
+        CHECK_FALSE(p.manager.closed_on_screen(PromptCloseKind::External));
+        CHECK(p.ended());
+    }
+
+    // The dialog is already closing; firing on_close would hide it a second time.
+    CHECK(p.close_count == 0);
+    // The prompt_end Klipper echoes back is then a no-op.
+    p.manager.process_line("// action:prompt_end");
+    CHECK(p.close_count == 0);
+}
+
+TEST_CASE_METHOD(LVGLTestFixture,
+                 "ActionPromptManager: hot reload keeps the prompt and re-shows it",
+                 "[action_prompt][state]") {
+    ShowingPrompt p;
+    REQUIRE(p.show_count == 1);
+
+    SECTION("re-shown on the next drain, nothing sent") {
+        CHECK_FALSE(p.manager.closed_on_screen(PromptCloseKind::HotReload));
+        CHECK(ActionPromptManager::is_showing());
+        CHECK(p.show_count == 1); // never from inside the hide
+        helix::ui::UpdateQueue::instance().drain();
+        CHECK(p.show_count == 2);
+        CHECK(ActionPromptManager::current_prompt_name() == "AFC Lane Error");
+    }
+
+    SECTION("not re-shown once the firmware ended it") {
+        CHECK_FALSE(p.manager.closed_on_screen(PromptCloseKind::HotReload));
+        p.manager.process_line("// action:prompt_end");
+        helix::ui::UpdateQueue::instance().drain();
+        CHECK(p.show_count == 1);
+    }
+
+    SECTION("not re-shown over a newer prompt") {
+        CHECK_FALSE(p.manager.closed_on_screen(PromptCloseKind::HotReload));
+        p.manager.process_line("// action:prompt_begin Next");
+        p.manager.process_line("// action:prompt_show");
+        REQUIRE(p.show_count == 2);
+        helix::ui::UpdateQueue::instance().drain();
+        CHECK(p.show_count == 2);
+    }
+}
+
+TEST_CASE("ActionPromptManager: closed_on_screen leaves a prompt that is not showing alone",
+          "[action_prompt][state]") {
+    ActionPromptManager manager;
+    REQUIRE_FALSE(manager.closed_on_screen(PromptCloseKind::UserDismiss));
+    REQUIRE(manager.get_state() == ActionPromptManager::State::IDLE);
+
+    // A follow-up prompt still being built must survive a stale close.
+    manager.process_line("// action:prompt_begin Next Step");
+    REQUIRE_FALSE(manager.closed_on_screen(PromptCloseKind::UserDismiss));
+    REQUIRE(manager.get_state() == ActionPromptManager::State::BUILDING);
+    manager.process_line("// action:prompt_show");
+    CHECK(manager.has_active_prompt());
+}
+
+// ============================================================================
+// Line sink: lines from other threads are applied on the main thread
+// ============================================================================
+
+TEST_CASE_METHOD(LVGLTestFixture, "ActionPromptManager: the line sink applies lines only on drain",
+                 "[action_prompt][threading]") {
+    ActionPromptManager manager;
+    auto feed = manager.make_line_sink();
+
+    feed("// action:prompt_begin Filament Change");
+    feed("ok");
+    feed("// action:prompt_button Continue|RESUME|primary");
+    feed("// action:prompt_show");
+
+    // Nothing has touched the state yet: the caller's thread only queued.
+    CHECK(manager.get_state() == ActionPromptManager::State::IDLE);
+
+    helix::ui::UpdateQueue::instance().drain();
+    REQUIRE(manager.has_active_prompt());
+    REQUIRE(manager.get_current_prompt() != nullptr);
+    CHECK(manager.get_current_prompt()->title == "Filament Change");
+    CHECK(manager.get_current_prompt()->buttons.size() == 1);
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "ActionPromptManager: queued lines are dropped once it is gone",
+                 "[action_prompt][threading]") {
+    (void)helix::async_lifetime::take_snapshot(); // clear earlier tests' skips
+    std::function<void(const std::string&)> feed;
+    {
+        ActionPromptManager manager;
+        feed = manager.make_line_sink();
+        feed("// action:prompt_begin Gone"); // queued while alive
+    }
+    feed("// action:prompt_show"); // refused before it is queued
+    helix::ui::UpdateQueue::instance().drain();
+
+    // Both lines were skipped by the guard rather than run on a dead manager.
+    uint64_t skipped = 0;
+    for (const auto& entry : helix::async_lifetime::take_snapshot().entries) {
+        if (entry.tag == "ActionPromptManager::process_line") {
+            skipped = entry.count;
+        }
+    }
+    CHECK(skipped == 2);
 }

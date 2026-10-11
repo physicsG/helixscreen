@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<component>
+  <!-- Home tile: heater glyph and label, current value with the target muted
+       beside it, and a canvas sparkline that fills the rest. The canvas is a
+       retained drawing the plugin rebuilds and commits on every sample. -->
+  <view extends="lv_obj"
+        width="100%" height="100%" clickable="true" style_pad_all="#space_sm" style_pad_gap="#space_xs"
+        flex_flow="column" scrollable="false">
+    <event_cb trigger="clicked" callback="plugin_event" user_data="temp-spark__open"/>
+    <lv_obj width="100%"
+            height="content" flex_flow="row" style_pad_all="0" style_pad_gap="#space_xxs"
+            style_flex_cross_place="center" scrollable="false" style_bg_opa="0" style_border_width="0">
+      <icon name="temp-spark__glyph" src="thermometer_lines" size="sm" variant="secondary"/>
+      <text_small name="temp-spark__heater" bind_text="temp-spark__heater_label"/>
+    </lv_obj>
+    <lv_obj width="100%"
+            height="content" flex_flow="row" style_pad_all="0" style_pad_gap="#space_xxs"
+            style_flex_cross_place="center" scrollable="false" style_bg_opa="0" style_border_width="0">
+      <lv_label name="temp-spark__value"
+                bind_text="temp-spark__value" style_text_font="#font_heading" style_text_color="#text"/>
+      <lv_label name="temp-spark__target_beside"
+                bind_text="temp-spark__target_beside" style_text_font="#font_body" style_text_color="#text_muted"/>
+      <lv_label name="temp-spark__unit" text="°C" style_text_font="#font_body" style_text_color="#text_muted"/>
+    </lv_obj>
+    <plugin_canvas name="temp-spark__spark" width="100%" flex_grow="1"/>
+  </view>
+</component>

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #pragma once
+#if HELIX_HAS_SNAPMAKER
 
 #include "ams_backend_snapmaker.h"
 
@@ -9,6 +10,10 @@
 #include <map>
 #include <optional>
 #include <string>
+
+namespace helix {
+
+class MultiAceTestAccess;
 
 /**
  * @file ams_backend_multiace.h
@@ -40,10 +45,9 @@
  * ## Why the dispatch override exists
  *
  * An ACE-fed head must be driven with `ACE_LOAD_HEAD` / `ACE_UNLOAD_HEAD`, not
- * the U1's native path. Sending the native unload to an ACE-fed head does move
- * the filament, but it terminates at `preload_finish` because the ACE performs
- * the retract — the UI waits for `unload_finish` and hangs on "Unloading"
- * forever. Heads on their stock feeder keep the inherited native path.
+ * the U1's native path. The ACE performs the retract, so the U1's own
+ * channel_state ends an unload at `preload_finish` and never reports
+ * `unload_finish`. Heads on their stock feeder keep the inherited native path.
  *
  * @see docs/devel/plans/2026-08-09-snapmaker-u1-multiace-plan.md § 4 Phase 2
  * @see tests/fixtures/snapmaker_u1/u1-multiace-head-mode-idle.json
@@ -62,6 +66,21 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
 
     [[nodiscard]] AmsType get_type() const override {
         return AmsType::MULTIACE;
+    }
+
+    /// The U1's answers, with two differences. Every ACE reports temperature
+    /// and humidity; unit 0 is the U1 itself and has no sensor, which the
+    /// per-unit indicator already accounts for. And the firmware's batch feed
+    /// drives AUTO_FEEDING per head, which is the wrong command for a head an
+    /// ACE feeds, so the batch affordance is withheld.
+    static constexpr BackendTraits kTraits = [] {
+        BackendTraits t = AmsBackendSnapmaker::kTraits;
+        t.has_environment_sensors = true;
+        t.supports_batch_filament_ops = false;
+        return t;
+    }();
+    [[nodiscard]] BackendTraits traits() const override {
+        return kTraits;
     }
 
     /**
@@ -95,32 +114,6 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     /// How head @p head is fed, per the last `ace` frame.
     [[nodiscard]] HeadSource head_source_kind(int head) const;
 
-    /// See AmsBackendSnapmaker::preload_finish_ends_unload(). True for an
-    /// ACE-fed head: `ACE_UNLOAD_HEAD` hands the retract to the ACE, so the
-    /// U1's channel_state stops at preload_finish and `unload_finish` never
-    /// arrives. A feeder or manual head still runs the native sequence and
-    /// keeps the stock answer.
-    ///
-    /// Except mid-SWAP, where the same preload_finish is a boundary rather than
-    /// an end: do_load_filament() emitted `ACE_UNLOAD_HEAD` and `ACE_LOAD_HEAD`
-    /// back to back, so resolving the operation here dropped the action to IDLE
-    /// between the halves -- the step bar hid itself, the action buttons came
-    /// back, ownership was released (so the load half was then re-detected as a
-    /// foreign operation) and a post-op nozzle cooldown was armed while the load
-    /// half still needed the heat. swap_in_flight_head_ suppresses exactly that
-    /// one resolution and nothing else.
-    [[nodiscard]] bool preload_finish_ends_unload(int head) const override {
-        // Reads head_kind_ DIRECTLY. The caller is the channel_state parse,
-        // which already holds mutex_, and head_source_kind() takes it again --
-        // a non-recursive std::mutex, so that self-deadlocked the main thread
-        // the first time an ACE-fed head reached preload_finish, i.e. on the
-        // first real unload. The whole UI froze.
-        if (head < 0 || head >= NUM_TOOLS || head_kind_[head] != HeadSource::ACE) {
-            return false;
-        }
-        return swap_in_flight_head_ != head;
-    }
-
     /// See AmsBackend::change_tool_completes_load(). True for the U1's own four
     /// heads, whose filament sits at the head already -- `T{n}` really is the
     /// whole load there. False for every ACE bay: mounting the head the bay
@@ -152,16 +145,26 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     ///
     /// UNLOAD: the last step names its destination when the head being unloaded
     /// is ACE-fed. The filament does not just leave the nozzle, it travels back
-    /// into the ACE, and "Retract" alone gave no sign of that -- the step sits
-    /// there for the length of the whole retract, which is most of the operation.
-    /// A RENAME, not an added step: the firmware drives it (unload phase 3).
+    /// into the ACE, and that step lasts for most of the operation. A rename,
+    /// not an added step: the firmware drives it (unload step 3).
     ///
-    /// LOAD_SWAP: a whole model of its own, because on an ACE-fed head a swap
-    /// really is one operation with two halves and an ACE-side gap in the middle
-    /// (see the .cpp). The base has no swap of its own -- a plain U1 lane is
-    /// PARALLEL and feeds its own nozzle -- so it answers LOAD_SWAP with the
-    /// load model, which is what put "Feed filament" under a retract.
+    /// LOAD_SWAP: swap_step_model(), because on an ACE-fed head a swap is one
+    /// operation with two halves. The base has no swap of its own (a plain U1
+    /// lane is PARALLEL and feeds its own nozzle) and answers LOAD_SWAP with
+    /// the load model.
     [[nodiscard]] OperationStepModel get_operation_step_model(StepOperationType op) const override;
+
+    /// Positions on the bay-swap step bar: the unload model's four steps, then
+    /// the load half's Feed, Extrude and Purge. The load half's own Home,
+    /// Select and Heat have no row: the head is already mounted and hot.
+    static constexpr int SWAP_STEP_RETRACT = 3;
+    static constexpr int SWAP_STEP_FEED = 4;
+    static constexpr int SWAP_STEP_EXTRUDE = 5;
+    static constexpr int SWAP_STEP_PURGE = 6;
+
+    /// The step bar of a bay swap on an ACE-fed head. Static so a simulated
+    /// backend shows the bar that ships.
+    [[nodiscard]] static OperationStepModel swap_step_model();
 
     /// Does loading @p slot_index have to retract what is at its head first?
     ///
@@ -181,20 +184,10 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     /// The base rule is `slot_index == get_current_slot()`, and the current slot
     /// is a HEAD (3), so no bay ever matched and a loaded bay drew exactly like
     /// its idle neighbours. Answered only for bays: the U1's own heads keep the
-    /// inherited rule, which is what the SnapSwap page has always shown.
-    /// Deliberately NOT done by claiming has_per_slot_loaded_authority(), which
-    /// would switch the heads over to a per-slot latch as a side effect.
+    /// inherited rule. Deliberately NOT done by claiming
+    /// has_per_slot_loaded_authority(), which would switch the heads over to a
+    /// per-slot latch as a side effect.
     [[nodiscard]] bool slot_is_actively_loaded(int slot_index) const override;
-
-    // Every ACE reports temperature and humidity. Answered at the BACKEND level,
-    // as the interface asks it: unit 0 is the U1 itself and has no sensor, but
-    // the per-unit `ams_env_ind_<n>_visible` subject already hides the indicator
-    // there. Inherited from AmsBackendSnapmaker this was false, which hard-hid
-    // the indicator on the unit detail page -- and with it the only route to the
-    // dryer and auto-dry controls for a drilled-into ACE.
-    [[nodiscard]] bool has_environment_sensors() const override {
-        return true;
-    }
 
     // Dryer. multiACE exposes parameterised commands -- ACE_DRY ACE=n [TEMP=]
     // [DURATION=] and ACE_STOP_DRYING [ACE=n] -- so temperature and duration are
@@ -224,8 +217,23 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     };
     [[nodiscard]] std::optional<SeatedSource> seated_source(int head) const;
 
+    /// A bay's readiness is the ACE's to state, and an ACE-fed head's feeder
+    /// channel is not what moves its filament, so neither is judged from the
+    /// U1's channel fields. Stock feeder heads keep the inherited answer.
+    [[nodiscard]] FilamentOpEligibility slot_op_eligibility(int slot_index,
+                                                            bool load) const override;
+
+    // A spool edit addresses a SLOT, and the bays are slots 4 and up. The
+    // inherited implementations address a U1 head and write the edit through
+    // to the U1's firmware; a bay has neither, so its edit is kept on the slot
+    // and in the override store only.
+    AmsError apply_user_edit(int slot_index, const SlotInfo& info,
+                             const helix::ams::Observation& declared) override;
+    AmsError sync_external_identity(int slot_index, const SlotInfo& info) override;
+    void clear_slot_override(int slot_index) override;
+
   protected:
-    void handle_status_update(const nlohmann::json& notification) override;
+    void handle_status(const nlohmann::json& status) override;
     const char* backend_log_tag() const override {
         return "[AMS multiACE]";
     }
@@ -234,6 +242,38 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     // inherited native U1 path. See the class comment.
     AmsError do_load_filament(int slot_index) override;
     AmsError do_unload_filament(int slot_index) override;
+
+    // `T{n}` names a head. The inherited implementations bound the index by
+    // the slot count, which here includes the bays, and the firmware routes
+    // T4 and up through its extruder map to some head.
+    AmsError do_select_slot(int slot_index) override;
+    AmsError do_change_tool(int tool_number) override;
+
+    /// See kTraits: the batch feed is the stock feeder's command.
+    AmsError do_filament_batch(const std::vector<int>& slots, bool load) override;
+
+    /// True for an ACE-fed head: `ACE_UNLOAD_HEAD` hands the retract to the
+    /// ACE, so the U1's channel_state stops at preload_finish and
+    /// `unload_finish` never arrives. A feeder or manual head runs the native
+    /// sequence and keeps the stock answer.
+    [[nodiscard]] bool preload_finish_ends_unload(int head) const override {
+        // Reads head_kind_ directly: the caller holds mutex_.
+        return head >= 0 && head < NUM_TOOLS && head_kind_[head] == HeadSource::ACE;
+    }
+
+    /// True while the unload half of a swap this backend dispatched is running
+    /// on @p head: do_load_filament() queued `ACE_UNLOAD_HEAD` and
+    /// `ACE_LOAD_HEAD` back to back, so the end of the unload is a boundary
+    /// inside one operation.
+    [[nodiscard]] bool unload_continues_into_load(int head) const override {
+        return swap_in_flight_head_ == head && head >= 0 && !swap_load_half_started_;
+    }
+
+    /// During a swap, the position on swap_step_model()'s bar; otherwise the
+    /// inherited per-direction index.
+    [[nodiscard]] int step_phase_locked(int head,
+                                        const snapmaker::ChannelStateInfo& info) const override;
+    [[nodiscard]] std::optional<AmsAction> step_action_locked() const override;
 
     /// The one network call fetch_slot_overrides() makes, split out so a test
     /// can hold the callbacks and complete them in an order of its choosing --
@@ -277,36 +317,35 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     /// The head the last dispatched load/unload NAMED, or -1 for none yet.
     ///
     /// get_operation_step_model() needs to know which head the operation is
-    /// about, and it takes no slot argument -- the sidebar asks it for a whole
-    /// bar, not per slot. It used to read `current_slot`, the head on the
-    /// CARRIAGE, which is the same head only in `mode="head"`. In `mode="multi"`
-    /// bay *s* feeds head *s*, so acting on a bay whose head is not mounted
-    /// consulted the wrong head's source kind and mislabelled the bar.
+    /// about, and it takes no slot argument: the sidebar asks it for a whole
+    /// bar, not per slot. `current_slot`, the head on the CARRIAGE, is the same
+    /// head only in `mode="head"`. In `mode="multi"` bay *s* feeds head *s*, so
+    /// a bay whose head is not mounted would read the wrong head's source kind.
     int op_target_head_ = -1;
 
-    /// Has the firmware confirmed the in-flight swap is actually running?
-    /// Guards the latch against the pre-start lag; see apply_swap_phase_locked().
+    /// The firmware has reported the in-flight swap running. A dispatched swap
+    /// still reads IDLE until the firmware picks the gcode up, so only an idle
+    /// action seen after this is set means the swap is over.
     bool swap_progress_seen_ = false;
 
     /// The head a UI-initiated swap is running on, or -1.
     ///
-    /// Set by do_load_filament() when it emits the pre-unload, cleared when the
-    /// operation reaches a terminal channel_state. Two jobs, both of which need
-    /// to know that the unload and the load are one operation:
-    /// preload_finish_ends_unload() must not resolve at the boundary, and
-    /// apply_swap_phase_locked() fills the ACE-side gap after it.
+    /// Set by do_load_filament() when it emits the pre-unload, cleared once the
+    /// operation is over. While set, the step index is published as a position
+    /// on swap_step_model()'s bar.
     int swap_in_flight_head_ = -1;
 
-    /// Retire the swap latch once the swap it guards is over. Caller must hold
-    /// mutex_; runs after AmsBackendSnapmaker::handle_status_update(), whose
-    /// channel_state parse is the input.
+    /// The swap's load half has begun. Until then the end of the unload is a
+    /// boundary inside the operation (unload_continues_into_load()).
+    bool swap_load_half_started_ = false;
+
+    /// Advance and retire the swap latch from the state the U1 parse left.
+    /// Caller must hold mutex_; runs after AmsBackendSnapmaker::handle_status().
     ///
-    /// The latch exists so preload_finish cannot resolve the operation at the
-    /// boundary BETWEEN the two halves; this is the other end of it. It does not
-    /// synthesize a phase: the gap between the halves measured ~4s of `inited`
-    /// on a live U1, not the long blind window the design assumed, so the bar
-    /// holds on the retract step across it instead of gaining a row nobody sees.
-    void apply_swap_phase_locked(bool& changed);
+    /// It synthesizes no step: the gap between the halves is a few seconds of
+    /// `inited` because the next bay is already staged at its gate, so the bar
+    /// holds on the retract step across it.
+    void apply_swap_phase_locked();
 
     /// Parse the `ace` object. Caller must hold mutex_.
     void parse_ace_object_locked(const nlohmann::json& ace, bool& changed);
@@ -489,3 +528,7 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     /// applied and the bay showed a stale material until some unrelated bump.
     bool override_refetch_wanted_ = false;
 };
+
+} // namespace helix
+
+#endif // HELIX_HAS_SNAPMAKER

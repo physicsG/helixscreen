@@ -9,7 +9,9 @@
 #include <unordered_map>
 #include <vector>
 
+namespace helix {
 class AmsBackend; // Forward declaration for compute_system_tool_layout()
+} // namespace helix
 
 /**
  * @brief Shared AMS drawing utilities
@@ -17,7 +19,22 @@ class AmsBackend; // Forward declaration for compute_system_tool_layout()
  * Consolidates duplicated drawing code used by ui_ams_mini_status,
  * ui_panel_ams_overview, ui_ams_slot, and ui_spool_canvas.
  */
-namespace helix::ams_draw {
+namespace helix::ui {
+/**
+ * @brief One hub: the units whose lanes join before one path to a toolhead
+ *
+ * Units naming the same non-empty AmsUnit::hub_id form one group; a unit with
+ * an empty hub_id is a group of its own. A hub feeds exactly one physical
+ * toolhead, and a toolhead may be fed by several hubs.
+ */
+struct HubGroup {
+    int physical_tool = -1; ///< The toolhead this hub feeds
+    std::string hub_id;     ///< Empty for a unit that is its own hub
+    std::vector<int> units; ///< Member unit indices, in backend order
+};
+} // namespace helix::ui
+
+namespace ams_draw {
 
 // ============================================================================
 // Color Utilities
@@ -37,10 +54,10 @@ lv_color_t blend_color(lv_color_t c1, lv_color_t c2, float factor);
 // ============================================================================
 
 /** Map error severity to theme color (danger/warning/text_muted) */
-lv_color_t severity_color(SlotError::Severity severity);
+lv_color_t severity_color(helix::SlotError::Severity severity);
 
 /** Get worst error severity across all slots in a unit */
-SlotError::Severity worst_unit_severity(const AmsUnit& unit);
+helix::SlotError::Severity worst_unit_severity(const helix::AmsUnit& unit);
 
 // ============================================================================
 // Data Helpers
@@ -57,8 +74,17 @@ SlotError::Severity worst_unit_severity(const AmsUnit& unit);
  */
 constexpr int SPOOL_ASSIGNED_MIN_FILL_PCT = 5;
 
+/**
+ * Floor a display_fill_pct-encoded value for BAR rendering: -1 propagates
+ * ("no data", callers keep the previous render), anything else clamps to
+ * min_pct..100 so a present-but-spent lane keeps a visible sliver instead of
+ * vanishing. THE shared rule - every bar-family surface must go through it or
+ * the same lane renders empty on one surface and floored on another.
+ */
+int floor_fill_pct(int pct, int min_pct = SPOOL_ASSIGNED_MIN_FILL_PCT);
+
 /** Calculate fill percentage from SlotInfo weight data (returns min_pct..100, or 100 if unknown) */
-int fill_percent_from_slot(const SlotInfo& slot, int min_pct = SPOOL_ASSIGNED_MIN_FILL_PCT);
+int fill_percent_from_slot(const helix::SlotInfo& slot, int min_pct = SPOOL_ASSIGNED_MIN_FILL_PCT);
 
 /**
  * Calculate bar width to fit slot_count bars in container_width.
@@ -72,7 +98,7 @@ int32_t calc_bar_width(int32_t container_width, int slot_count, int32_t gap, int
 // ============================================================================
 
 /** Get display name for a unit (uses unit.name, falls back to "Unit N") */
-std::string get_unit_display_name(const AmsUnit& unit, int unit_index);
+std::string get_unit_display_name(const helix::AmsUnit& unit, int unit_index);
 
 // ============================================================================
 // LVGL Widget Factories
@@ -82,53 +108,23 @@ std::string get_unit_display_name(const AmsUnit& unit, int unit_index);
 lv_obj_t* create_transparent_container(lv_obj_t* parent);
 
 // ============================================================================
-// Spool Visualization (shared by the AMS overlay slot and the home widget)
+// Spool-Family Presentation
 // ============================================================================
 
-/** Widget handles produced by create_spool_visual() */
-struct SpoolVisual {
-    lv_obj_t* container = nullptr;
-    bool use_3d = true;
-    int32_t spool_size = 0;
-    lv_obj_t* canvas = nullptr;            ///< 3D-only: pseudo-3D spool canvas
-    lv_obj_t* spool_outer = nullptr;       ///< flat-only: outer flange ring
-    lv_obj_t* color_swatch = nullptr;      ///< flat-only: filament color ring
-    lv_obj_t* spool_hub = nullptr;         ///< flat-only: center hub
-    lv_obj_t* empty_placeholder = nullptr; ///< dashed-circle "empty" placeholder (hidden)
-    lv_obj_t* error_indicator = nullptr;   ///< error dot, top-right (hidden)
-};
-
-/// Slack create_spool_visual() adds around the spool graphic so the lane badge,
-/// which is aligned to the container's bottom-right corner, is not clipped.
-///
-/// Exported because it is the difference between the spool size a caller asks
-/// for and the width the container actually occupies in a flex row. A caller
-/// laying out a fixed-width cell around the spool has to subtract it to know
-/// what is left for anything beside it; ui_ams_mini_status.cpp's spool cells do
-/// exactly that, and used to carry their own copy of the literal.
-inline constexpr int32_t SPOOL_VISUAL_BADGE_MARGIN_PX = 8;
-
-/**
- * @brief Build a spool visualization into @p container, honoring /ams/spool_style.
- * @param container Parent to populate (its size is set to
- *        spool_size + SPOOL_VISUAL_BADGE_MARGIN_PX, square).
- * @param spool_size Spool graphic size in px; <= 0 uses the "ams_slot_spool_size" token.
- */
-SpoolVisual create_spool_visual(lv_obj_t* container, int32_t spool_size = 0);
-
-/** Update spool color (3D canvas or flat color_swatch + darkened outer flange) */
-void spool_visual_set_color(const SpoolVisual& sv, lv_color_t color);
-
-/** Update spool fill level 0.0-1.0 (3D canvas fill or flat concentric ring size) */
-void spool_visual_set_fill(const SpoolVisual& sv, float fill_level);
-
-/** Toggle the empty-slot placeholder vs. the spool graphic */
-void spool_visual_set_empty(const SpoolVisual& sv, bool empty);
+/// Opacity of a spool visual and its labels on a lane that is assigned but not
+/// physically present. Shared by the AMS slot widget and the mini status strip
+/// so two views of the same lane cannot ghost to different strengths.
+inline constexpr lv_opa_t GHOST_OPA = LV_OPA_30;
 
 /** Create a circular lane-number badge (1-based) using AMS badge tokens.
  *  @param parent typically the spool container; caller may re-align.
  *  @param active when true, uses the "success" accent color for the active (loaded) lane. */
 lv_obj_t* create_lane_badge(lv_obj_t* parent, int lane_number, int32_t size, bool active = false);
+
+/** Recolor an existing lane badge for its lane's loaded state (see
+ *  create_lane_badge): "success" while actively loaded, the neutral
+ *  ams_badge_bg token otherwise, with the label's contrast text following. */
+void set_lane_badge_active(lv_obj_t* badge, bool active);
 
 // Shared dashed-circle draw callback for the empty-slot placeholder (moved here from
 // ui_ams_slot.cpp so both the overlay and the home widget share it).
@@ -161,7 +157,7 @@ void stop_pulse(lv_obj_t* dot);
  * The visual that says "this node is the one that matters right now". Lifted out
  * of ui_ams_slot.cpp's apply_current_slot_highlight() so the bypass node can wear
  * the same ring as a lane instead of growing a second, drifting copy - the reason
- * start_pulse()/style_slot_bar() live here too.
+ * start_pulse() lives here too.
  *
  * The glow is a shadow blur, not an animation; start_pulse() is the separate,
  * temporary treatment for an operation in flight.
@@ -180,7 +176,7 @@ void set_active_ring(lv_obj_t* target, bool active);
 lv_obj_t* create_error_badge(lv_obj_t* parent, int32_t size);
 
 /** Update badge visibility, color, and pulse based on error state */
-void update_error_badge(lv_obj_t* badge, bool has_error, SlotError::Severity severity,
+void update_error_badge(lv_obj_t* badge, bool has_error, helix::SlotError::Severity severity,
                         bool animate);
 
 // ============================================================================
@@ -193,16 +189,6 @@ struct SlotColumn {
     lv_obj_t* bar_bg = nullptr;      ///< Background/outline container
     lv_obj_t* bar_fill = nullptr;    ///< Colored fill (child of bar_bg)
     lv_obj_t* status_line = nullptr; ///< Bottom indicator line
-};
-
-/** Parameters for styling a slot bar */
-struct BarStyleParams {
-    uint32_t color_rgb = 0x808080;
-    int fill_pct = 100;
-    bool is_present = false;
-    bool is_loaded = false;
-    bool has_error = false;
-    SlotError::Severity severity = SlotError::INFO;
 };
 
 /// Status line dimensions
@@ -222,23 +208,16 @@ constexpr int32_t MINI_BAR_RADIUS_PX = 4;
 SlotColumn create_slot_column(lv_obj_t* parent, int32_t bar_width, int32_t bar_height,
                               int32_t bar_radius);
 
-/**
- * Style an existing slot bar (update colors, borders, fill, status line).
- * Visual style matches the overview cards:
- * - Loaded: 2px border, text color, 80% opa
- * - Present: 1px border, text_muted, 50% opa
- * - Empty: 1px border, text_muted, 20% opa (ghosted)
- * - Error: status line with severity color
- * - Non-error: status line hidden
- */
-void style_slot_bar(const SlotColumn& col, const BarStyleParams& params, int32_t bar_radius);
-
 // ============================================================================
 // Logo Helpers
 // ============================================================================
 
+/** The logo image path for a unit: its own name first, then the system's type name.
+ *  Null when neither has one. */
+const char* unit_logo_path(const helix::AmsUnit& unit, const helix::AmsSystemInfo& info);
+
 /** Apply logo to image widget: try unit name -> type name -> hide */
-void apply_logo(lv_obj_t* image, const AmsUnit& unit, const AmsSystemInfo& info);
+void apply_logo(lv_obj_t* image, const helix::AmsUnit& unit, const helix::AmsSystemInfo& info);
 
 /** Apply logo to image widget: try type name -> hide */
 void apply_logo(lv_obj_t* image, const std::string& type_name);
@@ -270,6 +249,12 @@ struct UnitToolLayout {
     /// units naming the same extruder feed one nozzle — that is string
     /// identity, so it holds for names no numbering scheme can parse.
     std::string extruder_identity;
+    /// The unit's AmsUnit::hub_id. Units naming the same non-empty hub share
+    /// one nozzle.
+    std::string hub_id;
+    /// Index into SystemToolLayout::hub_groups of the hub this unit's lanes
+    /// join; -1 for a unit that has none (an absent box, PARALLEL or MIXED).
+    int hub_group = -1;
 };
 
 /**
@@ -282,6 +267,16 @@ struct UnitToolLayout {
 struct SystemToolLayout {
     std::vector<UnitToolLayout> units;
     int total_physical_tools = 0;
+
+    /// Every hub of the system, in the order their first unit appears.
+    std::vector<helix::ui::HubGroup> hub_groups;
+
+    /// Unit indices in the overview's left-to-right card order: by first nozzle,
+    /// so the card row is monotonic with the toolhead row and lanes only cross
+    /// where the plumbing does. Stable, so an already-monotonic system keeps its
+    /// backend order. A unit feeding no nozzle (an absent box) sorts with the
+    /// unit listed before it, keeping its physical address slot.
+    std::vector<int> display_order;
 
     /// Map AFC virtual tool number -> physical nozzle index (for active tool highlighting)
     std::unordered_map<int, int> virtual_to_physical;
@@ -337,8 +332,8 @@ struct ToolBadgeLabels {
  * @param active_physical_tool Physical nozzle the active slot feeds, or <0
  */
 [[nodiscard]] ToolBadgeLabels compute_tool_badge_labels(const SystemToolLayout& layout,
-                                                        const AmsSystemInfo& info, int current_slot,
-                                                        int active_physical_tool);
+                                                        const helix::AmsSystemInfo& info,
+                                                        int current_slot, int active_physical_tool);
 
 /**
  * @brief Compute physical tool layout from AMS system info
@@ -354,11 +349,26 @@ struct ToolBadgeLabels {
  * @param backend Backend for per-unit topology queries (nullable, falls back to unit.topology)
  * @return SystemToolLayout with physical positions and virtual mappings
  */
-SystemToolLayout compute_system_tool_layout(const AmsSystemInfo& info, const AmsBackend* backend);
+SystemToolLayout compute_system_tool_layout(const helix::AmsSystemInfo& info,
+                                            const helix::AmsBackend* backend);
 
-} // namespace helix::ams_draw
+} // namespace ams_draw
 
-/// Unqualified `ams_draw::` is the spelling at ~230 call sites across the AMS
-/// drawing code. The namespace itself lives under helix:: (every HelixScreen
-/// declaration does); this alias keeps the short spelling working.
-namespace ams_draw = helix::ams_draw;
+namespace helix::ui {
+
+/// The number the overview canvas tags @p unit's hub with: 0 for a unit on a hub
+/// of its own (or none), else 1 + its index in SystemToolLayout::hub_groups for a
+/// hub shared by several units.
+[[nodiscard]] int overview_hub_group(const ams_draw::SystemToolLayout& layout, int unit);
+
+/// The unit whose view's buffer box the overview draws under @p unit's hub: the
+/// first unit on the hub, so every unit of a hub reads one buffer. -1 for a unit
+/// with no hub.
+[[nodiscard]] int overview_buffer_unit(const ams_draw::SystemToolLayout& layout, int unit);
+
+/// Indices into SystemToolLayout::hub_groups of the hubs that feed physical
+/// toolhead @p physical_tool, in group order.
+[[nodiscard]] std::vector<int> hub_groups_of_tool(const ams_draw::SystemToolLayout& layout,
+                                                  int physical_tool);
+
+} // namespace helix::ui

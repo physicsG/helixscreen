@@ -16,6 +16,8 @@
 // costs nothing at runtime and fails in a plain build, without ASan.
 
 #include "../lvgl_test_fixture.h"
+#include "../test_helpers/breadcrumb_capture.h"
+#include "../wait_finish_spy.h"
 #include "lv_draw_buf_guard.h"
 #include "lvgl/lvgl.h"
 #include "lvgl/src/core/lv_global.h"
@@ -30,90 +32,12 @@
 
 namespace {
 
-int g_wait_calls = 0;
-
-int32_t spy_wait_for_finish(lv_draw_unit_t*) {
-    g_wait_calls++;
-    return 0;
-}
-
-/// Never takes work. dispatch_cb is the one callback lv_draw_dispatch() calls
-/// without a null check, so it has to exist even though this unit draws
-/// nothing.
-int32_t spy_dispatch(lv_draw_unit_t*, lv_layer_t*) {
-    return LV_DRAW_UNIT_IDLE;
-}
-
-/// A draw unit that records every lv_draw_wait_for_finish() the code under test
-/// performs.
-///
-/// Registered and unregistered around one test rather than left in place: LVGL
-/// has no lv_draw_delete_unit(), units live until lv_deinit(), and the test
-/// binary never deinits. A permanent extra unit would take unit_cnt from 1 to
-/// 2, which switches lv_draw_get_available_task() to the multi-unit
-/// independence path for every later test in the shard.
-class WaitForFinishSpy {
-  public:
-    WaitForFinishSpy() {
-        unit_ = static_cast<lv_draw_unit_t*>(lv_draw_create_unit(sizeof(lv_draw_unit_t)));
-        REQUIRE(unit_ != nullptr);
-        unit_->name = "helix_test_wait_spy";
-        unit_->dispatch_cb = spy_dispatch;
-        unit_->wait_for_finish_cb = spy_wait_for_finish;
-        g_wait_calls = 0;
-    }
-
-    ~WaitForFinishSpy() {
-        // lv_draw_create_unit() pushes onto the head, and nothing else in this
-        // test creates one, so the spy is still the head.
-        lv_draw_global_info_t& info = LV_GLOBAL_DEFAULT()->draw_info;
-        if (info.unit_head == unit_) {
-            info.unit_head = unit_->next;
-            info.unit_cnt--;
-            lv_free(unit_);
-        }
-    }
-
-    WaitForFinishSpy(const WaitForFinishSpy&) = delete;
-    WaitForFinishSpy& operator=(const WaitForFinishSpy&) = delete;
-
-    int waits() const {
-        return g_wait_calls;
-    }
-
-  private:
-    lv_draw_unit_t* unit_ = nullptr;
-};
-
 /// Breadcrumb categories are truncated to 7 characters (crash_handler.cpp's
 /// `char category[8]`), so a probe tag has to fit or the assertion below hunts
 /// for a string the ring never held. Production's own tags ("cache_buf",
 /// "gles_draw_buf") are truncated the same way.
 constexpr const char* kDestroyTag = "tstbufA";
 constexpr const char* kNullTag = "tstbufB";
-
-/// The breadcrumb ring as lines, mirroring the pipe+dump_to_fd helper in
-/// test_crash_handler.cpp.
-std::vector<std::string> capture_breadcrumb_lines() {
-    int fds[2];
-    REQUIRE(::pipe(fds) == 0);
-    crash_handler::breadcrumb::dump_to_fd(fds[1]);
-    ::close(fds[1]);
-    std::string all;
-    char chunk[4096];
-    ssize_t n;
-    while ((n = ::read(fds[0], chunk, sizeof(chunk))) > 0) {
-        all.append(chunk, static_cast<size_t>(n));
-    }
-    ::close(fds[0]);
-    std::vector<std::string> lines;
-    size_t pos = 0, nl;
-    while ((nl = all.find('\n', pos)) != std::string::npos) {
-        lines.push_back(all.substr(pos, nl - pos));
-        pos = nl + 1;
-    }
-    return lines;
-}
 
 size_t count_lines_containing(const std::vector<std::string>& lines, const std::string& needle) {
     size_t hits = 0;
@@ -137,11 +61,16 @@ TEST_CASE_METHOD(LVGLTestFixture, "safe_draw_buf_destroy drains the draw units b
 
     helix::safe_draw_buf_destroy(buf, "test_buf");
 
-    // The whole point of the helper: no in-flight draw task can still be
-    // reading the buffer by the time lv_draw_buf_destroy() runs. Dropping the
-    // lv_draw_wait_for_finish() call - which is exactly what
-    // GCodeGLESRenderer::clear_cached_frame() had done - leaves this at 0.
+    // The whole point of the helper: no in-flight draw task can still be reading the
+    // buffer by the time lv_draw_buf_destroy() runs. Dropping the
+    // lv_draw_wait_for_finish() call leaves this at 0. A draw unit only renders on its
+    // own thread when LVGL has an OS, so only then is there anything to drain; a
+    // single-threaded build has already finished every task and drains nothing.
+#if LV_USE_OS
     CHECK(spy.waits() == 1);
+#else
+    CHECK(spy.waits() == 0);
+#endif
 
     // And the caller is not left holding the pointer it just handed over.
     CHECK(buf == nullptr);
@@ -159,7 +88,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "safe_draw_buf_destroy leaves the #929 breadcr
     helix::safe_draw_buf_destroy(buf, kDestroyTag);
     REQUIRE(buf == nullptr);
 
-    const auto crumbs = capture_breadcrumb_lines();
+    const auto crumbs = helix::capture_breadcrumb_lines();
     CHECK(count_lines_containing(crumbs, std::string(kDestroyTag) + " destroy_pre") == 1);
     CHECK(count_lines_containing(crumbs, std::string(kDestroyTag) + " destroy_post") == 1);
 }
@@ -178,6 +107,32 @@ TEST_CASE_METHOD(LVGLTestFixture, "safe_draw_buf_destroy on a null buffer does n
     CHECK(buf == nullptr);
     CHECK(spy.waits() == 0);
 
-    const auto crumbs = capture_breadcrumb_lines();
+    const auto crumbs = helix::capture_breadcrumb_lines();
     CHECK(count_lines_containing(crumbs, kNullTag) == 0);
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "draw_buf_blit_area never claims more than the buffer holds",
+                 "[draw_buf_guard][gcode]") {
+    lv_draw_buf_t* buf = lv_draw_buf_create(338, 290, LV_COLOR_FORMAT_ARGB8888, 0);
+    REQUIRE(buf != nullptr);
+
+    SECTION("a widget that outgrew the cached frame gets the frame's size, not its own") {
+        const lv_area_t widget = {100, 40, 100 + 342 - 1, 40 + 294 - 1};
+        const lv_area_t area = helix::draw_buf_blit_area(*buf, widget);
+        CHECK(area.x1 == 100);
+        CHECK(area.y1 == 40);
+        CHECK(lv_area_get_width(&area) == 338);
+        CHECK(lv_area_get_height(&area) == 290);
+    }
+
+    SECTION("a widget smaller than the frame still gets the frame's size, for the clip to trim") {
+        const lv_area_t widget = {-5, 7, -5 + 200 - 1, 7 + 100 - 1};
+        const lv_area_t area = helix::draw_buf_blit_area(*buf, widget);
+        CHECK(area.x1 == -5);
+        CHECK(area.y1 == 7);
+        CHECK(lv_area_get_width(&area) == 338);
+        CHECK(lv_area_get_height(&area) == 290);
+    }
+
+    helix::safe_draw_buf_destroy(buf, "tstbufC");
 }

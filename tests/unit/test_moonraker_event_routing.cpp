@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // Routing decisions for Moonraker events (#1219). The decision is pure — no
-// LVGL, no clock, no globals — which is the whole point: it used to live inline
-// in a lambda that ran on the libhv event-loop thread and called lv_tr() there.
-// Pulling it out is what lets the caller apply lv_tr() on the main thread.
+// LVGL, no clock, no globals — so it is testable without the event-loop thread
+// that raises the event, and the caller translates and presents on the main
+// thread.
 //
 // These cases pin the routing table, including the two orderings that matter:
 // recovery events must NOT be suppressible by the wizard, and
@@ -182,6 +182,22 @@ TEST_CASE("Klipper-ready is never a notification", "[moonraker][routing][1219]")
             REQUIRE(d.route == MoonrakerEventRoute::Ignore);
             REQUIRE(d.suppressed_because == MoonrakerEventSuppression::KlippyReady);
         }
+    }
+}
+
+TEST_CASE("Connection restored is a success toast, connection lost a warning",
+          "[moonraker][routing]") {
+    // Good news is not history: two outages must not leave four bell rows.
+    for (bool modal : {NO_MODAL, MODAL_UP}) {
+        INFO("modal=" << modal);
+        auto restored =
+            decide_moonraker_event(MoonrakerEventType::RECONNECTED, NOT_ERROR, NO_WIZARD, modal);
+        REQUIRE(restored.route == MoonrakerEventRoute::SuccessToast);
+        REQUIRE(restored.title_tag == nullptr);
+
+        auto lost = decide_moonraker_event(MoonrakerEventType::CONNECTION_LOST, NOT_ERROR,
+                                           NO_WIZARD, modal);
+        REQUIRE(lost.route == MoonrakerEventRoute::WarningToast);
     }
 }
 

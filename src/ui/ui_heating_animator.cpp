@@ -11,6 +11,8 @@
 
 #include <spdlog/spdlog.h>
 
+namespace helix::ui {
+
 HeatingIconAnimator::~HeatingIconAnimator() {
     if (lv_is_initialized()) {
         detach();
@@ -216,9 +218,9 @@ void HeatingIconAnimator::stop_pulse() {
 
 void HeatingIconAnimator::tint(lv_obj_t* obj, bool with_color) const {
     if (with_color) {
-        ui_icon_set_color(obj, current_color_, current_opacity_);
+        helix::ui::icon::set_color(obj, current_color_, current_opacity_);
     } else {
-        ui_icon_set_opa(obj, current_opacity_);
+        helix::ui::icon::set_opa(obj, current_opacity_);
     }
 }
 
@@ -322,3 +324,5 @@ void HeatingIconAnimator::icon_delete_cb(lv_event_t* e) {
     // Null out icon_ — the widget is already being destroyed, don't touch it further
     animator->icon_ = nullptr;
 }
+
+} // namespace helix::ui

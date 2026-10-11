@@ -4,13 +4,16 @@
 #include "ui_update_queue.h"
 
 #include "../../include/temp_graph_controller.h"
+#include "../../include/temp_graph_internal.h"
 #include "../../include/ui_temp_graph.h"
+#include "../test_helpers/temp_graph_controller_test_access.h"
 #include "../ui_test_utils.h"
 #include "app_globals.h"
 #include "lvgl/lvgl.h"
 #include "moonraker_types.h"
 #include "printer_state.h"
 #include "temperature_history_manager.h"
+#include "temperature_sensor_manager.h"
 
 #include <chrono>
 
@@ -35,6 +38,12 @@ class TempGraphControllerFixture {
 
         // Initialize PrinterState subjects (needed by controller's setup_observers)
         get_printer_state().init_subjects(false);
+
+        // PrinterState is process-global and rediscovery keeps a surviving
+        // tool's subjects, readings included. Start every case from a freshly
+        // discovered single tool reading 0 rather than a previous case's values.
+        get_printer_state().temperature_state().init_extruders({});
+        get_printer_state().temperature_state().init_extruders({"extruder"});
     }
 
     ~TempGraphControllerFixture() {}
@@ -70,14 +79,14 @@ TEST_CASE_METHOD(TempGraphControllerFixture, "Controller with series specs retur
     REQUIRE(controller->is_valid());
 
     // series_id_for should return valid (>= 0) IDs for added series
-    int extruder_id = controller->series_id_for("extruder");
-    int bed_id = controller->series_id_for("heater_bed");
-    REQUIRE(extruder_id >= 0);
-    REQUIRE(bed_id >= 0);
+    SeriesId extruder_id = controller->series_id_for("extruder");
+    SeriesId bed_id = controller->series_id_for("heater_bed");
+    REQUIRE(extruder_id != SeriesId::None);
+    REQUIRE(bed_id != SeriesId::None);
     REQUIRE(extruder_id != bed_id);
 
     // Nonexistent series returns -1
-    REQUIRE(controller->series_id_for("nonexistent_sensor") == -1);
+    REQUIRE(controller->series_id_for("nonexistent_sensor") == SeriesId::None);
 }
 
 TEST_CASE_METHOD(TempGraphControllerFixture, "Controller pause and resume do not crash",
@@ -124,15 +133,15 @@ TEST_CASE_METHOD(TempGraphControllerFixture,
 
     auto controller = std::make_unique<TempGraphController>(screen, cfg);
     REQUIRE(controller->is_valid());
-    REQUIRE(controller->series_id_for("extruder") >= 0);
+    REQUIRE(controller->series_id_for("extruder") != SeriesId::None);
 
     // Rebuild should recreate graph and series without crash
     REQUIRE_NOTHROW(controller->rebuild());
 
     REQUIRE(controller->is_valid());
     REQUIRE(controller->graph() != nullptr);
-    REQUIRE(controller->series_id_for("extruder") >= 0);
-    REQUIRE(controller->series_id_for("heater_bed") >= 0);
+    REQUIRE(controller->series_id_for("extruder") != SeriesId::None);
+    REQUIRE(controller->series_id_for("heater_bed") != SeriesId::None);
 }
 
 TEST_CASE_METHOD(TempGraphControllerFixture, "Controller with custom scale params does not crash",
@@ -174,9 +183,10 @@ TEST_CASE_METHOD(TempGraphControllerFixture,
                  "[controller][temp_graph_controller][chamber]") {
     auto& ps = get_printer_state();
 
+    ps.temperature_state().set_chamber_heater_name("heater_generic chamber");
     // Set chamber temp/target subjects to known values
-    lv_subject_set_int(ps.get_chamber_temp_subject(), 423);   // 42.3°C
-    lv_subject_set_int(ps.get_chamber_target_subject(), 500); // 50.0°C
+    lv_subject_set_int(ps.temperature_state().get_chamber_temp_subject(), 423);   // 42.3°C
+    lv_subject_set_int(ps.temperature_state().get_chamber_target_subject(), 500); // 50.0°C
 
     TempGraphControllerConfig cfg;
     cfg.series = {
@@ -187,8 +197,8 @@ TEST_CASE_METHOD(TempGraphControllerFixture,
     REQUIRE(controller->is_valid());
 
     // Verify series ID was assigned
-    int chamber_id = controller->series_id_for("heater_generic chamber");
-    REQUIRE(chamber_id >= 0);
+    SeriesId chamber_id = controller->series_id_for("heater_generic chamber");
+    REQUIRE(chamber_id != SeriesId::None);
 
     // Pump the observer callbacks through UpdateQueue
     auto& queue = helix::ui::UpdateQueue::instance();
@@ -212,6 +222,8 @@ TEST_CASE_METHOD(TempGraphControllerFixture,
     REQUIRE(y_points != nullptr);
     // On first value, the series is backfilled with the initial temp → 423 (deci-degrees)
     REQUIRE(y_points[0] == 423);
+    controller.reset();
+    ps.temperature_state().set_chamber_heater_name("");
 }
 
 TEST_CASE_METHOD(TempGraphControllerFixture,
@@ -219,9 +231,10 @@ TEST_CASE_METHOD(TempGraphControllerFixture,
                  "[controller][temp_graph_controller][chamber]") {
     auto& ps = get_printer_state();
 
+    ps.temperature_state().set_chamber_heater_name("temperature_fan chamber");
     // Set chamber temp/target to known values
-    lv_subject_set_int(ps.get_chamber_temp_subject(), 385);   // 38.5°C
-    lv_subject_set_int(ps.get_chamber_target_subject(), 450); // 45.0°C
+    lv_subject_set_int(ps.temperature_state().get_chamber_temp_subject(), 385);   // 38.5°C
+    lv_subject_set_int(ps.temperature_state().get_chamber_target_subject(), 450); // 45.0°C
 
     TempGraphControllerConfig cfg;
     cfg.series = {
@@ -231,8 +244,8 @@ TEST_CASE_METHOD(TempGraphControllerFixture,
     auto controller = std::make_unique<TempGraphController>(screen, cfg);
     REQUIRE(controller->is_valid());
 
-    int chamber_id = controller->series_id_for("temperature_fan chamber");
-    REQUIRE(chamber_id >= 0);
+    SeriesId chamber_id = controller->series_id_for("temperature_fan chamber");
+    REQUIRE(chamber_id != SeriesId::None);
 
     // Pump observer callbacks
     auto& queue = helix::ui::UpdateQueue::instance();
@@ -250,6 +263,64 @@ TEST_CASE_METHOD(TempGraphControllerFixture,
     REQUIRE(y_points != nullptr);
     // 38.5°C → 385 in chart storage (deci-degrees)
     REQUIRE(y_points[0] == 385);
+    controller.reset();
+    ps.temperature_state().set_chamber_heater_name("");
+}
+
+// Only the chamber's own objects plot chamber data. Any other heater_generic or
+// temperature_fan is a separate object (a filament dryer, an exhaust fan) and
+// must plot its own reading and target under its own label.
+TEST_CASE_METHOD(TempGraphControllerFixture,
+                 "Non-chamber heater_generic and temperature_fan bind to their own subjects",
+                 "[controller][temp_graph_controller][heater_generic]") {
+    auto& ps = get_printer_state();
+    ps.temperature_state().set_chamber_heater_name("heater_generic chamber");
+    lv_subject_set_int(ps.temperature_state().get_chamber_temp_subject(), 423);
+    lv_subject_set_int(ps.temperature_state().get_chamber_target_subject(), 500);
+
+    auto& tsm = sensors::TemperatureSensorManager::instance();
+    tsm.init_subjects();
+    tsm.set_sync_mode(true);
+    tsm.discover({"heater_generic filament_dryer", "temperature_fan exhaust"});
+    tsm.update_from_status(
+        {{"heater_generic filament_dryer", {{"temperature", 48.5}, {"target", 55.0}}},
+         {"temperature_fan exhaust", {{"temperature", 31.0}, {"target", 40.0}}}});
+
+    TempGraphControllerConfig cfg;
+    cfg.series = {
+        {"heater_generic filament_dryer", lv_color_hex(0xA3BE8C), true},
+        {"temperature_fan exhaust", lv_color_hex(0x88C0D0), true},
+        {"chamber", lv_color_hex(0xBF616A), true},
+    };
+    auto controller = std::make_unique<TempGraphController>(screen, cfg);
+    REQUIRE(controller->is_valid());
+    helix::ui::UpdateQueue::instance().drain();
+    lv_timer_handler_safe();
+
+    auto* graph = controller->graph();
+    lv_obj_t* chart = ui_temp_graph_get_chart(graph);
+    auto first_point = [&](const char* name) {
+        SeriesId id = controller->series_id_for(name);
+        REQUIRE(id != SeriesId::None);
+        return lv_chart_get_series_y_array(
+            chart, helix::temp_graph_internal::find_meta_by_id(graph, id)->chart_series)[0];
+    };
+    auto target_of = [&](const char* name) {
+        return helix::temp_graph_internal::find_meta_by_id(graph, controller->series_id_for(name))
+            ->target_temp;
+    };
+
+    CHECK(first_point("heater_generic filament_dryer") == 485);
+    CHECK(target_of("heater_generic filament_dryer") == Catch::Approx(55.0f));
+    CHECK(first_point("temperature_fan exhaust") == 310);
+    CHECK(target_of("temperature_fan exhaust") == Catch::Approx(40.0f));
+    CHECK(first_point("chamber") == 423);
+    CHECK(target_of("chamber") == Catch::Approx(50.0f));
+
+    controller.reset();
+    tsm.discover({});
+    tsm.set_sync_mode(false);
+    ps.temperature_state().set_chamber_heater_name("");
 }
 
 // ============================================================================
@@ -315,7 +386,7 @@ TEST_CASE_METHOD(TempGraphControllerFixture,
     };
     auto controller = std::make_unique<TempGraphController>(screen, cfg);
     REQUIRE(controller->is_valid());
-    REQUIRE(controller->series_id_for("extruder") >= 0);
+    REQUIRE(controller->series_id_for("extruder") != SeriesId::None);
 
     // Drain queued observer callbacks. The extruder subject defaults to 0, and
     // the live observer drops non-positive readings, so the chart stays empty.
@@ -351,6 +422,46 @@ TEST_CASE_METHOD(TempGraphControllerFixture,
     REQUIRE(count_series_points_eq(controller->graph(), 2000) > 0);
 }
 
+TEST_CASE_METHOD(TempGraphControllerFixture,
+                 "A paused graph takes the seed backfill on resume and not while paused",
+                 "[controller][temp_graph_controller][backfill]") {
+    auto& ps = get_printer_state();
+    TemperatureHistoryManager mgr(ps);
+    ScopedTestHistoryManager installed(&mgr);
+
+    TempGraphControllerConfig cfg;
+    cfg.series = {{"extruder", lv_color_hex(0xFF4444), true}};
+    auto controller = std::make_unique<TempGraphController>(screen, cfg);
+    REQUIRE(controller->is_valid());
+    auto& queue = helix::ui::UpdateQueue::instance();
+    queue.drain();
+    lv_timer_handler_safe();
+    controller->pause();
+
+    TemperatureStore store;
+    TemperatureStoreSeries series;
+    for (int i = 0; i < 40; ++i) {
+        series.temperatures.push_back(200.0f);
+        series.targets.push_back(210.0f);
+        series.powers.push_back(0.5f);
+    }
+    store["extruder"] = series;
+    const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::system_clock::now().time_since_epoch())
+                               .count();
+    mgr.seed_from_store(store, now_ms);
+
+    TempGraphController::refresh_all_from_history();
+    queue.drain();
+    lv_timer_handler_safe();
+    CHECK(count_series_points_eq(controller->graph(), 2000) == 0);
+
+    controller->resume();
+    queue.drain();
+    lv_timer_handler_safe();
+    CHECK(count_series_points_eq(controller->graph(), 2000) > 0);
+}
+
 // ============================================================================
 // Regression tests for #1117 — deferred-delete / queued-callback races
 // ============================================================================
@@ -371,7 +482,7 @@ TEST_CASE_METHOD(TempGraphControllerFixture,
                  "Queued rebuild callback safely no-ops after synchronous destroy (#1117)",
                  "[controller][temp_graph_controller][regression][uaf]") {
     auto& ps = get_printer_state();
-    auto* conn_subj = ps.get_printer_connection_state_subject();
+    auto* conn_subj = ps.network_state().get_printer_connection_state_subject();
     REQUIRE(conn_subj != nullptr);
 
     TempGraphControllerConfig cfg;
@@ -410,7 +521,7 @@ TEST_CASE_METHOD(TempGraphControllerFixture,
                  "Detach + release + deferred-delete race is safe (#1117)",
                  "[controller][temp_graph_controller][regression][uaf]") {
     auto& ps = get_printer_state();
-    auto* conn_subj = ps.get_printer_connection_state_subject();
+    auto* conn_subj = ps.network_state().get_printer_connection_state_subject();
     REQUIRE(conn_subj != nullptr);
 
     TempGraphControllerConfig cfg;
@@ -467,11 +578,11 @@ TEST_CASE_METHOD(TempGraphControllerFixture,
 
     // PrinterState is a process-global here and other cases discover tools into
     // it, so reset to the pre-discovery state this case is about.
-    ps.init_extruders({});
+    ps.temperature_state().init_extruders({});
     queue.drain();
 
     // Given: a graph built BEFORE discovery — "extruder1" does not exist yet
-    REQUIRE(ps.get_extruder_temp_subject("extruder1") == nullptr);
+    REQUIRE(ps.temperature_state().get_extruder_temp_subject("extruder1") == nullptr);
 
     TempGraphControllerConfig cfg;
     cfg.series = {
@@ -479,17 +590,116 @@ TEST_CASE_METHOD(TempGraphControllerFixture,
     };
     auto controller = std::make_unique<TempGraphController>(screen, cfg);
     REQUIRE(controller->is_valid());
-    REQUIRE(controller->series_id_for("extruder1") >= 0);
+    REQUIRE(controller->series_id_for("extruder1") != SeriesId::None);
 
     // When: discovery lands and extruder1 reports a temperature
-    ps.init_extruders({"extruder", "extruder1"});
+    ps.temperature_state().init_extruders({"extruder", "extruder1"});
     queue.drain();
     lv_timer_handler_safe();
 
-    lv_subject_set_int(ps.get_extruder_temp_subject("extruder1"), 2295);
+    lv_subject_set_int(ps.temperature_state().get_extruder_temp_subject("extruder1"), 2295);
     queue.drain();
     lv_timer_handler_safe();
 
     // Then: the live sample reaches the chart instead of being dropped
     REQUIRE(count_series_points_eq(controller->graph(), 2295) > 0);
+}
+
+// Discovery re-runs on every klippy ready with the WebSocket still up. A tool
+// that drops out of one discovery and returns in the next gets fresh subjects,
+// and a series bound to the old ones must follow.
+TEST_CASE_METHOD(TempGraphControllerFixture,
+                 "Extruder series rebinds when discovery recreates its subjects",
+                 "[controller][temp_graph_controller][klippy_restart]") {
+    auto& ps = get_printer_state();
+    auto& queue = helix::ui::UpdateQueue::instance();
+    auto& temps = ps.temperature_state();
+
+    temps.init_extruders({"extruder"});
+    lv_subject_set_int(temps.get_bed_temp_subject(), 0);
+    queue.drain();
+
+    TempGraphControllerConfig cfg;
+    cfg.series = {
+        {"extruder", lv_color_hex(0xFF4444), true},
+        {"heater_bed", lv_color_hex(0x88C0D0), true},
+    };
+    auto controller = std::make_unique<TempGraphController>(screen, cfg);
+    REQUIRE(controller->is_valid());
+
+    constexpr int64_t slot = UI_TEMP_GRAPH_SAMPLE_INTERVAL_SEC * 1000;
+    int64_t now = 1'000'000 * slot;
+    TempGraphControllerTestAccess::set_clock(*controller, [&now] { return now; });
+    queue.drain();
+
+    // Nozzle is the first series: read its newest sample and ring position.
+    auto* g = controller->graph();
+    auto* nozzle =
+        helix::temp_graph_internal::find_meta_by_id(g, controller->series_id_for("extruder"))
+            ->chart_series;
+    auto newest = [&] {
+        const uint32_t pc = lv_chart_get_point_count(g->chart);
+        const uint32_t sp = lv_chart_get_x_start_point(g->chart, nozzle);
+        return lv_chart_get_y_array(g->chart, nozzle)[(sp + pc - 1) % pc];
+    };
+
+    lv_subject_set_int(temps.get_extruder_temp_subject("extruder"), 520);
+    queue.drain();
+    REQUIRE(newest() == 520);
+
+    // The tool drops out and comes back: fresh subjects under the same name.
+    temps.init_extruders({});
+    temps.init_extruders({"extruder"});
+    queue.drain();
+    queue.drain();
+
+    // A bed reading on a new slot must not re-plot the pre-restart nozzle value.
+    const uint32_t nozzle_start = lv_chart_get_x_start_point(g->chart, nozzle);
+    now += slot;
+    lv_subject_set_int(temps.get_bed_temp_subject(), 600);
+    queue.drain();
+    CHECK(lv_chart_get_x_start_point(g->chart, nozzle) == nozzle_start);
+
+    // The nozzle heats: the graph follows the recreated subject.
+    now += slot;
+    lv_subject_set_int(temps.get_extruder_temp_subject("extruder"), 1000);
+    queue.drain();
+    REQUIRE(newest() == 1000);
+}
+
+// Bed and chamber series observe PrinterState's static subjects. When those die
+// first, lv_subject_deinit() has already freed each observer node, so the
+// controller's teardown must skip lv_observer_remove() rather than free it again.
+TEST_CASE_METHOD(TempGraphControllerFixture,
+                 "Controller destroyed after its bed and chamber subjects die is safe",
+                 "[controller][temp_graph_controller]") {
+    TempGraphControllerConfig cfg;
+    cfg.series = {
+        {"heater_bed", lv_color_hex(0x88C0D0), true},
+        {"heater_generic chamber", lv_color_hex(0xA3BE8C), true},
+    };
+
+    auto controller = std::make_unique<TempGraphController>(screen, cfg);
+    REQUIRE(controller->is_valid());
+
+    get_printer_state().deinit_subjects();
+    controller.reset();
+    get_printer_state().init_subjects(false);
+
+    REQUIRE(controller == nullptr);
+}
+
+TEST_CASE("sample_due puts every series on the same wall-clock slots", "[temp_graph_controller]") {
+    constexpr int64_t slot = UI_TEMP_GRAPH_SAMPLE_INTERVAL_SEC * 1000;
+    constexpr int64_t base = 1'000'000 * slot;
+
+    CHECK(TempGraphController::sample_due(0, base + 5));
+
+    // Late in one slot, then just past its boundary: due, though far less than
+    // an interval has elapsed.
+    CHECK(TempGraphController::sample_due(base + slot - 100, base + slot + 100));
+
+    // Early in a slot, then late in the same one: not due, though nearly an
+    // interval has elapsed.
+    CHECK_FALSE(TempGraphController::sample_due(base + 100, base + slot - 100));
 }

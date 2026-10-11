@@ -30,7 +30,7 @@ class ControlsZOffsetFixture : public LVGLUITestFixture {
 
     ~ControlsZOffsetFixture() override {
         if (panel_obj) {
-            panel.on_deactivate();
+            panel.on_deactivate(DeactivateReason::NavigateAway);
             lv_obj_delete(panel_obj);
             panel_obj = nullptr;
         }

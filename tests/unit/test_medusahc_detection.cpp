@@ -242,9 +242,13 @@ TEST_CASE("MedusaHC detection never displaces another AMS system",
         hw.parse_objects(
             json::array({"extruder", "extruder1", "gcode_macro T0", "gcode_macro T1"}));
 
+        // Two hot ends make this a multi-tool printer under the general rule
+        // (tests/unit/test_multi_tool_detection.cpp). What must not happen is
+        // the MedusaHC provider claiming it: that turns on dock sensors and a
+        // feeder the machine does not have.
         REQUIRE_FALSE(helix::toolchanger_addon::present(hw));
-        REQUIRE(hw.mmu_type() == AmsType::NONE);
-        REQUIRE(hw.detected_ams_systems().empty());
+        REQUIRE_FALSE(hw.has_medusahc());
+        REQUIRE(hw.mmu_type() == AmsType::TOOL_CHANGER);
     }
 
     SECTION("an MMU on a machine that also runs pin_watch keeps its own backend") {

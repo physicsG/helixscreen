@@ -3,6 +3,8 @@
 
 #include "printer_cache_registry.h"
 
+#include "exception_policy.h"
+
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -78,11 +80,7 @@ bool PrinterCacheRegistry::invalidate_one(const char* name) {
     // Copy before running: the callback may register (and therefore reallocate the vector).
     std::function<void()> fn = it->invalidate_fn;
     if (fn) {
-        try {
-            fn();
-        } catch (const std::exception& e) {
-            spdlog::error("[PrinterCacheRegistry] Invalidator '{}' threw: {}", name, e.what());
-        }
+        helix::contain_exceptions(fmt::format("[PrinterCacheRegistry] Invalidator '{}'", name), fn);
     }
     return true;
 }
@@ -114,12 +112,9 @@ void PrinterCacheRegistry::invalidate_all() {
         spdlog::trace("[PrinterCacheRegistry] Invalidating: {}", entry.name);
         // One component's bad cleanup must not leave every later component stale — that is
         // the exact failure this registry exists to prevent.
-        try {
-            entry.invalidate_fn();
-        } catch (const std::exception& e) {
-            spdlog::error("[PrinterCacheRegistry] Invalidator '{}' threw: {}", entry.name,
-                          e.what());
-        }
+        helix::contain_exceptions(
+            fmt::format("[PrinterCacheRegistry] Invalidator '{}'", entry.name),
+            entry.invalidate_fn);
     }
     spdlog::debug("[PrinterCacheRegistry] Per-printer caches invalidated");
 }

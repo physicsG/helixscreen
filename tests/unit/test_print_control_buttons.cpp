@@ -42,8 +42,9 @@ std::string read_str(const char* name) {
     return lv_subject_get_string(lv_xml_get_subject(nullptr, name));
 }
 void set_print_state(helix::PrintJobState s) {
-    lv_subject_set_int(get_printer_state().get_print_state_enum_subject(), static_cast<int>(s));
-    // observe_int_sync defers via queue_update — drain so the controller reacts.
+    lv_subject_set_int(get_printer_state().print_state().get_print_state_enum_subject(),
+                       static_cast<int>(s));
+    // observe<int> defers via queue_update — drain so the controller reacts.
     helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
 }
 

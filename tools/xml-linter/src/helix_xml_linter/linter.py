@@ -171,6 +171,26 @@ class Linter:
         if attr_name in (_EXTENDS_ATTR, "translation_tag", "name"):
             return diagnostics
 
+        # helix-xml resolves a value only when it STARTS with '#'; "-#x" is
+        # dropped with a warning, so the widget keeps its default.
+        if attr_value.startswith("-#"):
+            return [
+                Diagnostic(
+                    file=element.source_file,
+                    line=element.line,
+                    column=element.column,
+                    severity=Severity.ERROR,
+                    check=CheckType.NEGATED_CONST_REF,
+                    message=(
+                        f"'{attr_value}' negates a const, which helix-xml does not resolve: "
+                        "define a negative-valued const and reference it with '#'"
+                    ),
+                    element=element.tag,
+                    attribute=attr_name,
+                    value=attr_value,
+                )
+            ]
+
         # Handle style_* attributes separately
         if attr_name.startswith(_STYLE_PREFIX):
             return self._check_style_attribute(element, attr_name, attr_value)
@@ -269,36 +289,34 @@ class Linter:
     ) -> list[Diagnostic]:
         """Validate a style_* attribute against the style property registry.
 
-        Handles three layers of attribute name decomposition:
-        1. State qualifier (``__``): ``style_text_color__checked`` → base ``style_text_color``, state ``checked``
-        2. Part selector (``-``): ``style_bg_color-indicator`` → prop ``bg_color``, selector ``indicator``
-        3. Combined: ``style_bg_color-indicator__checked`` → prop ``bg_color``, selector ``indicator``, state ``checked``
+        The C parser splits the name on '-': ``style_bg_color-indicator-checked``
+        is prop ``bg_color`` with selectors ``indicator`` and ``checked``.
 
-        The preprocessor converts ``style_text_color:checked`` → ``style_text_color__checked``.
+        ``style_text_color:checked`` reaches this method as
+        ``style_text_color__checked`` (the preprocessor rewrites the ':' so the
+        file parses as XML). helix-xml has no ':' selector syntax: the whole
+        name matches no property and the attribute is dropped, so any ``__``
+        qualifier is an error pointing at the '-' spelling.
         """
         diagnostics: list[Diagnostic] = []
 
         # Extract the property name after "style_"
         raw_prop = attr_name[len(_STYLE_PREFIX) :]
 
-        # Step 1: Split on '__' to separate state qualifier from the base attribute.
-        # The XML preprocessor converts ':' to '__' in attribute names.
         base_prop, _, state_qualifier = raw_prop.partition("__")
 
-        # Validate state qualifier against known LVGL states
-        if state_qualifier and state_qualifier not in self._SELECTOR_STATES:
-            # Reconstruct the original colon syntax for display
+        if state_qualifier:
             display_attr = self._format_state_attr(attr_name)
             diagnostics.append(
                 Diagnostic(
                     file=element.source_file,
                     line=element.line,
                     column=element.column,
-                    severity=Severity.WARNING,
+                    severity=Severity.ERROR,
                     check=CheckType.INVALID_STATE_QUALIFIER,
                     message=(
-                        f"Unknown state qualifier ':{state_qualifier}' "
-                        f"on attribute '{display_attr}'"
+                        f"'{display_attr}' is never applied: style selectors follow '-', "
+                        f"not ':'. Write 'style_{base_prop}-{state_qualifier}'"
                     ),
                     element=element.tag,
                     attribute=attr_name,
@@ -314,7 +332,7 @@ class Linter:
         selectors = selector_suffix.split("-") if selector_suffix else []
 
         if not self._schema.is_valid_style_property(prop_name):
-            suggestion = self._suggest_selector_dash_attr(base_prop, state_qualifier)
+            suggestion = self._suggest_selector_dash_attr(base_prop)
             message = f"Unknown style property: style_{prop_name}"
             if suggestion:
                 message += f". Did you mean '{suggestion}'?"
@@ -378,7 +396,7 @@ class Linter:
 
         return diagnostics
 
-    def _suggest_selector_dash_attr(self, base_prop: str, state_qualifier: str) -> str:
+    def _suggest_selector_dash_attr(self, base_prop: str) -> str:
         """Suggest dash selector syntax for attrs like ``style_arc_width_indicator``."""
         for selector in sorted(self._VALID_SELECTORS, key=len, reverse=True):
             suffix = f"_{selector}"
@@ -389,10 +407,7 @@ class Linter:
             if not prop_name or not self._schema.is_valid_style_property(prop_name):
                 continue
 
-            suggestion = f"style_{prop_name}-{selector}"
-            if state_qualifier:
-                suggestion += f":{state_qualifier}"
-            return suggestion
+            return f"style_{prop_name}-{selector}"
 
         return ""
 
@@ -517,6 +532,20 @@ class Linter:
         """Check if an unknown tag is a known custom component or widget alias."""
         # Check extends map (custom components)
         if extends_map and element.tag in extends_map:
+            return True
+
+        # Slot injection, e.g. <my_button-icon>: the engine splits the tag at
+        # the first '-' and re-parents the children into the named widget
+        # inside the enclosing component instantiation. The prefix must be a
+        # component; the slot name itself resolves at runtime.
+        prefix, _, suffix = element.tag.partition("-")
+        if suffix and (
+            (extends_map and prefix in extends_map)
+            or (
+                self._project_registry is not None
+                and prefix in self._project_registry.component_view_names
+            )
+        ):
             return True
 
         # Check if it's in special elements from schema

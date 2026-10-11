@@ -1,7 +1,35 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+#include "platform_capabilities.h"
 #include "theme_manager.h"
 
 #include <lvgl.h>
+
+namespace helix {
+
+void configure_pressed_for_tier(lv_style_t* s, PlatformTier tier, const ThemePalette* ring) {
+    if (!full_style_effects_allowed(tier)) {
+        // A scale renders through a TRANSFORM layer. An outline draws in place
+        // and moves no layout. It sits outside the widget because it is drawn
+        // before the children, which cover a full-bleed card's inside edge.
+        if (ring) {
+            lv_style_set_outline_color(s, ring->primary);
+            lv_style_set_outline_width(s, 3);
+            lv_style_set_outline_pad(s, 0);
+            lv_style_set_outline_opa(s, LV_OPA_COVER);
+        }
+        return;
+    }
+    lv_style_set_transform_scale_x(s, 245); // 96% scale
+    lv_style_set_transform_scale_y(s, 245);
+    lv_style_set_transform_pivot_x(s, LV_PCT(50)); // Scale from center
+    lv_style_set_transform_pivot_y(s, LV_PCT(50));
+}
+
+void configure_card_pressed(lv_style_t* s, const ThemePalette& p) {
+    configure_pressed_for_tier(s, PlatformCapabilities::detect().tier, &p);
+}
+
+} // namespace helix
 
 namespace style_configs {
 
@@ -35,7 +63,6 @@ void configure_card(lv_style_t* s, const ThemePalette& p) {
 }
 
 void configure_dialog(lv_style_t* s, const ThemePalette& p) {
-    // Use elevated_bg so inputs (overlay_bg) have contrast
     lv_style_set_bg_color(s, p.elevated_bg);
     lv_style_set_bg_opa(s, LV_OPA_COVER);
     apply_border(s, p, p.elevated_bg);
@@ -53,9 +80,13 @@ void configure_obj_base(lv_style_t* s, const ThemePalette& p) {
 }
 
 void configure_input_bg(lv_style_t* s, const ThemePalette& p) {
-    lv_style_set_bg_color(s, p.elevated_bg);
-    lv_style_set_bg_opa(s, LV_OPA_COVER);
-    apply_border(s, p, p.elevated_bg);
+    // Outlined field: no fill, so it reads correctly on any surface (screen, card, dialog).
+    lv_style_set_bg_opa(s, LV_OPA_TRANSP);
+    lv_style_set_border_color(s,
+                              helix::field_outline_color(p.text_subtle, p.screen_bg, p.overlay_bg,
+                                                         p.card_bg, p.elevated_bg));
+    lv_style_set_border_width(s, p.border_width);
+    lv_style_set_border_opa(s, LV_OPA_COVER);
     lv_style_set_radius(s, p.border_radius);
     lv_style_set_text_color(s, p.text);
 }
@@ -67,10 +98,7 @@ void configure_disabled(lv_style_t* s, const ThemePalette& p) {
 
 void configure_pressed(lv_style_t* s, const ThemePalette& p) {
     (void)p;
-    lv_style_set_transform_scale_x(s, 245); // 96% scale
-    lv_style_set_transform_scale_y(s, 245);
-    lv_style_set_transform_pivot_x(s, LV_PCT(50)); // Scale from center
-    lv_style_set_transform_pivot_y(s, LV_PCT(50));
+    helix::configure_pressed_for_tier(s, helix::PlatformCapabilities::detect().tier);
 }
 
 void configure_focused(lv_style_t* s, const ThemePalette& p) {
@@ -132,7 +160,7 @@ void configure_button(lv_style_t* s, const ThemePalette& p) {
     lv_style_set_bg_color(s, p.elevated_bg);
     lv_style_set_bg_opa(s, LV_OPA_COVER);
     apply_border(s, p, p.elevated_bg);
-    lv_style_set_radius(s, p.border_radius);
+    lv_style_set_radius(s, p.button_radius);
     apply_shadow(s, p);
     // Pivot must be in base style so it doesn't animate during pressed→released transition
     lv_style_set_transform_pivot_x(s, LV_PCT(50));
@@ -181,6 +209,8 @@ void configure_button_outline(lv_style_t* s, const ThemePalette& p) {
     lv_style_set_border_width(s, 1);
     lv_style_set_border_opa(s, LV_OPA_COVER);
     lv_style_set_text_color(s, p.primary);
+    // A shadow under a transparent fill shows as a smear beside the border
+    lv_style_set_shadow_opa(s, LV_OPA_0);
 }
 
 void configure_button_success(lv_style_t* s, const ThemePalette& p) {
@@ -200,10 +230,7 @@ void configure_button_disabled(lv_style_t* s, const ThemePalette& p) {
 
 void configure_button_pressed(lv_style_t* s, const ThemePalette& p) {
     (void)p;
-    lv_style_set_transform_scale_x(s, 245);
-    lv_style_set_transform_scale_y(s, 245);
-    lv_style_set_transform_pivot_x(s, LV_PCT(50)); // Scale from center
-    lv_style_set_transform_pivot_y(s, LV_PCT(50));
+    helix::configure_pressed_for_tier(s, helix::PlatformCapabilities::detect().tier);
 }
 
 // Severity border styles

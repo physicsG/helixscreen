@@ -5,8 +5,10 @@
 
 #include "ui_callback_helpers.h"
 #include "ui_event_safety.h"
-#include "ui_fonts.h"
-#include "ui_nav_manager.h"
+#include "ui_nav.h"
+#include "ui_panel_common.h"
+#include "ui_row_text.h"
+#include "ui_temperature_utils.h"
 #include "ui_toast_manager.h"
 #include "ui_utils.h"
 
@@ -14,91 +16,53 @@
 #include "filament_database.h"
 #include "i_moonraker_api.h"
 #include "material_settings_manager.h"
-#include "static_panel_registry.h"
-#include "theme_manager.h"
+#include "printer_state.h"
+#include "temperature_controller.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <cstdlib>
-#include <memory>
-#include <numeric>
 #include <vector>
 
 namespace helix::settings {
 
-// ============================================================================
-// SINGLETON ACCESSOR
-// ============================================================================
-
-static std::unique_ptr<MaterialTempsOverlay> g_material_temps_overlay;
-
-MaterialTempsOverlay& get_material_temps_overlay() {
-    if (!g_material_temps_overlay) {
-        g_material_temps_overlay = std::make_unique<MaterialTempsOverlay>();
-        StaticPanelRegistry::instance().register_destroy(
-            "MaterialTempsOverlay", []() { g_material_temps_overlay.reset(); });
-    }
-    return *g_material_temps_overlay;
-}
-
-// ============================================================================
-// CONSTRUCTOR / DESTRUCTOR
-// ============================================================================
-
-MaterialTempsOverlay::MaterialTempsOverlay() {
-    spdlog::debug("[{}] Created", get_name());
-}
-
-MaterialTempsOverlay::~MaterialTempsOverlay() {
-    if (subjects_initialized_ && lv_is_initialized()) {
-        lv_subject_deinit(&has_macro_subject_);
-        lv_subject_deinit(&editing_subject_);
-        lv_subject_deinit(&edit_name_subject_);
-        lv_subject_deinit(&edit_defaults_subject_);
-    }
-    spdlog::trace("[{}] Destroyed", get_name());
-}
+/// The bounds the edit inputs accept: properties of the fields themselves.
+/// The printer's live ceiling is a send-time bound (TemperatureController),
+/// never a database bound.
+constexpr int NOZZLE_INPUT_ABS_MAX_C = 500;
+constexpr int BED_INPUT_ABS_MAX_C = 200;
+constexpr int CHAMBER_INPUT_ABS_MAX_C = 120;
 
 // ============================================================================
 // INITIALIZATION
 // ============================================================================
 
 void MaterialTempsOverlay::init_subjects() {
-    if (subjects_initialized_) {
-        return;
-    }
-
     // View toggle subject: 0=list, 1=editing
-    lv_subject_init_int(&editing_subject_, 0);
-    lv_xml_register_subject(nullptr, "material_editing", &editing_subject_);
+    UI_MANAGED_SUBJECT_INT(editing_subject_, 0, "material_editing", subjects_);
 
     // Edit view text subjects
-    edit_name_buf_[0] = '\0';
-    lv_subject_init_string(&edit_name_subject_, edit_name_buf_, nullptr, sizeof(edit_name_buf_),
-                           edit_name_buf_);
-    lv_xml_register_subject(nullptr, "material_edit_name", &edit_name_subject_);
+    UI_MANAGED_SUBJECT_STRING(edit_name_subject_, edit_name_buf_, "", "material_edit_name",
+                              subjects_);
 
-    edit_defaults_buf_[0] = '\0';
-    lv_subject_init_string(&edit_defaults_subject_, edit_defaults_buf_, nullptr,
-                           sizeof(edit_defaults_buf_), edit_defaults_buf_);
-    lv_xml_register_subject(nullptr, "material_edit_defaults", &edit_defaults_subject_);
+    UI_MANAGED_SUBJECT_STRING(edit_defaults_subject_, edit_defaults_buf_, "",
+                              "material_edit_defaults", subjects_);
 
-    lv_subject_init_int(&has_macro_subject_, 0);
-    lv_xml_register_subject(nullptr, "material_has_macro", &has_macro_subject_);
+    UI_MANAGED_SUBJECT_INT(has_macro_subject_, 0, "material_has_macro", subjects_);
 
-    subjects_initialized_ = true;
-    spdlog::debug("[{}] Subjects initialized", get_name());
+    UI_MANAGED_SUBJECT_INT(shipped_subject_, 1, "material_edit_is_shipped", subjects_);
 }
 
 void MaterialTempsOverlay::register_callbacks() {
     register_xml_callbacks({
-        {"on_material_save", on_material_save},
-        {"on_material_reset_defaults", on_material_reset_defaults},
-        {"on_macro_dropdown_changed", on_macro_dropdown_changed},
+        {"on_material_save", [](lv_event_t*) { get_material_temps_overlay().handle_save(); }},
+        {"on_material_reset_defaults",
+         [](lv_event_t*) { get_material_temps_overlay().handle_reset_defaults(); }},
+        {"on_macro_dropdown_changed",
+         [](lv_event_t*) { get_material_temps_overlay().handle_macro_dropdown_changed(); }},
     });
-
-    spdlog::debug("[{}] Callbacks registered", get_name());
 }
 
 // ============================================================================
@@ -106,34 +70,26 @@ void MaterialTempsOverlay::register_callbacks() {
 // ============================================================================
 
 lv_obj_t* MaterialTempsOverlay::create(lv_obj_t* parent) {
-    if (overlay_root_) {
-        spdlog::warn("[{}] create() called but overlay already exists", get_name());
-        return overlay_root_;
-    }
-
     spdlog::debug("[{}] Creating overlay...", get_name());
 
-    overlay_root_ =
-        static_cast<lv_obj_t*>(lv_xml_create(parent, "material_temps_overlay", nullptr));
+    overlay_root_ = helix::ui::create_xml_hidden(parent, "material_temps_overlay");
     if (!overlay_root_) {
         spdlog::error("[{}] Failed to create overlay from XML", get_name());
         return nullptr;
     }
 
     // Cache view refs
-    list_view_ = lv_obj_find_by_name(overlay_root_, "material_list_view");
-    edit_view_ = lv_obj_find_by_name(overlay_root_, "material_edit_view");
-
-    if (edit_view_) {
-        macro_dropdown_ = lv_obj_find_by_name(edit_view_, "macro_dropdown");
-        macro_heating_switch_ = lv_obj_find_by_name(edit_view_, "macro_heating_switch");
-    }
+    list_view_ = helix::ui::find_required(overlay_root_, "material_list_view", get_name());
+    edit_view_ = helix::ui::find_required(overlay_root_, "material_edit_view", get_name());
+    macro_dropdown_ = helix::ui::find_required(edit_view_, "macro_dropdown", get_name());
+    macro_heating_switch_ =
+        helix::ui::find_required(edit_view_, "macro_heating_switch", get_name());
 
     // Rewire back button to intercept when in edit view
     // Exception to "NO lv_obj_add_event_cb" rule: need to intercept back for view switching
-    lv_obj_t* header = lv_obj_find_by_name(overlay_root_, "overlay_header");
+    lv_obj_t* header = helix::ui::find_required(overlay_root_, "overlay_header", get_name());
     if (header) {
-        lv_obj_t* back_button = lv_obj_find_by_name(header, "back_button");
+        lv_obj_t* back_button = helix::ui::find_required(header, "back_button", get_name());
         if (back_button) {
             uint32_t event_count = lv_obj_get_event_count(back_button);
             for (uint32_t i = event_count; i > 0; --i) {
@@ -143,42 +99,12 @@ lv_obj_t* MaterialTempsOverlay::create(lv_obj_t* parent) {
         }
     }
 
-    // Initially hidden until show() pushes it
-    lv_obj_add_flag(overlay_root_, LV_OBJ_FLAG_HIDDEN);
-
     spdlog::info("[{}] Overlay created", get_name());
     return overlay_root_;
 }
 
-void MaterialTempsOverlay::show(lv_obj_t* parent_screen) {
-    spdlog::debug("[{}] show() called", get_name());
-
-    parent_screen_ = parent_screen;
-
-    // Ensure subjects and callbacks are initialized
-    if (!subjects_initialized_) {
-        init_subjects();
-        register_callbacks();
-    }
-
-    // Lazy create overlay
-    if (!overlay_root_ && parent_screen_) {
-        create(parent_screen_);
-    }
-
-    if (!overlay_root_) {
-        spdlog::error("[{}] Cannot show - overlay not created", get_name());
-        return;
-    }
-
-    // Reset to list view
+void MaterialTempsOverlay::before_show() {
     show_list_view();
-
-    // Register for lifecycle callbacks
-    NavigationManager::instance().register_overlay_instance(overlay_root_, this);
-
-    // Push onto navigation stack
-    NavigationManager::instance().push_overlay(overlay_root_);
 }
 
 // ============================================================================
@@ -188,10 +114,6 @@ void MaterialTempsOverlay::show(lv_obj_t* parent_screen) {
 void MaterialTempsOverlay::on_activate() {
     OverlayBase::on_activate();
     populate_material_list();
-}
-
-void MaterialTempsOverlay::on_deactivate() {
-    OverlayBase::on_deactivate();
 }
 
 // ============================================================================
@@ -210,72 +132,45 @@ void MaterialTempsOverlay::populate_material_list() {
     helix::ui::safe_clean_children(list_view_);
 
     // Sort materials alphabetically by name
-    std::vector<size_t> indices(filament::MATERIAL_COUNT);
-    std::iota(indices.begin(), indices.end(), 0);
-    std::sort(indices.begin(), indices.end(), [](size_t a, size_t b) {
-        return strcasecmp(filament::MATERIALS[a].name, filament::MATERIALS[b].name) < 0;
-    });
+    const auto table = filament::materials();
+    std::vector<const filament::MaterialInfo*> sorted;
+    sorted.reserve(table->size());
+    for (const auto& mat : *table) {
+        sorted.push_back(&mat);
+    }
+    std::sort(sorted.begin(), sorted.end(),
+              [](const auto* a, const auto* b) { return strcasecmp(a->name, b->name) < 0; });
 
     auto& mgr = MaterialSettingsManager::instance();
 
-    for (size_t idx : indices) {
-        const auto& mat = filament::MATERIALS[idx];
+    for (const auto* entry : sorted) {
+        const auto& mat = *entry;
 
-        // Look up effective values (with overrides applied)
-        auto effective = filament::find_material(mat.name);
-        int nozzle_min = effective ? effective->nozzle_min : mat.nozzle_min;
-        int nozzle_max = effective ? effective->nozzle_max : mat.nozzle_max;
-        int bed_temp = effective ? effective->bed_temp : mat.bed_temp;
-        bool has_override = mgr.has_override(mat.name);
+        // The table rows already carry the user's overrides
+        int nozzle_min = mat.nozzle_min;
+        int nozzle_max = mat.nozzle_max;
+        int bed_temp = mat.bed_temp;
+        bool has_override = mgr.has_override(mat.name) && !mat.user_defined;
 
-        // Material row
-        auto* row = lv_obj_create(list_view_);
-        lv_obj_set_name(row, mat.name);
-        lv_obj_set_width(row, lv_pct(100));
-        lv_obj_set_height(row, LV_SIZE_CONTENT);
-        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(row, 0, 0);
-        lv_obj_set_style_pad_all(row, theme_manager_get_spacing("space_sm"), 0);
-        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-        lv_obj_set_style_flex_cross_place(row, LV_FLEX_ALIGN_CENTER, 0);
-        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
-        // Press feedback
-        lv_obj_set_style_bg_color(row, theme_manager_get_color("primary"), LV_STATE_PRESSED);
-        lv_obj_set_style_bg_opa(row, 40, LV_STATE_PRESSED);
-        lv_obj_set_style_radius(row, 8, 0);
-        // Exception: rows created programmatically, not from XML
-        lv_obj_add_event_cb(row, on_material_row_clicked, LV_EVENT_CLICKED, nullptr);
-
-        // Material name
-        auto* name_label = lv_label_create(row);
-        lv_label_set_text(name_label, mat.name);
-        lv_obj_set_flex_grow(name_label, 1);
-        lv_obj_set_style_text_color(name_label, theme_manager_get_color("text"), 0);
-        lv_obj_add_flag(name_label, LV_OBJ_FLAG_EVENT_BUBBLE);
-        lv_obj_remove_flag(name_label, LV_OBJ_FLAG_CLICKABLE);
-
-        // Override indicator (tune icon in primary color)
-        if (has_override) {
-            auto* indicator = lv_label_create(row);
-            lv_label_set_text(indicator, "\xF3\xB0\x98\xAE"); // tune icon
-            lv_obj_set_style_text_font(indicator, &mdi_icons_16, 0);
-            lv_obj_set_style_text_color(indicator, theme_manager_get_color("primary"), 0);
-            lv_obj_set_style_pad_right(indicator, theme_manager_get_spacing("space_xs"), 0);
-            lv_obj_add_flag(indicator, LV_OBJ_FLAG_EVENT_BUBBLE);
-            lv_obj_remove_flag(indicator, LV_OBJ_FLAG_CLICKABLE);
-        }
-
-        // Temperature summary
-        auto* temp_label = lv_label_create(row);
+        char nozzle_buf[24];
+        helix::ui::temperature::format_temperature_range(nozzle_min, nozzle_max, nozzle_buf,
+                                                         sizeof(nozzle_buf), false);
         char temp_buf[48];
-        snprintf(temp_buf, sizeof(temp_buf), "%d-%d / %d°C", nozzle_min, nozzle_max, bed_temp);
-        lv_label_set_text(temp_label, temp_buf);
-        lv_obj_set_style_text_color(temp_label, theme_manager_get_color("text_muted"), 0);
-        lv_obj_add_flag(temp_label, LV_OBJ_FLAG_EVENT_BUBBLE);
-        lv_obj_remove_flag(temp_label, LV_OBJ_FLAG_CLICKABLE);
+        snprintf(temp_buf, sizeof(temp_buf), "%s / %d°C", nozzle_buf, bed_temp);
+
+        const char* attrs[] = {
+            "temps_text", temp_buf, "hide_override", has_override ? "false" : "true", nullptr,
+        };
+        auto* row = static_cast<lv_obj_t*>(lv_xml_create(list_view_, "material_temps_row", attrs));
+        if (!row) {
+            continue;
+        }
+        lv_obj_set_name(row, mat.name);
+        helix::ui::set_row_label_text(row, "material_name", mat.name);
+        lv_obj_add_event_cb(row, on_material_row_clicked, LV_EVENT_CLICKED, nullptr);
     }
 
-    spdlog::debug("[{}] Populated {} materials", get_name(), filament::MATERIAL_COUNT);
+    spdlog::debug("[{}] Populated {} materials", get_name(), sorted.size());
 }
 
 // ============================================================================
@@ -285,16 +180,15 @@ void MaterialTempsOverlay::populate_material_list() {
 void MaterialTempsOverlay::show_edit_view(const std::string& material_name) {
     editing_material_ = material_name;
 
-    // Get database defaults (from static array, NOT find_material which has overrides)
-    int default_nozzle_min = 0, default_nozzle_max = 0, default_bed = 0;
-    for (const auto& mat : filament::MATERIALS) {
-        if (std::string_view(mat.name) == material_name) {
-            default_nozzle_min = mat.nozzle_min;
-            default_nozzle_max = mat.nozzle_max;
-            default_bed = mat.bed_temp;
-            break;
-        }
-    }
+    // The shipped row is the default. A user-defined type has none, so its own
+    // values stand in and there is nothing to reset to.
+    auto shipped = filament::find_shipped_material(material_name);
+    auto base = shipped ? shipped : filament::find_material(material_name);
+    int default_nozzle_min = base ? base->nozzle_min : 0;
+    int default_nozzle_max = base ? base->nozzle_max : 0;
+    int default_bed = base ? base->bed_temp : 0;
+    int default_chamber = base ? base->chamber_temp_c : 0;
+    lv_subject_set_int(&shipped_subject_, shipped ? 1 : 0);
 
     // Get current effective values (with overrides if any)
     auto& mgr = MaterialSettingsManager::instance();
@@ -302,22 +196,41 @@ void MaterialTempsOverlay::show_edit_view(const std::string& material_name) {
     int cur_nozzle_min = (ovr && ovr->nozzle_min) ? *ovr->nozzle_min : default_nozzle_min;
     int cur_nozzle_max = (ovr && ovr->nozzle_max) ? *ovr->nozzle_max : default_nozzle_max;
     int cur_bed = (ovr && ovr->bed_temp) ? *ovr->bed_temp : default_bed;
+    int cur_chamber = (ovr && ovr->chamber_temp) ? *ovr->chamber_temp : default_chamber;
 
     // Update name subject
     snprintf(edit_name_buf_, sizeof(edit_name_buf_), "%s", material_name.c_str());
     lv_subject_copy_string(&edit_name_subject_, edit_name_buf_);
 
-    // Update defaults hint
-    snprintf(edit_defaults_buf_, sizeof(edit_defaults_buf_),
-             lv_tr("Default: %d-%d°C nozzle, %d°C bed"), default_nozzle_min, default_nozzle_max,
-             default_bed);
+    // Update defaults hint. It mentions the chamber exactly when the chamber column
+    // is shown, so it reads the capability that column binds.
+    lv_subject_t* chamber_column = lv_xml_get_subject(nullptr, "printer_has_chamber_heater");
+    const bool has_chamber = chamber_column && lv_subject_get_int(chamber_column) != 0;
+    char nozzle_range[24];
+    helix::ui::temperature::format_temperature_range(default_nozzle_min, default_nozzle_max,
+                                                     nozzle_range, sizeof(nozzle_range));
+    if (has_chamber) {
+        snprintf(edit_defaults_buf_, sizeof(edit_defaults_buf_),
+                 lv_tr("Default: %s nozzle, %d°C bed, %d°C chamber"), nozzle_range, default_bed,
+                 default_chamber);
+    } else {
+        snprintf(edit_defaults_buf_, sizeof(edit_defaults_buf_),
+                 lv_tr("Default: %s nozzle, %d°C bed"), nozzle_range, default_bed);
+    }
     lv_subject_copy_string(&edit_defaults_subject_, edit_defaults_buf_);
 
-    // Populate input fields
+    // Populate input fields. The chamber input is always filled even when its
+    // column is hidden: handle_save() reads it back, which keeps a stored
+    // chamber override intact on a printer whose heater is (currently) absent.
     if (edit_view_) {
-        lv_obj_t* nozzle_min_input = lv_obj_find_by_name(edit_view_, "edit_nozzle_min");
-        lv_obj_t* nozzle_max_input = lv_obj_find_by_name(edit_view_, "edit_nozzle_max");
-        lv_obj_t* bed_temp_input = lv_obj_find_by_name(edit_view_, "edit_bed_temp");
+        lv_obj_t* nozzle_min_input =
+            helix::ui::find_required(edit_view_, "edit_nozzle_min", get_name());
+        lv_obj_t* nozzle_max_input =
+            helix::ui::find_required(edit_view_, "edit_nozzle_max", get_name());
+        lv_obj_t* bed_temp_input =
+            helix::ui::find_required(edit_view_, "edit_bed_temp", get_name());
+        lv_obj_t* chamber_temp_input =
+            helix::ui::find_required(edit_view_, "edit_chamber_temp", get_name());
 
         char buf[8];
         if (nozzle_min_input) {
@@ -331,6 +244,10 @@ void MaterialTempsOverlay::show_edit_view(const std::string& material_name) {
         if (bed_temp_input) {
             snprintf(buf, sizeof(buf), "%d", cur_bed);
             lv_textarea_set_text(bed_temp_input, buf);
+        }
+        if (chamber_temp_input) {
+            snprintf(buf, sizeof(buf), "%d", cur_chamber);
+            lv_textarea_set_text(chamber_temp_input, buf);
         }
     }
 
@@ -388,19 +305,25 @@ void MaterialTempsOverlay::handle_save() {
     }
 
     // Read input values
-    lv_obj_t* nozzle_min_input = lv_obj_find_by_name(edit_view_, "edit_nozzle_min");
-    lv_obj_t* nozzle_max_input = lv_obj_find_by_name(edit_view_, "edit_nozzle_max");
-    lv_obj_t* bed_temp_input = lv_obj_find_by_name(edit_view_, "edit_bed_temp");
+    lv_obj_t* nozzle_min_input =
+        helix::ui::find_required(edit_view_, "edit_nozzle_min", get_name());
+    lv_obj_t* nozzle_max_input =
+        helix::ui::find_required(edit_view_, "edit_nozzle_max", get_name());
+    lv_obj_t* bed_temp_input = helix::ui::find_required(edit_view_, "edit_bed_temp", get_name());
+    lv_obj_t* chamber_temp_input =
+        helix::ui::find_required(edit_view_, "edit_chamber_temp", get_name());
 
-    if (!nozzle_min_input || !nozzle_max_input || !bed_temp_input) {
+    if (!nozzle_min_input || !nozzle_max_input || !bed_temp_input || !chamber_temp_input) {
         return;
     }
 
     const char* min_text = lv_textarea_get_text(nozzle_min_input);
     const char* max_text = lv_textarea_get_text(nozzle_max_input);
     const char* bed_text = lv_textarea_get_text(bed_temp_input);
+    const char* chamber_text = lv_textarea_get_text(chamber_temp_input);
 
-    if (!min_text || !min_text[0] || !max_text || !max_text[0] || !bed_text || !bed_text[0]) {
+    if (!min_text || !min_text[0] || !max_text || !max_text[0] || !bed_text || !bed_text[0] ||
+        !chamber_text || !chamber_text[0]) {
         ToastManager::instance().show(ToastSeverity::WARNING, lv_tr("All fields are required"),
                                       3000);
         return;
@@ -409,16 +332,29 @@ void MaterialTempsOverlay::handle_save() {
     int nozzle_min = atoi(min_text);
     int nozzle_max = atoi(max_text);
     int bed_temp = atoi(bed_text);
+    int chamber_temp = atoi(chamber_text);
 
-    // Validate ranges
-    if (nozzle_min < 100 || nozzle_max < 100 || nozzle_min > 500 || nozzle_max > 500) {
-        ToastManager::instance().show(ToastSeverity::WARNING,
-                                      lv_tr("Nozzle temp must be 100-500°C"), 3000);
+    // The edit view enforces only the fields' own bounds. The printer's live
+    // ceiling is applied where a target is sent (TemperatureController), so a
+    // material definition can carry values the current printer cannot reach -
+    // they clamp at send, not at save.
+    if (nozzle_min < 100 || nozzle_max < 100 || nozzle_min > NOZZLE_INPUT_ABS_MAX_C ||
+        nozzle_max > NOZZLE_INPUT_ABS_MAX_C) {
+        char msg[kToastBufBytes];
+        snprintf(msg, sizeof(msg), lv_tr("Nozzle temp must be 100-%d°C"), NOZZLE_INPUT_ABS_MAX_C);
+        ToastManager::instance().show(ToastSeverity::WARNING, msg, 3000);
         return;
     }
-    if (bed_temp < 0 || bed_temp > 200) {
-        ToastManager::instance().show(ToastSeverity::WARNING, lv_tr("Bed temp must be 0-200°C"),
-                                      3000);
+    if (bed_temp < 0 || bed_temp > BED_INPUT_ABS_MAX_C) {
+        char msg[kToastBufBytes];
+        snprintf(msg, sizeof(msg), lv_tr("Bed temp must be 0-%d°C"), BED_INPUT_ABS_MAX_C);
+        ToastManager::instance().show(ToastSeverity::WARNING, msg, 3000);
+        return;
+    }
+    if (chamber_temp < 0 || chamber_temp > CHAMBER_INPUT_ABS_MAX_C) {
+        char msg[kToastBufBytes];
+        snprintf(msg, sizeof(msg), lv_tr("Chamber temp must be 0-%d°C"), CHAMBER_INPUT_ABS_MAX_C);
+        ToastManager::instance().show(ToastSeverity::WARNING, msg, 3000);
         return;
     }
     if (nozzle_min > nozzle_max) {
@@ -427,19 +363,18 @@ void MaterialTempsOverlay::handle_save() {
         return;
     }
 
-    // Get database defaults to compute sparse override
+    // Sparse against the shipped row. A user-defined type has no shipped row,
+    // so every value is written: they are its definition.
     filament::MaterialOverride ovr;
-    for (const auto& mat : filament::MATERIALS) {
-        if (std::string_view(mat.name) == editing_material_) {
-            if (nozzle_min != mat.nozzle_min)
-                ovr.nozzle_min = nozzle_min;
-            if (nozzle_max != mat.nozzle_max)
-                ovr.nozzle_max = nozzle_max;
-            if (bed_temp != mat.bed_temp)
-                ovr.bed_temp = bed_temp;
-            break;
-        }
-    }
+    const auto shipped = filament::find_shipped_material(editing_material_);
+    if (!shipped || nozzle_min != shipped->nozzle_min)
+        ovr.nozzle_min = nozzle_min;
+    if (!shipped || nozzle_max != shipped->nozzle_max)
+        ovr.nozzle_max = nozzle_max;
+    if (!shipped || bed_temp != shipped->bed_temp)
+        ovr.bed_temp = bed_temp;
+    if (!shipped || chamber_temp != shipped->chamber_temp_c)
+        ovr.chamber_temp = chamber_temp;
 
     // Add macro override from dropdown selection
     if (macro_dropdown_) {
@@ -455,7 +390,7 @@ void MaterialTempsOverlay::handle_save() {
     }
 
     // Only save if there are actual overrides
-    if (ovr.nozzle_min || ovr.nozzle_max || ovr.bed_temp || ovr.preheat_macro) {
+    if (ovr.nozzle_min || ovr.nozzle_max || ovr.bed_temp || ovr.chamber_temp || ovr.preheat_macro) {
         MaterialSettingsManager::instance().set_override(editing_material_, ovr);
     } else {
         // All values match defaults — clear any existing override
@@ -485,7 +420,7 @@ void MaterialTempsOverlay::handle_back_clicked() {
         }
     } else {
         // In list view — close overlay
-        NavigationManager::instance().go_back();
+        helix::nav::go_back();
     }
 }
 
@@ -553,6 +488,8 @@ void MaterialTempsOverlay::handle_macro_dropdown_changed() {
 // STATIC CALLBACKS
 // ============================================================================
 
+// Attached with lv_obj_add_event_cb: the rows and the back button are built in
+// code, so there is no XML slot to register against.
 void MaterialTempsOverlay::on_material_row_clicked(lv_event_t* e) {
     LVGL_SAFE_EVENT_CB_BEGIN("[MaterialTempsOverlay] on_material_row_clicked");
     auto* row = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
@@ -563,27 +500,9 @@ void MaterialTempsOverlay::on_material_row_clicked(lv_event_t* e) {
     LVGL_SAFE_EVENT_CB_END();
 }
 
-void MaterialTempsOverlay::on_material_save(lv_event_t* /*e*/) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[MaterialTempsOverlay] on_material_save");
-    get_material_temps_overlay().handle_save();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void MaterialTempsOverlay::on_material_reset_defaults(lv_event_t* /*e*/) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[MaterialTempsOverlay] on_material_reset_defaults");
-    get_material_temps_overlay().handle_reset_defaults();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
 void MaterialTempsOverlay::on_back_clicked(lv_event_t* /*e*/) {
     LVGL_SAFE_EVENT_CB_BEGIN("[MaterialTempsOverlay] on_back_clicked");
     get_material_temps_overlay().handle_back_clicked();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void MaterialTempsOverlay::on_macro_dropdown_changed(lv_event_t* /*e*/) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[MaterialTempsOverlay] on_macro_dropdown_changed");
-    get_material_temps_overlay().handle_macro_dropdown_changed();
     LVGL_SAFE_EVENT_CB_END();
 }
 

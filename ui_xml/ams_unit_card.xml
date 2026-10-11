@@ -8,6 +8,11 @@
     <px name="status_line_gap" value="2"/>
   </consts>
   <api>
+    <!-- 1 while the unit is an absent placeholder: a box address held for a box
+         that is not on the bus. The card shows disabled and says so. -->
+    <prop name="absent" type="subject" default="ams_env_ind_off_flag"/>
+    <!-- 1 while a present unit is reported offline: drawn faded, with a chip. -->
+    <prop name="disconnected" type="subject" default="ams_env_ind_off_flag"/>
     <prop name="temp_text" type="subject" default="ams_env_ind_0_temp_text"/>
     <prop name="humidity_text" type="subject" default="ams_env_ind_0_humidity_text"/>
     <prop name="humidity_status" type="subject" default="ams_env_ind_0_humidity_status"/>
@@ -16,17 +21,26 @@
     <prop name="drying_active" type="subject" default="ams_env_ind_0_drying_active"/>
     <prop name="drying_text" type="subject" default="ams_env_ind_0_drying_text"/>
   </api>
+  <styles>
+    <style name="unit_offline" opa="128"/>
+  </styles>
   <view name="ams_unit_card"
         extends="lv_obj" height="content" scrollable="false" flex_flow="column" style_flex_main_place="start"
         style_flex_cross_place="center" style_bg_color="#elevated_bg" style_bg_opa="255" style_radius="#border_radius"
         style_pad_all="#space_sm" style_pad_gap="#space_xs" style_border_width="1" style_border_color="#border"
         style_border_opa="80" style_min_width="#ams_card_min_width" style_max_width="#ams_card_max_width"
         clickable="true">
+    <style name="styles.press_wash" selector="pressed"/>
+    <bind_state_if_eq subject="$absent" state="disabled" ref_value="1"/>
+    <!-- Offline fades the header, bars and readout, but not the card itself: it stays
+         tappable (its detail still shows what it last reported) and the chip keeps full
+         contrast, since a parent's opa would fade it too. -->
     <!-- Unit header: logo + name (clickable=false + event_bubble so clicks reach card) -->
-    <lv_obj width="100%"
-            height="content" scrollable="false" clickable="false" event_bubble="true" flex_flow="row"
+    <lv_obj name="unit_header"
+            width="100%" height="content" scrollable="false" clickable="false" event_bubble="true" flex_flow="row"
             style_flex_main_place="center" style_flex_cross_place="center" style_pad_all="0" style_pad_gap="#space_xs"
             style_bg_opa="0" style_border_width="0">
+      <bind_style_if_eq name="unit_offline" subject="$disconnected" ref_value="1"/>
       <!-- The logo is the first thing to go when the cards are width-starved: on a
            5-unit rig it costs ~28px of a ~102px card, and the unit's NAME is what
            the row is for. No inline hidden="" here - an inline attr would outrank
@@ -39,7 +53,7 @@
            the centered row, and get clipped at BOTH ends ("HTLF Claymore 1" read as
            "TLF Claym"). long_mode="dots" needs a bounded width to do anything. -->
       <text_body name="unit_name"
-                 width="1" height="#ams_unit_name_h" text="Unit" translation_tag="Unit" flex_grow="1" long_mode="dots"
+                 width="1" height="#ams_unit_name_h" text="Unit" flex_grow="1" long_mode="dots"
                  style_text_align="center"/>
     </lv_obj>
     <!-- Body row: slot content on the left, environment/dryer indicator on the right.
@@ -60,9 +74,18 @@
         <lv_obj name="bars_container"
                 width="100%" height="#ams_bars_height" scrollable="false" clickable="false" event_bubble="true"
                 flex_flow="row" style_flex_main_place="center" style_flex_cross_place="end" style_pad_all="0"
-                style_pad_column="#space_xxs" style_bg_opa="0" style_border_width="0"/>
+                style_pad_column="#space_xxs" style_bg_opa="0" style_border_width="0">
+          <bind_style_if_eq name="unit_offline" subject="$disconnected" ref_value="1"/>
+        </lv_obj>
         <!-- Slot count label -->
-        <text_small name="slot_count" text="0 slots" translation_tag="0 slots" event_bubble="true"/>
+        <text_small name="slot_count" text="0 slots" event_bubble="true">
+          <bind_flag_if_eq subject="$absent" flag="hidden" ref_value="1"/>
+          <bind_flag_if_eq subject="$disconnected" flag="hidden" ref_value="1"/>
+        </text_small>
+        <ams_disconnected_chip name="unit_disconnected_chip" disconnected="$disconnected"/>
+        <text_small name="unit_absent_label" text="Not connected" event_bubble="true">
+          <bind_flag_if_eq subject="$absent" flag="hidden" ref_value="0"/>
+        </text_small>
         <!-- Filament runout indicator — only shown on a real runout (print paused).
              ams_filament_runout is gated on PAUSED state in ams_state.cpp so the
              pre-load filament_useup assertion at print start never lights it. -->
@@ -74,7 +97,9 @@
       <ams_environment_indicator name="env_indicator"
                                  event_bubble="true" temp_text="$temp_text" humidity_text="$humidity_text"
                                  humidity_status="$humidity_status" humidity_visible="$humidity_visible"
-                                 visible="$visible" drying_active="$drying_active" drying_text="$drying_text"/>
+                                 visible="$visible" drying_active="$drying_active" drying_text="$drying_text">
+        <bind_style_if_eq name="unit_offline" subject="$disconnected" ref_value="1"/>
+      </ams_environment_indicator>
     </lv_obj>
   </view>
 </component>

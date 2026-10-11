@@ -1,0 +1,10 @@
+{
+  "id": "hello",
+  "name": "Hello",
+  "version": "1.0.0",
+  "helix_version": ">=0.0.1",
+  "permissions": ["gcode"],
+  "settings": [
+    {"key": "greeting", "type": "string", "label": "Greeting", "default": "hi"}
+  ]
+}

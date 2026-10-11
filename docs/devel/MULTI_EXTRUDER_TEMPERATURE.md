@@ -137,12 +137,13 @@ if (temp) {
 
 ```cpp
 // Observer triggers UI rebuild when extruder list changes
-add_observer(observe_int_async<TempPanel>(
+add_observer(observe<int>(
     pts.get_extruder_version_subject(),
     this,
     [](TempPanel* self, int32_t version) {
         self->rebuild_extruder_list();
-    }
+    },
+    get_printer_state().get_subjects_lifetime()
 ));
 ```
 
@@ -209,7 +210,7 @@ PrinterTemperatureState::update_from_status(status)
 
 ### Chamber Sensor
 
-The chamber temperature sensor name is configurable via `set_chamber_sensor_name()`. It's set during discovery when `PrinterDiscovery` detects a `temperature_sensor` with "chamber" in the name. The status JSON key for chamber varies per printer (e.g., `"temperature_sensor chamber"`, `"temperature_sensor Chamber_Temp"`).
+The chamber temperature sensor name is set through `set_chamber_sensor_name()` by `src/printer/printer_state.cpp#set_hardware`, which resolves the saved chamber sensor assignment with `helix::chamber::resolve_sensor()` (`include/chamber_heater_assignment.h`): `auto` takes the sensor `PrinterDiscovery` picked by name, `none` disables it, and a named sensor counts only while Klipper reports that object, otherwise discovery's pick stands. Consumers read `PrinterTemperatureState::chamber_sensor_name()` and the `printer_has_chamber_sensor` capability, not discovery's own pick. The one exception is the Settings > Devices > Sensors chamber sensor dropdown (`src/ui/ui_settings_sensors.cpp#populate_chamber_assignment`): its "Auto (X)" entry names discovery's pick, because that is the sensor `auto` takes. The status JSON key for chamber varies per printer (e.g., `"temperature_sensor chamber"`, `"temperature_sensor Chamber_Temp"`).
 
 ---
 
@@ -281,11 +282,11 @@ Chamber temperature **sends** go through `TemperatureController::set_target(Heat
 `PrinterTemperatureState` is a member of `PrinterState`, accessed via:
 
 ```cpp
-auto& ps = PrinterState::instance();
+auto& ps = get_printer_state();   // include/app_globals.h
 
 // Legacy accessors (delegate to PrinterTemperatureState)
-lv_subject_t* temp = ps.get_extruder_temp_subject();      // Static, first extruder
-lv_subject_t* bed = ps.get_bed_temp_subject();
+lv_subject_t* temp = ps.temperature_state().get_extruder_temp_subject();      // Static, first extruder
+lv_subject_t* bed = ps.temperature_state().get_bed_temp_subject();
 
 // Per-extruder access
 lv_subject_t* t1 = ps.temperature().get_extruder_temp_subject("extruder1");

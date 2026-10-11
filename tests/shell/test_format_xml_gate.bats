@@ -27,6 +27,8 @@
 # turned the shell suite red on main. These tests pin the script's exit codes regardless
 # of how the hook chooses to act on them.
 
+load helpers
+
 FORMATTER="scripts/format-xml.py"
 PY=".venv/bin/python"
 
@@ -84,7 +86,7 @@ write_and_run() {
 </component>
 ' --check
     [ "$status" -eq 0 ]
-    [[ "$output" != *"Namespace prefix"* ]]
+    lacks "Namespace prefix" "$output"
     [[ "$output" != *"could not be processed"* ]]
 }
 
@@ -158,7 +160,7 @@ write_and_run() {
 
 # --- 5. the pre-commit auto-fix must not sweep held-back work ---------------------
 #
-# Structural checks on qc_phase2's XML branch in scripts/quality-checks.sh. They pin the
+# Structural checks on qc_phase2's XML branch in scripts/qc/phase2.sh. They pin the
 # ORDER the logic depends on, which is the part that is easy to get wrong and impossible
 # to see in review: `git add` stages the whole working-tree file, so re-staging a
 # partially staged file commits hunks its author deliberately held back.
@@ -168,10 +170,10 @@ write_and_run() {
     # cannot tell "author held this back" from "the formatter just touched it" — it
     # reports every file as partially staged and re-stages nothing. Written the wrong way
     # round first; this pins the order.
-    run bash -c "grep -n 'XML_PRE_DIRTY=\"\"' scripts/quality-checks.sh | head -1 | cut -d: -f1"
+    run bash -c "grep -n 'XML_PRE_DIRTY=\"\"' scripts/qc/phase2.sh | head -1 | cut -d: -f1"
     [ "$status" -eq 0 ]
     pre_line="$output"
-    run bash -c "grep -n 'format-xml.py \$XML_FILES' scripts/quality-checks.sh | head -1 | cut -d: -f1"
+    run bash -c "grep -n 'format-xml.py \$XML_FILES' scripts/qc/phase2.sh | head -1 | cut -d: -f1"
     [ "$status" -eq 0 ]
     fmt_line="$output"
     [ -n "$pre_line" ] && [ -n "$fmt_line" ]
@@ -180,9 +182,9 @@ write_and_run() {
 
 @test "auto-fix decides re-staging from the recorded set, not a live git diff" {
     # A live `git diff` at decision time is the same bug in a different dress.
-    run bash -c "sed -n '/XML_RESTAGE=\"\"; XML_HELD=\"\"/,/^          done/p' scripts/quality-checks.sh"
+    run bash -c "sed -n '/XML_RESTAGE=\"\"; XML_HELD=\"\"/,/^          done/p' scripts/qc/phase2.sh"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"XML_PRE_DIRTY"* ]]
+    contains "XML_PRE_DIRTY" "$output"
     [[ "$output" != *"git diff"* ]]
 }
 
@@ -201,7 +203,7 @@ write_and_run() {
             if (!add)                 { print "MISSING re-stage"; exit }
             if (!fmt)                 { print "MISSING reformat"; exit }
             print (guard && fmt < guard && guard < add) ? "guarded" : "UNGUARDED"
-        }' scripts/quality-checks.sh
+        }' scripts/qc/phase2.sh
     [ "$status" -eq 0 ]
     [ "$output" = "guarded" ]
 }

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
 # Escalation discipline for the atomic-swap path in
-# scripts/lib/installer/release.sh and its bundled twin scripts/install.sh.
+# scripts/lib/installer/release.sh and its bundled twin install.sh.
 #
 # During a self-update the swap runs under systemd's NoNewPrivileges=true, where
 # `sudo` cannot execute at all. So the load-bearing moves — old install aside,
@@ -30,7 +30,7 @@ WORKTREE_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
 #       "$T/scripts/lib/installer/release.sh"
 #   HELIX_TEST_RELEASE_SH="$T/scripts/lib/installer/release.sh" bats tests/shell/test_install_file_sudo.bats
 RELEASE_SH="${HELIX_TEST_RELEASE_SH:-$WORKTREE_ROOT/scripts/lib/installer/release.sh}"
-INSTALL_SH="${HELIX_TEST_INSTALL_SH:-$WORKTREE_ROOT/scripts/install.sh}"
+INSTALL_SH="${HELIX_TEST_INSTALL_SH:-$INSTALL_BUNDLE}"
 
 # The swap lives in three functions: extract_release() moves the old install to
 # INSTALL_BACKUP and the new one into place, _restore_install_backup() undoes

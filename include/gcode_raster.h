@@ -37,10 +37,10 @@ enum class Aa { Off, On };
 /// GL_RGBA, ...)` readback hands back, so the 3D path's surface has red and blue
 /// the other way round.
 ///
-/// Only stroke_selection_rim() takes this. blend() and blend_coverage() are
-/// ARGB8888-only: they are fed packed 0xAARRGGBB words by the line rasterizers
-/// and there is no GL-side caller. Alpha is byte 3 in both layouts, which is why
-/// the selection tag itself needs no such distinction.
+/// Only stroke_selection_rim() and stroke_exclusion_hatch() take this. blend() and blend_coverage()
+/// are ARGB8888-only: they are fed packed 0xAARRGGBB words by the line rasterizers and there is no
+/// GL-side caller. Alpha is byte 3 in both layouts, which is why the selection tag itself needs no
+/// such distinction.
 enum class ChannelOrder { Bgra, Rgba };
 
 /// Upper bound on the offsets a single thick line can produce. Extrusion pixel
@@ -86,21 +86,30 @@ inline int round_offset(float v) {
 /// later pass covers the parts that should not show.
 inline constexpr uint8_t kSelectedAlpha = 254;
 
+/// Alpha value reserved to mean "this pixel belongs to an excluded object".
+///
+/// Same trick as kSelectedAlpha, one step down: the excluded object draws
+/// opaque and aliased with 253 in the alpha byte, and stroke_exclusion_hatch()
+/// later stripes exactly those pixels. When an object is both, kSelectedAlpha
+/// wins: the rim needs the tag more than the stripes do.
+inline constexpr uint8_t kExcludedAlpha = 253;
+
 /// Alpha for a stroke that is NOT the selected object, with the reserved tag
 /// rounded off.
 ///
-/// Two things can land on kSelectedAlpha by accident: a Wu edge pixel whose raw
+/// Two things can land on a reserved tag by accident: a Wu edge pixel whose raw
 /// coverage happens to be 254, and an accumulated src-over alpha that adds up to
 /// it. Either way stroke_selection_rim() would find an isolated tagged pixel,
 /// see no tagged neighbour in any of its four directions, and paint it white in
-/// the middle of an unselected object. 254 and 255 are indistinguishable on
+/// the middle of an unselected object; a stray kExcludedAlpha would pick up a
+/// red stripe pixel the same way. 253, 254 and 255 are indistinguishable on
 /// screen, so the collision is resolved upward.
 ///
 /// The tag itself is written by blend(), which takes the alpha byte from the
 /// caller's `argb` verbatim — a tagged stroke is always drawn aliased for
 /// exactly that reason, so nothing that reaches here ever means to be tagged.
 inline uint8_t untagged_alpha(uint8_t a) {
-    return (a == kSelectedAlpha) ? 255 : a;
+    return (a == kSelectedAlpha || a == kExcludedAlpha) ? 255 : a;
 }
 
 /// Overwrite one pixel. Not a composite despite the name, which is historical:
@@ -186,5 +195,24 @@ void thick_line(const RasterTarget& t, int x0, int y0, int x1, int y1, uint32_t 
  */
 void stroke_selection_rim(const RasterTarget& t, int rim_px, int gap_px, uint32_t rgb,
                           ChannelOrder order);
+
+/// Which way the rows of a RasterTarget run on screen. A glReadPixels readback
+/// is bottom-up; every LVGL buffer is top-down.
+enum class RowOrder { TopDown, BottomUp };
+
+/**
+ * @brief Stripe every kExcludedAlpha pixel with `rgb`, in place.
+ *
+ * Stripes run at 45 degrees, rising to the right on screen: a pixel is painted
+ * when (x + screen_y) mod `period_px` is below `stripe_px`. They are anchored to
+ * the surface rather than the object, so neighbouring excluded objects share
+ * one continuous pattern. Alpha is never touched, which keeps the pass
+ * idempotent and lets it re-run after the cache grows.
+ *
+ * O(w*h), one comparison per untagged pixel. Nothing is allocated. A period
+ * below 2 or a stripe that is empty or covers the whole period is a no-op.
+ */
+void stroke_exclusion_hatch(const RasterTarget& t, int period_px, int stripe_px, uint32_t rgb,
+                            ChannelOrder order, RowOrder rows);
 
 } // namespace helix::gcode

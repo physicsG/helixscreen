@@ -11,28 +11,35 @@
 #include "ams_types.h"
 #include "app_globals.h"
 #include "audio_settings_manager.h"
-#include "color_sensor_manager.h"
 #include "config.h"
 #include "display_backend.h"
 #include "display_manager.h"
 #include "display_settings_manager.h"
 #include "filament_sensor_manager.h"
+#include "helix_thread.h"
 #include "host_identity.h"
 #include "hv/requests.h"
 #include "i_moonraker_api.h"
+#include "i_moonraker_client.h"
 #include "json_utils.h"
-#include "moonraker_client.h"
+#include "klipper_extruder_naming.h"
+#include "load_cell_manager.h"
 #include "moonraker_types.h"
 #include "panel_widget_config.h"
 #include "panel_widget_manager.h"
 #include "platform_capabilities.h"
+#include "platform_table.h"
 #include "printer_state.h"
 #include "screen_locality.h"
 #include "system/crash_handler.h"
 #include "system/crash_history.h"
+#include "system/ingest_client.h"
+#include "system/sha256_util.h"
+#include "system/tls_trust.h"
 #include "system/update_checker.h"
 #include "system_settings_manager.h"
 #include "temperature_sensor_manager.h"
+#include "text_io.h"
 #include "theme_loader.h"
 #include "theme_manager.h"
 #include "tool_state.h"
@@ -42,6 +49,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <ctime>
@@ -52,10 +60,6 @@
 #include <sstream>
 #include <sys/utsname.h>
 #include <unistd.h>
-
-#ifdef __APPLE__
-#include <CommonCrypto/CommonDigest.h>
-#endif
 
 // glibc ptmalloc introspection for heap-fragmentation telemetry (#758 class).
 // mallinfo2() (glibc 2.33+) returns size_t fields — preferred.
@@ -89,201 +93,6 @@ std::atomic<int> active_panel_int{-1};
 std::atomic<bool> gcode_renderer_loaded{false};
 } // namespace telemetry_context
 } // namespace helix
-
-// =============================================================================
-// SHA-256 implementation
-// =============================================================================
-
-#ifdef __APPLE__
-
-static std::string sha256_hex(const std::string& input) {
-    unsigned char hash[CC_SHA256_DIGEST_LENGTH];
-    CC_SHA256(input.data(), static_cast<CC_LONG>(input.size()), hash);
-
-    char hex[CC_SHA256_DIGEST_LENGTH * 2 + 1];
-    for (int i = 0; i < CC_SHA256_DIGEST_LENGTH; ++i) {
-        std::snprintf(hex + i * 2, 3, "%02x", hash[i]);
-    }
-    return std::string(hex, CC_SHA256_DIGEST_LENGTH * 2);
-}
-
-#else
-
-// Minimal portable SHA-256 implementation (public domain)
-// Based on RFC 6234 / FIPS 180-4
-
-namespace {
-
-static const uint32_t K256[64] = {
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
-
-inline uint32_t rotr(uint32_t x, int n) {
-    return (x >> n) | (x << (32 - n));
-}
-
-inline uint32_t ch(uint32_t x, uint32_t y, uint32_t z) {
-    return (x & y) ^ (~x & z);
-}
-
-inline uint32_t maj(uint32_t x, uint32_t y, uint32_t z) {
-    return (x & y) ^ (x & z) ^ (y & z);
-}
-
-inline uint32_t sigma0(uint32_t x) {
-    return rotr(x, 2) ^ rotr(x, 13) ^ rotr(x, 22);
-}
-
-inline uint32_t sigma1(uint32_t x) {
-    return rotr(x, 6) ^ rotr(x, 11) ^ rotr(x, 25);
-}
-
-inline uint32_t gamma0(uint32_t x) {
-    return rotr(x, 7) ^ rotr(x, 18) ^ (x >> 3);
-}
-
-inline uint32_t gamma1(uint32_t x) {
-    return rotr(x, 17) ^ rotr(x, 19) ^ (x >> 10);
-}
-
-struct Sha256Ctx {
-    uint32_t state[8];
-    uint64_t count;
-    unsigned char buf[64];
-};
-
-static void sha256_init(Sha256Ctx& ctx) {
-    ctx.state[0] = 0x6a09e667;
-    ctx.state[1] = 0xbb67ae85;
-    ctx.state[2] = 0x3c6ef372;
-    ctx.state[3] = 0xa54ff53a;
-    ctx.state[4] = 0x510e527f;
-    ctx.state[5] = 0x9b05688c;
-    ctx.state[6] = 0x1f83d9ab;
-    ctx.state[7] = 0x5be0cd19;
-    ctx.count = 0;
-}
-
-static void sha256_transform(uint32_t state[8], const unsigned char block[64]) {
-    uint32_t W[64];
-    for (int i = 0; i < 16; ++i) {
-        W[i] = (static_cast<uint32_t>(block[i * 4]) << 24) |
-               (static_cast<uint32_t>(block[i * 4 + 1]) << 16) |
-               (static_cast<uint32_t>(block[i * 4 + 2]) << 8) |
-               (static_cast<uint32_t>(block[i * 4 + 3]));
-    }
-    for (int i = 16; i < 64; ++i) {
-        W[i] = gamma1(W[i - 2]) + W[i - 7] + gamma0(W[i - 15]) + W[i - 16];
-    }
-
-    uint32_t a = state[0], b = state[1], c = state[2], d = state[3];
-    uint32_t e = state[4], f = state[5], g = state[6], h = state[7];
-
-    for (int i = 0; i < 64; ++i) {
-        uint32_t t1 = h + sigma1(e) + ch(e, f, g) + K256[i] + W[i];
-        uint32_t t2 = sigma0(a) + maj(a, b, c);
-        h = g;
-        g = f;
-        f = e;
-        e = d + t1;
-        d = c;
-        c = b;
-        b = a;
-        a = t1 + t2;
-    }
-
-    state[0] += a;
-    state[1] += b;
-    state[2] += c;
-    state[3] += d;
-    state[4] += e;
-    state[5] += f;
-    state[6] += g;
-    state[7] += h;
-}
-
-static void sha256_update(Sha256Ctx& ctx, const unsigned char* data, size_t len) {
-    size_t buf_len = static_cast<size_t>(ctx.count % 64);
-    ctx.count += len;
-
-    // Fill existing buffer first
-    if (buf_len > 0) {
-        size_t fill = 64 - buf_len;
-        if (len < fill) {
-            std::memcpy(ctx.buf + buf_len, data, len);
-            return;
-        }
-        std::memcpy(ctx.buf + buf_len, data, fill);
-        sha256_transform(ctx.state, ctx.buf);
-        data += fill;
-        len -= fill;
-    }
-
-    // Process full blocks
-    while (len >= 64) {
-        sha256_transform(ctx.state, data);
-        data += 64;
-        len -= 64;
-    }
-
-    // Buffer remaining
-    if (len > 0) {
-        std::memcpy(ctx.buf, data, len);
-    }
-}
-
-static void sha256_final(Sha256Ctx& ctx, unsigned char hash[32]) {
-    uint64_t total_bits = ctx.count * 8;
-    size_t buf_len = static_cast<size_t>(ctx.count % 64);
-
-    // Padding
-    ctx.buf[buf_len++] = 0x80;
-    if (buf_len > 56) {
-        std::memset(ctx.buf + buf_len, 0, 64 - buf_len);
-        sha256_transform(ctx.state, ctx.buf);
-        buf_len = 0;
-    }
-    std::memset(ctx.buf + buf_len, 0, 56 - buf_len);
-
-    // Append length in bits (big-endian)
-    for (int i = 0; i < 8; ++i) {
-        ctx.buf[56 + i] = static_cast<unsigned char>(total_bits >> (56 - i * 8));
-    }
-    sha256_transform(ctx.state, ctx.buf);
-
-    // Output hash (big-endian)
-    for (int i = 0; i < 8; ++i) {
-        hash[i * 4] = static_cast<unsigned char>(ctx.state[i] >> 24);
-        hash[i * 4 + 1] = static_cast<unsigned char>(ctx.state[i] >> 16);
-        hash[i * 4 + 2] = static_cast<unsigned char>(ctx.state[i] >> 8);
-        hash[i * 4 + 3] = static_cast<unsigned char>(ctx.state[i]);
-    }
-}
-
-} // anonymous namespace
-
-static std::string sha256_hex(const std::string& input) {
-    Sha256Ctx ctx;
-    sha256_init(ctx);
-    sha256_update(ctx, reinterpret_cast<const unsigned char*>(input.data()), input.size());
-
-    unsigned char hash[32];
-    sha256_final(ctx, hash);
-
-    char hex[65];
-    for (int i = 0; i < 32; ++i) {
-        std::snprintf(hex + i * 2, 3, "%02x", hash[i]);
-    }
-    return std::string(hex, 64);
-}
-
-#endif // !__APPLE__
 
 // =============================================================================
 // Singleton
@@ -389,13 +198,9 @@ void TelemetryManager::init(const std::string& config_dir) {
     // loading, so by now /telemetry_enabled is already authoritative.
     {
         Config* cfg = Config::get_instance();
-        if (cfg) {
-            enabled_.store(cfg->get<bool>("/telemetry_enabled", false));
-            spdlog::info("[TelemetryManager] Loaded enabled state: {}",
-                         enabled_.load() ? "true" : "false");
-        } else {
-            enabled_.store(false);
-        }
+        enabled_.store(cfg->get<bool>("/telemetry_enabled", false));
+        spdlog::info("[TelemetryManager] Loaded enabled state: {}",
+                     enabled_.load() ? "true" : "false");
     }
 
     // Check for crash file from a previous session (respects opt-in)
@@ -403,14 +208,6 @@ void TelemetryManager::init(const std::string& config_dir) {
 
     // Check for update success flag from a previous session
     check_previous_update();
-
-    // Initialize LVGL subject for settings UI binding
-    if (!subjects_initialized_) {
-        UI_MANAGED_SUBJECT_INT(enabled_subject_, enabled_.load() ? 1 : 0, "telemetry_enabled",
-                               subjects_);
-        subjects_initialized_ = true;
-        spdlog::debug("[TelemetryManager] LVGL subject initialized");
-    }
 
     initialized_.store(true);
     spdlog::info("[TelemetryManager] Initialization complete (enabled={}, queue={})",
@@ -466,17 +263,6 @@ void TelemetryManager::shutdown() {
         send_thread_.join();
     }
 
-    // Expire the deferred subject write before the subject goes away (#1165).
-    // Unconditional: the callback must be dropped even on the LVGL-already-torn-
-    // down path, where deinit_all() is skipped but the subject is just as dead.
-    async_lifetime_.invalidate();
-
-    // Deinitialize LVGL subjects (skip if LVGL already torn down)
-    if (subjects_initialized_ && lv_is_initialized()) {
-        subjects_.deinit_all();
-        subjects_initialized_ = false;
-    }
-
     initialized_.store(false);
     shutting_down_.store(false);
     spdlog::info("[TelemetryManager] Shutdown complete");
@@ -500,28 +286,18 @@ void TelemetryManager::set_enabled(bool enabled) {
         stop_auto_send();
     }
 
-    // Update LVGL subject via queue to ensure thread safety.
     // NOTE: set_enabled() must be called from the LVGL thread since it
     // creates/deletes LVGL timers above. enabled_ is atomic for safe reads
     // from any thread, but the function itself is LVGL-thread-only.
-    if (subjects_initialized_) {
-        async_lifetime_.defer("TelemetryManager::set_enabled", [this, enabled]() {
-            lv_subject_set_int(&enabled_subject_, enabled ? 1 : 0);
-        });
-    }
 
     // Persist to settings.json via Config (single source of truth).
     // SystemSettingsManager::set_telemetry_enabled() also calls this path,
     // so there is exactly one writer now — application.cpp no longer needs
     // to clobber our state on every startup.
     Config* cfg = Config::get_instance();
-    if (cfg) {
-        cfg->set<bool>("/telemetry_enabled", enabled);
-        cfg->save();
-        spdlog::debug("[TelemetryManager] Persisted enabled state to settings.json");
-    } else {
-        spdlog::warn("[TelemetryManager] Config not available; enabled state not persisted");
-    }
+    cfg->set<bool>("/telemetry_enabled", enabled);
+    cfg->save();
+    spdlog::debug("[TelemetryManager] Persisted enabled state to settings.json");
 }
 
 bool TelemetryManager::is_enabled() const {
@@ -784,7 +560,7 @@ void TelemetryManager::write_update_success_flag(const std::string& config_dir,
     std::string path = config_dir + "/update_success.json";
     std::ofstream ofs(path);
     if (ofs) {
-        ofs << flag.dump();
+        ofs << helix::json_util::safe_dump(flag);
         spdlog::info("[TelemetryManager] Wrote update success flag: {}", path);
     } else {
         spdlog::error("[TelemetryManager] Failed to write update success flag: {}", path);
@@ -864,6 +640,10 @@ nlohmann::json TelemetryManager::get_queue_snapshot() const {
 void TelemetryManager::clear_queue() {
     std::lock_guard<std::mutex> lock(mutex_);
     queue_.clear();
+    // A purge ends the window the count describes. Carrying it forward would
+    // mark the first batch after the next opt-in as incomplete when nothing
+    // from that window was ever discarded.
+    events_dropped_since_send_ = 0;
     spdlog::info("[TelemetryManager] Queue cleared");
 }
 
@@ -883,6 +663,17 @@ void TelemetryManager::remove_sent_events(size_t count) {
     queue_.erase(queue_.begin(), queue_.begin() + static_cast<long>(to_remove));
     spdlog::debug("[TelemetryManager] Removed {} sent events, {} remaining", to_remove,
                   queue_.size());
+
+    // The server has no way to tell a quiet window from a lossy one, so a
+    // batch that follows a discard is an incomplete record of the span it
+    // covers. Reporting it here rather than in enqueue_event() costs one line
+    // per send window instead of one per discarded event.
+    if (events_dropped_since_send_ > 0) {
+        spdlog::warn("[TelemetryManager] {} events were discarded unsent before this batch — "
+                     "the window it covers is incomplete",
+                     events_dropped_since_send_);
+        events_dropped_since_send_ = 0;
+    }
 }
 
 void TelemetryManager::try_send(bool force) {
@@ -897,18 +688,11 @@ void TelemetryManager::try_send(bool force) {
         return;
     }
 
-    // Check send interval with backoff
     auto now = std::chrono::steady_clock::now();
     int backoff = backoff_multiplier_.load();
-    auto interval = SEND_INTERVAL * backoff;
-    // Cap backoff at 7 days
-    auto max_interval = std::chrono::hours{24 * 7};
-    if (interval > max_interval) {
-        interval = max_interval;
-    }
+    auto interval = next_attempt_delay(backoff);
 
-    if (!force && last_send_time_.time_since_epoch().count() > 0 &&
-        now - last_send_time_ < interval) {
+    if (!force && send_attempted_ && now - last_send_time_ < interval) {
         spdlog::debug("[TelemetryManager] try_send: too soon (backoff={}x), skipping", backoff);
         return;
     }
@@ -924,6 +708,7 @@ void TelemetryManager::try_send(bool force) {
     }
 
     last_send_time_ = now;
+    send_attempted_ = true;
 
     spdlog::info("[TelemetryManager] Sending batch of {} events", batch.size());
 
@@ -934,7 +719,7 @@ void TelemetryManager::try_send(bool force) {
     // spawn failure the queue is already in the right state. Just log; the
     // next try_send tick will retry.
     try {
-        send_thread_ = std::thread([this, batch = std::move(batch)]() { do_send(batch); });
+        send_thread_ = helix::make_thread([this, batch = std::move(batch)]() { do_send(batch); });
     } catch (const std::system_error& e) {
         spdlog::error("[TelemetryManager] Failed to spawn send thread: {} — events remain "
                       "queued for next try_send",
@@ -948,12 +733,7 @@ void TelemetryManager::do_send(const nlohmann::json& batch) {
         // On devices without a CA cert bundle (e.g., AD5M stock firmware),
         // glibc's NSS resolver can crash with SIGSEGV during SSL handshake.
         if (!ssl_verified_) {
-            const char* cert_file = getenv("SSL_CERT_FILE");
-            const char* cert_dir = getenv("SSL_CERT_DIR");
-            bool have_certs = (cert_file && access(cert_file, R_OK) == 0) ||
-                              (cert_dir && access(cert_dir, R_OK) == 0) ||
-                              access("/etc/ssl/certs/ca-certificates.crt", R_OK) == 0;
-            if (!have_certs) {
+            if (helix::tls::find_ca_store().empty()) {
                 spdlog::warn("[TelemetryManager] No CA certificate bundle found — "
                              "HTTPS requests may fail. Set SSL_CERT_FILE or install "
                              "ca-certificates.");
@@ -966,42 +746,51 @@ void TelemetryManager::do_send(const nlohmann::json& batch) {
             return;
         }
 
-        // Use libhv HTTP client (same pattern as UpdateChecker and Moonraker API)
-        auto req = std::make_shared<HttpRequest>();
-        req->method = HTTP_POST;
-        req->url = ENDPOINT_URL;
-        req->timeout = 30;
-        req->content_type = APPLICATION_JSON;
-        req->headers["User-Agent"] = std::string("HelixScreen/") + HELIX_VERSION;
-        req->headers["X-API-Key"] = API_KEY;
-        req->body = batch.dump();
+        // One send window drains the whole queue. Sending a single batch per
+        // window caps throughput at MAX_BATCH_SIZE per SEND_INTERVAL, which is
+        // below the rate the periodic producers enqueue at, so the queue sits
+        // saturated and enqueue_event() discards the oldest events for good
+        // (prestonbrown/helixscreen#1476). The bound stops a producer that
+        // outruns the drain from spinning this thread.
+        nlohmann::json pending = batch;
 
-        auto resp = requests::request(req);
+        for (size_t attempt = 0; attempt < MAX_BATCHES_PER_SEND; ++attempt) {
+            auto [status_code, resp_body] =
+                helix::ingest::post(ENDPOINT_URL, helix::json_util::safe_dump(pending), 30);
 
-        if (shutting_down_.load()) {
-            spdlog::debug("[TelemetryManager] Shutting down, aborting send result processing");
-            return;
-        }
+            if (shutting_down_.load()) {
+                spdlog::debug("[TelemetryManager] Shutting down, aborting send result processing");
+                return;
+            }
 
-        int status_code = resp ? static_cast<int>(resp->status_code) : 0;
+            if (status_code < 200 || status_code >= 300) {
+                // Failure: keep events, increase backoff
+                int new_backoff = std::min(backoff_multiplier_.load() * 2, MAX_BACKOFF_MULTIPLIER);
+                spdlog::warn(
+                    "[TelemetryManager] Send failed (HTTP {}), will retry with backoff={}x",
+                    status_code, new_backoff);
+                backoff_multiplier_.store(new_backoff);
+                return;
+            }
 
-        if (resp && status_code >= 200 && status_code < 300) {
             // Success: remove sent events from queue and persist
-            spdlog::info("[TelemetryManager] Successfully sent {} events (HTTP {})", batch.size(),
+            spdlog::info("[TelemetryManager] Successfully sent {} events (HTTP {})", pending.size(),
                          status_code);
-            remove_sent_events(batch.size());
+            remove_sent_events(pending.size());
             save_queue();
             backoff_multiplier_.store(1);
-        } else {
-            // Failure: keep events, increase backoff
-            int new_backoff = std::min(backoff_multiplier_.load() * 2, 7);
-            spdlog::warn("[TelemetryManager] Send failed (HTTP {}), will retry with backoff={}x",
-                         status_code, new_backoff);
-            backoff_multiplier_.store(new_backoff);
+
+            pending = build_batch();
+            if (pending.empty()) {
+                return;
+            }
         }
+
+        spdlog::debug("[TelemetryManager] Drain bound reached, {} events left for the next send",
+                      queue_size());
     } catch (const std::exception& e) {
         spdlog::error("[TelemetryManager] Send exception: {}", e.what());
-        backoff_multiplier_.store(std::min(backoff_multiplier_.load() * 2, 7));
+        backoff_multiplier_.store(std::min(backoff_multiplier_.load() * 2, MAX_BACKOFF_MULTIPLIER));
     }
 }
 
@@ -1111,9 +900,9 @@ std::string TelemetryManager::generate_uuid_v4() {
 
 std::string TelemetryManager::hash_device_id(const std::string& uuid, const std::string& salt) {
     // Double-hash: SHA-256(SHA-256(uuid) + salt)
-    std::string first_hash = sha256_hex(uuid);
+    std::string first_hash = helix::sha256_hex(uuid);
     std::string combined = first_hash + salt;
-    return sha256_hex(combined);
+    return helix::sha256_hex(combined);
 }
 
 // =============================================================================
@@ -1124,22 +913,11 @@ void TelemetryManager::save_queue() const {
     std::lock_guard<std::mutex> lock(mutex_);
     try {
         std::string path = get_queue_path();
-        std::string tmp_path = path + ".tmp";
-
-        // Write to temp file first, then atomic rename to prevent
-        // empty/corrupt queue file if process is killed mid-write
-        std::ofstream file(tmp_path);
-        if (file.good()) {
-            file << json(queue_).dump(2);
-            file.close();
-            if (std::rename(tmp_path.c_str(), path.c_str()) != 0) {
-                spdlog::warn("[TelemetryManager] Failed to rename queue temp file: {}",
-                             strerror(errno));
-            } else {
-                spdlog::trace("[TelemetryManager] Saved {} events to {}", queue_.size(), path);
-            }
+        if (helix::text_io::write_file_atomic(path, helix::json_util::safe_dump(json(queue_), 2))) {
+            spdlog::trace("[TelemetryManager] Saved {} events to {}", queue_.size(), path);
         } else {
-            spdlog::warn("[TelemetryManager] Failed to open queue file for writing: {}", path);
+            spdlog::warn("[TelemetryManager] Failed to write queue file {}: {}", path,
+                         strerror(errno));
         }
     } catch (const std::exception& e) {
         spdlog::error("[TelemetryManager] Failed to save queue: {}", e.what());
@@ -1311,7 +1089,7 @@ nlohmann::json TelemetryManager::build_crash_event(const nlohmann::json& crash_d
     }
 
     // Add platform (not in crash file — determined at runtime)
-    event["app_platform"] = UpdateChecker::get_platform_key();
+    event["app_platform"] = helix::platform::current_key();
 
     return event;
 }
@@ -1369,14 +1147,6 @@ bool TelemetryManager::enqueue_crash_event_unconditional() {
 }
 
 // =============================================================================
-// LVGL Subject
-// =============================================================================
-
-lv_subject_t* TelemetryManager::enabled_subject() {
-    return &enabled_subject_;
-}
-
-// =============================================================================
 // Internal Helpers
 // =============================================================================
 
@@ -1385,6 +1155,7 @@ void TelemetryManager::enqueue_event(nlohmann::json event) {
 
     // Drop oldest if at capacity
     if (queue_.size() >= MAX_QUEUE_SIZE) {
+        events_dropped_since_send_++;
         spdlog::debug("[TelemetryManager] Queue at capacity ({}), dropping oldest event",
                       MAX_QUEUE_SIZE);
         queue_.erase(queue_.begin());
@@ -1404,7 +1175,7 @@ nlohmann::json TelemetryManager::build_session_event() const {
     // ---- app section ----
     json app;
     app["version"] = HELIX_VERSION;
-    app["platform"] = UpdateChecker::get_platform_key();
+    app["platform"] = helix::platform::current_key();
 
     if (auto* dm = DisplayManager::instance()) {
         int w = dm->width();
@@ -1533,14 +1304,11 @@ nlohmann::json TelemetryManager::build_session_event() const {
         printer["mcu_count"] = static_cast<int>(hw.mcu_list().empty() ? (hw.mcu().empty() ? 0 : 1)
                                                                       : hw.mcu_list().size());
 
-        // Count extruders from heaters list (names starting with "extruder")
-        int extruder_count = 0;
-        for (const auto& heater : hw.heaters()) {
-            if (heater.rfind("extruder", 0) == 0 && heater.rfind("extruder_stepper", 0) != 0) {
-                extruder_count++;
-            }
-        }
-        printer["extruder_count"] = extruder_count;
+        // An extruder count is a tool count: strict grammar, shared with
+        // detection's tool_count heuristic, so an extruder-prefixed heater
+        // that is not a numbered extruder (extruder_mixing,
+        // extruder_stepper) must not inflate it.
+        printer["extruder_count"] = static_cast<int>(helix::count_extruder_names(hw.heaters()));
 
         printer["has_heated_bed"] = hw.has_heater_bed();
         printer["has_chamber"] = hw.supports_chamber();
@@ -1554,7 +1322,7 @@ nlohmann::json TelemetryManager::build_session_event() const {
 
         // Detected printer type (generic model name, not PII)
         {
-            const auto& ptype = get_printer_state().get_printer_type();
+            const auto& ptype = get_printer_state().profile_state().printer_type();
             if (!ptype.empty()) {
                 printer["detected_model"] = ptype;
             }
@@ -1605,10 +1373,7 @@ nlohmann::json TelemetryManager::build_session_event() const {
         if (spoolman_subj && lv_subject_get_int(spoolman_subj) > 0) {
             features.push_back("spoolman");
         }
-        if (ps.is_phase_tracking_enabled()) {
-            features.push_back("phase_tracking");
-        }
-        if (ps.service_has_helix_plugin()) {
+        if (ps.plugin_status_state().service_has_helix_plugin()) {
             features.push_back("helix_plugin");
         }
 
@@ -1715,7 +1480,7 @@ nlohmann::json TelemetryManager::build_memory_snapshot_event(const std::string& 
     event["device_id"] = get_hashed_device_id();
     event["timestamp"] = get_timestamp();
     event["app_version"] = HELIX_VERSION;
-    event["app_platform"] = UpdateChecker::get_platform_key();
+    event["app_platform"] = helix::platform::current_key();
     event["trigger"] = trigger;
 
     // Calculate uptime from init_time_
@@ -1781,7 +1546,7 @@ TelemetryManager::build_memory_warning_event(const helix::MemoryWarningEvent& wa
     event["device_id"] = get_hashed_device_id();
     event["timestamp"] = get_timestamp();
     event["app_version"] = HELIX_VERSION;
-    event["app_platform"] = UpdateChecker::get_platform_key();
+    event["app_platform"] = helix::platform::current_key();
     event["level"] = helix::pressure_level_to_string(warning.level);
     event["reason"] = warning.reason;
 
@@ -1865,9 +1630,9 @@ nlohmann::json TelemetryManager::build_hw_fans_section(const helix::PrinterDisco
 nlohmann::json TelemetryManager::build_hw_sensors_section(const helix::PrinterDiscovery& hw) {
     json sensors;
     sensors["filament"] = static_cast<int>(FilamentSensorManager::instance().sensor_count());
+    sensors["load_cell"] = static_cast<int>(sensors::LoadCellManager::instance().sensor_count());
     sensors["temperature_extra"] =
         static_cast<int>(sensors::TemperatureSensorManager::instance().sensor_count());
-    sensors["color"] = static_cast<int>(sensors::ColorSensorManager::instance().sensor_count());
     sensors["accel"] = static_cast<int>(sensors::AccelSensorManager::instance().sensor_count());
 
     // Name-level data for printer detection analysis
@@ -1934,12 +1699,21 @@ nlohmann::json TelemetryManager::build_hw_ams_section(const helix::PrinterDiscov
     case AmsType::CFS:
         ams["type"] = "cfs";
         break;
+    case AmsType::QIDI_BOX:
+        ams["type"] = "qidi_box";
+        break;
+    case AmsType::OPENAMS:
+        ams["type"] = "openams";
+        break;
     default:
         ams["type"] = "unknown";
         break;
     }
     ams["unit_count"] = lv_subject_get_int(AmsState::instance().get_backend_count_subject());
-    ams["total_slots"] = lv_subject_get_int(AmsState::instance().get_slot_count_subject());
+    // Bays that exist: the slot-count subject is the index span, which counts a
+    // box held at its address while off the bus.
+    AmsBackend* ams_backend = AmsState::instance().get_backend();
+    ams["total_slots"] = ams_backend ? ams_backend->get_system_info().present_slot_count() : 0;
     return ams;
 }
 
@@ -1983,7 +1757,7 @@ nlohmann::json TelemetryManager::build_hardware_profile_event() const {
         // ---- printer section ----
         json printer;
         {
-            const auto& ptype = get_printer_state().get_printer_type();
+            const auto& ptype = get_printer_state().profile_state().printer_type();
             if (!ptype.empty()) {
                 printer["detected_model"] = ptype;
             }
@@ -2032,14 +1806,10 @@ nlohmann::json TelemetryManager::build_hardware_profile_event() const {
             }
 
             // ---- extruders section ----
+            // The same tool count the session event's extruder_count
+            // reports, through the same counter.
             json extruders;
-            int extruder_count = 0;
-            for (const auto& heater : hw.heaters()) {
-                if (heater.rfind("extruder", 0) == 0 && heater.rfind("extruder_stepper", 0) != 0) {
-                    extruder_count++;
-                }
-            }
-            extruders["count"] = extruder_count;
+            extruders["count"] = static_cast<int>(helix::count_extruder_names(hw.heaters()));
             extruders["has_chamber_heater"] = hw.has_chamber_heater();
             extruders["has_heater_bed"] = hw.has_heater_bed();
             event["extruders"] = extruders;
@@ -2105,8 +1875,8 @@ nlohmann::json TelemetryManager::build_hardware_profile_event() const {
 
         // ---- plugins section ----
         json plugins;
-        plugins["helix_plugin_installed"] = get_printer_state().service_has_helix_plugin();
-        plugins["phase_tracking_enabled"] = get_printer_state().is_phase_tracking_enabled();
+        plugins["helix_plugin_installed"] =
+            get_printer_state().plugin_status_state().service_has_helix_plugin();
         event["plugins"] = plugins;
 
         // ---- display_backend ----
@@ -2130,7 +1900,7 @@ nlohmann::json TelemetryManager::build_settings_snapshot_event() const {
     event["device_id"] = get_hashed_device_id();
     event["timestamp"] = get_timestamp();
     event["app_version"] = HELIX_VERSION;
-    event["app_platform"] = UpdateChecker::get_platform_key();
+    event["app_platform"] = helix::platform::current_key();
 
     const auto& active_theme = theme_manager_get_active_theme();
     bool dark_mode = DisplaySettingsManager::instance().get_dark_mode();
@@ -2179,7 +1949,7 @@ nlohmann::json TelemetryManager::build_panel_usage_event() const {
     event["device_id"] = get_hashed_device_id();
     event["timestamp"] = get_timestamp();
     event["app_version"] = HELIX_VERSION;
-    event["app_platform"] = UpdateChecker::get_platform_key();
+    event["app_platform"] = helix::platform::current_key();
 
     // Session duration from init_time_
     auto now = std::chrono::steady_clock::now();
@@ -2444,7 +2214,7 @@ void TelemetryManager::ensure_device_id() {
 
         std::ofstream file(device_path);
         if (file.good()) {
-            file << data.dump(2);
+            file << helix::json_util::safe_dump(data, 2);
             spdlog::debug("[TelemetryManager] Saved device identity to {}", device_path);
         } else {
             spdlog::error("[TelemetryManager] Failed to write device identity to {}", device_path);
@@ -2494,7 +2264,7 @@ nlohmann::json TelemetryManager::build_performance_snapshot_event() const {
     event["device_id"] = get_hashed_device_id();
     event["timestamp"] = get_timestamp();
     event["app_version"] = HELIX_VERSION;
-    event["app_platform"] = UpdateChecker::get_platform_key();
+    event["app_platform"] = helix::platform::current_key();
     event["snapshot_seq"] = snapshot_seq_;
     event["is_shutdown"] = is_shutdown_snapshot_;
 
@@ -2619,7 +2389,7 @@ nlohmann::json TelemetryManager::build_feature_adoption_event() const {
     event["device_id"] = get_hashed_device_id();
     event["timestamp"] = get_timestamp();
     event["app_version"] = HELIX_VERSION;
-    event["app_platform"] = UpdateChecker::get_platform_key();
+    event["app_platform"] = helix::platform::current_key();
 
     auto has_panel = [&](const std::string& name) -> bool {
         auto it = panel_visits_.find(name);
@@ -2720,7 +2490,7 @@ nlohmann::json TelemetryManager::build_settings_changes_event() const {
     event["device_id"] = get_hashed_device_id();
     event["timestamp"] = get_timestamp();
     event["app_version"] = HELIX_VERSION;
-    event["app_platform"] = UpdateChecker::get_platform_key();
+    event["app_platform"] = helix::platform::current_key();
 
     json changes = json::array();
     for (const auto& c : pending_settings_changes_) {
@@ -2800,7 +2570,7 @@ nlohmann::json TelemetryManager::build_async_lifetime_snapshot_event(
     event["device_id"] = get_hashed_device_id();
     event["timestamp"] = get_timestamp();
     event["app_version"] = HELIX_VERSION;
-    event["app_platform"] = UpdateChecker::get_platform_key();
+    event["app_platform"] = helix::platform::current_key();
 
     auto now = std::chrono::steady_clock::now();
     auto uptime = std::chrono::duration_cast<std::chrono::seconds>(now - init_time_);
@@ -2933,17 +2703,12 @@ void TelemetryManager::save_snapshot_state() const {
     state["klippy_error_count"] = klippy_error_count_;
     state["klippy_shutdown_count"] = klippy_shutdown_count_;
 
-    auto path = fs::path(config_dir_) / "telemetry_snapshot.json";
-    auto tmp_path = fs::path(config_dir_) / "telemetry_snapshot.json.tmp";
-
-    try {
-        std::ofstream ofs(tmp_path);
-        ofs << state.dump(2);
-        ofs.close();
-        fs::rename(tmp_path, path);
-        spdlog::debug("[TelemetryManager] Snapshot state saved to {}", path.string());
-    } catch (const std::exception& e) {
-        spdlog::warn("[TelemetryManager] Failed to save snapshot state: {}", e.what());
+    const std::string path = (fs::path(config_dir_) / "telemetry_snapshot.json").string();
+    if (helix::text_io::write_file_atomic(path, helix::json_util::safe_dump(state, 2))) {
+        spdlog::debug("[TelemetryManager] Snapshot state saved to {}", path);
+    } else {
+        spdlog::warn("[TelemetryManager] Failed to save snapshot state to {}: {}", path,
+                     strerror(errno));
     }
 }
 
@@ -3047,7 +2812,7 @@ void on_print_state_changed_for_telemetry(lv_observer_t* observer, lv_subject_t*
     // Track the highest print start phase reached during this print.
     // Read it on every state change so we capture the max before it resets to IDLE.
     auto& ps = get_printer_state();
-    int phase = lv_subject_get_int(ps.get_print_start_phase_subject());
+    int phase = lv_subject_get_int(ps.print_state().get_print_start_phase_subject());
     if (phase > s_telemetry_max_phase) {
         s_telemetry_max_phase = phase;
     }
@@ -3061,7 +2826,7 @@ void on_print_state_changed_for_telemetry(lv_observer_t* observer, lv_subject_t*
     if (current == PrintJobState::PRINTING && s_telemetry_prev_state != PrintJobState::PAUSED) {
         s_telemetry_max_phase = 0;
         // Re-read phase in case it's already set
-        phase = lv_subject_get_int(ps.get_print_start_phase_subject());
+        phase = lv_subject_get_int(ps.print_state().get_print_start_phase_subject());
         if (phase > s_telemetry_max_phase) {
             s_telemetry_max_phase = phase;
         }
@@ -3073,7 +2838,7 @@ void on_print_state_changed_for_telemetry(lv_observer_t* observer, lv_subject_t*
         // Fetch file metadata to populate filament info for this print.
         // Note: if print ends before the async callback arrives, filament data
         // will be empty — this is acceptable (benign race, telemetry best-effort).
-        const char* filename = lv_subject_get_string(ps.get_print_filename_subject());
+        const char* filename = lv_subject_get_string(ps.print_state().get_print_filename_subject());
         if (filename && filename[0] != '\0') {
             std::string fname(filename);
             spdlog::debug("[Telemetry] Fetching metadata for filament info: {}", fname);
@@ -3091,26 +2856,29 @@ void on_print_state_changed_for_telemetry(lv_observer_t* observer, lv_subject_t*
                         int64_t fsize = metadata.size;
                         int est_dur = static_cast<int>(metadata.estimated_time);
                         std::string slicer_name = metadata.slicer;
-                        helix::ui::queue_update([ftype = std::move(ftype), ftotal, has_thumb, fsize,
-                                                 est_dur, slicer_name = std::move(slicer_name)]() {
-                            s_telemetry_filament_type = ftype;
-                            s_telemetry_filament_used_mm = ftotal;
-                            spdlog::debug("[Telemetry] Cached filament: type='{}', total={:.1f}mm",
-                                          s_telemetry_filament_type, s_telemetry_filament_used_mm);
+                        helix::ui::queue_update(
+                            "telemetry_manager::on_print_state_changed_for_telemetry",
+                            [ftype = std::move(ftype), ftotal, has_thumb, fsize, est_dur,
+                             slicer_name = std::move(slicer_name)]() {
+                                s_telemetry_filament_type = ftype;
+                                s_telemetry_filament_used_mm = ftotal;
+                                spdlog::debug(
+                                    "[Telemetry] Cached filament: type='{}', total={:.1f}mm",
+                                    s_telemetry_filament_type, s_telemetry_filament_used_mm);
 
-                            // Determine print source: "in_app" if we started it,
-                            // "external" otherwise (Mainsail, Fluidd, Obico, etc.)
-                            bool in_app =
-                                TelemetryManager::instance().consume_print_started_in_app();
-                            std::string source = in_app ? "in_app" : "external";
-                            int tools = ToolState::instance().tool_count();
-                            bool ams =
-                                lv_subject_get_int(AmsState::instance().get_ams_type_subject()) !=
-                                static_cast<int>(AmsType::NONE);
+                                // Determine print source: "in_app" if we started it,
+                                // "external" otherwise (Mainsail, Fluidd, Obico, etc.)
+                                bool in_app =
+                                    TelemetryManager::instance().consume_print_started_in_app();
+                                std::string source = in_app ? "in_app" : "external";
+                                int tools = ToolState::instance().tool_count();
+                                bool ams = lv_subject_get_int(
+                                               AmsState::instance().get_ams_type_subject()) !=
+                                           static_cast<int>(AmsType::NONE);
 
-                            TelemetryManager::instance().record_print_start_context(
-                                source, has_thumb, fsize, est_dur, slicer_name, tools, ams);
-                        });
+                                TelemetryManager::instance().record_print_start_context(
+                                    source, has_thumb, fsize, est_dur, slicer_name, tools, ams);
+                            });
                     },
                     [](const MoonrakerError& error) {
                         spdlog::warn(
@@ -3127,8 +2895,7 @@ void on_print_state_changed_for_telemetry(lv_observer_t* observer, lv_subject_t*
     // wire question is the right one: a preparing job that never confirms is
     // retired by PrinterPrintState and must not emit an outcome event here.
     bool was_active = printer_has_job(s_telemetry_prev_state);
-    bool is_terminal = (current == PrintJobState::COMPLETE || current == PrintJobState::CANCELLED ||
-                        current == PrintJobState::ERROR);
+    bool is_terminal = job_has_ended(current);
 
     if (was_active && is_terminal) {
         // Map PrintJobState to telemetry outcome string
@@ -3149,12 +2916,13 @@ void on_print_state_changed_for_telemetry(lv_observer_t* observer, lv_subject_t*
         }
 
         // Gather data from PrinterState subjects
-        int duration_sec = lv_subject_get_int(ps.get_print_elapsed_subject());
+        int duration_sec = lv_subject_get_int(ps.print_state().get_print_elapsed_subject());
         int phases_completed = s_telemetry_max_phase;
 
         // Temperatures: subjects store decidegrees (value * 10), divide by 10
-        int nozzle_temp_deci = lv_subject_get_int(ps.get_active_extruder_target_subject());
-        int bed_temp_deci = lv_subject_get_int(ps.get_bed_target_subject());
+        int nozzle_temp_deci =
+            lv_subject_get_int(ps.temperature_state().get_active_extruder_target_subject());
+        int bed_temp_deci = lv_subject_get_int(ps.temperature_state().get_bed_target_subject());
         int nozzle_temp = helix::ui::temperature::deci_to_degrees(nozzle_temp_deci);
         int bed_temp = helix::ui::temperature::deci_to_degrees(bed_temp_deci);
 
@@ -3190,6 +2958,6 @@ ObserverGuard TelemetryManager::init_print_outcome_observer() {
     s_telemetry_filament_used_mm = 0.0f;
 
     spdlog::debug("[Telemetry] Print outcome observer registered");
-    return ObserverGuard(get_printer_state().get_print_state_enum_subject(),
+    return ObserverGuard(get_printer_state().print_state().get_print_state_enum_subject(),
                          on_print_state_changed_for_telemetry, nullptr);
 }

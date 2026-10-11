@@ -41,9 +41,11 @@ class PendingStartupWarnings {
     /**
      * @brief Enqueue a warning to be shown once the toast system is up.
      *
-     * Safe to call from any thread.
+     * Safe to call from any thread. @p duration_ms is the toast duration the
+     * drain should use; 0 keeps the toast on screen until closed (see
+     * ToastManager::show_with_detail).
      */
-    void enqueue(Severity severity, std::string message);
+    void enqueue(Severity severity, std::string message, uint32_t duration_ms = 8000);
 
     /**
      * @brief Pop all queued warnings and invoke the callback for each, in FIFO order.
@@ -51,7 +53,7 @@ class PendingStartupWarnings {
      * Must be called on the main/UI thread. The callback typically forwards to
      * ToastManager::show. After this call returns, the queue is empty.
      */
-    void drain(const std::function<void(Severity, const std::string&)>& on_warning);
+    void drain(const std::function<void(Severity, const std::string&, uint32_t)>& on_warning);
 
     /** @brief Test helper: clear all queued warnings without invoking any callback. */
     void clear();
@@ -60,8 +62,14 @@ class PendingStartupWarnings {
     PendingStartupWarnings() = default;
     ~PendingStartupWarnings() = default;
 
+    struct Entry {
+        Severity severity;
+        std::string message;
+        uint32_t duration_ms;
+    };
+
     std::mutex mu_;
-    std::vector<std::pair<Severity, std::string>> pending_;
+    std::vector<Entry> pending_;
 };
 
 } // namespace helix

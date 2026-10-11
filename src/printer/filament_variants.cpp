@@ -2,15 +2,15 @@
 
 #include "filament_variants.h"
 
+#include "filament_catalog.h"
 #include "filament_database.h"
+#include "text_io.h"
 
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <cctype>
-#include <fstream>
 #include <mutex>
-#include <sstream>
 
 #include "hv/json.hpp"
 
@@ -38,7 +38,7 @@ struct VariantAffix {
 /// Known variant affixes, matched case-insensitively and ONLY when delimited by
 /// a '-', '_' or ' ' separator. Derived from the type strings actually present
 /// in assets/filaments.json (CF, GF, AERO), the variant rows in
-/// filament_database.h MATERIALS[] (Silk/Matte/Wood/Marble/Metal/Glow), and the
+/// the material-type table (Silk/Matte/Wood/Marble/Metal/Glow), and the
 /// prefixed product names the catalog carries (HT-PLA-GF, PLA-HS, PETG+HS,
 /// PLA-LW, Bambu PETG HF).
 ///
@@ -130,14 +130,6 @@ const VariantAffix* find_variant_affix(std::string_view token) {
     return nullptr;
 }
 
-std::string_view trim(std::string_view s) {
-    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front())))
-        s.remove_prefix(1);
-    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back())))
-        s.remove_suffix(1);
-    return s;
-}
-
 /// One pass of affix removal. Returns true if @p s was shortened. When
 /// @p removed is non-null it receives the table row that was stripped, or
 /// nullptr for the trailing-"+" rule (which has no row).
@@ -207,7 +199,7 @@ std::string_view family_override(std::string_view name) {
 
 std::set<std::string> filled_affixes_of(std::string_view name) {
     std::set<std::string> filled;
-    std::string_view work = trim(name);
+    std::string_view work = helix::text_io::trim(name);
     if (work.empty()) {
         return filled;
     }
@@ -225,8 +217,7 @@ std::set<std::string> filled_affixes_of(std::string_view name) {
         }
         if (removed && removed->filled) {
             std::string key(removed->name);
-            std::transform(key.begin(), key.end(), key.begin(),
-                           [](unsigned char c) { return std::toupper(c); });
+            key = helix::text_io::to_upper(key);
             filled.insert(std::move(key));
         }
     }
@@ -239,10 +230,6 @@ std::mutex g_orca_mutex;
 bool g_orca_loaded = false;
 std::set<std::string> g_orca_library_types;
 std::map<std::string, std::string> g_orca_overrides;
-
-// Same search order as FilamentCatalog::BUILTIN_PATHS (filament_catalog.cpp:19).
-const char* ORCA_TABLE_PATHS[] = {"assets/filaments.json", "../assets/filaments.json",
-                                  "/opt/helixscreen/assets/filaments.json"};
 
 /**
  * @brief SAX reader for the two Orca tables, skipping the rest of the file
@@ -345,7 +332,7 @@ class OrcaTableSax : public nlohmann::json_sax<nlohmann::json> {
 };
 
 /**
- * @brief Read both Orca tables out of a JSON stream
+ * @brief Read both Orca tables out of JSON text
  *
  * @param[out] error Set only when the document is malformed; a well-formed
  *                   document whose root is not an object returns false with
@@ -353,10 +340,10 @@ class OrcaTableSax : public nlohmann::json_sax<nlohmann::json> {
  *                   apart from "wrong shape" (skip quietly).
  * @return true when the tables were extracted from an object root
  */
-bool read_orca_tables(std::istream& in, std::set<std::string>& types,
+bool read_orca_tables(const std::string& text, std::set<std::string>& types,
                       std::map<std::string, std::string>& overrides, std::string& error) {
     OrcaTableSax sax;
-    if (!nlohmann::json::sax_parse(in, &sax)) {
+    if (!nlohmann::json::sax_parse(text, &sax)) {
         error = sax.error;
         return false;
     }
@@ -373,14 +360,14 @@ void load_orca_tables_locked() {
     if (g_orca_loaded)
         return;
     g_orca_loaded = true; // one attempt; a missing asset must not retry per call
-    for (const char* path : ORCA_TABLE_PATHS) {
-        std::ifstream f(path);
-        if (!f.is_open())
+    for (const auto& path : helix::printer::FilamentCatalog::builtin_candidate_paths()) {
+        const auto text = helix::text_io::read_file(path);
+        if (!text)
             continue;
         std::set<std::string> types;
         std::map<std::string, std::string> overrides;
         std::string error;
-        if (!read_orca_tables(f, types, overrides, error)) {
+        if (!read_orca_tables(*text, types, overrides, error)) {
             if (!error.empty()) {
                 spdlog::warn("[filament] Orca table parse failed {}: {}", path, error);
             }
@@ -415,7 +402,7 @@ const std::string* find_library_type(const std::string& candidate) {
 } // namespace
 
 std::string extract_base_material(std::string_view name) {
-    std::string_view work = trim(name);
+    std::string_view work = helix::text_io::trim(name);
     if (work.empty()) {
         return std::string(name);
     }
@@ -485,8 +472,7 @@ bool FilamentVariantsTestAccess::parse_orca_tables(const std::string& json_text,
                                                    std::set<std::string>& library_types,
                                                    std::map<std::string, std::string>& overrides,
                                                    std::string& error) {
-    std::istringstream in(json_text);
-    return read_orca_tables(in, library_types, overrides, error);
+    return read_orca_tables(json_text, library_types, overrides, error);
 }
 
 void FilamentVariantsTestAccess::set_orca_tables(std::set<std::string> library_types,
@@ -543,7 +529,7 @@ void merge_user_orca_overrides(const std::map<std::string, std::string>& overrid
 }
 
 std::string orca_match_type(std::string_view display_type) {
-    std::string work(trim(display_type));
+    std::string work(helix::text_io::trim(display_type));
     if (work.empty())
         return "";
 

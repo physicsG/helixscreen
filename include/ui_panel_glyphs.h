@@ -23,7 +23,6 @@
  * Display-only panel with no subjects or printer connectivity.
  *
  * @see PanelBase for base class documentation
- * @see TestPanel for similar simple panel pattern
  */
 class GlyphsPanel : public PanelBase {
   public:

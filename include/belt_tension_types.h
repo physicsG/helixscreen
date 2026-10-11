@@ -29,10 +29,8 @@ namespace helix::calibration {
 
 /// Belt path identifiers for CoreXY
 enum class BeltPath {
-    PATH_A, ///< CoreXY diagonal A (1,1)
-    PATH_B, ///< CoreXY diagonal B (1,-1)
-    X_AXIS, ///< Cartesian X
-    Y_AXIS, ///< Cartesian Y
+    PATH_A, ///< CoreXY diagonal A (1,-1)
+    PATH_B, ///< CoreXY diagonal B (1,1)
 };
 
 /// Kinematics type detected from printer
@@ -41,20 +39,6 @@ enum class KinematicsType {
     COREXY,
     CARTESIAN,
 };
-
-// ============================================================================
-// Status Evaluation
-// ============================================================================
-
-/// Status thresholds for belt tension
-enum class BeltStatus {
-    GOOD,    ///< Within +/-tolerance of target
-    WARNING, ///< 1-2x tolerance from target
-    BAD,     ///< >2x tolerance from target
-};
-
-/// Convert BeltStatus to user-facing display string
-const char* belt_status_to_string(BeltStatus status);
 
 // ============================================================================
 // Hardware Detection
@@ -68,54 +52,79 @@ struct BeltTensionHardware {
 };
 
 // ============================================================================
-// Measurement Results
+// Path Comparison
 // ============================================================================
 
-/// Result for a single belt path measurement
-struct BeltMeasurement {
-    BeltPath path = BeltPath::PATH_A;
-    float peak_frequency = 0.0f; ///< Detected resonant frequency (Hz)
-    float peak_amplitude = 0.0f; ///< PSD amplitude at peak
-    BeltStatus status = BeltStatus::GOOD;
-    std::vector<std::pair<float, float>> freq_response; ///< (freq_hz, psd)
+/// One path's response: (frequency Hz, psd_xyz) pairs, ascending frequency.
+using BeltCurve = std::vector<std::pair<float, float>>;
 
-    [[nodiscard]] bool is_valid() const {
-        return peak_frequency > 0.0f;
-    }
+enum class BeltVerdict { MATCHED, CLOSE, ADJUST };
+
+/// Provisional: from one real capture pair so far. Replace from more captures
+/// before the verdict gains directional advice (prestonbrown/helixscreen#1721).
+namespace belt_verdict {
+inline constexpr float PEAK_THRESHOLD_FRACTION = 0.10f; ///< of the in-band maximum
+inline constexpr float PAIR_MAX_HZ = 10.0f;             ///< pairing distance ceiling
+inline constexpr float MATCHED_SIMILARITY = 90.0f;
+inline constexpr float CLOSE_SIMILARITY = 75.0f;
+} // namespace belt_verdict
+
+/// One local maximum of a curve inside the analysis band.
+struct BeltPeak {
+    float freq_hz = 0.0f;
+    float amplitude = 0.0f;
 };
 
-/// Complete belt tension results
-struct BeltTensionResult {
-    BeltMeasurement path_a;
-    BeltMeasurement path_b;
-    float similarity_percent = 0.0f; ///< Pearson correlation * 100
-    float frequency_delta = 0.0f;    ///< |A - B| in Hz
-    float target_frequency = 110.0f; ///< Target Hz
-    float tolerance = 10.0f;         ///< +/-Hz tolerance
-
-    [[nodiscard]] bool has_path_a() const {
-        return path_a.is_valid();
-    }
-    [[nodiscard]] bool has_path_b() const {
-        return path_b.is_valid();
-    }
-    [[nodiscard]] bool is_complete() const {
-        return has_path_a() && has_path_b();
-    }
-
-    /// Evaluate overall status based on thresholds
-    [[nodiscard]] BeltStatus overall_status() const;
-
-    /// Generate user-facing recommendation string
-    [[nodiscard]] std::string recommendation() const;
+/// A peak from each curve the pairing judged the same resonance.
+struct BeltPeakPair {
+    BeltPeak a;
+    BeltPeak b;
 };
+
+/// Peaks of two curves paired by frequency, Shake&Tune's _pair_peaks.
+struct BeltPeakPairing {
+    std::vector<BeltPeakPair> pairs;  ///< sorted by a.amplitude + b.amplitude, descending
+    std::vector<BeltPeak> unpaired_a; ///< A peaks with no B partner within threshold_hz
+    std::vector<BeltPeak> unpaired_b;
+    float threshold_hz = 0.0f;
+};
+
+struct BeltComparison {
+    bool valid = false; ///< false when either curve has < 3 in-band bins
+    float similarity_percent = 0.0f;
+    BeltVerdict verdict = BeltVerdict::ADJUST; ///< from similarity only
+    BeltPeakPairing peaks;
+};
+
+/// Pearson correlation x100 of the two curves inside the band, clamped to 0..100.
+/// B is linearly interpolated onto A's in-band frequencies. Returns 0 when either
+/// curve has fewer than 3 in-band bins or zero variance.
+[[nodiscard]] float band_similarity(const BeltCurve& a, const BeltCurve& b, float band_min_hz,
+                                    float band_max_hz);
+
+/// Local maxima inside the band: value > left neighbour, value >= right neighbour,
+/// value >= PEAK_THRESHOLD_FRACTION * the in-band maximum. Ascending frequency.
+[[nodiscard]] std::vector<BeltPeak> detect_belt_peaks(const BeltCurve& curve, float band_min_hz,
+                                                      float band_max_hz);
+
+/// Greedy closest-first pairing of two peak lists. The distance threshold is
+/// min(median + 1.5 * IQR over all |fa - fb|, PAIR_MAX_HZ) - PAIR_MAX_HZ when
+/// there are no distances at all.
+[[nodiscard]] BeltPeakPairing pair_belt_peaks(const std::vector<BeltPeak>& a,
+                                              const std::vector<BeltPeak>& b);
+
+/// Tier from similarity_percent alone.
+[[nodiscard]] BeltVerdict verdict_for_similarity(float similarity_percent);
+
+/// Compare two belt-path resonance curves inside the printer's sweep range:
+/// band-limited similarity (the headline) and paired peaks. Invalid when either
+/// curve has < 3 in-band bins.
+[[nodiscard]] BeltComparison compare_belt_paths(const BeltCurve& a, const BeltCurve& b,
+                                                float band_min_hz, float band_max_hz);
 
 // ============================================================================
 // Analysis Functions
 // ============================================================================
-
-/// Evaluate belt status from frequency vs target
-BeltStatus evaluate_belt_status(float measured_hz, float target_hz, float tolerance_hz);
 
 /// Calculate Pearson correlation between two PSD curves (returns 0-100)
 float calculate_similarity(const std::vector<std::pair<float, float>>& curve_a,
@@ -165,8 +174,6 @@ PeakResult find_peak_frequency(const std::vector<std::pair<float, float>>& psd,
 
 using BeltHardwareDetectCallback = std::function<void(const BeltTensionHardware&)>;
 using BeltProgressCallback = std::function<void(int percent)>;
-using BeltMeasurementCallback = std::function<void(const BeltMeasurement&)>;
-using BeltResultCallback = std::function<void(const BeltTensionResult&)>;
 using BeltErrorCallback = std::function<void(const std::string& message)>;
 
 } // namespace helix::calibration

@@ -32,6 +32,7 @@
 
 #include "ams_backend_afc.h"
 #include "ams_types.h"
+#include "test_helpers/afc_test_access.h"
 
 #include <algorithm>
 #include <any>
@@ -45,6 +46,8 @@ using namespace helix;
 // ============================================================================
 // Test helper for multi-extruder AFC parsing
 // ============================================================================
+
+namespace helix {
 
 /**
  * @brief Test helper exposing AFC internals for multi-extruder testing
@@ -110,7 +113,7 @@ class AmsBackendAfcMultiExtruderHelper : public AmsBackendAfc {
             system_info_.tool_to_slot_map.push_back(i);
         }
 
-        slots_.initialize("Box Turtle 1", names);
+        AfcTestAccess::slots(*this).initialize("Box Turtle 1", names);
     }
 
     // Set discovered lanes (delegates to base)
@@ -121,11 +124,11 @@ class AmsBackendAfcMultiExtruderHelper : public AmsBackendAfc {
 
     // Accessors for extruder state
     int get_num_extruders() const {
-        return num_extruders_;
+        return AfcTestAccess::num_extruders(*this);
     }
 
     const std::vector<AfcExtruderInfo>& get_extruders() const {
-        return extruders_;
+        return AfcTestAccess::extruders(*this);
     }
 
     // Access system_info for assertions
@@ -154,6 +157,7 @@ class AmsBackendAfcMultiExtruderHelper : public AmsBackendAfc {
         return false;
     }
 };
+} // namespace helix
 
 // ============================================================================
 // AfcExtruderInfo struct tests
@@ -354,6 +358,10 @@ TEST_CASE("AFC.system webhook: each extruder tracks its available lanes",
 TEST_CASE("AFC single extruder: single bowden_length action", "[ams][afc][multi_extruder]") {
     AmsBackendAfcMultiExtruderHelper helper;
     helper.initialize_test_lanes_with_slots(4);
+
+    // A real single-extruder machine (Box Turtle) names its hub, and the
+    // generic bowden slider is HUB-keyed — it is only advertised where one is.
+    helper.feed_afc_state(nlohmann::json{{"hubs", nlohmann::json::array({"Turtle_1"})}});
 
     // Single extruder — should get the standard single bowden_length action
     auto actions = helper.get_device_actions();

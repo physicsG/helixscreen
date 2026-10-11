@@ -137,7 +137,7 @@ install_klipper_include_for_printer() {
         } | $(file_sudo "$printer_cfg") tee -a "$printer_cfg" >/dev/null
 
         if grep -qF "$include_line" "$printer_cfg" 2>/dev/null; then
-            log_success "Added [include helixscreen/${printer_id}.cfg] to printer.cfg"
+            log_note "Added [include helixscreen/${printer_id}.cfg] to printer.cfg"
             _record_klipper_include "include:${printer_cfg}:helixscreen/${printer_id}.cfg"
             # A Klipper restart / firmware_restart is needed to pick up the new
             # include. We do not invent a restart path here; the installer's

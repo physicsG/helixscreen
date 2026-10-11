@@ -9,7 +9,8 @@
 #include "ui_gcode_viewer.h"
 #include "ui_icon.h"
 #include "ui_modal.h"
-#include "ui_nav_manager.h"
+#include "ui_nav.h"
+#include "ui_panel_common.h"
 #include "ui_print_preparation_manager.h"
 #include "ui_timer_guard.h"
 #include "ui_toast_manager.h"
@@ -19,11 +20,13 @@
 #include "ams_remap.h"
 #include "ams_state.h"
 #include "app_globals.h"
+#include "bed_dimensions.h"
 #include "color_utils.h"
 #include "config.h"
 #include "display_settings_manager.h"
 #include "gcode_footer_summary.h"
 #include "gcode_parser.h"
+#include "gcode_preview_fetcher.h"
 #include "gcode_preview_setup.h"
 #include "gcode_temp_reclaim.h"
 #include "host_identity.h"
@@ -32,18 +35,26 @@
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "memory_utils.h"
 #include "moonraker_types.h"
+#include "moonraker_validation.h"
 #include "observer_factory.h"
+#include "pre_start_exclude.h"
+#include "print_detail_layout.h"
+#include "print_status_preview_decision.h"
 #include "runtime_config.h"
 #include "settings_manager.h"
+#include "text_io.h"
 #include "theme_manager.h"
 #include "tool_state.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
-#include <fstream>
+#include <cstdio>
 
 namespace helix::ui {
+
+namespace tio = ::helix::text_io;
 
 // ============================================================================
 // Static instance pointer for callback access
@@ -90,6 +101,9 @@ PrintSelectDetailView::~PrintSelectDetailView() {
 
     spdlog::trace("[DetailView] Destroyed");
 
+    // The tree can outlive this view; its delete event must not reach a freed `this`.
+    uninstall_root_delete_hook();
+
     // Cancel the pre-flight readiness safety timer if still armed (LVGL is known
     // initialized here — checked above).
     if (preflight_ready_timeout_timer_) {
@@ -102,9 +116,18 @@ PrintSelectDetailView::~PrintSelectDetailView() {
     // stays armed on a freed `this` when teardown skips it (#1173).
     cancel_progress_timer();
 
+    disarm_viewer_callbacks();
+
+    // A tree deleted externally leaves overlay_root_ naming freed memory.
+    if (tree_deleted_) {
+        helix::nav::clear_on_close(overlay_root_);
+        helix::nav::unregister_overlay(overlay_root_);
+        overlay_root_ = nullptr;
+    }
+
     // Unregister from NavigationManager (fallback if cleanup() wasn't called)
     if (overlay_root_) {
-        NavigationManager::instance().unregister_overlay_instance(overlay_root_);
+        helix::nav::unregister_overlay(overlay_root_);
     }
 
     // Deinitialize subjects to disconnect observers before widgets are deleted
@@ -162,6 +185,7 @@ void PrintSelectDetailView::init_subjects() {
     // Whether the viewer has rendered its first frame (0=no, 1=yes). The
     // thumbnail stays on top until this flips to hide the gray gap.
     UI_MANAGED_SUBJECT_INT(detail_viewer_first_frame_, 0, "detail_viewer_first_frame", subjects_);
+    UI_MANAGED_SUBJECT_INT(detail_viewer_hidden_, 1, "detail_viewer_hidden", subjects_);
 
     // Preview color mode: 0 = actual (loaded slot colors), 1 = sliced (slicer intent)
     UI_MANAGED_SUBJECT_INT(detail_prefer_sliced_colors_, 0, "detail_prefer_sliced_colors",
@@ -180,6 +204,8 @@ void PrintSelectDetailView::init_subjects() {
     // FilamentMappingCard::should_show() after each update(); XML binds
     // via bind_flag_if_eq in print_file_detail.xml.
     UI_MANAGED_SUBJECT_INT(filament_mapping_visible_, 0, "filament_mapping_visible", subjects_);
+    UI_MANAGED_SUBJECT_INT(gcode_rewrite_available_, -1, "detail_gcode_rewrite_available",
+                           subjects_); // SUBJECT_OK: option rows bind it via the renderer lookup
 
     // Whether a tap on the filament card opens the remap picker (0=no,
     // 1=yes). Binds the card's chevron AND its clickable flag in
@@ -187,24 +213,70 @@ void PrintSelectDetailView::init_subjects() {
     // Published alongside filament_mapping_visible_ by
     // publish_card_visibility(), against the same backend snapshot.
     UI_MANAGED_SUBJECT_INT(color_card_remappable_, 0, "color_card_remappable", subjects_);
+    // The three that describe a refusal. Published from the same call as the
+    // chevron so a card cannot be greyed while its chevron still invites a tap.
+    UI_MANAGED_SUBJECT_INT(color_card_remap_needs_setup_, 0, "color_card_remap_needs_setup",
+                           subjects_);
+    UI_MANAGED_SUBJECT_INT(color_card_remap_help_visible_, 0, "color_card_remap_help_visible",
+                           subjects_);
 
     // Empty-tools warning visibility (0=hidden, 1=visible). Set by
     // recompute_preflight() when any T-command-referenced slot is empty.
     UI_MANAGED_SUBJECT_INT(empty_tools_warning_, 0, "empty_tools_warning", subjects_);
 
-    // Pre-print time estimate (formatted string for bind_text)
+    // Options scroll-area overflow (0=everything visible, 1=content hidden
+    // below the visible bottom edge). print_file_detail.xml shows the bottom
+    // fade cue on this; update_options_more_below() is the only writer.
+    UI_MANAGED_SUBJECT_INT(detail_options_more_below_, 0, "detail_options_more_below", subjects_);
+
+    // Pre-print time estimate (formatted string for bind_text); the int twin
+    // hides the whole line when no estimate exists, because an empty string
+    // still occupies a row in the layout.
     UI_MANAGED_SUBJECT_STRING(prep_time_estimate_subject_, prep_time_estimate_buf_, "",
                               "preprint_estimate_text", subjects_);
+    UI_MANAGED_SUBJECT_INT(preprint_estimate_visible_, 0, "preprint_estimate_visible", subjects_);
 
     // Re-color the preview live when a slot's loaded color/presence changes
     // (filament reloaded). Static singleton subject -> plain ObserverGuard, no
     // lifetime token. Handler no-ops while the view is closed.
-    slots_version_observer_ = observe_int_sync<PrintSelectDetailView>(
+    slots_version_observer_ = observe<int>(
         AmsState::instance().get_slots_version_subject(), this,
         [](PrintSelectDetailView* self, int /*version*/) { self->on_ams_state_changed(); },
         AmsState::instance().get_subjects_lifetime());
 
+    // Both land after the card has already published: the plugin probe completes
+    // after first paint, and the Moonraker version arrives with discovery.
+    // Without these the card keeps whatever it decided before either was known.
+    plugin_installed_observer_ = observe<int>(
+        get_printer_state().plugin_status_state().get_helix_plugin_installed_subject(), this,
+        [](PrintSelectDetailView* self, int /*state*/) {
+            self->publish_rewrite_availability();
+            self->publish_card_visibility();
+        },
+        get_printer_state().get_subjects_lifetime());
+    moonraker_degraded_observer_ = observe<int>(
+        get_printer_state().versions_state().get_moonraker_history_degraded_subject(), this,
+        [](PrintSelectDetailView* self, int /*degraded*/) { self->publish_card_visibility(); },
+        get_printer_state().get_subjects_lifetime());
+
+    // Pre-start object picks: a private model and the skip button's subjects.
+    exclude_objects_.init_subjects(false);
+    UI_MANAGED_SUBJECT_INT(detail_exclude_available_, 0, "detail_exclude_available", subjects_);
+    UI_MANAGED_SUBJECT_INT(detail_exclude_pick_count_, 0, "detail_exclude_pick_count", subjects_);
+    UI_MANAGED_SUBJECT_STRING(detail_exclude_pick_count_text_, detail_exclude_pick_count_text_buf_,
+                              "", "detail_exclude_pick_count_text", subjects_);
+    exclude_picks_observer_ = observe<int>(
+        exclude_objects_.get_excluded_objects_version_subject(), this,
+        [](PrintSelectDetailView* self, int) { self->publish_exclude_picks(); },
+        exclude_objects_.get_subjects_lifetime());
+    // A printer switch can add or drop [exclude_object] while a file is open.
+    exclude_capability_observer_ = observe<int>(
+        get_printer_state().capabilities_state().subject(helix::Capability::HasExcludeObject), this,
+        [](PrintSelectDetailView* self, int) { self->refresh_exclude_objects(); },
+        get_printer_state().get_subjects_lifetime());
+
     subjects_initialized_ = true;
+    publish_rewrite_availability();
     spdlog::debug("[DetailView] Initialized pre-print option subjects");
 }
 
@@ -221,8 +293,7 @@ lv_obj_t* PrintSelectDetailView::create(lv_obj_t* parent_screen) {
 
     parent_screen_ = parent_screen;
 
-    overlay_root_ =
-        static_cast<lv_obj_t*>(lv_xml_create(parent_screen_, "print_file_detail", nullptr));
+    overlay_root_ = helix::ui::create_xml_hidden(parent_screen_, "print_file_detail");
 
     if (!overlay_root_) {
         LOG_ERROR_INTERNAL("[DetailView] Failed to create detail view from XML");
@@ -230,17 +301,22 @@ lv_obj_t* PrintSelectDetailView::create(lv_obj_t* parent_screen) {
         return nullptr;
     }
 
+    // A rebuilt view can reach here with the hook still on its previous root,
+    // whose deletion is deferred; take it off before tracking the new one.
+    uninstall_root_delete_hook();
+    // DECLARATIVE_OK: LV_EVENT_DELETE cleanup has no declarative equivalent.
+    lv_obj_add_event_cb(overlay_root_, on_root_deleted, LV_EVENT_DELETE, this);
+    delete_hook_root_ = overlay_root_;
+
     // Set responsive padding for content area
-    lv_obj_t* content_container = lv_obj_find_by_name(overlay_root_, "content_container");
+    lv_obj_t* content_container = find_required(overlay_root_, "content_container", get_name());
     if (content_container) {
         lv_coord_t padding = ui_get_header_content_padding();
         lv_obj_set_style_pad_all(content_container, padding, 0);
     }
 
-    lv_obj_add_flag(overlay_root_, LV_OBJ_FLAG_HIDDEN);
-
     // Store reference to print button for enable/disable state management
-    print_button_ = lv_obj_find_by_name(overlay_root_, "print_button");
+    print_button_ = find_required(overlay_root_, "print_button", get_name());
 
     // Find and configure G-code viewer widget
     gcode_viewer_ = lv_obj_find_by_name(overlay_root_, "detail_gcode_viewer");
@@ -253,7 +329,8 @@ lv_obj_t* PrintSelectDetailView::create(lv_obj_t* parent_screen) {
         // Here the strip IS an overlay over the preview's bottom, so this is a
         // real occlusion (~a third of the card) and the render shifts to clear it.
         helix::ui::set_preview_bottom_occluder(
-            gcode_viewer_, lv_obj_find_by_name(overlay_root_, "detail_metadata_clip"));
+            gcode_viewer_,
+            helix::ui::find_required(overlay_root_, "detail_metadata_clip", get_name()));
 
         // Frame the render the way the thumbnail beside it is framed (lifted
         // square, model centre at 55%), so swapping thumbnail for render is
@@ -272,6 +349,8 @@ lv_obj_t* PrintSelectDetailView::create(lv_obj_t* parent_screen) {
             gcode_viewer_,
             [](lv_obj_t*, void* ud) {
                 auto* self = static_cast<PrintSelectDetailView*>(ud);
+                // Its map and badges belong to the parse just freed; picks stay.
+                self->exclude_mode_.hide();
                 self->show_gcode_viewer(false);
                 self->gcode_loaded_ = false;
                 // gcode_loaded_ flipping false can drop readiness (when the
@@ -294,7 +373,42 @@ lv_obj_t* PrintSelectDetailView::create(lv_obj_t* parent_screen) {
     purge_line_checkbox_ = nullptr;
     timelapse_checkbox_ = nullptr;
     pre_print_options_container_ =
-        lv_obj_find_by_name(overlay_root_, "pre_print_options_container");
+        find_required(overlay_root_, "pre_print_options_container", get_name());
+
+    // The options scroll area feeds two measured rules: the more-below cue
+    // (scroll bottom > 0) and the portrait preview height. Scroll, size and
+    // layout events have no XML trigger; both handlers only measure and
+    // publish, the cue's visibility stays bound in XML. LAYOUT_CHANGED on the
+    // scroll area is the one event that also fires when the CONTENT grows
+    // without any scrolling (option tiles or filament rows arriving after the
+    // view is built), which scroll/size events alone would miss.
+    options_scroll_ = find_required(overlay_root_, "detail_options_scroll", get_name());
+    detail_card_ = find_required(overlay_root_, "detail_card", get_name());
+    if (options_scroll_) {
+        for (lv_event_code_t code : {LV_EVENT_SCROLL, LV_EVENT_SCROLL_END, LV_EVENT_SIZE_CHANGED,
+                                     LV_EVENT_LAYOUT_CHANGED}) {
+            lv_obj_add_event_cb(
+                options_scroll_,
+                [](lv_event_t* e) {
+                    static_cast<PrintSelectDetailView*>(lv_event_get_user_data(e))
+                        ->defer_detail_fit();
+                },
+                code, this);
+        }
+    }
+
+    // Portrait preview sizing is measured layout: it depends on runtime pixel
+    // sizes of the scroll content, so it reacts to the container's layout
+    // rather than any subject. The container was looked up above for its
+    // responsive padding; the same object carries this event.
+    if (content_container) {
+        lv_obj_add_event_cb(
+            content_container,
+            [](lv_event_t* e) {
+                static_cast<PrintSelectDetailView*>(lv_event_get_user_data(e))->defer_detail_fit();
+            },
+            LV_EVENT_LAYOUT_CHANGED, this);
+    }
 
     // Look up and initialize the one filament card. Its children declare
     // clickable=false + event_bubble=true in print_file_detail.xml (L071), so
@@ -303,8 +417,8 @@ lv_obj_t* PrintSelectDetailView::create(lv_obj_t* parent_screen) {
     // NOT a second lv_obj_add_event_cb here, which would fire the remap opener
     // twice per tap. Whether the card is clickable at all, and whether it shows
     // the chevron that says so, both come from color_card_remappable.
-    lv_obj_t* mapping_card = lv_obj_find_by_name(overlay_root_, "filament_mapping_card");
-    lv_obj_t* mapping_rows = lv_obj_find_by_name(overlay_root_, "filament_mapping_rows");
+    lv_obj_t* mapping_card = find_required(overlay_root_, "filament_mapping_card", get_name());
+    lv_obj_t* mapping_rows = find_required(overlay_root_, "filament_mapping_rows", get_name());
     lv_obj_t* mapping_warning = lv_obj_find_by_name(overlay_root_, "filament_mapping_warning");
     filament_mapping_card_.create(mapping_card, mapping_rows, mapping_warning);
     // Route the card tap to the panel's single remap opener instead of the
@@ -320,34 +434,54 @@ lv_obj_t* PrintSelectDetailView::create(lv_obj_t* parent_screen) {
     });
 
     // Look up history status display
-    history_status_row_ = lv_obj_find_by_name(overlay_root_, "history_status_row");
-    history_status_icon_ = lv_obj_find_by_name(overlay_root_, "history_status_icon");
-    history_status_label_ = lv_obj_find_by_name(overlay_root_, "history_status_label");
-
-    // Initialize print preparation manager (only if not already created —
-    // survives destroy-on-close so callbacks set by PrintSelectPanel persist)
-    if (!prep_manager_) {
-        prep_manager_ = std::make_unique<PrintPreparationManager>();
-    }
+    history_status_row_ = find_required(overlay_root_, "history_status_row", get_name());
+    history_status_icon_ = find_required(overlay_root_, "history_status_icon", get_name());
+    history_status_label_ = find_required(overlay_root_, "history_status_label", get_name());
 
     spdlog::debug("[DetailView] Detail view created");
     return overlay_root_;
 }
 
 void PrintSelectDetailView::set_dependencies(IMoonrakerAPI* api, PrinterState* printer_state) {
-    api_ = api;
-    printer_state_ = printer_state;
+    set_analysis_dependencies(api, printer_state);
 
-    // Ask once, well before the user opens a file, and never block on the
+    // Ask once, well before the G-code is needed, and never block on the
     // answer. A printer that never replies simply leaves us on the HTTP path.
     resolve_local_gcodes_root();
+}
 
-    if (prep_manager_) {
-        prep_manager_->set_dependencies(api_, printer_state_);
-        // Per-option toggle state flows through the OptionStateProvider that
-        // populate_option_rows() registers with the prep manager — no need to
-        // wire individual legacy state/visibility subjects here.
+void PrintSelectDetailView::set_analysis_dependencies(IMoonrakerAPI* api,
+                                                      PrinterState* printer_state) {
+    api_ = api;
+    gcode_fetcher_.set_api(api);
+    printer_state_ = printer_state;
+    publish_rewrite_availability(); // the transport is half the answer
+
+    // Not tied to the widget tree: the panel wires dependencies at setup, before
+    // any file opens, so the PRINT_START analysis starts on connect, and the
+    // manager survives destroy-on-close with the callbacks PrintSelectPanel set.
+    if (!prep_manager_) {
+        prep_manager_ = std::make_unique<PrintPreparationManager>();
+        // A scan answer can be what a deferred Print tap is waiting on.
+        prep_manager_->set_on_scan_answered([this]() {
+            refresh_exclude_objects();
+            fire_on_preflight_ready();
+        });
+        // Macro rows come and go with the analysis, so an open view rebuilds
+        // them now; a hidden one rebuilds in on_activate().
+        prep_manager_->set_macro_analysis_callback(
+            [this](const helix::PrintStartAnalysis& analysis) {
+                if (is_visible()) {
+                    populate_option_rows();
+                }
+                if (on_macro_analysis_cb_) {
+                    on_macro_analysis_cb_(analysis);
+                }
+            });
     }
+    // Per-option toggle state flows through the OptionStateProvider that
+    // populate_option_rows() registers with the prep manager.
+    prep_manager_->set_dependencies(api_, printer_state_);
 }
 
 // ============================================================================
@@ -359,7 +493,9 @@ void PrintSelectDetailView::show(const std::string& filename, const std::string&
                                  const std::vector<std::string>& filament_colors,
                                  const std::vector<std::string>& filament_materials,
                                  size_t file_size_bytes, time_t modified_timestamp,
-                                 uint64_t gcode_end_byte) {
+                                 uint64_t gcode_end_byte, const std::string& local_path) {
+    reclaim_deleted_tree();
+
     // Lazy re-create widget tree if it was destroyed by destroy-on-close
     if (!overlay_root_ && parent_screen_) {
         spdlog::info("[DetailView] Re-creating widget tree (destroy-on-close recovery)");
@@ -378,9 +514,23 @@ void PrintSelectDetailView::show(const std::string& filename, const std::string&
         return;
     }
 
+    // No-op once resolved; retries an attempt that met a connection still coming up.
+    resolve_local_gcodes_root();
+
+    // Picks belong to one file; a hold for a print start keeps them for that file only.
+    const bool same_file = filename == current_filename_ && current_path == current_path_;
+    if (!same_file) {
+        exclude_mode_.hide();
+    }
+    if (!(picks_held_for_start_ && same_file)) {
+        exclude_objects_.clear_objects();
+    }
+    picks_held_for_start_ = false;
+
     // Cache parameters for on_activate() to use
     current_filename_ = filename;
     current_path_ = current_path;
+    current_local_path_ = local_path;
     current_filament_type_ = filament_type;
     current_filament_colors_ = filament_colors;
     current_filament_materials_ = filament_materials;
@@ -453,6 +603,7 @@ void PrintSelectDetailView::show(const std::string& filename, const std::string&
     headless_tool_grams_.clear();
     headless_scan_done_ = false;
     headless_scan_settled_ = false;
+    printer_stop_wait_timed_out_ = false;
     // Moonraker's metadata is the one palette source available before any read:
     // when it carried colors the question is already answered, and when it did
     // not (Creality's Moonraker reports filament_type and no filament_colors for
@@ -477,16 +628,15 @@ void PrintSelectDetailView::show(const std::string& filename, const std::string&
     }
 
     // Register with NavigationManager for lifecycle callbacks
-    NavigationManager::instance().register_overlay_instance(overlay_root_, this);
+    helix::nav::register_overlay(overlay_root_, this);
 
     // Register close callback to destroy widget tree when overlay closes.
     // Frees memory when detail view is dismissed. Subjects survive;
     // next show() call re-creates widgets via lazy creation above.
-    NavigationManager::instance().register_overlay_close_callback(
-        overlay_root_, [this]() { destroy_overlay_ui(overlay_root_); });
+    helix::nav::on_close(overlay_root_, [this]() { destroy_overlay_ui(overlay_root_); });
 
     // Push onto navigation stack - on_activate() will be called by NavigationManager
-    NavigationManager::instance().push_overlay(overlay_root_);
+    helix::nav::push_overlay(overlay_root_);
 
     if (visible_subject_) {
         lv_subject_set_int(visible_subject_, 1);
@@ -497,17 +647,22 @@ void PrintSelectDetailView::show(const std::string& filename, const std::string&
     // show() call, so the first frame never sees a stale value.
     publish_mapping_ready();
 
+    // The objects were cleared above; a view that is already open gets no
+    // on_activate() to list them again.
+    refresh_exclude_objects();
+
     spdlog::debug("[DetailView] Showing detail view for: {} ({} colors)", filename,
                   filament_colors.size());
 }
 
 void PrintSelectDetailView::hide() {
+    reclaim_deleted_tree();
     if (!overlay_root_) {
         return;
     }
 
     // Pop from navigation stack - on_deactivate() will be called by NavigationManager
-    NavigationManager::instance().go_back();
+    helix::nav::go_back();
 
     if (visible_subject_) {
         lv_subject_set_int(visible_subject_, 0);
@@ -521,14 +676,19 @@ void PrintSelectDetailView::hide() {
 // ============================================================================
 
 std::string PrintSelectDetailView::canonical_gcode_path() const {
-    // Hash the FULL relative path (not just the filename) so same-name files
+    // Keyed on the FULL relative path (not just the filename) so same-name files
     // in different directories never collide on one temp file.
-    return get_helix_cache_dir("gcode_temp") + "/detail_" +
-           std::to_string(std::hash<std::string>{}(current_file_key())) + ".gcode";
+    return get_helix_cache_dir("gcode_temp") + "/" +
+           helix::ui::GcodePreviewFetcher::cache_file_name("detail_", current_file_key());
 }
 
 void PrintSelectDetailView::resolve_local_gcodes_root() {
     if (local_gcodes_root_resolved_ || !api_) {
+        return;
+    }
+    // A request now fails before reaching Moonraker, and latching that answer
+    // would send every file over HTTP for the rest of the session.
+    if (api_->get_connection_state() != ConnectionState::CONNECTED) {
         return;
     }
 
@@ -536,9 +696,9 @@ void PrintSelectDetailView::resolve_local_gcodes_root() {
     // absolute root path names a filesystem we cannot see, and reading a local
     // path that happens to match would be reading the wrong file entirely.
     std::string host;
-    if (Config* cfg = Config::get_instance()) {
-        host = cfg->get<std::string>(cfg->df() + "moonraker_host", "localhost");
-    }
+    Config* cfg = Config::get_instance();
+    host = cfg->get<std::string>(cfg->df() + "moonraker_host", "localhost");
+
     if (!helix::is_moonraker_on_same_host(host)) {
         local_gcodes_root_resolved_ = true;
         spdlog::debug("[DetailView] Moonraker is remote ('{}') — G-code comes over HTTP", host);
@@ -572,20 +732,22 @@ void PrintSelectDetailView::resolve_local_gcodes_root() {
 }
 
 std::string PrintSelectDetailView::local_gcode_source() const {
-    if (local_gcodes_root_.empty()) {
-        return {};
+    std::string candidate = current_local_path_;
+    if (candidate.empty()) {
+        if (local_gcodes_root_.empty()) {
+            return {};
+        }
+        candidate = local_gcodes_root_ + "/" + current_file_key();
     }
-    const std::string candidate = local_gcodes_root_ + "/" + current_file_key();
 
     // Size is the same staleness check the cached-copy path uses. It also
-    // doubles as the existence and readability probe: a file we cannot open is
-    // one we must fetch over HTTP instead.
-    std::ifstream f(candidate, std::ios::binary | std::ios::ate);
-    if (!f) {
-        spdlog::debug("[DetailView] No local G-code at '{}' — falling back to HTTP", candidate);
+    // doubles as the existence and readability probe: a Moonraker file we
+    // cannot open here comes over HTTP instead, and a USB file is unreadable.
+    if (!tio::open_file(candidate, "rb")) {
+        spdlog::debug("[DetailView] No readable local G-code at '{}'", candidate);
         return {};
     }
-    const auto on_disk_bytes = static_cast<size_t>(f.tellg());
+    const auto on_disk_bytes = static_cast<size_t>(tio::file_size(candidate).value_or(0));
     if (on_disk_bytes == 0) {
         return {};
     }
@@ -613,6 +775,11 @@ void PrintSelectDetailView::reclaim_download(const std::string& path) {
 }
 
 std::string PrintSelectDetailView::current_file_key() const {
+    // A stick file has no Moonraker path; its own path keeps same-named files
+    // in different folders apart.
+    if (!current_local_path_.empty()) {
+        return current_local_path_;
+    }
     return current_path_.empty() ? current_filename_ : current_path_ + "/" + current_filename_;
 }
 
@@ -623,8 +790,9 @@ void PrintSelectDetailView::ensure_gcode_downloaded(
         cb(false, {});
         return;
     }
-    // 0. Moonraker runs here, so its copy IS the file — no transfer, no second
-    //    copy on the same flash. This only CONSULTS the answer; the resolve is
+    // 0. The file is on this machine (a USB stick, or Moonraker's copy when
+    //    Moonraker runs here): no transfer, no second copy on the same
+    //    flash. For Moonraker's copy this only CONSULTS the answer; the resolve is
     //    kicked once from set_dependencies() and never awaited here. Awaiting it
     //    would hang this load outright on any Moonraker that does not answer
     //    server.files.roots — which includes older forks and our own mock
@@ -632,78 +800,44 @@ void PrintSelectDetailView::ensure_gcode_downloaded(
     //    never becomes temp_gcode_path_: it is the user's print file, not
     //    something we may delete (reclaim_download() refuses it too).
     if (const std::string local = local_gcode_source(); !local.empty()) {
-        spdlog::info("[DetailView] Using Moonraker's own G-code in place: {}", local);
+        spdlog::info("[DetailView] Using local G-code in place: {}", local);
         cb(true, local);
         return;
     }
-
-    const std::string path = canonical_gcode_path();
-
-    // 1. A transfer is already running — join it. Checked BEFORE the disk
-    //    probe: the in-flight file is partially written, and a non-empty
-    //    tellg() on it must not be mistaken for a complete copy.
-    if (gcode_download_in_flight_) {
-        gcode_download_waiters_.push_back(std::move(cb));
+    if (!current_local_path_.empty()) {
+        // Moonraker has no copy of a USB file until it is printed.
+        spdlog::warn("[DetailView] USB file unreadable: {}", current_local_path_);
+        cb(false, {});
         return;
     }
 
-    // 2. Already on disk (cached from a previous open of this file). When the
-    //    expected size is known, a mismatch means the local copy is stale or
-    //    partial — the server file was re-sliced onto the same path, or the
-    //    app died mid-transfer and left a truncated download behind. Trusting
-    //    those bytes would scan the OLD file and store the wrong tool set
-    //    under the NEW (size, mtime) cache key, so drop the copy and
-    //    re-download instead of scanning stale bytes.
-    if (std::ifstream f(path, std::ios::binary | std::ios::ate); f && f.tellg() > 0) {
-        const auto on_disk_bytes = static_cast<size_t>(f.tellg());
-        if (current_file_size_bytes_ == 0 || on_disk_bytes == current_file_size_bytes_) {
-            cb(true, path);
-            return;
-        }
-        spdlog::warn("[DetailView] Cached G-code size mismatch (disk={}, expected={}) - "
-                     "re-downloading",
-                     on_disk_bytes, current_file_size_bytes_);
-        reclaim_download(path);
-        // Fall through to a fresh transfer below.
-    }
-
-    // 3. Start the single shared transfer; later callers join via 1.
-    gcode_download_in_flight_ = true;
-    gcode_download_waiters_.push_back(std::move(cb));
-    const std::string file_path =
-        current_path_.empty() ? current_filename_ : current_path_ + "/" + current_filename_;
-    auto tok = lifetime_.token();
-    api_->transfers().download_file_to_path(
-        "gcodes", file_path, path,
-        [this, tok](const std::string& local) {
-            // HTTP thread — marshal member writes + waiter fan-out to the
-            // main thread (no bg-thread `this` access, L081 Mechanism C).
-            tok.defer("DetailView::gcode_shared_download_done", [this, local]() {
-                // Retire the previous file's temp copy (kept from the old
-                // pre-download cleanup) and adopt this one for teardown.
+    // One shared copy and one shared transfer per open: the fetcher joins a
+    // transfer already running and keeps a copy only when its size matches the
+    // file on the server, so a re-sliced or truncated copy is never scanned.
+    const std::string path = canonical_gcode_path();
+    gcode_fetcher_.ensure_local(
+        "gcodes", current_file_key(), path, current_file_size_bytes_,
+        [this, cb](const std::string& local, helix::ui::GcodePreviewFetcher::Source source) {
+            if (source == helix::ui::GcodePreviewFetcher::Source::Download) {
+                // Retire the previous file's temp copy and adopt this one for
+                // teardown.
                 if (!temp_gcode_path_.empty() && temp_gcode_path_ != local) {
                     reclaim_download(temp_gcode_path_);
                 }
                 temp_gcode_path_ = local;
-                gcode_download_in_flight_ = false;
-                auto waiters = std::move(gcode_download_waiters_);
-                gcode_download_waiters_.clear();
-                for (auto& w : waiters)
-                    w(true, local);
-            });
+            }
+            cb(true, local);
         },
-        [this, tok, path](const MoonrakerError& err) {
-            tok.defer("DetailView::gcode_shared_download_fail", [this, err, path]() {
-                spdlog::warn("[DetailView] Shared G-code download failed: {}", err.message);
-                // Drop any partial file the failed transfer left behind so a
-                // later open doesn't mistake it for a complete cached copy.
-                reclaim_download(path);
-                gcode_download_in_flight_ = false;
-                auto waiters = std::move(gcode_download_waiters_);
-                gcode_download_waiters_.clear();
-                for (auto& w : waiters)
-                    w(false, {});
-            });
+        [this, path, cb](helix::ui::GcodePreviewFetcher::Unavailable why) {
+            if (why == helix::ui::GcodePreviewFetcher::Unavailable::NoLocalCopies) {
+                spdlog::debug("[DetailView] No local G-code copy on this transport");
+            } else {
+                spdlog::warn("[DetailView] Shared G-code download failed");
+            }
+            // Drop any partial file the failed transfer left behind so a later
+            // open doesn't mistake it for a complete cached copy.
+            reclaim_download(path);
+            cb(false, {});
         });
 }
 
@@ -718,8 +852,18 @@ void PrintSelectDetailView::on_activate() {
     spdlog::debug("[DetailView] on_activate() for file: {}", current_filename_);
 
     // (Re)build dynamic option rows from the active printer's option set.
-    // Idempotent — only rebuilds when the printer type has changed.
+    // Idempotent — only rebuilds when the printer or its option ids changed.
     populate_option_rows();
+
+    // A queued job's saved states override the defaults for this render.
+    // set_state() ignores ids with no row, which is the whole merge rule:
+    // unknown ids drop, unmentioned ids keep their defaults.
+    if (!pending_option_seed_.empty()) {
+        for (const auto& [id, on] : pending_option_seed_) {
+            option_rows_renderer_.set_state(id, on ? 1 : 0);
+        }
+        pending_option_seed_.clear();
+    }
 
     // Cache file size for safety checks (before modification attempts)
     if (prep_manager_ && current_file_size_bytes_ > 0) {
@@ -728,8 +872,14 @@ void PrintSelectDetailView::on_activate() {
 
     // Ask the active AMS backend to refresh its slot/state view. Lets users
     // self-recover from any drift between cached UI state and printer truth
-    // by navigating away and back. Default backend impl is a no-op; AD5X IFS
-    // re-reads Adventurer5M.json + GET_ZCOLOR. Debounced internally.
+    // by navigating away and back. AD5X IFS re-reads Adventurer5M.json +
+    // GET_ZCOLOR and debounces that itself; a tool changer re-reads the shared
+    // lane_data namespace into the lane source model; every other backend does
+    // nothing here.
+    //
+    // The lane_data re-read is NOT coalesced: one database_get_namespace per
+    // entry into this view, with out-of-order completions settled by whichever
+    // lands last. A known gap, and a cheap one while nothing reads the result.
     if (auto* backend = AmsState::instance().get_backend()) {
         backend->request_resync();
     }
@@ -738,8 +888,11 @@ void PrintSelectDetailView::on_activate() {
     // The scan happens NOW after registration, so if user navigates away,
     // on_deactivate() will be called and we can check cleanup_called()
     if (!current_filename_.empty() && prep_manager_) {
-        prep_manager_->scan_file_for_operations(current_filename_, current_path_);
+        prep_manager_->scan_file_for_operations(current_filename_, current_path_,
+                                                current_local_path_);
     }
+    // A cached scan answers without calling back, so read it here too.
+    refresh_exclude_objects();
 
     // Headless tools_used scan — runs on ALL platforms (including 2D-only, where
     // the visual viewer below skips parsing). Provides tools_used + the pre-flight
@@ -759,8 +912,23 @@ void PrintSelectDetailView::on_activate() {
     load_gcode_for_preview();
 }
 
-void PrintSelectDetailView::on_deactivate() {
-    spdlog::debug("[DetailView] on_deactivate()");
+void PrintSelectDetailView::on_deactivating(DeactivateReason reason) {
+    spdlog::debug("[DetailView] on_deactivating({})", deactivate_reason_name(reason));
+
+    // Exclude mode closes on every reason: the viewer is cleared below. Picks
+    // live in exclude_objects_; a blanked screen keeps them, leaving the file
+    // drops them, unless they are held for the print start that hid this view.
+    exclude_mode_.hide();
+    if ((reason == DeactivateReason::NavigateAway && !picks_held_for_start_) ||
+        reason == DeactivateReason::Shutdown) {
+        exclude_objects_.clear_objects();
+    }
+
+    // The owning panel's close bookkeeping runs for every dismissal path —
+    // this hook is the only one ESC/go_back() and a navbar switch reach.
+    if (on_dismissed_cb_) {
+        on_dismissed_cb_();
+    }
 
     // Clear and pause gcode viewer immediately so the old model doesn't
     // linger when the user selects a different file
@@ -772,6 +940,7 @@ void PrintSelectDetailView::on_deactivate() {
     // Reset viewer mode to thumbnail so next open starts clean
     show_gcode_viewer(false);
     lv_subject_set_int(&detail_viewer_first_frame_, 0);
+    refresh_viewer_visibility();
     gcode_loaded_ = false;
     // Readiness drops with the view — headless_scan_done_ goes false too, so
     // the publish below resolves to 0 and the skeleton latch re-arms. show()
@@ -781,6 +950,7 @@ void PrintSelectDetailView::on_deactivate() {
     // the previous open's settlement as authorization to delete files.
     headless_scan_done_ = false;
     headless_scan_settled_ = false;
+    printer_stop_wait_timed_out_ = false;
     palette_settled_ = false;
     publish_mapping_ready();
 
@@ -807,31 +977,57 @@ void PrintSelectDetailView::on_deactivate() {
     // Note: We don't cancel scans here because PrintPreparationManager
     // has its own lifetime guard. Async callbacks in prep_manager_
     // will check cleanup_called() if needed.
+}
 
-    // Call base class
-    OverlayBase::on_deactivate();
+void PrintSelectDetailView::disarm_viewer_callbacks() {
+    // Every viewer callback carries `this` and touches subjects this view
+    // deinitialises. The viewer outlives the view on teardown (its tree is
+    // deleted on a later tick), and a parse finishing in that window would
+    // otherwise call into a cleaned-up or freed view.
+    if (!gcode_viewer_) {
+        return;
+    }
+    ui_gcode_viewer_set_first_frame_callback(gcode_viewer_, nullptr, nullptr);
+    ui_gcode_viewer_set_load_callback(gcode_viewer_, nullptr, nullptr);
+    ui_gcode_viewer_set_clear_callback(gcode_viewer_, nullptr, nullptr);
 }
 
 void PrintSelectDetailView::cleanup() {
     spdlog::debug("[DetailView] cleanup()");
+    reclaim_deleted_tree();
 
     // Pause viewer before subject cleanup to avoid rendering with freed subjects.
-    // Drop the first-frame callback too: it captures `this` and writes
-    // detail_viewer_first_frame_, which subjects_.deinit_all() below destroys.
-    // The viewer outlives this object on some teardown paths, and paused
-    // rendering is not a guarantee — unpausing anywhere else would resurrect it.
     if (gcode_viewer_) {
         ui_gcode_viewer_set_paused(gcode_viewer_, true);
-        ui_gcode_viewer_set_first_frame_callback(gcode_viewer_, nullptr, nullptr);
+    }
+    disarm_viewer_callbacks();
+    // The prep manager outlives cleanup() and keeps scanning; its callbacks
+    // reach subjects deinitialised below.
+    if (prep_manager_) {
+        prep_manager_->set_on_scan_answered(nullptr);
+        prep_manager_->set_macro_analysis_callback(nullptr);
+        prep_manager_->set_option_state_provider(nullptr);
     }
 
     // Expire all outstanding async tokens
     lifetime_.invalidate();
+    // The scroll area, the card and the content container are children of
+    // overlay_root_; their events can still fire between cleanup() and the
+    // widgets' deletion, and a fresh lifetime_.token() is valid again, so
+    // drop the pointers a deferred fit would dereference.
+    options_scroll_ = nullptr;
+    detail_card_ = nullptr;
+    fit_pending_ = false;
 
     // Unregister from NavigationManager before cleaning up
     if (overlay_root_) {
-        NavigationManager::instance().unregister_overlay_instance(overlay_root_);
+        helix::nav::unregister_overlay(overlay_root_);
     }
+
+    exclude_mode_.hide();
+    exclude_picks_observer_.reset();
+    exclude_capability_observer_.reset();
+    exclude_objects_.deinit_subjects();
 
     // Deinitialize subjects to disconnect observers
     if (subjects_initialized_) {
@@ -847,8 +1043,73 @@ void PrintSelectDetailView::cleanup() {
 // Destroy-on-close support
 // ============================================================================
 
+void PrintSelectDetailView::on_root_deleted(lv_event_t* e) {
+    auto* self = static_cast<PrintSelectDetailView*>(lv_event_get_user_data(e));
+    if (!self) {
+        return;
+    }
+    // A replaced root is deleted after create() has pointed the view at its
+    // successor; clearing the pointers then would blank a live tree.
+    if (lv_event_get_current_target(e) != self->delete_hook_root_) {
+        return;
+    }
+    self->delete_hook_root_ = nullptr;
+    self->tree_deleted_ = true;
+    self->forget_cached_widgets();
+}
+
+void PrintSelectDetailView::reclaim_deleted_tree() {
+    if (!tree_deleted_) {
+        return;
+    }
+    tree_deleted_ = false;
+    spdlog::debug("[DetailView] Widget tree was deleted externally - releasing it");
+    helix::nav::clear_on_close(overlay_root_);
+    helix::nav::unregister_overlay(overlay_root_);
+    overlay_root_ = nullptr;
+    on_ui_destroyed();
+}
+
+void PrintSelectDetailView::forget_cached_widgets() {
+    print_button_ = nullptr;
+    gcode_viewer_ = nullptr;
+
+    // Pre-print option checkboxes (kept as inert fields; see create()).
+    bed_mesh_checkbox_ = nullptr;
+    qgl_checkbox_ = nullptr;
+    z_tilt_checkbox_ = nullptr;
+    nozzle_clean_checkbox_ = nullptr;
+    purge_line_checkbox_ = nullptr;
+    timelapse_checkbox_ = nullptr;
+
+    pre_print_options_container_ = nullptr;
+    // The scroll area, the preview card and the content container (whose
+    // LAYOUT_CHANGED feeds fit_portrait_preview) are children of overlay_root_;
+    // their event callbacks die with them.
+    options_scroll_ = nullptr;
+    detail_card_ = nullptr;
+
+    filament_mapping_card_.on_ui_destroyed();
+
+    history_status_row_ = nullptr;
+    history_status_icon_ = nullptr;
+    history_status_label_ = nullptr;
+}
+
+void PrintSelectDetailView::uninstall_root_delete_hook() {
+    helix::ui::remove_event_cb_if_alive(delete_hook_root_, on_root_deleted, this);
+    delete_hook_root_ = nullptr;
+}
+
 void PrintSelectDetailView::on_ui_destroyed() {
     spdlog::debug("[DetailView] on_ui_destroyed() - nulling widget pointers");
+
+    // The base class only condemns the tree; its delete event comes later and
+    // must not reach a view that may be gone by then.
+    uninstall_root_delete_hook();
+
+    // Its widgets live in the tree being torn down.
+    exclude_mode_.hide();
 
     // Invalidate outstanding tokens so in-flight async callbacks (gcode download,
     // metadata fetch, load callbacks) bail out — they captured pointers to
@@ -877,50 +1138,37 @@ void PrintSelectDetailView::on_ui_destroyed() {
         temp_gcode_path_.clear();
     }
 
-    // A shared download still in flight for the destroyed session can no
-    // longer deliver (its deferred completion was dropped with the token
-    // above) and leaves a partial file behind. Drop the waiters so a fresh
-    // open starts a new transfer instead of joining a dead one, and remove
-    // the canonical file — temp_gcode_path_ above only tracks a COMPLETED
-    // download, so the in-flight partial needs its own removal.
-    gcode_download_in_flight_ = false;
-    gcode_download_waiters_.clear();
-    reclaim_download(canonical_gcode_path());
+    // The destroyed session's callers no longer want a shared download still in
+    // flight: drop them. A running transfer finishes on its own and removes the
+    // file when nobody claims it, and a fresh open joins it meanwhile, so the
+    // canonical file is removed here only when no transfer is writing it.
+    // temp_gcode_path_ above only tracks a COMPLETED download.
+    gcode_fetcher_.cancel();
+    if (!gcode_fetcher_.is_downloading(canonical_gcode_path())) {
+        reclaim_download(canonical_gcode_path());
+    }
 
-    // Null all child widget pointers (widget tree already deleted by base class)
     // Note: parent_screen_ is NOT nulled — it's the parent screen (not a child
     // widget) and is needed for lazy re-creation in show().
     confirmation_dialog_widget_ = nullptr;
-    print_button_ = nullptr;
-    gcode_viewer_ = nullptr;
-
-    // Pre-print option checkboxes (kept as inert fields; see create()).
-    bed_mesh_checkbox_ = nullptr;
-    qgl_checkbox_ = nullptr;
-    z_tilt_checkbox_ = nullptr;
-    nozzle_clean_checkbox_ = nullptr;
-    purge_line_checkbox_ = nullptr;
-    timelapse_checkbox_ = nullptr;
+    forget_cached_widgets();
 
     // The dynamic option rows were children of overlay_root_, which has been
     // destroyed by the base class. Drop the renderer's row state and force a
     // rebuild on next show(). Subjects inside the renderer are heap-owned —
     // their observers were attached to the now-deleted row widgets, so
     // dropping the subjects here is safe.
-    pre_print_options_container_ = nullptr;
+    // The invalidate above drops a queued fit without running it; the flag
+    // must not survive into the next create() cycle.
+    fit_pending_ = false;
     option_rows_renderer_.clear();
-    last_rendered_printer_type_.clear();
+    last_rendered_rows_.clear();
+    // A seed that never reached a render dies with the view it was meant
+    // for; the next file to open starts from its own defaults.
+    pending_option_seed_.clear();
     if (prep_manager_) {
         prep_manager_->set_option_state_provider(nullptr);
     }
-
-    // Filament mapping card
-    filament_mapping_card_.on_ui_destroyed();
-
-    // History status display
-    history_status_row_ = nullptr;
-    history_status_icon_ = nullptr;
-    history_status_label_ = nullptr;
 
     // Note: prep_manager_ is NOT reset — it holds no widget references and
     // retains its callbacks (scan_complete, macro_analysis) set by PrintSelectPanel.
@@ -976,11 +1224,12 @@ void PrintSelectDetailView::hide_delete_confirmation() {
 // ============================================================================
 
 void PrintSelectDetailView::handle_resize(lv_obj_t* parent_screen) {
-    if (!overlay_root_ || !parent_screen) {
+    if (!tree_alive() || !parent_screen) {
         return;
     }
 
-    lv_obj_t* content_container = lv_obj_find_by_name(overlay_root_, "content_container");
+    lv_obj_t* content_container =
+        helix::ui::find_required(overlay_root_, "content_container", get_name());
     if (content_container) {
         lv_coord_t padding = ui_get_header_content_padding();
         lv_obj_set_style_pad_all(content_container, padding, 0);
@@ -1004,15 +1253,15 @@ void PrintSelectDetailView::update_history_status(FileHistoryStatus status, int 
 
     case FileHistoryStatus::CURRENTLY_PRINTING:
         lv_obj_remove_flag(history_status_row_, LV_OBJ_FLAG_HIDDEN);
-        ui_icon_set_source(history_status_icon_, "clock");
-        ui_icon_set_variant(history_status_icon_, "accent");
+        helix::ui::icon::set_source(history_status_icon_, "clock");
+        helix::ui::icon::set_variant(history_status_icon_, "accent");
         lv_label_set_text(history_status_label_, lv_tr("Currently printing"));
         break;
 
     case FileHistoryStatus::COMPLETED: {
         lv_obj_remove_flag(history_status_row_, LV_OBJ_FLAG_HIDDEN);
-        ui_icon_set_source(history_status_icon_, "check");
-        ui_icon_set_variant(history_status_icon_, "success");
+        helix::ui::icon::set_source(history_status_icon_, "check");
+        helix::ui::icon::set_variant(history_status_icon_, "success");
         // Format: "Printed N time(s)"
         char buf[64];
         snprintf(buf, sizeof(buf),
@@ -1023,15 +1272,15 @@ void PrintSelectDetailView::update_history_status(FileHistoryStatus status, int 
 
     case FileHistoryStatus::FAILED:
         lv_obj_remove_flag(history_status_row_, LV_OBJ_FLAG_HIDDEN);
-        ui_icon_set_source(history_status_icon_, "alert");
-        ui_icon_set_variant(history_status_icon_, "error");
+        helix::ui::icon::set_source(history_status_icon_, "alert");
+        helix::ui::icon::set_variant(history_status_icon_, "error");
         lv_label_set_text(history_status_label_, lv_tr("Last print failed"));
         break;
 
     case FileHistoryStatus::CANCELLED:
         lv_obj_remove_flag(history_status_row_, LV_OBJ_FLAG_HIDDEN);
-        ui_icon_set_source(history_status_icon_, "cancel");
-        ui_icon_set_variant(history_status_icon_, "warning");
+        helix::ui::icon::set_source(history_status_icon_, "cancel");
+        helix::ui::icon::set_variant(history_status_icon_, "warning");
         lv_label_set_text(history_status_label_, lv_tr("Last print cancelled"));
         break;
     }
@@ -1069,9 +1318,41 @@ void PrintSelectDetailView::start_progress_timer() {
         250, this);
 }
 
+void PrintSelectDetailView::refresh_viewer_visibility() {
+    const int mode = lv_subject_get_int(&detail_gcode_viewer_mode_);
+    const bool first_frame = lv_subject_get_int(&detail_viewer_first_frame_) != 0;
+    lv_subject_set_int(&detail_viewer_hidden_,
+                       helix::ui::preview_viewer_hidden(mode, first_frame) ? 1 : 0);
+}
+
 void PrintSelectDetailView::poll_load_progress() {
-    if (!gcode_viewer_ || lv_subject_get_int(&detail_gcode_loading_) == 0) {
+    if (!gcode_viewer_) {
         cancel_progress_timer();
+        return;
+    }
+
+    const bool loading = lv_subject_get_int(&detail_gcode_loading_) != 0;
+    const bool revealed = lv_subject_get_int(&detail_viewer_first_frame_) != 0;
+    const bool is_2d = lv_subject_get_int(&detail_gcode_viewer_mode_) == helix::ui::PREVIEW_MODE_2D;
+
+    // A hidden 2D viewer is not drawn, so nothing would drive its build. Pump
+    // it here and reveal on readiness. 3D is untouched: it stays visible under
+    // the thumbnail because it uploads during the draw pass, and reveals from
+    // its own first-frame callback.
+    if (is_2d && !revealed && ui_gcode_viewer_pump_offscreen_2d(gcode_viewer_)) {
+        spdlog::debug("[DetailView] Preview has content - revealing viewer");
+        lv_subject_set_int(&detail_viewer_first_frame_, 1);
+        refresh_viewer_visibility();
+        cancel_progress_timer();
+        return;
+    }
+
+    if (!loading) {
+        // Indexing is done. Keep ticking only while a hidden 2D viewer still
+        // needs pumping; otherwise there is nothing left for this timer to do.
+        if (revealed || !is_2d) {
+            cancel_progress_timer();
+        }
         return;
     }
 
@@ -1116,6 +1397,7 @@ void PrintSelectDetailView::show_gcode_viewer(bool show) {
         mode = is_2d ? 2 : 1;
     }
     lv_subject_set_int(&detail_gcode_viewer_mode_, mode);
+    refresh_viewer_visibility();
 
     // Returning to thumbnail mode must also drop the first-frame latch — that
     // latch is what keeps the thumbnail hidden once the viewer has painted
@@ -1124,14 +1406,16 @@ void PrintSelectDetailView::show_gcode_viewer(bool show) {
     // that, mid-view) hides BOTH layers and the preview goes blank.
     if (mode == 0) {
         lv_subject_set_int(&detail_viewer_first_frame_, 0);
+        refresh_viewer_visibility();
     }
 
     // The 3D render is the preview when the viewer is active, so the
     // no-thumbnail placeholder glyph must not sit on top of it. (When the
     // viewer is inactive the print-select panel's has-thumbnail logic owns
     // whether the placeholder shows.)
-    if (mode > 0 && overlay_root_) {
-        lv_obj_t* no_thumb = lv_obj_find_by_name(overlay_root_, "detail_no_thumbnail_icon");
+    if (mode > 0 && tree_alive()) {
+        lv_obj_t* no_thumb =
+            helix::ui::find_required(overlay_root_, "detail_no_thumbnail_icon", get_name());
         if (no_thumb) {
             lv_obj_add_flag(no_thumb, LV_OBJ_FLAG_HIDDEN);
         }
@@ -1140,7 +1424,16 @@ void PrintSelectDetailView::show_gcode_viewer(bool show) {
     // Hide loading spinner now that viewer state is resolved
     lv_subject_set_int(&detail_gcode_loading_, 0);
     lv_subject_set_int(&detail_gcode_progress_, 0);
-    cancel_progress_timer();
+
+    // A viewer that is not revealed yet is hidden, so no draw drives its build.
+    // Keep the tick alive to pump it; poll_load_progress() stops itself on the
+    // reveal.
+    if (mode == helix::ui::PREVIEW_MODE_2D &&
+        lv_subject_get_int(&detail_viewer_first_frame_) == 0) {
+        start_progress_timer();
+    } else {
+        cancel_progress_timer();
+    }
 
     spdlog::trace("[DetailView] G-code viewer mode: {} ({})", mode, mode == 0 ? "thumbnail" : "3D");
 }
@@ -1470,29 +1763,108 @@ void PrintSelectDetailView::open_filament_mapping_modal() {
 }
 
 void PrintSelectDetailView::publish_card_visibility() {
-    // ONE place, and the only writer of either subject, so the three sites that
-    // learn something new about the card - show(), the footer-palette backfill
-    // and render_authoritative_chips() - cannot drift into publishing different
-    // answers from the same state. Reads the card's cached should_show(), so a
-    // caller that changed anything the card decides on must run update() first.
+    // ONE place, and the only writer of any of these subjects, so the sites that
+    // learn something new about the card - show(), the footer-palette backfill,
+    // render_authoritative_chips() and the two capability observers - cannot
+    // drift into publishing different answers from the same state. Reads the
+    // card's cached should_show(), so a caller that changed anything the card
+    // decides on must run update() first.
     const bool card_visible = filament_mapping_card_.should_show();
     lv_subject_set_int(&filament_mapping_visible_, card_visible ? 1 : 0);
-    // Published from the same place, against the same backend snapshot: a card
-    // shown without this would advertise nothing, and a chevron shown without
-    // the card would point at a control that is not there. It also clears the
-    // card's clickable flag, so a hidden card cannot swallow a tap either.
-    lv_subject_set_int(&color_card_remappable_, card_visible && color_card_opens_remap() ? 1 : 0);
+
+    const auto block = current_remap_block();
+    const bool available = block == helix::printer::RemapBlock::None;
+    // A hidden card cannot swallow a tap or light a chevron either.
+    lv_subject_set_int(&color_card_remappable_, card_visible && available ? 1 : 0);
+
+    // The only refusal worth dressing up. A backend with no route at all, a
+    // one-tool job and an in-flight probe all just leave the chevron dark: the
+    // chips are still worth showing and there is nothing for the user to do.
+    // A missing plugin is the one case where the answer is "not yet, and here
+    // is how", so it is the one that greys the card and offers the fix.
+    const bool needs_setup = card_visible && block == helix::printer::RemapBlock::NeedsPlugin;
+    lv_subject_set_int(&color_card_remap_needs_setup_, needs_setup ? 1 : 0);
+
+    // Available but the finished job will be misfiled: say so here rather than
+    // at startup, where it was a claim about the whole app instead of about the
+    // one thing it actually costs.
+    // Only a GcodeRewrite remap prints a modified copy and leans on the plugin to
+    // put the original name back, so only it can lose the history entry. A
+    // backend that routes through its own firmware table never touches the job
+    // file, and telling its user the file gets rewritten describes something the
+    // printer does not do. Same term remap_block() gates its plugin rung on.
+    const auto* backend = AmsState::instance().get_backend();
+    const bool rewrites_job_file =
+        backend != nullptr &&
+        backend->get_remap_strategy() == AmsBackend::RemapStrategy::GcodeRewrite;
+    const bool degraded =
+        available && rewrites_job_file &&
+        lv_subject_get_int(
+            get_printer_state().versions_state().get_moonraker_history_degraded_subject()) == 1;
+
+    lv_subject_set_int(&color_card_remap_help_visible_,
+                       card_visible && (needs_setup || degraded) ? 1 : 0);
+
+    spdlog::debug("[DetailView] filament card: visible={} remap={} setup={} degraded={}",
+                  card_visible, helix::printer::remap_block_name(block), needs_setup, degraded);
 }
 
-bool PrintSelectDetailView::color_card_opens_remap() {
-    // ANY backend that can carry out the pick — route AND readiness. Asking the
-    // route alone advertised a tap on an AD5X before `_IFS_VARS` discovery, and
-    // nothing downstream refused it: the opener's plugin guard only turns away
-    // GcodeRewrite, and IFS declares Native. The picker opened and Done silently
-    // wrote state the firmware replays nothing from. Now the chevron goes dark
-    // instead.
+void PrintSelectDetailView::show_remap_help_modal() {
+    if (current_remap_block() == helix::printer::RemapBlock::NeedsPlugin) {
+        helix::ui::ConfirmOptions opts;
+        opts.cancel_text = lv_tr("Not now");
+        opts.owner_token = object_lifetime_.token();
+        helix::ui::modal_confirm(
+            lv_tr("Filament remapping is unavailable"),
+            lv_tr("Remapping rewrites the job file before printing it. Without the HelixPrint "
+                  "plugin the rewritten copy is what lands in your print history, so finished "
+                  "jobs are listed under names like modified_1730824_benchy.gcode instead of the "
+                  "file you picked.\n\nInstalling the plugin takes a moment and needs no "
+                  "restart."),
+            ModalSeverity::Info, lv_tr("Install plugin"),
+            [this] {
+                if (on_plugin_setup_requested_) {
+                    on_plugin_setup_requested_();
+                }
+            },
+            opts);
+        return;
+    }
+
+    // The other reason the icon is offered: remapping works, but this Moonraker
+    // is too old for the plugin to put the original name back afterwards.
+    helix::ui::AlertOptions alert_opts;
+    alert_opts.owner_token = object_lifetime_.token();
+    helix::ui::modal_alert(
+        lv_tr("Print history will show the rewritten name"),
+        lv_tr("Remapping rewrites the job file before printing it. This printer's Moonraker is "
+              "too old for the HelixPrint plugin to restore the original filename afterwards, so "
+              "the finished job is listed under the rewritten name. Remapping itself works "
+              "normally."),
+        ModalSeverity::Info, lv_tr("OK"), nullptr, alert_opts);
+}
+
+helix::printer::RemapBlock PrintSelectDetailView::current_remap_block() const {
     auto* backend = AmsState::instance().get_backend();
-    return backend && helix::printer::can_remap(*backend);
+    if (backend == nullptr) {
+        return helix::printer::RemapBlock::NoStrategy;
+    }
+    return helix::printer::remap_block(*backend, rewrite_block(),
+                                       static_cast<int>(get_used_tool_info().size()));
+}
+
+helix::GcodeRewriteBlock PrintSelectDetailView::rewrite_block() const {
+    // Before set_analysis_dependencies() the view reads the app's printer, as
+    // the rest of the card's remap answer does.
+    return PrintPreparationManager::gcode_rewrite_block_for(
+        printer_state_ ? printer_state_ : &get_printer_state(), api_);
+}
+
+void PrintSelectDetailView::publish_rewrite_availability() {
+    if (!subjects_initialized_) {
+        return; // init_subjects() publishes once the subject exists
+    }
+    lv_subject_set_int(&gcode_rewrite_available_, helix::gcode_rewrite_available(rewrite_block()));
 }
 
 void PrintSelectDetailView::on_color_card_clicked() {
@@ -1501,12 +1873,23 @@ void PrintSelectDetailView::on_color_card_clicked() {
     // Kept as a guard even though the XML clears the card's clickable flag on a
     // non-remappable backend: the flag can only be as fresh as the last publish,
     // and this is the cheap way to make a stale one harmless.
-    if (!color_card_opens_remap()) {
+    const auto block = current_remap_block();
+    if (block == helix::printer::RemapBlock::NeedsPlugin) {
+        // The whole card is the help target here, not just the 24px cue: the
+        // card carries no remap to open, and a tap that explains beats a tap
+        // that silently does nothing. The Install button lives in that modal.
+        spdlog::debug("[PrintSelect] filament card tap -> remap help");
+        show_remap_help_modal();
+        return;
+    }
+    if (block != helix::printer::RemapBlock::None) {
+        spdlog::debug("[PrintSelect] filament card tap ignored: {}",
+                      helix::printer::remap_block_name(block));
         return;
     }
     spdlog::debug("[PrintSelect] filament card tap -> remap modal");
     // on_remap_requested_ is wired by the panel in create_detail_view() right
-    // after construction, so the null check is just defensive — a tap before
+    // after construction, so the null check is just defensive - a tap before
     // wiring is a no-op, not a crash.
     if (on_remap_requested_) {
         on_remap_requested_();
@@ -1538,8 +1921,8 @@ void PrintSelectDetailView::run_when_preflight_ready(std::function<void()> cb) {
     if (!cb) {
         return;
     }
-    // Already ready (viewer parsed or headless scan done): run synchronously.
-    if (is_preflight_ready()) {
+    // Already ready: run synchronously.
+    if (is_print_start_ready()) {
         cb();
         return;
     }
@@ -1565,13 +1948,26 @@ void PrintSelectDetailView::run_when_preflight_ready(std::function<void()> cb) {
             // file while the scanner is reading it (authoritative-empty
             // poison — see load_gcode_for_preview's oversize gate).
             self->headless_scan_done_ = true;
+            self->printer_stop_wait_timed_out_ = true;
             self->fire_on_preflight_ready();
         },
         PREFLIGHT_READY_TIMEOUT_MS, this);
     lv_timer_set_repeat_count(preflight_ready_timeout_timer_, 1);
 }
 
+bool PrintSelectDetailView::is_print_start_ready() const {
+    const bool stop_check_answered = printer_stop_wait_timed_out_ || !prep_manager_ ||
+                                     current_filename_.empty() ||
+                                     prep_manager_->has_printer_stop_answer_for(current_filename_);
+    return is_preflight_ready() && stop_check_answered;
+}
+
 void PrintSelectDetailView::fire_on_preflight_ready() {
+    // Each half of the readiness calls this when it lands; the other half's
+    // arrival calls it again.
+    if (!is_print_start_ready()) {
+        return;
+    }
     if (preflight_ready_timeout_timer_) {
         lv_timer_delete(preflight_ready_timeout_timer_);
         preflight_ready_timeout_timer_ = nullptr;
@@ -1580,6 +1976,111 @@ void PrintSelectDetailView::fire_on_preflight_ready() {
         auto cb = std::move(on_preflight_ready_cb_);
         on_preflight_ready_cb_ = nullptr;
         cb();
+    }
+}
+
+void PrintSelectDetailView::refresh_exclude_objects() {
+    std::vector<helix::gcode::GCodeObject> scanned;
+    if (prep_manager_ && prep_manager_->has_scan_result_for(current_filename_)) {
+        scanned = prep_manager_->get_scan_result()->objects;
+    }
+    // An open view shown for another file still holds the previous file's parse.
+    const auto* parsed = gcode_viewer_ && viewer_file_ == current_filename_
+                             ? ui_gcode_viewer_get_parsed_file(gcode_viewer_)
+                             : nullptr;
+    exclude_objects_.set_defined_objects_with_geometry(
+        helix::ui::object_infos_from(helix::ui::merge_defined_objects(scanned, parsed)));
+
+    const bool available = helix::ui::pre_start_exclude_available(
+        helix::ui::printer_has_exclude_object(printer_state_),
+        helix::gcode::is_3mf(current_filename_), exclude_objects_.get_defined_objects().size());
+    lv_subject_set_int(&detail_exclude_available_, available ? 1 : 0);
+    publish_exclude_picks();
+    exclude_mode_.refresh_render_badges();
+}
+
+void PrintSelectDetailView::toggle_exclude_pick(const std::string& name) {
+    const std::string defined =
+        helix::ui::canonical_object_name(exclude_objects_.get_defined_objects(), name);
+    if (defined.empty()) {
+        return;
+    }
+    auto picks = exclude_objects_.get_excluded_objects();
+    if (picks.erase(defined) == 0) {
+        if (!moonraker_internal::is_safe_object_name(defined)) {
+            NOTIFY_WARNING(lv_tr("{} cannot be skipped: its name has characters the printer "
+                                 "cannot be sent"),
+                           defined);
+            return;
+        }
+        picks.insert(defined);
+    }
+    spdlog::info("[DetailView] Object picks for {}: {}", current_filename_, picks.size());
+    exclude_objects_.set_excluded_objects(picks);
+}
+
+std::vector<std::string> PrintSelectDetailView::exclude_picks() const {
+    // Picks the skip option no longer offers (the printer lost [exclude_object])
+    // are neither shown nor sent.
+    std::vector<std::string> out;
+    if (lv_subject_get_int(const_cast<lv_subject_t*>(&detail_exclude_available_)) == 0) {
+        return out;
+    }
+    const auto& picks = exclude_objects_.get_excluded_objects();
+    for (const auto& name : exclude_objects_.get_defined_objects()) {
+        if (picks.count(name) > 0) {
+            out.push_back(name);
+        }
+    }
+    return out;
+}
+
+bool PrintSelectDetailView::drop_exclude_picks() {
+    if (exclude_objects_.get_excluded_objects().empty()) {
+        return false;
+    }
+    const bool had_offered_picks = !exclude_picks().empty();
+    exclude_objects_.set_excluded_objects({});
+    return had_offered_picks;
+}
+
+bool PrintSelectDetailView::all_objects_picked() const {
+    return !exclude_picks().empty() &&
+           helix::ui::every_object_picked(exclude_objects_.get_defined_objects(),
+                                          exclude_objects_.get_excluded_objects());
+}
+
+void PrintSelectDetailView::toggle_exclude_mode() {
+    if (exclude_mode_.is_open()) {
+        exclude_mode_.hide();
+        return;
+    }
+    if (!tree_alive()) {
+        return;
+    }
+    helix::ui::ExcludeModeTargets targets;
+    targets.card = detail_card_;
+    targets.columns = helix::ui::find_required(overlay_root_, "content_container", get_name());
+    targets.controls_name = "options_section";
+    targets.gcode_viewer = gcode_viewer_;
+    targets.thumbnail_mode = lv_subject_get_int(&detail_viewer_hidden_) == 1;
+    const auto bed = helix::bed_dimensions(api_, printer_state_);
+    targets.bed_w_mm = bed.w_mm;
+    targets.bed_h_mm = bed.h_mm;
+    exclude_mode_.show(targets, &exclude_objects_, helix::ui::ExcludeTapMode::Toggle,
+                       [this](const std::string& name) { toggle_exclude_pick(name); });
+}
+
+void PrintSelectDetailView::publish_exclude_picks() {
+    // What Print will send: the badge, the list and the render all show this.
+    const auto picks = exclude_picks();
+    const int count = static_cast<int>(picks.size());
+    lv_subject_set_int(&detail_exclude_pick_count_, count);
+    std::snprintf(detail_exclude_pick_count_text_buf_, sizeof(detail_exclude_pick_count_text_buf_),
+                  "%d", count);
+    lv_subject_copy_string(&detail_exclude_pick_count_text_, detail_exclude_pick_count_text_buf_);
+    if (gcode_viewer_) {
+        ui_gcode_viewer_set_excluded_objects(gcode_viewer_, {picks.begin(), picks.end()});
     }
 }
 
@@ -1709,8 +2210,9 @@ void PrintSelectDetailView::kick_off_headless_tools_scan() {
         return;
     }
 
-    if (!api_ || current_filename_.empty()) {
-        // No way to scan — mark done with no result so the gate degrades to
+    if (!api_ || current_filename_.empty() || helix::gcode::is_3mf(current_filename_)) {
+        // No way to scan (a .3mf is a zip with no G-code lines to read) —
+        // mark done with no result so the gate degrades to
         // "proceed without tools_used" instead of hanging, publish readiness
         // (skeleton resolves immediately), and release any deferred attempt
         // right away rather than making it wait out the safety timeout.
@@ -1825,13 +2327,13 @@ void PrintSelectDetailView::start_tail_summary_scan(LifetimeToken tok, std::set<
         });
     };
 
-    // Moonraker runs on this machine, so its copy IS the file: read the tail
-    // straight off disk instead of asking for those same bytes back over a
-    // loopback HTTP range request. Same window, same parse — local_gcode_source()
-    // already owns the "is it really there, and is it the right version" checks
-    // (it size-matches against the metadata), and returns empty when it is not.
+    // The file is on this machine (a USB stick, or Moonraker's own copy): read
+    // the tail straight off disk instead of asking Moonraker for those bytes.
+    // Same window, same parse; local_gcode_source() already owns the "is it
+    // really there, and is it the right version" checks (it size-matches
+    // against the metadata), and returns empty when it is not.
     if (const std::string local = local_gcode_source(); !local.empty()) {
-        spdlog::debug("[DetailView] Footer read from Moonraker's own copy: {}", local);
+        spdlog::debug("[DetailView] Footer read from the local copy: {}", local);
         helix::http::HttpExecutor::slow().submit([local, window, on_tail, fall_back]() mutable {
             std::string tail = helix::gcode::read_file_tail(local, window);
             if (tail.empty()) {
@@ -1842,7 +2344,15 @@ void PrintSelectDetailView::start_tail_summary_scan(LifetimeToken tok, std::set<
         });
         return;
     }
+    if (!current_local_path_.empty()) {
+        fall_back("USB file unreadable");
+        return;
+    }
 
+    if (!api_->transfers().supports_tail_reads()) {
+        fall_back("the transport reads no file tails");
+        return;
+    }
     api_->transfers().download_file_tail(
         "gcodes", file_path, window, [on_tail](const std::string& tail) mutable { on_tail(tail); },
         [fall_back](const MoonrakerError& error) mutable {
@@ -1961,6 +2471,7 @@ void PrintSelectDetailView::load_gcode_for_preview() {
     // Reset first-frame flag: the thumbnail stays on top until the viewer
     // renders, then the first-frame callback flips this to reveal it.
     lv_subject_set_int(&detail_viewer_first_frame_, 0);
+    refresh_viewer_visibility();
 
     // Register one-shot callback: fires after the viewer's first complete
     // render, at which point we hide the thumbnail (revealing the viewer).
@@ -1970,6 +2481,7 @@ void PrintSelectDetailView::load_gcode_for_preview() {
             auto* self = static_cast<PrintSelectDetailView*>(user_data);
             spdlog::debug("[DetailView] First frame rendered — revealing viewer");
             lv_subject_set_int(&self->detail_viewer_first_frame_, 1);
+            self->refresh_viewer_visibility();
         },
         this);
 
@@ -1980,6 +2492,56 @@ void PrintSelectDetailView::load_gcode_for_preview() {
     lv_subject_set_int(&detail_gcode_loading_, 1);
     start_progress_timer();
 
+    auto tok = lifetime_.token();
+
+    // Metadata fetch, in every render mode and for a .3mf too: it is the only
+    // writer of cached_file_metadata_, which PrintStartController's pre-print
+    // checks (filament weight, per-tool weights) read. It also re-checks the
+    // streaming-safety gate against the authoritative size; in thumbnail mode
+    // its show_gcode_viewer(false) calls leave the thumbnail as it is. A USB
+    // file has no Moonraker metadata to fetch until it is printed.
+    const std::string file_path =
+        current_path_.empty() ? current_filename_ : current_path_ + "/" + current_filename_;
+
+    if (current_local_path_.empty()) {
+        api_->files().get_file_metadata(
+            file_path,
+            [this, tok](const FileMetadata& metadata) {
+                // L081 Mechanism C: marshal member writes + LVGL/show_gcode_viewer
+                // to main thread before touching `this`.
+                tok.defer("DetailView::metadata_apply", [this, metadata]() {
+                    // Cache for PrintStartController's pre-print checks (e.g., filament weight)
+                    cached_file_metadata_ = metadata;
+
+                    // Check if file is safe to render given available RAM. When
+                    // the shared file already loaded this same size passed the
+                    // download's local gate below, so this only bites on the paths
+                    // where the ensure-callback hadn't resolved yet.
+                    if (!helix::is_gcode_2d_streaming_safe(metadata.size)) {
+                        auto mem = helix::get_system_memory_info();
+                        spdlog::warn("[DetailView] G-code too large for streaming: file={} bytes, "
+                                     "available RAM={}MB - using thumbnail",
+                                     metadata.size, mem.available_mb());
+                        show_gcode_viewer(false);
+                        return;
+                    }
+                    spdlog::debug("[DetailView] G-code size {} bytes - metadata cached",
+                                  metadata.size);
+                });
+            },
+            [this, tok](const MoonrakerError& err) {
+                // L081 Mechanism C: marshal LVGL show_gcode_viewer to main thread.
+                tok.defer("DetailView::metadata_error", [this, err]() {
+                    spdlog::debug(
+                        "[DetailView] Failed to get G-code metadata: {} - skipping preview",
+                        err.message);
+                    show_gcode_viewer(false);
+                });
+            },
+            true // silent
+        );
+    }
+
     // Check "Thumbnail Only" render mode - skip all gcode downloading/parsing.
     // This is the ONLY user-forced skip: past here we render whatever mode the
     // viewer is in (3D on GLES devices, 2D-layer otherwise), just like the
@@ -1988,23 +2550,23 @@ void PrintSelectDetailView::load_gcode_for_preview() {
     // lane-matched colors (apply_preview_colors) — so the browser shows the
     // colors the print will actually use. Oversized files still degrade to the
     // thumbnail below via is_gcode_2d_streaming_safe().
-    if (DisplaySettingsManager::instance().get_gcode_render_mode() == 3) {
-        spdlog::info("[DetailView] G-code render mode is Thumbnail Only - skipping G-code load");
+    // A .3mf takes the same path: it is a zip with no layers for the viewer to
+    // parse (prestonbrown/helixscreen#1713).
+    if (!helix::ui::preview_viewer_enabled() || helix::gcode::is_3mf(current_filename_)) {
+        spdlog::info("[DetailView] Thumbnail Only render mode or a .3mf file - skipping G-code "
+                     "load");
         lv_subject_set_int(&detail_gcode_loading_, 0);
         cancel_progress_timer();
         show_gcode_viewer(false);
         return;
     }
 
-    auto tok = lifetime_.token();
-
-    // Shared download FIRST: when the file is already on disk the viewer
-    // loads immediately — no wait on the metadata round-trip (preserves the
-    // old cached-file fast path). On a cold open this starts the ONE
-    // transfer the headless tools scan joins. The streaming-safety gate
-    // applies to the on-disk bytes either way (same size metadata.size
-    // reports); the metadata gate below re-checks the authoritative size on
-    // cold downloads.
+    // Shared download: when the file is already on disk the viewer loads
+    // immediately, with no wait on the metadata round-trip. On a cold open
+    // this starts the ONE transfer the headless tools scan joins. The
+    // streaming-safety gate applies to the on-disk bytes either way (same size
+    // metadata.size reports); the metadata gate above re-checks the
+    // authoritative size on cold downloads.
     ensure_gcode_downloaded([this, tok](bool ok, const std::string& path) {
         if (!ok) {
             spdlog::debug("[DetailView] Shared G-code download unavailable - using thumbnail");
@@ -2012,9 +2574,8 @@ void PrintSelectDetailView::load_gcode_for_preview() {
             return;
         }
 
-        std::ifstream f(path, std::ios::binary | std::ios::ate);
-        const std::streampos end_pos = f ? f.tellg() : std::streampos(0);
-        const size_t local_size = end_pos > 0 ? static_cast<size_t>(end_pos) : 0;
+        const size_t local_size =
+            tio::open_file(path, "rb") ? static_cast<size_t>(tio::file_size(path).value_or(0)) : 0;
         if (!helix::is_gcode_2d_streaming_safe(local_size)) {
             auto mem = helix::get_system_memory_info();
             spdlog::warn("[DetailView] G-code too large for streaming: file={} bytes, "
@@ -2050,50 +2611,14 @@ void PrintSelectDetailView::load_gcode_for_preview() {
         spdlog::info("[DetailView] Using G-code file ({} bytes): {}", local_size, path);
         begin_viewer_load(path);
     });
-
-    // Metadata fetch (parallel, as today): populates cached_file_metadata_
-    // for PrintStartController's pre-print checks (e.g. filament weight) and
-    // re-checks the streaming-safety gate against the authoritative size.
-    const std::string file_path =
-        current_path_.empty() ? current_filename_ : current_path_ + "/" + current_filename_;
-
-    api_->files().get_file_metadata(
-        file_path,
-        [this, tok](const FileMetadata& metadata) {
-            // L081 Mechanism C: marshal member writes + LVGL/show_gcode_viewer
-            // to main thread before touching `this`.
-            tok.defer("DetailView::metadata_apply", [this, metadata]() {
-                // Cache for PrintStartController's pre-print checks (e.g., filament weight)
-                cached_file_metadata_ = metadata;
-
-                // Check if file is safe to render given available RAM. When
-                // the shared file already loaded this same size passed the
-                // local gate above, so this only bites on the paths where the
-                // ensure-callback hadn't resolved yet.
-                if (!helix::is_gcode_2d_streaming_safe(metadata.size)) {
-                    auto mem = helix::get_system_memory_info();
-                    spdlog::warn("[DetailView] G-code too large for streaming: file={} bytes, "
-                                 "available RAM={}MB - using thumbnail",
-                                 metadata.size, mem.available_mb());
-                    show_gcode_viewer(false);
-                    return;
-                }
-                spdlog::debug("[DetailView] G-code size {} bytes - metadata cached", metadata.size);
-            });
-        },
-        [this, tok](const MoonrakerError& err) {
-            // L081 Mechanism C: marshal LVGL show_gcode_viewer to main thread.
-            tok.defer("DetailView::metadata_error", [this, err]() {
-                spdlog::debug("[DetailView] Failed to get G-code metadata: {} - skipping preview",
-                              err.message);
-                show_gcode_viewer(false);
-            });
-        },
-        true // silent
-    );
 }
 
 void PrintSelectDetailView::begin_viewer_load(const std::string& path) {
+    // Reached from a download callback, after which the tree may have died.
+    if (!gcode_viewer_) {
+        return;
+    }
+    viewer_file_ = current_filename_;
     // Set up the (single) load callback, then load the file. The body was
     // identical in the former cached-file and post-download paths.
     ui_gcode_viewer_set_load_callback(
@@ -2123,12 +2648,23 @@ void PrintSelectDetailView::begin_viewer_load(const std::string& path) {
             // fire_on_loaded() so any deferred print-attempt sees fresh checks.
             self->try_extract_gcode_colors(viewer);
 
+            // The whole file is parsed: definitions past the scan window now
+            // appear, before a deferred Print reads the picks.
+            self->refresh_exclude_objects();
             // Parse + pre-flight are now complete: release any deferred
             // run_when_loaded() callback (e.g. a print tapped pre-parse).
             self->fire_on_loaded();
             // The viewer parse also satisfies pre-flight readiness on full
             // platforms — release any run_when_preflight_ready() attempt.
             self->fire_on_preflight_ready();
+
+            // A parse that found no layers has nothing to draw, and revealing
+            // it would hide the thumbnail behind an empty viewer.
+            if (ui_gcode_viewer_get_layer_count(viewer) == 0) {
+                spdlog::debug("[DetailView] G-code has no layers - keeping thumbnail");
+                self->show_gcode_viewer(false);
+                return;
+            }
 
             // Unpause, show, then reset camera (must be visible for layout)
             ui_gcode_viewer_set_paused(viewer, false);
@@ -2157,6 +2693,7 @@ static void update_prep_time_label() {
 
     if (estimate_s <= 0) {
         lv_subject_copy_string(s_detail_view_instance->get_prep_time_estimate_subject(), "");
+        s_detail_view_instance->set_prep_estimate_visible(0);
         return;
     }
 
@@ -2173,6 +2710,7 @@ static void update_prep_time_label() {
         snprintf(buf, sizeof(buf), "~%d sec prep time", secs);
     }
     lv_subject_copy_string(s_detail_view_instance->get_prep_time_estimate_subject(), buf);
+    s_detail_view_instance->set_prep_estimate_visible(1);
 }
 
 // ============================================================================
@@ -2191,8 +2729,8 @@ static void update_prep_time_label() {
 //
 // Per-row visibility: the renderer's `VisibilitySubjectLookup` callback is
 // invoked for each option; returning nullptr leaves the row unconditionally
-// visible. Today only the plugin-gated predicate returns a non-null subject
-// (the helix_plugin_installed tri-state); macro-gated options are filtered
+// visible. Only the rewrite-gated predicate returns a non-null subject
+// (gcode_rewrite_available_, a tri-state); macro-gated options are filtered
 // out of the set BEFORE populate() is called (see
 // filter_macro_gated_options), so the lookup never sees them.
 
@@ -2205,12 +2743,16 @@ void PrintSelectDetailView::populate_option_rows() {
         return;
     }
 
-    const auto& option_set = printer_state_->get_pre_print_option_set();
+    // Macro-analysis rows join the printer's own options when its database
+    // entry declares none; see PrintPreparationManager::displayed_options().
+    const PrePrintOptionSet option_set =
+        prep_manager_ ? prep_manager_->displayed_options()
+                      : printer_state_->profile_state().pre_print_option_set();
 
-    // Skip rebuild only when rows are already populated AND the active
-    // printer hasn't changed since they were built. Mid-session printer-type
-    // changes (e.g. multi-printer setups) need a repopulate so the rows
-    // reflect the new option set.
+    // Skip rebuild only when rows are already populated AND neither the active
+    // printer nor its option ids have changed since they were built. A
+    // mid-session printer-type change (e.g. multi-printer setups) or a macro
+    // analysis landing after the first render needs a repopulate.
     //
     // The rebuild path is safe: `populate()` calls `clear()` (which deinits
     // every option subject — uninstalling observers from their row widgets)
@@ -2220,13 +2762,17 @@ void PrintSelectDetailView::populate_option_rows() {
     // still alive, so the deferred widget-delete tick has nothing to do for
     // them. Repopulating mid-session is therefore not the race that this
     // early-return originally guarded against.
-    const std::string& current_type = printer_state_->get_printer_type();
-    if (option_rows_renderer_.row_count() > 0 && current_type == last_rendered_printer_type_) {
+    const std::string& current_type = printer_state_->profile_state().printer_type();
+    std::string rows_key = current_type;
+    for (const auto& opt : option_set.options) {
+        rows_key += '\n' + opt.id;
+    }
+    if (option_rows_renderer_.row_count() > 0 && rows_key == last_rendered_rows_) {
         spdlog::trace("[DetailView] Skipping option-row rebuild (already populated for '{}')",
                       current_type);
         return;
     }
-    last_rendered_printer_type_ = current_type;
+    last_rendered_rows_ = rows_key;
 
     // Honor `PrePrintOption::requires_macro`: hide options whose required
     // macro isn't registered with Klipper. Their toggles would be inert —
@@ -2244,25 +2790,25 @@ void PrintSelectDetailView::populate_option_rows() {
                       option_set.options.size() - rendered.options.size(), current_type);
     }
 
-    // Plugin-gated visibility: HIDE a toggle only when DISABLING it would
-    // require the HelixPrint plugin (see
+    // Rewrite-gated visibility: HIDE a toggle only when DISABLING it would
+    // require rewriting the job (see
     // PrintPreparationManager::disabling_option_requires_plugin). For those
-    // options we bind the row to the helix_plugin_installed tri-state subject;
-    // the renderer hides the row when it reads 0 (plugin confirmed absent) and
-    // keeps it visible at -1 (still checking, startup window) and 1 (present).
+    // options we bind the row to gcode_rewrite_available_; the renderer hides
+    // the row when it reads 0 (no plugin, or a transport that keeps no local
+    // copy) and keeps it visible at -1 (still checking, startup window) and 1.
     //
     // CAUTION — do NOT hide options the printer handles natively without the
     // plugin. K2 Plus bed_mesh is a MacroParam whose START_PRINT/PRINT_PREPARED
     // takes the skip directly (setup_gcode present), so the predicate returns
     // false and it stays visible. Hiding it was a shipped regression; the
     // predicate now enforces the distinction structurally.
-    auto visibility_lookup = [this](const std::string& id) -> lv_subject_t* {
+    auto visibility_lookup = [this, &rendered](const std::string& id) -> lv_subject_t* {
         if (!prep_manager_ || !printer_state_) {
             return nullptr;
         }
-        const PrePrintOption* opt = printer_state_->get_pre_print_option_set().find(id);
+        const PrePrintOption* opt = rendered.find(id);
         if (opt && prep_manager_->disabling_option_requires_plugin(*opt)) {
-            return printer_state_->get_helix_plugin_installed_subject();
+            return &gcode_rewrite_available_;
         }
         return nullptr; // Not plugin-dependent: always visible for declared options.
     };
@@ -2291,6 +2837,98 @@ void PrintSelectDetailView::populate_option_rows() {
             return -1;
         });
     }
+
+    // The rows just changed the scroll area's content height without any
+    // scroll or size event, so refresh the cue's data here.
+    if (options_scroll_) {
+        lv_obj_update_layout(options_scroll_);
+        update_options_more_below();
+    }
+}
+
+void PrintSelectDetailView::defer_detail_fit() {
+    // Deferred one tick: these events fire mid-layout-pass, when the scroll
+    // area's height still reflects the PREVIOUS card height, and measuring
+    // that stale pair oscillates (card shrinks -> stale avail reads smaller
+    // -> card grows back -> repeat). After the tick the whole tree is
+    // consistent, and a fit that writes nothing ends the cycle. At most one
+    // deferral is queued at a time: a scroll drag fires this every frame,
+    // and one run after the last frame measures the same tree.
+    if (!options_scroll_ || !detail_card_ || fit_pending_) {
+        return;
+    }
+    fit_pending_ = true;
+    lifetime_.token().defer("DetailView::fit_portrait_preview", [this]() {
+        fit_pending_ = false;
+        if (!options_scroll_ || !detail_card_) {
+            return;
+        }
+        update_options_more_below();
+        fit_portrait_preview();
+    });
+}
+
+void PrintSelectDetailView::update_options_more_below() {
+    if (!options_scroll_) {
+        return;
+    }
+    const int more = lv_obj_get_scroll_bottom(options_scroll_) > 0 ? 1 : 0;
+    lv_subject_set_int(&detail_options_more_below_, more);
+}
+
+void PrintSelectDetailView::fit_portrait_preview() {
+    lv_obj_t* card = detail_card_;
+    if (!card || !options_scroll_) {
+        return;
+    }
+    lv_subject_t* portrait = lv_xml_get_subject(nullptr, "ui_is_portrait");
+    if (!portrait || lv_subject_get_int(portrait) == 0) {
+        // Landscape: the card fills its column by flex; drop any measured
+        // portrait height.
+        lv_obj_remove_local_style_prop(card, LV_STYLE_HEIGHT, 0);
+        return;
+    }
+    const int width = lv_obj_get_width(card);
+    const int avail = lv_obj_get_height(card) + lv_obj_get_height(options_scroll_);
+    const int content = lv_obj_get_scroll_y(options_scroll_) + lv_obj_get_height(options_scroll_) +
+                        lv_obj_get_scroll_bottom(options_scroll_);
+
+    // The tile grid's top, in the scroll area's content coordinates.
+    // lv_obj_get_y is relative to the parent's content box and folds the
+    // parent's scroll offset back in, which for the scroll area's direct
+    // child IS the conversion into content coordinates; the intermediates
+    // never scroll, so the plain chain sum needs no correction.
+    lv_obj_t* grid = pre_print_options_container_;
+    int grid_top = 0;
+    for (lv_obj_t* o = grid; o && o != options_scroll_; o = lv_obj_get_parent(o)) {
+        grid_top += lv_obj_get_y(o);
+    }
+    lv_obj_t* first_tile = grid ? lv_obj_get_child(grid, 0) : nullptr;
+    const int tile_h = first_tile ? lv_obj_get_height(first_tile) : 0;
+    const int gap = grid ? lv_obj_get_style_pad_row(grid, LV_PART_MAIN) : 0;
+
+    const int h =
+        helix::ui::decide_detail_portrait_preview(width, avail, content, grid_top, tile_h, gap);
+    spdlog::trace("[DetailView] fit_portrait_preview: card {} -> {} (avail {} content {} grid_top "
+                  "{} tile {} gap {})",
+                  lv_obj_get_height(card), h, avail, content, grid_top, tile_h, gap);
+    if (lv_obj_get_height(card) != h) {
+        // DECLARATIVE_OK: measured layout; the height depends on runtime
+        // pixel sizes the XML cannot know.
+        lv_obj_set_height(card, h);
+    }
+}
+
+std::map<std::string, bool> PrintSelectDetailView::collect_option_states() const {
+    std::map<std::string, bool> out;
+    for (const auto& id : option_rows_renderer_.rendered_ids()) {
+        out[id] = option_rows_renderer_.get_state(id, 0) != 0;
+    }
+    return out;
+}
+
+void PrintSelectDetailView::seed_option_states(std::map<std::string, bool> overrides) {
+    pending_option_seed_ = std::move(overrides);
 }
 
 } // namespace helix::ui

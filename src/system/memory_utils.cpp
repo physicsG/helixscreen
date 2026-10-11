@@ -3,13 +3,24 @@
 
 #include "memory_utils.h"
 
+#include "app_globals.h"
+#include "env_knobs.h"
+#include "gcode_layer_cache.h"
+#include "gcode_layer_index.h"
+#include "platform_capabilities.h"
+#include "system/helix_paths.h"
+#include "text_io.h"
+
 #include <lvgl/lvgl.h>
 #include <spdlog/spdlog.h>
 
 #include <cerrno>
 #include <cstdlib>
-#include <fstream>
 #include <string>
+
+#if defined(HELIX_PLATFORM_ESP32)
+#include <esp_heap_caps.h>
+#endif
 
 #ifdef __APPLE__
 #include <mach/mach.h>
@@ -18,6 +29,8 @@
 #include <sys/sysctl.h>
 #include <sys/types.h>
 #endif
+
+namespace tio = helix::text_io;
 
 namespace helix {
 
@@ -31,16 +44,16 @@ bool read_memory_stats(int64_t& rss_kb, int64_t& hwm_kb) {
     hwm_kb = 0;
 
 #ifdef __linux__
-    std::ifstream status("/proc/self/status");
-    if (!status.is_open())
+    tio::LineReader status("/proc/self/status");
+    if (!status)
         return false;
 
     std::string line;
-    while (std::getline(status, line)) {
+    while (status.next(line)) {
         if (line.compare(0, 6, "VmRSS:") == 0) {
-            rss_kb = std::stoll(line.substr(6));
+            rss_kb = tio::parse_leading<long long>(line.substr(6)).value_or(0);
         } else if (line.compare(0, 6, "VmHWM:") == 0) {
-            hwm_kb = std::stoll(line.substr(6));
+            hwm_kb = tio::parse_leading<long long>(line.substr(6)).value_or(0);
         }
     }
     return rss_kb > 0;
@@ -69,14 +82,14 @@ bool read_private_dirty(int64_t& private_dirty_kb) {
     private_dirty_kb = 0;
 
 #ifdef __linux__
-    std::ifstream smaps("/proc/self/smaps_rollup");
-    if (!smaps.is_open())
+    tio::LineReader smaps("/proc/self/smaps_rollup");
+    if (!smaps)
         return false;
 
     std::string line;
-    while (std::getline(smaps, line)) {
+    while (smaps.next(line)) {
         if (line.compare(0, 14, "Private_Dirty:") == 0) {
-            private_dirty_kb = std::stoll(line.substr(14));
+            private_dirty_kb = tio::parse_leading<long long>(line.substr(14)).value_or(0);
             return true;
         }
     }
@@ -89,37 +102,37 @@ bool read_smaps_rollup(SmapsRollup& rollup) {
     rollup = {};
 
 #ifdef __linux__
-    std::ifstream smaps("/proc/self/smaps_rollup");
-    if (!smaps.is_open())
+    tio::LineReader smaps("/proc/self/smaps_rollup");
+    if (!smaps)
         return false;
 
     int fields_found = 0;
     std::string line;
-    while (std::getline(smaps, line)) {
+    while (smaps.next(line)) {
         // Fields in smaps_rollup: "FieldName:     1234 kB"
         if (line.compare(0, 4, "Rss:") == 0) {
-            rollup.rss_kb = std::stoll(line.substr(4));
+            rollup.rss_kb = tio::parse_leading<long long>(line.substr(4)).value_or(0);
             ++fields_found;
         } else if (line.compare(0, 4, "Pss:") == 0) {
-            rollup.pss_kb = std::stoll(line.substr(4));
+            rollup.pss_kb = tio::parse_leading<long long>(line.substr(4)).value_or(0);
             ++fields_found;
         } else if (line.compare(0, 14, "Private_Dirty:") == 0) {
-            rollup.private_dirty_kb = std::stoll(line.substr(14));
+            rollup.private_dirty_kb = tio::parse_leading<long long>(line.substr(14)).value_or(0);
             ++fields_found;
         } else if (line.compare(0, 14, "Private_Clean:") == 0) {
-            rollup.private_clean_kb = std::stoll(line.substr(14));
+            rollup.private_clean_kb = tio::parse_leading<long long>(line.substr(14)).value_or(0);
             ++fields_found;
         } else if (line.compare(0, 13, "Shared_Clean:") == 0) {
-            rollup.shared_clean_kb = std::stoll(line.substr(13));
+            rollup.shared_clean_kb = tio::parse_leading<long long>(line.substr(13)).value_or(0);
             ++fields_found;
         } else if (line.compare(0, 13, "Shared_Dirty:") == 0) {
-            rollup.shared_dirty_kb = std::stoll(line.substr(13));
+            rollup.shared_dirty_kb = tio::parse_leading<long long>(line.substr(13)).value_or(0);
             ++fields_found;
         } else if (line.compare(0, 8, "SwapPss:") == 0) {
-            rollup.swap_pss_kb = std::stoll(line.substr(8));
+            rollup.swap_pss_kb = tio::parse_leading<long long>(line.substr(8)).value_or(0);
             ++fields_found;
         } else if (line.compare(0, 5, "Swap:") == 0) {
-            rollup.swap_kb = std::stoll(line.substr(5));
+            rollup.swap_kb = tio::parse_leading<long long>(line.substr(5)).value_or(0);
             ++fields_found;
         }
     }
@@ -134,26 +147,26 @@ MemoryInfo get_system_memory_info() {
     MemoryInfo info;
 
 #ifdef __linux__
-    std::ifstream meminfo("/proc/meminfo");
-    if (!meminfo.is_open())
-        return info;
-
-    std::string line;
-    while (std::getline(meminfo, line)) {
-        // Parse lines like "MemTotal:       1234567 kB"
-        if (line.compare(0, 9, "MemTotal:") == 0) {
-            info.total_kb = static_cast<size_t>(std::stoll(line.substr(9)));
-        } else if (line.compare(0, 13, "MemAvailable:") == 0) {
-            info.available_kb = static_cast<size_t>(std::stoll(line.substr(13)));
-        } else if (line.compare(0, 8, "MemFree:") == 0) {
-            info.free_kb = static_cast<size_t>(std::stoll(line.substr(8)));
-        }
-    }
+    const std::string meminfo = tio::read_file("/proc/meminfo").value_or("");
+    info.total_kb = static_cast<size_t>(parse_meminfo_kb(meminfo, "MemTotal"));
+    info.available_kb = static_cast<size_t>(parse_meminfo_kb(meminfo, "MemAvailable"));
+    info.free_kb = static_cast<size_t>(parse_meminfo_kb(meminfo, "MemFree"));
+    info.swap_free_kb = static_cast<size_t>(parse_meminfo_kb(meminfo, "SwapFree"));
 
     // Fallback: if MemAvailable not present (older kernels), estimate from free + buffers/cache
     if (info.available_kb == 0 && info.free_kb > 0) {
         info.available_kb = info.free_kb; // Conservative estimate
     }
+
+#elif defined(HELIX_PLATFORM_ESP32)
+    // General allocations (LVGL draw buffers and image decodes included) come
+    // from PSRAM, so PSRAM is the memory "available" heuristics are about.
+    // Only O(1) counters: the largest free block is not reported, because
+    // finding it walks every PSRAM block with interrupts masked for 20-30ms,
+    // and the RGB panel's bounce-buffer refill misses for the whole walk.
+    info.total_kb = heap_caps_get_total_size(MALLOC_CAP_SPIRAM) / 1024;
+    info.free_kb = heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024;
+    info.available_kb = info.free_kb;
 
 #elif defined(__APPLE__)
     // macOS: Get total physical memory via sysctl-style approach
@@ -186,8 +199,7 @@ MemoryInfo get_system_memory_info() {
 bool is_gcode_3d_render_safe(size_t file_size_bytes) {
     // Environment variable to force memory failure for testing
     // Usage: HELIX_FORCE_GCODE_MEMORY_FAIL=1 ./helix-screen --test
-    const char* force_fail = std::getenv("HELIX_FORCE_GCODE_MEMORY_FAIL");
-    if (force_fail && force_fail[0] == '1') {
+    if (helix::env_flag("HELIX_FORCE_GCODE_MEMORY_FAIL")) {
         spdlog::debug(
             "[memory_utils] HELIX_FORCE_GCODE_MEMORY_FAIL=1 - forcing memory check failure");
         return false;
@@ -220,37 +232,46 @@ bool is_gcode_3d_render_safe(size_t file_size_bytes) {
     return mem.available_kb > (estimated_memory_kb * 2);
 }
 
-bool is_gcode_2d_streaming_safe_impl(size_t file_size_bytes, size_t available_kb, int display_width,
-                                     int display_height) {
+bool is_gcode_2d_streaming_safe_impl(size_t file_size_bytes, size_t available_kb, size_t total_kb,
+                                     int display_width, int display_height,
+                                     bool cache_dir_is_ram_backed) {
     // 2D streaming mode memory requirements:
-    // 1. Layer index: ~24 bytes per layer (estimate 1 layer per 500 bytes of G-code)
-    // 2. LRU layer cache: 1MB fixed budget for parsed layer segments
+    // 1. Layer index: one StreamingLayerEntry per layer, estimating 1 layer per
+    //    500 bytes of G-code. Priced from the struct itself, so the gate cannot
+    //    reserve less per layer than GCodeLayerIndex allocates.
+    // 2. LRU layer cache: the budget GCodeStreamingController hands this RAM
+    //    tier. Adaptive mode may shrink it under pressure, never raise it, so
+    //    the tier budget is the ceiling to reserve.
     // 3. Ghost buffer: display_width * display_height * 4 bytes (ARGB8888)
     // 4. Safety margin: 3MB for other allocations
-    //
-    // Note: NO download spike - file streams directly to disk
+    // 5. Spill: the downloaded file itself when the cache directory is
+    //    RAM-backed. tmpfs/ramfs bytes ARE memory and, on a device without
+    //    swap, nothing can reclaim them while the file stays cached; on real
+    //    storage the download costs no RAM at all.
 
-    size_t estimated_layers = file_size_bytes / 500;
-    size_t layer_index_kb = (estimated_layers * 24) / 1024;
-    constexpr size_t lru_cache_kb = 1024; // 1MB
-    size_t ghost_buffer_kb =
+    const size_t estimated_layers = file_size_bytes / 500;
+    const size_t layer_index_kb = (estimated_layers * sizeof(gcode::StreamingLayerEntry)) / 1024;
+    const size_t lru_cache_kb =
+        gcode::GCodeLayerCache::budget_tier_for_total_ram_kb(total_kb).budget_bytes / 1024;
+    const size_t ghost_buffer_kb =
         (static_cast<size_t>(display_width) * static_cast<size_t>(display_height) * 4) / 1024;
     constexpr size_t safety_margin_kb = 3 * 1024; // 3MB
+    const size_t spill_kb = cache_dir_is_ram_backed ? file_size_bytes / 1024 : 0;
 
-    size_t total_needed_kb = layer_index_kb + lru_cache_kb + ghost_buffer_kb + safety_margin_kb;
+    const size_t total_needed_kb =
+        layer_index_kb + lru_cache_kb + ghost_buffer_kb + safety_margin_kb + spill_kb;
 
     spdlog::trace("[memory_utils] 2D streaming: need {}KB (index={}KB, cache={}KB, "
-                  "ghost={}KB@{}x{}, margin={}KB), available={}KB",
+                  "ghost={}KB@{}x{}, margin={}KB, spill={}KB), available={}KB",
                   total_needed_kb, layer_index_kb, lru_cache_kb, ghost_buffer_kb, display_width,
-                  display_height, safety_margin_kb, available_kb);
+                  display_height, safety_margin_kb, spill_kb, available_kb);
 
     return available_kb > total_needed_kb;
 }
 
 bool is_gcode_2d_streaming_safe(size_t file_size_bytes) {
     // Environment variable to force memory failure for testing
-    const char* force_fail = std::getenv("HELIX_FORCE_GCODE_MEMORY_FAIL");
-    if (force_fail && force_fail[0] == '1') {
+    if (helix::env_flag("HELIX_FORCE_GCODE_MEMORY_FAIL")) {
         spdlog::debug(
             "[memory_utils] HELIX_FORCE_GCODE_MEMORY_FAIL=1 - forcing memory check failure");
         return false;
@@ -272,8 +293,14 @@ bool is_gcode_2d_streaming_safe(size_t file_size_bytes) {
         display_height = lv_display_get_vertical_resolution(disp);
     }
 
-    return is_gcode_2d_streaming_safe_impl(file_size_bytes, mem.available_kb, display_width,
-                                           display_height);
+    // Resolved with the creating call, not peek_helix_cache_dir(): a directory
+    // that does not exist yet cannot be stat'd, and an unclassifiable path
+    // reads as storage — which is exactly the under-count this term exists to
+    // prevent. Same subdir the G-code preview downloads into.
+    const bool cache_dir_is_ram_backed = paths::is_ram_backed(get_helix_cache_dir("gcode_temp"));
+
+    return is_gcode_2d_streaming_safe_impl(file_size_bytes, mem.available_kb, mem.total_kb,
+                                           display_width, display_height, cache_dir_is_ram_backed);
 }
 
 // ============================================================================
@@ -306,12 +333,7 @@ bool parse_oom_score_adj(const char* value, int& out) {
 }
 
 bool write_oom_score_adj(int adj, const char* path) {
-    std::ofstream f(path);
-    if (!f.is_open())
-        return false;
-    f << adj;
-    f.flush();
-    return f.good();
+    return tio::write_file(path, fmt::format("{}", adj));
 }
 
 bool apply_oom_score_adj_from_env() {

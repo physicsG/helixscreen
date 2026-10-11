@@ -8,20 +8,17 @@
  * These tests capture the CURRENT behavior of plugin-related subjects
  * in PrinterState before extraction to a dedicated PrinterPluginStatusState class.
  *
- * Plugin status subjects (2 total):
+ * Plugin status subjects:
  * - helix_plugin_installed_ (int, tri-state: -1=unknown, 0=not installed, 1=installed)
- * - phase_tracking_enabled_ (int, tri-state: -1=unknown, 0=disabled, 1=enabled)
  *
  * Update mechanisms:
- * - set_helix_plugin_installed(bool) - async update via helix::async::invoke
- * - set_phase_tracking_enabled(bool) - async update via helix::async::invoke
+ * - set_helix_plugin_installed(bool) - async update via the UpdateQueue
  *
  * Query methods:
  * - service_has_helix_plugin() - returns true only when value is 1
- * - is_phase_tracking_enabled() - returns true only when value is 1
  *
  * Key behaviors:
- * - Both subjects are tri-state: -1 (unknown) is the initial value
+ * - helix_plugin_installed_ is tri-state: -1 (unknown) is the initial value
  * - Unknown state (-1) is treated as false for boolean queries
  * - Updates trigger update_gcode_modification_visibility() which refreshes the
  *   aggregate has_any_preprint_options subject (per-op can_show_* subjects
@@ -59,12 +56,6 @@ TEST_CASE("Plugin status characterization: initial values after init",
         REQUIRE(subject != nullptr);
         REQUIRE(lv_subject_get_int(subject) == -1);
     }
-
-    SECTION("phase_tracking_enabled initializes to -1 (unknown)") {
-        lv_subject_t* subject = get_subject_by_name("phase_tracking_enabled");
-        REQUIRE(subject != nullptr);
-        REQUIRE(lv_subject_get_int(subject) == -1);
-    }
 }
 
 TEST_CASE("Plugin status characterization: initial query methods return false for unknown state",
@@ -76,11 +67,7 @@ TEST_CASE("Plugin status characterization: initial query methods return false fo
     state.init_subjects(false);
 
     SECTION("service_has_helix_plugin returns false when unknown (-1)") {
-        REQUIRE(state.service_has_helix_plugin() == false);
-    }
-
-    SECTION("is_phase_tracking_enabled returns false when unknown (-1)") {
-        REQUIRE(state.is_phase_tracking_enabled() == false);
+        REQUIRE(state.plugin_status_state().service_has_helix_plugin() == false);
     }
 }
 
@@ -121,62 +108,14 @@ TEST_CASE("Plugin status characterization: set_helix_plugin_installed behavior",
         state.set_helix_plugin_installed(true);
         UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
 
-        REQUIRE(state.service_has_helix_plugin() == true);
+        REQUIRE(state.plugin_status_state().service_has_helix_plugin() == true);
     }
 
     SECTION("service_has_helix_plugin returns false after set_helix_plugin_installed(false)") {
         state.set_helix_plugin_installed(false);
         UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
 
-        REQUIRE(state.service_has_helix_plugin() == false);
-    }
-}
-
-// ============================================================================
-// set_phase_tracking_enabled Tests - Verify phase tracking toggle behavior
-// ============================================================================
-
-TEST_CASE("Plugin status characterization: set_phase_tracking_enabled behavior",
-          "[characterization][plugin][setter]") {
-    lv_init_safe();
-
-    PrinterState& state = get_printer_state();
-    PrinterStateTestAccess::reset(state);
-    state.init_subjects(true);
-
-    SECTION("set_phase_tracking_enabled(true) sets subject to 1") {
-        state.set_phase_tracking_enabled(true);
-        UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
-
-        lv_subject_t* subject = get_subject_by_name("phase_tracking_enabled");
-        REQUIRE(lv_subject_get_int(subject) == 1);
-    }
-
-    SECTION("set_phase_tracking_enabled(false) sets subject to 0") {
-        // First set to true
-        state.set_phase_tracking_enabled(true);
-        UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
-
-        // Then set to false
-        state.set_phase_tracking_enabled(false);
-        UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
-
-        lv_subject_t* subject = get_subject_by_name("phase_tracking_enabled");
-        REQUIRE(lv_subject_get_int(subject) == 0);
-    }
-
-    SECTION("is_phase_tracking_enabled returns true after set_phase_tracking_enabled(true)") {
-        state.set_phase_tracking_enabled(true);
-        UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
-
-        REQUIRE(state.is_phase_tracking_enabled() == true);
-    }
-
-    SECTION("is_phase_tracking_enabled returns false after set_phase_tracking_enabled(false)") {
-        state.set_phase_tracking_enabled(false);
-        UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
-
-        REQUIRE(state.is_phase_tracking_enabled() == false);
+        REQUIRE(state.plugin_status_state().service_has_helix_plugin() == false);
     }
 }
 
@@ -193,37 +132,21 @@ TEST_CASE("Plugin status characterization: tri-state semantics",
     state.init_subjects(false);
 
     SECTION("helix_plugin_installed: unknown (-1) vs not installed (0) are distinct") {
-        lv_subject_t* subject = state.get_helix_plugin_installed_subject();
+        lv_subject_t* subject = state.plugin_status_state().get_helix_plugin_installed_subject();
 
         // Initially unknown
         REQUIRE(lv_subject_get_int(subject) == -1);
-        REQUIRE(state.service_has_helix_plugin() == false);
+        REQUIRE(state.plugin_status_state().service_has_helix_plugin() == false);
 
         // Set to not installed
         state.set_helix_plugin_installed(false);
         UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
 
         REQUIRE(lv_subject_get_int(subject) == 0);
-        REQUIRE(state.service_has_helix_plugin() == false);
+        REQUIRE(state.plugin_status_state().service_has_helix_plugin() == false);
 
         // Both return false for query, but subject values are different
         // This allows UI to distinguish "still checking" from "definitely not installed"
-    }
-
-    SECTION("phase_tracking_enabled: unknown (-1) vs disabled (0) are distinct") {
-        // Must deinit first because the outer scope already called
-        // init_subjects(false), setting subjects_initialized_=true.
-        // Without deinit, init_subjects(true) is a no-op and XML subjects
-        // are never registered, causing get_subject_by_name to return nullptr.
-        state.deinit_subjects();
-        state.init_subjects(true);
-        lv_subject_t* subject = get_subject_by_name("phase_tracking_enabled");
-
-        // Get fresh subject after init
-        REQUIRE(subject != nullptr);
-        // Note: init_subjects already called, so initial state is -1
-        int initial_value = lv_subject_get_int(subject);
-        REQUIRE(initial_value == -1);
     }
 }
 
@@ -240,7 +163,7 @@ TEST_CASE("Plugin status characterization: async update behavior",
     state.init_subjects(false);
 
     SECTION("set_helix_plugin_installed requires queue drain to take effect") {
-        lv_subject_t* subject = state.get_helix_plugin_installed_subject();
+        lv_subject_t* subject = state.plugin_status_state().get_helix_plugin_installed_subject();
 
         // Call setter but don't drain
         state.set_helix_plugin_installed(true);
@@ -253,23 +176,8 @@ TEST_CASE("Plugin status characterization: async update behavior",
         REQUIRE(lv_subject_get_int(subject) == 1);
     }
 
-    SECTION("set_phase_tracking_enabled requires queue drain to take effect") {
-        // Must deinit first because the outer scope already called
-        // init_subjects(false), setting subjects_initialized_=true.
-        // Without deinit, init_subjects(true) is a no-op and XML subjects
-        // are never registered, causing get_subject_by_name to return nullptr.
-        state.deinit_subjects();
-        state.init_subjects(true);
-        lv_subject_t* subject = get_subject_by_name("phase_tracking_enabled");
-
-        state.set_phase_tracking_enabled(true);
-        UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
-
-        REQUIRE(lv_subject_get_int(subject) == 1);
-    }
-
     SECTION("multiple rapid updates coalesce correctly") {
-        lv_subject_t* subject = state.get_helix_plugin_installed_subject();
+        lv_subject_t* subject = state.plugin_status_state().get_helix_plugin_installed_subject();
 
         // Rapid toggling
         state.set_helix_plugin_installed(true);

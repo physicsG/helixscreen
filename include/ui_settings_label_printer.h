@@ -4,9 +4,12 @@
 #pragma once
 
 #include "bluetooth_plugin.h"
+#include "bt_discovery_run.h"
 #include "lvgl/lvgl.h"
 #include "mdns_discovery.h"
 #include "overlay_base.h"
+#include "static_panel_registry.h"
+#include "subject_managed_panel.h"
 #include "usb_printer_detector.h"
 
 #include <atomic>
@@ -18,7 +21,6 @@ namespace helix::settings {
 
 class LabelPrinterSettingsOverlay : public OverlayBase {
   public:
-    LabelPrinterSettingsOverlay();
     ~LabelPrinterSettingsOverlay() override;
 
     // OverlayBase interface
@@ -27,17 +29,17 @@ class LabelPrinterSettingsOverlay : public OverlayBase {
     const char* get_name() const override {
         return "Label Printer";
     }
+    const char* xml_component() const override {
+        return "label_printer_settings";
+    }
     void on_activate() override;
-    void on_deactivate() override;
+    void on_deactivating(DeactivateReason reason) override;
 
-    // UI creation
-    lv_obj_t* create(lv_obj_t* parent) override;
-    void show(lv_obj_t* parent_screen);
     bool is_created() const {
         return overlay_root_ != nullptr;
     }
 
-    // Event handlers (public for static callbacks)
+    // Event handlers (called by the XML callback lambdas)
     void handle_address_changed();
     void handle_port_changed();
     void handle_label_size_changed(int index);
@@ -87,6 +89,7 @@ class LabelPrinterSettingsOverlay : public OverlayBase {
     std::vector<DiscoveredPrinter> raw_printers_;        ///< temp buffer for raw TCP results
     std::vector<DiscoveredPrinter> ipp_printers_;        ///< temp buffer for IPP results
     std::vector<DiscoveredNetworkPrinter> discovered_network_printers_; ///< merged list
+    SubjectManager subjects_;             // declared ahead: tears down after the subjects it owns
     lv_subject_t ipp_selected_subject_{}; ///< 0=not IPP, 1=IPP protocol selected
 
     // USB printer detection
@@ -104,14 +107,9 @@ class LabelPrinterSettingsOverlay : public OverlayBase {
         bool is_scanner = false; ///< HID barcode scanner — exclude from printer dropdown
     };
 
-    /// C callback safety: prevent use-after-free when overlay is destroyed during discovery
-    struct BtDiscoveryContext {
-        std::atomic<bool> alive{true};
-        LabelPrinterSettingsOverlay* overlay = nullptr;
-    };
-
-    helix_bt_context* bt_ctx_ = nullptr;
-    std::unique_ptr<BtDiscoveryContext> bt_discovery_ctx_;
+    std::shared_ptr<helix::bluetooth::SharedContext> bt_ctx_ =
+        std::make_shared<helix::bluetooth::SharedContext>();
+    helix::bluetooth::DiscoveryRun bt_discovery_;
     std::vector<BtDeviceInfo> bt_devices_;
     bool bt_discovering_ = false;
     lv_subject_t bt_scanning_subject_{};   ///< 0=idle, 1=scanning
@@ -121,24 +119,10 @@ class LabelPrinterSettingsOverlay : public OverlayBase {
     void test_printing_subject_set(int val) {
         lv_subject_set_int(&test_printing_subject_, val);
     }
-
-  private:
-    // Static callbacks
-    static void on_address_done(lv_event_t* e);
-    static void on_port_done(lv_event_t* e);
-    static void on_label_size_changed(lv_event_t* e);
-    static void on_preset_changed(lv_event_t* e);
-    static void on_test_print(lv_event_t* e);
-    static void on_printer_selected(lv_event_t* e);
-    static void on_type_changed(lv_event_t* e);
-    static void on_usb_printer_selected(lv_event_t* e);
-    static void on_bt_printer_selected(lv_event_t* e);
-    static void on_bt_scan(lv_event_t* e);
-    static void on_bt_connect(lv_event_t* e);
-    static void on_bt_forget(lv_event_t* e);
-    static void on_label_count_changed(lv_event_t* e);
 };
 
-LabelPrinterSettingsOverlay& get_label_printer_settings_overlay();
+inline LabelPrinterSettingsOverlay& get_label_printer_settings_overlay() {
+    return lazy_global<LabelPrinterSettingsOverlay>("LabelPrinterSettingsOverlay");
+}
 
 } // namespace helix::settings

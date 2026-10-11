@@ -7,7 +7,7 @@
 <!-- Subjects are registered in C++ (init_subjects) - do not define here to avoid shadowing -->
 <component>
   <view name="touch_calibration_overlay"
-        extends="overlay_panel" title="Touch Calibration" title_tag="Touch Calibration" bg_color="#screen_bg"
+        extends="overlay_panel" title="Touch Calibration" bg_color="#screen_bg"
         back_button_callback="on_touch_cal_back_clicked">
 
     <!-- Main content area - full screen for touch capture -->
@@ -71,13 +71,13 @@
               scrollable="false">
 
         <!-- Accept button - visible only in VERIFY (state=4) -->
-        <ui_button name="btn_accept" width="150" text="Accept" translation_tag="Accept">
+        <ui_button name="btn_accept" width="150" text="Accept">
           <event_cb trigger="clicked" callback="on_touch_cal_accept_clicked"/>
           <bind_flag_if_not_eq subject="touch_cal_state" flag="hidden" ref_value="4"/>
         </ui_button>
 
         <!-- Retry button - visible only in VERIFY (state=4) -->
-        <ui_button name="btn_retry" width="150" variant="secondary" text="Retry" translation_tag="Retry">
+        <ui_button name="btn_retry" width="150" variant="secondary" text="Retry">
           <event_cb trigger="clicked" callback="on_touch_cal_retry_clicked"/>
           <bind_flag_if_not_eq subject="touch_cal_state" flag="hidden" ref_value="4"/>
         </ui_button>
@@ -99,9 +99,8 @@
            matching the Cancel chip: in VERIFY the normal chrome is back. ONE
            observer — see the crosshair's note on stacked flag bindings. -->
       <text_small name="hold_hint"
-                  width="content" text="Hold anywhere to cancel" translation_tag="Hold anywhere to cancel"
-                  style_text_color="#text_muted" style_text_align="right" align="bottom_right"
-                  style_pad_right="#space_md" style_pad_bottom="#space_md">
+                  width="content" text="Hold anywhere to cancel" style_text_color="#text_muted" style_text_align="right"
+                  align="bottom_right" style_pad_right="#space_md" style_pad_bottom="#space_md">
         <bind_flag_if cond="touch_cal_state lt 1 or touch_cal_state gt 3" flag="hidden"/>
       </text_small>
 
@@ -111,7 +110,7 @@
       <!-- (top-left, top-right, bottom-center). Lifted above the capture surface -->
       <!-- in C++ (on_activate) so it stays clickable. Visible only in POINT states -->
       <!-- (hidden in 0=IDLE, 4=VERIFY, 5=COMPLETE where the normal chrome returns). -->
-      <ui_button name="cancel_chip" width="content" variant="secondary" text="Cancel" translation_tag="Cancel">
+      <ui_button name="cancel_chip" width="content" variant="secondary" text="Cancel">
         <event_cb trigger="clicked" callback="on_touch_cal_cancel_clicked"/>
         <!-- Visible only during active capture (POINT_1..POINT_3 = states 1-3); -->
         <!-- hidden in IDLE(0), VERIFY(4), COMPLETE(5) where normal chrome returns. -->

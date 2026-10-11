@@ -18,6 +18,7 @@
  */
 
 #include "../lvgl_test_fixture.h"
+#include "../test_helpers/backend_user_edit.h"
 #include "ams_backend_mock.h"
 #include "ams_state.h"
 #include "ams_types.h"
@@ -62,7 +63,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "AmsState current-material label carries a ful
         slot.brand.clear();
         slot.color_name.clear();
         slot.material = "PLA";
-        backend->set_slot_info(0, slot);
+        helix::test::apply_edit(*backend, 0, slot);
 
         const std::string expected = slot.spool_name + " " + slot.material;
         // Longer than the old 48-byte buffer could hold (47 chars + NUL).
@@ -81,7 +82,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "AmsState current-material label carries a ful
         slot.brand.clear();
         slot.color_name.clear();
         slot.material = "PLA";
-        backend->set_slot_info(0, slot);
+        helix::test::apply_edit(*backend, 0, slot);
 
         ams.sync_current_loaded_from_backend();
 

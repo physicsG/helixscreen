@@ -2,13 +2,13 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Reject a vendored submodule whose applied patches are not the ones in patches/.
 
-mk/patches.mk guards every apply with a variant of "is this file already dirty?"
--- `git -C $(LVGL_DIR) diff --quiet src/drivers/evdev/lv_evdev.c`, or a grep for
-one marker string. What it never asks is "is it dirty with the CURRENT revision
-of this patch". So the first revision of a patch to reach a checkout is the one
-that stays there: editing the patch afterwards changes nothing for anybody whose
-submodule already carries the old hunks, and the recipe cheerfully reports
-"already applied".
+mk/patches.mk routes every apply through scripts/apply_submodule_patch.sh, whose
+verdict is three-way: apply, already-applied (reverse check), or refuse. The
+refuse branch is what a bare `git apply --check` cannot deliver honestly, and
+what a patched tree still cannot settle is whether the applied hunks are the
+CURRENT revision of the patch: the first revision of a patch to reach a checkout
+is the one that stays there, and editing the patch afterwards changes nothing
+for anybody whose submodule already carries the old hunks.
 
 That shipped. 86560d156 added lv_evdev_get_last_raw() to
 patches/lvgl-evdev-protocol-a.patch, main's lib/lvgl kept the previous revision,
@@ -70,11 +70,15 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 STAMP_NAME = "helix-patches-applied.json"
 STAMP_VERSION = 1
 
-# Every apply in mk/patches.mk has this shape, on one line:
-#   git -C $(LVGL_DIR) apply --check $(PATCH_DIR)/lvgl_sdl_window.patch
-# which binds the patch to its submodule without a hand-maintained table.
+# Every patch-to-submodule binding in mk/patches.mk has one of two shapes:
+#   a call to the shared apply helper, naming the submodule dir then the patch:
+#     $(APPLY_PATCH) $(LVGL_DIR) $(PATCH_DIR)/lvgl_sdl_window.patch "label"
+#   or a hand-written git invocation:
+#     git -C $(LIBHV_DIR) apply [--check] $(PATCH_DIR)/libhv-x.patch
+# Either way the $(<NAME>_DIR) adjacent to the $(PATCH_DIR)/ reference binds the
+# patch to its submodule without a hand-maintained table.
 APPLY_RE = re.compile(
-    r"git\s+-C\s+\$\((?P<var>[A-Z0-9_]+)_DIR\)\s+apply\b[^;\n]*?"
+    r"\$\((?P<var>[A-Z0-9_]+)_DIR\)[ \t]+(?:apply\b[^;\n]*?[ \t]?)?"
     r"\$\(PATCH_DIR\)/(?P<patch>[A-Za-z0-9_.-]+\.patch)"
 )
 
@@ -87,12 +91,33 @@ REMEDY = (
     "   Fix: make reapply-patches\n"
     "   (Restoring single files by hand is not equivalent -- several patches\n"
     "    touch one file, so a targeted restore drops the other patches' hunks.)\n"
-    "   Run it ONCE, from any tree. setup-worktree.sh symlinks lib/ into the main\n"
-    "   checkout and the stamp lives in the shared .git/modules, so every worktree\n"
-    "   sharing those submodules is satisfied by the same run. It will touch files\n"
-    "   outside the tree you run it from; that is expected, not a bug.\n"
-    "   Check for live builds first -- it rewrites headers other builds are reading:\n"
+    "   Run it in the tree that reported this, and only that tree. The drifted\n"
+    "   submodules are private checkouts here, so the run repairs this tree's\n"
+    "   submodules against this branch's patches/ and reaches no other.\n"
+    "   Check for a live build in THIS tree first -- it rewrites headers a compile\n"
+    "   here may be reading:\n"
     "     pgrep -x -d\' \' \'make|cc1plus\'"
+)
+
+# `make reapply-patches` repairs whatever checkout a submodule path RESOLVES to.
+# Where that path is a symlink into another tree, the run rewrites THAT tree's
+# submodule against this branch's patches/ -- and patches/ is per-branch, so a
+# shared checkout is also the usual reason there is drift to report here at all.
+# Offering the private-checkout remedy would aim it at exactly the trees it breaks.
+SHARED_REMEDY_HEAD = (
+    "   Do NOT run `make reapply-patches` in this tree. These drifted submodules\n"
+    "   are symlinks into another checkout:"
+)
+
+SHARED_REMEDY_TAIL = (
+    "   Reapplying here rewrites THAT tree's submodules against this branch's\n"
+    "   patches/, which is not the set its own branch expects -- it would repair\n"
+    "   this tree by breaking the other one.\n"
+    "\n"
+    "   Fix: give this worktree its own checkouts, then reapply inside it:\n"
+    "     scripts/setup-worktree.sh --setup-only --no-build {branch}\n"
+    "   That swaps each symlink for a private checkout copied from the main tree\n"
+    "   and reconciles patches against this branch's patches/, reaching no other."
 )
 
 
@@ -147,6 +172,7 @@ class Submodule:
     def __init__(self, var: str, rel: str, root: Path):
         self.var = var
         self.rel = rel
+        self.root = root
         self.path = root / rel
         self.patches: list[str] = []
 
@@ -157,11 +183,10 @@ class Submodule:
     def git_dir(self) -> Path | None:
         """Absolute git dir, or None when this is not a git checkout.
 
-        A submodule's working tree holds a `.git` FILE pointing at
-        .git/modules/<name>, and scripts/setup-worktree.sh symlinks lib/ into
-        the main tree, so a worktree resolves to the same place the main tree
-        does. That is correct: the patched checkout is genuinely shared between
-        them, so its stamp must be too.
+        A submodule's working tree holds a `.git` FILE pointing at its git dir,
+        which for a worktree's private lvgl/libhv checkout is that worktree's own
+        .git/worktrees/<name>/modules/<name>. Asking the checkout is what keeps
+        the stamp with the files it describes, since each tree patches its own.
         """
         try:
             out = subprocess.run(
@@ -285,6 +310,27 @@ class Finding:
         return f"{self.kind} {self.sub} {self.item}"
 
 
+def patch_in_any_ref(root: Path, name: str) -> bool | None:
+    """Does any ref of the superproject hold patches/<name>?
+
+    None when git cannot answer (not a repository, no git): the caller then
+    keeps the plain patch-removed verdict rather than guess.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "log", "--all", "--oneline", "--",
+             f"patches/{name}"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    return bool(proc.stdout.strip())
+
+
 def check_submodule(
     sub: Submodule, patch_dir: Path, pre_apply: bool
 ) -> tuple[list[Finding], str | None]:
@@ -353,6 +399,22 @@ def check_submodule(
 
     for name in sorted(stamped_patches):
         if name not in current_patches:
+            if patch_in_any_ref(sub.root, name) is False:
+                # A stamp entry is the only place this patch ever existed: an
+                # uncommitted file, applied and stamped, then deleted. Calling
+                # that "removed" claims its hunks linger in the submodule and
+                # sends someone hunting for a patch that never shipped.
+                findings.append(
+                    Finding(
+                        "stale-stamp-entry",
+                        sub.rel,
+                        name,
+                        "recorded in the stamp but exists in no ref - likely an "
+                        "uncommitted patch that was applied and then deleted. Run "
+                        "'make reapply-patches' to resync the stamp",
+                    )
+                )
+                continue
             findings.append(
                 Finding(
                     "patch-removed",
@@ -423,6 +485,35 @@ def clear_stamps(subs: list[Submodule]) -> int:
     return cleared
 
 
+def current_branch(root: str | Path) -> str:
+    """Branch name for the remedy command, or a placeholder when detached."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+            env=git_env(),
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return "<branch>"
+    name = out.stdout.strip()
+    return name if name and name != "HEAD" else "<branch>"
+
+
+def remedy(subs: list[Submodule], findings: list[Finding], root: str | Path) -> str:
+    """Repair text for these findings, which turns on how this tree holds them."""
+    drifted = {f.sub for f in findings}
+    shared = [s for s in subs if s.rel in drifted and s.path.is_symlink()]
+    if not shared:
+        return REMEDY
+    lines = [SHARED_REMEDY_HEAD]
+    lines.extend(f"     {s.rel} -> {os.readlink(s.path)}" for s in shared)
+    lines.append("")
+    lines.append(SHARED_REMEDY_TAIL.format(branch=current_branch(root)))
+    return "\n".join(lines)
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--repo-root", default=str(REPO_ROOT))
@@ -478,7 +569,7 @@ def main(argv: list[str]) -> int:
             print(f"   [{f.kind}] {f.sub} {f.item}")
             print(f"      {f.detail}")
         print()
-        print(REMEDY)
+        print(remedy(subs, findings, root))
         return 1
 
     total_patches = sum(len(s.patches) for s in subs)

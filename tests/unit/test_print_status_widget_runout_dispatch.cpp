@@ -38,6 +38,7 @@
 #include "printer_state.h"
 #include "standard_macros.h"
 
+#include <map>
 #include <memory>
 #include <string>
 
@@ -74,18 +75,18 @@ class IdleRunoutDispatchFixture : public LVGLTestFixture {
 
         // No AMS backend: the shape a basic runout-sensor printer has, and the
         // one the old code answered by navigating away.
-        AmsState::instance().clear_backends();
+        helix::AmsState::instance().clear_backends();
         // Empty cache => MacroParamKnowledge::UNKNOWN, i.e. the branch that WOULD
         // prompt. The only way to prove Suppress suppresses something.
         helix::MacroParamCache::instance().clear();
 
-        helix::ui::set_filament_param_prompter([this](const std::string& macro,
-                                                      const CachedMacroInfo&,
-                                                      MacroExecuteCallback on_execute) {
-            ++prompt_count;
-            prompted_macro = macro;
-            pending_execute = std::move(on_execute);
-        });
+        helix::ui::set_filament_param_prompter(
+            [this](const std::string& macro, const CachedMacroInfo&,
+                   const std::map<std::string, std::string>&, MacroExecuteCallback on_execute) {
+                ++prompt_count;
+                prompted_macro = macro;
+                pending_execute = std::move(on_execute);
+            });
     }
 
     ~IdleRunoutDispatchFixture() override {
@@ -93,7 +94,7 @@ class IdleRunoutDispatchFixture : public LVGLTestFixture {
         set_moonraker_api(previous_api_);
         StandardMacros::instance().reset();
         helix::MacroParamCache::instance().clear();
-        AmsState::instance().clear_backends();
+        helix::AmsState::instance().clear_backends();
         helix::ui::UpdateQueue::instance().drain();
         mock_client.stop_temperature_simulation();
         mock_client.disconnect();
@@ -141,7 +142,7 @@ TEST_CASE_METHOD(IdleRunoutDispatchFixture,
                  "Idle runout load dispatches the macro instead of navigating away",
                  "[print_status_widget][dispatch][runout]") {
     configure_filament_macros();
-    REQUIRE(AmsState::instance().get_backend() == nullptr);
+    REQUIRE(helix::AmsState::instance().get_backend() == nullptr);
 
     const helix::PanelId before = NavigationManager::instance().get_active();
 

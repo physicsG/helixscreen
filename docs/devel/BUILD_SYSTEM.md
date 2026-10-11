@@ -32,6 +32,9 @@ make ad5x-docker
 # Build for Creality K1 series (MIPS32, dynamic/glibc)
 make k1-dynamic-docker
 
+# Build for FlashForge Creator 5 Pro (MIPS32r2, static/musl, shares the K1 image)
+make creator5-docker
+
 # Build for Creality K2 series (ARM, tested on K2 Plus)
 make k2-docker
 
@@ -95,10 +98,13 @@ Docker images are **automatically built** on first use - no manual setup require
    `tests/shell/test_build_provenance.bats` fails the build if one does not. It carries two
    things, both of which exist because a **git worktree** is not self-contained:
 
-   - `DOCKER_WORKTREE_MOUNT` — `scripts/setup-worktree.sh` symlinks `lib/<submodule>` to the
-     main checkout by absolute path, so those links dangle inside a container that mounts only
-     `$(CURDIR)`. The real submodule tree is bind-mounted at its own absolute path so every
-     `lib/*` link resolves identically inside and out.
+   - `DOCKER_WORKTREE_MOUNT` — `scripts/setup-worktree.sh` symlinks the shared
+     `lib/<submodule>` entries to the main checkout by absolute path, so those links dangle
+     inside a container that mounts only `$(CURDIR)`. The real submodule tree is bind-mounted
+     at its own absolute path so every `lib/*` link resolves identically inside and out. The
+     detection asks every `lib/` entry where it really lives rather than probing one of them:
+     `lib/lvgl` is a private checkout under `$(CURDIR)`, so a single-entry probe would read a
+     worktree full of symlinks as a normal checkout and mount nothing.
    - `DOCKER_GIT_HASH_ENV` — a worktree's `.git` is a *file* reading
      `gitdir: $(MAIN)/.git/worktrees/<name>`, a path outside the mount, so git cannot resolve
      `HEAD` in the container and `scripts/gen-git-hash.sh` used to stamp
@@ -108,10 +114,13 @@ Docker images are **automatically built** on first use - no manual setup require
 
 4. **Build Features Stamp**: The link rule writes `build/<platform>/bin/.build-features`
    recording which optional subsystems the binary actually contains (currently
-   `remote_control`). `make deploy-*` runs as a separate make invocation with no
-   `PLATFORM_TARGET` and so cannot re-derive what the cross build chose; the stamp carries it
+   `remote_control` and `diag_uploads`). `make deploy-*` runs as a separate make invocation
+   with no `PLATFORM_TARGET` and so cannot re-derive what the cross build chose; the stamp carries it
    across, and the deploy turns on the matching runtime switch on the device. See
-   `docs/devel/HELIXCTL.md`.
+   `docs/devel/HELIXCTL.md` and `docs/devel/ENVIRONMENT_VARIABLES.md` § `HELIX_DIAGNOSTIC_UPLOADS`
+   for the upload gate, which rides the same mechanism: `ENABLE_DIAGNOSTIC_UPLOADS` defaults
+   to `yes` only under `HELIX_PACKAGING=1`, and `sync-device-features` stamps
+   `HELIX_DIAGNOSTIC_UPLOADS=1` on rigs at deploy time so dev devices keep uploading.
 
 5. **Display Backend Selection**: Cross-compilation automatically selects the appropriate display backend:
    - **Pi / Pi32**: DRM (preferred) with fbdev fallback
@@ -201,6 +210,14 @@ make cross-info          # Show cross-compilation help
 - **GCC 7.5 constraints**: See [GCC 7.5 Compatibility](#gcc-75-compatibility-k1-dynamic-target) section above
 - **Why two K1 targets?** Static/musl is simpler and more portable. Dynamic/glibc produces smaller binaries (shared system libs) and avoids musl edge cases, but requires the custom NaN2008 toolchain.
 
+#### FlashForge Creator 5 Pro
+- **CPU**: Ingenic X2000 (XBurst2, MIPS32r2 dual-core @ 1.2 GHz)
+- **Build**: the unified `mips` target (`make creator5` / `make creator5-docker`) — same binary and toolchain as the K1/AD5X (`mipsel-k1-linux-musl-`, GCC 13 + musl, NaN2008/FP64, fully static, LTO on)
+- **Display**: 480×800 portrait framebuffer (`/dev/fb0`); the creator5 preset rotates 90
+- **Input**: evdev for touch (`/dev/input/event2`)
+- **NaN encoding**: the Creator 5 Pro kernel refuses legacy-NaN executables with `ENOEXEC`; the unified target's NaN2008 output is the encoding it execs
+- See `docs/devel/printers/FLASHFORGE_CREATOR5_PRO_SUPPORT.md`
+
 #### Creality K2 Series (K2, K2 Pro, K2 Plus) — Tested on K2 Plus
 - **CPU**: Allwinner sun8iw20p1 (ARM Cortex-A7, dual-core, 57 BogoMIPS)
 - **Toolchain**: Bootlin `armv7-eabihf-musl` (GCC 12, musl libc)
@@ -271,7 +288,7 @@ The K1 dynamic build uses a custom GCC 7.5 toolchain targeting the K1's native g
 | **`std::from_chars` (integers)** | Not available | Use `std::strtol` / `std::strtod` | `src/util/version.cpp` |
 | **`std::atomic<time_point>`** | Doesn't compile | Store as `std::atomic<int64_t>` (nanoseconds) | `include/gcode_streaming_controller.h` |
 | **C++20 designated initializers** | Not supported (`{.foo = 1}`) | Initialize struct explicitly, then assign fields | `src/ui/ui_fan_control_overlay.cpp` |
-| **`directory_entry` member functions** | `.is_regular_file()`, `.file_size()`, `.last_write_time()` missing | Use free functions: `std::filesystem::is_regular_file(entry.path())` | `src/print/thumbnail_cache.cpp`, `src/plugin/plugin_manager.cpp` |
+| **`directory_entry` member functions** | `.is_regular_file()`, `.file_size()`, `.last_write_time()` missing | Use free functions: `std::filesystem::is_regular_file(entry.path())` | `src/print/thumbnail_cache.cpp` |
 | **`-lstdc++fs`** | Required for `<experimental/filesystem>` | Added automatically for `k1-dynamic` in `mk/cross.mk` and `mk/watchdog.mk` | — |
 | **LTO (`-flto`)** | GCC 7.5 static toolchain lacks `liblto_plugin.so` | Disabled for `k1-dynamic`; uses plain `ar`/`ranlib` instead of `gcc-ar`/`gcc-ranlib` | `mk/cross.mk` |
 
@@ -342,7 +359,7 @@ make deploy-pi PI_HOST=192.168.1.50 PI_USER=pi
 # Full cycle: remote build on thelio + deploy + run
 make ad5m-test
 
-# Remote build only (builds on thelio.local, fetches binaries)
+# Remote build only (builds on REMOTE_HOST, fetches binaries)
 make remote-ad5m
 
 # Deploy only (after building)
@@ -407,7 +424,7 @@ Display backend is selected via `DISPLAY_BACKEND` in `mk/cross.mk` and controls:
 
 ### Pi Dual-Link Build (Compile Once, Link Twice)
 
-Pi release builds produce two binaries: DRM (GPU-accelerated) and fbdev (framebuffer fallback). Instead of compiling all ~900 source files twice, the **dual-link build** compiles everything once with DRM superset defines, then links two binaries with different display libraries and link flags.
+Pi release builds produce two binaries: DRM (vsynced page flips via dumb buffers) and fbdev (framebuffer fallback). Instead of compiling all ~900 source files twice, the **dual-link build** compiles everything once with DRM superset defines, then links two binaries with different display libraries and link flags.
 
 **This cuts Pi CI build time roughly in half (~40 min instead of 80+).**
 
@@ -423,7 +440,7 @@ make PLATFORM_TARGET=pi-fbdev -j      # fbdev only
 
 #### How It Works
 
-1. **Compile phase**: All source files compile once using DRM superset defines (`-DHELIX_DISPLAY_DRM -DHELIX_DISPLAY_FBDEV -DHELIX_ENABLE_OPENGLES`). Objects go to `build/pi/obj/`.
+1. **Compile phase**: All source files compile once using DRM superset defines (`-DHELIX_DISPLAY_DRM -DHELIX_DISPLAY_FBDEV`). Objects go to `build/pi/obj/`.
 
 2. **Variant-specific compilation** (only 4 files):
    - `display_backend.cpp`, `display_backend_fbdev.cpp`, `touch_calibration.cpp` → compiled into `build/pi/display-fbdev/` without DRM defines, archived as `libhelix-display-fbdev.a`
@@ -514,41 +531,48 @@ path inside the repo outside `.worktrees/`.
 
 The script optimizes for **fast builds** by sharing artifacts from the main tree:
 
-1. **Symlinks lib/** — third-party submodules symlinked (no clone/configure time).
-   `lib/helix-xml` is the exception: it is **ours** and CLAUDE.md says to edit it directly
-   rather than carry a patch, so a symlink would put every worktree's engine edits into the
-   *main* tree's submodule working copy — shared with every other worktree, and showing up as
-   dirt in main's `git status` for another session to sweep. It gets a private per-worktree
-   checkout instead (~2.6 MB, seconds), listed in `LIB_PRIVATE_SUBMODULES`. Its gitdir lands
-   under `.git/worktrees/<name>/modules/`, `origin` stays the public GitHub remote, and
-   because a real checkout is what git already expects it needs no `--unlink`/`--relink`.
+1. **Symlinks the shared lib/ submodules, copies the rewritten ones** — the third-party
+   submodules nothing edits are symlinked (no clone/configure time). The four in
+   `LIB_PRIVATE_SUBMODULES` get a private per-worktree checkout instead: `lib/helix-xml`
+   because it is **ours** and CLAUDE.md says to edit it directly rather than carry a patch,
+   and `lib/lvgl`, `lib/libhv` and `lib/lua` because `patches/` rewrites them and `patches/` is
+   per-branch. Sharing one checkout across branches that disagree about either is
+   unsatisfiable — `make reapply-patches` in one tree redefines what every other tree
+   compiles, and each tree's correct action invalidates the other's
+   (prestonbrown/helixscreen#1471). Each private git dir lands under
+   `.git/worktrees/<name>/modules/`, `origin` stays the public GitHub remote, and because a
+   real checkout is what git already expects they need no `--unlink`/`--relink`.
+
+   The checkout is **copied from the main tree**, not cloned fresh: a fresh checkout writes
+   fresh mtimes, which invalidates every cloned object built against those headers and turns
+   a warm worktree cold. `cp -Rc` (clonefile on APFS, `--reflink=auto` on btrfs/xfs, a plain
+   copy elsewhere) keeps the mtimes; the git dir is a `git clone --local`, which hardlinks
+   the object store, so no network and no second copy of ~500 MB of packs. The pin is then
+   reconciled with a `git checkout` of the commit *this* branch names, which rewrites only
+   the files that actually differ. Setup ends by asserting every `lib/` submodule sits at
+   this branch's pin, and refuses to build when a private one does not.
 2. **Adopts the main tree's mtimes** for every byte-identical file — without this, nothing below actually saves you anything (see next section)
 3. **Clones compiled libraries** — `libhv.a`, `libwpa_client.a` from main tree
-4. **Clones the precompiled header** — `lvgl_pch.h.gch` (27MB)
-5. **Symlinks tools** — `node_modules/`, `.venv/`
-6. **Clones build objects** — copies `build/obj/` and `build/generated/` from the main tree (APFS clonefile on macOS; plain copy on Linux)
-7. **Configures ccache for cross-worktree reuse** — so the worktree builds against the *same* ccache the main tree populated, when ccache is installed (see below)
-8. **Validates architecture** — wrong-arch `.o`/`.a` files (left by a prior cross-compile) are detected and cleared so `make` rebuilds them correctly
-9. **Configures git** — `.git/info/exclude` + `--skip-worktree` keep `git status` clean despite the symlinks
+4. **Symlinks tools** — `node_modules/`, `.venv/`
+5. **Clones build objects** — copies `build/obj/` and `build/generated/` from the main tree (APFS clonefile on macOS; plain copy on Linux)
+6. **Configures ccache for cross-worktree reuse** — so the worktree builds against the *same* ccache the main tree populated, when ccache is installed (see below)
+7. **Validates architecture** — wrong-arch `.o`/`.a` files (left by a prior cross-compile) are detected and cleared so `make` rebuilds them correctly
+8. **Configures git** — `.git/info/exclude` + `--skip-worktree` keep `git status` clean despite the symlinks. `--skip-worktree` covers the symlinked submodules only: on a private checkout it would hide a real change of pinned revision from `git status`, `git add` and the revision check.
+9. **Reconciles patches** — `make reapply-patches` runs in the new worktree when this branch's `patches/` differs from the main tree's, or when a private submodule landed somewhere the main tree's patches do not describe. Otherwise the copy already carries them, and reapplying is not free: `build/.patches-applied` is a prerequisite of every object.
 
-**Trade-off**: If you need to modify library code (`lib/`), un-symlink that specific directory first (`rm lib/<name> && cp -a $MAIN/lib/<name> lib/`).
+**Trade-off**: `lib/lvgl`, `lib/libhv`, `lib/lua` and `lib/helix-xml` are yours to modify in place. For any other `lib/` entry, un-symlink that specific directory first (`rm lib/<name> && cp -a $MAIN/lib/<name> lib/`) or you are editing the main tree's copy.
 
-> **Build outputs are cloned, never symlinked.** `libhv.a` and `lvgl_pch.h.gch` used to be
-> symlinks into the main tree. They are build *outputs*, so make rewrites them — and both `cp`
-> (the tail of `make libhv-build`) and `clang -o` follow a symlink, writing straight into the
-> main tree. Measured: one fresh-worktree build moved the main tree's `libhv.a` mtime forward
-> five days, which left the main tree's own PCH older than it and put ~1900 objects back on the
-> main tree's next build. On APFS `cp -c` is a clonefile, so a private copy costs nothing.
+> **Build outputs are cloned, never symlinked.** `libhv.a` is a build *output*, so make
+> rewrites it, and `cp` (the tail of `make libhv-build`) follows a symlink, writing straight into
+> the main tree. A worktree build that moves the main tree's `libhv.a` mtime forward puts every
+> main-tree object back on its next build. On APFS `cp -c` is a clonefile, so a private copy
+> costs nothing.
 
 ### Why worktree builds are fast
 
 A fresh `git worktree add` stamps **every** file with the checkout mtime, so make sees the whole
-tree as newer than the cloned objects. It bites twice over:
-
-- `$(PCH)` lists `include/lvgl_pch.h` and `lv_conf.h` as prerequisites, and *every* C++ object
-  lists `$(PCH)` — one fresh header invalidates all ~1970 objects;
-- the `.d` files list `include/*.h` per object, and those are fresh too — so fixing only the PCH
-  would still leave every object out of date.
+tree as newer than the cloned objects: the `.d` files list `include/*.h` per object, and every
+C++ object force-includes `include/lvgl_pch.h`, so one fresh header invalidates all ~1970.
 
 Measured on a fresh worktree of an up-to-date main tree: **1945 of 1967 cloned objects
 recompiled**, 396s of wall clock, for a tree where nothing had changed.
@@ -557,7 +581,7 @@ recompiled**, 396s of wall clock, for a tree where nothing had changed.
 byte-identical to the main tree's file at the same path**, adopting that file's mtime
 (`scripts/sync-worktree-mtimes.py`, ~1s for the 3900-file tree). The build markers
 `build/.patches-applied` and `.fonts.stamp` get the same treatment — they are prerequisites of
-the PCH, libhv, and all 46 font objects, so stamping them `now` was on its own worth ~560
+every object, libhv, and all 46 font objects, so stamping them `now` was on its own worth ~560
 recompiles *and* was what made every fresh worktree rebuild libhv over the main tree's copy.
 
 This is deliberately **not** blanket mtime back-dating, which is how you ship a stale build. The
@@ -571,33 +595,35 @@ edit made after setup — keeps its fresh mtime and rebuilds normally:
 | Worktree at the same commit, clean | 0 (`make test -j` = 3.2s, link only) |
 | Worktree at an older commit (1 source differs) | 1 — and the binary carries the *old* code |
 | Source edited after setup | 1 |
-| `lv_conf.h` edited | PCH + 1888 |
+| `lv_conf.h` edited | ~1888 |
 
 What it inherits rather than fixes: if the main tree's own build is stale, the worktree
 reproduces that staleness. The object clone always had that property.
 
-> **If a fresh worktree still takes minutes, this is almost always why.** `lib/` is symlinked
-> from the main tree, so the libhv submodule is *shared by every tree*. Rebuilding libhv anywhere
-> regenerates `lib/libhv/include/hv/json.hpp`, which is a `$(PCH)` prerequisite — so the PCH, and
-> with it all ~1970 objects, goes out of date in the main tree and in every worktree at once. The
-> mtime sync cannot repair it: the script deliberately never follows the `lib/` symlinks, and
-> `git ls-files` does not reach inside a submodule. Observed during this work: a worktree that
-> should have built in 5s took 462s (680 objects + PCH) purely because an unrelated tree had
-> rebuilt libhv twenty minutes earlier. The fix is to let one tree rebuild once — after that
-> every tree is fast again. Un-sharing `lib/` would remove the coupling entirely, but that is the
-> core of the current worktree design.
+> **If a fresh worktree still takes minutes, this is almost always inherited staleness.**
+> A worktree copies the main tree's objects and mtimes, so it starts as up to date as the main
+> tree is and no more. When the main tree's `build/.patches-applied` is newer than its objects —
+> which any `make reapply-patches` there makes true — all ~2400 objects are
+> already out of date at the moment they are cloned, and the new worktree recompiles them. The
+> fix is to let one tree rebuild once. Measured on one such main tree, two worktrees off the
+> same commit both recompiled ~1280 objects, the symlinked one and the private-checkout one
+> alike: the staleness is the main tree's, not the worktree scheme's.
+>
+> `lib/libhv` and `lib/lvgl` no longer add to this. They are a private checkout per worktree,
+> so rebuilding libhv in one tree regenerates only that tree's `lib/libhv/include/hv/json.hpp`
+> — a prerequisite of every object — instead of putting every tree's objects out of date at once.
 
 ### The ccache config the script sets
 
 ccache is optional (it is not installed on every dev box — check with `command -v ccache`), and
 with the mtime sync in place it is no longer what makes a *clean* worktree fast. Where it matters
 is every build that genuinely has to recompile — after touching `lv_conf.h`, or after another tree
-rebuilds libhv and re-invalidates the shared PCH (see the box above). That is the difference
+rebuilds libhv and re-invalidates every object (see the box above). That is the difference
 between ~400s and a few tens of seconds.
 
 > **`sloppiness` is not optional — without it ccache caches nothing here.** Every native build
-> compiles with `-include $(PCH)`, and ccache refuses to cache *any* compilation that uses a
-> precompiled header unless `sloppiness` permits it. Measured on a single `-include` compile:
+> compiles with `-include include/lvgl_pch.h`, and ccache refuses to cache *any* such
+> compilation unless `sloppiness` permits it. Measured on a single `-include` compile:
 > `Uncacheable calls: 1/1 (100%)` before, `Cacheable calls: 1/1 (100%)` after, with the repeat
 > compile hitting. This was silently true for a long time — `base_dir` and `hash_dir` were being
 > set while the cache stayed empty, which is why this doc used to credit ccache for a speedup it
@@ -618,7 +644,7 @@ But it only helps across worktrees if it is configured for it. The native build 
 |----------------|--------|-----|
 | `base_dir` | `$HOME` | Rewrites absolute paths under `$HOME` to relative before hashing, so main-tree and worktree paths collapse to the same key |
 | `hash_dir` | `false` | Stops folding the cwd (the `-g` debug-path component) into the key |
-| `sloppiness` | `pch_defines,time_macros` | Without it ccache refuses to cache any `-include $(PCH)` compile — i.e. all of them. See the box above for the `__DATE__` tradeoff |
+| `sloppiness` | `pch_defines,time_macros` | Without it ccache refuses to cache any `-include include/lvgl_pch.h` compile — i.e. all of them. See the box above for the `__DATE__` tradeoff |
 | `max_size` | `25G` (raised, never lowered) | The default 5 GiB thrashes once several worktrees + cross-compile caches share it, re-causing cold misses |
 
 For the script's own initial build it also exports `CCACHE_BASEDIR` (the longest common ancestor of the main tree and the worktree, so it works even for out-of-tree paths like `/tmp/foo`), `CCACHE_NOHASHDIR=1`, and `CCACHE_SLOPPINESS`.
@@ -677,12 +703,21 @@ git worktree list
 ### Cleanup
 
 ```bash
-# Remove a worktree
-git worktree remove .worktrees/my-feature
-
-# Or force remove if dirty
-git worktree remove --force .worktrees/my-feature
+./scripts/teardown-worktree.sh my-feature      # remove the worktree + its merged branch
+./scripts/teardown-worktree.sh my-feature -n   # print the plan, change nothing
 ```
+
+`git worktree remove` refuses these trees because of the private submodule checkouts, so
+teardown is a guarded `rm -rf` plus a prune.
+
+Every worktree shares the main repo's `.git/modules/<name>/`, and each of those gitdirs has
+one `core.worktree`. `--unlink` leaves empty submodule directories that git can initialize,
+which aims that shared pointer into the worktree; once the worktree is gone, `git status`
+fails with "cannot chdir" in the main tree and every other worktree. `--relink`, setup and
+teardown all run `scripts/lib/worktree_lib.sh#restore_shared_module_pointers`, which aims any
+shared pointer resolving inside the worktree back at the main tree's copy. Private checkouts
+keep their gitdirs under `.git/worktrees/<name>/modules/` and are never touched
+(prestonbrown/helixscreen#1621).
 
 ---
 
@@ -792,7 +827,7 @@ make check-deps
 This checks for:
 - **System tools**: C/C++ compiler, cmake, make, python3, npm
 - **Code formatters**: clang-format (C/C++), xmllint (XML validation/formatting)
-- **Libraries**: pkg-config
+- **Libraries**: pkg-config, OpenSSL, libnl, libusb (required on Linux: the build links `-lusb-1.0` unconditionally; optional on macOS), ALSA (Linux, warns when the headers are missing because the sound backend is then compiled out)
 - **Canvas dependencies**: cairo, pango, libpng, libjpeg, librsvg (for lv_img_conv)
 - **npm packages**: lv_font_conv, lv_img_conv
 - **Optional libraries**: SDL2, spdlog, libhv (uses system if available, otherwise builds from submodules)
@@ -836,7 +871,13 @@ make lvgl-clean     # Clean LVGL compiled objects
 make libs-clean     # Clean all library artifacts at once
 ```
 
+**Thread stacks on musl targets**: musl gives every thread a 128 KiB stack unless the binary's `PT_GNU_STACK` header asks for more (musl 1.1.21 and later). The Moonraker callbacks run on such a thread, so recursion that is harmless on glibc overflows there and dies with no crash file. The unified `mips` target (K1, AD5X, Creator 5 Pro) and `k2` link with `MUSL_THREAD_STACK_LDFLAGS` (`-Wl,-z,stack-size=1048576`, defined in `mk/cross.mk`), which raises the default to 1 MiB of address space; a thread commits only the pages it touches. glibc targets size thread stacks from `RLIMIT_STACK` and ignore the flag, so they do not carry it. Check a build with `readelf -lW build/k2/bin/helix-screen | grep GNU_STACK` (the memsz reads `0x100000`). `std::regex` is kept out of app code for the same reason: libstdc++'s matcher recurses once per input character.
+
 **Cross-Compilation Note**: When cross-compiling (e.g., `make ad5m-docker`), libhv is **automatically cleaned** before each build to prevent architecture mixing. This adds ~5 seconds but ensures correct builds.
+
+### Test Binary Link
+
+`helix-tests` links through a response file: make's `$(file ...)` function writes the object list to `$(OBJ_DIR)/<binary>.objs` (for the plain build, `build/obj/helix-tests.objs`) and the compiler reads it as `@<that file>`. Inline, the list passes Linux's 128 KiB per-argument limit once object paths grow, as the ASAN build's do, and bash refuses the recipe with "Argument list too long".
 
 ### Test Harness
 
@@ -852,9 +893,9 @@ Tests 9 scenarios with 22 assertions covering dependency detection, platform-spe
 
 - **`V=1`** - Verbose mode: shows full compiler commands instead of short `[CC]`/`[CXX]` tags
 - **`OPT=0|1|2`** - Optimization level (default: 2). Use `OPT=0` for fastest compilation, `OPT=2` for release. `make dev` is shorthand for `OPT=0 -j`.
-- **`JOBS=N`** - Set parallel job count (default: auto-detects CPU cores)
+- **`JOBS=N`** - Set parallel job count (default: `scripts/helix-claim jobs`, see Parallel Compilation)
 - **`NO_COLOR=1`** - Disable colored output (useful for CI/CD)
-- **`-j<N>`** - Enable parallel builds with N jobs (NOT auto-enabled by default)
+- **`-j<N>`** - Run N jobs; without it, plain `make` picks its own (see Parallel Compilation)
 
 ### Build Output
 
@@ -918,10 +959,10 @@ make format-staged
 
 Formatting is automatically checked by the pre-commit hook (`.git/hooks/pre-commit`), which calls `scripts/quality-checks.sh --staged-only`:
 
-1. **Checks staged files** for formatting issues
-2. **Reports files** that need formatting
-3. **Prevents commit** if formatting issues are found
-4. **Suggests fix**: Run `make format-staged` or `clang-format -i <file>`
+1. **Resolves the pinned formatter**: the `clang-format` wheel pinned in `requirements.txt`, installed into `.venv` by `make venv-setup` (`scripts/qc/phase2.sh#qc_resolve_clang_format`). Nothing on `PATH` is consulted, and a tree without the wheel cannot commit C++ until it runs `make venv-setup` - one formatter everywhere is what keeps files from ping-ponging between machines
+2. **Checks staged files** with it and auto-formats the ones that need it
+3. **Prevents commit** if a formatted file could not be re-staged (partially staged hunks)
+4. **Full sweeps (pre-push, CI) fail** on any unformatted file outside `CLANG_FORMAT_BASELINE`, the list of files that predate the gate; an entry leaves the list once the file is auto-formatted on its next staging
 
 To bypass (not recommended):
 ```bash
@@ -995,23 +1036,24 @@ The build system automatically applies patches to git submodules before compilat
 - `HELIX_SDL_XPOS` - X coordinate for exact window position
 - `HELIX_SDL_YPOS` - Y coordinate for exact window position
 
-**Application Logic** (in `Makefile`):
+**Application Logic** (in `mk/patches.mk`):
 ```makefile
-apply-patches:
-	@echo "Checking LVGL patches..."
-	@if git -C $(LVGL_DIR) diff --quiet src/drivers/sdl/lv_sdl_window.c; then \
-		# File is clean, apply patch
-		git -C $(LVGL_DIR) apply ../patches/lvgl_sdl_window_position.patch
-	else \
-		# File already modified (patch applied)
-		echo "✓ LVGL SDL window position patch already applied"
-	fi
+	$(Q)$(APPLY_PATCH) $(LVGL_DIR) $(PATCH_DIR)/lvgl_sdl_window.patch "LVGL SDL window patch"
 ```
 
+`$(APPLY_PATCH)` is `scripts/apply_submodule_patch.sh`, which owns a three-way
+verdict for every patch: apply it, recognize it as already applied (reverse
+check), or report that it matches no reachable state of the submodule.
+
 **Status Messages**:
-- `✓ Patch applied successfully` - Patch was applied during this build
-- `✓ LVGL SDL window position patch already applied` - Patch was already present
-- `⚠ Cannot apply patch (already applied or conflicts)` - Manual intervention needed
+- `✓ <label> applied` - Patch was applied during this build
+- `✓ <label> already applied` - Reverse check recognized it; the tree keeps it
+- `✓ <label> already applied (marker present; sibling patches moved the context git compares)` - Neither check passes, but the marker table confirms the patch's effect is in the checkout; the routine case on shared files
+- `⚠ <label>: its marker is absent from the checkout - the patch's effect is missing` - Neither check passes and the marker is gone; run `make reapply-patches`
+- `⚠ <label> is not verifiable in place` - Neither check passes and the marker table has no row for the patch, so the verdict stays hedged; run `make reapply-patches` to judge from clean
+- `⚠ <submodule> is not pristine, so this run cannot judge patches from clean` - `HELIX_PATCHES_FROM_CLEAN=1` was set but the submodule already carries changes (the state `make clean` leaves), so the fatal verdict is not available and every patch is judged in place; run `make reapply-patches` to reset and judge from clean
+- `✗ <label> does not apply to a clean checkout` - The patch and the submodule disagree, on a run verified to have started from pristine submodules; regenerate the patch
+- `✗ <patch> ... Its marker is missing from <file>` - One of the patch's distinctive lines (there is one per file it touches) is absent from the checkout, so the build stops before compiling against unpatched code; run `make reapply-patches`. The marker check is a text search that needs no git, so it also fires in docker builds rsynced from worktrees. Companion messages name a changed patch file (`make regen-patch-markers`) and a wired stanza with no marker row.
 
 ### Adding New Patches
 
@@ -1028,32 +1070,37 @@ To add a new submodule patch:
    files are shared today (`src/misc/lv_event.c` by seven patches). Check with
    `grep -l "diff --git a/<path>" patches/*.patch` and use the pristine-file method in
    `patches/README.md` § "Regenerating a patch whose file is shared".
-3. **Update Makefile** to apply the patch in the `apply-patches` target. Use
-   `git -C $(LVGL_DIR) apply --check <patch>` as the apply condition rather than a
-   "is file X dirty?" test, which breaks as soon as another patch touches X.
-4. **Document** in `patches/README.md`
+3. **Update Makefile** to apply the patch in the `apply-patches` target, as one helper
+   stanza beside the others:
+   ```make
+   $(Q)$(APPLY_PATCH) $(LVGL_DIR) $(PATCH_DIR)/my-new-patch.patch "My new patch" "Without it <consequence>"
+   ```
+   The note is optional and names the runtime consequence of building without the patch;
+   the marker check prints it when the patch goes missing.
+4. **Regenerate the marker table** with `make regen-patch-markers` (it reapplies from
+   clean first, then rederives `mk/patch-markers.tsv`). Until you do, the build fails
+   naming the new patch — a wired stanza without a marker row is a coverage gap, not a
+   state the check tolerates.
+5. **Document** in `patches/README.md`
 
 ### Patch Gotchas (hard-won)
 
-Two traps cost a full debugging session on 2026-06-14 when the libhv DNS resolver
-fallback patch silently stopped reaching the binary on the AD5M (on-machine
-update checks failed with "Connection failed"). Both are now regression-tested in
-`tests/shell/test_libhv_dns_resolver_patch.bats`.
+The libhv DNS resolver fallback patch has three traps. The first two make the
+patch silently miss the binary (on the AD5M, on-machine update checks fail with
+"Connection failed"); the third breaks a pristine parallel build. All three are
+regression-tested in `tests/shell/test_libhv_dns_resolver_patch.bats`.
 
 1. **Guard on the actual change, not on a side effect.** A patch that adds NEW
    files *and* edits an existing one must not gate re-application on the new
-   file's existence. The old guard used `[ ! -f base/dns_resolv.c ]`; a submodule
-   reset reverted the tracked `base/hsocket.c` (the wiring) but left the
-   untracked `dns_resolv.c` orphaned, so the guard declared "already applied" and
-   never re-wired `hsocket.c`. Result: resolver compiled but **never called**.
-   Guard on a marker string *inside the edited file* and self-heal:
-   ```make
-   if ! grep -q "dns_resolv_resolve" "$(LIBHV_DIR)/base/hsocket.c"; then
-       rm -f .../base/dns_resolv.c .../base/dns_resolv.h;   # drop orphans
-       git -C $(LIBHV_DIR) checkout -- base/hsocket.c;       # pristine
-       git -C $(LIBHV_DIR) apply .../libhv-dns-resolver-fallback.patch
-   fi
-   ```
+   file's existence. A submodule reset reverts the tracked `base/hsocket.c`
+   (the wiring) but leaves an untracked `dns_resolv.c` orphaned, so a
+   file-existence guard declares "already applied" and never re-wires
+   `hsocket.c` — the resolver compiles but is **never called**. Both layers in
+   `mk/patches.mk` answer this now: every stanza routes through the
+   `$(APPLY_PATCH)` verdict helper (which resets nothing and never assumes),
+   and `mk/patch-markers.tsv` fails the build when a distinctive line the
+   patch adds is absent from any file it edits — on every build, docker trees
+   included.
 
 2. **A patched file compiled into a static `.a` must invalidate that `.a`.**
    `$(LIBHV_LIB)` (build/<plat>/lib/libhv.a) originally had **no
@@ -1068,6 +1115,18 @@ update checks failed with "Connection failed"). Both are now regression-tested i
    ```
    When in doubt, `rm build/<plat>/lib/libhv.a` to force a clean archive, and
    confirm a patch's marker actually made it in: `strings <binary> | grep <sym>`.
+
+3. **A file a patch creates needs a producer rule in every build flavour.** The
+   patch creates `base/dns_resolv.c`, which the cross app build and the native
+   test build (`test_dns_resolver`) both compile. On a pristine tree the file
+   does not exist when make reads the graph, so without
+   ```make
+   $(LIBHV_DIR)/base/dns_resolv.c: $(PATCHES_STAMP)
+   ```
+   a `-j` build fails with "No rule to make target 'lib/libhv/base/dns_resolv.c'".
+   The rule sits in `mk/rules.mk` outside any cross-only conditional; the case
+   "dns_resolv.c depends on the patch stamp in a native build" pins it by
+   reading the make database with `CROSS_COMPILE` empty (#1411).
 
 ## Multi-Display Support (macOS)
 
@@ -1132,33 +1191,179 @@ This ensures the UI window appears on a different display from the terminal, mak
 
 ## Parallel Compilation
 
-**Important**: Parallel builds are **NOT** enabled by default. Use `-j` flag explicitly.
+Plain `make` (or `make -j`) picks its own `-j`, so there is no need to pass one.
+The answer comes from `scripts/helix-claim jobs`:
 
-### Platform Detection
+| Box | `-j` |
+|-----|------|
+| No jobpool (CI, a Mac, a fresh clone) | the cores (`nproc`, or `sysctl -n hw.ncpu` on macOS), capped at one job per GB of `MemAvailable` where `/proc/meminfo` exists, never below 2 |
+| jobpool installed | the shared pool (below); the Makefile never reads `JOBS` |
 
-```makefile
-UNAME_S := $(shell uname -s)
-ifeq ($(UNAME_S),Darwin)
-    # macOS
-    NPROC := $(shell sysctl -n hw.ncpu 2>/dev/null || echo 4)
-    PLATFORM := macOS
-else
-    # Linux
-    NPROC := $(shell nproc 2>/dev/null || echo 4)
-    PLATFORM := Linux
-endif
+The two-phase re-invoke that applies `JOBS` lives in `mk/rules.mk` `all:` and
+`mk/tests.mk` `$(TEST_BIN)`; it is skipped whenever `MAKEFLAGS` already carries a
+jobserver. An explicit `make -jN` or `make JOBS=N` passes through untouched.
+`scripts/helix-claim jobs -v` prints the decision and what it was made from.
+
+**`helix-claim jobs` is make's `-j` and nothing else's.** With a pool live it is
+the whole pool, which is right for a make (it draws its jobs from the pool) and
+wrong for anything else: `docker run --cpus $(scripts/helix-claim jobs)`,
+`ninja -j$(...)` or `parallel -j$(...)` runs that many jobs on top of every build
+on the box. Work outside make sizes itself with
+`scripts/helix-claim hold [--min M] -- CMD`, which exports `JOBPOOL_SLOTS`, and a
+container goes through `scripts/pool-docker.sh`. Called outside a make while a
+pool is live, `jobs` says so on stderr (stdout stays the bare number), and the
+resource advisor names a runner sized from it.
+
+The same number sizes the unit sweep (3 shards per slot, `SHARD_CONCURRENCY`
+overrides) and the commit hook's build (`qc_build_jobs` in `scripts/qc/_lib.sh`,
+`HELIX_QC_JOBS` overrides). The build uses `--output-sync=target`, so parallel
+output does not interleave.
+
+### Optional: one build pool per machine (jobpool)
+
+jobpool is a machine-wide GNU make jobserver: a small daemon owns a FIFO of
+tokens sized from the cores and available memory, and every build that joins
+draws its jobs from it. Two sessions building on one box then share the cores
+instead of each taking all of them, and a tree that is linking or running tests
+holds no tokens, so its share flows to whoever is compiling. It is not a
+dependency: nothing in the build requires it, and without it everything above
+holds as written.
+
+This project's own build machines (the maintainer's desktop and its test host)
+have it installed. The repo is `~/Code/Tools/jobpool` there; its README covers
+install, configuration and macOS.
+
+Where it is installed:
+
+- `make` on `PATH` is jobpool's shim. Every top-level make joins the pool, and
+  the shim strips any `-j` from the command line, because GNU make leaves an
+  inherited jobserver when it sees one.
+- `jobpool status` shows the target, free tokens and consumers.
+- `JOBPOOL=0 make ...` bypasses the pool for one run. `helix-claim jobs` honours
+  the same switch.
+- `helix-claim jobs` reports the pool's size while the daemon is live, so the
+  sweep, the commit hook and the resource advisor read the machine budget. It
+  asks `jobpool target`, which takes no lock and moves no tokens; only
+  `jobs -v` reads `jobpool status` for the free count.
+- The unit sweep runs its shards three to a pool token (`jobpool with-token`
+  around each batch of three), so every sweep on the box together stays within
+  three shards per token.
+- Runners that size themselves rather than join a jobserver hold their share
+  through `scripts/helix-claim hold [-n N] -- CMD`, which exports
+  `JOBPOOL_SLOTS` (`jobpool hold`; without jobpool, `-n` or the cores). The
+  helix-xml test build runs its `cmake --build -j` from it. `make test-shell`
+  asks for `--grow FILE` too, which a jobpool that has it keeps at the live slot
+  count while the suite runs; bats is handed `scripts/parallel-jobs-file.sh` as
+  its parallel, which gives GNU parallel that file (re-read about once a second)
+  in place of the number bats insists on. Without it the suite runs at the
+  start-time `JOBPOOL_SLOTS`.
+- Container builds go through `scripts/pool-docker.sh`: a container's make
+  joins the pool (state dir mounted, FIFO opened inside, `-j` dropped, kept as
+  the fallback when the container cannot open the FIFO). An idf.py or ninja
+  command joins too: ninja 1.13 is a jobserver client in the FIFO form, so
+  `scripts/ninja-jobserver.sh` fetches the pinned upstream release once into
+  `~/.cache/helixscreen/` (sha256-checked; offline after that), pool-docker.sh
+  mounts it over the image's `/usr/bin/ninja`, names the FIFO in `MAKEFLAGS`
+  and empties `IDF_PY_BUILD_JOBS`, since idf.py passes it as `-j` and any `-j`
+  turns ninja's jobserver off. Any other container command (the ustreamer
+  script), or idf.py with no ninja 1.13 to be had, holds tokens and gets
+  `JOBPOOL_SLOTS` and `IDF_PY_BUILD_JOBS`. The native cross targets (`make pi`
+  and siblings) give their sub-make no `-j` while a pool is live.
+- `helix-claim resources` lists heavy runners (bats, GNU parallel, ninja,
+  `docker run`) running outside the pool, and the resource advisor names one
+  about to start.
+- On a test host with jobpool installed, `scripts/test-host-run.sh` joins the
+  container to the host's pool: the host's jobpool conf puts the state dir under
+  the directory the test container already mounts, the host runs `docker exec`
+  under `jobpool exec`, and the container opens the FIFO and exports `MAKEFLAGS`
+  (`jobpool container-env`) with no `-j` on make. Without a pool there it sizes
+  `-j` from `MemAvailable`, and runs of different trees take turns. A ZFS host
+  should keep build headroom free with the `zfs_arc_sys_free` tunable; the run
+  warns when it is under 32 GiB.
+
+## Using your own build/test host
+
+Two kinds of remote machine help here, and both are optional:
+
+- a **test host** runs the expensive, non-interactive jobs (`sweep`, `asan`,
+  `tsan`, `mutate`) in a container: `scripts/test-host-run.sh`. It mirrors your
+  working tree as it is on disk, uncommitted edits included, into a per-tree
+  directory whose `build/` persists, so a warm run rebuilds only what changed.
+  With one configured, `make full-test-run` runs the C++ sweep there while bats
+  runs locally whenever the link makes that pay (`TEST_HOST=1` forces it,
+  `TEST_HOST=0` or `HELIX_TEST_HOST_AUTO=0` keeps both local).
+- a **remote build host** builds natively or for the cross targets:
+  `make remote-native`, `make remote-test`, `make remote-pi` and siblings
+  (`mk/remote.mk`, `scripts/remote-build.sh`).
+
+Both are named in one file outside the tree, so every worktree and clone shares
+it:
+
+```
+${XDG_CONFIG_HOME:-$HOME/.config}/helixscreen/build-hosts.env
 ```
 
-### Usage
+One parser reads it, `scripts/lib/build_hosts.sh`: the scripts source it, and
+make asks it for a value the first time a remote target needs one, so an
+ordinary `make` never reads the file at all. Its rules:
+
+- `KEY=VALUE` at the start of a line, no spaces around `=`; `#` starts a
+  comment only at the start of a line.
+- Only the keys in the table below; any other key is named and skipped.
+- Values are literal: no `$` expansion, nothing runs, a CRLF line ending is
+  fine. A value cannot hold whitespace or quotes, so a trailing comment or a
+  quoted value is named and skipped rather than half-read.
+- If a key appears twice, the last line wins.
+- A variable set in the environment (or on the make command line) wins over
+  the file. `HELIX_BUILD_HOSTS_FILE` names a different file.
+
+Nothing has a host default: a command that needs a host you have not
+configured stops with one line naming the variable and this file, and nothing
+ever connects to a host you did not name. `make full-test-run` with no test
+host simply runs both suites locally, without a word.
+
+| Variable | Used by | Meaning (default) |
+|----------|---------|-------------------|
+| `HELIX_TEST_HOST` | `test-host-run.sh`, `full-test-run`, `helix-claim resources`, teardown | ssh name of the test host (none) |
+| `HELIX_TEST_CONTAINER` | same | container name (`helix-test`) |
+| `HELIX_TEST_TREES_HOST` | same | mirror root on the host, relative to the ssh user's home unless absolute (`helix-test/trees`) |
+| `HELIX_TEST_TREES` | same | the same directory inside the container (`/work/trees`) |
+| `HELIX_TEST_CCACHE` | same | ccache dir inside the container (`/work/ccache`) |
+| `HELIX_TEST_WORKDIR` | `test-host-run.sh --commit`, `mutate` | git checkout inside the container (`/work/helixscreen`) |
+| `HELIX_TEST_LOCK_DIR` | `test-host-run.sh` | lock directory on the host (`/tmp`) |
+| `HELIX_TEST_HOST_AUTO` | `full-test-run` | `0` keeps an unforced gate local even with a test host configured (`1`) |
+| `REMOTE_HOST`, `REMOTE_USER` | `mk/remote.mk`, `remote-build.sh` | remote build host and optional user (none) |
+| `REMOTE_DIR` | `mk/remote.mk` | rsync target on the remote for the cross targets (none). `remote-sync` rsyncs `--delete` into it, so give it a directory of its own, never a checkout you work in |
+| `REMOTE_BUILD_DIR` | `remote-build.sh` | its own clone on the remote (`~/helix-remote`), which it hard-resets and cleans every run. It works only in a directory it created (marked `.helix-remote-build`) and refuses any other |
+
+An example file:
+
+```
+HELIX_TEST_HOST=buildbox.local
+HELIX_TEST_CONTAINER=helix-test
+HELIX_TEST_TREES_HOST=/srv/helix-test/trees
+HELIX_TEST_TREES=/work/trees
+REMOTE_HOST=buildbox.local
+REMOTE_DIR=~/helix-remote-sync
+```
+
+**Setting up a test host.** Any Linux machine with Docker works, if you can ssh
+to it with a key and run `sudo -n docker` there. Name it in the file, then run
+from your own machine:
 
 ```bash
-make -j          # Auto-detect CPU cores and parallelize (recommended)
-make -j16        # Explicit job count (current system has 16 cores)
-make JOBS=16     # Set job count via variable
-make build       # Clean parallel build (auto-detects cores)
+scripts/test-host-setup.sh                    # image, container, toolchain checks
+scripts/test-host-setup.sh --commit-checkout  # also clone the checkout --commit and mutate use
+scripts/test-host-run.sh test '[netd]'        # first run: syncs the tree and builds (minutes)
 ```
 
-The build system uses `--output-sync=target` to prevent interleaved output during parallel builds.
+The setup builds the image from `docker/Dockerfile.sanitizer` in your tree,
+streamed over ssh, and starts the container with the parent of
+`HELIX_TEST_TREES_HOST` mounted at the parent of `HELIX_TEST_TREES`. Re-run it
+after the Dockerfile changes; `--recreate` swaps the container for one from the
+new image. `scripts/test-host-run.sh --prune [DAYS]` removes mirrors nobody has
+synced for DAYS (14), and `teardown-worktree.sh` drops a tree's mirror with the
+tree.
 
 ## Font Generation
 
@@ -1490,7 +1695,20 @@ These get their own deep section above — see **[Cross-Compilation](#cross-comp
 - **Build:** `make <target>-docker` (recommended, no local toolchain) or `make <target>` (needs host toolchain). Targets: `pi`, `pi32`, `ad5m`, `ad5x`, `cc1`, `k1`, `k1-dynamic`, `k2`, `snapmaker-u1`, `x86`.
 - **Deploy + run on device:** `make <target>-test` (build + deploy + run fg), `make deploy-<target>` (background), `deploy-<target>-fg` (foreground), `deploy-<target>-bin` (binaries only, fast iteration), `<target>-ssh`.
 - **Host override:** `make deploy-pi PI_HOST=192.168.1.50`. Defaults live in `mk/cross.mk` — note `PI_HOST` actually defaults to `192.168.1.113` (the `make help-cross` text saying `helixpi.local` is stale, and `helixpi.local` does not resolve). `K2_HOST` has **no** default and must be supplied.
-- **Remote build:** `make remote-pi` / `remote-ad5m` / `remote-native` build on a fast Linux host (`REMOTE_HOST`, default `thelio.local`) and fetch the binaries back. `make remote-status` checks readiness.
+- **Remote build:** two transports, and the choice matters on a slow link.
+  - `make remote-native` / `make remote-test TAG='[ams]'` send **only the local delta**
+    (`scripts/remote-build.sh`). The build host keeps its own clone and fetches committed
+    history from GitHub itself; your link carries one patch covering unpushed commits *and*
+    uncommitted edits, plus a tar of untracked files — a few KB over one multiplexed SSH
+    connection. Use this for every native build and test run.
+  - `make remote-pi` / `remote-ad5m` / `remote-all` rsync the whole working tree
+    (`make remote-sync`) because the Docker cross builds need a real mirror on the remote.
+    rsync is delta-based, but it still exchanges metadata for every file under `lib/` and
+    `assets/` before deciding nothing changed, and a **fresh destination directory transfers
+    ~260 MB** — so reuse one `REMOTE_DIR` rather than a new one per branch or worktree.
+  - `REMOTE_HOST` and `REMOTE_DIR` come from the build-hosts file
+    ([Using your own build/test host](#using-your-own-buildtest-host)); `make remote-status`
+    checks readiness.
 
 ### Utilities
 
@@ -1634,25 +1852,19 @@ SDL2_LIBS := $(shell sdl2-config --libs)
 
 ### Patch Application Fails
 
-**Symptom**: `⚠ Cannot apply patch (already applied or conflicts)`
+**Symptom**: `✗ <label> does not apply to a clean checkout` (from `make reapply-patches`),
+or `⚠ <label>: its marker is absent from the checkout` / `⚠ <label> is not verifiable in place` (from an incremental build)
 
 **Causes**:
-1. Submodule was manually modified (expected if patch is working)
-2. Patch conflicts with newer LVGL version
-3. Patch file is corrupted
+1. The patch drifted: a sibling patch moved the context it needs, and it
+   matches no reachable state of the submodule
+2. The patch was edited without regenerating it against the patched tree
 
-**Solutions**:
+**Solution** — let the from-clean run name every drifted patch, then
+regenerate each one it names (`patches/README.md` § "Regenerating a patch
+whose file is shared"):
 ```bash
-# Check if file is modified (expected)
-git -C lvgl diff src/drivers/sdl/lv_sdl_window.c
-
-# Revert to original (re-applies patch on next build)
-git -C lvgl checkout src/drivers/sdl/lv_sdl_window.c
-make apply-patches
-
-# Force re-apply
-git -C lvgl checkout src/drivers/sdl/lv_sdl_window.c
-git -C lvgl apply ../patches/lvgl_sdl_window_position.patch
+make reapply-patches
 ```
 
 ### Build Performance
@@ -1704,7 +1916,7 @@ The build compiles ~566 app source files. The dominant cost is **template instan
 
 With ccache installed, touching these headers without content changes costs ~8s (direct cache hit). Actual content changes recompile all dependents (~2 min at `-O2`, ~1 min at `-O0`).
 
-**Precompiled header** (`include/lvgl_pch.h`): Covers LVGL, helix-xml, spdlog, nlohmann JSON, and common STL headers. These are precompiled once and reused across all translation units. Don't add project headers to the PCH — only stable external libraries.
+**Forced include** (`include/lvgl_pch.h`, `$(FORCED_INCLUDE)` in the Makefile): covers LVGL, helix-xml, spdlog, nlohmann JSON, and common STL headers, and is passed as `-include` to every app and test C++ source, so many sources compile only because of it. It is an ordinary header, not precompiled: every TU parses it and tracks it through its `.d` file, so editing it rebuilds every C++ object. Don't add project headers to it — only stable external libraries. LVGL's own C++ sources (ThorVG, compiled out by `lv_conf.h`) do not get it.
 
 #### ccache across worktrees and Docker cross-builds
 
@@ -1721,7 +1933,7 @@ docker-ccache-args = -v "$(DOCKER_CCACHE_BASE)/$(1)":/ccache -e CCACHE_DIR=/ccac
 
 So `make pi-docker` caches into `~/.cache/helixscreen-ccache/pi/`, `make ad5m-docker` into `.../ad5m/`, etc. — one cache per architecture (they must stay separate; a Pi aarch64 object is meaningless to an AD5M armv7-a build). First cross-build of a target is cold; subsequent ones hit ~98%. Override the base location with `DOCKER_CCACHE_BASE=/path make pi-docker`. To wipe a single target's cache, `rm -rf ~/.cache/helixscreen-ccache/<target>`.
 
-Concurrent Docker cross-builds are serialized by `scripts/cross-compile-lock.sh` to avoid thrashing the machine — this is automatic.
+Every Docker cross-build runs through `scripts/pool-docker.sh`. With jobpool installed, the container's make joins the machine pool (its `-j` is dropped) and any other in-container build holds pool tokens through `helix-claim hold`; without jobpool the command runs exactly as written.
 
 ### Clang Standard Library Issues (Arch Linux)
 
@@ -1775,8 +1987,15 @@ Absorbed from the `helix-build` skill so there is one home for it. Values verifi
 
 ### Version
 
-Read from `VERSION.txt` (MAJOR.MINOR.PATCH) and injected as `-DHELIX_VERSION="..."`:
-`HELIX_VERSION`, `HELIX_VERSION_MAJOR` / `_MINOR` / `_PATCH`.
+Read from `VERSION.txt` and injected as `-DHELIX_VERSION="..."`: `HELIX_VERSION`,
+`HELIX_VERSION_MAJOR` / `_MINOR` / `_PATCH`.
+
+`HELIX_VERSION` is the whole string, prerelease suffix included
+(`1.1.0-beta.1`). The three numeric defines come from the core triple, because they
+are compiled as integers: splitting the full string on `.` puts `0-beta` in the
+patch field, and `-DHELIX_VERSION_PATCH=0-beta` fails to compile in every
+translation unit that includes `helix_version.h`. Ordering a prerelease against a
+release is `helix::version::Version`'s job, not the preprocessor's.
 
 The short git hash is **not** a global define. It changes on every commit, and
 `VERSION_DEFINES` lands on every translation unit's command line, which ccache's
@@ -1838,17 +2057,22 @@ tier list of the smallest device that will run it.
 for the high-DPI UI scale factor to step into on phone-class panels. No printer target
 declares the `xxlarge` tier, so none of them links these (~11MB of `.rodata`). Android
 does not build through this Makefile at all: `android/app/jni/CMakeLists.txt` globs
-`assets/fonts/*.c` wholesale, so it picks them up without a tier declaration.
+`assets/fonts/*.c` wholesale, so every face including these six is linked, and its
+`target_compile_definitions` declares `HELIX_MAX_FONT_TIER=6` and
+`HELIX_HAS_HIDPI_FONTS=1` to match, since both macros default to a conservative fallback
+when a build path leaves them undefined (`HELIX_HAS_HIDPI_FONTS` to 0), which would
+otherwise drop these six faces' mappings and asset registrations for a build that
+did link them.
 
 ### Feature gates
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `ENABLE_SDL` | yes (native) | SDL2 desktop display |
-| `ENABLE_OPENGLES` | per target | EGL/GLES GPU rendering |
+| `ENABLE_OPENGLES` | no (all targets) | Requests LVGL's DRM EGL path; the #error in display_backend_drm.cpp fails the build if set without LV_USE_OPENGLES |
 | `ENABLE_GLES_3D` | yes (Linux) | 3D gcode rendering |
 | `ENABLE_SCREENSAVER` | yes (desktop/Pi) | Flying toasters |
-| `ENABLE_MOCKS` | yes | Mock backends for development |
+| `ENABLE_MOCKS` | yes (no on `cc1`/`ad5m`/`ad5m-br`) | Mock backends for development |
 | `ENABLE_SSL` | per target | OpenSSL for HTTPS/WSS |
 | `HELIX_HAS_LABEL_PRINTER` | 1 | Label printer feature |
 | `HELIX_HAS_CFS` | 1 | CFS feature |
@@ -1856,6 +2080,7 @@ does not build through this Makefile at all: `android/app/jni/CMakeLists.txt` gl
 | `HELIX_HAS_ACE` | 1 | ACE vendor backend (0 on non-Anker cross targets) |
 | `HELIX_HAS_QIDI` | 1 | QIDI Box vendor backend (0 on non-QIDI cross targets) |
 | `HELIX_HAS_SNAPMAKER` | 1 | SnapSwap vendor backend (0 except `snapmaker-u1`) |
+| `HELIX_BACKLIGHT_FLOOR_PERCENT` | 0 | Lowest visible raw backlight level, percent of the raw range. 20 on `k2`, applied only by the sysfs and Sonic Pad CLI backends (the sysfs panel on community K2 firmware renders lower levels as off, #1709); the Allwinner `/dev/disp` backend ignores it. `/display/backlight_floor_percent` in settings.json overrides it on every backend |
 
 ### Linker flags by platform
 
@@ -1955,6 +2180,145 @@ Only use `make clean && make` when:
 - Create patches for submodule changes
 - Document patches in `patches/README.md`
 - Test patch application on clean checkouts
+
+## Cloud sessions: the warm environment
+
+Claude Code cloud sessions run on a fresh Ubuntu 24.04 VM per environment, and a cold one pays
+apt + submodule init + a full program and test build before it can do anything — on the order of
+hours. `scripts/cloud/env-setup.sh` and `scripts/cloud/session-start.sh` exist to make that a
+one-time cost per environment rather than a per-session one.
+
+**The setup script.** The cloud platform runs `scripts/cloud/env-setup.sh` once, as root, **before**
+the repo is cloned — there is no checkout for it to operate on, only system and network paths — and
+then snapshots the whole filesystem as the starting point of every later session on that
+environment. It must exit 0 and finish in a few minutes, so every step is best-effort and logged
+to `/var/log/helix-env-setup.log`: apt-installing the native build's dependencies
+(`scripts/cloud/env-setup.sh#install_apt_packages` names the single package list shared with CI),
+downloading and extracting a prebuilt ccache, seeding a full clone at `/opt/helixscreen-seed` for
+submodule alternates, and prebuilding a Python venv at `/opt/helix-venv`.
+`/opt/helix-cloud-env/READY` records what landed and gates everything downstream.
+
+**The snapshot's lifetime.** The platform reuses the snapshot until either ~7 days pass or the
+text pasted into the environment dialog changes. Pushing a new `scripts/cloud/env-setup.sh` to
+`main` does not refresh it on its own: the pasted three-liner re-fetches that file only when the
+snapshot is being rebuilt. To force a rebuild before the timer would, change the dialog text — a
+dated comment line there is a legitimate one-line edit purely for that.
+
+**The session hook.** `scripts/cloud/session-start.sh` runs as a `SessionStart` hook
+(`.claude/settings.json#SessionStart`) in every session, cloud or not. On a machine that never
+wrote the READY marker — a laptop, thelio — it exits silently on its first line, by design: the
+pieces below must never run uninvited. On a warmed cloud VM, once the repo exists, it wires
+`/opt/helixscreen-seed`'s objects in as a submodule alternate (so `git submodule update` borrows
+objects instead of fetching them), runs that submodule init, and symlinks `.venv` to the prebuilt
+one before reconciling it with `make venv-setup`.
+
+**Nothing prefetches a ccache, and the measurement is why.** Measured on a cloud box: of the calls
+a first build made against a published ccache snapshot, 18.75% hit; of the 955 compilations in a
+rebuild after 191 files moved under a new namespace, **none** did. The percentage a session reads
+from `ccache -s` at startup is the snapshot's own banked history — it never grows from that number,
+it only dilutes as the box builds. A full `make test` took about 85 minutes with 98% on screen.
+
+ccache itself is still installed and configured, and earns its keep *within* a session. What does
+not pay for itself is shipping a prebuilt one between machines.
+
+### Do not re-add a prebuilt ccache snapshot
+
+A `build-cache` workflow used to publish `ccache-linux-x64.tar.zst` as a release asset on a
+`build-cache` tag. It is gone, and the bar for bringing anything like it back is high, because the
+costs are easy to miss and the benefit was measured at the numbers above:
+
+- **No consumer.** `env-setup.sh` never fetched it. It ran on every push to `main` plus daily,
+  12-28 minutes warm and 117 cold, to produce something only a human could use by hand.
+- **A silent size ceiling.** A GitHub release asset must be under 2 GiB. The snapshot grew past it
+  and the upload began failing with a bare `HTTP 422: size must be less than 2147483648`, several
+  steps after the cause. It stayed broken for weeks without anyone noticing, precisely because
+  nothing downstream depended on it.
+- **A cache pinned at its own ceiling is a decaying asset.** Capping `max_size` under the 2 GiB
+  limit keeps it publishable but makes it evict internally on every run, so the hit rate that was
+  already 18.75% only falls further as the tree grows.
+
+If someone wants to revisit this, the case has to start with a *measurement on the target machine*
+showing a hit rate that survives a refactor - not with a faster transport or a bigger size limit.
+R2 would sidestep the 2 GiB cap (credentials already exist for releases), so "we ran out of room"
+is not by itself a reason to rebuild this.
+
+`ccache-warm.yml` and `cache-prune.yml` are a different pipeline and are unaffected: they warm and
+prune the Actions-cache ccache behind this repo's cross-compile CI, restored from the previous run
+on the same branch rather than from a snapshot, so the staleness above does not apply to them.
+
+The `compiler_check = content` setting stays in the generated `ccache.conf`: a cached object is
+reused only when the compiler that made it is byte-identical to the one asking.
+
+**Pasting the setup script into the environment dialog.** The platform wants the script inline, not
+a path, so the pasted script re-fetches the real one and never blocks environment creation on a
+network hiccup:
+
+```bash
+#!/bin/bash
+curl -fsSL https://raw.githubusercontent.com/prestonbrown/helixscreen/main/scripts/cloud/env-setup.sh -o /tmp/helix-env-setup.sh || exit 0
+bash /tmp/helix-env-setup.sh || true
+```
+
+**Known cache invalidation.** `Makefile#VERSION_DEFINES` puts `-DHELIX_VERSION` on every
+translation unit's command line, and ccache's direct mode hashes the full command line — so a
+`VERSION.txt` bump misses the *entire* project's cache exactly once, the same way it does for
+regular CI (see the comment above `VERSION_DEFINES`). `HELIX_GIT_HASH` deliberately avoids this by
+reaching only one generated header instead of every TU.
+
+## Briefing a cloud worker
+
+A coordinator session spawns worker sessions, hands each a scope, and merges their branches. What
+follows is the part of that protocol which is a property of this repo rather than of any one
+coordinator's plan.
+
+**Give a worker a queue, not a ticket.** On a 4-core cloud box the program binary takes about 44
+minutes and the test binary another 55 before a worker can run anything — an hour and a half of
+machine time that a one-issue scope pays in full and then throws away. Nothing removes that cost:
+a prebuilt ccache measured 18.75% of calls hitting on a first build and 0.00% after a wide header
+moved, so a session that starts by building pays roughly the same either way (see the warm
+environment section). What a queue saves is the second cost, which is real: a worker that has
+already read a subsystem answers the next question in it far faster than a fresh session does.
+
+So scope a worker to an *area* with two to four related issues in dependency order, and say which
+may be dropped if time runs short. Sequence anything touching the same files behind the change that
+moves them, and keep shared counters — the ratchet baselines in the gate files under `scripts/qc/` — to one
+worker at a time, since two workers each ratcheting the same number is a guaranteed merge conflict
+over a line neither of them cares about.
+
+**A small finding in the diff's own neighbourhood is fixed, not filed.** Workers surface more than
+they were sent for, and an issue is the reflex — but an issue costs triage, a milestone, a label, a
+brief and a box, which for a twenty-minute refactor is more than the fix. If the finding is small and
+sits in code the worker has already read, tell it to fix it in the same branch and say so in the
+report. File one only when the work genuinely does not belong to that worker: it needs a decision
+somebody else owns, it is blocked on something external, it is large enough to want its own scope, or
+it lands in files another worker is holding. A queue that closes four issues and opens three has not
+moved as far as the count suggests.
+
+**Never leave a worker blocked on the coordinator.** A worker waiting for a merge to appear on
+`main` is an idle box. When a scope depends on work still in review, say so in the brief, name what
+it should do meanwhile, and send the unblock as soon as it lands.
+
+**The reply channel is git.** Cross-session chat does not resolve from a worker container, so a
+worker reports by pushing a short status file early and a full report at the end to a throwaway
+`claude/report-<issue>` branch, never onto its work branch and never as a PR. The push
+triggers in `.github/workflows/build.yml` and `quality.yml` exclude that branch pattern, so status
+pushes cost no CI.
+
+**Tell a worker the formatter rule explicitly.** `scripts/quality-checks.sh` accepts only the
+pinned `clang-format` from `.venv`, so a worker runs `make venv-setup` before `make quality` and
+formats only the files its own diff touched. The sweep's `--auto-fix` reformats every file in
+`CLANG_FORMAT_BASELINE`, which belong to whoever is retiring them, not to the worker.
+
+**A push to a work branch costs a full CI run.** Build, Code Quality and XML Lint all fire on the
+`claude/**` namespace, and Build alone budgets 200 minutes. Push when the gates are green locally,
+never to find out whether they are — a red run on a work branch is a signal the worker skipped a
+check it could have run itself, and it queues behind everyone else's work. A coordinator asking for
+an early push to review in parallel is accepting that cost deliberately; a worker iterating against
+CI is not.
+
+**One OPT flavor per tree.** The pre-commit hook builds at the default optimization level, so a
+worker that builds with `OPT=0` makes every later hook run rewrite the objects it just wrote.
+Default everywhere, and never two `make` invocations in one tree at once.
 
 ## See Also
 

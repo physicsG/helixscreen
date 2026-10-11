@@ -3,6 +3,7 @@
 #include "ui_ams_tool_text.h"
 
 #include "ams_state.h"
+#include "display_numbering.h"
 #include "observer_factory.h"
 #include "static_subject_registry.h"
 #include "tool_state.h"
@@ -27,14 +28,14 @@ static void update_tool_badge(helix::ToolState* ts) {
     // with more than one nozzle needs to name which is which.
     const auto* tool = ts->has_multiple_extruders() ? ts->active_tool() : nullptr;
     if (tool) {
-        // Index only ("0"), not the full tool name ("T0"). The badge is a
-        // disc overlaid on the nozzle glyph it annotates, so its diameter is
-        // bounded by the icon; two glyphs force it wide enough to cover the
-        // icon. Call sites that want the full name bind a text label beside
-        // the icon instead (print_status_detailed_active.xml).
-        char buf[8];
-        snprintf(buf, sizeof(buf), "%d", tool->index);
-        lv_subject_copy_string(ts->get_tool_badge_text_subject(), buf);
+        // 1-based number only ("1"), not the full tool name ("T0"). The badge
+        // is a bold subscript digit beside the nozzle glyph; digit-only is the
+        // display convention everywhere (the "T" spelling is the 0-based
+        // G-code form, see include/display_numbering.h). Call sites that want
+        // the full name bind a text label beside the icon instead
+        // (print_status_detailed_active.xml).
+        const std::string label = helix::ui::lane_number_text(tool->index);
+        lv_subject_copy_string(ts->get_tool_badge_text_subject(), label.c_str());
         lv_subject_set_int(ts->get_show_tool_badge_subject(), 1);
     } else {
         lv_subject_copy_string(ts->get_tool_badge_text_subject(), "");
@@ -42,14 +43,23 @@ static void update_tool_badge(helix::ToolState* ts) {
     }
 }
 
-static void update_toolchange_text(AmsState* a) {
+static void update_current_tool_text(helix::AmsState* a, int tool) {
+    if (tool >= 0) {
+        const std::string label = helix::ui::lane_label(helix::ui::active_tool_noun(), tool);
+        lv_subject_copy_string(a->get_current_tool_text_subject(), label.c_str());
+    } else {
+        lv_subject_copy_string(a->get_current_tool_text_subject(), "---");
+    }
+}
+
+static void update_toolchange_text(helix::AmsState* a) {
     int total = lv_subject_get_int(a->get_ams_number_of_toolchanges_subject());
     if (total > 0) {
         int current = lv_subject_get_int(a->get_ams_current_toolchange_subject());
         // Backends store a 0-based index (-1 = none yet); display is 1-based.
         // Clamped to the total so a backend that over-reports cannot render a
         // nonsensical "162 / 161".
-        int raw_display = current + 1;
+        int raw_display = helix::ui::lane_number(current);
         int display_current = std::clamp(raw_display, 0, total);
         // The clamp is a display guard, not a correction: it turns an obviously
         // wrong "162 / 161" into a plausible "161 / 161" that then sits there for
@@ -90,30 +100,23 @@ void init_ams_tool_text_observers() {
     auto& ams = AmsState::instance();
 
     // Every observer below takes the owning state's SubjectLifetime. It is a
-    // defaulted 4th parameter, so omitting it is silent: the guard gets no token,
+    // required 4th parameter; an empty token is silent: the guard gets no defence,
     // never learns the subject died, and reset() then calls lv_observer_remove()
     // on freed memory (#705).
     //
-    // Observer on raw ams_current_tool_ (int) → format "T%d" or "---"
-    s_tool_text_observer = observe_int_sync<AmsState>(
+    // Observer on raw ams_current_tool_ (int) → the tool's physical label
+    // ("Tool 1", or "Toolhead 1" where the backend names the printing end) or "---"
+    s_tool_text_observer = observe<int>(
         ams.get_current_tool_subject(), &ams,
-        [](AmsState* a, int tool) {
-            if (tool >= 0) {
-                char buf[16];
-                snprintf(buf, sizeof(buf), "T%d", tool);
-                lv_subject_copy_string(a->get_current_tool_text_subject(), buf);
-            } else {
-                lv_subject_copy_string(a->get_current_tool_text_subject(), "---");
-            }
-        },
+        [](AmsState* a, int tool) { update_current_tool_text(a, tool); },
         ams.get_subjects_lifetime());
 
     // Two observers for toolchange text: one on total, one on current index
-    s_toolchange_total_observer = observe_int_sync<AmsState>(
+    s_toolchange_total_observer = observe<int>(
         ams.get_ams_number_of_toolchanges_subject(), &ams,
         [](AmsState* a, int /*total*/) { update_toolchange_text(a); }, ams.get_subjects_lifetime());
 
-    s_toolchange_current_observer = observe_int_sync<AmsState>(
+    s_toolchange_current_observer = observe<int>(
         ams.get_ams_current_toolchange_subject(), &ams,
         [](AmsState* a, int /*current*/) { update_toolchange_text(a); },
         ams.get_subjects_lifetime());
@@ -127,11 +130,11 @@ void init_ams_tool_text_observers() {
     // Mirrors the pair in print_status_widget.cpp DetailedFormatter, which drives
     // its T<n> label off the same two subjects for the same reason.
     auto& tools = ToolState::instance();
-    s_tool_badge_observer = observe_int_sync<ToolState>(
+    s_tool_badge_observer = observe<int>(
         tools.get_tools_version_subject(), &tools,
         [](ToolState* ts, int /*version*/) { update_tool_badge(ts); },
         tools.get_subjects_lifetime());
-    s_tool_badge_active_observer = observe_int_sync<ToolState>(
+    s_tool_badge_active_observer = observe<int>(
         tools.get_active_tool_subject(), &tools,
         [](ToolState* ts, int /*active*/) { update_tool_badge(ts); },
         tools.get_subjects_lifetime());
@@ -157,6 +160,14 @@ void init_ams_tool_text_observers() {
     });
 
     spdlog::debug("[AmsToolText] Tool text observers initialized");
+}
+
+void refresh_ams_tool_text() {
+    if (!s_initialized) {
+        return;
+    }
+    auto& ams = AmsState::instance();
+    update_current_tool_text(&ams, lv_subject_get_int(ams.get_current_tool_subject()));
 }
 
 } // namespace helix::ui

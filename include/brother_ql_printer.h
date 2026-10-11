@@ -18,7 +18,7 @@ namespace helix {
  * Supports QL-800, QL-810W, QL-820NWB and similar models.
  *
  * Thread safety: print_label() runs async on a detached thread. Callbacks
- * are dispatched to the UI thread via async_call().
+ * are dispatched to the UI thread via queue_update().
  */
 class BrotherQLPrinter : public ILabelPrinter {
   public:
@@ -38,7 +38,7 @@ class BrotherQLPrinter : public ILabelPrinter {
     // === Brother QL-specific API ===
 
     /// Print a label bitmap to a specific host:port. Connects, sends, disconnects.
-    /// Callback fires on UI thread via async_call().
+    /// Callback fires on UI thread via queue_update().
     void print_label(const std::string& host, int port, const LabelBitmap& bitmap,
                      const LabelSize& size, PrintCallback callback);
 

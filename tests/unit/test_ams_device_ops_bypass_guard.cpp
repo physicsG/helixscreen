@@ -25,19 +25,28 @@
 #include "ui_ams_device_operations_overlay.h"
 #include "ui_nav_manager.h"
 #include "ui_update_queue.h"
+#include "ui_utils.h"
 
 #include "../lvgl_ui_test_fixture.h"
+#include "../test_helpers/chaining_mock_backend.h"
 #include "../test_helpers/print_state_test_drivers.h"
 #include "ams_backend_mock.h"
 #include "ams_state.h"
 #include "ams_types.h"
+#include "observer_factory.h"
 #include "print_lifecycle_state.h"
 #include "printer_state.h"
 #include "static_panel_registry.h"
 
 #include <lvgl/lvgl.h>
+#include <spdlog/fmt/fmt.h>
 
+#include <condition_variable>
 #include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
 
 #include "../catch_amalgamated.hpp"
 
@@ -45,6 +54,65 @@ using namespace helix;
 using helix::ui::get_ams_device_operations_overlay;
 
 namespace {
+
+/// AmsBackendMock whose operation thread parks at its first event until the
+/// test opens the gate.
+///
+/// Every backend event becomes a queued sync that re-reads the backend's
+/// CURRENT state, so at operation delay 0 whether the main thread's first sync
+/// reads UNLOADING or already IDLE is a scheduling outcome. The gate pins it:
+/// parking the operation thread makes the mid-unload sync a fact of the test
+/// rather than of the box it runs on, so the arming-edge assertion below is
+/// asserting something real. Events emitted on the owning thread pass straight
+/// through: the unload dispatch and the enable both emit there.
+class GatedBackendMock : public helix::test::ChainingMockBackend {
+  public:
+    explicit GatedBackendMock(int slot_count) : ChainingMockBackend(slot_count) {}
+
+    ~GatedBackendMock() override {
+        // The wrapper below captures this object; nothing may still be parked
+        // in it when the base destructor joins the thread.
+        open_gate();
+        wait_for_operation_thread();
+    }
+
+    void set_event_callback(EventCallback callback) override {
+        AmsBackendMock::set_event_callback(
+            [this, cb = std::move(callback)](const std::string& event, const std::string& data) {
+                wait_at_gate();
+                if (cb) {
+                    cb(event, data);
+                }
+            });
+    }
+
+    void close_gate() {
+        std::lock_guard<std::mutex> lock(gate_mutex_);
+        gate_open_ = false;
+    }
+
+    void open_gate() {
+        {
+            std::lock_guard<std::mutex> lock(gate_mutex_);
+            gate_open_ = true;
+        }
+        gate_cv_.notify_all();
+    }
+
+  private:
+    void wait_at_gate() {
+        if (std::this_thread::get_id() == owner_thread_) {
+            return;
+        }
+        std::unique_lock<std::mutex> lock(gate_mutex_);
+        gate_cv_.wait(lock, [this] { return gate_open_; });
+    }
+
+    std::thread::id owner_thread_ = std::this_thread::get_id();
+    std::mutex gate_mutex_;
+    std::condition_variable gate_cv_;
+    bool gate_open_ = true;
+};
 
 /// Build the overlay through show() (the production path: create, refresh from
 /// the backend, register with NavigationManager, push) and hand back the switch.
@@ -54,18 +122,25 @@ namespace {
 /// discipline as test_ams_env_overlay_unit_binding.cpp.
 class DeviceOpsBypassFixture : public LVGLUITestFixture {
   public:
-    AmsBackendMock* backend = nullptr;
+    GatedBackendMock* backend = nullptr;
+
+    /// Every value the ams_action subject published since the overlay came up,
+    /// in order. When the enable never lands, this sequence says how far the
+    /// operation actually got — an empty list at expiry means the backend
+    /// published nothing and no amount of waiting helps.
+    std::vector<int> published_actions;
+    ObserverGuard action_recorder_;
 
     DeviceOpsBypassFixture() {
-        StaticPanelRegistry::instance().destroy_all();
+        helix::ui::destroy_static_panels();
         helix::ui::UpdateQueue::instance().drain();
 
         auto& ps = state();
-        if (ps.has_preparing_job()) {
-            ps.retire_preparing(helix::PreparingExit::Superseded);
+        if (ps.print_state().has_preparing_job()) {
+            ps.print_state().retire_preparing(helix::PreparingExit::Superseded);
         }
         helix::test::set_wire_state(ps, PrintJobState::STANDBY);
-        ps.set_print_start_state(PrintStartPhase::IDLE, "", 0);
+        ps.print_state().set_print_start_state(PrintStartPhase::IDLE, "", 0);
 
         // deinit first: init_subjects() early-returns when a previous case left
         // the singleton initialized, and the ams_* names would never reach the
@@ -74,7 +149,7 @@ class DeviceOpsBypassFixture : public LVGLUITestFixture {
         auto& ams = AmsState::instance();
         ams.deinit_subjects();
 
-        auto owned = std::make_unique<AmsBackendMock>(4);
+        auto owned = std::make_unique<GatedBackendMock>(4);
         backend = owned.get();
         backend->set_operation_delay(0);
         REQUIRE(backend->start().success());
@@ -85,16 +160,27 @@ class DeviceOpsBypassFixture : public LVGLUITestFixture {
 
         get_ams_device_operations_overlay().init_subjects();
         settle();
+
+        action_recorder_ = helix::ui::observe<int>(
+            ams.get_ams_action_subject(), this,
+            [](DeviceOpsBypassFixture* self, int action) {
+                self->published_actions.push_back(action);
+            },
+            ams.get_subjects_lifetime(), helix::ui::Dispatch::Immediate);
+        // Subscribing publishes the current value once; only edges matter.
+        published_actions.clear();
     }
 
     ~DeviceOpsBypassFixture() override {
+        action_recorder_.reset();
         NavigationManager::instance().go_back();
         settle();
         if (backend) {
+            backend->open_gate();
             backend->wait_for_operation_thread();
         }
         settle();
-        StaticPanelRegistry::instance().destroy_all();
+        helix::ui::destroy_static_panels();
         settle();
         AmsState::instance().set_backend(nullptr);
     }
@@ -131,23 +217,35 @@ class DeviceOpsBypassFixture : public LVGLUITestFixture {
     }
 
     /// Wait until `pred` holds. The unload->enable chain crosses the mock's
-    /// operation thread (AmsBackendMock::operation_thread_), an AmsState event
-    /// sync and a deferred observer, so the number of drains it needs is an
-    /// implementation detail, not something a test should hard-code.
-    ///
-    /// Must yield REAL time, not just drain. An earlier version spun 20 rounds
-    /// of settle(), and settle()'s process_lvgl(10) never sleeps - the sleep in
-    /// process_lvgl is gated on ms > 50. So the whole wait completed in
-    /// microseconds without ever descheduling us, and whether the operation
-    /// thread had run was pure luck. It held on an idle box and failed under a
-    /// loaded one, which is how it read as a flake. wait_until() drains and
-    /// pumps exactly the same way but sleeps between passes, and returns as soon
-    /// as the predicate holds, so the happy path costs no more than before.
+    /// operation thread, an AmsState event sync and a deferred observer, so the
+    /// number of drains it needs is an implementation detail, not something a
+    /// test should hard-code. wait_until() sleeps real time between passes so a
+    /// background thread can run; settle() never does (process_lvgl only sleeps
+    /// above 50ms), so it cannot wait for one.
     template <typename Pred> bool settle_until(Pred pred) {
         return wait_until([&] {
             helix::ui::UpdateQueue::instance().drain();
             return pred();
         });
+    }
+
+    /// What the unload->enable chain looks like right now, for the failure
+    /// message when the enable never lands.
+    std::string chain_state() const {
+        const AmsSystemInfo info = backend->get_system_info();
+        std::string edges;
+        for (int a : published_actions) {
+            edges += fmt::format("{}{}", edges.empty() ? "" : ",",
+                                 ams_action_to_string(static_cast<AmsAction>(a)));
+        }
+        return fmt::format("bypass_active={} backend.action={} backend.current_slot={} "
+                           "backend.filament_loaded={} ams_action_subject={} "
+                           "published_actions=[{}]",
+                           backend->is_bypass_active(), ams_action_to_string(info.action),
+                           info.current_slot, info.filament_loaded,
+                           ams_action_to_string(static_cast<AmsAction>(
+                               lv_subject_get_int(AmsState::instance().get_ams_action_subject()))),
+                           edges);
     }
 
     void set_printing() {
@@ -197,8 +295,16 @@ TEST_CASE_METHOD(DeviceOpsBypassFixture,
     REQUIRE(backend->get_slot_info(0).status == SlotStatus::LOADED);
 
     lv_obj_t* toggle = show_and_find_toggle();
+    backend->close_gate();
     tap(toggle);
 
+    // The handler syncs AmsState right after dispatching the unload; with the
+    // operation thread parked, that sync can only read UNLOADING. This pins the
+    // gate itself: without it the assertion below is a coin toss.
+    REQUIRE(lv_subject_get_int(AmsState::instance().get_ams_action_subject()) ==
+            static_cast<int>(AmsAction::UNLOADING));
+
+    backend->open_gate();
     backend->wait_for_operation_thread();
     settle();
 
@@ -208,6 +314,8 @@ TEST_CASE_METHOD(DeviceOpsBypassFixture,
     CHECK(backend->get_slot_info(0).status == SlotStatus::AVAILABLE);
 
     // ...and the chain still finishes the job the user asked for, driven by the
-    // controller's own ams_action observer off the real backend events.
-    CHECK(settle_until([this] { return backend->is_bypass_active(); }));
+    // controller's own observer off the real backend events.
+    const bool enabled = settle_until([this] { return backend->is_bypass_active(); });
+    INFO("chain at expiry: " << chain_state());
+    CHECK(enabled);
 }

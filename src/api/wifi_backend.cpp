@@ -3,6 +3,7 @@
 
 #include "wifi_backend.h"
 
+#include "exception_policy.h"
 #include "runtime_config.h"
 #include "spdlog/spdlog.h"
 
@@ -96,6 +97,29 @@ std::vector<WiFiNetwork> wifi_merge_networks_by_ssid(const std::vector<WiFiNetwo
     }
 
     return kept;
+}
+
+void WifiBackend::register_event_callback(const std::string& name,
+                                          std::function<void(const std::string&)> callback) {
+    std::lock_guard<std::mutex> lock(event_callbacks_mutex_);
+    if (!event_callbacks_.emplace(name, std::move(callback)).second) {
+        spdlog::warn("[WifiBackend] Callback '{}' already registered (not replacing)", name);
+    }
+}
+
+void WifiBackend::dispatch_event(const std::string& event_name, const std::string& data) {
+    std::function<void(const std::string&)> cb;
+    {
+        std::lock_guard<std::mutex> lock(event_callbacks_mutex_);
+        auto it = event_callbacks_.find(event_name);
+        if (it == event_callbacks_.end()) {
+            spdlog::trace("[WifiBackend] No callback registered for '{}'", event_name);
+            return;
+        }
+        cb = it->second;
+    }
+    spdlog::debug("[WifiBackend] Dispatching '{}'", event_name);
+    helix::contain_exceptions("[WifiBackend] callback '" + event_name + "'", [&] { cb(data); });
 }
 
 std::unique_ptr<WifiBackend> WifiBackend::create(bool silent) {

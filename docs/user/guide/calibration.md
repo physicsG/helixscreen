@@ -16,13 +16,14 @@ The Bed Mesh panel has two parts: a 3D visualization of your bed surface on the 
 
 - **Color gradient**: Blue (low) to Red (high)
 - **Touch to rotate** the 3D view
+- **Pinch** to zoom in on the spot, **two-finger drag** to move a zoomed view around; pinching all the way out returns to the full view
 - When no mesh is loaded, the panel shows a "No mesh loaded" placeholder
 
 **Current Mesh card (right):** shows the active profile name, mesh size (probe-point grid), highest and lowest points, and the overall Z range (variance).
 
-**Probe a new mesh:** tap **Probe** in the panel header to run a fresh bed mesh calibration.
+**Probe a new mesh:** tap **Probe** in the panel header. HelixScreen first asks which profile to store the new mesh in. The name starts as `default`, the profile Klipper loads at startup; type another name to keep the new mesh separate. Tap **Start** to probe. When probing finishes, HelixScreen asks whether to save the printer configuration so the mesh survives a restart.
 
-The visualization mode (3D, 2D, or Auto) can be changed in **Settings > Display**.
+The visualization mode (3D, 2D, or Auto) can be changed in **Settings > Appearance > Bed Mesh Render**.
 
 ### Profile Management
 
@@ -40,7 +41,7 @@ Tapping a row (or its Load icon) loads that profile.
 
 1. Tap the **pencil** icon on the active profile
 2. The rename dialog shows the current name and a field for the new name
-3. Enter a new profile name and tap **Rename**
+3. Enter a new profile name and tap **Rename**. Klipper reserves `default` for new calibrations, so a profile cannot be renamed to it.
 
 **After renaming or deleting**, HelixScreen asks **"Save changes to persist them across restarts?"** Profile changes only live in memory until saved:
 
@@ -84,11 +85,11 @@ Tune vibration compensation for smoother, faster prints:
 2. Review your current shaper configuration displayed at the top
 3. Pre-flight check verifies accelerometer is connected
 4. Select axis to test (X or Y)
-5. Tap **Calibrate** to run the resonance test. While the printer sweeps, a progress bar fills from 0 to 100%; once the sweep finishes it is replaced by a spinner with an "Analyzing data... Ns" counter while the printer's host crunches the samples. On slower printers the analysis alone can take a few minutes per axis — that wait is why the whole run gets a 10-minute timeout
-6. View **frequency response chart** with interactive shaper overlay toggles
+5. Tap **Calibrate** to run the resonance test. While the printer sweeps, a progress bar fills from 0 to 100%; the sweep covers the frequency range your printer's own resonance-tester config specifies, so progress tracks the real sweep rather than a fixed span. Once the sweep finishes it is replaced by a spinner with an "Analyzing data... Ns" counter while the printer's host crunches the samples. On slower printers the analysis alone can take a few minutes per axis; that wait is why the whole run gets a 10-minute timeout
+6. View the **frequency response chart**; tap a shaper's chip to select it - the chart highlights what that shaper would leave behind
 7. Review the **comparison table** showing recommended shaper and alternatives (frequency, vibration reduction, smoothing)
 8. Check the **change summary** under the table: it shows what was active before the run ("ei @ 69.8 Hz -> mzv @ 53.8 Hz") and, when the chart has data, how much vibration the old setting would leave on today's measurements versus the new one ("Old setting on today's data: 8.4% residual - now: 7.8%")
-9. Tap **Apply** to use for this session or **Save Config** to persist
+9. Tap **Save**. One button does both jobs: it writes your selected shaper for each axis to the Klipper config and restarts the printer's firmware, so the new setting is active immediately and persists across reboots.
 
 ![Mid-sweep: the progress bar fills as frequencies are tested (step 5)](../../images/screenshot-shaper-sweep.png)
 ![After the sweep: the spinner counts analysis seconds (step 5)](../../images/screenshot-shaper-analysis.png)
@@ -97,7 +98,7 @@ Tune vibration compensation for smoother, faster prints:
 **Chart features:**
 - The chart plots **relative vibration** (see the caption above each chart): lower is less residual vibration
 - The legend keys all three curve kinds: **Measured (shaper off)** is the raw vibration your printer produced during the test, the shaper chips show the vibration each shaper would leave behind, and **Previous** shows what your old setting would have left behind (only shown when a previous setting existed)
-- Toggle different shaper types on/off to compare their frequency response curves
+- The shaper chips act as a selector, not a stack of switches: one shaper per axis is selected, the selected chip is what **Save** writes, and tapping the selected chip again keeps it selected
 - Platform-adaptive: full interactive charts on desktop, simplified on embedded hardware
 - Per-axis results shown independently
 
@@ -154,83 +155,121 @@ HelixScreen picks the right calibration command for your setup (`PROBE_CALIBRATE
 
 > **Quick access:** A **Z Calibration** button is also available on the Controls panel for one-tap access.
 
+> **Tool changer?** Some printers can also measure Z automatically for every tool, including the reference one, as part of [automatic Tool Offsets calibration](#tool-offsets-beta) — on those, this paper-test flow is hidden. Most tool changers only measure the *other* tools' offsets relative to the reference tool, so the paper test stays available to set the reference tool's own Z.
+
+---
+
+## Tool Offsets *(Beta)*
+
+> Added in 1.1.
+
+![Tool Offsets Panel](../../images/user/advanced-tool-offsets.png)
+
+For tool-changer printers that can measure their own tool positions: one tap calibrates every tool's X, Y, and Z offset in a single automated pass, instead of adjusting each tool by hand.
+
+### Requirements
+
+This screen only appears on a tool changer whose firmware exposes the calibration macro. If your printer doesn't have it, use the regular [Z-Offset Calibration](#z-offset-calibration) flow instead — it still works per-tool.
+
+Every tool your printer reports gets its own row, however many there are:
+
+![Tool Offsets Panel with many tools](../../images/user/advanced-tool-offsets-many-tools.png)
+
+A tool that has never been calibrated shows `--` on each axis instead of a number, so it's never mistaken for a tool that measured exactly zero.
+
+### Running a Calibration
+
+1. Navigate to **Advanced > Tool Offsets** —
+
+   ![Tool Offsets row in the Advanced panel](../../images/user/advanced-beta-tool-offsets-row.png)
+
+   — or tap **Tool Offsets** on the Controls panel:
+
+   ![Tool Offsets button on the Controls panel](../../images/user/controls-tool-offsets.png)
+
+2. Clean every nozzle first — the confirmation dialog reminds you:
+
+   ![Tool Offsets confirmation dialog](../../images/user/advanced-tool-offsets-confirm.png)
+
+3. Tap **Calibrate all tools**, then confirm. The printer measures each tool in turn against its sensor; the row for whichever tool is currently being probed gets a highlighted border so it's clear which one is changing, while the rest keep showing their last known values
+
+![Tool Offsets Panel while running](../../images/user/advanced-tool-offsets-running.png)
+
+4. When the status line reads **Calibration complete**, tap **Save offsets** to write the results to your Klipper config (this briefly restarts Klipper, same as any other offset save)
+
+![Tool Offsets Panel after a completed run](../../images/user/advanced-tool-offsets-complete.png)
+
+5. If the run fails partway through, the status line explains why and the run stops there — clean the affected tool's nozzle and try again
+
+Tapping **Stop** during a run performs an emergency stop, since the calibration macro can't be paused partway through — only cancelled outright.
+
 ---
 
 ## Belt Tension *(Beta)*
 
-Uneven belt tension is one of the most common causes of print quality issues on CoreXY printers. Loose or mismatched belts produce visible artifacts like layer shifts, vertical fine artifacts (VFAs), and ringing/ghosting. HelixScreen's Belt Tension tool listens to each belt while **you pluck it by hand** and reports the frequency, so you can bring the two sides into agreement.
+> Added in 1.1.
 
-### How It Works
-
-Every belt has a natural resonant frequency set by its free span, mass, and tension - just like a guitar string. Tighter belts ring higher. On a CoreXY printer the two front belts should ring at very nearly the same frequency, which means their tension is balanced.
-
-The tool parks the gantry so both belts have the same free span, then streams your accelerometer live and watches for plucks. Each firm pluck is analysed on its own; the number you act on is the **median of five accepted plucks**, not a single reading. A guitar string's loudest overtone is often the octave above its fundamental, and belts are no different, so the tool identifies the fundamental from the whole harmonic series rather than from the tallest peak in the spectrum.
-
-You measure one belt, then the other, then compare.
+For CoreXY printers: compares the tension of the two belt paths by driving each one with the motors and measuring how it responds, so both paths get the same excitation every run instead of relying on a hand-plucked belt.
 
 ### Requirements
 
-All of these are checked before the **Start Check** button becomes active. If it is greyed out, the reason is shown right above it:
+The row appears under **Advanced > Calibration** once [beta features are enabled](beta-features.md), and only when your Klipper config has an accelerometer. **Start check** stays disabled until all of these hold:
 
-| Message | What to do |
-|---|---|
-| *Not connected to the printer* | Wait for the connection to come back |
-| *No accelerometer found in your Klipper config* | Add an `adxl345`, `lis2dw` or `mpu` section to `printer.cfg`. There is no accelerometer-free mode |
-| *Belt tuning is only available on CoreXY printers* | The A/B belt-path model does not apply to bed slingers or other Cartesian machines |
-| *This needs HelixScreen running on the printer itself* | The tool reads the accelerometer stream directly from Klipper's local socket. It cannot do that from a desktop or a separate tablet |
-| *This display is not fast enough to analyse belt frequencies live* | Your display hardware cannot keep up with the real-time analysis. Nothing to fix - the tool is not available on that device |
-| *Wait until the print finishes* | The toolhead has to be stationary. Measuring during a print would read the print, not the belt |
+- A **CoreXY** printer. The check compares the two diagonals only a CoreXY has, so it is unavailable on other kinematics
+- An **accelerometer** configured in Klipper, and exactly one. When more than one accelerometer reports during the sweep, the check stops with a message rather than guess which one to compare
+- **HelixScreen running on the printer's own computer.** Klipper writes its measurements to a file as it sweeps; only a HelixScreen installed on the same machine can read it. A remote session from another computer cannot run the check
+- On a printer with **less than 200 MB of memory**, the check warns you first. Klipper analyses each sweep on the printer itself, and on a small board that analysis can run out of memory and leave Klipper stuck until it is restarted
+- Klipper ready, and **no print running**. The toolhead has to be free to move
 
-### Running a Belt Tension Check
+### Running a Check
 
-1. Navigate to **Advanced > Belt Tension** (requires [beta features](beta-features.md) enabled)
-2. Review the **hardware summary** card showing detected kinematics and accelerometer status. If your printer model has a measured belt-span geometry, a **Target Frequency** is shown too; if it does not, no target is shown and the tool compares the two belts against each other instead of against an absolute number
-3. Tap **Start Check**. The printer homes if needed, then parks the gantry so the free span is the one the target is quoted for. If it cannot park (no bounds known, or no geometry for your model) it asks you to position the gantry yourself
-4. Tap **Start Listening**
-5. Hold still for a second while it learns the room's noise floor - the on-screen hint says *Hold still*
-6. **Pluck the front belt on the right** (belt A) with a fingernail, near the middle of the free span, and let it ring. The live readout shows the frequency of each accepted pluck and a running median underneath
-7. Repeat until the counter reads **5 / 5**. The **Next belt** button unlocks then, and not before
-8. Tap **Next belt**, then do the same for **the front belt on the left** (belt B)
-9. Tap **Compare**
+1. Navigate to **Advanced > Belt Tension**
+2. The panel shows what it found: your kinematics, your accelerometer, and the frequency range the sweep will cover. If a requirement is not met, the reason appears above the Start button
+3. Tap **Start check**. The printer homes first if it needs to, then sweeps each belt path in turn: the toolhead moves back and forth along one diagonal while the accelerometer listens, then the other. Two full sweeps take about 5 minutes at Klipper's default settings - keep clear of the printer while it moves
+4. Both curves appear on one chart, each path in its own color
 
-If a pluck is not accepted, the hint tells you why:
+The check always uses Klipper's plain pulse test, even on printers set up for the newer sweeping test: the sweeping test smooths over exactly the kind of mechanical difference a belt comparison looks for.
 
-- *Too soft - pluck harder* - the strike did not stand out enough from the background
-- *That did not sound like a pluck - try again* - something rang, but it did not have the shape or the harmonic structure of a plucked string. A fan spinning up and a knock on the frame both land here
+**Stop** aborts the run with an emergency stop followed by a firmware restart: a sweep cannot be paused or cancelled partway. Use it only when something is actually wrong.
 
 ### Reading the Results
 
-**Belt A and Belt B cards:**
-- **Measured frequency** in Hz - the median of your five plucks, in whole Hz. The tool resolves about 2 Hz, so a decimal would claim precision it does not have
-- **Status indicator** - Good, Needs adjustment, or Out of range. Only shown when there is a target frequency for your model; without one, an absolute verdict would be an invention
+- **Similarity**, the large number in the middle: how closely the two response curves match in shape, from 0 to 100%. Balanced belts give curves of the same shape
+- A verdict of **Good match** (90% and up), **Fair match** (75% and up) or **Poor match**. The verdict is provisional: the thresholds come from a handful of printers so far, so treat it as a starting point and read the curves yourself
+- **Peaks both paths share**, listed under the chart as pairs of frequencies, Path A first ("Peaks 35/36 · 133/132 Hz"), strongest first. Each pair carries the same number on both curves
+- **Peaks only one path has** ("Only on A: 120, 129 Hz"), shown as hollow rings on the chart. A strong peak one path has and the other lacks is usually the clearest sign the two belts differ
+- The chart's height is **relative**: both curves are scaled to the taller one, so the highest point reads 100%
 
-**Comparison section:**
-- **Frequency Delta** - the difference between the two belts. Anything under about 2 Hz reads as *Within measurement resolution*, because that is the floor of what the instrument can tell apart
-- **Match** - how closely belt B matches belt A, as a percentage. 100% is identical
+The check reports **paths, not belts**. Path A is the 1,-1 diagonal and Path B the 1,1 diagonal, the same naming Shake&Tune and the Voron documentation use. Which physical belt each diagonal loads depends on your printer's layout, so check your printer's documentation before turning anything.
 
-**Recommendation card:**
-- A specific instruction, e.g. *Belt A (front right) is tighter by 6 Hz. Tighten belt B, on the front left, or loosen belt A.* When a target frequency is known, the recommendation is written against the target rather than against matching alone - two belts can match each other perfectly and both be far too loose
+HelixScreen's similarity reads lower than Shake&Tune's for the same printer. Shake&Tune compares the curves up to 200 Hz, where both are nearly flat and so agree; HelixScreen compares only the range the printer actually swept.
 
-### Interpreting Frequencies
+### Adjusting and Re-testing
 
-The **target frequency** is a property of the *free span*, not of the printer: a 150 mm span at correct tension rings at 110 Hz on a Voron 2.4, and a shorter span rings higher. That is why the tool parks the gantry before measuring, and why it shows no target at all on a model whose span geometry has not been measured.
+After adjusting a belt, you do not need to re-run both paths:
 
-| Result | Meaning |
-|-----------|---------|
-| **Both belts match, near target** | Belt tension is balanced and correct |
-| **Both belts match, but low** | Balanced but too loose - tighten both equally |
-| **Both belts match, but high** | Balanced but overtightened - loosen both equally |
-| **Belts differ significantly** | Unbalanced - tighten the lower-frequency belt |
+- **Re-test A** / **Re-test B** sweeps just that one path and keeps the other's previous result. The path's old curve stays on the chart as a faint line, so you can see which way, and how far, your adjustment moved it
+- **Test both** discards both and starts a fresh run of the full check
 
-### Tips
+---
 
-- **Run the check after any belt adjustment** to verify your changes had the desired effect
-- **Tap "Start over"** during listening to go back and re-measure belt A once the flow has moved on to B
-- **Belt A is the front belt on the right; belt B is the front belt on the left.** Check your printer's documentation for which tensioner adjusts which
-- **Pluck in the same place on both belts.** The frequency depends on the free span, so plucking one belt near an idler and the other mid-span compares two different things
-- **Turn off part-cooling and chamber fans if you can.** A fan is a steady tone in exactly the range the tool listens to; it will usually be rejected as "not a pluck", but it also raises the noise floor and makes gentle plucks harder to detect
-- **Z belts cannot be measured this way.** A toolhead-mounted accelerometer is too far from them to hear anything useful
-- **Temperature matters** - belt tension changes slightly with temperature. Run the check at your typical operating temperature for the most accurate results
+## Pressure Advance
+
+> Added in 1.1.
+
+Some printers can measure pressure advance themselves instead of printing a tuning tower you judge by eye. On those, a **Pressure Adv.** button appears in the Controls panel's **Calibration & Tools** card, and a **Pressure Advance** row under **Advanced > Calibration**. Today that is the **Snapmaker U1** and the **FlashForge Creator 5 Pro**; on other printers both stay hidden.
+
+1. Tap either entry and pick the tool to measure. Picking a tool mounts it.
+2. Set the nozzle temperature for the filament that's loaded, or tap a material preset.
+3. Tap **Start** and confirm. Filament must be loaded: the printer heats the nozzle and extrudes a series of short test moves, which takes a few minutes (about 3 on the U1, up to 5 on the Creator 5 Pro).
+4. Read the result. A value outside the usual range for the extruder is flagged so you can measure again.
+
+Where the result goes depends on the printer:
+
+- **Snapmaker U1:** the printer applies the value and keeps it for that tool.
+- **Creator 5 Pro:** the printer keeps nothing. Copy the value into the filament's slicer profile.
+
+Leaving the screen while it is still heating stops the run. Once measuring has started, **Stop** ends the run on the screen, but the printer finishes that measurement on its own and the nozzle stays hot.
 
 ---
 

@@ -5,11 +5,15 @@
 #include "ui_error_reporting.h"
 #include "ui_temperature_utils.h"
 
+#include "chamber_heater_backend.h"
 #include "filament_database.h"
 #include "i_moonraker_api.h"
 #include "lvgl/src/others/translation/lv_translation.h"
+#include "observer_factory.h"
 #include "printer_state.h"
 #include "spdlog/spdlog.h"
+#include "spool_latch_gate.h"
+#include "text_io.h"
 
 #include <spdlog/fmt/fmt.h>
 
@@ -93,7 +97,7 @@ void TemperatureController::refresh_presets() {
 std::string TemperatureController::resolved_name(HeaterType type) const {
     switch (type) {
     case HeaterType::Nozzle:
-        return state_.active_extruder_name();
+        return state_.temperature_state().active_extruder_name();
     case HeaterType::Bed:
         return "heater_bed";
     case HeaterType::Chamber:
@@ -115,6 +119,22 @@ KeypadRange TemperatureController::keypad_range(HeaterType type) const {
     return {m.keypad_min, heater_effective_max_deg(m.keypad_max_default, m.configured_max)};
 }
 
+float TemperatureController::effective_keypad_max(HeaterType type, float fallback_deg) {
+    ensure_limits(type);
+    const float cap = keypad_range(type).max;
+    return cap > 0.0f ? cap : fallback_deg;
+}
+
+float TemperatureController::keypad_max_for(const std::string& klipper_name,
+                                            float fallback_deg) const {
+    if (api_) {
+        const auto& limits = api_->get_safety_limits();
+        if (limits.has_max_temp_for(klipper_name))
+            return static_cast<float>(limits.max_temp_for(klipper_name));
+    }
+    return fallback_deg;
+}
+
 void TemperatureController::ensure_limits(HeaterType type) {
     if (!api_ || model_[idx(type)].configured_max > 0) {
         return;
@@ -125,8 +145,7 @@ void TemperatureController::ensure_limits(HeaterType type) {
     }
     // configfile.config section headers are lower-cased by Moonraker; lower-case
     // defensively to match regardless of how the discovery name was capitalised.
-    std::transform(section.begin(), section.end(), section.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    section = helix::text_io::to_lower(section);
 
     auto tok = lifetime_.token();
     // Snapshot the backend ceiling before the query: the callback below runs
@@ -140,14 +159,14 @@ void TemperatureController::ensure_limits(HeaterType type) {
                 const auto& sec = config[section];
                 if (sec.contains("max_temp")) {
                     const auto& mt = sec["max_temp"];
-                    try {
-                        if (mt.is_string()) {
-                            max_deg = static_cast<int>(std::stof(mt.get<std::string>()));
-                        } else if (mt.is_number()) {
-                            max_deg = static_cast<int>(mt.get<double>());
+                    if (mt.is_string()) {
+                        const auto parsed =
+                            helix::text_io::parse_leading<float>(mt.get_ref<const std::string&>());
+                        if (parsed) {
+                            max_deg = static_cast<int>(*parsed);
                         }
-                    } catch (const std::exception&) {
-                        max_deg = 0;
+                    } else if (mt.is_number()) {
+                        max_deg = static_cast<int>(mt.get<double>());
                     }
                 }
             }
@@ -184,11 +203,12 @@ void TemperatureController::set_target(HeaterType type, double celsius, SendOpti
     // Nozzle only — bed/chamber and any call without the flag are untouched, so
     // cooldown-to-0 and deliberate manual lowers still work.
     if (type == HeaterType::Nozzle && opts.keep_previous_hot) {
-        const int actual_deci = lv_subject_get_int(state_.get_active_extruder_temp_subject());
+        const int actual_deci =
+            lv_subject_get_int(state_.temperature_state().get_active_extruder_temp_subject());
         const double actual_deg =
             static_cast<double>(helix::ui::temperature::deci_to_degrees_f(actual_deci));
-        const double latched =
-            static_cast<double>(state_.get_active_extruder_last_nonzero_target());
+        const double latched = static_cast<double>(
+            state_.temperature_state().get_active_extruder_last_nonzero_target());
         const double floor_deg = std::max({latched, actual_deg});
         if (celsius < floor_deg) {
             celsius = floor_deg;
@@ -231,15 +251,18 @@ void TemperatureController::set_target(const std::string& klipper_name, double c
     if (!api_ || klipper_name.empty()) {
         return;
     }
+    // Callers' callbacks toast, which is main-thread only; the printer's answer
+    // arrives on the WebSocket thread.
     auto on_ok = [opts]() {
         if (opts.on_success)
-            opts.on_success();
+            helix::ui::run_on_main("TemperatureController::on_success", opts.on_success);
     };
     auto on_err = [opts](const MoonrakerError& e) {
         if (opts.on_error)
-            opts.on_error(e);
+            helix::ui::run_on_main("TemperatureController::on_error",
+                                   [cb = opts.on_error, e]() { cb(e); });
         if (opts.toast) {
-            NOTIFY_ERROR(lv_tr("Failed to set temperature: {}"), e.user_message());
+            helix::ui::notify_error_tr(TR_NOOP("Failed to set temperature: {}"), e);
         }
     };
     // opts.toast is the signal: on_err above raises NOTIFY_ERROR only when it is
@@ -272,6 +295,202 @@ void TemperatureController::reset_chamber_fault() {
         spdlog::info("[TemperatureController] Chamber fault reset");
         api_->execute_gcode(chamber_reset_gcode_, nullptr, nullptr);
     }
+}
+
+void TemperatureController::set_chamber_dryer(const chamber::ChamberHeaterBackend* backend,
+                                              bool has_heated_bed) {
+    chamber_dryer_backend_ = backend;
+    chamber_dryer_has_bed_ = has_heated_bed;
+    // The cycle can end on the appliance's side (its timer, its own button),
+    // so the bed assist follows the reported state rather than our commands.
+    if (!dryer_active_observer_ && chamber_dryer().supported) {
+        dryer_active_observer_ = ui::observe<int>(
+            state_.temperature_state().get_chamber_dryer_active_subject(), this,
+            [](TemperatureController* self, int active) {
+                self->on_chamber_dryer_active(active != 0);
+            },
+            state_.get_subjects_lifetime());
+    }
+}
+
+DryerInfo TemperatureController::chamber_dryer() const {
+    return chamber_dryer_backend_ ? chamber_dryer_backend_->dryer_capabilities() : DryerInfo{};
+}
+
+// Spools may sit on the bed during a run, and plastic spool flanges soften
+// around 60-70 C, so the assist stays at 70 C; a bed that cannot reach it gets
+// its own ceiling.
+int TemperatureController::chamber_dryer_bed_assist_c() const {
+    if (!chamber_dryer_has_bed_) {
+        return 0;
+    }
+    constexpr int kBedAssistC = 70;
+    const int bed_max = static_cast<int>(keypad_range(HeaterType::Bed).max);
+    return bed_max > 0 ? std::min(kBedAssistC, bed_max) : kBedAssistC;
+}
+
+void TemperatureController::start_chamber_drying(float temp_c, int duration_min, bool heat_bed,
+                                                 bool hold_idle) {
+    const DryerInfo dryer = chamber_dryer();
+    if (!api_ || !dryer.supported) {
+        return;
+    }
+    lv_subject_t* job = state_.print_state().get_job_holds_machine_subject();
+    const bool job_active = job && lv_subject_get_int(job) != 0;
+    if (job_active && !dryer.allows_during_print) {
+        spdlog::info("[TemperatureController] Chamber drying refused: a job holds the machine");
+        return;
+    }
+    const std::string gcode = chamber_dryer_backend_->dryer_start_gcode(
+        dryer.clamp_temp(temp_c), dryer.clamp_duration(duration_min));
+    spdlog::info("[TemperatureController] Chamber drying start: {}", gcode);
+    const uint32_t run_id = ++next_dry_run_id_;
+    dry_run_ = {true, false, 0, 0, run_id};
+    auto tok = lifetime_.token();
+    api_->execute_gcode(gcode, nullptr, [this, tok, run_id](const MoonrakerError&) {
+        if (tok.expired()) {
+            return;
+        }
+        tok.defer("TemperatureController::drying_refused", [this, run_id]() {
+            if (dry_run_.id == run_id) {
+                end_dry_run("drying start refused");
+            }
+        });
+    });
+    if (hold_idle) {
+        hold_idle_timeout(run_id, dryer.clamp_duration(duration_min) * 60);
+    }
+
+    const int bed_c = chamber_dryer_bed_assist_c();
+    if (!heat_bed || bed_c <= 0) {
+        return;
+    }
+    if (job_active) {
+        spdlog::info("[TemperatureController] Bed assist refused: a job holds the machine");
+        return;
+    }
+    dry_run_.bed_c = bed_c;
+    set_target(HeaterType::Bed, bed_c);
+}
+
+// A dry run moves nothing, so Klipper's idle_timeout would fire mid-run and run
+// its gcode, TURN_OFF_HEATERS on most printers, zeroing the bed assist and the
+// appliance's own heater. Hold it off for the run plus a margin, but only once
+// the configured value is known: without it there is nothing to restore, so
+// nothing is held.
+void TemperatureController::hold_idle_timeout(uint32_t run_id, int run_s) {
+    constexpr int kMarginS = 30 * 60;
+    read_configured_idle_timeout([this, run_id, run_s](int configured_s) {
+        if (!dry_run_.armed || dry_run_.id != run_id || !api_) {
+            return;
+        }
+        dry_run_.idle_restore_s = configured_s;
+        api_->execute_gcode(fmt::format("SET_IDLE_TIMEOUT TIMEOUT={}", run_s + kMarginS), nullptr,
+                            nullptr);
+    });
+}
+
+void TemperatureController::read_configured_idle_timeout(std::function<void(int)> on_main) {
+    if (!api_) {
+        return;
+    }
+    constexpr int kKlipperDefaultS = 600;
+    auto tok = lifetime_.token();
+    api_->query_configfile(
+        [tok, on_main = std::move(on_main)](const nlohmann::json& config) {
+            // Background (WS) thread: parse only.
+            int configured_s = kKlipperDefaultS;
+            if (config.contains("idle_timeout") && config["idle_timeout"].contains("timeout")) {
+                const auto& t = config["idle_timeout"]["timeout"];
+                if (t.is_string()) {
+                    const auto parsed =
+                        helix::text_io::parse_leading<float>(t.get_ref<const std::string&>());
+                    if (!parsed) {
+                        return;
+                    }
+                    configured_s = static_cast<int>(*parsed);
+                } else if (t.is_number()) {
+                    configured_s = static_cast<int>(t.get<double>());
+                }
+            }
+            if (configured_s <= 0) {
+                return;
+            }
+            tok.defer("TemperatureController::read_configured_idle_timeout",
+                      [on_main, configured_s]() { on_main(configured_s); });
+        },
+        [](const MoonrakerError&) {});
+}
+
+std::vector<std::string> TemperatureController::chamber_dryer_tokens() const {
+    std::vector<std::string> tokens;
+    if (!chamber_dryer_backend_ || !chamber_dryer().supported) {
+        return tokens;
+    }
+    const DryerInfo dryer = chamber_dryer();
+    for (const std::string& script :
+         {chamber_dryer_backend_->dryer_start_gcode(dryer.clamp_temp(dryer.min_temp_c),
+                                                    dryer.clamp_duration(60)),
+          std::string(chamber_dryer_backend_->dryer_stop_gcode())}) {
+        for (std::string& token : gcode_line_tokens(script)) {
+            tokens.push_back(std::move(token));
+        }
+    }
+    return tokens;
+}
+
+void TemperatureController::stop_chamber_drying() {
+    if (!api_ || !chamber_dryer().supported) {
+        return;
+    }
+    spdlog::info("[TemperatureController] Chamber drying stop");
+    api_->execute_gcode(std::string(chamber_dryer_backend_->dryer_stop_gcode()), nullptr, nullptr);
+    end_dry_run("drying stopped");
+}
+
+void TemperatureController::on_chamber_dryer_active(bool running) {
+    if (!dry_run_.armed) {
+        return;
+    }
+    if (running) {
+        dry_run_.seen_running = true;
+    } else if (dry_run_.seen_running) {
+        end_dry_run("drying cycle ended");
+    }
+}
+
+// A print that started since owns both the bed and the idle timeout, so neither
+// is touched then. Otherwise the held timeout goes back to its configured value,
+// and the bed goes off only while it is still ours: a different target someone
+// set by hand owns it now. A target still reading 0 is ours too: the confirming
+// frame may not have arrived yet, and an off sent to a cold bed costs nothing.
+void TemperatureController::end_dry_run(const char* why) {
+    if (!dry_run_.armed) {
+        return;
+    }
+    const int target_c = dry_run_.bed_c;
+    const int restore_s = dry_run_.idle_restore_s;
+    dry_run_ = {};
+    lv_subject_t* job = state_.print_state().get_job_holds_machine_subject();
+    if (job && lv_subject_get_int(job) != 0) {
+        spdlog::info("[TemperatureController] Drying ended ({}): a job owns the machine", why);
+        return;
+    }
+    if (restore_s > 0 && api_) {
+        api_->execute_gcode(fmt::format("SET_IDLE_TIMEOUT TIMEOUT={}", restore_s), nullptr,
+                            nullptr);
+    }
+    if (target_c <= 0) {
+        return;
+    }
+    lv_subject_t* bed_target = state_.temperature_state().get_bed_target_subject();
+    const int bed_target_deci = bed_target ? lv_subject_get_int(bed_target) : 0;
+    if (bed_target_deci != 0 && bed_target_deci != target_c * 10) {
+        spdlog::info("[TemperatureController] Bed assist ended ({}): target changed since", why);
+        return;
+    }
+    spdlog::info("[TemperatureController] Bed assist off ({})", why);
+    set_target(HeaterType::Bed, 0);
 }
 
 void TemperatureController::set_chamber_filter_fan(bool on) {

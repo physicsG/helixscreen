@@ -30,6 +30,15 @@ endif
 
 FBDEV_TARGET := $(FBDEV_BUILD_DIR)/bin/helix-screen
 
+# The substitutions above only rewrite the three known subdirs. Any other
+# BUILD_SUBDIR leaves FBDEV_BUILD_DIR equal to BUILD_DIR, and then the fbdev
+# link silently overwrites the DRM binary it was supposed to sit beside — two
+# different binaries at one path, and whichever linked last is what runs.
+ifeq ($(abspath $(FBDEV_TARGET)),$(abspath $(TARGET)))
+    $(error BUILD_SUBDIR=$(BUILD_SUBDIR) has no fbdev counterpart, so the fbdev \
+binary would overwrite $(TARGET). Use pi, pi32 or x86, or add the mapping above.)
+endif
+
 # =============================================================================
 # Fbdev display backend library
 # =============================================================================
@@ -47,6 +56,7 @@ FBDEV_DISPLAY_CXXFLAGS := $(filter-out -DHELIX_DISPLAY_DRM -DHELIX_ENABLE_OPENGL
 FBDEV_DISPLAY_API_SRCS := \
     src/api/display_backend.cpp \
     src/api/display_backend_fbdev.cpp \
+    src/api/drm_rotation_strategy.cpp \
     src/api/touch_calibration_wrapper.cpp \
     src/api/input_device_scanner.cpp
 
@@ -58,11 +68,11 @@ FBDEV_DISPLAY_UI_OBJS := $(FBDEV_DISPLAY_UI_SRCS:src/ui/%.cpp=$(FBDEV_DISPLAY_DI
 FBDEV_DISPLAY_OBJS := $(FBDEV_DISPLAY_API_OBJS) $(FBDEV_DISPLAY_UI_OBJS)
 
 # Build fbdev display objects
-$(FBDEV_DISPLAY_DIR)/%.o: src/api/%.cpp $(LIBHV_LIB) | $(FBDEV_DISPLAY_DIR)
+$(FBDEV_DISPLAY_DIR)/%.o: src/api/%.cpp $(LIBHV_LIB) $(ABI_STAMP) | $(FBDEV_DISPLAY_DIR)
 	@echo "[CXX/fbdev] $<"
 	$(Q)$(CXX) $(FBDEV_DISPLAY_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
-$(FBDEV_DISPLAY_DIR)/%.o: src/ui/%.cpp $(LIBHV_LIB) | $(FBDEV_DISPLAY_DIR)
+$(FBDEV_DISPLAY_DIR)/%.o: src/ui/%.cpp $(LIBHV_LIB) $(ABI_STAMP) | $(FBDEV_DISPLAY_DIR)
 	@echo "[CXX/fbdev] $<"
 	$(Q)$(CXX) $(FBDEV_DISPLAY_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
@@ -87,9 +97,9 @@ DRM_CRASH_OBJ := $(OBJ_DIR)/system/crash_reporter.o
 # Strip the DRM variant define and add fbdev
 FBDEV_VARIANT_CXXFLAGS := $(subst -DHELIX_BINARY_VARIANT=\"drm\",-DHELIX_BINARY_VARIANT=\"fbdev\",$(CXXFLAGS))
 
-$(FBDEV_CRASH_OBJ): src/system/crash_reporter.cpp $(LIBHV_LIB) $(PCH) | $(FBDEV_VARIANT_DIR)
+$(FBDEV_CRASH_OBJ): src/system/crash_reporter.cpp $(LIBHV_LIB) $(PATCHES_STAMP) $(ABI_STAMP) | $(FBDEV_VARIANT_DIR) $(PATCH_MARKER_STAMP)
 	@echo "[CXX/fbdev] $< (variant=fbdev)"
-	$(Q)$(CXX) $(FBDEV_VARIANT_CXXFLAGS) $(DEPFLAGS) $(PCH_FLAGS) $(INCLUDES) $(LV_CONF) -c $< -o $@
+	$(Q)$(CXX) $(FBDEV_VARIANT_CXXFLAGS) $(DEPFLAGS) $(FORCED_INCLUDE) $(INCLUDES) $(LV_CONF) -c $< -o $@
 
 $(FBDEV_VARIANT_DIR):
 	$(Q)mkdir -p $@
@@ -109,31 +119,55 @@ FBDEV_GLES_CXXFLAGS := $(filter-out -DENABLE_GLES_3D -DHELIX_DISPLAY_DRM -DHELIX
 FBDEV_GLES_VARIANT_SRCS := \
     src/rendering/gcode_gles_renderer.cpp \
     src/ui/ui_gcode_viewer.cpp \
-    src/ui/backdrop_blur.cpp
+    src/ui/gcode_viewer_input.cpp \
+    src/ui/gcode_viewer_loader.cpp \
+    src/ui/backdrop_blur.cpp \
+    src/application/probe_egl_cmd.cpp
 
 # Map source paths to fbdev variant object paths (flatten into single dir)
 FBDEV_GLES_VARIANT_OBJS := \
     $(FBDEV_GLES_VARIANT_DIR)/gcode_gles_renderer.o \
     $(FBDEV_GLES_VARIANT_DIR)/ui_gcode_viewer.o \
-    $(FBDEV_GLES_VARIANT_DIR)/backdrop_blur.o
+    $(FBDEV_GLES_VARIANT_DIR)/gcode_viewer_input.o \
+    $(FBDEV_GLES_VARIANT_DIR)/gcode_viewer_loader.o \
+    $(FBDEV_GLES_VARIANT_DIR)/backdrop_blur.o \
+    $(FBDEV_GLES_VARIANT_DIR)/probe_egl_cmd.o
 
 # DRM-compiled originals to exclude from fbdev link
 DRM_GLES_APP_OBJS := \
     $(OBJ_DIR)/rendering/gcode_gles_renderer.o \
     $(OBJ_DIR)/ui/ui_gcode_viewer.o \
-    $(OBJ_DIR)/ui/backdrop_blur.o
+    $(OBJ_DIR)/ui/gcode_viewer_input.o \
+    $(OBJ_DIR)/ui/gcode_viewer_loader.o \
+    $(OBJ_DIR)/ui/backdrop_blur.o \
+    $(OBJ_DIR)/application/probe_egl_cmd.o
 
-$(FBDEV_GLES_VARIANT_DIR)/gcode_gles_renderer.o: src/rendering/gcode_gles_renderer.cpp $(LIBHV_LIB) $(PCH) | $(FBDEV_GLES_VARIANT_DIR)
+$(FBDEV_GLES_VARIANT_DIR)/gcode_gles_renderer.o: src/rendering/gcode_gles_renderer.cpp $(LIBHV_LIB) $(PATCHES_STAMP) $(ABI_STAMP) | $(FBDEV_GLES_VARIANT_DIR) $(PATCH_MARKER_STAMP)
 	@echo "[CXX/fbdev] $< (no GLES)"
-	$(Q)$(CXX) $(FBDEV_GLES_CXXFLAGS) $(DEPFLAGS) $(PCH_FLAGS) $(INCLUDES) $(LV_CONF) -c $< -o $@
+	$(Q)$(CXX) $(FBDEV_GLES_CXXFLAGS) $(DEPFLAGS) $(FORCED_INCLUDE) $(INCLUDES) $(LV_CONF) -c $< -o $@
 
-$(FBDEV_GLES_VARIANT_DIR)/ui_gcode_viewer.o: src/ui/ui_gcode_viewer.cpp $(LIBHV_LIB) $(PCH) | $(FBDEV_GLES_VARIANT_DIR)
+$(FBDEV_GLES_VARIANT_DIR)/ui_gcode_viewer.o: src/ui/ui_gcode_viewer.cpp $(LIBHV_LIB) $(PATCHES_STAMP) $(ABI_STAMP) | $(FBDEV_GLES_VARIANT_DIR) $(PATCH_MARKER_STAMP)
 	@echo "[CXX/fbdev] $< (no GLES)"
-	$(Q)$(CXX) $(FBDEV_GLES_CXXFLAGS) $(DEPFLAGS) $(PCH_FLAGS) $(INCLUDES) $(LV_CONF) -c $< -o $@
+	$(Q)$(CXX) $(FBDEV_GLES_CXXFLAGS) $(DEPFLAGS) $(FORCED_INCLUDE) $(INCLUDES) $(LV_CONF) -c $< -o $@
 
-$(FBDEV_GLES_VARIANT_DIR)/backdrop_blur.o: src/ui/backdrop_blur.cpp $(LIBHV_LIB) $(PCH) | $(FBDEV_GLES_VARIANT_DIR)
+$(FBDEV_GLES_VARIANT_DIR)/gcode_viewer_input.o: src/ui/gcode_viewer_input.cpp $(LIBHV_LIB) $(PATCHES_STAMP) $(ABI_STAMP) | $(FBDEV_GLES_VARIANT_DIR) $(PATCH_MARKER_STAMP)
 	@echo "[CXX/fbdev] $< (no GLES)"
-	$(Q)$(CXX) $(FBDEV_GLES_CXXFLAGS) $(DEPFLAGS) $(PCH_FLAGS) $(INCLUDES) $(LV_CONF) -c $< -o $@
+	$(Q)$(CXX) $(FBDEV_GLES_CXXFLAGS) $(DEPFLAGS) $(FORCED_INCLUDE) $(INCLUDES) $(LV_CONF) -c $< -o $@
+
+$(FBDEV_GLES_VARIANT_DIR)/gcode_viewer_loader.o: src/ui/gcode_viewer_loader.cpp $(LIBHV_LIB) $(PATCHES_STAMP) $(ABI_STAMP) | $(FBDEV_GLES_VARIANT_DIR) $(PATCH_MARKER_STAMP)
+	@echo "[CXX/fbdev] $< (no GLES)"
+	$(Q)$(CXX) $(FBDEV_GLES_CXXFLAGS) $(DEPFLAGS) $(FORCED_INCLUDE) $(INCLUDES) $(LV_CONF) -c $< -o $@
+
+$(FBDEV_GLES_VARIANT_DIR)/backdrop_blur.o: src/ui/backdrop_blur.cpp $(LIBHV_LIB) $(PATCHES_STAMP) $(ABI_STAMP) | $(FBDEV_GLES_VARIANT_DIR) $(PATCH_MARKER_STAMP)
+	@echo "[CXX/fbdev] $< (no GLES)"
+	$(Q)$(CXX) $(FBDEV_GLES_CXXFLAGS) $(DEPFLAGS) $(FORCED_INCLUDE) $(INCLUDES) $(LV_CONF) -c $< -o $@
+
+# Without the GLES defines this compiles to the stub that reports "built
+# without EGL support", which is what keeps libEGL and libgbm out of the fbdev
+# binary and verify-fbdev green.
+$(FBDEV_GLES_VARIANT_DIR)/probe_egl_cmd.o: src/application/probe_egl_cmd.cpp $(LIBHV_LIB) $(PATCHES_STAMP) $(ABI_STAMP) | $(FBDEV_GLES_VARIANT_DIR) $(PATCH_MARKER_STAMP)
+	@echo "[CXX/fbdev] $< (no GLES)"
+	$(Q)$(CXX) $(FBDEV_GLES_CXXFLAGS) $(DEPFLAGS) $(FORCED_INCLUDE) $(INCLUDES) $(LV_CONF) -c $< -o $@
 
 $(FBDEV_GLES_VARIANT_DIR):
 	$(Q)mkdir -p $@
@@ -205,8 +239,8 @@ FBDEV_LDFLAGS := $(filter-out -ldrm -linput -lEGL -lGLESv2 -lgbm,$(LDFLAGS))
 # only .github/workflows/ccache-warm.yml built the configuration that references
 # linenoise, and all three of its jobs died here on 11 undefined references.
 $(FBDEV_TARGET): $(APP_C_OBJS) $(FBDEV_APP_OBJS) $(FBDEV_GLES_VARIANT_OBJS) $(FBDEV_CRASH_OBJ) \
-                 $(FBDEV_LVGL_OBJS) $(HELIX_XML_OBJS) $(THORVG_OBJS) $(LV_MARKDOWN_OBJS) \
-                 $(QUIRC_OBJS) $(FONT_OBJS) $(TRANS_OBJS) $(REMOTE_LINENOISE_OBJ) \
+                 $(FBDEV_LVGL_OBJS) $(HELIX_XML_OBJS) $(THORVG_OBJS) $(SPDLOG_OBJS) $(LV_MARKDOWN_OBJS) \
+                 $(QUIRC_OBJS) $(LUA_OBJS) $(FONT_OBJS) $(TRANS_OBJS) $(REMOTE_LINENOISE_OBJ) \
                  $(DISPLAY_LIB_FBDEV) $(WPA_DEPS) \
                  | $(TARGET)
 	$(Q)mkdir -p $(dir $@)
@@ -223,7 +257,7 @@ $(FBDEV_TARGET): $(APP_C_OBJS) $(FBDEV_APP_OBJS) $(FBDEV_GLES_VARIANT_OBJS) $(FB
 	@# dirs — and `make deploy-pi-fbdev` and `make release-pi` both read the
 	@# stamp from the dir they are handling. Without this the fbdev half looked
 	@# like a binary from before the stamp existed.
-	$(Q)printf 'remote_control=%s\n' "$(ENABLE_REMOTE_CONTROL)" > $(dir $@).build-features
+	$(Q)printf 'remote_control=%s\ndiag_uploads=%s\n' "$(ENABLE_REMOTE_CONTROL)" "$(ENABLE_DIAGNOSTIC_UPLOADS)" > $(dir $@).build-features
 
 # =============================================================================
 # Symbol extraction and stripping for both binaries

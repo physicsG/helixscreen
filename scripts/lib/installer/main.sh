@@ -16,17 +16,111 @@ _HELIX_MAIN_SOURCED=1
 # shellcheck disable=SC3047
 trap 'error_handler $LINENO' ERR 2>/dev/null || true
 
-# Remove the scratch dir however the installer ends.
+# Resolve the open step, keep the log and remove the scratch dir however the
+# installer ends.
 #
 # The ERR trap above is a bash extension and is silently discarded on the
 # ash/dash shells every embedded platform runs, so without this trap an
 # interrupted or failing install leaks the whole download - tens of megabytes
 # stranded on a partition that may only have a couple of hundred.
 #
-# cleanup_on_success is idempotent (it tests for the directory first) so the
-# explicit call on the success path is unaffected, and it routes through
-# _safe_remove_tmp_dir, which is what refuses to rm -rf a mountpoint.
-trap 'cleanup_on_success' EXIT INT TERM
+# The log lives in the scratch dir until finalize_install_log moves it, so the
+# failure report runs first. cleanup_on_success is idempotent (it tests for
+# the directory first) so the explicit call on the success path is
+# unaffected, and it routes through _safe_remove_tmp_dir, which is what
+# refuses to rm -rf a mountpoint. A signal handler that returns resumes the
+# script with its download gone, so each signal exits with the shell's own
+# 128+N status, and the EXIT trap then reports it. The signal traps print
+# nothing: after an SSH drop the terminal is gone, and a failed write under
+# set -e would end the trap before the log is kept.
+trap 'installer_exit_report $?; cleanup_on_success' EXIT
+trap 'STEP_FAIL_REASON=interrupted; exit 129' HUP
+trap 'STEP_FAIL_REASON=interrupted; exit 130' INT
+trap 'STEP_FAIL_REASON=interrupted; exit 143' TERM
+
+# The failure block's closing lines, for a run that passed the confirm point
+# and then stopped: the failed step, what state the printer is in, and where
+# the full log is. The log is kept before anything prints, and nothing here
+# may end the shell early: stderr can be a terminal that no longer exists.
+installer_exit_report() { # exit status
+    set +e
+    [ "$1" -ne 0 ] && [ -n "${HELIX_CONFIRMED:-}" ] || return 0
+    _ier_state=$(install_state_line)
+    finalize_install_log
+    step_fail "${STEP_FAIL_REASON:-}"
+    printf '\n' >&2
+    if [ -n "$_ier_state" ]; then
+        _log_write "STATE $_ier_state"
+        printf '%s\n' "$_ier_state" >&2
+    fi
+    if [ -n "${INSTALL_LOG_KEPT:-}" ]; then
+        printf '%s\n' "Full log: $(display_path "$INSTALL_LOG_KEPT")" >&2
+    fi
+    return 0
+}
+
+# "a", "a and b", "a, b and c".
+_and_list() {
+    case $# in
+        0) ;;
+        1) printf '%s' "$1" ;;
+        *)
+            _al=""
+            while [ $# -gt 2 ]; do _al="$_al$1, "; shift; done
+            printf '%s%s and %s' "$_al" "$1" "$2"
+            ;;
+    esac
+}
+
+# What a stopped run left on the printer, from the marks apply_install and
+# extract_release set as they change it: INSTALL_SWAPPED (the new tree
+# landed, or an in-place replace began), INSTALL_BACKUP (the previous tree,
+# put back by a rollback when it no longer exists), INSTALL_STOPPED (services
+# stopped) and INSTALL_REMOVED_OLD (--clean). Empty once every step is done.
+install_state_line() {
+    [ -n "${INSTALL_COMPLETE:-}" ] && return 0
+    case "${INSTALL_SWAPPED:-}" in
+        in-place)
+            printf 'HelixScreen at %s was partly replaced; re-run the installer to finish.' "$INSTALL_DIR"
+            return 0
+            ;;
+        swapped)
+            if [ -n "${INSTALL_BACKUP:-}" ] && [ -d "$INSTALL_BACKUP" ]; then
+                printf 'The new install is in place but not set up; the previous one is kept at %s. Re-run the installer to finish.' "$INSTALL_BACKUP"
+            else
+                printf 'The new install is in place but not set up; re-run the installer to finish.'
+            fi
+            return 0
+            ;;
+    esac
+
+    _isl=""
+    if [ -n "${INSTALL_BACKUP:-}" ]; then
+        if [ -d "$INSTALL_BACKUP" ]; then
+            _isl="The previous install is at $INSTALL_BACKUP"
+        else
+            _isl="The previous install was put back"
+        fi
+    fi
+    if [ -n "${INSTALL_STOPPED:-}" ]; then
+        # shellcheck disable=SC2086  # names are single words
+        set -- $INSTALL_STOPPED
+        if [ $# -eq 1 ]; then _isl_v=was; else _isl_v=were; fi
+        _isl="${_isl:+$_isl; }$(_and_list "$@") $_isl_v stopped"
+    fi
+    if [ -n "${INSTALL_REMOVED_OLD:-}" ]; then
+        if [ -n "$_isl" ]; then
+            _isl="$_isl; the old install was removed"
+        else
+            _isl="The old install was removed"
+        fi
+    fi
+    if [ -z "$_isl" ]; then
+        printf 'Nothing on your printer was changed after this step.'
+    else
+        printf '%s; re-run the installer to finish.' "$_isl"
+    fi
+}
 
 # Print usage
 usage() {
@@ -38,10 +132,17 @@ usage() {
     echo "  --update       Update existing installation (preserves config)"
     echo "  --uninstall    Remove HelixScreen"
     echo "  --clean        Clean install: remove old installation completely,"
-    echo "                 including config and caches (asks for confirmation)"
+    echo "                 including config and caches. The disabled-services"
+    echo "                 ledger is kept, so a later uninstall can still"
+    echo "                 re-enable a stock UI this install disabled."
+    echo "                 Asks for confirmation."
     echo "  --yes, -y      Confirm destructive prompts non-interactively."
-    echo "                 Required for --clean when stdin is not a terminal"
+    echo "                 Required for --clean when no terminal can answer"
     echo "                 (e.g. curl ... | sh -s -- --clean --yes)"
+    echo "  --dry-run      Show what would be installed and changed, then exit."
+    echo "                 Changes nothing; exits non-zero if a check would stop the install."
+    echo "  --verbose, -v  Print every detail line and command output as it happens."
+    echo "                 The full log is always written either way."
     echo "  --version VER  Install specific version (default: latest)"
     echo "  --local FILE   Install from local archive (.zip or .tar.gz, skip download)"
     echo "  --skip-kiauh-registration"
@@ -80,6 +181,8 @@ parse_installer_args() {
     uninstall_mode=false
     clean_mode=false
     ASSUME_YES=false
+    # shellcheck disable=SC2034  # consumed by main()'s read-only pass
+    DRY_RUN=false
     version=""
     local_tarball=""
     skip_kiauh_registration=false
@@ -109,6 +212,16 @@ parse_installer_args() {
                 # the documented `curl ... | sh` invocation always has one.
                 # shellcheck disable=SC2034  # consumed by uninstall.sh (clean_old_installation)
                 ASSUME_YES=true
+                shift
+                ;;
+            --dry-run)
+                # shellcheck disable=SC2034  # consumed by main()'s read-only pass
+                DRY_RUN=true
+                shift
+                ;;
+            --verbose|-v)
+                # shellcheck disable=SC2034  # consumed by common.sh (log_info, run_logged)
+                HELIX_INSTALL_VERBOSE=1
                 shift
                 ;;
             --version)
@@ -196,6 +309,13 @@ parse_installer_args() {
         log_error "--payload-root cannot be combined with --standalone"
         exit 1
     fi
+
+    # The uninstall branch never reaches the confirm point, where a dry run
+    # stops, so it would remove everything.
+    if [ "$uninstall_mode" = true ] && [ "$DRY_RUN" = true ]; then
+        log_error "--dry-run cannot be combined with --uninstall; nothing was removed"
+        exit 1
+    fi
 }
 
 # Auto-detect the payload contract: a bare install on a host the mod profile
@@ -239,8 +359,8 @@ mod_payload_autodetect() {
 #
 # Nothing is ever deleted here: the legacy root and its service are the
 # operator's to remove, with the commands printed below or the shipped
-# uninstaller. An adoption IS recorded (the record write later in
-# mod_payload_mode_block), which is also how the next run resumes it without
+# uninstaller. An adoption IS recorded (record_payload_root_if_payload, after
+# the confirm point), which is also how the next run resumes it without
 # re-asking.
 payload_legacy_adopt_or_warn() {
     # Only an armed, bare payload install reaching for the mod's default
@@ -301,19 +421,17 @@ payload_legacy_adopt_or_warn() {
     log_warn "  --payload-root $legacy"
 }
 
-# Ask the adopt question where it can be answered: a TTY. The curl|sh pipe
-# cannot answer (stdin carries the script), so every other stdin declines -
-# the same rule confirm_clean_install applies, except a decline proceeds at
-# the mod default rather than aborting.
+# Ask the adopt question on the terminal, which tty_confirm reaches under
+# curl|sh too. With nothing that can answer, the offer is declined and the
+# install proceeds at the mod default. --yes does not answer it: --yes
+# consents to destructive prompts, and where the payload lands is a choice.
 # Returns 0 to adopt.
 payload_legacy_prompt_adopt() {
-    [ -t 0 ] || return 1
-    printf "Adopt the existing install at %s as the payload root? [y/N] " "$1"
-    read -r response
-    case "$response" in
-        [yY][eE][sS]|[yY]) return 0 ;;
-        *) return 1 ;;
-    esac
+    local assume_yes="${ASSUME_YES:-false}" rc=0
+    ASSUME_YES=false
+    tty_confirm "Adopt the existing install at $1 as the payload root?" n || rc=1
+    ASSUME_YES="$assume_yes"
+    return "$rc"
 }
 
 # Payload-mode wiring. Runs after set_install_paths (INSTALL_DIR holds the
@@ -354,23 +472,21 @@ mod_payload_mode_block() {
 
     # A payload root inside the mod's git tree does not survive a Forge-X
     # OTA -- their update_manager is type: git_repo and git clean -fd removes
-    # .bin/helixscreen, which is untracked there.
+    # every untracked path in it, a payload included.
     # Only the payload contract can reach a mod-owned INSTALL_DIR
     # (set_install_paths' install-dir gate refuses it otherwise), so this
-    # fires in payload mode and never else.
+    # fires in payload mode and never else. The probed default lives outside
+    # the tree, so this reaches only an operator-chosen in-tree root.
     if host_path_is_mod_owned "${INSTALL_DIR:-}"; then
         log_warn "This payload root lives inside the firmware mod's git tree."
         log_warn "A Forge-X OTA removes it: their updater cleans untracked files"
         log_warn "in the mod's repo. Prefer a root outside the tree:"
-        # The example must exist on THIS rig: the mod's data mount (/usr/data
-        # on the AD5X, /data on the AD5M), not the hard-coded AD5X path an
-        # AD5M operator would follow onto a partition their rig does not
-        # have. Unprobed corner (flag-armed, no chroot): fall back to the
-        # AD5X literal.
-        local od1_mount
-        od1_mount="$(host_mod_data_mount)"
-        [ -n "$od1_mount" ] || od1_mount="/usr/data"
-        log_warn "  --payload-root $od1_mount/helixscreen"
+        # Point at the default's own location: mod_data beside the mod tree,
+        # the same root a bare install uses -- never a bare
+        # <data-mount>/helixscreen path, which on the AD5M lands inside the
+        # partition the vendor symlinks into Moonraker's gcodes root.
+        # host_mod_data()'s fallback spelling exists on both layouts.
+        log_warn "  --payload-root $(host_mod_data)/helixscreen"
     fi
 
     if [ "${HELIX_MOD_PAYLOAD:-}" != "1" ]; then
@@ -397,11 +513,6 @@ mod_payload_mode_block() {
         # capture, since the record now names THIS run's root instead).
         # shellcheck disable=SC2034  # consumed by uninstall.sh (clean_old_installation sweeps it)
         HELIX_PRIOR_PAYLOAD_ROOT=$(read_payload_root_record 2>/dev/null || true)
-        # Record where this payload install actually landed, so a later armed
-        # uninstall removes THIS root (its own --payload-root, else this
-        # record, else the probed default). Install runs only: an uninstall
-        # must not re-point the record on its way out the door.
-        record_payload_root "$INSTALL_DIR"
 
         if [ "${MOD_PAYLOAD_FLAG_GIVEN:-}" = "1" ]; then
             log_info "--mod-payload: replacing payload contents in place at $INSTALL_DIR"
@@ -416,6 +527,17 @@ mod_payload_mode_block() {
     fi
 }
 
+# Record where this payload install actually lands, so a later armed uninstall
+# removes THIS root (its own --payload-root, else this record, else the probed
+# default). main() calls it after the confirm point, before --clean sweeps:
+# the sweep reads HELIX_PRIOR_PAYLOAD_ROOT, captured by mod_payload_mode_block
+# before this write replaces the record. Install runs only: an uninstall must
+# not re-point the record on its way out the door.
+record_payload_root_if_payload() {
+    [ "${HELIX_MOD_PAYLOAD:-}" = "1" ] || return 0
+    record_payload_root "$INSTALL_DIR"
+}
+
 # Configure platform-specific settings before stopping competing UIs
 # (ForgeX display mode, stock UI disable, screen.sh patching)
 configure_platform() {
@@ -428,7 +550,16 @@ configure_platform() {
 
     case "${AD5M_FIRMWARE:-}" in
         forge_x)
-            configure_forgex_display || true
+            # The display takeover is the one forgex step that must fail the
+            # install: its non-zero return means the vendor UI still owns the
+            # display slot, and an install that continued would ship two UIs
+            # fighting over the framebuffer. The steps below it harden around
+            # a takeover that already succeeded - best-effort by design.
+            configure_forgex_display || {
+                log_error "ForgeX display takeover failed - the vendor UI still owns the display slot"
+                log_error "The install did not complete; address the ForgeX message above and re-run"
+                return 1
+            }
             dismiss_forgex_feather_promo || true
             patch_forgex_screen_sh || true
             patch_forgex_screen_drawing || true
@@ -462,9 +593,23 @@ install_platform_hooks() {
 #
 # All other platforms (k1, k2, ad5m, snapmaker-u1, x86, …) get the single
 # "Detected platform: X" line — there's no device-name ambiguity to clear up.
+# ad5x is the exception on the non-Pi side: one install package covers the
+# AD5X and both Creator 5 boards, so the board name leads and the key is
+# reframed as the package, same shape as the non-Pi SBC case above.
+#
+# Sets HARDWARE_LABEL, the board name the plan's Printer line leads with
+# (empty where the platform key already says it).
 print_platform_banner() {
     local platform="$1"
     local _hw_label
+    HARDWARE_LABEL=""
+
+    if [ "$platform" = "ad5x" ]; then
+        HARDWARE_LABEL=$(ad5x_board_name)
+        log_info "Detected hardware: ${BOLD}${HARDWARE_LABEL}${NC}"
+        log_info "Install package: ${BOLD}${platform}${NC} (unified MIPS FlashForge build)"
+        return 0
+    fi
 
     if [ "$platform" != "pi" ] && [ "$platform" != "pi32" ]; then
         log_info "Detected platform: ${BOLD}${platform}${NC}"
@@ -472,6 +617,7 @@ print_platform_banner() {
     fi
 
     _hw_label=$(describe_hardware)
+    HARDWARE_LABEL="$_hw_label"
     case "$_hw_label" in
         "Raspberry Pi"*)
             log_info "Detected platform: ${BOLD}${platform}${NC}"
@@ -484,8 +630,49 @@ print_platform_banner() {
     esac
 }
 
+# Tell a K2 owner how AI failure detection stands after this install (#1378).
+#
+# Two independent parts of the install stop the STOCK detector, and neither
+# announces itself:
+#
+#   - assets/config/platform/hooks-k2.sh platform_stop_competing_uis() stops and
+#     disables /etc/init.d/app. That procd service is the stock UI, and the same
+#     service carries Creality's capture/infer/pause daemons (Monitor,
+#     master-server, app-server). The init script re-runs the hook on every
+#     start, so the disable is re-asserted at each boot.
+#   - install_camera_k2() (camera.sh) hands /dev/video0 to ustreamer, which
+#     kills the stock cam_app grabber on every launch. The node is single-stream,
+#     so nothing else can read the chamber camera while HelixScreen runs.
+#
+# HelixScreen ships its own spaghetti detector for exactly this gap: while a
+# print is active it captures a frame from the ustreamer camera and runs
+# /usr/bin/detection (Creality's on-device model) on it, pausing the print on a
+# hit. The notice says both halves - stock service stops, HelixScreen detection
+# takes over - so the owner knows what is watching their prints.
+#
+# The text stays ASCII: it lands on a BusyBox console on the printer. No-op on
+# every other platform.
+print_k2_stock_ai_notice() {
+    [ "${1:-}" = "k2" ] || return 0
+
+    log_warn "Creality's stock AI failure detection service is now DISABLED on this"
+    log_warn "  printer: HelixScreen replaces the stock UI (/etc/init.d/app), which also"
+    log_warn "  runs Creality's failure detector, and takes over the chamber camera."
+    log_warn "  HelixScreen provides its own spaghetti detection instead: while a print"
+    log_warn "  is active it captures a chamber-camera frame, runs Creality's on-device"
+    log_warn "  detection model (/usr/bin/detection) on it, and pauses the print with a"
+    log_warn "  warning when it sees spaghetti - or only warns, if detection is set not"
+    log_warn "  to pause. Its interval and threshold come from the printer's own"
+    log_warn "  ai_control settings (pastaTime / pastaTruth); the on/off and pause"
+    log_warn "  choices start from those settings (switch / pausePrint) and then live in"
+    log_warn "  Settings > Safety & Alerts."
+    log_warn "  To get the stock detector back, uninstall HelixScreen:"
+    log_warn "    curl -sSL https://releases.helixscreen.org/install.sh | sh -s -- --uninstall"
+    log_warn "  Uninstalling re-enables both the stock UI service and the stock camera."
+}
+
 # Refuse to run --uninstall from a script sitting inside the dir we're about to
-# delete. The release tarball ships scripts/install.sh into $INSTALL_DIR for
+# delete. The release tarball ships install.sh into $INSTALL_DIR for
 # offline --local updates; users sometimes invoke that copy with --uninstall,
 # which "works" on Linux only because the kernel keeps the inode open after rm.
 # Force the user to copy out. No-op (returns 0) when INSTALL_DIR isn't known
@@ -580,12 +767,6 @@ main() {
         _refuse_if_firmware_managed
     fi
 
-    printf '\n'
-    printf '%b\n' "${BOLD}========================================${NC}"
-    printf '%b\n' "${BOLD}       HelixScreen Installer${NC}"
-    printf '%b\n' "${BOLD}========================================${NC}"
-    printf '\n'
-
     # Detect platform
     platform=$(detect_platform)
     # For platforms that share a binary with pi/pi32 (e.g. m1), the download
@@ -607,6 +788,7 @@ main() {
         log_error "HelixScreen supports:"
         log_error "  - Raspberry Pi (aarch64/armv7l)"
         log_error "  - FlashForge Adventurer 5M (armv7l)"
+        log_error "  - FlashForge AD5X / Creator 5 / Creator 5 Pro (mips, Z-Mod)"
         log_error "  - Creality K1 series with Simple AF"
         log_error "  - Creality K2 series (K2/K2 Pro/K2 Plus)"
         log_error "  - x86_64 Debian/Ubuntu (x86_64)"
@@ -654,13 +836,23 @@ main() {
         exit 99
     fi
 
-    # Pre-flight checks
+    # Pre-flight checks. Everything from here to the confirm point only reads:
+    # --dry-run exits there, and the plan screen promises nothing has changed.
+    # A static test holds every call here to a read-only allowlist.
     log_info "Running pre-flight checks..."
+    detect_missing_unzip
     check_requirements
-    install_runtime_deps "$platform"
+    detect_missing_runtime_deps "$platform"
     check_disk_space "$platform"
     detect_init_system
     check_klipper_ecosystem "$platform"
+
+    # An update or reinstall must follow the channel the installed app is on:
+    # a beta user updating through KIAUH or a re-run of the installer would
+    # otherwise be handed the stable build. No-op on a fresh install.
+    if [ "$update_mode" = true ] || [ -d "$INSTALL_DIR" ]; then
+        resolve_update_channel
+    fi
 
     # Get version (skip if using local archive)
     if [ -n "$local_tarball" ]; then
@@ -672,7 +864,7 @@ main() {
         # Extract version from filename if possible. Only the tar.gz layout
         # carries a version in the name (helixscreen-<plat>-v1.2.3.tar.gz).
         # The unversioned helixscreen-<plat>.zip gets "local" as a placeholder.
-        version=$(echo "$local_tarball" | sed -n 's/.*helixscreen-[^-]*-\(v[0-9.]*\)\.tar\.gz/\1/p')
+        version=$(parse_tarball_version "$local_tarball")
         if [ -z "$version" ]; then
             version="local"
         fi
@@ -680,41 +872,120 @@ main() {
     else
         if [ -z "$version" ]; then
             version=$(get_latest_version "$download_platform")
+        else
+            # After resolve_update_channel: a channel read from the installed
+            # config outranks the one a prerelease --version implies. A --local
+            # archive never moves the channel; it picks a build, not a feed.
+            match_channel_to_version "$version"
         fi
     fi
     log_info "Target version: ${BOLD}${version}${NC}"
 
-    # Configure platform-specific settings before stopping UIs
-    configure_platform
+    # The release must exist before the plan offers it; HEAD requests only.
+    probe_release "$version" "$download_platform"
+    # After detect_init_system: systemd units are only looked for on systemd.
+    detect_competing_uis
+    detect_moonraker_integration "$platform"
+    detect_kiauh
 
-    # Stop competing UIs
-    stop_competing_uis
+    confirm_point "$platform" "$version"
+    apply_install
+}
 
-    # Clean old installation if requested
-    if [ "$clean_mode" = true ]; then
-        clean_old_installation "$platform"
+# The Installing libraries step: done with what apt added, hidden when nothing
+# was missing, failed when apt could not install a package. The install goes
+# on either way; verify_binary_deps stops it if a library it needs is missing.
+install_libraries_step() {
+    local libs ok=true
+    libs=$(plan_missing_libs)
+    step "Installing libraries" "Installed libraries"
+    install_missing_unzip || ok=false
+    install_runtime_deps "$platform" || ok=false
+    if [ "$ok" != true ]; then
+        step_fail "continuing; see above"
+    elif [ -n "$libs" ]; then
+        step_done "$libs"
+    else
+        step_skip
+    fi
+}
+
+# Everything after the confirm point, as the steps plan_count_steps counted:
+# a step with nothing to do is skipped only under the same conditions that
+# left it out of the count, or the [n/N] numbering is wrong.
+apply_install() {
+    local uis seed_pid detail
+
+    # The machine changes from here on.
+    if [ "$platform" = "ad5m" ]; then
+        cleanup_ad5m_gcodes_root
+    fi
+    record_payload_root_if_payload
+    # A write probe sudo would have had to prompt for runs now that it can.
+    if [ -n "${DISK_CHECK_DEFERRED:-}" ]; then
+        check_disk_space "$platform"
     fi
 
-    # Download/stage the release archive BEFORE stopping the service.
-    # Stopping helixscreen first can disrupt the network on some platforms
-    # (e.g. Snapmaker U1 where platform_post_stop restarts the stock GUI which
-    # owns wpa_supplicant and drops WiFi/SSH mid-update). Staging first also
-    # means a failed download leaves the running service untouched.
+    install_libraries_step
+
+    # Download/stage the release archive BEFORE any step that modifies the
+    # running printer (stock-UI disable, competing-UI shutdown, old-install
+    # cleanup, service stop): a failed download must leave the machine exactly
+    # as it was - stock UI enabled, old install intact, service running. The
+    # download also needs the network, and stopping UIs can take it away
+    # (e.g. Snapmaker U1's stock GUI owns wpa_supplicant, so restarting it
+    # drops WiFi/SSH mid-update).
     if [ -n "$local_tarball" ]; then
+        step "Unpacking local archive" "Unpacked local archive"
         use_local_tarball "$local_tarball"
     else
+        step "Downloading" "Downloaded"
         download_release "$version" "$download_platform"
+    fi
+    detail=$(file_size_text "$(_archive_tmp_path)")
+    if [ -n "${ARCHIVE_SHA256_VERIFIED:-}" ]; then
+        detail="${detail:+$detail$(_plan_sep)}SHA256 verified"
+    fi
+    step_done "$detail"
+
+    # Configure platform-specific settings before stopping UIs. The title
+    # names what detection found; without a find the step stays hidden
+    # unless the platform half fails.
+    uis="${COMPETING_UIS_FOUND:-}"
+    step "Stopping ${uis:-the stock screen}" "Stopped ${uis:-the stock screen}"
+    configure_platform
+    INSTALL_STOPPED="${INSTALL_STOPPED:-}${uis:+ $uis}"
+    stop_competing_uis
+    if [ -n "$uis" ]; then step_done; else step_skip; fi
+
+    step "Installing files" "Installed files"
+    # Clean old installation if requested
+    if [ "$clean_mode" = true ]; then
+        INSTALL_REMOVED_OLD=1
+        clean_old_installation "$platform"
     fi
 
     if [ "$update_mode" = true ]; then
         if [ ! -d "$INSTALL_DIR" ]; then
             log_warn "No existing installation found. Performing fresh install."
+        elif ! _is_self_update; then
+            INSTALL_STOPPED="HelixScreen${INSTALL_STOPPED:+ $INSTALL_STOPPED}"
         fi
         stop_service "$platform"
     fi
 
+    # Clear the payload's directory of any state kept there, before anything
+    # extracts on top of it.
+    migrate_previous_state_dir
+    # Rename a state root whose name had to change (AD5M dot-prefix), before
+    # the new payload's hook looks for it at the new name.
+    migrate_state_root
+
     extract_release "$platform"
     fix_install_ownership
+    step_done "$(display_path "$INSTALL_DIR")"
+
+    step "Setting up service" "Set up service"
     install_service "$platform"
     install_platform_hooks
 
@@ -732,6 +1003,12 @@ main() {
     # is root, and under NoNewPrivileges where sudo is unavailable.
     install_permission_rules "$platform"
 
+    # QIDI: take over the .3mf plate-thumbnail duty the stopped stock screen
+    # carried (prestonbrown/helixscreen#1713). No-op off QIDI-class hosts and
+    # on firmware whose Moonraker extracts thumbnails itself. Post-extract
+    # because the helper and its unit templates ship in the payload's config/.
+    install_qidi_3mf_thumbs
+
     # Install KIAUH extension if KIAUH is detected
     install_kiauh_extension "$skip_kiauh_registration" || true
 
@@ -739,6 +1016,16 @@ main() {
     # SSH (#535). Runs on both fresh install and self-update.
     if [ "$platform" = "k1" ]; then
         ensure_k1_ssh
+        # Re-record the stock UI disable against the payload that just landed:
+        # extract_release replaces INSTALL_DIR between the stop step and the
+        # config symlink setup, and a self-update run skips the stop step
+        # entirely. Idempotent (record_disabled_service dedups).
+        record_k1_stock_ui_disable
+        # Install and start the stock Creality backend trio
+        # (prestonbrown/helixscreen#1468). Runs post-extract (the init script
+        # ships in the release package) and on self-update, which skips
+        # stop_competing_uis and would otherwise never see it installed.
+        install_k1_creality_backend
     fi
 
     # Verify all shared library dependencies are satisfied before starting
@@ -747,18 +1034,35 @@ main() {
     # Create platform cache directory
     case "$platform" in
         ad5m)
-            $SUDO mkdir -p /data/helixscreen/cache
+            $SUDO mkdir -p /data/.helixscreen/cache
             ;;
         k1)
             $SUDO mkdir -p /usr/data/helixscreen/cache
             ;;
     esac
+    step_done
 
+    step "Connecting to Moonraker" "Connected to Moonraker"
     # Symlink config into printer_data (Pi/Klipper only - enables web UI editing)
     setup_config_symlink
 
+    # State the env file's owner/mode rather than inheriting them from the
+    # extract/restore umask; the launcher refuses to evaluate anything else.
+    # After setup_config_symlink so a migrated printer_data copy is pinned too.
+    pin_env_file
+
     # Configure Moonraker update_manager (Pi only - enables web UI updates)
     configure_moonraker_updates "$platform"
+    step_done "$(moonraker_step_detail)"
+
+    # Everything left prepares the first start, and its step resolves when
+    # the UI starts. A payload install's UI starts from the mod at boot, so
+    # its step only finishes the setup.
+    if plan_starts_ui; then
+        step "Starting HelixScreen" "Started HelixScreen"
+    else
+        step "Finishing setup" "Finished setup"
+    fi
 
     # K2: replace the stock proprietary WebRTC camera (which HelixScreen and
     # fluidd can't consume) with a static ustreamer MJPEG server and point both
@@ -779,7 +1083,6 @@ main() {
     # model and apply its bundled settings seed + Klipper include, if any.
     # detect_printer_model() is conservative and returns empty for unknown
     # hardware, so this is a no-op on every platform without a registered id.
-    local seed_pid
     seed_pid=$(detect_printer_model)
     if [ -n "$seed_pid" ]; then
         log_info "Recognized printer model: ${seed_pid} -- applying install-time defaults"
@@ -788,6 +1091,7 @@ main() {
     else
         seed_from_moonraker_detection || true
     fi
+    seed_update_channel
 
     # Configure ALSA "default" when the board has no card 0 (e.g. Pi + HDMI-audio
     # screens like the BTT HDMI5, whose only outputs are vc4hdmi0/vc4hdmi1 at
@@ -795,26 +1099,45 @@ main() {
     # already exists.
     configure_alsa_default || true
 
+    # K2: install the web-server carve-out's init script
+    # (prestonbrown/helixscreen#1617) BEFORE the service start, so the
+    # hook's first platform_stop_competing_uis finds the script and the
+    # procd instance is registered from the first launch. No-op off K2.
+    # The || guard keeps a carve-out failure non-fatal under set -eu: a
+    # supplementary backend must not abort the install — the function has
+    # already logged the fault and the manual fix.
+    install_k2_webserver_backend "$platform" ||
+        log_warn "Web-server carve-out incomplete; the UI install itself is fine"
+
     # Start service
     start_service "$platform"
+
+    # K2: bring the carve-out up for this session. The service start just
+    # ran the hook, whose app stop (killall -9) took whatever web-server
+    # was live down; the hook's own restore, this start, and procd's
+    # respawn bring it back. Belt-and-braces for paths that bypass the
+    # hook. No-op off K2; non-fatal on the same || contract.
+    start_k2_webserver_backend "$platform" ||
+        log_warn "Web-server carve-out not started; the UI install itself is fine"
+    step_done
+    # Past here only cleanup runs: the new install is in place,
+    # so a failure report has no rollback state to describe.
+    INSTALL_COMPLETE=1
+
     cleanup_old_install
+    cleanup_migrated_install
+    cleanup_superseded_payload
     cleanup_stale_cache_dirs
     retire_legacy_config_backups
 
-    # Cleanup on success
+    finalize_install_log
     cleanup_on_success
-
-    printf '\n'
-    printf '%b\n' "${GREEN}${BOLD}========================================${NC}"
-    printf '%b\n' "${GREEN}${BOLD}    Installation Complete!${NC}"
-    printf '%b\n' "${GREEN}${BOLD}========================================${NC}"
-    printf '\n'
-    echo "HelixScreen ${version} installed to ${INSTALL_DIR}"
-    echo ""
-    print_post_install_commands "${HOST_SERVICE_MECHANISM:-}"
-    echo ""
+    print_summary "$version"
 
     if [ "$platform" = "ad5m" ] || [ "$platform" = "k1" ] || [ "$platform" = "k2" ]; then
-        echo "Note: You may need to reboot for the display to update."
+        log_note "You may need to reboot for the display to update."
     fi
+
+    # Last thing on screen: the safety feature this install took away.
+    print_k2_stock_ai_notice "$platform"
 }

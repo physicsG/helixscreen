@@ -15,3 +15,7 @@ bool touch_input_init(void);
 // never the reverse). No extern "C" guard, like its main/ siblings — include
 // from C only.
 bool touch_input_available(void);
+
+/// Press at (x, y) for a few indev reads, then release: a tap as LVGL sees it.
+/// Safe from any task.
+void touch_input_inject_tap(int x, int y);

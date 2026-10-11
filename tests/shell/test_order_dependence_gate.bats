@@ -17,6 +17,8 @@
 # findings" unless the gate checks. That silent-zero is the failure this gate
 # most needs to not have.
 
+load helpers
+
 setup() {
     cd "$BATS_TEST_DIRNAME/../.." || return 1
     REPO_ROOT="$PWD"
@@ -74,7 +76,7 @@ gate() { ( cd "$WORK" && python3 scripts/check_test_order_dependence.py full.xml
     full_report true true
     stub_binary false true
     run gate --list
-    [[ "$output" == *"order-dependent"* ]]
+    contains "order-dependent" "$output"
     [[ "$output" == *"case A"* ]]
 }
 
@@ -122,7 +124,7 @@ EOF
     printf '#!/usr/bin/env bash\nexit 0\n' > "$WORK/build/bin/helix-tests"
     chmod +x "$WORK/build/bin/helix-tests"
     run gate --list
-    [[ "$output" == *"not-run"* ]]
+    contains "not-run" "$output"
     [[ "$output" != *"order-dependent"* ]]
 }
 
@@ -158,7 +160,7 @@ EOF
 EOF
     stub_binary true true
     run gate --shard-count 2 --shard-index 0
-    [[ "$output" == *"running 1 file"* ]]
+    contains "running 1 file" "$output"
     run gate --shard-count 2 --shard-index 1
     [[ "$output" == *"running 1 file"* ]]
 }
@@ -180,7 +182,7 @@ EOF
     run gate --timeout 2 --list
     elapsed=$(( $(date +%s) - start ))
     [ "$elapsed" -lt 30 ]
-    [[ "$output" == *"not-run"* ]]
+    contains "not-run" "$output"
     [[ "$output" == *"hung past"* ]]
 }
 
@@ -189,7 +191,10 @@ EOF
 # pins was not cosmetic: the 2026-08-31 nightly fired a finding whose isolated
 # run nobody could autopsy, because DEVNULL ate the child's output and the
 # tempdir ate its report.
-ev() { echo "$WORK/order-dependence-evidence/tests_unit_test_x.cpp"; }
+# The gate prints this path resolved absolute. $WORK can sit under a symlinked
+# parent (/var -> /private/var on macOS), so resolve here too or the expected
+# string is not the one the gate prints.
+ev() { echo "$(cd "$WORK" && pwd -P)/order-dependence-evidence/tests_unit_test_x.cpp"; }
 
 @test "a finding retains the isolated run's report, captured output, and spec" {
     full_report true true
@@ -216,7 +221,7 @@ XML
 STUB
     chmod +x "$WORK/build/bin/helix-tests"
     run gate --list
-    [[ "$output" == *"order-dependent"* ]]
+    contains "order-dependent" "$output"
     [ -f "$(ev)/r.xml" ]
     grep -q 'success="false"' "$(ev)/r.xml"
     grep -q "last words on stderr" "$(ev)/output.txt"
@@ -231,7 +236,7 @@ STUB
     full_report false true
     stub_binary true true
     run gate --list
-    [[ "$output" == *"pollution"* ]]
+    contains "pollution" "$output"
     [ -f "$(ev)/r.xml" ]
     grep -q 'success="true"' "$(ev)/r.xml"
 }
@@ -240,7 +245,7 @@ STUB
     full_report true true
     stub_binary true true
     run gate --list
-    [[ "$output" == *"findings: 0"* ]]
+    contains "findings: 0" "$output"
     [ ! -e "$WORK/order-dependence-evidence" ]
 }
 
@@ -250,7 +255,7 @@ STUB
     full_report false false
     stub_binary false false
     run gate --list
-    [[ "$output" == *"findings: 0"* ]]
+    contains "findings: 0" "$output"
     [ ! -e "$WORK/order-dependence-evidence" ]
 }
 
@@ -259,10 +264,40 @@ STUB
     printf '#!/usr/bin/env bash\nexit 0\n' > "$WORK/build/bin/helix-tests"
     chmod +x "$WORK/build/bin/helix-tests"
     run gate --list
-    [[ "$output" == *"not-run"* ]]
-    [[ "$output" == *"evidence retained at $(ev)"* ]]
+    contains "not-run" "$output"
+    contains "evidence retained at $(ev)" "$output"
     # No report was written; the escaped spec is the remaining record of what
     # the child was asked to run.
     [ -f "$(ev)/names.txt" ]
     grep -q "case A" "$(ev)/names.txt"
+}
+
+@test "a name Catch2's --input-file reader would drop or mangle is escaped" {
+    # Catch2 strips any spec line starting with '#' as a comment, and re-quotes
+    # a line that does not already start with '"'. An issue-numbered case name
+    # is therefore removed from the spec entirely, and a name carrying a quote
+    # is re-quoted into a spec that matches nothing.
+    cat > "$WORK/full.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<Catch2TestRun name="t">
+  <TestCase name="#1127 seeding state costs no extra bytes" filename="tests/unit/test_x.cpp" line="1">
+    <OverallResult success="true" skips="0"/>
+  </TestCase>
+  <TestCase name="a root with permissions &quot;r&quot; is not writable" filename="tests/unit/test_x.cpp" line="9">
+    <OverallResult success="true" skips="0"/>
+  </TestCase>
+</Catch2TestRun>
+EOF
+    stub_binary true true
+    rm -f /tmp/last-spec.txt
+    run gate --list
+    [ -f /tmp/last-spec.txt ]
+    # A line the reader treats as a comment never reaches the spec parser, and a
+    # spec file with every line commented out is no filter at all.
+    if grep -q '^#' /tmp/last-spec.txt; then
+        echo "spec line still begins with # - Catch2 drops it" >&2
+        return 1
+    fi
+    grep -q '\\#1127 seeding state' /tmp/last-spec.txt
+    grep -q 'permissions \\"r\\" is not writable' /tmp/last-spec.txt
 }

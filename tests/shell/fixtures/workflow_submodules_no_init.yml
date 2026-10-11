@@ -1,0 +1,11 @@
+name: no-init fixture
+on: [push]
+jobs:
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Apply submodule patches
+        run: make apply-patches HELIX_PATCHES_FROM_CLEAN=1
+      - name: Run shell tests
+        run: bats tests/shell/

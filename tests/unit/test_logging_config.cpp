@@ -1,9 +1,11 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "../test_helpers/log_capture.h"
+#include "../test_helpers/scoped_env.h"
+#include "hv/hlog.h"
 #include "logging_init.h"
 
-#include <cstdlib>
 #include <string>
 
 #include "../catch_amalgamated.hpp"
@@ -125,6 +127,63 @@ TEST_CASE("to_hv_level: spdlog to libhv level mapping", "[logging][config]") {
     }
 }
 
+TEST_CASE("libhv_level_for: libhv never logs below WARN", "[logging][config]") {
+    // libhv writes its own fsync-per-line file, so the app level must not drag it down.
+    REQUIRE(libhv_level_for(spdlog::level::trace) == 3);
+    REQUIRE(libhv_level_for(spdlog::level::debug) == 3);
+    REQUIRE(libhv_level_for(spdlog::level::info) == 3);
+    REQUIRE(libhv_level_for(spdlog::level::warn) == 3);
+    REQUIRE(libhv_level_for(spdlog::level::err) == 4);
+    REQUIRE(libhv_level_for(spdlog::level::off) == 6);
+}
+
+namespace {
+int g_hv_lines = 0;
+void count_hv_line(int, const char*, int) {
+    ++g_hv_lines;
+}
+} // namespace
+
+TEST_CASE("set_runtime_level keeps libhv at WARN", "[logging][config]") {
+    g_hv_lines = 0;
+    hlog_set_handler(count_hv_line);
+    set_runtime_level(spdlog::level::debug);
+
+    hlogi("info from libhv");
+    CHECK(g_hv_lines == 0);
+    hlogw("warn from libhv");
+    CHECK(g_hv_lines == 1);
+
+    route_libhv_to_spdlog(); // the handler every process runs with
+    set_runtime_level(spdlog::level::info);
+}
+
+TEST_CASE("libhv log lines reach spdlog tagged [libhv]", "[logging][config][libhv]") {
+    route_libhv_to_spdlog();
+    hlog_set_level(LOG_LEVEL_WARN);
+
+    SECTION("text arrives without libhv's prefix or trailing newline") {
+        TextLogCapture capture;
+        hlogw("libhv probe %d", 42);
+        const std::string text = capture.get_captured();
+        CHECK(text.rfind("[libhv] libhv probe 42 [", 0) == 0);
+        CHECK(text.find("\n") == text.size() - 1);
+    }
+
+    SECTION("libhv levels map onto spdlog levels") {
+        ExclusiveLogCapture capture;
+        hlogw("libhv warn probe");
+        hloge("libhv error probe");
+        hlogf("libhv fatal probe");
+        CHECK(capture.levels_for("libhv warn probe") ==
+              std::vector<spdlog::level::level_enum>{spdlog::level::warn});
+        CHECK(capture.levels_for("libhv error probe") ==
+              std::vector<spdlog::level::level_enum>{spdlog::level::err});
+        CHECK(capture.levels_for("libhv fatal probe") ==
+              std::vector<spdlog::level::level_enum>{spdlog::level::critical});
+    }
+}
+
 // ============================================================================
 // resolve_log_level() tests
 // ============================================================================
@@ -146,9 +205,9 @@ TEST_CASE("resolve_log_level: precedence rules", "[logging][config]") {
         REQUIRE(level == spdlog::level::debug);
     }
 
-    SECTION("production defaults to warn when no CLI or config") {
+    SECTION("production defaults to info when no CLI or config") {
         auto level = resolve_log_level(0, "", false);
-        REQUIRE(level == spdlog::level::warn);
+        REQUIRE(level == spdlog::level::info);
     }
 
     SECTION("CLI verbosity beats test_mode default") {
@@ -413,37 +472,6 @@ TEST_CASE("ring_capacity_for_ram scales with the machine", "[logging][config][ri
 // ============================================================================
 
 namespace {
-
-/// RAII setenv/unsetenv so a failing REQUIRE cannot leak a variable into the
-/// next test in the same process.
-class ScopedEnv {
-  public:
-    ScopedEnv(const char* name, const char* value) : name_(name) {
-        if (const char* prev = std::getenv(name)) {
-            had_previous_ = true;
-            previous_ = prev;
-        }
-        if (value != nullptr) {
-            ::setenv(name, value, 1);
-        } else {
-            ::unsetenv(name);
-        }
-    }
-    ~ScopedEnv() {
-        if (had_previous_) {
-            ::setenv(name_, previous_.c_str(), 1);
-        } else {
-            ::unsetenv(name_);
-        }
-    }
-    ScopedEnv(const ScopedEnv&) = delete;
-    ScopedEnv& operator=(const ScopedEnv&) = delete;
-
-  private:
-    const char* name_;
-    bool had_previous_ = false;
-    std::string previous_;
-};
 
 constexpr const char* ENV_DEST = "HELIX_LOG_DEST";
 constexpr const char* ENV_LEVEL = "HELIX_LOG_LEVEL";

@@ -107,7 +107,7 @@ setup() {
 @test "validate_install_dir: refusal names the offending value and the rule" {
     run validate_install_dir "/home/pi"
     [ "$status" -ne 0 ]
-    [[ "$output" == *"Refusing to use INSTALL_DIR='/home/pi'"* ]]
+    contains "Refusing to use INSTALL_DIR='/home/pi'" "$output"
     [[ "$output" == *"must contain 'helixscreen'"* ]]
 }
 
@@ -189,7 +189,7 @@ load_uninstall_module() {
     # `curl … | sh -s -- --clean` shape.
     run confirm_clean_install
     [ "$status" -eq 1 ]
-    [[ "$output" == *"Refusing to run --clean without confirmation"* ]]
+    contains "Refusing to run --clean without confirmation" "$output"
     [[ "$output" == *"--yes"* ]]
 }
 
@@ -208,4 +208,139 @@ load_uninstall_module() {
     grep -q 'ASSUME_YES=true' "$WORKTREE_ROOT/scripts/lib/installer/main.sh"
     grep -q -- '--yes|-y|--force' "$WORKTREE_ROOT/scripts/lib/installer/main.sh"
     grep -q 'ASSUME_YES:-false' "$WORKTREE_ROOT/scripts/lib/installer/uninstall.sh"
+}
+
+# ===========================================================================
+# uninstall's own-root sweep entry (helix_install_dirs_for_run)
+#
+# uninstall rm -rf's every entry of the list; INSTALL_DIR joins it only when
+# every guard in _uninstall_own_root_ok holds.
+# ===========================================================================
+
+_load_uninstall() {
+    # shellcheck disable=SC1090
+    . "$WORKTREE_ROOT/scripts/lib/installer/uninstall.sh"
+    export HELIX_INSTALL_DIRS="/opt/helixscreen"
+    unset HOST_MOD_ROOT HOST_MOD_CHROOT
+}
+
+# A directory holding our binary, the shape every accepted root has.
+_seed_root() {
+    mkdir -p "$1/bin"
+    : > "$1/bin/helix-screen"
+    chmod +x "$1/bin/helix-screen"
+}
+
+@test "uninstall sweep: a real home install root joins the list" {
+    _load_uninstall
+    local root="$BATS_TEST_TMPDIR/home/pi/helixscreen"
+    _seed_root "$root"
+    INSTALL_DIR="$root"
+    run helix_install_dirs_for_run
+    [ "$output" = "/opt/helixscreen $root" ]
+}
+
+@test "uninstall sweep: INSTALL_DIR=\$HOME is left alone" {
+    _load_uninstall
+    local home="$BATS_TEST_TMPDIR/home/helixscreen"
+    _seed_root "$home"
+    HOME="$home" INSTALL_DIR="$home"
+    run helix_install_dirs_for_run
+    [ "$output" = "/opt/helixscreen" ]
+}
+
+@test "uninstall sweep: INSTALL_DIR=\$KLIPPER_HOME is left alone" {
+    _load_uninstall
+    local khome="$BATS_TEST_TMPDIR/srv/helixscreen"
+    _seed_root "$khome"
+    KLIPPER_HOME="$khome" INSTALL_DIR="$khome"
+    run helix_install_dirs_for_run
+    [ "$output" = "/opt/helixscreen" ]
+}
+
+@test "uninstall sweep: INSTALL_DIR=/ is left alone" {
+    _load_uninstall
+    INSTALL_DIR="/"
+    run helix_install_dirs_for_run
+    [ "$output" = "/opt/helixscreen" ]
+}
+
+@test "uninstall sweep: a symlinked install root is left alone" {
+    _load_uninstall
+    local target="$BATS_TEST_TMPDIR/data/helixscreen"
+    _seed_root "$target"
+    mkdir -p "$BATS_TEST_TMPDIR/home/pi"
+    ln -s "$target" "$BATS_TEST_TMPDIR/home/pi/helixscreen"
+    INSTALL_DIR="$BATS_TEST_TMPDIR/home/pi/helixscreen"
+    run helix_install_dirs_for_run
+    [ "$output" = "/opt/helixscreen" ]
+    [ -x "$target/bin/helix-screen" ]
+}
+
+@test "uninstall sweep: a root reached through a symlinked parent is left alone" {
+    _load_uninstall
+    local target="$BATS_TEST_TMPDIR/data/pi"
+    _seed_root "$target/helixscreen"
+    mkdir -p "$BATS_TEST_TMPDIR/home"
+    ln -s "$target" "$BATS_TEST_TMPDIR/home/pi"
+    INSTALL_DIR="$BATS_TEST_TMPDIR/home/pi/helixscreen"
+    run helix_install_dirs_for_run
+    [ "$output" = "/opt/helixscreen" ]
+}
+
+@test "uninstall sweep: trailing slashes do not change the answer" {
+    _load_uninstall
+    local root="$BATS_TEST_TMPDIR/home/pi/helixscreen"
+    _seed_root "$root"
+    INSTALL_DIR="$root//"
+    run helix_install_dirs_for_run
+    [ "$output" = "/opt/helixscreen $root" ]
+}
+
+@test "uninstall sweep: a root whose path holds a space is left alone" {
+    # The sweeps iterate the list unquoted: "/mnt/usb drive/helixscreen" would
+    # split, and rm -rf would reach "/mnt/usb".
+    _load_uninstall
+    local root="$BATS_TEST_TMPDIR/mnt/usb drive/helixscreen"
+    _seed_root "$root"
+    INSTALL_DIR="$root"
+    run helix_install_dirs_for_run
+    [ "$output" = "/opt/helixscreen" ]
+}
+
+@test "uninstall sweep: a root whose path holds a glob character is left alone" {
+    _load_uninstall
+    local root="$BATS_TEST_TMPDIR/mnt/usb*/helixscreen"
+    _seed_root "$root"
+    INSTALL_DIR="$root"
+    run helix_install_dirs_for_run
+    [ "$output" = "/opt/helixscreen" ]
+}
+
+@test "uninstall sweep: a root the fixed list already reaches through a symlink is not repeated" {
+    _load_uninstall
+    local root="$BATS_TEST_TMPDIR/home/pi/helixscreen"
+    _seed_root "$root"
+    mkdir -p "$BATS_TEST_TMPDIR/opt"
+    ln -s "$root" "$BATS_TEST_TMPDIR/opt/helixscreen"
+    HELIX_INSTALL_DIRS="$BATS_TEST_TMPDIR/opt/helixscreen"
+    INSTALL_DIR="$root"
+    run helix_install_dirs_for_run
+    [ "$output" = "$BATS_TEST_TMPDIR/opt/helixscreen" ]
+}
+
+@test "uninstall sweep: a root without our binary is left alone" {
+    _load_uninstall
+    INSTALL_DIR="$BATS_TEST_TMPDIR/home/pi/helixscreen"
+    mkdir -p "$INSTALL_DIR/bin"
+    run helix_install_dirs_for_run
+    [ "$output" = "/opt/helixscreen" ]
+}
+
+@test "uninstall sweep: a root not named exactly helixscreen is left alone" {
+    _load_uninstall
+    INSTALL_DIR="$BATS_TEST_TMPDIR/home/pi/helixscreen-old"
+    _seed_root "$INSTALL_DIR"
+    run helix_install_dirs_for_run
+    [ "$output" = "/opt/helixscreen" ]
 }

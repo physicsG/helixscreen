@@ -4,6 +4,7 @@
 #pragma once
 
 #include "async_lifetime_guard.h"
+#include "gcode_unknown_command.h"
 
 #include <optional>
 #include <set>
@@ -19,16 +20,6 @@ struct GcodeNarrationRouterTestAccess;
 
 namespace helix {
 class IMoonrakerClient;
-
-/// Pure: extract the command name from Klipper's `Unknown command:"X"` response
-/// (prefix already stripped), nullopt for anything else.
-///
-/// This one shape is unambiguous and, unlike a `!!` error, is how Klipper reports
-/// a macro that aborted part-way through its own body — Moonraker still answers
-/// `ok` for the script, so nothing else in the stack can tell the difference
-/// between "the macro ran" and "the macro died on line 4". Deliberately narrow:
-/// it is not a general terminating-response classifier.
-[[nodiscard]] std::optional<std::string> parse_unknown_command(const std::string& body);
 
 /// Consumes narration lines from notify_gcode_response and routes them to the
 /// active AmsBackend's step model, updating the AmsState toolchange_step

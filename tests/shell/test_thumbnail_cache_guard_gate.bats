@@ -52,7 +52,7 @@ void Panel::load() {
                                 nullptr);
 }'
     [ "$status" -eq 1 ]
-    [[ "$output" == *':3:'* ]]
+    contains ':3:' "$output"
     [[ "$output" == *"unguarded ThumbnailCache::fetch()"* ]]
 }
 
@@ -68,7 +68,7 @@ void Panel::load() {
         on_err);
 }'
     [ "$status" -eq 1 ]
-    [[ "$output" == *':3:'* ]]
+    contains ':3:' "$output"
     [[ "$output" == *"unguarded ThumbnailCache::fetch()"* ]]
 }
 
@@ -81,8 +81,8 @@ void Panel::b() {
     auto y = get_thumbnail_cache().get_if_cached(relative_path, source_modified);
 }'
     [ "$status" -eq 1 ]
-    [[ "$output" == *':3:'* ]]
-    [[ "$output" == *':6:'* ]]
+    contains ':3:' "$output"
+    contains ':6:' "$output"
     [[ "$output" == *"2 site(s)"* ]]
 }
 
@@ -95,7 +95,7 @@ void Overlay::load() {
     std::string cached = cache.get_if_cached(thumb_rel_path);
 }'
     [ "$status" -eq 1 ]
-    [[ "$output" == *':4:'* ]]
+    contains ':4:' "$output"
     [[ "$output" == *"unguarded ThumbnailCache::get_if_cached()"* ]]
 }
 
@@ -126,8 +126,8 @@ void Panel::load() {
     get_thumbnail_cache().get_if_cached(relative_path, mtime);
 }'
     [ "$status" -eq 1 ]
-    [[ "$output" == *"diagnostic.cpp:3:"* ]]
-    [[ "$output" == *"ThumbnailLoadContext"* ]]
+    contains "diagnostic.cpp:3:" "$output"
+    contains "ThumbnailLoadContext" "$output"
     [[ "$output" == *"THUMB_LEGACY_OK"* ]]
 }
 
@@ -261,7 +261,7 @@ void Panel::load() {
 
 @test "the gate is wired into quality-checks.sh" {
     # A gate nothing runs is not a gate.
-    run grep -c 'check_thumbnail_cache_guard.py' scripts/quality-checks.sh
+    run grep -c 'check_thumbnail_cache_guard.py' scripts/qc/decl_ui.sh
     [ "$status" -eq 0 ]
     [ "$output" -ge 1 ]
 }
@@ -277,6 +277,9 @@ void Panel::load() {
     sed 's@^SINGLETON = "get_thumbnail_cache"@SINGLETON = "never_matches_anything"@' \
         "$GATE" > "$broken"
     refute_grep 'SINGLETON = "get_thumbnail_cache"' "$broken"
+    # The gate imports staged_content as a sibling module; a copy run outside
+    # scripts/ needs its own copy beside it.
+    cp "$(dirname "$GATE")/staged_content.py" "${FIXTURE_DIR}/"
 
     printf '%s\n' '
 void Panel::load() {
@@ -290,4 +293,66 @@ void Panel::load() {
     # ...broken gate does not. That difference is what the suite is pinning.
     run python3 "$broken" "$FIXTURE_DIR/mutation.cpp"
     [ "$status" -eq 0 ]
+}
+
+# ------------------------------------------------------- --staged-only content
+#
+# --staged-only picks its file SET from `git diff --cached`, but must read
+# each file's STAGED content (the index blob), not the working tree. Stage a
+# violation and then revert the working file to something clean, and a gate
+# that reads the working tree reports nothing while the bad blob commits.
+
+GATE_ABS="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)/scripts/check_thumbnail_cache_guard.py"
+
+setup_tmp_repo() {
+    TMP_REPO="$(mktemp -d "${BATS_TEST_TMPDIR:-${BATS_TMPDIR:-/tmp}}/thumb-guard-XXXXXX")"
+    cd "$TMP_REPO" || return 1
+    git init -q
+    git config user.email "test@example.com"
+    git config user.name "Test"
+    mkdir -p src/ui
+    printf 'void f() {\n    int x = 1;\n}\n' > src/ui/foo.cpp
+    git add -A && git commit -qm base
+}
+
+@test "--staged-only catches a violation in the STAGED blob, not a reverted working file" {
+    setup_tmp_repo
+    printf 'void f() {\n    get_thumbnail_cache().get_if_cached("relative/path.png", mtime);\n}\n' \
+        > src/ui/foo.cpp
+    git add src/ui/foo.cpp
+    printf 'void f() {\n    int x = 1;\n}\n' > src/ui/foo.cpp
+    run python3 "$GATE_ABS" --staged-only
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'unguarded ThumbnailCache::get_if_cached()'* ]]
+}
+
+@test "--staged-only stays silent on a clean staged file with a dirty violation on disk" {
+    setup_tmp_repo
+    # Genuinely different from the base commit (a second clean statement), so
+    # the file shows up as staged at all - content byte-identical to HEAD
+    # stages nothing for git to report, which would pass this test for free.
+    printf 'void f() {\n    int x = 1;\n    int y = 2;\n}\n' > src/ui/foo.cpp
+    git add src/ui/foo.cpp
+    printf 'void f() {\n    get_thumbnail_cache().get_if_cached("relative/path.png", mtime);\n}\n' \
+        > src/ui/foo.cpp
+    run python3 "$GATE_ABS" --staged-only
+    [ "$status" -eq 0 ]
+}
+
+@test "--staged-only still catches a violation staged then deleted from disk" {
+    # `rm` without staging the deletion leaves the index (and so the commit)
+    # holding the violating content, with `git status` showing MD. A gate
+    # that drops staged paths on Path.is_file() sees no file at all and
+    # reports clean, even though `git show :path` proves the commit will
+    # carry exactly the content it should have flagged.
+    setup_tmp_repo
+    printf 'void f() {\n    get_thumbnail_cache().get_if_cached("relative/path.png", mtime);\n}\n' \
+        > src/ui/foo.cpp
+    git add src/ui/foo.cpp
+    rm src/ui/foo.cpp
+    run git status --short
+    contains "MD src/ui/foo.cpp" "$output"
+    run python3 "$GATE_ABS" --staged-only
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'unguarded ThumbnailCache::get_if_cached()'* ]]
 }

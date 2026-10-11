@@ -438,8 +438,7 @@ inline ScreenBounds project_aabb_to_screen(const glm::mat4& mvp, const AABB& box
 /**
  * @brief Distance from point `p` to the segment `a`-`b`, all in screen pixels.
  *
- * Existed three times over: in the 2D picker, the CPU wireframe picker and the
- * GLES picker, each rewriting the same clamped projection. A degenerate segment
+ * Shared by the 2D picker and the GLES picker. A degenerate segment
  * (a == b) returns the distance to that point rather than dividing by zero.
  */
 inline float point_segment_distance(const glm::vec2& p, const glm::vec2& a, const glm::vec2& b) {

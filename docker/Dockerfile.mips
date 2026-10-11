@@ -1,0 +1,212 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# HelixScreen - Unified MIPS (Creality K1 series + FlashForge AD5X) Cross-Compilation Toolchain
+#
+# Build: docker build -t helixscreen/toolchain-mips -f Dockerfile.mips .
+# Usage: docker run --rm -v $(pwd):/src -w /src helixscreen/toolchain-mips make PLATFORM_TARGET=mips -j$(nproc)
+#
+# One static binary for two kernels:
+#   - K1 series: Ingenic X2000E, MIPS32r2, Linux 4.4.94, musl 1.2.5
+#   - AD5X:      MIPS32r5, Linux 5.10, runs from the Forge-X chroot
+#
+# Constraints a unified toolchain must satisfy (measured on hardware):
+#   - NaN2008 ABI: the AD5X kernel rejects legacy-NaN ELFs with ENOEXEC,
+#     and the K1 accepts both, so nan2008 is mandatory. The whole
+#     toolchain — libc included — is built -mnan=2008.
+#   - Kernel floor 4.4: glibc is impossible here — on mips o32 + nan2008
+#     its configure fragment pins arch_minimum_kernel=4.5.0 and silently
+#     resets anything lower, so every -static glibc binary aborts on the
+#     K1's 4.4.94 with "FATAL: kernel too old" (compiled check constant
+#     0x40500, verified by disassembly). musl has no kernel floor; the
+#     shipping K1 screen binary is musl on this very kernel. FP64 o32 on
+#     4.4.94 is proven by a static double-math probe.
+#
+# Derived from Dockerfile.k1-dynamic (same ct-ng build); differences are
+# the config file (musl instead of glibc) and the dropped k1-sysroot
+# overlay, which existed only to supply firmware .so files for dynamic
+# linking. This toolchain links -static.
+
+# ==============================================================================
+# Stage 1: Build crosstool-NG toolchain from source
+# ==============================================================================
+
+FROM debian:bookworm AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Configure apt to retry on transient network errors (deb.debian.org resets)
+RUN echo 'Acquire::Retries "3";' > /etc/apt/apt.conf.d/80-retries
+
+# Install crosstool-NG build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    autoconf \
+    automake \
+    libtool \
+    libtool-bin \
+    flex \
+    bison \
+    gawk \
+    texinfo \
+    help2man \
+    libncurses-dev \
+    python3 \
+    unzip \
+    rsync \
+    wget \
+    git \
+    gcc \
+    g++ \
+    make \
+    patch \
+    xz-utils \
+    bzip2 \
+    file \
+    gperf \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Clone and build crosstool-NG 1.26.0
+WORKDIR /tmp/ct-ng-src
+RUN git clone --depth 1 --branch crosstool-ng-1.26.0 \
+    https://github.com/crosstool-ng/crosstool-ng.git . && \
+    ./bootstrap && \
+    ./configure --prefix=/tmp/ct-ng-install && \
+    make -j$(nproc) && \
+    make install
+
+ENV PATH="/tmp/ct-ng-install/bin:$PATH"
+
+# crosstool-NG refuses to build as root — create a build user
+RUN useradd -m builder && \
+    mkdir -p /opt/k1-toolchain /tmp/ct-ng-build && \
+    chown -R builder:builder /opt/k1-toolchain /tmp/ct-ng-build
+
+# Build the unified MIPS toolchain using our defconfig
+USER builder
+WORKDIR /tmp/ct-ng-build
+COPY --chown=builder:builder mips-ct-ng.config .config
+RUN ct-ng olddefconfig && \
+    ct-ng build
+
+# Switch back to root for remaining stages
+USER root
+
+# Toolchain is now at /opt/k1-toolchain
+
+# ==============================================================================
+# Stage 2: Runtime image with toolchain and sysroot
+# ==============================================================================
+
+FROM debian:bookworm-slim
+
+LABEL maintainer="HelixScreen <dev@helixscreen.io>"
+LABEL description="Cross-compilation toolchain for the unified MIPS binary (K1 series + AD5X, NaN2008 musl 1.2.4, static)"
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install build dependencies
+# Note: autotools required for building libnl submodule
+# NOTE: nlohmann-json is bundled with libhv (lib/libhv/cpputil/json.hpp)
+# DO NOT install nlohmann-json3-dev - it causes ABI mismatches
+# Always use: #include "hv/json.hpp" (NOT <nlohmann/json.hpp>)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    git \
+    pkg-config \
+    ca-certificates \
+    make \
+    cmake \
+    python3 \
+    python3-yaml \
+    file \
+    wget \
+    xz-utils \
+    bzip2 \
+    autoconf \
+    automake \
+    libtool \
+    flex \
+    bison \
+    ccache \
+    && rm -rf /var/lib/apt/lists/*
+
+# Hardened download wrapper. A bare `wget -q` gives up on a DNS failure in ~24 ms
+# and on a refused connection in ~4 ms, without retrying either, which is how a
+# valid zlib URL failed the v0.99.111 cc1 release build 52 ms in. See fetch.sh.
+COPY fetch.sh /usr/local/bin/fetch
+
+# Copy the crosstool-NG built toolchain from stage 1
+COPY --from=builder /opt/k1-toolchain /opt/k1-toolchain
+
+# ==============================================================================
+# OpenSSL 1.1.1w - Static Cross-Compiled Libraries
+# ==============================================================================
+# Statically linked so the binary never depends on either board's OpenSSL.
+WORKDIR /tmp
+RUN export PATH="/opt/k1-toolchain/bin:$PATH" && \
+    fetch https://www.openssl.org/source/openssl-1.1.1w.tar.gz && \
+    tar xzf openssl-1.1.1w.tar.gz && \
+    cd openssl-1.1.1w && \
+    ./Configure linux-generic32 no-shared no-asm \
+        -march=mips32r2 -mnan=2008 -mfp64 \
+        --cross-compile-prefix=mipsel-k1-linux-musl- \
+        --prefix=/opt/k1-toolchain/mipsel-k1-linux-musl/sysroot/usr && \
+    make -j$(nproc) && \
+    make install_sw && \
+    cd .. && \
+    rm -rf openssl-1.1.1w openssl-1.1.1w.tar.gz
+
+# ==============================================================================
+# zlib 1.3.2 - Cross-Compiled Library
+# ==============================================================================
+# Required for debug bundle gzip compression (debug_bundle_collector.cpp).
+# The crosstool-NG toolchain doesn't include zlib, so we build it from source.
+WORKDIR /tmp
+RUN export PATH="/opt/k1-toolchain/bin:$PATH" && \
+    fetch https://github.com/madler/zlib/releases/download/v1.3.2/zlib-1.3.2.tar.gz && \
+    tar xzf zlib-1.3.2.tar.gz && \
+    cd zlib-1.3.2 && \
+    CHOST=mipsel-k1-linux-musl ./configure \
+        --prefix=/opt/k1-toolchain/mipsel-k1-linux-musl/sysroot/usr && \
+    make -j$(nproc) && \
+    make install && \
+    cd .. && \
+    rm -rf zlib-1.3.2 zlib-1.3.2.tar.gz
+
+# ==============================================================================
+# Cross-Compilation Environment
+# ==============================================================================
+
+ENV PATH="/opt/k1-toolchain/bin:$PATH"
+ENV CROSS_COMPILE=mipsel-k1-linux-musl-
+ENV CC=mipsel-k1-linux-musl-gcc
+ENV CXX=mipsel-k1-linux-musl-g++
+# gcc-ar/gcc-ranlib so archives carry the LTO plugin the release build links with
+ENV AR=mipsel-k1-linux-musl-gcc-ar
+ENV STRIP=mipsel-k1-linux-musl-strip
+ENV RANLIB=mipsel-k1-linux-musl-gcc-ranlib
+ENV LD=mipsel-k1-linux-musl-ld
+
+ENV TARGET_CFLAGS="-march=mips32r2 -mtune=mips32r2 -mnan=2008 -mfp64"
+ENV TARGET_LDFLAGS=""
+
+# Working directory
+WORKDIR /src
+
+# Configure git to trust the mounted source directory
+# Required because the container runs as root but files are owned by the host user
+RUN git config --global --add safe.directory '*'
+
+# Verify the toolchain works
+RUN mipsel-k1-linux-musl-gcc --version && \
+    mipsel-k1-linux-musl-g++ --version && \
+    mipsel-k1-linux-musl-ar --version && \
+    mipsel-k1-linux-musl-ranlib --version && \
+    echo "Toolchain verification passed" && \
+    echo "" && \
+    echo "NOTE: unified MIPS toolchain — NaN2008 + FP64, musl 1.2.4," && \
+    echo "for -static binaries that run on K1 (4.4.94) and AD5X (5.10)."
+
+# Default command: build the unified MIPS binary
+# SKIP_OPTIONAL_DEPS=1 runs minimal dependency check (skips npm, clang-format, etc.)
+CMD ["make", "PLATFORM_TARGET=mips", "SKIP_OPTIONAL_DEPS=1", "-j"]

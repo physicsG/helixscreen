@@ -25,6 +25,14 @@ std::pair<float, float> BedCoordMapper::mm_to_px(float x_mm, float y_mm) const {
     return {px, py};
 }
 
+std::pair<float, float> BedCoordMapper::px_to_mm(float x_px, float y_px) const {
+    // Invert mm_to_px term by term: undo the X letterbox offset and scale,
+    // then the Y flip (bed y=0 is the BOTTOM of the viewport) and offset.
+    float x_mm = (x_px - offset_x_) / scale_ + origin_x_;
+    float y_mm = (static_cast<float>(viewport_h_) - offset_y_ - y_px) / scale_ + origin_y_;
+    return {x_mm, y_mm};
+}
+
 PixelRect BedCoordMapper::bbox_to_rect(glm::vec2 bbox_min, glm::vec2 bbox_max) const {
     auto [x1, y1] = mm_to_px(bbox_min.x, bbox_max.y);
     auto [x2, y2] = mm_to_px(bbox_max.x, bbox_min.y);

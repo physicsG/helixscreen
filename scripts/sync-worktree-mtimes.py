@@ -8,13 +8,11 @@ Why this exists
 checkout-time mtime. That is newer than the build artifacts cloned from the main
 tree, so make rebuilds essentially everything:
 
-  - $(PCH) depends on include/lvgl_pch.h and lv_conf.h, and every C++ object
-    depends on $(PCH) -> one fresh header invalidates all ~1970 objects.
-  - the .d files list include/*.h as prerequisites of each object, and those
-    headers are fresh too -> the same objects are invalidated a second way.
+  - the .d files list include/*.h (lvgl_pch.h and lv_conf.h among them) as
+    prerequisites of each object -> one fresh header invalidates every object
+    that includes it, and the force-included lvgl_pch.h reaches all ~1970.
 
-Fixing only one of those two paths buys nothing, so this walks the whole
-checkout.
+So this walks the whole checkout.
 
 Why it is not "back-dating mtimes"
 ----------------------------------

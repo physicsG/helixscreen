@@ -3,7 +3,9 @@
 
 #include "app_boot.h"
 #include "board_display.h"
+#include "esp_async_memcpy.h"
 #include "esp_attr.h"
+#include "esp_cache.h"
 #include "esp_heap_caps.h"
 #include "esp_lcd_panel_rgb.h"
 #include "esp_log.h"
@@ -15,6 +17,7 @@
 #include "ktouch.h"
 #include "lvgl.h"
 #include "ota_health.h"
+#include "serial_snapshot.h"
 #include "src/xml/lv_xml.h"
 #include "touch_input.h"
 
@@ -60,16 +63,18 @@ static void (*s_ui_tick)(void);
 // the dirty band. Band-sized (UI_BAND_LINES) to keep the internal buffer small.
 //
 // num_fbs stays 1 (double-FB + bounce desyncs scan-out — see board_display.c
-// DO-NOT-RETRY). Shadow is 768KB PSRAM. Writer/presenter may touch overlapping
-// shadow rows (benign: a one-frame blend of two near-identical consecutive
-// renders — NOT scan-out garbage).
+// DO-NOT-RETRY). Shadow is 768KB PSRAM, and s_shadow_lock gives it one owner at
+// a time: flush_cb holds it from the first chunk of a refresh cycle to the last,
+// the presenter from before its vsync wait to the end of its blit. Without it a
+// blit can copy a band that is half the previous cycle and half the next, which
+// shows as a torn widget on every animation and page change.
 #define FB_BPP ((size_t)sizeof(lv_color16_t))
 #define FB_STRIDE ((size_t)BOARD_LCD_H_RES * FB_BPP)
 #define SHADOW_BYTES ((size_t)BOARD_LCD_V_RES * FB_STRIDE)
 
-// Two-hop staging band, INTERNAL DRAM. UI_BAND_LINES full-width rows (mirrors
-// the 10-line RGB bounce granularity). Allocated at display init AFTER the two
-// boot heap gates (48KB UI stack, 32KB bounce) have already passed, so it can't
+// Two-hop staging band, INTERNAL DRAM. UI_BAND_LINES full-width rows, half the
+// 20-line RGB bounce buffer (board_display.c). Allocated at display init AFTER the two
+// boot heap gates (40KB UI stack, 32KB bounce) have already passed, so it can't
 // threaten them; a failed alloc falls back to the direct PSRAM->PSRAM blit.
 // Drop to 8 lines if internal DRAM proves tight.
 #define UI_BAND_LINES 10
@@ -77,6 +82,26 @@ static void (*s_ui_tick)(void);
 
 static uint8_t* s_shadow; // full-frame PSRAM shadow (LVGL chunks land here)
 static uint8_t* s_band;   // internal-DRAM two-hop staging band (NULL => direct blit)
+// GDMA copy of shadow bands straight into the scan-out FB. A CPU copy between two
+// PSRAM buffers thrashes the shared cache and runs slower than the scan; the DMA
+// path bypasses the cache. NULL => the two-hop CPU copy below.
+static async_memcpy_handle_t s_dma;
+static uint8_t* s_fb;
+static SemaphoreHandle_t s_dma_done;
+static SemaphoreHandle_t s_shadow_lock;
+// The UI thread, suspended by the presenter for the length of each copy: a panel
+// build's PSRAM traffic otherwise slows the copy enough for the next frame's
+// scan-out to overtake it.
+static TaskHandle_t s_ui_task;
+static bool s_writer_holds;
+
+// Waits bounded so a wedged side can never freeze the other; a timeout proceeds
+// unlocked and is counted as a tear.
+#define SHADOW_LOCK_WAIT_MS 250
+static volatile uint32_t s_writer_waits;
+static volatile uint32_t s_writer_wait_ms;
+static volatile uint32_t s_tears;
+static volatile uint32_t s_presents;
 
 // vsync semaphore: given by the on_vsync ISR every frame, taken by the presenter
 // to align each blit to a fresh frame top.
@@ -107,6 +132,7 @@ static int32_t s_cur_y2;
 // zero is not exoneration (measured 741 late refills vs 34 counted here in one
 // 10-line-bounce boot).
 static volatile uint32_t s_vsync_n;
+static volatile int64_t s_vsync_isr_us;
 static volatile uint32_t s_frame_complete_n;
 
 static bool flush_on_vsync(esp_lcd_panel_handle_t panel,
@@ -115,6 +141,7 @@ static bool flush_on_vsync(esp_lcd_panel_handle_t panel,
     (void)edata;
     (void)user_ctx;
     s_vsync_n++;
+    s_vsync_isr_us = esp_timer_get_time();
     BaseType_t high_task_woken = pdFALSE;
     if (s_vsync_sem) {
         xSemaphoreGiveFromISR(s_vsync_sem, &high_task_woken);
@@ -136,7 +163,7 @@ static bool on_frame_buf_complete(esp_lcd_panel_handle_t panel,
 // into these). Static (link-time reserved, no runtime fragmentation lottery).
 // Internal (not PSRAM) so LVGL's blends don't contend with scan-out. 12-line
 // pair (2x19.2KB) double-buffers render N+1 while N is staged, at half the
-// internal cost of the 24-line pair — the 48KB UI stack and 32KB RGB bounce DMA
+// internal cost of the 24-line pair — the 40KB UI stack and 32KB RGB bounce DMA
 // must still find contiguous internal blocks (see the boot heap-gate logs).
 /* One 24-line buffer instead of the earlier 12-line double-buffer pair — SAME
  * 38.4KB internal total. Rationale: every chunk re-walks the widget tree and
@@ -150,11 +177,13 @@ static bool on_frame_buf_complete(esp_lcd_panel_handle_t panel,
 #define UI_DRAW_BUF_BYTES (BOARD_LCD_H_RES * UI_DRAW_BUF_LINES * (int)FB_BPP)
 LV_ATTRIBUTE_MEM_ALIGN static uint8_t s_draw_buf1[UI_DRAW_BUF_BYTES];
 
-// XML/expat parsing recurses deeply during component registration and layout;
-// the audit ran the full app slice on a 32KB pthread stack. 48KB gives margin
-// for the real bring-up + panel construction. Kept INTERNAL (not PSRAM) — the
-// UI thread does settings→flash writes, which cannot run from a PSRAM stack.
-#define UI_THREAD_STACK_BYTES (48 * 1024)
+// XML/expat parsing recurses deeply during component registration and layout.
+// Boot, the home page and the controls, filament and settings builds peak at
+// ~15KB, so 40KB keeps ~25KB of margin; internal RAM is the scarce resource
+// (the WebSocket task needs an 8KB block while WiFi is associating). Kept
+// INTERNAL (not PSRAM) — the UI thread does settings→flash writes, which cannot
+// run from a PSRAM stack.
+#define UI_THREAD_STACK_BYTES (40 * 1024)
 // Presenter: tiny body (union read + banded blit). 4KB internal stack, high
 // priority so it preempts to blit at the vsync boundary. No affinity — the
 // external-RAM cache is shared across cores, so shadow reads are coherent
@@ -172,6 +201,40 @@ static uint64_t s_cyc_px;
 static int64_t s_cyc_t0_us;
 #define CYCLE_LOG_MS 100
 
+// Adds shadow rows [y1, y2] to the refresh cycle in progress, which is
+// presented as one band once its last chunk lands. The cycle's first rows take
+// the shadow from the presenter until then.
+static void cycle_add_rows(int32_t y1, int32_t y2) {
+    if (!s_cur_valid) {
+        int64_t w0 = esp_timer_get_time();
+        if (xSemaphoreTake(s_shadow_lock, 0) == pdTRUE) {
+            s_writer_holds = true;
+        } else {
+            s_writer_holds =
+                xSemaphoreTake(s_shadow_lock, pdMS_TO_TICKS(SHADOW_LOCK_WAIT_MS)) == pdTRUE;
+            s_writer_waits++;
+            s_writer_wait_ms += (uint32_t)((esp_timer_get_time() - w0) / 1000);
+            if (!s_writer_holds)
+                s_tears++;
+        }
+        s_cur_y1 = y1;
+        s_cur_y2 = y2;
+        s_cur_valid = true;
+    } else {
+        if (y1 < s_cur_y1)
+            s_cur_y1 = y1;
+        if (y2 > s_cur_y2)
+            s_cur_y2 = y2;
+    }
+}
+
+// A scroll blit moves pixels inside the shadow as LVGL starts drawing the
+// strip it exposed, so the move joins that cycle and is presented with it.
+static bool scroll_claim_rows(int32_t y1, int32_t y2) {
+    cycle_add_rows(y1, y2);
+    return s_writer_holds;
+}
+
 static void flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* px_map) {
     // Stage this chunk into the PSRAM shadow at its screen offset (internal
     // partial buffer -> PSRAM, row by row: the chunk is w*h tightly packed, the
@@ -179,6 +242,7 @@ static void flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* px_map)
     // LVGL is free to reuse px_map immediately.
     int32_t w = area->x2 - area->x1 + 1;
     int32_t h = area->y2 - area->y1 + 1;
+    cycle_add_rows(area->y1, area->y2);
     if (s_cyc_chunks == 0) {
         s_cyc_t0_us = esp_timer_get_time();
     }
@@ -189,17 +253,6 @@ static void flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* px_map)
         uint8_t* dst = s_shadow + (size_t)(area->y1 + r) * FB_STRIDE + (size_t)area->x1 * FB_BPP;
         const uint8_t* src = px_map + (size_t)r * row_bytes;
         memcpy(dst, src, row_bytes);
-    }
-
-    if (!s_cur_valid) {
-        s_cur_y1 = area->y1;
-        s_cur_y2 = area->y2;
-        s_cur_valid = true;
-    } else {
-        if (area->y1 < s_cur_y1)
-            s_cur_y1 = area->y1;
-        if (area->y2 > s_cur_y2)
-            s_cur_y2 = area->y2;
     }
 
     if (lv_display_flush_is_last(disp)) {
@@ -220,6 +273,10 @@ static void flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* px_map)
         }
         portEXIT_CRITICAL(&s_present_mux);
         s_cur_valid = false;
+        if (s_writer_holds) {
+            s_writer_holds = false;
+            xSemaphoreGive(s_shadow_lock);
+        }
 
         int64_t cyc_ms = (esp_timer_get_time() - s_cyc_t0_us) / 1000;
         if (cyc_ms >= CYCLE_LOG_MS) {
@@ -234,18 +291,112 @@ static void flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* px_map)
     lv_display_flush_ready(disp); // immediate — LVGL never blocks on the panel
 }
 
+// Beam-trailing blit. The copy (~7-20 lines/ms, PSRAM bound) is slower than the
+// scan-out (17.7 lines/ms), so a blit that starts at frame top is overtaken and
+// that frame shows old content below the crossing. Instead each band is written
+// only once the bounce DMA has read it in the current frame; a writer that starts
+// right behind the reader stays behind it, and must only finish each band before
+// the NEXT frame reads it. Frame N then shows the old frame whole, frame N+1 the
+// new one whole.
+//
+// The bounce DMA reads FB line y at vsync + (VSYNC_PW + VSYNC_BP + y - lead) line
+// times, where lead is how far the two bounce buffers run ahead of the beam
+// (between one and two buffers). The earliest read uses the longest lead.
+#define LINE_US_X100                                                                               \
+    ((int64_t)(BOARD_LCD_H_RES + BOARD_LCD_HSYNC_PW + BOARD_LCD_HSYNC_BP + BOARD_LCD_HSYNC_FP) *   \
+     100000000LL / BOARD_LCD_PCLK_HZ)
+#define FRAME_LINES (BOARD_LCD_V_RES + BOARD_LCD_VSYNC_PW + BOARD_LCD_VSYNC_BP + BOARD_LCD_VSYNC_FP)
+#define BOUNCE_LINES 20
+#define READ_LEAD_MIN BOUNCE_LINES
+#define READ_LEAD_MAX (2 * BOUNCE_LINES)
+#define TRAIL_GUARD_US 200
+static volatile uint32_t s_late_presents;
+
+// When scan-out reads line y in frame `frame` after the vsync at vsync_us.
+static int64_t scan_read_us(int64_t vsync_us, int32_t y, int32_t frame, int32_t lead) {
+    return vsync_us +
+           ((int64_t)(BOARD_LCD_VSYNC_PW + BOARD_LCD_VSYNC_BP + y - lead + frame * FRAME_LINES) *
+            LINE_US_X100) /
+               100;
+}
+
+static bool dma_done_cb(async_memcpy_handle_t mcp, async_memcpy_event_t* event, void* arg) {
+    (void)mcp;
+    (void)event;
+    BaseType_t woken = pdFALSE;
+    xSemaphoreGiveFromISR((SemaphoreHandle_t)arg, &woken);
+    return woken == pdTRUE;
+}
+
+// Copy shadow rows [by, by+bh) into the FB by DMA. The shadow is written through
+// the cache by flush_cb, so its lines are written back first; the bounce ISR
+// reads the FB through the cache, so the rows just written are invalidated after.
+static bool dma_copy_band(int32_t by, int32_t bh) {
+    uint8_t* src = s_shadow + (size_t)by * FB_STRIDE;
+    uint8_t* dst = s_fb + (size_t)by * FB_STRIDE;
+    size_t n = (size_t)bh * FB_STRIDE;
+    esp_cache_msync(src, n, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+    if (esp_async_memcpy(s_dma, dst, src, n, dma_done_cb, s_dma_done) != ESP_OK) {
+        return false;
+    }
+    if (xSemaphoreTake(s_dma_done, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return false;
+    }
+    esp_cache_msync(dst, n, ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_INVALIDATE);
+    return true;
+}
+
 // Blit shadow rows [y1, y2] (full width) to the FB. Two-hop through the internal
 // band buffer when available (see the s_band comment); direct otherwise.
 static void present_blit(int32_t y1, int32_t y2) {
     if (s_band) {
+        const int64_t vsync_us = s_vsync_isr_us;
+        int32_t late_y = -1;
+        int64_t late_us = 0;
+        // Safe: the UI thread cannot hold the shadow lock (we do), heap locks are
+        // spinlocks it cannot be suspended inside, and nothing below takes a
+        // mutex it might own. Resume before logging: the log lock is a mutex.
+        if (s_ui_task) {
+            vTaskSuspend(s_ui_task);
+        }
         for (int32_t by = y1; by <= y2; by += UI_BAND_LINES) {
             int32_t bh = y2 - by + 1;
             if (bh > UI_BAND_LINES)
                 bh = UI_BAND_LINES;
-            // hop 1: shadow(PSRAM) -> internal band (sequential read)
-            memcpy(s_band, s_shadow + (size_t)by * FB_STRIDE, (size_t)bh * FB_STRIDE);
-            // hop 2: internal band -> FB(PSRAM) (cache-buffered write)
-            esp_lcd_panel_draw_bitmap(s_panel, 0, by, BOARD_LCD_H_RES, by + bh, s_band);
+            // Trail the reader: this band's last line must already be read.
+            // Only the first bands ever wait; the copy is slower than the scan.
+            const int64_t start_after =
+                scan_read_us(vsync_us, by + bh - 1, 0, READ_LEAD_MIN) + TRAIL_GUARD_US;
+            // Sleep through most of a long wait (a band low on the screen waits
+            // up to a frame); spin only the last stretch, for timing.
+            const int64_t wait_us = start_after - esp_timer_get_time();
+            if (wait_us > 2000) {
+                vTaskDelay(pdMS_TO_TICKS((wait_us - 1000) / 1000));
+            }
+            while (esp_timer_get_time() < start_after) {
+            }
+            if (!s_dma || !dma_copy_band(by, bh)) {
+                // hop 1: shadow(PSRAM) -> internal band (sequential read)
+                memcpy(s_band, s_shadow + (size_t)by * FB_STRIDE, (size_t)bh * FB_STRIDE);
+                // hop 2: internal band -> FB(PSRAM) (cache-buffered write)
+                esp_lcd_panel_draw_bitmap(s_panel, 0, by, BOARD_LCD_H_RES, by + bh, s_band);
+            }
+            const int64_t over =
+                esp_timer_get_time() - scan_read_us(vsync_us, by, 1, READ_LEAD_MAX);
+            if (over > late_us) {
+                late_us = over;
+                late_y = by;
+            }
+        }
+        if (s_ui_task) {
+            vTaskResume(s_ui_task);
+        }
+        if (late_y >= 0) {
+            s_late_presents++;
+            ESP_LOGW(TAG,
+                     "[present] late blit: band y=%ld finished %lldus after the next frame "
+                     "read it, %ld-line blit",
+                     (long)late_y, (long long)late_us, (long)(y2 - y1 + 1));
         }
     } else {
         esp_lcd_panel_draw_bitmap(s_panel, 0, y1, BOARD_LCD_H_RES, y2 + 1,
@@ -269,6 +420,12 @@ static void present_task(void* arg) {
             continue;
         }
 
+        // Take the shadow before the vsync wait, so the blit still starts at
+        // frame top; this also holds off a half-staged next cycle.
+        bool locked = xSemaphoreTake(s_shadow_lock, pdMS_TO_TICKS(SHADOW_LOCK_WAIT_MS)) == pdTRUE;
+        if (!locked)
+            s_tears++;
+
         // Align the blit to a FRESH frame top: drop any stale token, then wait
         // the next vsync (bounded so a stalled panel can't wedge the presenter).
         xSemaphoreTake(s_vsync_sem, 0);
@@ -288,7 +445,10 @@ static void present_task(void* arg) {
             y2 = BOARD_LCD_V_RES - 1;
         if (y2 >= y1) {
             present_blit(y1, y2);
+            s_presents++;
         }
+        if (locked)
+            xSemaphoreGive(s_shadow_lock);
     }
 }
 
@@ -305,6 +465,8 @@ static uint32_t tick_cb(void) {
 // sequential (LV_OS_NONE, no locking).
 static void* ui_thread_main(void* arg) {
     (void)arg;
+
+    s_ui_task = xTaskGetCurrentTaskHandle();
 
     // Panel first (RGB init + bounce buffers). Thread-agnostic hardware setup.
     s_panel = board_display_init();
@@ -331,15 +493,30 @@ static void* ui_thread_main(void* arg) {
         abort();
     }
     memset(s_shadow, 0, SHADOW_BYTES);
+    s_shadow_lock = xSemaphoreCreateMutex();
 
     // Two-hop blit staging band (INTERNAL DRAM). Allocated HERE — after the boot
-    // heap gates (48KB UI stack, 32KB bounce) have already passed — so it cannot
+    // heap gates (40KB UI stack, 32KB bounce) have already passed — so it cannot
     // push them over. Non-fatal: on failure present_blit falls back to the direct
     // PSRAM->PSRAM blit (slower, but correct).
     s_band = heap_caps_aligned_alloc(16, UI_BAND_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!s_band) {
         ESP_LOGW(TAG, "no internal for %uB band; direct blit (largest=%u)", (unsigned)UI_BAND_BYTES,
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    }
+
+    void* fb = NULL;
+    if (esp_lcd_rgb_panel_get_frame_buffer(s_panel, 1, &fb) == ESP_OK && fb) {
+        async_memcpy_config_t mcfg = ASYNC_MEMCPY_DEFAULT_CONFIG();
+        mcfg.backlog = 2;
+        mcfg.dma_burst_size = 64;
+        s_dma_done = xSemaphoreCreateBinary();
+        if (s_dma_done && esp_async_memcpy_install_gdma_ahb(&mcfg, &s_dma) == ESP_OK) {
+            s_fb = (uint8_t*)fb;
+        } else {
+            s_dma = NULL;
+            ESP_LOGW(TAG, "async memcpy unavailable; CPU blit");
+        }
     }
 
     lv_display_t* disp = lv_display_create(BOARD_LCD_H_RES, BOARD_LCD_V_RES);
@@ -353,6 +530,11 @@ static void* ui_thread_main(void* arg) {
     // enqueue the user-visible warning before it drains the warning queue.
     app_boot_set_touch_available(touch_input_init());
 
+    // Scrolls move the shadow's pixels and render only what scrolled in. The
+    // copy runs row to row: the band is the presenter's, whose fallback copy
+    // can run while a timed-out writer still holds rows.
+    app_boot_set_retained_frame(s_shadow, FB_STRIDE, NULL, 0, scroll_claim_rows);
+
     // Presenter task — the only writer of the panel FB.
     if (xTaskCreate(present_task, "present", PRESENT_STACK_BYTES, NULL, PRESENT_TASK_PRIO, NULL) !=
         pdPASS) {
@@ -362,6 +544,7 @@ static void* ui_thread_main(void* arg) {
 
     s_ui_build();
     ota_health_confirm();
+    serial_snapshot_start();
     ESP_LOGI(TAG, "ui: render loop");
     int64_t underrun_log_us = esp_timer_get_time();
     int32_t underrun_prev_drift = 0;
@@ -385,6 +568,17 @@ static void* ui_thread_main(void* arg) {
                          (long)(drift - underrun_prev_drift));
             }
             underrun_prev_drift = drift;
+
+            // Present-side cost of the shadow lock: frames shown, how often and
+            // how long the UI thread waited for a blit, and unlocked timeouts.
+            uint32_t waits = s_writer_waits, wait_ms = s_writer_wait_ms, tears = s_tears;
+            uint32_t presents = s_presents;
+            s_writer_waits = s_writer_wait_ms = s_tears = s_presents = 0;
+            if (waits || tears) {
+                ESP_LOGI(TAG, "[present] %lu frames, ui waited %lux / %lums, tears=%lu (10s)",
+                         (unsigned long)presents, (unsigned long)waits, (unsigned long)wait_ms,
+                         (unsigned long)tears);
+            }
         }
         // Cycle-time tripwire: a long lv_timer_handler starves the polled touch
         // indev — taps during the window are silently dropped. Pairs with the
@@ -398,9 +592,21 @@ static void* ui_thread_main(void* arg) {
         if (s_ui_tick) {
             s_ui_tick();
         }
+        serial_snapshot_poll();
         vTaskDelay(pdMS_TO_TICKS(delay < 5 ? 5 : delay > 50 ? 50 : delay));
     }
     return NULL;
+}
+
+bool helix_on_ui_task(void) {
+    return s_ui_task == NULL || xTaskGetCurrentTaskHandle() == s_ui_task;
+}
+
+const uint8_t* lvgl_glue_frame(uint32_t* w, uint32_t* h, size_t* stride) {
+    *w = BOARD_LCD_H_RES;
+    *h = BOARD_LCD_V_RES;
+    *stride = FB_STRIDE;
+    return s_shadow;
 }
 
 void lvgl_glue_start(void (*ui_build)(void), void (*ui_tick)(void)) {
@@ -421,8 +627,8 @@ void lvgl_glue_start(void (*ui_build)(void), void (*ui_tick)(void)) {
         ESP_LOGE(TAG, "esp_pthread_set_cfg failed: %s", esp_err_to_name(cfg_err));
     }
 
-    // Allocation gate #1 (one-shot, every boot): the 48KB UI stack must fit in
-    // `largest`. Below ~48KB, pthread_create fails with ENOMEM (errno 12). The
+    // Allocation gate #1 (one-shot, every boot): the UI stack must fit in
+    // `largest`, or pthread_create fails with ENOMEM (errno 12). The
     // matching gate #2 (RGB bounce DMA) logs inside board_display_init.
     ESP_LOGI(TAG, "heap before pthread: free=%u largest=%u need=%u",
              heap_caps_get_free_size(MALLOC_CAP_INTERNAL),

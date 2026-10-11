@@ -179,8 +179,10 @@ class LifetimeToken {
         }
         helix::ui::queue_update(
             [gen, snapshot, f = std::forward<F>(fn)]() mutable {
-                if (gen->load(std::memory_order_acquire) != snapshot)
+                if (gen->load(std::memory_order_acquire) != snapshot) {
+                    helix::async_lifetime::note_skipped(nullptr);
                     return;
+                }
                 f();
             },
             file, line);
@@ -281,16 +283,7 @@ class AsyncLifetimeGuard {
      */
     template <typename F>
     void defer(F&& fn, const char* file = __builtin_FILE(), int line = __builtin_LINE()) {
-        auto gen = gen_;
-        auto snapshot = gen_->load(std::memory_order_acquire);
-        helix::ui::queue_update(
-            [gen, snapshot, f = std::forward<F>(fn)]() mutable {
-                if (gen->load(std::memory_order_acquire) != snapshot) {
-                    return;
-                }
-                f();
-            },
-            file, line);
+        token().defer(std::forward<F>(fn), file, line);
     }
 
     /**
@@ -304,17 +297,7 @@ class AsyncLifetimeGuard {
      * @param fn The callback to defer
      */
     template <typename F> void defer(const char* tag, F&& fn) {
-        auto gen = gen_;
-        auto snapshot = gen_->load(std::memory_order_acquire);
-        helix::ui::queue_update(tag, [gen, snapshot, tag, f = std::forward<F>(fn)]() mutable {
-            if (gen->load(std::memory_order_acquire) != snapshot) {
-                helix::async_lifetime::note_skipped(tag);
-                spdlog::trace("[AsyncLifetimeGuard] Skipped expired callback: {}",
-                              tag ? tag : "unknown");
-                return;
-            }
-            f();
-        });
+        token().defer(tag, std::forward<F>(fn));
     }
 
     /**

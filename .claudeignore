@@ -51,7 +51,6 @@ lib/glm/doc/
 lib/libhv/docs/
 lib/libhv/examples/
 lib/libhv/unittest/
-lib/openvdb/doc/
 # Generated font files (large C arrays)
 assets/fonts/*.c
 

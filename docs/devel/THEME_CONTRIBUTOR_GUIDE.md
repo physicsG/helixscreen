@@ -16,7 +16,7 @@ A HelixScreen theme is a single JSON file. It defines:
 - A **light** palette (same 16 colors)
 - A handful of **style properties** (border radius, border width, shadow intensity)
 
-That's it. Users pick your theme in Settings → Display & Sound, and the UI re-renders using your colors instantly — no restart needed.
+That's it. Users pick your theme in Settings → Appearance → Theme Colors, and the UI re-renders using your colors instantly — no restart needed.
 
 The file lives in `assets/config/themes/defaults/` in the repo. Every theme in that directory is auto-discovered and shown in the theme picker. Adding a new one is literally dropping a JSON file.
 
@@ -186,7 +186,7 @@ You don't need to rebuild HelixScreen to test a theme. Put your theme in the **u
 - **On your dev machine:** `~/helixscreen/config/themes/my-theme.json`
 - **On a device:** `~/helixscreen/config/themes/my-theme.json` (SSH'd to the printer)
 
-User themes take precedence over defaults and are auto-discovered at launch. Restart the app, go to Settings → Display & Sound → Theme, and pick your theme.
+User themes take precedence over defaults and are auto-discovered at launch. Restart the app, go to Settings → Appearance → Theme Colors, and pick your theme.
 
 Edit the JSON, save, restart. Iterate fast.
 
@@ -223,7 +223,7 @@ Use any contrast checker. If your contrast is marginal, bump `text` darker (ligh
 
 ## Using the in-app theme editor
 
-HelixScreen has a built-in live theme editor (Settings → Display & Sound → Theme → Edit). It lets you tweak colors with live preview and export the result as JSON.
+HelixScreen has a built-in live theme editor (Settings → Appearance → Theme Colors → Edit). It lets you tweak colors with live preview and export the result as JSON.
 
 Workflow: create a minimal JSON stub, load it as your active theme, tune it in the editor, export the result, copy back into your `.json` file. Faster than editing hex codes in a text editor when you're still searching for the palette.
 

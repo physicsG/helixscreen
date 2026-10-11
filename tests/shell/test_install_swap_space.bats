@@ -56,14 +56,23 @@ setup() {
 }
 
 @test "the df helpers pass -P so output is one line per filesystem" {
-    grep -q 'df -kP "\$1" 2>/dev/null | tail -1 | awk .{print \$1}' "$RELEASE_SH" ||
-        grep -qE '_fs_id\(\)' "$RELEASE_SH"
+    local common="$WORKTREE_ROOT/scripts/lib/installer/common.sh"
     # Both helpers must carry -P; a bare `df -k` is the wrapped-name bug.
     local helpers
-    helpers=$(awk '/^_fs_id\(\)/,/^}/' "$RELEASE_SH"; awk '/^_fs_free_mb\(\)/,/^}/' "$RELEASE_SH")
+    helpers=$(awk '/^_fs_id\(\)/,/^}/' "$common"; awk '/^_fs_free_mb\(\)/,/^}/' "$common")
     [ -n "$helpers" ]
     echo "$helpers" | grep -c 'df -kP' | grep -q '^2$'
     echo "$helpers" | refute_grep 'df -k "'
+}
+
+@test "no installer module parses df output outside the helpers" {
+    # Every other df read would re-open the BusyBox wrapped-line bug.
+    local hits
+    hits=$(grep -nE '(^|[^_[:alnum:]])df [^|]*\| *tail' "$WORKTREE_ROOT"/scripts/lib/installer/*.sh |
+        grep -vE '^[^:]+:[0-9]+:\s*#' |
+        grep -vE 'common\.sh:[0-9]+:    df -kP "\$1" 2>/dev/null \| tail -1' || true)
+    [ -z "$hits" ] || fail "raw df parse outside _fs_id/_fs_free_mb:
+$hits"
 }
 
 @test "_fs_id: distinguishes genuinely different filesystems" {

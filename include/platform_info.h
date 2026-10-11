@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include <optional>
 #include <string>
 
 namespace helix {
@@ -51,7 +52,40 @@ bool is_printer_embedded();
 /// suites pin both to one truth table. All probes resolve under `probe_root`
 /// (default "/") so tests can feed a fake layout without touching the real
 /// root filesystem. stat-only; never opens anything.
-bool ad5x_mod_layout_present(const std::string& probe_root = "/");
+///
+/// `flavor_out`, when non-null, receives a static "ZMOD" or "Forge-X" naming
+/// which arm matched, and is left untouched on a false return. One platform key
+/// can serve a K1 and both AD5X firmware populations, so the arm is what tells
+/// three different filesystem layouts apart in a diagnostic.
+bool ad5x_mod_layout_present(const std::string& probe_root = "/",
+                             const char** flavor_out = nullptr);
+
+/// The three FlashForge boards the unified MIPS payload ships on. Answered by
+/// flashforge_machine_id() below.
+enum class FlashForgeMachine {
+    Ad5x,
+    Creator5,
+    Creator5Pro,
+};
+
+/// The board a FlashForge MIPS firmware names for itself, from the one of two
+/// places it is written that this process can reach: the `MACHINE=` line of the
+/// stock /usr/prog/app_startup.sh on the host, or — inside the Z-Mod chroot,
+/// whose prepare.sh bind-mounts only /usr/prog/config — the first word of
+/// `VERSION_CODENAME` in the chroot's os-release (start.sh writes
+/// `VERSION_CODENAME="<MACHINE> <version>"` on every boot). Whole-value match:
+/// Creator5 is a prefix of Creator5Pro. The same rule the installer's
+/// ff_machine_id() applies (scripts/lib/installer/platform.sh) — keep the two
+/// and their tests in step.
+///
+/// nullopt when neither source carries a recognized value (a Creality K1
+/// carries neither shape), so the caller keeps its own fallback. All probes
+/// resolve under `probe_root` (default "/") for tests.
+std::optional<FlashForgeMachine> flashforge_machine_id(const std::string& probe_root = "/");
+
+/// The printer-database spelling of a board ("FlashForge Creator 5 Pro"), the
+/// same names ad5x_board_name() prints in the installer.
+const char* flashforge_machine_display_name(FlashForgeMachine machine);
 
 /// Test helper: override the platform check. Pass -1 to reset to compile-time default.
 void set_platform_override(int override_value);
@@ -63,9 +97,6 @@ void set_printer_embedded_override(int override_value);
 /// Test helper: override the external-updates default. Pass -1 to reset to the
 /// compile-time platform answer.
 void set_external_updates_default_override(int override_value);
-
-/// Log platform info (kernel, arch, hostname, memory) at INFO level
-void log_platform_info();
 
 /// Short human-readable host arch line for the About screen and debug bundles.
 /// Format: "<kernel-arch> · <N>-bit userspace" — surfaces the common

@@ -56,8 +56,8 @@ constexpr HeightToken HEIGHT_TOKENS[] = {
     {"input_height", "48", "52", "56", "64"},
     {"temp_card_height", "48", "72", "80", "112"},
     {"dialog_content_max", "200", "320", "440", "800"},
+    {"dialog_content_recovery_max", "179", "276", "352", "642"},
     {"dialog_content_pinned_max", "139", "207", "272", "414"},
-    {"dialog_content_tall_chrome_max", "146", "229", "282", "545"},
     // spinner_lg has no _micro/_tiny variant, so TINY falls back inward to
     // spinner_lg_small = 48 — which is exactly why the two tight portrait sizes
     // (240x320, 480x272) are unchanged by putting it on this ladder.
@@ -69,6 +69,7 @@ lv_display_t* make_test_display(int32_t w, int32_t h) {
     return lv_display_create(w, h);
 }
 
+// TEST_MIRROR_OK: token() reads an XML const; it shares only its name with log_redact token()
 /// Read a token out of the "globals" XML scope, failing the test if absent.
 std::string token(const char* name) {
     const char* v = lv_xml_get_const(nullptr, name);

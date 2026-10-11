@@ -22,21 +22,25 @@ class ComparisonResult:
     diff: Image.Image | None = None
 
 
-def compare(actual: Image.Image, golden_path: Path) -> ComparisonResult:
-    """Exact pixel comparison. Freeze + stable capture is what makes this viable."""
-    with Image.open(golden_path) as g:
-        golden = g.convert("RGBA").copy()
-    actual = actual.convert("RGBA")
+def compare_images(actual: Image.Image, expected: Image.Image) -> ComparisonResult:
+    """Exact pixel comparison between two already-loaded images.
 
-    if actual.size != golden.size:
+    The reusable core: compare() below is this plus loading `expected` from a
+    golden file, and a caller checking two live captures against each other
+    (no golden file involved) uses this directly.
+    """
+    actual = actual.convert("RGBA")
+    expected = expected.convert("RGBA")
+
+    if actual.size != expected.size:
         return ComparisonResult(
             False,
             f"size differs: actual {actual.width}x{actual.height}, "
-            f"golden {golden.width}x{golden.height}",
+            f"expected {expected.width}x{expected.height}",
         )
 
     a = np.asarray(actual, dtype=np.int16)
-    b = np.asarray(golden, dtype=np.int16)
+    b = np.asarray(expected, dtype=np.int16)
     delta = np.abs(a - b)
     differing = int(np.count_nonzero(delta.any(axis=2)))
     if differing == 0:
@@ -53,6 +57,13 @@ def compare(actual: Image.Image, golden_path: Path) -> ComparisonResult:
         f"({differing / total:.4%} of {total})",
         diff_img,
     )
+
+
+def compare(actual: Image.Image, golden_path: Path) -> ComparisonResult:
+    """Exact pixel comparison. Freeze + stable capture is what makes this viable."""
+    with Image.open(golden_path) as g:
+        golden = g.convert("RGBA").copy()
+    return compare_images(actual, golden)
 
 
 def assert_golden(actual: Image.Image, name: str, *, goldens_dir: Path,

@@ -49,12 +49,18 @@
 #include "ams_backend_mock.h"
 #include "ams_state.h"
 #include "ams_types.h"
+#include "filament_op_router.h"
 #include "tool_state.h"
 
 #include <lvgl.h>
 #include <memory>
 
 #include "../catch_amalgamated.hpp"
+
+using helix::AmsAction;
+using helix::AmsSystemInfo;
+using helix::AmsType;
+using helix::PathTopology;
 
 using helix::ToolState;
 using helix::ToolTopology;
@@ -65,13 +71,12 @@ namespace {
 // Minimal AFC-shaped backend: the panel's op path needs a slot-selecting system
 // whose load/unload succeed synchronously and then stay silent, which is exactly
 // the fire-and-forget shape that makes a stall observable.
-class StubBackend : public AmsBackendMock {
+class StubBackend : public helix::AmsBackendMock {
   public:
-    StubBackend() : AmsBackendMock(4) {}
+    StubBackend() : helix::AmsBackendMock(4) {}
 
     AmsSystemInfo sys_{};
     int loaded_slot_ = -1;
-
     [[nodiscard]] AmsSystemInfo get_system_info() const override {
         return sys_;
     }
@@ -90,11 +95,11 @@ class StubBackend : public AmsBackendMock {
     [[nodiscard]] bool slot_has_filament_at_toolhead(int slot) const override {
         return slot == loaded_slot_;
     }
-    AmsError load_filament(int) override {
-        return AmsErrorHelper::success();
+    helix::AmsError load_filament(int) override {
+        return helix::AmsErrorHelper::success();
     }
-    AmsError unload_filament(int) override {
-        return AmsErrorHelper::success();
+    helix::AmsError unload_filament(int) override {
+        return helix::AmsErrorHelper::success();
     }
 };
 
@@ -126,14 +131,14 @@ struct TimeoutHarness {
 
     explicit TimeoutHarness(LVGLUITestFixture& f) : fx(f) {
         ToolState::instance().init_subjects(true);
-        AmsState::instance().init_subjects(true);
+        helix::AmsState::instance().init_subjects(true);
 
         auto owned = std::make_unique<StubBackend>();
         owned->sys_ = afc_sys();
         owned->loaded_slot_ = 3; // slot 0 stays free so a Load can proceed
         mock = owned.get();
-        AmsState::instance().set_backend(std::move(owned));
-        AmsState::instance().sync_from_backend();
+        helix::AmsState::instance().set_backend(std::move(owned));
+        helix::AmsState::instance().sync_from_backend();
         ToolState::instance().set_ams_topology(identity_topo());
 
         panel = std::make_unique<FilamentPanel>(fx.state(), fx.api());
@@ -165,7 +170,8 @@ struct TimeoutHarness {
     }
 
     void publish_action(AmsAction a, int settle_ms) {
-        lv_subject_set_int(AmsState::instance().get_ams_action_subject(), static_cast<int>(a));
+        lv_subject_set_int(helix::AmsState::instance().get_ams_action_subject(),
+                           static_cast<int>(a));
         fx.process_lvgl(settle_ms);
     }
 
@@ -175,9 +181,9 @@ struct TimeoutHarness {
         }
         fx.process_lvgl(10);
         panel.reset();
-        AmsState::instance().set_backend(nullptr);
+        helix::AmsState::instance().set_backend(nullptr);
         ToolState::instance().clear_ams_topology();
-        AmsState::instance().deinit_subjects();
+        helix::AmsState::instance().deinit_subjects();
         ToolState::instance().deinit_subjects();
     }
 };
@@ -381,6 +387,37 @@ TEST_CASE_METHOD(LVGLUITestFixture, "unknown-command abort survives the macro's 
     // reached the done state by now.
     process_lvgl(700);
     CHECK(TA::op_extrude_state(*h.panel) == 0); // still idle, never 2/done
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture, "template residue warns and leaves the running op alone",
+                 "[ui_integration][filament][unknown_command]") {
+    // `// Unknown command:"%}"` is a malformed tag in the macro's own template.
+    // Klipper skips that line and runs the rest, so the op is still live and no
+    // command is missing.
+    TimeoutHarness h(*this);
+
+    int errors = 0;
+    std::string warning;
+    helix::ui::set_test_notification_error_hook([&](const std::string&) { ++errors; });
+    helix::ui::set_test_notification_warning_hook([&](const std::string& m) { warning = m; });
+
+    {
+        auto freeze = helix::ui::UpdateQueue::instance().scoped_freeze("template-residue-test");
+
+        TA::execute_extrude(*h.panel);
+        REQUIRE(TA::op_extrude_state(*h.panel) == 1);
+
+        h.panel->fail_op_on_unknown_command("%}");
+
+        CHECK(TA::op_extrude_state(*h.panel) == 1); // still spinning
+        CHECK(TA::operation_active(*h.panel));
+        CHECK(errors == 0);
+        CHECK(warning.find("%}") != std::string::npos);
+    }
+
+    helix::ui::set_test_notification_error_hook(nullptr);
+    helix::ui::set_test_notification_warning_hook(nullptr);
+    process_lvgl(20);
 }
 
 TEST_CASE_METHOD(LVGLUITestFixture, "unknown-command response with no op in flight is inert",

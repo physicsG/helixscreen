@@ -1,0 +1,19 @@
+name: OK fixture
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/init-submodules
+      - name: Apply submodule patches
+        run: make apply-patches HELIX_PATCHES_FROM_CLEAN=1
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/init-submodules
+      - name: Apply submodule patches
+        run: make apply-patches HELIX_PATCHES_FROM_CLEAN=1
+      - name: Run shell tests
+        run: bats tests/shell/

@@ -6,7 +6,7 @@
  * @brief Thread-safe notification toast system callable from any thread
  *
  * @pattern Auto-detects background thread context; marshals to main thread
- * @threading Safe from any thread - automatically uses helix::ui::async_call() when needed
+ * @threading Safe from any thread - automatically defers via helix::ui::queue_update() when needed
  *
  * @see "Thread-safe:" comment in show() implementation
  */
@@ -66,7 +66,8 @@ static bool is_main_thread() {
 // "type=0" subject warnings and "toast_notification is not a known widget"
 // errors on every boot after a settings restore / tips load failure.
 // Application::run() drains PendingStartupWarnings right after ToastManager::init().
-static bool try_defer_to_startup_queue(ToastSeverity severity, const char* display_msg) {
+static bool try_defer_to_startup_queue(ToastSeverity severity, const char* display_msg,
+                                       uint32_t duration_ms = 8000) {
     if (!display_msg || !*display_msg)
         return false;
     if (ToastManager::instance().is_initialized())
@@ -87,7 +88,7 @@ static bool try_defer_to_startup_queue(ToastSeverity severity, const char* displ
         sev = helix::PendingStartupWarnings::Severity::ERROR;
         break;
     }
-    helix::PendingStartupWarnings::instance().enqueue(sev, display_msg);
+    helix::PendingStartupWarnings::instance().enqueue(sev, display_msg, duration_ms);
     return true;
 }
 
@@ -149,7 +150,7 @@ static bool top_modal_shows_title(const char* title) {
     return existing_title && strcmp(existing_title, title) == 0;
 }
 
-// Async callbacks for lv_async_call (called on main thread)
+// Deferred notification bodies (run on the main thread)
 static void async_message_callback(void* user_data) {
     AsyncMessageData* data = (AsyncMessageData*)user_data;
     if (data && data->message[0] != '\0') {
@@ -200,6 +201,8 @@ static void async_error_callback(void* user_data) {
                 return;
             }
         }
+
+        data->modal = helix::ui::fault_alert_gets_modal(data->modal, data->fault);
 
         if (data->modal && data->has_title) {
             // Check if a modal with the same title is already showing
@@ -345,7 +348,7 @@ static void show_notification(const char* title, const char* message, ToastSever
         data->severity = severity;
         data->duration_ms = duration_ms;
 
-        helix::ui::async_call(async_message_callback, data);
+        helix::ui::queue_update("Notification::show", [data]() { async_message_callback(data); });
     }
 }
 
@@ -384,14 +387,11 @@ void ui_notification_info_with_action(const char* title, const char* message, co
             spdlog::error("[Notification] Failed to allocate for async action notification");
             return;
         }
-        helix::ui::async_call(
-            [](void* user_data) {
-                auto* e = static_cast<NotificationHistoryEntry*>(user_data);
-                NotificationHistory::instance().add(*e);
-                helix::ui::notification_refresh_from_history();
-                delete e;
-            },
-            data);
+        helix::ui::queue_update("Notification::history_only", [data]() {
+            NotificationHistory::instance().add(*data);
+            helix::ui::notification_refresh_from_history();
+            delete data;
+        });
     }
 
     spdlog::info("[Notification] History-only notification: '{}' action='{}'", message, action);
@@ -447,7 +447,7 @@ void show_detail_notification(ToastSeverity severity, const char* message, const
         // one string, so both get the halves joined.
         const std::string joined = p->message + " - " + p->detail;
 
-        if (try_defer_to_startup_queue(p->severity, joined.c_str()))
+        if (try_defer_to_startup_queue(p->severity, joined.c_str(), p->duration_ms))
             return;
 
         if (should_show_toast(p->severity)) {
@@ -483,6 +483,11 @@ void ui_notification_warning_with_detail(const char* message, const char* detail
     show_detail_notification(ToastSeverity::WARNING, message, detail, 8000);
 }
 
+// NAMESPACE_OK: joins this header's global ui_notification_* free-function API
+void ui_notification_warning_sticky(const char* message, const char* detail) {
+    show_detail_notification(ToastSeverity::WARNING, message, detail, 0);
+}
+
 // Shared body for ui_notification_error() and ui_notification_printer_fault().
 // @p fault only decides whether the resulting dialog joins the sweep registry;
 // presentation is identical either way.
@@ -505,6 +510,11 @@ static void show_error_notification(const char* title, const char* message, bool
     }
 
     if (is_main_thread()) {
+        // A dialog on screen already restates the printer fault (the Klipper
+        // recovery dialog), so a new one gets a toast and a history row rather
+        // than a second modal stacked on it.
+        modal = helix::ui::fault_alert_gets_modal(modal, fault);
+
         // Main thread: call LVGL directly
         if (modal && title) {
             // Check if a modal with the same title is already showing
@@ -573,7 +583,7 @@ static void show_error_notification(const char* title, const char* message, bool
         data->modal = modal;
         data->fault = fault;
 
-        helix::ui::async_call(async_error_callback, data);
+        helix::ui::queue_update("Notification::error", [data]() { async_error_callback(data); });
     }
 }
 

@@ -12,6 +12,8 @@
 
 #include "theme_manager.h"
 
+#include <algorithm>
+
 #include "../catch_amalgamated.hpp"
 
 // ============================================================================
@@ -166,20 +168,18 @@ TEST_CASE("Validation does not require _tiny for complete sets", "[theme][breakp
     // _tiny is optional — validation should not warn about missing _tiny
     auto warnings = theme_manager_validate_constant_sets("ui_xml");
 
-    for (const auto& warning : warnings) {
-        // No warning should complain about missing _tiny
-        REQUIRE(warning.find("_tiny") == std::string::npos);
-    }
+    REQUIRE(std::none_of(warnings.begin(), warnings.end(), [](const std::string& w) {
+        return w.find("_tiny") != std::string::npos;
+    }));
 }
 
 TEST_CASE("Validation does not require _xlarge for complete sets", "[theme][breakpoints]") {
     // _xlarge is optional — validation should not warn about missing _xlarge
     auto warnings = theme_manager_validate_constant_sets("ui_xml");
 
-    for (const auto& warning : warnings) {
-        // No warning should complain about missing _xlarge
-        REQUIRE(warning.find("_xlarge") == std::string::npos);
-    }
+    REQUIRE(std::none_of(warnings.begin(), warnings.end(), [](const std::string& w) {
+        return w.find("_xlarge") != std::string::npos;
+    }));
 }
 
 // ============================================================================
@@ -228,10 +228,9 @@ TEST_CASE("Validation does not require _micro for complete sets", "[theme][break
     // _micro is optional — validation should not warn about missing _micro
     auto warnings = theme_manager_validate_constant_sets("ui_xml");
 
-    for (const auto& warning : warnings) {
-        // No warning should complain about missing _micro
-        REQUIRE(warning.find("_micro") == std::string::npos);
-    }
+    REQUIRE(std::none_of(warnings.begin(), warnings.end(), [](const std::string& w) {
+        return w.find("_micro") != std::string::npos;
+    }));
 }
 
 // ============================================================================

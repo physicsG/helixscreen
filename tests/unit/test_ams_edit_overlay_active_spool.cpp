@@ -19,6 +19,7 @@
 #include "settings_manager.h"
 #include "spoolman_manager.h"
 #include "spoolman_slot_saver.h"
+#include "test_helpers/unique_temp_dir.h"
 
 #include <cstdlib>
 #include <filesystem>
@@ -115,8 +116,7 @@ struct OverlayCommitFixture : LVGLTestFixture {
     std::string config_path;
 
     OverlayCommitFixture() : api(client, get_printer_state()) {
-        temp_dir = std::filesystem::temp_directory_path().string() + "/helix_overlay_commit_" +
-                   std::to_string(rand());
+        temp_dir = helix::test::unique_temp_dir("helix_overlay_commit");
         std::filesystem::create_directories(temp_dir);
         config_path = temp_dir + "/settings.json";
 
@@ -155,7 +155,8 @@ struct OverlayCommitFixture : LVGLTestFixture {
         ams.deinit_subjects();
         SpoolmanManager::clear_identity_cache();
         Config::get_instance()->clear_path();
-        std::filesystem::remove_all(temp_dir);
+        std::error_code ec;
+        std::filesystem::remove_all(temp_dir, ec);
     }
 
     /// Install a mock backend whose slot 0 carries spoolman_id.
@@ -166,7 +167,7 @@ struct OverlayCommitFixture : LVGLTestFixture {
 
         SlotInfo slot = backend->get_slot_info(0);
         slot.spoolman_id = slot0_spoolman_id;
-        backend->set_slot_info(0, slot, /*persist=*/false);
+        backend->sync_external_identity(0, slot);
     }
 };
 
@@ -205,12 +206,12 @@ TEST_CASE_METHOD(OverlayCommitFixture, "handle_save sets active spool when spool
     UpdateQueue::instance().drain();
 
     REQUIRE(completion_fired);
-    REQUIRE(api.spoolman_mock().get_mock_active_spool_id() == 42);
+    REQUIRE(client.spoolman_mock().get_mock_active_spool_id() == 42);
 }
 
 TEST_CASE_METHOD(OverlayCommitFixture, "handle_save sets active spool when spool changed (N -> M)",
                  "[ams_edit_overlay][spoolman][active_spool]") {
-    api.spoolman_mock().set_active_spool(42, nullptr, nullptr);
+    client.spoolman_mock().set_active_spool_id(42);
 
     AmsEditOverlay overlay;
     AmsEditOverlayTestAccess access(overlay);
@@ -238,7 +239,7 @@ TEST_CASE_METHOD(OverlayCommitFixture, "handle_save sets active spool when spool
     UpdateQueue::instance().drain();
 
     REQUIRE(completion_fired);
-    REQUIRE(api.spoolman_mock().get_mock_active_spool_id() == 99);
+    REQUIRE(client.spoolman_mock().get_mock_active_spool_id() == 99);
 }
 
 TEST_CASE_METHOD(OverlayCommitFixture,
@@ -251,7 +252,7 @@ TEST_CASE_METHOD(OverlayCommitFixture,
     seeded.spoolman_id = 42;
     AmsState::instance().set_external_spool_info(seeded);
 
-    api.spoolman_mock().set_active_spool(42, nullptr, nullptr);
+    client.spoolman_mock().set_active_spool_id(42);
 
     AmsEditOverlay overlay;
     AmsEditOverlayTestAccess access(overlay);
@@ -279,13 +280,13 @@ TEST_CASE_METHOD(OverlayCommitFixture,
     UpdateQueue::instance().drain();
 
     REQUIRE(completion_fired);
-    REQUIRE(api.spoolman_mock().get_mock_active_spool_id() == 0);
+    REQUIRE(client.spoolman_mock().get_mock_active_spool_id() == 0);
 }
 
 TEST_CASE_METHOD(OverlayCommitFixture, "handle_save re-syncs active spool on unchanged linked save",
                  "[ams_edit_overlay][spoolman][active_spool]") {
     // Simulate Moonraker having lost the active-spool state (e.g. after restart).
-    api.spoolman_mock().set_active_spool(7, nullptr, nullptr);
+    client.spoolman_mock().set_active_spool_id(7);
 
     AmsEditOverlay overlay;
     AmsEditOverlayTestAccess access(overlay);
@@ -314,7 +315,7 @@ TEST_CASE_METHOD(OverlayCommitFixture, "handle_save re-syncs active spool on unc
 
     REQUIRE(completion_fired);
     // Re-save always re-syncs so Moonraker recovers lost state.
-    REQUIRE(api.spoolman_mock().get_mock_active_spool_id() == 42);
+    REQUIRE(client.spoolman_mock().get_mock_active_spool_id() == 42);
 }
 
 TEST_CASE_METHOD(OverlayCommitFixture, "handle_save does NOT crash when no API available",
@@ -397,7 +398,7 @@ TEST_CASE_METHOD(OverlayCommitFixture,
     // S3 — the backend slot got the link...
     REQUIRE(backend->get_slot_info(0).spoolman_id == 169);
     // S1 — ...AND the server active spool was registered by the commit.
-    REQUIRE(api.spoolman_mock().get_mock_active_spool_id() == 169);
+    REQUIRE(client.spoolman_mock().get_mock_active_spool_id() == 169);
 }
 
 // ============================================================================

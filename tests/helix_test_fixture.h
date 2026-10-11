@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 namespace helix::test {
@@ -55,7 +56,18 @@ class HelixTestFixture {
     HelixTestFixture(HelixTestFixture&&) = delete;
     HelixTestFixture& operator=(HelixTestFixture&&) = delete;
 
-  protected:
-    // List expands reactively. Keep small; don't over-reset.
+    // List expands reactively. Keep small; don't over-reset. Public because the
+    // test runner's listener also calls it before every case (tests/test_main.cpp).
     static void reset_all();
+
+    // The global PrinterState part of reset_all(): its plain data and its print
+    // lifecycle. Both need its subjects up, so a fixture that tears them down
+    // calls this first.
+    static void reset_printer_state();
+
+  private:
+    /// A test that calls ObserverGuard::invalidate_all() to simulate teardown would
+    /// otherwise leave every guard created before it, and destroyed after it, skipping
+    /// removal from subjects that were never freed.
+    uint64_t observer_epoch_at_entry_;
 };

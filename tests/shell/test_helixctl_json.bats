@@ -33,6 +33,11 @@ setup_file() {
     if [ -z "$SDL_VIDEODRIVER" ]; then
         export SDL_VIDEODRIVER=dummy
     fi
+    # A plain local build defaults diagnostic uploads off, and the `ctl log` RPC
+    # refuses under that gate (prestonbrown/helixscreen#1410). This file's "log
+    # stays line-oriented" case is testing --json formatting, not the gate, so
+    # this instance opts in.
+    export HELIX_DIAGNOSTIC_UPLOADS=1
     "$BIN" --test --skip-wizard --skip-splash --remote --remote-socket "$SOCK" \
         >"$APP_LOG" 2>&1 &
     echo $! >"${BATS_FILE_TMPDIR}/app.pid"

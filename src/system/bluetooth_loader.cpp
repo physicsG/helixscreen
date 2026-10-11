@@ -2,15 +2,27 @@
 
 #include "bluetooth_loader.h"
 
+#include "runtime_config.h"
+
 #include <spdlog/spdlog.h>
 
 #include <climits>
+#include <cstdlib>
 #include <cstring>
+#include <dirent.h>
 #include <dlfcn.h>
 #include <string>
 #include <unistd.h>
 
 namespace helix::bluetooth {
+
+bool bluetooth_enabled(const char* env_value, bool test_mode) {
+    if (env_value && std::strcmp(env_value, "0") == 0)
+        return false;
+    if (env_value && std::strcmp(env_value, "1") == 0)
+        return true;
+    return !test_mode;
+}
 
 BluetoothLoader& BluetoothLoader::instance() {
     static BluetoothLoader instance;
@@ -18,9 +30,15 @@ BluetoothLoader& BluetoothLoader::instance() {
 }
 
 BluetoothLoader::BluetoothLoader() {
+    const auto* rc = get_runtime_config();
+    if (!bluetooth_enabled(::getenv("HELIX_BLUETOOTH"), rc && rc->test_mode)) {
+        spdlog::info("[BluetoothLoader] Disabled (HELIX_BLUETOOTH=0, or --test without "
+                     "HELIX_BLUETOOTH=1)");
+        return;
+    }
     if (!has_bt_hardware()) {
         spdlog::info(
-            "[BluetoothLoader] No Bluetooth hardware detected (no /sys/class/bluetooth/hci0)");
+            "[BluetoothLoader] No Bluetooth hardware detected (no /sys/class/bluetooth/hci*)");
         return;
     }
     spdlog::info("[BluetoothLoader] Bluetooth hardware detected");
@@ -38,16 +56,15 @@ BluetoothLoader::~BluetoothLoader() {
         deinit(shared_ctx_);
         shared_ctx_ = nullptr;
     }
-    if (dl_handle_) {
-        dlclose(dl_handle_);
-        dl_handle_ = nullptr;
-        spdlog::trace("[BluetoothLoader] Plugin unloaded");
-    }
+    // The plugin stays mapped until the process ends: a SharedContext released after this
+    // destructor, by a worker or a later static, still calls the deinit it captured.
 }
 
-// Not thread-safe, but callers are serialized by s_print_mutex in makeid_bt_printer.cpp
-// and UI pairing is single-threaded.
+// Callers run on print workers and Forget workers at once, so creation is serialized: a
+// second init() would register a competing BlueZ agent. A failed init() is retried by the
+// next caller.
 helix_bt_context* BluetoothLoader::get_or_create_context() {
+    std::lock_guard<std::mutex> lock(ctx_mutex_);
     if (shared_ctx_)
         return shared_ctx_;
     if (!available_ || !init)
@@ -61,7 +78,18 @@ bool BluetoothLoader::is_available() const {
 }
 
 bool BluetoothLoader::has_bt_hardware() {
-    return access("/sys/class/bluetooth/hci0", F_OK) == 0;
+    DIR* dir = opendir("/sys/class/bluetooth");
+    if (!dir)
+        return false;
+    bool found = false;
+    while (const dirent* entry = readdir(dir)) {
+        if (std::strncmp(entry->d_name, "hci", 3) == 0) {
+            found = true;
+            break;
+        }
+    }
+    closedir(dir);
+    return found;
 }
 
 bool BluetoothLoader::try_load() {

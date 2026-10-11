@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- The tile past the last home page, below the page cap. Its + adds a page
+     past the last one, and an edit session carries a dragged widget onto
+     next_page_container like any page, where a drop creates the page. The +
+     sits beside the container, not in it: a drag's scope disarms clicks
+     inside the container it covers, and the + must survive that. -->
+<component>
+  <view extends="lv_obj"
+        width="100%" height="100%" style_pad_all="0" style_border_width="0" style_bg_opa="0" scrollable="false"
+        event_bubble="true">
+    <home_page_container name="next_page_container"/>
+    <lv_obj name="add_page_group"
+            width="content" height="content" align="center" flex_flow="column" style_flex_cross_place="center"
+            style_pad_all="0" style_pad_gap="#space_xs" style_bg_opa="0" style_border_width="0" scrollable="false"
+            clickable="false">
+      <!-- An outlined disc in the accent colour, the look of an outline button,
+           so it reads as a control on an otherwise empty page. A plain object,
+           not a ui_button: it stays out of the focus group, whose order the
+           navbar's Done hands focus along when edit mode ends. -->
+      <lv_obj name="add_page_button"
+              width="#icon_badge_size" height="#icon_badge_size" style_radius="#icon_badge_radius" style_bg_opa="0"
+              style_border_width="1" style_border_color="#primary" style_pad_all="0" clickable="true" scrollable="false">
+        <icon name="add_page_icon"
+              src="plus" size="md" variant="primary" align="center" clickable="false" event_bubble="true"/>
+        <event_cb trigger="clicked" callback="on_add_page_clicked"/>
+      </lv_obj>
+      <text_small name="add_page_caption"
+                  text="Add page" style_text_color="#text_muted" clickable="false" event_bubble="true"/>
+    </lv_obj>
+  </view>
+</component>

@@ -2,27 +2,32 @@
 <!-- Copyright (C) 2025-2026 356C LLC -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <component>
+  <api>
+    <!-- Per-instance subject names, supplied by the widget at creation. They
+         must exist before this component is parsed: a binding whose subject is
+         missing at parse time is dropped permanently and silently. -->
+    <prop name="tile_icon_subject" type="string" default=""/>
+    <prop name="tile_label_subject" type="string" default=""/>
+    <prop name="tile_dir_subject" type="string" default=""/>
+    <prop name="tile_target_subject" type="string" default=""/>
+  </api>
   <view name="panel_widget_favorite_macro"
-        extends="lv_obj" height="100%" flex_grow="1" scrollable="false" style_pad_all="0" flex_flow="column"
-        style_flex_main_place="center" style_flex_cross_place="center" style_flex_track_place="center" clickable="true">
+        extends="lv_obj" height="100%" flex_grow="1" scrollable="false" style_pad_ver="0" style_pad_gap="#space_xxs"
+        clickable="true">
     <bind_state_if_not_eq subject="printer_connection_state" state="disabled" ref_value="2"/>
     <event_cb trigger="clicked" callback="favorite_macro_clicked_cb"/>
-    <!-- Circular badge background with centered icon -->
-    <lv_obj name="fav_macro_badge"
-            width="#icon_badge_size" height="#icon_badge_size" style_radius="#icon_badge_radius" style_bg_opa="40"
-            style_bg_color="#secondary" style_border_width="0" style_pad_all="0" clickable="false" scrollable="false"
-            event_bubble="true">
-      <icon name="fav_macro_icon"
-            src="script_text" size="md" variant="secondary" clickable="false" event_bubble="true" align="center"/>
-    </lv_obj>
-    <!-- Macro name label: truncated with ellipsis so long user-configured names
-         don't wrap. Hidden via the global show_widget_labels setting; when
-         hidden, LV_OBJ_FLAG_HIDDEN also removes it from flex layout so the
-         badge re-centers in the cell. -->
+    <style name="styles.tile_column"/>
+    <bind_style_if_eq name="styles.tile_row" subject="$tile_dir_subject" ref_value="1"/>
+    <tile_badge name="fav_macro_badge" icon="script_text" icon_name="fav_macro_icon" rung_subject="$tile_icon_subject"/>
+    <!-- Macro name: one dotted line, so a long user-configured name never
+         wraps. Follows show_widget_labels. -->
     <text_tiny name="fav_macro_name"
-               width="100%" text="Configure" translation_tag="Configure" style_text_align="center"
-               style_text_color="#text_muted" long_mode="dots" clickable="false" event_bubble="true">
+               width="100%" text="Configure" style_text_align="center" style_text_color="#text_muted" long_mode="dots"
+               clickable="false" event_bubble="true">
+      <bind_tile_rung ladder="label" subject="$tile_icon_subject" one_line="true"/>
+      <bind_style_if_eq name="styles.tile_fill" subject="$tile_dir_subject" ref_value="1"/>
       <bind_flag_if_eq subject="show_widget_labels" flag="hidden" ref_value="0"/>
+      <bind_flag_if_eq subject="$tile_label_subject" flag="hidden" ref_value="0"/>
     </text_tiny>
   </view>
 </component>

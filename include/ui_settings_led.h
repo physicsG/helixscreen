@@ -22,9 +22,9 @@
 #include "led/led_auto_state.h"
 #include "lvgl/lvgl.h"
 #include "overlay_base.h"
+#include "static_panel_registry.h"
 #include "subject_managed_panel.h"
 
-#include <set>
 #include <string>
 #include <vector>
 
@@ -42,13 +42,11 @@ namespace helix::settings {
  * @endcode
  */
 class LedSettingsOverlay : public OverlayBase {
-  public:
-    LedSettingsOverlay();
-    ~LedSettingsOverlay() override;
+    // Test access for exercising private handlers (macro deletion, chip clicks).
+    friend class LedSettingsOverlayTestAccess;
 
-    // Non-copyable
-    LedSettingsOverlay(const LedSettingsOverlay&) = delete;
-    LedSettingsOverlay& operator=(const LedSettingsOverlay&) = delete;
+  public:
+    ~LedSettingsOverlay() override;
 
     //
     // === OverlayBase Interface ===
@@ -60,23 +58,18 @@ class LedSettingsOverlay : public OverlayBase {
     const char* get_name() const override {
         return "LED Settings";
     }
+    const char* xml_component() const override {
+        return "led_settings_overlay";
+    }
 
     void on_activate() override;
-    void on_deactivate() override;
-
-    //
-    // === UI Creation ===
-    //
-
-    lv_obj_t* create(lv_obj_t* parent) override;
-    void show(lv_obj_t* parent_screen);
 
     bool is_created() const {
         return overlay_root_ != nullptr;
     }
 
     //
-    // === Event Handlers (public for static callbacks) ===
+    // === Event Handlers (called by the XML callback lambdas) ===
     //
 
     void handle_led_on_at_start_changed(bool enabled);
@@ -114,36 +107,17 @@ class LedSettingsOverlay : public OverlayBase {
     void handle_macro_selected(const std::string& state_key, const std::string& gcode);
     void save_and_evaluate(const std::string& state_key);
 
-    // LED chip selection state
-    std::vector<std::string> discovered_leds_;
-    std::set<std::string> selected_leds_;
-
     // Auto-state editor state
     SubjectManager subjects_;
     lv_subject_t auto_state_enabled_subject_{};
     lv_subject_t led_on_at_start_subject_{};
+    lv_subject_t print_macros_drive_leds_subject_{};
     std::vector<std::string> action_type_options_; // Maps dropdown index to action type string
     int editing_macro_index_ = -1;                 // -1 = no macro device being edited
-
-    //
-    // === Static Callbacks ===
-    //
-
-    static void on_led_on_at_start_changed(lv_event_t* e);
-    static void on_startup_brightness_changed(lv_event_t* e);
-    static void on_startup_brightness_commit(lv_event_t* e);
-    static void on_auto_state_changed(lv_event_t* e);
-    static void on_add_macro_device(lv_event_t* e);
 };
 
-/**
- * @brief Global instance accessor
- *
- * Creates the overlay on first access and registers it for cleanup
- * with StaticPanelRegistry.
- *
- * @return Reference to singleton LedSettingsOverlay
- */
-LedSettingsOverlay& get_led_settings_overlay();
+inline LedSettingsOverlay& get_led_settings_overlay() {
+    return lazy_global<LedSettingsOverlay>("LedSettingsOverlay");
+}
 
 } // namespace helix::settings

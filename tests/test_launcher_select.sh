@@ -52,12 +52,16 @@ cleanup_mock_bindir() {
     rm -rf "$1"
 }
 
-# Extract select_binary function from launcher for testing
-extract_select_binary() {
-    # Source the function definition by extracting it
+# Extract the named functions from the launcher, so a harness exercises the
+# real code. Name everything the function under test calls: a helper left out
+# does not fail the harness, the shell reports "not found", returns 127, and the
+# caller reads that as an ordinary false — which looks exactly like a decision.
+extract_launcher_functions() {
     local launcher="${PROJECT_ROOT}/scripts/helix-launcher.sh"
-    # Extract the select_binary function
-    sed -n '/^select_binary()/,/^}/p' "$launcher"
+    local fn
+    for fn in "$@"; do
+        sed -n "/^${fn}()/,/^}/p" "$launcher"
+    done
 }
 
 # Create a self-contained test script that includes select_binary
@@ -68,7 +72,7 @@ create_test_harness() {
 #!/bin/sh
 # Extract select_binary from launcher
 HARNESS_EOF
-    extract_select_binary >> "$harness"
+    extract_launcher_functions log libs_resolve probe_egl select_binary >> "$harness"
     echo 'select_binary "$1"' >> "$harness"
     chmod +x "$harness"
     echo "$harness"
@@ -247,6 +251,230 @@ EOF
     cleanup_mock_bindir "$bindir"
 }
 
+# Build a mock EGL binary whose --probe-egl exits with the given code.
+make_mock_egl() {
+    local path="$1"
+    local rc="$2"
+    local verdict="$3"
+    cat > "$path" << EOF
+#!/bin/sh
+if [ "\$1" = "--probe-egl" ]; then
+    echo "$verdict"
+    exit $rc
+fi
+EOF
+    chmod +x "$path"
+}
+
+# All libs resolve, for tests that care about the probe rather than ldd.
+make_fake_ldd_ok() {
+    cat > "$1/ldd" << 'EOF'
+#!/bin/sh
+echo "	libc.so.6 => /lib/aarch64-linux-gnu/libc.so.6 (0x00007f)"
+EOF
+    chmod +x "$1/ldd"
+}
+
+# Test: probe reports a hardware renderer → selects EGL
+test_probe_ok_selects_egl() {
+    print_test "EGL probe succeeds → selects EGL binary"
+    local bindir
+    bindir=$(setup_mock_bindir)
+
+    echo '#!/bin/sh' > "$bindir/helix-screen"
+    echo '#!/bin/sh' > "$bindir/helix-screen-fbdev"
+    chmod +x "$bindir/helix-screen" "$bindir/helix-screen-fbdev"
+    make_mock_egl "$bindir/helix-screen-egl" 0 "V3D 7.1.7"
+    make_fake_ldd_ok "$bindir"
+
+    local harness
+    harness=$(create_test_harness "$bindir")
+    local result
+    result=$(PATH="$bindir:$PATH" sh "$harness" "$bindir" 2>/dev/null)
+
+    assert "[ '$result' = '$bindir/helix-screen-egl' ]" \
+        "Selected EGL binary when probe reports a hardware renderer"
+
+    cleanup_mock_bindir "$bindir"
+}
+
+# Test: probe rejects a software renderer → DRM, never fbdev.
+# Demoting two rungs on a GPU failure would hide a working middle rung.
+test_probe_fail_selects_drm_not_fbdev() {
+    print_test "EGL probe fails → selects DRM primary, not fbdev"
+    local bindir
+    bindir=$(setup_mock_bindir)
+
+    echo '#!/bin/sh' > "$bindir/helix-screen"
+    echo '#!/bin/sh' > "$bindir/helix-screen-fbdev"
+    chmod +x "$bindir/helix-screen" "$bindir/helix-screen-fbdev"
+    make_mock_egl "$bindir/helix-screen-egl" 1 "software renderer (llvmpipe) - declining"
+    make_fake_ldd_ok "$bindir"
+
+    local harness
+    harness=$(create_test_harness "$bindir")
+    local result
+    result=$(PATH="$bindir:$PATH" sh "$harness" "$bindir" 2>/dev/null)
+
+    assert "[ '$result' = '$bindir/helix-screen' ]" \
+        "Selected DRM primary when probe declined"
+    assert "[ '$result' != '$bindir/helix-screen-fbdev' ]" \
+        "Did not demote past the middle rung to fbdev"
+
+    cleanup_mock_bindir "$bindir"
+}
+
+# Test: HELIX_DISPLAY_BACKEND=egl overrides a declining probe
+test_env_forced_egl() {
+    print_test "HELIX_DISPLAY_BACKEND=egl → selects EGL without probing"
+    local bindir
+    bindir=$(setup_mock_bindir)
+
+    echo '#!/bin/sh' > "$bindir/helix-screen"
+    echo '#!/bin/sh' > "$bindir/helix-screen-fbdev"
+    chmod +x "$bindir/helix-screen" "$bindir/helix-screen-fbdev"
+    make_mock_egl "$bindir/helix-screen-egl" 1 "would decline"
+    make_fake_ldd_ok "$bindir"
+
+    local harness
+    harness=$(create_test_harness "$bindir")
+    local result
+    result=$(PATH="$bindir:$PATH" HELIX_DISPLAY_BACKEND=egl sh "$harness" "$bindir" 2>/dev/null)
+
+    assert "[ '$result' = '$bindir/helix-screen-egl' ]" \
+        "Forced EGL even though the probe would decline"
+
+    cleanup_mock_bindir "$bindir"
+}
+
+# Test: forcing fbdev still wins over an installed EGL binary
+test_env_forced_fbdev_beats_egl() {
+    print_test "HELIX_DISPLAY_BACKEND=fbdev → fbdev even with EGL installed"
+    local bindir
+    bindir=$(setup_mock_bindir)
+
+    echo '#!/bin/sh' > "$bindir/helix-screen"
+    echo '#!/bin/sh' > "$bindir/helix-screen-fbdev"
+    chmod +x "$bindir/helix-screen" "$bindir/helix-screen-fbdev"
+    make_mock_egl "$bindir/helix-screen-egl" 0 "V3D 7.1.7"
+    make_fake_ldd_ok "$bindir"
+
+    local harness
+    harness=$(create_test_harness "$bindir")
+    local result
+    result=$(PATH="$bindir:$PATH" HELIX_DISPLAY_BACKEND=fbdev sh "$harness" "$bindir" 2>/dev/null)
+
+    assert "[ '$result' = '$bindir/helix-screen-fbdev' ]" \
+        "Forced fbdev outranks an EGL binary whose probe succeeds"
+
+    cleanup_mock_bindir "$bindir"
+}
+
+# Test: EGL binary present but its libs do not resolve → never probed
+test_egl_missing_libs_skips_probe() {
+    print_test "EGL binary with unresolvable libs → DRM primary"
+    local bindir
+    bindir=$(setup_mock_bindir)
+
+    echo '#!/bin/sh' > "$bindir/helix-screen"
+    echo '#!/bin/sh' > "$bindir/helix-screen-fbdev"
+    chmod +x "$bindir/helix-screen" "$bindir/helix-screen-fbdev"
+    # Exits 0 if it is ever run — so reaching the probe would select EGL and
+    # this test would fail, proving the ldd gate is what kept it out.
+    make_mock_egl "$bindir/helix-screen-egl" 0 "should never be consulted"
+
+    cat > "$bindir/ldd" << 'EOF'
+#!/bin/sh
+case "$1" in
+    *helix-screen-egl)
+        echo "	libEGL.so.1 => not found"
+        ;;
+    *)
+        echo "	libc.so.6 => /lib/aarch64-linux-gnu/libc.so.6 (0x00007f)"
+        ;;
+esac
+EOF
+    chmod +x "$bindir/ldd"
+
+    local harness
+    harness=$(create_test_harness "$bindir")
+    local result
+    result=$(PATH="$bindir:$PATH" sh "$harness" "$bindir" 2>/dev/null)
+
+    assert "[ '$result' = '$bindir/helix-screen' ]" \
+        "Skipped the EGL binary whose libraries do not resolve"
+
+    cleanup_mock_bindir "$bindir"
+}
+
+# Create a harness that prints the backend the launcher hands the app
+create_backend_harness() {
+    local bindir="$1"
+    local harness="$bindir/_backend_harness.sh"
+    echo '#!/bin/sh' > "$harness"
+    extract_launcher_functions app_display_backend >> "$harness"
+    # shellcheck disable=SC2016 # the harness expands its own arguments
+    echo 'app_display_backend "$1" "$2"' >> "$harness"
+    chmod +x "$harness"
+    echo "$harness"
+}
+
+# Test: a forced EGL rung reaches the app as drm, the backend it presents through
+test_env_forced_egl_tells_app_drm() {
+    print_test "HELIX_DISPLAY_BACKEND=egl → app is told drm"
+    local bindir
+    bindir=$(setup_mock_bindir)
+
+    local harness
+    harness=$(create_backend_harness "$bindir")
+    local result
+    result=$(HELIX_DISPLAY_BACKEND=egl sh "$harness" "$bindir/helix-screen-egl" \
+        "$bindir/helix-screen-fbdev")
+
+    assert "[ '$result' = 'drm' ]" "EGL binary told drm, not egl"
+
+    cleanup_mock_bindir "$bindir"
+}
+
+# Test: a forced EGL rung with no EGL binary leaves the app to auto-detect
+test_env_forced_egl_missing_leaves_auto() {
+    print_test "HELIX_DISPLAY_BACKEND=egl, no EGL binary → app auto-detects"
+    local bindir
+    bindir=$(setup_mock_bindir)
+
+    local harness
+    harness=$(create_backend_harness "$bindir")
+    local result
+    result=$(HELIX_DISPLAY_BACKEND=egl sh "$harness" "$bindir/helix-screen" \
+        "$bindir/helix-screen-fbdev")
+
+    assert "[ -z '$result' ]" "No backend passed on for a single-binary install"
+
+    cleanup_mock_bindir "$bindir"
+}
+
+# Test: a forced EGL rung with no EGL binary on a dual-binary install tells the
+# app drm, the backend the selected primary presents through
+test_env_forced_egl_missing_dual_binary_tells_app_drm() {
+    print_test "HELIX_DISPLAY_BACKEND=egl, no EGL binary, fbdev installed → app is told drm"
+    local bindir
+    bindir=$(setup_mock_bindir)
+
+    echo '#!/bin/sh' > "$bindir/helix-screen"
+    echo '#!/bin/sh' > "$bindir/helix-screen-fbdev"
+    chmod +x "$bindir/helix-screen" "$bindir/helix-screen-fbdev"
+
+    local harness
+    harness=$(create_backend_harness "$bindir")
+    local result
+    result=$(HELIX_DISPLAY_BACKEND=egl sh "$harness" "$bindir/helix-screen" \
+        "$bindir/helix-screen-fbdev")
+
+    assert "[ '$result' = 'drm' ]" "Primary on a dual-binary install told drm"
+
+    cleanup_mock_bindir "$bindir"
+}
+
 # Run all tests
 main() {
     echo -e "${BOLD}${CYAN}Launcher Binary Selection Test Harness${RESET}"
@@ -259,6 +487,14 @@ main() {
     test_env_forced_fbdev
     test_no_ldd_selects_primary
     test_both_fine_selects_primary
+    test_probe_ok_selects_egl
+    test_probe_fail_selects_drm_not_fbdev
+    test_env_forced_egl
+    test_env_forced_fbdev_beats_egl
+    test_egl_missing_libs_skips_probe
+    test_env_forced_egl_tells_app_drm
+    test_env_forced_egl_missing_leaves_auto
+    test_env_forced_egl_missing_dual_binary_tells_app_drm
 
     # Print summary
     echo ""

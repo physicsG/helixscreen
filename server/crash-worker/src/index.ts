@@ -181,6 +181,21 @@ async function handleCrashReport(request: Request, env: Env): Promise<Response> 
     return jsonResponse(400, { error: "Invalid app_version" });
   }
 
+  // A HelixScreen build can only ever report one of the platforms
+  // UpdateChecker::get_platform_key() compiles in, so a value outside that set
+  // means the binary is not one we produced. Its addresses resolve against no
+  // symbol file we publish, so the issue it would file is unactionable by
+  // construction. Absent is allowed: only a present-and-unrecognized value is
+  // refused, so a client that omits the field is still heard.
+  const reportedPlatform = String(body.platform ?? body.app_platform ?? "");
+  if (reportedPlatform !== "" && !isKnownPlatform(reportedPlatform)) {
+    console.warn(`Refusing crash report from unknown platform: ${reportedPlatform}`);
+    return jsonResponse(202, {
+      status: "ignored",
+      reason: "platform is not one a published HelixScreen build reports",
+    });
+  }
+
   // --- Create GitHub issue (or add comment to existing) ---
   try {
     const issue = await createGitHubIssue(env, body);
@@ -221,6 +236,42 @@ const VERSION_SHAPE = /^\d{1,4}\.\d{1,4}\.\d{1,5}([-+][0-9A-Za-z.-]{1,32})?$/;
 
 export function isVersionShapeValid(version: string): boolean {
   return VERSION_SHAPE.test(version);
+}
+
+/**
+ * Every platform key a HelixScreen build can report.
+ *
+ * This mirrors the return values of UpdateChecker::get_platform_key() in
+ * src/system/update_checker.cpp, plus the retired keys below, which stay for
+ * as long as old binaries exist in the field: a deployed binary keeps sending
+ * its compile-time key forever, and the worker refusing it silently drops
+ * that platform's crash reports. Removing a retired key is a fleet decision
+ * (telemetry: the key no longer appears in checkins), not a code cleanup.
+ * tests/shell/test_update_platform_coverage.bats fails if the current keys
+ * drift or a retired key loses its reason, which is what keeps this from
+ * becoming a stale second copy.
+ *
+ * Adding a platform means deploying this worker as well as shipping the app,
+ * or the new platform's first crash reports are refused.
+ */
+const KNOWN_PLATFORMS = new Set([
+  // Current keys (get_platform_key()).
+  "ad5m",
+  "cc1",
+  "esp32",
+  "k2",
+  "mips",
+  "pi",
+  "pi32",
+  "snapmaker-u1",
+  "x86",
+  // Retired keys, accepted while pre-unify binaries remain deployed.
+  "k1", // k1 -> mips (unified MIPS package); k1-series builds report it
+  "ad5x", // ad5x -> mips (unified MIPS package); AD5X builds report it
+]);
+
+export function isKnownPlatform(platform: string): boolean {
+  return KNOWN_PLATFORMS.has(platform);
 }
 
 /** Trim and escape a client-supplied string destined for the issue title. */
@@ -526,18 +577,34 @@ export function formatIssueBody(r: CrashReport, fingerprint: string, resolved: R
   }
 
   // System info section (all fields optional)
-  if (r.platform || r.display_backend || r.ram_mb || r.cpu_cores || r.printer_model || r.klipper_version) {
+  if (
+    r.platform ||
+    r.display_backend ||
+    r.ram_mb ||
+    r.cpu_cores ||
+    r.printer_model ||
+    r.klipper_version ||
+    r.mod_flavor ||
+    r.config_dir ||
+    r.cache_dir
+  ) {
     md += `\n## System Info
 
 | Field | Value |
 |-------|-------|
 `;
     if (r.platform) md += `| **Platform** | ${mdEscape(r.platform)} |\n`;
+    if (r.mod_flavor) md += `| **Mod flavor** | ${mdEscape(r.mod_flavor)} |\n`;
     if (r.display_backend) md += `| **Display** | ${mdEscape(r.display_backend)} |\n`;
     if (r.ram_mb) md += `| **RAM** | ${r.ram_mb} MB |\n`;
     if (r.cpu_cores) md += `| **CPU** | ${r.cpu_cores} cores |\n`;
     if (r.printer_model) md += `| **Printer** | ${mdEscape(r.printer_model)} |\n`;
     if (r.klipper_version) md += `| **Klipper** | ${mdEscape(r.klipper_version)} |\n`;
+    if (r.config_dir) md += `| **Config dir** | \`${mdEscape(r.config_dir)}\` |\n`;
+    if (r.cache_dir) {
+      const tier = r.cache_tier ? ` (${mdEscape(r.cache_tier)})` : "";
+      md += `| **Cache** | \`${mdEscape(r.cache_dir)}\`${tier} |\n`;
+    }
   }
 
   // Backtrace section — with resolved symbols when available

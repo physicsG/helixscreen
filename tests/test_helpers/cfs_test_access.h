@@ -8,7 +8,9 @@
 #include "ams_types.h"
 #include "filament_slot_override.h"
 #include "filament_slot_override_store.h"
+#include "test_helpers/seeded_override.h"
 
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -17,21 +19,40 @@
 
 #include "hv/json.hpp"
 
+namespace helix {
+
 // Friend-class shim for AmsBackendCfs -- declared as friend in the backend
-// header (`friend class ::CfsTestAccess;`). Gives tests narrow accessors for
+// header (`friend class helix::CfsTestAccess;`). Gives tests narrow accessors for
 // private override state and the homing-dispatch surface without going
 // through the public get_slot_info path (which layers apply_overrides on top
 // and obscures what the internal maps actually hold), and without widening
 // any member's access level in production code just to let a test reach it.
 class CfsTestAccess {
   public:
+    // dispatch_action_script is private; the homing/unwind cases drive it
+    // directly because the branch under test is its failure disposition, not
+    // the operation that chose the script.
+    static AmsError dispatch_action_script(helix::printer::AmsBackendCfs& b, std::string gcode) {
+        return b.dispatch_action_script(std::move(gcode));
+    }
+
+    /// Takes a notify frame, the shape the subscription delivers.
     static void handle_status(helix::printer::AmsBackendCfs& b, const nlohmann::json& n) {
         b.handle_status_update(n);
     }
     static void seed_override(helix::printer::AmsBackendCfs& b, int slot_index,
                               const helix::ams::FilamentSlotOverride& ovr) {
+        {
+            std::lock_guard<std::mutex> lock(b.mutex_);
+            b.overrides_[slot_index] = ovr;
+        }
+        // The backend's own init files both stores together; a fixture that
+        // wrote only this map would leave the lane reading empty.
+        helix::test::file_override_as_lane_records(b, slot_index, ovr);
+    }
+    static void erase_override(helix::printer::AmsBackendCfs& b, int slot_index) {
         std::lock_guard<std::mutex> lock(b.mutex_);
-        b.overrides_[slot_index] = ovr;
+        b.overrides_.erase(slot_index);
     }
     static std::optional<helix::ams::FilamentSlotOverride>
     get_override(const helix::printer::AmsBackendCfs& b, int slot_index) {
@@ -44,6 +65,22 @@ class CfsTestAccess {
     static void inject_override_store(helix::printer::AmsBackendCfs& b,
                                       std::unique_ptr<helix::ams::FilamentSlotOverrideStore> s) {
         b.override_store_ = std::move(s);
+    }
+    /// Put a whole Spoolman link on the live slot — the shape a linked slot
+    /// carries. The persisted override record has no filament-id field, so
+    /// the live slot is the only half of a link a test can seed whole.
+    /// Slot index is the GLOBAL index, matching clear_slot_override.
+    static bool seed_live_spoolman_link(helix::printer::AmsBackendCfs& b, int slot_index,
+                                        int spool_id, int filament_id, int vendor_id) {
+        std::lock_guard<std::mutex> lock(b.mutex_);
+        SlotInfo* slot = b.system_info_.get_slot_global(slot_index);
+        if (!slot)
+            return false;
+        slot->spoolman_id = spool_id;
+        slot->spoolman_filament_id = filament_id;
+        slot->spoolman_vendor_id = vendor_id;
+        slot->spool_name = "Linked Spool";
+        return true;
     }
     static std::optional<std::string> last_rfid_uid(const helix::printer::AmsBackendCfs& b,
                                                     int slot_index) {
@@ -91,6 +128,9 @@ class CfsTestAccess {
     static void set_macro_variant_k1(helix::printer::AmsBackendCfs& b) {
         b.macro_variant_ = helix::printer::CfsMacroVariant::K1;
     }
+    static void set_macro_variant_k2(helix::printer::AmsBackendCfs& b) {
+        b.macro_variant_ = helix::printer::CfsMacroVariant::K2;
+    }
     static void set_macro_variant_fork(helix::printer::AmsBackendCfs& b) {
         b.macro_variant_ = helix::printer::CfsMacroVariant::Fork;
     }
@@ -127,6 +167,17 @@ class CfsTestAccess {
     static AmsError call_dispatch_action_script(helix::printer::AmsBackendCfs& b,
                                                 std::string gcode) {
         return b.dispatch_action_script(std::move(gcode));
+    }
+
+    /// Send @p gcode through the base dispatcher's caller-policy branch (the
+    /// one CFS takes: an on_error, silent=false) with a caller-chosen
+    /// on_complete, so a test can watch where and when completion runs.
+    static AmsError dispatch_with_completion(helix::printer::AmsBackendCfs& b, std::string gcode,
+                                             std::function<void()> on_complete) {
+        return b.ensure_homed_then(
+            std::move(gcode), std::move(on_complete), [](const MoonrakerError&) {},
+            IMoonrakerAPI::AMS_OPERATION_TIMEOUT_MS,
+            /*skip_homing=*/true, /*silent=*/false);
     }
 
     /// Put the backend in the state dispatch leaves it in: action set, phase
@@ -168,3 +219,4 @@ class CfsTestAccess {
         b.on_started();
     }
 };
+} // namespace helix

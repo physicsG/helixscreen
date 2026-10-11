@@ -5,7 +5,6 @@
 
 #include "ui_event_safety.h"
 #include "ui_fan_control_overlay.h"
-#include "ui_nav_manager.h"
 #include "ui_update_queue.h"
 
 #include "app_globals.h"
@@ -19,6 +18,7 @@
 #include <spdlog/spdlog.h>
 
 #include <cstring>
+#include <utility>
 
 namespace helix {
 void register_fan_widget() {
@@ -28,6 +28,12 @@ void register_fan_widget() {
     // Register XML event callbacks at startup (before any XML is parsed)
     lv_xml_register_event_cb(nullptr, "fan_widget_clicked_cb", FanWidget::fan_widget_clicked_cb);
 }
+void FanWidget::on_size_changed(int colspan, int rowspan, int width_px, int height_px) {
+    (void)colspan;
+    (void)rowspan;
+    sizing_.measure_and_publish(width_px, height_px);
+}
+
 } // namespace helix
 
 using namespace helix;
@@ -42,7 +48,18 @@ int resolve_space_token(const char* name, int fallback) {
 
 } // anonymous namespace
 
-FanWidget::FanWidget(const std::string& instance_id) : instance_id_(instance_id) {
+FanWidget::FanWidget(const std::string& instance_id)
+    : TiledPanelWidget(instance_id), instance_id_(instance_id) {
+    // Worst cases, not a live reading: a size accepted while the fan reads 5%
+    // must still draw 100%.
+    TileSizing::Content content{"100%",
+                                "100%",
+                                "Fan",
+                                /*has_value=*/true,
+                                "",
+                                /*label_always_drawn=*/true};
+    content.label_is_identity = true;
+    sizing_.set_content(std::move(content));
     std::strcpy(speed_buffer_, "--");
 }
 
@@ -68,10 +85,6 @@ void FanWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
     widget_obj_ = widget_obj;
     parent_screen_ = parent_screen;
 
-    if (widget_obj_) {
-        lv_obj_set_user_data(widget_obj_, this);
-    }
-
     // Cache label pointers
     speed_label_ = lv_obj_find_by_name(widget_obj_, "fan_speed");
     name_label_ = lv_obj_find_by_name(widget_obj_, "fan_name");
@@ -82,7 +95,7 @@ void FanWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
     // handles binding once init_fans() bumps fans_version.
     if (selected_fan_.empty()) {
         auto_select_first_fan();
-    } else if (!get_printer_state().get_fans().empty()) {
+    } else if (!get_printer_state().fan_state().get_fans().empty()) {
         bind_speed_observer();
         update_display();
     } else {
@@ -91,8 +104,8 @@ void FanWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
 
     // Observe fan version to detect fan discovery/reconnection
     auto token = lifetime_.token();
-    version_observer_ = helix::ui::observe_int_sync<FanWidget>(
-        get_printer_state().get_fans_version_subject(), this,
+    version_observer_ = helix::ui::observe<int>(
+        get_printer_state().fan_state().get_fans_version_subject(), this,
         [token](FanWidget* self, int /*version*/) {
             if (token.expired())
                 return;
@@ -122,11 +135,9 @@ void FanWidget::detach() {
     }
 
     if (widget_obj_) {
-        lv_obj_set_user_data(widget_obj_, nullptr);
         widget_obj_ = nullptr;
     }
     parent_screen_ = nullptr;
-    fan_control_panel_ = nullptr;
     speed_label_ = nullptr;
     name_label_ = nullptr;
     fan_icon_ = nullptr;
@@ -136,32 +147,11 @@ void FanWidget::detach() {
 
 void FanWidget::handle_clicked() {
     spdlog::debug("[FanWidget] Clicked - opening fan control overlay");
-
-    if (!fan_control_panel_ && parent_screen_) {
-        auto& overlay = get_fan_control_overlay();
-
-        if (!overlay.are_subjects_initialized()) {
-            overlay.init_subjects();
-        }
-        overlay.register_callbacks();
-        overlay.set_api(get_moonraker_api());
-
-        fan_control_panel_ = overlay.create(parent_screen_);
-        if (!fan_control_panel_) {
-            spdlog::error("[FanWidget] Failed to create fan control overlay");
-            return;
-        }
-        NavigationManager::instance().register_overlay_instance(fan_control_panel_, &overlay);
-    }
-
-    if (fan_control_panel_) {
-        get_fan_control_overlay().set_api(get_moonraker_api());
-        NavigationManager::instance().push_overlay(fan_control_panel_);
-    }
+    open_fan_control_overlay(parent_screen_);
 }
 
 void FanWidget::resolve_display_name() {
-    const auto& fans = get_printer_state().get_fans();
+    const auto& fans = get_printer_state().fan_state().get_fans();
     for (const auto& fan : fans) {
         if (fan.object_name == selected_fan_) {
             display_name_ = fan.display_name;
@@ -172,7 +162,7 @@ void FanWidget::resolve_display_name() {
 }
 
 void FanWidget::auto_select_first_fan() {
-    const auto& fans = get_printer_state().get_fans();
+    const auto& fans = get_printer_state().fan_state().get_fans();
     if (!fans.empty()) {
         select_fan(fans.front().object_name);
     }
@@ -188,10 +178,10 @@ void FanWidget::bind_speed_observer() {
         return;
 
     auto& ps = get_printer_state();
-    lv_subject_t* subj = ps.get_fan_speed_subject(selected_fan_, speed_lifetime_);
+    lv_subject_t* subj = ps.fan_state().get_fan_speed_subject(selected_fan_, speed_lifetime_);
     if (subj) {
         auto token = lifetime_.token();
-        speed_observer_ = helix::ui::observe_int_sync<FanWidget>(
+        speed_observer_ = helix::ui::observe<int>(
             subj, this,
             [token](FanWidget* self, int speed) {
                 if (token.expired())
@@ -236,7 +226,7 @@ void FanWidget::update_display() {
         } else {
             // Read current value from subject
             auto& ps = get_printer_state();
-            lv_subject_t* subj = ps.get_fan_speed_subject(selected_fan_);
+            lv_subject_t* subj = ps.fan_state().get_fan_speed_subject(selected_fan_);
             if (subj) {
                 int speed = lv_subject_get_int(subj);
                 snprintf(speed_buffer_, sizeof(speed_buffer_), "%d%%", speed);
@@ -249,7 +239,8 @@ void FanWidget::update_display() {
 
     if (name_label_) {
         if (selected_fan_.empty()) {
-            lv_label_set_text(name_label_, lv_tr("Select fan"));
+            // A tag, not lv_tr() text: the label then re-translates itself.
+            lv_label_set_translation_tag(name_label_, "Select fan");
         } else {
             lv_label_set_text(name_label_, display_name_.c_str());
         }
@@ -275,7 +266,7 @@ void FanWidget::show_fan_picker() {
         return;
     }
 
-    if (get_printer_state().get_fans().empty()) {
+    if (get_printer_state().fan_state().get_fans().empty()) {
         spdlog::warn("[FanWidget] No fans available for picker");
         return;
     }
@@ -293,7 +284,7 @@ void FanWidget::FanPicker::on_created(lv_obj_t* menu_obj) {
         return;
     }
 
-    const auto& fans = get_printer_state().get_fans();
+    const auto& fans = get_printer_state().fan_state().get_fans();
 
     int space_xs = resolve_space_token("space_xs", 4);
     int space_sm = resolve_space_token("space_sm", 6);

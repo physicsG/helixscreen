@@ -301,6 +301,10 @@ If `HELIX_ANALYTICS_READ_TOKEN` needs to be recreated:
 | `connection_stability` | Connection lifecycle | connect_count, disconnect_count, total_connected_sec, klippy_error_count |
 | `print_start_context` | Print metadata at start | source, has_thumbnail, file_size_bucket, slicer, ams_active |
 | `error_encountered` | Rate-limited error log | category, code, context, uptime_sec |
+| `performance_snapshot` | Frame-time percentiles and dropped-frame counts | frame_time_p50/p95/p99_ms, dropped_frame_count, total_frame_count, worst_panel |
+| `feature_adoption` | Which built-in features are in use | features{} boolean flags |
+| `settings_changes` | Batched setting diffs | changes[]: setting, old_value, new_value |
+| `async_lifetime_skips` | Deferred async work skipped at shutdown | skips[], window stats |
 
 ### Event Trigger Summary
 
@@ -311,11 +315,15 @@ If `HELIX_ANALYTICS_READ_TOKEN` needs to be recreated:
 | `settings_snapshot` | After printer discovery | Once per launch |
 | `memory_snapshot` | Session start + hourly timer | ~1/hour |
 | `memory_warning` | Memory threshold breach | Rate-limited: 1/level/5min |
-| `panel_usage` | App shutdown | Once per session |
-| `connection_stability` | App shutdown | Once per session |
+| `panel_usage` | Periodic snapshot (4h) and app shutdown | ~every 4h |
+| `connection_stability` | Periodic snapshot (4h) and app shutdown | ~every 4h |
 | `print_outcome` | Print reaches terminal state | Per print |
 | `print_start_context` | Print starts (metadata callback) | Per print |
 | `error_encountered` | On non-fatal error | Rate-limited: 1/category/5min |
+| `performance_snapshot` | Hourly timer and app shutdown | ~1/hour |
+| `feature_adoption` | 5 minutes after startup | Once per session |
+| `settings_changes` | Debounced after a setting change | ~30s after the last change |
+| `async_lifetime_skips` | Periodic snapshot and app shutdown | With each `panel_usage` |
 | `crash` | Next boot after crash | Once per crash |
 | `update_failed` | Update failure | Per failure |
 | `update_success` | Next boot after update | Once per update |

@@ -107,6 +107,8 @@ class EthernetManager {
      */
     std::string get_ip_address();
 
+    friend class EthernetManagerTestAccess;
+
   private:
     // Held as shared_ptr so that an in-flight async worker (see
     // get_info_async) can keep the backend alive past EthernetManager's

@@ -141,7 +141,6 @@ TEST_CASE_METHOD(LVGLTestFixture, "2D tonal range by filament colour", "[.][cont
     for (const auto& f : filaments) {
         GCodeLayerRenderer r;
         r.set_gcode(&gcode);
-        r.set_view_mode(GCodeLayerRenderer::ViewMode::FRONT);
         r.set_ghost_mode(false);
         r.set_ssao_enabled(true);
         r.set_antialias_enabled(false); // isolate shading from edge coverage
@@ -200,7 +199,6 @@ TEST_CASE_METHOD(LVGLTestFixture, "2D tonal range via the tool palette", "[.][co
     for (const char* hex : hexes) {
         GCodeLayerRenderer r;
         r.set_gcode(&gcode);
-        r.set_view_mode(GCodeLayerRenderer::ViewMode::FRONT);
         r.set_ghost_mode(false);
         r.set_ssao_enabled(true);
         r.set_antialias_enabled(false);

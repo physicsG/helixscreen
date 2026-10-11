@@ -7,11 +7,12 @@
 
 #include "filament_catalog.h"
 #include "filament_database.h"
+#include "json_utils.h"
 #include "lvgl/src/others/translation/lv_translation.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/spdlog.h>
 
-#include <fstream>
 #include <string>
 #include <vector>
 
@@ -22,25 +23,11 @@ using helix::printer::FilamentCatalog;
 
 namespace {
 
-// Built-in catalog search paths, mirroring filament_catalog.cpp's private
-// BUILTIN_PATHS. Used only to answer "is this id shipped?" for the secondary
-// button label (Delete vs Restore Defaults); the resolved values themselves
-// come from FilamentCatalog::load_full().
-const char* BUILTIN_PATHS[] = {"assets/filaments.json", "../assets/filaments.json",
-                               "/opt/helixscreen/assets/filaments.json"};
-
-std::string first_existing_builtin() {
-    for (const char* p : BUILTIN_PATHS) {
-        std::ifstream f(p);
-        if (f.is_open())
-            return p;
-    }
-    return "";
-}
-
-/// True if @p id is present in the shipped (built-in-only) catalog.
+/// True if @p id is present in the shipped (built-in-only) catalog. Decides the
+/// secondary button label (Delete vs Restore Defaults); the resolved values
+/// themselves come from FilamentCatalog::load_full().
 bool id_in_builtin(const std::string& id) {
-    const std::string path = first_existing_builtin();
+    const std::string path = FilamentCatalog::builtin_asset_path();
     if (path.empty())
         return false;
     FilamentCatalog builtin = FilamentCatalog::load_from_file(path, /*codes_only=*/false, "");
@@ -50,7 +37,7 @@ bool id_in_builtin(const std::string& id) {
 /// True if an authored overlay entry already exists for @p id.
 bool id_in_overlay(const std::string& id) {
     for (const auto& p : FilamentCatalog::load_user_products()) {
-        if (p.is_object() && p.value("id", "") == id)
+        if (p.is_object() && helix::json_util::safe_string(p, "id", "") == id)
             return true;
     }
     return false;
@@ -95,10 +82,8 @@ FilamentProductEditModal::FilamentProductEditModal() = default;
 FilamentProductEditModal::~FilamentProductEditModal() {
     if (active_instance_ == this)
         active_instance_ = nullptr;
-    if (subjects_initialized_ && lv_is_initialized()) {
-        lv_subject_deinit(&secondary_text_subject_);
-        subjects_initialized_ = false;
-    }
+    subjects_.deinit_all();
+    subjects_initialized_ = false;
 }
 
 void FilamentProductEditModal::set_on_saved(SavedCallback cb) {
@@ -161,7 +146,7 @@ void FilamentProductEditModal::init_subjects() {
         return;
     lv_subject_init_string(&secondary_text_subject_, secondary_text_buf_, nullptr,
                            sizeof(secondary_text_buf_), lv_tr("Delete"));
-    lv_xml_register_subject(nullptr, "filament_product_secondary_text", &secondary_text_subject_);
+    subjects_.publish("filament_product_secondary_text", &secondary_text_subject_);
     subjects_initialized_ = true;
 }
 
@@ -244,7 +229,7 @@ FilamentFormValues FilamentProductEditModal::read_form() const {
     v.brand = get_input_text(dialog_, "field_brand");
     v.name = get_input_text(dialog_, "field_name");
 
-    if (lv_obj_t* dd = lv_obj_find_by_name(dialog_, "type_dropdown")) {
+    if (lv_obj_t* dd = helix::ui::find_required(dialog_, "type_dropdown", get_name())) {
         char buf[64] = {};
         lv_dropdown_get_selected_str(dd, buf, sizeof(buf));
         v.type = buf;
@@ -290,7 +275,7 @@ void FilamentProductEditModal::handle_save() {
     }
 
     const nlohmann::json sparse = build_product_json(v);
-    const std::string id = sparse.value("id", "");
+    const std::string id = helix::json_util::safe_string(sparse, "id", "");
 
     auto products = FilamentCatalog::load_user_products();
 
@@ -298,7 +283,7 @@ void FilamentProductEditModal::handle_save() {
     // merge-patching the sparse form values over the existing overlay entry.
     nlohmann::json to_write = sparse;
     for (const auto& p : products) {
-        if (p.is_object() && p.value("id", "") == id) {
+        if (p.is_object() && helix::json_util::safe_string(p, "id", "") == id) {
             to_write = p;                 // start from the existing authored entry
             to_write.merge_patch(sparse); // overlay the form's fields
             break;

@@ -55,8 +55,11 @@ class PrinterCompositeVisibilityState {
      * @brief Recalculate `has_any_preprint_options`
      *
      * Sets to 1 iff:
-     *   (plugin_installed AND any of bed_mesh/qgl/z_tilt/nozzle_clean/purge_line)
+     *   (plugin_installed AND macro_option_count > 0)
      *   OR timelapse capability OR framework_option_count > 0.
+     *
+     * Leveling hardware alone never counts: its row exists only when the
+     * database declares it or PRINT_START offers a skip parameter for it.
      *
      * Only writes the subject when the computed value differs from the current
      * one (avoids spurious observer notifications).
@@ -65,9 +68,11 @@ class PrinterCompositeVisibilityState {
      * @param capabilities Reference to capabilities state for has_* queries
      * @param framework_option_count Count of options declared by the new
      *        PrePrintOption framework for the active printer.
+     * @param macro_option_count Rows the PRINT_START analysis adds; each needs
+     *        the plugin to deliver its skip.
      */
     void update_visibility(bool plugin_installed, const PrinterCapabilitiesState& capabilities,
-                           size_t framework_option_count = 0);
+                           size_t framework_option_count = 0, size_t macro_option_count = 0);
 
     /**
      * @brief Get aggregate subject: 1 if ANY preprint option row is visible

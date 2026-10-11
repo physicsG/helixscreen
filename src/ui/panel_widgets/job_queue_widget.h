@@ -39,7 +39,7 @@ class JobQueueWidget : public PanelWidget {
     int current_size_mode_ = 1;         // 0=compact, 1=normal, 2=expanded
     bool list_rebuild_pending_ = false; ///< Coalesces rapid count observer notifications
 
-    /// Guards lv_async_call callbacks from accessing a detached widget
+    /// Guards next-tick callbacks from accessing a detached widget
     helix::AsyncLifetimeGuard lifetime_;
 
     void rebuild_job_list();

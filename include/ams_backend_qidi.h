@@ -4,13 +4,21 @@
 #if HELIX_HAS_QIDI
 
 #include "ams_subscription_backend.h"
+#include "filament_slot_override.h"
+#include "filament_slot_override_store.h"
+#include "lane_binding.h"
+#include "lane_echo.h"
 
 #include <cstdint>
 #include <ctime>
 #include <functional>
 #include <map>
+#include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
+
+namespace helix {
 
 /// AMS backend stub for the QIDI Box filament changer.
 ///
@@ -59,11 +67,36 @@ class AmsBackendQidi : public AmsSubscriptionBackend {
     [[nodiscard]] AmsType get_type() const override {
         return AmsType::QIDI_BOX;
     }
-    // QIDI Box exposes user-tunable per-lane eject distance + velocity, which the
-    // device-operations overlay surfaces as slider rows.
-    [[nodiscard]] bool supports_configurable_eject_params() const override {
-        return true;
+    /// Constant capability answers; see BackendTraits.
+    static constexpr BackendTraits kTraits = [] {
+        BackendTraits t;
+        // QIDI Box exposes user-tunable per-lane eject distance + velocity, which the
+        // device-operations overlay surfaces as slider rows.
+        t.supports_configurable_eject_params = true;
+        // The Box publishes a per-slot state word (save_variables slot<N>, where 2
+        // means loaded), which is its own statement about that slot and needs no
+        // active-slot pointer to interpret. The aggregate pair by contrast is
+        // written only from last_load_slot, so on a Box that never writes that
+        // variable nothing would ever read as loaded despite slot<N>: 2 on the
+        // wire. parse_save_variables() reconciles the two at the end of every pass
+        // so the stamp cannot fall behind the aggregate either
+        // (prestonbrown/helixscreen#1199).
+        t.has_per_slot_loaded_authority = true;
+        // The box exposes a PTC dryer heater (heater_generic heater_box<N>) plus an
+        // aht20_f humidity/temperature chip, so the per-unit environment indicator
+        // (temp/humidity + drying controls) must be reachable. Without this override
+        // the indicator widget is hard-hidden in ams_detail_pre_show_env_indicator().
+        t.has_environment_sensors = true;
+        // load_filament() drives the stock EXTRUDER_LOAD primitive directly and
+        // manages hotend temperature itself (heat → load → clear → cool), so the UI
+        // must not run its own preheat for QIDI loads.
+        t.supports_auto_heat_on_load = true;
+        return t;
+    }();
+    [[nodiscard]] BackendTraits traits() const override {
+        return kTraits;
     }
+
     [[nodiscard]] PathTopology get_topology() const override {
         return PathTopology::HUB;
     }
@@ -94,37 +127,22 @@ class AmsBackendQidi : public AmsSubscriptionBackend {
     [[nodiscard]] bool owns_tool_mapping_table() const override {
         return true;
     }
-    [[nodiscard]] SlotInfo get_slot_info(int slot_index) const override;
     [[nodiscard]] bool is_bypass_active() const override;
 
-    /// The Box publishes a per-slot state word (save_variables slot<N>, where 2
-    /// means loaded), which is its own statement about that slot and needs no
-    /// active-slot pointer to interpret. The aggregate pair by contrast is
-    /// written only from last_load_slot, so on a Box that never writes that
-    /// variable nothing would ever read as loaded despite slot<N>: 2 on the
-    /// wire. parse_save_variables() reconciles the two at the end of every pass
-    /// so the stamp cannot fall behind the aggregate either
-    /// (prestonbrown/helixscreen#1199).
-    [[nodiscard]] bool has_per_slot_loaded_authority() const override {
-        return true;
-    }
-
-    // The box exposes a PTC dryer heater (heater_generic heater_box<N>) plus an
-    // aht20_f humidity/temperature chip, so the per-unit environment indicator
-    // (temp/humidity + drying controls) must be reachable. Without this override
-    // the indicator widget is hard-hidden in ams_detail_pre_show_env_indicator().
-    [[nodiscard]] bool has_environment_sensors() const override {
-        return true;
-    }
-
-    // load_filament() drives the stock EXTRUDER_LOAD primitive directly and
-    // manages hotend temperature itself (heat → load → clear → cool), so the UI
-    // must not run its own preheat for QIDI loads.
-    [[nodiscard]] bool supports_auto_heat_on_load() const override {
-        return true;
-    }
-
   protected:
+    // The Box's slots are painted SlotInfo state that persists between
+    // save_variables polls, not re-read from firmware each pass, so a lane
+    // written from outside the parse (a person's edit) names the slot here and
+    // repaint_slot_from_lane() reaches it before the next poll arrives.
+    SlotInfo* cached_slot_locked(int slot_index) override;
+
+    // The parse restates the tag-painted fields (material, colour, brand) from
+    // the save_variables tables every poll, but spool name, catalogue pick,
+    // product line and vendor id exist only in the lane's records - nothing on
+    // this Box ever restates them, so a repaint must drop them from the struct
+    // or the record a rebind or a drop replaced keeps showing.
+    void prepare_lane_repaint_locked(int slot_index, SlotInfo& slot) override;
+
     // Operations. Gated by AmsSubscriptionBackend's NVI wrapper.
     // select_slot_moves_toolhead() stays false: do_select_slot() is
     // not_supported here — load_filament is the only path.
@@ -162,8 +180,13 @@ class AmsBackendQidi : public AmsSubscriptionBackend {
         return box_uses_multi_color_ || fw_force_move_enabled_;
     }
 
-    AmsError set_slot_info(int slot_index, const SlotInfo& info, bool persist = true) override;
-    AmsError set_tool_mapping(int tool_number, int slot_index) override;
+    AmsError apply_user_edit(int slot_index, const SlotInfo& info,
+                             const helix::ams::Observation& declared) override;
+    AmsError sync_external_identity(int slot_index, const SlotInfo& info) override;
+    void update_slot_weight_impl(int slot_index, float remaining_weight_g, float total_weight_g,
+                                 bool persist) override;
+    [[nodiscard]] AmsError can_set_tool_mapping(int tool_number, int slot_index) const override;
+    AmsError set_tool_mapping_impl(int tool_number, int slot_index) override;
     void clear_slot_override(int slot_index) override;
 
     AmsError enable_bypass() override;
@@ -176,7 +199,7 @@ class AmsBackendQidi : public AmsSubscriptionBackend {
 
   protected:
     void on_started() override;
-    void handle_status_update(const nlohmann::json& notification) override;
+    void handle_status(const nlohmann::json& status) override;
     const char* backend_log_tag() const override {
         return "[AMS QIDI Box]";
     }
@@ -223,7 +246,7 @@ class AmsBackendQidi : public AmsSubscriptionBackend {
     void apply_box_extras(const nlohmann::json& box_extras);
 
     /// Unwrap a printer.objects.query response (`result.status.{...}`)
-    /// and feed the inner object through handle_status_update so the
+    /// and feed the inner object through handle_status so the
     /// bootstrap fetch reuses every parser already exercised by the
     /// notification path.
     void apply_query_response(const nlohmann::json& response);
@@ -295,7 +318,7 @@ class AmsBackendQidi : public AmsSubscriptionBackend {
     /// vendor_list id → vendor name, populated by apply_filas_list().
     std::map<int, std::string> vendor_names_;
 
-    // --- Reverse lookups for set_slot_info() (pure, no member access) ---
+    // --- Reverse lookups for apply_user_edit() (pure, no member access) ---
     //
     // Map a SlotInfo back onto the three stock RFID indices written to
     // save_variables. Static + parameterised by the parsed maps so they
@@ -316,6 +339,62 @@ class AmsBackendQidi : public AmsSubscriptionBackend {
     /// else 0.
     static int resolve_vendor_id(const std::map<int, std::string>& vendors,
                                  const std::string& brand);
+
+    /// Fold a persisted fingerprint from a build whose composite counted the
+    /// vendor id onto the current shape, which counts evidence only. Values
+    /// already current, empty, or not ours pass through unchanged.
+    static std::string normalize_legacy_fingerprint(const std::string& stored);
+
+    /// Observe one slot's tag fingerprint and clear a standing user edit when
+    /// the ids a change carried decode to a different spool than the ones they
+    /// replaced, for a reason other than our own identity push. *verdict (when
+    /// given) receives the insert rule's classification of the change; it is
+    /// left untouched unless the fingerprint actually changed, so a caller
+    /// holding a NoEvidence default keeps it. Caller must hold mutex_.
+    /// Returns whether the change cleared an override.
+    bool check_hardware_event_clear(SlotInfo& slot, int slot_index, const std::string& observed_uid,
+                                    helix::ams::InsertVerdict* verdict = nullptr);
+
+    /// Decode a "fila|color" fingerprint back through the Box's tables into
+    /// the evidence those ids state about the spool: the fila row's material
+    /// and the palette row's colour. No tag UID exists on this Box, so the
+    /// ids themselves are the read and a non-empty fingerprint is a finished
+    /// one. Caller must hold mutex_.
+    [[nodiscard]] helix::ams::SpoolEvidence
+    fingerprint_evidence_locked(const std::string& fingerprint) const;
+
+    /// Cross-product the per-field id lists into the fingerprint set the slot
+    /// may report while our own SAVE_VARIABLEs echo back one field at a time,
+    /// and register it with rfid_tracker_ so each echo reads as OwnWriteEcho
+    /// instead of a spool swap. The vendor write needs no composite of its
+    /// own: the fingerprint does not count the vendor id. Returns the staged
+    /// values, for a forget_expected() release when none of the writes
+    /// dispatch. Caller must hold mutex_.
+    std::vector<std::string> expect_own_write_echoes_locked(int slot_index, const std::string& base,
+                                                            const std::vector<int>& fila_vals,
+                                                            const std::vector<int>& color_vals);
+
+    /// Blanks everything the slot showed, material and colour included, so it
+    /// reads as no identity the moment the clear lands; the parse restates
+    /// whatever the Box still reports.
+    void clear_override_fields(SlotInfo& slot) const override;
+
+    // Per-slot last-observed tag fingerprint (the composite of the three
+    // save_variable table indices), plus the pending expected fingerprints for
+    // an identity push we issued. Shared with the other fingerprint backends
+    // (CFS, Snapmaker). All access under mutex_.
+    helix::ams::SlotFingerprintTracker rfid_tracker_;
+
+    // The base's own_write_echoes_, on this backend:
+    // What the user's own SAVE_VARIABLE push declared, so the ids echoing
+    // back through save_variables are not filed as the Box's reading. The
+    // ids name table rows rather than spelling the values, so the staged
+    // declaration is relocated to what the rows resolve to. No boundary
+    // token exists for this lane: suppression ends on a value the write did
+    // not carry, or with the override at the fingerprint-change clear, which
+    // is the Box's own spool-swap signal.
 };
+
+} // namespace helix
 
 #endif // HELIX_HAS_QIDI

@@ -1,8 +1,8 @@
 # Seven new home-panel widgets
 
 Date: 2026-08-12
-Branch: `feature/home-widgets`, based on `fix/grid-cell-metrics`
-Status: approved design, not yet implemented
+Status: approved design. Batch 0 (the DRY refactors) is on main; none of the seven widgets
+(batches 1-3) is built, and no branch carries them.
 
 ## Goal
 
@@ -506,6 +506,8 @@ the seven depend on one of its extractions.
 - Half-cell support for any new widget. No new widget sets `supports_half_col` or
   `supports_half_row`; `test_grid_layout.cpp:438-470` pins the current set of five
   and adding a sixth is a separate decision.
+  *(Superseded by prestonbrown/helixscreen#1559: the eighteen centred-icon tiles set
+  both flags; see `LAYOUT_SYSTEM.md` § "Widget span authoring".)*
 - The three parked layout design questions and the known-red
   `test_grid_edit_drag_path.cpp:285-286`, both owned by the square-cell work.
 - Task 12 (AMS mini-status) and the `LAYOUT_SYSTEM.md` span-authoring rewrite
@@ -515,9 +517,7 @@ the seven depend on one of its extractions.
 
 # Batch 0 outcome and inputs to later batches
 
-Batch 0 (the DRY refactors) is complete: 13 commits on `feature/home-widgets`,
-branched from `fix/grid-cell-metrics`. Plan:
-`docs/devel/plans/2026-08-12-home-widgets-batch0-dry.md`.
+Batch 0 (the DRY refactors) is complete and on main.
 
 ## What Batch 0 delivered
 

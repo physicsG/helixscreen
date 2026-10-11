@@ -180,7 +180,7 @@ class InputShaperDeltaFixture : public LVGLUITestFixture {
 
         PrinterStateTestAccess::reset(get_printer_state());
         get_printer_state().init_subjects(false);
-        lv_subject_copy_string(get_printer_state().get_homed_axes_subject(), "xyz");
+        lv_subject_copy_string(get_printer_state().motion_state().get_homed_axes_subject(), "xyz");
 
         panel_ = &get_global_input_shaper_panel();
         panel_->init_subjects();
@@ -200,7 +200,7 @@ class InputShaperDeltaFixture : public LVGLUITestFixture {
     }
 
     ~InputShaperDeltaFixture() override {
-        panel_->on_deactivate();
+        panel_->on_deactivate(DeactivateReason::NavigateAway);
         helix::ui::UpdateQueue::instance().drain();
 
         // Drop the panel's subjects BEFORE the view: the view's bind observers

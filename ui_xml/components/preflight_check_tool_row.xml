@@ -34,8 +34,8 @@
             style_pad_all="0" scrollable="false" clickable="false" event_bubble="true"/>
     <!-- "EMPTY" label shown when the mapped slot has no filament. -->
     <lv_label name="empty_label"
-              hidden="true" text="EMPTY" translation_tag="EMPTY" style_text_font="#font_body"
-              style_text_color="#warning" clickable="false" event_bubble="true"/>
+              hidden="true" text="EMPTY" style_text_font="#font_body" style_text_color="#warning" clickable="false"
+              event_bubble="true"/>
     <!-- Severity glyph (✓ success / ⚠ warning / ✗ danger). Source + variant
          set from C++. Pushed to the trailing edge by flex_grow. -->
     <icon name="severity_icon" src="check" size="sm" variant="success" flex_grow="1" style_text_align="right"/>

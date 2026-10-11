@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "../lvgl_test_fixture.h"
+#include "../test_helpers/scoped_shared_resource.h"
 #include "lvgl/lvgl.h"
-#include "panel_widget_manager.h"
 #include "printer_state.h"
 #include "src/ui/panel_widgets/heater_temp_widget.h"
 #include "temperature_service.h"
@@ -49,8 +49,7 @@ TEST_CASE_METHOD(TempWidgetFixture,
                  "[temperature_widget][regression]") {
     // Simulate TemperatureService shared resource
     auto tcp = std::make_shared<TemperatureService>(state(), nullptr);
-    auto& mgr = PanelWidgetManager::instance();
-    mgr.register_shared_resource<TemperatureService>(tcp.get());
+    helix_test::ScopedSharedResource<TemperatureService> scope(tcp);
 
     // Build mock widget tree
     lv_obj_t* container = create_mock_temperature_widget(test_screen());
@@ -59,7 +58,7 @@ TEST_CASE_METHOD(TempWidgetFixture,
 
     // Create and attach widget
     HeaterTempWidget widget(state(), tcp.get(), nozzle_temp_config());
-    widget.attach(container, test_screen());
+    widget.attach_tile(container, test_screen());
 
     SECTION("user_data is on the container") {
         auto* recovered = static_cast<HeaterTempWidget*>(lv_obj_get_user_data(container));
@@ -73,29 +72,27 @@ TEST_CASE_METHOD(TempWidgetFixture,
     }
 
     SECTION("detach clears container user_data") {
-        widget.detach();
+        widget.detach_tile();
         auto* recovered = lv_obj_get_user_data(container);
         REQUIRE(recovered == nullptr);
     }
 
     // Clean up (detach is idempotent)
-    widget.detach();
-    mgr.clear_shared_resources();
+    widget.detach_tile();
 }
 
 TEST_CASE_METHOD(TempWidgetFixture,
                  "TemperatureWidget: click callback recovers widget via per-callback user_data",
                  "[temperature_widget][regression]") {
     auto tcp = std::make_shared<TemperatureService>(state(), nullptr);
-    auto& mgr = PanelWidgetManager::instance();
-    mgr.register_shared_resource<TemperatureService>(tcp.get());
+    helix_test::ScopedSharedResource<TemperatureService> scope(tcp);
 
     lv_obj_t* container = create_mock_temperature_widget(test_screen());
     lv_obj_t* btn = lv_obj_find_by_name(container, "temp_btn");
     REQUIRE(btn != nullptr);
 
     HeaterTempWidget widget(state(), tcp.get(), nozzle_temp_config());
-    widget.attach(container, test_screen());
+    widget.attach_tile(container, test_screen());
 
     // temp_clicked_cb now uses lv_event_get_user_data(e) (per-callback user_data)
     // rather than lv_obj_get_user_data(btn). Verify the container holds the widget
@@ -104,8 +101,7 @@ TEST_CASE_METHOD(TempWidgetFixture,
     REQUIRE(recovered != nullptr);
     REQUIRE(recovered == &widget);
 
-    widget.detach();
-    mgr.clear_shared_resources();
+    widget.detach_tile();
 }
 
 TEST_CASE_METHOD(TempWidgetFixture,
@@ -133,10 +129,13 @@ TEST_CASE_METHOD(TempWidgetFixture,
     }
 
     SECTION("subject getters resolve to the heater's own subjects") {
-        REQUIRE(chamber.temp_getter(state()) == state().get_chamber_temp_subject());
-        REQUIRE(chamber.target_getter(state()) == state().get_chamber_target_subject());
-        REQUIRE(bed.temp_getter(state()) == state().get_bed_temp_subject());
-        REQUIRE(nozzle.temp_getter(state()) == state().get_active_extruder_temp_subject());
+        REQUIRE(chamber.temp_getter(state()) ==
+                state().temperature_state().get_chamber_temp_subject());
+        REQUIRE(chamber.target_getter(state()) ==
+                state().temperature_state().get_chamber_target_subject());
+        REQUIRE(bed.temp_getter(state()) == state().temperature_state().get_bed_temp_subject());
+        REQUIRE(nozzle.temp_getter(state()) ==
+                state().temperature_state().get_active_extruder_temp_subject());
         // Distinct heaters never alias the same subject.
         REQUIRE(chamber.temp_getter(state()) != bed.temp_getter(state()));
         REQUIRE(chamber.temp_getter(state()) != nozzle.temp_getter(state()));

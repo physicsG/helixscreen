@@ -10,7 +10,6 @@
 
 #include "ui_event_safety.h"
 #include "ui_modal.h"
-#include "ui_nav_manager.h"
 #include "ui_severity_card.h"
 #include "ui_toast_manager.h"
 #include "ui_update_queue.h"
@@ -20,99 +19,11 @@
 #include "hardware_validator.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "printer_state.h"
-#include "static_panel_registry.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/spdlog.h>
 
-#include <memory>
-
 namespace helix::settings {
-
-// ============================================================================
-// SINGLETON ACCESSOR
-// ============================================================================
-
-static std::unique_ptr<HardwareHealthOverlay> g_hardware_health_overlay;
-
-HardwareHealthOverlay& get_hardware_health_overlay() {
-    if (!g_hardware_health_overlay) {
-        g_hardware_health_overlay = std::make_unique<HardwareHealthOverlay>();
-        StaticPanelRegistry::instance().register_destroy(
-            "HardwareHealthOverlay", []() { g_hardware_health_overlay.reset(); });
-    }
-    return *g_hardware_health_overlay;
-}
-
-// ============================================================================
-// CONSTRUCTOR / DESTRUCTOR
-// ============================================================================
-
-HardwareHealthOverlay::HardwareHealthOverlay() {
-    spdlog::debug("[{}] Created", get_name());
-}
-
-HardwareHealthOverlay::~HardwareHealthOverlay() {
-    spdlog::trace("[{}] Destroyed", get_name());
-}
-
-// ============================================================================
-// INITIALIZATION
-// ============================================================================
-
-void HardwareHealthOverlay::register_callbacks() {
-    // No XML callbacks needed - on_hardware_health_clicked is registered in SettingsPanel
-    // Action button callbacks use lv_obj_add_event_cb (dynamic row creation)
-    spdlog::debug("[{}] Callbacks registered", get_name());
-}
-
-// ============================================================================
-// UI CREATION
-// ============================================================================
-
-lv_obj_t* HardwareHealthOverlay::create(lv_obj_t* parent) {
-    if (overlay_root_) {
-        spdlog::warn("[{}] create() called but overlay already exists", get_name());
-        return overlay_root_;
-    }
-
-    spdlog::debug("[{}] Creating overlay...", get_name());
-
-    // Create from XML component
-    overlay_root_ =
-        static_cast<lv_obj_t*>(lv_xml_create(parent, "hardware_health_overlay", nullptr));
-    if (!overlay_root_) {
-        spdlog::error("[{}] Failed to create overlay from XML", get_name());
-        return nullptr;
-    }
-
-    // Initially hidden until show() pushes it
-    lv_obj_add_flag(overlay_root_, LV_OBJ_FLAG_HIDDEN);
-
-    spdlog::info("[{}] Overlay created", get_name());
-    return overlay_root_;
-}
-
-void HardwareHealthOverlay::show(lv_obj_t* parent_screen) {
-    spdlog::debug("[{}] show() called", get_name());
-
-    parent_screen_ = parent_screen;
-
-    // Lazy create overlay
-    if (!overlay_root_ && parent_screen_) {
-        create(parent_screen_);
-    }
-
-    if (!overlay_root_) {
-        spdlog::error("[{}] Cannot show - overlay not created", get_name());
-        return;
-    }
-
-    // Register with NavigationManager for lifecycle callbacks
-    NavigationManager::instance().register_overlay_instance(overlay_root_, this);
-
-    // Push onto navigation stack (on_activate will be called, which populates issues)
-    NavigationManager::instance().push_overlay(overlay_root_);
-}
 
 // ============================================================================
 // LIFECYCLE HOOKS
@@ -125,9 +36,7 @@ void HardwareHealthOverlay::on_activate() {
     populate_hardware_issues();
 }
 
-void HardwareHealthOverlay::on_deactivate() {
-    OverlayBase::on_deactivate();
-
+void HardwareHealthOverlay::on_deactivating(DeactivateReason) {
     // Clean up any open modal dialog
     if (hardware_save_dialog_) {
         helix::ui::modal_hide(hardware_save_dialog_);
@@ -150,7 +59,8 @@ void HardwareHealthOverlay::populate_hardware_issues() {
         return;
     }
 
-    const auto& result = printer_state_->get_hardware_validation_result();
+    const auto& result =
+        printer_state_->hardware_validation_state().get_hardware_validation_result();
 
     // Helper to convert severity enum to string for XML attribute
     auto severity_to_string = [](HardwareIssueSeverity sev) -> const char* {
@@ -190,22 +100,24 @@ void HardwareHealthOverlay::populate_hardware_issues() {
             ui_severity_card_finalize(row);
 
             // Set hardware name
-            lv_obj_t* name_label = lv_obj_find_by_name(row, "hardware_name");
+            lv_obj_t* name_label = helix::ui::find_required(row, "hardware_name", get_name());
             if (name_label) {
                 lv_label_set_text(name_label, issue.hardware_name.c_str());
             }
 
             // Set issue message
-            lv_obj_t* message_label = lv_obj_find_by_name(row, "issue_message");
+            lv_obj_t* message_label = helix::ui::find_required(row, "issue_message", get_name());
             if (message_label) {
-                lv_label_set_text(message_label, issue.message.c_str());
+                // Messages are TR_NOOP keys; a tag keeps the row re-translatable.
+                lv_label_set_translation_tag(message_label, issue.message.c_str());
             }
 
             // Configure action buttons for non-critical issues
             if (issue.severity != HardwareIssueSeverity::CRITICAL) {
-                lv_obj_t* action_buttons = lv_obj_find_by_name(row, "action_buttons");
-                lv_obj_t* ignore_btn = lv_obj_find_by_name(row, "ignore_btn");
-                lv_obj_t* save_btn = lv_obj_find_by_name(row, "save_btn");
+                lv_obj_t* action_buttons =
+                    helix::ui::find_required(row, "action_buttons", get_name());
+                lv_obj_t* ignore_btn = helix::ui::find_required(row, "ignore_btn", get_name());
+                lv_obj_t* save_btn = helix::ui::find_required(row, "save_btn", get_name());
 
                 if (action_buttons && ignore_btn) {
                     // Show button container
@@ -318,7 +230,7 @@ void HardwareHealthOverlay::handle_hardware_action(const char* hardware_name, bo
 
         // Remove from cached validation result and refresh overlay
         if (printer_state_) {
-            printer_state_->remove_hardware_issue(hw_name);
+            printer_state_->hardware_validation_state().remove_hardware_issue(hw_name);
         }
         // The Ignore button that fired this event is a child of the list cleaned by
         // populate_hardware_issues(). Defer the rebuild off the click stack; the actual
@@ -376,7 +288,7 @@ void HardwareHealthOverlay::handle_hardware_save_confirm() {
 
     // Remove from cached validation result and refresh overlay
     if (printer_state_) {
-        printer_state_->remove_hardware_issue(pending_hardware_save_);
+        printer_state_->hardware_validation_state().remove_hardware_issue(pending_hardware_save_);
     }
     // Defer rebuild for consistency with the Ignore path. The actual batch-escape
     // comes from safe_clean_children() inside populate_hardware_issues [L081].

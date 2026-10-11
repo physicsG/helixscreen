@@ -1,12 +1,20 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "ui_update_queue.h"
+
 #include "../helix_test_fixture.h"
 #include "../lvgl_test_fixture.h"
+#include "../test_helpers/printer_state_test_access.h"
+#include "../ui_test_utils.h"
+#include "app_constants.h"
 #include "app_globals.h"
 #include "config.h"
+#include "printer_state.h"
 #include "system/debug_bundle_collector.h"
 #include "system/update_checker.h"
+#include "test_helpers/scoped_update_urls.h"
+#include "test_helpers/unique_temp_dir.h"
 
 #include <spdlog/spdlog.h>
 
@@ -76,15 +84,50 @@ TEST_CASE("DebugBundleCollector: collect() returns valid JSON with expected keys
 // collect_system_info() tests [debug-bundle]
 // ============================================================================
 
-TEST_CASE("DebugBundleCollector: collect_system_info() has platform and ram", "[debug-bundle]") {
-    json sys = helix::DebugBundleCollector::collect_system_info();
+TEST_CASE("DebugBundleCollector: collect_system_info() projects its Diagnostics",
+          "[debug-bundle]") {
+    // A synthetic snapshot: the values are distinctive on purpose, so the test
+    // goes red the moment collect_system_info() computes anything itself
+    // instead of reading the snapshot it was handed.
+    helix::diagnostics::Diagnostics diag;
+    diag.identity.platform_key = "k1c-sim";
+    diag.identity.host_arch = "arm-sim";
+    diag.machine.cpu_cores = 7;
+    diag.machine.mem_total_kb = 3ULL * 1024 * 1024;
+    diag.machine.uptime_seconds = 3610.9;
 
-    REQUIRE(sys.contains("platform"));
-    REQUIRE(sys["platform"].is_string());
-    REQUIRE_FALSE(sys["platform"].get<std::string>().empty());
+    json sys = helix::DebugBundleCollector::collect_system_info(diag, {});
 
-    REQUIRE(sys.contains("total_ram_mb"));
-    REQUIRE(sys.contains("cpu_cores"));
+    CHECK(sys.at("platform") == json("k1c-sim"));
+    CHECK(sys.at("host_arch") == json("arm-sim"));
+    CHECK(sys.at("total_ram_mb") == json(3072));
+    CHECK(sys.at("cpu_cores") == json(7));
+    CHECK(sys.at("uptime_seconds") == json(3610));
+}
+
+TEST_CASE("DebugBundleCollector: system section agrees with diagnostics section",
+          "[debug-bundle]") {
+    json bundle = helix::DebugBundleCollector::collect();
+
+    REQUIRE(bundle.contains("system"));
+    REQUIRE(bundle.contains("diagnostics"));
+    const json& sys = bundle["system"];
+    const json& ident = bundle["diagnostics"]["identity"];
+
+    // collect() feeds the live host census into the same section.
+    if (std::filesystem::exists("/etc/os-release")) {
+        CHECK(sys.contains("os_pretty_name"));
+    }
+    const json& mach = bundle["diagnostics"]["machine"];
+
+    // Both sections come from one diagnostics::collect() call, so any
+    // disagreement here means a second computation crept back in.
+    CHECK(sys.at("platform") == ident.at("platform_key"));
+    CHECK(sys.at("host_arch") == ident.at("host_arch"));
+    CHECK(sys.at("cpu_cores") == mach.at("cpu_cores"));
+    CHECK(sys.at("total_ram_mb") == json(mach.at("mem_total_kb").get<uint64_t>() / 1024));
+    CHECK(sys.at("uptime_seconds") ==
+          json(static_cast<int>(mach.at("uptime_seconds").get<double>())));
 }
 
 // ============================================================================
@@ -188,6 +231,22 @@ TEST_CASE("DebugBundleCollector: collect_printer_info() returns valid JSON", "[d
     json printer = helix::DebugBundleCollector::collect_printer_info(
         helix::DebugBundleCollector::snapshot_printer_state());
     REQUIRE(printer.is_object());
+}
+
+TEST_CASE("DebugBundleCollector: mains-monitor objects join the printer-state query",
+          "[debug-bundle]") {
+    const std::string plain = helix::DebugBundleCollector::printer_objects_query({});
+    REQUIRE(plain == "/printer/objects/query"
+                     "?heater_bed&extruder&print_stats&toolhead&motion_report"
+                     "&fan&display_status&virtual_sdcard");
+
+    // Moonraker answers a query naming an unpublished object with an error, so
+    // the join must stay conditional: a printer without a mains monitor keeps
+    // the plain query.
+    const std::string monitored =
+        helix::DebugBundleCollector::printer_objects_query({"power_loss_check"});
+    REQUIRE(monitored.find("&power_loss_check") != std::string::npos);
+    REQUIRE(monitored.substr(0, plain.size()) == plain);
 }
 
 TEST_CASE("DebugBundleCollector: collect_printer_info() renders a snapshot without PrinterState",
@@ -347,6 +406,22 @@ TEST_CASE("DebugBundleCollector: sanitize_value redacts email addresses",
     auto result = helix::DebugBundleCollector::sanitize_value("notify user@example.com on error");
     REQUIRE(result.find("user@example.com") == std::string::npos);
     REQUIRE(result.find("[REDACTED_EMAIL]") != std::string::npos);
+
+    SECTION("multi-label domains and a bare two-letter TLD still redact") {
+        for (const char* addr :
+             {"a@b.co", "first.last+tag@mail.example.co.uk", "x@y-z.io", "admin@123.com"}) {
+            auto redacted = helix::DebugBundleCollector::sanitize_value(addr);
+            CAPTURE(addr);
+            REQUIRE(redacted == "[REDACTED_EMAIL]");
+        }
+    }
+
+    SECTION("a <name>@<freq><unit> diagnostic value is not an address") {
+        // The input shaper logs its live config this way; redacting it throws
+        // away the reading the bundle was collected to show.
+        const std::string line = "Input shaper config: X=mzv@40.2Hz, Y=ei@52.0Hz";
+        REQUIRE(helix::DebugBundleCollector::sanitize_value(line) == line);
+    }
 }
 
 TEST_CASE("DebugBundleCollector: sanitize_value redacts URLs with credentials",
@@ -509,18 +584,18 @@ TEST_CASE("DebugBundleCollector: sanitize_json redacts hardware serial numbers",
     json out = helix::DebugBundleCollector::sanitize_json(system_info);
     const json& info = out["result"]["system_info"];
 
-    REQUIRE(info["cpu_info"]["serial_number"].get<std::string>() == "[REDACTED]");
-    REQUIRE(info["sd_info"]["serial_number"].get<std::string>() == "[REDACTED]");
+    REQUIRE(info.at("cpu_info").at("serial_number").get<std::string>() == "[REDACTED]");
+    REQUIRE(info.at("sd_info").at("serial_number").get<std::string>() == "[REDACTED]");
 
     // The model and capacity next to them are diagnostic and must survive --
     // a key-pattern that swallowed the whole object would pass the two checks
     // above and gut the section.
-    REQUIRE(info["cpu_info"]["model"].get<std::string>() == "Raspberry Pi 4 Model B Rev 1.4");
-    REQUIRE(info["cpu_info"]["cpu_count"].get<int>() == 4);
-    REQUIRE(info["sd_info"]["manufacturer"].get<std::string>() == "Sandisk");
-    REQUIRE(info["sd_info"]["capacity"].get<std::string>() == "29.7 GiB");
+    REQUIRE(info.at("cpu_info").at("model").get<std::string>() == "Raspberry Pi 4 Model B Rev 1.4");
+    REQUIRE(info.at("cpu_info").at("cpu_count").get<int>() == 4);
+    REQUIRE(info.at("sd_info").at("manufacturer").get<std::string>() == "Sandisk");
+    REQUIRE(info.at("sd_info").at("capacity").get<std::string>() == "29.7 GiB");
 
-    const json& addrs = info["network"]["wlan0"]["ip_addresses"];
+    const json& addrs = info.at("network").at("wlan0").at("ip_addresses");
     REQUIRE(addrs[0]["address"].get<std::string>() == "192.168.1.50");
     REQUIRE(addrs[1]["address"].get<std::string>() == "fe80::1");
     REQUIRE(addrs[2]["address"].get<std::string>() == "fd12:3456:789a::1");
@@ -563,7 +638,8 @@ TEST_CASE("DebugBundleCollector: is_sensitive_key matches serial_number but not 
 TEST_CASE("DebugBundleCollector: collect_moonraker_info returns object with expected keys",
           "[debug-bundle][moonraker]") {
     // When not connected, should return an object with error sub-keys (not crash)
-    json mr = helix::DebugBundleCollector::collect_moonraker_info();
+    json mr = helix::DebugBundleCollector::collect_moonraker_info(helix::PrinterSnapshot{},
+                                                                  json::array());
     REQUIRE(mr.is_object());
 
     // Should always have these keys, even if errored
@@ -571,6 +647,8 @@ TEST_CASE("DebugBundleCollector: collect_moonraker_info returns object with expe
     REQUIRE(mr.contains("printer_info"));
     REQUIRE(mr.contains("system_info"));
     REQUIRE(mr.contains("printer_state"));
+    REQUIRE(mr.contains("klipper_status"));
+    REQUIRE(mr.contains("update_status"));
     REQUIRE(mr.contains("config"));
 }
 
@@ -581,13 +659,13 @@ TEST_CASE("DebugBundleCollector: collect includes moonraker section", "[debug-bu
 }
 
 // ============================================================================
-// collect_filament_system_info() tests [debug-bundle][filament]
+// collect_filament_system_info(json::array()) tests [debug-bundle][filament]
 // ============================================================================
 
 TEST_CASE("DebugBundleCollector: collect_filament_system_info returns object with expected keys",
           "[debug-bundle][filament]") {
     // When not connected, should return an object with error/empty sub-keys (not crash)
-    json filament = helix::DebugBundleCollector::collect_filament_system_info();
+    json filament = helix::DebugBundleCollector::collect_filament_system_info(json::array());
     REQUIRE(filament.is_object());
     REQUIRE(filament.contains("object_list"));
     REQUIRE(filament["object_list"].is_array());
@@ -597,7 +675,7 @@ TEST_CASE("DebugBundleCollector: collect_filament_system_info returns object wit
 
 TEST_CASE("DebugBundleCollector: collect_filament_system_info has all keys when disconnected",
           "[debug-bundle][filament]") {
-    json filament = helix::DebugBundleCollector::collect_filament_system_info();
+    json filament = helix::DebugBundleCollector::collect_filament_system_info(json::array());
     REQUIRE(filament.contains("afc_version"));
     REQUIRE(filament.contains("mmu_version"));
 }
@@ -645,6 +723,157 @@ TEST_CASE("DebugBundleCollector: filter_filament_objects matches expected prefix
         REQUIRE(name != "print_stats");
         REQUIRE(name != "toolhead");
     }
+}
+
+TEST_CASE("DebugBundleCollector: filter_filament_objects covers every supported backend",
+          "[debug-bundle][filament][klipper-status]") {
+    const std::vector<std::string> wanted = {"oams_manager",
+                                             "oams oams1",
+                                             "fps fps1",
+                                             "filament_group T0",
+                                             "ace",
+                                             "ace_instance_1",
+                                             "filament_hub",
+                                             "ifs",
+                                             "zmod_ifs",
+                                             "box_stepper slot1",
+                                             "filament_rack",
+                                             "filament_detect",
+                                             "filament_feed left",
+                                             "print_task_config",
+                                             "pin_watch",
+                                             "medusahc"};
+    json objects = json::array({"extruder", "heater_bed", "gcode_macro OPENAMS_LOAD", "fan"});
+    for (const auto& name : wanted)
+        objects.push_back(name);
+
+    auto filtered = helix::DebugBundleCollector::filter_filament_objects(objects);
+    CHECK(filtered == json(wanted));
+}
+
+TEST_CASE("DebugBundleCollector: filter_triage_objects picks triage objects and their instances",
+          "[debug-bundle][klipper-status]") {
+    json objects = json::array(
+        {"webhooks", "configfile", "idle_timeout", "pause_resume", "gcode_move", "bed_mesh",
+         "probe", "beacon", "probe_eddy_current btt", "heaters", "z_tilt", "exclude_object",
+         "system_stats", "mcu", "mcu nhk",
+         // Not triage objects, including ones that share a base's first letters.
+         "extruder", "toolhead", "gcode_macro PROBE_CALIBRATE", "temperature_sensor mcu_temp",
+         "mcu_temp", "bed_mesh_calibrate", "save_variables", "oams_manager"});
+
+    auto filtered = helix::DebugBundleCollector::filter_triage_objects(objects);
+    CHECK(filtered ==
+          json::array({"webhooks", "configfile", "idle_timeout", "pause_resume", "gcode_move",
+                       "bed_mesh", "probe", "beacon", "probe_eddy_current btt", "heaters", "z_tilt",
+                       "exclude_object", "system_stats", "mcu", "mcu nhk"}));
+    CHECK(helix::DebugBundleCollector::filter_triage_objects(json(42)).empty());
+}
+
+TEST_CASE("DebugBundleCollector: objects_query_path encodes names and narrows configfile",
+          "[debug-bundle][klipper-status]") {
+    CHECK(helix::DebugBundleCollector::objects_query_path(
+              json::array({"webhooks", "configfile", "mcu nhk"})) ==
+          "/printer/objects/query?webhooks&configfile=warnings&mcu%20nhk");
+}
+
+TEST_CASE("DebugBundleCollector: bound_status summarizes oversized fields",
+          "[debug-bundle][klipper-status]") {
+    json matrix = json::array();
+    for (int r = 0; r < 40; ++r) {
+        json row = json::array();
+        for (int c = 0; c < 30; ++c)
+            row.push_back(0.123456 * r * c);
+        matrix.push_back(row);
+    }
+    json status = {{"bed_mesh", {{"profile_name", "default"}, {"mesh_matrix", matrix}}},
+                   {"oams_manager", {{"lanes", json::array({{{"pressure", 0.42}}})}}}};
+
+    json bounded = helix::DebugBundleCollector::bound_status(status);
+
+    CHECK(bounded["bed_mesh"]["profile_name"] == "default");
+    CHECK(bounded["oams_manager"] == status["oams_manager"]);
+    const json& mm = bounded["bed_mesh"]["mesh_matrix"];
+    CHECK(mm["shape"] == json::array({40, 30}));
+    CHECK(mm["length"] == 40);
+    CHECK(mm["omitted_bytes"].get<size_t>() == matrix.dump().size());
+    CHECK(bounded.dump().size() < 1024);
+}
+
+TEST_CASE("DebugBundleCollector: bound_status drops the largest objects past the total cap",
+          "[debug-bundle][klipper-status]") {
+    // Each object is under the field cap, so only the total cap can act.
+    json status = json::object();
+    status["small"] = {{"state", "ready"}};
+    for (int i = 0; i < 4; ++i)
+        status["big" + std::to_string(i)] = {{"blob", std::string(3000 + i * 10, 'x')}};
+
+    json bounded = helix::DebugBundleCollector::bound_status(status, 4096, 7000);
+
+    CHECK(bounded["small"] == status["small"]);
+    CHECK(bounded["big3"].contains("omitted_bytes"));
+    CHECK(bounded["big2"].contains("omitted_bytes"));
+    CHECK(bounded["big1"] == status["big1"]);
+    CHECK(bounded["big0"] == status["big0"]);
+    CHECK(helix::DebugBundleCollector::bound_status(json("x")) == json("x"));
+}
+
+TEST_CASE("DebugBundleCollector: bound_response bounds and redacts update status",
+          "[debug-bundle][klipper-status]") {
+    json resp = {
+        {"result",
+         {{"busy", false},
+          {"version_info",
+           {{"klipper_openams",
+             {{"version", "v1.2.0-3-gabc1234"},
+              {"remote_url", "https://user:hunter2@github.com/openams/klipper_openams.git"},
+              {"api_key", "abcdef"},
+              {"commits_behind", json::array({{{"message", std::string(5000, 'm')}}})}}}}}}}};
+
+    json out = helix::DebugBundleCollector::bound_response(resp, "version_info");
+    const json& repo = out["result"]["version_info"]["klipper_openams"];
+
+    CHECK(repo["version"] == "v1.2.0-3-gabc1234");
+    CHECK(repo["remote_url"].get<std::string>().find("hunter2") == std::string::npos);
+    CHECK(repo["api_key"] == "[REDACTED]");
+    CHECK(repo["commits_behind"]["length"] == 1);
+    CHECK(out["result"]["busy"] == false);
+}
+
+TEST_CASE("DebugBundleCollector: bound_response keeps klippy webhooks state",
+          "[debug-bundle][klipper-status]") {
+    json resp = {{"result",
+                  {{"status",
+                    {{"webhooks", {{"state", "shutdown"}, {"state_message", "MCU 'nhk' shutdown"}}},
+                     {"moonraker_notifier",
+                      {{"webhook", "https://discord.com/api/webhooks/123/abc"},
+                       {"url", "https://discord.com/api/webhooks/456/def"}}}}}}}};
+
+    json out = helix::DebugBundleCollector::bound_response(resp, "status");
+    const json& status = out["result"]["status"];
+
+    CHECK(status["webhooks"]["state"] == "shutdown");
+    CHECK(status["webhooks"]["state_message"] == "MCU 'nhk' shutdown");
+    CHECK(status["moonraker_notifier"]["webhook"] == "[REDACTED]");
+    CHECK(status["moonraker_notifier"]["url"] == "[REDACTED_WEBHOOK]");
+}
+
+TEST_CASE("DebugBundleCollector: sanitize_value keeps git SHAs and redacts token-shaped strings",
+          "[debug-bundle][klipper-status]") {
+    const std::string sha = "3e887b9ee0c1d2a4b5f6e7d8c9b0a1f2e3d4c5b6";
+    REQUIRE(sha.size() == 40);
+    CHECK(helix::DebugBundleCollector::sanitize_value(sha) == sha);
+    CHECK(helix::DebugBundleCollector::sanitize_value("3E887b9ee0c1d2a4b5f6e7d8c9b0a1f2e3d4c5b6") ==
+          "[REDACTED_TOKEN]");
+    CHECK(helix::DebugBundleCollector::sanitize_value("aZ9kQ2mX7pL4vB8nR1tY6wE3uI5oP0sDfGhJkLzx") ==
+          "[REDACTED_TOKEN]");
+}
+
+TEST_CASE("DebugBundleCollector: collect_klipper_status carries an object-list error",
+          "[debug-bundle][klipper-status]") {
+    json err = {{"error", "HTTP 500 from /printer/objects/list"}};
+    CHECK(helix::DebugBundleCollector::collect_klipper_status("", err) == err);
+    CHECK(helix::DebugBundleCollector::collect_klipper_status("", json::array()) == json::object());
+    CHECK(helix::DebugBundleCollector::fetch_object_list("").contains("error"));
 }
 
 TEST_CASE("DebugBundleCollector: filter_filament_objects handles empty and non-array input",
@@ -745,21 +974,28 @@ TEST_CASE("DebugBundleCollector: parse_include_patterns finds Klipper includes",
     }
 }
 
-TEST_CASE("DebugBundleCollector: glob_match does not let wildcards cross a slash",
+TEST_CASE("DebugBundleCollector: resolve_include_pattern follows config_glob_match",
           "[debug-bundle][printer-config]") {
-    CHECK(helix::DebugBundleCollector::glob_match("printer.cfg", "printer.cfg"));
-    CHECK(helix::DebugBundleCollector::glob_match("mod/*.cfg", "mod/base.cfg"));
-    CHECK(helix::DebugBundleCollector::glob_match("*.cfg", "printer.cfg"));
-    CHECK(helix::DebugBundleCollector::glob_match("mod/?.cfg", "mod/a.cfg"));
-
-    // The load-bearing case: Python glob (which Klipper uses) stops '*' at a
-    // separator, so a top-level "*.cfg" must not vacuum up the whole tree.
-    CHECK_FALSE(helix::DebugBundleCollector::glob_match("*.cfg", "mod/base.cfg"));
-    CHECK_FALSE(helix::DebugBundleCollector::glob_match("mod/*.cfg", "mod/sub/base.cfg"));
-    CHECK_FALSE(helix::DebugBundleCollector::glob_match("mod/?.cfg", "mod/ab.cfg"));
-
-    CHECK_FALSE(helix::DebugBundleCollector::glob_match("printer.cfg", "printer.cfg.bak"));
-    CHECK_FALSE(helix::DebugBundleCollector::glob_match("other.cfg", "printer.cfg"));
+    const std::vector<std::string> files = {"printer.cfg", "mod/base.cfg", "mod/sub/deep.cfg",
+                                            "mod/sub/x/deeper.cfg"};
+    struct Row {
+        const char* pattern;
+        std::vector<std::string> want;
+    };
+    const Row rows[] = {
+        {"printer.cfg", {"printer.cfg"}},
+        {"*.cfg", {"printer.cfg"}},
+        {"mod/*.cfg", {"mod/base.cfg"}},
+        {"mod/?ase.cfg", {"mod/base.cfg"}},
+        {"mod/**/*.cfg", {"mod/base.cfg", "mod/sub/deep.cfg", "mod/sub/x/deeper.cfg"}},
+        {"mod/**.cfg", {"mod/base.cfg"}},
+        {"other.cfg", {}},
+    };
+    for (const auto& r : rows) {
+        INFO(r.pattern);
+        CHECK(helix::DebugBundleCollector::resolve_include_pattern(r.pattern, "printer.cfg",
+                                                                   files) == r.want);
+    }
 }
 
 TEST_CASE("DebugBundleCollector: resolve_include_pattern is relative to the including file",
@@ -1337,7 +1573,8 @@ TEST_CASE_METHOD(HelixTestFixture,
     REQUIRE(channel == UpdateChecker::channel_name(UpdateChecker::instance().get_channel()));
 
     // Effective URL must be resolved (default applied) and normalized, so a
-    // misconfigured /update/r2_url is visible as itself rather than as "".
+    // misconfigured r2_url in update_urls.json is visible as itself rather
+    // than as "".
     const auto url = upd["r2_base_url"].get<std::string>();
     INFO("r2_base_url=" << url);
     REQUIRE_FALSE(url.empty());
@@ -1361,16 +1598,19 @@ TEST_CASE_METHOD(HelixTestFixture, "DebugBundleCollector: collect() includes the
     REQUIRE(bundle["update"]["suppressed"].is_boolean());
 }
 
-TEST_CASE_METHOD(HelixTestFixture, "UpdateChecker: effective_r2_base_url defaults and normalizes",
+TEST_CASE_METHOD(HelixTestFixture, "UpdateChecker: settings.json r2_url is ignored",
                  "[debug-bundle][update]") {
-    // HelixTestFixture resets Config to empty, so no /update/r2_url is set.
+    // Point the state dir at scratch so a real /var/lib/helixscreen on the
+    // developer machine cannot feed the trusted update_urls.json lookup.
+    helix::test::ScopedUpdateUrls urls("helix_r2");
     REQUIRE(UpdateChecker::effective_r2_base_url() ==
             std::string(UpdateChecker::DEFAULT_R2_BASE_URL));
 
     auto* config = helix::Config::get_instance();
-    REQUIRE(config != nullptr);
+    // The base URL is root-owned authority; a settings.json copy is ignored.
     config->set<std::string>("/update/r2_url", "https://mirror.example.com/rel///");
-    REQUIRE(UpdateChecker::effective_r2_base_url() == "https://mirror.example.com/rel");
+    REQUIRE(UpdateChecker::effective_r2_base_url() ==
+            std::string(UpdateChecker::DEFAULT_R2_BASE_URL));
 }
 
 TEST_CASE("UpdateChecker: channel_name covers every channel", "[debug-bundle][update]") {
@@ -1431,7 +1671,6 @@ TEST_CASE_METHOD(LVGLTestFixture,
 TEST_CASE_METHOD(HelixTestFixture, "UpdateChecker: config snapshot tracks a channel change",
                  "[debug-bundle][update]") {
     auto* config = helix::Config::get_instance();
-    REQUIRE(config != nullptr);
     auto& checker = UpdateChecker::instance();
 
     // Beta and Dev are only effective while /beta_features is unlocked —
@@ -1970,4 +2209,29 @@ TEST_CASE("DebugBundleCollector: config-dump elision buys back the line budget",
     auto condensed = helix::DebugBundleCollector::condense_klipper_log(raw);
     REQUIRE(count_lines_with(last_n(condensed, 200), "Timer too close") == 1);
     REQUIRE(count_lines_with(last_n(condensed, 200), "Starting serial connect") == 1);
+}
+
+TEST_CASE("DebugBundleCollector: sanitize_json drops a subtree past the depth limit",
+          "[debug-bundle]") {
+    json deep = {{"leaf", "user@example.com"}};
+    for (int i = 0; i < 40; ++i)
+        deep = json{{"n", deep}};
+
+    const std::string out = helix::DebugBundleCollector::sanitize_json(deep).dump();
+    CHECK(out.find("user@example.com") == std::string::npos);
+    CHECK(out.find("[REDACTED]") != std::string::npos);
+}
+
+TEST_CASE_METHOD(LVGLTestFixture,
+                 "DebugBundleCollector: collect() leaves an uncaptured printer snapshot empty",
+                 "[debug-bundle]") {
+    PrinterState& state = get_printer_state();
+    PrinterStateTestAccess::reset(state);
+    state.init_subjects(false);
+    state.set_klipper_version("v9.9.9-bundle-race-probe");
+    helix::ui::UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
+    REQUIRE(state.versions_state().get_klipper_version_raw() == "v9.9.9-bundle-race-probe");
+
+    const json bundle = helix::DebugBundleCollector::collect();
+    CHECK(bundle["printer"].dump().find("bundle-race-probe") == std::string::npos);
 }

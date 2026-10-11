@@ -8,14 +8,6 @@
 
 using namespace helix;
 
-// Test helper for accessing private members
-class PrinterTemperatureStateTestAccess {
-  public:
-    static void reset(PrinterTemperatureState& state) {
-        state.deinit_subjects();
-    }
-};
-
 TEST_CASE("PrinterTemperatureState: active extruder defaults to 'extruder'",
           "[core][temperature][active-extruder]") {
     lv_init_safe();
@@ -24,7 +16,7 @@ TEST_CASE("PrinterTemperatureState: active extruder defaults to 'extruder'",
 
     REQUIRE(state.active_extruder_name() == "extruder");
 
-    PrinterTemperatureStateTestAccess::reset(state);
+    state.deinit_subjects();
 }
 
 TEST_CASE("PrinterTemperatureState: set_active_extruder changes active name",
@@ -37,7 +29,7 @@ TEST_CASE("PrinterTemperatureState: set_active_extruder changes active name",
     state.set_active_extruder("extruder1");
     REQUIRE(state.active_extruder_name() == "extruder1");
 
-    PrinterTemperatureStateTestAccess::reset(state);
+    state.deinit_subjects();
 }
 
 TEST_CASE("PrinterTemperatureState: set_active_extruder syncs current values",
@@ -61,7 +53,7 @@ TEST_CASE("PrinterTemperatureState: set_active_extruder syncs current values",
     REQUIRE(lv_subject_get_int(state.get_active_extruder_temp_subject()) == 2205);
     REQUIRE(lv_subject_get_int(state.get_active_extruder_target_subject()) == 2300);
 
-    PrinterTemperatureStateTestAccess::reset(state);
+    state.deinit_subjects();
 }
 
 TEST_CASE("PrinterTemperatureState: update_from_status updates active subjects",
@@ -87,7 +79,7 @@ TEST_CASE("PrinterTemperatureState: update_from_status updates active subjects",
     REQUIRE(lv_subject_get_int(state.get_active_extruder_temp_subject()) == 1953);
     REQUIRE(lv_subject_get_int(state.get_active_extruder_target_subject()) == 2000);
 
-    PrinterTemperatureStateTestAccess::reset(state);
+    state.deinit_subjects();
 }
 
 TEST_CASE("PrinterTemperatureState: unknown extruder name stays on previous",
@@ -104,7 +96,7 @@ TEST_CASE("PrinterTemperatureState: unknown extruder name stays on previous",
     state.set_active_extruder("extruder99");
     REQUIRE(state.active_extruder_name() == "extruder1");
 
-    PrinterTemperatureStateTestAccess::reset(state);
+    state.deinit_subjects();
 }
 
 TEST_CASE("PrinterTemperatureState: default active works with single extruder",
@@ -121,7 +113,7 @@ TEST_CASE("PrinterTemperatureState: default active works with single extruder",
     REQUIRE(lv_subject_get_int(state.get_active_extruder_temp_subject()) == 2050);
     REQUIRE(lv_subject_get_int(state.get_active_extruder_target_subject()) == 2100);
 
-    PrinterTemperatureStateTestAccess::reset(state);
+    state.deinit_subjects();
 }
 
 TEST_CASE("PrinterTemperatureState: load latch survives cooldown to 0",
@@ -141,7 +133,7 @@ TEST_CASE("PrinterTemperatureState: load latch survives cooldown to 0",
     REQUIRE(lv_subject_get_int(state.get_active_extruder_target_subject()) == 0);
     REQUIRE(state.get_active_extruder_last_nonzero_target() == Catch::Approx(250.0));
 
-    PrinterTemperatureStateTestAccess::reset(state);
+    state.deinit_subjects();
 }
 
 TEST_CASE("PrinterTemperatureState: latch tracks the most recent non-zero target",
@@ -158,7 +150,7 @@ TEST_CASE("PrinterTemperatureState: latch tracks the most recent non-zero target
     state.update_from_status({{"extruder", {{"target", 210.0}}}});
     REQUIRE(state.get_active_extruder_last_nonzero_target() == Catch::Approx(210.0));
 
-    PrinterTemperatureStateTestAccess::reset(state);
+    state.deinit_subjects();
 }
 
 TEST_CASE("PrinterTemperatureState: clear_load_latch resets the held target",
@@ -175,7 +167,7 @@ TEST_CASE("PrinterTemperatureState: clear_load_latch resets the held target",
     state.clear_load_latch();
     REQUIRE(state.get_active_extruder_last_nonzero_target() == Catch::Approx(0.0));
 
-    PrinterTemperatureStateTestAccess::reset(state);
+    state.deinit_subjects();
 }
 
 TEST_CASE("PrinterTemperatureState: latch is per-extruder and honors the active one",
@@ -201,7 +193,7 @@ TEST_CASE("PrinterTemperatureState: latch is per-extruder and honors the active 
     state.set_active_extruder("extruder1");
     REQUIRE(state.get_active_extruder_last_nonzero_target() == Catch::Approx(210.0));
 
-    PrinterTemperatureStateTestAccess::reset(state);
+    state.deinit_subjects();
 }
 
 TEST_CASE("PrinterTemperatureState: single extruder display_name is 'Nozzle'",
@@ -216,7 +208,7 @@ TEST_CASE("PrinterTemperatureState: single extruder display_name is 'Nozzle'",
     REQUIRE(it != exts.end());
     REQUIRE(it->second.display_name == "Nozzle");
 
-    PrinterTemperatureStateTestAccess::reset(state);
+    state.deinit_subjects();
 }
 
 TEST_CASE("PrinterTemperatureState: multi-extruder display_name is 'Nozzle N'",
@@ -232,7 +224,7 @@ TEST_CASE("PrinterTemperatureState: multi-extruder display_name is 'Nozzle N'",
     REQUIRE(exts.find("extruder2")->second.display_name == "Nozzle 3");
     REQUIRE(exts.find("extruder3")->second.display_name == "Nozzle 4");
 
-    PrinterTemperatureStateTestAccess::reset(state);
+    state.deinit_subjects();
 }
 
 TEST_CASE("PrinterTemperatureState: extruder names are sorted before labeling",
@@ -250,5 +242,184 @@ TEST_CASE("PrinterTemperatureState: extruder names are sorted before labeling",
     REQUIRE(exts.find("extruder2")->second.display_name == "Nozzle 3");
     REQUIRE(exts.find("extruder3")->second.display_name == "Nozzle 4");
 
-    PrinterTemperatureStateTestAccess::reset(state);
+    state.deinit_subjects();
+}
+
+TEST_CASE("PrinterTemperatureState: heater power publishes as whole percent",
+          "[core][temperature][power]") {
+    lv_init_safe();
+    PrinterTemperatureState state;
+    state.init_subjects(false);
+    state.set_chamber_heater_name("heater_generic chamber");
+
+    // Klipper reports duty as a 0.0-1.0 fraction on the heater object.
+    nlohmann::json status = {
+        {"extruder", {{"temperature", 210.0}, {"target", 210.0}, {"power", 0.42}}},
+        {"heater_bed", {{"temperature", 60.0}, {"target", 60.0}, {"power", 1.0}}},
+        {"heater_generic chamber", {{"temperature", 55.0}, {"target", 60.0}, {"power", 0.0}}}};
+    state.update_from_status(status);
+
+    CHECK(lv_subject_get_int(state.get_extruder_power_subject()) == 42);
+    CHECK(lv_subject_get_int(state.get_bed_power_subject()) == 100);
+    CHECK(lv_subject_get_int(state.get_chamber_power_subject()) == 0);
+
+    state.deinit_subjects();
+}
+
+TEST_CASE("PrinterTemperatureState: a heater reporting no power stays unknown",
+          "[core][temperature][power]") {
+    lv_init_safe();
+    PrinterTemperatureState state;
+    state.init_subjects(false);
+    // A temperature_fan drives the chamber by speed and never reports a duty.
+    state.set_chamber_heater_name("temperature_fan chamber_fan");
+
+    nlohmann::json status = {
+        {"extruder", {{"temperature", 25.0}, {"target", 0.0}}},
+        {"temperature_fan chamber_fan", {{"temperature", 30.0}, {"target", 40.0}, {"speed", 0.5}}}};
+    state.update_from_status(status);
+
+    // -1 is unknown, and a readout bound to it stays hidden rather than
+    // claiming the element is idle.
+    CHECK(lv_subject_get_int(state.get_chamber_power_subject()) == -1);
+    CHECK(lv_subject_get_int(state.get_extruder_power_subject()) == -1);
+
+    state.deinit_subjects();
+}
+
+TEST_CASE("PrinterTemperatureState: a frame omitting power leaves the last reading",
+          "[core][temperature][power]") {
+    lv_init_safe();
+    PrinterTemperatureState state;
+    state.init_subjects(false);
+
+    state.update_from_status({{"heater_bed", {{"temperature", 60.0}, {"power", 0.75}}}});
+    REQUIRE(lv_subject_get_int(state.get_bed_power_subject()) == 75);
+
+    // Moonraker sends deltas: a frame carrying only a temperature says nothing
+    // about duty, so the reading must survive rather than fall back to zero.
+    state.update_from_status({{"heater_bed", {{"temperature", 60.5}}}});
+    CHECK(lv_subject_get_int(state.get_bed_power_subject()) == 75);
+
+    state.deinit_subjects();
+}
+
+TEST_CASE("PrinterTemperatureState: out-of-range duty is clamped", "[core][temperature][power]") {
+    lv_init_safe();
+    PrinterTemperatureState state;
+    state.init_subjects(false);
+
+    state.update_from_status({{"heater_bed", {{"power", 1.4}}}});
+    CHECK(lv_subject_get_int(state.get_bed_power_subject()) == 100);
+    state.update_from_status({{"heater_bed", {{"power", -0.2}}}});
+    CHECK(lv_subject_get_int(state.get_bed_power_subject()) == 0);
+
+    state.deinit_subjects();
+}
+
+TEST_CASE("PrinterTemperatureState: per-extruder power reaches its own subject",
+          "[core][temperature][power]") {
+    lv_init_safe();
+    PrinterTemperatureState state;
+    state.init_subjects(false);
+    state.init_extruders({"extruder", "extruder1"});
+
+    // The machine's tool is extruder; a duty frame for the OTHER head must
+    // land on that head's subject without leaking into the active mirror.
+    state.update_from_status({{"extruder1", {{"power", 0.73}}}});
+
+    SubjectLifetime picked;
+    REQUIRE(state.get_extruder_power_subject("extruder1", picked) != nullptr);
+    CHECK(lv_subject_get_int(state.get_extruder_power_subject("extruder1", picked)) == 73);
+    CHECK(lv_subject_get_int(state.get_extruder_power_subject()) == -1);
+    SubjectLifetime idle;
+    CHECK(lv_subject_get_int(state.get_extruder_power_subject("extruder", idle)) == -1);
+
+    state.deinit_subjects();
+}
+
+TEST_CASE("PrinterTemperatureState: a toolchange resyncs active power",
+          "[core][temperature][power]") {
+    lv_init_safe();
+    PrinterTemperatureState state;
+    state.init_subjects(false);
+    state.init_extruders({"extruder", "extruder1"});
+
+    state.update_from_status({{"extruder", {{"power", 1.0}}}, {"extruder1", {{"power", 0.0}}}});
+    REQUIRE(lv_subject_get_int(state.get_extruder_power_subject()) == 100);
+
+    // Moonraker deltas omit unchanged fields, so an idle new tool may never
+    // carry a power frame after the change: the mirror must take extruder1's
+    // last known duty at the toolchange, not keep the old tool's 100.
+    state.set_active_extruder("extruder1");
+    CHECK(lv_subject_get_int(state.get_extruder_power_subject()) == 0);
+
+    state.deinit_subjects();
+}
+
+// Discovery re-runs on every klippy ready. A tool that is still there keeps its
+// subjects, so whatever is bound to them keeps receiving readings.
+TEST_CASE("PrinterTemperatureState: rediscovery keeps the subjects of unchanged extruders",
+          "[core][temperature][rediscovery]") {
+    lv_init_safe();
+    PrinterTemperatureState state;
+    state.init_subjects(false);
+    state.init_extruders({"extruder"});
+
+    SubjectLifetime lt;
+    lv_subject_t* temp = state.get_extruder_temp_subject("extruder", lt);
+    REQUIRE(temp != nullptr);
+    int last = -1;
+    lv_observer_t* obs = lv_subject_add_observer(
+        temp,
+        [](lv_observer_t* o, lv_subject_t* s) {
+            *static_cast<int*>(lv_observer_get_user_data(o)) = lv_subject_get_int(s);
+        },
+        &last);
+    const int version = lv_subject_get_int(state.get_extruder_version_subject());
+
+    state.init_extruders({"extruder"});
+
+    REQUIRE(*lt);
+    state.update_from_status({{"extruder", {{"temperature", 100.0}}}});
+    CHECK(last == 1000);
+    SubjectLifetime again;
+    CHECK(state.get_extruder_temp_subject("extruder", again) == temp);
+    CHECK(lv_subject_get_int(state.get_extruder_version_subject()) == version);
+
+    lv_observer_remove(obs);
+    state.deinit_subjects();
+}
+
+TEST_CASE("PrinterTemperatureState: rediscovery frees removed and adds new extruders",
+          "[core][temperature][rediscovery]") {
+    lv_init_safe();
+    PrinterTemperatureState state;
+    state.init_subjects(false);
+    state.init_extruders({"extruder", "extruder1"});
+
+    SubjectLifetime kept, removed;
+    lv_subject_t* kept_subj = state.get_extruder_temp_subject("extruder", kept);
+    REQUIRE(state.get_extruder_temp_subject("extruder1", removed) != nullptr);
+    REQUIRE(state.extruders().at("extruder").display_name == "Nozzle 1");
+    const int version = lv_subject_get_int(state.get_extruder_version_subject());
+
+    state.init_extruders({"extruder2", "extruder"});
+
+    CHECK_FALSE(*removed);
+    CHECK(*kept);
+    SubjectLifetime again;
+    CHECK(state.get_extruder_temp_subject("extruder", again) == kept_subj);
+    CHECK(state.get_extruder_temp_subject("extruder1") == nullptr);
+    CHECK(state.get_extruder_temp_subject("extruder2") != nullptr);
+    CHECK(state.extruders().at("extruder").display_name == "Nozzle 1");
+    CHECK(state.extruders().at("extruder2").display_name == "Nozzle 2");
+    CHECK(lv_subject_get_int(state.get_extruder_version_subject()) == version + 1);
+
+    // Dropping to one tool relabels the survivor without the number.
+    state.init_extruders({"extruder"});
+    CHECK(state.extruders().at("extruder").display_name == "Nozzle");
+    CHECK(state.get_extruder_temp_subject("extruder", again) == kept_subj);
+
+    state.deinit_subjects();
 }

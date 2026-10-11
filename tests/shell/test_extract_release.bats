@@ -25,7 +25,6 @@ setup() {
     export INSTALL_DIR="$BATS_TEST_TMPDIR/opt/helixscreen"
     export SUDO=""
     export BACKUP_CONFIG=""
-    export ORIGINAL_INSTALL_EXISTS=""
 
     mkdir -p "$TMP_DIR"
 }
@@ -296,7 +295,7 @@ setup_existing_install() {
 
 @test "install.sh (bundled) has incomplete-archive guard" {
     grep -q 'Extracted archive is incomplete' \
-        "$BATS_TEST_DIRNAME/../../scripts/install.sh"
+        "$INSTALL_BUNDLE"
 }
 
 # --- cleanup_old_install ---
@@ -306,7 +305,6 @@ setup_existing_install() {
     echo '{"user": true}' > "$INSTALL_DIR/config/settings.json"
     mkdir -p "${INSTALL_DIR}.old/bin"
     echo "old" > "${INSTALL_DIR}.old/bin/helix-screen"
-    ORIGINAL_INSTALL_EXISTS=true
     cleanup_old_install
     [ ! -d "${INSTALL_DIR}.old" ]
 }
@@ -316,11 +314,37 @@ setup_existing_install() {
     # No settings.json — config restore failed
     mkdir -p "${INSTALL_DIR}.old/config"
     echo '{"user": true}' > "${INSTALL_DIR}.old/config/settings.json"
-    ORIGINAL_INSTALL_EXISTS=true
-    cleanup_old_install
+    INSTALL_BACKUP="${INSTALL_DIR}.old"
+    _have_restore_candidate=true
+    run cleanup_old_install
     # .old must be preserved as last-resort recovery
     [ -d "${INSTALL_DIR}.old" ]
     [ -f "${INSTALL_DIR}.old/config/settings.json" ]
+    contains "keeping ${INSTALL_DIR}.old" "$output"
+}
+
+@test "cleanup_old_install: an old install that never had a config is not a lost config" {
+    # An install dir holding only logs and a binary predates any settings.json,
+    # so the update has nothing to carry across and nothing to warn about.
+    mkdir -p "$INSTALL_DIR/bin" "$INSTALL_DIR/logs"
+    echo "old binary" > "$INSTALL_DIR/bin/helix-screen"
+    create_test_tarball "ad5m"
+    extract_release "ad5m"
+    [ ! -f "$INSTALL_DIR/config/settings.json" ]
+
+    run cleanup_old_install
+    [ "$status" -eq 0 ]
+    lacks "Config not restored" "$output"
+    [ ! -d "${INSTALL_DIR}.old" ]
+}
+
+@test "cleanup_old_install: the warning never names a backup that is not there" {
+    mkdir -p "$INSTALL_DIR/config"
+    INSTALL_BACKUP="${INSTALL_DIR}.old"
+    _have_restore_candidate=true
+    run cleanup_old_install
+    contains "Config not restored" "$output"
+    lacks ".old" "$output"
 }
 
 @test "cleanup_old_install: no-op when .old does not exist" {
@@ -688,9 +712,9 @@ create_preset_tarball() {
 
 @test "install.sh (bundled) guards packaged-config removal on a restore candidate" {
     grep -q '_have_restore_candidate' \
-        "$BATS_TEST_DIRNAME/../../scripts/install.sh"
+        "$INSTALL_BUNDLE"
     grep -q '.helix-fresh-install' \
-        "$BATS_TEST_DIRNAME/../../scripts/install.sh"
+        "$INSTALL_BUNDLE"
 }
 
 # --- Legacy config migration ---
@@ -775,12 +799,12 @@ create_ad5x_payload_tarball() {
 # INSTALL_DIR at the mod's payload root.
 setup_mod_host() {
     MOD_ROOT="$BATS_TEST_TMPDIR/usr/data/config/mod"
-    mkdir -p "$MOD_ROOT/.shell" "$MOD_ROOT/.bin/helixscreen/config"
+    INSTALL_DIR="$BATS_TEST_TMPDIR/usr/data/config/mod_data/helixscreen"
+    mkdir -p "$MOD_ROOT/.shell" "$INSTALL_DIR/config"
     touch "$MOD_ROOT/.shell/platform.sh"
     HOST_MOD_ROOT="$MOD_ROOT"
     HOST_MOD_CHROOT="$BATS_TEST_TMPDIR/usr/data/.mod/.forge-x"
     HOST_SERVICE_MECHANISM="mod-managed"
-    INSTALL_DIR="$MOD_ROOT/.bin/helixscreen"
     # The payload-update contract: the mod-owned guard stands down for it.
     HELIX_MOD_PAYLOAD=1
     printf 'HELIX_CONFIG_DIR=/opt/config/mod_data/helixscreen/config\nHELIX_LOG_LEVEL=info\n' \

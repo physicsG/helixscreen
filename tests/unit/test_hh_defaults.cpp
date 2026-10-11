@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <set>
 #include <string>
+#include <vector>
 
 #include "../catch_amalgamated.hpp"
 
@@ -64,7 +65,7 @@ TEST_CASE("HH default sections: unique IDs", "[ams][hh_defaults]") {
 
 TEST_CASE("HH default actions: count", "[ams][hh_defaults]") {
     auto actions = hh_default_actions();
-    REQUIRE(actions.size() == 29);
+    REQUIRE(actions.size() == 32);
 }
 
 TEST_CASE("HH default actions: required fields", "[ams][hh_defaults]") {
@@ -120,6 +121,23 @@ TEST_CASE("HH default actions: known IDs", "[ams][hh_defaults]") {
     REQUIRE(ids.count("servo_buzz") == 1);
     REQUIRE(ids.count("reset_servo_counter") == 1);
     REQUIRE(ids.count("reset_blade_counter") == 1);
+    REQUIRE(ids.count("load_extruder") == 1);
+    REQUIRE(ids.count("unload_extruder") == 1);
+    REQUIRE(ids.count("spoolman_refresh") == 1);
+}
+
+TEST_CASE("HH default actions: extruder load and unload share the first button row",
+          "[ams][hh_defaults]") {
+    // The section overlay packs consecutive buttons two to a row.
+    std::vector<std::string> maintenance_buttons;
+    for (const auto& a : hh_default_actions()) {
+        if (a.section == "maintenance" && a.type == ActionType::BUTTON) {
+            maintenance_buttons.push_back(a.id);
+        }
+    }
+    REQUIRE(maintenance_buttons.size() >= 2);
+    CHECK(maintenance_buttons[0] == "load_extruder");
+    CHECK(maintenance_buttons[1] == "unload_extruder");
 }
 
 TEST_CASE("HH default actions: section assignments", "[ams][hh_defaults]") {

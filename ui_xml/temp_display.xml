@@ -22,6 +22,10 @@
          Accepts: micro|tiny|small|medium|large|xlarge|xxlarge.
          Empty (default) = always show when show_target=true. -->
     <prop name="hide_target_below_bp" type="string" default=""/>
+    <!-- Subject a sizing tile publishes its target-half verdict on: 1 draw,
+         0 drop. Supersedes hide_target_below_bp, so one decision has one
+         owner. -->
+    <prop name="size_target_subject" type="string" default=""/>
   </api>
   <!--
     The temp_display widget is a custom C++ widget registered via ui_temp_display_init().

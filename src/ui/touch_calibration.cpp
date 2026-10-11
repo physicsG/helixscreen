@@ -3,6 +3,8 @@
 
 #include "touch_calibration.h"
 
+#include "platform_info.h"
+
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -152,14 +154,26 @@ TouchCalibration platform_default_calibration() {
     //
     // e is positive on the AD5X and negative on the AD5M: the digitizer reports Y
     // in opposite directions on the two models, and f absorbs the flip.
-#if defined(HELIX_PLATFORM_AD5X)
-    cal.valid = true;
-    cal.a = 1.171731f;
-    cal.b = -0.043628f;
-    cal.c = -66.965828f;
-    cal.d = -0.006188f;
-    cal.e = 1.478954f;
-    cal.f = -118.906227f;
+    //
+    // Both were measured against logical targets on an unrotated panel, so
+    // capture_rotation stays at the struct default of 0 and
+    // apply_calibration_in_panel_space() places them directly in panel space. A
+    // fit measured on a rotated panel (a K2-class preset ships rotate=270) has to
+    // set capture_rotation to that rotation, or the matrix is placed in a basis it
+    // was never solved in and every tap lands a quarter turn out.
+#if defined(HELIX_PLATFORM_MIPS)
+    // One binary serves K1 and AD5X: the AD5X fit applies only on that board,
+    // detected by the mod-layout probe. K1 boards ship no default fit — the
+    // calibration wizard owns the first run there.
+    if (helix::ad5x_mod_layout_present()) {
+        cal.valid = true;
+        cal.a = 1.171731f;
+        cal.b = -0.043628f;
+        cal.c = -66.965828f;
+        cal.d = -0.006188f;
+        cal.e = 1.478954f;
+        cal.f = -118.906227f;
+    }
 #elif defined(HELIX_PLATFORM_AD5M)
     cal.valid = true;
     cal.a = 1.174004f;
@@ -196,8 +210,8 @@ bool is_calibration_valid(const TouchCalibration& cal) {
     return true;
 }
 
-bool detect_and_correct_axis_swap(TouchCalibration& cal, const Point screen_points[3],
-                                  Point touch_points[3]) {
+bool detect_axis_transposition(TouchCalibration& cal, const Point screen_points[3],
+                               const Point touch_points[3]) {
     // Compute cross-coupling ratio: off-diagonal vs diagonal dominance
     // For a well-aligned screen: a,e are large (scaling), b,d are ~0 (no cross-coupling)
     // For swapped axes: b,d are large, a,e may be small or the matrix is chaotic
@@ -259,17 +273,15 @@ bool detect_and_correct_axis_swap(TouchCalibration& cal, const Point screen_poin
         return false;
     }
 
-    spdlog::info("[TouchCalibration] Axis swap corrected cross-coupling "
-                 "(ratio {:.2f} -> {:.2f}, a={:.3f} b={:.3f} d={:.3f} e={:.3f})",
-                 cross_coupling_ratio, swapped_ratio, swapped_cal.a, swapped_cal.b, swapped_cal.d,
-                 swapped_cal.e);
+    spdlog::info("[TouchCalibration] Panel axes are transposed against the display "
+                 "(cross-coupling {:.2f}, {:.2f} when re-solved transposed)",
+                 cross_coupling_ratio, swapped_ratio);
 
-    // Apply the swap: update touch points in-place and use the swapped calibration
-    for (int i = 0; i < 3; i++) {
-        touch_points[i] = swapped_points[i];
-    }
-    swapped_cal.axes_swapped = true;
-    cal = swapped_cal;
+    // Recorded, not applied. `cal` already maps these taps onto the targets - the
+    // three-point solve is exact, so the transposition lives in its cross terms.
+    // Installing the re-solve would hand the read callback a matrix that only works
+    // on transposed input, which is not what arrives.
+    cal.axes_swapped = true;
     return true;
 }
 
@@ -577,10 +589,24 @@ const char* touch_range_source_name(TouchRangeSource source) {
         return "stored";
     case TouchRangeSource::Environment:
         return "environment";
+    case TouchRangeSource::DisplaySize:
+        return "display-size";
     case TouchRangeSource::None:
         break;
     }
     return "none";
+}
+
+TouchRangeSource resolve_touch_range_source(bool env_range_override,
+                                            const TouchRangeSettings& stored,
+                                            int applied_rotation) {
+    if (env_range_override) {
+        return TouchRangeSource::Environment;
+    }
+    if (stored.valid && (applied_rotation == 0 || stored.capture_rotation == 0)) {
+        return TouchRangeSource::Stored;
+    }
+    return TouchRangeSource::Declared;
 }
 
 void TouchObservedExtremes::observe(int x, int y) {
@@ -618,9 +644,53 @@ TouchRangeViolation touch_range_violation(const TouchObservedExtremes& observed,
 
     const TouchObservedExtremes seen =
         touch_observed_in_configured_axes(observed, configured.swap_axes);
+    if (configured.source == TouchRangeSource::DisplaySize) {
+        // The programmed range is a guess about the declared one, so a reading
+        // is impossible only when neither of them could produce it.
+        violation.x = axis_escapes(seen.min_x, seen.max_x, configured.min_x, configured.max_x) &&
+                      axis_escapes(seen.min_x, seen.max_x, configured.declared_min_x,
+                                   configured.declared_max_x);
+        violation.y = axis_escapes(seen.min_y, seen.max_y, configured.min_y, configured.max_y) &&
+                      axis_escapes(seen.min_y, seen.max_y, configured.declared_min_y,
+                                   configured.declared_max_y);
+        return violation;
+    }
     violation.x = axis_escapes(seen.min_x, seen.max_x, configured.min_x, configured.max_x);
     violation.y = axis_escapes(seen.min_y, seen.max_y, configured.min_y, configured.max_y);
     return violation;
+}
+
+namespace {
+
+/// One axis of transposed_range_guess_disproved().
+bool axis_disproves_guess(int observed_max, int programmed_min, int programmed_max,
+                          int declared_min, int declared_max) {
+    order_range(programmed_min, programmed_max);
+    order_range(declared_min, declared_max);
+    if (programmed_max <= 0 || declared_max <= 0) {
+        return false;
+    }
+    const auto overshoot = [observed_max](int max) {
+        return static_cast<float>(observed_max - max) / static_cast<float>(max);
+    };
+    return overshoot(programmed_max) > kAbsRangeTolerance &&
+           overshoot(declared_max) <= kAbsRangeTolerance;
+}
+
+} // namespace
+
+bool transposed_range_guess_disproved(const TouchObservedExtremes& observed,
+                                      const TouchPipelineInfo& pipeline) {
+    if (pipeline.source != TouchRangeSource::DisplaySize || !pipeline.declared_valid ||
+        observed.distinct_samples == 0) {
+        return false;
+    }
+    const TouchObservedExtremes seen =
+        touch_observed_in_configured_axes(observed, pipeline.swap_axes);
+    return axis_disproves_guess(seen.max_x, pipeline.min_x, pipeline.max_x, pipeline.declared_min_x,
+                                pipeline.declared_max_x) ||
+           axis_disproves_guess(seen.max_y, pipeline.min_y, pipeline.max_y, pipeline.declared_min_y,
+                                pipeline.declared_max_y);
 }
 
 double touch_axis_span_ratio(int observed_min, int observed_max, int configured_min,

@@ -16,10 +16,8 @@ namespace helix {
  *
  * Extracted from PrinterState as part of god class decomposition.
  *
- * ## Subjects (11 total):
- * - hardware_has_issues_ (int): 0=no issues, 1=has issues
- * - hardware_issue_count_ (int): Total number of validation issues
- * - hardware_max_severity_ (int): 0=info, 1=warning, 2=critical
+ * ## Subjects (8 total):
+ * - hardware_status_level_ (int): 0=ok, 1=attention, 2=critical (headline badge)
  * - hardware_critical_count_ (int): Count of critical issues
  * - hardware_warning_count_ (int): Count of warning issues
  * - hardware_info_count_ (int): Count of info issues
@@ -27,7 +25,6 @@ namespace helix {
  * - hardware_status_title_ (string): e.g., "All Healthy" or "3 Issues Detected"
  * - hardware_status_detail_ (string): e.g., "1 critical, 2 warnings"
  * - hardware_issues_label_ (string): "1 Hardware Issue" or "5 Hardware Issues"
- * - hardware_validation_version_ (int): Incremented on validation change
  */
 class PrinterHardwareValidationState {
   public:
@@ -74,47 +71,22 @@ class PrinterHardwareValidationState {
      */
     void remove_hardware_issue(const std::string& hardware_name);
 
+    /// Re-format the status texts in the current language.
+    void refresh_texts();
+
     // ========================================================================
     // Subject accessors
     // ========================================================================
 
     /**
-     * @brief Get hardware has issues subject for UI binding
+     * @brief Get the headline badge level subject for UI binding
      *
-     * Integer subject: 0=no issues, 1=has issues.
-     * Use with bind_flag_if_eq to show/hide Hardware Health section.
+     * Integer subject: 0=ok, 1=attention, 2=critical. Each headline badge in
+     * hardware_health_overlay binds to exactly one of these values, so the
+     * XML never has to decode a HardwareIssueSeverity ordinal itself.
      */
-    lv_subject_t* get_hardware_has_issues_subject() {
-        return &hardware_has_issues_;
-    }
-
-    /**
-     * @brief Get hardware issue count subject for UI binding
-     *
-     * Integer subject with total number of validation issues.
-     */
-    lv_subject_t* get_hardware_issue_count_subject() {
-        return &hardware_issue_count_;
-    }
-
-    /**
-     * @brief Get hardware max severity subject for UI binding
-     *
-     * Integer subject: 0=info, 1=warning, 2=critical.
-     * Use for styling (color) based on severity.
-     */
-    lv_subject_t* get_hardware_max_severity_subject() {
-        return &hardware_max_severity_;
-    }
-
-    /**
-     * @brief Get hardware validation version subject
-     *
-     * Integer subject incremented when validation changes.
-     * UI should observe to refresh dynamic lists.
-     */
-    lv_subject_t* get_hardware_validation_version_subject() {
-        return &hardware_validation_version_;
+    lv_subject_t* get_hardware_status_level_subject() {
+        return &hardware_status_level_;
     }
 
     /**
@@ -181,7 +153,7 @@ class PrinterHardwareValidationState {
      * @brief Check if hardware validation has any issues
      */
     bool has_hardware_issues() const {
-        return lv_subject_get_int(const_cast<lv_subject_t*>(&hardware_has_issues_)) != 0;
+        return hardware_validation_result_.has_issues();
     }
 
     /**
@@ -203,25 +175,23 @@ class PrinterHardwareValidationState {
     bool subjects_initialized_ = false;
 
     // Hardware validation subjects
-    lv_subject_t hardware_has_issues_{};         // Integer: 0=no issues, 1=has issues
-    lv_subject_t hardware_issue_count_{};        // Integer: total number of issues
-    lv_subject_t hardware_max_severity_{};       // Integer: 0=info, 1=warning, 2=critical
-    lv_subject_t hardware_validation_version_{}; // Integer: incremented on validation change
-    lv_subject_t hardware_critical_count_{};     // Integer: count of critical issues
-    lv_subject_t hardware_warning_count_{};      // Integer: count of warning issues
-    lv_subject_t hardware_info_count_{};         // Integer: count of info issues
-    lv_subject_t hardware_session_count_{};      // Integer: count of session change issues
-    lv_subject_t hardware_status_title_{};       // String: e.g., "All Healthy"
-    lv_subject_t hardware_status_detail_{};      // String: e.g., "1 critical, 2 warnings"
-    lv_subject_t hardware_issues_label_{};       // String: "1 Hardware Issue" / "5 Hardware Issues"
+    lv_subject_t hardware_status_level_{};   // Integer: 0=ok, 1=attention, 2=critical
+    lv_subject_t hardware_critical_count_{}; // Integer: count of critical issues
+    lv_subject_t hardware_warning_count_{};  // Integer: count of warning issues
+    lv_subject_t hardware_info_count_{};     // Integer: count of info issues
+    lv_subject_t hardware_session_count_{};  // Integer: count of session change issues
+    lv_subject_t hardware_status_title_{};   // String: e.g., "All Healthy"
+    lv_subject_t hardware_status_detail_{};  // String: e.g., "1 critical, 2 warnings"
+    lv_subject_t hardware_issues_label_{};   // String: "1 Hardware Issue" / "5 Hardware Issues"
 
     // Stored validation result for UI access
     HardwareValidationResult hardware_validation_result_;
+    bool has_result_ = false; ///< Before the first result the texts keep their defaults
 
     // String buffers for subject storage
     char hardware_status_title_buf_[64]{};
     char hardware_status_detail_buf_[128]{};
-    char hardware_issues_label_buf_[48]{}; // "1 Hardware Issue" / "5 Hardware Issues"
+    char hardware_issues_label_buf_[96]{}; // "1 Hardware Issue" / "5 Hardware Issues"
 };
 
 } // namespace helix

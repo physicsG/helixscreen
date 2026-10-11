@@ -3,9 +3,9 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <component>
   <view name="macro_panel"
-        extends="overlay_panel" title="Macros" title_tag="Macros" hide_action_button="false" action_button_text="Save"
-        action_button_text_tag="Save" action_button_callback="on_macros_edit_save"
-        action_button_hidden_subject="macros_edit_save_hidden" back_button_callback="on_macros_back_clicked">
+        extends="overlay_panel" title="Macros" hide_action_button="false" action_button_text="Save"
+        action_button_callback="on_macros_edit_save" action_button_hidden_subject="macros_edit_save_hidden"
+        back_button_callback="on_macros_back_clicked">
     <!-- Content Area -->
     <lv_obj name="overlay_content"
             width="100%" flex_grow="1" style_pad_left="#space_lg" style_pad_right="#space_lg" style_pad_top="0"
@@ -22,16 +22,31 @@
         <!-- Hide the list when there are no rows so the empty_state gets the
              full content area (not a 50/50 split of two flex_grow=1 siblings). -->
         <bind_flag_if_eq subject="macro_row_count" flag="hidden" ref_value="0"/>
-        <!-- Rows container: sole child is the reactive repeat. The repeat
-             MUST be the only/last child here — rebuilt rows are appended
-             to the end of their parent container. -->
-        <lv_obj name="rows_container" width="100%" height="content" flex_flow="column" style_pad_row="#space_xs">
-          <repeat count="macro_row_count">
-            <macro_card name_subject="macro_name_${i}"
-                        desc_subject="macro_desc_${i}" visible_subject="macro_visible_${i}"
-                        desc_hidden_subject="macro_desc_hidden_${i}" chevron_hidden_subject="macro_chevron_hidden_${i}"
-                        row_index="${i}"/>
+        <event_cb trigger="scroll" callback="on_macro_list_scroll"/>
+        <event_cb trigger="size_changed" callback="on_macro_list_resized"/>
+        <!-- Virtual list: the repeat builds a viewport's worth of row slots and
+             C++ binds each to whichever macro is scrolled into its place. The
+             spacers stand in for the rows outside the window; C++ keeps the
+             leading spacer first and the trailing spacer last as the repeat
+             rebuilds and the slots reorder. -->
+        <!-- Rows space themselves with a bottom margin rather than the flex gap,
+             so a zero-height spacer above the first row leaves no gap. -->
+        <lv_obj name="rows_container"
+                width="100%" height="content" flex_flow="column" style_pad_row="0" scrollable="false">
+          <lv_obj name="leading_spacer"
+                  width="100%" height="0" style_bg_opa="0" style_border_width="0" style_pad_all="0" clickable="false"
+                  scrollable="false"/>
+          <repeat count="macro_slot_count">
+            <macro_card name="macro_slot_${i}"
+                        style_margin_bottom="#space_xs" name_subject="macro_name_${i}" desc_subject="macro_desc_${i}"
+                        visible_subject="macro_visible_${i}" desc_hidden_subject="macro_desc_hidden_${i}"
+                        chevron_hidden_subject="macro_chevron_hidden_${i}"
+                        defaults_hidden_subject="macro_defaults_hidden_${i}"
+                        slot_hidden_subject="macro_slot_hidden_${i}" row_index="${i}"/>
           </repeat>
+          <lv_obj name="trailing_spacer"
+                  width="100%" height="0" style_bg_opa="0" style_border_width="0" style_pad_all="0" clickable="false"
+                  scrollable="false"/>
         </lv_obj>
       </lv_obj>
       <!-- Empty state (shown when no macros available) -->
@@ -41,10 +56,8 @@
               scrollable="false">
         <bind_flag_if_not_eq subject="macro_row_count" flag="hidden" ref_value="0"/>
         <icon src="code_tags" size="xl" variant="secondary"/>
-        <text_heading width="content" text="No Macros Found" translation_tag="No Macros Found" style_text_align="center"/>
-        <text_muted width="content"
-                    text="Define macros in your printer.cfg" translation_tag="Define macros in your printer.cfg"
-                    style_text_align="center"/>
+        <text_heading width="content" text="No Macros Found" style_text_align="center"/>
+        <text_muted width="content" text="Define macros in your printer.cfg" style_text_align="center"/>
       </lv_obj>
     </lv_obj>
   </view>

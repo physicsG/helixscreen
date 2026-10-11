@@ -27,19 +27,28 @@
     <px name="metadata_clip_height_xlarge" value="156"/>
     <px name="metadata_clip_height_xxlarge" value="196"/>
   </consts>
+  <styles>
+    <!-- Tiny/micro landscape: the two action rows share the grid's leftover
+         height (flex_grow beats the rows' inline height="content" in flex
+         distribution); each button fills its row via stacked_if_bp_lte, which
+         sets height 100% when it stacks. speed_flow_row is hidden below
+         MEDIUM so micro's rows still fit icon over label. Small and up keep
+         the content-height rows and fixed-height buttons. -->
+    <style name="ps_action_row_grow" flex_grow="1"/>
+  </styles>
   <!-- Print Status Panel - Active print monitoring with G-code 3D viewer -->
   <!-- Uses same sizing as print_file_detail: overlay_width_transient_large, 5:4 flex ratio -->
   <view name="print_status_panel"
         extends="lv_obj" width="#overlay_width_transient" height="100%" align="right_mid" style_bg_opa="255"
         style_bg_color="#card_bg" style_pad_all="0" style_border_width="0" flex_flow="column" clickable="true">
-    <!-- Header Bar with the dedicated E-Stop slot. The slot floats the e-stop
-         circle (ignore_layout) and reserves a horizontal gutter so any future
-         action button shifts left rather than sitting under it. The circle
-         overflows header_height at micro/tiny (prestonbrown/helixscreen#1204);
-         the slot handles that itself, so this panel no longer needs a standalone
-         floating FAB. estop_visible_subject gates it to active prints. -->
+    <!-- The Files action button opens print select mid-print so files can be
+         browsed and managed (prestonbrown/helixscreen#1395). The E-stop lives
+         on the navbar. -->
     <header_bar name="overlay_header"
-                title="Print Status" title_tag="Print Status" estop_visible_subject="estop_visible"/>
+                title="Print Status" hide_action_button_2="false" action_button_2_icon="folder"
+                action_button_2_icon_size="sm" action_button_2_bg_color="#elevated_bg" action_button_2_radius="9999"
+                action_button_2_width="#button_height_sm" action_button_2_min_width="0"
+                action_button_2_callback="on_print_status_files"/>
     <!-- Content Area (two columns: viewer left, controls right) -->
     <lv_obj name="overlay_content"
             width="100%" flex_grow="1" style_pad_left="#space_lg" style_pad_right="#space_lg" style_pad_top="0"
@@ -63,20 +72,21 @@
         <!-- Unified Temperature Card (nozzle + bed + optional chamber) -->
         <temp_card_unified name="temp_card"/>
 
-        <!-- Speed / Flow indicators (hidden on TINY and SMALL breakpoints) -->
-        <!-- Tap opens Tune overlay (same as Tune button) -->
+        <!-- Speed / Flow indicators (hidden below MEDIUM: the action buttons need the height) -->
+        <!-- Tap switches between percentages and mm/s + mm³/s (same preference as Tune's readouts) -->
         <lv_obj name="speed_flow_row"
                 width="100%" height="content" style_pad_left="#space_md" style_pad_right="#space_md" style_pad_top="0"
-                flex_flow="row" style_flex_cross_place="center" style_pad_gap="#space_sm" scrollable="false"
-                clickable="true">
-          <bind_flag_if_eq subject="ui_breakpoint" flag="hidden" ref_value="1"/>
-          <bind_flag_if_eq subject="ui_breakpoint" flag="hidden" ref_value="2"/>
-          <event_cb trigger="clicked" callback="on_print_status_tune"/>
+                flex_flow="row_wrap" style_flex_cross_place="center" style_pad_gap="#space_sm" scrollable="false"
+                clickable="true" style_radius="#border_radius">
+          <style name="styles.press_wash" selector="pressed"/>
+          <bind_flag_if cond="ui_breakpoint lt 3" flag="hidden"/>
+          <event_cb trigger="clicked" callback="on_print_status_units_toggle"/>
           <text_small text="Speed" clickable="false" event_bubble="true"/>
           <text_small name="speed_value" bind_text="print_speed_text" clickable="false" event_bubble="true"/>
           <text_small text=" · " clickable="false" event_bubble="true"/>
           <text_small text="Flow" clickable="false" event_bubble="true"/>
           <text_small name="flow_value" bind_text="print_flow_text" clickable="false" event_bubble="true"/>
+          <icon src="swap_horizontal" size="xs" variant="secondary" clickable="false" event_bubble="true"/>
         </lv_obj>
 
         <!-- Filament & AMS Status Row (side-by-side) -->
@@ -128,25 +138,23 @@
           <lv_obj width="100%"
                   height="content" style_pad_all="0" scrollable="false" flex_flow="row" style_flex_main_place="center"
                   style_flex_cross_place="center" style_pad_gap="#space_sm">
-            <ui_button name="btn_light"
-                       height="#button_height" flex_grow="1" text="Light" translation_tag="Light"
-                       bind_icon="light_button_icon" label_hidden_if_bp_eq="1">
+            <bind_style_if_lt name="ps_action_row_grow" subject="ui_breakpoint" ref_value="2"/>
+            <ui_button name="btn_light" flex_grow="1" text="Light" bind_icon="light_button_icon" stacked_if_bp_lte="1">
               <event_cb trigger="clicked" callback="on_print_status_light"/>
               <bind_flag_if_eq subject="led_controllable" flag="hidden" ref_value="0"/>
               <bind_state_if_eq subject="led_command_in_flight" state="disabled" ref_value="1"/>
             </ui_button>
             <!-- Timelapse button: only visible when Moonraker-Timelapse plugin installed -->
             <ui_button name="btn_timelapse"
-                       height="#button_height" flex_grow="1" bind_icon="timelapse_button_icon"
-                       bind_text="timelapse_button_label" label_hidden_if_bp_eq="1">
+                       flex_grow="1" bind_icon="timelapse_button_icon" bind_text="timelapse_button_label"
+                       stacked_if_bp_lte="1">
               <event_cb trigger="clicked" callback="on_print_status_timelapse"/>
               <bind_flag_if_eq subject="printer_has_timelapse" flag="hidden" ref_value="0"/>
               <bind_state_if_eq subject="print_controls_enabled" state="disabled" ref_value="0"/>
             </ui_button>
             <ui_button name="btn_pause"
-                       height="#button_height" flex_grow="1" style_max_width="50%"
-                       bind_icon="print_control_primary_icon" bind_text="print_control_primary_label"
-                       label_hidden_if_bp_eq="1">
+                       flex_grow="1" style_max_width="50%" bind_icon="print_control_primary_icon"
+                       bind_text="print_control_primary_label" stacked_if_bp_lte="1">
               <event_cb trigger="clicked" callback="on_print_control_primary"/>
               <bind_state_if_eq subject="print_control_primary_enabled" state="disabled" ref_value="0"/>
             </ui_button>
@@ -156,8 +164,8 @@
           <lv_obj width="100%"
                   height="content" style_pad_all="0" scrollable="false" flex_flow="row" style_flex_main_place="center"
                   style_flex_cross_place="center" style_pad_gap="#space_sm">
-            <ui_button name="btn_tune"
-                       height="#button_height" flex_grow="1" icon="tune" text="Tune" translation_tag="Tune">
+            <bind_style_if_lt name="ps_action_row_grow" subject="ui_breakpoint" ref_value="2"/>
+            <ui_button name="btn_tune" flex_grow="1" icon="tune" text="Tune" stacked_if_bp_lte="1">
               <event_cb trigger="clicked" callback="on_print_status_tune"/>
               <bind_state_if_eq subject="print_controls_enabled" state="disabled" ref_value="0"/>
             </ui_button>
@@ -168,23 +176,20 @@
                  (platform_extras_available gates the ESP32 v1 cut). Label is a
                  subject: "Cam" where Row 2 is tight, "Camera" from LARGE up. -->
             <ui_button name="btn_camera"
-                       height="#button_height" flex_grow="1" icon="webcam" bind_text="camera_button_label">
+                       flex_grow="1" icon="webcam" bind_text="camera_button_label" stacked_if_bp_lte="1">
               <bind_flag_if cond="printer_has_webcam and moonraker_is_remote and platform_extras_available"
                             flag="hidden" invert="true"/>
               <event_cb trigger="clicked" callback="on_print_status_camera"/>
             </ui_button>
             <!-- Cancel button: visible only during active print (outcome == NONE/0) -->
-            <ui_button name="btn_cancel"
-                       height="#button_height" flex_grow="1" variant="danger" icon="stop" text="Cancel"
-                       translation_tag="Cancel">
+            <ui_button name="btn_cancel" flex_grow="1" variant="danger" icon="stop" text="Cancel" stacked_if_bp_lte="1">
               <bind_flag_if_not_eq subject="print_outcome" flag="hidden" ref_value="0"/>
               <bind_state_if_eq subject="print_control_stop_enabled" state="disabled" ref_value="0"/>
               <event_cb trigger="clicked" callback="on_print_control_stop"/>
             </ui_button>
             <!-- Reprint button: shown for any terminal state (complete/cancelled/error) -->
             <ui_button name="btn_reprint"
-                       height="#button_height" flex_grow="1" icon="refresh" text="Reprint" translation_tag="Reprint"
-                       hidden="true">
+                       flex_grow="1" icon="refresh" text="Reprint" hidden="true" stacked_if_bp_lte="1">
               <bind_flag_if_eq subject="print_outcome" flag="hidden" ref_value="0"/>
               <event_cb trigger="clicked" callback="on_print_status_reprint"/>
             </ui_button>
@@ -194,22 +199,25 @@
         <!-- Plugin injection point: widgets from plugins appear here -->
         <!-- Plugins can inject print monitoring widgets, sensor readouts, etc. -->
         <lv_obj name="print_status_extras"
-                width="100%" height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_md"/>
+                width="100%" height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_md">
+          <!-- Up next: the first queued job. No completion modal shows while
+               the user sits on this panel, so this line is what makes the
+               queue reachable after a print ends — it stays up while the
+               queue is non-empty. Tap starts the job when the printer is
+               free, otherwise opens the job queue modal. -->
+          <lv_obj name="up_next_row"
+                  width="100%" height="content" style_pad_all="0" flex_flow="row" style_flex_cross_place="center"
+                  style_pad_gap="#space_xs" scrollable="false" clickable="true" style_radius="#border_radius">
+            <style name="styles.press_wash" selector="pressed"/>
+            <bind_flag_if_eq subject="job_queue_count" flag="hidden" ref_value="0"/>
+            <event_cb trigger="clicked" callback="on_up_next_tap"/>
+            <icon src="progress_clock" size="sm" variant="muted" clickable="false" event_bubble="true"/>
+            <text_small name="up_next_label"
+                        flex_grow="1" bind_text="job_queue_up_next_text" long_mode="dots" clickable="false"
+                        event_bubble="true"/>
+          </lv_obj>
+        </lv_obj>
       </lv_obj>
     </lv_obj>
-
-    <!-- E-Stop FAB — child of the panel ROOT (full-height), not the header, so
-         it never clips and stays fully hit-testable regardless of header_height
-         (prestonbrown/helixscreen#1204). The header_bar above reserves a spacer
-         gutter (estop_visible_subject) so the title never runs under this FAB.
-         estop_visible covers PRINTING + PAUSED + the preparing phase. Declared
-         last so it draws above the content it overlaps. -->
-    <lv_button name="estop_fab"
-               width="44" height="44" ignore_layout="true" align="top_right" style_translate_y="#space_sm"
-               style_radius="9999" style_bg_color="#danger" style_pad_all="0" hidden="true">
-      <bind_flag_if_eq subject="estop_visible" flag="hidden" ref_value="0"/>
-      <icon src="alert_octagon" size="md" color="#text" align="center"/>
-      <event_cb trigger="clicked" callback="emergency_stop_clicked"/>
-    </lv_button>
   </view>
 </component>

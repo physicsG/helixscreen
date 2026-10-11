@@ -4,8 +4,11 @@
 #include "ui_update_queue.h"
 
 #include "../test_fixtures.h"
+#include "../test_helpers/panel_widget_manager_test_access.h"
+#include "../test_helpers/process_async_timers.h"
 #include "../ui_test_utils.h"
 #include "config.h"
+#include "grid_layout.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "helix-xml/src/xml/lv_xml_component.h"
 #include "misc/lv_timer_private.h"
@@ -20,30 +23,7 @@
 
 using namespace helix;
 
-namespace {
-
-/// Drain LVGL's async list (lv_async_call queue) by calling lv_timer_handler
-/// repeatedly until no one-shot timer fires. lv_async_call schedules its
-/// callback as a one-shot timer; lv_timer_handler dispatches it.
-void process_async_calls() {
-    for (int safety = 0; safety < 50; ++safety) {
-        bool fired = false;
-        lv_timer_t* t = lv_timer_get_next(nullptr);
-        while (t) {
-            lv_timer_t* next = lv_timer_get_next(t);
-            if (t->repeat_count > 0 && t->timer_cb) {
-                t->timer_cb(t);
-                fired = true;
-                break;
-            }
-            t = next;
-        }
-        if (!fired)
-            break;
-    }
-}
-
-} // namespace
+namespace {} // namespace
 
 TEST_CASE("PanelWidget: supports_reuse defaults to true", "[panel_widget]") {
     struct TestWidget : PanelWidget {
@@ -238,7 +218,7 @@ TEST_CASE("PanelWidgetManager coalesces multiple gate firings into one rebuild",
         REQUIRE(rebuild_count == 0);
 
         // Run LVGL's async list. Should fire exactly one rebuild.
-        process_async_calls();
+        process_async_timers();
         REQUIRE(rebuild_count == 1);
     }
 
@@ -250,7 +230,7 @@ TEST_CASE("PanelWidgetManager coalesces multiple gate firings into one rebuild",
             lv_subject_set_int(subj, 1);
         }
         q.drain();
-        process_async_calls();
+        process_async_timers();
         REQUIRE(rebuild_count == 1);
 
         // Second burst (different values) after first rebuild completed →
@@ -259,7 +239,7 @@ TEST_CASE("PanelWidgetManager coalesces multiple gate firings into one rebuild",
             lv_subject_set_int(subj, 2);
         }
         q.drain();
-        process_async_calls();
+        process_async_timers();
         REQUIRE(rebuild_count == 2);
     }
 
@@ -279,9 +259,11 @@ struct GridSpyWidget : helix::PanelWidget {
     static int s_layout_at_attach; // lv_obj_get_style_layout of parent at attach
     static int s_attach_count;
     static lv_obj_t* s_attached_widget;
+    static void* s_user_data_at_attach;
 
     void attach(lv_obj_t* widget_obj, lv_obj_t* /*parent_screen*/) override {
         s_attached_widget = widget_obj;
+        s_user_data_at_attach = lv_obj_get_user_data(widget_obj);
         ++s_attach_count;
         lv_obj_t* parent = widget_obj ? lv_obj_get_parent(widget_obj) : nullptr;
         s_layout_at_attach =
@@ -302,6 +284,7 @@ struct GridSpyWidget : helix::PanelWidget {
 int GridSpyWidget::s_layout_at_attach = -2;
 int GridSpyWidget::s_attach_count = 0;
 lv_obj_t* GridSpyWidget::s_attached_widget = nullptr;
+void* GridSpyWidget::s_user_data_at_attach = nullptr;
 
 } // namespace
 
@@ -390,6 +373,8 @@ TEST_CASE_METHOD(XMLTestFixture,
     REQUIRE(GridSpyWidget::s_attached_widget != nullptr);
     // The attached widget is parented into the page container.
     REQUIRE(lv_obj_get_parent(GridSpyWidget::s_attached_widget) == container);
+    // The manager binds the tile root before attach(); the widget never sets it.
+    REQUIRE(GridSpyWidget::s_user_data_at_attach == widgets.front().get());
 
     // Restore global registry state for subsequent tests.
     helix::register_widget_factory("clock", original_clock_factory);
@@ -575,7 +560,8 @@ TEST_CASE_METHOD(XMLTestFixture,
     GridSpyWidget::s_attach_count = 0;
     GridSpyWidget::s_attached_widget = nullptr;
 
-    // Keep Klipper READY so no firmware_restart widget is injected.
+    // A populate while Klipper is not READY does not persist its layout, so keep
+    // it READY for tests that assert on what reached disk.
     lv_subject_set_int(lv_xml_get_subject(nullptr, "printer_connection_state"),
                        static_cast<int>(ConnectionState::CONNECTED));
     lv_subject_set_int(lv_xml_get_subject(nullptr, "klippy_state"),
@@ -642,7 +628,6 @@ TEST_CASE_METHOD(HelixTestFixture,
                  "PanelWidgetManager: clear_all_panel_configs reloads after printer switch",
                  "[panel_widget][manager]") {
     auto* cfg = Config::get_instance();
-    REQUIRE(cfg != nullptr);
 
     auto& mgr = PanelWidgetManager::instance();
 
@@ -674,7 +659,7 @@ TEST_CASE_METHOD(HelixTestFixture,
         REQUIRE_FALSE(wc.is_enabled("shutdown"));
     }
 
-    // Simulate Application::switch_printer(): change the active printer, then
+    // Simulate PrinterSession::switch_printer(): change the active printer, then
     // invalidate every cached panel config so the next access re-reads df().
     REQUIRE(cfg->set_active_printer("printer-B"));
     mgr.clear_all_panel_configs();
@@ -994,5 +979,404 @@ TEST_CASE_METHOD(XMLTestFixture,
 
     helix::register_widget_factory("clock", orig_clock);
     helix::register_widget_factory("shutdown", orig_shutdown);
+    mgr.clear_panel_config(panel_id);
+}
+
+// The set of visible widgets must not depend on klippy_state. Nothing observes
+// that subject for panel rebuilds any more, so a widget that DID vary with it
+// would change on screen only when some unrelated gate happened to fire.
+TEST_CASE_METHOD(XMLTestFixture, "Visible widget ids do not depend on klippy_state",
+                 "[panel_widget][manager]") {
+    helix::init_widget_registrations();
+
+    lv_subject_set_int(lv_xml_get_subject(nullptr, "printer_connection_state"),
+                       static_cast<int>(ConnectionState::CONNECTED));
+
+    const std::string panel_id = "test_klippy_independent_ids";
+    auto& mgr = PanelWidgetManager::instance();
+
+    lv_subject_set_int(lv_xml_get_subject(nullptr, "klippy_state"),
+                       static_cast<int>(KlippyState::READY));
+    const std::vector<std::string> when_ready = mgr.compute_visible_widget_ids(panel_id);
+
+    lv_subject_set_int(lv_xml_get_subject(nullptr, "klippy_state"),
+                       static_cast<int>(KlippyState::SHUTDOWN));
+    const std::vector<std::string> when_shutdown = mgr.compute_visible_widget_ids(panel_id);
+
+    // Non-empty, or this compares two empty vectors and proves nothing.
+    REQUIRE_FALSE(when_ready.empty());
+    CHECK(when_ready == when_shutdown);
+
+    mgr.clear_panel_config(panel_id);
+}
+
+namespace {
+
+/// Copy the descriptor arrays a container's grid style points at, up to (not
+/// including) the LV_GRID_TEMPLATE_LAST sentinel. Reading them back later and
+/// comparing is the whole test: LVGL stores the RAW pointers, so anything that
+/// frees the arrays between the two reads shows up as changed contents.
+std::pair<std::vector<int32_t>, std::vector<int32_t>> snapshot_grid_dsc(lv_obj_t* container) {
+    std::pair<std::vector<int32_t>, std::vector<int32_t>> out;
+    for (const int32_t* p = lv_obj_get_style_grid_column_dsc_array(container, LV_PART_MAIN);
+         *p != LV_GRID_TEMPLATE_LAST; ++p) {
+        out.first.push_back(*p);
+    }
+    for (const int32_t* p = lv_obj_get_style_grid_row_dsc_array(container, LV_PART_MAIN);
+         *p != LV_GRID_TEMPLATE_LAST; ++p) {
+        out.second.push_back(*p);
+    }
+    return out;
+}
+
+/// Render a descriptor snapshot for a Catch2 INFO line.
+std::string dsc_to_string(const std::vector<int32_t>& v) {
+    std::string out;
+    for (int32_t x : v) {
+        if (!out.empty())
+            out += ", ";
+        out += std::to_string(x);
+    }
+    return out;
+}
+
+} // namespace
+
+// A printer switch clears every cached panel config and the new session
+// populates a NEW page container for the same panel:page while the previous
+// session's container is still alive awaiting its deferred delete. The old
+// container's grid style holds raw pointers into the manager's descriptor
+// arrays (LVGL does not copy them), so those arrays must stay valid for as
+// long as any container laid out with them exists - their lifetime belongs to
+// the container, not to the cache key.
+//
+// B is deliberately taller than A: a same-size B could have its fresh arrays
+// land on A's just-freed buffers (malloc reuses the chunk), which would make
+// A read plausible-but-aliasing data. A different row count keeps the row
+// arrays in different size classes.
+TEST_CASE_METHOD(
+    XMLTestFixture,
+    "PanelWidgetManager keeps the old container's grid readable across a printer switch",
+    "[panel_widget][manager][switch]") {
+    helix::init_widget_registrations();
+
+    lv_xml_register_component_from_data(
+        "test_grid_spy_widget",
+        "<component><view extends=\"lv_obj\" width=\"100%\" height=\"100%\"/></component>");
+
+    const auto* clock_def = helix::find_widget_def("clock");
+    REQUIRE(clock_def != nullptr);
+    WidgetFactory original_clock_factory = clock_def->factory;
+    helix::register_widget_factory("clock", [](const std::string&) -> std::unique_ptr<PanelWidget> {
+        return std::make_unique<GridSpyWidget>();
+    });
+
+    const std::string panel_id = "test_switch_dsc_lifetime";
+
+    auto* cfg = Config::get_instance();
+    nlohmann::json widget_cfg = {{"main_page_index", 0},
+                                 {"next_page_id", 2},
+                                 {"pages",
+                                  {{{"id", "main"}, {"widgets", nlohmann::json::array()}},
+                                   {{"id", "spy"},
+                                    {"widgets",
+                                     {{{"id", "clock"},
+                                       {"enabled", true},
+                                       {"col", 0},
+                                       {"row", 0},
+                                       {"colspan", 1},
+                                       {"rowspan", 1}}}}}}}};
+    cfg->set<nlohmann::json>(cfg->df() + "panel_widgets/" + panel_id, widget_cfg);
+
+    auto& mgr = PanelWidgetManager::instance();
+    mgr.get_widget_config(panel_id).mark_dirty();
+    mgr.clear_panel_config(panel_id);
+
+    // Session 1: populate container A for the key.
+    lv_obj_t* container_a = lv_obj_create(test_screen());
+    lv_obj_set_size(container_a, 400, 300);
+    process_lvgl(10);
+    auto widgets_a = mgr.populate_widgets(panel_id, container_a, /*page_index=*/1);
+    REQUIRE(lv_obj_get_style_layout(container_a, LV_PART_MAIN) == LV_LAYOUT_GRID);
+
+    const auto [col_expected, row_expected] = snapshot_grid_dsc(container_a);
+    // The arrays must be long enough that the sentinel sits past the 16 bytes
+    // an allocator writes into a freed small chunk; otherwise the snapshot
+    // read below could itself walk off a freed array.
+    REQUIRE(col_expected.size() >= 4);
+    REQUIRE(row_expected.size() >= 4);
+
+    // The switch: every cached panel config invalidated, then the new session
+    // builds a NEW container for the SAME key while A is still alive.
+    widgets_a.clear();
+    mgr.clear_all_panel_configs();
+
+    lv_obj_t* container_b = lv_obj_create(test_screen());
+    lv_obj_set_size(container_b, 400, 700);
+    process_lvgl(10);
+    auto widgets_b = mgr.populate_widgets(panel_id, container_b, /*page_index=*/1);
+    REQUIRE(lv_obj_get_style_layout(container_b, LV_PART_MAIN) == LV_LAYOUT_GRID);
+    REQUIRE(container_b != container_a);
+
+    // A's grid must still read exactly what was installed into it.
+    const auto [col_now, row_now] = snapshot_grid_dsc(container_a);
+    INFO("col expected: " << dsc_to_string(col_expected) << " now: " << dsc_to_string(col_now));
+    INFO("row expected: " << dsc_to_string(row_expected) << " now: " << dsc_to_string(row_now));
+    CHECK(col_now == col_expected);
+    CHECK(row_now == row_expected);
+
+    // And a layout pass over A must survive - the lv_refr_now() the switch
+    // takes right after building the new tree is what walked the freed arrays
+    // in count_tracks.
+    lv_obj_update_layout(container_a);
+
+    helix::register_widget_factory("clock", original_clock_factory);
+    mgr.clear_panel_config(panel_id);
+}
+
+// The container owns its descriptor slot: deleting it drops the slot, so the
+// map is bounded by live containers no matter how many printer switches or
+// rebuilds came before.
+TEST_CASE_METHOD(XMLTestFixture,
+                 "PanelWidgetManager drops grid descriptors when their container is deleted",
+                 "[panel_widget][manager][switch]") {
+    helix::init_widget_registrations();
+
+    lv_xml_register_component_from_data(
+        "test_grid_spy_widget",
+        "<component><view extends=\"lv_obj\" width=\"100%\" height=\"100%\"/></component>");
+
+    const auto* clock_def = helix::find_widget_def("clock");
+    REQUIRE(clock_def != nullptr);
+    WidgetFactory original_clock_factory = clock_def->factory;
+    helix::register_widget_factory("clock", [](const std::string&) -> std::unique_ptr<PanelWidget> {
+        return std::make_unique<GridSpyWidget>();
+    });
+
+    const std::string panel_id = "test_switch_dsc_delete";
+    auto* cfg = Config::get_instance();
+    nlohmann::json widget_cfg = {{"main_page_index", 0},
+                                 {"next_page_id", 2},
+                                 {"pages",
+                                  {{{"id", "main"}, {"widgets", nlohmann::json::array()}},
+                                   {{"id", "spy"},
+                                    {"widgets",
+                                     {{{"id", "clock"},
+                                       {"enabled", true},
+                                       {"col", 0},
+                                       {"row", 0},
+                                       {"colspan", 1},
+                                       {"rowspan", 1}}}}}}}};
+    cfg->set<nlohmann::json>(cfg->df() + "panel_widgets/" + panel_id, widget_cfg);
+
+    auto& mgr = PanelWidgetManager::instance();
+    mgr.get_widget_config(panel_id).mark_dirty();
+    mgr.clear_panel_config(panel_id);
+
+    // Whatever earlier tests in this binary left behind, the count starts known.
+    const size_t before = PanelWidgetManagerTestAccess::grid_descriptor_count(mgr);
+
+    lv_obj_t* container = lv_obj_create(test_screen());
+    lv_obj_set_size(container, 400, 300);
+    process_lvgl(10);
+    auto widgets = mgr.populate_widgets(panel_id, container, /*page_index=*/1);
+    REQUIRE(lv_obj_get_style_layout(container, LV_PART_MAIN) == LV_LAYOUT_GRID);
+    REQUIRE(PanelWidgetManagerTestAccess::grid_descriptor_count(mgr) == before + 1);
+
+    lv_obj_delete(container);
+    REQUIRE(PanelWidgetManagerTestAccess::grid_descriptor_count(mgr) == before);
+
+    helix::register_widget_factory("clock", original_clock_factory);
+    mgr.clear_panel_config(panel_id);
+}
+
+TEST_CASE("gate_flips_only accepts only hardware-gate flips",
+          "[panel_widget][manager][gate_swap]") {
+    using Ids = std::vector<std::string>;
+    const std::string g = GATED_ID_SUFFIX;
+
+    SECTION("identical lists flip nothing") {
+        auto flips =
+            PanelWidgetManager::gate_flips_only({"clock", "led" + g}, {"clock", "led" + g});
+        REQUIRE(flips.has_value());
+        CHECK(flips->empty());
+    }
+    SECTION("un-gating and gating are reported with their direction") {
+        auto flips = PanelWidgetManager::gate_flips_only(Ids{"clock", "led" + g, "fan" + g},
+                                                         Ids{"clock", "led", "fan" + g});
+        REQUIRE(flips.has_value());
+        REQUIRE(flips->size() == 1);
+        CHECK((*flips)[0].index == 1);
+        CHECK_FALSE((*flips)[0].now_gated);
+
+        flips = PanelWidgetManager::gate_flips_only(Ids{"led"}, Ids{"led" + g});
+        REQUIRE(flips.has_value());
+        REQUIRE(flips->size() == 1);
+        CHECK((*flips)[0].now_gated);
+    }
+    SECTION("anything else is not a flip") {
+        CHECK_FALSE(PanelWidgetManager::gate_flips_only(Ids{"clock", "led"}, Ids{"led", "clock"}));
+        CHECK_FALSE(PanelWidgetManager::gate_flips_only(Ids{"clock"}, Ids{"clock", "led" + g}));
+        CHECK_FALSE(
+            PanelWidgetManager::gate_flips_only(Ids{"clock", "led" + g}, Ids{"clock", "fan"}));
+    }
+}
+
+namespace {
+
+// Records attach/detach per widget id, on a dependency-free component.
+struct GateSwapSpyWidget : helix::PanelWidget {
+    explicit GateSwapSpyWidget(std::string id) : id_(std::move(id)) {}
+    static inline std::unordered_map<std::string, int> s_attached;
+    static inline std::unordered_map<std::string, int> s_detached;
+
+    void attach(lv_obj_t*, lv_obj_t*) override {
+        ++s_attached[id_];
+    }
+    void detach() override {
+        ++s_detached[id_];
+    }
+    const char* id() const override {
+        return id_.c_str();
+    }
+    std::string get_component_name() const override {
+        return "test_gate_swap_widget";
+    }
+
+  private:
+    std::string id_;
+};
+
+lv_obj_t* find_tile(lv_obj_t* container, const char* id) {
+    for (uint32_t i = 0; i < lv_obj_get_child_count(container); ++i) {
+        lv_obj_t* child = lv_obj_get_child(container, static_cast<int32_t>(i));
+        const char* name = lv_obj_get_name(child);
+        if (name && std::strcmp(name, id) == 0) {
+            return child;
+        }
+    }
+    return nullptr;
+}
+
+} // namespace
+
+TEST_CASE_METHOD(XMLTestFixture,
+                 "A hardware gate flip re-creates only the flipped tile, in its own cell",
+                 "[panel_widget][manager][gate_swap]") {
+    helix::init_widget_registrations();
+    lv_xml_register_component_from_data(
+        "test_gate_swap_widget",
+        "<component><view extends=\"lv_obj\" width=\"100%\" height=\"100%\"/></component>");
+
+    lv_subject_t* gate = lv_xml_get_subject(nullptr, "led_controllable");
+    static lv_subject_t s_fallback_gate;
+    if (!gate) {
+        lv_subject_init_int(&s_fallback_gate, 0);
+        lv_xml_register_subject(nullptr, "led_controllable", &s_fallback_gate);
+        gate = &s_fallback_gate;
+    }
+    const int gate_before = lv_subject_get_int(gate);
+
+    const WidgetFactory orig_clock = helix::find_widget_def("clock")->factory;
+    const WidgetFactory orig_led = helix::find_widget_def("led")->factory;
+    for (const char* id : {"clock", "led"}) {
+        helix::register_widget_factory(id,
+                                       [](const std::string& wid) -> std::unique_ptr<PanelWidget> {
+                                           return std::make_unique<GateSwapSpyWidget>(wid);
+                                       });
+    }
+    GateSwapSpyWidget::s_attached.clear();
+    GateSwapSpyWidget::s_detached.clear();
+
+    const std::string panel_id = "test_gate_swap";
+    auto* cfg = Config::get_instance();
+    nlohmann::json widget_cfg = {{"main_page_index", 0},
+                                 {"next_page_id", 2},
+                                 {"pages",
+                                  {{{"id", "main"}, {"widgets", nlohmann::json::array()}},
+                                   {{"id", "swap"},
+                                    {"widgets",
+                                     {{{"id", "clock"},
+                                       {"enabled", true},
+                                       {"col", 0},
+                                       {"row", 0},
+                                       {"colspan", 1},
+                                       {"rowspan", 1}},
+                                      {{"id", "led"},
+                                       {"enabled", true},
+                                       {"col", 2},
+                                       {"row", 0},
+                                       {"colspan", 2},
+                                       {"rowspan", 2}}}}}}}};
+    cfg->set<nlohmann::json>(cfg->df() + "panel_widgets/" + panel_id, widget_cfg);
+    auto& mgr = PanelWidgetManager::instance();
+    mgr.get_widget_config(panel_id).mark_dirty();
+    mgr.clear_panel_config(panel_id);
+
+    lv_obj_t* container = lv_obj_create(test_screen());
+    lv_obj_set_size(container, 800, 480);
+    process_lvgl(10);
+
+    lv_subject_set_int(gate, 0);
+    const auto gated_ids = mgr.compute_visible_widget_ids(panel_id, 1);
+    auto widgets = mgr.populate_widgets(panel_id, container, 1);
+    lv_obj_t* clock_tile = find_tile(container, "clock");
+    lv_obj_t* gated_led = find_tile(container, "led");
+    REQUIRE(clock_tile != nullptr);
+    REQUIRE(gated_led != nullptr);
+    REQUIRE(widgets.size() == 1); // the gated led has no instance
+    PanelWidget* clock_instance = widgets[0].get();
+    const int led_col = lv_obj_get_style_grid_cell_column_pos(gated_led, LV_PART_MAIN);
+    const int led_colspan = lv_obj_get_style_grid_cell_column_span(gated_led, LV_PART_MAIN);
+    const int led_row = lv_obj_get_style_grid_cell_row_pos(gated_led, LV_PART_MAIN);
+    const int led_rowspan = lv_obj_get_style_grid_cell_row_span(gated_led, LV_PART_MAIN);
+
+    // Un-gate: only the led tile is replaced, in the cell it held.
+    lv_subject_set_int(gate, 1);
+    const auto live_ids = mgr.compute_visible_widget_ids(panel_id, 1);
+    auto flips = PanelWidgetManager::gate_flips_only(gated_ids, live_ids);
+    REQUIRE(flips.has_value());
+    REQUIRE(flips->size() == 1);
+    auto fresh = mgr.swap_gated_tiles(panel_id, container, 1, live_ids, *flips, widgets);
+    REQUIRE(fresh.has_value());
+    REQUIRE(fresh->size() == 1);
+    CHECK(std::string((*fresh)[0]->id()) == "led");
+    CHECK(GateSwapSpyWidget::s_attached["led"] == 1);
+    CHECK(GateSwapSpyWidget::s_attached["clock"] == 1);
+    CHECK(find_tile(container, "clock") == clock_tile);
+    CHECK(widgets.size() == 2);
+    CHECK(widgets[0].get() == clock_instance);
+    lv_obj_t* live_led = find_tile(container, "led");
+    REQUIRE(live_led != nullptr);
+    CHECK(live_led != gated_led);
+    CHECK(lv_obj_get_style_grid_cell_column_pos(live_led, LV_PART_MAIN) == led_col);
+    CHECK(lv_obj_get_style_grid_cell_column_span(live_led, LV_PART_MAIN) == led_colspan);
+    CHECK(lv_obj_get_style_grid_cell_row_pos(live_led, LV_PART_MAIN) == led_row);
+    CHECK(lv_obj_get_style_grid_cell_row_span(live_led, LV_PART_MAIN) == led_rowspan);
+
+    // The manager's cache names the swapped state, so the same list is a no-op.
+    CHECK(mgr.populate_widgets(panel_id, container, 1).empty());
+    CHECK(find_tile(container, "clock") == clock_tile);
+
+    // Gate again: the led instance is detached and dropped, the clock stays.
+    lv_subject_set_int(gate, 0);
+    flips =
+        PanelWidgetManager::gate_flips_only(live_ids, mgr.compute_visible_widget_ids(panel_id, 1));
+    REQUIRE(flips.has_value());
+    fresh = mgr.swap_gated_tiles(panel_id, container, 1, gated_ids, *flips, widgets);
+    REQUIRE(fresh.has_value());
+    CHECK(fresh->empty());
+    CHECK(GateSwapSpyWidget::s_detached["led"] == 1);
+    CHECK(GateSwapSpyWidget::s_detached["clock"] == 0);
+    REQUIRE(widgets.size() == 1);
+    CHECK(widgets[0].get() == clock_instance);
+    CHECK(find_tile(container, "clock") == clock_tile);
+
+    process_async_timers();
+    widgets.clear();
+    lv_obj_delete(container);
+    lv_subject_set_int(gate, gate_before);
+    helix::register_widget_factory("clock", orig_clock);
+    helix::register_widget_factory("led", orig_led);
     mgr.clear_panel_config(panel_id);
 }

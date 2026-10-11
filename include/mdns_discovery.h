@@ -57,7 +57,7 @@ class IMdnsDiscovery {
  *
  * Threading model:
  * - Discovery runs on a background thread
- * - Callbacks are dispatched to the main LVGL thread via helix::ui::async_call()
+ * - Callbacks are dispatched to the main LVGL thread via helix::ui::queue_update()
  * - stop_discovery() blocks until the background thread exits
  *
  * Usage:

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "page_scroll_auto_inject.h"
 
+#include "ui_update_queue.h"
+
 #include "display_settings_manager.h"
 #include "panel_widget.h"
 
@@ -54,6 +56,46 @@ bool PageScrollAutoInject::qualifies(lv_obj_t* obj) {
     return lv_obj_get_scroll_bottom(obj) > 0 || lv_obj_get_scroll_y(obj) > 0;
 }
 
+// A flex/grid container with a bounded height can start to overflow when content
+// arrives after the walk (Print Files fills its list asynchronously). Content-sized
+// containers that do not flex-grow never overflow, which keeps the watched set small.
+bool PageScrollAutoInject::may_overflow_later(lv_obj_t* obj) {
+    return lv_obj_has_flag(obj, LV_OBJ_FLAG_SCROLLABLE) &&
+           (lv_obj_get_scroll_dir(obj) & LV_DIR_VER) != 0 &&
+           lv_obj_get_style_layout(obj, LV_PART_MAIN) != LV_LAYOUT_NONE &&
+           (lv_obj_get_style_height(obj, LV_PART_MAIN) != LV_SIZE_CONTENT ||
+            lv_obj_get_style_flex_grow(obj, LV_PART_MAIN) > 0);
+}
+
+// LV_EVENT_LAYOUT_CHANGED fires on each layout pass of the container, which can be
+// every frame while it scrolls or animates, so the checks here stay cheap and the
+// tree walk runs only once the container actually overflows. Attaching creates the
+// gutter and changes padding, which must not happen inside the layout pass, so the
+// re-walk is deferred and coalesced.
+void PageScrollAutoInject::late_fill_cb(lv_event_t* e) {
+    auto& self = instance();
+    lv_obj_t* target = lv_event_get_current_target_obj(e);
+    if (self.rewalk_pending_ || !self.enabled() || !qualifies(target)) {
+        return;
+    }
+    // LVGL lays out hidden subtrees but the walk skips them, so a hidden list would
+    // re-walk on every pass without ever being claimed. on_root_shown() claims it
+    // when its panel is shown.
+    for (lv_obj_t* o = target; o != nullptr; o = lv_obj_get_parent(o)) {
+        if (lv_obj_has_flag(o, LV_OBJ_FLAG_HIDDEN)) {
+            return;
+        }
+    }
+    self.rewalk_pending_ = true;
+    helix::ui::queue_update("PageScroll::late_fill", [] {
+        auto& inj = instance();
+        inj.rewalk_pending_ = false;
+        ++inj.late_rewalks_;
+        inj.on_root_shown(lv_screen_active());
+        inj.on_root_shown(lv_layer_top());
+    });
+}
+
 void PageScrollAutoInject::walk_and_attach(lv_obj_t* obj, bool ancestor_managed) {
     if (lv_obj_has_flag(obj, LV_OBJ_FLAG_HIDDEN)) {
         return; // don't inject into hidden/stacked panels
@@ -92,6 +134,15 @@ void PageScrollAutoInject::walk_and_attach(lv_obj_t* obj, bool ancestor_managed)
             spdlog::debug("[PageScroll] attach failed for container {}", static_cast<void*>(obj));
         }
     }
+    if (may_overflow_later(obj)) {
+        // One registration per unclaimed container. A container under a managed
+        // ancestor stays unmanaged while that ancestor is managed, so watching it
+        // would only re-walk the tree for nothing; a managed one needs no watch.
+        lv_obj_remove_event_cb(obj, late_fill_cb);
+        if (!claimed) {
+            lv_obj_add_event_cb(obj, late_fill_cb, LV_EVENT_LAYOUT_CHANGED, nullptr);
+        }
+    }
     uint32_t n = lv_obj_get_child_count(obj);
     for (uint32_t i = 0; i < n; ++i) {
         walk_and_attach(lv_obj_get_child(obj, static_cast<int32_t>(i)), claimed);
@@ -99,7 +150,7 @@ void PageScrollAutoInject::walk_and_attach(lv_obj_t* obj, bool ancestor_managed)
 }
 
 void PageScrollAutoInject::on_root_shown(lv_obj_t* root) {
-    // Read the setting live rather than trusting a cached flag: observe_int_sync
+    // Read the setting live rather than trusting a cached flag: observe<int>
     // defers its callback via queue_update, so a member cache could lag the
     // subject's synchronous value by one process_lvgl tick (e.g. a caller that
     // flips the setting and immediately shows a panel in the same frame). This

@@ -55,7 +55,7 @@ class PrintControlButtons {
      * removal for live observers instead.
      */
     [[nodiscard]] SubjectLifetime get_subjects_lifetime() const {
-        return subjects_lifetime_;
+        return subjects_.get_subjects_lifetime();
     }
 
     void handle_primary_button();
@@ -117,23 +117,17 @@ class PrintControlButtons {
     /// nodes deinit_all() just freed.
     void teardown_subjects();
 
-    static void on_primary_clicked(lv_event_t* e);
-    static void on_stop_clicked(lv_event_t* e);
-
     IMoonrakerAPI* api_ = nullptr;
     bool subjects_initialized_ = false;
     PendingAction pending_action_ = PendingAction::None;
     lv_timer_t* pending_action_timeout_ = nullptr;
 
     SubjectManager subjects_;
-    /// See get_subjects_lifetime(). Created with the object and REPLACED (never
-    /// nulled) by teardown, so the accessor always hands out a live token.
-    SubjectLifetime subjects_lifetime_ = std::make_shared<bool>(true);
-    lv_subject_t primary_icon_subject_;
-    lv_subject_t primary_label_subject_;
-    lv_subject_t primary_enabled_subject_;
-    lv_subject_t stop_enabled_subject_;
-    lv_subject_t pending_action_subject_;
+    lv_subject_t primary_icon_subject_{};
+    lv_subject_t primary_label_subject_{};
+    lv_subject_t primary_enabled_subject_{};
+    lv_subject_t stop_enabled_subject_{};
+    lv_subject_t pending_action_subject_{};
     char primary_icon_buf_[32] = "\xF3\xB0\x8F\xA4";
     char primary_label_buf_[16] = "Pause";
 

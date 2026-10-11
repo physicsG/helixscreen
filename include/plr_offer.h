@@ -6,7 +6,7 @@ namespace helix {
 /// Raw inputs for the connect-time Power-Loss-Recovery offer decision, all
 /// sourced from PrinterState (plus the controller's own latch).
 ///
-/// `recovery_available` is the NORMALIZED signal that both backends collapse
+/// `recovery_available` is the NORMALIZED signal that the backends collapse
 /// into — see docs/devel/POWER_LOSS_RECOVERY.md and plr_backend.h:
 ///   - Snapmaker (passive): `virtual_sdcard.pl_env_valid == true`. That field
 ///     is emitted only by Snapmaker's forked virtual_sdcard (mainline/AFC
@@ -15,13 +15,17 @@ namespace helix {
 ///     no separate backend/printer-type gate is needed, which is what lets the
 ///     offer fire on an AFC-modded U1 whose AMS backend is not the Snapmaker
 ///     backend.
+///   - Qidi (passive): discovery saw Qidi's recovery macros AND
+///     `save_variables.variables.was_interrupted` is a JSON boolean true. The
+///     stock macros leave it true during every normal print too, so
+///     `printer_idle` is what scopes the offer to a boot after power loss.
 ///   - Creality (active): the one-shot `check_continue_print_state` probe
 ///     completed and reported BOTH `file_state` and `eeprom_state` true.
 ///
 /// Keeping the normalization outside this struct is what lets the latch,
 /// re-arm, and wizard-suppression rules below stay backend-agnostic.
 struct PlrOfferSignals {
-    bool recovery_available; ///< a resumable snapshot exists (either backend)
+    bool recovery_available; ///< a resumable snapshot exists (any backend)
     bool printer_idle;       ///< no active or paused print right now
     bool already_prompted;   ///< one-shot latch: already offered this connection
     bool wizard_active;      ///< setup wizard is running (app_globals::is_wizard_active())

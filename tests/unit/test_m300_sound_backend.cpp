@@ -307,18 +307,18 @@ TEST_CASE("M300 backend with null sender does not crash", "[sound][m300]") {
     M300SoundBackend backend(nullptr);
 
     // All operations should be safe no-ops
-    backend.set_tone(440.0f, 1.0f, 0.5f);
-    backend.set_tone(880.0f, 1.0f, 0.5f);
-    backend.silence();
-    backend.set_tone(440.0f, 0.0f, 0.5f);
+    REQUIRE_NOTHROW(backend.set_tone(440.0f, 1.0f, 0.5f));
+    REQUIRE_NOTHROW(backend.set_tone(880.0f, 1.0f, 0.5f));
+    REQUIRE_NOTHROW(backend.silence());
+    REQUIRE_NOTHROW(backend.set_tone(440.0f, 0.0f, 0.5f));
 }
 
 TEST_CASE("M300 backend with empty function does not crash", "[sound][m300]") {
     M300SoundBackend::GcodeSender empty_sender;
     M300SoundBackend backend(std::move(empty_sender));
 
-    backend.set_tone(440.0f, 1.0f, 0.5f);
-    backend.silence();
+    REQUIRE_NOTHROW(backend.set_tone(440.0f, 1.0f, 0.5f));
+    REQUIRE_NOTHROW(backend.silence());
 }
 
 // ============================================================================

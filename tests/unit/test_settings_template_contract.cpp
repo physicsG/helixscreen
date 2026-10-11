@@ -16,7 +16,7 @@
  *    that as "a tarball default" (config.cpp), restoring a rolling backup over
  *    the loaded file if one exists — so the documented values silently lose.
  *  - A legacy singular "printer" object alongside a "printers" key that held only
- *    show_printer_switcher. migrate_v3_to_v4 moves "printer" under "printers/<slug>"
+ *    show_printer_switcher. normalize_versionless_document moves "printer" under "printers/<slug>"
  *    but returns early when "printers" already exists, so the whole printer block —
  *    host, port, every timeout — was orphaned and ignored, with no error.
  *  - "display.theme" naming a theme that is not DEFAULT_THEME, with a comment
@@ -87,8 +87,9 @@ TEST_CASE("settings template declares the current config version", "[config][tem
 TEST_CASE("settings template uses the multi-printer schema", "[config][template]") {
     auto tpl = load_template();
 
-    INFO("migrate_v3_to_v4 returns early when 'printers' exists, so a legacy singular "
-         "'printer' object alongside it can never migrate and is silently ignored.");
+    INFO(
+        "normalize_versionless_document returns early when 'printers' exists, so a legacy singular "
+        "'printer' object alongside it can never migrate and is silently ignored.");
     CHECK_FALSE(tpl.contains("printer"));
 
     REQUIRE(tpl.contains("printers"));

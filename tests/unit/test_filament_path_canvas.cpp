@@ -139,3 +139,30 @@ TEST_CASE("bypass hit rect: full-extent bounds preserved (margin 0)", "[canvas][
     REQUIRE(bypass_hit({bx, my + 16}, bx, my, sr));       // Y edge inclusive
     REQUIRE_FALSE(bypass_hit({bx, my + 17}, bx, my, sr)); // beyond Y misses
 }
+
+// ============================================================================
+// recorded_box_hit() — a box recorded at render time follows the widget when it
+// moves without a re-render (an overlay sliding in, a scrolled parent).
+// ============================================================================
+
+TEST_CASE("recorded box: hits where it is drawn after the widget moves", "[canvas][hit_test]") {
+    // Recorded while the panel was mid-slide at x=700; it has since settled at
+    // x=88. The drawn box moved with the widget, 612px to the left.
+    const lv_area_t selector = {792, 204, 1180, 232}; // center (986, 218)
+    const lv_point_t rendered_at{700, 60};
+    const lv_point_t now_at{88, 60};
+
+    REQUIRE(helix::ui::recorded_box_hit({374, 218}, selector, rendered_at, now_at, 4));
+    REQUIRE(helix::ui::recorded_box_hit({185, 218}, selector, rendered_at, now_at, 4));
+    REQUIRE_FALSE(helix::ui::recorded_box_hit({986, 218}, selector, rendered_at, now_at, 4));
+    REQUIRE_FALSE(helix::ui::recorded_box_hit({374, 240}, selector, rendered_at, now_at, 4));
+}
+
+TEST_CASE("recorded box: unmoved widget reads the box as recorded", "[canvas][hit_test]") {
+    const lv_area_t box = {100, 50, 200, 80};
+    const lv_point_t origin{20, 10};
+    REQUIRE(helix::ui::recorded_box_hit({150, 65}, box, origin, origin, 0));
+    REQUIRE(helix::ui::recorded_box_hit({200, 80}, box, origin, origin, 0));
+    REQUIRE_FALSE(helix::ui::recorded_box_hit({201, 65}, box, origin, origin, 0));
+    REQUIRE(helix::ui::recorded_box_hit({203, 65}, box, origin, origin, 4));
+}

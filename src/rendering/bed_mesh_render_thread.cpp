@@ -5,6 +5,8 @@
 
 #include "bed_mesh_render_thread.h"
 
+#include "helix_thread.h"
+
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -25,17 +27,22 @@ void BedMeshRenderThread::start(int width, int height) {
         return;
     }
 
-    // Allocate double buffers
-    front_buffer_ = std::make_unique<PixelBuffer>(width, height);
-    back_buffer_ = std::make_unique<PixelBuffer>(width, height);
+    {
+        std::lock_guard<std::mutex> lock(swap_mutex_);
+        back_ = std::make_unique<PixelBuffer>(width, height);
+        shown_ = std::make_unique<PixelBuffer>(width, height);
+        ready_.reset();
+    }
+    back_available_.store(true);
+    shown_has_frame_ = false;
     buffer_ready_.store(false);
     render_requested_.store(false);
     last_render_time_ms_.store(0.0f);
 
     running_.store(true);
-    thread_ = std::thread(&BedMeshRenderThread::render_loop, this);
+    thread_ = helix::make_thread(&BedMeshRenderThread::render_loop, this);
 
-    spdlog::info("[BedMeshRenderThread] Started ({}x{}, double-buffered)", width, height);
+    spdlog::info("[BedMeshRenderThread] Started ({}x{}, two buffers)", width, height);
 }
 
 void BedMeshRenderThread::stop() {
@@ -58,6 +65,14 @@ void BedMeshRenderThread::stop() {
     if (thread_.joinable()) {
         thread_.join();
     }
+
+    std::lock_guard<std::mutex> lock(swap_mutex_);
+    back_.reset();
+    ready_.reset();
+    shown_.reset();
+    back_available_.store(false);
+    shown_has_frame_ = false;
+    buffer_ready_.store(false);
 
     spdlog::info("[BedMeshRenderThread] Stopped");
 }
@@ -88,22 +103,31 @@ bool BedMeshRenderThread::has_ready_buffer() const {
     return buffer_ready_.load();
 }
 
-const PixelBuffer* BedMeshRenderThread::get_ready_buffer() const {
-    if (!buffer_ready_.load()) {
-        return nullptr;
+const PixelBuffer* BedMeshRenderThread::acquire_frame() {
+    bool returned_to_render = false;
+    const PixelBuffer* result = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(swap_mutex_);
+        if (ready_) {
+            shown_.swap(ready_);
+            back_ = std::move(ready_);
+            back_available_.store(true);
+            shown_has_frame_ = true;
+            returned_to_render = true;
+        }
+        result = shown_has_frame_ ? shown_.get() : nullptr;
     }
-    // Front buffer is safe to read: render thread writes to back buffer.
-    // The swap_mutex_ protects pointer swap, but between swaps the front
-    // pointer is stable.
-    return front_buffer_.get();
+    if (returned_to_render) {
+        // Taking cv_mutex_ orders the flag store before the render loop's predicate check.
+        { std::lock_guard<std::mutex> lock(cv_mutex_); }
+        cv_.notify_one();
+    }
+    return result;
 }
 
-BedMeshRenderThread::LockedBuffer BedMeshRenderThread::lock_ready_buffer() const {
-    if (!buffer_ready_.load()) {
-        return {nullptr, {}};
-    }
-    std::unique_lock<std::mutex> lock(swap_mutex_);
-    return {front_buffer_.get(), std::move(lock)};
+int BedMeshRenderThread::resident_buffer_count() const {
+    std::lock_guard<std::mutex> lock(swap_mutex_);
+    return (back_ ? 1 : 0) + (ready_ ? 1 : 0) + (shown_ ? 1 : 0);
 }
 
 void BedMeshRenderThread::set_frame_ready_callback(std::function<void()> cb) {
@@ -135,6 +159,12 @@ void BedMeshRenderThread::reset_quality() {
     }
 }
 
+void BedMeshRenderThread::return_target(std::unique_ptr<PixelBuffer> buf) {
+    std::lock_guard<std::mutex> lock(swap_mutex_);
+    back_ = std::move(buf);
+    back_available_.store(true);
+}
+
 void BedMeshRenderThread::render_loop() {
     spdlog::debug("[BedMeshRenderThread] Render loop started");
 
@@ -142,7 +172,9 @@ void BedMeshRenderThread::render_loop() {
         // Wait for a render request or stop signal
         {
             std::unique_lock<std::mutex> lock(cv_mutex_);
-            cv_.wait(lock, [this]() { return render_requested_.load() || !running_.load(); });
+            cv_.wait(lock, [this]() {
+                return (render_requested_.load() && back_available_.load()) || !running_.load();
+            });
         }
 
         if (!running_.load()) {
@@ -151,6 +183,13 @@ void BedMeshRenderThread::render_loop() {
 
         // Consume the request (coalesces multiple requests into one render)
         render_requested_.store(false);
+
+        std::unique_ptr<PixelBuffer> target;
+        {
+            std::lock_guard<std::mutex> lock(swap_mutex_);
+            target = std::move(back_);
+            back_available_.store(false);
+        }
 
         // Snapshot colors under lock
         bed_mesh_render_colors_t colors;
@@ -169,16 +208,17 @@ void BedMeshRenderThread::render_loop() {
 
             if (!renderer_) {
                 spdlog::warn("[BedMeshRenderThread] Render requested but no renderer set");
+                return_target(std::move(target));
                 continue;
             }
 
-            // Render into back buffer
             auto t0 = std::chrono::steady_clock::now();
-            ok = bed_mesh_renderer_render_to_buffer(renderer_, *back_buffer_, colors);
+            ok = bed_mesh_renderer_render_to_buffer(renderer_, *target, colors);
             auto t1 = std::chrono::steady_clock::now();
 
             if (!ok) {
                 spdlog::warn("[BedMeshRenderThread] render_to_buffer failed");
+                return_target(std::move(target));
                 continue;
             }
 
@@ -211,10 +251,10 @@ void BedMeshRenderThread::render_loop() {
             }
         } // renderer_mutex_ released
 
-        // Swap front/back buffers
+        // Publish; the render thread has no buffer again until the consumer returns one
         {
             std::lock_guard<std::mutex> lock(swap_mutex_);
-            front_buffer_.swap(back_buffer_);
+            ready_ = std::move(target);
         }
         buffer_ready_.store(true);
 

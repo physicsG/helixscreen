@@ -85,7 +85,7 @@ gen() {
     rm -f "$OUT"
     gen "$OUT"
     [ "$status" -ne 0 ]
-    [[ "$output" == *"501 chars"* ]]
+    contains "501 chars" "$output"
     refute test -e "$OUT"
 }
 
@@ -123,7 +123,7 @@ business appearing in the Play Store listing at all.
 EOF
     gen "$OUT"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"explicit block"* ]]
+    contains "explicit block" "$output"
 
     local expected
     expected="Filament runout recovery now resumes the print by itself.
@@ -218,8 +218,8 @@ EOF
     [ "$status" -ne 0 ]
     # The message must carry the measured length, not just "too long" — the
     # author needs to know how much to cut.
-    [[ "$output" == *"818 chars"* ]]
-    [[ "$output" == *"limit of 500"* ]]
+    contains "818 chars" "$output"
+    contains "limit of 500" "$output"
     # And it must not have written a truncated file behind the error.
     refute test -e "$OUT"
 }
@@ -245,7 +245,7 @@ EOF
     rm -f "$OUT"
     gen "$OUT"
     [ "$status" -ne 0 ]
-    [[ "$output" == *"501 chars"* ]]
+    contains "501 chars" "$output"
     refute test -e "$OUT"
 }
 
@@ -260,6 +260,23 @@ EOF
     [ "$status" -eq 0 ]
     [ "$(cat "$OUT")" = "One short line." ]
     refute_grep 'Prose line' "$OUT"
+}
+
+@test "a block ending early in a section larger than a pipe buffer still exits 0" {
+    # Under pipefail, a reader that stops at the block's closing marker while the
+    # section is still being written into the pipe kills the script with SIGPIPE
+    # (exit 141) and no message. 200KB of prose after the block is far past any
+    # pipe buffer, so an early-exiting reader fails this every run.
+    {
+        printf '# Changelog\n\n## [1.2.3] - 2026-08-15\n\n'
+        printf '<!-- whatsnew\nOne short line.\n-->\n\n'
+        for _ in $(seq 1 3000); do
+            printf 'Prose line that follows the block and fills the pipe well past its buffer.\n'
+        done
+    } > "$REPO/CHANGELOG.md"
+    gen "$OUT"
+    [ "$status" -eq 0 ]
+    [ "$(cat "$OUT")" = "One short line." ]
 }
 
 # ---------------------------------------------------------------------------
@@ -309,7 +326,7 @@ rather than where a sentence ended, which is exactly the trap."
     fi
 
     # Restated as the properties that matter, so a failure says which one broke.
-    [[ "$(cat "$OUT")" == *. ]]
+    [[ "$(cat "$OUT")" == *. ]] || fail "summary does not end in a full stop"
     refute_grep 'exceeds the$' "$OUT"   # the mid-sentence line break (bug 3)
     refute_grep '…' "$OUT"              # the word-chop fallback (bug 1)
     [ "$(wc -c < "$OUT")" -le 501 ]     # content + the one trailing newline
@@ -393,7 +410,7 @@ EOF
 EOF
     gen "$OUT"
     [ "$status" -eq 0 ]
-    [[ "$(cat "$OUT")" == *"Bold and italic and code and a link all flatten."* ]]
+    contains "Bold and italic and code and a link all flatten." "$(cat "$OUT")"
     refute_grep '\*\*' "$OUT"
     refute_grep 'https://' "$OUT"
     refute_grep '###' "$OUT"
@@ -454,7 +471,7 @@ EOF
     rm -f "$OUT"
     gen "$OUT"
     [ "$status" -ne 0 ]
-    [[ "$output" == *"no CHANGELOG.md entry for version 1.2.3"* ]]
+    contains "no CHANGELOG.md entry for version 1.2.3" "$output"
     refute test -e "$OUT"
 }
 

@@ -33,17 +33,11 @@ When beta features are enabled, the following appear in the UI with an orange "B
 
 | Feature | Location | Description | Status |
 |---------|----------|-------------|--------|
-| **HelixPrint Plugin** | Advanced panel | Install/uninstall the HelixPrint Klipper plugin for advanced print start control | Functional; plugin manages bed mesh, QGL, z-tilt skipping |
-| **Configure PRINT_START** | Advanced panel | Make bed mesh and QGL skippable in your print start macro | Functional; needs only Beta Features enabled — writes your Klipper config directly via Moonraker, no plugin required |
-| **Plugins** | Settings panel | View installed plugins and their status | Functional; plugin system is early-stage |
-| **Update Channel** | Settings panel | Switch between Stable, Beta, and Dev update channels | Functional; Beta/Dev channels may have less-tested releases |
-| **Macro Browser** | Advanced panel | Browse and execute custom Klipper macros | Functional; hides system macros, confirms dangerous ones |
-| **Z Calibration** | Controls panel | Quick-access `PROBE_CALIBRATE` button (probe Z endstop) — distinct from the graduated Z-Offset Calibration flow | Functional; requires probe hardware |
-| **MPC Calibration** | Heater Calibration panel | Model Predictive Control calibration as an alternative to PID | Functional; requires Kalico firmware |
-| **Belt Tension** | Advanced panel | Pluck each belt by hand; the tool listens and reports its frequency, for CoreXY | **Early beta - not yet validated on real hardware.** Requires an accelerometer and HelixScreen running on the printer itself |
-| **Multi-Printer Management** | Settings panel, Navbar, Printer Manager | Add, switch between, and manage multiple Klipper printers from one touchscreen | Functional; switch/add/delete printers with one-tap switching |
+| **Dev Update Channel** | Settings > Updates | Adds **Dev** to the Update Channel selector, which otherwise offers Stable and Beta to everyone | Functional; needs `dev_url` set in `/var/lib/helixscreen/update_urls.json` (root-owned) |
+| **Tool Offsets** | Advanced panel, Controls panel | Automatically measure every tool's X/Y/Z position in one run, on a tool-changer printer | Functional; requires a tool changer with automatic offset calibration support |
+| **Belt Tension** | Advanced panel | Compare a CoreXY's two belt paths with a resonance sweep; re-test one path at a time after an adjustment and see the old curve as a faint line | Functional; requires a CoreXY with exactly one accelerometer and HelixScreen running on the printer's own computer. The verdict's thresholds are provisional |
 
-> **Graduated from beta:** the **Sound System**, PID Calibration, Input Shaper, the **Spool Wizard**, the **G-code Console**, **Probe Management**, **Z-Offset Calibration**, and **Timelapse** are now available to all users without enabling beta features.
+> **Graduated from beta:** the **Sound System**, PID Calibration, Input Shaper, the **Spool Wizard**, the **G-code Console**, **Probe Management**, **Z-Offset Calibration**, **Timelapse**, the **Macro Browser**, and **MPC Calibration** are now available to all users without enabling beta features. The **HelixPrint plugin** install/uninstall rows, the **Z Calibration** button, and **Multi-Printer Management** are likewise available to everyone.
 
 ---
 
@@ -51,33 +45,39 @@ When beta features are enabled, the following appear in the UI with an orange "B
 
 Besides running on a printer's host computer (Linux, Raspberry Pi, Android), HelixScreen can be built as firmware that runs directly on ESP32-S3 display panels — the BTT K-Touch class of hardware.
 
-**Status: alpha.** This is an early, experimental port for developers and early testers. Expect rough edges, missing features, and instability — not for daily use, and not a scheduled release. The Linux, Pi, and Android targets are unaffected and remain the production ones.
+**Status: alpha.** This is an early, experimental port for developers and early testers. Expect rough edges, missing features, and instability: not for daily use. The Linux, Pi, and Android targets are unaffected and remain the production ones.
 
 What works today:
 
 - Boots to the Home panel; heavier screens load on first visit to fit the panel's memory
 - Live printer status and bed mesh over WiFi through Moonraker
 - WiFi setup on first boot: the panel broadcasts its own setup hotspot — join it from your phone to configure the network
-- Over-the-air updates, with a fallback slot to recover a bad flash
-- All nine languages and the printer image set, packed to fit the panel's storage
+- Updating over USB that keeps your WiFi and settings. There are no over-the-air updates yet
+- Seven languages (English, German, French, Spanish, Russian, Portuguese, Italian); Chinese and Japanese need a font the panel has no room for
+- Printer pictures for the DIY and Klipper-converted machines an add-on panel usually drives (Voron, RatRig, Sovol SV08, Zero G and others); other printers show a generic picture
+- Notification history: tap the bell to see past alerts
+- Temperature graphs that start from the printer's recent history
 
 Not yet available on this target: the camera feed and QR features, the 2D G-code view, and the 3D bed mesh view.
 
-There is no release download yet — the firmware is built from the source tree with the ESP-IDF toolchain.
+Release builds (1.1 betas and newer) include a ready-to-flash firmware zip. Installing, first-boot setup, updating and recovery are covered in [K-Touch Install](install-esp32.md).
 
 ---
 
 ## Update Channel Selection
 
-When beta features are enabled, a channel selector appears in **Settings** → **About**:
+The channel selector in **Settings** → **About** offers **Stable** and **Beta** on
+every install. Enabling beta features adds a third entry:
 
-| Channel | Description |
-|---------|-------------|
-| **Stable** | Production releases (default) |
-| **Beta** | Pre-release builds for testing upcoming features |
-| **Dev** | Development builds — latest code, may be unstable |
+| Channel | Description | Needs beta features |
+|---------|-------------|---------------------|
+| **Stable** | Production releases (default) | No |
+| **Beta** | Pre-release builds for testing upcoming features | No |
+| **Dev** | Development builds — latest code, may be unstable | Yes |
 
 The update channel can also be set via `update.channel` in the config file (0=Stable, 1=Beta, 2=Dev).
+A stored Dev falls back to Stable while beta features are off; the stored value is
+kept, so turning beta back on restores Dev.
 
 ---
 

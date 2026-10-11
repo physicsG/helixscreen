@@ -42,6 +42,16 @@ declared_libhv_files() {
     [ -n "$LIBHV_LOOP" ]
 }
 
+@test "reset-patches covers every LUA_PATCHED_FILES entry" {
+    local lua_loop f
+    lua_loop="$(printf '%s\n' "$DRYRUN" | grep 'for file in' | grep 'lib/lua' || true)"
+    [ -n "$lua_loop" ]
+    while IFS= read -r f; do
+        printf '%s' "$lua_loop" | grep -q -- "$f" || { echo "not reset: $f"; return 1; }
+    done < <(sed -n '/^LUA_PATCHED_FILES[[:space:]]*:=/,/^$/p' "$PATCHES_MK" |
+        sed 's/^LUA_PATCHED_FILES[[:space:]]*:=//' | tr -d '\\' | tr ' \t' '\n' | grep -v '^$')
+}
+
 @test "reset-patches still covers the LVGL submodule" {
     printf '%s\n' "$DRYRUN" | grep 'for file in' | grep -q 'lib/lvgl'
 }

@@ -1,16 +1,22 @@
 <?xml version="1.0"?>
 <!-- Copyright (C) 2025-2026 356C LLC -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- Reusable tappable chip/pill for LED effects, WLED presets, macros -->
-<!-- Extends ui_button for proper text color handling (auto-contrast) -->
+<!-- A pill chip on the LEDs overlay (a level, the None effect, a macro action).
+     Lit while active_subject equals active_value; an empty active_subject never lights. -->
+<!-- Extends ui_button, which keeps the label readable on either fill. -->
 <component>
   <api>
     <prop name="label" type="string" default="Action"/>
+    <prop name="label_tag" type="string" default=""/>
+    <prop name="active_subject" type="string" default=""/>
+    <prop name="active_value" type="string" default="0"/>
   </api>
-  <px name="chip_height" value="36"/>
-  <px name="chip_radius" value="18"/>
-  <px name="chip_min_width" value="64"/>
-  <view name="led_action_chip"
-        extends="ui_button" height="#chip_height" variant="secondary" text="$label" style_radius="#chip_radius"
-        style_min_width="#chip_min_width"/>
+  <view extends="ui_button"
+        height="#led_chip_height" variant="ghost" text="$label" translation_tag="$label_tag"
+        style_radius="#led_chip_height" style_min_width="#led_chip_min_width" style_pad_left="#space_md"
+        style_pad_right="#space_md" ext_click_area="#led_chip_gap_half">
+    <!-- Idle first, active after: the later style wins while it is enabled. -->
+    <style name="styles.led_chip_idle"/>
+    <bind_style_if_eq name="styles.led_chip_active" subject="$active_subject" ref_value="$active_value"/>
+  </view>
 </component>

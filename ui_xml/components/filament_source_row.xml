@@ -15,7 +15,8 @@
   </api>
   <view extends="lv_obj"
         width="100%" height="content" flex_flow="row" style_flex_cross_place="center" style_pad_gap="#space_sm"
-        style_pad_all="#space_sm">
+        style_pad_all="#space_sm" style_radius="#border_radius">
+    <style name="styles.press_wash" selector="pressed"/>
     <event_cb trigger="clicked" callback="on_filament_source_selected" user_data="$value"/>
     <icon src="check" size="xs" variant="primary" clickable="false" event_bubble="true">
       <bind_flag_if_not_eq subject="filament_tile_source" flag="hidden" ref_value="$value"/>

@@ -8,11 +8,15 @@
     <prop name="visible_subject" type="string" default=""/>
     <prop name="desc_hidden_subject" type="string" default=""/>
     <prop name="chevron_hidden_subject" type="string" default=""/>
+    <prop name="defaults_hidden_subject" type="string" default=""/>
+    <prop name="slot_hidden_subject" type="string" default=""/>
     <prop name="row_index" type="string" default=""/>
   </api>
   <view name="macro_card"
         extends="lv_button" width="100%" height="content" style_radius="#border_radius" style_bg_color="#card_bg"
         style_bg_opa="255" style_border_width="0" style_pad_all="#space_md" style_shadow_width="0">
+    <!-- A pooled row with no macro to show -->
+    <bind_flag_if_eq subject="$slot_hidden_subject" flag="hidden" ref_value="1"/>
     <!-- Content container: checkbox (edit mode) + icon + text -->
     <lv_obj width="100%"
             height="content" flex_flow="row" style_flex_cross_place="center" style_pad_gap="#space_sm"
@@ -45,6 +49,15 @@
           <bind_flag_if_eq subject="$desc_hidden_subject" flag="hidden" ref_value="1"/>
         </text_small>
       </lv_obj>
+      <!-- Edit-mode "Default Parameters" editor entry: KNOWN_PARAMS rows only
+           (the panel hides it otherwise). event_bubble off so the tap edits
+           defaults instead of toggling the row's visibility checkbox. -->
+      <ui_button name="defaults_btn"
+                 width="#button_height_sm" height="#button_height_sm" icon="tune" variant="ghost" focusable="false"
+                 event_bubble="false">
+        <bind_flag_if_eq subject="$defaults_hidden_subject" flag="hidden" ref_value="1"/>
+        <event_cb trigger="clicked" callback="on_macro_defaults_clicked" user_data="$row_index"/>
+      </ui_button>
       <!-- Chevron indicating it's tappable -->
       <icon name="chevron_icon" src="chevron_right" size="sm" variant="secondary">
         <bind_flag_if_eq subject="$chevron_hidden_subject" flag="hidden" ref_value="1"/>

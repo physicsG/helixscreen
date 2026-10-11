@@ -19,7 +19,7 @@ A definition is considered reached when its name appears, outside its own
 definition line and outside a comment, in any of the caller files: the installer
 modules themselves plus the hand-written entry points that drive them
 (install-dev.sh and the two bundlers, whose generated main() bodies live inside
-their heredocs). The generated scripts/install.sh and scripts/uninstall.sh are
+their heredocs). The generated install.sh and uninstall.sh bundles are
 deliberately NOT scanned - they are output, and reading them would let a stale
 bundle vouch for a call site the sources no longer have.
 

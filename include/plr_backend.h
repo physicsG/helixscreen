@@ -4,23 +4,28 @@
 #include "json_fwd.h"
 
 #include <string>
+#include <vector>
 
 namespace helix {
 
+class PrinterDiscovery;
+
 /// Which firmware-specific Power-Loss-Recovery mechanism the connected printer
-/// exposes. Both backends are SELF-GATING: each is chosen by the presence of a
-/// status field that only that Klipper fork ever emits, so no printer-model or
-/// AMS-backend gate is needed (and none should be added — see
-/// tests/unit/test_plr_offer.cpp for the AFC-modded-U1 regression).
+/// exposes. All three backends are SELF-GATING: each is chosen by markers only
+/// that firmware ever carries, so no printer-model or AMS-backend gate is
+/// needed (and none should be added — see tests/unit/test_plr_offer.cpp for
+/// the AFC-modded-U1 regression).
 ///
 /// Full mechanism writeup: docs/devel/POWER_LOSS_RECOVERY.md
 enum class PlrBackendType {
     NONE = 0,  ///< No PLR support detected (mainline Klipper).
     SNAPMAKER, ///< Snapmaker U1 fork — virtual_sdcard.pl_env_valid (passive).
     CREALITY,  ///< Creality K/Ender/Hi fork — print_stats.power_loss (active probe).
+    QIDI,      ///< Qidi Q2/Q1 Pro/Plus 4 stock macros, save_variables.was_interrupted (passive).
 };
 
-/// Capability markers harvested from the Moonraker status payload.
+/// Capability markers harvested from the Moonraker status payload and the
+/// discovery snapshot.
 struct PlrCapabilitySignals {
     /// virtual_sdcard.pl_env_valid arrived as a JSON boolean AND is true.
     /// Snapmaker's fork is the only firmware that emits this key, and the value
@@ -33,10 +38,22 @@ struct PlrCapabilitySignals {
     /// unpopulated field with an explicit null, so "present and numeric" is what
     /// distinguishes the fork from everything else.
     bool creality_power_loss_field = false;
+    /// Discovery found Qidi's recovery macros (plr_resume_macro_present()).
+    /// They identify Qidi's stock firmware; without them a was_interrupted
+    /// save_variable is just a user-writable name any Klipper could carry.
+    bool qidi_resume_macro = false;
+    /// save_variables.variables.was_interrupted arrived as a JSON boolean AND
+    /// is true. The stock macros keep it true from PRINT_START until a normal
+    /// end or cancel, so it is ALSO true during every normal print; the
+    /// printer_idle input of the offer decision is what scopes it to a boot
+    /// after power loss.
+    bool qidi_was_interrupted = false;
 };
 
-/// Pick the backend. SNAPMAKER wins if both markers somehow appear (they never
-/// should) because its passive signal needs no side-effectful probe.
+/// Pick the backend. Passive markers outrank probe-based ones: SNAPMAKER
+/// first, QIDI before CREALITY. No firmware carries more than one marker set,
+/// so the ordering only makes a tie deterministic, and a passive signal
+/// chosen by mistake costs no side-effectful probe.
 PlrBackendType plr_select_backend(const PlrCapabilitySignals& caps);
 
 /// Outcome of Creality's one-shot `pause_resume/check_continue_print_state`
@@ -134,5 +151,49 @@ inline constexpr const char* CREALITY_DISCARD_RPC = "printer.pause_resume.cancel
 /// Sidecar holding the interrupted job's path, relative to the data root.
 inline constexpr const char* CREALITY_SIDECAR_REL_PATH =
     "creality/userdata/config/print_file_name.json";
+
+/// Qidi stock firmware (Q2 / Q1 Pro / Plus 4). Both are the plain gcode
+/// scripts the stock screen's Yes/No buttons send; neither takes parameters,
+/// so a recovery filename is display-only for this backend. RESUME_INTERRUPTED
+/// rebuilds the resume gcode from the .temp/ backup, lifts Z clear of the part
+/// before homing X/Y, then prints it.
+inline constexpr const char* QIDI_RESUME_GCODE = "RESUME_INTERRUPTED";
+inline constexpr const char* QIDI_DISCARD_GCODE = "CLEAR_LAST_FILE";
+/// The boot-time check the stock screen sends. Newer Qidi firmware (Q2
+/// 01.01.02.03 at least) registers RESUME_INTERRUPTED and CLEAR_LAST_FILE as Python commands, which
+/// never appear as gcode_macro objects, so this macro is the one that marks
+/// every Qidi firmware generation.
+inline constexpr const char* QIDI_DETECT_MACRO = "DETECT_INTERRUPTION";
+
+/// Whether the connected printer runs a firmware whose resume command is one
+/// the PLR module knows (currently Qidi's stock RESUME_INTERRUPTED, recognised
+/// by DETECT_INTERRUPTION or a RESUME_INTERRUPTED macro - the macro is the
+/// firmware discriminator, because the was_interrupted save_variable it
+/// maintains is user-writable on ANY Klipper). Capability-named on purpose:
+/// generic modules (PrinterState, the subscription builder) call this without
+/// learning the vendor. Out-of-line to keep this header free of the
+/// PrinterDiscovery dependency.
+bool plr_resume_macro_present(const PrinterDiscovery& hw);
+
+/// Status objects the PLR backends need subscribed for the discovered
+/// firmware, empty when none do (the subscription builder loops over this and
+/// never learns the vendor). Currently: save_variables, whose
+/// variables.was_interrupted the passive Qidi backend reads.
+std::vector<std::string> plr_required_status_objects(const PrinterDiscovery& hw);
+
+/// Read the passive backend's interrupted flag out of a status payload:
+/// 1/0 when save_variables.variables.was_interrupted arrived as a JSON boolean,
+/// -1 when this frame says nothing about it (no save_variables key, no
+/// variables dict, no such entry, or a non-boolean value - Moonraker notifies
+/// at top-level-field granularity, so absence in a delta is silence, not
+/// false). Booleans only: save_variables values are Python literals Klipper
+/// re-parses, and another type under this name is not our signal.
+int plr_parse_interrupted_flag(const nlohmann::json& status);
+
+/// True when this status frame carries print_stats.power_loss as a JSON number.
+/// Presence, not value, is the marker (the key exists only in the firmware
+/// fork that supports the active probe, and normally reads 0); a Moonraker
+/// null for a subscribed-but-unpopulated field does not count.
+bool plr_parse_power_loss_signal(const nlohmann::json& status);
 
 } // namespace helix

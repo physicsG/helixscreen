@@ -22,7 +22,10 @@ namespace helix {
  *
  * Uses HSL color space to generate descriptive names like:
  * - "Vibrant Red", "Deep Blue", "Light Muted Green"
- * - Special cases: "White", "Black", "Dark Gray"
+ * - Special cases: "White", "Black", "Deep Black", "Gray" (with a lightness prefix)
+ * - Near-black (l < 8% at any saturation, or l < 18% with s < 25%) is "Black"
+ *   (neutral l < 4.5% is "Deep Black");
+ *   near-white (l > 98%, or l >= 94% with s < 25%) is "White"
  *
  * Algorithm ported from Klipper DESCRIBE_COLOR macro.
  *
@@ -87,5 +90,35 @@ std::optional<uint32_t> parse_hex_color(const std::string& hex_str);
  * @return Hex string in "#RRGGBB" format (e.g., "#FF0000")
  */
 std::string color_to_hex_string(uint32_t rgb);
+
+/**
+ * @brief Key of the palette entry nearest to @p rgb by squared RGB distance.
+ *
+ * For firmware that stores a colour as an index into a fixed palette, where a
+ * colour outside it cannot be stored at all.
+ *
+ * @param entries (key, 0xRRGGBB) pairs: a std::map<int, uint32_t>, or a vector
+ *        of pairs. Ties keep the first entry.
+ * @param fallback Returned when @p entries is empty.
+ */
+template <typename Entries, typename Key>
+Key nearest_palette_key(const Entries& entries, uint32_t rgb, Key fallback) {
+    Key best = fallback;
+    long best_dist = -1;
+    const long r = (rgb >> 16) & 0xFF;
+    const long g = (rgb >> 8) & 0xFF;
+    const long b = rgb & 0xFF;
+    for (const auto& [key, packed] : entries) {
+        const long pr = (packed >> 16) & 0xFF;
+        const long pg = (packed >> 8) & 0xFF;
+        const long pb = packed & 0xFF;
+        const long dist = (r - pr) * (r - pr) + (g - pg) * (g - pg) + (b - pb) * (b - pb);
+        if (best_dist < 0 || dist < best_dist) {
+            best_dist = dist;
+            best = key;
+        }
+    }
+    return best;
+}
 
 } // namespace helix

@@ -210,6 +210,34 @@ TEST_CASE("text_transform uppercase via event callback", "[ui_text][transform]")
         REQUIRE(std::string(lv_label_get_text(label)) == "CAF\xC3\x89 NA\xC3\x8FVE"); // CAFÉ NAÏVE
     }
 
+    SECTION("Cyrillic, Greek and Latin Extended letters are uppercased") {
+        ui_text_apply_transform(label, "uppercase");
+        const auto upper = [&](const char* text) {
+            lv_label_set_text(label, text);
+            return std::string(lv_label_get_text(label));
+        };
+        CHECK(upper("Дисплей") == "ДИСПЛЕЙ");
+        CHECK(upper("ёж ѓ") == "ЁЖ Ѓ");
+        CHECK(upper("ґ і ї") == "Ґ І Ї");
+        CHECK(upper("ελληνικά ς") == "ΕΛΛΗΝΙΚΆ Σ");
+        CHECK(upper("łódź őz ÿ") == "ŁÓDŹ ŐZ Ÿ");
+        CHECK(upper("tiếng việt") == "TIẾNG VIỆT");
+    }
+
+    SECTION("A letter whose uppercase is longer, or has none, is left alone") {
+        ui_text_apply_transform(label, "uppercase");
+        lv_label_set_text(label, "Größe 中文 ı");
+        CHECK(std::string(lv_label_get_text(label)) == "GRÖßE 中文 ı");
+    }
+
+    SECTION("A sequence cut off at the end of the text is not read past") {
+        ui_text_apply_transform(label, "uppercase");
+        lv_label_set_text(label, "ab\xD0");
+        CHECK(std::string(lv_label_get_text(label)) == "AB\xD0");
+        lv_label_set_text(label, "ab\xE1\xBA");
+        CHECK(std::string(lv_label_get_text(label)) == "AB\xE1\xBA");
+    }
+
     lv_obj_delete(label);
 }
 

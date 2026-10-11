@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<component>
+  <view extends="lv_obj" width="100%" height="100%">
+    <lv_label name="widget-demo__size_label" bind_text="widget-demo__size"/>
+  </view>
+</component>

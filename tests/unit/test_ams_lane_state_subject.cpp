@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "../test_fixtures.h"
+#include "../test_helpers/backend_user_edit.h"
 #include "ams_backend_mock.h"
 #include "ams_lane_state.h"
 #include "ams_state.h"
@@ -21,12 +22,12 @@ TEST_CASE_METHOD(XMLTestFixture, "lane_state subject tracks the backend",
     {
         SlotInfo i0 = mock->get_slot_info(0);
         i0.material = "PLA";
-        REQUIRE(mock->set_slot_info(0, i0).success());
+        REQUIRE(helix::test::apply_edit(*mock, 0, i0).success());
         mock->force_slot_status(0, SlotStatus::AVAILABLE);
 
         SlotInfo i1 = mock->get_slot_info(1);
         i1.material = "PETG";
-        REQUIRE(mock->set_slot_info(1, i1).success());
+        REQUIRE(helix::test::apply_edit(*mock, 1, i1).success());
         mock->force_slot_status(1, SlotStatus::EMPTY);
 
         SlotInfo i2 = mock->get_slot_info(2);
@@ -34,7 +35,7 @@ TEST_CASE_METHOD(XMLTestFixture, "lane_state subject tracks the backend",
         i2.brand.clear();
         i2.spool_name.clear();
         i2.spoolman_id = 0;
-        REQUIRE(mock->set_slot_info(2, i2).success());
+        REQUIRE(helix::test::apply_edit(*mock, 2, i2).success());
         mock->force_slot_status(2, SlotStatus::EMPTY);
     }
 
@@ -112,13 +113,13 @@ TEST_CASE_METHOD(XMLTestFixture, "lane_state follows the single-slot update path
     {
         SlotInfo i0 = mock->get_slot_info(0);
         i0.material = "PLA";
-        REQUIRE(mock->set_slot_info(0, i0).success());
+        REQUIRE(helix::test::apply_edit(*mock, 0, i0).success());
         mock->force_slot_status(0, SlotStatus::AVAILABLE);
     }
 
     AmsState::instance().init_subjects(true);
     AmsState::instance().sync_from_backend();
-    // Drain the sync set_slot_info() queued, so the assertion window below belongs to
+    // Drain the sync apply_edit() queued, so the assertion window below belongs to
     // update_slot() alone and cannot be repaired by a full resync arriving late.
     process_lvgl(20);
 

@@ -2,19 +2,33 @@
 <!-- Copyright (C) 2025-2026 356C LLC -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <component>
+  <api>
+    <!-- Per-instance subject names, supplied by the widget at creation. They
+         must exist before this component is parsed: a binding whose subject is
+         missing at parse time is dropped permanently and silently. -->
+    <prop name="tile_icon_subject" type="string" default=""/>
+    <prop name="tile_label_subject" type="string" default=""/>
+    <prop name="tile_dir_subject" type="string" default=""/>
+    <prop name="tile_target_subject" type="string" default=""/>
+  </api>
   <view name="panel_widget_active_spool"
         extends="lv_obj" height="100%" flex_grow="1" style_pad_all="0" scrollable="false">
     <ui_button name="spoolman_btn"
-               width="100%" height="100%" variant="ghost" flex_flow="column" style_flex_main_place="center"
-               style_flex_cross_place="center" style_flex_track_place="center" style_border_width="0" focusable="false">
+               width="100%" height="100%" variant="ghost" style_pad_ver="0" style_pad_gap="#space_xxs"
+               style_border_width="0" focusable="false">
       <bind_state_if_not_eq subject="printer_connection_state" state="disabled" ref_value="2"/>
+      <!-- Compact: the spool over its caption, or beside it when the box is
+           too short to stack, sized by TileSizing like any other tile. -->
+      <style name="styles.tile_column"/>
+      <bind_style_if_eq name="styles.tile_row" subject="$tile_dir_subject" ref_value="1"/>
 
-      <!-- Wide layout: row with spool + text (hidden by default, shown in on_size_changed) -->
+      <!-- Wide layout: row with spool + text, while the box has room for it -->
       <lv_obj name="spoolman_wide_layout"
               width="100%" height="100%" flex_flow="row" style_flex_main_place="center" style_flex_cross_place="center"
               style_flex_track_place="center" style_pad_column="#space_md" style_pad_left="#space_md"
               style_pad_right="#space_md" style_pad_top="0" style_pad_bottom="0" style_bg_opa="0" scrollable="false"
               clickable="false" event_bubble="true" hidden="true">
+        <bind_flag_if_eq subject="active_spool_wide" flag="hidden" ref_value="0"/>
         <spool_canvas name="spool_wide" size="64" clickable="false" event_bubble="true"/>
         <lv_obj name="spoolman_text_stack"
                 width="0" height="content" flex_flow="column" flex_grow="1" style_pad_row="0" style_bg_opa="0"
@@ -47,19 +61,30 @@
         </lv_obj>
       </lv_obj>
 
-      <!-- Compact layout: just spool canvas centered (default visible) -->
-      <spool_canvas name="spool_compact" size="64" clickable="false" event_bubble="true"/>
+      <!-- Compact layout: the spool, its edge set from the tile's rung -->
+      <spool_canvas name="spool_compact" size="64" clickable="false" event_bubble="true">
+        <bind_flag_if_eq subject="active_spool_wide" flag="hidden" ref_value="1"/>
+      </spool_canvas>
 
-      <!-- "No Spool" label shown when nothing is active -->
+      <!-- One caption line: what is loaded is named by the spool's color, so
+           the caption says only whether anything is. -->
       <text_tiny name="spoolman_no_spool_label"
-                 text="No Spool" translation_tag="No Spool" style_text_color="#text_muted" style_text_align="center"
-                 clickable="false" event_bubble="true" hidden="true"/>
+                 text="No Spool" style_text_color="#text_muted" style_text_align="center" clickable="false"
+                 event_bubble="true" hidden="true">
+        <bind_tile_rung ladder="label" subject="$tile_icon_subject"/>
+        <bind_flag_if_eq subject="active_spool_loaded" flag="hidden" ref_value="1"/>
+        <bind_flag_if_eq subject="active_spool_wide" flag="hidden" ref_value="1"/>
+        <bind_flag_if_eq subject="$tile_label_subject" flag="hidden" ref_value="0"/>
+      </text_tiny>
+      <text_tiny name="spoolman_label"
+                 text="Active Spool" style_text_color="#text_muted" style_text_align="center" clickable="false"
+                 event_bubble="true">
+        <bind_tile_rung ladder="label" subject="$tile_icon_subject"/>
+        <bind_flag_if_eq subject="show_widget_labels" flag="hidden" ref_value="0"/>
+        <bind_flag_if_eq subject="active_spool_loaded" flag="hidden" ref_value="0"/>
+        <bind_flag_if_eq subject="active_spool_wide" flag="hidden" ref_value="1"/>
+        <bind_flag_if_eq subject="$tile_label_subject" flag="hidden" ref_value="0"/>
+      </text_tiny>
     </ui_button>
-
-    <text_tiny name="spoolman_label"
-               text="Active Spool" translation_tag="Active Spool" style_text_color="#text_muted"
-               style_text_align="center" align="bottom_mid" y="-#space_md" clickable="false" event_bubble="true">
-      <bind_flag_if_eq subject="show_widget_labels" flag="hidden" ref_value="0"/>
-    </text_tiny>
   </view>
 </component>

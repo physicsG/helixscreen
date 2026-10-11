@@ -3,7 +3,10 @@
 
 #include "lvgl_test_fixture.h"
 #include "observer_factory.h"
+#include "test_helpers/log_capture.h"
 #include "test_helpers/update_queue_test_access.h"
+
+#include <system_error>
 
 #include "../catch_amalgamated.hpp"
 
@@ -96,9 +99,9 @@ TEST_CASE_METHOD(LVGLTestFixture, "queue resumes after thaw — buffered + post-
 }
 
 // ---------------------------------------------------------------------------
-// observe_int_sync + ScopedFreeze interaction
+// observe<int> + ScopedFreeze interaction
 //
-// observe_int_sync defers its initial callback via queue_update(). Under the
+// observe<int> defers its initial callback via queue_update(). Under the
 // buffer-not-drop semantics, an observer created during a freeze has its
 // initial fire diverted into frozen_buffer_ and spliced into pending_ when
 // the freeze releases, so it fires on the next drain — no manual rebind
@@ -111,10 +114,15 @@ namespace {
 struct FakePanel {
     int observed_value = -1;
 };
+
+// The demangled name of a std type depends on the standard library's inline
+// namespace: libc++ names it std::__1::X, libstdc++ names it std::X.
+bool logs_std_type(const helix::TextLogCapture& capture, const std::string& name) {
+    return capture.contains("std::" + name) || capture.contains("std::__1::" + name);
+}
 } // namespace
 
-TEST_CASE_METHOD(LVGLTestFixture,
-                 "observe_int_sync initial callback is buffered during ScopedFreeze",
+TEST_CASE_METHOD(LVGLTestFixture, "observe<int> initial callback is buffered during ScopedFreeze",
                  "[update_queue][observer]") {
     auto& q = UpdateQueue::instance();
     FakePanel panel;
@@ -132,8 +140,9 @@ TEST_CASE_METHOD(LVGLTestFixture,
 
         // Create observer while frozen — the initial fire is queued via
         // queue_update(), goes into frozen_buffer_.
-        guard = helix::ui::observe_int_sync<FakePanel>(
-            &subject, &panel, [](FakePanel* p, int value) { p->observed_value = value; });
+        guard = helix::ui::observe<int>(
+            &subject, &panel, [](FakePanel* p, int value) { p->observed_value = value; },
+            subject_never_freed());
 
         // Drain inside freeze is a no-op — buffer has not been spliced yet.
         UpdateQueueTestAccess::drain(q);
@@ -148,7 +157,7 @@ TEST_CASE_METHOD(LVGLTestFixture,
     lv_subject_deinit(&subject);
 }
 
-TEST_CASE_METHOD(LVGLTestFixture, "observe_int_sync initial callback works without ScopedFreeze",
+TEST_CASE_METHOD(LVGLTestFixture, "observe<int> initial callback works without ScopedFreeze",
                  "[update_queue][observer]") {
     auto& q = UpdateQueue::instance();
     FakePanel panel;
@@ -158,8 +167,9 @@ TEST_CASE_METHOD(LVGLTestFixture, "observe_int_sync initial callback works witho
 
     {
         // Create observer without freeze — initial fire should be delivered.
-        auto guard = helix::ui::observe_int_sync<FakePanel>(
-            &subject, &panel, [](FakePanel* p, int value) { p->observed_value = value; });
+        auto guard = helix::ui::observe<int>(
+            &subject, &panel, [](FakePanel* p, int value) { p->observed_value = value; },
+            subject_never_freed());
 
         UpdateQueueTestAccess::drain(q);
         REQUIRE(panel.observed_value == 42);
@@ -168,7 +178,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "observe_int_sync initial callback works witho
     lv_subject_deinit(&subject);
 }
 
-TEST_CASE_METHOD(LVGLTestFixture, "observe_int_sync subsequent changes are delivered after thaw",
+TEST_CASE_METHOD(LVGLTestFixture, "observe<int> subsequent changes are delivered after thaw",
                  "[update_queue][observer]") {
     auto& q = UpdateQueue::instance();
     FakePanel panel;
@@ -181,8 +191,9 @@ TEST_CASE_METHOD(LVGLTestFixture, "observe_int_sync subsequent changes are deliv
         auto freeze = q.scoped_freeze();
 
         // Initial fire buffered during freeze.
-        guard = helix::ui::observe_int_sync<FakePanel>(
-            &subject, &panel, [](FakePanel* p, int value) { p->observed_value = value; });
+        guard = helix::ui::observe<int>(
+            &subject, &panel, [](FakePanel* p, int value) { p->observed_value = value; },
+            subject_never_freed());
     }
 
     // Buffered initial fire spliced into pending_ on freeze release — drain
@@ -231,7 +242,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "untagged queue_update has null callback tag",
 // the main loop sleeps for that answer. A sub-frame period therefore pins the
 // loop at its 5 ms floor — ~200 wakeups a second on a machine with nothing to
 // do — and each one pays clock reads, a notification-queue lock, and a drain.
-// Draining once per rendered frame is as often as the UI can use.
+// Draining once per refresh period is as often as the UI can use.
 TEST_CASE_METHOD(LVGLTestFixture, "drain timer does not wake the main loop faster than a frame",
                  "[update_queue][1440]") {
     auto& q = UpdateQueue::instance();
@@ -265,4 +276,90 @@ TEST_CASE_METHOD(LVGLTestFixture, "empty drain leaves buffered and later work in
 
     CHECK(frozen_ran);
     CHECK(nested_ran);
+}
+
+// A callback that throws must not take the drain batch with it, and the log
+// must identify the producer and the exception well enough to act on: the
+// tag, the type name, and for std::system_error the numeric code both ways —
+// what()'s strerror text alone can render a pointer-shaped code as a bare
+// "Unknown error -1288124992" with no hint of which callback threw it.
+TEST_CASE_METHOD(LVGLTestFixture,
+                 "a throwing system_error callback is contained and fully identified",
+                 "[update_queue]") {
+    auto& q = UpdateQueue::instance();
+    const auto before = UpdateQueueTestAccess::callback_exception_count();
+    bool ran_after_throw = false;
+
+    helix::TextLogCapture capture;
+
+    q.queue("ThrowingProducer::boom", []() {
+        // A pointer-shaped error value: no real errno is anywhere near this
+        // large. Decimal plus hex in the log is what makes that visible.
+        throw std::system_error(static_cast<int>(0xB338C5C0u), std::generic_category());
+    });
+    q.queue("AfterThrow::still_runs", [&ran_after_throw]() { ran_after_throw = true; });
+    UpdateQueueTestAccess::drain_all(q);
+
+    CHECK(UpdateQueueTestAccess::callback_exception_count() == before + 1);
+    CHECK(ran_after_throw);
+
+    const auto logged = capture.get_captured();
+    CHECK(capture.contains("[ThrowingProducer::boom]"));
+    CHECK(logs_std_type(capture, "system_error"));
+    CHECK(capture.contains("-1288124992"));
+    CHECK(capture.contains("b338c5c0"));
+    CHECK(capture.contains("Unknown error -1288124992"));
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "an untagged throwing callback is named by its enqueue site",
+                 "[update_queue]") {
+    auto& q = UpdateQueue::instance();
+    const auto before = UpdateQueueTestAccess::callback_exception_count();
+
+    helix::TextLogCapture capture;
+
+    q.queue([]() { throw std::runtime_error("boom"); });
+    UpdateQueueTestAccess::drain_all(q);
+
+    CHECK(UpdateQueueTestAccess::callback_exception_count() == before + 1);
+    CHECK(capture.contains("std::runtime_error"));
+    CHECK(capture.contains("boom"));
+    // The untagged enqueue recorded this file as its call site.
+    CHECK(capture.contains("test_update_queue.cpp"));
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "a non-std exception names its type with no message",
+                 "[update_queue]") {
+    auto& q = UpdateQueue::instance();
+    const auto before = UpdateQueueTestAccess::callback_exception_count();
+
+    helix::TextLogCapture capture;
+
+    q.queue("IntThrower::raw", []() { throw 42; });
+    UpdateQueueTestAccess::drain_all(q);
+
+    CHECK(UpdateQueueTestAccess::callback_exception_count() == before + 1);
+    CHECK(capture.contains("IntThrower::raw"));
+    CHECK(capture.contains("int"));
+    CHECK(capture.contains("(no message)"));
+}
+
+// The unique_ptr forms own their payload even when the queue drops the
+// callback unrun (shutdown, a test fixture discarding the queue).
+TEST_CASE_METHOD(LVGLTestFixture, "queue_update frees its payload when the callback is dropped",
+                 "[update_queue]") {
+    auto alive = std::make_shared<int>(0);
+    std::weak_ptr<int> probe = alive;
+    auto widget = lv_obj_create(lv_screen_active());
+
+    helix::ui::queue_update<std::shared_ptr<int>>(std::make_unique<std::shared_ptr<int>>(alive),
+                                                  [](std::shared_ptr<int>*) {});
+    helix::ui::queue_update(widget, std::make_unique<std::shared_ptr<int>>(alive),
+                            [](lv_obj_t*, std::shared_ptr<int>*) {});
+    alive.reset();
+    REQUIRE_FALSE(probe.expired());
+
+    (void)helix::ui::UpdateQueueTestAccess::discard_pending(helix::ui::UpdateQueue::instance());
+    REQUIRE(probe.expired());
+    lv_obj_delete(widget);
 }

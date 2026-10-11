@@ -2,35 +2,60 @@
 <!-- Copyright (C) 2025-2026 356C LLC -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <component>
+  <api>
+    <!-- Per-instance subject names, supplied by the widget at creation. They
+         must exist before this component is parsed: a binding whose subject is
+         missing at parse time is dropped permanently and silently. -->
+    <prop name="tile_icon_subject" type="string" default=""/>
+    <prop name="tile_label_subject" type="string" default=""/>
+    <prop name="tile_dir_subject" type="string" default=""/>
+    <prop name="tile_target_subject" type="string" default=""/>
+    <!-- The rung the bell draws at, which the badge sizes off -->
+    <prop name="tile_drawn_subject" type="string" default=""/>
+  </api>
   <styles>
     <style name="badge_info" bg_color="#info"/>
     <style name="badge_warning" bg_color="#warning"/>
     <style name="badge_error" bg_color="#danger"/>
   </styles>
   <view name="panel_widget_notifications"
-        extends="lv_obj" height="100%" flex_grow="1" style_pad_all="0" flex_flow="column" style_flex_main_place="center"
-        style_flex_cross_place="center" style_flex_track_place="center" scrollable="false">
+        extends="lv_obj" height="100%" flex_grow="1" style_pad_ver="0" style_pad_gap="#space_xxs" scrollable="false">
+    <style name="styles.tile_column"/>
+    <bind_style_if_eq name="styles.tile_row" subject="$tile_dir_subject" ref_value="1"/>
     <lv_obj name="status_notification_container" width="content" height="content" style_pad_all="0">
       <icon name="status_notification_icon"
             src="notifications" size="#icon_size" variant="secondary" align="center" clickable="true"
-            click_focusable="false">
+            click_focusable="false" style_radius="#border_radius">
+        <style name="styles.press_wash" selector="pressed"/>
+        <bind_tile_rung ladder="icon" subject="$tile_icon_subject"/>
+
         <event_cb trigger="clicked" callback="status_notification_history_clicked"/>
       </icon>
       <!-- Notification Count Badge - auto-contrast text color based on severity bg -->
       <notification_badge name="notification_badge"
-                          align="top_right" x="-#space_xxs" y="#space_xxs" hidden="true" clickable="true"
+                          align="top_right" x="#space_xxs_neg" y="#space_xxs" hidden="true" clickable="true"
                           click_focusable="false" bind_text="notification_count_text">
         <bind_flag_if_eq subject="notification_count" flag="hidden" ref_value="0"/>
         <bind_style name="badge_info" subject="notification_severity" ref_value="0"/>
         <bind_style name="badge_warning" subject="notification_severity" ref_value="1"/>
         <bind_style name="badge_error" subject="notification_severity" ref_value="2"/>
+        <!-- The badge rides the rung the bell draws at, so it stays 2/5 of the
+             glyph instead of covering it on the small rungs, and an xxl bell
+             held to its xl face keeps the xl badge. -->
+        <bind_style_if_eq name="styles.tile_badge_xs" subject="$tile_drawn_subject" ref_value="0"/>
+        <bind_style_if_eq name="styles.tile_badge_sm" subject="$tile_drawn_subject" ref_value="1"/>
+        <bind_style_if_eq name="styles.tile_badge_md" subject="$tile_drawn_subject" ref_value="2"/>
+        <bind_style_if_eq name="styles.tile_badge_lg" subject="$tile_drawn_subject" ref_value="3"/>
+        <bind_style_if_eq name="styles.tile_badge_xl" subject="$tile_drawn_subject" ref_value="4"/>
+        <bind_style_if_eq name="styles.tile_badge_xxl" subject="$tile_drawn_subject" ref_value="5"/>
         <event_cb trigger="clicked" callback="status_notification_history_clicked"/>
       </notification_badge>
     </lv_obj>
     <text_tiny text="Alerts"
-               translation_tag="Alerts" style_text_color="#text_muted" style_text_align="center" clickable="false"
-               event_bubble="true">
+               style_text_color="#text_muted" style_text_align="center" clickable="false" event_bubble="true">
       <bind_flag_if_eq subject="show_widget_labels" flag="hidden" ref_value="0"/>
+      <bind_tile_rung ladder="label" subject="$tile_icon_subject"/>
+      <bind_flag_if_eq subject="$tile_label_subject" flag="hidden" ref_value="0"/>
     </text_tiny>
   </view>
 </component>

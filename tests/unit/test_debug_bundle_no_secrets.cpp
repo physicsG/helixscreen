@@ -1,19 +1,24 @@
 // Copyright (C) 2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "../test_helpers/config_dir_guard.h"
 #include "data_root_resolver.h"
+#include "json_utils.h"
 #include "system/debug_bundle_collector.h"
 #include "wifi_saved_config.h"
 
 #include <spdlog/spdlog.h>
 
-#include <cstdlib>
+#include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <string>
+#include <vector>
 
 #include "../catch_amalgamated.hpp"
 #include "hv/json.hpp"
 
+using helix::ConfigDirGuard;
 using json = nlohmann::json;
 
 /**
@@ -33,44 +38,6 @@ using json = nlohmann::json;
  */
 
 namespace {
-
-/// Point HELIX_CONFIG_DIR at an isolated temp directory for the duration of
-/// a test, restoring whatever was there before on scope exit. Mirrors
-/// tests/unit/test_wifi_saved_config_store.cpp's ConfigDirGuard — both the
-/// wifi store and collect_sanitized_settings() resolve paths through
-/// helix::writable_path(), which honors this variable.
-class ConfigDirGuard {
-  public:
-    explicit ConfigDirGuard(const std::string& dir) {
-        if (const char* prev = std::getenv("HELIX_CONFIG_DIR")) {
-            had_prev_ = true;
-            prev_ = prev;
-        }
-        setenv("HELIX_CONFIG_DIR", dir.c_str(), 1);
-    }
-
-    ~ConfigDirGuard() {
-        if (had_prev_)
-            setenv("HELIX_CONFIG_DIR", prev_.c_str(), 1);
-        else
-            unsetenv("HELIX_CONFIG_DIR");
-    }
-
-    ConfigDirGuard(const ConfigDirGuard&) = delete;
-    ConfigDirGuard& operator=(const ConfigDirGuard&) = delete;
-
-  private:
-    bool had_prev_ = false;
-    std::string prev_;
-};
-
-/// Fresh, empty temp dir per test so runs never see a previous test's store.
-std::string make_temp_dir(const std::string& name) {
-    const std::string dir = "/tmp/" + name;
-    std::filesystem::remove_all(dir);
-    std::filesystem::create_directories(dir);
-    return dir;
-}
 
 /// True if any key anywhere in the JSON tree (object keys at any depth,
 /// including inside arrays) is exactly @p key_name. Recurses into both
@@ -96,7 +63,7 @@ bool contains_key_anywhere(const json& node, const std::string& key_name) {
 } // namespace
 
 TEST_CASE("A saved WiFi PSK never reaches a debug bundle", "[debug-bundle][wifi][security]") {
-    ConfigDirGuard guard(make_temp_dir("helix_debug_bundle_no_secrets"));
+    ConfigDirGuard guard("debug_bundle_no_secrets");
 
     // A unique, long, greppable literal — unambiguous as a substring match,
     // and distinctive enough that it could not plausibly appear in the
@@ -108,7 +75,7 @@ TEST_CASE("A saved WiFi PSK never reaches a debug bundle", "[debug-bundle][wifi]
     REQUIRE(helix::wifi::store::load().size() == 1);
 
     const json bundle = helix::DebugBundleCollector::collect();
-    const std::string serialized = bundle.dump();
+    const std::string serialized = helix::json_util::safe_dump(bundle);
 
     // The PSK itself must never appear, anywhere, in any form.
     CHECK(serialized.find(distinctive_psk) == std::string::npos);
@@ -127,4 +94,79 @@ TEST_CASE("A saved WiFi PSK never reaches a debug bundle", "[debug-bundle][wifi]
         std::filesystem::path(helix::wifi::store::store_path()).filename().string();
     INFO("store basename: " << store_basename);
     CHECK(serialized.find(store_basename) == std::string::npos);
+}
+
+/**
+ * The bundle captures Moonraker DB namespaces by explicit allowlist so a
+ * filament-identity report arrives with the override records that decide what
+ * the user actually sees. The same database holds Moonraker's user accounts and
+ * API key, and `gcode_metadata` holds base64 thumbnails, so the allowlist is the
+ * safety property: sanitize_value() is field-aware and cannot know what is
+ * sensitive inside a namespace nobody has looked at.
+ */
+TEST_CASE("Bundled DB namespaces stay an allowlist of filament overrides",
+          "[debug-bundle][security]") {
+    const auto namespaces = helix::DebugBundleCollector::filament_override_namespaces();
+
+    SECTION("it carries the three override stores and nothing else") {
+        REQUIRE(namespaces.size() == 3);
+        CHECK(std::find(namespaces.begin(), namespaces.end(), "lane_data") != namespaces.end());
+        CHECK(std::find(namespaces.begin(), namespaces.end(), "helix-screen-afc-overrides") !=
+              namespaces.end());
+        CHECK(std::find(namespaces.begin(), namespaces.end(), "helix-screen-hh-overrides") !=
+              namespaces.end());
+    }
+
+    SECTION("no credential-bearing or bulk namespace is ever listed") {
+        // A future addition that reaches for one of these trips here rather
+        // than shipping it to whoever the reporter forwards the bundle to.
+        static const char* forbidden[] = {"authorization", "authorized_users", "users",  "secrets",
+                                          "moonraker",     "gcode_metadata",   "history"};
+        for (const auto& ns : namespaces) {
+            for (const char* bad : forbidden) {
+                INFO("namespace: " << ns << " vs forbidden: " << bad);
+                CHECK(ns.find(bad) == std::string::npos);
+            }
+        }
+    }
+}
+
+/**
+ * The host census reports which processes contend for the display. A process's
+ * arguments carry paths, device serials and addresses, so only argv[0]'s name
+ * leaves, and every census string goes through sanitize_value().
+ */
+TEST_CASE("The host census ships process names, never their arguments",
+          "[debug-bundle][security][1692]") {
+    helix::diag::HostCensus census;
+    census.os_pretty_name = "Vendor Linux built by builder@example.com";
+    census.failed_units = std::vector<std::string>{"lightdm.service"};
+
+    const std::string serial = "SN-9f3e7ab21c";
+    const auto root = std::filesystem::temp_directory_path() / "helix_census_no_secrets";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root / "proc" / "42");
+    {
+        std::ofstream cmd(root / "proc" / "42" / "cmdline", std::ios::binary);
+        cmd << "/usr/bin/guppyscreen" << '\0' << "--camera" << '\0' << "/dev/v4l/by-id/usb-Cam_"
+            << serial << '\0';
+    }
+    census.processes = helix::diag::census_processes((root / "proc").string(), 32);
+    std::filesystem::remove_all(root);
+    REQUIRE(census.processes.size() == 1);
+
+    const json sys = helix::DebugBundleCollector::collect_system_info({}, census);
+    const std::string serialized = sys.dump();
+
+    CHECK(serialized.find(serial) == std::string::npos);
+    CHECK(serialized.find("--camera") == std::string::npos);
+    CHECK(serialized.find("builder@example.com") == std::string::npos);
+    CHECK(sys.at("display_processes").at(0).at("name") == json("guppyscreen"));
+    CHECK(sys.at("failed_units") == json::array({"lightdm.service"}));
+
+    SECTION("a box where systemd gave no answer reports no failed-unit list at all") {
+        census.failed_units.reset();
+        CHECK_FALSE(
+            helix::DebugBundleCollector::collect_system_info({}, census).contains("failed_units"));
+    }
 }

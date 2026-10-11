@@ -3,6 +3,7 @@
 
 #include "ams_state.h"
 #include "app_constants.h"
+#include "filament_temperature_source.h"
 
 namespace helix {
 
@@ -23,6 +24,13 @@ ActiveMaterial build_active_material(const SlotInfo& slot) {
     } else {
         result.display_name = "Unknown"; // i18n: do not translate (generic fallback label)
     }
+
+    // Firmware-published operation temperatures: vendor-preset tier data for
+    // the load/unload/clean operations, carried as their own fields. They
+    // cannot clash with tier 1 — the user override has no fields for a load
+    // temperature, and the fields it does have are resolved below, untouched
+    // by this.
+    result.firmware_temps = filament_temps::lookup_filament_temperatures(slot);
 
     // Resolve material_info via the three-tier precedence (#961):
     //   1. User override (Material Temps overlay) — highest

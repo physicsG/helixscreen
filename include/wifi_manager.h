@@ -18,6 +18,30 @@
 
 namespace helix {
 
+/// How a join attempt resolved. `result` carries WHY it failed, which the
+/// error string alone cannot: a backend reason is free-form text, so sniffing
+/// it for a substring misclassifies every reason nobody thought to look for.
+using ConnectCallback =
+    std::function<void(bool success, const std::string& error, WiFiResult result)>;
+
+/// The message to put in front of a user whose Wi-Fi join failed.
+///
+/// A genuine credential rejection is the ONE case where canned text beats the
+/// backend's own words: the password is the only thing the user can act on,
+/// and a supplicant reason code is not actionable. Every other result carries
+/// a reason the user needs to read - a daemon that is down, a network out of
+/// range, a transport that took the link - and substituting "check your
+/// password" for those tells someone whose password is correct to retype it
+/// indefinitely.
+///
+/// @param result       How the attempt resolved.
+/// @param reason       What the backend or manager said, already translated.
+/// @param auth_message Canned text for a credential rejection, already
+///                     translated (callers differ: a password modal says
+///                     "password", a hidden-network modal says "credentials").
+std::string connect_failure_message(WiFiResult result, const std::string& reason,
+                                    const std::string& auth_message);
+
 /**
  * @brief WiFi Manager - Clean interface using backend system
  *
@@ -112,10 +136,13 @@ class WiFiManager {
      *
      * @param ssid Network name
      * @param password Network password (empty for open networks)
-     * @param on_complete Callback with (success, error_message)
+     * @param on_complete Callback with (success, error_message, result)
+     * @param is_hidden true when the SSID was typed rather than picked from the
+     *        scan list; forwarded to the backend, which must not require the
+     *        network to be present in its scan cache
      */
-    void connect(const std::string& ssid, const std::string& password,
-                 std::function<void(bool success, const std::string& error)> on_complete);
+    void connect(const std::string& ssid, const std::string& password, ConnectCallback on_complete,
+                 bool is_hidden = false);
 
     /**
      * @brief Disconnect from current network
@@ -141,6 +168,24 @@ class WiFiManager {
     // ========================================================================
     // Status Queries
     // ========================================================================
+    //
+    // The synchronous queries below each ask the backend, which on
+    // wpa_supplicant is a control-socket round trip that can wait up to 10s.
+    // UI code uses get_status_async() instead.
+
+    /**
+     * @brief Non-blocking connection status for UI callers
+     *
+     * Reads on an HttpExecutor worker; `on_done` runs on the main/LVGL thread
+     * through `token`. One read is in flight at a time: a caller arriving
+     * during it is answered by the next read, so no answer predates its
+     * request. Call from the main thread: the read is registered there, so a
+     * backend swap or the destructor waits for it. With the pool not running
+     * (ESP32 never starts it; its backend answers from memory) `on_done` runs
+     * before this returns.
+     */
+    void get_status_async(helix::LifetimeToken token,
+                          std::function<void(const WifiBackend::ConnectionStatus&)> on_done);
 
     /**
      * @brief Check if connected to any network
@@ -186,6 +231,18 @@ class WiFiManager {
      * @return true if 5GHz is supported, false if only 2.4GHz
      */
     bool supports_5ghz();
+
+    /// WifiBackend::reports_frequency().
+    bool reports_frequency();
+
+    /// Managed network interface name ("wlan0"), empty when the backend cannot say.
+    std::string netdev_name();
+
+    /// Whether the backend can forget a saved network (WifiBackend::supports_forget()).
+    bool supports_forget();
+
+    /// Whether the backend can move the radio (WifiBackend::supports_radio_toggle()).
+    bool supports_radio_toggle();
 
     // ========================================================================
     // Hardware Detection (Legacy Compatibility)
@@ -357,7 +414,7 @@ class WiFiManager {
     helix::wifi::ScanScheduler scan_scheduler_;
 
     // Connection state
-    std::function<void(bool, const std::string&)> connect_callback_; // guarded by callback_mutex_
+    ConnectCallback connect_callback_;    // guarded by callback_mutex_
     bool connecting_in_progress_ = false; // guarded by callback_mutex_; true during connect
                                           // attempt, prevents false failure on DISCONNECTED
 
@@ -458,15 +515,42 @@ class WiFiManager {
     // `this`) so this stays free of member access.
     static void report_radio_result(bool enabled, const WiFiError& result, bool has_wired_fallback);
 
-    // Barrier for set_enabled_async() workers. The worker runs on an
-    // HttpExecutor thread and dereferences `this` (backend_) for the whole of
-    // apply_radio_enabled(), so the destructor waits here before any member is
-    // torn down. Unbounded on purpose: a timeout that expired would hand the
-    // worker a freed backend, and the backend calls carry their own deadlines.
+    // Records the radio state a toggle actually reached, so the stored
+    // expectation is never left at the value the caller assumed when it
+    // flipped its switch. Static for the same reason as report_radio_result,
+    // and deferred on the MANAGER's token rather than the caller's: a screen
+    // that starts a toggle and is dismissed inside the radio's multi-second
+    // window must not take the record of the outcome down with it. Only a
+    // toggle that actually reached the backend calls this — with nothing
+    // attempted there is no outcome to record. Main-thread only.
+    static void persist_radio_expectation(bool requested, bool success, bool actual);
+
+    // Barrier for set_enabled_async() and get_status_async() workers. A worker
+    // runs on an HttpExecutor thread and dereferences `this` (backend_) for the
+    // whole of its backend call, so the destructor and the backend swap wait
+    // here before touching backend_. Ops are registered on the main thread,
+    // which is busy running the swap, so none can start while it waits.
+    // Unbounded on purpose: a timeout that expired would hand the worker a
+    // freed backend, and the backend calls carry their own deadlines.
     std::mutex radio_op_mutex_;
     std::condition_variable radio_op_cv_;
     int radio_ops_inflight_ = 0;
+    void begin_radio_op();
+    void end_radio_op();
     void wait_for_radio_ops();
+    // Registers a radio op and ends it when the last copy is destroyed, so a
+    // work item the executor drops unrun still releases it. Main thread only.
+    std::shared_ptr<void> radio_op_scope();
+
+    // Callers waiting on the status read in flight (get_status_async).
+    struct StatusWaiter {
+        helix::LifetimeToken token;
+        std::function<void(const WifiBackend::ConnectionStatus&)> on_done;
+    };
+    std::mutex status_waiters_mutex_;
+    std::vector<StatusWaiter> status_waiters_;
+    bool status_read_inflight_ = false;
+    void run_status_reads();
 
     // Sysfs root used by has_non_wifi_network_path() to gate the stored-radio
     // -state reassert (Task 15: never disable the radio on a device whose

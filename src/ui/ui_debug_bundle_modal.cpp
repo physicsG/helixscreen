@@ -7,6 +7,7 @@
 
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "system/debug_bundle_collector.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/spdlog.h>
 
@@ -80,7 +81,7 @@ bool DebugBundleModal::show_owned() {
 void DebugBundleModal::on_show() {
     spdlog::debug("[DebugBundleModal] on_show");
     if (dialog()) {
-        lv_obj_t* note_ta = lv_obj_find_by_name(dialog(), "user_note_textarea");
+        lv_obj_t* note_ta = helix::ui::find_required(dialog(), "user_note_textarea", get_name());
         if (note_ta) {
             lv_textarea_set_max_length(note_ta, 500);
             KeyboardManager::instance().register_textarea(note_ta);
@@ -111,11 +112,11 @@ void DebugBundleModal::init_subjects() {
     lv_subject_init_string(&error_subject_, error_buf_, nullptr, sizeof(error_buf_), "");
     lv_subject_init_int(&include_logs_subject_, 0);
 
-    lv_xml_register_subject(nullptr, "debug_bundle_state", &state_subject_);
-    lv_xml_register_subject(nullptr, "debug_bundle_status", &status_subject_);
-    lv_xml_register_subject(nullptr, "debug_bundle_share_code", &share_code_subject_);
-    lv_xml_register_subject(nullptr, "debug_bundle_error", &error_subject_);
-    lv_xml_register_subject(nullptr, "debug_bundle_include_logs", &include_logs_subject_);
+    subjects_.publish("debug_bundle_state", &state_subject_);
+    subjects_.publish("debug_bundle_status", &status_subject_);
+    subjects_.publish("debug_bundle_share_code", &share_code_subject_);
+    subjects_.publish("debug_bundle_error", &error_subject_);
+    subjects_.publish("debug_bundle_include_logs", &include_logs_subject_);
 
     subjects_initialized_ = true;
 }
@@ -125,11 +126,7 @@ void DebugBundleModal::deinit_subjects() {
         return;
     }
 
-    lv_subject_deinit(&state_subject_);
-    lv_subject_deinit(&status_subject_);
-    lv_subject_deinit(&share_code_subject_);
-    lv_subject_deinit(&error_subject_);
-    lv_subject_deinit(&include_logs_subject_);
+    subjects_.deinit_all();
 
     subjects_initialized_ = false;
 }
@@ -192,7 +189,7 @@ void DebugBundleModal::handle_upload() {
     options.include_moonraker_logs = options.include_klipper_logs;
 
     if (dialog()) {
-        lv_obj_t* note_ta = lv_obj_find_by_name(dialog(), "user_note_textarea");
+        lv_obj_t* note_ta = helix::ui::find_required(dialog(), "user_note_textarea", get_name());
         if (note_ta) {
             const char* text = lv_textarea_get_text(note_ta);
             if (text && text[0] != '\0') {
@@ -223,7 +220,12 @@ void DebugBundleModal::handle_upload() {
                                  "share code: {}",
                                  result.share_code);
                 } else {
-                    lv_subject_copy_string(&error_subject_, result.error_message.c_str());
+                    // A build-gate refusal shows the translated message; a
+                    // transport failure shows the collector's detail verbatim.
+                    lv_subject_copy_string(&error_subject_,
+                                           result.uploads_disabled
+                                               ? lv_tr("Upload unavailable in this build")
+                                               : result.error_message.c_str());
                     lv_subject_set_int(&state_subject_, 3);
                     spdlog::warn("[DebugBundleModal] Upload failed: {}", result.error_message);
                 }

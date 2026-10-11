@@ -35,6 +35,10 @@ setup() {
     # Create a fake /etc/os-release indicating Debian (Pi-like system)
     mkdir -p "$BATS_TEST_TMPDIR/etc"
     echo 'ID=debian' > "$BATS_TEST_TMPDIR/etc/os-release"
+    # ff_machine_id's chroot fallback reads os-release through this override
+    # (same seam as moonraker.sh); point it at the sandbox copy so the suite
+    # never consults the host's real codename.
+    export OS_RELEASE_FILE="$BATS_TEST_TMPDIR/etc/os-release"
     # Create a fake /home/pi directory to trigger is_pi=true
     mkdir -p "$BATS_TEST_TMPDIR/home/pi"
 }
@@ -191,6 +195,181 @@ _mock_ad5x_detect_platform() {
     [ "$PREVIOUS_UI_SCRIPT" = "" ]
 }
 
+# --- Creator 5 / Creator 5 Pro board naming (issue 1714) ---
+#
+# The Creator 5 boards are MIPS FlashForge machines with the AD5X's exact
+# layout, payload and Z-Mod install shape, so detect_platform keeps returning
+# "ad5x" for them. The stock firmware names the board in
+# /usr/prog/app_startup.sh's MACHINE= line; ff_machine_id reads it so the
+# user-facing messages can name the actual board. Inside the Z-Mod chroot
+# (where the installer must run) that file is unreachable, and the name rides
+# in the first word of the chroot os-release's VERSION_CODENAME instead.
+
+_write_ff_machine() {
+    printf 'MACHINE=%s\n' "$1" > "$BATS_TEST_TMPDIR/app_startup.sh"
+    export HELIX_FF_MACHINE_FILE="$BATS_TEST_TMPDIR/app_startup.sh"
+}
+
+# Write the chroot-shaped os-release: no app_startup.sh at hand, and a
+# VERSION_CODENAME of "<MACHINE> <version>" as the chroot's start.sh stamps it.
+_write_ff_os_release() {
+    {
+        echo 'ID=buildroot'
+        [ -z "${1:-}" ] || printf 'VERSION_CODENAME="%s"\n' "$1"
+    } > "$OS_RELEASE_FILE"
+}
+
+@test "C5: ff_machine_id reads MACHINE=AD5X" {
+    _write_ff_machine "AD5X"
+    run ff_machine_id
+    [ "$status" -eq 0 ]
+    [ "$output" = "AD5X" ]
+}
+
+@test "C5: ff_machine_id reads MACHINE=Creator5" {
+    _write_ff_machine "Creator5"
+    run ff_machine_id
+    [ "$status" -eq 0 ]
+    [ "$output" = "Creator5" ]
+}
+
+@test "C5: ff_machine_id reads MACHINE=Creator5Pro without folding into Creator5" {
+    # Creator5 is a prefix of Creator5Pro; the plain-Creator5 verdict must not
+    # swallow the Pro (nor the Pro the plain).
+    _write_ff_machine "Creator5Pro"
+    run ff_machine_id
+    [ "$status" -eq 0 ]
+    [ "$output" = "Creator5Pro" ]
+}
+
+@test "C5: ff_machine_id trims CR and padding around the value" {
+    printf 'MACHINE=Creator5Pro \r\n' > "$BATS_TEST_TMPDIR/app_startup.sh"
+    export HELIX_FF_MACHINE_FILE="$BATS_TEST_TMPDIR/app_startup.sh"
+    run ff_machine_id
+    [ "$status" -eq 0 ]
+    [ "$output" = "Creator5Pro" ]
+}
+
+@test "C5: ff_machine_id returns empty for an unknown MACHINE value" {
+    _write_ff_machine "GuimeraX"
+    run ff_machine_id
+    [ "$status" -eq 0 ]
+    [ "$output" = "" ]
+}
+
+@test "C5: ff_machine_id returns empty when app_startup.sh is missing" {
+    export HELIX_FF_MACHINE_FILE="$BATS_TEST_TMPDIR/no-such-app_startup.sh"
+    run ff_machine_id
+    [ "$status" -eq 0 ]
+    [ "$output" = "" ]
+}
+
+@test "C5: ff_machine_id returns empty when the path is unreadable" {
+    export HELIX_FF_MACHINE_FILE="$BATS_TEST_TMPDIR"
+    run ff_machine_id
+    [ "$status" -eq 0 ]
+    [ "$output" = "" ]
+}
+
+@test "C5: ff_machine_id falls back to the chroot os-release (Creator5Pro)" {
+    _write_ff_os_release "Creator5Pro 1.7.3"
+    export HELIX_FF_MACHINE_FILE="$BATS_TEST_TMPDIR/no-such-app_startup.sh"
+    run ff_machine_id
+    [ "$status" -eq 0 ]
+    [ "$output" = "Creator5Pro" ]
+}
+
+@test "C5: ff_machine_id falls back to the chroot os-release (Creator5)" {
+    _write_ff_os_release "Creator5 1.7.3"
+    export HELIX_FF_MACHINE_FILE="$BATS_TEST_TMPDIR/no-such-app_startup.sh"
+    run ff_machine_id
+    [ "$status" -eq 0 ]
+    [ "$output" = "Creator5" ]
+}
+
+@test "C5: ff_machine_id falls back to the chroot os-release (AD5X)" {
+    _write_ff_os_release "AD5X 1.2.3"
+    export HELIX_FF_MACHINE_FILE="$BATS_TEST_TMPDIR/no-such-app_startup.sh"
+    run ff_machine_id
+    [ "$status" -eq 0 ]
+    [ "$output" = "AD5X" ]
+}
+
+@test "C5: ff_machine_id returns empty for an unrelated os-release codename" {
+    _write_ff_os_release "bookworm"
+    export HELIX_FF_MACHINE_FILE="$BATS_TEST_TMPDIR/no-such-app_startup.sh"
+    run ff_machine_id
+    [ "$status" -eq 0 ]
+    [ "$output" = "" ]
+}
+
+@test "C5: ff_machine_id returns empty when os-release has no VERSION_CODENAME" {
+    _write_ff_os_release ""
+    export HELIX_FF_MACHINE_FILE="$BATS_TEST_TMPDIR/no-such-app_startup.sh"
+    run ff_machine_id
+    [ "$status" -eq 0 ]
+    [ "$output" = "" ]
+}
+
+@test "C5: app_startup.sh wins when both sources exist" {
+    _write_ff_machine "AD5X"
+    _write_ff_os_release "Creator5Pro 1.7.3"
+    run ff_machine_id
+    [ "$status" -eq 0 ]
+    [ "$output" = "AD5X" ]
+}
+
+@test "C5: ad5x_board_name maps every MACHINE value to its display name" {
+    local machine want
+    for machine in AD5X Creator5 Creator5Pro; do
+        case "$machine" in
+            AD5X)      want="FlashForge AD5X" ;;
+            Creator5)  want="FlashForge Creator 5" ;;
+            Creator5Pro) want="FlashForge Creator 5 Pro" ;;
+        esac
+        _write_ff_machine "$machine"
+        run ad5x_board_name
+        [ "$status" -eq 0 ]
+        [ "$output" = "$want" ] || fail "MACHINE=$machine named '$output', want '$want'"
+    done
+}
+
+@test "C5: ad5x_board_name falls back to FlashForge AD5X without a MACHINE line" {
+    export HELIX_FF_MACHINE_FILE="$BATS_TEST_TMPDIR/no-such-app_startup.sh"
+    run ad5x_board_name
+    [ "$status" -eq 0 ]
+    [ "$output" = "FlashForge AD5X" ]
+}
+
+@test "C5: set_install_paths names the actual board in the ad5x platform log" {
+    detect_tmp_dir() { TMP_DIR="/tmp/helixscreen-install"; }
+    local _log=""
+    log_info() { _log="${_log}INFO: $*
+"; }
+    _write_ff_machine "Creator5Pro"
+
+    # Called directly (not via run): INSTALL_DIR is a side effect the run
+    # subshell would not carry back.
+    set_install_paths "ad5x"
+
+    [ "$INSTALL_DIR" = "/srv/helixscreen" ] || fail "INSTALL_DIR='$INSTALL_DIR'"
+    [[ "$_log" == *"Platform: FlashForge Creator 5 Pro (ZMOD)"* ]] \
+        || fail "platform log names the wrong board: $_log"
+}
+
+@test "C5: mod_check_chroot_context names the actual board in its refusal" {
+    _setup_zmod_ad5x_sandbox
+    [ -n "$HOST_MOD_CHROOT" ] || fail "probe did not find the zmod chroot"
+    log_error() { echo "ERROR: $*"; }
+    _write_ff_machine "Creator5"
+
+    run mod_check_chroot_context
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"FlashForge Creator 5 manual installs must run inside the ZMOD chroot"* ]] \
+        || fail "refusal names the wrong board: $output"
+}
+
 # --- AD5X Forge-X (mod-probed) detection tests ---
 #
 # A Forge-X AD5X carries none of the stock markers: no /ZMOD, no /usr/prog.
@@ -284,20 +463,23 @@ _setup_zmod_ad5x_sandbox() {
 
     set_install_paths "ad5x" "forge_x"
 
-    [ "$INSTALL_DIR" = "$SANDBOX/usr/data/config/mod/.bin/helixscreen" ] \
+    [ "$INSTALL_DIR" = "$SANDBOX/usr/data/config/mod_data/helixscreen" ] \
         || fail "INSTALL_DIR='$INSTALL_DIR'"
 }
 
-@test "mod host: a plain (non-payload) run is refused at the install-dir gate" {
+@test "mod host: a plain (non-payload) run lands on the out-of-tree default" {
+    # The probed payload root is ours and sits outside the mod's git tree, so
+    # an unarmed set_install_paths has nothing to refuse at the default. The
+    # mod-owned refusal still meets an in-tree INSTALL_DIR - the operator
+    # seam - which the guard suite drives against this same fixture shape.
     _setup_forgex_ad5x_sandbox
     HELIX_MOD_PAYLOAD=""
     detect_tmp_dir() { TMP_DIR="/tmp/helixscreen-install"; }
-    log_error() { echo "ERROR: $*"; }
 
-    run set_install_paths "ad5x" "forge_x"
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"refusing"* ]]
-    [[ "$output" == *"--payload-root"* ]]
+    set_install_paths "ad5x" "forge_x"
+
+    [ "$INSTALL_DIR" = "$SANDBOX/usr/data/config/mod_data/helixscreen" ] \
+        || fail "INSTALL_DIR='$INSTALL_DIR'"
 }
 
 @test "mod host: an explicit user INSTALL_DIR still wins over the mod root" {
@@ -371,7 +553,7 @@ _setup_zmod_ad5x_sandbox() {
 }
 
 @test "install.sh (bundled) also uses getconf LONG_BIT" {
-    grep -q 'getconf LONG_BIT' "$WORKTREE_ROOT/scripts/install.sh"
+    grep -q 'getconf LONG_BIT' "$INSTALL_BUNDLE"
 }
 
 @test "platform.sh has AD5X detection with /usr/prog check" {
@@ -429,6 +611,64 @@ _mock_detect_ad5m_firmware() {
     [ "$PREVIOUS_UI_SCRIPT" = "" ]
 }
 
+@test "AD5M: set_install_paths points the state root at the dot-prefixed name" {
+    detect_tmp_dir() { TMP_DIR="/tmp/helixscreen-install"; }
+
+    set_install_paths "ad5m" "forge_x"
+
+    # /data is the gcodes root (symlinked whole by the vendor), so the state
+    # root is dot-prefixed to stay out of the print-file picker, and the
+    # plain-named root is declared superseded + stale for the migration.
+    [ "$STATE_ROOT" = "/data/.helixscreen" ]
+    [ "$PREVIOUS_STATE_ROOT" = "/data/helixscreen" ]
+    [ "$STALE_CACHE_DIRS" = "/data/helixscreen/cache" ]
+}
+
+@test "AD5M gcodes sweep removes leftover release archives and install log" {
+    local root="$BATS_TEST_TMPDIR/data"
+    mkdir -p "$root"
+    touch "$root/helixscreen-ad5m-v0.99.118.tar.gz" \
+          "$root/helixscreen-ad5m-v1.0.0.zip" \
+          "$root/helixscreen-update.tar.gz.install.log" \
+          "$root/printer.gcode"
+
+    AD5M_GCODES_ROOT="$root" cleanup_ad5m_gcodes_root
+
+    [ ! -e "$root/helixscreen-ad5m-v0.99.118.tar.gz" ]
+    [ ! -e "$root/helixscreen-ad5m-v1.0.0.zip" ]
+    [ ! -e "$root/helixscreen-update.tar.gz.install.log" ]
+    # Only our names; the operator's files are the picker's real content.
+    [ -e "$root/printer.gcode" ]
+}
+
+@test "AD5M gcodes sweep never removes the archive this run installs from" {
+    local root="$BATS_TEST_TMPDIR/data"
+    mkdir -p "$root"
+    touch "$root/helixscreen-ad5m-v1.0.0.tar.gz" "$root/helixscreen-ad5m-v0.99.118.tar.gz"
+
+    local_tarball="$root/helixscreen-ad5m-v1.0.0.tar.gz"
+    AD5M_GCODES_ROOT="$root" cleanup_ad5m_gcodes_root
+
+    [ -e "$local_tarball" ]
+    [ ! -e "$root/helixscreen-ad5m-v0.99.118.tar.gz" ]
+}
+
+@test "AD5M gcodes sweep removes hx-clean only in its exact known shape" {
+    local root="$BATS_TEST_TMPDIR/data"
+    mkdir -p "$root/hx-clean/helixscreen"
+    touch "$root/hx-clean/helixscreen/marker"
+
+    AD5M_GCODES_ROOT="$root" cleanup_ad5m_gcodes_root
+    [ ! -d "$root/hx-clean" ]
+
+    # Anything more than our own subtree is the operator's; it survives.
+    mkdir -p "$root/hx-clean/helixscreen" "$root/hx-clean/keepme"
+    touch "$root/hx-clean/keepme/file"
+    AD5M_GCODES_ROOT="$root" cleanup_ad5m_gcodes_root
+    [ -d "$root/hx-clean" ]
+    [ -e "$root/hx-clean/keepme/file" ]
+}
+
 @test "platform.sh checks /ZMOD before forge_x default" {
     local platform_sh="$WORKTREE_ROOT/scripts/lib/installer/platform.sh"
     local zmod_line forge_x_line
@@ -461,12 +701,12 @@ _mock_detect_ad5m_firmware() {
 }
 
 @test "install.sh (bundled) runs the mod-flavor detector for ad5x" {
-    grep -q 'MOD_FLAVOR=$(detect_mod_flavor)' "$WORKTREE_ROOT/scripts/install.sh"
-    grep -q 'mod_check_chroot_context' "$WORKTREE_ROOT/scripts/install.sh"
+    grep -q 'MOD_FLAVOR=$(detect_mod_flavor)' "$INSTALL_BUNDLE"
+    grep -q 'mod_check_chroot_context' "$INSTALL_BUNDLE"
 }
 
 @test "uninstall.sh (bundled) still defines the compat wrappers" {
-    local uninst="$WORKTREE_ROOT/scripts/uninstall.sh"
+    local uninst="$UNINSTALL_BUNDLE"
     grep -q '^detect_ad5m_firmware()' "$uninst"
     grep -q '^ad5x_check_chroot_context()' "$uninst"
 }
@@ -561,7 +801,7 @@ _mock_k2_detect_platform() {
 
     set_install_paths "k2"
 
-    [ "$INSTALL_DIR" = "/opt/helixscreen" ]
+    [ "$INSTALL_DIR" = "/mnt/UDISK/helixscreen" ]
     [ "$INIT_SCRIPT_DEST" = "/etc/init.d/S99helixscreen" ]
     [ "$KLIPPER_USER" = "root" ]
 }
@@ -582,8 +822,8 @@ _mock_k2_detect_platform() {
 # The bundled install.sh is what actually ships to users — make sure the
 # fix isn't only present in the modular sources.
 @test "install.sh (bundled) sets KLIPPER_HOME=/mnt/UDISK for k2" {
-    grep -qE 'platform.*=.*"k2"' "$WORKTREE_ROOT/scripts/install.sh"
-    grep -q 'KLIPPER_HOME="/mnt/UDISK"' "$WORKTREE_ROOT/scripts/install.sh"
+    grep -qE 'platform.*=.*"k2"' "$INSTALL_BUNDLE"
+    grep -q 'KLIPPER_HOME="/mnt/UDISK"' "$INSTALL_BUNDLE"
 }
 
 # Same regression class as K2: K1 printer_data is at /usr/data/printer_data,
@@ -599,8 +839,8 @@ _mock_k2_detect_platform() {
 }
 
 @test "install.sh (bundled) sets KLIPPER_HOME=/usr/data for k1" {
-    grep -qE 'platform.*=.*"k1"' "$WORKTREE_ROOT/scripts/install.sh"
-    grep -q 'KLIPPER_HOME="/usr/data"' "$WORKTREE_ROOT/scripts/install.sh"
+    grep -qE 'platform.*=.*"k1"' "$INSTALL_BUNDLE"
+    grep -q 'KLIPPER_HOME="/usr/data"' "$INSTALL_BUNDLE"
 }
 
 # Snapmaker U1: detect_klipper_user would normally find /home/lava via
@@ -617,8 +857,8 @@ _mock_k2_detect_platform() {
 }
 
 @test "install.sh (bundled) sets KLIPPER_HOME=/home/lava for snapmaker-u1" {
-    grep -qE 'platform.*=.*"snapmaker-u1"' "$WORKTREE_ROOT/scripts/install.sh"
-    grep -q 'KLIPPER_HOME="/home/lava"' "$WORKTREE_ROOT/scripts/install.sh"
+    grep -qE 'platform.*=.*"snapmaker-u1"' "$INSTALL_BUNDLE"
+    grep -q 'KLIPPER_HOME="/home/lava"' "$INSTALL_BUNDLE"
 }
 
 # AD5M: /root/printer_data is the correct location (verified on hardware) —
@@ -735,8 +975,8 @@ _mock_u1_detect_platform() {
 }
 
 @test "install.sh (bundled) does NOT treat makerbase-client as an M1 marker (#1027)" {
-    refute grep -qE '\[ -f [^]]*makerbase-client' "$WORKTREE_ROOT/scripts/install.sh"
-    ! grep -qE 'list-unit-files.*makerbase-client' "$WORKTREE_ROOT/scripts/install.sh"
+    refute grep -qE '\[ -f [^]]*makerbase-client' "$INSTALL_BUNDLE"
+    ! grep -qE 'list-unit-files.*makerbase-client' "$INSTALL_BUNDLE"
 }
 
 # ============================================================================
@@ -789,7 +1029,7 @@ _mock_m1_gate() {
 }
 
 @test "install.sh (bundled) vetoes M1 detection with the QIDI-class fingerprint (#1027)" {
-    grep -qE 'is_m1.*=.*true.*&&.*! _is_qidi_class_sbc' "$WORKTREE_ROOT/scripts/install.sh"
+    grep -qE 'is_m1.*=.*true.*&&.*! _is_qidi_class_sbc' "$INSTALL_BUNDLE"
 }
 
 @test "_is_qidi_class_sbc keys on hostname linaro-alip + /home/mks" {
@@ -805,7 +1045,7 @@ _mock_m1_gate() {
 }
 
 @test "install.sh (bundled) _is_qidi_class_sbc accepts /home/qidi (#1047)" {
-    grep -qE '/home/mks.*\|\|.*/home/qidi' "$WORKTREE_ROOT/scripts/install.sh"
+    grep -qE '/home/mks.*\|\|.*/home/qidi' "$INSTALL_BUNDLE"
 }
 
 # ============================================================================
@@ -833,10 +1073,16 @@ _mock_m1_gate() {
     [ "$output" = "ad5m" ]
 }
 
-@test "get_download_platform: k1 → k1 (identity)" {
+@test "get_download_platform: k1 → k1 (released assets are named by board)" {
     run get_download_platform "k1"
     [ "$status" -eq 0 ]
     [ "$output" = "k1" ]
+}
+
+@test "get_download_platform: ad5x → ad5x (released assets are named by board)" {
+    run get_download_platform "ad5x"
+    [ "$status" -eq 0 ]
+    [ "$output" = "ad5x" ]
 }
 
 @test "get_download_platform: k2 → k2 (identity)" {
@@ -879,7 +1125,7 @@ _mock_m1_gate() {
 }
 
 @test "install.sh (bundled) has get_download_platform" {
-    grep -q 'get_download_platform' "$WORKTREE_ROOT/scripts/install.sh"
+    grep -q 'get_download_platform' "$INSTALL_BUNDLE"
 }
 
 @test "main.sh passes download_platform (not platform) to download_release" {
@@ -894,7 +1140,7 @@ _mock_m1_gate() {
 
 @test "install.sh (bundled) passes download_platform to download_release" {
     grep -q 'download_release "$version" "$download_platform"' \
-        "$WORKTREE_ROOT/scripts/install.sh"
+        "$INSTALL_BUNDLE"
 }
 
 @test "release_info.json picks pi/pi32 for m1 (not helixscreen-m1.zip)" {

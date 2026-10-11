@@ -2,18 +2,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // VENDOR_OK: this file is the vendor-knowledge border for chamber heaters.
 #include "chamber_heater_backend.h"
+#include "text_io.h"
 
 #include <algorithm>
 #include <cctype>
 
 namespace helix::chamber {
 namespace {
-
-std::string to_upper_copy(std::string s) {
-    std::transform(s.begin(), s.end(), s.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
-    return s;
-}
 
 bool has_standalone_token(const std::string& upper, const char* tok) {
     const std::string token = tok;
@@ -36,12 +31,52 @@ bool has_standalone_token(const std::string& upper, const char* tok) {
     return false;
 }
 
-/// Keyword tiers MOVED VERBATIM from printer_discovery.h chamber_keyword_confidence
-/// (which keeps its own copy for sensor/fan paths until Task 3 delegates).
-/// CHAMBER 100 > ENCLOSURE 90 > CAVITY 85 > BOX 60; -1 compound, -40 air-quality,
-/// floored at 1 when any keyword matched.
+/// Default backend: any chamber-ish heater_generic / temperature_fan discovered
+/// by keyword. No diagnostics, no filter pin, no cap — configfile rules alone.
+class GenericChamberHeaterBackend : public ChamberHeaterBackend {
+  public:
+    std::string_view id() const override {
+        return "generic";
+    }
+    int discovery_confidence(const std::string& object_name) const override {
+        return keyword_confidence(object_name);
+    }
+    std::string_view diagnostics_object() const override {
+        return {};
+    }
+    std::string_view filter_fan_pin() const override {
+        return {};
+    }
+    std::string_view fault_reset_gcode() const override {
+        return {};
+    }
+    // A plain heater_generic is one temperature; there is no element behind it.
+    bool reports_element_temp() const override {
+        return false;
+    }
+    double conservative_max_temp() const override {
+        return 0;
+    }
+    bool device_autonomous_control() const override {
+        return false;
+    }
+    std::optional<ChamberHeaterDiagnostics>
+    parse_diagnostics(const nlohmann::json&) const override {
+        return std::nullopt; // no diagnostics surface
+    }
+};
+
+const GenericChamberHeaterBackend kGeneric;
+
+} // namespace
+
+/// Keyword-only chamber score — the single keyword rule every discovery path
+/// (heater, sensor, cooling fan) scores object names with. match() layers
+/// appliance-backend names on top of it for the heater slot only.
+/// CHAMBER 100 > ENCLOSURE 90 > CAVITY 85 > standalone-token BOX 60; -1
+/// compound, -40 air-quality, floored at 1 when any keyword matched.
 int keyword_confidence(const std::string& object_name) {
-    std::string upper = to_upper_copy(object_name);
+    std::string upper = helix::text_io::to_upper(object_name);
     int score = 0;
     const char* keyword = nullptr;
     if (upper.find("CHAMBER") != std::string::npos) {
@@ -73,41 +108,6 @@ int keyword_confidence(const std::string& object_name) {
     }
     return score < 1 ? 1 : score;
 }
-
-/// Default backend: any chamber-ish heater_generic / temperature_fan discovered
-/// by keyword. No diagnostics, no filter pin, no cap — configfile rules alone.
-class GenericChamberHeaterBackend : public ChamberHeaterBackend {
-  public:
-    std::string_view id() const override {
-        return "generic";
-    }
-    int discovery_confidence(const std::string& object_name) const override {
-        return keyword_confidence(object_name);
-    }
-    std::string_view diagnostics_object() const override {
-        return {};
-    }
-    std::string_view filter_fan_pin() const override {
-        return {};
-    }
-    std::string_view fault_reset_gcode() const override {
-        return {};
-    }
-    double conservative_max_temp() const override {
-        return 0;
-    }
-    bool device_autonomous_control() const override {
-        return false;
-    }
-    std::optional<ChamberHeaterDiagnostics>
-    parse_diagnostics(const nlohmann::json&) const override {
-        return std::nullopt; // no diagnostics surface
-    }
-};
-
-const GenericChamberHeaterBackend kGeneric;
-
-} // namespace
 
 // Declared at helix::chamber scope (NOT the anonymous namespace) so they link
 // against the external definitions in the vendor backend files.

@@ -6,6 +6,7 @@
 #include "lvgl/lvgl.h"
 
 #include <cstdint>
+#include <vector>
 
 namespace helix::ui {
 
@@ -69,6 +70,46 @@ void create_touch_marker(lv_obj_t* parent, lv_coord_t x, lv_coord_t y);
 lv_obj_t* create_fullscreen_backdrop(lv_obj_t* parent, lv_opa_t opacity = 180);
 
 /**
+ * @brief Register a screen object that stays in front of every backdrop
+ *
+ * The navbar's buttons (the E-stop, the spools-on-the-bed button):
+ * they have to stay tappable above any overlay, modal or keypad backdrop.
+ */
+void add_always_on_top(lv_obj_t* obj);
+
+/// Unregister @p obj; unknown objects are ignored.
+void remove_always_on_top(lv_obj_t* obj);
+
+/**
+ * @brief Hides every always-on-top object while a screen snapshot is taken,
+ *        so a dimmed copy is not baked into the image
+ */
+class ScopedHideChrome {
+  public:
+    ScopedHideChrome();
+    ~ScopedHideChrome();
+    ScopedHideChrome(const ScopedHideChrome&) = delete;
+    ScopedHideChrome& operator=(const ScopedHideChrome&) = delete;
+
+  private:
+    std::vector<lv_obj_t*> hidden_;
+};
+
+/**
+ * @brief Bring @p obj to the front of its parent, keeping the always-on-top
+ *        objects in front of it
+ *
+ * Every screen-level backdrop goes up through this, so none of them can bury
+ * the E-stop. An object that must cover the E-stop (the lock screen, which
+ * lives on lv_layer_top) does not need it.
+ */
+void bring_to_front(lv_obj_t* obj);
+
+/// Whether @p child is screen chrome that sweeps over the screen's children
+/// (stale-overlay hiding, the keyboard's page shift) must leave alone.
+bool is_screen_chrome(const lv_obj_t* child);
+
+/**
  * @brief Flash an object with a brief opacity pulse for touch feedback
  *
  * Animates the object's opacity down and back up to provide visual confirmation
@@ -94,5 +135,9 @@ void flash_object(lv_obj_t* obj, int32_t duration_ms = 200, bool force = false);
  * @param obj Root object of the tree to defocus
  */
 void defocus_tree(lv_obj_t* obj);
+
+/// helix::full_style_effects_allowed() for the running tier, read from the
+/// "platform_tier" subject; true until that subject is registered.
+bool full_style_effects_active();
 
 } // namespace helix::ui

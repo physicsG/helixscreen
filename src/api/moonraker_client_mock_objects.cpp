@@ -1,6 +1,7 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "env_knobs.h"
 #include "moonraker_client_mock_internal.h"
 
 #include <spdlog/spdlog.h>
@@ -9,11 +10,25 @@
 #include <chrono>
 #include <string>
 
+namespace helix::sim {
+
+std::vector<std::string> mock_padded_macro_names() {
+    std::vector<std::string> names;
+    if (const char* v = std::getenv("HELIX_MOCK_MACRO_COUNT"); v && *v) {
+        const int want = atoi(v);
+        for (int i = 0; i < want; i++) {
+            names.push_back(fmt::format("MOCK_MACRO_{:03d}", i));
+        }
+    }
+    return names;
+}
+
+} // namespace helix::sim
+
 namespace mock_internal {
 
 static bool is_mock_kalico() {
-    const char* env = std::getenv("HELIX_MOCK_KALICO");
-    return env && std::string(env) == "1";
+    return helix::env_flag("HELIX_MOCK_KALICO");
 }
 
 // Configfile sections for the resolved chamber heater, so
@@ -31,8 +46,65 @@ static json chamber_heater_configfile_sections(const MoonrakerClientMock* self) 
     return sections;
 }
 
+// The toolchanger persona's calibration macro, as klipper-toolchanger's
+// example config defines it. Its description: is what the Tool Offsets
+// panel shows as the instruction text, read through MacroParamCache like
+// every other macro description; empty when the printer has no toolchanger,
+// as the object list then has no such macro either.
+static json toolchanger_configfile_sections(const MoonrakerClientMock* self) {
+    json sections = json::object();
+    if (self->hardware().has_tool_changer()) {
+        sections["gcode_macro CALIBRATE_TOOL_OFFSETS"] = {
+            {"gcode", "_CALIBRATE_TOOL_OFFSETS_IMPL"},
+            {"description",
+             "Measures every tool's XYZ offset on the nozzle sensor. Clean all nozzles first."}};
+    }
+    return sections;
+}
+
+// configfile sections of the led_effect objects populate_capabilities()
+// lists; empty for a persona that omits them.
+static json led_effect_configfile_sections(const MoonrakerClientMock* self) {
+    json sections = json::object();
+    if (helix::mock::descriptor(self->get_printer_type()).omit &
+        helix::mock::default_object::LED_EFFECTS) {
+        return sections;
+    }
+    sections["led_effect breathing"] = {
+        {"leds", "neopixel:chamber_light"}, {"autostart", "false"}, {"frame_rate", "24"}};
+    sections["led_effect fire_comet"] = {
+        {"leds", "neopixel:chamber_light (1-10)"}, {"autostart", "false"}, {"frame_rate", "24"}};
+    sections["led_effect rainbow"] = {
+        {"leds", "neopixel:status_led"}, {"autostart", "false"}, {"frame_rate", "24"}};
+    sections["led_effect static_white"] = {
+        {"leds", "neopixel:chamber_light"}, {"autostart", "false"}, {"frame_rate", "24"}};
+    return sections;
+}
+
+// LED effect status from the mock's enabled-effect set. Shared by the query
+// and subscribe handlers so both answer the same question the same way.
+static void append_led_effect_status(json& status_obj, const json& objects,
+                                     const MoonrakerClientMock* self) {
+    for (auto it = objects.begin(); it != objects.end(); ++it) {
+        if (it.key().rfind("led_effect ", 0) == 0) {
+            status_obj[it.key()] = {{"enabled", self->led_effect_enabled(it.key())},
+                                    {"run_complete", false},
+                                    {"frame_rate", 24.0}};
+        }
+    }
+}
+
 json get_mock_gcode_macro_config() {
     json cfg;
+    const auto padded = helix::sim::mock_padded_macro_names();
+    for (size_t i = 0; i < padded.size(); i++) {
+        json& entry = cfg["gcode_macro " + padded[i]];
+        entry["gcode"] = "G28";
+        if (i % 3 == 0) {
+            entry["description"] = "Padded mock macro with a description long enough to wrap "
+                                   "onto a second line of its row";
+        }
+    }
     cfg["gcode_macro clean_nozzle"] = {
         {"gcode", "{% set PURGE_LEN = params.PURGE_LEN|default(10)|float %}\n"
                   "{% set PURGE_TEMP = params.PURGE_TEMP|default(240)|int %}\nG1 ..."},
@@ -72,9 +144,20 @@ json get_mock_accel_config() {
     return {{"adxl345", json::object()}, {"resonance_tester", json::object()}};
 }
 
-json get_mock_probe_config() {
+std::string mock_probe_type(helix::mock::PrinterType type) {
     const char* probe_env = std::getenv("HELIX_MOCK_PROBE_TYPE");
-    const std::string probe_type = (probe_env && probe_env[0]) ? probe_env : "cartographer";
+    if (probe_env && probe_env[0]) {
+        return probe_env;
+    }
+    if (helix::mock::inherits_default(type, helix::mock::default_object::CARTOGRAPHER)) {
+        return "cartographer";
+    }
+    const std::string_view own = helix::mock::descriptor(type).probe;
+    return own.empty() ? "none" : std::string(own);
+}
+
+json get_mock_probe_config(helix::mock::PrinterType type) {
+    const std::string probe_type = mock_probe_type(type);
 
     json cfg = json::object();
     if (probe_type == "none") {
@@ -91,6 +174,8 @@ json get_mock_probe_config() {
         // Status reports z_offset: null for this one — the config is the only
         // place the persisted offset exists.
         cfg["probe"] = {{"z_offset", "-0.185"}, {"speed", "5"}};
+    } else if (probe_type == "load_cell_probe") {
+        cfg["load_cell_probe"] = {{"z_offset", "0.000"}, {"speed", "5"}};
     } else {
         // tap, klicky, standard, ... → generic [probe]
         cfg["probe"] = {{"z_offset", "-0.250"}, {"speed", "5"}};
@@ -114,8 +199,23 @@ json get_mock_mmu_status() {
             {"gate_status", {1, 0, 2, 1}},
             {"gate_color_rgb", {0xFF0000, 0x00FF00, 0x0000FF, 0xFFFF00}},
             {"gate_material", {"PLA", "PETG", "ABS", "TPU"}},
+            {"gate_vendor", {"Polymaker", "eSUN", "", "Overture"}},
             {"ttg_map", {0, 1, 2, 3}},
-            {"endless_spool_groups", {0, 0, 1, 1}}};
+            {"endless_spool_groups", {0, 0, 1, 1}},
+            {"flowguard",
+             {{"enabled", true},
+              {"active", true},
+              {"trigger", ""},
+              {"reason", ""},
+              {"level", 0.15},
+              {"max_clog", 0.2},
+              {"max_tangle", -0.3}}},
+            {"tangle_prevention",
+             {{"enabled", true},
+              {"active", false},
+              {"boosted", false},
+              {"threshold", 0.6},
+              {"release", 0.3}}}};
 }
 
 void register_object_handlers(std::unordered_map<std::string, MethodHandler>& registry) {
@@ -166,6 +266,8 @@ void register_object_handlers(std::unordered_map<std::string, MethodHandler>& re
            std::function<void(const MoonrakerError&)> error_cb) -> bool {
         (void)error_cb;
         json status_obj = json::object();
+        // Volume the persona reports through configfile settings and toolhead.
+        const auto axis_max = helix::mock::descriptor(self->get_printer_type()).axis_max;
 
         // Check what objects are being queried
         if (params.contains("objects")) {
@@ -223,7 +325,7 @@ void register_object_handlers(std::unordered_map<std::string, MethodHandler>& re
             // configfile (for update_safety_limits_from_printer + input shaper config)
             if (objects.contains("configfile")) {
                 // Build config section with input_shaper if configured
-                json config_section = {};
+                json config_section = {{"printer", {{"kinematics", self->kinematics()}}}};
 
                 // Accelerometer. The subscribe handler below and
                 // populate_capabilities() both already report it; without it
@@ -244,26 +346,14 @@ void register_object_handlers(std::unordered_map<std::string, MethodHandler>& re
                                                         {"speed", "50"},
                                                         {"horizontal_move_z", "10"}};
 
-                // Add LED effect configs to config section
-                config_section["led_effect breathing"] = {{"leds", "neopixel:chamber_light"},
-                                                          {"autostart", "false"},
-                                                          {"frame_rate", "24"}};
-                config_section["led_effect fire_comet"] = {
-                    {"leds", "neopixel:chamber_light (1-10)"},
-                    {"autostart", "false"},
-                    {"frame_rate", "24"}};
-                config_section["led_effect rainbow"] = {
-                    {"leds", "neopixel:status_led"}, {"autostart", "false"}, {"frame_rate", "24"}};
-                config_section["led_effect static_white"] = {{"leds", "neopixel:chamber_light"},
-                                                             {"autostart", "false"},
-                                                             {"frame_rate", "24"}};
+                config_section.merge_patch(led_effect_configfile_sections(self));
 
                 // Gcode macro templates for param detection testing
                 config_section.merge_patch(get_mock_gcode_macro_config());
 
                 // Probe section — where ProbeSensorManager::discover_from_config()
                 // reads z_offset from on the real discovery path.
-                config_section.merge_patch(get_mock_probe_config());
+                config_section.merge_patch(get_mock_probe_config(self->get_printer_type()));
 
                 // Build extruder settings based on HELIX_MOCK_KALICO env var
                 json extruder_settings = {
@@ -283,7 +373,7 @@ void register_object_handlers(std::unordered_map<std::string, MethodHandler>& re
                 // Probe-equipped printers (endstop_pin: probe:z_virtual_endstop)
                 // get a JSON null here rather than a number — see
                 // set_stepper_z_endstop_null().
-                json stepper_z_settings = {{"position_min", 0.0}, {"position_max", MOCK_BED_Z_MAX}};
+                json stepper_z_settings = {{"position_min", 0.0}, {"position_max", axis_max.z}};
                 if (self->is_stepper_z_endstop_null()) {
                     stepper_z_settings["position_endstop"] = nullptr;
                 } else {
@@ -292,11 +382,17 @@ void register_object_handlers(std::unordered_map<std::string, MethodHandler>& re
 
                 status_obj["configfile"] = {
                     {"settings",
-                     {{"printer", {{"max_velocity", 500.0}, {"max_accel", 10000.0}}},
+                     {{"printer",
+                       {{"max_velocity", 500.0},
+                        {"max_accel", 10000.0},
+                        // Same kinematics the config payload reports, so a
+                        // settings reader (belt hardware detect) and a config
+                        // reader (bed moves detection) see the same machine.
+                        {"kinematics", self->kinematics()}}},
                       {"stepper_x",
-                       {{"position_min", MOCK_BED_X_MIN}, {"position_max", MOCK_BED_X_MAX}}},
+                       {{"position_min", MOCK_BED_X_MIN}, {"position_max", axis_max.x}}},
                       {"stepper_y",
-                       {{"position_min", MOCK_BED_Y_MIN}, {"position_max", MOCK_BED_Y_MAX}}},
+                       {{"position_min", MOCK_BED_Y_MIN}, {"position_max", axis_max.y}}},
                       {"stepper_z", stepper_z_settings},
                       {"extruder", extruder_settings},
                       // Resonance sweep bounds — the input shaper collector
@@ -306,7 +402,7 @@ void register_object_handlers(std::unordered_map<std::string, MethodHandler>& re
                        {{"min_freq", self->get_resonance_min_freq()},
                         {"max_freq", self->get_resonance_max_freq()},
                         {"accel_per_hz", 75.0},
-                        {"hz_per_sec", 1.0}}},
+                        {"hz_per_sec", self->get_resonance_hz_per_sec()}}},
                       // Bed screw geometry — the screws-tilt panel reads
                       // screw_thread from here to size its level tolerance.
                       {"screws_tilt_adjust",
@@ -326,7 +422,19 @@ void register_object_handlers(std::unordered_map<std::string, MethodHandler>& re
                 // dragonbreath trio's max_temp 75 from HELIX_MOCK_OBJECTS.
                 const json chamber_sections = chamber_heater_configfile_sections(self);
                 status_obj["configfile"]["settings"].merge_patch(chamber_sections);
+                // Klipper lists every gcode_macro in settings too, with its gcode
+                // text; the macro call-graph analyzers read them from there.
+                status_obj["configfile"]["settings"].merge_patch(get_mock_gcode_macro_config());
+                const json skip_sections = self->skip_wrapper_sections();
+                status_obj["configfile"]["settings"].merge_patch(skip_sections);
+                status_obj["configfile"]["config"].merge_patch(skip_sections);
                 status_obj["configfile"]["config"].merge_patch(chamber_sections);
+                for (const auto& [name, settings] : self->extra_config_settings().items()) {
+                    status_obj["configfile"]["settings"][name] = settings;
+                }
+                const json toolchanger_sections = toolchanger_configfile_sections(self);
+                status_obj["configfile"]["settings"].merge_patch(toolchanger_sections);
+                status_obj["configfile"]["config"].merge_patch(toolchanger_sections);
 
                 // Whether a SAVE_CONFIG is owed, and for what. Klipper publishes
                 // these on configfile itself, not under settings/config, and
@@ -344,18 +452,24 @@ void register_object_handlers(std::unordered_map<std::string, MethodHandler>& re
                 }
             }
 
+            // bed_mesh (stored profiles, read around a mesh calibration)
+            if (objects.contains("bed_mesh")) {
+                status_obj["bed_mesh"] = self->bed_mesh_status();
+            }
+
             // toolhead (for get_machine_limits)
             if (objects.contains("toolhead")) {
-                status_obj["toolhead"] = {{"max_velocity", 500.0},
-                                          {"max_accel", 10000.0},
-                                          {"max_accel_to_decel", 5000.0},
-                                          {"square_corner_velocity", 5.0},
-                                          {"max_z_velocity", 40.0},
-                                          {"max_z_accel", 1000.0},
-                                          {"position", {0.0, 0.0, 0.0, 0.0}},
-                                          {"axis_minimum", {0.0, 0.0, 0.0, 0.0}},
-                                          {"axis_maximum", {235.0, 235.0, 250.0, 0.0}},
-                                          {"homed_axes", "xyz"}};
+                status_obj["toolhead"] = {
+                    {"max_velocity", 500.0},
+                    {"max_accel", 10000.0},
+                    {"max_accel_to_decel", 5000.0},
+                    {"square_corner_velocity", 5.0},
+                    {"max_z_velocity", 40.0},
+                    {"max_z_accel", 1000.0},
+                    {"position", {0.0, 0.0, 0.0, 0.0}},
+                    {"axis_minimum", {0.0, 0.0, 0.0, 0.0}},
+                    {"axis_maximum", {axis_max.x, axis_max.y, axis_max.z, 0.0}},
+                    {"homed_axes", self->get_homed_axes()}};
             }
 
             // stepper_enable (for motors_enabled state - immediate response to M84)
@@ -400,6 +514,15 @@ void register_object_handlers(std::unordered_map<std::string, MethodHandler>& re
                     status_obj["medusahc"] = medusa;
                 }
             }
+            // OpenAMS (HELIX_MOCK_AMS=openams): the claim query and the
+            // subscribe snapshot both read the manager's status.
+            if (objects.contains("oams_manager") && self->is_mock_openams()) {
+                status_obj["oams_manager"] = self->openams_status_json();
+            }
+            // Z-Mod's colour registry (creator5_zmod persona).
+            if (objects.contains("zmod_color")) {
+                status_obj["zmod_color"] = self->zmod_color_status();
+            }
             for (auto it = objects.begin(); it != objects.end(); ++it) {
                 if (it.key() != "pin_watch" && it.key().rfind("pin_watch ", 0) != 0) {
                     continue;
@@ -429,7 +552,7 @@ void register_object_handlers(std::unordered_map<std::string, MethodHandler>& re
             // Per-tool objects. Needed here and not only in subscribe: the
             // subscribe snapshot lands before ToolState has built its tool list
             // and is dropped, so ToolState re-asks through this path once the
-            // tools exist (ToolState::query_tool_z_offsets).
+            // tools exist (ToolState::query_tool_offsets).
             for (auto it = objects.begin(); it != objects.end(); ++it) {
                 const std::string& key = it.key();
                 if (key.rfind("tool ", 0) != 0) {
@@ -441,7 +564,29 @@ void register_object_handlers(std::unordered_map<std::string, MethodHandler>& re
                     std::isdigit(static_cast<unsigned char>(tool_suffix[1]))) {
                     tool_number = tool_suffix[1] - '0';
                 }
-                status_obj[key] = {{"gcode_z_offset", self->tool_z_offset(tool_number)}};
+                status_obj[key] = {
+                    {"gcode_x_offset", self->tool_offset(tool_number, helix::Axis::X)},
+                    {"gcode_y_offset", self->tool_offset(tool_number, helix::Axis::Y)},
+                    {"gcode_z_offset", self->tool_offset(tool_number, helix::Axis::Z)}};
+            }
+
+            // LED effect objects (enabled state of the SET_LED_EFFECT model)
+            append_led_effect_status(status_obj, objects, self);
+
+            // HELIX_MOCK_SKIP_WRAPPERS: the skip flags and leveling `applied`.
+            const json wrapper_status = self->skip_wrapper_status();
+            for (const auto& [name, status] : wrapper_status.items()) {
+                if (objects.contains(name)) {
+                    status_obj[name] = status;
+                }
+            }
+
+            // Test-set status objects (set_object_status()): served only when
+            // the query asks for the object, like every branch above.
+            for (const auto& [name, status] : self->object_status_overrides().items()) {
+                if (objects.contains(name)) {
+                    status_obj[name] = status;
+                }
             }
         }
 
@@ -467,6 +612,8 @@ void register_object_handlers(std::unordered_map<std::string, MethodHandler>& re
             std::chrono::duration_cast<std::chrono::microseconds>(epoch).count() / 1000000.0;
 
         json status_obj = json::object();
+        // Volume the persona reports through configfile settings and toolhead.
+        const auto axis_max = helix::mock::descriptor(self->get_printer_type()).axis_max;
 
         // Check what objects are being subscribed to
         if (params.contains("objects")) {
@@ -567,17 +714,18 @@ void register_object_handlers(std::unordered_map<std::string, MethodHandler>& re
 
             // toolhead
             if (objects.contains("toolhead")) {
-                status_obj["toolhead"] = {{"max_velocity", 500.0},
-                                          {"max_accel", 10000.0},
-                                          {"max_accel_to_decel", 5000.0},
-                                          {"square_corner_velocity", 5.0},
-                                          {"position", {0.0, 0.0, 0.0, 0.0}},
-                                          {"axis_minimum", {0.0, 0.0, 0.0, 0.0}},
-                                          {"axis_maximum", {235.0, 235.0, 250.0, 0.0}},
-                                          {"homed_axes", "xyz"},
-                                          {"print_time", 0.0},
-                                          {"estimated_print_time", 0.0},
-                                          {"extruder", "extruder"}};
+                status_obj["toolhead"] = {
+                    {"max_velocity", 500.0},
+                    {"max_accel", 10000.0},
+                    {"max_accel_to_decel", 5000.0},
+                    {"square_corner_velocity", 5.0},
+                    {"position", {0.0, 0.0, 0.0, 0.0}},
+                    {"axis_minimum", {0.0, 0.0, 0.0, 0.0}},
+                    {"axis_maximum", {axis_max.x, axis_max.y, axis_max.z, 0.0}},
+                    {"homed_axes", self->get_homed_axes()},
+                    {"print_time", 0.0},
+                    {"estimated_print_time", 0.0},
+                    {"extruder", "extruder"}};
             }
 
             // virtual_sdcard
@@ -621,6 +769,11 @@ void register_object_handlers(std::unordered_map<std::string, MethodHandler>& re
                 status_obj["mmu"] = get_mock_mmu_status();
             }
 
+            // OpenAMS (HELIX_MOCK_AMS=openams): the subscribe snapshot.
+            if (objects.contains("oams_manager") && self->is_mock_openams()) {
+                status_obj["oams_manager"] = self->openams_status_json();
+            }
+
             // MedusaHC (HELIX_MOCK_AMS=medusahc[-fork]). Emitted only for
             // the objects this variant actually ships, so a consumer that reads
             // the wrong schema finds nothing rather than a convenient default.
@@ -628,6 +781,10 @@ void register_object_handlers(std::unordered_map<std::string, MethodHandler>& re
                 if (auto medusa = self->medusa_status_json(); !medusa.empty()) {
                     status_obj["medusahc"] = medusa;
                 }
+            }
+            // Z-Mod's colour registry (creator5_zmod persona).
+            if (objects.contains("zmod_color")) {
+                status_obj["zmod_color"] = self->zmod_color_status();
             }
             for (auto it = objects.begin(); it != objects.end(); ++it) {
                 if (it.key() != "pin_watch" && it.key().rfind("pin_watch ", 0) != 0) {
@@ -652,8 +809,14 @@ void register_object_handlers(std::unordered_map<std::string, MethodHandler>& re
             for (auto it = objects.begin(); it != objects.end(); ++it) {
                 if (it.key().rfind("filament_switch_sensor ", 0) == 0 ||
                     it.key().rfind("filament_motion_sensor ", 0) == 0) {
+                    // The K2 Plus's toolhead switch follows the loaded bay.
+                    const bool detected = it.key() == "filament_switch_sensor filament_sensor" &&
+                                                  self->get_printer_type() ==
+                                                      helix::mock::PrinterType::CREALITY_K2_PLUS
+                                              ? self->cfs_toolhead_filament_detected()
+                                              : true;
                     status_obj[it.key()] = {
-                        {"filament_detected", true}, {"enabled", true}, {"detection_count", 0}};
+                        {"filament_detected", detected}, {"enabled", true}, {"detection_count", 0}};
                 }
             }
 
@@ -686,19 +849,20 @@ void register_object_handlers(std::unordered_map<std::string, MethodHandler>& re
                         std::isdigit(static_cast<unsigned char>(tool_suffix[1]))) {
                         tool_number = tool_suffix[1] - '0';
                     }
-                    status_obj[it.key()] = {{"active", false},
-                                            {"mounted", true},
-                                            {"detect_state", "OK"},
-                                            {"gcode_x_offset", 0.0},
-                                            {"gcode_y_offset", 0.0},
-                                            // Distinct per tool, and live: a
-                                            // SET_TOOL_PARAMETER earlier in the
-                                            // session must be reflected here,
-                                            // or a reconnect would silently
-                                            // revert what the user set.
-                                            {"gcode_z_offset", self->tool_z_offset(tool_number)},
-                                            {"extruder", extruder_for_tool},
-                                            {"fan", "fan"}};
+                    status_obj[it.key()] = {
+                        {"active", false},
+                        {"mounted", true},
+                        {"detect_state", "OK"},
+                        // Distinct per tool and axis, and
+                        // live: a SET_TOOL_PARAMETER earlier
+                        // in the session must be reflected
+                        // here, or a reconnect would
+                        // silently revert what the user set.
+                        {"gcode_x_offset", self->tool_offset(tool_number, helix::Axis::X)},
+                        {"gcode_y_offset", self->tool_offset(tool_number, helix::Axis::Y)},
+                        {"gcode_z_offset", self->tool_offset(tool_number, helix::Axis::Z)},
+                        {"extruder", extruder_for_tool},
+                        {"fan", "fan"}};
                 }
             }
 
@@ -752,10 +916,13 @@ void register_object_handlers(std::unordered_map<std::string, MethodHandler>& re
             }
 
             // LED effect objects (for tracking enabled state)
-            for (auto it = objects.begin(); it != objects.end(); ++it) {
-                if (it.key().rfind("led_effect ", 0) == 0) {
-                    status_obj[it.key()] = {
-                        {"enabled", false}, {"run_complete", false}, {"frame_rate", 24.0}};
+            append_led_effect_status(status_obj, objects, self);
+
+            // HELIX_MOCK_SKIP_WRAPPERS: the skip flags and leveling `applied`.
+            const json wrapper_status = self->skip_wrapper_status();
+            for (const auto& [name, status] : wrapper_status.items()) {
+                if (objects.contains(name)) {
+                    status_obj[name] = status;
                 }
             }
 
@@ -776,21 +943,27 @@ void register_object_handlers(std::unordered_map<std::string, MethodHandler>& re
 
                 status_obj["configfile"] = {
                     {"settings",
-                     {{"printer", {{"max_velocity", 500.0}, {"max_accel", 10000.0}}},
+                     {{"printer",
+                       {{"max_velocity", 500.0},
+                        {"max_accel", 10000.0},
+                        // Same kinematics the config payload reports, so a
+                        // settings reader (belt hardware detect) and a config
+                        // reader (bed moves detection) see the same machine.
+                        {"kinematics", self->kinematics()}}},
                       {"stepper_x",
-                       {{"position_min", MOCK_BED_X_MIN}, {"position_max", MOCK_BED_X_MAX}}},
+                       {{"position_min", MOCK_BED_X_MIN}, {"position_max", axis_max.x}}},
                       {"stepper_y",
-                       {{"position_min", MOCK_BED_Y_MIN}, {"position_max", MOCK_BED_Y_MAX}}},
+                       {{"position_min", MOCK_BED_Y_MIN}, {"position_max", axis_max.y}}},
                       {"stepper_z",
                        {{"position_min", 0.0},
-                        {"position_max", MOCK_BED_Z_MAX},
+                        {"position_max", axis_max.z},
                         {"position_endstop", 235.0}}},
                       {"extruder", extruder_settings2},
                       {"resonance_tester",
                        {{"min_freq", self->get_resonance_min_freq()},
                         {"max_freq", self->get_resonance_max_freq()},
                         {"accel_per_hz", 75.0},
-                        {"hz_per_sec", 1.0}}},
+                        {"hz_per_sec", self->get_resonance_hz_per_sec()}}},
                       {"heater_bed",
                        {{"min_temp", 0.0},
                         {"max_temp", 120.0},
@@ -801,25 +974,14 @@ void register_object_handlers(std::unordered_map<std::string, MethodHandler>& re
                     // config section contains raw Klipper config keys (used for sensor discovery)
                     {"config", [&]() {
                          json cfg = get_mock_accel_config();
+                         cfg["printer"] = {{"kinematics", self->kinematics()}};
                          if (self->is_input_shaper_configured()) {
                              cfg["input_shaper"] = self->build_input_shaper_config();
                          }
-                         // LED effect configs for mock testing
-                         cfg["led_effect breathing"] = {{"leds", "neopixel:chamber_light"},
-                                                        {"autostart", "false"},
-                                                        {"frame_rate", "24"}};
-                         cfg["led_effect fire_comet"] = {{"leds", "neopixel:chamber_light (1-10)"},
-                                                         {"autostart", "false"},
-                                                         {"frame_rate", "24"}};
-                         cfg["led_effect rainbow"] = {{"leds", "neopixel:status_led"},
-                                                      {"autostart", "false"},
-                                                      {"frame_rate", "24"}};
-                         cfg["led_effect static_white"] = {{"leds", "neopixel:chamber_light"},
-                                                           {"autostart", "false"},
-                                                           {"frame_rate", "24"}};
+                         cfg.merge_patch(led_effect_configfile_sections(self));
                          // Gcode macro templates for param detection testing
                          cfg.merge_patch(get_mock_gcode_macro_config());
-                         cfg.merge_patch(get_mock_probe_config());
+                         cfg.merge_patch(get_mock_probe_config(self->get_printer_type()));
                          return cfg;
                      }()}};
 
@@ -827,7 +989,19 @@ void register_object_handlers(std::unordered_map<std::string, MethodHandler>& re
                 // max_temp 75 from HELIX_MOCK_OBJECTS.
                 const json chamber_sections = chamber_heater_configfile_sections(self);
                 status_obj["configfile"]["settings"].merge_patch(chamber_sections);
+                // Klipper lists every gcode_macro in settings too, with its gcode
+                // text; the macro call-graph analyzers read them from there.
+                status_obj["configfile"]["settings"].merge_patch(get_mock_gcode_macro_config());
+                const json skip_sections = self->skip_wrapper_sections();
+                status_obj["configfile"]["settings"].merge_patch(skip_sections);
+                status_obj["configfile"]["config"].merge_patch(skip_sections);
                 status_obj["configfile"]["config"].merge_patch(chamber_sections);
+                for (const auto& [name, settings] : self->extra_config_settings().items()) {
+                    status_obj["configfile"]["settings"][name] = settings;
+                }
+                const json toolchanger_sections = toolchanger_configfile_sections(self);
+                status_obj["configfile"]["settings"].merge_patch(toolchanger_sections);
+                status_obj["configfile"]["config"].merge_patch(toolchanger_sections);
 
                 // Whether a SAVE_CONFIG is owed, and for what. Klipper publishes
                 // these on configfile itself, not under settings/config, and
@@ -853,3 +1027,57 @@ void register_object_handlers(std::unordered_map<std::string, MethodHandler>& re
 }
 
 } // namespace mock_internal
+
+namespace helix::sim {
+
+json mock_probe_status(helix::mock::PrinterType type) {
+    const std::string probe_type = mock_internal::mock_probe_type(type);
+
+    // Klipper's ProbeCommandHelper.get_status(); last_probe_position is a
+    // gcode.Coord, which pads to four elements.
+    const auto helper_status = [](const char* name, double last_z_result) {
+        return json{{"name", name},
+                    {"last_query", false},
+                    {"last_probe_position", json::array({0.0, 0.0, 0.0, 0.0})},
+                    {"last_z_result", last_z_result}};
+    };
+
+    json st = json::object();
+    if (probe_type == "none") {
+        return st;
+    }
+    if (probe_type == "cartographer") {
+        const json mode = {
+            {"current_model", "default"}, {"models", "default"}, {"last_z_result", nullptr}};
+        st["cartographer"] = {{"scan", mode},
+                              {"touch", mode},
+                              {"mcu", {{"last_sample", nullptr}, {"constants", nullptr}}}};
+        st["probe"] = {{"name", "cartographer"},
+                       {"last_query", 0},
+                       {"last_z_result", -0.425},
+                       {"last_probe_position", json::array({0.0, 0.0, 0.0, 0.0})}};
+    } else if (probe_type == "beacon") {
+        st["beacon"] = {
+            {"last_sample", nullptr},       {"last_received_sample", nullptr},
+            {"last_z_result", -0.312},      {"last_probe_position", json::array({0.0, 0.0})},
+            {"last_probe_result", nullptr}, {"last_offset_result", nullptr},
+            {"last_poke_result", nullptr},  {"model", "default"}};
+        st["probe"] = {{"name", "beacon"}};
+    } else if (probe_type == "bltouch") {
+        st["bltouch"] = helper_status("bltouch", 0.130);
+        st["probe"] = st["bltouch"];
+    } else if (probe_type == "loadcell") {
+        // No z_offset on this probe: Klipper answers the requested key with null.
+        st["probe"] = {{"last_z_result", 0.0}, {"z_offset", nullptr}};
+    } else if (probe_type == "load_cell_probe") {
+        // Mainline [load_cell_probe] registers the probe alias too.
+        st["load_cell_probe"] = helper_status("load_cell_probe", 0.0);
+        st["probe"] = st["load_cell_probe"];
+    } else {
+        // tap, klicky, standard, ... → generic [probe]
+        st["probe"] = helper_status("probe", 0.0);
+    }
+    return st;
+}
+
+} // namespace helix::sim

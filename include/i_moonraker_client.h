@@ -48,6 +48,39 @@ inline constexpr SubscriptionId INVALID_SUBSCRIPTION_ID = 0;
 inline constexpr const char* CACHED_SNAPSHOT_MARKER = "_helix_cached_snapshot";
 
 /**
+ * @brief Marker key stamped onto a synthetic notify_status_update whose payload
+ * holds every field of each object it names, as a printer.objects.subscribe
+ * response does, rather than only the fields that changed.
+ *
+ * A live frame names a field only when its value changed, so a field it carries
+ * is news. A whole-object payload repeats values the printer has held all along,
+ * which is what consumers that act on a value's arrival need to know. Set by the
+ * discovery subscription replay (also a cached snapshot) and by a subscription
+ * refresh (current, so not a cached snapshot).
+ */
+inline constexpr const char* WHOLE_OBJECTS_MARKER = "_helix_whole_objects";
+
+/**
+ * @brief Wrap a raw status object as the notify_status_update a client dispatches
+ *
+ * The inverse of parse_status_notification() (printer_state.h). A synthetic
+ * dispatch is not a Klipper frame, so its eventtime is 0.0 ("untimestamped") and
+ * provenance travels in the markers instead of being inferred from the clock.
+ */
+inline json make_status_notification(const json& status, bool from_cached_snapshot,
+                                     bool whole_objects) {
+    json notification = {{"method", "notify_status_update"},
+                         {"params", json::array({status, 0.0})}}; // [status, eventtime]
+    if (from_cached_snapshot) {
+        notification[CACHED_SNAPSHOT_MARKER] = true;
+    }
+    if (whole_objects) {
+        notification[WHOLE_OBJECTS_MARKER] = true;
+    }
+    return notification;
+}
+
+/**
  * @brief Abstract interface for the Moonraker WebSocket + JSON-RPC transport layer.
  *
  * Production and test consumers that only need polymorphic access to the Moonraker
@@ -186,7 +219,36 @@ class IMoonrakerClient {
     ///        sensitive consumers can refuse to regress on it. Defaults to false:
     ///        a dispatch that reflects the caller's current view — including every
     ///        mock-driven state change — is live.
-    virtual void dispatch_status_update(const json& status, bool from_cached_snapshot = false) = 0;
+    /// @param whole_objects true when `status` is a subscription response, carrying
+    ///        every field of each object instead of only the changed ones. Stamps
+    ///        WHOLE_OBJECTS_MARKER.
+    virtual void dispatch_status_update(const json& status, bool from_cached_snapshot = false,
+                                        bool whole_objects = false) = 0;
+
+    /// @brief Objects merged into every printer.objects.subscribe the discovery sequence sends
+    ///
+    /// The result is a printer.objects.subscribe objects map (object name to null or an array
+    /// of field names). It is unioned into the app's map and can never narrow it.
+    ///
+    /// Provider contract:
+    /// - It runs on the WebSocket thread (discovery and every reconnect) and on whichever
+    ///   thread calls refresh_subscription(), while the client holds an internal mutex.
+    /// - It returns a snapshot guarded by its own lock. It must not touch Lua, PluginHost,
+    ///   LVGL or the UpdateQueue, and must not call back into this client.
+    /// - It must not take a lock that a thread clearing the provider holds at that moment,
+    ///   or the clear deadlocks.
+    /// - Lifetime: the owner clears it with an empty function before anything it captures
+    ///   dies (the client outlives PluginHost). Once that call returns, the old provider is
+    ///   not running and is never called again.
+    virtual void set_subscription_extras_provider(std::function<json()> provider) = 0;
+
+    /// @brief Re-send printer.objects.subscribe with the app objects merged with current extras
+    ///
+    /// Safe from any thread and cheap when nothing changed. A call made while no refresh can
+    /// be sent (before this connection's discovery subscribe completes, or while a refresh is
+    /// in flight) is remembered and re-checked once that settles. While disconnected it does
+    /// nothing; the next connection's discovery subscribes the current extras.
+    virtual void refresh_subscription() = 0;
 
     // ========================================================================
     // Connection State & Observers
@@ -260,6 +322,10 @@ class IMoonrakerClient {
 
     /// @brief Get lifetime guard for safe destructor-aware captures
     virtual std::weak_ptr<bool> lifetime_weak() const = 0;
+
+    /// @brief Counter bumped by every connect, so a cached per-connection
+    /// answer can tell it belongs to an earlier connection.
+    virtual uint64_t connection_generation() const = 0;
 };
 
 /**

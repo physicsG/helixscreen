@@ -171,7 +171,7 @@ HelixScreen is an **add-on** to existing Klipper installations. We don't ship cu
 
 3. **Run installer:**
    ```bash
-   curl -sSL https://raw.githubusercontent.com/prestonbrown/helixscreen/main/scripts/install.sh | sh
+   curl -sSL https://releases.helixscreen.org/install.sh | sh
    ```
 
 4. **Verify installation:**
@@ -207,7 +207,7 @@ HelixScreen is an **add-on** to existing Klipper installations. We don't ship cu
 
 1. **With existing HelixScreen installed, run:**
    ```bash
-   curl -sSL https://raw.githubusercontent.com/prestonbrown/helixscreen/main/scripts/install.sh | sh -s -- --update
+   curl -sSL https://releases.helixscreen.org/install.sh | sh -s -- --update
    ```
 
 2. **Verify config preserved:**
@@ -222,7 +222,7 @@ HelixScreen is an **add-on** to existing Klipper installations. We don't ship cu
 
 1. **Run uninstaller:**
    ```bash
-   curl -sSL https://raw.githubusercontent.com/prestonbrown/helixscreen/main/scripts/install.sh | sh -s -- --uninstall
+   curl -sSL https://releases.helixscreen.org/install.sh | sh -s -- --uninstall
    ```
 
 2. **Verify removal:**
@@ -285,7 +285,7 @@ ps --no-headers -o comm 1
    # On your computer (replace vX.Y.Z with actual version):
    VERSION=vX.Y.Z
    wget "https://github.com/prestonbrown/helixscreen/releases/download/${VERSION}/helixscreen-ad5m.zip"
-   wget https://raw.githubusercontent.com/prestonbrown/helixscreen/main/scripts/install.sh
+   wget https://releases.helixscreen.org/install.sh
    # Windows users: use WSL, WinSCP (SCP protocol), or PuTTY's pscp instead of scp -O
    scp -O helixscreen-ad5m.zip install.sh root@<printer-ip>:/data/
    ```
@@ -346,7 +346,7 @@ ps --no-headers -o comm 1
    # On your computer (replace vX.Y.Z with actual version):
    VERSION=vX.Y.Z
    wget "https://github.com/prestonbrown/helixscreen/releases/download/${VERSION}/helixscreen-ad5m.zip"
-   wget https://raw.githubusercontent.com/prestonbrown/helixscreen/main/scripts/install.sh
+   wget https://releases.helixscreen.org/install.sh
    # Windows users: use WSL, WinSCP (SCP protocol), or PuTTY's pscp instead of scp -O
    scp -O helixscreen-ad5m.zip install.sh root@<printer-ip>:/data/
    ```
@@ -408,7 +408,7 @@ ps --no-headers -o comm 1
    # On your computer (replace vX.Y.Z with actual version):
    VERSION=vX.Y.Z
    wget "https://github.com/prestonbrown/helixscreen/releases/download/${VERSION}/helixscreen-ad5m.zip"
-   wget https://raw.githubusercontent.com/prestonbrown/helixscreen/main/scripts/install.sh
+   wget https://releases.helixscreen.org/install.sh
    # Windows users: use WSL, WinSCP (SCP protocol), or PuTTY's pscp instead of scp -O
    scp -O helixscreen-ad5m.zip install.sh root@<printer-ip>:/mnt/data/
    ```
@@ -495,7 +495,7 @@ ps --no-headers -o comm 1
 
 3. **Run installer:**
    ```bash
-   curl -sSL https://raw.githubusercontent.com/prestonbrown/helixscreen/main/scripts/install.sh | sh
+   curl -sSL https://releases.helixscreen.org/install.sh | sh
    ```
 
 4. **Verify installation:**
@@ -535,7 +535,7 @@ ps --no-headers -o comm 1
 
 1. **Run with --update:**
    ```bash
-   curl -sSL https://raw.githubusercontent.com/prestonbrown/helixscreen/main/scripts/install.sh | sh -s -- --update
+   curl -sSL https://releases.helixscreen.org/install.sh | sh -s -- --update
    ```
 
 2. **Verify config preserved:**
@@ -547,7 +547,7 @@ ps --no-headers -o comm 1
 
 1. **Run uninstaller:**
    ```bash
-   curl -sSL https://raw.githubusercontent.com/prestonbrown/helixscreen/main/scripts/install.sh | sh -s -- --uninstall
+   curl -sSL https://releases.helixscreen.org/install.sh | sh -s -- --uninstall
    ```
 
 2. **Verify removal and GuppyScreen restoration:**
@@ -631,7 +631,7 @@ Run through this checklist after installation on each platform:
 | Issue | Workaround |
 |-------|------------|
 | Wizard keeps appearing | Check settings.json exists and has valid JSON |
-| Touch offset | Use Settings → Touch Calibration |
+| Touch offset | Use Settings → Touch & Input → Touch Calibration |
 
 ### Pi-Specific
 

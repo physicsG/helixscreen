@@ -3,6 +3,7 @@
 #include "tools_used_cache.h"
 
 #include "app_globals.h"
+#include "json_utils.h"
 
 #include <spdlog/spdlog.h>
 
@@ -36,66 +37,61 @@ bool ToolsUsedCache::load_from_disk() {
     }
     std::fclose(f);
 
-    try {
-        const auto j = nlohmann::json::parse(data);
-        const auto it = j.find("entries");
-        if (it == j.end() || !it->is_object()) {
-            return false;
-        }
-        for (auto entry = it->begin(); entry != it->end(); ++entry) {
-            const auto& e = entry.value();
-            if (!e.is_object() || !e.contains("size") || !e.contains("mtime") ||
-                !e["size"].is_number() || !e["mtime"].is_number() || !e.contains("tools") ||
-                !e["tools"].is_array()) {
-                continue; // drop malformed entry, keep the rest
-            }
-            Entry parsed;
-            parsed.size_bytes = e["size"].get<uint64_t>();
-            parsed.modified = static_cast<time_t>(e["mtime"].get<int64_t>());
-            bool ok = true;
-            for (const auto& t : e["tools"]) {
-                if (!t.is_number() || t.get<int64_t>() < 0) {
-                    ok = false;
-                    break;
-                }
-                parsed.tools.insert(static_cast<int>(t.get<int64_t>()));
-            }
-            if (ok) {
-                parsed.last_used_ctr = next_ctr_++;
-                entries_[entry.key()] = std::move(parsed);
-            }
-        }
-        return true;
-    } catch (const std::exception& ex) {
-        spdlog::warn("[ToolsUsedCache] Corrupt cache file, starting cold: {}", ex.what());
+    const auto j = nlohmann::json::parse(data, nullptr, false);
+    if (j.is_discarded()) {
+        spdlog::warn("[ToolsUsedCache] Corrupt cache file, starting cold: not valid JSON");
         entries_.clear();
         return false;
     }
+    const auto it = j.find("entries");
+    if (it == j.end() || !it->is_object()) {
+        return false;
+    }
+    for (auto entry = it->begin(); entry != it->end(); ++entry) {
+        const auto& e = entry.value();
+        if (!e.is_object() || !e.contains("size") || !e.contains("mtime") ||
+            !e["size"].is_number() || !e["mtime"].is_number() || !e.contains("tools") ||
+            !e["tools"].is_array()) {
+            continue; // drop malformed entry, keep the rest
+        }
+        Entry parsed;
+        parsed.size_bytes = e["size"].get<uint64_t>();
+        parsed.modified = static_cast<time_t>(e["mtime"].get<int64_t>());
+        bool ok = true;
+        for (const auto& t : e["tools"]) {
+            if (!t.is_number() || t.get<int64_t>() < 0) {
+                ok = false;
+                break;
+            }
+            parsed.tools.insert(static_cast<int>(t.get<int64_t>()));
+        }
+        if (ok) {
+            parsed.last_used_ctr = next_ctr_++;
+            entries_[entry.key()] = std::move(parsed);
+        }
+    }
+    return true;
 }
 
 void ToolsUsedCache::save_to_disk() {
-    try {
-        nlohmann::json j = {{"v", 1}, {"entries", nlohmann::json::object()}};
-        for (const auto& [key, e] : entries_) {
-            nlohmann::json tools = nlohmann::json::array();
-            for (int t : e.tools)
-                tools.push_back(t);
-            j["entries"][key] = {{"size", e.size_bytes},
-                                 {"mtime", static_cast<int64_t>(e.modified)},
-                                 {"tools", std::move(tools)}};
-        }
-        const std::string path = cache_file_path();
-        FILE* f = std::fopen(path.c_str(), "wb");
-        if (!f) {
-            spdlog::warn("[ToolsUsedCache] Cannot write {}", path);
-            return;
-        }
-        const std::string out = j.dump();
-        std::fwrite(out.data(), 1, out.size(), f);
-        std::fclose(f);
-    } catch (const std::exception& ex) {
-        spdlog::warn("[ToolsUsedCache] Save failed: {}", ex.what());
+    nlohmann::json j = {{"v", 1}, {"entries", nlohmann::json::object()}};
+    for (const auto& [key, e] : entries_) {
+        nlohmann::json tools = nlohmann::json::array();
+        for (int t : e.tools)
+            tools.push_back(t);
+        j["entries"][key] = {{"size", e.size_bytes},
+                             {"mtime", static_cast<int64_t>(e.modified)},
+                             {"tools", std::move(tools)}};
     }
+    const std::string path = cache_file_path();
+    FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) {
+        spdlog::warn("[ToolsUsedCache] Cannot write {}", path);
+        return;
+    }
+    const std::string out = helix::json_util::safe_dump(j);
+    std::fwrite(out.data(), 1, out.size(), f);
+    std::fclose(f);
 }
 
 std::optional<std::set<int>> ToolsUsedCache::lookup(const std::string& file_path,

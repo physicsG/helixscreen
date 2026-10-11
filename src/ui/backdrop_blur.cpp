@@ -5,13 +5,15 @@
 
 #include "config.h"
 #include "data_root_resolver.h"
+#include "helix_fs.h"
+#include "lv_draw_buf_guard.h"
+#include "lvgl/src/misc/cache/instance/lv_image_cache.h" // not exported by lvgl.h
+#include "text_io.h"
 
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <cstring>
-#include <filesystem>
-#include <fstream>
 #include <vector>
 
 #ifdef ENABLE_GLES_3D
@@ -31,11 +33,22 @@
 
 namespace helix::ui {
 
+namespace hfs = fs;
+
 // ============================================================================
 // Circuit Breaker
 // ============================================================================
 
 static bool s_blur_disabled = false;
+
+// The ESP32 has 8MB of PSRAM for everything, and a full-frame RGB565 snapshot is
+// 768KB at 800x480: enough to starve the print thumbnail decode, all to show a
+// dimmed copy of the navbar. A dim layer shows the same thing for free.
+#ifdef ESP_PLATFORM
+static bool s_snapshot_backdrops = false;
+#else
+static bool s_snapshot_backdrops = true;
+#endif
 
 namespace detail {
 
@@ -45,6 +58,14 @@ void reset_circuit_breaker() {
 
 bool is_blur_disabled() {
     return s_blur_disabled;
+}
+
+bool snapshot_backdrops_enabled() {
+    return s_snapshot_backdrops;
+}
+
+void set_snapshot_backdrops_enabled(bool enabled) {
+    s_snapshot_backdrops = enabled;
 }
 
 } // namespace detail
@@ -167,6 +188,23 @@ void darken_argb8888_inplace(uint8_t* data, int width, int height, int stride,
     }
 }
 
+void darken_rgb565_inplace(uint8_t* data, int width, int height, int stride, lv_opa_t dim_opacity) {
+    if (!data || width < 1 || height < 1) {
+        return;
+    }
+    const uint32_t scale = 255 - dim_opacity;
+    for (int y = 0; y < height; y++) {
+        auto* row = reinterpret_cast<uint16_t*>(data + y * stride);
+        for (int x = 0; x < width; x++) {
+            const uint32_t px = row[x];
+            const uint32_t r = (((px >> 11) & 0x1F) * scale) / 255;
+            const uint32_t g = (((px >> 5) & 0x3F) * scale) / 255;
+            const uint32_t b = ((px & 0x1F) * scale) / 255;
+            row[x] = static_cast<uint16_t>((r << 11) | (g << 5) | b);
+        }
+    }
+}
+
 } // namespace detail
 
 // ============================================================================
@@ -184,6 +222,9 @@ struct GpuBlurState {
     EGLSurface surface = EGL_NO_SURFACE;
     struct gbm_device* gbm = nullptr;
     int drm_fd = -1;
+    // False when display is the display backend's own EGLDisplay: blur only
+    // adds a context to it, and terminating it would take the screen with it.
+    bool owns_display = true;
 
     GLuint program = 0;
     GLuint vbo = 0;
@@ -266,7 +307,56 @@ static GLuint compile_shader(GLenum type, const char* source) {
     return shader;
 }
 
-static bool init_gpu_blur() {
+// Create the blur context on an initialized display and make it current.
+// Returns false with nothing left allocated on @p display.
+static bool create_blur_context(EGLDisplay display) {
+    eglBindAPI(EGL_OPENGL_ES_API);
+
+    EGLint config_attribs[] = {EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, EGL_NONE};
+    EGLConfig config;
+    EGLint num_configs;
+    if (!eglChooseConfig(display, config_attribs, &config, 1, &num_configs) || num_configs == 0) {
+        return false;
+    }
+
+    EGLint ctx_attribs[] = {EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE};
+    auto context = eglCreateContext(display, config, EGL_NO_CONTEXT, ctx_attribs);
+    if (context == EGL_NO_CONTEXT) {
+        return false;
+    }
+
+    // Try surfaceless first, then PBuffer
+    EGLSurface egl_surface = EGL_NO_SURFACE;
+    const char* exts = eglQueryString(display, EGL_EXTENSIONS);
+    bool has_surfaceless = exts && strstr(exts, "EGL_KHR_surfaceless_context") != nullptr;
+
+    if (has_surfaceless) {
+        if (!eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, context)) {
+            has_surfaceless = false;
+        }
+    }
+
+    if (!has_surfaceless) {
+        EGLint pbuf_attribs[] = {EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE};
+        egl_surface = eglCreatePbufferSurface(display, config, pbuf_attribs);
+        if (egl_surface == EGL_NO_SURFACE ||
+            !eglMakeCurrent(display, egl_surface, egl_surface, context)) {
+            if (egl_surface != EGL_NO_SURFACE)
+                eglDestroySurface(display, egl_surface);
+            eglDestroyContext(display, context);
+            return false;
+        }
+    }
+
+    s_gpu.display = display;
+    s_gpu.context = context;
+    s_gpu.surface = egl_surface;
+    return true;
+}
+
+// @p current_display is the caller's bound EGLDisplay (the display backend's,
+// on an EGL screen), or EGL_NO_DISPLAY.
+static bool init_gpu_blur(EGLDisplay current_display) {
     if (s_gpu.initialized)
         return true;
 
@@ -290,9 +380,7 @@ static bool init_gpu_blur() {
     // on the next launch.
     const std::string guard_path = helix::writable_path("gpu_blur_guard");
     {
-        std::ofstream guard(guard_path, std::ios::out | std::ios::trunc);
-        if (guard.is_open()) {
-            guard << "1";
+        if (helix::text_io::write_file(guard_path, "1")) {
             spdlog::debug("[Backdrop Blur] Armed GPU crash-loop guard: {}", guard_path);
         } else {
             spdlog::warn("[Backdrop Blur] Could not write GPU crash-loop guard: {}", guard_path);
@@ -307,12 +395,27 @@ static bool init_gpu_blur() {
     struct GuardCleaner {
         const std::string& path;
         ~GuardCleaner() {
-            std::error_code ec;
-            std::filesystem::remove(path, ec);
+            hfs::remove(path);
         }
     } guard_cleaner{guard_path};
 
+    // An EGL screen already has the GPU driver loaded and a display up. Opening
+    // a second device beside it loads the driver a second time, which faults
+    // inside the dynamic loader on some Mesa stacks (prestonbrown/helixscreen#1742).
+    if (current_display != EGL_NO_DISPLAY) {
+        if (create_blur_context(current_display)) {
+            s_gpu.owns_display = false;
+            spdlog::info("[Backdrop Blur] EGL context ready on the display's EGLDisplay");
+        } else {
+            spdlog::debug("[Backdrop Blur] No blur context on the display's EGLDisplay "
+                          "(EGL error 0x{:04X}) - probing DRM devices",
+                          eglGetError());
+        }
+    }
+
     for (const char* path : DRM_DEVICES) {
+        if (s_gpu.context != EGL_NO_CONTEXT)
+            break;
         int fd = open(path, O_RDWR | O_CLOEXEC);
         if (fd < 0)
             continue;
@@ -337,57 +440,13 @@ static bool init_gpu_blur() {
             continue;
         }
 
-        eglBindAPI(EGL_OPENGL_ES_API);
-
-        EGLint config_attribs[] = {EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, EGL_NONE};
-        EGLConfig config;
-        EGLint num_configs;
-        if (!eglChooseConfig(display, config_attribs, &config, 1, &num_configs) ||
-            num_configs == 0) {
+        if (!create_blur_context(display)) {
             eglTerminate(display);
             gbm_device_destroy(gbm);
             close(fd);
             continue;
         }
 
-        EGLint ctx_attribs[] = {EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE};
-        auto context = eglCreateContext(display, config, EGL_NO_CONTEXT, ctx_attribs);
-        if (context == EGL_NO_CONTEXT) {
-            eglTerminate(display);
-            gbm_device_destroy(gbm);
-            close(fd);
-            continue;
-        }
-
-        // Try surfaceless first, then PBuffer
-        EGLSurface egl_surface = EGL_NO_SURFACE;
-        const char* exts = eglQueryString(display, EGL_EXTENSIONS);
-        bool has_surfaceless = exts && strstr(exts, "EGL_KHR_surfaceless_context") != nullptr;
-
-        if (has_surfaceless) {
-            if (!eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, context)) {
-                has_surfaceless = false;
-            }
-        }
-
-        if (!has_surfaceless) {
-            EGLint pbuf_attribs[] = {EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE};
-            egl_surface = eglCreatePbufferSurface(display, config, pbuf_attribs);
-            if (egl_surface == EGL_NO_SURFACE ||
-                !eglMakeCurrent(display, egl_surface, egl_surface, context)) {
-                if (egl_surface != EGL_NO_SURFACE)
-                    eglDestroySurface(display, egl_surface);
-                eglDestroyContext(display, context);
-                eglTerminate(display);
-                gbm_device_destroy(gbm);
-                close(fd);
-                continue;
-            }
-        }
-
-        s_gpu.display = display;
-        s_gpu.context = context;
-        s_gpu.surface = egl_surface;
         s_gpu.gbm = gbm;
         s_gpu.drm_fd = fd;
 
@@ -419,7 +478,8 @@ static bool init_gpu_blur() {
         if (s_gpu.surface != EGL_NO_SURFACE)
             eglDestroySurface(s_gpu.display, s_gpu.surface);
         eglDestroyContext(s_gpu.display, s_gpu.context);
-        eglTerminate(s_gpu.display);
+        if (s_gpu.owns_display)
+            eglTerminate(s_gpu.display);
         if (s_gpu.gbm)
             gbm_device_destroy(s_gpu.gbm);
         if (s_gpu.drm_fd >= 0)
@@ -525,7 +585,8 @@ static void destroy_gpu_blur() {
     if (s_gpu.surface != EGL_NO_SURFACE)
         eglDestroySurface(s_gpu.display, s_gpu.surface);
     eglDestroyContext(s_gpu.display, s_gpu.context);
-    eglTerminate(s_gpu.display);
+    if (s_gpu.owns_display)
+        eglTerminate(s_gpu.display);
 
     if (s_gpu.gbm)
         gbm_device_destroy(s_gpu.gbm);
@@ -541,16 +602,21 @@ static void destroy_gpu_blur() {
 static bool gpu_blur(uint8_t* data, int width, int height) {
     if (s_gpu.init_failed)
         return false;
-    if (!s_gpu.initialized && !init_gpu_blur()) {
-        s_gpu.init_failed = true;
-        return false;
-    }
 
-    // Save and restore previous EGL context
+    // Save before init: init_gpu_blur() binds and then releases its own context, which
+    // unbinds the caller's (LVGL's display context on the EGL backend). Losing it fails
+    // every later eglSwapBuffers and freezes the screen.
     auto saved_display = eglGetCurrentDisplay();
     auto saved_context = eglGetCurrentContext();
     auto saved_draw = eglGetCurrentSurface(EGL_DRAW);
     auto saved_read = eglGetCurrentSurface(EGL_READ);
+
+    if (!s_gpu.initialized && !init_gpu_blur(saved_display)) {
+        s_gpu.init_failed = true;
+        if (saved_context != EGL_NO_CONTEXT)
+            eglMakeCurrent(saved_display, saved_draw, saved_read, saved_context);
+        return false;
+    }
 
     if (saved_context != EGL_NO_CONTEXT) {
         eglMakeCurrent(saved_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
@@ -629,10 +695,12 @@ static bool gpu_blur(uint8_t* data, int width, int height) {
 // ============================================================================
 
 /// Event callback to free the draw_buf when the image widget is deleted.
+/// The render thread may still be blending this very image when the modal
+/// teardown deletes it, so the free must drain the draw units first.
 static void on_backdrop_image_deleted(lv_event_t* e) {
     auto* buf = static_cast<lv_draw_buf_t*>(lv_event_get_user_data(e));
     if (buf) {
-        lv_draw_buf_destroy(buf);
+        helix::safe_draw_buf_destroy(buf, "bd_img");
         spdlog::trace("[Backdrop Blur] Freed backdrop draw buffer");
     }
 }
@@ -775,6 +843,31 @@ lv_obj_t* create_blurred_backdrop(lv_obj_t* parent, lv_opa_t dim_opacity) {
     return img;
 }
 
+lv_obj_t* create_dim_layer(lv_obj_t* parent, lv_opa_t dim_opacity) {
+    lv_obj_t* layer = lv_obj_create(parent);
+    lv_obj_set_size(layer, LV_PCT(100), LV_PCT(100));
+    lv_obj_align(layer, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(layer, lv_color_black(), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(layer, dim_opacity, LV_PART_MAIN);
+    lv_obj_set_style_border_width(layer, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(layer, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(layer, 0, LV_PART_MAIN);
+    lv_obj_add_flag(layer, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(layer, LV_OBJ_FLAG_SCROLLABLE);
+    return layer;
+}
+
+static void darken_inplace(lv_draw_buf_t* buf, lv_opa_t dim_opacity) {
+    const int w = static_cast<int>(buf->header.w);
+    const int h = static_cast<int>(buf->header.h);
+    const int stride = static_cast<int>(buf->header.stride);
+    if (buf->header.cf == LV_COLOR_FORMAT_RGB565) {
+        detail::darken_rgb565_inplace(buf->data, w, h, stride, dim_opacity);
+    } else {
+        detail::darken_argb8888_inplace(buf->data, w, h, stride, dim_opacity);
+    }
+}
+
 lv_obj_t* create_darkened_backdrop(lv_obj_t* parent, lv_opa_t dim_opacity) {
     if (!parent) {
         spdlog::warn("[Backdrop Darken] Null parent");
@@ -788,64 +881,67 @@ lv_obj_t* create_darkened_backdrop(lv_obj_t* parent, lv_opa_t dim_opacity) {
         return nullptr;
     }
 
-    lv_draw_buf_t* snapshot = lv_snapshot_take(screen, LV_COLOR_FORMAT_ARGB8888);
-    if (!snapshot) {
-        spdlog::warn("[Backdrop Darken] Snapshot failed");
-        return nullptr;
+    if (!s_snapshot_backdrops) {
+        return create_dim_layer(parent, dim_opacity);
     }
 
-    int snap_w = static_cast<int>(snapshot->header.w);
-    int snap_h = static_cast<int>(snapshot->header.h);
-    auto* snap_data = static_cast<uint8_t*>(snapshot->data);
-    int snap_stride = static_cast<int>(snapshot->header.stride);
+    // A 16-bit display snapshots in its own format: half the memory of ARGB8888
+    // (768KB rather than 1.5MB at 800x480) and a plain copy to draw. The
+    // snapshot buffer itself becomes the image source.
+    lv_display_t* disp = lv_obj_get_display(screen);
+    const bool rgb565 = disp && lv_display_get_color_format(disp) == LV_COLOR_FORMAT_RGB565;
+    lv_draw_buf_t* snapshot =
+        lv_snapshot_take(screen, rgb565 ? LV_COLOR_FORMAT_RGB565 : LV_COLOR_FORMAT_ARGB8888);
+    if (!snapshot) {
+        // A full frame that did not fit once will not fit on the next overlay
+        // either, and every attempt fragments the heap a little more.
+        spdlog::warn("[Backdrop Darken] Snapshot failed: every later backdrop is a plain dim "
+                     "layer until restart");
+        s_snapshot_backdrops = false;
+        return create_dim_layer(parent, dim_opacity);
+    }
 
-    spdlog::debug("[Backdrop Darken] Snapshot {}x{} (stride={})", snap_w, snap_h, snap_stride);
+    spdlog::debug("[Backdrop Darken] Snapshot {}x{} (stride={}, {})",
+                  static_cast<uint32_t>(snapshot->header.w),
+                  static_cast<uint32_t>(snapshot->header.h),
+                  static_cast<uint32_t>(snapshot->header.stride), rgb565 ? "RGB565" : "ARGB8888");
 
     // Step 2: Darken the snapshot pixels in-place
-    detail::darken_argb8888_inplace(snap_data, snap_w, snap_h, snap_stride, dim_opacity);
+    darken_inplace(snapshot, dim_opacity);
 
-    // Step 3: Create lv_draw_buf and copy (row-by-row for stride alignment)
-    lv_draw_buf_t* result_buf = lv_draw_buf_create(
-        static_cast<uint32_t>(snap_w), static_cast<uint32_t>(snap_h), LV_COLOR_FORMAT_ARGB8888, 0);
-    if (!result_buf) {
-        spdlog::warn("[Backdrop Darken] Failed to allocate result buffer");
-        lv_draw_buf_destroy(snapshot);
-        return nullptr;
-    }
-
-    {
-        uint32_t src_stride = static_cast<uint32_t>(snap_stride);
-        uint32_t dst_stride = result_buf->header.stride;
-        uint32_t row_bytes = static_cast<uint32_t>(snap_w) * 4;
-        auto* dst = static_cast<uint8_t*>(result_buf->data);
-
-        if (src_stride == dst_stride) {
-            std::memcpy(dst, snap_data, static_cast<size_t>(dst_stride) * snap_h);
-        } else {
-            for (int y = 0; y < snap_h; y++) {
-                std::memcpy(dst + y * dst_stride, snap_data + y * src_stride, row_bytes);
-            }
-        }
-    }
-
-    // Done with snapshot
-    lv_draw_buf_destroy(snapshot);
-
-    // Step 4: Create image widget
+    // Step 3: Create image widget
     lv_obj_t* img = lv_image_create(parent);
     lv_obj_set_size(img, LV_PCT(100), LV_PCT(100));
     lv_obj_align(img, LV_ALIGN_CENTER, 0, 0);
-    lv_image_set_src(img, result_buf);
+    lv_image_set_src(img, snapshot);
     lv_image_set_inner_align(img, LV_IMAGE_ALIGN_STRETCH);
     lv_obj_add_flag(img, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_flag(img, LV_OBJ_FLAG_SCROLLABLE);
 
     // Free draw buffer when image is deleted
-    lv_obj_add_event_cb(img, on_backdrop_image_deleted, LV_EVENT_DELETE, result_buf);
+    lv_obj_add_event_cb(img, on_backdrop_image_deleted, LV_EVENT_DELETE, snapshot);
 
-    spdlog::debug("[Backdrop Darken] Created darkened backdrop ({}x{}, dim_opacity={})", snap_w,
-                  snap_h, dim_opacity);
+    spdlog::debug("[Backdrop Darken] Created darkened backdrop (dim_opacity={})", dim_opacity);
     return img;
+}
+
+bool retake_darkened_backdrop(lv_obj_t* backdrop, lv_opa_t dim_opacity) {
+    if (!backdrop || !lv_obj_check_type(backdrop, &lv_image_class))
+        return false;
+    auto* buf = static_cast<lv_draw_buf_t*>(const_cast<void*>(lv_image_get_src(backdrop)));
+    lv_obj_t* screen = lv_screen_active();
+    if (!buf || !screen)
+        return false;
+
+    // A draw unit may still be blending the old pixels on the render thread.
+    lv_draw_wait_for_finish();
+    if (lv_snapshot_take_to_draw_buf(screen, static_cast<lv_color_format_t>(buf->header.cf), buf) !=
+        LV_RESULT_OK)
+        return false;
+    darken_inplace(buf, dim_opacity);
+    lv_image_cache_drop(buf);
+    lv_obj_invalidate(backdrop);
+    return true;
 }
 
 void backdrop_blur_cleanup() {

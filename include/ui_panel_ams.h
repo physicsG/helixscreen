@@ -8,8 +8,8 @@
 #include "ui_ams_edit_overlay.h"
 #include "ui_ams_loading_error_modal.h"
 #include "ui_ams_selector_menu.h"
-#include "ui_ams_toolhead_menu.h"
 #include "ui_ams_sidebar.h"
+#include "ui_ams_toolhead_menu.h"
 #include "ui_bypass_spool_widget.h"
 #include "ui_observer_guard.h"
 #include "ui_panel_base.h"
@@ -55,7 +55,13 @@
  * @see AmsState for subject definitions
  * @see AmsBackend for backend operations
  */
+namespace helix {
+class AmsPanelTestAccess;
+}
+
 class AmsPanel : public PanelBase {
+    friend class helix::AmsPanelTestAccess;
+
   public:
     /**
      * @brief Construct AMS panel with dependencies
@@ -63,14 +69,14 @@ class AmsPanel : public PanelBase {
      * @param api Pointer to IMoonrakerAPI (may be nullptr)
      */
     AmsPanel(helix::PrinterState& printer_state, IMoonrakerAPI* api);
-    ~AmsPanel() override = default;
+    ~AmsPanel() override;
 
     // === PanelBase Interface ===
 
     void init_subjects() override;
     void setup(lv_obj_t* panel, lv_obj_t* parent_screen) override;
     void on_activate() override;
-    void on_deactivate() override;
+    void on_deactivating(DeactivateReason reason) override;
 
     /// Whether THIS panel currently holds a SpoolmanManager polling reference.
     ///
@@ -133,7 +139,21 @@ class AmsPanel : public PanelBase {
      */
     void clear_panel_reference();
 
+    /// The overlay was closed. Stops and frees what only an open panel needs; the
+    /// widget tree stays, so the next open shows it without a rebuild.
+    void on_closed();
+
+    /// The close callback every open registers: runs on_closed() on the instance.
+    static void run_close();
+
+    /// A hidden cached tree is dropped instead of rebuilt: the next open builds
+    /// it from the re-registered component. A shown panel is left alone.
+    bool rebuild() override;
+
   private:
+    /// Heat glow and the loading-error dialog for an AMS action.
+    void apply_action(int action_int, int prev_action);
+
     // === Slot Management ===
 
     static constexpr int MAX_VISIBLE_SLOTS =
@@ -173,6 +193,11 @@ class AmsPanel : public PanelBase {
     ObserverGuard slot_count_observer_;
     ObserverGuard path_segment_observer_;
     ObserverGuard path_topology_observer_;
+    ObserverGuard buffer_present_observer_;
+    ObserverGuard buffer_slider_observer_;
+    ObserverGuard buffer_bias_observer_;
+    ObserverGuard buffer_status_observer_;
+    ObserverGuard buffer_gauge_observer_;
     /// Per-slot LIVE path observers: each lane's filament path-segment and
     /// toolhead-present subjects. When a slot's sensor flips (push/pull filament),
     /// these fire and redraw that lane's path in real time. Static-array subjects
@@ -184,11 +209,10 @@ class AmsPanel : public PanelBase {
     ObserverGuard
         supports_bypass_observer_;         ///< Bypass node appears/disappears with backend support
     ObserverGuard bypass_active_observer_; ///< Active ring follows bypass engage/disengage
-    helix::AsyncLifetimeGuard
-        lifetime_; ///< Guards deferred callbacks from accessing destroyed panel
     bool backend_rebuild_pending_ = false; ///< Coalesces rapid backend count changes
     bool slot_creation_pending_ = false;   ///< Coalesces rapid slot count changes
-    bool path_update_pending_ = false;     ///< Coalesces rapid path state changes
+    bool open_ = false; ///< Pushed and not yet closed; a closed panel's observers wait
+    bool path_update_pending_ = false; ///< Coalesces rapid path state changes
 
     // === Dynamic Slot State ===
 
@@ -206,6 +230,9 @@ class AmsPanel : public PanelBase {
     // box + "Bypass" + material labels. Geometry differs per canvas; we just
     // call set_position with the right (cx, cy).
     helix::ui::BypassSpoolWidgets bypass_widgets_{};
+
+    static void on_path_canvas_size_changed(lv_event_t* e);
+    void detach_path_canvas_hooks();
 
     // === Endless Spool Arrows Canvas ===
 
@@ -272,14 +299,13 @@ class AmsPanel : public PanelBase {
     void on_path_hub_clicked(lv_point_t click_pt);
 
     /**
-     * @brief Dispatch a selector-menu action to the AMS backend.
+     * @brief Nozzle tap on a PARALLEL canvas: open the per-toolhead menu.
+     *
+     * Mount/park is a carriage question, not a lane one, so it gets its own
+     * menu instead of the per-slot one. @p tool_index is the tool number on the
+     * badge under the nozzle; helix::ui::show_toolhead_menu_at_touch() does the
+     * rest.
      */
-    void dispatch_selector_action(helix::ui::AmsSelectorMenu::SelectorAction a);
-
-    /// Nozzle taps on a PARALLEL canvas open the per-toolhead menu instead of
-    /// the per-slot one — mount/park is a carriage question, not a lane one.
-    /// @p tool_index is the tool number on the badge under the nozzle;
-    /// helix::ui::show_toolhead_menu_at_touch() does the rest.
     static void on_path_toolhead_clicked(int tool_index, void* user_data);
 
     /**
@@ -299,7 +325,6 @@ class AmsPanel : public PanelBase {
     // === UI Module Helpers (internal, show modals with callbacks) ===
 
     void show_context_menu(int slot_index, lv_obj_t* near_widget, lv_point_t click_pt);
-    void show_edit_modal(int slot_index, bool open_on_picker = false);
     void show_loading_error_modal();
 
     /**

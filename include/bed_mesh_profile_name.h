@@ -16,8 +16,8 @@
 /// literally named "  ". This is the one place that decides, so a field added
 /// later cannot get its own answer.
 ///
-/// Policy stays with the caller: this reports which of three situations the
-/// user is in and hands back the name it would use.
+/// Policy stays with the caller: this reports which situation the user is
+/// in and hands back the name it would use.
 
 #pragma once
 
@@ -29,11 +29,12 @@ namespace helix {
 namespace ui {
 namespace bed_mesh {
 
-/// The three outcomes of reading a profile-name field.
+/// The outcomes of reading a profile-name field.
 enum class ProfileNameVerdict {
     Empty,     ///< Nothing usable was typed. Reject, and say why.
     New,       ///< No stored profile answers to this name. Proceed.
     Overwrite, ///< A stored profile would be replaced. Confirm first.
+    Unusable,  ///< Holds ';' or a line break, where Klipper cuts a command. Reject, and say why.
 };
 
 struct ProfileNameCheck {

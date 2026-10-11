@@ -7,7 +7,6 @@
 #include "ui_panel_macros.h"
 
 #include "panel_widget_registry.h"
-#include "ui/ui_lazy_panel_helper.h"
 
 #include <spdlog/spdlog.h>
 
@@ -20,7 +19,8 @@ void register_macros_widget() {
     lv_xml_register_event_cb(nullptr, "macros_widget_clicked_cb", MacrosWidget::clicked_cb);
 }
 
-MacrosWidget::MacrosWidget() = default;
+MacrosWidget::MacrosWidget()
+    : TiledPanelWidget("macros", TileSizing::Content{"", "", "Macros", false}) {}
 
 MacrosWidget::~MacrosWidget() {
     detach();
@@ -30,11 +30,6 @@ void MacrosWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
     widget_obj_ = widget_obj;
     parent_screen_ = parent_screen;
 
-    // Set user_data on the root lv_obj, NOT on the ui_button child.
-    // ui_button allocates its own UiButtonData in user_data — overwriting it
-    // leaks memory and breaks button style/contrast auto-updates.
-    lv_obj_set_user_data(widget_obj_, this);
-
     btn_ = lv_obj_find_by_name(widget_obj_, "macros_button");
     if (btn_) {
         lv_obj_add_event_cb(btn_, clicked_cb, LV_EVENT_CLICKED, this);
@@ -42,17 +37,13 @@ void MacrosWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
 }
 
 void MacrosWidget::detach() {
-    if (widget_obj_) {
-        lv_obj_set_user_data(widget_obj_, nullptr);
-    }
     btn_ = nullptr;
     widget_obj_ = nullptr;
     parent_screen_ = nullptr;
 }
 
 void MacrosWidget::handle_click() {
-    helix::ui::lazy_create_and_push_overlay<MacrosPanel>(
-        get_global_macros_panel, macros_panel_, parent_screen_, "Macros", "MacrosWidget", true);
+    get_global_macros_panel().show(parent_screen_);
 }
 
 void MacrosWidget::clicked_cb(lv_event_t* e) {

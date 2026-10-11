@@ -8,14 +8,15 @@
 #include "ui_callback_helpers.h"
 #include "ui_event_safety.h"
 #include "ui_modal.h"
-#include "ui_nav_manager.h"
 #include "ui_toast_manager.h"
 #include "ui_update_queue.h"
 
 #include "bluetooth_loader.h"
 #include "brother_pt_bt_printer.h"
 #include "brother_ql_printer.h"
+#include "bt_discovery_run.h"
 #include "bt_discovery_utils.h"
+#include "helix_thread.h"
 #include "ipp_printer.h"
 #include "label_printer_settings.h"
 #include "label_printer_utils.h"
@@ -26,7 +27,7 @@
 #include "runtime_config.h"
 #include "sheet_label_layout.h"
 #include "spoolman_types.h"
-#include "static_panel_registry.h"
+#include "ui/ui_widget_helpers.h"
 #include "usb_printer_detector.h"
 
 #include <spdlog/fmt/fmt.h>
@@ -37,6 +38,9 @@
 #include <thread>
 
 namespace helix::settings {
+
+using helix::ui::event_selected;
+using helix::ui::find_required;
 
 // ============================================================================
 // HELPERS
@@ -119,50 +123,13 @@ static std::vector<helix::LabelSize> get_sizes_for_current_printer() {
 }
 
 // ============================================================================
-// SINGLETON ACCESSOR
-// ============================================================================
-
-static std::unique_ptr<LabelPrinterSettingsOverlay> g_label_printer_overlay;
-
-LabelPrinterSettingsOverlay& get_label_printer_settings_overlay() {
-    if (!g_label_printer_overlay) {
-        g_label_printer_overlay = std::make_unique<LabelPrinterSettingsOverlay>();
-        StaticPanelRegistry::instance().register_destroy("LabelPrinterSettingsOverlay",
-                                                         []() { g_label_printer_overlay.reset(); });
-    }
-    return *g_label_printer_overlay;
-}
-
-// ============================================================================
 // CONSTRUCTOR / DESTRUCTOR
 // ============================================================================
-
-LabelPrinterSettingsOverlay::LabelPrinterSettingsOverlay() {
-    spdlog::debug("[{}] Created", get_name());
-}
 
 LabelPrinterSettingsOverlay::~LabelPrinterSettingsOverlay() {
     stop_label_printer_discovery();
     stop_usb_detection();
     stop_bt_discovery();
-
-    // Deinit subjects
-    if (subjects_initialized_) {
-        lv_subject_deinit(&bt_scanning_subject_);
-        lv_subject_deinit(&test_printing_subject_);
-        lv_subject_deinit(&ipp_selected_subject_);
-    }
-
-    // Deinit BT context only in destructor, not in stop_bt_discovery()
-    if (bt_ctx_) {
-        auto& loader = helix::bluetooth::BluetoothLoader::instance();
-        if (loader.deinit) {
-            loader.deinit(bt_ctx_);
-        }
-        bt_ctx_ = nullptr;
-    }
-
-    spdlog::trace("[{}] Destroyed", get_name());
 }
 
 // ============================================================================
@@ -170,99 +137,68 @@ LabelPrinterSettingsOverlay::~LabelPrinterSettingsOverlay() {
 // ============================================================================
 
 void LabelPrinterSettingsOverlay::init_subjects() {
-    if (subjects_initialized_) {
-        return;
-    }
-
     // Ensure manager subjects are initialized (reads config for initial value)
     LabelPrinterSettingsManager::instance().init_subjects();
 
-    // Register C++-owned subject globally so XML bind_flag_if_not_eq can find it
+    // Register C++-owned subject globally so XML bind_flag_if_not_eq can find it.
+    // Deliberately NOT registered with subjects_: the name aliases
+    // LabelPrinterSettingsManager's subject (owner registered as
+    // "label_printer_type"), a process-lifetime singleton — its storage
+    // outlives this overlay, so the name never dangles (prestonbrown/helixscreen#1538).
     lv_xml_register_subject(nullptr, "printer_type_subject",
                             LabelPrinterSettingsManager::instance().subject_printer_type());
 
     // BT scanning state subject (0=idle, 1=scanning)
-    lv_subject_init_int(&bt_scanning_subject_, 0);
-    lv_xml_register_subject(nullptr, "bt_scanning", &bt_scanning_subject_);
-    lv_subject_init_int(&test_printing_subject_, 0);
-    lv_xml_register_subject(nullptr, "test_printing", &test_printing_subject_);
+    UI_MANAGED_SUBJECT_INT(bt_scanning_subject_, 0, "bt_scanning", subjects_);
+    UI_MANAGED_SUBJECT_INT(test_printing_subject_, 0, "test_printing", subjects_);
 
     // IPP selected subject (0=not IPP, 1=IPP protocol selected within network type)
     int ipp_initial = (LabelPrinterSettingsManager::instance().get_printer_type() == "network" &&
                        LabelPrinterSettingsManager::instance().get_printer_protocol() == "ipp")
                           ? 1
                           : 0;
-    lv_subject_init_int(&ipp_selected_subject_, ipp_initial);
-    lv_xml_register_subject(nullptr, "ipp_selected", &ipp_selected_subject_);
-
-    subjects_initialized_ = true;
-    spdlog::debug("[{}] Subjects initialized", get_name());
+    UI_MANAGED_SUBJECT_INT(ipp_selected_subject_, ipp_initial, "ipp_selected", subjects_);
 }
 
 void LabelPrinterSettingsOverlay::register_callbacks() {
     register_xml_callbacks({
-        {"on_lp_label_size_changed", on_label_size_changed},
-        {"on_lp_preset_changed", on_preset_changed},
-        {"on_lp_test_print", on_test_print},
-        {"on_lp_printer_selected", on_printer_selected},
-        {"on_lp_type_changed", on_type_changed},
-        {"on_lp_usb_printer_selected", on_usb_printer_selected},
-        {"on_lp_bt_printer_selected", on_bt_printer_selected},
-        {"on_lp_bt_scan", on_bt_scan},
-        {"on_lp_bt_connect", on_bt_connect},
-        {"on_lp_bt_forget", on_bt_forget},
-        {"on_lp_label_count_changed", on_label_count_changed},
+        {"on_lp_label_size_changed",
+         [](lv_event_t* e) {
+             get_label_printer_settings_overlay().handle_label_size_changed(event_selected(e));
+         }},
+        {"on_lp_preset_changed",
+         [](lv_event_t* e) {
+             get_label_printer_settings_overlay().handle_preset_changed(event_selected(e));
+         }},
+        {"on_lp_test_print",
+         [](lv_event_t*) { get_label_printer_settings_overlay().handle_test_print(); }},
+        {"on_lp_printer_selected",
+         [](lv_event_t* e) {
+             get_label_printer_settings_overlay().handle_printer_selected(event_selected(e));
+         }},
+        {"on_lp_type_changed",
+         [](lv_event_t* e) {
+             get_label_printer_settings_overlay().handle_type_changed(event_selected(e));
+         }},
+        {"on_lp_usb_printer_selected",
+         [](lv_event_t* e) {
+             get_label_printer_settings_overlay().handle_usb_printer_selected(event_selected(e));
+         }},
+        {"on_lp_bt_printer_selected",
+         [](lv_event_t* e) {
+             get_label_printer_settings_overlay().handle_bt_printer_selected(event_selected(e));
+         }},
+        {"on_lp_bt_scan",
+         [](lv_event_t*) { get_label_printer_settings_overlay().handle_bt_scan(); }},
+        {"on_lp_bt_connect",
+         [](lv_event_t*) { get_label_printer_settings_overlay().handle_bt_connect(); }},
+        {"on_lp_bt_forget",
+         [](lv_event_t*) { get_label_printer_settings_overlay().handle_bt_forget(); }},
+        {"on_lp_label_count_changed",
+         [](lv_event_t* e) {
+             get_label_printer_settings_overlay().handle_label_count_changed(event_selected(e));
+         }},
     });
-
-    spdlog::debug("[{}] Callbacks registered", get_name());
-}
-
-// ============================================================================
-// UI CREATION
-// ============================================================================
-
-lv_obj_t* LabelPrinterSettingsOverlay::create(lv_obj_t* parent) {
-    if (overlay_root_) {
-        spdlog::warn("[{}] create() called but overlay already exists", get_name());
-        return overlay_root_;
-    }
-
-    spdlog::debug("[{}] Creating overlay...", get_name());
-
-    overlay_root_ =
-        static_cast<lv_obj_t*>(lv_xml_create(parent, "label_printer_settings", nullptr));
-    if (!overlay_root_) {
-        spdlog::error("[{}] Failed to create overlay from XML", get_name());
-        return nullptr;
-    }
-
-    lv_obj_add_flag(overlay_root_, LV_OBJ_FLAG_HIDDEN);
-
-    spdlog::info("[{}] Overlay created", get_name());
-    return overlay_root_;
-}
-
-void LabelPrinterSettingsOverlay::show(lv_obj_t* parent_screen) {
-    spdlog::debug("[{}] show() called", get_name());
-
-    parent_screen_ = parent_screen;
-
-    if (!subjects_initialized_) {
-        init_subjects();
-        register_callbacks();
-    }
-
-    if (!overlay_root_ && parent_screen_) {
-        create(parent_screen_);
-    }
-
-    if (!overlay_root_) {
-        spdlog::error("[{}] Cannot show - overlay not created", get_name());
-        return;
-    }
-
-    NavigationManager::instance().register_overlay_instance(overlay_root_, this);
-    NavigationManager::instance().push_overlay(overlay_root_);
 }
 
 // ============================================================================
@@ -299,11 +235,10 @@ void LabelPrinterSettingsOverlay::on_activate() {
     inputs_initialized_ = true;
 }
 
-void LabelPrinterSettingsOverlay::on_deactivate() {
+void LabelPrinterSettingsOverlay::on_deactivating(DeactivateReason) {
     stop_label_printer_discovery();
     stop_usb_detection();
     stop_bt_discovery();
-    OverlayBase::on_deactivate();
 }
 
 // ============================================================================
@@ -315,15 +250,22 @@ void LabelPrinterSettingsOverlay::init_address_input() {
         return;
 
     auto& settings = LabelPrinterSettingsManager::instance();
-    lv_obj_t* row = lv_obj_find_by_name(overlay_root_, "row_address_port");
+    lv_obj_t* row = find_required(overlay_root_, "row_address_port", get_name());
     if (!row)
         return;
 
-    lv_obj_t* input = lv_obj_find_by_name(row, "input_address");
+    lv_obj_t* input = helix::ui::find_required(row, "input_address", get_name());
     if (input) {
         lv_textarea_set_text(input, settings.get_printer_address().c_str());
         if (!inputs_initialized_) {
-            lv_obj_add_event_cb(input, on_address_done, LV_EVENT_DEFOCUSED, nullptr);
+            lv_obj_add_event_cb(
+                input,
+                [](lv_event_t*) {
+                    LVGL_SAFE_EVENT_CB_BEGIN("[LabelPrinterSettings] address_done");
+                    get_label_printer_settings_overlay().handle_address_changed();
+                    LVGL_SAFE_EVENT_CB_END();
+                },
+                LV_EVENT_DEFOCUSED, nullptr);
         }
         spdlog::trace("[{}] Address input initialized", get_name());
     }
@@ -334,16 +276,23 @@ void LabelPrinterSettingsOverlay::init_port_input() {
         return;
 
     auto& settings = LabelPrinterSettingsManager::instance();
-    lv_obj_t* row = lv_obj_find_by_name(overlay_root_, "row_address_port");
+    lv_obj_t* row = find_required(overlay_root_, "row_address_port", get_name());
     if (!row)
         return;
 
-    lv_obj_t* input = lv_obj_find_by_name(row, "input_port");
+    lv_obj_t* input = helix::ui::find_required(row, "input_port", get_name());
     if (input) {
         auto port_str = fmt::format("{}", settings.get_printer_port());
         lv_textarea_set_text(input, port_str.c_str());
         if (!inputs_initialized_) {
-            lv_obj_add_event_cb(input, on_port_done, LV_EVENT_DEFOCUSED, nullptr);
+            lv_obj_add_event_cb(
+                input,
+                [](lv_event_t*) {
+                    LVGL_SAFE_EVENT_CB_BEGIN("[LabelPrinterSettings] port_done");
+                    get_label_printer_settings_overlay().handle_port_changed();
+                    LVGL_SAFE_EVENT_CB_END();
+                },
+                LV_EVENT_DEFOCUSED, nullptr);
         }
         spdlog::trace("[{}] Port input initialized", get_name());
     }
@@ -353,11 +302,11 @@ void LabelPrinterSettingsOverlay::init_label_size_dropdown() {
     if (!overlay_root_)
         return;
 
-    lv_obj_t* size_row = lv_obj_find_by_name(overlay_root_, "row_label_size");
+    lv_obj_t* size_row = find_required(overlay_root_, "row_label_size", get_name());
     if (!size_row)
         return;
 
-    lv_obj_t* dropdown = lv_obj_find_by_name(size_row, "dropdown");
+    lv_obj_t* dropdown = helix::ui::find_required(size_row, "dropdown", get_name());
     if (dropdown) {
         // PT printers auto-detect tape — disable size selection
         if (current_printer_auto_detects_size()) {
@@ -397,11 +346,11 @@ void LabelPrinterSettingsOverlay::init_preset_dropdown() {
     if (!overlay_root_)
         return;
 
-    lv_obj_t* preset_row = lv_obj_find_by_name(overlay_root_, "row_preset");
+    lv_obj_t* preset_row = find_required(overlay_root_, "row_preset", get_name());
     if (!preset_row)
         return;
 
-    lv_obj_t* dropdown = lv_obj_find_by_name(preset_row, "dropdown");
+    lv_obj_t* dropdown = helix::ui::find_required(preset_row, "dropdown", get_name());
     if (dropdown) {
         auto& settings = LabelPrinterSettingsManager::instance();
         // Build translated preset options
@@ -435,17 +384,17 @@ void LabelPrinterSettingsOverlay::init_discovery_dropdown() {
     if (!overlay_root_)
         return;
 
-    lv_obj_t* row = lv_obj_find_by_name(overlay_root_, "row_discovered_printers");
+    lv_obj_t* row = find_required(overlay_root_, "row_discovered_printers", get_name());
     if (!row)
         return;
 
     // Hide the empty description text to vertically center the label
-    lv_obj_t* desc = lv_obj_find_by_name(row, "description");
+    lv_obj_t* desc = helix::ui::find_required(row, "description", get_name());
     if (desc) {
         lv_obj_add_flag(desc, LV_OBJ_FLAG_HIDDEN);
     }
 
-    lv_obj_t* dropdown = lv_obj_find_by_name(row, "dropdown");
+    lv_obj_t* dropdown = helix::ui::find_required(row, "dropdown", get_name());
     if (dropdown) {
         lv_dropdown_set_options(dropdown, lv_tr("Searching..."));
     }
@@ -530,11 +479,11 @@ void LabelPrinterSettingsOverlay::merge_and_update_discovery() {
     if (!overlay_root_)
         return;
 
-    lv_obj_t* row = lv_obj_find_by_name(overlay_root_, "row_discovered_printers");
+    lv_obj_t* row = find_required(overlay_root_, "row_discovered_printers", get_name());
     if (!row)
         return;
 
-    lv_obj_t* dropdown = lv_obj_find_by_name(row, "dropdown");
+    lv_obj_t* dropdown = helix::ui::find_required(row, "dropdown", get_name());
     if (!dropdown)
         return;
 
@@ -612,14 +561,14 @@ void LabelPrinterSettingsOverlay::handle_printer_selected(int index) {
 
     // Update address and port input fields
     if (overlay_root_) {
-        lv_obj_t* addr_row = lv_obj_find_by_name(overlay_root_, "row_address_port");
+        lv_obj_t* addr_row = find_required(overlay_root_, "row_address_port", get_name());
         if (addr_row) {
-            lv_obj_t* addr_input = lv_obj_find_by_name(addr_row, "input_address");
+            lv_obj_t* addr_input = helix::ui::find_required(addr_row, "input_address", get_name());
             if (addr_input) {
                 lv_textarea_set_text(addr_input, printer.ip_address.c_str());
             }
 
-            lv_obj_t* port_input = lv_obj_find_by_name(addr_row, "input_port");
+            lv_obj_t* port_input = helix::ui::find_required(addr_row, "input_port", get_name());
             if (port_input) {
                 auto port_str = fmt::format("{}", port);
                 lv_textarea_set_text(port_input, port_str.c_str());
@@ -646,11 +595,11 @@ void LabelPrinterSettingsOverlay::init_printer_type_dropdown() {
     if (!overlay_root_)
         return;
 
-    lv_obj_t* row = lv_obj_find_by_name(overlay_root_, "row_printer_type");
+    lv_obj_t* row = find_required(overlay_root_, "row_printer_type", get_name());
     if (!row)
         return;
 
-    lv_obj_t* dropdown = lv_obj_find_by_name(row, "dropdown");
+    lv_obj_t* dropdown = helix::ui::find_required(row, "dropdown", get_name());
     if (dropdown) {
         const bool bt_available = helix::bluetooth::BluetoothLoader::instance().is_available();
         std::string options;
@@ -749,11 +698,11 @@ void LabelPrinterSettingsOverlay::init_label_count_dropdown() {
     if (!overlay_root_)
         return;
 
-    lv_obj_t* row = lv_obj_find_by_name(overlay_root_, "row_label_count");
+    lv_obj_t* row = find_required(overlay_root_, "row_label_count", get_name());
     if (!row)
         return;
 
-    lv_obj_t* dropdown = lv_obj_find_by_name(row, "dropdown");
+    lv_obj_t* dropdown = helix::ui::find_required(row, "dropdown", get_name());
     if (!dropdown)
         return;
 
@@ -792,11 +741,11 @@ void LabelPrinterSettingsOverlay::init_usb_printer_dropdown() {
     if (!overlay_root_)
         return;
 
-    lv_obj_t* row = lv_obj_find_by_name(overlay_root_, "row_usb_printers");
+    lv_obj_t* row = find_required(overlay_root_, "row_usb_printers", get_name());
     if (!row)
         return;
 
-    lv_obj_t* dropdown = lv_obj_find_by_name(row, "dropdown");
+    lv_obj_t* dropdown = helix::ui::find_required(row, "dropdown", get_name());
     if (dropdown) {
         lv_dropdown_set_options(dropdown, lv_tr("Searching..."));
     }
@@ -832,10 +781,10 @@ void LabelPrinterSettingsOverlay::on_usb_printers_detected(
     if (!overlay_root_)
         return;
 
-    lv_obj_t* row = lv_obj_find_by_name(overlay_root_, "row_usb_printers");
+    lv_obj_t* row = find_required(overlay_root_, "row_usb_printers", get_name());
     if (!row)
         return;
-    lv_obj_t* dropdown = lv_obj_find_by_name(row, "dropdown");
+    lv_obj_t* dropdown = helix::ui::find_required(row, "dropdown", get_name());
     if (!dropdown)
         return;
 
@@ -887,14 +836,11 @@ void LabelPrinterSettingsOverlay::handle_usb_printer_selected(int index) {
 // ============================================================================
 
 void LabelPrinterSettingsOverlay::handle_address_changed() {
-    if (!overlay_root_)
-        return;
-
-    lv_obj_t* row = lv_obj_find_by_name(overlay_root_, "row_address_port");
+    lv_obj_t* row = find_required(overlay_root_, "row_address_port", get_name());
     if (!row)
         return;
 
-    lv_obj_t* input = lv_obj_find_by_name(row, "input_address");
+    lv_obj_t* input = helix::ui::find_required(row, "input_address", get_name());
     if (input) {
         const char* text = lv_textarea_get_text(input);
         std::string addr = text ? text : "";
@@ -904,14 +850,11 @@ void LabelPrinterSettingsOverlay::handle_address_changed() {
 }
 
 void LabelPrinterSettingsOverlay::handle_port_changed() {
-    if (!overlay_root_)
-        return;
-
-    lv_obj_t* row = lv_obj_find_by_name(overlay_root_, "row_address_port");
+    lv_obj_t* row = find_required(overlay_root_, "row_address_port", get_name());
     if (!row)
         return;
 
-    lv_obj_t* input = lv_obj_find_by_name(row, "input_port");
+    lv_obj_t* input = helix::ui::find_required(row, "input_port", get_name());
     if (input) {
         const char* text = lv_textarea_get_text(input);
         if (text && text[0] != '\0') {
@@ -938,25 +881,23 @@ void LabelPrinterSettingsOverlay::handle_label_size_changed(int index) {
         // Force QR-only for small square labels where text won't fit
         const auto& sz = sizes[index];
         bool force_qr = (sz.width_px <= 250 && sz.height_px > 0 && sz.height_px <= 250);
-        if (overlay_root_) {
-            lv_obj_t* preset_row = lv_obj_find_by_name(overlay_root_, "row_preset");
-            if (preset_row) {
-                lv_obj_t* dd = lv_obj_find_by_name(preset_row, "dropdown");
-                if (dd) {
-                    if (force_qr) {
-                        lv_dropdown_set_options(dd, lv_tr("QR Only"));
-                        lv_dropdown_set_selected(dd, 0);
-                        lv_obj_add_state(dd, LV_STATE_DISABLED);
-                        settings.set_label_preset(static_cast<int>(LabelPreset::MINIMAL));
-                    } else {
-                        // Restore full options
-                        auto opts = fmt::format("{}\n{}\n{}", lv_tr("Standard"), lv_tr("Compact"),
-                                                lv_tr("QR Only"));
-                        lv_dropdown_set_options(dd, opts.c_str());
-                        lv_dropdown_set_selected(
-                            dd, static_cast<uint32_t>(settings.get_label_preset()));
-                        lv_obj_remove_state(dd, LV_STATE_DISABLED);
-                    }
+        lv_obj_t* preset_row = find_required(overlay_root_, "row_preset", get_name());
+        if (preset_row) {
+            lv_obj_t* dd = helix::ui::find_required(preset_row, "dropdown", get_name());
+            if (dd) {
+                if (force_qr) {
+                    lv_dropdown_set_options(dd, lv_tr("QR Only"));
+                    lv_dropdown_set_selected(dd, 0);
+                    lv_obj_add_state(dd, LV_STATE_DISABLED);
+                    settings.set_label_preset(static_cast<int>(LabelPreset::MINIMAL));
+                } else {
+                    // Restore full options
+                    auto opts = fmt::format("{}\n{}\n{}", lv_tr("Standard"), lv_tr("Compact"),
+                                            lv_tr("QR Only"));
+                    lv_dropdown_set_options(dd, opts.c_str());
+                    lv_dropdown_set_selected(dd,
+                                             static_cast<uint32_t>(settings.get_label_preset()));
+                    lv_obj_remove_state(dd, LV_STATE_DISABLED);
                 }
             }
         }
@@ -1043,11 +984,11 @@ void LabelPrinterSettingsOverlay::init_bt_printer_dropdown() {
     if (!overlay_root_)
         return;
 
-    lv_obj_t* row = lv_obj_find_by_name(overlay_root_, "row_bt_printers");
+    lv_obj_t* row = find_required(overlay_root_, "row_bt_printers", get_name());
     if (!row)
         return;
 
-    lv_obj_t* dropdown = lv_obj_find_by_name(row, "dropdown");
+    lv_obj_t* dropdown = helix::ui::find_required(row, "dropdown", get_name());
     if (!dropdown)
         return;
 
@@ -1085,13 +1026,13 @@ void LabelPrinterSettingsOverlay::init_bt_printer_dropdown() {
         lv_dropdown_set_selected(dropdown, 0);
 
         // Enable connect button (will update after async check)
-        lv_obj_t* btn = lv_obj_find_by_name(overlay_root_, "btn_bt_connect");
+        lv_obj_t* btn = find_required(overlay_root_, "btn_bt_connect", get_name());
         if (btn) {
             lv_obj_remove_state(btn, LV_STATE_DISABLED);
         }
 
         // Enable Forget button whenever a BT MAC is configured
-        lv_obj_t* forget_btn = lv_obj_find_by_name(overlay_root_, "btn_bt_forget");
+        lv_obj_t* forget_btn = find_required(overlay_root_, "btn_bt_forget", get_name());
         if (forget_btn) {
             lv_obj_remove_state(forget_btn, LV_STATE_DISABLED);
         }
@@ -1099,60 +1040,64 @@ void LabelPrinterSettingsOverlay::init_bt_printer_dropdown() {
         // Check actual paired/connected state asynchronously to avoid
         // blocking the UI thread on D-Bus calls (25-second default timeout)
         auto& loader = helix::bluetooth::BluetoothLoader::instance();
-        if (!bt_ctx_ && loader.is_available() && loader.init) {
-            bt_ctx_ = loader.init();
-        }
-        if (bt_ctx_ && loader.is_paired) {
+        if (loader.is_available() && loader.is_paired) {
             auto bt_token = lifetime_.token();
-            auto* ctx = bt_ctx_;
+            auto shared_ctx = bt_ctx_;
             std::string addr = saved_addr;
             // Wrap spawn per feedback_no_bare_threads_arm.md (#724, #837, [L083]).
             try {
-                std::thread([bt_token, ctx, addr]() {
+                helix::make_thread([bt_token, shared_ctx, addr]() {
                     auto& ldr = helix::bluetooth::BluetoothLoader::instance();
+                    auto* ctx = shared_ctx->get();
+                    if (!ctx)
+                        return;
                     int paired_r = ldr.is_paired ? ldr.is_paired(ctx, addr.c_str()) : -1;
                     bool connected = check_bt_connected(ctx, addr);
                     spdlog::debug("[Label Printer] Async BT state: is_paired={} connected={}",
                                   paired_r, connected);
 
-                    helix::ui::queue_update([bt_token, paired_r, connected, addr]() {
-                        if (bt_token.expired())
-                            return;
-                        auto& ov = get_label_printer_settings_overlay();
-                        for (auto& dev : ov.bt_devices_) {
-                            if (dev.mac == addr) {
-                                dev.paired = (paired_r == 1);
-                                dev.connected = connected;
-                                break;
-                            }
-                        }
-                        // Refresh dropdown with actual state
-                        if (ov.overlay_root_) {
-                            lv_obj_t* row =
-                                lv_obj_find_by_name(ov.overlay_root_, "row_bt_printers");
-                            if (row) {
-                                lv_obj_t* dd = lv_obj_find_by_name(row, "dropdown");
-                                if (dd) {
-                                    std::string options;
-                                    for (const auto& d : ov.bt_devices_) {
-                                        if (!options.empty())
-                                            options += "\n";
-                                        options += bt_device_label(d.name, d.paired, !d.mac.empty(),
-                                                                   d.connected);
-                                    }
-                                    lv_dropdown_set_options(dd, options.c_str());
+                    helix::ui::queue_update(
+                        "LabelPrinterSettingsOverlay::init_bt_printer_dropdown",
+                        [bt_token, paired_r, connected, addr]() {
+                            if (bt_token.expired())
+                                return;
+                            auto& ov = get_label_printer_settings_overlay();
+                            for (auto& dev : ov.bt_devices_) {
+                                if (dev.mac == addr) {
+                                    dev.paired = (paired_r == 1);
+                                    dev.connected = connected;
+                                    break;
                                 }
                             }
-                            // Update connect button
-                            lv_obj_t* b = lv_obj_find_by_name(ov.overlay_root_, "btn_bt_connect");
-                            if (b) {
-                                if (connected)
-                                    lv_obj_add_state(b, LV_STATE_DISABLED);
-                                else
-                                    lv_obj_remove_state(b, LV_STATE_DISABLED);
+                            // Refresh dropdown with actual state
+                            if (ov.overlay_root_) {
+                                lv_obj_t* row = helix::ui::find_required(
+                                    ov.overlay_root_, "row_bt_printers", "Label Printer");
+                                if (row) {
+                                    lv_obj_t* dd =
+                                        helix::ui::find_required(row, "dropdown", "Label Printer");
+                                    if (dd) {
+                                        std::string options;
+                                        for (const auto& d : ov.bt_devices_) {
+                                            if (!options.empty())
+                                                options += "\n";
+                                            options += bt_device_label(d.name, d.paired,
+                                                                       !d.mac.empty(), d.connected);
+                                        }
+                                        lv_dropdown_set_options(dd, options.c_str());
+                                    }
+                                }
+                                // Update connect button
+                                lv_obj_t* b = helix::ui::find_required(
+                                    ov.overlay_root_, "btn_bt_connect", "Label Printer");
+                                if (b) {
+                                    if (connected)
+                                        lv_obj_add_state(b, LV_STATE_DISABLED);
+                                    else
+                                        lv_obj_remove_state(b, LV_STATE_DISABLED);
+                                }
                             }
-                        }
-                    });
+                        });
                 }).detach();
             } catch (const std::system_error& e) {
                 spdlog::warn("[Label Printer] Failed to spawn BT state-probe thread: {}", e.what());
@@ -1162,7 +1107,7 @@ void LabelPrinterSettingsOverlay::init_bt_printer_dropdown() {
     } else {
         lv_dropdown_set_options(dropdown, lv_tr("Press Scan to search"));
         // No saved BT printer — ensure Forget button is disabled
-        lv_obj_t* forget_btn = lv_obj_find_by_name(overlay_root_, "btn_bt_forget");
+        lv_obj_t* forget_btn = find_required(overlay_root_, "btn_bt_forget", get_name());
         if (forget_btn) {
             lv_obj_add_state(forget_btn, LV_STATE_DISABLED);
         }
@@ -1181,17 +1126,6 @@ void LabelPrinterSettingsOverlay::start_bt_discovery() {
         return;
     }
 
-    // Initialize BT context if needed
-    if (!bt_ctx_ && loader.init) {
-        bt_ctx_ = loader.init();
-        if (!bt_ctx_) {
-            spdlog::error("[{}] Failed to init BT context", get_name());
-            ToastManager::instance().show(ToastSeverity::ERROR,
-                                          lv_tr("Bluetooth initialization failed"));
-            return;
-        }
-    }
-
     bt_discovering_ = true;
     // Keep saved paired device so it stays visible during scan
     bt_devices_.erase(std::remove_if(bt_devices_.begin(), bt_devices_.end(),
@@ -1201,207 +1135,158 @@ void LabelPrinterSettingsOverlay::start_bt_discovery() {
     // Update UI to show scanning state
     lv_subject_set_int(&bt_scanning_subject_, 1);
     if (overlay_root_) {
-        lv_obj_t* row = lv_obj_find_by_name(overlay_root_, "row_bt_printers");
+        lv_obj_t* row = find_required(overlay_root_, "row_bt_printers", get_name());
         if (row) {
-            lv_obj_t* dropdown = lv_obj_find_by_name(row, "dropdown");
+            lv_obj_t* dropdown = helix::ui::find_required(row, "dropdown", get_name());
             if (dropdown) {
                 lv_dropdown_set_options(dropdown, lv_tr("Scanning..."));
             }
         }
     }
 
-    // Set up C callback safety context
-    bt_discovery_ctx_ = std::make_unique<BtDiscoveryContext>();
-    bt_discovery_ctx_->alive.store(true);
-    bt_discovery_ctx_->overlay = this;
+    helix::bluetooth::DiscoveryRun::Callbacks callbacks;
+    callbacks.accept = [](const helix_bt_device& dev) {
+        if (!dev.is_scanner)
+            return true;
+        spdlog::debug("[Label Printer] Skipping scanner: {} ({})", dev.name ? dev.name : "",
+                      helix::redact::mac(dev.mac ? dev.mac : ""));
+        return false;
+    };
+    callbacks.on_device = [this](const helix::bluetooth::DiscoveredDevice& found) {
+        BtDeviceInfo info;
+        info.mac = found.mac;
+        info.name = found.name;
+        info.paired = found.paired;
+        info.is_ble = found.is_ble;
+        info.is_scanner = found.is_scanner;
 
-    auto* disc_ctx = bt_discovery_ctx_.get();
-    auto* ctx = bt_ctx_;
-    auto token = lifetime_.token();
+        // Exact-MAC dedup: ignore if BlueZ repeats the same device.
+        for (const auto& existing : bt_devices_) {
+            if (existing.mac == info.mac)
+                return;
+        }
 
-    // Run discovery on a detached thread
-    // Wrap spawn per feedback_no_bare_threads_arm.md (#724, #837, [L083]).
-    try {
-        std::thread([ctx, disc_ctx, token, &loader]() {
-            loader.discover(
-                ctx, 15000,
-                [](const helix_bt_device* dev, void* user_data) {
-                    auto* dctx = static_cast<BtDiscoveryContext*>(user_data);
-                    if (!dctx->alive.load())
-                        return;
-
-                    // Copy device info to avoid dangling pointers
-                    BtDeviceInfo info;
-                    info.mac = dev->mac ? dev->mac : "";
-                    info.name = dev->name ? dev->name : "Unknown";
-                    info.paired = dev->paired;
-                    info.connected = false; // updated on UI thread below
-                    info.is_ble = dev->is_ble;
-                    info.is_scanner = dev->is_scanner;
-
-                    // Skip barcode scanners before marshaling to UI thread
-                    if (info.is_scanner) {
-                        spdlog::debug("[Label Printer] Skipping scanner: {} ({})", info.name,
-                                      helix::redact::mac(info.mac));
-                        return;
+        // Name-based transport resolution. Dual-mode printers (e.g.
+        // Niimbot D110) enumerate as two BlueZ entries with the same
+        // name: one BR/EDR half exposing only SPP/PnP, one BLE half
+        // exposing the vendor GATT service. The brand table knows
+        // which transport actually prints; drop the mismatched half.
+        bool replaced = false;
+        if (!info.name.empty() && helix::bluetooth::find_brand(info.name.c_str()) != nullptr) {
+            const bool brand_prefers_ble = helix::bluetooth::name_suggests_ble(info.name.c_str());
+            const bool new_matches_brand = (info.is_ble == brand_prefers_ble);
+            for (auto it = bt_devices_.begin(); it != bt_devices_.end(); ++it) {
+                if (it->name != info.name)
+                    continue;
+                const bool existing_matches_brand = (it->is_ble == brand_prefers_ble);
+                if (new_matches_brand && !existing_matches_brand) {
+                    // Genuine transport migration: the existing entry was
+                    // the wrong-transport half of a dual-mode device.
+                    // Replace it and clear the saved address so the user
+                    // re-pairs on the correct transport.
+                    spdlog::info("[Label Printer] Migrating {} from {} {} "
+                                 "to brand-preferred {} {}",
+                                 it->name, helix::redact::mac(it->mac),
+                                 it->is_ble ? "BLE" : "Classic", helix::redact::mac(info.mac),
+                                 info.is_ble ? "BLE" : "Classic");
+                    auto& settings_mgr = LabelPrinterSettingsManager::instance();
+                    if (settings_mgr.get_bt_address() == it->mac && it->mac != info.mac) {
+                        spdlog::warn("[Label Printer] Saved BT address {} is the "
+                                     "wrong transport for {}; clearing so user "
+                                     "re-pairs with {}",
+                                     helix::redact::mac(it->mac), it->name,
+                                     helix::redact::mac(info.mac));
+                        settings_mgr.set_bt_address("");
                     }
-
-                    // Marshal to UI thread
-                    helix::ui::queue_update([dctx, info]() {
-                        if (!dctx->alive.load())
-                            return;
-                        auto* overlay = dctx->overlay;
-
-                        // Exact-MAC dedup: ignore if BlueZ repeats the same device.
-                        for (const auto& existing : overlay->bt_devices_) {
-                            if (existing.mac == info.mac)
-                                return;
-                        }
-
-                        // Name-based transport resolution. Dual-mode printers (e.g.
-                        // Niimbot D110) enumerate as two BlueZ entries with the same
-                        // name: one BR/EDR half exposing only SPP/PnP, one BLE half
-                        // exposing the vendor GATT service. The brand table knows
-                        // which transport actually prints; drop the mismatched half.
-                        bool replaced = false;
-                        if (!info.name.empty() &&
-                            helix::bluetooth::find_brand(info.name.c_str()) != nullptr) {
-                            const bool brand_prefers_ble =
-                                helix::bluetooth::name_suggests_ble(info.name.c_str());
-                            const bool new_matches_brand = (info.is_ble == brand_prefers_ble);
-                            for (auto it = overlay->bt_devices_.begin();
-                                 it != overlay->bt_devices_.end(); ++it) {
-                                if (it->name != info.name)
-                                    continue;
-                                const bool existing_matches_brand =
-                                    (it->is_ble == brand_prefers_ble);
-                                if (new_matches_brand && !existing_matches_brand) {
-                                    // Genuine transport migration: the existing entry was
-                                    // the wrong-transport half of a dual-mode device.
-                                    // Replace it and clear the saved address so the user
-                                    // re-pairs on the correct transport.
-                                    spdlog::info("[Label Printer] Migrating {} from {} {} "
-                                                 "to brand-preferred {} {}",
-                                                 it->name, helix::redact::mac(it->mac),
-                                                 it->is_ble ? "BLE" : "Classic",
-                                                 helix::redact::mac(info.mac),
-                                                 info.is_ble ? "BLE" : "Classic");
-                                    auto& settings_mgr = LabelPrinterSettingsManager::instance();
-                                    if (settings_mgr.get_bt_address() == it->mac &&
-                                        it->mac != info.mac) {
-                                        spdlog::warn("[Label Printer] Saved BT address {} is the "
-                                                     "wrong transport for {}; clearing so user "
-                                                     "re-pairs with {}",
-                                                     helix::redact::mac(it->mac), it->name,
-                                                     helix::redact::mac(info.mac));
-                                        settings_mgr.set_bt_address("");
-                                    }
-                                    *it = info;
-                                    replaced = true;
-                                } else if (new_matches_brand && existing_matches_brand) {
-                                    // Same name, same transport, different MAC — same
-                                    // device re-advertising with a different address
-                                    // (BLE random-address rotation, e.g. Niimbot B1).
-                                    // Keep the existing entry so the user's saved
-                                    // pairing sticks; drop the duplicate.
-                                    spdlog::debug("[Label Printer] Ignoring duplicate {} "
-                                                  "advertisement for {} (existing {}, new {}) "
-                                                  "— same transport, treating as RPA rotation",
-                                                  info.is_ble ? "BLE" : "Classic", info.name,
-                                                  helix::redact::mac(it->mac),
-                                                  helix::redact::mac(info.mac));
-                                    return;
-                                } else {
-                                    // New entry is on the non-preferred transport; drop.
-                                    spdlog::debug("[Label Printer] Ignoring {} ({} {}): "
-                                                  "brand prefers {} transport already present",
-                                                  info.name, helix::redact::mac(info.mac),
-                                                  info.is_ble ? "BLE" : "Classic",
-                                                  brand_prefers_ble ? "BLE" : "Classic");
-                                    return;
-                                }
-                                break;
-                            }
-                        }
-
-                        if (!replaced) {
-                            overlay->bt_devices_.push_back(info);
-                            spdlog::debug("[Label Printer] BT discovered: {} ({})", info.name,
-                                          helix::redact::mac(info.mac));
-                        }
-
-                        // Update dropdown
-                        if (overlay->overlay_root_) {
-                            lv_obj_t* row =
-                                lv_obj_find_by_name(overlay->overlay_root_, "row_bt_printers");
-                            if (row) {
-                                lv_obj_t* dropdown = lv_obj_find_by_name(row, "dropdown");
-                                if (dropdown) {
-                                    std::string options;
-                                    for (const auto& d : overlay->bt_devices_) {
-                                        if (!options.empty())
-                                            options += "\n";
-                                        options += bt_device_label(d.name, d.paired, !d.mac.empty(),
-                                                                   d.connected);
-                                    }
-                                    lv_dropdown_close(dropdown);
-                                    lv_dropdown_set_options(dropdown, options.c_str());
-                                }
-                            }
-                        }
-                    });
-                },
-                disc_ctx);
-
-            // Discovery completed (timeout or stopped)
-            helix::ui::queue_update([disc_ctx, token]() {
-                if (token.expired())
+                    *it = info;
+                    replaced = true;
+                } else if (new_matches_brand && existing_matches_brand) {
+                    // Same name, same transport, different MAC — same
+                    // device re-advertising with a different address
+                    // (BLE random-address rotation, e.g. Niimbot B1).
+                    // Keep the existing entry so the user's saved
+                    // pairing sticks; drop the duplicate.
+                    spdlog::debug("[Label Printer] Ignoring duplicate {} "
+                                  "advertisement for {} (existing {}, new {}) "
+                                  "— same transport, treating as RPA rotation",
+                                  info.is_ble ? "BLE" : "Classic", info.name,
+                                  helix::redact::mac(it->mac), helix::redact::mac(info.mac));
                     return;
-                if (!disc_ctx->alive.load())
+                } else {
+                    // New entry is on the non-preferred transport; drop.
+                    spdlog::debug("[Label Printer] Ignoring {} ({} {}): "
+                                  "brand prefers {} transport already present",
+                                  info.name, helix::redact::mac(info.mac),
+                                  info.is_ble ? "BLE" : "Classic",
+                                  brand_prefers_ble ? "BLE" : "Classic");
                     return;
+                }
+                break;
+            }
+        }
 
-                auto* overlay = disc_ctx->overlay;
-                overlay->bt_discovering_ = false;
-                lv_subject_set_int(&overlay->bt_scanning_subject_, 0);
+        if (!replaced) {
+            bt_devices_.push_back(info);
+            spdlog::debug("[Label Printer] BT discovered: {} ({})", info.name,
+                          helix::redact::mac(info.mac));
+        }
 
-                if (overlay->overlay_root_) {
-                    lv_obj_t* row = lv_obj_find_by_name(overlay->overlay_root_, "row_bt_printers");
-                    if (row) {
-                        lv_obj_t* dropdown = lv_obj_find_by_name(row, "dropdown");
-                        if (dropdown) {
-                            lv_dropdown_close(dropdown);
-                            if (overlay->bt_devices_.empty()) {
-                                lv_dropdown_set_options(dropdown,
-                                                        lv_tr("No Bluetooth printers found"));
-                            } else {
-                                // Refresh dropdown with final device list (handles case where
-                                // all discovered devices were already known — dropdown still
-                                // shows "Scanning..." without this)
-                                std::string options;
-                                for (const auto& d : overlay->bt_devices_) {
-                                    if (!options.empty())
-                                        options += "\n";
-                                    options += bt_device_label(
-                                        d.name, d.paired,
-                                        d.mac == LabelPrinterSettingsManager::instance()
-                                                     .get_bt_address(),
-                                        d.connected);
-                                }
-                                lv_dropdown_set_options(dropdown, options.c_str());
-                            }
+        // Update dropdown
+        if (overlay_root_) {
+            lv_obj_t* row = helix::ui::find_required(overlay_root_, "row_bt_printers", get_name());
+            if (row) {
+                lv_obj_t* dropdown = helix::ui::find_required(row, "dropdown", get_name());
+                if (dropdown) {
+                    std::string options;
+                    for (const auto& d : bt_devices_) {
+                        if (!options.empty())
+                            options += "\n";
+                        options += bt_device_label(d.name, d.paired, !d.mac.empty(), d.connected);
+                    }
+                    lv_dropdown_close(dropdown);
+                    lv_dropdown_set_options(dropdown, options.c_str());
+                }
+            }
+        }
+    };
+    callbacks.on_finished = [this](bool ok) {
+        if (!ok)
+            ToastManager::instance().show(ToastSeverity::ERROR,
+                                          lv_tr("Could not start Bluetooth discovery"), 3000);
+        bt_discovering_ = false;
+        lv_subject_set_int(&bt_scanning_subject_, 0);
+
+        if (overlay_root_) {
+            lv_obj_t* row = helix::ui::find_required(overlay_root_, "row_bt_printers", get_name());
+            if (row) {
+                lv_obj_t* dropdown = helix::ui::find_required(row, "dropdown", get_name());
+                if (dropdown) {
+                    lv_dropdown_close(dropdown);
+                    if (bt_devices_.empty()) {
+                        lv_dropdown_set_options(dropdown, lv_tr("No Bluetooth printers found"));
+                    } else {
+                        // Refresh dropdown with final device list (handles case where
+                        // all discovered devices were already known — dropdown still
+                        // shows "Scanning..." without this)
+                        std::string options;
+                        for (const auto& d : bt_devices_) {
+                            if (!options.empty())
+                                options += "\n";
+                            options += bt_device_label(
+                                d.name, d.paired,
+                                d.mac == LabelPrinterSettingsManager::instance().get_bt_address(),
+                                d.connected);
                         }
+                        lv_dropdown_set_options(dropdown, options.c_str());
                     }
                 }
-
-                spdlog::info("[Label Printer] BT discovery finished, {} devices found",
-                             overlay->bt_devices_.size());
-            });
-        }).detach();
-    } catch (const std::system_error& e) {
-        spdlog::error("[{}] Failed to spawn BT discovery thread: {}", get_name(), e.what());
-        if (bt_discovery_ctx_) {
-            bt_discovery_ctx_->alive.store(false);
+            }
         }
+
+        spdlog::info("[Label Printer] BT discovery finished, {} devices found", bt_devices_.size());
+    };
+
+    if (!bt_discovery_.start(bt_ctx_, 15000, lifetime_.token(), std::move(callbacks))) {
         bt_discovering_ = false;
         lv_subject_set_int(&bt_scanning_subject_, 0);
         ToastManager::instance().show(ToastSeverity::ERROR,
@@ -1416,16 +1301,7 @@ void LabelPrinterSettingsOverlay::stop_bt_discovery() {
     if (!bt_discovering_)
         return;
 
-    // Invalidate the discovery context to prevent callbacks
-    if (bt_discovery_ctx_) {
-        bt_discovery_ctx_->alive.store(false);
-    }
-
-    auto& loader = helix::bluetooth::BluetoothLoader::instance();
-    if (bt_ctx_ && loader.stop_discovery) {
-        loader.stop_discovery(bt_ctx_);
-    }
-
+    bt_discovery_.cancel();
     bt_discovering_ = false;
     lv_subject_set_int(&bt_scanning_subject_, 0);
     spdlog::debug("[{}] Stopped Bluetooth discovery", get_name());
@@ -1466,23 +1342,22 @@ void LabelPrinterSettingsOverlay::handle_bt_printer_selected(int index) {
                     return;
                 }
 
-                if (!bt_ctx_) {
-                    ToastManager::instance().show(ToastSeverity::ERROR,
-                                                  lv_tr("Bluetooth not initialized"));
-                    return;
-                }
-
                 ToastManager::instance().show(ToastSeverity::INFO, lv_tr("Pairing..."), 5000);
 
                 auto token = lifetime_.token();
-                auto* bt_ctx = bt_ctx_;
+                auto shared_ctx = bt_ctx_;
 
                 // Pair on a detached thread
                 // Wrap spawn per feedback_no_bare_threads_arm.md (#724, #837, [L083]).
                 try {
-                    std::thread([mac, bt_ctx, token]() {
+                    helix::make_thread([mac, shared_ctx, token]() {
                         auto& ldr = helix::bluetooth::BluetoothLoader::instance();
-                        int ret = ldr.pair(bt_ctx, mac.c_str());
+                        auto* bt_ctx = shared_ctx->get();
+                        int ret = bt_ctx ? ldr.pair(bt_ctx, mac.c_str()) : -ENODEV;
+                        std::string err;
+                        if (ret != 0)
+                            err = bt_ctx && ldr.last_error ? ldr.last_error(bt_ctx)
+                                                           : "Bluetooth not initialized";
 
                         // Check paired/connected state on this worker thread (D-Bus
                         // calls can take seconds - must not block the UI thread)
@@ -1496,60 +1371,62 @@ void LabelPrinterSettingsOverlay::handle_bt_printer_selected(int index) {
                                          paired_r, connected);
                         }
 
-                        helix::ui::queue_update([ret, mac, token, bt_ctx, paired_r, connected]() {
-                            if (token.expired())
-                                return;
+                        helix::ui::queue_update(
+                            "LabelPrinterSettingsOverlay::handle_bt_printer_selected",
+                            [ret, mac, token, err, paired_r, connected]() {
+                                if (token.expired())
+                                    return;
 
-                            if (ret == 0) {
-                                ToastManager::instance().show(ToastSeverity::SUCCESS,
-                                                              lv_tr("Paired successfully"), 2000);
+                                if (ret == 0) {
+                                    ToastManager::instance().show(
+                                        ToastSeverity::SUCCESS, lv_tr("Paired successfully"), 2000);
 
-                                // Update device info and save settings
-                                auto& ov = get_label_printer_settings_overlay();
-                                for (auto& dev : ov.bt_devices_) {
-                                    if (dev.mac == mac) {
-                                        dev.paired = (paired_r == 1);
-                                        dev.connected = connected;
-                                        auto& settings = LabelPrinterSettingsManager::instance();
-                                        settings.set_bt_address(mac);
-                                        settings.set_bt_name(dev.name);
-                                        settings.set_bt_transport(dev.is_ble ? "ble" : "spp");
-                                        ov.init_label_size_dropdown();
-                                        break;
-                                    }
-                                }
-
-                                // Refresh dropdown to show paired checkmark
-                                if (ov.overlay_root_) {
-                                    lv_obj_t* row =
-                                        lv_obj_find_by_name(ov.overlay_root_, "row_bt_printers");
-                                    if (row) {
-                                        lv_obj_t* dropdown = lv_obj_find_by_name(row, "dropdown");
-                                        if (dropdown) {
-                                            lv_dropdown_close(dropdown);
-                                            std::string options;
-                                            for (const auto& d : ov.bt_devices_) {
-                                                if (!options.empty())
-                                                    options += "\n";
-                                                options += bt_device_label(
-                                                    d.name, d.paired,
-                                                    d.mac == LabelPrinterSettingsManager::instance()
-                                                                 .get_bt_address(),
-                                                    d.connected);
-                                            }
-                                            lv_dropdown_set_options(dropdown, options.c_str());
+                                    // Update device info and save settings
+                                    auto& ov = get_label_printer_settings_overlay();
+                                    for (auto& dev : ov.bt_devices_) {
+                                        if (dev.mac == mac) {
+                                            dev.paired = (paired_r == 1);
+                                            dev.connected = connected;
+                                            auto& settings =
+                                                LabelPrinterSettingsManager::instance();
+                                            settings.set_bt_address(mac);
+                                            settings.set_bt_name(dev.name);
+                                            settings.set_bt_transport(dev.is_ble ? "ble" : "spp");
+                                            ov.init_label_size_dropdown();
+                                            break;
                                         }
                                     }
+
+                                    // Refresh dropdown to show paired checkmark
+                                    if (ov.overlay_root_) {
+                                        lv_obj_t* row = helix::ui::find_required(
+                                            ov.overlay_root_, "row_bt_printers", "Label Printer");
+                                        if (row) {
+                                            lv_obj_t* dropdown = helix::ui::find_required(
+                                                row, "dropdown", "Label Printer");
+                                            if (dropdown) {
+                                                lv_dropdown_close(dropdown);
+                                                std::string options;
+                                                for (const auto& d : ov.bt_devices_) {
+                                                    if (!options.empty())
+                                                        options += "\n";
+                                                    options += bt_device_label(
+                                                        d.name, d.paired,
+                                                        d.mac ==
+                                                            LabelPrinterSettingsManager::instance()
+                                                                .get_bt_address(),
+                                                        d.connected);
+                                                }
+                                                lv_dropdown_set_options(dropdown, options.c_str());
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    spdlog::error("[LabelPrinterSettings] Pairing failed: {}", err);
+                                    ToastManager::instance().show(ToastSeverity::ERROR,
+                                                                  lv_tr("Pairing failed"), 3000);
                                 }
-                            } else {
-                                auto& ldr = helix::bluetooth::BluetoothLoader::instance();
-                                const char* err =
-                                    ldr.last_error ? ldr.last_error(bt_ctx) : "Unknown error";
-                                spdlog::error("[LabelPrinterSettings] Pairing failed: {}", err);
-                                ToastManager::instance().show(ToastSeverity::ERROR,
-                                                              lv_tr("Pairing failed"), 3000);
-                            }
-                        });
+                            });
                     }).detach();
                 } catch (const std::system_error& e) {
                     spdlog::error("[LabelPrinterSettings] Failed to spawn pair thread: {}",
@@ -1574,7 +1451,7 @@ void LabelPrinterSettingsOverlay::handle_bt_printer_selected(int index) {
 
     // Enable connect button when not connected
     if (overlay_root_) {
-        lv_obj_t* btn = lv_obj_find_by_name(overlay_root_, "btn_bt_connect");
+        lv_obj_t* btn = find_required(overlay_root_, "btn_bt_connect", get_name());
         if (btn) {
             if (!device.connected) {
                 lv_obj_remove_state(btn, LV_STATE_DISABLED);
@@ -1596,90 +1473,6 @@ void LabelPrinterSettingsOverlay::handle_bt_scan() {
     }
 }
 
-// ============================================================================
-// STATIC CALLBACKS
-// ============================================================================
-
-void LabelPrinterSettingsOverlay::on_address_done(lv_event_t* /*e*/) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[LabelPrinterSettings] on_address_done");
-    get_label_printer_settings_overlay().handle_address_changed();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void LabelPrinterSettingsOverlay::on_port_done(lv_event_t* /*e*/) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[LabelPrinterSettings] on_port_done");
-    get_label_printer_settings_overlay().handle_port_changed();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void LabelPrinterSettingsOverlay::on_label_size_changed(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[LabelPrinterSettings] on_label_size_changed");
-    auto* dropdown = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
-    int index = static_cast<int>(lv_dropdown_get_selected(dropdown));
-    get_label_printer_settings_overlay().handle_label_size_changed(index);
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void LabelPrinterSettingsOverlay::on_preset_changed(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[LabelPrinterSettings] on_preset_changed");
-    auto* dropdown = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
-    int index = static_cast<int>(lv_dropdown_get_selected(dropdown));
-    get_label_printer_settings_overlay().handle_preset_changed(index);
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void LabelPrinterSettingsOverlay::on_test_print(lv_event_t* /*e*/) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[LabelPrinterSettings] on_test_print");
-    get_label_printer_settings_overlay().handle_test_print();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void LabelPrinterSettingsOverlay::on_printer_selected(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[LabelPrinterSettings] on_printer_selected");
-    auto* dropdown = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
-    int index = static_cast<int>(lv_dropdown_get_selected(dropdown));
-    get_label_printer_settings_overlay().handle_printer_selected(index);
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void LabelPrinterSettingsOverlay::on_type_changed(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[LabelPrinterSettings] on_type_changed");
-    auto* dropdown = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
-    int index = static_cast<int>(lv_dropdown_get_selected(dropdown));
-    get_label_printer_settings_overlay().handle_type_changed(index);
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void LabelPrinterSettingsOverlay::on_usb_printer_selected(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[LabelPrinterSettings] on_usb_printer_selected");
-    auto* dropdown = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
-    int index = static_cast<int>(lv_dropdown_get_selected(dropdown));
-    get_label_printer_settings_overlay().handle_usb_printer_selected(index);
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void LabelPrinterSettingsOverlay::on_bt_printer_selected(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[LabelPrinterSettings] on_bt_printer_selected");
-    auto* dropdown = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
-    int index = static_cast<int>(lv_dropdown_get_selected(dropdown));
-    get_label_printer_settings_overlay().handle_bt_printer_selected(index);
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void LabelPrinterSettingsOverlay::on_bt_scan(lv_event_t* /*e*/) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[LabelPrinterSettings] on_bt_scan");
-    get_label_printer_settings_overlay().handle_bt_scan();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void LabelPrinterSettingsOverlay::on_label_count_changed(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[LabelPrinterSettings] on_label_count_changed");
-    auto* dropdown = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
-    int index = static_cast<int>(lv_dropdown_get_selected(dropdown));
-    get_label_printer_settings_overlay().handle_label_count_changed(index);
-    LVGL_SAFE_EVENT_CB_END();
-}
-
 void LabelPrinterSettingsOverlay::handle_bt_connect() {
     auto& settings = LabelPrinterSettingsManager::instance();
     std::string mac = settings.get_bt_address();
@@ -1690,37 +1483,30 @@ void LabelPrinterSettingsOverlay::handle_bt_connect() {
     if (!loader.is_available())
         return;
 
-    // Ensure BT context
-    if (!bt_ctx_ && loader.init) {
-        bt_ctx_ = loader.init();
-    }
-    if (!bt_ctx_)
-        return;
-
     // Disable button while connecting
     if (overlay_root_) {
-        lv_obj_t* btn = lv_obj_find_by_name(overlay_root_, "btn_bt_connect");
+        lv_obj_t* btn = find_required(overlay_root_, "btn_bt_connect", get_name());
         if (btn)
             lv_obj_add_state(btn, LV_STATE_DISABLED);
     }
 
     auto token = lifetime_.token();
-    auto* ctx = bt_ctx_;
+    auto shared_ctx = bt_ctx_;
 
     // Wrap spawn per feedback_no_bare_threads_arm.md (#724, #837, [L083]).
     try {
-        std::thread([mac, ctx, token]() {
+        helix::make_thread([mac, shared_ctx, token]() {
             auto& ldr = helix::bluetooth::BluetoothLoader::instance();
-            auto* init_ctx = ctx;
+            auto* init_ctx = shared_ctx->get();
             int ret = -1;
 
-            if (ldr.pair) {
+            if (init_ctx && ldr.pair) {
                 ret = ldr.pair(init_ctx, mac.c_str());
             }
 
             // If pair failed (device may have been removed from BlueZ cache),
             // try a brief scan to rediscover, then retry
-            if (ret < 0 && ldr.discover && ldr.pair) {
+            if (init_ctx && ret < 0 && ldr.discover && ldr.pair) {
                 spdlog::info("[LabelPrinterSettings] Pair failed, scanning to rediscover {}...",
                              helix::redact::mac(mac));
                 struct ScanCtx {
@@ -1736,7 +1522,7 @@ void LabelPrinterSettingsOverlay::handle_bt_connect() {
                             sc->found = true;
                         }
                     },
-                    &scan_ctx);
+                    &scan_ctx, nullptr);
 
                 if (scan_ctx.found) {
                     spdlog::info("[LabelPrinterSettings] Rediscovered {}, retrying pair",
@@ -1757,7 +1543,10 @@ void LabelPrinterSettingsOverlay::handle_bt_connect() {
                 paired_ok = (ldr.is_paired(init_ctx, mac.c_str()) == 1);
             }
 
-            helix::ui::queue_update([mac, paired_ok, connected, token]() {
+            helix::ui::queue_update("LabelPrinterSettingsOverlay::handle_bt_connect", [mac,
+                                                                                       paired_ok,
+                                                                                       connected,
+                                                                                       token]() {
                 if (token.expired())
                     return;
 
@@ -1774,9 +1563,11 @@ void LabelPrinterSettingsOverlay::handle_bt_connect() {
 
                 // Refresh dropdown labels
                 if (ov.overlay_root_) {
-                    lv_obj_t* row = lv_obj_find_by_name(ov.overlay_root_, "row_bt_printers");
+                    lv_obj_t* row = helix::ui::find_required(ov.overlay_root_, "row_bt_printers",
+                                                             "Label Printer");
                     if (row) {
-                        lv_obj_t* dropdown = lv_obj_find_by_name(row, "dropdown");
+                        lv_obj_t* dropdown =
+                            helix::ui::find_required(row, "dropdown", "Label Printer");
                         if (dropdown) {
                             std::string options;
                             for (const auto& d : ov.bt_devices_) {
@@ -1793,7 +1584,8 @@ void LabelPrinterSettingsOverlay::handle_bt_connect() {
                     }
 
                     // Update connect button state
-                    lv_obj_t* btn = lv_obj_find_by_name(ov.overlay_root_, "btn_bt_connect");
+                    lv_obj_t* btn = helix::ui::find_required(ov.overlay_root_, "btn_bt_connect",
+                                                             "Label Printer");
                     if (btn) {
                         if (paired_ok) {
                             lv_obj_add_state(btn, LV_STATE_DISABLED);
@@ -1814,18 +1606,12 @@ void LabelPrinterSettingsOverlay::handle_bt_connect() {
     } catch (const std::system_error& e) {
         spdlog::error("[LabelPrinterSettings] Failed to spawn pair thread: {}", e.what());
         if (overlay_root_) {
-            lv_obj_t* btn = lv_obj_find_by_name(overlay_root_, "btn_bt_connect");
+            lv_obj_t* btn = find_required(overlay_root_, "btn_bt_connect", get_name());
             if (btn)
                 lv_obj_remove_state(btn, LV_STATE_DISABLED);
         }
         ToastManager::instance().show(ToastSeverity::ERROR, lv_tr("Pairing failed"), 2000);
     }
-}
-
-void LabelPrinterSettingsOverlay::on_bt_connect(lv_event_t* /*e*/) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[LabelPrinterSettings] on_bt_connect");
-    get_label_printer_settings_overlay().handle_bt_connect();
-    LVGL_SAFE_EVENT_CB_END();
 }
 
 void LabelPrinterSettingsOverlay::handle_bt_forget() {
@@ -1840,10 +1626,10 @@ void LabelPrinterSettingsOverlay::handle_bt_forget() {
 
     // Disable Forget + Connect buttons while the unpair is in flight
     if (overlay_root_) {
-        if (auto* fbtn = lv_obj_find_by_name(overlay_root_, "btn_bt_forget")) {
+        if (auto* fbtn = find_required(overlay_root_, "btn_bt_forget", get_name())) {
             lv_obj_add_state(fbtn, LV_STATE_DISABLED);
         }
-        if (auto* cbtn = lv_obj_find_by_name(overlay_root_, "btn_bt_connect")) {
+        if (auto* cbtn = find_required(overlay_root_, "btn_bt_connect", get_name())) {
             lv_obj_add_state(cbtn, LV_STATE_DISABLED);
         }
     }
@@ -1852,7 +1638,7 @@ void LabelPrinterSettingsOverlay::handle_bt_forget() {
     // Wrap the std::thread spawn in try/catch per feedback_no_bare_threads_arm.md
     // (#724) — thread creation can fail on AD5M/CC1 due to tight thread limits.
     try {
-        std::thread([this, tok, mac]() {
+        helix::make_thread([this, tok, mac]() {
             bool bluez_ok = false;
             auto& loader = helix::bluetooth::BluetoothLoader::instance();
             if (!loader.is_available() || !loader.remove_device) {
@@ -1919,12 +1705,6 @@ void LabelPrinterSettingsOverlay::handle_bt_forget() {
         spdlog::error("[LabelPrinterSettings] Failed to spawn forget thread: {}", e.what());
         ToastManager::instance().show(ToastSeverity::ERROR, lv_tr("Could not forget device"), 3000);
     }
-}
-
-void LabelPrinterSettingsOverlay::on_bt_forget(lv_event_t* /*e*/) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[LabelPrinterSettings] on_bt_forget");
-    get_label_printer_settings_overlay().handle_bt_forget();
-    LVGL_SAFE_EVENT_CB_END();
 }
 
 } // namespace helix::settings

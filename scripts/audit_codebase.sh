@@ -84,6 +84,7 @@ NC='\033[0m' # No Color
 # Parse arguments
 STRICT_MODE=false
 FILE_MODE=false
+STAGED_FILE_MODE=false
 FILES=()
 
 while [[ $# -gt 0 ]]; do
@@ -94,6 +95,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --files)
             FILE_MODE=true
+            STAGED_FILE_MODE=true
             shift
             # Collect all remaining arguments as files
             while [[ $# -gt 0 && ! "$1" =~ ^-- ]]; do
@@ -143,35 +145,60 @@ section() {
 # Change to repo root
 cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 
-# Filter files to only include relevant types
+# --files names the pre-commit hook's staged set (quality-checks.sh's
+# qc_mem_safety only calls this script that way). Every check below reads a
+# path with grep/sed against the filesystem, which is the working tree unless
+# each name here is swapped for a copy of its STAGED content first: stage a
+# violation, then revert the working file to something clean, and a plain
+# `grep "$f"` finds the clean copy and reports nothing while the bad blob
+# commits. A bare positional file argument (no --files) is a manual spot-check
+# against the real file on disk and is left alone.
+if [ "$STAGED_FILE_MODE" = true ] && [ ${#FILES[@]} -gt 0 ]; then
+    AUDIT_STAGED_DIR="$(mktemp -d "${TMPDIR:-/tmp}/helix-audit-staged.XXXXXX")"
+    trap 'rm -rf "$AUDIT_STAGED_DIR"' EXIT
+    STAGED_COPIES=()
+    for f in "${FILES[@]}"; do
+        if git cat-file -e ":$f" 2>/dev/null; then
+            dest="$AUDIT_STAGED_DIR/$f"
+            mkdir -p "$(dirname "$dest")"
+            git show ":$f" > "$dest" 2>/dev/null
+            STAGED_COPIES+=("$dest")
+        fi
+        # No index entry (staged for deletion) - nothing to check; dropped
+        # rather than carried forward as a stale working-tree copy.
+    done
+    FILES=("${STAGED_COPIES[@]}")
+fi
+
+# Filter files to only include relevant types. NUL-delimited output, never a
+# space-joined echo: a path with an embedded space (a real path this script
+# receives via --files from a staged-file list) would otherwise be torn back
+# apart the moment a caller re-reads it with plain word-splitting.
 filter_cpp_files() {
-    local result=()
+    local f
     for f in "${FILES[@]}"; do
         if [[ "$f" == *.cpp && -f "$f" ]]; then
-            result+=("$f")
+            printf '%s\0' "$f"
         fi
     done
-    echo "${result[@]:-}"
 }
 
 filter_xml_files() {
-    local result=()
+    local f
     for f in "${FILES[@]}"; do
         if [[ "$f" == *.xml && -f "$f" ]]; then
-            result+=("$f")
+            printf '%s\0' "$f"
         fi
     done
-    echo "${result[@]:-}"
 }
 
 filter_ui_cpp_files() {
-    local result=()
+    local f
     for f in "${FILES[@]}"; do
         if [[ "$f" == *ui_*.cpp && -f "$f" ]]; then
-            result+=("$f")
+            printf '%s\0' "$f"
         fi
     done
-    echo "${result[@]:-}"
 }
 
 # ============================================================================
@@ -183,11 +210,12 @@ if [ "$FILE_MODE" = true ]; then
     echo "Checking ${#FILES[@]} file(s)"
     echo "========================================"
 
-    # Get filtered file lists (filter_* echo one space-joined line; read -ra
-    # reproduces the word splitting the old array assignment did)
-    read -ra cpp_files <<< "$(filter_cpp_files)"
-    read -ra ui_cpp_files <<< "$(filter_ui_cpp_files)"
-    read -ra xml_files <<< "$(filter_xml_files)"
+    cpp_files=()
+    while IFS= read -r -d '' f; do cpp_files+=("$f"); done < <(filter_cpp_files)
+    ui_cpp_files=()
+    while IFS= read -r -d '' f; do ui_cpp_files+=("$f"); done < <(filter_ui_cpp_files)
+    xml_files=()
+    while IFS= read -r -d '' f; do xml_files+=("$f"); done < <(filter_xml_files)
 
     if [ ${#cpp_files[@]} -eq 0 ] && [ ${#xml_files[@]} -eq 0 ]; then
         echo "No auditable files (.cpp, .xml) in changeset"

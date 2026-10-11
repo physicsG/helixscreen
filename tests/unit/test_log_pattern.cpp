@@ -31,6 +31,8 @@ using helix::logging::SinkKind;
 
 namespace {
 
+// TEST_MIRROR_OK: contains() is a one-line assertion utility (substring search), not logic
+// under test
 bool contains(const char* hay, const char* needle) {
     return std::string(hay).find(needle) != std::string::npos;
 }
@@ -158,10 +160,17 @@ TEST_CASE("A rendered line actually contains the monotonic offset", "[logging][p
     // Guards the flag REGISTRATION, not just the pattern string: an unregistered
     // custom flag makes spdlog emit "%*" verbatim, which the string tests above
     // would happily accept.
+    //
+    // The offset is pinned through the replay channel: the live clock reads
+    // process age, so the rendered digits depend on how long the run has lasted.
+    auto& replay = helix::logging::detail::monotonic_replay();
+    replay.active = true;
+    replay.value = 1234.5;
     const std::string line = render(SinkKind::File, spdlog::log_clock::now());
+    replay = {};
     INFO(line);
     REQUIRE(line.find("%*") == std::string::npos);
-    REQUIRE(line.find("+00") != std::string::npos);
+    REQUIRE(line.find("+01234.500") != std::string::npos);
     REQUIRE(line.find("hello") != std::string::npos);
 }
 

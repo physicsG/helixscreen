@@ -28,26 +28,33 @@
           <!-- Title: "Multi-Filament" (colon lives with the backend suffix so it
                can be hidden together at MICRO/TINY) -->
           <text_heading name="header_title"
-                        text="Multi-Filament" translation_tag="Multi-Filament" text_transform="uppercase"
-                        long_mode="dots" style_text_align="left" clickable="false" event_bubble="true"
-                        scrollable="false"/>
+                        text="Multi-Filament" text_transform="uppercase" long_mode="dots" style_max_width="100%"
+                        style_text_align="left" clickable="false" event_bubble="true" scrollable="false"/>
           <!-- Backend suffix (":" + logo + name) — hidden at MICRO/TINY where
                horizontal room is tight. -->
+          <!-- width="1"+flex_grow: the suffix takes what the title and the chip leave,
+               and its name ellipsizes inside that, so the title keeps priority. -->
           <lv_obj name="header_backend_suffix"
-                  width="content" height="content" style_pad_all="0" flex_flow="row" style_flex_cross_place="center"
-                  style_pad_gap="#space_xs" scrollable="false" clickable="false" event_bubble="true">
+                  width="1" height="100%" flex_grow="1" style_pad_all="0" flex_flow="row"
+                  style_flex_cross_place="center" style_pad_gap="#space_xs" scrollable="false" clickable="false"
+                  event_bubble="true">
             <bind_flag_if_lt subject="ui_breakpoint" flag="hidden" ref_value="2"/>
             <text_heading text=":" clickable="false" event_bubble="true" scrollable="false"/>
-            <!-- System logo (bound to ams_system_logo subject) -->
+            <!-- System logo (bound to ams_system_logo subject). The logos are white
+                 marks, recolored to the heading text so they read in both modes. -->
             <lv_image name="system_logo"
-                      width="20" height="20" bind_src="ams_system_logo" inner_align="contain" clickable="false"
-                      event_bubble="true"/>
+                      width="#ams_header_logo_size" height="#ams_header_logo_size" bind_src="ams_system_logo"
+                      inner_align="contain" clickable="false" event_bubble="true" style_image_recolor="#text"
+                      style_image_recolor_opa="255"/>
             <!-- System name (bound to ams_system_name subject) -->
             <text_heading name="system_name_label"
-                          bind_text="ams_system_name" text_transform="uppercase" long_mode="dots" clickable="false"
-                          event_bubble="true" scrollable="false"/>
+                          width="1" flex_grow="1" bind_text="ams_system_name" text_transform="uppercase"
+                          long_mode="dots" style_max_height="100%" clickable="false" event_bubble="true"
+                          scrollable="false"/>
           </lv_obj>
         </lv_obj>
+        <!-- Outside the back button so a long system name cannot push it off the header -->
+        <ams_disconnected_chip name="system_disconnected_chip" disconnected="ams_all_units_disconnected"/>
       </lv_obj>
       <!-- Left column content (unit visualization + path canvas) -->
       <lv_obj name="left_column"
@@ -86,7 +93,7 @@
              Uses flex_grow="1" to fill remaining vertical space in left column -->
         <lv_obj name="path_container"
                 width="100%" flex_grow="1" style_pad_all="0" style_margin_top="-8" flex_flow="column"
-                style_flex_main_place="start" style_flex_cross_place="center" scrollable="false">
+                overflow_visible="true" style_flex_main_place="start" style_flex_cross_place="center" scrollable="false">
           <!-- Filament Path Canvas
                Shows schematic view of filament routing:
                - Slots at top (entry points)

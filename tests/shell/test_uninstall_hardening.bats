@@ -16,7 +16,7 @@ setup() {
     load helpers
 
     # Source the bundled uninstall.sh (the case guard skips main)
-    . "$WORKTREE_ROOT/scripts/uninstall.sh"
+    . "$UNINSTALL_BUNDLE"
 
     export INSTALL_DIR="$BATS_TEST_TMPDIR/opt/helixscreen"
     export HELIX_INSTALL_DIRS="$INSTALL_DIR"
@@ -100,9 +100,9 @@ setup() {
     # the simplest cross-check that the order didn't get accidentally swapped.
     local sentinel_line install_line
     sentinel_line=$(awk '/^main\(\)/{found=1} found && /_drop_uninstalling_sentinel/{print NR; exit}' \
-        "$WORKTREE_ROOT/scripts/uninstall.sh")
+        "$UNINSTALL_BUNDLE")
     install_line=$(awk '/^main\(\)/{found=1} found && /^    remove_installation$/{print NR; exit}' \
-        "$WORKTREE_ROOT/scripts/uninstall.sh")
+        "$UNINSTALL_BUNDLE")
     [ -n "$sentinel_line" ]
     [ -n "$install_line" ]
     [ "$sentinel_line" -lt "$install_line" ]
@@ -111,9 +111,9 @@ setup() {
 @test "bundle main(): remove_update_manager_section runs before remove_installation" {
     local mr_line install_line
     mr_line=$(awk '/^main\(\)/{found=1} found && /^    remove_update_manager_section/{print NR; exit}' \
-        "$WORKTREE_ROOT/scripts/uninstall.sh")
+        "$UNINSTALL_BUNDLE")
     install_line=$(awk '/^main\(\)/{found=1} found && /^    remove_installation$/{print NR; exit}' \
-        "$WORKTREE_ROOT/scripts/uninstall.sh")
+        "$UNINSTALL_BUNDLE")
     [ -n "$mr_line" ]
     [ -n "$install_line" ]
     [ "$mr_line" -lt "$install_line" ]
@@ -130,12 +130,12 @@ setup() {
         /^uninstall\(\)/{found=1}
         found && /^[a-z_]+\(\)/ && !/^uninstall\(\)/ {found=0}
         found && /remove_update_manager_section/{print NR; exit}
-    ' "$WORKTREE_ROOT/scripts/install.sh")
+    ' "$INSTALL_BUNDLE")
     rm_line=$(awk '
         /^uninstall\(\)/{found=1}
         found && /^[a-z_]+\(\)/ && !/^uninstall\(\)/ {found=0}
         found && /rm -rf "\$install_dir"/{print NR; exit}
-    ' "$WORKTREE_ROOT/scripts/install.sh")
+    ' "$INSTALL_BUNDLE")
     [ -n "$mr_line" ]
     [ -n "$rm_line" ]
     [ "$mr_line" -lt "$rm_line" ]
@@ -148,12 +148,12 @@ setup() {
         /^uninstall\(\)/{found=1}
         found && /^[a-z_]+\(\)/ && !/^uninstall\(\)/ {found=0}
         found && /_drop_uninstalling_sentinel/{print NR; exit}
-    ' "$WORKTREE_ROOT/scripts/uninstall.sh")
+    ' "$UNINSTALL_BUNDLE")
     rm_line=$(awk '
         /^uninstall\(\)/{found=1}
         found && /^[a-z_]+\(\)/ && !/^uninstall\(\)/ {found=0}
         found && /rm -rf "\$install_dir"/{print NR; exit}
-    ' "$WORKTREE_ROOT/scripts/uninstall.sh")
+    ' "$UNINSTALL_BUNDLE")
     [ -n "$sentinel_line" ]
     [ -n "$rm_line" ]
     [ "$sentinel_line" -lt "$rm_line" ]
@@ -168,13 +168,6 @@ setup() {
         "$WORKTREE_ROOT/config/helixscreen-update.service"
     grep -q "@@INSTALL_PARENT@@/.helixscreen/.uninstalling" \
         "$WORKTREE_ROOT/config/helixscreen-update.service"
-}
-
-@test "helixscreen-update.service template uninstalling-guard exits 1 to skip" {
-    # The guard must `exit 1` to abort the oneshot, not exit 0 (which would
-    # continue and restart helixscreen).
-    grep -A 6 "uninstalling" "$WORKTREE_ROOT/config/helixscreen-update.service" | \
-        grep -q "exit 1"
 }
 
 # ============================================================================
@@ -199,7 +192,7 @@ setup() {
     mkdir -p "$INSTALL_DIR"
     # Stage a copy of uninstall.sh inside INSTALL_DIR and invoke main()
     # through that path so $0 resolves inside INSTALL_DIR.
-    cp "$WORKTREE_ROOT/scripts/uninstall.sh" "$INSTALL_DIR/uninstall.sh"
+    cp "$UNINSTALL_BUNDLE" "$INSTALL_DIR/uninstall.sh"
 
     # Run the in-INSTALL_DIR copy.  guard_self_delete runs right after
     # set_install_paths and before check_permissions / detect_init_system,
@@ -217,7 +210,7 @@ setup() {
 @test "install.sh --uninstall refuses when \$0 is inside INSTALL_DIR" {
     INSTALL_DIR="$BATS_TEST_TMPDIR/opt/helixscreen"
     mkdir -p "$INSTALL_DIR"
-    cp "$WORKTREE_ROOT/scripts/install.sh" "$INSTALL_DIR/install.sh"
+    cp "$INSTALL_BUNDLE" "$INSTALL_DIR/install.sh"
 
     run sh "$INSTALL_DIR/install.sh" --uninstall
     [ "$status" -ne 0 ]
@@ -231,7 +224,7 @@ setup() {
     # don't match if INSTALL_DIR ends in / (becomes //*).  Normalize with %/.
     INSTALL_DIR="$BATS_TEST_TMPDIR/opt/helixscreen/"
     mkdir -p "$BATS_TEST_TMPDIR/opt/helixscreen"
-    cp "$WORKTREE_ROOT/scripts/uninstall.sh" "$BATS_TEST_TMPDIR/opt/helixscreen/uninstall.sh"
+    cp "$UNINSTALL_BUNDLE" "$BATS_TEST_TMPDIR/opt/helixscreen/uninstall.sh"
 
     run sh "$BATS_TEST_TMPDIR/opt/helixscreen/uninstall.sh" --force
     [ "$status" -ne 0 ]
@@ -267,17 +260,17 @@ setup() {
 }
 
 # ============================================================================
-# Regen check — the lib module and bundle must stay in sync
+# Determinism: every consumer builds its own bundle, and they must agree byte for byte
 # ============================================================================
 
 @test "bundle-uninstaller.sh regenerates identical output (idempotent)" {
     local regen="$BATS_TEST_TMPDIR/uninstall-regen.sh"
     "$WORKTREE_ROOT/scripts/bundle-uninstaller.sh" -o "$regen"
-    diff "$WORKTREE_ROOT/scripts/uninstall.sh" "$regen"
+    diff "$UNINSTALL_BUNDLE" "$regen"
 }
 
 @test "bundle-installer.sh regenerates identical output (idempotent)" {
     local regen="$BATS_TEST_TMPDIR/install-regen.sh"
     "$WORKTREE_ROOT/scripts/bundle-installer.sh" -o "$regen"
-    diff "$WORKTREE_ROOT/scripts/install.sh" "$regen"
+    diff "$INSTALL_BUNDLE" "$regen"
 }

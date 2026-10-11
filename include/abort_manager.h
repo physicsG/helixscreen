@@ -5,6 +5,7 @@
 #include "ui_observer_guard.h"
 #include "ui_timer_guard.h"
 
+#include "async_lifetime_guard.h"
 #include "lvgl/lvgl.h"
 #include "moonraker_job_api.h"
 #include "printer_state.h"
@@ -24,7 +25,7 @@ namespace helix {
  * Manages print abort operations using a state machine that progressively
  * tries softer abort methods before resorting to M112 emergency stop:
  *
- * 1. TRY_HEATER_INTERRUPT - Probe for Kalico, try soft interrupt (1s timeout)
+ * 1. TRY_HEATER_INTERRUPT - Try soft interrupt where supported (1s timeout)
  * 2. PROBE_QUEUE - Send M115 to test if queue is responsive (2s timeout)
  * 3. SENT_CANCEL - Queue responsive, send printer.print.cancel RPC (configurable timeout)
  * 4. SENT_ESTOP - Queue blocked or cancel failed, send M112
@@ -46,7 +47,7 @@ namespace helix {
  *
  * Thread Safety:
  * - State is stored as std::atomic<State> for safe reads from any thread
- * - All UI updates use helix::ui::async_call() for thread safety
+ * - API callbacks reach the main thread through lifetime_.bg_cb()
  * - Callbacks from Moonraker WebSocket run on background thread
  *
  * Usage:
@@ -69,7 +70,7 @@ class AbortManager {
      */
     enum class State {
         IDLE,                 ///< Not aborting, ready for new abort request
-        TRY_HEATER_INTERRUPT, ///< Probing for Kalico with HEATER_INTERRUPT command
+        TRY_HEATER_INTERRUPT, ///< Sending HEATER_INTERRUPT
         PROBE_QUEUE,          ///< Sending M115 to check if G-code queue is responsive
         SENT_CANCEL,          ///< Queue responsive, printer.print.cancel RPC sent
         SENT_ESTOP,           ///< Queue blocked or cancel failed, M112 sent
@@ -79,12 +80,12 @@ class AbortManager {
     };
 
     /**
-     * @brief Kalico firmware detection status (resolved from printer.info at first abort)
+     * @brief Whether the firmware accepts HEATER_INTERRUPT (resolved from discovery at first abort)
      */
-    enum class KalicoStatus {
-        UNKNOWN,    ///< Not yet resolved (printer.info not available)
-        DETECTED,   ///< printer.info "app" == "Kalico"
-        NOT_PRESENT ///< Stock Klipper (no Kalico app field)
+    enum class HeaterInterruptSupport {
+        UNKNOWN,    ///< Not yet resolved (discovery not available)
+        SUPPORTED,  ///< Discovery reports HEATER_INTERRUPT support
+        UNSUPPORTED ///< Firmware without HEATER_INTERRUPT
     };
 
     /**
@@ -124,9 +125,9 @@ class AbortManager {
      *
      * Begins the progressive abort state machine. If already aborting,
      * this call is ignored. State transitions are:
-     * - Resolves KalicoStatus from printer.info "app" field if UNKNOWN
-     * - If DETECTED -> TRY_HEATER_INTERRUPT (soft interrupt for M109 waits)
-     * - If NOT_PRESENT or UNKNOWN -> PROBE_QUEUE (skip heater interrupt)
+     * - Resolves HeaterInterruptSupport from printer.info "app" field if UNKNOWN
+     * - If SUPPORTED -> TRY_HEATER_INTERRUPT (soft interrupt for M109 waits)
+     * - If UNSUPPORTED or UNKNOWN -> PROBE_QUEUE (skip heater interrupt)
      */
     void start_abort();
 
@@ -161,10 +162,10 @@ class AbortManager {
     State get_state() const;
 
     /**
-     * @brief Get Kalico detection status
-     * @return Current KalicoStatus enum value
+     * @brief Get HEATER_INTERRUPT support status
+     * @return Current HeaterInterruptSupport enum value
      */
-    KalicoStatus get_kalico_status() const;
+    HeaterInterruptSupport get_heater_interrupt_support() const;
 
     /**
      * @brief Get state name as string for debugging
@@ -246,7 +247,7 @@ class AbortManager {
 
     // State machine
     std::atomic<State> abort_state_{State::IDLE};
-    std::atomic<KalicoStatus> kalico_status_{KalicoStatus::UNKNOWN};
+    std::atomic<HeaterInterruptSupport> heater_interrupt_support_{HeaterInterruptSupport::UNKNOWN};
     std::atomic<int> escalation_level_{0};
     std::atomic<int> commands_sent_{0};
 
@@ -286,12 +287,15 @@ class AbortManager {
     helix::ui::LvglTimerGuard cancel_timer_;
     helix::ui::LvglTimerGuard reconnect_timer_;
 
+    // Invalidated by start_abort(), so replies from an earlier sequence are dropped
+    helix::AsyncLifetimeGuard lifetime_;
+
     // ========================================================================
     // State Machine Transitions
     // ========================================================================
 
     /**
-     * @brief Try HEATER_INTERRUPT command to probe for Kalico
+     * @brief Try HEATER_INTERRUPT command to probe for HEATER_INTERRUPT support
      */
     void try_heater_interrupt();
 

@@ -34,13 +34,20 @@
 #include "../test_helpers/camera_widget_test_access.h"
 #include "src/ui/panel_widgets/camera_widget.h"
 #endif
+#include "../test_helpers/network_widget_test_access.h"
+#include "../test_helpers/print_stats_test_access.h"
+#include "../test_helpers/scoped_runtime_config.h"
+#include "../test_helpers/shutdown_widget_test_access.h"
 #include "../test_helpers/tool_switcher_test_access.h"
 #include "../test_helpers/update_queue_test_access.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "print_lifecycle_state.h"
 #include "printer_discovery.h"
 #include "printer_state.h"
+#include "src/ui/panel_widgets/network_widget.h"
 #include "src/ui/panel_widgets/nozzle_temps_widget.h"
+#include "src/ui/panel_widgets/print_stats_widget.h"
+#include "src/ui/panel_widgets/shutdown_widget.h"
 #include "src/ui/panel_widgets/thermistor_widget.h"
 #include "src/ui/panel_widgets/tool_switcher_widget.h"
 #include "temperature_sensor_manager.h"
@@ -105,7 +112,7 @@ bool delete_hook_installed(lv_obj_t* obj, const void* widget) {
 /// One extruder ("T0" -> "extruder") plus the bed — the real mock printer's
 /// topology (same seeding as test_widget_size_nozzle_temps.cpp).
 void configure_one_extruder(PrinterState& state) {
-    state.init_extruders({"extruder"});
+    state.temperature_state().init_extruders({"extruder"});
 
     ToolState::instance().deinit_subjects();
     ToolState::instance().init_subjects(false);
@@ -125,7 +132,6 @@ void configure_tools(int count, int active_index = 0) {
     ToolTopology topo;
     topo.tool_count = count;
     topo.active_tool = active_index;
-    topo.tool_name_prefix = "T";
     ts.set_ams_topology(topo);
 }
 
@@ -171,10 +177,10 @@ TEST_CASE_METHOD(HomeWidgetTeardownFixture,
     UpdateQueue::instance().drain();
     REQUIRE(NozzleTempsTestAccess::row_temp_label(*widget, 0) != nullptr);
 
-    // An extruder-temp change fires the row's observe_int_sync observer
+    // An extruder-temp change fires the row's observe<int> observer
     // synchronously; the handler body is queued. This is the pending lambda a
     // screen teardown can drain after the tree is already gone.
-    lv_subject_t* temp = state().get_extruder_temp_subject("extruder");
+    lv_subject_t* temp = state().temperature_state().get_extruder_temp_subject("extruder");
     REQUIRE(temp != nullptr);
     lv_subject_set_int(temp, 2450);
 
@@ -301,7 +307,7 @@ TEST_CASE_METHOD(HomeWidgetTeardownFixture,
 
     // A print-lifecycle transition fires print_state_observer_; its handler
     // (refresh_print_gating over pill_buttons_) is queued.
-    lv_subject_t* lifecycle = state().get_print_lifecycle_subject();
+    lv_subject_t* lifecycle = state().print_state().get_print_lifecycle_subject();
     REQUIRE(lifecycle != nullptr);
     lv_subject_set_int(lifecycle, static_cast<int>(PrintState::Printing));
 
@@ -370,12 +376,10 @@ TEST_CASE_METHOD(HomeWidgetTeardownFixture,
     widget->attach(make_tile(page, "panel_widget_thermistor"), test_screen());
     UpdateQueue::instance().drain();
 
-    REQUIRE(ThermistorTestAccess::temp_label(*widget) != nullptr);
     REQUIRE(ThermistorTestAccess::name_label(*widget) != nullptr);
 
     lv_obj_delete(page);
 
-    CHECK(ThermistorTestAccess::temp_label(*widget) == nullptr);
     CHECK(ThermistorTestAccess::name_label(*widget) == nullptr);
 }
 
@@ -389,21 +393,21 @@ TEST_CASE_METHOD(HomeWidgetTeardownFixture,
     lv_obj_t* page = make_page();
     widget->attach(make_tile(page, "panel_widget_thermistor"), test_screen());
     UpdateQueue::instance().drain();
-    REQUIRE(ThermistorTestAccess::temp_label(*widget) != nullptr);
+    REQUIRE(ThermistorTestAccess::name_label(*widget) != nullptr);
 
     // The sensor's temp subject fires temp_observer_ synchronously; the handler
-    // (on_temp_changed -> lv_label_set_text(temp_label_)) is queued.
+    // (on_temp_changed) is queued.
     lv_subject_t* subject =
         helix::sensors::TemperatureSensorManager::instance().get_temp_subject(THERMISTOR_SENSOR_A);
     REQUIRE(subject != nullptr);
     lv_subject_set_int(subject, 425);
 
-    // Tree dies while the handler is still queued. Pre-fix temp_label_ still
-    // pointed into the freed tree, so on_temp_changed() wrote to freed memory.
+    // Tree dies while the handler is still queued: the drained handler must
+    // touch nothing in the freed tree.
     lv_obj_delete(page);
     UpdateQueue::instance().drain();
 
-    CHECK(ThermistorTestAccess::temp_label(*widget) == nullptr);
+    CHECK(ThermistorTestAccess::name_label(*widget) == nullptr);
 }
 
 TEST_CASE_METHOD(HomeWidgetTeardownFixture,
@@ -567,7 +571,7 @@ void record_layout_at_delete(lv_event_t* e) {
 // condemnation today (ui_panel_home.cpp:83, 367, 461), but that is a property of
 // the callers, not of the widget: PanelWidgetManager::populate_page() reaches
 // safe_clean_children() with no detach of its own, and the raw-delete path
-// (on_hooked_root_deleted -> forget_tile_widgets) nulls size_watch_container_
+// (on_hooked_root_deleted -> forget_tile_widgets) nulls pill_container_
 // without touching the layout, leaving a condemned container in LV_LAYOUT_GRID
 // still pointed at the widget's descriptor buffers. Stripping it where the
 // pointer is dropped covers both paths and removes the reasoning dependency.
@@ -704,4 +708,229 @@ TEST_CASE_METHOD(HomeWidgetTeardownFixture, "camera ignores a replaced root's la
     CHECK(helix::CameraWidgetTestAccess::camera_image(*attached.widget) != nullptr);
 }
 
+// The fullscreen overlay is a child of the screen, not the tile, and a screen
+// teardown erases its NavigationManager close callback without running it. The
+// frame deferral prefers fullscreen_image_ over the tile image, and the
+// destructor deletes fullscreen_overlay_, so both must drop with the overlay
+// (#1430).
+TEST_CASE_METHOD(HomeWidgetTeardownFixture,
+                 "camera drops its fullscreen pointers when the overlay is deleted raw",
+                 "[camera][teardown][uaf]") {
+    using helix::CameraWidgetTestAccess;
+    AttachedCamera attached(*this);
+
+    CameraWidgetTestAccess::show_fullscreen_overlay(*attached.widget);
+    UpdateQueue::instance().drain();
+    lv_obj_t* overlay = CameraWidgetTestAccess::fullscreen_overlay(*attached.widget);
+    REQUIRE(overlay != nullptr);
+    REQUIRE(CameraWidgetTestAccess::fullscreen_image(*attached.widget) != nullptr);
+    REQUIRE(CameraWidgetTestAccess::fullscreen_spinner(*attached.widget) != nullptr);
+    REQUIRE(attached.widget->has_overlay_open());
+
+    lv_obj_delete(overlay);
+    UpdateQueue::instance().drain();
+
+    CHECK(CameraWidgetTestAccess::fullscreen_overlay(*attached.widget) == nullptr);
+    CHECK(CameraWidgetTestAccess::fullscreen_image(*attached.widget) == nullptr);
+    CHECK(CameraWidgetTestAccess::fullscreen_spinner(*attached.widget) == nullptr);
+    CHECK_FALSE(attached.widget->has_overlay_open());
+
+    // The single-owner slot is free again: a second overlay opens.
+    CameraWidgetTestAccess::show_fullscreen_overlay(*attached.widget);
+    UpdateQueue::instance().drain();
+    REQUIRE(CameraWidgetTestAccess::fullscreen_overlay(*attached.widget) != nullptr);
+
+    // detach() deletes the live overlay and nothing else.
+    attached.widget.reset();
+    UpdateQueue::instance().drain();
+    SUCCEED("widget destroyed after a raw overlay delete without touching freed memory");
+}
+
 #endif // HELIX_HAS_CAMERA
+
+// --------------------------------------------------------------------------
+// PrintStatsWidget
+//
+// This one publishes through static lv_subject_t values rather than into its
+// tile tree, so a drained totals callback is harmless by itself and the visible
+// UI state cannot tell a dropped pointer from a dangling one. The exposure is
+// the cached root: detach() calls lv_obj_set_user_data(widget_obj_, nullptr),
+// so a widget_obj_ that outlives its object writes into freed memory on the
+// next teardown.
+// --------------------------------------------------------------------------
+
+TEST_CASE_METHOD(HomeWidgetTeardownFixture,
+                 "print_stats drops its cached root when the page tree is deleted raw",
+                 "[print_stats][teardown][uaf]") {
+    auto widget = std::make_unique<PrintStatsWidget>();
+    lv_obj_t* page = make_page();
+    lv_obj_t* tile = make_tile(page, "panel_widget_print_stats");
+    widget->attach(tile, test_screen());
+    UpdateQueue::instance().drain();
+
+    // Or a null read below would prove nothing.
+    REQUIRE(PrintStatsTestAccess::widget_obj(*widget) == tile);
+
+    lv_obj_delete(page);
+    UpdateQueue::instance().drain();
+
+    CHECK(PrintStatsTestAccess::widget_obj(*widget) == nullptr);
+    CHECK(PrintStatsTestAccess::parent_screen(*widget) == nullptr);
+
+    // The path that would have written into the freed tile.
+    widget->detach();
+    SUCCEED("detach after a raw page delete touched no freed memory");
+}
+
+TEST_CASE_METHOD(HomeWidgetTeardownFixture,
+                 "print_stats uninstalls its delete hook when destroyed before its tree",
+                 "[print_stats][teardown][uaf]") {
+    auto widget = std::make_unique<PrintStatsWidget>();
+    lv_obj_t* page = make_page();
+    lv_obj_t* tile = make_tile(page, "panel_widget_print_stats");
+    widget->attach(tile, test_screen());
+    UpdateQueue::instance().drain();
+
+    REQUIRE(delete_hook_installed(tile, widget.get()));
+
+    const void* dead = widget.get();
+    widget.reset();
+    CHECK_FALSE(delete_hook_installed(tile, dead));
+
+    lv_obj_delete(tile);
+    UpdateQueue::instance().drain();
+    SUCCEED("tile torn down after the widget without touching freed memory");
+}
+
+// --------------------------------------------------------------------------
+// ShutdownWidget
+//
+// Its verification timer carries a heap VerifyCtx*, not `this`, and its
+// tok.defer() bodies call free functions, so neither reaches back into the
+// widget. What is left is the same cached-root exposure: detach() calls
+// lv_obj_set_user_data(widget_obj_, nullptr), and it also holds the button
+// pointer it registered a click handler on.
+// --------------------------------------------------------------------------
+
+TEST_CASE_METHOD(HomeWidgetTeardownFixture,
+                 "shutdown drops its cached root and button when the page tree is deleted raw",
+                 "[shutdown][teardown][uaf]") {
+    // No API needed: nothing on the teardown path calls one.
+    auto widget = std::make_unique<ShutdownWidget>(nullptr);
+    lv_obj_t* page = make_page();
+    lv_obj_t* tile = make_tile(page, "panel_widget_shutdown");
+    widget->attach(tile, test_screen());
+    UpdateQueue::instance().drain();
+
+    // Or the null reads below would prove nothing.
+    REQUIRE(ShutdownWidgetTestAccess::widget_obj(*widget) == tile);
+
+    lv_obj_delete(page);
+    UpdateQueue::instance().drain();
+
+    CHECK(ShutdownWidgetTestAccess::widget_obj(*widget) == nullptr);
+    CHECK(ShutdownWidgetTestAccess::shutdown_btn(*widget) == nullptr);
+    CHECK(ShutdownWidgetTestAccess::parent_screen(*widget) == nullptr);
+
+    // The path that would have written into the freed tile.
+    widget->detach();
+    SUCCEED("detach after a raw page delete touched no freed memory");
+}
+
+TEST_CASE_METHOD(HomeWidgetTeardownFixture,
+                 "shutdown uninstalls its delete hook when destroyed before its tree",
+                 "[shutdown][teardown][uaf]") {
+    auto widget = std::make_unique<ShutdownWidget>(nullptr);
+    lv_obj_t* page = make_page();
+    lv_obj_t* tile = make_tile(page, "panel_widget_shutdown");
+    widget->attach(tile, test_screen());
+    UpdateQueue::instance().drain();
+
+    REQUIRE(delete_hook_installed(tile, widget.get()));
+
+    const void* dead = widget.get();
+    widget.reset();
+    CHECK_FALSE(delete_hook_installed(tile, dead));
+
+    lv_obj_delete(tile);
+    UpdateQueue::instance().drain();
+    SUCCEED("tile torn down after the widget without touching freed memory");
+}
+
+// --------------------------------------------------------------------------
+// NetworkWidget
+//
+// The one here that needs more than pointer drops. Its signal-poll timer holds
+// `this` and the widget outlives the tree on this path, so the callback's own
+// `self` check still passes and a null root does not stop it. The body writes a
+// module-owned static subject rather than the tree, so it is not a UAF by
+// itself — but it keeps polling a screen that is gone, and at process teardown
+// that subject dies first.
+// --------------------------------------------------------------------------
+
+/// Pins the WiFi backend to its mock for the two cases below.
+///
+/// NetworkWidget::attach() reaches get_wifi_manager(), the process-lifetime
+/// WiFi singleton, whose backend is chosen once for the whole process. With
+/// test_mode off, WifiBackend::create() builds the real platform backend, and
+/// its start_async() worker probes this machine's live network state through
+/// nmcli/wpa_cli. That thread has no join site: the singleton is deliberately
+/// never destroyed, and ~WiFiManager -> backend_->stop() is the only place the
+/// backend's threads are joined, so the sanitizer sees a leaked thread at exit.
+/// The mock backend runs its init on the caller's thread and spawns none.
+struct NetworkWidgetTeardownFixture : HomeWidgetTeardownFixture {
+    ScopedRuntimeConfig scoped_config_;
+
+    NetworkWidgetTeardownFixture() {
+        auto* rc = get_runtime_config();
+        rc->test_mode = true;
+        rc->use_real_wifi = false;
+    }
+};
+
+TEST_CASE_METHOD(NetworkWidgetTeardownFixture,
+                 "network drops its cached root when the page tree is deleted raw",
+                 "[network_widget][teardown][uaf]") {
+    auto widget = std::make_unique<NetworkWidget>();
+    lv_obj_t* page = make_page();
+    lv_obj_t* tile = make_tile(page, "panel_widget_network");
+    widget->attach(tile, test_screen());
+    UpdateQueue::instance().drain();
+
+    // Or the null reads below would prove nothing.
+    REQUIRE(NetworkWidgetTestAccess::widget_obj(*widget) == tile);
+
+    lv_obj_delete(page);
+    UpdateQueue::instance().drain();
+
+    CHECK(NetworkWidgetTestAccess::widget_obj(*widget) == nullptr);
+    CHECK(NetworkWidgetTestAccess::parent_screen(*widget) == nullptr);
+    // Whether the poll timer was ever started depends on the detected network,
+    // so this pins the invariant rather than the transition: nothing may still
+    // be polling once the tree is gone.
+    CHECK(NetworkWidgetTestAccess::signal_poll_timer(*widget) == nullptr);
+
+    // The path that would have written into the freed tile.
+    widget->detach();
+    SUCCEED("detach after a raw page delete touched no freed memory");
+}
+
+TEST_CASE_METHOD(NetworkWidgetTeardownFixture,
+                 "network uninstalls its delete hook when destroyed before its tree",
+                 "[network_widget][teardown][uaf]") {
+    auto widget = std::make_unique<NetworkWidget>();
+    lv_obj_t* page = make_page();
+    lv_obj_t* tile = make_tile(page, "panel_widget_network");
+    widget->attach(tile, test_screen());
+    UpdateQueue::instance().drain();
+
+    REQUIRE(delete_hook_installed(tile, widget.get()));
+
+    const void* dead = widget.get();
+    widget.reset();
+    CHECK_FALSE(delete_hook_installed(tile, dead));
+
+    lv_obj_delete(tile);
+    UpdateQueue::instance().drain();
+    SUCCEED("tile torn down after the widget without touching freed memory");
+}

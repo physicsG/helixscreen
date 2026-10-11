@@ -2,17 +2,28 @@
 <!-- Copyright (C) 2025-2026 356C LLC -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <component>
+  <api>
+    <!-- Per-instance subject names, supplied by the widget at creation. They
+         must exist before this component is parsed: a binding whose subject is
+         missing at parse time is dropped permanently and silently. -->
+    <prop name="tile_icon_subject" type="string" default=""/>
+    <prop name="tile_label_subject" type="string" default=""/>
+    <prop name="tile_dir_subject" type="string" default=""/>
+    <prop name="tile_target_subject" type="string" default=""/>
+  </api>
   <view name="panel_widget_temperature"
         extends="lv_obj" height="100%" flex_grow="1" style_pad_all="0" style_pad_left="#space_xxs"
         style_pad_right="#space_xxs" scrollable="false">
     <ui_button name="temp_btn"
-               width="100%" height="100%" variant="ghost" flex_flow="column" style_flex_main_place="center"
-               style_flex_cross_place="center" style_flex_track_place="center" style_border_width="0" focusable="false">
+               width="100%" height="100%" style_pad_ver="0" variant="ghost" style_border_width="0" focusable="false">
+      <style name="styles.tile_column"/>
+      <bind_style_if_eq name="styles.tile_row" subject="$tile_dir_subject" ref_value="1"/>
       <bind_state_if_not_eq subject="printer_connection_state" state="disabled" ref_value="2"/>
       <event_cb trigger="clicked" callback="temp_clicked_cb"/>
-      <nozzle_icon name="temp_icon_container" size="#icon_size"/>
+      <nozzle_icon name="temp_icon_container" size="#icon_size" rung_subject="$tile_icon_subject"/>
       <temp_display name="temp_text_label"
-                    size="sm" show_target="true" hide_target_when_off="true" hide_target_below_bp="small"
+                    size_target_subject="$tile_target_subject" rung_subject="$tile_icon_subject" size="sm"
+                    show_target="true" hide_target_when_off="true" hide_target_below_bp="small"
                     bind_current="extruder_temp" bind_target="extruder_target" align="center"/>
     </ui_button>
   </view>

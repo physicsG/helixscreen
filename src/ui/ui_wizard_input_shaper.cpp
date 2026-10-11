@@ -36,15 +36,8 @@ extern lv_subject_t connection_test_passed;
 // Global Instance
 // ============================================================================
 
-static std::unique_ptr<WizardInputShaperStep> g_wizard_input_shaper_step;
-
 WizardInputShaperStep* get_wizard_input_shaper_step() {
-    if (!g_wizard_input_shaper_step) {
-        g_wizard_input_shaper_step = std::make_unique<WizardInputShaperStep>();
-        StaticPanelRegistry::instance().register_destroy(
-            "WizardInputShaperStep", []() { g_wizard_input_shaper_step.reset(); });
-    }
-    return g_wizard_input_shaper_step.get();
+    return &helix::lazy_global<WizardInputShaperStep>("WizardInputShaperStep");
 }
 
 // ============================================================================
@@ -61,17 +54,6 @@ WizardInputShaperStep::~WizardInputShaperStep() {
     // helper's own cancel-safe destructor would too; doing it here keeps the
     // ordering explicit).
     cancel_analysis_display();
-
-    // Deinitialize subjects to disconnect observers before destruction
-    // NOTE: lv_subject_deinit() is safe to call even during shutdown
-    if (subjects_initialized_) {
-        lv_subject_deinit(&calibration_status_);
-        lv_subject_deinit(&calibration_progress_);
-        lv_subject_deinit(&calibration_started_);
-        lv_subject_deinit(&calibration_active_);
-        lv_subject_deinit(&calibration_indeterminate_);
-        subjects_initialized_ = false;
-    }
 
     // NOTE: Do NOT log here - spdlog may be destroyed first
     screen_root_ = nullptr;
@@ -93,24 +75,23 @@ void WizardInputShaperStep::init_subjects() {
     // Initialize status subject with string buffer
     strncpy(status_buffer_, "Ready to calibrate", sizeof(status_buffer_) - 1);
     status_buffer_[sizeof(status_buffer_) - 1] = '\0';
-    lv_subject_init_string(&calibration_status_, status_buffer_, nullptr, sizeof(status_buffer_),
-                           status_buffer_);
-    lv_xml_register_subject(nullptr, "wizard_input_shaper_status", &calibration_status_);
+    UI_MANAGED_SUBJECT_STRING(calibration_status_, status_buffer_, status_buffer_,
+                              "wizard_input_shaper_status", subjects_);
 
     // Initialize progress subject
-    helix::ui::wizard::init_int_subject(&calibration_progress_, 0, "wizard_input_shaper_progress");
+    UI_MANAGED_SUBJECT_INT(calibration_progress_, 0, "wizard_input_shaper_progress", subjects_);
 
     // Initialize started subject (controls Start button and skip hint visibility)
-    helix::ui::wizard::init_int_subject(&calibration_started_, 0, "wizard_input_shaper_started");
+    UI_MANAGED_SUBJECT_INT(calibration_started_, 0, "wizard_input_shaper_started", subjects_);
 
     // Initialize active subject (controls Cancel button visibility — 1 only while
     // calibration is in flight; cleared on complete / cancel / error)
-    helix::ui::wizard::init_int_subject(&calibration_active_, 0, "wizard_input_shaper_active");
+    UI_MANAGED_SUBJECT_INT(calibration_active_, 0, "wizard_input_shaper_active", subjects_);
 
     // Initialize indeterminate subject (1 during the offline analysis phase:
     // hides the bar, shows the spinner)
-    helix::ui::wizard::init_int_subject(&calibration_indeterminate_, 0,
-                                        "wizard_input_shaper_indeterminate");
+    UI_MANAGED_SUBJECT_INT(calibration_indeterminate_, 0, "wizard_input_shaper_indeterminate",
+                           subjects_);
 
     subjects_initialized_ = true;
     spdlog::debug("[{}] Subjects initialized", get_name());
@@ -127,7 +108,7 @@ void WizardInputShaperStep::init_subjects() {
 // keys fall back to the key itself, so plain untranslated strings pass through
 // unchanged.
 static void safe_update_status(helix::LifetimeToken token, const std::string& msg_key) {
-    helix::ui::queue_update([token, msg_key]() {
+    helix::ui::queue_update("ui_wizard_input_shaper::safe_update_status", [token, msg_key]() {
         if (token.expired()) {
             return; // Step was cleaned up
         }
@@ -142,24 +123,25 @@ static void safe_update_status(helix::LifetimeToken token, const std::string& ms
 // treatment (spinner + "Analyzing data... Ns" elapsed label). Queued for the
 // same threading reason as safe_update_status.
 static void safe_set_analysis_phase(helix::LifetimeToken token, bool analyzing) {
-    helix::ui::queue_update([token, analyzing]() {
-        if (token.expired()) {
-            return;
-        }
-        WizardInputShaperStep* step = get_wizard_input_shaper_step();
-        if (step) {
-            lv_subject_set_int(step->get_indeterminate_subject(), analyzing ? 1 : 0);
-            if (analyzing) {
-                step->begin_analysis_display();
-            } else {
-                step->cancel_analysis_display();
+    helix::ui::queue_update(
+        "ui_wizard_input_shaper::safe_set_analysis_phase", [token, analyzing]() {
+            if (token.expired()) {
+                return;
             }
-        }
-    });
+            WizardInputShaperStep* step = get_wizard_input_shaper_step();
+            if (step) {
+                lv_subject_set_int(step->get_indeterminate_subject(), analyzing ? 1 : 0);
+                if (analyzing) {
+                    step->begin_analysis_display();
+                } else {
+                    step->cancel_analysis_display();
+                }
+            }
+        });
 }
 
 static void safe_update_progress(helix::LifetimeToken token, int progress) {
-    helix::ui::queue_update([token, progress]() {
+    helix::ui::queue_update("ui_wizard_input_shaper::safe_update_progress", [token, progress]() {
         if (token.expired()) {
             return; // Step was cleaned up
         }
@@ -171,7 +153,7 @@ static void safe_update_progress(helix::LifetimeToken token, int progress) {
 }
 
 static void safe_set_complete(helix::LifetimeToken token) {
-    helix::ui::queue_update([token]() {
+    helix::ui::queue_update("ui_wizard_input_shaper::safe_set_complete", [token]() {
         if (token.expired()) {
             return; // Step was cleaned up
         }
@@ -194,7 +176,7 @@ static void safe_set_complete(helix::LifetimeToken token) {
 }
 
 static void safe_handle_error(helix::LifetimeToken token) {
-    helix::ui::queue_update([token]() {
+    helix::ui::queue_update("ui_wizard_input_shaper::safe_handle_error", [token]() {
         if (token.expired()) {
             return;
         }
@@ -343,7 +325,12 @@ static void on_start_calibration_clicked(lv_event_t* e) {
     // On memory-constrained hosts, warn before entering the calibrating state so
     // the wizard doesn't flip its visuals if the user cancels.
     auto mem = helix::get_system_memory_info();
-    if (mem.total_mb() < helix::RESONANCE_LOW_RAM_WARN_MB) {
+    const auto verdict = helix::resonance_memory_check(mem);
+    if (verdict == helix::ResonanceMemory::REFUSE) {
+        helix::ui::show_resonance_memory_refusal(mem.headroom_mb());
+        return; // the Start button stays, as after declining the warning
+    }
+    if (verdict == helix::ResonanceMemory::WARN) {
         // Re-entry guard: a second entry while the warning modal is open is a no-op.
         if (step->low_ram_warn_dialog_)
             return;

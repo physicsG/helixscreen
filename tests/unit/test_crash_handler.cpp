@@ -12,7 +12,9 @@
  * Written TDD-style - tests WILL FAIL if crash_handler is removed.
  */
 
+#include "../test_helpers/breadcrumb_capture.h"
 #include "config.h"
+#include "helix_thread.h"
 #include "system/crash_error_log_sink.h"
 #include "system/crash_handler.h"
 #include "system/telemetry_manager.h"
@@ -21,12 +23,16 @@
 
 #include <algorithm>
 #include <chrono>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <sys/mman.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <vector>
 
@@ -837,36 +843,66 @@ TEST_CASE_METHOD(CrashTestFixture, "Crash: recent ERROR log lines captured into 
 // Install / Uninstall (no real signals) [telemetry][crash]
 // ============================================================================
 
+namespace {
+
+/// The SIGSEGV disposition currently installed, as one comparable pointer.
+void* current_segv_handler() {
+    struct sigaction sa {};
+    sigaction(SIGSEGV, nullptr, &sa);
+    return (sa.sa_flags & SA_SIGINFO) != 0 ? reinterpret_cast<void*>(sa.sa_sigaction)
+                                           : reinterpret_cast<void*>(sa.sa_handler);
+}
+
+} // namespace
+
 TEST_CASE_METHOD(CrashTestFixture, "Crash: install and uninstall do not crash",
                  "[telemetry][crash]") {
-    // Just verify install/uninstall is safe (no actual signal triggering)
-    crash_handler::install(crash_path());
-    crash_handler::uninstall();
+    void* const before = current_segv_handler();
 
-    // Double uninstall should be safe
+    crash_handler::install(crash_path());
+    REQUIRE(current_segv_handler() != before);
+
     crash_handler::uninstall();
+    REQUIRE(current_segv_handler() == before);
+
+    // A second uninstall leaves the restored disposition alone.
+    crash_handler::uninstall();
+    REQUIRE(current_segv_handler() == before);
 }
 
 TEST_CASE_METHOD(CrashTestFixture, "Crash: install with long path does not crash",
                  "[telemetry][crash]") {
-    // Test with a path longer than typical but within buffer limits
-    std::string long_path = temp_dir().string() + "/" + std::string(200, 'a') + "/crash.txt";
+    // Longer than typical but within the handler's path buffer.
+    const auto dir = temp_dir() / std::string(200, 'a');
+    std::filesystem::create_directories(dir);
+    const std::string long_path = (dir / "crash.txt").string();
+
     crash_handler::install(long_path);
+    crash_handler::write_exception_record("long path");
     crash_handler::uninstall();
+
+    REQUIRE(crash_handler::has_crash_file(long_path));
 }
 
 TEST_CASE_METHOD(CrashTestFixture, "Crash: install with very long path truncates safely",
                  "[telemetry][crash]") {
-    // Path longer than MAX_PATH_LEN (512) -- should truncate, not crash
+    // Longer than MAX_PATH_LEN (512): the path is truncated and the handlers still go in.
+    void* const before = current_segv_handler();
     std::string very_long_path = "/" + std::string(600, 'x') + "/crash.txt";
     crash_handler::install(very_long_path);
+    REQUIRE(current_segv_handler() != before);
     crash_handler::uninstall();
+    REQUIRE(current_segv_handler() == before);
 }
 
 TEST_CASE_METHOD(CrashTestFixture, "Crash: double install is idempotent", "[telemetry][crash]") {
+    void* const before = current_segv_handler();
     crash_handler::install(crash_path());
-    crash_handler::install(crash_path()); // Should be safe
+    crash_handler::install(crash_path());
+    // One uninstall restores the original: the second install did not save the
+    // crash handler itself as the disposition to restore.
     crash_handler::uninstall();
+    REQUIRE(current_segv_handler() == before);
 }
 
 // ============================================================================
@@ -1253,38 +1289,6 @@ TEST_CASE_METHOD(CrashTestFixture, "Crash: TelemetryManager crash event includes
 // (breadcrumbs, event_target / event_original_target / event_code, and the
 // heap_* / lv_heap_* snapshot fields).
 
-namespace {
-
-/// Call breadcrumb::dump_to_fd into a pipe and return every line emitted.
-/// The dump uses write() directly (signal-safe), so a pipe is the simplest
-/// readable sink from a normal test context.
-std::vector<std::string> capture_breadcrumb_dump() {
-    int pipe_fds[2];
-    REQUIRE(::pipe(pipe_fds) == 0);
-    crash_handler::breadcrumb::dump_to_fd(pipe_fds[1]);
-    ::close(pipe_fds[1]);
-
-    std::string buf;
-    char chunk[256];
-    ssize_t n;
-    while ((n = ::read(pipe_fds[0], chunk, sizeof(chunk))) > 0) {
-        buf.append(chunk, static_cast<size_t>(n));
-    }
-    ::close(pipe_fds[0]);
-
-    std::vector<std::string> lines;
-    size_t start = 0;
-    for (size_t i = 0; i < buf.size(); ++i) {
-        if (buf[i] == '\n') {
-            lines.emplace_back(buf.substr(start, i - start));
-            start = i + 1;
-        }
-    }
-    return lines;
-}
-
-} // namespace
-
 TEST_CASE("Crash: breadcrumb ring keeps the newest 256 entries on wraparound",
           "[telemetry][crash]") {
     // Drain the ring first — static state leaks across test cases. Writing
@@ -1301,7 +1305,7 @@ TEST_CASE("Crash: breadcrumb ring keeps the newest 256 entries on wraparound",
         crash_handler::breadcrumb::note("t", "entry", i);
     }
 
-    auto lines = capture_breadcrumb_dump();
+    auto lines = helix::capture_breadcrumb_lines();
     REQUIRE(lines.size() == 256);
 
     auto extract_index = [](const std::string& line) -> int {
@@ -1335,7 +1339,7 @@ TEST_CASE("Crash: breadcrumb category/subject are truncated with null terminator
     const std::string long_subject(200, 'S');
     crash_handler::breadcrumb::note(long_category.c_str(), long_subject.c_str());
 
-    auto lines = capture_breadcrumb_dump();
+    auto lines = helix::capture_breadcrumb_lines();
     REQUIRE_FALSE(lines.empty());
     const std::string& last = lines.back();
 
@@ -1407,3 +1411,203 @@ TEST_CASE_METHOD(CrashTestFixture,
     REQUIRE(result["breadcrumbs"][1] == "5200 nav home");
     REQUIRE(result["breadcrumbs"][2] == "5210 xml home_card");
 }
+
+namespace {
+// Each frame keeps a live buffer the compiler cannot elide, so the recursion
+// runs off the end of the stack instead of being folded into a loop.
+[[gnu::noinline]] int overflow_stack(int depth) {
+    volatile char frame[1024];
+    frame[0] = static_cast<char>(depth);
+    return overflow_stack(depth + 1) + frame[0];
+}
+
+#if defined(__APPLE__)
+// macOS does not carry the parent's signal stack into a fork()ed child, while
+// helix::install_thread_altstack() returns early on the record the parent left
+// in its thread-local. Without a stack of its own the child's SIGSEGV cannot
+// be delivered and the process dies before the handler writes anything.
+void give_forked_child_signal_stack() {
+    void* mem = mmap(nullptr, helix::kAltStackSize, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (mem == MAP_FAILED) {
+        _exit(96);
+    }
+    stack_t ss{};
+    ss.ss_sp = mem;
+    ss.ss_size = helix::kAltStackSize;
+    if (sigaltstack(&ss, nullptr) != 0) {
+        _exit(95);
+    }
+}
+#endif
+} // namespace
+
+TEST_CASE_METHOD(CrashTestFixture, "Crash: a stack overflow still writes the crash file",
+                 "[telemetry][crash][subprocess]") {
+    pid_t pid = fork();
+    REQUIRE(pid >= 0);
+
+    if (pid == 0) {
+        // A small stack makes the overflow quick and deterministic.
+        struct rlimit rl {};
+        rl.rlim_cur = 256 * 1024;
+        rl.rlim_max = RLIM_INFINITY;
+        setrlimit(RLIMIT_STACK, &rl);
+#if defined(__APPLE__)
+        give_forked_child_signal_stack();
+#endif
+        crash_handler::install(crash_path());
+        _exit(overflow_stack(0) == 0 ? 97 : 99);
+    }
+
+    int status = 0;
+    REQUIRE(waitpid(pid, &status, 0) == pid);
+    INFO("WIFEXITED=" << WIFEXITED(status) << " WEXITSTATUS=" << WEXITSTATUS(status)
+                      << " WIFSIGNALED=" << WIFSIGNALED(status)
+                      << " WTERMSIG=" << WTERMSIG(status));
+    REQUIRE(crash_handler::has_crash_file(crash_path()));
+    auto result = crash_handler::read_crash_file(crash_path());
+    REQUIRE_FALSE(result.is_null());
+    REQUIRE(result["signal"] == SIGSEGV);
+#if defined(__APPLE__)
+    // The stack dump and the memory map are written only by the Linux handler
+    // (ucontext stack reads through process_vm_readv, /proc/self/maps).
+    SKIP("stack_dump and memory_map are Linux-only; the macOS record ends at the signal");
+#endif
+    // SP sits in the guard region below the stack. The stack dump starts
+    // there, so a handler that reads it unchecked faults again and the record
+    // stops before the dump and the memory map that follow it.
+    REQUIRE(result.contains("stack_dump"));
+    REQUIRE(result.contains("memory_map"));
+}
+
+// TSan refuses to start a thread in a child forked from a multi-threaded
+// process, so under it the worker never runs. Both spellings of the guard are
+// required: GCC defines __SANITIZE_THREAD__, clang answers only __has_feature.
+#if !defined(__SANITIZE_THREAD__) && !(defined(__has_feature) && __has_feature(thread_sanitizer))
+TEST_CASE_METHOD(CrashTestFixture,
+                 "Crash: a stack overflow on a make_thread worker still writes the crash file",
+                 "[telemetry][crash][subprocess]") {
+    pid_t pid = fork();
+    REQUIRE(pid >= 0);
+
+    if (pid == 0) {
+        crash_handler::install(crash_path());
+        auto worker = helix::make_thread([] { overflow_stack(0); });
+        worker.join();
+        _exit(99);
+    }
+
+    int status = 0;
+    REQUIRE(waitpid(pid, &status, 0) == pid);
+    INFO("WIFEXITED=" << WIFEXITED(status) << " WEXITSTATUS=" << WEXITSTATUS(status)
+                      << " WIFSIGNALED=" << WIFSIGNALED(status)
+                      << " WTERMSIG=" << WTERMSIG(status));
+    // The main thread's signal stack does not serve a worker: without its own,
+    // the kernel cannot deliver SIGSEGV on the overflowed stack and the process
+    // dies before the handler writes anything.
+    REQUIRE(crash_handler::has_crash_file(crash_path()));
+    auto result = crash_handler::read_crash_file(crash_path());
+    REQUIRE_FALSE(result.is_null());
+    // macOS delivers a guard-page hit on a secondary thread's stack as SIGBUS.
+#if defined(__APPLE__)
+    REQUIRE(result["signal"] == SIGBUS);
+    SKIP("stack_dump and memory_map are Linux-only; the macOS record ends at the signal");
+#else
+    REQUIRE(result["signal"] == SIGSEGV);
+#endif
+    REQUIRE(result.contains("stack_dump"));
+    REQUIRE(result.contains("memory_map"));
+}
+#endif
+
+#if defined(__linux__)
+#include <cstddef>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
+#include <sys/prctl.h>
+#include <sys/syscall.h>
+
+namespace {
+// Makes process_vm_readv() fail with EPERM in this process, as Docker's default
+// seccomp profile does, so the handler has to fall back to its pipe probe.
+bool deny_process_vm_readv() {
+    struct sock_filter filter[] = {
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_process_vm_readv, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+    };
+    struct sock_fprog prog = {static_cast<unsigned short>(sizeof(filter) / sizeof(filter[0])),
+                              filter};
+    return prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0 &&
+           prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog) == 0;
+}
+
+bool has_nonzero_stack_word(const json& result) {
+    if (!result.contains("stack_dump")) {
+        return false;
+    }
+    for (const auto& word : result["stack_dump"]) {
+        if (std::stoull(word.get<std::string>(), nullptr, 16) != 0) {
+            return true;
+        }
+    }
+    return false;
+}
+} // namespace
+
+TEST_CASE_METHOD(CrashTestFixture, "Crash: the stack dump holds the real stack words",
+                 "[telemetry][crash][subprocess]") {
+    const bool deny = GENERATE(false, true);
+    CAPTURE(deny);
+    pid_t pid = fork();
+    REQUIRE(pid >= 0);
+
+    if (pid == 0) {
+        if (deny && !deny_process_vm_readv()) {
+            _exit(98);
+        }
+        crash_handler::install(crash_path());
+        raise(SIGABRT);
+        _exit(99);
+    }
+
+    int status = 0;
+    REQUIRE(waitpid(pid, &status, 0) == pid);
+    REQUIRE(WIFEXITED(status));
+    REQUIRE(WEXITSTATUS(status) == 128 + SIGABRT);
+    auto result = crash_handler::read_crash_file(crash_path());
+    REQUIRE_FALSE(result.is_null());
+    // The live stack under the handler is mapped, so a dump of all zeros means
+    // the reads were refused rather than performed.
+    REQUIRE(has_nonzero_stack_word(result));
+}
+
+TEST_CASE_METHOD(CrashTestFixture,
+                 "Crash: a stack overflow completes the record when process_vm_readv is refused",
+                 "[telemetry][crash][subprocess]") {
+    pid_t pid = fork();
+    REQUIRE(pid >= 0);
+
+    if (pid == 0) {
+        if (!deny_process_vm_readv()) {
+            _exit(98);
+        }
+        struct rlimit rl {};
+        rl.rlim_cur = 256 * 1024;
+        rl.rlim_max = RLIM_INFINITY;
+        setrlimit(RLIMIT_STACK, &rl);
+        crash_handler::install(crash_path());
+        _exit(overflow_stack(0) == 0 ? 97 : 99);
+    }
+
+    int status = 0;
+    REQUIRE(waitpid(pid, &status, 0) == pid);
+    REQUIRE_FALSE((WIFEXITED(status) && WEXITSTATUS(status) == 98));
+    auto result = crash_handler::read_crash_file(crash_path());
+    REQUIRE_FALSE(result.is_null());
+    REQUIRE(result["signal"] == SIGSEGV);
+    REQUIRE(result.contains("memory_map"));
+}
+#endif // __linux__

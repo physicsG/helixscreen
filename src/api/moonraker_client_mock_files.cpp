@@ -1,15 +1,19 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "env_knobs.h"
 #include "gcode_parser.h"
+#include "mock_planted_gcodes.h"
 #include "moonraker_client_mock_internal.h"
 #include "runtime_config.h"
+#include "text_io.h"
 
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <dirent.h>
 #include <sys/stat.h>
 
@@ -19,17 +23,11 @@ static constexpr const char* THUMBNAIL_CACHE_DIR = "build/thumbnail_cache";
 // Alias for cleaner code - use shared constant from RuntimeConfig
 #define TEST_GCODE_DIR RuntimeConfig::TEST_GCODE_DIR
 
-/**
- * @brief Scan test directory for G-code files
- * @return Vector of filenames (not full paths)
- */
-static std::vector<std::string> scan_mock_gcode_files() {
-    std::vector<std::string> files;
-
-    DIR* dir = opendir(TEST_GCODE_DIR);
+/// Append the G-code filenames in @p dir_path to @p files; false if it cannot be opened.
+static bool scan_gcode_dir(const std::string& dir_path, std::vector<std::string>& files) {
+    DIR* dir = opendir(dir_path.c_str());
     if (!dir) {
-        spdlog::warn("[MoonrakerClientMock] Cannot open test G-code directory: {}", TEST_GCODE_DIR);
-        return files;
+        return false;
     }
 
     struct dirent* entry;
@@ -43,7 +41,7 @@ static std::vector<std::string> scan_mock_gcode_files() {
 
         // Check for .gcode extension (case insensitive)
         std::string ext = name.substr(name.length() - 6);
-        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+        ext = helix::text_io::to_lower(ext);
         if (ext != ".gcode") {
             continue;
         }
@@ -52,7 +50,42 @@ static std::vector<std::string> scan_mock_gcode_files() {
     }
 
     closedir(dir);
+    return true;
+}
+
+/**
+ * @brief Scan the test gcodes tree, and any planted overlay, for G-code files
+ * @param subdir Directory relative to the gcodes root ("" = root)
+ * @return Vector of filenames (not full paths)
+ */
+static std::vector<std::string> scan_mock_gcode_files(const std::string& subdir = {}) {
+    std::vector<std::string> files;
+
+    const std::string suffix = subdir.empty() ? std::string() : "/" + subdir;
+    const std::string dir_path = std::string(TEST_GCODE_DIR) + suffix;
+    const std::string& planted = helix::mock::planted_gcode_dir();
+    const bool planted_found = !planted.empty() && scan_gcode_dir(planted + suffix, files);
+    if (!scan_gcode_dir(dir_path, files) && !planted_found) {
+        spdlog::warn("[MoonrakerClientMock] Cannot open test G-code directory: {}", dir_path);
+        return files;
+    }
     std::sort(files.begin(), files.end());
+    files.erase(std::unique(files.begin(), files.end()), files.end());
+
+    // HELIX_MOCK_FILE_COUNT=N - pad the listing to N entries by cycling the
+    // real filenames. Duplicate entries still resolve to real files for
+    // downloads and metadata, so a large-N print-select panel measures the
+    // per-file cost, not a wall of not-found errors.
+    if (const char* v = std::getenv("HELIX_MOCK_FILE_COUNT"); v && *v) {
+        size_t want = static_cast<size_t>(atoi(v));
+        if (want > files.size() && !files.empty()) {
+            const size_t real = files.size();
+            files.reserve(want);
+            for (size_t i = real; i < want; i++) {
+                files.push_back(files[i % real]);
+            }
+        }
+    }
 
     spdlog::debug("[MoonrakerClientMock] Found {} mock G-code files", files.size());
     return files;
@@ -121,14 +154,8 @@ static json build_mock_file_list_response(const std::string& root, const std::st
         return response;
     }
 
-    // Mock accelerometer CSV data files for belt tension / input shaper calibration
+    // Mock accelerometer CSV data files for input shaper calibration
     if (root == "config" && path == "data_store") {
-        result_array.push_back({{"path", "raw_data_belt_path_a-20260310_120000.csv"},
-                                {"size", 2048},
-                                {"modified", 1773158400.0}});
-        result_array.push_back({{"path", "raw_data_belt_path_b-20260310_120001.csv"},
-                                {"size", 2048},
-                                {"modified", 1773158401.0}});
         result_array.push_back({{"path", "raw_data_x-20260310_115000.csv"},
                                 {"size", 4096},
                                 {"modified", 1773154800.0}});
@@ -147,7 +174,7 @@ static json build_mock_file_list_response(const std::string& root, const std::st
         auto filenames = scan_mock_gcode_files();
 
         for (const auto& filename : filenames) {
-            std::string full_path = std::string(TEST_GCODE_DIR) + "/" + filename;
+            std::string full_path = helix::mock::gcode_disk_path(filename);
 
             struct stat file_stat;
             uint64_t size = 0;
@@ -163,10 +190,39 @@ static json build_mock_file_list_response(const std::string& root, const std::st
             result_array.push_back(file_entry);
         }
 
-        // Note: We only return real files from TEST_GCODE_DIR
+        // Note: We only return real files from TEST_GCODE_DIR and the planted overlay
         // Fake subdirectory entries were removed to prevent thumbnail extraction warnings
+    } else {
+        // A subdirectory of the gcodes root: scan it like the root, the way
+        // Moonraker lists any directory it is asked for. A nonexistent
+        // directory scans empty, matching the unknown-path behavior.
+        std::string subdir = path;
+        if (subdir.rfind("gcodes/", 0) == 0) {
+            subdir = subdir.substr(strlen("gcodes/"));
+        }
+        while (!subdir.empty() && subdir.back() == '/') {
+            subdir.pop_back();
+        }
+
+        auto filenames = scan_mock_gcode_files(subdir);
+
+        for (const auto& filename : filenames) {
+            std::string full_path = helix::mock::gcode_disk_path(subdir + "/" + filename);
+
+            struct stat file_stat;
+            uint64_t size = 0;
+            double modified = 0.0;
+            if (stat(full_path.c_str(), &file_stat) == 0) {
+                size = static_cast<uint64_t>(file_stat.st_size);
+                modified = static_cast<double>(file_stat.st_mtime);
+            }
+
+            json file_entry = {
+                {"path", filename}, {"size", size}, {"modified", modified}, {"permissions", "rw"}};
+            result_array.push_back(file_entry);
+        }
     }
-    // Unknown paths return empty lists
+    // Unscannable paths return empty lists
 
     json response = {{"result", result_array}};
 
@@ -188,7 +244,7 @@ static json build_mock_file_metadata_response(const std::string& filename) {
     if (filename.find(prefix) == 0) {
         clean_filename = filename.substr(prefix.length());
     }
-    std::string full_path = std::string(TEST_GCODE_DIR) + "/" + clean_filename;
+    std::string full_path = helix::mock::gcode_disk_path(clean_filename);
 
     // Get file info from filesystem
     struct stat file_stat;
@@ -211,10 +267,7 @@ static json build_mock_file_metadata_response(const std::string& filename) {
     // straight to the prescaler and the HTTP download is never exercised. That
     // is why --test could not reach the cold-fetch pipeline that bundle
     // 6F3QJLFG implicates (#960). MockHttpFileServer serves these.
-    static const bool remote_thumbs = [] {
-        const char* v = std::getenv("HELIX_MOCK_REMOTE_THUMBS");
-        return v && v[0] && std::string(v) != "0";
-    }();
+    static const bool remote_thumbs = [] { return helix::env_flag("HELIX_MOCK_REMOTE_THUMBS"); }();
     if (remote_thumbs && !thumbnail_path.empty()) {
         std::string base = filename;
         const size_t dot = base.rfind('.');
@@ -282,6 +335,15 @@ static json build_mock_file_metadata_response(const std::string& filename) {
 
 namespace mock_internal {
 
+/// HELIX_MOCK_METADATA_404=1 - server.files.metadata and .metascan fail with
+/// file-not-found for every file, the behaviour of vendor Moonraker forks that
+/// never populate their metadata DB (e.g. Qidi Q2). Read per call, not cached:
+/// unit tests toggle it around a single request, and a mock has no hot path
+/// worth an getenv() cache for.
+static bool metadata_404_enabled() {
+    return helix::env_flag("HELIX_MOCK_METADATA_404");
+}
+
 void register_file_handlers(std::unordered_map<std::string, MethodHandler>& registry) {
     // server.files.list - List files in a directory
     registry["server.files.list"] =
@@ -346,6 +408,10 @@ void register_file_handlers(std::unordered_map<std::string, MethodHandler>& regi
         if (params.contains("filename")) {
             filename = params["filename"].get<std::string>();
         }
+        if (metadata_404_enabled() && error_cb) {
+            error_cb(MoonrakerError::file_not_found("server.files.metadata", filename));
+            return true;
+        }
         if (!filename.empty()) {
             if (success_cb) {
                 json response = build_mock_file_metadata_response(filename);
@@ -370,6 +436,10 @@ void register_file_handlers(std::unordered_map<std::string, MethodHandler>& regi
         std::string filename;
         if (params.contains("filename")) {
             filename = params["filename"].get<std::string>();
+        }
+        if (metadata_404_enabled() && error_cb) {
+            error_cb(MoonrakerError::file_not_found("server.files.metascan", filename));
+            return true;
         }
         if (!filename.empty()) {
             if (success_cb) {
@@ -490,7 +560,7 @@ void register_file_handlers(std::unordered_map<std::string, MethodHandler>& regi
         if (relative.rfind(root_prefix, 0) == 0) {
             relative = relative.substr(root_prefix.length());
         }
-        const std::string disk_path = std::string(TEST_GCODE_DIR) + "/" + relative;
+        const std::string disk_path = helix::mock::gcode_disk_path(relative);
 
         spdlog::info("[MoonrakerClientMock] Mock delete_file: {}", path);
         if (std::remove(disk_path.c_str()) == 0) {

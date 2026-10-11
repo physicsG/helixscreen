@@ -8,7 +8,7 @@ This document defines the logging standards for HelixScreen. All new code should
 |-------|----------|---------|----------|
 | **ERROR** | (always) | Unrecoverable failures | "Failed to connect", "NULL pointer" |
 | **WARN** | (always) | Recoverable issues, guards | "Double init detected", "Fallback used" |
-| **INFO** | `-v` | User-visible milestones | "Connected to Moonraker", "Setup complete" |
+| **INFO** | (production default), `-v` | User-visible milestones | "Connected to Moonraker", "Setup complete" |
 | **DEBUG** | `-vv` | Troubleshooting info | Component init summaries, state changes |
 | **TRACE** | `-vvv` | Wire-level details | Per-item loops, JSON-RPC protocol, observer plumbing |
 
@@ -318,11 +318,11 @@ Verbosity still applies (`-v`=info, `-vv`=debug, `-vvv`=trace). Detection lines 
 | Raspberry Pi (systemd) | Journal | systemd journal | `journalctl -u helixscreen -f` |
 | x86/x86_64 (systemd) | Journal | systemd journal | `journalctl -u helixscreen -f` |
 | Snapmaker U1 (Debian Trixie, SysV) | Syslog | `/var/log/messages` (rsyslogd persists on overlay) | `grep helix-screen /var/log/messages` or `journalctl -t helix-screen` if journald-only |
-| AD5M Forge-X/KMod (BusyBox SysV) | **File** (hook) | `/data/helixscreen/logs/helix.log` | `tail -f /data/helixscreen/logs/helix.log` |
+| AD5M Forge-X/KMod (BusyBox SysV) | **File** (hook) | `/data/.helixscreen/logs/helix.log` | `tail -f /data/.helixscreen/logs/helix.log` |
 | AD5M ZMOD / AD5X (ZMOD MIPS, BusyBox) | **File** (hook) | `/opt/config/mod_data/log/helix.log` — under `/opt/config` so ZMOD's `TAR_CONFIG` archives it (#1249) | `tail -f /opt/config/mod_data/log/helix.log` |
-| Creality K1/K1C (BusyBox, in-memory syslog) | **File** (hook) | `/usr/data/helixscreen/logs/helix.log` | `tail -f /usr/data/helixscreen/logs/helix.log` |
-| Creality K2 (BusyBox procd) | **File** (hook) | `/mnt/UDISK/helixscreen/logs/helix.log` | `tail -f /mnt/UDISK/helixscreen/logs/helix.log` |
-| Elegoo CC1 / COSMOS (BusyBox) | **File** (hook) | `/user-resource/helixscreen/logs/helix.log` | `tail -f /user-resource/helixscreen/logs/helix.log` |
+| Creality K1/K1C (BusyBox, in-memory syslog) | **File** (hook) | `/usr/data/helixscreen-state/logs/helix.log` | `tail -f /usr/data/helixscreen-state/logs/helix.log` |
+| Creality K2 (BusyBox procd) | **File** (hook) | `/mnt/UDISK/helixscreen-state/logs/helix.log` | `tail -f /mnt/UDISK/helixscreen-state/logs/helix.log` |
+| Elegoo CC1 / COSMOS (BusyBox) | **File** (hook) | `/user-resource/helixscreen-state/logs/helix.log` | `tail -f /user-resource/helixscreen-state/logs/helix.log` |
 | SonicPad (Debian) | Syslog | `/var/log/syslog` | `grep helix-screen /var/log/syslog` |
 | Android | Android | logcat | `adb logcat -s HelixScreen` |
 | Dev workstation (macOS / interactive Linux) | Console | stdout in terminal | visible directly |
@@ -376,7 +376,7 @@ compiled in," not "not reached." See BUILD_SYSTEM.md § Patch Gotchas.
 | Snapmaker U1 | `/var/log/helixscreen/launcher.log` (overlay's upperdir is persistent ext4) |
 | AD5M Forge-X/KMod | `/opt/helixscreen/logs/launcher.log` (`/var/log` is tmpfs on BusyBox) |
 | K1 / K1C | `/usr/data/helixscreen/logs/launcher.log` |
-| K2 | `/usr/data/helixscreen/logs/launcher.log` |
+| K2 | `/mnt/UDISK/helixscreen/logs/launcher.log` |
 | AD5X (ZMOD) | `/opt/config/mod_data/log/helixscreen.log` — ghzserg ships their own fork of the init script with `LOGFILE` hardcoded, so the `/var/log` probe above never runs. `INSTALL_DIR` is `/srv/helixscreen`, not `/usr/data/helixscreen`. The **app** log is a separate file, `/opt/config/mod_data/log/helix.log` (see below) |
 | CC1 / COSMOS | `/user-resource/helixscreen/logs/launcher.log` |
 
@@ -404,12 +404,12 @@ Older installs wrote to `/tmp/helixscreen.log` on every SysV target. Debug bundl
 `helixscreen.env` (in `<install_dir>/config/`, but on Klipper platforms it's symlinked to `~/printer_data/config/helixscreen/helixscreen.env`):
 
 ```
-HELIX_LOG_LEVEL=warn   # trace, debug, info, warn, error, critical, off
+HELIX_LOG_LEVEL=info   # trace, debug, info, warn, error, critical, off
 HELIX_LOG_DEST=auto    # auto, journal, syslog, file, console
 HELIX_LOG_FILE=        # path; only used when HELIX_LOG_DEST=file
 ```
 
-Precedence: `--log-*` CLI flag > `HELIX_LOG_*` env > `/log_*` in `settings.json` > defaults (production: `warn`; test mode: `debug`).
+Precedence: `--log-*` CLI flag > `HELIX_LOG_*` env > `/log_*` in `settings.json` > defaults (production: `info`; test mode: `debug`). libhv's own logger stays at `warn` or quieter whatever the app level (`libhv_level_for()`), because it fsyncs every line into its own file in the working directory.
 
 The env tier is enforced in C++ (`Application::init_logging()` → `helix::logging::log_env_override()` / `resolve_log_setting()`), not just by the launcher's flag translation, so it holds however the binary was started. Validation is shared with the CLI parser (`is_valid_log_target()` / `is_valid_log_level()` in `logging_init.h`) so the accepted sets cannot drift, but the two disagree on what to do with a bad value on purpose: a bad **flag** is fatal (the user is at a prompt and can retry), a bad **env value** logs a warning and falls through to the next tier (a typo in `helixscreen.env` must not turn every boot of an appliance into a crash-loop).
 
@@ -425,7 +425,7 @@ On Klipper-based platforms (Pi, AD5M, K1, K2, Snapmaker U1, etc.), `setup_config
 
 ## Debug Bundles
 
-`DebugBundleCollector::collect()` (`src/system/debug_bundle_collector.cpp`) assembles a debug bundle on user request (Settings → About → Generate Debug Bundle, or the `helix_debug` Moonraker shell command), reading the on-disk log cascade through `src/system/log_collector.cpp`. It captures:
+`DebugBundleCollector::collect()` (`src/system/debug_bundle_collector.cpp`) assembles a debug bundle on user request (Settings → Help & About → Upload Debug Bundle, or the `helix_debug` Moonraker shell command), reading the on-disk log cascade through `src/system/log_collector.cpp`. It captures:
 
 - `log_tail` - the structured app log, read from the in-memory ring rather than from disk (`src/system/debug_bundle_collector.cpp`), so it is always the live process and always fresh. Because the ring is installed in `init_early()` it reaches back past Phase 2 config load; see "Ring-Buffer Sink Lifecycle". The companion `log_meta` field records the active sink target, the level the persistent sinks were configured at (which the ring may have been more verbose than), and whether the tail came from the live ring or the on-disk fallback
 - Last N lines from each candidate launcher-log path (`/var/log/helixscreen/launcher.log`, `${install_dir}/logs/launcher.log`, legacy `/tmp/helixscreen.log`, etc.)

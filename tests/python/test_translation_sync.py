@@ -480,6 +480,64 @@ class TestExtractHonorsUniversalMarker:
         assert "Sentence With Product" in result
 
 
+class TestExtractHeaderRules:
+    """Headers join the scan root under stricter rules than .cpp files."""
+
+    def _extract(self, tmp_path, source, suffix=".cpp"):
+        from translations.extractor import extract_strings_from_cpp
+
+        path = tmp_path / f"sample{suffix}"
+        path.write_text(dedent(source))
+        return extract_strings_from_cpp(path)
+
+    def test_bare_return_in_header_is_not_a_key(self, tmp_path):
+        """A Title-Case return in a header is as likely an identifier
+        (log_name, *_to_string) as a label, so headers must mark strings
+        explicitly to get a key."""
+        result = self._extract(
+            tmp_path,
+            """\
+            const char* log_name() const { return "WiFi Screen"; }
+            const char* f() { return "Some Status"; }
+            """,
+            suffix=".h",
+        )
+        assert "WiFi Screen" not in result
+        assert "Some Status" not in result
+
+    def test_lv_tr_in_header_is_a_key(self, tmp_path):
+        result = self._extract(
+            tmp_path,
+            """\
+            const char* f() { return lv_tr("Wrong State"); }
+            """,
+            suffix=".h",
+        )
+        assert "Wrong State" in result
+
+    def test_bare_return_in_cpp_still_a_key(self, tmp_path):
+        result = self._extract(
+            tmp_path,
+            """\
+            const char* f() { return "Some Status"; }
+            """,
+        )
+        assert "Some Status" in result
+
+    def test_log_name_getter_skipped_in_cpp(self, tmp_path):
+        """log_name() joins get_name()/component_name() as identifier getters:
+        named for logs, never rendered, so their literals are not keys."""
+        result = self._extract(
+            tmp_path,
+            """\
+            const char* log_name() const { return "Widget"; }
+            const char* g() { return "Other Status"; }
+            """,
+        )
+        assert "Widget" not in result
+        assert "Other Status" in result
+
+
 # =============================================================================
 # Test: YAML Manager Module
 # =============================================================================
@@ -1041,7 +1099,7 @@ class TestObsoleteDetection:
 
         from translations.obsolete import find_obsolete_keys
 
-        result = find_obsolete_keys(xml_dir, yaml_dir, cpp_dir=tmp_path / "src",
+        result = find_obsolete_keys(xml_dir, yaml_dir, cpp_dirs=[tmp_path / "src"],
                                     repo_root=tmp_path)
         assert "Welcome to HelixScreen" not in result
 
@@ -1056,12 +1114,12 @@ class TestObsoleteDetection:
 
         from translations.obsolete import find_obsolete_keys
 
-        result = find_obsolete_keys(xml_dir, yaml_dir, cpp_dir=tmp_path / "src",
+        result = find_obsolete_keys(xml_dir, yaml_dir, cpp_dirs=[tmp_path / "src"],
                                     repo_root=tmp_path)
         assert "AI detection" not in result
 
     def test_label_text_in_header_is_not_obsolete(self, tmp_path):
-        """include/ is scanned — cpp_dir only ever pointed at src/."""
+        """include/ is scanned — the reference scan covers headers, not cpp_dir."""
         xml_dir, yaml_dir = self._repo(tmp_path, ["Used Key", "Nozzle:"])
         (tmp_path / "include" / "ui_panel_controls.h").write_text(
             'constexpr const char* kNozzle = "Nozzle:";\n'
@@ -1069,7 +1127,7 @@ class TestObsoleteDetection:
 
         from translations.obsolete import find_obsolete_keys
 
-        result = find_obsolete_keys(xml_dir, yaml_dir, cpp_dir=tmp_path / "src",
+        result = find_obsolete_keys(xml_dir, yaml_dir, cpp_dirs=[tmp_path / "src"],
                                     repo_root=tmp_path)
         assert "Nozzle:" not in result
 
@@ -1084,7 +1142,7 @@ class TestObsoleteDetection:
 
         from translations.obsolete import find_obsolete_keys
 
-        result = find_obsolete_keys(xml_dir, yaml_dir, cpp_dir=tmp_path / "src",
+        result = find_obsolete_keys(xml_dir, yaml_dir, cpp_dirs=[tmp_path / "src"],
                                     repo_root=tmp_path)
         assert "Dead Key" in result
 
@@ -1098,7 +1156,7 @@ class TestObsoleteDetection:
 
         from translations.obsolete import find_obsolete_keys
 
-        result = find_obsolete_keys(xml_dir, yaml_dir, cpp_dir=tmp_path / "src",
+        result = find_obsolete_keys(xml_dir, yaml_dir, cpp_dirs=[tmp_path / "src"],
                                     repo_root=tmp_path)
         assert "Switch Tests" in result
 
@@ -1112,7 +1170,7 @@ class TestObsoleteDetection:
 
         from translations.obsolete import find_obsolete_keys
 
-        result = find_obsolete_keys(xml_dir, yaml_dir, cpp_dir=tmp_path / "src",
+        result = find_obsolete_keys(xml_dir, yaml_dir, cpp_dirs=[tmp_path / "src"],
                                     repo_root=tmp_path)
         assert "Up" in result
 
@@ -1414,12 +1472,12 @@ class TestObsoleteExtractedCache:
         no_scan = tmp_path / "not-a-checkout"
 
         rescan = find_obsolete_keys(
-            xml_dir, yaml_dir, cpp_dir=src_dir, repo_root=no_scan
+            xml_dir, yaml_dir, cpp_dirs=[src_dir], repo_root=no_scan
         )
         cached = find_obsolete_keys(
             xml_dir,
             yaml_dir,
-            cpp_dir=src_dir,
+            cpp_dirs=[src_dir],
             repo_root=no_scan,
             extracted=self._extracted(xml_dir, src_dir),
         )
@@ -1451,7 +1509,7 @@ class TestObsoleteExtractedCache:
         result = ob.find_obsolete_keys(
             xml_dir,
             yaml_dir,
-            cpp_dir=src_dir,
+            cpp_dirs=[src_dir],
             repo_root=tmp_path / "not-a-checkout",
             extracted=extracted,
         )
@@ -1476,7 +1534,7 @@ class TestObsoleteExtractedCache:
             return real(*args, **kwargs)
 
         monkeypatch.setattr(cli_mod, "find_obsolete_keys", spy)
-        result = cli_mod.run_sync(xml_dir, yaml_dir, dry_run=True, cpp_dir=src_dir)
+        result = cli_mod.run_sync(xml_dir, yaml_dir, dry_run=True, cpp_dirs=[src_dir])
 
         expected = self._extracted(xml_dir, src_dir)
         assert expected == {"Used Key", "From Cpp"}
@@ -1499,7 +1557,32 @@ class TestObsoleteExtractedCache:
 
         monkeypatch.setattr(cli_mod, "find_obsolete_keys", spy)
         cli_mod.run_sync(
-            xml_dir, yaml_dir, dry_run=True, cpp_dir=src_dir, with_sources=True
+            xml_dir, yaml_dir, dry_run=True, cpp_dirs=[src_dir], with_sources=True
         )
 
         assert captured["extracted"] is None
+
+    def test_header_lv_tr_string_becomes_a_key(self, tmp_path):
+        """A key living only in include/ is merged when headers are a scan root.
+
+        The extractor patterns already match *.h, so the scan root list is the
+        only thing that can keep header strings out of the YAML.
+        """
+        from translations.cli import run_sync
+        from translations.yaml_manager import load_yaml_file_readonly
+
+        xml_dir, yaml_dir, src_dir = self._repo(tmp_path)
+        include_dir = tmp_path / "include"
+        (include_dir / "ams_error.h").write_text('lv_tr("Nothing loaded");\n')
+
+        run_sync(xml_dir, yaml_dir, dry_run=False, cpp_dirs=[src_dir, include_dir])
+
+        base = load_yaml_file_readonly(yaml_dir / "en.yml")
+        assert "Nothing loaded" in (base.get("translations") or {})
+
+    def test_default_scan_roots_cover_headers(self):
+        """A bare `make translation-sync` scans include/, not only src/."""
+        import translation_sync
+
+        names = {p.name for p in translation_sync.DEFAULT_CPP_DIRS}
+        assert names == {"src", "include"}

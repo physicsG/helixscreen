@@ -13,6 +13,7 @@
  */
 
 #include "../test_fixtures.h"
+#include "../test_helpers/scoped_widget_factory.h"
 #include "config.h"
 #include "grid_layout.h"
 #include "helix-xml/src/xml/lv_xml.h"
@@ -30,6 +31,7 @@
 #include "../catch_amalgamated.hpp"
 
 using namespace helix;
+using helix_test::ScopedWidgetFactory;
 
 namespace {
 
@@ -67,25 +69,10 @@ lv_obj_t* SizeOracleWidget::s_obj = nullptr;
 int SizeOracleWidget::s_width_px = -1;
 int SizeOracleWidget::s_height_px = -1;
 
-/// Swap a registry factory for the duration of a test and restore it after.
-class ScopedOracleFactory {
-  public:
-    explicit ScopedOracleFactory(const char* id) : id_(id) {
-        const auto* def = helix::find_widget_def(id);
-        REQUIRE(def != nullptr);
-        original_ = def->factory;
-        helix::register_widget_factory(id, [](const std::string&) {
-            return std::unique_ptr<PanelWidget>(new SizeOracleWidget());
-        });
-    }
-    ~ScopedOracleFactory() {
-        helix::register_widget_factory(id_, original_);
-    }
-
-  private:
-    const char* id_;
-    WidgetFactory original_;
-};
+/// A registry factory building a SizeOracleWidget.
+WidgetFactory size_oracle_factory() {
+    return [](const std::string&) { return std::unique_ptr<PanelWidget>(new SizeOracleWidget()); };
+}
 
 /// Records the pixel size promised for a MULTI-CELL widget (colspan >= 2).
 /// The colspan==1 oracle above cannot exercise LVGL's per-track remainder
@@ -123,25 +110,10 @@ lv_obj_t* SpanOracleWidget::s_obj = nullptr;
 int SpanOracleWidget::s_width_px = -1;
 int SpanOracleWidget::s_height_px = -1;
 
-/// Swap a registry factory for the duration of a test and restore it after.
-class ScopedSpanOracleFactory {
-  public:
-    explicit ScopedSpanOracleFactory(const char* id) : id_(id) {
-        const auto* def = helix::find_widget_def(id);
-        REQUIRE(def != nullptr);
-        original_ = def->factory;
-        helix::register_widget_factory(id, [](const std::string&) {
-            return std::unique_ptr<PanelWidget>(new SpanOracleWidget());
-        });
-    }
-    ~ScopedSpanOracleFactory() {
-        helix::register_widget_factory(id_, original_);
-    }
-
-  private:
-    const char* id_;
-    WidgetFactory original_;
-};
+/// A registry factory building a SpanOracleWidget.
+WidgetFactory span_oracle_factory() {
+    return [](const std::string&) { return std::unique_ptr<PanelWidget>(new SpanOracleWidget()); };
+}
 
 } // namespace
 
@@ -158,7 +130,7 @@ TEST_CASE_METHOD(XMLTestFixture, "Widget is told the pixel width the grid actual
     // 0, the gutters vanish, and this test would pass without proving anything.
     REQUIRE(theme_manager_get_spacing("space_xs") > 0);
 
-    ScopedOracleFactory oracle("shutdown");
+    ScopedWidgetFactory oracle("shutdown", size_oracle_factory());
 
     const std::string panel_id = "test_cell_px_oracle";
     auto* cfg = Config::get_instance();
@@ -221,7 +193,7 @@ TEST_CASE_METHOD(XMLTestFixture,
     // 0, the gutters vanish, and this test would pass without proving anything.
     REQUIRE(theme_manager_get_spacing("space_xs") > 0);
 
-    ScopedSpanOracleFactory oracle("tips");
+    ScopedWidgetFactory oracle("tips", span_oracle_factory());
 
     const std::string panel_id = "test_cell_px_oracle_span";
     auto* cfg = Config::get_instance();
@@ -295,7 +267,7 @@ TEST_CASE_METHOD(XMLTestFixture,
         "<component><view extends=\"lv_obj\" width=\"100%\" height=\"100%\"/></component>");
     SizeOracleWidget::reset();
 
-    ScopedOracleFactory oracle("shutdown");
+    ScopedWidgetFactory oracle("shutdown", size_oracle_factory());
 
     // A single 1x1 widget in the top-left cell must still build the full row
     // count the container's content box earns. Sizing the row axis to the

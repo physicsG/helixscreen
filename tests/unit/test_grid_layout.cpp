@@ -8,6 +8,7 @@
  */
 
 #include "grid_layout.h"
+#include "panel_widget.h"
 #include "panel_widget_registry.h"
 
 #include <map>
@@ -456,59 +457,61 @@ TEST_CASE("PanelWidgetDef: half-cell capability is classified per widget",
           "[widget_def][half_cell][1126]") {
     // Every registry id appears below, so a new widget cannot be added without
     // deciding this. The rule (PanelWidgetDef::supports_half_col): an axis gets
-    // half-cell resolution when the content along it is CONTINUOUS - a chart,
-    // an aspect-fit frame, wrapping text, a scrolling strip, stacked readout
-    // rows, a measured layout switch - because half a cell of extra room shows
-    // more. A centred fixed glyph over a short label gains only whitespace, and
-    // the finer drag snap is a real cost at a 34px track, so those stay whole.
+    // half-cell resolution when half a cell of extra room shows MORE. That
+    // covers continuous content - a chart, an aspect-fit frame, wrapping text,
+    // a scrolling strip, stacked readout rows - and it covers a centred glyph,
+    // which scales to whatever box it is given rather than sitting fixed in the
+    // middle of it (prestonbrown/helixscreen#1559).
     //
-    // The five with a fixed 1x1 footprint (max == min on both axes) carry
-    // half_col for PLACEMENT alone: it is what lets a lone button centre in a
-    // two-cell gap. They cannot be resized at all.
+    // What stays whole is a widget whose layout is authored around a fixed
+    // number of cells, where a half cell buys nothing but a finer drag snap
+    // that costs real precision at a 34px track.
     const std::map<std::string, std::pair<bool, bool>> expected = {
         // id                      half_col  half_row
-        {"printer_image", {true, true}},   // aspect-fit render
-        {"print_status", {true, true}},    // filename/times/progress reflow
-        {"camera", {true, true}},          // aspect-fit frame
-        {"temp_graph", {true, true}},      // chart
-        {"tips", {true, true}},            // wrapping body text
-        {"job_queue", {true, true}},       // list rows
-        {"print_stats", {true, true}},     // stat rows
-        {"ams", {true, true}},             // lane slots side by side
-        {"active_spool", {true, true}},    // measured compact/wide switch
-        {"nozzle_temps", {true, true}},    // decide_nozzle_layout() is measured
-        {"temp_stack", {true, true}},      // 2-3 stacked readout rows
-        {"fan_stack", {true, true}},       // 2-3 stacked readout rows
-        {"tool_switcher", {true, true}},   // horizontal chip strip
-        {"clog_detection", {true, true}},  // carousel arc scales with the box
-        {"preheat", {true, false}},        // flex row; row span is fixed
-        {"fan", {true, false}},            // user fan name, long_mode=dots
-        {"thermistor", {true, false}},     // user sensor name, long_mode=dots
-        {"bypass", {true, false}},         // material name, long_mode=dots
-        {"favorite_macro", {true, false}}, // user macro name, long_mode=dots
-        {"shutdown", {true, false}},       // fixed 1x1: placement only
-        {"lock", {true, false}},           // fixed 1x1: placement only
-        {"firmware_restart", {true, false}},
-        {"led_controls", {true, false}},
+        {"printer_image", {true, true}},     // aspect-fit render
+        {"print_status", {true, true}},      // filename/times/progress reflow
+        {"camera", {true, true}},            // aspect-fit frame
+        {"temp_graph", {true, true}},        // chart
+        {"tips", {true, true}},              // wrapping body text
+        {"job_queue", {true, true}},         // list rows
+        {"print_stats", {true, true}},       // stat rows
+        {"ams", {true, true}},               // lane slots side by side
+        {"active_spool", {true, true}},      // measured compact/wide switch
+        {"nozzle_temps", {true, true}},      // decide_nozzle_layout() is measured
+        {"temp_stack", {true, true}},        // 2-3 stacked readout rows
+        {"fan_stack", {true, true}},         // 2-3 stacked readout rows
+        {"tool_switcher", {true, true}},     // horizontal chip strip
+        {"clog_detection", {true, true}},    // horizontal bar scales with the box
+        {"filament_buffer", {false, false}}, // slider tile; the trace needs a whole second cell
+        {"preheat", {true, false}},          // flex row; row span is fixed
+        {"fan", {true, true}},               // user fan name, long_mode=dots
+        {"thermistor", {true, true}},        // user sensor name, long_mode=dots
+        {"bypass", {true, true}},            // material name, long_mode=dots
+        {"favorite_macro", {true, true}},    // badge scales with the box
+        {"shutdown", {true, true}},          // fixed 1x1: placement only
+        {"lock", {true, true}},              // fixed 1x1: placement only
+        {"firmware_restart", {true, true}},
+        {"led_controls", {true, true}},
         {"clock", {true, true}}, // digits and date reflow on both axes
         // Centred fixed glyph + short label: an intermediate size is whitespace.
-        {"network", {false, false}},
-        {"led", {false, false}},
-        {"filament", {false, false}},
-        {"humidity", {false, false}},
-        {"width_sensor", {false, false}},
-        {"notifications", {false, false}},
-        {"temperature", {false, false}},
-        {"bed_temperature", {false, false}},
-        {"chamber_temperature", {false, false}},
+        {"network", {true, true}},
+        {"led", {true, true}},
+        {"filament", {true, true}},
+        {"humidity", {true, true}},
+        {"width_sensor", {true, true}},
+        {"notifications", {true, true}},
+        {"temperature", {true, true}},
+        {"bed_temperature", {true, true}},
+        {"chamber_temperature", {true, true}},
         // Fixed 1x1/2x1 action buttons that never gained placement freedom.
-        {"power_device", {false, false}},
-        {"macros", {false, false}},
-        {"motion", {false, false}},
-        {"gcode_console", {false, false}},
+        {"power_device", {true, true}},
+        {"macros", {true, true}},
+        {"motion", {true, true}},
+        {"gcode_console", {true, true}},
         {"control_buttons", {false, false}},
     };
 
+    helix::init_widget_registrations();
     for (const auto& def : helix::get_all_widget_defs()) {
         INFO("widget " << def.id);
         auto it = expected.find(def.id);
@@ -518,19 +521,57 @@ TEST_CASE("PanelWidgetDef: half-cell capability is classified per widget",
     }
 }
 
-TEST_CASE("PanelWidgetDef: a half-cell axis is never below a whole cell",
-          "[widget_def][half_cell][1126]") {
-    // Half-cell resolution only ever ADDS sizes above one whole cell. It was
-    // authored the other way once - a 1-track minimum at 31-40px, where the
-    // icon and caption clipped on every geometry - and the floor was raised to
-    // a cell in response. A new widget must not reintroduce a sub-cell floor
-    // just because it carries the flag.
+TEST_CASE("PanelWidgetDef: a sub-cell floor belongs only to a widget that can decline one",
+          "[widget_def][half_cell][1126][1559]") {
+    // A one-track span is 31-40px on the small tiers, which clips a widget whose
+    // layout is authored around whole cells. Only a widget that measures itself
+    // may sit below a cell on either axis, because only it can refuse a box it
+    // cannot draw: PanelWidget::fits_at is consulted by the resize clamp and the
+    // load path alike, and grow_span_to_fit lifts the span back above the floor
+    // when the answer is no. The rule is the same on both axes: a tile short
+    // enough to lose its stack lays its glyph beside its text instead.
     constexpr int cell = GridLayout::TRACKS_PER_CELL;
+    int sub_cell_cols = 0;
+    int sub_cell_rows = 0;
+    // The factories are filled in by registration, not by the static table.
+    helix::init_widget_registrations();
     for (const auto& def : helix::get_all_widget_defs()) {
         INFO("widget " << def.id);
-        CHECK(def.effective_min_colspan() >= cell);
-        CHECK(def.effective_min_rowspan() >= cell);
+        const bool narrow = def.effective_min_colspan() < cell;
+        const bool short_ = def.effective_min_rowspan() < cell;
+        if (!narrow && !short_) {
+            continue;
+        }
+        // Below a cell on an axis, so it must step by a half cell on that axis.
+        if (narrow) {
+            ++sub_cell_cols;
+            CHECK(def.supports_half_col);
+        }
+        if (short_) {
+            ++sub_cell_rows;
+            CHECK(def.supports_half_row);
+        }
+        // ...and be able to refuse one.
+        REQUIRE(def.factory != nullptr);
+        auto instance = def.factory(def.id);
+        REQUIRE(instance != nullptr);
+        // fits_at must be a real predicate, not a constant: a widget allowed
+        // below a whole cell has to accept a roomy box and refuse a box nothing
+        // can be drawn in. The sizes it refuses in between are geometry- and
+        // tier-dependent, which is what test_widget_content_fits measures at
+        // the smallest span each widget is actually offered; pinning a specific
+        // one here would pin this tier's arithmetic, not the rule.
+        INFO("widget " << def.id << " sits below a whole cell, so fits_at must discriminate");
+        CHECK(instance->fits_at(480, 480));
+        CHECK_FALSE(instance->fits_at(1, 1));
     }
+
+    // A registry where nothing sits below a cell would pass the loop above
+    // having checked none of this.
+    INFO("widgets authored below a whole cell wide");
+    CHECK(sub_cell_cols > 0);
+    INFO("widgets authored below a whole cell tall");
+    CHECK(sub_cell_rows > 0);
 }
 
 TEST_CASE("PanelWidgetDef: half-cell defaults to off", "[widget_def][half_cell]") {

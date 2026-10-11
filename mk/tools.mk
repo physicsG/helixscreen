@@ -25,7 +25,8 @@ INSPECTOR_DEPS := \
 	$(OBJ_DIR)/format_utils.o \
 	$(INSPECTOR_INTERACTIVE_OBJ) \
 	$(CPP_TERMINAL_VERSION_STUB_OBJ) \
-	$(CPP_TERMINAL_OBJS)
+	$(CPP_TERMINAL_OBJS) \
+	$(SPDLOG_OBJS)
 
 # Simplified linker flags (no SDL2, no UI frameworks)
 INSPECTOR_LDFLAGS := $(LIBHV_LIBS) -lm -lpthread
@@ -47,7 +48,7 @@ $(MOONRAKER_INSPECTOR): $(LIBHV_LIB) $(INSPECTOR_OBJ) $(INSPECTOR_DEPS)
 	$(ECHO) "$(GREEN)✓ Moonraker Inspector built: $@$(RESET)"
 
 # Compile inspector source
-$(INSPECTOR_OBJ): $(INSPECTOR_SRC) $(HEADERS) $(LIBHV_LIB)
+$(INSPECTOR_OBJ): $(INSPECTOR_SRC) $(HEADERS) $(LIBHV_LIB) $(ABI_STAMP)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(BLUE)[CXX]$(RESET) $<"
 ifeq ($(V),1)
@@ -59,7 +60,7 @@ endif
 	}
 
 # Compile interactive module
-$(INSPECTOR_INTERACTIVE_OBJ): $(INSPECTOR_INTERACTIVE_SRC) $(HEADERS) $(LIBHV_LIB)
+$(INSPECTOR_INTERACTIVE_OBJ): $(INSPECTOR_INTERACTIVE_SRC) $(HEADERS) $(LIBHV_LIB) $(ABI_STAMP)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(BLUE)[CXX]$(RESET) $<"
 ifeq ($(V),1)
@@ -71,7 +72,7 @@ endif
 	}
 
 # Compile cpp-terminal version stub (cmake normally generates version.cpp)
-$(CPP_TERMINAL_VERSION_STUB_OBJ): $(TOOLS_DIR)/cpp_terminal_version_stub.cpp
+$(CPP_TERMINAL_VERSION_STUB_OBJ): $(TOOLS_DIR)/cpp_terminal_version_stub.cpp $(ABI_STAMP)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(BLUE)[CXX]$(RESET) $<"
 	$(Q)$(CXX) $(CXXFLAGS) $(CPP_TERMINAL_INC) -c $< -o $@ || { \
@@ -80,7 +81,7 @@ $(CPP_TERMINAL_VERSION_STUB_OBJ): $(TOOLS_DIR)/cpp_terminal_version_stub.cpp
 	}
 
 # Compile cpp-terminal library (use SUBMODULE_CXXFLAGS to suppress third-party warnings)
-$(OBJ_DIR)/cpp-terminal/%.o: $(CPP_TERMINAL_DIR)/%.cpp
+$(OBJ_DIR)/cpp-terminal/%.o: $(CPP_TERMINAL_DIR)/%.cpp $(ABI_STAMP) $(FLAGS_STAMP)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(BLUE)[CXX]$(RESET) $<"
 ifeq ($(V),1)
@@ -104,18 +105,25 @@ VALIDATE_XML_SRC := $(TOOLS_DIR)/validate_xml_constants.cpp
 VALIDATE_XML_BIN := $(BIN_DIR)/validate-xml-constants
 VALIDATE_XML_OBJ := $(OBJ_DIR)/tools/validate_xml_constants.o
 
-# Validator reuses main app objects - filter out main.o to avoid duplicate main symbol
-VALIDATE_XML_APP_OBJS := $(filter-out $(OBJ_DIR)/main.o,$(APP_OBJS) $(APP_C_OBJS) $(OBJCPP_OBJS))
+# Validator reuses main app objects - filter out main.o to avoid duplicate main
+# symbol. remote_client.o goes too: its only caller is main.o, and it is the
+# one object that needs linenoise — the validator has no REPL and would
+# otherwise have to link linenoise solely to satisfy an object nothing reaches.
+# The rest of src/remote/ stays: Application::shutdown() calls the control
+# server, so those objects are live here.
+VALIDATE_XML_APP_OBJS := $(filter-out $(OBJ_DIR)/main.o $(OBJ_DIR)/remote/remote_client.o,$(APP_OBJS) $(APP_C_OBJS) $(OBJCPP_OBJS))
 
-# Full dependencies (app objects + LVGL + fonts + lv_markdown + quirc + translations)
-# Note: lv_markdown, quirc, and translations are needed because app objects may reference them
+# Full dependencies (app objects + LVGL + fonts + lv_markdown + quirc + lua + translations)
+# Note: lv_markdown, quirc, lua, and translations are needed because app objects may reference them
 VALIDATE_XML_DEPS := \
 	$(VALIDATE_XML_APP_OBJS) \
 	$(LVGL_OBJS) \
 	$(HELIX_XML_OBJS) \
 	$(THORVG_OBJS) \
+	$(SPDLOG_OBJS) \
 	$(LV_MARKDOWN_OBJS) \
 	$(QUIRC_OBJS) \
+	$(LUA_OBJS) \
 	$(FONT_OBJS) \
 	$(TRANS_OBJS)
 
@@ -133,7 +141,7 @@ $(VALIDATE_XML_BIN): $(TARGET) $(VALIDATE_XML_OBJ)
 	$(ECHO) "$(GREEN)✓ XML Constants Validator built: $@$(RESET)"
 
 # Compile validator source
-$(VALIDATE_XML_OBJ): $(VALIDATE_XML_SRC)
+$(VALIDATE_XML_OBJ): $(VALIDATE_XML_SRC) $(ABI_STAMP)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(BLUE)[CXX]$(RESET) $<"
 ifeq ($(V),1)
@@ -180,7 +188,7 @@ VALIDATE_ATTRS_LIB_OBJ := $(OBJ_DIR)/tools/xml_attribute_validator.o
 VALIDATE_ATTRS_LDFLAGS := -lexpat
 
 # Build rule for attribute validator
-$(VALIDATE_ATTRS_BIN): $(VALIDATE_ATTRS_OBJ) $(VALIDATE_ATTRS_LIB_OBJ)
+$(VALIDATE_ATTRS_BIN): $(VALIDATE_ATTRS_OBJ) $(VALIDATE_ATTRS_LIB_OBJ) $(SPDLOG_OBJS)
 	$(Q)mkdir -p $(BIN_DIR)
 	$(ECHO) "$(MAGENTA)$(BOLD)[LD]$(RESET) $@"
 	$(Q)$(CXX) $(CXXFLAGS) $^ -o $@ $(VALIDATE_ATTRS_LDFLAGS) || { \
@@ -190,7 +198,7 @@ $(VALIDATE_ATTRS_BIN): $(VALIDATE_ATTRS_OBJ) $(VALIDATE_ATTRS_LIB_OBJ)
 	$(ECHO) "$(GREEN)✓ XML Attribute Validator built: $@$(RESET)"
 
 # Compile validator main source
-$(VALIDATE_ATTRS_OBJ): $(VALIDATE_ATTRS_SRC)
+$(VALIDATE_ATTRS_OBJ): $(VALIDATE_ATTRS_SRC) $(ABI_STAMP)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(BLUE)[CXX]$(RESET) $<"
 	$(Q)$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@ || { \
@@ -199,7 +207,7 @@ $(VALIDATE_ATTRS_OBJ): $(VALIDATE_ATTRS_SRC)
 	}
 
 # Compile validator library source
-$(VALIDATE_ATTRS_LIB_OBJ): $(VALIDATE_ATTRS_LIB_SRC)
+$(VALIDATE_ATTRS_LIB_OBJ): $(VALIDATE_ATTRS_LIB_SRC) $(ABI_STAMP)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(BLUE)[CXX]$(RESET) $<"
 	$(Q)$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@ || { \
@@ -256,7 +264,7 @@ regen-xml-schema:
 # Theme token table (Python)
 # ==============================================================================
 # Build-time snapshot of every <color>/<px>/<string> design token in ui_xml/,
-# mirroring theme_manager.cpp's runtime scan (top-level files, sorted,
+# mirroring theme_token_scan.cpp's runtime scan (top-level files, sorted,
 # last-wins). Committed artifact consumed by src/generated/theme_token_table.cpp
 # callers; staleness is caught by the Task 4 parity test, not this target.
 #
@@ -319,3 +327,11 @@ regen-lvgl-event-codes:
 
 check-lvgl-event-codes:
 	$(Q)python3 scripts/gen_lvgl_event_codes.py --check
+
+# What a tag push builds and per-push CI does not, run before tagging: version and
+# changelog sanity, the installer bundles, then packaged docker cross builds of
+# RELEASE_GATE_TARGETS (default mips). TIERS=fast skips the cross builds. It lives
+# here because in mk/cross.mk a release-<name> target means a packaged platform.
+.PHONY: release-gate
+release-gate:
+	@RELEASE_GATE_TARGETS="$(RELEASE_GATE_TARGETS)" scripts/release-gate.sh $(TIERS)

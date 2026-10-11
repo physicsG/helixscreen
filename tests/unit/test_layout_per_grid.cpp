@@ -20,54 +20,42 @@
 // parked alongside it. These tests pin the property that makes it worth doing:
 // an arrangement survives a round trip through another grid untouched.
 
+#include "../test_helpers/config_dir_guard.h"
 #include "config.h"
 #include "panel_widget_config.h"
 #include "panel_widget_registry.h"
 
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <string>
 
 #include "../catch_amalgamated.hpp"
 
-namespace fs = std::filesystem;
 using namespace helix;
 using json = nlohmann::json;
 
 namespace {
 
 class PerGridFixture {
-  protected:
-    Config config;
-    std::string temp_dir;
-    std::string config_path;
-    std::string saved_config_dir_;
-    bool had_config_dir_ = false;
-
   public:
     PerGridFixture() {
-        temp_dir = (fs::temp_directory_path() / "helix_per_grid_test").string();
-        fs::remove_all(temp_dir);
-        fs::create_directories(temp_dir);
-        if (const char* prev = std::getenv("HELIX_CONFIG_DIR")) {
-            saved_config_dir_ = prev;
-            had_config_dir_ = true;
-        }
-        setenv("HELIX_CONFIG_DIR", temp_dir.c_str(), 1);
-        config_path = temp_dir + "/settings.json";
+        config_path = (config_dir_.dir / "settings.json").string();
     }
 
     ~PerGridFixture() {
-        fs::remove_all(temp_dir);
-        if (had_config_dir_) {
-            setenv("HELIX_CONFIG_DIR", saved_config_dir_.c_str(), 1);
-        } else {
-            unsetenv("HELIX_CONFIG_DIR");
-        }
         config.clear_path();
     }
 
+  protected:
+    Config config;
+    std::string config_path;
+
+  private:
+    // Concurrent Catch2 shards run this file's cases in separate processes, so
+    // each needs its own config dir — ConfigDirGuard's pid suffix provides it.
+    ConfigDirGuard config_dir_{"per_grid"};
+
+  public:
     /// Seed settings.json with one home page and init Config from it.
     void write_and_init(std::initializer_list<json> widgets, const json& extra = json::object()) {
         json home{{"main_page_index", 0},

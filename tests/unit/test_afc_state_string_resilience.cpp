@@ -10,12 +10,15 @@
 // rename a non-event, and the humanized display fallback for states we have
 // never seen.
 
+#include "test_helpers/afc_test_access.h"
 #include "ams_backend_afc.h"
 #include "ams_types.h"
 
 #include "../catch_amalgamated.hpp"
 
 using namespace helix;
+
+namespace helix {
 
 class AfcStateStringHelper : public AmsBackendAfc {
   public:
@@ -26,7 +29,7 @@ class AfcStateStringHelper : public AmsBackendAfc {
         for (int i = 0; i < count; ++i) {
             names.push_back("lane" + std::to_string(i + 1));
         }
-        initialize_slots(names);
+        AfcTestAccess::initialize_slots(*this, names);
     }
 
     void feed_afc_state(const nlohmann::json& afc_data) {
@@ -57,11 +60,12 @@ class AfcStateStringHelper : public AmsBackendAfc {
     }
 
     const std::unordered_map<std::string, AfcToolState>& tool_states() const {
-        return tool_states_;
+        return AfcTestAccess::tool_states(*this);
     }
 
     using AmsBackendAfc::match_narration_phase;
 };
+} // namespace helix
 
 // ============================================================================
 // ams_action_from_string() — normalized matching

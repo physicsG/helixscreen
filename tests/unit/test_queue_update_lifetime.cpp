@@ -28,7 +28,6 @@
 #include "moonraker_api_mock.h"
 #include "moonraker_client_mock.h"
 #include "printer_capabilities_state.h"
-#include "printer_plugin_status_state.h"
 #include "printer_print_state.h"
 #include "printer_state.h"
 #include "static_subject_registry.h"
@@ -144,7 +143,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "SpoolWizard vendor load is dropped when the o
     REQUIRE(wizard.all_vendors().empty());
 
     // User backs out of the wizard before the response is applied.
-    wizard.on_deactivate();
+    wizard.on_deactivate(DeactivateReason::NavigateAway);
 
     UpdateQueue::instance().drain();
 
@@ -194,7 +193,7 @@ TEST_CASE_METHOD(LVGLTestFixture,
     caps.set_sensor_count(4);
 
     REQUIRE(UpdateQueue::instance().pending_count() > 0);
-    REQUIRE(lv_subject_get_int(caps.get_printer_has_spoolman_subject()) == 0);
+    REQUIRE(lv_subject_get_int(caps.subject(Capability::HasSpoolman)) == 0);
 
     // Tear down and stand back up on the same live object, which is what the
     // test-isolation and reconnect paths do — and the shape a destructor-only
@@ -206,11 +205,11 @@ TEST_CASE_METHOD(LVGLTestFixture,
 
     // Pre-fix each of these writes into a subject that was deinited underneath
     // it, and lv_subject_notify walks the freed observer list.
-    CHECK(lv_subject_get_int(caps.get_printer_has_spoolman_subject()) == 0);
-    CHECK(lv_subject_get_int(caps.get_printer_has_timelapse_subject()) == 0);
-    CHECK(lv_subject_get_int(caps.get_printer_has_webcam_subject()) == 0);
-    CHECK(lv_subject_get_int(caps.get_power_device_count_subject()) == 0);
-    CHECK(lv_subject_get_int(caps.get_sensor_count_subject()) == 0);
+    CHECK(lv_subject_get_int(caps.subject(Capability::HasSpoolman)) == 0);
+    CHECK(lv_subject_get_int(caps.subject(Capability::HasTimelapse)) == 0);
+    CHECK(lv_subject_get_int(caps.subject(Capability::HasWebcam)) == 0);
+    CHECK(lv_subject_get_int(caps.subject(Capability::PowerDeviceCount)) == 0);
+    CHECK(lv_subject_get_int(caps.subject(Capability::SensorCount)) == 0);
     CHECK(caps.get_webcam_stream_url().empty());
     CHECK(UpdateQueue::instance().pending_count() == 0);
 }
@@ -229,8 +228,8 @@ TEST_CASE_METHOD(LVGLTestFixture,
 
     // Without this the drop case above would pass vacuously — a guard that
     // swallowed everything would satisfy it just as well.
-    CHECK(lv_subject_get_int(caps.get_printer_has_spoolman_subject()) == 1);
-    CHECK(lv_subject_get_int(caps.get_power_device_count_subject()) == 3);
+    CHECK(lv_subject_get_int(caps.subject(Capability::HasSpoolman)) == 1);
+    CHECK(lv_subject_get_int(caps.subject(Capability::PowerDeviceCount)) == 3);
 }
 
 // ============================================================================
@@ -244,14 +243,14 @@ TEST_CASE_METHOD(LVGLTestFixture, "PrinterState drops queued setters once subjec
     PrinterState state;
     state.init_subjects(false);
 
-    REQUIRE_FALSE(state.service_has_helix_plugin());
+    REQUIRE_FALSE(state.plugin_status_state().service_has_helix_plugin());
 
     state.set_helix_plugin_installed(true);
     state.set_timelapse_available(true);
     state.set_timelapse_default_enabled(true);
 
     REQUIRE(UpdateQueue::instance().pending_count() > 0);
-    REQUIRE_FALSE(state.service_has_helix_plugin());
+    REQUIRE_FALSE(state.plugin_status_state().service_has_helix_plugin());
 
     state.deinit_subjects();
     state.init_subjects(false);
@@ -261,7 +260,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "PrinterState drops queued setters once subjec
     // The plugin flag is the readable proxy: the queued body calls
     // plugin_status_state_.set_installed(true) plus the aggregate recompute,
     // all against subjects that no longer exist in the generation that queued it.
-    CHECK_FALSE(state.service_has_helix_plugin());
+    CHECK_FALSE(state.plugin_status_state().service_has_helix_plugin());
     CHECK(UpdateQueue::instance().pending_count() == 0);
 }
 
@@ -275,7 +274,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "PrinterState applies setters while subjects a
     state.set_helix_plugin_installed(true);
     UpdateQueue::instance().drain();
 
-    CHECK(state.service_has_helix_plugin());
+    CHECK(state.plugin_status_state().service_has_helix_plugin());
 }
 
 // ============================================================================
@@ -345,7 +344,7 @@ template <typename Panel> class ScopedPanelApi {
         panel_.set_api(client, api);
     }
     ~ScopedPanelApi() {
-        panel_.on_deactivate();
+        panel_.on_deactivate(DeactivateReason::NavigateAway);
         panel_.set_api(nullptr, nullptr);
     }
     ScopedPanelApi(const ScopedPanelApi&) = delete;
@@ -386,7 +385,7 @@ TEST_CASE_METHOD(LVGLTestFixture,
     panel.deinit_subjects();
     panel.init_subjects();
 
-    lv_subject_t* adxl = lv_xml_get_subject(nullptr, "bt_hw_adxl");
+    lv_subject_t* adxl = lv_xml_get_subject(nullptr, "bt_hw_accel");
     REQUIRE(adxl != nullptr);
     const std::string before = lv_subject_get_string(adxl);
 
@@ -412,7 +411,7 @@ TEST_CASE_METHOD(LVGLTestFixture,
 
     UpdateQueue::instance().drain();
 
-    lv_subject_t* adxl = lv_xml_get_subject(nullptr, "bt_hw_adxl");
+    lv_subject_t* adxl = lv_xml_get_subject(nullptr, "bt_hw_accel");
     REQUIRE(adxl != nullptr);
     const std::string before = lv_subject_get_string(adxl);
 
@@ -454,7 +453,8 @@ TEST_CASE_METHOD(LVGLTestFixture, "InputShaperPanel drops the config query once 
     panel.on_activate();
     REQUIRE(UpdateQueue::instance().pending_count() > 0);
 
-    panel.on_deactivate(); // OverlayBase::on_deactivate() invalidates lifetime_
+    panel.on_deactivate(
+        DeactivateReason::NavigateAway); // OverlayBase::on_deactivate() invalidates lifetime_
 
     UpdateQueue::instance().drain();
 
@@ -489,51 +489,6 @@ TEST_CASE_METHOD(LVGLTestFixture,
     panel.on_activate();
     UpdateQueue::instance().drain();
     CHECK(lv_subject_get_int(configured) == 0);
-}
-
-// ============================================================================
-// PrinterPluginStatusState — a sub-component with its own guard
-// ============================================================================
-
-TEST_CASE_METHOD(LVGLTestFixture,
-                 "PrinterPluginStatusState drops the phase-tracking setter after deinit",
-                 "[plugin_status][lifetime][queue_update]") {
-    UpdateQueue::instance().drain();
-
-    PrinterPluginStatusState plugin_status;
-    plugin_status.init_subjects(false);
-
-    REQUIRE_FALSE(plugin_status.is_phase_tracking_enabled());
-
-    plugin_status.set_phase_tracking_enabled(true);
-    REQUIRE(UpdateQueue::instance().pending_count() > 0);
-    REQUIRE_FALSE(plugin_status.is_phase_tracking_enabled());
-
-    // The #1146 shape: subjects torn down and re-inited on a LIVE object, so the
-    // destructor is never the hook that saves us. The generation must advance in
-    // deinit_subjects() or the queued body writes the re-inited subject.
-    plugin_status.deinit_subjects();
-    plugin_status.init_subjects(false);
-
-    UpdateQueue::instance().drain();
-
-    CHECK_FALSE(plugin_status.is_phase_tracking_enabled());
-    CHECK(UpdateQueue::instance().pending_count() == 0);
-}
-
-TEST_CASE_METHOD(LVGLTestFixture,
-                 "PrinterPluginStatusState applies the phase-tracking setter while live",
-                 "[plugin_status][lifetime][queue_update]") {
-    UpdateQueue::instance().drain();
-
-    PrinterPluginStatusState plugin_status;
-    plugin_status.init_subjects(false);
-
-    plugin_status.set_phase_tracking_enabled(true);
-    UpdateQueue::instance().drain();
-
-    // The guard must not swallow a setter issued against the live generation.
-    CHECK(plugin_status.is_phase_tracking_enabled());
 }
 
 // ============================================================================

@@ -15,15 +15,19 @@
 #include "ui_update_queue.h"
 
 #include "../lvgl_test_fixture.h"
+#include "../test_helpers/scoped_moonraker_client.h"
+#include "../test_helpers/telemetry_manager_test_access.h"
 #include "app_globals.h"
 #include "async_lifetime_guard.h"
 #include "config.h"
 #include "moonraker_api.h"
 #include "moonraker_client_mock.h"
 #include "printer_state.h"
+#include "system/sha256_util.h"
 #include "system/telemetry_manager.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -86,10 +90,9 @@ class TelemetryTestFixture {
         // ofstream open, calls CONFIG_RECORD_ERROR, and enqueues a phantom
         // telemetry "file_io" event between our clear_queue() and the test's
         // first assertion. Empty path makes save() a no-op (line 1426).
-        if (auto* cfg = helix::Config::get_instance()) {
-            cfg->clear_path();
-            cfg->set<bool>("/telemetry_enabled", false);
-        }
+        auto* cfg = helix::Config::get_instance();
+        cfg->clear_path();
+        cfg->set<bool>("/telemetry_enabled", false);
 
         tm.init(temp_dir_.string());
         tm.set_enabled(false);
@@ -237,6 +240,20 @@ TEST_CASE("hash_device_id: different UUIDs produce different output", "[telemetr
     auto hash2 = TelemetryManager::hash_device_id("11111111-2222-4333-8444-555555555555", salt);
 
     REQUIRE(hash1 != hash2);
+}
+
+TEST_CASE("sha256_hex matches the FIPS 180-4 test vectors", "[telemetry][hash]") {
+    REQUIRE(helix::sha256_hex("") ==
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    REQUIRE(helix::sha256_hex("abc") ==
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    REQUIRE(helix::sha256_hex("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq") ==
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+}
+
+TEST_CASE("hash_device_id: known value, so stored device ids stay stable", "[telemetry][hash]") {
+    REQUIRE(TelemetryManager::hash_device_id("550e8400-e29b-41d4-a716-446655440000", "test-salt") ==
+            "21fffeed629d1a1d7ff8bfcf6af51553abfc0ed61b5351a1f2aaa9ef513380b1");
 }
 
 TEST_CASE("hash_device_id: output is 64 hex characters (SHA-256)", "[telemetry][hash]") {
@@ -454,8 +471,8 @@ TEST_CASE_METHOD(TelemetryTestFixture, "Session event: app.zip_tool is on EVERY 
 
     const std::set<std::string> legal_values{"unzip", "python", "none"};
     for (const auto& event : snapshot) {
-        REQUIRE(event["app"].contains("zip_tool"));
-        const std::string zip_tool = event["app"]["zip_tool"];
+        REQUIRE(event.at("app").contains("zip_tool"));
+        const std::string zip_tool = event.at("app").at("zip_tool");
         REQUIRE(legal_values.count(zip_tool) == 1);
     }
     REQUIRE(snapshot[0]["app"]["zip_tool"] == snapshot[1]["app"]["zip_tool"]);
@@ -804,6 +821,216 @@ TEST_CASE_METHOD(TelemetryTestFixture, "Persistence: saved file is valid JSON",
 
 TEST_CASE("MAX_QUEUE_SIZE is 100", "[telemetry][queue]") {
     REQUIRE(TelemetryManager::MAX_QUEUE_SIZE == 100);
+}
+
+// ============================================================================
+// Drain capacity and retry spacing [telemetry][send][1476]
+// ============================================================================
+
+TEST_CASE("Drain: one send window can empty a full queue", "[telemetry][send][1476]") {
+    // The periodic producers enqueue faster than a single batch per window
+    // drains, so a window that cannot clear a full queue leaves it saturated
+    // and enqueue_event() discards the oldest events unsent.
+    REQUIRE(TelemetryManager::MAX_BATCHES_PER_SEND * TelemetryManager::MAX_BATCH_SIZE >=
+            TelemetryManager::MAX_QUEUE_SIZE);
+}
+
+TEST_CASE("Drain: the hourly producer alone outruns a single batch per window",
+          "[telemetry][send][1476]") {
+    // record_memory_snapshot("hourly") fires from the auto-send timer, so a
+    // day enqueues one event per hour with nobody touching the device. A drain
+    // capped at one batch per SEND_INTERVAL is below that rate on its own.
+    constexpr int hourly_events_per_send_interval =
+        static_cast<int>(TelemetryManager::SEND_INTERVAL.count());
+    REQUIRE(hourly_events_per_send_interval > static_cast<int>(TelemetryManager::MAX_BATCH_SIZE));
+
+    // The drain has to cover that rate, which is what the batch bound buys.
+    REQUIRE(static_cast<int>(TelemetryManager::MAX_BATCHES_PER_SEND *
+                             TelemetryManager::MAX_BATCH_SIZE) > hourly_events_per_send_interval);
+}
+
+TEST_CASE("Queue budget: an unattended send window fits the queue", "[telemetry][send][1476]") {
+    // With nobody touching the device the periodic timers are the whole
+    // producer set, and the queue is drained once per SEND_INTERVAL. A budget
+    // above MAX_QUEUE_SIZE is the number of events enqueue_event() discards
+    // unsent every day — on every platform, not only the K1-class ones where
+    // the drop log was read.
+    REQUIRE(TelemetryManager::UNATTENDED_EVENTS_PER_SEND_WINDOW <=
+            TelemetryManager::MAX_QUEUE_SIZE);
+}
+
+TEST_CASE_METHOD(TelemetryTestFixture, "Queue: a day of unattended production survives to the send",
+                 "[telemetry][send][1476]") {
+    auto& tm = TelemetryManager::instance();
+    tm.set_enabled(true);
+
+    // The hourly memory snapshot is one of the producers the budget counts, so
+    // enqueueing the whole budget through it reproduces a day's worth of
+    // unattended enqueue pressure without waiting on the timers.
+    for (size_t i = 0; i < TelemetryManager::UNATTENDED_EVENTS_PER_SEND_WINDOW; ++i) {
+        tm.record_memory_snapshot("hourly");
+    }
+
+    REQUIRE(tm.queue_size() == TelemetryManager::UNATTENDED_EVENTS_PER_SEND_WINDOW);
+    REQUIRE(TelemetryManagerTestAccess::events_dropped_since_send(tm) == 0);
+}
+
+TEST_CASE_METHOD(TelemetryTestFixture, "Queue: a discarded event is counted, not silent",
+                 "[telemetry][send][1476]") {
+    // A queue at MAX_QUEUE_SIZE looks the same whether it just filled or has
+    // been shedding events for hours, so the count is the only thing that can
+    // tell the next batch's window is incomplete.
+    auto& tm = TelemetryManager::instance();
+    tm.set_enabled(true);
+
+    for (size_t i = 0; i < TelemetryManager::MAX_QUEUE_SIZE; ++i) {
+        tm.record_session();
+    }
+    REQUIRE(TelemetryManagerTestAccess::events_dropped_since_send(tm) == 0);
+
+    tm.record_session();
+    REQUIRE(tm.queue_size() == TelemetryManager::MAX_QUEUE_SIZE);
+    REQUIRE(TelemetryManagerTestAccess::events_dropped_since_send(tm) == 1);
+
+    // The count covers the span since the last batch reached the server, so a
+    // batch that lands starts a fresh window rather than carrying the old
+    // shortfall into every send that follows.
+    tm.remove_sent_events(TelemetryManager::MAX_BATCH_SIZE);
+    REQUIRE(TelemetryManagerTestAccess::events_dropped_since_send(tm) == 0);
+}
+
+TEST_CASE_METHOD(TelemetryTestFixture, "Queue: a purge ends the window the drop count describes",
+                 "[telemetry][send][1476]") {
+    auto& tm = TelemetryManager::instance();
+    tm.set_enabled(true);
+
+    for (size_t i = 0; i < TelemetryManager::MAX_QUEUE_SIZE + 1; ++i) {
+        tm.record_session();
+    }
+    REQUIRE(TelemetryManagerTestAccess::events_dropped_since_send(tm) == 1);
+
+    // clear_queue() is the opt-out purge. Nothing it discards belongs to a
+    // batch anyone will send, so the shortfall it leaves is not one to report
+    // against the first batch of the next opt-in.
+    tm.clear_queue();
+    REQUIRE(tm.queue_size() == 0);
+    REQUIRE(TelemetryManagerTestAccess::events_dropped_since_send(tm) == 0);
+}
+
+TEST_CASE("Send delay: a healthy sender waits the full send interval", "[telemetry][send][1476]") {
+    REQUIRE(TelemetryManager::next_attempt_delay(1) == TelemetryManager::SEND_INTERVAL);
+}
+
+TEST_CASE("Send delay: a first failure retries sooner than the daily cadence",
+          "[telemetry][send][1476]") {
+    // A backoff above 1 means the previous attempt failed. Spacing that first
+    // retry off the full send interval would leave the queue filling for a day
+    // over a server that was unreachable for a moment.
+    REQUIRE(TelemetryManager::next_attempt_delay(2) < TelemetryManager::SEND_INTERVAL);
+}
+
+TEST_CASE("Send delay: a sustained failure backs off past the daily cadence",
+          "[telemetry][send][1476]") {
+    // The counterweight to the test above. A printer that never reaches the
+    // endpoint at all must not end up attempting MORE often than a healthy one
+    // — each attempt is a thread, a DNS lookup and a 30s timeout, and on a
+    // LAN-only machine every one of them is waste that never succeeds.
+    REQUIRE(TelemetryManager::next_attempt_delay(TelemetryManager::MAX_BACKOFF_MULTIPLIER) >=
+            TelemetryManager::SEND_INTERVAL);
+}
+
+TEST_CASE("Send delay: retries lengthen as the backoff grows", "[telemetry][send][1476]") {
+    REQUIRE(TelemetryManager::next_attempt_delay(2) < TelemetryManager::next_attempt_delay(4));
+    REQUIRE(TelemetryManager::next_attempt_delay(4) < TelemetryManager::next_attempt_delay(64));
+}
+
+TEST_CASE("Send delay: the backoff ceiling still reaches seven days", "[telemetry][send][1476]") {
+    // RETRY_INTERVAL is the base, so the multiplier has to be able to climb far
+    // enough that the ceiling is still a week rather than a few hours.
+    REQUIRE(TelemetryManager::next_attempt_delay(TelemetryManager::MAX_BACKOFF_MULTIPLIER) ==
+            std::chrono::hours{24 * 7});
+}
+
+TEST_CASE("Send delay: never exceeds seven days", "[telemetry][send][1476]") {
+    REQUIRE(TelemetryManager::next_attempt_delay(100000) <= std::chrono::hours{24 * 7});
+}
+
+// try_send() has to actually consult next_attempt_delay(). Pinning the helper
+// alone leaves the call site free to keep its own spacing rule, so these drive
+// the gate: it stamps last_send_time_ when it passes and leaves it when it
+// skips, which is the only outward sign of the decision.
+
+TEST_CASE_METHOD(TelemetryTestFixture, "Send window: a backed-off sender retries within hours",
+                 "[telemetry][send][1476]") {
+    auto& tm = TelemetryManager::instance();
+    TelemetryManagerTestAccess::disable_network(tm);
+    tm.set_enabled(true);
+    tm.record_session();
+    REQUIRE(tm.queue_size() > 0); // an empty queue returns before the gate
+
+    // The previous attempt failed (backoff 2) three hours ago. Spaced off
+    // RETRY_INTERVAL that is a 2h wait, so this attempt is due.
+    const auto three_hours_ago = std::chrono::steady_clock::now() - std::chrono::hours{3};
+    TelemetryManagerTestAccess::set_last_send_time(tm, three_hours_ago);
+    TelemetryManagerTestAccess::set_backoff(tm, 2);
+
+    tm.try_send();
+
+    REQUIRE(TelemetryManagerTestAccess::last_send_time(tm) > three_hours_ago);
+}
+
+TEST_CASE_METHOD(TelemetryTestFixture, "Send window: a healthy sender still waits the full day",
+                 "[telemetry][send][1476]") {
+    auto& tm = TelemetryManager::instance();
+    TelemetryManagerTestAccess::disable_network(tm);
+    tm.set_enabled(true);
+    tm.record_session();
+    REQUIRE(tm.queue_size() > 0);
+
+    // Backoff 1 means the last send succeeded, so the 24h cadence applies and
+    // three hours is not yet due. Without this the shorter retry spacing could
+    // widen to every send and quietly become an hourly upload.
+    // steady_clock counts from boot, so a stamp older than the box is a
+    // negative time point and try_send() reads it as never sent. Age the stamp
+    // three hours, or just inside uptime, whichever is shorter: both sit
+    // inside the 24 h cadence this case is about.
+    const auto now = std::chrono::steady_clock::now();
+    const auto age = std::min<std::chrono::steady_clock::duration>(
+        std::chrono::hours{3}, now.time_since_epoch() - std::chrono::seconds{1});
+    REQUIRE(age.count() > 0);
+    const auto earlier = now - age;
+    TelemetryManagerTestAccess::set_last_send_time(tm, earlier);
+    TelemetryManagerTestAccess::set_backoff(tm, 1);
+
+    tm.try_send();
+
+    REQUIRE(TelemetryManagerTestAccess::last_send_time(tm) == earlier);
+}
+
+TEST_CASE_METHOD(TelemetryTestFixture,
+                 "Send window: the gate reads the elapsed time, not the clock's sign",
+                 "[telemetry][send][1476]") {
+    // steady_clock's epoch is boot, so on a machine up less than the stamp's
+    // age a perfectly ordinary "sent a while ago" time point is negative.
+    // Deciding "never sent" from that sign would let the gate pass on every
+    // try_send() a freshly booted device makes, which is the opposite of the
+    // spacing the window exists to keep. Half a send interval is under the
+    // healthy cadence on any uptime, and is negative on a young clock, so this
+    // exercises the sentinel wherever it is exercisable.
+    auto& tm = TelemetryManager::instance();
+    TelemetryManagerTestAccess::disable_network(tm);
+    tm.set_enabled(true);
+    tm.record_session();
+    REQUIRE(tm.queue_size() > 0);
+
+    const auto half_a_window =
+        std::chrono::steady_clock::now() - (TelemetryManager::SEND_INTERVAL / 2);
+    TelemetryManagerTestAccess::set_last_send_time(tm, half_a_window);
+    TelemetryManagerTestAccess::set_backoff(tm, 1);
+
+    tm.try_send();
+
+    REQUIRE(TelemetryManagerTestAccess::last_send_time(tm) == half_a_window);
 }
 
 // ============================================================================
@@ -1791,7 +2018,7 @@ json hardware_profile_with_url(const std::string& websocket_url) {
     tm.record_hardware_profile();
 
     for (const auto& event : tm.get_queue_snapshot()) {
-        if (event["event"] == "hardware_profile") {
+        if (event.value("event", "") == "hardware_profile") {
             return event;
         }
     }
@@ -1840,7 +2067,7 @@ TEST_CASE_METHOD(TelemetryTestFixture,
     REQUIRE_FALSE(snapshot.empty());
 
     for (const auto& event : snapshot) {
-        if (event["event"] == "hardware_profile") {
+        if (event.value("event", "") == "hardware_profile") {
             CHECK_FALSE(event.contains("moonraker_is_local"));
         }
     }
@@ -1862,6 +2089,39 @@ TEST_CASE_METHOD(TelemetryTestFixture, "record_hardware_profile creates valid ev
     CHECK(event.contains("timestamp"));
     // Hardware profile may have empty sections in test mode (no printer connected)
     // but the event itself should be valid
+}
+
+TEST_CASE_METHOD(TelemetryTestFixture,
+                 "session and hardware_profile extruder counts use the strict extruder grammar",
+                 "[telemetry][extruder_count][1502]") {
+    // Both events count tools, and a tool count is exactly the question
+    // is_extruder_name() answers: an extruder-prefixed heater that is not a
+    // numbered extruder (extruder_mixing, extruder_stepper) is not a tool and
+    // must not inflate the count.
+    MoonrakerClientMock client;
+    client.set_heaters({"extruder", "extruder1", "extruder2", "extruder_mixing", "extruder_stepper",
+                        "heater_bed"});
+    ScopedMoonrakerClient installed(&client);
+
+    auto& tm = TelemetryManager::instance();
+    tm.set_enabled(true);
+    tm.clear_queue();
+    tm.record_session();
+    tm.record_hardware_profile();
+
+    bool saw_session = false;
+    bool saw_hw_profile = false;
+    for (const auto& event : tm.get_queue_snapshot()) {
+        if (event.value("event", "") == "session") {
+            saw_session = true;
+            CHECK(event.at("printer").at("extruder_count") == 3);
+        } else if (event.value("event", "") == "hardware_profile") {
+            saw_hw_profile = true;
+            CHECK(event.at("extruders").at("count") == 3);
+        }
+    }
+    REQUIRE(saw_session);
+    REQUIRE(saw_hw_profile);
 }
 
 // ============================================================================
@@ -2121,9 +2381,20 @@ TEST_CASE_METHOD(TelemetryTestFixture, "New events do not leak PII", "[telemetry
 
         INFO("Checking event: " << event_type << " (index " << i << ")");
 
-        // Must NOT contain hostname of the test machine
+        // Must NOT contain the hostname of the test machine, matched as a whole
+        // token: a hostname like "vm" is also a substring of field names such as
+        // "vm_size_kb", and a key is not a leak. A hostname leaking as a value,
+        // a path segment or a URL host is still surrounded by non-word bytes.
         if (!machine_hostname.empty()) {
-            REQUIRE(event_str.find(machine_hostname) == std::string::npos);
+            std::string escaped;
+            for (char c : machine_hostname) {
+                if (!std::isalnum(static_cast<unsigned char>(c))) {
+                    escaped += '\\';
+                }
+                escaped += c;
+            }
+            std::regex host_regex("(^|[^A-Za-z0-9_])" + escaped + "($|[^A-Za-z0-9_])");
+            REQUIRE_FALSE(std::regex_search(event_str, host_regex));
         }
 
         // Must NOT contain IP address patterns
@@ -2295,11 +2566,11 @@ TEST_CASE_METHOD(TelemetryTestFixture, "Snapshot: snapshot_seq increments on eac
 
     int first_seq = -1, second_seq = -1;
     for (const auto& ev : queue) {
-        if (ev["event"] == "panel_usage") {
+        if (ev.value("event", "") == "panel_usage") {
             if (first_seq < 0)
-                first_seq = ev["snapshot_seq"].get<int>();
+                first_seq = ev.value("snapshot_seq", -1);
             else
-                second_seq = ev["snapshot_seq"].get<int>();
+                second_seq = ev.value("snapshot_seq", -1);
         }
     }
     REQUIRE(first_seq == 0);

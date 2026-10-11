@@ -17,7 +17,7 @@
               style_flex_cross_place="center" style_bg_opa="0%" style_border_width="0" clickable="false"
               scrollable="false">
         <icon src="progress_clock" size="#icon_size" variant="accent"/>
-        <text_heading text="Job Queue" translation_tag="Job Queue"/>
+        <text_heading text="Job Queue"/>
       </lv_obj>
       <ui_button name="btn_close" width="40" height="40" variant="ghost" icon="close" focusable="false">
         <event_cb trigger="clicked" callback="on_jq_modal_close"/>
@@ -46,6 +46,6 @@
     <!-- Empty state -->
     <text_muted name="modal_empty_state"
                 width="100%" text="No jobs in queue" style_text_align="center" style_pad_top="#space_md"
-                style_pad_bottom="#space_md" translation_tag="No jobs in queue" hidden="true"/>
+                style_pad_bottom="#space_md" hidden="true"/>
   </view>
 </component>

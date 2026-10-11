@@ -3,6 +3,8 @@
 
 #include "spoolman_types.h"
 
+#include "text_io.h"
+
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -101,8 +103,7 @@ std::string build_searchable_text(const SpoolInfo& spool) {
     // matches its terms against exactly this blob.
     std::string searchable = "#" + std::to_string(spool.id) + " " + spool.vendor + " " +
                              spool.material + " " + spool.filament_name + " " + spool.location;
-    std::transform(searchable.begin(), searchable.end(), searchable.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
+    searchable = helix::text_io::to_lower(searchable);
     return searchable;
 }
 
@@ -119,8 +120,7 @@ std::vector<SpoolInfo> filter_spools(const std::vector<SpoolInfo>& spools, const
     std::istringstream stream(query);
     std::string term;
     while (stream >> term) {
-        std::transform(term.begin(), term.end(), term.begin(),
-                       [](unsigned char c) { return std::tolower(c); });
+        term = helix::text_io::to_lower(term);
         terms.push_back(std::move(term));
     }
 

@@ -650,8 +650,11 @@ TEST_CASE("netd query_snapshot is bounded against a wedged full-backlog listener
     // Fill the (minimal) backlog so the next connect cannot complete.
     std::vector<int> fillers;
     for (int i = 0; i < 4; ++i) {
-        const int c = ::socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
+        // SOCK_NONBLOCK is a Linux socket() flag; the portable spelling is the
+        // two-step form, which is what netd itself uses.
+        const int c = ::socket(AF_UNIX, SOCK_STREAM, 0);
         REQUIRE(c >= 0);
+        REQUIRE(helix::netd::set_nonblocking(c, true));
         (void)::connect(c, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
         fillers.push_back(c);
     }
@@ -830,10 +833,9 @@ TEST_CASE("netd set_nonblocking reports failure on a bad descriptor", "[netd][pr
     REQUIRE_FALSE(helix::netd::set_nonblocking(-1, true));
     REQUIRE_FALSE(helix::netd::set_nonblocking(-1, false));
 
-    // A descriptor that was open and then closed is equally unusable.
-    int sv[2] = {-1, -1};
-    REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
-    ::close(sv[0]);
-    ::close(sv[1]);
-    REQUIRE_FALSE(helix::netd::set_nonblocking(sv[0], true));
+    // Deliberately no closed-descriptor case. A closed fd number is immediately
+    // reusable, and this binary runs background threads that open sockets, so
+    // the call would race them: either a phantom red when the number is live
+    // again, or O_NONBLOCK flipped on somebody else's descriptor. The -1 cases
+    // above already reach the same fcntl failure path.
 }

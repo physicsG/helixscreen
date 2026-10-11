@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "sensor_enum_names.h"
+
 #include <string>
 
 namespace helix::sensors {
@@ -41,64 +43,34 @@ struct WidthSensorState {
     bool available = false; ///< Sensor available in current config
 };
 
-/// @brief Convert role enum to config string
-/// @param role The role to convert
-/// @return Config-safe string for JSON storage
+inline constexpr EnumName<WidthSensorRole> kWidthSensorRoles[] = {
+    {WidthSensorRole::NONE, "none", "Unassigned"},
+    {WidthSensorRole::FLOW_COMPENSATION, "flow_compensation", "Flow Compensation"},
+};
+
+inline constexpr EnumName<WidthSensorType> kWidthSensorTypes[] = {
+    {WidthSensorType::TSL1401CL, "tsl1401cl", "TSL1401CL"},
+    {WidthSensorType::HALL, "hall", "Hall"},
+};
+
 [[nodiscard]] inline std::string width_role_to_string(WidthSensorRole role) {
-    switch (role) {
-    case WidthSensorRole::NONE:
-        return "none";
-    case WidthSensorRole::FLOW_COMPENSATION:
-        return "flow_compensation";
-    default:
-        return "none";
-    }
+    return enum_id(kWidthSensorRoles, role);
 }
 
-/// @brief Parse role string to enum
-/// @param str The config string to parse
-/// @return Parsed role, or NONE if unrecognized
 [[nodiscard]] inline WidthSensorRole width_role_from_string(const std::string& str) {
-    if (str == "flow_compensation")
-        return WidthSensorRole::FLOW_COMPENSATION;
-    return WidthSensorRole::NONE;
+    return enum_from_id(kWidthSensorRoles, str);
 }
 
-/// @brief Convert role to display string
-/// @param role The role to convert
-/// @return Human-readable role name for UI display
 [[nodiscard]] inline std::string width_role_to_display_string(WidthSensorRole role) {
-    switch (role) {
-    case WidthSensorRole::NONE:
-        return "Unassigned";
-    case WidthSensorRole::FLOW_COMPENSATION:
-        return "Flow Compensation";
-    default:
-        return "Unassigned";
-    }
+    return enum_display(kWidthSensorRoles, role);
 }
 
-/// @brief Convert type enum to config string
-/// @param type The type to convert
-/// @return Config-safe string
 [[nodiscard]] inline std::string width_type_to_string(WidthSensorType type) {
-    switch (type) {
-    case WidthSensorType::TSL1401CL:
-        return "tsl1401cl";
-    case WidthSensorType::HALL:
-        return "hall";
-    default:
-        return "tsl1401cl";
-    }
+    return enum_id(kWidthSensorTypes, type);
 }
 
-/// @brief Parse type string to enum
-/// @param str The config string to parse
-/// @return Parsed type, defaults to TSL1401CL if unrecognized
 [[nodiscard]] inline WidthSensorType width_type_from_string(const std::string& str) {
-    if (str == "hall")
-        return WidthSensorType::HALL;
-    return WidthSensorType::TSL1401CL;
+    return enum_from_id(kWidthSensorTypes, str);
 }
 
 } // namespace helix::sensors

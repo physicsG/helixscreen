@@ -1,0 +1,20 @@
+diff --git a/event/hloop.c b/event/hloop.c
+index d0e042c..f92bcec 100644
+--- a/event/hloop.c
++++ b/event/hloop.c
+@@ -332,8 +332,13 @@ static void hloop_init(hloop_t* loop) {
+     heap_init(&loop->realtimers, timers_compare);
+ 
+     // ios
+-    // NOTE: io_array_init when hio_get -> io_array_resize
+-    // io_array_init(&loop->ios, IO_ARRAY_INIT_SIZE);
++    // Allocated here, before the loop thread exists. A lazy first allocation in
++    // hio_get() runs on whichever thread gets there first, and a client's
++    // createsocket() calls hio_get() on the caller's thread while hloop_run()
++    // creates the eventfd io on the loop thread: two first allocations, and the
++    // io one of them stored is lost. An fd at or past IO_ARRAY_INIT_SIZE still
++    // resizes lazily.
++    io_array_init(&loop->ios, IO_ARRAY_INIT_SIZE);
+ 
+     // readbuf
+     // NOTE: alloc readbuf when hio_use_loop_readbuf

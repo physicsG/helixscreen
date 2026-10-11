@@ -2,19 +2,53 @@
 <!-- Copyright (C) 2025-2026 356C LLC -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <component>
-  <view name="panel_widget_led" extends="lv_obj" height="100%" flex_grow="1" style_pad_all="0" scrollable="false">
+  <api>
+    <!-- Per-instance subject names, supplied by the widget at creation. They
+         must exist before this component is parsed: a binding whose subject is
+         missing at parse time is dropped permanently and silently. -->
+    <prop name="tile_icon_subject" type="string" default=""/>
+    <prop name="tile_label_subject" type="string" default=""/>
+    <prop name="tile_dir_subject" type="string" default=""/>
+    <prop name="tile_target_subject" type="string" default=""/>
+    <!-- The name of the light this button drives, and 1 when the tile is wide
+         enough for the › zone that opens it in the LEDs overlay. -->
+    <prop name="name_subject" type="string" default=""/>
+    <prop name="wide_subject" type="string" default=""/>
+  </api>
+  <view name="panel_widget_led"
+        extends="lv_obj" height="100%" flex_grow="1" style_pad_all="0" style_pad_gap="0" scrollable="false"
+        flex_flow="row">
     <ui_button name="light_button"
-               width="100%" height="100%" variant="ghost" flex_flow="column" style_flex_main_place="center"
-               style_flex_cross_place="center" style_flex_track_place="center" style_border_width="0" focusable="false">
-      <!-- Hardware gate (led_controllable) checked in C++ populate_widgets() -->
+               width="0" height="100%" flex_grow="1" style_pad_ver="0" variant="ghost" style_border_width="0"
+               focusable="false">
+      <style name="styles.tile_column"/>
+      <bind_style_if_eq name="styles.tile_row" subject="$tile_dir_subject" ref_value="1"/>
       <bind_state_if cond="printer_connection_state ne 2 or led_command_in_flight eq 1" state="disabled"/>
-      <icon name="light_icon" src="lightbulb_outline" size="#icon_size" variant="muted"/>
-      <text_tiny text="Light"
-                 translation_tag="Light" style_text_color="#text_muted" style_text_align="center" clickable="false"
-                 event_bubble="true">
+      <icon name="light_icon"
+            src="lightbulb_outline" size="#icon_size" variant="muted" clickable="false" event_bubble="true">
+        <bind_tile_rung ladder="icon" subject="$tile_icon_subject"/>
+      </icon>
+      <text_tiny name="light_name"
+                 width="100%" bind_text="$name_subject" style_text_color="#text_muted" style_text_align="center"
+                 long_mode="dots" clickable="false" event_bubble="true">
         <bind_flag_if_eq subject="show_widget_labels" flag="hidden" ref_value="0"/>
+        <bind_tile_rung ladder="label" subject="$tile_icon_subject"/>
+        <bind_flag_if_eq subject="$tile_label_subject" flag="hidden" ref_value="0"/>
       </text_tiny>
       <event_cb trigger="clicked" callback="light_toggle_cb"/>
+    </ui_button>
+    <!-- The › zone: a whole touch target, never narrower than #button_height. -->
+    <ui_button name="light_more_button"
+               width="content" height="100%" style_min_width="#button_height" style_pad_all="0" variant="ghost"
+               style_border_width="0" flex_flow="column" style_flex_main_place="center" style_flex_cross_place="center"
+               style_flex_track_place="center" focusable="false">
+      <bind_flag_if_eq subject="$wide_subject" flag="hidden" ref_value="0"/>
+      <!-- One rung under the bulb, so the chevron grows with the tile but stays secondary. -->
+      <icon name="light_more_icon"
+            src="chevron_right" size="#icon_size" variant="muted" clickable="false" event_bubble="true">
+        <bind_tile_rung ladder="icon" subject="$tile_icon_subject" offset="-1"/>
+      </icon>
+      <event_cb trigger="clicked" callback="light_more_cb"/>
     </ui_button>
   </view>
 </component>

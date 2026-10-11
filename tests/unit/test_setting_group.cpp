@@ -41,10 +41,64 @@ TEST_CASE_METHOD(SettingGroupFixture, "setting_group: applies card shell", "[set
 
     // Card fill is opaque (from StyleRole::Card via configure_card).
     REQUIRE(lv_obj_get_style_bg_opa(group, LV_PART_MAIN) == LV_OPA_COVER);
-    // Children are clipped to the rounded rect so first/last row corners round.
-    REQUIRE(lv_obj_get_style_clip_corner(group, LV_PART_MAIN) == true);
+    // Nothing focused: rows draw nothing in the corners, so no clipping layer.
+    REQUIRE_FALSE(lv_obj_get_style_clip_corner(group, LV_PART_MAIN));
     // Group is a fixed container, not a scroll area.
     REQUIRE_FALSE(lv_obj_has_flag(group, LV_OBJ_FLAG_SCROLLABLE));
+}
+
+TEST_CASE_METHOD(SettingGroupFixture,
+                 "setting_group: clips its corners only while a focus ring reaches one",
+                 "[setting_group]") {
+    auto* group = static_cast<lv_obj_t*>(lv_xml_create(test_screen(), "setting_group", nullptr));
+    REQUIRE(group != nullptr);
+    REQUIRE(lv_obj_get_style_radius(group, LV_PART_MAIN) > 0);
+    auto make_row = [](lv_obj_t* parent) {
+        lv_obj_t* row = lv_button_create(parent);
+        lv_obj_set_size(row, LV_PCT(100), 40);
+        return row;
+    };
+    lv_obj_t* first = make_row(group);
+    lv_obj_t* middle = make_row(group);
+    lv_obj_t* wrapper = lv_obj_create(group);
+    lv_obj_set_size(wrapper, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_all(wrapper, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_width(wrapper, 0, LV_PART_MAIN);
+    lv_obj_t* last_nested = make_row(wrapper);
+    lv_obj_update_layout(test_screen());
+
+    SECTION("the first row") {
+        lv_obj_add_state(first, LV_STATE_FOCUSED);
+        REQUIRE(lv_obj_get_style_clip_corner(group, LV_PART_MAIN));
+        lv_obj_remove_state(first, LV_STATE_FOCUSED);
+        REQUIRE_FALSE(lv_obj_get_style_clip_corner(group, LV_PART_MAIN));
+    }
+    SECTION("the last row, inside a wrapper") {
+        lv_obj_add_state(last_nested, LV_STATE_FOCUSED);
+        REQUIRE(lv_obj_get_style_clip_corner(group, LV_PART_MAIN));
+    }
+    SECTION("a middle row never reaches a corner") {
+        lv_obj_add_state(middle, LV_STATE_FOCUSED);
+        REQUIRE_FALSE(lv_obj_get_style_clip_corner(group, LV_PART_MAIN));
+    }
+    SECTION("focus moving off a corner row onto a middle row drops the clip") {
+        lv_obj_add_state(first, LV_STATE_FOCUSED);
+        lv_obj_add_state(middle, LV_STATE_FOCUSED);
+        lv_obj_remove_state(first, LV_STATE_FOCUSED);
+        REQUIRE_FALSE(lv_obj_get_style_clip_corner(group, LV_PART_MAIN));
+    }
+    SECTION("a row added after layout becomes the last row") {
+        lv_obj_t* late = make_row(group);
+        lv_obj_update_layout(test_screen());
+        lv_obj_add_state(late, LV_STATE_FOCUSED);
+        REQUIRE(lv_obj_get_style_clip_corner(group, LV_PART_MAIN));
+    }
+    SECTION("a focused middle row that becomes the last row picks up the clip") {
+        lv_obj_add_state(middle, LV_STATE_FOCUSED);
+        lv_obj_add_flag(wrapper, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_update_layout(test_screen());
+        REQUIRE(lv_obj_get_style_clip_corner(group, LV_PART_MAIN));
+    }
 }
 
 TEST_CASE_METHOD(SettingGroupFixture, "setting_group: divider count skips hidden children",
@@ -141,5 +195,53 @@ TEST_CASE_METHOD(SettingGroupFixture, "setting_group_header: badge visibility fo
         lv_obj_t* badge = lv_obj_find_by_name(header, "fan_count_badge_hidden");
         REQUIRE(badge != nullptr);
         REQUIRE(lv_obj_has_flag(badge, LV_OBJ_FLAG_HIDDEN));
+    }
+}
+
+// A section whose every row is hidden hides its header too, and shows it again
+// the moment any row returns (Advanced's sections gate rows on capabilities).
+TEST_CASE_METHOD(SettingGroupFixture, "setting_group: header follows whether any row shows",
+                 "[setting_group]") {
+    auto* group = static_cast<lv_obj_t*>(lv_xml_create(test_screen(), "setting_group", nullptr));
+    REQUIRE(group != nullptr);
+    lv_obj_t* header = lv_obj_create(group);
+    lv_obj_set_name(header, "setting_group_header");
+    lv_obj_set_height(header, 30);
+    lv_obj_t* row_a = lv_obj_create(group);
+    lv_obj_set_height(row_a, 40);
+    lv_obj_t* row_b = lv_obj_create(group);
+    lv_obj_set_height(row_b, 40);
+    lv_obj_update_layout(test_screen());
+    CHECK_FALSE(lv_obj_has_flag(header, LV_OBJ_FLAG_HIDDEN));
+
+    SECTION("one row still showing keeps the header") {
+        lv_obj_add_flag(row_a, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_update_layout(test_screen());
+        CHECK_FALSE(lv_obj_has_flag(header, LV_OBJ_FLAG_HIDDEN));
+        CHECK_FALSE(lv_obj_has_state(group, LV_STATE_USER_1));
+    }
+
+    SECTION("every row hidden hides the header and collapses the card") {
+        lv_obj_add_flag(row_a, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(row_b, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_update_layout(test_screen());
+        CHECK(lv_obj_has_flag(header, LV_OBJ_FLAG_HIDDEN));
+        CHECK(lv_obj_has_state(group, LV_STATE_USER_1));
+        CHECK(lv_obj_get_style_margin_bottom(group, LV_PART_MAIN) == 0);
+
+        // A row coming back brings the header with it.
+        lv_obj_remove_flag(row_b, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_update_layout(test_screen());
+        CHECK_FALSE(lv_obj_has_flag(header, LV_OBJ_FLAG_HIDDEN));
+        CHECK_FALSE(lv_obj_has_state(group, LV_STATE_USER_1));
+    }
+
+    SECTION("a visible wrapper with nothing inside counts as no row") {
+        lv_obj_add_flag(row_a, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_height(row_b, LV_SIZE_CONTENT);
+        lv_obj_set_style_pad_all(row_b, 0, LV_PART_MAIN);
+        lv_obj_set_style_border_width(row_b, 0, LV_PART_MAIN);
+        lv_obj_update_layout(test_screen());
+        CHECK(lv_obj_has_flag(header, LV_OBJ_FLAG_HIDDEN));
     }
 }

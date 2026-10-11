@@ -20,6 +20,7 @@
 
 #include "ui_observer_guard.h" // SubjectLifetime
 
+#include "bed_mesh_probe_temp.h"
 #include "subject_managed_panel.h" // SubjectManager
 
 #include <functional>
@@ -54,6 +55,7 @@ enum class StandardMacroSlot {
     ScrewsTilt,     ///< Manual bed screw guidance (SCREWS_TILT_CALCULATE)
     CleanNozzle,    ///< Nozzle cleaning/wiping
     HeatSoak,       ///< Chamber/bed heat soak
+    ParkToolhead,   ///< Park the toolhead (machine-specific park position)
 
     COUNT ///< Number of slots (for iteration)
 };
@@ -64,6 +66,7 @@ enum class StandardMacroSlot {
 enum class MacroSource {
     NONE,       ///< No macro assigned
     CONFIGURED, ///< User explicitly configured in Settings
+    SHIPPED,    ///< Sequence the printer database ships for this printer
     DETECTED,   ///< Auto-detected from printer
     FALLBACK    ///< Using HELIX_* fallback macro
 };
@@ -83,8 +86,32 @@ struct StandardMacroInfo {
     [[nodiscard]] const char* translated_name() const;
 
     std::string configured_macro; ///< User override the printer defines (or empty)
-    std::string detected_macro;   ///< Auto-detected (or empty)
-    std::string fallback_macro;   ///< HELIX_* fallback (or empty)
+
+    /**
+     * @brief The sequence the printer database ships for this printer (or empty).
+     *
+     * Outranks detection because it is hand-authored for one machine and
+     * detection is not: detection matches a name and stops, with no way to know
+     * which parameters that machine's macro needs or what it already prepares.
+     *
+     * Unlike the other three this may be a multi-line SCRIPT rather than a macro
+     * name — printers need a sequence more often than they need a rename. It may
+     * contain the placeholders MacroScriptValues names; resolve_macro_script()
+     * substitutes them.
+     */
+    std::string shipped_macro;
+
+    /**
+     * @brief The shipped sequence heats, homes and prepares the probe itself.
+     *
+     * Data from the printer database, never implied by the tier: a sequence
+     * authored for one machine may still expect the app's preparation ahead of
+     * it. Consulted only while shipped_macro wins.
+     */
+    bool shipped_self_prepares = false;
+
+    std::string detected_macro; ///< Auto-detected (or empty)
+    std::string fallback_macro; ///< HELIX_* fallback (or empty)
 
     /**
      * @brief The user's configured macro when the connected printer has no such
@@ -125,19 +152,26 @@ struct StandardMacroInfo {
      * @return true if all three sources are empty
      */
     [[nodiscard]] bool is_empty() const {
-        return configured_macro.empty() && detected_macro.empty() && fallback_macro.empty();
+        return configured_macro.empty() && shipped_macro.empty() && detected_macro.empty() &&
+               fallback_macro.empty();
     }
 
     /**
      * @brief Get the resolved macro name
      *
-     * Priority: configured > detected > fallback
+     * Priority: configured > shipped > detected > fallback
      *
-     * @return First non-empty macro name, or empty string if none
+     * The user's explicit choice wins over everything, including a sequence we
+     * ship: a printer whose stock macro is wrong is exactly why the override
+     * exists. Below that, specific beats general.
+     *
+     * @return First non-empty macro name or script, or empty string if none
      */
     [[nodiscard]] std::string get_macro() const {
         if (!configured_macro.empty())
             return configured_macro;
+        if (!shipped_macro.empty())
+            return shipped_macro;
         if (!detected_macro.empty())
             return detected_macro;
         return fallback_macro;
@@ -150,6 +184,8 @@ struct StandardMacroInfo {
     [[nodiscard]] MacroSource get_source() const {
         if (!configured_macro.empty())
             return MacroSource::CONFIGURED;
+        if (!shipped_macro.empty())
+            return MacroSource::SHIPPED;
         if (!detected_macro.empty())
             return MacroSource::DETECTED;
         if (!fallback_macro.empty())
@@ -157,6 +193,61 @@ struct StandardMacroInfo {
         return MacroSource::NONE;
     }
 };
+
+namespace helix {
+
+/// Values a shipped sequence may reference by placeholder.
+struct MacroScriptValues {
+    /// Replaces `{profile_arg}`: the bed mesh profile argument with its leading
+    /// space (` PROFILE=cold`), or empty to leave the firmware's default profile.
+    std::string profile_arg;
+
+    /// Replaces `{bed_temp}`, in whole degrees C: the bed temperature to probe at.
+    int bed_temp_c = bed_mesh::DEFAULT_PROBE_BED_TEMP_C;
+};
+
+/// A slot resolved into something runnable.
+struct ResolvedMacroScript {
+    /// The winning macro name or sequence, with its placeholders substituted.
+    std::string script;
+
+    /// The script prepares the machine itself, so a caller that would otherwise
+    /// heat, home or prepend preparation gcode must not. True only when the
+    /// shipped tier won and its database entry says so
+    /// (StandardMacroInfo::shipped_self_prepares): the name-based skip rules
+    /// cannot recognise a script.
+    bool self_prepares = false;
+
+    /// The script marks where a profile argument goes, so whatever it stores lands
+    /// in the profile the caller named.
+    bool takes_profile_arg = false;
+
+    /// The shipped tier won: a sequence authored for this printer, every command of
+    /// which is meant to exist.
+    bool shipped = false;
+};
+
+/**
+ * @brief Resolve @p info into a runnable script.
+ *
+ * The priority is StandardMacroInfo::get_macro()'s; this adds the two things a
+ * caller would otherwise open-code, and get subtly different from the next
+ * caller: substituting placeholders, and deciding whether the winner brings its
+ * own preparation.
+ *
+ * @param info    The slot to resolve.
+ * @param values  What each placeholder is replaced with, wherever it appears.
+ * @param accept_fallback Whether the HELIX_* fallback tier may win. Pass false
+ *        from a caller whose operation must happen unconditionally: the
+ *        fallbacks are "if needed" macros (HELIX_BED_MESH_IF_NEEDED reports
+ *        "using existing mesh" and returns without probing), which is right at
+ *        print start and wrong for a button that means "do it now".
+ */
+[[nodiscard]] ResolvedMacroScript resolve_macro_script(const StandardMacroInfo& info,
+                                                       const helix::MacroScriptValues& values,
+                                                       bool accept_fallback = true);
+
+} // namespace helix
 
 /**
  * @brief Unified registry for standard macro operations (singleton)
@@ -208,8 +299,11 @@ class StandardMacros {
      * Loads user config and runs pattern matching on available macros.
      *
      * @param hardware Hardware discovery with discovered macros
+     * @param printer_type Printer database key, for the shipped-sequence tier.
+     *        Empty simply leaves that tier unfilled, which is what a test with
+     *        no database wants.
      */
-    void init(const helix::PrinterDiscovery& hardware);
+    void init(const helix::PrinterDiscovery& hardware, const std::string& printer_type = "");
 
     // ========================================================================
     // Observability
@@ -237,7 +331,7 @@ class StandardMacros {
      * without the token dereferences freed memory on its next reset().
      */
     [[nodiscard]] SubjectLifetime get_subjects_lifetime() const {
-        return subjects_lifetime_;
+        return subjects_.get_subjects_lifetime();
     }
 
     /**
@@ -362,6 +456,7 @@ class StandardMacros {
      *
      * Resolves the macro using priority chain, then executes via API.
      * If slot is empty, returns false immediately without calling callbacks.
+     * Callbacks run on the main thread, whichever thread the printer answers on.
      *
      * @param slot The slot to execute
      * @param api IMoonrakerAPI instance for execution
@@ -437,10 +532,6 @@ class StandardMacros {
     bool initialized_ = false;
 
     SubjectManager subjects_;
-    /// See get_subjects_lifetime(). Created with the object and REPLACED (never
-    /// nulled) by deinit_subjects() — an empty token reads as "dead" and would
-    /// suppress removal for observers registered after the teardown.
-    SubjectLifetime subjects_lifetime_ = std::make_shared<bool>(true);
     bool subjects_initialized_ = false;
     lv_subject_t macros_version_{};
 };

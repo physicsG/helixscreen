@@ -48,12 +48,33 @@ TEST_CASE("assemble dedups identical pcm strings", "[sound][alsa-device]") {
 }
 
 TEST_CASE("resolve_alsa_device precedence: env > settings > default", "[sound][alsa-device]") {
-    CHECK(resolve_alsa_device("plughw:CARD=vc4hdmi1,DEV=0", "envdev") == "envdev");
+    CHECK(resolve_alsa_device("plughw:CARD=vc4hdmi1,DEV=0", "hw:1") == "hw:1");
     CHECK(resolve_alsa_device("plughw:CARD=vc4hdmi1,DEV=0", nullptr) ==
           "plughw:CARD=vc4hdmi1,DEV=0");
     CHECK(resolve_alsa_device("plughw:CARD=vc4hdmi1,DEV=0", "") == "plughw:CARD=vc4hdmi1,DEV=0");
     CHECK(resolve_alsa_device("", nullptr) == "default");
     CHECK(resolve_alsa_device("", "") == "default");
+}
+
+TEST_CASE("only hardware PCM names are opened", "[sound][alsa-device]") {
+    CHECK(is_safe_pcm_name("default"));
+    CHECK(is_safe_pcm_name("sysdefault"));
+    CHECK(is_safe_pcm_name("sysdefault:CARD=Headphones"));
+    CHECK(is_safe_pcm_name("hw:0,0"));
+    CHECK(is_safe_pcm_name("dmix:CARD=1"));
+    CHECK(is_safe_pcm_name(make_pcm_name("vc4hdmi1")));
+    CHECK_FALSE(is_safe_pcm_name("file:FILE=|touch /tmp/pwned"));
+    CHECK_FALSE(is_safe_pcm_name("plughw:0|x"));
+    CHECK_FALSE(is_safe_pcm_name("tee:hw:0,'/tmp/x'"));
+    CHECK_FALSE(is_safe_pcm_name("plug:{type file}"));
+    CHECK_FALSE(is_safe_pcm_name(""));
+}
+
+TEST_CASE("an unsafe PCM name from env or settings falls through to the next source",
+          "[sound][alsa-device]") {
+    CHECK(resolve_alsa_device("hw:1", "file:FILE=|cmd") == "hw:1");
+    CHECK(resolve_alsa_device("file:FILE=|cmd", nullptr) == "default");
+    CHECK(resolve_alsa_device("tee:x", "file:x") == "default");
 }
 
 TEST_CASE("list() always offers System default first", "[sound][alsa-device]") {

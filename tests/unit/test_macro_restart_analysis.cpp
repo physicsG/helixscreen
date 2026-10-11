@@ -386,3 +386,36 @@ TEST_CASE("The ZMOD bed-level chain reaches the report, not just the dialog",
     REQUIRE(classify_macro_rpc_failure(plain, klippy_disconnect_error()) ==
             MacroFailureReport::Error);
 }
+
+TEST_CASE("A print start macro reaching SET_LED_EFFECT through a wrapper drives LEDs",
+          "[macro][led]") {
+    auto settings = merge({
+        macro_section("print_start", "    G28\n    _STATUS_HEATING\n    M190 S{bed}\n"),
+        macro_section("_status_heating", "    SET_LED_EFFECT EFFECT=heating REPLACE=1\n"),
+        macro_section("clean_nozzle", "    G1 X10\n"),
+    });
+    auto flagged = analyze_led_driving_macros(settings);
+    CHECK(flagged.count("PRINT_START") == 1);
+    CHECK(flagged.count("_STATUS_HEATING") == 1);
+    CHECK(flagged.count("CLEAN_NOZZLE") == 0);
+
+    PrinterDiscovery hw;
+    hw.set_led_driving_macros(std::move(flagged));
+    CHECK(hw.print_macros_drive_leds());
+}
+
+TEST_CASE("An end macro using plain SET_LED counts; a non-print macro does not", "[macro][led]") {
+    PrinterDiscovery end_hw;
+    end_hw.set_led_driving_macros(analyze_led_driving_macros(
+        macro_section("end_print", "    TURN_OFF_HEATERS\n    SET_LED LED=chamber WHITE=0\n")));
+    CHECK(end_hw.print_macros_drive_leds());
+    end_hw.clear();
+    CHECK_FALSE(end_hw.print_macros_drive_leds());
+
+    PrinterDiscovery other_hw;
+    other_hw.set_led_driving_macros(analyze_led_driving_macros(merge({
+        macro_section("lights_on", "    SET_LED LED=chamber WHITE=1\n"),
+        macro_section("print_start", "    G28\n    RESPOND MSG=\"SET_LED_EFFECT skipped\"\n"),
+    })));
+    CHECK_FALSE(other_hw.print_macros_drive_leds());
+}

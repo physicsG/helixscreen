@@ -7,7 +7,6 @@
 #include "ui_panel_motion.h"
 
 #include "panel_widget_registry.h"
-#include "ui/ui_lazy_panel_helper.h"
 
 #include <spdlog/spdlog.h>
 
@@ -20,7 +19,8 @@ void register_motion_widget() {
     lv_xml_register_event_cb(nullptr, "motion_widget_clicked_cb", MotionWidget::clicked_cb);
 }
 
-MotionWidget::MotionWidget() = default;
+MotionWidget::MotionWidget()
+    : TiledPanelWidget("motion", TileSizing::Content{"", "", "Motion", false}) {}
 
 MotionWidget::~MotionWidget() {
     detach();
@@ -29,7 +29,6 @@ MotionWidget::~MotionWidget() {
 void MotionWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
     widget_obj_ = widget_obj;
     parent_screen_ = parent_screen;
-    lv_obj_set_user_data(widget_obj_, this);
 
     btn_ = lv_obj_find_by_name(widget_obj_, "motion_button");
     if (btn_) {
@@ -38,17 +37,13 @@ void MotionWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
 }
 
 void MotionWidget::detach() {
-    if (widget_obj_) {
-        lv_obj_set_user_data(widget_obj_, nullptr);
-    }
     btn_ = nullptr;
     widget_obj_ = nullptr;
     parent_screen_ = nullptr;
 }
 
 void MotionWidget::handle_click() {
-    helix::ui::lazy_create_and_push_overlay<MotionPanel>(get_global_motion_panel, motion_panel_,
-                                                         parent_screen_, "Motion", "MotionWidget");
+    get_global_motion_panel().show(parent_screen_);
 }
 
 void MotionWidget::clicked_cb(lv_event_t* e) {

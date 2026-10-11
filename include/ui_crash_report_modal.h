@@ -21,7 +21,7 @@
 
 class CrashReportModal : public Modal {
   public:
-    CrashReportModal();
+    explicit CrashReportModal(CrashReporter& reporter);
     ~CrashReportModal() override;
 
     // Non-copyable
@@ -36,7 +36,7 @@ class CrashReportModal : public Modal {
 
     /// One-shot form: show on the active screen and hand the instance to
     /// ModalStack, which frees it when its entry goes (#1382).
-    static bool show_owned(const CrashReporter::CrashReport& report);
+    static bool show_owned(CrashReporter& reporter, const CrashReporter::CrashReport& report);
 
     const char* get_name() const override {
         return "Crash Report";
@@ -51,9 +51,10 @@ class CrashReportModal : public Modal {
 
   private:
     // Subjects for XML data binding
-    lv_subject_t details_subject_;
-    lv_subject_t status_subject_;
-    lv_subject_t show_qr_subject_;
+    SubjectManager subjects_;
+    lv_subject_t details_subject_{};
+    lv_subject_t status_subject_{};
+    lv_subject_t show_qr_subject_{};
     bool subjects_initialized_ = false;
 
     // Subject string buffers
@@ -61,6 +62,7 @@ class CrashReportModal : public Modal {
     char status_buf_[256] = {};
 
     // Crash report data
+    CrashReporter& reporter_;
     CrashReporter::CrashReport report_;
 
     // Flipped on first Send click so double-taps don't kick off a second
@@ -91,5 +93,8 @@ class CrashReportModal : public Modal {
     //   the share code through to try_auto_send so the issue body links to it.
     void attempt_delivery();
     void send_with_bundle(const std::string& share_code);
+    // The no-network end state: QR code (or plain save) plus an honest status.
+    // Reached when the worker send fails and when this build may not upload.
+    void show_local_fallback(const CrashReporter::CrashReport& report, const char* status);
     void show_qr_code(const std::string& url);
 };

@@ -1,0 +1,1 @@
+-- The manifest's settings_overlay is the whole UI for this plugin.

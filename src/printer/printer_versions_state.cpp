@@ -12,6 +12,8 @@
 #include "printer_versions_state.h"
 
 #include "state/subject_macros.h"
+#include "text_io.h"
+#include "version.h"
 
 #include <spdlog/spdlog.h>
 
@@ -19,6 +21,17 @@
 #include <cctype>
 
 namespace helix {
+
+bool moonraker_history_is_degraded(const std::string& version) {
+    if (!helix::version::parse_version(version)) {
+        return false;
+    }
+    // Moonraker ships git-describe versions ("v0.9.0-16-g0f1e2d3"). SemVer ranks
+    // a prerelease below its own release, so the constraint check is the right
+    // comparison: it answers on the core triple alone.
+    return !helix::version::check_version_constraint(std::string(">=") + MIN_MOONRAKER_VERSION,
+                                                     version);
+}
 
 namespace {
 
@@ -36,8 +49,7 @@ std::string display_version(const std::string& version) {
                   trimmed.end());
 
     std::string lowered = trimmed;
-    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
+    lowered = helix::text_io::to_lower(lowered);
 
     if (trimmed.empty() || trimmed == "?" || lowered == "unknown") {
         return lv_tr("Unknown");
@@ -59,6 +71,8 @@ void PrinterVersionsState::init_subjects(bool register_xml) {
     INIT_SUBJECT_STRING(klipper_version, "—", subjects_, register_xml);
     INIT_SUBJECT_STRING(moonraker_version, "—", subjects_, register_xml);
     INIT_SUBJECT_STRING(os_version, "—", subjects_, register_xml);
+    // 0 until a version arrives: an unknown Moonraker is not a degraded one.
+    INIT_SUBJECT_INT(moonraker_history_degraded, 0, subjects_, register_xml);
 
     subjects_initialized_ = true;
     spdlog::trace("[PrinterVersionsState] Subjects initialized successfully");
@@ -75,13 +89,19 @@ void PrinterVersionsState::deinit_subjects() {
 }
 
 void PrinterVersionsState::set_klipper_version_internal(const std::string& version) {
+    klipper_version_raw_ = version;
     lv_subject_copy_string(&klipper_version_, display_version(version).c_str());
     spdlog::debug("[PrinterVersionsState] Klipper version set: {}", version);
 }
 
 void PrinterVersionsState::set_moonraker_version_internal(const std::string& version) {
     lv_subject_copy_string(&moonraker_version_, display_version(version).c_str());
-    spdlog::debug("[PrinterVersionsState] Moonraker version set: {}", version);
+    // Derived from the raw string, not the display form: display_version()
+    // collapses placeholders to a translated label that no comparison can read.
+    const bool degraded = moonraker_history_is_degraded(version);
+    lv_subject_set_int(&moonraker_history_degraded_, degraded ? 1 : 0);
+    spdlog::debug("[PrinterVersionsState] Moonraker version set: {} (history degraded: {})",
+                  version, degraded);
 }
 
 void PrinterVersionsState::set_os_version_internal(const std::string& version) {

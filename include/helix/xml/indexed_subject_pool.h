@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -29,7 +30,7 @@ namespace helix::xml {
 // Not thread-safe; not copyable. Intended for main-thread XML/UI use only.
 class IndexedSubjectPool {
   public:
-    enum class Type { Int, String };
+    enum class Type { Int, String, Color };
 
     IndexedSubjectPool(std::string prefix, Type type, size_t string_cap = 64);
     ~IndexedSubjectPool();
@@ -43,6 +44,9 @@ class IndexedSubjectPool {
 
     // Type::Int only.
     void set_int(size_t i, int v);
+
+    // Type::Color only. @p rgb is 0xRRGGBB.
+    void set_color(size_t i, uint32_t rgb);
 
     // Type::String only. Value is truncated to string_cap - 1 chars by LVGL.
     void set_string(size_t i, const std::string& v);

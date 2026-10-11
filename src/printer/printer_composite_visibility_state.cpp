@@ -4,9 +4,9 @@
  * @brief Aggregate `has_any_preprint_options` visibility subject
  *
  * Manages the single aggregate subject driving the PRINT OPTIONS card's
- * visibility in print_file_detail.xml. Computed from plugin-gated hardware
- * capabilities, the (un-gated) timelapse capability, and the new
- * PrePrintOption framework's option count.
+ * visibility in print_file_detail.xml. Computed from the PrePrintOption
+ * framework's option count, the plugin-gated PRINT_START macro rows, and the
+ * (un-gated) timelapse capability.
  */
 
 #include "printer_composite_visibility_state.h"
@@ -44,30 +44,18 @@ void PrinterCompositeVisibilityState::deinit_subjects() {
 
 void PrinterCompositeVisibilityState::update_visibility(
     bool plugin_installed, const PrinterCapabilitiesState& capabilities,
-    size_t framework_option_count) {
-    // has_any_preprint_options = (plugin_installed && any plugin-gated cap)
-    //                          || timelapse capability (no plugin gate)
-    //                          || framework_option_count > 0
-    const bool any_plugin_gated_cap =
-        lv_subject_get_int(capabilities.get_printer_has_bed_mesh_subject()) ||
-        lv_subject_get_int(capabilities.get_printer_has_qgl_subject()) ||
-        lv_subject_get_int(capabilities.get_printer_has_z_tilt_subject()) ||
-        lv_subject_get_int(capabilities.get_printer_has_nozzle_clean_subject()) ||
-        lv_subject_get_int(capabilities.get_printer_has_purge_line_subject());
-
-    const bool any_visible = (plugin_installed && any_plugin_gated_cap) ||
-                             lv_subject_get_int(capabilities.get_printer_has_timelapse_subject()) ||
+    size_t framework_option_count, size_t macro_option_count) {
+    const bool any_visible = (plugin_installed && macro_option_count > 0) ||
+                             lv_subject_get_int(capabilities.subject(Capability::HasTimelapse)) ||
                              framework_option_count > 0;
 
     const int new_any = any_visible ? 1 : 0;
-    if (lv_subject_get_int(&has_any_preprint_options_) != new_any) {
-        lv_subject_set_int(&has_any_preprint_options_, new_any);
-    }
+    lv_subject_set_int(&has_any_preprint_options_, new_any);
 
     if (!last_log_state_initialized_ || new_any != last_any_ || plugin_installed != last_plugin_) {
         spdlog::debug("[PrinterCompositeVisibilityState] has_any_preprint_options={} (plugin={}, "
-                      "framework={})",
-                      new_any, plugin_installed, framework_option_count);
+                      "framework={}, macro={})",
+                      new_any, plugin_installed, framework_option_count, macro_option_count);
         last_any_ = new_any;
         last_plugin_ = plugin_installed;
         last_log_state_initialized_ = true;

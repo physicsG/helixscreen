@@ -56,6 +56,8 @@ The full list shows individual jobs and gives you tools to find a specific one.
 
 Each row shows the job's filename, status, and key details. When filters are active and nothing matches, the list tells you no jobs match; otherwise the empty state hints that completed prints will appear there.
 
+> **Multi-color jobs and filenames:** on [printers that remap by rewriting the file](filament.md#printers-that-remap-by-rewriting-the-file), a remapped job is printed from a rewritten copy, and print history normally shows the original filename again once the print is done. That restore needs the HelixPrint plugin (and a reasonably current Moonraker). Without it, a remapped job is listed under the rewritten name, which looks like `modified_1730824_benchy.gcode` - the print itself is unaffected.
+
 ---
 
 ## Print Details & Reprinting

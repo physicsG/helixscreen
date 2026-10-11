@@ -437,3 +437,46 @@ G1 X0 Y0 Z0.3 E0.5
         REQUIRE(result.has_operation(OperationType::BED_MESH));
     }
 }
+
+// ============================================================================
+// Commands the printer treats as an emergency stop
+// ============================================================================
+
+TEST_CASE("GCodeOpsDetector - command_word", "[gcode][ops][printer_stop]") {
+    CHECK(GCodeOpsDetector::command_word("M729") == "M729");
+    CHECK(GCodeOpsDetector::command_word("  m729 S1") == "m729");
+    CHECK(GCodeOpsDetector::command_word("M729;trailing") == "M729");
+    CHECK(GCodeOpsDetector::command_word("M729\r") == "M729");
+    CHECK(GCodeOpsDetector::command_word("G1 X1 ; M729") == "G1");
+    CHECK(GCodeOpsDetector::command_word("; M729").empty());
+    CHECK(GCodeOpsDetector::command_word("   ").empty());
+    CHECK(GCodeOpsDetector::command_word("").empty());
+}
+
+TEST_CASE("GCodeOpsDetector - first line calling a named command", "[gcode][ops][printer_stop]") {
+    const std::set<std::string> stops = {"M729", "M8213"};
+
+    SECTION("an uncommented call matches whatever its case and arguments") {
+        const auto hit = GCodeOpsDetector::find_first_command(
+            "G28\n; M729\nG1 X1 ; M729\nM7290\nm729 S1\nM8213\n", stops);
+        REQUIRE(hit.has_value());
+        CHECK(hit->command == "m729");
+        CHECK(hit->line_number == 5);
+    }
+
+    SECTION("a comment, a later token and a longer word are not calls") {
+        CHECK_FALSE(GCodeOpsDetector::find_first_command("; M729\nG1 X1 ; M729\nM7290\n", stops)
+                        .has_value());
+    }
+
+    SECTION("a call on the last line with no newline is found") {
+        const auto hit = GCodeOpsDetector::find_first_command("G28\nM8213", stops);
+        REQUIRE(hit.has_value());
+        CHECK(hit->command == "M8213");
+        CHECK(hit->line_number == 2);
+    }
+
+    SECTION("no commands named, nothing found") {
+        CHECK_FALSE(GCodeOpsDetector::find_first_command("M729\n", {}).has_value());
+    }
+}

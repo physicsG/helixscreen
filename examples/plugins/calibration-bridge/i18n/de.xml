@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<translations languages="de">
+  <!-- Manifest fields -->
+  <translation tag="Calibration Bridge" de="Kalibrationsbrücke"/>
+  <translation tag="Run slicer-side filament calibrations at the printer: a companion (an OrcaSlicer plugin) posts the wizard context, the screen starts the pre-sliced print, asks which result is best, and sends the answer back." de="Slicer-seitige Filamentkalibrierung am Drucker: ein Begleitprozess (ein OrcaSlicer-Plugin) liefert den Kontext, der Bildschirm startet den vor-geslicten Druck, fragt nach dem besten Ergebnis und sendet die Antwort zurück."/>
+  <translation tag="Companion result URL" de="Ergebnis-URL des Begleitprozesses"/>
+  <translation tag="Open when a calibration arrives" de="Öffnen, wenn eine Kalibrierung ankommt"/>
+  <translation tag="Open the picker when the print finishes" de="Auswahl öffnen, wenn der Druck endet"/>
+  <translation tag="Open calibration" de="Kalibrierung öffnen"/>
+  <!-- Overlay -->
+  <translation tag="No calibration running" de="Keine Kalibrierung aktiv"/>
+  <translation tag="Temperature tower" de="Temperaturturm"/>
+  <translation tag="PA pattern" de="PA-Muster"/>
+  <translation tag="Flow rate" de="Flussrate"/>
+  <translation tag="Start the calibration print" de="Kalibrierungsdruck starten"/>
+  <translation tag="Printing..." de="Druckt..."/>
+  <translation tag="Which one is best?" de="Welches ist am besten?"/>
+  <translation tag="sent to the companion" de="an den Begleitprozess gesendet"/>
+  <translation tag="(no companion URL set)" de="(keine Begleitprozess-URL gesetzt)"/>
+  <translation tag="print cancelled" de="Druck abgebrochen"/>
+  <translation tag="print failed" de="Druck fehlgeschlagen"/>
+  <translation tag="no print file in the event" de="keine Druckdatei im Ereignis"/>
+  <translation tag="bad event" de="fehlerhaftes Ereignis"/>
+  <translation tag="Profile" de="Profil"/>
+</translations>

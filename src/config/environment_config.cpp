@@ -3,8 +3,9 @@
 
 #include "environment_config.h"
 
+#include "env_knobs.h"
+
 #include <cstdlib>
-#include <cstring>
 
 namespace helix::config {
 
@@ -61,11 +62,6 @@ std::optional<int> EnvironmentConfig::get_int_scaled(const char* name, int min, 
     return static_cast<int>(scaled);
 }
 
-bool EnvironmentConfig::get_bool(const char* name) {
-    const char* value = std::getenv(name);
-    return value != nullptr && strcmp(value, "1") == 0;
-}
-
 bool EnvironmentConfig::exists(const char* name) {
     return std::getenv(name) != nullptr;
 }
@@ -94,7 +90,7 @@ std::optional<int> EnvironmentConfig::get_auto_quit_seconds() {
 }
 
 bool EnvironmentConfig::get_screenshot_enabled() {
-    return get_bool("HELIX_AUTO_SCREENSHOT");
+    return env_flag("HELIX_AUTO_SCREENSHOT");
 }
 
 std::optional<int> EnvironmentConfig::get_mock_ams_gates() {

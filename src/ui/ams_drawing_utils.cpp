@@ -2,22 +2,19 @@
 
 #include "ui/ams_drawing_utils.h"
 
-#include "ui_fonts.h"
-#include "ui_icon_codepoints.h"
-#include "ui_spool_canvas.h"
-
 #include "ams_backend.h"
 #include "ams_state.h"
-#include "config.h"
+#include "display_numbering.h"
 #include "theme_manager.h"
 
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <map>
+#include <numeric>
 #include <set>
 
-namespace helix::ams_draw {
+namespace ams_draw {
 
 // ============================================================================
 // Color Utilities
@@ -45,22 +42,22 @@ lv_color_t blend_color(lv_color_t c1, lv_color_t c2, float factor) {
 // Severity & Error Helpers
 // ============================================================================
 
-lv_color_t severity_color(SlotError::Severity severity) {
+lv_color_t severity_color(helix::SlotError::Severity severity) {
     switch (severity) {
-    case SlotError::ERROR:
+    case helix::SlotError::ERROR:
         return theme_manager_get_color("danger");
-    case SlotError::WARNING:
+    case helix::SlotError::WARNING:
         return theme_manager_get_color("warning");
     default:
         return theme_manager_get_color("text_muted");
     }
 }
 
-SlotError::Severity worst_unit_severity(const AmsUnit& unit) {
-    SlotError::Severity worst = SlotError::INFO;
+helix::SlotError::Severity worst_unit_severity(const helix::AmsUnit& unit) {
+    helix::SlotError::Severity worst = helix::SlotError::INFO;
     for (const auto& slot : unit.slots) {
-        if (slot.error.has_value() && slot.error->severity > worst) {
-            worst = slot.error->severity;
+        if (slot.has_fault() && slot.fault_severity() > worst) {
+            worst = slot.fault_severity();
         }
     }
     return worst;
@@ -70,18 +67,21 @@ SlotError::Severity worst_unit_severity(const AmsUnit& unit) {
 // Data Helpers
 // ============================================================================
 
-int fill_percent_from_slot(const SlotInfo& slot, int min_pct) {
+int floor_fill_pct(int pct, int min_pct) {
     // Canonical fill semantics (SlotInfo::display_fill_pct): real ratio when
     // both weights are known, 100% when only metadata is present, 0 for an
     // empty/ghost lane, and -1 when there is no data at all. -1 is propagated
     // so callers can skip/keep-previous instead of rendering a phantom bar; it
     // is what keeps a lane we know nothing about from being painted, which is a
     // different case from a known lane whose weight nobody tracks.
-    int pct = slot.display_fill_pct();
     if (pct < 0) {
         return -1;
     }
     return std::clamp(pct, min_pct, 100);
+}
+
+int fill_percent_from_slot(const helix::SlotInfo& slot, int min_pct) {
+    return floor_fill_pct(slot.display_fill_pct(), min_pct);
 }
 
 int32_t calc_bar_width(int32_t container_width, int slot_count, int32_t gap, int32_t min_width,
@@ -97,7 +97,7 @@ int32_t calc_bar_width(int32_t container_width, int slot_count, int32_t gap, int
 // Presentation Helpers
 // ============================================================================
 
-std::string get_unit_display_name(const AmsUnit& unit, int unit_index) {
+std::string get_unit_display_name(const helix::AmsUnit& unit, int unit_index) {
     // Prefer display_name (short, pretty) over internal name
     std::string raw;
     if (!unit.display_name.empty()) {
@@ -105,7 +105,7 @@ std::string get_unit_display_name(const AmsUnit& unit, int unit_index) {
     } else if (!unit.name.empty()) {
         raw = unit.name;
     } else {
-        return "Unit " + std::to_string(unit_index + 1);
+        return "Unit " + std::to_string(helix::ui::lane_number(unit_index));
     }
 
     // Replace underscores with spaces for readability
@@ -231,7 +231,7 @@ lv_obj_t* create_error_badge(lv_obj_t* parent, int32_t size) {
     return badge;
 }
 
-void update_error_badge(lv_obj_t* badge, bool has_error, SlotError::Severity severity,
+void update_error_badge(lv_obj_t* badge, bool has_error, helix::SlotError::Severity severity,
                         bool animate) {
     if (!badge) {
         return;
@@ -287,69 +287,24 @@ SlotColumn create_slot_column(lv_obj_t* parent, int32_t bar_width, int32_t bar_h
     return col;
 }
 
-void style_slot_bar(const SlotColumn& col, const BarStyleParams& params, int32_t bar_radius) {
-    (void)bar_radius; // Reserved for future dynamic radius changes
-    if (!col.bar_bg || !col.bar_fill) {
-        return;
-    }
-
-    // --- Bar background border ---
-    if (params.is_loaded && !params.has_error) {
-        // Loaded: wider, brighter border
-        lv_obj_set_style_border_width(col.bar_bg, 2, LV_PART_MAIN);
-        lv_obj_set_style_border_color(col.bar_bg, theme_manager_get_color("text"), LV_PART_MAIN);
-        lv_obj_set_style_border_opa(col.bar_bg, LV_OPA_80, LV_PART_MAIN);
-    } else {
-        lv_obj_set_style_border_width(col.bar_bg, 1, LV_PART_MAIN);
-        lv_obj_set_style_border_color(col.bar_bg, theme_manager_get_color("text_muted"),
-                                      LV_PART_MAIN);
-        lv_obj_set_style_border_opa(col.bar_bg, params.is_present ? LV_OPA_50 : LV_OPA_20,
-                                    LV_PART_MAIN);
-    }
-
-    // --- Fill gradient ---
-    if (params.is_present && params.fill_pct > 0) {
-        lv_color_t base_color = lv_color_hex(params.color_rgb);
-        lv_color_t light_color = lighten_color(base_color, 50);
-
-        lv_obj_set_style_bg_color(col.bar_fill, light_color, LV_PART_MAIN);
-        lv_obj_set_style_bg_grad_color(col.bar_fill, base_color, LV_PART_MAIN);
-        lv_obj_set_style_bg_grad_dir(col.bar_fill, LV_GRAD_DIR_VER, LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(col.bar_fill, LV_OPA_COVER, LV_PART_MAIN);
-
-        lv_obj_set_height(col.bar_fill, LV_PCT(params.fill_pct));
-        lv_obj_align(col.bar_fill, LV_ALIGN_BOTTOM_MID, 0, 0);
-        lv_obj_remove_flag(col.bar_fill, LV_OBJ_FLAG_HIDDEN);
-    } else {
-        lv_obj_add_flag(col.bar_fill, LV_OBJ_FLAG_HIDDEN);
-    }
-
-    // --- Status line ---
-    if (col.status_line) {
-        if (params.has_error) {
-            lv_color_t error_color = severity_color(params.severity);
-            lv_obj_set_style_bg_color(col.status_line, error_color, LV_PART_MAIN);
-            lv_obj_set_style_bg_opa(col.status_line, LV_OPA_COVER, LV_PART_MAIN);
-            lv_obj_remove_flag(col.status_line, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_add_flag(col.status_line, LV_OBJ_FLAG_HIDDEN);
-        }
-    }
-}
-
 // ============================================================================
 // Logo Helpers
 // ============================================================================
 
-void apply_logo(lv_obj_t* image, const AmsUnit& unit, const AmsSystemInfo& info) {
+const char* unit_logo_path(const helix::AmsUnit& unit, const helix::AmsSystemInfo& info) {
+    const char* path = helix::AmsState::get_logo_path(unit.name);
+    if (!path || !path[0]) {
+        path = helix::AmsState::get_logo_path(info.type_name);
+    }
+    return path;
+}
+
+void apply_logo(lv_obj_t* image, const helix::AmsUnit& unit, const helix::AmsSystemInfo& info) {
     if (!image) {
         return;
     }
 
-    const char* path = AmsState::get_logo_path(unit.name);
-    if (!path || !path[0]) {
-        path = AmsState::get_logo_path(info.type_name);
-    }
+    const char* path = unit_logo_path(unit, info);
 
     if (path && path[0]) {
         lv_image_set_src(image, path);
@@ -364,7 +319,7 @@ void apply_logo(lv_obj_t* image, const std::string& type_name) {
         return;
     }
 
-    const char* path = AmsState::get_logo_path(type_name);
+    const char* path = helix::AmsState::get_logo_path(type_name);
     if (path && path[0]) {
         lv_image_set_src(image, path);
         lv_obj_remove_flag(image, LV_OBJ_FLAG_HIDDEN);
@@ -377,7 +332,8 @@ void apply_logo(lv_obj_t* image, const std::string& type_name) {
 // System Tool Layout
 // ============================================================================
 
-SystemToolLayout compute_system_tool_layout(const AmsSystemInfo& info, const AmsBackend* backend) {
+SystemToolLayout compute_system_tool_layout(const helix::AmsSystemInfo& info,
+                                            const helix::AmsBackend* backend) {
     SystemToolLayout result;
     int total_physical = 0;
 
@@ -408,7 +364,7 @@ SystemToolLayout compute_system_tool_layout(const AmsSystemInfo& info, const Ams
         const auto& unit = info.units[i];
 
         // Determine topology — prefer backend query, fall back to unit struct
-        PathTopology topo = unit.topology;
+        helix::PathTopology topo = unit.topology;
         if (backend) {
             topo = backend->get_unit_topology(i);
         }
@@ -430,64 +386,72 @@ SystemToolLayout compute_system_tool_layout(const AmsSystemInfo& info, const Ams
         UnitToolLayout utl;
         utl.min_virtual_tool = min_tool;
         utl.hub_tool_label = unit.hub_tool_label;
+        utl.hub_id = unit.hub_id;
 
         // Cross-unit head sharing. A unit whose lanes all feed heads that an
         // EARLIER unit already owns is a *source* for those heads, not a new set
-        // of heads — so it must reuse their physical nozzles instead of
-        // allocating its own. multiACE is the case that forced this: the ACE
-        // unit's bays all map to the U1 head it is bound to, and without this
-        // the overview drew five nozzles on a four-head machine, labelling T3
-        // twice. (The HUB branch below already shares by hub_tool_label; this is
-        // the same idea keyed on mapped_tool, which every unit populates.)
+        // of heads, so it reuses their physical nozzles instead of allocating
+        // its own: a multiACE unit's bays all map to the toolchanger head it is
+        // bound to, and allocating would draw one nozzle more than the machine
+        // has. (The HUB branch below shares by hub_tool_label; this is the same
+        // idea keyed on mapped_tool, which every unit populates.)
         //
-        // Guarded three ways, because widening it would redraw existing
-        // multi-unit rigs: every one of this unit's mapped tools must already be
-        // claimed (a unit that adds even one new head allocates normally), the
-        // reused nozzles must form a contiguous ascending run (UnitToolLayout
-        // can only express first+count), and units with no mapped_tool at all
-        // fall through untouched. Two Box Turtles on disjoint tool ranges — the
-        // shape the existing tests pin — match none of this and are unaffected.
-        if (min_tool >= 0) {
-            std::vector<int> phys;
+        // Guarded so other multi-unit rigs keep their layout: every one of this
+        // unit's mapped tools must already be claimed (a unit that adds even
+        // one new head allocates normally), each by a unit of several heads
+        // (two hubs on one nozzle are the HUB branch's to group), the reused
+        // nozzles must form a contiguous ascending run (UnitToolLayout can only
+        // express first+count), and units with no mapped_tool at all fall
+        // through.
+        std::vector<int> shared_phys;
+        if (!unit.absent && min_tool >= 0) {
+            auto owned_by_heads_unit = [&result](int phys) {
+                return std::any_of(
+                    result.units.begin(), result.units.end(), [phys](const UnitToolLayout& prev) {
+                        return prev.tool_count > 1 && phys >= prev.first_physical_tool &&
+                               phys < prev.first_physical_tool + prev.tool_count;
+                    });
+            };
             bool all_claimed = true;
             for (const auto& slot : unit.slots) {
                 if (slot.mapped_tool < 0) {
                     continue;
                 }
                 auto it = result.virtual_to_physical.find(slot.mapped_tool);
-                if (it == result.virtual_to_physical.end()) {
+                if (it == result.virtual_to_physical.end() || !owned_by_heads_unit(it->second)) {
                     all_claimed = false;
                     break;
                 }
-                phys.push_back(it->second);
+                shared_phys.push_back(it->second);
             }
-            if (all_claimed && !phys.empty()) {
-                std::sort(phys.begin(), phys.end());
-                phys.erase(std::unique(phys.begin(), phys.end()), phys.end());
-                bool contiguous = true;
-                for (size_t k = 1; k < phys.size(); ++k) {
-                    if (phys[k] != phys[k - 1] + 1) {
-                        contiguous = false;
-                        break;
-                    }
+            std::sort(shared_phys.begin(), shared_phys.end());
+            shared_phys.erase(std::unique(shared_phys.begin(), shared_phys.end()),
+                              shared_phys.end());
+            for (size_t k = 1; all_claimed && k < shared_phys.size(); ++k) {
+                if (shared_phys[k] != shared_phys[k - 1] + 1) {
+                    all_claimed = false;
                 }
-                if (contiguous) {
-                    utl.first_physical_tool = phys.front();
-                    utl.tool_count = static_cast<int>(phys.size());
-                    for (const auto& slot : unit.slots) {
-                        if (slot.mapped_tool < 0) {
-                            continue; // operator[] would insert a bogus -1 key
-                        }
-                        record_extruder(result.virtual_to_physical[slot.mapped_tool],
-                                        slot.extruder_name);
-                    }
-                    result.units.push_back(utl);
-                    continue;
-                }
+            }
+            if (!all_claimed) {
+                shared_phys.clear();
             }
         }
 
-        if (topo == PathTopology::MIXED) {
+        if (unit.absent) {
+            // A box that is not on the bus feeds no nozzle, so the units around
+            // it number their nozzles as if it were not there.
+            utl.first_physical_tool = total_physical;
+            utl.tool_count = 0;
+        } else if (!shared_phys.empty()) {
+            utl.first_physical_tool = shared_phys.front();
+            utl.tool_count = static_cast<int>(shared_phys.size());
+            for (const auto& slot : unit.slots) {
+                if (slot.mapped_tool < 0) {
+                    continue; // operator[] would insert a bogus -1 key
+                }
+                record_extruder(result.virtual_to_physical[slot.mapped_tool], slot.extruder_name);
+            }
+        } else if (topo == helix::PathTopology::MIXED) {
             // MIXED: direct lanes each get their own nozzle position,
             // hub lanes share one nozzle position regardless of mapped_tool.
             // Count = number of direct lanes + 1 per hub group.
@@ -505,7 +469,7 @@ SystemToolLayout compute_system_tool_layout(const AmsSystemInfo& info, const Ams
                                   ? unit.lane_is_hub_routed[s]
                                   : false;
                 int gi = unit.first_slot_global_index + s;
-                auto slot = backend ? backend->get_slot_info(gi) : SlotInfo{};
+                auto slot = backend ? backend->get_slot_info(gi) : helix::SlotInfo{};
                 int tool = (slot.mapped_tool >= 0) ? slot.mapped_tool : gi;
 
                 if (is_hub) {
@@ -540,7 +504,7 @@ SystemToolLayout compute_system_tool_layout(const AmsSystemInfo& info, const Ams
             }
 
             total_physical += utl.tool_count;
-        } else if (topo != PathTopology::PARALLEL) {
+        } else if (topo != helix::PathTopology::PARALLEL) {
             // HUB/LINEAR: all lanes converge to a single physical nozzle.
             // Multiple HUB units feeding one extruder (e.g. a BoxTurtle and a
             // Claymore both on e0) share one physical nozzle.
@@ -574,7 +538,8 @@ SystemToolLayout compute_system_tool_layout(const AmsSystemInfo& info, const Ams
                     !unit_extruder.empty() && prev.extruder_identity == unit_extruder;
                 const bool same_label =
                     unit.hub_tool_label >= 0 && prev.hub_tool_label == unit.hub_tool_label;
-                if (same_extruder || same_label) {
+                const bool same_hub = !unit.hub_id.empty() && prev.hub_id == unit.hub_id;
+                if (same_extruder || same_label || same_hub) {
                     shared_phys = prev.first_physical_tool;
                     break;
                 }
@@ -588,6 +553,20 @@ SystemToolLayout compute_system_tool_layout(const AmsSystemInfo& info, const Ams
                 total_physical += 1;
             }
             utl.tool_count = 1;
+
+            // The unit's hub: the group of an earlier unit naming the same
+            // non-empty hub_id, else a group of its own.
+            for (size_t g = 0; g < result.hub_groups.size() && !unit.hub_id.empty(); ++g) {
+                if (result.hub_groups[g].hub_id == unit.hub_id) {
+                    utl.hub_group = static_cast<int>(g);
+                    break;
+                }
+            }
+            if (utl.hub_group < 0) {
+                utl.hub_group = static_cast<int>(result.hub_groups.size());
+                result.hub_groups.push_back({utl.first_physical_tool, unit.hub_id, {}});
+            }
+            result.hub_groups[static_cast<size_t>(utl.hub_group)].units.push_back(i);
 
             // Map all virtual tool numbers from this unit to this physical nozzle
             int phys = utl.first_physical_tool;
@@ -751,6 +730,17 @@ SystemToolLayout compute_system_tool_layout(const AmsSystemInfo& info, const Ams
         }
     }
 
+    std::vector<int> order_key(result.units.size(), 0);
+    for (size_t u = 0; u < result.units.size(); ++u) {
+        const auto& utl = result.units[u];
+        order_key[u] =
+            utl.tool_count > 0 ? utl.first_physical_tool : (u > 0 ? order_key[u - 1] : 0);
+    }
+    result.display_order.resize(result.units.size());
+    std::iota(result.display_order.begin(), result.display_order.end(), 0);
+    std::stable_sort(result.display_order.begin(), result.display_order.end(),
+                     [&order_key](int a, int b) { return order_key[a] < order_key[b]; });
+
     // Physical→extruder-name map. Positions no branch could identify stay empty.
     result.physical_to_extruder_name.assign(total_physical, std::string());
     for (const auto& [phys, name] : physical_extruder_names) {
@@ -772,15 +762,17 @@ bool layout_has_extruder_identity(const SystemToolLayout& layout) {
         [](const std::string& name) { return helix::tool_number_for_extruder(name).has_value(); });
 }
 
-ToolBadgeLabels compute_tool_badge_labels(const SystemToolLayout& layout, const AmsSystemInfo& info,
-                                          int current_slot, int active_physical_tool) {
+ToolBadgeLabels compute_tool_badge_labels(const SystemToolLayout& layout,
+                                          const helix::AmsSystemInfo& info, int current_slot,
+                                          int active_physical_tool) {
     ToolBadgeLabels out;
 
     if (layout_has_extruder_identity(layout)) {
         // 'T', not 'E': this labels a TOOLHEAD, which is what every other
-        // surface calls it. The extruder name is still what supplies the NUMBER
-        // — that is the part of #1229 that mattered, since a virtual lane alias
-        // can disagree with the physical toolhead and an extruder name cannot.
+        // surface calls it, so it carries the tool's own 0-based number as
+        // tool_label() spells it. The extruder name is still what supplies the
+        // NUMBER: a virtual lane alias can disagree with the physical toolhead
+        // and an extruder name cannot (prestonbrown/helixscreen#1229).
         out.prefix = 'T';
         out.numbers.reserve(layout.physical_to_extruder_name.size());
         for (const auto& name : layout.physical_to_extruder_name) {
@@ -801,250 +793,23 @@ ToolBadgeLabels compute_tool_badge_labels(const SystemToolLayout& layout, const 
     // loaded, not "T4").
     if (active_physical_tool >= 0 && active_physical_tool < static_cast<int>(out.numbers.size()) &&
         current_slot >= 0) {
-        const SlotInfo* active_slot_info = info.get_slot_global(current_slot);
+        const helix::SlotInfo* active_slot_info = info.get_slot_global(current_slot);
         if (active_slot_info && active_slot_info->mapped_tool >= 0) {
             out.numbers[active_physical_tool] = active_slot_info->mapped_tool;
         }
     }
+
+    // With several toolheads, a toolhead fed by a hub shared across units (identified
+    // by its hub id) is badged by its position: the hub's filament groups are not toolheads.
+    if (layout.total_physical_tools > 1) {
+        for (const auto& group : layout.hub_groups) {
+            if (!group.hub_id.empty() && group.physical_tool >= 0 &&
+                group.physical_tool < static_cast<int>(out.numbers.size())) {
+                out.numbers[group.physical_tool] = helix::ui::lane_number(group.physical_tool);
+            }
+        }
+    }
     return out;
-}
-
-// ============================================================================
-// Spool Visualization
-// ============================================================================
-
-// Draw a dashed circle using segmented arcs (LVGL 9.5 has no dashed border API)
-void draw_dashed_circle_cb(lv_event_t* e) {
-    auto* obj = static_cast<lv_obj_t*>(lv_event_get_target(e));
-    auto* layer = static_cast<lv_layer_t*>(lv_event_get_layer(e));
-
-    int32_t w = lv_obj_get_width(obj);
-    int32_t h = lv_obj_get_height(obj);
-    lv_area_t coords;
-    lv_obj_get_coords(obj, &coords);
-    int32_t cx = coords.x1 + w / 2;
-    int32_t cy = coords.y1 + h / 2;
-    int32_t radius = LV_MIN(w, h) / 2 - 1;
-
-    lv_draw_arc_dsc_t arc_dsc;
-    lv_draw_arc_dsc_init(&arc_dsc);
-    arc_dsc.center.x = cx;
-    arc_dsc.center.y = cy;
-    arc_dsc.radius = static_cast<uint16_t>(radius);
-    arc_dsc.width = 2;
-    arc_dsc.color = theme_manager_get_color("text_muted");
-    arc_dsc.opa = LV_OPA_20;
-
-    // Draw 16 dashes of 15 degrees each with 7.5 degree gaps
-    constexpr int DASH_COUNT = 16;
-    constexpr int DASH_ANGLE = 15;
-    constexpr int GAP_ANGLE = 7; // 16 * (15 + 7) = 352 ≈ 360
-    for (int d = 0; d < DASH_COUNT; d++) {
-        arc_dsc.start_angle = static_cast<uint16_t>(d * (DASH_ANGLE + GAP_ANGLE));
-        arc_dsc.end_angle = static_cast<uint16_t>(arc_dsc.start_angle + DASH_ANGLE);
-        lv_draw_arc(layer, &arc_dsc);
-    }
-}
-
-static bool resolve_3d_spool_style() {
-    helix::Config* cfg = helix::Config::get_instance();
-    return cfg->get<std::string>("/ams/spool_style", "3d") == "3d";
-}
-
-SpoolVisual create_spool_visual(lv_obj_t* container, int32_t spool_size) {
-    SpoolVisual sv;
-    if (!container)
-        return sv;
-    sv.container = container;
-    sv.use_3d = resolve_3d_spool_style();
-
-    // Spool size is a dedicated responsive token (see ams_panel.xml consts).
-    if (spool_size <= 0) {
-        spool_size = theme_manager_get_spacing("ams_slot_spool_size");
-        if (spool_size <= 0)
-            spool_size = theme_manager_get_spacing("space_lg") * 4;
-    }
-    sv.spool_size = spool_size;
-
-    int32_t container_size = spool_size + SPOOL_VISUAL_BADGE_MARGIN_PX; // Extra room for badge
-    lv_obj_set_size(container, container_size, container_size);
-
-    if (sv.use_3d) {
-        // ====================================================================
-        // 3D SPOOL CANVAS (Bambu-style pseudo-3D with gradients + AA)
-        // ====================================================================
-        lv_obj_t* canvas = ui_spool_canvas_create(container, spool_size);
-        if (canvas) {
-            lv_obj_align(canvas, LV_ALIGN_CENTER, 0, 0);
-            // Prevent flex layout from resizing the canvas
-            lv_obj_set_style_min_width(canvas, spool_size, LV_PART_MAIN);
-            lv_obj_set_style_min_height(canvas, spool_size, LV_PART_MAIN);
-            lv_obj_set_style_max_width(canvas, spool_size, LV_PART_MAIN);
-            lv_obj_set_style_max_height(canvas, spool_size, LV_PART_MAIN);
-            ui_spool_canvas_set_color(canvas, lv_color_hex(AMS_DEFAULT_SLOT_COLOR));
-            ui_spool_canvas_set_fill_level(canvas, 1.0f);
-            lv_obj_add_flag(canvas, LV_OBJ_FLAG_EVENT_BUBBLE);
-            sv.canvas = canvas;
-            lv_obj_set_name(canvas, "spool_graphic");
-        }
-    } else {
-        // ====================================================================
-        // FLAT STYLE (skeuomorphic concentric rings)
-        // ====================================================================
-        int32_t filament_ring_size = spool_size - 8;
-        int32_t hub_size = spool_size / 3;
-
-        lv_obj_set_style_radius(container, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-        lv_obj_set_style_shadow_width(container, 8, LV_PART_MAIN);
-        lv_obj_set_style_shadow_opa(container, LV_OPA_20, LV_PART_MAIN);
-        lv_obj_set_style_shadow_offset_y(container, 2, LV_PART_MAIN);
-        lv_obj_set_style_shadow_color(container, lv_color_black(), LV_PART_MAIN);
-
-        // Layer 1: Outer ring (flange - darker shade of filament color)
-        lv_obj_t* outer_ring = lv_obj_create(container);
-        lv_obj_set_size(outer_ring, spool_size, spool_size);
-        lv_obj_align(outer_ring, LV_ALIGN_CENTER, 0, 0);
-        lv_obj_set_style_radius(outer_ring, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-        lv_obj_set_style_bg_color(outer_ring,
-                                  ams_draw::darken_color(lv_color_hex(AMS_DEFAULT_SLOT_COLOR), 50),
-                                  LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(outer_ring, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_set_style_border_width(outer_ring, 2, LV_PART_MAIN);
-        lv_obj_set_style_border_color(outer_ring, theme_manager_get_color("ams_hub"), LV_PART_MAIN);
-        lv_obj_set_style_border_opa(outer_ring, LV_OPA_50, LV_PART_MAIN);
-        lv_obj_remove_flag(outer_ring, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_add_flag(outer_ring, LV_OBJ_FLAG_EVENT_BUBBLE);
-        sv.spool_outer = outer_ring;
-
-        // Layer 2: Main filament color ring
-        lv_obj_t* filament_ring = lv_obj_create(container);
-        lv_obj_set_size(filament_ring, filament_ring_size, filament_ring_size);
-        lv_obj_align(filament_ring, LV_ALIGN_CENTER, 0, 0);
-        lv_obj_set_style_radius(filament_ring, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-        lv_obj_set_style_bg_color(filament_ring, lv_color_hex(AMS_DEFAULT_SLOT_COLOR),
-                                  LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(filament_ring, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_set_style_border_width(filament_ring, 0, LV_PART_MAIN);
-        lv_obj_remove_flag(filament_ring, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_add_flag(filament_ring, LV_OBJ_FLAG_EVENT_BUBBLE);
-        sv.color_swatch = filament_ring;
-        lv_obj_set_name(filament_ring, "spool_graphic");
-
-        // Layer 3: Center hub
-        lv_obj_t* hub = lv_obj_create(container);
-        lv_obj_set_size(hub, hub_size, hub_size);
-        lv_obj_align(hub, LV_ALIGN_CENTER, 0, 0);
-        lv_obj_set_style_radius(hub, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-        lv_obj_set_style_bg_color(hub, theme_manager_get_color("ams_hub"), LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(hub, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_set_style_border_width(hub, 1, LV_PART_MAIN);
-        lv_obj_set_style_border_color(hub, theme_manager_get_color("ams_hub_border"), LV_PART_MAIN);
-        lv_obj_remove_flag(hub, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_add_flag(hub, LV_OBJ_FLAG_EVENT_BUBBLE);
-        sv.spool_hub = hub;
-    }
-
-    // Create empty slot placeholder (circle outline with plus icon, initially hidden)
-    {
-        lv_obj_t* ph = lv_obj_create(container);
-        lv_obj_set_size(ph, spool_size - 4, spool_size - 4);
-        lv_obj_align(ph, LV_ALIGN_CENTER, 0, 0);
-        lv_obj_set_style_radius(ph, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(ph, LV_OPA_TRANSP, LV_PART_MAIN);
-        lv_obj_set_style_border_width(ph, 0, LV_PART_MAIN);
-        lv_obj_add_event_cb(ph, ams_draw::draw_dashed_circle_cb, LV_EVENT_DRAW_MAIN, nullptr);
-        lv_obj_remove_flag(ph, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_add_flag(ph, LV_OBJ_FLAG_EVENT_BUBBLE);
-        lv_obj_add_flag(ph, LV_OBJ_FLAG_HIDDEN);
-
-        // Plus icon centered in circle to communicate "empty, add filament"
-        const char* plus_glyph = ui_icon::lookup_codepoint("plus");
-        if (plus_glyph) {
-            lv_obj_t* plus = lv_label_create(ph);
-            lv_label_set_text(plus, plus_glyph);
-            lv_obj_set_style_text_font(plus, &mdi_icons_24, LV_PART_MAIN);
-            lv_obj_set_style_text_color(plus, theme_manager_get_color("text_muted"), LV_PART_MAIN);
-            lv_obj_set_style_text_opa(plus, LV_OPA_20, LV_PART_MAIN);
-            lv_obj_align(plus, LV_ALIGN_CENTER, 0, 0);
-            lv_obj_add_flag(plus, LV_OBJ_FLAG_EVENT_BUBBLE);
-        }
-        // Named so lv_obj_find_by_name() reaches it — it is the one element that
-        // exists in both the flat and 3D branches, which makes it the stable
-        // handle for "is this lane rendering as unassigned-empty?" from tests
-        // and from `helix-screen ctl`.
-        lv_obj_set_name(ph, "empty_placeholder");
-        sv.empty_placeholder = ph;
-    }
-
-    // Create error indicator dot (top-right of container, initially hidden)
-    {
-        lv_obj_t* err = lv_obj_create(container);
-        lv_obj_set_size(err, 14, 14);
-        lv_obj_set_style_radius(err, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-        lv_obj_set_style_bg_color(err, theme_manager_get_color("danger"), LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(err, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_set_style_border_width(err, 0, LV_PART_MAIN);
-        lv_obj_set_align(err, LV_ALIGN_TOP_RIGHT);
-        lv_obj_set_style_translate_x(err, -2, LV_PART_MAIN);
-        lv_obj_set_style_translate_y(err, 2, LV_PART_MAIN);
-        lv_obj_remove_flag(err, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_add_flag(err, LV_OBJ_FLAG_EVENT_BUBBLE);
-        lv_obj_add_flag(err, LV_OBJ_FLAG_HIDDEN);
-        sv.error_indicator = err;
-    }
-
-    return sv;
-}
-
-// Ported verbatim from ui_ams_slot.cpp apply_slot_color()
-void spool_visual_set_color(const SpoolVisual& sv, lv_color_t color) {
-    if (sv.use_3d) {
-        if (sv.canvas)
-            ui_spool_canvas_set_color(sv.canvas, color);
-    } else if (sv.color_swatch) {
-        lv_obj_set_style_bg_color(sv.color_swatch, color, LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(sv.color_swatch, LV_OPA_COVER, LV_PART_MAIN);
-        if (sv.spool_outer)
-            lv_obj_set_style_bg_color(sv.spool_outer, ams_draw::darken_color(color, 50),
-                                      LV_PART_MAIN);
-    }
-}
-
-// Ported verbatim from ui_ams_slot.cpp update_filament_ring_size()
-void spool_visual_set_fill(const SpoolVisual& sv, float fill) {
-    if (fill < 0.0f)
-        fill = 0.0f;
-    if (fill > 1.0f)
-        fill = 1.0f;
-    if (sv.use_3d) {
-        if (sv.canvas)
-            ui_spool_canvas_set_fill_level(sv.canvas, fill);
-    } else if (sv.color_swatch && sv.container && sv.spool_hub) {
-        lv_obj_update_layout(sv.container);
-        int32_t spool_w = lv_obj_get_width(sv.container);
-        int32_t hub_w = lv_obj_get_width(sv.spool_hub);
-        int32_t min_ring = hub_w + 4;
-        int32_t max_ring = spool_w - 8;
-        int32_t ring_size = min_ring + static_cast<int32_t>((max_ring - min_ring) * fill);
-        lv_obj_set_size(sv.color_swatch, ring_size, ring_size);
-        lv_obj_align(sv.color_swatch, LV_ALIGN_CENTER, 0, 0);
-    }
-}
-
-void spool_visual_set_empty(const SpoolVisual& sv, bool empty) {
-    auto show = [&](lv_obj_t* o, bool visible) {
-        if (!o)
-            return;
-        if (visible)
-            lv_obj_remove_flag(o, LV_OBJ_FLAG_HIDDEN);
-        else
-            lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
-    };
-    show(sv.empty_placeholder, empty);
-    show(sv.canvas, !empty);
-    show(sv.spool_outer, !empty);
-    show(sv.color_swatch, !empty);
-    show(sv.spool_hub, !empty);
 }
 
 lv_obj_t* create_lane_badge(lv_obj_t* parent, int lane_number, int32_t size, bool active) {
@@ -1053,9 +818,6 @@ lv_obj_t* create_lane_badge(lv_obj_t* parent, int lane_number, int32_t size, boo
     lv_obj_t* badge = lv_obj_create(parent);
     lv_obj_set_size(badge, size, size);
     lv_obj_set_style_radius(badge, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_color_t bg =
-        active ? theme_manager_get_color("success") : theme_manager_get_color("ams_badge_bg");
-    lv_obj_set_style_bg_color(badge, bg, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(badge, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_border_width(badge, 1, LV_PART_MAIN);
     lv_obj_set_style_border_color(badge, theme_manager_get_color("card_bg"), LV_PART_MAIN);
@@ -1070,10 +832,57 @@ lv_obj_t* create_lane_badge(lv_obj_t* parent, int lane_number, int32_t size, boo
     const lv_font_t* f = theme_manager_get_font("font_xs");
     if (f)
         lv_obj_set_style_text_font(lbl, f, LV_PART_MAIN);
-    lv_obj_set_style_text_color(lbl, theme_manager_get_color("text"), LV_PART_MAIN);
     lv_obj_center(lbl);
     lv_obj_add_flag(lbl, LV_OBJ_FLAG_EVENT_BUBBLE);
+    set_lane_badge_active(badge, active);
     return badge;
 }
 
-} // namespace helix::ams_draw
+void set_lane_badge_active(lv_obj_t* badge, bool active) {
+    if (!badge)
+        return;
+    lv_color_t bg =
+        active ? theme_manager_get_color("success") : theme_manager_get_color("ams_badge_bg");
+    lv_obj_set_style_bg_color(badge, bg, LV_PART_MAIN);
+    if (lv_obj_get_child_count(badge) > 0) {
+        // Both fills are accents, so the number starts from the palette text colour and
+        // shifts toward its pole as 4:1 needs
+        lv_obj_set_style_text_color(
+            lv_obj_get_child(badge, 0),
+            theme_manager_get_contrast_adjusted_text(theme_manager_get_color("text"), bg),
+            LV_PART_MAIN);
+    }
+}
+
+} // namespace ams_draw
+
+namespace helix::ui {
+
+int overview_hub_group(const ams_draw::SystemToolLayout& layout, int unit) {
+    if (unit < 0 || unit >= static_cast<int>(layout.units.size())) {
+        return 0;
+    }
+    const int group = layout.units[static_cast<size_t>(unit)].hub_group;
+    return group >= 0 && layout.hub_groups[static_cast<size_t>(group)].units.size() > 1 ? group + 1
+                                                                                        : 0;
+}
+
+int overview_buffer_unit(const ams_draw::SystemToolLayout& layout, int unit) {
+    if (unit < 0 || unit >= static_cast<int>(layout.units.size())) {
+        return -1;
+    }
+    const int group = layout.units[static_cast<size_t>(unit)].hub_group;
+    return group >= 0 ? layout.hub_groups[static_cast<size_t>(group)].units.front() : -1;
+}
+
+std::vector<int> hub_groups_of_tool(const ams_draw::SystemToolLayout& layout, int physical_tool) {
+    std::vector<int> groups;
+    for (size_t g = 0; g < layout.hub_groups.size(); ++g) {
+        if (layout.hub_groups[g].physical_tool == physical_tool) {
+            groups.push_back(static_cast<int>(g));
+        }
+    }
+    return groups;
+}
+
+} // namespace helix::ui

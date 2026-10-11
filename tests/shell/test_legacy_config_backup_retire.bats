@@ -93,5 +93,5 @@ seed() {  # <dir> <files...>
 @test "the install path actually calls it" {
     grep -q 'retire_legacy_config_backups' "$WORKTREE_ROOT/scripts/lib/installer/main.sh"
     # And it survives into the bundle users curl.
-    grep -q 'retire_legacy_config_backups()' "$WORKTREE_ROOT/scripts/install.sh"
+    grep -q 'retire_legacy_config_backups()' "$INSTALL_BUNDLE"
 }

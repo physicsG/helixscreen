@@ -448,11 +448,12 @@ void TemperatureHistoryManager::target_observer_callback(lv_observer_t* observer
 }
 
 void TemperatureHistoryManager::subscribe_to_subjects() {
-    // Discovery republishes the extruder and sensor lists — and recreates their
-    // subjects — after the WebSocket connects, long after this manager is built
-    // at startup. Watch both version subjects so the recorders reattach instead
-    // of silently sampling nothing for the rest of the session.
-    if (lv_subject_t* extruder_version = printer_state_.get_extruder_version_subject()) {
+    // Discovery republishes the extruder and sensor lists — creating subjects for
+    // new names, freeing those for removed ones — after the WebSocket connects, long after this
+    // manager is built at startup. Watch both version subjects so the recorders reattach instead of
+    // silently sampling nothing for the rest of the session.
+    if (lv_subject_t* extruder_version =
+            printer_state_.temperature_state().get_extruder_version_subject()) {
         extruder_version_observer_ = ObserverGuard(
             extruder_version,
             [](lv_observer_t* observer, lv_subject_t*) {
@@ -463,6 +464,7 @@ void TemperatureHistoryManager::subscribe_to_subjects() {
                 }
             },
             this);
+        extruder_version_observer_.set_alive_token(printer_state_.get_subjects_lifetime());
     }
 
     auto& sensor_mgr = helix::sensors::TemperatureSensorManager::instance();
@@ -477,6 +479,7 @@ void TemperatureHistoryManager::subscribe_to_subjects() {
                 }
             },
             this);
+        sensor_count_observer_.set_alive_token(sensor_mgr.get_subjects_lifetime());
     }
 
     resubscribe();
@@ -549,8 +552,10 @@ void TemperatureHistoryManager::resubscribe() {
     for (const auto& [name, info] : extruders) {
         SubjectLifetime temp_lt;
         SubjectLifetime target_lt;
-        lv_subject_t* temp = printer_state_.get_extruder_temp_subject(name, temp_lt);
-        lv_subject_t* target = printer_state_.get_extruder_target_subject(name, target_lt);
+        lv_subject_t* temp =
+            printer_state_.temperature_state().get_extruder_temp_subject(name, temp_lt);
+        lv_subject_t* target =
+            printer_state_.temperature_state().get_extruder_target_subject(name, target_lt);
         subscribe_one(name, temp, temp_lt, target, target_lt);
     }
 
@@ -559,14 +564,16 @@ void TemperatureHistoryManager::resubscribe() {
     // lands, because keeping it would refile the ACTIVE tool's readings under
     // "extruder" — the bug this whole path exists to avoid.
     if (extruders.empty()) {
-        subscribe_one("extruder", printer_state_.get_active_extruder_temp_subject(), {},
-                      printer_state_.get_active_extruder_target_subject(), {});
+        subscribe_one("extruder",
+                      printer_state_.temperature_state().get_active_extruder_temp_subject(), {},
+                      printer_state_.temperature_state().get_active_extruder_target_subject(), {});
     }
 
     SubjectLifetime bed_temp_lt;
     SubjectLifetime bed_target_lt;
-    lv_subject_t* bed_temp = printer_state_.get_bed_temp_subject(bed_temp_lt);
-    lv_subject_t* bed_target = printer_state_.get_bed_target_subject(bed_target_lt);
+    lv_subject_t* bed_temp = printer_state_.temperature_state().get_bed_temp_subject(bed_temp_lt);
+    lv_subject_t* bed_target =
+        printer_state_.temperature_state().get_bed_target_subject(bed_target_lt);
     subscribe_one("heater_bed", bed_temp, bed_temp_lt, bed_target, bed_target_lt);
 
     // A heater_generic/temperature_fan chamber is not a TemperatureSensorManager
@@ -575,19 +582,26 @@ void TemperatureHistoryManager::resubscribe() {
     if (!temp_state.chamber_heater_name().empty()) {
         SubjectLifetime chamber_temp_lt;
         SubjectLifetime chamber_target_lt;
-        lv_subject_t* chamber_temp = printer_state_.get_chamber_temp_subject(chamber_temp_lt);
-        lv_subject_t* chamber_target = printer_state_.get_chamber_target_subject(chamber_target_lt);
+        lv_subject_t* chamber_temp =
+            printer_state_.temperature_state().get_chamber_temp_subject(chamber_temp_lt);
+        lv_subject_t* chamber_target =
+            printer_state_.temperature_state().get_chamber_target_subject(chamber_target_lt);
         subscribe_one(temp_state.chamber_heater_name(), chamber_temp, chamber_temp_lt,
                       chamber_target, chamber_target_lt);
     }
 
     // Every auxiliary sensor: chamber thermistors, beacon coil, the per-tool
-    // T0_temp..TN_temp probes on a changer. No targets on these.
+    // T0_temp..TN_temp probes on a changer, filament dryer heaters. Only
+    // heater_generic / temperature_fan objects carry a target.
     auto& sensor_mgr = helix::sensors::TemperatureSensorManager::instance();
     for (const auto& sensor : sensor_mgr.get_sensors()) {
         SubjectLifetime sensor_lt;
         lv_subject_t* temp = sensor_mgr.get_temp_subject(sensor.klipper_name, sensor_lt);
-        subscribe_one(sensor.klipper_name, temp, sensor_lt, nullptr, {});
+        SubjectLifetime target_lt;
+        lv_subject_t* target = helix::sensors::klipper_object_has_target(sensor.klipper_name)
+                                   ? sensor_mgr.get_target_subject(sensor.klipper_name, target_lt)
+                                   : nullptr;
+        subscribe_one(sensor.klipper_name, temp, sensor_lt, target, target_lt);
     }
 
     spdlog::debug("[TempHistory] recording {} sensors ({} extruders discovered)",

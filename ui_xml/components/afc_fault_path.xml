@@ -112,34 +112,29 @@
     <lv_obj width="100%"
             height="content" flex_flow="row" style_pad_all="0" style_pad_gap="0" style_bg_opa="0" style_border_width="0"
             scrollable="false">
-      <text_small name="afc_stop_label_spool" text="Spool" translation_tag="Spool" flex_grow="1" style_text_align="left"/>
-      <text_small name="afc_stop_label_lane" text="Lane" translation_tag="Lane" flex_grow="1" style_text_align="center"/>
-      <text_small name="afc_stop_label_hub" text="Hub" translation_tag="Hub" flex_grow="1" style_text_align="center"/>
-      <text_small name="afc_stop_label_toolhead"
-                  text="Toolhead" translation_tag="Toolhead" flex_grow="1" style_text_align="right"/>
+      <text_small name="afc_stop_label_spool" text="Spool" flex_grow="1" style_text_align="left"/>
+      <text_small name="afc_stop_label_lane" text="Lane" flex_grow="1" style_text_align="center"/>
+      <text_small name="afc_stop_label_hub" text="Hub" flex_grow="1" style_text_align="center"/>
+      <text_small name="afc_stop_label_toolhead" text="Toolhead" flex_grow="1" style_text_align="right"/>
     </lv_obj>
 
     <!-- Says in words what the red element says in colour. Exactly one is ever visible; the
          parent hides the lot when the segment is 0, so no caption needs to cover that case. -->
     <text_small name="afc_stop_caption_spool"
-                width="100%" long_mode="wrap" style_text_align="center" text="Stopped between Spool and Lane"
-                translation_tag="Stopped between Spool and Lane">
+                width="100%" long_mode="wrap" style_text_align="center" text="Stopped between Spool and Lane">
       <bind_flag_if_not_eq subject="afc_fault_segment" flag="hidden" ref_value="1"/>
     </text_small>
     <text_small name="afc_stop_caption_hub"
-                width="100%" long_mode="wrap" style_text_align="center" text="Stopped between Lane and Hub"
-                translation_tag="Stopped between Lane and Hub">
+                width="100%" long_mode="wrap" style_text_align="center" text="Stopped between Lane and Hub">
       <bind_flag_if_not_eq subject="afc_fault_segment" flag="hidden" ref_value="4"/>
     </text_small>
     <text_small name="afc_stop_caption_output"
-                width="100%" long_mode="wrap" style_text_align="center" text="Stopped between Hub and Toolhead"
-                translation_tag="Stopped between Hub and Toolhead">
+                width="100%" long_mode="wrap" style_text_align="center" text="Stopped between Hub and Toolhead">
       <bind_flag_if_not_eq subject="afc_fault_segment" flag="hidden" ref_value="5"/>
     </text_small>
     <!-- Not a gap: the filament cleared the toolhead sensor and jammed in the extruder gears. -->
     <text_small name="afc_stop_caption_toolhead"
-                width="100%" long_mode="wrap" style_text_align="center" text="Jammed at the Toolhead"
-                translation_tag="Jammed at the Toolhead">
+                width="100%" long_mode="wrap" style_text_align="center" text="Jammed at the Toolhead">
       <bind_flag_if_not_eq subject="afc_fault_segment" flag="hidden" ref_value="6"/>
     </text_small>
   </view>

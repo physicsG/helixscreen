@@ -32,6 +32,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <optional>
 #include <string>
 #include <unistd.h>
 #include <vector>
@@ -494,4 +495,37 @@ TEST_CASE_METHOD(LVGLTestFixture, "ThumbnailCache: the PNG fallback reports degr
     CHECK(delivered == ThumbnailCache::to_lvgl_path(cache.get_cache_path(key)));
 
     cache.invalidate(key);
+}
+
+/// An error callback captures the same owner its success callback does, so a
+/// dead owner must not receive it either. The live block proves this fetch
+/// does report an error (no api, nothing cached); the dead block then shows it
+/// is the guard that withholds it.
+TEST_CASE_METHOD(LVGLTestFixture, "ThumbnailRequest: fetch withholds errors from a dead owner",
+                 "[thumbnail][request]") {
+    ThumbnailCache cache;
+    ThumbnailRequest req;
+    req.key = unique_key("dead_owner_error");
+    req.target = target_120();
+    REQUIRE(cache.get_if_cached(req).empty());
+
+    {
+        helix::AsyncLifetimeGuard guard;
+        bool error_fired = false;
+        cache.fetch(req, ThumbnailLoadContext::create(guard), nullptr,
+                    [&error_fired](const std::string&) { error_fired = true; });
+        settle([&] { return error_fired; });
+        REQUIRE(error_fired);
+    }
+
+    std::optional<helix::AsyncLifetimeGuard> guard;
+    guard.emplace();
+    auto ctx = ThumbnailLoadContext::create(*guard);
+    guard.reset();
+    REQUIRE_FALSE(ctx.is_valid());
+
+    bool error_fired = false;
+    cache.fetch(req, ctx, nullptr, [&error_fired](const std::string&) { error_fired = true; });
+    settle([&] { return error_fired; });
+    CHECK_FALSE(error_fired);
 }

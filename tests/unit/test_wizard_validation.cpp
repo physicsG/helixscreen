@@ -1,6 +1,6 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
-#include "wizard_validation.h"
+#include "utils/network_validation.h"
 
 #include "../catch_amalgamated.hpp"
 

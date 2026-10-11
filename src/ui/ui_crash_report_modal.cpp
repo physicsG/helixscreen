@@ -9,6 +9,7 @@
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "system/crash_reporter.h"
 #include "system/debug_bundle_collector.h"
+#include "system/diag_upload_gate.h"
 #include "system/telemetry_manager.h"
 
 #include <spdlog/spdlog.h>
@@ -32,7 +33,7 @@ CrashReportModal* CrashReportModal::active_instance_ = nullptr;
 // Constructor / Destructor
 // =============================================================================
 
-CrashReportModal::CrashReportModal() {
+CrashReportModal::CrashReportModal(CrashReporter& reporter) : reporter_(reporter) {
     spdlog::debug("[CrashReportModal] Constructed");
 }
 
@@ -81,8 +82,9 @@ bool CrashReportModal::show_modal(lv_obj_t* parent) {
     return result;
 }
 
-bool CrashReportModal::show_owned(const CrashReporter::CrashReport& report) {
-    auto modal = std::make_unique<CrashReportModal>();
+bool CrashReportModal::show_owned(CrashReporter& reporter,
+                                  const CrashReporter::CrashReport& report) {
+    auto modal = std::make_unique<CrashReportModal>(reporter);
     modal->set_report(report);
     if (!modal->show_modal(lv_screen_active())) {
         // show_modal() already registered the XML-named subjects; the global
@@ -141,9 +143,9 @@ void CrashReportModal::init_subjects() {
     lv_subject_init_string(&status_subject_, status_buf_, nullptr, sizeof(status_buf_), "");
     lv_subject_init_int(&show_qr_subject_, 0);
 
-    lv_xml_register_subject(nullptr, "crash_report_details", &details_subject_);
-    lv_xml_register_subject(nullptr, "crash_report_status", &status_subject_);
-    lv_xml_register_subject(nullptr, "crash_report_show_qr", &show_qr_subject_);
+    subjects_.publish("crash_report_details", &details_subject_);
+    subjects_.publish("crash_report_status", &status_subject_);
+    subjects_.publish("crash_report_show_qr", &show_qr_subject_);
 
     subjects_initialized_ = true;
 }
@@ -153,9 +155,7 @@ void CrashReportModal::deinit_subjects() {
         return;
     }
 
-    lv_subject_deinit(&details_subject_);
-    lv_subject_deinit(&status_subject_);
-    lv_subject_deinit(&show_qr_subject_);
+    subjects_.deinit_all();
 
     subjects_initialized_ = false;
 }
@@ -204,7 +204,7 @@ void CrashReportModal::handle_dismiss() {
     spdlog::info("[CrashReportModal] User dismissed crash report");
 
     // Always consume the crash file so we don't nag on every launch
-    CrashReporter::instance().consume_crash_file();
+    reporter_.consume_crash_file();
 
     hide();
 }
@@ -219,6 +219,16 @@ void CrashReportModal::attempt_delivery() {
         return;
     }
     sending_ = true;
+
+    // A build that may not ship diagnostics goes straight to the local
+    // fallback: neither the bundle nor the report would leave the machine, so
+    // "Sending..." followed by a refusal would be a lie (prestonbrown/helixscreen#1410).
+    if (!helix::diag::uploads_enabled()) {
+        spdlog::info("[CrashReportModal] Diagnostic uploads disabled in this build — "
+                     "using local fallback");
+        show_local_fallback(report_, lv_tr("Upload unavailable in this build"));
+        return;
+    }
 
     // Phase 1: collect + upload a debug bundle first. The bundle captures the
     // pre-crash log tail, sanitized settings, crash history, and Moonraker
@@ -257,7 +267,7 @@ void CrashReportModal::attempt_delivery() {
 }
 
 void CrashReportModal::send_with_bundle(const std::string& share_code) {
-    auto& cr = CrashReporter::instance();
+    auto& cr = reporter_;
 
     lv_subject_copy_string(&status_subject_, lv_tr("Sending..."));
 
@@ -284,14 +294,20 @@ void CrashReportModal::send_with_bundle(const std::string& share_code) {
     }
 
     // Auto-send failed — fall back to QR code for phone-based submission.
-    std::string url = cr.generate_github_url(report);
+    show_local_fallback(report, lv_tr("No network. Scan QR code to report on your phone."));
+}
+
+void CrashReportModal::show_local_fallback(const CrashReporter::CrashReport& report,
+                                           const char* status) {
+    auto& cr = reporter_;
+
+    const std::string url = cr.generate_github_url(report);
     if (!url.empty()) {
         show_qr_code(url);
-        lv_subject_copy_string(&status_subject_,
-                               lv_tr("No network. Scan QR code to report on your phone."));
     } else {
-        lv_subject_copy_string(&status_subject_, lv_tr("Report saved to crash_report.txt"));
+        status = lv_tr("Report saved to crash_report.txt");
     }
+    lv_subject_copy_string(&status_subject_, status);
 
     cr.save_to_file(report);
     cr.consume_crash_file();

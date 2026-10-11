@@ -146,7 +146,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
 
     // Tear down: drop the observer, hide the overlay widget before the fixture
     // destroys the screen/state.
-    overlay.on_deactivate();
+    overlay.on_deactivate(DeactivateReason::NavigateAway);
     helix::ui::UpdateQueue::instance().drain();
     AmsState::instance().set_backend(nullptr);
 }

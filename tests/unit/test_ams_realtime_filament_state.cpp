@@ -17,13 +17,17 @@
  */
 
 #include "../lvgl_test_fixture.h"
+#include "../test_helpers/backend_user_edit.h"
 #include "../test_helpers/update_queue_test_access.h"
 #include "ams_backend_mock.h"
 #include "ams_backend_snapmaker.h"
 #include "ams_state.h"
 #include "ams_types.h"
 
+#include <functional>
 #include <memory>
+#include <utility>
+#include <vector>
 
 #include "../catch_amalgamated.hpp"
 
@@ -32,17 +36,20 @@ using namespace helix::printer;
 
 using json = nlohmann::json;
 
+namespace helix {
+
 // Friend-class shim mirroring the one in test_ams_backend_snapmaker.cpp.
 class SnapmakerRealtimeTestAccess {
   public:
     static void handle_status(AmsBackendSnapmaker& b, const json& n) {
-        b.handle_status_update(n);
+        b.handle_status(n);
     }
     static void set_sensor_present(AmsBackendSnapmaker& b, int slot_index, bool present) {
         std::lock_guard<std::mutex> lock(b.mutex_);
         b.sensor_filament_present_[slot_index] = present;
     }
 };
+} // namespace helix
 
 namespace {
 void drain() {
@@ -108,6 +115,8 @@ TEST_CASE_METHOD(LVGLTestFixture,
     // Slot 0 active (LOADED), slots 1 & 3 hold filament (AVAILABLE), slot 2 empty.
     json status = json{
         {"toolhead", json{{"extruder", "extruder"}}}, // active tool = slot 0
+        {"filament_feed left",
+         json{{"extruder0", json{{"filament_detected", true}, {"channel_state", "load_finish"}}}}},
         {"print_task_config", json{{"filament_exist", json::array({true, true, false, true})}}}};
     SnapmakerRealtimeTestAccess::handle_status(backend, status);
 
@@ -169,6 +178,8 @@ TEST_CASE_METHOD(LVGLTestFixture, "AmsState publishes per-slot LIVE subjects on 
     // Drive a known state: slot 0 LOADED, slot 1 AVAILABLE, slot 2 empty.
     json status = json{
         {"toolhead", json{{"extruder", "extruder"}}},
+        {"filament_feed left",
+         json{{"extruder0", json{{"filament_detected", true}, {"channel_state", "load_finish"}}}}},
         {"print_task_config", json{{"filament_exist", json::array({true, true, false, false})}}}};
     SnapmakerRealtimeTestAccess::handle_status(*backend_ptr, status);
 
@@ -215,12 +226,11 @@ TEST_CASE_METHOD(LVGLTestFixture, "AmsState publishes per-slot LIVE subjects on 
         CHECK(lv_subject_get_int(ams.get_slot_segment_subject(0)) == expected);
     }
 
-    SECTION("SubjectLifetime overload returns the same static subject + empty token") {
+    SECTION("SubjectLifetime overload returns the same subject + the subjects lifetime") {
         SubjectLifetime lt;
         lv_subject_t* s = ams.get_slot_active_loaded_subject(0, lt);
         CHECK(s == ams.get_slot_active_loaded_subject(0));
-        // Static subject → empty (always-alive) token.
-        CHECK(lt == nullptr);
+        CHECK(lt == ams.get_subjects_lifetime());
     }
 
     ams.clear_backends();
@@ -308,6 +318,8 @@ TEST_CASE_METHOD(LVGLTestFixture, "Active-loaded subject is the single highlight
 
     json loaded = json{
         {"toolhead", json{{"extruder", "extruder"}}},
+        {"filament_feed left",
+         json{{"extruder0", json{{"filament_detected", true}, {"channel_state", "load_finish"}}}}},
         {"print_task_config", json{{"filament_exist", json::array({true, false, false, false})}}}};
     SnapmakerRealtimeTestAccess::handle_status(*backend_ptr, loaded);
     ams.sync_from_backend();
@@ -375,9 +387,15 @@ TEST_CASE_METHOD(LVGLTestFixture, "AmsState publishes per-slot fill subject on s
     s0.color_rgb = 0x00FF00;
     s0.remaining_weight_g = 500.0f;
     s0.total_weight_g = 1000.0f;
-    mock_ptr->set_slot_info(0, s0);
+    helix::test::apply_edit(*mock_ptr, 0, s0);
 
-    // slot 1: empty lane → 0 (not present).
+    // slot 1: empty lane with NO recorded weight → 0. The weights are cleared
+    // explicitly: a real weight now outranks the empty status (an absent tool on
+    // a changer took its filament with it), so inheriting the mock's default
+    // weights here would be testing the other branch by accident.
+    SlotInfo s1;
+    s1.slot_index = 1; // remaining/total stay -1 (unknown)
+    helix::test::apply_edit(*mock_ptr, 1, s1);
     mock_ptr->force_slot_status(1, SlotStatus::EMPTY);
 
     // slot 2: present, metadata only (no usable weights) → full fallback.
@@ -386,13 +404,13 @@ TEST_CASE_METHOD(LVGLTestFixture, "AmsState publishes per-slot fill subject on s
     s2.slot_index = 2;
     s2.material = "PETG";
     s2.color_rgb = 0x0000FF;
-    mock_ptr->set_slot_info(2, s2); // remaining/total stay -1 (unknown)
+    helix::test::apply_edit(*mock_ptr, 2, s2); // remaining/total stay -1 (unknown)
 
     // slot 3: present but zero metadata AND no weights → no data (-1).
     mock_ptr->force_slot_status(3, SlotStatus::AVAILABLE);
     SlotInfo s3;
     s3.slot_index = 3; // material empty, default color, weights -1
-    mock_ptr->set_slot_info(3, s3);
+    helix::test::apply_edit(*mock_ptr, 3, s3);
 
     ams.set_backend(std::move(mock));
     ams.sync_from_backend();
@@ -407,11 +425,48 @@ TEST_CASE_METHOD(LVGLTestFixture, "AmsState publishes per-slot fill subject on s
     CHECK(ams.get_slot_fill_subject(-1) == nullptr);
     CHECK(ams.get_slot_fill_subject(AmsState::MAX_SLOTS) == nullptr);
 
-    // Token'd overload: backend 0 is a static subject → same pointer, empty token.
+    // Token'd overload: backend 0 → same pointer, the subjects lifetime.
     SubjectLifetime lt;
     lv_subject_t* fs = ams.get_slot_fill_subject(0, 0, lt);
     CHECK(fs == ams.get_slot_fill_subject(0));
-    CHECK(lt == nullptr);
+    CHECK(lt == ams.get_subjects_lifetime());
+
+    ams.clear_backends();
+    ams.deinit_subjects();
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "A slot event refreshes the fill subject without a full sync",
+                 "[ams][fill][ams_state]") {
+    auto& ams = AmsState::instance();
+    ams.init_subjects(false);
+
+    auto mock = AmsBackend::create_mock(2);
+    auto* mock_ptr = static_cast<AmsBackendMock*>(mock.get());
+    mock_ptr->force_slot_status(0, SlotStatus::AVAILABLE);
+    SlotInfo s0;
+    s0.slot_index = 0;
+    s0.material = "PLA";
+    s0.color_rgb = 0x00FF00;
+    s0.remaining_weight_g = 1000.0f;
+    s0.total_weight_g = 1000.0f;
+    helix::test::apply_edit(*mock_ptr, 0, s0);
+
+    ams.set_backend(std::move(mock));
+    ams.sync_from_backend();
+    drain();
+    REQUIRE(lv_subject_get_int(ams.get_slot_fill_subject(0)) == 100);
+    const int version_before = lv_subject_get_int(ams.get_slots_version_subject());
+
+    // The mock's slot write raises SLOT_CHANGED for this slot and nothing else,
+    // so the drain below runs the single-slot update alone.
+    s0.remaining_weight_g = 250.0f;
+    helix::test::apply_edit(*mock_ptr, 0, s0);
+    REQUIRE(mock_ptr->get_slot_info(0).remaining_weight_g == 250.0f);
+    drain();
+
+    CHECK(lv_subject_get_int(ams.get_slot_fill_subject(0)) == 25);
+    // A fill change moves slots_version, as it does in a full sync.
+    CHECK(lv_subject_get_int(ams.get_slots_version_subject()) > version_before);
 
     ams.clear_backends();
     ams.deinit_subjects();
@@ -442,27 +497,24 @@ TEST_CASE_METHOD(LVGLTestFixture, "SlotInfo remaining-length display hides senti
     CHECK(s.remaining_length_display().empty());
 }
 
-TEST_CASE_METHOD(LVGLTestFixture, "SlotInfo remaining display falls back to weight",
-                 "[ams][ams_state][1387]") {
+TEST_CASE("SlotInfo remaining summary carries weight and length", "[ams][ams_state][remaining]") {
     SlotInfo s;
-    // Length wins when it is a real measurement.
-    s.remaining_length_m = 42.0f;
+    CHECK(s.remaining_summary().empty());
+    s.remaining_length_m = 212.0f;
+    CHECK(s.remaining_summary() == "212m");
+    s.total_weight_g = 1000.0f;
     s.remaining_weight_g = 750.0f;
-    CHECK(s.remaining_display() == "42m");
-    // Sentinel and non-measurement lengths fall to the weight.
-    s.remaining_length_m = 100.0f;
-    CHECK(s.remaining_display() == "750g");
-    s.remaining_length_m = -1.0f;
-    CHECK(s.remaining_display() == "750g");
-    // No measurable length and no positive weight: nothing to show.
-    s.remaining_weight_g = -1.0f;
-    CHECK(s.remaining_display().empty());
-    s.remaining_weight_g = 0.0f;
-    CHECK(s.remaining_display().empty());
+    CHECK(s.remaining_summary() == "750g \xC2\xB7 212m");
+    // A sentinel length is not a measurement.
+    s.remaining_length_m = 255.0f;
+    CHECK(s.remaining_summary() == "750g");
+    // Weight needs a known total, the loaded card's rule.
+    s.total_weight_g = 0.0f;
+    CHECK(s.remaining_summary().empty());
 }
 
-TEST_CASE_METHOD(LVGLTestFixture, "AmsState remaining subject falls back to weight on sentinels",
-                 "[ams][ams_state][1387]") {
+TEST_CASE_METHOD(LVGLTestFixture, "AmsState remaining subject carries measured length only",
+                 "[ams][ams_state][1387][remaining]") {
     auto& ams = AmsState::instance();
     ams.init_subjects(false);
 
@@ -470,7 +522,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "AmsState remaining subject falls back to weig
     auto* mock_ptr = static_cast<AmsBackendMock*>(mock.get());
 
     // slot 0: real measured length. The length is firmware-derived state, so
-    // it is staged through force_slot_remaining - set_slot_info does not copy
+    // it is staged through force_slot_remaining - apply_user_edit does not copy
     // it (same discipline as status).
     mock_ptr->force_slot_status(0, SlotStatus::AVAILABLE);
     mock_ptr->force_slot_remaining(0, 42.0f);
@@ -478,10 +530,10 @@ TEST_CASE_METHOD(LVGLTestFixture, "AmsState remaining subject falls back to weig
     s0.slot_index = 0;
     s0.material = "PLA";
     s0.color_rgb = 0x00FF00;
-    mock_ptr->set_slot_info(0, s0);
+    helix::test::apply_edit(*mock_ptr, 0, s0);
 
-    // slot 1: the failed-probe sentinel is not a measurement, so the weight
-    // carries the display instead.
+    // slot 1: the failed-probe sentinel is not a measurement, and weight has
+    // its own surfaces, so the slot shows nothing.
     mock_ptr->force_slot_status(1, SlotStatus::AVAILABLE);
     mock_ptr->force_slot_remaining(1, 255.0f);
     SlotInfo s1;
@@ -489,14 +541,14 @@ TEST_CASE_METHOD(LVGLTestFixture, "AmsState remaining subject falls back to weig
     s1.material = "PLA";
     s1.color_rgb = 0xFF0000;
     s1.remaining_weight_g = 250.0f;
-    mock_ptr->set_slot_info(1, s1);
+    helix::test::apply_edit(*mock_ptr, 1, s1);
 
     ams.set_backend(std::move(mock));
     ams.sync_from_backend();
     drain();
 
     CHECK(std::string(lv_subject_get_string(ams.get_slot_remaining_subject(0))) == "42m");
-    CHECK(std::string(lv_subject_get_string(ams.get_slot_remaining_subject(1))) == "250g");
+    CHECK(std::string(lv_subject_get_string(ams.get_slot_remaining_subject(1))).empty());
 
     ams.clear_backends();
     ams.deinit_subjects();
@@ -523,7 +575,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "AMS op-card color matches the loaded slot's c
     for (int i = 0; i < 4; ++i) {
         auto slot = mock_ptr->get_slot_info(i);
         slot.color_rgb = colors[i];
-        mock_ptr->set_slot_info(i, slot);
+        helix::test::apply_edit(*mock_ptr, i, slot);
     }
 
     // Load slot 1 (a non-zero, non-first slot to expose +1 indexing). The mock
@@ -566,6 +618,8 @@ TEST_CASE_METHOD(LVGLTestFixture, "AMS clears filament_loaded after unload compl
     // Load slot 0: active tool = extruder0, filament present.
     json loaded = json{
         {"toolhead", json{{"extruder", "extruder"}}},
+        {"filament_feed left",
+         json{{"extruder0", json{{"filament_detected", true}, {"channel_state", "load_finish"}}}}},
         {"print_task_config", json{{"filament_exist", json::array({true, false, false, false})}}}};
     SnapmakerRealtimeTestAccess::handle_status(*backend_ptr, loaded);
     ams.sync_from_backend();
@@ -594,5 +648,182 @@ TEST_CASE_METHOD(LVGLTestFixture, "AMS clears filament_loaded after unload compl
     }
 
     ams.clear_backends();
+    ams.deinit_subjects();
+}
+
+// ============================================================================
+// Part 3 — per-slot error state subjects (ams_slot_<n>_has_error /
+// ams_slot_<n>_error_severity): the same derivation the lane-bar consumers
+// compute from SlotInfo, published so a lane bar can draw its own status line
+// from subjects instead of from a snapshot.
+// ============================================================================
+
+TEST_CASE_METHOD(LVGLTestFixture, "AmsState publishes per-slot error state and severity on sync",
+                 "[1527][ams][ams_state]") {
+    auto& ams = AmsState::instance();
+    ams.init_subjects(false);
+
+    auto backend = std::make_unique<AmsBackendMock>(4);
+    auto* backend_ptr = backend.get();
+    ams.set_backend(std::move(backend));
+
+    SECTION("accessors return non-null in range and null out of range") {
+        CHECK(ams.get_slot_has_error_subject(0) != nullptr);
+        CHECK(ams.get_slot_error_severity_subject(0) != nullptr);
+        CHECK(ams.get_slot_has_error_subject(-1) == nullptr);
+        CHECK(ams.get_slot_error_severity_subject(AmsState::MAX_SLOTS) == nullptr);
+    }
+
+    SECTION("a carried error publishes has_error=1 and its severity") {
+        backend_ptr->set_slot_error(0, SlotError{"lane jammed", SlotError::Severity::ERROR});
+        ams.sync_from_backend();
+        drain();
+
+        CHECK(lv_subject_get_int(ams.get_slot_has_error_subject(0)) == 1);
+        CHECK(lv_subject_get_int(ams.get_slot_error_severity_subject(0)) ==
+              static_cast<int>(SlotError::Severity::ERROR));
+        // Neighbor slots stay quiet.
+        CHECK(lv_subject_get_int(ams.get_slot_has_error_subject(1)) == 0);
+        CHECK(lv_subject_get_int(ams.get_slot_error_severity_subject(1)) ==
+              static_cast<int>(SlotError::Severity::INFO));
+    }
+
+    SECTION("clearing the error resets the flag and falls back to INFO") {
+        backend_ptr->set_slot_error(0, SlotError{"lane jammed", SlotError::Severity::WARNING});
+        ams.sync_from_backend();
+        drain();
+        REQUIRE(lv_subject_get_int(ams.get_slot_has_error_subject(0)) == 1);
+
+        backend_ptr->set_slot_error(0, std::nullopt);
+        ams.sync_from_backend();
+        drain();
+        CHECK(lv_subject_get_int(ams.get_slot_has_error_subject(0)) == 0);
+        CHECK(lv_subject_get_int(ams.get_slot_error_severity_subject(0)) ==
+              static_cast<int>(SlotError::Severity::INFO));
+    }
+
+    SECTION("a BLOCKED lane without an error object publishes an error") {
+        // force_slot_status, not apply_user_edit: status is firmware-derived and
+        // apply_user_edit deliberately ignores it, like every real backend.
+        backend_ptr->force_slot_status(0, SlotStatus::BLOCKED);
+        backend_ptr->set_slot_error(0, std::nullopt);
+        ams.sync_from_backend();
+        drain();
+
+        CHECK(lv_subject_get_int(ams.get_slot_has_error_subject(0)) == 1);
+        CHECK(lv_subject_get_int(ams.get_slot_error_severity_subject(0)) ==
+              static_cast<int>(SlotError::Severity::ERROR));
+    }
+
+    SECTION("the single-slot fast path publishes the same state") {
+        backend_ptr->set_slot_error(0, SlotError{"gate jam", SlotError::Severity::WARNING});
+        ams.update_slot(0);
+        drain();
+
+        CHECK(lv_subject_get_int(ams.get_slot_has_error_subject(0)) == 1);
+        CHECK(lv_subject_get_int(ams.get_slot_error_severity_subject(0)) ==
+              static_cast<int>(SlotError::Severity::WARNING));
+    }
+
+    SECTION("slots beyond a shrinking backend reset to no-error") {
+        backend_ptr->set_slot_error(3, SlotError{"tail jam", SlotError::Severity::ERROR});
+        ams.sync_from_backend();
+        drain();
+        REQUIRE(lv_subject_get_int(ams.get_slot_has_error_subject(3)) == 1);
+
+        // Swap in a backend that reports only two slots: slot 3 must clear.
+        ams.set_backend(std::make_unique<AmsBackendMock>(2));
+        ams.sync_from_backend();
+        drain();
+
+        CHECK(lv_subject_get_int(ams.get_slot_has_error_subject(3)) == 0);
+        CHECK(lv_subject_get_int(ams.get_slot_error_severity_subject(3)) ==
+              static_cast<int>(SlotError::Severity::INFO));
+    }
+
+    SECTION("re-entry with register_xml publishes the XML names") {
+        ams.init_subjects(true);
+        CHECK(lv_xml_get_subject(nullptr, "ams_slot_0_has_error") != nullptr);
+        CHECK(lv_xml_get_subject(nullptr, "ams_slot_0_error_severity") != nullptr);
+    }
+}
+
+// deinit_subjects() frees the observers of every per-slot subject, so the
+// token'd accessors must hand out a token that dies there, or an ObserverGuard
+// removes a freed observer node on reset (#1700).
+TEST_CASE_METHOD(LVGLTestFixture, "Per-slot token'd accessors hand out a token deinit kills",
+                 "[ams][lifetime]") {
+    auto& ams = AmsState::instance();
+
+    using Accessor = std::function<lv_subject_t*(SubjectLifetime&)>;
+    const std::vector<std::pair<const char*, Accessor>> accessors = {
+        {"segment", [&](SubjectLifetime& lt) { return ams.get_slot_segment_subject(0, lt); }},
+        {"toolhead_present",
+         [&](SubjectLifetime& lt) { return ams.get_slot_toolhead_present_subject(0, lt); }},
+        {"active_loaded",
+         [&](SubjectLifetime& lt) { return ams.get_slot_active_loaded_subject(0, lt); }},
+        {"color", [&](SubjectLifetime& lt) { return ams.get_slot_color_subject(0, 0, lt); }},
+        {"status", [&](SubjectLifetime& lt) { return ams.get_slot_status_subject(0, 0, lt); }},
+        {"fill", [&](SubjectLifetime& lt) { return ams.get_slot_fill_subject(0, 0, lt); }},
+        {"lane_state",
+         [&](SubjectLifetime& lt) { return ams.get_slot_lane_state_subject(0, 0, lt); }},
+        {"has_error",
+         [&](SubjectLifetime& lt) { return ams.get_slot_has_error_subject(0, 0, lt); }},
+        {"error_severity",
+         [&](SubjectLifetime& lt) { return ams.get_slot_error_severity_subject(0, 0, lt); }},
+    };
+
+    for (const auto& [name, get] : accessors) {
+        INFO(name);
+        ams.init_subjects(false);
+        SubjectLifetime lt;
+        REQUIRE(get(lt) != nullptr);
+        REQUIRE(lt);
+        REQUIRE(*lt);
+        ams.deinit_subjects();
+        CHECK_FALSE(*lt);
+    }
+
+    // A secondary backend's subjects are freed by clear_backends(), which runs
+    // on rediscovery as well as inside deinit_subjects(), so its token must die
+    // there and not only at deinit_subjects().
+    const std::vector<std::pair<const char*, Accessor>> secondary = {
+        {"color", [&](SubjectLifetime& lt) { return ams.get_slot_color_subject(1, 0, lt); }},
+        {"status", [&](SubjectLifetime& lt) { return ams.get_slot_status_subject(1, 0, lt); }},
+        {"fill", [&](SubjectLifetime& lt) { return ams.get_slot_fill_subject(1, 0, lt); }},
+        {"lane_state",
+         [&](SubjectLifetime& lt) { return ams.get_slot_lane_state_subject(1, 0, lt); }},
+        {"has_error",
+         [&](SubjectLifetime& lt) { return ams.get_slot_has_error_subject(1, 0, lt); }},
+        {"error_severity",
+         [&](SubjectLifetime& lt) { return ams.get_slot_error_severity_subject(1, 0, lt); }},
+    };
+    ams.init_subjects(false);
+    for (const auto& [name, get] : secondary) {
+        INFO("secondary " << name);
+        ams.set_backend(std::make_unique<AmsBackendMock>(4));
+        REQUIRE(ams.add_backend(std::make_unique<AmsBackendMock>(4)) == 1);
+        SubjectLifetime lt;
+        REQUIRE(get(lt) != nullptr);
+        REQUIRE(lt);
+        REQUIRE(*lt);
+        ams.clear_backends();
+        CHECK_FALSE(*lt);
+    }
+    ams.set_backend(std::make_unique<AmsBackendMock>(4));
+    REQUIRE(ams.add_backend(std::make_unique<AmsBackendMock>(4)) == 1);
+    SubjectLifetime secondary_lt;
+    REQUIRE(ams.get_slot_lane_state_subject(1, 0, secondary_lt) != nullptr);
+    ams.deinit_subjects();
+    CHECK_FALSE(*secondary_lt);
+
+    // No subject, no token.
+    ams.init_subjects(false);
+    SubjectLifetime lt = std::make_shared<bool>(true);
+    CHECK(ams.get_slot_segment_subject(AmsState::MAX_SLOTS, lt) == nullptr);
+    CHECK_FALSE(lt);
+    lt = std::make_shared<bool>(true);
+    CHECK(ams.get_slot_color_subject(0, AmsState::MAX_SLOTS, lt) == nullptr);
+    CHECK_FALSE(lt);
     ams.deinit_subjects();
 }

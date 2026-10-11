@@ -25,6 +25,7 @@
 
 #include "lvgl/lvgl.h"
 #include "overlay_base.h"
+#include "static_panel_registry.h"
 
 namespace helix::settings {
 
@@ -34,63 +35,27 @@ namespace helix::settings {
  */
 class SecuritySettingsOverlay : public OverlayBase {
   public:
-    SecuritySettingsOverlay();
-    ~SecuritySettingsOverlay() override;
-
-    //
-    // === OverlayBase Interface ===
-    //
-
-    void init_subjects() override;
-    void register_callbacks() override;
-
     const char* get_name() const override {
         return "Security Settings";
     }
+    const char* xml_component() const override {
+        return "security_settings_overlay";
+    }
 
+    void register_callbacks() override;
     void on_activate() override;
-    void on_deactivate() override;
 
-    //
-    // === UI Creation ===
-    //
-
-    lv_obj_t* create(lv_obj_t* parent) override;
-    void show(lv_obj_t* parent_screen);
-
-    //
-    // === Event Handlers (public for static callbacks) ===
-    //
-
-    void handle_set_pin_clicked();
     void handle_change_pin_clicked();
     void handle_remove_pin_clicked();
-    void handle_auto_lock_changed(bool enabled);
+    /// Two-step "Enter New PIN" then "Confirm PIN" dialog.
     void run_set_pin_flow();
 
   private:
-    //
-    // === Internal Helpers ===
-    //
-
     void init_auto_lock_toggle();
-
-    //
-    // === Static Callbacks ===
-    //
-
-    static void on_set_pin_clicked(lv_event_t* e);
-    static void on_change_pin_clicked(lv_event_t* e);
-    static void on_remove_pin_clicked(lv_event_t* e);
-    static void on_auto_lock_changed(lv_event_t* e);
 };
 
-/**
- * @brief Global instance accessor.
- *
- * Creates the overlay on first access and registers it for cleanup
- * with StaticPanelRegistry.
- */
-SecuritySettingsOverlay& get_security_settings_overlay();
+inline SecuritySettingsOverlay& get_security_settings_overlay() {
+    return lazy_global<SecuritySettingsOverlay>("SecuritySettingsOverlay");
+}
 
 } // namespace helix::settings

@@ -17,11 +17,10 @@
  * leading indicator) is deliberately unaffected.
  */
 
+#include "../test_helpers/log_capture.h"
+#include "../test_helpers/moonraker_request_tracker_test_access.h"
 #include "moonraker_request.h"
 #include "moonraker_request_tracker.h"
-
-#include <spdlog/sinks/ringbuffer_sink.h>
-#include <spdlog/spdlog.h>
 
 #include <chrono>
 #include <memory>
@@ -32,59 +31,7 @@
 
 using namespace helix;
 
-/// Friend-class test accessor (L065 / test_code_lint.bats): keeps production
-/// headers free of `_for_testing` methods. Mirrors the definition in
-/// test_moonraker_request_tracker_silent.cpp — it must be a global-scope class,
-/// so it cannot live in an anonymous namespace.
-class MoonrakerRequestTrackerTestAccess {
-  public:
-    static void inject_request(MoonrakerRequestTracker& tracker, RequestId id,
-                               PendingRequest request) {
-        std::lock_guard<std::mutex> lock(tracker.requests_mutex_);
-        tracker.pending_requests_[id] = std::move(request);
-    }
-};
-
 namespace {
-
-/// RAII spdlog capture: collects formatted log lines so the test can assert on
-/// what a debug bundle's ring buffer would actually have recorded.
-class LogCapture {
-  public:
-    LogCapture() : sink_(std::make_shared<spdlog::sinks::ringbuffer_sink_mt>(256)) {
-        logger_ = spdlog::default_logger();
-        prev_level_ = logger_->level();
-        sink_->set_level(spdlog::level::trace);
-        logger_->sinks().push_back(sink_);
-        logger_->set_level(spdlog::level::trace);
-    }
-
-    ~LogCapture() {
-        auto& sinks = logger_->sinks();
-        for (auto it = sinks.begin(); it != sinks.end(); ++it) {
-            if (*it == sink_) {
-                sinks.erase(it);
-                break;
-            }
-        }
-        logger_->set_level(prev_level_);
-    }
-
-    int count_containing(const std::string& needle) const {
-        int n = 0;
-        for (const auto& l : sink_->last_formatted(256)) {
-            if (l.find(needle) != std::string::npos) {
-                ++n;
-            }
-        }
-        return n;
-    }
-
-  private:
-    std::shared_ptr<spdlog::sinks::ringbuffer_sink_mt> sink_;
-    std::shared_ptr<spdlog::logger> logger_;
-    spdlog::level::level_enum prev_level_;
-};
 
 /// A request that is still in flight (nowhere near its timeout) but has been
 /// pending for `age`. Generous timeout so check_timeouts() counts it as pending
@@ -102,7 +49,7 @@ PendingRequest make_pending_request(const std::string& method, std::chrono::mill
 
 /// check_timeouts() takes an emit_event sink; these tests assert on logs, not events.
 auto ignore_events() {
-    return [](MoonrakerEventType, const std::string&, bool, const std::string&) {};
+    return [](const MoonrakerEvent&) {};
 }
 
 /// Matches only the periodic pending-count line, not the tracker's other

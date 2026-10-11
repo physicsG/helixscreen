@@ -5,17 +5,19 @@
 
 #include "ui_update_queue.h"
 
+#include "helix_thread.h"
 #include "spdlog/spdlog.h"
+#include "text_io.h"
 
 #include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
-#include <fstream>
-#include <sstream>
 #include <sys/wait.h>
 #include <unistd.h>
+
+namespace tio = helix::text_io;
 
 // ============================================================================
 // Constructor / Destructor
@@ -74,7 +76,7 @@ void NetworkTester::start_test(Callback callback) {
     result_ = TestResult{};
 
     // Spawn worker thread
-    worker_thread_ = std::thread(&NetworkTester::run_test, this);
+    worker_thread_ = helix::make_thread(&NetworkTester::run_test, this);
 }
 
 void NetworkTester::cancel() {
@@ -235,14 +237,12 @@ std::string NetworkTester::get_default_gateway() {
     }
 
     // Parse output for "gateway: X.X.X.X"
-    std::istringstream iss(result);
-    std::string line;
-    while (std::getline(iss, line)) {
-        if (line.find("gateway:") != std::string::npos) {
+    for (std::string_view line : tio::lines(result)) {
+        if (line.find("gateway:") != std::string_view::npos) {
             // Extract IP after "gateway: "
             size_t pos = line.find(':');
-            if (pos != std::string::npos) {
-                std::string gateway = line.substr(pos + 1);
+            if (pos != std::string_view::npos) {
+                std::string gateway(line.substr(pos + 1));
                 // Trim whitespace
                 gateway.erase(0, gateway.find_first_not_of(" \t\r\n"));
                 gateway.erase(gateway.find_last_not_of(" \t\r\n") + 1);
@@ -257,19 +257,21 @@ std::string NetworkTester::get_default_gateway() {
 
 #else
     // Linux: Parse /proc/net/route for line with destination 00000000
-    std::ifstream route_file("/proc/net/route");
-    if (!route_file.is_open()) {
+    tio::LineReader route_file("/proc/net/route");
+    if (!route_file) {
         spdlog::error("[NetworkTester] Failed to open /proc/net/route");
         return "";
     }
 
     std::string line;
-    std::getline(route_file, line); // Skip header
+    route_file.next(line); // Skip header
 
-    while (std::getline(route_file, line)) {
-        std::istringstream iss(line);
-        std::string iface, destination, gateway;
-        iss >> iface >> destination >> gateway;
+    while (route_file.next(line)) {
+        auto tokens = tio::split_ws(line);
+        if (tokens.size() < 3)
+            continue;
+        std::string destination(tokens[1]);
+        std::string gateway(tokens[2]);
 
         // Default route has destination 00000000
         if (destination == "00000000") {

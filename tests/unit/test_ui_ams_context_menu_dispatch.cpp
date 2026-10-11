@@ -21,11 +21,19 @@
 #include "ui_ams_detail.h"
 
 #include "../lvgl_ui_test_fixture.h"
+#include "../test_helpers/backend_user_edit.h"
+#include "../test_helpers/print_state_test_drivers.h"
+#include "../ui_test_utils.h"
 #include "ams_backend_mock.h"
 #include "ams_state.h"
+#include "app_globals.h"
+#include "filament_op_slot_resolver.h"
 
 #include <cstddef>
 #include <memory>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "../catch_amalgamated.hpp"
 
@@ -36,10 +44,10 @@ namespace {
 /// Install a 4-slot mock backend so dispatch reaches real backend calls
 /// rather than short-circuiting on the "no MFS available" guard.
 void install_mock_backend() {
-    AmsState::instance().init_subjects(true);
-    auto mock = AmsBackend::create_mock(4);
-    AmsState::instance().set_backend(std::move(mock));
-    AmsState::instance().sync_from_backend();
+    helix::AmsState::instance().init_subjects(true);
+    auto mock = helix::AmsBackend::create_mock(4);
+    helix::AmsState::instance().set_backend(std::move(mock));
+    helix::AmsState::instance().sync_from_backend();
 }
 
 } // namespace
@@ -51,9 +59,9 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams dispatch: claims every backend-only act
     // These five must be handled centrally. If any one of them stops being
     // claimed here, the Overview panel silently swallows it again — which is
     // exactly the #1258 failure mode.
-    const MenuAction shared[] = {MenuAction::EJECT, MenuAction::RECOVER_POSITION,
+    const MenuAction shared[] = {MenuAction::EJECT,       MenuAction::RECOVER_POSITION,
                                  MenuAction::SELECT_GATE, MenuAction::CHECK_GATE,
-                                 MenuAction::CLEAR_SPOOL};
+                                 MenuAction::PRELOAD,     MenuAction::CLEAR_SPOOL};
 
     for (MenuAction action : shared) {
         INFO("action index = " << static_cast<int>(action));
@@ -84,15 +92,15 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams dispatch: EJECT reaches the backend",
                  "[ui][ams][context_menu][dispatch][1258]") {
     install_mock_backend();
 
-    auto* backend = static_cast<AmsBackendMock*>(AmsState::instance().get_backend());
+    auto* backend = static_cast<helix::AmsBackendMock*>(helix::AmsState::instance().get_backend());
     REQUIRE(backend != nullptr);
 
-    SlotInfo info;
+    helix::SlotInfo info;
     info.slot_index = 1;
     info.material = "PLA";
-    info.status = SlotStatus::AVAILABLE;
-    backend->set_slot_info(1, info);
-    AmsState::instance().sync_from_backend();
+    info.status = helix::SlotStatus::AVAILABLE;
+    helix::test::apply_edit(*backend, 1, info);
+    helix::AmsState::instance().sync_from_backend();
 
     // The whole point of #1258: the tap must actually arrive at the backend,
     // not be consumed by a switch that has no case for it.
@@ -101,8 +109,8 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams dispatch: EJECT reaches the backend",
 
 TEST_CASE_METHOD(LVGLUITestFixture, "ams dispatch: claims actions even with no backend",
                  "[ui][ams][context_menu][dispatch][1258]") {
-    AmsState::instance().init_subjects(true);
-    AmsState::instance().set_backend(nullptr);
+    helix::AmsState::instance().init_subjects(true);
+    helix::AmsState::instance().set_backend(nullptr);
 
     // With no MFS the user still gets a warning toast — the action is handled,
     // so the caller must not fall through and double-report it.
@@ -198,4 +206,263 @@ TEST_CASE_METHOD(LVGLUITestFixture, "AmsContextMenu instances share one set of X
     lv_subject_set_int(can_load, 0);
     CHECK(lv_subject_get_int(lv_xml_get_subject(nullptr, "ams_slot_can_load")) == 0);
     lv_subject_set_int(can_load, 1);
+}
+
+// ============================================================================
+// Clear Spool vs an active print
+// ============================================================================
+
+namespace {
+
+/// Pin the print lifecycle for one case and restore a machine-free state on
+/// the way out, even when an assertion throws. The lifecycle subject outlives
+/// every test in this binary (the fixture resets plain data, not subject
+/// values), and CLEAR_SPOOL's behaviour depends on it: a case that died with
+/// Printing latched would change what any later test's clear is allowed to do.
+struct LifecycleGuard {
+    explicit LifecycleGuard(PrintState state) {
+        if (state == PrintState::Preparing) {
+            // Preparing is phase-derived, not a print_stats state, so the wire
+            // driver cannot name it, so the enum value is the sanctioned route
+            // (print_state_test_drivers.h).
+            lv_subject_set_int(get_printer_state().print_state().get_print_lifecycle_subject(),
+                               static_cast<int>(PrintState::Preparing));
+        } else {
+            helix::test::set_wire_state(get_printer_state(), wire_job_state(state));
+        }
+    }
+    ~LifecycleGuard() {
+        helix::test::set_wire_state(get_printer_state(), helix::PrintJobState::STANDBY);
+    }
+
+  private:
+    static helix::PrintJobState wire_job_state(PrintState state) {
+        switch (state) {
+        case PrintState::Printing:
+            return helix::PrintJobState::PRINTING;
+        case PrintState::Paused:
+            return helix::PrintJobState::PAUSED;
+        case PrintState::Idle:
+        case PrintState::Complete:
+        case PrintState::Cancelled:
+        case PrintState::Error:
+        case PrintState::Preparing:
+            break;
+        }
+        return helix::PrintJobState::STANDBY;
+    }
+};
+
+} // namespace
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "ams dispatch: Clear Spool refuses on the lane feeding an active print",
+                 "[ui][ams][context_menu][dispatch][1661]") {
+    install_mock_backend();
+    auto* backend = static_cast<helix::AmsBackendMock*>(helix::AmsState::instance().get_backend());
+    REQUIRE(backend != nullptr);
+
+    // The warning hook is the seam the commit-slot tests use for this same
+    // dispatch function; severity is pinned by which hook the toast lands in
+    // (an info-severity toast would reach the info hook and this stays empty).
+    std::vector<std::string> warnings;
+    helix::ui::set_test_notification_warning_hook(
+        [&](const std::string& msg) { warnings.push_back(msg); });
+
+    // create_mock() seeds slot 0 as the loaded, current lane, the one a job
+    // draws from. Everything the clear would erase is still there afterwards.
+    REQUIRE(backend->slot_is_actively_loaded(0));
+
+    size_t warnings_index = 0;
+    for (const PrintState busy :
+         {PrintState::Preparing, PrintState::Printing, PrintState::Paused}) {
+        INFO("lifecycle = " << static_cast<int>(busy));
+        LifecycleGuard hold(busy);
+
+        const helix::SlotInfo before = backend->get_slot_info(0);
+        REQUIRE_FALSE(before.material.empty()); // something to refuse erasing
+
+        // Handled (true) with a refusal toast, not silently swallowed.
+        REQUIRE(helix::ui::ams_dispatch_backend_action(MenuAction::CLEAR_SPOOL, 0, nullptr));
+        // Exactly one refusal per lifecycle state, so a state that stops
+        // refusing fails here rather than being averaged into the final count.
+        CHECK(warnings.size() == warnings_index + 1);
+        ++warnings_index;
+
+        const helix::SlotInfo after = backend->get_slot_info(0);
+        CHECK(after.material == before.material);
+        CHECK(after.color_rgb == before.color_rgb);
+        CHECK(after.color_name == before.color_name);
+        CHECK(after.spoolman_id == before.spoolman_id);
+        CHECK(after.remaining_weight_g == before.remaining_weight_g);
+    }
+
+    helix::ui::set_test_notification_warning_hook(nullptr);
+
+    REQUIRE(warnings.size() == 3);
+    for (const std::string& message : warnings) {
+        // The mock speaks Happy Hare, whose positions are gates (1-based).
+        CHECK(message.find("Gate 1") != std::string::npos);
+        CHECK(message.find("feeding the current print") != std::string::npos);
+    }
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "ams dispatch: Clear Spool still clears other lanes mid-print and any lane idle",
+                 "[ui][ams][context_menu][dispatch][1661]") {
+    install_mock_backend();
+    auto* backend = static_cast<helix::AmsBackendMock*>(helix::AmsState::instance().get_backend());
+    REQUIRE(backend != nullptr);
+
+    SECTION("a lane the job is not drawing from clears mid-print") {
+        LifecycleGuard hold(PrintState::Printing);
+        REQUIRE_FALSE(backend->slot_is_actively_loaded(1));
+        REQUIRE(helix::ui::ams_dispatch_backend_action(MenuAction::CLEAR_SPOOL, 1, nullptr));
+
+        const helix::SlotInfo after = backend->get_slot_info(1);
+        CHECK(after.material.empty());
+        CHECK(after.spoolman_id == 0);
+    }
+
+    SECTION("the loaded lane clears once the machine is free") {
+        LifecycleGuard hold(PrintState::Idle);
+        REQUIRE(backend->slot_is_actively_loaded(0));
+        REQUIRE(helix::ui::ams_dispatch_backend_action(MenuAction::CLEAR_SPOOL, 0, nullptr));
+
+        const helix::SlotInfo after = backend->get_slot_info(0);
+        CHECK(after.material.empty());
+        CHECK(after.spoolman_id == 0);
+    }
+}
+
+namespace {
+
+/// A backend whose firmware refuses part of the clear, the way Happy Hare's
+/// Spoolman pull mode and its mid-print backstop do.
+class PartialClearMock : public helix::AmsBackendMock {
+  public:
+    using helix::AmsBackendMock::AmsBackendMock;
+    helix::AmsError apply_user_edit(int slot_index, const helix::SlotInfo& info,
+                                    const helix::ams::Observation& declared) override {
+        (void)helix::AmsBackendMock::apply_user_edit(slot_index, info, declared);
+        helix::AmsError partial(helix::AmsResult::COMMAND_FAILED, "firmware refused",
+                                "Couldn't clear", "HelixScreen cleared its own copy.");
+        partial.partially_applied = true;
+        return partial;
+    }
+    void clear_slot_override(int slot_index) override {
+        cleared_slots.push_back(slot_index);
+        helix::AmsBackendMock::clear_slot_override(slot_index);
+    }
+    std::vector<int> cleared_slots;
+};
+
+} // namespace
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "ams dispatch: a partially applied Clear Spool still drops the local record",
+                 "[ui][ams][context_menu][dispatch][1661]") {
+    helix::AmsState::instance().init_subjects(true);
+    auto owned = std::make_unique<PartialClearMock>(4);
+    PartialClearMock* backend = owned.get();
+    helix::AmsState::instance().set_backend(std::move(owned));
+    helix::AmsState::instance().sync_from_backend();
+
+    REQUIRE(helix::ui::ams_dispatch_backend_action(MenuAction::CLEAR_SPOOL, 1, nullptr));
+
+    // The error says HelixScreen cleared its own copy; that has to be true.
+    REQUIRE(backend->cleared_slots.size() == 1);
+    CHECK(backend->cleared_slots.front() == 1);
+}
+
+// ============================================================================
+// An insert the hardware read nothing about (prestonbrown/helixscreen#1710)
+// ============================================================================
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "ams insert: an unverified insert offers Clear, which runs Clear Spool",
+                 "[ui][ams][dispatch][insert_rule]") {
+    install_mock_backend();
+    auto* backend = static_cast<helix::AmsBackendMock*>(helix::AmsState::instance().get_backend());
+    REQUIRE(backend != nullptr);
+
+    std::vector<std::pair<ToastSeverity, std::string>> toasts;
+    helix::ui::set_test_toast_hook([&](ToastSeverity severity, const std::string& msg, uint32_t) {
+        toasts.emplace_back(severity, msg);
+    });
+    helix::ui::reset_insert_offers_for_test();
+
+    SECTION("a flapping gate asks once, not on every edge") {
+        LifecycleGuard hold(PrintState::Idle);
+        for (int edge = 0; edge < 5; ++edge) {
+            helix::ui::offer_clear_after_unverified_insert(0);
+        }
+        CHECK(toasts.size() == 1);
+
+        // Another lane is its own question.
+        helix::ui::offer_clear_after_unverified_insert(2);
+        CHECK(toasts.size() == 2);
+
+        // New details on the lane are a new question.
+        helix::SlotInfo edited = backend->get_slot_info(0);
+        edited.material = "ASA";
+        REQUIRE(helix::test::apply_edit(*backend, 0, edited).success());
+        helix::ui::offer_clear_after_unverified_insert(0);
+        CHECK(toasts.size() == 3);
+    }
+
+    SECTION("offered on a free machine, and the button clears the lane") {
+        LifecycleGuard hold(PrintState::Idle);
+        REQUIRE_FALSE(backend->get_slot_info(0).material.empty());
+
+        helix::ui::offer_clear_after_unverified_insert(0);
+        REQUIRE(toasts.size() == 1);
+        CHECK(toasts[0].first == ToastSeverity::INFO);
+        CHECK(toasts[0].second.find("Gate 1") != std::string::npos);
+        // Asking changes nothing on its own.
+        CHECK_FALSE(backend->get_slot_info(0).material.empty());
+
+        REQUIRE(helix::ui::fire_last_toast_action());
+        CHECK(backend->get_slot_info(0).material.empty());
+        CHECK(backend->get_slot_info(0).spoolman_id == 0);
+    }
+
+    SECTION("Clear does nothing once the lane changed since the notice") {
+        LifecycleGuard hold(PrintState::Idle);
+        helix::ui::offer_clear_after_unverified_insert(0);
+        REQUIRE(toasts.size() == 1);
+
+        helix::SlotInfo edited = backend->get_slot_info(0);
+        edited.material = "ASA";
+        REQUIRE(helix::test::apply_edit(*backend, 0, edited).success());
+        REQUIRE(backend->get_slot_info(0).material == "ASA");
+
+        REQUIRE(helix::ui::fire_last_toast_action());
+        CHECK(backend->get_slot_info(0).material == "ASA");
+    }
+
+    SECTION("not offered on a lane with nothing to clear") {
+        LifecycleGuard hold(PrintState::Idle);
+        REQUIRE(helix::ui::ams_dispatch_backend_action(MenuAction::CLEAR_SPOOL, 1, nullptr));
+        toasts.clear();
+        helix::ui::offer_clear_after_unverified_insert(1);
+        CHECK(toasts.empty());
+    }
+
+    SECTION("not offered on the lane feeding the print") {
+        LifecycleGuard hold(PrintState::Printing);
+        REQUIRE(backend->slot_is_actively_loaded(0));
+        helix::ui::offer_clear_after_unverified_insert(0);
+        CHECK(toasts.empty());
+        CHECK_FALSE(helix::ui::fire_last_toast_action());
+    }
+
+    SECTION("offered on another lane mid-print") {
+        LifecycleGuard hold(PrintState::Printing);
+        REQUIRE_FALSE(backend->slot_is_actively_loaded(1));
+        helix::ui::offer_clear_after_unverified_insert(1);
+        CHECK(toasts.size() == 1);
+    }
+
+    helix::ui::set_test_toast_hook(nullptr);
 }

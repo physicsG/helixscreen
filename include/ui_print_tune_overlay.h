@@ -3,12 +3,10 @@
 
 #pragma once
 
-#include "ui_save_z_offset_modal.h"
-
 #include "lvgl/lvgl.h"
 #include "observer_factory.h"
 #include "overlay_base.h"
-#include "save_config_restart.h"
+#include "static_panel_registry.h"
 #include "subject_managed_panel.h"
 #include "z_offset_utils.h"
 
@@ -36,21 +34,12 @@ class PrinterState;
  */
 class PrintTuneOverlay : public OverlayBase {
   public:
-    PrintTuneOverlay();
     ~PrintTuneOverlay() override;
-
-    // Non-copyable
-    PrintTuneOverlay(const PrintTuneOverlay&) = delete;
-    PrintTuneOverlay& operator=(const PrintTuneOverlay&) = delete;
 
     /**
      * @brief Show the tune panel overlay
      *
-     * Lazy initialization - creates panel on first call. Handles:
-     * - Subject initialization
-     * - Panel creation from XML
-     * - Standard overlay setup (back button, scrolling)
-     * - Pushes onto navigation stack
+     * Stores the dependencies, then OverlayBase::show() builds and pushes it.
      *
      * @param parent_screen The parent screen for the overlay
      * @param api IMoonrakerAPI for sending G-code commands
@@ -90,12 +79,6 @@ class PrintTuneOverlay : public OverlayBase {
      * @param direction -1 for closer (more squish), +1 for farther (less squish)
      */
     void handle_z_adjust(int direction);
-
-    /**
-     * @brief Handle save Z-offset button click
-     * Shows warning modal since SAVE_CONFIG will restart Klipper
-     */
-    void handle_save_z_offset();
 
     /**
      * @brief Update Z-offset icons based on printer kinematics
@@ -143,7 +126,7 @@ class PrintTuneOverlay : public OverlayBase {
      * @return Tune panel widget, or nullptr if not set up
      */
     lv_obj_t* get_panel() const {
-        return tune_panel_;
+        return overlay_root_;
     }
 
     //
@@ -158,28 +141,13 @@ class PrintTuneOverlay : public OverlayBase {
         return "Print Tune";
     }
 
-    /**
-     * @brief Initialize subjects (OverlayBase pure virtual)
-     *
-     * This overlay uses init_subjects_internal() called from show().
-     * This method delegates to that implementation.
-     */
-    void init_subjects() override {
-        init_subjects_internal();
+    const char* xml_component() const override {
+        return "print_tune_panel";
     }
 
-    /**
-     * @brief Create overlay UI (OverlayBase pure virtual)
-     *
-     * This overlay uses show() for creation with additional parameters.
-     * This method returns nullptr; use show() instead.
-     *
-     * @param parent Unused - show() provides parent
-     * @return nullptr (use show() for proper creation)
-     */
-    lv_obj_t* create(lv_obj_t* /*parent*/) override {
-        return nullptr;
-    }
+    void init_subjects() override;
+    void register_callbacks() override;
+    lv_obj_t* create(lv_obj_t* parent) override;
 
     /**
      * @brief Called when overlay becomes visible
@@ -191,15 +159,14 @@ class PrintTuneOverlay : public OverlayBase {
     /**
      * @brief Called when overlay is being hidden
      */
-    void on_deactivate() override;
+    void on_deactivating(DeactivateReason reason) override;
 
   private:
-    void init_subjects_internal();
     void setup_panel();
+    /// Renders the speed/flow headlines and their live readouts, led by
+    /// whichever units the speed/flow preference picks.
     void update_display();
     void sync_to_state();
-    void update_actual_speed_display();
-    void update_actual_flow_display();
 
     //
     // === Dependencies ===
@@ -207,11 +174,7 @@ class PrintTuneOverlay : public OverlayBase {
 
     IMoonrakerAPI* api_ = nullptr;
 
-    /// Owns the SAVE_CONFIG contract for the z-offset save: absorbs the rpc the
-    /// restart drops and reports success only once Klipper is back (#1359).
-    helix::ui::SaveConfigWatch save_config_watch_;
     helix::PrinterState* printer_state_ = nullptr;
-    lv_obj_t* tune_panel_ = nullptr;
 
     //
     // === Subject Management ===
@@ -220,41 +183,47 @@ class PrintTuneOverlay : public OverlayBase {
     SubjectManager subjects_;
 
     // Subjects for reactive UI
-    lv_subject_t tune_speed_subject_;
-    lv_subject_t tune_flow_subject_;
-    lv_subject_t tune_z_offset_subject_;
+    lv_subject_t tune_speed_subject_{};
+    lv_subject_t tune_flow_subject_{};
+    lv_subject_t tune_z_offset_subject_{};
     /// Which z-step amount is selected, as an index. ONE int, not four
     /// booleans: the buttons are mutually exclusive by construction, so four
     /// parallel flags were four chances for the UI to disagree with itself,
     /// and every selection wrote all four. The XML compares against it with
     /// bind_style_if (CLAUDE.md rule 7).
-    lv_subject_t z_step_selected_subject_;
+    lv_subject_t z_step_selected_subject_{};
 
     /// Which z-offset the direction buttons drive: 0 machine-wide, 1 the active
     /// tool's own. Only meaningful on a tool changer — see helix::tool_offsets.
-    lv_subject_t z_tune_target_subject_;
+    lv_subject_t z_tune_target_subject_{};
     /// The target the user is NOT on, formatted for the muted context label.
-    lv_subject_t tune_z_other_subject_;
+    lv_subject_t tune_z_other_subject_{};
     /// Label for the tool button ("T1"). Not tool_badge_text: that one is
     /// deliberately index-only, sized for a disc overlaid on the nozzle glyph.
-    lv_subject_t tune_z_tool_label_subject_;
-    lv_subject_t z_closer_icon_subject_;  ///< Icon name for closer button (kinematic-aware)
-    lv_subject_t z_farther_icon_subject_; ///< Icon name for farther button (kinematic-aware)
+    lv_subject_t tune_z_tool_label_subject_{};
+    lv_subject_t z_closer_icon_subject_{};  ///< Icon name for closer button (kinematic-aware)
+    lv_subject_t z_farther_icon_subject_{}; ///< Icon name for farther button (kinematic-aware)
 
     // Actual speed/flow display subjects
-    lv_subject_t tune_actual_speed_subject_;
-    lv_subject_t tune_actual_flow_subject_;
+    lv_subject_t tune_actual_speed_subject_{};
+    lv_subject_t tune_actual_flow_subject_{};
 
     // Subject storage buffers
-    char tune_speed_buf_[16] = "100%";
-    char tune_flow_buf_[16] = "100%";
+    char tune_speed_buf_[32] = "100%";
+    char tune_flow_buf_[32] = "100%";
     char tune_z_offset_buf_[16] = "0.000mm";
     char z_closer_icon_buf_[24] = "arrow_down";
     char z_farther_icon_buf_[24] = "arrow_up";
     char tune_actual_speed_buf_[32] = "";
     char tune_actual_flow_buf_[32] = "";
-    char tune_z_other_buf_[32] = "";
-    char tune_z_tool_label_buf_[8] = "T0";
+    // Carries a translated position label and its offset value together
+    // ("Печатающая головка 16 -0.150mm"), so it needs more room than the
+    // label-only buffer below.
+    char tune_z_other_buf_[96] = "";
+    // Holds a translated position label ("Tool 1", "Печатающая головка 16") —
+    // sized like current_slot_text_buf_/layer_text_buf_ elsewhere, since a
+    // translated noun plus a two-digit number can run well past ASCII length.
+    char tune_z_tool_label_buf_[64] = "Tool 1";
 
     //
     // === State ===
@@ -276,27 +245,15 @@ class PrintTuneOverlay : public OverlayBase {
     //
 
     ObserverGuard speed_observer_;
-    ObserverGuard tool_z_offset_observer_;
-    ObserverGuard tool_z_valid_observer_;
+    ObserverGuard tools_version_observer_;
     ObserverGuard active_tool_observer_;
-    ObserverGuard gcode_speed_observer_;
+    ObserverGuard live_velocity_observer_;
     ObserverGuard max_velocity_observer_;
     ObserverGuard extruder_vel_observer_;
-
-    //
-    // === Modals ===
-    //
-
-    SaveZOffsetModal save_z_offset_modal_;
+    ObserverGuard units_observer_;
 };
 
-/**
- * @brief Get the singleton PrintTuneOverlay instance
- *
- * Lazy singleton - creates on first access, registers with StaticPanelRegistry
- * for cleanup on shutdown. Used by XML event callbacks and panels that need
- * to show the tuning overlay.
- *
- * @return Reference to the shared PrintTuneOverlay instance
- */
-PrintTuneOverlay& get_print_tune_overlay();
+/// Lazy singleton; shared by the XML event callbacks and the panels that open it.
+inline PrintTuneOverlay& get_print_tune_overlay() {
+    return helix::lazy_global<PrintTuneOverlay>("PrintTuneOverlay");
+}

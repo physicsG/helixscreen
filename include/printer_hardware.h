@@ -184,6 +184,24 @@ class PrinterHardware {
      */
     std::string guess_exhaust_fan() const;
 
+    /**
+     * @brief Guess the most likely aux fan (secondary/auxiliary cooling)
+     *
+     * Aux fans are extra user-controllable fans beyond the four standard
+     * roles — internal case ventilation, side-mounted blowers, etc.
+     *
+     * Priority order:
+     * 1. Exact match: "aux_fan"
+     * 2. Substring priority chain:
+     *    - "aux" - auxiliary (also covers the spelled-out "auxiliary")
+     *    - "internal" - internal/case circulation
+     *    - "side" - side-mounted
+     * 3. Return empty if no match (optional hardware)
+     *
+     * @return Aux fan name or empty string if none found
+     */
+    std::string guess_aux_fan() const;
+
     // ========================================================================
     // LED Guessing
     // ========================================================================

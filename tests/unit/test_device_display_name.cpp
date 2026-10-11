@@ -298,6 +298,7 @@ TEST_CASE("prettify_name() snake_case conversion", "[device_display_name][pretti
 
     SECTION("Special words replaced") {
         REQUIRE(prettify_name("psu_led_strip") == "PSU LED Strip");
+        REQUIRE(prettify_name("NeoPixel_rgbw") == "NeoPixel RGBW");
         REQUIRE(prettify_name("aux_gpio_relay") == "Auxiliary GPIO Relay");
     }
 }
@@ -315,7 +316,7 @@ TEST_CASE("get_display_name() edge cases", "[device_display_name][edge]") {
     SECTION("Prefix only (no suffix after space)") {
         // When raw name is just the type prefix (e.g., "neopixel" with no instance name),
         // and it's also in skip words, we don't add a suffix since the type is obvious
-        REQUIRE(get_display_name("neopixel", DeviceType::LED) == "Neopixel");
+        REQUIRE(get_display_name("neopixel", DeviceType::LED) == "NeoPixel");
     }
 
     SECTION("Single character") {
@@ -368,7 +369,7 @@ TEST_CASE("get_display_name() real-world examples", "[device_display_name][examp
         REQUIRE(get_display_name("fan_generic bed_fans", DeviceType::FAN) == "Bed Fans");
 
         // Voron-style LEDs - "sb_leds" contains "leds" so no suffix
-        REQUIRE(get_display_name("neopixel sb_leds", DeviceType::LED) == "Sb Leds");
+        REQUIRE(get_display_name("neopixel sb_leds", DeviceType::LED) == "Sb LEDs");
         REQUIRE(get_display_name("neopixel caselight", DeviceType::LED) == "Caselight LED");
 
         // Temperature sensors

@@ -13,12 +13,16 @@
 
 #pragma once
 
-#include "ams_types.h" // For AmsType in backend_owns_runout_during_job()
+#include "env_knobs.h"
 
 #include <cstdio>      // For snprintf in get_default_test_file_path()
 #include <cstdlib>     // For getenv in should_mock_remote_printer()
 #include <string>      // For std::string in should_mock_remote_printer()
 #include <sys/types.h> // For pid_t
+
+namespace helix {
+enum class AmsType; // defined in ams_types.h
+}
 
 /**
  * @brief Runtime configuration for development and testing
@@ -48,6 +52,11 @@ struct RuntimeConfig {
 
     bool disable_sound = false; ///< Disable all sound/audio output (--no-sound or settings.json)
 
+    /// Set for this run only when startup detects a crash loop: plugins stay
+    /// unloaded and the home panel shows the default layout without touching
+    /// the saved one. The next clean start runs normally.
+    bool crash_loop_safe_mode = false;
+
     // Debug/testing options
     bool test_history_api = false; ///< Test print history API on startup (--test-history)
 
@@ -71,10 +80,6 @@ struct RuntimeConfig {
 
     /// Test mode config file path (separate from production to avoid conflicts)
     static constexpr const char* TEST_CONFIG_PATH = "config/settings-test.json";
-
-    /// Legacy config file names (for migration from older versions)
-    static constexpr const char* LEGACY_PROD_CONFIG_PATH = "config/helixconfig.json";
-    static constexpr const char* LEGACY_TEST_CONFIG_PATH = "config/helixconfig-test.json";
 
     /**
      * @brief Get full path to default test G-code file
@@ -224,8 +229,7 @@ struct RuntimeConfig {
     bool should_mock_remote_printer() const {
         if (!test_mode)
             return false;
-        const char* env = std::getenv("HELIX_MOCK_REMOTE_PRINTER");
-        return env && env[0] && std::string(env) != "0";
+        return helix::env_flag("HELIX_MOCK_REMOTE_PRINTER");
     }
 
     /**
@@ -341,7 +345,7 @@ struct RuntimeConfig {
  * @return true if, during a job, this backend surfaces the runout itself and
  *         the generic sensor-edge toast should stand down
  */
-bool backend_owns_runout_during_job(AmsType type);
+bool backend_owns_runout_during_job(helix::AmsType type);
 
 /**
  * @brief Get global runtime configuration

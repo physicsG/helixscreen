@@ -1,0 +1,122 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component>
+  <!-- Move tab: the bed as seen from above (rear row on top) plus the action
+       row. Shared by the portrait strip layout and the landscape rail layout,
+       so the nine positions and their gating live in exactly one place. -->
+  <api>
+    <!-- "false" hides the action row: portrait carries Park and Motors off in
+         the panel's bottom row instead, so the grid fills the freed height. -->
+    <prop name="actions" type="string" default="true"/>
+  </api>
+  <styles>
+    <!-- The eight rim positions use the muted primary of the panel's
+         unselected jog modes, so the grid does not read as a wall of solid
+         buttons; Center is solid primary, the one anchor on the bed. -->
+    <style name="preset_rim" bg_color="#primary" bg_opa="40"/>
+    <style name="preset_center" bg_color="#primary" bg_opa="255"/>
+  </styles>
+  <view name="move_preset_grid"
+        extends="lv_obj" width="100%" height="100%" style_pad_all="0" style_border_opa="0" scrollable="false"
+        flex_flow="column" style_pad_gap="#space_xs">
+    <!-- Every preset button is disabled while the panel's moves are gated:
+       nav buttons off (not connected / klippy not ready) or a print active.
+       The C++ handlers re-check both as a backstop. Presets and Park also
+       grey out while the toolhead is busy (idle_timeout "Printing"), so a
+       second tap cannot land mid-move. The raw flag also blips during a
+       printer's own housekeeping macros; the grid greys for that moment. -->
+    <lv_obj name="move_grid"
+            width="100%" height="0" flex_grow="1" style_pad_all="0" style_border_opa="0" scrollable="false"
+            flex_flow="column" style_pad_gap="#space_xs">
+      <!-- Rear row (+Y), far edge of the bed from the operator. -->
+      <lv_obj name="preset_row_rear"
+              width="100%" height="0" flex_grow="1" style_pad_all="0" style_border_opa="0" scrollable="false"
+              flex_flow="row" style_pad_gap="#space_xs">
+        <ui_button name="preset_rear_left" width="0" height="100%" text="Rear Left" flex_grow="1" moves_machine="true">
+          <style name="preset_rim"/>
+          <bind_state_if_eq subject="nav_buttons_enabled" state="disabled" ref_value="0"/>
+          <bind_state_if_eq subject="idle_timeout_printing" state="disabled" ref_value="1"/>
+          <event_cb trigger="clicked" callback="on_motion_preset_clicked" user_data="rear_left"/>
+        </ui_button>
+        <ui_button name="preset_rear" width="0" height="100%" text="Rear" flex_grow="1" moves_machine="true">
+          <style name="preset_rim"/>
+          <bind_state_if_eq subject="nav_buttons_enabled" state="disabled" ref_value="0"/>
+          <bind_state_if_eq subject="idle_timeout_printing" state="disabled" ref_value="1"/>
+          <event_cb trigger="clicked" callback="on_motion_preset_clicked" user_data="rear"/>
+        </ui_button>
+        <ui_button name="preset_rear_right" width="0" height="100%" text="Rear Right" flex_grow="1" moves_machine="true">
+          <style name="preset_rim"/>
+          <bind_state_if_eq subject="nav_buttons_enabled" state="disabled" ref_value="0"/>
+          <bind_state_if_eq subject="idle_timeout_printing" state="disabled" ref_value="1"/>
+          <event_cb trigger="clicked" callback="on_motion_preset_clicked" user_data="rear_right"/>
+        </ui_button>
+      </lv_obj>
+      <!-- Middle row: Left, Center, Right. -->
+      <lv_obj name="preset_row_mid"
+              width="100%" height="0" flex_grow="1" style_pad_all="0" style_border_opa="0" scrollable="false"
+              flex_flow="row" style_pad_gap="#space_xs">
+        <ui_button name="preset_left" width="0" height="100%" text="Left" flex_grow="1" moves_machine="true">
+          <style name="preset_rim"/>
+          <bind_state_if_eq subject="nav_buttons_enabled" state="disabled" ref_value="0"/>
+          <bind_state_if_eq subject="idle_timeout_printing" state="disabled" ref_value="1"/>
+          <event_cb trigger="clicked" callback="on_motion_preset_clicked" user_data="left"/>
+        </ui_button>
+        <ui_button name="preset_center" width="0" height="100%" text="Center" flex_grow="1" moves_machine="true">
+          <style name="preset_center"/>
+          <bind_state_if_eq subject="nav_buttons_enabled" state="disabled" ref_value="0"/>
+          <bind_state_if_eq subject="idle_timeout_printing" state="disabled" ref_value="1"/>
+          <event_cb trigger="clicked" callback="on_motion_preset_clicked" user_data="center"/>
+        </ui_button>
+        <ui_button name="preset_right" width="0" height="100%" text="Right" flex_grow="1" moves_machine="true">
+          <style name="preset_rim"/>
+          <bind_state_if_eq subject="nav_buttons_enabled" state="disabled" ref_value="0"/>
+          <bind_state_if_eq subject="idle_timeout_printing" state="disabled" ref_value="1"/>
+          <event_cb trigger="clicked" callback="on_motion_preset_clicked" user_data="right"/>
+        </ui_button>
+      </lv_obj>
+      <!-- Front row (-Y), nearest the operator. -->
+      <lv_obj name="preset_row_front"
+              width="100%" height="0" flex_grow="1" style_pad_all="0" style_border_opa="0" scrollable="false"
+              flex_flow="row" style_pad_gap="#space_xs">
+        <ui_button name="preset_front_left" width="0" height="100%" text="Front Left" flex_grow="1" moves_machine="true">
+          <style name="preset_rim"/>
+          <bind_state_if_eq subject="nav_buttons_enabled" state="disabled" ref_value="0"/>
+          <bind_state_if_eq subject="idle_timeout_printing" state="disabled" ref_value="1"/>
+          <event_cb trigger="clicked" callback="on_motion_preset_clicked" user_data="front_left"/>
+        </ui_button>
+        <ui_button name="preset_front" width="0" height="100%" text="Front" flex_grow="1" moves_machine="true">
+          <style name="preset_rim"/>
+          <bind_state_if_eq subject="nav_buttons_enabled" state="disabled" ref_value="0"/>
+          <bind_state_if_eq subject="idle_timeout_printing" state="disabled" ref_value="1"/>
+          <event_cb trigger="clicked" callback="on_motion_preset_clicked" user_data="front"/>
+        </ui_button>
+        <ui_button name="preset_front_right"
+                   width="0" height="100%" text="Front Right" flex_grow="1" moves_machine="true">
+          <style name="preset_rim"/>
+          <bind_state_if_eq subject="nav_buttons_enabled" state="disabled" ref_value="0"/>
+          <bind_state_if_eq subject="idle_timeout_printing" state="disabled" ref_value="1"/>
+          <event_cb trigger="clicked" callback="on_motion_preset_clicked" user_data="front_right"/>
+        </ui_button>
+      </lv_obj>
+    </lv_obj>
+    <!-- Action row: Park runs the ParkToolhead macro (Front preset fallback),
+         Motors off raises the shared confirmation. -->
+    <lv_obj name="move_actions"
+            width="100%" height="content" style_pad_all="0" style_border_opa="0" scrollable="false" flex_flow="row"
+            style_pad_gap="#space_xs" hidden_if_prop_eq="$actions|false">
+      <ui_button name="move_park"
+                 width="0" height="#button_height" text="Park" variant="outline" flex_grow="1" moves_machine="true">
+        <bind_state_if_eq subject="nav_buttons_enabled" state="disabled" ref_value="0"/>
+        <bind_state_if_eq subject="idle_timeout_printing" state="disabled" ref_value="1"/>
+        <event_cb trigger="clicked" callback="on_motion_park_clicked"/>
+      </ui_button>
+      <ui_button name="move_motors_off"
+                 width="0" height="#button_height" text="Motors Off" icon="power" variant="outline" flex_grow="1"
+                 moves_machine="true">
+        <bind_state_if_eq subject="nav_buttons_enabled" state="disabled" ref_value="0"/>
+        <event_cb trigger="clicked" callback="on_motion_motors_off_clicked"/>
+      </ui_button>
+    </lv_obj>
+  </view>
+</component>

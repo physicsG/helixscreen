@@ -560,6 +560,7 @@ TEST_CASE("accumulated coverage never lands on the reserved tag value", "[gcode_
             blend_coverage(t.target(), 1, 1, 0x336699, static_cast<uint8_t>(first));
             blend_coverage(t.target(), 1, 1, 0x336699, static_cast<uint8_t>(second));
             REQUIRE(t.channel(1, 1, 3) != kSelectedAlpha);
+            REQUIRE(t.channel(1, 1, 3) != kExcludedAlpha);
         }
     }
 }
@@ -578,6 +579,7 @@ TEST_CASE("a single coverage write never lands on the reserved tag value", "[gco
         // of 0 would satisfy "not tagged" while erasing the stroke.
         REQUIRE(t.channel(1, 1, 3) != 0);
         REQUIRE(t.channel(1, 1, 3) != kSelectedAlpha);
+        REQUIRE(t.channel(1, 1, 3) != kExcludedAlpha);
     }
 }
 
@@ -660,4 +662,81 @@ TEST_CASE("the two channel orders disagree on a non-grey rim", "[gcode_raster]")
     stroke_selection_rim(bgra.target(), 1, 1, kOutlineToken, ChannelOrder::Bgra);
     stroke_selection_rim(rgba.target(), 1, 1, kOutlineToken, ChannelOrder::Rgba);
     REQUIRE(bgra.mem != rgba.mem);
+}
+
+// ===========================================================================
+// Exclusion hatch: red stripes over every kExcludedAlpha pixel, nowhere else.
+// ===========================================================================
+
+namespace {
+constexpr uint32_t kGreyBody = 0x808080;
+constexpr uint32_t kHatch = 0xFF3B30;
+
+/// Fill [x0, x1] x [y0, y1] with grey carrying `alpha`.
+void fill_alpha(Surface& s, int x0, int y0, int x1, int y1, uint8_t alpha) {
+    for (int y = y0; y <= y1; ++y) {
+        for (int x = x0; x <= x1; ++x) {
+            blend(s.target(), x, y, (static_cast<uint32_t>(alpha) << 24) | kGreyBody);
+        }
+    }
+}
+
+bool is_hatch_bgra(const Surface& s, int x, int y) {
+    return s.channel(x, y, 2) == 0xFF && s.channel(x, y, 1) == 0x3B && s.channel(x, y, 0) == 0x30;
+}
+} // namespace
+
+TEST_CASE("the hatch stripes exactly the excluded pixels on the stripe phase", "[gcode_raster]") {
+    Surface s(24, 24);
+    fill_alpha(s, 0, 0, 11, 23, kExcludedAlpha); // left half excluded
+    fill_alpha(s, 12, 0, 23, 23, 255);           // right half plain
+    stroke_exclusion_hatch(s.target(), 6, 2, kHatch, ChannelOrder::Bgra, RowOrder::TopDown);
+
+    int striped = 0;
+    for (int y = 0; y < 24; ++y) {
+        for (int x = 0; x < 24; ++x) {
+            CAPTURE(x, y);
+            const bool want = x < 12 && (x + y) % 6 < 2;
+            REQUIRE(is_hatch_bgra(s, x, y) == want);
+            striped += want;
+            // Alpha is never written: the tag survives for the next pass.
+            REQUIRE(s.channel(x, y, 3) == (x < 12 ? kExcludedAlpha : 255));
+        }
+    }
+    REQUIRE(striped > 0);
+    REQUIRE(s.guard_band_clean());
+}
+
+TEST_CASE("the hatch leans the same way on a bottom-up readback", "[gcode_raster]") {
+    Surface s(12, 12);
+    fill_alpha(s, 0, 0, 11, 11, kExcludedAlpha);
+    stroke_exclusion_hatch(s.target(), 6, 2, kHatch, ChannelOrder::Rgba, RowOrder::BottomUp);
+    for (int y = 0; y < 12; ++y) {
+        for (int x = 0; x < 12; ++x) {
+            CAPTURE(x, y);
+            const bool want = (x + (11 - y)) % 6 < 2;
+            // Rgba: red is byte 0.
+            REQUIRE((s.channel(x, y, 0) == 0xFF && s.channel(x, y, 2) == 0x30) == want);
+        }
+    }
+}
+
+TEST_CASE("the hatch is idempotent", "[gcode_raster]") {
+    Surface s(16, 16);
+    fill_alpha(s, 2, 2, 13, 13, kExcludedAlpha);
+    stroke_exclusion_hatch(s.target(), 6, 2, kHatch, ChannelOrder::Bgra, RowOrder::TopDown);
+    const auto once = s.mem;
+    stroke_exclusion_hatch(s.target(), 6, 2, kHatch, ChannelOrder::Bgra, RowOrder::TopDown);
+    REQUIRE(s.mem == once);
+}
+
+TEST_CASE("degenerate hatch parameters are a no-op", "[gcode_raster]") {
+    Surface s(8, 8);
+    fill_alpha(s, 0, 0, 7, 7, kExcludedAlpha);
+    const auto before = s.mem;
+    stroke_exclusion_hatch(s.target(), 1, 1, kHatch, ChannelOrder::Bgra, RowOrder::TopDown);
+    stroke_exclusion_hatch(s.target(), 6, 0, kHatch, ChannelOrder::Bgra, RowOrder::TopDown);
+    stroke_exclusion_hatch(s.target(), 6, 6, kHatch, ChannelOrder::Bgra, RowOrder::TopDown);
+    stroke_exclusion_hatch(RasterTarget{}, 6, 2, kHatch, ChannelOrder::Bgra, RowOrder::TopDown);
+    REQUIRE(s.mem == before);
 }

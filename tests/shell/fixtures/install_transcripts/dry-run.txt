@@ -1,0 +1,6 @@
+HelixScreen installer v1.1.0-beta.1 (beta)
+  Printer    x86 · systemd · user root
+  Install    v1.1.0-beta.1 (beta) · SHA256 available
+  Add        Moonraker update manager
+
+Dry run, nothing changed.

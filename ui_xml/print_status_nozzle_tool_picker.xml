@@ -3,7 +3,7 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <component>
   <view name="print_status_nozzle_tool_picker" extends="context_menu_backdrop">
-    <context_menu_card title="Show temp for" title_tag="Show temp for">
+    <context_menu_card title="Show temp for">
       <lv_obj name="option_list"
               width="100%" height="content" flex_flow="column" style_pad_all="#space_xs" style_pad_gap="0"
               scrollable="false"/>

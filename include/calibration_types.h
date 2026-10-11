@@ -65,14 +65,16 @@ constexpr float SCREW_SEVERE_ADJUSTMENT_MM = 0.25f;
  * @brief Convert a bed-height distance to clock-minutes of screw rotation
  *
  * One "minute" is 1/60 of a full turn, matching Klipper's TT:MM output.
- * Never returns less than 1 so a tolerance can't collapse to an exact-match test.
+ * Sign is preserved so a caller can take CW/CCW from the diff's sign; a
+ * distance that rounds to zero still returns one minute, keeping its sign, so
+ * a tolerance can't collapse to an exact-match test.
  */
 [[nodiscard]] inline int screw_minutes_for_mm(float distance_mm, float pitch_mm) {
     if (!(pitch_mm > 0.0f)) {
         pitch_mm = SCREW_PITCH_DEFAULT_MM;
     }
     int minutes = static_cast<int>(std::lround(distance_mm / pitch_mm * 60.0f));
-    return minutes > 0 ? minutes : 1;
+    return minutes != 0 ? minutes : (distance_mm < 0.0f ? -1 : 1);
 }
 
 /// Level tolerance in clock-minutes for a given thread pitch (the single source

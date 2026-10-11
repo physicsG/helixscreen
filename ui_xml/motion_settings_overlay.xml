@@ -1,0 +1,179 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Motion Settings Overlay Panel -->
+<!-- Jog feedrates and step distances (persisted settings) -->
+<component>
+  <view name="motion_settings_overlay" extends="overlay_panel" title="Motion" bg_color="#screen_bg">
+    <!-- Content Area -->
+    <lv_obj name="overlay_content"
+            width="100%" flex_grow="1" style_pad_top="0" style_pad_left="#space_lg" style_pad_right="#space_lg"
+            style_pad_bottom="#space_lg" scrollable="true" flex_flow="column">
+      <!-- ================================================================== -->
+      <!-- JOG SPEED XY -->
+      <!-- ================================================================== -->
+      <lv_obj name="jog_speed_xy_section"
+              width="100%" height="content" scrollable="false" style_pad_left="#space_lg" style_pad_right="#space_lg"
+              style_pad_top="#space_md" style_pad_bottom="#space_md" flex_flow="column" style_pad_gap="#space_sm">
+        <lv_obj width="100%"
+                height="content" style_pad_all="0" scrollable="false" flex_flow="row"
+                style_flex_main_place="space_between" style_flex_cross_place="center">
+          <lv_obj height="content"
+                  style_pad_all="0" scrollable="false" flex_flow="row" style_flex_cross_place="center"
+                  style_pad_gap="#space_sm">
+            <icon src="axis_arrow" size="sm" variant="secondary"/>
+            <lv_obj height="content" style_pad_all="0" scrollable="false" flex_flow="column" style_pad_gap="#space_xxs">
+              <text_body text="Jog Speed XY"/>
+              <text_small text="X and Y jog feedrate"/>
+            </lv_obj>
+          </lv_obj>
+          <!-- Current value: tap to type an exact number -->
+          <setting_value_field name="jog_speed_xy_field"
+                               value_subject="jog_speed_xy_display" callback="on_motion_field_clicked" user_data="0"/>
+        </lv_obj>
+        <!-- Slider: mm/s. Max is set from the printer's reported feedrate
+             limit at runtime; the XML value is only the pre-refresh default. -->
+        <lv_obj width="100%"
+                height="#input_height" style_pad_left="#space_md" style_pad_right="#space_md" style_pad_top="#space_md"
+                style_pad_bottom="#space_md" scrollable="false" flex_flow="row" style_flex_cross_place="center">
+          <text_small name="jog_speed_xy_min_label" width="40" text="1"/>
+          <lv_slider name="jog_speed_xy_slider"
+                     flex_grow="1" min_value="1" max_value="1000" value="100" style_margin_left="#space_sm"
+                     style_margin_right="#space_sm">
+            <event_cb trigger="value_changed" callback="on_jog_speed_xy_changed"/>
+          </lv_slider>
+          <text_small name="jog_speed_xy_max_label" width="50" text="500" bind_text="jog_speed_max_display"/>
+        </lv_obj>
+      </lv_obj>
+      <!-- Divider -->
+      <divider_horizontal/>
+      <!-- ================================================================== -->
+      <!-- JOG SPEED Z -->
+      <!-- ================================================================== -->
+      <lv_obj name="jog_speed_z_section"
+              width="100%" height="content" scrollable="false" style_pad_left="#space_lg" style_pad_right="#space_lg"
+              style_pad_top="#space_md" style_pad_bottom="#space_md" flex_flow="column" style_pad_gap="#space_sm">
+        <lv_obj width="100%"
+                height="content" style_pad_all="0" scrollable="false" flex_flow="row"
+                style_flex_main_place="space_between" style_flex_cross_place="center">
+          <lv_obj height="content"
+                  style_pad_all="0" scrollable="false" flex_flow="row" style_flex_cross_place="center"
+                  style_pad_gap="#space_sm">
+            <icon src="axis_z_arrow" size="sm" variant="secondary"/>
+            <lv_obj height="content" style_pad_all="0" scrollable="false" flex_flow="column" style_pad_gap="#space_xxs">
+              <text_body text="Jog Speed Z"/>
+              <text_small text="Z jog feedrate"/>
+            </lv_obj>
+          </lv_obj>
+          <!-- Current value: tap to type an exact number -->
+          <setting_value_field name="jog_speed_z_field"
+                               value_subject="jog_speed_z_display" callback="on_motion_field_clicked" user_data="1"/>
+        </lv_obj>
+        <!-- Slider: mm/s, max set from the printer's reported feedrate limit -->
+        <lv_obj width="100%"
+                height="#input_height" style_pad_left="#space_md" style_pad_right="#space_md" style_pad_top="#space_md"
+                style_pad_bottom="#space_md" scrollable="false" flex_flow="row" style_flex_cross_place="center">
+          <text_small name="jog_speed_z_min_label" width="40" text="1"/>
+          <lv_slider name="jog_speed_z_slider"
+                     flex_grow="1" min_value="1" max_value="1000" value="10" style_margin_left="#space_sm"
+                     style_margin_right="#space_sm">
+            <event_cb trigger="value_changed" callback="on_jog_speed_z_changed"/>
+          </lv_slider>
+          <text_small name="jog_speed_z_max_label" width="50" text="500" bind_text="jog_speed_max_display"/>
+        </lv_obj>
+      </lv_obj>
+      <!-- Divider -->
+      <divider_horizontal/>
+      <!-- ================================================================== -->
+      <!-- STEP DISTANCES -->
+      <!-- ================================================================== -->
+      <lv_obj width="100%"
+              height="content" scrollable="false" style_pad_left="#space_lg" style_pad_right="#space_lg"
+              style_pad_top="#space_md" style_pad_bottom="#space_xs" flex_flow="row" style_flex_cross_place="center"
+              style_pad_gap="#space_sm">
+        <icon src="cursor_move" size="xs" variant="secondary"/>
+        <text_small text="Distance moved per jog button tap"/>
+      </lv_obj>
+      <!-- Each distance row is one tappable setting_value_field carrying the
+           row name; the container beside it is unnamed scaffolding. -->
+      <lv_obj width="100%"
+              height="content" scrollable="false" style_pad_left="#space_lg" style_pad_right="#space_lg"
+              style_pad_top="#space_sm" style_pad_bottom="#space_sm" flex_flow="row"
+              style_flex_main_place="space_between" style_flex_cross_place="center">
+        <text_body text="Fine Inner"/>
+        <setting_value_field name="fine_inner_row"
+                             value_subject="fine_inner_display" callback="on_motion_field_clicked" user_data="2"/>
+      </lv_obj>
+      <lv_obj width="100%"
+              height="content" scrollable="false" style_pad_left="#space_lg" style_pad_right="#space_lg"
+              style_pad_top="#space_sm" style_pad_bottom="#space_sm" flex_flow="row"
+              style_flex_main_place="space_between" style_flex_cross_place="center">
+        <text_body text="Fine Outer"/>
+        <setting_value_field name="fine_outer_row"
+                             value_subject="fine_outer_display" callback="on_motion_field_clicked" user_data="3"/>
+      </lv_obj>
+      <lv_obj width="100%"
+              height="content" scrollable="false" style_pad_left="#space_lg" style_pad_right="#space_lg"
+              style_pad_top="#space_sm" style_pad_bottom="#space_sm" flex_flow="row"
+              style_flex_main_place="space_between" style_flex_cross_place="center">
+        <text_body text="Coarse Inner"/>
+        <setting_value_field name="coarse_inner_row"
+                             value_subject="coarse_inner_display" callback="on_motion_field_clicked" user_data="4"/>
+      </lv_obj>
+      <lv_obj width="100%"
+              height="content" scrollable="false" style_pad_left="#space_lg" style_pad_right="#space_lg"
+              style_pad_top="#space_sm" style_pad_bottom="#space_sm" flex_flow="row"
+              style_flex_main_place="space_between" style_flex_cross_place="center">
+        <text_body text="Coarse Outer"/>
+        <setting_value_field name="coarse_outer_row"
+                             value_subject="coarse_outer_display" callback="on_motion_field_clicked" user_data="5"/>
+      </lv_obj>
+      <lv_obj width="100%"
+              height="content" scrollable="false" style_pad_left="#space_lg" style_pad_right="#space_lg"
+              style_pad_top="#space_sm" style_pad_bottom="#space_sm" flex_flow="row"
+              style_flex_main_place="space_between" style_flex_cross_place="center">
+        <text_body text="Turbo Inner"/>
+        <setting_value_field name="turbo_inner_row"
+                             value_subject="turbo_inner_display" callback="on_motion_field_clicked" user_data="6"/>
+      </lv_obj>
+      <lv_obj width="100%"
+              height="content" scrollable="false" style_pad_left="#space_lg" style_pad_right="#space_lg"
+              style_pad_top="#space_sm" style_pad_bottom="#space_sm" flex_flow="row"
+              style_flex_main_place="space_between" style_flex_cross_place="center">
+        <text_body text="Turbo Outer"/>
+        <setting_value_field name="turbo_outer_row"
+                             value_subject="turbo_outer_display" callback="on_motion_field_clicked" user_data="7"/>
+      </lv_obj>
+      <divider_horizontal/>
+      <!-- Bed tab: a move from below this height lifts Z to it first -->
+      <lv_obj width="100%"
+              height="content" scrollable="false" style_pad_left="#space_lg" style_pad_right="#space_lg"
+              style_pad_top="#space_md" style_pad_bottom="#space_sm" flex_flow="row"
+              style_flex_main_place="space_between" style_flex_cross_place="center">
+        <lv_obj height="content"
+                style_pad_all="0" scrollable="false" flex_flow="row" style_flex_cross_place="center"
+                style_pad_gap="#space_sm">
+          <icon src="grid_large" size="sm" variant="secondary"/>
+          <lv_obj height="content" style_pad_all="0" scrollable="false" flex_flow="column" style_pad_gap="#space_xxs">
+            <text_body text="Bed Map Clearance"/>
+            <text_small text="Bed tab moves lift to this height first"/>
+          </lv_obj>
+        </lv_obj>
+        <setting_value_field name="bed_map_clearance_row"
+                             value_subject="bed_map_clearance_display" callback="on_motion_field_clicked" user_data="8"/>
+      </lv_obj>
+      <!-- Spacer to push buttons to bottom -->
+      <lv_obj width="100%" flex_grow="1" scrollable="false"/>
+    </lv_obj>
+    <!-- ================================================================== -->
+    <!-- ACTION BUTTONS -->
+    <!-- ================================================================== -->
+    <divider_horizontal/>
+    <lv_obj width="100%"
+            height="content" style_pad_all="#space_md" flex_flow="row" style_flex_main_place="center" scrollable="false">
+      <ui_button name="reset_distances_btn" width="180" text="Reset Distances">
+        <event_cb trigger="clicked" callback="on_reset_distances"/>
+      </ui_button>
+    </lv_obj>
+  </view>
+</component>

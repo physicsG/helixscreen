@@ -3,8 +3,12 @@
 
 #include "helix_test_fixture.h"
 
+#include "ui_ams_edit_overlay.h"
+#include "ui_animations_pref.h"
+#include "ui_insert_notice.h"
 #include "ui_modal.h"
 #include "ui_nav_manager.h"
+#include "ui_observer_guard.h"
 #include "ui_test_utils.h"
 #include "ui_update_queue.h"
 
@@ -16,22 +20,46 @@
 #include "config.h"
 #include "display_settings_manager.h"
 #include "fault_surface_correlation.h"
+#include "filament_catalog.h"
+#include "filament_database.h"
 #include "filament_slot_override_store.h"
 #include "helix-xml/src/xml/lv_xml.h"
+#include "http_executor.h"
+#include "lane_source_store.h"
+#include "logging_init.h"
+#include "lvgl_log_handler.h"
 #include "panel_widget_manager.h"
+#include "rpc_error_correlation.h"
 #include "runtime_config.h"
 #include "safety_settings_manager.h"
+#include "screensaver_canvas.h"
+#include "screensaver_registry.h"
+#include "settings_manager.h"
+#include "sound_manager.h"
+#include "standard_macros.h"
+#include "system/crash_error_log_sink.h"
 #include "system_settings_manager.h"
+#include "temperature_sensor_manager.h"
+#include "test_helpers/ams_state_test_access.h"
 #include "test_helpers/config_test_access.h"
+#include "test_helpers/display_manager_test_access.h"
 #include "test_helpers/emergency_stop_test_access.h"
+#include "test_helpers/layout_manager_test_access.h"
 #include "test_helpers/print_control_buttons_test_access.h"
 #include "test_helpers/printer_state_test_access.h"
+#include "test_helpers/tips_manager_test_access.h"
 #include "tool_state.h"
+#include "ui/ui_widget_helpers.h"
 
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
+#include <thread>
 #include <unistd.h>
+#include <utility>
+
+#include "hv/json.hpp"
 
 namespace {
 // Force SDL's dummy audio driver for the WHOLE test binary, before any code can
@@ -53,13 +81,15 @@ struct ForceDummyAudioDriver {
 };
 const ForceDummyAudioDriver g_force_dummy_audio_driver;
 
-// Force SDL's dummy VIDEO driver too. No test initializes SDL video today (the
-// only SDL_Init in the test link is AUDIO, in SDLSoundBackend), so this changes
-// no current behavior. It enforces that invariant: the first test that does
-// reach display creation (DisplayBackendSDL -> lv_sdl_window_create) would
-// otherwise open a real "HelixScreen" window on whatever desktop the run lands
-// on, a behavior CI can never catch because its runners have no display
-// server. Same placement and escape hatch as the audio twin above.
+// Force SDL's dummy VIDEO driver too. This is load-bearing, not preventative:
+// the GL-fallback test drives GCodeGLESRenderer::init_gl() into
+// SDL_CreateWindow, and SDL2 self-initializes video there. Without the dummy
+// driver that call succeeds on a developer's GL desktop and the test's whole
+// premise -- that GL init fails -- evaporates. It also keeps any future test
+// reaching display creation (DisplayBackendSDL -> lv_sdl_window_create) from
+// opening a real "HelixScreen" window on whatever desktop the run lands on, a
+// behavior CI can never catch because its runners have no display server.
+// Same placement and escape hatch as the audio twin above.
 struct ForceDummyVideoDriver {
     ForceDummyVideoDriver() {
         ::setenv("SDL_VIDEODRIVER", "dummy", /*overwrite=*/0);
@@ -128,6 +158,10 @@ struct ConfigSandbox {
         // and before any backend thread exists. Per-instance dirs still win.
         helix::ams::detail::slot_override_cache_dir_ref() = dir;
 
+        // The user filament overlay resolves to the same relative "config" dir.
+        // MaterialSettingsManager writes it on every override change.
+        helix::printer::detail::user_overlay_dir_ref() = dir;
+
         apply();
     }
 
@@ -148,6 +182,29 @@ struct ConfigSandbox {
 };
 const ConfigSandbox g_config_sandbox;
 
+/// The default logger as the process first saw it. Cases that call
+/// logging::init(), swap in a capture logger, or raise the level for their own
+/// output leave the next case logging into a different logger at a different
+/// threshold, so a case that reads back an info line finds nothing.
+void restore_default_logger() {
+    struct Baseline {
+        std::shared_ptr<spdlog::logger> logger = spdlog::default_logger();
+        spdlog::level::level_enum level = logger->level();
+        std::vector<spdlog::sink_ptr> sinks = logger->sinks();
+    };
+    static const Baseline baseline;
+
+    if (spdlog::default_logger() != baseline.logger) {
+        spdlog::set_default_logger(baseline.logger);
+    }
+    if (baseline.logger->level() != baseline.level) {
+        baseline.logger->set_level(baseline.level);
+    }
+    if (baseline.logger->sinks() != baseline.sinks) {
+        baseline.logger->sinks() = baseline.sinks;
+    }
+}
+
 } // namespace
 
 namespace helix::test {
@@ -159,6 +216,13 @@ const std::string& config_sandbox_dir() {
 void reset_config_singleton() {
     g_config_sandbox.apply();
 
+    // The rolling-backup tiers are shared by the whole process. A backup one
+    // case wrote would otherwise be what the next case's first-boot init()
+    // restores from, so every case starts with both tiers empty.
+    std::error_code backup_ec;
+    std::filesystem::remove_all(config_sandbox_dir() + "/state", backup_ec);
+    std::filesystem::remove_all(config_sandbox_dir() + "/backup", backup_ec);
+
     // ToolState persists tool_spools.json into helix::get_user_config_dir(),
     // which defaults to the RELATIVE dir "config" — i.e. the repo's own
     // config/ under the test binary's CWD. It really did write there during
@@ -166,10 +230,20 @@ void reset_config_singleton() {
     // spool assignments. set_config_dir() is the supported override.
     helix::ToolState::instance().set_config_dir(config_sandbox_dir());
 
-    helix::Config* cfg = helix::Config::get_instance();
-    if (cfg == nullptr) {
-        return;
+    // A test that wrote the overlay leaves its types merged into the material
+    // table; drop both so the next test sees only the shipped types.
+    helix::printer::detail::user_overlay_dir_ref() = config_sandbox_dir();
+    std::error_code overlay_ec;
+    if (std::filesystem::remove(config_sandbox_dir() + "/user_filaments.json", overlay_ec)) {
+        filament::reload_materials();
     }
+
+    // FilamentSlotOverrideStore's offline fallback reads this file when the
+    // Moonraker DB round-trip never answers, so a record an earlier backend case
+    // cached would come back as the "offline" overrides of an unrelated store.
+    std::filesystem::remove(config_sandbox_dir() + "/filament_slot_overrides.json", overlay_ec);
+
+    helix::Config* cfg = helix::Config::get_instance();
     helix::ConfigTestAccess::path(*cfg) = config_sandbox_dir() + "/settings.json";
     helix::ConfigTestAccess::data(*cfg) = nlohmann::json::object();
     helix::ConfigTestAccess::active_printer_id(*cfg).clear();
@@ -178,12 +252,13 @@ void reset_config_singleton() {
     // Drop any file a previous test's save() left behind, so a test that
     // re-init()s the singleton at this path sees a fresh install.
     std::error_code ec;
-    fs::remove(helix::ConfigTestAccess::path(*cfg), ec);
+    std::filesystem::remove(helix::ConfigTestAccess::path(*cfg), ec);
 }
 
 } // namespace helix::test
 
-HelixTestFixture::HelixTestFixture() {
+HelixTestFixture::HelixTestFixture()
+    : observer_epoch_at_entry_(ObserverGuard::invalidation_epoch()) {
     // Tests opt into strict L081 detection: any bg-thread tok.expired() check
     // while alive aborts the run instead of just warning. Production stays
     // at warn. See include/async_lifetime_guard.h.
@@ -193,30 +268,20 @@ HelixTestFixture::HelixTestFixture() {
     // would never fire on dismiss) aborts instead of just warning. Production
     // stays at warn. See NavigationManager::set_overlay_registration_strict.
     NavigationManager::set_overlay_registration_strict(true);
+    // And into fatal UI contract checks: a required widget missing from its
+    // XML, or show() pushing a root someone else holds the close callback for.
+    helix::ui::set_strict_ui_checks(true);
     reset_all();
 }
 
 HelixTestFixture::~HelixTestFixture() {
+    // Before reset_all(): its teardown resets long-lived guards, which must see the epoch
+    // they were created under.
+    ObserverGuard::restore_invalidation_epoch(observer_epoch_at_entry_);
     reset_all();
 }
 
-void HelixTestFixture::reset_all() {
-    // LVGL + UpdateQueue must be up before we touch any subject-backed state.
-    // lv_init_safe() is idempotent and also re-arms the UpdateQueue if a prior
-    // fixture's destructor shut it down. Safe to call from non-LVGL tests.
-    lv_init_safe();
-
-    // BEFORE the drain, not after: EmergencyStopOverlay is a process-wide
-    // singleton holding raw init() pointers to a PrinterState that in tests is a
-    // stack local or fixture member. By the time a fixture destructor reaches
-    // here the test body's locals are already gone, so draining first would run
-    // a queued update_recovery_dialog_content() straight into the freed object.
-    // Nulled, its `if (printer_state_ && ...)` guard makes that callback a no-op.
-    EmergencyStopOverlayTestAccess::reset_dependencies(EmergencyStopOverlay::instance());
-
-    // Drain any callbacks queued by a prior test before we touch state they read.
-    helix::ui::UpdateQueue::instance().drain();
-
+void HelixTestFixture::reset_printer_state() {
     // Clear every plain (non-subject) data member on the GLOBAL PrinterState.
     //
     // PrinterState is a Meyers singleton (get_printer_state()) that lives for the
@@ -242,6 +307,65 @@ void HelixTestFixture::reset_all() {
     // touches no observer lists and is safe whether or not subjects exist.
     helix::PrinterStateTestAccess::clear_data(get_printer_state());
 
+    // The print lifecycle lives in subjects, so clear_data() leaves it alone,
+    // and a test that drove the global printer into a job leaves the next test
+    // reading a print in progress (Clear Spool refused, pause paths armed).
+    // Returned to standby through the production path, which notifies only
+    // when a value actually moves.
+    {
+        auto& ps = get_printer_state();
+        if (ps.are_subjects_initialized() &&
+            (ps.print_state().get_print_lifecycle() != PrintState::Idle ||
+             ps.print_state().is_in_print_start() ||
+             ps.print_state().get_print_job_state() != helix::PrintJobState::STANDBY)) {
+            ps.print_state().reset_print_start_state(); // deferred: drained below
+            ps.update_from_status(nlohmann::json{{"print_stats", {{"state", "standby"}}}});
+            helix::ui::UpdateQueue::instance().drain();
+        }
+    }
+}
+
+void HelixTestFixture::reset_all() {
+    // LVGL + UpdateQueue must be up before we touch any subject-backed state.
+    // lv_init_safe() is idempotent and also re-arms the UpdateQueue if a prior
+    // fixture's destructor shut it down. Safe to call from non-LVGL tests.
+    lv_init_safe();
+
+    // A display with no flush callback latches disp->flushing on its first
+    // refresh and never clears it; lv_refr.c then busy-waits on that flag for
+    // the rest of the process. Several test translation units create the
+    // process's default display that way in a static initialiser, so this has
+    // to be re-asserted from a place every test passes through rather than at
+    // any one creation site.
+    ensure_displays_never_block_on_flush();
+
+    // BEFORE the drain, not after: EmergencyStopOverlay is a process-wide
+    // singleton holding raw init() pointers to a PrinterState that in tests is a
+    // stack local or fixture member. By the time a fixture destructor reaches
+    // here the test body's locals are already gone, so draining first would run
+    // a queued update_recovery_dialog_content() straight into the freed object.
+    // Nulled, its `if (printer_state_ && ...)` guard makes that callback a no-op.
+    EmergencyStopOverlay& estop = EmergencyStopOverlay::instance();
+    EmergencyStopOverlayTestAccess::reset_dependencies(estop);
+
+    // The same singleton also carries two wall-clock deadlines — the suppression
+    // window and the user-restart window — and the reason a window is holding
+    // back. Production arms those for 10-30s while a test advances lv_tick by
+    // tens of milliseconds, so one armed window outlives every test that follows
+    // it in this binary and gates whether a recovery dialog may appear at all.
+    // The latched reason goes with them: left set, it surfaces a dialog inside a
+    // later test. Cleared centrally for the reason reset_dependencies() is — a
+    // test that arms one cannot be relied on to unwind it past a failed
+    // assertion, which unwinds straight past any trailing cleanup.
+    EmergencyStopOverlayTestAccess::reset_suppression(estop);
+    EmergencyStopOverlayTestAccess::set_restart_in_progress(estop, false);
+    EmergencyStopOverlayTestAccess::reset_pending_recovery_reason(estop);
+
+    // Drain any callbacks queued by a prior test before we touch state they read.
+    helix::ui::UpdateQueue::instance().drain();
+
+    reset_printer_state();
+
     // SystemSettingsManager language back to "en" (matches config default).
     // init_subjects() is idempotent — first call creates the subjects, later
     // calls are no-ops. Required because set_language() writes to an LVGL subject.
@@ -253,8 +377,18 @@ void HelixTestFixture::reset_all() {
     // derived fixture did, which is what the scattered clear_path() calls in
     // individual tests were working around.
     helix::test::reset_config_singleton();
+    // StandardMacros holds each slot's user-configured macro, and reset() keeps
+    // it on purpose, so a Load macro one test assigned outlives the config
+    // reset above and routes every later filament op to the macro tier.
+    // Re-read the slots from the now-empty config.
+    StandardMacros::instance().reset();
+    StandardMacros::instance().load_from_config();
     helix::SystemSettingsManager::instance().init_subjects();
     helix::SystemSettingsManager::instance().set_language("en");
+
+    // A same-spool notice asked in one test would otherwise hold its lane's
+    // quiet window open into the next, and that test's insert would ask nothing.
+    helix::ui::reset_insert_offers_for_test();
 
     // Global RuntimeConfig's --real-*/--no-ams/--disconnected opt-out flags back
     // to their off-by-default state. Every test that exercises RuntimeConfig
@@ -287,6 +421,11 @@ void HelixTestFixture::reset_all() {
 
     // Delete any tracked modal widgets and clear the modal stack.
     ModalStack::instance().clear();
+
+    // Lane source records are process-wide and are written by backends, so a
+    // lane one test populated would read back in the next as a reading nobody
+    // took.
+    helix::ams::reset_lane_sources();
 
     // PrintStatusWidget's DetailedFormatter used to be torn down here for the
     // reason described below, and no longer needs to be: its PrinterState
@@ -333,7 +472,16 @@ void HelixTestFixture::reset_all() {
     // inherits whatever the previous test left behind. set_active_step_operation()
     // only exchanges the atomic and clears a plain int high-water mark - no
     // subject writes - so it is safe to call unconditionally here.
-    AmsState::instance().set_active_step_operation(StepOperationType::LOAD_SWAP);
+    helix::AmsState::instance().set_active_step_operation(helix::StepOperationType::LOAD_SWAP);
+
+    // A backend a test installs on the AmsState singleton outlives it, and a
+    // later test that expects no filament system reads its slots: the active
+    // spool widget draws the mock's loaded lane instead of "No Spool".
+    if (helix::AmsState::instance().get_backend() != nullptr) {
+        helix::AmsState::instance().set_backend(nullptr);
+    }
+    helix::AmsStateTestAccess::reset_action(helix::AmsState::instance());
+    helix::AmsStateTestAccess::clear_narration(helix::AmsState::instance());
 
     // DisplaySettingsManager's animations_enabled is a process-global subject
     // that defaults to the platform value (true on desktop). A fixture-less
@@ -360,10 +508,32 @@ void HelixTestFixture::reset_all() {
     // test that pumps less than 150ms starts reading the OUTGOING dialog —
     // lv_obj_find_by_name() returns the stale subtree because it is still parented
     // to the screen (test_afc_fault_path_modal.cpp read a previous fault's text).
-    helix::DisplaySettingsManager::instance().init_subjects();
-    if (lv_subject_t* anim = lv_xml_get_subject(nullptr, "settings_animations_enabled")) {
-        lv_subject_set_int(anim, 0);
-    }
+    //
+    // The name is re-pointed at the manager's own subject rather than looked up:
+    // a fixture that publishes its own subject under this global name and
+    // withdraws it on teardown (test_label_scroll_motion.cpp does) leaves the
+    // name unregistered, and init_subjects() is a no-op for a manager that is
+    // already up, so nothing else would ever publish it again. Every later
+    // animations_pref_subject() then reads null.
+    auto& display_settings = helix::DisplaySettingsManager::instance();
+    display_settings.init_subjects();
+    lv_subject_t* anim = display_settings.subject_animations_enabled();
+    lv_xml_register_subject(nullptr, helix::ui::ANIMATIONS_SUBJECT_NAME, anim);
+    lv_subject_set_int(anim, 0);
+
+    // Page-scroll gutters are opt-in off-device. A test that enabled them leaves the
+    // subject on, and NavigationManager then injects gutter children into every
+    // later scrollable it shows, so row counts in unrelated pages read one too high.
+    lv_subject_set_int(display_settings.subject_page_scroll_buttons(), 0);
+
+#ifdef HELIX_ENABLE_SCREENSAVER
+    // The manager stays initialised across tests, so a screensaver choice one test
+    // made would otherwise be read back as the "fresh install" default by the next.
+    // Set on the subject, not through set_screensaver_type(), which writes Config.
+    lv_subject_set_int(
+        display_settings.subject_screensaver_type(),
+        static_cast<int>(helix::ui::default_screensaver_type(helix::ui::SAVER_BUILD_DEPTH)));
+#endif
 
     // Same restore for the other two settings sub-managers a test can tear down.
     //
@@ -374,7 +544,7 @@ void HelixTestFixture::reset_all() {
     // each subject's name from the XML scope on the way out, so once a test tears
     // one of these down the names stay withdrawn for the REST of the binary:
     // every later SettingsManager::init_subjects() short-circuits and never
-    // re-registers them. A test that then builds settings_display_sound_overlay.xml
+    // re-registers them. A test that then builds settings_display_overlay.xml
     // or settings_safety_overlay.xml gets "No subject was found" and silently
     // unbound toggles — a failure that reads as a broken binding, not as leakage
     // from a test that ran twenty test cases earlier.
@@ -389,15 +559,93 @@ void HelixTestFixture::reset_all() {
     // volume of 100, min_toast_severity 2 and its notifications cache) returns
     // to the compiled-in default rather than following the manager forward.
     // Neither init_subjects() reaches SoundManager — AudioSettingsManager seeds
-    // settings_audio_device_available to 0 and leaves the real value to
-    // refresh_audio_device_available(), which only Application calls.
+    // settings_audio_device_available and settings_music_available to 0 and
+    // leaves the real values to refresh_backend_subjects(), which only
+    // Application calls.
     helix::AudioSettingsManager::instance().init_subjects();
+    // init_subjects() is a no-op while the subjects are alive, so a value a test
+    // set without tearing the manager down (sounds_enabled) is reloaded here.
+    helix::AudioSettingsManager::instance().reload_from_config();
     helix::SafetySettingsManager::instance().init_subjects();
 
     // fault_surface_correlation entries live for 3s of wall clock, which spans
     // dozens of tests in a fast suite. A record left by an error-routing test
     // would silence AmsErrorBridge's fallback toast in an unrelated later one.
     helix::fault_surface_correlation::clear_for_test();
+
+    // rpc_error_correlation records expire on wall clock too: a caller-handled
+    // message left by one test suppresses the same message's router toast in
+    // the next.
+    helix::rpc_error_correlation::clear_for_test();
+
+    // The LVGL warning dedupe is a process-wide cache that wipes itself at 256
+    // bodies; a case asserting "first occurrence logs at its usual level" would
+    // otherwise depend on how many distinct warnings earlier cases emitted.
+    helix::logging::reset_lvgl_log_dedupe();
+
+    // Once initialized, LayoutManager decides ui_is_portrait and the layout tier
+    // for every refresh, so a case that initialized it would make a later case's
+    // display resize invisible to the theme.
+    LayoutManagerTestAccess::reset(helix::LayoutManager::instance());
+
+    // Its subjects publish global XML names, and a second AmsEditOverlay built
+    // on the stack (which cases do to reach its private members) takes those
+    // names over and withdraws them when it dies. The singleton still counts
+    // them as registered, so it is dropped to re-register on next use.
+    if (helix::lazy_global_if_exists<helix::ui::AmsEditOverlay>() &&
+        !lv_xml_get_subject(nullptr, "ams_edit_save_disabled")) {
+        helix::detail::lazy_global_slot<helix::ui::AmsEditOverlay>().reset();
+    }
+
+    TipsManagerTestAccess::reset_if_created();
+
+    // The wake gate arms a one-shot timer that re-enables every pointer indev.
+    DisplayManagerTestAccess::finish_input_gate();
+
+    restore_default_logger();
+
+    // The debug-bundle log tail reads this ring, so whatever earlier cases
+    // logged (a store path, an SSID) would otherwise show up in a later bundle.
+    helix::logging::clear_ring_buffer();
+
+    // SettingsManager::init_subjects() is one-shot, so a setting a test changed
+    // (jog speeds, jog distances) would otherwise outlive the Config reset above.
+    helix::SettingsManager::instance().reload_from_config();
+
+    // MoonrakerManager::init() hands SoundManager a pointer to its client, and
+    // nothing takes it back when a test destroys the manager. A set client lets
+    // set_hardware() install the M300 backend, which flips has_speaker() on for
+    // every later capability test. Shutdown first so an M300 backend is joined
+    // while the client is still named; host_recovery=false keeps the clear from
+    // probing a host backend back in.
+    helix::SoundManager::instance().shutdown();
+    helix::SoundManager::instance().set_moonraker_client(nullptr, /*host_recovery=*/false);
+
+    // The executors start with the binary (the isolation listener warms both
+    // lanes), and submit() on a stopped lane drops the work, so a case that
+    // stops one would leave every later transfer or REST test waiting on a
+    // callback that never comes. start() is idempotent.
+    helix::http::HttpExecutor::start_all();
+
+    // A backend torn down at the end of a test can leave a fetch queued on the
+    // process-wide executors. Waiting here, bounded, keeps that worker from
+    // counting against the next test's inflight() reads.
+    for (auto [name, exec] : {std::pair{"fast", &helix::http::HttpExecutor::fast()},
+                              std::pair{"slow", &helix::http::HttpExecutor::slow()}}) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        while (exec->inflight() != 0 && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        if (exec->inflight() != 0) {
+            spdlog::warn("[reset_all] HttpExecutor::{} still has {} item(s) in flight after 1s; "
+                         "a test left work queued",
+                         name, exec->inflight());
+        }
+    }
+
+    // The crash handler's recent-error ring is process-wide, so errors logged by
+    // earlier tests would show up in a forked child's crash file.
+    helix::CrashErrorLogSink::instance().clear_for_test();
 
     // PanelWidgetManager's panel_configs_ cache is a process-wide map keyed by
     // panel_id. Once a test calls get_widget_config("home") — directly or
@@ -413,6 +661,21 @@ void HelixTestFixture::reset_all() {
     // every entry dirty here makes the next get_widget_config() reload from
     // Config::df() regardless of which printer a prior test left active.
     helix::PanelWidgetManager::instance().clear_all_panel_configs();
+
+    // TemperatureSensorManager is a process singleton whose sensor list has no
+    // lifetime hook: only another discover() or deinit_subjects() clears it, and
+    // no fixture calls either. A widget built against an empty config
+    // auto-selects get_sensors_sorted().front(), so one sensor left behind makes
+    // a thermistor tile render a live reading and display name where a clean
+    // process renders its placeholders — wider content in the same tile, which
+    // is enough to clip the tightest layout the content-fits sweep measures.
+    //
+    // discover({}) and not TemperatureSensorManagerTestAccess::reset(): reset()
+    // also calls deinit_subjects(), which frees observer nodes on the temp
+    // subjects. Running that for EVERY fixture walks into the same
+    // observer-lifetime trap that keeps PrinterStateTestAccess::reset() out of
+    // this function. discover({}) clears the sensor list and touches no subject.
+    helix::sensors::TemperatureSensorManager::instance().discover({});
 
     // NOTE: NavigationManager has no public reset API (clear_overlay_stack is
     // private; shutdown() is a one-way teardown for app exit). Add a reset

@@ -4,6 +4,7 @@
 #include "thermal_rate_model.h"
 
 #include "config.h"
+#include "printer_detector.h"
 #include "spdlog/spdlog.h"
 
 #include <algorithm>
@@ -14,21 +15,40 @@ void ThermalRateModel::record_sample(float temp_c, uint32_t tick_ms) {
         start_tick_ = tick_ms;
         last_tick_ = tick_ms;
         last_temp_ = temp_c;
+        high_temp_ = temp_c;
+        last_rise_tick_ = tick_ms;
+        holding_ = false;
+        return;
+    }
+
+    if (temp_c > high_temp_ + RISE_EPSILON_C) {
+        high_temp_ = temp_c;
+        last_rise_tick_ = tick_ms;
+        holding_ = false;
+    } else if (holding_ ||
+               (tick_ms > last_rise_tick_ && tick_ms - last_rise_tick_ >= STALL_REANCHOR_MS)) {
+        // Holding, not climbing: the next step starts from this reading.
+        holding_ = true;
+        last_temp_ = temp_c;
+        last_tick_ = tick_ms;
+        high_temp_ = std::min(high_temp_, temp_c + RISE_EPSILON_C);
         return;
     }
 
     float delta_from_last = temp_c - last_temp_;
 
     if (delta_from_last >= MIN_DELTA_FROM_LAST && tick_ms > last_tick_) {
-        float inst_rate = static_cast<float>(tick_ms - last_tick_) / 1000.0f / delta_from_last;
+        const float step_s = static_cast<float>(tick_ms - last_tick_) / 1000.0f;
+        climb_seconds_ += step_s;
+        climb_degrees_ += delta_from_last;
+        const float inst_rate = step_s / delta_from_last;
 
         if (has_measured_heat_rate_) {
             // EMA: blend new instantaneous rate with running estimate
             measured_heat_rate_ = EMA_NEW_WEIGHT * inst_rate + EMA_OLD_WEIGHT * measured_heat_rate_;
-        } else if (temp_c - start_temp_ >= MIN_TOTAL_MOVEMENT) {
-            // First usable measurement — seed from cumulative rate
-            float elapsed_s = static_cast<float>(tick_ms - start_tick_) / 1000.0f;
-            measured_heat_rate_ = elapsed_s / (temp_c - start_temp_);
+        } else if (climb_degrees_ >= MIN_TOTAL_MOVEMENT) {
+            // First usable measurement — seed from the climb so far
+            measured_heat_rate_ = climb_seconds_ / climb_degrees_;
             has_measured_heat_rate_ = true;
         }
 
@@ -66,11 +86,12 @@ void ThermalRateModel::load_history(float rate_s_per_deg) {
 }
 
 float ThermalRateModel::blended_rate_for_save() const {
-    if (!has_measured_heat_rate_)
+    if (!has_measured_heat_rate_ || climb_degrees_ <= 0.0f)
         return 0.0f;
+    const float climb_rate = climb_seconds_ / climb_degrees_;
     if (has_history_ && hist_heat_rate_ > 0)
-        return SAVE_NEW_WEIGHT * measured_heat_rate_ + SAVE_OLD_WEIGHT * hist_heat_rate_;
-    return measured_heat_rate_;
+        return SAVE_NEW_WEIGHT * climb_rate + SAVE_OLD_WEIGHT * hist_heat_rate_;
+    return climb_rate;
 }
 
 void ThermalRateModel::set_default_rate(float rate_s_per_deg) {
@@ -80,10 +101,14 @@ void ThermalRateModel::set_default_rate(float rate_s_per_deg) {
 void ThermalRateModel::reset(float start_temp) {
     measured_heat_rate_ = 0.0f;
     has_measured_heat_rate_ = false;
-    start_temp_ = start_temp;
     last_temp_ = start_temp;
     last_tick_ = 0;
     start_tick_ = 0;
+    high_temp_ = start_temp;
+    last_rise_tick_ = 0;
+    holding_ = false;
+    climb_seconds_ = 0.0f;
+    climb_degrees_ = 0.0f;
 }
 
 // --- ThermalRateManager ---
@@ -109,7 +134,7 @@ float ThermalRateManager::estimate_heating_seconds(const std::string& heater_nam
 }
 
 void ThermalRateManager::load_from_config(helix::Config& config) {
-    for (const auto& heater : {"extruder", "heater_bed"}) {
+    for (const char* heater : PERSISTED_HEATERS) {
         std::string path = std::string("/thermal/rates/") + heater + "/heat_rate";
         float rate = config.get<float>(path, 0.0f);
         if (rate > 0.0f) {
@@ -131,7 +156,8 @@ void ThermalRateManager::save_to_config(helix::Config& config) {
     config.save();
 }
 
-void ThermalRateManager::apply_archetype_defaults(float bed_x_max) {
+void ThermalRateManager::apply_archetype_defaults(float bed_x_max,
+                                                  const std::string& printer_type) {
     // Extruder: most hotends heat at 0.2-0.3 s/°C (e.g. AD5M does 183°C in ~40s)
     models_["extruder"].set_default_rate(0.25f);
 
@@ -151,6 +177,12 @@ void ThermalRateManager::apply_archetype_defaults(float bed_x_max) {
 
     spdlog::info("thermal: archetype defaults — extruder=0.25, bed={:.1f} (bed_x_max={:.0f})",
                  bed_rate, bed_x_max);
+
+    for (const auto& [heater, rate] : PrinterDetector::get_thermal_rates(printer_type)) {
+        models_[heater].set_default_rate(rate);
+        spdlog::info("thermal: {} default {:.2f} s/°C from the database entry for '{}'", heater,
+                     rate, printer_type);
+    }
 }
 
 void ThermalRateManager::reset() {

@@ -49,7 +49,7 @@ TEST_CASE("Explicit destination wins over any parent", "[overlay][width][1178]")
 // ============================================================================
 
 TEST_CASE("Inherit takes the class of the overlay beneath it", "[overlay][width][1178]") {
-    SECTION("parent is a destination — Settings > Display & Sound > Theme Editor") {
+    SECTION("parent is a destination — Settings > Appearance > Theme Editor") {
         CHECK(resolve_overlay_is_destination(OverlayClass::Inherit, /*has_parent=*/true,
                                              /*parent_dest=*/true, /*root_dest=*/false));
     }

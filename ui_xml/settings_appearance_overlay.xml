@@ -1,0 +1,72 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Appearance Settings Overlay: dark mode, theme, animations, widget labels, printer visuals -->
+<!-- Uses setting_* components for consistency with main settings panel -->
+<component>
+  <styles>
+    <!-- Cards own the horizontal inset (setting_group side margins); content has none. -->
+    <style name="content_standard" pad_top="0" pad_left="0" pad_right="0" pad_bottom="#space_lg"/>
+    <style name="content_micro" pad_top="0" pad_left="0" pad_right="0" pad_bottom="#space_sm"/>
+    <style name="spacer_standard" height="#space_lg"/>
+    <style name="spacer_micro" height="#space_md"/>
+  </styles>
+  <view name="settings_appearance_overlay" extends="overlay_panel" title="Appearance" bg_color="#screen_bg">
+    <!-- Content Area - no padding, rows handle their own -->
+    <lv_obj name="overlay_content" width="100%" flex_grow="1" scrollable="true" flex_flow="column">
+      <bind_style_if_eq name="content_micro" subject="ui_breakpoint" ref_value="0"/>
+      <bind_style_if_ge name="content_standard" subject="ui_breakpoint" ref_value="1"/>
+      <setting_group name="group_appearance">
+        <!-- Dark Mode Toggle -->
+        <setting_toggle_row name="row_dark_mode"
+                            label="Dark Mode" icon="light_off" description="Switch between light and dark themes"
+                            subject="settings_dark_mode" callback="on_dark_mode_changed">
+          <bind_state_if_eq subject="settings_dark_mode_available" state="disabled" ref_value="0"/>
+        </setting_toggle_row>
+        <!-- Theme Colors -->
+        <setting_action_row name="row_theme_settings"
+                            label="Theme Colors" icon="tune" description="Explore palette and preview"
+                            callback="on_theme_settings_clicked"/>
+        <!-- Animations Toggle -->
+        <setting_toggle_row name="row_animations"
+                            label="Animations" icon="animation" description="Enable UI motion effects"
+                            subject="settings_animations_enabled" callback="on_animations_changed"/>
+        <!-- Widget Labels -->
+        <setting_toggle_row name="row_widget_labels"
+                            label="Widget Labels" icon="view_grid"
+                            description="Show text labels on icon-only home screen widgets" subject="show_widget_labels"
+                            callback="on_widget_labels_changed"/>
+      </setting_group>
+      <!-- ================================================================== -->
+      <!-- PRINTER VISUALS -->
+      <!-- ================================================================== -->
+      <setting_group name="group_printer_visuals">
+        <setting_group_header title="PRINTER VISUALS"/>
+        <setting_dropdown_row name="row_toolhead_style"
+                              label="Toolhead Style" icon="palette" description="How the toolhead icon appears"
+                              options="Auto" callback="on_toolhead_style_changed"/>
+        <setting_dropdown_row name="row_gcode_mode"
+                              label="G-code Preview" icon="printer_3d"
+                              description="Choose rendering mode for G-code visualization"
+                              options="Auto&#10;3D View&#10;2D Layers&#10;Thumbnail Only"
+                              options_tag="Auto&#10;3D View&#10;2D Layers&#10;Thumbnail Only"
+                              callback="on_gcode_mode_changed"/>
+        <setting_dropdown_row name="row_z_movement_style"
+                              label="Z Movement" icon="arrow_up_down" description="How Z-axis movement is displayed"
+                              options="Auto&#10;Bed Moves&#10;Nozzle Moves"
+                              options_tag="Auto&#10;Bed Moves&#10;Nozzle Moves"
+                              bind_selected="settings_z_movement_style" callback="on_z_movement_style_changed"/>
+        <setting_dropdown_row name="row_bed_mesh_mode"
+                              label="Bed Mesh Render" icon="grid_large"
+                              description="Choose rendering mode for bed mesh visualization"
+                              options="Auto&#10;3D View&#10;2D Heatmap" options_tag="Auto&#10;3D View&#10;2D Heatmap"
+                              bind_selected="settings_bed_mesh_render_mode" callback="on_bed_mesh_mode_changed"/>
+      </setting_group>
+      <!-- Bottom padding for scroll -->
+      <lv_obj width="100%" scrollable="false">
+        <bind_style_if_eq name="spacer_micro" subject="ui_breakpoint" ref_value="0"/>
+        <bind_style_if_ge name="spacer_standard" subject="ui_breakpoint" ref_value="1"/>
+      </lv_obj>
+    </lv_obj>
+  </view>
+</component>

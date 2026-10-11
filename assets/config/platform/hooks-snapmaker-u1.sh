@@ -30,17 +30,6 @@
 # Display: 480x320 32bpp rockchipdrmfb (/dev/fb0)
 # SSH access: root@<ip> (password: snapmaker) via extended firmware
 
-# PID of the background keepalive process
-DRM_KEEPALIVE_PID=""
-
-# Opt into the launcher's boot-time respawn self-heal. The U1 ships no
-# helix-watchdog and busybox init does not respawn S99 children, so a single
-# boot-time SIGTERM to helix-screen (handled as _exit(0)) would otherwise be
-# permanent. The launcher (helix-launcher.sh) reads HELIX_BOOT_RESPAWN_MAX and
-# respawns a fast-exiting helix-screen up to this many times. Respect any value
-# the user pinned in helixscreen.env.
-export HELIX_BOOT_RESPAWN_MAX="${HELIX_BOOT_RESPAWN_MAX:-3}"
-
 # WiFi restore configuration. The stock Snapmaker app saves the user's network
 # to HELIX_SAVED_WPA and loads it into wpa_supplicant at runtime; since we
 # replaced the stock app, we do it ourselves (see ensure_wifi_associated).
@@ -58,6 +47,8 @@ platform_stop_competing_uis() {
     # Spawn a background process that holds the DRM device open.
     # It stays alive until helix-screen opens /dev/dri/card0 itself (detected
     # via /proc/*/fd), or for a maximum of 30 seconds as a safety timeout.
+    # Nothing reaps it afterwards: it is bounded by that timeout, and the
+    # stop path runs in a separate shell that never sees its pid.
     if [ -e /dev/dri/card0 ]; then
         (
             # Hold the device open via our own fd
@@ -83,8 +74,7 @@ platform_stop_competing_uis() {
             done
             echo "DRM keepalive: timeout after 30s, releasing"
         ) &
-        DRM_KEEPALIVE_PID=$!
-        echo "DRM keepalive: background process PID $DRM_KEEPALIVE_PID"
+        echo "DRM keepalive: background process PID $!"
     fi
 
     # Kill stock UI processes only. unisrv (proprietary camera/MQTT daemon
@@ -240,6 +230,43 @@ ensure_wifi_associated() {
     return 0
 }
 
+# ── Root Access: keep SSH up the way the stock UI does ───────────────────────
+#
+# On stock firmware /etc/init.d/S50dropbear exits without starting dropbear on a
+# retail build (`custom_misc vertype` is not "dbg") unless it is invoked as
+# `start --force`. The stock UI is the only caller of --force: its Settings >
+# Maintenance > Root Access toggle stores "open_root": 1 under "system" in
+# gui_config.json, and at every startup it starts dropbear with --force when
+# that is set. HelixScreen disables /usr/bin/gui, so without this hook SSH
+# never comes back after a reboot.
+#
+# PAXX Extended Firmware comments that gate out of S50dropbear and decides SSH
+# from its own `ssh:` setting, so the hook acts only while the gate is live.
+HELIX_GUI_CONFIG="${HELIX_GUI_CONFIG:-/home/lava/printer_data/config/gui_config.json}"
+HELIX_DROPBEAR_INIT="${HELIX_DROPBEAR_INIT:-/etc/init.d/S50dropbear}"
+
+# True (0) when the stock UI's Root Access toggle is on. The stock UI writes a
+# number and treats any nonzero value as on; `true` is accepted as well.
+_root_access_enabled() {
+    [ -f "$HELIX_GUI_CONFIG" ] || return 1
+    tr -d ' \t\r\n' < "$HELIX_GUI_CONFIG" 2>/dev/null | \
+        grep -Eq '"open_root":(true|-?[0-9]*[1-9])'
+}
+
+# Start dropbear with --force when Root Access is on and it is not running.
+# Idempotent; never fails the caller.
+ensure_root_ssh() {
+    [ -f "$HELIX_DROPBEAR_INIT" ] || return 0
+    grep -q '^[^#]*custom_misc vertype' "$HELIX_DROPBEAR_INIT" 2>/dev/null || return 0
+    _root_access_enabled || return 0
+    if pidof dropbear >/dev/null 2>&1; then
+        return 0
+    fi
+    echo "Root Access is enabled: starting SSH (dropbear)"
+    "$HELIX_DROPBEAR_INIT" start --force || true
+    return 0
+}
+
 # ── Remote screen: serve the live UI to Mainsail/Fluidd ──────────────────────
 #
 # PAXX Extended Firmware ships a remote-screen tool, /usr/local/bin/fb-http.py,
@@ -299,25 +326,51 @@ _remote_screen_backend_args() {
 start_remote_screen() {
     [ -f "$HELIX_FB_HTTP" ] || return 0
     _remote_screen_enabled || return 0
+    # The mode fb-http runs in is a declaration, not a start side effect, so
+    # it is decided and re-supplied ABOVE and INSIDE the already-running
+    # early return: the init script fires platform_pre_start in a subshell
+    # (side effects only), and the launcher's own call is the one whose
+    # environment reaches helix-screen. Below the guard it would be supplied
+    # only by the subshell and never re-supplied.
+    #
+    # A warm call re-declares the mode the RUNNING fb-http was started with,
+    # recorded beside the pidfile, rather than re-probing whatever binary is
+    # on disk now: fb-http can be replaced between the init subshell's start
+    # and the launcher's call, and a build that gained --backend would flip
+    # the probe, skip the fb0 export, and leave the running fbdev fb-http
+    # reading an fb0 nothing mirrors — a silently frozen remote screen. No
+    # record (a start that predates the record) conservatively exports the
+    # mirror: an unneeded one costs a few writes, a missing one freezes the
+    # feed.
+    _rs_mode_file="${HELIX_REMOTE_SCREEN_PID}.mode"
     if [ -f "$HELIX_REMOTE_SCREEN_PID" ] && \
        kill -0 "$(cat "$HELIX_REMOTE_SCREEN_PID" 2>/dev/null)" 2>/dev/null; then
+        if [ "$(cat "$_rs_mode_file" 2>/dev/null)" != "drm" ]; then
+            export HELIX_REMOTE_SCREEN_FB0="${HELIX_REMOTE_SCREEN_FB0:-/dev/fb0}"
+        fi
+        unset _rs_mode_file
         return 0
     fi
     _rs_backend=$(_remote_screen_backend_args)
+    # No DRM backend: fb-http reads /dev/fb0. HelixScreen renders into its own
+    # DRM dumb buffer and never touches fb0, so fb0 would be stale — UNLESS the
+    # in-app fb0 mailbox mirror is enabled. Export HELIX_REMOTE_SCREEN_FB0 so
+    # helix-screen mirrors each rendered frame into /dev/fb0, making fb-http's
+    # snapshot the live UI. Only on the fbdev path — the DRM branch captures
+    # the real buffer directly and needs no mirror. See
+    # docs/devel/printers/SNAPMAKER_U1_SUPPORT.md.
+    if [ -z "$_rs_backend" ]; then
+        export HELIX_REMOTE_SCREEN_FB0="${HELIX_REMOTE_SCREEN_FB0:-/dev/fb0}"
+        echo fbdev > "$_rs_mode_file"
+    else
+        echo drm > "$_rs_mode_file"
+    fi
     if [ -n "$_rs_backend" ]; then
         # --drm-wait lets fb-http wait for the DRM device to be ready, so it is
         # safe to launch here (before helix-screen becomes DRM master); capture
         # is read-only and does not contend for DRM master.
         echo "Remote screen: starting fb-http (DRM capture of /dev/dri/card0) on 127.0.0.1:8092"
     else
-        # No DRM backend: fb-http reads /dev/fb0. HelixScreen renders into its own
-        # DRM dumb buffer and never touches fb0, so fb0 would be stale — UNLESS the
-        # in-app fb0 mailbox mirror is enabled. Export HELIX_REMOTE_SCREEN_FB0 so
-        # helix-screen (launched after this hook, inheriting our env) mirrors each
-        # rendered frame into /dev/fb0, making fb-http's snapshot the live UI. Only
-        # on the fbdev path — the DRM branch captures the real buffer directly and
-        # needs no mirror. See docs/devel/printers/SNAPMAKER_U1_SUPPORT.md.
-        export HELIX_REMOTE_SCREEN_FB0="/dev/fb0"
         echo "Remote screen: starting fb-http (fbdev /dev/fb0) + in-app fb0 mirror on 127.0.0.1:8092"
     fi
     # Output is discarded to /dev/null: fb-http is a long-lived daemon (whole UI
@@ -331,7 +384,7 @@ start_remote_screen() {
     # vanishes when empty); it is a fixed internal string, never user input.
     start-stop-daemon -S -b -m -p "$HELIX_REMOTE_SCREEN_PID" -x /bin/sh -- -c \
         "exec /usr/bin/python3 $HELIX_FB_HTTP --bind 127.0.0.1 --port 8092 $_rs_backend --html-dir $HELIX_FB_HTTP_HTML >/dev/null 2>&1"
-    unset _rs_backend
+    unset _rs_backend _rs_mode_file
 }
 
 # Stop fb-http if we started it.
@@ -351,17 +404,23 @@ stop_remote_screen() {
             start-stop-daemon -K -p "$HELIX_REMOTE_SCREEN_PID" -s TERM 2>/dev/null || \
                 kill -TERM "$_rs_pid" 2>/dev/null || true
         fi
-        rm -f "$HELIX_REMOTE_SCREEN_PID"
+        rm -f "$HELIX_REMOTE_SCREEN_PID" "${HELIX_REMOTE_SCREEN_PID}.mode"
         unset _rs_pid _fb_name
     else
         pkill -f "$HELIX_FB_HTTP" 2>/dev/null || true
+        rm -f "${HELIX_REMOTE_SCREEN_PID}.mode"
     fi
 }
 
 platform_pre_start() {
-    export HELIX_CACHE_DIR="/userdata/helixscreen/cache"
+    # Cache and logs live beside the payload, never inside it. The install root
+    # is what an update replaces, and not only by our own hand: a Moonraker
+    # `type: web` entry does shutil.rmtree(path) before extracting. Anything
+    # under it goes on every update - logs vanish exactly when someone needs
+    # them, and the thumbnail cache is rebuilt from nothing.
+    export HELIX_CACHE_DIR="${HELIX_CACHE_DIR:-/userdata/helixscreen-state/cache}"
     # Force DRM device — skip auto-detection which may race with connector state
-    export HELIX_DRM_DEVICE="/dev/dri/card0"
+    export HELIX_DRM_DEVICE="${HELIX_DRM_DEVICE:-/dev/dri/card0}"
 
     # Recover the camera supervisor if a prior helixscreen build killed it.
     # Idempotent: no-op when lmd is already alive.
@@ -371,9 +430,18 @@ platform_pre_start() {
     # Must NOT block boot or strand the device if helix later dies.
     ensure_wifi_associated
 
+    # Start SSH when the stock Root Access toggle is on (no-op otherwise).
+    ensure_root_ssh
+
     # Serve the live UI to Mainsail/Fluidd via the firmware's fb-http tool when
     # the PAXX `web remote_screen` toggle is on (no-op otherwise).
     start_remote_screen
+
+    # Opt into the launcher's boot-time respawn self-heal (busybox init does
+    # not respawn S99 children). Supplied here, not at file scope: the init
+    # script sources this file, and a file-scope export would outrank
+    # helixscreen.env when the launcher inherits it.
+    export HELIX_BOOT_RESPAWN_MAX="${HELIX_BOOT_RESPAWN_MAX:-3}"
 
     return 0
 }
@@ -381,14 +449,6 @@ platform_pre_start() {
 platform_post_stop() {
     # Stop the remote-screen server we started in platform_pre_start.
     stop_remote_screen
-
-    # Kill the keepalive process if still running
-    if [ -n "$DRM_KEEPALIVE_PID" ]; then
-        kill "$DRM_KEEPALIVE_PID" 2>/dev/null || true
-        wait "$DRM_KEEPALIVE_PID" 2>/dev/null || true
-        echo "DRM keepalive: cleaned up process $DRM_KEEPALIVE_PID"
-        DRM_KEEPALIVE_PID=""
-    fi
 
     # Do NOT restart /usr/bin/gui — the stock Snapmaker UI takes ownership of
     # wpa_supplicant on launch and drops the active WiFi connection, breaking

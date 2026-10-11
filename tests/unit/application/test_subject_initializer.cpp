@@ -18,6 +18,8 @@
 #include "../../lvgl_test_fixture.h"
 #include "observer_factory.h"
 #include "runtime_config.h"
+#include "settings_manager.h"
+#include "subject_initializer.h"
 
 #include <atomic>
 #include <string>
@@ -147,12 +149,13 @@ TEST_CASE_METHOD(LVGLTestFixture, "ObserverGuard RAII removes observer on destru
 
     {
         // Create observer in inner scope
-        auto guard = helix::ui::observe_int_sync<TestReceiver>(
-            &subject, &receiver, [](TestReceiver* r, int /*value*/) { r->counter->fetch_add(1); });
+        auto guard = helix::ui::observe<int>(
+            &subject, &receiver, [](TestReceiver* r, int /*value*/) { r->counter->fetch_add(1); },
+            subject_never_freed());
 
         REQUIRE(guard); // Guard should be valid
 
-        // observe_int_sync defers callbacks via queue_update(), so we must
+        // observe<int> defers callbacks via queue_update(), so we must
         // drain the update queue to process the initial subscription callback
         process_lvgl(10);
         REQUIRE(callback_count.load() == 1); // Initial callback on subscription
@@ -201,12 +204,13 @@ TEST_CASE_METHOD(LVGLTestFixture, "ObserverGuard move semantics transfer ownersh
     ObserverGuard outer_guard; // Empty guard
 
     {
-        auto inner_guard = helix::ui::observe_int_sync<TestReceiver>(
-            &subject, &receiver, [](TestReceiver* r, int /*value*/) { r->counter->fetch_add(1); });
+        auto inner_guard = helix::ui::observe<int>(
+            &subject, &receiver, [](TestReceiver* r, int /*value*/) { r->counter->fetch_add(1); },
+            subject_never_freed());
 
         REQUIRE(inner_guard);
 
-        // observe_int_sync defers callbacks via queue_update(), drain the queue
+        // observe<int> defers callbacks via queue_update(), drain the queue
         process_lvgl(10);
         REQUIRE(callback_count.load() == 1);
 
@@ -235,4 +239,18 @@ TEST_CASE_METHOD(LVGLTestFixture, "ObserverGuard move semantics transfer ownersh
     REQUIRE(callback_count.load() == 0); // No callback after reset
 
     lv_subject_deinit(&subject);
+}
+
+// Panels built by init_panels() observe the language subject from their
+// constructors, and LVGL refuses an observer on a subject not yet initialised.
+TEST_CASE_METHOD(LVGLTestFixture, "Settings subjects are live once core and state subjects are",
+                 "[application][subjects][i18n]") {
+    auto& settings = helix::SettingsManager::instance();
+    settings.deinit_subjects();
+    REQUIRE_FALSE(settings.are_subjects_initialized());
+
+    SubjectInitializer subjects;
+    subjects.init_core_and_state();
+
+    CHECK(settings.are_subjects_initialized());
 }

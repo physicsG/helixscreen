@@ -2,9 +2,28 @@ name: Code Quality
 
 on:
   push:
-    branches: [ main, "claude/**", "release/**" ]
+    branches:
+      - main
+      - "claude/**"
+      # Report branches carry a worker's STATUS.md over a full tree. Nothing
+      # in them is code, and each push otherwise queues a whole build.
+      - "!claude/report-*"
+      - "release/**"
   pull_request:
     branches: [ main, "release/**" ]
+
+# A push to a claude/** work branch is superseded within minutes on a busy day,
+# and this workflow can hold a runner for hours. Keying the group on the ref
+# lets a newer push cancel the older run there. main and release/** key on the
+# SHA instead, so every commit that lands keeps its own run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || (startsWith(github.ref, 'refs/heads/release/') && github.sha || github.ref) }}
+  cancel-in-progress: true
+
+# Every patch is judged from clean here (see build.yml for why the flag is
+# environment-wide rather than per-step).
+env:
+  HELIX_PATCHES_FROM_CLEAN: "1"
 
 jobs:
   quality-checks:

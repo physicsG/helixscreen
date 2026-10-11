@@ -6,7 +6,10 @@
  * @brief Unit tests for AsyncLifetimeGuard — generation-counter-based async callback safety
  */
 
+#include "ui_next_tick.h"
+
 #include "../lvgl_test_fixture.h"
+#include "../ui_test_utils.h"
 #include "async_lifetime_guard.h"
 
 #include <spdlog/spdlog.h>
@@ -130,6 +133,26 @@ TEST_CASE_METHOD(LVGLTestFixture, "Defer with tag skips when invalidated", "[lif
 
     helix::ui::UpdateQueue::instance().drain();
     REQUIRE_FALSE(ran);
+}
+
+// Every defer form reports a skipped callback to the telemetry counter, tagged
+// or not, guard or token: the skip rate is only meaningful if nothing escapes it.
+TEST_CASE_METHOD(LVGLTestFixture, "Every defer form counts a skip after enqueue",
+                 "[lifetime_guard][telemetry]") {
+    drain_skip_counters();
+    AsyncLifetimeGuard guard;
+    auto tok = guard.token();
+    bool ran = false;
+
+    guard.defer([&ran]() { ran = true; });
+    guard.defer("test::guard_tagged", [&ran]() { ran = true; });
+    tok.defer([&ran]() { ran = true; });
+    tok.defer("test::token_tagged", [&ran]() { ran = true; });
+    guard.invalidate();
+
+    helix::ui::UpdateQueue::instance().drain();
+    REQUIRE_FALSE(ran);
+    REQUIRE(helix::async_lifetime::take_snapshot().total == 4);
 }
 
 TEST_CASE_METHOD(LVGLTestFixture, "Defer safe after guard destroyed", "[lifetime_guard]") {
@@ -665,6 +688,27 @@ TEST_CASE_METHOD(LVGLTestFixture, "AsyncLifetimeGuard::bg_cb skip path increment
     REQUIRE(snap.entries[0].tag == "TestProducer::bg_cb");
 }
 
+// A bg_cb wrapper built on the main thread and invoked from a background
+// thread runs its body on the main thread, with the argument copied across.
+TEST_CASE_METHOD(LVGLTestFixture, "AsyncLifetimeGuard::bg_cb marshals a bg call to main",
+                 "[lifetime_guard]") {
+    AsyncLifetimeGuard guard;
+    const auto main_id = std::this_thread::get_id();
+    std::thread::id ran_on;
+    std::string got;
+
+    auto cb = guard.bg_cb("TestProducer::bg_marshal", [&](const std::string& v) {
+        ran_on = std::this_thread::get_id();
+        got = v;
+    });
+    std::thread([&cb] { cb(std::string("from-bg")); }).join();
+
+    REQUIRE(got.empty());
+    helix::ui::UpdateQueue::instance().drain();
+    REQUIRE(got == "from-bg");
+    REQUIRE(ran_on == main_id);
+}
+
 TEST_CASE_METHOD(LVGLTestFixture, "Non-skipped callbacks do NOT increment counter",
                  "[lifetime_guard][telemetry]") {
     drain_skip_counters();
@@ -683,4 +727,36 @@ TEST_CASE_METHOD(LVGLTestFixture, "Non-skipped callbacks do NOT increment counte
     auto snap = helix::async_lifetime::take_snapshot();
     REQUIRE(snap.total == 0);
     REQUIRE(snap.entries.empty());
+}
+
+// ============================================================================
+// run_next_tick
+// ============================================================================
+
+TEST_CASE_METHOD(LVGLTestFixture, "run_next_tick token form skips an invalidated owner",
+                 "[lifetime_guard][next_tick]") {
+    AsyncLifetimeGuard guard;
+    bool ran = false;
+
+    helix::ui::run_next_tick(guard.token(), [&ran]() { ran = true; });
+    guard.invalidate();
+    lv_timer_handler_safe();
+
+    REQUIRE_FALSE(ran);
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "run_next_tick runs on the next tick, not inline",
+                 "[lifetime_guard][next_tick]") {
+    AsyncLifetimeGuard guard;
+    int guarded = 0;
+    int unowned = 0;
+
+    helix::ui::run_next_tick(guard.token(), [&guarded]() { ++guarded; });
+    helix::ui::run_next_tick([&unowned]() { ++unowned; });
+    REQUIRE(guarded == 0);
+    REQUIRE(unowned == 0);
+
+    lv_timer_handler_safe();
+    REQUIRE(guarded == 1);
+    REQUIRE(unowned == 1);
 }

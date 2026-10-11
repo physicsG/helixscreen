@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<component>
+  <view extends="lv_obj" width="100%" height="100%">
+    <lv_label name="subscribe-demo__temp_label" bind_text="subscribe-demo__temp"/>
+  </view>
+</component>

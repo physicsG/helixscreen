@@ -12,6 +12,9 @@ class LockManagerTestAccess {
         mgr.locked_ = false;
         mgr.auto_lock_ = false;
     }
+    static const std::string& pin_hash(const helix::LockManager& mgr) {
+        return mgr.pin_hash_;
+    }
 };
 
 TEST_CASE("LockManager: no PIN set by default", "[lock]") {
@@ -32,6 +35,16 @@ TEST_CASE("LockManager: set and verify PIN", "[lock]") {
     CHECK_FALSE(mgr.verify_pin("0000"));
     CHECK_FALSE(mgr.verify_pin("12345"));
     CHECK_FALSE(mgr.verify_pin(""));
+}
+
+TEST_CASE("LockManager: the stored PIN hash is lowercase hex SHA-256", "[lock]") {
+    // Hashes saved by existing installs must keep verifying.
+    auto& mgr = helix::LockManager::instance();
+    LockManagerTestAccess::reset(mgr);
+
+    mgr.set_pin("1234");
+    CHECK(LockManagerTestAccess::pin_hash(mgr) ==
+          "03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4");
 }
 
 TEST_CASE("LockManager: lock and unlock", "[lock]") {

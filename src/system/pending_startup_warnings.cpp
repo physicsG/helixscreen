@@ -20,7 +20,7 @@ PendingStartupWarnings& PendingStartupWarnings::instance() {
     return s_instance;
 }
 
-void PendingStartupWarnings::enqueue(Severity severity, std::string message) {
+void PendingStartupWarnings::enqueue(Severity severity, std::string message, uint32_t duration_ms) {
     std::lock_guard<std::mutex> lock(mu_);
     if (pending_.size() >= MAX_PENDING) {
         // Log once per overflow boundary — not once per drop.
@@ -37,26 +37,26 @@ void PendingStartupWarnings::enqueue(Severity severity, std::string message) {
     // tries DRM first and then falls back to fbdev for software rotation. The
     // user should see one toast, not one per backend that hit the same condition.
     if (std::any_of(pending_.begin(), pending_.end(), [&](const auto& entry) {
-            return entry.first == severity && entry.second == message;
+            return entry.severity == severity && entry.message == message;
         })) {
         return;
     }
-    pending_.emplace_back(severity, std::move(message));
+    pending_.push_back(Entry{severity, std::move(message), duration_ms});
 }
 
 void PendingStartupWarnings::drain(
-    const std::function<void(Severity, const std::string&)>& on_warning) {
+    const std::function<void(Severity, const std::string&, uint32_t)>& on_warning) {
     // Swap under the lock, then invoke callbacks without holding it. This
     // avoids any risk of the callback re-entering enqueue() (e.g. from a
     // toast implementation that logs something), and keeps the lock hold
     // time minimal.
-    std::vector<std::pair<Severity, std::string>> local;
+    std::vector<Entry> local;
     {
         std::lock_guard<std::mutex> lock(mu_);
         local.swap(pending_);
     }
     for (const auto& entry : local) {
-        on_warning(entry.first, entry.second);
+        on_warning(entry.severity, entry.message, entry.duration_ms);
     }
 }
 

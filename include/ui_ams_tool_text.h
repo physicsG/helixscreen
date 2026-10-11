@@ -8,4 +8,7 @@ namespace helix::ui {
 /// Call once after AmsState subjects are initialized.
 void init_ams_tool_text_observers();
 
+/// Publish the current tool's label again, in the current language.
+void refresh_ams_tool_text();
+
 } // namespace helix::ui

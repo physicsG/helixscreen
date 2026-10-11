@@ -5,21 +5,22 @@
  * @file test_grid_edit_drag_path.cpp
  * @brief Drives a real drag through GridEditMode's instance methods.
  *
- * The four public statics (screen_to_grid_cell, round_to_grid_cell,
- * compute_resize_result, clamp_span) are well covered elsewhere, but nothing
- * exercises the geometry as the live drag path actually calls it —
- * handle_drag_move() reads current_metrics() and CellMetrics::gutter directly,
- * and no existing test drives that call. This test seeds a real pointer
- * device, drags a widget through GridEditMode's own event handlers, and
- * asserts the snap target the drag actually lands on, so that corrupting the
- * gutter inside handle_drag_move() is caught (it previously was not: the same
- * mutation passed all 67 pre-existing [grid_edit] tests).
+ * The public statics (screen_to_grid_cell, round_to_grid_cell,
+ * compute_resize_result, clamp_span) have their own tests. These drive the
+ * geometry the way the live drag path calls it: handle_drag_move() reads
+ * current_metrics() and CellMetrics::gutter directly, so a real pointer device
+ * drags a widget through GridEditMode's own event handlers and the tests assert
+ * the snap target the drag lands on, which a gutter-blind pitch moves to another
+ * cell. The [1169] cases pin the point handle_drag_start() classifies a
+ * gesture from.
  */
 
 #include "ui_breakpoint.h"
 
 #include "../test_fixtures.h"
 #include "../test_helpers/grid_edit_mode_test_access.h"
+#include "../test_helpers/scoped_pointer_indev.h"
+#include "../test_helpers/scoped_whole_cell_def.h"
 #include "config.h"
 #include "grid_edit_mode.h"
 #include "grid_layout.h"
@@ -33,66 +34,9 @@
 #include "../catch_amalgamated.hpp"
 
 using namespace helix;
+using helix_test::ScopedPointerIndev;
 
 namespace {
-
-/// State consumed by the synthetic indev's read callback. File-scope, not a
-/// stack local: LVGL retains the indev (and therefore this callback) for as
-/// long as the indev exists, and ScopedTestIndev below is what bounds that
-/// lifetime to the test.
-struct DragIndevState {
-    lv_point_t point{0, 0};
-    lv_indev_state_t state{LV_INDEV_STATE_RELEASED};
-};
-
-DragIndevState g_drag_indev_state;
-
-void drag_indev_read_cb(lv_indev_t* /*indev*/, lv_indev_data_t* data) {
-    data->point = g_drag_indev_state.point;
-    data->state = g_drag_indev_state.state;
-}
-
-/// Owns a hand-rolled pointer indev for the duration of one test.
-///
-/// lv_indev_active() (which handle_drag_start()/handle_drag_move() call
-/// through lv_indev_get_point()) is non-null ONLY while lv_indev_read() is on
-/// the stack (lib/lvgl/src/indev/lv_indev.c:229-296) — there is no public
-/// setter — so every call into GridEditMode's handlers has to happen from
-/// inside send() below, not from a bare event dispatch.
-///
-/// Unlike the file-static virtual_indev in ui_test_utils.cpp (deliberately
-/// left for the whole binary's lifetime, cleaned up by lv_deinit()), this one
-/// is deleted at scope exit: lv_indev_create() also arms a periodic read
-/// timer, and an un-deleted indev would keep polling g_drag_indev_state on
-/// every later test's process_lvgl()/lv_timer_handler() call for the rest of
-/// the binary's run.
-class ScopedTestIndev {
-  public:
-    ScopedTestIndev() {
-        indev_ = lv_indev_create();
-        lv_indev_set_type(indev_, LV_INDEV_TYPE_POINTER);
-        lv_indev_set_read_cb(indev_, drag_indev_read_cb);
-    }
-    ~ScopedTestIndev() {
-        g_drag_indev_state.state = LV_INDEV_STATE_RELEASED;
-        lv_indev_delete(indev_);
-    }
-    ScopedTestIndev(const ScopedTestIndev&) = delete;
-    ScopedTestIndev& operator=(const ScopedTestIndev&) = delete;
-
-    /// Set the point/state and drive one read cycle. Dispatches PRESSED and/or
-    /// PRESSING (or RELEASED/CLICKED) synchronously, bubbling from whatever the
-    /// point hits up to the container — see the LV_OBJ_FLAG_EVENT_BUBBLE note
-    /// on dots_overlay_ below for why that reaches our forwarding callback.
-    void send(int x, int y, lv_indev_state_t state) {
-        g_drag_indev_state.point = {x, y};
-        g_drag_indev_state.state = state;
-        lv_indev_read(indev_);
-    }
-
-  private:
-    lv_indev_t* indev_ = nullptr;
-};
 
 /// Forwards LV_EVENT_PRESSING to the GridEditMode instance under test — the
 /// same wiring HomePanel::on_home_grid_pressing uses in production
@@ -107,6 +51,7 @@ void forward_pressing(lv_event_t* e) {
 
 TEST_CASE_METHOD(XMLTestFixture, "GridEditMode: real drag lands on the gutter-aware snap target",
                  "[grid_edit][grid_edit_drag]") {
+    ScopedWholeCellDef whole_cell("humidity");
     // theme_manager_get_spacing() reads "ui_xml" as a path relative to the
     // process's cwd. Run this test from anywhere but the repo root and the
     // token silently resolves to 0 — gutters vanish and the whole test
@@ -166,7 +111,7 @@ TEST_CASE_METHOD(XMLTestFixture, "GridEditMode: real drag lands on the gutter-aw
     constexpr int COLSPAN = GridLayout::TRACKS_PER_CELL;
     constexpr int ROWSPAN = GridLayout::TRACKS_PER_CELL;
     lv_obj_t* widget = lv_obj_create(container);
-    lv_obj_set_name(widget, "temperature");
+    lv_obj_set_name(widget, "humidity");
     lv_obj_remove_flag(widget, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_grid_cell(widget, LV_GRID_ALIGN_STRETCH, 0, COLSPAN, LV_GRID_ALIGN_STRETCH, 0,
                          ROWSPAN);
@@ -188,7 +133,7 @@ TEST_CASE_METHOD(XMLTestFixture, "GridEditMode: real drag lands on the gutter-aw
                         {{{"id", "main"}, {"widgets", nlohmann::json::array()}},
                          {{"id", "spy"},
                           {"widgets",
-                           {{{"id", "temperature"},
+                           {{{"id", "humidity"},
                              {"enabled", true},
                              {"col", 0},
                              {"row", 0},
@@ -201,14 +146,14 @@ TEST_CASE_METHOD(XMLTestFixture, "GridEditMode: real drag lands on the gutter-aw
     auto& config = mgr.get_widget_config(panel_id);
     constexpr int PAGE_INDEX = 1; // "spy" page above
 
-    // Sanity check on the config wiring itself, not the drag: "temperature" is
+    // Sanity check on the config wiring itself, not the drag: "humidity" is
     // a real registered widget ID (panel_widget_registry.cpp) — an ID
     // parse_widget_array() doesn't recognize is silently dropped
     // (find_widget_def() == nullptr), which would make the drag below fail
     // with "widget not in config" rather than a snap-target mismatch.
     const auto& spy_entries = config.page_entries(static_cast<size_t>(PAGE_INDEX));
     REQUIRE(spy_entries.size() == 1);
-    REQUIRE(spy_entries[0].id == "temperature");
+    REQUIRE(spy_entries[0].id == "humidity");
 
     GridEditMode em;
     em.enter(container, &config, PAGE_INDEX);
@@ -225,14 +170,13 @@ TEST_CASE_METHOD(XMLTestFixture, "GridEditMode: real drag lands on the gutter-aw
     // build the expectation could not tell a correct helper from a broken
     // one.
     //
-    // Snap resolution: "temperature" halves on neither axis, so
+    // Snap resolution: "humidity" is held to whole cells here, so
     // snap_step_for() hands round_to_grid_cell() a step of TRACKS_PER_CELL and
     // every reachable target is an EVEN track index. Assert that here — if the
-    // registry ever grants this widget half-cell support the step drops to 1,
-    // every expectation below shifts, and the test must be re-derived rather
-    // than left to fail on an arithmetic mismatch that looks like a geometry
-    // regression.
-    const auto* drag_def = helix::find_widget_def("temperature");
+    // override is ever dropped the step falls to 1, every expectation below
+    // shifts, and the test must be re-derived rather than left to fail on an
+    // arithmetic mismatch that looks like a geometry regression.
+    const auto* drag_def = helix::find_widget_def("humidity");
     REQUIRE(drag_def != nullptr);
     REQUIRE_FALSE(drag_def->supports_half_col);
     REQUIRE_FALSE(drag_def->supports_half_row);
@@ -240,14 +184,13 @@ TEST_CASE_METHOD(XMLTestFixture, "GridEditMode: real drag lands on the gutter-aw
 
     // Column target = track 8. With step 2 the decision boundary between
     // landing on 8 and on 10 sits at track 9, so the landing point is placed
-    // midway between where the CORRECT pitch puts track 9 (9*60 = 540px) and
-    // where the GUTTER-BLIND pitch puts it (m.gutter treated as 0, content/cols
+    // midway between where the correct pitch puts track 9 (9*60 = 540px) and
+    // where a gutter-blind pitch puts it (m.gutter treated as 0, content/cols
     // instead of (content-(n-1)*gutter)/n + gutter: 9*59.58 = 536.25px). That
-    // single pixel is below the correct boundary and above the buggy one, so
-    // the mutation flips the result from 8 to 10 — exactly what Step 6
-    // introduces. Both 8 and 10 are <= the max valid target_col
-    // (ncols - colspan == 10), so neither gets clamped back onto the other and
-    // the mutation stays observable rather than masked.
+    // single pixel is below the correct boundary and above the gutter-blind
+    // one, so a drag path that ignores the gutter lands on 10 instead of 8.
+    // Both 8 and 10 are <= the max valid target_col (ncols - colspan == 10), so
+    // neither is clamped back onto the other.
     const float pitch_correct_col =
         static_cast<float>(content_w + gutter) / static_cast<float>(ncols);
     const float pitch_buggy_col = static_cast<float>(content_w) / static_cast<float>(ncols);
@@ -268,7 +211,7 @@ TEST_CASE_METHOD(XMLTestFixture, "GridEditMode: real drag lands on the gutter-aw
     const int target_y = content_area.y1 + target_px_y;
 
     // --- Drive the drag ---------------------------------------------------
-    ScopedTestIndev indev;
+    ScopedPointerIndev indev;
 
     lv_area_t sel_area;
     lv_obj_get_coords(widget, &sel_area);
@@ -370,7 +313,7 @@ TEST_CASE_METHOD(XMLTestFixture,
     lv_obj_set_style_pad_row(container, gutter, 0);
 
     lv_obj_t* widget = lv_obj_create(container);
-    lv_obj_set_name(widget, "temperature");
+    lv_obj_set_name(widget, "humidity");
     lv_obj_remove_flag(widget, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_grid_cell(widget, LV_GRID_ALIGN_STRETCH, 0, COLSPAN, LV_GRID_ALIGN_STRETCH, 0,
                          ROWSPAN);
@@ -386,7 +329,7 @@ TEST_CASE_METHOD(XMLTestFixture,
                         {{{"id", "main"}, {"widgets", nlohmann::json::array()}},
                          {{"id", "spy"},
                           {"widgets",
-                           {{{"id", "temperature"},
+                           {{{"id", "humidity"},
                              {"enabled", true},
                              {"col", 0},
                              {"row", 0},
@@ -401,7 +344,7 @@ TEST_CASE_METHOD(XMLTestFixture,
 
     const auto& spy_entries = config.page_entries(static_cast<size_t>(PAGE_INDEX));
     REQUIRE(spy_entries.size() == 1);
-    REQUIRE(spy_entries[0].id == "temperature");
+    REQUIRE(spy_entries[0].id == "humidity");
 
     GridEditMode em;
     em.enter(container, &config, PAGE_INDEX);
@@ -413,7 +356,7 @@ TEST_CASE_METHOD(XMLTestFixture,
     lv_area_t content_area;
     lv_obj_get_content_coords(container, &content_area);
 
-    ScopedTestIndev indev;
+    ScopedPointerIndev indev;
 
     lv_area_t sel_area;
     lv_obj_get_coords(widget, &sel_area);
@@ -453,16 +396,15 @@ TEST_CASE_METHOD(XMLTestFixture,
 // handle_drag_start's ownership guard is anchored at the press origin (#1169)
 // ===========================================================================
 //
-// A unit test of press_owns_widget() proves the predicate but cannot prove
-// which point handle_drag_start() feeds it — verified empirically: reverting
-// the call site to the live pointer left the whole [1169] pure-function set
-// green. Only a gesture driven through the real indev reaches that call site,
-// so these two tests live here, next to the harness that can do it.
+// press_owns_widget()'s own tests pin the predicate, not which point
+// handle_drag_start() feeds it. Only a gesture driven through the real indev
+// reaches that call site, so these two tests live here, next to the harness
+// that can drive one.
 
 namespace {
 
 /// Shared setup for the two guard tests below: a container with a real grid
-/// descriptor and one 2x2 "temperature" widget on a private page.
+/// descriptor and one 2x2 "humidity" widget on a private page.
 ///
 /// Mirrors the first test's setup because that is this file's convention
 /// (each test owns its geometry — the second test deliberately builds a
@@ -520,7 +462,7 @@ GuardFixture make_guard_fixture(lv_obj_t* parent, const std::string& panel_id) {
     constexpr int COLSPAN = GridLayout::TRACKS_PER_CELL;
     constexpr int ROWSPAN = GridLayout::TRACKS_PER_CELL;
     f.widget = lv_obj_create(f.container);
-    lv_obj_set_name(f.widget, "temperature");
+    lv_obj_set_name(f.widget, "humidity");
     lv_obj_remove_flag(f.widget, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_grid_cell(f.widget, LV_GRID_ALIGN_STRETCH, 0, COLSPAN, LV_GRID_ALIGN_STRETCH, 0,
                          ROWSPAN);
@@ -535,7 +477,7 @@ GuardFixture make_guard_fixture(lv_obj_t* parent, const std::string& panel_id) {
                         {{{"id", "main"}, {"widgets", nlohmann::json::array()}},
                          {{"id", "spy"},
                           {"widgets",
-                           {{{"id", "temperature"},
+                           {{{"id", "humidity"},
                              {"enabled", true},
                              {"col", 0},
                              {"row", 0},
@@ -549,7 +491,7 @@ GuardFixture make_guard_fixture(lv_obj_t* parent, const std::string& panel_id) {
 
     const auto& entries = f.config->page_entries(static_cast<size_t>(f.page_index));
     REQUIRE(entries.size() == 1);
-    REQUIRE(entries[0].id == "temperature");
+    REQUIRE(entries[0].id == "humidity");
     return f;
 }
 
@@ -560,9 +502,9 @@ TEST_CASE_METHOD(XMLTestFixture,
                  "[grid_edit][grid_edit_drag][resize][1169]") {
     // Growing a widget drags AWAY from it: the finger starts on the edge and
     // travels outward. By the time DRAG_THRESHOLD_PX is crossed the live
-    // pointer is legitimately off-widget, so a guard that tests the live
-    // pointer drops exactly the gestures that should have become resizes —
-    // shrinking (which drags inward) worked, growing never did.
+    // pointer is legitimately off-widget, so a guard that tested the live
+    // pointer would drop exactly the gestures that should become resizes,
+    // while a shrink, which drags inward, would still pass.
     GuardFixture f = make_guard_fixture(test_screen(), "test_grid_edit_guard_grow");
 
     GridEditMode em;
@@ -572,7 +514,7 @@ TEST_CASE_METHOD(XMLTestFixture,
 
     lv_obj_add_event_cb(f.container, forward_pressing, LV_EVENT_PRESSING, &em);
 
-    ScopedTestIndev indev;
+    ScopedPointerIndev indev;
     lv_area_t sel_area;
     lv_obj_get_coords(f.widget, &sel_area);
 
@@ -582,7 +524,7 @@ TEST_CASE_METHOD(XMLTestFixture,
     // Preconditions, asserted so a geometry or registry change fails loudly
     // instead of making the assertion below vacuous.
     //  - the origin must classify as Right, not a corner;
-    //  - "temperature" must still be scalable, or handle_drag_start() takes
+    //  - "humidity" must still be scalable, or handle_drag_start() takes
     //    the move path and resizing_ stays false for an unrelated reason.
     REQUIRE(em.detect_resize_edge(origin.x, origin.y, sel_area) == GridEditMode::ResizeEdge::Right);
 
@@ -598,7 +540,7 @@ TEST_CASE_METHOD(XMLTestFixture,
 
     // resizing_ + resize_edge_ are the direct witness: together they prove the
     // gesture was admitted by the guard AND classified as the right-hand edge.
-    // resize_preview_ alone would only prove the branch ran; dragging_ tells a
+    // The resize outline alone would only prove the branch ran; dragging_ tells a
     // gesture dropped at the guard apart from one that fell through to a move.
     CHECK(GridEditModeTestAccess::resizing(em));
     CHECK(GridEditModeTestAccess::resize_edge(em) == GridEditMode::ResizeEdge::Right);
@@ -628,7 +570,7 @@ TEST_CASE_METHOD(XMLTestFixture,
 
     lv_obj_add_event_cb(f.container, forward_pressing, LV_EVENT_PRESSING, &em);
 
-    ScopedTestIndev indev;
+    ScopedPointerIndev indev;
     lv_area_t sel_area;
     lv_obj_get_coords(f.widget, &sel_area);
 

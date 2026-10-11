@@ -213,6 +213,14 @@ After installation:
 
 Then remove the `[helix_print]` section from `moonraker.conf` and restart Moonraker.
 
+If a HelixScreen before 1.1 had instrumented PRINT_START (the "detailed print
+preparation tracking" prompt), uninstalling also removes those marker blocks
+from whichever Klipper config file defines PRINT_START, backing up each file
+it edits as `<file>.bak.<YYYYMMDD_HHMMSS>` first. That edit takes effect at
+the next Klipper restart; `helix_macros.cfg` and its `[include]` are left in
+place, since the macros it defines are shared HelixScreen helpers, not part
+of the instrumentation.
+
 ## Troubleshooting
 
 ### Plugin not loading

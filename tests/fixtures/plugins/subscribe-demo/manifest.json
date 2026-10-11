@@ -1,0 +1,10 @@
+{
+  "id": "subscribe-demo",
+  "name": "Subscribe Demo",
+  "version": "1.0.0",
+  "widgets": [
+    {"id": "subscribe-demo__tile", "name": "Subscribe Demo", "icon": "puzzle_outline",
+     "description": "Shows the extruder temperature from a live subscription",
+     "component": "subscribe-demo__tile", "colspan": 1, "rowspan": 1}
+  ]
+}

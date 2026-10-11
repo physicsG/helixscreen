@@ -20,12 +20,12 @@ using helix::ui::temperature::HeatState;
 // other. Values here are DECIDEGREES; the animator's tolerance is 20 (= 2 deg).
 
 TEST_CASE("HeatingIconAnimator::State is the shared HeatState", "[animator][heat_state]") {
-    STATIC_REQUIRE(std::is_same_v<HeatingIconAnimator::State, HeatState>);
+    STATIC_REQUIRE(std::is_same_v<helix::ui::HeatingIconAnimator::State, HeatState>);
 }
 
 TEST_CASE("HeatingIconAnimator: unattached update does not change state",
           "[animator][heat_state]") {
-    HeatingIconAnimator animator;
+    helix::ui::HeatingIconAnimator animator;
     REQUIRE_FALSE(animator.is_attached());
     animator.update(1500, 2000);
     // update() early-returns when icon_ is null; state stays at its initial value.
@@ -61,7 +61,7 @@ TEST_CASE_METHOD(LVGLTestFixture,
                  "HeatingIconAnimator: default mode is a passthrough (nozzle/bed unaffected)",
                  "[animator][heat_state][chamber_mode]") {
     lv_obj_t* icon = lv_obj_create(test_screen());
-    HeatingIconAnimator animator;
+    helix::ui::HeatingIconAnimator animator;
     animator.attach(icon);
 
     // No mode argument — must classify identically to the plain classifier,
@@ -77,7 +77,7 @@ TEST_CASE_METHOD(LVGLTestFixture,
                  "never Heating",
                  "[animator][heat_state][chamber_mode]") {
     lv_obj_t* icon = lv_obj_create(test_screen());
-    HeatingIconAnimator animator;
+    helix::ui::HeatingIconAnimator animator;
     animator.attach(icon);
 
     // Regression case: stone cold (current=0) and far below the Maintaining
@@ -93,7 +93,7 @@ TEST_CASE_METHOD(LVGLTestFixture,
 TEST_CASE_METHOD(LVGLTestFixture, "HeatingIconAnimator: Maintaining above ceiling is Cooling",
                  "[animator][heat_state][chamber_mode]") {
     lv_obj_t* icon = lv_obj_create(test_screen());
-    HeatingIconAnimator animator;
+    helix::ui::HeatingIconAnimator animator;
     animator.attach(icon);
 
     animator.update(2500, 2000, ChamberMode::Maintaining);
@@ -113,7 +113,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "HeatingIconAnimator: Maintaining mode never p
     // off — without this the state machine is never even consulted.
     helix::ui::ScopedAnimationsEnabled animations_on;
     lv_obj_t* icon = lv_obj_create(test_screen());
-    HeatingIconAnimator animator;
+    helix::ui::HeatingIconAnimator animator;
     animator.attach(icon);
 
     animator.update(0, 2000, ChamberMode::Maintaining); // coldest possible input
@@ -130,7 +130,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "HeatingIconAnimator: Heating mode still pulse
                  "[animator][heat_state][chamber_mode]") {
     helix::ui::ScopedAnimationsEnabled animations_on;
     lv_obj_t* icon = lv_obj_create(test_screen());
-    HeatingIconAnimator animator;
+    helix::ui::HeatingIconAnimator animator;
     animator.attach(icon);
 
     animator.update(1500, 2000, ChamberMode::Heating);

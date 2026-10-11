@@ -532,8 +532,34 @@ TEST_CASE_METHOD(LVGLUITestFixture, "Recovery dialog - DISCONNECTED hides restar
     // modal_button_row's leading divider with it, so no orphaned rule is left behind.
     REQUIRE(lv_obj_has_flag(restart_row, LV_OBJ_FLAG_HIDDEN));
 
-    // Dismiss always visible
+    // The close X is always visible, and with the restart row hidden it is the
+    // only way out, so it must actually close the dialog.
     REQUIRE_FALSE(lv_obj_has_flag(dismiss_btn, LV_OBJ_FLAG_HIDDEN));
+    lv_obj_send_event(dismiss_btn, LV_EVENT_CLICKED, nullptr);
+    process_lvgl(50);
+    CHECK(lv_obj_find_by_name(lv_screen_active(), "klipper_recovery_card") == nullptr);
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture, "Recovery dialog - close X sits in the header row",
+                 "[recovery][buttons]") {
+    auto& estop = EmergencyStopOverlay::instance();
+
+    estop.show_recovery_for(RecoveryReason::SHUTDOWN);
+    process_lvgl(50);
+
+    lv_obj_t* dialog = lv_obj_find_by_name(lv_screen_active(), "klipper_recovery_card");
+    REQUIRE(dialog != nullptr);
+    lv_obj_t* title = lv_obj_find_by_name(dialog, "recovery_title");
+    lv_obj_t* dismiss_btn = lv_obj_find_by_name(dialog, "recovery_dismiss_btn");
+    REQUIRE(title != nullptr);
+    REQUIRE(dismiss_btn != nullptr);
+
+    CHECK(lv_obj_get_parent(dismiss_btn) == lv_obj_get_parent(title));
+    // The restart row is the card's last child: nothing sits below it.
+    lv_obj_t* restart_row = lv_obj_find_by_name(dialog, "recovery_restart_actions");
+    REQUIRE(restart_row != nullptr);
+    CHECK(lv_obj_get_index(restart_row) ==
+          static_cast<int32_t>(lv_obj_get_child_count(dialog)) - 1);
 }
 
 TEST_CASE_METHOD(LVGLUITestFixture, "Recovery dialog - SHUTDOWN then DISCONNECTED updates buttons",
@@ -573,7 +599,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "Recovery dialog - SHUTDOWN shows state_mess
     const std::string error_msg = "flashforge_loadcell: Max force exceeded. Last weight was: 912g\n"
                                   "Once the underlying issue is corrected, use the\n"
                                   "\"FIRMWARE_RESTART\" command to reset the firmware.";
-    ps.set_klippy_state_message(error_msg);
+    ps.network_state().set_klippy_state_message(error_msg);
 
     // Trigger SHUTDOWN recovery dialog — the dialog content is set in the
     // async callback which reads printer_state_->get_klippy_state_message()
@@ -598,7 +624,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     estop.init(ps, nullptr);
 
     // Ensure no stale state_message from previous test
-    ps.set_klippy_state_message("");
+    ps.network_state().set_klippy_state_message("");
 
     // No state_message set — should show generic text
     estop.show_recovery_for(RecoveryReason::SHUTDOWN);
@@ -621,7 +647,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "Recovery dialog - DISCONNECTED ignores stat
     estop.init(ps, nullptr);
 
     // Even with a state_message set, DISCONNECTED should show its own text
-    ps.set_klippy_state_message("some error");
+    ps.network_state().set_klippy_state_message("some error");
 
     estop.show_recovery_for(RecoveryReason::DISCONNECTED);
     process_lvgl(50);
@@ -668,7 +694,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "Recovery dialog - pure JSON state_message s
     auto& ps = get_printer_state();
     estop.init(ps, nullptr);
 
-    ps.set_klippy_state_message(
+    ps.network_state().set_klippy_state_message(
         R"({"code":"key1", "msg":"Internal error during ready callback: No active exception to reraise"})");
 
     estop.show_recovery_for(RecoveryReason::SHUTDOWN);
@@ -698,7 +724,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "Recovery dialog - embedded JSON state_messa
 
     // K2 shape: prose prefix with the envelope spliced in after a bang. key9001 is
     // deliberately absent from the CFS table, so this exercises the plain msg path.
-    ps.set_klippy_state_message(
+    ps.network_state().set_klippy_state_message(
         R"(Internal error during connect: !{"code":"key9001","msg":"MCU 'mcu' shutdown"})");
 
     estop.show_recovery_for(RecoveryReason::SHUTDOWN);
@@ -724,7 +750,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "Recovery dialog - known CFS code gets curat
     // key298 has a CFS_ERROR_TABLE entry, so the decoder replaces Klipper's terse msg
     // with the curated message + recovery hint. That substitution is the point of
     // routing through clean_error_text() rather than reimplementing a JSON strip.
-    ps.set_klippy_state_message(R"({"code":"key298","msg":"MCU 'mcu' shutdown"})");
+    ps.network_state().set_klippy_state_message(R"({"code":"key298","msg":"MCU 'mcu' shutdown"})");
 
     estop.show_recovery_for(RecoveryReason::SHUTDOWN);
     process_lvgl(100);
@@ -749,7 +775,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "Recovery dialog - plain-prose state_message
 
     // Guards against an over-eager decoder mangling the common non-JSON case.
     const std::string prose = "flashforge_loadcell: Max force exceeded. Last weight was: 912g";
-    ps.set_klippy_state_message(prose);
+    ps.network_state().set_klippy_state_message(prose);
 
     estop.show_recovery_for(RecoveryReason::SHUTDOWN);
     process_lvgl(100);
@@ -773,7 +799,8 @@ TEST_CASE_METHOD(LVGLUITestFixture, "Recovery dialog - truncated JSON falls back
 
     // Unterminated envelope: brace-balancing never closes. The user must still see
     // something, so the raw string is shown rather than an empty dialog.
-    ps.set_klippy_state_message(R"({"code":"key1", "msg":"No active exception to reraise)");
+    ps.network_state().set_klippy_state_message(
+        R"({"code":"key1", "msg":"No active exception to reraise)");
 
     estop.show_recovery_for(RecoveryReason::SHUTDOWN);
     process_lvgl(100);

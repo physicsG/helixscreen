@@ -41,14 +41,12 @@
             width="100%" height="content" style_pad_all="0" flex_flow="row_wrap" style_pad_column="#space_xs"
             style_pad_row="#space_xs" scrollable="false" clickable="false" event_bubble="true">
       <ui_button name="idle_reprint_btn"
-                 width="content" height="#button_height_sm" flex_grow="1" variant="outline" text="Reprint Last"
-                 translation_tag="Reprint Last">
+                 width="content" height="#button_height_sm" flex_grow="1" variant="outline" text="Reprint Last">
         <bind_state_if_eq subject="print_status_idle_has_last" state="disabled" ref_value="0"/>
         <event_cb trigger="clicked" callback="library_last_cb"/>
       </ui_button>
       <ui_button name="idle_queue_btn"
-                 width="content" height="#button_height_sm" flex_grow="1" variant="outline" text="Job Queue"
-                 translation_tag="Job Queue">
+                 width="content" height="#button_height_sm" flex_grow="1" variant="outline" text="Job Queue">
         <bind_flag_if_eq subject="print_status_queue_hidden" flag="hidden" ref_value="1"/>
         <event_cb trigger="clicked" callback="library_queue_cb"/>
       </ui_button>

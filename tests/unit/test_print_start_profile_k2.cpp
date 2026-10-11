@@ -11,7 +11,7 @@ using namespace helix;
 // Creality K2 Profile Tests
 //
 // Every input line below is verbatim from a K2 Plus klippy.log capture
-// (2026-08-18, three prints; see PRINT_START_OBSERVERS.md for the source).
+// (2026-08-18, three prints; see PRINT_START_PROFILES.md for the source).
 // The K2 narrates through [GCODE]/[DEBUG] respond echoes when started from
 // a path that enables them, and stays fully silent otherwise - which is why
 // the profile also enables position_signals.
@@ -66,6 +66,36 @@ TEST_CASE("PrintStartProfile: creality_k2 matches captured narration", "[profile
         // Mesh entry comes from the bed-mesh presence flap and position
         // inference instead.
         REQUIRE_FALSE(profile->try_match_pattern("[GCODE]BED_MESH_CLEAR", result));
+    }
+
+    SECTION("Our own pre-start command echo announces no phase") {
+        // The bed_mesh pre-print option sends BED_MESH_CALIBRATE_START_PRINT
+        // ahead of START_PRINT, and the K2 echoes it back. It carries
+        // BED_TEMP, EXTRUDER_TEMP and a BED_MESH_CALIBRATE prefix, so a
+        // pattern list keyed on those bare tokens enters three phases before
+        // the printer has done anything. apply_profile_match() only fires
+        // once per phase, so the premature entry also consumes the real one,
+        // pins phase_enter_times_ for the history, and sets real_signal_seen_.
+        REQUIRE_FALSE(profile->try_match_pattern(
+            "[GCODE]BED_MESH_CALIBRATE_START_PRINT GCODE_FILE='bench.gcode' "
+            "BED_TEMP=60 EXTRUDER_TEMP=220",
+            result));
+    }
+
+    SECTION("Real bed heat still announces HEATING_BED") {
+        REQUIRE(profile->try_match_pattern("[GCODE]M190 S60", result));
+        REQUIRE(result.phase == PrintStartPhase::HEATING_BED);
+    }
+
+    SECTION("Real mesh calibrate still announces BED_MESH") {
+        REQUIRE(profile->try_match_pattern("[GCODE]BED_MESH_CALIBRATE", result));
+        REQUIRE(result.phase == PrintStartPhase::BED_MESH);
+    }
+
+    SECTION("Adaptive mesh calibrate still announces BED_MESH") {
+        REQUIRE(profile->try_match_pattern("[GCODE]BED_MESH_CALIBRATE PROFILE=adaptive ADAPTIVE=1",
+                                           result));
+        REQUIRE(result.phase == PrintStartPhase::BED_MESH);
     }
 
     SECTION("Position inference enabled") {

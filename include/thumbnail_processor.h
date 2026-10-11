@@ -300,7 +300,11 @@ class ThumbnailProcessor {
     void clear_cache();
 
     /**
-     * @brief Get number of pending processing tasks
+     * @brief Get number of tasks still queued or executing
+     *
+     * Counts both: a task a worker has already picked up but not yet
+     * finished is still "pending" for any caller polling this to learn when
+     * the pool has genuinely gone quiet.
      */
     size_t pending_tasks() const;
 
@@ -310,6 +314,16 @@ class ThumbnailProcessor {
      * Useful for testing or graceful shutdown.
      */
     void wait_for_completion();
+
+    /**
+     * @brief Submit an arbitrary task to the worker pool, bypassing PNG processing
+     *
+     * Test/mock-scenario hook: gives pending_tasks() a deterministic nonzero
+     * window without needing a real thumbnail to decode, mirroring
+     * HttpExecutor::submit() for the same purpose. See mock_scenarios.cpp's
+     * "thumbnail_busy" scenario.
+     */
+    void submit_test_task(std::function<void()> task);
 
     /**
      * @brief Shutdown the processor
@@ -324,15 +338,6 @@ class ThumbnailProcessor {
     ~ThumbnailProcessor();
 
     /**
-     * @brief Generate cache filename for a source/target combination
-     *
-     * Format: {hash}_{w}x{h}_{format}.bin
-     * Example: a1b2c3d4_160x160_ARGB8888.bin
-     */
-    std::string generate_cache_filename(const std::string& source_path,
-                                        const ThumbnailTarget& target) const;
-
-    /**
      * @brief Core processing implementation
      *
      * 1. Decode PNG with stb_image
@@ -341,6 +346,7 @@ class ThumbnailProcessor {
      * 4. Convert to ARGB8888 if needed
      * 5. Write LVGL binary header + pixel data
      *
+     * @param cache_key The source's cache key, taken when the work was requested
      * @param cache_dir Cache directory path (passed explicitly for thread safety)
      * @param journal Write listener, or nullptr. Snapshotted by the caller
      *        alongside @p cache_dir for the same reason: the pair must describe
@@ -350,7 +356,8 @@ class ThumbnailProcessor {
      *        task can never contend with a shutdown() that is waiting on it.
      */
     ProcessResult do_process(const std::vector<uint8_t>& png_data, const std::string& source_path,
-                             const ThumbnailTarget& target, const std::string& cache_dir,
+                             const std::string& cache_key, const ThumbnailTarget& target,
+                             const std::string& cache_dir,
                              const std::shared_ptr<ThumbnailWriteJournal>& journal);
 
     /// Marshal a finished ProcessResult back to the main thread and fire the

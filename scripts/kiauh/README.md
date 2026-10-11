@@ -9,7 +9,7 @@ This directory contains a KIAUH (Klipper Installation And Update Helper) extensi
 The simplest way to install HelixScreen is using our bundled installer:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/prestonbrown/helixscreen/main/scripts/install.sh | sh
+curl -sSL https://releases.helixscreen.org/install.sh | sh
 ```
 
 If KIAUH is detected at `~/kiauh/kiauh/extensions/`, the installer automatically
@@ -17,7 +17,7 @@ registers the HelixScreen KIAUH extension. Pass `--skip-kiauh-registration` to
 opt out:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/prestonbrown/helixscreen/main/scripts/install.sh | sh -s -- --skip-kiauh-registration
+curl -sSL https://releases.helixscreen.org/install.sh | sh -s -- --skip-kiauh-registration
 ```
 
 After install, restart KIAUH (`~/kiauh/kiauh.sh`) and HelixScreen will appear

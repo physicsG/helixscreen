@@ -43,7 +43,8 @@ namespace helix::ui {
  * @param callback_name Name for logging (e.g., "home_button_clicked")
  * @param handler Function to execute safely
  */
-inline void event_safe_call(const char* callback_name, std::function<void()> handler) {
+template <class F> void event_safe_call(const char* callback_name, F&& handler) {
+#if defined(__cpp_exceptions)
     try {
         handler();
     } catch (const std::exception& ex) {
@@ -51,6 +52,10 @@ inline void event_safe_call(const char* callback_name, std::function<void()> han
     } catch (...) {
         spdlog::error("[LVGL Event Safety] Unknown exception in '{}'", callback_name);
     }
+#else
+    (void)callback_name;
+    handler();
+#endif
 }
 
 } // namespace helix::ui
@@ -123,13 +128,20 @@ inline void event_safe_call(const char* callback_name, std::function<void()> han
  *
  * @param callback_name String name of the callback (for logging)
  */
+// Without exceptions (the ESP32 build) nothing can be caught, so the pair is
+// a plain block.
+#if defined(__cpp_exceptions)
 #define LVGL_SAFE_EVENT_CB_BEGIN(callback_name) try {
+#else
+#define LVGL_SAFE_EVENT_CB_BEGIN(callback_name) {
+#endif
 /**
  * @brief End exception-safe event callback block
  *
  * Use this at the end of an event callback function to close the exception
  * handling block started with LVGL_SAFE_EVENT_CB_BEGIN().
  */
+#if defined(__cpp_exceptions)
 #define LVGL_SAFE_EVENT_CB_END()                                                                   \
     }                                                                                              \
     catch (const std::exception& ex) {                                                             \
@@ -138,3 +150,6 @@ inline void event_safe_call(const char* callback_name, std::function<void()> han
     catch (...) {                                                                                  \
         spdlog::error("Unknown exception in LVGL callback");                                       \
     }
+#else
+#define LVGL_SAFE_EVENT_CB_END() }
+#endif

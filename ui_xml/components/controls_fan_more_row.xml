@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- "N additional fans" overflow line under the Controls cooling card's fan rows. -->
+<component>
+  <api>
+    <prop name="caption" type="string" default=""/>
+  </api>
+  <view name="controls_fan_more_row"
+        extends="lv_obj" width="100%" height="content" style_bg_opa="0" style_border_width="0" style_pad_all="0"
+        scrollable="false" clickable="false" flex_flow="row" style_flex_main_place="space_between"
+        style_flex_cross_place="center" style_flex_track_place="center">
+    <text_small name="more_fans_label" text="$caption" style_text_color="#text_muted" clickable="false"/>
+    <icon src="chevron_right" size="xs" variant="secondary" clickable="false"/>
+  </view>
+</component>

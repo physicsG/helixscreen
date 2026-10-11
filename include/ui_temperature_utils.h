@@ -2,13 +2,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include "ui_heater_config.h"
+
 #include "lvgl/lvgl.h"
+#include "moonraker_types.h"
 #include "printer_temperature_state.h"
 #include "unit_conversions.h"
 
 #include <cmath>
 #include <cstddef>
 #include <string>
+#include <vector>
 
 /**
  * @file ui_temperature_utils.h
@@ -153,6 +157,37 @@ bool validate_and_clamp_pair(int& current, int& target, int min_temp, int max_te
 bool is_extrusion_safe(int current_temp, int min_extrusion_temp);
 
 /**
+ * @brief The lowest whole-degree nozzle temperature Klipper extrudes at
+ *
+ * Klipper refuses extrusion below min_extrude_temp, which may be fractional, so the
+ * whole-degree floor rounds up: a 180.5 minimum is 181, because 180 is refused. Every
+ * surface that holds an int extrusion minimum takes it from here.
+ *
+ * @param extruder Klipper extruder name, SafetyLimits::min_extrude_temp_for(); the
+ *                 primary extruder unless named.
+ */
+int extrusion_floor_c(const SafetyLimits& limits, const std::string& extruder = "extruder");
+
+/**
+ * @brief Whether the active hotend may extrude right now
+ *
+ * At or above extrusion_floor_c(), or the user opted into cold extrusion (#978).
+ * Shared by every surface that refuses or defers a needs-hot-nozzle action.
+ */
+bool active_nozzle_ready_for_extrusion(const SafetyLimits& limits);
+
+/**
+ * @brief A hotend's max_temp in whole degrees
+ *
+ * That extruder's own ceiling, SafetyLimits::max_temp_for(), from the same section
+ * its min_extrude_temp is read from. Rounded down, so a whole-degree target never
+ * exceeds it. Until that section has been read it is the global sanity ceiling.
+ *
+ * @param extruder Klipper extruder name; the primary extruder unless named.
+ */
+int nozzle_max_temp_c(const SafetyLimits& limits, const std::string& extruder = "extruder");
+
+/**
  * @brief Gets a human-readable safety status message
  *
  * @param current_temp Current nozzle temperature
@@ -254,15 +289,19 @@ char* format_temperature_pair_f(float current, float target, char* buffer, size_
 /**
  * @brief Format a temperature range for material specs
  *
- * Formats as "200-230°C" for AMS material temperature ranges.
+ * Formats as "200-230°C" for AMS material temperature ranges. A range whose
+ * ends are equal, or with only one end set, is one temperature: "210°C". Ends
+ * given in the wrong order are swapped. The separator is the locale's.
  *
  * @param min_temp Minimum temperature in degrees
  * @param max_temp Maximum temperature in degrees
  * @param buffer Output buffer
  * @param buffer_size Size of buffer (recommended: 16)
+ * @param with_unit false drops the "°C", for a caller that states the unit itself
  * @return Pointer to buffer for chaining convenience
  */
-char* format_temperature_range(int min_temp, int max_temp, char* buffer, size_t buffer_size);
+char* format_temperature_range(int min_temp, int max_temp, char* buffer, size_t buffer_size,
+                               bool with_unit = true);
 
 // ============================================================================
 // Display Color Functions
@@ -273,6 +312,17 @@ constexpr int DEFAULT_AT_TEMP_TOLERANCE = 2;
 
 /** The same tolerance for callers that classify in decidegrees. */
 constexpr int DEFAULT_AT_TEMP_TOLERANCE_DECI = DEFAULT_AT_TEMP_TOLERANCE * 10;
+
+/**
+ * @brief Bytes a heater status-area string needs, including its terminator.
+ *
+ * Duty text is a few bytes, but the read-only chamber surface writes the
+ * translated "Monitoring" word into the same buffer. Every surface that
+ * snprintf's status text into a fixed buffer sizes it from here: a surface
+ * with a smaller buffer renders the same heater cut short while another
+ * renders it whole, and the two then disagree on screen.
+ */
+constexpr std::size_t HEATER_STATUS_BUF_BYTES = 64;
 
 /**
  * @brief Thermal state of a heater, shared by every consumer of the 4-state logic.
@@ -326,6 +376,14 @@ HeatState classify_heat_state(int current, int target, int tolerance = DEFAULT_A
 HeatState classify_heat_state_with_mode(int current, int target, helix::ChamberMode mode,
                                         int tolerance = DEFAULT_AT_TEMP_TOLERANCE);
 
+/// A heater whose target is off but whose part is still hot enough to burn.
+/// Callers keep showing it (muted) until it cools below this.
+constexpr int RESIDUAL_HEAT_THRESHOLD_DECI = 500;
+
+/// True while `current_deci` is above the residual-heat threshold. Independent
+/// of the target: callers decide whether an "on" heater counts.
+bool is_residual_hot(int current_deci);
+
 /**
  * @brief Get the theme color for an already-classified thermal state.
  *
@@ -371,7 +429,7 @@ lv_color_t get_heating_state_color(int current_deg, int target_deg,
  * @brief Get the icon color-variant string for a heater's thermal state
  *
  * Mirrors get_heating_state_color()'s 4-state logic, but returns the
- * ui_icon_set_variant() string instead of a resolved color. Keeps icon tint
+ * helix::ui::icon::set_variant() string instead of a resolved color. Keeps icon tint
  * and temp-label color in lockstep (same thresholds, same inputs):
  * - target <= 0:                    "muted"   (off / gray)
  * - current < target - tolerance:   "danger"  (heating / red)
@@ -381,7 +439,7 @@ lv_color_t get_heating_state_color(int current_deg, int target_deg,
  * @param current_deg Current temperature in degrees
  * @param target_deg Target temperature in degrees (<= 0 = heater off)
  * @param tolerance Degrees tolerance for "at temp" state (default: 2)
- * @return Variant string suitable for ui_icon_set_variant()
+ * @return Variant string suitable for helix::ui::icon::set_variant()
  */
 const char* get_heating_state_variant(int current_deg, int target_deg,
                                       int tolerance = DEFAULT_AT_TEMP_TOLERANCE);
@@ -393,15 +451,15 @@ const char* get_heating_state_variant(int current_deg, int target_deg,
 /**
  * @brief Result of formatting a heater display
  *
- * Contains all the information needed to display a heater status:
+ * Contains all the information needed to display a heater reading:
  * - temp: formatted temperature string (e.g., "150°C" or "150 / 200°C")
- * - status: semantic status ("Off", "Heating...", "Ready", or "Cooling")
+ * - state: classified thermal state (same thresholds as the color below)
  * - pct: percentage towards target (0-100, clamped)
  * - color: theme color matching the heating state (from get_heating_state_color)
  */
 struct HeaterDisplayResult {
     std::string temp;
-    std::string status;
+    HeatState state;
     int pct;
     lv_color_t color;
 };
@@ -413,17 +471,57 @@ struct HeaterDisplayResult {
  * produces a consistent display result used across all heater displays.
  * Includes a color field from get_heating_state_color() for one-call convenience.
  *
- * Status logic (DEFAULT_AT_TEMP_TOLERANCE, matches get_heating_state_color):
- * - target <= 0: "Off"
- * - current < target - tolerance: "Heating..."
- * - current > target + tolerance: "Cooling"
- * - within +/- tolerance: "Ready"
+ * State logic (DEFAULT_AT_TEMP_TOLERANCE, matches get_heating_state_color):
+ * - target <= 0: Off
+ * - current < target - tolerance: Heating
+ * - current > target + tolerance: Cooling
+ * - within +/- tolerance: AtTemp
  *
  * @param current_deci Current temperature in decidegrees
  * @param target_deci Target temperature in decidegrees (0 = off)
- * @return HeaterDisplayResult with formatted temp, status, percentage, and color
+ * @return HeaterDisplayResult with formatted temp, state, percentage, and color
  */
 HeaterDisplayResult heater_display(int current_deci, int target_deci);
+
+/**
+ * @brief What a heater's status area shows: one glyph state, plus duty text.
+ *
+ * The status area is a state glyph plus duty text. The states map to
+ * rendering per surface (flame/check/snowflake glyphs, amber/muted duty
+ * text); this classification is the single decision all of them bind to.
+ */
+enum class HeaterStatusState {
+    None,    ///< heater off, or nothing to say
+    Heating, ///< below target: flame glyph, duty in warning color
+    Ready,   ///< at target (or chamber holding at/below its ceiling): check glyph
+    Cooling  ///< above target (or above the chamber ceiling): snowflake glyph
+};
+
+/**
+ * @brief Classify a heater's status area from decidegree readings and duty.
+ *
+ * One pure decision shared by every heater surface: the print status rows, the
+ * temp-graph overlay cards and the controls panel each write the state int and
+ * the duty string into their own subjects and let XML map them to glyphs.
+ *
+ * Classifies the displayed reading (displayed_deci) so the glyph matches the
+ * number on screen, same as heater_display(). Duty is "" when power_pct <= 0:
+ * an unknown duty and a zero one both render as no duty rather than hanging
+ * "0%" off every idle heater.
+ *
+ * @param current_deci Current temperature in decidegrees
+ * @param target_deci Target temperature in decidegrees (0 = off)
+ * @param power_pct Heater power duty 0-100 (<= 0 = omit)
+ * @param mode ChamberMode for the chamber (Maintaining folds Neutral into
+ *             Ready); plain heaters take the default
+ */
+struct HeaterStatus {
+    HeaterStatusState state;
+    std::string duty; ///< "", or "NN%"
+};
+
+HeaterStatus classify_heater_status(int current_deci, int target_deci, int power_pct,
+                                    helix::ChamberMode mode = helix::ChamberMode::Heating);
 
 // ============================================================================
 // Heater GCode
@@ -490,8 +588,9 @@ ChamberSetpoint chamber_effective_setpoint(int heater_target_deci, int fan_targe
  * @brief Map a ChamberMode enum value to its untranslated status word.
  *
  * Returns "Heating", "Maintaining", or "Off".  Callers that display the string
- * must localise it at the call site via lv_tr().  Single source of truth shared
- * by the temperature-service display path and the chamber_status_text composer.
+ * must localise it at the call site via lv_tr().  Single definition of the
+ * words; TemperatureService::recompute_chamber_target() is
+ * the only caller, filling HeaterInfo::chamber_mode.
  */
 const char* chamber_mode_word(helix::ChamberMode mode);
 
@@ -506,21 +605,35 @@ inline const char* build_heater_off_gcode(const std::string& heater_full_name, c
 }
 
 /**
- * @brief Compose the chamber status string from mode + thermal progress.
+ * @brief The gcode Cool Down sends for @p macro_gcode on this printer
  *
- * Single source of truth used by both the controls panel and the temp-graph
- * overlay so they can never diverge.  Leads with the M141 control mode word
- * (Off / Maintaining / Heating), then appends thermal progress ("Ready" /
- * "Cooling") only when it adds information beyond the mode word — suppresses
- * "Heating · Heating..." and "Off · Off".
- *
- * @param current_deci  Current chamber temperature in decidegrees
- * @param target_deci   Effective chamber target in decidegrees (heater target
- *                       when Heating, fan ceiling when Maintaining, 0 when Off)
- * @param mode           ChamberMode enum value (Off / Heating / Maintaining)
- * @return Localised status string, e.g. "Maintaining", "Heating", "Maintaining · Cooling"
+ * The shared default macro names only `extruder` and `heater_bed`: its text is
+ * fixed at install time and shared by machines with different tool counts and
+ * chamber heaters. So when @p macro_gcode is exactly that default, this
+ * appends an off command for every other extruder in @p extruder_names (in
+ * tool order, extruder2 before extruder10) and then for @p chamber_heater_name
+ * when it is non-empty. A customized macro, or a single-model preset's own
+ * hardcoded chamber line, is returned unchanged and runs exactly as written.
  */
-std::string chamber_status_text(int current_deci, int target_deci, helix::ChamberMode mode);
+std::string build_cooldown_gcode(const std::string& macro_gcode,
+                                 const std::vector<std::string>& extruder_names,
+                                 const std::string& chamber_heater_name);
+
+/**
+ * @brief The configured Cool Down macro, completed by build_cooldown_gcode()
+ *        with the extruders and chamber heater @p temps has discovered
+ */
+std::string resolve_cooldown_gcode(const helix::PrinterTemperatureState& temps);
+
+/**
+ * @brief Keypad header title for a heater: its short name
+ *
+ * The unit beside the value already says it is a temperature, and a
+ * "<heater> Temperature" title does not fit a small keypad header in every
+ * language. The nozzle is named the way the panels name it ("Nozzle 4" on a
+ * multi-extruder printer).
+ */
+std::string heater_keypad_title(HeaterType type);
 
 } // namespace temperature
 } // namespace ui

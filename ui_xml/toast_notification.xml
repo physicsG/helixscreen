@@ -28,7 +28,7 @@
         extends="lv_obj" width="100%" height="content" style_radius="#border_radius" style_pad_all="#space_lg"
         style_pad_gap="#space_sm" style_border_width="#border_width" style_border_color="#border"
         style_bg_color="#elevated_bg" style_bg_opa="255" style_shadow_width="#space_2xl" style_shadow_spread="#space_xs"
-        style_shadow_opa="120" style_shadow_ofs_y="#space_xs" flex_flow="row" style_flex_main_place="start"
+        style_shadow_opa="120" style_shadow_offset_y="#space_xs" flex_flow="row" style_flex_main_place="start"
         style_flex_cross_place="center">
     <lv_label name="icon" text="$icon_glyph" style_text_font="mdi_icons_24" style_text_color="$icon_color"/>
     <!-- Message column: the failure on top, the recovery underneath. A column

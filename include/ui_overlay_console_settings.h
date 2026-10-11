@@ -5,6 +5,7 @@
 
 #include "lvgl.h"
 #include "overlay_base.h"
+#include "static_panel_registry.h"
 
 /**
  * @file ui_overlay_console_settings.h
@@ -21,19 +22,15 @@
  */
 class ConsoleSettingsOverlay : public OverlayBase {
   public:
-    ConsoleSettingsOverlay();
-    ~ConsoleSettingsOverlay() override = default;
-
-    void init_subjects() override;
-    lv_obj_t* create(lv_obj_t* parent) override;
+    void register_callbacks() override;
     [[nodiscard]] const char* get_name() const override {
         return "Console Settings";
     }
-
-    [[nodiscard]] const char* get_xml_component_name() const {
+    const char* xml_component() const override {
         return "console_settings_overlay";
     }
 };
 
-ConsoleSettingsOverlay& get_global_console_settings();
-void init_global_console_settings();
+inline ConsoleSettingsOverlay& get_global_console_settings() {
+    return helix::lazy_global<ConsoleSettingsOverlay>("ConsoleSettingsOverlay");
+}

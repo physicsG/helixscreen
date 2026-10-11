@@ -20,6 +20,8 @@
 #include "macro_param_modal.h"
 
 #include <functional>
+#include <map>
+#include <optional>
 #include <string>
 
 namespace helix::ui {
@@ -60,59 +62,73 @@ enum class ParamPolicy {
  * screen, and so a future surface can present parameters its own way without
  * forking dispatch_filament_macro().
  */
-using ParamPrompter =
-    std::function<void(const std::string& macro_name, const helix::CachedMacroInfo& cached,
-                       helix::MacroExecuteCallback on_execute)>;
+using ParamPrompter = std::function<void(
+    const std::string& macro_name, const helix::CachedMacroInfo& cached,
+    const std::map<std::string, std::string>& prefill, helix::MacroExecuteCallback on_execute)>;
 
 /// Install a prompter. Pass a default-constructed ParamPrompter to restore the
 /// shared-modal default.
 void set_filament_param_prompter(ParamPrompter prompter);
 
 /**
- * @brief How the "toolhead isn't homed, inject G28?" confirmation is raised.
- *
- * Sibling seam to ParamPrompter above, for the same reason: it makes the
- * confirm-before-homing branch (AmsSubscriptionBackend::ensure_homed_then())
- * reachable from a headless test binary, and lets the one real caller
- * (SubjectInitializer) present it as a modal without ensure_homed_then()
- * knowing anything about LVGL.
- */
-using HomeConfirmPrompter =
-    std::function<void(std::function<void()> on_confirm, std::function<void()> on_cancel)>;
-
-/// Install a prompter. Pass a default-constructed HomeConfirmPrompter to
-/// restore the default described on request_home_confirmation().
-void set_home_confirm_prompter(HomeConfirmPrompter prompter);
-
-/**
- * @brief Ask before ensure_homed_then() injects an unrequested G28.
- *
- * With no prompter installed -- the state of every test that doesn't call
- * set_home_confirm_prompter(), and ~4600 of them don't -- @p on_confirm fires
- * immediately and synchronously. That default is load-bearing: it is what
- * keeps every pre-existing homing test (and every un-migrated caller) seeing
- * today's "just home it" behaviour with no prompter wired up.
- */
-void request_home_confirmation(std::function<void()> on_confirm, std::function<void()> on_cancel);
-
-/**
  * @brief Tier 2: dispatch the user's configured macro.
  *
- * Resolves @p macro_name against MacroParamCache. Under ParamPolicy::Prompt a
- * macro with KNOWN_PARAMS or UNKNOWN parameters raises the prompter and @p run
- * fires only if the user confirms; under ParamPolicy::Suppress @p run always
- * fires immediately with an empty MacroParamResult.
+ * Resolves @p macro_name against MacroParamCache. Under ParamPolicy::Suppress
+ * @p run always fires immediately with an empty MacroParamResult. Under
+ * ParamPolicy::Prompt:
+ *   - a macro with no parameters runs immediately with an empty result;
+ *   - a KNOWN_PARAMS macro whose every parameter @p known_values names runs
+ *     immediately with exactly those values, and no prompt;
+ *   - otherwise the prompter is raised, with the @p known_values the macro reads
+ *     typed in, and @p run fires only if the user confirms. An UNKNOWN macro
+ *     always prompts, with nothing typed in.
  *
- * @warning Under ParamPolicy::Prompt, @p run outlives this call and is retained
+ * @param known_values Values the surface already knows, keyed by parameter name.
+ *        Names the macro does not read are never sent.
+ *
+ * @warning When a prompt is raised, @p run outlives this call and is retained
  *          by the shared modal past dismissal. Callers that are not immortal
  *          must capture an AsyncLifetimeGuard token in @p run, not a bare
  *          `this`.
  *
- * @return true if a prompt was raised (@p run fires later, or never), false if
- *         @p run was invoked synchronously with no parameters.
+ * @return true if a prompt was raised (@p run fires later, or never). false if
+ *         @p run already ran synchronously, before this call returned: with no
+ *         parameters, or with @p known_values filling every parameter.
  */
 bool dispatch_filament_macro(const std::string& macro_name, ParamPolicy policy,
-                             helix::MacroExecuteCallback run);
+                             helix::MacroExecuteCallback run,
+                             const std::map<std::string, std::string>& known_values = {});
+
+/// The filament macro a nozzle-temperature prefill is for. Each reads the
+/// temperature under its own parameter names.
+enum class FilamentMacroOp { Load, Unload, Purge };
+
+/**
+ * @brief The nozzle temperature a filament surface can hand @p op's macro, keyed
+ *        by the parameter names that kind of macro reads it under.
+ *
+ * The temperature is filament_op_nozzle_temp() of @p material_temp_c and the LIVE
+ * @p extruder_target_c. A backend load shares that rule but raises the material to
+ * the latched last non-zero target instead (AmsOperationSidebar::handle_load_with_preheat),
+ * so a nozzle whose target has dropped to 0 still reheats there to purge, while a
+ * prefill offers the material temperature alone.
+ *
+ * Nothing is offered at or below @p min_extrude_c, or above @p max_nozzle_c; the
+ * dialog asks instead. M109 returns within a degree of its target and Klipper checks
+ * its smoothed temperature against the minimum, so a macro heated to exactly the
+ * minimum can still be refused extrusion. Klipper rejects a target above the hotend's
+ * max_temp outright, and a macro sent with no dialog leaves the user no way to lower it.
+ *
+ * Load and Unload offer EXTRUDER_TEMP, NOZZLE_TEMP and TEMP; Purge offers only
+ * PURGE_TEMP. A load macro that also reads PURGE_TEMP is left an unfilled
+ * parameter, so it prompts rather than having its purge temperature replaced.
+ *
+ * @param min_extrude_c Whole-degree extrusion minimum, from temperature::extrusion_floor_c()
+ * @param max_nozzle_c  Whole-degree hotend ceiling, from temperature::nozzle_max_temp_c()
+ */
+[[nodiscard]] std::map<std::string, std::string>
+nozzle_temp_prefill(FilamentMacroOp op, int extruder_target_c, std::optional<int> material_temp_c,
+                    int min_extrude_c, int max_nozzle_c);
 
 /**
  * @brief Tier 3 load fallback: fast move through the bowden, then a slow push

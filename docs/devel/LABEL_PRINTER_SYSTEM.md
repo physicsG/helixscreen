@@ -57,7 +57,7 @@ HelixScreen supports printing spool labels to thermal label printers via three t
 | File | Transport |
 |------|-----------|
 | `src/system/brother_ql_printer.cpp` | Brother QL over TCP (network) |
-| `src/system/phomemo_printer.cpp` | Phomemo over USB (libusb) |
+| `src/system/phomemo_printer.cpp` | Phomemo over USB (libusb detects, writes go to the `/dev/usb/lpN` node) |
 | `src/system/brother_ql_bt_printer.cpp` | Brother QL over BT Classic (RFCOMM) |
 | `src/system/phomemo_bt_printer.cpp` | Phomemo over BT Classic (RFCOMM) or BLE GATT |
 | `src/system/niimbot_bt_printer.cpp` | Niimbot over BLE GATT |
@@ -93,7 +93,7 @@ HelixScreen supports printing spool labels to thermal label printers via three t
 
 ### Phomemo (ESC/POS Raster)
 
-- **Transport:** USB (libusb), BT Classic RFCOMM, or BLE GATT
+- **Transport:** USB (`usblp` device node, found by VID:PID through libusb), BT Classic RFCOMM, or BLE GATT
 - **Protocol:** ESC/POS command stream with GS v 0 raster block
 - **Sequence:** Speed + density + media type commands → GS v 0 raster → finalize + feed-to-gap
 - **DPI:** 203 (native)
@@ -209,6 +209,40 @@ Each printer family defines its own label size table:
 | `niimbot_b21_sizes()` | 384px (48mm) | 203 | 50x30mm, 40x30mm, 50x50mm |
 | `niimbot_d11_sizes()` | 96px (12mm) | 203 | 12x40mm, 12x22mm, 12x30mm |
 | `niimbot_sizes_for_model(name)` | auto-detect | 203 | Selects B21 or D11 from device name |
+
+## Label Layouts
+
+`LabelRenderer::render()` (`src/system/label_renderer.cpp`) composes the label from the chosen
+preset (`LabelPreset` in `include/label_printer.h`): `STANDARD`, `COMPACT` and `MINIMAL`,
+chosen in the label printer settings overlay (`ui_xml/label_printer_settings.xml`).
+
+Every layout follows one reading order, because the label exists to be scanned across the room
+(#1491):
+
+- **The spool number is line 1 and leads at the largest text scale.** Tracked spools print
+  `#<id>`; a negative id prints `TEST` (the preview label), whose QR payload encodes
+  `web+spoolman:test` so a scanner cannot resolve it.
+- The weight gets **its own line** (`"NNNG"` / `"NNNG / NNNM"`), so a narrow column truncates
+  the weight and never the spool number.
+- Remaining lines, STANDARD only, when the data is present and fits: vendor, material+color,
+  temps, lot, comment. COMPACT is number + vendor + material/color.
+
+Untracked spools (id 0) have no QR payload and no number, so both are dropped and the remaining
+lines re-center rather than leaving a blank first line. `MINIMAL` is QR + number and nothing
+else, which would print a blank label for an untracked spool, so it falls back to COMPACT
+(`src/system/label_renderer.cpp`).
+
+Layout adapts to the physical stock:
+
+- **Narrow labels (< 150 px wide** - D11-class 12mm tape, printhead along the short edge) are
+  composed in landscape (QR left, text right) and rotated 90 degrees clockwise for the printer.
+- **Labels under 500 px wide** (62mm tape and smaller die-cuts) get tighter margins and a
+  smaller QR so text keeps its floor of at least 8 characters per line.
+- The QR takes 40% of label width on STANDARD, 30% on COMPACT, both capped
+  (`qr_max` 250 / 200 px) and shrunk further on narrow stock.
+- On `MINIMAL` the number scales to fill whatever space the QR leaves, bounded by
+  `ID_MIN_SCALE`/`ID_MAX_SCALE` (3..12), placed beside the QR when it stays legible there,
+  below otherwise.
 
 ## Testing
 

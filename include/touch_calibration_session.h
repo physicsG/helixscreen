@@ -7,6 +7,12 @@
 
 namespace helix {
 
+/// The evdev range a touch device runs now, and which stage supplied it.
+struct LiveTouchRange {
+    TouchRangeSettings range; ///< valid=false: no evdev stage, or its range is unknown
+    TouchRangeSource source = TouchRangeSource::None;
+};
+
 /// The four touch-calibration operations an interactive calibration session
 /// performs on the live input device. DisplayManager implements this; the
 /// indirection exists so TouchCalibrationSession's backup/restore logic can be
@@ -35,14 +41,38 @@ struct ICalibrationSink {
     /// can do this, and every fake and every non-evdev display legitimately
     /// cannot. A false return means the caller must keep the affine-only result.
     ///
+    /// @param source What the diagnostics record as supplying the range
     /// @return true if the device accepted the new range
-    virtual bool apply_touch_range(bool swap_axes, int min_x, int min_y, int max_x, int max_y) {
+    virtual bool apply_touch_range(bool swap_axes, int min_x, int min_y, int max_x, int max_y,
+                                   TouchRangeSource source) {
+        (void)source;
         (void)swap_axes;
         (void)min_x;
         (void)min_y;
         (void)max_x;
         (void)max_y;
         return false;
+    }
+
+    /// The evdev ABS range and axis swap live now, so a session can put it back
+    /// after previewing a solved one. An invalid range (no evdev stage, or a
+    /// range that is not knowable) leaves nothing to restore, so no solved range
+    /// is installed over it either.
+    virtual LiveTouchRange current_touch_range() const {
+        return {};
+    }
+
+    /// Mark that a calibration capture is on screen.
+    ///
+    /// The global debug-touch ripple is suppressed while this is true: the
+    /// calibration draws its own, and affine is disabled during capture so the
+    /// global one would render raw coordinates (#943).
+    ///
+    /// Defaulted to a no-op so fakes need not care. It lives here rather than
+    /// being reached for on DisplayManager directly, so a caller holding a sink
+    /// never needs a second handle on the display to run a capture.
+    virtual void set_capture_active(bool active) {
+        (void)active;
     }
 
     /// Discard the device's stored calibration, leaving it uncalibrated.
@@ -57,6 +87,21 @@ struct ICalibrationSink {
     virtual void clear_calibration() = 0;
 };
 
+/// Install the result of a three-point calibration on the live device without
+/// persisting it: the solved evdev range when the device accepts it and reports
+/// the range it runs now (so the change is undoable), with the residual affine on
+/// top; otherwise the full affine over the current range.
+///
+/// This is the mapping commit_calibration_result() will persist, so a preview
+/// shows the user exactly what Next/Accept keeps. Installing only the full
+/// affine behind the declared range would leave an under-declared axis clamped
+/// before the affine runs, putting the confirm button out of reach (#1714).
+/// TouchCalibrationSession::restore()/revert_for_retry() undo both stages.
+///
+/// @return true if the live device accepted the new mapping
+bool apply_calibration_result(ICalibrationSink* sink, const TouchCalibration& cal,
+                              const TouchRangeFit& fit);
+
 /// Persist and install the result of an accepted three-point calibration.
 ///
 /// A calibration now has two possible shapes, and this writes exactly ONE of
@@ -67,12 +112,15 @@ struct ICalibrationSink {
 ///    `/input/calibration/` (usually nothing at all, on a panel square to the
 ///    display). The range is re-programmed on the live device first, then the
 ///    residual affine installed on top.
-///  - No range fit (no raw digitizer readings, or an implausible decomposition):
-///    `cal` goes to `/input/calibration/` exactly as it did before #1259, and
-///    the stored range is cleared.
+///  - No range installed (no raw digitizer readings, an implausible
+///    decomposition, a rotated display, or a backend that refuses it): `cal` goes
+///    to `/input/calibration/`. It was solved over the range live now, so a
+///    stored range that is live stays stored, with its own capture rotation;
+///    otherwise the stored range is cleared.
 ///
-/// Clearing the unused side is the part that matters: a stored range left behind
-/// next to a full-pipeline affine would apply both stages and double the mapping.
+/// Clearing the unused side is the part that matters: a stored range the affine
+/// was not solved over, left behind next to it, would apply both stages and
+/// double the mapping.
 ///
 /// Does NOT call Config::save() - the caller decides when to flush.
 ///
@@ -100,7 +148,7 @@ bool commit_calibration_result(ICalibrationSink* sink, const TouchCalibration& c
 /// left the panel's touch input disabled until a restart.
 class TouchCalibrationSession {
   public:
-    /// Snapshot the calibration active now and disable the affine transform so
+    /// Snapshot the calibration and evdev range active now and disable the affine transform so
     /// the session can capture raw (pre-affine) coordinates. Re-snapshots on
     /// every call: a session always begins from a clean baseline.
     void begin_capture(ICalibrationSink& sink);
@@ -136,6 +184,7 @@ class TouchCalibrationSession {
 
   private:
     TouchCalibration backup_{};
+    LiveTouchRange range_backup_{};
     bool has_backup_ = false;
 };
 

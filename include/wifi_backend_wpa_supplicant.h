@@ -7,7 +7,6 @@
 #include "wifi_interface.h"
 
 #include <functional>
-#include <map>
 #include <string>
 #include <vector>
 
@@ -215,21 +214,6 @@ class WifiBackendWpaSupplicant : public WifiBackend, private hv::EventLoopThread
     bool is_running() const override;
 
     /**
-     * @brief Register event callback
-     *
-     * Translates standard event names to wpa_supplicant-specific events:
-     * - "SCAN_COMPLETE" → "CTRL-EVENT-SCAN-RESULTS"
-     * - "CONNECTED" → "CTRL-EVENT-CONNECTED"
-     * - "DISCONNECTED" → "CTRL-EVENT-DISCONNECTED"
-     * - "AUTH_FAILED" → "CTRL-EVENT-SSID-TEMP-DISABLED"
-     *
-     * @param name Standard event name
-     * @param callback Handler function
-     */
-    void register_event_callback(const std::string& name,
-                                 std::function<void(const std::string&)> callback) override;
-
-    /**
      * @brief Send synchronous command to wpa_supplicant
      *
      * Blocks until response received or timeout (usually <100ms).
@@ -254,13 +238,17 @@ class WifiBackendWpaSupplicant : public WifiBackend, private hv::EventLoopThread
 
     WiFiError trigger_scan() override;
     WiFiError get_scan_results(std::vector<WiFiNetwork>& networks) override;
-    WiFiError connect_network(const std::string& ssid, const std::string& password) override;
+    WiFiError connect_network(const std::string& ssid, const std::string& password,
+                              bool is_hidden) override;
     WiFiError disconnect_network() override;
     ConnectionStatus get_status() override;
     bool supports_5ghz() const override;
     WiFiError set_radio_enabled(bool on) override;
     bool is_radio_enabled() const override;
     WiFiError forget_network(const std::string& ssid) override;
+    bool supports_forget() const override {
+        return true;
+    }
 
   private:
     // ========================================================================
@@ -338,16 +326,6 @@ class WifiBackendWpaSupplicant : public WifiBackend, private hv::EventLoopThread
      */
     static void _handle_wpa_events(hio_t* io, void* data, int readbyte);
 
-    /**
-     * @brief Dispatch a synthetic event to a specific registered callback
-     *
-     * Used for internal events like INIT_FAILED that don't come from wpa_supplicant.
-     *
-     * @param event_name Name of the callback to dispatch to
-     * @param message Message to pass to the callback
-     */
-    void dispatch_event(const std::string& event_name, const std::string& message);
-
     // Helper methods for clean API (encapsulate wpa_supplicant ugliness)
     std::vector<WiFiNetwork> parse_scan_results(const std::string& raw);
     std::vector<std::string> split_by_tabs(const std::string& str);
@@ -420,10 +398,7 @@ class WifiBackendWpaSupplicant : public WifiBackend, private hv::EventLoopThread
     hio_t* mon_io_{nullptr};   ///< libhv I/O handle for monitor socket (must cleanup on re-init)
 
     // Thread safety
-    std::mutex cmd_mutex_;       ///< Protects conn from concurrent send_command() calls
-    std::mutex callbacks_mutex_; ///< Protects callbacks map from race conditions
-    std::map<std::string, std::function<void(const std::string&)>>
-        callbacks; ///< Registered event handlers
+    std::mutex cmd_mutex_; ///< Protects conn from concurrent send_command() calls
 
     // Change detection for status logging (reduces log noise)
     ConnectionStatus last_logged_status_; ///< Previous status for change detection
@@ -494,6 +469,10 @@ class WifiBackendWpaSupplicant : public WifiBackend, private hv::EventLoopThread
     /// The resolved interface, or nullopt when resolution was inconclusive and
     /// callers must fall back to legacy first-match behaviour.
     std::optional<helix::wifi::WifiInterface> resolved_interface() const override;
+
+    bool reports_frequency() const override {
+        return true;
+    }
 
   private:
     // Last state requested via set_radio_enabled(). Defaults to true (radio on).

@@ -41,16 +41,25 @@
 #include "ui_update_queue.h"
 
 #include "../lvgl_ui_test_fixture.h"
+#include "../test_helpers/planted_gcode.h"
+#include "gcode_ops_detector.h"
+#include "gcode_preview_fetcher.h"
 #include "helix-xml/src/xml/lv_xml.h"
+#include "http_executor.h"
+#include "macro_param_cache.h"
 #include "moonraker_api_mock.h"
 #include "moonraker_client_mock.h"
+#include "print_start_checks.h"
+#include "print_status_preview_decision.h"
 #include "printer_state.h"
 #include "tools_used_cache.h"
 
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <memory>
 #include <set>
 #include <string>
@@ -140,6 +149,7 @@ class DelayedFileTransfers : public MoonrakerFileTransferAPIMock {
                                const std::string& dest_path, StringCallback on_success,
                                ErrorCallback on_error, ProgressCallback on_progress) override {
         (void)on_progress;
+        ++download_count;
         if (!hold_transfers) {
             MoonrakerFileTransferAPIMock::download_file_to_path(
                 root, path, dest_path, std::move(on_success), std::move(on_error));
@@ -170,13 +180,53 @@ class DelayedFileTransfers : public MoonrakerFileTransferAPIMock {
             root, path, max_bytes, std::move(on_success), std::move(on_error));
     }
 
+    /// Holds the preamble read the operations scan makes, the way hold_transfers
+    /// holds the whole-file download.
+    void download_file_partial(const std::string& root, const std::string& path, size_t max_bytes,
+                               StringCallback on_success, ErrorCallback on_error,
+                               CancelFlag = nullptr) override {
+        ++partial_read_count;
+        if (!hold_partials) {
+            MoonrakerFileTransferAPIMock::download_file_partial(
+                root, path, max_bytes, std::move(on_success), std::move(on_error));
+            return;
+        }
+        held_partials_.push_back([this, root, path, max_bytes, on_success = std::move(on_success),
+                                  on_error = std::move(on_error)]() {
+            MoonrakerFileTransferAPIMock::download_file_partial(root, path, max_bytes, on_success,
+                                                                on_error);
+        });
+    }
+
+    void release_held_partials() {
+        auto held = std::move(held_partials_);
+        held_partials_.clear();
+        for (auto& h : held) {
+            h();
+        }
+    }
+
     bool hold_transfers = false;
+    bool hold_partials = false;
     bool fail_tail_reads = false;
+
+    /// A transport that writes no local copies and reads no tails, as on the ESP32.
+    bool local_copies = true;
+    bool tail_reads = true;
+    bool supports_local_copies() const override {
+        return local_copies;
+    }
+    bool supports_tail_reads() const override {
+        return tail_reads;
+    }
 
     /// How many footer reads the view has asked for. The tools-used cache
     /// persists only the used-tool set, so a cache hit must NOT suppress the
     /// read that also answers the palette and the per-tool grams.
     int tail_read_count = 0;
+    /// Whole-file downloads and preamble reads, counted the same way.
+    int download_count = 0;
+    int partial_read_count = 0;
 
     /// Resolve every held transfer (copies the real asset, fires callbacks
     /// synchronously — same as an unheld call).
@@ -190,6 +240,7 @@ class DelayedFileTransfers : public MoonrakerFileTransferAPIMock {
 
   private:
     std::vector<std::function<void()>> held_;
+    std::vector<std::function<void()>> held_partials_;
 };
 
 /// MoonrakerAPIMock whose transfers() serves the holdable DelayedFileTransfers
@@ -223,6 +274,7 @@ class DetailDownloadFixture : public LVGLUITestFixture {
             {"on_print_select_delete_button", detail_noop_cb},
             {"on_print_detail_back_clicked", detail_noop_cb},
             {"on_toggle_sliced_colors", detail_noop_cb},
+            {"on_print_select_detail_objects", detail_noop_cb},
         });
 
         view_.init_subjects();
@@ -263,11 +315,11 @@ class DetailDownloadFixture : public LVGLUITestFixture {
         helix::ui::UpdateQueue::instance().drain();
     }
 
-    /// Canonical shared-download path for `key` — mirrors
-    /// PrintSelectDetailView::canonical_gcode_path() (full-path hash).
+    /// Canonical shared-download path for `key`, as
+    /// PrintSelectDetailView::canonical_gcode_path() names it.
     std::filesystem::path canonical_path_for(const std::string& key) const {
         return std::filesystem::path(::getenv("HELIX_CACHE_DIR")) / "gcode_temp" /
-               ("detail_" + std::to_string(std::hash<std::string>{}(key)) + ".gcode");
+               helix::ui::GcodePreviewFetcher::cache_file_name("detail_", key);
     }
 
     bool ready() const {
@@ -694,6 +746,358 @@ TEST_CASE_METHOD(DetailDownloadFixture, "nothing outstanding issues no footer re
     drain_queue_chain();
 
     CHECK(transfers_.tail_read_count == 1);
+
+    pop_and_drain();
+}
+
+// ============================================================================
+// A Print tap waits for the printer-stopping command check
+// ============================================================================
+
+namespace {
+
+/// This printer's M729 is a macro that shuts it down.
+struct StopMacroCache {
+    StopMacroCache() {
+        nlohmann::json config;
+        config["gcode_macro M729"] = {
+            {"gcode", "{action_emergency_stop(\"M729 is not supported\")}"}};
+        helix::MacroParamCache::instance().populate_from_configfile(config, {"M729"});
+    }
+    ~StopMacroCache() {
+        helix::MacroParamCache::instance().clear();
+    }
+};
+
+} // namespace
+
+TEST_CASE_METHOD(DetailDownloadFixture,
+                 "A Print tap waits for the file scan's printer-stopping command check",
+                 "[print_select][detail_view][printer_stop]") {
+    CacheDirGuard guard;
+    EnvGuard mem_fail("HELIX_FORCE_GCODE_MEMORY_FAIL", "1");
+    StopMacroCache macros;
+
+    // Tools scan settles, the operations scan is held, the tap waits; releasing
+    // the scan releases the tap. Returns what the scan answered.
+    const auto tap_before_scan = [this](const std::string& name, const std::string& content) {
+        PlantedGcode file(name, "", content);
+        transfers_.hold_partials = true;
+        view_.show(name, "", "PLA", {"#FF0000"}, {}, content.size(), 42);
+        REQUIRE(wait_until([this]() { return view_.is_preflight_ready(); }, 15000));
+        REQUIRE_FALSE(view_.is_print_start_ready());
+
+        int taps = 0;
+        view_.run_when_preflight_ready([&taps]() { ++taps; });
+        drain_queue_chain();
+        CHECK(taps == 0);
+
+        transfers_.release_held_partials();
+        drain_queue_chain();
+        CHECK(taps == 1);
+        CHECK(view_.is_print_start_ready());
+
+        const helix::PrinterStopCheck check =
+            view_.get_prep_manager()->printer_stop_check_for(name);
+        pop_and_drain();
+        return check;
+    };
+
+    const std::string pid = std::to_string(::getpid());
+
+    SECTION("then blocks on a file that calls one") {
+        const auto check =
+            tap_before_scan("printer_stop_calls_" + pid + ".gcode", "G28\nM729\nG1 X10 Y10 E1\n");
+        REQUIRE(check.state == helix::PrinterStopCheck::State::Stops);
+        CHECK(check.command == "M729");
+        CHECK(check.line_number == 2);
+        CHECK(check.stop_message == "M729 is not supported");
+    }
+
+    SECTION("then starts a clean file") {
+        const auto check =
+            tap_before_scan("printer_stop_clean_" + pid + ".gcode", "G28\nG1 X10 Y10 E1\n");
+        CHECK(check.state == helix::PrinterStopCheck::State::Clean);
+    }
+
+    SECTION("an answer stops being current once the printer's macros change") {
+        const std::string name = "printer_stop_regen_" + pid + ".gcode";
+        const auto check = tap_before_scan(name, "G28\nM729\nG1 X10 Y10 E1\n");
+        REQUIRE(check.state == helix::PrinterStopCheck::State::Stops);
+
+        auto* prep = view_.get_prep_manager();
+        REQUIRE(prep != nullptr);
+        REQUIRE(prep->has_printer_stop_answer_for(name));
+
+        // A reconnect re-reads the printer's macros, so the set the scan
+        // answered against is no longer the set this printer has.
+        helix::MacroParamCache::instance().clear();
+
+        CHECK_FALSE(prep->has_printer_stop_answer_for(name));
+        CHECK(prep->printer_stop_check_for(name).state == helix::PrinterStopCheck::State::NotRun);
+    }
+}
+
+// ============================================================================
+// Files with nothing for the viewer to draw keep the thumbnail
+// (prestonbrown/helixscreen#1713)
+// ============================================================================
+
+namespace {
+int subject_int(const char* name) {
+    lv_subject_t* s = lv_xml_get_subject(nullptr, name);
+    REQUIRE(s != nullptr);
+    return lv_subject_get_int(s);
+}
+} // namespace
+
+TEST_CASE_METHOD(DetailDownloadFixture, "A .3mf project reads none of its bytes",
+                 "[print_select][detail_view][qidi_3mf]") {
+    CacheDirGuard guard;
+    const std::string name = "qidi_" + std::to_string(::getpid()) + " (PETG).gcode.3mf";
+    const std::string zip = std::string("PK\x03\x04", 4) + "not gcode";
+    PlantedGcode file(name, "", zip);
+
+    view_.show(name, "", "PETG", {"#FF0000"}, {}, zip.size(), 42);
+    drain_queue_chain();
+
+    // A zip has no G-code for the viewer, the tools scan or the operations scan.
+    CHECK(transfers_.download_count == 0);
+    CHECK(transfers_.tail_read_count == 0);
+    CHECK(transfers_.partial_read_count == 0);
+
+    // Nothing is left pending: a Print tap is not held on a scan that never runs.
+    CHECK(view_.is_print_start_ready());
+    CHECK(view_.get_prep_manager()->printer_stop_check_for(name).state ==
+          helix::PrinterStopCheck::State::NotRun);
+
+    CHECK(subject_int("detail_gcode_viewer_mode") == helix::ui::PREVIEW_MODE_THUMBNAIL);
+    CHECK(subject_int("detail_gcode_loading") == 0);
+
+    pop_and_drain();
+}
+
+TEST_CASE_METHOD(DetailDownloadFixture,
+                 "A .3mf opened after a G-code file carries none of its embedded operations",
+                 "[print_select][detail_view][qidi_3mf]") {
+    CacheDirGuard guard;
+    EnvGuard mem_fail("HELIX_FORCE_GCODE_MEMORY_FAIL", "1");
+    const std::string pid = std::to_string(::getpid());
+    const std::string gcode_name = "embedded_mesh_" + pid + ".gcode";
+    const std::string gcode = "G28\nBED_MESH_CALIBRATE\nG1 X10 Y10 E1\n";
+    PlantedGcode gcode_file(gcode_name, "", gcode);
+
+    view_.show(gcode_name, "", "PLA", {"#FF0000"}, {}, gcode.size(), 42);
+    drain_queue_chain();
+    auto* prep = view_.get_prep_manager();
+    REQUIRE(prep != nullptr);
+    REQUIRE(prep->has_scan_result_for(gcode_name));
+    REQUIRE(prep->get_scan_result()->has_operation(helix::gcode::OperationType::BED_MESH));
+    pop_and_drain();
+
+    const std::string zip_name = "qidi_" + pid + ".gcode.3mf";
+    const std::string zip = std::string("PK\x03\x04", 4) + "not gcode";
+    PlantedGcode zip_file(zip_name, "", zip);
+    view_.show(zip_name, "", "PETG", {"#FF0000"}, {}, zip.size(), 42);
+    drain_queue_chain();
+
+    // Every reader of the scan cache (ops to disable, plugin requirement,
+    // capability matrix, modify-and-print) sees the .3mf's empty answer.
+    prep = view_.get_prep_manager();
+    REQUIRE(prep != nullptr);
+    CHECK(prep->has_scan_result_for(zip_name));
+    REQUIRE(prep->get_scan_result().has_value());
+    CHECK(prep->get_scan_result()->operations.empty());
+
+    pop_and_drain();
+}
+
+TEST_CASE_METHOD(DetailDownloadFixture, "A .3mf still fetches metadata for the pre-print checks",
+                 "[print_select][detail_view][qidi_3mf]") {
+    CacheDirGuard guard;
+    const std::string name = "qidi_meta_" + std::to_string(::getpid()) + ".gcode.3mf";
+    const std::string zip = std::string("PK\x03\x04", 4) + "not gcode";
+    PlantedGcode file(name, "", zip);
+
+    view_.show(name, "", "PETG", {"#FF0000"}, {}, zip.size(), 42);
+    drain_queue_chain();
+
+    const auto metadata = view_.get_file_metadata();
+    REQUIRE(metadata.has_value());
+    REQUIRE(metadata->filament_weight_total > 0.0);
+
+    helix::PrintStartContext ctx;
+    ctx.metadata = metadata;
+    SlotInfo spool;
+    spool.remaining_weight_g = 0.5f;
+    ctx.external_spool = spool;
+    const auto shortfall = helix::insufficient_spool_weight_in(ctx);
+    REQUIRE(shortfall.has_value());
+    CHECK(shortfall->first == Catch::Approx(metadata->filament_weight_total));
+
+    pop_and_drain();
+}
+
+TEST_CASE_METHOD(DetailDownloadFixture, "A G-code file with no layers keeps the thumbnail",
+                 "[print_select][detail_view][qidi_3mf]") {
+    CacheDirGuard guard;
+    const std::string name = "no_layers_" + std::to_string(::getpid()) + ".gcode";
+    const std::string content = "M117 nothing to print\nG28\n";
+    PlantedGcode file(name, "", content);
+
+    view_.show(name, "", "PLA", {"#FF0000"}, {}, content.size(), 42);
+    REQUIRE(wait_until([this]() { return view_.is_gcode_loaded(); }, 15000));
+    drain_queue_chain();
+
+    CHECK(subject_int("detail_gcode_viewer_mode") == helix::ui::PREVIEW_MODE_THUMBNAIL);
+    CHECK(subject_int("detail_viewer_first_frame") == 0);
+
+    pop_and_drain();
+}
+
+// ============================================================================
+// USB files: Moonraker has no copy until one is printed
+// ============================================================================
+
+namespace {
+
+/// A file on a "stick" this process owns, outside the mock's gcodes root.
+struct StickFile {
+    std::filesystem::path dir =
+        std::filesystem::temp_directory_path() / ("detail_usb_stick_" + std::to_string(::getpid()));
+    std::filesystem::path path;
+    StickFile(const std::string& name, const std::string& content) : path(dir / name) {
+        std::filesystem::create_directories(dir);
+        std::ofstream(path, std::ios::binary) << content;
+    }
+    ~StickFile() {
+        std::error_code ec;
+        std::filesystem::remove_all(dir, ec);
+    }
+};
+
+} // namespace
+
+TEST_CASE_METHOD(DetailDownloadFixture, "A USB file is read from the stick, never from Moonraker",
+                 "[print_select][detail_view][usb]") {
+    CacheDirGuard guard;
+    const std::string name = "stick_part.gcode";
+    const std::string content =
+        "G28\nBED_MESH_CALIBRATE\n;LAYER:0\nG1 Z0.2 F600\nG1 X10 Y10 E1\nG1 X20 Y10 E2\n"
+        ";LAYER:1\nG1 Z0.4\nG1 X10 Y20 E3\n";
+    StickFile stick(name, content);
+
+    view_.show(name, "", "PLA", {"#FF0000"}, {}, content.size(), 42, 0, stick.path.string());
+    auto* prep = view_.get_prep_manager();
+    REQUIRE(prep != nullptr);
+    REQUIRE(wait_until(
+        [&]() { return view_.is_gcode_loaded() && ready() && prep->has_scan_result_for(name); },
+        15000));
+    drain_queue_chain();
+
+    CHECK(prep->get_scan_result()->has_operation(helix::gcode::OperationType::BED_MESH));
+    CHECK(transfers_.download_count == 0);
+    CHECK(transfers_.tail_read_count == 0);
+    CHECK(transfers_.partial_read_count == 0);
+
+    pop_and_drain();
+}
+
+TEST_CASE_METHOD(DetailDownloadFixture, "An unreadable USB file asks Moonraker for nothing",
+                 "[print_select][detail_view][usb]") {
+    CacheDirGuard guard;
+    const std::string name = "gone_from_stick.gcode";
+    const std::string missing =
+        (std::filesystem::temp_directory_path() / ("no_stick_" + std::to_string(::getpid())) / name)
+            .string();
+
+    view_.show(name, "", "PLA", {"#FF0000"}, {}, 1234, 42, 0, missing);
+    auto* prep = view_.get_prep_manager();
+    REQUIRE(prep != nullptr);
+    REQUIRE(
+        wait_until([&]() { return ready() && prep->has_printer_stop_answer_for(name); }, 15000));
+    drain_queue_chain();
+
+    CHECK(transfers_.download_count == 0);
+    CHECK(transfers_.tail_read_count == 0);
+    CHECK(transfers_.partial_read_count == 0);
+    CHECK(prep->printer_stop_check_for(name).state == helix::PrinterStopCheck::State::NotRun);
+
+    pop_and_drain();
+}
+
+TEST_CASE_METHOD(DetailDownloadFixture,
+                 "A USB file named like a printer file gets its own operations scan",
+                 "[print_select][detail_view][usb]") {
+    CacheDirGuard guard;
+    EnvGuard mem_fail("HELIX_FORCE_GCODE_MEMORY_FAIL", "1");
+    const std::string name = "same_name_" + std::to_string(::getpid()) + ".gcode";
+    const std::string printer_gcode = "G28\nBED_MESH_CALIBRATE\nG1 X10 Y10 E1\n";
+    PlantedGcode printer_file(name, "", printer_gcode);
+
+    view_.show(name, "", "PLA", {"#FF0000"}, {}, printer_gcode.size(), 42);
+    auto* prep = view_.get_prep_manager();
+    REQUIRE(prep != nullptr);
+    REQUIRE(wait_until([&]() { return prep->has_scan_result_for(name); }, 15000));
+    REQUIRE(prep->get_scan_result()->has_operation(helix::gcode::OperationType::BED_MESH));
+    pop_and_drain();
+
+    const std::string stick_gcode = "G28\nG1 X10 Y10 E1\n";
+    StickFile stick(name, stick_gcode);
+    view_.show(name, "", "PLA", {"#FF0000"}, {}, stick_gcode.size(), 42, 0, stick.path.string());
+    prep = view_.get_prep_manager();
+    REQUIRE(wait_until([&]() { return prep->has_scan_result_for(name); }, 15000));
+    drain_queue_chain();
+
+    CHECK_FALSE(prep->get_scan_result()->has_operation(helix::gcode::OperationType::BED_MESH));
+
+    pop_and_drain();
+}
+
+TEST_CASE_METHOD(DetailDownloadFixture,
+                 "A USB file's operations scan does not wait on the slow lane",
+                 "[print_select][detail_view][usb]") {
+    CacheDirGuard guard;
+    EnvGuard mem_fail("HELIX_FORCE_GCODE_MEMORY_FAIL", "1");
+    const std::string name = "busy_lane_" + std::to_string(::getpid()) + ".gcode";
+    const std::string content = "G28\nBED_MESH_CALIBRATE\nG1 X10 Y10 E1\n";
+    StickFile stick(name, content);
+
+    // A long upload holding the slow lane's single worker.
+    std::promise<void> release;
+    std::shared_future<void> upload_done = release.get_future().share();
+    helix::http::HttpExecutor::slow().submit([upload_done] { upload_done.wait(); });
+
+    view_.show(name, "", "PLA", {"#FF0000"}, {}, content.size(), 42, 0, stick.path.string());
+    auto* prep = view_.get_prep_manager();
+    REQUIRE(prep != nullptr);
+    CHECK(wait_until([&]() { return prep->has_printer_stop_answer_for(name); }, 5000));
+
+    release.set_value();
+    REQUIRE(wait_until([this]() { return ready(); }, 15000));
+    pop_and_drain();
+}
+
+TEST_CASE_METHOD(DetailDownloadFixture,
+                 "A transport without local copies or tail reads is asked for neither",
+                 "[print_select][detail_view][gcode_footer]") {
+    CacheDirGuard guard;
+    const std::string asset = find_test_asset("u1_4color_ring.gcode");
+    REQUIRE_FALSE(asset.empty());
+    const auto size = static_cast<size_t>(std::filesystem::file_size(asset));
+    transfers_.local_copies = false;
+    transfers_.tail_reads = false;
+
+    view_.show("u1_4color_ring.gcode", "", "PLA", {}, {}, size, 4242, size - 30'000);
+    drain_queue_chain();
+
+    CHECK(transfers_.download_count == 0);
+    CHECK(transfers_.tail_read_count == 0);
+    // The operations scan reads the file's head, which such a transport serves.
+    CHECK(transfers_.partial_read_count >= 1);
+    // The palette question is settled as unknown instead of left waiting.
+    CHECK(ready());
+    CHECK(subject_int("detail_gcode_viewer_mode") == helix::ui::PREVIEW_MODE_THUMBNAIL);
 
     pop_and_drain();
 }

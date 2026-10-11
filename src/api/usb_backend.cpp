@@ -24,18 +24,10 @@ std::unique_ptr<UsbBackend> UsbBackend::create(bool force_mock) {
 #endif
 
 #if defined(__linux__) && !defined(__ANDROID__)
-    // Linux: Use native backend (inotify preferred, polling fallback)
+    // Returned unstarted: the owner attaches its event callback first, and
+    // UsbManager::start() reports a backend that fails to start.
     spdlog::debug("[UsbBackend] Linux platform detected - using native backend");
-    auto backend = std::make_unique<UsbBackendLinux>();
-    UsbError result = backend->start();
-    if (result.success()) {
-        return backend;
-    }
-
-    // Native backend failed - no USB support available
-    spdlog::warn("[UsbBackend] Linux backend failed: {} - USB support unavailable",
-                 result.technical_msg);
-    return nullptr;
+    return std::make_unique<UsbBackendLinux>();
 #elif defined(__APPLE__)
     // macOS: No native USB backend implemented
     spdlog::info("[UsbBackend] macOS platform - USB support not available");

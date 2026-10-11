@@ -3,6 +3,8 @@
 #
 # Code lint tests: enforce architectural rules on the codebase.
 
+load helpers
+
 setup() {
     cd "$BATS_TEST_DIRNAME/../.." || return 1
 }
@@ -26,6 +28,24 @@ setup() {
     [ "$status" -eq 1 ]  # grep returns 1 when no matches found
 }
 
+# A friend accessor defined in two test TUs is an ODR violation: the linker keeps
+# one copy of each inline member, so a test can silently run another file's body.
+# Define it once in tests/test_helpers/<name>_test_access.h and include that.
+@test "every *TestAccess class is defined in at most one file" {
+    local defs
+    defs=$(grep -rEo --include='*.cpp' --include='*.h' \
+        '^[[:space:]]*(class|struct)[[:space:]]+[A-Za-z0-9_]*TestAccess[[:space:]]*(final[[:space:]]*)?(:[^;]*)?\{' tests/ \
+        | sed -E 's/^([^:]+):[[:space:]]*(class|struct)[[:space:]]+([A-Za-z0-9_]+).*/\3 \1/' | sort -u)
+    [ -n "$defs" ]  # an empty scan means the pattern stopped matching, not a clean tree
+    local dups
+    dups=$(echo "$defs" | awk '{n[$1]++; f[$1]=f[$1]" "$2} END {for (c in n) if (n[c] > 1) print c ":" f[c]}')
+    if [ -n "$dups" ]; then
+        echo "TestAccess classes defined in more than one file:"
+        echo "$dups"
+        return 1
+    fi
+}
+
 # --- Migrated temperature VIEW files must route sends through the controller ---
 # ui_overlay_temp_graph.cpp and ui_panel_controls.cpp were migrated to delegate
 # temperature commands to helix::TemperatureController. They must NOT call the
@@ -44,6 +64,34 @@ setup() {
     # controller's own ->set_temperature() is the sanctioned path, so exclude it.
     run bash -c "grep -nE '\->set_temperature\(' $files | grep -v 'controller'"
     [ "$status" -ne 0 ]  # non-zero == no disallowed direct send found
+}
+
+# --- Flush-path px_map stride must go through the shared helper ---
+# The dbuf-stride-or-fallback rule (active_buf->header.stride when queryable
+# and positive, else lv_draw_buf_width_to_stride(area_w, cf)) serves two
+# flush-path consumers, ColorTransform::select_flush_region and the
+# remote-screen mirror inside DisplayManager's flush hook. It lives once, in
+# helix::flush_px_map_stride (include/flush_stride.h); an inline copy at
+# either call site is a twin that can drift silently
+# (prestonbrown/helixscreen#1610).
+
+@test "flush px_map stride is derived via helix::flush_px_map_stride, not re-inlined" {
+    local folded="src/application/color_transform.cpp src/application/display_manager.cpp"
+
+    # The inline trust-check ternary must not come back at either call site.
+    run grep -n 'header.stride > 0' $folded
+    [ "$status" -eq 1 ]  # grep returns 1 when no matches found
+
+    # Both call sites must actually call the shared helper.
+    for f in $folded; do
+        run grep -n 'flush_px_map_stride(' "$f"
+        [ "$status" -eq 0 ]
+    done
+
+    # The rule itself still exists, exactly once, in the helper.
+    run bash -c "grep -c 'header.stride > 0' include/flush_stride.h"
+    [ "$status" -eq 0 ]
+    [ "$output" -eq 1 ]
 }
 
 # --- Chamber temp_display must use the maintain-aware effective target ---
@@ -155,13 +203,12 @@ setup() {
 # — narrower and cheaper to just not have it.
 #
 # Compile-time-only exceptions NOT covered by this lint (by design, not by
-# gap): a few consumers reference concrete-class static constexpr timeouts
-# (MoonrakerAdvancedAPI::PROBING_TIMEOUT_MS, ::LEVELING_TIMEOUT_MS,
-# MoonrakerJobAPI::CANCEL_TIMEOUT_MS) and the MoonrakerAdvancedAPI::MPCResult
-# qualified-name alias. These aren't runtime polymorphism — MPCResult is
-# actually defined on IAdvancedAPI with the concrete class providing a `using`
-# alias purely so old qualified references keep resolving (see
-# include/i_moonraker_sub_apis.h and include/moonraker_advanced_api.h). The
+# gap): a consumer references a concrete-class static constexpr timeout
+# (MoonrakerJobAPI::CANCEL_TIMEOUT_MS) and the MoonrakerAdvancedAPI::MPCResult
+# qualified-name alias. These aren't runtime polymorphism — MPCResult and the
+# calibration timeouts are defined on IAdvancedAPI and reach the concrete class
+# by inheritance or a `using` alias, so old qualified references keep resolving
+# (see include/i_moonraker_sub_apis.h and include/moonraker_advanced_api.h). The
 # ten sub-API concrete class names are deliberately left out of the grep
 # pattern below rather than allowlisting each of those consumer files, which
 # would blur the "outside the network layer" invariant this test communicates.
@@ -220,10 +267,10 @@ moonraker_concrete_pattern() {
 # switch_printer() actually makes the call, and makes it BEFORE teardown, while
 # Config::df() has already moved to the new printer.
 
-# Print the body of Application::switch_printer() from the file given in $1.
+# Print the body of PrinterSwitchFlow::switch_printer() from the file given in $1.
 switch_printer_body() {
     awk '
-        /^void Application::switch_printer\(/ { inside = 1 }
+        /^bool PrinterSwitchFlow::switch_printer\(/ { inside = 1 }
         inside { print }
         inside && /^\}/ { exit }
     ' "$1"
@@ -234,7 +281,7 @@ check_switch_printer_clears_caches() {
     local body clear_line teardown_line
     body=$(switch_printer_body "$1")
     if [ -z "$body" ]; then
-        echo "could not locate Application::switch_printer() in $1"
+        echo "could not locate PrinterSwitchFlow::switch_printer() in $1"
         return 1
     fi
 
@@ -244,21 +291,21 @@ check_switch_printer_clears_caches() {
         return 1
     fi
 
-    teardown_line=$(printf '%s\n' "$body" | grep -n 'tear_down_printer_state()' | head -1 | cut -d: -f1)
+    teardown_line=$(printf '%s\n' "$body" | grep -n 'm_restart.teardown()' | head -1 | cut -d: -f1)
     if [ -z "$teardown_line" ]; then
-        echo "switch_printer() does not call tear_down_printer_state()"
+        echo "switch_printer() does not call m_restart.teardown()"
         return 1
     fi
 
     if [ "$clear_line" -ge "$teardown_line" ]; then
-        echo "PrinterCacheRegistry::invalidate_all() must precede tear_down_printer_state()"
+        echo "PrinterCacheRegistry::invalidate_all() must precede m_restart.teardown()"
         return 1
     fi
     return 0
 }
 
 @test "switch_printer invalidates every registered per-printer cache before teardown" {
-    run check_switch_printer_clears_caches src/application/application.cpp
+    run check_switch_printer_clears_caches src/application/printer_switch_flow.cpp
     [ "$status" -eq 0 ]
 }
 
@@ -266,7 +313,7 @@ check_switch_printer_clears_caches() {
     # Meta-test: a gate that cannot fail is not a gate. Strip the call from a
     # copy and confirm the check reports the #804 regression.
     local mutated="${BATS_TEST_TMPDIR}/application_no_clear.cpp"
-    grep -v 'PrinterCacheRegistry::instance().invalidate_all()' src/application/application.cpp > "$mutated"
+    grep -v 'PrinterCacheRegistry::instance().invalidate_all()' src/application/printer_switch_flow.cpp > "$mutated"
 
     run check_switch_printer_clears_caches "$mutated"
     [ "$status" -eq 1 ]
@@ -277,9 +324,9 @@ check_switch_printer_clears_caches() {
     # The ordering half: invalidating after teardown re-reads the OLD printer's
     # values on the way down, so position matters as much as presence.
     local mutated="${BATS_TEST_TMPDIR}/application_late_clear.cpp"
-    sed -e 's@^    helix::PrinterCacheRegistry::instance().invalidate_all();@@' \
-        -e 's@^    tear_down_printer_state();@    tear_down_printer_state();\n    helix::PrinterCacheRegistry::instance().invalidate_all();@' \
-        src/application/application.cpp > "$mutated"
+    sed -e 's@^    PrinterCacheRegistry::instance().invalidate_all();@@' \
+        -e 's@^    m_restart.teardown();@    m_restart.teardown();\n    PrinterCacheRegistry::instance().invalidate_all();@' \
+        src/application/printer_switch_flow.cpp > "$mutated"
 
     run check_switch_printer_clears_caches "$mutated"
     [ "$status" -eq 1 ]
@@ -290,8 +337,8 @@ check_switch_printer_clears_caches() {
     # Fail-closed: a rename or signature change must break the gate loudly rather
     # than silently pass on an empty body.
     local mutated="${BATS_TEST_TMPDIR}/application_no_fn.cpp"
-    sed -e 's@^void Application::switch_printer(@void Application::switch_printer_renamed(@' \
-        src/application/application.cpp > "$mutated"
+    sed -e 's@^bool PrinterSwitchFlow::switch_printer(@bool PrinterSwitchFlow::switch_printer_renamed(@' \
+        src/application/printer_switch_flow.cpp > "$mutated"
 
     run check_switch_printer_clears_caches "$mutated"
     [ "$status" -eq 1 ]
@@ -300,11 +347,11 @@ check_switch_printer_clears_caches() {
 
 @test "the switch_printer cache-invalidation gate fails when teardown is missing" {
     local mutated="${BATS_TEST_TMPDIR}/application_no_teardown.cpp"
-    grep -v '^    tear_down_printer_state();' src/application/application.cpp > "$mutated"
+    grep -v '^    m_restart.teardown();' src/application/printer_switch_flow.cpp > "$mutated"
 
     run check_switch_printer_clears_caches "$mutated"
     [ "$status" -eq 1 ]
-    [[ "$output" == *"tear_down_printer_state"* ]]
+    [[ "$output" == *"m_restart.teardown"* ]]
 }
 
 # --- No RTTI code shapes (the firmware builds -fno-rtti) ---
@@ -367,13 +414,16 @@ rtti_lint_files() {
 # gate has no opt-out). The pattern travels through the environment, not
 # `awk -v`: -v runs escape processing over the value, which turns `\.` into a
 # match-anything `.` and emits a warning for every escape.
+# Optional CODE_LINT_JOIN (an ERE): a code line matching it is held and joined
+# to the next line before matching, reported at the first line. That catches a
+# declaration clang-format split after its type.
 code_offenders() {
     local pat="$1" optout="$2"
     shift 2
     CODE_LINT_PAT="$pat" CODE_LINT_OPTOUT="$optout" awk '
-        BEGIN { pat = ENVIRON["CODE_LINT_PAT"]; optout = ENVIRON["CODE_LINT_OPTOUT"] }
-        FNR == 1 { in_block = 0 }
-        optout != "" && index($0, optout) > 0 { next }
+        BEGIN { pat = ENVIRON["CODE_LINT_PAT"]; optout = ENVIRON["CODE_LINT_OPTOUT"]; join = ENVIRON["CODE_LINT_JOIN"] }
+        FNR == 1 { in_block = 0; held = "" }
+        optout != "" && index($0, optout) > 0 { held = ""; next }
         {
             # Walk the line left to right, honouring whichever delimiter opens
             # first. A `//` and a `/*` on one line is not hypothetical:
@@ -403,7 +453,20 @@ code_offenders() {
                 if (e == 0) { in_block = 1; break }
                 line = substr(rest, e + 2)
             }
-            if (code ~ pat) print FILENAME ":" FNR ": " $0
+            if (held != "") {
+                code = held " " code
+                text = held_text " " $0
+                where = held_fnr
+                held = ""
+            } else {
+                text = $0
+                where = FNR
+            }
+            if (join != "" && code ~ join) {
+                held = code; held_text = text; held_fnr = where
+                next
+            }
+            if (code ~ pat) print FILENAME ":" where ": " text
         }
     ' "$@"
 }
@@ -475,9 +538,9 @@ EOF
     run rtti_offenders "$(rtti_forbidden_pattern)" "$f"
     [ "$status" -eq 0 ]
     [ "${#lines[@]}" -eq 4 ]
-    [[ "$output" == *"dynamic_cast"* ]]
-    [[ "$output" == *"typeid"* ]]
-    [[ "$output" == *"type_index"* ]]
+    contains "dynamic_cast" "$output"
+    contains "typeid" "$output"
+    contains "type_index" "$output"
     [[ "$output" == *"target_type"* ]]
 }
 
@@ -514,8 +577,387 @@ EOF
     run rtti_offenders "$(rtti_any_pattern)" "$f"
     [ "$status" -eq 0 ]
     [ "${#lines[@]}" -eq 3 ]
-    [[ "$output" != *"LayoutManager"* ]]
+    lacks "LayoutManager" "$output"
     [[ "$output" != *"any_cast"* ]]
+}
+
+# libstdc++'s std::regex backtracks by recursion, one frame per input character,
+# so a long enough input overflows a thread stack. musl builds give every thread a
+# small default stack and the Moonraker callbacks run on one of them. helix::Regex
+# (include/helix_regex.h) keeps its backtracking on the heap.
+std_regex_pattern() {
+    printf '%s' '#[[:space:]]*include[[:space:]]*<regex>|std::(regex|smatch|cmatch|sregex|wregex)'
+}
+
+# Allowed, with the reason:
+#   src/tools/ - host-only build tools
+std_regex_lint_files() {
+    rtti_lint_files | grep -Ev '^src/tools/'
+}
+
+check_no_std_regex() {
+    local offenders
+    # shellcheck disable=SC2046  # paths have no spaces; word splitting is intended
+    offenders=$(code_offenders "$(std_regex_pattern)" STD_REGEX_OK $(std_regex_lint_files))
+    [ -z "$offenders" ] && return 0
+    echo "std::regex in app code (its recursive backtracking overflows a thread stack):"
+    printf '%s\n' "$offenders"
+    echo "Use helix::Regex (include/helix_regex.h). Unavoidable? // STD_REGEX_OK: <reason>"
+    return 1
+}
+
+@test "no std::regex in app code (use helix::Regex)" {
+    run check_no_std_regex
+    [ "$status" -eq 0 ]
+}
+
+@test "the std::regex gate catches includes and uses, and stays quiet on prose and opt-outs" {
+    local f="${BATS_TEST_TMPDIR}/regex_shapes.cpp"
+    cat > "$f" <<'SHAPES'
+#include <regex>
+static const std::regex re("a+");
+std::smatch m;
+auto it = std::sregex_iterator(s.begin(), s.end(), re);
+// Plain string walking rather than std::regex, which overflows the stack.
+auto hatch = std::regex("x"); // STD_REGEX_OK: test fixture
+helix::Regex fine("a+");
+SHAPES
+    run code_offenders "$(std_regex_pattern)" STD_REGEX_OK "$f"
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 4 ]
+    lacks "Plain string" "$output"
+    lacks "STD_REGEX_OK" "$output"
+    lacks "helix::Regex" "$output"
+}
+
+# Only <spdlog/fmt/fmt.h> is on every build's include path; the standalone
+# <fmt/...> headers are absent on hosts that build against spdlog's bundled fmt.
+bare_fmt_include_files() {
+    git ls-files --cached --others --exclude-standard src include tests firmware |
+        grep -E '\.(cpp|h)$'
+}
+
+check_no_bare_fmt_include() {
+    local offenders
+    # shellcheck disable=SC2046  # paths have no spaces; word splitting is intended
+    offenders=$(code_offenders '#[[:space:]]*include[[:space:]]*<fmt/' FMT_INCLUDE_OK $(bare_fmt_include_files))
+    [ -z "$offenders" ] && return 0
+    echo "bare <fmt/...> include (not on every host's include path):"
+    printf '%s\n' "$offenders"
+    echo "Use <spdlog/fmt/fmt.h>."
+    return 1
+}
+
+@test "no bare <fmt/...> include in src, include, tests or firmware" {
+    run check_no_bare_fmt_include
+    [ "$status" -eq 0 ]
+}
+
+# sigaltstack is per thread, so a thread that never installs its own signal
+# stack dies on a stack overflow without writing a crash file. helix::make_thread
+# (include/helix_thread.h) installs one before running the thread's body.
+raw_thread_pattern() {
+    printf '%s' 'std::j?thread[[:space:]]*[({]|std::j?thread[[:space:]]+[A-Za-z_][A-Za-z_0-9]*[[:space:]]*[({]|std::async[[:space:]]*\(|pthread_create[[:space:]]*\('
+}
+
+raw_thread_lint_files() {
+    git ls-files --cached --others --exclude-standard src include |
+        grep -E '\.(cpp|h)$' | grep -v '^include/helix_thread\.h$'
+}
+
+check_no_raw_threads() {
+    local offenders
+    # shellcheck disable=SC2046  # paths have no spaces; word splitting is intended
+    offenders=$(code_offenders "$(raw_thread_pattern)" THREAD_OK $(raw_thread_lint_files))
+    [ -z "$offenders" ] && return 0
+    echo "Raw thread spawn (a stack overflow on it leaves no crash file):"
+    printf '%s\n' "$offenders"
+    echo "Use helix::make_thread (include/helix_thread.h). Unavoidable? Call"
+    echo "helix::install_thread_altstack() first in the body and mark it // THREAD_OK: <reason>"
+    return 1
+}
+
+@test "every app thread starts through helix::make_thread" {
+    run check_no_raw_threads
+    [ "$status" -eq 0 ]
+}
+
+@test "the raw-thread gate catches spawns and stays quiet on members, ids and opt-outs" {
+    local f="${BATS_TEST_TMPDIR}/thread_shapes.cpp"
+    cat > "$f" <<'SHAPES'
+worker_ = std::thread([this] { run(); });
+std::thread t(&Foo::run, this);
+std::thread{fn}.detach();
+auto fut = std::async(std::launch::async, fn);
+std::jthread j([] {});
+pthread_create(&tid, nullptr, run, this);
+std::thread worker_;
+std::jthread jworker_;
+std::thread::id owner_;
+std::vector<std::thread> pool_;
+// Joined in the destructor: std::thread(...) must not outlive us.
+auto hatch = std::async(std::launch::async, fn); // THREAD_OK: test fixture
+worker_ = helix::make_thread([this] { run(); });
+SHAPES
+    run code_offenders "$(raw_thread_pattern)" THREAD_OK "$f"
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 6 ]
+    lacks "std::thread worker_;" "$output"
+    lacks "jworker_" "$output"
+    lacks "THREAD_OK" "$output"
+    lacks "make_thread" "$output"
+}
+
+# --- lv_subject_t declarations are value-initialized ---
+#
+# A subject that has not been through lv_subject_init_*() must read as
+# LV_SUBJECT_TYPE_INVALID with an empty subscriber list, so a publish that
+# arrives first is LVGL's warned no-op. Without `{}` a member or local holds
+# whatever the allocation held, and garbage that reads as an INT subject sends
+# lv_subject_set_int() down a wild subscriber list (#1423). `static` and
+# `extern` declarations are not matched: static storage is zeroed already. A
+# bare namespace-scope global is zeroed too but is still flagged, since the
+# line alone cannot tell it from a member; brace it. Unavoidable?
+# // SUBJECT_INIT_OK: <reason>
+subject_no_init_pattern() {
+    local lead='^[[:space:]]*(mutable[[:space:]]+)?'
+    local name='[_[:alnum:]]+[[:space:]]*(\[[^]]*\][[:space:]]*)*'
+    printf '%s' "${lead}(::)?lv_subject_t[[:space:]]+([^;]*,[[:space:]]*)?${name}[,;]|${lead}std::array<[[:space:]]*(::)?lv_subject_t[[:space:]]*,.*>[[:space:]]+${name};"
+}
+
+# A type alone on its line: clang-format splits long declarations there.
+subject_split_pattern() {
+    printf '%s' '^[[:space:]]*(mutable[[:space:]]+)?(::)?lv_subject_t[[:space:]]*$'
+}
+
+subject_offenders() {
+    CODE_LINT_JOIN="$(subject_split_pattern)" code_offenders "$(subject_no_init_pattern)" SUBJECT_INIT_OK "$@"
+}
+
+check_subjects_value_initialized() {
+    local offenders
+    # shellcheck disable=SC2046  # paths have no spaces; word splitting is intended
+    offenders=$(subject_offenders $(rtti_lint_files))
+    [ -z "$offenders" ] && return 0
+    echo "lv_subject_t declared without an initializer (reads as garbage until init):"
+    printf '%s\n' "$offenders"
+    echo "Write \`lv_subject_t name_{};\`. Unavoidable? // SUBJECT_INIT_OK: <reason>"
+    return 1
+}
+
+@test "lv_subject_t declarations are value-initialized (#1423)" {
+    run check_subjects_value_initialized
+    [ "$status" -eq 0 ]
+}
+
+@test "the subject-init gate catches bare declarations, and stays quiet on initialized, static and pointer forms" {
+    local f="${BATS_TEST_TMPDIR}/subject_shapes.h"
+    cat > "$f" <<'SHAPES'
+    lv_subject_t bare_;
+    lv_subject_t slots_[MAX_SLOTS];
+    std::array<lv_subject_t, 4> rows_;
+    lv_subject_t
+        split_bare_; ///< clang-format moved the name
+    mutable lv_subject_t mutable_bare_;
+    ::lv_subject_t qualified_bare_;
+    lv_subject_t first_bare_, second_bare_;
+    lv_subject_t init_first_{}, trailing_bare_;
+    lv_subject_t grid_[2][3];
+    std::array<lv_subject_t, static_cast<size_t>(Kind::Count)> cast_rows_;
+    lv_subject_t braced_{};
+    lv_subject_t braced_slots_[MAX_SLOTS]{};
+    std::array<lv_subject_t, 4> braced_rows_{};
+    std::array<lv_subject_t, static_cast<size_t>(Kind::Count)> braced_cast_rows_{};
+    lv_subject_t
+        braced_split_{}; ///< clang-format moved the name
+    mutable lv_subject_t braced_mutable_{};
+    lv_subject_t braced_pair_a_{}, braced_pair_b_{};
+    lv_subject_t braced_grid_[2][3]{};
+    static lv_subject_t zeroed_by_storage;
+    lv_subject_t* pointer_ = nullptr;
+    extern lv_subject_t elsewhere;
+    lv_subject_t hatch_; // SUBJECT_INIT_OK: test fixture
+    // lv_subject_t in_a_comment_;
+SHAPES
+    run subject_offenders "$f"
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 10 ]
+    contains "subject_shapes.h:4: " "$output"
+    contains "split_bare_" "$output"
+    lacks "braced" "$output"
+    lacks "zeroed_by_storage" "$output"
+    lacks "pointer_" "$output"
+    lacks "elsewhere" "$output"
+    lacks "SUBJECT_INIT_OK" "$output"
+}
+
+# --- One way to defer to the main thread per job ---
+#
+# UpdateQueue work bound to an object goes through AsyncLifetimeGuard::defer or
+# bg_cb, unowned work through queue_update(tag, fn), and work that needs LVGL's
+# own async list through run_next_tick (include/ui_next_tick.h). A raw
+# lv_async_call or a void* async_call carries a bare `this` with no lifetime
+# check, so it is banned outside run_next_tick itself. Unavoidable?
+# // LV_ASYNC_OK: <reason>
+defer_idiom_pattern() {
+    printf '%s' '(^|[^_[:alnum:]])(lv_)?async_call[[:space:]]*\(|helix::async::'
+}
+
+defer_idiom_lint_files() {
+    rtti_lint_files | grep -Ev '^include/ui_next_tick\.h$'
+}
+
+check_no_raw_defer_idioms() {
+    local offenders
+    # shellcheck disable=SC2046  # paths have no spaces; word splitting is intended
+    offenders=$(code_offenders "$(defer_idiom_pattern)" LV_ASYNC_OK $(defer_idiom_lint_files))
+    [ -z "$offenders" ] && return 0
+    echo "Raw main-thread deferral (no lifetime check on what it captures):"
+    printf '%s\n' "$offenders"
+    echo "Use lifetime_.defer / bg_cb, queue_update(tag, fn), or helix::ui::run_next_tick."
+    return 1
+}
+
+@test "no raw lv_async_call / async_call / helix::async deferrals in app code" {
+    run check_no_raw_defer_idioms
+    [ "$status" -eq 0 ]
+}
+
+@test "the deferral gate catches raw idioms, and stays quiet on prose, cancel and opt-outs" {
+    local f="${BATS_TEST_TMPDIR}/defer_shapes.cpp"
+    cat > "$f" <<'SHAPES'
+lv_async_call(cb, this);
+helix::ui::async_call([](void*) {}, nullptr);
+helix::async::call_method(this, &T::m);
+// lv_async_call(cb, this) in a comment
+lv_async_call_cancel(cb, this);
+simulate_ui_async_call([] {});
+lv_async_call(cb, &slot); // LV_ASYNC_OK: test fixture
+helix::ui::run_next_tick(tok, [] {});
+SHAPES
+    run code_offenders "$(defer_idiom_pattern)" LV_ASYNC_OK "$f"
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 3 ]
+    lacks "in a comment" "$output"
+    lacks "_cancel" "$output"
+    lacks "simulate_ui" "$output"
+    lacks "LV_ASYNC_OK" "$output"
+    lacks "run_next_tick" "$output"
+}
+
+# --- Every queue_update() names its producer ---
+#
+# The test-isolation listener reports a leaked UpdateQueue callback by its tag;
+# an untagged one reads `<untagged>`, which names no owner (#1685). App code
+# passes a string literal first: queue_update("Owner::method", fn). The
+# forwarding wrappers in include/ thread file/line instead and are not linted.
+# A tag forwarded through a variable? // QUEUE_TAG_OK: <reason>
+queue_untagged_pattern() {
+    printf '%s' '(^|[^_[:alnum:]])queue_update[[:space:]]*\([[:space:]]*[^"[:space:]]'
+}
+
+# clang-format wraps a long call after the open paren; join that line to the next.
+queue_split_pattern() {
+    printf '%s' '(^|[^_[:alnum:]])queue_update[[:space:]]*\([[:space:]]*$'
+}
+
+check_queue_update_tagged() {
+    local offenders
+    # shellcheck disable=SC2046  # paths have no spaces; word splitting is intended
+    offenders=$(CODE_LINT_JOIN="$(queue_split_pattern)" code_offenders \
+        "$(queue_untagged_pattern)" QUEUE_TAG_OK \
+        $(git ls-files --cached --others --exclude-standard src firmware | grep -E '\.(cpp|h)$'))
+    [ -z "$offenders" ] && return 0
+    echo "Untagged queue_update() (a leak would report <untagged>):"
+    printf '%s\n' "$offenders"
+    echo "Pass the owner as a literal first: queue_update(\"Owner::method\", fn)."
+    return 1
+}
+
+@test "every queue_update() in app code passes a producer tag" {
+    run check_queue_update_tagged
+    [ "$status" -eq 0 ]
+}
+
+@test "the queue_update tag gate catches tagless and wrapped calls, and skips tags and opt-outs" {
+    local f="${BATS_TEST_TMPDIR}/queue_shapes.cpp"
+    cat > "$f" <<'SHAPES'
+helix::ui::queue_update([this]() {});
+ui::queue_update(std::move(cb));
+helix::ui::queue_update(
+    [x]() {});
+helix::ui::queue_update("Owner::method", [this]() {});
+helix::ui::queue_update(
+    "Owner::wrapped", [x]() {});
+// helix::ui::queue_update([]() {}) in a comment
+ui_queue_update([] {});
+helix::ui::queue_update(tag, [o]() {}); // QUEUE_TAG_OK: forwarded literal
+SHAPES
+    CODE_LINT_JOIN="$(queue_split_pattern)" run code_offenders \
+        "$(queue_untagged_pattern)" QUEUE_TAG_OK "$f"
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 3 ]
+    contains "queue_shapes.cpp:1: " "$output"
+    contains "queue_shapes.cpp:3: " "$output"
+    lacks "Owner::" "$output"
+    lacks "in a comment" "$output"
+    lacks "ui_queue_update" "$output"
+    lacks "QUEUE_TAG_OK" "$output"
+}
+
+# --- One observe<V>() entry point ---
+#
+# The per-type observer factories (observe_int_sync, observe_string, the *_immediate
+# forms, observe_int_async) are gone; observe<int> / observe<const char*> with an
+# optional Dispatch::Immediate replace them. A branch written against the old names
+# does not compile, and scripts/rename_observers.py rewrites it mechanically.
+old_observer_pattern() {
+    printf '%s' '(^|[^_[:alnum:]])observe_(int_sync|int_immediate|int_async|string|string_immediate|print_state_immediate)[[:space:]]*[<(]'
+}
+
+old_observer_lint_files() {
+    rtti_lint_files
+    git ls-files --cached --others --exclude-standard tests/unit | grep -E '\.(cpp|h)$'
+}
+
+check_no_old_observer_names() {
+    local offenders
+    # shellcheck disable=SC2046  # paths have no spaces; word splitting is intended
+    offenders=$(code_offenders "$(old_observer_pattern)" "" $(old_observer_lint_files))
+    [ -z "$offenders" ] && return 0
+    echo "Retired observer factory name:"
+    printf '%s\n' "$offenders"
+    echo "Run scripts/rename_observers.py (observe<int>/observe<const char*>, Dispatch::Immediate)."
+    return 1
+}
+
+@test "no retired observe_int_sync / observe_string / *_immediate / observe_int_async calls" {
+    run check_no_old_observer_names
+    [ "$status" -eq 0 ]
+}
+
+@test "the observer-name gate catches the retired spellings, and stays quiet on the new API and prose" {
+    local f="${BATS_TEST_TMPDIR}/observer_shapes.cpp"
+    cat > "$f" <<'SHAPES'
+g = observe_int_sync<Panel>(s, this, h, lt);
+g = helix::ui::observe_string<Panel>(s, this, h, lt);
+g = observe_int_immediate<Panel>(s, this, h, lt);
+g = observe_string_immediate(s, this, h, lt);
+g = observe_int_async<Panel>(s, this, h, u, lt);
+g = observe_print_state_immediate<Panel>(s, this, h, lt);
+g = observe<int>(s, this, h, lt);
+g = observe<const char*>(s, this, h, lt, Dispatch::Immediate);
+g = observe_print_state<Panel>(s, this, h, lt);
+// observe_int_sync<Panel>(s, this, h, lt) in a comment
+auto observe_string_view = 3;
+SHAPES
+    run code_offenders "$(old_observer_pattern)" "" "$f"
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 6 ]
+    lacks "in a comment" "$output"
+    lacks "observe<int>" "$output"
+    lacks "observe_print_state<Panel>" "$output"
+    lacks "observe_string_view" "$output"
 }
 
 @test "filaments.json android mirror matches when present" {
@@ -559,20 +1001,20 @@ EOF
 # and `make test-shell` only runs late in the release. These pin the wiring.
 
 @test "the translation coverage gate is wired into quality-checks.sh" {
-  run grep -c 'qc_translation_coverage' scripts/quality-checks.sh
+  run grep -q 'QC_ALL=.*qc_translation_coverage' scripts/quality-checks.sh
   [ "$status" -eq 0 ]
-  # definition, QC_ALL registration, and the path-gating trigger row
-  [ "$output" -ge 3 ]
+  run grep -q '^qc_translation_coverage() {' scripts/qc/translation_coverage.sh
+  [ "$status" -eq 0 ]
 }
 
 @test "quality-checks.sh runs the coverage gate as a dry run" {
   # A bare `sync` REWRITES all nine catalogs. A gate that edits the tree it is
   # inspecting would stage catalog churn behind the committer's back, and would
   # then report green on the very drift it just introduced.
-  run grep -n 'translation_sync.py sync' scripts/quality-checks.sh
+  run grep -n 'translation_sync.py sync' scripts/qc/translation_coverage.sh
   [ "$status" -eq 0 ]
   while IFS= read -r line; do
-    [[ "$line" == *"--dry-run"* ]]
+    contains "--dry-run" "$line"
   done <<< "$output"
 }
 
@@ -580,10 +1022,57 @@ EOF
   # A new lv_tr() in src/ or a label_tag in ui_xml/ is what ADDS an untranslated
   # string; gating the check on ^translations/ alone would sleep through exactly
   # the commit that introduces one.
-  run bash -c "sed -n '/qc_translation_coverage)/,/;;/p' scripts/quality-checks.sh"
+  run qc_trigger translation_coverage
   [ "$status" -eq 0 ]
-  [[ "$output" == *"^ui_xml/"* ]]
+  contains "^ui_xml/" "$output"
   [[ "$output" == *"^src/"* ]]
+}
+
+@test "the coverage gate fails on empty locale values via CI's pytest" {
+  # The dry run proves a KEY exists; `make translation-sync` writes a new key
+  # as an EMPTY placeholder, and an empty value renders as empty text in that
+  # locale (the English-tag fallback only fires on a MISSING key). The gate
+  # must run the same scan CI's Code Quality job runs -
+  # tests/python/test_cpp_translation_coverage.py - so a tree the hook passes
+  # cannot fail CI on the same rule.
+  if [ ! -x .venv/bin/python ]; then
+    skip "translations venv not set up (run 'make venv-setup')"
+  fi
+  run bash -c "sed -n '/^qc_translation_coverage() {/,/^}/p' scripts/qc/translation_coverage.sh"
+  [ "$status" -eq 0 ]
+  contains "tests/python/test_cpp_translation_coverage.py" "$output"
+  contains "-m pytest" "$output"
+}
+
+# A missing .venv used to turn this gate into a warning in every mode. The full
+# sweep is what pre-push and CI run, and a fresh clone (a cloud session, a new
+# box) has no .venv until someone runs `make venv-setup`, so the last gate before
+# main read as green over an untranslated lv_tr() key (prestonbrown/helixscreen#1507).
+# Staged mode keeps the skip: pre-commit on a box without the venv must stay usable.
+
+run_coverage_gate_without_venv() {
+  # $1 = STAGED_ONLY value. Runs the real function body with the venv pointed
+  # at a path that does not exist, and the timing helper stubbed out.
+  bash -c '
+    section_time() { :; }
+    STAGED_ONLY="$1"
+    VENV_PYTHON="/nonexistent/helix-venv/bin/python"
+    . scripts/qc/translation_coverage.sh
+    qc_translation_coverage
+  ' _ "$1"
+}
+
+@test "a missing .venv fails the full translation coverage sweep" {
+  run run_coverage_gate_without_venv false
+  [ "$status" -eq 1 ]
+  contains "make venv-setup" "$output"
+  lacks "skipping" "$output"
+}
+
+@test "a missing .venv is still only a skip in staged mode" {
+  run run_coverage_gate_without_venv true
+  [ "$status" -eq 0 ]
+  contains "skipping" "$output"
 }
 
 # --- Global RuntimeConfig::test_mode must be restored by whoever sets it ---
@@ -767,7 +1256,7 @@ EOF
 EOF
     run history_lazy_fetch_offenders "$d"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"hm->fetch("* ]]
+    contains "hm->fetch(" "$output"
     [[ "$output" == *"history->fetch("* ]]
 }
 
@@ -804,7 +1293,17 @@ EOF
 check_deinit_all_does_not_log() {
     local file="$1"
     local body
-    body=$(awk '/void deinit_all\(\) \{/{f=1} f{print} f && /^    \}$/{exit}' "$file")
+    # Track brace depth rather than stopping at the first four-space "}": a
+    # nested block closing in that column would end the extraction early and
+    # leave the rest of the body unchecked.
+    body=$(awk '
+        /void deinit_all\(\) \{/ { f = 1 }
+        f {
+            print
+            depth += gsub(/\{/, "{") - gsub(/\}/, "}")
+            if (depth <= 0) exit
+        }
+    ' "$file")
 
     if [ -z "$body" ]; then
         echo "could not locate SubjectManager::deinit_all() in $file"
@@ -834,6 +1333,31 @@ check_deinit_all_does_not_log() {
     [[ "$output" == *"static destruction"* ]]
 }
 
+@test "the deinit_all logging gate reads the whole body, not a prefix" {
+    # Extraction has to end on the brace that closes deinit_all(), not on the
+    # first four-space "}" it meets. A nested block whose closing brace lands in
+    # that column - a lambda, or a clang-format reflow - would otherwise end the
+    # extraction early, and every line after it goes unchecked while the gate
+    # reports green.
+    local mutated="${BATS_TEST_TMPDIR}/subject_managed_panel_prefix.h"
+    awk '
+        /^        for \(size_t i = 0; i < subjects_.size\(\); \+\+i\) \{/ && !done {
+            print "        if (subjects_.empty()) {"
+            print "    }"
+            print "        spdlog::trace(\"after the reflowed brace\");"
+            done = 1
+        }
+        { print }
+    ' include/subject_managed_panel.h > "$mutated"
+
+    # The mutation has to actually be there, or this test passes vacuously.
+    contains "after the reflowed brace" "$(cat "$mutated")"
+
+    run check_deinit_all_does_not_log "$mutated"
+    [ "$status" -eq 1 ]
+    contains "static destruction" "$output"
+}
+
 @test "the deinit_all logging gate fails closed when the function is renamed" {
     local mutated="${BATS_TEST_TMPDIR}/subject_managed_panel_renamed.h"
     sed -e 's@^    void deinit_all() {@    void deinit_everything() {@' \
@@ -852,15 +1376,25 @@ check_deinit_all_does_not_log() {
 @test "the nightly reads the vacuous ceiling from the makefile, not a literal" {
     run grep -A2 'check_vacuous_tests.py' .github/workflows/nightly.yml
     [ "$status" -eq 0 ]
-    [[ "$output" == *"print-vacuous-max"* ]]
+    contains "print-vacuous-max" "$output"
     # A bare --max-allowed <number> is the shape that drifts.
     [[ ! "$output" =~ --max-allowed[[:space:]]+[0-9]+ ]]
 }
 
 @test "print-vacuous-max resolves to a bare integer" {
-    run bash -c 'make -s print-vacuous-max 2>/dev/null | tail -1'
-    [ "$status" -eq 0 ]
-    [[ "$output" =~ ^[0-9]+$ ]]
+    local out='' err=''
+    # `make -C <dir>` implies --print-directory and exports it through MAKEFLAGS,
+    # so an inner make launched under one writes "Entering/Leaving directory" to
+    # STDOUT around the echoed value. --no-print-directory cancels that inherited
+    # -w; -s alone does not. make's stderr is kept for the failure message: a red
+    # here must say what make said.
+    out="$(make --no-print-directory -s print-vacuous-max \
+        2>"$BATS_TEST_TMPDIR/vacuous-max.err")" || true
+    [[ "$out" =~ ^[0-9]+$ ]] && return 0
+    err="$(cat "$BATS_TEST_TMPDIR/vacuous-max.err")" || true
+    echo "print-vacuous-max stdout: [$out]"
+    echo "print-vacuous-max stderr: [$err]"
+    false
 }
 
 # --- the vacuous baseline can express a test name that starts with '#' ---
@@ -884,6 +1418,1909 @@ b = m.load_baseline(Path('$base'))
 print(sorted(b))
 "
     [ "$status" -eq 0 ]
-    [[ "$output" == *"#1127 seeding state costs no extra bytes per layer entry"* ]]
+    contains "#1127 seeding state costs no extra bytes per layer entry" "$output"
     [[ "$output" != *"a real comment"* ]]
+}
+
+# --- ObserverGuard's move paths must clear the source's cleanup ---
+# A moved-from std::function is valid but UNSPECIFIED. libc++ keeps the target
+# when the callable fits its small-object buffer, and ObserverGuard's cleanup -
+# one captured pointer - does. A source that kept it frees the observer's
+# context from its own destructor while the destination keeps the observer
+# attached, so the next notify reads freed memory (#1446). libstdc++ empties the
+# source, so no test on this box can fail on it - which is exactly why the
+# invariant is pinned here instead.
+
+check_observer_guard_move_clears_cleanup() {
+    local file="$1"
+    local moves
+    moves=$(grep -n 'cleanup_.*other\.cleanup_' "$file")
+
+    if [ -z "$moves" ]; then
+        echo "could not locate ObserverGuard's move paths in $file"
+        return 1
+    fi
+
+    if [ "$(echo "$moves" | wc -l)" -ne 2 ]; then
+        echo "expected exactly 2 cleanup_ move sites (move ctor + move assignment), found:"
+        echo "$moves"
+        return 1
+    fi
+
+    if echo "$moves" | grep -q 'std::move'; then
+        echo "ObserverGuard move path uses std::move on cleanup_; a moved-from"
+        echo "std::function keeps its target on libc++, so the source frees the"
+        echo "observer context out from under the destination. Use std::exchange:"
+        echo "$moves" | grep 'std::move'
+        return 1
+    fi
+    return 0
+}
+
+@test "ObserverGuard's move paths clear the moved-from cleanup" {
+    run check_observer_guard_move_clears_cleanup include/ui_observer_guard.h
+    [ "$status" -eq 0 ]
+}
+
+@test "the ObserverGuard move gate fires when std::move comes back" {
+    local mutated="${BATS_TEST_TMPDIR}/ui_observer_guard_moved.h"
+    sed -e 's@std::exchange(other\.cleanup_, nullptr)@std::move(other.cleanup_)@' \
+        include/ui_observer_guard.h > "$mutated"
+
+    run check_observer_guard_move_clears_cleanup "$mutated"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"libc++"* ]]
+}
+
+@test "the ObserverGuard move gate fails closed when a move path disappears" {
+    local mutated="${BATS_TEST_TMPDIR}/ui_observer_guard_dropped.h"
+    awk '/cleanup_.*other\.cleanup_/ && !seen { seen = 1; next } { print }' \
+        include/ui_observer_guard.h > "$mutated"
+
+    run check_observer_guard_move_clears_cleanup "$mutated"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"expected exactly 2"* ]]
+}
+
+# ====================================================================
+# A friend list is a fixed, reviewable set, not an open-ended one
+# ====================================================================
+# AmsBackendAfc and AmsBackendHappyHare each expose internals to tests through
+# a single XTestAccess shim; LaneSourceStore (below) names its two writer
+# funnels plus a test shim. In every case, widening what a header befriends is
+# a review-worthy edit, so this compares the file's friend declarations
+# against an exact expected set rather than merely counting them. The match
+# is on normalised whitespace, not literal text, since clang-format may
+# reflow a multi-argument signature, and it is order-insensitive: a header's
+# friend declarations are a set of grants, not a sequence, so reordering two
+# of them without adding or removing a grant is not a widening.
+check_friend_list() {
+    local file="$1"
+    local expected
+    expected=$(printf '%s\n' "$2" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/[[:space:]]+/ /g')
+    local expected_count
+    expected_count=$(printf '%s\n' "$expected" | grep -c .)
+
+    local friends
+    friends=$(grep -E '^[[:space:]]*friend ' "$file" 2>/dev/null \
+              | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/[[:space:]]+/ /g' || true)
+
+    if [ -z "$friends" ]; then
+        echo "no friend declaration in $file; expected exactly $expected_count:"
+        echo "$expected"
+        return 1
+    fi
+
+    if [ "$(printf '%s\n' "$friends" | sort)" != "$(printf '%s\n' "$expected" | sort)" ]; then
+        local found_count
+        found_count=$(printf '%s\n' "$friends" | grep -c .)
+        echo "expected exactly $expected_count test friend(s) in $file, found $found_count:"
+        echo "found:"
+        echo "$friends"
+        echo "expected:"
+        echo "$expected"
+        return 1
+    fi
+    return 0
+}
+
+@test "AmsBackendAfc befriends exactly one test shim" {
+    run check_friend_list include/ams_backend_afc.h "friend class AfcTestAccess;"
+    [ "$status" -eq 0 ]
+}
+
+@test "AmsBackendHappyHare befriends exactly one test shim" {
+    run check_friend_list include/ams_backend_happy_hare.h "friend class HappyHareTestAccess;"
+    [ "$status" -eq 0 ]
+}
+
+@test "the backend friend gate fires when a second friend is added" {
+    local mutated="${BATS_TEST_TMPDIR}/afc_two_friends.h"
+    sed -e 's@^\([[:space:]]*\)friend class AfcTestAccess;@\1friend class AfcTestAccess;\n\1friend class AfcSomeNewHelper;@' \
+        include/ams_backend_afc.h > "$mutated"
+
+    run check_friend_list "$mutated" "friend class AfcTestAccess;"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"expected exactly 1"* ]]
+}
+
+@test "the backend friend gate fails closed when the shim friend disappears" {
+    local mutated="${BATS_TEST_TMPDIR}/afc_no_friend.h"
+    grep -v 'friend class AfcTestAccess;' include/ams_backend_afc.h > "$mutated"
+
+    run check_friend_list "$mutated" "friend class AfcTestAccess;"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"no friend declaration"* ]]
+}
+# --- No on_deactivate() overrides on panels and overlays ---
+# ViewLifecycleBase makes on_deactivate(DeactivateReason) final and dispatches to
+# on_deactivating(reason), so a subclass re-declaring the no-argument spelling
+# overrides nothing: it compiles, it is never called, and the work it meant to do
+# silently stops happening. PanelWidget is a separate hierarchy with its own
+# on_deactivate() hook and keeps the name.
+
+check_no_on_deactivate_overrides() {
+    local hits=""
+    local file found
+    while IFS= read -r file; do
+        # The widget hierarchy, by directory and by the base it names — an
+        # implementation file mentions PanelWidget only via its own header.
+        case "$file" in */panel_widgets/*) continue ;; esac
+        grep -q 'PanelWidget' "$file" && continue
+        found=$(grep -nE '(\bvoid[[:space:]]+on_deactivate[[:space:]]*\(\)|::on_deactivate[[:space:]]*\(\))' "$file")
+        [ -n "$found" ] && hits+="${file}:${found}"$'\n'
+    done < <(grep -rl 'on_deactivate' "$@" --include='*.h' --include='*.cpp' 2>/dev/null)
+
+    if [ -n "$hits" ]; then
+        echo "on_deactivate() is final on ViewLifecycleBase — override"
+        echo "on_deactivating(DeactivateReason) instead. Offending sites:"
+        echo "$hits"
+        return 1
+    fi
+    return 0
+}
+
+@test "no panel or overlay declares a no-argument on_deactivate() override" {
+    run check_no_on_deactivate_overrides src include
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "the on_deactivate gate fires on a reintroduced override" {
+    local dir="${BATS_TEST_TMPDIR}/reintroduced"
+    mkdir -p "$dir"
+    cat > "$dir/ui_overlay_thing.h" <<'EOF'
+class ThingOverlay : public OverlayBase {
+    void on_deactivate() override;
+};
+EOF
+
+    run check_no_on_deactivate_overrides "$dir"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"on_deactivating(DeactivateReason)"* ]]
+}
+
+@test "the on_deactivate gate fires on an out-of-line definition" {
+    local dir="${BATS_TEST_TMPDIR}/outofline"
+    mkdir -p "$dir"
+    cat > "$dir/ui_overlay_thing.cpp" <<'EOF'
+void ThingOverlay::on_deactivate() {
+    stop_scanning();
+}
+EOF
+
+    run check_no_on_deactivate_overrides "$dir"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"ui_overlay_thing.cpp"* ]]
+}
+
+@test "the on_deactivate gate stays quiet on the hook, PanelWidget and prose" {
+    local dir="${BATS_TEST_TMPDIR}/quiet"
+    mkdir -p "$dir"
+    cat > "$dir/ui_overlay_migrated.h" <<'EOF'
+/// Fires when the overlay is popped; on_deactivate() reaches this via the base.
+class MigratedOverlay : public OverlayBase {
+  protected:
+    void on_deactivating(DeactivateReason reason) override;
+};
+EOF
+    cat > "$dir/clock_widget.h" <<'EOF'
+class ClockWidget : public PanelWidget {
+    void on_deactivate() override;
+};
+EOF
+    cat > "$dir/panel_lifecycle.h" <<'EOF'
+class ViewLifecycleBase : public IPanelLifecycle {
+  public:
+    void on_deactivate(DeactivateReason reason) final;
+};
+EOF
+
+    run check_no_on_deactivate_overrides "$dir"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+# --- An OverlayBase cleanup() override must reach the base ---
+# OverlayBase::cleanup() is the only thing that invalidates object_lifetime_, the
+# guard whose whole point is surviving deactivation. A subclass that overrides
+# cleanup() and never calls the base leaves that guard live for the rest of the
+# process, so callbacks parked on it still fire into a torn-down overlay. The
+# wizard steps and the list views own an unrelated cleanup() and are not in this
+# hierarchy.
+
+check_overlay_cleanup_calls_base() {
+    local classes
+    classes=$(grep -rhoE 'class[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*:[[:space:]]*public[[:space:]]+OverlayBase' \
+        "$@" --include='*.h' --include='*.cpp' 2>/dev/null \
+        | awk '{print $2}' | sort -u | paste -sd'|' -)
+    [ -n "$classes" ] || classes="__no_overlay_subclass__"
+
+    local hits="" file found inline
+    while IFS= read -r file; do
+        # An inline body carries no class name, so it is attributed by the file
+        # it sits in; an out-of-line one names its class and needs no such help.
+        inline=0
+        grep -q 'public[[:space:]]*OverlayBase' "$file" && inline=1
+        found=$(awk -v classes="$classes" -v allow_inline="$inline" '
+            BEGIN {
+                outofline = "^[ \t]*void[ \t]+(" classes ")::cleanup[ \t]*\\([ \t]*\\)"
+                inline_def = "void[ \t]+cleanup[ \t]*\\([ \t]*\\)[ \t]*(override[ \t]*)?\\{"
+            }
+            !in_body {
+                if ($0 ~ outofline || (allow_inline == 1 && $0 ~ inline_def)) {
+                    in_body = 1; body = ""; start = NR; depth = 0; opened = 0
+                }
+            }
+            in_body {
+                body = body $0 "\n"
+                o = gsub(/\{/, "{"); c = gsub(/\}/, "}")
+                if (o > 0) opened = 1
+                depth += o - c
+                if (opened && depth <= 0) {
+                    if (body !~ /OverlayBase::cleanup/) print FILENAME ":" start
+                    in_body = 0
+                }
+            }
+        ' "$file")
+        [ -n "$found" ] && hits+="${found}"$'\n'
+    done < <(grep -rl 'cleanup' "$@" --include='*.h' --include='*.cpp' 2>/dev/null)
+
+    if [ -n "$hits" ]; then
+        echo "an OverlayBase subclass that overrides cleanup() must call"
+        echo "OverlayBase::cleanup() — it is what invalidates both lifetime guards."
+        echo "Offending sites:"
+        echo "$hits"
+        return 1
+    fi
+    return 0
+}
+
+@test "every OverlayBase subclass overriding cleanup() calls the base" {
+    run check_overlay_cleanup_calls_base src include
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "the cleanup gate examines the overrides that exist" {
+    # A pass that inspected nothing reads exactly like a pass that inspected
+    # everything, so the gate has to be shown finding the real overrides first.
+    local found
+    found=$(grep -rl 'OverlayBase::cleanup()' src --include='*.cpp' | wc -l | tr -d ' ')
+    [ "$found" -ge 10 ]
+}
+
+@test "the cleanup gate fires on a log-only override" {
+    local dir="${BATS_TEST_TMPDIR}/logonly"
+    mkdir -p "$dir"
+    cat > "$dir/ui_overlay_thing.h" <<'EOF'
+class ThingOverlay : public OverlayBase {
+  public:
+    void cleanup() override;
+};
+EOF
+    cat > "$dir/ui_overlay_thing.cpp" <<'EOF'
+void ThingOverlay::cleanup() {
+    spdlog::trace("[Thing] Cleanup");
+}
+EOF
+
+    run check_overlay_cleanup_calls_base "$dir"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"ui_overlay_thing.cpp:1"* ]]
+}
+
+@test "the cleanup gate fires on an inline header override" {
+    local dir="${BATS_TEST_TMPDIR}/inline"
+    mkdir -p "$dir"
+    cat > "$dir/ui_overlay_thing.h" <<'EOF'
+class ThingOverlay : public OverlayBase {
+  public:
+    void cleanup() override {
+        stop_polling();
+    }
+};
+EOF
+
+    run check_overlay_cleanup_calls_base "$dir"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"ui_overlay_thing.h:3"* ]]
+}
+
+@test "the cleanup gate reads each override separately, not the file as a whole" {
+    # One correct override in a file does not vouch for a second one beside it.
+    local dir="${BATS_TEST_TMPDIR}/twobodies"
+    mkdir -p "$dir"
+    cat > "$dir/ui_overlay_pair.h" <<'EOF'
+class FirstOverlay : public OverlayBase {
+    void cleanup() override;
+};
+class SecondOverlay : public OverlayBase {
+    void cleanup() override;
+};
+EOF
+    cat > "$dir/ui_overlay_pair.cpp" <<'EOF'
+void FirstOverlay::cleanup() {
+    stop_polling();
+    OverlayBase::cleanup();
+}
+
+void SecondOverlay::cleanup() {
+    stop_polling();
+}
+EOF
+
+    run check_overlay_cleanup_calls_base "$dir"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"ui_overlay_pair.cpp:6"* ]]
+}
+
+@test "the cleanup gate stays quiet on a base call and on the other hierarchies" {
+    local dir="${BATS_TEST_TMPDIR}/quietcleanup"
+    mkdir -p "$dir"
+    cat > "$dir/ui_overlay_good.h" <<'EOF'
+class GoodOverlay : public OverlayBase {
+  public:
+    void cleanup() override;
+};
+EOF
+    cat > "$dir/ui_overlay_good.cpp" <<'EOF'
+void GoodOverlay::cleanup() {
+    if (timer_) {
+        lv_timer_cancel_safe(&timer_);
+    }
+    OverlayBase::cleanup();
+}
+EOF
+    cat > "$dir/ui_wizard_step_thing.cpp" <<'EOF'
+void WizardThingStep::cleanup() {
+    spdlog::trace("[WizardThing] Cleanup");
+}
+EOF
+    cat > "$dir/ui_thing_list_view.h" <<'EOF'
+class ThingListView : public ContainerDeleteNet {
+  public:
+    void cleanup() {
+        rows_.clear();
+    }
+};
+EOF
+
+    run check_overlay_cleanup_calls_base "$dir"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+# --- The Z-offset save-availability rule has ONE definition ---
+# "Is there an offset worth saving" is helix::zoffset::save_available(), published
+# to XML as the z_offset_save_available subject. An inline cond= that re-derives
+# it from a tool-dirty subject is a second copy, and copies agree by convention
+# until one is widened and the others are not: a tool dirty on an axis the stale
+# copy does not ask about gets no save affordance, and SET_TOOL_PARAMETER is
+# runtime-only (prestonbrown/helixscreen#1517).
+
+zoffset_save_rule_copies() {
+    grep -rnE 'cond="[^"]*any_tool_(offset|[xyz]_)dirty' "$@" 2>/dev/null || true
+}
+
+# Names every XML that offers the save without binding the published rule.
+#
+# The file list is DISCOVERED from the button names, not spelled out: a surface
+# added later, or a breakpoint override that gets its own copy of the button,
+# has to bind the rule too. A button binding something narrower is the failure
+# this catches — a micro-breakpoint Save that asks only about the machine-wide
+# offset hides itself over a dirty tool while the handler would save it.
+zoffset_save_button_files() {
+    grep -rlE 'name="(btn_save_z_offset|header_save_z_offset)"' "$@" 2>/dev/null || true
+}
+
+zoffset_save_buttons_unbound() {
+    local f
+    for f in "$@"; do
+        grep -qF 'subject="z_offset_save_available"' "$f" || echo "$f"
+    done
+}
+
+# The publisher observes subjects ToolState registers in init_ams_subjects(), so
+# initialising it earlier would attach to nothing and leave every save surface
+# bound to a subject that never moves. Silent in both directions: the XML binding
+# resolves, the button just never appears.
+zoffset_publisher_wiring() {
+    local f="${1:-src/application/subject_initializer.cpp}"
+    local ams init
+    ams=$(grep -n 'init_ams_subjects();' "$f" | tail -1 | cut -d: -f1)
+    init=$(grep -n 'zoffset::init_save_available_subject(' "$f" | head -1 | cut -d: -f1)
+    if [ -z "$ams" ]; then
+        echo "init_ams_subjects() call not found in $f"
+        return
+    fi
+    if [ -z "$init" ]; then
+        echo "init_save_available_subject() is never called in $f"
+        return
+    fi
+    [ "$init" -gt "$ams" ] || echo "init_save_available_subject() runs before init_ams_subjects()"
+}
+
+@test "the Z-offset save publisher is initialised after ToolState" {
+    run zoffset_publisher_wiring
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "the Z-offset publisher gate fires when the call is missing or too early" {
+    local d="${BATS_TEST_TMPDIR}/zoffset_wiring"
+    mkdir -p "$d"
+    printf '%s\n' 'void f() {' '    init_ams_subjects();' '}' > "$d/missing.cpp"
+    run zoffset_publisher_wiring "$d/missing.cpp"
+    [ "$status" -eq 0 ]
+    contains "never called" "$output"
+
+    printf '%s\n' 'void f() {' '    helix::zoffset::init_save_available_subject();' \
+        '    init_ams_subjects();' '}' > "$d/early.cpp"
+    run zoffset_publisher_wiring "$d/early.cpp"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"before init_ams_subjects"* ]]
+}
+
+@test "no XML re-derives the Z-offset save rule from a tool-dirty subject" {
+    run zoffset_save_rule_copies ui_xml/ --include='*.xml'
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "the Z-offset save-rule gate fires on a reintroduced inline condition" {
+    local d="${BATS_TEST_TMPDIR}/zoffset_rule_copy"
+    mkdir -p "$d"
+    cat > "$d/offender.xml" <<'EOF'
+<ui_button name="btn_save_z_offset">
+  <bind_flag_if cond="z_offset_can_save and (gcode_z_offset ne 0 or any_tool_z_dirty)" flag="hidden" invert="true"/>
+</ui_button>
+EOF
+    run zoffset_save_rule_copies "$d" --include='*.xml'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"offender.xml"* ]]
+}
+
+@test "the Z-offset save-rule gate stays quiet on the published binding" {
+    local d="${BATS_TEST_TMPDIR}/zoffset_rule_ok"
+    mkdir -p "$d"
+    cat > "$d/ok.xml" <<'EOF'
+<ui_button name="btn_save_z_offset">
+  <bind_flag_if_eq subject="z_offset_save_available" flag="hidden" ref_value="0"/>
+</ui_button>
+EOF
+    run zoffset_save_rule_copies "$d" --include='*.xml'
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "every Z-offset save surface binds the published rule" {
+    local files
+    files=$(zoffset_save_button_files ui_xml/ --include='*.xml')
+    # Fail closed: an empty list would pass the emptiness check below having
+    # examined nothing.
+    [ "$(printf '%s\n' "$files" | grep -c .)" -ge 4 ]
+
+    run zoffset_save_buttons_unbound $files
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "the Z-offset save-surface gate fires on a button that binds nothing" {
+    local d="${BATS_TEST_TMPDIR}/zoffset_unbound"
+    mkdir -p "$d"
+    printf '%s\n' '<ui_button name="btn_save_z_offset" hidden="true"/>' > "$d/offender.xml"
+
+    run zoffset_save_buttons_unbound "$d/offender.xml"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"offender.xml"* ]]
+}
+
+# --- The Spoolman weight poll files a lane observation, never a whole SlotInfo ---
+# The poll states what the server said by filing the lane's Spoolman source
+# (helix::ams::ingest), and the resolver decides what the slot shows. Handing a
+# backend a whole SlotInfo instead lets it re-derive state from fields the poll
+# never meant to touch: a backend that infers presence from identity resurrects a
+# lane its sensors report empty, and the persist arm re-stages the user-lock flags
+# from whatever the slot happened to hold (#981, #1632). The poll runs on a timer
+# over every linked lane, so the damage repeats until the link goes away.
+
+check_weight_poll_is_weight_only() {
+    local file="$1"
+    if [ ! -f "$file" ]; then
+        echo "could not locate $file"
+        return 1
+    fi
+    if grep -qE '(\.|->)(apply_user_edit|sync_external_identity)\(' "$file"; then
+        echo "$file writes a whole SlotInfo; an automated weight poll must file the lane's Spoolman source through helix::ams::ingest() instead"
+        return 1
+    fi
+    return 0
+}
+
+@test "the Spoolman weight poll does not write whole SlotInfo structs" {
+    run check_weight_poll_is_weight_only src/printer/spoolman_manager.cpp
+    [ "$status" -eq 0 ]
+}
+
+@test "the weight-poll gate fires when the poll writes a whole SlotInfo" {
+    # Meta-test: a gate that cannot fail is not a gate.
+    local mutated="${BATS_TEST_TMPDIR}/spoolman_manager_whole_struct.cpp"
+    local filing='helix::ams::ingest(lane, stated);'
+    # A mutation whose target has moved changes nothing and passes vacuously.
+    grep -qF "$filing" src/printer/spoolman_manager.cpp
+    sed -e 's@helix::ams::ingest(lane, stated);@owner.sync_external_identity(slot_index, slot);@' \
+        src/printer/spoolman_manager.cpp > "$mutated"
+
+    run check_weight_poll_is_weight_only "$mutated"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"helix::ams::ingest"* ]]
+}
+
+@test "the weight-poll gate fails closed when the file is missing" {
+    run check_weight_poll_is_weight_only "${BATS_TEST_TMPDIR}/does_not_exist.cpp"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"could not locate"* ]]
+}
+
+# --- The lane source store has exactly one mutable entry point ---
+# LaneSourceStore::write() is private, so ingest() and commit_slot_edit() are
+# the only code that can reach a lane's records; a third friend line, of any
+# kind, would be a third writer. check_friend_list's grep matches "friend "
+# rather than "friend class ", since both funnels here are free functions a
+# class-only pattern would not see. Every entry in this list is a grant that
+# some code actually uses: a friend that needs no friendship teaches the next
+# reader that entries here need not be load-bearing.
+
+LANE_STORE_FRIENDS_EXPECTED="friend void ingest(LaneId, const Observation&);
+friend void commit_slot_edit(LaneId, const Observation&);"
+
+@test "the lane source store names exactly its two funnels as friends" {
+    run check_friend_list include/lane_source_store.h "$LANE_STORE_FRIENDS_EXPECTED"
+    [ "$status" -eq 0 ]
+}
+
+@test "the lane store friend gate fires when a third writer is added" {
+    local mutated="${BATS_TEST_TMPDIR}/lane_store_three_friends.h"
+    sed -e 's@^\([[:space:]]*\)friend void ingest(LaneId, const Observation\&);@\1friend void ingest(LaneId, const Observation\&);\n\1friend void sync_from_backend(LaneId, const Observation\&);@' \
+        include/lane_source_store.h > "$mutated"
+
+    run check_friend_list "$mutated" "$LANE_STORE_FRIENDS_EXPECTED"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"expected exactly 2"* ]]
+}
+
+@test "the lane store friend gate fires when a funnel is swapped for another writer" {
+    # A count is not the invariant; which two names hold the grant is. A
+    # substitution keeps the list at two and hands write() to code the funnels
+    # do not cover.
+    local mutated="${BATS_TEST_TMPDIR}/lane_store_swapped_friend.h"
+    sed -e 's@^\([[:space:]]*\)friend void commit_slot_edit(LaneId, const Observation\&);@\1friend void sync_from_backend(LaneId, const Observation\&);@' \
+        include/lane_source_store.h > "$mutated"
+
+    [ "$(grep -cE '^[[:space:]]*friend ' "$mutated")" -eq 2 ]
+
+    run check_friend_list "$mutated" "$LANE_STORE_FRIENDS_EXPECTED"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"sync_from_backend"* ]]
+}
+
+# write() is the one method the friend list above actually gates. If it were
+# renamed while the friend list stayed put, the list would describe a method
+# that no longer exists, so this checks the guarded declaration separately.
+
+check_lane_store_write_declared() {
+    local file="$1"
+    if ! grep -qE '^[[:space:]]*void write\(LaneId lane, const Observation& obs, bool amend\);' \
+         "$file" 2>/dev/null; then
+        echo "LaneSourceStore::write is not declared where the friend list guards it"
+        return 1
+    fi
+    return 0
+}
+
+@test "the lane store's guarded write() is declared as the friend list expects" {
+    run check_lane_store_write_declared include/lane_source_store.h
+    [ "$status" -eq 0 ]
+}
+
+@test "the lane store write-declaration gate fails closed when write() is renamed" {
+    local mutated="${BATS_TEST_TMPDIR}/lane_store_renamed_write.h"
+    sed -e 's@void write(LaneId lane, const Observation\& obs, bool amend);@void set(LaneId lane, const Observation\& obs, bool amend);@' \
+        include/lane_source_store.h > "$mutated"
+
+    run check_lane_store_write_declared "$mutated"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"not declared where the friend list guards it"* ]]
+}
+
+@test "the lane store write-declaration gate fails closed when the file does not exist" {
+    run check_lane_store_write_declared "${BATS_TEST_TMPDIR}/does_not_exist.h"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"not declared where the friend list guards it"* ]]
+}
+
+# The store's singleton is reachable only from the funnels' own translation
+# unit. A caller holding the instance is a caller one edit away from a write.
+
+check_no_lane_store_instance_callers() {
+    local dir
+    for dir in "$@"; do
+        if [ ! -d "$dir" ]; then
+            echo "search path $dir does not exist; cannot confirm the lane store has no outside callers"
+            return 1
+        fi
+    done
+
+    local hits
+    hits=$(grep -rn 'LaneSourceStore::instance()' "$@" --include='*.cpp' --include='*.h' \
+           2>/dev/null | grep -v 'src/printer/lane_source_store.cpp' || true)
+    if [ -n "$hits" ]; then
+        echo "LaneSourceStore::instance() is reachable only from the funnels."
+        echo "Call helix::ams::ingest() or helix::ams::commit_slot_edit() instead:"
+        echo "$hits"
+        return 1
+    fi
+    return 0
+}
+
+@test "nothing outside the funnels holds the lane source store" {
+    run check_no_lane_store_instance_callers src/ include/
+    [ "$status" -eq 0 ]
+}
+
+@test "the lane store singleton gate fires on a new caller" {
+    local dir="${BATS_TEST_TMPDIR}/fake_src"
+    mkdir -p "$dir"
+    cat > "$dir/ams_backend_example.cpp" <<'EOF'
+void refresh() {
+    helix::ams::LaneSourceStore::instance().get(0);
+}
+EOF
+
+    run check_no_lane_store_instance_callers "$dir"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"reachable only from the funnels"* ]]
+}
+
+@test "the lane store singleton gate fails closed when given no directory to search" {
+    run check_no_lane_store_instance_callers "${BATS_TEST_TMPDIR}/does_not_exist"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"does not exist"* ]]
+}
+
+@test "the friend-list gate ignores harmless reordering of the same friends" {
+    local mutated="${BATS_TEST_TMPDIR}/lane_store_reordered_friends.h"
+    sed -e 's@^\([[:space:]]*\)friend void ingest(LaneId, const Observation\&);@\1PLACEHOLDER_SWAP@' \
+        -e 's@^\([[:space:]]*\)friend void commit_slot_edit(LaneId, const Observation\&);@\1friend void ingest(LaneId, const Observation\&);@' \
+        -e 's@^\([[:space:]]*\)PLACEHOLDER_SWAP@\1friend void commit_slot_edit(LaneId, const Observation\&);@' \
+        include/lane_source_store.h > "$mutated"
+
+    run check_friend_list "$mutated" "$LANE_STORE_FRIENDS_EXPECTED"
+    [ "$status" -eq 0 ]
+}
+
+# check_friend_list and check_lane_store_write_declared both read declaration
+# text only, so a write() moved out of the private: block and into public:
+# passes both of them with the friend list and the write() signature both
+# untouched. The friend list only restricts anything while write() stays
+# private, so that access specifier is a separate fact this checks for
+# itself: which label is in force at the write() declaration inside class
+# LaneSourceStore, defaulting to private before any label has appeared, since
+# that is what an unlabelled C++ class body means.
+
+check_lane_store_write_is_private() {
+    local file="$1"
+    local access
+    access=$(awk '
+        /^class LaneSourceStore[[:space:]]*\{/ { in_class = 1; access = "private"; next }
+        in_class && /^\};/ { in_class = 0; next }
+        in_class && /^[[:space:]]*public:[[:space:]]*$/ { access = "public"; next }
+        in_class && /^[[:space:]]*protected:[[:space:]]*$/ { access = "protected"; next }
+        in_class && /^[[:space:]]*private:[[:space:]]*$/ { access = "private"; next }
+        in_class && /void write\(/ { print access; found = 1; exit }
+        END { if (!found) print "NOTFOUND" }
+    ' "$file" 2>/dev/null)
+
+    if [ -z "$access" ] || [ "$access" = "NOTFOUND" ]; then
+        echo "LaneSourceStore::write() was not found inside class LaneSourceStore in $file"
+        return 1
+    fi
+    if [ "$access" != "private" ]; then
+        echo "LaneSourceStore::write() is declared $access in $file; the friend list only matters while it stays private"
+        return 1
+    fi
+    return 0
+}
+
+@test "the lane store's write() is declared private" {
+    run check_lane_store_write_is_private include/lane_source_store.h
+    [ "$status" -eq 0 ]
+}
+
+@test "the write-privacy gate fires when write() moves to public with the friend list untouched" {
+    local mutated="${BATS_TEST_TMPDIR}/lane_store_public_write.h"
+    sed '/^[[:space:]]*void write(LaneId lane, const Observation& obs, bool amend);$/d' \
+        include/lane_source_store.h \
+        | sed 's/^  public:$/  public:\n    void write(LaneId lane, const Observation\& obs, bool amend);/' \
+        > "$mutated"
+
+    # The friend list itself is unwidened by this mutation, so both gates that
+    # read declaration text only stay quiet on it.
+    run check_friend_list "$mutated" "$LANE_STORE_FRIENDS_EXPECTED"
+    [ "$status" -eq 0 ]
+    run check_lane_store_write_declared "$mutated"
+    [ "$status" -eq 0 ]
+
+    run check_lane_store_write_is_private "$mutated"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"declared public"* ]]
+}
+
+@test "the write-privacy gate fails closed when class LaneSourceStore is not found" {
+    local mutated="${BATS_TEST_TMPDIR}/lane_store_no_class.h"
+    printf '%s\n' 'namespace helix::ams { void ingest(int, int); }' > "$mutated"
+
+    run check_lane_store_write_is_private "$mutated"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"was not found"* ]]
+}
+
+@test "the write-privacy gate fails closed when write() is missing from the class" {
+    local mutated="${BATS_TEST_TMPDIR}/lane_store_write_gone.h"
+    grep -v '^[[:space:]]*void write(LaneId lane, const Observation& obs, bool amend);$' \
+        include/lane_source_store.h > "$mutated"
+
+    run check_lane_store_write_is_private "$mutated"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"was not found"* ]]
+}
+
+# --- The mock files its lane readings from exactly one call site ---
+# AmsBackendMock::publish_lane_observations() reads the persistent SlotInfo
+# that apply_user_edit() writes a user's colour and material into, so it states
+# simulated firmware truth only where no edit can have landed yet: the tail of
+# start(). A second call site - from load_filament, unload_filament,
+# select_slot, change_tool or force_slot_status - would file the user's own
+# values back as something the simulated machine reported.
+#
+# The mock has one struct playing both roles and no simulated firmware behind
+# it, so it cannot express the invariant the way a real backend does, and the
+# number of callers is what bounds it instead.
+
+check_mock_publishes_lane_readings_once() {
+    local file="$1"
+    if [ ! -f "$file" ]; then
+        echo "could not locate $file"
+        return 1
+    fi
+
+    if ! grep -qE '^void AmsBackendMock::publish_lane_observations\(\)' "$file"; then
+        echo "AmsBackendMock::publish_lane_observations is not defined in $file"
+        return 1
+    fi
+
+    local calls
+    calls=$(grep -nE 'publish_lane_observations\(\)' "$file" \
+            | grep -v '::publish_lane_observations' || true)
+    local count
+    count=$(printf '%s\n' "$calls" | grep -c . || true)
+
+    if [ "$count" -ne 1 ]; then
+        echo "expected exactly 1 call to publish_lane_observations() in $file, found $count:"
+        echo "$calls"
+        return 1
+    fi
+    return 0
+}
+
+@test "the mock files its lane readings from exactly one call site" {
+    run check_mock_publishes_lane_readings_once src/printer/ams_backend_mock.cpp
+    [ "$status" -eq 0 ]
+}
+
+@test "the mock publish gate fires when a second call site is added" {
+    local mutated="${BATS_TEST_TMPDIR}/mock_two_publishes.cpp"
+    sed -e 's@^\([[:space:]]*\)publish_lane_observations();@\1publish_lane_observations();\n\1publish_lane_observations();@' \
+        src/printer/ams_backend_mock.cpp > "$mutated"
+
+    run check_mock_publishes_lane_readings_once "$mutated"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"found 2"* ]]
+}
+
+@test "the mock publish gate fails closed when the method is renamed" {
+    local mutated="${BATS_TEST_TMPDIR}/mock_renamed_publish.cpp"
+    sed -e 's@publish_lane_observations@refile_lane_readings@g' \
+        src/printer/ams_backend_mock.cpp > "$mutated"
+
+    run check_mock_publishes_lane_readings_once "$mutated"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"is not defined in"* ]]
+}
+
+@test "the mock publish gate fails closed when the file is missing" {
+    run check_mock_publishes_lane_readings_once "${BATS_TEST_TMPDIR}/does_not_exist.cpp"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"could not locate"* ]]
+}
+
+# --- Hand-built tool labels and lane/slot offsets must route through display_numbering.h ---
+# include/display_numbering.h keeps the storage-index -> display-number `+ 1`
+# in exactly one function (helix::ui::lane_number()) and spells a gcode tool's
+# label through exactly one function (helix::ui::tool_label()). Both are one
+# line to rebuild by hand, which is exactly how they drift: one call site
+# gets fixed and a sibling built the old way does not.
+#
+# scripts/check_tool_labels.sh is the gate. It runs as its own process here,
+# the same way it runs from a shell prompt or CI, rather than sourcing its
+# internals - SCAN_ROOT redirects it at a fixture directory instead of the
+# real tree.
+
+run_tool_label_gate() {
+    SCAN_ROOT="$1" bash "$BATS_TEST_DIRNAME/../../scripts/check_tool_labels.sh"
+}
+
+@test "no hand-built tool labels or lane/slot offsets in the real tree" {
+    run bash "$BATS_TEST_DIRNAME/../../scripts/check_tool_labels.sh"
+    [ "$status" -eq 0 ]
+}
+
+@test "the tool label gate catches each forbidden shape" {
+    # Meta-test: a gate that cannot fail is not a gate.
+    local d="${BATS_TEST_TMPDIR}/offenders"
+    mkdir -p "$d"
+    cat > "$d/a.cpp" <<'EOF'
+void a(char* b, int i) { snprintf(b, 8, "T%d", i); }
+void c(char* b, int i) { snprintf(b, 8, "T{}", i); }
+void e(int i) { auto s = "T" + std::to_string(i); }
+void f(int slot_index) { auto s = fmt::format("Slot {}", slot_index + 1); }
+void g(int backup) { auto s = fmt::format("Slot {} matches.", backup + 1); }
+EOF
+    run run_tool_label_gate "$d"
+    [ "$status" -eq 1 ]
+    contains "T%d" "$output"
+    contains "T{}" "$output"
+    contains "std::to_string(i)" "$output"
+    contains "slot_index + 1" "$output"
+    contains "backup + 1" "$output"
+}
+
+@test "the tool label gate catches the spellings the tree actually uses" {
+    # sizeof(buf) and lv_tr(...) each put a close paren between the formatting
+    # call's open paren and the index; a pattern that bridges the gap with
+    # [^)]* stops dead at that paren. These are the spellings of nearly every
+    # real snprintf and fmt::format site, so a fixture without them certifies
+    # nothing about the tree.
+    local d="${BATS_TEST_TMPDIR}/real_spellings"
+    mkdir -p "$d"
+    cat > "$d/a.cpp" <<'EOF'
+void h(char* buf, int slot_index) { snprintf(buf, sizeof(buf), "Slot %d", slot_index + 1); }
+void i(int lane) { auto s = fmt::format(lv_tr("Lane {}"), lane + 1); }
+void j(int gate) { lv_label_set_text_fmt(label, "Gate %d", gate + 1); }
+EOF
+    run run_tool_label_gate "$d"
+    [ "$status" -eq 1 ]
+    contains "slot_index + 1" "$output"
+    contains "lane + 1" "$output"
+    contains "gate + 1" "$output"
+}
+
+@test "the tool label gate fails closed when the scan root is missing" {
+    run run_tool_label_gate "${BATS_TEST_TMPDIR}/does_not_exist"
+    [ "$status" -eq 1 ]
+}
+
+@test "the tool label gate catches an assignment that feeds a formatting call a few lines later" {
+    # Shape 3: shape 2 only sees the arithmetic and the formatting call
+    # together on one physical line. Splitting the assignment out reaches the
+    # same display text and is the same violation.
+    local d="${BATS_TEST_TMPDIR}/split_offenders"
+    mkdir -p "$d"
+    cat > "$d/a.cpp" <<'EOF'
+void f(int slot_index) {
+    int display_slot = slot_index + 1;
+    std::string label = "unit";
+    do_other_work();
+    snprintf(tmp, sizeof(tmp), lv_tr("Current: Slot %d"), display_slot);
+}
+EOF
+    run run_tool_label_gate "$d"
+    [ "$status" -eq 1 ]
+    contains "int display_slot = slot_index + 1;" "$output"
+    contains "display_slot);" "$output"
+}
+
+@test "the tool label gate stays quiet on a protocol field id with no formatting call" {
+    # The silent half of shapes 2 and 3: the arithmetic alone is not the
+    # violation, and neither is assigning it to a variable that a formatting
+    # call never reads. Only building display text from it without
+    # lane_number() is - matching the real allowlisted wire-format shape in
+    # filament_slot_override_store.cpp, which is 1-based on the wire by spec.
+    local d="${BATS_TEST_TMPDIR}/plain_offset"
+    mkdir -p "$d"
+    cat > "$d/quiet.cpp" <<'EOF'
+void f(int slot_index) {
+    wire_fields[slot_index + 1] = 0;
+    unit_addrs.push_back(unit_index + 1);
+}
+void g(int slot_index) {
+    int idx = slot_index + 1;
+    registers_[idx] = 0;
+}
+EOF
+    run run_tool_label_gate "$d"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "the tool label gate stays quiet on an spdlog diagnostic containing + 1" {
+    local d="${BATS_TEST_TMPDIR}/spdlog_diag"
+    mkdir -p "$d"
+    cat > "$d/quiet.cpp" <<'EOF'
+void f(int slot_index) {
+    spdlog::debug("[Thing] resolved lane {}", slot_index + 1);
+}
+EOF
+    run run_tool_label_gate "$d"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "the tool label gate stays quiet on filament_slot_override_store.cpp-style wire-format code" {
+    # The whole file is allowlisted: format_lane_key builds BOTH forbidden
+    # shapes on purpose - a 1-based "laneN" text key over a 0-based inner
+    # field, per docs/specs/filament_slots.md.
+    local d="${BATS_TEST_TMPDIR}/wire_format"
+    mkdir -p "$d"
+    cat > "$d/filament_slot_override_store.cpp" <<'EOF'
+std::string format_lane_key(LaneKeyStyle style, int slot_index) {
+    return style == LaneKeyStyle::Tool ? "T" + std::to_string(slot_index)
+                                       : "lane" + std::to_string(slot_index + 1);
+}
+EOF
+    run run_tool_label_gate "$d"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "the tool label gate stays quiet on a T<n> gcode emitter in ams_backend_*.cpp" {
+    # ams_backend_*.cpp is allowlisted for shape 1 only: a T<n> built there is
+    # gcode sent to firmware, not a label.
+    local d="${BATS_TEST_TMPDIR}/gcode_emitter"
+    mkdir -p "$d"
+    cat > "$d/ams_backend_example.cpp" <<'EOF'
+void select_tool(int tool_number) {
+    execute_gcode("T" + std::to_string(tool_number));
+}
+EOF
+    run run_tool_label_gate "$d"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "the tool label gate escape hatch suppresses a genuine one-off" {
+    local d="${BATS_TEST_TMPDIR}/hatch"
+    mkdir -p "$d"
+    cat > "$d/hatch.cpp" <<'EOF'
+void f(int i) { snprintf(b, 8, "T%d", i); } // DISPLAY_NUMBERING_OK: desktop-only debug scratch tool
+EOF
+    run run_tool_label_gate "$d"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+
+@test "the control socket directory is resolved in one place" {
+    # Client and server each computed this inline. They agreed by convention
+    # until they did not, and a client looking where the server never bound
+    # reports "no instance found" (prestonbrown/helixscreen#1602). Both go
+    # through control_socket_dir() now; reading the environment directly in
+    # either one puts the second copy back.
+    run bash -c "grep -nE 'getenv\(\"(XDG_RUNTIME_DIR|RUNTIME_DIRECTORY)\"' \
+        src/remote/remote_client.cpp src/remote/remote_control_server.cpp"
+    [ "$status" -ne 0 ]  # non-zero == no inline lookup found
+}
+
+@test "the control-socket-directory gate fails when a caller inlines the lookup" {
+    local probe="$BATS_TEST_TMPDIR/inlined.cpp"
+    printf 'const char* d = getenv("XDG_RUNTIME_DIR");\n' > "$probe"
+    run bash -c "grep -nE 'getenv\(\"(XDG_RUNTIME_DIR|RUNTIME_DIRECTORY)\"' '$probe'"
+    [ "$status" -eq 0 ]  # the gate above can go red
+}
+
+
+# --- a getenv() pointer must not be read after a setenv may have replaced it --
+#
+# setenv() may reallocate the environ block and the strings it points at, so a
+# `const char*` captured from getenv() and dereferenced after any later
+# setenv()/unsetenv() reads whatever bytes live at that address now — a
+# corrupted variable inherited by every std::system() child the test spawns
+# (prestonbrown/helixscreen#1537). Copy the value into a std::string at capture
+# (helix::ScopedEnv in tests/test_helpers/scoped_env.h does this, and its
+# (name, value) constructor owns the set too) and restore from the copy.
+#
+# This is a spelling-level scanner, not a C++ parser, and it is NOT exhaustive.
+# It sees char and auto* declarations (west-const, east-const, pointer-const,
+# wrapped after the name) and bare `auto` initialized by the getenv() call
+# itself, retires each capture at its closing brace (a capture declared in a
+# control-statement header whose body opens on the same line retires with that
+# statement), and blanks comments, literal contents and qualified names
+# (`x.name`, `ptr->name`, `ns::name`, `name::member`) before matching. A read
+# is stale only when a setenv()/unsetenv() call has COMPLETED - its closing
+# paren sits between the capture and the read - so an argument of a call still
+# open on the read's line stays quiet, wrapped or not, while a read after a
+# call that closed earlier on the same line flags. Known-uncovered spellings:
+# assignment-form capture (`const char* p; p = getenv(..)`), direct-init
+# (`const char* p(getenv(..))`), the second declarator of a comma declaration
+# (`const char* a = getenv(..), *b = getenv(..)`), a declaration wrapped
+# BEFORE the name (`const char*\np = getenv(..)`), and bare `auto` with the
+# getenv() on a continuation line. Scope: all first-party C and C++ outside
+# lib/ - the roots named in the @test below; lib/ is vendored submodules. The
+# 400-line backstop window exists only so a pathological single function
+# cannot pin a name forever. Residual false-positive shapes: a same-named
+# local in a NESTED scope of the same function, and a control-statement
+# header that WRAPS across lines (its capture retires only at the function's
+# closing brace).
+
+getenv_pointer_live_across_setenv_files() {
+    python3 - "$@" <<'EOF'
+import bisect
+import pathlib
+import re
+import sys
+
+# (const )?char( const)? * (const )? NAME =  — west-const, east-const and
+# pointer-const spellings; (?!=) keeps == comparisons out.
+DECL = re.compile(r'(?:const\s+)?char\s*(?:const\s*)?\*\s*(?:const\s*)?'
+                  r'([A-Za-z_]\w*)\s*=(?!=)')
+# `auto*` deduces the same raw pointer `char*` spells.
+DECL_AUTO_PTR = re.compile(r'(?:const\s+)?auto\s*\*\s*(?:const\s*)?'
+                           r'([A-Za-z_]\w*)\s*=(?!=)')
+# Bare `auto` is tracked only when the initializer IS the getenv() call: a
+# value captured straight into owned storage must not flag the copy's users.
+DECL_AUTO_DIRECT = re.compile(r'\bauto\s+([A-Za-z_]\w*)\s*=\s*'
+                              r'(?:std\s*::\s*)?getenv\s*\(')
+GETENV = re.compile(r'\bgetenv\s*\(')
+SETENV = re.compile(r'\b(?:setenv|unsetenv)\s*\(')
+WINDOW = 400
+WRAP_MAX = 5  # continuation lines scanned for getenv() in a wrapped initializer
+
+def strip_comments_and_strings(lines):
+    """Blank out // and /* */ comments and the CONTENTS of string and char
+    literals, quote-aware, so commented-out code cannot trip the scan, a '//'
+    inside a string keeps its line, and a name mentioned only inside a log
+    message is not a use."""
+    out = []
+    in_block = False
+    for raw in lines:
+        kept = []
+        i = 0
+        quote = None  # '"' or "'" while inside that literal
+        while i < len(raw):
+            c = raw[i]
+            if in_block:
+                if raw[i:i + 2] == '*/':
+                    in_block = False
+                    i += 2
+                    continue
+                i += 1
+                continue
+            if quote:
+                if c == '\\':
+                    kept.append('  ')
+                    i += 2
+                    continue
+                if c == quote:
+                    quote = None
+                    kept.append(c)
+                else:
+                    kept.append(' ')
+                i += 1
+                continue
+            if c in '"\'':
+                quote = c
+                kept.append(c)
+                i += 1
+                continue
+            if raw[i:i + 2] == '//':
+                break
+            if raw[i:i + 2] == '/*':
+                in_block = True
+                i += 2
+                continue
+            kept.append(c)
+            i += 1
+        out.append(''.join(kept))
+    return out
+
+def env_call_completions(text):
+    """Offsets of every setenv()/unsetenv() call's closing paren, wrapped
+    calls included: a read is stale only once the call has completed."""
+    done = []
+    for m in SETENV.finditer(text):
+        j = m.end()
+        paren = 1
+        while j < len(text) and paren:
+            if text[j] == '(':
+                paren += 1
+            elif text[j] == ')':
+                paren -= 1
+            j += 1
+        if paren == 0:
+            done.append(j - 1)
+    return sorted(done)
+
+def line_depths(line, start):
+    """Depth at each column, the minimum depth over each suffix, and the
+    depth at line end, for scope retirement."""
+    at = []
+    run = start
+    for c in line:
+        at.append(run)
+        if c == '{':
+            run += 1
+        elif c == '}':
+            run -= 1
+    at.append(run)
+    suffix_min = list(at)
+    for c in range(len(at) - 2, -1, -1):
+        suffix_min[c] = min(suffix_min[c], suffix_min[c + 1])
+    return at, suffix_min, run
+
+def register_capture(m, line, i, lines, active, pos, depth_at, retire_col):
+    initializer = line[m.end():]
+    # '{' ends an initializer the same way ';' does: a parameter default like
+    # `const char* value = nullptr) : m_(m) {` must not swallow the
+    # constructor body's getenv() as its own
+    terminated = (';' in initializer) or ('{' in initializer)
+    if not terminated:
+        for cont in lines[i + 1:i + 1 + WRAP_MAX]:
+            stop = re.search(r'[;{]', cont)
+            if stop:
+                initializer += ' ' + cont[:stop.start() + 1]
+                break
+            initializer += ' ' + cont
+    if GETENV.search(initializer):
+        # a redeclaration of the same name starts a new capture
+        active[m.group(1)] = [i, retire_col, pos, depth_at]
+
+bad = 0
+for arg in sys.argv[1:]:
+    root = pathlib.Path(arg)
+    if not root.exists():
+        print(f"scan root does not exist: {arg}")
+        bad = 1
+        continue
+    paths = sorted(root.rglob('*')) if root.is_dir() else [root]
+    for path in paths:
+        if path.suffix not in ('.cpp', '.h', '.cc', '.hpp', '.c'):
+            continue
+        try:
+            lines = strip_comments_and_strings(path.read_text(errors='replace').splitlines())
+        except OSError:
+            continue
+        text = '\n'.join(lines)
+        completions = env_call_completions(text)
+        starts = []
+        o = 0
+        for ln in lines:
+            starts.append(o)
+            o += len(ln) + 1
+        depth = 0  # brace depth; a capture dies when its scope closes
+        active = {}  # name -> [capture line, retire col, offset, depth]
+        for i, line in enumerate(lines):
+            at, smin, depth = line_depths(line, depth)
+            for rx in (DECL, DECL_AUTO_PTR):
+                for m in rx.finditer(line):
+                    prefix = line[:m.start(1)]
+                    # A capture declared in a for/if/while header whose body
+                    # opens on the same line is scoped to that statement: one
+                    # level deeper, and it retires from the body's opening
+                    # brace rather than from the name.
+                    in_header = (prefix.count('(') - prefix.count(')') > 0 and
+                                 re.search(r'\b(?:for|if|while)\b[^;{}]*$', prefix) and
+                                 '{' in line[m.end(1):])
+                    retire_col = (line.rfind('{', m.end(1)) + 1
+                                  if in_header else m.end(1))
+                    register_capture(m, line, i, lines, active,
+                                     starts[i] + m.start(1),
+                                     at[m.start(1)] + (1 if in_header else 0),
+                                     retire_col)
+            for m in DECL_AUTO_DIRECT.finditer(line):
+                active[m.group(1)] = [i, m.end(1), starts[i] + m.start(1),
+                                      at[m.start(1)]]
+            # A read is stale only when a setenv()/unsetenv() completed at an
+            # offset between the capture and the read: an argument of a call
+            # still open at the read's position is evaluated before that call
+            # runs, while a read after a closing paren earlier on the same
+            # line is post-setenv and flags.
+            for name, state in list(active.items()):
+                if i < state[0] or i > state[0] + WINDOW:
+                    continue
+                # cfg.name, ptr->name, ns::name and name::member are different
+                # entities, not uses of the captured local; blanked same-length
+                # so offsets stay valid
+                quiet = re.sub(r'(?:\.|->|::)\s*' + re.escape(name) + r'\b' +
+                               r'|\b' + re.escape(name) + r'\s*::',
+                               lambda mm: ' ' * len(mm.group(0)), line)
+                for um in re.finditer(r'\b' + re.escape(name) + r'\b', quiet):
+                    k = bisect.bisect_right(completions, state[2])
+                    if (k < len(completions) and
+                            completions[k] < starts[i] + um.start()):
+                        print(f"{path}:{state[0] + 1}: '{name}' from getenv() is read at "
+                              f"line {i + 1}, after a setenv() between the two; copy the "
+                              f"value into a std::string at capture (helix::ScopedEnv)")
+                        bad = 1
+                        del active[name]
+                        break
+            # The running depth dipping below the depth at capture closes the
+            # capture's scope, so one inline method's local never reaches the
+            # next method's same-named local.
+            for name, state in list(active.items()):
+                if i == state[0]:
+                    if smin[state[1]] < state[3]:
+                        del active[name]
+                elif smin[0] < state[3]:
+                    del active[name]
+sys.exit(bad)
+EOF
+}
+
+@test "no getenv pointer is read after a setenv may have replaced it" {
+    # Scope is every first-party C and C++ root; lib/ is vendored submodules
+    # and scripts/ is not C++, so neither belongs here.
+    run getenv_pointer_live_across_setenv_files \
+        tests/ src/ include/ tools/ firmware/ android/ server/ moonraker-plugin/ ui_xml/
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "the getenv/setenv gate fails on a missing scan root" {
+    # A renamed root would otherwise scan nothing and pass vacuously.
+    run getenv_pointer_live_across_setenv_files "${BATS_TEST_TMPDIR}/no-such-root"
+    [ "$status" -ne 0 ]
+    contains "does not exist" "$output"
+}
+
+@test "the getenv/setenv gate fires on a pointer restored after a setenv" {
+    # Meta-test: a gate that cannot fail is not a gate.
+    local d="${BATS_TEST_TMPDIR}/stale"
+    mkdir -p "$d"
+    cat > "$d/restore.cpp" <<'EOF'
+TEST_CASE("restores PATH through a stale pointer") {
+    const char* original = std::getenv("PATH");
+    setenv("PATH", "", 1);
+    run_thing();
+    if (original) {
+        setenv("PATH", original, 1);
+    }
+}
+EOF
+    run getenv_pointer_live_across_setenv_files "$d"
+    [ "$status" -ne 0 ]
+    contains "restore.cpp" "$output"
+    contains "std::string" "$output"
+}
+
+@test "the getenv/setenv gate catches wrapped declarations and east-const" {
+    # clang-format splits a long declaration across lines, and `char const*`
+    # spells the same type; the capture regex has to see both.
+    local d="${BATS_TEST_TMPDIR}/spelled"
+    mkdir -p "$d"
+    cat > "$d/wrapped.cpp" <<'EOF'
+TEST_CASE("declaration wraps past the getenv") {
+    const char* original_environment_path =
+        std::getenv("PATH");
+    setenv("PATH", "", 1);
+    run_thing();
+    setenv("PATH", original_environment_path, 1);
+}
+EOF
+    cat > "$d/east_const.cpp" <<'EOF'
+TEST_CASE("east const") {
+    char const* original = std::getenv("PATH");
+    setenv("PATH", "", 1);
+    run_thing();
+    setenv("PATH", original, 1);
+}
+EOF
+    run getenv_pointer_live_across_setenv_files "$d"
+    [ "$status" -ne 0 ]
+    contains "wrapped.cpp" "$output"
+    contains "east_const.cpp" "$output"
+}
+
+@test "the getenv/setenv gate catches auto-spelled pointer captures" {
+    # `auto*` and a bare `auto` initialized by the getenv() call itself
+    # deduce the same raw pointer `char*` spells.
+    local d="${BATS_TEST_TMPDIR}/autos"
+    mkdir -p "$d"
+    cat > "$d/auto_star.cpp" <<'EOF'
+TEST_CASE("auto pointer spelling") {
+    auto* original = std::getenv("PATH");
+    setenv("PATH", "", 1);
+    run_thing();
+    setenv("PATH", original, 1);
+}
+EOF
+    cat > "$d/auto_value.cpp" <<'EOF'
+TEST_CASE("auto by value is still a raw pointer") {
+    auto mode = std::getenv("HELIX_MODE");
+    setenv("HELIX_MODE", "1", 1);
+    use(mode);
+}
+EOF
+    run getenv_pointer_live_across_setenv_files "$d"
+    [ "$status" -ne 0 ]
+    contains "auto_star.cpp" "$output"
+    contains "auto_value.cpp" "$output"
+}
+
+@test "the getenv/setenv gate fires on a use later on the same line as the setenv" {
+    # Only a read inside the setenv()'s own parentheses is an argument,
+    # evaluated before the call runs; a read after the call completes is
+    # post-setenv however close it sits.
+    local d="${BATS_TEST_TMPDIR}/sameline"
+    mkdir -p "$d"
+    cat > "$d/same_line.cpp" <<'EOF'
+TEST_CASE("a use hidden past an in-string url") {
+    const char* base = std::getenv("HELIX_URL");
+    setenv("HELIX_URL", "https://example.invalid/a//b", 1); if (base) { use(base); }
+    do_work();
+}
+EOF
+    run getenv_pointer_live_across_setenv_files "$d"
+    [ "$status" -ne 0 ]
+    contains "same_line.cpp" "$output"
+}
+
+@test "the getenv/setenv gate fires on a long same-function save/restore span" {
+    # The window is a backstop, not the coverage edge: a save at the top of a
+    # long Catch2 case and its restore at the bottom are one function and must
+    # be caught however many lines sit between them.
+    local d="${BATS_TEST_TMPDIR}/longspan"
+    mkdir -p "$d"
+    {
+        echo 'TEST_CASE("long span") {'
+        echo '    const char* original = std::getenv("PATH");'
+        echo '    setenv("PATH", "", 1);'
+        for _ in $(seq 70); do echo ''; done
+        echo '    setenv("PATH", original, 1);'
+        echo '}'
+    } > "$d/long.cpp"
+    run getenv_pointer_live_across_setenv_files "$d"
+    [ "$status" -ne 0 ]
+    contains "long.cpp" "$output"
+}
+
+@test "the getenv/setenv gate stays quiet on capture-time copies and immediate reads" {
+    local d="${BATS_TEST_TMPDIR}/owned"
+    mkdir -p "$d"
+    cat > "$d/copied.cpp" <<'EOF'
+TEST_CASE("copies the value out before the setenv") {
+    std::string saved;
+    if (const char* prev = std::getenv("HELIX_CONFIG_DIR")) {
+        saved = prev;
+    }
+    setenv("HELIX_CONFIG_DIR", "/tmp/x", 1);
+    setenv("HELIX_CONFIG_DIR", saved.c_str(), 1);
+}
+EOF
+    cat > "$d/immediate.cpp" <<'EOF'
+TEST_CASE("reads and decides in one breath") {
+    const char* existing = getenv("HELIX_CACHE_DIR");
+    if (!existing || existing[0] == '\0')
+        setenv("HELIX_CACHE_DIR", "/tmp/x", 1);
+}
+EOF
+    cat > "$d/shared_guard.cpp" <<'EOF'
+TEST_CASE("uses the shared guard") {
+    helix::ScopedEnv env("PATH");
+    setenv("PATH", "", 1);
+}
+EOF
+    run getenv_pointer_live_across_setenv_files "$d"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "the getenv/setenv gate stays quiet on a same-named local in a later function" {
+    # The scope of a capture ends at the column-0 brace that closes its
+    # function or class, so an unrelated `v` in the next function is a
+    # different variable however near it sits.
+    local d="${BATS_TEST_TMPDIR}/shadow"
+    mkdir -p "$d"
+    cat > "$d/shadow.cpp" <<'EOF'
+void guard(const char* name) {
+    const char* v = getenv(name);
+    std::string saved = v;
+    setenv(name, "", 1);
+}
+
+void unrelated_below() {
+    for (auto v = table.begin(); v != table.end(); ++v) {
+        use(*v);
+    }
+}
+EOF
+    cat > "$d/qualified.cpp" <<'EOF'
+TEST_CASE("a member access on another object") {
+    const char* original = std::getenv("PATH");
+    std::string saved = original;
+    setenv("PATH", "", 1);
+    REQUIRE(cfg.original == 1);
+    setenv("PATH", saved.c_str(), 1);
+}
+EOF
+    run getenv_pointer_live_across_setenv_files "$d"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "the getenv/setenv gate stays quiet on commented-out code and in-string slashes" {
+    # Dead code inside /* */ cannot be a live bug, and a URL in a string
+    # literal must not truncate the line's remaining text.
+    local d="${BATS_TEST_TMPDIR}/deadcode"
+    mkdir -p "$d"
+    cat > "$d/commented.cpp" <<'EOF'
+TEST_CASE("commented out") {
+    setenv("X", "1", 1);
+    /*
+    const char* old = getenv("X");
+    setenv("X", "", 1);
+    setenv("X", old, 1);
+    */
+    do_work();
+}
+EOF
+    cat > "$d/url.cpp" <<'EOF'
+TEST_CASE("slashes inside a string literal") {
+    const char* base = getenv("HELIX_URL");
+    std::string saved = base;
+    setenv("HELIX_URL", "https://example.invalid/a//b", 1);
+    use(saved);
+}
+EOF
+    run getenv_pointer_live_across_setenv_files "$d"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "the getenv/setenv gate stays quiet on string mentions and sibling methods" {
+    # A name inside a log string is not a use, and a capture dies at its
+    # closing brace, so one inline method's local never reaches the next
+    # method's same-named local.
+    local d="${BATS_TEST_TMPDIR}/quiet3"
+    mkdir -p "$d"
+    cat > "$d/log_string.cpp" <<'EOF'
+TEST_CASE("mentions a name inside a log string") {
+    const char* home = std::getenv("HOME");
+    std::string saved = home;
+    setenv("HOME", "/tmp/x", 1);
+    log("could not expand $home in the config path");
+    setenv("HOME", saved.c_str(), 1);
+}
+EOF
+    cat > "$d/inline_methods.cpp" <<'EOF'
+class Registry {
+  public:
+    const char* first_dir() {
+        const char* dir = std::getenv("HELIX_FIRST_DIR");
+        std::string saved = dir;
+        setenv("HELIX_FIRST_DIR", "/tmp", 1);
+        return saved.c_str();
+    }
+    void second() {
+        for (auto dir = dirs.begin(); dir != dirs.end(); ++dir) {
+            total += dir->size();
+        }
+    }
+};
+EOF
+    run getenv_pointer_live_across_setenv_files "$d"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "the getenv/setenv gate stays quiet on a re-assert and an auto copy" {
+    # A read inside the setenv()'s parentheses is an argument, evaluated
+    # before the call runs; an auto capture copied into owned storage
+    # before any setenv is safe to keep using afterwards.
+    local d="${BATS_TEST_TMPDIR}/quiet4"
+    mkdir -p "$d"
+    cat > "$d/reassert.cpp" <<'EOF'
+TEST_CASE("re-asserts the current value") {
+    const char* cur = std::getenv("HELIX_MODE");
+    setenv("HELIX_MODE", cur, 1);
+}
+EOF
+    cat > "$d/auto_copy.cpp" <<'EOF'
+TEST_CASE("auto captured straight into owned storage") {
+    auto existing = std::getenv("HELIX_CACHE_DIR");
+    std::string saved = existing;
+    setenv("HELIX_CACHE_DIR", "/tmp/x", 1);
+    use(saved);
+}
+EOF
+    run getenv_pointer_live_across_setenv_files "$d"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "the getenv/setenv gate stays quiet on a qualified ::name" {
+    # A capture named `path` is not read by std::filesystem::path::iterator;
+    # a variable can never appear as a scope qualifier on either side.
+    local d="${BATS_TEST_TMPDIR}/quiet5"
+    mkdir -p "$d"
+    cat > "$d/qualified.cpp" <<'EOF'
+TEST_CASE("iterates a filesystem path") {
+    const char* path = std::getenv("HELIX_PATH");
+    std::string saved = path;
+    setenv("OTHER", "x", 1);
+    std::filesystem::path::iterator it;
+    for (auto seg = it; seg != end(); ++seg) {
+        total += seg->string().size();
+    }
+    setenv("HELIX_PATH", saved.c_str(), 1);
+}
+EOF
+    run getenv_pointer_live_across_setenv_files "$d"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "the getenv/setenv gate stays quiet on a wrapped re-assert" {
+    # The re-assert idiom split across lines by clang-format keeps the same
+    # meaning: the read is still an argument of the call it belongs to.
+    local d="${BATS_TEST_TMPDIR}/quiet6"
+    mkdir -p "$d"
+    cat > "$d/wrapped_reassert.cpp" <<'EOF'
+TEST_CASE("re-asserts a long variable name") {
+    const char* cur = std::getenv("HELIX_EXTENDED_CONFIGURATION_MODE");
+    setenv("HELIX_EXTENDED_CONFIGURATION_MODE",
+           cur,
+           1);
+}
+EOF
+    cat > "$d/wrapped_arg_use.cpp" <<'EOF'
+TEST_CASE("restores with a wrapped call") {
+    const char* original = std::getenv("PATH");
+    std::string saved = original;
+    setenv("PATH", "", 1);
+    system("true");
+    setenv("PATH",
+           saved.c_str(),
+           1);
+}
+EOF
+    run getenv_pointer_live_across_setenv_files "$d"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "the getenv/setenv gate stays quiet on a for-init capture's sibling" {
+    # A capture declared in a for-init header is scoped to the statement:
+    # its closing brace retires it, so a same-named local in a later loop
+    # of the same function is never read against the dead capture.
+    local d="${BATS_TEST_TMPDIR}/quiet7"
+    mkdir -p "$d"
+    cat > "$d/for_init.cpp" <<'EOF'
+TEST_CASE("walks env then a table") {
+    for (const char* p = std::getenv("HELIX_LIST"); *p; ++p) {
+        count += (*p == ',');
+    }
+    setenv("OTHER", "x", 1);
+    for (int i = 0; i < 3; ++i) {
+        const char* p = table[i];
+        use(p);
+    }
+}
+EOF
+    run getenv_pointer_live_across_setenv_files "$d"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "the getenv/setenv gate fires on a capture, setenv and use on one line" {
+    local d="${BATS_TEST_TMPDIR}/fire5"
+    mkdir -p "$d"
+    cat > "$d/one_line_all.cpp" <<'EOF'
+TEST_CASE("compresses the whole bug into one line") {
+    const char* p = std::getenv("X"); setenv("X", "1", 1); use(p);
+}
+EOF
+    run getenv_pointer_live_across_setenv_files "$d"
+    [ "$status" -eq 1 ]
+    contains "'p' from getenv() is read at line 2" "$output"
+}
+
+@test "the getenv/setenv gate fires on a read after an earlier same-line setenv" {
+    # The first setenv completes before the second call's arguments are
+    # evaluated, so passing the capture to the second is already a stale read.
+    local d="${BATS_TEST_TMPDIR}/fire6"
+    mkdir -p "$d"
+    cat > "$d/two_setenv_one_line.cpp" <<'EOF'
+TEST_CASE("sets two variables in one statement") {
+    const char* p = std::getenv("B");
+    setenv("A", "1", 1); setenv("B", p, 1);
+}
+EOF
+    run getenv_pointer_live_across_setenv_files "$d"
+    [ "$status" -eq 1 ]
+    contains "'p' from getenv() is read at line 3" "$output"
+}
+
+# --- The override-store lifecycle goes through make_loaded_override_store() ---
+#
+# A FilamentSlotOverrideStore is only useful once it has been loaded into the
+# map the backend reads. helix::ams::make_loaded_override_store() returns the
+# store together with that map, so "constructed but never loaded" has no
+# spelling. Assigning override_store_ from a bare make_unique reopens it, and
+# the failure is silent: every save_async and clear_async site is guarded on
+# override_store_, so a backend that skipped the load still answers every
+# in-session read from overrides_ while persisting nothing. Nothing goes red
+# until the next launch, by which time the user's colours are gone.
+#
+# AFC's and Happy Hare's lane_publish_store_ is deliberately not covered. It
+# publishes to the shared namespace their Klipper plugins own and holds no map
+# to load, so it has no lifecycle to forget.
+
+override_store_offenders() {
+    local root="${1:-src}"
+    # Keyed on the TYPE, not on the member name: splitting the build from the
+    # assignment is the natural thing to write once the argument list grows,
+    # and a name-keyed grep reads a two-line
+    #     auto s = std::make_unique<FilamentSlotOverrideStore>(...);
+    #     override_store_ = std::move(s);
+    # as clean. A seventh backend naming its member something else evades a
+    # name-keyed grep too. Every construction of the type is therefore an
+    # offender unless it is one of the three the allowlist names.
+    grep -rnE 'make_unique<[^>]*FilamentSlotOverrideStore|new[[:space:]]+[A-Za-z:]*FilamentSlotOverrideStore' \
+        --include='*.cpp' --include='*.h' "$root" 2>/dev/null \
+        | grep -v 'printer/filament_slot_override_store\.cpp' \
+        | grep -v 'lane_publish_store_' \
+        || true
+}
+
+@test "override_store_ is only ever assigned from make_loaded_override_store()" {
+    run override_store_offenders src
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+
+    run override_store_offenders include
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "the override-store lifecycle gate fires on a hand-written construction" {
+    # A gate that cannot fail is not a gate. Three spellings, all of which
+    # persist nothing: the direct assignment, the split build-then-move, and a
+    # differently-named member in a backend that never says override_store_.
+    local d="${BATS_TEST_TMPDIR}/offender"
+    mkdir -p "$d"
+    cat > "$d/ams_backend_thing.cpp" <<'EOF'
+void AmsBackendThing::on_started() {
+    override_store_ = std::make_unique<helix::ams::FilamentSlotOverrideStore>(
+        api_, "thing", helix::ams::lane_key_style_for(get_type()));
+}
+void AmsBackendThing::restart() {
+    auto s = std::make_unique<helix::ams::FilamentSlotOverrideStore>(
+        api_, "thing", helix::ams::lane_key_style_for(get_type()));
+    override_store_ = std::move(s);
+}
+void AmsBackendThing::third() {
+    slot_store_.reset(new helix::ams::FilamentSlotOverrideStore(api_, "thing", style));
+}
+EOF
+    run override_store_offenders "$d"
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 3 ]
+    contains "FilamentSlotOverrideStore" "$output"
+}
+
+@test "the override-store gate stays quiet on the helper and on the publish store" {
+    # The silent half: the sanctioned spelling moves a store the helper built,
+    # and the publish store is a different member with no map behind it.
+    local d="${BATS_TEST_TMPDIR}/quiet"
+    mkdir -p "$d"
+    cat > "$d/ams_backend_ok.cpp" <<'EOF'
+void AmsBackendOk::on_started() {
+    auto loaded = helix::ams::make_loaded_override_store(api_, "ok", get_type(),
+                                                         backend_log_tag());
+    std::lock_guard<std::mutex> lock(mutex_);
+    override_store_ = std::move(loaded.store);
+    overrides_ = std::move(loaded.overrides);
+    lane_publish_store_ = std::make_unique<helix::ams::FilamentSlotOverrideStore>(
+        api_, "ok", style, "lane_data");
+}
+EOF
+    run override_store_offenders "$d"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+# --- Slot-index validation lives on the subscription base (#1624) ---
+#
+# AmsSubscriptionBackend::validate_slot_index() is the one answer to "is this
+# slot index valid", bounded by slot_index_bound_locked(). A backend that
+# declares its own validate_slot_index() hides the base's for every caller in
+# that class, and each copy picks its own bound. A backend whose range is not
+# total_slots overrides the bound.
+
+slot_validator_offenders() {
+    local root="${1:-include}"
+    grep -nE 'AmsError[[:space:]]+validate_slot_index(_locked)?[[:space:]]*\(' \
+        "$root"/ams_backend_*.h 2>/dev/null || true
+}
+
+@test "no AMS backend header declares its own validate_slot_index()" {
+    run slot_validator_offenders include
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "the slot-validator gate fires on a backend-local copy" {
+    local d="${BATS_TEST_TMPDIR}/offender"
+    mkdir -p "$d"
+    cat > "$d/ams_backend_thing.h" <<'EOF'
+class AmsBackendThing : public AmsSubscriptionBackend {
+    AmsError validate_slot_index(int slot_index) const;
+};
+EOF
+    run slot_validator_offenders "$d"
+    [ "$status" -eq 0 ]
+    contains "validate_slot_index" "$output"
+}
+
+# --- Our own servers are reached only through helix::tls::trusted_* ---
+# trusted_request()/trusted_download() verify the server certificate; a plain
+# requests:: call to the update, telemetry, crash or debug-bundle servers does not.
+# Uploads to the ingest workers go through helix::ingest::post, the one sender
+# that carries the API key. Requests to the printer's LAN services keep
+# requests:: on purpose.
+
+own_endpoint_http_offenders() {
+    local root="$1" f
+    for f in update_checker telemetry_manager crash_reporter ingest_client; do
+        grep -nE '^[^/]*(requests::|HttpClient)' "$root/src/system/$f.cpp" | sed "s|^|$f.cpp:|"
+    done
+    # Any other file naming one of our hosts must reach it through trusted_*.
+    grep -rlE 'helixscreen\.org|api\.github\.com|github(usercontent)?\.com/prestonbrown' \
+        "$root/src" | while read -r f; do
+        if grep -qE '^[^/]*(requests::|HttpClient)' "$f" && ! grep -q 'tls::trusted_' "$f"; then
+            echo "${f#"$root"/}: names one of our hosts but sends without tls::trusted_*"
+        fi
+    done
+    awk '/= worker_url\(\);|= WORKER_URL;/ { on = 1; seen = 1 }
+         on && /^[^\/]*(requests::|HttpClient)/ { print "debug_bundle_collector.cpp:" FNR ": " $0 }
+         on && /^}/ { on = 0 }
+         END { if (!seen) print "debug_bundle_collector.cpp: upload to WORKER_URL not found" }' \
+        "$root/src/system/debug_bundle_collector.cpp"
+    grep -rnF '["X-API-Key"]' "$root/src" | grep -v '^[^:]*/src/system/ingest_client\.cpp:' |
+        sed 's|$| (ingest uploads go through helix::ingest::post)|'
+}
+
+@test "requests to our own servers go through helix::tls::trusted_*" {
+    run own_endpoint_http_offenders .
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "the own-endpoint gate fires on a plain requests:: call" {
+    local d="${BATS_TEST_TMPDIR}/offender/src/system"
+    mkdir -p "$d"
+    printf '    // requests::request is fine in a comment\n' > "$d/update_checker.cpp"
+    printf '    auto r = requests::request(req);\n' > "$d/telemetry_manager.cpp"
+    printf '    hv::HttpClient cli;\n' > "$d/crash_reporter.cpp"
+    printf '    req->headers["X-API-Key"] = API_KEY;\n' > "$d/ingest_client.cpp"
+    mkdir -p "$d/../ui"
+    printf 'auto u = "https://api.github.com/x";\nauto r = requests::get(u);\n' > "$d/../ui/rogue.cpp"
+    printf 'auto u = "https://helixscreen.org/x";\nauto r = helix::tls::trusted_request(q);\n' \
+        > "$d/../ui/fine.cpp"
+    printf 'auto u = "https://helixscreen.org/docs";\n' > "$d/../ui/link_only.cpp"
+    printf '    req->headers["X-API-Key"] = key;\n' > "$d/../ui/keyed.cpp"
+    printf 'int f() {\n    auto r = requests::request(req);\n}\nvoid up() {\n    const std::string url = worker_url();\n    auto r = requests::request(req);\n}\n' \
+        > "$d/debug_bundle_collector.cpp"
+    run own_endpoint_http_offenders "${BATS_TEST_TMPDIR}/offender"
+    [ "$status" -eq 0 ]
+    contains "telemetry_manager.cpp" "$output"
+    contains "debug_bundle_collector.cpp:6" "$output"
+    contains "crash_reporter.cpp" "$output"
+    contains "src/ui/rogue.cpp" "$output"
+    lacks "fine.cpp" "$output"
+    lacks "link_only.cpp" "$output"
+    lacks "update_checker.cpp" "$output"
+    lacks "debug_bundle_collector.cpp:2" "$output"
+    contains "keyed.cpp" "$output"
+    lacks "ingest_client.cpp" "$output"
+}
+
+# --- ui_xml never uses the plugin name separator ---
+# `__` separates a plugin id from the rest of a name that plugin owns
+# (plugin_manifest.h kPluginNameSeparator). An app file name or app-bound
+# attribute value containing it would sit inside the plugin namespace, where
+# the ownership checks would read it as plugin-owned.
+
+@test "no ui_xml file name contains the plugin separator" {
+    run find ui_xml -name '*__*'
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "no ui_xml name, subject or cond attribute value contains the plugin separator" {
+    run grep -rEn '((^|[^_a-z0-9])subject|[_a-z0-9]+_subject|bind_[_a-z0-9]+|[_a-z0-9]*cond|name)="[^"]*__[^"]*"' ui_xml/
+    [ "$status" -eq 1 ]  # grep returns 1 when no matches found
+}
+
+@test "no app-registered XML subject name contains the plugin separator" {
+    # `subject="x__y"` in a bind_flag_if/bind_state_if/bind_style/bind_tile_rung child,
+    # a `cond=` expression, or a C++-registered subject (lv_xml_register_subject literal
+    # or INIT_SUBJECT_* macro name) would sit inside the plugin namespace: the policy
+    # would read it as plugin-owned and a plugin with id `x` could bind it. Plugin code
+    # is excluded because building `__` names is its job.
+    run bash -c "grep -rn -A 1 --include='*.cpp' --include='*.h' --exclude-dir=plugin --exclude='plugin_*' --exclude='lua_*' 'lv_xml_register_subject(' src/ include/ | grep -E '\"[^\"]*__'"
+    [ "$status" -eq 1 ]
+    run grep -rnE --include='*.cpp' --include='*.h' --exclude-dir=plugin --exclude='plugin_*' --exclude='lua_*' 'INIT_SUBJECT_[A-Z_]+\([[:space:]]*[_A-Za-z0-9]*__' src/ include/
+    [ "$status" -eq 1 ]
+    # register_subject_in_current_scope(name, ...) publishes the same scope entry as
+    # lv_xml_register_subject; UI_MANAGED_SUBJECT_* and UI_SUBJECT_INIT_AND_REGISTER_*
+    # take the XML name as a string-literal argument and publish through it. The name
+    # can sit on the call's next line, so -A 1; these macros also carry non-name
+    # literals (initial values), where a __ fails closed rather than slipping through.
+    run bash -c "grep -rn -A 1 --include='*.cpp' --include='*.h' --exclude-dir=plugin --exclude='plugin_*' --exclude='lua_*' -E 'register_subject_in_current_scope\(|\.publish\(|UI_MANAGED_SUBJECT_[A-Z_]+\(|UI_SUBJECT_INIT_AND_REGISTER_[A-Z_]+\(' src/ include/ | grep -E '\"[^\"]*__'"
+    [ "$status" -eq 1 ]
+}
+
+# --- The full NavigationManager header is for what ui_nav.h does not carry ---
+# ui_nav.h holds the navigation calls most callers need (push, go_back, close,
+# overlay registration, close callbacks, set_active). Editing ui_nav_manager.h
+# rebuilds every file that includes it, so a caller that only needs those takes
+# helix::nav::* and ui_nav.h. The count may fall, never rise: lower the limit when
+# an includer narrows.
+@test "ui_nav_manager.h is included by no more src/include files than it needs" {
+    local limit=15 includers count
+    includers=$(grep -rlE '^#include "ui_nav_manager\.h"' src include | sort)
+    count=$(printf '%s\n' "$includers" | grep -c .)
+    if [ "$count" -gt "$limit" ]; then
+        echo "ui_nav_manager.h has $count includers in src/ and include/, limit $limit." >&2
+        echo "Use helix::nav::* and ui_nav.h for push_overlay/go_back/close_overlay/" >&2
+        echo "register_overlay/unregister_overlay/on_close/clear_on_close/set_active/is_on_top/is_in_stack." >&2
+        printf '%s\n' "$includers" >&2
+    fi
+    [ "$count" -le "$limit" ]
+}
+
+# --- Per-event ESP32 paths must not walk the PSRAM heap ---
+# heap_caps_get_largest_free_block() walks every block with interrupts masked
+# for 20-30ms on the K-Touch, and the RGB panel's bounce-buffer refill misses
+# for the whole walk: the screen glitches once per call. These files run it per
+# thumbnail decode, per file-detail open and per print-status build.
+
+@test "per-event ESP32 paths read free PSRAM, never walk the heap" {
+    local files="include/esp_psram_thumbnail.h src/system/memory_utils.cpp src/ui/ui_panel_print_select.cpp src/print/active_print_media_manager.cpp src/ui/ui_panel_print_status.cpp"
+    run bash -c "grep -n 'heap_caps_get_largest_free_block\|heap_caps_get_info' $files | grep -v ':[0-9]*: *//'"
+    [ "$status" -eq 1 ]  # grep returns 1 when no matches found
+
+    run grep -n 'heap_caps_get_free_size(MALLOC_CAP_SPIRAM)' include/esp_psram_thumbnail.h
+    [ "$status" -eq 0 ]
 }

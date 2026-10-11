@@ -24,6 +24,7 @@
  */
 
 #include "../lvgl_test_fixture.h"
+#include "../test_helpers/mock_printer.h"
 #include "ams_backend_cfs.h"
 #include "app_globals.h"
 #include "async_lifetime_guard.h"
@@ -65,7 +66,7 @@ constexpr const char* G28_REJECTION = "Must home axis first";
 helix::PrinterState& unhomed_global_state() {
     helix::PrinterState& state = get_printer_state();
     state.init_subjects(false);
-    lv_subject_copy_string(state.get_homed_axes_subject(), "");
+    lv_subject_copy_string(state.motion_state().get_homed_axes_subject(), "");
     return state;
 }
 
@@ -139,10 +140,9 @@ TEST_CASE_METHOD(OwnershipFixture,
 TEST_CASE_METHOD(OwnershipFixture,
                  "CFS action script does not claim the report for a rejected payload",
                  "[error-center][gcode-ownership][ams][cfs]") {
-    MoonrakerClientMock client(MoonrakerClientMock::PrinterType::VORON_24);
-    helix::PrinterState state;
-    state.init_subjects(false);
-    MoonrakerAPIMock api(client, state);
+    MockPrinter mock_printer;
+    auto& client = mock_printer.client;
+    auto& api = mock_printer.api;
 
     helix::printer::AmsBackendCfs backend(&api, nullptr);
 
@@ -152,7 +152,7 @@ TEST_CASE_METHOD(OwnershipFixture,
     client.force_next_gcode_error(MoonrakerErrorType::JSON_RPC_ERROR, PAYLOAD_REJECTION,
                                   "BOX_LOAD");
 
-    auto err = CfsTestAccess::call_dispatch_action_script(backend, "BOX_LOAD LANE=1");
+    auto err = helix::CfsTestAccess::call_dispatch_action_script(backend, "BOX_LOAD LANE=1");
     REQUIRE(err.success());
 
     // G28's ack is marshalled through token.defer(); drain so the payload send

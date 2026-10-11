@@ -98,9 +98,9 @@ def test_stable_times_out_with_an_actionable_message_on_a_genuinely_moving_scree
     # for why that seeding step exists at all).
     # PrintStatusPanel restarts a ~300ms ease-out progress-bar animation on
     # every mock physics tick (~250ms, independent of --sim-speed), so
-    # pixels never hold still for 3 consecutive 16ms samples — this
-    # reliably drives the timeout branch rather than merely asserting it
-    # exists.
+    # pixels never hold still for 3 consecutive samples, each a 16 ms sleep
+    # plus up to a 33 ms wait for a queue drain. That reliably drives the
+    # timeout branch rather than merely asserting it exists.
     #
     # Boots its own instance (HELIX_MOCK_AUTO_PRINT env + --sim-speed) since
     # this needs boot-time flags the shared `helix_app`/`fresh_helix_app`

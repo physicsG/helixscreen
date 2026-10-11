@@ -4,22 +4,22 @@
 <component>
   <!--
     AMS Sidebar - Shared right-column component for AMS panels.
-
     Contains: current loaded card, status/progress display, action buttons.
     Used by both ams_panel.xml and ams_overview_panel.xml.
-
     Callbacks (registered by AmsOperationSidebar::register_callbacks_static()):
     - ams_sidebar_bypass_toggled: Bypass toggle switch
-    - ams_sidebar_unload_clicked: Unload button
+    - ams_sidebar_unload_clicked: Unload buttons (btn_unload, btn_batch_unload)
+    - ams_sidebar_batch_load_clicked: Load button (batch-capable systems only)
     - ams_sidebar_reset_clicked: Reset button
     - ams_sidebar_check_gates_clicked: Check slots button (Happy Hare only)
     - ams_sidebar_settings_clicked: Settings button
-
     C++ companion: AmsOperationSidebar (ui_ams_sidebar.h)
   -->
+  <!-- Scrolls vertically: with every action a backend offers, the buttons
+       outgrow a MEDIUM screen's column. -->
   <view name="ams_sidebar"
-        extends="lv_obj" width="100%" height="100%" style_pad_all="0" scrollable="false" flex_flow="column"
-        style_flex_main_place="start" style_flex_cross_place="center" style_pad_gap="#space_sm">
+        extends="lv_obj" width="100%" height="100%" style_pad_all="0" scrollable="true" scroll_dir="ver"
+        flex_flow="column" style_flex_main_place="start" style_flex_cross_place="center" style_pad_gap="#space_sm">
     <!-- Currently Loaded Section Header (e.g., "Current: Slot 1") -->
     <text_small width="100%" bind_text="ams_current_slot_text"/>
     <!-- Shared loaded card component -->
@@ -60,37 +60,67 @@
              Dims while a job owns the toolhead, same binding as
              panel_widget_bypass.xml; BypassToggleController still enforces that
              guard on every tap. -->
-        <ui_switch name="bypass_switch" size="small">
+        <ui_switch name="bypass_switch" size="small" moves_machine="true">
           <bind_state_if_eq subject="ams_bypass_active" state="checked" ref_value="1"/>
-          <bind_state_if_eq subject="job_holds_machine" state="disabled" ref_value="1"/>
           <event_cb trigger="value_changed" callback="ams_sidebar_bypass_toggled"/>
         </ui_switch>
       </lv_obj>
-      <!-- Unload Button (full width) - hidden for tool changers -->
+      <!-- Batch Load (parallel-toolhead systems): opens the picker modal in the
+           Load direction; one firmware script covers every ticked head. -->
+      <!-- Disabled state comes from ams_sidebar_load_disabled, which
+           AmsOperationSidebar::refresh_button_gating() computes through the
+           shared compute_op_button_gating() rule: no head worth feeding is the
+           existing nothing_to_feed refusal, and a running op or a print owning
+           the toolhead disables it like every other filament op. -->
+      <ui_button name="btn_batch_load" width="100%" variant="secondary" icon="arrow_down" text="Load...">
+        <bind_flag_if_eq subject="ams_sidebar_supports_batch" flag="hidden" ref_value="0"/>
+        <bind_state_if_eq subject="ams_sidebar_load_disabled" state="disabled" ref_value="1"/>
+        <event_cb trigger="clicked" callback="ams_sidebar_batch_load_clicked"/>
+      </ui_button>
+      <!-- Unload: on per-toolhead filament systems (AFC, Happy Hare, CFS, tool
+           changer) btn_unload unloads the filament in the ACTIVE head. On
+           batch-capable systems btn_batch_unload replaces it and opens the picker
+           in the Unload direction, labelled with an ellipsis like btn_batch_load
+           because it acts on the heads the user ticks, not the active one. Both
+           share one callback, whose capability branch picks the path. -->
       <!-- Disabled state comes from ams_sidebar_unload_disabled, which
-           AmsOperationSidebar::refresh_unload_gating() computes through the
-           shared compute_op_button_gating() rule. It folds in the old
-           ams_filament_loaded term plus the two this button never had: an AMS
-           op already running, and a print owning the toolhead. -->
-      <ui_button name="btn_unload"
-                 width="100%" variant="secondary" icon="tray_arrow_up" text="Unload" translation_tag="Unload">
-        <bind_flag_if_eq subject="ams_is_filament_system" flag="hidden" ref_value="0"/>
+           AmsOperationSidebar::refresh_button_gating() computes through the
+           shared compute_op_button_gating() rule. On batch backends the
+           availability term is "some head can unload" (the same per-head answer
+           the picker's rows read); elsewhere it is the aggregate
+           ams_filament_loaded flag. Both fold in an AMS op already running and
+           a print owning the toolhead. -->
+      <ui_button name="btn_unload" width="100%" variant="secondary" icon="tray_arrow_up" text="Unload">
+        <bind_flag_if cond="ams_is_filament_system eq 0 or ams_sidebar_supports_batch eq 1" flag="hidden"/>
+        <bind_state_if_eq subject="ams_sidebar_unload_disabled" state="disabled" ref_value="1"/>
+        <event_cb trigger="clicked" callback="ams_sidebar_unload_clicked"/>
+      </ui_button>
+      <ui_button name="btn_batch_unload" width="100%" variant="secondary" icon="tray_arrow_up" text="Unload...">
+        <bind_flag_if_eq subject="ams_sidebar_supports_batch" flag="hidden" ref_value="0"/>
         <bind_state_if_eq subject="ams_sidebar_unload_disabled" state="disabled" ref_value="1"/>
         <event_cb trigger="clicked" callback="ams_sidebar_unload_clicked"/>
       </ui_button>
       <!-- Reset Button (full width) - hidden for tool changers -->
-      <ui_button name="btn_reset" width="100%" variant="secondary" icon="refresh" text="Reset" translation_tag="Reset">
+      <!-- Disabled state comes from ams_sidebar_reset_disabled, which
+           AmsOperationSidebar::refresh_button_gating() computes through the
+           shared compute_machine_op_gating() rule. Reset is state-only on most
+           backends and stays live mid-job so it can clear a latched fault; it
+           greys only where reset_moves_filament() is true. -->
+      <ui_button name="btn_reset" width="100%" variant="secondary" icon="refresh" text="Reset">
         <bind_flag_if_eq subject="ams_is_tool_changer" flag="hidden" ref_value="1"/>
+        <bind_state_if_eq subject="ams_sidebar_reset_disabled" state="disabled" ref_value="1"/>
         <event_cb trigger="clicked" callback="ams_sidebar_reset_clicked"/>
       </ui_button>
       <!-- Check Slots (Happy Hare): probe all slot sensors (MMU_CHECK_GATE). Shown only when supported. -->
-      <ui_button name="btn_check_gates"
-                 width="100%" variant="secondary" icon="refresh" text="Check slots" translation_tag="Check slots"
-                 hidden="true">
+      <!-- Probing a slot is a physical move - the firmware parks the toolhead
+           and unloads/reloads each lane to test its sensor - so a job owning the
+           machine disables it via ams_sidebar_check_gates_disabled. -->
+      <ui_button name="btn_check_gates" width="100%" variant="secondary" icon="refresh" text="Check slots" hidden="true">
+        <bind_state_if_eq subject="ams_sidebar_check_gates_disabled" state="disabled" ref_value="1"/>
         <event_cb trigger="clicked" callback="ams_sidebar_check_gates_clicked"/>
       </ui_button>
       <!-- Settings Button (full width) -->
-      <ui_button name="btn_settings" width="100%" icon="settings" text="Settings" translation_tag="Settings">
+      <ui_button name="btn_settings" width="100%" icon="settings" text="Settings">
         <event_cb trigger="clicked" callback="ams_sidebar_settings_clicked"/>
       </ui_button>
     </lv_obj>

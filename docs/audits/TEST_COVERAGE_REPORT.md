@@ -68,7 +68,6 @@ This report analyzes test coverage for the HelixScreen project and documents the
 | Module | Reason |
 |--------|--------|
 | bed_mesh_renderer.cpp | Rendering code - visual testing required |
-| gcode_renderer.cpp | Rendering code |
 | gcode_tinygl_renderer.cpp | Rendering code |
 | ui_bed_mesh.cpp | UI panel - integration testing |
 | ui_card.cpp | UI component |

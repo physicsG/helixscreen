@@ -35,17 +35,15 @@ def test_wait_idle_reports_which_counter_was_busy_on_timeout(helix_app):
     # its message. The property actually worth testing is that the embedded
     # counter is a REAL nonzero reading, not just present-looking text.
     #
-    # A previous version of this test tried to win that reading by racing a
-    # burst of subject changes (via `scenario printing`/`idle`) against this
-    # process's own subprocess-spawn + socket round trip. That burst only
-    # shows up in UpdateQueue.pending_count() for at most one LVGL tick
-    # (~16ms) — process_pending() drains the ENTIRE queue every tick, so
-    # there is no way to widen that window from the subject side. Under load
-    # (spawn latency ballooning past 16ms) the race was lost most of the
-    # time, and no amount of retrying fixes a per-attempt probability that
-    # collapses exactly when the machine is busy enough to make spawning
-    # slow — confirmed failing 4-5 times out of 5-6 isolated runs under
-    # heavy build load.
+    # Racing a burst of subject changes (via `scenario printing`/`idle`)
+    # against this process's own subprocess-spawn + socket round trip cannot
+    # win that reading reliably. The burst shows up in
+    # UpdateQueue.pending_count() for at most one drain period (33 ms), because
+    # process_pending() drains the ENTIRE queue each time, so there is no way
+    # to widen that window from the subject side, and under load spawn latency
+    # alone exceeds it. No amount of retrying fixes a per-attempt probability
+    # that collapses exactly when the machine is busy enough to make spawning
+    # slow.
     #
     # The "http_busy" mock scenario sidesteps the race instead of tuning it:
     # it submits a 2-second synthetic job to HttpExecutor::fast(), whose
@@ -71,4 +69,25 @@ def test_wait_idle_reports_which_counter_was_busy_on_timeout(helix_app):
         # what this test does. Wait it out here rather than leaving it
         # dangling — this is a session-scoped shared instance, and the next
         # test to call wait_idle shouldn't inherit a surprise busy http=1.
+        helix_app.wait_idle(timeout=5.0)
+
+
+def test_wait_idle_reports_thumbnail_counter_busy_on_timeout(helix_app):
+    # Same property as the http counter above, for ThumbnailProcessor's own
+    # worker pool. "thumbnail_busy" submits a synthetic 2s task directly to
+    # the pool via submit_test_task(), sidestepping real PNG decode timing
+    # for the same load-insensitive window http_busy uses.
+    counter_pattern = re.compile(r"thumbnail=[1-9]\d*")
+    try:
+        helix_app.ctl("scenario", "thumbnail_busy")
+        with pytest.raises(HelixCtlError) as exc:
+            helix_app.wait_idle(timeout=0.0)
+        message = exc.value.message
+        assert counter_pattern.search(message), (
+            f"wait_idle did not report a genuinely nonzero thumbnail counter "
+            f"(message: {message!r}), either the thumbnail_busy scenario didn't "
+            "submit its task, or counter reporting regressed to always "
+            "showing zero"
+        )
+    finally:
         helix_app.wait_idle(timeout=5.0)

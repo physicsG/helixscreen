@@ -13,8 +13,42 @@ using helix::snapmaker_terminal_matchers;
 TEST_CASE("snapmaker_terminal_matchers: dirty-bed by id 532 => Terminal", "[pause][snapmaker]") {
     PauseSignals s;
     s.exception_id = 532;
+    s.exception_code = 1;
     s.message = "detected dirty bed";
     REQUIRE(classify_pause(s, snapmaker_terminal_matchers()) == PauseCause::Terminal);
+}
+
+// Exception 532 is the defect_detection family: code 1 dirty bed, 2 noodle,
+// 3 residue, 4 dirty nozzle. The firmware PAUSEs for all four, so only the
+// hardware-verified dirty-bed code (#991) is Terminal — the rest attempt RESUME.
+TEST_CASE("snapmaker_terminal_matchers: id 532 code 2 (noodle) => Recoverable",
+          "[pause][snapmaker]") {
+    PauseSignals s;
+    s.exception_id = 532;
+    s.exception_code = 2;
+    s.message = "detected noodle";
+    s.sdcard_active = false; // firmware defect pauses deactivate the SD
+    REQUIRE(classify_pause(s, snapmaker_terminal_matchers()) == PauseCause::Recoverable);
+}
+
+TEST_CASE("snapmaker_terminal_matchers: id 532 code 3 (residue) => Recoverable",
+          "[pause][snapmaker]") {
+    PauseSignals s;
+    s.exception_id = 532;
+    s.exception_code = 3;
+    s.message = "detected residue";
+    s.sdcard_active = false;
+    REQUIRE(classify_pause(s, snapmaker_terminal_matchers()) == PauseCause::Recoverable);
+}
+
+TEST_CASE("snapmaker_terminal_matchers: id 532 code 4 (dirty nozzle) => Recoverable",
+          "[pause][snapmaker]") {
+    PauseSignals s;
+    s.exception_id = 532;
+    s.exception_code = 4;
+    s.message = "detected dirty nozzle";
+    s.sdcard_active = false;
+    REQUIRE(classify_pause(s, snapmaker_terminal_matchers()) == PauseCause::Recoverable);
 }
 
 TEST_CASE("snapmaker_terminal_matchers: dirty-bed by message => Terminal", "[pause][snapmaker]") {

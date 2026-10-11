@@ -10,6 +10,7 @@
 #include "gcode_classify.h"
 #include "gcode_homing.h"
 #include "json_utils.h"
+#include "klipper_extruder_naming.h"
 #include "macro_param_cache.h"
 #include "moonraker_api.h"
 #include "moonraker_api_internal.h"
@@ -21,7 +22,6 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
-#include <sstream>
 
 using namespace moonraker_internal;
 
@@ -39,29 +39,23 @@ void MoonrakerAPI::set_temperature(const std::string& heater, double temperature
 
     // Validate heater name
     if (!is_safe_identifier(heater)) {
-        NOTIFY_ERROR("Invalid heater name '{}'. Contains unsafe characters.", heater);
-        if (on_error) {
-            MoonrakerError err = MoonrakerError::validation_error(
-                "set_temperature", "Invalid heater name contains illegal characters");
-            on_error(err);
-        }
+        report_validation_error(
+            on_error, "set_temperature", "Invalid heater name contains illegal characters",
+            fmt::format("Invalid heater name '{}'. Contains unsafe characters.", heater));
         return;
     }
 
     // Validate temperature range
     if (!is_safe_temperature(temperature, safety_limits_, heater)) {
-        NOTIFY_ERROR("Temperature {:.0f}°C is out of range. Valid: {:.0f}°C to {:.0f}°C.",
-                     temperature, safety_limits_.min_temperature_celsius,
-                     safety_limits_.max_temp_for(heater));
-        if (on_error) {
-            MoonrakerError err = MoonrakerError::validation_error(
-                "set_temperature",
-                "Temperature " + std::to_string(static_cast<int>(temperature)) +
-                    "°C exceeds safety limits (" +
-                    std::to_string(static_cast<int>(safety_limits_.min_temperature_celsius)) + "-" +
-                    std::to_string(static_cast<int>(safety_limits_.max_temp_for(heater))) + "°C)");
-            on_error(err);
-        }
+        report_validation_error(
+            on_error, "set_temperature",
+            "Temperature " + std::to_string(static_cast<int>(temperature)) +
+                "°C exceeds safety limits (" +
+                std::to_string(static_cast<int>(safety_limits_.min_temperature_celsius)) + "-" +
+                std::to_string(static_cast<int>(safety_limits_.max_temp_for(heater))) + "°C)",
+            fmt::format("Temperature {:.0f}°C is out of range. Valid: {:.0f}°C to {:.0f}°C.",
+                        temperature, safety_limits_.min_temperature_celsius,
+                        safety_limits_.max_temp_for(heater)));
         return;
     }
 
@@ -76,12 +70,8 @@ void MoonrakerAPI::set_temperature(const std::string& heater, double temperature
     const char* gcode = helix::ui::temperature::build_heater_gcode(
         heater, helix::units::to_decidegrees(temperature), gcode_buf, sizeof(gcode_buf), use_m141);
     if (!gcode) {
-        spdlog::error("[Moonraker API] Cannot build gcode for empty heater name");
-        if (on_error) {
-            MoonrakerError err =
-                MoonrakerError::validation_error("set_temperature", "Empty heater name");
-            on_error(err);
-        }
+        report_validation_error(on_error, "set_temperature", "Empty heater name",
+                                "Cannot set a temperature without a heater name.");
         return;
     }
 
@@ -101,28 +91,22 @@ void MoonrakerAPI::set_fan_speed(const std::string& fan, double speed, SuccessCa
 
     // Validate fan name
     if (!is_safe_identifier(fan)) {
-        NOTIFY_ERROR("Invalid fan name '{}'. Contains unsafe characters.", fan);
-        if (on_error) {
-            MoonrakerError err = MoonrakerError::validation_error(
-                "set_fan_speed", "Invalid fan name contains illegal characters");
-            on_error(err);
-        }
+        report_validation_error(
+            on_error, "set_fan_speed", "Invalid fan name contains illegal characters",
+            fmt::format("Invalid fan name '{}'. Contains unsafe characters.", fan));
         return;
     }
 
     // Validate speed percentage
     if (!is_safe_fan_speed(speed, safety_limits_)) {
-        NOTIFY_ERROR("Fan speed {:.0f}% is out of range. Valid: {:.0f}% to {:.0f}%.", speed,
-                     safety_limits_.min_fan_speed_percent, safety_limits_.max_fan_speed_percent);
-        if (on_error) {
-            MoonrakerError err = MoonrakerError::validation_error(
-                "set_fan_speed",
-                "Fan speed " + std::to_string(static_cast<int>(speed)) +
-                    "% exceeds safety limits (" +
-                    std::to_string(static_cast<int>(safety_limits_.min_fan_speed_percent)) + "-" +
-                    std::to_string(static_cast<int>(safety_limits_.max_fan_speed_percent)) + "%)");
-            on_error(err);
-        }
+        report_validation_error(
+            on_error, "set_fan_speed",
+            "Fan speed " + std::to_string(static_cast<int>(speed)) + "% exceeds safety limits (" +
+                std::to_string(static_cast<int>(safety_limits_.min_fan_speed_percent)) + "-" +
+                std::to_string(static_cast<int>(safety_limits_.max_fan_speed_percent)) + "%)",
+            fmt::format("Fan speed {:.0f}% is out of range. Valid: {:.0f}% to {:.0f}%.", speed,
+                        safety_limits_.min_fan_speed_percent,
+                        safety_limits_.max_fan_speed_percent));
         return;
     }
 
@@ -139,7 +123,7 @@ void MoonrakerAPI::set_fan_speed(const std::string& fan, double speed, SuccessCa
 void MoonrakerAPI::get_sensors(SensorsCallback on_success, ErrorCallback on_error) {
     client_.send_jsonrpc(
         "server.sensors.list", json::object(),
-        [on_success](json response) {
+        [on_success](const json& response) {
             std::vector<helix::SensorInfo> sensors;
             nlohmann::json initial_values;
 
@@ -154,8 +138,9 @@ void MoonrakerAPI::get_sensors(SensorsCallback on_success, ErrorCallback on_erro
 
                     helix::SensorInfo info;
                     info.id = sensor_id;
-                    info.friendly_name = sensor_data.value("friendly_name", sensor_id);
-                    info.type = sensor_data.value("type", "unknown");
+                    info.friendly_name =
+                        helix::json_util::safe_string(sensor_data, "friendly_name", sensor_id);
+                    info.type = helix::json_util::safe_string(sensor_data, "type", "unknown");
 
                     // Extract value keys and initial values from the "values" object
                     if (sensor_data.contains("values") && sensor_data["values"].is_object()) {
@@ -200,7 +185,8 @@ void MoonrakerAPI::get_sensors(SensorsCallback on_success, ErrorCallback on_erro
 
 void MoonrakerAPI::execute_gcode(const std::string& gcode, SuccessCallback on_success,
                                  ErrorCallback on_error, uint32_t timeout_ms, bool silent,
-                                 SuccessCallback on_queued, bool caller_surfaces_errors) {
+                                 SuccessCallback on_queued, bool caller_surfaces_errors,
+                                 bool bypass_busy_gate) {
     // G-code leaves here VERBATIM. Nothing is appended, rewritten, or stripped —
     // see moonraker_gcode_guards.h and tests/unit/test_gcode_verbatim.cpp.
     //
@@ -226,7 +212,7 @@ void MoonrakerAPI::execute_gcode(const std::string& gcode, SuccessCallback on_su
     // CONNECTION_LOST (#909).
     {
         const bool connected = client_.get_connection_state() == helix::ConnectionState::CONNECTED;
-        const int klippy = lv_subject_get_int(state_.get_klippy_state_subject());
+        const int klippy = lv_subject_get_int(state_.network_state().get_klippy_state_subject());
         if (connected && (klippy == static_cast<int>(helix::KlippyState::SHUTDOWN) ||
                           klippy == static_cast<int>(helix::KlippyState::ERROR))) {
             if (!silent) {
@@ -235,8 +221,9 @@ void MoonrakerAPI::execute_gcode(const std::string& gcode, SuccessCallback on_su
                              klippy, gcode.substr(0, 60));
             }
             if (on_error) {
-                on_error(MoonrakerError::not_ready(
-                    "printer.gcode.script", "Klipper is halted — restart firmware to continue"));
+                on_error(MoonrakerError::refusal(
+                    "printer.gcode.script",
+                    TR_NOOP("Klipper is halted — restart firmware to continue")));
             }
             return;
         }
@@ -251,18 +238,30 @@ void MoonrakerAPI::execute_gcode(const std::string& gcode, SuccessCallback on_su
                                                       "[Moonraker API]")) {
         return;
     }
+    if (helix::api::reject_motion_while_spools_on_bed(gcode, state_, silent, on_error,
+                                                      "[Moonraker API]")) {
+        return;
+    }
 
     // Gate discretionary gcode (fan, temp, non-homing moves, LED) while a blocking
     // non-print operation holds Klipper's single-threaded gcode lock (homing,
-    // BED_MESH_CALIBRATE, QGL, PROBE_ACCURACY, manual probe). Split by danger below:
+    // BED_MESH_CALIBRATE, QGL, PROBE_ACCURACY, manual probe) or while a print
+    // start is under way — the START macro (heat soak, mesh, probing) holds the
+    // same gcode mutex for minutes while print_stats already reports PRINTING,
+    // which the blocking predicate excludes, so the print-start phase is gated on
+    // its own arm here (bundle SQJ8SAL7, FlashForge AD5X). Split by danger below:
     // a physical MOVE is refused (a late jog is dangerous); benign fan/temp/LED are
     // queued fire-and-forget with a single per-episode toast rather than lost or
     // timed out (bundle 7CT79XXK, Sovol SV08 calibration; #1108). Recovery, homing,
     // probe-control (TESTZ/ACCEPT/ABORT) and macros are never discretionary, so they
-    // pass. Real file prints are excluded by is_blocking_operation_active(). Self-busy
-    // from the app's own recent jog passes too (idle_timeout reports "Printing"
-    // during any move); only external blocking ops are gated.
-    if (helix::is_discretionary_gcode(gcode) && state_.is_external_blocking_operation_active()) {
+    // pass. Mid-print tweaks once the start sequence is done stay synchronous.
+    // Self-busy from the app's own recent jog passes too (idle_timeout reports
+    // "Printing" during any move); only external blocking ops are gated.
+    // bypass_busy_gate is for the print-launch send: its on_success chains the
+    // job launch, so queueing it fire-and-forget would orphan the print start.
+    if (!bypass_busy_gate && helix::is_discretionary_gcode(gcode) &&
+        (state_.is_external_blocking_operation_active() ||
+         state_.print_state().is_in_print_start())) {
         // A physical MOVE must never queue behind the blocking op: a jog that fires
         // minutes late, after the user has walked away, can crash the toolhead.
         // Refuse it up front (recovery/homing are non-discretionary and never reach
@@ -274,8 +273,8 @@ void MoonrakerAPI::execute_gcode(const std::string& gcode, SuccessCallback on_su
                              gcode.substr(0, 60));
             }
             if (on_error) {
-                on_error(MoonrakerError::not_ready("printer.gcode.script",
-                                                   "Printer is busy — try again in a moment"));
+                on_error(MoonrakerError::refusal(
+                    "printer.gcode.script", TR_NOOP("Printer is busy — try again in a moment")));
             }
             return;
         }
@@ -322,15 +321,19 @@ void MoonrakerAPI::execute_gcode(const std::string& gcode, SuccessCallback on_su
         // frontend's console) is worth announcing precisely because, from this
         // panel's point of view, it came out of nowhere.
         //
+        // A silent send is a non-interactive caller (LedAutoState applying the
+        // state theme), not a user command; the toast exists to explain a
+        // command the USER made, so it neither shows nor claims the latch.
+        //
         // The short-circuit ordering is load-bearing: when suppressed,
         // claim_busy_queue_toast() must NOT be called, so the once-per-episode
         // latch stays armed and a genuinely external op later in the same
         // episode can still announce itself.
         //
-        // This is the ONLY consumer of app_macro_activity(). The blocking-op
-        // predicates deliberately do not read it — narrowing them would let a
-        // late jog through during a filament op (#1108).
-        if (!state_.app_macro_activity().recently_active() && state_.claim_busy_queue_toast()) {
+        // The blocking-op predicates deliberately do not read app_macro_activity():
+        // narrowing them would let a late jog through during a filament op (#1108).
+        if (!silent && !state_.app_macro_activity().recently_active() &&
+            state_.calibration_state().claim_busy_queue_toast()) {
             NOTIFY_INFO("Printer is busy — your {} will run when it's ready.",
                         helix::discretionary_gcode_noun(gcode));
         }
@@ -444,17 +447,13 @@ void MoonrakerAPI::exclude_object(const std::string& object_name, SuccessCallbac
         spdlog::warn("[Moonraker API] Rejected exclude_object name '{}' — contains characters "
                      "outside the object-name allowlist",
                      object_name);
-        NOTIFY_ERROR("Invalid object name '{}'. Contains unsafe characters.", object_name);
-        if (on_error) {
-            MoonrakerError err = MoonrakerError::validation_error(
-                "exclude_object", "Invalid object name contains illegal characters");
-            on_error(err);
-        }
+        report_validation_error(
+            on_error, "exclude_object", "Invalid object name contains illegal characters",
+            fmt::format("Invalid object name '{}'. Contains unsafe characters.", object_name));
         return;
     }
 
-    std::ostringstream gcode;
-    gcode << "EXCLUDE_OBJECT NAME=" << object_name;
+    std::string gcode = "EXCLUDE_OBJECT NAME=" + object_name;
 
     spdlog::info("[Moonraker API] Excluding object: {}", object_name);
 
@@ -466,7 +465,7 @@ void MoonrakerAPI::exclude_object(const std::string& object_name, SuccessCallbac
     // truth comes from the `exclude_object.excluded_objects` status subscription. A 15-minute
     // ceiling still catches genuinely stuck requests without aborting legitimate pre-prints.
     constexpr uint32_t EXCLUDE_OBJECT_TIMEOUT_MS = 15 * 60 * 1000;
-    execute_gcode(gcode.str(), on_success, on_error, EXCLUDE_OBJECT_TIMEOUT_MS, /*silent=*/true);
+    execute_gcode(gcode, on_success, on_error, EXCLUDE_OBJECT_TIMEOUT_MS, /*silent=*/true);
 }
 
 void MoonrakerAPI::emergency_stop(SuccessCallback on_success, ErrorCallback on_error) {
@@ -482,6 +481,12 @@ void MoonrakerAPI::emergency_stop(SuccessCallback on_success, ErrorCallback on_e
 }
 
 void MoonrakerAPI::restart_firmware(SuccessCallback on_success, ErrorCallback on_error) {
+    // Restarting releases the steppers; with spools on the bed a gantry can sink
+    // onto them (prestonbrown/helixscreen#1730).
+    if (helix::api::reject_restart_while_spools_on_bed(&state_, "printer.firmware_restart",
+                                                       on_error)) {
+        return;
+    }
     spdlog::info("[Moonraker API] Restarting firmware");
 
     client_.send_jsonrpc(
@@ -494,6 +499,11 @@ void MoonrakerAPI::restart_firmware(SuccessCallback on_success, ErrorCallback on
 }
 
 void MoonrakerAPI::restart_klipper(SuccessCallback on_success, ErrorCallback on_error) {
+    // Restarting releases the steppers; with spools on the bed a gantry can sink
+    // onto them (prestonbrown/helixscreen#1730).
+    if (helix::api::reject_restart_while_spools_on_bed(&state_, "printer.restart", on_error)) {
+        return;
+    }
     spdlog::info("[Moonraker API] Restarting Klipper");
 
     client_.send_jsonrpc(
@@ -507,6 +517,11 @@ void MoonrakerAPI::restart_klipper(SuccessCallback on_success, ErrorCallback on_
 
 void MoonrakerAPI::restart_service(const std::string& service_name, SuccessCallback on_success,
                                    ErrorCallback on_error) {
+    if (service_name.find("klipper") != std::string::npos &&
+        helix::api::reject_restart_while_spools_on_bed(&state_, "machine.services.restart",
+                                                       on_error)) {
+        return;
+    }
     spdlog::info("[Moonraker API] Restarting service '{}' via machine.services.restart",
                  service_name);
 
@@ -579,205 +594,202 @@ void MoonrakerAPI::update_safety_limits_from_printer(SuccessCallback on_success,
 
     client_.send_jsonrpc(
         "printer.objects.query", params,
-        [this, on_success](json response) {
-            try {
-                if (!response.contains("result") || !response["result"].contains("status") ||
-                    !response["result"]["status"].contains("configfile") ||
-                    !response["result"]["status"]["configfile"].contains("settings")) {
-                    spdlog::warn("[Moonraker API] Printer configuration not available, using "
-                                 "default safety limits");
-                    if (on_success) {
-                        on_success();
-                    }
-                    return;
-                }
-
-                const json& settings = response["result"]["status"]["configfile"]["settings"];
-                bool updated = false;
-
-                // Extract max_velocity from printer settings.
-                // Every read in this callback is is_number()-guarded on purpose: the
-                // whole body is a single try, so one wrong-typed field would abort
-                // every limit parsed after it (see the position_endstop note below).
-                if (settings.contains("printer") && settings["printer"].is_object() &&
-                    settings["printer"].contains("max_velocity") &&
-                    settings["printer"]["max_velocity"].is_number()) {
-                    double max_velocity_mm_s = settings["printer"]["max_velocity"].get<double>();
-                    safety_limits_.max_feedrate_mm_min = max_velocity_mm_s * 60.0;
-                    updated = true;
-                    spdlog::debug(
-                        "[Moonraker API] Updated max_feedrate from printer config: {} mm/min",
-                        safety_limits_.max_feedrate_mm_min);
-                }
-
-                // Extract axis limits from stepper configurations
-                // Also populate build_volume from stepper_x/y for accurate bed dimensions
-                BuildVolume build_vol = hardware().build_volume();
-                bool build_volume_updated = false;
-
-                for (const auto& stepper : {"stepper_x", "stepper_y", "stepper_z"}) {
-                    if (settings.contains(stepper) && settings[stepper].is_object()) {
-                        if (settings[stepper].contains("position_max") &&
-                            settings[stepper]["position_max"].is_number()) {
-                            double pos_max = settings[stepper]["position_max"].get<double>();
-                            // Use the largest axis max as absolute position limit
-                            if (pos_max > safety_limits_.max_absolute_position_mm) {
-                                safety_limits_.max_absolute_position_mm = pos_max;
-                                updated = true;
-                            }
-                            // Update build_volume for X/Y axes
-                            if (std::string(stepper) == "stepper_x") {
-                                build_vol.x_max = static_cast<float>(pos_max);
-                                build_volume_updated = true;
-                            } else if (std::string(stepper) == "stepper_y") {
-                                build_vol.y_max = static_cast<float>(pos_max);
-                                build_volume_updated = true;
-                            } else if (std::string(stepper) == "stepper_z") {
-                                build_vol.z_max = static_cast<float>(pos_max);
-                                build_volume_updated = true;
-                            }
-                        }
-                        if (settings[stepper].contains("position_min") &&
-                            settings[stepper]["position_min"].is_number()) {
-                            double pos_min = settings[stepper]["position_min"].get<double>();
-                            // Use the smallest (most negative) axis min as absolute position limit
-                            if (pos_min < safety_limits_.min_absolute_position_mm) {
-                                safety_limits_.min_absolute_position_mm = pos_min;
-                                updated = true;
-                            }
-                            // Update build_volume for X/Y axes
-                            if (std::string(stepper) == "stepper_x") {
-                                build_vol.x_min = static_cast<float>(pos_min);
-                                build_volume_updated = true;
-                            } else if (std::string(stepper) == "stepper_y") {
-                                build_vol.y_min = static_cast<float>(pos_min);
-                                build_volume_updated = true;
-                            }
-                        }
-                    }
-                }
-
-                // Update build_volume if we found stepper configs
-                if (build_volume_updated) {
-                    hardware().set_build_volume(build_vol);
-                    notify_build_volume_changed();
-                    spdlog::debug("[Moonraker API] Build volume from stepper config: "
-                                  "X[{:.0f},{:.0f}] Y[{:.0f},{:.0f}] Z[0,{:.0f}]",
-                                  build_vol.x_min, build_vol.x_max, build_vol.y_min,
-                                  build_vol.y_max, build_vol.z_max);
-                }
-
-                // Extract stepper_z position_endstop for non-probe Z-offset reference.
-                //
-                // Klipper emits `position_endstop: null` for any printer using
-                // `endstop_pin: probe:z_virtual_endstop` — i.e. most probe-equipped
-                // machines. is_number() is a PRESENCE test, not a default: 0.0 is a
-                // legal endstop, so there is no value we could substitute that the
-                // reader could tell apart from a real reading. Leaving the setter
-                // uncalled keeps stepper_z_endstop_microns_ at its "not set" 0.
-                //
-                // The guard is load-bearing: a bare .get<double>() throws
-                // type_error.302 on that null, and since the whole callback is one
-                // try block the throw would skip the temperature-limit loop below —
-                // max/min temp and min_extrude_temp would silently keep their
-                // compiled defaults while the catch still reported success.
-                if (settings.contains("stepper_z") && settings["stepper_z"].is_object() &&
-                    settings["stepper_z"].contains("position_endstop")) {
-                    const json& endstop_val = settings["stepper_z"]["position_endstop"];
-                    if (endstop_val.is_number()) {
-                        double endstop = endstop_val.get<double>();
-                        int microns = static_cast<int>(endstop * 1000.0);
-                        state_.set_stepper_z_endstop_microns(microns);
-                        spdlog::debug(
-                            "[Moonraker API] stepper_z position_endstop: {:.3f}mm ({} microns)",
-                            endstop, microns);
-                    } else {
-                        spdlog::debug("[Moonraker API] stepper_z position_endstop is not a "
-                                      "number (virtual endstop / probe) — leaving unset");
-                    }
-                }
-
-                // Extract temperature limits from heater configurations
-                for (const auto& [key, value] : settings.items()) {
-                    if ((key.find("extruder") != std::string::npos ||
-                         key.find("heater_") != std::string::npos) &&
-                        value.is_object()) {
-                        if (value.contains("max_temp") && value["max_temp"].is_number()) {
-                            double max_temp = value["max_temp"].get<double>();
-                            // Keyed on the section header, because that IS the
-                            // name a send arrives with:
-                            // TemperatureController::resolved_name() hands
-                            // set_temperature() "extruder", "heater_bed", or the
-                            // whole "heater_generic chamber_heater". Adopted as-is
-                            // rather than widened - a 290C hotend has to be able to
-                            // LOWER its bound, which is exactly what the global
-                            // below cannot do (#1355). set_max_temp_for() folds the
-                            // case so the key matches the lookup whatever Klipper
-                            // reported; a raw insert here does not.
-                            safety_limits_.set_max_temp_for(key, max_temp);
-                            updated = true;
-
-                            // The global stays a permissive sanity net for callers
-                            // that have no heater name to hand, so it only widens.
-                            if (max_temp > safety_limits_.max_temperature_celsius) {
-                                safety_limits_.max_temperature_celsius = max_temp;
-                            }
-                        }
-                        if (value.contains("min_temp") && value["min_temp"].is_number()) {
-                            double min_temp = value["min_temp"].get<double>();
-                            // Use the lowest heater min_temp as temperature limit
-                            if (min_temp < safety_limits_.min_temperature_celsius) {
-                                safety_limits_.min_temperature_celsius = min_temp;
-                                updated = true;
-                            }
-                        }
-                        // Extract min_extrude_temp from extruder (not heater_bed)
-                        if (key == "extruder" && value.contains("min_extrude_temp") &&
-                            value["min_extrude_temp"].is_number()) {
-                            double min_extrude = value["min_extrude_temp"].get<double>();
-                            safety_limits_.min_extrude_temp_celsius = min_extrude;
-                            updated = true;
-                            spdlog::debug("[Moonraker API] min_extrude_temp from config: {}°C",
-                                          min_extrude);
-                        }
-                    }
-                }
-
-                // Klipper's min_temp/min_extrude_temp are sensor sanity floors and may
-                // legitimately be negative (an open thermistor on an unmounted tool).
-                // SafetyLimits floors mean something else entirely - the lowest
-                // *sendable* target and the heat-to instruction the panel renders - so
-                // the adopted values are clamped here, at the one point where external
-                // config crosses into our domain (prestonbrown/helixscreen#1353).
-                // Ahead of the log below, so the log reports what we actually adopted.
-                safety_limits_.clamp_temperature_floors();
-
-                if (updated) {
-                    spdlog::debug(
-                        "[Moonraker API] Updated safety limits from printer configuration:");
-                    spdlog::debug("[Moonraker API]   Temperature: {} to {}°C",
-                                  safety_limits_.min_temperature_celsius,
-                                  safety_limits_.max_temperature_celsius);
-                    spdlog::debug("[Moonraker API]   Position: {} to {}mm",
-                                  safety_limits_.min_absolute_position_mm,
-                                  safety_limits_.max_absolute_position_mm);
-                    spdlog::debug("[Moonraker API]   Feedrate: {} to {} mm/min",
-                                  safety_limits_.min_feedrate_mm_min,
-                                  safety_limits_.max_feedrate_mm_min);
-                } else {
-                    spdlog::debug("[Moonraker API] No safety limit overrides found in printer "
-                                  "config, using defaults");
-                }
-
+        [this, on_success](const json& response) {
+            if (!response.contains("result") || !response["result"].contains("status") ||
+                !response["result"]["status"].contains("configfile") ||
+                !response["result"]["status"]["configfile"].contains("settings")) {
+                spdlog::warn("[Moonraker API] Printer configuration not available, using "
+                             "default safety limits");
                 if (on_success) {
                     on_success();
                 }
-            } catch (const std::exception& e) {
-                LOG_ERROR_INTERNAL("Failed to parse printer configuration for safety limits: {}",
-                                   e.what());
-                if (on_success) {
-                    on_success(); // Continue with defaults on parse error
+                return;
+            }
+
+            const json& settings = response["result"]["status"]["configfile"]["settings"];
+            bool updated = false;
+
+            // Extract max_velocity from printer settings.
+            // Every read in this callback is is_number()-guarded on purpose: one
+            // wrong-typed field must not abort every limit parsed after it (see
+            // the position_endstop note below).
+            if (settings.contains("printer") && settings["printer"].is_object() &&
+                settings["printer"].contains("max_velocity") &&
+                settings["printer"]["max_velocity"].is_number()) {
+                double max_velocity_mm_s = settings["printer"]["max_velocity"].get<double>();
+                safety_limits_.max_feedrate_mm_min = max_velocity_mm_s * 60.0;
+                updated = true;
+                spdlog::debug("[Moonraker API] Updated max_feedrate from printer config: {} mm/min",
+                              safety_limits_.max_feedrate_mm_min);
+            }
+
+            // Extract axis limits from stepper configurations
+            // Also populate build_volume from stepper_x/y for accurate bed dimensions
+            BuildVolume build_vol = hardware().build_volume();
+            bool build_volume_updated = false;
+
+            for (const auto& stepper : {"stepper_x", "stepper_y", "stepper_z"}) {
+                if (settings.contains(stepper) && settings[stepper].is_object()) {
+                    if (settings[stepper].contains("position_max") &&
+                        settings[stepper]["position_max"].is_number()) {
+                        double pos_max = settings[stepper]["position_max"].get<double>();
+                        // Use the largest axis max as absolute position limit
+                        if (pos_max > safety_limits_.max_absolute_position_mm) {
+                            safety_limits_.max_absolute_position_mm = pos_max;
+                            updated = true;
+                        }
+                        // Update build_volume for X/Y axes
+                        if (std::string(stepper) == "stepper_x") {
+                            build_vol.x_max = static_cast<float>(pos_max);
+                            build_volume_updated = true;
+                        } else if (std::string(stepper) == "stepper_y") {
+                            build_vol.y_max = static_cast<float>(pos_max);
+                            build_volume_updated = true;
+                        } else if (std::string(stepper) == "stepper_z") {
+                            build_vol.z_max = static_cast<float>(pos_max);
+                            build_volume_updated = true;
+                        }
+                    }
+                    if (settings[stepper].contains("position_min") &&
+                        settings[stepper]["position_min"].is_number()) {
+                        double pos_min = settings[stepper]["position_min"].get<double>();
+                        // Use the smallest (most negative) axis min as absolute position limit
+                        if (pos_min < safety_limits_.min_absolute_position_mm) {
+                            safety_limits_.min_absolute_position_mm = pos_min;
+                            updated = true;
+                        }
+                        // Update build_volume for X/Y axes
+                        if (std::string(stepper) == "stepper_x") {
+                            build_vol.x_min = static_cast<float>(pos_min);
+                            build_volume_updated = true;
+                        } else if (std::string(stepper) == "stepper_y") {
+                            build_vol.y_min = static_cast<float>(pos_min);
+                            build_volume_updated = true;
+                        }
+                    }
                 }
+            }
+
+            // Update build_volume if we found stepper configs
+            if (build_volume_updated) {
+                hardware().set_build_volume(build_vol);
+                notify_build_volume_changed();
+                spdlog::debug("[Moonraker API] Build volume from stepper config: "
+                              "X[{:.0f},{:.0f}] Y[{:.0f},{:.0f}] Z[0,{:.0f}]",
+                              build_vol.x_min, build_vol.x_max, build_vol.y_min, build_vol.y_max,
+                              build_vol.z_max);
+            }
+
+            // Extract stepper_z position_endstop for non-probe Z-offset reference.
+            //
+            // Klipper emits `position_endstop: null` for any printer using
+            // `endstop_pin: probe:z_virtual_endstop` — i.e. most probe-equipped
+            // machines. is_number() is a PRESENCE test, not a default: 0.0 is a
+            // legal endstop, so there is no value we could substitute that the
+            // reader could tell apart from a real reading. Leaving the setter
+            // uncalled keeps stepper_z_endstop_microns_ at its "not set" 0.
+            //
+            // The guard is load-bearing: a bare .get<double>() on that null
+            // throws type_error.302 (an abort on targets built without
+            // exceptions) and skips the temperature-limit loop below —
+            // max/min temp and min_extrude_temp would silently keep their
+            // compiled defaults.
+            if (settings.contains("stepper_z") && settings["stepper_z"].is_object() &&
+                settings["stepper_z"].contains("position_endstop")) {
+                const json& endstop_val = settings["stepper_z"]["position_endstop"];
+                if (endstop_val.is_number()) {
+                    double endstop = endstop_val.get<double>();
+                    int microns = static_cast<int>(endstop * 1000.0);
+                    state_.capabilities_state().set_stepper_z_endstop_microns(microns);
+                    spdlog::debug(
+                        "[Moonraker API] stepper_z position_endstop: {:.3f}mm ({} microns)",
+                        endstop, microns);
+                } else {
+                    spdlog::debug("[Moonraker API] stepper_z position_endstop is not a "
+                                  "number (virtual endstop / probe) — leaving unset");
+                }
+            }
+
+            // Extract temperature limits from heater configurations
+            for (const auto& [key, value] : settings.items()) {
+                // temperature_fan targets are settable too (the thermistor tile).
+                if ((key.find("extruder") != std::string::npos ||
+                     key.find("heater_") != std::string::npos ||
+                     key.rfind("temperature_fan ", 0) == 0) &&
+                    value.is_object()) {
+                    if (value.contains("max_temp") && value["max_temp"].is_number()) {
+                        double max_temp = value["max_temp"].get<double>();
+                        // Keyed on the section header, because that IS the
+                        // name a send arrives with:
+                        // TemperatureController::resolved_name() hands
+                        // set_temperature() "extruder", "heater_bed", or the
+                        // whole "heater_generic chamber_heater". Adopted as-is
+                        // rather than widened - a 290C hotend has to be able to
+                        // LOWER its bound, which is exactly what the global
+                        // below cannot do (#1355). set_max_temp_for() folds the
+                        // case so the key matches the lookup whatever Klipper
+                        // reported; a raw insert here does not.
+                        safety_limits_.set_max_temp_for(key, max_temp);
+                        updated = true;
+
+                        // The global stays a permissive sanity net for callers
+                        // that have no heater name to hand, so it only widens.
+                        if (max_temp > safety_limits_.max_temperature_celsius) {
+                            safety_limits_.max_temperature_celsius = max_temp;
+                        }
+                    }
+                    if (value.contains("min_temp") && value["min_temp"].is_number()) {
+                        double min_temp = value["min_temp"].get<double>();
+                        // Use the lowest heater min_temp as temperature limit
+                        if (min_temp < safety_limits_.min_temperature_celsius) {
+                            safety_limits_.min_temperature_celsius = min_temp;
+                            updated = true;
+                        }
+                    }
+                    // Every extruder section carries its own min_extrude_temp;
+                    // the primary one's is also the global floor for callers
+                    // with no extruder name to hand.
+                    if (helix::is_extruder_name(key) && value.contains("min_extrude_temp") &&
+                        value["min_extrude_temp"].is_number()) {
+                        double min_extrude = value["min_extrude_temp"].get<double>();
+                        safety_limits_.set_min_extrude_temp_for(key, min_extrude);
+                        if (key == "extruder") {
+                            safety_limits_.min_extrude_temp_celsius = min_extrude;
+                        }
+                        updated = true;
+                        spdlog::debug("[Moonraker API] {} min_extrude_temp from config: {}°C", key,
+                                      min_extrude);
+                    }
+                }
+            }
+
+            // Klipper's min_temp/min_extrude_temp are sensor sanity floors and may
+            // legitimately be negative (an open thermistor on an unmounted tool).
+            // SafetyLimits floors mean something else entirely - the lowest
+            // *sendable* target and the heat-to instruction the panel renders - so
+            // the adopted values are clamped here, at the one point where external
+            // config crosses into our domain (prestonbrown/helixscreen#1353).
+            // Ahead of the log below, so the log reports what we actually adopted.
+            safety_limits_.clamp_temperature_floors();
+
+            if (updated) {
+                spdlog::debug("[Moonraker API] Updated safety limits from printer configuration:");
+                spdlog::debug("[Moonraker API]   Temperature: {} to {}°C",
+                              safety_limits_.min_temperature_celsius,
+                              safety_limits_.max_temperature_celsius);
+                spdlog::debug("[Moonraker API]   Position: {} to {}mm",
+                              safety_limits_.min_absolute_position_mm,
+                              safety_limits_.max_absolute_position_mm);
+                spdlog::debug("[Moonraker API]   Feedrate: {} to {} mm/min",
+                              safety_limits_.min_feedrate_mm_min,
+                              safety_limits_.max_feedrate_mm_min);
+            } else {
+                spdlog::debug("[Moonraker API] No safety limit overrides found in printer "
+                              "config, using defaults");
+            }
+
+            if (on_success) {
+                on_success();
             }
         },
         on_error);

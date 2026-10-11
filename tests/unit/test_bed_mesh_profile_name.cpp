@@ -62,6 +62,23 @@ TEST_CASE("An unused name is new and needs no confirmation", "[bed_mesh][profile
     REQUIRE(check.name == "test");
 }
 
+TEST_CASE("A name holding a character Klipper cuts a command at is unusable",
+          "[bed_mesh][profile_name]") {
+    // Klipper ends a gcode line at ';' before any quoting is read, and a line
+    // break starts another command, so neither can reach it inside a name.
+    for (const char* raw : {"cold;hot", ";", "a\nb", "a\rb"}) {
+        const auto check = check_profile_name(raw, kStored);
+        INFO("raw = '" << raw << "'");
+        CHECK(check.verdict == ProfileNameVerdict::Unusable);
+    }
+    // Quoting carries these, so they are ordinary names.
+    for (const char* raw : {"PEI Sheet", "a#b", "say \"hi\"", "it's"}) {
+        const auto check = check_profile_name(raw, kStored);
+        INFO("raw = '" << raw << "'");
+        CHECK(check.verdict != ProfileNameVerdict::Unusable);
+    }
+}
+
 TEST_CASE("A stored name is an overwrite", "[bed_mesh][profile_name][1360]") {
     const auto check = check_profile_name("default", kStored);
     REQUIRE(check.verdict == ProfileNameVerdict::Overwrite);

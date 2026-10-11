@@ -8,10 +8,10 @@
 #include "data_root_resolver.h"
 #include "json_utils.h"
 #include "lvgl/src/others/translation/lv_translation.h"
+#include "text_io.h"
 
 #include <algorithm>
 #include <cctype>
-#include <fstream>
 #include <sys/stat.h>
 
 using namespace helix;
@@ -59,47 +59,43 @@ bool TipsManager::init(const std::string& tips_path) {
         return false;
     }
 
-    try {
-        spdlog::debug("[TipsManager] Loading tips from {}", tips_path);
-        std::ifstream file(tips_path);
-        data = json::parse(file);
+    spdlog::debug("[TipsManager] Loading tips from {}", tips_path);
+    data = json::parse(helix::text_io::read_file(tips_path).value_or(""), nullptr, false);
 
-        // Validate required fields
-        if (!data.contains("categories") || !data["categories"].is_object()) {
-            NOTIFY_WARNING(lv_tr("Tips database format error"));
-            LOG_ERROR_INTERNAL(
-                "[TipsManager] Invalid tips file: missing or invalid 'categories' field");
-            return false;
-        }
-
-        // Build cache for fast access
-        // Cache the two things the DOM was still being kept alive for, then
-        // release it. `data` and tips_cache held the same 105 KB twice for the
-        // whole session; only get_version() and get_all_categories() still read
-        // the DOM, and both are satisfied by these.
-        version_ = helix::json_util::safe_string(data, "version", "unknown");
-        categories_.clear();
-        for (auto& [category_key, _] : data["categories"].items()) {
-            categories_.push_back(category_key);
-        }
-
-        build_tips_cache();
+    if (data.is_discarded()) {
         data = json();
-
-        // Reads the cached members, not `data` — it has just been released.
-        spdlog::trace("[TipsManager] Loaded {} tips from {} categories (version: {})",
-                      tips_cache.size(), categories_.size(), version_);
-
-        return true;
-    } catch (const json::parse_error& e) {
         NOTIFY_WARNING(lv_tr("Could not parse tips database"));
-        LOG_ERROR_INTERNAL("[TipsManager] JSON parse error: {}", e.what());
-        return false;
-    } catch (const std::exception& e) {
-        NOTIFY_WARNING(lv_tr("Error loading printing tips"));
-        LOG_ERROR_INTERNAL("[TipsManager] Error loading tips: {}", e.what());
+        LOG_ERROR_INTERNAL("[TipsManager] JSON parse error in {}: not valid JSON", tips_path);
         return false;
     }
+
+    // Validate required fields
+    if (!data.contains("categories") || !data["categories"].is_object()) {
+        NOTIFY_WARNING(lv_tr("Tips database format error"));
+        LOG_ERROR_INTERNAL(
+            "[TipsManager] Invalid tips file: missing or invalid 'categories' field");
+        return false;
+    }
+
+    // Build cache for fast access
+    // Cache the two things the DOM was still being kept alive for, then
+    // release it. `data` and tips_cache held the same 105 KB twice for the
+    // whole session; only get_version() and get_all_categories() still read
+    // the DOM, and both are satisfied by these.
+    version_ = helix::json_util::safe_string(data, "version", "unknown");
+    categories_.clear();
+    for (auto& [category_key, _] : data["categories"].items()) {
+        categories_.push_back(category_key);
+    }
+
+    build_tips_cache();
+    data = json();
+
+    // Reads the cached members, not `data` — it has just been released.
+    spdlog::trace("[TipsManager] Loaded {} tips from {} categories (version: {})",
+                  tips_cache.size(), categories_.size(), version_);
+
+    return true;
 }
 
 void TipsManager::build_tips_cache() {
@@ -269,19 +265,16 @@ std::vector<PrintingTip> TipsManager::search_by_keyword(const std::string& keywo
 
     // Convert keyword to lowercase for case-insensitive search
     std::string keyword_lower = keyword;
-    std::transform(keyword_lower.begin(), keyword_lower.end(), keyword_lower.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
+    keyword_lower = helix::text_io::to_lower(keyword_lower);
 
     for (const auto& tip : tips_cache) {
         // Search in title
         std::string title_lower = tip.title;
-        std::transform(title_lower.begin(), title_lower.end(), title_lower.begin(),
-                       [](unsigned char c) { return std::tolower(c); });
+        title_lower = helix::text_io::to_lower(title_lower);
 
         // Search in content
         std::string content_lower = tip.content;
-        std::transform(content_lower.begin(), content_lower.end(), content_lower.begin(),
-                       [](unsigned char c) { return std::tolower(c); });
+        content_lower = helix::text_io::to_lower(content_lower);
 
         // Check title, content, and tags
         bool found = false;
@@ -293,8 +286,7 @@ std::vector<PrintingTip> TipsManager::search_by_keyword(const std::string& keywo
             // Search in tags
             for (const auto& tag : tip.tags) {
                 std::string tag_lower = tag;
-                std::transform(tag_lower.begin(), tag_lower.end(), tag_lower.begin(),
-                               [](unsigned char c) { return std::tolower(c); });
+                tag_lower = helix::text_io::to_lower(tag_lower);
                 if (tag_lower.find(keyword_lower) != std::string::npos) {
                     found = true;
                     break;
@@ -330,14 +322,12 @@ std::vector<PrintingTip> TipsManager::get_tips_by_tag(const std::string& tag) {
 
     // Convert tag to lowercase for case-insensitive comparison
     std::string tag_lower = tag;
-    std::transform(tag_lower.begin(), tag_lower.end(), tag_lower.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
+    tag_lower = helix::text_io::to_lower(tag_lower);
 
     for (const auto& tip : tips_cache) {
         for (const auto& tip_tag : tip.tags) {
             std::string tip_tag_lower = tip_tag;
-            std::transform(tip_tag_lower.begin(), tip_tag_lower.end(), tip_tag_lower.begin(),
-                           [](unsigned char c) { return std::tolower(c); });
+            tip_tag_lower = helix::text_io::to_lower(tip_tag_lower);
 
             if (tip_tag_lower == tag_lower) {
                 results.push_back(tip);
@@ -355,14 +345,11 @@ std::vector<PrintingTip> TipsManager::get_tips_by_difficulty(const std::string& 
 
     // Convert to lowercase for case-insensitive comparison
     std::string difficulty_lower = difficulty;
-    std::transform(difficulty_lower.begin(), difficulty_lower.end(), difficulty_lower.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
+    difficulty_lower = helix::text_io::to_lower(difficulty_lower);
 
     for (const auto& tip : tips_cache) {
         std::string tip_difficulty_lower = tip.difficulty;
-        std::transform(tip_difficulty_lower.begin(), tip_difficulty_lower.end(),
-                       tip_difficulty_lower.begin(),
-                       [](unsigned char c) { return std::tolower(c); });
+        tip_difficulty_lower = helix::text_io::to_lower(tip_difficulty_lower);
 
         if (tip_difficulty_lower == difficulty_lower) {
             results.push_back(tip);
@@ -378,13 +365,11 @@ std::vector<PrintingTip> TipsManager::get_tips_by_priority(const std::string& pr
 
     // Convert to lowercase for case-insensitive comparison
     std::string priority_lower = priority;
-    std::transform(priority_lower.begin(), priority_lower.end(), priority_lower.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
+    priority_lower = helix::text_io::to_lower(priority_lower);
 
     for (const auto& tip : tips_cache) {
         std::string tip_priority_lower = tip.priority;
-        std::transform(tip_priority_lower.begin(), tip_priority_lower.end(),
-                       tip_priority_lower.begin(), [](unsigned char c) { return std::tolower(c); });
+        tip_priority_lower = helix::text_io::to_lower(tip_priority_lower);
 
         if (tip_priority_lower == priority_lower) {
             results.push_back(tip);

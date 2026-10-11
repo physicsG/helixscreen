@@ -1,8 +1,8 @@
 # Print Start Phase Detection
 
-HelixScreen detects when your print's preparation phase (heating, homing, leveling, etc.) is complete and actual printing begins. This document explains how the detection works and how to optimize it for your setup.
+HelixScreen detects when your print's preparation phase (heating, homing, leveling, etc.) is complete and actual printing begins. This document is the user/modder side of that: making your setup legible to HelixScreen with macros and slicer options, controlling pre-print operations per print, and troubleshooting a preparation phase that misbehaves.
 
-**Developer guide**: For adding profiles for new printers, see [PRINT_START_PROFILES.md](PRINT_START_PROFILES.md).
+**Developer guide**: how detection works internally - the observer pipeline and its five signal sources, the evidence kinds, the JSON profile schema, and how to author a profile for a new printer - is [PRINT_START_PROFILES.md](PRINT_START_PROFILES.md); the ETA engine is [PREPRINT_PREDICTION.md](PREPRINT_PREDICTION.md).
 
 ## How It Works
 
@@ -43,7 +43,7 @@ Detection uses a multi-signal system with these fallbacks for completion:
 | 2 | **G-code Console** | Parses console output for `HELIX:READY`, `LAYER: 1`, `;LAYER:1`, `First layer`, or `SET_PRINT_STATS_INFO CURRENT_LAYER=` |
 | 3 | **Layer Count** | Monitors `print_stats.info.current_layer` becoming ≥1 |
 | 4 | **Progress + Temps** | Print progress ≥2% AND temps within 5°C of target |
-| 5 | **Timeout** | Adaptive; see "Completion Fallbacks". Never a flat 45s. |
+| 5 | **Timeout** | Adaptive; see Troubleshooting below. Never a flat 45s. |
 
 ## Making Your Setup HelixScreen-Friendly
 
@@ -54,10 +54,10 @@ The HelixScreen macro file provides:
 - **Phase tracking**: Optional `HELIX_PHASE_*` macros for detailed progress display
 - **Pre-print helpers**: `HELIX_BED_LEVEL_IF_NEEDED`, `HELIX_CLEAN_NOZZLE`, `HELIX_START_PRINT`
 
-**Installation via Settings UI:**
+**Installation via the UI:**
 
-1. Go to Settings → Advanced → HelixScreen Macros
-2. Click "Install Macros"
+1. Open the **Advanced** panel from the navbar and find the **Helper Macros** section
+2. Tap **Install Helper Macros** (the row reads **Update Helper Macros** when an update is available, and **Helper Macros - Installed** when current)
 3. Restart Klipper when prompted
 
 **Manual Installation:**
@@ -90,7 +90,7 @@ gcode:
 
 ### Option 1b: With Phase Tracking
 
-For detailed progress display during preparation, add phase signals:
+Phase display works out of the box: with no instrumentation at all, HelixScreen infers the current phase from the console stream, probe lines, bed-mesh status, and toolhead position (how that inference works is developer territory - see [PRINT_START_PROFILES.md](PRINT_START_PROFILES.md)). Adding explicit phase signals is a manual opt-in for exact, firmware-announced phases on a setup where the heuristics pick wrong:
 
 ```gcode
 [gcode_macro PRINT_START]
@@ -173,6 +173,10 @@ When `helix_macros.cfg` is installed, these macros are available:
 | `HELIX_CLEAN_NOZZLE` | Nozzle cleaning sequence (configure brush position) |
 | `HELIX_START_PRINT` | Complete start print sequence with all options |
 
+### Uninstalling
+
+The uninstall path (`moonraker-plugin/install.sh`) also runs `strip_phase_tracking.py` over the Klipper config tree. Each marker block is a pair of `HELIX_TRACKING` comment lines wrapped around a single `HELIX_PHASE_*`/`HELIX_READY` call; the script removes those blocks from inside `[gcode_macro ...]` bodies, writes a `.bak.<timestamp>` backup of every file it edits, and never touches a file whose markers look anomalous (unmatched, nested, or not exactly the three lines a marker block consists of). It does not restart Klipper - the edit takes effect at the next restart. Exit status: `0` all clean or stripped, `2` nothing failed but a file needs a human to look, `1` an edit failed.
+
 ## Controllable Pre-Print Operations
 
 HelixScreen can analyze your `PRINT_START` macro to detect which operations can be toggled from the print details panel. This allows you to skip bed mesh, QGL, etc. on a per-print basis.
@@ -195,6 +199,49 @@ An option with `emit_when_disabled: false` has no "off" gcode at all: unchecking
 **K1C specifics.** The K1 firmware's `START_PRINT` runs its full preparation chain whenever its `prepare` variable is 0 (homing, nozzle wipe, accurate Z homing, then `CX_PRINT_LEVELING_CALIBRATE`). That command is a 4-corner bed check - it re-meshes the whole bed only when ≥2 corners drift beyond tolerance, and the whole decision is internal: none of it reaches the gcode console. The shipped toggle front-runs exactly what Creality's own app sends - heat, home, nozzle wipe, accurate home, `BED_MESH_CALIBRATE`, then `PRINT_PREPARED` (which makes the file's `START_PRINT` skip its now-redundant chain) - so one preparation pass runs, at print temperature, with a guaranteed mesh.
 
 Only the K1C entries use this. The K1, K1 Max, and K1 SE entries still map `bed_mesh` to the legacy `PREPARE` macro-param, deliberately: their stock firmware ships a different `START_PRINT` (the older K1 macro branches on `custom_macro.leveling_calibration` instead of `prepare`), so the same front-run sequence is unverified there. Convert them only after capturing a real print start from each model.
+
+### Skipping steps PRINT_START always runs (helix_skips.cfg)
+
+A `PRINT_START` that runs `BED_MESH_CALIBRATE`, `QUAD_GANTRY_LEVEL` or `Z_TILT_ADJUST`
+with no parameter to turn it off can still be skipped for one print, without editing
+it. Installing or updating the helper macros also writes `helix_skips.cfg`
+(`src/printer/preprint_skip_wrappers.cpp#generate`) and puts its include on the first
+line of `printer.cfg`:
+
+- `[gcode_macro _HELIX_PREP]` holds one flag per step, `run_bed_mesh`, `run_qgl` and
+  `run_z_tilt`, each 1 (run) unless a skip is set. Calling it resets them all.
+- Each wrapped command is a `gcode_macro` that renames the built-in
+  (`rename_existing: _HELIX_BASE_<COMMAND>`) and runs it with `{rawparams}` unless its
+  flag is 0. A skip is one-shot: the wrapper sets the flag back to 1 as it skips, and
+  says so on the console.
+- `BED_MESH_CLEAR` is wrapped with the mesh calibration and does nothing while a mesh
+  skip is pending: `PRINT_START` commonly clears right before it calibrates, which
+  would throw away the mesh the skip keeps. While a mesh skip is pending, a
+  `BED_MESH_CLEAR` elsewhere (a `PRINT_END`) is skipped too; the pending skip is
+  reset as soon as no job holds the machine.
+
+The print-detail panel offers a step's toggle only while skipping it is safe: a mesh
+is loaded (`bed_mesh.probed_matrix`), or the gantry or bed has been leveled since the
+last motors-off (`quad_gantry_level.applied`, `z_tilt.applied`, Kalico's
+`z_tilt_ng.applied`). Turning one off sends
+`SET_GCODE_VARIABLE MACRO=_HELIX_PREP VARIABLE=run_<step> VALUE=0` in the pre-start
+block, which always opens with `_HELIX_PREP`. No HelixPrint plugin is involved. A
+database option or a `PRINT_START` skip parameter for the same step wins over the
+toggle, and a skip still set while no job holds the machine (the job ended before
+reaching the step, or HelixScreen reconnects to find one) is reset with `_HELIX_PREP`,
+so a later print started from anywhere runs every step.
+
+What keeps it safe to install:
+
+| Case | What happens |
+|------|--------------|
+| A user `[gcode_macro BED_MESH_CALIBRATE]` (KAMP, Beacon helpers, vendor macros) already exists | That step is not wrapped (`wrappable()` reads `configfile.settings`) |
+| The user adds one later | Klipper merges same-named macro sections, later file winning per option. `helix_skips.cfg` loads first, so the user's macro wins, `ours_intact()` reads false, and the toggle hides. The leftover section in `helix_skips.cfg` is inert, and the next regeneration leaves the step out |
+| Klipper reports an error after the restart that loads the file | The Advanced panel removes the file and its include and restarts once (`skip_wrappers::LoadWatch`) |
+| Beacon, Cartographer or Creality prtouch replace the command in Python | They do it at config load; `rename_existing` runs later at connect, so the wrapper layers over them |
+| A wrappable step is not wrapped (the file or its include is missing, or the printer gained `[z_tilt]`) | The helper macros read as Outdated, and Update stages the file |
+| The user later removes `[bed_mesh]`, `[quad_gantry_level]` or `[z_tilt]` while its wrapper is loaded | Klipper refuses to start: `Existing command '...' not found in gcode_macro rename`. Only the restart HelixScreen itself requests is watched, so this one is not rolled back. Remove the `[include helix_skips.cfg]` line, or reinstall the helper macros after restarting |
+| A Klipper error after HelixScreen's restart has another cause (a CAN board that did not come up) | The rollback still removes the file, since it cannot tell the causes apart; Update stages it again once Klipper is healthy |
 
 ### Parameter Semantics
 
@@ -285,11 +332,14 @@ If the home panel stays on "Preparing Print" indefinitely:
 
 1. **Check console output**: Run your print and look at the Klipper console. Do you see any layer markers?
 2. **Verify macro variables**: Query `gcode_macro _HELIX_STATE` via Moonraker to see if `print_started` is being set
-3. **Check whether the printer is still talking.** Every timeout except the 1800s
-   absolute ceiling also requires the printer to have gone quiet for 90 seconds. A
-   pre-print that is still narrating itself is not considered stuck, however long it
-   runs - that is deliberate, and it is why a slow bed mesh no longer gets cut off
-   mid-sequence.
+3. **Check whether the printer is still talking.** The deadline timeouts wait for 90
+   seconds without pre-print activity: a matched line, a probe line, a status-signal
+   rule firing, or a bed or nozzle climbing past its highest reading under its current
+   target. The ceiling (1800s, or 2.5x the predicted total when that is longer) ignores
+   temperatures, climbing heaters and status-signal rules, but still waits for 90
+   seconds without a matched line or probe line, so a slow bed mesh or a narrated
+   chamber soak is not cut off mid-sequence. Only the backstop, at twice the ceiling,
+   ignores everything: a printer that keeps talking past it still leaves Preparing.
 4. **Check for a host-side pre-start block.** If the printer is commit-armed and a
    forced bed mesh or setup macro is running in front of the job, `print_stats` will
    read `complete` or `standby` for the whole block. That is expected, not a hang -
@@ -304,82 +354,10 @@ If detection falls all the way through to a timeout:
 3. **Verify macro object subscriptions**: HelixScreen subscribes to `gcode_macro _HELIX_STATE`, `gcode_macro _START_PRINT`, and `gcode_macro START_PRINT`
 4. **ForgeX users**: Detection should be instant via the Forge-X profile (`// State:` signals) and `START_PRINT.preparation_done` macro variable
 
-## Technical Details
-
-### Printer-Specific Profiles
-
-HelixScreen uses a modular profile system to match different printer firmware. Known printers (like the FlashForge AD5M with Forge-X firmware) have custom profiles that map firmware-specific output to preparation phases with accurate progress tracking. Unknown printers use generic regex patterns that work with standard G-code commands.
-
-Profiles are JSON files in `assets/config/print_start_profiles/`. Each profile can define:
-- **Signal formats**: Exact prefix + value matching for structured firmware output
-- **Response patterns**: Regex patterns for G-code console parsing
-- **Progress mode**: `sequential` (known firmware) or `weighted` (generic heuristics)
-- **`cfs_signals`**: Opt in to Creality's tag-stream matchers (purge `percent` lines, `[box]` CFS load events). The vocabulary is vendor-specific; without the flag, lines that merely contain `percent` plus `num:` never hijack the phase into PURGING.
-- **`adaptive_meshing`**: The bed-mesh sweep is trimmed to the object, so a configured `probe_count` overstates the sweep (see PRINT_START_PROFILES.md).
-- **`position_signals`**: Opt in to toolhead-position inference for the silent window (below).
-
-Profile `message` strings are English translation tags and resolve through the loaded language pack like the built-in labels.
-
-### Silent-phase signals
-
-Some firmwares run whole preparation steps without echoing anything to the gcode console (Creality K1: accurate Z homing, the bed-mesh corner check, and the mesh sweep are ~3 minutes of silence). Three non-console signals fill the gap:
-
-- **Bed-mesh status flap** - klippy reports the loaded mesh, then clears it, when probing begins. A mesh that disappears while the display shows "Cleaning Nozzle" moves it to "Bed Meshing..." (the probe denominator is fetched at that point).
-- **"probe at X,Y is z=Z" lines** - counted as mesh points once enough distinct points confirm a sweep is underway; they never fall through to the pattern matcher, so a profile's BED_MESH pattern cannot re-announce the phase and reset the counters mid-sweep.
-- **Toolhead position inference** (`position_signals`, K1 family today) - Klipper keeps pushing `toolhead.position` through the silence. The collector classifies the stream geometrically against the bed-mesh probe area (`PrintStartPositionClassifier`, `tests/unit/test_print_start_position_classifier.cpp` replays real captures): repeated Z descents near the mesh centre read as **"Probing Z..."**, touches at ≥3 distinct mesh corners as **"Checking Bed Mesh..."**, and a monotonic row march as the mesh sweep (BED_MESH entry, same edge as the flap). These refine the message without touching the phase or its progress weight - real console markers always outrank them.
-
-For developer details on creating profiles for new printers, see [PRINT_START_PROFILES.md](PRINT_START_PROFILES.md); for the whole observer system - sources, threading, tests - see [PRINT_START_OBSERVERS.md](PRINT_START_OBSERVERS.md).
-
-### Phase Detection
-
-During PRINT_START, HelixScreen detects these preparation phases:
-
-| Phase | Description |
-|-------|-------------|
-| Initializing | PRINT_START macro detected |
-| Homing | G28 / Home All Axes |
-| Heating Bed | M190 / M140 |
-| Heating Nozzle | M109 / M104 |
-| QGL | Quad Gantry Level |
-| Z Tilt | Z Tilt Adjust |
-| Bed Mesh | BED_MESH_CALIBRATE / mesh load |
-| Cleaning | Nozzle wipe / clean |
-| Purging | Purge line / priming |
-| Complete | Transition to printing |
-
-### Detection Priority
-
-G-code responses are checked in this order (first match wins):
-
-| Priority | Signal | How It Works |
-|----------|--------|--------------|
-| 1 | **HELIX:PHASE signals** | Universal `HELIX:PHASE:HOMING` etc. from HelixScreen macros |
-| 2 | **Profile signal formats** | Exact prefix matching (e.g., Forge-X `// State: HOMING...`) |
-| 3 | **PRINT_START marker** | Detects `PRINT_START`/`START_PRINT` once per session |
-| 4 | **Completion marker** | `SET_PRINT_STATS_INFO CURRENT_LAYER=`, `LAYER: 1`, `HELIX:READY` |
-| 5 | **Profile regex patterns** | G-code command matching (G28, M190, etc.) |
-
-### Completion Fallbacks
-
-For printers that don't emit G-code layer markers, HelixScreen has additional fallback signals:
-
-| Fallback | Condition |
-|----------|-----------|
-| **Macro Variables** | `_HELIX_STATE.print_started`, `_START_PRINT.print_started`, or `START_PRINT.preparation_done` becomes True |
-| **Layer Count** | `print_stats.info.current_layer` becomes ≥ 1 |
-| **Progress + Temps** | Print progress ≥ 2% AND temperatures within 5°C of target |
-| **Timeout (adaptive)** | Elapsed > 1.5x the predicted total, **and** temps ≥ 90% of target, **and** the printer has said nothing for 90s |
-| **Timeout (no history)** | Elapsed > 300s, with the same temp and quiet requirements |
-| **Absolute ceiling** | Elapsed > 1800s. The only fallback that ignores the quiet requirement. |
-
-### Files
+## Files
 
 | File | Purpose |
 |------|---------|
-| `src/print/print_start_collector.cpp` | Detection engine and fallback implementation |
-| `src/print/print_start_profile.cpp` | Profile loading and signal/pattern matching |
-| `assets/config/print_start_profiles/*.json` | Printer-specific profile definitions |
-| `assets/config/helix_macros.cfg` | Klipper macros for detection and phase tracking |
-| `src/printer/macro_manager.cpp` | Macro installation management |
-| `src/api/moonraker_client.cpp` | Object subscription setup |
-| `docs/devel/PRINT_START_PROFILES.md` | Developer guide for creating new profiles |
+| `assets/config/helix_macros.cfg` | The Klipper macros this doc describes: install it or copy the calls into your own macros |
+| `moonraker-plugin/install.sh` | Installs and strips the phase-tracking marker blocks (the uninstall path above) |
+| `src/printer/macro_manager.cpp` | Macro installation management behind the UI button |

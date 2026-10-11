@@ -11,6 +11,8 @@ using helix::printer::EffectiveFilament;
 using helix::printer::FilamentCatalog;
 
 namespace {
+// TEST_MIRROR_OK: contains() is a one-line assertion utility (vector membership), not logic
+// under test
 bool contains(const std::vector<std::string>& v, const std::string& s) {
     return std::find(v.begin(), v.end(), s) != v.end();
 }

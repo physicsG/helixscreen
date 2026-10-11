@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "sensor_enum_names.h"
+
 #include <string>
 
 namespace helix::sensors {
@@ -21,6 +23,7 @@ enum class TemperatureSensorRole {
 enum class TemperatureSensorType {
     TEMPERATURE_SENSOR = 1, ///< temperature_sensor (read-only)
     TEMPERATURE_FAN = 2,    ///< temperature_fan (has target and speed)
+    HEATER_GENERIC = 3,     ///< heater_generic (has target and power)
 };
 
 /// @brief Configuration for a temperature sensor
@@ -44,93 +47,50 @@ struct TemperatureSensorConfig {
 /// @brief Runtime state for a temperature sensor
 struct TemperatureSensorState {
     float temperature = 0.0f; ///< Temperature in degrees C
-    float target = 0.0f;      ///< Target temp (temperature_fan only)
+    float target = 0.0f;      ///< Target temp (temperature_fan / heater_generic)
     float speed = 0.0f;       ///< Fan speed 0-1 (temperature_fan only)
     bool available = false;   ///< Sensor available in current config
 };
 
-/// @brief Convert role enum to config string
-/// @param role The role to convert
-/// @return Config-safe string for JSON storage
+inline constexpr EnumName<TemperatureSensorRole> kTemperatureSensorRoles[] = {
+    {TemperatureSensorRole::NONE, "none", "Unassigned"},
+    {TemperatureSensorRole::CHAMBER, "chamber", "Chamber"},
+    {TemperatureSensorRole::MCU, "mcu", "MCU"},
+    {TemperatureSensorRole::HOST, "host", "Host"},
+    {TemperatureSensorRole::AUXILIARY, "auxiliary", "Auxiliary"},
+    {TemperatureSensorRole::STEPPER_DRIVER, "stepper_driver", "Stepper Driver"},
+};
+
+inline constexpr EnumName<TemperatureSensorType> kTemperatureSensorTypes[] = {
+    {TemperatureSensorType::TEMPERATURE_SENSOR, "temperature_sensor", "Temperature Sensor"},
+    {TemperatureSensorType::TEMPERATURE_FAN, "temperature_fan", "Temperature Fan"},
+    {TemperatureSensorType::HEATER_GENERIC, "heater_generic", "Generic Heater"},
+};
+
+/// Whether a Klipper temperature object carries a settable target.
+[[nodiscard]] inline bool klipper_object_has_target(const std::string& klipper_name) {
+    return klipper_name.rfind("heater_generic ", 0) == 0 ||
+           klipper_name.rfind("temperature_fan ", 0) == 0;
+}
+
 [[nodiscard]] inline std::string temp_role_to_string(TemperatureSensorRole role) {
-    switch (role) {
-    case TemperatureSensorRole::NONE:
-        return "none";
-    case TemperatureSensorRole::CHAMBER:
-        return "chamber";
-    case TemperatureSensorRole::MCU:
-        return "mcu";
-    case TemperatureSensorRole::HOST:
-        return "host";
-    case TemperatureSensorRole::AUXILIARY:
-        return "auxiliary";
-    case TemperatureSensorRole::STEPPER_DRIVER:
-        return "stepper_driver";
-    default:
-        return "none";
-    }
+    return enum_id(kTemperatureSensorRoles, role);
 }
 
-/// @brief Parse role string to enum
-/// @param str The config string to parse
-/// @return Parsed role, or NONE if unrecognized
 [[nodiscard]] inline TemperatureSensorRole temp_role_from_string(const std::string& str) {
-    if (str == "chamber")
-        return TemperatureSensorRole::CHAMBER;
-    if (str == "mcu")
-        return TemperatureSensorRole::MCU;
-    if (str == "host")
-        return TemperatureSensorRole::HOST;
-    if (str == "auxiliary")
-        return TemperatureSensorRole::AUXILIARY;
-    if (str == "stepper_driver")
-        return TemperatureSensorRole::STEPPER_DRIVER;
-    return TemperatureSensorRole::NONE;
+    return enum_from_id(kTemperatureSensorRoles, str);
 }
 
-/// @brief Convert role to display string
-/// @param role The role to convert
-/// @return Human-readable role name for UI display
 [[nodiscard]] inline std::string temp_role_to_display_string(TemperatureSensorRole role) {
-    switch (role) {
-    case TemperatureSensorRole::NONE:
-        return "Unassigned";
-    case TemperatureSensorRole::CHAMBER:
-        return "Chamber";
-    case TemperatureSensorRole::MCU:
-        return "MCU";
-    case TemperatureSensorRole::HOST:
-        return "Host";
-    case TemperatureSensorRole::AUXILIARY:
-        return "Auxiliary";
-    case TemperatureSensorRole::STEPPER_DRIVER:
-        return "Stepper Driver";
-    default:
-        return "Unassigned";
-    }
+    return enum_display(kTemperatureSensorRoles, role);
 }
 
-/// @brief Convert type enum to config string
-/// @param type The type to convert
-/// @return Config-safe string
 [[nodiscard]] inline std::string temp_type_to_string(TemperatureSensorType type) {
-    switch (type) {
-    case TemperatureSensorType::TEMPERATURE_SENSOR:
-        return "temperature_sensor";
-    case TemperatureSensorType::TEMPERATURE_FAN:
-        return "temperature_fan";
-    default:
-        return "temperature_sensor";
-    }
+    return enum_id(kTemperatureSensorTypes, type);
 }
 
-/// @brief Parse type string to enum
-/// @param str The config string to parse
-/// @return Parsed type, defaults to TEMPERATURE_SENSOR if unrecognized
 [[nodiscard]] inline TemperatureSensorType temp_type_from_string(const std::string& str) {
-    if (str == "temperature_fan")
-        return TemperatureSensorType::TEMPERATURE_FAN;
-    return TemperatureSensorType::TEMPERATURE_SENSOR;
+    return enum_from_id(kTemperatureSensorTypes, str);
 }
 
 } // namespace helix::sensors

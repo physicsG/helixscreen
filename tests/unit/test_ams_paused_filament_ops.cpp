@@ -49,12 +49,17 @@
 #include "moonraker_api_mock.h"
 #include "moonraker_client_mock.h"
 #include "printer_state.h"
+#include "test_helpers/afc_test_access.h"
 
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "../catch_amalgamated.hpp"
+
+using helix::AmsError;
+using helix::AmsErrorHelper;
+using helix::AmsResult;
 
 namespace {
 
@@ -93,7 +98,7 @@ struct PausedGateFixture : public LVGLTestFixture {
 
     /// A host-side pre-print block: the wire still reads standby.
     void set_preprint_phase(helix::PrintStartPhase phase) {
-        state.set_print_start_state(phase, "", 0);
+        state.print_state().set_print_start_state(phase, "", 0);
         helix::ui::UpdateQueue::instance().drain();
     }
 
@@ -119,17 +124,17 @@ TEST_CASE_METHOD(PausedGateFixture,
     // `_IFS_REMOVE_CURRENT_PRUTOK` / `INSERT_PRUTOK_IFS`. Every other backend
     // dispatches through ensure_homed_then(), which homes only when unhomed.
 #if HELIX_HAS_IFS
-    CHECK(make<AmsBackendAd5xIfs>()->filament_ops_self_home());
+    CHECK(make<helix::AmsBackendAd5xIfs>()->filament_ops_self_home());
 #endif
-    CHECK_FALSE(make<AmsBackendAfc>()->filament_ops_self_home());
-    CHECK_FALSE(make<AmsBackendHappyHare>()->filament_ops_self_home());
-    CHECK_FALSE(make<AmsBackendQidi>()->filament_ops_self_home());
+    CHECK_FALSE(make<helix::AmsBackendAfc>()->filament_ops_self_home());
+    CHECK_FALSE(make<helix::AmsBackendHappyHare>()->filament_ops_self_home());
+    CHECK_FALSE(make<helix::AmsBackendQidi>()->filament_ops_self_home());
     // Snapmaker's AUTO_FEEDING does home, but prepare_for_resume() drives
     // `AUTO_FEEDING ... PRINTING=1` on a PAUSED job and was live-verified on
     // physical U1 hardware (#991) — the firmware exposes PRINTING=1 for exactly
     // that recovery. No evidence the home is unsafe, so this stays false and the
     // runout-recovery workflow keeps working.
-    CHECK_FALSE(make<AmsBackendSnapmaker>()->filament_ops_self_home());
+    CHECK_FALSE(make<helix::AmsBackendSnapmaker>()->filament_ops_self_home());
 }
 
 // ============================================================================
@@ -142,7 +147,7 @@ TEST_CASE_METHOD(PausedGateFixture, "PRINTING refuses toolhead-motion ops on eve
 
 #if HELIX_HAS_IFS
     SECTION("self-homing backend (AD5X)") {
-        auto backend = make<AmsBackendAd5xIfs>();
+        auto backend = make<helix::AmsBackendAd5xIfs>();
         AmsError err = backend->check_preconditions(/*requires_toolhead_motion=*/true);
         REQUIRE_FALSE(err.success());
         CHECK(err.result == AmsResult::WRONG_STATE);
@@ -155,7 +160,7 @@ TEST_CASE_METHOD(PausedGateFixture, "PRINTING refuses toolhead-motion ops on eve
 #endif // HELIX_HAS_IFS
 
     SECTION("non-self-homing backend (AFC) — the reported machine") {
-        auto backend = make<AmsBackendAfc>();
+        auto backend = make<helix::AmsBackendAfc>();
         AmsError err = backend->check_preconditions(true);
         REQUIRE_FALSE(err.success());
         CHECK(err.result == AmsResult::WRONG_STATE);
@@ -166,7 +171,7 @@ TEST_CASE_METHOD(PausedGateFixture, "PRINTING refuses toolhead-motion ops on eve
     }
 
     SECTION("non-self-homing backend (Happy Hare)") {
-        auto backend = make<AmsBackendHappyHare>();
+        auto backend = make<helix::AmsBackendHappyHare>();
         CHECK_FALSE(backend->check_preconditions(true).success());
         CHECK_FALSE(backend->call_refuse_if_printing().success());
     }
@@ -174,7 +179,7 @@ TEST_CASE_METHOD(PausedGateFixture, "PRINTING refuses toolhead-motion ops on eve
     SECTION("QIDI gates via refuse_if_printing() directly, not check_preconditions()") {
         // QIDI's load/unload/change_tool call refuse_if_printing() themselves
         // because they skip the running_/busy gate. That path must refuse too.
-        auto backend = make<AmsBackendQidi>();
+        auto backend = make<helix::AmsBackendQidi>();
         AmsError err = backend->call_refuse_if_printing();
         REQUIRE_FALSE(err.success());
         CHECK(err.user_msg == "Cannot run filament operation while printing");
@@ -189,7 +194,7 @@ TEST_CASE_METHOD(PausedGateFixture, "PRINTING refuses toolhead-motion ops on eve
 TEST_CASE_METHOD(PausedGateFixture, "PAUSED still refuses on AD5X — the buried _G28 would collide",
                  "[ams][safety][paused]") {
     set_print_state(helix::PrintJobState::PAUSED);
-    auto backend = make<AmsBackendAd5xIfs>();
+    auto backend = make<helix::AmsBackendAd5xIfs>();
 
     AmsError err = backend->check_preconditions(/*requires_toolhead_motion=*/true);
     REQUIRE_FALSE(err.success());
@@ -225,18 +230,18 @@ TEST_CASE_METHOD(PausedGateFixture,
         // only when toolhead.homed_axes lacks "xyz"; a paused job is homed. AFC's
         // own is_printing() is `print_stats.state == "printing"`, so the firmware
         // permits it too — which is why Mainsail's unload succeeded.
-        auto backend = make<AmsBackendAfc>();
+        auto backend = make<helix::AmsBackendAfc>();
         CHECK(backend->check_preconditions(/*requires_toolhead_motion=*/true).success());
         CHECK(backend->call_refuse_if_printing().success());
     }
 
     SECTION("Happy Hare") {
-        auto backend = make<AmsBackendHappyHare>();
+        auto backend = make<helix::AmsBackendHappyHare>();
         CHECK(backend->check_preconditions(true).success());
     }
 
     SECTION("QIDI, via its direct refuse_if_printing() call site") {
-        auto backend = make<AmsBackendQidi>();
+        auto backend = make<helix::AmsBackendQidi>();
         CHECK(backend->call_refuse_if_printing().success());
     }
 }
@@ -257,7 +262,7 @@ TEST_CASE_METHOD(PausedGateFixture,
 TEST_CASE_METHOD(PausedGateFixture, "Snapmaker refuses toolhead-motion filament ops while PRINTING",
                  "[ams][snapmaker][safety][paused]") {
     set_print_state(helix::PrintJobState::PRINTING);
-    auto backend = make<AmsBackendSnapmaker>();
+    auto backend = make<helix::AmsBackendSnapmaker>();
 
     auto expect_refused = [&](AmsError err) {
         REQUIRE_FALSE(err.success());
@@ -306,7 +311,7 @@ TEST_CASE_METHOD(PausedGateFixture, "Snapmaker still allows filament ops while P
     // drives AUTO_FEEDING against a paused job on real hardware (#991). Refusing
     // here would break the workflow the gate exists to protect.
     set_print_state(helix::PrintJobState::PAUSED);
-    auto backend = make<AmsBackendSnapmaker>();
+    auto backend = make<helix::AmsBackendSnapmaker>();
 
     SECTION("load_filament") {
         REQUIRE(backend->load_filament(2).success());
@@ -341,7 +346,7 @@ TEST_CASE_METHOD(PausedGateFixture, "Snapmaker still allows filament ops while P
 
 TEST_CASE_METHOD(PausedGateFixture, "Snapmaker filament ops are untouched with no print running",
                  "[ams][snapmaker][safety][paused]") {
-    auto backend = make<AmsBackendSnapmaker>();
+    auto backend = make<helix::AmsBackendSnapmaker>();
 
     for (helix::PrintJobState s : {helix::PrintJobState::STANDBY, helix::PrintJobState::COMPLETE,
                                    helix::PrintJobState::CANCELLED, helix::PrintJobState::ERROR}) {
@@ -363,9 +368,9 @@ TEST_CASE_METHOD(PausedGateFixture, "Snapmaker filament ops are untouched with n
 
 TEST_CASE_METHOD(PausedGateFixture, "inactive print states allow motion ops on every backend",
                  "[ams][safety][paused]") {
-    auto afc = make<AmsBackendAfc>();
+    auto afc = make<helix::AmsBackendAfc>();
 #if HELIX_HAS_IFS
-    auto ad5x = make<AmsBackendAd5xIfs>();
+    auto ad5x = make<helix::AmsBackendAd5xIfs>();
 #endif
 
     for (helix::PrintJobState s : {helix::PrintJobState::STANDBY, helix::PrintJobState::COMPLETE,
@@ -403,10 +408,10 @@ TEST_CASE_METHOD(PausedGateFixture, "PREPARING refuses toolhead-motion ops on ev
     set_print_state(helix::PrintJobState::STANDBY);
     set_preprint_phase(helix::PrintStartPhase::BED_MESH);
 
-    auto afc = make<AmsBackendAfc>();
-    auto snap = make<AmsBackendSnapmaker>();
+    auto afc = make<helix::AmsBackendAfc>();
+    auto snap = make<helix::AmsBackendSnapmaker>();
 #if HELIX_HAS_IFS
-    auto ad5x = make<AmsBackendAd5xIfs>();
+    auto ad5x = make<helix::AmsBackendAd5xIfs>();
 #endif
 
     CHECK_FALSE(afc->check_preconditions(/*requires_toolhead_motion=*/true).success());
@@ -428,7 +433,7 @@ TEST_CASE_METHOD(PausedGateFixture,
     set_print_state(helix::PrintJobState::COMPLETE);
     set_preprint_phase(helix::PrintStartPhase::HOMING);
 
-    auto afc = make<AmsBackendAfc>();
+    auto afc = make<helix::AmsBackendAfc>();
     CHECK_FALSE(afc->check_preconditions(/*requires_toolhead_motion=*/true).success());
 }
 
@@ -439,7 +444,7 @@ TEST_CASE_METHOD(PausedGateFixture, "abandoning the pre-print block re-permits f
     set_print_state(helix::PrintJobState::STANDBY);
     set_preprint_phase(helix::PrintStartPhase::BED_MESH);
 
-    auto afc = make<AmsBackendAfc>();
+    auto afc = make<helix::AmsBackendAfc>();
     REQUIRE_FALSE(afc->check_preconditions(/*requires_toolhead_motion=*/true).success());
 
     set_preprint_phase(helix::PrintStartPhase::IDLE);
@@ -498,6 +503,8 @@ TEST_CASE("AmsErrorHelper::print_active copy matches the state it describes",
 // section fails.
 // ============================================================================
 
+namespace helix {
+
 /// Named (not anonymous-namespace) and befriended in ams_backend_afc.h, matching
 /// how every other AFC test helper reaches the private initialize_slots().
 class AfcEjectPrintGateHelper : public AmsBackendAfc {
@@ -505,7 +512,7 @@ class AfcEjectPrintGateHelper : public AmsBackendAfc {
     AfcEjectPrintGateHelper(MoonrakerAPI* api, helix::MoonrakerClient* client)
         : AmsBackendAfc(api, client) {
         running_.store(true);
-        initialize_slots({"lane1", "lane2"});
+        AfcTestAccess::initialize_slots(*this, std::vector<std::string>{"lane1", "lane2"});
     }
 
     /// Production dispatch goes through api_->execute_gcode with completion
@@ -517,10 +524,11 @@ class AfcEjectPrintGateHelper : public AmsBackendAfc {
 
     std::vector<std::string> dispatched;
 };
+} // namespace helix
 
 TEST_CASE_METHOD(PausedGateFixture, "AFC eject is refused while PRINTING, allowed while PAUSED",
                  "[ams][afc][eject][paused]") {
-    AfcEjectPrintGateHelper backend(api.get(), &mock_client);
+    helix::AfcEjectPrintGateHelper backend(api.get(), &mock_client);
 
     SECTION("PRINTING refuses, and dispatches nothing") {
         set_print_state(helix::PrintJobState::PRINTING);
@@ -551,11 +559,11 @@ TEST_CASE_METHOD(PausedGateFixture, "AFC eject is refused while PRINTING, allowe
 
 TEST_CASE_METHOD(PausedGateFixture, "AFC is the backend whose cold lane ops the firmware gates",
                  "[ams][afc][eject][paused]") {
-    CHECK(make<AmsBackendAfc>()->cold_lane_ops_refused_during_print());
-    CHECK_FALSE(make<AmsBackendHappyHare>()->cold_lane_ops_refused_during_print());
-    CHECK_FALSE(make<AmsBackendQidi>()->cold_lane_ops_refused_during_print());
+    CHECK(make<helix::AmsBackendAfc>()->cold_lane_ops_refused_during_print());
+    CHECK_FALSE(make<helix::AmsBackendHappyHare>()->cold_lane_ops_refused_during_print());
+    CHECK_FALSE(make<helix::AmsBackendQidi>()->cold_lane_ops_refused_during_print());
 #if HELIX_HAS_IFS
-    CHECK_FALSE(make<AmsBackendAd5xIfs>()->cold_lane_ops_refused_during_print());
+    CHECK_FALSE(make<helix::AmsBackendAd5xIfs>()->cold_lane_ops_refused_during_print());
 #endif
 }
 
@@ -573,7 +581,7 @@ TEST_CASE_METHOD(PausedGateFixture, "AFC is the backend whose cold lane ops the 
 
 TEST_CASE_METHOD(PausedGateFixture, "A park is refused while a print owns the toolhead",
                  "[ams][safety][paused][park]") {
-    auto backend = make<AmsBackendSnapmaker>();
+    auto backend = make<helix::AmsBackendSnapmaker>();
 
     SECTION("PRINTING refuses, and dispatches nothing") {
         set_print_state(helix::PrintJobState::PRINTING);
@@ -605,7 +613,7 @@ TEST_CASE_METHOD(PausedGateFixture, "A backend that cannot park refuses without 
                  "[ams][safety][park]") {
     // do_park_toolhead()'s default refuses, so supports_toolhead_park() == false
     // backends need no override and cannot accidentally dispatch one.
-    auto backend = make<AmsBackendAfc>();
+    auto backend = make<helix::AmsBackendAfc>();
     set_print_state(helix::PrintJobState::STANDBY);
     CHECK_FALSE(backend->supports_toolhead_park());
     CHECK_FALSE(backend->park_toolhead().success());

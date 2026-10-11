@@ -13,6 +13,7 @@ struct WatchdogObservation {
     int prev_cached;  ///< cached observed last tick (-2 = never sampled)
     int prev_target;  ///< target observed last tick
     int stall_streak; ///< consecutive confirmed-stall ticks accumulated so far
+    bool visible;     ///< viewer can be drawn this tick (lv_obj_is_visible)
 };
 
 /// Decision returned by the watchdog for this tick.
@@ -29,6 +30,13 @@ struct WatchdogDecision {
 ///                        giving up (stop kicking, signal error)
 inline WatchdogDecision watchdog_evaluate(const WatchdogObservation& obs, int max_stall_kicks) {
     constexpr int NEVER_SAMPLED = -2;
+
+    // The cache advances only while the viewer is drawn, and a viewer under a
+    // hidden screen (screensaver, software sleep) is not drawn. That is not a
+    // stall: no kick, no give-up, and counting restarts once it is visible.
+    if (!obs.visible) {
+        return WatchdogDecision{false, false, 0};
+    }
 
     const bool first_sample = (obs.prev_cached == NEVER_SAMPLED);
     const bool behind_target = (obs.cached < obs.target);

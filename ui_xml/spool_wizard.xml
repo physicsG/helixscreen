@@ -4,6 +4,10 @@
 <!-- Spool Wizard: 3-step overlay for creating new spools in Spoolman -->
 <!-- Steps: 0=Select Vendor, 1=Select Filament, 2=Spool Details -->
 <component>
+  <styles>
+    <style name="vendor_list_fill" flex_grow="1"/>
+    <style name="vendor_list_capped" height="content" flex_grow="0" max_height="35%"/>
+  </styles>
   <view name="spool_wizard"
         extends="lv_obj" width="#overlay_width_transient" height="100%" align="right_mid" style_border_width="0"
         style_pad_all="0" style_bg_opa="255" style_bg_color="#card_bg" scrollable="false" flex_flow="column">
@@ -27,32 +31,76 @@
                 height="content" flex_flow="row" style_pad_all="0" style_pad_gap="#space_sm"
                 style_flex_cross_place="center" scrollable="false">
           <text_input name="vendor_search"
-                      flex_grow="1" placeholder_text="Search vendors..." placeholder_tag="Search vendors...">
+                      height="#input_height" flex_grow="1" placeholder_text="Search vendors..."
+                      placeholder_tag="Search vendors...">
             <event_cb trigger="value_changed" callback="on_wizard_vendor_search_changed"/>
           </text_input>
-          <ui_button name="add_vendor_btn" width="content" variant="secondary" text="+ New" translation_tag="+ New">
+          <ui_button name="add_vendor_btn" width="content" height="#input_height" variant="secondary" text="+ New">
             <event_cb trigger="clicked" callback="on_wizard_show_create_vendor_modal"/>
           </ui_button>
         </lv_obj>
 
         <!-- Vendor list (scrollable) -->
         <lv_obj name="vendor_list"
-                width="100%" flex_grow="1" scrollable="true" flex_flow="column" style_pad_left="#space_xs"
-                style_pad_right="#space_xs" style_pad_top="0" style_pad_bottom="0" style_pad_gap="#space_sm"/>
+                width="100%" scrollable="true" flex_flow="column" style_pad_left="#space_xs" style_pad_right="#space_md"
+                style_pad_top="0" style_pad_bottom="0" style_pad_gap="#space_sm">
+          <!-- The whole step, or only the matching vendors while SpoolmanDB
+               results share it -->
+          <bind_style_if name="vendor_list_fill" cond="spool_db_available eq 0 or spool_db_state eq 0"/>
+          <bind_style_if name="vendor_list_capped" cond="spool_db_available eq 1 and spool_db_state ne 0"/>
+          <bind_flag_if cond="spool_wizard_vendor_count eq 0 and spool_db_available eq 1 and spool_db_state ne 0"
+                        flag="hidden"/>
+        </lv_obj>
+
+        <!-- SpoolmanDB search: the same query searched in Spoolman's catalog.
+             Hidden on a server without the route and while the query is too short.
+             A new search keeps the last results on screen under a small spinner. -->
+        <lv_obj name="catalog_section"
+                width="100%" flex_grow="1" flex_flow="column" style_pad_all="0" style_pad_gap="#space_xs"
+                scrollable="false" hidden="true">
+          <bind_flag_if cond="spool_db_available eq 0 or spool_db_state eq 0" flag="hidden"/>
+          <lv_obj width="100%"
+                  height="content" flex_flow="row" style_flex_cross_place="center" style_pad_all="0"
+                  style_pad_gap="#space_sm" scrollable="false">
+            <text_small text="From SpoolmanDB" style_text_color="#text_muted"/>
+            <spinner name="catalog_loading_indicator" size="xs" hidden="true">
+              <bind_flag_if_not_eq subject="spool_db_state" flag="hidden" ref_value="1"/>
+            </spinner>
+            <text_small name="catalog_error_label"
+                        text="SpoolmanDB search failed" style_text_color="#text_muted" hidden="true">
+              <bind_flag_if_not_eq subject="spool_db_state" flag="hidden" ref_value="4"/>
+            </text_small>
+          </lv_obj>
+          <lv_obj name="catalog_results"
+                  width="100%" flex_grow="1" scrollable="true" flex_flow="column" style_pad_left="#space_xs"
+                  style_pad_right="#space_md" style_pad_top="0" style_pad_bottom="0" style_pad_gap="#space_xs"
+                  hidden="true">
+            <bind_flag_if_eq subject="spool_db_result_count" flag="hidden" ref_value="0"/>
+            <!-- One row per result slot, built once; a new answer rebinds their
+                 subjects and shows as many as it has. -->
+            <repeat count="25">
+              <wizard_catalog_row index="$i"/>
+            </repeat>
+          </lv_obj>
+          <centered_column name="catalog_empty_state" flex_grow="1" hidden="true">
+            <bind_flag_if_not_eq subject="spool_db_state" flag="hidden" ref_value="3"/>
+            <text_small text="No matches in SpoolmanDB" style_text_align="center" style_text_color="#text_muted"/>
+          </centered_column>
+        </lv_obj>
 
         <!-- Empty state for vendor list -->
         <centered_column name="vendor_empty_state" flex_grow="1" hidden="true">
-          <bind_flag_if_not_eq subject="spool_wizard_vendor_count" flag="hidden" ref_value="0"/>
+          <bind_flag_if cond="spool_wizard_vendor_count ne 0 or (spool_db_available eq 1 and spool_db_state ne 0)"
+                        flag="hidden"/>
           <icon src="inbox_outline" size="xl" variant="secondary"/>
-          <text_body text="No vendors found"
-                     translation_tag="No vendors found" style_text_align="center" style_text_color="#text_muted"/>
+          <text_body text="No vendors found" style_text_align="center" style_text_color="#text_muted"/>
         </centered_column>
 
         <!-- Loading state for vendor list -->
         <centered_column name="vendor_loading_state" flex_grow="1" hidden="true">
           <bind_flag_if_not_eq subject="spool_wizard_vendors_loading" flag="hidden" ref_value="1"/>
           <spinner size="lg"/>
-          <text_small text="Loading vendors..." translation_tag="Loading vendors..." style_text_align="center"/>
+          <text_small text="Loading vendors..." style_text_align="center"/>
         </centered_column>
       </lv_obj>
 
@@ -64,17 +112,15 @@
 
         <!-- Instruction text -->
         <text_small width="100%"
-                    text="Choose an existing filament, or tap + New to create one."
-                    translation_tag="Choose an existing filament, or tap + New to create one."
-                    style_text_color="#text_muted"/>
+                    text="Choose an existing filament, or tap + New to create one." style_text_color="#text_muted"/>
 
         <!-- Selected vendor display + New button -->
         <lv_obj width="100%"
                 height="content" flex_flow="row" style_pad_all="0" style_flex_cross_place="center"
                 style_pad_gap="#space_sm" scrollable="false">
-          <text_small text="Vendor:" translation_tag="Vendor:" style_text_color="#text_muted"/>
+          <text_small text="Vendor:" style_text_color="#text_muted"/>
           <text_body name="selected_vendor_label" bind_text="wizard_selected_vendor_name" flex_grow="1"/>
-          <ui_button name="add_filament_btn" width="content" variant="secondary" text="+ New" translation_tag="+ New">
+          <ui_button name="add_filament_btn" width="content" variant="secondary" text="+ New">
             <event_cb trigger="clicked" callback="on_wizard_show_create_filament_modal"/>
           </ui_button>
         </lv_obj>
@@ -82,21 +128,20 @@
         <!-- Filament list (scrollable) -->
         <lv_obj name="filament_list"
                 width="100%" flex_grow="1" scrollable="true" flex_flow="column" style_pad_left="#space_xs"
-                style_pad_right="#space_xs" style_pad_top="0" style_pad_bottom="0" style_pad_gap="#space_xs"/>
+                style_pad_right="#space_md" style_pad_top="0" style_pad_bottom="0" style_pad_gap="#space_xs"/>
 
         <!-- Empty state for filament list -->
         <centered_column name="filament_empty_state" flex_grow="1" hidden="true">
           <bind_flag_if_not_eq subject="spool_wizard_filament_count" flag="hidden" ref_value="0"/>
           <icon src="inbox_outline" size="xl" variant="secondary"/>
-          <text_body text="No filaments found"
-                     translation_tag="No filaments found" style_text_align="center" style_text_color="#text_muted"/>
+          <text_body text="No filaments found" style_text_align="center" style_text_color="#text_muted"/>
         </centered_column>
 
         <!-- Loading state for filament list -->
         <centered_column name="filament_loading_state" flex_grow="1" hidden="true">
           <bind_flag_if_not_eq subject="spool_wizard_filaments_loading" flag="hidden" ref_value="1"/>
           <spinner size="lg"/>
-          <text_small text="Loading filaments..." translation_tag="Loading filaments..." style_text_align="center"/>
+          <text_small text="Loading filaments..." style_text_align="center"/>
         </centered_column>
 
       </lv_obj>
@@ -111,9 +156,10 @@
         <ui_card name="summary_card"
                  width="100%" height="content" style_pad_all="#space_sm" flex_flow="row" style_pad_gap="#space_sm"
                  style_flex_cross_place="center">
-          <lv_obj name="summary_color_swatch"
-                  width="28" height="28" style_radius="14" style_bg_color="#card_bg" style_bg_opa="255"
-                  style_border_width="1" style_border_color="#border"/>
+          <lv_obj name="summary_color_swatch" width="28" height="28" style_radius="14" style_bg_opa="255">
+            <bind_style_prop prop="bg_color" subject="wizard_summary_color"/>
+            <bind_style_if_eq name="styles.contrast_edge" subject="wizard_summary_edge" ref_value="1"/>
+          </lv_obj>
           <lv_obj height="content"
                   flex_grow="1" flex_flow="column" style_pad_all="0" style_pad_gap="0" scrollable="false">
             <text_small name="summary_vendor" bind_text="wizard_summary_vendor"/>
@@ -126,15 +172,14 @@
                 height="content" flex_flow="row" style_pad_all="0" style_pad_gap="#space_sm" scrollable="false">
           <lv_obj height="content"
                   flex_grow="1" flex_flow="column" style_pad_all="0" style_pad_gap="2" scrollable="false">
-            <text_small text="Remaining Weight (g)"
-                        translation_tag="Remaining Weight (g)" style_text_color="#text_muted"/>
+            <text_small text="Remaining Weight (g)" style_text_color="#text_muted"/>
             <text_input name="remaining_weight" width="100%" placeholder_text="1000" keyboard_hint="numeric">
               <event_cb trigger="value_changed" callback="on_wizard_remaining_weight_changed"/>
             </text_input>
           </lv_obj>
           <lv_obj height="content"
                   flex_grow="1" flex_flow="column" style_pad_all="0" style_pad_gap="2" scrollable="false">
-            <text_small text="Price" translation_tag="Price" style_text_color="#text_muted"/>
+            <text_small text="Price" style_text_color="#text_muted"/>
             <text_input name="spool_price"
                         width="100%" placeholder_text="25.00" placeholder_tag="25.00" keyboard_hint="numeric">
               <event_cb trigger="value_changed" callback="on_wizard_price_changed"/>
@@ -147,14 +192,14 @@
                 height="content" flex_flow="row" style_pad_all="0" style_pad_gap="#space_sm" scrollable="false">
           <lv_obj height="content"
                   flex_grow="1" flex_flow="column" style_pad_all="0" style_pad_gap="2" scrollable="false">
-            <text_small text="Lot # (optional)" translation_tag="Lot # (optional)" style_text_color="#text_muted"/>
+            <text_small text="Lot # (optional)" style_text_color="#text_muted"/>
             <text_input name="spool_lot" width="100%" placeholder_text="LOT-2024-001" placeholder_tag="LOT-2024-001">
               <event_cb trigger="value_changed" callback="on_wizard_lot_changed"/>
             </text_input>
           </lv_obj>
           <lv_obj height="content"
                   flex_grow="1" flex_flow="column" style_pad_all="0" style_pad_gap="2" scrollable="false">
-            <text_small text="Notes (optional)" translation_tag="Notes (optional)" style_text_color="#text_muted"/>
+            <text_small text="Notes (optional)" style_text_color="#text_muted"/>
             <text_input name="spool_notes" width="100%" placeholder_text="Any notes..." placeholder_tag="Any notes...">
               <event_cb trigger="value_changed" callback="on_wizard_notes_changed"/>
             </text_input>
@@ -166,7 +211,7 @@
       <centered_column name="creating_state" flex_grow="1" hidden="true">
         <bind_flag_if_not_eq subject="wizard_creating" flag="hidden" ref_value="1"/>
         <spinner size="lg"/>
-        <text_body text="Creating spool..." translation_tag="Creating spool..." style_text_align="center"/>
+        <text_body text="Creating spool..." style_text_align="center"/>
       </centered_column>
 
     </lv_obj>
@@ -178,7 +223,7 @@
             style_pad_bottom="#space_md" scrollable="false">
 
       <!-- Back button: hidden on step 0 -->
-      <ui_button name="back_btn" variant="secondary" text="Back" translation_tag="Back" hidden="true">
+      <ui_button name="back_btn" variant="secondary" text="Back" hidden="true">
         <bind_flag_if_eq subject="spool_wizard_step" flag="hidden" ref_value="0"/>
         <event_cb trigger="clicked" callback="on_wizard_back"/>
       </ui_button>
@@ -187,14 +232,14 @@
       <lv_obj name="footer_spacer" width="0" height="1" flex_grow="1"/>
 
       <!-- Next button: visible on steps 0 and 1 -->
-      <ui_button name="next_btn" variant="primary" text="Next" translation_tag="Next" hidden="true">
+      <ui_button name="next_btn" variant="primary" text="Next" hidden="true">
         <bind_flag_if_eq subject="spool_wizard_step" flag="hidden" ref_value="2"/>
         <bind_state_if_eq subject="spool_wizard_can_proceed" state="disabled" ref_value="0"/>
         <event_cb trigger="clicked" callback="on_wizard_next"/>
       </ui_button>
 
       <!-- Create button: visible on step 2 only -->
-      <ui_button name="create_btn" variant="primary" text="Create Spool" translation_tag="Create Spool" hidden="true">
+      <ui_button name="create_btn" variant="primary" text="Create Spool" hidden="true">
         <bind_flag_if_not_eq subject="spool_wizard_step" flag="hidden" ref_value="2"/>
         <bind_state_if cond="spool_wizard_can_proceed eq 0 or wizard_creating eq 1" state="disabled"/>
         <event_cb trigger="clicked" callback="on_wizard_create"/>

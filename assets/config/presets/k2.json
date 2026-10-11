@@ -27,6 +27,7 @@
         "output_pin fan1": "Chamber (manual)",
         "output_pin fan2": "Auxiliary",
         "heater_fan chamber_fan": "Chamber Heater Fan",
+        "heater_fan chamber_heater_fan": "Chamber Heater Fan",
         "temperature_fan chamber_fan": "Chamber Circulation"
       }
     },
@@ -52,6 +53,7 @@
         "temperature_sensor chamber_temp",
         "temperature_sensor mcu_temp",
         "heater_fan chamber_fan",
+        "heater_fan chamber_heater_fan",
         "heater_fan hotend_fan",
         "temperature_fan chamber_fan",
         "output_pin LED",
@@ -69,7 +71,7 @@
       ]
     },
     "default_macros": {
-      "cooldown": "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=0\nSET_HEATER_TEMPERATURE HEATER=heater_bed TARGET=0\nSET_HEATER_TEMPERATURE HEATER=chamber_heater TARGET=0",
+      "cooldown": "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=0\nSET_HEATER_TEMPERATURE HEATER=heater_bed TARGET=0",
       "load_filament": { "label": "CFS Load", "gcode": "BOX_LOAD_MATERIAL" },
       "unload_filament": { "label": "CFS Unload", "gcode": "BOX_QUIT_MATERIAL" },
       "macro_1": { "label": "Clean Nozzle", "gcode": "BOX_NOZZLE_CLEAN" },

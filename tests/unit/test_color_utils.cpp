@@ -8,6 +8,10 @@
 
 #include "color_utils.h"
 
+#include <map>
+#include <utility>
+#include <vector>
+
 #include "../catch_amalgamated.hpp"
 
 // ============================================================================
@@ -273,8 +277,51 @@ TEST_CASE("describe_color: basic colors", "[color][describe]") {
 
 TEST_CASE("describe_color: grayscale", "[color][describe]") {
     REQUIRE(helix::describe_color(0xFFFFFF) == "White");
-    REQUIRE(helix::describe_color(0x000000) == "Black");
+    REQUIRE(helix::describe_color(0x000000) == "Deep Black");
+    REQUIRE(helix::describe_color(0x0A0A0A) == "Deep Black");
 
     std::string gray = helix::describe_color(0x808080);
     REQUIRE(gray.find("Gray") != std::string::npos);
+}
+
+TEST_CASE("describe_color: near-blacks read as Black", "[color][describe]") {
+    for (uint32_t rgb : {0x1A1A1A, 0x111111, 0x0B0D14, 0x1E1E2E, 0x02061A}) {
+        INFO(std::hex << rgb);
+        REQUIRE(helix::describe_color(rgb) == "Black");
+    }
+    REQUIRE(helix::describe_color(0x4A4A4A) == "Deep Gray");
+    REQUIRE(helix::describe_color(0x282828) == "Black");
+    // Saturated dark colors keep their hue.
+    REQUIRE(helix::describe_color(0x1A237E).find("Blue") != std::string::npos);
+}
+
+TEST_CASE("describe_color: near-whites read as White", "[color][describe]") {
+    REQUIRE(helix::describe_color(0xF5F5F5) == "White");
+    REQUIRE(helix::describe_color(0xFFFFFF) == "White");
+    REQUIRE(helix::describe_color(0xE8E8E8) == "Pale Gray");
+}
+
+// ============================================================================
+// nearest_palette_key Tests
+// ============================================================================
+
+TEST_CASE("nearest_palette_key picks the closest entry by RGB distance", "[color_utils][palette]") {
+    const std::vector<std::pair<int, uint32_t>> palette = {
+        {0, 0xFFFFFF}, {1, 0xF72224}, {2, 0x161616}, {3, 0x0ACC38}};
+    CHECK(helix::nearest_palette_key(palette, 0xFFFFFF, -1) == 0);
+    CHECK(helix::nearest_palette_key(palette, 0xE01010, -1) == 1);
+    CHECK(helix::nearest_palette_key(palette, 0x000000, -1) == 2);
+    CHECK(helix::nearest_palette_key(palette, 0x10D040, -1) == 3);
+}
+
+TEST_CASE("nearest_palette_key returns the fallback for an empty palette",
+          "[color_utils][palette]") {
+    const std::vector<std::pair<int, uint32_t>> none;
+    CHECK(helix::nearest_palette_key(none, 0x123456, -7) == -7);
+}
+
+TEST_CASE("nearest_palette_key keeps the first of two equally close entries",
+          "[color_utils][palette]") {
+    const std::map<int, uint32_t> palette = {{5, 0x000010}, {9, 0x000030}};
+    CHECK(helix::nearest_palette_key(palette, 0x000020, 0) == 5);
 }

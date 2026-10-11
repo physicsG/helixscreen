@@ -10,6 +10,7 @@
  * that changes are detected and the correct component names are derived.
  */
 
+#include "../test_helpers/layout_manager_test_access.h"
 #include "layout_manager.h"
 #include "xml_hot_reloader.h"
 
@@ -299,10 +300,8 @@ TEST_CASE_METHOD(HotReloadFixture, "destructor stops the polling thread", "[hot-
         hr.set_reload_callback([](const std::string&, const std::string&) {});
         hr.start({temp_dir_.string()}, 50);
         REQUIRE(hr.is_running() == true);
-        // Destructor should call stop() and join the thread
+        // The destructor stops and joins the thread; a missed join hangs the suite here.
     }
-    // If we get here without hanging, the destructor worked
-    REQUIRE(true);
 }
 
 // ============================================================================
@@ -676,21 +675,6 @@ TEST_CASE_METHOD(HotReloadFixture, "empty file is deferred (editor mid-write)", 
 // Breakpoint-variant resolution [hot-reload]
 // ============================================================================
 
-// Note: LayoutManagerTestAccess is also defined in test_layout_manager.cpp and
-// test_grid_layout.cpp, but Catch2 amalgamated builds compile each test file
-// separately, so no ODR conflict.
-class LayoutManagerTestAccess {
-  public:
-    static void reset(helix::LayoutManager& lm) {
-        lm.type_ = helix::LayoutType::STANDARD;
-        lm.name_ = "standard";
-        lm.override_name_.clear();
-        lm.initialized_ = false;
-        lm.width_ = 0;
-        lm.height_ = 0;
-    }
-};
-
 /// Stands up a miniature ui_xml/ tree holding both a base component and a
 /// micro/ override of it, and makes the temp root the process CWD.
 /// LayoutManager resolves variant paths relative to the CWD, so the reloader
@@ -816,7 +800,6 @@ TEST_CASE_METHOD(HotReloadFixture, "globals.xml is never reloaded", "[hot-reload
 TEST_CASE_METHOD(HotReloadFixture, "components with C++-injected constants are never reloaded",
                  "[hot-reload]") {
     create_xml("color_picker.xml", "<component><view/></component>");
-    create_sub_xml("color_swatch_grid.xml", "<component><view/></component>");
 
     std::vector<std::string> reloaded;
     helix::XmlHotReloader hr;
@@ -825,8 +808,6 @@ TEST_CASE_METHOD(HotReloadFixture, "components with C++-injected constants are n
     hr.start({temp_dir_.string()}, 10000);
 
     overwrite_xml(temp_dir_ / "color_picker.xml", "<component><view/><!--edited--></component>");
-    overwrite_xml(sub_dir_ / "color_swatch_grid.xml",
-                  "<component><view/><!--edited--></component>");
     hr.scan_and_reload();
     REQUIRE(reloaded.empty());
 

@@ -3,18 +3,22 @@
 
 #pragma once
 
+#include "ui_observer_guard.h"
+
+#include "async_lifetime_guard.h"
 #include "filament_sensor_types.h"
 #include "json_fwd.h"
 #include "lvgl.h"
-#include "sensor_registry.h"
+#include "sensor_collection.h"
 #include "subject_managed_panel.h"
+
+#include "hv/json.hpp"
 
 // Forward declarations — IMoonrakerAPI is a GLOBAL-scope interface (see
 // i_moonraker_api.h); declaring it inside namespace helix would create a
 // distinct phantom type.
 class IMoonrakerAPI;
 
-#include <atomic>
 #include <chrono>
 #include <functional>
 #include <map>
@@ -25,9 +29,11 @@ class IMoonrakerAPI;
 #include <utility>
 #include <vector>
 
+namespace helix {
+
 // Test-only friend (defined in tests/unit/test_runout_empty_lane_scope.cpp) used
-// to set per-sensor roles directly, bypassing the single-RUNOUT exclusivity in
-// set_sensor_role() so multi-lane (Snapmaker) runout scenarios can be exercised.
+// to set per-sensor roles directly, the way a settings.json restore does, without
+// going through set_sensor_role().
 class RunoutScopeTestAccess;
 class BypassArmingTestAccess;
 // Test-only friend (defined in tests/test_helpers/post_unload_grace_test_access.h)
@@ -36,8 +42,6 @@ class BypassArmingTestAccess;
 class PostUnloadGraceTestAccess;
 
 class AmsBackend;
-
-namespace helix {
 
 enum class PrintJobState;
 
@@ -81,7 +85,7 @@ enum class PrintJobState;
  * }
  * @endcode
  */
-class FilamentSensorManager : public helix::sensors::ISensorManager {
+class FilamentSensorManager {
   public:
     /// @brief Callback for sensor state change notifications
     using StateChangeCallback =
@@ -98,36 +102,13 @@ class FilamentSensorManager : public helix::sensors::ISensorManager {
     FilamentSensorManager& operator=(const FilamentSensorManager&) = delete;
 
     // ========================================================================
-    // ISensorManager Interface
+    // Discovery, Status and Config
     // ========================================================================
-
-    /// @brief Get category name for registry
-    [[nodiscard]] std::string category_name() const override;
-
-    /**
-     * @brief Discover sensors from Klipper objects list
-     *
-     * Implements ISensorManager interface. Delegates to discover_sensors().
-     * @note MUST be called from main LVGL thread (updates subjects directly)
-     */
-    void discover(const std::vector<std::string>& klipper_objects) override;
 
     // update_from_status() is declared below in "State Updates" section
 
-    /**
-     * @brief Load sensor configuration from JSON
-     *
-     * Note: This manager uses legacy Config-based persistence. This method
-     * accepts JSON for ISensorManager compatibility but delegates to the
-     * internal load_config_from_file() which reads from settings.json.
-     *
-     * @param config JSON config (currently ignored - uses internal config)
-     * @note MUST be called from main LVGL thread (updates subjects directly)
-     */
-    void load_config(const nlohmann::json& config) override;
-
     /// @brief Save configuration to JSON
-    [[nodiscard]] nlohmann::json save_config() const override;
+    [[nodiscard]] nlohmann::json save_config() const;
 
     // ========================================================================
     // Initialization
@@ -148,6 +129,18 @@ class FilamentSensorManager : public helix::sensors::ISensorManager {
      * Called by StaticSubjectRegistry during application shutdown.
      */
     void deinit_subjects();
+
+    /**
+     * @brief Death signal for every subject this manager owns.
+     *
+     * deinit_subjects() frees the observer nodes on all of them at once, so an
+     * observer whose owner outlives this manager's teardown must pass this
+     * token to observe_*(). Without it the guard's reset() calls
+     * lv_observer_remove() on a freed node.
+     */
+    [[nodiscard]] SubjectLifetime get_subjects_lifetime() const {
+        return subjects_.get_subjects_lifetime();
+    }
 
     /**
      * @brief Discover sensors from PrinterCapabilities
@@ -183,17 +176,11 @@ class FilamentSensorManager : public helix::sensors::ISensorManager {
      *
      * Merges saved config with discovered sensors. New sensors get default config,
      * removed sensors are preserved in config (in case they come back).
-     *
-     * @note This is the legacy config API. Use ISensorManager::load_config(json) for
-     *       SensorRegistry integration.
      */
     void load_config_from_file();
 
     /**
      * @brief Save current configuration to settings.json
-     *
-     * @note This is the legacy config API. ISensorManager::save_config() returns
-     *       JSON but also saves to file for this manager.
      */
     void save_config_to_file();
 
@@ -298,6 +285,11 @@ class FilamentSensorManager : public helix::sensors::ISensorManager {
     /**
      * @brief Check if filament is detected for a given role
      *
+     * Presence query, not a runout decision: a sensor the firmware stood down
+     * (SET_FILAMENT_SENSOR ENABLE=0) still reports and is still read. With
+     * several holders of the role the firmware-running one is preferred, then
+     * the first holder. Runout alerting is gated separately (monitors_runout).
+     *
      * Returns false if master disabled, sensor disabled, or no sensor assigned to role.
      *
      * @param role The sensor role to check
@@ -307,6 +299,9 @@ class FilamentSensorManager : public helix::sensors::ISensorManager {
 
     /**
      * @brief Check if a sensor is available (exists and enabled)
+     *
+     * Same presence split as is_filament_detected: a firmware stand-down does
+     * not make the sensor unavailable.
      *
      * @param role The sensor role to check
      * @return true if sensor exists, is enabled, and is available in Klipper
@@ -427,12 +422,11 @@ class FilamentSensorManager : public helix::sensors::ISensorManager {
      * @brief Update sensor states from Moonraker notification
      *
      * Called by PrinterState when receiving notify_status_update.
-     * Implements ISensorManager interface.
      * Thread-safe.
      *
      * @param status JSON object containing sensor state updates
      */
-    void update_from_status(const nlohmann::json& status) override;
+    void update_from_status(const nlohmann::json& status);
 
     /**
      * @brief Register callback for state changes
@@ -452,7 +446,7 @@ class FilamentSensorManager : public helix::sensors::ISensorManager {
     [[nodiscard]] lv_subject_t* get_runout_detected_subject();
 
     /**
-     * @brief Get subject for the print-scoped runout state (FIX B).
+     * @brief Get subject for the print-scoped runout state.
      *
      * Same -1/0/1/2 encoding as get_runout_detected_subject(), but scoped to the
      * active print's used tools using AMS lane truth. The in-print runout badge
@@ -517,13 +511,17 @@ class FilamentSensorManager : public helix::sensors::ISensorManager {
      */
     [[nodiscard]] lv_subject_t* get_sensor_count_subject();
 
+    /// Ticks when a sensor's role or enabled flag, or the master switch, changes.
+    /// A reading that moves because of configuration is not a physical event.
+    [[nodiscard]] lv_subject_t* get_config_revision_subject();
+
     /**
      * @brief Check if still within sensor stabilization grace period
      *
      * Used to suppress notifications and modals while sensor states
      * are being synchronized after Moonraker connection.
      *
-     * @return true if within grace period (first 2 seconds after sensor discovery)
+     * @return true within AppConstants::Startup::SENSOR_STABILIZATION_PERIOD of sensor discovery
      */
     [[nodiscard]] bool is_in_startup_grace_period() const;
 
@@ -531,7 +529,7 @@ class FilamentSensorManager : public helix::sensors::ISensorManager {
      * @brief Enable synchronous mode for testing
      *
      * When enabled, update_from_status() calls update_subjects() synchronously
-     * instead of using lv_async_call(). This avoids LVGL timer dependencies in unit tests.
+     * instead of using queue_update(). This avoids LVGL timer dependencies in unit tests.
      *
      * @param enabled true to enable synchronous updates
      */
@@ -547,9 +545,9 @@ class FilamentSensorManager : public helix::sensors::ISensorManager {
 
   private:
     friend class FilamentSensorManagerTestAccess;
-    friend class ::RunoutScopeTestAccess;
-    friend class ::BypassArmingTestAccess;
-    friend class ::PostUnloadGraceTestAccess;
+    friend class RunoutScopeTestAccess;
+    friend class BypassArmingTestAccess;
+    friend class PostUnloadGraceTestAccess;
 
     FilamentSensorManager();
     ~FilamentSensorManager();
@@ -566,24 +564,35 @@ class FilamentSensorManager : public helix::sensors::ISensorManager {
                             FilamentSensorType& type) const;
 
     /**
-     * @brief Find config by Klipper name
-     * @return Pointer to config, or nullptr if not found
+     * @brief Whether this sensor's reading counts for runout/presence decisions
+     *
+     * One rule shared by every runout consumer: the user's config enables the
+     * sensor, it holds a role, and the firmware is running it. Klipper keeps
+     * reporting filament_detected for a sensor stood down with
+     * SET_FILAMENT_SENSOR ENABLE=0 but takes no runout action of its own, so
+     * neither do we. The state default is enabled=true, so a sensor that has
+     * never reported the field counts as running. A runout observed while the
+     * firmware ran the sensor keeps counting after a stand-down (see
+     * observed_runouts_). Caller MUST hold mutex_.
      */
-    FilamentSensorConfig* find_config(const std::string& klipper_name);
-    const FilamentSensorConfig* find_config(const std::string& klipper_name) const;
+    [[nodiscard]] bool monitors_runout(const FilamentSensorConfig& config) const;
 
     /**
-     * @brief Find config by assigned role
-     * @return Pointer to config, or nullptr if no sensor has this role
+     * @brief First holder of @p role the firmware is running
+     *
+     * When every holder of the role is stood down, the first holder is
+     * returned anyway, so a caller can still tell "configured but not
+     * running" from "no sensor holds this role". Caller MUST hold mutex_.
      */
-    const FilamentSensorConfig* find_config_by_role(FilamentSensorRole role) const;
+    [[nodiscard]] const FilamentSensorConfig*
+    find_monitoring_config_by_role(FilamentSensorRole role) const;
 
     /// Result of one scoped lane scan — shared by find_empty_required_lanes()
     /// and compute_scoped_runout_value() (dedups config lookup + backend fetch +
     /// availability gate + per-lane scan).
     struct ScopedRunoutScan {
         std::vector<std::pair<int, int>> empty_lanes; ///< (tool, slot) genuinely empty
-        ::AmsBackend* backend = nullptr;              ///< active backend (nullptr -> no lane truth)
+        AmsBackend* backend = nullptr;                ///< active backend (nullptr -> no lane truth)
         bool no_used_tools = false;                   ///< tools_used was empty
         bool runout_configured = false;               ///< a RUNOUT-role sensor exists
         bool runout_enabled = false;                  ///< master && sensor enabled
@@ -592,13 +601,19 @@ class FilamentSensorManager : public helix::sensors::ISensorManager {
     };
 
     /// Shared scoped lane scan. Caller MUST hold mutex_ (recursive).
+    /// @p read_stood_down: whether a head sensor the firmware has stood down
+    /// still counts as that head's reading. The pre-print check needs it (the
+    /// firmware holds every head down between prints); the running-print badge
+    /// does not (a stood-down head is one the job is not feeding from).
     [[nodiscard]] ScopedRunoutScan scan_required_lanes(const std::set<int>& tools_used,
-                                                       const std::map<int, int>& remap) const;
+                                                       const std::map<int, int>& remap,
+                                                       bool read_stood_down) const;
 
     /**
      * @brief Update all LVGL subjects from current state
      */
     void update_subjects();
+    void bump_config_revision();
 
     // Recursive mutex for thread-safe state access
     // Recursive because update_subjects() calls has_any_runout()/is_motion_active()
@@ -606,7 +621,7 @@ class FilamentSensorManager : public helix::sensors::ISensorManager {
 
     // Configuration
     bool master_enabled_ = true;
-    std::vector<FilamentSensorConfig> sensors_;
+    sensors::SensorCollection<FilamentSensorConfig, FilamentSensorState> sensors_;
 
     /// Klipper names of sensors WE armed for bypass (restore set). Empty when
     /// no bypass arming is outstanding.
@@ -621,19 +636,29 @@ class FilamentSensorManager : public helix::sensors::ISensorManager {
     void send_firmware_sensor_enable(class IMoonrakerAPI* api, const FilamentSensorConfig& sensor,
                                      bool enabled);
 
-    // Runtime state (keyed by klipper_name)
-    std::map<std::string, FilamentSensorState> states_;
+    /// Runout-role sensors whose removal toast is serving
+    /// helix::RUNOUT_TOAST_DWELL, keyed by klipper_name and holding
+    /// the moment the sensor went clear. Filament returning before the dwell
+    /// expires drops the entry, so a tool change announces nothing at all.
+    std::map<std::string, std::chrono::steady_clock::time_point> pending_removal_toast_;
+
+    /// Sensors that went empty while the firmware ran them, mid-job and outside
+    /// a filament operation, and have not refilled since. A pause macro that
+    /// stands every sensor down still leaves this runout for the modal to
+    /// report; a sensor the user keeps disabled never gets here. Cleared on
+    /// refill and when the job lets go of the machine. Keyed by klipper_name.
+    std::set<std::string> observed_runouts_;
 
     // State change callback
     StateChangeCallback state_change_callback_;
 
     // Test mode: when true, update_from_status() calls update_subjects() synchronously
-    // instead of using lv_async_call(). This avoids LVGL timer dependencies in unit tests.
+    // instead of using queue_update(). This avoids LVGL timer dependencies in unit tests.
     bool sync_mode_ = false;
 
     // Tracks whether we've received the first status update from Moonraker.
     // Ensures update_subjects() fires on initial status even when sensor state
-    // matches defaults (filament_detected=false), which wouldn't trigger any_changed.
+    // matches defaults (filament_detected=true), which wouldn't trigger any_changed.
     bool initial_status_received_ = false;
 
     // Discovery time for suppressing initial state notifications
@@ -643,15 +668,18 @@ class FilamentSensorManager : public helix::sensors::ISensorManager {
     // LVGL subjects
     bool subjects_initialized_ = false;
     SubjectManager subjects_;
-    lv_subject_t runout_detected_;
-    lv_subject_t scoped_runout_; ///< Print-scoped runout (FIX B); driven by PrintStatusPanel
-    lv_subject_t toolhead_detected_;
-    lv_subject_t entry_detected_;
-    lv_subject_t probe_triggered_;
-    lv_subject_t any_runout_;
-    lv_subject_t motion_active_;
-    lv_subject_t master_enabled_subject_;
-    lv_subject_t sensor_count_;
+    // Expires deferred subject updates when the subjects are torn down.
+    helix::AsyncLifetimeGuard lifetime_;
+    lv_subject_t runout_detected_{};
+    lv_subject_t scoped_runout_{}; ///< Print-scoped runout; driven by PrintStatusPanel
+    lv_subject_t toolhead_detected_{};
+    lv_subject_t entry_detected_{};
+    lv_subject_t probe_triggered_{};
+    lv_subject_t any_runout_{};
+    lv_subject_t motion_active_{};
+    lv_subject_t master_enabled_subject_{};
+    lv_subject_t sensor_count_{};
+    lv_subject_t config_revision_{};
 };
 
 } // namespace helix

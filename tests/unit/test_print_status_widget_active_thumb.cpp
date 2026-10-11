@@ -22,6 +22,7 @@
 #include "ui_update_queue.h"
 
 #include "../lvgl_ui_test_fixture.h"
+#include "../test_helpers/print_state_test_drivers.h"
 #include "app_globals.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "lvgl/lvgl.h"
@@ -66,9 +67,12 @@ TEST_CASE_METHOD(LVGLUITestFixture, "print_status active thumbnail write escapes
         lv_obj_t* comp = make_print_status(test_screen());
         REQUIRE(comp != nullptr);
         widget.attach(comp, test_screen());
+        // The active thumbnail exists only while a print holds the machine.
+        helix::test::set_wire_state(get_printer_state(), PrintJobState::PRINTING);
+        process_lvgl(10);
         process_lvgl(30);
 
-        get_printer_state().set_print_thumbnail("a.gcode", kThumbA);
+        get_printer_state().print_state().set_print_thumbnail("a.gcode", kThumbA);
         helix::ui::UpdateQueue::instance().drain();
         // Still inside what a real publish would call the batch: only the LVGL
         // timer tick below may apply the src.
@@ -95,9 +99,12 @@ TEST_CASE_METHOD(LVGLUITestFixture,
         lv_obj_t* comp = make_print_status(test_screen());
         REQUIRE(comp != nullptr);
         widget.attach(comp, test_screen());
+        // The active thumbnail exists only while a print holds the machine.
+        helix::test::set_wire_state(get_printer_state(), PrintJobState::PRINTING);
+        process_lvgl(10);
         process_lvgl(30);
 
-        get_printer_state().set_print_thumbnail("a.gcode", kThumbA);
+        get_printer_state().print_state().set_print_thumbnail("a.gcode", kThumbA);
         helix::ui::UpdateQueue::instance().drain();
         process_lvgl(30);
         on_screen = active_thumb_src(comp);
@@ -106,7 +113,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
         // the next async tick — exactly where a queued thumbnail can still land.
         lv_obj_set_parent(comp, lv_layer_top());
 
-        get_printer_state().set_print_thumbnail("b.gcode", kThumbB);
+        get_printer_state().print_state().set_print_thumbnail("b.gcode", kThumbB);
         helix::ui::UpdateQueue::instance().drain();
         process_lvgl(30);
         after_reparent = active_thumb_src(comp);
@@ -119,4 +126,33 @@ TEST_CASE_METHOD(LVGLUITestFixture,
 
     CHECK(on_screen == kThumbA);
     CHECK(after_reparent == kThumbA);
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "print_status active thumbnail tick shows the thumbnail current when it fires",
+                 "[print_status][panel_widget][thumbnail]") {
+    std::string after_tick;
+    {
+        PrintStatusWidget widget;
+        widget.set_config({{"layout_style", "library"}});
+
+        lv_obj_t* comp = make_print_status(test_screen());
+        REQUIRE(comp != nullptr);
+        widget.attach(comp, test_screen());
+        // The active thumbnail exists only while a print holds the machine.
+        helix::test::set_wire_state(get_printer_state(), PrintJobState::PRINTING);
+        process_lvgl(10);
+        process_lvgl(30);
+
+        // Both publishes land before the tick: the apply queued for A must not
+        // put A back over B.
+        get_printer_state().print_state().set_print_thumbnail("a.gcode", kThumbA);
+        get_printer_state().print_state().set_print_thumbnail("b.gcode", kThumbB);
+        helix::ui::UpdateQueue::instance().drain();
+        process_lvgl(30);
+        after_tick = active_thumb_src(comp);
+    }
+    PrintStatusWidget::destroy_formatter_for_test();
+
+    CHECK(after_tick == kThumbB);
 }

@@ -157,8 +157,8 @@ class LabelPrinterSettingsManager {
 
     SubjectManager subjects_;
 
-    lv_subject_t printer_configured_subject_; // int: 0/1
-    lv_subject_t printer_type_subject_;       // int: 0=network, 1=usb, 2=bluetooth
+    lv_subject_t printer_configured_subject_{}; // int: 0/1
+    lv_subject_t printer_type_subject_{};       // int: 0=network, 1=usb, 2=bluetooth
 
     bool subjects_initialized_ = false;
 };

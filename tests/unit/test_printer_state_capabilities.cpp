@@ -11,8 +11,8 @@
  * - get_pre_print_option_set() const
  *
  * Note: Tests use set_printer_type_sync() which directly calls the internal
- * method. The async set_printer_type() defers to the main thread via
- * helix::async::call_method_ref() for thread safety from WebSocket callbacks.
+ * method. The async set_printer_type() defers to the main thread for thread
+ * safety from WebSocket callbacks.
  */
 
 #include "ui_update_queue.h"
@@ -45,7 +45,7 @@ TEST_CASE("PrinterState: set_printer_type stores the type name", "[printer_state
     state.set_printer_type_sync("FlashForge Adventurer 5M Pro");
 
     // Verify the type is stored and retrievable
-    REQUIRE(state.get_printer_type() == "FlashForge Adventurer 5M Pro");
+    REQUIRE(state.profile_state().printer_type() == "FlashForge Adventurer 5M Pro");
 }
 
 TEST_CASE("PrinterState: set_printer_type with different printer names",
@@ -58,22 +58,22 @@ TEST_CASE("PrinterState: set_printer_type with different printer names",
 
     SECTION("FlashForge Adventurer 5M") {
         state.set_printer_type_sync("FlashForge Adventurer 5M");
-        REQUIRE(state.get_printer_type() == "FlashForge Adventurer 5M");
+        REQUIRE(state.profile_state().printer_type() == "FlashForge Adventurer 5M");
     }
 
     SECTION("Voron 2.4") {
         state.set_printer_type_sync("Voron 2.4");
-        REQUIRE(state.get_printer_type() == "Voron 2.4");
+        REQUIRE(state.profile_state().printer_type() == "Voron 2.4");
     }
 
     SECTION("Custom/Other") {
         state.set_printer_type_sync("Custom/Other");
-        REQUIRE(state.get_printer_type() == "Custom/Other");
+        REQUIRE(state.profile_state().printer_type() == "Custom/Other");
     }
 
     SECTION("Empty string") {
         state.set_printer_type_sync("");
-        REQUIRE(state.get_printer_type() == "");
+        REQUIRE(state.profile_state().printer_type() == "");
     }
 }
 
@@ -93,7 +93,7 @@ TEST_CASE("PrinterState: set_printer_type fetches capabilities from database",
     state.set_printer_type_sync("FlashForge Adventurer 5M Pro");
 
     // Get the capabilities
-    const PrePrintOptionSet& caps = state.get_pre_print_option_set();
+    const PrePrintOptionSet& caps = state.profile_state().pre_print_option_set();
 
     // Verify macro name is populated from database
     REQUIRE(caps.macro_name == "START_PRINT");
@@ -119,7 +119,7 @@ TEST_CASE("PrinterState: AD5M Pro does not include purge_line parameter",
 
     state.set_printer_type_sync("FlashForge Adventurer 5M Pro");
 
-    const PrePrintOptionSet& caps = state.get_pre_print_option_set();
+    const PrePrintOptionSet& caps = state.profile_state().pre_print_option_set();
 
     // AD5M Pro START_PRINT macro does not have purge_line or skew_correct options
     REQUIRE(caps.find("purge_line") == nullptr);
@@ -135,7 +135,7 @@ TEST_CASE("PrinterState: AD5M Pro does not include skew_correct parameter",
 
     state.set_printer_type_sync("FlashForge Adventurer 5M Pro");
 
-    const PrePrintOptionSet& caps = state.get_pre_print_option_set();
+    const PrePrintOptionSet& caps = state.profile_state().pre_print_option_set();
 
     // AD5M Pro START_PRINT macro does not have skew_correct option
     REQUIRE(caps.find("skew_correct") == nullptr);
@@ -157,7 +157,7 @@ TEST_CASE("PrinterState: unknown printer type returns empty capabilities",
     state.set_printer_type_sync("Some Unknown Printer Model XYZ");
 
     // Capabilities should be empty
-    const PrePrintOptionSet& caps = state.get_pre_print_option_set();
+    const PrePrintOptionSet& caps = state.profile_state().pre_print_option_set();
     REQUIRE(caps.empty());
     REQUIRE(caps.macro_name.empty());
     REQUIRE(caps.options.empty());
@@ -174,7 +174,7 @@ TEST_CASE("PrinterState: Custom/Other printer type returns empty capabilities",
     // Custom/Other is a valid selection but has no database entry
     state.set_printer_type_sync("Custom/Other");
 
-    const PrePrintOptionSet& caps = state.get_pre_print_option_set();
+    const PrePrintOptionSet& caps = state.profile_state().pre_print_option_set();
     REQUIRE(caps.empty());
 }
 
@@ -188,7 +188,7 @@ TEST_CASE("PrinterState: empty printer type returns empty capabilities",
 
     state.set_printer_type_sync("");
 
-    const PrePrintOptionSet& caps = state.get_pre_print_option_set();
+    const PrePrintOptionSet& caps = state.profile_state().pre_print_option_set();
     REQUIRE(caps.empty());
 }
 
@@ -208,7 +208,7 @@ TEST_CASE("PrinterState: changing printer type updates capabilities",
     state.set_printer_type_sync("FlashForge Adventurer 5M Pro");
 
     // Verify it has the option set
-    const PrePrintOptionSet& caps1 = state.get_pre_print_option_set();
+    const PrePrintOptionSet& caps1 = state.profile_state().pre_print_option_set();
     REQUIRE_FALSE(caps1.empty());
     REQUIRE(caps1.macro_name == "START_PRINT");
     REQUIRE(caps1.find("bed_mesh") != nullptr);
@@ -217,7 +217,7 @@ TEST_CASE("PrinterState: changing printer type updates capabilities",
     state.set_printer_type_sync("Some Unknown Printer");
 
     // Capabilities should now be empty
-    const PrePrintOptionSet& caps2 = state.get_pre_print_option_set();
+    const PrePrintOptionSet& caps2 = state.profile_state().pre_print_option_set();
     REQUIRE(caps2.empty());
 }
 
@@ -231,12 +231,12 @@ TEST_CASE("PrinterState: changing from unknown to known updates capabilities",
 
     // Start with unknown
     state.set_printer_type_sync("Unknown Printer");
-    REQUIRE(state.get_pre_print_option_set().empty());
+    REQUIRE(state.profile_state().pre_print_option_set().empty());
 
     // Change to known printer with capabilities
     state.set_printer_type_sync("FlashForge Adventurer 5M Pro");
 
-    const PrePrintOptionSet& caps = state.get_pre_print_option_set();
+    const PrePrintOptionSet& caps = state.profile_state().pre_print_option_set();
     REQUIRE_FALSE(caps.empty());
     REQUIRE(caps.macro_name == "START_PRINT");
 }
@@ -251,12 +251,12 @@ TEST_CASE("PrinterState: changing between printers with different capabilities",
 
     // Set to AD5M Pro
     state.set_printer_type_sync("FlashForge Adventurer 5M Pro");
-    const PrePrintOptionSet& caps1 = state.get_pre_print_option_set();
+    const PrePrintOptionSet& caps1 = state.profile_state().pre_print_option_set();
     REQUIRE(caps1.macro_name == "START_PRINT");
 
     // Change to regular AD5M (also has START_PRINT but same capabilities in DB)
     state.set_printer_type_sync("FlashForge Adventurer 5M");
-    const PrePrintOptionSet& caps2 = state.get_pre_print_option_set();
+    const PrePrintOptionSet& caps2 = state.profile_state().pre_print_option_set();
     // AD5M should also have capabilities from database
     REQUIRE(caps2.macro_name == "START_PRINT");
 }
@@ -273,7 +273,7 @@ TEST_CASE("PrinterState: initial printer type is empty", "[printer_state][capabi
     state.init_subjects(false);
 
     // Before setting any type, should be empty
-    REQUIRE(state.get_printer_type().empty());
+    REQUIRE(state.profile_state().printer_type().empty());
 }
 
 TEST_CASE("PrinterState: initial capabilities are empty", "[printer_state][capabilities]") {
@@ -284,7 +284,7 @@ TEST_CASE("PrinterState: initial capabilities are empty", "[printer_state][capab
     state.init_subjects(false);
 
     // Before setting any type, capabilities should be empty
-    const PrePrintOptionSet& caps = state.get_pre_print_option_set();
+    const PrePrintOptionSet& caps = state.profile_state().pre_print_option_set();
     REQUIRE(caps.empty());
 }
 
@@ -302,11 +302,11 @@ TEST_CASE("PrinterState: printer type lookup is case-insensitive",
 
     // Correct case should work
     state.set_printer_type_sync("FlashForge Adventurer 5M Pro");
-    REQUIRE_FALSE(state.get_pre_print_option_set().empty());
+    REQUIRE_FALSE(state.profile_state().pre_print_option_set().empty());
 
     // Different case should also work (database lookup is case-insensitive)
     state.set_printer_type_sync("flashforge adventurer 5m pro");
-    REQUIRE_FALSE(state.get_pre_print_option_set().empty());
+    REQUIRE_FALSE(state.profile_state().pre_print_option_set().empty());
 }
 
 TEST_CASE("PrinterState: setting same type twice is idempotent",
@@ -318,11 +318,11 @@ TEST_CASE("PrinterState: setting same type twice is idempotent",
     state.init_subjects(false);
 
     state.set_printer_type_sync("FlashForge Adventurer 5M Pro");
-    const PrePrintOptionSet& caps1 = state.get_pre_print_option_set();
+    const PrePrintOptionSet& caps1 = state.profile_state().pre_print_option_set();
 
     // Set same type again
     state.set_printer_type_sync("FlashForge Adventurer 5M Pro");
-    const PrePrintOptionSet& caps2 = state.get_pre_print_option_set();
+    const PrePrintOptionSet& caps2 = state.profile_state().pre_print_option_set();
 
     // Should still have same option set
     REQUIRE(caps2.macro_name == caps1.macro_name);
@@ -339,24 +339,24 @@ TEST_CASE("PrinterState: set_printer_type deduplicates redundant calls",
 
     // First call sets type and capabilities
     state.set_printer_type_sync("FlashForge Adventurer 5M Pro");
-    REQUIRE(state.get_printer_type() == "FlashForge Adventurer 5M Pro");
-    REQUIRE_FALSE(state.get_pre_print_option_set().empty());
+    REQUIRE(state.profile_state().printer_type() == "FlashForge Adventurer 5M Pro");
+    REQUIRE_FALSE(state.profile_state().pre_print_option_set().empty());
 
     // Capture the capabilities object address — if dedup works, the internal
     // object won't be reassigned, so the address stays the same.
-    const auto* caps_ptr = &state.get_pre_print_option_set();
+    const auto* caps_ptr = &state.profile_state().pre_print_option_set();
 
     // Second call with same type should be a no-op (dedup early return)
     state.set_printer_type_sync("FlashForge Adventurer 5M Pro");
 
     // The capabilities reference should point to the exact same object
     // (not a freshly-assigned copy) because the early-return skipped assignment
-    REQUIRE(&state.get_pre_print_option_set() == caps_ptr);
-    REQUIRE(state.get_printer_type() == "FlashForge Adventurer 5M Pro");
+    REQUIRE(&state.profile_state().pre_print_option_set() == caps_ptr);
+    REQUIRE(state.profile_state().printer_type() == "FlashForge Adventurer 5M Pro");
 
     // But changing to a different type should NOT be deduped
     state.set_printer_type_sync("FlashForge Adventurer 5M");
-    REQUIRE(state.get_printer_type() == "FlashForge Adventurer 5M");
+    REQUIRE(state.profile_state().printer_type() == "FlashForge Adventurer 5M");
 }
 
 TEST_CASE("PrinterState: set_printer_type dedup detects strategy changes",
@@ -369,16 +369,16 @@ TEST_CASE("PrinterState: set_printer_type dedup detects strategy changes",
 
     // Set to an unknown printer (no DB entry → strategy from probe state)
     state.set_printer_type_sync("Unknown Printer");
-    REQUIRE(state.get_printer_type() == "Unknown Printer");
+    REQUIRE(state.profile_state().printer_type() == "Unknown Printer");
 
     // Setting the same unknown type again should still dedup (same strategy)
-    const auto* caps_ptr = &state.get_pre_print_option_set();
+    const auto* caps_ptr = &state.profile_state().pre_print_option_set();
     state.set_printer_type_sync("Unknown Printer");
-    REQUIRE(&state.get_pre_print_option_set() == caps_ptr);
+    REQUIRE(&state.profile_state().pre_print_option_set() == caps_ptr);
 
     // But switching to a known type (different strategy) must NOT dedup
     state.set_printer_type_sync("FlashForge Adventurer 5M Pro");
-    REQUIRE_FALSE(state.get_pre_print_option_set().empty());
+    REQUIRE_FALSE(state.profile_state().pre_print_option_set().empty());
 }
 
 TEST_CASE("PrinterState: get_printer_type returns const reference",
@@ -392,8 +392,8 @@ TEST_CASE("PrinterState: get_printer_type returns const reference",
     state.set_printer_type_sync("FlashForge Adventurer 5M Pro");
 
     // Get reference and verify it's stable
-    const std::string& type1 = state.get_printer_type();
-    const std::string& type2 = state.get_printer_type();
+    const std::string& type1 = state.profile_state().printer_type();
+    const std::string& type2 = state.profile_state().printer_type();
 
     // Should return the same reference (not a copy)
     REQUIRE(&type1 == &type2);
@@ -411,8 +411,8 @@ TEST_CASE("PrinterState: get_pre_print_option_set returns const reference",
     state.set_printer_type_sync("FlashForge Adventurer 5M Pro");
 
     // Get reference and verify it's stable
-    const PrePrintOptionSet& caps1 = state.get_pre_print_option_set();
-    const PrePrintOptionSet& caps2 = state.get_pre_print_option_set();
+    const PrePrintOptionSet& caps1 = state.profile_state().pre_print_option_set();
+    const PrePrintOptionSet& caps2 = state.profile_state().pre_print_option_set();
 
     // Should return the same reference (not a copy)
     REQUIRE(&caps1 == &caps2);
@@ -443,7 +443,7 @@ TEST_CASE("PrinterState: a capability answered before subject init survives it",
     PrinterStateTestAccess::reset(state);
 
     // Answer BEFORE the subjects exist, the way discovery can.
-    state.set_spoolman_available(true);
+    state.capabilities_state().set_spoolman_available(true);
     helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
 
     state.init_subjects(false);
@@ -461,7 +461,7 @@ TEST_CASE("PrinterState: a pre-init 'absent' answer is honoured too",
     PrinterState& state = get_printer_state();
     PrinterStateTestAccess::reset(state);
 
-    state.set_spoolman_available(false);
+    state.capabilities_state().set_spoolman_available(false);
     helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
 
     state.init_subjects(false);
@@ -479,16 +479,50 @@ TEST_CASE("PrinterState: a post-init answer still wins over the latched one",
     PrinterState& state = get_printer_state();
     PrinterStateTestAccess::reset(state);
 
-    state.set_spoolman_available(true);
+    state.capabilities_state().set_spoolman_available(true);
     helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
     state.init_subjects(false);
     helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
     REQUIRE(state.is_spoolman_available());
 
-    state.set_spoolman_available(false);
+    state.capabilities_state().set_spoolman_available(false);
     helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
 
     CHECK_FALSE(state.is_spoolman_available());
+}
+
+TEST_CASE("PrinterCapabilitiesState: every setter's pre-init answer survives init",
+          "[printer_state][capabilities]") {
+    lv_init_safe();
+
+    PrinterDiscovery hardware;
+    hardware.parse_objects(nlohmann::json::array({"ff_pa", "timelapse"}));
+    CapabilityOverrides overrides;
+    overrides.set_hardware(hardware);
+
+    PrinterCapabilitiesState caps;
+    caps.set_hardware(hardware, overrides);
+    caps.set_has_individual_xyz_homing(false); // subject default is 1
+    caps.set_supports_belt_compare(true);
+    caps.set_has_chamber_sensor(true);
+    caps.set_has_chamber_heater_diagnostics(true);
+    caps.set_has_chamber_filter_fan(true);
+    caps.set_has_chamber_element_temp(true);
+    caps.set_has_chamber_dryer(true);
+
+    caps.init_subjects(false);
+
+    CHECK(lv_subject_get_int(caps.subject(Capability::HasTimelapse)) == 1);
+    CHECK(lv_subject_get_int(caps.subject(Capability::HasPaCal)) == 1);
+    CHECK(lv_subject_get_int(caps.subject(Capability::HasIndividualXyzHoming)) == 0);
+    CHECK(lv_subject_get_int(caps.subject(Capability::SupportsBeltCompare)) == 1);
+    CHECK(lv_subject_get_int(caps.subject(Capability::HasChamber)) == 1);
+    CHECK(lv_subject_get_int(caps.subject(Capability::HasChamberHeaterDiagnostics)) == 1);
+    CHECK(lv_subject_get_int(caps.subject(Capability::HasChamberFilterFan)) == 1);
+    CHECK(lv_subject_get_int(caps.subject(Capability::HasChamberElementTemp)) == 1);
+    CHECK(lv_subject_get_int(caps.subject(Capability::HasChamberDryer)) == 1);
+
+    caps.deinit_subjects();
 }
 
 // ============================================================================
@@ -507,29 +541,29 @@ TEST_CASE("PrinterState: an external z-offset persistence provider forces firmwa
     // never firmware-managed. Asserting that first is what makes the override
     // assertion mean something.
     state.set_printer_type_sync("Unknown Printer");
-    REQUIRE(state.get_z_offset_calibration_strategy() !=
+    REQUIRE(state.profile_state().z_offset_calibration_strategy() !=
             ZOffsetCalibrationStrategy::FIRMWARE_MANAGED);
-    REQUIRE(lv_subject_get_int(state.get_z_offset_can_save_subject()) == 1);
+    REQUIRE(lv_subject_get_int(state.profile_state().get_z_offset_can_save_subject()) == 1);
 
     // Discovery matched a provider (Helper-Script's save-zoffset wrapper, ZMOD,
     // Forge-X): the module owns persistence, so Save Z Offset must stand down
     // or its probe fold double-applies on every restart.
     state.set_z_offset_external_persistence_internal("Helper-Script");
-    REQUIRE(state.get_z_offset_calibration_strategy() ==
+    REQUIRE(state.profile_state().z_offset_calibration_strategy() ==
             ZOffsetCalibrationStrategy::FIRMWARE_MANAGED);
-    REQUIRE(lv_subject_get_int(state.get_z_offset_can_save_subject()) == 0);
+    REQUIRE(lv_subject_get_int(state.profile_state().get_z_offset_can_save_subject()) == 0);
 
     // Sticky across a type re-resolution that would recompute a
     // probe/endstop strategy.
     state.set_printer_type_sync("Another Unknown Printer");
-    REQUIRE(state.get_z_offset_calibration_strategy() ==
+    REQUIRE(state.profile_state().z_offset_calibration_strategy() ==
             ZOffsetCalibrationStrategy::FIRMWARE_MANAGED);
 
     // And rediscovery without the module restores the type-derived strategy.
     state.clear_z_offset_external_persistence_internal();
-    REQUIRE(state.get_z_offset_calibration_strategy() !=
+    REQUIRE(state.profile_state().z_offset_calibration_strategy() !=
             ZOffsetCalibrationStrategy::FIRMWARE_MANAGED);
-    REQUIRE(lv_subject_get_int(state.get_z_offset_can_save_subject()) == 1);
+    REQUIRE(lv_subject_get_int(state.profile_state().get_z_offset_can_save_subject()) == 1);
 }
 
 // ============================================================================
@@ -576,30 +610,30 @@ TEST_CASE("PrinterState: a status frame without the store refutes a wrapper-only
     // An unknown printer resolves to probe/endstop, so the stand-down below is
     // visible rather than the type's own answer.
     state.set_printer_type_sync("Unknown Printer");
-    REQUIRE(state.get_z_offset_calibration_strategy() !=
+    REQUIRE(state.profile_state().z_offset_calibration_strategy() !=
             ZOffsetCalibrationStrategy::FIRMWARE_MANAGED);
 
     // Discovery latches on the wrapper object - conservative by design.
     state.set_z_offset_external_persistence_internal("Helper-Script");
-    REQUIRE(state.get_z_offset_calibration_strategy() ==
+    REQUIRE(state.profile_state().z_offset_calibration_strategy() ==
             ZOffsetCalibrationStrategy::FIRMWARE_MANAGED);
-    REQUIRE(lv_subject_get_int(state.get_z_offset_can_save_subject()) == 0);
+    REQUIRE(lv_subject_get_int(state.profile_state().get_z_offset_can_save_subject()) == 0);
 
     // The save_variables store arrives complete, carrying someone else's
     // variables and no `zoffset` key: save-zoffset.cfg is not installed, the
     // wrapper stores nothing, and Save Z Offset must come back.
     state.update_from_status(save_variables_frame(nlohmann::json{{"lan_clients", 7}}));
 
-    CHECK(state.get_z_offset_calibration_strategy() !=
+    CHECK(state.profile_state().z_offset_calibration_strategy() !=
           ZOffsetCalibrationStrategy::FIRMWARE_MANAGED);
-    CHECK(lv_subject_get_int(state.get_z_offset_can_save_subject()) == 1);
+    CHECK(lv_subject_get_int(state.profile_state().get_z_offset_can_save_subject()) == 1);
 
     // One-shot: further frames of the same shape find nothing latched and must
     // not thrash the strategy back and forth.
     state.update_from_status(save_variables_frame(nlohmann::json::object()));
-    CHECK(state.get_z_offset_calibration_strategy() !=
+    CHECK(state.profile_state().z_offset_calibration_strategy() !=
           ZOffsetCalibrationStrategy::FIRMWARE_MANAGED);
-    CHECK(lv_subject_get_int(state.get_z_offset_can_save_subject()) == 1);
+    CHECK(lv_subject_get_int(state.profile_state().get_z_offset_can_save_subject()) == 1);
 }
 
 TEST_CASE("PrinterState: a real store, a seeded one, and no news all keep the stand-down",
@@ -615,7 +649,7 @@ TEST_CASE("PrinterState: a real store, a seeded one, and no news all keep the st
     state.set_hardware(discovery_with_macros({"SET_GCODE_OFFSET"}));
     state.set_printer_type_sync("Unknown Printer");
     state.set_z_offset_external_persistence_internal("Helper-Script");
-    REQUIRE(state.get_z_offset_calibration_strategy() ==
+    REQUIRE(state.profile_state().z_offset_calibration_strategy() ==
             ZOffsetCalibrationStrategy::FIRMWARE_MANAGED);
 
     SECTION("the module's variable is present with a real value") {
@@ -633,9 +667,9 @@ TEST_CASE("PrinterState: a real store, a seeded one, and no news all keep the st
         state.update_from_status(nlohmann::json{{"save_variables", nlohmann::json::object()}});
     }
 
-    CHECK(state.get_z_offset_calibration_strategy() ==
+    CHECK(state.profile_state().z_offset_calibration_strategy() ==
           ZOffsetCalibrationStrategy::FIRMWARE_MANAGED);
-    CHECK(lv_subject_get_int(state.get_z_offset_can_save_subject()) == 0);
+    CHECK(lv_subject_get_int(state.profile_state().get_z_offset_can_save_subject()) == 0);
 }
 
 TEST_CASE("PrinterState: an unambiguously detected provider is not refuted by a frame",
@@ -651,12 +685,12 @@ TEST_CASE("PrinterState: an unambiguously detected provider is not refuted by a 
     state.set_hardware(discovery_with_macros({"SAVE_ZMOD_DATA"}));
     state.set_printer_type_sync("Unknown Printer");
     state.set_z_offset_external_persistence_internal("ZMOD");
-    REQUIRE(state.get_z_offset_calibration_strategy() ==
+    REQUIRE(state.profile_state().z_offset_calibration_strategy() ==
             ZOffsetCalibrationStrategy::FIRMWARE_MANAGED);
 
     state.update_from_status(save_variables_frame(nlohmann::json{{"lan_clients", 7}}));
 
-    CHECK(state.get_z_offset_calibration_strategy() ==
+    CHECK(state.profile_state().z_offset_calibration_strategy() ==
           ZOffsetCalibrationStrategy::FIRMWARE_MANAGED);
-    CHECK(lv_subject_get_int(state.get_z_offset_can_save_subject()) == 0);
+    CHECK(lv_subject_get_int(state.profile_state().get_z_offset_can_save_subject()) == 0);
 }

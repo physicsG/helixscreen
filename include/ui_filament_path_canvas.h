@@ -279,6 +279,18 @@ int ui_filament_path_canvas_get_slot_filament(lv_obj_t* obj, int slot_index);
 void ui_filament_path_canvas_set_slot_prep_sensor(lv_obj_t* obj, int slot, bool has_sensor);
 
 /**
+ * @brief Set whether a slot has a load sensor between its prep sensor and the
+ *        hub (AFC's per-lane `load`); the HUB layout draws its band, read as LANE
+ */
+void ui_filament_path_canvas_set_slot_load_sensor(lv_obj_t* obj, int slot, bool has_sensor);
+
+/**
+ * @brief Set whether a slot reports an error of its own. A lane off the active
+ *        route shows it at the point its filament reached.
+ */
+void ui_filament_path_canvas_set_slot_error(lv_obj_t* obj, int slot, bool has_error);
+
+/**
  * @brief Clear all per-slot filament states
  *
  * Resets all slots to show as idle (no filament installed).
@@ -292,7 +304,7 @@ void ui_filament_path_canvas_clear_slot_filaments(lv_obj_t* obj);
  *
  * When false, the bypass spool, label, path line, and merge sensor are
  * all suppressed.  Used for tool changers where bypass is not a thing.
- * Default: true (bypass drawn when not in hub_only mode).
+ * Default: true.
  *
  * @param obj The filament_path_canvas widget
  * @param show true to draw bypass elements, false to hide them
@@ -338,17 +350,79 @@ void ui_filament_path_canvas_set_buffer_callback(lv_obj_t* obj, filament_path_bu
                                                  void* user_data);
 
 /**
- * @brief Set hub-only rendering mode
+ * @brief Set the units of this unit's hub that sit on other pages of a paging screen
  *
- * When enabled, only draws slots → prep sensors → hub. Skips everything
- * downstream: bypass, output sensor, toolhead sensor, nozzle. Used in the
- * overview panel's inline detail view where system-level routing is shown
- * separately by the system_path_canvas.
+ * On a HUB layout each non-zero side draws one dashed stub on the hub: a hint of a lane
+ * running outward, labeled "N units", with a drying glyph before the label when one of
+ * them is drying. The hub box is widened to hold the stubs' entries.
+ *
+ * @param before units on earlier pages (the stub left of the hub); 0 for none
+ * @param before_drying one of those is drying
+ * @param after units on later pages (the stub right of the hub); 0 for none
+ * @param after_drying one of those is drying
+ */
+void ui_filament_path_canvas_set_offpage_units(lv_obj_t* obj, int before, bool before_drying,
+                                               int after, bool after_drying);
+
+/**
+ * @brief Keep the hub where it is from one unit to the next
+ *
+ * For a screen that pages through the units of one hub. With @p lanes > 0 the hub, buffer
+ * and toolhead stand on the widget's center line (not the center of the shown unit's
+ * spools) and the hub box is sized for @p lanes lanes at @p lane_pitch px apart (0 takes
+ * the shown unit's own pitch), so the box is the same whichever unit is shown and swapping
+ * the unit swaps its lanes and nothing downstream. 0 lanes centers the hub on the spools
+ * and sizes it for the unit.
+ */
+void ui_filament_path_canvas_set_fixed_hub(lv_obj_t* obj, int lanes, int32_t lane_pitch = 0);
+
+/**
+ * @brief Keep @p px columns clear at both ends of the widget, over a band of rows
+ *
+ * Controls overlaid on the widget's edges (the paging arrows) sit there; the off-page
+ * stubs and their labels stop short of them wherever they would share rows with a
+ * control. @p y_top and @p y_bottom are the rows the controls span, in absolute display
+ * coordinates; with @p y_bottom <= @p y_top the reserve holds on every row. 0 px clears
+ * nothing.
+ */
+void ui_filament_path_canvas_set_edge_reserve(lv_obj_t* obj, int32_t px, int32_t y_top = 0,
+                                              int32_t y_bottom = 0);
+
+/**
+ * @brief Where the hub (or selector) box is, in absolute display coordinates
+ *
+ * Computed from the same frame the renderer draws, so it is right before the first paint.
+ * False for a layout with no such box (MIXED, PARALLEL) or before the widget has a size.
+ */
+bool ui_filament_path_canvas_get_hub_box(lv_obj_t* obj, lv_area_t* area_out);
+
+/**
+ * @brief Set the unit's hub (or selector) output sensor
+ *
+ * With the sensor the hub's output edge carries a clamp band, and filament the sensor
+ * reads with no lane to own it fills the trunk as far as the hub's output.
  *
  * @param obj The filament_path_canvas widget
- * @param hub_only true to stop rendering at the hub
+ * @param has_sensor Whether the unit reports a hub/output sensor
+ * @param triggered Whether that sensor reads filament
  */
-void ui_filament_path_canvas_set_hub_only(lv_obj_t* obj, bool hub_only);
+void ui_filament_path_canvas_set_hub_sensor(lv_obj_t* obj, bool has_sensor, bool triggered);
+
+/**
+ * @brief Set how much of the bowden (output) tube a load or unload has filled,
+ *        in percent from the hub end, or -1 when the backend reports none
+ *
+ * While the active lane's filament is in the bowden, only that share of the
+ * tube is drawn filled.
+ */
+void ui_filament_path_canvas_set_bowden_fill(lv_obj_t* obj, int percent);
+
+/**
+ * @brief Set where the spool box's front edge sits, in pixels below the slot
+ *        grid's top (INT32_MIN for no box): the lanes enter the path there and
+ *        their prep sensor bands clamp that edge
+ */
+void ui_filament_path_canvas_set_lane_entry(lv_obj_t* obj, int32_t offset_from_slot_grid);
 
 /**
  * @brief Set nozzle heat active state
@@ -370,7 +444,7 @@ void ui_filament_path_canvas_set_heat_active(lv_obj_t* obj, bool active);
  *   2 = fault detected (red tint)
  *
  * @param obj The filament_path_canvas widget
- * @param state Buffer fault state (0=healthy, 1=warning, 2=fault)
+ * @param state Buffer fault state (-1=untinted, 0=healthy, 1=warning, 2=fault)
  */
 void ui_filament_path_canvas_set_buffer_fault_state(lv_obj_t* obj, int state);
 
@@ -383,14 +457,17 @@ void ui_filament_path_canvas_set_buffer_fault_state(lv_obj_t* obj, int state);
  * @param obj The filament_path_canvas widget
  * @param present true to draw the buffer element
  * @param state 0=neutral (even coil), 1=compressed (tight coil), 2=tension (stretched coil)
+ * @param label Text drawn in the box: "BUF", or "FPS" for a filament pressure
+ *              sensor. A static string; the canvas keeps the pointer.
  */
-void ui_filament_path_canvas_set_buffer_info(lv_obj_t* obj, bool present, int state);
+void ui_filament_path_canvas_set_buffer_info(lv_obj_t* obj, bool present, int state,
+                                             const char* label = "BUF");
 
 /**
  * @brief Set proportional buffer bias for smooth color interpolation
  *
- * When set to a valid value (> -1.5), the buffer coil color interpolates
- * smoothly from green (neutral) through orange to red based on abs(bias).
+ * When set to a valid value (> -1.5), the buffer box border takes the buffer
+ * bands' token for its fault state: text_muted on target, warning, danger.
  * When unavailable (-2.0), falls back to discrete 3-state color logic.
  *
  * @param obj The filament_path_canvas widget
@@ -416,8 +493,8 @@ void ui_filament_path_canvas_set_bypass_has_spool(lv_obj_t* obj, bool has_spool)
  * @brief Compute where the bypass tube terminates (absolute screen coords).
  *
  * The owning panel anchors its shared BypassSpoolWidgets overlay at this
- * point. Returns false when bypass isn't enabled (`show_bypass=false`,
- * hub-only mode) or the canvas hasn't been laid out yet.
+ * point. Returns false when bypass isn't enabled (`show_bypass=false`) or the canvas hasn't been
+ * laid out yet.
  */
 bool ui_filament_path_canvas_get_bypass_merge_pos(lv_obj_t* obj, int32_t* cx_out, int32_t* cy_out);
 
@@ -479,6 +556,17 @@ void ui_filament_path_canvas_set_slot_hub_routed(lv_obj_t* obj, int slot, bool i
 void ui_filament_path_canvas_set_eject_mode(lv_obj_t* obj, bool eject);
 
 /**
+ * @brief Set whether the unit reports a toolhead filament sensor
+ *
+ * LINEAR/HUB draws the toolhead sensor band on the trunk only when it does,
+ * whether or not the bypass is shown. Defaults to true.
+ *
+ * @param obj The filament_path_canvas widget
+ * @param has_sensor true when the unit has a toolhead sensor
+ */
+void ui_filament_path_canvas_set_toolhead_sensor(lv_obj_t* obj, bool has_sensor);
+
+/**
  * @brief Set click callback for the selector/hub box
  *
  * When the user taps the selector/hub box on the path diagram, this callback
@@ -498,6 +586,14 @@ void ui_filament_path_canvas_set_hub_callback(lv_obj_t* obj, hub_callback_t cb, 
 
 #ifdef __cplusplus
 namespace helix::ui {
+/// The state last given to ui_filament_path_canvas_set_buffer_fault_state()
+/// (-1 untinted, 0 healthy, 1 warning, 2 fault); 0 for a non-canvas object.
+int filament_path_canvas_buffer_fault_state(lv_obj_t* obj);
+
+/// Free the canvas buffer of a path that is no longer on screen. The next time
+/// the widget is drawn, the buffer is allocated once and the path repainted.
+void filament_path_canvas_release_buffer(lv_obj_t* obj);
+
 /**
  * @brief Pure coordinate hit-test for an axis-aligned box.
  *
@@ -507,6 +603,17 @@ namespace helix::ui {
  * NOTE: argument order is width-then-height.
  */
 bool hub_box_hit(lv_point_t p, int32_t cx, int32_t cy, int32_t w, int32_t h, int32_t margin);
+
+/**
+ * @brief Hit-test against a box the renderer recorded in absolute coordinates.
+ *
+ * The widget can move after the render that recorded @p box (an overlay sliding
+ * in, a scrolled parent) and its drawn pixels move with it, so @p p is shifted
+ * by how far the widget's origin has travelled from @p rendered_origin to
+ * @p current_origin before the test.
+ */
+bool recorded_box_hit(lv_point_t p, const lv_area_t& box, lv_point_t rendered_origin,
+                      lv_point_t current_origin, int32_t margin);
 } // namespace helix::ui
 #endif
 

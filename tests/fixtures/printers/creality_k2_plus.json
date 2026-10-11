@@ -1,0 +1,16 @@
+{
+  "provenance": "Realistic Creality K2 Plus fingerprint from on-device Moonraker discovery (Sonic Pad; hostname K2Plus-50C1, 141 objects incl. box and motor_control). configfile_settings is the same machine's configfile=settings query (2026-09-13), cut to the keys discovery's build-volume parse reads: stepper travel and the bed size gcode_macro product_param declares",
+  "heaters": ["extruder", "heater_bed", "heater_generic chamber_heater"],
+  "sensors": ["temperature_sensor chamber_temp"],
+  "fans": ["fan", "heater_fan chamber_fan"],
+  "hostname": "K2Plus-50C1",
+  "printer_objects": ["box", "motor_control", "fan_feedback", "load_ai", "filament_rack",
+                      "temperature_sensor chamber_temp", "heater_generic chamber_heater"],
+  "kinematics": "corexy",
+  "configfile_settings": {
+    "stepper_x": {"position_min": -10.0, "position_max": 352.5},
+    "stepper_y": {"position_min": -6.2, "position_max": 400.0},
+    "stepper_z": {"position_max": 360.0},
+    "gcode_macro product_param": {"variable_bed_size_x": "350", "variable_bed_size_y": "350"}
+  }
+}

@@ -91,10 +91,10 @@ TEST_CASE("MacroBackend: execute_on for unknown macro calls error", "[led][macro
 TEST_CASE("MacroBackend: null callbacks don't crash", "[led][macro]") {
     helix::led::MacroBackend backend;
 
-    backend.execute_on("NonExistent", nullptr, nullptr);
-    backend.execute_off("NonExistent", nullptr, nullptr);
-    backend.execute_toggle("NonExistent", nullptr, nullptr);
-    backend.execute_custom_action("LED_PARTY", nullptr, nullptr);
+    REQUIRE_NOTHROW(backend.execute_on("NonExistent", nullptr, nullptr));
+    REQUIRE_NOTHROW(backend.execute_off("NonExistent", nullptr, nullptr));
+    REQUIRE_NOTHROW(backend.execute_toggle("NonExistent", nullptr, nullptr));
+    REQUIRE_NOTHROW(backend.execute_custom_action("LED_PARTY", nullptr, nullptr));
 }
 
 TEST_CASE("MacroBackend: type is MACRO", "[led][macro]") {

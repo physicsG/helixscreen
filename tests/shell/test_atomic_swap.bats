@@ -30,7 +30,6 @@ setup() {
     export INSTALL_DIR="$BATS_TEST_TMPDIR/opt/helixscreen"
     export SUDO=""
     export BACKUP_CONFIG=""
-    export ORIGINAL_INSTALL_EXISTS=""
 
     mkdir -p "$TMP_DIR"
 
@@ -251,7 +250,7 @@ mock_has_privs() {
     [ -d "${INSTALL_DIR}.old" ]
     [ -f "$INSTALL_DIR/bin/helix-screen" ]
     # Should NOT mention parent dir test (skips NoNewPrivileges block entirely)
-    [[ "$output" != *"Parent dir writable"* ]]
+    lacks "Parent dir writable" "$output"
     [[ "$output" != *"parent read-only"* ]]
 }
 
@@ -317,4 +316,61 @@ SUDOEOF
     grep -q "ReadWritePaths=$INSTALL_DIR $expected_parent /var/log" "$dest"
     # No un-substituted @@INSTALL_PARENT@@ should remain
     ! grep -q '@@INSTALL_PARENT@@' "$dest"
+}
+
+# =============================================================================
+# The swap mark the failure report reads (INSTALL_SWAPPED)
+# =============================================================================
+
+# extract_release, then print the mark whether it returned or exited.
+_extract_reporting_swap() {
+    trap 'echo "SWAPPED=${INSTALL_SWAPPED:-}"' EXIT
+    extract_release "$1"
+}
+
+@test "swap mark: a fresh install marks the new tree as landed" {
+    create_test_tarball "pi"
+    run _extract_reporting_swap pi
+    [ "$status" -eq 0 ]
+    contains "SWAPPED=swapped" "$output"
+}
+
+@test "swap mark: an atomic-swap update marks the new tree as landed" {
+    setup_existing_install
+    create_test_tarball "pi"
+    run _extract_reporting_swap pi
+    [ "$status" -eq 0 ]
+    contains "SWAPPED=swapped" "$output"
+}
+
+@test "swap mark: an in-place update that fails midway says so" {
+    setup_existing_install
+    create_test_tarball "pi"
+    mock_no_new_privs
+    chmod a-w "$BATS_TEST_TMPDIR/opt" "$INSTALL_DIR/ui_xml"
+    run _extract_reporting_swap pi
+    chmod u+w "$BATS_TEST_TMPDIR/opt" "$INSTALL_DIR/ui_xml"
+    [ "$status" -ne 0 ]
+    contains "SWAPPED=in-place" "$output"
+}
+
+@test "swap mark: an in-place update that finishes marks the new tree as landed" {
+    setup_existing_install
+    create_test_tarball "pi"
+    mock_no_new_privs
+    chmod a-w "$BATS_TEST_TMPDIR/opt"
+    run _extract_reporting_swap pi
+    chmod u+w "$BATS_TEST_TMPDIR/opt"
+    [ "$status" -eq 0 ]
+    contains "SWAPPED=swapped" "$output"
+}
+
+@test "swap mark: a release that never extracts leaves no mark" {
+    setup_existing_install
+    echo "not a tarball" > "$TMP_DIR/helixscreen.tar.gz"
+    run _extract_reporting_swap pi
+    [ "$status" -ne 0 ]
+    contains "SWAPPED=" "$output"
+    lacks "SWAPPED=swapped" "$output"
+    lacks "SWAPPED=in-place" "$output"
 }

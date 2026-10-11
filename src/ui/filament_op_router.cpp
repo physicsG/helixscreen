@@ -3,6 +3,10 @@
 
 #include "filament_op_router.h"
 
+#include "filament_op_slot_resolver.h"
+#include "macro_executor.h"
+#include "macro_param_defaults.h"
+
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 
@@ -18,18 +22,12 @@ ParamPrompter& prompter_slot() {
     return prompter;
 }
 
-/// Storage for the installed home-confirm prompter. Empty means "proceed
-/// immediately" -- see request_home_confirmation().
-HomeConfirmPrompter& home_confirm_prompter_slot() {
-    static HomeConfirmPrompter prompter;
-    return prompter;
-}
-
 void show_shared_param_modal(const std::string& macro_name, const helix::CachedMacroInfo& cached,
+                             const std::map<std::string, std::string>& prefill,
                              helix::MacroExecuteCallback on_execute) {
     if (cached.knowledge == helix::MacroParamKnowledge::KNOWN_PARAMS) {
         get_filament_param_modal().show_for_macro(lv_screen_active(), macro_name, cached.params,
-                                                  std::move(on_execute));
+                                                  std::move(on_execute), prefill);
         return;
     }
     get_filament_param_modal().show_for_unknown_params(lv_screen_active(), macro_name,
@@ -48,47 +46,81 @@ void set_filament_param_prompter(ParamPrompter prompter) {
 }
 
 bool dispatch_filament_macro(const std::string& macro_name, ParamPolicy policy,
-                             helix::MacroExecuteCallback run) {
+                             helix::MacroExecuteCallback run,
+                             const std::map<std::string, std::string>& known_values) {
     if (!run) {
         spdlog::error("[FilamentRouter] No run callback for macro '{}'", macro_name);
         return false;
     }
 
     const helix::CachedMacroInfo cached = helix::MacroParamCache::instance().get(macro_name);
-    const bool takes_params = cached.knowledge == helix::MacroParamKnowledge::KNOWN_PARAMS ||
-                              cached.knowledge == helix::MacroParamKnowledge::UNKNOWN;
 
-    if (policy == ParamPolicy::Suppress || !takes_params) {
-        // KNOWN_NO_PARAMS, or a surface that must not stack a second modal —
-        // run straight through with an empty result.
-        spdlog::debug("[FilamentRouter] Executing '{}' with no parameters (policy={})", macro_name,
-                      policy == ParamPolicy::Suppress ? "suppress" : "no-params");
-        run({});
+    // Saved defaults: ask off runs with the saved values, ask on prefills the
+    // modal with them. Either way the surface's own policy still applies.
+    const helix::MacroParamDefaultRecord defaults =
+        helix::MacroParamDefaults::instance().get(macro_name);
+
+    helix::MacroRunRequest req;
+    req.prompt_for_params = policy != ParamPolicy::Suppress && defaults.ask_for_params;
+    // Suppress must keep sending exactly what it did before saved defaults:
+    // the saved values only, and nothing without a record. Passing the
+    // computed values through would make it a sender it never was.
+    req.known_values =
+        policy == ParamPolicy::Suppress ? std::map<std::string, std::string>{} : known_values;
+    req.saved_values = defaults.values;
+
+    const helix::MacroRunDecision decision = helix::decide_macro_run(cached, req);
+
+    if (decision.action == helix::MacroRunAction::Run) {
+        if (decision.params.empty()) {
+            // KNOWN_NO_PARAMS, or a surface that must not stack a second modal —
+            // run straight through with an empty result.
+            spdlog::debug("[FilamentRouter] Executing '{}' with no parameters (policy={})",
+                          macro_name, policy == ParamPolicy::Suppress ? "suppress" : "no-params");
+            run({});
+        } else if (req.prompt_for_params) {
+            // A prompting surface lands here only when its computed values
+            // covered every declared parameter.
+            spdlog::info("[FilamentRouter] Every parameter of '{}' is known — running without a "
+                         "prompt",
+                         macro_name);
+            run(helix::macro_param_result_from_values(cached.params, decision.params));
+        } else {
+            spdlog::info("[FilamentRouter] '{}' runs with no param prompt (Ask off or suppressed) "
+                         "— {} value(s) from saved defaults and computed state",
+                         macro_name, decision.params.size());
+            run(helix::macro_param_result_from_values(cached.params, decision.params));
+        }
         return false;
     }
 
-    spdlog::info("[FilamentRouter] Macro '{}' takes parameters — prompting", macro_name);
+    spdlog::info("[FilamentRouter] Macro '{}' takes parameters — prompting ({} prefilled)",
+                 macro_name, decision.params.size());
     const ParamPrompter& prompter = prompter_slot();
     if (prompter) {
-        prompter(macro_name, cached, std::move(run));
+        prompter(macro_name, cached, decision.params, std::move(run));
     } else {
-        show_shared_param_modal(macro_name, cached, std::move(run));
+        show_shared_param_modal(macro_name, cached, decision.params, std::move(run));
     }
     return true;
 }
 
-void set_home_confirm_prompter(HomeConfirmPrompter prompter) {
-    home_confirm_prompter_slot() = std::move(prompter);
-}
-
-void request_home_confirmation(std::function<void()> on_confirm, std::function<void()> on_cancel) {
-    const HomeConfirmPrompter& prompter = home_confirm_prompter_slot();
-    if (!prompter) {
-        // No prompter installed: proceed exactly as before this seam existed.
-        on_confirm();
-        return;
+std::map<std::string, std::string> nozzle_temp_prefill(FilamentMacroOp op, int extruder_target_c,
+                                                       std::optional<int> material_temp_c,
+                                                       int min_extrude_c, int max_nozzle_c) {
+    const int temp_c = filament_op_nozzle_temp(material_temp_c.value_or(0), extruder_target_c);
+    if (temp_c <= 0 || temp_c <= min_extrude_c || temp_c > max_nozzle_c) {
+        return {};
     }
-    prompter(std::move(on_confirm), std::move(on_cancel));
+    const std::string value = std::to_string(temp_c);
+    switch (op) {
+    case FilamentMacroOp::Purge:
+        return {{"PURGE_TEMP", value}};
+    case FilamentMacroOp::Load:
+    case FilamentMacroOp::Unload:
+        break;
+    }
+    return {{"EXTRUDER_TEMP", value}, {"NOZZLE_TEMP", value}, {"TEMP", value}};
 }
 
 std::string filament_load_fallback_gcode() {

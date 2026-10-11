@@ -9,7 +9,7 @@
  * D-Bus method calls per chunk.
  *
  * Also implements the unified helix_bt_disconnect() that handles both
- * RFCOMM fds (< BLE_HANDLE_OFFSET) and BLE handles (>= BLE_HANDLE_OFFSET).
+ * RFCOMM fds and BLE handles (tagged with BLE_HANDLE_TAG).
  *
  * All sd-bus operations are serialized through the shared BusThread so they
  * never race with discovery, pairing, or other plugin bus users.
@@ -18,6 +18,7 @@
 #include "bluetooth_plugin.h"
 #include "bt_context.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
@@ -318,6 +319,30 @@ static int on_notify_changed(sd_bus_message* msg, void* userdata, sd_bus_error* 
     return 0;
 }
 
+/// Stores a connection in the first free slot and returns its handle.
+static int ble_store_connection(helix_bt_context* ctx,
+                                std::shared_ptr<helix_bt_context::BleConnection> conn) {
+    std::lock_guard<std::mutex> lock(ctx->ble_mutex);
+    auto& table = ctx->ble_connections;
+    auto slot = std::find(table.begin(), table.end(), nullptr);
+    if (slot == table.end())
+        slot = table.insert(table.end(), nullptr);
+    *slot = std::move(conn);
+    return helix::bluetooth::BLE_HANDLE_TAG | static_cast<int>(slot - table.begin());
+}
+
+/// The live connection behind a handle, or null for a stale or foreign handle.
+static std::shared_ptr<helix_bt_context::BleConnection> ble_find_connection(helix_bt_context* ctx,
+                                                                            int handle) {
+    if (!helix::bluetooth::is_ble_handle(handle))
+        return nullptr;
+    size_t index = static_cast<size_t>(handle & ~helix::bluetooth::BLE_HANDLE_TAG);
+    std::lock_guard<std::mutex> lock(ctx->ble_mutex);
+    if (index >= ctx->ble_connections.size())
+        return nullptr;
+    return ctx->ble_connections[index];
+}
+
 // ---------------------------------------------------------------------------
 // Public API: BLE Connect
 // ---------------------------------------------------------------------------
@@ -337,7 +362,15 @@ extern "C" int helix_bt_connect_ble(helix_bt_context* ctx, const char* mac,
         return -ENODEV;
     }
 
-    std::string device_path = mac_to_dbus_path(mac);
+    std::string device_path;
+    try {
+        ctx->bus_thread->run_sync(
+            [&](sd_bus* bus) { device_path = helix::bluetooth::device_dbus_path(bus, mac); });
+    } catch (const std::exception& e) {
+        std::lock_guard<std::mutex> lock(ctx->mutex);
+        ctx->last_error = e.what();
+        return -EIO;
+    }
     fprintf(stderr, "[bt] BLE connecting to %s (%s)\n", mac, device_path.c_str());
 
     int r = 0;
@@ -459,7 +492,7 @@ extern "C" int helix_bt_connect_ble(helix_bt_context* ctx, const char* mac,
     }
 
     // Step 4: Create BleConnection and register PropertiesChanged match if needed.
-    auto conn = std::make_unique<helix_bt_context::BleConnection>();
+    auto conn = std::make_shared<helix_bt_context::BleConnection>();
     conn->device_path = device_path;
     conn->char_path = char_path;
     conn->acquired_fd = acquired_fd;
@@ -468,17 +501,12 @@ extern "C" int helix_bt_connect_ble(helix_bt_context* ctx, const char* mac,
     conn->active = true;
 
     helix_bt_context::BleConnection* conn_raw = conn.get();
-    int index = -1;
-    {
-        std::lock_guard<std::mutex> lock(ctx->ble_mutex);
-        index = static_cast<int>(ctx->ble_connections.size());
-        ctx->ble_connections.push_back(std::move(conn));
-    }
+    int handle = ble_store_connection(ctx, std::move(conn));
 
     // With an AcquireNotify fd, BlueZ delivers bytes via the fd and does NOT emit
     // PropertiesChanged for Value. We only need the signal match when we fell back
     // to StartNotify (no fd), which DOES emit PropertiesChanged.
-    // conn_raw is stable because unique_ptr storage doesn't move the pointee.
+    // The table keeps conn_raw alive until disconnect has unreffed this match.
     if (notify_fd < 0) {
         try {
             ctx->bus_thread->run_sync([&](sd_bus* bus) {
@@ -497,7 +525,6 @@ extern "C" int helix_bt_connect_ble(helix_bt_context* ctx, const char* mac,
         }
     }
 
-    int handle = BLE_HANDLE_OFFSET + index;
     fprintf(stderr, "[bt] BLE connected to %s (handle=%d, write_fd=%d, notify_fd=%d, mtu=%u%s)\n",
             mac, handle, acquired_fd, notify_fd, mtu,
             used_start_notify ? ", signal-based notify" : "");
@@ -516,29 +543,15 @@ extern "C" int helix_bt_ble_write(helix_bt_context* ctx, int handle, const uint8
         ctx->last_error = "null data or zero length";
         return -EINVAL;
     }
-    if (handle < BLE_HANDLE_OFFSET) {
+    if (!helix::bluetooth::is_ble_handle(handle)) {
         std::lock_guard<std::mutex> lock(ctx->mutex);
-        ctx->last_error = "invalid BLE handle (expected >= 1000)";
+        ctx->last_error = "invalid BLE handle";
         return -EINVAL;
     }
 
-    int index = handle - BLE_HANDLE_OFFSET;
-
-    // Hold ble_mutex only long enough to grab a pointer to the connection.
-    // BleConnection is heap-allocated via unique_ptr, so the pointer is stable
-    // across vector growth. We drop the lock before doing sd-bus work to avoid
-    // holding two mutexes (ble_mutex + bus thread queue mutex).
-    helix_bt_context::BleConnection* conn = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(ctx->ble_mutex);
-        if (index < 0 || index >= static_cast<int>(ctx->ble_connections.size())) {
-            std::lock_guard<std::mutex> lock2(ctx->mutex);
-            ctx->last_error = "BLE handle out of range";
-            return -EINVAL;
-        }
-        conn = ctx->ble_connections[static_cast<size_t>(index)].get();
-    }
-
+    // A local shared_ptr keeps the connection alive without holding ble_mutex across the
+    // sd-bus work below (that would hold it and the bus thread's queue mutex together).
+    auto conn = ble_find_connection(ctx, handle);
     if (!conn || !conn->active) {
         std::lock_guard<std::mutex> lock2(ctx->mutex);
         ctx->last_error = "BLE connection not active";
@@ -651,20 +664,10 @@ extern "C" int helix_bt_ble_read(helix_bt_context* ctx, int handle, uint8_t* buf
         return -EINVAL;
     if (!buf || buf_len <= 0)
         return -EINVAL;
-    if (handle < BLE_HANDLE_OFFSET)
+    if (!helix::bluetooth::is_ble_handle(handle))
         return -EINVAL;
 
-    int index = handle - BLE_HANDLE_OFFSET;
-
-    helix_bt_context::BleConnection* conn = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(ctx->ble_mutex);
-        if (index < 0 || index >= static_cast<int>(ctx->ble_connections.size())) {
-            return -EINVAL;
-        }
-        conn = ctx->ble_connections[static_cast<size_t>(index)].get();
-    }
-
+    auto conn = ble_find_connection(ctx, handle);
     if (!conn || !conn->active)
         return -ENOTCONN;
 
@@ -675,7 +678,9 @@ extern "C" int helix_bt_ble_read(helix_bt_context* ctx, int handle, uint8_t* buf
     {
         std::unique_lock<std::mutex> lk(conn->rx_mu);
         if (conn->rx_cv.wait_for(lk, std::chrono::milliseconds(timeout_ms),
-                                 [conn] { return !conn->rx_queue.empty(); })) {
+                                 [&conn] { return !conn->rx_queue.empty() || !conn->active; })) {
+            if (conn->rx_queue.empty())
+                return -ENOTCONN;
             auto data = std::move(conn->rx_queue.front());
             conn->rx_queue.pop_front();
             lk.unlock();
@@ -719,20 +724,16 @@ extern "C" void helix_bt_disconnect(helix_bt_context* ctx, int handle) {
     if (!ctx)
         return;
 
-    if (handle >= BLE_HANDLE_OFFSET) {
-        // BLE disconnect
-        int index = handle - BLE_HANDLE_OFFSET;
-
-        helix_bt_context::BleConnection* conn = nullptr;
-        {
-            std::lock_guard<std::mutex> lock(ctx->ble_mutex);
-            if (index < 0 || index >= static_cast<int>(ctx->ble_connections.size())) {
-                return;
-            }
-            conn = ctx->ble_connections[static_cast<size_t>(index)].get();
-        }
-        if (!conn || !conn->active)
+    if (helix::bluetooth::is_ble_handle(handle)) {
+        auto conn = ble_find_connection(ctx, handle);
+        if (!conn || !conn->active.exchange(false))
             return;
+
+        // Wake any reader blocked on rx_cv so it observes !active and bails.
+        {
+            std::lock_guard<std::mutex> rxlock(conn->rx_mu);
+            conn->rx_cv.notify_all();
+        }
 
         // Close acquired fds if held (no bus traffic needed)
         if (conn->acquired_fd >= 0) {
@@ -762,12 +763,12 @@ extern "C" void helix_bt_disconnect(helix_bt_context* ctx, int handle) {
             }
         }
 
-        conn->active = false;
-
-        // Wake any reader blocked on rx_cv so it can observe !active and bail.
-        {
-            std::lock_guard<std::mutex> rxlock(conn->rx_mu);
-            conn->rx_cv.notify_all();
+        // A match still registered would call into a freed connection, so its slot stays
+        // taken; that only happens when the bus thread is already gone.
+        if (!conn->notify_slot) {
+            std::lock_guard<std::mutex> lock(ctx->ble_mutex);
+            ctx->ble_connections[static_cast<size_t>(handle & ~helix::bluetooth::BLE_HANDLE_TAG)]
+                .reset();
         }
 
         fprintf(stderr, "[bt] BLE disconnected (handle=%d)\n", handle);

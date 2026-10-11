@@ -31,6 +31,7 @@
         style_radius="#border_radius" style_pad_left="#space_sm" style_pad_right="#space_sm" style_pad_top="#space_xs"
         style_pad_bottom="#space_xs" style_pad_gap="#space_xs" flex_flow="row" style_flex_cross_place="center"
         style_flex_main_place="end" clickable="true" scrollable="false">
+    <style name="styles.press_wash" selector="pressed"/>
     <text_body name="value" text="" bind_text="$value_subject" clickable="false" event_bubble="true"/>
     <!-- Affordance: without it the field reads as a boxed label rather than
          something to press. Muted so it does not compete with the value. -->

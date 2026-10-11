@@ -6,7 +6,9 @@
 
 #include <spdlog/spdlog.h>
 
-static const char* print_state_name(PrintState s) {
+namespace helix {
+
+const char* print_state_name(PrintState s) {
     switch (s) {
     case PrintState::Idle:
         return "Idle";
@@ -25,6 +27,8 @@ static const char* print_state_name(PrintState s) {
     }
     return "Unknown";
 }
+
+} // namespace helix
 
 // RAW_PRINT_STATE_OK: whole function. This is the mapping itself - the single
 // place the wire becomes the lifecycle. Every other consumer reads the result.
@@ -62,7 +66,8 @@ StateChangeResult PrintLifecycleState::on_job_state_changed(helix::PrintJobState
     PrintState new_state = derive_print_state(job_state, start_phase);
 
     if (new_state == current_state_) {
-        spdlog::trace("[PrintLifecycleState] state unchanged: {}", print_state_name(new_state));
+        spdlog::trace("[PrintLifecycleState] state unchanged: {}",
+                      helix::print_state_name(new_state));
         StateChangeResult unchanged{};
         unchanged.old_state = current_state_;
         unchanged.new_state = current_state_;
@@ -70,7 +75,7 @@ StateChangeResult PrintLifecycleState::on_job_state_changed(helix::PrintJobState
     }
 
     spdlog::debug("[PrintLifecycleState] state transition: {} -> {}",
-                  print_state_name(current_state_), print_state_name(new_state));
+                  helix::print_state_name(current_state_), helix::print_state_name(new_state));
 
     // Compute derived booleans
     bool going_idle = (new_state == PrintState::Idle);
@@ -201,7 +206,7 @@ bool PrintLifecycleState::on_start_phase_changed(int phase,
     if (current_state_ == PrintState::Preparing) {
         current_state_ = derived;
         spdlog::debug("[PrintLifecycleState] exiting Preparing -> {}",
-                      print_state_name(current_state_));
+                      helix::print_state_name(current_state_));
         return true;
     }
 

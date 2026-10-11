@@ -21,8 +21,9 @@ namespace helix::ui {
  * @brief Renders the per-print toggle list on the print-detail panel.
  *
  * Owns the per-option `lv_subject_t` state (one int subject per option in the
- * active printer's `PrePrintOptionSet`). Builds a flat row list — one row per
- * option, label on the left and `ui_switch` on the right. Categories are used
+ * active printer's `PrePrintOptionSet`). Builds a 2-column grid of checkable
+ * `option_tile` cells: one tile per option, icon + 2-line label in an
+ * outline that turns `#primary` when checked. Categories are used
  * as a sort key only; no sub-headers are emitted (the surrounding "PRINT
  * OPTIONS" card header in `print_file_detail.xml` provides the section title).
  *
@@ -81,7 +82,7 @@ class PrePrintOptionsRenderer {
     using VisibilitySubjectLookup = std::function<lv_subject_t*(const std::string& id)>;
 
     /**
-     * @brief Callback invoked when a switch toggles. Receives the option id
+     * @brief Callback invoked when a tile toggles. Receives the option id
      *        and the new state (1 = enabled / checked).
      */
     using OnToggleCallback = std::function<void(const std::string& id, int new_state)>;
@@ -109,7 +110,7 @@ class PrePrintOptionsRenderer {
      * @param option_set Options to render (sorted by category/order on input)
      * @param visibility_lookup Callback returning the can_show_* subject for
      *        each id, or nullptr to skip visibility binding for that option
-     * @param on_toggle Callback fired when any switch changes state
+     * @param on_toggle Callback fired when any tile changes state
      */
     void populate(lv_obj_t* container, const PrePrintOptionSet& option_set,
                   const VisibilitySubjectLookup& visibility_lookup, OnToggleCallback on_toggle);
@@ -131,9 +132,9 @@ class PrePrintOptionsRenderer {
      * @brief Set toggle state for `id`. No-op if id is not present.
      *
      * @note This updates the underlying subject (and propagates to the
-     *       switch's checked state via the observer wiring), but does NOT
+     *       tile's checked state via the observer wiring), but does NOT
      *       invoke the `OnToggleCallback`. Only user-driven changes that fire
-     *       `LV_EVENT_VALUE_CHANGED` on the switch reach the toggle callback.
+     *       `LV_EVENT_VALUE_CHANGED` on the tile reach the toggle callback.
      *       Callers that need both the model update and the side-effect must
      *       invoke the side-effect themselves.
      */
@@ -158,10 +159,10 @@ class PrePrintOptionsRenderer {
     [[nodiscard]] lv_obj_t* get_row(const std::string& id) const;
 
     /**
-     * @brief Look up the switch widget for `id`. Returns nullptr if not
-     *        present. Test/diagnostic helper.
+     * @brief Look up the tile widget for `id`: the checkable object itself.
+     *        Returns nullptr if not present. Test/diagnostic helper.
      */
-    [[nodiscard]] lv_obj_t* get_switch(const std::string& id) const;
+    [[nodiscard]] lv_obj_t* get_toggle(const std::string& id) const;
 
     /// Look up the i18n string for an option's label, falling back to a
     /// humanized version of the id when no `label_key` is set in the DB.
@@ -171,13 +172,19 @@ class PrePrintOptionsRenderer {
     /// modification affects.
     static std::string label_for(const PrePrintOption& opt);
 
+    /// The tile icon for an option id (`grid_large` for bed_mesh,
+    /// `camera_timer` for timelapse, `tune` for anything unlisted). The
+    /// database's `PrePrintOption::icon` is not read: no entry sets it and
+    /// its stored form does not match these icon names.
+    static std::string default_icon_for(const std::string& id);
+
   private:
     friend class PrePrintOptionsRendererTestAccess;
 
     struct OptionRow {
         std::string id;
         lv_obj_t* row = nullptr;
-        lv_obj_t* switch_widget = nullptr;
+        lv_obj_t* toggle_widget = nullptr;
         std::unique_ptr<lv_subject_t> state_subject;
     };
 
@@ -192,7 +199,7 @@ class PrePrintOptionsRenderer {
     void make_row(lv_obj_t* container, const PrePrintOption& opt,
                   const VisibilitySubjectLookup& visibility_lookup);
 
-    static void on_switch_value_changed(lv_event_t* e);
+    static void on_toggle_value_changed(lv_event_t* e);
 
     std::vector<OptionRow> rows_;
     OnToggleCallback on_toggle_;

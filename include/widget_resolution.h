@@ -14,6 +14,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -67,6 +68,17 @@ std::string path_of(lv_obj_t* o, lv_obj_t* base = nullptr);
  * path_of()'s walk-to-the-root for every widget it lists.
  */
 std::string path_segment_for(lv_obj_t* o);
+
+/// A widget whose content reaches past its content area, with the excess in px
+/// on each side. LVGL scrolls a scrollable widget by exactly these amounts and
+/// clips a non-scrollable one.
+struct Overflow {
+    lv_obj_t* obj = nullptr;
+    int32_t top = 0, bottom = 0, left = 0, right = 0;
+};
+
+/// Every widget in @p root's visible subtree, @p root included, that overflows.
+std::vector<Overflow> find_overflow(lv_obj_t* root);
 
 /**
  * @brief Resolve a locator emitted by path_of() back to a live widget.
@@ -128,6 +140,55 @@ bool has_own_click_handler(lv_obj_t* o);
  */
 lv_obj_t* resolve_actionable(lv_obj_t* target, lv_obj_t** descended_to,
                              std::vector<lv_obj_t*>* ambiguous);
+
+/**
+ * @brief Why a real tap on this widget would never arrive, or nullptr.
+ *
+ * `lv_obj_send_event(o, LV_EVENT_CLICKED)` reaches any object at all, so a
+ * synthetic click reports success on widgets a finger cannot activate. LVGL's
+ * input device is stricter: it hit-tests on LV_OBJ_FLAG_CLICKABLE and gates
+ * PRESSED, PRESSING and CLICKED on !lv_obj_has_state(o, LV_STATE_DISABLED)
+ * (lv_indev.c). Anything the indev would refuse is named here so a remote click
+ * can refuse it too, instead of handing back a success a real panel would not
+ * reproduce.
+ *
+ * Checked in the indev's own order, so the reported reason is the first one a
+ * finger would hit. The returned string is a literal, valid for the caller's
+ * lifetime.
+ *
+ * @return Literal reason ("hidden", "not clickable", "disabled"), or nullptr
+ *         when a tap would land.
+ */
+const char* click_blocker(lv_obj_t* obj);
+
+/**
+ * @brief Append every widget below @p root whose name satisfies @p pred, depth first.
+ *
+ * A widget the author never named is not nameless: lv_obj_get_name_resolved()
+ * crafts "<class>_<index>" for it ("lv_label_0") and lv_obj_find_by_name()
+ * already matches that form, so the predicate sees the crafted name. The name
+ * is built on demand and never stored, which matters on the ESP32 target where
+ * naming every widget for real would be paid in heap. Explicit names are still
+ * the better thing for a test to drive: a crafted index counts siblings, so
+ * inserting a widget renumbers the ones after it.
+ *
+ * Hidden subtrees are skipped unless @p include_hidden: a widget the user
+ * cannot see is never what `click <name>` meant. @p root itself is not tested.
+ *
+ * @param pred Called with the resolved name (never null); true keeps the widget.
+ */
+void collect_widgets(lv_obj_t* root, const std::function<bool(const char* name)>& pred,
+                     std::vector<lv_obj_t*>& out, bool include_hidden = false);
+
+/**
+ * @brief collect_widgets() over the search roots a `ctl` command addresses.
+ *
+ * @p scope when given (the caller's working directory), otherwise the active
+ * screen followed by the top layer, where modals live.
+ */
+[[nodiscard]] std::vector<lv_obj_t*>
+search_widgets(lv_obj_t* scope, const std::function<bool(const char* name)>& pred,
+               bool include_hidden = false);
 
 /**
  * @brief Rank one candidate of a by-name search; the highest key wins.

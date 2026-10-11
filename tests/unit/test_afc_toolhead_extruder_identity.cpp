@@ -199,10 +199,8 @@ TEST_CASE("AFC toolchanger: toolhead nodes carry extruder identity, not lane ali
     CHECK(ams_draw::layout_has_extruder_identity(layout));
 
     const auto badges = ams_draw::compute_tool_badge_labels(layout, info, -1, -1);
-    // Prefix is 'T' on BOTH paths now: this labels a toolhead, and T is what
-    // every other surface calls one. #1229 was about which NUMBER is shown —
-    // the extruder's, never the virtual lane alias — and that is what the
-    // assertions around this line still pin.
+    // A toolhead badge is 'T' on both paths; the extruder name, never the
+    // virtual lane alias, supplies the number (prestonbrown/helixscreen#1229).
     CHECK(badges.prefix == 'T');
     REQUIRE(badges.numbers.size() == expected.size());
     for (size_t p = 0; p < expected.size(); ++p) {
@@ -261,10 +259,8 @@ TEST_CASE("AFC toolchanger: the extruder5 toolhead is E5, never the lane's T0 al
     CHECK(badges.numbers[node_e5] != *alias_e5); // THE defect: 5, never 0
     CHECK(badges.numbers[node_e4] == 4);
     CHECK(badges.numbers[node_e4] != *alias_e4);
-    // Prefix is 'T' on BOTH paths now: this labels a toolhead, and T is what
-    // every other surface calls one. #1229 was about which NUMBER is shown —
-    // the extruder's, never the virtual lane alias — and that is what the
-    // assertions around this line still pin.
+    // A toolhead badge is 'T' on both paths; the extruder name, never the
+    // virtual lane alias, supplies the number (prestonbrown/helixscreen#1229).
     CHECK(badges.prefix == 'T');
 }
 
@@ -296,11 +292,10 @@ TEST_CASE("AFC toolchanger: an active lane's alias is never written onto a toolh
 
     const auto badges = ams_draw::compute_tool_badge_labels(layout, info, active_slot, active_node);
     INFO("active lane alias T" << slot->mapped_tool << " must not overwrite the E5 badge");
+    // A toolhead badge is 'T' plus the tool's own 0-based number on both
+    // paths; the extruder name, never the virtual lane alias, supplies the
+    // number (prestonbrown/helixscreen#1229).
     CHECK(badges.numbers[active_node] == 5);
-    // Prefix is 'T' on BOTH paths now: this labels a toolhead, and T is what
-    // every other surface calls one. #1229 was about which NUMBER is shown —
-    // the extruder's, never the virtual lane alias — and that is what the
-    // assertions around this line still pin.
     CHECK(badges.prefix == 'T');
 
     // The legacy path keeps the substitution — it is long-standing behaviour on

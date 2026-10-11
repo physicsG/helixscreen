@@ -8,8 +8,8 @@
 // wire. That cannot see a job the app has committed to but the printer has not
 // reported yet, so during a host-side pre-print block - the K2's forced bed mesh
 // is the motivating case - `print_active` is 0 while the toolhead homes and
-// probes. 21 XML bindings disable jog/motion/extrude on that subject, so all 21
-// controls are live during exactly the window they exist to guard.
+// probes. Every XML binding that disables jog, motion or extrude reads that
+// subject, so the controls are live during exactly the window they guard.
 //
 // These tests pin BOTH halves: the pure predicate over the lifecycle enum, and
 // the published subject, driven through the same status/phase inputs the app
@@ -78,16 +78,16 @@ struct JobHoldsMachineFixture : public LVGLTestFixture {
     }
 
     void set_phase(PrintStartPhase phase) {
-        state_.set_print_start_state(phase, "", 0);
+        state_.print_state().set_print_start_state(phase, "", 0);
         drain();
     }
 
     int holds() {
-        return lv_subject_get_int(state_.get_job_holds_machine_subject());
+        return lv_subject_get_int(state_.print_state().get_job_holds_machine_subject());
     }
 
     int print_active() {
-        return lv_subject_get_int(state_.get_print_active_subject());
+        return lv_subject_get_int(state_.print_state().get_print_active_subject());
     }
 
     PrinterState state_;
@@ -192,14 +192,13 @@ TEST_CASE_METHOD(JobHoldsMachineFixture, "job_holds_machine subject: 0 for every
 // ============================================================================
 // The XML seam
 //
-// Two ways this refactor fails silently:
+// Two ways the binding fails silently:
 //   1. The subject is registered under a different name than the XML asks for.
 //      LVGL logs "No subject was found" and the binding is simply inert - the
 //      control stays enabled and nothing crashes.
-//   2. A later sweep "finishes the job" by putting the bindings back on
-//      print_active, reopening the exact hole this closes.
+//   2. A sweep "finishes the job" by putting the bindings on print_active,
+//      reopening the hole that job_holds_machine closes.
 // ============================================================================
-
 #include "../test_fixtures.h"
 
 #include <fstream>
@@ -213,7 +212,7 @@ TEST_CASE_METHOD(XMLTestFixture,
     // would still be non-null and would never move when this state publishes.
     lv_subject_t* from_xml = lv_xml_get_subject(nullptr, "job_holds_machine");
     REQUIRE(from_xml != nullptr);
-    REQUIRE(from_xml == state().get_job_holds_machine_subject());
+    REQUIRE(from_xml == state().print_state().get_job_holds_machine_subject());
 }
 
 TEST_CASE_METHOD(XMLTestFixture, "the bypass tile is disabled during a host-side pre-print block",
@@ -225,82 +224,613 @@ TEST_CASE_METHOD(XMLTestFixture, "the bypass tile is disabled during a host-side
     REQUIRE_FALSE(lv_obj_has_state(tile, LV_STATE_DISABLED));
 
     // The K2 shape: print_stats still says standby while the toolhead is being
-    // homed and probed by a host-side block. print_active stays 0 through all of
-    // it, which is why this tile used to remain tappable.
+    // homed and probed by a host-side block, so print_active stays 0 through all
+    // of it and cannot keep this tile from being tapped.
     state().update_from_status(nlohmann::json{{"print_stats", {{"state", "standby"}}}});
-    state().set_print_start_state(helix::PrintStartPhase::BED_MESH, "", 0);
+    state().print_state().set_print_start_state(helix::PrintStartPhase::BED_MESH, "", 0);
     for (int pass = 0; pass < 8; ++pass) {
         helix::ui::UpdateQueue::instance().drain();
     }
 
-    REQUIRE(lv_subject_get_int(state().get_print_active_subject()) == 0);
+    REQUIRE(lv_subject_get_int(state().print_state().get_print_active_subject()) == 0);
     REQUIRE(lv_obj_has_state(tile, LV_STATE_DISABLED));
 
     // And it comes back when the block is abandoned - a latched-disabled control
     // is the failure mode that would make this fix worse than the bug.
-    state().set_print_start_state(helix::PrintStartPhase::IDLE, "", 0);
+    state().print_state().set_print_start_state(helix::PrintStartPhase::IDLE, "", 0);
     for (int pass = 0; pass < 8; ++pass) {
         helix::ui::UpdateQueue::instance().drain();
     }
     REQUIRE_FALSE(lv_obj_has_state(tile, LV_STATE_DISABLED));
 }
 
-TEST_CASE("no toolhead-guarding XML binding is left on the raw print_active subject",
-          "[ui][xml][job_holds_machine]") {
-    // Pins the sweep itself. These four files hold every `disabled`-state
-    // binding that exists to keep a control off the toolhead; all of them must
-    // ask the lifecycle, not the wire. Run from the repo root (as the suite is).
-    const char* files[] = {
-        "ui_xml/controls_panel.xml",
-        "ui_xml/micro/controls_panel.xml",
-        "ui_xml/motion_panel.xml",
-        "ui_xml/components/panel_widget_bypass.xml",
-    };
+// ============================================================================
+// The guard arrives by construction
+//
+// The moves_machine attribute is what makes "did anyone forget one" answerable:
+// the engine installs the machine_motion_blocked -> disabled binding for the
+// element itself, so a machine-moving control is guarded the moment its XML
+// says it moves the machine. This test pins that construction, not a spelling.
+// ============================================================================
 
-    int derived_bindings = 0;
-    for (const char* path : files) {
-        std::ifstream in(path);
-        INFO("reading " << path);
-        REQUIRE(in.good());
-        std::stringstream ss;
-        ss << in.rdbuf();
-        const std::string xml = ss.str();
+TEST_CASE_METHOD(XMLTestFixture, "moves_machine installs the toolhead guard by construction",
+                 "[ui][xml][job_holds_machine]") {
+    const char* attrs[] = {"moves_machine", "true", nullptr};
+    lv_obj_t* control = static_cast<lv_obj_t*>(lv_xml_create(test_screen(), "lv_obj", attrs));
+    REQUIRE(control != nullptr);
 
-        INFO(path << " still binds a disabled state to the raw print_active subject");
-        REQUIRE(xml.find("<bind_state_if_eq subject=\"print_active\" state=\"disabled\"") ==
-                std::string::npos);
+    REQUIRE_FALSE(lv_obj_has_state(control, LV_STATE_DISABLED));
 
-        // The full form, including the direction. Counting only the subject name
-        // would let ref_value="0" through - controls disabled when idle and live
-        // while printing, the exact inversion - and the census would still read
-        // 21. Only the bypass tile has its direction pinned behaviourally.
-        size_t pos = 0;
-        const std::string needle =
-            "<bind_state_if_eq subject=\"job_holds_machine\" state=\"disabled\" ref_value=\"1\"/>";
-        while ((pos = xml.find(needle, pos)) != std::string::npos) {
-            ++derived_bindings;
-            pos += needle.size();
-        }
-
-        // A control with a SECOND reason to be disabled cannot carry two binds:
-        // each bind_state_* sets or clears the state, so the later one undoes
-        // the earlier. Those fold the lifecycle guard into one compound cond=,
-        // which still pins the direction (`job_holds_machine eq 1`) and still
-        // counts - a silent drop is exactly as visible either way.
-        pos = 0;
-        const std::string compound = "<bind_state_if cond=\"job_holds_machine eq 1 or ";
-        while ((pos = xml.find(compound, pos)) != std::string::npos) {
-            const size_t end = xml.find("/>", pos);
-            INFO(path << " has an unterminated bind_state_if");
-            REQUIRE(end != std::string::npos);
-            INFO(path << " folds job_holds_machine into a bind that is not the disabled state");
-            REQUIRE(xml.substr(pos, end - pos).find("state=\"disabled\"") != std::string::npos);
-            ++derived_bindings;
-            pos = end;
-        }
+    // A host-side pre-print block: print_active stays 0 and only the
+    // lifecycle subject moves.
+    state().update_from_status(nlohmann::json{{"print_stats", {{"state", "standby"}}}});
+    state().print_state().set_print_start_state(helix::PrintStartPhase::BED_MESH, "", 0);
+    for (int pass = 0; pass < 8; ++pass) {
+        helix::ui::UpdateQueue::instance().drain();
     }
 
-    // The census count. If a binding is legitimately added or removed, update
-    // this - the number existing is what makes a silent drop visible.
-    REQUIRE(derived_bindings == 21);
+    REQUIRE(lv_subject_get_int(state().print_state().get_print_active_subject()) == 0);
+    REQUIRE(lv_obj_has_state(control, LV_STATE_DISABLED));
+
+    // And it releases - a latched-disabled control is the failure mode.
+    state().print_state().set_print_start_state(helix::PrintStartPhase::IDLE, "", 0);
+    for (int pass = 0; pass < 8; ++pass) {
+        helix::ui::UpdateQueue::instance().drain();
+    }
+    REQUIRE_FALSE(lv_obj_has_state(control, LV_STATE_DISABLED));
+
+    // Spools on the bed block the same controls with no job at all
+    // (prestonbrown/helixscreen#1730).
+    state().print_state().set_spool_latch(true);
+    REQUIRE(lv_subject_get_int(state().print_state().get_job_holds_machine_subject()) == 0);
+    REQUIRE(lv_obj_has_state(control, LV_STATE_DISABLED));
+    state().print_state().set_spool_latch(false);
+    REQUIRE_FALSE(lv_obj_has_state(control, LV_STATE_DISABLED));
+}
+
+// ============================================================================
+// The census
+//
+// The gate walks every .xml under ui_xml/ and asks one question per file: does
+// it declare a control? A file that does must appear in exactly one of the two
+// tables below - either with the number of toolhead guards its controls carry,
+// or as an assertion that nothing in it commands the printer. A new panel
+// therefore arrives classified or arrives red; it cannot arrive invisible.
+//
+// What the gate reads is the shape of the guards that exist and the
+// classification a human wrote. It cannot read a callback and work out that the
+// button homes the toolhead, so a control that needs a guard and sits in a file
+// already classified as guarded still passes (prestonbrown/helixscreen#1518).
+// ============================================================================
+
+#include <algorithm>
+#include <filesystem>
+#include <set>
+#include <vector>
+
+namespace {
+
+constexpr const char* kSubject = "job_holds_machine";
+constexpr const char* kDisabled = "state=\"disabled\"";
+constexpr const char* kGuardAttribute = "moves_machine=\"true\"";
+/// The attribute at any value. lv_xml_to_bool() reads everything except the
+/// literal "false" as true, so `moves_machine="false"` is an attribute that
+/// carries no guard while reading like a deliberate one.
+constexpr const char* kGuardAttributeName = "moves_machine=\"";
+constexpr const char* kSocketGuard = "moves_machine=\"$";
+
+struct GuardedFile {
+    const char* path;
+    int guards;
+};
+
+/// Files whose controls carry a toolhead guard, and how many each carries.
+constexpr GuardedFile kGuardedFiles[] = {
+    {"ui_xml/ams_device_operations.xml", 1},
+    {"ui_xml/batch_filament_modal.xml", 1},
+    {"ui_xml/bed_drying_modal.xml", 1},
+    {"ui_xml/calibration_tool_offset_panel.xml", 2},
+    {"ui_xml/chamber_dryer_modal.xml", 1},
+    {"ui_xml/cfs_chute_calibration_overlay.xml", 6},
+    {"ui_xml/components/ams_sidebar.xml", 1},
+    {"ui_xml/components/chamber_dryer_row.xml", 1},
+    {"ui_xml/components/panel_widget_bypass.xml", 1},
+    {"ui_xml/calibration_pa_panel.xml", 2},
+    {"ui_xml/controls_panel.xml", 17},
+    {"ui_xml/header_bar.xml", 1},
+    {"ui_xml/micro/controls_panel.xml", 17},
+    {"ui_xml/micro/header_bar.xml", 1},
+    {"ui_xml/motion_panel.xml", 8},
+    {"ui_xml/components/move_preset_grid.xml", 11},
+    {"ui_xml/components/motion_bed_map.xml", 2},
+    {"ui_xml/probe_generic_panel.xml", 2},
+    {"ui_xml/probe_eddy_panel.xml", 2},
+    {"ui_xml/probe_cartographer_panel.xml", 2},
+    {"ui_xml/probe_bltouch_panel.xml", 2},
+    {"ui_xml/probe_beacon_panel.xml", 2},
+    {"ui_xml/temp_graph_overlay.xml", 2},
+};
+
+/// Control-bearing files that command nothing on the printer. A guard appearing
+/// in one of these is a stale classification, not a bonus.
+constexpr const char* kNoMachineControlFiles[] = {
+    "ui_xml/abort_progress_modal.xml",
+    "ui_xml/about_settings_overlay.xml",
+    "ui_xml/accel_sensor_row.xml",
+    "ui_xml/advanced_panel.xml",
+    "ui_xml/ams_context_menu.xml",
+    "ui_xml/ams_current_tool.xml",
+    "ui_xml/ams_edit_overlay.xml",
+    "ui_xml/ams_environment_overlay.xml",
+    "ui_xml/ams_loading_error_modal.xml",
+    "ui_xml/ams_overview_panel.xml",
+    "ui_xml/ams_panel.xml",
+    "ui_xml/ams_recover_state_modal.xml",
+    "ui_xml/ams_selector_menu.xml",
+    "ui_xml/ams_slot_view.xml",
+    "ui_xml/ams_toolhead_menu.xml",
+    "ui_xml/ams_unit_card.xml",
+    "ui_xml/barcode_scanner_settings.xml",
+    "ui_xml/bed_mesh_calibrate_modal.xml",
+    "ui_xml/bed_mesh_panel.xml",
+    "ui_xml/bed_mesh_rename_modal.xml",
+    "ui_xml/bed_mesh_save_config_modal.xml",
+    "ui_xml/calibration_pid_panel.xml",
+    "ui_xml/calibration_zoffset_panel.xml",
+    "ui_xml/change_host_modal.xml",
+    "ui_xml/color_picker.xml",
+    "ui_xml/components/activity_chip.xml",
+    "ui_xml/components/ams_environment_indicator.xml",
+    "ui_xml/components/barcode_scanner_device_row.xml",
+    "ui_xml/components/bed_drying_banner.xml",
+    "ui_xml/components/bed_mesh_canvas_band.xml",
+    "ui_xml/components/bed_mesh_profiles_card.xml",
+    "ui_xml/components/buffer_status_modal.xml",
+    "ui_xml/components/camera_config_modal.xml",
+    "ui_xml/components/camera_fullscreen.xml",
+    "ui_xml/components/chamber_fault_banner.xml",
+    "ui_xml/components/clog_detection_config_modal.xml",
+    "ui_xml/components/color_swatch.xml",
+    "ui_xml/components/color_swatch_grid.xml",
+    "ui_xml/components/context_menu_backdrop.xml",
+    "ui_xml/components/context_menu_card.xml",
+    "ui_xml/components/exclude_object_map.xml",
+    "ui_xml/components/exclude_object_row.xml",
+    "ui_xml/components/exclude_object_side_list.xml",
+    "ui_xml/components/filament_catalog_add_row.xml",
+    "ui_xml/components/filament_catalog_picker.xml",
+    "ui_xml/components/filament_catalog_row.xml",
+    "ui_xml/components/filament_catalog_selector.xml",
+    "ui_xml/components/filament_mapping_tool_row.xml",
+    "ui_xml/components/filament_material_group.xml",
+    "ui_xml/components/filament_operations_group.xml",
+    "ui_xml/components/filament_slot_picker_row.xml",
+    "ui_xml/components/filament_source_row.xml",
+    "ui_xml/components/filament_spool_card.xml",
+    "ui_xml/components/home_action_tile.xml",
+    "ui_xml/components/home_next_page_slot.xml",
+    "ui_xml/components/home_page_container.xml",
+    "ui_xml/components/ipp_print_modal.xml",
+    "ui_xml/components/job_queue_row.xml",
+    "ui_xml/components/lock_screen.xml",
+    "ui_xml/components/material_temps_row.xml",
+    "ui_xml/components/navbar_drying.xml",
+    "ui_xml/components/navbar_estop.xml",
+    "ui_xml/components/option_tile.xml",
+    "ui_xml/components/page_scroll_gutter.xml",
+    "ui_xml/components/panel_widget_active_spool.xml",
+    "ui_xml/components/panel_widget_bed_temperature.xml",
+    "ui_xml/components/panel_widget_camera.xml",
+    "ui_xml/components/panel_widget_chamber_temperature.xml",
+    "ui_xml/components/panel_widget_clog_detection.xml",
+    "ui_xml/components/panel_widget_control_buttons.xml",
+    "ui_xml/components/panel_widget_fan.xml",
+    "ui_xml/components/panel_widget_fan_stack.xml",
+    "ui_xml/components/panel_widget_favorite_macro.xml",
+    "ui_xml/components/panel_widget_filament.xml",
+    "ui_xml/components/panel_widget_filament_buffer.xml",
+    "ui_xml/components/panel_widget_firmware_restart.xml",
+    "ui_xml/components/panel_widget_gcode_console.xml",
+    "ui_xml/components/panel_widget_job_queue.xml",
+    "ui_xml/components/panel_widget_led.xml",
+    "ui_xml/components/panel_widget_led_controls.xml",
+    "ui_xml/components/panel_widget_lock.xml",
+    "ui_xml/components/panel_widget_macros.xml",
+    "ui_xml/components/panel_widget_motion.xml",
+    "ui_xml/components/panel_widget_network.xml",
+    "ui_xml/components/panel_widget_notifications.xml",
+    "ui_xml/components/exclude_objects_button.xml",
+    "ui_xml/components/panel_widget_power_device.xml",
+    "ui_xml/components/panel_widget_preheat.xml",
+    "ui_xml/components/panel_widget_print_stats.xml",
+    "ui_xml/components/panel_widget_print_status.xml",
+    "ui_xml/components/panel_widget_printer_image.xml",
+    "ui_xml/components/panel_widget_shutdown.xml",
+    "ui_xml/components/panel_widget_temp_graph.xml",
+    "ui_xml/components/panel_widget_temp_stack.xml",
+    "ui_xml/components/panel_widget_temperature.xml",
+    "ui_xml/components/panel_widget_thermistor.xml",
+    "ui_xml/components/panel_widget_tips.xml",
+    "ui_xml/components/panel_widget_tool_switcher.xml",
+    "ui_xml/components/picker_chip.xml",
+    "ui_xml/components/picker_option_row.xml",
+    "ui_xml/components/pin_entry_modal.xml",
+    "ui_xml/components/preflight_check_modal.xml",
+    "ui_xml/components/print_status_detailed_active.xml",
+    "ui_xml/components/print_status_detailed_idle.xml",
+    "ui_xml/components/print_status_fan_row.xml",
+    "ui_xml/components/print_status_preview_card.xml",
+    "ui_xml/components/printer_switch_row.xml",
+    "ui_xml/components/progress_bar.xml",
+    "ui_xml/components/spaghetti_detection_modal.xml",
+    "ui_xml/components/temp_card_unified.xml",
+    "ui_xml/components/temp_graph_config_modal.xml",
+    "ui_xml/components/theme_swatch_grid.xml",
+    "ui_xml/components/tool_picker_button.xml",
+    "ui_xml/components/upgrade_banner.xml",
+    "ui_xml/components/zone_row.xml",
+    "ui_xml/components/zone_tab.xml",
+    "ui_xml/console_panel.xml",
+    "ui_xml/console_settings_overlay.xml",
+    "ui_xml/crash_report_modal.xml",
+    "ui_xml/create_filament_modal.xml",
+    "ui_xml/create_vendor_modal.xml",
+    "ui_xml/debug_bundle_modal.xml",
+    "ui_xml/estop_confirmation_dialog.xml",
+    "ui_xml/exclude_object_modal.xml",
+    "ui_xml/factory_reset_modal.xml",
+    "ui_xml/fan_dial.xml",
+    "ui_xml/fan_rename_modal.xml",
+    "ui_xml/favorite_macro_config_modal.xml",
+    "ui_xml/filament_mapping_modal.xml",
+    "ui_xml/filament_panel.xml",
+    "ui_xml/filament_product_edit_modal.xml",
+    "ui_xml/filament_sensor_row.xml",
+    "ui_xml/form_field.xml",
+    "ui_xml/hardware_issue_row.xml",
+    "ui_xml/hidden_network_modal.xml",
+    "ui_xml/history_dashboard_panel.xml",
+    "ui_xml/history_detail_overlay.xml",
+    "ui_xml/history_list_panel.xml",
+    "ui_xml/history_list_row.xml",
+    "ui_xml/home_panel.xml",
+    "ui_xml/humidity_sensor_row.xml",
+    "ui_xml/info_qr_modal.xml",
+    "ui_xml/input_shaper_panel.xml",
+    "ui_xml/job_queue_modal.xml",
+    "ui_xml/klipper_recovery_dialog.xml",
+    "ui_xml/label_printer_settings.xml",
+    "ui_xml/led_control_overlay.xml",
+    "ui_xml/led_list_chip.xml",
+    "ui_xml/led_picker.xml",
+    "ui_xml/led_settings_overlay.xml",
+    "ui_xml/led_white_tone.xml",
+    "ui_xml/machine_limits_overlay.xml",
+    "ui_xml/macro_buttons_overlay.xml",
+    "ui_xml/macro_card.xml",
+    "ui_xml/macro_panel.xml",
+    "ui_xml/macro_param_modal.xml",
+    "ui_xml/material_temps_overlay.xml",
+    "ui_xml/micro/material_temps_overlay.xml",
+    "ui_xml/micro/theme_editor_overlay.xml",
+    "ui_xml/micro/theme_preview_overlay.xml",
+    "ui_xml/micro_portrait/material_temps_overlay.xml",
+    "ui_xml/modal_button_row.xml",
+    "ui_xml/modal_dialog.xml",
+    "ui_xml/modal_header.xml",
+    "ui_xml/motion_settings_overlay.xml",
+    "ui_xml/navigation_bar.xml",
+    "ui_xml/network_settings_overlay.xml",
+    "ui_xml/network_test_modal.xml",
+    "ui_xml/numeric_keypad_panel.xml",
+    "ui_xml/overlay_backdrop.xml",
+    "ui_xml/overlay_panel.xml",
+    "ui_xml/panel_belt_tension.xml",
+    "ui_xml/plugin_install_modal.xml",
+    "ui_xml/portrait/print_status_panel.xml",
+    "ui_xml/portrait/print_tune_panel.xml",
+    "ui_xml/power_device_row.xml",
+    "ui_xml/print_completion_modal.xml",
+    "ui_xml/print_cancel_confirm_modal.xml",
+    "ui_xml/print_file_card.xml",
+    "ui_xml/print_file_detail.xml",
+    "ui_xml/print_file_list_row.xml",
+    "ui_xml/print_select_panel.xml",
+    "ui_xml/print_status_configure_picker.xml",
+    "ui_xml/print_status_panel.xml",
+    "ui_xml/print_tune_panel.xml",
+    "ui_xml/printer_image_list_item.xml",
+    "ui_xml/printer_image_overlay.xml",
+    "ui_xml/printer_image_tagger_overlay.xml",
+    "ui_xml/printer_list_item.xml",
+    "ui_xml/printer_list_overlay.xml",
+    "ui_xml/printer_manager_overlay.xml",
+    "ui_xml/printer_switch_interstitial.xml",
+    "ui_xml/printer_switch_menu.xml",
+    "ui_xml/probe_accuracy_modal.xml",
+    "ui_xml/probe_config_edit_modal.xml",
+    "ui_xml/probe_overlay.xml",
+    "ui_xml/probe_sensor_row.xml",
+    "ui_xml/qr_scanner_overlay.xml",
+    "ui_xml/restart_prompt_dialog.xml",
+    "ui_xml/retraction_settings_overlay.xml",
+    "ui_xml/runout_guidance_modal.xml",
+    "ui_xml/screws_tilt_panel.xml",
+    "ui_xml/screws_tilt_share_modal.xml",
+    "ui_xml/security_settings_overlay.xml",
+    "ui_xml/sensors_overlay.xml",
+    "ui_xml/setting_action_row.xml",
+    "ui_xml/setting_dropdown_row.xml",
+    "ui_xml/setting_form_dropdown.xml",
+    "ui_xml/setting_form_input.xml",
+    "ui_xml/setting_form_macro_field.xml",
+    "ui_xml/setting_section_header.xml",
+    "ui_xml/setting_slider_row.xml",
+    "ui_xml/setting_state_row.xml",
+    "ui_xml/setting_text_row.xml",
+    "ui_xml/setting_toggle_row.xml",
+    "ui_xml/setting_value_field.xml",
+    "ui_xml/settings_appearance_overlay.xml",
+    "ui_xml/settings_connection_overlay.xml",
+    "ui_xml/settings_display_overlay.xml",
+    "ui_xml/settings_hardware_overlay.xml",
+    "ui_xml/settings_help_overlay.xml",
+    "ui_xml/settings_language_time_overlay.xml",
+    "ui_xml/settings_panel.xml",
+    "ui_xml/settings_printing_overlay.xml",
+    "ui_xml/settings_safety_overlay.xml",
+    "ui_xml/settings_sound_overlay.xml",
+    "ui_xml/settings_system_overlay.xml",
+    "ui_xml/settings_touch_overlay.xml",
+    "ui_xml/settings_updates_overlay.xml",
+    "ui_xml/shutdown_modal.xml",
+    "ui_xml/spool_wizard.xml",
+    "ui_xml/spoolman_context_menu.xml",
+    "ui_xml/spoolman_edit_modal.xml",
+    "ui_xml/spoolman_panel.xml",
+    "ui_xml/spoolman_settings.xml",
+    "ui_xml/spoolman_spool_item.xml",
+    "ui_xml/spoolman_spool_row.xml",
+    "ui_xml/telemetry_data_overlay.xml",
+    "ui_xml/telemetry_info_modal.xml",
+    "ui_xml/theme_editor_overlay.xml",
+    "ui_xml/theme_preview_overlay.xml",
+    "ui_xml/theme_save_as_modal.xml",
+    "ui_xml/timelapse_install_overlay.xml",
+    "ui_xml/timelapse_settings_overlay.xml",
+    "ui_xml/timelapse_video_card.xml",
+    "ui_xml/timelapse_videos_overlay.xml",
+    "ui_xml/toast_notification.xml",
+    "ui_xml/touch_calibration_overlay.xml",
+    "ui_xml/tour_tooltip_card.xml",
+    "ui_xml/update_download_modal.xml",
+    "ui_xml/update_notify_modal.xml",
+    "ui_xml/widget_catalog_overlay.xml",
+    "ui_xml/width_sensor_row.xml",
+    "ui_xml/wifi_network_item.xml",
+    "ui_xml/wifi_password_modal.xml",
+    "ui_xml/wizard_catalog_row.xml",
+    "ui_xml/wizard_connection.xml",
+    "ui_xml/wizard_container.xml",
+    "ui_xml/wizard_fan_select.xml",
+    "ui_xml/wizard_filament_row.xml",
+    "ui_xml/wizard_filament_sensor_select.xml",
+    "ui_xml/wizard_heater_select.xml",
+    "ui_xml/wizard_input_shaper.xml",
+    "ui_xml/wizard_language_chooser.xml",
+    "ui_xml/wizard_led_select.xml",
+    "ui_xml/wizard_preferences.xml",
+    "ui_xml/wizard_printer_identify.xml",
+    "ui_xml/wizard_summary.xml",
+    "ui_xml/wizard_telemetry.xml",
+    "ui_xml/wizard_touch_calibration.xml",
+    "ui_xml/wizard_vendor_row.xml",
+    "ui_xml/wizard_wifi_setup.xml",
+};
+
+std::string read_xml(const std::string& path) {
+    std::ifstream in(path);
+    if (!in.good()) {
+        return {};
+    }
+    std::stringstream ss;
+    ss << in.rdbuf();
+    return ss.str();
+}
+
+/// Every .xml under ui_xml/, repo-root-relative and sorted. Dot-directories
+/// hold tool scratch space rather than layouts.
+std::vector<std::string> walk_ui_xml() {
+    namespace fs = std::filesystem;
+    std::vector<std::string> paths;
+    for (auto it = fs::recursive_directory_iterator("ui_xml");
+         it != fs::recursive_directory_iterator(); ++it) {
+        if (it->is_directory()) {
+            if (it->path().filename().string().rfind('.', 0) == 0) {
+                it.disable_recursion_pending();
+            }
+            continue;
+        }
+        if (it->path().extension() == ".xml") {
+            paths.push_back(it->path().generic_string());
+        }
+    }
+    std::sort(paths.begin(), paths.end());
+    return paths;
+}
+
+/// A control the user can operate. Component rows and event_cb elements both
+/// spell their handler `callback="..."`; the rest are containers made clickable
+/// and the primitive widgets that are clickable by nature.
+bool declares_a_control(const std::string& xml) {
+    for (const char* marker :
+         {"callback=\"", "clickable=\"true\"", "<ui_button", "<lv_button", "<ui_switch",
+          "<lv_switch", "<lv_slider", "<lv_dropdown", "<lv_checkbox", "<lv_roller", "<text_input",
+          "<lv_textarea", "<modal_button_row"}) {
+        if (xml.find(marker) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Each `<bind_state_*` element in the file, as raw text.
+std::vector<std::string> state_binds(const std::string& xml) {
+    std::vector<std::string> binds;
+    for (size_t pos = 0; (pos = xml.find("<bind_state_", pos)) != std::string::npos;) {
+        const size_t end = xml.find("/>", pos);
+        if (end == std::string::npos) {
+            binds.push_back(xml.substr(pos));
+            break;
+        }
+        binds.push_back(xml.substr(pos, end + 2 - pos));
+        pos = end + 2;
+    }
+    return binds;
+}
+
+size_t count_occurrences(const std::string& haystack, const std::string& needle) {
+    size_t n = 0;
+    for (size_t pos = 0; (pos = haystack.find(needle, pos)) != std::string::npos;
+         pos += needle.size()) {
+        ++n;
+    }
+    return n;
+}
+
+struct GuardScan {
+    size_t recognized = 0; ///< moves_machine="true" attributes
+    size_t attributes = 0; ///< moves_machine attributes at any value
+};
+
+GuardScan scan_guards(const std::string& xml) {
+    GuardScan scan;
+    scan.recognized = count_occurrences(xml, kGuardAttribute);
+    // A `moves_machine="$prop"` socket is the component plumbing that carries
+    // a caller's decision, not a guard decision itself: the caller's literal
+    // is what the census row at the call site counts, so subtract the socket
+    // here or the template reads as carrying its own guard.
+    scan.attributes =
+        count_occurrences(xml, kGuardAttributeName) - count_occurrences(xml, kSocketGuard);
+    return scan;
+}
+
+} // namespace
+
+TEST_CASE("every control-bearing XML file is classified for toolhead safety",
+          "[ui][xml][job_holds_machine]") {
+    const std::vector<std::string> walked = walk_ui_xml();
+    INFO("the suite runs from the repo root, where ui_xml/ is");
+    REQUIRE_FALSE(walked.empty());
+
+    std::set<std::string> classified;
+    for (const GuardedFile& row : kGuardedFiles) {
+        INFO(row.path << " appears twice in the census");
+        REQUIRE(classified.insert(row.path).second);
+    }
+    for (const char* path : kNoMachineControlFiles) {
+        INFO(path << " appears in both census tables");
+        REQUIRE(classified.insert(path).second);
+    }
+
+    std::set<std::string> bears_controls;
+    std::string unclassified;
+    for (const std::string& path : walked) {
+        if (!declares_a_control(read_xml(path))) {
+            continue;
+        }
+        bears_controls.insert(path);
+        if (classified.count(path) == 0) {
+            unclassified += "\n  " + path;
+        }
+    }
+    {
+        INFO("These files declare a control and are in neither census table:"
+             << unclassified
+             << "\nAdd each to kGuardedFiles with the number of toolhead guards its controls "
+                "carry, or to kNoMachineControlFiles to state that none of them commands the "
+                "printer.");
+        REQUIRE(unclassified.empty());
+    }
+
+    std::string stale;
+    for (const std::string& path : classified) {
+        if (bears_controls.count(path) == 0) {
+            stale += "\n  " + path;
+        }
+    }
+    INFO("These census rows name a file that is gone or no longer declares a control:"
+         << stale << "\nDrop the row.");
+    REQUIRE(stale.empty());
+}
+
+TEST_CASE("no XML disables a control on the raw print_active subject",
+          "[ui][xml][job_holds_machine]") {
+    for (const std::string& path : walk_ui_xml()) {
+        for (const std::string& bind : state_binds(read_xml(path))) {
+            if (bind.find(kDisabled) == std::string::npos) {
+                continue;
+            }
+            INFO(path << " disables a control on print_active, which reads 0 throughout a "
+                         "host-side pre-print block while the toolhead homes and probes: "
+                      << bind);
+            REQUIRE(bind.find("print_active") == std::string::npos);
+        }
+    }
+}
+
+TEST_CASE("each guarded file carries exactly the toolhead guards its census row pins",
+          "[ui][xml][job_holds_machine]") {
+    for (const GuardedFile& row : kGuardedFiles) {
+        const std::string xml = read_xml(row.path);
+        INFO("reading " << row.path);
+        REQUIRE_FALSE(xml.empty());
+
+        const GuardScan scan = scan_guards(xml);
+        {
+            INFO(row.path << " carries " << scan.attributes << " moves_machine attributes but "
+                          << scan.recognized
+                          << " spelled \"true\". Every other value installs no guard, or "
+                             "installs one while reading as a refusal - the engine treats "
+                             "everything but the literal \"false\" as true. Spell it "
+                             "\"true\" or drop the attribute.");
+            REQUIRE(scan.attributes == scan.recognized);
+        }
+        INFO(row.path << " pins " << row.guards << " toolhead guards and carries "
+                      << scan.recognized
+                      << ". If a control was legitimately added or removed, update the row - the "
+                         "number being written down is what makes a silent drop visible.");
+        REQUIRE(scan.recognized == static_cast<size_t>(row.guards));
+    }
+}
+
+TEST_CASE("a file classified as commanding nothing carries no toolhead guard",
+          "[ui][xml][job_holds_machine]") {
+    for (const char* path : kNoMachineControlFiles) {
+        const std::string xml = read_xml(path);
+        INFO("reading " << path);
+        REQUIRE_FALSE(xml.empty());
+        const GuardScan scan = scan_guards(xml);
+        INFO(path << " carries " << scan.attributes
+                  << " moves_machine attributes, so a control in it does command the printer. "
+                     "Move its row to kGuardedFiles with that count.");
+        REQUIRE(scan.attributes == 0);
+    }
+}
+
+TEST_CASE("no XML names the job_holds_machine subject", "[ui][xml][job_holds_machine]") {
+    // The guard arrives by construction from moves_machine, on the element
+    // itself and composed with whatever else drives its state. A layout that
+    // spells the subject is either binding it by hand - which rots, and which
+    // no census row counts - or claiming a guard in prose without carrying one.
+    // Counting occurrences over the whole file rather than inspecting
+    // <bind_state_* elements is what makes a
+    // <bind_flag_if_eq subject="job_holds_machine"/> visible.
+    for (const std::string& path : walk_ui_xml()) {
+        const size_t mentions = count_occurrences(read_xml(path), kSubject);
+        INFO(path << " names job_holds_machine " << mentions
+                  << " times. Carry the guard as moves_machine=\"true\" on the control, and "
+                     "say the rest in words that are not the subject name.");
+        REQUIRE(mentions == 0);
+    }
 }

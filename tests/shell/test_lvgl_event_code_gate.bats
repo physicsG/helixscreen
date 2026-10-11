@@ -141,7 +141,7 @@ setup() {
 # --- wiring ---
 
 @test "gate is wired into quality-checks.sh" {
-    run grep -q "gen_lvgl_event_codes.py" scripts/quality-checks.sh
+    run grep -q "gen_lvgl_event_codes.py" scripts/qc/lvgl_event_codes.sh
     [ "$status" -eq 0 ]
 }
 
@@ -151,10 +151,10 @@ setup() {
 }
 
 @test "gate wakes on the worker, the enum config, and the generator" {
-    run bash -c "sed -n '/qc_lvgl_event_codes)/,/;;/p' scripts/quality-checks.sh"
+    run qc_trigger lvgl_event_codes
     [ "$status" -eq 0 ]
-    [[ "$output" == *"^server/crash-worker/"* ]]
-    [[ "$output" == *"gen_lvgl_event_codes"* ]]
+    contains "^server/crash-worker/" "$output"
+    contains "gen_lvgl_event_codes" "$output"
     [[ "$output" == *"lv_conf"* ]]
 }
 

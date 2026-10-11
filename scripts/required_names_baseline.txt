@@ -1,0 +1,3 @@
+# find_required() names missing from their XML in some layout variant.
+# Accepted debt, shrink-only: fix the XML or switch the site to
+# find_optional(), then re-run with --write-baseline.

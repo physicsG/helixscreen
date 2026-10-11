@@ -18,7 +18,8 @@ setup() {
 
 teardown() {
     rm -rf "$STAGE_DIR"
-    rm -f build/ad5m-br/bin/helix-screen build/ad5m-br/bin/helix-splash
+    rm -f build/ad5m-br/bin/helix-screen build/ad5m-br/bin/helix-splash \
+        build/ad5m-br/bin/libhelix-bluetooth.so
 }
 
 @test "install: produces /opt/helixscreen/bin/helix-screen" {
@@ -95,4 +96,18 @@ teardown() {
             -type f
         return 1
     }
+}
+
+@test "install: puts the Bluetooth plugin beside the binary that dlopen()s it" {
+    echo 'stub' > build/ad5m-br/bin/libhelix-bluetooth.so
+    run make install PLATFORM_TARGET=ad5m-br DESTDIR="$STAGE_DIR"
+    [ "$status" -eq 0 ]
+    [ -f "$STAGE_DIR/opt/helixscreen/bin/libhelix-bluetooth.so" ]
+}
+
+@test "install: succeeds without a Bluetooth plugin on platforms that do not build one" {
+    rm -f build/ad5m-br/bin/libhelix-bluetooth.so
+    run make install PLATFORM_TARGET=ad5m-br DESTDIR="$STAGE_DIR"
+    [ "$status" -eq 0 ]
+    [ ! -e "$STAGE_DIR/opt/helixscreen/bin/libhelix-bluetooth.so" ]
 }

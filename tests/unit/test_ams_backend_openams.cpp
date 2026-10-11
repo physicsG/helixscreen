@@ -1,0 +1,1783 @@
+// Copyright (C) 2026 356C LLC
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#include "ui_ams_detail.h"
+#include "ui_test_utils.h"
+#include "ui_update_queue.h"
+
+#include "../helix_test_fixture.h"
+#include "../test_helpers/filament_slot_override_store_test_access.h"
+#include "../test_helpers/mock_printer.h"
+#include "ams_backend_openams.h"
+#include "ams_error.h"
+#include "ams_types.h"
+#include "buffer_reading.h"
+#include "filament_op_dispatch.h"
+#include "filament_op_execute.h"
+#include "filament_slot_override.h"
+#include "filament_slot_override_store.h"
+#include "lvgl_ui_test_fixture.h"
+#include "moonraker_api_mock.h"
+#include "moonraker_client_mock.h"
+#include "printer_discovery.h"
+#include "printer_state.h"
+#include "test_helpers/openams_test_access.h"
+#include "test_helpers/registered_backend.h"
+#include "test_helpers/scoped_env.h"
+#include "test_helpers/seeded_override.h"
+#include "ui/ams_drawing_utils.h"
+
+#include <filesystem>
+#include <functional>
+#include <memory>
+#include <set>
+#include <string>
+#include <unistd.h>
+#include <vector>
+
+#include "../catch_amalgamated.hpp"
+#include "hv/json.hpp"
+
+using helix::AmsAction;
+using helix::AmsBackendOpenAms;
+using helix::AmsResult;
+using helix::AmsType;
+using helix::PathTopology;
+using helix::SlotStatus;
+using json = nlohmann::json;
+
+namespace {
+
+/// The real backend, started, with every command it sends captured. Load and
+/// unload hand back their completion and error callbacks so a case can decide
+/// how the macro ends.
+class OpenAmsHarness : public AmsBackendOpenAms {
+  public:
+    explicit OpenAmsHarness(IMoonrakerAPI* api = nullptr, helix::IMoonrakerClient* client = nullptr)
+        : AmsBackendOpenAms(api, client) {
+        running_ = true;
+        set_event_callback(
+            [this](const std::string& event, const std::string&) { events.push_back(event); });
+    }
+
+    ~OpenAmsHarness() override {
+        helix::ui::UpdateQueue::instance().drain();
+    }
+
+    void feed(const json& manager) {
+        handle_status_update(json{{"method", "notify_status_update"},
+                                  {"params", json::array({json{{"oams_manager", manager}}, 0.0})}});
+    }
+
+    helix::AmsError execute_gcode(const std::string& gcode) override {
+        commands.push_back(gcode);
+        return helix::AmsErrorHelper::success();
+    }
+
+    void complete_operation() {
+        REQUIRE(on_complete);
+        on_complete();
+        helix::ui::UpdateQueue::instance().drain();
+    }
+
+    void fail_operation(const std::string& message) {
+        REQUIRE(on_error);
+        MoonrakerError error;
+        error.message = message;
+        on_error(error);
+        helix::ui::UpdateQueue::instance().drain();
+    }
+
+    std::vector<std::string> operations;
+    std::vector<std::string> commands;
+    std::vector<std::string> events;
+    bool send_succeeds = true;
+
+  protected:
+    helix::AmsError
+    send_operation_gcode(const std::string& gcode, std::function<void()> complete,
+                         std::function<void(const MoonrakerError&)> error) override {
+        operations.push_back(gcode);
+        on_complete = std::move(complete);
+        on_error = std::move(error);
+        return send_succeeds ? helix::AmsErrorHelper::success()
+                             : helix::AmsErrorHelper::not_connected("fixture send failure");
+    }
+
+  private:
+    std::function<void()> on_complete;
+    std::function<void(const MoonrakerError&)> on_error;
+};
+
+json all_commands() {
+    return json{{"load", "OPENAMS_LOAD"},
+                {"unload", "OPENAMS_UNLOAD"},
+                {"cancel", "OAMSM_LOAD_FILAMENT_CANCEL"},
+                {"reset", "OAMSM_CLEAR_ERRORS"}};
+}
+
+json lane(const std::string& state, const json& group = nullptr, const json& slot = nullptr) {
+    return json{{"id", "fps"},          {"state", state},     {"current_group", group},
+                {"current_slot", slot}, {"following", false}, {"direction", 0},
+                {"message", nullptr}};
+}
+
+json slot(int id, int bay, bool ready, bool loaded = false) {
+    return json{{"id", id}, {"bay", bay}, {"ready", ready}, {"loaded", loaded}};
+}
+
+/// One four-bay hub unit on lane `fps`, slot ids 0-3. T0 owns bays 0 and 1,
+/// T1 bay 2, T2 bay 3. Bay 0 is empty, the rest hold a spool, nothing loaded.
+json manager(json lanes = json::array({lane("unloaded")}), json commands = all_commands()) {
+    return json{{"api_version", 1},
+                {"schema", "openams.manager"},
+                {"ready", true},
+                {"commands", std::move(commands)},
+                {"lanes", std::move(lanes)},
+                {"units",
+                 json::array({json{{"id", "1"},
+                                   {"name", "unit1"},
+                                   {"kind", "oams"},
+                                   {"topology", "hub"},
+                                   {"lane", "fps"},
+                                   {"connected", true},
+                                   {"slots", json::array({slot(0, 0, false), slot(1, 1, true),
+                                                          slot(2, 2, true), slot(3, 3, true)})}}})},
+                {"groups", json::array({json{{"name", "T0"}, {"lane", "fps"}, {"slots", {0, 1}}},
+                                        json{{"name", "T1"}, {"lane", "fps"}, {"slots", {2}}},
+                                        json{{"name", "T2"}, {"lane", "fps"}, {"slots", {3}}}})},
+                {"current_group", nullptr}};
+}
+
+/// manager() with slot 2 (T1) loaded.
+json loaded_manager(json commands = all_commands()) {
+    json m = manager(json::array({lane("loaded", "T1", 2)}), std::move(commands));
+    m["units"][0]["slots"][2]["loaded"] = true;
+    return m;
+}
+
+struct TmpCacheDir {
+    std::filesystem::path path;
+    explicit TmpCacheDir(const std::string& suffix) {
+        path = std::filesystem::temp_directory_path() /
+               ("openams_cache_" + suffix + "_" + std::to_string(::getpid()));
+        std::filesystem::remove_all(path);
+        std::filesystem::create_directories(path);
+    }
+    ~TmpCacheDir() {
+        std::error_code ec;
+        std::filesystem::remove_all(path, ec);
+    }
+};
+
+} // namespace
+
+// ============================================================================
+// Discovery: who claims the printer
+// ============================================================================
+
+TEST_CASE("OpenAMS claims the printer only once its status shows the UI API",
+          "[ams][openams][discovery]") {
+    helix::PrinterDiscovery discovery;
+    discovery.parse_objects(json::array({"oams_manager", "fps", "oams unit1", "extruder"}));
+
+    // The name alone decides nothing.
+    CHECK_FALSE(discovery.has_mmu());
+    CHECK(discovery.detected_ams_systems().empty());
+    const json query = discovery.claim_status_query();
+    REQUIRE(query.contains("oams_manager"));
+
+    SECTION("a supported API claims it") {
+        discovery.settle_status_claims(
+            json{{"oams_manager", {{"api_version", 1}, {"schema", "openams.manager"}}}});
+        CHECK(discovery.has_mmu());
+        CHECK(discovery.mmu_type() == AmsType::OPENAMS);
+        REQUIRE(discovery.detected_ams_systems().size() == 1);
+        CHECK(discovery.detected_ams_systems()[0].type == AmsType::OPENAMS);
+    }
+
+    SECTION("a manager that predates the API does not") {
+        discovery.settle_status_claims(json{{"oams_manager", {{"current_group", "T0"}}}});
+        CHECK_FALSE(discovery.has_mmu());
+        CHECK(discovery.detected_ams_systems().empty());
+    }
+
+    SECTION("an API version this build does not read does not") {
+        discovery.settle_status_claims(
+            json{{"oams_manager", {{"api_version", 2}, {"schema", "openams.manager"}}}});
+        CHECK_FALSE(discovery.has_mmu());
+    }
+
+    SECTION("a failed query does not") {
+        discovery.settle_status_claims(json::object());
+        CHECK_FALSE(discovery.has_mmu());
+        CHECK(discovery.detected_ams_systems().empty());
+    }
+}
+
+TEST_CASE("AFC keeps the printer when oams_manager is also present", "[ams][openams][discovery]") {
+    const auto afc_first = json::array({"AFC", "AFC_OpenAMS AMS_1", "oams_manager"});
+    const auto oams_first = json::array({"oams_manager", "AFC_OpenAMS AMS_1", "AFC"});
+    for (const auto& objects : {afc_first, oams_first}) {
+        helix::PrinterDiscovery discovery;
+        discovery.parse_objects(objects);
+
+        CHECK(discovery.mmu_type() == AmsType::AFC);
+        CHECK(discovery.claim_status_query().empty());
+        discovery.settle_status_claims(
+            json{{"oams_manager", {{"api_version", 1}, {"schema", "openams.manager"}}}});
+        CHECK(discovery.mmu_type() == AmsType::AFC);
+        REQUIRE(discovery.detected_ams_systems().size() == 1);
+        CHECK(discovery.detected_ams_systems()[0].type == AmsType::AFC);
+    }
+}
+
+// ============================================================================
+// Status model
+// ============================================================================
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS snapshot maps units, slots, groups and topology",
+                 "[ams][openams]") {
+    OpenAmsHarness backend;
+    json m = loaded_manager();
+    m["units"].push_back(json{{"id", "2"},
+                              {"name", "Direct feeder"},
+                              {"kind", "feeder"},
+                              {"topology", "linear"},
+                              {"lane", "fps"},
+                              {"connected", true},
+                              {"slots", json::array({slot(9, 0, true)})}});
+    m["groups"].push_back(json{{"name", "T3"}, {"lane", "fps"}, {"slots", {9}}});
+    backend.feed(m);
+
+    const auto info = backend.get_system_info();
+    CHECK(info.type == AmsType::OPENAMS);
+    REQUIRE(info.units.size() == 2);
+    CHECK(info.total_slots == 5);
+    CHECK(info.units[0].topology == PathTopology::HUB);
+    CHECK(info.units[1].topology == PathTopology::LINEAR);
+    CHECK(backend.get_topology() == PathTopology::MIXED);
+    // The contract carries no toolhead sensor, so no unit claims one.
+    CHECK_FALSE(info.units[0].has_toolhead_sensor);
+    CHECK_FALSE(info.units[1].has_toolhead_sensor);
+    CHECK(info.units[0].slots[0].status == SlotStatus::EMPTY);
+    CHECK(info.units[0].slots[1].status == SlotStatus::AVAILABLE);
+    CHECK(info.units[0].slots[2].status == SlotStatus::LOADED);
+    CHECK(info.current_slot == 2);
+    CHECK(info.current_tool == 1);
+    CHECK(info.filament_loaded);
+    CHECK(info.units[0].slots[1].mapped_tool == 0);
+    CHECK(info.units[1].slots[0].mapped_tool == 3);
+    CHECK(backend.get_tool_mapping() == std::vector<int>{1, 2, 3, 4});
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS reports each lane's FPS as its units' buffer",
+                 "[ams][openams]") {
+    OpenAmsHarness backend;
+
+    SECTION("a lane with a pressure reading") {
+        json m = manager(json::array({lane("loaded", "T1", 2)}));
+        m["lanes"][0]["pressure"] = 0.62;
+        m["lanes"][0]["set_point"] = 0.5;
+        backend.feed(m);
+
+        const auto info = backend.get_system_info();
+        REQUIRE(info.units[0].buffer_health.has_value());
+        const auto& fps = *info.units[0].buffer_health;
+        CHECK(fps.fps_reported);
+        CHECK(fps.fps_value == Catch::Approx(0.62f));
+        CHECK(fps.fps_set_point == Catch::Approx(0.5f));
+        CHECK_FALSE(fps.fault_detection_enabled);
+    }
+
+    SECTION("a manager that publishes no pressure") {
+        backend.feed(manager());
+        CHECK_FALSE(backend.get_system_info().units[0].buffer_health.has_value());
+    }
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS publishes its FPS as a one-sided pressure",
+                 "[ams][openams]") {
+    OpenAmsHarness backend;
+    auto feed_pressure = [&](float pressure, json set_point, bool loaded = true) {
+        json m = loaded ? manager(json::array({lane("loaded", "T1", 2)}))
+                        : manager(json::array({lane("unloaded")}));
+        m["lanes"][0]["pressure"] = pressure;
+        m["lanes"][0]["set_point"] = set_point;
+        backend.feed(m);
+        return backend.get_system_info();
+    };
+
+    SECTION("the sensor is compression only and never reaches the two-ended scale") {
+        const auto info = feed_pressure(0.62f, 0.5);
+        const auto& fps = *info.units[0].buffer_health;
+        CHECK(fps.compression_only);
+        CHECK(fps.filament_loaded);
+        CHECK(info.pressure_sensor_bias() <= -1.5f);
+    }
+
+    SECTION("above set_point is more compression, not slack") {
+        const auto info = feed_pressure(0.62f, 0.5);
+        for (int unit : {-1, 0}) {
+            const auto r = helix::buffer_reading(info, unit);
+            CHECK(r.is_fill());
+            CHECK(r.has_slider);
+            CHECK(r.value_pct == 62);
+            CHECK(r.target_pct == 50);
+            CHECK(r.bias == 0.0f);
+            CHECK(std::string(helix::buffer_lean_text(r)) == "Above target");
+        }
+    }
+
+    SECTION("below set_point is less compression, not tension") {
+        const auto r = helix::buffer_reading(feed_pressure(0.3f, 0.5), -1);
+        CHECK(r.is_fill());
+        CHECK(r.bias == 0.0f);
+        CHECK(r.status == helix::ui::ClogMeterStatus::Ok);
+        CHECK(std::string(helix::buffer_lean_text(r)) == "Below target");
+    }
+
+    SECTION("no set_point is a gauge with no tick and no verdict") {
+        const auto info = feed_pressure(0.62f, nullptr);
+        CHECK(info.units[0].buffer_health->fps_reported);
+        const auto r = helix::buffer_reading(info, 0);
+        CHECK(r.is_fill());
+        CHECK(r.target_pct == -1);
+        CHECK(r.text_only());
+        CHECK(std::string(helix::buffer_lean_text(r)).empty());
+        CHECK(helix::buffer_value_text(r) == "Pressure: 62%");
+    }
+
+    SECTION("an empty gauge warns only while the lane holds filament") {
+        CHECK(helix::buffer_reading(feed_pressure(0.03f, 0.5, true), 0).status ==
+              helix::ui::ClogMeterStatus::Warning);
+        const auto idle = feed_pressure(0.03f, 0.5, false);
+        CHECK_FALSE(idle.units[0].buffer_health->filament_loaded);
+        CHECK(helix::buffer_reading(idle, 0).status == helix::ui::ClogMeterStatus::Ok);
+    }
+
+    SECTION("several lanes: the one feeding the current slot wins") {
+        json m = manager(json::array({lane("unloaded"), lane("loaded", "T3", 9)}));
+        m["lanes"][0]["pressure"] = 0.9;
+        m["lanes"][0]["set_point"] = 0.5;
+        m["lanes"][1]["id"] = "fps2";
+        m["lanes"][1]["pressure"] = 0.3;
+        m["lanes"][1]["set_point"] = 0.5;
+        m["units"].push_back(json{{"id", "2"},
+                                  {"name", "unit2"},
+                                  {"kind", "oams"},
+                                  {"topology", "hub"},
+                                  {"lane", "fps2"},
+                                  {"connected", true},
+                                  {"slots", json::array({slot(9, 0, true, true)})}});
+        m["groups"].push_back(json{{"name", "T3"}, {"lane", "fps2"}, {"slots", {9}}});
+        backend.feed(m);
+
+        const auto info = backend.get_system_info();
+        REQUIRE(info.units.size() == 2);
+        REQUIRE(info.current_slot == 4);
+        CHECK(helix::buffer_reading(info, -1).value_pct == 30);
+        // Each unit's own view draws its own lane.
+        CHECK(helix::buffer_reading(info, 0).value_pct == 90);
+        CHECK(helix::buffer_reading(info, 0).status == helix::ui::ClogMeterStatus::Warning);
+        CHECK(helix::buffer_reading(info, 1).value_pct == 30);
+    }
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS keeps the snapshot across partial status updates",
+                 "[ams][openams]") {
+    OpenAmsHarness backend;
+    backend.feed(loaded_manager());
+    backend.feed(json{{"lanes", json::array({lane("unloading", "T1", 2)})}});
+
+    const auto info = backend.get_system_info();
+    CHECK(info.total_slots == 4);
+    CHECK(info.action == AmsAction::UNLOADING);
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS without a supported API presents nothing, not an error",
+                 "[ams][openams]") {
+    OpenAmsHarness backend;
+
+    SECTION("a manager that predates the API") {
+        backend.feed(json{{"current_group", "T0"}});
+    }
+    SECTION("an unknown API version") {
+        json m = manager();
+        m["api_version"] = 2;
+        backend.feed(m);
+    }
+
+    const auto info = backend.get_system_info();
+    CHECK(info.total_slots == 0);
+    CHECK(info.units.empty());
+    CHECK(info.action == AmsAction::IDLE);
+    CHECK(info.operation_detail.empty());
+    CHECK(backend.load_filament(0).result != AmsResult::SUCCESS);
+    CHECK(backend.operations.empty());
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS draws an unknown unit topology as a hub",
+                 "[ams][openams]") {
+    OpenAmsHarness backend;
+    json m = manager();
+    m["units"][0]["topology"] = "carousel";
+    backend.feed(m);
+
+    CHECK(backend.get_system_info().total_slots == 4);
+    CHECK(backend.get_unit_topology(0) == PathTopology::HUB);
+    REQUIRE(backend.load_filament(2).success());
+    CHECK(backend.operations == std::vector<std::string>{"OPENAMS_LOAD GROUP=T1 SLOT=2"});
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS does not fold two loaded lanes into one current slot",
+                 "[ams][openams]") {
+    OpenAmsHarness backend;
+    json m = manager(json::array({lane("loaded", "T1", 2), lane("loaded", "T2", 3)}));
+    m["lanes"][1]["id"] = "fps1";
+    backend.feed(m);
+
+    const auto info = backend.get_system_info();
+    CHECK(info.filament_loaded);
+    CHECK(info.current_slot == -1);
+    CHECK(info.current_tool == -1);
+    // The unload names the lane the loaded slot is on, so several loaded
+    // lanes do not stop it from emptying the one asked about.
+    REQUIRE(backend.unload_filament(3).success());
+    CHECK(backend.operations == std::vector<std::string>{"OPENAMS_UNLOAD FPS=fps1"});
+}
+
+// ============================================================================
+// Load and tool change, through the public entry points
+// ============================================================================
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS load dispatches the advertised command and completes",
+                 "[ams][openams]") {
+    OpenAmsHarness backend;
+    backend.feed(manager());
+
+    REQUIRE(backend.load_filament(1).success());
+    CHECK(backend.operations == std::vector<std::string>{"OPENAMS_LOAD GROUP=T0 SLOT=1"});
+    CHECK(backend.get_current_action() == AmsAction::LOADING);
+    CHECK(backend.get_system_info().pending_target_slot == 1);
+
+    backend.events.clear();
+    backend.complete_operation();
+
+    CHECK(backend.get_current_action() == AmsAction::IDLE);
+    CHECK(backend.get_system_info().pending_target_slot == -1);
+    CHECK(std::find(backend.events.begin(), backend.events.end(),
+                    helix::AmsBackend::EVENT_LOAD_COMPLETE) != backend.events.end());
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS load failure unwinds and keeps the reason",
+                 "[ams][openams]") {
+    OpenAmsHarness backend;
+    backend.feed(manager());
+
+    REQUIRE(backend.load_filament(2).success());
+    backend.events.clear();
+    backend.fail_operation("OpenAMS slot 2 is not ready");
+
+    auto info = backend.get_system_info();
+    CHECK(info.action == AmsAction::IDLE);
+    CHECK(info.pending_target_slot == -1);
+    CHECK(info.operation_detail == "OpenAMS slot 2 is not ready");
+    CHECK(std::find(backend.events.begin(), backend.events.end(),
+                    helix::AmsBackend::EVENT_LOAD_COMPLETE) == backend.events.end());
+
+    // The reason survives the next frame, and clear_fault() retires it.
+    backend.feed(json{{"ready", true}});
+    CHECK(backend.get_system_info().operation_detail == "OpenAMS slot 2 is not ready");
+    REQUIRE(backend.clear_fault(-1).success());
+    CHECK(backend.get_system_info().operation_detail.empty());
+
+    // A new operation is accepted once the failed one has unwound.
+    REQUIRE(backend.load_filament(2).success());
+    CHECK(backend.operations.size() == 2);
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS unwinds when the load cannot be sent",
+                 "[ams][openams]") {
+    OpenAmsHarness backend;
+    backend.feed(manager());
+    backend.send_succeeds = false;
+
+    CHECK_FALSE(backend.load_filament(1).success());
+    CHECK(backend.get_current_action() == AmsAction::IDLE);
+    CHECK(backend.get_system_info().pending_target_slot == -1);
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS refuses to load a slot with no spool ready",
+                 "[ams][openams]") {
+    OpenAmsHarness backend;
+    backend.feed(manager());
+
+    CHECK(backend.load_filament(0).result == AmsResult::SLOT_NOT_AVAILABLE);
+    CHECK(backend.operations.empty());
+    CHECK(backend.get_current_action() == AmsAction::IDLE);
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS tool change picks a ready slot in the tool's group",
+                 "[ams][openams]") {
+    OpenAmsHarness backend;
+
+    SECTION("the first member with a spool ready, skipping an empty bay") {
+        backend.feed(manager());
+        REQUIRE(backend.change_tool(0).success());
+        CHECK(backend.operations == std::vector<std::string>{"OPENAMS_LOAD GROUP=T0 SLOT=1"});
+    }
+
+    SECTION("the member already loaded, over an earlier ready one") {
+        json m = manager(json::array({lane("loaded", "T0", 1)}));
+        m["units"][0]["slots"][0]["ready"] = true;
+        m["units"][0]["slots"][1]["loaded"] = true;
+        backend.feed(m);
+        REQUIRE(backend.change_tool(0).success());
+        CHECK(backend.operations == std::vector<std::string>{"OPENAMS_LOAD GROUP=T0 SLOT=1"});
+    }
+
+    SECTION("no member ready refuses without sending") {
+        json m = manager();
+        m["units"][0]["slots"][1]["ready"] = false;
+        backend.feed(m);
+        CHECK(backend.change_tool(0).result == AmsResult::SLOT_NOT_AVAILABLE);
+        CHECK(backend.operations.empty());
+    }
+
+    SECTION("a tool with no group refuses without sending") {
+        backend.feed(manager());
+        CHECK(backend.change_tool(7).result == AmsResult::INVALID_TOOL);
+        CHECK(backend.operations.empty());
+    }
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS refuses every action while the manager is not ready",
+                 "[ams][openams]") {
+    OpenAmsHarness backend;
+    json m = loaded_manager();
+    m["ready"] = false;
+    backend.feed(m);
+
+    // Status is still shown.
+    CHECK(backend.get_system_info().total_slots == 4);
+    CHECK(backend.load_filament(1).result == AmsResult::WRONG_STATE);
+    CHECK(backend.change_tool(0).result == AmsResult::WRONG_STATE);
+    CHECK(backend.unload_filament(2).result == AmsResult::WRONG_STATE);
+    CHECK(backend.operations.empty());
+}
+
+// ============================================================================
+// Missing commands disable only their own action
+// ============================================================================
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS without load macros still shows status and unloads",
+                 "[ams][openams]") {
+    OpenAmsHarness backend;
+    json commands = all_commands();
+    commands.erase("load");
+    backend.feed(loaded_manager(commands));
+
+    CHECK(backend.get_system_info().total_slots == 4);
+    CHECK(backend.load_filament(1).result == AmsResult::NOT_SUPPORTED);
+    CHECK(backend.change_tool(0).result == AmsResult::NOT_SUPPORTED);
+    CHECK(backend.operations.empty());
+
+    CHECK(backend.can_unload_from_toolhead(2));
+    REQUIRE(backend.unload_filament(2).success());
+    CHECK(backend.operations == std::vector<std::string>{"OPENAMS_UNLOAD FPS=fps"});
+    backend.complete_operation();
+    CHECK(std::find(backend.events.begin(), backend.events.end(),
+                    helix::AmsBackend::EVENT_UNLOAD_COMPLETE) != backend.events.end());
+
+    REQUIRE(backend.reset().success());
+    CHECK(backend.commands == std::vector<std::string>{"OAMSM_CLEAR_ERRORS"});
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS without an unload macro offers no unload",
+                 "[ams][openams]") {
+    OpenAmsHarness backend;
+    json commands = all_commands();
+    commands.erase("unload");
+    backend.feed(loaded_manager(commands));
+
+    CHECK_FALSE(backend.can_unload_from_toolhead(2));
+    CHECK(backend.unload_filament(2).result == AmsResult::NOT_SUPPORTED);
+    CHECK(backend.operations.empty());
+
+    // Loading into a lane that holds nothing needs no unload.
+    backend.feed(manager(json::array({lane("unloaded")}), commands));
+    REQUIRE(backend.load_filament(1).success());
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS without reset or cancel refuses just those",
+                 "[ams][openams]") {
+    OpenAmsHarness backend;
+    json commands = all_commands();
+    commands.erase("reset");
+    commands.erase("cancel");
+    backend.feed(manager(json::array({lane("loading", "T1", nullptr)}), commands));
+
+    CHECK(backend.reset().result == AmsResult::NOT_SUPPORTED);
+    CHECK(backend.cancel().result == AmsResult::NOT_SUPPORTED);
+    CHECK(backend.commands.empty());
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS ignores a command name that is not one G-code word",
+                 "[ams][openams]") {
+    OpenAmsHarness backend;
+    json commands = all_commands();
+    commands["load"] = "OPENAMS_LOAD\nG28";
+    backend.feed(manager(json::array({lane("unloaded")}), commands));
+
+    CHECK(backend.load_filament(1).result == AmsResult::NOT_SUPPORTED);
+    CHECK(backend.operations.empty());
+}
+
+// ============================================================================
+// Cancel
+// ============================================================================
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS cancel", "[ams][openams]") {
+    OpenAmsHarness backend;
+
+    SECTION("is refused while a load started here holds the G-code queue") {
+        backend.feed(manager());
+        REQUIRE(backend.load_filament(1).success());
+        backend.feed(json{{"lanes", json::array({lane("loading", "T0", nullptr)})}});
+
+        CHECK(backend.cancel().result == AmsResult::BUSY);
+        CHECK(backend.commands.empty());
+        // Our own record of the load is untouched: it ends when the macro does.
+        CHECK(backend.get_current_action() == AmsAction::LOADING);
+        CHECK(backend.get_system_info().pending_target_slot == 1);
+    }
+
+    SECTION("reaches a load the manager is running on its own") {
+        backend.feed(manager(json::array({lane("loading", "T1", nullptr)})));
+        REQUIRE(backend.cancel().success());
+        CHECK(backend.commands == std::vector<std::string>{"OAMSM_LOAD_FILAMENT_CANCEL"});
+    }
+
+    SECTION("with no load running is refused") {
+        backend.feed(loaded_manager());
+        CHECK(backend.cancel().result == AmsResult::WRONG_STATE);
+        CHECK(backend.commands.empty());
+    }
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS offers Abort only when cancel can reach the load",
+                 "[ams][openams]") {
+    OpenAmsHarness backend;
+    backend.feed(manager());
+    CHECK(backend.can_cancel_operation());
+
+    REQUIRE(backend.load_filament(1).success());
+    CHECK_FALSE(backend.can_cancel_operation());
+
+    backend.complete_operation();
+    CHECK(backend.can_cancel_operation());
+
+    json no_cancel = all_commands();
+    no_cancel.erase("cancel");
+    backend.feed(manager(json::array({lane("loading", "T1", nullptr)}), no_cancel));
+    CHECK_FALSE(backend.can_cancel_operation());
+}
+
+// ============================================================================
+// Slot identity persistence
+// ============================================================================
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS repaints a slot from the lane, not the stored record",
+                 "[ams][openams][filament_slot_override]") {
+    // A resync refreshes the lane but not overrides_, so a repaint that
+    // restated a field from overrides_ would disagree with the next frame.
+    OpenAmsHarness backend;
+    backend.feed(manager());
+    helix::ams::FilamentSlotOverride ovr;
+    ovr.brand = "Polymaker";
+    ovr.spool_name = "Galaxy Black";
+    helix::OpenAmsTestAccess::seed_override(backend, 1, ovr);
+
+    backend.repaint_slot_from_lane(1);
+
+    const auto info = backend.get_slot_info(1);
+    CHECK(info.brand.empty());
+    CHECK(info.spool_name.empty());
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS persists metered weight and clears slot metadata",
+                 "[ams][openams][filament_slot_override]") {
+    TmpCacheDir tmp("persist");
+    MockPrinter mock_printer;
+    auto& api = mock_printer.api;
+
+    OpenAmsHarness backend(&api);
+    auto store = std::make_unique<helix::ams::FilamentSlotOverrideStore>(&api, "openams");
+    FilamentSlotOverrideStoreTestAccess::set_cache_directory(*store, tmp.path);
+    helix::OpenAmsTestAccess::inject_override_store(backend, std::move(store));
+    backend.feed(manager());
+
+    helix::ams::FilamentSlotOverride ovr;
+    ovr.brand = "Polymaker";
+    ovr.material = "PLA";
+    ovr.color_rgb = 0xFF5500;
+    ovr.spoolman_id = 42;
+    ovr.total_weight_g = 1000.0f;
+    ovr.remaining_weight_g = 800.0f;
+    helix::OpenAmsTestAccess::seed_override(backend, 1, ovr);
+
+    backend.update_slot_weight(1, 640.0f, 1000.0f, /*persist=*/true);
+
+    auto stored = helix::OpenAmsTestAccess::get_override(backend, 1);
+    REQUIRE(stored.has_value());
+    CHECK(stored->remaining_weight_g == 640.0f);
+    CHECK(stored->brand == "Polymaker");
+    const json record = mock_printer.client.mock_db_get("lane_data", "lane2");
+    REQUIRE(record.is_object());
+    CHECK(record.value("remaining_weight_g", -1.0f) == 640.0f);
+
+    backend.clear_slot_override(1);
+
+    CHECK_FALSE(helix::OpenAmsTestAccess::get_override(backend, 1).has_value());
+    CHECK(mock_printer.client.mock_db_get("lane_data", "lane2").is_null());
+    const auto info = backend.get_slot_info(1);
+    CHECK(info.brand.empty());
+    CHECK(info.material.empty());
+    CHECK(info.spoolman_id == 0);
+    CHECK(info.color_rgb == helix::AMS_DEFAULT_SLOT_COLOR);
+    CHECK(info.remaining_weight_g < 0.0f);
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "OpenAMS asks about a spool inserted into an observed empty slot, not a clear",
+                 "[ams][openams][filament_slot_override][1710]") {
+    // OpenAMS reads nothing off a spool, so an insert has no evidence either
+    // way: the record stays and the user is asked. Tapping Clear clears it.
+    TmpCacheDir tmp("insert_notice");
+    MockPrinter mock_printer;
+    auto& api = mock_printer.api;
+
+    helix::test::RegisteredBackend<OpenAmsHarness> backend_reg(&api);
+    OpenAmsHarness& backend = *backend_reg;
+    auto store = std::make_unique<helix::ams::FilamentSlotOverrideStore>(&api, "openams");
+    FilamentSlotOverrideStoreTestAccess::set_cache_directory(*store, tmp.path);
+    helix::OpenAmsTestAccess::inject_override_store(backend, std::move(store));
+
+    mock_printer.client.mock_db_set(
+        "lane_data", "lane2",
+        json{{"vendor", "Polymaker"}, {"material", "PLA"}, {"color", "#FF5500"}});
+    helix::ams::FilamentSlotOverride ovr;
+    ovr.brand = "Polymaker";
+    ovr.material = "PLA";
+    ovr.color_rgb = 0xFF5500;
+    helix::OpenAmsTestAccess::seed_override(backend, 1, ovr);
+    helix::test::file_override_as_lane_records(backend, 1, ovr);
+
+    std::vector<std::pair<ToastSeverity, std::string>> toasts;
+    helix::ui::set_test_toast_hook([&](ToastSeverity severity, const std::string& msg, uint32_t) {
+        toasts.emplace_back(severity, msg);
+    });
+
+    // The first frame is a baseline, even for a slot holding a spool.
+    backend.feed(manager());
+    helix::ui::UpdateQueue::instance().drain();
+    CHECK(toasts.empty());
+
+    json emptied = manager();
+    emptied["units"][0]["slots"][1]["ready"] = false;
+    backend.feed(emptied);
+    helix::ui::UpdateQueue::instance().drain();
+    CHECK(toasts.empty()); // a spool leaving is not an insert
+
+    backend.feed(manager());
+    helix::ui::UpdateQueue::instance().drain();
+    REQUIRE(toasts.size() == 1);
+    CHECK(toasts[0].first == ToastSeverity::INFO);
+    CHECK(helix::OpenAmsTestAccess::get_override(backend, 1).has_value());
+
+    // Frames that keep the spool present never ask again.
+    backend.feed(manager());
+    helix::ui::UpdateQueue::instance().drain();
+    CHECK(toasts.size() == 1);
+
+    REQUIRE(helix::ui::fire_last_toast_action());
+    helix::ui::UpdateQueue::instance().drain();
+    CHECK_FALSE(helix::OpenAmsTestAccess::get_override(backend, 1).has_value());
+    CHECK(mock_printer.client.mock_db_get("lane_data", "lane2").is_null());
+
+    helix::ui::set_test_toast_hook(nullptr);
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "OpenAMS judges no insert from bays an offline unit or unready manager reports",
+                 "[ams][openams][filament_slot_override][1710]") {
+    MockPrinter mock_printer;
+    auto& api = mock_printer.api;
+
+    helix::test::RegisteredBackend<OpenAmsHarness> backend_reg(&api);
+    OpenAmsHarness& backend = *backend_reg;
+
+    // Every bay carries details, so any insert the backend judged would ask.
+    helix::ams::FilamentSlotOverride ovr;
+    ovr.brand = "Polymaker";
+    ovr.material = "PLA";
+    ovr.color_rgb = 0xFF5500;
+    for (int bay = 0; bay < 4; ++bay) {
+        helix::test::file_override_as_lane_records(backend, bay, ovr);
+    }
+
+    std::vector<std::pair<ToastSeverity, std::string>> toasts;
+    helix::ui::set_test_toast_hook([&](ToastSeverity severity, const std::string& msg, uint32_t) {
+        toasts.emplace_back(severity, msg);
+    });
+
+    // Baseline: bay 0 empty, bays 1-3 holding a spool.
+    backend.feed(manager());
+    helix::ui::UpdateQueue::instance().drain();
+    REQUIRE(toasts.empty());
+
+    json unread = manager();
+    for (auto& bay : unread["units"][0]["slots"]) {
+        bay["ready"] = false;
+    }
+    SECTION("the unit goes offline") {
+        unread["units"][0]["connected"] = false;
+    }
+    SECTION("the manager is not ready") {
+        unread["ready"] = false;
+    }
+    backend.feed(unread);
+    helix::ui::UpdateQueue::instance().drain();
+
+    // Bays 1-3 come back as they were: nothing was inserted.
+    backend.feed(manager());
+    helix::ui::UpdateQueue::instance().drain();
+    CHECK(toasts.empty());
+
+    // Bay 0 was last read empty, so a spool there now is still an insert.
+    json inserted = manager();
+    inserted["units"][0]["slots"][0]["ready"] = true;
+    backend.feed(inserted);
+    helix::ui::UpdateQueue::instance().drain();
+    CHECK(toasts.size() == 1);
+
+    helix::ui::set_test_toast_hook(nullptr);
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS only highlights a path error when an error is reported",
+                 "[ams][openams]") {
+    OpenAmsHarness backend;
+    for (const char* state : {"idle", "loaded", "loading", "unloading"}) {
+        CAPTURE(state);
+        backend.feed(manager(json::array({lane(state, "T1", 2)})));
+        CHECK(backend.infer_error_segment() == helix::PathSegment::NONE);
+    }
+    json errored = loaded_manager();
+    errored["lanes"] = json::array({lane("error", "T1", 2)});
+    backend.feed(errored);
+    CHECK(backend.infer_error_segment() == helix::PathSegment::NOZZLE);
+    backend.feed(loaded_manager());
+    CHECK(backend.infer_error_segment() == helix::PathSegment::NONE);
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS locates a reported error during a pending load",
+                 "[ams][openams]") {
+    OpenAmsHarness backend;
+    backend.feed(manager());
+    REQUIRE(backend.load_filament(1).success());
+    CHECK(backend.infer_error_segment() == helix::PathSegment::NONE);
+    backend.feed(manager(json::array({lane("error", "T1", 2)})));
+    CHECK(backend.infer_error_segment() == helix::PathSegment::OUTPUT);
+}
+
+// ============================================================================
+// Two units on one lane: an AMS HT (slot 0) and an AMS 2 Pro (slots 1-4)
+// ============================================================================
+
+namespace {
+
+json toolhead_commands() {
+    return json{{"load", "OAMSM_LOAD_TO_TOOLHEAD"},
+                {"unload", "OAMSM_UNLOAD_FROM_TOOLHEAD"},
+                {"cancel", "OAMSM_LOAD_FILAMENT_CANCEL"},
+                {"reset", "OAMSM_CLEAR_ERRORS"}};
+}
+
+/// The core every manager publishes. @p loaded is the global slot on lane fps,
+/// -1 for none. @p openams_extras adds what only the openams plugin publishes.
+json shared_manager(int loaded = -1, json commands = all_commands(), bool openams_extras = false) {
+    json l = lane(loaded >= 0 ? "loaded" : "unloaded",
+                  loaded >= 0 ? json("T" + std::to_string(loaded)) : json(),
+                  loaded >= 0 ? json(loaded) : json());
+    l["pressure"] = 0.79;
+    l["set_point"] = 0.5;
+    json groups = json::array();
+    for (int i = 0; i < 5; ++i) {
+        groups.push_back(json{{"name", "T" + std::to_string(i)}, {"lane", "fps"}, {"slots", {i}}});
+    }
+    json m{{"api_version", 1},
+           {"schema", "openams.manager"},
+           {"ready", true},
+           {"commands", std::move(commands)},
+           {"lanes", json::array({l})},
+           {"units", json::array({json{{"id", "1"},
+                                       {"name", "ams_ht"},
+                                       {"kind", "oams"},
+                                       {"topology", "hub"},
+                                       {"lane", "fps"},
+                                       {"connected", true},
+                                       {"slots", json::array({slot(0, 0, true, loaded == 0)})}},
+                                  json{{"id", "2"},
+                                       {"name", "ams2"},
+                                       {"kind", "oams"},
+                                       {"topology", "hub"},
+                                       {"lane", "fps"},
+                                       {"connected", true},
+                                       {"slots", json::array({slot(1, 0, true, loaded == 1),
+                                                              slot(2, 1, true, loaded == 2),
+                                                              slot(3, 2, true, loaded == 3),
+                                                              slot(4, 3, true, loaded == 4)})}}})},
+           {"groups", groups}};
+    if (openams_extras) {
+        m["lanes_by_fps"] = {{"fps", {{"op", "loaded"}, {"extruder", "extruder"}}}};
+        m["topology"] = {{"schema_version", 1}, {"fps", {"fps"}}};
+    }
+    return m;
+}
+
+} // namespace
+
+TEST_CASE_METHOD(HelixTestFixture,
+                 "OpenAMS units on one lane share one hub, with or without the openams extras",
+                 "[ams][openams][shared_hub]") {
+    for (bool extras : {false, true}) {
+        CAPTURE(extras);
+        OpenAmsHarness backend;
+        backend.feed(shared_manager(0, all_commands(), extras));
+        const auto info = backend.get_system_info();
+        REQUIRE(info.units.size() == 2);
+        CHECK(info.units[0].hub_id == "fps");
+        CHECK(info.units[1].hub_id == "fps");
+
+        const auto layout = ams_draw::compute_system_tool_layout(info, &backend);
+        CHECK(layout.total_physical_tools == 1);
+        CHECK(layout.units[0].first_physical_tool == layout.units[1].first_physical_tool);
+    }
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS units on different lanes keep their own toolheads",
+                 "[ams][openams][shared_hub]") {
+    OpenAmsHarness backend;
+    json m = shared_manager(0);
+    m["units"][1]["lane"] = "fps1";
+    for (auto& g : m["groups"]) {
+        if (g["name"] != "T0") {
+            g["lane"] = "fps1";
+        }
+    }
+    json second = lane("unloaded");
+    second["id"] = "fps1";
+    m["lanes"].push_back(second);
+    backend.feed(m);
+
+    const auto info = backend.get_system_info();
+    REQUIRE(info.units.size() == 2);
+    CHECK(info.units[0].hub_id != info.units[1].hub_id);
+    const auto layout = ams_draw::compute_system_tool_layout(info, &backend);
+    CHECK(layout.total_physical_tools == 2);
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS puts the lane's FPS on the system path of shared units",
+                 "[ams][openams][shared_hub]") {
+    for (bool extras : {false, true}) {
+        CAPTURE(extras);
+        OpenAmsHarness backend;
+        backend.feed(shared_manager(0, all_commands(), extras));
+        const auto info = backend.get_system_info();
+
+        // The whole-system view (the overview's output line) and each unit's own view.
+        for (int unit : {-1, 0, 1}) {
+            CAPTURE(unit);
+            const auto box = helix::ui::ams_detail_buffer_box(info, unit);
+            CHECK(box.present);
+            CHECK(std::string(box.label) == "FPS");
+        }
+    }
+
+    SECTION("a manager that publishes no pressure draws no FPS") {
+        OpenAmsHarness backend;
+        json m = shared_manager(0);
+        m["lanes"][0].erase("pressure");
+        backend.feed(m);
+        CHECK_FALSE(helix::ui::ams_detail_buffer_box(backend.get_system_info(), -1).present);
+    }
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS unload names the lane, for either command map",
+                 "[ams][openams][commands]") {
+    struct Map {
+        json commands;
+        std::string unload;
+    };
+    for (const Map& map : {Map{all_commands(), "OPENAMS_UNLOAD FPS=fps"},
+                           Map{toolhead_commands(), "OAMSM_UNLOAD_FROM_TOOLHEAD FPS=fps"}}) {
+        CAPTURE(map.unload);
+        OpenAmsHarness backend;
+        backend.feed(shared_manager(3, map.commands));
+        REQUIRE(backend.unload_filament(3).success());
+        CHECK(backend.operations == std::vector<std::string>{map.unload});
+    }
+
+    SECTION("a slot that is not loaded falls back to the loaded one") {
+        OpenAmsHarness backend;
+        backend.feed(shared_manager(3, toolhead_commands()));
+        REQUIRE(backend.unload_filament(-1).success());
+        CHECK(backend.operations == std::vector<std::string>{"OAMSM_UNLOAD_FROM_TOOLHEAD FPS=fps"});
+    }
+
+    SECTION("nothing loaded sends nothing") {
+        OpenAmsHarness backend;
+        backend.feed(shared_manager(-1));
+        CHECK_FALSE(backend.unload_filament(2).success());
+        CHECK(backend.operations.empty());
+    }
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS load into an empty lane is one command, for either map",
+                 "[ams][openams][commands]") {
+    struct Map {
+        json commands;
+        std::string load;
+    };
+    for (const Map& map : {Map{all_commands(), "OPENAMS_LOAD GROUP=T2 SLOT=2"},
+                           Map{toolhead_commands(), "OAMSM_LOAD_TO_TOOLHEAD GROUP=T2 SLOT=2"}}) {
+        CAPTURE(map.load);
+        OpenAmsHarness backend;
+        backend.feed(shared_manager(-1, map.commands));
+        REQUIRE(backend.load_filament(2).success());
+        CHECK(backend.operations == std::vector<std::string>{map.load});
+    }
+}
+
+TEST_CASE_METHOD(HelixTestFixture,
+                 "OpenAMS load over another slot on the lane unloads it first, as one operation",
+                 "[ams][openams][commands]") {
+    struct Map {
+        json commands;
+        std::string script;
+    };
+    for (const Map& map :
+         {Map{all_commands(), "OPENAMS_UNLOAD FPS=fps\nOPENAMS_LOAD GROUP=T2 SLOT=2"},
+          Map{toolhead_commands(),
+              "OAMSM_UNLOAD_FROM_TOOLHEAD FPS=fps\nOAMSM_LOAD_TO_TOOLHEAD GROUP=T2 SLOT=2"}}) {
+        CAPTURE(map.script);
+        {
+            OpenAmsHarness backend;
+            backend.feed(shared_manager(0, map.commands));
+            REQUIRE(backend.load_filament(2).success());
+            CHECK(backend.operations == std::vector<std::string>{map.script});
+            CHECK(backend.get_current_action() == AmsAction::LOADING);
+            CHECK(backend.needs_unload_before_load(backend.get_system_info(), 2));
+        }
+        {
+            OpenAmsHarness backend; // a tool change to T2 swaps the same way
+            backend.feed(shared_manager(0, map.commands));
+            REQUIRE(backend.change_tool(2).success());
+            CHECK(backend.operations == std::vector<std::string>{map.script});
+        }
+    }
+
+    SECTION("loading the slot already loaded does not unload it") {
+        OpenAmsHarness backend;
+        backend.feed(shared_manager(2, toolhead_commands()));
+        REQUIRE(backend.load_filament(2).success());
+        CHECK(backend.operations ==
+              std::vector<std::string>{"OAMSM_LOAD_TO_TOOLHEAD GROUP=T2 SLOT=2"});
+        CHECK_FALSE(backend.needs_unload_before_load(backend.get_system_info(), 2));
+    }
+
+    SECTION("a manager with no unload command cannot swap") {
+        json commands = toolhead_commands();
+        commands.erase("unload");
+        OpenAmsHarness backend;
+        backend.feed(shared_manager(0, commands));
+        CHECK(backend.load_filament(2).result == AmsResult::NOT_SUPPORTED);
+        CHECK(backend.operations.empty());
+    }
+
+    SECTION("a slot on another lane is loaded without touching the first") {
+        OpenAmsHarness backend;
+        json m = shared_manager(0, toolhead_commands());
+        m["units"][1]["lane"] = "fps1";
+        json second = lane("unloaded");
+        second["id"] = "fps1";
+        m["lanes"].push_back(second);
+        backend.feed(m);
+        REQUIRE(backend.load_filament(2).success());
+        CHECK(backend.operations ==
+              std::vector<std::string>{"OAMSM_LOAD_TO_TOOLHEAD GROUP=T2 SLOT=2"});
+        CHECK_FALSE(backend.needs_unload_before_load(backend.get_system_info(), 2));
+    }
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS names no macro in its missing-command errors",
+                 "[ams][openams][commands]") {
+    json commands = toolhead_commands();
+    commands.erase("load");
+    commands.erase("unload");
+    OpenAmsHarness backend;
+    backend.feed(shared_manager(0, commands));
+    for (const auto& result : {backend.load_filament(2), backend.unload_filament(0)}) {
+        CHECK(result.result == AmsResult::NOT_SUPPORTED);
+        CHECK(result.technical_msg.find("oams_macros") == std::string::npos);
+        CHECK(result.technical_msg.find("OPENAMS_") == std::string::npos);
+    }
+}
+
+// ============================================================================
+// Spool links that arrive after start
+// ============================================================================
+
+TEST_CASE_METHOD(LVGLUITestFixture, "OpenAMS shows a spool link written to lane_data after start",
+                 "[ams][openams][filament_slot_override][late_links]") {
+    TmpCacheDir tmp("late_links");
+    MockPrinter mock_printer;
+    auto& api = mock_printer.api;
+
+    helix::test::RegisteredBackend<OpenAmsHarness> backend_reg(&api, &mock_printer.client);
+    OpenAmsHarness& backend = *backend_reg;
+    backend.feed(shared_manager(0));
+    helix::OpenAmsTestAccess::start(backend); // lane_data is empty: nothing to show yet
+    helix::ui::UpdateQueue::instance().drain();
+    CHECK(backend.get_slot_info(3).spoolman_id == 0);
+
+    // openams_spoolman links slot 3 (lane4) after the app is up, then says so.
+    mock_printer.client.mock_db_set(
+        "lane_data", "lane4",
+        json{{"lane", "3"}, {"color", "#1F3A93"}, {"material", "PETG"}, {"spool_id", 41}});
+    mock_printer.client.dispatch_method_callback(
+        "notify_openams_spoolman_status",
+        json{{"method", "notify_openams_spoolman_status"}, {"params", json::array()}});
+    for (int i = 0; i < 4; ++i) {
+        helix::ui::UpdateQueue::instance().drain();
+    }
+
+    const auto info = backend.get_slot_info(3);
+    CHECK(info.spoolman_id == 41);
+    CHECK(info.color_rgb == 0x1F3A93);
+    CHECK(info.material == "PETG");
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "OpenAMS lets a newer openams_spoolman link replace an older edit made here",
+                 "[ams][openams][filament_slot_override][late_links][1632]") {
+    TmpCacheDir tmp("late_links_outrank");
+    MockPrinter mock_printer;
+    auto& api = mock_printer.api;
+
+    helix::test::RegisteredBackend<OpenAmsHarness> backend_reg(&api, &mock_printer.client);
+    OpenAmsHarness& backend = *backend_reg;
+    backend.feed(shared_manager(0));
+    helix::OpenAmsTestAccess::start(backend);
+    helix::ui::UpdateQueue::instance().drain();
+
+    // Someone set slot 3 to red PLA on this screen in 2024.
+    const helix::ams::LaneId lane = helix::ams::lane_id_for(backend.backend_index(), 3);
+    helix::ams::Observation edit(helix::ams::ObservationSource::LocalUser);
+    edit.material = "PLA";
+    edit.color_rgb = 0xFF0000;
+    edit.edited_at = std::chrono::system_clock::time_point{} + std::chrono::hours(24 * 365 * 54);
+    helix::ams::commit_slot_edit(lane, edit);
+    REQUIRE(helix::ams::lane_sources(lane).local_user.has_value());
+
+    SECTION("an unstamped link written since wins") {
+        mock_printer.client.mock_db_set(
+            "lane_data", "lane4",
+            json{{"lane", "3"}, {"color", "#1F3A93"}, {"material", "PETG"}, {"spool_id", 41}});
+        mock_printer.client.dispatch_method_callback(
+            "notify_openams_spoolman_status",
+            json{{"method", "notify_openams_spoolman_status"}, {"params", json::array()}});
+        for (int i = 0; i < 4; ++i) {
+            helix::ui::UpdateQueue::instance().drain();
+        }
+        const auto info = backend.get_slot_info(3);
+        CHECK(info.spoolman_id == 41);
+        CHECK(info.material == "PETG");
+        CHECK(info.color_rgb == 0x1F3A93);
+    }
+}
+
+// ============================================================================
+// Unit faults
+// ============================================================================
+
+namespace {
+
+json fault_entry(const std::string& code, const std::string& text, json actions,
+                 const std::string& severity = "stop", json bay = nullptr) {
+    return json{{"severity", severity}, {"code", code},       {"text", text},
+                {"bay", bay},           {"actions", actions}, {"source", "firmware"}};
+}
+
+/// shared_manager() with `devices.<unit>.faults` set.
+json faulted_manager(const json& ams_ht_faults, const json& ams2_faults = json::array(),
+                     json commands = toolhead_commands()) {
+    json m = shared_manager(-1, std::move(commands), true);
+    m["devices"] = {{"ams_ht", {{"faults", ams_ht_faults}}}, {"ams2", {{"faults", ams2_faults}}}};
+    return m;
+}
+
+const std::string kClearHt = "OAMS_CLEAR_FAULT OAMS=1\nOAMSM_CLEAR_ERRORS";
+
+} // namespace
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS surfaces a latched unit fault in plain words",
+                 "[ams][openams][fault]") {
+    OpenAmsHarness backend;
+    backend.feed(faulted_manager(
+        json::array({fault_entry("motor_drive_fault", "motor_drive_fault", {"clear_fault"})})));
+
+    const auto info = backend.get_system_info();
+    CHECK(info.action == AmsAction::ERROR);
+    CHECK(info.operation_detail == "ams_ht: Motor drive fault");
+    REQUIRE(info.units[0].slots[0].error.has_value());
+    CHECK(info.units[0].slots[0].error->message == "Motor drive fault");
+    CHECK(info.units[0].has_any_error());
+    CHECK_FALSE(info.units[1].has_any_error());
+
+    const auto event = backend.current_error();
+    REQUIRE(event.has_value());
+    CHECK(event->detail == "ams_ht: Motor drive fault");
+    REQUIRE(event->recovery_actions.size() == 1);
+    CHECK(event->recovery_actions[0].gcode == kClearHt);
+
+    SECTION("motion_timeout reads in words, an unknown code reads as the unit's text") {
+        backend.feed(faulted_manager(json::array(
+            {fault_entry("motion_timeout", "x", {"clear_fault"}),
+             fault_entry("odd_code", "Spool jammed at the gate", json::array(), "pause")})));
+        const auto detail = backend.get_system_info().operation_detail;
+        CHECK(detail.find("Motion timed out") != std::string::npos);
+        CHECK(detail.find("Spool jammed at the gate") != std::string::npos);
+    }
+
+    SECTION("a bay fault marks only that bay") {
+        backend.feed(
+            faulted_manager(json::array({fault_entry("unload failed", "Spool unloading failed",
+                                                     json::array({"clear_errors"}), "pause", 0)})));
+        CHECK(backend.get_system_info().units[0].slots[0].error.has_value());
+        CHECK_FALSE(backend.get_system_info().units[1].has_any_error());
+    }
+
+    SECTION("clearing the fault retires the error") {
+        backend.feed(faulted_manager(json::array()));
+        CHECK(backend.get_system_info().action == AmsAction::IDLE);
+        CHECK_FALSE(backend.current_error().has_value());
+        CHECK_FALSE(backend.get_system_info().units[0].has_any_error());
+    }
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS clears each faulted unit, then resets the manager",
+                 "[ams][openams][fault]") {
+    SECTION("openams shape: unit clears first, in unit order, then commands.reset") {
+        OpenAmsHarness backend;
+        backend.feed(
+            faulted_manager(json::array({fault_entry("motor_drive_fault", "m", {"clear_fault"})}),
+                            json::array({fault_entry("motion_timeout", "t", {"clear_fault"})})));
+        REQUIRE(backend.reset().success());
+        CHECK(backend.commands ==
+              std::vector<std::string>{"OAMS_CLEAR_FAULT OAMS=1\nOAMS_CLEAR_FAULT OAMS=2\n"
+                                       "OAMSM_CLEAR_ERRORS"});
+    }
+
+    SECTION("only the faulted unit is cleared") {
+        OpenAmsHarness backend;
+        backend.feed(faulted_manager(
+            json::array(), json::array({fault_entry("motor_drive_fault", "m", {"clear_fault"})})));
+        REQUIRE(backend.recover().success());
+        CHECK(backend.commands ==
+              std::vector<std::string>{"OAMS_CLEAR_FAULT OAMS=2\nOAMSM_CLEAR_ERRORS"});
+    }
+
+    SECTION("a fault the unit offers no clear_fault for resets the manager only") {
+        OpenAmsHarness backend;
+        backend.feed(
+            faulted_manager(json::array({fault_entry("unload failed", "Spool unloading failed",
+                                                     json::array({"clear_errors"}), "pause", 0)})));
+        REQUIRE(backend.reset().success());
+        CHECK(backend.commands == std::vector<std::string>{"OAMSM_CLEAR_ERRORS"});
+        CHECK(backend.current_error().has_value());
+    }
+
+    SECTION("clear_fault clears the latched unit fault, and sends nothing without one") {
+        OpenAmsHarness backend;
+        backend.feed(
+            faulted_manager(json::array({fault_entry("motor_drive_fault", "m", {"clear_fault"})})));
+        REQUIRE(backend.clear_fault(-1).success());
+        CHECK(backend.commands == std::vector<std::string>{kClearHt});
+
+        OpenAmsHarness quiet;
+        quiet.feed(shared_manager(-1, toolhead_commands()));
+        REQUIRE(quiet.clear_fault(-1).success());
+        CHECK(quiet.commands.empty());
+    }
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS shows no fault and resets as before without devices",
+                 "[ams][openams][fault]") {
+    // klipper_openams publishes no `devices`.
+    OpenAmsHarness backend;
+    backend.feed(shared_manager(-1, all_commands(), false));
+
+    CHECK(backend.get_system_info().action == AmsAction::IDLE);
+    CHECK_FALSE(backend.current_error().has_value());
+    REQUIRE(backend.reset().success());
+    CHECK(backend.commands == std::vector<std::string>{"OAMSM_CLEAR_ERRORS"});
+}
+
+// ============================================================================
+// Environment and dryer
+// ============================================================================
+
+namespace {
+
+json dryer_device(bool ht, const std::string& state = "off", double target = 0.0,
+                  int remaining_s = 0, bool offer = true) {
+    json actions = json::array({"load", "unload"});
+    if (offer) {
+        // A running cycle withdraws dryer_start.
+        if (remaining_s == 0) {
+            actions.push_back("dryer_start");
+        }
+        actions.push_back("dryer_stop");
+    }
+    return json{
+        {"capabilities",
+         {{"dryer", true},
+          {"dryer_target_min_c", 45.0},
+          {"dryer_target_max_c", ht ? 80.0 : 65.0},
+          {"dryer_requires_unloaded", !ht}}},
+        {"environment", {{"temp_c", ht ? 26.1 : 28.2}, {"rh_pct", ht ? 29.0 : 31.0}}},
+        {"dryer",
+         {{"state", state}, {"target_c", target}, {"remaining_s", remaining_s}, {"fan_pct", 60.0}}},
+        {"telemetry", {{"dryer", {{"chamber_c", 51.5}}}}},
+        {"supported_actions", actions}};
+}
+
+json dryer_manager(int loaded = -1, json ht = dryer_device(true), json ams2 = dryer_device(false)) {
+    json m = shared_manager(loaded, toolhead_commands(), true);
+    m["devices"] = {{"ams_ht", std::move(ht)}, {"ams2", std::move(ams2)}};
+    return m;
+}
+
+} // namespace
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS reads each unit's own temperature and humidity",
+                 "[ams][openams][environment]") {
+    OpenAmsHarness backend;
+    backend.feed(dryer_manager());
+
+    CHECK(backend.traits().has_environment_sensors);
+    const auto info = backend.get_system_info();
+    const auto ht = info.units[0].environment;
+    const auto pro = info.units[1].environment;
+    REQUIRE(ht.has_value());
+    REQUIRE(pro.has_value());
+    CHECK(ht->temperature_c == Catch::Approx(26.1f));
+    CHECK(ht->humidity_pct == Catch::Approx(29.0f));
+    CHECK(ht->has_humidity);
+    CHECK(pro->temperature_c == Catch::Approx(28.2f));
+    CHECK(pro->humidity_pct == Catch::Approx(31.0f));
+
+    SECTION("a reading without humidity says so") {
+        json ams2 = dryer_device(false);
+        ams2["environment"] = {{"temp_c", 30.0}};
+        backend.feed(dryer_manager(-1, dryer_device(true), ams2));
+        CHECK_FALSE(backend.get_system_info().units[1].environment->has_humidity);
+    }
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS publishes no environment or dryer without devices",
+                 "[ams][openams][environment][dryer]") {
+    // klipper_openams publishes no `devices`.
+    OpenAmsHarness backend;
+    backend.feed(shared_manager(-1, all_commands(), false));
+
+    CHECK_FALSE(backend.get_dryer_info(0).supported);
+    CHECK_FALSE(backend.traits().has_environment_sensors);
+    CHECK_FALSE(backend.get_system_info().units[0].environment.has_value());
+    CHECK_FALSE(backend.start_drying(55.0f, 60, -1, 0).success());
+    CHECK_FALSE(backend.stop_drying(0).success());
+    CHECK(backend.commands.empty());
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS offers a dryer only where the unit advertises it",
+                 "[ams][openams][dryer]") {
+    OpenAmsHarness backend;
+    backend.feed(dryer_manager());
+
+    const DryerInfo ht = backend.get_dryer_info(0);
+    CHECK(ht.supported);
+    CHECK(ht.min_temp_c == Catch::Approx(45.0f));
+    CHECK(ht.max_temp_c == Catch::Approx(80.0f));
+    CHECK(backend.get_dryer_info(1).max_temp_c == Catch::Approx(65.0f));
+    CHECK(ht.max_duration_min == 10080);
+
+    SECTION("neither action withholds the dryer") {
+        json none = dryer_device(true);
+        none["supported_actions"] = json::array({"load"});
+        backend.feed(dryer_manager(-1, none));
+        CHECK_FALSE(backend.get_dryer_info(0).supported);
+        CHECK(backend.get_dryer_info(1).supported);
+        CHECK_FALSE(backend.start_drying(55.0f, 60, -1, 0).success());
+        CHECK_FALSE(backend.stop_drying(0).success());
+    }
+    SECTION("no dryer capability withholds the dryer") {
+        json none = dryer_device(true);
+        none["capabilities"]["dryer"] = false;
+        backend.feed(dryer_manager(-1, none));
+        CHECK_FALSE(backend.get_dryer_info(0).supported);
+    }
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS maps the unit's dryer state", "[ams][openams][dryer]") {
+    OpenAmsHarness backend;
+    backend.feed(dryer_manager());
+    CHECK_FALSE(backend.get_dryer_info(0).active);
+    CHECK(backend.get_dryer_info(0).target_temp_c == Catch::Approx(0.0f));
+
+    backend.feed(dryer_manager(-1, dryer_device(true, "heating", 60.0, 5400)));
+    DryerInfo dry = backend.get_dryer_info(0);
+    CHECK(dry.active);
+    CHECK(dry.target_temp_c == Catch::Approx(60.0f));
+    CHECK(dry.remaining_min == 90);
+    CHECK(dry.current_temp_c == Catch::Approx(51.5f));
+    CHECK(dry.fan_pct == 60);
+    CHECK_FALSE(backend.get_dryer_info(1).active);
+
+    backend.feed(dryer_manager(-1, dryer_device(true, "holding", 60.0, 61)));
+    CHECK(backend.get_dryer_info(0).active);
+    CHECK(backend.get_dryer_info(0).remaining_min == 2);
+
+    backend.feed(dryer_manager(-1, dryer_device(true, "fault", 60.0, 100)));
+    CHECK_FALSE(backend.get_dryer_info(0).active);
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS starts and stops a unit's dryer, clamped to its range",
+                 "[ams][openams][dryer]") {
+    OpenAmsHarness backend;
+    backend.feed(dryer_manager());
+
+    REQUIRE(backend.start_drying(55.0f, 120, -1, 0).success());
+    CHECK(backend.commands.back() == "OAMS_DRYER_START OAMS=1 TARGET=55 DURATION=7200");
+
+    SECTION("the AMS 2 Pro addresses its own index and ceiling") {
+        REQUIRE(backend.start_drying(70.0f, 30, -1, 1).success());
+        CHECK(backend.commands.back() == "OAMS_DRYER_START OAMS=2 TARGET=65 DURATION=1800");
+    }
+    SECTION("a target below the floor rises to it") {
+        REQUIRE(backend.start_drying(30.0f, 60, -1, 0).success());
+        CHECK(backend.commands.back() == "OAMS_DRYER_START OAMS=1 TARGET=45 DURATION=3600");
+    }
+    SECTION("a duration is held to 1 s .. 7 days") {
+        REQUIRE(backend.start_drying(55.0f, 999999, -1, 0).success());
+        CHECK(backend.commands.back() == "OAMS_DRYER_START OAMS=1 TARGET=55 DURATION=604800");
+        REQUIRE(backend.start_drying(55.0f, 0, -1, 0).success());
+        CHECK(backend.commands.back() == "OAMS_DRYER_START OAMS=1 TARGET=55 DURATION=60");
+    }
+    SECTION("stop names the unit") {
+        REQUIRE(backend.stop_drying(1).success());
+        CHECK(backend.commands.back() == "OAMS_DRYER_STOP OAMS=2");
+    }
+    SECTION("an unknown unit is refused") {
+        const auto before = backend.commands.size();
+        CHECK_FALSE(backend.start_drying(55.0f, 60, -1, 7).success());
+        CHECK_FALSE(backend.stop_drying(-1).success());
+        CHECK(backend.commands.size() == before);
+    }
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS refuses to dry a unit that must be unloaded first",
+                 "[ams][openams][dryer]") {
+    OpenAmsHarness backend;
+    // Slot 2 belongs to the AMS 2 Pro; the AMS HT dryer has no such condition.
+    backend.feed(dryer_manager(2));
+
+    const auto refused = backend.start_drying(55.0f, 60, -1, 1);
+    CHECK_FALSE(refused.success());
+    CHECK(refused.result == AmsResult::WRONG_STATE);
+    CHECK(backend.commands.empty());
+
+    REQUIRE(backend.start_drying(55.0f, 60, -1, 0).success());
+    CHECK(backend.commands.size() == 1);
+
+    backend.feed(dryer_manager(-1));
+    REQUIRE(backend.start_drying(55.0f, 60, -1, 1).success());
+    CHECK(backend.commands.back() == "OAMS_DRYER_START OAMS=2 TARGET=55 DURATION=3600");
+}
+
+TEST_CASE_METHOD(HelixTestFixture,
+                 "OpenAMS keeps a running dryer stoppable when only dryer_stop is advertised",
+                 "[ams][openams][dryer]") {
+    OpenAmsHarness backend;
+    // dryer_start is withdrawn for as long as the cycle runs.
+    backend.feed(
+        dryer_manager(-1, dryer_device(true), dryer_device(false, "timed_dry", 45.0, 3000)));
+
+    const DryerInfo running = backend.get_dryer_info(1);
+    CHECK(running.supported);
+    CHECK(running.active);
+    CHECK(backend.get_dryer_info(0).supported);
+    CHECK_FALSE(backend.get_dryer_info(0).active);
+
+    REQUIRE(backend.stop_drying(1).success());
+    CHECK(backend.commands.back() == "OAMS_DRYER_STOP OAMS=2");
+
+    const auto before = backend.commands.size();
+    const auto refused = backend.start_drying(55.0f, 60, -1, 1);
+    CHECK_FALSE(refused.success());
+    CHECK(refused.result == AmsResult::WRONG_STATE);
+    CHECK(backend.commands.size() == before);
+
+    SECTION("an idle unit with both actions still starts and stops") {
+        REQUIRE(backend.start_drying(55.0f, 60, -1, 0).success());
+        REQUIRE(backend.stop_drying(0).success());
+    }
+    SECTION("a unit offering only dryer_start cannot be stopped") {
+        json start_only = dryer_device(true);
+        start_only["supported_actions"] = json::array({"dryer_start"});
+        backend.feed(dryer_manager(-1, start_only));
+        CHECK(backend.get_dryer_info(0).supported);
+        CHECK_FALSE(backend.stop_drying(0).success());
+    }
+}
+
+TEST_CASE_METHOD(HelixTestFixture,
+                 "OpenAMS names each lane's extruder from the plugin's lanes_by_fps",
+                 "[ams][openams][shared_hub]") {
+    OpenAmsHarness backend;
+    json m = shared_manager(0, all_commands(), true);
+    m["units"][1]["lane"] = "fps2";
+    for (auto& g : m["groups"]) {
+        if (g["name"] != "T0") {
+            g["lane"] = "fps2";
+        }
+    }
+    json second = lane("unloaded");
+    second["id"] = "fps2";
+    m["lanes"].push_back(second);
+    m["lanes_by_fps"]["fps2"] = {{"op", "idle"}, {"extruder", "extruder1"}};
+    backend.feed(m);
+
+    const auto info = backend.get_system_info();
+    REQUIRE(info.units.size() == 2);
+    CHECK(info.units[0].slots[0].extruder_name == "extruder");
+    for (const auto& slot : info.units[1].slots) {
+        CHECK(slot.extruder_name == "extruder1");
+    }
+
+    // Two lanes are two toolheads, each badged by its extruder.
+    const auto layout = ams_draw::compute_system_tool_layout(info, &backend);
+    CHECK(layout.total_physical_tools == 2);
+    CHECK(layout.physical_to_extruder_name == std::vector<std::string>{"extruder", "extruder1"});
+
+    SECTION("a manager without lanes_by_fps names none") {
+        OpenAmsHarness legacy;
+        legacy.feed(shared_manager(0));
+        CHECK(legacy.get_system_info().units[0].slots[0].extruder_name.empty());
+    }
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS fleet mock publishes twelve units on two hubs",
+                 "[ams][openams][mock][fleet]") {
+    helix::ScopedEnv ams("HELIX_MOCK_AMS", "openams");
+    helix::ScopedEnv units("HELIX_MOCK_OPENAMS_UNITS", "fleet");
+    helix::ScopedEnv api("HELIX_MOCK_OPENAMS_API", nullptr);
+    MoonrakerClientMock client(MoonrakerClientMock::PrinterType::GENERIC_COREXY);
+
+    OpenAmsHarness backend;
+    backend.feed(client.openams_status_json());
+
+    const auto info = backend.get_system_info();
+    REQUIRE(info.units.size() == 12);
+    CHECK(info.total_slots == 45);
+    CHECK(info.units[0].slot_count == 1);
+    for (size_t u = 1; u < info.units.size(); ++u) {
+        CHECK(info.units[u].slot_count == 4);
+    }
+
+    std::set<std::string> hubs;
+    for (size_t u = 0; u < info.units.size(); ++u) {
+        hubs.insert(info.units[u].hub_id);
+        CHECK(info.units[u].hub_id == (u < 10 ? "fps" : "fps2"));
+        REQUIRE(info.units[u].environment.has_value());
+    }
+    CHECK(hubs.size() == 2);
+
+    // Each hub's lane feeds its own extruder.
+    for (size_t u = 0; u < info.units.size(); ++u) {
+        for (const auto& slot : info.units[u].slots) {
+            CHECK(slot.extruder_name == (u < 10 ? "extruder" : "extruder1"));
+        }
+    }
+
+    // Readings differ unit to unit, so a page showing the wrong unit is visible.
+    CHECK(info.units[1].environment->humidity_pct != info.units[2].environment->humidity_pct);
+
+    // One bay loaded, on the third unit; one unit mid-dryer-cycle.
+    CHECK(info.current_slot == 5);
+    CHECK(info.units[2].slots[0].status == SlotStatus::LOADED);
+    for (size_t u = 0; u < info.units.size(); ++u) {
+        INFO("unit " << u);
+        CHECK(backend.get_dryer_info(static_cast<int>(u)).active == (u == 5));
+    }
+    CHECK(backend.get_dryer_info(5).remaining_min > 0);
+
+    // A group per bay: T0..T44.
+    CHECK(backend.get_tool_mapping().size() == 45);
+}
+
+// ============================================================================
+// Tool serving slot, endless spool, and backup-slot dispatch
+// ============================================================================
+
+namespace {
+
+/// One `groups[]` entry on lane fps, with its member slots.
+json tool_group(const std::string& name, const json& slots) {
+    return json{{"name", name}, {"lane", "fps"}, {"slots", slots}};
+}
+
+/// manager() with slots 1 and 2 forming T0 (a runout backup pair), slot 3 as
+/// T1 and slot 0 as the single-slot T2. Slot 0 is empty, so slot 1 serves T0.
+json backup_pair_manager() {
+    json m = manager();
+    m["groups"] =
+        json::array({tool_group("T0", json::array({1, 2})), tool_group("T1", json::array({3})),
+                     tool_group("T2", json::array({0}))});
+    return m;
+}
+
+} // namespace
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS maps a tool to the one slot serving it",
+                 "[ams][openams][mapping]") {
+    OpenAmsHarness backend;
+
+    SECTION("the first ready member serves; its backup carries no tool") {
+        backend.feed(backup_pair_manager());
+        const auto info = backend.get_system_info();
+        CHECK(info.units[0].slots[1].mapped_tool == 0);
+        CHECK(info.units[0].slots[2].mapped_tool == -1);
+        CHECK(backend.get_tool_mapping()[0] == 1);
+    }
+
+    SECTION("when the serving slot is empty, the backup takes the tool") {
+        json m = backup_pair_manager();
+        m["units"][0]["slots"][1]["ready"] = false;
+        backend.feed(m);
+        const auto info = backend.get_system_info();
+        CHECK(info.units[0].slots[1].mapped_tool == -1);
+        CHECK(info.units[0].slots[2].mapped_tool == 0);
+        CHECK(backend.get_tool_mapping()[0] == 2);
+    }
+
+    SECTION("a loaded backup serves the tool over a ready member") {
+        json m = backup_pair_manager();
+        m["lanes"] = json::array({lane("loaded", "T0", 2)});
+        m["units"][0]["slots"][2]["loaded"] = true;
+        backend.feed(m);
+        const auto info = backend.get_system_info();
+        CHECK(info.units[0].slots[2].mapped_tool == 0);
+        CHECK(info.units[0].slots[1].mapped_tool == -1);
+        CHECK(backend.get_tool_mapping()[0] == 2);
+    }
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS reports a runout-backup group as endless spool",
+                 "[ams][openams][endless]") {
+    OpenAmsHarness backend;
+
+    SECTION("nothing is reported before a ready manager") {
+        const auto caps = backend.get_endless_spool_capabilities();
+        CHECK_FALSE(caps.available());
+        CHECK(backend.get_endless_spool_config().empty());
+    }
+
+    SECTION("a two-slot group is one read-only, enabled group") {
+        backend.feed(backup_pair_manager());
+        const auto caps = backend.get_endless_spool_capabilities();
+        CHECK(caps.available());
+        CHECK_FALSE(caps.editable());
+        CHECK(caps.enabled == helix::printer::EndlessSpoolEnabled::On);
+        CHECK(caps.restriction == helix::printer::EndlessSpoolRestriction::FirmwareManaged);
+
+        const auto config = backend.get_endless_spool_config();
+        REQUIRE(config.groups.size() == 1);
+        CHECK(config.groups[0].members == std::vector<int>{1, 2});
+    }
+
+    SECTION("single-slot groups back nothing up, so the setting is off") {
+        json m = manager();
+        m["groups"] =
+            json::array({tool_group("T0", json::array({0})), tool_group("T1", json::array({2})),
+                         tool_group("T2", json::array({3}))});
+        backend.feed(m);
+        const auto caps = backend.get_endless_spool_capabilities();
+        CHECK(caps.available());
+        CHECK(caps.enabled == helix::printer::EndlessSpoolEnabled::Off);
+        CHECK(backend.get_endless_spool_config().empty());
+    }
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS dispatches a backup slot as its own load",
+                 "[ams][openams][dispatch]") {
+    // Slot 0 is loaded on lane fps and slot 2 is its runout backup in T0.
+    json m = backup_pair_manager();
+    m["lanes"] = json::array({lane("loaded", "T0", 0)});
+    m["units"][0]["slots"][0]["ready"] = true;
+    m["units"][0]["slots"][0]["loaded"] = true;
+    m["groups"] =
+        json::array({tool_group("T0", json::array({0, 1, 2})), tool_group("T1", json::array({3}))});
+    OpenAmsHarness backend;
+    backend.feed(m);
+
+    helix::AmsSystemInfo info;
+    const helix::ui::BackendCaps caps = helix::ui::read_backend_caps(&backend, info, 2);
+    REQUIRE(info.units[0].slots[2].mapped_tool == -1);
+
+    const helix::ui::FilamentOpPlan plan = helix::ui::plan_load(info, caps, 2, false, false);
+    CHECK(plan.tier == helix::ui::FilamentTier::AmsBackend);
+    CHECK(plan.ams_call == helix::ui::AmsCall::Load);
+    CHECK(plan.ams_arg == 2);
+    CHECK(backend.needs_unload_before_load(info, 2));
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "OpenAMS tool change loads the slot serving the tool",
+                 "[ams][openams][commands]") {
+    SECTION("the ready serving slot, not the backup behind it") {
+        OpenAmsHarness backend;
+        backend.feed(backup_pair_manager());
+        REQUIRE(backend.change_tool(0).success());
+        CHECK(backend.operations == std::vector<std::string>{"OPENAMS_LOAD GROUP=T0 SLOT=1"});
+    }
+
+    SECTION("the backup when the serving slot is empty") {
+        OpenAmsHarness backend;
+        json m = backup_pair_manager();
+        m["units"][0]["slots"][1]["ready"] = false;
+        backend.feed(m);
+        REQUIRE(backend.change_tool(0).success());
+        CHECK(backend.operations == std::vector<std::string>{"OPENAMS_LOAD GROUP=T0 SLOT=2"});
+    }
+
+    SECTION("a loaded backup keeps serving the tool") {
+        OpenAmsHarness backend;
+        json m = backup_pair_manager();
+        m["lanes"] = json::array({lane("loaded", "T0", 2)});
+        m["units"][0]["slots"][2]["loaded"] = true;
+        backend.feed(m);
+        REQUIRE(backend.change_tool(0).success());
+        CHECK(backend.operations == std::vector<std::string>{"OPENAMS_LOAD GROUP=T0 SLOT=2"});
+    }
+}

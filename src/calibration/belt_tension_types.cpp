@@ -5,7 +5,8 @@
  * @brief Implementation of belt tension analysis functions
  *
  * Provides PSD computation via DFT, CSV parsing for Klipper accelerometer
- * data, Pearson correlation for belt path similarity, and status evaluation.
+ * data, Pearson correlation for belt path similarity, and two-path curve
+ * comparison with a provisional verdict.
  */
 
 #include "belt_tension_types.h"
@@ -24,122 +25,203 @@
 namespace helix::calibration {
 
 // ============================================================================
-// belt_status_to_string()
+// Band-limited comparison: band_similarity() / detect_belt_peaks() /
+// pair_belt_peaks() / verdict_for_similarity() / compare_belt_paths()
 // ============================================================================
 
-const char* belt_status_to_string(BeltStatus status) {
-    switch (status) {
-    case BeltStatus::GOOD:
-        return "Good";
-    case BeltStatus::WARNING:
-        return "Needs adjustment";
-    case BeltStatus::BAD:
-        return "Out of range";
+namespace {
+
+/// The curve's bins with band_min_hz <= f <= band_max_hz, ascending frequency.
+BeltCurve in_band(const BeltCurve& curve, float band_min_hz, float band_max_hz) {
+    BeltCurve out;
+    for (const auto& bin : curve) {
+        if (bin.first >= band_min_hz && bin.first <= band_max_hz) {
+            out.push_back(bin);
+        }
     }
-    return "";
+    return out;
 }
 
-// ============================================================================
-// evaluate_belt_status()
-// ============================================================================
-
-BeltStatus evaluate_belt_status(float measured_hz, float target_hz, float tolerance_hz) {
-    float delta = std::abs(measured_hz - target_hz);
-
-    if (delta <= tolerance_hz) {
-        return BeltStatus::GOOD;
-    } else if (delta <= 2.0f * tolerance_hz) {
-        return BeltStatus::WARNING;
+/// Linear interpolation at freq, clamped to the end bins outside the curve
+/// (numpy's np.interp semantics).
+float interp_at(const BeltCurve& curve, float freq) {
+    if (freq <= curve.front().first) {
+        return curve.front().second;
     }
-    return BeltStatus::BAD;
+    for (size_t i = 1; i < curve.size(); ++i) {
+        if (curve[i].first >= freq) {
+            const float f0 = curve[i - 1].first;
+            const float f1 = curve[i].first;
+            if (f1 - f0 < 1e-6f) {
+                return curve[i - 1].second;
+            }
+            const float t = (freq - f0) / (f1 - f0);
+            return curve[i - 1].second + t * (curve[i].second - curve[i - 1].second);
+        }
+    }
+    return curve.back().second;
 }
 
-// ============================================================================
-// BeltTensionResult::overall_status()
-// ============================================================================
-
-BeltStatus BeltTensionResult::overall_status() const {
-    if (!is_complete()) {
-        return BeltStatus::GOOD; // No data yet, neutral status
-    }
-
-    // Large A/B delta is always BAD regardless of individual status
-    if (frequency_delta > tolerance * 1.5f) {
-        return BeltStatus::BAD;
-    }
-
-    BeltStatus status_a = evaluate_belt_status(path_a.peak_frequency, target_frequency, tolerance);
-    BeltStatus status_b = evaluate_belt_status(path_b.peak_frequency, target_frequency, tolerance);
-
-    // Return the worse of the two
-    if (status_a == BeltStatus::BAD || status_b == BeltStatus::BAD) {
-        return BeltStatus::BAD;
-    }
-    if (status_a == BeltStatus::WARNING || status_b == BeltStatus::WARNING) {
-        return BeltStatus::WARNING;
-    }
-    return BeltStatus::GOOD;
+/// Percentile of ascending `values` with linear interpolation between closest
+/// ranks - numpy's default - so thresholds match the reference computations.
+float percentile_linear(const std::vector<float>& values, float pct) {
+    const float pos = pct / 100.0f * static_cast<float>(values.size() - 1);
+    const size_t lo = static_cast<size_t>(pos);
+    const size_t hi = std::min(lo + 1, values.size() - 1);
+    return values[lo] + (pos - static_cast<float>(lo)) * (values[hi] - values[lo]);
 }
 
-// ============================================================================
-// BeltTensionResult::recommendation()
-// ============================================================================
+} // namespace
 
-std::string BeltTensionResult::recommendation() const {
-    if (!is_complete()) {
-        return "Run a measurement to get recommendations.";
+BeltVerdict verdict_for_similarity(float similarity_percent) {
+    using namespace belt_verdict;
+    return similarity_percent >= MATCHED_SIMILARITY ? BeltVerdict::MATCHED
+           : similarity_percent >= CLOSE_SIMILARITY ? BeltVerdict::CLOSE
+                                                    : BeltVerdict::ADJUST;
+}
+
+float band_similarity(const BeltCurve& a, const BeltCurve& b, float band_min_hz,
+                      float band_max_hz) {
+    const BeltCurve xa = in_band(a, band_min_hz, band_max_hz);
+    const BeltCurve xb = in_band(b, band_min_hz, band_max_hz);
+    if (xa.size() < 3 || xb.size() < 3) {
+        return 0.0f;
     }
 
-    float freq_a = path_a.peak_frequency;
-    float freq_b = path_b.peak_frequency;
-    float delta = std::abs(freq_a - freq_b);
-
-    BeltStatus status_a = evaluate_belt_status(freq_a, target_frequency, tolerance);
-    BeltStatus status_b = evaluate_belt_status(freq_b, target_frequency, tolerance);
-
-    bool a_low = freq_a < (target_frequency - tolerance);
-    bool b_low = freq_b < (target_frequency - tolerance);
-    bool a_high = freq_a > (target_frequency + tolerance);
-    bool b_high = freq_b > (target_frequency + tolerance);
-
-    // Both good and similar frequencies
-    if (status_a == BeltStatus::GOOD && status_b == BeltStatus::GOOD && delta <= tolerance) {
-        return "Belt tension looks good!";
+    // Pearson over A's in-band bins with B interpolated onto them. Double
+    // accumulators: psd values reach 1e5 and products 1e10, past where float
+    // rounding stays quiet in the headline percent.
+    std::vector<double> va(xa.size()), vb(xa.size());
+    for (size_t i = 0; i < xa.size(); ++i) {
+        va[i] = xa[i].second;
+        vb[i] = interp_at(xb, xa[i].first);
     }
-
-    // Both low
-    if (a_low && b_low) {
-        return "Both belts need tightening.";
+    const double mean_a =
+        std::accumulate(va.begin(), va.end(), 0.0) / static_cast<double>(va.size());
+    const double mean_b =
+        std::accumulate(vb.begin(), vb.end(), 0.0) / static_cast<double>(vb.size());
+    double sum_ab = 0.0, sum_aa = 0.0, sum_bb = 0.0;
+    for (size_t i = 0; i < va.size(); ++i) {
+        const double da = va[i] - mean_a;
+        const double db = vb[i] - mean_b;
+        sum_ab += da * db;
+        sum_aa += da * da;
+        sum_bb += db * db;
     }
-
-    // Both high
-    if (a_high && b_high) {
-        return "Both belts are overtightened.";
+    const double denom = std::sqrt(sum_aa * sum_bb);
+    if (denom < 1e-12) {
+        return 0.0f;
     }
+    const double r = sum_ab / denom;
+    return static_cast<float>(std::clamp(r * 100.0, 0.0, 100.0));
+}
 
-    // Frequencies differ significantly
-    if (delta > tolerance) {
-        if (freq_a < freq_b) {
-            return "Tighten Path A belt to match Path B.";
+std::vector<BeltPeak> detect_belt_peaks(const BeltCurve& curve, float band_min_hz,
+                                        float band_max_hz) {
+    const BeltCurve x = in_band(curve, band_min_hz, band_max_hz);
+    std::vector<BeltPeak> peaks;
+    if (x.size() < 3) {
+        return peaks;
+    }
+    float max_v = 0.0f;
+    for (const auto& bin : x) {
+        max_v = std::max(max_v, bin.second);
+    }
+    const float min_amplitude = belt_verdict::PEAK_THRESHOLD_FRACTION * max_v;
+    // A bin needs both neighbours in-band, so the band's edge bins cannot be
+    // peaks. Ascending frequency comes free from the input order.
+    for (size_t i = 1; i + 1 < x.size(); ++i) {
+        if (x[i].second > x[i - 1].second && x[i].second >= x[i + 1].second &&
+            x[i].second >= min_amplitude) {
+            peaks.push_back({x[i].first, x[i].second});
         }
-        return "Tighten Path B belt to match Path A.";
+    }
+    return peaks;
+}
+
+BeltPeakPairing pair_belt_peaks(const std::vector<BeltPeak>& a, const std::vector<BeltPeak>& b) {
+    BeltPeakPairing out;
+
+    std::vector<float> dists;
+    dists.reserve(a.size() * b.size());
+    for (const auto& pa : a) {
+        for (const auto& pb : b) {
+            dists.push_back(std::abs(pa.freq_hz - pb.freq_hz));
+        }
+    }
+    if (dists.empty()) {
+        out.threshold_hz = belt_verdict::PAIR_MAX_HZ;
+    } else {
+        std::sort(dists.begin(), dists.end());
+        const float median = percentile_linear(dists, 50.0f);
+        const float iqr = percentile_linear(dists, 75.0f) - percentile_linear(dists, 25.0f);
+        out.threshold_hz = std::min(median + 1.5f * iqr, belt_verdict::PAIR_MAX_HZ);
     }
 
-    // One is off, the other is fine
-    if (status_a != BeltStatus::GOOD && status_b == BeltStatus::GOOD) {
-        if (a_low) {
-            return "Tighten Path A belt.";
+    // Greedy: repeatedly take the globally closest remaining (a, b) inside the
+    // threshold. Scanning a then b in order and keeping only strictly closer
+    // candidates breaks distance ties toward the lower a, then lower b, index.
+    std::vector<bool> used_a(a.size(), false), used_b(b.size(), false);
+    for (;;) {
+        size_t best_i = a.size(), best_j = 0;
+        float best_d = 0.0f;
+        for (size_t i = 0; i < a.size(); ++i) {
+            if (used_a[i]) {
+                continue;
+            }
+            for (size_t j = 0; j < b.size(); ++j) {
+                if (used_b[j]) {
+                    continue;
+                }
+                const float d = std::abs(a[i].freq_hz - b[j].freq_hz);
+                if (d <= out.threshold_hz && (best_i == a.size() || d < best_d)) {
+                    best_i = i;
+                    best_j = j;
+                    best_d = d;
+                }
+            }
         }
-        return "Loosen Path A belt.";
-    }
-    if (status_b != BeltStatus::GOOD && status_a == BeltStatus::GOOD) {
-        if (b_low) {
-            return "Tighten Path B belt.";
+        if (best_i == a.size()) {
+            break;
         }
-        return "Loosen Path B belt.";
+        out.pairs.push_back({a[best_i], b[best_j]});
+        used_a[best_i] = true;
+        used_b[best_j] = true;
     }
 
-    return "Adjust belt tension toward the target frequency.";
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (!used_a[i]) {
+            out.unpaired_a.push_back(a[i]);
+        }
+    }
+    for (size_t j = 0; j < b.size(); ++j) {
+        if (!used_b[j]) {
+            out.unpaired_b.push_back(b[j]);
+        }
+    }
+    std::sort(out.pairs.begin(), out.pairs.end(), [](const BeltPeakPair& l, const BeltPeakPair& r) {
+        return l.a.amplitude + l.b.amplitude > r.a.amplitude + r.b.amplitude;
+    });
+    return out;
+}
+
+BeltComparison compare_belt_paths(const BeltCurve& a, const BeltCurve& b, float band_min_hz,
+                                  float band_max_hz) {
+    BeltComparison out;
+    if (in_band(a, band_min_hz, band_max_hz).size() < 3 ||
+        in_band(b, band_min_hz, band_max_hz).size() < 3) {
+        return out;
+    }
+    out.valid = true;
+    out.similarity_percent = band_similarity(a, b, band_min_hz, band_max_hz);
+    out.verdict = verdict_for_similarity(out.similarity_percent);
+    out.peaks = pair_belt_peaks(detect_belt_peaks(a, band_min_hz, band_max_hz),
+                                detect_belt_peaks(b, band_min_hz, band_max_hz));
+    spdlog::debug("[BeltTension] Comparison: similarity {:.1f}% in [{:.0f},{:.0f}] Hz, {} pairs, "
+                  "{}+{} unpaired (threshold {:.2f} Hz)",
+                  out.similarity_percent, band_min_hz, band_max_hz, out.peaks.pairs.size(),
+                  out.peaks.unpaired_a.size(), out.peaks.unpaired_b.size(), out.peaks.threshold_hz);
+    return out;
 }
 
 // ============================================================================

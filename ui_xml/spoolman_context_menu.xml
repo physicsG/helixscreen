@@ -11,8 +11,7 @@
          material name (e.g. "Polymaker PLA"); the colour and vendor subtitles sit
          between it and the rule, so the card's own rule is suppressed. -->
     <context_menu_card width="220"
-                       title="Spool" title_tag="Spool" title_name="spool_header" title_grow="1" title_long_mode="dots"
-                       hide_divider="true">
+                       title="Spool" title_name="spool_header" title_grow="1" title_long_mode="dots" hide_divider="true">
       <!-- Color name (e.g., "Jet Black") -->
       <text_small name="spool_color_label" width="100%" text="" long_mode="dots" style_text_color="#text_muted"/>
       <!-- Vendor subtitle -->
@@ -22,35 +21,32 @@
               height="1" style_bg_color="#text_muted" style_bg_opa="38" style_pad_all="0" scrollable="false"/>
       <!-- Set Active Button -->
       <ui_button name="btn_set_active"
-                 width="100%" height="#button_height_sm" icon="check_circle" text="Set Active"
-                 translation_tag="Set Active" variant="ghost" clickable="true" focusable="false"
-                 style_flex_main_place="start">
+                 width="100%" height="#button_height_sm" icon="check_circle" text="Set Active" variant="ghost"
+                 clickable="true" focusable="false" style_flex_main_place="start">
         <event_cb trigger="clicked" callback="spoolman_context_set_active_cb"/>
       </ui_button>
       <!-- Edit Button -->
       <ui_button name="btn_edit"
-                 width="100%" height="#button_height_sm" icon="pencil" text="Edit" translation_tag="Edit"
-                 variant="ghost" clickable="true" focusable="false" style_flex_main_place="start">
+                 width="100%" height="#button_height_sm" icon="pencil" text="Edit" variant="ghost" clickable="true"
+                 focusable="false" style_flex_main_place="start">
         <event_cb trigger="clicked" callback="spoolman_context_edit_cb"/>
       </ui_button>
       <!-- Print Label Button -->
       <ui_button name="btn_print_label"
-                 width="100%" height="#button_height_sm" icon="print" text="Print Label" translation_tag="Print Label"
-                 variant="ghost" clickable="true" focusable="false" style_flex_main_place="start">
+                 width="100%" height="#button_height_sm" icon="print" text="Print Label" variant="ghost"
+                 clickable="true" focusable="false" style_flex_main_place="start">
         <event_cb trigger="clicked" callback="spoolman_context_print_label_cb"/>
       </ui_button>
       <!-- Duplicate Button -->
       <ui_button name="btn_duplicate"
-                 width="100%" height="#button_height_sm" icon="content_copy" text="Duplicate"
-                 translation_tag="Duplicate" variant="ghost" clickable="true" focusable="false"
-                 style_flex_main_place="start">
+                 width="100%" height="#button_height_sm" icon="content_copy" text="Duplicate" variant="ghost"
+                 clickable="true" focusable="false" style_flex_main_place="start">
         <event_cb trigger="clicked" callback="spoolman_context_duplicate_cb"/>
       </ui_button>
       <!-- Archive Button -->
       <ui_button name="btn_archive"
-                 width="100%" height="#button_height_sm" icon="archive_arrow_down" text="Archive"
-                 translation_tag="Archive" variant="ghost" clickable="true" focusable="false"
-                 style_flex_main_place="start">
+                 width="100%" height="#button_height_sm" icon="archive_arrow_down" text="Archive" variant="ghost"
+                 clickable="true" focusable="false" style_flex_main_place="start">
         <event_cb trigger="clicked" callback="spoolman_context_archive_cb"/>
       </ui_button>
       <!-- Divider before destructive action -->
@@ -58,9 +54,8 @@
               height="1" style_bg_color="#text_muted" style_bg_opa="38" style_pad_all="0" scrollable="false"/>
       <!-- Delete Button -->
       <ui_button name="btn_delete"
-                 width="100%" height="#button_height_sm" icon="delete" text="Delete" translation_tag="Delete"
-                 variant="ghost" clickable="true" focusable="false" style_flex_main_place="start"
-                 style_text_color="#danger">
+                 width="100%" height="#button_height_sm" icon="delete" text="Delete" variant="ghost" clickable="true"
+                 focusable="false" style_flex_main_place="start" style_text_color="#danger">
         <event_cb trigger="clicked" callback="spoolman_context_delete_cb"/>
       </ui_button>
     </context_menu_card>

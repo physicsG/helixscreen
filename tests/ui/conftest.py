@@ -53,12 +53,14 @@ _TEST_GCODE_MTIME_ORDER = [
     "Night Spirit_v1_2_og.gcode",
     "Low poly vase v1.1 flat top.gcode",
     "ECC_0.4_stand_PLA0.2_2h42m.gcode",
-    # Added by 6ba20a707 as extra mock gcode; nothing references them by name.
+    # Extra mock gcode; no UI test opens any of these three by name (two unit
+    # tests open pause_markers_demo.gcode directly, unaffected by mtime order).
     # Pinned oldest so they sort onto the last row rather than displacing the
-    # cards the golden was captured under. Moving either up is a deliberate
+    # cards the golden was captured under. Moving any up is a deliberate
     # golden update.
     "eiffel_final_PLA_2h42m.gcode",
     "2022-big-ben-by-miniworld3d_ABS_36m21s.gcode",
+    "pause_markers_demo.gcode",
 ]
 
 
@@ -176,9 +178,16 @@ def artifacts(request):
     if not failed or app is None:
         return
 
+    dump_failure_diagnostics(app, target)
+
+
+def dump_failure_diagnostics(app, target):
+    """Write screenshot, log and state for `app` into `target`.
+
+    Each dump is independently best-effort: the app may be wedged or dead, and
+    losing the screenshot must not cost us the log.
+    """
     target.mkdir(parents=True, exist_ok=True)
-    # Each dump is independently best-effort: the app may be wedged or dead, and
-    # losing the screenshot must not cost us the log.
     try:
         app.screenshot(str((target / "screen.png").resolve()))
     except Exception as exc:  # noqa: BLE001 - diagnostics must never mask the real failure
@@ -197,6 +206,11 @@ def artifacts(request):
 
 
 GOLDENS_DIR = Path(__file__).parent / "goldens"
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers", "slow: minutes-long; deselected in PR CI, run nightly and by make test-ui-pytest")
 
 
 def pytest_addoption(parser):

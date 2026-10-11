@@ -7,7 +7,7 @@ HelixScreen ships on screens from 480x272 to 1440p. A raw `style_pad_all="12"`
 is 12px on every one of them, so a layout tuned on a 1024x600 dev window is
 cramped on a Snapmaker U1 and lost in whitespace on a 1280x720 panel. The token
 ladders in ui_xml/globals.xml exist so one attribute resolves per breakpoint:
-theme_manager_resolve_px_tokens() (src/ui/theme_manager.cpp) picks the
+theme_manager_resolve_px_tokens() (src/ui/theme_responsive.cpp) picks the
 `_micro.._xxlarge` variant for the live display and registers it under the base
 name, which is what `#space_md` and theme_manager_get_spacing("space_md") read.
 
@@ -53,8 +53,7 @@ WHAT IS NOT FLAGGED
   - Anything inside an XML comment. A comment that documents a fix by quoting
     the attribute it replaced is documentation, not a violation.
   - Sub-token granularity: a value below 2 has no ladder, see above.
-  - The dev-only panels (ui_xml/test_panel.xml, gcode_test_panel.xml,
-    step_test_panel.xml and their C++), the crash/hang screens
+  - The crash/hang screens
     (helix_watchdog.cpp, ui_fatal_error.cpp), the glyph diagnostic panel, and
     the snake easter egg. The crash screens are the load-bearing exclusion:
     they render before or without theme init, where theme_manager_get_spacing()
@@ -66,7 +65,7 @@ WHAT IS NOT FLAGGED
     Mirrors the existing DECLARATIVE_OK / TIMER_DTOR_OK convention.
 
 This is a RATCHET, not a wall. Hundreds of sites predate it. The number may go
-DOWN — convert a site, then lower the baseline in scripts/quality-checks.sh —
+DOWN — convert a site, then lower the baseline in scripts/qc/design_pixels.sh —
 but it must never go up.
 
 Usage:
@@ -94,6 +93,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from staged_content import catfile_batch
+
 XML_DIRS = ("ui_xml",)
 CPP_DIRS = ("src",)
 CPP_EXTS = (".cpp", ".cc")
@@ -111,12 +112,8 @@ OPT_OUT_LOOKBACK = 6
 
 # Dev-only surfaces and pre-theme crash screens. See WHAT IS NOT FLAGGED.
 EXEMPT_FILES = {
-    "ui_xml/test_panel.xml",
-    "ui_xml/gcode_test_panel.xml",
-    "ui_xml/step_test_panel.xml",
     "src/helix_watchdog.cpp",
     "src/ui/ui_fatal_error.cpp",
-    "src/ui/ui_panel_gcode_test.cpp",
     "src/ui/ui_panel_glyphs.cpp",
     "src/ui/ui_snake_game.cpp",
 }
@@ -131,7 +128,7 @@ NON_LENGTH_TOKENS = ("opacity", "opa")
 # the fastest way to teach people the gate is noise. Spacing tokens still drive
 # the xml-pad and cpp-pad rules, where they ARE the answer.
 NON_SIZE_PREFIXES = ("space_", "spinner_arc_", "border_radius")
-NON_SIZE_SUBSTRINGS = ("padding",)
+NON_SIZE_SUBSTRINGS = ("padding", "gap")
 
 # style_pad_all="12" / style_margin_top="8". Token refs (#name), percentages and
 # "content" do not match, because the value group is digits-only.
@@ -309,38 +306,6 @@ def _git_text(args: list[str], root: Path) -> str:
                           capture_output=True, text=True, check=False).stdout
 
 
-def _catfile_batch(root: Path, revs: list[str], rels: list[str]):
-    """Yield (rel, text) for each blob rev via one `git cat-file --batch`.
-
-    The byte-count header makes this robust to newlines/binary in content; the
-    streaming form (one process for every rev) is ~8x faster than spawning a
-    `git show` per file (0.2s vs 1.5s for ~1000 files — benchmarked).
-    """
-    proc = subprocess.Popen(
-        ["git", "-C", str(root), "cat-file", "--batch"],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-    try:
-        for rev, rel in zip(revs, rels):
-            assert proc.stdin is not None and proc.stdout is not None
-            proc.stdin.write((rev + "\n").encode())
-            proc.stdin.flush()
-            header = proc.stdout.readline().decode("utf-8", "replace").split()
-            # "<sha> blob <size>" — skip "missing" / non-blob (submodule) entries.
-            if len(header) < 3 or header[1] != "blob":
-                continue
-            size = int(header[2])
-            content = proc.stdout.read(size)
-            proc.stdout.read(1)  # trailing newline after each blob
-            try:
-                yield (rel, content.decode("utf-8"))
-            except UnicodeDecodeError:
-                continue
-    finally:
-        if proc.stdin is not None:
-            proc.stdin.close()
-        proc.wait()
-
-
 def _in_scope(rel: str) -> bool:
     """True if rel is a file the gate scans — mirrors the default scan's dirs.
 
@@ -387,7 +352,7 @@ def collect(args, root: Path):
             return  # not a git repo / empty index — nothing to check
         rels = [f for f in _git_text(
             ["ls-tree", "-r", "--name-only", tree], root).split("\n") if f and _in_scope(f)]
-        yield from _catfile_batch(root, [f"{tree}:{r}" for r in rels], rels)
+        yield from catfile_batch(((r, f"{tree}:{r}") for r in rels), root)
         return
 
     # Default: whole working tree.

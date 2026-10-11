@@ -30,6 +30,7 @@
 #include "ui_spool_canvas.h"
 
 #include "../test_fixtures.h"
+#include "../test_helpers/backend_user_edit.h"
 #include "ams_backend_mock.h"
 #include "ams_state.h"
 #include "ams_types.h"
@@ -87,7 +88,7 @@ TEST_CASE_METHOD(XMLTestFixture, "AmsPanel slot material stays correct across na
     {
         SlotInfo info = mock->get_slot_info(0);
         info.material = "PLA";
-        REQUIRE(mock->set_slot_info(0, info).success());
+        REQUIRE(helix::test::apply_edit(*mock, 0, info).success());
     }
 
     auto* backend = mock.get();
@@ -106,6 +107,7 @@ TEST_CASE_METHOD(XMLTestFixture, "AmsPanel slot material stays correct across na
     REQUIRE(panel_obj != nullptr);
 
     panel.setup(panel_obj, test_screen());
+    panel.on_activate(); // a shown panel builds its slots
     lv_obj_update_layout(test_screen());
     process_lvgl(50);
     panel.refresh_slots();
@@ -121,11 +123,11 @@ TEST_CASE_METHOD(XMLTestFixture, "AmsPanel slot material stays correct across na
     //    unchanged, exactly the #981 scenario), then nav back. The label must
     //    reflect the new material, driven by the reactive subject rather than an
     //    on_activate() imperative re-read.
-    panel.on_deactivate();
+    panel.on_deactivate(DeactivateReason::NavigateAway);
     {
         SlotInfo info = backend->get_slot_info(0);
         info.material = "PETG"; // color_rgb left untouched — the #981 case
-        REQUIRE(backend->set_slot_info(0, info).success());
+        REQUIRE(helix::test::apply_edit(*backend, 0, info).success());
     }
     AmsState::instance().sync_from_backend();
     process_lvgl(20);
@@ -138,6 +140,7 @@ TEST_CASE_METHOD(XMLTestFixture, "AmsPanel slot material stays correct across na
     REQUIRE(slot0_material_text(panel) == "PETG");
 
     // Tear down panel UI before the fixture destroys state/subjects.
+    panel.on_deactivate(DeactivateReason::NavigateAway);
     panel.clear_panel_reference();
     lv_obj_delete(panel_obj);
     process_lvgl(10);
@@ -162,7 +165,7 @@ TEST_CASE_METHOD(XMLTestFixture,
     {
         SlotInfo info = mock->get_slot_info(0);
         info.material = "PLA";
-        REQUIRE(mock->set_slot_info(0, info).success());
+        REQUIRE(helix::test::apply_edit(*mock, 0, info).success());
     }
 
     auto* backend = mock.get();
@@ -180,6 +183,7 @@ TEST_CASE_METHOD(XMLTestFixture,
     REQUIRE(panel_obj != nullptr);
 
     panel.setup(panel_obj, test_screen());
+    panel.on_activate(); // a shown panel builds its slots
     lv_obj_update_layout(test_screen());
     process_lvgl(50);
     panel.refresh_slots();
@@ -192,7 +196,7 @@ TEST_CASE_METHOD(XMLTestFixture,
     {
         SlotInfo info = backend->get_slot_info(0);
         info.material = "PETG"; // color_rgb left untouched
-        REQUIRE(backend->set_slot_info(0, info).success());
+        REQUIRE(helix::test::apply_edit(*backend, 0, info).success());
     }
     AmsState::instance().sync_from_backend();
     process_lvgl(20);
@@ -200,6 +204,54 @@ TEST_CASE_METHOD(XMLTestFixture,
     // THE #1065 ASSERTION: the label tracks the new material on the sync frame.
     REQUIRE(slot0_material_text(panel) == "PETG");
 
+    panel.on_deactivate(DeactivateReason::NavigateAway);
+    panel.clear_panel_reference();
+    lv_obj_delete(panel_obj);
+    process_lvgl(10);
+    AmsState::instance().set_backend(nullptr);
+}
+
+TEST_CASE_METHOD(XMLTestFixture, "AmsPanel activation builds its slots once",
+                 "[ui_integration][ams]") {
+    auto mock = std::make_unique<AmsBackendMock>(4);
+    mock->set_afc_mode(true);
+    REQUIRE(mock->start().success());
+    AmsState::instance().set_backend(std::move(mock));
+    AmsState::instance().init_subjects(true);
+    AmsState::instance().sync_from_backend();
+
+    register_ams_widgets_and_xml_once();
+
+    AmsPanel panel(state(), &api());
+    panel.init_subjects();
+    lv_obj_t* panel_obj =
+        static_cast<lv_obj_t*>(lv_xml_create(test_screen(), "ams_panel", nullptr));
+    REQUIRE(panel_obj != nullptr);
+    // Activated before the queue drains, as a push activates a freshly built panel.
+    panel.setup(panel_obj, test_screen());
+    panel.on_activate();
+    lv_obj_t* slot_grid = lv_obj_find_by_name(panel.get_panel(), "slot_grid");
+    REQUIRE(slot_grid != nullptr);
+    lv_obj_t* first_slot = lv_obj_get_child(slot_grid, 0);
+    REQUIRE(first_slot != nullptr);
+    bool rebuilt = false;
+    lv_obj_add_event_cb(
+        first_slot, [](lv_event_t* e) { *static_cast<bool*>(lv_event_get_user_data(e)) = true; },
+        LV_EVENT_DELETE, &rebuilt);
+
+    // The slot-count observer's first notification is still queued, and carries
+    // the count on_activate() just built for.
+    process_lvgl(50);
+    CHECK_FALSE(rebuilt);
+
+    // A count that bounces back before the queued rebuild runs leaves the slots alone.
+    lv_subject_t* count = AmsState::instance().get_slot_count_subject();
+    lv_subject_set_int(count, 5);
+    lv_subject_set_int(count, 4);
+    process_lvgl(50);
+    CHECK_FALSE(rebuilt);
+
+    panel.on_deactivate(DeactivateReason::NavigateAway);
     panel.clear_panel_reference();
     lv_obj_delete(panel_obj);
     process_lvgl(10);

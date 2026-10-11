@@ -19,7 +19,6 @@
 #include <chrono>
 #include <condition_variable>
 #include <functional>
-#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -96,12 +95,10 @@ class WifiBackendNetd : public WifiBackend, private hv::EventLoopThread {
     void stop() override;
     bool is_running() const override;
 
-    void register_event_callback(const std::string& name,
-                                 std::function<void(const std::string&)> callback) override;
-
     WiFiError trigger_scan() override;
     WiFiError get_scan_results(std::vector<WiFiNetwork>& networks) override;
-    WiFiError connect_network(const std::string& ssid, const std::string& password) override;
+    WiFiError connect_network(const std::string& ssid, const std::string& password,
+                              bool is_hidden) override;
     WiFiError disconnect_network() override;
 
     ConnectionStatus get_status() override;
@@ -110,6 +107,7 @@ class WifiBackendNetd : public WifiBackend, private hv::EventLoopThread {
     bool is_radio_enabled() const override;
     bool supports_radio_toggle() const override;
     bool supports_wpa_supplicant_fallback() const override;
+    bool join_displaces_wired_link() override;
 
   private:
     // ========================================================================
@@ -182,10 +180,6 @@ class WifiBackendNetd : public WifiBackend, private hv::EventLoopThread {
     /// Send a scan deferred behind a join, once the join has resolved.
     /// Safe from any thread (hops to the loop).
     void flush_deferred_scan();
-
-    /// Fire a registered callback by name (copy under the map mutex, invoke
-    /// outside it — same deadlock-avoidance shape as the wpa backend).
-    void dispatch_event(const std::string& event_name, const std::string& message);
 
     // ========================================================================
     // Write path (any thread)
@@ -269,9 +263,7 @@ class WifiBackendNetd : public WifiBackend, private hv::EventLoopThread {
     int fd_{-1};
     helix::netd::LineAssembler assembler_; ///< loop thread only
 
-    std::mutex cmd_mutex_;       ///< Serializes writers against the closer.
-    std::mutex callbacks_mutex_; ///< Protects the callbacks map.
-    std::map<std::string, std::function<void(const std::string&)>> callbacks_;
+    std::mutex cmd_mutex_; ///< Serializes writers against the closer.
 
     std::mutex snapshot_mutex_;
     helix::netd::NetdSnapshot snapshot_; ///< Last merged daemon state.

@@ -40,4 +40,11 @@ class ZOffsetCalibrationTestAccess {
     static void send_accept(ZOffsetCalibrationPanel& panel) {
         panel.send_accept();
     }
+
+    /// Drops the panel straight into a phase. Assigns the member rather than
+    /// calling set_state(), which also pushes subjects and touches widgets a
+    /// bare panel does not have.
+    static void force_state(ZOffsetCalibrationPanel& panel, ZOffsetCalibrationPanel::State state) {
+        panel.state_ = state;
+    }
 };

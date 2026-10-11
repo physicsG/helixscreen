@@ -3,7 +3,11 @@
 
 #pragma once
 
+#include "ui_observer_guard.h"
+#include "ui_widget_ref.h"
+
 #include "overlay_base.h"
+#include "static_panel_registry.h"
 
 #include <string>
 
@@ -11,20 +15,15 @@ namespace helix::ui {
 
 class PrinterListOverlay : public OverlayBase {
   public:
-    PrinterListOverlay() = default;
-    ~PrinterListOverlay() override = default;
-
-    void init_subjects() override {}
-    void register_callbacks() override;
-    lv_obj_t* create(lv_obj_t* parent) override;
-    void on_activate() override;
-    void on_deactivate() override;
-
     const char* get_name() const override {
         return "Printer List";
     }
+    const char* xml_component() const override {
+        return "printer_list_overlay";
+    }
 
-    void show(lv_obj_t* parent_screen);
+    void register_callbacks() override;
+    void on_activate() override;
 
     void handle_add_printer();
     void handle_switch_printer(const std::string& printer_id);
@@ -33,14 +32,13 @@ class PrinterListOverlay : public OverlayBase {
   private:
     void populate_printer_list();
 
-    static bool s_callbacks_registered_;
-
-    static void on_add_printer_cb(lv_event_t* e);
-    static void on_printer_row_cb(lv_event_t* e);
-    static void on_delete_printer_cb(lv_event_t* e);
-    static void on_printer_switcher_changed(lv_event_t* e);
+    /// The active row's connection dot, colored by printer_connection_state.
+    WidgetRef active_dot_;
+    ObserverGuard active_dot_observer_;
 };
 
-PrinterListOverlay& get_printer_list_overlay();
+inline PrinterListOverlay& get_printer_list_overlay() {
+    return lazy_global<PrinterListOverlay>("PrinterListOverlay");
+}
 
 } // namespace helix::ui

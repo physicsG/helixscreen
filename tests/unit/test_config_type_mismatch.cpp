@@ -23,12 +23,10 @@
 #include "../helix_test_fixture.h"
 #include "../lvgl_test_fixture.h"
 #include "../test_helpers/config_test_access.h"
+#include "../test_helpers/log_capture.h"
 #include "config.h"
 #include "input_settings_manager.h"
 #include "input_settings_test_helpers.h"
-
-#include <spdlog/sinks/ringbuffer_sink.h>
-#include <spdlog/spdlog.h>
 
 #include <string>
 #include <vector>
@@ -53,55 +51,6 @@ class ConfigTypeFixture : public HelixTestFixture {
     void seed(const json& doc) {
         ConfigTestAccess::data(config) = doc;
     }
-};
-
-/// RAII spdlog capture, so "the user is told which key was ignored" is an
-/// assertion rather than an intention.
-class LogCapture {
-  public:
-    LogCapture() : sink_(std::make_shared<spdlog::sinks::ringbuffer_sink_mt>(256)) {
-        logger_ = spdlog::default_logger();
-        prev_level_ = logger_->level();
-        sink_->set_level(spdlog::level::trace);
-        logger_->sinks().push_back(sink_);
-        logger_->set_level(spdlog::level::trace);
-    }
-
-    ~LogCapture() {
-        auto& sinks = logger_->sinks();
-        for (auto it = sinks.begin(); it != sinks.end(); ++it) {
-            if (*it == sink_) {
-                sinks.erase(it);
-                break;
-            }
-        }
-        logger_->set_level(prev_level_);
-    }
-
-    LogCapture(const LogCapture&) = delete;
-    LogCapture& operator=(const LogCapture&) = delete;
-
-    /// True when some captured line contains every one of @p needles.
-    bool has_line_with(const std::vector<std::string>& needles) const {
-        for (const auto& line : sink_->last_formatted(256)) {
-            bool all = true;
-            for (const auto& needle : needles) {
-                if (line.find(needle) == std::string::npos) {
-                    all = false;
-                    break;
-                }
-            }
-            if (all) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-  private:
-    std::shared_ptr<spdlog::sinks::ringbuffer_sink_mt> sink_;
-    std::shared_ptr<spdlog::logger> logger_;
-    spdlog::level::level_enum prev_level_;
 };
 
 } // namespace
@@ -156,8 +105,8 @@ TEST_CASE_METHOD(ConfigTypeFixture, "Config: number where a string belongs reads
 
 TEST_CASE_METHOD(ConfigTypeFixture, "Config: wrongly typed container reads as the default",
                  "[core][config][get][type_mismatch]") {
-    // PluginManager reads /plugins/enabled as a vector<string>; a scalar there,
-    // or an array of the wrong element type, are both unconvertible.
+    // A scalar where a vector<string> is expected, or an array of the wrong
+    // element type, is unconvertible and reads as the default.
     const std::vector<std::string> fallback{"builtin"};
 
     seed({{"plugins", {{"enabled", "all"}}}});
@@ -252,6 +201,89 @@ TEST_CASE_METHOD(ConfigTypeFixture, "Config: set() through a scalar parent fails
     // And reading back through the same broken parent is quiet too.
     REQUIRE(config.get<bool>("/input/home_edit_mode_enabled", true) == true);
     REQUIRE_FALSE(config.exists("/input/home_edit_mode_enabled"));
+}
+
+TEST_CASE_METHOD(ConfigTypeFixture,
+                 "Config: a bool where a number belongs converts as nlohmann does",
+                 "[core][config][get][type_mismatch]") {
+    // nlohmann reads a JSON boolean as an int, so this is a value, not a
+    // mismatch. Its own double type refuses one, and a number where a bool
+    // belongs is rejected too; both read as the default.
+    seed({{"input", {{"jitter_threshold", true}, {"home_edit_mode_enabled", 1}}}});
+
+    REQUIRE(config.get<int>("/input/jitter_threshold", 9) == 1);
+    REQUIRE(config.get<double>("/input/jitter_threshold", 9.0) == 9.0);
+    REQUIRE(config.get<bool>("/input/home_edit_mode_enabled", false) == false);
+}
+
+TEST_CASE_METHOD(ConfigTypeFixture, "Config: a refused set() is logged and leaves no partial path",
+                 "[core][config][set][type_mismatch]") {
+    seed({{"input", {{"calibration", 3}}}});
+
+    LogCapture log;
+    config.set<bool>("/input/calibration/valid/deep", true);
+
+    REQUIRE(log.has_line_with({"/input/calibration/valid/deep", "will not persist"}));
+    REQUIRE(data()["input"]["calibration"] == 3);
+}
+
+TEST_CASE_METHOD(ConfigTypeFixture, "Config: malformed and array pointers never throw",
+                 "[core][config][get][set][type_mismatch]") {
+    seed({{"list", json::array({10, 20})}, {"display", json::object()}});
+
+    // No leading '/', and a '~' that is not ~0 or ~1: json_pointer throws on both.
+    REQUIRE(config.get<int>("display/rotate", 4) == 4);
+    REQUIRE(config.get<int>("/display/ro~2tate", 4) == 4);
+    REQUIRE_FALSE(config.exists("/display/ro~2tate"));
+    REQUIRE_NOTHROW(config.set<int>("/display/ro~2tate", 1));
+    REQUIRE(data()["display"].empty());
+
+    // Array tokens read like nlohmann's contains(): an index, never "-" or "01".
+    REQUIRE(config.get<int>("/list/1", 0) == 20);
+    REQUIRE(config.get<int>("/list/-", 0) == 0);
+    REQUIRE(config.get<int>("/list/01", 0) == 0);
+    REQUIRE(config.get<int>("/list/99999999999999999999999", 0) == 0);
+
+    // Writing appends past the end as nlohmann does; a name into an array is refused.
+    config.set<int>("/list/2", 30);
+    REQUIRE(data()["list"] == json::array({10, 20, 30}));
+    REQUIRE_NOTHROW(config.set<int>("/list/name", 1));
+    REQUIRE(data()["list"].size() == 3);
+
+    // An escaped key is still reachable.
+    config.set<int>("/display/a~1b", 7);
+    REQUIRE(data()["display"]["a/b"] == 7);
+    REQUIRE(config.get<int>("/display/a~1b", 0) == 7);
+}
+
+TEST_CASE_METHOD(ConfigTypeFixture,
+                 "Config: a macro with a wrongly typed field reads as the default",
+                 "[core][config][get][type_mismatch]") {
+    // With no active printer df() routes to /printers/default/.
+    seed({{"printers",
+           {{"default",
+             {{"default_macros",
+               {{"bad", {{"label", 5}, {"gcode", "G28"}}},
+                {"good", {{"label", "Home"}, {"gcode", "G28"}}}}}}}}}});
+    const MacroConfig fallback{"Fallback", "M117"};
+
+    const MacroConfig bad = config.get_macro("bad", fallback);
+    REQUIRE(bad.label == "Fallback");
+    REQUIRE(bad.gcode == "M117");
+
+    const MacroConfig good = config.get_macro("good", fallback);
+    REQUIRE(good.label == "Home");
+    REQUIRE(good.gcode == "G28");
+}
+
+TEST_CASE_METHOD(ConfigTypeFixture, "Config: get_json() through a scalar hands back a scratch node",
+                 "[core][config][set][type_mismatch]") {
+    seed({{"input", "oops"}});
+
+    config.get_json("/input/calibration") = json{{"valid", true}};
+
+    REQUIRE(data()["input"] == "oops");
+    REQUIRE_FALSE(config.exists("/input/calibration"));
 }
 
 // ============================================================================

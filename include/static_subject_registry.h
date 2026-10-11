@@ -88,6 +88,17 @@ class StaticSubjectRegistry {
     bool deinit_one(const char* name);
 
     /**
+     * @brief Drop a registered entry without running it
+     *
+     * For a registrant that is not a process-lifetime singleton (a test
+     * fixture's own PrinterState): its callback captures the object, so the
+     * entry has to leave the registry before the object does.
+     *
+     * @return true if an entry was found and dropped
+     */
+    bool unregister(const char* name);
+
+    /**
      * @brief Clear all registered entries without running callbacks
      *
      * Used during soft restart (printer switching) after deinit_all() has run,
@@ -100,6 +111,24 @@ class StaticSubjectRegistry {
      */
     size_t count() const {
         return deinitializers_.size();
+    }
+
+    /**
+     * @brief Registered names in registration order (for testing/debugging)
+     *
+     * deinit_all() walks this order in reverse, so the position of an entry is
+     * the contract: it is what makes late registrants tear down before the ones
+     * whose subjects they observe. A test that cares about ordering reads it
+     * here rather than firing deinit_all(), which in a test binary would also
+     * run entries left behind by earlier fixtures.
+     */
+    std::vector<std::string> names() const {
+        std::vector<std::string> out;
+        out.reserve(deinitializers_.size());
+        for (const DeinitEntry& e : deinitializers_) {
+            out.push_back(e.name);
+        }
+        return out;
     }
 
   private:

@@ -14,11 +14,12 @@
  */
 
 #include "ams_types.h"
-#include "chamber_heater_backend.h" // For chamber::match — heater candidate scoring
-#include "macro_patterns.h"         // Shared macro-name tables (nozzle clean, ...)
-#include "printer_detector.h"       // For BuildVolume struct
-
-#include <spdlog/spdlog.h>
+#include "filament_database.h" // filament::DEFAULT_DIAMETER_MM
+#include "leveling_probe_points.h"
+#include "openams_api.h" // OpenAMS claims only a manager speaking its API
+#include "preprint_skip_wrappers.h"
+#include "printer_detector.h" // For BuildVolume struct
+#include "text_io.h"          // helix::text_io::to_upper
 
 #include <algorithm>
 #include <cctype>
@@ -38,6 +39,14 @@ struct DetectedAmsSystem {
     std::string name; // Human-readable: "Happy Hare", "AFC", "Tool Changer"
 };
 
+/// Which screws-tilt module a printer runs. Upstream [screws_tilt_adjust]
+/// reports through SCREWS_TILT_CALCULATE console lines; the Snapmaker U1 ships
+/// its own [auto_screws_tilt_adjust] whose results arrive as a status object.
+enum class ScrewsTiltDialect {
+    Standard,      ///< upstream [screws_tilt_adjust]
+    SnapmakerAuto, ///< Snapmaker U1 [auto_screws_tilt_adjust]
+};
+
 class PrinterDiscovery {
   public:
     PrinterDiscovery() = default;
@@ -50,684 +59,38 @@ class PrinterDiscovery {
      *
      * @param objects JSON array of object names from printer.objects.list
      */
-    void parse_objects(const nlohmann::json& objects) {
-        clear();
+    void parse_objects(const nlohmann::json& objects);
 
-        // Validate input is an array
-        if (!objects.is_array()) {
-            return;
+    /**
+     * @brief Status fields that decide a claim the object list cannot
+     *
+     * Empty unless a filament system is present by name only and has to show
+     * a supported API before it may claim the printer. The discovery sequence
+     * queries these (a `printer.objects.query` "objects" map) before the
+     * hardware callback and hands the reply to settle_status_claims().
+     */
+    [[nodiscard]] nlohmann::json claim_status_query() const {
+        nlohmann::json query = nlohmann::json::object();
+        if (has_openams_manager_ && !has_mmu_) {
+            query[openams::kManagerObject] = nlohmann::json::array({"api_version", "schema"});
         }
-
-        // Keep the raw list. Detection's object_exists / macro_match /
-        // macro_exclude heuristics read printer_objects(), which 73 of the 94
-        // database entries depend on, so a caller that parses an object list
-        // and never calls set_printer_objects() would score blind against the
-        // strongest signals in the database. The discovery sequence still calls
-        // the setter afterwards with the same strings, which is an idempotent
-        // overwrite rather than a second copy.
-        printer_objects_.reserve(objects.size());
-        for (const auto& obj : objects) {
-            if (obj.is_string()) {
-                printer_objects_.push_back(obj.template get<std::string>());
-            }
-        }
-
-        // AFC_stepper names collected separately — only used as lane source when
-        // no AFC_lane objects exist (Box Turtle compat). Vivid uses AFC_stepper for
-        // motor components (drive/selector), not lanes.
-        std::vector<std::string> afc_stepper_names;
-
-        // Highest-confidence chamber match wins regardless of iteration order,
-        // so a "chamber"-named heater always beats a "box"-named one when a
-        // printer has both (e.g. QIDI Q2: real chamber heater + Qidi-Box dryer).
-        //
-        // The score is keyword-tier dominant with an object-TYPE tiebreak:
-        // when two candidates share the same keyword (e.g. the Creality K2 Plus
-        // exposes both `heater_generic chamber_heater` and a `temperature_fan
-        // chamber_fan` cooling fan), a settable heater_generic must win so that
-        // "heat the chamber" never routes to a fan's cooling threshold. The
-        // keyword weight is scaled so type only ever breaks exact-keyword ties,
-        // never promotes a weaker keyword over a stronger one.
-        int best_chamber_heater_conf = 0;
-        int best_chamber_sensor_conf = 0;
-        int best_chamber_cooling_fan_conf = 0;
-
-        constexpr int CHAMBER_HEATER_GENERIC_WEIGHT = 2;  // settable heater — preferred
-        constexpr int CHAMBER_TEMPERATURE_FAN_WEIGHT = 1; // fan — only wins if no heater_generic
-
-        // Promote the current object to the best chamber heater if its keyword
-        // confidence (plus object-type tiebreak) exceeds the running best.
-        // type_weight breaks ties between equal-keyword candidates.
-        auto try_set_chamber_heater = [&](const std::string& full_name,
-                                          const std::string& object_name, int type_weight) {
-            // Registry first: appliance backends (dragonbreath, panda_breath)
-            // claim their names at 95; generic carries the keyword tiers.
-            // chamber_keyword_confidence is kept for sensor/cooling-fan paths.
-            chamber::MatchResult m = chamber::match(object_name);
-            if (m.confidence == 0) {
-                return; // not a chamber-named object — never a heater candidate
-            }
-            int conf = m.confidence * 10 + type_weight;
-            if (conf > best_chamber_heater_conf) {
-                has_chamber_heater_ = true;
-                chamber_heater_name_ = full_name;
-                chamber_heater_object_name_ = object_name;
-                best_chamber_heater_conf = conf;
-                chamber_heater_backend_id_ = std::string(m.backend->id());
-                chamber_diagnostics_object_ = std::string(m.backend->diagnostics_object());
-                chamber_filter_fan_pin_ = std::string(m.backend->filter_fan_pin());
-            }
-        };
-        auto try_set_chamber_sensor = [&](const std::string& full_name,
-                                          const std::string& object_name) {
-            int conf = chamber_keyword_confidence(object_name);
-            if (conf > best_chamber_sensor_conf) {
-                has_chamber_sensor_ = true;
-                chamber_sensor_name_ = full_name;
-                best_chamber_sensor_conf = conf;
-            }
-        };
-        // Record the chamber cooling fan independent of the heater pick. A
-        // temperature_fan loses the heater role to a settable heater_generic, but
-        // in COOLING mode (<=40C) the K2 M141 macro parks the setpoint on this
-        // fan's target — so we must remember it separately to read that target.
-        auto try_set_chamber_cooling_fan = [&](const std::string& full_name,
-                                               const std::string& object_name) {
-            int conf = chamber_keyword_confidence(object_name);
-            if (conf > best_chamber_cooling_fan_conf) {
-                chamber_cooling_fan_name_ = full_name;
-                best_chamber_cooling_fan_conf = conf;
-            }
-        };
-
-        for (const auto& obj : objects) {
-            // Skip non-string elements
-            if (!obj.is_string()) {
-                continue;
-            }
-            std::string name = obj.template get<std::string>();
-
-            // Skip empty strings
-            if (name.empty()) {
-                continue;
-            }
-
-            std::string upper_name = to_upper(name);
-
-            // ================================================================
-            // Steppers (stepper_x, stepper_y, stepper_z, stepper_z1, etc.)
-            // ================================================================
-            if (name.rfind("stepper_", 0) == 0) {
-                steppers_.push_back(name);
-            }
-            // ================================================================
-            // Heaters: extruders, heater_bed, heater_generic
-            // ================================================================
-            // Match "extruder", "extruder1", etc., but NOT "extruder_stepper"
-            else if (name.rfind("extruder", 0) == 0 && name.rfind("extruder_stepper", 0) != 0) {
-                heaters_.push_back(name);
-            }
-            // Heated bed
-            else if (name == "heater_bed") {
-                heaters_.push_back(name);
-                has_heater_bed_ = true;
-            }
-            // Generic heaters (e.g., "heater_generic chamber")
-            else if (name.rfind("heater_generic ", 0) == 0) {
-                heaters_.push_back(name);
-                std::string heater_name = name.substr(15); // Remove "heater_generic " prefix
-                try_set_chamber_heater(name, heater_name, CHAMBER_HEATER_GENERIC_WEIGHT);
-            }
-            // ================================================================
-            // Sensors: temperature_sensor, temperature_fan (dual-purpose)
-            // ================================================================
-            else if (name.rfind("temperature_sensor ", 0) == 0) {
-                sensors_.push_back(name);
-                std::string sensor_name = name.substr(19); // Remove "temperature_sensor " prefix
-                try_set_chamber_sensor(name, sensor_name);
-            }
-            // Temperature-controlled fans (also act as sensors). A chamber-named
-            // temperature_fan is the heater equivalent — it actively drives air
-            // temperature, unlike a passive temperature_sensor.
-            else if (name.rfind("temperature_fan ", 0) == 0) {
-                sensors_.push_back(name);
-                fans_.push_back(name);                  // Also add to fans for control
-                std::string fan_name = name.substr(16); // Remove "temperature_fan " prefix
-                try_set_chamber_heater(name, fan_name, CHAMBER_TEMPERATURE_FAN_WEIGHT);
-                try_set_chamber_cooling_fan(name, fan_name);
-            }
-            // TMC stepper drivers with built-in temperature (tmc2240, tmc5160)
-            else if (name.rfind("tmc2240 ", 0) == 0 || name.rfind("tmc5160 ", 0) == 0) {
-                sensors_.push_back(name);
-            }
-            // ================================================================
-            // Fans: fan, heater_fan, fan_generic, controller_fan
-            // ================================================================
-            else if (name == "fan") {
-                fans_.push_back(name);
-            } else if (name.rfind("heater_fan ", 0) == 0) {
-                fans_.push_back(name);
-            } else if (name.rfind("fan_generic ", 0) == 0) {
-                fans_.push_back(name);
-            } else if (name.rfind("controller_fan ", 0) == 0) {
-                fans_.push_back(name);
-            }
-            // ================================================================
-            // LEDs: led_effect (must be before "led "), neopixel, dotstar, led
-            // ================================================================
-            // led_effect MUST be checked before "led " to avoid false match
-            else if (name.rfind("led_effect ", 0) == 0) {
-                led_effects_.push_back(name);
-                has_led_effects_ = true;
-            } else if (name.rfind("neopixel ", 0) == 0 || name == "neopixel") {
-                leds_.push_back(name);
-                has_led_ = true;
-            } else if (name.rfind("dotstar ", 0) == 0 || name == "dotstar") {
-                leds_.push_back(name);
-                has_led_ = true;
-            } else if (name.rfind("led ", 0) == 0) {
-                leds_.push_back(name);
-                has_led_ = true;
-            }
-            // Output pins - classify as fan, LED, or speaker based on name
-            else if (name == "fan_feedback") {
-                has_fan_feedback_ = true;
-            } else if (name.rfind("output_pin ", 0) == 0) {
-                std::string pin_name = name.substr(11); // Remove "output_pin " prefix
-                std::string upper_pin = to_upper(pin_name);
-
-                // Fan detection: name starts with "FAN" (e.g., fan0, fan1, fan2)
-                if (upper_pin.rfind("FAN", 0) == 0) {
-                    fans_.push_back(name);
-                }
-                // LED detection
-                else if (upper_pin.find("LIGHT") != std::string::npos ||
-                         upper_pin.find("LED") != std::string::npos ||
-                         upper_pin.find("LAMP") != std::string::npos) {
-                    leds_.push_back(name);
-                    has_led_ = true;
-                }
-                // Speaker/buzzer detection for M300 support
-                if (upper_pin.find("BEEPER") != std::string::npos ||
-                    upper_pin.find("BUZZER") != std::string::npos ||
-                    upper_pin.find("SPEAKER") != std::string::npos) {
-                    has_speaker_ = true;
-                }
-            }
-            // ================================================================
-            // Capability flags
-            // ================================================================
-            else if (name == "quad_gantry_level") {
-                has_qgl_ = true;
-            } else if (name == "z_tilt") {
-                has_z_tilt_ = true;
-            } else if (name == "bed_mesh") {
-                has_bed_mesh_ = true;
-            } else if (name == "probe" || name == "bltouch" || name == "smart_effector" ||
-                       name == "cartographer" || name == "beacon") {
-                has_probe_ = true;
-            } else if (name.rfind("probe_eddy_current ", 0) == 0) {
-                has_probe_ = true;
-            } else if (name == "firmware_retraction") {
-                has_firmware_retraction_ = true;
-            } else if (name == "timelapse") {
-                has_timelapse_ = true;
-            } else if (name == "exclude_object") {
-                has_exclude_object_ = true;
-            } else if (name == "screws_tilt_adjust") {
-                has_screws_tilt_ = true;
-            }
-            // NOTE: screws_tilt_adjust may not appear in objects/list (no get_status()).
-            // Also detected in parse_config_keys() as fallback.
-            //
-            // NOTE: Accelerometer detection removed from parse_objects().
-            // Klipper's objects/list only returns objects with get_status() methods.
-            // Accelerometers (adxl345, lis2dw, mpu9250, resonance_tester) intentionally
-            // don't have get_status() since they're on-demand calibration tools.
-            // Use parse_config_keys() instead to detect accelerometers from configfile.
-            // ================================================================
-            // MMU/AMS detection
-            // ================================================================
-            else if (name == "mmu") {
-                has_mmu_ = true;
-                mmu_type_ = AmsType::HAPPY_HARE;
-            } else if (name == "AFC") {
-                has_mmu_ = true;
-                mmu_type_ = AmsType::AFC;
-            }
-            // CFS detection (Creality Filament System).
-            //
-            // Both K1 and K2 series publish a `box` Klipper object when the
-            // official CFS upgrade is installed, but the firmwares expose
-            // different macro dialects:
-            //   - K2 stock firmware: CR_BOX_PRE_OPT / CR_BOX_EXTRUDE /
-            //     CR_BOX_WASTE / CR_BOX_FLUSH / CR_BOX_END_OPT, plus BOX_*
-            //     envelope (BOX_SAVE_FAN, BOX_MODE_WAIT, etc.)
-            //   - K1 official CFS upgrade (≥ v2.3.5.33): BOX_EXTRUDE_MATERIAL,
-            //     BOX_MATERIAL_FLUSH, BOX_NOZZLE_CLEAN, BOX_CUT_MATERIAL,
-            //     BOX_RETRUDE_MATERIAL_WITH_TNN — no CR_ prefix, no fan-save.
-            // AmsBackendCfs picks the right dialect from PrinterDetector at
-            // construction (#968).
-            else if (name == "box") {
-                has_mmu_ = true;
-                mmu_type_ = AmsType::CFS;
-                if (PrinterDetector::is_creality_k1()) {
-                    spdlog::info("[PrinterDiscovery] 'box' object on K1-series printer — "
-                                 "enabling CFS backend with K1 macro dialect (BOX_*).");
-                }
-            }
-            // ACE detection (Anycubic ACE Pro). Native Anycubic GoKlipper
-            // (as shipped by Rinkhals firmware) registers the status object as
-            // `filament_hub` even though the config section is `[ace]`. The
-            // community drivers (ValgACE/BunnyACE/DuckACE) register it as `ace`.
-            // The Anycubic Kobra S1 "mainline-Python ACE fork" registers each
-            // unit as `ace_instance_N` (has get_status()) and exposes NO
-            // top-level `ace`/`filament_hub` object — its config is `[ace]`
-            // with `ace_count`, but only `ace_instance_N` appears in
-            // objects.list (#1107). Match all three forms.
-            //
-            // Collect EVERY matched ACE object name (the discovery sequence
-            // subscribes the real object names), but only the first ACE match
-            // flips has_mmu_/mmu_type_ — with multiple `ace_instance_N` objects
-            // the name-collection must NOT be gated behind the !has_mmu_ guard.
-            else if (name == "ace" || name == "filament_hub" ||
-                     name.rfind("ace_instance", 0) == 0) {
-                ace_object_names_.push_back(name);
-                // `filament_hub` and `ace_instance_N` are unambiguously Anycubic, so
-                // they claim the type here as before. The bare name `ace` is NOT:
-                // decay71/multiACE registers its own Klipper object under exactly
-                // that name on a Snapmaker U1, and its schema is unrelated
-                // (aces[].slots[] rather than a top-level slots[]). Claiming it as
-                // Anycubic points AmsBackendAce at a payload it cannot read, and it
-                // then falls through to a /server/ace/* REST bridge multiACE does
-                // not serve — an empty panel plus a "bridge not found" warning.
-                // Defer the bare-`ace` decision to finalize_ams_detection(), which
-                // can see the whole object list at once.
-                if (name == "ace") {
-                    has_bare_ace_object_ = true;
-                } else if (!has_mmu_) {
-                    has_mmu_ = true;
-                    mmu_type_ = AmsType::ACE;
-                    spdlog::info(
-                        "[PrinterDiscovery] Detected ACE (Anycubic ACE Pro) via '{}' object", name);
-                }
-            }
-            // multiACE ships these two extras alongside its `ace` object and the
-            // Anycubic stacks have no equivalent, so either one is a positive
-            // multiACE marker. Both are always installed by multiACE's own
-            // installer ("always shipped so opting in is a config-only step").
-            else if (name == "ace_bg_swap" || name == "ace_tipform") {
-                has_multiace_markers_ = true;
-            }
-            // MMU encoder discovery (Happy Hare)
-            else if (name.rfind("mmu_encoder ", 0) == 0) {
-                std::string encoder_name = name.substr(12); // Remove "mmu_encoder " prefix
-                if (!encoder_name.empty()) {
-                    mmu_encoder_names_.push_back(encoder_name);
-                }
-            }
-            // MMU servo discovery (Happy Hare)
-            else if (name.rfind("mmu_servo ", 0) == 0) {
-                std::string servo_name = name.substr(10); // Remove "mmu_servo " prefix
-                if (!servo_name.empty()) {
-                    mmu_servo_names_.push_back(servo_name);
-                }
-            }
-            // AFC_stepper: may be lanes (Box Turtle) or motor components (Vivid).
-            // Collected separately; only used as lanes if no AFC_lane objects exist.
-            else if (name.rfind("AFC_stepper ", 0) == 0) {
-                std::string stepper_name = name.substr(12); // Remove "AFC_stepper " prefix
-                if (!stepper_name.empty()) {
-                    afc_stepper_names.push_back(stepper_name);
-                }
-            }
-            // AFC hub discovery
-            else if (name.rfind("AFC_hub ", 0) == 0) {
-                std::string hub_name = name.substr(8); // Remove "AFC_hub " prefix
-                if (!hub_name.empty()) {
-                    afc_hub_names_.push_back(hub_name);
-                }
-            }
-            // AFC_lane discovery (authoritative lane source for Vivid, OpenAMS, etc.)
-            else if (name.rfind("AFC_lane ", 0) == 0) {
-                std::string lane_name = name.substr(9); // Remove "AFC_lane " prefix (9 chars)
-                if (!lane_name.empty()) {
-                    afc_lane_names_.push_back(lane_name);
-                }
-            }
-            // AFC unit-level objects (BoxTurtle, OpenAMS, ViViD, NightOwl, etc.)
-            // Any AFC_ object not matching known component prefixes is a unit type
-            else if (name.rfind("AFC_", 0) == 0 && name.rfind("AFC_stepper ", 0) != 0 &&
-                     name.rfind("AFC_hub ", 0) != 0 && name.rfind("AFC_extruder ", 0) != 0 &&
-                     name.rfind("AFC_lane ", 0) != 0 && name.rfind("AFC_buffer ", 0) != 0 &&
-                     name.rfind("AFC_led ", 0) != 0) {
-                afc_unit_object_names_.push_back(name); // Store FULL name for Klipper queries
-            }
-            // AFC buffer objects
-            else if (name.rfind("AFC_buffer ", 0) == 0) {
-                std::string buffer_name = name.substr(11); // Remove "AFC_buffer " prefix (11 chars)
-                if (!buffer_name.empty()) {
-                    afc_buffer_names_.push_back(buffer_name);
-                }
-            }
-            // AD5X IFS detection via ZMOD firmware sensors
-            // Three sensor name patterns trigger detection:
-            //   1. lessWaste plugin:  "filament_switch_sensor _ifs_port_sensor_N"
-            //   2. Native ZMOD (old): "filament_motion_sensor _ifs_motion_sensor_N"
-            //   3. Native ZMOD:       "filament_motion_sensor ifs_motion_sensor"
-            //   4. Standalone IFS module (the Forge-X drop-in): the `ifs` /
-            //      `ifs_materials` get_status objects themselves. Its sensors
-            //      register under stock filament_switch_sensor names the
-            //      client-side bucketing already subscribes ("lane1".."lane4",
-            //      "toolhead"), so no sensor pattern is needed for it - and
-            //      these two names must NOT go into filament_sensor_names_,
-            //      which FilamentSensorManager reads as sensors.
-            else if (!has_mmu_ &&
-                     (name.rfind("filament_switch_sensor _ifs_port_sensor_", 0) == 0 ||
-                      name.rfind("filament_motion_sensor _ifs_motion_sensor_", 0) == 0 ||
-                      name == "filament_motion_sensor ifs_motion_sensor")) {
-                has_mmu_ = true;
-                mmu_type_ = AmsType::AD5X_IFS;
-                filament_sensor_names_.push_back(name);
-            }
-            // The standalone module's objects, on their own: an [ifs] section
-            // with no sensors configured, or [ifs_materials] on a machine whose
-            // IFS board is unplugged (deliberately readable without the board -
-            // the UI should still show the slot registry and report
-            // not-connected). Either name alone is unambiguous: neither is a
-            // stock Klipper object and no other known firmware defines them.
-            else if (!has_mmu_ && (name == "ifs" || name == "ifs_materials")) {
-                has_mmu_ = true;
-                mmu_type_ = AmsType::AD5X_IFS;
-            }
-            // QIDI Box detection — custom Klipper extension on Plus 4 / Q2 / Max 4
-            // registers `box_stepper slot<N>` per physical slot (4 per box,
-            // 1-4 boxes chainable to 16 slots). Presence of any `box_stepper
-            // slot*` object is the unambiguous detection signal; the per-name
-            // count gives the physical slot count.
-            else if (name.rfind("box_stepper slot", 0) == 0) {
-                if (!has_mmu_) {
-                    has_mmu_ = true;
-                    mmu_type_ = AmsType::QIDI_BOX;
-                }
-                if (mmu_type_ == AmsType::QIDI_BOX) {
-                    ++qidi_box_slot_count_;
-                }
-            }
-            // Snapmaker U1 detection — filament_detect is unique to U1 firmware
-            else if (name == "filament_detect") {
-                has_snapmaker_ = true;
-            }
-            // Tool changer detection
-            else if (name == "toolchanger") {
-                has_tool_changer_ = true;
-            }
-            // pin_watch: a dock-sensor extra (not stock Klipper). Recorded as a
-            // plain object fact, like toolchanger above. What it MEANS is
-            // helix::toolchanger_addon's business, not this catalog's.
-            // Deliberately does NOT touch has_mmu_/mmu_type_: those pick which
-            // AMS backend gets built, and writing one here would swap out a
-            // working backend on every printer that happens to run pin_watch.
-            else if (name == "pin_watch" || name.rfind("pin_watch ", 0) == 0) {
-                has_pin_watch_ = true;
-                pin_watch_object_name_ = name;
-            }
-            // [medusahc]: a hotend changer's own extra, recorded as the same
-            // kind of plain object fact as pin_watch above. Upstream ships it
-            // ALONGSIDE pin_watch and klipper-toolchanger; one fork folds the
-            // dock sensing into it and ships neither, and there this object is
-            // the only thing left to see. Matched exactly - [medusahc_calibrate]
-            // is a sibling object, not this one.
-            else if (name == "medusahc" || name.rfind("medusahc ", 0) == 0) {
-                has_medusahc_ = true;
-                medusahc_object_name_ = name;
-            }
-            // Tool object discovery
-            else if (name.rfind("tool ", 0) == 0) {
-                std::string tool_name = name.substr(5); // Remove "tool " prefix
-                if (!tool_name.empty()) {
-                    tool_names_.push_back(tool_name);
-                }
-            }
-            // ================================================================
-            // Width sensors (filament diameter measurement)
-            // ================================================================
-            else if (name == "hall_filament_width_sensor" ||
-                     name == "tsl1401cl_filament_width_sensor") {
-                width_sensor_objects_.push_back(name);
-            }
-            // ================================================================
-            // Filament sensors
-            // ================================================================
-            else if (name.rfind("filament_switch_sensor ", 0) == 0 ||
-                     name.rfind("filament_motion_sensor ", 0) == 0) {
-                filament_sensor_names_.push_back(name);
-            }
-            // ================================================================
-            // Macro detection
-            // ================================================================
-            else if (name.rfind("gcode_macro ", 0) == 0) {
-                std::string macro_name = name.substr(12); // Remove "gcode_macro " prefix
-                std::string upper_macro = to_upper(macro_name);
-
-                macros_.insert(upper_macro);
-                // Klipper keeps the CONFIG case for the status object key
-                // ("gcode_macro Tool_Offset") and for SET_GCODE_VARIABLE's
-                // MACRO= mux key, while the callable command is the uppercased
-                // alias. Code that has to name the object or write a variable
-                // therefore cannot use the uppercased key we match on - see
-                // macro_config_name().
-                macro_config_names_.emplace(upper_macro, macro_name);
-
-                // Check for HelixScreen helper macros
-                if (upper_macro.rfind("HELIX_", 0) == 0) {
-                    helix_macros_.insert(upper_macro);
-                }
-
-                // Check for Klippain Shake&Tune
-                if (upper_macro == "AXES_SHAPER_CALIBRATION") {
-                    has_klippain_shaketune_ = true;
-                }
-
-                // An M300 macro is the printer's tone command and the direct
-                // proof it answers M300 gcode. Some buzzer setups have no
-                // output_pin object at all (Z-Mod's AD5X config shells out to
-                // a buzzer helper from an M300 macro), so the output_pin-based
-                // speaker detection in the branch above never fires there.
-                // Stronger signal than a beeper-named pin, too: a printer
-                // defining the macro cannot answer M300 with
-                // "Unknown command", which is the feedback loop the M300
-                // backend's lazy install guards against.
-                if (upper_macro == "M300") {
-                    has_speaker_ = true;
-                }
-
-                // Check for common macro patterns and cache them
-                if (nozzle_clean_macro_.empty()) {
-                    // Shared with StandardMacros' CleanNozzle slot — see
-                    // include/macro_patterns.h.
-                    if (matches_any(upper_macro, macro_patterns::clean_nozzle())) {
-                        nozzle_clean_macro_ = macro_name;
-                    }
-                }
-
-                if (purge_line_macro_.empty()) {
-                    static const std::vector<std::string> purge_patterns = {
-                        "PURGE_LINE", "PRIME_LINE", "INTRO_LINE", "LINE_PURGE"};
-                    if (matches_any(upper_macro, purge_patterns)) {
-                        purge_line_macro_ = macro_name;
-                    }
-                }
-
-                if (heat_soak_macro_.empty()) {
-                    static const std::vector<std::string> soak_patterns = {
-                        "HEAT_SOAK", "CHAMBER_SOAK", "SOAK", "BED_SOAK"};
-                    if (matches_any(upper_macro, soak_patterns)) {
-                        heat_soak_macro_ = macro_name;
-                    }
-                }
-
-                // LED macro auto-detection
-                static const std::vector<std::string> led_keywords = {
-                    "LIGHT", "LED", "LAMP", "ILLUMINAT", "BACKLIGHT", "NEON"};
-                static const std::vector<std::string> led_exclusions = {
-                    "PRINT_START", "PRINT_END",        "M600",       "BED_MESH",
-                    "PAUSE",       "RESUME",           "CANCEL",     "HOME",
-                    "QGL",         "Z_TILT",           "PROBE",      "CALIBRATE",
-                    "PID",         "FIRMWARE_RESTART", "SAVE_CONFIG"};
-
-                bool is_led_candidate = false;
-                for (const auto& kw : led_keywords) {
-                    if (upper_macro.find(kw) != std::string::npos) {
-                        is_led_candidate = true;
-                        break;
-                    }
-                }
-                if (is_led_candidate) {
-                    // Exclusions match on whole underscore-delimited words. The
-                    // keyword test above stays a substring match on purpose (it
-                    // has to catch LIGHTS, LIGHTING, ILLUMINATE), but an
-                    // exclusion that fires on a fragment throws away real LED
-                    // macros -- LED_RAPID_FLASH is not a PID macro.
-                    bool excluded = false;
-                    for (const auto& ex : led_exclusions) {
-                        if (contains_word(upper_macro, ex)) {
-                            excluded = true;
-                            break;
-                        }
-                    }
-                    if (!excluded) {
-                        led_macros_.push_back(upper_macro);
-                    }
-                }
-            }
-        }
-
-        // AFC_stepper objects can be lanes (Box Turtle: "AFC_stepper lane0") or motor
-        // components (Vivid: "AFC_stepper Vivid_1_drive"/"Vivid_1_selector").
-        // When no AFC_lane objects exist, treat all steppers as lanes (pure Box Turtle).
-        // When BOTH exist (e.g., Box Turtle + OpenAMS + ACE), merge stepper names
-        // that look like lanes ("lane" prefix + digit) into the lane list.
-        if (afc_lane_names_.empty() && !afc_stepper_names.empty()) {
-            afc_lane_names_ = std::move(afc_stepper_names);
-        } else if (!afc_lane_names_.empty() && !afc_stepper_names.empty()) {
-            // Mixed setup: merge AFC_stepper lane names not already in AFC_lane list
-            std::unordered_set<std::string> existing(afc_lane_names_.begin(),
-                                                     afc_lane_names_.end());
-            for (auto& name : afc_stepper_names) {
-                if (name.rfind("lane", 0) == 0 && existing.find(name) == existing.end()) {
-                    afc_lane_names_.push_back(std::move(name));
-                }
-            }
-        }
-
-        // Sort AFC lane names using natural sort (lane2 before lane10)
-        if (!afc_lane_names_.empty()) {
-            natural_sort(afc_lane_names_);
-        }
-        if (!afc_buffer_names_.empty()) {
-            natural_sort(afc_buffer_names_);
-        }
-
-        // Sort tool names for consistent ordering
-        if (!tool_names_.empty()) {
-            std::sort(tool_names_.begin(), tool_names_.end());
-        }
-
-        // A hotend changer that runs without klipper-toolchanger has no [tool N]
-        // objects to name its tools: the swap is driven by the extra's own T<n>
-        // macros. One hot end per extruder heater is what a hotend changer IS,
-        // so enumerate those and keep the G-code tool numbers as the names.
-        // Never overwrites real tool objects - a klipper-toolchanger name is
-        // arbitrary, and ASSIGN_TOOL can remap it.
-        if (tool_names_.empty() && has_medusahc_) {
-            int extruders = 0;
-            for (const auto& heater : heaters_) {
-                if (heater.rfind("extruder", 0) == 0 && heater.rfind("extruder_stepper", 0) != 0) {
-                    ++extruders;
-                }
-            }
-            for (int i = 0; i < extruders; ++i) {
-                tool_names_.push_back("T" + std::to_string(i));
-            }
-        }
-
-        // Collect all detected AMS systems
-        detected_ams_systems_.clear();
-
-        // Resolve the ambiguous bare `ace` object now that the whole object list
-        // has been seen. Two stacks register that exact name:
-        //
-        //   Anycubic community drivers (ValgACE/BunnyACE/DuckACE) — a real ACE hub
-        //   decay71/multiACE                                      — 1-4 ACE units on a Snapmaker U1
-        //
-        // Either multiACE marker (`ace_bg_swap` / `ace_tipform`), or the U1's own
-        // firmware signature (`filament_detect`, which no Anycubic printer has),
-        // identifies it as multiACE. Until AmsBackendMultiAce exists, fall through
-        // rather than claim it: the U1's native Snapmaker backend reads the same
-        // four heads correctly from print_task_config, whereas AmsBackendAce reads
-        // a schema multiACE does not publish and ends up with nothing at all.
-        if (has_bare_ace_object_ && !has_mmu_) {
-            if (has_multiace_markers_ || has_snapmaker_) {
-                // AmsBackendMultiAce derives from the Snapmaker backend, so the
-                // U1's four heads keep every bit of their native handling and
-                // the ACE units are added alongside as units 1..N. Claiming the
-                // type here is what routes `ace` into that backend at all; until
-                // it existed the only safe answer was to fall through.
-                has_mmu_ = true;
-                mmu_type_ = AmsType::MULTIACE;
-                spdlog::info("[PrinterDiscovery] Detected multiACE (markers={}, snapmaker={}) — "
-                             "U1 heads plus ACE units",
-                             has_multiace_markers_, has_snapmaker_);
-            } else {
-                has_mmu_ = true;
-                mmu_type_ = AmsType::ACE;
-                spdlog::info("[PrinterDiscovery] Detected ACE (Anycubic ACE Pro) via 'ace' object");
-            }
-        }
-
-        // Register the filament management backend. When a real MMU (AFC, Happy
-        // Hare, etc.) is present, it always wins — even on Snapmaker U1 hardware
-        // that also reports filament_detect. The Snapmaker backend is a basic
-        // 4-slot fallback for U1s without an aftermarket MMU. Toolchanger alone
-        // only handles tool switching, not filament management.
-        if (has_mmu_) {
-            if (mmu_type_ == AmsType::HAPPY_HARE) {
-                detected_ams_systems_.push_back({AmsType::HAPPY_HARE, "Happy Hare"});
-            } else if (mmu_type_ == AmsType::AFC) {
-                detected_ams_systems_.push_back({AmsType::AFC, "AFC"});
-            } else if (mmu_type_ == AmsType::AD5X_IFS) {
-                detected_ams_systems_.push_back({AmsType::AD5X_IFS, "AD5X IFS"});
-            } else if (mmu_type_ == AmsType::CFS) {
-                detected_ams_systems_.push_back({AmsType::CFS, "CFS"});
-            } else if (mmu_type_ == AmsType::ACE) {
-                detected_ams_systems_.push_back({AmsType::ACE, "ACE"});
-            } else if (mmu_type_ == AmsType::QIDI_BOX) {
-                // i18n: do not translate - product name
-                detected_ams_systems_.push_back({AmsType::QIDI_BOX, "QIDI Box"});
-            } else if (mmu_type_ == AmsType::MULTIACE) {
-                // multiACE claims has_mmu_, which means the has_snapmaker_
-                // fallback below is skipped — so this arm is not optional. Its
-                // absence registered NO system at all and left AmsState with no
-                // backend, i.e. an empty multi-filament panel on a U1 that had
-                // been working a moment earlier.
-                // i18n: do not translate - product name
-                detected_ams_systems_.push_back({AmsType::MULTIACE, "multiACE"});
-            }
-        } else if (has_snapmaker_) {
-            // Native Snapmaker filament system (no aftermarket MMU)
-            detected_ams_systems_.push_back({AmsType::SNAPMAKER, "Snapmaker"});
-            mmu_type_ = AmsType::SNAPMAKER;
-        } else if ((has_tool_changer_ || has_medusahc_) && !tool_names_.empty()) {
-            // Standalone tool changer with no MMU — show parallel topology.
-            // Either klipper-toolchanger, or a hotend changer whose own extra
-            // does the swapping; the tools above came from whichever it is.
-            // Still last in the chain, so a real MMU always keeps its backend.
-            detected_ams_systems_.push_back({AmsType::TOOL_CHANGER, "Tool Changer"});
-            mmu_type_ = AmsType::TOOL_CHANGER;
-        }
+        return query;
     }
 
+    /**
+     * @brief Finish the claims claim_status_query() left open
+     *
+     * @param status The `status` object of the query's reply; empty when the
+     *               query failed, which settles every open claim as unclaimed.
+     */
+    void settle_status_claims(const nlohmann::json& status);
+
+  private:
+    /// Fill detected_ams_systems_ from the flags the scan (and any settled
+    /// status claim) left behind.
+    void register_detected_ams_systems();
+
+  public:
     /**
      * @brief Parse configfile keys to detect accelerometers
      *
@@ -738,65 +101,7 @@ class PrinterDiscovery {
      *
      * @param config JSON object from configfile.config response
      */
-    void parse_config_keys(const nlohmann::json& config) {
-        if (!config.is_object()) {
-            return;
-        }
-
-        // Extract kinematics from [printer] section
-        // Klipper's toolhead.kinematics status field returns null (it's an object reference),
-        // so configfile.config.printer.kinematics is the reliable source
-        if (config.contains("printer") && config["printer"].is_object()) {
-            const auto& printer = config["printer"];
-            if (printer.contains("kinematics") && printer["kinematics"].is_string()) {
-                kinematics_ = printer["kinematics"].get<std::string>();
-                spdlog::debug("[PrinterDiscovery] Kinematics from config: {}", kinematics_);
-            }
-        }
-
-        for (const auto& [key, value] : config.items()) {
-            if (key == "adxl345" || key.rfind("adxl345 ", 0) == 0 || key == "lis2dw" ||
-                key.rfind("lis2dw ", 0) == 0 || key == "mpu9250" || key.rfind("mpu9250 ", 0) == 0 ||
-                key == "lis3dh" || key.rfind("lis3dh ", 0) == 0 || key == "icm20948" ||
-                key.rfind("icm20948 ", 0) == 0 || key == "resonance_tester") {
-                has_accelerometer_ = true;
-                spdlog::debug("[PrinterDiscovery] Accelerometer detected from config: {}", key);
-            }
-
-            // Beacon RevH has an onboard LIS2DW accelerometer.
-            // Detect from accel-specific config fields in the [beacon] section.
-            if (key == "beacon" && value.is_object()) {
-                if (value.contains("accel_scale") || value.contains("accel_axes_map")) {
-                    has_accelerometer_ = true;
-                    spdlog::debug(
-                        "[PrinterDiscovery] Beacon onboard accelerometer detected from config");
-                }
-            }
-
-            // Also detect accelerometers referenced by resonance_tester
-            // (e.g., accel_chip: beacon for Beacon RevH probes)
-            if (key == "resonance_tester" && value.is_object()) {
-                for (const auto& field : {"accel_chip", "accel_chip_x", "accel_chip_y"}) {
-                    if (value.contains(field) && value[field].is_string()) {
-                        const auto& chip = value[field].get<std::string>();
-                        if (chip == "beacon" || chip.rfind("beacon ", 0) == 0) {
-                            has_accelerometer_ = true;
-                            spdlog::debug("[PrinterDiscovery] Beacon accelerometer detected via "
-                                          "resonance_tester {}",
-                                          field);
-                        }
-                    }
-                }
-            }
-
-            // screws_tilt_adjust doesn't implement get_status() in Klipper,
-            // so it may not appear in objects/list. Detect from configfile as fallback.
-            if (key == "screws_tilt_adjust") {
-                has_screws_tilt_ = true;
-                spdlog::debug("[PrinterDiscovery] screws_tilt_adjust detected from config");
-            }
-        }
-    }
+    void parse_config_keys(const nlohmann::json& config);
 
     /**
      * @brief Derive the build volume from the configfile [stepper_*] sections
@@ -814,41 +119,7 @@ class PrinterDiscovery {
      * @param settings JSON object from a configfile.settings response
      * @return true when a usable X or Y extent was found and stored
      */
-    bool parse_build_volume(const nlohmann::json& settings) {
-        if (!settings.is_object()) {
-            return false;
-        }
-
-        BuildVolume volume{};
-        auto read = [&settings](const char* section, const char* field, float& out) {
-            const auto s = settings.find(section);
-            if (s == settings.end() || !s->is_object()) {
-                return;
-            }
-            const auto f = s->find(field);
-            if (f != s->end() && f->is_number()) {
-                out = f->get<float>();
-            }
-        };
-        read("stepper_x", "position_min", volume.x_min);
-        read("stepper_x", "position_max", volume.x_max);
-        read("stepper_y", "position_min", volume.y_min);
-        read("stepper_y", "position_max", volume.y_max);
-        read("stepper_z", "position_max", volume.z_max);
-
-        // An all-zero volume is worse than none: build_volume_range heuristics
-        // would score it against every printer's window. Only a real extent is
-        // worth storing.
-        if (volume.x_max <= 0.0f && volume.y_max <= 0.0f) {
-            return false;
-        }
-
-        build_volume_ = volume;
-        spdlog::debug("[PrinterDiscovery] Build volume from config: X[{:.0f},{:.0f}] "
-                      "Y[{:.0f},{:.0f}] Z[0,{:.0f}]",
-                      volume.x_min, volume.x_max, volume.y_min, volume.y_max, volume.z_max);
-        return true;
-    }
+    bool parse_build_volume(const nlohmann::json& settings);
 
     /**
      * @brief Reset all discovered hardware to initial state
@@ -857,90 +128,7 @@ class PrinterDiscovery {
      *       When using parse_objects(), call printer info setters AFTER parse_objects()
      *       since it calls clear() internally.
      */
-    void clear() {
-        // Hardware lists
-        heaters_.clear();
-        fans_.clear();
-        sensors_.clear();
-        leds_.clear();
-        steppers_.clear();
-
-        // AMS/MMU discovery
-        afc_lane_names_.clear();
-        afc_hub_names_.clear();
-        afc_unit_object_names_.clear();
-        afc_buffer_names_.clear();
-        tool_names_.clear();
-        filament_sensor_names_.clear();
-        width_sensor_objects_.clear();
-        mmu_encoder_names_.clear();
-        mmu_servo_names_.clear();
-        ace_object_names_.clear();
-
-        // Macros
-        macros_.clear();
-        macro_config_names_.clear();
-        host_restarting_macros_.clear();
-        host_halting_macros_.clear();
-        helix_macros_.clear();
-        nozzle_clean_macro_.clear();
-        purge_line_macro_.clear();
-        heat_soak_macro_.clear();
-
-        // Capability flags
-        has_qgl_ = false;
-        has_z_tilt_ = false;
-        has_bed_mesh_ = false;
-        has_probe_ = false;
-        has_heater_bed_ = false;
-        has_mmu_ = false;
-        has_snapmaker_ = false;
-        has_tool_changer_ = false;
-        has_pin_watch_ = false;
-        pin_watch_object_name_.clear();
-        has_medusahc_ = false;
-        medusahc_object_name_.clear();
-        has_chamber_heater_ = false;
-        has_chamber_sensor_ = false;
-        chamber_sensor_name_.clear();
-        chamber_heater_name_.clear();
-        chamber_heater_object_name_.clear();
-        chamber_heater_backend_id_.clear();
-        chamber_diagnostics_object_.clear();
-        chamber_filter_fan_pin_.clear();
-        chamber_cooling_fan_name_.clear();
-        chamber_fan_resting_deci_ = 0;
-        fan_max_power_.clear();
-        has_led_ = false;
-        led_effects_.clear();
-        has_led_effects_ = false;
-        led_macros_.clear();
-        has_accelerometer_ = false;
-        has_firmware_retraction_ = false;
-        has_timelapse_ = false;
-        has_exclude_object_ = false;
-        has_screws_tilt_ = false;
-        has_klippain_shaketune_ = false;
-        has_speaker_ = false;
-        has_fan_feedback_ = false;
-        is_kalico_ = false;
-        mmu_type_ = AmsType::NONE;
-        qidi_box_slot_count_ = 0;
-        detected_ams_systems_.clear();
-
-        // Printer info
-        hostname_.clear();
-        software_version_.clear();
-        moonraker_version_.clear();
-        os_version_.clear();
-        cpu_arch_.clear();
-        kinematics_.clear();
-        build_volume_ = BuildVolume{};
-        mcu_.clear();
-        mcu_list_.clear();
-        mcu_versions_.clear();
-        printer_objects_.clear();
-    }
+    void clear();
 
     // ========================================================================
     // Hardware Lists
@@ -952,6 +140,10 @@ class PrinterDiscovery {
 
     [[nodiscard]] const std::vector<std::string>& fans() const {
         return fans_;
+    }
+
+    [[nodiscard]] const std::vector<std::string>& load_cells() const {
+        return load_cells_;
     }
 
     [[nodiscard]] const std::vector<std::string>& sensors() const {
@@ -1002,9 +194,33 @@ class PrinterDiscovery {
         return has_tool_changer_;
     }
 
+    /// Whether the firmware ships AUTO_FEEDING_BATCH, the macro that wraps a
+    /// multi-head feed with target snapshot/restore and next-head preheat.
+    /// Absent on firmware before 1.6; the batch path falls back to bare
+    /// AUTO_FEEDING per head when this is false.
+    [[nodiscard]] bool has_auto_feeding_batch() const {
+        return has_auto_feeding_batch_;
+    }
+
     /// Whether a pin_watch dock-sensor extra is configured.
     [[nodiscard]] bool has_pin_watch() const {
         return has_pin_watch_;
+    }
+
+    /// An `AFC_unit` object is present, which only PAXX's AFC-Lite stub
+    /// publishes. A plain fact about the object list; what it means for backend
+    /// selection is decided alongside has_snapmaker().
+    [[nodiscard]] bool has_afc_lite() const {
+        return has_afc_lite_;
+    }
+
+    /// The `zmod_afclite` object is present: Z-Mod's AFC shim for the Creator 5
+    /// line, which publishes the `AFC` / `AFC_lane` / `AFC_unit` objects an AFC
+    /// panel wants. A plain fact about the object list; what it means for
+    /// backend selection is decided alongside the changer fingerprint
+    /// (toolchanger_addon::zmod_c5_present).
+    [[nodiscard]] bool has_zmod_afclite() const {
+        return has_zmod_afclite_;
     }
 
     /// Full Klipper object name of the pin_watch section (e.g. "pin_watch io"),
@@ -1127,6 +343,18 @@ class PrinterDiscovery {
 
     [[nodiscard]] bool has_screws_tilt() const {
         return has_screws_tilt_;
+    }
+
+    /// Which screws-tilt module backs the capability. Standard whenever
+    /// upstream [screws_tilt_adjust] is configured, alone or alongside
+    /// Snapmaker's — SCREWS_TILT_CALCULATE works and is the simpler path.
+    /// SnapmakerAuto only when the U1's module is the sole one. Also the
+    /// answer for a printer with neither module: the dialect is meaningless
+    /// until the capability exists, and must not claim the U1's.
+    [[nodiscard]] ScrewsTiltDialect screws_tilt_dialect() const {
+        return (has_snapmaker_auto_screws_tilt_ && !has_standard_screws_tilt_)
+                   ? ScrewsTiltDialect::SnapmakerAuto
+                   : ScrewsTiltDialect::Standard;
     }
 
     [[nodiscard]] bool has_klippain_shaketune() const {
@@ -1282,7 +510,7 @@ class PrinterDiscovery {
      * @return true if the macro exists
      */
     [[nodiscard]] bool has_macro(const std::string& name) const {
-        return macros_.count(to_upper(name)) > 0;
+        return macros_.count(helix::text_io::to_upper(name)) > 0;
     }
 
     /**
@@ -1303,7 +531,7 @@ class PrinterDiscovery {
      * here. Empty when no such macro exists.
      */
     [[nodiscard]] std::string macro_config_name(const std::string& name) const {
-        auto it = macro_config_names_.find(to_upper(name));
+        auto it = macro_config_names_.find(helix::text_io::to_upper(name));
         return it == macro_config_names_.end() ? std::string{} : it->second;
     }
 
@@ -1319,11 +547,96 @@ class PrinterDiscovery {
     /// check misses the wrapped case (ZMOD's AUTO_FULL_BED_LEVEL reaches
     /// SAVE_CONFIG two levels down), which is why confirmations ask this.
     [[nodiscard]] bool macro_restarts_host(const std::string& name) const {
-        return host_restarting_macros_.count(to_upper(name)) > 0;
+        return host_restarting_macros_.count(helix::text_io::to_upper(name)) > 0;
     }
 
     [[nodiscard]] const std::unordered_set<std::string>& host_restarting_macros() const {
         return host_restarting_macros_;
+    }
+
+    /**
+     * @brief Read the filament diameter from [extruder] filament_diameter
+     *
+     * A missing, null or non-positive value leaves the current diameter.
+     *
+     * @param settings JSON object from a configfile.settings response
+     */
+    void parse_filament_diameter(const nlohmann::json& settings) {
+        const auto extruder = settings.find("extruder");
+        if (extruder == settings.end() || !extruder->is_object()) {
+            return;
+        }
+        const auto d = extruder->find("filament_diameter");
+        if (d != extruder->end() && d->is_number() && d->get<float>() > 0.0f) {
+            filament_diameter_mm_ = d->get<float>();
+        }
+    }
+
+    /// Filament diameter in mm the extruder is configured for.
+    [[nodiscard]] float filament_diameter_mm() const {
+        return filament_diameter_mm_;
+    }
+
+    /**
+     * @brief Read the XY points gantry leveling and Z tilt probe
+     *
+     * From `[quad_gantry_level] points` and `[z_tilt] points`, each a list of
+     * [x, y]. A section whose list is missing or has any malformed entry
+     * contributes nothing.
+     *
+     * @param settings JSON object from a configfile.settings response
+     */
+    void parse_leveling_probe_points(const nlohmann::json& settings) {
+        leveling_probe_points_.clear();
+        auto read = [&](const char* section, PrintStartPhase phase) {
+            const auto s = settings.find(section);
+            if (s == settings.end() || !s->is_object()) {
+                return;
+            }
+            const auto pts = s->find("points");
+            if (pts == s->end() || !pts->is_array()) {
+                return;
+            }
+            std::vector<LevelingProbePoint> parsed;
+            for (const auto& p : *pts) {
+                if (!p.is_array() || p.size() < 2 || !p[0].is_number() || !p[1].is_number()) {
+                    return;
+                }
+                parsed.push_back({p[0].get<double>(), p[1].get<double>(), phase});
+            }
+            leveling_probe_points_.insert(leveling_probe_points_.end(), parsed.begin(),
+                                          parsed.end());
+        };
+        if (settings.is_object()) {
+            read("quad_gantry_level", PrintStartPhase::QGL);
+            read("z_tilt", PrintStartPhase::Z_TILT);
+        }
+    }
+
+    /// Configured gantry-leveling / Z-tilt probe points; empty when neither is configured.
+    [[nodiscard]] const std::vector<LevelingProbePoint>& leveling_probe_points() const {
+        return leveling_probe_points_;
+    }
+
+    /**
+     * @brief Resolve the command that toggles a filament sensor in firmware
+     *
+     * A [gcode_macro SET_FILAMENT_SENSOR] wrapper must rename the builtin
+     * (rename_existing), and a wrapper may treat every call as a user setting
+     * and persist it. HelixScreen's toggles are temporary firmware state, not
+     * user settings, so they go to the builtin under its renamed name and skip
+     * the wrapper's side effects on purpose.
+     *
+     * @param settings JSON object from a configfile.settings response
+     * @return true when a wrapper's rename_existing was found and stored
+     */
+    bool parse_sensor_toggle_command(const nlohmann::json& settings);
+
+    /// The firmware command for SENSOR=<name> ENABLE=<0|1>. See
+    /// parse_sensor_toggle_command().
+    [[nodiscard]] std::string sensor_toggle_command() const {
+        return sensor_toggle_command_.empty() ? std::string("SET_FILAMENT_SENSOR")
+                                              : sensor_toggle_command_;
     }
 
     /// Macros reaching a command that leaves the host DOWN, from
@@ -1336,11 +649,47 @@ class PrinterDiscovery {
     /// another macro? Separate from macro_restarts_host() because the two differ
     /// in what the user is promised once the rpc comes back dropped.
     [[nodiscard]] bool macro_halts_host(const std::string& name) const {
-        return host_halting_macros_.count(to_upper(name)) > 0;
+        return host_halting_macros_.count(helix::text_io::to_upper(name)) > 0;
     }
 
     [[nodiscard]] const std::unordered_set<std::string>& host_halting_macros() const {
         return host_halting_macros_;
+    }
+
+    /// Leveling steps helix_skips.cfg can wrap on this printer, and the ones it
+    /// wraps right now; skip_wrappers::wrappable()/active() over configfile.settings.
+    void set_skip_wrappers(std::vector<skip_wrappers::Op> wrappable,
+                           std::vector<skip_wrappers::Op> active) {
+        skip_wrappable_ = std::move(wrappable);
+        skip_active_ = std::move(active);
+    }
+
+    [[nodiscard]] const std::vector<skip_wrappers::Op>& skip_wrappable() const {
+        return skip_wrappable_;
+    }
+
+    [[nodiscard]] const std::vector<skip_wrappers::Op>& skip_active() const {
+        return skip_active_;
+    }
+
+    /// Macros that set LEDs, directly or through another macro, from
+    /// helix::analyze_led_driving_macros(); stored uppercased like macros_.
+    void set_led_driving_macros(std::unordered_set<std::string> macros) {
+        led_driving_macros_ = std::move(macros);
+    }
+
+    /// Whether the print start or end macro sets LEDs itself. Those fire at the
+    /// same state changes LedAutoState reacts to, so the two override each other.
+    [[nodiscard]] bool print_macros_drive_leds() const {
+        static constexpr const char* NAMES[] = {"PRINT_START",  "START_PRINT", "_PRINT_START",
+                                                "_START_PRINT", "PRINT_END",   "END_PRINT",
+                                                "_PRINT_END",   "_END_PRINT"};
+        for (const char* name : NAMES) {
+            if (led_driving_macros_.count(name) > 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     [[nodiscard]] std::string nozzle_clean_macro() const {
@@ -1404,7 +753,7 @@ class PrinterDiscovery {
      * @return true if macro was detected
      */
     [[nodiscard]] bool has_helix_macro(const std::string& macro_name) const {
-        return helix_macros_.count(to_upper(macro_name)) > 0;
+        return helix_macros_.count(helix::text_io::to_upper(macro_name)) > 0;
     }
 
     /**
@@ -1413,11 +762,6 @@ class PrinterDiscovery {
     [[nodiscard]] size_t macro_count() const {
         return macros_.size();
     }
-
-    /**
-     * @brief Get summary string for logging
-     */
-    [[nodiscard]] std::string summary() const;
 
     // ========================================================================
     // Printer Info (populated from server.info / printer.info)
@@ -1545,149 +889,21 @@ class PrinterDiscovery {
         return printer_objects_;
     }
 
+    /// True once parse_objects() consumed an objects list: the hardware lists
+    /// above are then complete, and an empty one means the printer has none.
+    [[nodiscard]] bool objects_reported() const {
+        return objects_reported_;
+    }
+
   private:
-    // Helper: convert string to uppercase
-    static std::string to_upper(const std::string& str) {
-        std::string result = str;
-        std::transform(result.begin(), result.end(), result.begin(),
-                       [](unsigned char c) { return std::toupper(c); });
-        return result;
-    }
-
-    // Chamber/enclosure keyword scoring for sensor, fan, and heater object
-    // names. Vendors diverge: Creality uses "chamber", Snapmaker uses "cavity",
-    // Elegoo COSMOS uses literal "box", modders often use "enclosure".
-    //
-    // Returns 0 for no match, higher for stronger evidence. The discovery loop
-    // keeps the highest-scoring match so iteration order does not decide.
-    //
-    // CHAMBER / ENCLOSURE / CAVITY match as substrings — these names are
-    // unambiguous, and compound forms ("chamber_temp", "ENCLOSURE_top") are
-    // intended as the printer chamber.
-    //
-    // BOX matches only as a standalone token — split on `_` and whitespace —
-    // so AMS-style names like "box1_heater" / "Box1_STM32" (QIDI Box filament
-    // dryer) are not mistaken for the printer chamber. The COSMOS case
-    // ("temperature_sensor box") and compound forms ("box_fan") still match.
-    //
-    // Two modifiers refine the base tier so a real chamber TEMPERATURE sensor
-    // outranks an air-quality sensor whose name merely contains a chamber
-    // keyword:
-    //   - Compound penalty (-1): if the keyword is not the entire name (e.g.
-    //     "chamber_temp"), subtract 1. Exact "chamber" (100) then beats
-    //     "chamber_temp" (99) on a tie, while both still crush weaker keywords.
-    //   - Air-quality penalty (-40): if the name carries an air-quality token
-    //     (TVOC/VOC/CO2/GAS/HUMIDITY/IAQ/AQI/PM25/PM10/PARTICULATE/PRESSURE),
-    //     subtract 40 so "chamber_tvoc" (59) loses to a clean "chamber" (100)
-    //     or even "enclosure" (90).
-    // A matched score is floored at 1 so an only-candidate air-quality chamber
-    // sensor is still detected rather than dropped; no keyword still returns 0.
-    static int chamber_keyword_confidence(const std::string& object_name) {
-        std::string upper = to_upper(object_name);
-
-        int score = 0;
-        const char* keyword = nullptr;
-        if (upper.find("CHAMBER") != std::string::npos) {
-            score = 100;
-            keyword = "CHAMBER";
-        } else if (upper.find("ENCLOSURE") != std::string::npos) {
-            score = 90;
-            keyword = "ENCLOSURE";
-        } else if (upper.find("CAVITY") != std::string::npos) {
-            score = 85;
-            keyword = "CAVITY";
-        } else if (has_standalone_token(upper, "BOX")) {
-            score = 60;
-            keyword = "BOX";
-        } else {
-            return 0;
-        }
-
-        // Compound penalty: prefer a name that is exactly the keyword.
-        if (upper != keyword)
-            score -= 1;
-
-        // Air-quality penalty: names carrying a gas/particulate/humidity token
-        // describe air quality, not chamber temperature.
-        static const char* const AIR_QUALITY_TOKENS[] = {
-            "TVOC", "VOC",  "CO2",  "GAS",         "HUMIDITY", "IAQ",
-            "AQI",  "PM25", "PM10", "PARTICULATE", "PRESSURE"};
-        for (const char* tok : AIR_QUALITY_TOKENS) {
-            if (has_standalone_token(upper, tok)) {
-                score -= 40;
-                break;
-            }
-        }
-
-        // A matched keyword always stays detectable.
-        return score < 1 ? 1 : score;
-    }
-
-    // Returns true iff `token` appears in `haystack` as a complete token,
-    // where tokens are separated by `_` or whitespace. Both inputs are
-    // compared case-sensitively; callers upper-case beforehand.
-    static bool has_standalone_token(const std::string& haystack, const std::string& token) {
-        auto is_separator = [](char c) {
-            return c == '_' || std::isspace(static_cast<unsigned char>(c));
-        };
-        size_t i = 0;
-        while (i < haystack.size()) {
-            while (i < haystack.size() && is_separator(haystack[i])) {
-                ++i;
-            }
-            size_t start = i;
-            while (i < haystack.size() && !is_separator(haystack[i])) {
-                ++i;
-            }
-            if (i - start == token.size() && haystack.compare(start, token.size(), token) == 0) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     // Helper: natural sort — splits on trailing digits so "lane2" < "lane10"
-    static void natural_sort(std::vector<std::string>& names) {
-        std::sort(names.begin(), names.end(), [](const std::string& a, const std::string& b) {
-            // Find where trailing digits start
-            auto digit_start = [](const std::string& s) -> size_t {
-                size_t i = s.size();
-                while (i > 0 && std::isdigit(static_cast<unsigned char>(s[i - 1])))
-                    --i;
-                return i;
-            };
-            size_t da = digit_start(a);
-            size_t db = digit_start(b);
-            std::string prefix_a = a.substr(0, da);
-            std::string prefix_b = b.substr(0, db);
-            if (prefix_a != prefix_b)
-                return prefix_a < prefix_b;
-            // Same prefix — compare numeric suffixes
-            int num_a = (da < a.size()) ? std::stoi(a.substr(da)) : -1;
-            int num_b = (db < b.size()) ? std::stoi(b.substr(db)) : -1;
-            return num_a < num_b;
-        });
-    }
+    static void natural_sort(std::vector<std::string>& names);
 
     // Helper: true when `needle` appears in `name` bounded by underscores or the
     // ends of the string. Klipper macro names are underscore-separated words, so
     // a plain substring test matches far too much: "PID" hits LED_RAPID_FLASH and
     // "HOME" hits STATUS_LED_HOMING, dropping LED macros that are perfectly valid.
-    static bool contains_word(const std::string& name, const std::string& needle) {
-        if (needle.empty() || needle.size() > name.size()) {
-            return false;
-        }
-        for (size_t pos = name.find(needle); pos != std::string::npos;
-             pos = name.find(needle, pos + 1)) {
-            const size_t end = pos + needle.size();
-            const bool left_ok = (pos == 0) || (name[pos - 1] == '_');
-            const bool right_ok = (end == name.size()) || (name[end] == '_');
-            if (left_ok && right_ok) {
-                return true;
-            }
-        }
-        return false;
-    }
+    static bool contains_word(const std::string& name, const std::string& needle);
 
     // Helper: check if name matches any pattern
     static bool matches_any(const std::string& name, const std::vector<std::string>& patterns) {
@@ -1702,6 +918,7 @@ class PrinterDiscovery {
     // Hardware lists
     std::vector<std::string> heaters_;
     std::vector<std::string> fans_;
+    std::vector<std::string> load_cells_;
     std::vector<std::string> sensors_;
     std::vector<std::string> leds_;
     std::vector<std::string> steppers_;
@@ -1726,6 +943,10 @@ class PrinterDiscovery {
     std::unordered_map<std::string, std::string> macro_config_names_;
     std::unordered_set<std::string> host_restarting_macros_; ///< Macros that reach a host restart
     std::unordered_set<std::string> host_halting_macros_;    ///< Macros that reach a host halt
+    std::unordered_set<std::string> led_driving_macros_;     ///< Macros that set LEDs
+    std::vector<skip_wrappers::Op> skip_wrappable_;
+    std::vector<skip_wrappers::Op> skip_active_;
+    std::string sensor_toggle_command_; ///< Empty = the SET_FILAMENT_SENSOR builtin
     std::unordered_set<std::string> helix_macros_;
     std::string nozzle_clean_macro_;
     std::string purge_line_macro_;
@@ -1738,8 +959,12 @@ class PrinterDiscovery {
     bool has_probe_ = false;
     bool has_heater_bed_ = false;
     bool has_mmu_ = false;
+    bool has_openams_manager_ = false; ///< oams_manager listed; claim settled from its status
     bool has_snapmaker_ = false;
+    bool has_afc_lite_ = false;
+    bool has_zmod_afclite_ = false;
     bool has_tool_changer_ = false;
+    bool has_auto_feeding_batch_ = false;
     bool has_pin_watch_ = false;
     std::string pin_watch_object_name_;
     bool has_medusahc_ = false;
@@ -1757,9 +982,11 @@ class PrinterDiscovery {
                                              ///< independent of the heater pick: in COOLING mode
                                              ///< the K2 M141 macro parks the setpoint on this fan's
                                              ///< target, not the heater's.
-    int chamber_fan_resting_deci_ = 0;       ///< Cooling fan's configured resting/off target
-                                             ///< (decidegrees), from configfile.settings
-                                             ///< target_temp. 0 = unknown. M141 S0 returns here.
+    float filament_diameter_mm_ = filament::DEFAULT_DIAMETER_MM; ///< [extruder] filament_diameter
+    std::vector<LevelingProbePoint> leveling_probe_points_; ///< [quad_gantry_level]/[z_tilt] points
+    int chamber_fan_resting_deci_ = 0; ///< Cooling fan's configured resting/off target
+                                       ///< (decidegrees), from configfile.settings
+                                       ///< target_temp. 0 = unknown. M141 S0 returns here.
     std::unordered_map<std::string, double> fan_max_power_; ///< Per-fan max_power from
                                                             ///< configfile.settings, keyed by
                                                             ///< lowercased object name. Used to
@@ -1773,14 +1000,13 @@ class PrinterDiscovery {
     bool has_timelapse_ = false;
     bool has_exclude_object_ = false;
     bool has_screws_tilt_ = false;
+    bool has_standard_screws_tilt_ = false;       ///< upstream [screws_tilt_adjust]
+    bool has_snapmaker_auto_screws_tilt_ = false; ///< U1 [auto_screws_tilt_adjust]
     int qidi_box_slot_count_ = 0; ///< Count of `box_stepper slot<N>` objects (QIDI Box)
     bool has_klippain_shaketune_ = false;
     bool has_speaker_ = false;
     bool has_fan_feedback_ = false;
     bool is_kalico_ = false;
-    /// Set when a Klipper object named exactly `ace` was seen. Ambiguous on its
-    /// own — resolved in finalize_ams_detection() using has_multiace_markers_.
-    bool has_bare_ace_object_ = false;
     /// Set by `ace_bg_swap` / `ace_tipform`, which only multiACE registers.
     bool has_multiace_markers_ = false;
     AmsType mmu_type_ = AmsType::NONE;
@@ -1798,6 +1024,7 @@ class PrinterDiscovery {
     std::vector<std::string> mcu_list_;
     std::vector<std::pair<std::string, std::string>> mcu_versions_;
     std::vector<std::string> printer_objects_;
+    bool objects_reported_ = false;
 };
 
 } // namespace helix
@@ -1806,7 +1033,8 @@ class PrinterDiscovery {
 class IMoonrakerAPI;
 namespace helix {
 class IMoonrakerClient;
-}
+class PrinterState;
+} // namespace helix
 
 namespace helix {
 
@@ -1822,5 +1050,26 @@ namespace helix {
  */
 void init_subsystems_from_hardware(const PrinterDiscovery& hardware, IMoonrakerAPI* api,
                                    IMoonrakerClient* client);
+
+/// Saves Klipper's hostname for the active printer, writing only when it changed. The
+/// connection-failed prompt re-finds the printer over mDNS by it (#1217).
+void remember_printer_hostname(const std::string& hostname);
+
+/**
+ * @brief The objects TemperatureSensorManager tracks: temperature_sensor /
+ *        temperature_fan / tmc objects plus every heater_generic (filament
+ *        dryers, auxiliary heaters). Extruders and the bed are PrinterState's.
+ */
+std::vector<std::string> temperature_sensor_objects(const PrinterDiscovery& hardware);
+
+/**
+ * @brief Case-insensitive search of Klipper object names
+ *
+ * A leading '^' pins the pattern to the start of a name and a trailing '$'
+ * to its end, so "^box$" names exactly the object "box" and not a
+ * "gcode_macro BOX_UNLOAD" that contains it. Shared by detection heuristics
+ * (object_exists) and probe-preparation rules.
+ */
+[[nodiscard]] bool has_pattern(const std::vector<std::string>& objects, const std::string& pattern);
 
 } // namespace helix

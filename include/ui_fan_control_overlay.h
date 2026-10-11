@@ -5,8 +5,10 @@
 #include "ui_fan_dial.h"
 #include "ui_observer_guard.h"
 
+#include "app_globals.h"
 #include "overlay_base.h"
 #include "printer_state.h"
+#include "static_panel_registry.h"
 #include "ui/animated_value.h"
 
 #include <memory>
@@ -31,6 +33,8 @@ class IMoonrakerAPI;
  * @see fan_control_overlay.xml for layout definition
  */
 class FanControlOverlay : public OverlayBase {
+    friend class FanControlOverlayTestAccess;
+
   public:
     /**
      * @brief Construct FanControlOverlay with injected dependencies
@@ -43,26 +47,10 @@ class FanControlOverlay : public OverlayBase {
     // === OverlayBase Implementation ===
     //
 
-    /**
-     * @brief Initialize subjects for XML binding
-     *
-     * No local subjects needed - we use PrinterState's fans_version subject.
-     */
-    void init_subjects() override;
-
-    /**
-     * @brief Create overlay UI from XML
-     * @param parent Parent widget to attach overlay to (usually screen)
-     * @return Root object of overlay, or nullptr on failure
-     */
+    const char* xml_component() const override {
+        return "fan_control_overlay";
+    }
     lv_obj_t* create(lv_obj_t* parent) override;
-
-    /**
-     * @brief Register XML event callbacks
-     *
-     * Registers back button callback.
-     */
-    void register_callbacks() override;
 
     /**
      * @brief Get human-readable overlay name
@@ -84,7 +72,7 @@ class FanControlOverlay : public OverlayBase {
      *
      * Unsubscribes from fans_version subject.
      */
-    void on_deactivate() override;
+    void on_deactivating(DeactivateReason reason) override;
 
     /**
      * @brief Clean up resources for async-safe destruction
@@ -100,6 +88,15 @@ class FanControlOverlay : public OverlayBase {
     }
 
   private:
+    /// LV_EVENT_DELETE on the root: drops the dials and cards while their
+    /// widgets are still alive, so a tree deleted by anyone else leaves no
+    /// pointer into freed memory and the next open recreates it.
+    static void on_root_deleted(lv_event_t* e);
+
+    /// Unsubscribe observers, stop spin animations, destroy the dials and
+    /// forget the cards. Their widgets must still be alive.
+    void release_fan_widgets();
+
     /**
      * @brief Populate fan widgets from helix::PrinterState
      *
@@ -195,15 +192,19 @@ class FanControlOverlay : public OverlayBase {
     void refresh_all_auto_fan_animations();
 };
 
-/**
- * @brief Get global FanControlOverlay instance
- * @return Reference to singleton instance
- * @throws std::runtime_error if not initialized
- */
-FanControlOverlay& get_fan_control_overlay();
+/// Lazy singleton bound to the global PrinterState.
+inline FanControlOverlay& get_fan_control_overlay() {
+    return helix::lazy_global<FanControlOverlay>("FanControlOverlay", get_printer_state());
+}
 
+namespace helix {
 /**
- * @brief Initialize global FanControlOverlay instance
- * @param printer_state Reference to global helix::PrinterState
+ * @brief Push the fan control overlay, creating it under @p parent_screen when it has no live tree
+ *
+ * The overlay singleton owns its one widget tree; every caller opens through
+ * here and none keeps or deletes the root.
+ * @param parent_screen Screen to create the overlay on when it has no live tree
+ * @return The pushed root, or nullptr if it could not be created
  */
-void init_fan_control_overlay(helix::PrinterState& printer_state);
+lv_obj_t* open_fan_control_overlay(lv_obj_t* parent_screen);
+} // namespace helix

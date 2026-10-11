@@ -3,8 +3,9 @@
 # Module: release
 # Release download and extraction
 #
-# Reads: GITHUB_REPO, TMP_DIR, INSTALL_DIR, SUDO
-# Writes: CLEANUP_TMP, BACKUP_CONFIG, BACKUP_ENV, ORIGINAL_INSTALL_EXISTS
+# Reads: GITHUB_REPO, TMP_DIR, INSTALL_DIR, SUDO, MIGRATE_FROM_DIR,
+#        HELIX_MOD_PAYLOAD, HOST_MOD_ROOT (payload supersession sweep)
+# Writes: CLEANUP_TMP, BACKUP_CONFIG, BACKUP_ENV
 
 # Source guard
 [ -n "${_HELIX_RELEASE_SOURCED:-}" ] && return 0
@@ -12,6 +13,9 @@ _HELIX_RELEASE_SOURCED=1
 
 # R2 CDN configuration (overridable via environment)
 : "${R2_BASE_URL:=https://releases.helixscreen.org}"
+# Whether R2_CHANNEL arrived from the environment (as opposed to the default
+# below). resolve_update_channel() must not override the operator's choice.
+_R2_CHANNEL_FROM_ENV="${R2_CHANNEL:+yes}"
 : "${R2_CHANNEL:=stable}"
 
 # Plain HTTP endpoint for systems without SSL (K1, AD5M BusyBox wget)
@@ -346,6 +350,120 @@ parse_manifest_version() {
     parse_json_string_field version
 }
 
+# Extract the value of a JSON integer field from stdin. Args: key
+#
+# Prints the number, or nothing when the key is absent or its value is not a
+# bare integer. Unquoted values ride in the same quote-split field as the colon
+# ("channel": 1, splits to `channel` + `: 1,`), so the digits are trimmed out
+# of that field rather than read from the next one. First match wins, and the
+# key/value pair always shares a line, so the line-wise walk of
+# parse_json_string_field is enough here too.
+parse_json_int_field() {
+    awk -v key="$1" '
+        {
+            n = split($0, p, "\"")
+            for (i = 1; i < n; i++) {
+                if (p[i] == key && p[i+1] ~ /^[ \t]*:[ \t]*-?[0-9]/) {
+                    v = p[i+1]
+                    sub(/^[^0-9-]*/, "", v)
+                    sub(/[^0-9].*$/, "", v)
+                    print v
+                    exit
+                }
+            }
+        }
+    '
+}
+
+# Newest release tag from GitHub's /releases payload on stdin, prereleases
+# included. GitHub lists the array newest-first and serializes every entry with
+# tag_name ahead of draft and prerelease, so one walk that carries the current
+# entry's tag and flags can take the first non-draft prerelease, falling back
+# to the first non-draft stable release (what /releases/latest answers) when
+# no prerelease exists. Whole-field comparison on quote-split input keeps a
+# "prerelease" mentioned inside release prose from counting, per
+# parse_json_string_field.
+parse_newest_release_tag() {
+    awk '
+        {
+            n = split($0, p, "\"")
+            for (i = 1; i < n; i++) {
+                if (p[i] == "tag_name" && p[i+1] ~ /^[ \t]*:[ \t]*$/) tag = p[i+2]
+                else if (p[i] == "draft") draft = (p[i+1] ~ /:[ \t]*true/)
+                else if (p[i] == "prerelease") {
+                    if (p[i+1] ~ /:[ \t]*true/) {
+                        if (!draft && tag != "") { print tag; done = 1; exit }
+                    } else if (!draft && tag != "" && stable == "") {
+                        stable = tag
+                    }
+                }
+            }
+        }
+        END { if (!done && stable != "") print stable }
+    '
+}
+
+# Set R2_CHANNEL from the installed app's settings, so an update follows the
+# channel the user picked in the UI instead of always pulling stable.
+#
+# The app persists its channel at /update/channel as an int (0=stable,
+# 1=beta, 2=dev). config/settings.json is normally a symlink into
+# printer_data/config/helixscreen/; reading through it covers both layouts,
+# and _config_source_dir also reaches an install mid-migration at its old
+# root. An R2_CHANNEL from the environment wins; anything unreadable,
+# absent or out of range maps back to stable.
+resolve_update_channel() {
+    if [ "${_R2_CHANNEL_FROM_ENV:-}" = "yes" ]; then
+        log_info "Update channel: ${R2_CHANNEL} (R2_CHANNEL set in environment)"
+        return 0
+    fi
+
+    local settings num=""
+    settings="$(_config_source_dir)/config/settings.json"
+
+    if [ -f "$settings" ]; then
+        num=$(parse_json_int_field channel < "$settings" 2>/dev/null) || num=""
+    fi
+
+    case "$num" in
+        1) R2_CHANNEL=beta ;;
+        2) R2_CHANNEL=dev ;;
+        *) R2_CHANNEL=stable ;;
+    esac
+    case "$num" in
+        0 | 1 | 2) _R2_CHANNEL_FROM_SETTINGS=yes ;;
+    esac
+    log_info "Update channel: ${R2_CHANNEL} (read from ${settings})"
+}
+
+# An explicit --version decides the channel when nothing else has: a
+# prerelease (any '-' suffix, the same test scripts/release-channel.sh applies
+# to tags) pinned on a fresh install or one with no settings.json is a beta
+# install, and the channel written into moonraker.conf must follow it.
+# _R2_CHANNEL_FROM_VERSION tells seed_update_channel to persist it for the app.
+# Args: the requested version tag
+match_channel_to_version() {
+    [ "${_R2_CHANNEL_FROM_ENV:-}" = "yes" ] && return 0
+    [ "${_R2_CHANNEL_FROM_SETTINGS:-}" = "yes" ] && return 0
+    case "$1" in
+        *-*)
+            R2_CHANNEL=beta
+            _R2_CHANNEL_FROM_VERSION=yes
+            log_info "Update channel: beta (${1} is a prerelease)"
+            ;;
+    esac
+}
+
+# Extract the version from a release tarball path. Args: path or basename.
+# Prints nothing when the name carries no version, which is how the
+# unversioned helixscreen-<plat>.zip layout is detected.
+#
+# Platform names and versions both carry hyphens (android-arm64,
+# v1.1.0-beta.1), so the version is whatever follows the last '-v<digit>'.
+parse_tarball_version() {
+    echo "$1" | sed -n 's/.*helixscreen-.*-\(v[0-9][0-9A-Za-z.+-]*\)\.tar\.gz$/\1/p'
+}
+
 # Extract one string field from a platform's block of the manifest's assets
 # object on stdin. Args: platform key
 #
@@ -426,9 +544,9 @@ _UNVERIFIED_HTTP_REFUSED=false
 #
 # The no-hash-over-HTTP rejection is a WARNING, not an error, because it fires
 # mid-cascade in the normal case: generate-manifest.sh withholds zip_url /
-# zip_sha256 from the BusyBox platforms in ZIP_EXCLUDE_PLATFORMS (ad5m, ad5x,
-# cc1, k1, k2, snapmaker-u1 — helixscreen#993), so on exactly the HTTP-only
-# devices the zip candidate has no hash and must be skipped before the tar.gz
+# zip_sha256 from the platforms in its ZIP_EXCLUDE_PLATFORMS list
+# (helixscreen#993), so on exactly those HTTP-only devices the zip candidate
+# has no hash and must be skipped before the tar.gz
 # candidate, which does have one, succeeds. Only download_release's final
 # all-candidates-exhausted message spells out the override.
 _verify_archive_hash() {
@@ -439,6 +557,8 @@ _verify_archive_hash() {
         actual=$(_sha256_file "$file")
         if [ "$actual" = "$expected" ]; then
             log_info "SHA256 verified ($(basename "$file"))"
+            # shellcheck disable=SC2034  # consumed by main.sh (apply_install)
+            ARCHIVE_SHA256_VERIFIED=1
             return 0
         fi
         if [ -z "$actual" ]; then
@@ -470,19 +590,47 @@ _verify_archive_hash() {
 # second (matching get_latest_version's own source order), so an HTTPS-capable
 # box gets an authenticated set of hashes even when it later has to fall back
 # to the HTTP mirror for the much larger archive.
-# Returns 0 when a manifest is in hand.
+#
+# Each channel's manifest describes only that channel's latest release, so
+# given a version the install channel's manifest does not cover, the other
+# channels' manifests are tried: a beta pinned with --version on a stable
+# install is listed in beta's.
+# Args: [version tag the manifest must cover]
+# Returns 0 when a manifest (covering that version, if given) is in hand.
 _ensure_manifest() {
-    [ -n "$_R2_MANIFEST" ] && return 0
+    local want=${1:-} ch
+    if [ -n "$_R2_MANIFEST" ]; then
+        if [ -z "$want" ] || _manifest_covers_version "$want"; then
+            return 0
+        fi
+    fi
 
+    if _fetch_channel_manifest "$R2_CHANNEL" &&
+        { [ -z "$want" ] || _manifest_covers_version "$want"; }; then
+        return 0
+    fi
+    [ -n "$want" ] || return 1
+    for ch in stable beta dev; do
+        [ "$ch" = "$R2_CHANNEL" ] && continue
+        if _fetch_channel_manifest "$ch" && _manifest_covers_version "$want"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Fetch one channel's manifest into _R2_MANIFEST / _R2_MANIFEST_TRANSPORT.
+# Args: channel
+_fetch_channel_manifest() {
     if check_https_capability; then
-        _R2_MANIFEST=$(fetch_url "${R2_BASE_URL}/${R2_CHANNEL}/manifest.json") || true
+        _R2_MANIFEST=$(fetch_url "${R2_BASE_URL}/${1}/manifest.json") || true
         if [ -n "$_R2_MANIFEST" ]; then
             _R2_MANIFEST_TRANSPORT="https"
             return 0
         fi
     fi
 
-    _R2_MANIFEST=$(fetch_url_http "${HTTP_BASE_URL}/${R2_CHANNEL}/manifest.json") || true
+    _R2_MANIFEST=$(fetch_url_http "${HTTP_BASE_URL}/${1}/manifest.json") || true
     if [ -n "$_R2_MANIFEST" ]; then
         _R2_MANIFEST_TRANSPORT="http"
         return 0
@@ -715,11 +863,19 @@ get_latest_version() {
             fi
         fi
 
-        # Fallback: GitHub API
-        local url="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
-        log_info "Fetching latest version from GitHub..."
-
-        version=$(fetch_url "$url" | parse_json_string_field tag_name)
+        # Fallback: GitHub API. /releases/latest skips prereleases, so the
+        # beta and dev channels list /releases and take the newest non-draft
+        # release, prereleases included.
+        local url
+        if [ "$R2_CHANNEL" != "stable" ]; then
+            url="https://api.github.com/repos/${GITHUB_REPO}/releases"
+            log_info "Fetching newest ${R2_CHANNEL} version from GitHub..."
+            version=$(fetch_url "$url" | parse_newest_release_tag)
+        else
+            url="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
+            log_info "Fetching latest version from GitHub..."
+            version=$(fetch_url "$url" | parse_json_string_field tag_name)
+        fi
 
         if [ -n "$version" ]; then
             echo "$version"
@@ -807,27 +963,146 @@ _try_download_candidate() {
     return 0
 }
 
+# Normalize to the v-prefixed release tag. Release artifacts live under the
+# tag at every transport — R2 dir (releases/vX.Y.Z/), versioned tar filename
+# (helixscreen-<plat>-vX.Y.Z.tar.gz), and the GitHub tag (vX.Y.Z). A bare
+# version arrives whenever the caller bypasses get_latest_version's own
+# normalization: an explicit `--version 0.99.80`, or the in-app updater
+# passing the manifest's bare `.version` field. Without the `v` every
+# candidate URL 404s. ("local" placeholder for --local installs is untouched.)
+# Args: version
+_release_tag() {
+    case "$1" in
+        [0-9]*) echo "v$1" ;;
+        *) echo "$1" ;;
+    esac
+}
+
+# The candidate archive URLs, in the order download_release tries them, and
+# the manifest's hashes for them. Fetches the manifest when it is not cached.
+# Sets, in the caller's scope (declare them local first): zip_filename
+# tar_filename zip_r2 tar_r2 zip_gh tar_gh zip_http tar_http zip_sha tar_sha
+# manifest_ok.
+# Args: release tag (from _release_tag), release platform (get_release_platform)
+_release_candidates() {
+    local version=$1 platform=$2 manifest_url
+
+    # NOTE: *_filename are the fixed server-side asset names (fetch URLs). Only
+    # the local staged names carry the version.
+    zip_filename="helixscreen-${platform}.zip"
+    tar_filename="helixscreen-${platform}-${version}.tar.gz"
+
+    # get_latest_version() is invoked as `version=$(get_latest_version ...)`,
+    # so the _R2_MANIFEST it caches lives and dies in that command
+    # substitution's subshell; without this refetch every download is
+    # unverifiable.
+    _ensure_manifest "$version" || true
+
+    # The channel manifest only ever describes the LATEST release. Anything it
+    # says (asset URLs *and* hashes) is off-limits when the caller pinned an
+    # older --version, or we would download the newest build under the old
+    # version's name and then fail its hash.
+    manifest_ok=false
+    manifest_url=""
+    if _manifest_covers_version "$version"; then
+        manifest_ok=true
+        manifest_url=$(echo "$_R2_MANIFEST" | parse_manifest_platform_url "$platform")
+    fi
+
+    # Zip gets tried before tar at every transport.
+    zip_r2="${R2_BASE_URL}/releases/${version}/${zip_filename}"
+    tar_r2="${manifest_url:-${R2_BASE_URL}/releases/${version}/${tar_filename}}"
+    zip_gh="https://github.com/${GITHUB_REPO}/releases/download/${version}/${zip_filename}"
+    tar_gh="https://github.com/${GITHUB_REPO}/releases/download/${version}/${tar_filename}"
+    zip_http="${HTTP_BASE_URL}/releases/${version}/${zip_filename}"
+    tar_http="${HTTP_BASE_URL}/releases/${version}/${tar_filename}"
+    if [ -n "$manifest_url" ]; then
+        tar_http=$(echo "$manifest_url" | sed "s|${R2_BASE_URL}|${HTTP_BASE_URL}|")
+    fi
+
+    # All three transports serve byte-identical artifacts (one CI job uploads
+    # the same files to the GitHub release and to R2, and generates the
+    # manifest from them), so one pair of hashes covers every candidate.
+    zip_sha=""
+    tar_sha=""
+    if [ "$manifest_ok" = true ]; then
+        zip_sha=$(echo "$_R2_MANIFEST" | parse_manifest_platform_sha256 "$platform" zip)
+        tar_sha=$(echo "$_R2_MANIFEST" | parse_manifest_platform_sha256 "$platform")
+    fi
+}
+
+# Ask for a URL with a HEAD request; never fetches the body or writes a file.
+# Echoes found, missing (an HTTP 404) or unknown (anything else: DNS, timeout,
+# TLS, a proxy, a refusal). A wget that does not list --spider (the python
+# shim some K2 firmware ships as wget) is not asked at all, and neither is
+# python: both read as unknown, leaving download_release as the check.
+_url_probe() {
+    local code err
+    if _has_real_curl; then
+        code=$(curl -sIL --connect-timeout 10 --max-time 20 -A "$_INSTALLER_UA" \
+            -o /dev/null -w '%{http_code}' "$1" 2>/dev/null) || true
+        case "$code" in
+            2??) echo found ;;
+            404) echo missing ;;
+            *) echo unknown ;;
+        esac
+    elif command -v wget >/dev/null 2>&1 && wget --help 2>&1 | grep -q -- '--spider'; then
+        if err=$(wget --spider -O /dev/null -T 10 "$1" 2>&1); then
+            echo found
+        else
+            case "$err" in
+                *404*) echo missing ;;
+                *) echo unknown ;;
+            esac
+        fi
+    else
+        echo unknown
+    fi
+}
+
+# The read-only half of download_release, for the plan: confirms the archive
+# exists and says whether it can be verified, writing nothing. Exits 1 only
+# when every candidate answers 404; a probe that cannot tell continues with
+# "release not checked" and download_release stays the real check.
+# Sets PROBE_SIZE_TEXT. Args: version platform
+probe_release() {
+    if [ -n "${local_tarball:-}" ]; then
+        PROBE_SIZE_TEXT="local file, $(file_size_text "$local_tarball")"
+        return 0
+    fi
+    local zip_filename tar_filename zip_r2 tar_r2 zip_gh tar_gh zip_http tar_http
+    local zip_sha tar_sha manifest_ok url answer unknown=false
+    _release_candidates "$(_release_tag "$1")" "$(get_release_platform "$2")"
+    # shellcheck disable=SC2034  # consumed by plan.sh (confirm_point)
+    if [ -n "$zip_sha$tar_sha" ]; then
+        PROBE_SIZE_TEXT="SHA256 available"
+    else
+        PROBE_SIZE_TEXT="no SHA256 published"
+    fi
+    for url in "$zip_r2" "$tar_r2" "$zip_gh" "$tar_gh" "$zip_http" "$tar_http"; do
+        answer=$(_url_probe "$url")
+        [ "$answer" = found ] && return 0
+        [ "$answer" = unknown ] && unknown=true
+    done
+    if [ "$unknown" = true ]; then
+        # shellcheck disable=SC2034  # consumed by plan.sh (confirm_point)
+        PROBE_SIZE_TEXT="release not checked"
+        return 0
+    fi
+    log_error "No HelixScreen $1 release for $2."
+    exit 1
+}
+
 # Download release archive. Prefers the unversioned .zip (consumed by both this
 # installer and Moonraker Update Manager) and falls back to the legacy versioned
 # .tar.gz if no .zip is available at any transport — kept for bridge releases
 # during the zip migration. Sets _ARCHIVE_FORMAT to record which format won.
 # Tries R2 CDN, then GitHub Releases, then the plain-HTTP mirror.
 download_release() {
-    local version=$1
-    local platform=$2
-    platform=$(get_release_platform "$platform")
-
-    # Normalize to the v-prefixed release tag. Release artifacts live under the
-    # tag at every transport — R2 dir (releases/vX.Y.Z/), versioned tar filename
-    # (helixscreen-<plat>-vX.Y.Z.tar.gz), and the GitHub tag (vX.Y.Z). A bare
-    # version reaches here whenever the caller bypasses get_latest_version's own
-    # normalization: an explicit `--version 0.99.80`, or the in-app updater
-    # passing the manifest's bare `.version` field. Without the `v` every
-    # candidate URL 404s. ("local" placeholder for --local installs is untouched.)
-    case "$version" in
-        v* | local) ;;
-        [0-9]*) version="v${version}" ;;
-    esac
+    local version
+    local platform
+    version=$(_release_tag "$1")
+    platform=$(get_release_platform "$2")
 
     # Stage downloads under an identifiable local name (helixscreen-<plat>-<ver>.zip);
     # extract_release()/use_local_tarball() read it back via _archive_tmp_path().
@@ -837,60 +1112,15 @@ download_release() {
     mkdir -p "$TMP_DIR"
     CLEANUP_TMP=true
 
-    # NOTE: *_filename are the fixed server-side asset names (fetch URLs); *_dest are
-    # the local staged paths. Only the local names carry the version — keep them in
-    # sync with _archive_tmp_path() above.
-    local zip_filename="helixscreen-${platform}.zip"
+    # *_dest are the local staged paths; keep them in sync with
+    # _archive_tmp_path() above.
+    local zip_filename tar_filename zip_r2 tar_r2 zip_gh tar_gh zip_http tar_http
+    local zip_sha tar_sha manifest_ok
+    _release_candidates "$version" "$platform"
     local zip_dest="${TMP_DIR}/helixscreen-${platform}-${version}.zip"
-    local tar_filename="helixscreen-${platform}-${version}.tar.gz"
     local tar_dest="${TMP_DIR}/helixscreen-${platform}-${version}.tar.gz"
 
-    # Make sure we have a manifest to check against. get_latest_version() is
-    # invoked as `version=$(get_latest_version ...)`, so the _R2_MANIFEST it
-    # caches lives and dies in that command substitution's subshell and never
-    # reaches here — without this refetch every download is unverifiable.
-    _ensure_manifest || true
-
-    # The channel manifest only ever describes the LATEST release. Anything it
-    # says (asset URLs *and* hashes) is off-limits when the caller pinned an
-    # older --version, or we would download the newest build under the old
-    # version's name and then fail its hash.
-    local manifest_ok=false
-    if _manifest_covers_version "$version"; then
-        manifest_ok=true
-    fi
-
-    # Build candidate URL lists. Zip gets tried before tar at every transport.
-    local zip_r2="${R2_BASE_URL}/releases/${version}/${zip_filename}"
-    local tar_r2=""
     if [ "$manifest_ok" = true ]; then
-        tar_r2=$(echo "$_R2_MANIFEST" | parse_manifest_platform_url "$platform")
-    fi
-    if [ -z "$tar_r2" ]; then
-        tar_r2="${R2_BASE_URL}/releases/${version}/${tar_filename}"
-    fi
-
-    local zip_gh="https://github.com/${GITHUB_REPO}/releases/download/${version}/${zip_filename}"
-    local tar_gh="https://github.com/${GITHUB_REPO}/releases/download/${version}/${tar_filename}"
-
-    local zip_http="${HTTP_BASE_URL}/releases/${version}/${zip_filename}"
-    local tar_http="${HTTP_BASE_URL}/releases/${version}/${tar_filename}"
-    if [ "$manifest_ok" = true ]; then
-        local http_manifest_url
-        http_manifest_url=$(echo "$_R2_MANIFEST" | parse_manifest_platform_url "$platform")
-        if [ -n "$http_manifest_url" ]; then
-            tar_http=$(echo "$http_manifest_url" | sed "s|${R2_BASE_URL}|${HTTP_BASE_URL}|")
-        fi
-    fi
-
-    # Expected SHA256s. All three transports serve byte-identical artifacts
-    # (one CI job uploads the same files to the GitHub release and to R2, and
-    # generates the manifest from them), so one pair of hashes covers every
-    # candidate.
-    local zip_sha="" tar_sha=""
-    if [ "$manifest_ok" = true ]; then
-        zip_sha=$(echo "$_R2_MANIFEST" | parse_manifest_platform_sha256 "$platform" zip)
-        tar_sha=$(echo "$_R2_MANIFEST" | parse_manifest_platform_sha256 "$platform")
         # A hash fetched over the plain-HTTP mirror travelled the same
         # unauthenticated channel as the archive will, so it proves integrity
         # (truncation, a stale mirror) but not authenticity. Say so rather than
@@ -1043,15 +1273,11 @@ use_local_tarball() {
     dest=$(_archive_tmp_path)
     if [ "$src" != "$dest" ]; then
         # Resolve to absolute path so a symlink created in $TMP_DIR doesn't
-        # become dangling if the user passed a relative path.
-        # (BusyBox readlink may not support -f, so try realpath first.)
-        # NOTE: `|| abs_src=""` on each substitution is REQUIRED under `set -e`:
-        # on BusyBox (K2/AD5M) `realpath` is often absent, so the substitution
-        # exits 127 and would abort the whole installer before the fallback runs.
+        # become dangling if the user passed a relative path. host_profile.sh
+        # owns the realpath/readlink-f fallback the BusyBox hosts need; the
+        # `|| abs_src="$src"` covers its empty-input refusal under `set -e`.
         local abs_src
-        abs_src=$(realpath "$src" 2>/dev/null) || abs_src=""
-        [ -n "$abs_src" ] || abs_src=$(readlink -f "$src" 2>/dev/null) || abs_src=""
-        [ -n "$abs_src" ] || abs_src="$src"
+        abs_src=$(host_canonical_path "$src") || abs_src="$src"
 
         # Prefer a symlink to avoid copying large files on constrained devices,
         # but *verify* the staged tarball is readable. Fall back to copying.
@@ -1230,29 +1456,8 @@ validate_binary_architecture() {
 # Used when the install partition is too tight to hold the old + new install
 # at once (e.g. K2 /opt: ~240MB, ~81MB free). Relocating the old install to a
 # roomy partition frees the install fs so the new tree can move in, and the
-# off-partition copy serves as the rollback source on failure.
-#
-# --- Filesystem measurement helpers -----------------------------------------
-#
-# `-P` is load-bearing, not decoration: without it df wraps a long device name
-# onto its own line, and `tail -1 | awk '{print $1}'` then returns a BLOCK COUNT
-# where the caller expects a device. Two filesystems would compare unequal by
-# accident and a rename would be mistaken for a copy. POSIX output is one line
-# per filesystem, which is why detect_rollback_dir already uses it.
-#
-# `-P` alone reports 512-byte blocks, so pair it with `-k` to get the 1K units
-# the arithmetic below assumes. Verified on BusyBox 1.29.3 and 1.33.2.
-
-# Echo the filesystem identity for a path (df's device column). Two paths with
-# the same value are on one filesystem, so a mv between them is a rename.
-_fs_id() {
-    df -kP "$1" 2>/dev/null | tail -1 | awk '{print $1}'
-}
-
-# Echo free space in MB on the filesystem holding a path.
-_fs_free_mb() {
-    df -kP "$1" 2>/dev/null | tail -1 | awk '{print int($4/1024)}'
-}
+# off-partition copy serves as the rollback source on failure. Free space and
+# filesystem identity come from _fs_free_mb / _fs_id in common.sh.
 
 # Echo the size of a directory tree in MB.
 #
@@ -1377,11 +1582,11 @@ detect_rollback_dir() {
     local _candidates _cand _dev _free _install_dev
 
     # Candidate mounts, overridable for testability.
-    _candidates="${HELIX_ROLLBACK_CANDIDATES:-/mnt/UDISK /usr/data /mnt/data /data /user-resource /oem /userdata /var/tmp}"
+    _candidates="${HELIX_ROLLBACK_CANDIDATES:-$HELIX_ROLLBACK_CANDIDATES_DEFAULT}"
 
     # Filesystem device backing the install partition — candidates on the same
     # device free no space when we relocate there.
-    _install_dev=$(df -P "$install_parent" 2>/dev/null | tail -1 | awk '{print $1}')
+    _install_dev=$(_fs_id "$install_parent")
 
     for _cand in $_candidates; do
         [ -d "$_cand" ] || continue
@@ -1395,13 +1600,13 @@ detect_rollback_dir() {
             continue
         fi
 
-        _dev=$(df -P "$_cand" 2>/dev/null | tail -1 | awk '{print $1}')
+        _dev=$(_fs_id "$_cand")
         # Skip tmpfs — volatile RAM, a reboot mid-update loses the rollback.
         [ "$_dev" = "tmpfs" ] && continue
         # Skip same filesystem as the install — relocating there frees nothing.
         [ "$_dev" = "$_install_dev" ] && continue
 
-        _free=$(df "$_cand" 2>/dev/null | tail -1 | awk '{print int($4/1024)}')
+        _free=$(_fs_free_mb "$_cand")
         if [ -n "$_free" ] && [ "$_free" -ge $(( needed_mb + 20 )) ]; then
             echo "$_cand"
             return 0
@@ -1562,7 +1767,7 @@ extract_release() {
     while [ ! -d "$tmp_check_dir" ] && [ "$tmp_check_dir" != "/" ]; do
         tmp_check_dir=$(dirname "$tmp_check_dir")
     done
-    tmp_available_mb=$(df "$tmp_check_dir" 2>/dev/null | tail -1 | awk '{print int($4/1024)}')
+    tmp_available_mb=$(_fs_free_mb "$tmp_check_dir")
 
     if [ -n "$tmp_available_mb" ] && [ "$tmp_available_mb" -lt "$extract_required_mb" ]; then
         log_error "Not enough space in temp directory for extraction."
@@ -1619,10 +1824,10 @@ extract_release() {
 
     if [ "$extract_ok" = false ]; then
         local post_mb
-        post_mb=$(df "$tmp_check_dir" 2>/dev/null | tail -1 | awk '{print int($4/1024)}')
+        post_mb=$(_fs_free_mb "$tmp_check_dir")
         if [ -n "$post_mb" ] && [ "$post_mb" -lt 5 ]; then
             log_error "Failed to extract archive: no space left on device."
-            log_error "Filesystem $(df "$tmp_check_dir" | tail -1 | awk '{print $1}') is full."
+            log_error "Filesystem $(_fs_id "$tmp_check_dir") is full."
             log_error "Try: TMP_DIR=/path/with/space sh install.sh ..."
         else
             log_error "Failed to extract archive."
@@ -1675,7 +1880,8 @@ extract_release() {
     # is the standalone-install contract; the payload root must never be mv'd
     # aside or rm -rf'd as a whole, so none of it may run in this mode.
     if [ "${HELIX_MOD_PAYLOAD:-}" = "1" ]; then
-        [ -d "${INSTALL_DIR}" ] && ORIGINAL_INSTALL_EXISTS=true
+        # shellcheck disable=SC2034  # INSTALL_SWAPPED is read by main.sh (install_state_line)
+        INSTALL_SWAPPED=in-place
         if ! payload_replace_contents "$new_install" "${INSTALL_DIR}"; then
             log_error "Payload update failed at ${INSTALL_DIR}; entries already replaced are gone."
             cd / 2>/dev/null || true
@@ -1684,40 +1890,15 @@ extract_release() {
         fi
         cd / 2>/dev/null || true
         rm -rf "$extract_dir"
+        INSTALL_SWAPPED=swapped
         log_success "Payload contents replaced in place at ${INSTALL_DIR}"
         return 0
     fi
 
     # Phase 4: Backup existing installation (if present)
+    backup_existing_config "$(_config_source_dir)"
+
     if [ -d "${INSTALL_DIR}" ]; then
-        ORIGINAL_INSTALL_EXISTS=true
-
-        # Backup config (check new name first, then legacy names)
-        if [ -f "${INSTALL_DIR}/config/settings.json" ]; then
-            BACKUP_CONFIG="${TMP_DIR}/settings.json.backup"
-            cp "${INSTALL_DIR}/config/settings.json" "$BACKUP_CONFIG"
-            log_info "Backed up existing configuration (from config/settings.json)"
-        elif [ -f "${INSTALL_DIR}/config/helixconfig.json" ]; then
-            BACKUP_CONFIG="${TMP_DIR}/settings.json.backup"
-            cp "${INSTALL_DIR}/config/helixconfig.json" "$BACKUP_CONFIG"
-            log_info "Backed up existing configuration (from config/helixconfig.json)"
-        elif [ -f "${INSTALL_DIR}/settings.json" ]; then
-            BACKUP_CONFIG="${TMP_DIR}/settings.json.backup"
-            cp "${INSTALL_DIR}/settings.json" "$BACKUP_CONFIG"
-            log_info "Backed up existing configuration (legacy root location)"
-        elif [ -f "${INSTALL_DIR}/helixconfig.json" ]; then
-            BACKUP_CONFIG="${TMP_DIR}/settings.json.backup"
-            cp "${INSTALL_DIR}/helixconfig.json" "$BACKUP_CONFIG"
-            log_info "Backed up existing configuration (legacy root location)"
-        fi
-
-        # Backup helixscreen.env (preserves HELIX_LOG_LEVEL and other env customizations)
-        if [ -f "${INSTALL_DIR}/config/helixscreen.env" ]; then
-            BACKUP_ENV="${TMP_DIR}/helixscreen.env.backup"
-            cp "${INSTALL_DIR}/config/helixscreen.env" "$BACKUP_ENV"
-            log_info "Backed up existing helixscreen.env"
-        fi
-
         # Under NoNewPrivileges (self-update from in-app), we prefer the
         # atomic swap (mv old; mv new) if the parent dir is writable (service
         # file v0.97.4+ adds ReadWritePaths for it).  Fall back to the racy
@@ -1752,6 +1933,7 @@ extract_release() {
                 # The loops below rm -rf every child of INSTALL_DIR — refuse
                 # before the first one touches a mod-owned payload root.
                 host_refuse_mod_owned "in-place update of" "$INSTALL_DIR"
+                INSTALL_SWAPPED=in-place
 
                 # Remove old contents (except config/).
                 # Don't use || true — if rm fails, we must not proceed to mv
@@ -1823,6 +2005,7 @@ extract_release() {
                 fi
 
                 rm -rf "$extract_dir"
+                INSTALL_SWAPPED=swapped
                 log_success "Updated in-place at ${INSTALL_DIR}"
                 return 0
             fi
@@ -1844,7 +2027,7 @@ extract_release() {
         while [ ! -d "$install_parent" ] && [ "$install_parent" != "/" ]; do
             install_parent=$(dirname "$install_parent")
         done
-        install_free_mb=$(df "$install_parent" 2>/dev/null | tail -1 | awk '{print int($4/1024)}')
+        install_free_mb=$(_fs_free_mb "$install_parent")
         [ -z "$install_free_mb" ] && install_free_mb=0
 
         swap_margin_mb=10
@@ -1920,6 +2103,8 @@ extract_release() {
         rm -rf "$extract_dir"
         exit 1
     fi
+    # shellcheck disable=SC2034  # read by main.sh (install_state_line)
+    INSTALL_SWAPPED=swapped
 
     # Phase 6: Restore config and settings
     # User's config always takes priority over bundled defaults so customizations
@@ -1931,10 +2116,9 @@ extract_release() {
     # Does a user config actually exist to restore?  Must match the candidate
     # chain the restore below walks, or the removal here outruns it.
     #
-    # ORIGINAL_INSTALL_EXISTS is not that test: it is set from `[ -d INSTALL_DIR ]`
-    # alone, and embedded targets keep logs and cache under the install dir
-    # (K1: /usr/data/helixscreen/{logs,cache}), so the directory routinely
-    # predates a first install with no config in it.
+    # The install dir existing is not that test: embedded targets keep logs and
+    # cache under it (K1: /usr/data/helixscreen/{logs,cache}), so the directory
+    # routinely predates a first install with no config in it.
     _have_restore_candidate=false
     if [ -n "${BACKUP_CONFIG:-}" ] && [ -s "$BACKUP_CONFIG" ]; then
         _have_restore_candidate=true
@@ -2061,11 +2245,14 @@ extract_release() {
         # dialog the user already dismissed (dismiss only rotates crash.txt to
         # crash_1.txt; it does not survive the .old round-trip). crash_history.json
         # is intentionally NOT pruned — it is the dedup store and should persist.
+        # .helix-fresh-install is install context, not user data: restoring a
+        # stale marker marks an update's restored config as freshly installed.
         $(file_sudo "${INSTALL_BACKUP}/config") rm -f \
             "${INSTALL_BACKUP}/config/crash.txt" \
             "${INSTALL_BACKUP}/config/"crash_*.txt \
             "${INSTALL_BACKUP}/config/crash_report.txt" \
-            "${INSTALL_BACKUP}/config/.crash_restart_count" 2>/dev/null || true
+            "${INSTALL_BACKUP}/config/.crash_restart_count" \
+            "${INSTALL_BACKUP}/config/.helix-fresh-install" 2>/dev/null || true
     fi
 
     # Restore any remaining user data from previous config/ (custom_images/,
@@ -2074,10 +2261,13 @@ extract_release() {
     # Uses [ ! -e ] instead of cp -n for BusyBox compatibility.
     # For directories that exist in both old and new installs (e.g. printer_database.d/),
     # merge at the file level so user additions are preserved alongside new bundled files.
+    # The /.* pass alongside the bare glob restores dotfiles (.disabled_services
+    # and any other config/.* state) that a bare glob silently skips.
     if [ -n "${INSTALL_BACKUP:-}" ] && [ -d "${INSTALL_BACKUP}/config" ]; then
-        for _item in "${INSTALL_BACKUP}/config"/*; do
+        for _item in "${INSTALL_BACKUP}/config"/* "${INSTALL_BACKUP}/config"/.*; do
             [ -e "$_item" ] || continue
             _base=$(basename "$_item")
+            case "$_base" in .|..) continue ;; esac
             if [ ! -e "${INSTALL_DIR}/config/${_base}" ]; then
                 # Item doesn't exist in new install — restore the whole thing
                 if $(file_sudo "${INSTALL_DIR}/config") cp -r "$_item" "${INSTALL_DIR}/config/${_base}" 2>/dev/null; then
@@ -2087,9 +2277,11 @@ extract_release() {
                 fi
             elif [ -d "$_item" ] && [ -d "${INSTALL_DIR}/config/${_base}" ]; then
                 # Both old and new have this directory — merge individual files
-                for _subitem in "$_item"/*; do
+                # (dotfiles included, same /.* pass as the outer loop)
+                for _subitem in "$_item"/* "$_item"/.*; do
                     [ -e "$_subitem" ] || continue
                     _subbase=$(basename "$_subitem")
+                    case "$_subbase" in .|..) continue ;; esac
                     if [ ! -e "${INSTALL_DIR}/config/${_base}/${_subbase}" ]; then
                         if $(file_sudo "${INSTALL_DIR}/config/${_base}") cp -r "$_subitem" "${INSTALL_DIR}/config/${_base}/${_subbase}" 2>/dev/null; then
                             log_info "Restored user data: config/${_base}/${_subbase}"
@@ -2167,11 +2359,233 @@ cleanup_stale_cache_dirs() {
 }
 
 # Remove backup of previous installation (call after service starts successfully)
+# Print the directory the operator's files are in right now.
+#
+# A migrating install is still at its old root when this runs and INSTALL_DIR is
+# an empty directory, so reading from INSTALL_DIR would find nothing and hand
+# the user a default configuration back.
+_config_source_dir() {
+    if [ -n "${MIGRATE_FROM_DIR:-}" ] && [ -d "$MIGRATE_FROM_DIR" ]; then
+        printf '%s\n' "$MIGRATE_FROM_DIR"
+    else
+        printf '%s\n' "$INSTALL_DIR"
+    fi
+}
+
+# Copy the operator's settings and env aside from a live install root.
+# Args: $1 = the directory holding the install being replaced
+backup_existing_config() {
+    _bec_src="$1"
+    [ -n "$_bec_src" ] && [ -d "$_bec_src" ] || return 0
+
+    # Newest name first, then the names older installs still carry.
+    if [ -f "${_bec_src}/config/settings.json" ]; then
+        BACKUP_CONFIG="${TMP_DIR}/settings.json.backup"
+        cp "${_bec_src}/config/settings.json" "$BACKUP_CONFIG"
+        log_info "Backed up existing configuration (from config/settings.json)"
+    elif [ -f "${_bec_src}/config/helixconfig.json" ]; then
+        BACKUP_CONFIG="${TMP_DIR}/settings.json.backup"
+        cp "${_bec_src}/config/helixconfig.json" "$BACKUP_CONFIG"
+        log_info "Backed up existing configuration (from config/helixconfig.json)"
+    elif [ -f "${_bec_src}/settings.json" ]; then
+        BACKUP_CONFIG="${TMP_DIR}/settings.json.backup"
+        cp "${_bec_src}/settings.json" "$BACKUP_CONFIG"
+        log_info "Backed up existing configuration (legacy root location)"
+    elif [ -f "${_bec_src}/helixconfig.json" ]; then
+        BACKUP_CONFIG="${TMP_DIR}/settings.json.backup"
+        cp "${_bec_src}/helixconfig.json" "$BACKUP_CONFIG"
+        log_info "Backed up existing configuration (legacy root location)"
+    fi
+
+    # helixscreen.env carries HELIX_LOG_LEVEL and other operator customizations.
+    if [ -f "${_bec_src}/config/helixscreen.env" ]; then
+        BACKUP_ENV="${TMP_DIR}/helixscreen.env.backup"
+        cp "${_bec_src}/config/helixscreen.env" "$BACKUP_ENV"
+        log_info "Backed up existing helixscreen.env"
+    fi
+}
+
+# Empty the directory the payload is about to occupy.
+# A platform whose PREVIOUS_STATE_DIR is its new INSTALL_DIR kept cache/ and
+# logs/ exactly where the payload now goes. Anything left there would be
+# extracted over and then deleted by the next update, so it all moves to
+# STATE_DIR first. Everything moves, not a known list of names: a directory
+# becoming a payload root has to be empty of state, whatever is in it.
+migrate_previous_state_dir() {
+    _mpsd_old="${PREVIOUS_STATE_DIR:-}"
+    _mpsd_new="${STATE_DIR:-}"
+
+    [ -n "$_mpsd_old" ] && [ -n "$_mpsd_new" ] || return 0
+    [ "$_mpsd_old" != "$_mpsd_new" ] || return 0
+    [ -d "$_mpsd_old" ] || return 0
+    # Only when the payload is actually taking this directory over.
+    [ "$_mpsd_old" = "$INSTALL_DIR" ] || return 0
+    # A runnable binary here means this is a payload, not state: the move has
+    # already happened and these entries belong to the install.
+    if [ -x "${_mpsd_old}/bin/helix-screen" ]; then
+        return 0
+    fi
+
+    mkdir -p "$_mpsd_new" 2>/dev/null || $SUDO mkdir -p "$_mpsd_new" || return 0
+    log_info "Moving state from ${_mpsd_old} to ${_mpsd_new}"
+
+    for _mpsd_entry in "$_mpsd_old"/* "$_mpsd_old"/.[!.]*; do
+        [ -e "$_mpsd_entry" ] || continue
+        _mpsd_name=$(basename "$_mpsd_entry")
+        _mpsd_dest="${_mpsd_new}/${_mpsd_name}"
+        # Never clobber: a half-finished move leaves both sides populated, and
+        # the older copy is still the operator's data.
+        if [ -e "$_mpsd_dest" ]; then
+            _mpsd_dest="${_mpsd_dest}.previous"
+            log_warn "${_mpsd_new}/${_mpsd_name} already exists; keeping the older copy as ${_mpsd_name}.previous"
+        fi
+        mv "$_mpsd_entry" "$_mpsd_dest" 2>/dev/null \
+            || $SUDO mv "$_mpsd_entry" "$_mpsd_dest" 2>/dev/null \
+            || log_warn "Could not move ${_mpsd_entry}"
+    done
+}
+
+# Rename a state root whose name has to change, payload not involved. This is
+# the AD5M's move to a dot-prefixed root: /data is that board's gcodes root,
+# so a plain-named state directory shows up in the print-file picker and the
+# vendor's own hidden directories (.mod, .thumbs) mark dot-prefixing as the
+# local convention. The app performs the same rename at startup, so this
+# covers the reinstall path and boxes the app's pass cannot reach.
+migrate_state_root() {
+    _mst_old="${PREVIOUS_STATE_ROOT:-}"
+    _mst_new="${STATE_ROOT:-}"
+
+    [ -n "$_mst_old" ] && [ -n "$_mst_new" ] || return 0
+    [ "$_mst_old" != "$_mst_new" ] || return 0
+    [ -d "$_mst_old" ] || return 0
+    # Only our own spelling, and only a same-parent rename: this must never
+    # touch a mount root or a directory some other package owns.
+    case "${_mst_old}:${_mst_new}" in
+        /*/helixscreen:/*/.helixscreen) ;;
+        *)
+            log_warn "Refusing unexpected state-root rename: $_mst_old -> $_mst_new"
+            return 0 ;;
+    esac
+    [ "$(dirname "$_mst_old")" = "$(dirname "$_mst_new")" ] || return 0
+
+    if [ -d "$_mst_new" ]; then
+        # Both exist: carry the known state subtrees across, never clobber.
+        for _mst_sub in cache logs; do
+            [ -d "${_mst_old}/${_mst_sub}" ] || continue
+            if [ ! -e "${_mst_new}/${_mst_sub}" ]; then
+                mv "${_mst_old}/${_mst_sub}" "${_mst_new}/${_mst_sub}" 2>/dev/null \
+                    || $SUDO mv "${_mst_old}/${_mst_sub}" "${_mst_new}/${_mst_sub}" 2>/dev/null \
+                    || log_warn "Could not move ${_mst_old}/${_mst_sub}"
+            fi
+        done
+        # The rest is either empty scaffolding or the operator's; rmdir takes
+        # only the empty case.
+        rmdir "$_mst_old" 2>/dev/null || $SUDO rmdir "$_mst_old" 2>/dev/null || true
+    else
+        mv "$_mst_old" "$_mst_new" 2>/dev/null \
+            || $SUDO mv "$_mst_old" "$_mst_new" 2>/dev/null \
+            || { log_warn "Could not move state root ${_mst_old}"; return 0; }
+        log_info "Moved state root ${_mst_old} -> ${_mst_new}"
+    fi
+    return 0
+}
+
+# The install at INSTALL_DIR is complete enough that an outgoing root may be
+# removed: the binary is runnable and the operator's config was carried. Both
+# have to pass before the outgoing tree stops being the device's only working
+# install. $1 names the kept root in the refusal messages.
+replacement_install_verifies() {
+    if [ ! -x "${INSTALL_DIR}/bin/helix-screen" ]; then
+        log_warn "Keeping ${1:-the old install}: ${INSTALL_DIR} has no runnable binary"
+        return 1
+    fi
+    if [ ! -f "${INSTALL_DIR}/config/settings.json" ]; then
+        log_warn "Keeping ${1:-the old install}: configuration was not carried over"
+        return 1
+    fi
+    return 0
+}
+
+# Remove the tree an install that has been replaced left behind. Gates: the
+# replacement verifies (above), the outgoing path is an install root (final
+# component exactly "helixscreen" - never a bare mount or data root), and it
+# is not where this run installed.
+remove_superseded_install_tree() {
+    _rsit_old="${1:-}"
+    [ -n "$_rsit_old" ] || return 0
+    [ "$_rsit_old" != "$INSTALL_DIR" ] || return 0
+    [ -d "$_rsit_old" ] || return 0
+    replacement_install_verifies "$_rsit_old" || return 0
+
+    case "$_rsit_old" in
+        */helixscreen) ;;
+        *)
+            log_warn "Refusing to remove unexpected install path: $_rsit_old"
+            return 0 ;;
+    esac
+
+    rm -rf "$_rsit_old" 2>/dev/null || $SUDO rm -rf "$_rsit_old" 2>/dev/null || true
+    log_success "Removed the previous install at ${_rsit_old}"
+}
+
+# Remove the tree a migration moved away from.
+# Runs after the service is up, so a failure at any earlier step leaves a
+# complete and bootable install at the old path.
+cleanup_migrated_install() {
+    [ -n "${MIGRATE_FROM_DIR:-}" ] || return 0
+    remove_superseded_install_tree "$MIGRATE_FROM_DIR"
+}
+
+# Remove the payload install the mod's previous default root
+# ($HOST_MOD_ROOT/.bin/helixscreen, inside the mod's git tree) left behind:
+# its tree on the host and the HOST-side init script an install at that root
+# wrote. Left in place, that init fires at boot beside this install's chroot
+# init and the two fight over the display - and its stop is name-based, so
+# stopping either instance kills both. The tree is tens of MB the mod's data
+# partition pays for until the mod's own OTA happens to reap it.
+#
+# Scope is exactly the one root our own installer used at that era - never a
+# discovered path, never the legacy standalone population
+# (payload_legacy_adopt_or_warn owns that one). The tree and the init are one
+# superseded install: both go, or both stay while the replacement at
+# INSTALL_DIR cannot be verified. Runs after the service is up, like
+# cleanup_migrated_install.
+cleanup_superseded_payload() {
+    [ "${HELIX_MOD_PAYLOAD:-}" = "1" ] || return 0
+    [ -n "${HOST_MOD_ROOT:-}" ] || return 0
+
+    _csp_old="${HOST_MOD_ROOT}/.bin/helixscreen"
+    [ "$_csp_old" != "$INSTALL_DIR" ] || return 0
+    replacement_install_verifies "the payload install at ${_csp_old}" || return 0
+
+    # Positive identification before an irreversible delete: the tree must
+    # carry our binary. Anything else inside the mod's tree belongs to the
+    # mod, and a tree already reaped by the mod's OTA leaves nothing to check.
+    if [ -d "$_csp_old" ] && [ ! -x "${_csp_old}/bin/helix-screen" ]; then
+        log_warn "Keeping ${_csp_old}: no HelixScreen payload found inside"
+        return 0
+    fi
+
+    remove_superseded_host_init "$HOST_MOD_ROOT"
+
+    if [ -d "$_csp_old" ]; then
+        remove_superseded_install_tree "$_csp_old"
+    fi
+    return 0
+}
+
 cleanup_old_install() {
-    # Keep .old as a last-resort recovery path if config wasn't restored.
-    # Without this guard, a failed Phase 6 + cleanup = permanent config loss.
-    if [ "$ORIGINAL_INSTALL_EXISTS" = true ] && [ ! -f "${INSTALL_DIR}/config/settings.json" ]; then
-        log_warn "Config not restored — keeping .old backup for recovery"
+    # Keep the backup as a last-resort recovery path if the old install had a
+    # config that did not come across. Without this guard, a failed Phase 6 +
+    # cleanup = permanent config loss. _have_restore_candidate is extract_release's
+    # record of whether that config existed; an old dir holding only logs and
+    # cache never had one, so its absence afterwards loses nothing.
+    if [ "${_have_restore_candidate:-}" = true ] && [ ! -f "${INSTALL_DIR}/config/settings.json" ]; then
+        if [ -n "${INSTALL_BACKUP:-}" ] && [ -d "$INSTALL_BACKUP" ]; then
+            log_warn "Config not restored: keeping ${INSTALL_BACKUP} for recovery"
+        else
+            log_warn "Config not restored, and no backup of the previous install remains"
+        fi
         return 0
     fi
 

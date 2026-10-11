@@ -46,7 +46,6 @@ class FilamentCatalogPickerModal : public Modal {
     void on_hide() override;
 
   private:
-    void apply_input_surface(); // re-assert dropdown input-surface after palette reapply
     void handle_select_button();
 
     friend struct FilamentPickerTestAccess;

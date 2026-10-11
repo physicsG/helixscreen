@@ -64,7 +64,10 @@ class EmptyFilamentColumnMenu : public BareContextMenu {
 
   protected:
     void on_created(lv_obj_t* menu) override {
-        for (const char* name : {"btn_load", "btn_unload", "btn_gate_select", "btn_gate_check"}) {
+        // btn_preload is bound to ams_slot_preload, which AmsState keeps across tests, so it
+        // is hidden here rather than left to that subject's current value.
+        for (const char* name : {"btn_load", "btn_unload", "btn_purge", "btn_gate_select",
+                                 "btn_gate_check", "btn_preload"}) {
             if (lv_obj_t* btn = lv_obj_find_by_name(menu, name))
                 lv_obj_add_flag(btn, LV_OBJ_FLAG_HIDDEN);
         }

@@ -12,7 +12,7 @@
        inside context_menu_card.xml:45 - so do NOT set name= on the instance below,
        the engine warns that it displaces the component's own name. -->
   <view name="context_backdrop" extends="context_menu_backdrop">
-    <context_menu_card title="Sensor Source" title_tag="Sensor Source">
+    <context_menu_card title="Sensor Source">
       <filament_source_row label="Auto" value="0"/>
       <filament_source_row label="Runout Sensor" value="1"/>
       <filament_source_row label="Toolhead Sensor" value="2"/>

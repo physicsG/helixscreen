@@ -28,15 +28,22 @@ void StaticSubjectRegistry::register_deinit(const char* name, std::function<void
     // Names identify a subject source, not a registration event. A source that is
     // torn down and rebuilt (PrintStatusWidget's DetailedFormatter, when the last
     // print-status widget leaves the dashboard and one is added back) re-registers
-    // under the same name, and appending would leave a stale callback closed over
-    // the previous instance to run alongside the live one. Drop the old entry and
-    // re-append, so the entry keeps the "last registered, first deinitialized"
-    // position deinit_all()'s reverse walk depends on.
+    // under the same name, and keeping both would leave a stale callback closed
+    // over the previous instance to run alongside the live one.
+    //
+    // Replace in place rather than re-appending. A slot is the source's position
+    // in registration order, and deinit_all()'s reverse walk depends on it to tear
+    // down late registrants (widgets) before the early ones whose subjects they
+    // observe. Re-appending moves whatever re-registers to the tail and therefore
+    // deinitializes it FIRST, so a core singleton that re-runs init_subjects() —
+    // a soft restart, a printer switch — would be torn down ahead of the widgets
+    // observing it, which is the ordering this registry exists to prevent.
     auto it = std::find_if(deinitializers_.begin(), deinitializers_.end(),
                            [name](const DeinitEntry& e) { return e.name == name; });
     if (it != deinitializers_.end()) {
-        deinitializers_.erase(it);
+        it->deinit_fn = std::move(deinit_fn);
         spdlog::trace("[StaticSubjectRegistry] Replacing existing entry: {}", name);
+        return;
     }
     deinitializers_.push_back({name, std::move(deinit_fn)});
     spdlog::trace("[StaticSubjectRegistry] Registered: {} (total: {})", name,
@@ -56,6 +63,16 @@ bool StaticSubjectRegistry::deinit_one(const char* name) {
     if (fn) {
         fn();
     }
+    return true;
+}
+
+bool StaticSubjectRegistry::unregister(const char* name) {
+    auto it = std::find_if(deinitializers_.begin(), deinitializers_.end(),
+                           [name](const DeinitEntry& e) { return e.name == name; });
+    if (it == deinitializers_.end()) {
+        return false;
+    }
+    deinitializers_.erase(it);
     return true;
 }
 

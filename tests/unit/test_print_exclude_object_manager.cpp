@@ -86,7 +86,7 @@ class ExcludeManagerFixture {
         api = std::make_unique<MoonrakerAPI>(mock_client, state);
         manager = std::make_unique<PrintExcludeObjectManager>(api.get(), state, nullptr);
         manager->init();
-        // observe_int_sync defers an initial-value callback through UpdateQueue
+        // observe<int> defers an initial-value callback through UpdateQueue
         // (per L048 / observer_factory.h). Drain it now so the print-state
         // watchdog's STANDBY=0 fire-on-subscribe doesn't clear test-injected
         // awaiting_confirmation_ entries on the first real drain.
@@ -135,7 +135,7 @@ TEST_CASE_METHOD(ExcludeManagerFixture,
     REQUIRE(manager->get_excluded_objects().count("Part_1") == 0);
 
     // Klipper pushes a status update via Moonraker subscription: Part_1 is now excluded.
-    state.set_excluded_objects({"Part_1"});
+    state.excluded_objects_state().set_excluded_objects({"Part_1"});
     UpdateQueue::instance().drain();
 
     SECTION("object moves into confirmed excluded set") {
@@ -156,7 +156,7 @@ TEST_CASE_METHOD(ExcludeManagerFixture,
     REQUIRE_FALSE(
         PrintExcludeObjectManagerTestAccess::is_awaiting_confirmation(*manager, "Foreign_Part"));
 
-    state.set_excluded_objects({"Foreign_Part"});
+    state.excluded_objects_state().set_excluded_objects({"Foreign_Part"});
     UpdateQueue::instance().drain();
 
     REQUIRE(manager->get_excluded_objects().count("Foreign_Part") == 1);
@@ -171,7 +171,7 @@ TEST_CASE_METHOD(ExcludeManagerFixture,
     // silently forget the object.
     PrintExcludeObjectManagerTestAccess::add_awaiting_confirmation(*manager, "Part_B");
 
-    state.set_excluded_objects({"Part_A"});
+    state.excluded_objects_state().set_excluded_objects({"Part_A"});
     UpdateQueue::instance().drain();
 
     REQUIRE(manager->get_excluded_objects().count("Part_A") == 1);
@@ -183,7 +183,7 @@ TEST_CASE_METHOD(ExcludeManagerFixture,
                  "status subscription removes entries Klipper dropped (RESET_EXCLUDE)",
                  "[exclude_object][manager][regression]") {
     // Klipper confirms two exclusions, promoting them into the local confirmed set.
-    state.set_excluded_objects({"Part_A", "Part_B"});
+    state.excluded_objects_state().set_excluded_objects({"Part_A", "Part_B"});
     UpdateQueue::instance().drain();
     REQUIRE(manager->get_excluded_objects().count("Part_A") == 1);
     REQUIRE(manager->get_excluded_objects().count("Part_B") == 1);
@@ -192,14 +192,14 @@ TEST_CASE_METHOD(ExcludeManagerFixture,
         // RESET_EXCLUDE macro / print-end reset drops everything from Klipper's set.
         // Our local cache must follow, otherwise the gcode viewer keeps ghosting objects
         // that Klipper will happily print again on the next run.
-        state.set_excluded_objects({});
+        state.excluded_objects_state().set_excluded_objects({});
         UpdateQueue::instance().drain();
 
         REQUIRE(manager->get_excluded_objects().empty());
     }
 
     SECTION("partial drop removes just the dropped entry") {
-        state.set_excluded_objects({"Part_A"});
+        state.excluded_objects_state().set_excluded_objects({"Part_A"});
         UpdateQueue::instance().drain();
 
         REQUIRE(manager->get_excluded_objects().count("Part_A") == 1);
@@ -210,7 +210,7 @@ TEST_CASE_METHOD(ExcludeManagerFixture,
         // An object with a dispatched-but-unconfirmed RPC must not be prematurely
         // synthesized into excluded_objects_ just because Klipper's set is empty.
         PrintExcludeObjectManagerTestAccess::add_awaiting_confirmation(*manager, "InFlight");
-        state.set_excluded_objects({});
+        state.excluded_objects_state().set_excluded_objects({});
         UpdateQueue::instance().drain();
 
         REQUIRE(manager->get_excluded_objects().empty());
@@ -246,7 +246,7 @@ TEST_CASE_METHOD(ExcludeManagerFixture,
     }
 
     // Simulate Klipper eventually confirming via the status subscription.
-    state.set_excluded_objects({"LateExclude"});
+    state.excluded_objects_state().set_excluded_objects({"LateExclude"});
     UpdateQueue::instance().drain();
 
     SECTION("late status arrival still promotes to confirmed") {
@@ -357,7 +357,7 @@ TEST_CASE_METHOD(ExcludeManagerFixture, "confirmed exclusions survive the watchd
     // Dispatch, Klipper confirms, THEN the user cancels. The confirmed exclusion
     // must stay in excluded_objects_ — only un-confirmed awaiting entries get dropped.
     PrintExcludeObjectManagerTestAccess::add_awaiting_confirmation(*manager, "ConfirmedPart");
-    state.set_excluded_objects({"ConfirmedPart"});
+    state.excluded_objects_state().set_excluded_objects({"ConfirmedPart"});
     UpdateQueue::instance().drain();
     REQUIRE(manager->get_excluded_objects().count("ConfirmedPart") == 1);
 
@@ -374,7 +374,7 @@ TEST_CASE_METHOD(ExcludeManagerFixture,
     // must reset, otherwise a stale awaiting entry could promote itself when the
     // next print's first status push arrives.
     PrintExcludeObjectManagerTestAccess::add_awaiting_confirmation(*manager, "StalePart");
-    state.set_excluded_objects({"Confirmed"});
+    state.excluded_objects_state().set_excluded_objects({"Confirmed"});
     UpdateQueue::instance().drain();
     REQUIRE(manager->get_excluded_objects().count("Confirmed") == 1);
 

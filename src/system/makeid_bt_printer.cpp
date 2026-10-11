@@ -8,6 +8,7 @@
 
 #include "bluetooth_loader.h"
 #include "bt_print_utils.h"
+#include "helix_thread.h"
 #include "label_printer_settings.h"
 #include "log_redact.h"
 #include "lvgl/src/others/translation/lv_translation.h"
@@ -204,14 +205,14 @@ void MakeIdBluetoothPrinter::print(const LabelBitmap& bitmap, const LabelSize& s
                                    PrintCallback callback) {
     auto& loader = helix::bluetooth::BluetoothLoader::instance();
     if (!loader.is_available()) {
-        helix::ui::queue_update([callback]() {
+        helix::ui::queue_update("MakeIdBluetoothPrinter::print", [callback]() {
             if (callback)
                 callback(false, lv_tr("Bluetooth not available"));
         });
         return;
     }
     if (mac_.empty()) {
-        helix::ui::queue_update([callback]() {
+        helix::ui::queue_update("MakeIdBluetoothPrinter::print", [callback]() {
             if (callback)
                 callback(false, lv_tr("Bluetooth device not configured"));
         });
@@ -235,7 +236,7 @@ void MakeIdBluetoothPrinter::print(const LabelBitmap& bitmap, const LabelSize& s
     // ARM (AD5M/CC1) throws std::system_error which aborts with std::terminate
     // if it escapes an LVGL event frame (#724, #837, [L083]).
     try {
-        std::thread([mac, job = std::move(job), callback]() {
+        helix::make_thread([mac, job = std::move(job), callback]() {
             std::lock_guard<std::mutex> lock(s_print_mutex);
             auto& loader = helix::bluetooth::BluetoothLoader::instance();
             bool success = false;
@@ -316,14 +317,14 @@ void MakeIdBluetoothPrinter::print(const LabelBitmap& bitmap, const LabelSize& s
 
             if (!error.empty())
                 spdlog::error("MakeID BT: {}", error);
-            helix::ui::queue_update([callback, success, error]() {
+            helix::ui::queue_update("MakeIdBluetoothPrinter::print", [callback, success, error]() {
                 if (callback)
                     callback(success, error);
             });
         }).detach();
     } catch (const std::system_error& e) {
         spdlog::error("MakeID BT: failed to spawn print thread: {}", e.what());
-        helix::ui::queue_update([callback]() {
+        helix::ui::queue_update("MakeIdBluetoothPrinter::print", [callback]() {
             if (callback)
                 callback(false, lv_tr("System busy — please try again"));
         });

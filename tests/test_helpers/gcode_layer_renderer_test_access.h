@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <thread>
+#include <utility>
 
 namespace helix {
 namespace gcode {
@@ -44,6 +45,15 @@ class GCodeLayerRendererTestAccess {
         return true;
     }
 
+    /// Block until a ghost build that render() started has exited. Joins the
+    /// worker instead of polling its flag against a budget, which a loaded
+    /// machine can outlast. No-op when no worker is running.
+    static void join_ghost_build(GCodeLayerRenderer& renderer) {
+        if (renderer.ghost_thread_.joinable()) {
+            renderer.ghost_thread_.join();
+        }
+    }
+
     /// True when the pass ran to completion rather than bailing out early.
     static bool ghost_completed(const GCodeLayerRenderer& renderer) {
         return renderer.ghost_thread_ready_.load();
@@ -68,8 +78,60 @@ class GCodeLayerRendererTestAccess {
     /// Private for that reason; a test asking "which color is tool N wearing
     /// now" - after a slicer palette, after AMS overrides, after a retraction -
     /// has no other way to see the answer.
+    static const SelectionState& selection(const GCodeLayerRenderer& renderer) {
+        return renderer.selection_;
+    }
+
     static const GCodeColorPalette& tool_palette(const GCodeLayerRenderer& renderer) {
         return renderer.tool_palette_;
+    }
+
+    /// The fit shape auto_fit() applies. Private because the renderer re-fits
+    /// itself when it changes; a test asking "was the viewer's framing pushed
+    /// to this renderer" has no other way to see the answer.
+    static FitFraming framing(const GCodeLayerRenderer& renderer) {
+        return renderer.framing_;
+    }
+
+    /// Drive one solid-cache batch directly. render() only reaches this path
+    /// after warmup frames with a live canvas; a budget test wants the batch
+    /// in isolation, with layers_per_frame_ pinned high so a wall-clock box
+    /// is the only thing that can stop the batch early.
+    static int render_solid_batch(GCodeLayerRenderer& renderer, int from_layer, int to_layer,
+                                  int width, int height) {
+        renderer.ensure_cache(width, height);
+        return renderer.render_layers_to_cache(from_layer, to_layer);
+    }
+
+    /// Pin the adaptive layer count. render_layers_to_cache reads it per call;
+    /// adaptation only runs from render(), which the direct-call tests skip.
+    static void pin_layers_per_frame(GCodeLayerRenderer& renderer, int layers) {
+        renderer.layers_per_frame_ = layers;
+    }
+
+    /// Layers the ghost worker has drawn and the layers its pass will visit.
+    static std::pair<int, int> ghost_layer_progress(const GCodeLayerRenderer& renderer) {
+        return {renderer.ghost_layers_done_.load(), renderer.ghost_layers_total_.load()};
+    }
+
+    /// Put the worker's shared state where a running pass would have it, so the
+    /// progress getter can be read mid-build without racing a real worker.
+    static void stage_running_ghost(GCodeLayerRenderer& renderer, int done, int total) {
+        renderer.ghost_thread_ready_.store(false);
+        renderer.ghost_thread_running_.store(true);
+        renderer.ghost_layers_done_.store(done);
+        renderer.ghost_layers_total_.store(total);
+    }
+
+    static void clear_staged_ghost(GCodeLayerRenderer& renderer) {
+        renderer.ghost_thread_running_.store(false);
+    }
+
+    /// Switch the projection. Production always draws FRONT; the pick tests use
+    /// TOP_DOWN so a click can be named in plain XY millimetres.
+    static void set_view_mode(GCodeLayerRenderer& renderer, ViewMode mode) {
+        renderer.view_mode_.store(static_cast<int>(mode), std::memory_order_relaxed);
+        renderer.bounds_valid_ = false;
     }
 
     /// The per-segment draw gate, private because every draw path consults it

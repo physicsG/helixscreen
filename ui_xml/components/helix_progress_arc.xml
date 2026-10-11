@@ -4,10 +4,10 @@
 <!--
   Helix Progress Arc — shared lv_arc with proportional stroke thickness.
 
-  Encapsulates the common arc styling we used to repeat across
-  print_status_detailed_active, fan_arc_core, ams_loaded_card, and
-  clog_meter_page (track color, indicator color, rounded ends, no
-  bg/border/knob), plus the 5-tier diameter-driven thickness styles.
+  Encapsulates the common arc styling shared by
+  print_status_detailed_active, fan_arc_core and ams_loaded_card (track
+  color, indicator color, rounded ends, no bg/border/knob), plus the 5-tier
+  diameter-driven thickness styles.
 
   Pair with helix::ui::attach_progress_arc() (include/ui_progress_arc.h)
   to wire automatic resize-to-square + thickness tier publication.

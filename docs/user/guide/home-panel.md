@@ -52,11 +52,11 @@ Your dashboard can have **multiple pages** of widgets — just like home screens
 
 - **Swipe left or right** anywhere on the widget grid to move between pages
 - **Dot indicators** at the bottom of the screen show which page you're on and how many pages you have
-- If you only have one page, the dots and swiping are hidden — it works exactly like a single-page dashboard
+- If you only have one page, the dots are hidden, in Edit Mode too. Swiping still works for one thing: the screen to the right of your page holds the **Add page** tile (see below), and you can swipe over to it
 
 ### The Main Page
 
-One page is designated as the **main page** (the first page by default). This is the page shown when you first connect to your printer or navigate to the Home panel.
+One page is designated as the **main page** (the first page by default). This is the page shown when you first connect to your printer.
 
 **Home button behavior:**
 
@@ -66,15 +66,32 @@ One page is designated as the **main page** (the first page by default). This is
 
 ### Adding a Page
 
+**The easy way: the Add page tile.** A tile with a **+** sits one swipe past your last page, labelled **Add page**.
+
+1. Swipe to your last page, then one more: the **Add page** tile slides in
+2. Tap the **+**. The new page is created right away and you land on it, empty and ready for widgets (see [Adding a Widget](#adding-a-widget))
+
+You can stay in Edit Mode or not - the tile and its + work either way.
+
+**By dragging a widget:** a new page also starts with a widget on it, when you drag one past the edge of the first or last page.
+
 1. Enter **Edit Mode** (long-press the widget grid)
-2. Swipe to the **last page** — a **"+" tile** appears
-3. Tap the **"+"** to create a new empty page
-4. You can have up to **8 pages** maximum
-5. Exit Edit Mode and start adding widgets to your new page
+2. Pick up a widget (see [Moving a Widget](#moving-a-widget)) and carry it across the right edge of each page until you are on your **last page**
+3. Keep going past the right edge of your last page: an empty page slides in, with the widget still under your finger
+4. Drop the widget anywhere on it. The new page is created past the last one, with the widget where you dropped it. Drag back instead and no page is created
+5. Add more widgets to the new page (see [Adding a Widget](#adding-a-widget))
+
+At the **left edge of your first page** nothing slides in; the page is made when you let go. Drag the widget until most of it is past the left edge of your first page (over the navigation bar, in landscape) and release. The new page is created **before** your first one, with the widget at its left side, and every other page shifts one to the right with all its widgets.
+
+Swiping never takes you past your last page, except to the Add page tile: the empty page slides in only while you drag a widget onto it. If the widget you dragged was the last one on its page, that page is removed as the new one is created (see [Moving a Widget to Another Page](#moving-a-widget-to-another-page)).
 
 ### Page Limit
 
-The dashboard supports up to **8 pages**. Once you reach the limit, the "+" tile no longer appears.
+The dashboard supports up to **8 pages**. At the limit there is no Add page tile to swipe to, and dragging a widget past the edge of your first or last page creates nothing.
+
+### Deleting a Page
+
+While in Edit Mode, any page other than the main page shows a **red trash button** in its top-right corner (it appears only when you have more than one page). Tap it, confirm, and the page is removed along with every widget on it. The main page has no delete button.
 
 ---
 
@@ -82,9 +99,9 @@ The dashboard supports up to **8 pages**. Once you reach the limit, the "+" tile
 
 Edit Mode is how you customize your dashboard layout. While in Edit Mode, all normal widget interactions (tapping to open overlays, etc.) are disabled so you can freely rearrange things.
 
-> **Edit Mode is on by default.** If it triggers accidentally when a finger rests on the screen (common on a tablet lying flat), you have two options: turn it off entirely with **Allow Home Screen Editing** under **Settings → System → Touch & Input**, or raise the **Long Press Time** slider in the same page so a longer hold is required. Both take effect immediately.
+> **Edit Mode is on by default.** If it triggers accidentally when a finger rests on the screen (common on a tablet lying flat), you have two options: turn it off entirely with **Allow Home Screen Editing** under **Settings → Touch & Input**, or raise the **Long Press Time** slider in the same page so a longer hold is required. Both take effect immediately.
 
-**Page swiping in Edit Mode:** Swiping between pages is disabled while in Edit Mode so you can drag widgets without accidentally changing pages. The one exception is swiping past the last page to reach the "+" add-page tile. When you exit Edit Mode, normal page swiping is re-enabled.
+**Page swiping in Edit Mode:** Swiping between pages works in Edit Mode just as it does outside it: between your pages, plus the Add page tile past your last one, and never further. Swiping pauses from the moment your finger lands on the selected widget until you lift it, while you drag or resize a widget, and while the Widget Catalog is open. To take a widget to another page, or to a new page before your first or past your last one, drag it across the page border - see [Moving a Widget to Another Page](#moving-a-widget-to-another-page).
 
 ### Entering Edit Mode
 
@@ -94,7 +111,7 @@ Edit Mode is how you customize your dashboard layout. While in Edit Mode, all no
 - **Corner brackets** appear on the widget under your finger, indicating it's selected
 - All normal widget tap actions are disabled — you can touch anything without triggering it
 
-The widget you long-pressed is automatically selected and ready to drag. You can start moving it immediately without lifting your finger.
+The widget you long-pressed is selected, not picked up, however long you keep holding. To move it, lift your finger and press it again.
 
 ![Edit Mode — widget selected with gear and trash icons, toolbar at top](../../images/user/home-edit-mode.png)
 
@@ -104,23 +121,34 @@ The widget you long-pressed is automatically selected and ready to drag. You can
 - The corner brackets **pulse** gently to indicate the active selection
 - **Tap empty space** to deselect the current widget
 - Only one widget can be selected at a time
+- Pressing a widget that is not selected only selects it, even if your finger then slides: a slide across the grid swipes pages rather than dragging a widget
 
 ### Moving a Widget
 
-1. **Select** a widget by tapping it (or it's auto-selected when you enter Edit Mode)
-2. **Press and drag** the widget to a new position
+1. **Select** a widget by tapping it (the widget you long-pressed to enter Edit Mode is already selected)
+2. **Press it again and drag** it to a new position. You can also skip the tap: **press and hold** any widget for about half a second to pick it up, then drag
 3. As you drag, a **snap preview** appears showing where the widget will land:
    - **Blue/accent preview** = valid drop position
-   - **Red preview** = invalid position (would overlap another widget or go off-grid)
-4. **Release** to drop the widget — it snaps into the grid position with a smooth animation
-5. If the position is invalid, the widget returns to its original spot
+   - **Red preview** = invalid position (would overlap another widget)
+   - Carrying a widget past the edge of the grid doesn't make it invalid: the preview stays at the nearest position inside the grid
+4. **Release** to drop the widget - it lands in the grid position the preview showed
+5. If the position is invalid, the widget returns to its original spot and stays selected
 
-A faint outline stays at the widget's original position while dragging so you can see where it came from.
+### Moving a Widget to Another Page
+
+1. Start dragging a widget
+2. Carry it past the left or right edge of the page until most of the widget is over the border, or hold your finger near the edge of the widget area for a moment (in landscape, the left edge is the one beside the navigation bar)
+3. The neighbouring page slides in, with the widget still under your finger. At the left edge of your first page there is no page to slide in: letting go there creates a new page in front (see [Adding a Page](#adding-a-page))
+4. Drop the widget where you want it
+
+**Creating a page by dropping:** drag a widget past your last page and an empty page slides in. Drop the widget anywhere on it and the page is created, with the widget where you dropped it. Drag back instead and no page is created. At the **left edge of your first page** no page slides in: release the widget with most of it past that edge and a new page is created **before** your first one, with the widget at its left side. At the 8-page limit neither edge creates a page.
+
+**Empty pages remove themselves:** when a page's last widget is moved to another page or removed, the empty page is deleted from your layout. The main page is never removed this way. A page that still holds widgets greyed out because their hardware isn't detected is not empty, and stays.
 
 
 ### Resizing a Widget
 
-Not all widgets are resizable — some (like Power and Shutdown) are always 1x1. For widgets that support resizing:
+Almost every widget is resizable. **Print Controls** keeps its fixed 2x1 size and **Power** keeps a one-cell minimum; everything else can be made bigger or smaller within the sizes in the tables below:
 
 1. **Select** the widget by tapping it
 2. Look for **thin edge lines** along the sides of the selected widget — these are the resize handles
@@ -138,19 +166,21 @@ Some widgets adapt their content based on size. For example, the Digital Clock s
 
 ### Snapping and half cells
 
-Many widgets snap to whole cells when you drag or resize them. The ones that show more content when you give them a bit more room can go finer, in half-cell steps:
+Widgets place and resize in half-cell steps. What varies is which axes a widget takes those steps on:
 
 | Widget | What it can do |
 |--------|----------------|
 | **Print Status**, **Camera**, **Printer Image**, **Temperature Graph**, **Tips**, **Job Queue**, **Print Stats**, **Multi-Filament System Status**, **Active Spool**, **Nozzle Temperatures**, **Temperatures**, **Fan Speeds**, **Tool Switcher**, **Clog Detection**, **Digital Clock** | Move **and resize** in half-cell steps on **both** axes - so 1.5x1 and 2x2.5 are real sizes |
-| **Preheat**, **Fan**, **Temperature Sensors**, **Macro Button** | Half-cell steps **across** only - useful when a long fan, sensor, or macro name is getting cut off |
-| **Shutdown/Reboot**, **Lock Screen**, **Firmware Restart**, **LED Controls** | Stay one cell in size, but can be **positioned** half a cell across, so a row of them can sit between the main columns |
+| **Preheat**, **Macro Button** | Half-cell steps **across** only - useful when a long macro name is getting cut off |
+| **Network**, **LED Light**, **LED Controls**, **Filament Sensor**, **Notifications**, **G-code Console**, **Macros**, **Motion**, **Bypass**, **Fan**, **Temperature Sensors**, the single **Nozzle**, **Bed** and **Chamber** temperature tiles, **Shutdown/Reboot**, **Lock Screen**, **Firmware Restart** | Move **and resize** in half-cell steps on both axes. These are the centred-icon tiles: they start at half a cell wide by one cell tall and grow as large as you like, stepping their icon and text up to whatever the new size carries |
+| **Power** | Resizes in half-cell steps like the tiles above, but never below one whole cell - its round device badge does not shrink |
+| **Humidity**, **Width Sensor** | Snap to whole cells in both directions (1x1 up to 2x2) |
 
-Everything else - the small tiles that are just an icon and a short label, like **Network**, **LED Light**, **Filament Sensor**, **Humidity**, and the individual temperature tiles - snaps to whole cells. An in-between size would only add empty space around a centred icon, and whole-cell snapping is easier to hit with a finger.
+On the smallest panels (about 480 pixels wide or less), half-cell steps are not offered at all: every widget snaps to whole cells there, because half a cell cannot carry an icon and a reading side by side.
 
-You don't have to remember which is which. The dot grid tells you: **whole-cell dots are always drawn, and the smaller, fainter half-cell dots in between appear only while a widget that can use them is selected** — and only on the axis it can use them on. If you see the extra dots, you can snap to them. If you don't, the widget you have selected snaps to whole cells.
+The floor across the grid: no widget goes below half a cell wide by one cell tall, and the height floor is one whole cell for every widget. Some of the bigger widgets - **Preheat**, **Print Status**, **Print Controls**, **Job Queue**, **Clog Detection** - have a two-cell minimum width.
 
-No widget can be made smaller than one whole cell, whatever its snapping.
+You don't have to remember which is which. The dot grid tells you: **whole-cell dots are always drawn, and the smaller, fainter half-cell dots in between appear only while a widget that can use them is selected** - and only on the axis it can use them on. If you see the extra dots, you can snap to them. If you don't, the widget you have selected snaps to whole cells.
 
 Half-cell sizes are also why the Widget Catalog occasionally shows a size like "1.5x1" on a badge.
 
@@ -159,18 +189,21 @@ Half-cell sizes are also why the Widget Catalog occasionally shows a size like "
 
 In Edit Mode there are two ways to open the Widget Catalog:
 
-- Tap the **+** button at the top of the navigation bar
+- Tap the **+** button at the start of the navigation bar (the navigation bar runs along the bottom of the screen in portrait)
 - **Long-press an empty area** of the grid — this also tells HelixScreen where you want the widget to go
 
 **The Widget Catalog** opens on a list of **5 categories** - Print & Status, Temperature & Cooling, Filament, Controls, and System, each showing how many widgets it holds. Tap a category to see the widgets inside it. A **back button** in the header returns you to the category list, so you can browse another category without closing the catalog.
+
+A **search box** at the top of the catalog matches widget names and descriptions. Typing switches the list to the matching widgets, wherever their category; clear the box to get the category list back.
+
+Widgets this printer cannot use (missing hardware, wrong platform) sit in their own **Unavailable on this printer** section at the bottom of the category list, each with the reason in brackets after its name. Inside search results they appear inline, dimmed with the same reason. A category whose every widget is unavailable is hidden from the category list rather than shown empty.
 
 Inside a category, each widget entry shows:
 - Widget name and description
 - Size badge in cells (e.g., "2x1" means two cells wide by one tall)
 - Widgets already on your dashboard are **dimmed** and labeled "Placed"
-- Widgets whose hardware isn't detected are **dimmed** too, with the reason in brackets after the name
 
-Tap any available widget to add it. HelixScreen places it near where you long-pressed, or finds the best available spot if that area is occupied. If the grid is completely full, you'll need to remove a widget first.
+Tap any available widget to add it. HelixScreen places it near where you long-pressed, or finds the best available spot if that area is occupied. If there's no room at the widget's usual size, HelixScreen tries smaller sizes, down to the widget's minimum, before telling you there isn't enough room.
 
 The **Reset** button in the catalog header resets your whole dashboard — see [Resetting to Defaults](#resetting-to-defaults).
 
@@ -181,10 +214,10 @@ The **Reset** button in the catalog header resets your whole dashboard — see [
 ### Removing a Widget
 
 1. **Select** the widget you want to remove
-2. A **trash icon** appears — drag the widget to the trash, or tap the delete button
+2. A **trash icon** appears at the widget's upper-right corner - tap it
 3. The widget is removed from your grid
 
-Removing a widget doesn't delete any data — you can always add it back from the Widget Catalog.
+Removing a widget you can add only once keeps its settings, so adding it back from the Widget Catalog brings them back. A widget you can add more than once, like Fan, Macro Button, or LED Light, is added as a new copy each time, and removing a copy you added deletes that copy along with its settings.
 
 ![Widget selected with trash icon in upper-right corner](../../images/user/home-widget-trash.png)
 
@@ -198,14 +231,14 @@ Some widgets have settings you can change directly from Edit Mode. When you sele
 |--------|--------------------------|
 | **Temperatures** | Toggles between Stack and Carousel display mode |
 | **Fan Speeds** | Toggles between Stack and Carousel display mode |
-| **Temperature Sensors** | Toggles between single-sensor and Carousel display mode |
+| **Temperature Sensors** | Opens the sensor list: tick one sensor for the single view or several for the Carousel, and pick an icon |
 | **Fan** | Opens the fan picker — choose which fan to monitor |
 | **Temperature Graph** | Opens a configuration modal — toggle sensors on/off and customize series colors |
 | **Macro Button** | Opens the config modal — pick the macro, its icon and color, and whether running it asks for confirmation |
 | **Print Status** | Opens the section picker — choose which sections to show |
 | **Filament Sensor** | Opens the sensor source picker - choose which sensor the tile follows: Auto, Runout, Toolhead, or Entry |
 | **Power** | Opens the device picker — choose which power device to bind |
-| **Camera** | Opens the camera configuration modal — set rotation and flip |
+| **Camera** | Opens the camera configuration modal - pick which webcam the widget shows (Automatic, or one of your printer's named webcams), and set rotation and flip |
 | **Clog Detection** | Opens the Clog Detection config modal — set detection source, mode, and thresholds |
 
 **To configure a widget:**
@@ -234,14 +267,14 @@ The default layout is authored per screen shape rather than being one arrangemen
 
 ### Exiting Edit Mode
 
-- Tap the **Done** button in the toolbar
-- Or **navigate away** to any other panel — Edit Mode exits automatically and saves your changes
+- Tap the **Done** button in the navigation bar
+- The other navigation buttons are disabled while you edit. If something else takes you off the Home panel, Edit Mode exits automatically and saves your changes
 
 ---
 
 ## Available Widgets
 
-> **Sizes** are listed as columns x rows. For example, "2x1" means 2 columns wide and 1 row tall.
+> **Sizes** are listed as columns x rows. For example, "2x1" means 2 columns wide and 1 row tall. A width of "0.5" means half a cell, and "Full grid" means the widget can be stretched across the whole dashboard.
 
 These are the same 5 groups the Widget Catalog uses on the device.
 
@@ -249,11 +282,11 @@ These are the same 5 groups the Widget Catalog uses on the device.
 
 | Widget | Description | Default | Min | Max | Resizable | Hardware Required |
 |--------|-------------|---------|-----|-----|-----------|-------------------|
-| **Printer Image** | Your printer's photo. Tap to open the Printer Manager overlay where you can change the name, image, and see hardware info. | 2x2 | 1x1 | 4x3 | Yes | — |
-| **Print Status** | Tracks the print job in all three of its states — idle (pick a file), preparing (pre-print steps with a progress bar), and printing (filename, percentage, ETA, elapsed time). Tap opens the full Print Status overlay whenever a job is preparing or printing, or the file browser when idle. | 2x2 | 2x1 | Full width x3 | Yes | — |
+| **Printer Image** | Your printer's photo, with live chips for the heaters, part fan and light while they are in use (see [Status Chips on the Printer Image](#status-chips-on-the-printer-image)). Tap a chip for that part's controls, or the picture itself to open the Printer Manager overlay where you can change the name, image, and see hardware info. | 2x2 | 1x1 | 4x3 | Yes | — |
+| **Print Status** | Tracks the print job in all three of its states - idle (pick a file), preparing (pre-print steps with a progress bar), and printing (filename, percentage, ETA, elapsed time). Pauses scheduled in the G-code (M600, PAUSE and friends) show as ticks on the progress bar and arc, so you can see a filament change coming. Tap opens the full Print Status overlay whenever a job is preparing or printing, or the file browser when idle. | 2x2 | 2x1 | Full width x3 | Yes | — |
 | **Print Controls** | Pause, resume, and stop buttons for the running print, right on the dashboard. | 2x1 | 2x1 | 2x1 | No | — |
 | **Print Stats** | Print history statistics — total prints, success rate, and total print time. Tap to open the full print history overlay. | 2x2 | 2x1 | 3x2 | Yes | — |
-| **Job Queue** | Shows the number of queued print jobs. Tap to open the Job Queue Manager modal (see [Job Queue Manager](#job-queue-manager) below). | 2x2 | 2x1 | 4x3 | Yes | — |
+| **Job Queue** | Shows the number of queued print jobs. Tap to open the Job Queue Manager modal (see [Job Queue Manager](#job-queue-manager) below). | 2x2 | 2x2 | 4x3 | Yes | — |
 
 ![The Print Status widget during pre-print: current step, progress bar and ETA](../../images/screenshot-preparing-card.png)
 | **Camera** | Live webcam feed from your MJPEG stream. Tap to go fullscreen. Automatically detects webcams configured in Moonraker. See [Camera Widget](#camera-widget) below for setup tips. | 2x2 | 1x1 | 4x3 | Yes | Webcam configured |
@@ -262,16 +295,16 @@ These are the same 5 groups the Widget Catalog uses on the device.
 
 | Widget | Description | Default | Min | Max | Resizable | Hardware Required |
 |--------|-------------|---------|-----|-----|-----------|-------------------|
-| **Nozzle Temperature** | Live nozzle temperature for the active extruder, with an animated heating icon that pulses when the heater is active. Tap to open the temperature graph overlay. (Singular — shows one nozzle. For all extruders at once, use **Nozzle Temperatures** below.) | 1x1 | 1x1 | 2x2 | Yes | — |
-| **Nozzle Temperatures** | Shows **all** extruder temperatures at once, each as a labeled row with current and target readings color-coded by state (green at-temp, red heating, blue cooling, gray off), plus a bed row at the bottom. On multi-tool printers each extruder gets its own row, labeled "T0", "T1", … (or "Nozzle 1", "Nozzle 2", … at wider sizes). Tap a nozzle row to open the nozzle temperature graph, or the bed row for the bed graph. (Plural — for single-extruder printers the singular **Nozzle Temperature** widget is simpler.) | 1x2 | 1x1 | 2x3 | Yes | — |
-| **Bed Temperature** | Live bed temperature with current and target readings. Tap to open the temperature graph overlay. | 1x1 | 1x1 | 2x2 | Yes | — |
-| **Chamber Temperature** | Live chamber temperature with current and target readings, shown with a chamber icon and an animated heating indicator. Tap to open the temperature graph overlay focused on the chamber. Only available on printers with a chamber temperature sensor or heater. | 1x1 | 1x1 | 2x2 | Yes | Chamber sensor or heater |
+| **Nozzle Temperature** | Live nozzle temperature for the active extruder, with an animated heating icon that pulses when the heater is active. Tap to open the temperature graph overlay. (Singular - shows one nozzle. For all extruders at once, use **Nozzle Temperatures** below.) | 1x1 | 0.5x1 | Full grid | Yes | — |
+| **Nozzle Temperatures** | Shows **all** extruder temperatures at once, each as a labeled row with current and target readings color-coded by state (green at-temp, red heating, blue cooling, gray off), plus a bed row at the bottom. On multi-tool printers each extruder gets its own row, labeled "Nozzle 1", "Nozzle 2", … at wider sizes, with shorter "Tool 1"-style labels or bare numbers where the row is narrow (toolchangers with named tools keep their configured names). Tap a nozzle row to open the nozzle temperature graph, or the bed row for the bed graph. (Plural - for single-extruder printers the singular **Nozzle Temperature** widget is simpler.) | 1x2 | 1x1 | 2x3 | Yes | — |
+| **Bed Temperature** | Live bed temperature with current and target readings. Tap to open the temperature graph overlay. | 1x1 | 0.5x1 | Full grid | Yes | — |
+| **Chamber Temperature** | Live chamber temperature with current and target readings, shown with a chamber icon and an animated heating indicator. Tap to open the temperature graph overlay focused on the chamber. Only available on printers with a chamber temperature sensor or heater. | 1x1 | 0.5x1 | Full grid | Yes | Chamber sensor or heater |
 | **Temperatures** | Stacked view showing nozzle, bed, and chamber temperatures in one widget. Each row shows current temp and target. Also available in Carousel mode (see [Display Modes](#display-modes-stack-vs-carousel) below). Tap any reading to open the temperature graph. | 1x1 | 1x1 | 3x2 | Yes | — |
-| **Temperature Sensors** | Monitor additional temperature sensors (chamber, enclosure heater, etc.) in a single-sensor or carousel view. You can add multiple instances, each configured to a different sensor. Also available in Carousel mode. | 1x1 | 1x1 | 2x1 | Horizontal only | Extra temp sensors |
+| **Temperature Sensors** | Monitor additional temperature sensors (chamber, enclosure heater, filament dryer, etc.) in a single-sensor or carousel view. A sensor that has a target (a `[heater_generic]` or `[temperature_fan]`) shows current / target, and tapping it opens the keypad to set the target. You can add multiple instances, each configured to a different sensor. Also available in Carousel mode. | 1x1 | 0.5x1 | Full grid | Yes | Extra temp sensors |
 | **Temperature Graph** | Live temperature chart with configurable sensor series. Shows colored lines for each sensor with optional target setpoint lines. Content adapts to size — larger sizes show legends, axis labels, gradients, and temperature readouts. Tap to open the full-screen graph overlay. Configure which sensors to display via the gear icon in Edit Mode. You can add multiple instances. | 2x2 | 1x1 | Full width x4 | Yes | — |
 | **Preheat** | Quick preheat buttons with material selection. Tap a material to instantly set nozzle and bed temperatures to that material's profile. | 3x1 | 2x1 | 4x1 | Horizontal only | — |
 | **Fan Speeds** | Part cooling, hotend, and auxiliary fan speeds at a glance. Fan icons spin when running. Also available in Carousel mode with arc slider controls. Tap to open the Fan Control overlay. You can add multiple instances. | 1x1 | 1x1 | 3x2 | Yes | — |
-| **Fan** | Monitor a single fan's speed. Tap to open a fan picker to choose which fan to display. You can add multiple instances, each showing a different fan. Configure via the gear icon in Edit Mode. | 1x1 | 1x1 | 2x1 | Horizontal only | — |
+| **Fan** | Monitor a single fan's speed. Tap to open a fan picker to choose which fan to display. You can add multiple instances, each showing a different fan. Configure via the gear icon in Edit Mode. | 1x1 | 0.5x1 | Full grid | Yes | — |
 
 ### Filament
 
@@ -279,10 +312,11 @@ These are the same 5 groups the Widget Catalog uses on the device.
 |--------|-------------|---------|-----|-----|-----------|-------------------|
 | **Active Spool** | Shows the currently loaded Spoolman spool — displays the spool color, material type, brand, and remaining weight. Tap to edit the active spool. At compact sizes (1x1) shows just the colored spool icon; at wider sizes shows material details alongside. | 1x1 | 1x1 | 4x2 | Yes | Spoolman configured |
 | **AMS Status** | A live view of your multi-material spool lanes. At 1x it's a compact row of colored bars — one per lane, each filled to show roughly how much filament is left. At 2x and wider it switches to a detailed view: a small spool for each lane with its lane number, material type (PLA, PETG…), and percent remaining, and the currently loaded lane's number badge is highlighted green. The spools size to fit the widget — 2 across at 2x, 4 across at 4x — and any lanes that don't fit scroll sideways. Tap for the full AMS panel. | 1x1 | 1x1 | 4x2 | Yes | AMS/MMU detected |
-| **Filament Sensor** | Filament runout detection status. Tap to load, unload, or purge filament - what happens depends on what's going on: if the sensor is turned off, tapping opens its settings instead; while a print is running the modal is a status readout only; and if the print is paused you also get **Resume Print** and **Cancel Print**, so a runout pause can be dealt with without leaving the home screen. Cancelling asks you to confirm first. Configurable via the gear icon in Edit Mode - choose which sensor the tile follows. See [Configuring a Widget](#configuring-a-widget) above. | 1x1 | 1x1 | 2x1 | Horizontal only | Filament sensor |
+| **Filament Sensor** | Filament runout detection status. Tap to load, unload, or purge filament - what happens depends on what's going on: if the sensor is turned off, tapping opens its settings instead; while a print is running the modal is a status readout only; and if the print is paused you also get **Resume Print** and **Cancel Print**, so a runout pause can be dealt with without leaving the home screen. Cancelling asks you to confirm first. Configurable via the gear icon in Edit Mode - choose which sensor the tile follows. See [Configuring a Widget](#configuring-a-widget) above. | 1x1 | 0.5x1 | Full grid | Yes | Filament sensor |
 | **Width Sensor** | Live filament width reading from a diameter sensor. | 1x1 | 1x1 | 2x2 | Yes | Width sensor |
-| **Clog Detection** | Filament clog and flow health monitor. Shows the FlowGuard bar, and a buffer sync meter on Happy Hare printers. Tap to open the Buffer Status detail modal. Configurable via the gear icon in Edit Mode. See [Clog Detection Widget](#clog-detection-widget) below. | 2x1 | 2x1 | 4x2 | Yes | AMS/MMU detected |
-| **Bypass** | One-tap toggle for external-spool bypass. Shows the bypass state (icon changes, and the external spool's color and material while engaged) — tap to toggle. Same guards as the AMS panel's bypass toggle: if filament is loaded from a lane it unloads first, and while a job holds the printer (preparing, printing, or paused) the tap is refused with a "Bypass cannot be changed while printing" warning. | 1x1 | 1x1 | 2x1 | Horizontal only | Filament system with bypass |
+| **Clog Detection** | Filament clog and flow health monitor. Shows the FlowGuard bar. Tap to open the Buffer Status detail modal. Configurable via the gear icon in Edit Mode. See [Clog Detection Widget](#clog-detection-widget) below. | 2x1 | 2x1 | 4x2 | Yes | AMS/MMU detected |
+| **Filament Buffer** | Where the filament buffer between your feeder and extruder sits against its target: an upright slider (loose up, tight down) beside a big colored reading; an OpenAMS pressure sensor is a fill gauge instead, rising from the bottom with a tick at its target. At 2x1 it adds the target, the last minute as a trace, and says whether the filament is running tight, loose or balanced (OpenAMS: at, above or below target). Tap for Buffer Status. | 1x1 | 1x1 | 2x1 | Yes | A filament pressure sensor or sync feedback |
+| **Bypass** | One-tap toggle for external-spool bypass. Shows the bypass state (icon changes, and the external spool's color and material while engaged) - tap to toggle. Same guards as the AMS panel's bypass toggle: if filament is loaded from a lane it unloads first, and while a job holds the printer (preparing, printing, or paused) the tap is refused with a "Bypass cannot be changed while printing" warning. | 1x1 | 0.5x1 | Full grid | Yes | Filament system with bypass |
 | **Humidity** | Enclosure humidity reading from a connected sensor. | 1x1 | 1x1 | 2x2 | Yes | Humidity sensor |
 
 ### Controls
@@ -290,38 +324,38 @@ These are the same 5 groups the Widget Catalog uses on the device.
 | Widget | Description | Default | Min | Max | Resizable | Hardware Required |
 |--------|-------------|---------|-----|-----|-----------|-------------------|
 | **Macro Button** | One-tap buttons to run configured macros. Add as many Macro Button widgets as you like, each independently configurable — assign a macro to each via the gear icon in Edit Mode. See [Macro Button confirmation](#macro-button-confirmation). | 1x1 | 1x1 | 2x1 | Horizontal only | — |
-| **Macros** | One-tap shortcut to open the [Macros](advanced.md#macro-execution) panel for browsing and executing Klipper macros. | 1x1 | 1x1 | 1x1 | No | — |
-| **G-code Console** | One-tap shortcut to open the [G-code Console](advanced.md#g-code-console) overlay for sending commands and viewing Klipper responses. See [G-code Console Widget](#g-code-console-widget) below. | 1x1 | 1x1 | 1x1 | No | — |
-| **Motion** | One-tap shortcut to open the [Motion](motion.md) panel for jogging the toolhead and homing. | 1x1 | 1x1 | 1x1 | No | — |
+| **Macros** | One-tap shortcut to open the [Macros](advanced.md#macro-execution) panel for browsing and executing Klipper macros. | 1x1 | 0.5x1 | Full grid | Yes | — |
+| **G-code Console** | One-tap shortcut to open the [G-code Console](advanced.md#g-code-console) overlay for sending commands and viewing Klipper responses. See [G-code Console Widget](#g-code-console-widget) below. | 1x1 | 0.5x1 | Full grid | Yes | — |
+| **Motion** | One-tap shortcut to open the [Motion](motion.md) panel for jogging the toolhead and homing. | 1x1 | 0.5x1 | Full grid | Yes | — |
 | **Tool Switcher** | Quick tool switching for multi-tool printers (IDEX, toolchangers, multi-head). Shows the available tools and lets you switch the active tool with one tap. See [Tool Switcher Widget](#tool-switcher-widget) below. | 1x1 | 1x1 | 2x2 | Yes | Multi-tool printer |
-| **Power** | Toggle a Moonraker power device (PSU, lights, etc.) with one tap. You can add multiple instances, each bound to a different device. Shows the device name, state, and a customizable icon. | 1x1 | 1x1 | 1x1 | No | Power devices |
-| **LED Light** | Quick on/off toggle for your printer's LEDs. Tapping it switches the lights on or off — nothing else. For color, brightness, and effects, use the **LED Controls** widget below. | 1x1 | 1x1 | 2x1 | Horizontal only | LEDs configured |
-| **LED Controls** | One-tap shortcut to open the LED color and brightness controls overlay directly. | 1x1 | 1x1 | 1x1 | No | LEDs configured |
+| **Power** | Toggle a Moonraker power device (PSU, lights, etc.) with one tap. You can add multiple instances, each bound to a different device. Shows the device name, state, and a customizable icon. | 1x1 | 1x1 | Full grid | Yes | Power devices |
+| **LED Light** | Turns one light on or off — pick which one, or **All lights**, from the gear icon in Edit Mode; defaults to the chamber light. At 2x1 or wider, an arrow next to the bulb opens full color, brightness, and effects for it in the LEDs overlay. You can add more than one, each controlling a different light. | 1x1 | 0.5x1 | Full grid | Yes | A light HelixScreen can switch |
+| **LED Controls** | One-tap shortcut to open the LEDs overlay directly, on whichever light you last looked at (or the chamber light). | 1x1 | 0.5x1 | Full grid | Yes | Any LED device |
 
 ### System
 
 | Widget | Description | Default | Min | Max | Resizable | Hardware Required |
 |--------|-------------|---------|-----|-----|-----------|-------------------|
-| **Network** | Current network connection status — WiFi signal strength (with bar indicator) or Ethernet. | 1x1 | 1x1 | 2x1 | Horizontal only | — |
-| **Notifications** | Shows pending notification count with a severity badge (info/warning/error). Tap to open the notification history overlay. | 1x1 | 1x1 | 2x1 | Horizontal only | — |
+| **Network** | Current network connection status - WiFi signal strength (with bar indicator) or Ethernet. | 1x1 | 0.5x1 | Full grid | Yes | — |
+| **Notifications** | Shows pending notification count with a severity badge (info/warning/error). Tap to open the notification history overlay. | 1x1 | 0.5x1 | Full grid | Yes | — |
 | **Digital Clock** | Current time and date. Respects your 12/24-hour preference from display settings. Content adapts to size: time only at 1x1, time + date at 2x1, time + date + system uptime at 2x2+. Resizes in half-cell steps — see [Snapping and half cells](#snapping-and-half-cells). | 2x1 | 1x1 | 3x3 | Yes | — |
 | **Tips** | Rotating helpful tips about 3D printing and HelixScreen features. Tap any tip to see the full article. Tips rotate automatically. | 4x2 | 2x1 | Full width x2 | Horizontal only | — |
-| **Shutdown/Reboot** | Shutdown or reboot your printer's host system. Shows a confirmation dialog before acting. | 1x1 | 1x1 | 1x1 | No | — |
-| **Firmware Restart** | Restart the Klipper firmware. Useful when Klipper enters SHUTDOWN state. This widget automatically appears during firmware errors even if disabled. | 1x1 | 1x1 | 1x1 | No | — |
-| **Lock Screen** | Locks the screen immediately. Set a PIN in Settings > Security first, otherwise there is nothing to unlock with. | 1x1 | 1x1 | 1x1 | No | — |
+| **Shutdown/Reboot** | Shutdown or reboot your printer's host system. Shows a confirmation dialog before acting. | 1x1 | 0.5x1 | Full grid | Yes | — |
+| **Firmware Restart** | Restart the Klipper firmware. Useful when Klipper enters SHUTDOWN state. This widget automatically appears during firmware errors even if disabled. | 1x1 | 0.5x1 | Full grid | Yes | — |
+| **Lock Screen** | Locks the screen immediately. Set a PIN in Settings > System > Security first, otherwise there is nothing to unlock with. | 1x1 | 0.5x1 | Full grid | Yes | — |
 
 #### Shutdown/Reboot Widget
 
-The Shutdown/Reboot widget puts one-tap host shutdown/reboot on your home panel — a faster alternative to the **Settings > Advanced** shutdown entry. A confirmation dialog always appears first, so there's no risk of an accidental shutdown. For switching a PSU or smart plug instead, see the **Power** widget above.
+The Shutdown/Reboot widget puts one-tap host shutdown/reboot on your home panel — a faster alternative to the **Shutdown** and **Reboot** entries on the **Advanced** panel. A confirmation dialog always appears first, so there's no risk of an accidental shutdown. For switching a PSU or smart plug instead, see the **Power** widget above.
 
 
 ### Hardware-Gated Widgets
 
 Some widgets depend on specific hardware being detected by Klipper. If the hardware isn't present:
 
-- The widget still **appears** in the Widget Catalog, but it is **dimmed and can't be tapped**, and the reason is added to its name in parentheses — for example "Humidity (No humidity sensor detected)"
+- The widget still **appears** in the Widget Catalog, under the **Unavailable on this printer** section at the bottom of the category list - **dimmed and untappable**, with the reason added to its name in parentheses, for example "Humidity (No humidity sensor detected)". In search results it shows up inline, dimmed the same way
 - If hardware is detected later (plugged in, configured), the widget becomes available automatically
-- If hardware is removed after placing a widget, the widget **hides automatically** but keeps its grid position — it reappears if the hardware returns
+- If hardware is removed after placing a widget, the widget **greys out automatically** and can't be tapped, but keeps its grid position, and it works again if the hardware returns
 
 | Widget | Required Hardware |
 |--------|-------------------|
@@ -330,12 +364,14 @@ Some widgets depend on specific hardware being detected by Klipper. If the hardw
 | AMS Status | AMS, AFC (Box Turtle), Happy Hare, ACE (Anycubic ACE Pro), or compatible MMU system |
 | Bypass | A filament system with a bypass — Creality CFS, FlashForge AD5X IFS, AFC (Box Turtle), or Happy Hare with `has_bypass` enabled |
 | Clog Detection | AMS, AFC, Happy Hare, or compatible MMU with clog/flow detection |
-| LED Light / LED Controls | Any LED strip configured in Klipper (neopixel, dotstar, output_pin) |
+| Filament Buffer | An OpenAMS or AFC filament pressure sensor (FPS), or Happy Hare with sync feedback |
+| LED Light | A light HelixScreen can switch: a Klipper LED (neopixel, dotstar, led), a light `[output_pin]`, a WLED strip, or an On/Off or Toggle macro device |
+| LED Controls | Any of those, or a preset-only macro device |
 | Power | Moonraker power devices (PSU control, smart plugs) |
 | Filament Sensor | `[filament_switch_sensor]` or `[filament_motion_sensor]` in Klipper |
 | Humidity | `[temperature_sensor]` with humidity capability |
 | Width Sensor | `[hall_filament_width_sensor]` in Klipper |
-| Temperature Sensors | Extra `[temperature_sensor]` entries beyond nozzle and bed |
+| Temperature Sensors | Extra `[temperature_sensor]`, `[temperature_fan]` or `[heater_generic]` entries beyond nozzle and bed |
 
 ---
 
@@ -360,7 +396,7 @@ Full-size swipeable pages with one item per page. Indicator dots at the bottom s
 
 ### Switching Modes
 
-Long-press the grid to enter Edit Mode, select the Temperatures, Fan Speeds, or Temperature Sensors widget, and tap the **gear icon** in the upper-left corner. Each tap toggles the mode. Your preference is saved per widget and persists across restarts.
+Long-press the grid to enter Edit Mode, select the Temperatures or Fan Speeds widget, and tap the **gear icon** in the upper-left corner. Each tap toggles the mode. For **Temperature Sensors**, the gear icon opens the sensor list instead: tick one sensor for the single view, or several for the Carousel. Your preference is saved per widget and persists across restarts.
 
 ---
 
@@ -370,7 +406,7 @@ While **not** in Edit Mode, widgets respond to taps and other gestures:
 
 | Widget | Tap Action |
 |--------|------------|
-| Printer Image | Opens Printer Manager overlay |
+| Printer Image | Opens Printer Manager overlay; a status chip opens that part's controls |
 | Print Status | Opens Print Status overlay (preparing or printing) or File Browser (idle) |
 | Print Controls | Pauses, resumes, or stops the print — one button each |
 | Print Stats | Opens print history overlay |
@@ -385,7 +421,7 @@ While **not** in Edit Mode, widgets respond to taps and other gestures:
 | Bed Temperature | Opens temperature graph overlay |
 | Chamber Temperature | Opens temperature graph overlay focused on the chamber |
 | Temperatures | Opens temperature graph for the tapped sensor |
-| Temperature Sensors | — (display only) |
+| Temperature Sensors | A heater or temperature fan: opens the keypad to set its target. A read-only sensor: opens the sensor picker. Carousel: opens the sensor list. To change which sensor a heater tile shows, use the gear icon in Edit Mode |
 | Temperature Graph | Opens full-screen temperature graph overlay |
 | Preheat | Sets nozzle and bed temperature to the tapped material profile |
 | Humidity | — (display only) |
@@ -396,8 +432,9 @@ While **not** in Edit Mode, widgets respond to taps and other gestures:
 | Filament Sensor | Opens a load/unload/purge dialog (idle or paused), a status-only dialog (printing), or the sensor's settings (sensor turned off) |
 | Width Sensor | — (display only) |
 | Clog Detection | Opens the Buffer Status detail modal |
-| LED Light | Toggles the printer lights on or off |
-| LED Controls | Opens LED Control Overlay |
+| Filament Buffer | Opens the Buffer Status modal |
+| LED Light | Toggles its light on or off; on a 2x1 or wider tile, the arrow opens the LEDs overlay for it |
+| LED Controls | Opens the LEDs overlay |
 | Macro Button | Runs the configured macro — asking for parameters or confirmation first, unless you turned that off ([details](#macro-button-confirmation)) |
 | Macros | Opens the Macros panel overlay |
 | G-code Console | Opens the G-code Console overlay |
@@ -414,7 +451,7 @@ While **not** in Edit Mode, widgets respond to taps and other gestures:
 
 By default, tapping a Macro Button asks you something before it runs anything. If
 the macro takes parameters, you get a form to fill in. If it takes none, you get a
-"Run MACRO?" dialog — the one controlled by **Settings > Safety > Confirm before
+"Run MACRO?" dialog — the one controlled by **Settings > Safety & Alerts > Confirm before
 running macros**.
 
 That is the right default for a button sitting on the home screen, but it gets in
@@ -449,8 +486,8 @@ Tap the **Job Queue** widget to open the queue manager — a full-screen modal f
 
 At the top, you'll see the current queue state:
 
-- **Queue: Ready** — the queue is active and will auto-print jobs in order
-- **Queue: Paused** — the queue is paused; queued jobs won't start automatically
+- **Queue: Ready** - the queue is active. It starts jobs in order by itself only if Moonraker's `automatic_transition` is enabled in `moonraker.conf`; otherwise you start each one (see [Printing - Queueing a Print](printing.md#queueing-a-print))
+- **Queue: Paused** - the queue is paused; queued jobs won't start automatically
 
 Tap the **Start** or **Pause** button to toggle the queue state.
 
@@ -463,7 +500,9 @@ Below the state indicator, all queued jobs are listed with:
 
 ### Actions
 
-**Start a print:** Tap any job in the list to start it. The start only goes through when the printer is genuinely free — not just finished with the last print, but also not busy starting one (the heating, homing, and leveling before the first layer count as busy). While a job is preparing or printing, the tap is ignored and the job stays in the queue. There's no on-screen notice when this happens, so if tapping a job does nothing, check whether a print is still preparing or running, and try again once it's done.
+**Open a job:** Tap any job in the list to open it in the file view with the pre-print options it was queued with already set. Check that the bed is clear, then tap **Print** - the job leaves the queue only once the print actually starts, so backing out of the file view leaves it queued. The tap only goes through when the printer is genuinely free - not just finished with the last print, but also not busy starting one (the heating, homing, and leveling before the first layer count as busy). While a job is preparing or printing, the job stays in the queue and a notice tells you so; try again once the printer is free.
+
+Jobs queued from HelixScreen's file view carry their saved options; jobs queued from another interface open with their default options. See [Printing - Queueing a Print](printing.md#queueing-a-print).
 
 **Delete a job:** Tap the **trash icon** on the right side of any job row. The job is immediately removed from the queue.
 
@@ -479,13 +518,11 @@ The job queue is managed by Moonraker, so jobs added from Mainsail, Fluidd, or t
 
 ## Clog Detection Widget
 
-The Clog Detection widget monitors your filament path health in real time — detecting clogs, flow issues, and buffer sync problems. It only appears when a compatible filament system is detected (Happy Hare, AFC, or another MMU with clog detection).
+The Clog Detection widget monitors your filament path health in real time, detecting clogs and flow issues. It only appears when a compatible filament system is detected (Happy Hare, AFC, or another MMU with clog detection).
 
 ### What It Shows
 
-The widget displays a **carousel** with one or two pages depending on your hardware:
-
-**Page 1 — FlowGuard bar** (always shown)
+The widget shows the FlowGuard bar:
 
 ![FlowGuard bar — TANGLE and CLOG end labels, fill running out from the middle, danger shading at both ends](../../images/user/home-flowguard-bar.png)
 
@@ -513,33 +550,23 @@ When there is nothing to report at all — an AFC buffer that is armed but not c
 
 > The same reading is drawn as an arc gauge in the filament sidebar and on the loaded-spool card, where the space is tall and narrow rather than wide and short.
 
-**Page 2 — Buffer Sync Meter** (any printer reporting proportional buffer pressure)
-
-A visual representation of the physical buffer plunger position. Two nested rectangles show the buffer housing and plunger — the plunger slides up or down to indicate filament tension:
-
-- **Center position** = balanced, healthy tension
-- **Shifted up** = filament under compression (being pushed)
-- **Shifted down** = filament under tension (being pulled)
-- Color shifts from green → orange → red as the bias increases
-
-A percentage label shows the exact bias reading (e.g., "+5%", "−10%"). Swipe between pages using the indicator dots at the bottom.
-
 ### Tapping the Widget
 
 Tap the Clog Detection widget to open the **Buffer Status** modal — a detailed read-only view of your filament path health:
 
-The same FlowGuard bar sits across the top, so the modal shows everything the widget did and more — it used to show *less*, naming only the detection mode with no reading, threshold or peak.
+The same FlowGuard bar sits across the top, so the modal shows everything the widget did and more - the reading, the danger threshold and the worst value seen this print.
 
 **Happy Hare printers also show:**
-- Filament tension description (e.g., "Slight tension", "Balanced")
+- Filament tension description (e.g., "Running tight", "Balanced")
 - Spool motor state
 - Gear sync status
 - Flow rate
-- Full-size buffer meter visualization
 
 **AFC printers also show:**
 - Advancing/trailing buffer state
 - Distance to fault (in mm)
+
+Where your printer has a filament buffer with a proportional reading, the modal also shows it live: the tall slider on the left (a fill gauge for an OpenAMS pressure sensor), then the reading, its target and whether the filament is running tight, loose or balanced (at, above or below target for OpenAMS), with the last minute as a trace underneath. The modal closes with the **X** in its corner. See [Filament Buffer Widget](#filament-buffer-widget).
 
 ### Configuring Clog Detection
 
@@ -553,6 +580,27 @@ In Edit Mode, select the Clog Detection widget and tap the **gear icon** to open
 | **Danger Threshold** | Override the computed danger zone percentage |
 
 **Auto** mode is recommended — HelixScreen automatically selects the best source based on your detected hardware.
+
+---
+
+## Filament Buffer Widget
+
+![Filament Buffer widget at 2x1: slider, 32% target 50%, a one-minute trace line, FPS Running tight](../../images/user/home-filament-buffer.png)
+
+The filament buffer is the slack between your feeder and the extruder, and the feeder steers it toward a target. The widget shows where it sits right now. The upright slider has loose filament up and tight filament down, with the target as a dashed window in the middle and faint zones at both ends. Only the block on the filament moves.
+
+The block and the number beside it share one color: grey when the buffer is near its target, amber as it drifts off, and red when it is close to an end. The small label under the number says what is measuring: **FPS** for a filament pressure sensor (OpenAMS, or an AFC buffer with a pressure sensor) or **Sync** for Happy Hare's sync feedback.
+
+| Size | Shows |
+|------|-------|
+| **1x1** | The slider, the reading and its label |
+| **2x1** | The reading with its target (for example "32%  target 50%"), the last minute as a trace, and the label with **Running tight**, **Running loose** or **Balanced** |
+
+The trace runs from the slider to the right, newest next to the slider. It is a line that turns amber or red for the stretches where the buffer drifted off its target, over a faint dashed line for the target itself. It starts empty and fills as the minute goes by: the part with no history yet is a dotted line.
+
+A sensor that reports no target shows the pressure as text only (for example "Pressure: 32%"), with no slider or trace.
+
+Tap the widget to open [Buffer Status](#tapping-the-widget), which shows the same reading larger and updates while it is open. A printer with no buffer reading leaves the widget dimmed with a slash badge; it comes back on its own when a reading appears.
 
 ---
 
@@ -597,7 +645,7 @@ The Tool Switcher widget lets you change the active tool on multi-tool printers 
 
 The widget adapts to its size:
 
-- **Compact (1x1)** — shows a swap icon above the current tool's label (e.g., "T0"). Tap it to open a **tool picker** popup listing every tool. The active tool is highlighted; tap any other tool to switch to it.
+- **Compact (1x1)** - shows a swap icon above the current tool's label (e.g., "Tool 1"). Tap it to open a **tool picker** popup listing every tool. The active tool is highlighted; tap any other tool to switch to it.
 - **Larger sizes** — shows a row (or two rows) of tappable **tool pills**, one per tool. The active tool's pill is highlighted. If there are more tools than fit, the row scrolls horizontally and keeps the active tool in view.
 
 The widget updates automatically when the active tool changes — whether you switch it here, run a tool-change macro, or it changes during a print.
@@ -632,6 +680,7 @@ share of a 480x272 panel as it does of a 1280x720 one.
 | 1024x600 | 8 columns x 5 rows | 40 |
 | 1280x720 | 8 columns x 5 rows | 40 |
 | 480x800 (portrait) | 4 columns x 6 rows | 24 |
+| 320x1480 (tall portrait) | 4 columns x 17 rows | 68 |
 | 1920x440 (ultrawide) | 23 columns x 5 rows | 115 |
 
 Rotating a screen turns the grid with it, give or take a cell: 1024x600 gives 8x5, and the
@@ -690,73 +739,61 @@ Your printer keeps working the whole time — this only moves tiles around. The 
 
 ## Active Tool Badge
 
-On printers with a toolchanger (IDEX, multi-head, tool-changing systems), the Home Panel displays an active tool badge:
+On printers with more than one extruder (IDEX, toolchangers, multi-head systems), temperature tiles and the print status card show a small badge on the nozzle icon:
 
-- Shows the current active tool (e.g., "T0", "T1", "T2")
+- Shows the active tool's number, counting from 1 ("1", "2", …) to match the "Nozzle 1" row labels
 - Updates automatically when tools are switched during a print or via macros
 - Color-coded to match the tool's filament color (if configured via Spoolman or AMS)
-- Only visible on multi-tool printers — single-extruder printers won't see this
+- Only visible on multi-tool printers - single-extruder printers won't see it
 
 ---
 
 ## Emergency Stop
 
-The red **Emergency Stop** button in the top bar halts all printer motion immediately. By default, a confirmation dialog appears before executing. You can disable the confirmation in **Settings > Safety & Notifications > E-Stop Confirmation**.
+The red **Emergency Stop** button in the top bar halts all printer motion immediately. By default, a confirmation dialog appears before executing. You can disable the confirmation in **Settings > Safety & Alerts > E-Stop Confirmation**.
 
 ---
 
 ## LED Controls
 
-Tap the **LED Controls** widget to open the LED Control Overlay — a full control panel for all your printer's lighting. What you see depends on your hardware. (The **LED Light** widget is a plain on/off toggle and does not open this overlay.)
+Tap the **LED Controls** widget, or the arrow on a wider **LED Light** button, to open the **LEDs** overlay — one tab per light, each showing only the controls that light actually supports.
 
-### Strip Selector
+### Tabs
 
-If you have more than one LED strip configured, a row of chips at the top lets you pick which strip to control. The overlay heading updates to show the selected strip name.
+A tab per light runs along the top in a row that scrolls sideways once you have more than fit. Each tab carries a small dot: filled in that light's current color while it's on, hollow while it's off, or a dimmed ring for a light whose on/off state HelixScreen can't read (a macro-driven light). Tapping a tab only changes which light you're looking at — it never changes what a Home Panel Light button or Automatic LED Control targets.
 
-### Color & Brightness (Klipper Native LEDs)
+![LEDs overlay — tabs across the top, power and brightness, white tones, color swatches](../../images/user/home-led-control.png)
 
-For neopixel, dotstar, and other Klipper-native strips:
+### Power & Brightness
 
-- **Color presets**: 8 preset swatches — White, Warm White, Orange, Blue, Red, Green, Purple, Cyan
-- **Custom color**: Tap the custom color button to open an HSV color picker. Pick any color — HelixScreen automatically separates it into a base color and brightness level
-- **Brightness slider**: Adjust from 0-100%, independent of color selection
-- **Color swatch**: Shows the actual output color (base color adjusted by current brightness)
-- **Turn Off**: Stops any active effects and turns off the selected strip
+Most lights show a round power button above a tall brightness slider:
 
-![LED Control — strip selector, color presets, brightness slider, effects](../../images/user/home-led-control.png)
+- **Power button** — fills with the light's current color while on, an outline while off. Tap to toggle. Turning a light off this way also stops any effect running on it.
+- **Brightness slider** — drag to set 0-100%; 0% turns the light off. The fill matches the light's current color, with the percentage shown inside it.
 
-### Output Pin Lights
+A light with no brightness control (a plain on/off `[output_pin]`, or a macro Toggle device) shows just a centered button in that spot.
 
-For `[output_pin]` lights (auto-detected by naming convention):
+### White (Color-Capable Klipper LEDs)
 
-- **PWM pins**: Brightness slider from 0-100%
-- **Non-PWM pins**: Simple on/off toggle
-- Color controls are hidden since output pins don't support color
+RGBW and RGB lights show three fixed white swatches — **Cool**, **Neutral**, **Warm**. Tap one to set that white level: on an RGBW light it drives the dedicated white channel, on RGB it's mixed from the color channels. A neopixel counts as RGBW when its `color_order` includes a `W`. A ring shows which one (if any) matches the light's current look.
 
-### LED Effects
+### Color
 
-If you have the [klipper-led_effect](https://github.com/julianschill/klipper-led_effect) plugin installed:
+Color-capable lights also show a row of preset color swatches, plus a rainbow **Custom** swatch at the end that opens the full color picker. A ring shows which preset matches the light's current color.
 
-- Effect cards appear for each available effect, filtered to the currently selected strip
-- The active effect is highlighted with an accent border
-- **Stop All Effects** button kills all running effects at once
-- Tap any effect card to activate it
+### Effects & Presets
 
-### WLED Controls
+- **Klipper LED effects** ([klipper-led_effect](https://github.com/julianschill/klipper-led_effect)): the effects defined for that light appear as chips, plus a **None** chip that stops whichever one is running. Tap a chip to activate its effect.
+- **WLED presets**: the presets you've configured on that WLED device appear as chips — tap to activate. WLED lights get power and brightness here, but no color controls.
+- **Non-color Klipper lights and PWM output pins**: quick level chips (10/25/50/75/100%) appear instead, since there's nothing else to show.
 
-For WLED network-connected strips:
+### Macro-Driven Lights
 
-- **On/Off toggle** to control the strip power
-- **Brightness slider** from 0-100%
-- **Preset buttons** for each WLED preset — fetched directly from your WLED device, with the active preset highlighted
+A light backed by a Klipper macro can't show a power dot or button, because HelixScreen has no way to read whether it's actually on:
 
-### Macro Device Controls
-
-Custom macro devices you've configured in [LED Settings](settings/led-settings.md) appear with controls matching their type:
-
-- **On/Off devices**: Separate "Turn On" and "Turn Off" buttons
-- **Toggle devices**: A single "Toggle" button
-- **Preset devices**: Named buttons for each preset action
+- **On/Off devices** (configured in [LED Settings](settings/led-settings.md#macro-devices)): separate **On** and **Off** buttons take the place of the slider
+- **Toggle devices**: a single **Toggle** button
+- **Preset devices**: named preset buttons fill the whole page
 
 ---
 
@@ -785,6 +822,7 @@ If your camera is mounted at an angle or its image comes in mirrored, you can co
 
 The modal offers:
 
+- **Source** - which webcam the widget shows: **Automatic** (the printer's preferred camera), or one of your printer's named webcams. The choice is saved per widget, so two Camera widgets can show two different feeds. If the named camera disappears from Moonraker, the widget falls back to the automatic choice until it returns. See [Camera](camera.md) for details.
 - **Rotation** — rotate the feed by **0°, 90°, 180°, or 270°**. The current rotation is highlighted.
 - **Flip** — toggle **Horizontal** and/or **Vertical** mirroring. Each can be on or off independently.
 
@@ -865,6 +903,31 @@ The list is filtered to your printer's motion type, the same way the setup wizar
 
 ![Printer image picker — scrollable list on left, live preview on right](../../images/user/home-image-picker.png)
 
+### Status Chips on the Printer Image
+
+> Added in 1.1.
+
+While the printer is working, small chips on the printer image show what each part is doing:
+
+- **Nozzle, bed and chamber** - a temperature chip appears while the heater has a target, and stays, greyed, until a heater you turned off has cooled below 50°C. The chamber chip appears only on printers with a chamber heater.
+- **Part fan** - shows its speed while it is running.
+- **Light** - shows while your chamber light is on.
+
+Tap a heater chip for its temperature graph, the fan chip for the fan controls, or the light chip for the chamber light's page in the LEDs overlay.
+
+On the most common printers the shipped pictures know where each part is, so each chip points at its part: beside the picture with a line to it on a wide tile, or on top of it on a small one. On other pictures, including your own photos, the chips sit along the edge of the picture until you tag its parts.
+
+### Tagging the Printer's Parts
+
+To place the chips on a picture that does not know its parts yet, or to correct a shipped picture you disagree with:
+
+1. Open the Image Picker (see [Changing the Printer Image](#changing-the-printer-image)) and select the picture
+2. Tap **Tag parts** under the preview
+3. Tap each part as you are asked: the nozzle tip, the part cooling fan, the bed's front-left corner, the bed's front-right corner, an empty spot inside the enclosure, and the light. The fan, enclosure and light can be skipped with **Skip** if your printer does not have them; **Undo** steps back one tap
+4. Check where the chips will sit, then tap **Save**
+
+Your tags are kept for that picture, as long as its size does not change: replace a custom image with a file of different dimensions and you will need to tag it again. **Reset tags**, which appears once a picture has your own tags, puts the picture back to its shipped positions (or to chips along the edge, for a picture that has none).
+
 ### Using Custom Printer Images
 
 You can use your own printer photo or rendering:
@@ -919,7 +982,7 @@ A row of chips shows detected hardware capabilities: Probe, Bed Mesh, Heated Bed
 
 > Requires [beta features](beta-features.md) to be enabled and at least two printers configured.
 
-When you have multiple printers configured, the Printer Manager overlay shows a **Manage Printers** button at the bottom. Tap it to open the printer management screen (same as Settings > Printers).
+When you have multiple printers configured, the Printer Manager overlay shows a **Manage Printers** button at the bottom. Tap it to open the printer management screen (same as Settings > Connection > Printers).
 
 You can also switch printers directly from the **navigation bar**. When multiple printers are configured, a badge with your printer's name appears in the nav bar. Tap it to see a quick-switch menu listing all your printers — tap any printer to switch instantly.
 

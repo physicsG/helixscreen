@@ -1,0 +1,310 @@
+{
+  "api_version": 1,
+  "data_ready": true,
+  "driver_ready": true,
+  "filament_detected": false,
+  "filament_sensor_error": null,
+  "fluidd_widget_version": 2,
+  "humidity_pct": 54,
+  "load_path": {
+    "box_addr": null,
+    "buffer": {
+      "active": true,
+      "state_code": 2,
+      "status_code": 0
+    },
+    "clog_detection": {
+      "baseline_ready": false,
+      "encoder_delta_mm": null,
+      "encoder_reset_mm": 18.0,
+      "event_count": 0,
+      "extruder_delta_mm": null,
+      "extruder_threshold_mm": 80.0,
+      "last_event": {
+        "encoder_mm": null,
+        "extruder_mm": null
+      },
+      "state": "inactive",
+      "triggered": false
+    },
+    "encoder": {
+      "active": false,
+      "position_mm": null
+    },
+    "loaded_mask": 0,
+    "loaded_slot": -1,
+    "printhead_sensor": {
+      "detected": false,
+      "error": null
+    },
+    "slot_filament_mask": 15,
+    "source_slot": null,
+    "tracking_active": false
+  },
+  "loaded_mask": 0,
+  "loaded_slot": -1,
+  "materials": {
+    "ABS": {
+      "target_temp": 245
+    },
+    "ASA": {
+      "target_temp": 245
+    },
+    "PETG": {
+      "target_temp": 245
+    },
+    "PLA": {
+      "target_temp": 220
+    }
+  },
+  "print_info": null,
+  "print_mapping": {
+    "active_slot": null,
+    "active_tool": null,
+    "filename": null,
+    "map": {}
+  },
+  "print_mapping_version": 1,
+  "recovery": {
+    "automatic": false,
+    "blocked": false,
+    "reason": null,
+    "step": null,
+    "target": null
+  },
+  "rfid_insert_reading_enabled": false,
+  "rfid_startup_reading_enabled": false,
+  "runout": null,
+  "runout_swap_enabled": true,
+  "slot_filament_mask": 15,
+  "slots": [
+    {
+      "brand": "Sunlu",
+      "color": "#D75BA7",
+      "external": false,
+      "index": 0,
+      "loaded": false,
+      "material": "PLA",
+      "name": "Magenta",
+      "present": true,
+      "rfid_percent": null,
+      "rfid_reserve": "",
+      "spoolman_id": null
+    },
+    {
+      "brand": "Slic3D",
+      "color": "#111111",
+      "external": false,
+      "index": 1,
+      "loaded": false,
+      "material": "PLA",
+      "name": "Black",
+      "present": true,
+      "rfid_percent": null,
+      "rfid_reserve": "",
+      "spoolman_id": null
+    },
+    {
+      "brand": "Elegoo",
+      "color": "#F2F2F2",
+      "external": false,
+      "index": 2,
+      "loaded": false,
+      "material": "PLA",
+      "name": "White",
+      "present": true,
+      "rfid_percent": null,
+      "rfid_reserve": "",
+      "spoolman_id": null
+    },
+    {
+      "brand": "Elegoo",
+      "color": "#6F7379",
+      "external": false,
+      "index": 3,
+      "loaded": false,
+      "material": "PLA",
+      "name": "Grey",
+      "present": true,
+      "rfid_percent": null,
+      "rfid_reserve": "",
+      "spoolman_id": null
+    },
+    {
+      "brand": "",
+      "color": "",
+      "external": false,
+      "index": 4,
+      "loaded": false,
+      "material": "",
+      "name": "",
+      "present": false,
+      "rfid_percent": null,
+      "rfid_reserve": "",
+      "spoolman_id": null
+    },
+    {
+      "brand": "",
+      "color": "",
+      "external": false,
+      "index": 5,
+      "loaded": false,
+      "material": "",
+      "name": "",
+      "present": false,
+      "rfid_percent": null,
+      "rfid_reserve": "",
+      "spoolman_id": null
+    },
+    {
+      "brand": "",
+      "color": "",
+      "external": false,
+      "index": 6,
+      "loaded": false,
+      "material": "",
+      "name": "",
+      "present": false,
+      "rfid_percent": null,
+      "rfid_reserve": "",
+      "spoolman_id": null
+    },
+    {
+      "brand": "",
+      "color": "",
+      "external": false,
+      "index": 7,
+      "loaded": false,
+      "material": "",
+      "name": "",
+      "present": false,
+      "rfid_percent": null,
+      "rfid_reserve": "",
+      "spoolman_id": null
+    },
+    {
+      "brand": "",
+      "color": "",
+      "external": false,
+      "index": 8,
+      "loaded": false,
+      "material": "",
+      "name": "",
+      "present": false,
+      "rfid_percent": null,
+      "rfid_reserve": "",
+      "spoolman_id": null
+    },
+    {
+      "brand": "",
+      "color": "",
+      "external": false,
+      "index": 9,
+      "loaded": false,
+      "material": "",
+      "name": "",
+      "present": false,
+      "rfid_percent": null,
+      "rfid_reserve": "",
+      "spoolman_id": null
+    },
+    {
+      "brand": "",
+      "color": "",
+      "external": false,
+      "index": 10,
+      "loaded": false,
+      "material": "",
+      "name": "",
+      "present": false,
+      "rfid_percent": null,
+      "rfid_reserve": "",
+      "spoolman_id": null
+    },
+    {
+      "brand": "",
+      "color": "",
+      "external": false,
+      "index": 11,
+      "loaded": false,
+      "material": "",
+      "name": "",
+      "present": false,
+      "rfid_percent": null,
+      "rfid_reserve": "",
+      "spoolman_id": null
+    },
+    {
+      "brand": "",
+      "color": "",
+      "external": false,
+      "index": 12,
+      "loaded": false,
+      "material": "",
+      "name": "",
+      "present": false,
+      "rfid_percent": null,
+      "rfid_reserve": "",
+      "spoolman_id": null
+    },
+    {
+      "brand": "",
+      "color": "",
+      "external": false,
+      "index": 13,
+      "loaded": false,
+      "material": "",
+      "name": "",
+      "present": false,
+      "rfid_percent": null,
+      "rfid_reserve": "",
+      "spoolman_id": null
+    },
+    {
+      "brand": "",
+      "color": "",
+      "external": false,
+      "index": 14,
+      "loaded": false,
+      "material": "",
+      "name": "",
+      "present": false,
+      "rfid_percent": null,
+      "rfid_reserve": "",
+      "spoolman_id": null
+    },
+    {
+      "brand": "",
+      "color": "",
+      "external": false,
+      "index": 15,
+      "loaded": false,
+      "material": "",
+      "name": "",
+      "present": false,
+      "rfid_percent": null,
+      "rfid_reserve": "",
+      "spoolman_id": null
+    },
+    {
+      "brand": "",
+      "color": "",
+      "external": true,
+      "index": 16,
+      "loaded": false,
+      "material": "",
+      "name": "",
+      "present": true,
+      "rfid_percent": null,
+      "rfid_reserve": "",
+      "spoolman_id": null
+    }
+  ],
+  "state": "IDLE",
+  "state_code": 0,
+  "status": "OK",
+  "status_code": 0,
+  "temp_c": 27,
+  "tracking_active": false,
+  "unload_after_print_enabled": false
+}

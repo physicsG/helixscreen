@@ -12,7 +12,7 @@
  * then call rebuild() on connect and the controller handles the rest.
  *
  * @pattern Controller owns graph + observers; consumer owns the container.
- * @threading Observer callbacks are deferred via UpdateQueue (observe_int_sync).
+ * @threading Observer callbacks are deferred via UpdateQueue (observe<int>).
  */
 
 #pragma once
@@ -23,11 +23,15 @@
 
 #include "async_lifetime_guard.h"
 
+#include <chrono>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
 namespace helix {
+
+class IMoonrakerClient;
 
 // ============================================================================
 // Color palette — shared across all temp graph consumers
@@ -64,8 +68,10 @@ uint32_t temp_graph_series_hex(int index);
  * The klipper_name determines how the controller resolves subjects:
  * - "extruder" / "extruder1" etc  -> extruder temp/target subjects
  * - "heater_bed"                  -> bed temp/target subjects
- * - "chamber"                     -> chamber temp/target subjects
- * - anything else                 -> TemperatureSensorManager lookup
+ * - "chamber", or the chamber's own heater / temperature-source object name
+ *                                 -> chamber temp/target subjects
+ * - anything else                 -> TemperatureSensorManager lookup (temp, plus target
+ *                                    for heater_generic / temperature_fan)
  */
 struct TempGraphSeriesSpec {
     std::string klipper_name; ///< Klipper object key (e.g., "extruder", "heater_bed")
@@ -138,6 +144,11 @@ class TempGraphController {
     /// Resume updates and backfill any missed history
     void resume();
 
+    /// True between pause() and resume()
+    bool paused() const {
+        return paused_;
+    }
+
     /**
      * @brief Re-read history from the manager and repopulate every series.
      *
@@ -168,6 +179,23 @@ class TempGraphController {
      * that already backfilled at construction. Main-thread only (#1124).
      */
     static void refresh_all_from_history();
+
+    /**
+     * @brief Seed the temperature history from Moonraker's cached samples
+     * (server.temperature_store) and re-backfill every graph.
+     *
+     * Without it graphs fill in live over several minutes (#944). The reply
+     * arrives on the client's thread; the seed itself runs on the main thread.
+     * Call once discovery has created the heater and sensor subjects; it re-runs
+     * on reconnect because discovery does.
+     */
+    static void seed_from_moonraker(IMoonrakerClient& client);
+
+    /// True when a live reading at now_ms should reach the chart, given the
+    /// series last pushed at last_ms (0 = never). All series share the same
+    /// SAMPLE_INTERVAL_SEC wall-clock slots, so one status notify carrying the
+    /// nozzle and bed readings costs one chart repaint, not two.
+    static bool sample_due(int64_t last_ms, int64_t now_ms);
 
     /**
      * @brief Tear down and recreate the graph from scratch
@@ -215,22 +243,34 @@ class TempGraphController {
      * @brief Look up the graph series ID for a given Klipper name
      * @return Series ID (>= 0) or -1 if not found
      */
-    int series_id_for(const std::string& klipper_name) const;
+    SeriesId series_id_for(const std::string& klipper_name) const;
+
+    /// Rename the series for @p klipper_name in the legend; no-op when absent.
+    void set_series_name(const std::string& klipper_name, const std::string& display_name);
 
   private:
+    friend class TempGraphControllerTestAccess;
+
     /// Per-series runtime state (extends the spec with observer handles)
     struct SeriesState {
         std::string klipper_name;
-        int series_id = -1;
+        SeriesId series_id = SeriesId::None;
         bool show_target = false;
         bool is_dynamic = false;
         /// Bound to a stand-in subject because the real one is not discovered
         /// yet; must be re-resolved once discovery publishes the real one.
         bool provisional = false;
-        int64_t last_update_ms = 0; ///< Throttle graph updates to 1Hz per series
+        int64_t last_update_ms = 0; ///< Last push; one per sample slot per series
+        int latest_deci = 0;        ///< Latest valid reading, 0 when it has none
         ObserverGuard temp_obs;
         ObserverGuard target_obs;
         SubjectLifetime lifetime;
+    };
+
+    std::function<int64_t()> now_ms_fn_ = [] {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::system_clock::now().time_since_epoch())
+            .count();
     };
 
     void create_graph();
@@ -239,6 +279,7 @@ class TempGraphController {
     void setup_connection_observer();
     void backfill_history();
     void apply_auto_range();
+    void forget_latest_readings();
 
     /**
      * @brief Attach temp/target observers for one series
@@ -251,10 +292,11 @@ class TempGraphController {
     bool attach_series_observers(size_t i);
 
     /**
-     * @brief Retry the series that had no subject when the graph was built
+     * @brief Rebind the series whose subject is missing, provisional, or dead
      *
-     * Fired by the discovery version subjects. Attaches only what is still
-     * unresolved, then re-backfills so the newly reachable history appears at
+     * Fired by the discovery version subjects. Attaches only series with no
+     * live binding (never discovered, riding a stand-in, or bound to a subject
+     * discovery has since recreated), then re-backfills so the newly reachable history appears at
      * once instead of redrawing one live sample at a time. Deliberately NOT a
      * rebuild(): tearing the graph down here would destroy widgets from inside
      * a queued observer callback.
@@ -267,7 +309,8 @@ class TempGraphController {
 
     std::vector<SeriesState> series_;
     ObserverGuard connection_observer_;
-    /// Installed only while some series is unresolved; retries on discovery.
+    /// Installed whenever an extruder (or, below, a sensor) series exists;
+    /// rebinds series whose subject is missing or was recreated by discovery.
     ObserverGuard discovery_observer_;
     ObserverGuard sensor_discovery_observer_;
 
@@ -278,7 +321,7 @@ class TempGraphController {
     /**
      * @brief Drops the attach-time sample push while reattach_observers() runs.
      *
-     * observe_int_sync() attaches with lv_subject_add_observer_obj(), which
+     * observe<int>() attaches with lv_subject_add_observer_obj(), which
      * fires the observer once immediately — but that fire only *queues* the
      * handler (observer_factory.h), so it lands in UpdateQueue and runs on a
      * later process_pending tick. On reconnect the subjects still hold their

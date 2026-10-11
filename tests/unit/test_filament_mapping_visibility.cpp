@@ -10,7 +10,7 @@
  * card - rendered the same information there. That second surface is gone, so
  * hiding on non-editable backends would show the user nothing at all. The
  * dead-control concern it existed for now lives entirely on the tap affordance
- * (PrintSelectDetailView::color_card_opens_remap).
+ * (PrintSelectDetailView::current_remap_block).
  *
  * The two gates that MUST survive the merge are pinned here too: the bypass
  * single-lane suppression (a K2 user printed off the bypass spool after reading
@@ -25,6 +25,7 @@
 #include "ui_update_queue.h"
 
 #include "../mapping_card_render_fixture.h"
+#include "../test_helpers/mock_bypass.h"
 #include "ams_backend_mock.h"
 #include "ams_state.h"
 #include "printer_discovery.h"
@@ -72,7 +73,7 @@ struct SingleExtruderMappingCardFixture : MappingCardRenderFixture {
 
 TEST_CASE_METHOD(MappingCardRenderFixture, "Card shows on a backend whose mapping is not editable",
                  "[filament_mapping][visibility]") {
-    // snapmaker_mode_ is the U1 case: RemapStrategy::SnapmakerNative, so the
+    // snapmaker_mode_ is the U1 case: RemapStrategy::PrePrintSend, so the
     // pick IS honored (through the pre-print send) while no tool->slot table is
     // written and owns_tool_mapping_table() is false. Before the merge this hid
     // the card and a second surface drew the chips; that surface is gone.
@@ -89,6 +90,7 @@ TEST_CASE_METHOD(MappingCardRenderFixture, "Card hides a single-lane print while
                  "[filament_mapping][visibility]") {
     // With bypass engaged a single-tool print takes filament from the external
     // spool, so offering a lane mapping claims something the print will not do.
+    REQUIRE(helix::test::unload_for_bypass(*mock));
     REQUIRE(mock->enable_bypass().success());
     REQUIRE(mock->is_bypass_active());
     card.update({"#FF0000"}, {"PLA"});

@@ -16,6 +16,7 @@
 #include "afc_config_manager.h"
 #include "ams_backend_afc.h"
 #include "ams_types.h"
+#include "test_helpers/afc_test_access.h"
 
 #include <algorithm>
 #include <any>
@@ -53,40 +54,43 @@ variable_cooling_tube_length: 15
 variable_cooling_tube_retraction: 35
 )";
 
+namespace helix {
+
 /**
  * @brief Test helper to access AmsBackendAfc private config members
  */
 class AmsBackendAfcConfigHelper {
   public:
     static void set_configs_loaded(AmsBackendAfc& backend, bool loaded) {
-        backend.configs_loaded_ = loaded;
+        AfcTestAccess::configs_loaded(backend) = loaded;
     }
 
     static AfcConfigManager* get_afc_config(AmsBackendAfc& backend) {
-        return backend.afc_config_.get();
+        return AfcTestAccess::afc_config(backend).get();
     }
 
     static AfcConfigManager* get_macro_vars_config(AmsBackendAfc& backend) {
-        return backend.macro_vars_config_.get();
+        return AfcTestAccess::macro_vars_config(backend).get();
     }
 
     static void create_configs(AmsBackendAfc& backend) {
-        backend.afc_config_ = std::make_unique<AfcConfigManager>(nullptr);
-        backend.macro_vars_config_ = std::make_unique<AfcConfigManager>(nullptr);
+        AfcTestAccess::afc_config(backend) = std::make_unique<AfcConfigManager>(nullptr);
+        AfcTestAccess::macro_vars_config(backend) = std::make_unique<AfcConfigManager>(nullptr);
     }
 
     static void load_test_configs(AmsBackendAfc& backend) {
         create_configs(backend);
-        backend.afc_config_->load_from_string(SAMPLE_AFC_CFG, "AFC/AFC.cfg");
-        backend.macro_vars_config_->load_from_string(SAMPLE_MACRO_VARS_CFG,
-                                                     "AFC/AFC_Macro_Vars.cfg");
-        backend.configs_loaded_ = true;
+        AfcTestAccess::afc_config(backend)->load_from_string(SAMPLE_AFC_CFG, "AFC/AFC.cfg");
+        AfcTestAccess::macro_vars_config(backend)->load_from_string(SAMPLE_MACRO_VARS_CFG,
+                                                                    "AFC/AFC_Macro_Vars.cfg");
+        AfcTestAccess::configs_loaded(backend) = true;
     }
 
     static void set_tip_method(AmsBackendAfc& backend, TipMethod method) {
-        backend.system_info_.tip_method = method;
+        AfcTestAccess::system_info(backend).tip_method = method;
     }
 };
+} // namespace helix
 
 // Helper to find action by ID
 static const DeviceAction* find_action(const std::vector<DeviceAction>& actions,
@@ -268,6 +272,9 @@ TEST_CASE("Hub actions disabled when config not loaded", "[ams][afc][device_acti
 TEST_CASE("Tip forming actions read macro vars", "[ams][afc][device_actions][config]") {
     AmsBackendAfc backend(nullptr, nullptr);
     AmsBackendAfcConfigHelper::load_test_configs(backend);
+    // Tip forming actions are exposed only while tip forming is the active
+    // method — the same condition that shows the tip_forming section.
+    AmsBackendAfcConfigHelper::set_tip_method(backend, TipMethod::TIP_FORM);
 
     auto actions = backend.get_device_actions();
 
@@ -428,6 +435,9 @@ TEST_CASE("Execute macro var slider modifies config", "[ams][afc][device_actions
 TEST_CASE("Config sections show correct values from parser", "[ams][afc][device_actions][config]") {
     AmsBackendAfc backend(nullptr, nullptr);
     AmsBackendAfcConfigHelper::create_configs(backend);
+    // The macro-var SECTION below reads tip forming actions, exposed only
+    // while tip forming is the active method.
+    AmsBackendAfcConfigHelper::set_tip_method(backend, TipMethod::TIP_FORM);
 
     // Load custom config with different values
     const char* custom_afc = R"(

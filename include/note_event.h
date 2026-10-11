@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <mutex>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -40,12 +41,14 @@ struct NoteEvent {
 };
 
 /// Per-voice state in a PCM backend.
-/// `event` + `generation` are written by the sequencer thread.
+/// `event` + `generation` are written by the sequencer thread through
+/// publish()/edit() and read by the audio thread through start_pending_note().
 /// Everything else is owned by the audio callback / render thread.
 struct VoiceSlot {
-    // --- Written by sequencer, read by callback ---
+    // --- Written by sequencer, read by callback, both under event_mutex ---
     NoteEvent event;
     std::atomic<uint32_t> generation{0};
+    std::mutex event_mutex;
 
     // --- Owned by audio callback thread only ---
     uint32_t cb_generation = 0;
@@ -57,7 +60,42 @@ struct VoiceSlot {
     // Snapshot of event params (copied on generation change)
     NoteEvent active;
 
-    /// Call from the audio callback when generation changes.
+    /// Sequencer side: replace the pending note and announce it.
+    void publish(const NoteEvent& e) {
+        edit([&](NoteEvent& ev) { ev = e; }, true);
+    }
+
+    /// Sequencer side: change fields of the pending note. `restart` announces
+    /// it as a new note; without it the change applies at the next note start.
+    template <typename F> void edit(F&& fn, bool restart) {
+        std::lock_guard<std::mutex> lock(event_mutex);
+        fn(event);
+        if (restart)
+            generation.fetch_add(1, std::memory_order_release);
+    }
+
+    /// Audio side: start the pending note if one was announced. Never blocks:
+    /// if the sequencer is mid-publish the note starts on the next call.
+    bool start_pending_note(float sample_rate) {
+        if (generation.load(std::memory_order_acquire) == cb_generation)
+            return false;
+        std::unique_lock<std::mutex> lock(event_mutex, std::try_to_lock);
+        if (!lock.owns_lock())
+            return false;
+        cb_generation = generation.load(std::memory_order_relaxed);
+        reset_for_new_note();
+        lock.unlock();
+        if (active.filter_type != 0) {
+            auto ft = (active.filter_type == 1) ? helix::audio::FilterType::LOWPASS
+                                                : helix::audio::FilterType::HIGHPASS;
+            helix::audio::compute_biquad_coeffs(filter, ft, active.filter_cutoff, sample_rate);
+        }
+        return true;
+    }
+
+    /// Snapshot `event` into `active` and restart the voice. Single-threaded
+    /// callers use it directly; a live audio thread goes through
+    /// start_pending_note().
     void reset_for_new_note() {
         active = event;
         phase = 0;

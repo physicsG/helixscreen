@@ -8,9 +8,11 @@
 // (the AD5X failure mode — debug IFS logs never reach /var/log/messages so
 // every bundle shipped stale, WARN-only context; #raza616).
 
+#include "hv/hlog.h"
 #include "logging_init.h"
 #include "system/log_collector.h"
 
+#include <spdlog/sinks/sink.h>
 #include <spdlog/spdlog.h>
 
 #include <cstdlib>
@@ -205,4 +207,22 @@ TEST_CASE("tail_best honors an explicit paths list and skips the ring buffer", "
 
     auto tail = helix::logs::tail_best(50, {"/nonexistent/pinned.log"});
     REQUIRE(tail.find("ring-should-not-leak-into-pinned-paths") == std::string::npos);
+}
+
+// ============================================================================
+// init_early() routes libhv into spdlog
+// ============================================================================
+
+TEST_CASE("init_early sends libhv's log lines into the ring", "[log_ring][libhv][1317]") {
+    // Start from libhv's own file handler, so only init_early() can reroute it.
+    hlog_set_handler(nullptr);
+    init_early();
+    hlog_set_level(LOG_LEVEL_WARN);
+
+    hlogw("libhv-early-probe-3c9e");
+    CHECK(tail_ring_buffer(200).find("[libhv] libhv-early-probe-3c9e") != std::string::npos);
+
+    // init_early() left the production handler installed; the logger goes back
+    // to the console setup the other cases in this file use.
+    init_console_logging(spdlog::level::warn);
 }

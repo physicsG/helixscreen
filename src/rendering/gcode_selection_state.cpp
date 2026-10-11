@@ -48,11 +48,9 @@ InvalidationScope SelectionState::set_highlighted(const std::unordered_set<std::
     highlighted_ = names;
     highlighted_hash_ = hash_name_set(highlighted_);
     refresh_flags();
-    // The ghost pass draws the selection halo too - it is what is visible for
-    // most of a print - so its cache is stale as well. Measured at 7ms for 219
-    // layers / 128k segments, so the earlier "multi-second re-render" worry that
-    // justified returning SolidCache here was inherited from a comment, not
-    // measured.
+    // The ghost pass draws the selection rim too - it is what is visible for
+    // most of a print - so its cache is stale as well. A full-load ghost
+    // rebuild measured 7ms for 219 layers / 128k segments.
     return InvalidationScope::SolidAndGhost;
 }
 

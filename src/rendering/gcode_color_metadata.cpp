@@ -34,9 +34,11 @@ std::string_view trim(std::string_view sv) {
 bool parse_filament_color_palette(std::string_view line, std::vector<std::string>& out_palette) {
     out_palette.clear();
 
-    // Limit keyword search to the part of the line before '=' to avoid matching
-    // a value that happens to contain "filament_colour" etc. as a substring.
-    size_t eq = line.find('=');
+    // Limit keyword search to the part of the line before the separator to avoid
+    // matching a value that happens to contain "filament_colour" etc. The
+    // separator is whichever of '=' and ':' comes first, as for every other
+    // slicer comment key.
+    size_t eq = line.find_first_of("=:");
     if (eq == std::string_view::npos) {
         return false;
     }
@@ -48,7 +50,7 @@ bool parse_filament_color_palette(std::string_view line, std::vector<std::string
         return false;
     }
 
-    // Split everything after '=' by ';' or ',' and trim each token. Slicers
+    // Split everything after the separator by ';' or ',' and trim each token. Slicers
     // emit both separator forms (OrcaSlicer's joined-config variant uses ',').
     // Empty/invalid tokens become empty strings so palette stays slot-aligned
     // with tool indices: e.g. "#A;;#B" → ["#A", "", "#B"].

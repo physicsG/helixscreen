@@ -21,16 +21,25 @@
 
 #include "../helix_test_fixture.h"
 #include "../test_helpers/live_thread_count.h"
+#include "../test_helpers/scoped_env.h"
+#include "../test_helpers/scoped_runtime_config.h"
+#include "../test_helpers/scoped_update_urls.h"
 #include "../test_helpers/update_checker_test_access.h"
 #include "../test_helpers/update_queue_test_access.h"
+#include "app_constants.h"
 #include "config.h"
 #include "lvgl.h"
+#include "platform_table.h"
+#include "runtime_config.h"
 #include "version.h"
+
+#include <spdlog/fmt/fmt.h>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -43,6 +52,7 @@
 #include <string>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -60,86 +70,21 @@ using json = nlohmann::json;
 namespace {
 
 /**
- * @brief Strip 'v' or 'V' prefix from version tag
+ * @brief One GitHub release asset entry, as the API serves it
  *
- * GitHub releases use "v1.2.3" format, but version comparison needs "1.2.3"
+ * Asset selection keys off the name, so the url and size only need to be
+ * present and distinguishable.
  */
-std::string strip_version_prefix(const std::string& tag) {
-    if (!tag.empty() && (tag[0] == 'v' || tag[0] == 'V')) {
-        return tag.substr(1);
-    }
-    return tag;
+std::string asset_json(const std::string& name) {
+    return R"({"name": ")" + name + R"(", "browser_download_url": "https://x/)" + name +
+           R"(", "size": 123})";
 }
 
 /**
- * @brief Parse ReleaseInfo from GitHub API JSON response
- *
- * Expected JSON format:
- * {
- *   "tag_name": "v1.2.3",
- *   "body": "Release notes...",
- *   "published_at": "2025-01-15T10:00:00Z",
- *   "assets": [{"name": "file.tar.gz", "browser_download_url": "https://..."}]
- * }
+ * @brief The tarball name a release publishes for this build's platform
  */
-struct ParsedRelease {
-    std::string version;       // Stripped version (e.g., "1.2.3")
-    std::string tag_name;      // Original tag (e.g., "v1.2.3")
-    std::string download_url;  // Asset download URL
-    std::string release_notes; // Body markdown
-    std::string published_at;  // ISO 8601 timestamp
-    bool valid = false;
-};
-
-/**
- * @brief Safely get string value from JSON, handling null
- */
-std::string json_string_or_empty(const json& j, const std::string& key) {
-    if (!j.contains(key)) {
-        return "";
-    }
-    const auto& val = j[key];
-    if (val.is_null()) {
-        return "";
-    }
-    if (val.is_string()) {
-        return val.get<std::string>();
-    }
-    return "";
-}
-
-ParsedRelease parse_github_release(const std::string& json_str) {
-    ParsedRelease result;
-
-    try {
-        auto j = json::parse(json_str);
-
-        result.tag_name = json_string_or_empty(j, "tag_name");
-        result.release_notes = json_string_or_empty(j, "body");
-        result.published_at = json_string_or_empty(j, "published_at");
-
-        // Strip 'v' prefix for version comparison
-        result.version = strip_version_prefix(result.tag_name);
-
-        // Find binary asset URL (look for .tar.gz)
-        if (j.contains("assets") && j["assets"].is_array()) {
-            for (const auto& asset : j["assets"]) {
-                std::string name = asset.value("name", "");
-                if (name.find(".tar.gz") != std::string::npos) {
-                    result.download_url = asset.value("browser_download_url", "");
-                    break;
-                }
-            }
-        }
-
-        // Valid if we have at least a version
-        result.valid = !result.version.empty() && parse_version(result.version).has_value();
-
-    } catch (const json::exception&) {
-        result.valid = false;
-    }
-
-    return result;
+std::string platform_tarball(const std::string& version) {
+    return "helixscreen-" + helix::platform::current_key() + "-v" + version + ".tar.gz";
 }
 
 } // anonymous namespace
@@ -147,6 +92,22 @@ ParsedRelease parse_github_release(const std::string& json_str) {
 // ============================================================================
 // Version Parsing Behind Update Detection
 // ============================================================================
+
+TEST_CASE("Self-restart sentinel creates a missing fallback dir", "[update_checker][sentinel]") {
+    namespace fs = std::filesystem;
+    const std::string prev = AppConstants::Update::detail::backup_fallback_dir_ref();
+    const fs::path root =
+        fs::temp_directory_path() / ("helix-sentinel-" + std::to_string(getpid()));
+    const fs::path dir = root / ".helixscreen";
+    fs::remove_all(root);
+    AppConstants::Update::detail::backup_fallback_dir_ref() = dir.string();
+
+    CHECK(UpdateChecker::write_self_restart_sentinel());
+    CHECK(fs::exists(dir / "self_restart_sentinel"));
+
+    AppConstants::Update::detail::backup_fallback_dir_ref() = prev;
+    fs::remove_all(root);
+}
 
 // The three-way update rule lives in compare_channel_version() and is pinned
 // against that shipped function at the bottom of this file. What remains here
@@ -161,14 +122,14 @@ TEST_CASE("Version parsing semantics update detection rests on", "[update_checke
         REQUIRE(*v2 > *v1);
     }
 
-    SECTION("pre-release suffix stripped for comparison") {
-        // Pre-release versions should compare as their base version
+    SECTION("a pre-release ranks below the release of its triple") {
+        // The updater has to offer 1.0.0 to someone running a 1.0.0 beta.
         auto beta = parse_version("1.0.0-beta");
         auto release = parse_version("1.0.0");
         REQUIRE(beta.has_value());
         REQUIRE(release.has_value());
-        // Both parse to 1.0.0, so they're equal
-        REQUIRE(*beta == *release);
+        REQUIRE(*beta < *release);
+        REQUIRE(*beta != *release);
     }
 }
 
@@ -177,45 +138,44 @@ TEST_CASE("Version parsing semantics update detection rests on", "[update_checke
 // ============================================================================
 
 TEST_CASE("GitHub release JSON parsing", "[update_checker][json]") {
+    UpdateChecker::ReleaseInfo release;
+    std::string error;
+
     SECTION("parses valid release JSON") {
-        const char* json_str = R"({
+        const std::string tarball = platform_tarball("1.2.3");
+        const std::string json_str = R"({
             "tag_name": "v1.2.3",
             "body": "## What's New\n- Feature A\n- Bug fix B",
             "published_at": "2025-01-15T10:00:00Z",
-            "assets": [{
-                "name": "helixscreen-1.2.3.tar.gz",
-                "browser_download_url": "https://github.com/prestonbrown/helixscreen/releases/download/v1.2.3/helixscreen-1.2.3.tar.gz"
-            }]
+            "assets": [)" + asset_json(tarball) +
+                                     R"(]
         })";
 
-        auto release = parse_github_release(json_str);
-
-        REQUIRE(release.valid);
+        REQUIRE(helix::parse_github_release(json_str, release, error));
         REQUIRE(release.tag_name == "v1.2.3");
         REQUIRE(release.version == "1.2.3");
         REQUIRE(release.release_notes == "## What's New\n- Feature A\n- Bug fix B");
         REQUIRE(release.published_at == "2025-01-15T10:00:00Z");
-        REQUIRE(release.download_url ==
-                "https://github.com/prestonbrown/helixscreen/releases/download/v1.2.3/"
-                "helixscreen-1.2.3.tar.gz");
+        REQUIRE(release.download_url == "https://x/" + tarball);
     }
 
-    SECTION("handles multiple assets, selects tar.gz") {
-        const char* json_str = R"({
+    SECTION("selects this platform's tar.gz over its zip and over other assets") {
+        // A release carries one tarball and one zip per platform alongside
+        // GitHub's own source archives. The tarball wins: devices still on
+        // v0.99.30 or earlier gunzip whatever url the asset list hands them.
+        const std::string tarball = platform_tarball("2.0.0");
+        const std::string zip = "helixscreen-" + helix::platform::current_key() + ".zip";
+        const std::string json_str = R"({
             "tag_name": "v2.0.0",
             "body": "Release",
             "published_at": "2025-02-01T00:00:00Z",
-            "assets": [
-                {"name": "source.zip", "browser_download_url": "https://example.com/source.zip"},
-                {"name": "helixscreen.tar.gz", "browser_download_url": "https://example.com/helixscreen.tar.gz"},
-                {"name": "debug.log", "browser_download_url": "https://example.com/debug.log"}
-            ]
+            "assets": [)" + asset_json("source.zip") +
+                                     "," + asset_json(zip) + "," + asset_json(tarball) + "," +
+                                     asset_json("debug.log") + R"(]
         })";
 
-        auto release = parse_github_release(json_str);
-
-        REQUIRE(release.valid);
-        REQUIRE(release.download_url == "https://example.com/helixscreen.tar.gz");
+        REQUIRE(helix::parse_github_release(json_str, release, error));
+        REQUIRE(release.download_url == "https://x/" + tarball);
     }
 
     SECTION("handles missing optional fields gracefully") {
@@ -224,9 +184,7 @@ TEST_CASE("GitHub release JSON parsing", "[update_checker][json]") {
             "tag_name": "v3.0.0"
         })";
 
-        auto release = parse_github_release(json_str);
-
-        REQUIRE(release.valid);
+        REQUIRE(helix::parse_github_release(json_str, release, error));
         REQUIRE(release.version == "3.0.0");
         REQUIRE(release.release_notes.empty());
         REQUIRE(release.published_at.empty());
@@ -240,9 +198,7 @@ TEST_CASE("GitHub release JSON parsing", "[update_checker][json]") {
             "assets": []
         })";
 
-        auto release = parse_github_release(json_str);
-
-        REQUIRE(release.valid);
+        REQUIRE(helix::parse_github_release(json_str, release, error));
         REQUIRE(release.version == "1.0.0");
         REQUIRE(release.download_url.empty());
     }
@@ -254,9 +210,7 @@ TEST_CASE("GitHub release JSON parsing", "[update_checker][json]") {
             "published_at": "2025-01-01T00:00:00Z"
         })";
 
-        auto release = parse_github_release(json_str);
-
-        REQUIRE(release.valid);
+        REQUIRE(helix::parse_github_release(json_str, release, error));
         // null should be converted to empty string by .value() default
         REQUIRE(release.release_notes.empty());
     }
@@ -267,13 +221,13 @@ TEST_CASE("GitHub release JSON parsing", "[update_checker][json]") {
             "body": "missing comma"
         })";
 
-        auto release = parse_github_release(invalid_json);
-        REQUIRE_FALSE(release.valid);
+        REQUIRE_FALSE(helix::parse_github_release(invalid_json, release, error));
+        REQUIRE_FALSE(error.empty());
     }
 
     SECTION("rejects empty JSON object") {
-        auto release = parse_github_release("{}");
-        REQUIRE_FALSE(release.valid);
+        REQUIRE_FALSE(helix::parse_github_release("{}", release, error));
+        REQUIRE_FALSE(error.empty());
     }
 
     SECTION("rejects invalid tag_name") {
@@ -281,13 +235,13 @@ TEST_CASE("GitHub release JSON parsing", "[update_checker][json]") {
             "tag_name": "not-a-version"
         })";
 
-        auto release = parse_github_release(json_str);
-        REQUIRE_FALSE(release.valid);
+        REQUIRE_FALSE(helix::parse_github_release(json_str, release, error));
+        REQUIRE_FALSE(error.empty());
     }
 
     SECTION("rejects empty string") {
-        auto release = parse_github_release("");
-        REQUIRE_FALSE(release.valid);
+        REQUIRE_FALSE(helix::parse_github_release("", release, error));
+        REQUIRE_FALSE(error.empty());
     }
 
     SECTION("handles version without v prefix") {
@@ -295,9 +249,7 @@ TEST_CASE("GitHub release JSON parsing", "[update_checker][json]") {
             "tag_name": "1.5.0"
         })";
 
-        auto release = parse_github_release(json_str);
-
-        REQUIRE(release.valid);
+        REQUIRE(helix::parse_github_release(json_str, release, error));
         REQUIRE(release.tag_name == "1.5.0");
         REQUIRE(release.version == "1.5.0");
     }
@@ -309,23 +261,23 @@ TEST_CASE("GitHub release JSON parsing", "[update_checker][json]") {
 
 TEST_CASE("Version prefix stripping", "[update_checker][version]") {
     SECTION("strips lowercase v") {
-        REQUIRE(strip_version_prefix("v1.2.3") == "1.2.3");
+        REQUIRE(helix::strip_version_prefix("v1.2.3") == "1.2.3");
     }
 
     SECTION("strips uppercase V") {
-        REQUIRE(strip_version_prefix("V1.2.3") == "1.2.3");
+        REQUIRE(helix::strip_version_prefix("V1.2.3") == "1.2.3");
     }
 
     SECTION("preserves version without prefix") {
-        REQUIRE(strip_version_prefix("1.2.3") == "1.2.3");
+        REQUIRE(helix::strip_version_prefix("1.2.3") == "1.2.3");
     }
 
     SECTION("handles empty string") {
-        REQUIRE(strip_version_prefix("") == "");
+        REQUIRE(helix::strip_version_prefix("") == "");
     }
 
     SECTION("handles just v") {
-        REQUIRE(strip_version_prefix("v") == "");
+        REQUIRE(helix::strip_version_prefix("v") == "");
     }
 }
 
@@ -334,19 +286,20 @@ TEST_CASE("Version prefix stripping", "[update_checker][version]") {
 // ============================================================================
 
 TEST_CASE("Update checker error scenarios", "[update_checker][error]") {
+    UpdateChecker::ReleaseInfo release;
+    std::string error;
+
     SECTION("empty response body") {
-        auto release = parse_github_release("");
-        REQUIRE_FALSE(release.valid);
+        REQUIRE_FALSE(helix::parse_github_release("", release, error));
     }
 
     SECTION("non-JSON response") {
-        auto release = parse_github_release("<!DOCTYPE html><html>Error</html>");
-        REQUIRE_FALSE(release.valid);
+        REQUIRE_FALSE(
+            helix::parse_github_release("<!DOCTYPE html><html>Error</html>", release, error));
     }
 
     SECTION("JSON array instead of object") {
-        auto release = parse_github_release("[1, 2, 3]");
-        REQUIRE_FALSE(release.valid);
+        REQUIRE_FALSE(helix::parse_github_release("[1, 2, 3]", release, error));
     }
 
     SECTION("deeply nested invalid structure") {
@@ -354,9 +307,12 @@ TEST_CASE("Update checker error scenarios", "[update_checker][error]") {
             "tag_name": {"nested": "object"}
         })";
 
-        auto release = parse_github_release(json_str);
-        REQUIRE_FALSE(release.valid);
+        REQUIRE_FALSE(helix::parse_github_release(json_str, release, error));
     }
+
+    // Every rejection above has to say why: a silent false leaves the UI with
+    // no message to show.
+    CHECK_FALSE(error.empty());
 }
 
 // ============================================================================
@@ -372,6 +328,7 @@ TEST_CASE("Update checker error scenarios", "[update_checker][error]") {
 #include "ui_update_queue.h"
 
 #include "app_globals.h"
+#include "platform_table.h"
 #include "print_lifecycle_state.h"
 #include "printer_state.h"
 #include "system/update_checker.h"
@@ -439,27 +396,6 @@ TEST_CASE("UpdateChecker cache behavior", "[update_checker][cache]") {
     }
 }
 
-TEST_CASE("UpdateChecker thread safety", "[update_checker][threading]") {
-    auto& checker = UpdateChecker::instance();
-
-    SECTION("get_status is thread-safe") {
-        // Should be able to call from any thread
-        auto status = checker.get_status();
-        (void)status; // Use the variable
-    }
-
-    SECTION("get_cached_update is thread-safe") {
-        // Should return consistent snapshot
-        auto cached = checker.get_cached_update();
-        (void)cached;
-    }
-
-    SECTION("has_update_available is thread-safe") {
-        auto has_update = checker.has_update_available();
-        (void)has_update;
-    }
-}
-
 TEST_CASE("UpdateChecker lifecycle", "[update_checker][lifecycle]") {
     auto& checker = UpdateChecker::instance();
 
@@ -485,24 +421,25 @@ TEST_CASE("UpdateChecker lifecycle", "[update_checker][lifecycle]") {
 // positive. A condition-based wait for the count to settle would let it come
 // back into the default run.
 TEST_CASE("UpdateChecker callback is optional", "[update_checker][callback][slow]") {
-    // Hermetic by construction: no real network. The dev channel already reads
-    // its endpoint from config (/update/dev_url) and is exempt from the rate
-    // limiter, so pointing it at a closed loopback port drives the full
+    // Hermetic by construction: no real network. The dev channel reads its
+    // endpoint from the root-owned update_urls.json (settings.json's copy is
+    // ignored) and is exempt from the rate limiter, so pointing it at a closed
+    // loopback port drives the full
     // check_for_updates -> do_check -> fetch_dev_release -> report_result cycle
     // on a fast, local, deterministic connection refusal. Hitting api.github.com
-    // instead made this test slow, network-dependent, and — because libhv's
+    // instead made this test slow, network-dependent, and - because libhv's
     // requests:: client spins event-loop threads on a successful TLS connection
-    // that outlive the call — the one test in the suite that leaked threads
+    // that outlive the call - the one test in the suite that leaked threads
     // (prestonbrown/helixscreen#1212). The isolation listener's per-TEST_CASE
-    // reset_config_singleton() wipes these keys again for the next test.
+    // reset_config_singleton() wipes these config keys again for the next test;
+    // the ScopedUpdateUrls guard restores the state dir itself.
     auto* config = Config::get_instance();
-    REQUIRE(config != nullptr);
-    // Dev and Beta are gated behind /beta_features — get_channel() reports Stable
+    // Dev and Beta are gated behind /beta_features - get_channel() reports Stable
     // for either one while beta is locked, which would send this check at the real
     // stable endpoint instead of the loopback port below.
     config->set<bool>("/beta_features", true);
     config->set<int>("/update/channel", 2); // Dev
-    config->set<std::string>("/update/dev_url", "http://127.0.0.1:1/");
+    helix::test::ScopedUpdateUrls urls("helix_dev_url", R"({"dev_url": "http://127.0.0.1:1/"})");
 
     auto& checker = UpdateChecker::instance();
     checker.init();
@@ -558,7 +495,8 @@ TEST_CASE("UpdateChecker callback is optional", "[update_checker][callback][slow
 TEST_CASE("Real-world update scenarios", "[update_checker][scenarios]") {
     SECTION("typical GitHub release response") {
         // Simulates actual GitHub API response structure
-        const char* github_response = R"({
+        const std::string tarball = platform_tarball("1.5.0");
+        const std::string github_response = R"({
             "url": "https://api.github.com/repos/prestonbrown/helixscreen/releases/12345",
             "html_url": "https://github.com/prestonbrown/helixscreen/releases/tag/v1.5.0",
             "id": 12345,
@@ -574,10 +512,11 @@ TEST_CASE("Real-world update scenarios", "[update_checker][scenarios]") {
                 {
                     "url": "https://api.github.com/repos/prestonbrown/helixscreen/releases/assets/100",
                     "id": 100,
-                    "name": "helixscreen-1.5.0-arm64.tar.gz",
+                    "name": ")" + tarball + R"(",
                     "size": 5242880,
                     "download_count": 42,
-                    "browser_download_url": "https://github.com/prestonbrown/helixscreen/releases/download/v1.5.0/helixscreen-1.5.0-arm64.tar.gz"
+                    "browser_download_url": "https://github.com/prestonbrown/helixscreen/releases/download/v1.5.0/)" +
+                                            tarball + R"("
                 },
                 {
                     "url": "https://api.github.com/repos/prestonbrown/helixscreen/releases/assets/101",
@@ -590,12 +529,13 @@ TEST_CASE("Real-world update scenarios", "[update_checker][scenarios]") {
             ]
         })";
 
-        auto release = parse_github_release(github_response);
-
-        REQUIRE(release.valid);
+        UpdateChecker::ReleaseInfo release;
+        std::string error;
+        REQUIRE(helix::parse_github_release(github_response, release, error));
         REQUIRE(release.version == "1.5.0");
         REQUIRE(release.tag_name == "v1.5.0");
-        REQUIRE(release.download_url.find("helixscreen-1.5.0-arm64.tar.gz") != std::string::npos);
+        REQUIRE(release.download_url.find(tarball) != std::string::npos);
+        REQUIRE(release.download_bytes == 5242880);
         REQUIRE(release.release_notes.find("Auto-update support") != std::string::npos);
     }
 }
@@ -643,10 +583,10 @@ TEST_CASE("UpdateChecker subject initialization", "[update_checker][subjects]") 
                 static_cast<int>(UpdateChecker::Status::Idle));
     }
 
-    SECTION("string subjects start empty") {
+    SECTION("version text starts on the current version, not blank") {
         const char* version_text = lv_subject_get_string(checker.version_text_subject());
         REQUIRE(version_text != nullptr);
-        REQUIRE(std::string(version_text).empty());
+        REQUIRE(std::string(version_text) == fmt::format("Version {}", HELIX_VERSION));
 
         const char* new_version = lv_subject_get_string(checker.new_version_subject());
         REQUIRE(new_version != nullptr);
@@ -675,14 +615,16 @@ TEST_CASE("UpdateChecker subject accessors remain stable after shutdown",
 }
 
 TEST_CASE("JSON edge cases", "[update_checker][json][edge]") {
+    UpdateChecker::ReleaseInfo release;
+    std::string error;
+
     SECTION("unicode in release notes") {
         const char* json_str = R"({
             "tag_name": "v1.0.0",
             "body": "Fixed emoji display \ud83d\ude80 and Chinese chars \u4e2d\u6587"
         })";
 
-        auto release = parse_github_release(json_str);
-        REQUIRE(release.valid);
+        REQUIRE(helix::parse_github_release(json_str, release, error));
         REQUIRE_FALSE(release.release_notes.empty());
     }
 
@@ -690,23 +632,25 @@ TEST_CASE("JSON edge cases", "[update_checker][json][edge]") {
         std::string long_body(10000, 'x');
         std::string json_str = R"({"tag_name": "v1.0.0", "body": ")" + long_body + R"("})";
 
-        auto release = parse_github_release(json_str);
-        REQUIRE(release.valid);
+        REQUIRE(helix::parse_github_release(json_str, release, error));
         REQUIRE(release.release_notes.length() == 10000);
     }
 
-    SECTION("special characters in asset names") {
-        const char* json_str = R"({
+    SECTION("an asset name carrying no platform key is not selected") {
+        // A wrong-platform binary bricks the device it lands on, so a name the
+        // platform rule does not recognise leaves the update unavailable
+        // rather than guessing. The release still parses; download_url stays
+        // empty. Both spellings below miss the rule for the same reason: no
+        // "-<platform>-v<digit>" between the prefix and the extension.
+        const std::string json_str = R"({
             "tag_name": "v1.0.0",
-            "assets": [{
-                "name": "helix screen_v1.0.0_(arm64).tar.gz",
-                "browser_download_url": "https://example.com/release.tar.gz"
-            }]
+            "assets": [)" + asset_json("helixscreen-1.0.0.tar.gz") +
+                                     "," + asset_json("helix screen_v1.0.0_(arm64).tar.gz") + R"(]
         })";
 
-        auto release = parse_github_release(json_str);
-        REQUIRE(release.valid);
-        REQUIRE_FALSE(release.download_url.empty());
+        REQUIRE(helix::parse_github_release(json_str, release, error));
+        CHECK(release.version == "1.0.0");
+        CHECK(release.download_url.empty());
     }
 }
 
@@ -776,6 +720,29 @@ TEST_CASE("UpdateChecker get_download_path returns valid path", "[update_checker
     checker.shutdown();
 }
 
+TEST_CASE("UpdateChecker stages downloads under dot-prefixed names", "[update_checker]") {
+    // Boards whose gcodes root IS the data partition list every plainly named
+    // file in the print picker, so the staged archive must hide behind a
+    // leading dot in both archive formats. The property is the dot, not the
+    // spelling of the name.
+    SECTION("tar.gz release") {
+        const std::string name =
+            UpdateChecker::download_filename_for_url("https://r.example/helixscreen.tar.gz");
+        INFO(name);
+        REQUIRE(!name.empty());
+        REQUIRE(name.front() == '.');
+        REQUIRE(name.compare(name.size() - 7, 7, ".tar.gz") == 0);
+    }
+    SECTION("zip release") {
+        const std::string name =
+            UpdateChecker::download_filename_for_url("https://r.example/helixscreen.zip");
+        INFO(name);
+        REQUIRE(!name.empty());
+        REQUIRE(name.front() == '.');
+        REQUIRE(name.compare(name.size() - 4, 4, ".zip") == 0);
+    }
+}
+
 // Helper: assert the staging dir is NOT within-or-equal-to install_root. This
 // is the load-bearing safety invariant — TMP_DIR is rm -rf'd on cleanup AND the
 // installer's --update flow (release.sh) does dotfile `rm -rf` inside INSTALL_DIR
@@ -786,6 +753,138 @@ static void require_outside_install_root(const std::string& staging,
                                          const std::string& install_root) {
     REQUIRE(staging != install_root);
     REQUIRE(staging.rfind(install_root + "/", 0) != 0);
+}
+
+TEST_CASE("UpdateChecker install_failure_detail names the cause, not the step",
+          "[update_checker][install_failure_detail]") {
+    using UC = UpdateChecker;
+
+    // The installer's step line ("[n/N] <title> ... FAILED") follows the
+    // [ERROR] lines that say why; the touchscreen needs the why.
+    SECTION("an [ERROR] line wins over a later FAILED step line") {
+        const std::vector<std::string> lines = {
+            "[3/6] Downloaded ... ok (40 MB)",
+            "      \033[0;31m[ERROR]\033[0m Not enough space on /opt (12MB free)",
+            "[4/6] Installed files ... FAILED",
+            "Nothing on your printer was changed after this step.",
+        };
+        REQUIRE(UC::install_failure_detail(lines) ==
+                "[ERROR] Not enough space on /opt (12MB free)");
+    }
+
+    SECTION("the first substantive [ERROR] line is the one shown") {
+        const std::vector<std::string> lines = {
+            "[ERROR] first",
+            "[ERROR] second",
+            "[2/6] Downloaded ... FAILED",
+        };
+        REQUIRE(UC::install_failure_detail(lines) == "[ERROR] first");
+    }
+
+    SECTION("a refusal block names its cause first; the how-to-fix tail is not it") {
+        // check_service_dest_space prints an [ERROR] block: the failing
+        // operation, then the filesystem, then what the user should do. The
+        // closing advice line points at context the touchscreen never shows.
+        const std::vector<std::string> lines = {
+            "[ERROR] Cannot write the service definition to /etc/init.d.",
+            "[ERROR] Filesystem: overlayfs:/overlay (0MB free) -- full or read-only.",
+            "[ERROR] ",
+            "[ERROR] Deleting print files or gcode will NOT help.",
+            "[ERROR] Free a few MB there, then re-run this installer.",
+        };
+        REQUIRE(UC::install_failure_detail(lines) ==
+                "[ERROR] Cannot write the service definition to /etc/init.d.");
+    }
+
+    SECTION("a content-free [ERROR] separator is never the cause") {
+        const std::vector<std::string> lines = {
+            "[ERROR] ",
+            "[ERROR] real cause",
+        };
+        REQUIRE(UC::install_failure_detail(lines) == "[ERROR] real cause");
+    }
+
+    SECTION("without an [ERROR] line, the last ERROR or FAILED line") {
+        const std::vector<std::string> lines = {
+            "[WARN] careful",
+            "[2/6] Downloaded ... FAILED (interrupted)",
+        };
+        REQUIRE(UC::install_failure_detail(lines) == "[2/6] Downloaded ... FAILED (interrupted)");
+    }
+
+    SECTION("an error before a completed step is not the cause") {
+        const std::vector<std::string> lines = {
+            "      [ERROR] Could not seed settings",
+            "[5/6] Connected to Moonraker ... ok (update manager)",
+            "      systemctl enable helixscreen failed (exit 1):",
+            "        Failed to enable unit: Unit file helixscreen.service is masked.",
+            "[6/6] Starting HelixScreen ... FAILED",
+        };
+        REQUIRE(UC::install_failure_detail(lines) ==
+                "systemctl enable helixscreen failed (exit 1):");
+    }
+
+    SECTION("a completed step clears earlier errors and warnings") {
+        const std::vector<std::string> lines = {
+            "[ERROR] stale",
+            "WARNING: stale",
+            "[4/6] Set up service ... ok",
+            "[5/6] Connecting to Moonraker ... FAILED (interrupted)",
+        };
+        REQUIRE(UC::install_failure_detail(lines) ==
+                "[5/6] Connecting to Moonraker ... FAILED (interrupted)");
+    }
+
+    SECTION("a failed command outranks a later FAILED step line") {
+        const std::vector<std::string> lines = {
+            "      apt-get install -y unzip failed (exit 100):",
+            "        E: Unable to locate package unzip",
+            "[2/7] Installing libraries ... FAILED",
+        };
+        REQUIRE(UC::install_failure_detail(lines) == "apt-get install -y unzip failed (exit 100):");
+    }
+
+    SECTION("a WARNING line only when nothing failed louder") {
+        const std::vector<std::string> lines = {"ok", "WARNING: low disk"};
+        REQUIRE(UC::install_failure_detail(lines) == "WARNING: low disk");
+    }
+
+    SECTION("nothing to show") {
+        REQUIRE(UC::install_failure_detail({"all fine"}).empty());
+    }
+}
+
+TEST_CASE("UpdateChecker service_dest_probe_error mirrors the installer's write probe",
+          "[update_checker][1778]") {
+    using UC = UpdateChecker;
+    namespace fs = std::filesystem;
+    const fs::path base =
+        fs::temp_directory_path() / ("helix-probe-" + std::to_string(getpid()));
+    fs::remove_all(base);
+    fs::create_directories(base);
+
+    // The operation under test is a NEW-file write: overwriting an existing
+    // file needs no fresh blocks and succeeds on a full filesystem, which is
+    // why the probe must create its own file and leave nothing behind.
+    SECTION("a writable init dir probes clean and leaves no litter") {
+        REQUIRE(UC::service_dest_probe_error(base.string()).empty());
+        std::error_code ec;
+        CHECK(fs::is_empty(base, ec));
+    }
+
+    SECTION("a missing init dir is a failure, not a pass") {
+        const std::string msg = UC::service_dest_probe_error((base / "absent").string());
+        REQUIRE_FALSE(msg.empty());
+        CHECK(msg.find("absent") != std::string::npos);
+    }
+
+    SECTION("a path under a non-directory fails for any uid") {
+        const fs::path blocker = base / "blocker";
+        { std::ofstream out(blocker); out << "x"; }
+        REQUIRE_FALSE(UC::service_dest_probe_error((blocker / "init.d").string()).empty());
+    }
+
+    fs::remove_all(base);
 }
 
 TEST_CASE("UpdateChecker compute_update_staging_dir derives a safe subdir", "[update_checker]") {
@@ -958,9 +1057,10 @@ TEST_CASE("UpdateChecker cancel_download sets cancelled flag", "[update_checker]
 // runs only from update_from_status() and set_print_start_state() — writing
 // print_state_enum directly leaves it stale.
 static void drive_lifecycle(PrinterState& ps, const char* wire_state, PrintStartPhase phase) {
-    ps.reset_print_start_state(); // force phase to IDLE so the next raise is a new print
+    ps.print_state()
+        .reset_print_start_state(); // force phase to IDLE so the next raise is a new print
     ps.update_from_status(json{{"print_stats", {{"state", wire_state}}}});
-    ps.set_print_start_state(phase, "", 0);
+    ps.print_state().set_print_start_state(phase, "", 0);
     for (int i = 0; i < 8; ++i) {
         helix::ui::UpdateQueue::instance().drain();
     }
@@ -976,7 +1076,7 @@ namespace {
 struct GlobalPrintStateFixture : public HelixTestFixture {
     ~GlobalPrintStateFixture() override {
         auto& ps = get_printer_state();
-        ps.reset_print_start_state();
+        ps.print_state().reset_print_start_state();
         ps.update_from_status(nlohmann::json{{"print_stats", {{"state", "standby"}}}});
         for (int i = 0; i < 8; ++i) {
             helix::ui::UpdateQueue::instance().drain();
@@ -1007,7 +1107,7 @@ TEST_CASE_METHOD(GlobalPrintStateFixture,
     // Host-side pre-print block: print_stats still reads standby while the
     // lifecycle is already Preparing.
     drive_lifecycle(state, "standby", PrintStartPhase::BED_MESH);
-    REQUIRE(state.get_print_lifecycle() == PrintState::Preparing);
+    REQUIRE(state.print_state().get_print_lifecycle() == PrintState::Preparing);
 
     checker.start_download();
 
@@ -1037,7 +1137,7 @@ TEST_CASE_METHOD(GlobalPrintStateFixture,
     checker.clear_cache();
 
     drive_lifecycle(state, "standby", PrintStartPhase::IDLE);
-    REQUIRE(state.get_print_lifecycle() == PrintState::Idle);
+    REQUIRE(state.print_state().get_print_lifecycle() == PrintState::Idle);
 
     checker.start_download();
 
@@ -1070,36 +1170,31 @@ TEST_CASE("UpdateChecker dismissed version logic", "[update_checker][dismissed]"
 
     // Clear any previously dismissed version
     auto* config = Config::get_instance();
-    if (config) {
-        config->set<std::string>("/update/dismissed_version", "");
-        config->save();
-    }
+    config->set<std::string>("/update/dismissed_version", "");
+    config->save();
 
     SECTION("is_version_dismissed returns false when no dismissed version in config") {
         REQUIRE_FALSE(checker.is_version_dismissed("1.2.0"));
     }
 
     SECTION("is_version_dismissed returns true when version matches dismissed") {
-        if (config) {
-            config->set<std::string>("/update/dismissed_version", "1.2.0");
-            config->save();
-        }
+        config->set<std::string>("/update/dismissed_version", "1.2.0");
+        config->save();
+
         REQUIRE(checker.is_version_dismissed("1.2.0"));
     }
 
     SECTION("is_version_dismissed returns false for newer version than dismissed") {
-        if (config) {
-            config->set<std::string>("/update/dismissed_version", "1.2.0");
-            config->save();
-        }
+        config->set<std::string>("/update/dismissed_version", "1.2.0");
+        config->save();
+
         REQUIRE_FALSE(checker.is_version_dismissed("1.3.0"));
     }
 
     SECTION("is_version_dismissed returns true for older version than dismissed") {
-        if (config) {
-            config->set<std::string>("/update/dismissed_version", "1.2.0");
-            config->save();
-        }
+        config->set<std::string>("/update/dismissed_version", "1.2.0");
+        config->save();
+
         REQUIRE(checker.is_version_dismissed("1.1.0"));
     }
 
@@ -1108,11 +1203,9 @@ TEST_CASE("UpdateChecker dismissed version logic", "[update_checker][dismissed]"
         // Since we can't easily set cached_info_ without a real check,
         // test via the config path directly
         // This tests the config interaction pattern
-        if (config) {
-            auto dismissed = config->get<std::string>("/update/dismissed_version", "");
-            // After clearing, should be empty
-            REQUIRE(dismissed.empty());
-        }
+        auto dismissed = config->get<std::string>("/update/dismissed_version", "");
+        // After clearing, should be empty
+        REQUIRE(dismissed.empty());
     }
 
     checker.shutdown();
@@ -1376,6 +1469,50 @@ std::string get_update_fixture_dir() {
 
 } // namespace
 
+TEST_CASE("do_install never runs the installer in test mode",
+          "[update_checker][installer][do_install][test_mode]") {
+    auto tmp = make_temp_dir("helix_install_testmode");
+    REQUIRE(!tmp.empty());
+
+    // An installer that only leaves a marker, so a missing gate shows up as the
+    // marker existing rather than as anything done to the host.
+    const std::string marker = tmp + "/installer_ran";
+    std::string inner = tmp + "/helixscreen";
+    mkdir(inner.c_str(), 0755);
+    create_file(inner + "/install.sh", "#!/bin/sh\ntouch '" + marker + "'\n", true);
+    const std::string tarball = tmp + "/release.tar.gz";
+    std::string cmd =
+        "cd " + tmp + " && COPYFILE_DISABLE=1 tar czf release.tar.gz helixscreen/install.sh";
+    REQUIRE(std::system(cmd.c_str()) == 0);
+
+    // A child process makes the install: past the installer, do_install()
+    // ends the process to restart it, which would take the assertions with it.
+    const pid_t pid = fork();
+    REQUIRE(pid >= 0);
+    if (pid == 0) {
+        ScopedRuntimeConfig scoped_config;
+        get_runtime_config()->test_mode = true;
+        auto& checker = UpdateChecker::instance();
+        UpdateCheckerTestAccess::set_restart_action(checker, [] {});
+        UpdateCheckerTestAccess::set_status_hold_ms(checker, 0, 0);
+        UpdateCheckerTestAccess::do_install(checker, tarball);
+        _exit(0);
+    }
+    int wstatus = 0;
+    for (int i = 0; i < 3000 && waitpid(pid, &wstatus, WNOHANG) == 0; ++i)
+        usleep(10 * 1000);
+    if (waitpid(pid, &wstatus, WNOHANG) == 0) {
+        kill(pid, SIGKILL);
+        waitpid(pid, &wstatus, 0);
+        FAIL("do_install did not return within 30s");
+    }
+
+    CHECK(access(marker.c_str(), F_OK) != 0);
+    CHECK(access(tarball.c_str(), F_OK) != 0);
+
+    remove_dir(tmp);
+}
+
 TEST_CASE("extract_installer_from_tarball: tarball with install.sh",
           "[update_checker][installer][do_install]") {
     auto tmp = make_temp_dir("helix_extract_test");
@@ -1512,17 +1649,14 @@ TEST_CASE("extract_installer_from_tarball: works with empty PATH (systemd regres
     auto tmp = make_temp_dir("helix_path_test");
     REQUIRE(!tmp.empty());
 
-    // Save and clear PATH to simulate a minimal systemd environment
-    const char* original_path = std::getenv("PATH");
-    setenv("PATH", "", 1); // empty PATH — bare execvp("tar",...) would fail
-
-    auto result = UpdateChecker::extract_installer_from_tarball(tarball, tmp);
-
-    // Restore PATH before assertions (even if they fail)
-    if (original_path) {
-        setenv("PATH", original_path, 1);
-    } else {
-        unsetenv("PATH");
+    // Clear PATH to simulate a minimal systemd environment. The guard owns
+    // both the set and the restore, and keeps the original value in storage
+    // it owns (prestonbrown/helixscreen#1537). The tight scope restores PATH
+    // before remove_dir(), whose rm needs the real PATH back.
+    std::string result;
+    {
+        helix::ScopedEnv path_env("PATH", ""); // empty PATH — bare execvp("tar",...) would fail
+        result = UpdateChecker::extract_installer_from_tarball(tarball, tmp);
     }
 
     remove_dir(tmp);
@@ -1535,18 +1669,18 @@ TEST_CASE("extract_installer_from_tarball: works with empty PATH (systemd regres
 // Platform Key & Architecture Validation
 // ============================================================================
 
-TEST_CASE("get_platform_key returns a known platform", "[update_checker][platform]") {
-    std::string platform = UpdateChecker::get_platform_key();
+TEST_CASE("current_key returns a known platform", "[update_checker][platform]") {
+    std::string platform = helix::platform::current_key();
     REQUIRE(!platform.empty());
 
     // Must be one of the supported platform keys. Keep in sync with the
     // release matrix in .github/workflows/release.yml and the #ifdef ladder in
-    // UpdateChecker::get_platform_key(). Adding a platform without an entry
-    // here — AND a matching #elif in get_platform_key — silently bricks
+    // helix::platform::current_key(). Adding a platform without an entry
+    // here — AND a matching #elif in current_key — silently bricks
     // in-app updates for that platform (falls through to "pi", so the device
     // downloads the Pi tarball and ends up with missing shared libs).
-    std::vector<std::string> known_platforms = {"pi", "pi32", "x86", "ad5m",  "k1",
-                                                "k2", "ad5x", "cc1", "esp32", "snapmaker-u1"};
+    std::vector<std::string> known_platforms = {"pi",   "pi32", "x86", "ad5m",  "k1",          "k2",
+                                                "ad5x", "mips", "cc1", "esp32", "snapmaker-u1"};
     bool found = false;
     for (const auto& p : known_platforms) {
         if (platform == p) {
@@ -1557,14 +1691,13 @@ TEST_CASE("get_platform_key returns a known platform", "[update_checker][platfor
     REQUIRE(found);
 }
 
-TEST_CASE("get_platform_key matches compiled binary architecture",
-          "[update_checker][platform][arch]") {
+TEST_CASE("current_key matches compiled binary architecture", "[update_checker][platform][arch]") {
 #ifndef __linux__
     SKIP("Linux-only: requires /proc/self/exe and ELF binary format");
 #else
     // The platform key must agree with what we actually compiled as.
     // This catches the bug where uname() returned "aarch64" on a pi32 build.
-    std::string platform = UpdateChecker::get_platform_key();
+    std::string platform = helix::platform::current_key();
 
     // Check that our own binary's ELF class matches the platform expectation
     FILE* f = fopen("/proc/self/exe", "rb");
@@ -1583,91 +1716,112 @@ TEST_CASE("get_platform_key matches compiled binary architecture",
 
     uint8_t elf_class = elf_header[4]; // 1 = 32-bit, 2 = 64-bit
 
-    if (platform == "pi32" || platform == "ad5m") {
-        REQUIRE(elf_class == 1); // ELFCLASS32
-    } else if (platform == "pi") {
-        REQUIRE(elf_class == 2); // ELFCLASS64
-    }
-    // Other platforms (k1, k2, ad5x, cc1) may vary — no assertion
+    // Native dev builds report "pi" whatever the host, so only the class is
+    // comparable here, not the machine.
+    const auto* expected = helix::platform::find(platform);
+    REQUIRE(expected != nullptr);
+    REQUIRE(elf_class == expected->elf_class);
 #endif
 }
 
-TEST_CASE("mips_runtime_platform_key classifies an AD5X mod layout as ad5x, not k1",
+TEST_CASE("display_name returns non-empty string for all known platforms",
           "[update_checker][platform]") {
-    // The mips binary ships for K1 and AD5X alike, so the split is a runtime
-    // question. A Forge-X rig carries none of the ZMOD markers (no /ZMOD, no
-    // /usr/prog, and no /usr/data inside the chroot) — only the mod git tree —
-    // so the classification must ask the same layout question the launcher and
-    // log collector ask, or the rig self-updates from K1 builds. Layouts are
-    // built under a temp root (the probe_root seam); the real / is never
-    // touched. Both spellings of the mod tree count: the chroot binds
-    // /usr/data at /opt, so exactly one is reachable per side.
-    SECTION("Forge-X chroot spelling (/opt/config/mod) -> ad5x") {
-        std::string root = make_temp_dir("helix_mips_fx");
-        std::filesystem::create_directories(root + "/opt/config/mod/.shell");
-        create_file(root + "/opt/config/mod/.shell/platform.sh", "#!/bin/sh\n");
-        REQUIRE(UpdateChecker::mips_runtime_platform_key(root) == "ad5x");
-        remove_dir(root);
-    }
-    SECTION("Forge-X host-side spelling (/usr/data/config/mod) -> ad5x") {
-        std::string root = make_temp_dir("helix_mips_fxh");
-        std::filesystem::create_directories(root + "/usr/data/config/mod/.shell");
-        create_file(root + "/usr/data/config/mod/.shell/platform.sh", "#!/bin/sh\n");
-        REQUIRE(UpdateChecker::mips_runtime_platform_key(root) == "ad5x");
-        remove_dir(root);
-    }
-    SECTION("ZMOD marker file -> ad5x") {
-        std::string root = make_temp_dir("helix_mips_zmod");
-        std::filesystem::create_directories(root);
-        create_file(root + "/ZMOD", "marker\n");
-        REQUIRE(UpdateChecker::mips_runtime_platform_key(root) == "ad5x");
-        remove_dir(root);
-    }
-    SECTION("FlashForge /usr/prog dir -> ad5x") {
-        std::string root = make_temp_dir("helix_mips_prog");
-        std::filesystem::create_directories(root + "/usr/prog");
-        REQUIRE(UpdateChecker::mips_runtime_platform_key(root) == "ad5x");
-        remove_dir(root);
-    }
-    SECTION("plain layout (K1) -> k1") {
-        std::string root = make_temp_dir("helix_mips_plain");
-        std::filesystem::create_directories(root);
-        REQUIRE(UpdateChecker::mips_runtime_platform_key(root) == "k1");
-        remove_dir(root);
-    }
-}
-
-TEST_CASE("get_platform_display_name returns non-empty string for all known platforms",
-          "[update_checker][platform]") {
-    // Mirror the known_platforms list from "get_platform_key returns a known platform".
-    // Every key that get_platform_key() can return MUST have a display name.
-    // Keep in sync with platform_canonical_model in debug_bundle_collector.cpp
-    // (and UpdateChecker::get_platform_display_name once centralised).
-    std::vector<std::string> known_platforms = {"pi", "pi32", "x86", "ad5m",  "k1",
-                                                "k2", "ad5x", "cc1", "esp32", "snapmaker-u1"};
+    // Mirror the known_platforms list from "current_key returns a known platform".
+    // Every key that helix::platform::current_key() can return MUST have a display name.
+    std::vector<std::string> known_platforms = {"pi",   "pi32", "x86", "ad5m",  "k1",          "k2",
+                                                "ad5x", "mips", "cc1", "esp32", "snapmaker-u1"};
 
     for (const auto& key : known_platforms) {
         INFO("platform key: " << key);
-        std::string name = UpdateChecker::get_platform_display_name(key);
+        std::string name = helix::platform::display_name(key);
         REQUIRE(!name.empty());
+        // Self-update ELF validation and debug-bundle file capture read the
+        // same row, so a key without one silently loses both.
+        REQUIRE(helix::platform::find(key) != nullptr);
     }
 }
 
-TEST_CASE("get_platform_display_name returns correct strings for known platforms",
+TEST_CASE("platform table gives every Linux platform an ELF expectation",
+          "[update_checker][platform]") {
+    // esp32 ships a firmware image, not an ELF release zip.
+    for (const char* key :
+         {"pi", "pi32", "x86", "ad5m", "k1", "k2", "ad5x", "mips", "cc1", "snapmaker-u1"}) {
+        INFO("platform key: " << key);
+        const auto* p = helix::platform::find(key);
+        REQUIRE(p != nullptr);
+        REQUIRE(p->elf_class != 0);
+    }
+}
+
+TEST_CASE("platform table marks which platforms name printer hardware",
+          "[update_checker][platform]") {
+    // Debug bundles compare this platform's display name against the user's
+    // printer pick; generic hosts have no hardware name to compare.
+    for (const char* key : {"pi", "pi32", "x86", "esp32"}) {
+        INFO("platform key: " << key);
+        REQUIRE_FALSE(helix::platform::find(key)->has_printer_hardware);
+    }
+    for (const char* key : {"ad5m", "ad5x", "mips", "k1", "k2", "cc1", "snapmaker-u1"}) {
+        INFO("platform key: " << key);
+        REQUIRE(helix::platform::find(key)->has_printer_hardware);
+    }
+}
+
+TEST_CASE("mips platform validates MIPS32 LE and captures the AD5X zmod files",
+          "[update_checker][platform]") {
+    const auto* p = helix::platform::find("mips");
+    REQUIRE(p != nullptr);
+    REQUIRE(p->elf_class == 1);   // ELFCLASS32
+    REQUIRE(p->elf_data == 1);    // ELFDATA2LSB
+    REQUIRE(p->elf_machine == 8); // EM_MIPS
+
+    const auto* ad5x = helix::platform::find("ad5x");
+    REQUIRE(ad5x != nullptr);
+    REQUIRE(!ad5x->diagnostic_files.empty());
+    REQUIRE(p->diagnostic_files == ad5x->diagnostic_files);
+}
+
+TEST_CASE("elf_header_matches checks class, endianness and machine", "[update_checker][platform]") {
+    const auto* mips = helix::platform::find("mips");
+    REQUIRE(mips != nullptr);
+
+    // 0x7f ELF, class 1, data 1 (LE), e_machine at bytes 18-19.
+    uint8_t hdr[20] = {0x7f, 'E', 'L', 'F', 1, 1};
+    hdr[18] = 0x08;
+    REQUIRE(helix::platform::elf_header_matches(*mips, hdr));
+
+    SECTION("big-endian MIPS is rejected") {
+        hdr[5] = 2;
+        hdr[18] = 0x00;
+        hdr[19] = 0x08;
+        REQUIRE_FALSE(helix::platform::elf_header_matches(*mips, hdr));
+    }
+    SECTION("ARM is rejected") {
+        hdr[18] = 0x28;
+        REQUIRE_FALSE(helix::platform::elf_header_matches(*mips, hdr));
+    }
+    SECTION("64-bit is rejected") {
+        hdr[4] = 2;
+        REQUIRE_FALSE(helix::platform::elf_header_matches(*mips, hdr));
+    }
+}
+
+TEST_CASE("display_name returns correct strings for known platforms",
           "[update_checker][platform]") {
     // Exact display name strings — changing them breaks debug bundle dashboard parsing.
-    REQUIRE(UpdateChecker::get_platform_display_name("pi") == "Raspberry Pi");
-    REQUIRE(UpdateChecker::get_platform_display_name("pi32") == "Raspberry Pi (32-bit)");
-    REQUIRE(UpdateChecker::get_platform_display_name("x86") == "x86 Desktop");
-    REQUIRE(UpdateChecker::get_platform_display_name("ad5m") == "FlashForge Adventurer 5M");
-    REQUIRE(UpdateChecker::get_platform_display_name("ad5x") == "FlashForge Adventurer 5X");
-    REQUIRE(UpdateChecker::get_platform_display_name("k1") == "Creality K1");
-    REQUIRE(UpdateChecker::get_platform_display_name("k2") == "Creality K2 Plus");
-    REQUIRE(UpdateChecker::get_platform_display_name("cc1") == "Elegoo Centauri Carbon");
-    REQUIRE(UpdateChecker::get_platform_display_name("snapmaker-u1") == "Snapmaker U1");
-    REQUIRE(UpdateChecker::get_platform_display_name("esp32") == "BTT K-Touch");
+    REQUIRE(helix::platform::display_name("pi") == "Raspberry Pi");
+    REQUIRE(helix::platform::display_name("pi32") == "Raspberry Pi (32-bit)");
+    REQUIRE(helix::platform::display_name("x86") == "x86 Desktop");
+    REQUIRE(helix::platform::display_name("ad5m") == "FlashForge Adventurer 5M");
+    REQUIRE(helix::platform::display_name("ad5x") == "FlashForge Adventurer 5X");
+    REQUIRE(helix::platform::display_name("mips") == "MIPS (K1 series / AD5X)");
+    REQUIRE(helix::platform::display_name("k1") == "Creality K1");
+    REQUIRE(helix::platform::display_name("k2") == "Creality K2");
+    REQUIRE(helix::platform::display_name("cc1") == "Elegoo Centauri Carbon");
+    REQUIRE(helix::platform::display_name("snapmaker-u1") == "Snapmaker U1");
+    REQUIRE(helix::platform::display_name("esp32") == "BTT K-Touch");
     // Unknown keys fall back to the key itself.
-    REQUIRE(UpdateChecker::get_platform_display_name("unknown-platform") == "unknown-platform");
+    REQUIRE(helix::platform::display_name("unknown-platform") == "unknown-platform");
 }
 
 // ============================================================================
@@ -1932,7 +2086,7 @@ TEST_CASE("extract_zip_member fails for a member that isn't in the archive",
 namespace {
 
 std::string expected_asset_name() {
-    return "helixscreen-" + UpdateChecker::get_platform_key() + ".zip";
+    return "helixscreen-" + helix::platform::current_key() + ".zip";
 }
 
 // Read a whole file; returns "" when it cannot be opened.
@@ -2265,17 +2419,63 @@ TEST_CASE("compare_channel_version: unparseable versions do nothing",
     CHECK(compare_channel_version("", "") == ChannelVersionRelation::Unknown);
 }
 
-TEST_CASE("compare_channel_version: prerelease suffixes are still discarded",
+TEST_CASE("compare_channel_version: prerelease suffixes order by precedence",
           "[update_checker][version][channel]") {
-    // Pins the constraint that forced the release pipeline off suffix-derived
-    // channels: Version carries only major/minor/patch, so two devel builds of
-    // the same x.y.z are indistinguishable here. Releases route by the
-    // RELEASE_CHANNEL file and use plain monotonic versions instead.
-    CHECK(compare_channel_version("1.1.0-dev1", "1.1.0-dev2") == ChannelVersionRelation::Same);
-    CHECK(compare_channel_version("1.1.0", "1.1.0-rc.1") == ChannelVersionRelation::Same);
-    // And with the suffix on the installed side: a beta build is not offered
-    // the plain release of the same x.y.z as an update.
-    CHECK(compare_channel_version("1.0.0-beta", "1.0.0") == ChannelVersionRelation::Same);
+    // The beta lane lives entirely inside one x.y.z, so the suffix is the only
+    // thing that distinguishes two builds on it.
+    CHECK(compare_channel_version("1.1.0-dev1", "1.1.0-dev2") == ChannelVersionRelation::Newer);
+    CHECK(compare_channel_version("1.1.0-beta.2", "1.1.0-beta.11") ==
+          ChannelVersionRelation::Newer);
+    CHECK(compare_channel_version("1.1.0-beta.11", "1.1.0-beta.2") ==
+          ChannelVersionRelation::Older);
+    CHECK(compare_channel_version("1.1.0-beta.1", "1.1.0-beta.1") == ChannelVersionRelation::Same);
+
+    // The stable cut outranks every beta of the same triple, and a channel
+    // serving a beta of the version already installed is behind it.
+    CHECK(compare_channel_version("1.0.0-beta", "1.0.0") == ChannelVersionRelation::Newer);
+    CHECK(compare_channel_version("1.1.0", "1.1.0-rc.1") == ChannelVersionRelation::Older);
+}
+
+// ============================================================================
+// GitHub-fallback asset selection (drives self-update on the fallback path)
+// ============================================================================
+//
+// A release carries one tarball per platform key, and some keys are prefixes
+// of others (k1 and k1-dynamic). Selection must anchor the version's 'v'
+// directly after this build's platform key, or the shorter key grabs the
+// longer platform's tarball. The host test build reports platform "pi"; the
+// decoy below extends it exactly the way k1-dynamic extends k1.
+
+TEST_CASE("parse_github_release: a platform prefix does not select a longer platform's tarball",
+          "[update_checker][github]") {
+    const std::string platform = helix::platform::current_key();
+    // "pi" on a host test build; the test only needs SOME known key.
+    REQUIRE_FALSE(platform.empty());
+
+    const std::string mine = platform_tarball("1.2.3");
+    const std::string decoy = "helixscreen-" + platform + "-dynamic-v0.99.0.tar.gz";
+    // Decoy first: it also sorts first alphabetically, which is how the real
+    // release listing serves it.
+    const std::string body = R"({"tag_name": "v1.2.3", "assets": [)" + asset_json(decoy) + ", " +
+                             asset_json(mine) + "]}";
+
+    UpdateChecker::ReleaseInfo info;
+    std::string error;
+    REQUIRE(helix::parse_github_release(body, info, error));
+    CHECK(info.version == "1.2.3");
+    REQUIRE_FALSE(info.download_url.empty());
+    CHECK(info.download_url.find(mine) != std::string::npos);
+    CHECK(info.download_url.find(decoy) == std::string::npos);
+
+    SECTION("only the longer platform's tarball present: no asset, not the wrong one") {
+        // A wrong-platform tarball bricks the device it lands on; an empty
+        // download_url leaves the update unavailable instead.
+        const std::string only_decoy =
+            R"({"tag_name": "v1.2.3", "assets": [)" + asset_json(decoy) + "]}";
+        UpdateChecker::ReleaseInfo sparse;
+        REQUIRE(helix::parse_github_release(only_decoy, sparse, error));
+        CHECK(sparse.download_url.empty());
+    }
 }
 
 TEST_CASE("ReleaseInfo::is_downgrade defaults to false", "[update_checker][channel]") {
@@ -2453,7 +2653,7 @@ void arm_stalled_download(UpdateChecker& checker, StalledHttpServer& server) {
     auto& state = get_printer_state();
     state.init_subjects(false);
     drive_lifecycle(state, "standby", PrintStartPhase::IDLE);
-    REQUIRE(state.get_print_lifecycle() == PrintState::Idle);
+    REQUIRE(state.print_state().get_print_lifecycle() == PrintState::Idle);
 
     checker.init();
     UpdateCheckerTestAccess::seed_available_update(checker, "9.9.9", server.url());
@@ -2476,7 +2676,7 @@ TEST_CASE_METHOD(GlobalPrintStateFixture,
 
     // Reproduce the reported trap. cancel_download() only sets a flag that the
     // worker reads after downloadFile() returns, and
-    // AboutSettingsOverlay::hide_update_download_modal() immediately resets the
+    // UpdatesSettingsOverlay::hide_update_download_modal() immediately resets the
     // status to Idle. The enum now says "nothing is happening" while the worker
     // is still inside an hour-long blocking call.
     checker.cancel_download();
@@ -2599,4 +2799,255 @@ TEST_CASE_METHOD(HelixTestFixture,
     checker.report_download_status(UpdateChecker::DownloadStatus::Idle, 0, "");
     helix::ui::UpdateQueue::instance().drain();
     checker.shutdown();
+}
+
+// ============================================================================
+// moonraker.conf channel sync
+// ============================================================================
+
+#include "moonraker_api_mock.h"
+#include "moonraker_client_mock.h"
+
+namespace {
+
+/// Counts config writes; the mock's injected config root records their content.
+class CountingTransfers : public MoonrakerFileTransferAPIMock {
+  public:
+    using MoonrakerFileTransferAPIMock::MoonrakerFileTransferAPIMock;
+    int uploads = 0;
+    void upload_file(const std::string& root, const std::string& path, const std::string& content,
+                     SuccessCallback on_success, ErrorCallback on_error) override {
+        ++uploads;
+        MoonrakerFileTransferAPIMock::upload_file(root, path, content, std::move(on_success),
+                                                  std::move(on_error));
+    }
+};
+
+class ChannelSyncApi : public MoonrakerAPIMock {
+  public:
+    ChannelSyncApi(helix::MoonrakerClient& client, helix::PrinterState& state)
+        : MoonrakerAPIMock(client, state), xfers_(client, "http://127.0.0.1:1") {}
+    MoonrakerFileTransferAPI& transfers() override {
+        return xfers_;
+    }
+    void restart_moonraker(SuccessCallback on_success, ErrorCallback) override {
+        ++restarts;
+        if (on_success)
+            on_success();
+    }
+    CountingTransfers xfers_;
+    int restarts = 0;
+};
+
+const char* const kConf = "[server]\nhost: 0.0.0.0\n\n"
+                          "[update_manager helixscreen]\ntype: web\nchannel: {}\n"
+                          "repo: prestonbrown/helixscreen\npath: {}\n";
+
+constexpr const char* kInstallRoot = "/opt/helixscreen";
+
+struct ChannelSyncFixture : public GlobalPrintStateFixture {
+    MoonrakerClientMock client;
+    helix::PrinterState state;
+    ChannelSyncApi api{client, state};
+
+    ChannelSyncFixture() {
+        get_printer_state().init_subjects(false);
+        api.set_http_base_url("http://127.0.0.1:7125");
+        set_moonraker_api(&api);
+    }
+
+    std::string install_root = kInstallRoot;
+    ~ChannelSyncFixture() override {
+        set_moonraker_api(nullptr);
+    }
+
+    void seed(const std::string& conf) {
+        api.xfers_.set_config_files({{"moonraker.conf", conf}});
+    }
+    void set_app_channel(int channel, bool beta_features) {
+        auto* config = Config::get_instance();
+        config->set<bool>("/beta_features", beta_features);
+        config->set<int>("/update/channel", channel);
+    }
+    void start_sync() {
+        UpdateCheckerTestAccess::sync_moonraker_channel_for(UpdateChecker::instance(),
+                                                            install_root);
+    }
+    std::string sync() {
+        start_sync();
+        return drain();
+    }
+    std::string drain() {
+        for (int i = 0; i < 8; ++i)
+            helix::ui::UpdateQueue::instance().drain();
+        return api.xfers_.get_uploaded_config("moonraker.conf").value_or("");
+    }
+    static std::string conf(const char* channel, const char* path = kInstallRoot) {
+        return fmt::format(kConf, channel, path);
+    }
+};
+
+} // namespace
+
+TEST_CASE_METHOD(ChannelSyncFixture,
+                 "Channel sync rewrites a drifted stanza and restarts Moonraker",
+                 "[update_checker][moonraker_channel]") {
+    seed(conf("stable"));
+    set_app_channel(1, true); // Beta
+
+    CHECK(sync() == conf("beta"));
+    CHECK(api.xfers_.uploads == 1);
+    CHECK(api.restarts == 1);
+}
+
+TEST_CASE_METHOD(ChannelSyncFixture, "Channel sync leaves a matching stanza alone",
+                 "[update_checker][moonraker_channel]") {
+    seed(conf("beta"));
+    set_app_channel(1, true);
+
+    CHECK(sync() == conf("beta"));
+    CHECK(api.xfers_.uploads == 0);
+    CHECK(api.restarts == 0);
+}
+
+TEST_CASE_METHOD(ChannelSyncFixture, "Channel sync maps Dev to beta, and clamped Dev to stable",
+                 "[update_checker][moonraker_channel]") {
+    SECTION("Dev with beta features rides beta") {
+        seed(conf("stable"));
+        set_app_channel(2, true);
+        CHECK(sync() == conf("beta"));
+    }
+    SECTION("Dev without beta features is effectively Stable") {
+        seed(conf("beta"));
+        set_app_channel(2, false);
+        CHECK(sync() == conf("stable"));
+    }
+}
+
+TEST_CASE_METHOD(ChannelSyncFixture, "Channel sync never writes without a stanza",
+                 "[update_checker][moonraker_channel]") {
+    const std::string bare = "[server]\nhost: 0.0.0.0\n";
+    seed(bare);
+    set_app_channel(1, true);
+
+    CHECK(sync() == bare);
+    CHECK(api.xfers_.uploads == 0);
+    CHECK(api.restarts == 0);
+}
+
+TEST_CASE_METHOD(ChannelSyncFixture, "Channel sync never restarts Moonraker under a job",
+                 "[update_checker][moonraker_channel]") {
+    seed(conf("stable"));
+    set_app_channel(1, true);
+    drive_lifecycle(get_printer_state(), "paused", PrintStartPhase::IDLE);
+    REQUIRE(job_holds_machine(get_printer_state().print_state().get_print_lifecycle()));
+
+    // The file is still corrected, so Moonraker's next start reads the right channel.
+    CHECK(sync() == conf("beta"));
+    CHECK(api.restarts == 0);
+}
+
+TEST_CASE_METHOD(ChannelSyncFixture, "Channel sync matches the stanza path after canonicalizing",
+                 "[update_checker][moonraker_channel]") {
+    seed(conf("stable", "/opt/./helixscreen/"));
+    set_app_channel(1, true);
+
+    CHECK(sync() == conf("beta", "/opt/./helixscreen/"));
+    CHECK(api.restarts == 1);
+}
+
+TEST_CASE_METHOD(ChannelSyncFixture, "Channel sync never touches another install's stanza",
+                 "[update_checker][moonraker_channel]") {
+    seed(conf("stable", "/home/pi/helixscreen"));
+    set_app_channel(1, true);
+
+    SECTION("stanza names a different directory") {}
+    SECTION("this install's directory is unknown") {
+        install_root.clear();
+    }
+    CHECK(sync() == conf("stable", "/home/pi/helixscreen"));
+    CHECK(api.xfers_.uploads == 0);
+    CHECK(api.restarts == 0);
+}
+
+TEST_CASE_METHOD(ChannelSyncFixture, "Channel sync never writes to a remote Moonraker",
+                 "[update_checker][moonraker_channel]") {
+    seed(conf("stable"));
+    set_app_channel(1, true);
+    api.set_http_base_url("http://203.0.113.7:7125"); // TEST-NET-3, never this host
+
+    CHECK(sync() == conf("stable"));
+    CHECK(api.xfers_.uploads == 0);
+    CHECK(api.restarts == 0);
+}
+
+TEST_CASE_METHOD(ChannelSyncFixture, "Channel sync abandons a printer it was detached from",
+                 "[update_checker][moonraker_channel]") {
+    seed(conf("stable"));
+    set_app_channel(1, true);
+
+    start_sync(); // the download answers inline; the upload waits on the queue
+    UpdateChecker::instance().detach(client);
+
+    CHECK(drain() == conf("stable"));
+    CHECK(api.xfers_.uploads == 0);
+    CHECK(api.restarts == 0);
+}
+
+TEST_CASE_METHOD(ChannelSyncFixture, "Channel sync restarts no printer it was detached from",
+                 "[update_checker][moonraker_channel]") {
+    seed(conf("stable"));
+    set_app_channel(1, true);
+    client.defer_next("machine.update.status");
+
+    CHECK(sync() == conf("beta"));
+    UpdateChecker::instance().detach(client);
+    client.fire_deferred("machine.update.status");
+    drain();
+
+    CHECK(api.restarts == 0);
+}
+
+TEST_CASE_METHOD(ChannelSyncFixture, "Channel sync never restarts a busy update_manager",
+                 "[update_checker][moonraker_channel]") {
+    seed(conf("stable"));
+    set_app_channel(1, true);
+
+    SECTION("update_manager reports busy") {
+        client.set_update_manager_busy(true);
+    }
+    SECTION("update_manager status unavailable") {
+        client.fail_next("machine.update.status");
+    }
+    CHECK(sync() == conf("beta"));
+    CHECK(api.restarts == 0);
+}
+
+TEST_CASE_METHOD(ChannelSyncFixture, "The newest channel sync wins over one still in flight",
+                 "[update_checker][moonraker_channel]") {
+    seed(conf("stable"));
+    set_app_channel(1, true);
+    start_sync(); // downloads inline; its beta upload waits on the queue
+
+    set_app_channel(0, true);
+    start_sync(); // the file already says stable: nothing to write
+
+    CHECK(drain() == conf("stable"));
+    CHECK(api.xfers_.uploads == 0);
+}
+
+TEST_CASE_METHOD(ChannelSyncFixture,
+                 "A job starting during the update status check blocks the restart",
+                 "[update_checker][moonraker_channel]") {
+    seed(conf("stable"));
+    set_app_channel(1, true);
+    client.defer_next("machine.update.status");
+
+    CHECK(sync() == conf("beta"));
+    drive_lifecycle(get_printer_state(), "printing", PrintStartPhase::IDLE);
+    REQUIRE(job_holds_machine(get_printer_state().print_state().get_print_lifecycle()));
+    client.fire_deferred("machine.update.status");
+    drain();
+
+    CHECK(api.restarts == 0);
 }

@@ -3,9 +3,11 @@
 
 #include "clog_meter_geometry.h"
 
+#include "ams_types.h"
 #include "theme_manager.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 
 namespace helix::ui {
@@ -48,6 +50,16 @@ lv_color_t resolve_clog_tint(int mode, int value, int warning) {
     return lv_color_mix(theme_manager_get_color(t.a), theme_manager_get_color(t.b), t.mix_a);
 }
 
+ClogNote clog_meter_note(bool tripped, bool has_reason, bool tangle_active, bool tangle_boosted) {
+    if (tripped && has_reason) {
+        return ClogNote::TripReason;
+    }
+    if (tangle_boosted) {
+        return ClogNote::TangleBoosted;
+    }
+    return tangle_active ? ClogNote::TangleActive : ClogNote::None;
+}
+
 ClogMeterStatus clog_meter_status(int mode, int value, int warning, int danger_pct) {
     if (warning != 0) {
         return ClogMeterStatus::Fault;
@@ -63,6 +75,70 @@ ClogMeterStatus clog_meter_status(int mode, int value, int warning, int danger_p
     return ClogMeterStatus::Ok;
 }
 
+ClogMeterStatus buffer_fault_status(const BufferHealth& health) {
+    if (!health.fault_detection_enabled || !health.is_tracking()) {
+        return ClogMeterStatus::Ok;
+    }
+    return clog_meter_status(static_cast<int>(ClogMeterMode::Buffer), health.danger_value(),
+                             health.is_warning() ? 1 : 0, BufferHealth::kWarningDangerPct);
+}
+
+ClogMeterStatus pressure_status_of_bias(float bias) {
+    const float clamped = std::isnan(bias) ? 0.0f : std::clamp(bias, -1.0f, 1.0f);
+    return pressure_status(static_cast<int>(std::lround(clamped * 100.0f)));
+}
+
+bool clog_meter_is_symmetrical(int mode) {
+    return static_cast<ClogMeterMode>(mode) == ClogMeterMode::Flowguard;
+}
+
+ClogMeterStatus pressure_status(int pct) {
+    const int magnitude = std::abs(pct);
+    if (magnitude >= kPressureFaultPct) {
+        return ClogMeterStatus::Fault;
+    }
+    if (magnitude >= kPressureWarningPct) {
+        return ClogMeterStatus::Warning;
+    }
+    return ClogMeterStatus::Ok;
+}
+
+ClogMeterStatus fill_pressure_status(int pct, bool loaded) {
+    if (pct >= kPressureFullFaultPct) {
+        return ClogMeterStatus::Fault;
+    }
+    if (pct >= kPressureFullWarningPct || (loaded && pct <= kPressureEmptyWarningPct)) {
+        return ClogMeterStatus::Warning;
+    }
+    return ClogMeterStatus::Ok;
+}
+
+PressureTargetSide pressure_target_side(int pct, int target_pct) {
+    if (std::abs(pct - target_pct) <= kPressureTargetDeadbandPct) {
+        return PressureTargetSide::At;
+    }
+    return pct > target_pct ? PressureTargetSide::Above : PressureTargetSide::Below;
+}
+
+const char* buffer_status_token(ClogMeterStatus s) {
+    switch (s) {
+    case ClogMeterStatus::Warning:
+        return "warning";
+    case ClogMeterStatus::Fault:
+        return "danger";
+    case ClogMeterStatus::Ok:
+        break;
+    }
+    return "text_muted";
+}
+
+BufferLean buffer_lean(float bias) {
+    if (std::fabs(bias) < 0.02f) {
+        return BufferLean::Balanced;
+    }
+    return bias < 0 ? BufferLean::Tight : BufferLean::Loose;
+}
+
 bool clog_meter_is_safe(int mode, int value) {
     return static_cast<ClogMeterMode>(mode) == ClogMeterMode::Buffer && value == 0;
 }
@@ -73,7 +149,7 @@ ClogBarGeometry clog_bar_geometry(int mode, int value, int danger_pct, int peak_
         return g;
     }
 
-    const bool symmetrical = static_cast<ClogMeterMode>(mode) == ClogMeterMode::Flowguard;
+    const bool symmetrical = clog_meter_is_symmetrical(mode);
     danger_pct = std::clamp(danger_pct, 0, 100);
     peak_pct = std::clamp(std::abs(peak_pct), 0, 100);
 
@@ -86,12 +162,13 @@ ClogBarGeometry clog_bar_geometry(int mode, int value, int danger_pct, int peak_
         g.fill_w = offset;
         g.marker_x = v < 0 ? centre - offset : centre + offset;
 
-        // Beyond +/- danger_pct at either end.
+        // Beyond +/- danger_pct at either end, the same width at both: an odd
+        // track's spare pixel sits in the safe middle, not in one danger zone.
         const int safe_half = scale(danger_pct, track_w, kHalfRange);
         g.danger_lo_x = 0;
         g.danger_lo_w = std::max(0, centre - safe_half);
-        g.danger_hi_x = centre + safe_half;
-        g.danger_hi_w = std::max(0, track_w - g.danger_hi_x);
+        g.danger_hi_w = g.danger_lo_w;
+        g.danger_hi_x = track_w - g.danger_hi_w;
 
         // The peak is a magnitude; show it on the side the reading leans to,
         // and to the right when it is sitting exactly in the middle.

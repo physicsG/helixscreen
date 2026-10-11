@@ -93,7 +93,7 @@ produces a sentence rather than a protocol object.
 The REPL ignores `--json` — formatted output is the reason the REPL exists.
 
     helix-screen ctl --json current | jq -r .panel
-    helix-screen ctl --json resolve row_hardware | jq -r .path
+    helix-screen ctl --json resolve row_devices | jq -r .path
 
 Options are the same in both modes: `-s/--socket <path>` picks the instance,
 `-C/--cwd <path>` scopes the command (see [the working directory](#the-working-directory)).
@@ -166,15 +166,45 @@ The server speaks JSON-RPC over one of two transports, selectable at runtime:
 | `--remote-http-port <n>` | `7130` | HTTP TCP port (implies http) |
 
 **Unix socket** (default) — local, owner-only (0600), no network exposure. The
-`ctl`/`repl` client speaks this. Socket path resolution (client and server use
-the same order):
+`ctl`/`repl` client speaks this.
+
+The **server** binds the first directory its own context yields:
+1. `--remote-socket <path>` (explicit)
+2. `$RUNTIME_DIRECTORY/` (systemd units)
+3. `$XDG_RUNTIME_DIR/`
+4. `/tmp/`
+
+The **client** searches every directory it might find a server in, because it
+usually runs in a different context than the server: a systemd service has
+`$RUNTIME_DIRECTORY` and no `$XDG_RUNTIME_DIR`, an ssh session has the reverse.
 1. `--remote-socket <path>` / `helix-screen ctl -s <path>` (explicit)
-2. `$XDG_RUNTIME_DIR/helixscreen-control.sock`
-3. `/tmp/helixscreen-control.sock`
+2. `$RUNTIME_DIRECTORY/` (systemd units)
+3. `$XDG_RUNTIME_DIR/`
+4. `/run/helixscreen/` (a client-side guess for systemd's
+   `RuntimeDirectory=helixscreen`, used when the client's own context has
+   neither env var set - an ssh session never inherits the service's)
+5. `/tmp/`
+
+Exactly one live socket among those directories is used automatically; more
+than one makes the client refuse to guess rather than silently pick one and
+drive the wrong app (see "More than one instance" below).
+
+`$RUNTIME_DIRECTORY` comes from `RuntimeDirectory=helixscreen` in
+`config/helixscreen.service` and has to outrank `/tmp`: that unit also sets
+`ProtectSystem=strict`, which leaves `/tmp` read-only, so a socket there cannot
+be bound on any systemd install. Both sides resolve their own directory through
+`src/remote/unix_socket_transport.cpp#control_socket_dir`; the client's wider
+search is `src/remote/unix_socket_transport.cpp#control_socket_search_dirs`.
 
 **HTTP/TCP** — a minimal `POST /rpc` JSON-RPC endpoint. Binds loopback by
 default; LAN exposure is opt-in via `--remote-http-bind`. This is the base for
 the post-1.0 web config UI (the same embedded server will serve it).
+
+The endpoint carries the full command set with none of the Unix socket's 0600
+protection, so a bind to anything outside `127.0.0.0/8` refuses to start unless
+`HELIX_REMOTE_HTTP_TOKEN` is set to at least 16 characters. Once set, every
+request needs `Authorization: Bearer <token>` or it gets `401`. The token comes
+from the environment, not a flag, because `argv` is readable through `/proc`.
 
 ```bash
 ./build/bin/helix-screen --test --remote --remote-transport http --remote-http-port 7130 &
@@ -194,11 +224,16 @@ it probes with a `connect()`, finds a live owner, and parks on
 `helixscreen-control-<pid>.sock` beside it, logging a warning. Both stay
 reachable, and neither gets silently hijacked.
 
-The client resolves in the same spirit. If the well-known path is live it uses
-it — so with two apps running, a bare `helix-screen ctl` drives whichever one
-started first, silently. If the well-known path is dead or absent, the client
-looks for pid-suffixed instances: exactly one is used automatically, and
-several make it refuse to guess:
+The client resolves the same way, across every directory in its search list: one
+live well-known socket anywhere is used automatically. If more than one
+directory has a live well-known socket - two unrelated apps, each the first
+instance in its own context, such as a systemd service and a developer's second
+build in an ssh session - the client refuses to guess and lists every one,
+exactly as it does for pid-suffixed instances below.
+
+If no well-known socket is live anywhere, the client looks for pid-suffixed
+instances instead: exactly one is used automatically, and several make it
+refuse to guess, with the same message either way:
 
 ```
 $ helix-screen ctl ls
@@ -342,16 +377,17 @@ curl -s -X POST http://127.0.0.1:7130/rpc -d '{"jsonrpc":"2.0","id":1,
 | Command | Meaning |
 |---------|---------|
 | `ls`, `describe_screen` `[target]` | List on-screen widgets: name, `path`, `layer`, type, available actions. With a target, list only that widget's subtree (plus the widget itself); with no target, the working directory. The response also carries `topmost_layer` and `active_screen` — compare an entry's `layer` against `topmost_layer` to tell a frontmost widget from one stacked behind it — and `scope` whenever the listing was confined to a subtree. The REPL's rendering groups widgets by what you can do to them, with a final `(inert)` line for labels, icons and containers that carry no action (repeats collapsed as `name x6`) |
-| `list_components` | List **every** registered XML component (live registry): panels, overlays, modals, cards, rows — the full introspectable surface |
+| `list_components` | List the XML components registered so far (they register on first use): panels, overlays, modals, cards, rows |
 | `list_callbacks` | List every registered event-callback name (overlay/modal open-handlers, button callbacks). Names only — nothing is fired |
-| `click <target>` | Click a widget (also toggles switches/checkboxes) |
-| `set_value <target> <v>` | Set a value (slider, switch, dropdown, textarea) |
+| `click <target> [--force]` | Click a widget (also toggles switches/checkboxes) |
+| `set_value <target> <v> [--force]` | Set a value (slider, switch, dropdown, textarea) |
 | `scroll <target> [dx dy]` | Scroll a widget into view, or by a delta |
 | `focus <target>` | Focus a widget through its input group. Fires the real `LV_EVENT_FOCUSED`, so a registered textarea raises the on-screen keyboard — `click` does not, and leaves it hidden. Fails if the widget is not in an input group |
 | `text <target>` | Read a widget's text: `lv_label`, `lv_textarea`, or `lv_dropdown` (its selected option). Descends into a composite (e.g. a button wrapping a label) the same way `click` descends to a value-control. Raises rather than returning `""` if the widget has no text concept at all — an empty label and "not a text widget" are different facts |
 | `state <target>` | Read a widget's LVGL states and flags: `checked`/`disabled`/`focused`/`pressed` as booleans plus an active-`states` array, and `hidden`/`clickable`/`scrollable` under `flags`. Descends a composite row to its control, matching what `click`/`set_value` act on; when it descends, a `target` subobject carries the named widget's own `path` + `flags` (a hidden row's inner switch carries no flag of its own). A HIDDEN widget still resolves by name (only `ls` filters hidden subtrees), so `bind_flag_if` and `disabled=`-prop contracts are assertable here |
 | `set_text <target> <text>` | Overwrite a **label's** text. Resolves the target the same way `text` reads it, so a composite works. For labels the app sets imperatively — a value that comes from a backend field rather than a subject, so `set` cannot reach it (e.g. the AMS loading-error message). A label driven by `bind_text` is restored the next time its subject changes; set the subject instead when one exists |
 | `geom <target> [depth]` | Measured geometry: position, size, declared-vs-computed size, flex/scroll state |
+| `overflow [target]` | Every visible widget whose content reaches past its box, with the px past each edge and whether it `scrollable` (else the excess is clipped). One call finds a stray scrollbar or a clipped row anywhere on screen. A label that dots, scrolls or clips its text is left out: it truncates by design. Intentional scrollers, such as the home carousel, are listed too |
 | `get_const [scope] <name>` | Resolve an XML `#const` to the value the renderer actually sees |
 
 ### Synthetic pointer — testing gestures
@@ -371,6 +407,7 @@ input pipeline**, so gestures behave exactly as they do under a finger.
 | `move <x> <y>` | Move it — a drag while pressed, a hover while released |
 | `release [x y]` | Lift it, at x,y if given, otherwise where it currently is |
 | `long_press <x> <y> [hold_ms]` | Press at x,y, hold past the long-press threshold, then release - the whole gesture inside one request |
+| `tap <x> <y>` | Press and release at x,y. `click <x> <y>` is the same command |
 
 Each command returns only after LVGL has sampled the device twice, so sequences do
 not race the indev timer.
@@ -379,17 +416,19 @@ The device is created lazily on the first pointer command and coexists with the
 real SDL/evdev pointer; LVGL supports multiple pointer indevs. Instances that never
 receive a pointer command never register it.
 
-**A long press cannot be assembled from the shell.** `press`, `sleep`, `release` looks
-like it should work and does not: every `ctl` invocation is its own process and
-connection, so the hold elapses with no client attached, and the command that follows
-re-samples the device in a way that restarts the press. `long_press` exists because the
-hold has to happen server-side. It latches the press, holds without touching the pointer
-while LVGL keeps sampling it on its own timer - exactly as under a resting finger - and
-then releases (`src/remote/remote_control_server.cpp#handle_set_text`).
+**`press`, `sleep`, `release` assembles a long press too.** Every `ctl` invocation is its
+own process and connection, but the press stays latched between them: the synthetic
+pointer reports its latched state on every read (`src/remote/remote_pointer.cpp#read_cb`),
+so LVGL keeps sampling a held press on its own timer while the shell sleeps - exactly as
+under a resting finger. Sleep past the configured long-press time with a margin (0.7s
+covers the default). `long_press` does the whole gesture in one request: it latches the
+press, holds without touching the pointer, then releases
+(`src/remote/remote_control_server.cpp#handle_pointer_long_press`), and it sizes the hold
+itself.
 
 `hold_ms` is optional. Omitted, the server derives the hold from the **configured**
 long-press time (`InputSettingsManager::get_long_press_time()`, the Touch & Input
-setting) plus a margin - `pointer_long_press_hold_ms()` in `include/remote_pointer.h#helix::remote`.
+setting) plus a margin - `pointer_long_press_hold_ms()` in `include/remote_pointer.h#pointer_long_press_hold_ms`.
 Two reasons it is derived rather than hardcoded: LVGL starts counting from the sample
 that first reports the press, not from the moment the command ran, so a hold of exactly
 the threshold races the indev timer and intermittently lands a plain click; and raising
@@ -415,19 +454,37 @@ helix-screen ctl release
 
 Separate commands are right for those last two: what matters is where the pointer goes,
 not how long it rests, and the press stays latched between connections. `long_press`
-always ends in its own release (`src/remote/remote_control_server.cpp#handle_state`), so a
+always ends in its own release (`src/remote/remote_control_server.cpp#handle_pointer_long_press`), so a
 hold-then-slide gesture - long-press to raise a popover, then slide onto it - has no
 single-command form.
 
 Get coordinates from `geom <target>` — it reports each widget's absolute `x`, `y`,
 `w` and `h`, so aim at a rect's centre rather than guessing.
 
+#### Home-grid layout without gestures
+
+`home` edits the layout directly, in cells (`1.5` for a widget with half-cell
+support). Each change is checked the way an Edit Mode drop is, against the widget's
+span limits, its half-cell support and the cells already taken, then saved and
+rebuilt live. A refusal says which rule it broke.
+
+```bash
+helix-screen ctl home                       # every page: grid size and placed widgets
+helix-screen ctl home resize ams 4 1        # keep its position, change its span
+helix-screen ctl home place ams 0 3 6 2     # col row w h [page]; adds a widget not yet placed
+helix-screen ctl home remove fan_stack      # what Edit Mode's trash does
+```
+
+To start from a prepared layout instead, edit the saved config before launch. Under
+`--test` that file is `settings-test.json` in the config dir, not `settings.json`,
+and the layout sits at `/printers/<printer>/panel_widgets/home`.
+
 #### Home-grid Edit Mode and the widget catalog
 
 ```bash
 # 1. Enter Edit Mode - one long press anywhere on the home grid
 helix-screen ctl navigate home
-helix-screen ctl geom filament          # a tile's rect; its name is its PanelWidgetDef id
+helix-screen ctl geom filament          # a tile's rect; its name is its config entry id (fan:1 for an added Fan)
 # {"x": 40, "y": 120, "w": 100, "h": 50, ...}
 helix-screen ctl long_press 90 145      # centre of that rect
 
@@ -436,23 +493,80 @@ helix-screen ctl click nav_btn_edit_add
 helix-screen ctl ls
 ```
 
-The `long_pressed` handler is registered on `carousel_host`, the grid's own container
-(`ui_xml/home_panel.xml#carousel_host`), and the press reaches it by bubbling: the carousel, its
-scroll container, its tiles and the page containers all get `LV_OBJ_FLAG_EVENT_BUBBLE`
-(`src/ui/ui_panel_home.cpp#build_carousel`), and `set_event_bubble_recursive()` re-flags every
-descendant of a page container after its widgets are populated
-(`src/ui/ui_panel_home.cpp#populate_page`). So aiming at a tile is fine - it is
-not necessary to hit the gutter between tiles.
+The grid handlers are registered on `carousel_host`, the grid's own container
+(`ui_xml/home_panel.xml#carousel_host`), and a press reaches them by bubbling. Page containers
+bubble by their component (`ui_xml/components/home_page_container.xml`),
+`set_event_bubble_recursive()` re-flags every descendant of a page container after its widgets
+are populated (`src/ui/ui_panel_home.cpp#populate_page`), and the carousel keeps its scroll
+container and tiles bubbling through every page-count change because `build_carousel` sets that
+as a carousel property (`src/ui/ui_carousel.cpp#carousel_set_bubble_events`). So aiming at a
+tile is fine - it is not necessary to hit the gutter between tiles.
 
-**Open the catalog with `click nav_btn_edit_add`, not a second long press.** Entering Edit
-Mode already selects whatever widget was under the press and starts dragging it
-(`src/ui/ui_panel_home.cpp#on_home_grid_long_press`), and `GridEditMode::handle_long_press` opens the
-catalog only when nothing is selected (`src/ui/grid_edit_mode.cpp#compute_resize_result`) - so a
-second long press on a tile starts a drag instead. The nav bar's `+`
-(`ui_xml/navigation_bar.xml#nav_btn_edit_add`) goes straight to `HomePanel::open_widget_catalog()`
-(`src/xml_registration.cpp#register_xml_components`) with no such condition. A press that lands on empty
-grid selects nothing, and *then* a second long press does open the catalog - but the
-button is the case that always works.
+**Open the catalog with `click nav_btn_edit_add`, not a second long press.** The long press
+that enters Edit Mode selects the widget under the press and does not start dragging it,
+however long it is held: `enter()` marks that hold inert (`src/ui/grid_edit_mode.cpp#enter`), and
+an inert hold's long press does nothing. Inside Edit Mode a long press grabs: it picks up the
+selected widget, or the widget under the press once it selects it, and opens the catalog only on
+empty grid with nothing selected (`src/ui/grid_edit_mode.cpp#handle_long_press`). The nav bar's `+`
+(`ui_xml/navigation_bar.xml#nav_btn_edit_add`) goes straight to
+`HomePanel::open_widget_catalog()` (`src/xml_registration.cpp#register_xml_components`) with no
+such condition, so it is the case that always works.
+
+The recipes below enter Edit Mode with `long_press` and pick a widget up with `press`,
+`release`, `press`. A `press`, `sleep`, `release` is a hold like any other: on the grid outside
+Edit Mode it enters Edit Mode and only selects, however long the sleep; inside Edit Mode, on a
+widget, it grabs that widget.
+
+**Swiping works in Edit Mode as it does outside it.** While no widget gesture owns the pointer (a
+press armed on the selected widget, a drag or a resize) and the widget catalog is closed, the
+carousel swipes when there is more than one page, and a swipe stops at the last page: the
+next-page slot past it is a drop target, within reach only while a drag is live
+(`src/ui/ui_panel_home.cpp#apply_edit_swipe_policy`). A single-page home has nothing to swipe to.
+Swipe on empty grid, or starting on a widget that is not selected:
+
+```bash
+helix-screen ctl press 620 160
+helix-screen ctl move 420 160
+helix-screen ctl move 180 160
+helix-screen ctl release 180 160
+```
+
+**Moving a widget takes a second press.** A press on a widget that is not selected only selects
+it, however the pointer moves afterward. A fresh press on the selected widget arms a grab, and
+moving past the drag threshold starts the drag, or a resize when the press landed in a resizable
+widget's edge band (`src/ui/grid_edit_mode.cpp#handle_pressing`). The release commits. A
+release that lands away from its press never changes the selection, so a drop the grid rejects
+leaves the dragged widget selected (`src/ui/ui_panel_home.cpp#on_home_grid_clicked`):
+
+```bash
+helix-screen ctl geom temp_graph                  # a tile's rect: aim at its centre, CX,CY
+helix-screen ctl press $CX $CY
+helix-screen ctl release $CX $CY                  # selects
+helix-screen ctl press $CX $CY                    # arms the grab
+helix-screen ctl move $((CX - 60)) $CY            # drags
+helix-screen ctl release $((CX - 60)) $CY         # drops
+```
+
+**Dragging onto the next-page slot.** This is the only way to add a page. Carry a grabbed widget
+to the right edge of the last page and leave the pointer there: the press stays latched between
+commands and LVGL keeps sampling it, so the edge push carries the widget across the border and the
+page flips onto the slot.
+Releasing there creates the page, with the widget at the dropped cell; moving back across
+before the release creates nothing. On an 800px-wide window:
+
+```bash
+helix-screen ctl press $CX $CY
+helix-screen ctl release $CX $CY                  # selects
+helix-screen ctl press $CX $CY                    # arms the grab
+for x in 730 760 785 795; do helix-screen ctl move $x $CY; done
+sleep 1.5                                         # the push crosses, the page flips
+helix-screen ctl release 795 $CY
+helix-screen ctl get home_populated_pages         # one more than before, see below
+```
+
+The populated page count rises by one only when the dragged widget's page keeps a widget. A drag
+of a page's last widget empties that page, which then stops counting: a page other than the main
+page is removed, and the main page stays but holds no placed widget, so the count stays the same.
 
 **When the long press appears to do nothing**, check the suppressors before suspecting the
 pointer. `should_suppress_edit_mode()` (`src/ui/ui_panel_home.cpp#should_suppress_edit_mode`) drops it when:
@@ -461,8 +575,15 @@ pointer. `should_suppress_edit_mode()` (`src/ui/ui_panel_home.cpp#should_suppres
 |-----------|--------------|
 | Home edit mode is off in Touch & Input (#1245) | `ctl get settings_home_edit_mode_enabled` - check this first |
 | The lock screen is up | `ctl ls` shows the PIN pad as the topmost layer |
-| A scroll object is active on the indev | a preceding drag left the list scrolling; `ctl wait_idle` or release cleanly first |
 | The press target is an arc or slider | those consume drags for value adjustment - aim at a different part of the tile |
+
+It also refuses while a scroll object is active on the indev, but that never stops a stationary
+long press: LVGL clears the scroll object on every new press and sends LONG_PRESSED only while
+none is set (`indev_proc_press`: `lib/lvgl/src/indev/lv_indev.c#"if(indev->pointer.scroll_obj == NULL && indev->long_pr_sent == 0) {"`).
+
+The handler also ignores a long press while the carousel rests on a page it does not act on, one
+the arrow buttons paged to while the widget catalog is open
+(`src/ui/ui_panel_home.cpp#carousel_on_scoped_page`).
 
 Drift is not a factor with `long_press`: entering Edit Mode also requires a stationary
 hold (`src/ui/ui_panel_home.cpp#on_home_grid_long_press`), and the synthetic pointer never moves during it.
@@ -471,10 +592,14 @@ hold (`src/ui/ui_panel_home.cpp#on_home_grid_long_press`), and the synthetic poi
 returns success and does not enter Edit Mode. The subject is written by
 `GridEditMode::enter()` (`src/ui/grid_edit_mode.cpp#enter`) / `exit()`
 (`src/ui/grid_edit_mode.cpp#exit`); setting it by
-hand only unhides the nav bar's edit buttons, which bind to it
-(`ui_xml/navigation_bar.xml#nav_btn_edit_add`). Clicking the `+` then still does nothing, because
+hand only changes what observes it: the nav bar's edit buttons unhide
+(`ui_xml/navigation_bar.xml#nav_btn_edit_add`) and its other buttons disable
+(`ui_xml/navigation_bar.xml#nav_btn_home` and the buttons after it), the page badge shows when
+more than one page is populated (`ui_xml/home_panel.xml`), and a camera widget drops its stream
+to 2 fps (`src/ui/panel_widgets/camera_widget.cpp#update_stream_fps`). Clicking the `+` then still does nothing, because
 `HomePanel::open_widget_catalog()` no-ops unless `grid_edit_mode_.is_active()`
-(`src/ui/ui_panel_home.cpp#open_widget_catalog`). `long_press` is the only way in.
+(`src/ui/ui_panel_home.cpp#open_widget_catalog`). A long press on the grid - `long_press`, or
+`press`, `sleep`, `release` - is the only way in.
 
 A **target** is one of:
 
@@ -562,6 +687,35 @@ overlay) are clicked as-is, so navigation is unaffected. If several candidates
 exist the container is clicked and they are listed under `candidates`, so you
 can re-issue against a specific `@path`.
 
+
+### `click` refuses what a finger could not reach
+
+`lv_obj_send_event(o, LV_EVENT_CLICKED)` lands on any object at all, so a
+synthetic click reports success on widgets no real tap can activate. LVGL's
+input device is stricter: it hit-tests on `LV_OBJ_FLAG_CLICKABLE` and gates
+`PRESSED`/`PRESSING`/`CLICKED` on `!lv_obj_has_state(o, LV_STATE_DISABLED)`.
+
+`click` now refuses a target that is **hidden** (its own flag or any ancestor's),
+**not clickable**, or **disabled**, naming which. `set_value` refuses a disabled
+control, which the user could not have changed; it does not require clickability,
+because it also pokes labels.
+
+```
+$ helix-screen ctl click nav_icon_home_active
+Error: Widget 'nav_icon_home_active' is not clickable - a real tap would not
+reach it. Pass --force to send the event anyway.
+```
+
+`--force` sends it regardless and reports what was bypassed, so the transcript
+cannot be mistaken for an ordinary click:
+
+```json
+{"clicked": "nav_icon_home_active", "forced": "not clickable", "handlers": 3}
+```
+
+Occlusion is NOT checked: a target underneath a modal still clicks. That needs
+hit-testing against the layer stack rather than three flag reads.
+
 The descent is **bounded to scaffolding**, in two ways. A target that already
 carries a click handler of its own is acted on literally — never descended
 into — and the search never tunnels past a descendant that carries one either.
@@ -625,7 +779,9 @@ reads the resolved value, so it shows which one is really in effect.
 state, constructed with representative sample data and the real lifecycle:
 `preflight-check`, `color-mismatch`, `runout-modal`, `lock-screen`,
 `print-status`, `print-tune`, `ams`, `camera`, `ams-error-toast`,
-`action-prompt-worst`, `action-prompt-many`.
+`action-prompt-worst`, `action-prompt-many`, `spaghetti-detection`.
+`spaghetti-detection` fetches its camera still from the mock's unreachable webcam, so set
+`HELIX_DEMO_SNAPSHOT_URL` to a JPEG URL to see the preview.
 
 `action-prompt-many` raises a Klipper `action:prompt` carrying seven material
 presets, the case where the buttons cannot share one row and must wrap. Both
@@ -640,10 +796,10 @@ refusal — this is how the toast's layout gets checked on a 480x272 panel.
 ### Diagnostics & lifecycle
 | Command | Meaning |
 |---------|---------|
-| `wait_idle [--timeout N]` | Block until `UpdateQueue` and `HttpExecutor` are both quiet (default 10s), so a script can gate on real async work instead of a fixed `sleep` |
-| `freeze` | Stop the moving parts for a reproducible capture: `lv_anim_delete_all()` plus `animations_enabled = 0`, and pause every periodic `lv_timer` except two (see below). Returns `{"frozen": true, "timers_paused": N}` |
+| `wait_idle [--timeout N]` | Block until `UpdateQueue`, `HttpExecutor`, and `ThumbnailProcessor` are all quiet (default 10s), so a script can gate on real async work instead of a fixed `sleep` |
+| `freeze` | Stop the moving parts for a reproducible capture: `lv_anim_delete_all()` plus `animations_enabled = 0`, pause every periodic `lv_timer` except two, and park the mock printer's simulation loop (see below). Returns `{"frozen": true, "timers_paused": N}` |
 | `unfreeze` | Reverse `freeze`: resume exactly the timers it paused, re-enable animations. Returns `{"frozen": false, "timers_resumed": N}` |
-| `log [-n N]` | Tail the app's in-memory log ring buffer (default 50 lines). Printed as raw lines, so it pipes to `grep` |
+| `log [-n N]` | Tail the app's in-memory log ring buffer (default 50 lines). Printed as raw lines, so it pipes to `grep`. **Gated**: same diagnostic-upload switch as the bundle/crash pipes — refused with a JSON-RPC error in any build that may not ship diagnostics (see below) |
 | `shutdown` | Ask the app to exit its main loop (`app_request_quit`), running the normal shutdown path |
 | `reset` | Return to the home panel with no overlays or modals open. Returns `{"panel": "home", "overlays_popped": N, "modals_cleared": N, "toasts_cleared": N}` |
 
@@ -653,6 +809,18 @@ means a scripted run can read the app's own log without redirecting stdout to a
 file first. The ring is installed by `init_early()`, so on a short-lived instance
 it still holds the Phase 2 config-load trail that runs before the full logger
 exists (`LOGGING.md` § "Ring-Buffer Sink Lifecycle").
+
+The gate: the log ring is the densest diagnostics surface the app holds, so `log`
+is refused in any build that may not ship diagnostics
+(prestonbrown/helixscreen#1410) — plain local `make` included, which is what a
+dev desktop runs. The refusal is a **real JSON-RPC error** (`Handler error:
+Diagnostic log RPC is disabled in this build`), so `ctl log` exits non-zero with
+the message on stderr rather than printing anything to stdout. A rig deployed
+via `make deploy-*` (or any build/run opted in with `HELIX_DIAGNOSTIC_UPLOADS=1`)
+serves the ring normally; the switch and its default are
+`docs/devel/ENVIRONMENT_VARIABLES.md` § `HELIX_DIAGNOSTIC_UPLOADS`. On a gated
+build, read the log file instead — the tee recipe in
+`docs/devel/LOGGING.md` § "Console sink" is the substitute for scripted runs.
 
 #### `reset` — a cheap alternative to rebooting between tests
 
@@ -704,9 +872,11 @@ meanings available.
 
 #### `wait_idle` — what it can and cannot see
 
-`wait_idle` polls two counters from the transport thread — `UpdateQueue` pending
-work (including anything buffered by a `ScopedFreeze` held internally) and `HttpExecutor` in-flight
-items on both lanes — and returns once both read zero on two consecutive
+`wait_idle` polls three counters from the transport thread: `UpdateQueue` pending
+work (including anything buffered by a `ScopedFreeze` held internally),
+`HttpExecutor` in-flight items on both lanes, and `ThumbnailProcessor`
+pending tasks (its worker pool prescaling a card thumbnail, independent of
+either HTTP lane). It returns once all three read zero on two consecutive
 samples (a single zero reading can land in the gap between one callback
 finishing and the next being enqueued by the work it just completed). A
 timeout names the nonzero counter(s) rather than just saying time ran out.
@@ -732,9 +902,8 @@ large and grows. Known gaps:
 
 | Source | Where | Note |
 |---|---|---|
-| Raw `lv_async_call` | `panel_widget_manager.cpp` (home-panel widget-gate rebuild), `ui_nav_manager.cpp` (overlay-close), `ui_filament_path_layers.cpp`, `grid_edit_mode.cpp` | LVGL exposes only call/cancel — no count API |
-| Thumbnail render thread | `gcode_object_thumbnail_renderer.cpp` | Own `std::thread`, not `HttpExecutor` |
-| GCode geometry build | `ui_gcode_viewer.cpp` (`build_thread_`) | Same |
+| LVGL async list (`run_next_tick`, raw `lv_async_call`) | `panel_widget_manager.cpp` (home-panel widget-gate rebuild), `ui_nav_manager.cpp` (overlay-close), every `run_next_tick` caller | LVGL exposes only call/cancel — no count API |
+| GCode geometry build | `gcode_viewer_state.h` (`build_thread_`) | Same |
 | GCode layer/streaming | `gcode_layer_renderer.h`, `gcode_streaming_controller.h` | Same |
 | Mock backends | `moonraker_client_mock.cpp` (`simulation_thread_` + 3 timers), `moonraker_client_mock_print.cpp` (2 timers), `ams_backend_mock.cpp` (6 threads), `wifi_backend_mock.cpp` (2) | Mock mode **adds** nondeterminism |
 | Deferred deletion | `safe_delete_deferred` / `lv_obj_delete_async` / `safe_clean_children` sites | Escapes the queue by design — `pending == 0` does not mean the old subtree is gone |
@@ -743,7 +912,7 @@ large and grows. Known gaps:
 
 `freeze` pairs with `wait_idle` for screenshot-quality stability: `wait_idle`
 waits for async work to *land*, `freeze` stops the moving parts so a captured
-frame doesn't change again a moment later. It combines three things:
+frame doesn't change again a moment later. It combines four things:
 
 - `lv_anim_delete_all()` — stop animations already running.
 - Flipping the existing `animations_enabled` **subject** to `0` to prevent new
@@ -761,6 +930,15 @@ frame doesn't change again a moment later. It combines three things:
   restores it exactly rather than assuming "on".
 - Pausing every periodic `lv_timer` one at a time via `lv_timer_pause()`,
   **with a two-entry skip list**.
+- Parking the mock printer's simulation loop, on a `--test` run. That loop is
+  its own `std::thread` (`MoonrakerClientMock::temperature_simulation_loop`),
+  not an `lv_timer`, so the timer pass never reaches it. It dispatches a full
+  status snapshot every second, and `PrinterState` applies any field that
+  differs from the subject's own value — so while it runs, a subject a caller
+  wrote with `ctl set` is overwritten within a second, and a card whose
+  visibility derives from printer state flips back under a "frozen" screen.
+  `unfreeze` resumes it. A run against a real printer has no mock to park, and
+  the machine keeps reporting whatever it is doing.
 
 **The skip list, and why a global `lv_timer_enable(false)` cannot be used
 instead:** `UpdateQueue`'s processor is itself an `lv_timer`
@@ -810,8 +988,9 @@ rationale.
 #### `screenshot --stable` / `--target` — the frame-hash gate
 
 `wait_idle` and `freeze` are both best-effort: neither one can see raw
-`lv_async_call` work, the gcode/thumbnail build threads, or the mock
-backends' own threads (see the gap table above). `--stable` is the black-box
+`lv_async_call` work, the gcode-viewer and per-object thumbnail render
+threads, or the mock backends' own threads (see the gap table above).
+`--stable` is the black-box
 backstop — it hashes the actual captured pixels (FNV-1a over the composited
 RGBA buffer) and polls, at most 180 samples 16ms apart (~3s), until three
 consecutive frames hash identically. It throws rather than returning a

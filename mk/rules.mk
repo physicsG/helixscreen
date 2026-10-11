@@ -5,26 +5,6 @@
 # Handles all compilation rules, linking, and main build targets
 
 # ============================================================================
-# BUILD UP-TO-DATE CHECK (for pre-commit hook)
-# ============================================================================
-# Problem: 'make -q' can't evaluate shell commands in the 'all' target,
-# so it always returns "needs rebuild" even when the build is current.
-#
-# Solution: A fast target that uses 'find -newer' to compare source timestamps
-# against the binary. Used by scripts/quality-checks.sh to skip unnecessary builds.
-#
-# Exit codes: 0 = up to date, 1 = needs rebuild
-# ============================================================================
-.PHONY: check-uptodate
-check-uptodate:
-	@if [ ! -f "$(TARGET)" ]; then \
-		exit 1; \
-	fi
-	@if find $(SRC_DIR) $(INC_DIR) -type f \( -name '*.cpp' -o -name '*.c' -o -name '*.h' -o -name '*.mm' \) -newer "$(TARGET)" 2>/dev/null | grep -q .; then \
-		exit 1; \
-	fi
-
-# ============================================================================
 # UNLIMITED -j DETECTION AND AUTO-FIX
 # ============================================================================
 # Problem: 'make -j' (no number) means UNLIMITED parallelism in GNU Make.
@@ -38,35 +18,47 @@ check-uptodate:
 # ============================================================================
 
 # ============================================================================
-# ARCHITECTURE CHANGE DETECTION
+# TOOLCHAIN CHANGE DETECTION
 # ============================================================================
-# Problem: Switching between native and cross-compilation targets leaves
-# stale object files from the wrong architecture, causing cryptic linker errors.
+# make compares timestamps, not toolchains, so one build dir survives both a
+# target switch and a compiler switch and ends up holding objects from each.
 #
-# Solution: Track the last build target in .build-target and auto-clean when
-# the target changes. This prevents mixing ARM and x86/ARM64 objects.
+# Mixing architectures gives cryptic linker errors. Mixing compilers is quieter
+# and worse: GCC and clang mangle a function-local std::string static
+# differently, so the linker keeps BOTH copies of it. One translation unit's
+# write is then invisible to another and nothing reports a problem.
+#
+# .build-target records the target AND the compiler; either changing cleans.
 # ============================================================================
-ARCH_MARKER := $(BUILD_DIR)/.build-target
+TOOLCHAIN_MARKER := $(BUILD_DIR)/.build-target
 # Map pi-both → pi, pi32-both → pi32 so switching between single/dual-link
 # modes doesn't trigger an unnecessary clean (they share the same build dir)
 _RAW_TARGET := $(if $(PLATFORM_TARGET),$(PLATFORM_TARGET),native)
 CURRENT_TARGET := $(subst pi32-both,pi32,$(subst pi-both,pi,$(_RAW_TARGET)))
+# Whatever the compiler prints for itself. This covers a gcc/clang swap and a
+# version bump alike, and is stable across ccache being installed or not.
+CXX_IDENTITY := $(shell $(CXX) --version 2>/dev/null | head -1)
+CURRENT_TOOLCHAIN := $(CURRENT_TARGET) | $(CXX_IDENTITY)
 
-# Check if architecture changed and clean if needed
-define check-arch-change
+# Run this from a dependency-free phase-1 recipe only: once an object has
+# compiled it is already too late to tell which toolchain produced it.
+define check-toolchain-change
 	@mkdir -p $(BUILD_DIR)
-	@if [ -f "$(ARCH_MARKER)" ]; then \
-		LAST_TARGET=$$(cat "$(ARCH_MARKER)"); \
-		if [ "$$LAST_TARGET" != "$(CURRENT_TARGET)" ]; then \
+	@if [ -f "$(TOOLCHAIN_MARKER)" ]; then \
+		LAST_BUILD=$$(cat "$(TOOLCHAIN_MARKER)"); \
+		if [ "$$LAST_BUILD" != "$(CURRENT_TOOLCHAIN)" ]; then \
 			echo ""; \
-			echo "$(YELLOW)$(BOLD)⚠️  Build target changed: $$LAST_TARGET → $(CURRENT_TARGET)$(RESET)"; \
-			echo "$(CYAN)Auto-cleaning to avoid mixing architectures...$(RESET)"; \
+			echo "$(YELLOW)$(BOLD)⚠️  Build target or compiler changed$(RESET)"; \
+			echo "$(YELLOW)     was: $$LAST_BUILD$(RESET)"; \
+			echo "$(YELLOW)     now: $(CURRENT_TOOLCHAIN)$(RESET)"; \
+			echo "$(CYAN)Auto-cleaning so the build dir holds one toolchain...$(RESET)"; \
 			echo ""; \
 			$(MAKE) clean; \
 			mkdir -p $(BUILD_DIR); \
 		fi; \
 	fi
-	@echo "$(CURRENT_TARGET)" > "$(ARCH_MARKER)"
+	@# Rewritten only on a change, so its mtime marks the last toolchain switch.
+	@[ "$$(cat "$(TOOLCHAIN_MARKER)" 2>/dev/null)" = "$(CURRENT_TOOLCHAIN)" ] || echo "$(CURRENT_TOOLCHAIN)" > "$(TOOLCHAIN_MARKER)"
 endef
 
 # Dependency check stamp file - created by check-deps, prevents re-checking
@@ -77,20 +69,8 @@ DEPS_CHECKED_MARKER := $(BUILD_DIR)/.deps-checked
 .PHONY: all
 all:
 ifndef _PARALLEL_CHECKED
-	@# First check for architecture change BEFORE anything else
-	@mkdir -p $(BUILD_DIR)
-	@if [ -f "$(ARCH_MARKER)" ]; then \
-		LAST_TARGET=$$(cat "$(ARCH_MARKER)"); \
-		if [ "$$LAST_TARGET" != "$(CURRENT_TARGET)" ]; then \
-			echo ""; \
-			echo "$(YELLOW)$(BOLD)⚠️  Build target changed: $$LAST_TARGET → $(CURRENT_TARGET)$(RESET)"; \
-			echo "$(CYAN)Auto-cleaning to avoid mixing architectures...$(RESET)"; \
-			echo ""; \
-			$(MAKE) clean; \
-			mkdir -p $(BUILD_DIR); \
-		fi; \
-	fi
-	@echo "$(CURRENT_TARGET)" > "$(ARCH_MARKER)"
+	@# Target and compiler BEFORE anything else compiles
+	$(check-toolchain-change)
 	@# Check dependencies BEFORE parallel build starts (prevents confusing errors)
 	@# Only run if marker is missing or older than check script.
 	@# SKIP_OPTIONAL_DEPS=1 passes --minimal for cross-compilation builds (Docker).
@@ -106,40 +86,47 @@ ifneq ($(YOCTO_BUILD),yes)
 		touch "$(DEPS_CHECKED_MARKER)"; \
 	fi
 endif
-	@# Auto-parallelize: add -j$(NPROC) unless bounded -jN already set
+	@# Auto-parallelize: add a -j unless bounded -jN already set
 	@if echo "$(MAKEFLAGS)" | grep -q 'jobserver'; then \
 		exec $(MAKE) _PARALLEL_CHECKED=1 $(MAKECMDGOALS); \
 	else \
+		j=$(JOBS_SH); \
 		if echo "$(MAKEFLAGS)" | grep -q 'j'; then \
 			echo ""; \
-			echo "$(YELLOW)$(BOLD)⚠️  'make -j' (unlimited) detected - auto-fixing to -j$(NPROC)$(RESET)"; \
+			echo "$(YELLOW)$(BOLD)⚠️  'make -j' (unlimited) detected - auto-fixing to -j$$j$(RESET)"; \
 			echo ""; \
 		fi; \
-		exec $(MAKE) _PARALLEL_CHECKED=1 -j$(NPROC) $(MAKECMDGOALS); \
+		exec $(MAKE) _PARALLEL_CHECKED=1 -j"$$j" $(MAKECMDGOALS); \
 	fi
 else
 # Phase 2: Actual build (only runs when _PARALLEL_CHECKED is set)
-ifdef PI_DUAL_LINK
-all: apply-patches generate-fonts $(TRANS_XML) splash watchdog $(TARGET) $(FBDEV_TARGET) verify-fbdev strip-both bluetooth-plugin
+ifeq ($(ENABLE_EGL_RUNG),yes)
+    EGL_RUNG_GOALS := $(EGL_TARGET) strip-egl
 else
-all: apply-patches generate-fonts $(TRANS_XML) splash watchdog $(TARGET) strip bluetooth-plugin
+    EGL_RUNG_GOALS :=
+endif
+ifdef PI_DUAL_LINK
+all: apply-patches generate-fonts $(TRANS_XML) splash watchdog $(TARGET) $(FBDEV_TARGET) verify-fbdev strip-both $(EGL_RUNG_GOALS) bluetooth-plugin
+else
+all: apply-patches generate-fonts $(TRANS_XML) splash watchdog $(TARGET) strip $(EGL_RUNG_GOALS) bluetooth-plugin
 endif
 	$(ECHO) "$(GREEN)$(BOLD)✓ Build complete!$(RESET)"
 	$(ECHO) "$(CYAN)Run with: $(YELLOW)./$(TARGET)$(RESET)"
 ifndef SKIP_COMPILE_COMMANDS
 	@# Auto-generate compile_commands.json from fragments (fast, <0.3s)
-	@# Uses Python to produce properly indented JSON that VS Code can parse
 	@# Skip with SKIP_COMPILE_COMMANDS=1 (used by pre-commit to avoid LSP churn)
-	@if [ -d "$(BUILD_DIR)" ]; then \
-		CCJ_COUNT=$$(find $(BUILD_DIR) -name '*.ccj' 2>/dev/null | wc -l | tr -d ' '); \
-		if [ "$$CCJ_COUNT" -gt 0 ]; then \
-			find $(BUILD_DIR) -name '*.ccj' -print0 2>/dev/null | xargs -0 cat | \
-				python3 -c "import sys,json; entries=[json.loads(l) for l in sys.stdin if l.strip()]; json.dump(entries, open('compile_commands.json','w'), indent=2)"; \
-			echo "$(CYAN)→ compile_commands.json updated ($$CCJ_COUNT entries)$(RESET)"; \
-		fi; \
+	@# stdout is captured into the summary line; stderr is where the merge says
+	@# why it refused, and it is the only account of a failure the recipe gives.
+	@$(MERGE_COMPILE_COMMANDS)
+endif
+endif
+
+# Shared by `all` and `test-build`: a test build writes fragments too, and a
+# database merged only after the app leaves every test file flagless in clangd.
+MERGE_COMPILE_COMMANDS = if [ -d "$(BUILD_DIR)" ] && [ -f scripts/merge_compile_commands.py ]; then \
+		SUMMARY=$$(python3 scripts/merge_compile_commands.py --build-dir $(BUILD_DIR)) && \
+			echo "$(CYAN)→ compile_commands.json ($$SUMMARY)$(RESET)"; \
 	fi
-endif
-endif
 
 # Build libhv if not present (dependency rule).
 # MUST depend on $(PATCHES_STAMP): libhv patches (e.g. the DNS resolver fallback
@@ -159,7 +146,7 @@ endif
 # different member offsets than the headers our own objects compiled against —
 # ~MoonrakerClient then reads loop_ from the wrong offset and blocks forever on
 # a mutex made of unrelated bytes.
-$(LIBHV_LIB): $(PATCHES_STAMP) $(LIBHV_PATCHED_SRCS)
+$(LIBHV_LIB): $(PATCHES_STAMP) $(LIBHV_PATCHED_SRCS) | $(PATCH_MARKER_STAMP)
 	$(Q)$(MAKE) libhv-build
 
 ifneq ($(LIBHV_JSON_HEADER),)
@@ -173,7 +160,8 @@ endif
 
 # Link binary (SDL2_LIB is empty if using system SDL2)
 # Keep broad filtering so non-object prerequisites can be added safely later.
-$(TARGET): $(SDL2_LIB) $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(CONTRIBUTORS_H) $(APP_C_OBJS) $(APP_OBJS) $(APP_MODULE_OBJS) $(REMOTE_LINENOISE_OBJ) $(OBJCPP_OBJS) $(LVGL_OBJS) $(HELIX_XML_OBJS) $(THORVG_OBJS) $(LVGL_OPENGLES_OBJS) $(LV_MARKDOWN_OBJS) $(QUIRC_OBJS) $(FONT_OBJS) $(TRANS_OBJS) $(APP_DNS_RESOLV_OBJ) $(WPA_DEPS)
+$(TARGET): $(SDL2_LIB) $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(CONTRIBUTORS_H) $(APP_C_OBJS) $(APP_OBJS) $(APP_MODULE_OBJS) $(REMOTE_LINENOISE_OBJ) $(OBJCPP_OBJS) $(LVGL_OBJS) $(HELIX_XML_OBJS) $(THORVG_OBJS) $(SPDLOG_OBJS) $(LVGL_OPENGLES_OBJS) $(LV_MARKDOWN_OBJS) $(QUIRC_OBJS) $(LUA_OBJS) $(FONT_OBJS) $(TRANS_OBJS) $(APP_DNS_RESOLV_OBJ) $(WPA_DEPS)
+	$(call check_abi_unchanged)
 	$(Q)mkdir -p $(BIN_DIR)
 	$(ECHO) "$(MAGENTA)$(BOLD)[LD]$(RESET) $@"
 	# Exclude header prerequisites (including .hpp generated deps like hv/json.hpp).
@@ -187,7 +175,7 @@ $(TARGET): $(SDL2_LIB) $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(CONTRIBUTORS_H) $(APP
 	@# so it re-derives ENABLE_REMOTE_CONTROL as the native default (yes) and
 	@# cannot see what the cross build chose. The stamp carries that across, and
 	@# the deploy targets use it to turn the matching runtime switch on.
-	$(Q)printf 'remote_control=%s\n' "$(ENABLE_REMOTE_CONTROL)" > $(BIN_DIR)/.build-features
+	$(Q)printf 'remote_control=%s\ndiag_uploads=%s\n' "$(ENABLE_REMOTE_CONTROL)" "$(ENABLE_DIAGNOSTIC_UPLOADS)" > $(BIN_DIR)/.build-features
 
 # Collect all .d dependency files for proper header tracking
 # These are generated during compilation with -MMD -MP flags
@@ -202,11 +190,17 @@ DEPFILES := $(wildcard $(OBJ_DIR)/*.d $(OBJ_DIR)/**/*.d)
 # Usage: $(call emit-compile-command,compiler,flags,source,output)
 # Example: $(call emit-compile-command,$(CXX),$(CXXFLAGS) $(INCLUDES),$<,$@)
 #
-# Note: Uses sed to escape double quotes in the command for valid JSON
+# The command must stay shell-ready: a consumer splits it back into argv, so a
+# define whose value has to reach the compiler WITH quotes (-DNAME="text") needs
+# those quotes to survive that split. Single-quoting the value is what carries
+# them through; escaping alone would hand the compiler a bare token and the
+# macro would expand to something that does not parse. Then the double quotes
+# are escaped again for JSON.
 # ============================================================================
 define emit-compile-command
 	@CMD="$(1) $(2) -c $(3) -o $(4)"; \
-	CMD_ESC=$$(echo "$$CMD" | sed 's/"/\\"/g'); \
+	CMD_SH=$$(echo "$$CMD" | sed "s/\(-D[A-Za-z_][A-Za-z0-9_]*=\)\(\"[^\" ]*\"\)/\1'\2'/g"); \
+	CMD_ESC=$$(echo "$$CMD_SH" | sed 's/"/\\"/g'); \
 	printf '{"directory": "%s", "file": "%s", "command": "%s"}\n' \
 		"$(CURDIR)" \
 		"$(abspath $(3))" \
@@ -214,27 +208,10 @@ define emit-compile-command
 		> $(4:.o=.ccj)
 endef
 
-# Precompiled header rule (must be built before any C++ compilation)
-# PCH only depends on its source header and external libraries (LVGL, spdlog)
-# Project headers are NOT included - changing app headers should not invalidate PCH
-# The PCH contains only stable, rarely-changing includes (see include/lvgl_pch.h)
-# CRITICAL: lv_conf.h must be listed - it controls LVGL feature flags
-# PATCHES_STAMP ensures LVGL patches are applied before PCH compilation
-$(PCH): $(PCH_HEADER) $(LIBHV_LIB) $(LIBHV_JSON_HEADER) lv_conf.h $(PATCHES_STAMP)
-	$(Q)mkdir -p $(dir $@)
-	$(ECHO) "$(MAGENTA)$(BOLD)[PCH]$(RESET) $<"
-ifeq ($(V),1)
-	$(Q)echo "$(YELLOW)Command:$(RESET) $(CXX) $(CXXFLAGS) $(INCLUDES) $(LV_CONF) -x c++-header -c $< -o $@"
-endif
-	$(Q)$(CXX) $(CXXFLAGS) $(INCLUDES) $(LV_CONF) -x c++-header -c $< -o $@ || { \
-		echo "$(RED)$(BOLD)✗ PCH compilation failed:$(RESET) $<"; \
-		exit 1; \
-	}
-
 # Compile app C sources
 # Uses DEPFLAGS to generate .d files for header dependency tracking
 # Emits .ccj fragment for incremental compile_commands.json generation
-$(OBJ_DIR)/%.o: $(SRC_DIR)/%.c $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(PATCHES_STAMP)
+$(OBJ_DIR)/%.o: $(SRC_DIR)/%.c $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(PATCHES_STAMP) $(ABI_STAMP) $(FLAGS_STAMP) | $(PATCH_MARKER_STAMP)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(BLUE)[CC]$(RESET) $<"
 ifeq ($(V),1)
@@ -247,44 +224,78 @@ endif
 	}
 	$(call emit-compile-command,$(CC),$(CFLAGS) $(INCLUDES) $(LV_CONF),$<,$@)
 
-# Compile libhv dns_resolv.c for safe_resolve.h (cross-compiled targets only)
-# dns_resolv.c is created by the libhv DNS resolver fallback patch, so we must
-# tell make it's produced by PATCHES_STAMP to prevent parallel build races
-# (make would otherwise fail with "No rule to make target 'dns_resolv.c'").
-ifneq ($(APP_DNS_RESOLV_OBJ),)
+# dns_resolv.c is created by the libhv DNS resolver fallback patch, so make has
+# to know PATCHES_STAMP produces it, or a parallel build on a pristine tree fails
+# with "No rule to make target 'dns_resolv.c'". Unconditional: the native test
+# build compiles it too (DNS_RESOLV_OBJ in tests.mk).
 $(LIBHV_DIR)/base/dns_resolv.c: $(PATCHES_STAMP)
 
+# Compile libhv dns_resolv.c for safe_resolve.h (cross-compiled targets only)
+ifneq ($(APP_DNS_RESOLV_OBJ),)
 $(APP_DNS_RESOLV_OBJ): $(LIBHV_DIR)/base/dns_resolv.c $(LIBHV_LIB)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(BLUE)[CC]$(RESET) $<"
 	$(Q)$(CC) $(CFLAGS) -I$(LIBHV_DIR)/base $(LIBHV_INC) -c $< -o $@
 endif
 
-# Compile app C++ sources (depend on libhv and PCH)
+# ----------------------------------------------------------------------------
+# Feature-flag stamp
+# ----------------------------------------------------------------------------
+# Toggling ENABLE_SCREENSAVER over an existing tree leaves every object compiled
+# under the previous flags: no source changed, so make rebuilds nothing, the
+# callers stay #ifdef'd out, and LTO drops the feature the new sources added.
+# The link succeeds at an unchanged binary size, so exit 0 reports a feature the
+# binary does not contain. $(FLAGS_STAMP) is a prerequisite of every rule that
+# compiles into $(OBJ_DIR); rewriting it here bumps its mtime whenever the flag
+# text changes, which is what forces those objects to rebuild.
+#
+# Hashing the flag text rather than naming the ENABLE_* variables keeps this
+# correct as flags are added. INCLUDES and DEPFLAGS stay out: app and test
+# objects share these flags and differ only in include paths, so folding those in
+# would make `make` and `make test` invalidate each other on every alternation.
+#
+# Keyed on OBJ_DIR rather than BUILD_DIR, unlike $(ABI_STAMP): obj-asan, obj-tsan
+# and obj-cov share a BUILD_DIR while carrying different flags, and a single stamp
+# between them would ping-pong and rebuild everything on each alternation.
+#
+# A dry run (-n, -q) parses with whatever flags its caller passed and must not
+# write the stamp: a `make -n CROSS_COMPILE=...` would leave cross flags behind,
+# and the next real build writing native flags back bumps the mtime and
+# rebuilds every object over identical flags. Instead, a dry run whose flags
+# differ marks the stamp phony, so it still reports the objects that would
+# rebuild.
+FLAGS_STAMP_TEXT := $(CC) $(CFLAGS) $(CXX) $(CXXFLAGS) $(SUBMODULE_CXXFLAGS) $(SUBMODULE_CFLAGS) $(LVGL_C_CFLAGS)
+ifeq ($(findstring n,$(firstword -$(MAKEFLAGS)))$(findstring q,$(firstword -$(MAKEFLAGS))),)
+$(shell mkdir -p $(OBJ_DIR))
+$(file >$(FLAGS_STAMP).new,$(FLAGS_STAMP_TEXT))
+$(shell cmp -s $(FLAGS_STAMP).new $(FLAGS_STAMP) || mv -f $(FLAGS_STAMP).new $(FLAGS_STAMP); rm -f $(FLAGS_STAMP).new)
+else ifneq ($(file <$(FLAGS_STAMP)),$(FLAGS_STAMP_TEXT))
+.PHONY: $(FLAGS_STAMP)
+endif
+
+# Compile app C++ sources (depend on libhv and the LVGL patch stamp)
 # Uses DEPFLAGS to generate .d files for header dependency tracking
 # Emits .ccj fragment for incremental compile_commands.json generation
-$(OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(PCH)
+$(OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(PATCHES_STAMP) $(ABI_STAMP) $(FLAGS_STAMP) | $(PATCH_MARKER_STAMP)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(BLUE)[CXX]$(RESET) $<"
 ifeq ($(V),1)
-	$(Q)echo "$(YELLOW)Command:$(RESET) $(CXX) $(CXXFLAGS) $(DEPFLAGS) $(PCH_FLAGS) $(INCLUDES) $(LV_CONF) -c $< -o $@"
+	$(Q)echo "$(YELLOW)Command:$(RESET) $(CXX) $(CXXFLAGS) $(DEPFLAGS) $(FORCED_INCLUDE) $(INCLUDES) $(LV_CONF) -c $< -o $@"
 endif
-	$(Q)$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(PCH_FLAGS) $(INCLUDES) $(LV_CONF) -c $< -o $@ || { \
+	$(Q)$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(FORCED_INCLUDE) $(INCLUDES) $(LV_CONF) -c $< -o $@ || { \
 		echo "$(RED)$(BOLD)✗ Compilation failed:$(RESET) $<"; \
-		echo "$(YELLOW)Command:$(RESET) $(CXX) $(CXXFLAGS) $(DEPFLAGS) $(PCH_FLAGS) $(INCLUDES) $(LV_CONF) -c $< -o $@"; \
+		echo "$(YELLOW)Command:$(RESET) $(CXX) $(CXXFLAGS) $(DEPFLAGS) $(FORCED_INCLUDE) $(INCLUDES) $(LV_CONF) -c $< -o $@"; \
 		exit 1; \
 	}
-	$(call emit-compile-command,$(CXX),$(CXXFLAGS) $(PCH_FLAGS) $(INCLUDES) $(LV_CONF),$<,$@)
+	$(call emit-compile-command,$(CXX),$(CXXFLAGS) $(FORCED_INCLUDE) $(INCLUDES) $(LV_CONF),$<,$@)
 
 # Large-file support for the gcode reader. FileDataSource addresses gcode by
 # uint64_t but seeks with fseeko/ftello, whose off_t is 32-bit on our 32-bit
 # targets, so a file past 2 GB truncates. The define has to arrive on the command
-# line: $(PCH_FLAGS) force-includes lvgl_pch.h ahead of the source, so a #define
+# line: $(FORCED_INCLUDE) force-includes lvgl_pch.h ahead of the source, so a #define
 # inside the .cpp is read after the system headers have already latched the value.
 # Scoped to this one object because it widens off_t for the whole translation
 # unit; off_t crosses no TU boundary here (see the comment in the source).
-# Side effect: the flags no longer match $(PCH), so this object re-parses
-# lvgl_pch.h from source instead of using the precompiled copy.
 #
 # `override` is load-bearing: the sanitizer targets re-invoke make with CXXFLAGS
 # on the command line, and a command-line variable discards every makefile
@@ -292,22 +303,27 @@ endif
 # so. Nothing else supplies this define, so without the keyword the object
 # compiles with a 32-bit off_t wherever that route is taken.
 $(OBJ_DIR)/rendering/gcode_data_source.o: override CXXFLAGS += -D_FILE_OFFSET_BITS=64
+# text_io opens, stats and seeks every file the ESP32-cut code reads, G-code
+# included; its API carries int64_t offsets, never off_t.
+$(OBJ_DIR)/system/text_io.o: override CXXFLAGS += -D_FILE_OFFSET_BITS=64
+# helix_fs stats and lists the same files; a 32-bit stat fails a >2GB file with EOVERFLOW.
+$(OBJ_DIR)/system/helix_fs.o: override CXXFLAGS += -D_FILE_OFFSET_BITS=64
 
 # Compile app Objective-C++ sources (macOS .mm files)
 # Uses DEPFLAGS to generate .d files for header dependency tracking
 # Emits .ccj fragment for incremental compile_commands.json generation
-$(OBJ_DIR)/%.o: $(SRC_DIR)/%.mm $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(PCH)
+$(OBJ_DIR)/%.o: $(SRC_DIR)/%.mm $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(PATCHES_STAMP) $(ABI_STAMP) $(FLAGS_STAMP) | $(PATCH_MARKER_STAMP)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(BLUE)[OBJCXX]$(RESET) $<"
 ifeq ($(V),1)
-	$(Q)echo "$(YELLOW)Command:$(RESET) $(CXX) $(CXXFLAGS) $(DEPFLAGS) $(PCH_FLAGS) $(INCLUDES) $(LV_CONF) -c $< -o $@"
+	$(Q)echo "$(YELLOW)Command:$(RESET) $(CXX) $(CXXFLAGS) $(DEPFLAGS) $(FORCED_INCLUDE) $(INCLUDES) $(LV_CONF) -c $< -o $@"
 endif
-	$(Q)$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(PCH_FLAGS) $(INCLUDES) $(LV_CONF) -c $< -o $@ || { \
+	$(Q)$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(FORCED_INCLUDE) $(INCLUDES) $(LV_CONF) -c $< -o $@ || { \
 		echo "$(RED)$(BOLD)✗ Compilation failed:$(RESET) $<"; \
-		echo "$(YELLOW)Command:$(RESET) $(CXX) $(CXXFLAGS) $(DEPFLAGS) $(PCH_FLAGS) $(INCLUDES) $(LV_CONF) -c $< -o $@"; \
+		echo "$(YELLOW)Command:$(RESET) $(CXX) $(CXXFLAGS) $(DEPFLAGS) $(FORCED_INCLUDE) $(INCLUDES) $(LV_CONF) -c $< -o $@"; \
 		exit 1; \
 	}
-	$(call emit-compile-command,$(CXX),$(CXXFLAGS) $(PCH_FLAGS) $(INCLUDES) $(LV_CONF),$<,$@)
+	$(call emit-compile-command,$(CXX),$(CXXFLAGS) $(FORCED_INCLUDE) $(INCLUDES) $(LV_CONF),$<,$@)
 
 # Compile LVGL sources (use SUBMODULE_CFLAGS to suppress third-party warnings)
 # NOTE: No DEPFLAGS for internal LVGL headers - 600+ files whose deps bloat make startup.
@@ -320,7 +336,7 @@ endif
 # lvgl_event_pop_unwind_safe.patch (L081 root cause fix). Code-size impact is
 # bounded — only functions with cleanups get extra unwind regions.
 LVGL_C_CFLAGS := $(SUBMODULE_CFLAGS) -fexceptions
-$(OBJ_DIR)/lvgl/%.o: $(LVGL_DIR)/%.c lv_conf.h $(PATCHES_STAMP)
+$(OBJ_DIR)/lvgl/%.o: $(LVGL_DIR)/%.c lv_conf.h $(PATCHES_STAMP) $(ABI_STAMP) $(FLAGS_STAMP) | $(PATCH_MARKER_STAMP)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(CYAN)[CC]$(RESET) $<"
 ifeq ($(V),1)
@@ -338,7 +354,7 @@ endif
 # development (see CLAUDE.md), so it gets
 # DEPFLAGS like app sources do - stale objects after a header-only edit here
 # caused a struct-size mismatch/stack-smash that required hand-deleting 168 .o files.
-$(OBJ_DIR)/helix-xml/%.o: $(HELIX_XML_DIR)/%.c lv_conf.h $(PATCHES_STAMP)
+$(OBJ_DIR)/helix-xml/%.o: $(HELIX_XML_DIR)/%.c lv_conf.h $(PATCHES_STAMP) $(ABI_STAMP) $(FLAGS_STAMP) | $(PATCH_MARKER_STAMP)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(CYAN)[CC]$(RESET) $<"
 	$(Q)$(CC) $(SUBMODULE_CFLAGS) $(DEPFLAGS) $(INCLUDES) $(LV_CONF) -c $< -o $@ || { \
@@ -347,37 +363,39 @@ $(OBJ_DIR)/helix-xml/%.o: $(HELIX_XML_DIR)/%.c lv_conf.h $(PATCHES_STAMP)
 	}
 	$(call emit-compile-command,$(CC),$(SUBMODULE_CFLAGS) $(INCLUDES) $(LV_CONF),$<,$@)
 
-# Compile lv_markdown C sources (markdown viewer + md4c parser)
-$(OBJ_DIR)/lv_markdown/%.o: $(LV_MARKDOWN_DIR)/%.c $(PATCHES_STAMP)
-	$(Q)mkdir -p $(dir $@)
-	$(ECHO) "$(CYAN)[CC]$(RESET) $<"
-	$(Q)$(CC) $(SUBMODULE_CFLAGS) $(INCLUDES) $(LV_CONF) -c $< -o $@ || { \
-		echo "$(RED)$(BOLD)✗ Compilation failed:$(RESET) $<"; \
-		exit 1; \
-	}
-	$(call emit-compile-command,$(CC),$(SUBMODULE_CFLAGS) $(INCLUDES) $(LV_CONF),$<,$@)
-
-# Compile LVGL C++ sources (ThorVG) - use SUBMODULE_CXXFLAGS and PCH
+# Compile LVGL C++ sources (ThorVG) - use SUBMODULE_CXXFLAGS
+# No forced include: lv_conf.h compiles ThorVG out (LV_USE_THORVG_INTERNAL 0),
+# so these TUs are nearly empty and parsing lvgl_pch.h would be most of their cost.
 # NOTE: No DEPFLAGS for internal headers - see C rule above for rationale.
 # lv_conf.h tracked explicitly as it controls LVGL feature flags.
 # Emits .ccj fragment for incremental compile_commands.json generation
-$(OBJ_DIR)/lvgl/%.o: $(LVGL_DIR)/%.cpp $(PCH) lv_conf.h $(PATCHES_STAMP)
+$(OBJ_DIR)/lvgl/%.o: $(LVGL_DIR)/%.cpp lv_conf.h $(PATCHES_STAMP) $(ABI_STAMP) $(FLAGS_STAMP) | $(PATCH_MARKER_STAMP)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(CYAN)[CXX]$(RESET) $<"
 ifeq ($(V),1)
-	$(Q)echo "$(YELLOW)Command:$(RESET) $(CXX) $(SUBMODULE_CXXFLAGS) $(PCH_FLAGS) $(INCLUDES) $(LV_CONF) -c $< -o $@"
+	$(Q)echo "$(YELLOW)Command:$(RESET) $(CXX) $(SUBMODULE_CXXFLAGS) $(INCLUDES) $(LV_CONF) -c $< -o $@"
 endif
-	$(Q)$(CXX) $(SUBMODULE_CXXFLAGS) $(PCH_FLAGS) $(INCLUDES) $(LV_CONF) -c $< -o $@ || { \
+	$(Q)$(CXX) $(SUBMODULE_CXXFLAGS) $(INCLUDES) $(LV_CONF) -c $< -o $@ || { \
 		echo "$(RED)$(BOLD)✗ Compilation failed:$(RESET) $<"; \
 		exit 1; \
 	}
-	$(call emit-compile-command,$(CXX),$(SUBMODULE_CXXFLAGS) $(PCH_FLAGS) $(INCLUDES) $(LV_CONF),$<,$@)
+	$(call emit-compile-command,$(CXX),$(SUBMODULE_CXXFLAGS) $(INCLUDES) $(LV_CONF),$<,$@)
+
+# Compile spdlog's own sources (SPDLOG_COMPILED_LIB), once for every binary
+$(OBJ_DIR)/spdlog/%.o: $(SPDLOG_DIR)/src/%.cpp $(ABI_STAMP) $(FLAGS_STAMP)
+	$(Q)mkdir -p $(dir $@)
+	$(ECHO) "$(CYAN)[CXX]$(RESET) $<"
+	$(Q)$(CXX) $(SUBMODULE_CXXFLAGS) $(SPDLOG_DEFINES) $(SPDLOG_INC) -c $< -o $@ || { \
+		echo "$(RED)$(BOLD)✗ Compilation failed:$(RESET) $<"; \
+		exit 1; \
+	}
+	$(call emit-compile-command,$(CXX),$(SUBMODULE_CXXFLAGS) $(SPDLOG_DEFINES) $(SPDLOG_INC),$<,$@)
 
 # Compile LVGL OpenGL ES shader assets as C++ (raw string literals require C++11)
 # Only the assets/ subdirectory needs C++ — the rest compiles fine as C.
 # -fpermissive allows void* implicit conversions from C-style LVGL allocations.
 # Only built when ENABLE_OPENGLES=yes (LVGL_OPENGLES_OBJS is empty otherwise).
-$(LVGL_OPENGLES_OBJS): $(OBJ_DIR)/lvgl/%.o: $(LVGL_DIR)/%.c lv_conf.h $(PATCHES_STAMP)
+$(LVGL_OPENGLES_OBJS): $(OBJ_DIR)/lvgl/%.o: $(LVGL_DIR)/%.c lv_conf.h $(PATCHES_STAMP) $(ABI_STAMP) $(FLAGS_STAMP) | $(PATCH_MARKER_STAMP)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(CYAN)[CXX/GLES]$(RESET) $<"
 	$(Q)$(CXX) $(SUBMODULE_CXXFLAGS) -fpermissive $(INCLUDES) $(LV_CONF) -c $< -o $@ || { \
@@ -388,7 +406,7 @@ $(LVGL_OPENGLES_OBJS): $(OBJ_DIR)/lvgl/%.o: $(LVGL_DIR)/%.c lv_conf.h $(PATCHES_
 
 # Compile lv_markdown sources (vendored C library - use SUBMODULE_CFLAGS)
 # Includes both src/*.c and deps/md4c/md4c.c
-$(OBJ_DIR)/lv_markdown/%.o: $(LV_MARKDOWN_DIR)/%.c $(PATCHES_STAMP)
+$(OBJ_DIR)/lv_markdown/%.o: $(LV_MARKDOWN_DIR)/%.c $(PATCHES_STAMP) $(ABI_STAMP) $(FLAGS_STAMP) | $(PATCH_MARKER_STAMP)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(CYAN)[CC]$(RESET) $<"
 ifeq ($(V),1)
@@ -410,9 +428,19 @@ $(OBJ_DIR)/quirc/%.o: $(QUIRC_DIR)/%.c
 	}
 	$(call emit-compile-command,$(CC),$(SUBMODULE_CFLAGS) $(INCLUDES),$<,$@)
 
+# Compile Lua sources (vendored C compiled as C++ so a Lua error unwinds as an exception)
+$(OBJ_DIR)/lua/%.o: $(LUA_DIR)/%.c $(PATCHES_STAMP) $(ABI_STAMP) $(FLAGS_STAMP) | $(PATCH_MARKER_STAMP)
+	$(Q)mkdir -p $(dir $@)
+	$(ECHO) "$(CYAN)[CC]$(RESET) $<"
+	$(Q)$(CXX) -x c++ $(SUBMODULE_CXXFLAGS) $(INCLUDES) -c $< -o $@ || { \
+		echo "$(RED)$(BOLD)✗ Compilation failed:$(RESET) $<"; \
+		exit 1; \
+	}
+	$(call emit-compile-command,$(CXX),-x c++ $(SUBMODULE_CXXFLAGS) $(INCLUDES),$<,$@)
+
 # Compile font sources (generated by lv_font_conv - use SUBMODULE flags)
 # Emits .ccj fragment for incremental compile_commands.json generation
-$(OBJ_DIR)/assets/fonts/%.o: assets/fonts/%.c $(PATCHES_STAMP)
+$(OBJ_DIR)/assets/fonts/%.o: assets/fonts/%.c $(PATCHES_STAMP) $(ABI_STAMP) $(FLAGS_STAMP) | $(PATCH_MARKER_STAMP)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(GREEN)[FONT]$(RESET) $<"
 	$(Q)$(CC) $(SUBMODULE_CFLAGS) $(INCLUDES) $(LV_CONF) -c $< -o $@ || { \
@@ -523,6 +551,8 @@ $(OBJ_DIR)/lvgl/demos/%.o: $(LVGL_DIR)/demos/%.c
 # Generate compile_commands.json for IDE/LSP support
 # Fast incremental approach: merges .ccj fragments generated during compilation
 # First build creates fragments, subsequent 'make compile_commands' is instant
+# The merge itself lives in scripts/merge_compile_commands.py so this target and
+# the one that runs after every build cannot drift apart.
 compile_commands:
 	$(ECHO) "$(CYAN)Generating compile_commands.json from build fragments...$(RESET)"
 	@CCJ_FILES=$$(find $(BUILD_DIR) -name '*.ccj' 2>/dev/null | head -1); \
@@ -530,13 +560,8 @@ compile_commands:
 		echo "$(YELLOW)No .ccj fragments found. Running build first...$(RESET)"; \
 		$(MAKE) all test-build; \
 	fi
-	@echo "[" > compile_commands.json
-	@find $(BUILD_DIR) -name '*.ccj' -print0 2>/dev/null | xargs -0 cat | \
-		sed 's/}$$/},/' | \
-		sed '$$ s/,$$//' >> compile_commands.json
-	@echo "]" >> compile_commands.json
-	@CCJ_COUNT=$$(find $(BUILD_DIR) -name '*.ccj' 2>/dev/null | wc -l | tr -d ' '); \
-	echo "$(GREEN)✓ compile_commands.json generated ($$CCJ_COUNT entries)$(RESET)"
+	@SUMMARY=$$(python3 scripts/merge_compile_commands.py --build-dir $(BUILD_DIR)) && \
+		echo "$(GREEN)✓ compile_commands.json: $$SUMMARY$(RESET)"
 	$(ECHO) ""
 	$(ECHO) "$(CYAN)IDE/LSP integration ready. Restart your editor to pick up changes.$(RESET)"
 

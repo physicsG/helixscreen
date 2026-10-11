@@ -7,16 +7,23 @@
 
 #include "app_globals.h"
 #include "config.h"
+#include "gcode_parser.h"
+#include "helix_fs.h"
+#include "http_request_epoch.h"
 #include "system/crash_handler.h"
 #include "system/helix_paths.h"
+#include "text_io.h"
+#include "thumbnail_rules.h"
 
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cerrno>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
-#include <fstream>
 #include <functional>
+#include <iterator>
 #include <vector>
 
 using namespace helix;
@@ -29,25 +36,25 @@ ThumbnailCache& get_thumbnail_cache() {
 
 // Helper to calculate dynamic cache size based on available disk space
 static size_t calculate_dynamic_max_size(const std::string& cache_dir, size_t configured_max) {
-    try {
-        std::filesystem::space_info space = std::filesystem::space(cache_dir);
-        size_t available = space.available;
-
-        // Use 5% of available space
-        size_t dynamic_size = static_cast<size_t>(available * ThumbnailCache::DEFAULT_DISK_PERCENT);
-
-        // Clamp to min/configured_max bounds
-        size_t clamped = std::clamp(dynamic_size, ThumbnailCache::MIN_CACHE_SIZE, configured_max);
-
-        spdlog::debug("[ThumbnailCache] Available disk: {} MB, cache limit: {} MB (max: {} MB)",
-                      available / (1024 * 1024), clamped / (1024 * 1024),
-                      configured_max / (1024 * 1024));
-
-        return clamped;
-    } catch (const std::filesystem::filesystem_error& e) {
-        spdlog::warn("[ThumbnailCache] Failed to query disk space: {}, using minimum", e.what());
+    const auto space = helix::fs::space_available(cache_dir);
+    if (!space) {
+        spdlog::warn("[ThumbnailCache] Failed to query disk space: {}, using minimum",
+                     std::strerror(errno));
         return ThumbnailCache::MIN_CACHE_SIZE;
     }
+    size_t available = static_cast<size_t>(*space);
+
+    // Use 5% of available space
+    size_t dynamic_size = static_cast<size_t>(available * ThumbnailCache::DEFAULT_DISK_PERCENT);
+
+    // Clamp to min/configured_max bounds
+    size_t clamped = std::clamp(dynamic_size, ThumbnailCache::MIN_CACHE_SIZE, configured_max);
+
+    spdlog::debug("[ThumbnailCache] Available disk: {} MB, cache limit: {} MB (max: {} MB)",
+                  available / (1024 * 1024), clamped / (1024 * 1024),
+                  configured_max / (1024 * 1024));
+
+    return clamped;
 }
 
 // Helper to try creating a cache directory and return success
@@ -62,16 +69,14 @@ static bool try_create_cache_dir(const std::string& path) {
 std::string ThumbnailCache::determine_cache_dir() {
     // 1. Check config setting first (explicit override)
     Config* config = Config::get_instance();
-    if (config) {
-        std::string config_dir = config->get<std::string>("/cache/directory", "");
-        if (!config_dir.empty()) {
-            std::string full_path = config_dir + "/" + CACHE_SUBDIR;
-            if (try_create_cache_dir(full_path)) {
-                spdlog::info("[ThumbnailCache] Using configured cache directory: {}", full_path);
-                return full_path;
-            }
-            spdlog::warn("[ThumbnailCache] Cannot use configured directory: {}", full_path);
+    std::string config_dir = config->get<std::string>("/cache/directory", "");
+    if (!config_dir.empty()) {
+        std::string full_path = config_dir + "/" + CACHE_SUBDIR;
+        if (try_create_cache_dir(full_path)) {
+            spdlog::info("[ThumbnailCache] Using configured cache directory: {}", full_path);
+            return full_path;
         }
+        spdlog::warn("[ThumbnailCache] Cannot use configured directory: {}", full_path);
     }
 
     // 2. Fall through to centralized cache resolution chain
@@ -136,20 +141,14 @@ ThumbnailCache::ThumbnailCache(size_t max_size)
 }
 
 void ThumbnailCache::ensure_cache_dir() const {
-    try {
-        std::filesystem::create_directories(cache_dir_);
-    } catch (const std::filesystem::filesystem_error& e) {
+    if (!helix::fs::create_directories(cache_dir_)) {
         spdlog::warn("[ThumbnailCache] Failed to create cache directory {}: {}", cache_dir_,
-                     e.what());
+                     std::strerror(errno));
     }
 }
 
 void ThumbnailCache::load_config() {
     Config* config = Config::get_instance();
-    if (!config) {
-        spdlog::debug("[ThumbnailCache] Config not available, using defaults");
-        return;
-    }
 
     // Read cache settings from config (values are in MB, convert to bytes)
     int max_mb = config->get<int>("/cache/thumbnail_max_mb",
@@ -176,13 +175,8 @@ void ThumbnailCache::load_config() {
                   disk_low_ / (1024 * 1024));
 }
 
-std::string ThumbnailCache::compute_hash(const std::string& path) {
-    std::hash<std::string> hasher;
-    return std::to_string(hasher(path));
-}
-
-std::string ThumbnailCache::get_cache_path(const std::string& relative_path) const {
-    return cache_dir_ + "/" + compute_hash(relative_path) + ".png";
+std::string ThumbnailCache::get_cache_path(const std::string& cache_id) const {
+    return cache_dir_ + "/" + thumbnail_file_name(thumbnail_hash(cache_id), nullptr);
 }
 
 bool ThumbnailCache::is_lvgl_path(const std::string& path) {
@@ -205,7 +199,7 @@ std::string ThumbnailCache::get_if_cached(const std::string& relative_path,
     // If already an LVGL path, check if the file exists
     if (is_lvgl_path(relative_path)) {
         std::string local_path = relative_path.substr(2); // Remove "A:" prefix
-        if (std::filesystem::exists(local_path)) {
+        if (helix::fs::exists(local_path)) {
             return relative_path;
         }
         return "";
@@ -213,35 +207,29 @@ std::string ThumbnailCache::get_if_cached(const std::string& relative_path,
 
     // Check if cached locally
     std::string cache_path = get_cache_path(relative_path);
-    if (!std::filesystem::exists(cache_path)) {
+    if (!helix::fs::exists(cache_path)) {
         return "";
     }
 
-    // If source_modified provided, validate cache freshness
     if (source_modified > 0) {
-        try {
-            auto cache_time = std::filesystem::last_write_time(cache_path);
-            // Convert file_time_type to time_t for comparison
-            // C++20 provides a cleaner way, but this works for C++17
-            auto sctp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
-                cache_time - std::filesystem::file_time_type::clock::now() +
-                std::chrono::system_clock::now());
-            time_t cache_epoch = std::chrono::system_clock::to_time_t(sctp);
+        if (const auto mtime = helix::fs::mtime_ns(cache_path)) {
+            const time_t cache_epoch = static_cast<time_t>(*mtime / 1'000'000'000);
 
-            if (cache_epoch < source_modified) {
+            if (!is_fresh(cache_epoch, source_modified)) {
                 spdlog::debug("[ThumbnailCache] Cache stale for {} (cached: {}, source: {})",
                               relative_path, cache_epoch, source_modified);
                 // Invalidate by removing the file (const_cast needed for invalidation)
                 const_cast<ThumbnailCache*>(this)->invalidate(relative_path);
                 return "";
             }
-        } catch (const std::filesystem::filesystem_error& e) {
-            spdlog::warn("[ThumbnailCache] Failed to check cache age: {}", e.what());
+        } else {
+            spdlog::warn("[ThumbnailCache] Failed to check cache age: {}", std::strerror(errno));
             // On error, assume cache is valid (don't break existing behavior)
         }
     }
 
     spdlog::debug("[ThumbnailCache] Cache hit for {}", relative_path);
+    note_use(cache_path);
     return to_lvgl_path(cache_path);
 }
 
@@ -256,7 +244,7 @@ size_t ThumbnailCache::get_max_size() const {
     return max_size_;
 }
 
-size_t ThumbnailCache::get_available_disk_space() const {
+std::optional<size_t> ThumbnailCache::probe_disk_space() const {
     // Rate-limited: statfs is a syscall against the backing store, and this is
     // reached twice per fetch_optimized() — once via is_caching_allowed() and
     // once inside evict_locked() — on the main thread while a file listing
@@ -275,13 +263,11 @@ size_t ThumbnailCache::get_available_disk_space() const {
         }
     }
 
-    size_t available = 0;
-    try {
-        std::filesystem::space_info space = std::filesystem::space(cache_dir_);
-        available = space.available;
-    } catch (const std::filesystem::filesystem_error& e) {
-        spdlog::warn("[ThumbnailCache] Failed to query disk space: {}", e.what());
-        available = 0;
+    std::optional<size_t> available;
+    if (const auto space = helix::fs::space_available(cache_dir_)) {
+        available = static_cast<size_t>(*space);
+    } else {
+        spdlog::debug("[ThumbnailCache] Free space unknown: {}", std::strerror(errno));
     }
 
     std::lock_guard<std::mutex> lock(disk_probe_mutex_);
@@ -291,20 +277,31 @@ size_t ThumbnailCache::get_available_disk_space() const {
     return available;
 }
 
+size_t ThumbnailCache::get_available_disk_space() const {
+    return probe_disk_space().value_or(0);
+}
+
 void ThumbnailCache::invalidate_disk_probe() {
     std::lock_guard<std::mutex> lock(disk_probe_mutex_);
     disk_probe_valid_ = false;
 }
 
-ThumbnailCache::DiskPressure ThumbnailCache::get_disk_pressure() const {
-    size_t available = get_available_disk_space();
-
-    if (available < disk_critical_) {
+ThumbnailCache::DiskPressure ThumbnailCache::classify_disk_pressure(std::optional<size_t> available,
+                                                                    size_t critical, size_t low) {
+    if (!available) {
+        return DiskPressure::Normal;
+    }
+    if (*available < critical) {
         return DiskPressure::Critical;
-    } else if (available < disk_low_) {
+    }
+    if (*available < low) {
         return DiskPressure::Low;
     }
     return DiskPressure::Normal;
+}
+
+ThumbnailCache::DiskPressure ThumbnailCache::get_disk_pressure() const {
+    return classify_disk_pressure(probe_disk_space(), disk_critical_, disk_low_);
 }
 
 bool ThumbnailCache::is_caching_allowed() const {
@@ -317,60 +314,59 @@ std::vector<ThumbnailCache::CacheEntry> ThumbnailCache::scan_locked(size_t* tota
 
     full_scans_.fetch_add(1, std::memory_order_relaxed);
 
-    std::error_code ec;
-    std::filesystem::directory_iterator it(cache_dir_, ec);
-    if (ec) {
-        spdlog::warn("[ThumbnailCache] Error opening cache dir {}: {}", cache_dir_, ec.message());
+    const auto listing = helix::fs::list_dir(cache_dir_);
+    if (!listing) {
+        spdlog::warn("[ThumbnailCache] Error opening cache dir {}: {}", cache_dir_,
+                     std::strerror(errno));
         if (total_out) {
             *total_out = 0;
         }
         return entries;
     }
 
-    // Advance with increment(ec), not a range-for: the throwing operator++ would
-    // escape this function entirely now that the blanket try/catch is gone, and
-    // this runs on HttpExecutor worker threads where an exception crossing back
-    // into libhv's callback is not survivable.
-    //
-    // Every per-entry query likewise uses the error_code overload. A file that
-    // vanishes between readdir and stat — the normal case when another thread is
-    // evicting, and the reason one try/catch around the whole loop discarded the
-    // entire result — costs only its own entry.
-    const std::filesystem::directory_iterator end;
-    for (; it != end; it.increment(ec)) {
-        if (ec) {
-            spdlog::warn("[ThumbnailCache] Stopping cache scan after read error: {}", ec.message());
-            break;
-        }
-        const auto& path = it->path();
+    constexpr std::int64_t STALE_STAGING_NS = 10LL * 60 * 1000 * 1000 * 1000;
+    const std::int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                    std::chrono::system_clock::now().time_since_epoch())
+                                    .count();
+
+    // Every per-entry query is non-throwing. A file that vanishes between
+    // readdir and stat - the normal case when another thread is evicting -
+    // costs only its own entry; this runs on HttpExecutor worker threads.
+    for (const auto& dir_entry : *listing) {
+        const std::string& path = dir_entry.path;
 
         stat_calls_.fetch_add(1, std::memory_order_relaxed);
 
-        std::error_code entry_ec;
-        if (!std::filesystem::is_regular_file(path, entry_ec) || entry_ec) {
-            if (entry_ec) {
-                spdlog::debug("[ThumbnailCache] Skipping unreadable cache entry {}: {}",
-                              path.string(), entry_ec.message());
+        if (!dir_entry.is_regular) {
+            continue;
+        }
+
+        const auto mtime = helix::fs::mtime_ns(path);
+        if (!mtime) {
+            spdlog::debug("[ThumbnailCache] Skipping entry with no mtime {}: {}", path,
+                          std::strerror(errno));
+            continue;
+        }
+
+        // Staging files (text_io::write_file_atomic, write_lvgl_bin) are writes
+        // in flight or debris from a crash mid-write: never cached content.
+        // Debris past STALE_STAGING_NS no writer can still own.
+        if (path.size() > 4 && path.compare(path.size() - 4, 4, ".tmp") == 0) {
+            if (now_ns - *mtime > STALE_STAGING_NS && helix::fs::remove(path)) {
+                spdlog::debug("[ThumbnailCache] Removed stale staging file {}", path);
             }
             continue;
         }
 
-        const auto mtime = std::filesystem::last_write_time(path, entry_ec);
-        if (entry_ec) {
-            spdlog::debug("[ThumbnailCache] Skipping entry with no mtime {}: {}", path.string(),
-                          entry_ec.message());
+        const auto size = helix::text_io::file_size(path);
+        if (!size) {
+            spdlog::debug("[ThumbnailCache] Skipping entry with no size {}: {}", path,
+                          std::strerror(errno));
             continue;
         }
 
-        const auto size = std::filesystem::file_size(path, entry_ec);
-        if (entry_ec) {
-            spdlog::debug("[ThumbnailCache] Skipping entry with no size {}: {}", path.string(),
-                          entry_ec.message());
-            continue;
-        }
-
-        entries.push_back({path, mtime, size});
-        total += size;
+        entries.push_back({path, *mtime, *size});
+        total += *size;
     }
 
     if (total_out) {
@@ -388,7 +384,14 @@ void ThumbnailCache::rescan_locked() const {
         // Normalised on the way in, as in index_file_locked() / forget_file_locked().
         // The index is keyed by path, and "dir/x.png" vs "dir//x.png" arriving from
         // two different call sites would read as two files and double-count.
-        index_.emplace(entry.path.lexically_normal(), IndexEntry{entry.mtime, entry.size});
+        index_.emplace(helix::fs::lexically_normal(entry.path),
+                       IndexEntry{entry.mtime_ns, entry.size});
+    }
+    {
+        std::lock_guard<std::mutex> usage_lock(usage_mutex_);
+        for (auto it = last_used_ns_.begin(); it != last_used_ns_.end();) {
+            it = index_.count(it->first) ? std::next(it) : last_used_ns_.erase(it);
+        }
     }
     index_total_ = total;
     index_primed_ = true;
@@ -399,36 +402,36 @@ void ThumbnailCache::rescan_locked() const {
     journal_->reset();
 }
 
-void ThumbnailCache::index_file_locked(const std::filesystem::path& raw_path) const {
-    const std::filesystem::path path = raw_path.lexically_normal();
+void ThumbnailCache::index_file_locked(const std::string& raw_path) const {
+    const std::string path = helix::fs::lexically_normal(raw_path);
 
     // A journal entry can name a file in a directory this cache no longer owns:
     // ThumbnailProcessor::set_cache_dir() is allowed to move while a write is in
     // flight, and each task reports to the journal that matched its destination.
     // Counting a foreign file here would corrupt the total in the one direction
     // that matters.
-    if (path.parent_path() != std::filesystem::path(cache_dir_).lexically_normal()) {
-        spdlog::debug("[ThumbnailCache] Ignoring write outside cache dir: {}", path.string());
+    if (helix::fs::parent_path(path) != helix::fs::lexically_normal(cache_dir_)) {
+        spdlog::debug("[ThumbnailCache] Ignoring write outside cache dir: {}", path);
         return;
     }
 
     stat_calls_.fetch_add(1, std::memory_order_relaxed);
 
-    std::error_code ec;
-    const auto size = std::filesystem::file_size(path, ec);
-    if (ec) {
+    const auto size_opt = helix::text_io::file_size(path);
+    if (!size_opt) {
         // Written then immediately removed, or never really there. Drop any
         // stale belief rather than inventing a size.
         forget_file_locked(path);
         return;
     }
 
-    std::error_code mtime_ec;
-    const auto mtime = std::filesystem::last_write_time(path, mtime_ec);
-    if (mtime_ec) {
+    const auto mtime_opt = helix::fs::mtime_ns(path);
+    if (!mtime_opt) {
         forget_file_locked(path);
         return;
     }
+    const std::uint64_t size = *size_opt;
+    const std::int64_t mtime = *mtime_opt;
 
     const auto [it, inserted] = index_.try_emplace(path, IndexEntry{mtime, size});
     if (!inserted) {
@@ -440,13 +443,28 @@ void ThumbnailCache::index_file_locked(const std::filesystem::path& raw_path) co
     index_total_ += size;
 }
 
-void ThumbnailCache::forget_file_locked(const std::filesystem::path& path) const {
-    const auto it = index_.find(path.lexically_normal());
+void ThumbnailCache::forget_file_locked(const std::string& path) const {
+    const std::string normal = helix::fs::lexically_normal(path);
+    {
+        std::lock_guard<std::mutex> usage_lock(usage_mutex_);
+        last_used_ns_.erase(normal);
+    }
+    const auto it = index_.find(normal);
     if (it == index_.end()) {
         return;
     }
     index_total_ -= it->second.size;
     index_.erase(it);
+}
+
+void ThumbnailCache::note_use(const std::string& path) const {
+    const std::int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                 std::chrono::system_clock::now().time_since_epoch())
+                                 .count();
+    const std::string normal =
+        helix::fs::lexically_normal(is_lvgl_path(path) ? path.substr(2) : path);
+    std::lock_guard<std::mutex> lock(usage_mutex_);
+    last_used_ns_[normal] = now;
 }
 
 void ThumbnailCache::refresh_index_locked() const {
@@ -534,9 +552,21 @@ void ThumbnailCache::evict_locked() {
     // Oldest first, off the index rather than off a fresh directory listing.
     // Sorting is the only O(n log n) left, and unlike the walk it is memory,
     // not syscalls — and it happens only when eviction actually fires.
-    std::vector<std::pair<std::filesystem::path, IndexEntry>> victims(index_.begin(), index_.end());
+    // "Oldest" is least recently written or served, whichever is later: a
+    // render that is only ever read (the dashboard's last-print card) would
+    // otherwise be the first thing a busy file grid pushes out.
+    std::vector<std::pair<std::string, IndexEntry>> victims(index_.begin(), index_.end());
+    const auto last_used = [this]() {
+        std::lock_guard<std::mutex> usage_lock(usage_mutex_);
+        return last_used_ns_;
+    }();
+    auto recency = [&last_used](const std::pair<std::string, IndexEntry>& v) {
+        const auto used = last_used.find(v.first);
+        return used == last_used.end() ? v.second.mtime_ns
+                                       : std::max(v.second.mtime_ns, used->second);
+    };
     std::sort(victims.begin(), victims.end(),
-              [](const auto& a, const auto& b) { return a.second.mtime < b.second.mtime; });
+              [&recency](const auto& a, const auto& b) { return recency(a) < recency(b); });
 
     // Remove oldest files until under limit
     size_t evicted_count = 0;
@@ -551,10 +581,9 @@ void ThumbnailCache::evict_locked() {
         // false (not an error) for a path that is already gone, and crediting
         // ourselves for that would stop the loop believing it freed space it
         // did not — leaving the cache over its limit.
-        std::error_code rm_ec;
-        const bool removed = std::filesystem::remove(path, rm_ec);
-        if (rm_ec) {
-            spdlog::warn("[ThumbnailCache] Failed to evict {}: {}", path.string(), rm_ec.message());
+        const bool removed = helix::fs::remove(path);
+        if (!removed && errno != ENOENT) {
+            spdlog::warn("[ThumbnailCache] Failed to evict {}: {}", path, std::strerror(errno));
             continue;
         }
 
@@ -617,7 +646,8 @@ ThumbnailCache::ErrorCallback ThumbnailCache::on_main_err(ErrorCallback cb) {
 }
 
 void ThumbnailCache::fetch(IMoonrakerAPI* api, const std::string& relative_path,
-                           SuccessCallback on_success, ErrorCallback on_error) {
+                           SuccessCallback on_success, ErrorCallback on_error,
+                           time_t source_modified) {
     // Marshal once, at the boundary — see on_main() for why per-path wrapping
     // does not hold. Everything below may now deliver from any thread.
     on_success = on_main(std::move(on_success));
@@ -633,7 +663,7 @@ void ThumbnailCache::fetch(IMoonrakerAPI* api, const std::string& relative_path,
     // If already an LVGL path, validate and return immediately
     if (is_lvgl_path(relative_path)) {
         std::string local_path = relative_path.substr(2);
-        if (std::filesystem::exists(local_path)) {
+        if (helix::fs::exists(local_path)) {
             spdlog::debug("[ThumbnailCache] Already LVGL path: {}", relative_path);
             if (on_success) {
                 on_success(relative_path, /*degraded=*/false);
@@ -645,7 +675,7 @@ void ThumbnailCache::fetch(IMoonrakerAPI* api, const std::string& relative_path,
     }
 
     // Check local filesystem first (might be a local file path in mock mode)
-    if (std::filesystem::exists(relative_path)) {
+    if (helix::fs::exists(relative_path)) {
         spdlog::debug("[ThumbnailCache] Local file exists: {}", relative_path);
         if (on_success) {
             on_success(to_lvgl_path(relative_path), /*degraded=*/false);
@@ -654,7 +684,7 @@ void ThumbnailCache::fetch(IMoonrakerAPI* api, const std::string& relative_path,
     }
 
     // Check cache
-    std::string cached = get_if_cached(relative_path);
+    std::string cached = get_if_cached(relative_path, source_modified);
     if (!cached.empty()) {
         if (on_success) {
             on_success(cached, /*degraded=*/false);
@@ -680,6 +710,13 @@ void ThumbnailCache::fetch(IMoonrakerAPI* api, const std::string& relative_path,
         return;
     }
 
+    if (is_refused(relative_path, source_modified)) {
+        if (on_error) {
+            on_error("Unsupported thumbnail format: " + relative_path);
+        }
+        return;
+    }
+
     // Evict old files before downloading new one
     evict_if_needed();
 
@@ -701,43 +738,38 @@ void ThumbnailCache::fetch(IMoonrakerAPI* api, const std::string& relative_path,
             }
         },
         // Error callback
-        [on_error, relative_path](const MoonrakerError& error) {
+        [this, on_error, relative_path](const MoonrakerError& error) {
             spdlog::warn("[ThumbnailCache] Failed to download {}: {}", relative_path,
                          error.message);
+            note_download_error(relative_path, error);
             if (on_error) {
                 on_error(error.message);
             }
         });
 }
 
-std::string ThumbnailCache::save_raw_png(const std::string& source_identifier,
+std::string ThumbnailCache::save_raw_png(ThumbnailSource source, const std::string& id,
                                          const std::vector<uint8_t>& png_data) {
-    if (source_identifier.empty()) {
+    const std::string source_identifier = thumbnail_cache_id(source, id);
+    if (id.empty()) {
         spdlog::warn("[ThumbnailCache] Empty source identifier for save_raw_png");
         return "";
     }
 
-    if (png_data.size() < 8) {
-        spdlog::warn("[ThumbnailCache] PNG data too small ({} bytes)", png_data.size());
-        return "";
-    }
-
-    // Validate PNG magic bytes: 89 50 4E 47 0D 0A 1A 0A
-    static const uint8_t png_magic[] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
-    if (std::memcmp(png_data.data(), png_magic, sizeof(png_magic)) != 0) {
-        spdlog::warn("[ThumbnailCache] Invalid PNG magic bytes in save_raw_png");
+    // The file is named .png and LVGL picks its decoder by that name, so a
+    // JPEG is re-encoded and anything else is refused.
+    const std::vector<uint8_t> png = helix::ensure_png(png_data);
+    if (png.empty()) {
+        spdlog::warn("[ThumbnailCache] save_raw_png: {} is not a PNG or decodable JPEG ({} bytes)",
+                     source_identifier, png_data.size());
         return "";
     }
 
 #if defined(HELIX_PLATFORM_ESP32)
-    // No disk-cache materialization on ESP32 (Task 10 R3 hard constraint).
-    // This path is reachable ONLY via the gcode-header thumbnail-extraction
-    // fallback (ui_panel_print_select.cpp), which is itself desktop-shaped
-    // and awaiting Task 11's PSRAM-based redesign — until then, refuse to
-    // write and let the existing empty-return handling there degrade
-    // gracefully ("Failed to cache extracted thumbnail for ..." + skip), the
-    // same fallback contract every other failure branch in this function
-    // already uses.
+    // The ESP32 keeps no thumbnails on disk; they live in PSRAM. Its only
+    // caller, gcode-header extraction, is gated off there by
+    // gcode_thumbnail_extraction_available(), and any other caller gets the
+    // same empty return as every failure branch above.
     spdlog::debug("[ThumbnailCache] save_raw_png: no local cache on this platform ({})",
                   source_identifier);
     return "";
@@ -753,27 +785,49 @@ std::string ThumbnailCache::save_raw_png(const std::string& source_identifier,
     // Evict old files before saving new one
     evict_if_needed();
 
-    // Generate cache path using same hash scheme as downloaded thumbnails
     std::string cache_path = get_cache_path(source_identifier);
 
-    // Write PNG data to cache file
-    std::ofstream file(cache_path, std::ios::binary);
-    if (!file) {
-        spdlog::error("[ThumbnailCache] Failed to create cache file: {}", cache_path);
-        return "";
+    // One lock scope for the write and the bin sweep. What it buys: every
+    // cache-side reader that takes mutex_ (eviction, invalidate, index
+    // maintenance) sees the new PNG and the retired prescaled variants as
+    // one step, never one without the other; note_write_and_evict takes the
+    // lock itself and stays outside. RESIDUAL, accepted:
+    // ThumbnailProcessor's fresh-bin probe (fetch_optimized's step 1) reads
+    // under its own mutex and never acquires ours, so a fetch racing this
+    // scope can still serve the previous .bin once — a one-shot stale render
+    // that self-corrects on the next load, reachable only when two surfaces
+    // extract the same file concurrently. Closing it fully would need
+    // sweep-before-write with resurrection handling, or per-key versioning.
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        // Write PNG data to cache file
+        if (!helix::text_io::write_file(cache_path,
+                                        {reinterpret_cast<const char*>(png.data()), png.size()})) {
+            spdlog::error("[ThumbnailCache] Failed to create cache file: {}", cache_path);
+            return "";
+        }
+
+        spdlog::debug("[ThumbnailCache] Saved {} bytes from gcode extraction: {}", png.size(),
+                      cache_path);
+
+        // The pre-scaled .bin variants still on disk were derived from
+        // whatever PNG previously sat at this key. Nothing else invalidates
+        // them for callers that pass no source_modified, so a re-slice under
+        // the same name would keep being served through them.
+        const auto dropped = remove_bin_variants_locked(thumbnail_hash(source_identifier));
+        if (!dropped) {
+            // The fresh PNG is on disk; a failed sweep only risks a stale
+            // bin, which the next source_modified-checked fetch catches.
+            spdlog::warn("[ThumbnailCache] Failed to write/sweep cache for {}: {}",
+                         source_identifier, std::strerror(errno));
+            return "";
+        }
+        if (*dropped > 0) {
+            spdlog::debug("[ThumbnailCache] Dropped {} stale prescaled variants for {}", *dropped,
+                          source_identifier);
+        }
     }
-
-    file.write(reinterpret_cast<const char*>(png_data.data()),
-               static_cast<std::streamsize>(png_data.size()));
-    file.close();
-
-    if (!file) {
-        spdlog::error("[ThumbnailCache] Failed to write PNG data to {}", cache_path);
-        return "";
-    }
-
-    spdlog::debug("[ThumbnailCache] Saved {} bytes from gcode extraction: {}", png_data.size(),
-                  cache_path);
 
     // Index the file we just wrote, then check whether it pushed us over.
     note_write_and_evict(cache_path);
@@ -781,18 +835,83 @@ std::string ThumbnailCache::save_raw_png(const std::string& source_identifier,
     return to_lvgl_path(cache_path);
 }
 
+std::string ThumbnailCache::save_prescaled(ThumbnailSource source, const std::string& id,
+                                           const std::vector<uint8_t>& image_data,
+                                           const ThumbnailTarget& target, time_t source_modified) {
+    // A rescan of an unchanged file: rewriting the PNG would drop this .bin
+    // and blank the card until the decode below replaced it.
+    if (std::string bin = get_if_optimized(thumbnail_cache_id(source, id), target, source_modified);
+        !bin.empty()) {
+        return bin;
+    }
+    const std::string png_path = save_raw_png(source, id, image_data);
+#if !defined(HELIX_PLATFORM_ESP32)
+    if (!png_path.empty()) {
+        const ProcessResult result = ThumbnailProcessor::instance().process_sync(
+            image_data, thumbnail_cache_id(source, id), target);
+        if (result.success) {
+            return result.output_path;
+        }
+        spdlog::warn("[ThumbnailCache] Pre-scaling {} failed ({}), keeping the PNG", id,
+                     result.error);
+    }
+#else
+    (void)target;
+#endif
+    return png_path;
+}
+
+std::string ThumbnailCache::unsupported_marker_path(const std::string& cache_id) const {
+    return cache_dir_ + "/" + thumbnail_hash(cache_id) + ".unsupported";
+}
+
+bool ThumbnailCache::is_refused(const std::string& cache_id, time_t source_modified) {
+    const std::string marker = unsupported_marker_path(cache_id);
+    const auto mtime = helix::fs::mtime_ns(marker);
+    if (!mtime) {
+        return false;
+    }
+    const bool fresh = is_fresh(static_cast<time_t>(*mtime / 1'000'000'000), source_modified);
+    if (!fresh) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        helix::fs::remove(marker);
+        forget_file_locked(marker);
+    }
+    return fresh;
+}
+
+void ThumbnailCache::note_download_error(const std::string& cache_id, const MoonrakerError& error) {
+    // VALIDATION_ERROR is the download refusing the bytes it got; anything
+    // else (a 404, a dropped connection) is worth retrying.
+    if (error.type != MoonrakerErrorType::VALIDATION_ERROR) {
+        return;
+    }
+    const std::string marker = unsupported_marker_path(cache_id);
+    if (helix::text_io::write_file(marker, "")) {
+        note_write_and_evict(marker);
+    }
+}
+
 size_t ThumbnailCache::clear_cache() {
     // Shares mutex_ with eviction: both unlink from the same directory, and a
     // concurrent eviction scan would otherwise trip over files this removes.
     std::lock_guard<std::mutex> lock(mutex_);
     size_t count = 0;
-    try {
-        for (const auto& entry : std::filesystem::directory_iterator(cache_dir_)) {
-            if (std::filesystem::is_regular_file(entry.path())) {
-                std::filesystem::remove(entry.path());
-                ++count;
+    const auto entries = helix::fs::list_dir(cache_dir_);
+    bool complete = entries.has_value();
+    if (entries) {
+        for (const auto& entry : *entries) {
+            if (!entry.is_regular) {
+                continue;
             }
+            if (!helix::fs::remove(entry.path) && errno != ENOENT) {
+                complete = false;
+                break;
+            }
+            ++count;
         }
+    }
+    if (complete) {
         spdlog::info("[ThumbnailCache] Cleared {} cached thumbnails", count);
 
         // We just enumerated and emptied the directory, so an empty index is
@@ -802,8 +921,8 @@ size_t ThumbnailCache::clear_cache() {
         index_primed_ = true;
         checks_since_scan_ = 0;
         journal_->reset();
-    } catch (const std::filesystem::filesystem_error& e) {
-        spdlog::warn("[ThumbnailCache] Error clearing cache: {}", e.what());
+    } else {
+        spdlog::warn("[ThumbnailCache] Error clearing cache: {}", std::strerror(errno));
         // Enumeration stopped partway, so we do not know what survived. Force
         // the next accounting pass to find out rather than assert an empty cache
         // it cannot back up.
@@ -812,56 +931,81 @@ size_t ThumbnailCache::clear_cache() {
     return count;
 }
 
-size_t ThumbnailCache::invalidate(const std::string& relative_path) {
-    if (relative_path.empty()) {
+std::optional<size_t> ThumbnailCache::remove_bin_variants_locked(const std::string& hash) {
+    // .bin files are named: {hash}_{w}x{h}_{format}.bin
+    const auto entries = helix::fs::list_dir(cache_dir_);
+    if (!entries) {
+        return std::nullopt;
+    }
+    size_t count = 0;
+    for (const auto& entry : *entries) {
+        if (!entry.is_regular) {
+            continue;
+        }
+        const std::string& filename = entry.name;
+        std::string prefix = hash + "_";
+        bool has_prefix =
+            filename.size() >= prefix.size() && filename.compare(0, prefix.size(), prefix) == 0;
+        bool has_suffix =
+            filename.size() >= 4 && filename.compare(filename.size() - 4, 4, ".bin") == 0;
+        if (has_prefix && has_suffix) {
+            if (!helix::fs::remove(entry.path) && errno != ENOENT) {
+                return std::nullopt;
+            }
+            forget_file_locked(entry.path);
+            ++count;
+            spdlog::debug("[ThumbnailCache] Invalidated BIN: {}", entry.path);
+        }
+    }
+    return count;
+}
+
+size_t ThumbnailCache::invalidate(const std::string& cache_id) {
+    if (cache_id.empty()) {
         return 0;
     }
 
     // Same directory, same reason as clear_cache().
     std::lock_guard<std::mutex> lock(mutex_);
     size_t count = 0;
-    std::string hash = compute_hash(relative_path);
+    std::string hash = thumbnail_hash(cache_id);
 
-    try {
-        // Delete the PNG file
-        std::string png_path = cache_dir_ + "/" + hash + ".png";
-        if (std::filesystem::exists(png_path)) {
-            std::filesystem::remove(png_path);
+    // Delete the PNG file
+    std::string png_path = cache_dir_ + "/" + thumbnail_file_name(hash, nullptr);
+    bool failed = false;
+    if (helix::fs::exists(png_path)) {
+        if (helix::fs::remove(png_path) || errno == ENOENT) {
             forget_file_locked(png_path);
             ++count;
             spdlog::debug("[ThumbnailCache] Invalidated PNG: {}", png_path);
+        } else {
+            failed = true;
         }
+    }
 
-        // Delete all pre-scaled .bin variants (e.g., {hash}_120x120_RGB565.bin)
-        for (const auto& entry : std::filesystem::directory_iterator(cache_dir_)) {
-            if (!std::filesystem::is_regular_file(entry.path())) {
-                continue;
-            }
-            std::string filename = entry.path().filename().string();
-            // .bin files are named: {hash}_{w}x{h}_{format}.bin
-            std::string prefix = hash + "_";
-            bool has_prefix =
-                filename.size() >= prefix.size() && filename.compare(0, prefix.size(), prefix) == 0;
-            bool has_suffix =
-                filename.size() >= 4 && filename.compare(filename.size() - 4, 4, ".bin") == 0;
-            if (has_prefix && has_suffix) {
-                std::filesystem::remove(entry.path());
-                forget_file_locked(entry.path());
-                ++count;
-                spdlog::debug("[ThumbnailCache] Invalidated BIN: {}", entry.path().string());
-            }
-        }
+    const std::string marker = unsupported_marker_path(cache_id);
+    if (helix::fs::remove(marker)) {
+        forget_file_locked(marker);
+        ++count;
+    }
 
-        if (count > 0) {
-            spdlog::info("[ThumbnailCache] Invalidated {} cached files for {}", count,
-                         relative_path);
+    // Delete all pre-scaled .bin variants (e.g., {hash}_120x120_RGB565.bin)
+    if (!failed) {
+        if (const auto bins = remove_bin_variants_locked(hash)) {
+            count += *bins;
+        } else {
+            failed = true;
         }
-    } catch (const std::filesystem::filesystem_error& e) {
-        spdlog::warn("[ThumbnailCache] Error invalidating cache for {}: {}", relative_path,
-                     e.what());
-        // Removed an unknown subset before throwing. Over-counting until the
+    }
+
+    if (failed) {
+        spdlog::warn("[ThumbnailCache] Error invalidating cache for {}: {}", cache_id,
+                     std::strerror(errno));
+        // Removed an unknown subset before failing. Over-counting until the
         // next reconcile is safe; asserting a total we cannot justify is not.
         index_primed_ = false;
+    } else if (count > 0) {
+        spdlog::info("[ThumbnailCache] Invalidated {} cached files for {}", count, cache_id);
     }
 
     return count;
@@ -893,21 +1037,16 @@ std::string ThumbnailCache::get_if_optimized(const std::string& relative_path,
 
     // Validate cache freshness if source_modified provided
     if (source_modified > 0) {
-        try {
-            // Strip "A:" prefix to get filesystem path
-            std::string fs_path = bin_path.substr(2);
-            if (!std::filesystem::exists(fs_path)) {
-                return "";
-            }
+        // Strip "A:" prefix to get filesystem path
+        std::string fs_path = bin_path.substr(2);
+        if (!helix::fs::exists(fs_path)) {
+            return "";
+        }
 
-            auto cache_time = std::filesystem::last_write_time(fs_path);
-            // Convert file_time_type to time_t for comparison
-            auto sctp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
-                cache_time - std::filesystem::file_time_type::clock::now() +
-                std::chrono::system_clock::now());
-            time_t cache_epoch = std::chrono::system_clock::to_time_t(sctp);
+        if (const auto mtime = helix::fs::mtime_ns(fs_path)) {
+            const time_t cache_epoch = static_cast<time_t>(*mtime / 1'000'000'000);
 
-            if (cache_epoch < source_modified) {
+            if (!is_fresh(cache_epoch, source_modified)) {
                 spdlog::debug(
                     "[ThumbnailCache] Optimized cache stale for {} (cached: {}, source: {})",
                     relative_path, cache_epoch, source_modified);
@@ -915,12 +1054,14 @@ std::string ThumbnailCache::get_if_optimized(const std::string& relative_path,
                 const_cast<ThumbnailCache*>(this)->invalidate(relative_path);
                 return "";
             }
-        } catch (const std::filesystem::filesystem_error& e) {
-            spdlog::warn("[ThumbnailCache] Failed to check optimized cache age: {}", e.what());
+        } else {
+            spdlog::warn("[ThumbnailCache] Failed to check optimized cache age: {}",
+                         std::strerror(errno));
             // On error, assume cache is valid (don't break existing behavior)
         }
     }
 
+    note_use(bin_path);
     return bin_path;
 }
 
@@ -978,6 +1119,13 @@ void ThumbnailCache::fetch_optimized(IMoonrakerAPI* api, const std::string& rela
         return;
     }
 
+    if (is_refused(relative_path, source_modified)) {
+        if (on_error) {
+            on_error("Unsupported thumbnail format: " + relative_path);
+        }
+        return;
+    }
+
     evict_if_needed();
 
     std::string cache_path = get_cache_path(relative_path);
@@ -1001,9 +1149,10 @@ void ThumbnailCache::fetch_optimized(IMoonrakerAPI* api, const std::string& rela
             process_and_callback(lvgl_path, relative_path, target, on_success, on_error);
         },
         // Error callback - download failed
-        [on_error, relative_path](const MoonrakerError& error) {
+        [this, on_error, relative_path](const MoonrakerError& error) {
             spdlog::warn("[ThumbnailCache] Optimized fetch failed for {}: {}", relative_path,
                          error.message);
+            note_download_error(relative_path, error);
             if (on_error) {
                 on_error(error.message);
             }
@@ -1056,11 +1205,10 @@ void ThumbnailCache::process_and_callback(const std::string& png_lvgl_path,
 
 void ThumbnailCache::fetch(const ThumbnailRequest& req, ThumbnailLoadContext ctx,
                            SuccessCallback on_success, ErrorCallback on_error) {
-    // The caller's success callback runs only if no newer request superseded
-    // this one. The target comes from the request rather than being chosen
-    // here, which is what lets one method serve every call site — the per-view
-    // wrappers this replaced each picked their own and could not be told
-    // otherwise.
+    // The caller's callbacks run only if its owner is alive and no newer
+    // request superseded this one: error and success capture the same owner.
+    // The target comes from the request rather than being chosen here, which
+    // is what lets one method serve every call site.
     auto guarded_success = [ctx, on_success = std::move(on_success)](const std::string& path,
                                                                      bool degraded) {
         if (!ctx.is_valid()) {
@@ -1072,27 +1220,109 @@ void ThumbnailCache::fetch(const ThumbnailRequest& req, ThumbnailLoadContext ctx
         }
     };
 
+    auto guarded_error = [ctx, on_error = std::move(on_error)](const std::string& error) {
+        if (!ctx.is_valid()) {
+            spdlog::debug("[ThumbnailCache] Dropping stale fetch error: {}", error);
+            return;
+        }
+        if (on_error) {
+            on_error(error);
+        }
+    };
+
     if (req.format == ThumbnailRequest::ThumbnailFormat::FullPng) {
         // Full-resolution PNG: req.target does not apply, so this bypasses the
         // pre-scaler entirely. A PNG handed back because a PNG was requested is
         // the thing that was asked for, never the degraded fallback that
         // process_and_callback reports when a pre-scale FAILS.
         fetch(
-            req.api, req.key,
+            req.api, thumbnail_cache_id(req.source, req.key),
             [guarded_success](const std::string& path, bool /*degraded*/) {
                 guarded_success(path, /*degraded=*/false);
             },
-            std::move(on_error));
+            std::move(guarded_error), req.source_modified);
         return;
     }
 
-    fetch_optimized(req.api, req.key, req.target, std::move(guarded_success), std::move(on_error),
-                    req.source_modified);
+    fetch_optimized(req.api, thumbnail_cache_id(req.source, req.key), req.target,
+                    std::move(guarded_success), std::move(guarded_error), req.source_modified);
 }
 
 std::string ThumbnailCache::get_if_cached(const ThumbnailRequest& req) const {
+    const std::string cache_id = thumbnail_cache_id(req.source, req.key);
     if (req.format == ThumbnailRequest::ThumbnailFormat::FullPng) {
-        return get_if_cached(req.key, req.source_modified);
+        return get_if_cached(cache_id, req.source_modified);
     }
-    return get_if_optimized(req.key, req.target, req.source_modified);
+    return get_if_optimized(cache_id, req.target, req.source_modified);
+}
+
+void helix::fetch_thumbnail_from_gcode(const std::string& gcode_path, size_t max_header_bytes,
+                                       IMoonrakerAPI* api, const helix::ThumbnailTarget& target,
+                                       ThumbnailLoadContext ctx,
+                                       ThumbnailCache::SuccessCallback on_success,
+                                       ThumbnailCache::ErrorCallback on_error) {
+    // Early failures surface on the HttpExecutor worker, while the ones from
+    // the fetch below are marshalled by the cache. Route everything through
+    // the queue so @p on_error always runs on the main thread (the same
+    // reason ThumbnailCache wraps its own callbacks — #960, #1202).
+    auto report_error = [on_error](const std::string& message) {
+        helix::ui::queue_update("thumbnail_cache::fetch_thumbnail_from_gcode",
+                                [on_error, message]() {
+                                    if (on_error) {
+                                        on_error(message);
+                                    }
+                                });
+    };
+
+    if (!api) {
+        report_error("no API available for gcode thumbnail extraction");
+        return;
+    }
+    if constexpr (!gcode_thumbnail_extraction_available()) {
+        report_error("gcode thumbnail extraction is not available on this platform");
+        return;
+    }
+
+    api->transfers().download_file_partial(
+        "gcodes", gcode_path, max_header_bytes,
+        [gcode_path, target, api, ctx, on_success, report_error](const std::string& content) {
+            // HttpExecutor worker. The parse and the cache write below are
+            // deliberately left here — they are the expensive part and touch
+            // no UI state and nothing owned by the caller, everything the
+            // body needs having been captured by value on the main thread.
+            const auto best = helix::gcode::get_best_thumbnail_from_content(content);
+            if (best.png_data.empty()) {
+                spdlog::debug("[ThumbnailCache] No embedded thumbnails in {}", gcode_path);
+                report_error(std::string(GCODE_THUMBNAIL_NONE_EMBEDDED) + gcode_path);
+                return;
+            }
+
+            spdlog::debug("[ThumbnailCache] Extracted {}x{} thumbnail ({} bytes) from {}",
+                          best.width, best.height, best.png_data.size(), gcode_path);
+
+            std::string lvgl_path = get_thumbnail_cache().save_raw_png(
+                ThumbnailSource::GcodeExtract, gcode_path, best.png_data);
+            if (lvgl_path.empty()) {
+                spdlog::warn("[ThumbnailCache] Failed to cache extracted thumbnail for {}",
+                             gcode_path);
+                report_error("failed to cache extracted thumbnail for " + gcode_path);
+                return;
+            }
+
+            // Feed through the prescale pipeline for .bin generation (avoids
+            // runtime scaling on every frame). fetch marshals the callbacks
+            // to the main thread and drops a superseded load via ctx.
+            ThumbnailRequest req;
+            req.key = gcode_path;
+            req.source = ThumbnailSource::GcodeExtract;
+            req.target = target;
+            req.api = api;
+
+            get_thumbnail_cache().fetch(req, ctx, std::move(on_success), report_error);
+        },
+        [gcode_path, report_error](const MoonrakerError& error) {
+            spdlog::debug("[ThumbnailCache] Failed to download gcode header for {}: {}", gcode_path,
+                          error.message);
+            report_error(error.message);
+        });
 }

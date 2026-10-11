@@ -1,0 +1,123 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Display Settings Overlay: brightness, dim, sleep, screensaver, rotation, UI scale -->
+<!-- Uses setting_* components for consistency with main settings panel -->
+<component>
+  <styles>
+    <!-- Cards own the horizontal inset (setting_group side margins); content has none. -->
+    <style name="content_standard" pad_top="0" pad_left="0" pad_right="0" pad_bottom="#space_lg"/>
+    <style name="content_micro" pad_top="0" pad_left="0" pad_right="0" pad_bottom="#space_sm"/>
+    <style name="brightness_standard"
+           pad_left="#space_lg" pad_right="#space_lg" pad_top="#space_md" pad_bottom="#space_md" pad_gap="#space_xs"/>
+    <style name="brightness_micro"
+           pad_left="#space_md" pad_right="#space_md" pad_top="#space_xs" pad_bottom="#space_xs" pad_gap="#space_xs"/>
+    <style name="spacer_standard" height="#space_lg"/>
+    <style name="spacer_micro" height="#space_md"/>
+  </styles>
+  <view name="settings_display_overlay" extends="overlay_panel" title="Display" bg_color="#screen_bg">
+    <!-- Content Area - no padding, rows handle their own -->
+    <lv_obj name="overlay_content" width="100%" flex_grow="1" scrollable="true" flex_flow="column">
+      <bind_style_if_eq name="content_micro" subject="ui_breakpoint" ref_value="0"/>
+      <bind_style_if_ge name="content_standard" subject="ui_breakpoint" ref_value="1"/>
+      <setting_group name="group_display">
+        <!-- Screen Rotation: first in the group so a user staring at a sideways
+             screen reaches it with the least scrolling. Hidden where the display
+             backend ignores /display/rotate (SDL desktop builds). -->
+        <setting_dropdown_row name="row_display_rotation"
+                              label="Screen Rotation" icon="rotate_right"
+                              description="Turn the picture to match how the screen is mounted. Applies after restart."
+                              options="Normal&#10;90° Clockwise&#10;180° Upside Down&#10;270° Clockwise"
+                              options_tag="Normal&#10;90° Clockwise&#10;180° Upside Down&#10;270° Clockwise"
+                              callback="on_display_rotation_changed">
+          <bind_flag_if_eq subject="settings_rotation_available" flag="hidden" ref_value="0"/>
+        </setting_dropdown_row>
+        <!-- UI Scale (options populated dynamically in C++ — the Automatic row
+             carries the DPI-resolved percentage) -->
+        <setting_dropdown_row name="row_ui_scale"
+                              label="UI Scale" icon="magnify" description="Interface size. Applies after restart."
+                              options="" callback="on_ui_scale_changed"/>
+        <!-- Brightness (conditional - hidden when no hardware backlight) -->
+        <lv_obj name="brightness_section" width="100%" height="content" scrollable="false" flex_flow="column">
+          <bind_flag_if_eq subject="settings_has_dimming" flag="hidden" ref_value="0"/>
+          <bind_style_if_eq name="brightness_micro" subject="ui_breakpoint" ref_value="0"/>
+          <bind_style_if_ge name="brightness_standard" subject="ui_breakpoint" ref_value="1"/>
+          <!-- Label row with value display -->
+          <lv_obj width="100%"
+                  height="content" flex_flow="row" style_flex_main_place="space_between" style_flex_cross_place="center"
+                  style_pad_all="0" scrollable="false">
+            <lv_obj height="content"
+                    flex_flow="row" style_flex_cross_place="center" style_pad_gap="#space_sm" style_pad_all="0"
+                    scrollable="false">
+              <icon src="light" size="sm" variant="secondary"/>
+              <text_body text="Brightness"/>
+            </lv_obj>
+            <text_body name="brightness_value_label" bind_text="brightness_value"/>
+          </lv_obj>
+          <!-- Description -->
+          <text_small text="Adjust screen brightness level"/>
+          <!-- Slider with min/max icons -->
+          <lv_obj width="100%"
+                  height="content" flex_flow="row" style_flex_cross_place="center" style_pad_left="0"
+                  style_pad_right="0" style_pad_top="#space_md" style_pad_bottom="#space_md" style_pad_gap="#space_sm"
+                  scrollable="false">
+            <icon src="light_off" size="xs" variant="secondary"/>
+            <lv_slider name="brightness_slider" flex_grow="1" min_value="10" max_value="100" value="50">
+              <event_cb trigger="value_changed" callback="on_brightness_changed"/>
+              <!-- Persist once on release; value_changed only previews (settings.json
+                 is fsync'd twice + backed up, and some backlight backends fork). -->
+              <event_cb trigger="released" callback="on_brightness_commit"/>
+            </lv_slider>
+            <icon src="light" size="xs" variant="primary"/>
+          </lv_obj>
+        </lv_obj>
+        <!-- Screen Dim -->
+        <setting_dropdown_row name="row_display_dim"
+                              label="Screen Dim" icon="lightbulb_on_50"
+                              description="Screen dims to lower brightness after period of inactivity"
+                              options="Never&#10;30 seconds&#10;1 minute&#10;2 minutes&#10;5 minutes&#10;10 minutes"
+                              options_tag="Never&#10;30 seconds&#10;1 minute&#10;2 minutes&#10;5 minutes&#10;10 minutes"
+                              callback="on_dim_changed">
+          <bind_flag_if_eq subject="settings_has_dimming" flag="hidden" ref_value="0"/>
+        </setting_dropdown_row>
+        <!-- Display Sleep -->
+        <setting_dropdown_row name="row_display_sleep"
+                              label="Display Sleep" icon="clock"
+                              description="Screen sleeps after the selected period of inactivity"
+                              options="Never&#10;1 minute&#10;5 minutes&#10;10 minutes&#10;20 minutes&#10;30 minutes"
+                              options_tag="Never&#10;1 minute&#10;5 minutes&#10;10 minutes&#10;20 minutes&#10;30 minutes"
+                              callback="on_sleep_changed"/>
+        <!-- Screensaver -->
+        <setting_dropdown_row name="row_screensaver"
+                              label="Screensaver" icon="television_classic" description="Show instead of dimming"
+                              options="Off&#10;Flying Toasters&#10;Starfield&#10;3D Pipes&#10;Bouncing Printer&#10;Fireworks"
+                              options_tag="Off&#10;Flying Toasters&#10;Starfield&#10;3D Pipes&#10;Bouncing Printer&#10;Fireworks"
+                              bind_selected="settings_screensaver_type" callback="on_screensaver_changed"/>
+        <!-- Test Screensaver button (hidden when Off is selected) -->
+        <lv_obj name="container_test_screensaver"
+                width="100%" height="content" style_pad_left="#space_lg" style_pad_right="#space_lg"
+                style_pad_top="#space_sm" style_pad_bottom="#space_md" style_pad_gap="0" flex_flow="row"
+                style_flex_main_place="end" scrollable="false">
+          <bind_flag_if_eq subject="settings_screensaver_type" flag="hidden" ref_value="0"/>
+          <ui_button name="btn_test_screensaver"
+                     width="content" height="#button_height_sm" variant="outline" text="Test Screensaver" icon="play">
+            <event_cb trigger="clicked" callback="on_test_screensaver"/>
+          </ui_button>
+        </lv_obj>
+        <!-- Sleep While Printing -->
+        <setting_toggle_row name="row_sleep_while_printing"
+                            label="Sleep While Printing" icon="sleep"
+                            description="Allow display to sleep during active prints"
+                            subject="settings_sleep_while_printing" callback="on_sleep_while_printing_changed"/>
+        <!-- Info Note -->
+        <info_note icon="info"
+                   text="Touch screen to wake from sleep" style_pad_left="#space_lg" style_pad_right="#space_lg"/>
+      </setting_group>
+      <!-- Bottom padding for scroll -->
+      <lv_obj width="100%" scrollable="false">
+        <bind_style_if_eq name="spacer_micro" subject="ui_breakpoint" ref_value="0"/>
+        <bind_style_if_ge name="spacer_standard" subject="ui_breakpoint" ref_value="1"/>
+      </lv_obj>
+    </lv_obj>
+  </view>
+</component>

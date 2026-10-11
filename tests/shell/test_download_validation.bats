@@ -732,6 +732,28 @@ MOCK
     [ -e "$TMP_DIR/helixscreen.tar.gz" ]
 }
 
+@test "use_local_tarball: a relative source is staged as an absolute symlink" {
+    # ln -sf resolves its target relative to the LINK's directory, so staging a
+    # relative source verbatim points $TMP_DIR/helixscreen.tar.gz at a sibling
+    # that is not there. The copy fallback then hides it: cp resolves the same
+    # relative path against the caller's cwd and succeeds, leaving a staged
+    # archive that is real and a resolution step that never ran.
+    create_valid_gzip "$BATS_TEST_TMPDIR/rel_release.tar.gz" 2048
+    cd "$BATS_TEST_TMPDIR"
+
+    run use_local_tarball "./rel_release.tar.gz"
+    [ "$status" -eq 0 ] || fail "use_local_tarball failed: $output"
+    [ -L "$TMP_DIR/helixscreen.tar.gz" ] || fail "staged as a copy, not a symlink"
+    [ -r "$TMP_DIR/helixscreen.tar.gz" ] || fail "staged symlink does not resolve"
+
+    local target
+    target=$(readlink "$TMP_DIR/helixscreen.tar.gz")
+    case "$target" in
+        /*) ;;
+        *) fail "staged symlink target is not absolute: $target" ;;
+    esac
+}
+
 @test "use_local_tarball: exits with error for missing file" {
     run use_local_tarball "$BATS_TEST_TMPDIR/no_such_file.tar.gz"
     [ "$status" -ne 0 ]
@@ -1039,6 +1061,48 @@ MANIFEST_WITH_HASHES='{
     [[ "$output" == *"HELIX_ALLOW_UNVERIFIED_HTTP=1"* ]]
 }
 
+# Each channel's manifest describes only that channel's latest release, so a
+# --version pinned from another channel is verified against the one listing it.
+_channel_manifests() {
+    STABLE_M='{"version": "1.0.3", "assets": {"pi": {"zip_sha256": "aaaa"}}}'
+    BETA_M='{"version": "1.1.0-beta.4", "assets": {"pi": {"zip_sha256": "bbbb"}}}'
+    R2_CHANNEL=stable
+    _R2_MANIFEST=""
+    serve_manifest() {
+        case "$1" in
+            */stable/manifest.json) echo "$STABLE_M" ;;
+            */beta/manifest.json) echo "$BETA_M" ;;
+            *) return 1 ;;
+        esac
+    }
+    _try_download_candidate() { echo "CANDIDATE $1 sha=$4"; : > "$2"; return 0; }
+}
+
+@test "download_release: an explicit --version is verified against the channel that lists it" {
+    _channel_manifests
+    check_https_capability() { return 0; }
+    fetch_url() { serve_manifest "$1"; }
+    fetch_url_http() { return 1; }
+
+    run download_release "v1.1.0-beta.4" "pi"
+    [ "$status" -eq 0 ]
+    lacks "No release manifest" "$output"
+    lacks "plain-HTTP mirror" "$output"
+    contains "sha=bbbb" "$output"
+}
+
+@test "download_release: the cross-channel manifest lookup keeps the plain-HTTP fallback" {
+    _channel_manifests
+    check_https_capability() { return 1; }
+    fetch_url() { return 1; }
+    fetch_url_http() { serve_manifest "$1"; }
+
+    run download_release "v1.1.0-beta.4" "pi"
+    [ "$status" -eq 0 ]
+    contains "sha=bbbb" "$output"
+    contains "plain-HTTP mirror" "$output"
+}
+
 @test "download_release: a plain 404 cascade does NOT mention the override" {
     # Keep the security advice off unrelated failures — it would read as
     # "set this env var to fix your install" for a simple typo'd --version.
@@ -1156,7 +1220,7 @@ $unwired"
 
     run download_release "v9.9.9" "ad5m"
     [ "$status" -ne 0 ]
-    [[ "$output" == *"SHA256 MISMATCH"* ]]
+    contains "SHA256 MISMATCH" "$output"
     [[ "$output" == *"Failed to download release"* ]]
 }
 
@@ -1185,4 +1249,44 @@ $unwired"
     run download_release "v9.9.9" "ad5m"
     [ "$status" -eq 0 ]
     [[ "$output" == *"SHA256 verified"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# parse_tarball_version
+# ---------------------------------------------------------------------------
+
+@test "parse_tarball_version reads a plain version off a single-word platform" {
+    run parse_tarball_version "helixscreen-pi-v0.99.118.tar.gz"
+    [ "$status" -eq 0 ]
+    [ "$output" = "v0.99.118" ]
+}
+
+@test "parse_tarball_version survives a hyphenated platform name" {
+    for plat in snapmaker-u1 android-arm64 android-universal k1-dynamic; do
+        run parse_tarball_version "helixscreen-${plat}-v0.99.118.tar.gz"
+        [ "$output" = "v0.99.118" ] || fail "$plat lost its version: [$output]"
+    done
+}
+
+@test "parse_tarball_version keeps a prerelease suffix intact" {
+    run parse_tarball_version "helixscreen-pi-v1.1.0-beta.1.tar.gz"
+    [ "$output" = "v1.1.0-beta.1" ] || fail "got [$output]"
+
+    run parse_tarball_version "helixscreen-pi-v1.1.0-rc.2.tar.gz"
+    [ "$output" = "v1.1.0-rc.2" ] || fail "got [$output]"
+}
+
+@test "parse_tarball_version handles a hyphenated platform and prerelease together" {
+    run parse_tarball_version "helixscreen-snapmaker-u1-v1.1.0-beta.1.tar.gz"
+    [ "$output" = "v1.1.0-beta.1" ] || fail "got [$output]"
+}
+
+@test "parse_tarball_version reads through a leading directory path" {
+    run parse_tarball_version "/tmp/downloads/helixscreen-android-arm64-v1.1.0-beta.1.tar.gz"
+    [ "$output" = "v1.1.0-beta.1" ] || fail "got [$output]"
+}
+
+@test "parse_tarball_version prints nothing for the unversioned zip layout" {
+    run parse_tarball_version "helixscreen-pi.zip"
+    [ -z "$output" ] || fail "expected empty, got [$output]"
 }

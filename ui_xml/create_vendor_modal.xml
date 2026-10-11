@@ -12,11 +12,11 @@
             style_pad_top="#space_lg" style_pad_bottom="#space_lg" flex_flow="column" style_flex_cross_place="center"
             style_pad_gap="#space_md">
       <!-- Title -->
-      <text_heading width="100%" text="Create New Vendor" translation_tag="Create New Vendor" style_text_align="center"/>
+      <text_heading width="100%" text="Create New Vendor" style_text_align="center"/>
       <!-- Vendor name input -->
       <lv_obj width="100%"
               height="content" flex_flow="column" style_pad_all="0" style_pad_gap="#space_xs" scrollable="false">
-        <text_small text="Vendor Name" translation_tag="Vendor Name" style_text_color="#text_muted"/>
+        <text_small text="Vendor Name" style_text_color="#text_muted"/>
         <text_input name="new_vendor_name"
                     width="100%" placeholder_text="e.g. Polymaker" placeholder_tag="e.g. Polymaker">
           <event_cb trigger="value_changed" callback="on_wizard_new_vendor_name_changed"/>
@@ -25,7 +25,7 @@
       <!-- Vendor URL input (optional) -->
       <lv_obj width="100%"
               height="content" flex_flow="column" style_pad_all="0" style_pad_gap="#space_xs" scrollable="false">
-        <text_small text="Website (optional)" translation_tag="Website (optional)" style_text_color="#text_muted"/>
+        <text_small text="Website (optional)" style_text_color="#text_muted"/>
         <text_input name="new_vendor_url" width="100%" placeholder_text="https://..." placeholder_tag="https://...">
           <event_cb trigger="value_changed" callback="on_wizard_new_vendor_url_changed"/>
         </text_input>

@@ -47,10 +47,10 @@ class PerformanceState {
     /// so their ObserverGuard releases safely instead of calling
     /// lv_observer_remove() on a freed subject. These subjects are NOT a
     /// never-freed singleton: deinit_subjects()/init_subjects() destroy and
-    /// recreate them on reconnect, printer switch, and between tests. Null until
-    /// init_subjects() has run.
-    const SubjectLifetime& subjects_lifetime() const {
-        return subjects_lifetime_;
+    /// recreate them on reconnect, printer switch, and between tests. Live from
+    /// construction: the manager's token flips and renews on every teardown.
+    [[nodiscard]] SubjectLifetime subjects_lifetime() const {
+        return subjects_.get_subjects_lifetime();
     }
 
   private:
@@ -69,10 +69,6 @@ class PerformanceState {
 
     // ---- Subjects (static set) ----
     SubjectManager subjects_;
-    // Shared lifetime handed to observers of the perf subjects. Reset (and its
-    // bool flipped false) in deinit_subjects() BEFORE the subjects are freed so
-    // ObserverGuard::reset() detects the dead subject. See subjects_lifetime().
-    SubjectLifetime subjects_lifetime_;
     lv_subject_t s_host_cpu_pct_{};
     lv_subject_t s_host_cpu_pct_present_{};
     lv_subject_t s_host_cpu_temp_c10_{};

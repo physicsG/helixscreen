@@ -221,3 +221,71 @@ TEST_CASE("bypass off with no AMS still does not block", "[preflight_validator][
     auto r = PreflightValidator::validate(tools, {}, {}, false);
     CHECK_FALSE(r.has_block());
 }
+
+// A Snapmaker U1 slot holding a tagless spool reports filament_type "NONE":
+// filament is physically loaded, so the slot is NOT empty, but the firmware
+// refuses RESUME for that extruder until somebody assigns a material. Left
+// unchecked the print heats, homes, probes and only fails minutes in, reported
+// as a runout. "NONE" is the literal the U1 firmware writes; no other backend
+// puts it in a material field.
+TEST_CASE("slot with no material identity blocks", "[preflight_validator][snapmaker]") {
+    std::vector<GcodeToolInfo> tools = {{2, 0x1A1A1A, "ASA"}};
+    std::vector<AvailableSlot> slots = {{2, 0, 0xFFFFFF, "NONE", false, -1, 0, 0, ""}};
+    std::vector<ToolMapping> mapping = {{2, 2, 0, false, false, ToolMapping::MatchReason::AUTO}};
+    auto r = PreflightValidator::validate(tools, slots, mapping, false);
+
+    REQUIRE(r.checks.size() == 1);
+    CHECK(r.checks[0].severity == Severity::UnknownMaterial);
+    CHECK(r.has_block());
+    // The slot IS seated — saying "empty" here is the misleading report this
+    // check exists to replace.
+    CHECK(r.checks[0].slot_present);
+    CHECK(r.checks[0].mapped_slot == 2);
+}
+
+TEST_CASE("unknown material outranks a mismatch it cannot be compared against",
+          "[preflight_validator][snapmaker]") {
+    std::vector<GcodeToolInfo> tools = {{0, 0xED1C24, "PLA"}};
+    std::vector<AvailableSlot> slots = {{0, 0, 0xED1C24, "NONE", false, -1, 0, 0, ""}};
+    std::vector<ToolMapping> mapping = {{0, 0, 0, false, false, ToolMapping::MatchReason::AUTO}};
+    auto r = PreflightValidator::validate(tools, slots, mapping, false);
+    CHECK(r.checks[0].severity == Severity::UnknownMaterial);
+    CHECK(r.has_block());
+    CHECK_FALSE(r.has_advisory());
+}
+
+// A backend that simply does not report material leaves the field empty. That
+// is "not known", not "declared unusable", and blocking it would stop prints
+// that run fine today on every printer whose slots carry no material at all.
+TEST_CASE("an unreported material does not block", "[preflight_validator]") {
+    std::vector<GcodeToolInfo> tools = {{0, 0xED1C24, "PLA"}};
+    std::vector<AvailableSlot> slots = {{0, 0, 0xED1C24, "", false, -1, 0, 0, ""}};
+    std::vector<ToolMapping> mapping = {{0, 0, 0, false, false, ToolMapping::MatchReason::AUTO}};
+    auto r = PreflightValidator::validate(tools, slots, mapping, false);
+    CHECK(r.checks[0].severity != Severity::UnknownMaterial);
+    CHECK_FALSE(r.has_block());
+}
+
+TEST_CASE("an unidentified slot the job never uses is not a block",
+          "[preflight_validator][snapmaker]") {
+    std::vector<GcodeToolInfo> tools = {{0, 0xED1C24, "PLA"}};
+    std::vector<AvailableSlot> slots = {
+        {0, 0, 0xED1C24, "PLA", false, -1, 0, 0, ""},
+        {2, 0, 0xFFFFFF, "NONE", false, -1, 0, 0, ""}, // loaded, unidentified, unused
+    };
+    std::vector<ToolMapping> mapping = {{0, 0, 0, false, false, ToolMapping::MatchReason::AUTO}};
+    auto r = PreflightValidator::validate(tools, slots, mapping, false);
+    REQUIRE(r.checks.size() == 1);
+    CHECK(r.checks[0].severity == Severity::Ok);
+    CHECK_FALSE(r.has_block());
+}
+
+TEST_CASE("bypass still short-circuits an unidentified slot",
+          "[preflight_validator][snapmaker][bypass]") {
+    std::vector<GcodeToolInfo> tools = {{2, 0x1A1A1A, "ASA"}};
+    std::vector<AvailableSlot> slots = {{2, 0, 0xFFFFFF, "NONE", false, -1, 0, 0, ""}};
+    std::vector<ToolMapping> mapping = {{2, 2, 0, false, false, ToolMapping::MatchReason::AUTO}};
+    auto r = PreflightValidator::validate(tools, slots, mapping, /*bypass_active=*/true);
+    CHECK(r.checks.empty());
+    CHECK_FALSE(r.has_block());
+}

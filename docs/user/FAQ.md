@@ -36,8 +36,9 @@ HelixScreen works with any Klipper-based printer running Moonraker. Tested and s
 | Creality Hi | **Preliminary** | Auto-detected; Cartesian bedslinger with optional CFS. Untested on our hardware. |
 | Anycubic Kobra 2 Pro / Kobra 3 / 3 V2 / 3 Max / S1 / S1 Max | **Community** | Auto-detected on [Rinkhals](https://github.com/jbatonnet/Rinkhals) firmware; native ACE (`filament_hub`) supported. Untested on our hardware. |
 | FlashForge AD5X | **Tested** | IFS filament system integrated |
+| FlashForge Creator 5 / Creator 5 Pro | **Preliminary** | Four-head tool changer, auto-detected on either replacement firmware: [Z-Mod](https://wiki.zmod.link/C5PRO/) or [Reforge](https://github.com/Klipper4FlashForge/firmware). Mounting and parking a head is driven from the screen. On Z-Mod, each head's material and colour are read from the printer itself once Z-Mod ships its pending status update; until then, edits stay on the screen. Untested on our hardware. |
 | SOVOL SV06 / SV08 | **Tested** | Community reports welcome |
-| Elegoo Centauri Carbon 1 | **Tested** | Requires [OpenCentauri COSMOS](https://docs.opencentauri.cc/klipper-conversion/cosmos/cosmos/) firmware; ships with factory white-balance calibration |
+| Elegoo Centauri Carbon 1 | **Tested** | Requires [OpenCentauri COSMOS](https://docs.opencentauri.cc/klipper-conversion/cosmos/cosmos/) firmware 26.07.0 or newer; ships with factory white-balance calibration |
 | Snapmaker U1 (SnapSwap toolchanger) | **Tested** | Native four-head support with RFID spool recognition. Needs SSH — stock firmware (1.2+) via its **Root access** option, or PAXX Extended Firmware (SSH on by default). Tested on PAXX 1.2.x–1.4.x; the stock-firmware path is unverified on a real stock device. Reinstall after a firmware update. On PAXX firmware you can also view/control the screen remotely in Mainsail/Fluidd (the "gui" webcam) via the firmware's `web remote_screen` toggle; physical cameras work normally. |
 | Artillery M1 Pro | **Tested** | |
 | Zero G Mercury / Nebula / Hydra | **Tested** | Multiple variants supported |
@@ -88,7 +89,7 @@ HelixScreen reads standard G-code, so most slicers work. But support is tiered:
 | Slicer | Status | Notes |
 |--------|--------|-------|
 | **OrcaSlicer 2.3.2+** | **Primary** | The slicer we develop and test against. Best experience — including one-way (HelixScreen → OrcaSlicer) filament preset sync with HelixScreen's filament slots. Recommended for everyone. |
-| Manufacturer slicers (Creality Print, FlashForge Orca, Bambu Studio, etc.) | **Supported** | Most are OrcaSlicer/PrusaSlicer forks and work well. We aim to support them. |
+| Manufacturer slicers (Creality Print, FlashForge Orca, Bambu Studio, etc.) | **Supported** | Most are OrcaSlicer/PrusaSlicer forks and work well. We aim to support them. This is about G-code and profiles, not the vendor's own network path: on the Creality K1 series the stock backend keeps running beside HelixScreen, so Creality Print can still reach the printer. If it cannot, see [Troubleshooting](TROUBLESHOOTING.md#creality-print-can-no-longer-find-or-connect-to-the-printer). |
 | PrusaSlicer / SuperSlicer | **Supported** | Fully usable, including exclude-objects and pre-print options. |
 | Cura | **Not targeted** | We don't test against Cura and don't build features for it, but we don't go out of our way to break it. Output generally works; some features (exclude objects, filament sync) need extra setup or aren't available. |
 
@@ -109,7 +110,7 @@ For an exact layer count and a reliable time-remaining estimate, HelixScreen nee
 | **Reactive Binding** | Built-in | Manual | Manual |
 | **3D G-code preview** | Yes | 2D layers | No |
 | **3D bed mesh** | Yes | 2D heatmap | 2D heatmap |
-| **Status** | Pre-1.0, actively developed | Mature (maintenance) | Unmaintained |
+| **Status** | Actively developed | Mature (maintenance) | Unmaintained |
 
 **HelixScreen advantages:**
 - Low memory footprint (~15MB on embedded targets vs ~50MB for KlipperScreen on the same hardware)
@@ -249,7 +250,7 @@ This enables SIMD-accelerated (hardware-optimized) JPEG decoding, which is 3-5x 
 
 **Yes.** Spoolman integration is supported:
 - **Advanced panel** → **Spoolman** to browse your spool inventory
-- **Settings** → **Hardware & Devices** → **Spoolman** for weight sync settings
+- **Settings** → **Devices** → **Spoolman** for weight sync settings
 - Assign spools to AMS slots and track filament usage
 
 ### Can I print spool labels?
@@ -267,6 +268,7 @@ Labels include spool name, material, color swatch, temperatures, and a QR code. 
 **Yes.** Full multi-material support is available for:
 - **Happy Hare** — MMU2, ERCF, 3MS, Tradrack
 - **AFC-Klipper** — Box Turtle, OpenAMS and ViViD, with full lane data, a live step bar during tool changes, and more than 25 device settings and actions grouped into their own sections
+- **OpenAMS** without AFC — supported through klipper_openams' own UI API. Status appears as soon as that API is installed. Load and Unload work once its updated `OPENAMS_LOAD` / `OPENAMS_UNLOAD` macros are merged into your macro file; until then Unload is hidden and Load says the macro is missing
 - **ACE** (Anycubic ACE Pro) — supported on native Anycubic firmware (the `filament_hub` Klipper object, e.g. Kobra on Rinkhals) and on the community ValgACE/BunnyACE/DuckACE Klipper drivers
 - **Tool changers** — supported
 
@@ -278,7 +280,7 @@ Features include visual slot configuration with tool badges, endless spool arrow
 
 To customize:
 1. **Long-press the widget grid** to enter Edit Mode
-2. **Drag** a widget to move it, or drag its edges to resize it
+2. **Tap** a widget to select it, then press it again and **drag** it to move it, or drag its edges to resize it. Drag a widget across the page border to move it to another page
 3. **Long-press an empty area** — or tap **+** on the navigation bar — to open the Widget Catalog and add something
 4. Select a widget and tap the **trash icon** to remove it, or the **gear icon** to configure it
 5. Tap **Done** when you are finished
@@ -299,7 +301,7 @@ See the [Shutdown/Reboot Widget](guide/home-panel.md#shutdownreboot-widget) sect
 
 **Yes!** HelixScreen includes a built-in theme editor with 18 preset themes:
 
-1. Go to **Settings** → **Display & Sound**
+1. Go to **Settings** → **Appearance**
 2. Tap **Theme Colors** to open the theme editor
 3. Choose from presets: Ayu, Catppuccin, ChatGPT, Cupertino, Dracula, Everforest, Gruvbox, Hazard, HelixScreen (default), Kanagawa, Material Design, Midnight, Nord, One Dark, Rose Pine, Solarized, Tokyo Night, or Yami
 4. Toggle dark/light mode
@@ -309,7 +311,7 @@ For layout customization, use Edit Mode on the Home panel — long-press the das
 
 ### Does it support multiple printers?
 
-**Yes!** You can configure multiple Klipper printers and switch between them from the navigation bar or Settings. You view one printer at a time, but switching is instant. Enable beta features first (**Settings** → **Help & About** → **About**, then tap the version button 7 times), then add printers via **Settings** → **Hardware & Devices** → **Printers**.
+**Yes!** You can configure multiple Klipper printers and switch between them from the navigation bar or Settings. You view one printer at a time, but switching is instant. Enable beta features first (**Settings** → **Help & About** → **About**, then tap the version button 7 times), then add printers via **Settings** → **Connection** → **Printers**.
 
 ### Can I view print history?
 
@@ -347,7 +349,7 @@ For layout customization, use Edit Mode on the Home panel — long-press the das
 
 **That's deliberate.** A load or unload heats the nozzle to material temperature, and HelixScreen turns the heater back off two minutes later so it doesn't sit hot indefinitely. The delay lets you run several operations back to back, and a running print is never interfered with.
 
-If your filament system already does its own post-operation cooldown — AFC does — turn ours off at **Settings > Safety & Notifications > Cool nozzle after filament ops** so the two aren't both driving the heater. It's a per-printer setting, so your other machines keep the built-in behavior. See [Safety settings](guide/settings/safety.md#cool-nozzle-after-filament-ops).
+If your filament system already does its own post-operation cooldown — AFC does — turn ours off at **Settings > Printing > Cool nozzle after filament ops** so the two aren't both driving the heater. It's a per-printer setting, so your other machines keep the built-in behavior. See [Printing settings](guide/settings/printing.md#cool-nozzle-after-filament-ops).
 
 ### Can I customize the printer image on the home screen?
 
@@ -365,7 +367,7 @@ Your selection is saved to the `display.printer_image` config key and persists a
 
 ### What languages are supported?
 
-HelixScreen ships with 9 languages: English, German, Spanish, French, Italian, Japanese, Portuguese, Russian, and Chinese. Change the language in **Settings** → **Display & Sound** → **Language**.
+HelixScreen ships with 9 languages: English, German, Spanish, French, Italian, Japanese, Portuguese, Russian, and Chinese. Change the language in **Settings** → **Language & Time** → **Language**.
 
 ### Does HelixScreen collect any data?
 
@@ -394,7 +396,7 @@ Note: This option only appears on touchscreen displays, not in the desktop simul
 
 ### How do I change the theme or colors?
 
-1. Go to **Settings** → **Display & Sound**
+1. Go to **Settings** → **Appearance**
 2. Tap **Theme Colors** to open the theme editor
 3. Browse available presets and see live preview
 4. Toggle dark/light mode
@@ -421,7 +423,7 @@ This option only appears if Klipper reports firmware retraction capability.
 ### How do I check why the UI is slow?
 
 1. **Check your display connection:** SPI displays are significantly slower than HDMI or DSI. If possible, use an HDMI or DSI-connected display for best performance.
-2. **Disable animations:** Go to **Settings** → **Display & Sound** → toggle **Animations** off
+2. **Disable animations:** Go to **Settings** → **Appearance** → toggle **Animations** off
 3. **Check CPU/memory via SSH:** Run `top` or `htop` to see if something else is using resources
 4. **Reduce logging:** If you added `-vv` or `-vvv` to the service, remove it
 5. **Heavy 3D interactions feel slow?** Bed mesh rotation and gcode preview lean on the CPU/GPU; a Pi 4 or Pi 5 is smoother than a Pi 3 or Zero, but everything else in HelixScreen works fine on the older Pi tier.
@@ -437,26 +439,16 @@ The wizard runs when no valid configuration exists. Causes:
 
 ### How do I change the Moonraker address?
 
-There's currently no UI to change this after initial setup. Your options:
+Go to **Settings > Connection > Host** and enter the new address. HelixScreen disconnects from the current printer and connects to the new one right away.
 
-**Edit the config file directly:**
+To re-run the whole setup wizard instead, use **Settings > System > Factory Reset** (wipes all HelixScreen settings and their backup copies), or stop the service and start the app once with the wizard flag:
+
 ```bash
-sudo nano ~/helixscreen/config/settings.json
-# (fallback path if no Klipper ecosystem: /opt/helixscreen/config/settings.json)
-# Edit moonraker_host and moonraker_port in the "printer" section
-sudo systemctl restart helixscreen
-```
-
-**Or re-run the setup wizard:**
-```bash
-# Either delete the config to trigger wizard on next start:
-# (fallback path if no Klipper ecosystem: /opt/helixscreen/config/settings.json)
-sudo rm ~/helixscreen/config/settings.json
-sudo systemctl restart helixscreen
-
-# Or force wizard with command-line flag:
+sudo systemctl stop helixscreen
 helix-screen --wizard
 ```
+
+Deleting `settings.json` by hand does not re-run the wizard on its own: HelixScreen restores it from a rolling backup on the next start. See [Reset HelixScreen or re-run the setup wizard](TROUBLESHOOTING.md#reset-helixscreen-or-re-run-the-setup-wizard) for the full manual procedure.
 
 ---
 
@@ -539,7 +531,7 @@ Open a GitHub issue with the "enhancement" label, or suggest it in the [Discord]
 
 ### How do I enable debug logging?
 
-**Easiest method:** Go to **Settings > System > Log Level** and select **Debug** from the dropdown. The change takes effect immediately — no restart needed. Set it back to **Warn** when you're done.
+**Easiest method:** Go to **Settings > System > Log Level** and select **Debug** from the dropdown. The change takes effect immediately, with no restart needed. Set it back to **Info** when you're done.
 
 **Alternative (via config file):** Add `HELIX_LOG_LEVEL=debug` to your `helixscreen.env` file and restart. On Klipper-based printers the canonical path is in your `printer_data` config dir (the same place where you edit `printer.cfg` from Mainsail/Fluidd):
 
@@ -553,7 +545,7 @@ echo 'HELIX_LOG_LEVEL=debug' >> /opt/helixscreen/config/helixscreen.env
 /etc/init.d/S90helixscreen restart
 ```
 
-Available levels: `warn` (default), `info`, `debug`, `trace`. **Set back to Warn after debugging** — verbose logging impacts performance.
+Available levels: `warn`, `info` (default), `debug`, `trace`. **Set back to Info after debugging**: debug and trace logging cost CPU and log space.
 
 ### Where are the logs?
 
@@ -561,16 +553,22 @@ The app produces **two log streams**: a structured app log (recommended starting
 
 ```bash
 # Structured app log
-sudo journalctl -u helixscreen -f          # MainsailOS / x86 / any systemd Pi-like setup
-grep helix-screen /var/log/messages         # AD5M, Snapmaker U1 (persistent syslog)
-logread | grep helix-screen                 # K1 / K1C / K2 / CC1 / AD5X (BusyBox in-RAM)
+sudo journalctl -u helixscreen -f                          # MainsailOS / x86 / any systemd Pi-like setup
+grep helix-screen /var/log/messages                        # Snapmaker U1 (persistent syslog)
+tail -100 /usr/data/helixscreen-state/logs/helix.log       # K1 / K1C
+tail -100 /mnt/UDISK/helixscreen-state/logs/helix.log      # K2
+tail -100 /data/.helixscreen/logs/helix.log                # AD5M
+tail -100 /user-resource/helixscreen-state/logs/helix.log # CC1
+tail -100 /opt/config/mod_data/log/helix.log               # AD5X
 
-# Launcher / crash capture (SysV platforms only — systemd platforms put this in the journal)
-tail -100 /opt/helixscreen/logs/launcher.log              # AD5M
-tail -100 /usr/data/helixscreen/logs/launcher.log         # K1 / K1C / K2 / AD5X
-tail -100 /var/log/helixscreen/launcher.log               # Snapmaker U1
-tail -100 /user-resource/helixscreen/logs/launcher.log    # CC1 (COSMOS)
-tail -100 /tmp/helixscreen.log                            # pre-v0.99.62 fallback
+# Launcher / crash capture (SysV platforms only; systemd platforms put this in the journal)
+tail -100 /opt/helixscreen/logs/launcher.log               # AD5M (Forge-X)
+tail -100 /root/printer_software/helixscreen/logs/launcher.log  # AD5M (Klipper Mod)
+tail -100 /usr/data/helixscreen/logs/launcher.log          # K1 / K1C
+tail -100 /mnt/UDISK/helixscreen/logs/launcher.log         # K2
+tail -100 /opt/config/mod_data/log/helixscreen.log         # AD5X
+tail -100 /var/log/helixscreen/launcher.log                # Snapmaker U1
+tail -100 /user-resource/helixscreen/logs/launcher.log     # CC1
 ```
 
 For a complete map of log locations and how they're wired up, see the [Logging](../devel/LOGGING.md#log-destinations--retrieval) developer doc.

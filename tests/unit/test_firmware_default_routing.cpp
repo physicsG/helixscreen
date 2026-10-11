@@ -59,7 +59,7 @@ TEST_CASE("AmsBackendSnapmaker declares the four-head U1 table", "[filament][rou
     // The U1 has four physical heads and accepts up to 32 logical tools. Its own
     // firmware table is [0,1,2,3,0,0,...], so T5 really does print from head 0 -
     // this is the one backend for which the old constant was right.
-    AmsBackendSnapmaker backend(nullptr, nullptr);
+    helix::AmsBackendSnapmaker backend(nullptr, nullptr);
     auto routing = backend.firmware_default_routing();
 
     CHECK(routing.head(0) == 0);

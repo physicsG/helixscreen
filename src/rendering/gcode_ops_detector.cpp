@@ -4,14 +4,12 @@
 #include "gcode_ops_detector.h"
 
 #include "operation_patterns.h"
+#include "text_io.h"
 
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <cctype>
-#include <fstream>
-#include <regex>
-#include <sstream>
 
 namespace helix {
 namespace gcode {
@@ -34,20 +32,16 @@ namespace {
 /// from a whitespace-separated KEY=VALUE token list. Returns 0 when absent or
 /// non-numeric.
 int temp_from_call_line(const std::string& line, const char* key) {
-    std::istringstream tokens(line);
-    std::string token;
-    const std::string key_upper = helix::to_upper(key);
-    while (tokens >> token) {
+    const std::string key_upper = helix::text_io::to_upper(key);
+    for (std::string_view token_view : helix::text_io::split_ws(line)) {
+        const std::string token(token_view);
         const size_t eq = token.find('=');
         if (eq == std::string::npos)
             continue;
-        if (helix::to_upper(token.substr(0, eq)) != key_upper)
+        if (helix::text_io::to_upper(token.substr(0, eq)) != key_upper)
             continue;
-        try {
-            return static_cast<int>(std::stof(token.substr(eq + 1)));
-        } catch (const std::exception&) {
-            return 0;
-        }
+        const auto parsed = helix::text_io::parse_leading<float>(token.substr(eq + 1));
+        return parsed ? static_cast<int>(*parsed) : 0;
     }
     return 0;
 }
@@ -177,29 +171,37 @@ void GCodeOpsDetector::add_pattern(OperationPattern pattern) {
     patterns_.push_back(std::move(pattern));
 }
 
-ScanResult GCodeOpsDetector::scan_file(const std::filesystem::path& filepath) const {
-    std::ifstream file(filepath);
-    if (!file.is_open()) {
-        spdlog::warn("[GCodeOpsDetector] Failed to open file: {}", filepath.string());
+ScanResult GCodeOpsDetector::scan_file(const std::string& filepath) const {
+    helix::text_io::LineReader file(filepath);
+    if (!file) {
+        spdlog::warn("[GCodeOpsDetector] Failed to open file: {}", filepath);
         return {};
     }
 
-    spdlog::debug("[GCodeOpsDetector] Scanning file: {}", filepath.string());
-    return scan_stream(file);
+    spdlog::debug("[GCodeOpsDetector] Scanning file: {}", filepath);
+    return scan_lines([&file](std::string& line) { return file.next(line); });
 }
 
 ScanResult GCodeOpsDetector::scan_content(const std::string& content) const {
-    std::istringstream stream(content);
-    return scan_stream(stream);
+    auto records = helix::text_io::lines(content);
+    auto it = records.begin();
+    const auto end = records.end();
+    return scan_lines([&](std::string& line) {
+        if (it == end)
+            return false;
+        line.assign(it->data(), it->size());
+        ++it;
+        return true;
+    });
 }
 
-ScanResult GCodeOpsDetector::scan_stream(std::istream& stream) const {
+template <typename NextLine> ScanResult GCodeOpsDetector::scan_lines(NextLine next_line) const {
     ScanResult result;
     std::string line;
     size_t line_number = 0;
     size_t byte_offset = 0;
 
-    while (std::getline(stream, line)) {
+    while (next_line(line)) {
         line_number++;
 
         // Check limits
@@ -230,7 +232,7 @@ ScanResult GCodeOpsDetector::scan_stream(std::istream& stream) const {
         // Skip comment-only lines and empty lines (but still track byte offset)
         if (!line.empty() && line[0] != ';') {
             // Check for PRINT_START or START_PRINT macro call (case-insensitive)
-            std::string upper_line = helix::to_upper(line);
+            std::string upper_line = helix::text_io::to_upper(line);
 
             // Capture the PRINT_START call info (first occurrence only)
             if (!result.print_start.found) {
@@ -288,8 +290,8 @@ void GCodeOpsDetector::check_line(const std::string& line, size_t line_number, s
         bool found = false;
 
         // Always case-insensitive, but exact_match controls exact vs substring
-        std::string upper_trimmed = helix::to_upper(trimmed);
-        std::string upper_pattern = helix::to_upper(pattern.pattern);
+        std::string upper_trimmed = helix::text_io::to_upper(trimmed);
+        std::string upper_pattern = helix::text_io::to_upper(pattern.pattern);
 
         if (pattern.exact_match) {
             // G-codes: exact match at start of line (avoid G28 inside FOO_G28_BAR)
@@ -351,24 +353,20 @@ bool GCodeOpsDetector::is_first_extrusion(const std::string& line) const {
     }
 
     // Extract value after E
-    try {
-        std::string e_str;
-        for (size_t i = e_pos + 2; i < line.size(); i++) {
-            char c = line[i];
-            if (c == '-' || c == '.' || std::isdigit(c)) {
-                e_str += c;
-            } else {
-                break;
-            }
+    std::string e_str;
+    for (size_t i = e_pos + 2; i < line.size(); i++) {
+        char c = line[i];
+        if (c == '-' || c == '.' || std::isdigit(c)) {
+            e_str += c;
+        } else {
+            break;
         }
-        if (e_str.empty()) {
-            return false;
-        }
-        float e_val = std::stof(e_str);
-        return e_val > 0.001f; // Positive extrusion
-    } catch (...) {
+    }
+    if (e_str.empty()) {
         return false;
     }
+    const auto e_val = helix::text_io::parse_leading<float>(e_str);
+    return e_val && *e_val > 0.001f; // Positive extrusion
 }
 
 bool GCodeOpsDetector::is_layer_marker(const std::string& line) const {
@@ -395,7 +393,7 @@ namespace {
  * Returns false for: "FALSE", "0", "NO", or non-numeric strings
  */
 bool is_truthy_value(const std::string& value) {
-    std::string upper_value = helix::to_upper(value);
+    std::string upper_value = helix::text_io::to_upper(value);
 
     if (upper_value == "TRUE" || upper_value == "1" || upper_value == "YES") {
         return true;
@@ -404,14 +402,10 @@ bool is_truthy_value(const std::string& value) {
         return false;
     }
 
-    // Try parsing as number
-    try {
-        float num = std::stof(value);
-        return num > 0;
-    } catch (...) {
-        // Not a number - be conservative
-        return false;
-    }
+    // Try parsing as number; anything that does not parse is not a number -
+    // be conservative
+    const auto num = helix::text_io::parse_leading<float>(value);
+    return num && *num > 0;
 }
 
 } // namespace
@@ -421,7 +415,7 @@ void GCodeOpsDetector::parse_start_print_params(const std::string& line, size_t 
     // Parse parameters like: START_PRINT EXTRUDER_TEMP=220 BED_TEMP=60 FORCE_LEVELING=true
     // Uses shared parameter matching from operation_patterns.h
 
-    std::string upper_line = helix::to_upper(line);
+    std::string upper_line = helix::text_io::to_upper(line);
 
     // Parse all KEY=VALUE pairs from the line
     // We scan for patterns like "KEY=" and extract the value
@@ -496,6 +490,43 @@ void GCodeOpsDetector::parse_start_print_params(const std::string& line, size_t 
         // Move past this key=value pair
         pos = eq_pos + 1 + value.size();
     }
+}
+
+std::string_view GCodeOpsDetector::command_word(std::string_view line) {
+    const auto is_blank = [](char c) { return c == ' ' || c == '\t' || c == '\r'; };
+    size_t start = 0;
+    while (start < line.size() && is_blank(line[start])) {
+        ++start;
+    }
+    size_t end = start;
+    while (end < line.size() && !is_blank(line[end]) && line[end] != ';') {
+        ++end;
+    }
+    return line.substr(start, end - start);
+}
+
+std::optional<CommandHit>
+GCodeOpsDetector::find_first_command(std::string_view content,
+                                     const std::set<std::string>& commands) {
+    if (commands.empty()) {
+        return std::nullopt;
+    }
+    size_t line_number = 0;
+    size_t line_start = 0;
+    while (line_start < content.size()) {
+        size_t line_end = content.find('\n', line_start);
+        if (line_end == std::string_view::npos) {
+            line_end = content.size();
+        }
+        ++line_number;
+        const std::string_view word =
+            command_word(content.substr(line_start, line_end - line_start));
+        if (!word.empty() && commands.count(helix::text_io::to_upper(word)) > 0) {
+            return CommandHit{std::string(word), line_number};
+        }
+        line_start = line_end + 1;
+    }
+    return std::nullopt;
 }
 
 } // namespace gcode

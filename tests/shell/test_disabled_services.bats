@@ -16,6 +16,7 @@ setup() {
 
     # Source modules (reset source guards)
     unset _HELIX_COMPETING_UIS_SOURCED
+    unset _HELIX_SERVICE_SOURCED
     unset _HELIX_UNINSTALL_SOURCED
 
     # Stub out functions used by competing_uis.sh but not under test
@@ -32,6 +33,11 @@ setup() {
     HELIX_PROCESSES=""
 
     . "$WORKTREE_ROOT/scripts/lib/installer/competing_uis.sh"
+    # service.sh before uninstall.sh, the order every production entry
+    # point uses: uninstall.sh's rc.common shebang checks call
+    # is_rc_common_script from service.sh.
+    # shellcheck disable=SC1090
+    . "$WORKTREE_ROOT/scripts/lib/installer/service.sh"
     . "$WORKTREE_ROOT/scripts/lib/installer/uninstall.sh"
 }
 
@@ -59,6 +65,12 @@ setup() {
     local count
     count=$(grep -c "systemd:KlipperScreen" "$DISABLED_SERVICES_FILE")
     [ "$count" -eq 1 ]
+}
+
+@test "record: an entry that is a prefix of a recorded one is still recorded" {
+    record_disabled_service "systemd-dropin" "gdm3"
+    record_disabled_service "systemd-dropin" "gdm"
+    grep -qxF "systemd-dropin:gdm" "$DISABLED_SERVICES_FILE"
 }
 
 @test "record: handles multiple different entries" {

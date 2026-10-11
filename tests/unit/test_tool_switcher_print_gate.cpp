@@ -63,8 +63,10 @@ class GateBackend : public AmsBackendMock {
     bool tool_change_should_fail = false;
     int change_tool_calls = 0;
 
-    bool filament_ops_self_home() const override {
-        return self_homes;
+    BackendTraits traits() const override {
+        BackendTraits t = AmsBackendMock::traits();
+        t.filament_ops_self_home = self_homes;
+        return t;
     }
 
     AmsError change_tool(int /*tool_number*/) override {
@@ -124,7 +126,7 @@ struct ToolSwitcherGateFixture : public LVGLTestFixture {
 
     /// A host-side pre-print block: the wire still reads standby.
     void set_preprint_phase(helix::PrintStartPhase phase) {
-        printer_state.set_print_start_state(phase, "", 0);
+        printer_state.print_state().set_print_start_state(phase, "", 0);
         helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
     }
 
@@ -262,7 +264,7 @@ TEST_CASE_METHOD(ToolSwitcherGateFixture, "pills grey and un-grey as the print s
     pills.push_back(lv_obj_create(host));
     pills.push_back(lv_obj_create(host));
 
-    // observe_int_sync() defers through the UpdateQueue, so the gate lands on
+    // observe<int>() defers through the UpdateQueue, so the gate lands on
     // the next tick — drain before asserting.
     auto tick = [] {
         helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());

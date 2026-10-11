@@ -11,6 +11,7 @@
 #ifdef HELIX_DISPLAY_FBDEV
 
 #include "display_backend.h"
+#include "pointer_frame_hook.h"
 #include "touch_calibration.h"
 #include "touch_calibration_wrapper.h"
 
@@ -59,6 +60,9 @@ class DisplayBackendFbdev : public DisplayBackend {
     // Input device creation
     lv_indev_t* create_input_pointer() override;
     lv_indev_t* create_input_keyboard() override;
+    bool has_hardware_keyboard() const override {
+        return keyboard_ != nullptr;
+    }
 
     // Backend info
     DisplayBackendType type() const override {
@@ -136,7 +140,8 @@ class DisplayBackendFbdev : public DisplayBackend {
      * accepted.
      */
     void clear_calibration() override;
-    bool apply_touch_range(bool swap_axes, int min_x, int min_y, int max_x, int max_y) override;
+    bool apply_touch_range(bool swap_axes, int min_x, int min_y, int max_x, int max_y,
+                           helix::TouchRangeSource source) override;
 
     /**
      * @brief Get current touch calibration
@@ -181,7 +186,6 @@ class DisplayBackendFbdev : public DisplayBackend {
      * The DRM backend needs this override for hardware plane rotation,
      * but fbdev software rotation needs no additional touch transform.
      */
-    void set_display_rotation(lv_display_rotation_t rot, int phys_w, int phys_h) override;
 
   private:
     std::string fb_device_ = "/dev/fb0";
@@ -200,6 +204,11 @@ class DisplayBackendFbdev : public DisplayBackend {
 
     /// Calibration context for touch input (member to avoid memory leak)
     helix::CalibrationContext calibration_context_;
+
+    /// Fronts the touch device and the mouse, each with the evdev read callback
+    /// it replaced. LVGL rotates every pointer sample by the display's rotation,
+    /// which a relative pointer's position must not get.
+    helix::PointerFrameHook pointer_frames_;
 
     /// True once install_calibration_wrapper() has wired calibrated_read_cb onto
     /// touch_ with user_data = &calibration_context_. Tracks install state so

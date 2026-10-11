@@ -55,7 +55,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
                  "[recovery][threading][lifetime]") {
     auto& estop = EmergencyStopOverlay::instance();
 
-    // Exactly how Application::init_panel_subjects() wires it (application.cpp).
+    // Exactly how PrinterSession::init_panel_subjects() wires it (application.cpp).
     // The fixture already ran init_subjects().
     estop.init(state(), api());
     estop.create();
@@ -63,7 +63,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     // One of the three subjects create() subscribed to. Its storage is a member
     // of a PrinterState component, so the address stays valid across the cycle
     // below — only the observer nodes hanging off it are freed.
-    lv_subject_t* klippy = state().get_klippy_state_subject();
+    lv_subject_t* klippy = state().network_state().get_klippy_state_subject();
     REQUIRE(klippy != nullptr);
 
     // Teardown + rebuild, the soft-restart shape. deinit_subjects() flips

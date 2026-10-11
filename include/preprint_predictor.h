@@ -2,9 +2,10 @@
 
 #pragma once
 
+#include "json_fwd.h"
+
 #include <cstdint>
 #include <map>
-#include <set>
 #include <vector>
 
 namespace helix {
@@ -117,16 +118,17 @@ class PreprintPredictor {
      */
     [[nodiscard]] std::map<int, int> predicted_phases() const;
 
+    /// Homing estimate floor. A macro that goes straight from G28 into its
+    /// next narrated step records a homing phase of a few seconds or none.
+    static constexpr int MIN_HOMING_SECONDS = 20;
+
     /**
-     * @brief Real-time remaining seconds estimate
+     * @brief Predicted homing seconds, never below MIN_HOMING_SECONDS
      *
-     * @param completed_phases Set of phase enum ints already completed
-     * @param current_phase Current phase enum int (0=IDLE, no contribution)
-     * @param elapsed_in_current_phase_seconds Seconds spent in current phase
-     * @return Estimated remaining seconds, 0 if no predictions
+     * The one homing estimate the pre-print collector and the print details
+     * estimate share.
      */
-    [[nodiscard]] int remaining_seconds(const std::set<int>& completed_phases, int current_phase,
-                                        int elapsed_in_current_phase_seconds) const;
+    [[nodiscard]] int predicted_homing_seconds() const;
 
     /**
      * @brief Whether any predictions can be made
@@ -150,6 +152,28 @@ class PreprintPredictor {
      * @return Parsed entries (may be empty)
      */
     [[nodiscard]] static std::vector<PreprintEntry> load_entries_from_config();
+
+    /**
+     * @brief Serialize entries to the /print_start_history/entries array shape
+     *
+     * The inverse of load_entries_from_config(), and kept beside it so both
+     * directions of the stored format are read in one place.
+     *
+     * @return JSON array, one object per entry
+     */
+    [[nodiscard]] static json entries_to_json(const std::vector<PreprintEntry>& entries);
+
+    /**
+     * @brief Record one finished pre-print in Config's print_start_history
+     *
+     * Every stored entry is kept except the oldest of the new entry's own
+     * (temp bucket, window) population beyond MAX_ENTRIES, and the oldest
+     * overall beyond MAX_STORED_ENTRIES. Writes Config; does not save it.
+     */
+    static void append_to_config(const PreprintEntry& entry);
+
+    /// Cap on the whole stored history, across buckets and windows
+    static constexpr size_t MAX_STORED_ENTRIES = 15;
 
     /**
      * @brief Load history from Config and return predicted total seconds

@@ -3,15 +3,13 @@
 
 #include "subject_initializer.h"
 
+#include "ui_bed_drying_modal.h"
 #include "ui_component_keypad.h"
 #include "ui_emergency_stop.h"
 #include "ui_error_reporting.h"
-#include "ui_fan_control_overlay.h"
-#include "ui_modal.h"
 #include "ui_nav_manager.h"
 #include "ui_notification.h"
 #include "ui_notification_manager.h"
-#include "ui_overlay_console_settings.h"
 #include "ui_overlay_printer_image.h"
 #include "ui_overlay_retraction_settings.h"
 #include "ui_overlay_timelapse_install.h"
@@ -21,6 +19,7 @@
 #include "ui_panel_bed_mesh.h"
 #include "ui_panel_belt_tension.h"
 #include "ui_panel_calibration_pid.h"
+#include "ui_panel_calibration_tool_offset.h"
 #include "ui_panel_calibration_zoffset.h"
 #include "ui_panel_console.h"
 #include "ui_panel_controls.h"
@@ -41,17 +40,13 @@
 #include "ui_wizard.h"
 
 #include "abort_manager.h"
-#include "accel_sensor_manager.h"
 #include "active_print_media_manager.h"
 #include "ams_state.h"
 #include "app_globals.h"
-#include "color_sensor_manager.h"
+#include "bed_drying_controller.h"
 #include "filament_catalog.h"
-#include "filament_op_router.h"
-#include "filament_sensor_manager.h"
+#include "filament_database.h"
 #include "filament_variants.h"
-#include "humidity_sensor_manager.h"
-#include "led/ui_led_control_overlay.h"
 #include "lock_manager.h"
 #include "lvgl/lvgl.h"
 #include "material_settings_manager.h"
@@ -62,168 +57,27 @@
 #include "print_control_buttons.h"
 #include "print_start_navigation.h"
 #include "printer_state.h"
-#include "probe_sensor_manager.h"
+#include "runtime_config.h"
+#include "sensor_managers.h"
 #include "settings_manager.h"
 #include "spoolman_manager.h"
 #include "standard_macros.h"
 #include "system/telemetry_manager.h"
 #include "temperature_controller.h"
-#include "temperature_sensor_manager.h"
 #include "temperature_service.h"
 #include "timelapse_state.h"
 #include "tool_state.h"
 #include "usb_manager.h"
-#include "width_sensor_manager.h"
 #include "xml_registration.h"
+#include "z_offset_utils.h"
 
 #include <spdlog/spdlog.h>
 
 #include <chrono>
 #include <memory>
 
-namespace {
-
-// The one live installation of helix::ui::HomeConfirmPrompter (Task 8). Every
-// other caller of set_home_confirm_prompter() is a test.
-//
-// Built on the Modal INSTANCE API (helix::ui::Modal subclass), not the bare
-// static Modal::show() factory. A bare-show dialog is pushed with no owner:
-// nothing observes its close, so backdrop-tap and ESC just tear the widgets
-// down and no hook fires (the first cut of this code used the helper form on
-// that path and learned this the hard way). Since AmsBackendAfc/AmsBackendToolChanger arm their
-// optimistic AmsAction *before* calling ensure_homed_then(), and
-// ensure_homed_then()'s unhomed branch now always returns success() once it
-// decides to prompt (no more synchronous failure return for `!result` to
-// catch), a backdrop-tap or ESC dismissal that never resolves either callback
-// left those two backends permanently stuck busy -- ToolChanger has no
-// stuck-action watchdog at all, so that was an unrecoverable lockout short of
-// an app restart.
-//
-// The instance API's on_hide() hook, by contrast, fires on every exit path:
-// Ok/Cancel buttons and ESC all route through on_ok()/on_cancel() (which
-// default to hide()), and backdrop-tap calls hide() directly. HomeConfirmModal
-// uses on_hide() as a fallback net -- resolve() below is idempotent, so
-// whichever path got there first (button, ESC, or the backdrop-tap fallback)
-// is the only one that fires a callback.
-class HomeConfirmModal : public Modal {
-  public:
-    HomeConfirmModal(std::function<void()> on_confirm, std::function<void()> on_cancel)
-        : on_confirm_(std::move(on_confirm)), on_cancel_(std::move(on_cancel)) {}
-
-    const char* get_name() const override {
-        return "HomeConfirm"; // i18n: do not translate, internal modal identifier
-    }
-    const char* component_name() const override {
-        return "modal_dialog";
-    }
-
-  protected:
-    void on_show() override {
-        wire_ok_button();
-        wire_cancel_button();
-    }
-
-    void on_ok() override {
-        resolve(on_confirm_);
-        Modal::on_ok(); // hides
-    }
-
-    void on_cancel() override {
-        resolve(on_cancel_);
-        Modal::on_cancel(); // hides
-    }
-
-    void on_hide() override {
-        // Fallback net: only fires if neither on_ok() nor on_cancel() already
-        // resolved this dialog -- i.e. it was dismissed by backdrop-tap (which
-        // calls hide() directly, bypassing on_cancel()) or any other exit that
-        // skips both. Every dismissal must land the backend at IDLE the same
-        // way the Cancel button does, so the fallback treats it as cancel.
-        resolve(on_cancel_);
-        // No self-delete: the ModalStack owns this instance and frees it when
-        // its entry goes (#1382).
-    }
-
-  public:
-    // Same fallback-as-cancel contract as on_hide(), for the one path that
-    // never reaches it: show() itself failing (no active screen). Called by
-    // install_home_confirm_prompter() right before the unique_ptr frees an
-    // unshown instance -- without this, a failed show() would silently drop
-    // both callbacks and wedge the backend exactly like the bug this class
-    // fixes.
-    void resolve_unshown_as_cancelled() {
-        resolve(on_cancel_);
-    }
-
-  private:
-    void resolve(std::function<void()>& cb) {
-        if (resolved_) {
-            return;
-        }
-        resolved_ = true;
-        if (cb) {
-            cb();
-        }
-    }
-
-    std::function<void()> on_confirm_;
-    std::function<void()> on_cancel_;
-    bool resolved_ = false;
-};
-
-/// Installs the modal-backed HomeConfirmPrompter used by every real run of
-/// the app. Must run after DisplayManager has created the LVGL display (so
-/// lv_screen_active() and the modal subsystem exist by the time a user
-/// action later triggers the callback) -- true for every SubjectInitializer
-/// entry point, since Application::init_display() (Phase 4) runs well before
-/// Application::init_core_subjects()/init_panels()/init_ui() (Phases 9+),
-/// which is what calls into SubjectInitializer at all. Installing here (not
-/// e.g. inside AmsSubscriptionBackend) keeps the AMS backend layer free of
-/// any LVGL/modal dependency -- it only ever calls the seam in
-/// filament_op_router.h.
-void install_home_confirm_prompter() {
-    helix::ui::set_home_confirm_prompter(
-        [](std::function<void()> on_confirm, std::function<void()> on_cancel) {
-            // Same subjects the modal_confirm() helper
-            // configures (severity/button text) -- "modal_dialog" is a shared
-            // XML component bound to these, regardless of which API shows it.
-            // modal_configure() leaves a null cancel_text's subject untouched
-            // (stale from whichever dialog configured it last), unlike
-            // modal_confirm() which defaults it -- pass it explicitly.
-            helix::ui::modal_configure(ModalSeverity::Warning, /*show_cancel=*/true,
-                                       lv_tr("Home & Continue"), lv_tr("Cancel"));
-            const char* attrs[] = {
-                "title", lv_tr("Home printer first?"), "message",
-                lv_tr("The printer is not homed. Continuing will home all axes, moving the "
-                      "toolhead. Make sure the bed is clear."),
-                nullptr};
-            auto modal =
-                std::make_unique<HomeConfirmModal>(std::move(on_confirm), std::move(on_cancel));
-            // show(lv_obj_t*, const char**) -- the instance overload (parent is
-            // ignored internally; it always uses lv_screen_active()). A bare
-            // nullptr is ambiguous against the static show(const char*, const
-            // char**) overload in the same class, hence the explicit cast.
-            if (!modal->show(static_cast<lv_obj_t*>(nullptr), attrs)) {
-                spdlog::error("[SubjectInitializer] Failed to show home-confirm modal");
-                modal->resolve_unshown_as_cancelled();
-                return; // the unique_ptr frees the never-shown instance
-            }
-            // The stack owns the instance from here: freed when its entry
-            // goes, by whichever path that is (#1382). Grab the backdrop
-            // before the move -- argument evaluation is unsequenced.
-            lv_obj_t* backdrop = modal->backdrop();
-            ModalStack::instance().assume_ownership(backdrop, std::move(modal));
-        });
-}
-
-} // namespace
-
 SubjectInitializer::SubjectInitializer() = default;
-SubjectInitializer::~SubjectInitializer() {
-    // Invalidate alive guard BEFORE UsbManager destruction — prevents queued
-    // USB callbacks from accessing freed PrintSelectPanel
-    *m_usb_callback_alive = false;
-}
+SubjectInitializer::~SubjectInitializer() = default;
 
 void SubjectInitializer::init_core_and_state() {
     spdlog::debug("[SubjectInitializer] Initializing core and state subjects...");
@@ -234,11 +88,20 @@ void SubjectInitializer::init_core_and_state() {
     // Phase 2: PrinterState subjects (panels depend on these)
     init_printer_state_subjects();
 
+    // Settings subjects next: panels built from here on observe the language
+    // subject, and LVGL refuses an observer on a subject not yet initialised.
+    // Needs PrinterState (the Z movement override applies there).
+    helix::SettingsManager::instance().init_subjects();
+
     // Warm the Orca match tables on the main thread, before AmsState/backends
     // start below — otherwise the first lane_data heal parses
     // assets/filaments.json under g_orca_mutex on a WebSocket background
     // thread (see filament_variants.h warm_orca_tables()).
     filament::warm_orca_tables();
+
+    // Same reason for the material-type table: its first use would otherwise
+    // parse the asset and the user overlay on whichever thread got there first.
+    filament::materials();
 
     // Merge user-contributed Orca type overrides from config/user_filaments.json
     // (object form, `orca_type_map` key). User entries win over shipped entries
@@ -248,6 +111,11 @@ void SubjectInitializer::init_core_and_state() {
 
     // Phase 3: AMS and filament sensor subjects
     init_ams_subjects();
+
+    // Z-offset save availability. Derived from PrinterState's strategy and
+    // machine-wide offset plus ToolState's per-tool dirty flag, so it registers
+    // after all three, and before any panel XML binds the name.
+    helix::zoffset::init_save_available_subject();
 
     // Phase 4: Navigation subjects — MUST register AFTER PrinterState/AmsState
     // so that in reverse deinit order, NavigationManager cleans up its observers
@@ -278,14 +146,6 @@ void SubjectInitializer::init_post(const RuntimeConfig& runtime_config) {
     // Phase 7: USB manager (needs notification system)
     init_usb_manager(runtime_config);
 
-    // Phase 8: Install the real "home printer first?" confirmation prompter
-    // (Task 8) -- see install_home_confirm_prompter() above for why this
-    // placement is safe. No test ever reaches this: HelixTestFixture's
-    // reset_all() doesn't touch the prompter slot, and no test calls
-    // SubjectInitializer::init_post(), so the ~4600 existing tests keep
-    // seeing the default (no-prompter, proceed-immediately) behaviour.
-    install_home_confirm_prompter();
-
     m_initialized = true;
     spdlog::debug("[SubjectInitializer] Initialized {} observer guards", m_observers.size());
 }
@@ -310,7 +170,7 @@ void SubjectInitializer::init_core_subjects() {
 void SubjectInitializer::init_printer_state_subjects() {
     spdlog::trace("[SubjectInitializer] Initializing PrinterState subjects");
     // PrinterState must be initialized BEFORE panels that observe its subjects
-    // (e.g., HomePanel observes led_state_, extruder_temp_, connection_state_)
+    // (e.g., HomePanel observes extruder_temp_, connection_state_)
     get_printer_state().init_subjects();
 
     // ActivePrintMediaManager observes print_filename_ and updates print_display_filename_
@@ -331,7 +191,7 @@ void SubjectInitializer::init_ams_subjects() {
 
     // Initialize AmsState subjects BEFORE panels so XML bindings can find ams_gate_count
     // Note: In mock mode, init_subjects() also creates the mock backend internally
-    AmsState::instance().init_subjects(true);
+    helix::AmsState::instance().init_subjects(true);
 
     // Initialize SpoolmanManager AFTER AmsState (it reads slot data from AmsState)
     SpoolmanManager::instance().init_subjects();
@@ -342,13 +202,7 @@ void SubjectInitializer::init_ams_subjects() {
 
     // Initialize sensor manager subjects BEFORE panels so XML bindings can work
     // Note: Each manager self-registers cleanup with StaticSubjectRegistry in init_subjects()
-    helix::FilamentSensorManager::instance().init_subjects();
-    helix::sensors::HumiditySensorManager::instance().init_subjects();
-    helix::sensors::WidthSensorManager::instance().init_subjects();
-    helix::sensors::ProbeSensorManager::instance().init_subjects();
-    helix::sensors::AccelSensorManager::instance().init_subjects();
-    helix::sensors::ColorSensorManager::instance().init_subjects();
-    helix::sensors::TemperatureSensorManager::instance().init_subjects();
+    helix::sensors::for_each_sensor_manager([](auto& m) { m.init_subjects(); });
 }
 
 void SubjectInitializer::init_panel_subjects(IMoonrakerAPI* api) {
@@ -409,16 +263,6 @@ void SubjectInitializer::init_panel_subjects(IMoonrakerAPI* api) {
     init_global_retraction_settings(api);
     get_global_retraction_settings().init_subjects();
 
-    init_global_console_settings();
-    get_global_console_settings().init_subjects();
-
-    // Fan control overlay (opened from Controls panel secondary fans list)
-    init_fan_control_overlay(get_printer_state());
-    get_fan_control_overlay().init_subjects();
-
-    // LED control overlay (opened from Home panel light long-press)
-    init_led_control_overlay(get_printer_state());
-
     // ConsolePanel is now lazy-initialized by AdvancedPanel (OverlayBase pattern)
 
     // Row handlers for advanced features
@@ -426,6 +270,7 @@ void SubjectInitializer::init_panel_subjects(IMoonrakerAPI* api) {
     init_input_shaper_row_handler();
     init_belt_tension_row_handler();
     init_zoffset_row_handler();
+    helix::ui::init_tool_offset_row_handler();
     init_zoffset_event_callbacks();
     init_probe_row_handler();
 
@@ -481,6 +326,33 @@ void SubjectInitializer::init_panel_subjects(IMoonrakerAPI* api) {
     helix::PanelWidgetManager::instance().register_shared_resource<helix::TemperatureController>(
         m_temp_controller.get());
 
+    // Drying on the heated bed (prestonbrown/helixscreen#1730). restore() brings
+    // back a persisted spools-on-the-bed latch before any panel can move the
+    // printer.
+    // Under --test the run's clock follows --sim-speed, so a 12 h run plays out
+    // against the mock in minutes.
+    helix::BedDryingController::Clock bed_drying_clock;
+    if (auto* rc = get_runtime_config(); rc && rc->is_test_mode() && rc->sim_speedup > 1.0) {
+        const double speedup = rc->sim_speedup;
+        const auto t0 = std::chrono::steady_clock::now();
+        const long long wall0 = std::chrono::duration_cast<std::chrono::seconds>(
+                                    std::chrono::system_clock::now().time_since_epoch())
+                                    .count();
+        bed_drying_clock = [speedup, t0, wall0] {
+            const double elapsed =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            return wall0 + static_cast<long long>(elapsed * speedup);
+        };
+    }
+    m_bed_drying = std::make_unique<helix::BedDryingController>(
+        get_printer_state(), api, m_temp_controller.get(), std::move(bed_drying_clock));
+    m_bed_drying->init_subjects();
+    m_bed_drying->set_on_ready_to_remove(helix::ui::show_bed_drying_remove_prompt);
+    m_bed_drying->set_on_print_while_latched(helix::ui::show_spools_on_bed_print_alarm);
+    helix::PanelWidgetManager::instance().register_shared_resource<helix::BedDryingController>(
+        m_bed_drying.get());
+    m_bed_drying->restore();
+
     // TemperatureService (owned by SubjectInitializer - destructor handles deinit_subjects)
     m_temp_control_panel = std::make_unique<TemperatureService>(get_printer_state(), api);
     m_temp_control_panel->set_controller(m_temp_controller.get());
@@ -532,7 +404,7 @@ void SubjectInitializer::init_observers() {
     m_observers.push_back(TelemetryManager::instance().init_print_outcome_observer());
 
     // Panel usage tracking for telemetry
-    // Note: Uses raw ObserverGuard rather than observe_int_sync because there's no
+    // Note: Uses raw ObserverGuard rather than observe<int> because there's no
     // Panel* context — SubjectInitializer is not a Panel subclass.
     {
         auto* panel_subject = NavigationManager::instance().get_active_panel_subject();
@@ -577,7 +449,7 @@ void SubjectInitializer::init_observers() {
 
         // Connection state observer — safe without mutex because these subjects
         // are only updated via ui_queue_update() (fires on LVGL/main thread).
-        auto* conn_subject = ps.get_printer_connection_state_subject();
+        auto* conn_subject = ps.network_state().get_printer_connection_state_subject();
         if (conn_subject) {
             m_observers.push_back(ObserverGuard(
                 conn_subject,
@@ -589,7 +461,7 @@ void SubjectInitializer::init_observers() {
         }
 
         // Klippy state observer
-        auto* klippy_subject = ps.get_klippy_state_subject();
+        auto* klippy_subject = ps.network_state().get_klippy_state_subject();
         if (klippy_subject) {
             m_observers.push_back(ObserverGuard(
                 klippy_subject,
@@ -611,21 +483,10 @@ void SubjectInitializer::init_usb_manager(const RuntimeConfig& runtime_config) {
     spdlog::trace("[SubjectInitializer] Initializing USB manager");
 
     m_usb_manager = std::make_unique<UsbManager>(runtime_config.should_mock_usb());
-    if (m_usb_manager->start()) {
-        spdlog::debug("[SubjectInitializer] USB Manager started (mock={})",
-                      runtime_config.should_mock_usb());
-        if (m_print_select_panel) {
-            m_print_select_panel->set_usb_manager(m_usb_manager.get());
-        }
-        // Also provide USB manager to printer image overlay
-        helix::settings::get_printer_image_overlay().set_usb_manager(m_usb_manager.get());
-    } else {
-        spdlog::info(
-            "[SubjectInitializer] USB Manager not started (not available on this platform)");
-    }
 
-    // Set up USB drive event notifications
-    if (m_usb_manager) {
+    // The callback goes on before start(): the backend's thread can report a
+    // drive as soon as it runs, and an event with no callback is dropped.
+    {
         // Track when USB callbacks were set up - suppress toasts for drives at startup
         static auto usb_setup_time = std::chrono::steady_clock::now();
 
@@ -646,7 +507,8 @@ void SubjectInitializer::init_usb_manager(const RuntimeConfig& runtime_config) {
                 if (!within_grace_period) {
                     // Marshal notification to main thread — callback fires from
                     // USB backend's background thread
-                    helix::ui::queue_update([]() { NOTIFY_SUCCESS(lv_tr("USB drive connected")); });
+                    helix::ui::queue_update("SubjectInitializer::init_usb_manager",
+                                            []() { NOTIFY_SUCCESS(lv_tr("USB drive connected")); });
                 } else {
                     spdlog::debug("[USB] Suppressing toast for drive present at startup");
                 }
@@ -654,21 +516,36 @@ void SubjectInitializer::init_usb_manager(const RuntimeConfig& runtime_config) {
                     // Marshal to main thread — callback fires from UsbBackendMock's
                     // demo thread, and panel methods touch LVGL widgets.
                     // Capture weak_alive to guard against panel destruction.
-                    helix::ui::queue_update([panel, weak_alive]() {
-                        if (!weak_alive.expired())
-                            panel->on_usb_drive_inserted();
-                    });
+                    helix::ui::queue_update("SubjectInitializer::init_usb_manager",
+                                            [panel, weak_alive]() {
+                                                if (!weak_alive.expired())
+                                                    panel->on_usb_drive_inserted();
+                                            });
                 }
             } else if (event == UsbEvent::DRIVE_REMOVED) {
-                helix::ui::queue_update([]() { NOTIFY_INFO(lv_tr("USB drive removed")); });
+                helix::ui::queue_update("SubjectInitializer::init_usb_manager",
+                                        []() { NOTIFY_INFO(lv_tr("USB drive removed")); });
                 if (panel) {
-                    helix::ui::queue_update([panel, weak_alive]() {
-                        if (!weak_alive.expired())
-                            panel->on_usb_drive_removed();
-                    });
+                    helix::ui::queue_update("SubjectInitializer::init_usb_manager",
+                                            [panel, weak_alive]() {
+                                                if (!weak_alive.expired())
+                                                    panel->on_usb_drive_removed();
+                                            });
                 }
             }
         });
-        // Note: Demo drives are now auto-added by UsbBackendMock::start() after 1.5s delay
+    }
+
+    if (m_usb_manager->start()) {
+        spdlog::debug("[SubjectInitializer] USB Manager started (mock={})",
+                      runtime_config.should_mock_usb());
+        if (m_print_select_panel) {
+            m_print_select_panel->set_usb_manager(m_usb_manager.get());
+        }
+        // Also provide USB manager to printer image overlay
+        helix::settings::get_printer_image_overlay().set_usb_manager(m_usb_manager.get());
+    } else {
+        spdlog::info(
+            "[SubjectInitializer] USB Manager not started (not available on this platform)");
     }
 }

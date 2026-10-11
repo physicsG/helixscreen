@@ -18,6 +18,7 @@
 
 #include "ams_types.h"
 #include "overlay_base.h"
+#include "static_panel_registry.h"
 
 #include <lvgl/lvgl.h>
 
@@ -25,7 +26,9 @@
 #include <vector>
 
 // Forward declarations
+namespace helix {
 class AmsBackend;
+} // namespace helix
 
 namespace helix::ui {
 
@@ -47,18 +50,9 @@ namespace helix::ui {
 class AmsDeviceSectionDetailOverlay : public OverlayBase {
   public:
     /**
-     * @brief Default constructor
-     */
-    AmsDeviceSectionDetailOverlay();
-
-    /**
      * @brief Destructor
      */
     ~AmsDeviceSectionDetailOverlay() override;
-
-    // Non-copyable
-    AmsDeviceSectionDetailOverlay(const AmsDeviceSectionDetailOverlay&) = delete;
-    AmsDeviceSectionDetailOverlay& operator=(const AmsDeviceSectionDetailOverlay&) = delete;
 
     //
     // === OverlayBase Interface ===
@@ -73,28 +67,18 @@ class AmsDeviceSectionDetailOverlay : public OverlayBase {
     void init_subjects() override;
 
     /**
-     * @brief Register event callbacks with lv_xml system
-     *
-     * No XML-defined callbacks needed — controls are created imperatively
-     * (documented exception for dynamic backend-driven controls).
-     */
-    void register_callbacks() override;
-
-    /**
-     * @brief Create the overlay UI (called lazily)
-     *
-     * @param parent Parent widget to attach overlay to (usually screen)
-     * @return Root object of overlay, or nullptr on failure
-     */
-    lv_obj_t* create(lv_obj_t* parent) override;
-
-    /**
      * @brief Get human-readable overlay name
      * @return "Section Detail"
      */
     const char* get_name() const override {
         return "Section Detail";
     }
+
+    const char* xml_component() const override {
+        return "ams_device_section_detail";
+    }
+
+    lv_obj_t* create(lv_obj_t* parent) override;
 
     //
     // === Public API ===
@@ -103,12 +87,8 @@ class AmsDeviceSectionDetailOverlay : public OverlayBase {
     /**
      * @brief Show the overlay for a specific section
      *
-     * This method:
-     * 1. Ensures overlay is created (lazy init)
-     * 2. Sets the title to the section label
-     * 3. Queries backend for actions matching section_id
-     * 4. Creates controls for matching actions
-     * 5. Pushes overlay onto navigation stack
+     * Sets the title to the section label, builds controls for the backend
+     * actions matching section_id, and pushes the overlay.
      *
      * @param parent_screen The parent screen for overlay creation
      * @param section_id The section ID to filter actions by (e.g., "calibration")
@@ -123,6 +103,9 @@ class AmsDeviceSectionDetailOverlay : public OverlayBase {
      * Re-queries backend and recreates controls for the current section.
      */
     void refresh();
+
+  protected:
+    void before_show() override;
 
   private:
     //
@@ -196,6 +179,9 @@ class AmsDeviceSectionDetailOverlay : public OverlayBase {
     /// The section ID this overlay is currently showing
     std::string section_id_;
 
+    /// Its human-readable label, shown in the header
+    std::string section_label_;
+
     /// Cached actions from backend
     std::vector<helix::printer::DeviceAction> cached_actions_;
 
@@ -203,14 +189,8 @@ class AmsDeviceSectionDetailOverlay : public OverlayBase {
     std::vector<std::string> action_ids_;
 };
 
-/**
- * @brief Global instance accessor
- *
- * Creates the overlay on first access and registers it for cleanup
- * with StaticPanelRegistry.
- *
- * @return Reference to singleton AmsDeviceSectionDetailOverlay
- */
-AmsDeviceSectionDetailOverlay& get_ams_device_section_detail_overlay();
+inline AmsDeviceSectionDetailOverlay& get_ams_device_section_detail_overlay() {
+    return lazy_global<AmsDeviceSectionDetailOverlay>("AmsDeviceSectionDetailOverlay");
+}
 
 } // namespace helix::ui

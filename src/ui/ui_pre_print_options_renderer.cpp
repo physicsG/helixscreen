@@ -16,11 +16,11 @@ namespace helix::ui {
 
 namespace {
 
-/// Per-row event-callback context. Stored as the user_data of the switch
+/// Per-tile event-callback context. Stored as the user_data of the tile
 /// widget so the dispatcher can recover both the renderer and the option id
-/// at event time. Owned by the row's `LV_EVENT_DELETE` callback (set up
+/// at event time. Owned by the tile's `LV_EVENT_DELETE` callback (set up
 /// alongside the value-changed callback) so it never leaks.
-struct SwitchUserData {
+struct ToggleUserData {
     PrePrintOptionsRenderer* renderer;
     std::string id;
 };
@@ -123,6 +123,28 @@ std::string PrePrintOptionsRenderer::label_for(const PrePrintOption& opt) {
     return std::string(lv_tr(label_key_for(opt).c_str()));
 }
 
+std::string PrePrintOptionsRenderer::default_icon_for(const std::string& id) {
+    if (id == "bed_mesh") {
+        return "grid_large";
+    }
+    if (id == "shaper_calibrate") {
+        return "sine_wave";
+    }
+    if (id == "flow_calibrate") {
+        return "gauge";
+    }
+    if (id == "timelapse" || id == "u1_timelapse") {
+        return "camera_timer";
+    }
+    if (id == "ai_detect") {
+        return "robot";
+    }
+    if (id == "qgl" || id == "z_tilt") {
+        return "spirit_level";
+    }
+    return "tune";
+}
+
 void PrePrintOptionsRenderer::populate(lv_obj_t* container, const PrePrintOptionSet& option_set,
                                        const VisibilitySubjectLookup& visibility_lookup,
                                        OnToggleCallback on_toggle) {
@@ -130,8 +152,6 @@ void PrePrintOptionsRenderer::populate(lv_obj_t* container, const PrePrintOption
         spdlog::warn("[PrePrintOptionsRenderer] populate() called with null container");
         return;
     }
-
-    on_toggle_ = std::move(on_toggle);
 
     // Order matters: deinit subjects (observers attached to live widgets) BEFORE
     // we ask LVGL to delete those widgets. If we deleted widgets first,
@@ -144,8 +164,14 @@ void PrePrintOptionsRenderer::populate(lv_obj_t* container, const PrePrintOption
     // subsequent widget delete has nothing to do for those observers. The
     // alternative ordering would risk `lv_observer_remove` touching a freed
     // subject's `subs_ll` (UAF).
+    //
+    // clear() also drops on_toggle_, so the caller's callback is assigned
+    // after it; assigning before clear() would leave a populate() with no
+    // toggle callback.
     clear();
     safe_clean_children(container);
+
+    on_toggle_ = std::move(on_toggle);
 
     if (option_set.options.empty()) {
         spdlog::debug("[PrePrintOptionsRenderer] Empty option set — container left empty");
@@ -212,10 +238,10 @@ lv_obj_t* PrePrintOptionsRenderer::get_row(const std::string& id) const {
     return (it != rows_.end()) ? it->row : nullptr;
 }
 
-lv_obj_t* PrePrintOptionsRenderer::get_switch(const std::string& id) const {
+lv_obj_t* PrePrintOptionsRenderer::get_toggle(const std::string& id) const {
     auto it =
         std::find_if(rows_.begin(), rows_.end(), [&](const OptionRow& r) { return r.id == id; });
-    return (it != rows_.end()) ? it->switch_widget : nullptr;
+    return (it != rows_.end()) ? it->toggle_widget : nullptr;
 }
 
 void PrePrintOptionsRenderer::make_row(lv_obj_t* container, const PrePrintOption& opt,
@@ -228,19 +254,16 @@ void PrePrintOptionsRenderer::make_row(lv_obj_t* container, const PrePrintOption
     row.state_subject = std::make_unique<lv_subject_t>();
     lv_subject_init_int(row.state_subject.get(), opt.default_enabled ? 1 : 0);
 
-    // Row container + label + switch, built from the shared
-    // compact_toggle_row XML component (ui_xml/components/compact_toggle_row.xml)
-    // rather than hand-assembled here, so the appearance can't drift from the
-    // XML-authored rows that use the same component (e.g. sliced_colors_row
-    // in print_file_detail.xml).
+    // The tile itself, built from the option_tile XML component
+    // (ui_xml/components/option_tile.xml) rather than hand-assembled here, so
+    // the appearance can't drift from the XML-authored widgets. The tile is
+    // the row: the checkable object and the container are one widget, so
+    // there is no child lookup.
     //
-    // `subject` and `callback` are deliberately left unset (their XML "" default):
-    //  - subject="" makes the component's <bind_state_if_eq> skip installing an
-    //    observer (lv_xml_obj_parser.c empty-subject branch), so it doesn't
-    //    fight the imperative lv_subject_add_observer_obj binding below.
-    //  - callback="" resolves to the no-op event cb registered for the empty
-    //    name (xml_registration.cpp), leaving the real handler to be wired
-    //    imperatively via lv_obj_add_event_cb below, same as before.
+    // `callback` is deliberately left unset (its XML "" default): callback=""
+    // resolves to the no-op event cb registered for the empty name
+    // (xml_registration.cpp), leaving the real handler to be wired
+    // imperatively via lv_obj_add_event_cb below.
     //
     // label_tag carries the untranslated i18n key (matching label_for()'s
     // lv_tr() call) so the label can be re-resolved by
@@ -249,35 +272,30 @@ void PrePrintOptionsRenderer::make_row(lv_obj_t* container, const PrePrintOption
     // ("") and blank the label out.
     std::string label_key = label_key_for(opt);
     std::string text = std::string(lv_tr(label_key.c_str()));
-    const char* attrs[] = {"label", text.c_str(), "label_tag", label_key.c_str(), nullptr};
-    lv_obj_t* row_obj =
-        static_cast<lv_obj_t*>(lv_xml_create(container, "compact_toggle_row", attrs));
+    std::string icon = default_icon_for(opt.id);
+    const char* attrs[] = {"label", text.c_str(), "label_tag", label_key.c_str(),
+                           "icon",  icon.c_str(), nullptr};
+    lv_obj_t* row_obj = static_cast<lv_obj_t*>(lv_xml_create(container, "option_tile", attrs));
     if (!row_obj) {
-        spdlog::error("[PrePrintOptionsRenderer] lv_xml_create('compact_toggle_row') returned "
+        spdlog::error("[PrePrintOptionsRenderer] lv_xml_create('option_tile') returned "
                       "NULL for '{}'",
                       opt.id);
-        // Subject was init'd above but never handed to a row widget — deinit
+        // Subject was init'd above but never handed to a tile; deinit
         // now or its observer-list backing leaks (see ~PrePrintOptionsRenderer).
         lv_subject_deinit(row.state_subject.get());
         return;
     }
+    lv_obj_set_name(row_obj, ("option_tile_" + opt.id).c_str());
     row.row = row_obj;
 
-    lv_obj_t* sw = lv_obj_find_by_name(row_obj, "toggle");
-    if (!sw) {
-        spdlog::error(
-            "[PrePrintOptionsRenderer] compact_toggle_row missing 'toggle' child for '{}'", opt.id);
-        lv_subject_deinit(row.state_subject.get());
-        return;
-    }
     if (opt.default_enabled) {
-        lv_obj_add_state(sw, LV_STATE_CHECKED);
+        lv_obj_add_state(row_obj, LV_STATE_CHECKED);
     }
-    row.switch_widget = sw;
+    row.toggle_widget = row_obj;
 
-    // Bind switch checked-state to the per-option state subject. We do this
+    // Bind tile checked-state to the per-option state subject. We do this
     // imperatively rather than via the XML <bind_state_if_eq> path because
-    // the row is created dynamically.
+    // the tile is created dynamically.
     lv_subject_add_observer_obj(
         row.state_subject.get(),
         [](lv_observer_t* observer, lv_subject_t* subject) {
@@ -288,7 +306,7 @@ void PrePrintOptionsRenderer::make_row(lv_obj_t* container, const PrePrintOption
                 lv_obj_remove_state(widget, LV_STATE_CHECKED);
             }
         },
-        sw, nullptr);
+        row_obj, nullptr);
 
     // Visibility binding — `bind_flag_if_eq subject="..." flag="hidden" ref_value="0"`.
     if (visibility_lookup) {
@@ -307,17 +325,17 @@ void PrePrintOptionsRenderer::make_row(lv_obj_t* container, const PrePrintOption
         }
     }
 
-    // Wire up the value-changed callback. SwitchUserData is heap-allocated
+    // Wire up the value-changed callback. ToggleUserData is heap-allocated
     // and freed in the LV_EVENT_DELETE handler so it lives exactly as long
-    // as the switch widget.
-    auto* user_data = new SwitchUserData{this, opt.id};
-    lv_obj_add_event_cb(sw, on_switch_value_changed, LV_EVENT_VALUE_CHANGED, user_data);
+    // as the tile widget.
+    auto* user_data = new ToggleUserData{this, opt.id};
+    lv_obj_add_event_cb(row_obj, on_toggle_value_changed, LV_EVENT_VALUE_CHANGED, user_data);
     lv_obj_add_event_cb(
-        sw,
+        row_obj,
         [](lv_event_t* e) {
             // Free the heap-allocated user data when the widget is deleted.
             // LV_EVENT_DELETE callbacks fire exactly once.
-            auto* data = static_cast<SwitchUserData*>(lv_event_get_user_data(e));
+            auto* data = static_cast<ToggleUserData*>(lv_event_get_user_data(e));
             delete data;
         },
         LV_EVENT_DELETE, user_data);
@@ -325,17 +343,17 @@ void PrePrintOptionsRenderer::make_row(lv_obj_t* container, const PrePrintOption
     rows_.push_back(std::move(row));
 }
 
-void PrePrintOptionsRenderer::on_switch_value_changed(lv_event_t* e) {
+void PrePrintOptionsRenderer::on_toggle_value_changed(lv_event_t* e) {
     // user_data lifetime is guaranteed by the LV_EVENT_DELETE handler, which
     // LVGL fires last among a widget's event callbacks. VALUE_CHANGED can
     // never fire after `data` is freed because deletion runs first only on
     // the LV_EVENT_DELETE path, which then frees `data` once.
-    auto* data = static_cast<SwitchUserData*>(lv_event_get_user_data(e));
+    auto* data = static_cast<ToggleUserData*>(lv_event_get_user_data(e));
     if (!data || !data->renderer) {
         return;
     }
-    auto* sw = static_cast<lv_obj_t*>(lv_event_get_target(e));
-    int new_state = lv_obj_has_state(sw, LV_STATE_CHECKED) ? 1 : 0;
+    auto* tile = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    int new_state = lv_obj_has_state(tile, LV_STATE_CHECKED) ? 1 : 0;
     data->renderer->set_state(data->id, new_state);
     if (data->renderer->on_toggle_) {
         data->renderer->on_toggle_(data->id, new_state);

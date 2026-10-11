@@ -2,20 +2,19 @@
 <!-- Copyright (C) 2025-2026 356C LLC -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <!-- Hardware Issue Row - Displays a single hardware validation issue -->
-<!-- Styled to match notification_history_item with 4px left border and severity icon -->
+<!-- A flat row inside a setting_group card: the group draws the card, the row only its content -->
 <!-- After creating, call ui_severity_card_finalize(row) to show correct icon -->
 <component>
   <api>
     <prop name="severity" type="string"/>
     <!-- "error", "warning", "info" -->
   </api>
-  <!-- Card with colored left border (severity_card handles border color based on severity) -->
+  <!-- severity_card selects the per-severity icon; the enclosing group supplies the card -->
   <view name="hardware_issue_row"
         extends="severity_card" width="100%" height="content" severity="$severity" style_pad_left="#space_md"
-        style_pad_right="#space_md" style_pad_top="#space_sm" style_pad_bottom="#space_sm" style_bg_color="#card_bg"
-        style_bg_opa="255" style_border_width="4" style_border_side="left" style_radius="#border_radius"
-        scrollable="false" flex_flow="row" style_flex_main_place="start" style_flex_cross_place="start"
-        style_pad_gap="#space_md">
+        style_pad_right="#space_md" style_pad_top="#space_sm" style_pad_bottom="#space_sm" style_bg_opa="0"
+        style_border_width="0" scrollable="false" flex_flow="row" style_flex_main_place="start"
+        style_flex_cross_place="start" style_pad_gap="#space_md">
     <!-- Icon column (fixed width for severity icon) -->
     <lv_obj width="28" style_pad_all="0" style_pad_top="#space_xxs" scrollable="false">
       <!-- Severity icons - all hidden by default, finalize() shows the correct one -->
@@ -27,16 +26,14 @@
                 text="#icon_triangle_exclamation" hidden="true" style_text_font="mdi_icons_24"
                 style_text_color="#warning"/>
       <lv_label name="icon_error"
-                text="#icon_triangle_exclamation" hidden="true" style_text_font="mdi_icons_24"
-                style_text_color="#danger"/>
+                text="#icon_alert_octagon" hidden="true" style_text_font="mdi_icons_24" style_text_color="#danger"/>
     </lv_obj>
     <!-- Content column -->
     <lv_obj flex_grow="1"
             style_pad_all="0" style_pad_right="#space_md" scrollable="false" flex_flow="column"
             style_pad_gap="#space_xxs">
-      <text_body name="hardware_name" width="100%" text="Hardware Name" translation_tag="Hardware Name" long_mode="wrap"/>
-      <text_small name="issue_message"
-                  width="100%" text="Issue description" translation_tag="Issue description" long_mode="wrap"/>
+      <text_body name="hardware_name" width="100%" text="Hardware Name" long_mode="wrap"/>
+      <text_small name="issue_message" width="100%" text="Issue description" long_mode="wrap"/>
     </lv_obj>
     <!-- Action buttons container (hidden by default, shown by C++ for non-critical issues) -->
     <lv_obj name="action_buttons"
@@ -44,12 +41,11 @@
             scrollable="false" style_flex_cross_place="center">
       <!-- Ignore button (mark as optional) -->
       <ui_button name="ignore_btn"
-                 width="content" height="#button_height" style_min_width="64" variant="ghost" text="Ignore"
-                 translation_tag="Ignore"/>
+                 width="content" height="#button_height" style_min_width="64" variant="ghost" text="Ignore"/>
       <!-- Save button (add to expected list) - only for INFO severity -->
       <ui_button name="save_btn"
-                 width="content" height="#button_height" hidden="true" style_min_width="64" variant="success"
-                 text="Save" translation_tag="Save"/>
+                 width="content" height="#button_height" hidden="true" style_min_width="64" variant="primary"
+                 text="Save"/>
     </lv_obj>
   </view>
 </component>

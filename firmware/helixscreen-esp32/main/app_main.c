@@ -4,7 +4,7 @@
 // Boot order: storage mount → UI pthread (created FIRST) → network task. The UI
 // pthread's thread body brings up the panel + LVGL + the real shell; creating
 // the pthread before the net task keeps the boot's two internal-DRAM allocation
-// gates (48KB UI stack, then the 32KB RGB bounce DMA in board_display_init)
+// gates (40KB UI stack, then the 32KB RGB bounce DMA in board_display_init)
 // ahead of WiFi. Fitting both also required moving the app core's large statics
 // to PSRAM (see lvgl_glue.c / sdkconfig.defaults) — ordering alone wasn't
 // enough; the internal-DRAM demand simply exceeded the free budget.

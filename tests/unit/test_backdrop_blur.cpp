@@ -1,6 +1,8 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "../lvgl_test_fixture.h"
+#include "../wait_finish_spy.h"
 #include "backdrop_blur.h"
 
 #include <algorithm>
@@ -224,4 +226,77 @@ TEST_CASE("circuit breaker: cleanup keeps blur disabled", "[backdrop_blur][circu
     // Cleanup keeps blur disabled (pending stability testing)
     helix::ui::backdrop_blur_cleanup();
     REQUIRE(is_blur_disabled());
+}
+
+// ============================================================================
+// Teardown drain (#1673)
+// ============================================================================
+
+TEST_CASE_METHOD(LVGLTestFixture, "backdrop image delete drains the draw units before freeing",
+                 "[backdrop_blur][drawbuf][1673]") {
+    // The blurred/darkened backdrop is a live image source until the modal
+    // teardown deletes its widget. The free must go through
+    // helix::safe_draw_buf_destroy() so no in-flight blend on the render
+    // thread reads the buffer after it is gone - the same failure shape as
+    // the K1 crash, where a blend source was munmap'd mid-draw.
+    reset_circuit_breaker();
+
+    lv_obj_t* parent = lv_obj_create(lv_screen_active());
+    lv_obj_t* img = helix::ui::create_blurred_backdrop(parent, 180);
+    REQUIRE(img != nullptr);
+
+    WaitForFinishSpy spy;
+    lv_obj_delete(img);
+
+    CHECK(spy.waits() >= 1);
+}
+
+// ============================================================================
+// RGB565 darkening
+// ============================================================================
+
+TEST_CASE("darken_rgb565: scales each channel and leaves row padding alone",
+          "[backdrop_blur][darken]") {
+    // Two white pixels, then two padding bytes the stride skips.
+    std::vector<uint8_t> buf(6, 0xAB);
+    auto* px = reinterpret_cast<uint16_t*>(buf.data());
+    px[0] = 0xFFFF;
+    px[1] = 0xFFFF;
+
+    darken_rgb565_inplace(buf.data(), 2, 1, 6, 40);
+
+    // 31*215/255 = 26, 63*215/255 = 53
+    CHECK(px[0] == ((26u << 11) | (53u << 5) | 26u));
+    CHECK(px[1] == px[0]);
+    CHECK(buf[4] == 0xAB);
+    CHECK(buf[5] == 0xAB);
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "darkened backdrop on a 16-bit display is an RGB565 snapshot",
+                 "[backdrop_blur][darken]") {
+    lv_display_t* prev = lv_display_get_default();
+    static uint8_t draw_buf[64 * 32 * 2];
+    lv_display_t* disp = lv_display_create(64, 32);
+    lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565);
+    lv_display_set_buffers(disp, draw_buf, nullptr, sizeof(draw_buf),
+                           LV_DISPLAY_RENDER_MODE_PARTIAL);
+    lv_display_set_flush_cb(
+        disp, [](lv_display_t* d, const lv_area_t*, uint8_t*) { lv_display_flush_ready(d); });
+    lv_display_set_default(disp);
+
+    lv_obj_t* scr = lv_display_get_screen_active(disp);
+    lv_obj_set_style_bg_color(scr, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+
+    lv_obj_t* img = helix::ui::create_darkened_backdrop(scr, 40);
+    REQUIRE(img != nullptr);
+    const auto* src = static_cast<const lv_draw_buf_t*>(lv_image_get_src(img));
+    REQUIRE(src != nullptr);
+    CHECK(src->header.cf == LV_COLOR_FORMAT_RGB565);
+    CHECK(src->header.w == 64);
+    CHECK(reinterpret_cast<const uint16_t*>(src->data)[0] == ((26u << 11) | (53u << 5) | 26u));
+
+    lv_obj_delete(img);
+    lv_display_set_default(prev);
+    lv_display_delete(disp);
 }

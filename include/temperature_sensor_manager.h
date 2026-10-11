@@ -7,7 +7,7 @@
 
 #include "async_lifetime_guard.h"
 #include "lvgl.h"
-#include "sensor_registry.h"
+#include "sensor_collection.h"
 #include "subject_managed_panel.h"
 #include "temperature_sensor_types.h"
 
@@ -18,12 +18,13 @@
 #include <string>
 #include <vector>
 
+#include "hv/json.hpp"
+
 namespace helix::sensors {
 
 /**
- * @brief Manager for temperature sensors (temperature_sensor and temperature_fan)
+ * @brief Manager for temperature sensors (temperature_sensor, temperature_fan, heater_generic)
  *
- * Implements ISensorManager interface for integration with SensorRegistry.
  * Provides:
  * - Auto-discovery of temperature sensors from Klipper objects list
  * - Auto-categorization by role (CHAMBER, MCU, HOST, AUXILIARY)
@@ -35,6 +36,8 @@ namespace helix::sensors {
  * Klipper object names:
  * - temperature_sensor <name>  - Read-only temperature sensor
  * - temperature_fan <name>     - Temperature-controlled fan (has target and speed)
+ * - heater_generic <name>      - Generic heater (has target); the chamber's own heater
+ *                                takes the CHAMBER role via apply_chamber_sensor_override()
  *
  * Excludes: extruder, extruder1, heater_bed (managed by PrinterState)
  *
@@ -52,17 +55,18 @@ namespace helix::sensors {
  * }
  * @endcode
  */
-class TemperatureSensorManager : public ISensorManager {
+class TemperatureSensorManager {
   public:
     /**
      * @brief Dynamic integer subject for per-sensor temperature binding
      *
      * Wraps an lv_subject_t with lifecycle management. These are NOT registered
      * with the XML system since they are created dynamically per-sensor.
-     * Values stored as decidegrees (temperature * 100).
+     * Values stored as decidegrees (temperature * 10).
      */
     struct DynamicIntSubject {
         lv_subject_t subject{};
+        lv_subject_t target_subject{}; ///< Target in decidegrees (0 for read-only sensors)
         bool initialized = false;
         SubjectLifetime lifetime; ///< Alive token for ObserverGuard safety
 
@@ -73,6 +77,7 @@ class TemperatureSensorManager : public ISensorManager {
             lifetime.reset();
             if (initialized && lv_is_initialized()) {
                 lv_subject_deinit(&subject);
+                lv_subject_deinit(&target_subject);
             }
             initialized = false;
         }
@@ -88,29 +93,26 @@ class TemperatureSensorManager : public ISensorManager {
     TemperatureSensorManager& operator=(const TemperatureSensorManager&) = delete;
 
     // ========================================================================
-    // ISensorManager Interface
+    // Discovery, Status and Config
     // ========================================================================
-
-    /// @brief Get category name for registry
-    [[nodiscard]] std::string category_name() const override;
 
     /**
      * @brief Discover sensors from Klipper objects list
      * @note MUST be called from main LVGL thread (updates subjects directly)
      */
-    void discover(const std::vector<std::string>& klipper_objects) override;
+    void discover(const std::vector<std::string>& klipper_objects);
 
     /// @brief Update state from Moonraker status JSON
-    void update_from_status(const nlohmann::json& status) override;
+    void update_from_status(const nlohmann::json& status);
 
     /**
      * @brief Load sensor configuration from JSON
      * @note MUST be called from main LVGL thread (updates subjects directly)
      */
-    void load_config(const nlohmann::json& config) override;
+    void load_config(const nlohmann::json& config);
 
     /// @brief Save configuration to JSON
-    [[nodiscard]] nlohmann::json save_config() const override;
+    [[nodiscard]] nlohmann::json save_config() const;
 
     // ========================================================================
     // Initialization
@@ -177,9 +179,13 @@ class TemperatureSensorManager : public ISensorManager {
      *
      * @param klipper_name Full Klipper object name for the new chamber sensor,
      *                     or empty string to clear chamber assignment entirely.
+     * @param heater_name  The resolved chamber heater. A heater_generic also takes the
+     *                     CHAMBER role so it is not listed a second time as an auxiliary
+     *                     heater; a temperature_fan keeps its own role. Empty when none.
      * @note MUST be called from main LVGL thread (updates subjects directly)
      */
-    void apply_chamber_sensor_override(const std::string& klipper_name);
+    void apply_chamber_sensor_override(const std::string& klipper_name,
+                                       const std::string& heater_name = "");
 
     /**
      * @brief Enable or disable a sensor
@@ -220,6 +226,15 @@ class TemperatureSensorManager : public ISensorManager {
     [[nodiscard]] lv_subject_t* get_temp_subject(const std::string& klipper_name,
                                                  SubjectLifetime& lifetime);
 
+    /**
+     * @brief Get a sensor's target subject (int: decidegrees)
+     *
+     * Shares the temperature subject's lifetime token. Reads 0 for objects
+     * without a target (temperature_sensor, tmc*).
+     */
+    [[nodiscard]] lv_subject_t* get_target_subject(const std::string& klipper_name,
+                                                   SubjectLifetime& lifetime);
+
     /// @brief Get dynamic subject without lifetime token (only for non-observer uses)
     [[nodiscard]] lv_subject_t* get_temp_subject(const std::string& klipper_name);
 
@@ -230,10 +245,22 @@ class TemperatureSensorManager : public ISensorManager {
     [[nodiscard]] lv_subject_t* get_sensor_count_subject();
 
     /**
+     * @brief Death signal for the set-level subjects this singleton owns.
+     *
+     * deinit_subjects() frees every observer node on them without bumping the
+     * ObserverGuard invalidation epoch, so outside observers must pass this to
+     * observe_*(), or their guards call lv_observer_remove() on a freed node.
+     * Per-sensor subjects have their own tokens via get_temp_subject().
+     */
+    [[nodiscard]] SubjectLifetime get_subjects_lifetime() const {
+        return subjects_.get_subjects_lifetime();
+    }
+
+    /**
      * @brief Enable synchronous mode for testing
      *
      * When enabled, update_from_status() calls update_subjects() synchronously
-     * instead of using lv_async_call().
+     * instead of using queue_update().
      */
     void set_sync_mode(bool enabled);
 
@@ -260,13 +287,6 @@ class TemperatureSensorManager : public ISensorManager {
                             TemperatureSensorType& type) const;
 
     /**
-     * @brief Find config by Klipper name
-     * @return Pointer to config, or nullptr if not found
-     */
-    TemperatureSensorConfig* find_config(const std::string& klipper_name);
-    const TemperatureSensorConfig* find_config(const std::string& klipper_name) const;
-
-    /**
      * @brief Update all LVGL subjects from current state
      * @note Internal method - MUST only be called from main LVGL thread
      */
@@ -284,11 +304,7 @@ class TemperatureSensorManager : public ISensorManager {
     // Async callback safety guard (L072: never access state after shutdown)
     helix::AsyncLifetimeGuard lifetime_;
 
-    // Configuration
-    std::vector<TemperatureSensorConfig> sensors_;
-
-    // Runtime state (keyed by klipper_name)
-    std::map<std::string, TemperatureSensorState> states_;
+    SensorCollection<TemperatureSensorConfig, TemperatureSensorState> sensors_;
 
     // Per-sensor dynamic subjects (keyed by klipper_name, value in decidegrees)
     std::map<std::string, std::unique_ptr<DynamicIntSubject>> temp_subjects_;

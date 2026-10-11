@@ -4,8 +4,8 @@
 # Meta-tests for scripts/check_responsive_token_scope.py — the responsive-token
 # location gate.
 #
-# theme_manager_find_xml_files() skips subdirectories outright
-# (src/ui/theme_manager.cpp: `if (entry->d_type == DT_DIR) continue;`), so token
+# Token discovery calls theme_manager_find_xml_files() with recursive=false,
+# which skips subdirectories outright (src/ui/theme_token_scan.cpp), so token
 # auto-discovery reads only the top-level ui_xml/*.xml. A responsive token
 # declared in ui_xml/components/, ui_xml/portrait/, ui_xml/micro/ — anywhere but
 # the top level — is never registered, and every `#token` referencing it
@@ -21,6 +21,8 @@
 # ui_xml/components/ (grid_gap, pin_dot_size, tray_default_height) and resolve
 # fine through the component's own scope. A gate that fired on those would be
 # noise on every component commit and would get switched off.
+
+load helpers
 
 GATE="scripts/check_responsive_token_scope.py"
 
@@ -49,8 +51,8 @@ run_gate() {
   <view name="card" extends="lv_obj"/>
 </component>'
     [ "$status" -eq 1 ]
-    [[ "$output" == *"card_gutter_small"* ]]
-    [[ "$output" == *"card.xml"* ]]
+    contains "card_gutter_small" "$output"
+    contains "card.xml" "$output"
     [[ "$output" == *"globals.xml"* ]]
 }
 

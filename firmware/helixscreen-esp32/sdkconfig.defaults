@@ -2,7 +2,6 @@ CONFIG_IDF_TARGET="esp32s3"
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
-CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
 CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
@@ -22,7 +21,21 @@ CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536
 CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
 
 CONFIG_COMPILER_OPTIMIZATION_SIZE=y
-CONFIG_COMPILER_CXX_EXCEPTIONS=y
+
+# Exceptions off. IDF then links no .eh_frame at all (ld.common keys it on this
+# option) and -fno-exceptions drops the landing pads and LSDA tables: measured
+# 6,711,056 -> 5,345,136 bytes, .eh_frame -443K, .flash.text -623K and
+# .flash.rodata -300K. Every throw is an abort here: nlohmann's JSON_THROW keys
+# on __cpp_exceptions and becomes std::abort(), and libstdc++'s __throw_* reach
+# IDF's aborting __cxa_throw. So firmware-compiled code reads JSON through
+# json_util's non-throwing readers, parses numbers with text_io::parse_leading,
+# and writes no try/catch or throw of its own: exception_policy.h holds the two
+# helpers for code desktop and firmware share. A try or throw in a firmware
+# file is a compile error; scripts/check_esp32_app_srcs.py reports it at commit
+# time, along with the calls that compile but abort (json .value("k", d),
+# .at("k"), one-argument json::parse, std::sto*, value-form std::any_cast), and
+# scripts/check_esp32_size.py fails esp32-build if exception support is linked.
+# CONFIG_COMPILER_CXX_EXCEPTIONS is not set
 
 # RTTI off (IDF's own default; stated explicitly because it is a deliberate
 # constraint on the app, not an inherited value). The firmware is RTTI-free by
@@ -35,10 +48,6 @@ CONFIG_COMPILER_CXX_EXCEPTIONS=y
 # every polymorphic type used to carry — 2,076 _ZTSZ* symbols in the map, now
 # zero. -fno-rtti also goes on the link line, which selects the no-rtti multilib
 # (lib/esp32s3/no-rtti/) so nothing pulls in the RTTI libstdc++/libc copies.
-#
-# Exceptions stay ON. GCC still emits typeinfo for thrown and caught types, so
-# catch-by-base keeps working; only the runtime *query* forms are gone. That is
-# why .eh_frame barely moves here (396,560 -> 396,200).
 #
 # Consequence to know before reintroducing either: a dynamic_cast or typeid in
 # any firmware translation unit is now a hard compile error, not a size
@@ -93,11 +102,21 @@ CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=8
 # case), and stock ships this mitigation.
 CONFIG_ESP_PHY_REDUCE_TX_POWER=y
 
-# Stock parity: DOUT flash header — the shipped stock image runs DOUT@80m,
-# not the QIO its build config nominally requested. (Stock's 32B data-cache
-# line was tried and worsened scan-out: 64B lines give longer, more efficient
-# PSRAM bursts for the framebuffer reads.)
-CONFIG_ESPTOOLPY_FLASHMODE_DOUT=y
+# QIO flash: all code executes from flash through a 16KB instruction cache, so
+# every miss pays the fetch; QIO builds panels ~10% faster than the stock
+# image's DOUT on the K-Touch's GD25Q128. The image header stays DIO and the
+# bootloader enables quad mode only when it can set the chip's QE bit.
+# (Stock's 32B data-cache line was tried and worsened scan-out: 64B lines give
+# longer, more efficient PSRAM bursts for the framebuffer reads.)
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+
+# 32KB instruction cache. With 16KB the hot UI code thrashes it: panel builds,
+# XML registration and full-screen renders ran 30-40% slower, and an unrelated
+# code-layout shift could swing them 25%. The larger cache takes all of SRAM0,
+# so its IRAM code moves into shared DIRAM; FreeRTOS's non-ISR functions go to
+# flash to pay for most of that (ISR-safe ones stay in IRAM).
+CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
+CONFIG_FREERTOS_PLACE_FUNCTIONS_INTO_FLASH=y
 
 # RESTART_IN_VSYNC must stay OFF (measured 2026-08-14, IDF v5.5.5 driver bug):
 # the bounce refill targets bounce_buffer[bb_eof_count % 2], and the driver

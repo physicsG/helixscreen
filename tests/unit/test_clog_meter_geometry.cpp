@@ -14,6 +14,9 @@
 
 #include "clog_meter_geometry.h"
 
+#include <cmath>
+#include <string>
+
 #include "../catch_amalgamated.hpp"
 
 using namespace helix::ui;
@@ -256,6 +259,17 @@ TEST_CASE("clog_bar_geometry: Flowguard shades both ends", "[clog][bar][1017]") 
     CHECK(g.danger_lo_w == g.danger_hi_w);
 }
 
+TEST_CASE("clog_bar_geometry: Flowguard shades both ends alike on an odd track",
+          "[clog][bar][1017]") {
+    for (int track : {199, 201, 97, 3}) {
+        INFO("track " << track);
+        auto g = clog_bar_geometry(kMode_Flowguard, 0, /*danger=*/80, 0, track);
+        CHECK(g.danger_lo_w == g.danger_hi_w);
+        // The high zone still runs to the track's far edge.
+        CHECK(g.danger_hi_x + g.danger_hi_w == track);
+    }
+}
+
 TEST_CASE("clog_bar_geometry: the Flowguard peak follows the side in fault", "[clog][bar][1017]") {
     // peak_pct is max(|clog|, |tangle|) — a magnitude with no side of its own,
     // so it is drawn on the side the current reading leans toward.
@@ -290,4 +304,86 @@ TEST_CASE("clog_bar_geometry: out-of-range values are clamped, not wrapped", "[c
 
     auto silly_danger = clog_bar_geometry(kMode_Encoder, 50, /*danger=*/900, 0, kTrack);
     CHECK(silly_danger.danger_hi_w == 0); // shading collapses, it does not invert
+}
+
+// ===========================================================================
+// Buffer reading bands
+// ===========================================================================
+
+TEST_CASE("pressure_status: the bands, by magnitude", "[clog][status][pressure]") {
+    CHECK(pressure_status(0) == ClogMeterStatus::Ok);
+    CHECK(pressure_status(kPressureWarningPct - 1) == ClogMeterStatus::Ok);
+    CHECK(pressure_status(kPressureWarningPct) == ClogMeterStatus::Warning);
+    CHECK(pressure_status(-kPressureWarningPct) == ClogMeterStatus::Warning);
+    CHECK(pressure_status(kPressureFaultPct - 1) == ClogMeterStatus::Warning);
+    CHECK(pressure_status(kPressureFaultPct) == ClogMeterStatus::Fault);
+    CHECK(pressure_status(-100) == ClogMeterStatus::Fault);
+}
+
+TEST_CASE("pressure_status_of_bias: the bands at their edges", "[clog][status][pressure]") {
+    CHECK(pressure_status_of_bias(-0.71f) == ClogMeterStatus::Fault);
+    CHECK(pressure_status_of_bias(-0.70f) == ClogMeterStatus::Fault);
+    CHECK(pressure_status_of_bias(-0.30f) == ClogMeterStatus::Warning);
+    CHECK(pressure_status_of_bias(-0.29f) == ClogMeterStatus::Ok);
+    CHECK(pressure_status_of_bias(0.0f) == ClogMeterStatus::Ok);
+    CHECK(pressure_status_of_bias(0.29f) == ClogMeterStatus::Ok);
+    CHECK(pressure_status_of_bias(0.30f) == ClogMeterStatus::Warning);
+    CHECK(pressure_status_of_bias(0.70f) == ClogMeterStatus::Fault);
+    CHECK(pressure_status_of_bias(5.0f) == ClogMeterStatus::Fault);
+    CHECK(pressure_status_of_bias(std::nanf("")) == ClogMeterStatus::Ok);
+}
+
+TEST_CASE("buffer_lean: tension is tight, compression loose, a deadband between",
+          "[clog][pressure]") {
+    CHECK(buffer_lean(0.0f) == BufferLean::Balanced);
+    CHECK(buffer_lean(-0.019f) == BufferLean::Balanced);
+    CHECK(buffer_lean(0.019f) == BufferLean::Balanced);
+    CHECK(buffer_lean(-0.3f) == BufferLean::Tight);
+    CHECK(buffer_lean(0.15f) == BufferLean::Loose);
+}
+
+TEST_CASE("buffer_status_token: neutral on target, warning off it, danger at an end stop",
+          "[clog][status][buffer]") {
+    CHECK(std::string(buffer_status_token(ClogMeterStatus::Ok)) == "text_muted");
+    CHECK(std::string(buffer_status_token(ClogMeterStatus::Warning)) == "warning");
+    CHECK(std::string(buffer_status_token(ClogMeterStatus::Fault)) == "danger");
+}
+
+TEST_CASE("clog_meter_note: a trip reason outranks tangle prevention, which outranks silence",
+          "[clog_meter][note]") {
+    CHECK(clog_meter_note(true, true, true, true) == ClogNote::TripReason);
+    CHECK(clog_meter_note(true, false, true, true) == ClogNote::TangleBoosted);
+    CHECK(clog_meter_note(false, true, true, false) == ClogNote::TangleActive);
+    CHECK(clog_meter_note(false, false, true, false) == ClogNote::TangleActive);
+    CHECK(clog_meter_note(true, false, false, false) == ClogNote::None);
+    CHECK(clog_meter_note(false, false, false, false) == ClogNote::None);
+}
+
+TEST_CASE("fill_pressure_status: only the rails color a compression-only reading",
+          "[clog-meter][buffer][fill]") {
+    using helix::ui::ClogMeterStatus;
+    using helix::ui::fill_pressure_status;
+    using namespace helix::ui;
+    CHECK(kPressureFullWarningPct == 85);
+    CHECK(kPressureFullFaultPct == 95);
+    CHECK(kPressureEmptyWarningPct == 5);
+    CHECK(fill_pressure_status(50, true) == ClogMeterStatus::Ok);
+    CHECK(fill_pressure_status(84, true) == ClogMeterStatus::Ok);
+    CHECK(fill_pressure_status(85, false) == ClogMeterStatus::Warning);
+    CHECK(fill_pressure_status(94, false) == ClogMeterStatus::Warning);
+    CHECK(fill_pressure_status(95, false) == ClogMeterStatus::Fault);
+    CHECK(fill_pressure_status(5, true) == ClogMeterStatus::Warning);
+    CHECK(fill_pressure_status(6, true) == ClogMeterStatus::Ok);
+    CHECK(fill_pressure_status(5, false) == ClogMeterStatus::Ok);
+}
+
+TEST_CASE("pressure_target_side: a deadband of five points either way",
+          "[clog-meter][buffer][fill]") {
+    using helix::ui::pressure_target_side;
+    using helix::ui::PressureTargetSide;
+    CHECK(pressure_target_side(50, 50) == PressureTargetSide::At);
+    CHECK(pressure_target_side(45, 50) == PressureTargetSide::At);
+    CHECK(pressure_target_side(55, 50) == PressureTargetSide::At);
+    CHECK(pressure_target_side(44, 50) == PressureTargetSide::Below);
+    CHECK(pressure_target_side(56, 50) == PressureTargetSide::Above);
 }

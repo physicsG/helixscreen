@@ -2,6 +2,7 @@
 #include "qr_decoder.h"
 
 #include "quirc/lib/quirc.h"
+#include "text_io.h"
 
 #include <spdlog/spdlog.h>
 
@@ -114,10 +115,11 @@ int QrDecoder::parse_spoolman_id(const std::string& text) {
         spdlog::debug("QrDecoder: normalized '{}' -> '{}'", text, normalized);
     }
 
-    // Format: "web+spoolman:s-<id>"
+    // Format: "web+spoolman:s-<id>". URI schemes are case-insensitive, and
+    // Spoolman's own labels encode it uppercase for QR alphanumeric mode.
     const std::string prefix_ws = "web+spoolman:s-";
     if (normalized.size() > prefix_ws.size() &&
-        normalized.compare(0, prefix_ws.size(), prefix_ws) == 0) {
+        text_io::to_lower(std::string_view(normalized).substr(0, prefix_ws.size())) == prefix_ws) {
         return safe_parse_int(normalized.substr(prefix_ws.size()));
     }
 

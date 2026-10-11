@@ -71,8 +71,10 @@ set -e
 : "${GITHUB_REPO:=prestonbrown/helixscreen}"
 : "${SERVICE_NAME:=helixscreen}"
 
-# Previous UIs we may need to re-enable (for scanning)
-PREVIOUS_UIS="guppyscreen GuppyScreen featherscreen FeatherScreen klipperscreen KlipperScreen"
+# Previous UIs we may need to re-enable (for scanning). qidi-client and
+# makerbase-client are the QIDI stock screen units. The Sovol mksclient is left
+# out: it is a bare binary, and a restored UI gets run with `start`.
+PREVIOUS_UIS="guppyscreen GuppyScreen featherscreen FeatherScreen klipperscreen KlipperScreen qidi-client makerbase-client"
 
 HEADER
 
@@ -82,7 +84,7 @@ HEADER
     # host_profile.sh provides the mod-ownership guard behind uninstall.sh's
     # HELIX_INSTALL_DIRS sweeps and moonraker.sh's stanza writer; main() below
     # probes it before set_install_paths' install-dir gate calls it.
-    for module in common.sh host_profile.sh platform.sh permissions.sh requirements.sh forgex.sh service.sh moonraker.sh camera.sh uninstall.sh; do
+    for module in common.sh host_profile.sh platform.sh permissions.sh requirements.sh forgex.sh competing_uis.sh service.sh moonraker.sh camera.sh uninstall.sh; do
         module_path="$LIB_DIR/$module"
         if [ ! -f "$module_path" ]; then
             echo "ERROR: Module not found: $module_path" >&2
@@ -121,6 +123,85 @@ HEADER
 # Main orchestration
 # ============================================
 
+# True when a recorded disable target names one of the screen UIs in
+# PREVIOUS_UIS. The .disabled_services record also carries Wayland compositors,
+# stock vendor daemons and bare client binaries; those come back enabled, but
+# none of them is a screen to start on the way out.
+# Args: $1 = recorded target (systemd unit name or path)
+_is_previous_ui_target() {
+    local ui
+    for ui in $PREVIOUS_UIS; do
+        case "$1" in *"$ui"*) return 0 ;; esac
+    done
+    return 1
+}
+
+# Start one restored UI, or leave it for the next boot if a UI is already up.
+# reenable_disabled_services() has already re-enabled it; this is what saves the
+# user a reboot. Args: $1 = label, $2.. = the command that starts it
+_start_restored_ui() {
+    local label="$1"
+    shift
+    if [ "$found_ui" = true ]; then
+        log_note "Re-enabled: $label (not started, another UI already running)"
+        return 0
+    fi
+    if "$@" 2>/dev/null; then
+        log_note "Re-enabled and started: $label"
+    else
+        log_warn "Re-enabled but failed to start: $label"
+        log_warn "You may need to reboot"
+    fi
+    found_ui=true
+}
+
+# Restore exactly the screen UIs this install recorded disabling.
+_restore_recorded_previous_uis() {
+    local target
+
+    for target in ${HELIX_REENABLED_SCRIPTS:-}; do
+        [ "$target" = "$PREVIOUS_UI_SCRIPT" ] && continue
+        _is_previous_ui_target "$target" || continue
+        [ -f "$target" ] || continue
+        log_info "Found previous UI: $target"
+        _start_restored_ui "$target" "$target" start
+    done
+
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
+        for target in ${HELIX_REENABLED_UNITS:-}; do
+            _is_previous_ui_target "$target" || continue
+            log_info "Found previous UI (systemd): $target"
+            _start_restored_ui "$target" $SUDO systemctl start "$target"
+        done
+    fi
+}
+
+# Fallback for an install with no .disabled_services record: find any screen UI
+# on the host and put it back. Cannot tell a UI we disabled from one the user
+# had already switched off, so it only runs when there is no record to consult.
+_scan_for_previous_uis() {
+    local ui initscript
+
+    for ui in $PREVIOUS_UIS; do
+        for initscript in /etc/init.d/S*${ui}* /opt/config/mod/.root/S*${ui}*; do
+            [ "$initscript" = "$PREVIOUS_UI_SCRIPT" ] && continue
+            if [ -f "$initscript" ] 2>/dev/null; then
+                log_info "Found previous UI: $initscript"
+                $SUDO chmod +x "$initscript" 2>/dev/null || true
+                _start_restored_ui "$initscript" "$initscript" start
+            fi
+        done
+
+        if [ "$INIT_SYSTEM" = "systemd" ]; then
+            if systemctl list-unit-files "${ui}.service" >/dev/null 2>&1; then
+                log_info "Found previous UI (systemd): $ui"
+                enable_unit_or_warn "$ui"
+                _start_restored_ui "$ui" $SUDO systemctl start "$ui"
+            fi
+        fi
+    done
+}
+
 # Re-enable previous UI (extended version with scanning)
 reenable_previous_ui() {
     log_info "Looking for previous screen UI to re-enable..."
@@ -138,7 +219,7 @@ reenable_previous_ui() {
     if type restore_previous_ui_platform >/dev/null 2>&1; then
         restore_previous_ui_platform "$platform"
         if [ -n "$HELIX_RESTORED_UI" ]; then
-            log_success "Re-enabled: $HELIX_RESTORED_UI"
+            log_note "Re-enabled: $HELIX_RESTORED_UI"
             found_ui=true
         fi
         [ -n "$HELIX_RESTORED_XORG" ] && restored_xorg=true
@@ -160,7 +241,7 @@ reenable_previous_ui() {
                 log_info "Re-enabling GuppyScreen for K1..."
                 $SUDO chmod +x "$k1_ui" 2>/dev/null || true
                 if "$k1_ui" start 2>/dev/null; then
-                    log_success "Re-enabled and started: $k1_ui"
+                    log_note "Re-enabled and started: $k1_ui"
                     found_ui=true
                     break
                 fi
@@ -182,7 +263,7 @@ reenable_previous_ui() {
         log_info "Found previous UI: $PREVIOUS_UI_SCRIPT"
         $SUDO chmod +x "$PREVIOUS_UI_SCRIPT" 2>/dev/null || true
         if "$PREVIOUS_UI_SCRIPT" start 2>/dev/null; then
-            log_success "Re-enabled and started: $PREVIOUS_UI_SCRIPT"
+            log_note "Re-enabled and started: $PREVIOUS_UI_SCRIPT"
             found_ui=true
         else
             log_warn "Re-enabled but failed to start: $PREVIOUS_UI_SCRIPT"
@@ -191,55 +272,34 @@ reenable_previous_ui() {
         fi
     fi
 
-    # Scan for other UIs we might have disabled
-    for ui in $PREVIOUS_UIS; do
-        for initscript in /etc/init.d/S*${ui}* /opt/config/mod/.root/S*${ui}*; do
-            [ "$initscript" = "$PREVIOUS_UI_SCRIPT" ] && continue
-            if [ -f "$initscript" ] 2>/dev/null; then
-                log_info "Found previous UI: $initscript"
-                $SUDO chmod +x "$initscript" 2>/dev/null || true
-                if [ "$found_ui" = false ]; then
-                    if "$initscript" start 2>/dev/null; then
-                        log_success "Re-enabled and started: $initscript"
-                        found_ui=true
-                    else
-                        log_warn "Re-enabled but failed to start: $initscript"
-                        log_warn "You may need to reboot"
-                        found_ui=true
-                    fi
-                else
-                    log_info "Re-enabled: $initscript (not started, another UI already running)"
-                fi
-            fi
-        done
-
-        if [ "$INIT_SYSTEM" = "systemd" ]; then
-            if systemctl list-unit-files "${ui}.service" >/dev/null 2>&1; then
-                log_info "Found previous UI (systemd): $ui"
-                $SUDO systemctl enable "$ui" 2>/dev/null || true
-                if $SUDO systemctl start "$ui" 2>/dev/null; then
-                    log_success "Re-enabled and started: $ui"
-                    found_ui=true
-                else
-                    log_warn "Re-enabled but failed to start: $ui"
-                    found_ui=true
-                fi
-            fi
-        fi
-    done
+    # What this install displaced is the recorded set, so that is what comes
+    # back. Scanning the host instead switches a screen UI the user had already
+    # turned off before installing back ON at uninstall - the record is the only
+    # thing that tells the two cases apart. The scan stays as the fallback for an
+    # install that recorded nothing: one predating the state file, or one whose
+    # directory was removed by hand before the uninstaller could read it.
+    if [ "${HELIX_DISABLED_RECORD_FOUND:-0}" = "1" ]; then
+        _restore_recorded_previous_uis
+    else
+        _scan_for_previous_uis
+    fi
 
     # Re-enable tslib for ForgeX (if not already handled by uninstall_forgex)
     if [ -f "/opt/config/mod/.root/S35tslib" ]; then
         $SUDO chmod +x "/opt/config/mod/.root/S35tslib" 2>/dev/null || true
     fi
 
-    if [ "$found_ui" = false ]; then
+    # A platform restore that warned did find the stock UI, so "no UI found"
+    # would contradict the warning it just printed.
+    if [ -n "${HELIX_RESTORE_WARNED:-}" ]; then
+        log_warn "Previous UI restore incomplete: $HELIX_RESTORE_WARNED"
+    elif [ "$found_ui" = false ]; then
         log_info "No previous screen UI found to re-enable"
         log_info "If you had a stock UI, a reboot may restore it"
     fi
 
     if [ "$restored_xorg" = true ]; then
-        log_info "Re-enabled: Xorg (/etc/init.d/S40xorg)"
+        log_note "Re-enabled: Xorg (/etc/init.d/S40xorg)"
     fi
 }
 
@@ -280,21 +340,21 @@ remove_service() {
         if [ -f "/etc/systemd/system/helixscreen.service" ]; then
             $SUDO rm -f "/etc/systemd/system/helixscreen.service"
             $SUDO systemctl daemon-reload
-            log_success "Removed systemd service"
+            log_note "Removed systemd service"
         fi
     fi
 
     # Remove configured init script
     if [ -n "$INIT_SCRIPT_DEST" ] && [ -f "$INIT_SCRIPT_DEST" ]; then
         $SUDO rm -f "$INIT_SCRIPT_DEST"
-        log_success "Removed SysV init script: $INIT_SCRIPT_DEST"
+        log_note "Removed SysV init script: $INIT_SCRIPT_DEST"
     fi
 
     # Also check and remove from all possible locations
     for init_script in $HELIX_INIT_SCRIPTS; do
         if [ -f "$init_script" ]; then
             $SUDO rm -f "$init_script"
-            log_success "Removed SysV init script: $init_script"
+            log_note "Removed SysV init script: $init_script"
         fi
     done
 }
@@ -315,12 +375,12 @@ remove_installation() {
         # has no business deleting it (same rule as install.sh's entry gate).
         host_refuse_mod_owned "uninstall of" "$INSTALL_DIR"
         $SUDO rm -rf "$INSTALL_DIR"
-        log_success "Removed $INSTALL_DIR"
+        log_note "Removed $INSTALL_DIR"
         removed_any=true
         # Also remove updater repo clone if present
         if [ -d "${INSTALL_DIR}-repo" ]; then
             $SUDO rm -rf "${INSTALL_DIR}-repo"
-            log_success "Removed ${INSTALL_DIR}-repo"
+            log_note "Removed ${INSTALL_DIR}-repo"
         fi
     fi
 
@@ -334,11 +394,11 @@ remove_installation() {
                 continue
             fi
             $SUDO rm -rf "$install_dir"
-            log_success "Removed $install_dir"
+            log_note "Removed $install_dir"
             removed_any=true
             if [ -d "${install_dir}-repo" ]; then
                 $SUDO rm -rf "${install_dir}-repo"
-                log_success "Removed ${install_dir}-repo"
+                log_note "Removed ${install_dir}-repo"
             fi
         fi
     done
@@ -369,6 +429,8 @@ remove_installation() {
     # Sweep state dirs holding rolling config backups (out-of-INSTALL_DIR by design).
     # Defined in lib/installer/common.sh; bundled into this script.
     clean_helix_state_dirs
+    # Our leftovers in the AD5M's gcodes root show in the print-file picker.
+    if [ "${platform:-}" = "ad5m" ] && type cleanup_ad5m_gcodes_root >/dev/null 2>&1; then cleanup_ad5m_gcodes_root; fi
 }
 
 # Refuse to run if $0 lives inside $INSTALL_DIR — we're about to delete
@@ -455,11 +517,8 @@ main() {
         esac
     done
 
-    echo ""
-    echo "${CYAN}========================================${NC}"
-    echo "${CYAN}     HelixScreen Uninstaller${NC}"
-    echo "${CYAN}========================================${NC}"
-    echo ""
+    # The run's one header; log_note lines below say what went.
+    printf '%b\n' "${BOLD}HelixScreen uninstaller${NC}" >&2
 
     # Probe the host before set_install_paths' install-dir gate runs —
     # its mod-ownership guard needs HOST_MOD_ROOT already probed.
@@ -510,7 +569,7 @@ main() {
             [yY][eE][sS]|[yY])
                 ;;
             *)
-                log_info "Uninstall cancelled"
+                log_note "Uninstall cancelled"
                 exit 0
                 ;;
         esac
@@ -538,6 +597,9 @@ main() {
     trap '_sweep_uninstalling_sentinel' EXIT INT TERM
     _drop_uninstalling_sentinel
     remove_update_manager_section || true
+    # Before stop/remove: the plugin removal delegates to
+    # moonraker-plugin/install.sh, which lives inside the install tree.
+    remove_moonraker_plugin || true
     stop_helixscreen
     remove_service
     # The payload arm runs before the generic sweeps: it restores the mod's
@@ -549,14 +611,8 @@ main() {
     remove_installation
     reenable_previous_ui
 
-    echo ""
-    echo "${GREEN}========================================${NC}"
-    echo "${GREEN}    Uninstall Complete!${NC}"
-    echo "${GREEN}========================================${NC}"
-    echo ""
-    log_info "HelixScreen has been removed."
-    log_info "A reboot is recommended to ensure clean state."
-    echo ""
+    log_note "HelixScreen has been removed."
+    log_note "A reboot is recommended to ensure clean state."
 }
 
 # Only run when executed directly (not when sourced for testing)

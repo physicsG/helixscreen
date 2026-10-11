@@ -5,6 +5,7 @@
 
 #include "ethernet_backend.h"
 
+#include <atomic>
 #include <string>
 
 /**
@@ -34,6 +35,23 @@ class EthernetBackendMock : public EthernetBackend {
     bool has_interface() override;
     EthernetInfo get_info() override;
 
+    /// Test helper — drive connected state directly, mirroring
+    /// WifiBackendMock::set_connected_state. The interface itself stays
+    /// present (has_interface() is a hardware-presence question, not a link
+    /// one); only get_info()'s connected/status reflect this.
+    void set_connected_state(bool connected) {
+        connected_ = connected;
+    }
+
+    /// Test helper — the link state mocks constructed from now on start with,
+    /// for owners that build their EthernetManager and probe it at once.
+    static void set_default_connected(bool connected) {
+        default_connected_ = connected;
+    }
+
   private:
     std::string real_mac_; ///< Real MAC from system for realistic demo display
+    static inline bool default_connected_ = true;
+    /// Set by tests on the main thread, read by get_info() on executor threads.
+    std::atomic<bool> connected_{default_connected_};
 };

@@ -4,16 +4,20 @@
 
 #include "ui_screensaver.h"
 
-#include "ui_timer_guard.h" // lv_timer_cancel_safe
 #include "ui_utils.h"
 
-#include "platform_capabilities.h"
+#include "lv_draw_buf_guard.h"
 
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <cstdlib>
 #include <draw/lv_image_decoder_private.h>
+
+using helix::ui::DirtyRect;
+using helix::ui::screensaver::flap_frame_at;
+using helix::ui::screensaver::flight_pos_at;
+using helix::ui::screensaver::FlightPos;
 
 // Sprite asset paths
 static constexpr const char* TOASTER_FRAMES[] = {
@@ -28,19 +32,9 @@ static constexpr int NUM_TOASTER_FRAMES = sizeof(TOASTER_FRAMES) / sizeof(TOASTE
 // CSS reference: translate(-1600px, 1600px) — fixed travel distance
 static constexpr int FLIGHT_DISTANCE = 1600;
 
-// Tick period determines frames-per-second for sprite motion and flap animation.
-// Each tick traverses the active sprite list, triggering LVGL dirty-region work.
-// On STANDARD hardware, 50 ms (~20 fps) looks smooth. On BASIC/EMBEDDED, drop to
-// ~7 fps — still visually acceptable for a background screensaver, ~3× less work
-// per wall-second. Combined with SPRITE_CAP_LOW, this keeps Klipper's CPU budget
-// untouched if the user opts the screensaver back on.
-static constexpr uint32_t TICK_PERIOD_STANDARD_MS = 50;
-static constexpr uint32_t TICK_PERIOD_LOW_MS = 150;
-
-// Low-tier sprite cap — hard cap on active sprites regardless of how many are
-// defined in OBJECTS[]. The array is pre-ordered by delay/wave, so truncation
-// keeps a representative visual mix.
-static constexpr int SPRITE_CAP_LOW = 10;
+// Each wing frame holds this long on a 10 s or 16 s flight, and twice as long on a
+// 24 s flight: slower flight, slower flap.
+static constexpr int FLAP_STEP_MS = 50;
 
 // Object definition matching the exact CSS classes and positions.
 // CSS uses right/top percentages. Negative right = off-screen to the right.
@@ -139,6 +133,11 @@ static constexpr ObjectDef OBJECTS[] = {
 };
 static constexpr int NUM_OBJECTS = sizeof(OBJECTS) / sizeof(OBJECTS[0]);
 
+// Sprites flown per level, indexed like LEVEL_PERIODS_MS. Every visible sprite costs
+// dirty-region work each frame, so the rungs past half rate thin the flock rather than slow it
+// again. OBJECTS[] is ordered by delay and wave, so a prefix keeps a representative mix.
+static constexpr int LEVEL_SPRITE_CAPS[] = {NUM_OBJECTS, NUM_OBJECTS, 25, 10};
+
 int FlyingToasterScreensaver::get_scale_factor() const {
     lv_display_t* disp = lv_display_get_default();
     if (!disp)
@@ -147,85 +146,47 @@ int FlyingToasterScreensaver::get_scale_factor() const {
     return (w > 800) ? 512 : 256; // 2x on larger displays
 }
 
-void FlyingToasterScreensaver::start() {
-    if (m_active) {
-        spdlog::debug("[Screensaver] Already active, ignoring start()");
-        return;
-    }
-
+bool FlyingToasterScreensaver::on_start() {
     spdlog::info("[Screensaver] Starting flying toasters");
-
-    const auto caps = helix::PlatformCapabilities::detect();
-    const bool low_tier = !caps.supports_animations;
-    m_tick_period_ms = low_tier ? TICK_PERIOD_LOW_MS : TICK_PERIOD_STANDARD_MS;
 
     m_elapsed_ms = 0;
     decode_sprites();
-    create_overlay();
-    spawn_objects(low_tier);
-
-    m_tick_timer = lv_timer_create(tick_cb, m_tick_period_ms, this);
-    spdlog::info("[Screensaver] Flying toasters tick period = {}ms ({} tier)", m_tick_period_ms,
-                 helix::platform_tier_to_string(caps.tier));
-
-    m_active = true;
+    spawn_objects(sprite_limit(level()));
+    return true;
 }
 
-FlyingToasterScreensaver::~FlyingToasterScreensaver() {
-    // ScreensaverManager owns these in a unique_ptr and does not stop the active
-    // one before destroying it, so a screensaver torn down while running would
-    // otherwise leave tick_cb armed on a freed `this`. lv_timer_cancel_safe()
-    // self-guards on lv_is_initialized() and neuters rather than unlinking, which
-    // is what makes it safe from a destructor and after lv_deinit has already
-    // reclaimed the timer (#750, #751, #1173).
-    cancel_timer();
+void FlyingToasterScreensaver::on_stop() {
+    // The sprites are children of the overlay the base has already queued for deletion.
+    m_objects.clear();
+    free_sprites();
 }
 
-void FlyingToasterScreensaver::cancel_timer() {
-    if (m_tick_timer) {
-        helix::ui::lv_timer_cancel_safe(m_tick_timer);
-        m_tick_timer = nullptr;
-    }
+void FlyingToasterScreensaver::on_level_request(size_t level) {
+    apply_level(level);
+    drop_sprites_past(sprite_limit(this->level()));
 }
 
-void FlyingToasterScreensaver::stop() {
-    if (!m_active) {
+size_t FlyingToasterScreensaver::sprite_limit(size_t level) const {
+    // A member sees the private period table, so the two stay the same length here.
+    static_assert(sizeof(LEVEL_SPRITE_CAPS) / sizeof(LEVEL_SPRITE_CAPS[0]) ==
+                      sizeof(LEVEL_PERIODS_MS) / sizeof(LEVEL_PERIODS_MS[0]),
+                  "every level needs both a frame period and a sprite cap");
+    constexpr size_t last = sizeof(LEVEL_SPRITE_CAPS) / sizeof(LEVEL_SPRITE_CAPS[0]) - 1;
+    return static_cast<size_t>(std::min(NUM_OBJECTS, LEVEL_SPRITE_CAPS[std::min(level, last)]));
+}
+
+void FlyingToasterScreensaver::drop_sprites_past(size_t limit) {
+    if (m_objects.size() <= limit) {
         return;
     }
-
-    spdlog::info("[Screensaver] Stopping flying toasters");
-
-    cancel_timer();
-
-    // Clear object list (LVGL objects are children of overlay, deleted with it)
-    m_objects.clear();
-
-    // Async delete — stop() runs inside lv_timer_handler (via check_display_sleep),
-    // so synchronous deletion corrupts LVGL's event linked list (#316).
-    // safe_delete_deferred also reparents to lv_layer_top() before the async
-    // delete so a racing parent-clean can't free the overlay out from under us.
-    helix::ui::safe_delete_deferred(m_overlay);
-
-    free_sprites();
-
-    m_active = false;
+    // Each sprite is hidden now and freed on the next timer pass.
+    for (size_t i = limit; i < m_objects.size(); i++) {
+        helix::ui::safe_delete_deferred(m_objects[i].img);
+    }
+    m_objects.erase(m_objects.begin() + static_cast<std::ptrdiff_t>(limit), m_objects.end());
 }
 
-void FlyingToasterScreensaver::create_overlay() {
-    m_overlay = lv_obj_create(lv_layer_top());
-    lv_obj_set_size(m_overlay, lv_pct(100), lv_pct(100));
-    lv_obj_set_style_bg_color(m_overlay, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(m_overlay, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(m_overlay, 0, 0);
-    lv_obj_set_style_pad_all(m_overlay, 0, 0);
-    lv_obj_set_style_radius(m_overlay, 0, 0);
-    // Clickable to absorb wake touch (prevents it from triggering underlying UI)
-    // LVGL still registers the activity for inactivity tracking
-    lv_obj_add_flag(m_overlay, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_remove_flag(m_overlay, LV_OBJ_FLAG_SCROLLABLE);
-}
-
-void FlyingToasterScreensaver::spawn_objects(bool low_tier) {
+void FlyingToasterScreensaver::spawn_objects(size_t count) {
     lv_display_t* disp = lv_display_get_default();
     if (!disp)
         return;
@@ -238,7 +199,7 @@ void FlyingToasterScreensaver::spawn_objects(bool low_tier) {
         obj_size = obj_size * scale / 256;
     }
 
-    const int active_count = low_tier ? std::min(NUM_OBJECTS, SPRITE_CAP_LOW) : NUM_OBJECTS;
+    const int active_count = std::min(NUM_OBJECTS, static_cast<int>(count));
 
     m_objects.reserve(active_count);
 
@@ -259,17 +220,16 @@ void FlyingToasterScreensaver::spawn_objects(bool low_tier) {
                              def.delay_ms);
     }
 
-    spdlog::debug("[Screensaver] Spawned {}/{} flying objects ({}x{} screen, {}px sprites, "
-                  "low_tier={})",
-                  m_objects.size(), NUM_OBJECTS, screen_w, screen_h, obj_size, low_tier);
+    spdlog::debug("[Screensaver] Spawned {}/{} flying objects ({}x{} screen, {}px sprites)",
+                  m_objects.size(), NUM_OBJECTS, screen_w, screen_h, obj_size);
 }
 
 void FlyingToasterScreensaver::create_flying_object(int start_x, int start_y, bool is_toaster,
                                                     bool reverse_flap, int speed_ms, int delay_ms) {
-    if (!m_overlay)
+    if (!overlay().obj())
         return;
 
-    lv_obj_t* img = lv_image_create(m_overlay);
+    lv_obj_t* img = lv_image_create(overlay().obj());
 
     // Set initial image from pre-decoded RAM buffers
     uint8_t initial_frame = reverse_flap ? 2 : 0;
@@ -290,10 +250,6 @@ void FlyingToasterScreensaver::create_flying_object(int start_x, int start_y, bo
     lv_obj_remove_flag(img, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_pos(img, start_x, start_y);
 
-    // Pre-compute flap rate: slower flight = slower wing flap
-    // 10s → every tick, 16s → every 2 ticks, 24s → every 3 ticks
-    int8_t ticks_per_flap = static_cast<int8_t>(std::max(1, speed_ms / 10000));
-
     FlyingObject obj{};
     obj.img = img;
     obj.is_toaster = is_toaster;
@@ -301,45 +257,41 @@ void FlyingToasterScreensaver::create_flying_object(int start_x, int start_y, bo
     obj.start_y = static_cast<int16_t>(start_y);
     obj.fly_ms = speed_ms;
     obj.delay_ms = delay_ms;
+    obj.initial_frame = initial_frame;
     obj.flap_frame = initial_frame;
-    obj.flap_forward = true;
-    obj.flap_counter = 0;
-    obj.ticks_per_flap = ticks_per_flap;
+    // 10 s and 16 s flights hold each wing frame FLAP_STEP_MS, 24 s flights twice that
+    obj.flap_step_ms = static_cast<uint16_t>(FLAP_STEP_MS * std::max(1, speed_ms / 10000));
     m_objects.push_back(obj);
 }
 
-void FlyingToasterScreensaver::tick_cb(lv_timer_t* timer) {
-    auto* self = static_cast<FlyingToasterScreensaver*>(lv_timer_get_user_data(timer));
-    if (!self || !self->m_active)
-        return;
-
-    self->m_elapsed_ms += self->m_tick_period_ms;
+// Sprites are LVGL images, which invalidate their own old and new areas when they move or
+// change frame, so a frame adds nothing to the dirty list.
+void FlyingToasterScreensaver::on_frame(uint32_t dt_ms, std::vector<DirtyRect>& /*dirty*/) {
+    m_elapsed_ms += dt_ms;
 
     lv_display_t* disp = lv_display_get_default();
     int screen_w = disp ? lv_display_get_horizontal_resolution(disp) : 800;
     int screen_h = disp ? lv_display_get_vertical_resolution(disp) : 480;
     int obj_size = 64;
-    int scale = self->get_scale_factor();
+    int scale = get_scale_factor();
     if (scale != 256) {
         obj_size = obj_size * scale / 256;
     }
 
-    for (auto& obj : self->m_objects) {
+    for (auto& obj : m_objects) {
         if (!obj.img)
             continue;
 
+        // Position is a function of elapsed time, never of how often the timer fired
+        const FlightPos pos = flight_pos_at(m_elapsed_ms, obj.start_x, obj.start_y, obj.fly_ms,
+                                            obj.delay_ms, FLIGHT_DISTANCE);
+
         // Skip objects still in their start delay
-        if (self->m_elapsed_ms < static_cast<uint32_t>(obj.delay_ms)) {
+        if (!pos.started) {
             continue;
         }
-
-        // Compute position from elapsed time (replaces per-object LVGL animations)
-        uint32_t local_ms = self->m_elapsed_ms - obj.delay_ms;
-        uint32_t t = local_ms % static_cast<uint32_t>(obj.fly_ms);
-        int32_t dx = static_cast<int32_t>(-FLIGHT_DISTANCE) * static_cast<int32_t>(t) / obj.fly_ms;
-        int32_t dy = static_cast<int32_t>(FLIGHT_DISTANCE) * static_cast<int32_t>(t) / obj.fly_ms;
-        auto new_x = static_cast<int16_t>(obj.start_x + dx);
-        auto new_y = static_cast<int16_t>(obj.start_y + dy);
+        auto new_x = static_cast<int16_t>(pos.x);
+        auto new_y = static_cast<int16_t>(pos.y);
 
         // Hide objects that are entirely off-screen (LVGL skips hidden objects in render)
         bool on_screen =
@@ -364,29 +316,14 @@ void FlyingToasterScreensaver::tick_cb(lv_timer_t* timer) {
         if (!obj.is_toaster)
             continue;
 
-        obj.flap_counter++;
-        if (obj.flap_counter < obj.ticks_per_flap)
-            continue;
-        obj.flap_counter = 0;
-
-        // Advance frame: 0→1→2→3→2→1→0 (ping-pong)
-        uint8_t prev_frame = obj.flap_frame;
-        if (obj.flap_forward) {
-            obj.flap_frame++;
-            if (obj.flap_frame >= NUM_TOASTER_FRAMES - 1) {
-                obj.flap_forward = false;
-            }
-        } else {
-            if (obj.flap_frame == 0) {
-                obj.flap_forward = true;
-            } else {
-                obj.flap_frame--;
-            }
-        }
+        // Wing frame cycles 0→1→2→3→2→1 on elapsed time
+        const uint8_t frame =
+            flap_frame_at(m_elapsed_ms, obj.delay_ms, obj.flap_step_ms, obj.initial_frame);
 
         // Only update image source when frame actually changed (RAM buffer, no file I/O)
-        if (obj.flap_frame != prev_frame) {
-            lv_image_set_src(obj.img, self->m_decoded_frames[obj.flap_frame]);
+        if (frame != obj.flap_frame) {
+            obj.flap_frame = frame;
+            lv_image_set_src(obj.img, m_decoded_frames[frame]);
         }
     }
 }
@@ -426,16 +363,12 @@ void FlyingToasterScreensaver::decode_sprites() {
 }
 
 void FlyingToasterScreensaver::free_sprites() {
+    // The sprites are live image sources; a blend of the saver's last frame
+    // may still be in flight when the overlay is torn down.
     for (auto& buf : m_decoded_frames) {
-        if (buf) {
-            lv_draw_buf_destroy(buf);
-            buf = nullptr;
-        }
+        helix::safe_draw_buf_destroy(buf, "toaster");
     }
-    if (m_decoded_toast) {
-        lv_draw_buf_destroy(m_decoded_toast);
-        m_decoded_toast = nullptr;
-    }
+    helix::safe_draw_buf_destroy(m_decoded_toast, "toast");
 }
 
 #endif // HELIX_ENABLE_SCREENSAVER

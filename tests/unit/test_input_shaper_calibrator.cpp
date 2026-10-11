@@ -71,7 +71,7 @@ class HomingGateAPI : public MoonrakerAPI {
     void execute_gcode(const std::string& gcode, IMoonrakerAPI::SuccessCallback on_success,
                        IMoonrakerAPI::ErrorCallback on_error, uint32_t timeout_ms = 0,
                        bool silent = false, IMoonrakerAPI::SuccessCallback on_queued = nullptr,
-                       bool caller_surfaces_errors = true) override {
+                       bool caller_surfaces_errors = true, bool bypass_busy_gate = false) override {
         if (gcode == "G28") {
             ++g28_count_;
             g28_success_ = std::move(on_success);
@@ -150,7 +150,7 @@ class InputShaperCalibratorTestFixture : public LVGLTestFixture {
         // makes the continuation run synchronously.
         PrinterStateTestAccess::reset(get_printer_state());
         get_printer_state().init_subjects(false);
-        lv_subject_copy_string(get_printer_state().get_homed_axes_subject(), "xyz");
+        lv_subject_copy_string(get_printer_state().motion_state().get_homed_axes_subject(), "xyz");
 
         calibrator_ = InputShaperCalibrator(api_.get());
         // Nothing the fixture itself did should show up in the transcript the
@@ -215,7 +215,7 @@ class InputShaperCalibratorTestFixture : public LVGLTestFixture {
      * committed to until release_homing() / fail_homing() is called.
      */
     static void unhome() {
-        lv_subject_copy_string(get_printer_state().get_homed_axes_subject(), "");
+        lv_subject_copy_string(get_printer_state().motion_state().get_homed_axes_subject(), "");
     }
 
     void release_homing() {

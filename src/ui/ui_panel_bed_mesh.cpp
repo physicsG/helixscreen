@@ -18,17 +18,18 @@
 #include "ui_emergency_stop.h"
 #include "ui_error_reporting.h"
 #include "ui_event_safety.h"
-#include "ui_global_panel_helper.h"
 #include "ui_modal.h"
-#include "ui_nav_manager.h"
 #include "ui_panel_common.h"
 #include "ui_subject_registry.h"
 #include "ui_temperature_utils.h"
 #include "ui_toast_manager.h"
 #include "ui_update_queue.h"
+#include "ui_utils.h"
 
 #include "app_globals.h"
+#include "bed_mesh_calibration_plan.h"
 #include "bed_mesh_portrait_layout.h"
+#include "bed_mesh_probe_temp.h"
 #include "bed_mesh_profile_name.h"
 #include "display_settings_manager.h"
 #include "format_utils.h"
@@ -43,33 +44,26 @@
 #include "temperature_controller.h"
 #include "theme_manager.h"
 #include "toolhead_homing.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 
 using namespace helix;
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <memory>
+#include <mutex>
 
 // ============================================================================
-// Forward declarations for static event callbacks
+// Forward declarations for the profile-row callbacks
 // ============================================================================
 static void on_profile_clicked_cb(lv_event_t* e);
 static void on_profile_rename_cb(lv_event_t* e);
 static void on_profile_delete_cb(lv_event_t* e);
-static void on_calibrate_header_clicked_cb(lv_event_t* e);
-static void on_calibrate_cancel_cb(lv_event_t* e);
-static void on_calibrate_start_cb(lv_event_t* e);
-static void on_rename_cancel_cb(lv_event_t* e);
-static void on_rename_confirm_cb(lv_event_t* e);
-static void on_delete_cancel_cb(lv_event_t* e);
-static void on_delete_confirm_cb(lv_event_t* e);
-static void on_save_config_no_cb(lv_event_t* e);
-static void on_save_config_yes_cb(lv_event_t* e);
-static void on_emergency_stop_cb(lv_event_t* e);
-static void on_save_profile_cb(lv_event_t* e);
 
 // ============================================================================
 // Constructor / Destructor
@@ -85,14 +79,13 @@ BedMeshPanel::BedMeshPanel() {
     std::memset(rename_old_name_buf_, 0, sizeof(rename_old_name_buf_));
     std::memset(probe_text_buf_, 0, sizeof(probe_text_buf_));
     std::memset(error_message_buf_, 0, sizeof(error_message_buf_));
+    std::memset(calibrate_name_buf_, 0, sizeof(calibrate_name_buf_));
 
     // Initialize profile buffers
     for (int i = 0; i < BED_MESH_MAX_PROFILES; i++) {
         std::memset(profile_name_bufs_[static_cast<size_t>(i)].data(), 0, 64);
         std::memset(profile_range_bufs_[static_cast<size_t>(i)].data(), 0, 32);
     }
-
-    spdlog::trace("[BedMeshPanel] Instance created");
 }
 
 BedMeshPanel::~BedMeshPanel() {
@@ -124,34 +117,18 @@ BedMeshPanel::~BedMeshPanel() {
             delete_modal_widget_ = nullptr;
         }
 
-        // wire_canvas_and_content() registers on_canvas_deleted_cb (canvas_)
-        // plus on_content_size_changed and on_content_deleted_cb (content_),
-        // all with user_data=this.
-        // StaticPanelRegistry::destroy_all() runs BEFORE lv_deinit() and
-        // before a soft restart's explicit widget-tree deletion — in both
-        // paths `this` is about to be freed while canvas_/overlay_content
-        // are still live widgets. Without removing these here, the later
-        // real deletion would fire on_canvas_deleted_cb with user_data
-        // pointing at freed memory (rule 5's hazard class, DELETE variant —
-        // worse than the analogous SIZE_CHANGED case because DELETE is
-        // GUARANTEED to fire during teardown). lv_obj_remove_event_cb()
-        // removes every registration of the given callback function
-        // regardless of how many accumulated, so this is correct even if
-        // wire_canvas_and_content() were ever called more than once against
-        // the same still-live widget.
-        if (canvas_) {
-            lv_obj_remove_event_cb(canvas_, on_canvas_deleted_cb);
-        }
-        if (content_) {
-            lv_obj_remove_event_cb(content_, on_content_size_changed);
-            lv_obj_remove_event_cb(content_, on_content_deleted_cb);
-        }
+        // wire_canvas_and_content() registers on_content_size_changed on
+        // content_ with user_data=this. StaticPanelRegistry::destroy_all() runs
+        // BEFORE lv_deinit() and before a soft restart's explicit widget-tree
+        // deletion, so `this` is freed while overlay_content is still live;
+        // the registration has to go with it, every one of them however many
+        // accumulated. content_ may also have died before this panel.
+        helix::ui::remove_event_cb_if_alive(content_, on_content_size_changed, this);
     }
 
     // Clear widget pointers (LVGL owns the objects)
     canvas_ = nullptr;
     content_ = nullptr;
-    calibrate_name_input_ = nullptr;
     rename_name_input_ = nullptr;
 }
 
@@ -194,21 +171,23 @@ void BedMeshPanel::init_subjects() {
             // Initialize with 5-arg form: (subject, buf, prev_buf, size, initial_value)
             lv_subject_init_string(&profile_name_subjects_[idx], name_buf, nullptr,
                                    profile_name_bufs_[idx].size(), "");
-            lv_xml_register_subject(nullptr, name_key.c_str(), &profile_name_subjects_[idx]);
-            subjects_.register_subject(&profile_name_subjects_[idx]);
+            helix::xml::register_subject_in_current_scope(name_key.c_str(),
+                                                          &profile_name_subjects_[idx]);
+            subjects_.register_subject(&profile_name_subjects_[idx], name_key.c_str());
 
             lv_subject_init_string(&profile_range_subjects_[idx], range_buf, nullptr,
                                    profile_range_bufs_[idx].size(), "");
-            lv_xml_register_subject(nullptr, range_key.c_str(), &profile_range_subjects_[idx]);
-            subjects_.register_subject(&profile_range_subjects_[idx]);
+            helix::xml::register_subject_in_current_scope(range_key.c_str(),
+                                                          &profile_range_subjects_[idx]);
+            subjects_.register_subject(&profile_range_subjects_[idx], range_key.c_str());
 
             lv_subject_init_int(&profile_active_subjects_[idx], 0);
-            lv_xml_register_subject(nullptr, active_key.c_str(), &profile_active_subjects_[idx]);
-            subjects_.register_subject(&profile_active_subjects_[idx]);
+            helix::xml::register_subject_in_current_scope(active_key.c_str(),
+                                                          &profile_active_subjects_[idx]);
+            subjects_.register_subject(&profile_active_subjects_[idx], active_key.c_str());
         }
 
         // Modal state subjects (NOT visibility - internal state only)
-        UI_MANAGED_SUBJECT_INT(bed_mesh_calibrating_, 0, "bed_mesh_calibrating", subjects_);
         UI_MANAGED_SUBJECT_STRING(bed_mesh_rename_old_name_, rename_old_name_buf_, "",
                                   "bed_mesh_rename_old_name", subjects_);
         // Note: All modals now use helix::ui::modal_show() pattern instead of visibility subjects
@@ -222,6 +201,9 @@ void BedMeshPanel::init_subjects() {
                                   "bed_mesh_probe_text", subjects_);
         UI_MANAGED_SUBJECT_STRING(bed_mesh_error_message_, error_message_buf_, "",
                                   "bed_mesh_error_message", subjects_);
+        UI_MANAGED_SUBJECT_STRING(bed_mesh_calibrate_name_, calibrate_name_buf_,
+                                  helix::bed_mesh::DEFAULT_PROFILE, "bed_mesh_calibrate_name",
+                                  subjects_);
 
         // Self-register cleanup — ensures deinit runs before lv_deinit()
         StaticPanelRegistry::instance().register_destroy(
@@ -240,34 +222,13 @@ void BedMeshPanel::deinit_subjects() {
 // ============================================================================
 
 lv_obj_t* BedMeshPanel::create(lv_obj_t* parent) {
-    if (!parent) {
-        spdlog::error("[{}] Cannot create: null parent", get_name());
+    if (!OverlayBase::create(parent)) {
         return nullptr;
     }
 
-    spdlog::debug("[{}] Creating overlay from XML", get_name());
-
-    parent_screen_ = parent;
-
-    // Reset cleanup flag when (re)creating
-    cleanup_called_ = false;
-
-    // Create overlay from XML
-    overlay_root_ = static_cast<lv_obj_t*>(lv_xml_create(parent, "bed_mesh_panel", nullptr));
-
-    if (!overlay_root_) {
-        spdlog::error("[{}] Failed to create from XML", get_name());
-        return nullptr;
-    }
-
-    // Use standard overlay panel setup
-    // Note: Back button is wired via header_bar.xml default callback (on_header_back_clicked)
-    ui_overlay_panel_setup_standard(overlay_root_, parent_screen_, "overlay_header",
-                                    "overlay_content");
-
-    lv_obj_t* overlay_content = lv_obj_find_by_name(overlay_root_, "overlay_content");
+    lv_obj_t* overlay_content =
+        helix::ui::find_required(overlay_root_, "overlay_content", get_name());
     if (!overlay_content) {
-        spdlog::error("[{}] overlay_content not found!", get_name());
         return overlay_root_;
     }
 
@@ -313,10 +274,6 @@ lv_obj_t* BedMeshPanel::create(lv_obj_t* parent) {
 
     apply_canvas_render_settings();
 
-    // Initially hidden
-    lv_obj_add_flag(overlay_root_, LV_OBJ_FLAG_HIDDEN);
-
-    spdlog::info("[{}] Overlay created successfully", get_name());
     return overlay_root_;
 }
 
@@ -335,24 +292,18 @@ lv_obj_t* BedMeshPanel::create(lv_obj_t* parent) {
 // zero-size "condemned" sink and lv_obj_delete_async()s the sink, so the old
 // widgets are gone (or about to be) the moment the rebuild runs.
 //
-// Nothing else in this file ever learned that canvas_ or the SIZE_CHANGED
-// registration on the old overlay_content had gone stale — on_ui_destroyed()
-// (which nulls canvas_) is only called on full panel teardown, never on an
-// in-place XML rebuild. Every canvas_ dereference between a rotation and the
-// panel's eventual destruction — including ensure_async_rendering()'s
-// ui_bed_mesh_request_async_render(canvas_) reachable from the resize path
-// in src/application/application.cpp — was a potential use-after-free.
-//
-// Real hardware never resizes or rotates at runtime, so this only matters
-// for the SDL dev window — but "don't crash" applies there too. The fix is
-// two independent, minimal pieces:
-//   1. wire_canvas_and_content() installs an LV_EVENT_DELETE guard directly
-//      on canvas_ that nulls it the instant the widget is actually deleted,
-//      from WHICHEVER path deletes it. canvas_ can therefore never dangle —
-//      every existing call site already checks `if (canvas_)` first.
+// on_ui_destroyed() runs only on full panel teardown, never on an in-place
+// XML rebuild, so the rebuild is handled in two pieces:
+//   1. canvas_ and content_ are WidgetRefs: whichever path deletes the old
+//      tree leaves them null, and every call site checks `if (canvas_)` first
+//      (ensure_async_rendering() is reachable from the resize path in
+//      src/application/application.cpp).
 //   2. setup_orientation_rewire_observer() + rewire_after_orientation_flip()
 //      re-run the same wiring against the freshly rebuilt tree, so a flip
-//      leaves the panel fully functional instead of merely non-crashing.
+//      leaves the panel fully functional.
+//
+// Real hardware never resizes or rotates at runtime, so this matters for the
+// SDL dev window.
 
 bool BedMeshPanel::wire_canvas_and_content(lv_obj_t* overlay_content) {
     if (!overlay_content) {
@@ -360,19 +311,10 @@ bool BedMeshPanel::wire_canvas_and_content(lv_obj_t* overlay_content) {
         return false;
     }
 
-    canvas_ = lv_obj_find_by_name(overlay_content, "bed_mesh_canvas");
+    canvas_ = helix::ui::find_required(overlay_content, "bed_mesh_canvas", get_name());
     if (!canvas_) {
-        spdlog::error("[{}] Canvas widget 'bed_mesh_canvas' not found in XML", get_name());
         return false;
     }
-
-    // Belt-and-suspenders against on_ui_destroyed() (full teardown) AND the
-    // <if> rebuild path above — whichever deletes this widget, canvas_ ends
-    // up null rather than dangling.
-    // Remove first for the same reason as the SIZE_CHANGED registration below:
-    // create()'s immediate observer fire re-enters against the same canvas.
-    lv_obj_remove_event_cb(canvas_, on_canvas_deleted_cb);
-    lv_obj_add_event_cb(canvas_, on_canvas_deleted_cb, LV_EVENT_DELETE, this);
 
     // Wire LV_EVENT_SIZE_CHANGED on overlay_content so the portrait canvas
     // height recomputes whenever the column resizes (rotation, or the
@@ -382,51 +324,15 @@ bool BedMeshPanel::wire_canvas_and_content(lv_obj_t* overlay_content) {
     //
     // Usually overlay_content is fresh — from lv_xml_create() the first time,
     // from the <if> rebuild after each orientation flip. The exception is
-    // create(): observe_int_immediate fires at registration, so
+    // create(): observe<int> fires at registration, so
     // rewire_after_orientation_flip() runs once against the SAME
     // overlay_content that was just wired here. Remove before adding so that
     // path leaves one registration rather than two.
     lv_obj_remove_event_cb(overlay_content, on_content_size_changed);
-    lv_obj_remove_event_cb(overlay_content, on_content_deleted_cb);
     lv_obj_add_event_cb(overlay_content, on_content_size_changed, LV_EVENT_SIZE_CHANGED, this);
-    lv_obj_add_event_cb(overlay_content, on_content_deleted_cb, LV_EVENT_DELETE, this);
     content_ = overlay_content;
 
     return true;
-}
-
-void BedMeshPanel::on_canvas_deleted_cb(lv_event_t* e) {
-    auto* self = static_cast<BedMeshPanel*>(lv_event_get_user_data(e));
-    if (!self) {
-        return;
-    }
-    // Guard against a STALE canvas's delete clobbering a already-rewired
-    // canvas_: xml_frag_teardown reparents the old canvas into an off-tree
-    // sink and lv_obj_delete_async()s it, so its LV_EVENT_DELETE fires on a
-    // LATER tick — by which time rewire_after_orientation_flip() has
-    // already, synchronously, pointed canvas_ at the brand-new widget from
-    // the rebuild. Without this check, that late DELETE would null out the
-    // CURRENT valid canvas_ instead of the dead one that actually triggered
-    // it, since every canvas this panel has ever owned shares the same
-    // user_data (`this`) on this same callback.
-    if (lv_event_get_target(e) == self->canvas_) {
-        self->canvas_ = nullptr;
-    }
-}
-
-void BedMeshPanel::on_content_deleted_cb(lv_event_t* e) {
-    auto* self = static_cast<BedMeshPanel*>(lv_event_get_user_data(e));
-    if (!self) {
-        return;
-    }
-    // Same stale-widget check as on_canvas_deleted_cb, for the same reason:
-    // the condemned overlay_content's async delete lands after
-    // rewire_after_orientation_flip() has already pointed content_ at the
-    // rebuilt one, and every overlay_content this panel has ever wired shares
-    // user_data (`this`) on this callback.
-    if (lv_event_get_target(e) == self->content_) {
-        self->content_ = nullptr;
-    }
 }
 
 void BedMeshPanel::apply_canvas_render_settings() {
@@ -456,7 +362,7 @@ void BedMeshPanel::setup_orientation_rewire_observer() {
         return;
     }
 
-    // observe_int_IMMEDIATE, deliberately not the usual observe_int_sync:
+    // Dispatch::Immediate, deliberately not the usual deferred default:
     // bed_mesh_panel.xml's own <if cond="ui_is_portrait eq 1"> is ALSO bound
     // to this subject, and its rebuild (xml_frag_rebuild) runs SYNCHRONOUSLY
     // inside lv_subject_set_int() — not deferred. LVGL appends observers to
@@ -464,17 +370,18 @@ void BedMeshPanel::setup_orientation_rewire_observer() {
     // (lv_subject_notify, lv_observer.c), so registration order is
     // notification order: the <if>'s observer was added during the
     // lv_xml_create() call in create(), strictly before this one, so it
-    // always fires — and finishes its rebuild — first. observe_int_sync's
+    // always fires — and finishes its rebuild — first. observe<int>'s
     // deferral (helix::ui::queue_update()) would be exactly wrong here: it
     // would leave this rewire running on a LATER tick, after the old
     // overlay_content/canvas_ were already condemned and possibly freed.
-    // observe_int_immediate's stated precondition (no observer-lifecycle
+    // Dispatch::Immediate's stated precondition (no observer-lifecycle
     // mutation inside the callback) holds — rewire_after_orientation_flip()
     // only re-finds widgets and adds plain lv_obj_add_event_cb hooks, it
     // never touches an ObserverGuard or a ui_is_portrait subscription.
-    portrait_rewire_observer_ = helix::ui::observe_int_immediate<BedMeshPanel>(
+    portrait_rewire_observer_ = helix::ui::observe<int>(
         portrait_subject, this,
-        [](BedMeshPanel* self, int /*is_portrait*/) { self->rewire_after_orientation_flip(); });
+        [](BedMeshPanel* self, int /*is_portrait*/) { self->rewire_after_orientation_flip(); },
+        subject_never_freed(), helix::ui::Dispatch::Immediate);
 }
 
 void BedMeshPanel::rewire_after_orientation_flip() {
@@ -625,16 +532,10 @@ void BedMeshPanel::apply_portrait_canvas_height() {
 // ============================================================================
 
 void BedMeshPanel::register_callbacks() {
-    if (callbacks_registered_) {
-        spdlog::debug("[{}] Callbacks already registered", get_name());
-        return;
-    }
-
-    spdlog::debug("[{}] Registering event callbacks", get_name());
-
     register_xml_callbacks({
         // Header calibrate button
-        {"on_bed_mesh_calibrate_clicked", on_calibrate_header_clicked_cb},
+        {"on_bed_mesh_calibrate_clicked",
+         [](lv_event_t*) { get_global_bed_mesh_panel().start_calibration(); }},
 
         // Profile row callbacks (5 profiles)
         {"on_profile_0_clicked", on_profile_clicked_cb},
@@ -655,29 +556,34 @@ void BedMeshPanel::register_callbacks() {
         {"on_profile_3_delete", on_profile_delete_cb},
         {"on_profile_4_delete", on_profile_delete_cb},
 
-        // Calibrate modal
-        {"on_bed_mesh_calibrate_cancel", on_calibrate_cancel_cb},
-        {"on_bed_mesh_calibrate_start", on_calibrate_start_cb},
-
-        // Rename modal
-        {"on_bed_mesh_rename_cancel", on_rename_cancel_cb},
-        {"on_bed_mesh_rename_confirm", on_rename_confirm_cb},
-
-        // Delete modal
-        {"on_bed_mesh_delete_cancel", on_delete_cancel_cb},
-        {"on_bed_mesh_delete_confirm", on_delete_confirm_cb},
+        // Calibrate and rename modals: both just close
+        {"on_bed_mesh_calibrate_cancel",
+         [](lv_event_t*) { get_global_bed_mesh_panel().hide_all_modals(); }},
+        {"on_bed_mesh_rename_cancel",
+         [](lv_event_t*) { get_global_bed_mesh_panel().hide_all_modals(); }},
+        {"on_bed_mesh_rename_confirm",
+         [](lv_event_t*) {
+             // Get the new name from the input field
+             lv_obj_t* input = lv_obj_find_by_name(lv_layer_top(), "rename_new_name_input");
+             if (!input) {
+                 input = lv_obj_find_by_name(lv_screen_active(), "rename_new_name_input");
+             }
+             const char* text = input ? lv_textarea_get_text(input) : nullptr;
+             get_global_bed_mesh_panel().rename_profile_checked(text ? text : "");
+         }},
 
         // Save config modal
-        {"on_bed_mesh_save_config_no", on_save_config_no_cb},
-        {"on_bed_mesh_save_config_yes", on_save_config_yes_cb},
+        {"on_bed_mesh_save_config_no",
+         [](lv_event_t*) { get_global_bed_mesh_panel().decline_save_config(); }},
+        {"on_bed_mesh_save_config_yes",
+         [](lv_event_t*) { get_global_bed_mesh_panel().confirm_save_config(); }},
 
-        // Calibration modal - emergency stop and save profile
-        {"on_bed_mesh_emergency_stop", on_emergency_stop_cb},
-        {"on_bed_mesh_save_profile", on_save_profile_cb},
+        // Calibration modal - emergency stop and start
+        {"on_bed_mesh_emergency_stop",
+         [](lv_event_t*) { get_global_bed_mesh_panel().handle_emergency_stop(); }},
+        {"on_bed_mesh_calibrate_start",
+         [](lv_event_t*) { get_global_bed_mesh_panel().submit_calibration_name_field(); }},
     });
-
-    callbacks_registered_ = true;
-    spdlog::debug("[{}] Event callbacks registered", get_name());
 }
 
 // ============================================================================
@@ -733,25 +639,21 @@ void BedMeshPanel::ensure_async_rendering() {
     }
 
     lv_obj_invalidate(canvas_);
-    ui_bed_mesh_request_async_render(canvas_);
+    ui_bed_mesh_redraw(canvas_);
 }
 
-void BedMeshPanel::on_deactivate() {
-    spdlog::debug("[{}] on_deactivate()", get_name());
+void BedMeshPanel::on_deactivating(DeactivateReason) {
+    spdlog::debug("[{}] on_deactivating()", get_name());
 
     // Stop the render thread when panel is not visible to avoid wasting CPU
     if (canvas_) {
         ui_bed_mesh_set_async_mode(canvas_, false);
     }
-
-    // Call base class
-    OverlayBase::on_deactivate();
 }
 
 void BedMeshPanel::on_ui_destroyed() {
     canvas_ = nullptr;
     profile_dropdown_ = nullptr;
-    calibrate_name_input_ = nullptr;
     rename_name_input_ = nullptr;
     calibrate_modal_widget_ = nullptr;
     rename_modal_widget_ = nullptr;
@@ -776,13 +678,7 @@ void BedMeshPanel::update_profile_list_subjects() {
     const BedMeshProfile* active_mesh = api->advanced().get_active_bed_mesh();
     std::string active_name = active_mesh ? active_mesh->name : "";
 
-    // Filter out the temporary calibration profile used internally
-    std::vector<std::string> profiles;
-    profiles.reserve(raw_profiles.size());
-    for (const auto& p : raw_profiles) {
-        if (p != "_hs_temp")
-            profiles.push_back(p);
-    }
+    const std::vector<std::string>& profiles = raw_profiles;
 
     spdlog::debug("[{}] update_profile_list_subjects: {} profiles, active='{}'", get_name(),
                   profiles.size(), active_name);
@@ -891,7 +787,7 @@ void BedMeshPanel::setup_moonraker_subscription() {
     auto token = lifetime_.token();
 
     SubscriptionId id =
-        api->subscribe_notifications([this, api, token](nlohmann::json notification) {
+        api->subscribe_notifications([this, api, token](const nlohmann::json& notification) {
             // Check if this notification contains bed_mesh data BEFORE deferring to main thread
             if (!notification.contains("params") || !notification["params"].is_array() ||
                 notification["params"].empty()) {
@@ -924,12 +820,17 @@ void BedMeshPanel::setup_build_volume_observer() {
         return;
     }
 
-    // Observe build_volume_version subject to refresh bounds when stepper config loads
-    build_volume_observer_ = helix::ui::observe_int_sync<BedMeshPanel>(
-        api->get_build_volume_version_subject(), this, [](BedMeshPanel* self, int /*version*/) {
+    // Observe build_volume_version subject to refresh bounds when stepper config loads.
+    // The subject dies only in ~MoonrakerAPI, and both teardown paths reset
+    // m_panels and run StaticPanelRegistry::destroy_all() BEFORE m_moonraker,
+    // so no observer guard can still be alive when it is freed.
+    build_volume_observer_ = helix::ui::observe<int>(
+        api->get_build_volume_version_subject(), this,
+        [](BedMeshPanel* self, int /*version*/) {
             spdlog::debug("[{}] build_volume changed, refreshing bed bounds", self->get_name());
             self->refresh_bed_bounds();
-        });
+        },
+        subject_never_freed());
 }
 
 void BedMeshPanel::refresh_bed_bounds() {
@@ -1162,7 +1063,7 @@ void BedMeshPanel::load_profile(int index) {
             pending_operation_ = PendingOperation::None;
             NOTIFY_WARNING(lv_tr("Bed mesh operation timed out"));
         });
-        std::string cmd = "BED_MESH_PROFILE LOAD=" + name;
+        const std::string cmd = helix::bed_mesh::profile_command("LOAD", name);
         api->execute_gcode(
             cmd,
             lifetime_.bg_cb("BedMeshPanel::load_refresh",
@@ -1203,15 +1104,24 @@ void BedMeshPanel::rename_profile(int index) {
     show_rename_modal(name);
 }
 
+void BedMeshPanel::remember_heaters_probing_turns_on() {
+    auto& state = get_printer_state();
+    // A target of 0 means the heater is off.
+    preheat_turned_on_nozzle_ =
+        lv_subject_get_int(state.temperature_state().get_active_extruder_target_subject()) == 0;
+    preheat_turned_on_bed_ =
+        lv_subject_get_int(state.temperature_state().get_bed_target_subject()) == 0;
+}
+
 void BedMeshPanel::preheat_for_probing() {
-    preheat_turned_on_nozzle_ = false;
-    preheat_turned_on_bed_ = false;
+    remember_heaters_probing_turns_on();
 
     auto& state = get_printer_state();
 
-    // Subject values are decidegrees (value * 10) — target of 0 means heater is off
-    int nozzle_target = lv_subject_get_int(state.get_active_extruder_target_subject());
-    int bed_target = lv_subject_get_int(state.get_bed_target_subject());
+    // Subject values are decidegrees (value * 10)
+    int nozzle_target =
+        lv_subject_get_int(state.temperature_state().get_active_extruder_target_subject());
+    int bed_target = lv_subject_get_int(state.temperature_state().get_bed_target_subject());
 
     auto set_temp = [](const std::string& heater, double temp, const char* label) {
         if (auto* c = get_temperature_controller()) {
@@ -1223,17 +1133,15 @@ void BedMeshPanel::preheat_for_probing() {
         }
     };
 
-    if (nozzle_target == 0) {
-        preheat_turned_on_nozzle_ = true;
+    if (preheat_turned_on_nozzle_) {
         spdlog::info("[BedMeshPanel] Preheating nozzle to {}°C for probing", PROBE_NOZZLE_TEMP);
-        set_temp(state.active_extruder_name(), PROBE_NOZZLE_TEMP, "nozzle");
+        set_temp(state.temperature_state().active_extruder_name(), PROBE_NOZZLE_TEMP, "nozzle");
     } else {
         spdlog::info("[BedMeshPanel] Nozzle already heating (target={}°C), skipping",
                      helix::units::from_decidegrees(nozzle_target));
     }
 
-    if (bed_target == 0) {
-        preheat_turned_on_bed_ = true;
+    if (preheat_turned_on_bed_) {
         spdlog::info("[BedMeshPanel] Preheating bed to {}°C for probing", PROBE_BED_TEMP);
         set_temp("heater_bed", PROBE_BED_TEMP, "bed");
     } else {
@@ -1258,7 +1166,7 @@ void BedMeshPanel::cooldown_after_probing() {
     };
 
     if (preheat_turned_on_nozzle_) {
-        turn_off(get_printer_state().active_extruder_name(), "nozzle");
+        turn_off(get_printer_state().temperature_state().active_extruder_name(), "nozzle");
         preheat_turned_on_nozzle_ = false;
     }
 
@@ -1269,29 +1177,109 @@ void BedMeshPanel::cooldown_after_probing() {
 }
 
 void BedMeshPanel::start_calibration() {
-    // Prevent double-tap while already probing
     auto current_state =
         static_cast<BedMeshCalibrationState>(lv_subject_get_int(&bed_mesh_calibrate_state_));
-    if (current_state == BedMeshCalibrationState::PROBING) {
-        spdlog::debug("[BedMeshPanel] Calibration already in progress, ignoring");
+    if (current_state == BedMeshCalibrationState::NAMING && !calibration_dialog_is_open()) {
+        // Dismissed from outside: nothing was sent, so naming starts over.
+        spdlog::debug("[BedMeshPanel] Naming dialog was dismissed; opening it again");
+        calibrate_modal_widget_ = nullptr;
+    } else if (current_state == BedMeshCalibrationState::PROBING ||
+               current_state == BedMeshCalibrationState::NAMING) {
+        spdlog::debug("[BedMeshPanel] Calibration dialog already open, ignoring");
         return;
     }
 
-    // Reset state to PROBING
+    // The mesh is named before anything is probed, so the calibration itself
+    // stores it there. The field starts on the profile Klipper loads at startup.
+    lv_subject_copy_string(&bed_mesh_calibrate_name_, helix::bed_mesh::DEFAULT_PROFILE);
+    lv_subject_set_int(&bed_mesh_calibrate_state_,
+                       static_cast<int>(BedMeshCalibrationState::NAMING));
+    calibrate_modal_widget_ = helix::ui::modal_show("bed_mesh_calibrate_modal");
+    spdlog::debug("[BedMeshPanel] Calibration dialog shown, awaiting a profile name");
+}
+
+bool BedMeshPanel::calibration_dialog_is_open() const {
+    if (!calibrate_modal_widget_) {
+        return false;
+    }
+    // The stack matches entries by pointer, so a dialog already freed is simply
+    // not found.
+    const auto& stack = ModalStack::instance();
+    lv_obj_t* backdrop = stack.backdrop_for(calibrate_modal_widget_);
+    return backdrop && !stack.is_exiting(backdrop);
+}
+
+void BedMeshPanel::submit_calibration_name_field() {
+    submit_calibration_name(lv_subject_get_string(&bed_mesh_calibrate_name_));
+}
+
+void BedMeshPanel::submit_calibration_name(std::string_view typed) {
+    const std::vector<std::string> stored = stored_profile_names();
+    const auto check = helix::ui::bed_mesh::check_profile_name(typed, stored);
+    if (check.verdict == helix::ui::bed_mesh::ProfileNameVerdict::Empty) {
+        // Leave the dialog up: an empty field is not "default"
+        // (prestonbrown/helixscreen#1360).
+        NOTIFY_WARNING(lv_tr("Enter a name for this profile"));
+        return;
+    }
+    if (check.verdict == helix::ui::bed_mesh::ProfileNameVerdict::Unusable) {
+        NOTIFY_WARNING(lv_tr("Profile names cannot contain ';'"));
+        return;
+    }
+
+    // Only where the command stores is read here, so the probe temperature is moot.
+    const auto plan = helix::bed_mesh::plan_calibration(
+        StandardMacros::instance().get(StandardMacroSlot::BedMesh), check.name,
+        helix::bed_mesh::DEFAULT_PROBE_BED_TEMP_C);
+    const auto replaced = helix::bed_mesh::profiles_replaced_by(plan, stored);
+    if (replaced.empty()) {
+        begin_calibration(check.name);
+        return;
+    }
+    ask_before_overwrite(OverwriteTarget::Calibrate, check.name, replaced);
+}
+
+void BedMeshPanel::begin_calibration(const std::string& name) {
     lv_subject_set_int(&bed_mesh_calibrate_state_,
                        static_cast<int>(BedMeshCalibrationState::PROBING));
     lv_subject_set_int(&bed_mesh_probe_progress_, 0);
     lv_subject_set_int(&bed_mesh_probe_indeterminate_, 0);
     lv_subject_copy_string(&bed_mesh_probe_text_, lv_tr("Preparing..."));
 
-    // Show modal immediately
-    calibrate_modal_widget_ = helix::ui::modal_show("bed_mesh_calibrate_modal");
-    spdlog::debug("[BedMeshPanel] Starting calibration, modal shown");
-
-    // Get API
     IMoonrakerAPI* api = get_moonraker_api();
     if (!api) {
         on_calibration_error("API not available");
+        return;
+    }
+
+    calibration_plan_ = plan_calibration_into(name);
+    // What the printer stores now, so completion can tell what the calibration stored.
+    read_stored_meshes(
+        [this](helix::bed_mesh::StoredMeshes before) {
+            meshes_before_ = std::move(before);
+            prepare_and_probe();
+        },
+        [this](const std::string& why) {
+            on_calibration_error("Could not read the stored meshes: " + why);
+        });
+}
+
+void BedMeshPanel::prepare_and_probe() {
+    IMoonrakerAPI* api = get_moonraker_api();
+    if (!api) {
+        on_calibration_error("API not available");
+        return;
+    }
+
+    if (calibration_plan_.self_prepares) {
+        // The sequence heats and homes the printer itself. Anything sent from here
+        // would run ahead of it, and a panel preheat could disagree with the bed
+        // temperature the sequence was given.
+        spdlog::info("[BedMeshPanel] Sequence prepares the printer itself; no preheat or homing");
+        // What it heats stays on after it, so the heaters that were off are
+        // turned off again once probing is done.
+        remember_heaters_probing_turns_on();
+        start_calibration_probing();
         return;
     }
 
@@ -1308,7 +1296,8 @@ void BedMeshPanel::start_calibration() {
         if (preheat_turned_on_nozzle_) {
             char buf[128];
             std::snprintf(buf, sizeof(buf), "TEMPERATURE_WAIT SENSOR=%s MINIMUM=%.0f\n",
-                          get_printer_state().active_extruder_name().c_str(), PROBE_NOZZLE_TEMP);
+                          get_printer_state().temperature_state().active_extruder_name().c_str(),
+                          PROBE_NOZZLE_TEMP);
             wait_cmd += buf;
         }
         if (preheat_turned_on_bed_) {
@@ -1332,7 +1321,7 @@ void BedMeshPanel::start_calibration() {
                             [this](const MoonrakerError& err) {
                                 on_calibration_error("Preheat failed: " + err.message);
                             }),
-            CALIBRATION_TIMEOUT_MS);
+            PREHEAT_TIMEOUT_MS);
     } else {
         // Heaters already on — go straight to home/probe
         start_home_and_probe();
@@ -1386,13 +1375,16 @@ void BedMeshPanel::start_calibration_probing() {
     json params = {{"objects", json::object({{"configfile", json::array({"settings"})}})}};
     api->get_client().send_jsonrpc(
         "printer.objects.query", params,
-        [this, api, token](json response) {
+        [this, api, token](const json& response) {
             // BG: parse JSON without touching `this`. Member call (launch_calibration)
             // happens inside the defer below.
             int expected = 0;
             int samples = 1;
+            static const json::json_pointer kSettings("/result/status/configfile/settings");
+            static const json kNoSettings = json::object();
             try {
-                const auto& settings = response["result"]["status"]["configfile"]["settings"];
+                const json& settings =
+                    response.contains(kSettings) ? response[kSettings] : kNoSettings;
                 if (settings.contains("bed_mesh") && settings["bed_mesh"].contains("probe_count")) {
                     const auto& pc = settings["bed_mesh"]["probe_count"];
                     if (pc.is_array() && pc.size() >= 2) {
@@ -1436,11 +1428,33 @@ void BedMeshPanel::start_calibration_probing() {
         });
 }
 
+helix::bed_mesh::CalibrationPlan
+BedMeshPanel::plan_calibration_into(const std::string& name) const {
+    // One ladder, StandardMacros': configured > shipped > detected. A
+    // printer-shipped sequence calls the firmware's own mesh macro with the
+    // parameters it takes, and brings its own heating and homing.
+    const auto& info = StandardMacros::instance().get(StandardMacroSlot::BedMesh);
+    auto& state = get_printer_state();
+    const int bed_temp_c = helix::bed_mesh::probe_bed_temp_c(
+        lv_subject_get_int(state.temperature_state().get_bed_target_subject()),
+        lv_subject_get_int(state.temperature_state().get_bed_temp_subject()));
+    auto plan = helix::bed_mesh::plan_calibration(info, name, bed_temp_c);
+    if (plan.copy_to.empty()) {
+        spdlog::info("[BedMeshPanel] Calibrating into '{}' with: {}", name, plan.command);
+    } else {
+        spdlog::info("[BedMeshPanel] Calibrating with: {} (stores '{}', copied to '{}')",
+                     plan.command, plan.writes_profile, plan.copy_to);
+    }
+    return plan;
+}
+
 void BedMeshPanel::launch_calibration(IMoonrakerAPI* api, int expected_probes, int probe_samples) {
     // Start calibration with progress tracking. All three callbacks fire on the
     // WebSocket thread; bg_cb defers the body to main and re-checks the lifetime
     // generation atomically before invoking.
     api->advanced().start_bed_mesh_calibrate(
+        IAdvancedAPI::BedMeshCommand{calibration_plan_.command, calibration_plan_.self_prepares,
+                                     calibration_plan_.shipped},
         lifetime_.bg_cb("BedMeshPanel::probe_progress",
                         [this](int current, int total) { on_probe_progress(current, total); }),
         lifetime_.bg_cb("BedMeshPanel::calibrate_done", [this]() { on_calibration_complete(); }),
@@ -1452,13 +1466,6 @@ void BedMeshPanel::launch_calibration(IMoonrakerAPI* api, int expected_probes, i
 // ============================================================================
 // Modal Management
 // ============================================================================
-
-void BedMeshPanel::show_calibrate_modal() {
-    lv_subject_set_int(&bed_mesh_calibrating_, 0);
-
-    calibrate_modal_widget_ = helix::ui::modal_show("bed_mesh_calibrate_modal");
-    spdlog::debug("[{}] Showing calibrate modal", get_name());
-}
 
 void BedMeshPanel::show_rename_modal(const std::string& profile_name) {
     pending_rename_old_ = profile_name;
@@ -1503,7 +1510,6 @@ void BedMeshPanel::hide_all_modals() {
     operation_guard_.end();
 
     // Reset calibration state machine
-    lv_subject_set_int(&bed_mesh_calibrating_, 0);
     lv_subject_set_int(&bed_mesh_calibrate_state_, static_cast<int>(BedMeshCalibrationState::IDLE));
 
     // Hide all modals (all use ui_modal_hide pattern now)
@@ -1542,11 +1548,6 @@ void BedMeshPanel::confirm_save_config() {
     pending_operation_ = PendingOperation::None;
 }
 
-void BedMeshPanel::start_calibration_with_name(const std::string& profile_name) {
-    hide_all_modals();
-    execute_calibration(profile_name);
-}
-
 void BedMeshPanel::confirm_rename(const std::string& new_name) {
     std::string old_name = pending_rename_old_;
     hide_all_modals();
@@ -1570,7 +1571,7 @@ void BedMeshPanel::execute_delete_profile(const std::string& name) {
         NOTIFY_WARNING(lv_tr("Bed mesh operation timed out"));
     });
 
-    std::string cmd = "BED_MESH_PROFILE REMOVE=" + name;
+    const std::string cmd = helix::bed_mesh::profile_command("REMOVE", name);
     api->execute_gcode(
         cmd,
         lifetime_.bg_cb("BedMeshPanel::delete_done",
@@ -1602,131 +1603,54 @@ void BedMeshPanel::execute_rename_profile(const std::string& old_name,
         NOTIFY_WARNING(lv_tr("Bed mesh operation timed out"));
     });
 
-    // Three-step chain: LOAD → SAVE (new name) → REMOVE (old name). Each success
-    // body runs on the main thread (via bg_cb), so it's safe to call member
-    // helpers like get_moonraker_api() and queue the next gcode from there.
-    std::string load_cmd = "BED_MESH_PROFILE LOAD=" + old_name;
+    // LOAD -> SAVE (new name) -> REMOVE (old name). The old profile goes only once
+    // the save is known to have stored the mesh: until then it is the only copy.
+    // Each success body runs on the main thread (via bg_cb).
     api->execute_gcode(
-        load_cmd,
+        helix::bed_mesh::profile_command("LOAD", old_name),
         lifetime_.bg_cb(
             "BedMeshPanel::rename_load_done",
             [this, old_name, new_name]() {
-                // Step 2: Save with new name
-                IMoonrakerAPI* api2 = get_moonraker_api();
-                if (!api2) {
-                    operation_guard_.end();
-                    return;
-                }
-                std::string save_cmd = "BED_MESH_PROFILE SAVE=" + new_name;
-                api2->execute_gcode(
-                    save_cmd,
-                    lifetime_.bg_cb(
-                        "BedMeshPanel::rename_save_done",
-                        [this, old_name, new_name]() {
-                            // Step 3: Remove old name
-                            IMoonrakerAPI* api3 = get_moonraker_api();
-                            if (!api3) {
-                                operation_guard_.end();
-                                return;
-                            }
-                            std::string remove_cmd = "BED_MESH_PROFILE REMOVE=" + old_name;
-                            api3->execute_gcode(
-                                remove_cmd,
-                                lifetime_.bg_cb("BedMeshPanel::rename_done",
-                                                [this, old_name, new_name]() {
-                                                    operation_guard_.end();
-                                                    spdlog::info("[{}] Profile renamed: {} -> {}",
-                                                                 get_name(), old_name, new_name);
-                                                    NOTIFY_SUCCESS(lv_tr("Profile renamed"));
-                                                    pending_operation_ = PendingOperation::Rename;
-                                                    show_save_config_modal();
-                                                }),
-                                lifetime_.bg_cb(
-                                    "BedMeshPanel::rename_remove_error",
-                                    [this](const MoonrakerError& err) {
-                                        operation_guard_.end();
-                                        spdlog::error("[{}] Failed to remove old profile: {}",
-                                                      get_name(), err.message);
-                                        NOTIFY_ERROR(lv_tr("Rename failed at remove step"));
-                                    }));
-                        }),
-                    lifetime_.bg_cb("BedMeshPanel::rename_save_error",
-                                    [this](const MoonrakerError& err) {
-                                        operation_guard_.end();
-                                        spdlog::error("[{}] Failed to save new profile: {}",
-                                                      get_name(), err.message);
-                                        NOTIFY_ERROR(lv_tr("Rename failed at save step"));
-                                    }));
+                save_profile_as(
+                    new_name,
+                    [this, old_name, new_name]() {
+                        IMoonrakerAPI* api3 = get_moonraker_api();
+                        if (!api3) {
+                            operation_guard_.end();
+                            return;
+                        }
+                        api3->execute_gcode(
+                            helix::bed_mesh::profile_command("REMOVE", old_name),
+                            lifetime_.bg_cb("BedMeshPanel::rename_done",
+                                            [this, old_name, new_name]() {
+                                                operation_guard_.end();
+                                                spdlog::info("[{}] Profile renamed: {} -> {}",
+                                                             get_name(), old_name, new_name);
+                                                NOTIFY_SUCCESS(lv_tr("Profile renamed"));
+                                                pending_operation_ = PendingOperation::Rename;
+                                                show_save_config_modal();
+                                            }),
+                            lifetime_.bg_cb("BedMeshPanel::rename_remove_error",
+                                            [this](const MoonrakerError& err) {
+                                                operation_guard_.end();
+                                                spdlog::error(
+                                                    "[{}] Failed to remove old profile: {}",
+                                                    get_name(), err.message);
+                                                NOTIFY_ERROR(lv_tr("Rename failed at remove step"));
+                                            }));
+                    },
+                    [this, new_name](const std::string& why) {
+                        operation_guard_.end();
+                        spdlog::error("[{}] Failed to save new profile '{}': {}", get_name(),
+                                      new_name, why);
+                        NOTIFY_ERROR(lv_tr("Could not save the mesh as '{}': {}"), new_name, why);
+                    });
             }),
         lifetime_.bg_cb("BedMeshPanel::rename_load_error", [this](const MoonrakerError& err) {
             operation_guard_.end();
             spdlog::error("[{}] Failed to load profile for rename: {}", get_name(), err.message);
             NOTIFY_ERROR(lv_tr("Rename failed at load step"));
         }));
-}
-
-void BedMeshPanel::execute_calibration(const std::string& /*profile_name*/) {
-    IMoonrakerAPI* api = get_moonraker_api();
-    if (!api)
-        return;
-
-    // Probe into a temporary profile so we don't clobber an existing "default"
-    // mesh. save_profile_with_name() renames this to the user's chosen name
-    // after probing completes.
-    static constexpr const char* TEMP_PROFILE = "_hs_temp";
-
-    // A printer may declare a multi-line gcode template in the database
-    // (calibration.bed_mesh_gcode). Used today by the Elegoo Centauri Carbon,
-    // whose mainline-Klipper [load_cell_probe] aborts on stale tare; the
-    // template tares first, runs the vendor's wipe wrapper, then saves the
-    // current mesh under {profile}.
-    const std::string& printer_name = get_printer_state().get_printer_type();
-    std::string cmd = PrinterDetector::get_bed_mesh_calibrate_gcode(printer_name);
-
-    std::string macro_name;
-    if (!cmd.empty()) {
-        const std::string placeholder = "{profile}";
-        for (size_t pos = cmd.find(placeholder); pos != std::string::npos;
-             pos = cmd.find(placeholder, pos + 1)) {
-            cmd.replace(pos, placeholder.size(), TEMP_PROFILE);
-        }
-        macro_name = "<calibration.bed_mesh_gcode>";
-    } else {
-        // Resolve the calibration macro via StandardMacros (user-configurable,
-        // defaults to auto-detected BED_MESH_CALIBRATE or G29)
-        const auto& macro_info = StandardMacros::instance().get(StandardMacroSlot::BedMesh);
-        macro_name = macro_info.get_macro();
-        if (macro_name.empty()) {
-            macro_name = "BED_MESH_CALIBRATE"; // Fallback if nothing configured/detected
-        }
-        cmd = macro_name + " PROFILE=" + std::string(TEMP_PROFILE);
-    }
-
-    spdlog::info("[{}] Starting calibration (temp profile: {}, macro: {})", get_name(),
-                 TEMP_PROFILE, macro_name);
-    lv_subject_set_int(&bed_mesh_calibrating_, 1);
-
-    api->execute_gcode(
-        cmd,
-        lifetime_.bg_cb("BedMeshPanel::calibrate_gcode_done",
-                        [this]() {
-                            spdlog::info("[{}] Calibration started", get_name());
-                            NOTIFY_INFO(lv_tr("Calibration started"));
-                        }),
-        lifetime_.bg_cb(
-            "BedMeshPanel::calibrate_gcode_error",
-            [this](const MoonrakerError& err) {
-                if (err.type == MoonrakerErrorType::TIMEOUT) {
-                    spdlog::warn("[{}] Calibration response timed out (may still be running)",
-                                 get_name());
-                    NOTIFY_WARNING(lv_tr("Calibration may still be running — response timed out"));
-                } else {
-                    spdlog::error("[{}] Failed to start calibration: {}", get_name(), err.message);
-                    NOTIFY_ERROR(lv_tr("Failed to start calibration"));
-                    lv_subject_set_int(&bed_mesh_calibrating_, 0);
-                }
-            }),
-        CALIBRATION_TIMEOUT_MS);
 }
 
 void BedMeshPanel::execute_save_config() {
@@ -1785,10 +1709,157 @@ void BedMeshPanel::on_probe_progress(int current, int total) {
 }
 
 void BedMeshPanel::on_calibration_complete() {
-    spdlog::info("[BedMeshPanel] Calibration complete, transitioning to naming state");
     cooldown_after_probing();
-    lv_subject_set_int(&bed_mesh_calibrate_state_,
-                       static_cast<int>(BedMeshCalibrationState::NAMING));
+    // A command reporting success proves nothing was stored where it was asked to
+    // store it: judge by what the printer's profiles now hold.
+    read_stored_meshes(
+        [this](const helix::bed_mesh::StoredMeshes& after) {
+            const auto result =
+                helix::bed_mesh::check_calibration(calibration_plan_, meshes_before_, after);
+            switch (result.outcome) {
+            case helix::bed_mesh::CalibrationOutcome::Stored:
+                finish_calibration(result.to);
+                return;
+            case helix::bed_mesh::CalibrationOutcome::Copy:
+                spdlog::info("[BedMeshPanel] Mesh stored in '{}'; copying it to '{}'", result.from,
+                             result.to);
+                copy_calibrated_mesh(result.from, result.to);
+                return;
+            case helix::bed_mesh::CalibrationOutcome::NotStored:
+                spdlog::error("[BedMeshPanel] Calibration finished, but no stored profile holds a "
+                              "new mesh (expected '{}')",
+                              calibration_plan_.writes_profile);
+                NOTIFY_ERROR(lv_tr("No new mesh was stored as '{}'"), calibration_plan_.name);
+                hide_all_modals();
+                return;
+            }
+        },
+        [this](const std::string& why) {
+            spdlog::error("[BedMeshPanel] Could not read the stored meshes after calibrating: {}",
+                          why);
+            NOTIFY_ERROR(lv_tr("Could not save the mesh as '{}': {}"), calibration_plan_.name, why);
+            hide_all_modals();
+        });
+}
+
+void BedMeshPanel::read_stored_meshes(std::function<void(helix::bed_mesh::StoredMeshes)> on_read,
+                                      std::function<void(const std::string&)> on_failed) {
+    IMoonrakerAPI* api = get_moonraker_api();
+    if (!api) {
+        on_failed("API not available");
+        return;
+    }
+
+    auto token = lifetime_.token();
+    json params = {{"objects", json::object({{"bed_mesh", json::array({"profiles"})}})}};
+    api->get_client().send_jsonrpc(
+        "printer.objects.query", params,
+        [token, on_read](const json& response) {
+            // BG: parse here, hand the result to the main thread.
+            auto meshes = std::make_shared<helix::bed_mesh::StoredMeshes>();
+            if (response.contains("result") && response["result"].contains("status") &&
+                response["result"]["status"].contains("bed_mesh")) {
+                *meshes = helix::bed_mesh::stored_meshes_from_status(
+                    response["result"]["status"]["bed_mesh"]);
+            }
+            token.defer("BedMeshPanel::stored_meshes_read",
+                        [on_read, meshes]() { on_read(std::move(*meshes)); });
+        },
+        [token, on_failed](const MoonrakerError& err) {
+            token.defer("BedMeshPanel::stored_meshes_error",
+                        [on_failed, message = err.message]() { on_failed(message); });
+        });
+}
+
+void BedMeshPanel::finish_calibration(const std::string& profile) {
+    spdlog::info("[BedMeshPanel] Calibration complete, mesh stored as '{}'", profile);
+    NOTIFY_SUCCESS(lv_tr("Mesh saved as '{}'"), profile);
+    hide_all_modals();
+    // The profile lives in Klipper's memory until SAVE_CONFIG writes it out.
+    pending_operation_ = PendingOperation::Calibrate;
+    show_save_config_modal();
+}
+
+void BedMeshPanel::copy_calibrated_mesh(const std::string& from, const std::string& to) {
+    auto fail = [this, to](const std::string& why) {
+        spdlog::error("[BedMeshPanel] Could not save the mesh as '{}': {}", to, why);
+        NOTIFY_ERROR(lv_tr("Could not save the mesh as '{}': {}"), to, why);
+        hide_all_modals();
+    };
+    IMoonrakerAPI* api = get_moonraker_api();
+    if (!api) {
+        fail("API not available");
+        return;
+    }
+    api->execute_gcode(helix::bed_mesh::profile_command("LOAD", from),
+                       lifetime_.bg_cb("BedMeshPanel::copy_load_done",
+                                       [this, to, fail]() {
+                                           save_profile_as(
+                                               to, [this, to]() { finish_calibration(to); }, fail);
+                                       }),
+                       lifetime_.bg_cb("BedMeshPanel::copy_load_error",
+                                       [fail](const MoonrakerError& err) { fail(err.message); }));
+}
+
+void BedMeshPanel::save_profile_as(const std::string& name, std::function<void()> on_saved,
+                                   std::function<void(const std::string&)> on_failed) {
+    IMoonrakerAPI* api = get_moonraker_api();
+    if (!api) {
+        on_failed("API not available");
+        return;
+    }
+
+    // The console is watched while the command runs. The watcher runs on the
+    // WebSocket thread and touches nothing but this shared capture.
+    struct Refusal {
+        std::mutex mutex;
+        std::string line;
+    };
+    auto refusal = std::make_shared<Refusal>();
+    static std::atomic<uint64_t> s_watch_id{0};
+    const std::string watch = "bed_mesh_profile_save_" + std::to_string(++s_watch_id);
+    api->register_method_callback("notify_gcode_response", watch, [refusal](const json& msg) {
+        if (!msg.contains("params") || !msg["params"].is_array() || msg["params"].empty() ||
+            !msg["params"][0].is_string()) {
+            return;
+        }
+        const auto& line = msg["params"][0].get_ref<const std::string&>();
+        if (!helix::bed_mesh::is_profile_save_refusal(line)) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(refusal->mutex);
+        if (refusal->line.empty()) {
+            refusal->line = line.rfind("// ", 0) == 0 ? line.substr(3) : line;
+        }
+    });
+
+    auto saved =
+        lifetime_.bg_cb("BedMeshPanel::profile_save_done", [refusal, on_saved, on_failed]() {
+            std::string why;
+            {
+                std::lock_guard<std::mutex> lock(refusal->mutex);
+                why = refusal->line;
+            }
+            if (why.empty()) {
+                on_saved();
+            } else {
+                on_failed(why);
+            }
+        });
+    auto failed =
+        lifetime_.bg_cb("BedMeshPanel::profile_save_error",
+                        [on_failed](const MoonrakerError& err) { on_failed(err.message); });
+
+    api->execute_gcode(
+        helix::bed_mesh::profile_command("SAVE", name),
+        [api, watch, saved]() mutable {
+            api->unregister_method_callback("notify_gcode_response", watch);
+            saved();
+        },
+        [api, watch, failed](const MoonrakerError& err) mutable {
+            api->unregister_method_callback("notify_gcode_response", watch);
+            failed(err);
+        });
 }
 
 /// Strip Klipper error prefixes and make messages user-friendly
@@ -1868,52 +1939,25 @@ std::vector<std::string> BedMeshPanel::stored_profile_names() const {
     if (!api) {
         return {};
     }
-    std::vector<std::string> names;
-    for (const auto& p : api->advanced().get_bed_mesh_profiles()) {
-        // "_hs_temp" is where calibration probes before the user names the
-        // mesh; it is not a profile anyone can overwrite on purpose.
-        if (p != "_hs_temp") {
-            names.push_back(p);
-        }
-    }
-    return names;
-}
-
-void BedMeshPanel::save_profile_checked(std::string_view typed) {
-    const auto check = helix::ui::bed_mesh::check_profile_name(typed, stored_profile_names());
-    switch (check.verdict) {
-    case helix::ui::bed_mesh::ProfileNameVerdict::Empty:
-        // Leave the naming modal up. Substituting "default" here is exactly the
-        // silent overwrite reported in prestonbrown/helixscreen#1360.
-        NOTIFY_WARNING(lv_tr("Enter a name to save this profile"));
-        return;
-    case helix::ui::bed_mesh::ProfileNameVerdict::Overwrite:
-        ask_before_overwrite(OverwriteTarget::Save, check.name);
-        return;
-    case helix::ui::bed_mesh::ProfileNameVerdict::New:
-        save_profile_with_name(check.name);
-        return;
-    }
-}
-
-void BedMeshPanel::start_calibration_checked(std::string_view typed) {
-    const auto check = helix::ui::bed_mesh::check_profile_name(typed, stored_profile_names());
-    if (check.verdict == helix::ui::bed_mesh::ProfileNameVerdict::Empty) {
-        NOTIFY_WARNING(lv_tr("Enter a name for this profile"));
-        return;
-    }
-    // An existing name is not confirmed here: calibration probes into the
-    // temporary profile and nothing is written under this name until the user
-    // taps Save, which asks then.
-    start_calibration_with_name(check.name);
+    return api->advanced().get_bed_mesh_profiles();
 }
 
 void BedMeshPanel::rename_profile_checked(std::string_view typed) {
     const auto check = helix::ui::bed_mesh::check_profile_name(typed, stored_profile_names());
+    if (check.verdict != helix::ui::bed_mesh::ProfileNameVerdict::Empty &&
+        check.name != pending_rename_old_ && helix::bed_mesh::save_is_refused_for(check.name)) {
+        // Klipper refuses BED_MESH_PROFILE SAVE to it; only a calibration stores there.
+        NOTIFY_ERROR(
+            lv_tr("Klipper reserves 'default' for new calibrations. Choose another name."));
+        return;
+    }
     switch (check.verdict) {
     case helix::ui::bed_mesh::ProfileNameVerdict::Empty:
         // The old callback returned silently here, so the button looked broken.
         NOTIFY_WARNING(lv_tr("Enter a name for this profile"));
+        return;
+    case helix::ui::bed_mesh::ProfileNameVerdict::Unusable:
+        NOTIFY_WARNING(lv_tr("Profile names cannot contain ';'"));
         return;
     case helix::ui::bed_mesh::ProfileNameVerdict::Overwrite:
         if (check.name == pending_rename_old_) {
@@ -1921,7 +1965,7 @@ void BedMeshPanel::rename_profile_checked(std::string_view typed) {
             hide_all_modals();
             return;
         }
-        ask_before_overwrite(OverwriteTarget::Rename, check.name);
+        ask_before_overwrite(OverwriteTarget::Rename, check.name, {check.name});
         return;
     case helix::ui::bed_mesh::ProfileNameVerdict::New:
         confirm_rename(check.name);
@@ -1929,11 +1973,17 @@ void BedMeshPanel::rename_profile_checked(std::string_view typed) {
     }
 }
 
-void BedMeshPanel::ask_before_overwrite(OverwriteTarget target, const std::string& name) {
+void BedMeshPanel::ask_before_overwrite(OverwriteTarget target, const std::string& name,
+                                        const std::vector<std::string>& replaced) {
     pending_overwrite_ = target;
     pending_overwrite_name_ = name;
 
-    std::string msg = fmt::format(lv_tr("'{}' already exists. Replace the stored mesh?"), name);
+    const std::string msg =
+        replaced.size() > 1
+            ? fmt::format(lv_tr("'{}' and '{}' already exist. Replace the stored meshes?"),
+                          replaced[0], replaced[1])
+            : fmt::format(lv_tr("'{}' already exists. Replace the stored mesh?"),
+                          replaced.empty() ? name : replaced[0]);
     // Cancel and a dismissal resolve the same pending overwrite state.
     auto cancel = [this] { cancel_overwrite(); };
     helix::ui::ConfirmOptions opts;
@@ -1952,8 +2002,8 @@ void BedMeshPanel::confirm_overwrite() {
     pending_overwrite_name_.clear();
 
     switch (target) {
-    case OverwriteTarget::Save:
-        save_profile_with_name(name);
+    case OverwriteTarget::Calibrate:
+        begin_calibration(name);
         return;
     case OverwriteTarget::Rename:
         confirm_rename(name);
@@ -1970,46 +2020,8 @@ void BedMeshPanel::cancel_overwrite() {
     pending_overwrite_name_.clear();
 }
 
-void BedMeshPanel::save_profile_with_name(const std::string& name) {
-    spdlog::info("[BedMeshPanel] Saving mesh profile: {}", name);
-
-    IMoonrakerAPI* api = get_moonraker_api();
-    if (!api) {
-        hide_all_modals();
-        return;
-    }
-
-    // The calibration probed into "_hs_temp" to avoid clobbering existing
-    // profiles. Now save the mesh under the user's chosen name and remove
-    // the temporary profile.
-    static constexpr const char* TEMP_PROFILE = "_hs_temp";
-
-    std::string cmd = "BED_MESH_PROFILE SAVE=" + name;
-    api->execute_gcode(
-        cmd,
-        lifetime_.bg_cb("BedMeshPanel::save_profile_done",
-                        [this, name, api]() {
-                            // Clean up the temporary calibration profile
-                            api->execute_gcode(std::string("BED_MESH_PROFILE REMOVE=") +
-                                                   TEMP_PROFILE,
-                                               nullptr, nullptr);
-                            spdlog::info("[BedMeshPanel] Profile saved: {}", name);
-                            NOTIFY_SUCCESS(lv_tr("Mesh saved as '{}'"), name);
-                            hide_all_modals();
-                            lv_subject_set_int(&bed_mesh_calibrate_state_,
-                                               static_cast<int>(BedMeshCalibrationState::IDLE));
-                            pending_operation_ = PendingOperation::Calibrate;
-                            show_save_config_modal();
-                        }),
-        lifetime_.bg_cb("BedMeshPanel::save_profile_error", [this](const MoonrakerError& err) {
-            spdlog::error("[BedMeshPanel] Failed to save profile: {}", err.message);
-            NOTIFY_ERROR(lv_tr("Failed to save profile"));
-            hide_all_modals();
-        }));
-}
-
 // ============================================================================
-// Static Event Callbacks
+// Profile Row Callbacks
 // ============================================================================
 
 // Helper to extract profile index from callback name
@@ -2055,74 +2067,6 @@ static void on_profile_delete_cb(lv_event_t* e) {
     }
 }
 
-static void on_calibrate_header_clicked_cb(lv_event_t* /*e*/) {
-    get_global_bed_mesh_panel().start_calibration();
+BedMeshPanel& get_global_bed_mesh_panel() {
+    return helix::lazy_global<BedMeshPanel>("BedMeshPanel");
 }
-
-static void on_calibrate_cancel_cb(lv_event_t* /*e*/) {
-    get_global_bed_mesh_panel().hide_all_modals();
-}
-
-static void on_calibrate_start_cb(lv_event_t* /*e*/) {
-    // Find the textarea
-    lv_obj_t* input = lv_obj_find_by_name(lv_layer_top(), "calibrate_profile_name_input");
-    if (!input) {
-        // Try from parent screen
-        input = lv_obj_find_by_name(lv_screen_active(), "calibrate_profile_name_input");
-    }
-
-    const char* text = input ? lv_textarea_get_text(input) : nullptr;
-    get_global_bed_mesh_panel().start_calibration_checked(text ? text : "");
-}
-
-static void on_rename_cancel_cb(lv_event_t* /*e*/) {
-    get_global_bed_mesh_panel().hide_all_modals();
-}
-
-static void on_rename_confirm_cb(lv_event_t* /*e*/) {
-    // Get the new name from the input field
-    lv_obj_t* input = lv_obj_find_by_name(lv_layer_top(), "rename_new_name_input");
-    if (!input) {
-        input = lv_obj_find_by_name(lv_screen_active(), "rename_new_name_input");
-    }
-
-    const char* text = input ? lv_textarea_get_text(input) : nullptr;
-    get_global_bed_mesh_panel().rename_profile_checked(text ? text : "");
-}
-
-static void on_delete_cancel_cb(lv_event_t* /*e*/) {
-    get_global_bed_mesh_panel().hide_all_modals();
-}
-
-static void on_delete_confirm_cb(lv_event_t* /*e*/) {
-    get_global_bed_mesh_panel().confirm_delete_profile();
-}
-
-static void on_save_config_no_cb(lv_event_t* /*e*/) {
-    get_global_bed_mesh_panel().decline_save_config();
-}
-
-static void on_save_config_yes_cb(lv_event_t* /*e*/) {
-    get_global_bed_mesh_panel().confirm_save_config();
-}
-
-static void on_emergency_stop_cb(lv_event_t* /*e*/) {
-    get_global_bed_mesh_panel().handle_emergency_stop();
-}
-
-static void on_save_profile_cb(lv_event_t* /*e*/) {
-    // Find the input field in the modal
-    lv_obj_t* input = lv_obj_find_by_name(lv_layer_top(), "calibrate_profile_name_input");
-    if (!input) {
-        input = lv_obj_find_by_name(lv_screen_active(), "calibrate_profile_name_input");
-    }
-
-    const char* text = input ? lv_textarea_get_text(input) : nullptr;
-    get_global_bed_mesh_panel().save_profile_checked(text ? text : "");
-}
-
-// ============================================================================
-// Global Instance
-// ============================================================================
-
-DEFINE_GLOBAL_PANEL(BedMeshPanel, g_bed_mesh_panel, get_global_bed_mesh_panel)

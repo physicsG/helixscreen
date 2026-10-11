@@ -1,0 +1,13 @@
+{
+  "provenance": "Creality K2 Pro reported by a community member (2026-09-08), transcribed from docs/devel/printer-research/CREALITY_K2_PLUS_RESEARCH.md (K2 Pro): its hostname, the Klipper objects the report names, and printer.cfg stepper position_max. The report records no position_min and no gcode_macro product_param, so configfile_settings carries neither; heater, sensor and fan lists were not reported",
+  "hostname": "K2Pro",
+  "printer_objects": ["box", "motor_control", "fan_feedback", "load_ai", "filament_rack",
+                      "heater_generic chamber_heater", "temperature_sensor chamber_temp",
+                      "prtouch_v3", "z_align", "belt_mdl mdlx", "belt_mdl mdly", "exclude_object"],
+  "kinematics": "corexy",
+  "configfile_settings": {
+    "stepper_x": {"position_max": 302.0},
+    "stepper_y": {"position_max": 332.0},
+    "stepper_z": {"position_max": 303.0}
+  }
+}

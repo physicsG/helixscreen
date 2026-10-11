@@ -137,6 +137,16 @@ class PrintExcludeObjectManager {
      */
     void set_gcode_viewer(lv_obj_t* gcode_viewer);
 
+    /**
+     * @brief Forget the gcode viewer without touching it
+     *
+     * For a viewer whose tree is being deleted: its long-press callback dies
+     * with it, and deinit() must not reach it afterwards.
+     */
+    void detach_gcode_viewer() {
+        gcode_viewer_ = nullptr;
+    }
+
     //
     // === Testing API ===
     //
@@ -202,7 +212,7 @@ class PrintExcludeObjectManager {
     ///
     /// Main-thread only — populated in `exclude_undo_timer_cb` (LVGL timer, main thread),
     /// cleared from `tok.defer` bodies (UpdateQueue drained on main) and from
-    /// `on_excluded_objects_changed` (observe_int_sync defers to UpdateQueue per L048).
+    /// `on_excluded_objects_changed` (observe<int> defers to UpdateQueue per L048).
     /// No mutex needed.
     std::unordered_set<std::string> awaiting_confirmation_;
 

@@ -130,30 +130,20 @@ TEST_CASE("HelixPluginInstaller", "[plugin_installer]") {
 // the logic but may need to be run in isolation or with a test config setup.
 
 TEST_CASE("HelixPluginInstaller preferences logic", "[plugin_installer][preferences]") {
-    SECTION("should_prompt_install is suppressed when config is unavailable") {
+    SECTION("should_prompt_install requires beta features and a completed wizard") {
         helix::HelixPluginInstaller installer;
-
-        // The implementation returns FALSE when Config::get_instance() is null
-        // (the old comment here claimed the opposite). Suppressing is the safe
-        // side: with no config we cannot know whether the user already declined,
-        // so we must not nag.
         helix::Config* config = helix::Config::get_instance();
         const bool result = installer.should_prompt_install();
 
-        if (!config) {
-            REQUIRE_FALSE(result);
-        } else {
-            // Config present: prompting is gated behind beta features AND a
-            // completed wizard. Whatever this environment's config happens to
-            // say, a true answer implies both gates were open.
-            if (result) {
-                CHECK(config->is_beta_features_enabled());
-                CHECK_FALSE(config->is_wizard_required());
-            }
-            // Contrapositive, so the false branch is not a free pass either.
-            if (!config->is_beta_features_enabled() || config->is_wizard_required()) {
-                CHECK_FALSE(result);
-            }
+        // Whatever this environment's config happens to say, a true answer
+        // implies both gates were open.
+        if (result) {
+            CHECK(config->is_beta_features_enabled());
+            CHECK_FALSE(config->is_wizard_required());
+        }
+        // Contrapositive, so the false branch is not a free pass either.
+        if (!config->is_beta_features_enabled() || config->is_wizard_required()) {
+            CHECK_FALSE(result);
         }
     }
 }
@@ -181,17 +171,17 @@ TEST_CASE("HelixPluginInstaller script path", "[plugin_installer]") {
         helix::HelixPluginInstaller installer;
 
         // The resolver walks a candidate list and returns the first entry that
-        // exists, canonicalizes to a file still named install.sh, and is
-        // owner-executable. Every other outcome is "". So the invariant that
-        // holds regardless of whether this checkout has the script bundled is:
-        // empty, or a real executable file called install.sh.
+        // exists and canonicalizes to a file still named install.sh. Every
+        // other outcome is "". The exec bit is deliberately not required: the
+        // script runs via /bin/sh because Moonraker's zip extractor does not
+        // restore unix modes. The invariant that holds regardless of whether
+        // this checkout has the script bundled is: empty, or a real file
+        // called install.sh.
         const std::string path = installer.get_install_script_path();
 
         CHECK((path.empty() || std::filesystem::exists(path)));
         if (!path.empty()) {
             CHECK(std::filesystem::path(path).filename() == "install.sh");
-            const auto perms = std::filesystem::status(path).permissions();
-            CHECK((perms & std::filesystem::perms::owner_exec) != std::filesystem::perms::none);
         }
 
         // Path resolution is a pure query - it must not move the state machine.
@@ -224,86 +214,48 @@ TEST_CASE("HelixPluginInstaller state", "[plugin_installer]") {
 }
 
 // ============================================================================
-// Test: install_local() Error Paths
+// Test: install_local_sync() Error Paths
 // ============================================================================
 
-TEST_CASE("HelixPluginInstaller install_local error handling", "[plugin_installer]") {
-    SECTION("install_local fails when not connected to local Moonraker") {
+TEST_CASE("HelixPluginInstaller install_local_sync error handling", "[plugin_installer]") {
+    SECTION("install_local_sync fails when not connected to local Moonraker") {
         helix::HelixPluginInstaller installer;
 
         // Set to remote URL
         installer.set_websocket_url("ws://192.168.1.100:7125/websocket");
 
-        bool callback_called = false;
-        bool callback_success = true;
-        std::string callback_message;
+        const auto result = installer.install_local_sync();
 
-        installer.install_local([&](bool success, const std::string& msg) {
-            callback_called = true;
-            callback_success = success;
-            callback_message = msg;
-        });
-
-        REQUIRE(callback_called);
-        REQUIRE(callback_success == false);
-        REQUIRE(callback_message.find("local Moonraker") != std::string::npos);
+        REQUIRE(result.success == false);
+        REQUIRE(result.message.find("local Moonraker") != std::string::npos);
         // State should remain IDLE since install never started
         REQUIRE(installer.get_state() == helix::PluginInstallState::IDLE);
     }
 
-    SECTION("install_local fails when no URL is set") {
+    SECTION("install_local_sync fails when no URL is set") {
         helix::HelixPluginInstaller installer;
         // No URL set - should fail with "local Moonraker" message
 
-        bool callback_called = false;
-        bool callback_success = true;
+        const auto result = installer.install_local_sync();
 
-        installer.install_local([&](bool success, const std::string&) {
-            callback_called = true;
-            callback_success = success;
-        });
-
-        REQUIRE(callback_called);
-        REQUIRE(callback_success == false);
+        REQUIRE(result.success == false);
     }
 
-    SECTION("install_local fails gracefully when script not found (localhost)") {
+    SECTION("install_local_sync fails gracefully when script not found (localhost)") {
         helix::HelixPluginInstaller installer;
 
         // Set localhost URL so is_local_moonraker() returns true
         installer.set_websocket_url("ws://localhost:7125/websocket");
 
-        bool callback_called = false;
-        bool callback_success = true;
-        std::string callback_message;
-
-        installer.install_local([&](bool success, const std::string& msg) {
-            callback_called = true;
-            callback_success = success;
-            callback_message = msg;
-        });
+        const auto result = installer.install_local_sync();
 
         // In test environment, install.sh likely won't be found
-        // Either way, callback should be called
-        REQUIRE(callback_called);
-
         // If script not found, should fail with appropriate message
-        if (!callback_success) {
-            REQUIRE((callback_message.find("not found") != std::string::npos ||
-                     callback_message.find("failed") != std::string::npos ||
-                     callback_message.find("Failed") != std::string::npos));
+        if (!result.success) {
+            REQUIRE((result.message.find("not found") != std::string::npos ||
+                     result.message.find("failed") != std::string::npos ||
+                     result.message.find("Failed") != std::string::npos));
         }
-    }
-
-    SECTION("install_local handles nullptr callback safely") {
-        helix::HelixPluginInstaller installer;
-        installer.set_websocket_url("ws://192.168.1.100:7125/websocket");
-
-        // Should not crash with nullptr callback
-        installer.install_local(nullptr);
-
-        // State should remain IDLE (install didn't start due to remote URL)
-        REQUIRE(installer.get_state() == helix::PluginInstallState::IDLE);
     }
 }
 
@@ -312,6 +264,8 @@ TEST_CASE("HelixPluginInstaller install_local error handling", "[plugin_installe
 // ============================================================================
 
 TEST_CASE("HelixPluginInstaller uninstall_local error handling", "[plugin_installer]") {
+    using Outcome = helix::UninstallOutcome;
+
     SECTION("uninstall_local fails when not connected to local Moonraker") {
         helix::HelixPluginInstaller installer;
 
@@ -319,17 +273,17 @@ TEST_CASE("HelixPluginInstaller uninstall_local error handling", "[plugin_instal
         installer.set_websocket_url("ws://192.168.1.100:7125/websocket");
 
         bool callback_called = false;
-        bool callback_success = true;
+        Outcome callback_outcome = Outcome::SUCCESS;
         std::string callback_message;
 
-        installer.uninstall_local([&](bool success, const std::string& msg) {
+        installer.uninstall_local([&](Outcome outcome, const std::string& msg) {
             callback_called = true;
-            callback_success = success;
+            callback_outcome = outcome;
             callback_message = msg;
         });
 
         REQUIRE(callback_called);
-        REQUIRE(callback_success == false);
+        REQUIRE(callback_outcome == Outcome::FAILED);
         REQUIRE(callback_message.find("local Moonraker") != std::string::npos);
         // State should remain IDLE since uninstall never started
         REQUIRE(installer.get_state() == helix::PluginInstallState::IDLE);
@@ -340,15 +294,15 @@ TEST_CASE("HelixPluginInstaller uninstall_local error handling", "[plugin_instal
         // No URL set - should fail with "local Moonraker" message
 
         bool callback_called = false;
-        bool callback_success = true;
+        Outcome callback_outcome = Outcome::SUCCESS;
 
-        installer.uninstall_local([&](bool success, const std::string&) {
+        installer.uninstall_local([&](Outcome outcome, const std::string&) {
             callback_called = true;
-            callback_success = success;
+            callback_outcome = outcome;
         });
 
         REQUIRE(callback_called);
-        REQUIRE(callback_success == false);
+        REQUIRE(callback_outcome == Outcome::FAILED);
     }
 
     SECTION("uninstall_local handles nullptr callback safely") {
@@ -369,12 +323,12 @@ TEST_CASE("HelixPluginInstaller uninstall_local error handling", "[plugin_instal
         installer.set_websocket_url("ws://localhost:7125/websocket");
 
         bool callback_called = false;
-        bool callback_success = true;
+        Outcome callback_outcome = Outcome::SUCCESS;
         std::string callback_message;
 
-        installer.uninstall_local([&](bool success, const std::string& msg) {
+        installer.uninstall_local([&](Outcome outcome, const std::string& msg) {
             callback_called = true;
-            callback_success = success;
+            callback_outcome = outcome;
             callback_message = msg;
         });
 
@@ -382,7 +336,7 @@ TEST_CASE("HelixPluginInstaller uninstall_local error handling", "[plugin_instal
         REQUIRE(callback_called);
 
         // If script not found, should fail with appropriate message
-        if (!callback_success) {
+        if (callback_outcome != Outcome::SUCCESS) {
             REQUIRE((callback_message.find("not found") != std::string::npos ||
                      callback_message.find("failed") != std::string::npos ||
                      callback_message.find("Failed") != std::string::npos));

@@ -127,6 +127,11 @@ class BeltStreamClient {
     /// to call on panel entry. Connects and immediately closes.
     static bool socket_reachable(const std::string& socket_path);
 
+    /// Moonraker's klippy_uds_address may be written "~/printer_data/...", which
+    /// Moonraker expands itself but connect() does not. Returns @p path with a
+    /// leading "~/" replaced by @p home, or unchanged when @p home is empty.
+    [[nodiscard]] static std::string expand_home(const std::string& path, const std::string& home);
+
     /**
      * @brief Webhooks endpoint for a Klipper accelerometer section name
      *

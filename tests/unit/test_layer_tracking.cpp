@@ -13,6 +13,7 @@
 #include "../test_helpers/printer_state_test_access.h"
 #include "../ui_test_utils.h"
 #include "app_globals.h"
+#include "gcode_response_lines.h"
 #include "moonraker_manager.h"
 #include "printer_state.h"
 
@@ -25,10 +26,6 @@ using namespace helix;
 using namespace helix::ui;
 using json = nlohmann::json;
 
-// ============================================================================
-// Helper: parse a gcode response line for layer info (mirrors application.cpp logic)
-// ============================================================================
-
 namespace {
 
 struct LayerParseResult {
@@ -37,27 +34,8 @@ struct LayerParseResult {
 };
 
 LayerParseResult parse_layer_from_gcode(const std::string& line) {
-    LayerParseResult result;
-
-    // Pattern 1: SET_PRINT_STATS_INFO CURRENT_LAYER=N [TOTAL_LAYER=N]
-    if (line.find("SET_PRINT_STATS_INFO") != std::string::npos) {
-        auto pos = line.find("CURRENT_LAYER=");
-        if (pos != std::string::npos) {
-            result.layer = std::atoi(line.c_str() + pos + 14);
-        }
-        pos = line.find("TOTAL_LAYER=");
-        if (pos != std::string::npos) {
-            result.total = std::atoi(line.c_str() + pos + 12);
-        }
-    }
-
-    // Pattern 2: ;LAYER:N
-    if (result.layer < 0 && line.size() >= 8 && line[0] == ';' && line[1] == 'L' &&
-        line[2] == 'A' && line[3] == 'Y' && line[4] == 'E' && line[5] == 'R' && line[6] == ':') {
-        result.layer = std::atoi(line.c_str() + 7);
-    }
-
-    return result;
+    const auto parsed = parse_layer_line(line);
+    return {parsed.current, parsed.total};
 }
 
 } // namespace
@@ -82,27 +60,27 @@ TEST_CASE("Layer tracking: print_stats.info.current_layer updates subject",
         json status = {{"print_stats", {{"info", {{"current_layer", 5}, {"total_layer", 110}}}}}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 5);
-        REQUIRE(lv_subject_get_int(state.get_print_layer_total_subject()) == 110);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 5);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_total_subject()) == 110);
     }
 
     SECTION("null info does not crash or update") {
         // Set initial value
         json status = {{"print_stats", {{"info", {{"current_layer", 3}}}}}};
         state.update_from_status(status);
-        REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 3);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 3);
 
         // Send null info - should not change the value
         json null_info = {{"print_stats", {{"info", nullptr}}}};
         state.update_from_status(null_info);
-        REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 3);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 3);
     }
 
     SECTION("missing info key does not crash") {
         json status = {{"print_stats", {{"state", "printing"}}}};
         state.update_from_status(status);
         // Should still be at default (0)
-        REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 0);
     }
 }
 
@@ -169,32 +147,181 @@ TEST_CASE("Layer tracking: set_print_layer_current setter", "[layer_tracking][se
     state.init_subjects(false);
 
     SECTION("setter updates the subject via async") {
-        state.set_print_layer_current(7);
+        state.print_state().set_print_layer_current(7);
         // Process the async queue so the value actually lands
         UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
 
-        REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 7);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 7);
     }
 
     SECTION("setter and print_stats.info both update same subject") {
         // Simulate gcode fallback setting layer
-        state.set_print_layer_current(10);
+        state.print_state().set_print_layer_current(10);
         UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
-        REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 10);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 10);
 
         // Then print_stats.info comes in with a different value (takes precedence naturally)
         json status = {{"print_stats", {{"info", {{"current_layer", 12}}}}}};
         state.update_from_status(status);
-        REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 12);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 12);
     }
 
     SECTION("setter marks has_real_layer_data true") {
-        REQUIRE_FALSE(state.has_real_layer_data());
-        state.set_print_layer_current(5);
+        REQUIRE_FALSE(state.print_state().has_real_layer_data());
+        state.print_state().set_print_layer_current(5);
         // Flag is set inside the async lambda, so drain the queue first
         UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
-        REQUIRE(state.has_real_layer_data());
+        REQUIRE(state.print_state().has_real_layer_data());
     }
+}
+
+// ============================================================================
+// Monotonic layer within a print: real sources (slicer gcode, print_stats.info,
+// virtual_sdcard.layer) all report the same climbing value, but a status frame
+// generated before the latest gcode response can still carry an older value.
+// At print start that shows up as the layer bouncing 1 -> 0 -> 1: the gcode
+// fallback reports layer 1, then a Moonraker status update with a stale
+// print_stats.info.current_layer=0 drags it back. A regression also restarts
+// the 3D G-code viewer's whole sliced render (gcode_render_schedule decide_job).
+// ============================================================================
+
+TEST_CASE("Layer tracking: layer never bounces back mid-print", "[layer_tracking][bounce]") {
+    lv_init_safe();
+
+    PrinterState& state = get_printer_state();
+    PrinterStateTestAccess::reset(state);
+    state.init_subjects(false);
+
+    // Print start: Moonraker reports state=printing, then the slicer's
+    // SET_PRINT_STATS_INFO / ;LAYER responses arrive over the gcode path.
+    state.update_from_status({{"print_stats", {{"state", "printing"}}}});
+    REQUIRE(lv_subject_get_int(state.print_state().get_print_active_subject()) == 1);
+
+    SECTION("stale print_stats.info does not lower a gcode-reported layer") {
+        state.print_state().set_print_layer_current(5);
+        UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
+        // Precondition: the guard is armed (real data latched, value 5 landed)
+        REQUIRE(state.print_state().has_real_layer_data());
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 5);
+
+        // The print-start bounce: a status frame still carrying the pre-print
+        // info.current_layer=0 after gcode already reported layer 5
+        json stale_zero = {{"print_stats", {{"info", {{"current_layer", 0}}}}}};
+        state.update_from_status(stale_zero);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 5);
+
+        // Any older nonzero value is equally refused
+        json stale_three = {{"print_stats", {{"info", {{"current_layer", 3}}}}}};
+        state.update_from_status(stale_three);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 5);
+    }
+
+    SECTION("a higher print_stats.info value still raises the layer") {
+        state.print_state().set_print_layer_current(5);
+        UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
+
+        json higher = {{"print_stats", {{"info", {{"current_layer", 7}}}}}};
+        state.update_from_status(higher);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 7);
+    }
+
+    SECTION("stale virtual_sdcard.layer does not lower a gcode-reported layer") {
+        state.print_state().set_print_layer_current(5);
+        UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
+
+        json stale_vsd = {{"virtual_sdcard", {{"progress", 0.5}, {"layer", 2}}}};
+        state.update_from_status(stale_vsd);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 5);
+    }
+
+    SECTION("a lower echo value is accepted (sequential print restarts per object)") {
+        // One-object-at-a-time prints restart ;LAYER:N per object, and a
+        // deliberate lower SET_PRINT_STATS_INFO CURRENT_LAYER is equally
+        // legitimate - the echo is never the stale side
+        state.print_state().set_print_layer_current(40);
+        UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 40);
+
+        state.print_state().set_print_layer_current(1);
+        UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 1);
+    }
+
+    SECTION("a lower print_stats.info value stands when no echo has written") {
+        // A printer that reports layers only through print_stats keeps its own
+        // decreases (sequential via info), so the guard protects only a value
+        // the echo just reported
+        json first = {{"print_stats", {{"info", {{"current_layer", 40}}}}}};
+        state.update_from_status(first);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 40);
+
+        json second = {{"print_stats", {{"info", {{"current_layer", 1}}}}}};
+        state.update_from_status(second);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 1);
+    }
+
+    SECTION("a drifted estimate loses to a lower echo value") {
+        // printer_reports_layers_ false: the progress tier fabricates a layer
+        state.update_from_status({{"print_stats", {{"print_duration", 120}}}});
+        state.print_state().set_print_layer_total(320);
+        UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
+        state.update_from_status({{"virtual_sdcard", {{"progress", 0.50}}}});
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 160);
+        REQUIRE_FALSE(state.print_state().has_real_layer_data());
+
+        // The echo corrects the estimate downward, and a status frame behind
+        // the echo then cannot drag the layer back up the estimate's drift
+        state.print_state().set_print_layer_current(142);
+        UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 142);
+
+        json behind_echo = {{"print_stats", {{"info", {{"current_layer", 100}}}}}};
+        state.update_from_status(behind_echo);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 142);
+    }
+}
+
+// ============================================================================
+// Reprint: reset_for_new_print() is the one legitimate path to a lower layer.
+// Every new-print flow runs it before the new job's first layer data can arrive
+// (begin_preparing synchronously, or the collector's IDLE -> INITIALIZING
+// phase for a print started outside the app), so the monotonic guard never
+// pins a stale high value across prints.
+// ============================================================================
+
+TEST_CASE("Layer tracking: reprint restarts the layer climb from zero",
+          "[layer_tracking][reprint]") {
+    lv_init_safe();
+
+    PrinterState& state = get_printer_state();
+    PrinterStateTestAccess::reset(state);
+    state.init_subjects(false);
+
+    // A finished print left the layer high with real data latched
+    state.update_from_status({{"print_stats", {{"state", "printing"}}}});
+    state.print_state().set_print_layer_current(40);
+    UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
+    REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 40);
+
+    state.update_from_status({{"print_stats", {{"state", "complete"}}}});
+
+    // New print: the IDLE -> preparing transition resets the per-print state
+    state.print_state().reset_print_start_state();
+    UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
+    state.print_state().set_print_start_state(PrintStartPhase::INITIALIZING, "Preparing Print...",
+                                              0);
+    UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
+
+    REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 0);
+    REQUIRE_FALSE(state.print_state().has_real_layer_data());
+
+    // The new print's layers land: 0 holds, then 1 climbs
+    state.update_from_status(
+        {{"print_stats", {{"state", "printing"}, {"info", {{"current_layer", 0}}}}}});
+    REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 0);
+
+    state.update_from_status({{"print_stats", {{"info", {{"current_layer", 1}}}}}});
+    REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 1);
 }
 
 // ============================================================================
@@ -219,14 +346,14 @@ TEST_CASE("Layer tracking: virtual_sdcard.layer updates subject",
             {"virtual_sdcard", {{"progress", 0.50}, {"layer", 158}, {"layer_count", 296}}}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 158);
-        REQUIRE(lv_subject_get_int(state.get_print_layer_total_subject()) == 296);
-        REQUIRE(state.has_real_layer_data());
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 158);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_total_subject()) == 296);
+        REQUIRE(state.print_state().has_real_layer_data());
     }
 
     SECTION("virtual_sdcard.layer takes precedence over estimation") {
         // Set total for estimation to have something to work with
-        state.set_print_layer_total(296);
+        state.print_state().set_print_layer_total(296);
         UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
 
         // Send progress with layer data — should use layer, not estimation
@@ -235,33 +362,33 @@ TEST_CASE("Layer tracking: virtual_sdcard.layer updates subject",
         state.update_from_status(status);
 
         // 0.66 * 296 = 195 (estimation), but real layer is 158
-        REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 158);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 158);
     }
 
     SECTION("virtual_sdcard.layer prevents future estimation") {
         json with_layer = {{"virtual_sdcard", {{"progress", 0.50}, {"layer", 100}}}};
         state.update_from_status(with_layer);
-        REQUIRE(state.has_real_layer_data());
+        REQUIRE(state.print_state().has_real_layer_data());
 
         // Further progress without layer data should NOT overwrite via estimation
-        state.set_print_layer_total(296);
+        state.print_state().set_print_layer_total(296);
         UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
 
         json without_layer = {{"virtual_sdcard", {{"progress", 0.80}}}};
         state.update_from_status(without_layer);
-        REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 100);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 100);
     }
 
     SECTION("missing layer field falls back to estimation") {
-        state.set_print_layer_total(200);
+        state.print_state().set_print_layer_total(200);
         UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
 
         json no_layer = {{"virtual_sdcard", {{"progress", 0.50}}}};
         state.update_from_status(no_layer);
 
         // Should estimate: 50% of 200 = 100
-        REQUIRE_FALSE(state.has_real_layer_data());
-        REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 100);
+        REQUIRE_FALSE(state.print_state().has_real_layer_data());
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 100);
     }
 }
 
@@ -292,8 +419,8 @@ TEST_CASE("Layer tracking: print_stats.info wins over virtual_sdcard in same upd
             {"virtual_sdcard", {{"progress", 0.21}, {"layer", 999}, {"layer_count", 9999}}}};
         state.update_from_status(combined);
 
-        REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 42);
-        REQUIRE(lv_subject_get_int(state.get_print_layer_total_subject()) == 200);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 42);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_total_subject()) == 200);
     }
 
     SECTION("virtual_sdcard takes over when info missing in subsequent update") {
@@ -301,13 +428,13 @@ TEST_CASE("Layer tracking: print_stats.info wins over virtual_sdcard in same upd
         json info_only = {
             {"print_stats", {{"info", {{"current_layer", 10}, {"total_layer", 100}}}}}};
         state.update_from_status(info_only);
-        REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 10);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 10);
 
         // Second update: virtual_sdcard only — should now drive layer
         json sdcard_only = {
             {"virtual_sdcard", {{"progress", 0.5}, {"layer", 50}, {"layer_count", 100}}}};
         state.update_from_status(sdcard_only);
-        REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 50);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 50);
     }
 
     SECTION("partial info — only current_layer set — still prefers info, sdcard fills total") {
@@ -316,8 +443,8 @@ TEST_CASE("Layer tracking: print_stats.info wins over virtual_sdcard in same upd
             {"virtual_sdcard", {{"progress", 0.0}, {"layer", 99}, {"layer_count", 150}}}};
         state.update_from_status(partial);
 
-        REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 7);
-        REQUIRE(lv_subject_get_int(state.get_print_layer_total_subject()) == 150);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 7);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_total_subject()) == 150);
     }
 }
 
@@ -338,17 +465,17 @@ TEST_CASE("Layer tracking: progress-based estimation fallback", "[layer_tracking
     state.update_from_status(printing);
 
     // Set total layers from metadata (this is how it works in practice)
-    state.set_print_layer_total(320);
+    state.print_state().set_print_layer_total(320);
     UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
 
     SECTION("estimates layer from progress when no real layer data") {
-        REQUIRE_FALSE(state.has_real_layer_data());
+        REQUIRE_FALSE(state.print_state().has_real_layer_data());
 
         // 50% progress → ~160/320
         json progress = {{"virtual_sdcard", {{"progress", 0.50}}}};
         state.update_from_status(progress);
 
-        REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 160);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 160);
     }
 
     SECTION("estimates at low progress") {
@@ -356,7 +483,7 @@ TEST_CASE("Layer tracking: progress-based estimation fallback", "[layer_tracking
         state.update_from_status(progress);
 
         // 1% of 320 = 3.2, rounded = 3. But clamped to min 1.
-        REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) >= 1);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) >= 1);
     }
 
     SECTION("estimates at high progress") {
@@ -364,62 +491,62 @@ TEST_CASE("Layer tracking: progress-based estimation fallback", "[layer_tracking
         state.update_from_status(progress);
 
         // 99% of 320 = 316.8 → 317
-        int estimated = lv_subject_get_int(state.get_print_layer_current_subject());
+        int estimated = lv_subject_get_int(state.print_state().get_print_layer_current_subject());
         REQUIRE(estimated >= 315);
         REQUIRE(estimated <= 320);
     }
 
     SECTION("does not estimate when total_layers is 0") {
-        state.set_print_layer_total(0);
+        state.print_state().set_print_layer_total(0);
         UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
 
         json progress = {{"virtual_sdcard", {{"progress", 0.50}}}};
         state.update_from_status(progress);
 
         // Should stay at 0 — no total to estimate from
-        REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 0);
     }
 
     SECTION("stops estimating once real data arrives from print_stats.info") {
         // First: estimation active
         json progress = {{"virtual_sdcard", {{"progress", 0.50}}}};
         state.update_from_status(progress);
-        REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 160);
-        REQUIRE_FALSE(state.has_real_layer_data());
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 160);
+        REQUIRE_FALSE(state.print_state().has_real_layer_data());
 
         // Real data arrives
         json real_layer = {{"print_stats", {{"info", {{"current_layer", 142}}}}}};
         state.update_from_status(real_layer);
-        REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 142);
-        REQUIRE(state.has_real_layer_data());
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 142);
+        REQUIRE(state.print_state().has_real_layer_data());
 
         // Further progress updates should NOT overwrite real data
         json progress2 = {{"virtual_sdcard", {{"progress", 0.55}}}};
         state.update_from_status(progress2);
-        REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 142);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 142);
     }
 
     SECTION("stops estimating once real data arrives from gcode fallback") {
         json progress = {{"virtual_sdcard", {{"progress", 0.50}}}};
         state.update_from_status(progress);
-        REQUIRE_FALSE(state.has_real_layer_data());
+        REQUIRE_FALSE(state.print_state().has_real_layer_data());
 
         // Gcode fallback sets real data
-        state.set_print_layer_current(150);
+        state.print_state().set_print_layer_current(150);
         UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
-        REQUIRE(state.has_real_layer_data());
+        REQUIRE(state.print_state().has_real_layer_data());
 
         // Progress update should NOT overwrite
         json progress2 = {{"virtual_sdcard", {{"progress", 0.55}}}};
         state.update_from_status(progress2);
-        REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 150);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 150);
     }
 
     SECTION("does not estimate in terminal state even without real data") {
         // Set total layers and make some progress
         json progress = {{"virtual_sdcard", {{"progress", 0.50}}}};
         state.update_from_status(progress);
-        REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 160);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 160);
 
         // Print completes
         json complete = {{"print_stats", {{"state", "complete"}}}};
@@ -428,14 +555,14 @@ TEST_CASE("Layer tracking: progress-based estimation fallback", "[layer_tracking
         // Progress update arrives after completion — should NOT change layer
         json progress2 = {{"virtual_sdcard", {{"progress", 0.99}}}};
         state.update_from_status(progress2);
-        REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 160);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 160);
     }
 
     SECTION("has_real_layer_data resets on new print") {
         // Get real data
         json real_layer = {{"print_stats", {{"info", {{"current_layer", 42}}}}}};
         state.update_from_status(real_layer);
-        REQUIRE(state.has_real_layer_data());
+        REQUIRE(state.print_state().has_real_layer_data());
 
         // Simulate new print starting (state goes to standby then printing)
         json standby = {{"print_stats", {{"state", "standby"}}}};
@@ -448,7 +575,7 @@ TEST_CASE("Layer tracking: progress-based estimation fallback", "[layer_tracking
         json printing2 = {{"print_stats", {{"state", "printing"}}}};
         state.update_from_status(printing2);
 
-        REQUIRE_FALSE(state.has_real_layer_data());
+        REQUIRE_FALSE(state.print_state().has_real_layer_data());
     }
 }
 
@@ -491,17 +618,17 @@ TEST_CASE("Layer tracking: layer-reporting printer never estimates during prepri
                    {{"state", "printing"}, {"info", {{"total_layer", 10}, {"current_layer", 0}}}}}};
     state.update_from_status(start);
 
-    REQUIRE(state.printer_reports_layers());
-    REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 0);
-    REQUIRE(lv_subject_get_int(state.get_print_layer_total_subject()) == 10);
+    REQUIRE(state.print_state().printer_reports_layers());
+    REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 0);
+    REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_total_subject()) == 10);
 
     // --- reset_for_new_print() runs (async, after the collector starts). It
     //     clears the PER-PRINT has_real_layer_data_ flag but NOT the sticky
     //     capability flag. This is the exact window that used to break. ---
-    state.reset_for_new_print();
+    state.print_state().reset_for_new_print();
     UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
-    REQUIRE_FALSE(state.has_real_layer_data());
-    REQUIRE(state.printer_reports_layers()); // sticky — survives reset
+    REQUIRE_FALSE(state.print_state().has_real_layer_data());
+    REQUIRE(state.print_state().printer_reports_layers()); // sticky — survives reset
     // Re-seed total (reset cleared current to 0; total survives in the subject
     // but re-send it the way Moonraker would on the next delta that carries it).
     json total_only = {{"print_stats", {{"info", {{"total_layer", 10}}}}}};
@@ -513,26 +640,26 @@ TEST_CASE("Layer tracking: layer-reporting printer never estimates during prepri
         // it). Before the fix this estimated max(1, round(0.02*10)) = 1.
         json progress2pct = {{"virtual_sdcard", {{"progress", 0.02}}}};
         state.update_from_status(progress2pct);
-        REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 0);
 
         // Progress keeps climbing through the rest of the silent pre-print —
         // still no estimate, layer stays pinned at the authoritative 0.
         json progress15pct = {{"virtual_sdcard", {{"progress", 0.15}}}};
         state.update_from_status(progress15pct);
-        REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 0);
     }
 
     SECTION("only the real info.current_layer=1 advances the layer") {
         // Pre-print progress — no estimate.
         json progress = {{"virtual_sdcard", {{"progress", 0.05}}}};
         state.update_from_status(progress);
-        REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 0);
 
         // The genuine first model layer: slicer emits CURRENT_LAYER=1 → info.
         json real_layer1 = {{"print_stats", {{"info", {{"current_layer", 1}}}}}};
         state.update_from_status(real_layer1);
-        REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 1);
-        REQUIRE(state.has_real_layer_data());
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 1);
+        REQUIRE(state.print_state().has_real_layer_data());
     }
 }
 
@@ -560,8 +687,8 @@ TEST_CASE("Layer tracking: printer_reports_layers is sticky across reset_for_new
     state.init_subjects(false);
 
     // Sentinel: a fresh session has never seen layer data.
-    REQUIRE_FALSE(state.printer_reports_layers());
-    REQUIRE_FALSE(state.has_real_layer_data());
+    REQUIRE_FALSE(state.print_state().printer_reports_layers());
+    REQUIRE_FALSE(state.print_state().has_real_layer_data());
 
     // --- Print A: U1 reports total_layer at print start (current_layer arrives later). ---
     json print_a_start = {
@@ -569,8 +696,8 @@ TEST_CASE("Layer tracking: printer_reports_layers is sticky across reset_for_new
          {{"state", "printing"}, {"info", {{"total_layer", 10}, {"current_layer", 0}}}}}};
     state.update_from_status(print_a_start);
     UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
-    REQUIRE(state.printer_reports_layers()); // latched immediately from total_layer
-    REQUIRE(state.has_real_layer_data());
+    REQUIRE(state.print_state().printer_reports_layers()); // latched immediately from total_layer
+    REQUIRE(state.print_state().has_real_layer_data());
 
     // Print A advances and finishes.
     state.update_from_status(
@@ -581,31 +708,33 @@ TEST_CASE("Layer tracking: printer_reports_layers is sticky across reset_for_new
     UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
     // Force phase back to IDLE so the next set_print_start_state triggers the
     // IDLE -> preparing new-print path (which calls reset_for_new_print()).
-    state.reset_print_start_state();
+    state.print_state().reset_print_start_state();
     UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
 
     // --- Print B begins: pre-print phase opens. This is the IDLE -> INITIALIZING
     //     transition that fires reset_for_new_print() in set_print_start_state(). ---
-    lv_subject_set_int(state.get_print_active_subject(), 1);
-    state.set_print_start_state(PrintStartPhase::INITIALIZING, "Preparing Print...", 0);
+    lv_subject_set_int(state.print_state().get_print_active_subject(), 1);
+    state.print_state().set_print_start_state(PrintStartPhase::INITIALIZING, "Preparing Print...",
+                                              0);
     UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
 
     SECTION("reset_for_new_print clears the per-print flag but NOT the sticky one") {
         // Per-print flag cleared (the U1 hasn't re-emitted current_layer yet)...
-        REQUIRE_FALSE(state.has_real_layer_data());
+        REQUIRE_FALSE(state.print_state().has_real_layer_data());
         // ...but the sticky printer-capability flag survives.
-        REQUIRE(state.printer_reports_layers());
+        REQUIRE(state.print_state().printer_reports_layers());
     }
 
     SECTION("Pre-print purge does NOT complete despite has_real_layer_data being false") {
         // EXACT device state mid-purge: per-print flag false, current_layer 0,
         // print_duration ticking up from auto-feed/purge. Discriminating on the
         // sticky flag keeps us on the real-first-layer path → no completion.
-        REQUIRE_FALSE(state.has_real_layer_data());
-        REQUIRE(state.printer_reports_layers());
+        REQUIRE_FALSE(state.print_state().has_real_layer_data());
+        REQUIRE(state.print_state().printer_reports_layers());
         REQUIRE_FALSE(MoonrakerManager::should_complete_preprint(
-            /*printer_reports_layers=*/state.printer_reports_layers(),
-            /*current_layer=*/lv_subject_get_int(state.get_print_layer_current_subject()),
+            /*printer_reports_layers=*/state.print_state().printer_reports_layers(),
+            /*current_layer=*/
+            lv_subject_get_int(state.print_state().get_print_layer_current_subject()),
             /*print_duration=*/120, /*seen_layer_zero=*/true));
     }
 
@@ -614,11 +743,12 @@ TEST_CASE("Layer tracking: printer_reports_layers is sticky across reset_for_new
         state.update_from_status(
             {{"print_stats", {{"state", "printing"}, {"info", {{"current_layer", 1}}}}}});
         UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
-        REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 1);
-        REQUIRE(state.printer_reports_layers());
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 1);
+        REQUIRE(state.print_state().printer_reports_layers());
         REQUIRE(MoonrakerManager::should_complete_preprint(
-            /*printer_reports_layers=*/state.printer_reports_layers(),
-            /*current_layer=*/lv_subject_get_int(state.get_print_layer_current_subject()),
+            /*printer_reports_layers=*/state.print_state().printer_reports_layers(),
+            /*current_layer=*/
+            lv_subject_get_int(state.print_state().get_print_layer_current_subject()),
             /*print_duration=*/120, /*seen_layer_zero=*/true));
     }
 }
@@ -636,12 +766,12 @@ TEST_CASE("Layer tracking: never-reporting printer keeps sticky false (fallback 
     state.update_from_status({{"virtual_sdcard", {{"progress", 0.10}}}});
     UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
 
-    REQUIRE_FALSE(state.printer_reports_layers());
+    REQUIRE_FALSE(state.print_state().printer_reports_layers());
 
     // With the sticky flag false, the print_duration fallback is preserved so
     // the printer still leaves Preparing on first extrusion.
     REQUIRE(MoonrakerManager::should_complete_preprint(
-        /*printer_reports_layers=*/state.printer_reports_layers(),
+        /*printer_reports_layers=*/state.print_state().printer_reports_layers(),
         /*current_layer=*/0, /*print_duration=*/5, /*seen_layer_zero=*/false));
 }
 
@@ -674,8 +804,8 @@ TEST_CASE("Layer tracking: Z-height derivation for non-reporting slicer",
     // print_duration > 0 marks real printing (past PRINT_START) so the Z-height
     // derivation tier is allowed to run.
     state.update_from_status({{"print_stats", {{"state", "printing"}, {"print_duration", 120}}}});
-    state.set_print_layer_total(75);
-    state.set_print_layer_heights(0.2, 0.2);
+    state.print_state().set_print_layer_total(75);
+    state.print_state().set_print_layer_heights(0.2, 0.2);
     UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
 
     SECTION("kostake#4542: derives 5 from Z, not 9 from progress fraction") {
@@ -685,12 +815,12 @@ TEST_CASE("Layer tracking: Z-height derivation for non-reporting slicer",
                        {"gcode_move", {{"gcode_position", {10.0, 10.0, 1.0, 0.0}}}}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 5);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 5);
         // Not a slicer-reported field (pre-print gate must stay unaffected)...
-        REQUIRE_FALSE(state.has_real_layer_data());
-        REQUIRE_FALSE(state.printer_reports_layers());
+        REQUIRE_FALSE(state.print_state().has_real_layer_data());
+        REQUIRE_FALSE(state.print_state().printer_reports_layers());
         // ...but display-accurate (Mainsail parity) — the label drops the "~".
-        REQUIRE(state.layer_is_accurate());
+        REQUIRE(state.print_state().layer_is_accurate());
     }
 
     SECTION("first layer: Z at first_layer_height derives layer 1") {
@@ -699,7 +829,7 @@ TEST_CASE("Layer tracking: Z-height derivation for non-reporting slicer",
         state.update_from_status(status);
 
         // round((0.2-0.2)/0.2)+1 = 1.
-        REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 1);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 1);
     }
 
     SECTION("clamps to total when Z runs past the model") {
@@ -708,7 +838,7 @@ TEST_CASE("Layer tracking: Z-height derivation for non-reporting slicer",
         state.update_from_status(status);
 
         // round((100-0.2)/0.2)+1 = 500, clamped to total 75.
-        REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 75);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 75);
     }
 }
 
@@ -721,8 +851,8 @@ TEST_CASE("Layer tracking: real info.current_layer still wins over Z derivation"
     state.init_subjects(false);
 
     state.update_from_status({{"print_stats", {{"state", "printing"}}}});
-    state.set_print_layer_total(75);
-    state.set_print_layer_heights(0.2, 0.2);
+    state.print_state().set_print_layer_total(75);
+    state.print_state().set_print_layer_heights(0.2, 0.2);
     UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
 
     // Real layer 5 AND a gcode Z (2.8mm) that would derive 15. Real value wins,
@@ -731,10 +861,10 @@ TEST_CASE("Layer tracking: real info.current_layer still wins over Z derivation"
                    {"gcode_move", {{"gcode_position", {10.0, 10.0, 2.8, 0.0}}}}};
     state.update_from_status(status);
 
-    REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 5);
-    REQUIRE(state.has_real_layer_data());
-    REQUIRE(state.printer_reports_layers());
-    REQUIRE(state.layer_is_accurate());
+    REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 5);
+    REQUIRE(state.print_state().has_real_layer_data());
+    REQUIRE(state.print_state().printer_reports_layers());
+    REQUIRE(state.print_state().layer_is_accurate());
 }
 
 TEST_CASE("Layer tracking: progress estimate preserved when slice geometry unknown",
@@ -749,17 +879,17 @@ TEST_CASE("Layer tracking: progress estimate preserved when slice geometry unkno
     // (progress fraction) must still apply. print_duration > 0 marks real
     // printing (past PRINT_START) so the progress-fraction tier is allowed to run.
     state.update_from_status({{"print_stats", {{"state", "printing"}, {"print_duration", 120}}}});
-    state.set_print_layer_total(75);
+    state.print_state().set_print_layer_total(75);
     UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
 
     json status = {{"virtual_sdcard", {{"progress", 0.12}}}};
     state.update_from_status(status);
 
     // round(0.12 * 75) = 9 — the historical progress-fraction behavior.
-    REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 9);
-    REQUIRE_FALSE(state.has_real_layer_data());
+    REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 9);
+    REQUIRE_FALSE(state.print_state().has_real_layer_data());
     // Progress-fraction guess is NOT accurate — the label keeps the "~".
-    REQUIRE_FALSE(state.layer_is_accurate());
+    REQUIRE_FALSE(state.print_state().layer_is_accurate());
 }
 
 // ============================================================================
@@ -789,8 +919,8 @@ TEST_CASE("Layer tracking: fallback tiers do NOT fabricate a layer during PRINT_
     // is still 0 (bed mesh / purge / Z-hop, no real extrusion time yet). Slice
     // geometry + total layers are known from file metadata.
     state.update_from_status({{"print_stats", {{"state", "printing"}, {"print_duration", 0}}}});
-    state.set_print_layer_total(75);
-    state.set_print_layer_heights(0.2, 0.2);
+    state.print_state().set_print_layer_total(75);
+    state.print_state().set_print_layer_heights(0.2, 0.2);
     UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
 
     SECTION("Z-derivation is suppressed while print_duration==0 (no bogus layer 10)") {
@@ -800,21 +930,21 @@ TEST_CASE("Layer tracking: fallback tiers do NOT fabricate a layer during PRINT_
         state.update_from_status(status);
 
         // Holds at the pre-print default (0) rather than fabricating a layer...
-        REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 0);
         // ...and must NOT claim display-accuracy (would drop the "~" prefix).
-        REQUIRE_FALSE(state.layer_is_accurate());
+        REQUIRE_FALSE(state.print_state().layer_is_accurate());
     }
 
     SECTION("progress-fraction tier is suppressed while print_duration==0") {
         // Unknown slice geometry routes to the progress-fraction tier instead.
-        state.set_print_layer_heights(0.0, 0.0);
+        state.print_state().set_print_layer_heights(0.0, 0.0);
         UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
 
         // 12% of 75 = 9 would be fabricated without the gate.
         json status = {{"virtual_sdcard", {{"progress", 0.12}}}};
         state.update_from_status(status);
 
-        REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 0);
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 0);
     }
 
     SECTION("derivation resumes once print_duration>0 (feature not disabled)") {
@@ -827,8 +957,8 @@ TEST_CASE("Layer tracking: fallback tiers do NOT fabricate a layer during PRINT_
         state.update_from_status(status);
 
         // Z=1.0mm, 0.2mm layers => round((1.0-0.2)/0.2)+1 = 5.
-        REQUIRE(lv_subject_get_int(state.get_print_layer_current_subject()) == 5);
-        REQUIRE(state.layer_is_accurate());
+        REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 5);
+        REQUIRE(state.print_state().layer_is_accurate());
     }
 }
 
@@ -855,7 +985,7 @@ TEST_CASE("ETA: smoother not seeded from extrapolation while print_duration==0",
     state.init_subjects(false);
 
     // Slicer estimate known from metadata; real printing not started yet.
-    state.set_estimated_print_time(3600); // 60 min
+    state.print_state().set_estimated_print_time(3600); // 60 min
     UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
     state.update_from_status({{"print_stats", {{"state", "printing"}}}});
 
@@ -870,5 +1000,5 @@ TEST_CASE("ETA: smoother not seeded from extrapolation while print_duration==0",
 
     // With print_duration==0 the noisy extrapolation is NOT used and the smoother
     // is NOT seeded. The slicer-estimate fallback applies: 3600 * (100-10)/100.
-    REQUIRE(lv_subject_get_int(state.get_print_time_left_subject()) == 3240);
+    REQUIRE(lv_subject_get_int(state.print_state().get_print_time_left_subject()) == 3240);
 }

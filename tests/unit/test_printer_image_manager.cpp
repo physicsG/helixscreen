@@ -8,7 +8,10 @@
 
 #include "../../include/lvgl_image_writer.h"
 #include "../../include/printer_image_manager.h"
+#include "../test_helpers/config_dir_guard.h"
+#include "../test_helpers/printer_image_regions_test_access.h"
 #include "lvgl/lvgl.h"
+#include "printer_image_regions.h"
 
 #include <cstdint>
 #include <cstring>
@@ -153,6 +156,7 @@ static std::vector<uint8_t> read_file_bytes(const std::string& path) {
 // ============================================================================
 // Scoped temp directory for test isolation
 // ============================================================================
+namespace {
 struct TempDir {
     fs::path path;
     TempDir() {
@@ -168,6 +172,7 @@ struct TempDir {
         return path.string();
     }
 };
+} // namespace
 
 // ============================================================================
 // Tests
@@ -208,7 +213,7 @@ TEST_CASE("PrinterImageManager get_active_image_path returns empty for auto-dete
 
 TEST_CASE("PrinterImageManager get_shipped_images returns list", "[printer_image_manager]") {
     auto& pim = helix::PrinterImageManager::instance();
-    auto shipped = pim.get_shipped_images();
+    auto shipped = pim.get_shipped_images(800);
 
     // Should find PNG files in assets/images/printers/
     // This test depends on the actual assets being present (they are in the worktree)
@@ -609,4 +614,37 @@ TEST_CASE("PrinterImageManager::format_display_name", "[printer_image_manager]")
     SECTION("underscore between digits also becomes dot") {
         REQUIRE(PIM::format_display_name("v1_0_0") == "v1.0.0");
     }
+}
+
+TEST_CASE("PrinterImageManager import and delete clear the image's user tags",
+          "[printer_image_manager][image_tagger]") {
+    const helix::ConfigDirGuard cfg("pim_import_clears_tags");
+    auto& pim = helix::PrinterImageManager::instance();
+    pim.init(cfg.dir.string());
+    helix::unload_image_regions();
+
+    const std::string image = cfg.dir.string() + "/test-printer.bmp";
+    write_test_png(image, 8, 6);
+    REQUIRE(pim.import_image(image).success);
+
+    helix::ImageRegions tags;
+    tags.src_w = 300;
+    tags.src_h = 225;
+    tags.nozzle = {0.5f, 0.3f};
+    tags.bed_left = {0.2f, 0.8f};
+    tags.bed_right = {0.8f, 0.8f};
+    REQUIRE(helix::save_user_image_regions("custom:test-printer", tags));
+    REQUIRE(helix::save_user_image_regions("voron-v2", tags));
+
+    // A new photo under the same name, the same aspect and so the same tier size.
+    write_test_png(image, 16, 12);
+    REQUIRE(pim.import_image(image).success);
+    CHECK(helix::lookup_user_image_regions("custom:test-printer", 300, 225) == nullptr);
+    CHECK(helix::lookup_user_image_regions("voron-v2", 300, 225) != nullptr);
+
+    REQUIRE(helix::save_user_image_regions("custom:test-printer", tags));
+    REQUIRE(pim.delete_custom_image("test-printer"));
+    CHECK(helix::lookup_user_image_regions("custom:test-printer", 300, 225) == nullptr);
+    CHECK(helix::lookup_user_image_regions("voron-v2", 300, 225) != nullptr);
+    helix::unload_image_regions();
 }

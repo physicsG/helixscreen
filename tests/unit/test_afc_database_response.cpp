@@ -17,6 +17,7 @@
  */
 
 #include "../lvgl_test_fixture.h"
+#include "test_helpers/afc_test_access.h"
 #include "ams_backend_afc.h"
 #include "ams_types.h"
 
@@ -28,24 +29,27 @@
 using namespace helix;
 using json = nlohmann::json;
 
+namespace helix {
+
 /// Reaches the response-application methods without needing a live client.
 class AfcDatabaseResponseHelper : public AmsBackendAfc {
   public:
     AfcDatabaseResponseHelper() : AmsBackendAfc(nullptr, nullptr) {}
 
     bool apply_version(const json& response) {
-        return apply_afc_version_response(response);
+        return AfcTestAccess::apply_afc_version_response(*this, response);
     }
     bool apply_lanes(const json& response) {
-        return apply_lane_data_response(response);
+        return AfcTestAccess::apply_lane_data_response(*this, response);
     }
     static const json& item_value(const json& response) {
-        return database_item_value(response);
+        return AfcTestAccess::database_item_value(response);
     }
     std::string version() const {
-        return afc_version_;
+        return AfcTestAccess::afc_version(*this);
     }
 };
+} // namespace helix
 
 namespace {
 

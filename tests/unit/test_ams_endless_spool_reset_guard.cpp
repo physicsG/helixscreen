@@ -25,19 +25,19 @@ namespace {
 /// Editable endless spool, no slot count yet — the window between "the backend
 /// is up and says it supports per-slot failover" and "the backend has parsed its
 /// lanes". Also counts writes, so the test can prove nothing was touched.
-class SlotlessEditableBackend : public AmsBackendMock {
+class SlotlessEditableBackend : public helix::AmsBackendMock {
   public:
-    SlotlessEditableBackend() : AmsBackendMock(4) {}
+    SlotlessEditableBackend() : helix::AmsBackendMock(4) {}
 
-    AmsSystemInfo get_system_info() const override {
-        AmsSystemInfo info = AmsBackendMock::get_system_info();
+    helix::AmsSystemInfo get_system_info() const override {
+        helix::AmsSystemInfo info = helix::AmsBackendMock::get_system_info();
         info.total_slots = 0;
         return info;
     }
 
-    AmsError apply_endless_spool_backup(int slot_index, int backup_slot) override {
+    helix::AmsError apply_endless_spool_backup(int slot_index, int backup_slot) override {
         ++writes;
-        return AmsBackendMock::apply_endless_spool_backup(slot_index, backup_slot);
+        return helix::AmsBackendMock::apply_endless_spool_backup(slot_index, backup_slot);
     }
 
     /// The protected accessor reset_endless_spool() actually loops over.
@@ -61,7 +61,7 @@ TEST_CASE("reset_endless_spool refuses a backend with no slot count",
     // The whole point: NOT success. A silent success behind a destructive
     // confirmation is indistinguishable from a working reset.
     CHECK_FALSE(result.success());
-    CHECK(result.result == AmsResult::NOT_SUPPORTED);
+    CHECK(result.result == helix::AmsResult::NOT_SUPPORTED);
     CHECK_FALSE(result.user_msg.empty()); // something to put in front of the user
     CHECK(backend.writes == 0);
 
@@ -75,7 +75,7 @@ TEST_CASE("reset_endless_spool refuses a backend with no slot count",
 TEST_CASE("reset_endless_spool still clears every slot once the count is known",
           "[ams][endless_spool][reset]") {
     // The guard must not swallow the working case.
-    AmsBackendMock backend(4);
+    helix::AmsBackendMock backend(4);
     backend.set_operation_delay(0);
     REQUIRE(backend.start());
 

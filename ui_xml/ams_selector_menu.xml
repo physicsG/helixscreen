@@ -5,17 +5,17 @@
   <!-- Full-screen backdrop overlay - tap to dismiss -->
   <view name="selector_backdrop" extends="context_menu_backdrop">
     <!-- Selector context menu card - positioned by C++ -->
-    <context_menu_card title="Selector" title_tag="Selector" title_name="menu_header" pad_gap="#space_xs">
+    <context_menu_card title="Selector" title_name="menu_header" pad_gap="#space_xs">
       <!-- Home selector -->
       <ui_button name="btn_home_selector"
-                 height="#button_height_sm" icon="home" text="Home selector" translation_tag="Home selector"
-                 variant="ghost" clickable="true" style_flex_main_place="start">
+                 height="#button_height_sm" icon="home" text="Home selector" variant="ghost" clickable="true"
+                 style_flex_main_place="start">
         <event_cb trigger="clicked" callback="ams_selector_home_cb"/>
       </ui_button>
       <!-- Check slots -->
       <ui_button name="btn_check_slots"
-                 height="#button_height_sm" icon="refresh" text="Check slots" translation_tag="Check slots"
-                 variant="ghost" clickable="true" style_flex_main_place="start">
+                 height="#button_height_sm" icon="refresh" text="Check slots" variant="ghost" clickable="true"
+                 style_flex_main_place="start">
         <event_cb trigger="clicked" callback="ams_selector_check_cb"/>
       </ui_button>
       <!-- Servo row (hidden on Type B / virtual selector) -->
@@ -27,12 +27,11 @@
       <lv_obj name="servo_row"
               width="content" height="content" style_pad_all="0" style_pad_gap="#space_xs" flex_flow="row"
               style_flex_cross_place="center" scrollable="false">
-        <text_small text="Servo" translation_tag="Servo"/>
+        <text_small text="Servo"/>
         <ui_button name="btn_servo_up" height="#button_height_sm" icon="arrow_up" variant="secondary" clickable="true">
           <event_cb trigger="clicked" callback="ams_selector_servo_up_cb"/>
         </ui_button>
-        <ui_button name="btn_servo_move"
-                   height="#button_height_sm" text="Move" translation_tag="Move" variant="secondary" clickable="true">
+        <ui_button name="btn_servo_move" height="#button_height_sm" text="Move" variant="secondary" clickable="true">
           <event_cb trigger="clicked" callback="ams_selector_servo_move_cb"/>
         </ui_button>
         <ui_button name="btn_servo_down"
@@ -44,7 +43,7 @@
       <lv_obj name="jog_row"
               width="100%" height="content" style_pad_all="0" style_pad_gap="#space_xs" flex_flow="row"
               style_flex_cross_place="center" scrollable="false">
-        <text_small text="Move selector" translation_tag="Move selector" flex_grow="1"/>
+        <text_small text="Move selector" flex_grow="1"/>
         <ui_button name="btn_jog_prev" height="#button_height_sm" icon="arrow_left" variant="secondary" clickable="true">
           <event_cb trigger="clicked" callback="ams_selector_jog_prev_cb"/>
         </ui_button>
@@ -57,15 +56,15 @@
       <lv_obj name="gear_sync_row"
               width="100%" height="content" style_pad_all="0" style_pad_gap="#space_sm" flex_flow="row"
               style_flex_main_place="space_between" style_flex_cross_place="center" scrollable="false">
-        <text_body text="Gear motor synced" translation_tag="Gear motor synced"/>
+        <text_body text="Gear motor synced"/>
         <ui_switch name="gear_sync_switch" size="small">
           <event_cb trigger="value_changed" callback="ams_selector_gear_sync_cb"/>
         </ui_switch>
       </lv_obj>
       <!-- Recover -->
       <ui_button name="btn_recover"
-                 height="#button_height_sm" icon="restart" text="Recover" translation_tag="Recover" variant="ghost"
-                 clickable="true" style_flex_main_place="start">
+                 height="#button_height_sm" icon="restart" text="Recover" variant="ghost" clickable="true"
+                 style_flex_main_place="start">
         <event_cb trigger="clicked" callback="ams_selector_recover_cb"/>
       </ui_button>
     </context_menu_card>

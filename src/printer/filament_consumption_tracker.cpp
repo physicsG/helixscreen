@@ -32,24 +32,27 @@ void FilamentConsumptionTracker::start() {
     // RAW_PRINT_STATE_OK: subscribes to the WIRE deliberately - tracks material actually
     // extruded; nothing is consumed during a preparing window.
     print_state_obs_ = helix::ui::observe_print_state<FilamentConsumptionTracker>(
-        printer.get_print_state_enum_subject(), this,
+        printer.print_state().get_print_state_enum_subject(), this,
         [](FilamentConsumptionTracker* self, PrintJobState state) {
             self->on_print_state_changed(state);
-        });
+        },
+        printer.get_subjects_lifetime());
 
-    filament_used_obs_ = helix::ui::observe_int_sync<FilamentConsumptionTracker>(
-        printer.get_print_filament_used_subject(), this,
-        [](FilamentConsumptionTracker* self, int mm) { self->on_filament_used_changed(mm); });
+    filament_used_obs_ = helix::ui::observe<int>(
+        printer.print_state().get_print_filament_used_subject(), this,
+        [](FilamentConsumptionTracker* self, int mm) { self->on_filament_used_changed(mm); },
+        printer.get_subjects_lifetime());
 
     // Per-extruder filament_used_mm observers. These are dynamic subjects
     // ([L077]) and share one lifetime token so a single reset() in stop()
     // invalidates every observer before the subjects are deinit'd.
     for (int idx = 0; idx < MAX_TRACKED_EXTRUDERS; ++idx) {
-        auto* subj = printer.get_extruder_filament_used_subject(idx, extruder_lifetime_);
+        auto* subj =
+            printer.print_state().get_extruder_filament_used_subject(idx, extruder_lifetime_);
         if (!subj) {
             continue;
         }
-        extruder_obs_[idx] = helix::ui::observe_int_sync<FilamentConsumptionTracker>(
+        extruder_obs_[idx] = helix::ui::observe<int>(
             subj, this,
             [idx](FilamentConsumptionTracker* self, int mm) {
                 self->on_extruder_filament_used_changed(idx, mm);
@@ -130,7 +133,7 @@ FilamentConsumptionTracker::register_sink(std::unique_ptr<IConsumptionSink> sink
     // per-extruder stream. No gram is lost in that rebase because the
     // remaining_weight_g snapshot reads the backend's current value each time.
     if (print_in_progress_) {
-        auto* subj = get_printer_state().get_print_filament_used_subject();
+        auto* subj = get_printer_state().print_state().get_print_filament_used_subject();
         const float mm = static_cast<float>(lv_subject_get_int(subj));
         raw->snapshot(mm);
         if (raw->is_trackable()) {
@@ -161,7 +164,7 @@ void FilamentConsumptionTracker::unregister_sink(SinkHandle handle) {
 }
 
 void FilamentConsumptionTracker::on_print_state_changed(PrintJobState state) {
-    auto* printer_mm = get_printer_state().get_print_filament_used_subject();
+    auto* printer_mm = get_printer_state().print_state().get_print_filament_used_subject();
     const float mm = static_cast<float>(lv_subject_get_int(printer_mm));
 
     // RAW_PRINT_STATE_OK: this tracks material actually extruded, so it keys on
@@ -171,6 +174,7 @@ void FilamentConsumptionTracker::on_print_state_changed(PrintJobState state) {
     case PrintJobState::PRINTING:
         if (!print_in_progress_) {
             snapshot_all_sinks(mm);
+            warn_unreported_extruder_mappings();
             print_in_progress_ = true;
             // active_ is true iff at least one sink is tracking so that
             // is_active() retains its original "tracker has live state"
@@ -257,13 +261,9 @@ void FilamentConsumptionTracker::on_extruder_filament_used_changed(int extruder_
 
     // Find any backend that declares a slot mapping for this extruder and
     // route the delta to the matching AmsSlotSink. A single extruder can map
-    // at most one slot per backend; multiple backends are independent.
-    //
-    // TODO(filament-tracker-deadidx): If a backend declares a mapping for an
-    // extruder that Klipper never reports (e.g. mapping claims slot 1 →
-    // extruder1, but only `extruder` appears in status), that slot silently
-    // never accrues. Consider emitting a single spdlog::warn on first
-    // print-start if a mapped extruder has never fired a status update.
+    // at most one slot per backend; multiple backends are independent. A slot
+    // mapped to an extruder Klipper never reports gets no delta here;
+    // warn_unreported_extruder_mappings() names it at print start.
     for (int b = 0; b < AmsState::instance().backend_count(); ++b) {
         AmsBackend* backend = AmsState::instance().get_backend(b);
         if (!backend) {
@@ -285,6 +285,35 @@ void FilamentConsumptionTracker::on_extruder_filament_used_changed(int extruder_
     }
 
     active_ = any_sink_trackable();
+}
+
+int FilamentConsumptionTracker::warn_unreported_extruder_mappings() {
+    // Deltas arrive per reported extruder, so a slot mapped past that count
+    // never accrues. Zero means discovery has not run, not "no extruders".
+    const int reported = get_printer_state().temperature_state().extruder_count();
+    if (reported <= 0) {
+        return 0;
+    }
+    int dead = 0;
+    for (int b = 0; b < AmsState::instance().backend_count(); ++b) {
+        AmsBackend* backend = AmsState::instance().get_backend(b);
+        if (!backend) {
+            continue;
+        }
+        for (int e = reported; e < MAX_TRACKED_EXTRUDERS; ++e) {
+            auto slot = backend->slot_for_extruder(e);
+            if (!slot) {
+                continue;
+            }
+            ++dead;
+            spdlog::warn("[FilamentTracker] Backend {} maps slot {} to extruder{}, but Klipper "
+                         "reports only {} extruder(s): that slot will not track consumption "
+                         "this print",
+                         b, *slot, e, reported);
+        }
+    }
+    unreported_mappings_at_start_ = dead;
+    return dead;
 }
 
 void FilamentConsumptionTracker::snapshot_all_sinks(float filament_used_mm) {

@@ -3,10 +3,14 @@
 
 #pragma once
 
+#include "ams_environment_zone.h"
 #include "ams_subscription_backend.h"
 #include "async_lifetime_guard.h"
 #include "error_event.h"
 #include "filament_slot_override_store.h"
+#include "happy_hare_status_parse.h"
+#include "lane_echo.h"
+#include "lane_observation.h"
 #include "slot_registry.h"
 
 #include <ctime>
@@ -14,6 +18,10 @@
 #include <map>
 #include <optional>
 #include <string>
+
+namespace helix {
+
+class HappyHareTestAccess;
 
 /**
  * @file ams_backend_happy_hare.h
@@ -40,6 +48,23 @@
  * - MMU_HOME            - Home the selector
  * - MMU_RECOVER         - Attempt error recovery
  */
+/**
+ * @brief Pre-gate filament sensor readings for one gate, from printer.mmu.sensors
+ * or the gate's own `filament_switch_sensor mmu_entry_<N>` object
+ *
+ * Kept beside the registry slots rather than inside SlotEntry so the registry
+ * stays free of any one backend's sensor vocabulary. Keyed by global gate
+ * index like overrides_; initialize_slots() clears it with the registry.
+ */
+struct HappyHareGateSensor {
+    bool has_pre_gate_sensor = false; ///< Whether any frame ever reported this gate's sensor
+    bool pre_gate_triggered = false;  ///< Filament detected at the pre-gate position
+    /// The sensor object's own fields, which arrive in independent deltas;
+    /// pre_gate_triggered is detected while enabled.
+    bool object_detected = false;
+    bool object_enabled = true;
+};
+
 class AmsBackendHappyHare : public AmsSubscriptionBackend {
   public:
     /**
@@ -57,8 +82,9 @@ class AmsBackendHappyHare : public AmsSubscriptionBackend {
      * @brief Bare filament-sensor names Happy Hare owns (no AMS keyword).
      *
      * extruder, toolhead, filament_tension, filament_compression. The
-     * keyword-bearing sensors (mmu_gate / mmu_pre_gate_N / mmu_gear_N) are
-     * caught by PrinterHardware's substring path, not here. Static and
+     * keyword-bearing sensors (mmu_gate / mmu_pre_gate_N / mmu_gear_N, and v4's
+     * mmu_entry_N / mmu_exit_N) are caught by PrinterHardware's substring path,
+     * not here. Static and
      * discovery-free; @p discovery is accepted for signature uniformity with
      * other backends. See AmsBackend::sensor_belongs_to_backend (#1054).
      */
@@ -71,15 +97,10 @@ class AmsBackendHappyHare : public AmsSubscriptionBackend {
     [[nodiscard]] const char* get_klipper_object_name() const override {
         return "mmu"; // Matches the Klipper object name
     }
-    // Happy Hare reports printer.mmu.sync_feedback_bias; a value > -1.5 means real
-    // bias data is available (the buffer meter, path-canvas tint, and clog buffer
-    // page render proportional bias). -1.5 is the "no data" sentinel.
-    [[nodiscard]] bool
-    supports_sync_feedback_visualization(const AmsSystemInfo& info) const override {
-        return info.sync_feedback_bias > -1.5f;
+    [[nodiscard]] helix::ui::LaneNoun lane_noun() const override {
+        return helix::ui::LaneNoun::Gate;
     }
     [[nodiscard]] bool manages_active_spool() const override;
-    [[nodiscard]] SlotInfo get_slot_info(int slot_index) const override;
 
     // Path visualization
     [[nodiscard]] int get_bowden_progress() const override {
@@ -100,16 +121,64 @@ class AmsBackendHappyHare : public AmsSubscriptionBackend {
     AmsError do_unload_filament(int slot_index) override;
     AmsError do_select_slot(int slot_index) override;
     AmsError do_change_tool(int tool_number) override;
+    /// Load, unload and tool change: ensure_homed_then() with an error leg that
+    /// emits EVENT_ERROR, which ends an operation Happy Hare never reported.
+    AmsError dispatch_filament_op(std::string cmd);
 
   public:
     // Recovery
     AmsError recover() override;
     AmsError reset() override;
     AmsError clear_fault(int slot_index) override;
+    AmsError recover_with_state(const RecoverStateRequest& request) override;
+    /// Constant capability answers; see BackendTraits.
+    static constexpr BackendTraits kTraits = [] {
+        BackendTraits t;
+        t.supports_recover_with_state = true;
+        t.supports_lane_preload = true;
+        t.supports_gate_select = true;
+        t.supports_gate_check = true;
+        // reset() sends bare MMU_HOME. With no FORCE_UNLOAD parameter Happy Hare
+        // takes its automatic-unload branch whenever filament_pos is not UNLOADED,
+        // so the filament comes out of the toolhead before the selector homes.
+        t.reset_moves_filament = true;
+        // Happy Hare users have a console; the screen passes their command through
+        // rather than synthesising a prerequisite operation they never asked for
+        // (#1229).
+        t.allows_implicit_chaining = false;
+        // Live temp/target read from heater_generic via Moonraker subscriptions
+        t.has_environment_sensors = true;
+        // Happy Hare persists via MMU_GATE_MAP SPOOLID
+        t.has_firmware_spool_persistence = true;
+        // Happy Hare publishes gate spool_id in mmu status
+        t.printer_reports_spool_ids = true;
+        // mmu.action stays Idle until MMU_LOAD/MMU_UNLOAD starts, and through
+        // the UI's own preheat before it.
+        t.holds_optimistic_action = true;
+        return t;
+    }();
+    [[nodiscard]] BackendTraits traits() const override {
+        return kTraits;
+    }
+
+    /**
+     * @brief The MMU_RECOVER line asserting @p request.
+     *
+     * Names only what the request knows: an unset gate is omitted, and an
+     * unset loaded flag leaves LOADED off so HH detects it with its sensors.
+     * BYPASS=1 replaces GATE; HH then forces tool and gate to bypass. Never
+     * names TOOL: HH's tool branch remaps the tool onto the gate and rewrites
+     * that gate's status, and with LOADED=0 wipes the gate's spool info.
+     */
+    [[nodiscard]] static std::string build_recover_command(const RecoverStateRequest& request);
     AmsError eject_lane(int slot_index) override;
     [[nodiscard]] bool supports_lane_eject() const override {
         return true;
     }
+    /**
+     * @brief Park a gate's filament ready for a later load (MMU_PRELOAD GATE=n).
+     */
+    AmsError preload_lane(int slot_index) override;
     /**
      * @brief Move the selector to a gate without loading filament (MMU_SELECT).
      */
@@ -118,12 +187,6 @@ class AmsBackendHappyHare : public AmsSubscriptionBackend {
      * @brief Jog the selector relative to the current gate (MMU_SELECT, clamped).
      */
     AmsError move_selector(int delta) override;
-    [[nodiscard]] bool supports_gate_select() const override {
-        return true;
-    }
-    [[nodiscard]] bool supports_gate_check() const override {
-        return true;
-    }
     [[nodiscard]] std::string reset_button_label() const override {
         return "Home";
     }
@@ -140,13 +203,23 @@ class AmsBackendHappyHare : public AmsSubscriptionBackend {
     // Error-center: classify a pausing MMU fault into a recovery ErrorEvent.
     [[nodiscard]] std::optional<helix::ErrorEvent>
     classify_error(const std::string& raw_line, const helix::ClassifyContext& ctx) const override;
+    [[nodiscard]] bool duplicates_firmware_prompt(const std::string& title) const override;
 
     [[nodiscard]] std::vector<ToolchangePhase>
     toolchange_phase_template(StepOperationType op) const override;
 
     // Configuration
-    AmsError set_slot_info(int slot_index, const SlotInfo& info, bool persist = true) override;
-    AmsError set_tool_mapping(int tool_number, int slot_index) override;
+    AmsError apply_user_edit(int slot_index, const SlotInfo& info,
+                             const helix::ams::Observation& declared) override;
+    AmsError sync_external_identity(int slot_index, const SlotInfo& info) override;
+    void persist_slot_weight(int slot_index, float remaining_weight_g,
+                             float total_weight_g) override;
+    void persist_external_identity_impl(int slot_index,
+                                        const helix::ams::Observation& spoolman) override;
+    [[nodiscard]] AmsError can_set_tool_mapping(int tool_number, int slot_index) const override;
+    /// can_set_tool_mapping() for a caller that holds mutex_.
+    [[nodiscard]] AmsError can_set_tool_mapping_locked(int tool_number, int slot_index) const;
+    AmsError set_tool_mapping_impl(int tool_number, int slot_index) override;
 
     // Bypass mode
     AmsError enable_bypass() override;
@@ -155,12 +228,6 @@ class AmsBackendHappyHare : public AmsSubscriptionBackend {
     /// mmu.filament "Loaded" while mmu.gate names no gate (-1). Gate -2 is
     /// bypass — accounted there (the gate layer also silences under bypass).
     [[nodiscard]] std::optional<bool> toolhead_filament_unaccounted() const override;
-    /// Happy Hare users have a console; the screen passes their command through
-    /// rather than synthesising a prerequisite operation they never asked for
-    /// (#1229).
-    [[nodiscard]] bool allows_implicit_chaining() const override {
-        return false;
-    }
 
     // === Endless Spool ===
     //
@@ -206,14 +273,14 @@ class AmsBackendHappyHare : public AmsSubscriptionBackend {
 
     // Dryer support (v4 - KMS/EMU hardware with heaters)
     [[nodiscard]] DryerInfo get_dryer_info(int unit = 0) const override;
+    [[nodiscard]] std::vector<helix::printer::EnvironmentZone>
+    get_environment_zones(int unit = -1) const override;
     AmsError start_drying(float temp_c, int duration_min, int fan_pct = -1, int unit = 0) override;
     AmsError stop_drying(int unit = 0) override;
-    [[nodiscard]] bool has_environment_sensors() const override {
-        return true; // Live temp/target read from heater_generic via Moonraker subscriptions
-    }
+    AmsError update_drying(float temp_c = -1, int duration_min = -1, int fan_pct = -1,
+                           int unit = 0) override;
 
-    /// Delete this gate's user override ("Clear Spool"). Happy Hare previously
-    /// inherited the no-op default, so the button did nothing here.
+    /// Delete this gate's user override ("Clear Spool").
     void clear_slot_override(int slot_index) override;
 
     /// Publish the external spool as lane{N+1} in the SHARED lane_data
@@ -223,14 +290,6 @@ class AmsBackendHappyHare : public AmsSubscriptionBackend {
     /// HH boot; the AmsState event triggers (bypass engage, external-spool
     /// edit) re-publish.
     void publish_external_spool_lane(const SlotInfo* spool) override;
-
-    [[nodiscard]] bool has_firmware_spool_persistence() const override {
-        return true; // Happy Hare persists via MMU_GATE_MAP SPOOLID
-    }
-
-    [[nodiscard]] bool printer_reports_spool_ids() const override {
-        return true; // Happy Hare publishes gate spool_id in mmu status
-    }
 
     [[nodiscard]] RemapStrategy get_remap_strategy() const override {
         return RemapStrategy::Native;
@@ -272,6 +331,15 @@ class AmsBackendHappyHare : public AmsSubscriptionBackend {
     // highlight on a gate that ran out (gate_status 0) while its filament is
     // still at the toolhead (prestonbrown/helixscreen#1199).
 
+    /// MMU_TEST_CONFIG with the clog mode and, in manual mode, the length,
+    /// named as the installed version takes them (happy_hare::param_name), on
+    /// a unit with an encoder; nullopt when no unit has one on v4.
+    [[nodiscard]] std::optional<std::string>
+    clog_detection_mode_gcode(int mode, float det_length) const override;
+    /// flowguard_encoder_max_motion from 3.42 on; nullopt before, where the
+    /// length is the calibrated one the encoder reports live.
+    [[nodiscard]] std::optional<float> clog_detection_length_setting() const override;
+
     // Device Management
     [[nodiscard]] std::vector<helix::printer::DeviceSection> get_device_sections() const override;
     [[nodiscard]] std::vector<helix::printer::DeviceAction> get_device_actions() const override;
@@ -298,20 +366,38 @@ class AmsBackendHappyHare : public AmsSubscriptionBackend {
     AmsError apply_endless_spool_backup(int slot_index, int backup_slot) override;
 
     // Allow test helper access to private members
-    friend class AmsBackendHappyHareTestHelper;
-    friend class AmsBackendHappyHareEndlessSpoolHelper;
-    friend class AmsBackendHHMultiUnitHelper;
-    friend class HappyHareErrorStateHelper;
-    friend class HappyHareCharHelper;
-    friend class HHToolchangeTestHelper;
-    friend class HhFaultEventCharHelper;
+    /// Pre-gate sensor record for @p slot_index, or nullptr when the index is
+    /// out of range or no frame ever reported the gate's sensor.
+    const HappyHareGateSensor* gate_sensor(int slot_index) const;
+    /// Pre-gate sensor record for @p slot_index, creating it on first write;
+    /// nullptr only when the index is out of range.
+    HappyHareGateSensor* gate_sensor_mut(int slot_index);
+
+    friend class HappyHareTestAccess;
 
     // --- AmsSubscriptionBackend hooks ---
     void on_started() override;
-    void handle_status_update(const nlohmann::json& notification) override;
+    void handle_status(const nlohmann::json& status) override;
     const char* backend_log_tag() const override {
         return "[AMS HappyHare]";
     }
+    SlotInfo* cached_slot_locked(int slot_index) override;
+    [[nodiscard]] const SlotInfo* slot_info_locked(int slot_index) const override {
+        const auto* entry = slots_.get(slot_index);
+        return entry ? &entry->info : nullptr;
+    }
+
+    /// The gate map states colour, material, the spool id and the gate name,
+    /// and nothing else on the resolver-owned identity: brand, the catalog
+    /// pick and the Spoolman vendor id come from the lane's records alone.
+    /// Those are cleared before every paint (a gate's SlotInfo persists
+    /// across frames), so a dropped record stops showing rather than living
+    /// on in the struct - except a field the gate's override record carries,
+    /// which takes that record's value: the gate map cannot hold brand or
+    /// spool name at all, so the override is their only restating source. The
+    /// gate name keeps its own value: gate_name owns colour_name and no lane
+    /// record restates it.
+    void prepare_lane_repaint_locked(int slot_index, SlotInfo& slot) override;
 
   private:
     // === User-attached slot identity (FilamentSlotOverrideStore) =============
@@ -323,40 +409,110 @@ class AmsBackendHappyHare : public AmsSubscriptionBackend {
     // PRIVATE namespace: lane_data belongs to the Happy Hare plugin, same as
     // AFC. See AmsBackendAfc for the full rationale.
     //
-    // Written blind — no Happy Hare hardware on hand; mirrors AFC exactly.
     static constexpr const char* OVERRIDE_NAMESPACE = "helix-screen-hh-overrides";
-    std::unique_ptr<helix::ams::FilamentSlotOverrideStore> override_store_;
     /// Store on the SHARED lane_data namespace, used only by
     /// publish_external_spool_lane. Happy Hare's plugin owns that namespace.
     std::unique_ptr<helix::ams::FilamentSlotOverrideStore> lane_publish_store_;
-    std::unordered_map<int, helix::ams::FilamentSlotOverride> overrides_;
-    void apply_overrides(SlotInfo& slot, int slot_index);
-    void persist_override(int slot_index, const SlotInfo& info);
+    void persist_override(int slot_index, const SlotInfo& info,
+                          const helix::ams::Observation& declared);
+    /// Put @p info's filament fields and tool mapping on @p slot, the half an
+    /// edit and a sync share. Callers hold mutex_.
+    void write_gate_locked(int slot_index, SlotInfo& slot, const SlotInfo& info);
 
-    // Build a " GATES=g0,g1,..." suffix targeting a specific unit's gates for
-    // MMU_HEATER on multi-unit (EMU) rigs. Returns "" for a single-unit MMU or
-    // unit<0 so the command omits GATES and HH defaults to all non-empty gates.
-    // Locks mutex_ internally — call with no lock held.
-    [[nodiscard]] std::string gates_suffix_for_unit(int unit) const;
+    // The MMU_HEATER target for @p unit: UNIT= where unit_suffix_locked() needs
+    // one, then " GATES=g0,g1,..." naming the unit's gates on multi-unit (EMU)
+    // rigs. GATES is omitted for a single-unit MMU or unit<0, so HH defaults to
+    // all non-empty gates. Caller holds mutex_.
+    [[nodiscard]] std::string heater_suffix_locked(int unit) const;
+    /// One heater target per command: @p unit's, or for unit<0 on a multi-unit
+    /// v4, one per unit that has a heater. Locks mutex_.
+    [[nodiscard]] std::vector<std::string> heater_targets_for_unit(int unit) const;
+    /// @p command once per heater target; the first failure stops it.
+    AmsError send_heater_command(const std::string& command, int unit);
+
+    /// UNIT value naming every unit; v4 takes UNIT=ALL on its per-unit commands.
+    static constexpr int kAllUnits = -1;
+    /// " UNIT=<n>" (" UNIT=ALL" for kAllUnits) when a command has to name its
+    /// unit: a v4 install with more than one unit refuses a per-unit command
+    /// without it. Empty otherwise, and always on v3, whose MMU_TEST_CONFIG
+    /// rejects an unknown parameter. Caller holds mutex_.
+    [[nodiscard]] std::string unit_suffix_locked(int unit) const;
+    /// The unit a command with no unit context of its own targets: the
+    /// selected one. Caller holds mutex_.
+    [[nodiscard]] int active_unit_locked() const;
 
     // Build context-aware recovery actions from live MMU state. Caller holds mutex_
     // (the base declares that contract; mutex_ is non-recursive, so this must not
     // lock).
     [[nodiscard]] std::vector<helix::RecoveryAction> build_recovery_actions() const override;
+    /// The one HH recovery list. Resume only while a print is paused.
+    [[nodiscard]] std::vector<helix::RecoveryAction>
+    recovery_actions_locked(bool print_paused) const;
 
     // Synthesize a toolchange step index from the current AmsAction and push it
     // to AmsState's step subject (deferred to the main thread). Happy Hare emits
     // no // narration, so the backend drives the bar itself. Caller holds mutex_.
     void sync_narration_step();
 
-    /**
-     * @brief Parse MMU state from Moonraker JSON
-     *
-     * Extracts mmu object from notification and updates system_info_.
-     *
-     * @param mmu_data JSON object containing printer.mmu data
-     */
-    void parse_mmu_state(const nlohmann::json& mmu_data);
+    /// What one printer.mmu frame accumulates while it is applied: the gate
+    /// identity it stated and cleared, which the echo guard judges at the
+    /// filing step, and what must happen once mutex_ is released.
+    ///
+    /// The accumulator gate_readings_ carries the gate map's last word on every
+    /// key, so a frame silent about material would otherwise offer the pre-edit
+    /// material as this frame's statement and release the material declaration
+    /// before its echo lands. The echo guard therefore judges these instead.
+    struct MmuFrame {
+        /// A fault stood when the frame began (reason_for_pause was non-empty).
+        bool was_faulted = false;
+        std::map<int, helix::ams::Observation> stated;
+        std::map<int, helix::ams::Observation> cleared;
+        /// Gates that went from empty to holding filament with no spool
+        /// binding to say what went in.
+        std::vector<int> unverified_insert_gates;
+
+        /// Observation has no default constructor, so every entry is created
+        /// through these with a definite source.
+        helix::ams::Observation& stated_for(int gate) {
+            return stated
+                .try_emplace(gate,
+                             helix::ams::Observation{helix::ams::ObservationSource::VendorCache})
+                .first->second;
+        }
+        helix::ams::Observation& cleared_for(int gate) {
+            return cleared
+                .try_emplace(gate,
+                             helix::ams::Observation{helix::ams::ObservationSource::VendorCache})
+                .first->second;
+        }
+    };
+
+    // The sections of one printer.mmu frame, applied under mutex_ in this order.
+    void apply_mmu_status_locked(const happy_hare::MmuStatusDelta& delta, MmuFrame& frame);
+    /// The standing identity record for @p gate, created on first mention.
+    helix::ams::Observation& gate_reading_locked(int gate);
+    void apply_mmu_selector_locked(const happy_hare::MmuCoreDelta& core);
+    void apply_mmu_path_locked(const happy_hare::MmuCoreDelta& core);
+    void apply_mmu_topology_locked(const happy_hare::MmuTopologyDelta& topology);
+    void apply_gate_status_locked(const happy_hare::GateIdentityDelta& identity);
+    /// gate_color_rgb / gate_color / gate_material.
+    void apply_gate_appearance_locked(const happy_hare::GateIdentityDelta& identity,
+                                      MmuFrame& frame);
+    /// Spool binding (with its reconcile), temperature, names, tool map and
+    /// endless-spool groups.
+    void apply_gate_binding_locked(const happy_hare::MmuStatusDelta& delta, MmuFrame& frame);
+    void apply_mmu_telemetry_locked(const happy_hare::MmuTelemetryDelta& telemetry);
+    /// Pre-gate sensors, drying and the endless-spool enable bit.
+    void apply_mmu_sensors_locked(const happy_hare::MmuStatusDelta& delta);
+    void apply_mmu_drying_locked(const happy_hare::DryingDelta& drying);
+    /// Per-gate `filament_switch_sensor mmu_entry_<N>` objects.
+    void
+    apply_entry_sensor_objects_locked(const std::vector<happy_hare::EntrySensorReading>& readings);
+    /// The tail of every frame: file readings, repaint each gate, re-derive
+    /// statuses, mark the fault edge.
+    void converge_mmu_locked(MmuFrame& frame);
+    void file_gate_readings_locked(MmuFrame& frame);
+    void apply_fault_edge_locked(const MmuFrame& frame);
 
     /**
      * @brief Re-derive every gate's SlotStatus from gate_status + the loaded gate
@@ -366,64 +522,88 @@ class AmsBackendHappyHare : public AmsSubscriptionBackend {
      * the latter two alone. Deriving the LOADED stamp inside the gate_status
      * branch therefore pinned it to whichever gate was loaded the last time a
      * gate's fill state happened to change (#1199). Called at the end of every
-     * parse_mmu_state() instead, off the cached gate_status_raw_.
+     * apply_mmu_status_locked() instead, off the cached gate_status_raw_.
      *
      * Caller must hold mutex_.
      */
     void refresh_gate_statuses_locked();
 
     /**
+     * @brief Blank the identity only a departed source could have stated.
+     *
+     * reconcile_lane_binding() drops the Spoolman, user and remembered records
+     * from a gate's lane the moment the gate map stops agreeing with them. The
+     * fields below are the ones apply_mmu_status_locked() never writes, so with those
+     * records gone nothing can restate them, and apply_resolved() does not
+     * write a field no source observed. They would otherwise stand on a gate
+     * describing a spool that has nothing to do with it - on a re-bind, the
+     * incoming spool wearing the outgoing one's brand
+     * (prestonbrown/helixscreen#1672).
+     *
+     * Colour, material, gate name and the spool id are left alone: the gate map
+     * states each of them and this frame has already written them.
+     *
+     * Caller must hold mutex_. The paint at the end of apply_mmu_status_locked() is
+     * what fills these back in from whatever still speaks for the gate.
+     */
+    void retire_departed_identity_locked(int gate);
+
+    /**
      * @brief Initialize slot structures based on gate_status array size
      *
      * Called when we first receive gate_status to create the correct
-     * number of SlotInfo entries.
+     * number of SlotInfo entries, and again when mmu_machine's unit split
+     * arrives after that, which re-splits without losing gate state.
      *
      * @param gate_count Number of gates detected
      */
     void initialize_slots(int gate_count);
 
     /**
-     * @brief Validate gate index is within range
+     * @brief Query configfile.settings and the live mmu_machine object once
      *
-     * @param gate_index Slot index to validate
-     * @return AmsError (SUCCESS if valid, INVALID_GATE otherwise)
+     * One printer.objects.query feeds apply_tip_method_config(),
+     * apply_selector_type_config(), apply_heater_config() and
+     * apply_config_defaults(). Called once during on_started().
      */
-    AmsError validate_slot_index(int gate_index) const;
+    void query_config_from_printer();
 
     /**
-     * @brief Query configfile.settings.mmu to determine tip method
+     * @brief Set the tip method from form_tip_macro
      *
-     * Reads form_tip_macro from Happy Hare config via Moonraker.
-     * If macro name contains "cut", sets TipMethod::CUT (e.g., _MMU_CUT_TIP).
-     * Otherwise sets TipMethod::TIP_FORM (e.g., _MMU_FORM_TIP).
-     * Called once during start().
+     * A macro name containing "cut" (e.g., _MMU_CUT_TIP) is TipMethod::CUT;
+     * anything else (e.g., _MMU_FORM_TIP) is TipMethod::TIP_FORM.
      */
-    void query_tip_method_from_config();
+    void apply_tip_method_config(const nlohmann::json& settings,
+                                 const happy_hare::MachineLayout& layout);
 
     /**
-     * @brief Query configfile.settings.mmu_machine to determine selector type
+     * @brief Set selector_type_ and the unit topologies from mmu_machine
      *
-     * Reads selector_type from Happy Hare config via Moonraker.
      * VirtualSelector = Type B (HUB topology), all others = Type A (LINEAR).
-     * Called once during on_started().
+     * @param live_mmu_machine The live mmu_machine status object (see apply_heater_config)
      */
-    void query_selector_type_from_config();
+    void apply_selector_type_config(const nlohmann::json& settings,
+                                    const nlohmann::json& live_mmu_machine);
 
     /**
-     * @brief Query configfile.settings.mmu_machine + mmu for heater name + max_temp
-     *
-     * Reads filament_heater from [mmu_machine] and heater_max_temp from [mmu].
-     * Called once during on_started().
+     * @brief Load speed/distance defaults, then re-apply persisted overrides
      */
-    void query_heater_config_from_config();
+    void apply_config_defaults(const nlohmann::json& settings,
+                               const happy_hare::MachineLayout& layout);
 
     /**
      * @brief Parse heater config settings into dryer_info_
      *
-     * Factored out of query_heater_config_from_config() for testability.
+     * Reads every unit's heaters and environment sensors, and heater_max_temp
+     * from wherever @p layout keeps it.
      * @param settings The configfile.settings JSON object
+     * @param live_mmu_machine The live mmu_machine status object, which carries
+     *        the per-unit fields (v4 and v3.4); older v3 keeps them in settings
+     * @param layout read_machine_layout() of the same pair
      */
-    void apply_heater_config(const nlohmann::json& settings);
+    void apply_heater_config(const nlohmann::json& settings, const nlohmann::json& live_mmu_machine,
+                             const happy_hare::MachineLayout& layout);
 
     /**
      * @brief Parse live heater_generic temperature/target from a status update
@@ -453,15 +633,22 @@ class AmsBackendHappyHare : public AmsSubscriptionBackend {
      */
     [[nodiscard]] bool is_type_b() const;
 
+    /// Whether unit @p unit_index is Type B, from its own mmu_machine
+    /// selector_type, else the machine-wide one. Caller holds mutex_.
+    [[nodiscard]] bool unit_is_type_b_locked(int unit_index) const;
+
     /**
      * @brief Update topology on all existing units after selector_type is known
      */
     void update_unit_topologies();
 
-    std::string selector_type_; ///< Selector type from config (e.g., "VirtualSelector" for Type B)
+    std::string selector_type_; ///< Unit 0's selector type (e.g., "VirtualSelector" for Type B)
+    /// Every unit's machine fields from the connect-time query, in unit order.
+    std::vector<happy_hare::MachineUnit> machine_units_;
 
-    // Async callback safety guard
-    helix::AsyncLifetimeGuard lifetime_;
+    /// Version and config layout, from the connect-time configfile query. Until
+    /// that answers, the v3 layout.
+    happy_hare::MachineLayout machine_layout_;
 
     // Cached MMU state
     helix::printer::SlotRegistry slots_;    ///< Single source of truth for per-slot state
@@ -469,15 +656,58 @@ class AmsBackendHappyHare : public AmsSubscriptionBackend {
     std::vector<int> per_unit_gate_counts_; ///< Per-unit gate counts for dissimilar multi-MMU (v4)
     int active_unit_{0};                    ///< Currently active MMU unit (v4)
 
-    /// Whether printer.mmu.has_bypass has been observed at least once, so the
-    /// resolved value gets logged even when it matches our optimistic default.
+    /// Whether bypass support has been resolved at least once, so the resolved
+    /// value gets logged even when it matches our optimistic default.
     bool bypass_support_seen_{false};
+    /// Last printer.mmu.has_bypass; the bypass source on v3 only.
+    std::optional<bool> status_has_bypass_;
+    /// The one v4 predicate: the query's layout, or a status frame carrying a
+    /// field only v4 publishes. Caller holds mutex_.
+    [[nodiscard]] bool is_v4_locked() const {
+        return machine_layout_.v4;
+    }
+    /// supports_bypass from whichever source the install's layout trusts.
+    /// Caller holds mutex_.
+    void apply_bypass_support_locked();
+    /// Each unit's hub_sensor_triggered from filament_pos_ and the current
+    /// gate. Caller holds mutex_.
+    void refresh_hub_sensors_locked();
 
     /// Last printer.mmu.gate_status array, raw Happy Hare values (-1 unknown,
     /// 0 empty, 1 available, 2 from_buffer). Kept because the array and the
     /// gate/filament pair arrive in independent deltas and
     /// refresh_gate_statuses_locked() needs both to derive a status.
     std::vector<int> gate_status_raw_;
+
+    /// Pre-gate sensor state per gate, keyed by global gate index. Cleared by
+    /// initialize_slots() together with the registry it mirrors.
+    std::unordered_map<int, HappyHareGateSensor> gate_sensors_;
+    /// A per-gate sensor object has reported. printer.mmu.sensors' aggregate
+    /// `mmu_pre_gate` then adds nothing and must not overwrite the other gates.
+    bool entry_sensor_objects_seen_{false};
+    /// Toolhead / extruder-entry sensor fitted, from printer.mmu.sensors; nullopt
+    /// until a frame carries the dict. v4 refuses the toolhead distance tuned
+    /// against a sensor that is not fitted.
+    std::optional<bool> toolhead_sensor_fitted_;
+    std::optional<bool> extruder_sensor_fitted_;
+
+    /// What Happy Hare's gate map says about each gate's identity, keyed by
+    /// global gate index and accumulated across frames. Moonraker names only
+    /// the keys that changed, so one frame is never the whole map and a record
+    /// built from a single frame would blank every field that frame omits.
+    ///
+    /// Nothing folds a declaration into this, which is what separates it from
+    /// SlotInfo: apply_resolved_lane() rewrites that struct in place, so
+    /// reading it back would file a user's own choice as something the MMU
+    /// remembers.
+    std::map<int, helix::ams::Observation> gate_readings_;
+
+    // The base's own_write_echoes_, on this backend:
+    // What the user's own MMU_GATE_MAP write declared, so the gate map
+    // echoing it back through printer.mmu is not filed as firmware's reading.
+    // The gate map is user-maintained, so no tag names the spool a write was
+    // made against: suppression ends on a differing value, a key published
+    // empty, the re-bind verdict in the gate_spool_id parse, or a clear.
 
     // Path visualization state
     int filament_pos_{0};     ///< Happy Hare filament_pos value
@@ -499,7 +729,9 @@ class AmsBackendHappyHare : public AmsSubscriptionBackend {
     std::string environment_sensor_name_; ///< scalar [mmu_machine] environment_sensor
     std::vector<std::string> filament_heaters_; ///< per-gate heaters (plural), empty if shared
     std::vector<std::string>
-        environment_sensors_;                  ///< per-gate env sensors (plural), empty if shared
+        environment_sensors_; ///< per-gate env sensors (plural), empty if shared
+    /// Firmware drying state per gate, indexed globally. Empty on the scalar form.
+    std::vector<std::string> gate_drying_states_;
     std::map<std::string, float> heater_temp_; ///< live temp (°C) keyed by heater object name
     std::map<std::string, float>
         sensor_humidity_; ///< live humidity (%RH) keyed by env-sensor object name
@@ -509,9 +741,9 @@ class AmsBackendHappyHare : public AmsSubscriptionBackend {
     // Error state tracking
     std::string reason_for_pause_; ///< Last reason_for_pause from MMU (descriptive error text)
 
-    // --- Config defaults from configfile.settings.mmu ---
+    // --- Config defaults from configfile.settings ---
 
-    /// Cached config defaults parsed from configfile.settings.mmu
+    /// Cached config defaults parsed from configfile.settings
     struct ConfigDefaults {
         float gear_from_buffer_speed = 150.0f;
         float gear_from_spool_speed = 60.0f;
@@ -525,6 +757,8 @@ class AmsBackendHappyHare : public AmsSubscriptionBackend {
         float toolhead_ooze_reduction = 2.0f;
         int sync_to_extruder = 0;
         int clog_detection = 0;
+        /// Manual-mode clog detection length, when the config names one
+        std::optional<float> detection_length;
         bool loaded = false;
     };
     ConfigDefaults config_defaults_;
@@ -548,17 +782,40 @@ class AmsBackendHappyHare : public AmsSubscriptionBackend {
 
     // Status-backed values (from printer.mmu.* subscriptions)
     std::string led_exit_effect_;
-    std::string espooler_active_;
+    std::string espooler_active_; ///< eSpooler operation shown for the selected gate
+    /// v4's per-gate `espooler` list. Once a frame carries it, the shown
+    /// operation comes from here rather than the deprecated espooler_active.
+    std::vector<std::string> espooler_per_gate_;
     int flowguard_encoder_mode_ = -1; ///< -1 = not yet received from Moonraker
 
-    void query_config_defaults();
     void load_persisted_overrides();
     void save_override(const std::string& key, float value);
     void save_override(const std::string& key, int value);
     void reapply_overrides();
+    /// The MMU_TEST_CONFIG parameter for tunable @p key (v3 spelling) on this
+    /// install, uppercased; empty when it has none. Caller holds mutex_.
+    [[nodiscard]] std::string test_config_param_locked(std::string_view key) const;
+    /// The unit an MMU_TEST_CONFIG of @p key targets: the selected unit when it
+    /// takes the parameter, else the first unit that does; nullopt when none
+    /// does or the installed version has no such parameter. v3 checks only
+    /// names, so there only selector_move_speed depends on the unit.
+    /// Caller holds mutex_.
+    [[nodiscard]] std::optional<int> test_config_unit_locked(std::string_view key) const;
+    /// `MMU_TEST_CONFIG <param>=<value>[ UNIT=n]` for @p key, or nullopt when
+    /// no unit takes it. Caller holds mutex_.
+    [[nodiscard]] std::optional<std::string>
+    test_config_command_locked(std::string_view key, const std::string& value) const;
+    /// Whether unit @p unit has @p feature, from its mmu_machine fields, else
+    /// the machine-wide selector type. Caller holds mutex_.
+    [[nodiscard]] bool unit_supports_locked(int unit, happy_hare::UnitFeature feature) const;
+    /// The selected unit when it has @p feature, else the first that does.
+    /// Caller holds mutex_.
+    [[nodiscard]] std::optional<int> unit_with_locked(happy_hare::UnitFeature feature) const;
 
     /// Get the config default float for a given action key
     [[nodiscard]] float get_config_default_float(const std::string& key) const;
     /// Get the config default int for a given action key
     [[nodiscard]] int get_config_default_int(const std::string& key) const;
 };
+
+} // namespace helix

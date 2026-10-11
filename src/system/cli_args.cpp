@@ -7,12 +7,15 @@
 #include "config.h"
 #include "helix_version.h"
 #include "logging_init.h"
+#include "mock_persona.h"
 #include "runtime_config.h"
+#include "text_io.h"
 #include "theme_manager.h"
 
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -129,11 +132,15 @@ static void print_help(const char* program_name) {
     printf("  --moonraker <url>    Override Moonraker URL (e.g., ws://192.168.1.100:7125)\n");
     printf("  --detect-printer     Detect printer via Moonraker REST, print JSON, exit\n");
     printf("                       (use with --host/--port; default 127.0.0.1:7125)\n");
+    printf("  --probe-egl          Report whether EGL comes up on a GPU here, then exit\n");
+    printf("                       (exit 0 = hardware GPU; the launcher gates on this)\n");
+#ifdef HELIX_ENABLE_REMOTE_CONTROL
     printf("  --remote             Enable remote control server (auto in --test mode)\n");
     printf("  --remote-socket <p>  Override remote control socket path\n");
     printf("  --remote-transport <t>  Transport: socket (default) or http\n");
     printf("  --remote-http-bind <h>  HTTP bind host (default 127.0.0.1; implies http)\n");
     printf("  --remote-http-port <n>  HTTP port (default 7130; implies http)\n");
+#endif
     printf("  --rotate <degrees>   Display rotation: 0, 90, 180, 270\n");
     printf("  --render-2d          Force the G-code viewer to the 2D layer renderer\n");
     printf("  --render-3d          Force the G-code viewer to the 3D GLES renderer\n");
@@ -145,14 +152,15 @@ static void print_help(const char* program_name) {
     printf("  --test               Enable test mode (uses all mocks by default)\n");
     printf("    --real-wifi        Use real WiFi hardware (requires --test)\n");
     printf("    --real-ethernet    Use real Ethernet hardware (requires --test)\n");
-    printf("    --real-moonraker   Connect to real printer (requires --test)\n");
+    printf("    --real-moonraker   Connect to real printer (requires --test, implies "
+           "--real-ams)\n");
     printf("    --real-files       Use real files from printer (requires --test)\n");
     printf("    --real-ams         Use real AMS backend (requires --test)\n");
     printf("    --real-sensors     Use real sensor data (requires --test)\n");
     printf("    --disconnected     Simulate disconnected state (requires --test)\n");
     printf("    --no-ams           Don't create mock AMS (enables runout modal testing)\n");
     printf("    --test-history     Enable test history API data\n");
-    printf("    --sim-speed <n>    Simulation speedup factor (1.0-1000.0, e.g., 100 for 100x)\n");
+    printf("    --sim-speed <n>    Simulation speedup factor (1.0-1000.0, requires --test)\n");
     printf("    --mock-crash       Write synthetic crash.txt to test crash reporter UI\n");
     printf("    --select-file <name>  Auto-select file in print-select panel\n");
     printf("\nG-code Viewer Options (require --test):\n");
@@ -232,53 +240,34 @@ static bool parse_camera_arg(const char* camera_str, RuntimeConfig& config) {
     return true;
 }
 
-bool parse_screen_size_string(const char* size_str, int& out_width, int& out_height,
-                              ScreenSize& out_size) {
-    if (strcmp(size_str, "micro") == 0) {
+bool parse_screen_size_string(const char* size_str, int& out_width, int& out_height) {
+    // Lowercasing also normalises the separator, so 1920X1080 parses.
+    const std::string size = helix::text_io::to_lower(size_str);
+    if (size == "micro") {
         out_width = UI_SCREEN_MICRO_W;
         out_height = UI_SCREEN_MICRO_H;
-        out_size = ScreenSize::MICRO;
-    } else if (strcmp(size_str, "tiny") == 0) {
+    } else if (size == "tiny") {
         out_width = UI_SCREEN_TINY_W;
         out_height = UI_SCREEN_TINY_H;
-        out_size = ScreenSize::TINY;
-    } else if (strcmp(size_str, "small") == 0) {
+    } else if (size == "small") {
         out_width = UI_SCREEN_SMALL_W;
         out_height = UI_SCREEN_SMALL_H;
-        out_size = ScreenSize::SMALL;
-    } else if (strcmp(size_str, "medium") == 0) {
+    } else if (size == "medium") {
         out_width = UI_SCREEN_MEDIUM_W;
         out_height = UI_SCREEN_MEDIUM_H;
-        out_size = ScreenSize::MEDIUM;
-    } else if (strcmp(size_str, "large") == 0) {
+    } else if (size == "large") {
         out_width = UI_SCREEN_LARGE_W;
         out_height = UI_SCREEN_LARGE_H;
-        out_size = ScreenSize::LARGE;
-    } else if (strcmp(size_str, "xlarge") == 0) {
+    } else if (size == "xlarge") {
         out_width = UI_SCREEN_XLARGE_W;
         out_height = UI_SCREEN_XLARGE_H;
-        out_size = ScreenSize::XLARGE;
     } else {
         int w = 0, h = 0;
-        if (sscanf(size_str, "%dx%d", &w, &h) == 2 && w > 0 && h > 0) {
-            out_width = w;
-            out_height = h;
-            if (std::min(w, h) <= UI_SCREEN_MICRO_H && std::max(w, h) <= UI_SCREEN_TINY_W) {
-                out_size = ScreenSize::MICRO;
-            } else if (h <= UI_BREAKPOINT_TINY_MAX) {
-                out_size = ScreenSize::TINY;
-            } else if (h <= UI_BREAKPOINT_SMALL_MAX) {
-                out_size = ScreenSize::SMALL;
-            } else if (h <= UI_BREAKPOINT_MEDIUM_MAX) {
-                out_size = ScreenSize::MEDIUM;
-            } else if (h <= UI_BREAKPOINT_LARGE_MAX) {
-                out_size = ScreenSize::LARGE;
-            } else {
-                out_size = ScreenSize::XLARGE;
-            }
-        } else {
+        if (sscanf(size.c_str(), "%dx%d", &w, &h) != 2 || w <= 0 || h <= 0) {
             return false;
         }
+        out_width = w;
+        out_height = h;
     }
     return true;
 }
@@ -294,8 +283,7 @@ bool parse_cli_args(int argc, char** argv, CliArgs& args, int& screen_width, int
                 return false;
             }
             const char* size_arg = argv[++i];
-            if (!parse_screen_size_string(size_arg, screen_width, screen_height,
-                                          args.screen_size)) {
+            if (!parse_screen_size_string(size_arg, screen_width, screen_height)) {
                 printf("Unknown screen size: %s\n", size_arg);
                 printf("Available sizes: micro, tiny, small, medium, large, xlarge (or WxH "
                        "like 480x400)\n");
@@ -410,6 +398,11 @@ bool parse_cli_args(int argc, char** argv, CliArgs& args, int& screen_width, int
         // Test mode flags
         else if (strcmp(argv[i], "--test") == 0) {
             config.test_mode = true;
+#ifndef HELIX_ENABLE_MOCKS
+            // Stays a warning: perf-farm-check.sh runs --test idle on mockless builds.
+            spdlog::warn("[CLI] --test: this build has no mock backends (ENABLE_MOCKS=no); "
+                         "connecting to the real Moonraker instead");
+#endif
         } else if (strcmp(argv[i], "--skip-splash") == 0) {
             config.skip_splash = true;
         } else if (strncmp(argv[i], "--splash-pid=", 13) == 0) {
@@ -593,7 +586,10 @@ bool parse_cli_args(int argc, char** argv, CliArgs& args, int& screen_width, int
                 args.moonraker_url += "/websocket";
             }
         }
-        // Remote control
+        // Remote control (compiled out of packaged builds, see HELIX_ENABLE_REMOTE_CONTROL
+        // in the Makefile; an unmatched --remote* flag then falls through to the
+        // "ignoring unknown argument" warning below instead of being silently accepted)
+#ifdef HELIX_ENABLE_REMOTE_CONTROL
         else if (strcmp(argv[i], "--remote") == 0) {
             args.remote_control = true;
         } else if (strcmp(argv[i], "--remote-socket") == 0 ||
@@ -660,6 +656,7 @@ bool parse_cli_args(int argc, char** argv, CliArgs& args, int& screen_width, int
             args.remote_transport = "http"; // Selecting an HTTP option implies http
             args.remote_control = true;
         }
+#endif
         // Log destination
         else if (strcmp(argv[i], "--log-dest") == 0 || strncmp(argv[i], "--log-dest=", 11) == 0) {
             const char* value = nullptr;
@@ -728,24 +725,49 @@ bool parse_cli_args(int argc, char** argv, CliArgs& args, int& screen_width, int
     // hotend changer does, and the production AmsBackendToolChanger is meant to
     // drive them. That is exactly what --real-ams already means, so imply it
     // rather than adding a third knob that can disagree with this one. Same for
-    // the standalone IFS module mode (real AmsBackendAd5xIfs).
+    // the standalone IFS module mode (real AmsBackendAd5xIfs) and the CFS
+    // modes. The creator5_zmod printer persona is the same deal keyed on the
+    // printer env var instead; an explicit HELIX_MOCK_AMS still wins.
+    // A real printer behind a mock AMS would see the mock's fabricated spool ids:
+    // a mock tool change sets them active and a lane save PATCHes them, on the
+    // printer's real Spoolman. A real printer means its real AMS, whatever
+    // HELIX_MOCK_AMS asks for.
+    if (config.test_mode && config.use_real_moonraker && !config.use_real_ams) {
+        config.use_real_ams = true;
+        spdlog::info("[CLI] --real-moonraker implies --real-ams (a mock AMS would write its "
+                     "spool ids to the real printer)");
+    }
+
     if (config.test_mode && !config.use_real_ams) {
-        if (const char* ams_env = std::getenv("HELIX_MOCK_AMS"); ams_env && ams_env[0]) {
-            std::string mode(ams_env);
-            std::transform(mode.begin(), mode.end(), mode.begin(),
-                           [](unsigned char c) { return std::tolower(c); });
-            if (mode == "medusahc" || mode == "medusa" || mode == "mhc" ||
-                mode == "medusahc-fork" || mode == "medusa-fork") {
-                config.use_real_ams = true;
-                spdlog::info("[CLI] HELIX_MOCK_AMS={} implies --real-ams (mock hardware, real "
-                             "tool-changer backend)",
-                             mode);
-            } else if (mode == "ifs-module" || mode == "ifs_module" || mode == "ad5x-module") {
-                config.use_real_ams = true;
-                spdlog::info("[CLI] HELIX_MOCK_AMS={} implies --real-ams (mock hardware, real "
-                             "AD5X IFS backend)",
-                             mode);
-            }
+        const char* printer_env = std::getenv("HELIX_MOCK_PRINTER");
+        const std::string mode =
+            helix::mock::effective_mock_ams(std::getenv("HELIX_MOCK_AMS"), printer_env);
+        if (mode == "medusahc" || mode == "medusa" || mode == "mhc" || mode == "medusahc-fork" ||
+            mode == "medusa-fork") {
+            config.use_real_ams = true;
+            spdlog::info("[CLI] HELIX_MOCK_AMS={} implies --real-ams (mock hardware, real "
+                         "tool-changer backend)",
+                         mode);
+        } else if (mode == "ifs-module" || mode == "ifs_module" || mode == "ad5x-module") {
+            config.use_real_ams = true;
+            spdlog::info("[CLI] HELIX_MOCK_AMS={} implies --real-ams (mock hardware, real "
+                         "AD5X IFS backend)",
+                         mode);
+        } else if (mode == "cfs" || mode == "cfs-k1") {
+            config.use_real_ams = true;
+            spdlog::info("[CLI] HELIX_MOCK_AMS={} implies --real-ams (mock hardware, real "
+                         "CFS backend)",
+                         mode);
+        } else if (mode == "openams") {
+            config.use_real_ams = true;
+            spdlog::info("[CLI] HELIX_MOCK_AMS={} implies --real-ams (mock hardware, real "
+                         "OpenAMS backend)",
+                         mode);
+        } else if (mode.empty() && printer_env && helix::mock::is_hardware_persona(printer_env)) {
+            config.use_real_ams = true;
+            spdlog::info("[CLI] HELIX_MOCK_PRINTER={} implies --real-ams (mock "
+                         "hardware, real tool-changer backend)",
+                         printer_env);
         }
     }
 
@@ -770,6 +792,14 @@ bool parse_cli_args(int argc, char** argv, CliArgs& args, int& screen_width, int
 
     if (config.mock_crash && !config.test_mode) {
         printf("Error: --mock-crash requires --test mode\n");
+        return false;
+    }
+
+    // A speedup outside --test would fast-forward PrintStartCollector's clock
+    // against a real printer, inflating the pre-print durations it measures and
+    // persists as predictions.
+    if (config.sim_speedup != 1.0 && !config.test_mode) {
+        printf("Error: --sim-speed requires --test mode\n");
         return false;
     }
 

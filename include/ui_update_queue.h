@@ -5,15 +5,16 @@
  * @brief Thread-safe UI update queue for LVGL
  *
  * This module provides a safe mechanism for scheduling UI updates from any thread.
- * Updates are queued and processed at the START of each lv_timer_handler cycle,
- * BEFORE rendering begins. This guarantees that widget modifications never
- * happen during the render phase.
+ * Updates are queued and run on the main thread by an LVGL timer that fires once
+ * per LV_DEF_REFR_PERIOD inside lv_timer_handler(), the same timer walk that
+ * renders, so an update never runs during a render. Which of the drain and the
+ * display refresh runs first in a pass is not guaranteed.
  *
  * Architecture:
  * 1. Any thread can queue updates via helix::ui::queue_update()
  * 2. Updates accumulate in a thread-safe queue
- * 3. At the start of each frame (via LVGL timer), all pending updates are processed
- * 4. Rendering happens AFTER all updates are applied
+ * 3. Once per refresh period an LVGL timer runs all pending updates
+ * 4. Rendering happens in the same timer walk, before or after that drain
  *
  * This is similar to React's batched state updates - changes are queued and
  * applied together at a safe point.
@@ -23,7 +24,7 @@
  * // From any thread (WebSocket callback, async operation, etc.):
  * helix::ui::queue_update([](void*) {
  *     lv_subject_set_int(&my_subject, new_value);
- *     lv_label_set_text(label, "Updated!");
+ *     lv_label_set_text(label, new_text);
  * });
  *
  * // With captured data:
@@ -49,6 +50,8 @@
 #include <memory>
 #include <mutex>
 #include <queue>
+#include <string>
+#include <system_error>
 #include <thread>
 
 namespace helix::ui {
@@ -84,9 +87,10 @@ struct TaggedCallback {
  * @brief Thread-safe UI update queue
  *
  * Singleton that manages pending UI updates. Call init() once at startup to
- * install a timer that drains the queue once per display refresh period (LVGL 9
- * timers have no priority field; the timer is created at init so it sits near
- * the head of the timer list).
+ * install a timer that drains the queue once per display refresh period. LVGL 9
+ * timers have no priority field: lv_timer_create() inserts at the head of the
+ * list lv_timer_handler() walks, so a timer created later, such as a recreated
+ * display's refresh timer, runs ahead of this one when both are due.
  *
  * LV_EVENT_REFR_START is not usable here: it only fires when LVGL decides to
  * render, so on a screen nothing has invalidated the queue would never drain. A
@@ -111,17 +115,20 @@ class UpdateQueue {
     /**
      * @brief Initialize the update queue (call once at startup)
      *
-     * Creates the drain timer. Created at init so it runs near the head of the
-     * timer list (LVGL 9 has no timer priorities).
+     * Creates the drain timer, which fires once per LV_DEF_REFR_PERIOD.
      */
     void init() {
         if (initialized_)
             return;
 
-        shut_down_ = false;
+        {
+            // queue_impl() reads this from worker threads under mutex_, and a
+            // worker from an earlier init/shutdown cycle can still be posting.
+            std::lock_guard<std::mutex> lock(mutex_);
+            shut_down_ = false;
+        }
 
-        // One drain per rendered frame. Created early at init, so it is near the
-        // head of the timer list.
+        // One drain per display refresh period, whether or not a frame renders.
         timer_ = lv_timer_create(timer_cb, LV_DEF_REFR_PERIOD, this);
         if (!timer_) {
             spdlog::error("[UpdateQueue] Failed to create timer!");
@@ -146,7 +153,7 @@ class UpdateQueue {
         // timer. Record that identity so callers can ask whether they are
         // already on the main thread instead of marshalling unconditionally
         // (see helix::ui::is_main_thread).
-        main_thread_id_ = std::this_thread::get_id();
+        main_thread_id_.store(std::this_thread::get_id(), std::memory_order_release);
         main_thread_known_.store(true, std::memory_order_release);
 
         initialized_ = true;
@@ -164,14 +171,14 @@ class UpdateQueue {
         if (!main_thread_known_.load(std::memory_order_acquire)) {
             return true;
         }
-        return std::this_thread::get_id() == main_thread_id_;
+        return std::this_thread::get_id() == main_thread_id_.load(std::memory_order_acquire);
     }
 
     /**
      * @brief Queue an update for processing
      *
      * Thread-safe. Can be called from any thread.
-     * The callback will be executed on the main LVGL thread before rendering.
+     * The callback runs on the main LVGL thread in a later drain, never during a render.
      *
      * @param callback Function to execute
      */
@@ -227,7 +234,7 @@ class UpdateQueue {
      * @brief Process all pending callbacks immediately
      *
      * Call before destroying objects that may be referenced by queued callbacks.
-     * Deferred observer callbacks (from observe_int_sync) capture raw panel
+     * Deferred observer callbacks (from observe<int>) capture raw panel
      * pointers; if those callbacks run after the panel is destroyed, they
      * crash with use-after-free. Draining the queue while pointers are still
      * valid ensures those callbacks execute safely.
@@ -431,8 +438,8 @@ class UpdateQueue {
     /**
      * @brief Timer callback - processes all pending updates
      *
-     * Called by LVGL on every lv_timer_handler() cycle due to highest priority.
-     * Runs BEFORE the render timer, ensuring updates are applied before drawing.
+     * Called from lv_timer_handler() once per LV_DEF_REFR_PERIOD. It can run
+     * before or after the display refresh timer, but never during a render.
      */
     static void timer_cb(lv_timer_t* timer) {
         auto* self = static_cast<UpdateQueue*>(lv_timer_get_user_data(timer));
@@ -444,8 +451,8 @@ class UpdateQueue {
     void process_pending() {
         // Move pending updates to local queue to minimize lock time.
         //
-        // The empty check comes first because this runs on every frame whether or
-        // not anything was queued, and a default-constructed std::queue is not
+        // The empty check comes first because this runs every refresh period whether
+        // or not anything was queued, and a default-constructed std::queue is not
         // free: its deque allocates a map plus a node before holding anything.
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -458,19 +465,40 @@ class UpdateQueue {
             std::swap(to_process, pending_);
         }
 
-        // Execute all pending updates - safe because render hasn't started yet
+        // Execute all pending updates - safe because no render is in progress.
+        //
+        // std::system_error is matched ahead of std::exception (it derives
+        // from runtime_error) so the log can carry the numeric code and
+        // category that what()'s strerror text alone does not reveal.
         while (!to_process.empty()) {
+#if defined(__cpp_exceptions)
             try {
                 auto& entry = to_process.front();
                 current_tag_ = entry.tag;
                 entry.callback();
+            } catch (const std::system_error& e) {
+                callback_exception_count_.fetch_add(1, std::memory_order_relaxed);
+                spdlog::error("[UpdateQueue] Exception in queued callback [{}]: {} code {} ({:#x}) "
+                              "category {}: {}",
+                              describe_entry(to_process.front()),
+                              crash_handler::current_exception_type_name(), e.code().value(),
+                              static_cast<unsigned int>(e.code().value()),
+                              e.code().category().name(), e.what());
             } catch (const std::exception& e) {
                 callback_exception_count_.fetch_add(1, std::memory_order_relaxed);
-                spdlog::error("[UpdateQueue] Exception in queued callback: {}", e.what());
+                spdlog::error("[UpdateQueue] Exception in queued callback [{}]: {}: {}",
+                              describe_entry(to_process.front()),
+                              crash_handler::current_exception_type_name(), e.what());
             } catch (...) {
                 callback_exception_count_.fetch_add(1, std::memory_order_relaxed);
-                spdlog::error("[UpdateQueue] Unknown exception in queued callback");
+                spdlog::error("[UpdateQueue] Exception in queued callback [{}]: {} (no message)",
+                              describe_entry(to_process.front()),
+                              crash_handler::current_exception_type_name());
             }
+#else
+            current_tag_ = to_process.front().tag;
+            to_process.front().callback();
+#endif
             // Retain the N most-recently-completed tags so a post-callback
             // crash (heap corruption detonating on the next main-thread malloc,
             // or a few callbacks later) still names the prior sequence.
@@ -496,6 +524,24 @@ class UpdateQueue {
             current_tag_ = nullptr;
             to_process.pop();
         }
+    }
+
+    /**
+     * @brief Producer identity of a queued entry, for exception logs
+     *
+     * The tag when the producer passed one; otherwise the recorded enqueue
+     * call site, which is the only identity an untagged callback has. Built
+     * only on the exception path — the drain loop's steady state allocates
+     * nothing per callback.
+     */
+    static std::string describe_entry(const TaggedCallback& entry) {
+        if (entry.tag != nullptr) {
+            return entry.tag;
+        }
+        if (entry.file != nullptr) {
+            return std::string(entry.file) + ":" + std::to_string(entry.line) + " (untagged)";
+        }
+        return "<untagged>";
     }
 
     mutable std::mutex mutex_;
@@ -529,10 +575,12 @@ class UpdateQueue {
     static inline volatile unsigned int previous_tag_next_ = 0;
 
     /// Identity of the LVGL main thread, captured in init(). Read from any
-    /// thread via is_main_thread(); `main_thread_known_` orders the write so a
-    /// racing reader either sees "not yet known" (and assumes main, which is
-    /// correct that early) or a fully-published id.
-    static inline std::thread::id main_thread_id_{};
+    /// thread via is_main_thread(); `main_thread_known_` orders the first write
+    /// so a racing reader either sees "not yet known" (and assumes main, which
+    /// is correct that early) or a fully-published id. The id itself is atomic
+    /// because every later init() rewrites it while workers from the previous
+    /// cycle may still be reading it.
+    static inline std::atomic<std::thread::id> main_thread_id_{};
     static inline std::atomic<bool> main_thread_known_{false};
 
     /// Count of queued callbacks that threw. Swallowing the exception is
@@ -571,15 +619,6 @@ class UpdateQueue {
 };
 
 /**
- * @brief Queue a UI update for safe execution
- *
- * This is the primary API for scheduling UI updates from any thread.
- * Updates are guaranteed to execute BEFORE rendering, avoiding the
- * "Invalidate area is not allowed during rendering" assertion.
- *
- * @param callback Function to execute on the main thread
- */
-/**
  * @brief Whether the caller is already on the LVGL main thread
  */
 inline bool is_main_thread() {
@@ -611,6 +650,15 @@ inline void run_on_main(const char* tag, UpdateCallback fn) {
     UpdateQueue::instance().queue(tag, std::move(fn));
 }
 
+/**
+ * @brief Queue a UI update for safe execution
+ *
+ * This is the primary API for scheduling UI updates from any thread.
+ * Updates never execute during a render, avoiding the
+ * "Invalidate area is not allowed during rendering" assertion.
+ *
+ * @param callback Function to execute on the main thread
+ */
 // The trailing file/line parameters are never passed explicitly: their default
 // arguments are evaluated in the CALLER, so every untagged enqueue records its
 // own call site. Forwarding wrappers below thread the pair through so the
@@ -645,22 +693,19 @@ inline void queue_update(const char* tag, UpdateCallback callback) {
 template <typename T>
 void queue_update(std::unique_ptr<T> data, std::function<void(T*)> callback,
                   const char* file = __builtin_FILE(), int line = __builtin_LINE()) {
-    // Capture data and callback in a lambda
-    T* raw_ptr = data.release(); // Transfer ownership
-    queue_update(
-        [raw_ptr, callback = std::move(callback)]() {
-            std::unique_ptr<T> owned(raw_ptr); // Reclaim ownership for RAII
-            callback(owned.get());
-        },
-        file, line);
+    // shared_ptr, not a raw release: UpdateCallback must be copyable, and a
+    // callback the queue drops unrun must still free the payload.
+    queue_update([owned = std::shared_ptr<T>(std::move(data)),
+                  callback = std::move(callback)]() { callback(owned.get()); },
+                 file, line);
 }
 
 /**
  * @brief Initialize the UI update queue
  *
  * Call this once during application startup, AFTER lv_init() but BEFORE
- * creating any UI elements. This ensures the processing timer has highest
- * priority and runs before other timers.
+ * creating any UI elements. It only creates the drain timer: LVGL 9 timers have
+ * no priority, so calling it early does not make the drain run first.
  */
 inline void update_queue_init() {
     UpdateQueue::instance().init();
@@ -673,31 +718,6 @@ inline void update_queue_init() {
  */
 inline void update_queue_shutdown() {
     UpdateQueue::instance().shutdown();
-}
-
-/**
- * @brief Drop-in replacement for lv_async_call
- *
- * Has the EXACT same signature as lv_async_call() but uses the UI update queue
- * to ensure callbacks run BEFORE rendering, not during. Exceptions thrown by
- * callbacks are caught and logged by UpdateQueue::process_pending().
- *
- * Migration: Simply replace `lv_async_call(` with `async_call(`
- *
- * @param async_xcb Callback function (same signature as lv_async_call)
- * @param user_data User data passed to callback
- * @return LV_RESULT_OK always (queue never fails)
- */
-inline lv_result_t async_call(lv_async_cb_t async_xcb, void* user_data,
-                              const char* file = __builtin_FILE(), int line = __builtin_LINE()) {
-    queue_update(
-        [async_xcb, user_data]() {
-            if (async_xcb) {
-                async_xcb(user_data);
-            }
-        },
-        file, line);
-    return LV_RESULT_OK;
 }
 
 // ============================================================================
@@ -723,10 +743,8 @@ inline lv_result_t async_call(lv_async_cb_t async_xcb, void* user_data,
 template <typename T, typename F>
 void queue_update(lv_obj_t* widget, std::unique_ptr<T> data, F&& callback,
                   const char* file = __builtin_FILE(), int line = __builtin_LINE()) {
-    T* raw_ptr = data.release();
     queue_update(
-        [widget, raw_ptr, cb = std::forward<F>(callback)]() {
-            std::unique_ptr<T> owned(raw_ptr); // RAII: always freed
+        [widget, owned = std::shared_ptr<T>(std::move(data)), cb = std::forward<F>(callback)]() {
             if (!lv_obj_is_valid(widget)) {
                 spdlog::debug(
                     "[UpdateQueue] Widget-safe guard: widget destroyed, skipping callback");
@@ -763,31 +781,15 @@ void queue_widget_update(lv_obj_t* widget, F&& callback, const char* file = __bu
 }
 
 /**
- * @brief Widget-safe drop-in replacement for lv_async_call
+ * @brief Invalidate a widget after the current render or observer chain
  *
- * Same as async_call(cb, user_data) but validates the widget first.
- * If the widget is destroyed before the callback fires, the callback is skipped.
- *
- * @param widget Widget that must still be valid when callback fires
- * @param async_xcb Callback function (same signature as lv_async_call)
- * @param user_data User data passed to callback
- * @return LV_RESULT_OK always (queue never fails)
+ * lv_obj_invalidate() asserts inside a draw callback and repaints with stale
+ * style state mid-observer, so animation exec callbacks, draw callbacks and
+ * observers defer it. Skipped if the widget is gone by then.
  */
-inline lv_result_t async_call(lv_obj_t* widget, lv_async_cb_t async_xcb, void* user_data,
-                              const char* file = __builtin_FILE(), int line = __builtin_LINE()) {
-    queue_update(
-        [widget, async_xcb, user_data]() {
-            if (!lv_obj_is_valid(widget)) {
-                spdlog::debug(
-                    "[UpdateQueue] Widget-safe guard: widget destroyed, skipping async_call");
-                return;
-            }
-            if (async_xcb) {
-                async_xcb(user_data);
-            }
-        },
-        file, line);
-    return LV_RESULT_OK;
+inline void queue_invalidate(lv_obj_t* obj, const char* file = __builtin_FILE(),
+                             int line = __builtin_LINE()) {
+    queue_widget_update(obj, [](lv_obj_t* o) { lv_obj_invalidate(o); }, file, line);
 }
 
 } // namespace helix::ui

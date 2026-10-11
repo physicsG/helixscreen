@@ -13,10 +13,12 @@
 #include "ui_temp_display.h"
 #include "ui_text.h"
 #include "ui_text_input.h"
+#include "ui_tile_rung.h"
 
 #include "material_settings_manager.h"
 #include "preset_materials.h"
 #include "spdlog/spdlog.h"
+#include "xml_registration.h"
 
 // Forward declaration — defined in favorite_macro_widget.cpp, not exported in any header.
 namespace helix {
@@ -167,10 +169,6 @@ XMLTestFixture::~XMLTestFixture() {
     // member destructor runs after this function body completes.
     m_api.reset();
     m_client.reset();
-    // TODO: PrinterState::init_subjects(true) appends a `[this]{ deinit_subjects(); }`
-    // lambda to StaticSubjectRegistry that dangles after this dtor. Not called today,
-    // but would segfault if someone adds a process-exit deinit_all() path. Needs an
-    // unregister() API on StaticSubjectRegistry.
     m_state.deinit_subjects();
 
     spdlog::debug("[XMLTestFixture] Cleaned up");
@@ -201,23 +199,18 @@ void XMLTestFixture::setup_global_xml_registrations_once() {
     lv_xml_register_component_from_file("A:ui_xml/styles.xml");
 
     // 4. Register custom widgets (must be done before loading components that use them)
-    ui_icon_register_widget(); // icon component
-    ui_text_init();            // text_heading, text_body, text_small, text_xs
-    ui_text_input_init();      // text_input (textarea with bind_text support)
-    ui_button_init();          // ui_button with bind_icon support
-    ui_progress_bar_init();    // progress_bar (print progress, preview card)
-    ui_card_register();        // ui_card
-    ui_temp_display_init();    // temp_display
+    helix::ui::icon::register_widget();      // icon component
+    helix::ui::register_tile_rung_binding(); // <bind_tile_rung>
+    ui_text_init();                          // text_heading, text_body, text_small, text_xs
+    ui_text_input_init();                    // text_input (textarea with bind_text support)
+    ui_button_init();                        // ui_button with bind_icon support
+    ui_progress_bar_init();                  // progress_bar (print progress, preview card)
+    ui_card_register();                      // ui_card
+    ui_temp_display_init();                  // temp_display
 
     // 5. Register no-op callbacks for event handlers in XML components
     lv_xml_register_event_cb(nullptr, "", xml_test_noop_event_callback);
     lv_xml_register_event_cb(nullptr, "on_header_back_clicked", xml_test_noop_event_callback);
-    // Nozzle temp panel callbacks
-    lv_xml_register_event_cb(nullptr, "on_nozzle_custom_clicked", xml_test_noop_event_callback);
-    // Bed temp panel callbacks
-    lv_xml_register_event_cb(nullptr, "on_bed_custom_clicked", xml_test_noop_event_callback);
-    // Shared preset-button handler on both temp panels.
-    lv_xml_register_event_cb(nullptr, "on_heater_preset_clicked", xml_test_noop_event_callback);
 
     // nozzle_temp_panel / bed_temp_panel are `<view extends="overlay_panel">` and
     // draw the heater glyph with <nozzle_icon>. An unregistered dependency makes
@@ -225,6 +218,11 @@ void XMLTestFixture::setup_global_xml_registrations_once() {
     // as nullptr and every binding test against them fails on a bare nullptr.
     lv_xml_register_component_from_file("A:ui_xml/overlay_panel.xml");
     lv_xml_register_component_from_file("A:ui_xml/components/nozzle_icon.xml");
+
+    // The heater status area rides inside controls_panel, temp_card_unified and
+    // temp_graph_overlay; an unregistered instance silently vanishes from the
+    // tree and only the surrounding row renders.
+    lv_xml_register_component_from_file("A:ui_xml/components/heater_status.xml");
 
     // Dependencies of print_status_preview_card. An unregistered component
     // name inside a parsed file makes that element (and only it) vanish from
@@ -243,18 +241,26 @@ void XMLTestFixture::setup_global_xml_registrations_once() {
     // Register components used by the modal
     lv_xml_register_component_from_file("A:ui_xml/divider_horizontal.xml");
     lv_xml_register_component_from_file("A:ui_xml/setting_toggle_row.xml");
+    // Options-tab action row. An unregistered component does not merely vanish:
+    // the parser reparents its children onto the enclosing object, so its
+    // visibility bind would pin section_options hidden (same trap info_note
+    // documents above).
+    lv_xml_register_component_from_file("A:ui_xml/setting_action_row.xml");
     // modal_header is a dependency of favorite_macro_config_modal (shared modal header).
     lv_xml_register_component_from_file("A:ui_xml/modal_header.xml");
+    // <info_note> sits inside the modal's Options section, and an unregistered
+    // component does not merely vanish: the parser reparents an unknown tag's
+    // children onto the enclosing object, so info_note's
+    // `bind_flag_if_eq fav_macro_require_confirm` would land on section_options
+    // and pin that whole section hidden for as long as confirmation is on.
+    lv_xml_register_component_from_file("A:ui_xml/info_note.xml");
     lv_xml_register_component_from_file("A:ui_xml/favorite_macro_config_modal.xml");
-
-    // Register components used by filament_catalog_picker (Modal subclass, no
-    // pre-registered app-wide entry point yet — Task 5/7 wires that up).
-    // The embedded filament_catalog_selector fragment MUST be registered
-    // before the picker that instantiates it.
-    lv_xml_register_component_from_file("A:ui_xml/divider_vertical.xml");
-    lv_xml_register_component_from_file("A:ui_xml/modal_button_row.xml");
-    lv_xml_register_component_from_file("A:ui_xml/components/filament_catalog_selector.xml");
-    lv_xml_register_component_from_file("A:ui_xml/components/filament_catalog_picker.xml");
+    // The defaults editor the config modal's "Default Parameters" row opens. Its
+    // subjects and event callbacks register lazily from MacroParamModal itself;
+    // only the component files need listing here (form_field is the label +
+    // textarea row the editor builds its parameter inputs from).
+    lv_xml_register_component_from_file("A:ui_xml/macro_param_modal.xml");
+    lv_xml_register_component_from_file("A:ui_xml/form_field.xml");
 
     // <afc_fault_path> + the afc_fault_segment subject it binds. Embedded by
     // ams_loading_error_modal.xml and action_prompt_modal.xml, both of which

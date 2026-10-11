@@ -13,6 +13,7 @@
  * - Config persistence
  */
 
+#include "../test_helpers/update_queue_test_access.h"
 #include "../ui_test_utils.h"
 #include "width_sensor_manager.h"
 #include "width_sensor_types.h"
@@ -37,7 +38,6 @@ class WidthSensorManagerTestAccess {
     static void reset(WidthSensorManager& obj) {
         std::lock_guard<std::recursive_mutex> lock(obj.mutex_);
         obj.sensors_.clear();
-        obj.states_.clear();
         obj.sync_mode_ = true;
         // Reset subject values but keep subjects initialized
         if (obj.subjects_initialized_) {
@@ -473,8 +473,26 @@ TEST_CASE_METHOD(WidthSensorTestFixture, "WidthSensorManager - edge cases", "[wi
         mgr().set_sensor_enabled("tsl1401cl_filament_width_sensor", false);
         REQUIRE_FALSE(mgr().is_sensor_available(WidthSensorRole::FLOW_COMPENSATION));
     }
+}
 
-    SECTION("category_name returns 'width'") {
-        REQUIRE(mgr().category_name() == "width");
-    }
+// A deferral queued before deinit_subjects() must not land on the subjects a
+// later init_subjects() creates.
+TEST_CASE_METHOD(WidthSensorTestFixture,
+                 "WidthSensorManager - deferred update dropped after deinit", "[width][lifetime]") {
+    discover_test_sensors();
+    mgr().set_sensor_role("tsl1401cl_filament_width_sensor", WidthSensorRole::FLOW_COMPENSATION);
+    mgr().set_sync_mode(false);
+
+    update_sensor_state("tsl1401cl_filament_width_sensor", 1.75f, 100.0f);
+    mgr().deinit_subjects();
+    mgr().init_subjects();
+    const int reinit = lv_subject_get_int(mgr().get_diameter_subject());
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+    REQUIRE(lv_subject_get_int(mgr().get_diameter_subject()) == reinit);
+    REQUIRE(reinit != 1750);
+
+    update_sensor_state("tsl1401cl_filament_width_sensor", 1.80f, 100.0f);
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+    REQUIRE(lv_subject_get_int(mgr().get_diameter_subject()) == 1800);
+    mgr().set_sync_mode(true);
 }

@@ -226,7 +226,7 @@ TEST_CASE_METHOD(XMLTestFixture,
     lv_subject_set_int(state, 1); // restore capture state before teardown
 
     // --- Teardown restores the reparented widgets (no orphan on the screen) -----
-    overlay.on_deactivate();
+    overlay.on_deactivate(DeactivateReason::NavigateAway);
     lv_obj_update_layout(screen);
     // After dismiss the capture surface is back inside the overlay subtree, so a
     // header-strip tap is owned by the Back button again (normal chrome returns).

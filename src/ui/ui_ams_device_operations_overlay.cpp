@@ -9,10 +9,10 @@
 #include "ui_ams_device_operations_overlay.h"
 
 #include "ui_ams_device_section_detail_overlay.h"
+#include "ui_ams_recover_state_modal.h"
+#include "ui_callback_helpers.h"
 #include "ui_error_reporting.h"
-#include "ui_event_safety.h"
 #include "ui_modal.h"
-#include "ui_nav_manager.h"
 #include "ui_status_pill.h"
 #include "ui_utils.h"
 
@@ -21,8 +21,11 @@
 #include "ams_state.h"
 #include "ams_types.h"
 #include "lvgl/src/others/translation/lv_translation.h"
+#include "observer_factory.h"
 #include "settings_manager.h"
 #include "static_panel_registry.h"
+#include "ui/ams_drawing_utils.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
@@ -32,46 +35,12 @@
 namespace helix::ui {
 
 // ============================================================================
-// SINGLETON ACCESSOR
+// DESTRUCTOR
 // ============================================================================
-
-static std::unique_ptr<AmsDeviceOperationsOverlay> g_ams_device_operations_overlay;
-
-AmsDeviceOperationsOverlay& get_ams_device_operations_overlay() {
-    if (!g_ams_device_operations_overlay) {
-        g_ams_device_operations_overlay = std::make_unique<AmsDeviceOperationsOverlay>();
-        StaticPanelRegistry::instance().register_destroy(
-            "AmsDeviceOperationsOverlay", []() { g_ams_device_operations_overlay.reset(); });
-    }
-    return *g_ams_device_operations_overlay;
-}
-
-// ============================================================================
-// CONSTRUCTOR / DESTRUCTOR
-// ============================================================================
-
-AmsDeviceOperationsOverlay::AmsDeviceOperationsOverlay() {
-    spdlog::debug("[{}] Created", get_name());
-}
 
 AmsDeviceOperationsOverlay::~AmsDeviceOperationsOverlay() {
-    if (subjects_initialized_ && lv_is_initialized()) {
-        lv_subject_deinit(&system_info_subject_);
-        lv_subject_deinit(&status_subject_);
-        lv_subject_deinit(&supports_bypass_subject_);
-        lv_subject_deinit(&fw_supports_bypass_subject_);
-        lv_subject_deinit(&hw_bypass_sensor_subject_);
-        lv_subject_deinit(&supports_auto_heat_subject_);
-        lv_subject_deinit(&has_backend_subject_);
-        lv_subject_deinit(&is_afc_subject_);
-        lv_subject_deinit(&reports_spool_ids_subject_);
-        lv_subject_deinit(&printer_retains_spool_info_subject_);
-        lv_subject_deinit(&is_qidi_subject_);
-        lv_subject_deinit(&qidi_eject_distance_display_subject_);
-        lv_subject_deinit(&qidi_eject_velocity_display_subject_);
-        lv_subject_deinit(&can_reset_endless_spool_subject_);
-    }
-    spdlog::trace("[{}] Destroyed", get_name());
+    // subjects_ tears the subjects down, withdrawing each XML-scope name before
+    // the storage it resolves to goes away.
 }
 
 // ============================================================================
@@ -79,102 +48,213 @@ AmsDeviceOperationsOverlay::~AmsDeviceOperationsOverlay() {
 // ============================================================================
 
 void AmsDeviceOperationsOverlay::init_subjects() {
-    if (subjects_initialized_) {
-        return;
-    }
+    init_subjects_guarded([this]() {
+        // System info text (e.g. "System: AFC · v1.2.3")
+        UI_MANAGED_SUBJECT_STRING(system_info_subject_, system_info_buf_, "",
+                                  "ams_device_ops_system_info", subjects_);
 
-    // System info text (e.g. "System: AFC · v1.2.3")
-    system_info_buf_[0] = '\0';
-    lv_subject_init_string(&system_info_subject_, system_info_buf_, nullptr,
-                           sizeof(system_info_buf_), system_info_buf_);
-    lv_xml_register_subject(nullptr, "ams_device_ops_system_info", &system_info_subject_);
+        // Status text
+        UI_MANAGED_SUBJECT_STRING(status_subject_, status_buf_, lv_tr("Idle"),
+                                  "ams_device_ops_status", subjects_);
 
-    // Status text
-    snprintf(status_buf_, sizeof(status_buf_), "%s", lv_tr("Idle"));
-    lv_subject_init_string(&status_subject_, status_buf_, nullptr, sizeof(status_buf_),
-                           status_buf_);
-    lv_xml_register_subject(nullptr, "ams_device_ops_status", &status_subject_);
+        // Capability subjects
+        UI_MANAGED_SUBJECT_INT(supports_bypass_subject_, 0, "ams_device_ops_supports_bypass",
+                               subjects_);
+        UI_MANAGED_SUBJECT_INT(fw_supports_bypass_subject_, 0, "ams_device_ops_fw_supports_bypass",
+                               subjects_);
+        UI_MANAGED_SUBJECT_INT(hw_bypass_sensor_subject_, 0, "ams_device_ops_hw_bypass_sensor",
+                               subjects_);
+        UI_MANAGED_SUBJECT_INT(supports_auto_heat_subject_, 0, "ams_device_ops_supports_auto_heat",
+                               subjects_);
+        UI_MANAGED_SUBJECT_INT(has_backend_subject_, 0, "ams_device_ops_has_backend", subjects_);
+        UI_MANAGED_SUBJECT_INT(unload_after_print_configurable_subject_, 0,
+                               "ams_device_ops_unload_after_print_configurable", subjects_);
+        UI_MANAGED_SUBJECT_INT(bypass_is_virtual_subject_, 0, "ams_device_ops_bypass_is_virtual",
+                               subjects_);
 
-    // Capability subjects
-    lv_subject_init_int(&supports_bypass_subject_, 0);
-    lv_xml_register_subject(nullptr, "ams_device_ops_supports_bypass", &supports_bypass_subject_);
+        // Keep-spool-info-on-eject row visibility. Gates on
+        // AmsBackend::printer_reports_spool_ids() in update_from_backend().
+        UI_MANAGED_SUBJECT_INT(reports_spool_ids_subject_, 0, "ams_device_ops_reports_spool_ids",
+                               subjects_);
 
-    lv_subject_init_int(&fw_supports_bypass_subject_, 0);
-    lv_xml_register_subject(nullptr, "ams_device_ops_fw_supports_bypass",
-                            &fw_supports_bypass_subject_);
+        // Disables the keep-spool-info toggle when firmware retention owns the
+        // behavior. Gates on AmsBackend::printer_retains_spool_info() in
+        // update_from_backend().
+        UI_MANAGED_SUBJECT_INT(printer_retains_spool_info_subject_, 0,
+                               "ams_device_ops_printer_retains_spool_info", subjects_);
 
-    lv_subject_init_int(&hw_bypass_sensor_subject_, 0);
-    lv_xml_register_subject(nullptr, "ams_device_ops_hw_bypass_sensor", &hw_bypass_sensor_subject_);
+        // QIDI Box gating + eject distance/velocity value displays
+        UI_MANAGED_SUBJECT_INT(is_qidi_subject_, 0, "ams_device_ops_is_qidi", subjects_);
+        UI_MANAGED_SUBJECT_STRING(qidi_eject_distance_display_subject_, qidi_eject_distance_buf_,
+                                  "", "ams_device_ops_qidi_eject_distance_display", subjects_);
+        UI_MANAGED_SUBJECT_STRING(qidi_eject_velocity_display_subject_, qidi_eject_velocity_buf_,
+                                  "", "ams_device_ops_qidi_eject_velocity_display", subjects_);
 
-    lv_subject_init_int(&supports_auto_heat_subject_, 0);
-    lv_xml_register_subject(nullptr, "ams_device_ops_supports_auto_heat",
-                            &supports_auto_heat_subject_);
-
-    lv_subject_init_int(&has_backend_subject_, 0);
-    lv_xml_register_subject(nullptr, "ams_device_ops_has_backend", &has_backend_subject_);
-
-    lv_subject_init_int(&is_afc_subject_, 0);
-    lv_xml_register_subject(nullptr, "ams_device_ops_is_afc", &is_afc_subject_);
-
-    // Keep-spool-info-on-eject row visibility. Gates on
-    // AmsBackend::printer_reports_spool_ids() in update_from_backend().
-    lv_subject_init_int(&reports_spool_ids_subject_, 0);
-    lv_xml_register_subject(nullptr, "ams_device_ops_reports_spool_ids",
-                            &reports_spool_ids_subject_);
-
-    // Disables the keep-spool-info toggle when firmware retention owns the
-    // behavior. Gates on AmsBackend::printer_retains_spool_info() in
-    // update_from_backend().
-    lv_subject_init_int(&printer_retains_spool_info_subject_, 0);
-    lv_xml_register_subject(nullptr, "ams_device_ops_printer_retains_spool_info",
-                            &printer_retains_spool_info_subject_);
-
-    // QIDI Box gating + eject distance/velocity value displays
-    lv_subject_init_int(&is_qidi_subject_, 0);
-    lv_xml_register_subject(nullptr, "ams_device_ops_is_qidi", &is_qidi_subject_);
-
-    qidi_eject_distance_buf_[0] = '\0';
-    lv_subject_init_string(&qidi_eject_distance_display_subject_, qidi_eject_distance_buf_, nullptr,
-                           sizeof(qidi_eject_distance_buf_), qidi_eject_distance_buf_);
-    lv_xml_register_subject(nullptr, "ams_device_ops_qidi_eject_distance_display",
-                            &qidi_eject_distance_display_subject_);
-
-    qidi_eject_velocity_buf_[0] = '\0';
-    lv_subject_init_string(&qidi_eject_velocity_display_subject_, qidi_eject_velocity_buf_, nullptr,
-                           sizeof(qidi_eject_velocity_buf_), qidi_eject_velocity_buf_);
-    lv_xml_register_subject(nullptr, "ams_device_ops_qidi_eject_velocity_display",
-                            &qidi_eject_velocity_display_subject_);
-
-    // "Reset Endless Spool" row visibility. Gates on
-    // EndlessSpoolCapabilities::editable() in update_from_backend().
-    lv_subject_init_int(&can_reset_endless_spool_subject_, 0);
-    lv_xml_register_subject(nullptr, "ams_device_ops_can_reset_endless_spool",
-                            &can_reset_endless_spool_subject_);
-
-    subjects_initialized_ = true;
-    spdlog::debug("[{}] Subjects initialized", get_name());
+        // "Reset Endless Spool" row visibility. Gates on
+        // EndlessSpoolCapabilities::editable() in update_from_backend().
+        UI_MANAGED_SUBJECT_INT(can_reset_endless_spool_subject_, 0,
+                               "ams_device_ops_can_reset_endless_spool", subjects_);
+        UI_MANAGED_SUBJECT_INT(can_abort_subject_, 0, "ams_device_ops_can_abort", subjects_);
+        UI_MANAGED_SUBJECT_STRING(details_subject_, details_buf_, "", "ams_device_ops_details",
+                                  subjects_);
+        UI_MANAGED_SUBJECT_INT(has_details_subject_, 0, "ams_device_ops_has_details", subjects_);
+    });
 }
 
 void AmsDeviceOperationsOverlay::register_callbacks() {
-    lv_xml_register_event_cb(nullptr, "on_ams_device_ops_home", on_home_clicked);
-    lv_xml_register_event_cb(nullptr, "on_ams_device_ops_recover", on_recover_clicked);
-    lv_xml_register_event_cb(nullptr, "on_ams_device_ops_abort", on_abort_clicked);
-    lv_xml_register_event_cb(nullptr, "on_ams_device_ops_bypass_toggled", on_bypass_toggled);
-    lv_xml_register_event_cb(nullptr, "on_ams_afc_unload_after_print_toggled",
-                             on_afc_unload_after_print_toggled);
-    lv_xml_register_event_cb(nullptr, "on_ams_always_show_bypass_spool_toggled",
-                             on_always_show_bypass_spool_toggled);
-    lv_xml_register_event_cb(nullptr, "on_ams_keep_spool_info_toggled", on_keep_spool_info_toggled);
-    lv_xml_register_event_cb(nullptr, "on_ams_force_bypass_controls_toggled",
-                             on_force_bypass_controls_toggled);
-    lv_xml_register_event_cb(nullptr, "on_ams_qidi_eject_distance_changed",
-                             on_qidi_eject_distance_changed);
-    lv_xml_register_event_cb(nullptr, "on_ams_qidi_eject_velocity_changed",
-                             on_qidi_eject_velocity_changed);
-    lv_xml_register_event_cb(nullptr, "on_ams_reset_endless_spool_clicked",
-                             on_reset_endless_spool_clicked);
-    lv_xml_register_event_cb(nullptr, "on_ams_section_clicked", on_section_row_clicked);
-    spdlog::debug("[{}] Callbacks registered", get_name());
+    register_xml_callbacks({
+        {"on_ams_device_ops_home",
+         [](lv_event_t*) {
+             AmsBackend* backend = AmsState::instance().get_backend();
+             if (!backend) {
+                 NOTIFY_WARNING("{}", lv_tr("No Multi-Filament System connected"));
+                 return;
+             }
+             AmsError result = backend->reset();
+             if (result.success()) {
+                 NOTIFY_INFO("{}", lv_tr("Homing..."));
+             } else {
+                 helix::ui::notify_ams_error(result, lv_tr("Home failed"));
+             }
+             get_ams_device_operations_overlay().refresh();
+         }},
+        {"on_ams_device_ops_recover",
+         [](lv_event_t*) {
+             AmsBackend* backend = AmsState::instance().get_backend();
+             if (!backend) {
+                 NOTIFY_WARNING("{}", lv_tr("No Multi-Filament System connected"));
+                 return;
+             }
+             if (AmsRecoverStateModal::show_owned()) {
+                 return; // The modal sends the state the user asserts.
+             }
+             AmsError result = backend->recover();
+             if (result.success()) {
+                 NOTIFY_INFO("{}", lv_tr("Recovering..."));
+             } else {
+                 helix::ui::notify_ams_error(result, lv_tr("Recovery failed"));
+             }
+             get_ams_device_operations_overlay().refresh();
+         }},
+        {"on_ams_device_ops_abort",
+         [](lv_event_t*) {
+             AmsBackend* backend = AmsState::instance().get_backend();
+             if (!backend) {
+                 NOTIFY_WARNING("{}", lv_tr("No Multi-Filament System connected"));
+                 return;
+             }
+             AmsError result = backend->cancel();
+             if (result.success()) {
+                 NOTIFY_INFO("{}", lv_tr("Aborting..."));
+             } else {
+                 helix::ui::notify_ams_error(result, lv_tr("Abort failed"));
+             }
+             get_ams_device_operations_overlay().refresh();
+         }},
+        {"on_ams_device_ops_bypass_toggled",
+         [](lv_event_t*) {
+             // The switch flips its own CHECKED state before this runs, so the widget
+             // is not the authority on intent: the controller reads the backend, the
+             // same way the sidebar toggle and the home tile do. It owns the print
+             // guard, the hardware-sensor refusal and the unload-first chain.
+             get_ams_device_operations_overlay().bypass_toggle_.toggle();
+
+             // Put the switch back where the backend actually is. A refusal, or an
+             // armed unload->enable chain that has not settled yet, leaves the widget
+             // flipped ahead of reality; sync_from_backend() republishes
+             // ams_bypass_active from every backend, and the notify re-applies the
+             // binding for the case where that value did NOT change (lv_subject_set_int
+             // is a no-op notify-wise when the value is unchanged, which is exactly
+             // the refusal case).
+             AmsState::instance().sync_from_backend();
+             lv_subject_notify(AmsState::instance().get_bypass_active_subject());
+         }},
+        {"on_ams_afc_unload_after_print_toggled",
+         [](lv_event_t* e) {
+             SettingsManager::instance().set_afc_unload_after_print(event_checked(e));
+         }},
+        {"on_ams_always_show_bypass_spool_toggled",
+         [](lv_event_t* e) {
+             SettingsManager::instance().set_ams_always_show_bypass_spool(event_checked(e));
+         }},
+        {"on_ams_keep_spool_info_toggled",
+         [](lv_event_t* e) {
+             SettingsManager::instance().set_ams_keep_spool_info_on_eject(event_checked(e));
+         }},
+        {"on_ams_force_bypass_controls_toggled",
+         [](lv_event_t* e) {
+             SettingsManager::instance().set_ams_force_bypass_controls(event_checked(e));
+             // Both gating subjects are recomputed from the backend rather than from
+             // the setting, so neither moves on its own when the override flips.
+             // AmsState drives the sidebar toggle and the path node; this overlay
+             // drives its own section.
+             AmsState::instance().sync_from_backend();
+             get_ams_device_operations_overlay().update_from_backend();
+         }},
+        {"on_ams_qidi_eject_distance_changed",
+         [](lv_event_t* e) {
+             auto& self = get_ams_device_operations_overlay();
+             SettingsManager::instance().set_qidi_eject_distance(
+                 lv_slider_get_value(lv_event_get_current_target_obj(e)));
+             snprintf(self.qidi_eject_distance_buf_, sizeof(self.qidi_eject_distance_buf_), "%d mm",
+                      SettingsManager::instance().get_qidi_eject_distance());
+             lv_subject_copy_string(&self.qidi_eject_distance_display_subject_,
+                                    self.qidi_eject_distance_buf_);
+         }},
+        {"on_ams_qidi_eject_velocity_changed",
+         [](lv_event_t* e) {
+             auto& self = get_ams_device_operations_overlay();
+             SettingsManager::instance().set_qidi_eject_velocity(
+                 lv_slider_get_value(lv_event_get_current_target_obj(e)));
+             snprintf(self.qidi_eject_velocity_buf_, sizeof(self.qidi_eject_velocity_buf_),
+                      "%d mm/s", SettingsManager::instance().get_qidi_eject_velocity());
+             lv_subject_copy_string(&self.qidi_eject_velocity_display_subject_,
+                                    self.qidi_eject_velocity_buf_);
+         }},
+        {"on_ams_reset_endless_spool_clicked",
+         [](lv_event_t*) {
+             // The reset wipes ALL failover config, so it needs a confirmation, not a
+             // bare tap. on_confirm re-fetches the backend so it cannot dangle if the
+             // panel/backend changed while the dialog was open; the dialog closes
+             // itself after the press.
+             //
+             // Both outcomes are announced. refresh() only re-derives
+             // can_reset_endless_spool_subject_ from editable(), which a reset does not
+             // change, and this overlay renders no endless-spool assignments at all (the
+             // backup arrows live on AmsPanel and are not refreshed from here) - so
+             // without a toast, wiping every spool's failover looks exactly like a no-op.
+             helix::ui::modal_confirm(
+                 lv_tr("Reset Endless Spool?"),
+                 lv_tr("This clears every spool's failover assignment. The print will stop on "
+                       "runout until you set up failover again."),
+                 ModalSeverity::Warning, lv_tr("Reset"), [] {
+                     AmsBackend* b = AmsState::instance().get_backend();
+                     if (!b) {
+                         return;
+                     }
+                     AmsError result = b->reset_endless_spool();
+                     if (!result.success()) {
+                         helix::ui::notify_ams_error(result, lv_tr("Reset endless spool failed"));
+                     } else {
+                         NOTIFY_INFO("{}", lv_tr("Endless spool failover cleared for every slot"));
+                     }
+                     get_ams_device_operations_overlay().refresh();
+                 });
+         }},
+        {"on_ams_section_clicked",
+         [](lv_event_t* e) {
+             auto& self = get_ams_device_operations_overlay();
+             auto* row = lv_event_get_current_target_obj(e);
+             auto index = reinterpret_cast<size_t>(lv_obj_get_user_data(row));
+             if (index >= self.cached_sections_.size()) {
+                 spdlog::warn("[{}] Invalid section index: {}", self.get_name(), index);
+                 return;
+             }
+             const auto& section = self.cached_sections_[index];
+             get_ams_device_section_detail_overlay().show(self.parent_screen_, section.id,
+                                                          section.label);
+         }},
+    });
 }
 
 // ============================================================================
@@ -182,58 +262,54 @@ void AmsDeviceOperationsOverlay::register_callbacks() {
 // ============================================================================
 
 lv_obj_t* AmsDeviceOperationsOverlay::create(lv_obj_t* parent) {
-    if (overlay_) {
-        spdlog::warn("[{}] create() called but overlay already exists", get_name());
-        return overlay_;
-    }
-
-    spdlog::debug("[{}] Creating overlay...", get_name());
-
-    overlay_ = static_cast<lv_obj_t*>(lv_xml_create(parent, "ams_device_operations", nullptr));
-    if (!overlay_) {
-        spdlog::error("[{}] Failed to create overlay from XML", get_name());
+    if (!OverlayBase::create(parent)) {
         return nullptr;
     }
 
-    // Find section list container
-    section_list_container_ = lv_obj_find_by_name(overlay_, "section_list_container");
-    if (!section_list_container_) {
-        spdlog::warn("[{}] section_list_container not found in XML", get_name());
-    }
+    section_list_container_ =
+        helix::ui::find_required(overlay_root_, "section_list_container", get_name());
 
-    lv_obj_add_flag(overlay_, LV_OBJ_FLAG_HIDDEN);
+    action_observer_ = observe<int>(
+        AmsState::instance().get_ams_action_subject(), this,
+        [](AmsDeviceOperationsOverlay* self, int) { self->update_abort_available(); },
+        AmsState::instance().get_subjects_lifetime());
 
-    spdlog::info("[{}] Overlay created", get_name());
-    return overlay_;
-}
-
-void AmsDeviceOperationsOverlay::show(lv_obj_t* parent_screen) {
-    spdlog::debug("[{}] show() called", get_name());
-
-    parent_screen_ = parent_screen;
-
-    if (!subjects_initialized_) {
-        init_subjects();
-        register_callbacks();
-    }
-
-    if (!overlay_ && parent_screen_) {
-        create(parent_screen_);
-    }
-
-    if (!overlay_) {
-        spdlog::error("[{}] Cannot show - overlay not created", get_name());
-        return;
-    }
-
-    refresh();
-
-    NavigationManager::instance().register_overlay_instance(overlay_, this);
-    NavigationManager::instance().push_overlay(overlay_);
+    return overlay_root_;
 }
 
 void AmsDeviceOperationsOverlay::on_ui_destroyed() {
+    action_observer_.reset();
     bypass_toggle_.cancel_pending();
+}
+
+std::vector<DeviceDetailRow> ams_device_detail_rows(const AmsSystemInfo& info) {
+    std::vector<DeviceDetailRow> rows;
+    for (size_t i = 0; i < info.units.size(); ++i) {
+        const AmsUnit& unit = info.units[i];
+        if (unit.absent) {
+            continue;
+        }
+        const std::string name = ams_draw::get_unit_display_name(unit, static_cast<int>(i));
+        if (!unit.firmware_version.empty()) {
+            rows.push_back(
+                {fmt::format(fmt::runtime(lv_tr("{} firmware")), name), unit.firmware_version});
+        }
+        if (!unit.serial_number.empty()) {
+            rows.push_back(
+                {fmt::format(fmt::runtime(lv_tr("{} serial")), name), unit.serial_number});
+        }
+    }
+    if (info.toolchange_purge_volume > 0.0f) {
+        rows.push_back({lv_tr("Toolchange purge"),
+                        fmt::format("{:.0f} mm\xC2\xB3", info.toolchange_purge_volume)});
+    }
+    if (info.spoolman_mode != SpoolmanMode::OFF) {
+        rows.push_back({lv_tr("Spoolman"), lv_tr(spoolman_mode_to_string(info.spoolman_mode))});
+    }
+    if (info.pending_spool_id >= 0) {
+        rows.push_back({lv_tr("Pending spool"), fmt::format("#{}", info.pending_spool_id)});
+    }
+    return rows;
 }
 
 void AmsDeviceOperationsOverlay::refresh() {
@@ -249,6 +325,14 @@ void AmsDeviceOperationsOverlay::refresh() {
 // BACKEND QUERIES
 // ============================================================================
 
+void AmsDeviceOperationsOverlay::update_abort_available() {
+    if (!subjects_initialized_) {
+        return;
+    }
+    AmsBackend* backend = AmsState::instance().get_backend();
+    lv_subject_set_int(&can_abort_subject_, backend && backend->can_cancel_operation() ? 1 : 0);
+}
+
 void AmsDeviceOperationsOverlay::update_from_backend() {
     AmsBackend* backend = AmsState::instance().get_backend();
 
@@ -259,11 +343,16 @@ void AmsDeviceOperationsOverlay::update_from_backend() {
         lv_subject_set_int(&fw_supports_bypass_subject_, 0);
         lv_subject_set_int(&hw_bypass_sensor_subject_, 0);
         lv_subject_set_int(&supports_auto_heat_subject_, 0);
-        lv_subject_set_int(&is_afc_subject_, 0);
+        lv_subject_set_int(&unload_after_print_configurable_subject_, 0);
+        lv_subject_set_int(&bypass_is_virtual_subject_, 0);
         lv_subject_set_int(&reports_spool_ids_subject_, 0);
         lv_subject_set_int(&printer_retains_spool_info_subject_, 0);
         lv_subject_set_int(&is_qidi_subject_, 0);
         lv_subject_set_int(&can_reset_endless_spool_subject_, 0);
+        lv_subject_set_int(&can_abort_subject_, 0);
+        details_buf_[0] = '\0';
+        lv_subject_copy_string(&details_subject_, details_buf_);
+        lv_subject_set_int(&has_details_subject_, 0);
         system_info_buf_[0] = '\0';
         lv_subject_copy_string(&system_info_subject_, system_info_buf_);
         snprintf(status_buf_, sizeof(status_buf_), "%s",
@@ -279,6 +368,7 @@ void AmsDeviceOperationsOverlay::update_from_backend() {
 
     // Has backend
     lv_subject_set_int(&has_backend_subject_, 1);
+    update_abort_available();
 
     // Query capabilities
     auto info = backend->get_system_info();
@@ -292,6 +382,18 @@ void AmsDeviceOperationsOverlay::update_from_backend() {
                  info.type_name.c_str(), info.version.c_str());
     }
     lv_subject_copy_string(&system_info_subject_, system_info_buf_);
+
+    std::string details;
+    for (const DeviceDetailRow& row : ams_device_detail_rows(info)) {
+        if (!details.empty()) {
+            details += '\n';
+        }
+        details += row.label + ": " + row.value;
+    }
+    snprintf(details_buf_, sizeof(details_buf_), "%s", details.c_str());
+    lv_subject_copy_string(&details_subject_, details_buf_);
+    lv_subject_set_int(&has_details_subject_, details.empty() ? 0 : 1);
+
     lv_subject_set_int(&supports_bypass_subject_,
                        helix::bypass_available_for(info.supports_bypass) ? 1 : 0);
     lv_subject_set_int(&fw_supports_bypass_subject_, info.supports_bypass ? 1 : 0);
@@ -299,7 +401,7 @@ void AmsDeviceOperationsOverlay::update_from_backend() {
 
     // Update hardware bypass status pill if applicable
     if (info.has_hardware_bypass_sensor && overlay_) {
-        auto* pill = lv_obj_find_by_name(overlay_, "bypass_status_pill");
+        auto* pill = helix::ui::find_required(overlay_, "bypass_status_pill", get_name());
         if (pill) {
             bool active = backend->is_bypass_active();
             ui_status_pill_set_text(pill, active ? lv_tr("Active") : lv_tr("Inactive"));
@@ -309,8 +411,13 @@ void AmsDeviceOperationsOverlay::update_from_backend() {
 
     lv_subject_set_int(&supports_auto_heat_subject_, backend->supports_auto_heat_on_load() ? 1 : 0);
 
-    // AFC-only: the unload-after-print toggle applies only to AFC systems
-    lv_subject_set_int(&is_afc_subject_, backend->is_afc_system() ? 1 : 0);
+    // The unload-after-print row is offered only where the behavior is the
+    // user's setting rather than fixed by firmware.
+    lv_subject_set_int(&unload_after_print_configurable_subject_,
+                       backend->supports_configurable_unload_after_print() ? 1 : 0);
+    // The always-show-bypass row is only meaningful where the bypass node
+    // hides when disengaged, i.e. where the reported bypass is virtual.
+    lv_subject_set_int(&bypass_is_virtual_subject_, backend->bypass_is_virtual() ? 1 : 0);
 
     // Keep-spool-info-on-eject is only meaningful where the firmware reports
     // spool ids per lane (AFC, Happy Hare); other systems clear on a detected
@@ -332,7 +439,8 @@ void AmsDeviceOperationsOverlay::update_from_backend() {
         int eject_distance = SettingsManager::instance().get_qidi_eject_distance();
         int eject_velocity = SettingsManager::instance().get_qidi_eject_velocity();
 
-        auto* dist_slider = lv_obj_find_by_name(overlay_, "qidi_eject_distance_slider");
+        auto* dist_slider =
+            helix::ui::find_required(overlay_, "qidi_eject_distance_slider", get_name());
         if (dist_slider) {
             lv_slider_set_value(dist_slider, eject_distance, LV_ANIM_OFF);
         }
@@ -340,7 +448,8 @@ void AmsDeviceOperationsOverlay::update_from_backend() {
                  eject_distance);
         lv_subject_copy_string(&qidi_eject_distance_display_subject_, qidi_eject_distance_buf_);
 
-        auto* vel_slider = lv_obj_find_by_name(overlay_, "qidi_eject_velocity_slider");
+        auto* vel_slider =
+            helix::ui::find_required(overlay_, "qidi_eject_velocity_slider", get_name());
         if (vel_slider) {
             lv_slider_set_value(vel_slider, eject_velocity, LV_ANIM_OFF);
         }
@@ -498,278 +607,6 @@ const char* AmsDeviceOperationsOverlay::action_to_string(int action) {
     default:
         return lv_tr("Unknown");
     }
-}
-
-// ============================================================================
-// STATIC CALLBACKS
-// ============================================================================
-
-void AmsDeviceOperationsOverlay::on_home_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[AmsDeviceOperationsOverlay] on_home_clicked");
-    LV_UNUSED(e);
-
-    spdlog::info("[AmsDeviceOperationsOverlay] Home button clicked");
-
-    AmsBackend* backend = AmsState::instance().get_backend();
-    if (!backend) {
-        NOTIFY_WARNING("{}", lv_tr("No Multi-Filament System connected"));
-    } else {
-        AmsError result = backend->reset();
-        if (result.success()) {
-            NOTIFY_INFO("{}", lv_tr("Homing AFC system..."));
-        } else {
-            helix::ui::notify_ams_error(result, lv_tr("Home failed"));
-        }
-        get_ams_device_operations_overlay().refresh();
-    }
-
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void AmsDeviceOperationsOverlay::on_recover_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[AmsDeviceOperationsOverlay] on_recover_clicked");
-    LV_UNUSED(e);
-
-    spdlog::info("[AmsDeviceOperationsOverlay] Recover button clicked");
-
-    AmsBackend* backend = AmsState::instance().get_backend();
-    if (!backend) {
-        NOTIFY_WARNING("{}", lv_tr("No Multi-Filament System connected"));
-    } else {
-        AmsError result = backend->recover();
-        if (result.success()) {
-            NOTIFY_INFO("{}", lv_tr("Recovering AFC system..."));
-        } else {
-            helix::ui::notify_ams_error(result, lv_tr("Recovery failed"));
-        }
-        get_ams_device_operations_overlay().refresh();
-    }
-
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void AmsDeviceOperationsOverlay::on_abort_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[AmsDeviceOperationsOverlay] on_abort_clicked");
-    LV_UNUSED(e);
-
-    spdlog::info("[AmsDeviceOperationsOverlay] Abort button clicked");
-
-    AmsBackend* backend = AmsState::instance().get_backend();
-    if (!backend) {
-        NOTIFY_WARNING("{}", lv_tr("No Multi-Filament System connected"));
-    } else {
-        AmsError result = backend->cancel();
-        if (result.success()) {
-            NOTIFY_INFO("{}", lv_tr("Aborting AFC operation..."));
-        } else {
-            helix::ui::notify_ams_error(result, lv_tr("Abort failed"));
-        }
-        get_ams_device_operations_overlay().refresh();
-    }
-
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void AmsDeviceOperationsOverlay::on_bypass_toggled(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[AmsDeviceOperationsOverlay] on_bypass_toggled");
-
-    auto* toggle = static_cast<lv_obj_t*>(lv_event_get_target(e));
-    if (!toggle || !lv_obj_is_valid(toggle)) {
-        spdlog::warn("[AmsDeviceOperationsOverlay] Stale callback - toggle no longer valid");
-    } else {
-        // The switch flips its own CHECKED state before this runs, so the widget
-        // is not the authority on intent — the controller reads the backend, the
-        // same way the sidebar toggle and the home tile do. It owns the print
-        // guard, the hardware-sensor refusal and the #1229 unload-first chain,
-        // none of which this handler had while it called the backend directly.
-        get_ams_device_operations_overlay().bypass_toggle_.toggle();
-
-        // Put the switch back where the backend actually is. A refusal, or an
-        // armed unload->enable chain that has not settled yet, leaves the widget
-        // flipped ahead of reality; sync_from_backend() republishes
-        // ams_bypass_active from every backend, and the notify re-applies the
-        // binding for the case where that value did NOT change (lv_subject_set_int
-        // is a no-op notify-wise when the value is unchanged, which is exactly
-        // the refusal case).
-        AmsState::instance().sync_from_backend();
-        lv_subject_notify(AmsState::instance().get_bypass_active_subject());
-    }
-
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void AmsDeviceOperationsOverlay::on_afc_unload_after_print_toggled(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[AmsDeviceOperationsOverlay] on_afc_unload_after_print_toggled");
-
-    auto* toggle = static_cast<lv_obj_t*>(lv_event_get_target(e));
-    if (!toggle || !lv_obj_is_valid(toggle)) {
-        spdlog::warn("[AmsDeviceOperationsOverlay] Stale callback - toggle no longer valid");
-    } else {
-        bool is_checked = lv_obj_has_state(toggle, LV_STATE_CHECKED);
-        spdlog::info("[AmsDeviceOperationsOverlay] AFC unload-after-print toggle: {}",
-                     is_checked ? "enabled" : "disabled");
-        SettingsManager::instance().set_afc_unload_after_print(is_checked);
-    }
-
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void AmsDeviceOperationsOverlay::on_always_show_bypass_spool_toggled(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[AmsDeviceOperationsOverlay] on_always_show_bypass_spool_toggled");
-
-    auto* toggle = static_cast<lv_obj_t*>(lv_event_get_target(e));
-    if (!toggle || !lv_obj_is_valid(toggle)) {
-        spdlog::warn("[AmsDeviceOperationsOverlay] Stale callback - toggle no longer valid");
-    } else {
-        bool is_checked = lv_obj_has_state(toggle, LV_STATE_CHECKED);
-        spdlog::info("[AmsDeviceOperationsOverlay] Always-show-bypass-spool toggle: {}",
-                     is_checked ? "enabled" : "disabled");
-        SettingsManager::instance().set_ams_always_show_bypass_spool(is_checked);
-    }
-
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void AmsDeviceOperationsOverlay::on_keep_spool_info_toggled(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[AmsDeviceOperationsOverlay] on_keep_spool_info_toggled");
-
-    auto* toggle = static_cast<lv_obj_t*>(lv_event_get_target(e));
-    if (!toggle || !lv_obj_is_valid(toggle)) {
-        spdlog::warn("[AmsDeviceOperationsOverlay] Stale callback - toggle no longer valid");
-    } else {
-        bool is_checked = lv_obj_has_state(toggle, LV_STATE_CHECKED);
-        spdlog::info("[AmsDeviceOperationsOverlay] Keep-spool-info-on-eject toggle: {}",
-                     is_checked ? "enabled" : "disabled");
-        SettingsManager::instance().set_ams_keep_spool_info_on_eject(is_checked);
-    }
-
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void AmsDeviceOperationsOverlay::on_force_bypass_controls_toggled(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[AmsDeviceOperationsOverlay] on_force_bypass_controls_toggled");
-
-    auto* toggle = static_cast<lv_obj_t*>(lv_event_get_target(e));
-    if (!toggle || !lv_obj_is_valid(toggle)) {
-        spdlog::warn("[AmsDeviceOperationsOverlay] Stale callback - toggle no longer valid");
-    } else {
-        bool is_checked = lv_obj_has_state(toggle, LV_STATE_CHECKED);
-        spdlog::info("[AmsDeviceOperationsOverlay] Force-bypass-controls toggle: {}",
-                     is_checked ? "enabled" : "disabled");
-        SettingsManager::instance().set_ams_force_bypass_controls(is_checked);
-        // Both gating subjects are recomputed from the backend rather than from
-        // the setting, so neither moves on its own when the override flips.
-        // AmsState drives the sidebar toggle and the path node; this overlay
-        // drives its own section.
-        AmsState::instance().sync_from_backend();
-        get_ams_device_operations_overlay().update_from_backend();
-    }
-
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void AmsDeviceOperationsOverlay::on_qidi_eject_distance_changed(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[AmsDeviceOperationsOverlay] on_qidi_eject_distance_changed");
-
-    auto* slider = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
-    if (!slider || !lv_obj_is_valid(slider)) {
-        spdlog::warn("[AmsDeviceOperationsOverlay] Stale callback - eject distance slider invalid");
-    } else {
-        int value = lv_slider_get_value(slider);
-        spdlog::info("[AmsDeviceOperationsOverlay] QIDI eject distance: {} mm", value);
-        SettingsManager::instance().set_qidi_eject_distance(value);
-
-        auto& overlay = get_ams_device_operations_overlay();
-        snprintf(overlay.qidi_eject_distance_buf_, sizeof(overlay.qidi_eject_distance_buf_),
-                 "%d mm", SettingsManager::instance().get_qidi_eject_distance());
-        lv_subject_copy_string(&overlay.qidi_eject_distance_display_subject_,
-                               overlay.qidi_eject_distance_buf_);
-    }
-
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void AmsDeviceOperationsOverlay::on_qidi_eject_velocity_changed(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[AmsDeviceOperationsOverlay] on_qidi_eject_velocity_changed");
-
-    auto* slider = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
-    if (!slider || !lv_obj_is_valid(slider)) {
-        spdlog::warn("[AmsDeviceOperationsOverlay] Stale callback - eject velocity slider invalid");
-    } else {
-        int value = lv_slider_get_value(slider);
-        spdlog::info("[AmsDeviceOperationsOverlay] QIDI eject velocity: {} mm/s", value);
-        SettingsManager::instance().set_qidi_eject_velocity(value);
-
-        auto& overlay = get_ams_device_operations_overlay();
-        snprintf(overlay.qidi_eject_velocity_buf_, sizeof(overlay.qidi_eject_velocity_buf_),
-                 "%d mm/s", SettingsManager::instance().get_qidi_eject_velocity());
-        lv_subject_copy_string(&overlay.qidi_eject_velocity_display_subject_,
-                               overlay.qidi_eject_velocity_buf_);
-    }
-
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void AmsDeviceOperationsOverlay::on_section_row_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[AmsDeviceOperationsOverlay] on_section_row_clicked");
-
-    auto* row = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
-    if (!row || !lv_obj_is_valid(row)) {
-        spdlog::warn("[AmsDeviceOperationsOverlay] on_section_row_clicked: invalid target");
-    } else {
-        auto& overlay = get_ams_device_operations_overlay();
-        auto index = reinterpret_cast<size_t>(lv_obj_get_user_data(row));
-
-        if (index >= overlay.cached_sections_.size()) {
-            spdlog::warn("[AmsDeviceOperationsOverlay] Invalid section index: {}", index);
-        } else {
-            const auto& section = overlay.cached_sections_[index];
-            spdlog::info("[AmsDeviceOperationsOverlay] Section clicked: {} ('{}')", section.id,
-                         section.label);
-
-            // Push the detail overlay for this section
-            auto& detail = get_ams_device_section_detail_overlay();
-            detail.show(overlay.parent_screen_, section.id, section.label);
-        }
-    }
-
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void AmsDeviceOperationsOverlay::on_reset_endless_spool_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[AmsDeviceOperationsOverlay] on_reset_endless_spool_clicked");
-    LV_UNUSED(e);
-
-    spdlog::info("[AmsDeviceOperationsOverlay] Reset Endless Spool button clicked");
-
-    // The reset wipes ALL failover config, so it needs a confirmation, not a
-    // bare tap. on_confirm re-fetches the backend so it cannot dangle if the
-    // panel/backend changed while the dialog was open; the dialog closes
-    // itself after the press.
-    //
-    // Both outcomes are announced. refresh() only re-derives
-    // can_reset_endless_spool_subject_ from editable(), which a reset does not
-    // change, and this overlay renders no endless-spool assignments at all (the
-    // backup arrows live on AmsPanel and are not refreshed from here) - so
-    // without a toast, wiping every spool's failover looks exactly like a no-op.
-    helix::ui::modal_confirm(
-        lv_tr("Reset Endless Spool?"),
-        lv_tr("This clears every spool's failover assignment. The print will stop on runout "
-              "until you set up failover again."),
-        ModalSeverity::Warning, lv_tr("Reset"), [] {
-            AmsBackend* b = AmsState::instance().get_backend();
-            if (b) {
-                AmsError result = b->reset_endless_spool();
-                if (!result.success()) {
-                    helix::ui::notify_ams_error(result, lv_tr("Reset endless spool failed"));
-                } else {
-                    NOTIFY_INFO("{}", lv_tr("Endless spool failover cleared for every slot"));
-                }
-                get_ams_device_operations_overlay().refresh();
-            }
-        });
-
-    LVGL_SAFE_EVENT_CB_END();
 }
 
 } // namespace helix::ui

@@ -227,51 +227,83 @@ whichever machine last ran it and turns the intended environment red instead.
 The screen list is *sourced from*, not hand-copied from,
 `scripts/screenshot-recipes.sh`: the test shells out to
 `bash -c 'source scripts/screenshot-recipes.sh; ...'` and walks the table through
-that script's own two accessors — `screenshot_recipe_tokens` to enumerate and
-`screenshot_recipe_for` to resolve — so a recipe added or renamed there shows up
-here without a second edit to keep in sync.
+that script's own two accessors, `screenshot_recipe_tokens` to enumerate and
+`screenshot_recipe_for` to resolve, so a recipe added or renamed there shows up
+here without a second edit. `_load_recipes()` raises with bash's stderr if the
+table comes back empty, because bash can refuse a declaration and still exit 0.
 
-Going through the accessors rather than reading the data variable is deliberate:
-this used to expand `${!SCREENSHOT_RECIPE[@]}` directly, which broke the moment
-that array did. (It was an associative array; macOS ships bash 3.2, which
-supports neither `declare -A` nor `declare -g` and *still exits 0* after
-refusing them, so the table read as empty on macOS and the failure surfaced as a
-`KeyError` at module scope. `_load_recipes()` now raises with bash's stderr if
-the table comes back empty.)
-
-Only 8 of the ~38 known recipe tokens are golden'd so far — deliberately, because
-`freeze()` cannot pin down everything a screen might show:
+Only a subset of the recipe tokens is golden'd, because `freeze()` cannot pin
+down everything a screen might show:
 
 - **Live mock telemetry** (`home`, `controls`, `filament`, `fan`, and any screen that
   leaves the Controls temperature card visible) drifts via the mock backend's
-  `simulation_thread_` (`moonraker_client_mock.cpp`) — a raw background thread, not
+  `simulation_thread_` (`moonraker_client_mock.cpp`), a raw background thread, not
   an LVGL timer, so it's invisible to both `freeze()` and `wait_idle()`.
 - **Wall-clock content** (`console`'s gcode log timestamps, `filament`'s usage-chart
   x-axis) is never the same twice by construction.
 - **Free-running spinners** (`camera`'s "Connecting Camera..." indicator) animate via
   `lv_anim` independent of `settings_animations_enabled`, so `freeze()` catches an
-  arbitrary arc position — the same category of issue the design spec calls out for
-  the print-select loading spinner.
-- **Modal backdrops** (`preflight-check`) can inherit jitter faintly through the dim
+  arbitrary arc position.
+- **Modal backdrops** (`preflight-check`) inherit jitter faintly through the dim
   scrim over a jittery panel underneath.
+- **`ams`**: the Bypass spool icon renders differently depending on how many
+  times its canvas was refreshed on the way to the same final state.
 
-Each of these was confirmed empirically (byte-identical captures compared across
-independent app boots, not just within one `capture(stable=True)` call) before being
-excluded — see the task-10 report for the evidence. Adding one of them later needs
-either a mock-side way to pin the drifting value, or accepting a masked/cropped
-comparison region; don't just re-add the token and hope.
+Adding one of them needs a mock-side way to pin the drifting value or an app fix
+for the widget; don't just re-add the token and hope.
+
+Each `HelixApp` gets a private `HELIX_CONFIG_DIR` and a private `HELIX_CACHE_DIR`
+(`helix/app.py`). The cache matters for print-select: the default thumbnail cache
+(`~/.cache/helix`) is shared by every helix-screen on the machine, each boot
+rewrites the cached PNGs there and drops their prescaled variants, so another
+instance can delete art this one is loading. A private cache also gives every
+boot the same cold start.
+
+#### Size and theme variants
+
+Each screen in the subset is also captured under the variants in `_VARIANTS`
+(`test_screens.py`): `small` (`-s small`, 480x400), `large` (`-s large`, 1024x600)
+and `light` (`--light`). The default variant (`""`, 800x480 dark) keeps the
+unsuffixed golden names (`settings.png`); every other variant's golden is
+`<screen>@<variant>.png` and its test id is `[<screen>@<variant>]`. Every
+case boots its own app: a panel's own state survives `ctl reset`, so in a shared
+app a capture depends on which screens ran before it. A full run takes about a
+minute.
+
+A (screen, variant) pair belongs in the corpus only once its capture is
+byte-identical across at least 20 independent app boots, including some run
+alongside other boots so the machine is loaded. A race that loses one boot in
+three on an idle box loses far more often under load. To add a variant or a
+screen:
+
+1. Add the entry to `_VARIANTS` (or the token to `_SUBSET`).
+2. Capture only the new goldens, so no existing one is overwritten, by naming
+   their test ids:
+   `.venv/bin/python -m pytest 'tests/ui/test_screens.py::test_screen_matches_golden[<screen>@<variant>]' --accept-goldens`
+3. Run those cases at least 20 times without `--accept-goldens`; each run is a
+   fresh boot. A pair that goes red has a race to find: compare `ctl geom` of a
+   passing and a failing boot and fix what differs. Do not mask it.
+4. Open every new PNG and confirm it shows the intended screen, at the intended
+   size and theme, fully settled.
+
+Two mock facts the corpus depends on:
+
+- **The mock printer boots unhomed.** `MoonrakerClientMock` reports
+  `toolhead.homed_axes` from one field on every path: the subscribe reply, an
+  object query and each simulation tick. `motion` shows the unhomed state (muted
+  axis letters, Z-down enabled).
+- **The USB drive arrives 1.5s after boot.** print-select waits on
+  `print_source_usb_present` before capturing. The source selector is exactly as
+  tall as the view toggle beside it, so the card grid, sized when the file list
+  first populates, is the same whether the drive arrives before or after that.
 
 Every golden'd screen also depends on `settings_animations_enabled` being off, or
 `NavigationManager`'s overlay slide+fade can still be mid-flight when `freeze()`
-runs, locking in a half-transitioned frame. This used to be a real bug: each
-`HelixApp` boots with its own private `HELIX_CONFIG_DIR` (to avoid lock-file
-collisions between instances), which bypassed `config/settings-test.json` entirely
-and fell back to the platform-capability default instead (`true` on native/desktop —
-confirmed via boot log: "animations=true"). `HelixApp.start()` (`helix/app.py`) now
-seeds each private config dir with `config/settings-test.json` before boot, so every
-instance gets the intended test defaults *and* lock isolation — no per-test
-workaround needed. If a future screen animates unexpectedly, check whether that
-seeding step is still wired up before adding a local fixture to paper over it again.
+runs. Each `HelixApp` boots with its own private `HELIX_CONFIG_DIR`, which
+bypasses `config/settings-test.json`, so `HelixApp.start()` seeds that dir with a
+minimal settings file that turns animations off. If a screen animates
+unexpectedly, check that the seeding step is still wired up before adding a local
+fixture.
 
 ### CI coverage: what runs, what doesn't, and why
 

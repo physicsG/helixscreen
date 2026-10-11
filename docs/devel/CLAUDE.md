@@ -7,9 +7,9 @@ All developer documentation lives here. When working on features, look up the re
 | Doc | When to read |
 |-----|-------------|
 | `DEVELOPMENT.md` | Build setup, dev environment, contributing |
-| `HELIXCTL.md` | Driving the UI / screenshots via `helix-screen ctl` (replaces the old `-p`/`--panel` flags). **Read the socket-isolation box first** — a bare `ctl` drives whichever instance started first and still reports success |
+| `HELIXCTL.md` | Driving the UI / screenshots via `helix-screen ctl`. **Read the socket-isolation box first** — a bare `ctl` drives whichever instance started first and still reports success |
 | `ARCHITECTURE.md` | The 15-minute whole-app model (XML → Subjects → C++) + the routing table into the chapter series. Start here for "how does the app fit together" |
-| `architecture/` | The 16-chapter architecture guide — one subsystem per chapter, ~1 hour each. `architecture/README.md` is the "I want to work on..." index |
+| `architecture/` | The 17-chapter architecture guide — one subsystem per chapter, ~1 hour each. `architecture/README.md` is the "I want to work on..." index |
 | `THREADING.md` | **Single source of truth** for threading, async-callback, and object-lifetime rules. Read before any code that crosses a thread boundary, observes a subject, or destroys a widget |
 | `BRANCHING.md` | The two long-lived branches, which way fixes flow between them, and the `RELEASE_CHANNEL` rule that keeps a trunk tag off the stable channel |
 | `BUILD_SYSTEM.md` | Makefile internals, make target reference, cross-compilation, worktree workflow, ccache, patches |
@@ -22,7 +22,6 @@ All developer documentation lives here. When working on features, look up the re
 | `COPYRIGHT_HEADERS.md` | SPDX license headers |
 | `RELEASE_PROCESS.md` | Release workflow, versioning |
 | `CHANGELOG_STYLE.md` | How `CHANGELOG.md` entries are written: user-facing voice, hyphen separator, bare `(#N)` links, daily vs milestone shapes. Read before drafting a release's changelog section |
-| `RELEASE_1_0_CHECKLIST.md` | Everything blocking `v1.0.0` and the 1.1 devel track — the atomic `release/1.0` branch cut + `RELEASE_CHANNEL` flip, open milestone issues, what is and is not verified. Delete once 1.0 ships |
 | `CHANGELOG_1_1_DRAFT.md` | Running release notes for everything on `main` that is not in the 1.0 release. Kept out of `CHANGELOG.md` so the release tooling owns that file; becomes the `## [1.1]` entry at release, then delete |
 | `CI_CD_GUIDE.md` | CI pipeline, GitHub Actions |
 | `ANDROID_PLAY_STORE.md` | Play Store publishing pipeline, one-time setup, promotion flow |
@@ -42,6 +41,10 @@ All developer documentation lives here. When working on features, look up the re
 | `THEME_SYSTEM.md` | Theme internals: ThemeManager style architecture, StyleRole roles, adding themed widgets |
 | `THEME_CONTRIBUTOR_GUIDE.md` | For people **creating themes** — JSON schema, palette design, testing. No C++ needed. |
 | `LAYOUT_SYSTEM.md` | Layout system internals: LayoutManager C++ API, auto-detection logic, and the home widget grid (`GridLayout` sizing, `assets/config/default_layout.json` anchors, widget span/`min_colspan` authoring) |
+| `HOME_EDIT_MODE.md` | Home-grid edit mode: the session over a page, the selection, grab and click rules, the event shield and the events that end a gesture (release, press lost, indev reset), the carousel swipe policy, cross-page drag and the next-page slot, page creation and pruning. Read before touching `GridEditMode` or HomePanel's edit handlers |
+| `PANEL_WIDGET_GUIDE.md` | Home widget authoring: registry def, widget class, XML; the measured-layout reference pattern (pure decision fn, subjects, binds) with nozzle_temps as exemplar |
+| `PLUGIN_DEVELOPMENT.md` | Writing a Lua plugin: manifest, XML rules, the helix.* API, permissions, limits, debugging |
+| `PLUGIN_TUTORIAL.md` | Step-by-step build of the maintenance-meter widget plugin: annotated code, the why of each decision, the adaptive size ladder |
 | `PAGE_SCROLL_BUTTONS.md` | Chevron page-scroll gutter: where it auto-attaches and why it stops at a home widget tile. On by default on ESP32 only |
 | `TRANSLATION_SYSTEM.md` | i18n: YAML strings -> code generation -> runtime lookups |
 | `TRANSLATION_CONTRIBUTOR_GUIDE.md` | For **translators** — how to improve existing translations or add a new language. No code needed. |
@@ -49,9 +52,10 @@ All developer documentation lives here. When working on features, look up the re
 | `architecture/16-gcode-pipeline.md` | G-code from file to screen: parse/scan paths, footer fast path, tools-used cache, render modes, object picking. Start here for viewer work |
 | `GCODE_VIEWER_CONFIG.md` | GCode viewer configuration |
 | `BED_MESH_RENDERING_INTERNALS.md` | Bed mesh 3D rendering internals |
+| `GPU_ACCELERATION.md` | What the GPU is worth on real boards: measured EGL vs software CPU/throughput/RSS per board, the four draw-unit rungs, why nanovg is unusable upstream, and the `LV_DRAW_BUF_STRIDE_ALIGN` invariant. Read before proposing rendering-path work |
 | `FILAMENT_PATH_CANVAS.md` | Filament-path canvas: 3-layer model, pathgeo arc-fillet routing, shared tube stroker, RenderCtx phases, topology renderers (linear/hub/parallel/mixed) |
 | `PRE_RENDERED_IMAGES.md` | Pre-rendered image pipeline |
-| `GESTURE_RECOGNITION.md` | Research notes: pinch-to-zoom via LVGL 9.5 gesture recognition on evdev multi-touch |
+| `GESTURE_RECOGNITION.md` | Pinch zoom and two-finger pan: LVGL recognizers, view_gestures, per-view mapping |
 | `GALLERY.md` | Screenshots of the main panels, regenerated by `scripts/screenshot.sh` |
 
 ## Feature Systems
@@ -59,29 +63,37 @@ All developer documentation lives here. When working on features, look up the re
 | Doc | When to read |
 |-----|-------------|
 | `LABEL_PRINTER_SYSTEM.md` | Label printing: Brother QL, Phomemo, Niimbot, MakeID protocols; USB/TCP/Bluetooth transports |
-| `FILAMENT_MANAGEMENT.md` | Filament system hub: multi-backend architecture, slot metadata, filament-op dispatch, endless spool, UI panels, dryer, device ops, mock mode, add-a-backend guide |
-| `FILAMENT_BACKEND_AFC.md`, `FILAMENT_BACKEND_HAPPY_HARE.md`, `FILAMENT_BACKEND_ACE.md`, `FILAMENT_BACKEND_TOOLCHANGER.md`, `FILAMENT_BACKEND_AD5X_IFS.md`, `FILAMENT_BACKEND_CFS.md`, `FILAMENT_BACKEND_QIDI_BOX.md`, `FILAMENT_BACKEND_SNAPMAKER_U1.md` | One leaf per filament backend: protocol, data sources, G-code commands, topology, capability table |
+| `FILAMENT_MANAGEMENT.md` | Filament system hub: multi-backend architecture, slot metadata, filament-op dispatch, endless spool, UI panels, dryer commands, device ops, mock mode, add-a-backend guide |
+| `FILAMENT_ENVIRONMENT_ZONES.md` | Filament boxes (heated and passive): the `EnvironmentZone` model, the three discovery paths, drying-state folding and the concurrency cap, the tabs-vs-list presentation rule, and what a backend must publish to get a box on screen |
+| `FILAMENT_BACKEND_AFC.md`, `FILAMENT_BACKEND_OPENAMS.md`, `FILAMENT_BACKEND_HAPPY_HARE.md`, `FILAMENT_BACKEND_ACE.md`, `FILAMENT_BACKEND_TOOLCHANGER.md`, `FILAMENT_BACKEND_AD5X_IFS.md`, `FILAMENT_BACKEND_CFS.md`, `FILAMENT_BACKEND_QIDI_BOX.md`, `FILAMENT_BACKEND_SNAPMAKER_U1.md` | One leaf per filament backend: protocol, data sources, G-code commands, topology, capability table |
 | `FILAMENT_BACKEND_MEDUSAHC.md` | MedusaHC hotend changer. NOT its own backend: it is a klipper-toolchanger printer plus two add-ons (dock sensors that outrank `toolchanger.tool_number`, and a servo feeder). Read with `FILAMENT_BACKEND_TOOLCHANGER.md` |
-| `QIDI_BOX_HEATER.md` | QIDI Box PTC heater RE reference: Klipper objects, G-code commands, firmware variants, HelixScreen integration |
-| `CREALITY_CFS_INTERNALS.md` | Creality K1-family CFS box-wrapper RE reference: `BOX_*` command semantics, <tn_data.json>, deferred-failure and resume traps, staged loading, serial timeouts. Read before changing anything the CFS backend emits on K1 |
+| `printer-research/QIDI_BOX_HEATER.md` | QIDI Box PTC heater RE reference: Klipper objects, G-code commands, firmware variants, HelixScreen integration |
+| `printer-research/CREALITY_CFS_K2_INTERNALS.md` | Creality K2 CFS module RE reference: box.cfg, `box` schema variants and field encodings, `BOX_*`/`M8200` commands, error codes, runout and auto-refill, the community Kalico port |
+| `printer-research/CREALITY_CFS_K1_INTERNALS.md` | Creality K1-family CFS box-wrapper RE reference: `BOX_*` command semantics, <tn_data.json>, deferred-failure and resume traps, staged loading, serial timeouts. Read before changing anything the CFS backend emits on K1 |
 | `FILAMENT_SLOT_METADATA.md` | Internal notes on `FilamentSlotOverrideStore`: per-backend integration, hardware-event clearing, lifetime discipline, local cache, legacy migration. Pair with `../specs/filament_slots.md` for the public wire format. |
 | `MULTI_EXTRUDER_TEMPERATURE.md` | Multi-extruder temperature tracking, ExtruderInfo, dynamic subjects |
 | `TOOL_ABSTRACTION.md` | ToolState singleton, ToolInfo, tool-to-backend mapping, DetectState |
 | `INPUT_SHAPER.md` | Calibration panels, frequency response charts, CSV parser, PID |
 | `BELT_TUNER.md` | Pluck-based belt tension tuner: Klipper UDS accel stream, pluck detection, harmonic pitch estimation. **Read its Validation status section first - the feature is green in CI and has never measured a real belt, and its thresholds are circular** |
+| `BELT_TENSION.md` | Belt Tension check: two `TEST_RESONANCES` sweeps compared as curves, the Start gate, provisional verdict constants, mock knobs |
 | `PREPRINT_PREDICTION.md` | ETA prediction engine, phase timing, weighted history |
 | `EXCLUDE_OBJECTS.md` | Object exclusion, per-object thumbnails, slicer setup |
 | `PRINT_STATE_MACHINE.md` | Print lifecycle state machine: states, transitions, guards, resource lifecycle |
 | `PRINT_CONTROL_BUTTONS.md` | PrintControlButtons controller: owned subjects, pure view function, optimistic pending-action machine, 2x1 home widget, panel delegation |
-| `PRINT_START_PROFILES.md` | Print start phase detection: evidence kinds, JSON profile schema, authoring a profile for a new printer |
-| `PRINT_START_OBSERVERS.md` | The whole pre-print observer system: arming, the five signal sources (console, probe lines, bed-mesh flap, toolhead position, fallbacks), threading/lifetime rules, and which tests pin what |
+| `PRINT_START_PROFILES.md` | Print start phase detection, developer guide: the observer pipeline, arming, the five signal sources (console, probe lines, bed-mesh flap, toolhead position, fallbacks), evidence kinds, JSON profile schema, authoring a profile for a new printer, threading/lifetime rules, and which tests pin what |
 | `PRINT_START_INTEGRATION.md` | User-facing macro setup for print start tracking |
 | `Z_OFFSET_PERSISTENCE.md` | Firmware that stores the z-offset outside `gcode_move` and zeroes the live one between prints (ZMOD on AD5M/AD5X): why the idle reading lies, the `persisted_z_offset` subjects, the relative-vs-absolute `SET_GCODE_OFFSET` rule, and the one-row recipe for adding a firmware |
-| `POWER_LOSS_RECOVERY.md` | Resume-after-power-loss: the passive Snapmaker backend vs the **active, side-effectful** Creality probe, capability detection via `print_stats.power_loss` presence, and the mandatory probe-before-resume safety invariant |
+| `POWER_LOSS_RECOVERY.md` | Resume-after-power-loss: the passive Snapmaker and Qidi backends vs the **active, side-effectful** Creality probe, capability detection per firmware, and the mandatory probe-before-resume safety invariant |
 | `UPDATE_SYSTEM.md` | Update channels (stable/beta/dev), R2 CDN, Moonraker updater |
-| `SOUND_SYSTEM.md` | Audio architecture, JSON themes, backends (SDL, ALSA, PWM, M300). User guide: `../user/guide/settings/display-sound.md#sound` |
+| `SOUND_SYSTEM.md` | Audio architecture, JSON themes, backends (SDL, ALSA, PWM, M300). User guide: `../user/guide/settings/sound.md` |
+| `SCREENSAVERS.md` | Screensavers: the registry, shared overlay/canvas/timer/pixel writer, the CPU gate and stored levels, color depth in builds, adding a saver |
 | `LED_CONTROL.md` | LED control system: 5 backends, auto-state lighting, control/settings overlays, home panel widget |
+| `SENSOR_MANAGEMENT.md` | Sensor managers (filament, temperature, humidity, probe, accel, width, load cell): discovery inputs, the `for_each_sensor_manager` fan-out, subject encodings, runout vs presence, toast suppression, bypass arming, config persistence, `SensorState`, adding a sensor |
+| `ACTION_PROMPTS.md` | Klipper `action:prompt_*` / `action:notify` macros: parser and state machine, the ActionPromptModal layout and colors, how button gcode reaches the printer, unsupported directives, mock/demo knobs, adding a directive |
+| `BLUETOOTH_SYSTEM.md` | Bluetooth plugin internals: dlopen loader and C ABI versioning, BusThread and which thread each call runs on, context ownership, discovery filtering, pairing/bonding, RFCOMM/SDP and BLE GATT data paths, failure modes, adding an ABI function |
+| `USB_MANAGEMENT.md` | USB drives (mount-table detection, classification, the root-only fallback automounter), the print-select USB source and its subjects, USB label printer detection/transport, HID scanner choice, the `--test` mock drive |
 | `CHAMBER_HEATER.md` | Chamber heaters: backend registry (generic/dragonbreath/panda_breath), discovery, diagnostics subjects + card, ceiling rules, arbitration, verification logs |
+| `BED_DRYING.md` | Drying filament on the heated bed: the enclosure capability, the flow, the spools-on-the-bed latch and its five send-layer choke points, persistence across restarts and power loss |
 | `PRINTER_MANAGER.md` | Printer overlay, custom images, inline name editing |
 | `MULTI_PRINTER.md` | Multi-printer management: config v4, soft restart, printer switching |
 | `TIMELAPSE.md` | Moonraker timelapse plugin integration |
@@ -95,15 +107,19 @@ All developer documentation lives here. When working on features, look up the re
 | Doc | When to read |
 |-----|-------------|
 | `INSTALLER.md` | Installation system, KIAUH extension, shell tests (bats) |
+| `printers/README.md` | Index of the per-printer support docs, and which shipped targets still lack one |
+| `printers/FLASHFORGE_AD5M_SUPPORT.md` | FlashForge Adventurer 5M / Pro: Forge-X, Klipper Mod and ZMOD, the static `ad5m` and buildroot `ad5m-br` targets, the Allwinner backlight quirks |
 | `printers/CREALITY_K1_SUPPORT.md` | Creality K1 series platform (K1, K1C, K1 Max) |
 | `printers/QIDI_SUPPORT.md` | QIDI platform (Q2 + Max 4 on-device; Plus 4 + older 3-series TJC models are remote-only) |
 | `printers/SNAPMAKER_U1_SUPPORT.md` | Snapmaker U1 toolchanger platform |
 | `printers/CREALITY_K2_SUPPORT.md` | Creality K2 series platform |
 | `printers/FLASHFORGE_AD5X_SUPPORT.md` | FlashForge Adventurer 5X (MIPS, ZMOD) |
-| `YOCTO_BUILD.md` | Building HelixScreen as a Yocto recipe |
+| `printers/FLASHFORGE_CREATOR5_PRO_SUPPORT.md` | FlashForge Creator 5 line, Pro and heater-free (Ingenic X2000 MIPS, unified `mips` target): both firmwares, the model split on the chamber heater, the Z-Mod tool changer support and its `creator5_zmod` mock persona |
+| `printers/ELEGOO_CENTAURI_CARBON_YOCTO.md` | Elegoo Centauri Carbon: the `cc1` and `yocto` targets, and the local Yocto (OpenCentauri COSMOS) dev loop |
 | `LAN_CLIENT_AUTHORIZATION.md` | Firmware-brokered LAN pairing: firmwares that ask the printer's own screen to approve a slicer or phone app (Snapmaker Orca / Snapmaker App on a U1). Protocol, the no-capability-gate design, and the traps |
-| `AD5M_KMOD_VARIANT.md` | Building HelixScreen as a native variant inside the AD5M Klipper Mod firmware |
-| `plans/ESP32_NATIVE_AUDIT.md` | ESP32-S3 (BTT K-Touch) native-port feasibility audit — memory/flash/render budgets behind the `firmware/` port |
+| `architecture/17-esp32-firmware.md` | The native ESP32-S3 (BTT K-Touch) firmware's architecture: the curated `app_srcs.txt` subset, components, internal-SRAM memory model, tasks, boot order, vsync presenter, networking, storage, OTA, crash fallback. Read before touching `firmware/helixscreen-esp32/` |
+| `ESP32_PORT.md` | Hands-on K-Touch firmware guide: what a shared `src/` change must respect, build and flash recipe, `sdkconfig.local` options, serial console, debugging table, gates |
+| `ESP32_NATIVE_AUDIT.md` | ESP32-S3 native-port feasibility audit: the memory, flash and render measurements behind the port's feature gates |
 | `ENVIRONMENT_VARIABLES.md` | All runtime and build env vars |
 
 ## Integration
@@ -112,15 +128,14 @@ All developer documentation lives here. When working on features, look up the re
 |-----|-------------|
 | `MOONRAKER_ARCHITECTURE.md` | Moonraker API abstraction, WebSocket integration |
 | `RPC_ERROR_OWNERSHIP.md` | Who reports a failed JSON-RPC call: the caller's UI, the tracker's generic fallback, or `GcodeErrorRouter`'s `!!` broadcast. Read before adding an `on_error` to any gcode send |
-| `PLUGIN_DEVELOPMENT.md` | Plugin API, lifecycle, UI injection, threading, examples |
 | `TELEMETRY_ADMIN.md` | Telemetry pipeline, Analytics Engine, dashboard, scripts, secrets |
 
 ## Planning & Research
 
 | Doc | When to read |
 |-----|-------------|
-| `plans/` | The single tracked home for in-flight plans and specs — **point-in-time, not current truth.** Scaffolding, deleted in the same change that ships the work (lifecycle convention: `../CLAUDE.md`). A plan records what was intended when it was written; several prescribe approaches the shipped code has since diverged from, and they read as instructions. Verify every predicate against the code before following one. Live example: `docs/devel/plans/2026-06-25-ad5x-ifs-seated-chan-robustness.md#"Fix 2 — Persist last-known seated slot across restart (RC2 + cold-boot floor)"` tells you to gate on `head_filament_`, which `include/ams_backend_ad5x_ifs.h` now documents as untrustworthy on its own — the shipped gate is `head_switch_seen_ && !head_switch_present_`. |
-| `printer-research/` | Printer-specific research notes |
+| `plans/` | The single tracked home for in-flight plans and specs — **point-in-time, not current truth.** Scaffolding, deleted in the same change that ships the work (lifecycle convention: `../CLAUDE.md`). A plan records what was intended when it was written and reads as instructions; several prescribe approaches the shipped code has since diverged from. Verify every predicate against the code before following one. |
+| `printer-research/README.md` | Printer research index, plus the overview matrix of every printer's SoC, panel, firmware, target and support status |
 | `printer-research/FLASHFORGE_AD5X_IFS_ANALYSIS.md` | AD5X IFS protocol reverse engineering |
 | `printer-research/ANYCUBIC_ACE_KOBRA_S1_LOG_ANALYSIS.md` | Kobra S1 + ACE Pro real-log analysis: mainline-Python Klipper fork path (`[ace_status]`), command surface, inventory model |
 

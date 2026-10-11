@@ -13,6 +13,12 @@
 
 namespace helix::printer {
 
+namespace detail {
+/// When non-empty, the user overlay is `<dir>/user_filaments.json` instead of
+/// the user config dir. The test sandbox points it at its own directory.
+std::string& user_overlay_dir_ref();
+} // namespace detail
+
 /// Fully-resolved filament: product deltas merged over the base material type.
 struct EffectiveFilament {
     std::string id, brand, name, type;
@@ -83,7 +89,7 @@ class FilamentCatalog {
     static std::map<std::string, std::string> load_user_orca_type_map_from(const std::string& path);
 
     /// Atomically replace the user overlay's `filaments` section with
-    /// `products`, preserving any existing `orca_type_map`. Legacy bare-array
+    /// `products`, preserving its other sections (`types`, `orca_type_map`). Legacy bare-array
     /// overlays are migrated to object form on first save. Caller provides
     /// pre-built product objects (typically from a modal's form fields); each
     /// entry should carry at minimum an `id`. Written via temp-file + rename
@@ -103,7 +109,7 @@ class FilamentCatalog {
     /// install must still be able to create the file). Returns "" only for an
     /// empty list. Exposed for tests; `save_user_products` uses it with the
     /// built-in user-path list.
-    static std::string choose_overlay_write_path(const char* const* paths, std::size_t n);
+    static std::string choose_overlay_write_path(const std::vector<std::string>& paths);
 
     /// Read the user overlay's authored `filaments` entries as raw JSON objects
     /// (sparse — type inheritance is NOT applied), for read-modify-write by the
@@ -113,6 +119,31 @@ class FilamentCatalog {
     static std::vector<nlohmann::json> load_user_products();
     /// Explicit-path variant for tests / non-default locations.
     static std::vector<nlohmann::json> load_user_products_from(const std::string& path);
+
+    /// The overlay's `types` entries as raw objects: a sparse patch over the
+    /// shipped type of the same name, or a new type. Empty for a bare-array
+    /// overlay, a missing one, or one that cannot be parsed.
+    static std::vector<nlohmann::json> load_user_types();
+    /// Explicit-path variant for tests / non-default locations.
+    static std::vector<nlohmann::json> load_user_types_from(const std::string& path);
+    /// Replace the overlay's `types` section, with save_user_products' write
+    /// guarantees and preserving the other sections.
+    static bool save_user_types(const std::vector<nlohmann::json>& types);
+    /// Explicit-path variant for tests / non-default locations.
+    static bool save_user_types_to(const std::vector<nlohmann::json>& types,
+                                   const std::string& path);
+
+    /// True when @p path exists, holds more than whitespace, and does not parse.
+    /// A missing or blank file is no overlay yet, not a corrupt one.
+    static bool overlay_file_is_corrupt(const std::string& path);
+
+    /// Where the shipped filaments.json may live, in search order. The first
+    /// entry resolves under asset_root(), the only one the firmware can reach.
+    static std::vector<std::string> builtin_candidate_paths();
+    /// The first shipped asset on the search path that exists, or "".
+    static std::string builtin_asset_path();
+    /// The first user overlay on the search path that exists, or "".
+    static std::string user_overlay_path();
     /// Insert `product` into `products`, replacing an existing entry with the
     /// same `"id"` (exact match) in place (preserving order), else appending.
     /// Returns true if an existing entry was replaced (an edit), false if
@@ -140,6 +171,9 @@ class FilamentCatalog {
                                                        const std::string& type) const;
 
   private:
+    static bool save_user_section_to(const char* key, nlohmann::json value,
+                                     const std::string& path);
+
     std::vector<EffectiveFilament> products_;
     std::unordered_map<std::string, size_t> by_id_;
     // scheme -> (code -> product index)

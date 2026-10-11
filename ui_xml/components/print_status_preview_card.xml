@@ -28,22 +28,16 @@
     <!-- The art band: whatever the column leaves above the strip. -->
     <preview_stack name="preview_clear_area"
                    width="100%" flex_grow="1" gradient_name="gradient_background" viewer_name="print_gcode_viewer"
-                   thumbnail_name="print_thumbnail" hint_name="rotate_hint"
-                   gradient_hidden="gcode_viewer_mode eq 1 or exclude_map_active eq 1"
+                   thumbnail_name="print_thumbnail" hint_name="rotate_hint" gradient_hidden="exclude_map_active eq 1"
                    viewer_hidden="gcode_viewer_mode eq 0"
                    thumbnail_hidden="gcode_viewer_mode gt 0 or exclude_map_active eq 1"
                    hint_hidden="gcode_viewer_mode ne 1"/>
 
-    <!-- Objects list button: top-left corner, visible only when multi-object print -->
-    <lv_obj name="btn_objects"
-            width="#icon_button_size_lg" height="#icon_button_size_lg" ignore_layout="true" align="top_left"
-            style_translate_x="#space_md" style_translate_y="#space_md" style_bg_color="#card_bg" style_bg_opa="180"
-            style_radius="#icon_button_radius_lg" clickable="true" style_pad_all="0" scrollable="false">
-      <bind_flag_if_eq subject="exclude_objects_available" flag="hidden" ref_value="0"/>
-      <lv_label text="#icon_debug_step_over"
-                style_text_font="mdi_icons_24" style_text_color="#text_muted" align="center"/>
-      <event_cb trigger="clicked" callback="on_print_status_objects"/>
-    </lv_obj>
+    <!-- Skip-objects button: top-left corner, visible only for a multi-object print -->
+    <exclude_objects_button name="btn_objects"
+                            ignore_layout="true" align="top_left" style_translate_x="#space_md"
+                            style_translate_y="#space_md" callback="on_print_status_objects"
+                            hidden_when="exclude_objects_available eq 0"/>
 
     <!-- View mode toggle: switches between progress (ghost layers) and complete view -->
     <!-- Position shifts right when objects button is visible (managed in C++) -->
@@ -51,6 +45,7 @@
             width="#icon_button_size_lg" height="#icon_button_size_lg" ignore_layout="true" align="top_left"
             style_translate_x="#space_md" style_translate_y="#space_md" style_bg_color="#card_bg" style_bg_opa="180"
             style_radius="#icon_button_radius_lg" clickable="true" style_pad_all="0" scrollable="false">
+      <style name="styles.press_wash" selector="pressed"/>
       <bind_flag_if_eq subject="gcode_viewer_mode" flag="hidden" ref_value="0"/>
       <lv_label name="btn_view_toggle_icon"
                 bind_text="view_toggle_icon" style_text_font="mdi_icons_24" style_text_color="#text_muted"
@@ -72,9 +67,8 @@
       <!-- Uses ui_button for auto-contrast text via update_button_text_contrast() -->
       <ui_button name="success_badge"
                  width="content" height="content" variant="success" icon="check_circle" text="Print Complete!"
-                 translation_tag="Print Complete!" clickable="false" focusable="false" style_radius="#space_lg"
-                 style_pad_left="#space_md" style_pad_right="#space_md" style_pad_top="#space_sm"
-                 style_pad_bottom="#space_sm"/>
+                 clickable="false" focusable="false" style_radius="#space_lg" style_pad_left="#space_md"
+                 style_pad_right="#space_md" style_pad_top="#space_sm" style_pad_bottom="#space_sm"/>
     </lv_obj>
 
     <!-- PRINT CANCELLED OVERLAY: shown via show_cancelled_overlay (see COMPLETE above). -->
@@ -89,9 +83,8 @@
       <!-- Uses ui_button for auto-contrast text via update_button_text_contrast() -->
       <ui_button name="cancel_badge"
                  width="content" height="content" variant="warning" icon="cancel" text="Print Cancelled"
-                 translation_tag="Print Cancelled" clickable="false" focusable="false" style_radius="#space_lg"
-                 style_pad_left="#space_md" style_pad_right="#space_md" style_pad_top="#space_sm"
-                 style_pad_bottom="#space_sm"/>
+                 clickable="false" focusable="false" style_radius="#space_lg" style_pad_left="#space_md"
+                 style_pad_right="#space_md" style_pad_top="#space_sm" style_pad_bottom="#space_sm"/>
     </lv_obj>
 
     <!-- PRINT ERROR OVERLAY: shown via show_error_overlay (see COMPLETE above). -->
@@ -106,9 +99,8 @@
       <!-- Uses ui_button for auto-contrast text via update_button_text_contrast() -->
       <ui_button name="error_badge"
                  width="content" height="content" variant="danger" icon="alert_circle" text="Print Failed"
-                 translation_tag="Print Failed" clickable="false" focusable="false" style_radius="#space_lg"
-                 style_pad_left="#space_md" style_pad_right="#space_md" style_pad_top="#space_sm"
-                 style_pad_bottom="#space_sm"/>
+                 clickable="false" focusable="false" style_radius="#space_lg" style_pad_left="#space_md"
+                 style_pad_right="#space_md" style_pad_top="#space_sm" style_pad_bottom="#space_sm"/>
     </lv_obj>
 
     <!-- PRINT PAUSED OVERLAY: shown while print is in PAUSED state. Driven by   -->
@@ -139,7 +131,7 @@
         <lv_obj width="content"
                 height="content" style_pad_all="0" style_pad_gap="0" style_border_width="0" style_bg_opa="0"
                 flex_flow="column" style_flex_cross_place="center" scrollable="false">
-          <lv_label text="Print Paused" translation_tag="Print Paused" style_text_align="center"/>
+          <lv_label text="Print Paused" style_text_align="center"/>
           <lv_label name="paused_badge_reason" bind_text="print_pause_reason" style_text_align="center">
             <bind_flag_if_eq subject="print_pause_reason_visible" flag="hidden" ref_value="0"/>
           </lv_label>

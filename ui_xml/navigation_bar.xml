@@ -11,67 +11,149 @@
     <px name="nav_width_large" value="132"/>
     <px name="nav_width_xlarge" value="148"/>
     <px name="nav_width_xxlarge" value="176"/>
+
+    <!-- Nav bar inactive-icon size: one rung below #icon_size, so the selected
+         button reads larger as well as brighter. micro matches #icon_size
+         instead, because one rung down there is a 16px face and a 16px outline
+         glyph has strokes too thin to read in a 42px strip.
+         test_nav_icon_size_ladder.cpp enforces the relationship. -->
+    <string name="icon_size_nav_inactive_micro" value="md"/>
+    <string name="icon_size_nav_inactive_tiny" value="sm"/>
+    <string name="icon_size_nav_inactive_small" value="sm"/>
+    <string name="icon_size_nav_inactive_medium" value="md"/>
+    <string name="icon_size_nav_inactive_large" value="md"/>
+    <string name="icon_size_nav_inactive_xlarge" value="md"/>
+    <string name="icon_size_nav_inactive_xxlarge" value="md"/>
+
+    <!-- Navbar E-stop diameter: the larger of #button_height and 44px, so the
+         target never shrinks below the circles it stands in for. micro is
+         capped at the 42px navbar width. -->
+    <px name="nav_estop_size_micro" value="42"/>
+    <px name="nav_estop_size_tiny" value="44"/>
+    <px name="nav_estop_size_small" value="48"/>
+    <px name="nav_estop_size_medium" value="52"/>
+    <px name="nav_estop_size_large" value="72"/>
+    <px name="nav_estop_size_xlarge" value="80"/>
+    <px name="nav_estop_size_xxlarge" value="96"/>
   </consts>
+  <styles>
+    <!-- One bar, two axes. Each pair is bound complementarily on ui_is_portrait
+         so exactly one is ever live, and the attributes they carry must NOT
+         also appear inline on the element: an inline width/height/pad is a
+         local style and outranks every added style, which would pin the bar to
+         one orientation with nothing failing. -->
+    <!-- Landscape: full-height strip on the leading edge, buttons stacked down it. -->
+    <style name="nav_bar_landscape"
+           width="#nav_width" height="100%" flex_flow="column" pad_top="#space_xl" pad_bottom="#space_xl" pad_left="0"
+           pad_right="0"/>
+    <!-- Portrait: full-width bar across the bottom, buttons spread along it.
+         The height reuses the shared button_height_lg touch-target ladder. -->
+    <style name="nav_bar_portrait"
+           width="100%" height="#button_height_lg" flex_flow="row" pad_left="#space_xl" pad_right="#space_xl"
+           pad_top="0" pad_bottom="0"/>
+    <!-- The edit-mode buttons are the only children without flex_grow, so they
+         are the only ones whose main-axis size the bar does not compute. Height
+         cannot come from these styles: ui_button_create sets a local height,
+         which wins. Landscape therefore caps the inline 100%/90% height back
+         down to one button_height, the value that local style already holds. -->
+    <style name="nav_btn_edit_add_landscape" width="100%" max_height="#button_height" min_height="48"/>
+    <style name="nav_btn_edit_add_portrait" width="content" min_width="48"/>
+    <style name="nav_btn_edit_done_landscape" width="90%" max_height="#button_height" min_height="36"/>
+    <style name="nav_btn_edit_done_portrait" width="content" min_width="36"/>
+    <!-- Nav icon crossfade: each pair's checked icon sits at full opacity and
+         scale, the other faded and shrunk. Both icons of a pair carry both
+         styles below - the transition lives on the base style because a
+         style is scanned when its own state bits are a subset of the state
+         being entered: state 0 (the base) is a subset of every state, so it
+         is scanned on both entry and exit, while a checked-only declaration
+         is scanned only when entering checked and stays silent on the way
+         out; the "on" style then sets the properties explicitly, since equal
+         endpoints are a no-op and text_opa is inheritable. -->
+    <style name="nav_icon_fade"
+           text_opa="0" transform_scale_x="205" transform_scale_y="205" transform_pivot_x="50%" transform_pivot_y="50%"
+           transition="text_opa|transform_scale_x|transform_scale_y 180ms ease_out"/>
+    <style name="nav_icon_fade_on" text_opa="255" transform_scale_x="256" transform_scale_y="256"/>
+  </styles>
   <view extends="lv_obj"
-        width="#nav_width" height="100%" style_pad_top="#space_xl" style_pad_bottom="#space_xl" style_pad_left="0"
-        style_pad_right="0" flex_flow="column" style_flex_main_place="start" style_flex_track_place="center"
+        style_layout="flex" style_flex_main_place="center" style_flex_track_place="center"
         style_flex_cross_place="center" style_border_width="0" style_radius="0" scrollable="false"
         style_bg_color="#card_bg" style_bg_opa="255">
+    <bind_style_if_eq name="nav_bar_portrait" subject="ui_is_portrait" ref_value="1"/>
+    <bind_style_if_not_eq name="nav_bar_landscape" subject="ui_is_portrait" ref_value="1"/>
     <!-- ================================================================== -->
     <!-- Edit Mode Buttons - visible only during home panel grid edit      -->
     <!-- ================================================================== -->
     <!-- Add Widget (+) button -->
     <ui_button name="nav_btn_edit_add"
-               width="100%" style_min_height="48" variant="ghost" flex_flow="column" style_flex_main_place="center"
+               height="100%" variant="ghost" flex_flow="column" style_flex_main_place="center"
                style_flex_cross_place="center" style_flex_track_place="center" style_border_width="0" hidden="true">
+      <bind_style_if_eq name="nav_btn_edit_add_portrait" subject="ui_is_portrait" ref_value="1"/>
+      <bind_style_if_not_eq name="nav_btn_edit_add_landscape" subject="ui_is_portrait" ref_value="1"/>
       <bind_flag_if_eq subject="home_edit_mode" flag="hidden" ref_value="0"/>
       <icon src="plus" size="#icon_size" variant="primary" clickable="false" event_bubble="true"/>
       <event_cb trigger="clicked" callback="on_edit_add_widget_clicked"/>
     </ui_button>
     <!-- Done button (exits edit mode) — filled primary style -->
-    <ui_button name="nav_btn_edit_done"
-               width="90%" style_min_height="36" variant="primary" text="Done" translation_tag="Done" hidden="true">
+    <ui_button name="nav_btn_edit_done" height="90%" variant="primary" text="Done" hidden="true">
+      <bind_style_if_eq name="nav_btn_edit_done_portrait" subject="ui_is_portrait" ref_value="1"/>
+      <bind_style_if_not_eq name="nav_btn_edit_done_landscape" subject="ui_is_portrait" ref_value="1"/>
       <bind_flag_if_eq subject="home_edit_mode" flag="hidden" ref_value="0"/>
       <event_cb trigger="clicked" callback="on_edit_done_clicked"/>
     </ui_button>
     <!-- ================================================================== -->
     <!-- Navigation Buttons - Dual icon pattern (accent/secondary variants) -->
     <!-- ================================================================== -->
+    <!-- Every button below carries flex_grow, so the bar computes its main-axis
+         size in either orientation and the 100% only ever lands on the cross
+         axis. Their own flex_flow="column" stacks the icon inside the button
+         and is unrelated to the bar's axis. -->
     <!-- Home Button (Panel 0) -->
     <ui_button name="nav_btn_home"
-               width="100%" flex_grow="1" variant="ghost" flex_flow="column" style_flex_main_place="center"
-               style_flex_cross_place="center" style_flex_track_place="center" style_border_width="0">
+               width="100%" height="100%" flex_grow="1" variant="ghost" flex_flow="column"
+               style_flex_main_place="center" style_flex_cross_place="center" style_flex_track_place="center"
+               style_border_width="0">
       <!-- Disabled during grid edit mode -->
       <bind_state_if_eq subject="home_edit_mode" state="disabled" ref_value="1"/>
-      <!-- Active icon (accent color) - shown when active_panel == 0 -->
-      <icon name="nav_icon_home_active" src="home" size="#icon_size" variant="primary" hidden="true">
-        <bind_flag_if_not_eq subject="active_panel" flag="hidden" ref_value="0"/>
+      <!-- Active icon (accent color) - full opacity/scale when active_panel == 0 -->
+      <icon name="nav_icon_home_active" src="home" size="#icon_size" variant="primary" floating="true" align="center">
+        <style name="nav_icon_fade"/>
+        <style name="nav_icon_fade_on" selector="checked"/>
+        <bind_state_if_eq subject="active_panel" state="checked" ref_value="0"/>
       </icon>
-      <!-- Inactive icon (gray) - shown when active_panel != 0 -->
-      <icon name="nav_icon_home_inactive" src="home" size="#icon_size" variant="secondary">
-        <bind_flag_if_eq subject="active_panel" flag="hidden" ref_value="0"/>
+      <!-- Inactive icon (gray) - full opacity/scale when active_panel != 0 -->
+      <icon name="nav_icon_home_inactive"
+            src="home_outline" size="#icon_size_nav_inactive" variant="secondary" floating="true" align="center">
+        <style name="nav_icon_fade"/>
+        <style name="nav_icon_fade_on" selector="checked"/>
+        <bind_state_if_not_eq subject="active_panel" state="checked" ref_value="0"/>
       </icon>
     </ui_button>
     <!-- Controls Button (Panel 2) - CONNECTION + KLIPPY READY REQUIRED -->
     <!-- Uses combined nav_buttons_enabled subject (1=enabled when connected AND klippy ready) -->
     <ui_button name="nav_btn_controls"
-               width="100%" flex_grow="1" variant="ghost" flex_flow="column" style_flex_main_place="center"
-               style_flex_cross_place="center" style_flex_track_place="center" style_border_width="0">
-      <!-- Disabled when nav is not enabled (disconnected OR klippy not ready),
-           and while the home grid is in edit mode. One binding, not two: each
-           observer asserts BOTH polarities on every fire, so a second one
-           clears whatever the first set. -->
-      <bind_state_if cond="nav_buttons_enabled ne 1 or home_edit_mode eq 1" state="disabled"/>
+               width="100%" height="100%" flex_grow="1" variant="ghost" flex_flow="column"
+               style_flex_main_place="center" style_flex_cross_place="center" style_flex_track_place="center"
+               style_border_width="0">
+      <!-- Disabled clickability when not enabled (disconnected OR klippy not ready) -->
+      <bind_state_if_not_eq subject="nav_buttons_enabled" state="disabled" ref_value="1"/>
+      <!-- Disabled during grid edit mode -->
+      <bind_state_if_eq subject="home_edit_mode" state="disabled" ref_value="1"/>
       <!-- Normal icons container - visible only when enabled -->
-      <lv_obj name="nav_controls_icons" clickable="false" style_pad_all="0">
+      <lv_obj name="nav_controls_icons" width="100%" height="100%" clickable="false" style_pad_all="0">
         <bind_flag_if_eq subject="nav_buttons_enabled" flag="hidden" ref_value="0"/>
-        <!-- Active icon (accent) - shown when on controls panel -->
-        <icon name="nav_icon_controls_active" src="fine_tune" size="#icon_size" variant="primary" hidden="true">
-          <bind_flag_if_not_eq subject="active_panel" flag="hidden" ref_value="2"/>
+        <!-- Active icon (accent) - full opacity/scale when on controls panel -->
+        <icon name="nav_icon_controls_active"
+              src="fine_tune" size="#icon_size" variant="primary" floating="true" align="center">
+          <style name="nav_icon_fade"/>
+          <style name="nav_icon_fade_on" selector="checked"/>
+          <bind_state_if_eq subject="active_panel" state="checked" ref_value="2"/>
         </icon>
-        <!-- Inactive icon (secondary) - shown when not on controls panel -->
-        <icon name="nav_icon_controls_inactive" src="fine_tune" size="#icon_size" variant="secondary">
-          <bind_flag_if_eq subject="active_panel" flag="hidden" ref_value="2"/>
+        <!-- Inactive icon (secondary) - full opacity/scale when not on controls panel -->
+        <icon name="nav_icon_controls_inactive"
+              src="fine_tune" size="#icon_size_nav_inactive" variant="secondary" floating="true" align="center">
+          <style name="nav_icon_fade"/>
+          <style name="nav_icon_fade_on" selector="checked"/>
+          <bind_state_if_not_eq subject="active_panel" state="checked" ref_value="2"/>
         </icon>
       </lv_obj>
       <!-- Disabled icon - visible only when disabled (disconnected OR klippy not ready) -->
@@ -82,23 +164,29 @@
     <!-- Filament Button (Panel 3) - CONNECTION + KLIPPY READY REQUIRED -->
     <!-- Uses combined nav_buttons_enabled subject (1=enabled when connected AND klippy ready) -->
     <ui_button name="nav_btn_filament"
-               width="100%" flex_grow="1" variant="ghost" flex_flow="column" style_flex_main_place="center"
-               style_flex_cross_place="center" style_flex_track_place="center" style_border_width="0">
-      <!-- Disabled when nav is not enabled (disconnected OR klippy not ready),
-           and while the home grid is in edit mode. One binding, not two: each
-           observer asserts BOTH polarities on every fire, so a second one
-           clears whatever the first set. -->
-      <bind_state_if cond="nav_buttons_enabled ne 1 or home_edit_mode eq 1" state="disabled"/>
+               width="100%" height="100%" flex_grow="1" variant="ghost" flex_flow="column"
+               style_flex_main_place="center" style_flex_cross_place="center" style_flex_track_place="center"
+               style_border_width="0">
+      <!-- Disabled clickability when not enabled (disconnected OR klippy not ready) -->
+      <bind_state_if_not_eq subject="nav_buttons_enabled" state="disabled" ref_value="1"/>
+      <!-- Disabled during grid edit mode -->
+      <bind_state_if_eq subject="home_edit_mode" state="disabled" ref_value="1"/>
       <!-- Normal icons container - visible only when enabled -->
-      <lv_obj name="nav_filament_icons" clickable="false" style_pad_all="0">
+      <lv_obj name="nav_filament_icons" width="100%" height="100%" clickable="false" style_pad_all="0">
         <bind_flag_if_eq subject="nav_buttons_enabled" flag="hidden" ref_value="0"/>
-        <!-- Active icon (accent) - shown when on filament panel -->
-        <icon name="nav_icon_filament_active" src="filament" size="#icon_size" variant="primary" hidden="true">
-          <bind_flag_if_not_eq subject="active_panel" flag="hidden" ref_value="3"/>
+        <!-- Active icon (accent) - full opacity/scale when on filament panel -->
+        <icon name="nav_icon_filament_active"
+              src="filament" size="#icon_size" variant="primary" floating="true" align="center">
+          <style name="nav_icon_fade"/>
+          <style name="nav_icon_fade_on" selector="checked"/>
+          <bind_state_if_eq subject="active_panel" state="checked" ref_value="3"/>
         </icon>
-        <!-- Inactive icon (secondary) - shown when not on filament panel -->
-        <icon name="nav_icon_filament_inactive" src="filament" size="#icon_size" variant="secondary">
-          <bind_flag_if_eq subject="active_panel" flag="hidden" ref_value="3"/>
+        <!-- Inactive icon (secondary) - full opacity/scale when not on filament panel -->
+        <icon name="nav_icon_filament_inactive"
+              src="filament_outline" size="#icon_size_nav_inactive" variant="secondary" floating="true" align="center">
+          <style name="nav_icon_fade"/>
+          <style name="nav_icon_fade_on" selector="checked"/>
+          <bind_state_if_not_eq subject="active_panel" state="checked" ref_value="3"/>
         </icon>
       </lv_obj>
       <!-- Disabled icon - visible only when disabled (disconnected OR klippy not ready) -->
@@ -108,34 +196,49 @@
     </ui_button>
     <!-- Settings Button (Panel 4) -->
     <ui_button name="nav_btn_settings"
-               width="100%" flex_grow="1" variant="ghost" flex_flow="column" style_flex_main_place="center"
-               style_flex_cross_place="center" style_flex_track_place="center" style_border_width="0">
+               width="100%" height="100%" flex_grow="1" variant="ghost" flex_flow="column"
+               style_flex_main_place="center" style_flex_cross_place="center" style_flex_track_place="center"
+               style_border_width="0">
       <!-- Disabled during grid edit mode -->
       <bind_state_if_eq subject="home_edit_mode" state="disabled" ref_value="1"/>
-      <icon name="nav_icon_settings_active" src="settings" size="#icon_size" variant="primary" hidden="true">
-        <bind_flag_if_not_eq subject="active_panel" flag="hidden" ref_value="4"/>
+      <icon name="nav_icon_settings_active"
+            src="settings" size="#icon_size" variant="primary" floating="true" align="center">
+        <style name="nav_icon_fade"/>
+        <style name="nav_icon_fade_on" selector="checked"/>
+        <bind_state_if_eq subject="active_panel" state="checked" ref_value="4"/>
       </icon>
-      <icon name="nav_icon_settings_inactive" src="settings" size="#icon_size" variant="secondary">
-        <bind_flag_if_eq subject="active_panel" flag="hidden" ref_value="4"/>
+      <icon name="nav_icon_settings_inactive"
+            src="settings_outline" size="#icon_size_nav_inactive" variant="secondary" floating="true" align="center">
+        <style name="nav_icon_fade"/>
+        <style name="nav_icon_fade_on" selector="checked"/>
+        <bind_state_if_not_eq subject="active_panel" state="checked" ref_value="4"/>
       </icon>
     </ui_button>
     <!-- Advanced Button (Panel 5) -->
     <ui_button name="nav_btn_advanced"
-               width="100%" flex_grow="1" variant="ghost" flex_flow="column" style_flex_main_place="center"
-               style_flex_cross_place="center" style_flex_track_place="center" style_border_width="0">
+               width="100%" height="100%" flex_grow="1" variant="ghost" flex_flow="column"
+               style_flex_main_place="center" style_flex_cross_place="center" style_flex_track_place="center"
+               style_border_width="0">
       <!-- Disabled during grid edit mode -->
       <bind_state_if_eq subject="home_edit_mode" state="disabled" ref_value="1"/>
-      <icon name="nav_icon_advanced_active" src="dots_vertical" size="#icon_size" variant="primary" hidden="true">
-        <bind_flag_if_not_eq subject="active_panel" flag="hidden" ref_value="5"/>
+      <icon name="nav_icon_advanced_active"
+            src="dots_vertical" size="#icon_size" variant="primary" floating="true" align="center">
+        <style name="nav_icon_fade"/>
+        <style name="nav_icon_fade_on" selector="checked"/>
+        <bind_state_if_eq subject="active_panel" state="checked" ref_value="5"/>
       </icon>
-      <icon name="nav_icon_advanced_inactive" src="dots_vertical" size="#icon_size" variant="secondary">
-        <bind_flag_if_eq subject="active_panel" flag="hidden" ref_value="5"/>
+      <icon name="nav_icon_advanced_inactive"
+            src="dots_vertical" size="#icon_size_nav_inactive" variant="secondary" floating="true" align="center">
+        <style name="nav_icon_fade"/>
+        <style name="nav_icon_fade_on" selector="checked"/>
+        <bind_state_if_not_eq subject="active_panel" state="checked" ref_value="5"/>
       </icon>
     </ui_button>
     <!-- Printer switcher button — visible only when setting enabled -->
     <ui_button name="nav_printer_badge"
-               width="100%" flex_grow="1" variant="ghost" flex_flow="column" style_flex_main_place="center"
-               style_flex_cross_place="center" style_flex_track_place="center" style_border_width="0" hidden="true">
+               width="100%" height="100%" flex_grow="1" variant="ghost" flex_flow="column"
+               style_flex_main_place="center" style_flex_cross_place="center" style_flex_track_place="center"
+               style_border_width="0" hidden="true">
       <bind_flag_if_eq subject="show_printer_switcher" flag="hidden" ref_value="0"/>
       <!-- Disabled during grid edit mode -->
       <bind_state_if_eq subject="home_edit_mode" state="disabled" ref_value="1"/>
@@ -147,5 +250,22 @@
                 clickable="false" event_bubble="true"/>
       </lv_obj>
     </ui_button>
+    <!-- Room for the spools-on-the-bed button while a bed-drying run has them
+         latched; the button is the navbar_drying component, kept over this slot
+         the same way as the E-stop below. -->
+    <lv_obj name="nav_drying_slot"
+            width="#nav_estop_size" height="#nav_estop_size" style_bg_opa="0" style_border_width="0" style_pad_all="0"
+            clickable="false" scrollable="false" hidden="true">
+      <bind_flag_if_eq subject="bed_drying_state" flag="hidden" ref_value="0"/>
+    </lv_obj>
+    <!-- Room for the E-stop while a job holds the machine. The button itself is
+         the navbar_estop component, which NavigationManager keeps over this slot
+         on the screen so backdrops never dim it. Last in the bar: the bottom of
+         the navbar, the end of the portrait bar. -->
+    <lv_obj name="nav_estop_slot"
+            width="#nav_estop_size" height="#nav_estop_size" style_bg_opa="0" style_border_width="0" style_pad_all="0"
+            clickable="false" scrollable="false" hidden="true">
+      <bind_flag_if_eq subject="estop_visible" flag="hidden" ref_value="0"/>
+    </lv_obj>
   </view>
 </component>

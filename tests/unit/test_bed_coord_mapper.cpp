@@ -46,3 +46,55 @@ TEST_CASE("BedCoordMapper honours a center origin for delta beds", "[bed_coord_m
     REQUIRE(cx == Catch::Approx(100.0f));
     REQUIRE(cy == Catch::Approx(100.0f));
 }
+
+TEST_CASE("BedCoordMapper px_to_mm round-trips on a wide viewport (letterboxed X)",
+          "[bed_coord_mapper]") {
+    // 100x100mm bed into 400x200px: scale 2.0, plate centered with 100px of
+    // slack on each side in X.
+    BedCoordMapper m(100.0f, 100.0f, 400, 200);
+    const float pts[][2] = {{0, 0}, {100, 100}, {50, 50}, {12.5, 87.5}, {0, 100}, {100, 0}};
+    for (const auto& p : pts) {
+        auto [px, py] = m.mm_to_px(p[0], p[1]);
+        auto [x, y] = m.px_to_mm(px, py);
+        INFO("mm(" << p[0] << "," << p[1] << ") -> px(" << px << "," << py << ") -> mm(" << x << ","
+                   << y << ")");
+        REQUIRE(x == Catch::Approx(p[0]).margin(1e-3f));
+        REQUIRE(y == Catch::Approx(p[1]).margin(1e-3f));
+    }
+}
+
+TEST_CASE("BedCoordMapper px_to_mm round-trips on a tall viewport (letterboxed Y)",
+          "[bed_coord_mapper]") {
+    // 100x100mm bed into 200x400px: scale 2.0, slack is vertical now.
+    BedCoordMapper m(100.0f, 100.0f, 200, 400);
+    const float pts[][2] = {{0, 0}, {100, 100}, {50, 50}, {33.3, 66.6}};
+    for (const auto& p : pts) {
+        auto [px, py] = m.mm_to_px(p[0], p[1]);
+        auto [x, y] = m.px_to_mm(px, py);
+        REQUIRE(x == Catch::Approx(p[0]).margin(1e-3f));
+        REQUIRE(y == Catch::Approx(p[1]).margin(1e-3f));
+    }
+}
+
+TEST_CASE("BedCoordMapper px_to_mm round-trips a centre-origin delta bed", "[bed_coord_mapper]") {
+    BedCoordMapper m(200.0f, 200.0f, 200, 200, -100.0f, -100.0f);
+    const float pts[][2] = {{-100, -100}, {100, 100}, {0, 0}, {-42.5, 17.5}};
+    for (const auto& p : pts) {
+        auto [px, py] = m.mm_to_px(p[0], p[1]);
+        auto [x, y] = m.px_to_mm(px, py);
+        REQUIRE(x == Catch::Approx(p[0]).margin(1e-3f));
+        REQUIRE(y == Catch::Approx(p[1]).margin(1e-3f));
+    }
+}
+
+TEST_CASE("BedCoordMapper px_to_mm maps a letterbox-margin point outside the bed",
+          "[bed_coord_mapper]") {
+    // Same wide-viewport geometry as the round-trip test: x slack is 100px per
+    // side, so px x=50 sits in the left margin and must invert to a negative
+    // mm x. The mapper is deliberately unclamped; callers clamp.
+    BedCoordMapper m(100.0f, 100.0f, 400, 200);
+    auto [x, y] = m.px_to_mm(50.0f, 100.0f);
+    REQUIRE(x < 0.0f);
+    REQUIRE(y >= 0.0f);
+    REQUIRE(y <= 100.0f);
+}

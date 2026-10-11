@@ -12,6 +12,7 @@
 #include "overlay_base.h"
 #include "spoolman_slot_saver.h"
 #include "spoolman_types.h"
+#include "static_panel_registry.h"
 #include "subject_managed_panel.h"
 
 #include <functional>
@@ -79,12 +80,15 @@ class AmsEditOverlay : public OverlayBase {
     // === OverlayBase interface ===
     void init_subjects() override;
     lv_obj_t* create(lv_obj_t* parent) override;
+    const char* xml_component() const override {
+        return "ams_edit_overlay";
+    }
     void register_callbacks() override;
     [[nodiscard]] const char* get_name() const override {
         return "AMS Slot Editor";
     }
     void on_activate() override;
-    void on_deactivate() override;
+    void on_deactivating(DeactivateReason reason) override;
     void on_ui_destroyed() override;
     /// The catalog selector's options, the color swatch and the logistics field
     /// text are populated on view entry, not by the XML — re-apply them for the
@@ -113,6 +117,9 @@ class AmsEditOverlay : public OverlayBase {
     // Explicit "Save to Spoolman" opt-in captured from the filament-details
     // toggle (spec §3.3). Reset per show_for_slot; false = local-only save.
     bool save_to_spoolman_opt_in_ = false;
+    // A Spoolman save is in flight. The editor stays open while it runs, so a
+    // second tap on Save is reachable and would start a second save.
+    bool save_in_flight_ = false;
     // Whether the slot was Spoolman-tracked when the spool-edit view was
     // entered. Captured in enter_spool_edit() before any unlink zeroes
     // spoolman_id, so handle_spool_edit_save() can tell a genuine untracked
@@ -131,16 +138,12 @@ class AmsEditOverlay : public OverlayBase {
     CompletionCallback completion_callback_;
     bool completion_fired_ = false; ///< Guards single-fire completion
 
-    /// Cached overlay widget for lazy_create_and_push_overlay
-    lv_obj_t* cached_overlay_widget_ = nullptr;
-
     // === Spool logistics (managed-slot fields inside VIEW_SPOOL_EDIT) ===
     SpoolInfo detail_original_; ///< as fetched on view entry
     SpoolInfo detail_working_;  ///< live field edits
 
     void populate_detail_fields();
     void read_detail_fields();
-    static void on_detail_field_changed_cb(lv_event_t* e);
 
     // === Spool-edit view (VIEW_SPOOL_EDIT): identity + color + logistics ===
     FilamentCatalogSelector details_selector_;
@@ -161,27 +164,37 @@ class AmsEditOverlay : public OverlayBase {
     void handle_custom_color_changed(uint32_t rgb);
     void handle_color_hex_changed();
     void handle_color_apply();
-    static void on_color_swatch_cb(lv_event_t* e);
-    static void on_color_apply_cb(lv_event_t* e);
-    static void on_color_hex_changed_cb(lv_event_t* e);
 
     // === Subjects for XML binding ===
     SubjectManager subjects_;
-    lv_subject_t slot_indicator_subject_;
-    lv_subject_t temp_nozzle_subject_;
-    lv_subject_t temp_bed_subject_;
-    lv_subject_t remaining_pct_subject_;
-    lv_subject_t view_mode_subject_;    ///< kView* ("ams_edit_view")
-    lv_subject_t picker_state_subject_; ///< 0=loading, 1=fetch error (retry), 2=content, 3=no match
-    lv_subject_t save_disabled_subject_; ///< 1=Save disabled ("ams_edit_save_disabled")
-    lv_subject_t save_hidden_subject_;   ///< 1=header Save hidden ("ams_edit_save_hidden")
-    lv_subject_t is_managed_subject_;    ///< 1=linked Spoolman spool ("ams_edit_is_managed")
-    lv_subject_t chip_text_subject_;     ///< card identity label text
-    lv_subject_t spoolman_id_subject_;   ///< "#19" beside the Spoolman mark, "" when untracked
+    lv_subject_t slot_indicator_subject_{};
+    lv_subject_t temp_nozzle_subject_{};
+    lv_subject_t temp_bed_subject_{};
+    lv_subject_t remaining_pct_subject_{};
+    lv_subject_t view_mode_subject_{}; ///< kView* ("ams_edit_view")
+    lv_subject_t
+        picker_state_subject_{}; ///< 0=loading, 1=fetch error (retry), 2=content, 3=no match
+    lv_subject_t save_disabled_subject_{}; ///< 1=Save disabled ("ams_edit_save_disabled")
+    lv_subject_t save_hidden_subject_{};   ///< 1=header Save hidden ("ams_edit_save_hidden")
+    lv_subject_t is_managed_subject_{};    ///< 1=linked Spoolman spool ("ams_edit_is_managed")
+    /// 1 when the slot's identity is the linked spool's ("ams_edit_identity_is_spoolmans").
+    /// Carries no availability of its own: the XML combines it with
+    /// printer_has_spoolman, so no C++ observer has to join two subjects.
+    lv_subject_t identity_is_spoolmans_subject_{};
+    lv_subject_t identity_text_subject_{}; ///< "Brand · Material" for the read-only row
+    lv_subject_t chip_text_subject_{};     ///< card identity label text
+    lv_subject_t has_scan_subject_{};      ///< 1=slot has a scanner reading ("ams_edit_has_scan")
+    lv_subject_t scan_text_subject_{};     ///< "TD 1.4" beside the scan swatch
+    lv_subject_t spoolman_id_subject_{};   ///< "#19" beside the Spoolman mark, "" when untracked
+    char identity_text_buf_[96] = {0};
     char chip_text_buf_[96] = {0};
     char spoolman_id_buf_[16] = {0};
+    char scan_text_buf_[24] = {0};
 
-    char slot_indicator_buf_[32] = {0};
+    /// Holds a translated position label nested inside a translated sentence,
+    /// so it is sized for the longest locale rather than for the English. A
+    /// short buffer truncates mid-UTF-8 and loses the number entirely.
+    char slot_indicator_buf_[96] = {0};
     char temp_nozzle_buf_[32] = {0};
     char temp_bed_buf_[24] = {0};
     char remaining_pct_buf_[48] = {0};
@@ -222,6 +235,7 @@ class AmsEditOverlay : public OverlayBase {
     // apply; finish=false returns to the overview (tests / non-terminal calls).
     void handle_spool_edit_save(bool finish = false);
     void handle_quick_swatch(lv_obj_t* swatch);
+    void handle_use_scanned_color(); ///< Apply the slot's scanned colour as a manual pick
     void handle_picker_search(const char* text);
     void update_spoolman_button_state();
 
@@ -240,7 +254,6 @@ class AmsEditOverlay : public OverlayBase {
     void handle_back();            ///< Header back: per-view routing (cancel on overview)
     void handle_card_clicked();    ///< Card tap: opens the spool-edit view
     void handle_change_filament(); ///< Row tap: picker (Spoolman) or spool-edit
-    void handle_setup_entry();
     void handle_save();
 
     // Pure decision for whether handle_save() should create a NEW Spoolman
@@ -249,6 +262,20 @@ class AmsEditOverlay : public OverlayBase {
     // replaces the silent auto-create / user-edit heuristic, #1071), and only
     // when the metadata is complete.
     static bool should_create_new_spool(const SlotInfo& working_info, bool save_to_spoolman);
+
+    // Whether Save is unavailable, from the three things that decide it. The
+    // spool-edit view keeps Save available because its edits live in the
+    // on-screen widgets and is_dirty() cannot see them; the overview gates on
+    // the edit; and a save already in flight holds it shut on either view.
+    [[nodiscard]] static bool save_is_disabled(int view, bool save_in_flight, bool dirty);
+
+    /// Whether the slot's brand and material are the linked spool's and cannot
+    /// be written right now. Spoolman owns a linked spool's identity, so with
+    /// the server unreachable there is nowhere for a change to go. The widgets
+    /// are not the guard: the XML hides the selector from the same two facts
+    /// and this is what the save path asks.
+    [[nodiscard]] static bool identity_locked(const SlotInfo& original, const SlotInfo& working,
+                                              bool spoolman_available);
 
     static bool is_material_identity_change(const SlotInfo& original, const SlotInfo& edited);
 
@@ -303,6 +330,15 @@ class AmsEditOverlay : public OverlayBase {
     // view, so the now-inert selector must be brought back to life or
     // vendor/type/product picking silently stops working.
     void reattach_details_selector();
+
+    // A save that wrote nothing leaves the editor where it was: the spool-edit
+    // view gets its catalog selector back, and Save becomes available again.
+    void stay_open_after_failed_save();
+
+    // Name the first field a Spoolman filament needs and this slot does not
+    // carry. One sentence per field, never a list: substituting a translated
+    // field name into a sentence breaks agreement in most locales.
+    void show_missing_filament_toast(const helix::MissingFilamentFields& missing);
     // Bind + configure + populate details_selector_ against the spool-edit
     // view's fragment (find + attach + configure + preselect). Shared by
     // enter_spool_edit() and reattach_details_selector(). Returns false (and
@@ -325,38 +361,10 @@ class AmsEditOverlay : public OverlayBase {
 #endif
     void handle_scan_qr();
     void handle_tool_changed(int index);
-
-    // === Static Callback Registration ===
-    static bool callbacks_registered_;
-
-    // === Static Callbacks ===
-    static void on_back_cb(lv_event_t* e);
-    static void on_card_clicked_cb(lv_event_t* e);
-    static void on_change_filament_cb(lv_event_t* e);
-    static void on_setup_entry_cb(lv_event_t* e);
-    static void on_quick_swatch_cb(lv_event_t* e);
-    static void on_custom_color_cb(lv_event_t* e);
-    static void on_save_cb(lv_event_t* e);
-    static void on_print_label_cb(lv_event_t* e);
-    static void on_scan_qr_cb(lv_event_t* e);
-    static void on_picker_search_cb(lv_event_t* e);
-    static void on_picker_retry_cb(lv_event_t* e);
-    static void on_spool_item_cb(lv_event_t* e);
-    static void on_spool_item_edit_cb(lv_event_t* e);
-    static void on_tool_changed_cb(lv_event_t* e);
-
-    /**
-     * @brief Resolve the editor instance for a static XML callback.
-     * The editor is a process-lifetime singleton, so this is just the accessor
-     * (replaces the modal's s_active_instance_ routing).
-     */
-    static AmsEditOverlay* get_instance_from_event(lv_event_t* e);
 };
 
-/**
- * @brief Global instance accessor (creates on first use, registers cleanup
- *        with StaticPanelRegistry)
- */
-AmsEditOverlay& get_ams_edit_overlay();
+inline AmsEditOverlay& get_ams_edit_overlay() {
+    return lazy_global<AmsEditOverlay>("AmsEditOverlay");
+}
 
 } // namespace helix::ui

@@ -24,6 +24,7 @@
  */
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 
 namespace helix {
@@ -45,17 +46,17 @@ enum class PlatformTier {
 
     /**
      * BASIC: Mid-range embedded hardware
-     * - RAM 512MB-2GB OR 2-3 cores
+     * - RAM 512-767 MB OR 2-3 cores
      * - Simplified charts (50 points), no animations
-     * - Examples: Raspberry Pi 3, older Pi 4 models
+     * - Examples: 512 MB boards, 2-3 core boards
      */
     BASIC,
 
     /**
      * STANDARD: Modern capable hardware
-     * - RAM >= 2GB AND 4+ cores
+     * - RAM >= 768 MB AND 4+ cores
      * - Full charts (200 points) with animations
-     * - Examples: Raspberry Pi 4/5 (2GB+), desktop
+     * - Examples: Raspberry Pi 3B (1 GB) and 4/5, desktop
      */
     STANDARD
 };
@@ -67,6 +68,10 @@ struct CpuInfo {
     int core_count = 0;    ///< Number of logical CPU cores
     float bogomips = 0.0f; ///< BogoMIPS value (approximate speed indicator)
     int cpu_mhz = 0;       ///< CPU frequency in MHz (if available)
+    /// Human-readable CPU name. Which key carries it is architecture-specific
+    /// ("model name" on x86, "Hardware" on ARM, "cpu model" on MIPS), so the
+    /// parser tries each; "" when none of them appears.
+    std::string model;
 };
 
 /**
@@ -101,7 +106,7 @@ struct PlatformCapabilities {
     static constexpr size_t EMBEDDED_RAM_THRESHOLD_MB = 512;
 
     /// RAM at or above this threshold (with enough cores) = STANDARD tier
-    static constexpr size_t STANDARD_RAM_THRESHOLD_MB = 2048;
+    static constexpr size_t STANDARD_RAM_THRESHOLD_MB = 768;
 
     /// Minimum cores for STANDARD tier (with enough RAM)
     static constexpr int STANDARD_CPU_CORES_MIN = 4;
@@ -153,6 +158,15 @@ struct PlatformCapabilities {
 size_t parse_meminfo_total_mb(const std::string& content);
 
 /**
+ * @brief Read one "<Key>: <N> kB" line out of /proc/meminfo content
+ *
+ * @param content Full content of /proc/meminfo
+ * @param key     Field name without the colon, e.g. "MemTotal", "MemAvailable"
+ * @return The value in kB, or 0 when the key is absent or unparseable
+ */
+uint64_t parse_meminfo_kb(const std::string& content, const std::string& key);
+
+/**
  * @brief Parse CPU information from /proc/cpuinfo content
  *
  * Counts processor entries and extracts BogoMIPS/MHz values.
@@ -161,6 +175,16 @@ size_t parse_meminfo_total_mb(const std::string& content);
  * @return CpuInfo with detected values
  */
 CpuInfo parse_cpuinfo(const std::string& content);
+
+/**
+ * @brief Whether this tier can afford style effects that cost a redraw per use
+ *
+ * The one rule for each such effect: a pressed widget's scale-down renders
+ * through a TRANSFORM layer on every press, and a scrollbar restyled while
+ * scrolling redraws the whole scroller when a drag starts and stops. The
+ * limited tiers go without both.
+ */
+bool full_style_effects_allowed(PlatformTier tier);
 
 /**
  * @brief Convert PlatformTier to string representation

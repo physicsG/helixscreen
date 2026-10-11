@@ -49,6 +49,11 @@ concurrency:
   group: ccache-warm
   cancel-in-progress: true
 
+# Every patch is judged from clean here (see build.yml for why the flag is
+# environment-wide rather than per-step).
+env:
+  HELIX_PATCHES_FROM_CLEAN: "1"
+
 jobs:
   # Free the budget BEFORE the matrix below tries to save ~1.6 GB x 3. Without
   # this, a warm run started right before cutting a release can push the repo
@@ -172,6 +177,7 @@ jobs:
           -v "${{ github.workspace }}":/src \
           -v /tmp/.ccache-${{ matrix.platform }}:/root/.cache/ccache \
           -e CCACHE_DIR=/root/.cache/ccache \
+          -e HELIX_PATCHES_FROM_CLEAN \
           -w /src \
           helixscreen/toolchain-${{ matrix.platform }} \
           make PLATFORM_TARGET=${{ matrix.build_target }} HELIX_PACKAGING=1 SKIP_OPTIONAL_DEPS=1 -j$(nproc)

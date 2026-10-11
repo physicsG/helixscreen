@@ -75,6 +75,11 @@ const SubjectDebugInfo* SubjectDebugRegistry::lookup(lv_subject_t* subject) {
     if (subject == nullptr) {
         return nullptr;
     }
+    // Mirrors unregister_subject(): a caller running during static destruction
+    // (SubjectManager::deinit_all) would otherwise lock a destroyed mutex_.
+    if (!g_registry_alive.load(std::memory_order_acquire)) {
+        return nullptr;
+    }
 
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = subjects_.find(subject);
@@ -108,6 +113,11 @@ std::string SubjectDebugRegistry::type_name(lv_subject_type_t type) {
 }
 
 lv_subject_t* SubjectDebugRegistry::lookup_by_name(const std::string& name) {
+    // Same late-caller safety as lookup(): deinit_all() consults this during
+    // static destruction and must not lock a destroyed mutex_.
+    if (!g_registry_alive.load(std::memory_order_acquire)) {
+        return nullptr;
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = name_to_subject_.find(name);
     if (it == name_to_subject_.end()) {

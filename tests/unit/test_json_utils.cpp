@@ -434,3 +434,150 @@ TEST_CASE("safe_size_t rejects negatives rather than wrapping", "[json_utils]") 
     j["v"] = "-1";
     CHECK(ju::safe_size_t(j, "v", 5u) == static_cast<std::size_t>(5));
 }
+
+// ============================================================================
+// Notification payload
+// ============================================================================
+// A method callback is handed the whole JSON-RPC message, and Moonraker wraps a
+// notification's payload in a single-element params array. Three subscribers
+// walk down to it, so the walk is one function.
+
+TEST_CASE("notification_payload finds the object inside params", "[json_utils][notification]") {
+    const nlohmann::json msg = {
+        {"jsonrpc", "2.0"},
+        {"method", "notify_history_changed"},
+        {"params", nlohmann::json::array({nlohmann::json{{"action", "finished"}}})}};
+
+    const nlohmann::json* payload = helix::json_util::notification_payload(msg);
+    REQUIRE(payload != nullptr);
+    CHECK(helix::json_util::safe_string(*payload, "action") == "finished");
+    CHECK(helix::json_util::notification_action(msg) == "finished");
+}
+
+TEST_CASE("notification_payload rejects frames shaped any other way",
+          "[json_utils][notification]") {
+    using helix::json_util::notification_action;
+    using helix::json_util::notification_payload;
+
+    // No params at all.
+    CHECK(notification_payload(nlohmann::json{{"method", "notify_history_changed"}}) == nullptr);
+    // params present but empty - Moonraker sends this for parameterless events.
+    CHECK(notification_payload(nlohmann::json{{"params", nlohmann::json::array()}}) == nullptr);
+    // params is an object rather than the array a notification uses.
+    CHECK(notification_payload(nlohmann::json{{"params", {{"action", "finished"}}}}) == nullptr);
+    // params[0] is a scalar, so there are no fields to read.
+    CHECK(notification_payload(nlohmann::json{{"params", nlohmann::json::array({7})}}) == nullptr);
+
+    // An unreadable frame reports no action rather than throwing, which is what
+    // lets a caller treat "not the action I want" and "not a frame I understand"
+    // the same way.
+    CHECK(notification_action(nlohmann::json{{"method", "x"}}).empty());
+    // A payload with no action field, and one whose action is JSON null.
+    CHECK(notification_action(nlohmann::json{{"params", nlohmann::json::array({nlohmann::json{
+                                                            {"job", nlohmann::json::object()}}})}})
+              .empty());
+    CHECK(notification_action(nlohmann::json{{"params", nlohmann::json::array({nlohmann::json{
+                                                            {"action", nullptr}}})}})
+              .empty());
+}
+
+// ============================================================================
+// safe_dump
+// ============================================================================
+
+namespace {
+
+/// A string no UTF-8 decoder can accept: 0xFF is not a legal lead byte in any
+/// position. Free-form text reaching a save path — SSIDs, printer and tool
+/// names, file names, macro text, gcode responses — is not validated anywhere,
+/// so a byte like this can be sitting in any stored string.
+const std::string kInvalidUtf8 = std::string("Voron \xff\xfe 2.4");
+
+} // namespace
+
+TEST_CASE("safe_dump serializes invalid UTF-8 instead of throwing", "[json_utils][safe_dump]") {
+    json j = {{"name", kInvalidUtf8}, {"port", 7125}};
+
+    // The default handler is error_handler_t::strict, which is what makes an
+    // unguarded save path fatal.
+    CHECK_THROWS_AS(j.dump(), nlohmann::json::type_error);
+
+    std::string out;
+    REQUIRE_NOTHROW(out = ju::safe_dump(j));
+
+    // The rest of the document survives — that is the whole point of replacing
+    // rather than catching.
+    json round_trip = json::parse(out);
+    CHECK(round_trip["port"] == 7125);
+    CHECK(round_trip["name"].get<std::string>().rfind("Voron ", 0) == 0);
+    // The offending bytes become U+FFFD, so they are gone from the output.
+    CHECK(round_trip["name"].get<std::string>().find('\xff') == std::string::npos);
+}
+
+TEST_CASE("safe_dump matches dump() byte for byte on valid input", "[json_utils][safe_dump]") {
+    json j = {{"name", "Vorön ünicode ✓"}, {"nested", {{"a", 1}, {"b", json::array({1, 2})}}}};
+
+    CHECK(ju::safe_dump(j) == j.dump());
+    CHECK(ju::safe_dump(j, 2) == j.dump(2));
+    CHECK(ju::safe_dump(j, 4) == j.dump(4));
+}
+
+TEST_CASE("safe_dump honors the indent argument", "[json_utils][safe_dump]") {
+    json j = {{"name", kInvalidUtf8}};
+
+    // Compact by default, pretty-printed on request — a caller replacing
+    // `doc.dump(2)` must not silently lose its formatting.
+    CHECK(ju::safe_dump(j).find('\n') == std::string::npos);
+    CHECK(ju::safe_dump(j, 2).find("\n  ") != std::string::npos);
+}
+
+// ============================================================================
+// UTF-8 decoder table
+// ============================================================================
+
+TEST_CASE("dump() escapes multi-byte UTF-8 through the real decoder table",
+          "[json_utils][safe_dump]") {
+    // The DFA every dump() walks its strings with is a 400-entry table declared
+    // as a function-local static inside a template, which the compiler emits as
+    // a STB_GNU_UNIQUE symbol. A linker that drops that symbol leaves the
+    // reference to it resolving to the image base, so the decoder indexes the
+    // ELF header: the link is silent, the binary runs, and every string it
+    // serializes comes out mis-escaped (prestonbrown/helixscreen#1584).
+    //
+    // So these expectations are absolute rather than dump() compared against
+    // dump(). Both sides of such a comparison read the same table and agree
+    // with each other whatever it holds. The invalid-UTF-8 case above reaches a
+    // wrong table only by aborting inside a JSON_ASSERT, which names nothing and
+    // is a plain assert(), so under NDEBUG the mis-escaping is silent.
+    // ensure_ascii is what forces the multi-byte path; with it off the bytes are
+    // copied through unexamined.
+    CHECK(json("\xC3\xA9").dump(-1, ' ', true) == "\"\\u00e9\"");                // U+00E9 é
+    CHECK(json("\xE2\x82\xAC").dump(-1, ' ', true) == "\"\\u20ac\"");            // U+20AC €
+    CHECK(json("\xF0\x9F\x98\x80").dump(-1, ' ', true) == "\"\\ud83d\\ude00\""); // U+1F600
+
+    // The reject state has to be reachable too, or safe_dump()'s replacement
+    // handler has nothing to act on: 0xFF is a legal byte in no position.
+    CHECK_THROWS_AS(json("\xff").dump(-1, ' ', true), nlohmann::json::type_error);
+}
+
+TEST_CASE("as_* read a value in hand and never throw", "[json_utils]") {
+    const json arr = json::parse(R"([12, "7", "12abc", null, true, "x", 5000000000, 2.5])");
+    CHECK(ju::as_int(arr[0]) == 12);
+    CHECK(ju::as_int(arr[1]) == 7);
+    CHECK(ju::as_int(arr[2]) == 12); // std::stoi rules: trailing text ignored
+    CHECK(ju::as_int(arr[3], -1) == -1);
+    CHECK(ju::as_int(arr[5], -1) == -1);
+    CHECK(ju::as_int(arr[6], -1) == -1);
+    CHECK(ju::as_int64(arr[6]) == 5000000000LL);
+    CHECK(ju::as_double(arr[7]) == 2.5);
+    CHECK(ju::as_string(arr[0], "d") == "d");
+    CHECK(ju::as_string(arr[0], "d", true) == "12");
+    CHECK(ju::as_bool(arr[4]) == true);
+    CHECK(ju::as_bool(arr[3], true) == true);
+}
+
+TEST_CASE("safe_* on a non-object returns the default", "[json_utils]") {
+    CHECK(ju::safe_int(json::array({1, 2}), "k", 7) == 7);
+    CHECK(ju::safe_string(json("text"), "k", "d") == "d");
+    CHECK(ju::safe_double(json(nullptr), "k", 1.5) == 1.5);
+}

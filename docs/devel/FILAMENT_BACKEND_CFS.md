@@ -28,9 +28,9 @@ Both axes are decided **from the payload, never from `PrinterDetector`** — a c
 
 The command dialect is selected by the explicit `api_version == 1` field rather than inferred from the `Flat` status layout, so another firmware can use the same layout without inheriting this one's commands. It also cannot be detected with `has_macro("BOX_LOAD")`: the Fork commands are registered in Python, so they are not gcode_macros and never appear in `printer.objects.list`.
 
-A `Flat` box whose module we cannot identify still has its control paths refused by `reject_if_flat_schema()`. Full field mapping, command signatures and remaining gaps: `printers/CREALITY_K2_SUPPORT.md` § "Community Kalico port".
+A `Flat` box whose module we cannot identify still has its control paths refused by `reject_if_flat_schema()`. Full field mapping, command signatures and remaining gaps: `printer-research/CREALITY_CFS_K2_INTERNALS.md` § "Community Kalico port".
 
-[`Jacob10383/kalico`](https://github.com/Jacob10383/kalico) is the Kalico (Danger-Klipper) fork the port builds on — it is the firmware *base*, and it does **not** contain the CFS modules. box.py and its siblings are dropped in by the port's installer and are not committed to any public repo, so the repo link is context rather than a source for the command surface. To read the modules themselves, fetch them from the port's content-addressed firmware store: `printers/CREALITY_K2_SUPPORT.md` § "Getting the module source".
+[`Jacob10383/kalico`](https://github.com/Jacob10383/kalico) is the Kalico (Danger-Klipper) fork the port builds on — it is the firmware *base*, and it does **not** contain the CFS modules. box.py and its siblings are dropped in by the port's installer and are not committed to any public repo, so the repo link is context rather than a source for the command surface. To read the modules themselves, fetch them from the port's content-addressed firmware store: `printer-research/CREALITY_CFS_K2_INTERNALS.md` § "Getting the module source".
 
 ### Firmware requirements
 
@@ -86,10 +86,16 @@ A `Flat` box whose module we cannot identify still has its control paths refused
 |-----------|-------------|-------------|
 | Envelope open | `SAVE_GCODE_STATE` → `BOX_SAVE_FAN` → `BOX_GO_TO_EXTRUDE_POS` → `BOX_MODE_WAIT` | `SAVE_GCODE_STATE` → `BOX_SAVE_FAN` → `BOX_ERROR_CLEAR` → `BOX_CHECK_MATERIAL` |
 | Load slot N | `CR_BOX_PRE_OPT` → `CR_BOX_EXTRUDE TNN=…` → `CR_BOX_WASTE` → `CR_BOX_FLUSH TNN=…` → `CR_BOX_END_OPT` | `BOX_EXTRUDE_MATERIAL TNN=…` → `BOX_EXTRUDER_EXTRUDE TNN=…` → `BOX_MATERIAL_FLUSH` |
-| Unload current | `CR_BOX_PRE_OPT` → `CR_BOX_CUT` → `BOX_MODE_WAIT` → `CR_BOX_RETRUDE` → `CR_BOX_END_OPT` | `BOX_CUT_MATERIAL` → `BOX_RETRUDE_MATERIAL` |
+| Unload current | `CR_BOX_PRE_OPT` → `BOX_CUT_MATERIAL` → `BOX_MODE_WAIT` → `CR_BOX_RETRUDE` → `CR_BOX_END_OPT` | `BOX_CUT_MATERIAL` → `BOX_RETRUDE_MATERIAL` |
 | Envelope close (with wipe) | `BOX_NOZZLE_CLEAN` → `BOX_RESTORE_FAN` → `BOX_MOVE_TO_SAFE_POS` → `RESTORE_GCODE_STATE` | `BOX_NOZZLE_CLEAN` → `BOX_RESTORE_FAN` → `BOX_MOVE_TO_SAFE_POS` → `RESTORE_GCODE_STATE` |
 | Tool remap | `BOX_MODIFY_TN T<src>=T<dst>` | (same syntax — but **inert as we use it**, see below) |
 | Color sync | `BOX_MODIFY_TN_DATA ADDR=… NUM=… PART=color_value DATA=0RRGGBB` + `BOX_UPDATE_SAME_MATERIAL_LIST` | (same — `PART` names match the tn_data.json fields; the same-material refresh follows on both families because group membership requires exact color equality) |
+
+Both dialects cut with `BOX_CUT_MATERIAL`, the firmware's positioned cut. The K2's
+`CR_BOX_CUT` (`M8200 C`) is a bare cutter primitive: it strikes in X from wherever the
+toolhead stands, and Creality's own tool change moves to `[box]` `pre_cut_pos` before it.
+The envelope leaves the head at the purge chute (`extrude_pos`), and on a K2 Pro a strike
+from there runs into the frame, so no HelixScreen script emits `CR_BOX_CUT`.
 
 The K1 envelope is shorter only because `BOX_MODE_WAIT` does not exist on K1 — verified by
 symbol grep, which finds it nowhere in the extension. `BOX_SAVE_FAN`/`BOX_RESTORE_FAN` are
@@ -102,7 +108,7 @@ present on both families and are now emitted on both.
 > `BOX_EXTRUDE_MATERIAL TNN=<physical>` directly, bypassing the mapping layer, so a remap we
 > write can never take effect. Whether K2's module behaves the same way is unverified — our
 > K2 remap may be inert for the same reason. Mechanism and options:
-> [CREALITY_CFS_INTERNALS.md § Tool remap](CREALITY_CFS_INTERNALS.md#tool-remap-box_modify_tn).
+> [CREALITY_CFS_K1_INTERNALS.md § Tool remap](printer-research/CREALITY_CFS_K1_INTERNALS.md#tool-remap-box_modify_tn).
 
 ### Implementation
 
@@ -114,6 +120,25 @@ present on both families and are now emitted on both.
 
 `AmsBackendCfs::macro_variant_` is latched in the constructor by querying `PrinterDetector::is_creality_k1()`. All member operations (`load_filament`, `unload_filament`, `change_tool`) thread `macro_variant_` into the gcode helpers. Static call sites without an explicit variant default to `K2` to preserve existing test behavior.
 
+**A bay's global index is the firmware's slot number on both schemas,** `(box address - 1) * 4
++ local`, so every per-bay store (lane_data overrides, lane records, RFID baselines, insert
+bookkeeping) stays on the physical bay whichever boxes are on the bus. An address below the
+highest reporting box gets an absent placeholder unit (`AmsUnit::absent`): its bays read
+EMPTY, validation refuses them, no tool maps to them, and `AmsSystemInfo::present_slot_count()`
+/ `slot_exists()` leave them out of anything counted or offered to the user. `total_slots` is
+the index span (#1464).
+
+**`total_slots == 0` means the box size is unknown, not "no bays" (#1623).** The count is
+committed only by the first unit-bearing box frame, and the print-start slot-mapping
+restore fires on klippy READY, unordered against that frame - its recovery record is
+deleted when a send is refused, so a pre-frame refusal would lose the mapping for good.
+Every slot-index bound therefore goes through `slot_index_ceiling()`
+(`src/printer/ams_backend_cfs.cpp`): the attached unit count once known, the TNN alphabet
+(4 units x 4 bays = 16) until then, which keeps the pre-frame window permissive while a
+4-slot CFS still refuses index 7. A remap's **tool number** is a routing-table key, not a
+bay, so its bound stays the TNN alphabet even after the unit count is known - a slicer or
+Creality's own UI can hold a high key while fewer units are attached.
+
 ### Endless spool (auto-refill)
 
 CFS reports `Available` + `ReadOnly` + `FirmwareManaged`, with `enabled` derived from
@@ -121,6 +146,11 @@ CFS reports `Available` + `ReadOnly` + `FirmwareManaged`, with `enabled` derived
 `AmsSystemInfo::endless_spool_enabled`. On and off are therefore distinguishable, which the
 old two-bool struct could not express - it hardcoded `supported = true` and buried the real
 state in an untranslated `description`.
+
+The bit is applied from any frame that carries it, whether or not a unit is up yet. The box
+sends it once, in its first full frame (often while every unit still reads `state=None`), and
+resends it only when it changes, so a bare `{"auto_refill": n}` frame counts as a full update.
+Until a frame has carried it, `enabled` is `Unknown` with restriction `NotReady`.
 
 When auto-refill is on AND the frame carried `same_material` AND no group pairs two or more
 lanes, `enabled` is `OnWithoutBackup` instead of `On` (#1391): the firmware swaps between
@@ -139,17 +169,24 @@ name, and the per-lane group ordinals (`AmsSystemInfo::endless_spool_group_ids`)
 `OnWithoutBackup` derivation above. Nothing is pushed back to the firmware on its basis.
 
 The user-facing on/off control is the `toggle_auto_refill` device action, which emits
-`BOX_ENABLE_AUTO_REFILL ENABLE=1|0` — a setter, not a toggle: it inverts the last
-box-reported `endless_spool_enabled` and sends the explicit argument, mirroring
-Creality's own master-server (string tables in both OTA images; a bare call leaves the
-handler's `gcmd.get_int` without its argument, whose behavior is unverified). It is not
-an endless-spool *edit* in the
+`BOX_ENABLE_AUTO_REFILL ENABLE=1|0` — a setter, not a toggle: it sends the switch's value
+(or, called with no value, the inverse of the cached `endless_spool_enabled`) as the explicit
+argument, mirroring Creality's own master-server (string tables in both OTA images; a bare
+call leaves the handler's `gcmd.get_int` without its argument, whose behavior is
+unverified). The switch renders the cached state, and has no value until a frame has
+reported one. A send becomes the cached state once Klipper reports the command complete,
+because the box never confirms a value it already held; a send that errors (the flat fork
+registers no `BOX_ENABLE_AUTO_REFILL`, Klipper not ready, a box rejection) leaves the cache
+alone. On the identified fork dialect the same action sends `_BOX_SET_RUNOUT_SWAP ENABLE=1|0`,
+the module's own setter for `runout_swap_enabled`; an unidentified flat module is refused like
+every other control path. `on_started()` forgets the bit, so a restart reads `Unknown` until the box reports it
+again. It is not an endless-spool *edit* in the
 `set_endless_spool_backup()` sense, which is why editability stays `ReadOnly`.
 
 ### Bypass / external spool
 
 Supported, with a different mechanism per dialect. `supports_bypass` starts `false`
-in the constructor and converges on the first full box frame in `handle_status_update`:
+in the constructor and converges on the first full box frame in `handle_status`:
 
 - **Flat schema:** true only when the Fork dialect is identified (`api_version == 1`)
   AND the payload carries an `external: true` entry (`find_external_slot_index()`,
@@ -198,7 +235,7 @@ persisted flag re-clears idempotently on the next boot).
 ### Known limitations on K1
 
 Full mechanism for each of these, with sources and evidence tiers:
-**[CREALITY_CFS_INTERNALS.md](CREALITY_CFS_INTERNALS.md)**.
+**[CREALITY_CFS_K1_INTERNALS.md](printer-research/CREALITY_CFS_K1_INTERNALS.md)**.
 
 The full `BOX_*` command surface has since been read directly out of the shipped extension in
 `CR4CU220812S11_ota_img_V2.3.5.34`, so the items below rest on the artifact rather than on
@@ -218,7 +255,7 @@ inference.
   whole sequence could return success while nothing moved. `finish_action()` now checks the
   toolhead filament switch against the operation's latched intent and raises a fault through
   `current_error()` when they disagree. Applies to every dialect — it reads physical state, not
-  macros. See [CREALITY_CFS_INTERNALS.md](CREALITY_CFS_INTERNALS.md#failures-are-deferred-not-raised--fixed-host-side-verification).
+  macros. See [CREALITY_CFS_K1_INTERNALS.md](printer-research/CREALITY_CFS_K1_INTERNALS.md#failures-are-deferred-not-raised--fixed-host-side-verification).
 
 **Still open:**
 
@@ -233,7 +270,7 @@ inference.
   `BOX_MATERIAL_FLUSH`, matching the firmware's own `BOX_LOAD_MATERIAL_WITH_MATERIAL` macro.
   The colour-aware `BOX_MATERIAL_CHANGE_FLUSH LAST_TNN=<old> TNN=<new>` exists and is what the
   internal `T*` path uses, but adopting it changes purge length on unowned hardware and adds a
-  blockage failure mode — gated on #1278.
+  blockage failure mode, so it needs a K1 + CFS to settle.
 - `BOX_MODIFY_TN_DATA` (color sync) syntax is confirmed correct — `PART` values are the
   tn_data.json field names. Material-type writeback is unblocked *except* for the
   `material_type` value domain, which is still unknown.

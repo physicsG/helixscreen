@@ -7,7 +7,7 @@
 #include "ui_error_reporting.h"
 #include "ui_event_safety.h"
 #include "ui_led_chip_factory.h"
-#include "ui_nav_manager.h"
+#include "ui_nav.h"
 #include "ui_panel_common.h"
 #include "ui_subject_registry.h"
 #include "ui_update_queue.h"
@@ -21,6 +21,7 @@
 #include "print_lifecycle_state.h"
 #include "printer_state.h"
 #include "static_panel_registry.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/spdlog.h>
 
@@ -104,16 +105,18 @@ void PowerPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
     ui_overlay_panel_setup_standard(panel_, parent_screen_, "overlay_header", "overlay_content");
 
     // Find widget references
-    lv_obj_t* overlay_content = lv_obj_find_by_name(panel_, "overlay_content");
+    lv_obj_t* overlay_content = helix::ui::find_required(panel_, "overlay_content", get_name());
     if (overlay_content) {
-        device_list_container_ = lv_obj_find_by_name(overlay_content, "device_list");
-        empty_state_container_ = lv_obj_find_by_name(overlay_content, "empty_state");
-        status_label_ = lv_obj_find_by_name(overlay_content, "status_message");
-        chip_container_ = lv_obj_find_by_name(overlay_content, "power_chip_container");
+        device_list_container_ =
+            helix::ui::find_required(overlay_content, "device_list", get_name());
+        empty_state_container_ =
+            helix::ui::find_required(overlay_content, "empty_state", get_name());
+        status_label_ = helix::ui::find_required(overlay_content, "status_message", get_name());
+        chip_container_ =
+            helix::ui::find_required(overlay_content, "power_chip_container", get_name());
     }
 
     if (!device_list_container_) {
-        spdlog::error("[{}] device_list container not found!", get_name());
         return;
     }
 
@@ -135,11 +138,9 @@ void PowerPanel::fetch_devices() {
     std::snprintf(status_buf_, sizeof(status_buf_), "%s", lv_tr("Loading devices..."));
     lv_subject_copy_string(&status_subject_, status_buf_);
 
-    auto token = lifetime_.token();
+    auto token = object_lifetime_.token();
     api_->get_power_devices(
         [this, token](const std::vector<PowerDevice>& devices) {
-            if (token.expired())
-                return;
             // Marshal onto UI thread — API callbacks fire on a background thread.
             auto devices_copy = std::make_shared<std::vector<PowerDevice>>(devices);
             token.defer("PowerPanel::list_power_devices", [this, devices_copy]() {
@@ -148,8 +149,6 @@ void PowerPanel::fetch_devices() {
             });
         },
         [this, token](const MoonrakerError& err) {
-            if (token.expired())
-                return;
             auto msg = err.message;
             token.defer("PowerPanel::fetch_error", [this, msg]() {
                 spdlog::error("[{}] Failed to fetch power devices: {}", get_name(), msg);
@@ -235,9 +234,8 @@ void PowerPanel::create_device_row(const PowerDevice& device) {
     }
 
     // Find the toggle within the component
-    lv_obj_t* toggle = lv_obj_find_by_name(row, "device_toggle");
+    lv_obj_t* toggle = helix::ui::find_required(row, "device_toggle", get_name());
     if (!toggle) {
-        spdlog::error("[{}] device_toggle not found in row", get_name());
         helix::ui::safe_delete(row);
         return;
     }
@@ -253,21 +251,21 @@ void PowerPanel::create_device_row(const PowerDevice& device) {
     // than the wire: the lock has to cover the pre-print window, where the
     // printer still reports standby while the toolhead homes and probes, and
     // cutting the PSU there is what the flag exists to prevent.
-    bool is_locked =
-        device.locked_while_printing && job_holds_machine(printer_state_.get_print_lifecycle());
+    bool is_locked = device.locked_while_printing &&
+                     job_holds_machine(printer_state_.print_state().get_print_lifecycle());
 
     if (is_locked) {
         // Disable toggle interaction
         lv_obj_add_state(toggle, LV_STATE_DISABLED);
 
         // Show lock icon
-        lv_obj_t* lock_icon = lv_obj_find_by_name(row, "lock_icon");
+        lv_obj_t* lock_icon = helix::ui::find_required(row, "lock_icon", get_name());
         if (lock_icon) {
             lv_obj_remove_flag(lock_icon, LV_OBJ_FLAG_HIDDEN);
         }
 
         // Show status text explaining why it's locked
-        lv_obj_t* status_label = lv_obj_find_by_name(row, "device_status");
+        lv_obj_t* status_label = helix::ui::find_required(row, "device_status", get_name());
         if (status_label) {
             lv_label_set_text(status_label, lv_tr("Locked during print"));
             lv_obj_remove_flag(status_label, LV_OBJ_FLAG_HIDDEN);
@@ -305,7 +303,7 @@ void PowerPanel::handle_device_toggle(const std::string& device, bool power_on) 
         EmergencyStopOverlay::instance().suppress_recovery_dialog(RecoverySuppression::NORMAL);
     }
 
-    auto token = lifetime_.token();
+    auto token = object_lifetime_.token();
     api_->set_device_power(
         device, action,
         [device, power_on]() {
@@ -313,8 +311,6 @@ void PowerPanel::handle_device_toggle(const std::string& device, bool power_on) 
                           power_on ? "on" : "off");
         },
         [this, token, device](const MoonrakerError& err) {
-            if (token.expired())
-                return;
             auto msg = err.message;
             token.defer("PowerPanel::toggle_error", [this, device, msg]() {
                 spdlog::error("[{}] Failed to toggle device '{}': {}", get_name(), device, msg);
@@ -368,10 +364,6 @@ void PowerPanel::on_power_device_toggle(lv_event_t* e) {
 
 void PowerPanel::load_selected_devices() {
     Config* config = Config::get_instance();
-    if (!config) {
-        spdlog::warn("[{}] No config available for loading selected devices", get_name());
-        return;
-    }
 
     auto devices = config->get<std::vector<std::string>>(config->df() + "power/selected_devices",
                                                          std::vector<std::string>{});
@@ -393,11 +385,9 @@ void PowerPanel::set_selected_devices(const std::vector<std::string>& devices) {
     selected_devices_ = devices;
 
     Config* config = Config::get_instance();
-    if (config) {
-        config->set(config->df() + "power/selected_devices", devices);
-        config->save();
-        spdlog::debug("[{}] Saved {} selected devices to config", get_name(), devices.size());
-    }
+    config->set(config->df() + "power/selected_devices", devices);
+    config->save();
+    spdlog::debug("[{}] Saved {} selected devices to config", get_name(), devices.size());
 }
 
 void PowerPanel::on_devices_discovered(const std::vector<PowerDevice>& devices) {
@@ -473,13 +463,13 @@ void PowerPanel::populate_device_chips() {
     if (!chip_container_)
         return;
 
-    // Defer rebuild (#80) AND use safe_clean_children (#776): lifetime_.defer moves
+    // Defer rebuild (#80) AND use safe_clean_children (#776): object_lifetime_.defer moves
     // the rebuild off the click handler stack (avoids deleting the clicked chip during
     // its own event), and safe_clean_children escapes UpdateQueue::process_pending()
     // so sync lv_obj_clean() can't corrupt LVGL's event linked list.
     if (!chips_rebuild_pending_) {
         chips_rebuild_pending_ = true;
-        lifetime_.defer("PowerPanel::populate_device_chips", [this]() {
+        object_lifetime_.defer("PowerPanel::populate_device_chips", [this]() {
             chips_rebuild_pending_ = false;
             if (chip_container_)
                 populate_device_chips_impl();
@@ -531,7 +521,7 @@ lv_obj_t* PowerPanel::get_or_create_overlay(lv_obj_t* parent_screen) {
         // unregistered (invisible to lifecycle machinery, no on_deactivate on
         // dismiss). Idempotent (keyed by widget). All push sites call this
         // immediately before push_overlay().
-        NavigationManager::instance().register_overlay_instance(cached_overlay_, this);
+        helix::nav::register_overlay(cached_overlay_, this);
         return cached_overlay_;
     }
 
@@ -542,27 +532,20 @@ lv_obj_t* PowerPanel::get_or_create_overlay(lv_obj_t* parent_screen) {
         init_subjects();
     }
 
-    auto* obj =
-        static_cast<lv_obj_t*>(lv_xml_create(parent_screen, get_xml_component_name(), nullptr));
+    auto* obj = helix::ui::create_xml_hidden(parent_screen, get_xml_component_name());
     if (!obj) {
         spdlog::error("[{}] Failed to create overlay from XML", get_name());
         return nullptr;
     }
 
     setup(obj, parent_screen);
-    NavigationManager::instance().register_overlay_instance(obj, this);
+    helix::nav::register_overlay(obj, this);
     cached_overlay_ = obj;
     return cached_overlay_;
 }
 
 // Global instance accessor
-static std::unique_ptr<PowerPanel> g_power_panel;
 
 PowerPanel& get_global_power_panel() {
-    if (!g_power_panel) {
-        g_power_panel = std::make_unique<PowerPanel>(get_printer_state(), get_moonraker_api());
-        StaticPanelRegistry::instance().register_destroy("PowerPanel",
-                                                         []() { g_power_panel.reset(); });
-    }
-    return *g_power_panel;
+    return helix::lazy_global<PowerPanel>("PowerPanel", get_printer_state(), get_moonraker_api());
 }

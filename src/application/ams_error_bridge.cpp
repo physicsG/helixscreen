@@ -20,7 +20,7 @@ AmsErrorBridge::AmsErrorBridge(helix::ui::RecoveryModalPresenter& presenter)
 void AmsErrorBridge::start() {
     // One-shot: Application calls this once. Re-calling would reinstall the
     // observer while leaving prev_action_/presented_ stale — don't.
-    action_observer_ = helix::ui::observe_int_sync<AmsErrorBridge>(
+    action_observer_ = helix::ui::observe<int>(
         AmsState::instance().get_ams_action_subject(), this,
         [](AmsErrorBridge* self, int action) { self->on_action_changed(action); },
         AmsState::instance().get_subjects_lifetime());
@@ -30,7 +30,7 @@ void AmsErrorBridge::start() {
     // AmsAction stays ERROR never re-presents and the user keeps reading the
     // first message. present() dedups on (detail, action-set), so a detail
     // change that does not move current_error() is absorbed as a no-op.
-    detail_observer_ = helix::ui::observe_string<AmsErrorBridge>(
+    detail_observer_ = helix::ui::observe<const char*>(
         AmsState::instance().get_ams_action_detail_subject(), this,
         [](AmsErrorBridge* self, const char* detail) { self->on_detail_changed(detail); },
         AmsState::instance().get_subjects_lifetime());
@@ -70,7 +70,7 @@ void AmsErrorBridge::on_action_changed(int action) {
         // toasts if nothing else surfaced the fault; see
         // surface_unhandled_error(). Deferred by one queue tick so the other
         // observers on this subject (AmsPanel's loading-error dialog) and
-        // GcodeErrorRouter get their chance first — observe_int_sync queues
+        // GcodeErrorRouter get their chance first — observe<int> queues
         // every handler, so at this instant none of them have run yet and an
         // inline check would toast and then get a modal stacked on top.
         // process_pending() swaps the queue out before draining, so this lands

@@ -61,6 +61,14 @@ MODES
   (default)          check; exit 0 if clean, 1 on any finding above.
   --list             print the undecided files, one per line.
   --summary          one-line counts.
+  --link             link-level check over the native build's objects (build/obj):
+                     fails when a listed file references a symbol that only an
+                     excluded file defines, which the source checks cannot see.
+                     A symbol the firmware's own sources stub, or a reference whose
+                     every mention sits in a branch the firmware does not compile,
+                     is fine. Known references are ratcheted in --baseline
+                     (default scripts/esp32_link_baseline.txt).
+                     Exit 2 when listed objects are missing (no native build yet).
   --write-exclusions SEEDING/BULK-ADD tool, not the answer to routine drift.
                      Adds the currently-undecided files to the baseline,
                      compressing whole directories to dir-level entries.
@@ -75,7 +83,9 @@ Exit 0 when the manifest and exclusion baseline cover src/ exactly, 1 otherwise.
 from __future__ import annotations
 
 import argparse
+import os
 import re
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -84,6 +94,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MANIFEST = REPO_ROOT / "firmware/helixscreen-esp32/components/helixapp/app_srcs.txt"
 DEFAULT_EXCLUSIONS = REPO_ROOT / "firmware/helixscreen-esp32/components/helixapp/app_srcs_excluded.txt"
 DEFAULT_SRC_ROOT = REPO_ROOT / "src"
+DEFAULT_OBJ_ROOT = REPO_ROOT / "build/obj"
+DEFAULT_FIRMWARE_ROOT = REPO_ROOT / "firmware/helixscreen-esp32"
+DEFAULT_LINK_BASELINE = REPO_ROOT / "scripts/esp32_link_baseline.txt"
+LINK_CEILING_KEY = "max-edges"
 SRC_SUFFIXES = (".cpp", ".c")
 
 # The exact shape CMake's `REGEX "^[^#].*\.(cpp|c)$"` accepts AND that yields a
@@ -92,6 +106,193 @@ SRC_SUFFIXES = (".cpp", ".c")
 CMAKE_MANIFEST_LINE = re.compile(r"^[^#\s].*\.(?:cpp|c)$")
 
 DEFAULT_FILE_REASON = "not in the v1 Core+AMS cut"
+
+# Each of these in a compiled file links libstdc++'s std::locale machinery (~150K of
+# facets, built all at once on first use) into the image: iostreams and <regex>
+# directly, <filesystem> through path's wide codecvt. text_io.h, helix_regex.h and
+# helix_fs.h replace them. Headers reached indirectly are caught by the map check
+# in scripts/check_esp32_size.py.
+LOCALE_INCLUDE = re.compile(
+    r"^\s*#\s*include\s*<(sstream|fstream|iostream|istream|ostream|iomanip|regex|filesystem|locale)>",
+    re.M)
+
+# The ESP32 image is built without exceptions, so each of these aborts the device on
+# input the desktop build would catch: a wrongly typed or missing JSON field, text
+# that is not a number, an any holding another type. try/catch and throw do not
+# compile there, so the compiler flags those; these calls compile and abort.
+ABORTING_CALLS = [
+    (re.compile(r'\.value\(\s*"'), 'json .value("key", d) throws on a wrongly typed field',
+     "json_util::safe_*(j, \"key\", d)"),
+    (re.compile(r'\.at\(\s*"'), 'json .at("key") throws on a missing key',
+     "find() or contains() first"),
+    (re.compile(r'json::parse\([^,()]*\)'), "one-argument json::parse throws on bad input",
+     "json::parse(s, nullptr, false) and is_discarded()"),
+    (re.compile(r'\bstd::sto(?:i|l|ll|ul|ull|f|d|ld)\s*\('), "std::sto* throws on text that is not a number",
+     "text_io::parse_leading<T>(s)"),
+    (re.compile(r'\bany_cast<[^>]+>\s*\((?!\s*&)'), "value-form std::any_cast throws on another type",
+     "std::any_cast<T>(&a) and a null check"),
+]
+
+# try/catch/throw do not compile without exceptions. The firmware build says so
+# 25 minutes into esp32-build; this says so at commit time. A branch the firmware
+# does not compile is skipped: the firmware's own compile definitions (helixapp's
+# CMakeLists) decide `#if HELIX_HAS_X`, `#if defined(ESP_PLATFORM)` and
+# `#if defined(__cpp_exceptions)`. A condition this cannot evaluate counts as
+# compiled. Code desktop and firmware share keeps a desktop-only net inside
+# `#if defined(__cpp_exceptions)`, or uses exception_policy.h.
+EXCEPTION_CONSTRUCT = re.compile(r"\btry\s*\{|\bcatch\s*\(|\bthrow\b(?!_)")
+STRING_LITERAL = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'')
+# Defined by the toolchain or IDF on every firmware compile, or never defined there.
+FIRMWARE_TOOLCHAIN_DEFINES = {"ESP_PLATFORM": "1"}
+FIRMWARE_UNDEFINED = {"__cpp_exceptions", "HELIX_ENABLE_MOCKS", "__APPLE__", "__ANDROID__"}
+
+
+def native_only_flags(repo: Path, cmake_text: str) -> set[str]:
+    """HELIX_* names only the native Makefile's -D sets, which the firmware never sees.
+
+    The firmware's flags come from its CMake and sdkconfig alone, so a name the
+    Makefile passes, no firmware CMake or sdkconfig file mentions and no source
+    #defines is undefined there.
+    """
+    makefiles = [repo / "Makefile", *sorted((repo / "mk").glob("*.mk"))]
+    names = {n for m in makefiles if m.is_file()
+             for n in re.findall(r"-D\s*(HELIX_\w+)", m.read_text(errors="replace"))}
+    firmware_config = [cmake_text] + [
+        f.read_text(errors="replace") for f in (repo / "firmware").rglob("*")
+        if (f.name == "CMakeLists.txt" or f.suffix == ".cmake" or f.name.startswith("sdkconfig"))
+        and "build" not in f.relative_to(repo).parts and f.is_file()]
+    names = {n for n in names if not any(re.search(rf"\b{n}\b", t) for t in firmware_config)}
+    if not names:
+        return names
+    hash_defined = re.compile(r"^\s*#\s*define\s+(HELIX_\w+)", re.M)
+    for d in ("include", "src", "firmware"):
+        for f in (repo / d).rglob("*"):
+            if f.suffix in (".h", ".hpp", ".c", ".cpp") and f.is_file():
+                names -= set(hash_defined.findall(f.read_text(errors="replace")))
+    return names
+
+
+def firmware_defines(cmake_text: str, repo: Path | None = None) -> dict[str, str | None]:
+    """NAME -> value for helixapp's PRIVATE compile definitions, plus the toolchain's.
+
+    A name mapped to None is known to be undefined on the firmware.
+    """
+    defines: dict[str, str | None] = dict.fromkeys(FIRMWARE_UNDEFINED)
+    if repo is not None:
+        defines.update(dict.fromkeys(native_only_flags(repo, cmake_text)))
+    defines.update(FIRMWARE_TOOLCHAIN_DEFINES)
+    m = re.search(r"target_compile_definitions\(\$\{COMPONENT_LIB\} PRIVATE(.*?)\)\s*$",
+                  cmake_text, re.S | re.M)
+    if m:
+        for line in m.group(1).splitlines():
+            for token in line.split("#", 1)[0].split():
+                name, _, value = token.partition("=")
+                if re.fullmatch(r"[A-Za-z_]\w*", name):
+                    defines[name] = value or "1"
+    return defines
+
+
+def firmware_condition(directive: str, defines: dict[str, str]) -> bool | None:
+    """Whether the firmware compiles the branch a #if/#ifdef/#ifndef opens; None if unknown."""
+    def defined(name: str) -> bool | None:
+        return defines[name] is not None if name in defines else None
+
+    def negate(v: bool | None) -> bool | None:
+        return None if v is None else not v
+
+    m = re.fullmatch(r"(ifdef|ifndef)\s+(\w+)", directive)
+    if m:
+        v = defined(m.group(2))
+        return v if m.group(1) == "ifdef" else negate(v)
+    m = re.fullmatch(r"if\s+(!?)\s*defined\s*\(?\s*(\w+)\s*\)?", directive)
+    if m:
+        v = defined(m.group(2))
+        return negate(v) if m.group(1) else v
+    m = re.fullmatch(r"if\s+(!?)\s*(\w+)(?:\s*(==|!=)\s*(\d+))?", directive)
+    if m:
+        name = m.group(2)
+        if name.isdigit():
+            value = int(name)
+        elif name in defines:
+            raw = defines[name]
+            value = 0 if raw is None else int(raw) if raw.lstrip("-").isdigit() else None
+        else:
+            return None
+        if value is None:
+            return None
+        if m.group(3):
+            v = (value == int(m.group(4))) == (m.group(3) == "==")
+        else:
+            v = value != 0
+        return not v if m.group(1) else v
+    return None
+
+
+def firmware_code_lines(text: str, defines: dict[str, str | None], includes: bool = False):
+    """Yield (line, code) for each line in a branch the firmware compiles.
+
+    Code is the line with string literals blanked and comments cut. A branch
+    whose condition this cannot evaluate counts as compiled. With `includes`,
+    compiled #include directives are yielded too.
+    """
+    stack, in_block_comment = [], False
+    lines = text.splitlines()
+    for lineno, raw in enumerate(lines, 1):
+        line = raw
+        if line.lstrip().startswith("#"):
+            while line.endswith("\\") and lineno < len(lines):
+                line = line[:-1] + " " + lines[lineno]
+                lines[lineno] = ""
+                lineno += 1
+        if in_block_comment:
+            if "*/" not in line:
+                continue
+            line, in_block_comment = line.split("*/", 1)[1], False
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            directive = re.sub(r"\s+", " ", stripped[1:].split("//", 1)[0]).strip()
+            # Each frame: [does the firmware compile this branch (None = unknown),
+            #              has an earlier branch of this #if been compiled,
+            #              could an earlier branch have been compiled].
+            if directive.startswith("if"):
+                cond = firmware_condition(directive, defines)
+                stack.append([cond, cond is True, cond is None])
+            elif directive.startswith(("elif", "else")) and stack:
+                frame = stack[-1]
+                cond = (firmware_condition("if" + directive[4:], defines)
+                        if directive.startswith("elif") else True)
+                if frame[1]:
+                    frame[0] = False
+                elif frame[2] and cond is not False:
+                    frame[0] = None
+                else:
+                    frame[0] = cond
+                frame[1] = frame[1] or frame[0] is True
+                frame[2] = frame[2] or frame[0] is None
+            elif directive.startswith("endif") and stack:
+                stack.pop()
+            elif (includes and directive.startswith("include")
+                  and not any(frame[0] is False for frame in stack)):
+                yield lineno, stripped
+            continue
+        code = STRING_LITERAL.sub('""', line).split("//", 1)[0]
+        if "/*" in code:
+            code, rest = code.split("/*", 1)
+            in_block_comment = "*/" not in rest
+        if any(frame[0] is False for frame in stack):
+            continue
+        yield lineno, code
+
+
+def exception_sites(text: str, defines: dict[str, str]) -> list[tuple[int, str]]:
+    """(line, construct) for each try/catch/throw in a branch the firmware compiles."""
+    sites = []
+    for lineno, code in firmware_code_lines(text, defines):
+        m = EXCEPTION_CONSTRUCT.search(code)
+        if m:
+            sites.append((lineno, m.group(0).rstrip("({ ")))
+    return sites
+
 
 EXCLUSIONS_HEADER = [
     "# ESP32 firmware app_srcs exclusion baseline.",
@@ -136,11 +337,15 @@ class Findings:
     stale_manifest: list[str] = field(default_factory=list)
     stale_exclusions: list[tuple[int, str, str]] = field(default_factory=list)  # (lineno, path, why)
     overlap: list[tuple[str, str]] = field(default_factory=list)  # (file, exclusion entry)
+    locale_includes: list[tuple[str, int, str]] = field(default_factory=list)  # (file, lineno, header)
+    aborting_calls: list[tuple[str, int, str, str]] = field(default_factory=list)  # (file, lineno, why, fix)
+    exception_constructs: list[tuple[str, int, str]] = field(default_factory=list)  # (file, lineno, construct)
     universe: set[str] = field(default_factory=set)
 
     def any(self) -> bool:
         return bool(self.undecided or self.malformed or self.stale_manifest
-                    or self.stale_exclusions or self.overlap)
+                    or self.stale_exclusions or self.overlap or self.locale_includes
+                    or self.aborting_calls or self.exception_constructs)
 
 
 def why_cmake_drops(line: str) -> str:
@@ -278,9 +483,316 @@ def compute(manifest: Path, exclusions: Path, src_root: Path) -> Findings:
         if cover is not None:
             overlap.append((f, cover))
 
+    locale_includes: list[tuple[str, int, str]] = []
+    aborting_calls: list[tuple[str, int, str, str]] = []
+    exception_constructs: list[tuple[str, int, str]] = []
+    cmake = manifest.parent / "CMakeLists.txt"
+    base = src_root.parent
+    defines = firmware_defines(cmake.read_text() if cmake.exists() else "", base)
+    compiled = [f for f in sorted(included) if f.startswith("src/") and f in universe]
+    # Every header, not only the ones a compiled file includes: any of them can
+    # reach the firmware through an include, and tracing that graph here would be
+    # a second, weaker compiler. Plus the firmware's own component sources, which
+    # sit beside helixapp outside src/.
+    extra = [p.relative_to(base).as_posix()
+             for d in (base / "include", src_root) if d.is_dir()
+             for p in sorted(d.rglob("*.h"))]
+    if manifest.parent.name == "helixapp":
+        extra += [p.relative_to(base).as_posix()
+                  for p in sorted(manifest.parent.parent.glob("*/*.cpp"))
+                  if p.is_relative_to(base)]
+    for f in compiled + extra:
+        text = (base / f).read_text(errors="replace")
+        if f in compiled:
+            for m in LOCALE_INCLUDE.finditer(text):
+                locale_includes.append((f, text.count("\n", 0, m.start()) + 1, m.group(1)))
+        for lineno, line in enumerate(text.splitlines(), 1):
+            code = line.split("//", 1)[0]
+            if code.lstrip().startswith("*"):
+                continue
+            for pattern, why, fix in ABORTING_CALLS:
+                if pattern.search(code):
+                    aborting_calls.append((f, lineno, why, fix))
+        for lineno, construct in exception_sites(text, defines):
+            exception_constructs.append((f, lineno, construct))
+
     return Findings(undecided=undecided, malformed=malformed,
                     stale_manifest=stale_manifest, stale_exclusions=stale_exclusions,
-                    overlap=overlap, universe=universe)
+                    overlap=overlap, locale_includes=locale_includes,
+                    aborting_calls=aborting_calls,
+                    exception_constructs=exception_constructs, universe=universe)
+
+
+def load_link_baseline(path: Path) -> tuple[set[tuple[str, str]], int | None]:
+    """(edges, max-edges ceiling) from a `listed -> excluded` per-line baseline."""
+    edges: set[tuple[str, str]] = set()
+    ceiling = None
+    if not path.exists():
+        return edges, ceiling
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if line.startswith(LINK_CEILING_KEY + ":"):
+            ceiling = int(line.split(":", 1)[1])
+        elif " -> " in line:
+            user, _, definer = line.partition(" -> ")
+            edges.add((user.strip(), definer.strip()))
+    return edges, ceiling
+
+
+IDENTIFIER = re.compile(r"[A-Za-z_]\w*")
+INCLUDE = re.compile(r'^\s*#\s*include\s*["<]([^">]+)[">]', re.M)
+
+
+def object_path(obj_root: Path, rel: str) -> Path:
+    """build/obj/<path under src/>.o, the native build's object for src/<path>."""
+    return obj_root / Path(rel).relative_to("src").with_suffix(".o")
+
+
+def nm_symbols(objects: dict[str, Path], flag: str) -> dict[str, set[str]]:
+    """rel -> symbols `nm <flag>` lists for that object."""
+    by_path = {str(p): rel for rel, p in objects.items()}
+    out: dict[str, set[str]] = {rel: set() for rel in objects}
+    paths = list(by_path)
+    for i in range(0, len(paths), 500):
+        res = subprocess.run(["nm", "-A", "-P", flag, *paths[i:i + 500]],
+                             capture_output=True, text=True, check=True)
+        for line in res.stdout.splitlines():
+            obj, _, rest = line.partition(": ")
+            if rest:
+                out[by_path[obj]].add(rest.split()[0])
+    return out
+
+
+def symbol_name(demangled: str) -> list[str]:
+    """`ns::Cls::fn(args) const` -> ['ns', 'Cls', 'fn']; vtables name their class."""
+    name = demangled.removeprefix("vtable for ").removeprefix("typeinfo for ")
+    depth = 0
+    for i, c in enumerate(name):
+        depth += c == "<"
+        depth -= c == ">"
+        if c == "(" and depth == 0:
+            name = name[:i]
+            break
+    name = re.sub(r"\[abi:\w+\]", "", name)
+    while "<" in name:
+        stripped = re.sub(r"<[^<>]*>", "", name)
+        if stripped == name:
+            break
+        name = stripped
+    return name.split("::")
+
+
+NOT_A_FUNCTION = {"if", "for", "while", "switch", "return", "sizeof", "catch", "defined",
+                  "alignof", "decltype", "static_assert"}
+CALLEE = re.compile(r"(?<![\w.>:~])((?:\w+::)*~?\w+)\s*\(")
+AFTER_PARAMS = re.compile(
+    r"(?:\s|\bconst\b|\bnoexcept\b|\boverride\b|\bfinal\b)*(?:[{]|:(?!:)|=\s*default\b)")
+VARIABLE_DEFINITION = re.compile(r"^[ \t]*(?:(?:static|extern|const|constexpr|inline|"
+                                 r"thread_local)\s+)*(?!return\b)[\w:]+(?:<[^;{]*>)?[\s*&]+"
+                                 r"((?:\w+::)*\w+)\s*(?:[{=;\[])", re.M)
+
+
+def defined_functions(code: str) -> set[str]:
+    """Names, as written (`Cls::fn`, `fn`), of each function `code` gives a body.
+
+    A name counts when its closing parenthesis is followed, past cv/noexcept
+    qualifiers, by `{`, a constructor's `:` or `= default`. A call is followed by
+    `;`, `)`, `.` or an operator instead. Namespace-scope variables count too: a
+    declaration with a type before the name and an initializer or `;` after it.
+    """
+    out = set(VARIABLE_DEFINITION.findall(code))
+    for m in CALLEE.finditer(code):
+        if m.group(1).rsplit("::", 1)[-1] in NOT_A_FUNCTION:
+            continue
+        depth, k = 0, m.end() - 1
+        while k < len(code):
+            depth += {"(": 1, ")": -1}.get(code[k], 0)
+            if depth == 0:
+                break
+            k += 1
+        if AFTER_PARAMS.match(code, k + 1):
+            out.add(m.group(1))
+    return out
+
+
+def firmware_defines_symbol(parts: list[str], defined: set[str], namespaces: set[str]) -> bool:
+    """Whether a firmware source gives `parts` (from symbol_name) a body.
+
+    A vtable or typeinfo names a class: any out-of-line member of it counts.
+    """
+    name = parts[-1]
+    if len(parts) > 1 and f"{parts[-2]}::{name}" in defined:
+        return True
+    return name in defined and (len(parts) == 1 or parts[-2] in namespaces)
+
+
+@dataclass
+class LinkFindings:
+    new: dict[tuple[str, str], list[str]] = field(default_factory=dict)  # edge -> symbols
+    stale_baseline: list[tuple[str, str]] = field(default_factory=list)
+    over_ceiling: tuple[int, int | None] | None = None  # (entries, ceiling)
+    missing_objects: list[str] = field(default_factory=list)
+
+
+def compute_link(manifest: Path, exclusions: Path, src_root: Path, obj_root: Path,
+                 firmware_root: Path, baseline: set[tuple[str, str]]) -> LinkFindings:
+    """References from firmware-listed objects that only an excluded object satisfies.
+
+    A symbol counts as supplied when a listed object defines it, or when one of the
+    firmware's own sources (stubs, platform seams) gives it a body. A reference counts as live unless every mention of the name in
+    the referencing source sits in a branch the firmware does not compile.
+    """
+    included, _ = load_manifest(manifest)
+    ex_files, ex_dirs = split_exclusions(load_exclusions(exclusions))
+    universe = scan_universe(src_root)
+    listed = sorted(f for f in included if f in universe)
+    excluded = sorted(f for f in universe
+                      if f not in included and is_excluded(f, ex_files, ex_dirs))
+    found = LinkFindings()
+    listed_objs = {}
+    for f in listed:
+        o = object_path(obj_root, f)
+        if o.exists():
+            listed_objs[f] = o
+        else:
+            found.missing_objects.append(f)
+    excluded_objs = {f: object_path(obj_root, f) for f in excluded
+                     if object_path(obj_root, f).exists()}
+
+    undefined = nm_symbols(listed_objs, "--undefined-only")
+    supplied = {sym for syms in nm_symbols(listed_objs, "--defined-only").values()
+                for sym in syms}
+    owner: dict[str, str] = {}
+    for f, syms in nm_symbols(excluded_objs, "--defined-only").items():
+        for sym in syms:
+            owner.setdefault(sym, f)
+    wanted = sorted({sym for syms in undefined.values() for sym in syms
+                     if sym in owner and sym not in supplied})
+    if not wanted:
+        found.stale_baseline = sorted(e for e in baseline if e[0] in listed_objs)
+        return found
+    demangled = dict(zip(wanted, subprocess.run(
+        ["c++filt"], input="\n".join(wanted), capture_output=True, text=True,
+        check=True).stdout.splitlines()))
+
+    cmake = manifest.parent / "CMakeLists.txt"
+    cmake_text = cmake.read_text() if cmake.exists() else ""
+    base = src_root.parent
+    defines = firmware_defines(cmake_text, base)
+    include_dirs = [base / d for d in re.findall(r"\$\{REPO_ROOT\}/([\w./-]+)", cmake_text)]
+    firmware_defined: set[str] = set()
+    firmware_namespaces: set[str] = set()
+    for p in sorted(firmware_root.rglob("*")):
+        if p.suffix not in SRC_SUFFIXES:
+            continue
+        text = p.read_text(errors="replace")
+        # A single-header library defines its functions in the source that sets
+        # its *_IMPLEMENTATION macro before including it.
+        if re.search(r"^\s*#\s*define\s+\w+_IMPLEMENTATION\b", text, re.M):
+            for header in re.findall(r'^\s*#\s*include\s*"([^"]+)"', text, re.M):
+                hits = [d / header for d in (p.parent, *include_dirs) if (d / header).is_file()]
+                if hits:
+                    text += "\n" + hits[0].read_text(errors="replace")
+        code = "\n".join(c for _, c in firmware_code_lines(text, defines))
+        firmware_defined |= defined_functions(code)
+        for ns in re.findall(r"\bnamespace\s+([\w:]+)", code):
+            firmware_namespaces |= set(ns.split("::"))
+    firmware_classes = {d.split("::")[-2] for d in firmware_defined if "::" in d}
+    header_dirs = [base / "include", *include_dirs]
+    forced = [base / h for h in re.findall(r"-include\b[^$]*?\$\{REPO_ROOT\}/([\w./-]+)",
+                                           cmake_text, re.S) if (base / h).is_file()]
+    header_words: dict[Path, set[str]] = {}
+    header_includes: dict[Path, list[Path]] = {}
+
+    def resolve(names, includer: Path) -> list[Path]:
+        return [Path(os.path.normpath(hits[0])) for h in names
+                if (hits := [d / h for d in (includer.parent, *header_dirs) if (d / h).is_file()])]
+
+    def words_of(header: Path) -> set[str]:
+        if header not in header_words:
+            code = STRING_LITERAL.sub('""', header.read_text(errors="replace"))
+            code = re.sub(r"/\*.*?\*/|//[^\n]*", " ", code, flags=re.S)
+            header_words[header] = set(IDENTIFIER.findall(code))
+        return header_words[header]
+
+    def closure(roots: list[Path]) -> set[Path]:
+        """Every header `roots` reach. A header's own #if branches all count."""
+        out, todo = set(), list(roots)
+        while todo:
+            h = todo.pop()
+            if h in out:
+                continue
+            out.add(h)
+            if h not in header_includes:
+                header_includes[h] = resolve(INCLUDE.findall(h.read_text(errors="replace")), h)
+            todo += header_includes[h]
+        return out
+
+    seen: set[tuple[str, str]] = set()
+    for f in sorted(undefined):
+        syms = sorted(undefined[f] & demangled.keys())
+        if not syms:
+            continue
+        text = (base / f).read_text(errors="replace")
+        words = set(IDENTIFIER.findall(text))
+        live_words = {w for _, c in firmware_code_lines(text, defines)
+                      for w in IDENTIFIER.findall(c)}
+        src = base / f
+        live_headers = closure(forced + resolve(
+            [h for _, c in firmware_code_lines(text, defines, includes=True)
+             for h in INCLUDE.findall(c)], src))
+        all_headers = live_headers | closure(resolve(INCLUDE.findall(text), src))
+
+        def dead(word: str) -> bool:
+            """Every mention of `word` sits in a branch the firmware does not compile.
+
+            A name the source never spells comes from an inline in a header; it is
+            dead when some header mentions it and none the firmware's compiled
+            includes reach does.
+            """
+            if word in words:
+                return word not in live_words
+            return (any(word in words_of(h) for h in all_headers - live_headers)
+                    and not any(word in words_of(h) for h in live_headers))
+
+        for sym in syms:
+            parts = symbol_name(demangled[sym])
+            if demangled[sym].startswith(("vtable for ", "typeinfo for ")):
+                if parts[-1] in firmware_classes:
+                    continue
+            elif firmware_defines_symbol(parts, firmware_defined, firmware_namespaces):
+                continue
+            if dead(parts[-1].lstrip("~")):
+                continue
+            edge = (f, owner[sym])
+            seen.add(edge)
+            if edge not in baseline:
+                found.new.setdefault(edge, []).append(demangled[sym])
+    found.stale_baseline = sorted(e for e in baseline - seen if e[0] in listed_objs)
+    return found
+
+
+def report_link(f: LinkFindings) -> None:
+    if f.new:
+        print(f"FAIL: {len(f.new)} firmware-listed file(s) reference symbols only an "
+              "app_srcs_excluded.txt file defines.\n      The ESP32 link has no definition "
+              "for them:", file=sys.stderr)
+        for (user, definer), syms in sorted(f.new.items()):
+            print(f"        {user} -> {definer}", file=sys.stderr)
+            for sym in syms:
+                print(f"            {sym}", file=sys.stderr)
+        print("\n      Guard the call with the subsystem's HELIX_HAS_* macro, compile the "
+              "defining file\n      on the firmware (move it to app_srcs.txt), or stub it in "
+              "firmware/helixscreen-esp32/.", file=sys.stderr)
+    if f.stale_baseline:
+        print(f"FAIL: {len(f.stale_baseline)} link baseline entr(ies) no longer occur; "
+              "delete them and lower max-edges:", file=sys.stderr)
+        for user, definer in f.stale_baseline:
+            print(f"        {user} -> {definer}", file=sys.stderr)
+    if f.over_ceiling:
+        entries, ceiling = f.over_ceiling
+        print(f"FAIL: the link baseline holds {entries} entries against max-edges: {ceiling}.\n"
+              "      It only shrinks; fix the reference instead of listing it.", file=sys.stderr)
 
 
 def compress_dirs(undecided_set: set[str], universe: set[str]) -> dict[str, list[str]]:
@@ -378,6 +890,27 @@ def report(f: Findings) -> None:
               "      file at once, which is the wrong answer for a file you just added.",
               file=sys.stderr)
 
+    if f.locale_includes:
+        print(f"FAIL: {len(f.locale_includes)} std::locale-pulling include(s) in firmware-compiled "
+              "files.\n      Any one links ~150K of libstdc++ locale facets into the ESP32 image.",
+              file=sys.stderr)
+        for path, lineno, header in f.locale_includes:
+            print(f"        {path}:{lineno}: <{header}>", file=sys.stderr)
+        print("\n      Use text_io.h (streams), helix_regex.h (<regex>) or helix_fs.h "
+              "(<filesystem>).", file=sys.stderr)
+    if f.aborting_calls:
+        print(f"FAIL: {len(f.aborting_calls)} call(s) in firmware-compiled files that abort the "
+              "ESP32 image,\n      which is built without exceptions:", file=sys.stderr)
+        for path, lineno, why, fix in f.aborting_calls:
+            print(f"        {path}:{lineno}: {why}; use {fix}", file=sys.stderr)
+    if f.exception_constructs:
+        print(f"FAIL: {len(f.exception_constructs)} try/catch/throw in firmware-compiled files; "
+              "the ESP32 image\n      is built without exceptions, so these do not compile "
+              "there:", file=sys.stderr)
+        for path, lineno, construct in f.exception_constructs:
+            print(f"        {path}:{lineno}: {construct}", file=sys.stderr)
+        print("\n      Keep a desktop-only net inside #if defined(__cpp_exceptions), or use "
+              "exception_policy.h\n      (throw_or_abort, contain_exceptions).", file=sys.stderr)
     if f.overlap:
         print(f"FAIL: {len(f.overlap)} file(s) in BOTH app_srcs.txt and app_srcs_excluded.txt.\n"
               "      CMake compiles them; the exclusion baseline says it does not. Remove\n"
@@ -419,7 +952,32 @@ def main() -> int:
     ap.add_argument("--force", action="store_true",
                     help="with --write-exclusions: merge into an existing baseline "
                          "(existing entries and hand-written reasons are preserved)")
+    ap.add_argument("--link", action="store_true",
+                    help="check the native build's objects instead: fail on a reference "
+                         "from a listed file that only an excluded file defines")
+    ap.add_argument("--obj-root", type=Path, default=DEFAULT_OBJ_ROOT)
+    ap.add_argument("--firmware-root", type=Path, default=DEFAULT_FIRMWARE_ROOT)
+    ap.add_argument("--baseline", type=Path, default=DEFAULT_LINK_BASELINE,
+                    help="with --link: the known `listed -> excluded` edges and their "
+                         f"{LINK_CEILING_KEY}: ceiling")
     args = ap.parse_args()
+
+    if args.link:
+        baseline, ceiling = load_link_baseline(args.baseline)
+        lf = compute_link(args.manifest, args.exclusions, args.src_root, args.obj_root,
+                          args.firmware_root, baseline)
+        if lf.missing_objects:
+            print(f"SKIP: {len(lf.missing_objects)} listed file(s) have no object under "
+                  f"{display(args.obj_root)}; build first (make).", file=sys.stderr)
+            return 2
+        if ceiling is None or len(baseline) > ceiling:
+            lf.over_ceiling = (len(baseline), ceiling)
+        if lf.new or lf.stale_baseline or lf.over_ceiling:
+            report_link(lf)
+            return 1
+        print(f"OK: no firmware-listed object references a symbol only an excluded file "
+              f"defines beyond the {len(baseline)} baselined edge(s).")
+        return 0
 
     f = compute(args.manifest, args.exclusions, args.src_root)
 

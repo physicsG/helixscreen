@@ -5,6 +5,7 @@
 
 #include "ui_context_menu.h"
 #include "ui_observer_guard.h"
+#include "ui_widget_ref.h"
 
 #include "async_lifetime_guard.h"
 #include "panel_widget.h"
@@ -50,18 +51,17 @@ class FanStackWidget : public PanelWidget {
     std::string selected_fan_; // Specific fan object_name (empty = auto-classify)
     std::string icon_name_;    // Custom icon name (empty = default "fan")
 
-    lv_obj_t* widget_obj_ = nullptr;
-    lv_obj_t* parent_screen_ = nullptr;
-    lv_obj_t* fan_control_panel_ = nullptr;
+    helix::ui::WidgetRef widget_obj_;
+    helix::ui::WidgetRef parent_screen_;
 
     // Labels, names, and icons for each fan row (stack mode)
-    lv_obj_t* part_label_ = nullptr;
-    lv_obj_t* hotend_label_ = nullptr;
-    lv_obj_t* aux_label_ = nullptr;
-    lv_obj_t* aux_row_ = nullptr;
-    lv_obj_t* part_icon_ = nullptr;
-    lv_obj_t* hotend_icon_ = nullptr;
-    lv_obj_t* aux_icon_ = nullptr;
+    helix::ui::WidgetRef part_label_;
+    helix::ui::WidgetRef hotend_label_;
+    helix::ui::WidgetRef aux_label_;
+    helix::ui::WidgetRef aux_row_;
+    helix::ui::WidgetRef part_icon_;
+    helix::ui::WidgetRef hotend_icon_;
+    helix::ui::WidgetRef aux_icon_;
 
     // Per-fan observers. lifetime_ is declared LAST below so reverse-
     // declaration destruction tears it down first, expiring captured tokens
@@ -76,6 +76,7 @@ class FanStackWidget : public PanelWidget {
 
     // Animation settings observer
     ObserverGuard anim_settings_observer_;
+    ObserverGuard language_observer_;
 
     // Resolved fan object names and display names
     std::string part_fan_name_;

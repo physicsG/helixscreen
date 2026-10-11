@@ -42,12 +42,13 @@ TEST_CASE_METHOD(LVGLTestFixture, "CHAR: Setting empty set to non-empty set incr
 
     // Document: Adding objects increments version from 0 to 1
     std::unordered_set<std::string> objects = {"Part_1", "Part_2"};
-    state.set_excluded_objects(objects);
+    state.excluded_objects_state().set_excluded_objects(objects);
 
-    REQUIRE(lv_subject_get_int(state.get_excluded_objects_version_subject()) == 1);
-    REQUIRE(state.get_excluded_objects().size() == 2);
-    REQUIRE(state.get_excluded_objects().count("Part_1") == 1);
-    REQUIRE(state.get_excluded_objects().count("Part_2") == 1);
+    REQUIRE(lv_subject_get_int(
+                state.excluded_objects_state().get_excluded_objects_version_subject()) == 1);
+    REQUIRE(state.excluded_objects_state().get_excluded_objects().size() == 2);
+    REQUIRE(state.excluded_objects_state().get_excluded_objects().count("Part_1") == 1);
+    REQUIRE(state.excluded_objects_state().get_excluded_objects().count("Part_2") == 1);
 
     PrinterStateTestAccess::reset(state);
 }
@@ -59,17 +60,20 @@ TEST_CASE_METHOD(LVGLTestFixture, "CHAR: Setting same set again does NOT increme
 
     // Set initial objects
     std::unordered_set<std::string> objects = {"Benchy_hull", "Benchy_cabin"};
-    state.set_excluded_objects(objects);
-    REQUIRE(lv_subject_get_int(state.get_excluded_objects_version_subject()) == 1);
+    state.excluded_objects_state().set_excluded_objects(objects);
+    REQUIRE(lv_subject_get_int(
+                state.excluded_objects_state().get_excluded_objects_version_subject()) == 1);
 
     // Document: Setting identical set does NOT change version
-    state.set_excluded_objects(objects);
-    REQUIRE(lv_subject_get_int(state.get_excluded_objects_version_subject()) == 1);
+    state.excluded_objects_state().set_excluded_objects(objects);
+    REQUIRE(lv_subject_get_int(
+                state.excluded_objects_state().get_excluded_objects_version_subject()) == 1);
 
     // Even with a new set object containing same strings
     std::unordered_set<std::string> same_objects = {"Benchy_hull", "Benchy_cabin"};
-    state.set_excluded_objects(same_objects);
-    REQUIRE(lv_subject_get_int(state.get_excluded_objects_version_subject()) == 1);
+    state.excluded_objects_state().set_excluded_objects(same_objects);
+    REQUIRE(lv_subject_get_int(
+                state.excluded_objects_state().get_excluded_objects_version_subject()) == 1);
 
     PrinterStateTestAccess::reset(state);
 }
@@ -81,23 +85,27 @@ TEST_CASE_METHOD(LVGLTestFixture, "CHAR: Setting different set increments versio
 
     // Set initial objects
     std::unordered_set<std::string> objects1 = {"Part_1"};
-    state.set_excluded_objects(objects1);
-    REQUIRE(lv_subject_get_int(state.get_excluded_objects_version_subject()) == 1);
+    state.excluded_objects_state().set_excluded_objects(objects1);
+    REQUIRE(lv_subject_get_int(
+                state.excluded_objects_state().get_excluded_objects_version_subject()) == 1);
 
     // Document: Adding a new object increments version
     std::unordered_set<std::string> objects2 = {"Part_1", "Part_2"};
-    state.set_excluded_objects(objects2);
-    REQUIRE(lv_subject_get_int(state.get_excluded_objects_version_subject()) == 2);
+    state.excluded_objects_state().set_excluded_objects(objects2);
+    REQUIRE(lv_subject_get_int(
+                state.excluded_objects_state().get_excluded_objects_version_subject()) == 2);
 
     // Document: Removing an object also increments version
     std::unordered_set<std::string> objects3 = {"Part_2"};
-    state.set_excluded_objects(objects3);
-    REQUIRE(lv_subject_get_int(state.get_excluded_objects_version_subject()) == 3);
+    state.excluded_objects_state().set_excluded_objects(objects3);
+    REQUIRE(lv_subject_get_int(
+                state.excluded_objects_state().get_excluded_objects_version_subject()) == 3);
 
     // Document: Completely different set increments version
     std::unordered_set<std::string> objects4 = {"NewObject_A", "NewObject_B"};
-    state.set_excluded_objects(objects4);
-    REQUIRE(lv_subject_get_int(state.get_excluded_objects_version_subject()) == 4);
+    state.excluded_objects_state().set_excluded_objects(objects4);
+    REQUIRE(lv_subject_get_int(
+                state.excluded_objects_state().get_excluded_objects_version_subject()) == 4);
 
     PrinterStateTestAccess::reset(state);
 }
@@ -109,15 +117,17 @@ TEST_CASE_METHOD(LVGLTestFixture, "CHAR: Setting back to empty set increments ve
 
     // Set initial objects
     std::unordered_set<std::string> objects = {"Part_1", "Part_2"};
-    state.set_excluded_objects(objects);
-    REQUIRE(lv_subject_get_int(state.get_excluded_objects_version_subject()) == 1);
-    REQUIRE(state.get_excluded_objects().size() == 2);
+    state.excluded_objects_state().set_excluded_objects(objects);
+    REQUIRE(lv_subject_get_int(
+                state.excluded_objects_state().get_excluded_objects_version_subject()) == 1);
+    REQUIRE(state.excluded_objects_state().get_excluded_objects().size() == 2);
 
     // Document: Clearing all objects increments version
     std::unordered_set<std::string> empty_set;
-    state.set_excluded_objects(empty_set);
-    REQUIRE(lv_subject_get_int(state.get_excluded_objects_version_subject()) == 2);
-    REQUIRE(state.get_excluded_objects().empty());
+    state.excluded_objects_state().set_excluded_objects(empty_set);
+    REQUIRE(lv_subject_get_int(
+                state.excluded_objects_state().get_excluded_objects_version_subject()) == 2);
+    REQUIRE(state.excluded_objects_state().get_excluded_objects().empty());
 
     PrinterStateTestAccess::reset(state);
 }
@@ -131,23 +141,29 @@ TEST_CASE_METHOD(LVGLTestFixture, "CHAR: Multiple changes increment version by 1
     PrinterState state;
     state.init_subjects(false);
 
-    REQUIRE(lv_subject_get_int(state.get_excluded_objects_version_subject()) == 0);
+    REQUIRE(lv_subject_get_int(
+                state.excluded_objects_state().get_excluded_objects_version_subject()) == 0);
 
     // Document: Each actual change increments version by exactly 1
-    state.set_excluded_objects({"A"});
-    REQUIRE(lv_subject_get_int(state.get_excluded_objects_version_subject()) == 1);
+    state.excluded_objects_state().set_excluded_objects({"A"});
+    REQUIRE(lv_subject_get_int(
+                state.excluded_objects_state().get_excluded_objects_version_subject()) == 1);
 
-    state.set_excluded_objects({"A", "B"});
-    REQUIRE(lv_subject_get_int(state.get_excluded_objects_version_subject()) == 2);
+    state.excluded_objects_state().set_excluded_objects({"A", "B"});
+    REQUIRE(lv_subject_get_int(
+                state.excluded_objects_state().get_excluded_objects_version_subject()) == 2);
 
-    state.set_excluded_objects({"A", "B", "C"});
-    REQUIRE(lv_subject_get_int(state.get_excluded_objects_version_subject()) == 3);
+    state.excluded_objects_state().set_excluded_objects({"A", "B", "C"});
+    REQUIRE(lv_subject_get_int(
+                state.excluded_objects_state().get_excluded_objects_version_subject()) == 3);
 
-    state.set_excluded_objects({"B", "C"});
-    REQUIRE(lv_subject_get_int(state.get_excluded_objects_version_subject()) == 4);
+    state.excluded_objects_state().set_excluded_objects({"B", "C"});
+    REQUIRE(lv_subject_get_int(
+                state.excluded_objects_state().get_excluded_objects_version_subject()) == 4);
 
-    state.set_excluded_objects({});
-    REQUIRE(lv_subject_get_int(state.get_excluded_objects_version_subject()) == 5);
+    state.excluded_objects_state().set_excluded_objects({});
+    REQUIRE(lv_subject_get_int(
+                state.excluded_objects_state().get_excluded_objects_version_subject()) == 5);
 
     PrinterStateTestAccess::reset(state);
 }
@@ -165,9 +181,10 @@ TEST_CASE_METHOD(LVGLTestFixture, "CHAR: Version does not skip or jump values",
         for (int j = 0; j < i; ++j) {
             objects.insert("Object_" + std::to_string(j));
         }
-        state.set_excluded_objects(objects);
+        state.excluded_objects_state().set_excluded_objects(objects);
         expected_version++;
-        REQUIRE(lv_subject_get_int(state.get_excluded_objects_version_subject()) ==
+        REQUIRE(lv_subject_get_int(
+                    state.excluded_objects_state().get_excluded_objects_version_subject()) ==
                 expected_version);
     }
 
@@ -191,24 +208,25 @@ TEST_CASE_METHOD(LVGLTestFixture, "CHAR: Observer on version subject fires when 
         (*count)++;
     };
 
-    ObserverGuard guard(state.get_excluded_objects_version_subject(), cb, &callback_count);
+    ObserverGuard guard(state.excluded_objects_state().get_excluded_objects_version_subject(), cb,
+                        &callback_count);
 
     // Document: Observer fires immediately on subscription
     REQUIRE(callback_count == 1);
 
     // Document: Observer fires when set changes
-    state.set_excluded_objects({"Part_1"});
+    state.excluded_objects_state().set_excluded_objects({"Part_1"});
     REQUIRE(callback_count == 2);
 
-    state.set_excluded_objects({"Part_1", "Part_2"});
+    state.excluded_objects_state().set_excluded_objects({"Part_1", "Part_2"});
     REQUIRE(callback_count == 3);
 
     // Document: Observer does NOT fire when set is unchanged
-    state.set_excluded_objects({"Part_1", "Part_2"});
+    state.excluded_objects_state().set_excluded_objects({"Part_1", "Part_2"});
     REQUIRE(callback_count == 3);
 
     // Observer fires again on actual change
-    state.set_excluded_objects({});
+    state.excluded_objects_state().set_excluded_objects({});
     REQUIRE(callback_count == 4);
 
     guard.release();
@@ -227,17 +245,18 @@ TEST_CASE_METHOD(LVGLTestFixture, "CHAR: Observer receives correct version value
         *ver = lv_subject_get_int(subj);
     };
 
-    ObserverGuard guard(state.get_excluded_objects_version_subject(), cb, &observed_version);
+    ObserverGuard guard(state.excluded_objects_state().get_excluded_objects_version_subject(), cb,
+                        &observed_version);
 
     // Initial callback sees version 0
     REQUIRE(observed_version == 0);
 
     // After first change, observer sees version 1
-    state.set_excluded_objects({"Object_A"});
+    state.excluded_objects_state().set_excluded_objects({"Object_A"});
     REQUIRE(observed_version == 1);
 
     // After second change, observer sees version 2
-    state.set_excluded_objects({"Object_B"});
+    state.excluded_objects_state().set_excluded_objects({"Object_B"});
     REQUIRE(observed_version == 2);
 
     guard.release();
@@ -253,11 +272,12 @@ TEST_CASE_METHOD(LVGLTestFixture, "CHAR: Single object in set works correctly",
     PrinterState state;
     state.init_subjects(false);
 
-    state.set_excluded_objects({"SingleObject"});
+    state.excluded_objects_state().set_excluded_objects({"SingleObject"});
 
-    REQUIRE(lv_subject_get_int(state.get_excluded_objects_version_subject()) == 1);
-    REQUIRE(state.get_excluded_objects().size() == 1);
-    REQUIRE(state.get_excluded_objects().count("SingleObject") == 1);
+    REQUIRE(lv_subject_get_int(
+                state.excluded_objects_state().get_excluded_objects_version_subject()) == 1);
+    REQUIRE(state.excluded_objects_state().get_excluded_objects().size() == 1);
+    REQUIRE(state.excluded_objects_state().get_excluded_objects().count("SingleObject") == 1);
 
     PrinterStateTestAccess::reset(state);
 }
@@ -275,13 +295,14 @@ TEST_CASE_METHOD(LVGLTestFixture, "CHAR: Object names with special characters wo
         "Model 123",          // space
         "Complex_Object-v2.0" // mixed
     };
-    state.set_excluded_objects(objects);
+    state.excluded_objects_state().set_excluded_objects(objects);
 
-    REQUIRE(lv_subject_get_int(state.get_excluded_objects_version_subject()) == 1);
-    REQUIRE(state.get_excluded_objects().size() == 5);
+    REQUIRE(lv_subject_get_int(
+                state.excluded_objects_state().get_excluded_objects_version_subject()) == 1);
+    REQUIRE(state.excluded_objects_state().get_excluded_objects().size() == 5);
 
     for (const auto& obj : objects) {
-        REQUIRE(state.get_excluded_objects().count(obj) == 1);
+        REQUIRE(state.excluded_objects_state().get_excluded_objects().count(obj) == 1);
     }
 
     PrinterStateTestAccess::reset(state);
@@ -292,11 +313,13 @@ TEST_CASE_METHOD(LVGLTestFixture, "CHAR: get_excluded_objects returns const refe
     PrinterState state;
     state.init_subjects(false);
 
-    state.set_excluded_objects({"Part_1", "Part_2"});
+    state.excluded_objects_state().set_excluded_objects({"Part_1", "Part_2"});
 
     // Document: get_excluded_objects() returns const reference for read-only access
-    const std::unordered_set<std::string>& ref1 = state.get_excluded_objects();
-    const std::unordered_set<std::string>& ref2 = state.get_excluded_objects();
+    const std::unordered_set<std::string>& ref1 =
+        state.excluded_objects_state().get_excluded_objects();
+    const std::unordered_set<std::string>& ref2 =
+        state.excluded_objects_state().get_excluded_objects();
 
     // Same reference returned each time
     REQUIRE(&ref1 == &ref2);

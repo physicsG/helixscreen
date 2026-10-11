@@ -148,6 +148,18 @@ TEST_CASE("SafetyLimits: negative temperature floors clamp to zero", "[1353][saf
     CHECK(limits.min_extrude_temp_celsius == Catch::Approx(0.0));
 }
 
+TEST_CASE("SafetyLimits: a negative per-extruder extrusion floor clamps to zero",
+          "[1353][safety_limits]") {
+    SafetyLimits limits;
+    limits.set_min_extrude_temp_for("extruder1", REPORTED_MIN_TEMP);
+    limits.set_min_extrude_temp_for("extruder2", 190.0);
+
+    limits.clamp_temperature_floors();
+
+    CHECK(limits.min_extrude_temp_for("extruder1") == Catch::Approx(0.0));
+    CHECK(limits.min_extrude_temp_for("extruder2") == Catch::Approx(190.0));
+}
+
 TEST_CASE("SafetyLimits: a configured positive floor survives the clamp", "[1353][safety_limits]") {
     // The clamp must be a floor, not a reset - a printer that really does
     // require 190°C before it will extrude keeps that number.
@@ -243,6 +255,23 @@ TEST_CASE_METHOD(NegativeMinTempFixture, "set_temperature rejects a negative tar
     helix::ui::UpdateQueue::instance().drain();
 }
 
+TEST_CASE_METHOD(NegativeMinTempFixture,
+                 "Each extruder section's min_extrude_temp is adopted for that extruder",
+                 "[safety_limits][multi_extruder]") {
+    mock_client_.set_extruder_min_extrude_temp(170.0);
+    mock_client_.set_config_settings_section(
+        "extruder1", {{"min_temp", 0.0}, {"max_temp", 250.0}, {"min_extrude_temp", 200.0}});
+
+    REQUIRE(run_update());
+
+    const SafetyLimits& limits = api_->get_safety_limits();
+    REQUIRE(limits.max_temp_for("extruder1") == Catch::Approx(250.0));
+    CHECK(limits.min_extrude_temp_for("extruder1") == Catch::Approx(200.0));
+    CHECK(limits.min_extrude_temp_for("extruder") == Catch::Approx(170.0));
+    // The global stays the primary extruder's.
+    CHECK(limits.min_extrude_temp_celsius == Catch::Approx(170.0));
+}
+
 TEST_CASE_METHOD(NegativeMinTempFixture, "A positive configured min_extrude_temp is preserved",
                  "[1353][safety_limits]") {
     // The clamp must not flatten a printer that genuinely wants a high floor.
@@ -264,16 +293,13 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     SafetyTextHarness h(*this);
 
     // Push the reporter's numbers through the API the way discovery does, then
-    // hand the panel the ints application.cpp casts them to.
+    // hand the panel the adopted limits, as application.cpp does.
     SafetyLimits limits;
     limits.min_temperature_celsius = REPORTED_MIN_TEMP;
     limits.min_extrude_temp_celsius = REPORTED_MIN_TEMP;
     api()->set_safety_limits(limits);
 
-    const SafetyLimits& adopted = api()->get_safety_limits();
-    h.panel->set_limits(static_cast<int>(adopted.min_temperature_celsius),
-                        static_cast<int>(adopted.max_temperature_celsius),
-                        static_cast<int>(adopted.min_extrude_temp_celsius));
+    h.panel->set_limits(api()->get_safety_limits());
     process_lvgl(10);
 
     const std::string text = h.safety_text();

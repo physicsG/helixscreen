@@ -6,10 +6,15 @@
 #include "ui_swatch.h"
 #include "ui_utils.h"
 
+#include "ams_remap.h"
 #include "ams_state.h"
+#include "display_numbering.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "settings_manager.h"
+#include "static_subject_registry.h"
+#include "subject_managed_panel.h"
 #include "theme_manager.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/spdlog.h>
 
@@ -22,7 +27,44 @@ namespace helix::ui {
 namespace {
 constexpr int TOOL_LABEL_MIN_W = 32;
 constexpr lv_opa_t SWATCH_BORDER_OPA = 30;
+
+// Process-wide, not per-instance: the dialog tree is deleted after the owning
+// modal's teardown, so instance-owned subjects would die under bound labels.
+// StaticSubjectRegistry tears them down before lv_deinit().
+struct NoteSubjects {
+    lv_subject_t text{};
+    lv_subject_t visible{};
+    char text_buf[512] = {};
+    SubjectManager manager;
+    bool initialized = false;
+};
+
+NoteSubjects& note_subjects() {
+    static NoteSubjects s;
+    return s;
+}
+
+void init_note_subjects() {
+    auto& s = note_subjects();
+    if (s.initialized) {
+        return;
+    }
+    UI_MANAGED_SUBJECT_STRING_N(s.text, s.text_buf, sizeof(s.text_buf), "", "filament_mapping_note",
+                                s.manager);
+    UI_MANAGED_SUBJECT_INT(s.visible, 0, "filament_mapping_note_visible", s.manager);
+    s.initialized = true;
+    StaticSubjectRegistry::instance().register_deinit("FilamentMappingModal", []() {
+        auto& n = note_subjects();
+        n.manager.deinit_all();
+        n.initialized = false;
+    });
+}
 } // namespace
+
+// The XML binds these at creation, so they must exist before show().
+FilamentMappingModal::FilamentMappingModal() {
+    init_note_subjects();
+}
 
 // ============================================================================
 // Configuration
@@ -44,6 +86,10 @@ void FilamentMappingModal::set_on_mappings_updated(MappingsUpdatedCallback cb) {
     on_updated_cb_ = std::move(cb);
 }
 
+void FilamentMappingModal::set_start_macro_note(std::string note) {
+    start_macro_note_ = std::move(note);
+}
+
 // ============================================================================
 // Modal lifecycle
 // ============================================================================
@@ -60,6 +106,11 @@ void FilamentMappingModal::on_show() {
     // effect of merely LOOKING at what the other mode would do.
     original_mappings_ = mappings_;
     original_auto_color_map_ = auto_color_map_;
+
+    // Published on every show: the subjects are shared by every instance, so a
+    // note left from one caller must not reach another's dialog. Visibility is
+    // published by rebuild_rows(), which every change to the picks goes through.
+    lv_subject_copy_string(&note_subjects().text, start_macro_note_.c_str());
 
     tool_list_ = find_widget("mapping_tool_list");
     if (!tool_list_) {
@@ -101,6 +152,9 @@ void FilamentMappingModal::on_cancel() {
 // ============================================================================
 
 void FilamentMappingModal::rebuild_rows() {
+    lv_subject_set_int(
+        &note_subjects().visible,
+        helix::printer::start_macro_note_shown(!start_macro_note_.empty(), mappings_) ? 1 : 0);
     if (!tool_list_) {
         return;
     }
@@ -143,22 +197,22 @@ lv_obj_t* FilamentMappingModal::create_tool_row(int tool_index) {
     }
 
     lv_color_t gcode_color = lv_color_hex(tool.color_rgb);
-    if (auto* expected_swatch = lv_obj_find_by_name(row, "expected_swatch")) {
+    if (auto* expected_swatch = helix::ui::find_required(row, "expected_swatch", get_name())) {
         lv_obj_set_style_bg_color(expected_swatch, gcode_color, 0);
     }
 
-    if (auto* tool_label = lv_obj_find_by_name(row, "tool_label")) {
+    if (auto* tool_label = helix::ui::find_required(row, "tool_label", get_name())) {
         if (tool_info_.size() > 1) {
-            char tool_buf[8];
-            snprintf(tool_buf, sizeof(tool_buf), "T%d", tool.tool_index);
-            lv_label_set_text(tool_label, tool_buf);
-            lv_obj_set_style_text_color(tool_label, theme_manager_get_contrast_color(gcode_color),
+            lv_label_set_text(tool_label, helix::ui::tool_label(tool.tool_index).c_str());
+            lv_obj_set_style_text_color(tool_label,
+                                        theme_manager_get_contrast_adjusted_text(
+                                            theme_manager_get_color("text"), gcode_color),
                                         0);
             lv_obj_remove_flag(tool_label, LV_OBJ_FLAG_HIDDEN);
         }
     }
 
-    if (auto* mat_label = lv_obj_find_by_name(row, "material_label")) {
+    if (auto* mat_label = helix::ui::find_required(row, "material_label", get_name())) {
         if (!tool.material.empty()) {
             lv_label_set_text(mat_label, tool.material.c_str());
             lv_obj_remove_flag(mat_label, LV_OBJ_FLAG_HIDDEN);
@@ -166,10 +220,10 @@ lv_obj_t* FilamentMappingModal::create_tool_row(int tool_index) {
     }
 
     const auto* mapped = find_mapped_slot(mapping);
-    auto* trigger = lv_obj_find_by_name(row, "trigger");
+    auto* trigger = helix::ui::find_required(row, "trigger", get_name());
     trigger_widgets_[static_cast<size_t>(tool_index)] = trigger;
 
-    if (auto* chosen_swatch = lv_obj_find_by_name(row, "chosen_swatch")) {
+    if (auto* chosen_swatch = helix::ui::find_required(row, "chosen_swatch", get_name())) {
         if (mapped && !mapped->is_empty) {
             helix::ui::apply_swatch_color(chosen_swatch, mapped->color_rgb,
                                           mapped->multi_color_hexes);
@@ -184,19 +238,19 @@ lv_obj_t* FilamentMappingModal::create_tool_row(int tool_index) {
         // Auto/Unmapped (mapped == nullptr) leaves the swatch hidden.
     }
 
-    if (auto* slot_text = lv_obj_find_by_name(row, "slot_text")) {
+    if (auto* slot_text = helix::ui::find_required(row, "slot_text", get_name())) {
         lv_label_set_text(slot_text, get_slot_display_text(mapping).c_str());
     }
 
     bool mapped_to_empty = mapped && mapped->is_empty;
     if (mapping.material_mismatch || mapped_to_empty) {
-        if (auto* warn = lv_obj_find_by_name(row, "trigger_warn")) {
+        if (auto* warn = helix::ui::find_required(row, "trigger_warn", get_name())) {
             lv_obj_remove_flag(warn, LV_OBJ_FLAG_HIDDEN);
         }
     }
 
     if (!auto_color_map_) {
-        if (auto* chevron = lv_obj_find_by_name(row, "trigger_chevron")) {
+        if (auto* chevron = helix::ui::find_required(row, "trigger_chevron", get_name())) {
             lv_obj_remove_flag(chevron, LV_OBJ_FLAG_HIDDEN);
         }
     }
@@ -253,14 +307,13 @@ std::string FilamentMappingModal::get_slot_display_text(const helix::ToolMapping
         return helix::FilamentMapper::format_slot_label(*slot);
     }
 
-    // Fallback when the slot itself could not be resolved. Still the badge's
-    // spool number rather than mapped_slot + 1 — see spool_display_number().
-    auto* backend = AmsState::instance().get_backend();
-    const int shown =
-        backend ? backend->spool_display_number(mapping.mapped_slot) : mapping.mapped_slot + 1;
-    char buf[32];
-    snprintf(buf, sizeof(buf), "%s %d", lv_tr("Slot"), shown);
-    return buf;
+    // No AvailableSlot here to carry a noun, so the active printer answers for
+    // it, with the number the slot's badge shows. The label helpers spell the
+    // whole label, so there is no buffer here for a translated noun to overrun.
+    if (const helix::AmsBackend* backend = helix::AmsState::instance().get_backend()) {
+        return helix::ui::backend_lane_label(*backend, mapping.mapped_slot);
+    }
+    return helix::ui::lane_label(helix::ui::active_lane_noun(), mapping.mapped_slot);
 }
 
 // ============================================================================

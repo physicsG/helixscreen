@@ -33,23 +33,12 @@ void ui_severity_card_register(void);
  * Call this after creating a severity_card via lv_xml_create to style
  * children (which don't exist during widget apply phase).
  *
- * This will find any child named "severity_icon" and:
- * - Set its text to the appropriate icon glyph
- * - Set its text color to match the severity
+ * The card's XML defines one hidden icon per severity (icon_info,
+ * icon_success, icon_warning, icon_error); this unhides the matching one.
  *
  * @param obj The severity_card widget
  */
 void ui_severity_card_finalize(lv_obj_t* obj);
-
-/**
- * @brief Get the severity color for a given severity string
- *
- * Useful for other code that needs to match severity colors.
- *
- * @param severity The severity string ("error", "warning", "success", "info")
- * @return The theme color for the severity
- */
-lv_color_t ui_severity_get_color(const char* severity);
 
 #ifdef __cplusplus
 }

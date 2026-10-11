@@ -9,8 +9,7 @@
  * - Type helpers: role/type string conversion
  * - Sensor discovery from Klipper object names (adxl345, lis2dw, lis3dh, mpu9250, icm20948)
  * - Role assignment (INPUT_SHAPER)
- * - State updates from Moonraker status JSON
- * - Subject value correctness for UI binding
+ * - Status frames leave discovered state alone (accelerometers publish none)
  * - Config persistence
  */
 
@@ -38,8 +37,6 @@ class AccelSensorManagerTestAccess {
     static void reset(AccelSensorManager& obj) {
         std::lock_guard<std::recursive_mutex> lock(obj.mutex_);
         obj.sensors_.clear();
-        obj.states_.clear();
-        obj.sync_mode_ = true;
         obj.deinit_subjects();
     }
 };
@@ -91,13 +88,6 @@ class AccelSensorTestFixture {
                        {"adxl345 bed", json::object()},
                        {"lis2dw hotend", json::object()}};
         mgr().discover_from_config(config);
-    }
-
-    // Helper to simulate Moonraker status update
-    void update_sensor_state(const std::string& klipper_name, bool connected) {
-        json status;
-        status[klipper_name]["connected"] = connected;
-        mgr().update_from_status(status);
     }
 
   private:
@@ -285,6 +275,15 @@ TEST_CASE_METHOD(AccelSensorTestFixture, "AccelSensorManager - config-based disc
         REQUIRE(configs[0].type == AccelSensorType::LIS2DW);
     }
 
+    SECTION("Beacon found via resonance_tester survives rediscovery") {
+        json config_keys = {{"resonance_tester", {{"accel_chip", "beacon"}}}};
+        mgr().discover_from_config(config_keys);
+        mgr().discover_from_config(config_keys);
+
+        REQUIRE(mgr().sensor_count() == 1);
+        REQUIRE(mgr().get_sensors()[0].klipper_name == "beacon");
+    }
+
     SECTION("Discovers Beacon accelerometer via resonance_tester accel_chip_x") {
         json config_keys = {{"resonance_tester", {{"accel_chip_x", "beacon"}}}};
         mgr().discover_from_config(config_keys);
@@ -312,10 +311,8 @@ TEST_CASE_METHOD(AccelSensorTestFixture, "AccelSensorManager - config-based disc
     }
 }
 
-// NOTE: The old discover(vector<string>) tests have been removed because:
-// - Accelerometers only exist in configfile.config, not printer.objects.list
-// - The ISensorManager::discover() method now uses the default no-op for AccelSensorManager
-// - Use discover_from_config() tests above instead
+// Accelerometers only exist in configfile.config, not printer.objects.list, so
+// discover_from_config() is the only discovery path.
 
 // ============================================================================
 // Role Assignment Tests
@@ -373,78 +370,21 @@ TEST_CASE_METHOD(AccelSensorTestFixture, "AccelSensorManager - role assignment",
 // State Update Tests
 // ============================================================================
 
-TEST_CASE_METHOD(AccelSensorTestFixture, "AccelSensorManager - state updates", "[accel][state]") {
+TEST_CASE_METHOD(AccelSensorTestFixture, "AccelSensorManager - status frames change nothing",
+                 "[accel][state]") {
     discover_test_sensors();
     mgr().set_sensor_role("adxl345", AccelSensorRole::INPUT_SHAPER);
+    REQUIRE(mgr().is_sensor_available(AccelSensorRole::INPUT_SHAPER));
 
-    SECTION("Parses connected state from status JSON") {
-        auto state = mgr().get_sensor_state(AccelSensorRole::INPUT_SHAPER);
-        REQUIRE(state.has_value());
-        REQUIRE(state->connected == false);
+    json status;
+    status["adxl345"]["connected"] = false;
+    status["unknown_sensor"]["connected"] = true;
+    mgr().update_from_status(status);
+    mgr().update_from_status(json::object());
 
-        json status;
-        status["adxl345"]["connected"] = true;
-        mgr().update_from_status(status);
-
-        state = mgr().get_sensor_state(AccelSensorRole::INPUT_SHAPER);
-        REQUIRE(state->connected == true);
-    }
-
-    SECTION("Status update for unknown sensor is ignored") {
-        json status;
-        status["unknown_sensor"]["connected"] = true;
-        mgr().update_from_status(status);
-
-        REQUIRE(mgr().sensor_count() == 3);
-    }
-
-    SECTION("Empty status update is handled") {
-        json status = json::object();
-        mgr().update_from_status(status);
-
-        REQUIRE(mgr().has_sensors());
-    }
-}
-
-// ============================================================================
-// Subject Value Tests
-// ============================================================================
-
-TEST_CASE_METHOD(AccelSensorTestFixture, "AccelSensorManager - subject values",
-                 "[accel][subjects]") {
-    SECTION("Connected subject shows -1 when no accelerometer discovered") {
-        REQUIRE(lv_subject_get_int(mgr().get_connected_subject()) == -1);
-    }
-
-    SECTION("Connected subject shows 0 when sensor disconnected") {
-        discover_test_sensors();
-        mgr().set_sensor_role("adxl345", AccelSensorRole::INPUT_SHAPER);
-
-        // After assignment, should show 0 (disconnected)
-        REQUIRE(lv_subject_get_int(mgr().get_connected_subject()) == 0);
-    }
-
-    SECTION("Connected subject updates correctly") {
-        discover_test_sensors();
-        mgr().set_sensor_role("adxl345", AccelSensorRole::INPUT_SHAPER);
-
-        // Update state with connected = true
-        update_sensor_state("adxl345", true);
-        REQUIRE(lv_subject_get_int(mgr().get_connected_subject()) == 1);
-
-        // Update with connected = false
-        update_sensor_state("adxl345", false);
-        REQUIRE(lv_subject_get_int(mgr().get_connected_subject()) == 0);
-    }
-
-    SECTION("Connected subject shows -1 when sensor disabled") {
-        discover_test_sensors();
-        mgr().set_sensor_role("adxl345", AccelSensorRole::INPUT_SHAPER);
-        update_sensor_state("adxl345", true);
-
-        mgr().set_sensor_enabled("adxl345", false);
-        REQUIRE(lv_subject_get_int(mgr().get_connected_subject()) == -1);
-    }
+    REQUIRE(mgr().sensor_count() == 3);
+    REQUIRE(mgr().is_sensor_available(AccelSensorRole::INPUT_SHAPER));
+    REQUIRE(lv_subject_get_int(mgr().get_sensor_count_subject()) == 3);
 }
 
 // ============================================================================
@@ -540,9 +480,5 @@ TEST_CASE_METHOD(AccelSensorTestFixture, "AccelSensorManager - edge cases", "[ac
 
         mgr().set_sensor_enabled("adxl345", false);
         REQUIRE_FALSE(mgr().is_sensor_available(AccelSensorRole::INPUT_SHAPER));
-    }
-
-    SECTION("category_name returns 'accelerometer'") {
-        REQUIRE(mgr().category_name() == "accelerometer");
     }
 }

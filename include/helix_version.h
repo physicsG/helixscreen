@@ -34,6 +34,9 @@
 #define HELIX_VERSION_PATCH 0
 #endif
 
+/// User-Agent for every HTTP request the app makes.
+#define HELIX_USER_AGENT "HelixScreen/" HELIX_VERSION
+
 // Build type
 #ifndef HELIX_BUILD_TYPE
 #define HELIX_BUILD_TYPE "dev"

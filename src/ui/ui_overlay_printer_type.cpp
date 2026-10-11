@@ -14,14 +14,14 @@
 
 #include "ui_overlay_printer_type.h"
 
-#include "ui_event_safety.h"
-#include "ui_nav_manager.h"
+#include "ui_callback_helpers.h"
+#include "ui_nav.h"
 
 #include "app_globals.h"
 #include "config.h"
 #include "i_moonraker_api.h"
 #include "printer_detector.h"
-#include "static_panel_registry.h"
+#include "ui/ui_widget_helpers.h"
 #include "wizard_config_paths.h"
 
 #include <spdlog/spdlog.h>
@@ -31,80 +31,26 @@
 
 namespace helix::settings {
 
-namespace {
-std::unique_ptr<PrinterTypeOverlay> g_printer_type_overlay;
-} // namespace
-
-PrinterTypeOverlay& get_printer_type_overlay() {
-    if (!g_printer_type_overlay) {
-        g_printer_type_overlay = std::make_unique<PrinterTypeOverlay>();
-        StaticPanelRegistry::instance().register_destroy("PrinterTypeOverlay",
-                                                         []() { g_printer_type_overlay.reset(); });
-    }
-    return *g_printer_type_overlay;
-}
-
-// ============================================================================
-// CONSTRUCTOR / DESTRUCTOR
-// ============================================================================
-
-PrinterTypeOverlay::PrinterTypeOverlay() {
-    spdlog::debug("[{}] Created", get_name());
-}
-
-PrinterTypeOverlay::~PrinterTypeOverlay() = default;
+using helix::ui::find_required;
 
 // ============================================================================
 // OVERLAY BASE INTERFACE
 // ============================================================================
 
-void PrinterTypeOverlay::init_subjects() {
-    // No subjects: the list is built imperatively from the database and the
-    // selected row is expressed with LV_STATE_CHECKED, which the XML component
-    // already styles.
-    subjects_initialized_ = true;
-}
-
 void PrinterTypeOverlay::register_callbacks() {
-    lv_xml_register_event_cb(nullptr, "on_printer_type_row_clicked", on_type_row_clicked);
-    spdlog::debug("[{}] Callbacks registered", get_name());
+    register_xml_callbacks({
+        {"on_printer_type_row_clicked",
+         [](lv_event_t* e) {
+             auto* row = lv_event_get_current_target_obj(e);
+             auto* name = row ? static_cast<const char*>(lv_obj_get_user_data(row)) : nullptr;
+             if (name) {
+                 get_printer_type_overlay().handle_type_selected(std::string(name));
+             }
+         }},
+    });
 }
 
-lv_obj_t* PrinterTypeOverlay::create(lv_obj_t* parent) {
-    if (overlay_root_) {
-        spdlog::warn("[{}] create() called but overlay already exists", get_name());
-        return overlay_root_;
-    }
-
-    overlay_root_ = static_cast<lv_obj_t*>(lv_xml_create(parent, "printer_type_overlay", nullptr));
-    if (!overlay_root_) {
-        spdlog::error("[{}] Failed to create overlay from XML", get_name());
-        return nullptr;
-    }
-
-    lv_obj_add_flag(overlay_root_, LV_OBJ_FLAG_HIDDEN);
-
-    spdlog::info("[{}] Overlay created", get_name());
-    return overlay_root_;
-}
-
-void PrinterTypeOverlay::show(lv_obj_t* parent_screen) {
-    parent_screen_ = parent_screen;
-
-    if (!subjects_initialized_) {
-        init_subjects();
-        register_callbacks();
-    }
-
-    if (!overlay_root_ && parent_screen_) {
-        create(parent_screen_);
-    }
-
-    if (!overlay_root_) {
-        spdlog::error("[{}] Cannot show - overlay not created", get_name());
-        return;
-    }
-
+void PrinterTypeOverlay::before_show() {
     // Match the wizard's filter so both surfaces offer the same candidates.
     // An empty filter means "unfiltered", which is the right fallback when
     // Moonraker has not reported kinematics.
@@ -112,9 +58,6 @@ void PrinterTypeOverlay::show(lv_obj_t* parent_screen) {
     if (IMoonrakerAPI* api = get_moonraker_api()) {
         kinematics_filter_ = api->hardware().kinematics();
     }
-
-    NavigationManager::instance().register_overlay_instance(overlay_root_, this);
-    NavigationManager::instance().push_overlay(overlay_root_);
 }
 
 void PrinterTypeOverlay::on_activate() {
@@ -131,9 +74,8 @@ void PrinterTypeOverlay::populate_type_list() {
         return;
     }
 
-    lv_obj_t* list = lv_obj_find_by_name(overlay_root_, "printer_type_list");
+    lv_obj_t* list = find_required(overlay_root_, "printer_type_list", get_name());
     if (!list) {
-        spdlog::error("[{}] printer_type_list not found in XML", get_name());
         return;
     }
 
@@ -175,9 +117,9 @@ void PrinterTypeOverlay::populate_type_list() {
     }
 
     std::string current;
-    if (Config* config = Config::get_instance()) {
-        current = config->get<std::string>(config->df() + helix::wizard::PRINTER_TYPE, "");
-    }
+    Config* config = Config::get_instance();
+    current = config->get<std::string>(config->df() + helix::wizard::PRINTER_TYPE, "");
+
     update_selection_indicator(current);
 
     spdlog::debug("[{}] Populated {} models (kinematics filter '{}'), current '{}'", get_name(),
@@ -185,11 +127,7 @@ void PrinterTypeOverlay::populate_type_list() {
 }
 
 void PrinterTypeOverlay::update_selection_indicator(const std::string& active_type) {
-    if (!overlay_root_) {
-        return;
-    }
-
-    lv_obj_t* list = lv_obj_find_by_name(overlay_root_, "printer_type_list");
+    lv_obj_t* list = find_required(overlay_root_, "printer_type_list", get_name());
     if (!list) {
         return;
     }
@@ -221,7 +159,7 @@ void PrinterTypeOverlay::handle_type_selected(const std::string& type_name) {
 
     Config* config = Config::get_instance();
     IMoonrakerAPI* api = get_moonraker_api();
-    if (!config || !api) {
+    if (!api) {
         spdlog::warn("[{}] Cannot apply '{}' - config or Moonraker unavailable", get_name(),
                      type_name);
         return;
@@ -230,17 +168,7 @@ void PrinterTypeOverlay::handle_type_selected(const std::string& type_name) {
     PrinterDetector::apply_type_choice(config, type_name, api->hardware());
 
     update_selection_indicator(type_name);
-    NavigationManager::instance().go_back();
-}
-
-void PrinterTypeOverlay::on_type_row_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[PrinterTypeOverlay] on_type_row_clicked");
-    auto* row = lv_event_get_current_target_obj(e);
-    auto* name = row ? static_cast<const char*>(lv_obj_get_user_data(row)) : nullptr;
-    if (name) {
-        get_printer_type_overlay().handle_type_selected(std::string(name));
-    }
-    LVGL_SAFE_EVENT_CB_END();
+    helix::nav::go_back();
 }
 
 } // namespace helix::settings

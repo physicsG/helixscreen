@@ -29,47 +29,37 @@
  *
  * ## Usage Pattern:
  *
+ * A behaviour-free overlay is its name and XML component; show() does the rest
+ * (subjects once, callbacks + create on each build, register + push):
+ *
  * @code
  * class MyOverlay : public OverlayBase {
- * public:
- *     void init_subjects() override {
- *         // Register LVGL subjects for XML binding
- *         subjects_initialized_ = true;
- *     }
- *
- *     void register_callbacks() override {
- *         // Register event callbacks with lv_xml_register_event_cb()
- *     }
- *
- *     lv_obj_t* create(lv_obj_t* parent) override {
- *         overlay_root_ = lv_xml_create(parent, "my_overlay", nullptr);
- *         return overlay_root_;
- *     }
- *
+ *   public:
  *     const char* get_name() const override { return "My Overlay"; }
- *
- *     void on_activate() override {
- *         // Start scanning, refresh data, etc.
- *         visible_ = true;
- *     }
- *
- *     void on_deactivate() override {
- *         // Stop scanning, cancel pending operations, etc.
- *         visible_ = false;
- *     }
+ *     const char* xml_component() const override { return "my_overlay"; }
  * };
+ * MyOverlay& get_my_overlay() { return helix::lazy_global<MyOverlay>("MyOverlay"); }
+ *
+ * get_my_overlay().show(parent_screen);
  * @endcode
+ *
+ * Override init_subjects() for owned subjects, register_callbacks() for XML
+ * callbacks, before_show() for per-open work that needs the root, and
+ * destroy_on_close() to free the widget tree whenever the overlay is popped.
  *
  * @see NetworkSettingsOverlay for reference implementation
  */
 
 #pragma once
 
-#include "async_lifetime_guard.h"
+#include "ui_widget_ref.h"
+
 #include "lvgl/lvgl.h"
 #include "panel_lifecycle.h"
 
 #include <spdlog/spdlog.h>
+
+#include <functional>
 
 // Include for SubjectManager (needed for deinit_subjects_base)
 #include "subject_managed_panel.h"
@@ -79,13 +69,14 @@
  * @brief Abstract base class for overlay panels with lifecycle management
  *
  * Provides shared infrastructure for overlay panels including:
- * - Lifecycle hooks (on_activate/on_deactivate) called by NavigationManager
+ * - Lifecycle hooks (on_activate/on_deactivating) called by NavigationManager
  * - Two-phase initialization (init_subjects -> create -> register_callbacks)
  * - Async-safe cleanup pattern
  *
  * @implements IPanelLifecycle for NavigationManager dispatch
+ * @see ViewLifecycleBase for the two lifetime guards and which one to use
  */
-class OverlayBase : public IPanelLifecycle {
+class OverlayBase : public ViewLifecycleBase {
   public:
     /**
      * @brief Virtual destructor for proper cleanup
@@ -103,20 +94,69 @@ class OverlayBase : public IPanelLifecycle {
     /**
      * @brief Initialize LVGL subjects for XML data binding
      *
-     * MUST be called BEFORE create() to ensure bindings work.
-     * Implementations should set subjects_initialized_ = true.
+     * Runs BEFORE create() so bindings resolve. show() calls it once and sets
+     * subjects_initialized_; the default has nothing to initialize.
      */
-    virtual void init_subjects() = 0;
+    virtual void init_subjects() {}
 
     /**
-     * @brief Create overlay UI from XML
+     * @brief Create overlay UI
+     *
+     * Default: create_overlay_from_xml(parent, xml_component()). Override when
+     * the overlay passes attributes to lv_xml_create or builds its own rows.
      *
      * @param parent Parent widget to attach overlay to (usually screen)
      * @return Root object of overlay, or nullptr on failure
      *
      * Implementations should store result in overlay_root_.
      */
-    virtual lv_obj_t* create(lv_obj_t* parent) = 0;
+    virtual lv_obj_t* create(lv_obj_t* parent);
+
+    /**
+     * @brief XML component the default create() instantiates
+     * @return Component name, or nullptr when the subclass overrides create()
+     */
+    virtual const char* xml_component() const {
+        return nullptr;
+    }
+
+    /**
+     * @brief Free the widget tree every time show()'s overlay is popped
+     *
+     * The object (subjects, state) survives and the next show() re-creates the
+     * tree (#1329, #1246). Default: built once, retained for the session.
+     */
+    virtual bool destroy_on_close() const {
+        return false;
+    }
+
+    /**
+     * @brief Open this overlay: the one lazy-create-and-push sequence
+     *
+     * Initializes subjects once, and on each build registers callbacks (XML
+     * callback slots are last-write-wins) and calls create(). Then runs
+     * before_show(), registers the lifecycle and pushes. With
+     * destroy_on_close(), registers the close callback that frees the tree.
+     *
+     * For overlays that own their root for the session. An overlay whose
+     * object is owned elsewhere and dies with its screen (plugin settings
+     * screens) is pushed by its owner, whose close callback deletes it:
+     * NavigationManager keeps one close callback per root, so show() refuses a
+     * root that already carries someone else's (abort in --test and unit
+     * tests, error log in release).
+     *
+     * @param parent_screen Screen to build on
+     * @return false (after a toast) when the root could not be created
+     */
+    bool show(lv_obj_t* parent_screen);
+
+    /**
+     * @brief Close this overlay through NavigationManager::close_overlay()
+     *
+     * Pops it when on top, drops it silently when buried, no-op when it is
+     * already gone; safe to call whatever the stack looks like.
+     */
+    void close();
 
     /**
      * @brief Get human-readable overlay name
@@ -149,21 +189,12 @@ class OverlayBase : public IPanelLifecycle {
     void on_activate() override;
 
     /**
-     * @brief Called when overlay is being hidden
-     *
-     * Override to stop scanning, cancel pending operations, pause timers.
-     * Called by NavigationManager before slide-out animation starts.
-     * Default implementation sets visible_ = false.
-     */
-    void on_deactivate() override;
-
-    /**
      * @brief Rebuild this overlay's widget tree from its XML component
      *
      * Dev-only. Called by NavigationManager after XML hot-reload re-registers
-     * a component. Invokes on_deactivate() to drop state, calls create() for
-     * a new widget, rekeys NavigationManager maps, restores visibility, and
-     * schedules async deletion of the old widget.
+     * a component. Deactivates with DeactivateReason::Rebuild to drop state,
+     * calls create() for a new widget, rekeys NavigationManager maps, restores
+     * visibility, and schedules async deletion of the old widget.
      *
      * @return true if rebuilt, false if no current widget or create() failed
      */
@@ -173,7 +204,9 @@ class OverlayBase : public IPanelLifecycle {
      * @brief Clean up resources for async-safe destruction
      *
      * Call this before destroying the overlay to handle any pending
-     * async callbacks safely. Sets cleanup_called_ flag.
+     * async callbacks safely. Invalidates BOTH lifetime guards — including
+     * object_lifetime_, whose whole point is surviving deactivation — and sets
+     * cleanup_called_.
      */
     virtual void cleanup();
 
@@ -208,8 +241,8 @@ class OverlayBase : public IPanelLifecycle {
     /**
      * @brief Destroy overlay widget tree to free memory
      *
-     * Called by close callbacks registered via lazy_create_and_push_overlay
-     * with destroy_on_close=true. Performs:
+     * Called by the close callback show() registers when destroy_on_close()
+     * is true. Performs:
      * 1. Drains UpdateQueue (process pending deferred callbacks)
      * 2. Unregisters close callback from NavigationManager
      * 3. Unregisters overlay instance from NavigationManager
@@ -221,12 +254,17 @@ class OverlayBase : public IPanelLifecycle {
      *    reparented to top layer; actual deletion runs on the next tick)
      *
      * The overlay object (subjects, state) survives — only the widget tree
-     * is destroyed. Next open triggers re-creation via lazy_create_and_push_overlay.
+     * is destroyed. The next show() re-creates it.
      *
-     * @param cached_panel Reference to the caller's cached lv_obj_t* pointer
-     *                     (the same reference passed to lazy_create_and_push_overlay)
+     * @param cached_panel A caller's second copy of the root, nulled too
      */
     void destroy_overlay_ui(lv_obj_t*& cached_panel);
+
+    /// destroy_overlay_ui() for an overlay no caller keeps a second copy of.
+    void destroy_overlay_ui() {
+        lv_obj_t* no_cache = nullptr;
+        destroy_overlay_ui(no_cache);
+    }
 
     /**
      * @brief Check if subjects have been initialized
@@ -277,10 +315,12 @@ class OverlayBase : public IPanelLifecycle {
     bool visible_ = false;              ///< True when overlay is visible
     bool cleanup_called_ = false;       ///< True after cleanup() called
 
-    /// Async callback safety. Automatically invalidated on cleanup()/on_deactivate().
-    /// Subclasses use lifetime_.defer(...) or lifetime_.token() for
-    /// bg-thread callbacks that need to touch UI.
-    helix::AsyncLifetimeGuard lifetime_;
+    /**
+     * @brief Per-open work that needs the root (populate, seed state)
+     *
+     * show() runs it on every open, after create() and before the push.
+     */
+    virtual void before_show() {}
 
     /**
      * @brief Called after widget tree is destroyed by destroy_overlay_ui()
@@ -350,4 +390,114 @@ class OverlayBase : public IPanelLifecycle {
         subjects_initialized_ = false;
         spdlog::trace("[{}] Subjects deinitialized", get_name());
     }
+
+  private:
+    void on_view_hidden() override;
+    void report_foreign_close_callback() const;
+
+    /// The root show() last pushed, and a handle LVGL nulls when it is deleted:
+    /// a root freed with its screen still reads non-null in overlay_root_.
+    lv_obj_t* shown_root_ = nullptr;
+    helix::ui::WidgetRef shown_root_ref_;
 };
+
+/**
+ * @namespace helix::ui
+ * @brief Shared overlay teardown sequence
+ */
+namespace helix::ui {
+
+/**
+ * @enum TeardownDelete
+ * @brief How teardown_overlay_ui() frees the widget tree
+ */
+enum class TeardownDelete {
+    /**
+     * Reparent the root to the top layer and async-delete it. The plain
+     * overlay path: the root carries no grid/flex layout of its own, so a
+     * racing ancestor relayout cannot corrupt anything.
+     */
+    Deferred,
+
+    /**
+     * Detach the root into a hidden, layout-less condemned container first,
+     * then async-delete. For roots containing grid/flex layouts whose
+     * grid_update/flex_update must be structurally unable to race teardown
+     * (#983) — detaching off-tree makes an ancestor relayout of the original
+     * parent incapable of iterating the doomed subtree.
+     */
+    DetachSubtree,
+};
+
+/**
+ * @struct TeardownHooks
+ * @brief The two owner callbacks teardown_overlay_ui() runs, named at the
+ *        call site
+ *
+ * The slots differ only in when they run relative to the free, and that
+ * difference is the whole point: a hook that drops widgets the subtree owns
+ * has to run while the tree is still attached. Putting it in the other slot
+ * reaches into an already-condemned subtree (#776/#983) and is the same type,
+ * so build through before()/after() and the slot is spelled where the hook
+ * is written.
+ */
+struct TeardownHooks {
+    /// Step 4 — every pointer still valid, tree still attached.
+    std::function<void()> before_delete;
+    /// Step 7 — free already queued; tree hidden and off-tree but still alive.
+    std::function<void()> after_delete;
+
+    static TeardownHooks before(std::function<void()> fn) {
+        return {std::move(fn), nullptr};
+    }
+    static TeardownHooks after(std::function<void()> fn) {
+        return {nullptr, std::move(fn)};
+    }
+};
+
+/**
+ * @brief The one overlay teardown sequence — drain, unregister, breadcrumb,
+ *        owner hooks, deferred free, pointer null-out
+ *
+ * OverlayBase::destroy_overlay_ui() and the AMS destroy_*_panel_ui() sites
+ * all run this sequence; a site differs only in its delete strategy and in
+ * which owner hooks it needs, never in the sequence itself. Re-implementing
+ * it per site is how the copies drift.
+ *
+ * Performs, in order:
+ * 1. Drains the UpdateQueue under a scoped freeze while all pointers are
+ *    still valid (observe<int> callbacks capture raw panel pointers)
+ * 2. Unregisters the close callback and overlay instance from
+ *    NavigationManager (before deletion, so a manual destroy while the panel
+ *    is still stacked cannot double-invoke)
+ * 3. Breadcrumbs "ovrl_dst" so crashes in the close path can be pinned to
+ *    the overlay being torn down
+ * 4. Runs hooks.before_delete while every pointer is still valid AND the tree
+ *    is still attached — owners whose sub-objects own widgets in the subtree
+ *    (AMS sidebars, context menus, modals) drop them here
+ * 5. Deletes per @p how (both strategies defer the actual free — sync
+ *    deletion inside an overlay close callback corrupts LVGL's global event
+ *    list when chained from an UpdateQueue batch, #776/#840)
+ * 6. Nulls @p root, and @p cached_panel when the caller passed one (it may
+ *    point at @p root itself)
+ * 7. Runs hooks.after_delete — the widget tree is still alive (hidden,
+ *    off-tree) until the async tick, so owners can null child-widget
+ *    pointers that must stay dereferenceable during teardown
+ *
+ * The owner object (subjects, state) survives — only the widget tree is
+ * destroyed; the next open re-creates it.
+ *
+ * @param root Root widget to tear down; nulled on return
+ * @param owner_name Logged and breadcrumbed owner name
+ * @param how Delete strategy (see TeardownDelete)
+ * @param cached_panel Caller's cached copy of the root, nulled on return;
+ *                     null when the caller keeps no second copy, and may
+ *                     point at @p root itself
+ * @param hooks Owner hooks for steps 4 and 7 (either may be empty)
+ * @return true if a teardown happened; false when @p root was null (no
+ *         hooks run in that case)
+ */
+bool teardown_overlay_ui(lv_obj_t*& root, const char* owner_name, TeardownDelete how,
+                         lv_obj_t** cached_panel = nullptr, TeardownHooks hooks = {});
+
+} // namespace helix::ui

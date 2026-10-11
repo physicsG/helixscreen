@@ -757,308 +757,92 @@ TEST_CASE_METHOD(ThemeConstantsFixture,
     cleanup_temp_dir();
 }
 
-// ============================================================================
-// Undefined Constant Reference Tests
-// ============================================================================
-
-TEST_CASE_METHOD(ThemeConstantsFixture, "ui_theme: defined constant reference passes validation",
-                 "[ui_theme][validation][undefined]") {
-    setup_temp_xml_dir();
-
-    // Define space_lg and use #space_lg in an attribute
-    write_xml("test.xml", R"(
-<component>
-    <consts>
-        <px name="space_lg" value="16"/>
-    </consts>
-    <view>
-        <lv_obj style_pad_all="#space_lg"/>
-    </view>
-</component>
-)");
-
-    auto warnings = theme_manager_validate_constant_sets(temp_dir.string().c_str());
-
-    REQUIRE(warnings.empty());
-
-    cleanup_temp_dir();
+TEST_CASE("ui_xml has no incomplete constant sets", "[ui_theme][validation]") {
+    const auto warnings = theme_manager_validate_constant_sets("ui_xml");
+    for (const auto& w : warnings) {
+        UNSCOPED_INFO(w);
+    }
+    CHECK(warnings.empty());
 }
 
-TEST_CASE_METHOD(ThemeConstantsFixture, "ui_theme: undefined constant reference triggers warning",
-                 "[ui_theme][validation][undefined]") {
+TEST_CASE_METHOD(ThemeConstantsFixture,
+                 "ui_theme: only border_radius_small is exempt from the responsive set rule",
+                 "[ui_theme][validation]") {
     setup_temp_xml_dir();
 
-    // Use #space_xxl but space_xxl is not defined
-    write_xml("test.xml", R"(
+    write_xml("fixed.xml", R"(
 <component>
     <consts>
-        <px name="space_lg" value="16"/>
+        <px name="border_radius_small" value="4"/>
+        <px name="swatch_gap_small" value="4"/>
     </consts>
-    <view>
-        <lv_obj style_pad_all="#space_xxl"/>
-    </view>
 </component>
 )");
 
     auto warnings = theme_manager_validate_constant_sets(temp_dir.string().c_str());
 
     REQUIRE(warnings.size() == 1);
-    REQUIRE(warnings[0].find("#space_xxl") != std::string::npos);
-    REQUIRE(warnings[0].find("test.xml") != std::string::npos);
-    REQUIRE(warnings[0].find("style_pad_all") != std::string::npos);
+    CHECK(warnings[0].find("swatch_gap") != std::string::npos);
 
     cleanup_temp_dir();
 }
 
 TEST_CASE_METHOD(ThemeConstantsFixture,
-                 "ui_theme: responsive constant base name is valid reference",
-                 "[ui_theme][validation][undefined]") {
+                 "ui_theme: border_radius loses its exemption once it grows a second tier",
+                 "[ui_theme][validation]") {
     setup_temp_xml_dir();
 
-    // Define space_lg_small, space_lg_medium, space_lg_large
-    // Use #space_lg (the base name) - should be valid because responsive system registers it
-    write_xml("test.xml", R"(
+    write_xml("fixed.xml", R"(
 <component>
     <consts>
-        <px name="space_lg_small" value="12"/>
-        <px name="space_lg_medium" value="16"/>
-        <px name="space_lg_large" value="20"/>
-    </consts>
-    <view>
-        <lv_obj style_pad_all="#space_lg"/>
-    </view>
-</component>
-)");
-
-    auto warnings = theme_manager_validate_constant_sets(temp_dir.string().c_str());
-
-    REQUIRE(warnings.empty());
-
-    cleanup_temp_dir();
-}
-
-TEST_CASE_METHOD(ThemeConstantsFixture, "ui_theme: themed color base name is valid reference",
-                 "[ui_theme][validation][undefined]") {
-    setup_temp_xml_dir();
-
-    // Define card_bg_light and card_bg_dark
-    // Use #card_bg (the base name) - should be valid because theme system registers it
-    write_xml("test.xml", R"(
-<component>
-    <consts>
-        <color name="card_bg_light" value="#FFFFFF"/>
-        <color name="card_bg_dark" value="#1A1A1A"/>
-    </consts>
-    <view>
-        <lv_obj style_bg_color="#card_bg"/>
-    </view>
-</component>
-)");
-
-    auto warnings = theme_manager_validate_constant_sets(temp_dir.string().c_str());
-
-    REQUIRE(warnings.empty());
-
-    cleanup_temp_dir();
-}
-
-TEST_CASE_METHOD(ThemeConstantsFixture, "ui_theme: hex color values are not flagged as undefined",
-                 "[ui_theme][validation][undefined]") {
-    setup_temp_xml_dir();
-
-    // Use style_bg_color="#FF0000" - this is a hex color, not a constant reference
-    write_xml("test.xml", R"(
-<component>
-    <view>
-        <lv_obj style_bg_color="#FF0000"/>
-        <lv_obj style_bg_color="#ABC"/>
-        <lv_obj style_bg_color="#12345678"/>
-    </view>
-</component>
-)");
-
-    auto warnings = theme_manager_validate_constant_sets(temp_dir.string().c_str());
-
-    REQUIRE(warnings.empty());
-
-    cleanup_temp_dir();
-}
-
-TEST_CASE_METHOD(ThemeConstantsFixture, "ui_theme: local constant in same file is valid",
-                 "[ui_theme][validation][undefined]") {
-    setup_temp_xml_dir();
-
-    // Define local constant and use it in same file
-    write_xml("component.xml", R"(
-<component>
-    <consts>
-        <px name="my_local_padding" value="8"/>
-        <color name="my_local_color" value="#123456"/>
-    </consts>
-    <view>
-        <lv_obj style_pad_all="#my_local_padding" style_bg_color="#my_local_color"/>
-    </view>
-</component>
-)");
-
-    auto warnings = theme_manager_validate_constant_sets(temp_dir.string().c_str());
-
-    REQUIRE(warnings.empty());
-
-    cleanup_temp_dir();
-}
-
-TEST_CASE_METHOD(ThemeConstantsFixture, "ui_theme: constant defined in different file is valid",
-                 "[ui_theme][validation][undefined]") {
-    setup_temp_xml_dir();
-
-    // Define constants in globals.xml
-    write_xml("globals.xml", R"(
-<component>
-    <consts>
-        <px name="shared_padding" value="16"/>
+        <px name="border_radius_small" value="4"/>
+        <px name="border_radius_medium" value="8"/>
     </consts>
 </component>
 )");
 
-    // Use in component.xml
-    write_xml("component.xml", R"(
-<component>
-    <view>
-        <lv_obj style_pad_all="#shared_padding"/>
-    </view>
-</component>
-)");
-
     auto warnings = theme_manager_validate_constant_sets(temp_dir.string().c_str());
 
-    REQUIRE(warnings.empty());
-
-    cleanup_temp_dir();
-}
-
-TEST_CASE_METHOD(ThemeConstantsFixture, "ui_theme: string constant is valid reference",
-                 "[ui_theme][validation][undefined]") {
-    setup_temp_xml_dir();
-
-    write_xml("test.xml", R"(
-<component>
-    <consts>
-        <string name="font_body" value="noto_sans_18"/>
-    </consts>
-    <view>
-        <lv_label style_text_font="#font_body"/>
-    </view>
-</component>
-)");
-
-    auto warnings = theme_manager_validate_constant_sets(temp_dir.string().c_str());
-
-    REQUIRE(warnings.empty());
-
-    cleanup_temp_dir();
-}
-
-TEST_CASE_METHOD(ThemeConstantsFixture, "ui_theme: str (icon glyph) constant is valid reference",
-                 "[ui_theme][validation][undefined]") {
-    setup_temp_xml_dir();
-
-    // Icon glyphs are defined as <str> elements
-    write_xml("test.xml", R"(
-<component>
-    <consts>
-        <str name="icon_home" value="&#xF0001;"/>
-    </consts>
-    <view>
-        <lv_label text="#icon_home"/>
-    </view>
-</component>
-)");
-
-    auto warnings = theme_manager_validate_constant_sets(temp_dir.string().c_str());
-
-    REQUIRE(warnings.empty());
-
-    cleanup_temp_dir();
-}
-
-TEST_CASE_METHOD(ThemeConstantsFixture, "ui_theme: percentage constant is valid reference",
-                 "[ui_theme][validation][undefined]") {
-    setup_temp_xml_dir();
-
-    write_xml("test.xml", R"(
-<component>
-    <consts>
-        <percentage name="card_width" value="45%"/>
-    </consts>
-    <view>
-        <lv_obj width="#card_width"/>
-    </view>
-</component>
-)");
-
-    auto warnings = theme_manager_validate_constant_sets(temp_dir.string().c_str());
-
-    REQUIRE(warnings.empty());
+    REQUIRE(warnings.size() == 1);
+    CHECK(warnings[0].find("border_radius") != std::string::npos);
+    CHECK(warnings[0].find("_large") != std::string::npos);
 
     cleanup_temp_dir();
 }
 
 TEST_CASE_METHOD(ThemeConstantsFixture,
-                 "ui_theme: multiple undefined constants produce multiple warnings",
-                 "[ui_theme][validation][undefined]") {
+                 "ui_theme: constant sets are checked in layout subdirectories too",
+                 "[ui_theme][validation]") {
     setup_temp_xml_dir();
+    fs::create_directories(temp_dir / "components");
+    fs::create_directories(temp_dir / "portrait");
 
-    write_xml("test.xml", R"(
+    write_xml("components/tile.xml", R"(
 <component>
-    <view>
-        <lv_obj style_pad_all="#undefined_padding" style_bg_color="#undefined_color"/>
-    </view>
+    <consts>
+        <px name="tile_pad_small" value="4"/>
+    </consts>
+</component>
+)");
+    write_xml("portrait/panel.xml", R"(
+<component>
+    <consts>
+        <color name="strip_bg_light" value="#FFFFFF"/>
+    </consts>
 </component>
 )");
 
     auto warnings = theme_manager_validate_constant_sets(temp_dir.string().c_str());
 
-    // Find warnings for undefined constants
-    bool found_padding = false;
+    REQUIRE(warnings.size() == 2);
+    bool found_px = false;
     bool found_color = false;
     for (const auto& w : warnings) {
-        if (w.find("#undefined_padding") != std::string::npos) {
-            found_padding = true;
-        }
-        if (w.find("#undefined_color") != std::string::npos) {
-            found_color = true;
-        }
+        found_px |= w.find("tile_pad") != std::string::npos;
+        found_color |= w.find("strip_bg") != std::string::npos;
     }
-    REQUIRE(found_padding);
-    REQUIRE(found_color);
-
-    cleanup_temp_dir();
-}
-
-TEST_CASE_METHOD(ThemeConstantsFixture,
-                 "ui_theme: responsive string constant base name is valid reference",
-                 "[ui_theme][validation][undefined]") {
-    setup_temp_xml_dir();
-
-    // Define font_body_small, font_body_medium, font_body_large
-    // Use #font_body (the base name) - should be valid
-    write_xml("test.xml", R"(
-<component>
-    <consts>
-        <string name="font_body_small" value="noto_sans_14"/>
-        <string name="font_body_medium" value="noto_sans_18"/>
-        <string name="font_body_large" value="noto_sans_20"/>
-    </consts>
-    <view>
-        <lv_label style_text_font="#font_body"/>
-    </view>
-</component>
-)");
-
-    auto warnings = theme_manager_validate_constant_sets(temp_dir.string().c_str());
-
-    REQUIRE(warnings.empty());
+    CHECK(found_px);
+    CHECK(found_color);
 
     cleanup_temp_dir();
 }

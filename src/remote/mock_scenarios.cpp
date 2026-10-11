@@ -3,9 +3,15 @@
 
 #include "mock_scenarios.h"
 
+// The scenario machinery drives the mock AMS backend, which is compiled out
+// of the size-constrained device builds (ENABLE_MOCKS=no); those builds get
+// an empty registry and find_scenario() always misses.
+#ifdef HELIX_ENABLE_MOCKS
+
 #include "ams_backend_mock.h"
 #include "ams_state.h"
 #include "http_executor.h"
+#include "thumbnail_processor.h"
 
 #include <spdlog/spdlog.h>
 
@@ -58,6 +64,9 @@ static void apply_clog_state(const std::function<void(AmsBackendMock&)>& mutate)
     // chain (source precedence, thresholds, label text) runs exactly as it does
     // when a printer pushes an update.
     AmsState::instance().sync_from_backend();
+    // What a backend event does after its sync, so surfaces that re-read the
+    // backend on a revision tick (the Buffer Status modal) see it too.
+    AmsState::instance().bump_data_revision();
 }
 
 /// Encoder state at a given headroom, in the shape Happy Hare reports it.
@@ -85,9 +94,32 @@ static EncoderClogInfo encoder_at(float headroom, float min_headroom) {
 static void clear_clog_sources(AmsBackendMock& mock) {
     mock.set_encoder_clog_info(EncoderClogInfo{}, /*detection_mode_flag=*/0);
     mock.set_flowguard_info(FlowguardInfo{});
+    mock.set_tangle_prevention(TanglePreventionInfo{});
+    mock.set_sync_feedback_bias(-2.0f);
     for (int u = 0; u < 4; ++u) {
         mock.set_unit_buffer_health(u, std::nullopt);
     }
+}
+
+/// A filament pressure sensor on unit 0 reading `pressure` against
+/// `set_point` (-1: none published), and nothing else measuring. Read as such
+/// by every simulated type but Happy Hare, whose buffer is system-level.
+static void set_fps(AmsBackendMock& mock, float pressure, float set_point = 0.5f,
+                    bool compression_only = false, bool filament_loaded = false) {
+    clear_clog_sources(mock);
+    BufferHealth h;
+    h.fps_value = h.smoothed_fps = pressure;
+    h.fps_set_point = set_point;
+    h.fps_reported = true;
+    h.compression_only = compression_only;
+    h.filament_loaded = filament_loaded;
+    mock.set_unit_buffer_health(0, h);
+}
+
+/// A compression-only pressure sensor (0 none .. 1 full), drawn as a one-sided gauge.
+static void set_pressure(AmsBackendMock& mock, float pressure, float set_point = 0.5f,
+                         bool filament_loaded = true) {
+    set_fps(mock, pressure, set_point, /*compression_only=*/true, filament_loaded);
 }
 
 static std::vector<MockScenario> clog_scenarios() {
@@ -142,6 +174,24 @@ static std::vector<MockScenario> clog_scenarios() {
                      });
                  }});
 
+    s.push_back({"flowguard_tangle_boosted", "Tangle prevention boosting the gate stepper", []() {
+                     apply_clog_state([](AmsBackendMock& m) {
+                         clear_clog_sources(m);
+                         FlowguardInfo fg;
+                         fg.enabled = true;
+                         fg.active = true;
+                         fg.level = -0.45f;
+                         fg.max_clog = 0.20f;
+                         fg.max_tangle = -0.62f;
+                         m.set_flowguard_info(fg);
+                         TanglePreventionInfo tp;
+                         tp.present = tp.enabled = tp.active = tp.boosted = true;
+                         tp.threshold = 0.6f;
+                         tp.release = 0.3f;
+                         m.set_tangle_prevention(tp);
+                     });
+                 }});
+
     s.push_back({"flowguard_clog", "Flowguard tripped at the clog end", []() {
                      apply_clog_state([](AmsBackendMock& m) {
                          clear_clog_sources(m);
@@ -152,6 +202,7 @@ static std::vector<MockScenario> clog_scenarios() {
                          // A non-empty trigger is what sets warning=1, which is
                          // what turns the indicator red whatever the mode.
                          fg.trigger = "CLOG";
+                         fg.reason = "No filament movement for 12.0mm";
                          fg.max_clog = 0.86f;
                          fg.max_tangle = -0.10f;
                          m.set_flowguard_info(fg);
@@ -181,6 +232,71 @@ static std::vector<MockScenario> clog_scenarios() {
                          h.state = "Trailing";
                          h.distance_to_fault = 1.5f; // close to the threshold
                          m.set_unit_buffer_health(0, h);
+                     });
+                 }});
+
+    s.push_back({"buffer_fps", "Filament pressure sensor below its set point (pulling tight)",
+                 []() { apply_clog_state([](AmsBackendMock& m) { set_fps(m, 0.32f); }); }});
+
+    s.push_back({"buffer_fps_loose", "Filament pressure sensor above its set point (loose)",
+                 []() { apply_clog_state([](AmsBackendMock& m) { set_fps(m, 0.71f); }); }});
+
+    s.push_back({"buffer_fps_on_target", "Filament pressure sensor on its set point",
+                 []() { apply_clog_state([](AmsBackendMock& m) { set_fps(m, 0.52f); }); }});
+
+    s.push_back({"buffer_fps_danger", "Filament pressure sensor pinned near the tight end",
+                 []() { apply_clog_state([](AmsBackendMock& m) { set_fps(m, 0.08f); }); }});
+
+    s.push_back({"buffer_fps_no_target", "Filament pressure sensor with no set point",
+                 []() { apply_clog_state([](AmsBackendMock& m) { set_fps(m, 0.32f, -1.0f); }); }});
+
+    s.push_back({"buffer_pressure_on_target", "Compression-only pressure sensor on its set point",
+                 []() { apply_clog_state([](AmsBackendMock& m) { set_pressure(m, 0.52f); }); }});
+
+    s.push_back({"buffer_pressure_below", "Compression-only pressure sensor below its set point",
+                 []() { apply_clog_state([](AmsBackendMock& m) { set_pressure(m, 0.32f); }); }});
+
+    s.push_back({"buffer_pressure_above", "Compression-only pressure sensor above its set point",
+                 []() { apply_clog_state([](AmsBackendMock& m) { set_pressure(m, 0.71f); }); }});
+
+    s.push_back({"buffer_pressure_full", "Compression-only pressure sensor near full: danger",
+                 []() { apply_clog_state([](AmsBackendMock& m) { set_pressure(m, 0.97f); }); }});
+
+    s.push_back({"buffer_pressure_empty_loaded",
+                 "Compression-only pressure sensor near empty with filament loaded: warning",
+                 []() { apply_clog_state([](AmsBackendMock& m) { set_pressure(m, 0.03f); }); }});
+
+    s.push_back({"buffer_pressure_empty_unloaded",
+                 "Compression-only pressure sensor near empty with no filament: neutral", []() {
+                     apply_clog_state([](AmsBackendMock& m) {
+                         set_pressure(m, 0.03f, 0.5f, /*filament_loaded=*/false);
+                     });
+                 }});
+
+    s.push_back(
+        {"buffer_pressure_no_target", "Compression-only pressure sensor with no set point",
+         []() { apply_clog_state([](AmsBackendMock& m) { set_pressure(m, 0.53f, -1.0f); }); }});
+
+    s.push_back({"buffer_fps_with_clog",
+                 "Filament pressure sensor and AFC fault detection both reporting", []() {
+                     apply_clog_state([](AmsBackendMock& m) {
+                         set_fps(m, 0.32f);
+                         BufferHealth h;
+                         h.fps_value = h.smoothed_fps = 0.32f;
+                         h.fps_set_point = 0.5f;
+                         h.fps_reported = true;
+                         h.fault_detection_enabled = true;
+                         h.error_sensitivity = 7.0f;
+                         h.state = "Trailing";
+                         h.distance_to_fault = 1.5f;
+                         m.set_unit_buffer_health(0, h);
+                     });
+                 }});
+
+    s.push_back({"sync_feedback_tight", "Happy Hare sync feedback leaning to tension", []() {
+                     apply_clog_state([](AmsBackendMock& m) {
+                         clear_clog_sources(m);
+                         m.set_sync_feedback_bias(-0.45f);
                      });
                  }});
 
@@ -350,9 +466,9 @@ static std::vector<MockScenario> build_scenarios() {
     // Not a printer state — a synthetic HTTP-lane busy condition for testing
     // wait_idle()'s "which counter was busy" reporting deterministically.
     // A burst of subject changes makes UpdateQueue's `pending_` nonzero for
-    // at most one LVGL tick (~16ms): process_pending() drains the entire
-    // batch every tick, so there's no way to widen that window from the
-    // subject side. HttpExecutor::inflight() instead stays incremented for
+    // at most one drain period (LV_DEF_REFR_PERIOD, 33 ms): process_pending()
+    // drains the entire batch each time, so there's no way to widen that window
+    // from the subject side. HttpExecutor::inflight() instead stays incremented for
     // the full wall-clock duration of the submitted job body (see
     // http_executor.h's `submit()` — incremented there, decremented only on
     // completion), so a deliberately slow job gives wait_idle(timeout=0.0) a
@@ -367,6 +483,18 @@ static std::vector<MockScenario> build_scenarios() {
                                  std::this_thread::sleep_for(std::chrono::milliseconds(2000));
                              });
                          }});
+
+    // --- thumbnail_busy ---
+    // Same purpose as http_busy above, for ThumbnailProcessor's worker pool
+    // instead of HttpExecutor's. submit_test_task() bypasses PNG decoding
+    // entirely, so the 2s window is exact rather than however long a real
+    // thumbnail happens to take on this machine.
+    scenarios.push_back(
+        {"thumbnail_busy",
+         "Synthetic ThumbnailProcessor busy state (test-only, not a printer condition)", []() {
+             helix::ThumbnailProcessor::instance().submit_test_task(
+                 []() { std::this_thread::sleep_for(std::chrono::milliseconds(2000)); });
+         }});
 
     // --- clog / flow detection -------------------------------------------
     //
@@ -400,3 +528,20 @@ const MockScenario* find_scenario(const std::string& name) {
 }
 
 } // namespace helix
+
+#else // !HELIX_ENABLE_MOCKS
+
+namespace helix {
+
+const std::vector<MockScenario>& get_mock_scenarios() {
+    static const std::vector<MockScenario> kEmpty;
+    return kEmpty;
+}
+
+const MockScenario* find_scenario(const std::string&) {
+    return nullptr;
+}
+
+} // namespace helix
+
+#endif // HELIX_ENABLE_MOCKS

@@ -3,22 +3,17 @@
 
 /**
  * @file ui_settings_system.h
- * @brief System settings overlay - security, network, host, admin
+ * @brief System settings overlay - security, telemetry, logging, admin
  *
  * This overlay provides access to system administration settings:
  * - Security (PIN lock)
- * - Network settings
- * - Host configuration
- * - Touch calibration
- * - Hardware health
- * - Plugins
+ * - Performance
  * - Telemetry
+ * - Log level
  * - Restart / Factory reset
  *
- * Most callbacks are delegated to the global SettingsPanel which already
- * owns the complex logic (change host modal, factory reset dialog, etc.).
- * This overlay simply registers matching callback names and initializes
- * toggle/description state on activate.
+ * The telemetry and log-level rows bind to their SystemSettingsManager subjects;
+ * this overlay owns the row callbacks and the factory reset dialog.
  *
  * @pattern Overlay (lazy init)
  * @threading Main thread only
@@ -28,6 +23,7 @@
 
 #include "lvgl/lvgl.h"
 #include "overlay_base.h"
+#include "static_panel_registry.h"
 
 namespace helix::settings {
 
@@ -35,58 +31,37 @@ namespace helix::settings {
  * @class SystemSettingsOverlay
  * @brief Overlay for system administration settings
  *
- * ## Usage:
- *
  * @code
- * auto& overlay = helix::settings::get_system_settings_overlay();
- * overlay.show(parent_screen);
+ * helix::settings::get_system_settings_overlay().show(parent_screen);
  * @endcode
  */
 class SystemSettingsOverlay : public OverlayBase {
   public:
-    SystemSettingsOverlay();
     ~SystemSettingsOverlay() override;
-
-    //
-    // === OverlayBase Interface ===
-    //
-
-    void init_subjects() override;
-    void register_callbacks() override;
 
     const char* get_name() const override {
         return "System";
     }
-
-    void on_activate() override;
-    void on_deactivate() override;
-
-    //
-    // === UI Creation ===
-    //
-
-    lv_obj_t* create(lv_obj_t* parent) override;
-    void show(lv_obj_t* parent_screen);
-
-    bool is_created() const {
-        return overlay_root_ != nullptr;
+    const char* xml_component() const override {
+        return "settings_system_overlay";
     }
 
+    void register_callbacks() override;
+
+    /// The Performance row's action: open the Performance overlay.
+    void open_performance();
+
   private:
-    void init_telemetry_toggle();
-    void init_touch_cal_description();
-    void init_host_description();
-    void init_log_level_dropdown();
+    void handle_restart_helix_clicked();
+    void handle_factory_reset_clicked();
+    void perform_factory_reset();
+
+    /// Created on first use, deleted when its close animation finishes.
+    lv_obj_t* factory_reset_dialog_ = nullptr;
 };
 
-/**
- * @brief Global instance accessor
- *
- * Creates the overlay on first access and registers it for cleanup
- * with StaticPanelRegistry.
- *
- * @return Reference to singleton SystemSettingsOverlay
- */
-SystemSettingsOverlay& get_system_settings_overlay();
+inline SystemSettingsOverlay& get_system_settings_overlay() {
+    return lazy_global<SystemSettingsOverlay>("SystemSettingsOverlay");
+}
 
 } // namespace helix::settings

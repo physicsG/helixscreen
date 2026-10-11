@@ -3,13 +3,16 @@
 
 #include "config_backup.h"
 
+#include "helix_fs.h"
 #include "spdlog/spdlog.h"
+#include "text_io.h"
 
-#include <cstdio>
-#include <filesystem>
+#include <cerrno>
+#include <cstring>
+#include <optional>
 #include <sys/stat.h>
 
-namespace fs = std::filesystem;
+namespace hfs = helix::fs;
 
 namespace helix::config_backup {
 
@@ -20,31 +23,22 @@ bool write_backup_file(const std::string& src_path, const std::string& backup_pa
     }
 
     // Ensure parent directory exists (create if needed for $HOME fallback)
-    fs::path parent = fs::path(backup_path).parent_path();
-    if (!parent.empty() && !fs::exists(parent)) {
-        std::error_code ec;
-        fs::create_directories(parent, ec);
-        if (ec) {
+    std::string parent{hfs::parent_path(backup_path)};
+    if (!parent.empty() && !hfs::exists(parent)) {
+        if (!hfs::create_directories(parent)) {
             return false;
         }
     }
 
-    std::string tmp_path = backup_path + ".tmp";
-    try {
-        fs::copy_file(src_path, tmp_path, fs::copy_options::overwrite_existing);
-        if (std::rename(tmp_path.c_str(), backup_path.c_str()) != 0) {
-            std::remove(tmp_path.c_str());
-            return false;
-        }
-        return true;
-    } catch (const std::exception& e) {
-        std::remove(tmp_path.c_str());
+    const auto data = helix::text_io::read_file(src_path);
+    if (!data || !helix::text_io::write_file_atomic(backup_path, *data)) {
         // Demoted to debug — write_rolling_backup() warns once if BOTH primary
         // and fallback fail. A primary-only failure (typical in dev: /var/lib
         // not writable, $HOME fallback succeeds) is not noteworthy.
-        spdlog::debug("[Config] Backup to {} failed: {}", backup_path, e.what());
+        spdlog::debug("[Config] Backup to {} failed: {}", backup_path, std::strerror(errno));
         return false;
     }
+    return true;
 }
 
 void write_rolling_backup(const std::string& src_path, const std::string& primary,
@@ -86,24 +80,29 @@ bool restore_from_backup(const std::string& target_path, const char* label,
 
     spdlog::warn("[Config] {} missing — restoring from backup: {}", label, backup);
 
-    fs::path parent_dir = fs::path(target_path).parent_path();
-    if (!parent_dir.empty() && !fs::exists(parent_dir)) {
-        std::error_code ec;
-        fs::create_directories(parent_dir, ec);
-        if (ec) {
-            spdlog::error("[Config] Failed to create dir {}: {}", parent_dir.string(),
-                          ec.message());
+    std::string parent_dir{hfs::parent_path(target_path)};
+    if (!parent_dir.empty() && !hfs::exists(parent_dir)) {
+        if (!hfs::create_directories(parent_dir)) {
+            spdlog::error("[Config] Failed to create dir {}: {}", parent_dir, std::strerror(errno));
             return false;
         }
     }
 
-    try {
-        fs::copy_file(backup, target_path);
-        spdlog::info("[Config] Restored {} from backup: {}", label, backup);
-        return true;
-    } catch (const fs::filesystem_error& e) {
-        spdlog::error("[Config] Failed to restore {}: {}", label, e.what());
+    if (!hfs::copy_file(backup, target_path)) {
+        spdlog::error("[Config] Failed to restore {}: {}", label, std::strerror(errno));
         return false;
+    }
+    spdlog::info("[Config] Restored {} from backup: {}", label, backup);
+    return true;
+}
+
+void remove_backups(const std::vector<std::string>& backup_paths) {
+    for (const auto& path : backup_paths) {
+        if (hfs::remove(path)) {
+            spdlog::info("[Config] Removed backup: {}", path);
+        } else if (errno != ENOENT) {
+            spdlog::warn("[Config] Failed to remove backup {}: {}", path, std::strerror(errno));
+        }
     }
 }
 

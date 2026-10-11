@@ -3,12 +3,14 @@
 
 #pragma once
 
+#include "ui_coalesced_timer.h"
 #include "ui_observer_guard.h"
 
 #include "async_lifetime_guard.h"
 #include "print_history_data.h"
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <unordered_map>
@@ -42,6 +44,30 @@ namespace helix {
 using HistoryChangedCallback = std::function<void()>;
 } // namespace helix
 
+namespace helix {
+
+/**
+ * @brief How much of Moonraker's history a consumer needs cached
+ *
+ * The cache is populated at one of two fidelities, so "is it loaded" cannot be
+ * answered without saying loaded for what: a RECENT load holds only the newest
+ * jobs, and a consumer that aggregates across the whole history would read that
+ * boot-time slice as the complete record and render truncated numbers.
+ *
+ * Every query and every load entry point takes one of these, with no default,
+ * so a call site states its fidelity rather than inheriting one.
+ */
+enum class HistoryScope {
+    /// The newest jobs only. Everything the home panel shows is satisfied by
+    /// the slice pulled at startup.
+    RECENT,
+    /// Every job Moonraker will return. Required by anything aggregating over
+    /// all of history - per-filename stats, the history panels' ALL_TIME view.
+    COMPLETE,
+};
+
+} // namespace helix
+
 /**
  * @brief Centralized print history cache with observer notification
  *
@@ -62,9 +88,10 @@ using HistoryChangedCallback = std::function<void()>;
  *
  * // In on_activate - ensure_loaded(), never fetch(). fetch() means "the cache
  * // is wrong", and asking for it while a request is in flight queues a second
- * // identical one.
- * manager_->ensure_loaded();
- * if (manager_->is_loaded()) {
+ * // identical one. The scope says what this consumer needs; get_filename_stats()
+ * // and any all-of-history aggregate need COMPLETE.
+ * manager_->ensure_loaded(helix::HistoryScope::COMPLETE);
+ * if (manager_->is_loaded(helix::HistoryScope::COMPLETE)) {
  *     update_from_history();
  * }
  *
@@ -72,10 +99,19 @@ using HistoryChangedCallback = std::function<void()>;
  * update_from_history();
  * ```
  *
+ * ## Fidelity
+ *
+ * Startup pulls a RECENT slice, which is all the home panel reads, and the
+ * whole list is pulled the first time a consumer that needs it asks. Because
+ * the cache can therefore be populated at two fidelities, every query names
+ * the scope it is asking about - see HistoryScope.
+ *
  * ## Cache Invalidation
  *
- * The manager subscribes to Moonraker's `notify_history_changed` notification
- * and automatically invalidates + re-fetches when a print completes.
+ * The manager subscribes to Moonraker's `notify_history_changed` notification.
+ * That notification carries the complete job record it is announcing, so the
+ * cache is normally amended in place rather than re-pulled; a payload that
+ * cannot be applied falls back to a debounced re-fetch at the loaded scope.
  *
  * @see PrintHistoryStats for per-file aggregation structure
  * @see PrintHistoryJob for raw job data structure
@@ -138,11 +174,51 @@ class PrintHistoryManager {
     }
 
     /**
-     * @brief Check if history data has been loaded
-     * @return true if fetch has completed at least once
+     * @brief Whether the cache holds enough history to answer @p scope
+     *
+     * RECENT is satisfied by any completed load. COMPLETE additionally requires
+     * that the load asked for the whole list, or that a smaller request came
+     * back short and therefore already holds every job the printer has.
+     *
+     * There is no defaulted overload on purpose: a consumer of
+     * get_filename_stats() or the ALL_TIME view that asked the cheap question
+     * would render a boot-time slice as the complete record.
      */
-    [[nodiscard]] bool is_loaded() const {
+    [[nodiscard]] bool is_loaded(helix::HistoryScope scope) const;
+
+    /**
+     * @brief Whether every job started at or after @p since is cached
+     *
+     * A RECENT load is capped at kRecentJobLimit jobs, which on a busy printer
+     * can stop short of a window a consumer needs. Cached jobs keep Moonraker's
+     * newest-first order, so the oldest one bounds the covered window; a load
+     * that came back short of its limit covers everything.
+     *
+     * @param since Unix timestamp of the oldest job the caller must see
+     */
+    [[nodiscard]] bool covers_since(double since) const;
+
+    /**
+     * @brief Whether any load has completed, at any fidelity
+     *
+     * The connection-staleness watcher's question: it decides whether there is
+     * a latch worth clearing and renders nothing, so it needs no scope. Not a
+     * substitute for is_loaded() - this cannot say whether the cache holds
+     * enough to answer a particular consumer.
+     */
+    [[nodiscard]] bool has_cached_data() const {
         return is_loaded_;
+    }
+
+    /**
+     * @brief Whether the cache holds every job the printer has
+     *
+     * True only once a response came back shorter than it asked for. A full
+     * response, at any scope, may have stopped short of older jobs; a consumer
+     * showing totals over the cache must say what it covers until this is true.
+     */
+    [[nodiscard]] bool holds_every_job() const {
+        return is_loaded_ && holds_every_job_;
     }
 
     /**
@@ -160,6 +236,53 @@ class PrintHistoryManager {
     // Fetch / Refresh
     // ========================================================================
 
+    /// Jobs a RECENT load asks for. Matches Moonraker's own default page size,
+    /// and covers a week of prints without escalating on any printer running
+    /// fewer than seven jobs a day.
+    static constexpr int kRecentJobLimit = 50;
+
+    /// Jobs a COMPLETE load asks for. A job with metadata runs ~1.6 KB on the
+    /// wire, so the ESP32 asks for fewer: its WebSocket client drops any message
+    /// over 256 KB (MAX_MESSAGE_BYTES in esp_moonraker_client.h), and a dropped
+    /// response is never answered. A load that comes back full holds the newest
+    /// jobs only (see covers_since()).
+#if defined(HELIX_PLATFORM_ESP32)
+    static constexpr int kCompleteJobLimit = 100;
+#else
+    static constexpr int kCompleteJobLimit = 500;
+#endif
+
+    /// Jobs one server.history.list request asks for; 0 sends each load as one request.
+    /// At ~1.6 KB a job, ten keep a reply near 16 KB: the ESP32's 5.7 KB TCP window on a
+    /// weak link stalls on larger frames, and its client cannot answer pings mid-frame.
+#if defined(HELIX_PLATFORM_ESP32)
+    static constexpr int kWirePageJobs = 10;
+#else
+    static constexpr int kWirePageJobs = 0;
+#endif
+
+    /// Jobs one load_older() page asks for.
+#if defined(HELIX_PLATFORM_ESP32)
+    static constexpr int kOlderPageJobs = kWirePageJobs;
+#else
+    static constexpr int kOlderPageJobs = 50;
+#endif
+
+    /// Jobs the cache may hold before load_older() stops paging. Each cached job
+    /// lives in RAM (PSRAM on the ESP32); past this the stats say they cover
+    /// the newest jobs only.
+#if defined(HELIX_PLATFORM_ESP32)
+    static constexpr size_t kCachedJobBudget = 300;
+#else
+    static constexpr size_t kCachedJobBudget = 5000;
+#endif
+
+    /// Quiet period that collapses a burst of invalidations into one request.
+    /// A klippy restart fires the config-backup move_file and the restart's own
+    /// history event together, and deleting several files walks the same path
+    /// once per file.
+    static constexpr uint32_t kInvalidationDebounceMs = 300;
+
     /**
      * @brief Fetch history from Moonraker asynchronously
      *
@@ -169,32 +292,64 @@ class PrintHistoryManager {
      * This is the INVALIDATION entry point: it means "whatever is cached is
      * wrong, go get it again". If a request is already in flight its response
      * predates the change that prompted this call, so one re-issue is queued to
-     * run when that response lands. Callers that only want the cache populated
-     * must use ensure_loaded() instead - queueing a re-issue for them fetches
-     * the same list twice.
+     * run when that response lands, at the widest scope anyone asked for while
+     * it was out. Callers that only want the cache populated must use
+     * ensure_loaded() instead - queueing a re-issue for them fetches the same
+     * list twice.
      *
-     * @param limit Maximum number of jobs to fetch (default 500)
+     * @param scope How much history to pull
      */
-    void fetch(int limit = 500);
+    void fetch(helix::HistoryScope scope);
+
+    /// Asks for the next wire page of a load of @p limit jobs, @p acc holding the pages
+    /// already received; the last page completes the load.
+    void request_page(helix::HistoryScope scope, int limit, std::vector<PrintHistoryJob> acc);
 
     /**
-     * @brief Populate the cache if it is not already loaded or loading
+     * @brief Populate the cache to @p scope if it is not already there
      *
      * The LAZY-LOAD entry point, for a panel that needs history on activate and
      * does not care whether it or someone else triggered the request. Does
-     * nothing when the cache is loaded or a fetch is already in flight, because
-     * that fetch's response serves this caller too.
+     * nothing when the cache already answers @p scope, or when a request that
+     * will answer it is in flight or downloaded and waiting for the main
+     * thread - in all those cases the pending response serves this caller too.
      *
-     * Splitting this out of fetch() is the fix for a real double-fetch: the
-     * panels that want history call this on activate, four such calls landed
-     * while the first request was in flight, and fetch() read every one of them
-     * as an invalidation and queued a re-issue. On an
-     * AD5X the 500-job list took 10.4s and ~800 KB, and every byte of the second
-     * one was redundant (bundles MG34LYR4 / VXYB9JPQ).
+     * A request narrower than @p scope does NOT serve it, so a COMPLETE caller
+     * arriving behind an in-flight RECENT load still queues the wider one.
      *
-     * @param limit Maximum number of jobs to fetch (default 500)
+     * @param scope How much history the caller needs
      */
-    void ensure_loaded(int limit = 500);
+    void ensure_loaded(helix::HistoryScope scope);
+
+    /// From now on, each connection fetches history only after on_discovery_complete():
+    /// a history reply then never competes with discovery, and a reconnect does not ask
+    /// for it before anything else. A fetch asked for earlier waits and runs then.
+    void hold_until_discovery();
+
+    /// Discovery and the status subscription finished on this connection. Main thread.
+    void on_discovery_complete();
+
+    /**
+     * @brief Load whatever it takes to have every job started since @p since
+     *
+     * Populates the cache when it is cold and escalates to the whole list when
+     * a RECENT slice stops short of @p since. Cheap on a printer whose recent
+     * slice already reaches back that far, which is the common case.
+     *
+     * @param since Unix timestamp of the oldest job the caller must see
+     */
+    void ensure_covers_since(double since);
+
+    /**
+     * @brief Fetch the page of jobs older than the oldest cached one
+     *
+     * Appends up to kOlderPageJobs jobs started before the oldest cached job
+     * and notifies observers. Does nothing while history is not loaded, while
+     * any request is out, once the cache holds every job, or once it holds
+     * kCachedJobBudget jobs. A full load or an
+     * invalidation replaces the cache with the newest jobs again.
+     */
+    void load_older();
 
     /**
      * @brief Mark cache as stale
@@ -203,6 +358,14 @@ class PrintHistoryManager {
      * stale-while-revalidate pattern).
      */
     void invalidate();
+
+    /**
+     * @brief Drop every cached job and tell observers
+     *
+     * For a switch to another printer: unlike invalidate(), nothing of the previous
+     * printer's history may show while the new one is fetched or unreachable.
+     */
+    void forget_printer();
 
     // ========================================================================
     // Observer Pattern
@@ -235,8 +398,64 @@ class PrintHistoryManager {
   private:
     /**
      * @brief Handle completed fetch (runs on main thread)
+     *
+     * @param jobs      Parsed jobs, newest first
+     * @param scope     Scope the request was issued at
+     * @param requested Job limit the request carried. A response shorter than
+     *                  its limit is the whole history, whatever scope asked.
      */
-    void on_history_fetched(std::vector<PrintHistoryJob>&& jobs);
+    void on_history_fetched(std::vector<PrintHistoryJob>&& jobs, helix::HistoryScope scope,
+                            int requested);
+
+    /// Main-thread completion of load_older(). Appends the page unless a full
+    /// load replaced the cache since it was requested (@p generation).
+    void on_older_page(std::vector<PrintHistoryJob>&& jobs, uint64_t generation);
+
+    /// After a load lands: keep paging toward an ensure_covers_since() target.
+    void continue_coverage();
+
+    /**
+     * @brief Fold a single job from a history notification into the cache
+     *
+     * Replaces the entry with the same job_id, or inserts by start_time when
+     * the job is new. Fidelity is unchanged: one more job neither completes an
+     * incomplete cache nor truncates a complete one.
+     */
+    void apply_job_update(PrintHistoryJob&& job);
+
+    /**
+     * @brief Queue one refetch behind an in-flight request, widening its scope
+     *
+     * Several changes landing during one request collapse into a single
+     * re-issue, and that re-issue asks for the widest scope any of them needed.
+     */
+    void queue_refetch(helix::HistoryScope scope);
+
+    /**
+     * @brief Stale the cache now and coalesce the resulting request
+     *
+     * Invalidation is immediate so a consumer reading is_loaded() sees the
+     * cache as stale from the moment the change is known; only the round-trip
+     * waits out kInvalidationDebounceMs.
+     */
+    void invalidate_and_refetch();
+
+    /**
+     * @brief Whether a notify_history_changed action carries a usable job
+     *
+     * Moonraker attaches the complete job record, including the `exists` flag
+     * it recomputes per request, to the actions it emits from add_job and
+     * finish_job. Anything else has to be answered by refetching.
+     */
+    [[nodiscard]] static bool history_action_carries_job(const std::string& action);
+
+    /// Job limit a request at @p scope carries.
+    [[nodiscard]] static int limit_for(helix::HistoryScope scope);
+
+    /// "No request" sentinel for the two scope slots below. HistoryScope's
+    /// enumerators are ordered narrowest-first, so a plain integer comparison
+    /// answers "is that scope wide enough" and this sits below all of them.
+    static constexpr int kNoFetch = -1;
 
     /**
      * @brief Build filename_stats_ from cached_jobs_
@@ -251,28 +470,58 @@ class PrintHistoryManager {
      */
     void notify_observers();
 
+    /// A job printed from a copy this app rewrote names the rewrite, whose file
+    /// (and thumbnails) are deleted when the print ends. When the name places
+    /// the original (gcode::trusted_original_path()), present the job as the
+    /// original's print: its name, and its existence, mtime and thumbnails from
+    /// one metadata request per original. Otherwise it reads as missing.
+    void adopt_original(PrintHistoryJob& job);
+
+    /// What the original's metadata answered. It reads as missing while the
+    /// request is out, and an original that fails to answer stays missing and
+    /// is not asked about again until the cache is invalidated.
+    struct OriginalFile {
+        bool exists = false;
+        double modified = 0.0;
+        std::vector<ThumbnailInfo> thumbnails;
+    };
+    static void apply_original(PrintHistoryJob& job, const OriginalFile& original);
+    void on_original_answered(const std::string& filename, uint64_t generation,
+                              OriginalFile original);
+
     /**
      * @brief Subscribe to the Moonraker notifications that stale the cache
      *
      * Called in constructor. Two of them:
-     * - `notify_history_changed` - a job was added or history was cleared.
+     * - `notify_history_changed` - a job was added or finished. The payload
+     *   carries that job, so this one normally patches the cache instead of
+     *   re-fetching (see history_action_carries_job).
      * - `notify_filelist_changed` - filtered to the actions that can orphan a
-     *   job (see filelist_action_affects_history); a delete or move flips a
+     *   job (see filelist_change_affects_history); a delete or move flips a
      *   cached job's `exists` flag and Moonraker never reports that through
      *   the history notification.
      *
-     * Both invalidate the cache and re-fetch, on the main thread.
+     * Both apply on the main thread; the parse runs on the WebSocket thread.
      */
     void subscribe_to_notifications();
 
     /**
-     * @brief Whether a notify_filelist_changed action can orphan a history job
+     * @brief Whether a notify_filelist_changed payload can orphan a history job
      *
      * Uploads, metadata scans and directory listings fire the same
      * notification and cannot change any job's `exists` flag, so they must not
-     * trigger a history round-trip.
+     * trigger a history round-trip. Neither can anything confined to a root
+     * other than `gcodes`, which is the only root history names files in.
+     *
+     * @param action      The payload's `action` field
+     * @param item_root   `item.root`. Empty means a payload shape we do not
+     *                    recognise, which invalidates rather than risk going stale
+     * @param source_root `source_item.root`, which Moonraker sends only on a
+     *                    move or copy; empty otherwise
      */
-    [[nodiscard]] static bool filelist_action_affects_history(const std::string& action);
+    [[nodiscard]] static bool filelist_change_affects_history(const std::string& action,
+                                                              const std::string& item_root,
+                                                              const std::string& source_root);
 
     /**
      * @brief Mark the cache stale whenever the Moonraker socket is not up
@@ -292,21 +541,64 @@ class PrintHistoryManager {
     // Cached data
     std::vector<PrintHistoryJob> cached_jobs_;
     std::unordered_map<std::string, PrintHistoryStats> filename_stats_;
+    std::unordered_map<std::string, OriginalFile> originals_;
+    /// Bumped by invalidate(), so an answer asked for before it is dropped.
+    uint64_t originals_generation_ = 0;
 
     // Observers (stored as pointers for reliable removal)
     std::vector<helix::HistoryChangedCallback*> observers_;
 
     // State
     bool is_loaded_ = false;
+    // Fidelity of the cached list: the scope the load that filled it asked for.
+    // An invalidation refetches at this scope, so a consumer that escalated to
+    // the whole list keeps it across a history event instead of silently
+    // dropping back to the startup slice.
+    helix::HistoryScope loaded_scope_ = helix::HistoryScope::RECENT;
+    // The load came back shorter than the limit it asked for, so the cache
+    // holds every job the printer has whatever scope requested it.
+    bool holds_every_job_ = false;
+    // Oldest start time an ensure_covers_since() caller still needs, or 0.
+    // Each older page that lands short of it asks for the next one.
+    double wanted_since_ = 0.0;
+    // Bumped by every full load, so an older page that was out while the cache
+    // was replaced is not appended to a list it no longer extends.
+    uint64_t cache_generation_ = 0;
+    size_t job_budget_ = kCachedJobBudget;
+    // An older page added nothing new (a server ignoring before=): paging stops
+    // until the next full load, without claiming every job is held.
+    bool older_exhausted_ = false;
+    // A full load was requested by ensure_covers_since(), so its landing keeps
+    // paging toward wanted_since_. Any other full load drops the target: a
+    // consumer that still needs the window asks again.
+    bool coverage_load_pending_ = false;
     // Atomic because we clear it on the WebSocket BG thread (before posting the
     // main-thread defer) to survive UpdateQueue freeze-drops — otherwise a dropped
     // fetch_success strands the guard and blocks every subsequent fetch.
     std::atomic<bool> is_fetching_{false};
-    // Set when fetch() is dropped because one is already in flight. The
-    // in-flight response predates whatever prompted the dropped call, so the
-    // completion handler re-issues exactly one more fetch. Atomic for the same
-    // reason as is_fetching_: written from the WebSocket thread's parse side.
-    std::atomic<bool> refetch_pending_{false};
+    // Scope of the request currently out, or kNoFetch. ensure_loaded() joins an
+    // in-flight load only when it is at least as wide as what the caller needs.
+    std::atomic<int> in_flight_scope_{kNoFetch};
+    // Scope of the fetch queued behind an in-flight one, or kNoFetch. One slot
+    // carrying the widest scope requested, rather than a bare "something is
+    // queued" bit: a re-issue that dropped back to the startup slice would
+    // truncate a cache a panel had escalated. Atomic for the same reason as
+    // is_fetching_: written from the WebSocket thread's parse side.
+    std::atomic<int> pending_scope_{kNoFetch};
+    // A response is downloaded and its handler is queued for the main thread.
+    // Set on the WebSocket BG thread before that handler is posted, cleared
+    // when it runs. is_fetching_ is already false across this gap - it is
+    // released BG-side on purpose - and the gap is as wide as the main thread
+    // is busy, so this is the flag that lets ensure_loaded() join a load whose
+    // bytes are already in hand. fetch() is deliberately NOT gated on it: an
+    // invalidation must still force a real re-fetch.
+    std::atomic<bool> delivery_pending_{false};
+
+    /// Collapses a burst of invalidations into one request. Leading-edge, so
+    /// the refetch fires at a bounded rate however fast the notifications
+    /// arrive. Cancelled by its own destructor, which is what keeps a pending
+    /// callback from outliving this manager.
+    helix::ui::CoalescedTimer refetch_debounce_{kInvalidationDebounceMs};
 
     /// Guard for async callback safety
     /// Prevents use-after-free when callbacks fire after destruction
@@ -314,6 +606,15 @@ class PrintHistoryManager {
 
     /// Watches printer connection state so a dropped socket stales the cache.
     ObserverGuard connection_observer_;
+
+    // Discovery gate (hold_until_discovery()). Main thread only.
+    bool hold_until_discovery_ = false;
+    bool discovered_ = false;
+    int held_scope_ = kNoFetch; ///< Widest fetch asked for while held
+    int last_conn_state_ = 0;   ///< Connection subject value the gate last saw
+    ObserverGuard discovery_gate_observer_;
+
+    int wire_page_jobs_ = kWirePageJobs;
 
     friend class helix::PrintHistoryManagerTestAccess;
 };

@@ -24,17 +24,21 @@ constexpr int TEST_DISPLAY_HEIGHT = 480;
  * theme_manager_refresh_layout_constants(), and the rest of the suite assumes
  * the fixture's TEST_DISPLAY_WIDTH x TEST_DISPLAY_HEIGHT.
  *
- * Restoring the resolution does NOT restore the XML constants the refresh
- * rewrote — call the refresh once more after the scope ends if the test moved
- * them.
+ * The destructor restores the pixels only. The derived state those pixels
+ * feed - XML px constants, the ui_breakpoint / ui_breakpoint_v /
+ * ui_is_portrait subjects, font tiers - is process-global, and
+ * helix::widget_size::current_breakpoint() reads the subject rather than the
+ * display, so a scope whose refresh outlives it would decide layout for every
+ * later test sharing this display; that repaint happens once, conditionally,
+ * at the next case boundary (LVGLTestFixture::reclaim_display()). Mid-case
+ * successors still see the scope's tier until then.
  *
- * Refreshing from this guard's own constructor and destructor was tried and
- * reverted: the content-fit sweep (test_widget_content_fits) measures widgets
- * across eight geometries inside these scopes and depends on the token set NOT
- * moving under it, so the extra refreshes broke its measurements and crashed
- * the suite. A caller that needs the constants to follow must say so itself.
- * For the breakpoint subject specifically, use
- * tests/test_helpers/scoped_breakpoint.h, which restores what it sets.
+ * It deliberately does NOT refresh on construction. The content-fit sweep
+ * (test_widget_content_fits) measures widgets across eight geometries inside
+ * these scopes and needs the token set to hold still while it does; a test that
+ * wants the tier to follow the pixels calls
+ * theme_manager_refresh_layout_constants() itself after opening the scope.
+ * For the breakpoint subject alone, use tests/test_helpers/scoped_breakpoint.h.
  */
 class ScopedResolution {
   public:
@@ -100,6 +104,22 @@ class LVGLTestFixture : public HelixTestFixture {
     LVGLTestFixture& operator=(const LVGLTestFixture&) = delete;
     LVGLTestFixture(LVGLTestFixture&&) = delete;
     LVGLTestFixture& operator=(LVGLTestFixture&&) = delete;
+
+    /**
+     * @brief Put the shared display back the way a fresh process finds it
+     *
+     * Restores rotation, then resolution, then the default-display slot, then
+     * (only when the geometry moved or the breakpoint subject disagrees with
+     * it - the repaint walks ui_xml seven times) the derived layout state:
+     * breakpoint subjects, XML px tokens, switch presets. Font tiers are the
+     * one derived thing NOT restored: AssetManager never unregisters faces,
+     * so a case that raised the tier leaves the extra faces available for
+     * the rest of the shard; only a fresh process gets the fixture-geometry
+     * font set back. Exactly what the constructor runs; public and static so
+     * a case that moves the display mid-body can hand whatever runs next the
+     * same state without constructing a second fixture inside a live one.
+     */
+    static void reclaim_display();
 
     /**
      * @brief Advance LVGL's VIRTUAL clock by @p ms and pump timers

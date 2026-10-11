@@ -75,6 +75,11 @@ class UsbBackendMock : public UsbBackend {
      */
     void clear_all();
 
+    /// How many scan_for_gcode() calls reached this backend
+    int scan_count() const {
+        return scan_count_.load();
+    }
+
     /**
      * @brief Add default demo drives with sample files
      *
@@ -92,4 +97,5 @@ class UsbBackendMock : public UsbBackend {
     // Demo drive scheduling (auto-adds after delay when started)
     std::thread demo_thread_;
     std::atomic<bool> demo_cancelled_{false};
+    std::atomic<int> scan_count_{0};
 };

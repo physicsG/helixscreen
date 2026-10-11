@@ -9,7 +9,7 @@
  * label from the combined view of AmsState and PrinterState:
  *   1. backend operation_detail (non-empty)
  *   2. ams_action != IDLE → action string
- *   3. PrintJobState::PRINTING → "Printing"
+ *   3. PrintJobState::PRINTING → "Printing now"
  *   4. PrintJobState::PAUSED  → "Paused"
  *   5. otherwise              → "Idle"
  *
@@ -39,7 +39,8 @@ std::string detail_text() {
 
 // Helper: set print state via Moonraker-side subject + drain queue.
 void set_print_state(PrintJobState state) {
-    lv_subject_set_int(get_printer_state().get_print_state_enum_subject(), static_cast<int>(state));
+    lv_subject_set_int(get_printer_state().print_state().get_print_state_enum_subject(),
+                       static_cast<int>(state));
     helix::ui::UpdateQueue::instance().drain();
 }
 
@@ -80,12 +81,12 @@ TEST_CASE_METHOD(LVGLTestFixture, "AmsState::ams_action_detail priority",
         CHECK(detail_text() == "Waiting for slot 2");
     }
 
-    SECTION("IDLE + empty detail + PRINTING -> Printing") {
+    SECTION("IDLE + empty detail + PRINTING -> Printing now") {
         ams.set_action(AmsAction::IDLE);
         ams.set_action_detail("");
         set_print_state(PrintJobState::PRINTING);
 
-        CHECK(detail_text() == "Printing");
+        CHECK(detail_text() == "Printing now");
     }
 
     SECTION("IDLE + empty detail + PAUSED -> Paused") {
@@ -114,7 +115,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "AmsState::ams_action_detail priority",
         // Transition to PRINTING — observer should rerun derivation
         // without anyone calling sync_from_backend() or set_action()/set_action_detail().
         set_print_state(PrintJobState::PRINTING);
-        CHECK(detail_text() == "Printing");
+        CHECK(detail_text() == "Printing now");
 
         // Pause it.
         set_print_state(PrintJobState::PAUSED);

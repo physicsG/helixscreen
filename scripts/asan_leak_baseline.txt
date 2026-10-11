@@ -21,31 +21,18 @@
 # The ceilings below catch an already-listed origin leaking MORE, which the key
 # set alone cannot see. They come from the SUMMARY line, so they cover direct
 # and indirect bytes together.
-max-leaked-bytes: 131841
-max-leaked-objects: 1220
+# Ceilings are the zeus ASAN run (16 shards) measured at 205 allocations / 18467 B, plus ~25% headroom.
+max-leaked-bytes: 23100
+max-leaked-objects: 256
 <no-stack>
-include/observer_factory.h::observe_int_async<TestPanel>
-include/observer_factory.h::observe_int_immediate<TestPanel>
-include/observer_factory.h::observe_int_sync<ControlsPanel>
-include/observer_factory.h::observe_int_sync<HomePanel>
-include/observer_factory.h::observe_int_sync<PrintStatusPanel>
-include/observer_factory.h::observe_int_sync<SpoolmanManager>
-include/observer_factory.h::observe_int_sync<TestPanel>
-include/observer_factory.h::observe_int_sync<helix::ActiveSpoolWidget>
-include/observer_factory.h::observe_int_sync<helix::PanelWidgetManager>
-include/observer_factory.h::observe_int_sync<helix::PowerDeviceState>
-include/observer_factory.h::observe_int_sync<helix::PrintStatusWidget>
-include/observer_factory.h::observe_string<CATCH2_INTERNAL_TEST::test()::AxesState>
-include/observer_factory.h::observe_string<TestPanel>
-include/observer_factory.h::observe_string_async<TestPanel>
-include/observer_factory.h::observe_string_immediate<TestPanel>
 lib/lvgl/src/layouts/grid/lv_grid.c::calc_rows
 lib/lvgl/src/misc/lv_ll.c::lv_ll_ins_tail
-lib/lvgl/src/stdlib/builtin/lv_string_builtin.c::lv_strdup
-src/ui/ui_button.cpp::ui_button_create
+src/printer/power_device_state.cpp::PowerDeviceState::set_devices
+src/ui/ui_icon_picker.cpp::populate_icon_grid
 src/ui/ui_split_button.cpp::ui_split_button_create
+tests/unit/test_observer_factory.cpp::CATCH2_INTERNAL_TEST::test
+tests/unit/test_observer_factory.cpp::CATCH2_INTERNAL_TEST::test()::lambda::operator()
 tests/unit/test_panel_widget_manager.cpp::CATCH2_INTERNAL_TEST::lambda::operator()
 tests/unit/test_panel_widget_manager.cpp::operator()
-tests/unit/test_scoped_subject_registry.cpp::test
 tests/unit/test_temp_graph_controller.cpp::CATCH2_INTERNAL_TEST::test
 tests/unit/test_temp_graph_controller.cpp::test

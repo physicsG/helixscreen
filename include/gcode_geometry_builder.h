@@ -11,6 +11,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <glm/glm.hpp>
 #include <memory>
 #include <optional>
@@ -321,6 +322,12 @@ struct RibbonGeometry {
     QuantizationParams quantization; ///< Quantization params for dequantization
     float layer_height_mm{0.2f};     ///< Layer height for Z-offset calculations during LOD
 
+    /// The weak-GPU moving mesh: the same file rebanded to every n-th layer,
+    /// exterior features only, each band n layers tall. Null when the main
+    /// build alone fits the moving budget, or when the mesh build was
+    /// cancelled or failed (the renderer falls back to layer striding).
+    std::unique_ptr<RibbonGeometry> moving_mesh;
+
     /**
      * @brief The object runs recorded for one layer.
      *
@@ -372,10 +379,13 @@ struct RibbonGeometry {
         for (const auto& pb : prepared_buffers) {
             total += pb.data.capacity();
         }
+        if (moving_mesh) {
+            total += moving_mesh->memory_usage();
+        }
         return total;
     }
 
-    /// Pre-computed interleaved vertex buffers for GPU upload (packed 20-byte layout — see
+    /// Pre-computed interleaved vertex buffers for GPU upload (packed 12-byte layout — see
     /// PackedVertex). Prepared on background thread to avoid blocking UI during VBO upload.
     struct PreparedLayerBuffer {
         std::vector<uint8_t>
@@ -483,6 +493,14 @@ struct SimplificationOptions {
 // ============================================================================
 
 /**
+ * @brief Index of the first layer holding a printed (non-auxiliary) extrusion
+ *
+ * Start-gcode purge lines can occupy a layer of their own below the model, so the moving
+ * mesh counts its band stride from here, not from layer 0. 0 when nothing is printed.
+ */
+size_t first_print_layer(const ParsedGCodeFile& gcode);
+
+/**
  * @brief Converts G-code toolpath segments into optimized 3D ribbon geometry
  *
  * Pipeline:
@@ -505,9 +523,15 @@ class GeometryBuilder {
      *
      * @param gcode Parsed G-code file with toolpath segments
      * @param options Simplification configuration
+     * @param should_cancel Optional predicate polled between work chunks.
+     *        Returning true stops the build and returns empty geometry: the
+     *        viewer's build thread is joined on the UI thread when a preview
+     *        is torn down mid-build, so the pass must be stoppable rather
+     *        than costing a full build's wall clock.
      * @return Optimized ribbon geometry ready for 3D rendering
      */
-    RibbonGeometry build(const ParsedGCodeFile& gcode, const SimplificationOptions& options);
+    RibbonGeometry build(const ParsedGCodeFile& gcode, const SimplificationOptions& options,
+                         const std::function<bool()>& should_cancel = {});
 
     /**
      * @brief Get statistics about last build operation
@@ -542,17 +566,13 @@ class GeometryBuilder {
     }
 
     /**
-     * @brief Enable/disable Z-height color gradient
-     */
-    void set_use_height_gradient(bool enable) {
-        use_height_gradient_ = enable;
-    }
-
-    /**
-     * @brief Set solid filament color (disables height gradient)
+     * @brief Set the color of every segment the tool palette does not cover
      * @param hex_color Color in hex format (e.g., "#26A69A" or "26A69A")
      */
     void set_filament_color(const std::string& hex_color);
+
+    /// Same as set_filament_color(), from a 0xRRGGBB value.
+    void set_filament_rgb(uint32_t rgb);
 
     /**
      * @brief Set layer height for tube geometry (default: 0.2mm)
@@ -563,6 +583,24 @@ class GeometryBuilder {
      */
     void set_layer_height(float height_mm) {
         layer_height_mm_ = height_mm;
+    }
+
+    /**
+     * @brief Band the build for the moving mesh
+     * @param n Band depth in layers; 1 (default) = off
+     * @param surfaces_every_layer Keep skins on every layer, not only on band layers
+     *
+     * n > 1 keeps, counting layers from first_print_layer():
+     * - on every n-th layer, band shells (is_band_shell_feature), drawn n layer heights tall
+     *   so consecutive bands touch with no gaps;
+     * - the whole first print layer, so the model always has its bottom;
+     * - horizontal skins (is_surface_feature) on band layers, or on every layer when
+     *   surfaces_every_layer is set, so tops and bottoms do not read as holes.
+     * Everything that is not a band shell is drawn one layer tall.
+     */
+    void set_band_layers(int n, bool surfaces_every_layer = true) {
+        band_layers_ = n < 1 ? 1 : n;
+        band_surfaces_every_layer_ = surfaces_every_layer;
     }
 
     /**
@@ -616,7 +654,8 @@ class GeometryBuilder {
 
     // Simplification pipeline
     std::vector<ToolpathSegment> simplify_segments(const std::vector<ToolpathSegment>& segments,
-                                                   const SimplificationOptions& options);
+                                                   const SimplificationOptions& options,
+                                                   const std::function<bool()>& should_cancel);
 
     bool are_collinear(const glm::vec3& p1, const glm::vec3& p2, const glm::vec3& p3,
                        float tolerance) const;
@@ -634,9 +673,6 @@ class GeometryBuilder {
 
     glm::vec3 compute_perpendicular(const glm::vec3& direction, float width) const;
 
-    // Color assignment
-    uint32_t compute_color_rgb(float z_height, float z_min, float z_max) const;
-
     /**
      * @brief Parse hex color string to RGB integer
      * @param hex_color Hex color string (e.g., "#ED1C24" or "ED1C24")
@@ -647,22 +683,15 @@ class GeometryBuilder {
     /**
      * @brief Compute color for a segment with multi-color support
      * @param segment Toolpath segment with tool_index
-     * @param z_min Minimum Z height of model
-     * @param z_max Maximum Z height of model
-     * @return RGB color as 32-bit integer (0xRRGGBB)
-     *
-     * Priority:
-     * 1. Tool-specific color from palette (if tool_index valid and palette not empty)
-     * 2. Z-height gradient (if use_height_gradient_ enabled)
-     * 3. Default filament color
+     * @return RGB color as 32-bit integer (0xRRGGBB): the tool's palette color
+     *         when it has one, else the filament color
      */
-    uint32_t compute_segment_color(const ToolpathSegment& segment, float z_min, float z_max) const;
+    uint32_t compute_segment_color(const ToolpathSegment& segment) const;
 
     // Configuration
     float extrusion_width_mm_ = 0.42f;              ///< Default for 0.4mm nozzle
     float travel_width_mm_ = 0.1f;                  ///< Thin for travels
     float layer_height_mm_ = 0.2f;                  ///< Layer height for tube vertical dimension
-    bool use_height_gradient_ = true;               ///< Rainbow Z-gradient
     uint8_t filament_r_ = 0x26;                     ///< Filament color red component
     uint8_t filament_g_ = 0xA6;                     ///< Filament color green component
     uint8_t filament_b_ = 0x9A;                     ///< Filament color blue component
@@ -670,6 +699,12 @@ class GeometryBuilder {
     bool debug_face_colors_ = false;                ///< Enable per-face debug coloring
     std::vector<std::string> tool_color_palette_;   ///< Hex colors per tool (multi-color prints)
     int tube_sides_ = 16;                           ///< Tube cross-section sides (valid: 4, 8, 16)
+    int band_layers_ = 1;                           ///< Moving-mesh band depth (1 = off)
+    bool band_surfaces_every_layer_ = true;         ///< Skins survive the band stride
+    size_t band_first_layer_ = 0;                   ///< first_print_layer() of the file being built
+
+    /// Kept by the moving mesh, and how tall: 0 = dropped, 1 = one layer, n = a band.
+    int band_height_layers(const ToolpathSegment& seg) const;
 
     int budget_tube_sides_ = 0;     ///< Override tube_sides from budget (0 = use config)
     size_t budget_limit_bytes_ = 0; ///< Memory ceiling (0 = unlimited)

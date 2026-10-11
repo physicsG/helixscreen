@@ -62,12 +62,10 @@ class WifiBackendNetworkManager : public WifiBackend {
     void stop() override;
     bool is_running() const override;
 
-    void register_event_callback(const std::string& name,
-                                 std::function<void(const std::string&)> callback) override;
-
     WiFiError trigger_scan() override;
     WiFiError get_scan_results(std::vector<WiFiNetwork>& networks) override;
-    WiFiError connect_network(const std::string& ssid, const std::string& password) override;
+    WiFiError connect_network(const std::string& ssid, const std::string& password,
+                              bool is_hidden) override;
     WiFiError disconnect_network() override;
     WiFiError set_radio_enabled(bool on) override;
     bool is_radio_enabled() const override;
@@ -82,10 +80,6 @@ class WifiBackendNetworkManager : public WifiBackend {
     std::atomic<bool> running_{false};
     std::mutex start_mutex_;     // Serializes start() against concurrent start_async()
     std::string wifi_interface_; ///< Detected WiFi interface (e.g., "wlan0")
-
-    // Event system (thread-safe)
-    std::mutex callbacks_mutex_;
-    std::map<std::string, std::function<void(const std::string&)>> callbacks_;
 
     // Async threads for scan/connect (same pattern as mock backend)
     std::thread scan_thread_;
@@ -221,7 +215,7 @@ class WifiBackendNetworkManager : public WifiBackend {
 
     // Thread functions for async operations
     void scan_thread_func();
-    void connect_thread_func(std::string ssid, std::string password);
+    void connect_thread_func(std::string ssid, std::string password, bool is_hidden);
 
     // Result of one nmcli connect attempt (fork/exec, captures stderr).
     struct ConnectAttempt {
@@ -230,9 +224,19 @@ class WifiBackendNetworkManager : public WifiBackend {
         std::string stderr_out;
     };
 
+    /// Argument vector for `nmcli device wifi connect`, program name excluded.
+    /// Pure so tests can pin the shape without a live NetworkManager.
+    /// nmcli matches <ssid> against its scan cache; a hidden SSID is never in
+    /// it, so a hidden join needs the explicit `hidden yes` pair or nmcli
+    /// refuses with "No network with SSID found".
+    static std::vector<std::string> connect_argv(const std::string& ssid,
+                                                 const std::string& password, bool is_hidden,
+                                                 const std::string& iface);
+
     // Single fork/exec of `nmcli device wifi connect`. Returns exit_code + stderr.
     // Honours connect_active_ for cancellation.
-    ConnectAttempt try_nmcli_connect(const std::string& ssid, const std::string& password);
+    ConnectAttempt try_nmcli_connect(const std::string& ssid, const std::string& password,
+                                     bool is_hidden);
 
     // Delete a saved connection profile by id. Best-effort, fork/exec to avoid
     // shell injection with caller-supplied SSIDs. Returns true if nmcli exited 0.

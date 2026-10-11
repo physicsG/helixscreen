@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "print_control_buttons.h"
 
+#include "ui_callback_helpers.h"
 #include "ui_error_reporting.h" // NOTIFY_WARNING / NOTIFY_ERROR
 #include "ui_event_safety.h"    // LVGL_SAFE_EVENT_CB_BEGIN / END
 #include "ui_resume_dispatch.h"
@@ -35,14 +36,16 @@ void PrintControlButtons::init_subjects() {
 
     UI_MANAGED_SUBJECT_STRING(primary_icon_subject_, primary_icon_buf_, "\xF3\xB0\x8F\xA4",
                               "print_control_primary_icon", subjects_);
-    UI_MANAGED_SUBJECT_STRING(primary_label_subject_, primary_label_buf_, "Pause",
+    UI_MANAGED_SUBJECT_STRING(primary_label_subject_, primary_label_buf_, CONTROL_LABEL_PAUSE,
                               "print_control_primary_label", subjects_);
     UI_MANAGED_SUBJECT_INT(primary_enabled_subject_, 0, "print_control_primary_enabled", subjects_);
     UI_MANAGED_SUBJECT_INT(stop_enabled_subject_, 0, "print_control_stop_enabled", subjects_);
     UI_MANAGED_SUBJECT_INT(pending_action_subject_, 0, "print_pending_action", subjects_);
 
-    lv_xml_register_event_cb(nullptr, "on_print_control_primary", on_primary_clicked);
-    lv_xml_register_event_cb(nullptr, "on_print_control_stop", on_stop_clicked);
+    register_xml_callbacks({
+        {"on_print_control_primary", [](lv_event_t*) { instance().handle_primary_button(); }},
+        {"on_print_control_stop", [](lv_event_t*) { instance().handle_stop_button(); }},
+    });
 
     // print_state_enum is a static global subject — no SubjectLifetime needed.
     // RAW_PRINT_STATE_OK: TWO observers on purpose. This one clears the
@@ -50,8 +53,8 @@ void PrintControlButtons::init_subjects() {
     // lifecycle observer below recomputes the buttons. Collapsing them would
     // clear a pending Pause on the Idle -> Preparing edge, before the printer
     // has answered.
-    print_state_observer_ = observe_int_sync<PrintControlButtons>(
-        get_printer_state().get_print_state_enum_subject(), this,
+    print_state_observer_ = observe<int>(
+        get_printer_state().print_state().get_print_state_enum_subject(), this,
         [](PrintControlButtons* self, int) {
             // A real state change clears any optimistic
             // pending action; the new state is authoritative.
@@ -67,8 +70,8 @@ void PrintControlButtons::init_subjects() {
     // it moves independently of print_state_enum: during a host-side pre-start
     // block the printer keeps reporting the previous job, so nothing else here
     // would re-evaluate for the entire window.
-    print_lifecycle_observer_ = observe_int_sync<PrintControlButtons>(
-        get_printer_state().get_print_lifecycle_subject(), this,
+    print_lifecycle_observer_ = observe<int>(
+        get_printer_state().print_state().get_print_lifecycle_subject(), this,
         [](PrintControlButtons* self, int) { self->recompute(); },
         get_printer_state().get_subjects_lifetime());
 
@@ -94,9 +97,9 @@ ControlButtonView PrintControlButtons::current_view() const {
     // RAW_PRINT_STATE_OK: ControlButtonInputs carries BOTH axes on purpose -
     // job_state (the wire) and lifecycle - because "who holds the job" and "what
     // may the user do" are different questions. See print_control_view.cpp.
-    in.job_state = state.get_print_job_state();
-    in.lifecycle = state.get_print_lifecycle();
-    in.has_preparing_job = state.has_preparing_job();
+    in.job_state = state.print_state().get_print_job_state();
+    in.lifecycle = state.print_state().get_print_lifecycle();
+    in.has_preparing_job = state.print_state().has_preparing_job();
     in.pending = pending_action_;
     in.pause_available = !macros.get(StandardMacroSlot::Pause).is_empty();
     in.resume_available = !macros.get(StandardMacroSlot::Resume).is_empty();
@@ -129,7 +132,7 @@ void PrintControlButtons::handle_primary_button() {
         return;
     }
     // RAW_PRINT_STATE_OK: picks which macro to send; see below.
-    auto state = get_printer_state().get_print_job_state();
+    auto state = get_printer_state().print_state().get_print_job_state();
     auto& macros = StandardMacros::instance();
 
     // RAW_PRINT_STATE_OK: chooses WHICH macro to send. Pause is meaningless
@@ -149,7 +152,7 @@ void PrintControlButtons::handle_primary_button() {
             StandardMacroSlot::Pause, api_, []() { spdlog::info("[PrintControl] Pause sent"); },
             [](const MoonrakerError& err) {
                 spdlog::error("[PrintControl] Pause failed: {}", err.message);
-                NOTIFY_ERROR(lv_tr("Failed to pause print: {}"), err.user_message());
+                helix::ui::notify_error_tr(TR_NOOP("Failed to pause print: {}"), err);
                 PrintControlButtons::instance().clear_pending_action();
             },
             /*timeout_ms=*/0, /*suppress_auto_toast=*/true);
@@ -207,7 +210,7 @@ void PrintControlButtons::handle_stop_button() {
             // The notification and the heater cooldown belong to the
             // preparing-exit observer, which sees every retirement rather than
             // just this one path.
-            state.retire_preparing(helix::PreparingExit::Cancelled);
+            state.print_state().retire_preparing(helix::PreparingExit::Cancelled);
             return;
         }
 
@@ -260,17 +263,6 @@ PrintControlButtons::~PrintControlButtons() {
 }
 
 void PrintControlButtons::teardown_subjects() {
-    // Death signal BEFORE deinit_all(), which frees every observer node on these
-    // subjects. Outside holders — PrintStatusPanel's pending_action_observer_ —
-    // read it in ObserverGuard::reset() and skip the removal instead of
-    // dereferencing a freed observer. Replace rather than clear: an empty token
-    // reads as "dead" and would suppress removal for observers registered after
-    // this teardown, orphaning live nodes.
-    if (subjects_lifetime_) {
-        *subjects_lifetime_ = false;
-    }
-    subjects_lifetime_ = std::make_shared<bool>(true);
-
     cancel_pending_action_timer();
     subjects_.deinit_all();
     subjects_initialized_ = false;
@@ -297,20 +289,6 @@ void PrintControlButtons::notify_printer_error(const std::string& detail) {
     spdlog::warn("[PrintControl] Klipper error while {} pending — releasing the button: {}", verb,
                  detail);
     clear_pending_action();
-}
-
-void PrintControlButtons::on_primary_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[PrintControl] on_primary_clicked");
-    (void)e;
-    instance().handle_primary_button();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void PrintControlButtons::on_stop_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[PrintControl] on_stop_clicked");
-    (void)e;
-    instance().handle_stop_button();
-    LVGL_SAFE_EVENT_CB_END();
 }
 
 } // namespace helix::ui

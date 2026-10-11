@@ -14,9 +14,9 @@
 #include "../catch_amalgamated.hpp"
 
 // Minimal fake that overrides classify_error to recognize "FAKE-JAM" lines.
-class FakeJamBackend : public AmsBackendAfc {
+class FakeJamBackend : public helix::AmsBackendAfc {
   public:
-    FakeJamBackend() : AmsBackendAfc(nullptr, nullptr) {}
+    FakeJamBackend() : helix::AmsBackendAfc(nullptr, nullptr) {}
 
     std::optional<helix::ErrorEvent>
     classify_error(const std::string& raw_line,
@@ -41,7 +41,7 @@ TEST_CASE("AmsBackend::classify_error default returns nullopt", "[ams][error-cen
 
     // Dispatch through the base reference to prove the virtual resolves through
     // AmsBackend's vtable, not just the concrete type.
-    AmsBackend& base = backend;
+    helix::AmsBackend& base = backend;
     REQUIRE_FALSE(base.classify_error("!! anything", ctx).has_value());
 }
 
@@ -57,7 +57,7 @@ TEST_CASE("AmsBackend::classify_error override is honored", "[ams][error-center]
 
         // Dispatch through the base reference to prove the override is reached
         // via AmsBackend's vtable.
-        AmsBackend& base = backend;
+        helix::AmsBackend& base = backend;
         auto e = base.classify_error("!! FAKE-JAM xyz", ctx);
         REQUIRE(e.has_value());
         REQUIRE(e->severity == helix::ErrorSeverity::CRITICAL);

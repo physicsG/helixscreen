@@ -320,9 +320,12 @@ The printer database (`config/printer_database.json`) is the source of truth for
 | `image` | PNG filename in `assets/images/printers/` |
 | `print_start_profile` | Profile for print start phase detection |
 | `z_offset_calibration_strategy` | Z-offset calibration approach: `probe_calibrate`, `endstop`, or `firmware_managed` (firmware/macros persist it, so HelixScreen hides its own Save step). Omit to derive from probe presence. Separate from *where the value is stored* — see `include/z_offset_persistence.h` |
+| `hide_manual_z_calibration` | `true` when the printer's `CALIBRATE_TOOL_OFFSETS` routine sets every tool's Z, the reference tool included, so the manual Z calibration (paper test) entries step aside while that beta screen is shown. Omit (default `false`) for a stock klipper-toolchanger, whose example macro measures the other tools against T0 and writes nothing for T0. Independent of `z_offset_calibration_strategy`: the result may still need `SAVE_CONFIG`. |
 | `heuristics` | Array of detection rules with confidence scores |
 | `print_start_capabilities` | PRINT_START macro parameters |
 | `screws_tilt_direction` | `"cw"` or `"ccw"` — override for the physical tightening direction of bed screws. Use when the vendor-shipped Klipper `screw_thread` disagrees with the actual screw geometry, causing `SCREWS_TILT_CALCULATE` directions to un-level the bed. When set to `"ccw"` (disagreeing with Klipper's default CW-M\* semantics), HelixScreen flips CW↔CCW in the displayed direction. Omit the field (or set `"cw"`) for printers whose Klipper config matches reality. Known use: FlashForge Adventurer 5M family. |
+
+The bundled `assets/config/printer_database.json` is schema-checked by the `[printer_database][schema]` test (`tests/unit/test_printer_database_evidence.cpp`): every entry needs non-empty string `id`, `name`, `manufacturer` and `image` fields and a `heuristics` array, ids are unique lowercase slugs (`a-z`, `0-9`, `_`, `-`), and names are unique ignoring case.
 
 ### Heuristic Types
 
@@ -337,7 +340,7 @@ The printer database (`config/printer_database.json`) is the source of truth for
 | `fan_combo` | Match multiple fan patterns |
 | `led_match` | Match LED/neopixel names |
 | `mcu_match` | Match MCU chip type |
-| `build_volume_range` | Match bed dimensions |
+| `build_volume_range` | Match X/Y stepper travel from the configfile (not the bed mesh or print area) |
 | `macro_match` | Match G-code macro names |
 
 Detection scores are combined across multiple heuristics. A confidence of >= 70 is considered high-confidence.
@@ -381,20 +384,15 @@ Capability chips are pill-shaped UI elements displayed in a flow-wrapped contain
 
 ### Chip Navigation Pattern
 
-Clickable chips use the `lazy_create_and_push_overlay` helper for lazy panel creation:
+Clickable chips open the panel through its global accessor's `OverlayBase::show()`, which creates it on first use:
 
 ```cpp
-void PrinterManagerOverlay::on_chip_bed_mesh_clicked(lv_event_t* e) {
-    auto& pm = get_printer_manager_overlay();
-    helix::ui::lazy_create_and_push_overlay<BedMeshPanel>(
-        get_global_bed_mesh_panel,          // global accessor
-        pm.bed_mesh_panel_,                 // cached panel pointer
-        lv_display_get_screen_active(nullptr),
-        "Bed Mesh", "Printer Manager");     // overlay name, source name
+void on_chip_bed_mesh_clicked(lv_event_t*) {
+    get_global_bed_mesh_panel().show(lv_display_get_screen_active(nullptr));
 }
 ```
 
-The panel pointer is cached as a member of `PrinterManagerOverlay` so the panel is only created once.
+The panel object owns its root, so the chip keeps no pointer to it.
 
 ---
 
@@ -439,11 +437,7 @@ The panel pointer is cached as a member of `PrinterManagerOverlay` so the panel 
    ```cpp
    void PrinterManagerOverlay::on_chip_my_feature_clicked(lv_event_t* e) {
        (void)e;
-       auto& pm = get_printer_manager_overlay();
-       helix::ui::lazy_create_and_push_overlay<MyFeaturePanel>(
-           get_global_my_feature_panel, pm.my_feature_panel_,
-           lv_display_get_screen_active(nullptr),
-           "My Feature", "Printer Manager");
+       get_global_my_feature_panel().show(lv_display_get_screen_active(nullptr));
    }
    ```
 

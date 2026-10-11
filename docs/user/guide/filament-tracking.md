@@ -55,23 +55,30 @@ HelixScreen reaches Spoolman **through Moonraker** — you point Moonraker at yo
 
 You need a running Spoolman server on your network. Then, on the printer:
 
-1. Open **Settings → Hardware → Spoolman**.
+1. Open **Settings → Devices → Spoolman**.
 2. On the setup screen, enter your Spoolman server's **IP address / hostname** and **port** (the default is `7912`).
 3. Tap **Connect**.
 
 HelixScreen verifies the server is reachable and configures Moonraker automatically — you don't need to edit `moonraker.conf` by hand. Once connected, the same screen shows the server URL with **Change** and **Remove** options.
 
-Full setting-by-setting reference: [Settings → Hardware → Spoolman](settings/hardware.md#spoolman).
+Full setting-by-setting reference: [Settings → Devices → Spoolman](settings/devices.md#spoolman).
 
 ### Weight sync
 
 With Spoolman connected, HelixScreen doesn't decrement weight itself — Spoolman does, against whichever spool is active, as the print runs. HelixScreen periodically **reads** the updated weight back so the display stays current.
 
-- Turn on **Sync with Spoolman** under **Settings → Hardware → Spoolman** to enable this polling.
+- Turn on **Sync with Spoolman** under **Settings → Devices → Spoolman** to enable this polling.
 - Choose a **Refresh Interval** — 30 seconds, 1 minute, 2 minutes, or 5 minutes. Shorter is more up to date but chattier on the network.
 - Weights also refresh automatically whenever a print **starts, pauses, or completes**, so the numbers are fresh at the moments that matter even between polls.
 
 > **Note:** Because Spoolman owns consumption for any spool you've assigned from it, HelixScreen's own estimator stands down for those spools — you won't get two systems fighting over the same number. HelixScreen only writes to Spoolman when *you* make an explicit change (assigning a spool, editing weight, or creating a spool).
+
+> **Color from the printer's own screen (AD5X):** on a lane with a Spoolman spool
+> linked, the spool's own color wins over anything the machine itself reports - a change
+> made in the printer's color menu does not override it. Pick a color in HelixScreen's
+> lane editor instead (a color you pick beats the linked spool's), or edit the spool in
+> Spoolman. Lanes with no spool linked are unaffected.
+> See [Troubleshooting](../TROUBLESHOOTING.md#color-set-on-the-printers-own-screen-reverts-ad5x-with-spoolman).
 
 ### Browsing and assigning spools
 
@@ -124,8 +131,8 @@ You can start without Spoolman and add it whenever you like — connecting it do
 
 ## See Also
 
-- [Filament Management](filament.md) — Load/unload, AMS slots, dryer control, and the spool editors referenced above
-- [Settings → Hardware → Spoolman](settings/hardware.md#spoolman) — Every Spoolman setting in one place
+- [Filament Management](filament.md) — Load/unload, AMS slots, filament drying and humidity, and the spool editors referenced above
+- [Settings → Devices → Spoolman](settings/devices.md#spoolman) — Every Spoolman setting in one place
 - [Barcode Scanner](barcode-scanner.md) — Scan Spoolman QR codes to identify spools
 - [Label Printing](label-printing.md) — Print spool labels with a QR code linking back to Spoolman
 

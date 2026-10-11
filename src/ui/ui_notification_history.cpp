@@ -35,6 +35,8 @@ void NotificationHistory::add(const NotificationHistoryEntry& entry) {
         head_index_ = (head_index_ + 1) % MAX_ENTRIES;
     }
 
+    ++version_;
+
     spdlog::trace("[Notification History] Added notification to history: severity={}, message='{}'",
                   static_cast<int>(entry.severity), entry.message);
 }
@@ -126,6 +128,7 @@ void NotificationHistory::clear() {
     entries_.clear();
     head_index_ = 0;
     buffer_full_ = false;
+    ++version_;
 
     spdlog::debug("[Notification History] Cleared notification history");
 }
@@ -133,6 +136,11 @@ void NotificationHistory::clear() {
 size_t NotificationHistory::count() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return entries_.size();
+}
+
+uint64_t NotificationHistory::version() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return version_;
 }
 
 void NotificationHistory::seed_test_data() {
@@ -162,11 +170,11 @@ void NotificationHistory::seed_test_data() {
     warning_entry.was_read = false;
     add(warning_entry);
 
+    // Untitled entries are what plain toasts record, the most common kind
     // Success from 20 minutes ago
     NotificationHistoryEntry success_entry = {};
     success_entry.timestamp_ms = now - (20 * 60 * 1000); // 20 min ago
     success_entry.severity = ToastSeverity::SUCCESS;
-    strncpy(success_entry.title, "Print Complete", sizeof(success_entry.title) - 1);
     strncpy(success_entry.message, "benchy_v2.gcode finished successfully in 1h 23m.",
             sizeof(success_entry.message) - 1);
     success_entry.was_modal = false;
@@ -188,8 +196,9 @@ void NotificationHistory::seed_test_data() {
     NotificationHistoryEntry warning2_entry = {};
     warning2_entry.timestamp_ms = now - (30 * 1000); // 30 sec ago
     warning2_entry.severity = ToastSeverity::WARNING;
-    strncpy(warning2_entry.title, "Bed Leveling", sizeof(warning2_entry.title) - 1);
-    strncpy(warning2_entry.message, "Bed mesh is outdated. Consider re-calibrating.",
+    strncpy(warning2_entry.message,
+            "Bed mesh is outdated. Re-calibrate before the next print to avoid first-layer "
+            "adhesion problems.",
             sizeof(warning2_entry.message) - 1);
     warning2_entry.was_modal = false;
     warning2_entry.was_read = false;

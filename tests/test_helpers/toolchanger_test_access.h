@@ -5,11 +5,18 @@
 
 #include "ams_backend_toolchanger.h"
 #include "ams_error.h"
+#include "filament_slot_override.h"
 #include "filament_slot_override_store.h"
+#include "test_helpers/seeded_override.h"
 
+#include <memory>
 #include <mutex>
 #include <string>
 #include <utility>
+
+#include "hv/json.hpp"
+
+namespace helix {
 
 // Friend-class shim for AmsBackendToolChanger -- declared as friend in the
 // backend header (`friend class ToolChangerTestAccess;`). Gives tests direct
@@ -30,6 +37,13 @@ class ToolChangerTestAccess {
         return b.dispatch_operation(std::move(gcode), action);
     }
 
+    /// Point the backend at a lane-record store without a live Moonraker,
+    /// which is what a resync re-reads.
+    static void inject_override_store(AmsBackendToolChanger& b,
+                                      std::unique_ptr<helix::ams::FilamentSlotOverrideStore> s) {
+        b.override_store_ = std::move(s);
+    }
+
     /// Whether an optimistic dispatch is still armed and awaiting resolution.
     /// A cancelled home confirmation must clear this -- otherwise the next
     /// macro ack (or a superseding dispatch) resolves against a generation
@@ -37,6 +51,14 @@ class ToolChangerTestAccess {
     static bool has_pending_dispatch(const AmsBackendToolChanger& b) {
         std::lock_guard<std::mutex> lock(b.mutex_);
         return b.pending_dispatch_action_.has_value();
+    }
+
+    /// Deliver one gcode-response line to the Z-Mod marker handler, the
+    /// main-thread half the notify_gcode_response listener drives on a real
+    /// client. The listener itself needs a client, which the unit-test helper
+    /// does not wire.
+    static void feed_zmod_marker(AmsBackendToolChanger& b, const std::string& line) {
+        b.on_zmod_marker_line(line);
     }
 
     /// Run the REAL on_started(), which is where the backend builds its
@@ -51,6 +73,33 @@ class ToolChangerTestAccess {
         b.on_started();
     }
 
+    /// Drive the REAL status path. handle_status_update() is protected, and it
+    /// is where every dock and carriage reading lands, so a case that wants a
+    /// later frame's effect has to go through it rather than poking members.
+    static void handle_status(AmsBackendToolChanger& b, const nlohmann::json& n) {
+        b.handle_status_update(n);
+    }
+
+    /// Put a user override in the map without a store behind it. On this
+    /// backend the override IS the only source of filament identity, so this is
+    /// how a case builds a slot whose every identity field is the user's.
+    static void seed_override(AmsBackendToolChanger& b, int slot_index,
+                              const helix::ams::FilamentSlotOverride& ovr) {
+        {
+            std::lock_guard<std::mutex> lock(b.mutex_);
+            b.overrides_[slot_index] = ovr;
+        }
+        // The backend's own init files both stores together; a fixture that
+        // wrote only this map would leave the lane reading empty.
+        helix::test::file_override_as_lane_records(b, slot_index, ovr);
+    }
+
+    /// True once any slot holds a stored override.
+    static bool has_overrides(const AmsBackendToolChanger& b) {
+        std::lock_guard<std::mutex> lock(b.mutex_);
+        return !b.overrides_.empty();
+    }
+
     /// Name of the Moonraker DB namespace the store was pointed at, so a test
     /// can assert it is the SHARED "lane_data" and not a private one. Empty
     /// when no store was built (null API).
@@ -58,3 +107,4 @@ class ToolChangerTestAccess {
         return b.override_store_ ? b.override_store_->namespace_for_test() : std::string();
     }
 };
+} // namespace helix

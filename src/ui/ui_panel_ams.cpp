@@ -18,7 +18,7 @@
 #include "ui_fonts.h"
 #include "ui_icon.h"
 #include "ui_modal.h"
-#include "ui_nav_manager.h"
+#include "ui_nav.h"
 #include "ui_overlay_qr_scanner.h"
 #include "ui_panel_ams_overview.h"
 #include "ui_panel_common.h"
@@ -28,6 +28,8 @@
 
 #include "ams_backend.h"
 #include "data_root_resolver.h"
+#include "overlay_base.h"
+#include "ui/ui_widget_helpers.h"
 #if HELIX_HAS_CFS
 #include "ams_backend_cfs.h"
 #endif
@@ -37,6 +39,7 @@
 #include "buffer_status_modal.h"
 #include "color_utils.h"
 #include "config.h"
+#include "display_numbering.h"
 #include "i_moonraker_api.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "observer_factory.h"
@@ -55,7 +58,6 @@
 #include <any>
 #include <cmath>
 #include <memory>
-#include <sstream>
 #include <unordered_map>
 
 using namespace helix;
@@ -70,8 +72,6 @@ static constexpr int32_t DEFAULT_SLOT_WIDTH = 80;
 static constexpr int ALL_UNITS = -1;
 
 // Logo path mapping moved to AmsState::get_logo_path()
-
-// Voron printer check moved to PrinterDetector::is_voron_printer()
 
 // Lazy registration flag - widgets and XML registered on first use
 static bool s_ams_widgets_registered = false;
@@ -186,12 +186,12 @@ void AmsPanel::init_subjects() {
 
     // Register observers for state changes
     // Using observer factory for action and slot_count; others use traditional callbacks
-    using helix::ui::observe_int_sync;
+    using helix::ui::observe;
 
-    slots_version_observer_ = observe_int_sync<AmsPanel>(
+    slots_version_observer_ = observe<int>(
         AmsState::instance().get_slots_version_subject(), this,
         [](AmsPanel* self, int) {
-            if (!self->subjects_initialized_ || !self->panel_)
+            if (!self->open_ || !self->subjects_initialized_ || !self->panel_)
                 return;
             spdlog::trace("[AmsPanel] Gates version changed - refreshing slots");
             self->refresh_slots();
@@ -200,48 +200,16 @@ void AmsPanel::init_subjects() {
 
     // Simplified action observer - only handles panel-specific concerns
     // (path canvas heat glow and error modal). Step progress is handled by sidebar_.
-    action_observer_ = observe_int_sync<AmsPanel>(
+    action_observer_ = observe<int>(
         AmsState::instance().get_ams_action_subject(), this,
         [](AmsPanel* self, int action_int) {
             // Record the previous value before any early return so the
-            // ERROR-exit edge below stays accurate across ticks that bail out.
+            // ERROR-exit edge stays accurate across ticks that bail out.
             const int prev_action = self->prev_ams_action_;
             self->prev_ams_action_ = action_int;
-
-            if (!self->subjects_initialized_ || !self->panel_)
+            if (!self->open_)
                 return;
-            auto action = static_cast<AmsAction>(action_int);
-
-            // Path canvas heat glow (panel-specific)
-            if (self->path_canvas_) {
-                bool heating = (action == AmsAction::HEATING);
-                ui_filament_path_canvas_set_heat_active(self->path_canvas_, heating);
-            }
-
-            // Error modal (panel-specific)
-            if (action == AmsAction::ERROR) {
-                if (!self->error_modal_ || !self->error_modal_->is_visible()) {
-                    // Cooldown: don't re-show within 3s of user dismissal
-                    auto now = std::chrono::steady_clock::now();
-                    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-                        now - self->error_modal_dismiss_time_);
-                    if (elapsed.count() >= 3) {
-                        self->show_loading_error_modal();
-                    }
-                }
-            } else {
-                // Error cleared — reset cooldown so next error shows immediately
-                self->error_modal_dismiss_time_ = {};
-
-                // The fault resolved without the dialog being touched (recovered
-                // from the console, another client, or a macro), so its
-                // Resume/Eject/Recover buttons no longer describe anything real
-                // (#1185). Edge only: prev_ams_action_ starts at -1, which never
-                // equals ERROR, so the observer's first tick can't trigger this.
-                if (prev_action == static_cast<int>(AmsAction::ERROR)) {
-                    self->dismiss_error_modal_silently("AMS action left ERROR");
-                }
-            }
+            self->apply_action(action_int, prev_action);
         },
         AmsState::instance().get_subjects_lifetime());
 
@@ -260,8 +228,8 @@ void AmsPanel::init_subjects() {
     // its subjects can be torn down while this guard is still alive (#705).
     // RAW_PRINT_STATE_OK: subscribes to the WIRE deliberately - paired with the keep-raw
     // comparison below; see the marker there for the full reason.
-    print_state_observer_ = observe_int_sync<AmsPanel>(
-        printer_state_.get_print_state_enum_subject(), this,
+    print_state_observer_ = observe<int>(
+        printer_state_.print_state().get_print_state_enum_subject(), this,
         [](AmsPanel* self, int print_state) {
             // Record before the teardown guard so the edge stays accurate
             // across ticks that bail out, matching the action observer above.
@@ -287,12 +255,12 @@ void AmsPanel::init_subjects() {
 
             self->dismiss_error_modal_silently("print resumed");
         },
-        printer_state_.get_static_print_subjects_lifetime());
+        printer_state_.print_state().get_static_subjects_lifetime());
 
-    current_slot_observer_ = observe_int_sync<AmsPanel>(
+    current_slot_observer_ = observe<int>(
         AmsState::instance().get_current_slot_subject(), this,
         [](AmsPanel* self, int slot) {
-            if (!self->subjects_initialized_ || !self->panel_)
+            if (!self->open_ || !self->subjects_initialized_ || !self->panel_)
                 return;
             spdlog::debug("[AmsPanel] Current slot changed: {}", slot);
             self->update_current_slot_highlight(slot);
@@ -322,29 +290,43 @@ void AmsPanel::init_subjects() {
         AmsState::instance().get_subjects_lifetime());
 
     // Slot count observer for dynamic slot creation (non-scoped mode only).
-    // Deferred via lifetime_ to avoid deleting children during LVGL layout refresh (#563).
-    slot_count_observer_ = observe_int_sync<AmsPanel>(
-        AmsState::instance().get_slot_count_subject(), this, [](AmsPanel* self, int new_count) {
-            if (!self->panel_)
+    // Deferred via object_lifetime_ to avoid deleting children during LVGL layout refresh (#563).
+    slot_count_observer_ = observe<int>(
+        AmsState::instance().get_slot_count_subject(), this,
+        [](AmsPanel* self, int) {
+            if (!self->open_ || !self->panel_)
                 return;
             if (!self->slot_creation_pending_) {
                 self->slot_creation_pending_ = true;
-                self->lifetime_.defer("AmsPanel::create_slots", [self, new_count]() {
+                self->object_lifetime_.defer("AmsPanel::create_slots", [self]() {
                     self->slot_creation_pending_ = false;
-                    spdlog::debug("[AmsPanel] Slot count changed to {}", new_count);
-                    self->create_slots(new_count);
+                    if (!self->open_) {
+                        return;
+                    }
+                    // Read when the rebuild runs, not when it was queued: this
+                    // observer is re-added on every open, and its first, queued
+                    // notification lands after on_activate() has already built
+                    // the slots for the current count.
+                    const int count =
+                        lv_subject_get_int(AmsState::instance().get_slot_count_subject());
+                    if (count == self->current_slot_count_) {
+                        return;
+                    }
+                    spdlog::debug("[AmsPanel] Slot count changed to {}", count);
+                    self->create_slots(count);
                 });
             }
-        });
+        },
+        AmsState::instance().get_subjects_lifetime());
 
     // Path state observers for filament path visualization.
-    // Deferred via lifetime_ to avoid modifying widgets during LVGL layout refresh (#563).
+    // Deferred via object_lifetime_ to avoid modifying widgets during LVGL layout refresh (#563).
     auto path_handler = [](AmsPanel* self, int) {
-        if (!self->subjects_initialized_ || !self->panel_)
+        if (!self->open_ || !self->subjects_initialized_ || !self->panel_)
             return;
         if (!self->path_update_pending_) {
             self->path_update_pending_ = true;
-            self->lifetime_.defer("AmsPanel::update_path_canvas", [self]() {
+            self->object_lifetime_.defer("AmsPanel::update_path_canvas", [self]() {
                 self->path_update_pending_ = false;
                 spdlog::debug("[AmsPanel] Path state changed - updating path canvas");
                 self->update_path_canvas_from_backend();
@@ -352,29 +334,44 @@ void AmsPanel::init_subjects() {
         }
     };
     path_segment_observer_ =
-        observe_int_sync<AmsPanel>(AmsState::instance().get_path_filament_segment_subject(), this,
-                                   path_handler, AmsState::instance().get_subjects_lifetime());
+        observe<int>(AmsState::instance().get_path_filament_segment_subject(), this, path_handler,
+                     AmsState::instance().get_subjects_lifetime());
     path_topology_observer_ =
-        observe_int_sync<AmsPanel>(AmsState::instance().get_path_topology_subject(), this,
-                                   path_handler, AmsState::instance().get_subjects_lifetime());
+        observe<int>(AmsState::instance().get_path_topology_subject(), this, path_handler,
+                     AmsState::instance().get_subjects_lifetime());
+
+    // The path canvas's buffer box follows the buffer reading while the panel is open.
+    auto& ams_state = AmsState::instance();
+    buffer_present_observer_ = observe<int>(ams_state.get_buffer_present_subject(), this,
+                                            path_handler, ams_state.get_subjects_lifetime());
+    buffer_slider_observer_ = observe<int>(ams_state.get_buffer_slider_subject(), this,
+                                           path_handler, ams_state.get_subjects_lifetime());
+    buffer_bias_observer_ = observe<int>(ams_state.get_buffer_bias_pct_subject(), this,
+                                         path_handler, ams_state.get_subjects_lifetime());
+    buffer_status_observer_ = observe<int>(ams_state.get_buffer_status_subject(), this,
+                                           path_handler, ams_state.get_subjects_lifetime());
+    buffer_gauge_observer_ = observe<int>(ams_state.get_buffer_gauge_subject(), this, path_handler,
+                                          ams_state.get_subjects_lifetime());
 
     // Backend count observer for multi-backend selector
-    backend_count_observer_ = observe_int_sync<AmsPanel>(
-        AmsState::instance().get_backend_count_subject(), this, [](AmsPanel* self, int /*count*/) {
+    backend_count_observer_ = observe<int>(
+        AmsState::instance().get_backend_count_subject(), this,
+        [](AmsPanel* self, int /*count*/) {
             if (!self->backend_rebuild_pending_) {
                 self->backend_rebuild_pending_ = true;
-                self->lifetime_.defer("AmsPanel::rebuild_backend_selector", [self]() {
+                self->object_lifetime_.defer("AmsPanel::rebuild_backend_selector", [self]() {
                     self->backend_rebuild_pending_ = false;
                     self->rebuild_backend_selector();
                 });
             }
-        });
+        },
+        AmsState::instance().get_subjects_lifetime());
 
     // Observe external spool color changes to reactively update bypass in path canvas.
     // NOTE: set_external_spool_info() calls lv_subject_set_int() directly (not via
     // ui_queue_update) which is safe because all current callers are on the LVGL thread.
     // If callers from background threads are added, those must use ui_queue_update().
-    external_spool_observer_ = observe_int_sync<AmsPanel>(
+    external_spool_observer_ = observe<int>(
         AmsState::instance().get_external_spool_color_subject(), this,
         [](AmsPanel* self, int /*color_int*/) {
             // Update path canvas bypass indicator
@@ -400,13 +397,14 @@ void AmsPanel::init_subjects() {
     // from the live mmu object, and our own default stands in as true until that
     // first status lands, so the node has to be able to appear and disappear
     // after the panel is built.
-    supports_bypass_observer_ = observe_int_sync<AmsPanel>(
+    supports_bypass_observer_ = observe<int>(
         AmsState::instance().get_supports_bypass_subject(), this,
-        [](AmsPanel* self, int /*supported*/) { self->update_bypass_spool_from_state(); });
+        [](AmsPanel* self, int /*supported*/) { self->update_bypass_spool_from_state(); },
+        AmsState::instance().get_subjects_lifetime());
 
     // The ring marks the node the printer is actually feeding from. Engaging
     // bypass touches no slot, so nothing else on this panel refreshes for it.
-    bypass_active_observer_ = observe_int_sync<AmsPanel>(
+    bypass_active_observer_ = observe<int>(
         AmsState::instance().get_bypass_active_subject(), this,
         [](AmsPanel* self, int /*active*/) { self->update_bypass_spool_from_state(); },
         AmsState::instance().get_subjects_lifetime());
@@ -445,15 +443,55 @@ void AmsPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
     setup_endless_arrows();
 
     // Setup shared sidebar component
-    sidebar_ = std::make_unique<helix::ui::AmsOperationSidebar>(printer_state_);
-    sidebar_->setup(panel_);
-    sidebar_->init_observers();
+    sidebar_ = helix::ui::AmsOperationSidebar::attach(printer_state_, panel_);
 
     spdlog::debug("[{}] Setup complete!", get_name());
 }
 
+void AmsPanel::apply_action(int action_int, int prev_action) {
+    if (!subjects_initialized_ || !panel_)
+        return;
+    auto action = static_cast<AmsAction>(action_int);
+
+    // Path canvas heat glow (panel-specific)
+    if (path_canvas_) {
+        bool heating = (action == AmsAction::HEATING);
+        ui_filament_path_canvas_set_heat_active(path_canvas_, heating);
+    }
+
+    // Error modal (panel-specific)
+    if (action == AmsAction::ERROR) {
+        if (!error_modal_ || !error_modal_->is_visible()) {
+            // Cooldown: don't re-show within 3s of user dismissal
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed =
+                std::chrono::duration_cast<std::chrono::seconds>(now - error_modal_dismiss_time_);
+            if (elapsed.count() >= 3) {
+                show_loading_error_modal();
+            }
+        }
+    } else {
+        // Error cleared — reset cooldown so next error shows immediately
+        error_modal_dismiss_time_ = {};
+
+        // The fault resolved without the dialog being touched (recovered
+        // from the console, another client, or a macro), so its
+        // Resume/Eject/Recover buttons no longer describe anything real
+        // (#1185). Edge only: a prev_action of -1 never equals ERROR, so a
+        // first look at the state can't trigger this.
+        if (prev_action == static_cast<int>(AmsAction::ERROR)) {
+            dismiss_error_modal_silently("AMS action left ERROR");
+        }
+    }
+}
+
 void AmsPanel::on_activate() {
     spdlog::debug("[{}] Activated - syncing from backend", get_name());
+    const bool opening = !open_;
+    open_ = true;
+    if (!sidebar_) {
+        sidebar_ = helix::ui::AmsOperationSidebar::attach(printer_state_, panel_);
+    }
 
     // Sync state when panel becomes visible
     AmsState::instance().sync_from_backend();
@@ -465,7 +503,7 @@ void AmsPanel::on_activate() {
 
     // path_container is shown unconditionally; bypass_row visibility is managed
     // by bind_flag_if_eq on the ams_supports_bypass subject.
-    lv_obj_t* path_container = lv_obj_find_by_name(panel_, "path_container");
+    lv_obj_t* path_container = helix::ui::find_required(panel_, "path_container", get_name());
     if (path_container)
         lv_obj_remove_flag(path_container, LV_OBJ_FLAG_HIDDEN);
 
@@ -486,6 +524,15 @@ void AmsPanel::on_activate() {
     // Sync sidebar step progress and preheat feedback from current state
     if (sidebar_) {
         sidebar_->sync_from_state();
+    }
+
+    // What the closed panel's observers skipped. The rest of this function
+    // already resyncs from the backend.
+    if (opening) {
+        const int slot = lv_subject_get_int(AmsState::instance().get_current_slot_subject());
+        update_current_slot_highlight(slot);
+        update_path_canvas_from_backend();
+        apply_action(lv_subject_get_int(AmsState::instance().get_ams_action_subject()), -1);
     }
 
     // Sync Spoolman active spool with currently loaded slot
@@ -527,7 +574,7 @@ void AmsPanel::sync_spoolman_active_spool() {
     }
 }
 
-void AmsPanel::on_deactivate() {
+void AmsPanel::on_deactivating(DeactivateReason) {
     if (holds_poll_ref_) {
         SpoolmanManager::instance().stop_spoolman_polling();
         holds_poll_ref_ = false;
@@ -539,13 +586,60 @@ void AmsPanel::on_deactivate() {
     }
 
     spdlog::debug("[{}] Deactivated", get_name());
-    // Note: UI destruction is handled by NavigationManager close callback
-    // registered in get_global_ams_panel()
+}
+
+void AmsPanel::run_close() {
+    if (auto* p = get_existing_ams_panel()) {
+        p->on_closed();
+    }
+}
+
+void AmsPanel::on_closed() {
+    // A close callback can run after a reopen has already pushed the panel again.
+    // Its own callback was consumed by that run, so arm the next close again.
+    if (panel_ && (helix::nav::is_in_stack(panel_) || helix::nav::is_push_pending(panel_))) {
+        helix::nav::on_close(panel_, &AmsPanel::run_close);
+        return;
+    }
+    open_ = false;
+    // What only an open panel runs: the sidebar's operation handlers and stall
+    // watchdog, the error and context menus, and the path canvas buffer.
+    sidebar_.reset();
+    error_modal_.reset();
+    context_menu_.reset();
+    selector_menu_.reset();
+    if (path_canvas_) {
+        helix::ui::filament_path_canvas_release_buffer(path_canvas_);
+    }
+}
+
+bool AmsPanel::rebuild() {
+    if (!panel_ || helix::nav::is_showing(panel_)) {
+        return false;
+    }
+    destroy_ams_panel_ui();
+    return true;
+}
+
+void AmsPanel::on_path_canvas_size_changed(lv_event_t* e) {
+    if (auto* self = static_cast<AmsPanel*>(lv_event_get_user_data(e)))
+        self->update_bypass_spool_position();
+}
+
+void AmsPanel::detach_path_canvas_hooks() {
+    // The canvas can outlive this panel; its callback must not.
+    helix::ui::remove_event_cb_if_alive(path_canvas_, on_path_canvas_size_changed, this);
+}
+
+AmsPanel::~AmsPanel() {
+    detach_path_canvas_hooks();
 }
 
 void AmsPanel::clear_panel_reference() {
+    detach_path_canvas_hooks();
     // Mark subjects uninitialized FIRST — observer callbacks check this and bail out
     subjects_initialized_ = false;
+    open_ = false;
 
     // Reset extracted UI modules (they handle their own RAII cleanup)
     sidebar_.reset();
@@ -576,6 +670,11 @@ void AmsPanel::clear_panel_reference() {
     slot_count_observer_.reset();
     path_segment_observer_.reset();
     path_topology_observer_.reset();
+    buffer_present_observer_.reset();
+    buffer_slider_observer_.reset();
+    buffer_bias_observer_.reset();
+    buffer_status_observer_.reset();
+    buffer_gauge_observer_.reset();
     slot_path_observers_.clear();
     print_state_observer_.reset();
     backend_count_observer_.reset();
@@ -597,7 +696,7 @@ void AmsPanel::rebuild_backend_selector() {
         return;
     }
 
-    lv_obj_t* row = lv_obj_find_by_name(panel_, "backend_selector_row");
+    lv_obj_t* row = helix::ui::find_required(panel_, "backend_selector_row", get_name());
     if (!row) {
         return;
     }
@@ -613,7 +712,7 @@ void AmsPanel::rebuild_backend_selector() {
     lv_obj_remove_flag(row, LV_OBJ_FLAG_HIDDEN);
 
     // Clear existing children. rebuild_backend_selector runs from
-    // backend_count_observer_ via lifetime_.defer (UpdateQueue batch). [L081]
+    // backend_count_observer_ via object_lifetime_.defer (UpdateQueue batch). [L081]
     helix::ui::safe_clean_children(row);
 
     for (int i = 0; i < count; ++i) {
@@ -693,9 +792,8 @@ void AmsPanel::on_backend_segment_selected(int index) {
 }
 
 void AmsPanel::setup_slots() {
-    lv_obj_t* unit_detail = lv_obj_find_by_name(panel_, "unit_detail");
+    lv_obj_t* unit_detail = helix::ui::find_required(panel_, "unit_detail", get_name());
     if (!unit_detail) {
-        spdlog::warn("[{}] unit_detail not found in XML", get_name());
         return;
     }
 
@@ -741,7 +839,8 @@ void AmsPanel::create_slots(int count) {
     setup_slot_path_observers(result.slot_count);
 
     // Update tray
-    ams_detail_update_tray(detail_widgets_);
+    ams_detail_update_tray(detail_widgets_, slot_widgets_, result.slot_count, ALL_UNITS);
+    helix::ui::ams_detail_sync_lane_entry(path_canvas_, slot_grid_);
 }
 
 void AmsPanel::setup_slot_path_observers(int slot_count) {
@@ -756,14 +855,14 @@ void AmsPanel::setup_slot_path_observers(int slot_count) {
 
     // Coalesced redraw handler (same pattern as path_segment_observer_): re-runs
     // the full path setup (which re-reads every slot's live segment + color and
-    // calls ui_filament_path_canvas_refresh) on the next deferred tick.
+    // repaints when any of them changed) on the next deferred tick.
     auto on_slot_path_change = [](AmsPanel* self, int) {
-        if (!self->subjects_initialized_ || !self->panel_)
+        if (!self->open_ || !self->subjects_initialized_ || !self->panel_)
             return;
         spdlog::debug("[AmsPanel] Per-slot path subject fired — scheduling path redraw");
         if (!self->path_update_pending_) {
             self->path_update_pending_ = true;
-            self->lifetime_.defer("AmsPanel::update_path_canvas(slot)", [self]() {
+            self->object_lifetime_.defer("AmsPanel::update_path_canvas(slot)", [self]() {
                 self->path_update_pending_ = false;
                 self->update_path_canvas_from_backend();
             });
@@ -774,13 +873,13 @@ void AmsPanel::setup_slot_path_observers(int slot_count) {
         int global_idx = i + slot_offset;
         // Segment subject — how far filament extends along this lane's path.
         if (auto* seg_subj = state.get_slot_segment_subject(global_idx)) {
-            slot_path_observers_.push_back(
-                helix::ui::observe_int_sync<AmsPanel>(seg_subj, this, on_slot_path_change));
+            slot_path_observers_.push_back(helix::ui::observe<int>(
+                seg_subj, this, on_slot_path_change, state.get_subjects_lifetime()));
         }
         // Toolhead-present subject — live per-slot motion/switch sensor.
         if (auto* th_subj = state.get_slot_toolhead_present_subject(global_idx)) {
-            slot_path_observers_.push_back(
-                helix::ui::observe_int_sync<AmsPanel>(th_subj, this, on_slot_path_change));
+            slot_path_observers_.push_back(helix::ui::observe<int>(
+                th_subj, this, on_slot_path_change, state.get_subjects_lifetime()));
         }
     }
     spdlog::debug("[AmsPanel] Wired {} per-slot path observers (offset={})",
@@ -790,9 +889,8 @@ void AmsPanel::setup_slot_path_observers(int slot_count) {
 // on_slot_count_changed migrated to lambda in init_subjects()
 
 void AmsPanel::setup_path_canvas() {
-    path_canvas_ = lv_obj_find_by_name(panel_, "path_canvas");
+    path_canvas_ = helix::ui::find_required(panel_, "path_canvas", get_name());
     if (!path_canvas_) {
-        spdlog::warn("[{}] path_canvas not found in XML", get_name());
         return;
     }
 
@@ -813,13 +911,13 @@ void AmsPanel::setup_path_canvas() {
     ui_filament_path_canvas_set_buffer_callback(path_canvas_, on_buffer_clicked, this);
 
     // Configure from backend using shared helper
-    ams_detail_setup_path_canvas(path_canvas_, slot_grid_, ALL_UNITS, false);
+    ams_detail_setup_path_canvas(path_canvas_, slot_grid_, ALL_UNITS);
 
     spdlog::debug("[{}] Path canvas setup complete", get_name());
 }
 
 void AmsPanel::update_path_canvas_from_backend() {
-    ams_detail_setup_path_canvas(path_canvas_, slot_grid_, ALL_UNITS, false);
+    ams_detail_setup_path_canvas(path_canvas_, slot_grid_, ALL_UNITS);
 }
 
 void AmsPanel::setup_bypass_spool() {
@@ -861,14 +959,7 @@ void AmsPanel::setup_bypass_spool() {
     // time setup_bypass_spool() runs is not its final size; the surrounding
     // flex layout adjusts it later (we observed 251→283px height growth, which
     // shifted the rendered tube ~13px and left the spool stranded above it).
-    lv_obj_add_event_cb(
-        path_canvas_,
-        [](lv_event_t* e) {
-            auto* self = static_cast<AmsPanel*>(lv_event_get_user_data(e));
-            if (self)
-                self->update_bypass_spool_position();
-        },
-        LV_EVENT_SIZE_CHANGED, this);
+    lv_obj_add_event_cb(path_canvas_, on_path_canvas_size_changed, LV_EVENT_SIZE_CHANGED, this);
 
     update_bypass_spool_position();
 }
@@ -894,27 +985,12 @@ void AmsPanel::update_bypass_spool_from_state() {
         return;
     }
 
-    // On AFC the node is removed entirely while bypass is disengaged (#1229).
-    const bool show_bypass = helix::ui::bypass_node_visible_for(AmsState::instance().get_backend());
-    helix::ui::bypass_spool_set_visible(bypass_widgets_, show_bypass);
-    if (!show_bypass) {
+    const bool node_visible =
+        helix::ui::bypass_node_visible_for(AmsState::instance().get_backend());
+    helix::ui::bypass_spool_sync_from_state(bypass_widgets_, node_visible);
+    if (!node_visible) {
         return;
     }
-
-    auto ext = AmsState::instance().get_external_spool_info();
-    if (ext.has_value()) {
-        helix::ui::bypass_spool_set_color(bypass_widgets_, ext->color_rgb);
-        helix::ui::bypass_spool_set_has_spool(bypass_widgets_, true);
-        helix::ui::bypass_spool_set_material(bypass_widgets_, ext->material.c_str());
-    } else {
-        helix::ui::bypass_spool_set_color(bypass_widgets_, 0x505050);
-        helix::ui::bypass_spool_set_has_spool(bypass_widgets_, false);
-        helix::ui::bypass_spool_set_material(bypass_widgets_, "");
-    }
-    // Same ring a lane slot wears when it is the active node - bypass IS a node
-    // on the path, and while it is engaged it is the one feeding the toolhead.
-    helix::ui::bypass_spool_set_active(
-        bypass_widgets_, lv_subject_get_int(AmsState::instance().get_bypass_active_subject()) != 0);
 
     // Reposition because the material label visibility may have changed,
     // which affects the layout above the spool box.
@@ -922,9 +998,8 @@ void AmsPanel::update_bypass_spool_from_state() {
 }
 
 void AmsPanel::setup_endless_arrows() {
-    endless_arrows_ = lv_obj_find_by_name(panel_, "endless_arrows");
+    endless_arrows_ = helix::ui::find_required(panel_, "endless_arrows", get_name());
     if (!endless_arrows_) {
-        spdlog::warn("[{}] endless_arrows not found in XML - skipping", get_name());
         return;
     }
 
@@ -987,14 +1062,16 @@ void AmsPanel::update_endless_arrows_from_backend() {
     // Get slot width and overlap from current layout
     int32_t slot_width = DEFAULT_SLOT_WIDTH;
     int32_t overlap = 0;
+    int32_t offset = 0;
     if (slot_grid_) {
         lv_obj_t* slot_area = lv_obj_get_parent(slot_grid_);
         if (slot_area) {
             lv_obj_update_layout(slot_area);
             int32_t available_width = lv_obj_get_content_width(slot_area);
-            auto layout = calculate_ams_slot_layout(available_width, slot_count);
+            auto layout = helix::ui::ams_detail_slot_layout(available_width, slot_count);
             slot_width = layout.slot_width > 0 ? layout.slot_width : DEFAULT_SLOT_WIDTH;
             overlap = layout.overlap;
+            offset = layout.centering_offset;
         }
     }
 
@@ -1002,6 +1079,7 @@ void AmsPanel::update_endless_arrows_from_backend() {
     ui_endless_spool_arrows_set_slot_count(endless_arrows_, slot_count);
     ui_endless_spool_arrows_set_slot_width(endless_arrows_, slot_width);
     ui_endless_spool_arrows_set_slot_overlap(endless_arrows_, overlap);
+    ui_endless_spool_arrows_set_slot_offset(endless_arrows_, offset);
     ui_endless_spool_arrows_set_config(endless_arrows_, backup_slots, slot_count);
 
     // Show the canvas
@@ -1022,6 +1100,11 @@ void AmsPanel::refresh_slots() {
     }
 
     update_slot_colors();
+    // One read of the system info serves both the bay states and the path canvas.
+    const AmsBackend* backend = AmsState::instance().get_backend();
+    const AmsSystemInfo info = backend ? backend->get_system_info() : AmsSystemInfo{};
+    if (backend)
+        helix::ui::ams_detail_sync_slot_states(slot_widgets_, current_slot_count_, info);
 
     int current_slot = lv_subject_get_int(AmsState::instance().get_current_slot_subject());
     update_current_slot_highlight(current_slot);
@@ -1033,7 +1116,8 @@ void AmsPanel::refresh_slots() {
     // guards against a missing canvas (ams_detail_setup_path_canvas() returns
     // early when canvas/backend is null) and never writes slot subjects, so it
     // can't recurse back into a slots_version bump.
-    update_path_canvas_from_backend();
+    if (backend)
+        ams_detail_setup_path_canvas(path_canvas_, slot_grid_, ALL_UNITS, backend, info);
 }
 
 // ============================================================================
@@ -1168,9 +1252,8 @@ void AmsPanel::on_bypass_spool_clicked(void* user_data) {
 }
 
 void AmsPanel::handle_bypass_spool_click() {
-    helix::ui::show_external_spool_menu(
-        parent_screen_, path_canvas_, context_menu_,
-        [this](bool open_on_picker) { show_edit_modal(-2, open_on_picker); });
+    helix::ui::show_external_spool_menu(parent_screen_, path_canvas_, context_menu_,
+                                        helix::ui::sidebar_external_spool_hooks(sidebar_.get()));
 }
 
 void AmsPanel::on_buffer_clicked(void* user_data) {
@@ -1181,12 +1264,9 @@ void AmsPanel::on_buffer_clicked(void* user_data) {
 }
 
 void AmsPanel::handle_buffer_click() {
-    auto* backend = AmsState::instance().get_backend();
-    if (!backend)
+    if (!AmsState::instance().get_backend())
         return;
-
-    auto info = backend->get_system_info();
-    BufferStatusModal::show_for(info, 0);
+    BufferStatusModal::show_for(-1);
 }
 
 void AmsPanel::on_path_slot_clicked(int slot_index, void* user_data) {
@@ -1230,9 +1310,8 @@ void AmsPanel::on_path_toolhead_clicked(int tool_index, void* user_data) {
     if (!self) {
         return;
     }
-    // Range check, touch point, lazy menu, shared dispatch -- all in the helper,
-    // which the overview calls too. The two panels each had a copy of it once,
-    // and the range check went missing from one of them.
+    // Range check, touch point, lazy menu and shared dispatch all live in the
+    // helper, which the overview calls too.
     helix::ui::show_toolhead_menu_at_touch(self->toolhead_menu_, self->parent_screen_,
                                            self->path_canvas_, tool_index);
 }
@@ -1251,70 +1330,10 @@ void AmsPanel::on_path_hub_clicked(lv_point_t click_pt) {
         return; // Selector/Happy Hare backends only
     }
     selector_menu_ = std::make_unique<helix::ui::AmsSelectorMenu>();
-    selector_menu_->set_action_callback(
-        [this](helix::ui::AmsSelectorMenu::SelectorAction a) { dispatch_selector_action(a); });
+    selector_menu_->set_action_callback([](helix::ui::AmsSelectorMenu::SelectorAction a) {
+        helix::ui::ams_dispatch_selector_action(a);
+    });
     selector_menu_->show_at(parent_screen_, path_canvas_, click_pt, backend);
-}
-
-void AmsPanel::dispatch_selector_action(helix::ui::AmsSelectorMenu::SelectorAction a) {
-    using SA = helix::ui::AmsSelectorMenu::SelectorAction;
-    AmsBackend* backend = AmsState::instance().get_backend();
-    if (!backend) {
-        NOTIFY_WARNING(lv_tr("Multi-Filament System not available"));
-        return;
-    }
-    AmsError err{};
-    // Feedback for these quick selector commands flows through the AMS status
-    // display (the ams_action_detail subject) — the backend sets a transient
-    // action/operation_detail and the UI observes it, matching how real Happy
-    // Hare reports "Checking"/"Selecting"/etc. automatically. No toasts here.
-    switch (a) {
-    case SA::HOME:
-        err = backend->reset(); // reset()==MMU_HOME for HH; reads as "Homing selector"
-        break;
-    case SA::CHECK_SLOTS:
-        err = backend->check_all_gates();
-        break;
-    case SA::SERVO_UP:
-        err = backend->execute_device_action("servo_up");
-        break;
-    case SA::SERVO_MOVE:
-        err = backend->execute_device_action("servo_move");
-        break;
-    case SA::SERVO_DOWN:
-        err = backend->execute_device_action("servo_down");
-        break;
-    case SA::JOG_PREV:
-        err = backend->move_selector(-1);
-        break;
-    case SA::JOG_NEXT:
-        err = backend->move_selector(+1);
-        break;
-    case SA::GEAR_SYNC_ON:
-        err = backend->execute_device_action("gear_sync", std::any(true));
-        break;
-    case SA::GEAR_SYNC_OFF:
-        err = backend->execute_device_action("gear_sync", std::any(false));
-        break;
-    case SA::RECOVER:
-        // Re-fetch the backend inside the callback so it cannot dangle if the
-        // panel/backend changed while the dialog was open. Feedback comes from
-        // the backend action state.
-        helix::ui::modal_confirm(lv_tr("Recover MMU state?"),
-                                 lv_tr("Re-syncs Happy Hare's tracked state with the hardware."),
-                                 ModalSeverity::Warning, lv_tr("Recover"), [] {
-                                     AmsBackend* b = AmsState::instance().get_backend();
-                                     if (b) {
-                                         b->recover();
-                                     }
-                                 });
-        return;
-    case SA::CANCELLED:
-        return;
-    }
-    if (err.result != AmsResult::SUCCESS) {
-        helix::ui::notify_ams_error(err, lv_tr("MMU command failed"));
-    }
 }
 
 void AmsPanel::on_slot_clicked(lv_event_t* e) {
@@ -1366,7 +1385,7 @@ void AmsPanel::handle_slot_tap(int slot_index, lv_point_t click_pt) {
 }
 
 // ============================================================================
-// Context Menu Management (delegates to helix::ui::AmsContextMenu)
+// Context Menu Management (delegates to helix::ui::open_slot_context_menu)
 // ============================================================================
 
 void AmsPanel::show_context_menu(int slot_index, lv_obj_t* near_widget, lv_point_t click_pt) {
@@ -1374,183 +1393,21 @@ void AmsPanel::show_context_menu(int slot_index, lv_obj_t* near_widget, lv_point
         return;
     }
 
-    // Create context menu on first use
     if (!context_menu_) {
         context_menu_ = std::make_unique<helix::ui::AmsContextMenu>();
     }
 
-    // Set callback to handle menu actions
-    context_menu_->set_action_callback([this](helix::ui::AmsContextMenu::MenuAction action,
-                                              int slot) {
-        AmsBackend* backend = AmsState::instance().get_backend();
-
-        // EJECT / RECOVER_POSITION / SELECT_GATE / CHECK_GATE / CLEAR_SPOOL are
-        // identical in both AMS panels — see ams_dispatch_backend_action().
-        if (helix::ui::ams_dispatch_backend_action(action, slot, path_canvas_)) {
-            return;
-        }
-
-        switch (action) {
-        case helix::ui::AmsContextMenu::MenuAction::LOAD:
-            if (!backend) {
-                NOTIFY_WARNING(lv_tr("Multi-Filament System not available"));
-                return;
-            }
-            // Check if backend is busy
-            {
-                AmsSystemInfo info = backend->get_system_info();
-                if (info.action != AmsAction::IDLE && info.action != AmsAction::ERROR) {
-                    NOTIFY_WARNING(lv_tr("Multi-Filament System is busy: {}"),
-                                   ams_action_to_string(info.action));
-                    return;
-                }
-            }
-            // Use preheat-aware load via sidebar instead of direct load
-            if (this->sidebar_) {
-                this->sidebar_->handle_load_with_preheat(slot);
-            }
-            break;
-
-        case helix::ui::AmsContextMenu::MenuAction::UNLOAD:
-            if (!backend) {
-                NOTIFY_WARNING(lv_tr("Multi-Filament System not available"));
-                return;
-            }
-            // Route through the sidebar so start_operation(UNLOAD) builds the
-            // correct stepper (mirrors how LOAD routes via handle_load_with_preheat).
-            if (this->sidebar_) {
-                this->sidebar_->handle_unload(slot);
-            } else {
-                AmsError error = backend->unload_filament(slot);
-                if (error.result != AmsResult::SUCCESS) {
-                    helix::ui::notify_ams_error(error);
-                }
-            }
-            break;
-
-        case helix::ui::AmsContextMenu::MenuAction::EDIT:
-            show_edit_modal(slot);
-            break;
-
-        case helix::ui::AmsContextMenu::MenuAction::SPOOLMAN:
-            show_edit_modal(slot, /*open_on_picker=*/true);
-            break;
-
-        case helix::ui::AmsContextMenu::MenuAction::OPEN_SOURCE_UNIT:
-            // This panel is one unit's view and cannot show another unit's
-            // detail. navigate_to_ams_panel() routes to the multi-unit overview
-            // whenever there is more than one unit, which is exactly the case
-            // that produces this action at all.
-            navigate_to_ams_panel();
-            break;
-
-        case helix::ui::AmsContextMenu::MenuAction::SCAN_QR: {
-#if HELIX_HAS_CAMERA
-            auto& scanner = helix::ui::get_qr_scanner_overlay();
-            scanner.show(parent_screen_, slot, [slot](const SpoolInfo& spool) {
-                AmsBackend* be = AmsState::instance().get_backend();
-                if (!be)
-                    return;
-
-                // Capture the pre-edit slot BEFORE the commit — its unlink arm
-                // (clear the server active spool) needs the old link.
-                SlotInfo original = be->get_slot_info(slot);
-                SlotInfo applied = original;
-                apply_spool_to_slot(applied, spool);
-                AmsError err = AmsState::instance().commit_slot_edit(slot, original, applied);
-                if (!err.success()) {
-                    helix::ui::notify_ams_error(err);
-                    return;
-                }
-                spdlog::info("[AmsPanel] QR scan assigned spool #{} to slot {}", spool.id, slot);
-            });
-#endif // HELIX_HAS_CAMERA
-            break;
-        }
-
-        case helix::ui::AmsContextMenu::MenuAction::CANCELLED:
-        default:
-            break;
-        }
-    });
-
-    // Determine whether to offer Unload for this slot. Decoupled from the
-    // display LOADED status so a runout that clears the head sensor doesn't
-    // disable Unload on the firmware's active slot (#995).
-    bool is_loaded = false;
-    AmsBackend* backend = AmsState::instance().get_backend();
-    if (backend) {
-        is_loaded = backend->can_unload_from_toolhead(slot_index);
-    }
-
-    // Position menu near the click point, then show
-    context_menu_->set_click_point(click_pt);
-    context_menu_->show_near_widget(parent_screen_, slot_index, near_widget, is_loaded, backend);
-}
-
-// ============================================================================
-// Slot Editor (delegated to helix::ui::AmsEditOverlay)
-// ============================================================================
-
-void AmsPanel::show_edit_modal(int slot_index, bool open_on_picker) {
-    if (!parent_screen_) {
-        spdlog::warn("[{}] Cannot show slot editor - no parent screen", get_name());
-        return;
-    }
-
-    auto& editor = helix::ui::get_ams_edit_overlay();
-
-    // External spool (bypass/direct) — not managed by backend
-    if (slot_index == -2) {
-        auto ext = AmsState::instance().get_external_spool_info();
-        SlotInfo initial_info = ext.value_or(SlotInfo{});
-        initial_info.slot_index = -2;
-        initial_info.global_index = -2;
-
-        editor.show_for_slot(
-            parent_screen_, -2, initial_info, api_,
-            [](const helix::ui::AmsEditOverlay::EditResult& result) {
-                if (result.saved) {
-                    AmsState::instance().commit_external_spool_edit(result.slot_info);
-                    // bypass display update handled reactively by external_spool_observer_
-                    NOTIFY_INFO(lv_tr("External spool updated"));
-                }
-            },
-            open_on_picker);
-        return;
-    }
-
-    AmsBackend* backend = AmsState::instance().get_backend();
-    if (!backend) {
-        NOTIFY_WARNING(lv_tr("Multi-Filament System not available"));
-        return;
-    }
-
-    // Get current slot info
-    SlotInfo initial_info = backend->get_slot_info(slot_index);
-
-    editor.show_for_slot(
-        parent_screen_, slot_index, initial_info, api_,
-        [this](const helix::ui::AmsEditOverlay::EditResult& result) {
-            if (result.saved && result.slot_index >= 0) {
-                AmsBackend* backend = AmsState::instance().get_backend();
-                if (backend) {
-                    // Capture the pre-edit slot BEFORE the commit — its unlink
-                    // arm (clear the server active spool) needs the old link.
-                    SlotInfo original = backend->get_slot_info(result.slot_index);
-                    AmsError err = AmsState::instance().commit_slot_edit(
-                        result.slot_index, original, result.slot_info);
-                    if (!err.success()) {
-                        helix::ui::notify_ams_error(err);
-                        return;
-                    }
-                    // The badge's spool number — see spool_display_number().
-                    NOTIFY_INFO(lv_tr("Slot {} updated"),
-                                backend->spool_display_number(result.slot_index));
-                }
-            }
-        },
-        open_on_picker);
+    helix::ui::SlotMenuHost host;
+    host.parent_screen = parent_screen_;
+    host.api = api_;
+    host.log_tag = "[AmsPanel]";
+    host.path_canvas = [this] { return path_canvas_; };
+    host.sidebar = [this] { return sidebar_.get(); };
+    // This panel is one unit's view and cannot show another unit's.
+    // navigate_to_ams_panel() routes to the multi-unit overview whenever there
+    // is more than one unit, which is the only case that produces the action.
+    host.open_source_unit = [](int /*owner_unit*/) { navigate_to_ams_panel(); };
+    helix::ui::open_slot_context_menu(*context_menu_, host, slot_index, near_widget, click_pt);
 }
 
 void AmsPanel::show_loading_error_modal() {
@@ -1561,6 +1418,14 @@ void AmsPanel::show_loading_error_modal() {
 
     AmsBackend* backend = AmsState::instance().get_backend();
     if (!backend) {
+        return;
+    }
+
+    // A backend that publishes its own fault owns the surface: AmsErrorBridge
+    // presents current_error() with that backend's title, wording and recovery
+    // actions. This dialog is the fallback for the ones that do not, and firing
+    // both stacks two dialogs on one fault.
+    if (backend->current_error().has_value()) {
         return;
     }
 
@@ -1639,68 +1504,46 @@ void AmsPanel::dismiss_error_modal_silently(const char* reason) {
 // Global Instance
 // ============================================================================
 
-static std::unique_ptr<AmsPanel> g_ams_panel;
 static lv_obj_t* s_ams_panel_obj = nullptr;
+// Theme generation the cached tree was built under; its widgets keep the
+// colours they were created with.
+static int s_ams_panel_theme_gen = 0;
 
-// NOTE: this deliberately does NOT call OverlayBase::destroy_overlay_ui().
-// AmsPanel derives from PanelBase, not OverlayBase — the two are sibling
-// IPanelLifecycle implementations, so the helper is not reachable from here
-// (there is no overlay_root_ and no on_ui_destroyed() on this hierarchy).
-// The sequence below mirrors the helper's, with two required deviations:
-//   1. clear_panel_reference() runs BEFORE deletion (the helper's
-//      on_ui_destroyed() runs after), because it destroys the sidebar /
-//      context-menu / modal sub-objects that own widgets in this subtree.
-//   2. safe_delete_subtree() instead of safe_delete_deferred() — see #983.
+// The shared sequence lives in helix::ui::teardown_overlay_ui(); this site
+// differs from OverlayBase::destroy_overlay_ui() only in the two things a
+// site is allowed to differ in:
+//   1. DetachSubtree deletion — the root contains grid/flex layouts whose
+//      grid_update/flex_update must be structurally unable to race teardown
+//      (#983).
+//   2. clear_panel_reference() as the before-delete hook — it destroys the
+//      sidebar/context-menu/modal sub-objects that own widgets in this
+//      subtree, so it must run while the tree is still attached.
 void destroy_ams_panel_ui() {
-    if (s_ams_panel_obj) {
-        spdlog::info("[AMS Panel] Destroying panel UI to free memory");
+    helix::ui::teardown_overlay_ui(s_ams_panel_obj, "AmsPanel",
+                                   helix::ui::TeardownDelete::DetachSubtree, nullptr,
+                                   helix::ui::TeardownHooks::before([]() {
+                                       if (auto* panel = helix::lazy_global_if_exists<AmsPanel>()) {
+                                           panel->clear_panel_reference();
+                                       }
+                                   }));
 
-        // Drain deferred observer callbacks while pointers are still valid.
-        // observe_int_sync queues lambdas via queue_update() that capture raw
-        // panel/sidebar pointers; processing them here prevents use-after-free.
-        auto freeze = helix::ui::UpdateQueue::instance().scoped_freeze();
-        helix::ui::UpdateQueue::instance().drain();
-
-        // Unregister close callback BEFORE deleting to prevent double-invocation
-        // (e.g., if destroy called manually while panel is in overlay stack)
-        NavigationManager::instance().unregister_overlay_close_callback(s_ams_panel_obj);
-        NavigationManager::instance().unregister_overlay_instance(s_ams_panel_obj);
-
-        // Breadcrumb the destroy so crashes in the close path can be pinned to
-        // which overlay was being torn down. Pairs with the "overlay+" crumb on
-        // push, and matches OverlayBase::destroy_overlay_ui().
-        crash_handler::breadcrumb::note("ovrl_dst", "AmsPanel");
-
-        // Clear the panel_ reference in AmsPanel before deleting
-        if (g_ams_panel) {
-            g_ams_panel->clear_panel_reference();
-        }
-
-        // safe_delete_subtree (not safe_delete) because the AMS panel root
-        // contains grid/flex layouts whose grid_update/flex_update could race
-        // teardown if an ancestor relayouts during this drain. Detaching the
-        // subtree off-tree before deferred deletion makes that race
-        // structurally impossible (#983). Null the pointer ourselves — the
-        // subtree helper takes a raw pointer and does not null its argument.
-        helix::ui::safe_delete_subtree(s_ams_panel_obj);
-        s_ams_panel_obj = nullptr;
-
-        // Note: Widget registrations remain (LVGL doesn't support unregistration)
-        // Note: g_ams_panel C++ object stays for state preservation
-    }
+    // Note: Widget registrations remain (LVGL doesn't support unregistration)
+    // Note: the AmsPanel instance stays for state preservation
 }
 
 AmsPanel& get_global_ams_panel() {
-    if (!g_ams_panel) {
-        g_ams_panel = std::make_unique<AmsPanel>(get_printer_state(), get_moonraker_api());
-        StaticPanelRegistry::instance().register_destroy("AmsPanel", []() {
-            destroy_ams_panel_ui();
-            g_ams_panel.reset();
-        });
+    AmsPanel& panel = helix::lazy_global_with_teardown<AmsPanel>(
+        "AmsPanel", destroy_ams_panel_ui, get_printer_state(), get_moonraker_api());
+
+    const int theme_gen = lv_subject_get_int(theme_manager_get_changed_subject());
+    if (s_ams_panel_obj && s_ams_panel_theme_gen != theme_gen &&
+        !helix::nav::is_showing(s_ams_panel_obj)) {
+        destroy_ams_panel_ui();
     }
 
     // Lazy create the panel UI if not yet created
-    if (!s_ams_panel_obj && g_ams_panel) {
+    if (!s_ams_panel_obj) {
+        s_ams_panel_theme_gen = theme_gen;
         // Ensure widgets and XML are registered
         ensure_ams_widgets_registered();
 
@@ -1709,36 +1552,34 @@ AmsPanel& get_global_ams_panel() {
 
         // Create the panel on the active screen
         lv_obj_t* screen = lv_scr_act();
-        s_ams_panel_obj = static_cast<lv_obj_t*>(lv_xml_create(screen, "ams_panel", nullptr));
+        s_ams_panel_obj = helix::ui::create_xml_hidden(screen, "ams_panel");
 
         if (s_ams_panel_obj) {
             // Initialize panel observers (AmsState already initialized above)
-            if (!g_ams_panel->are_subjects_initialized()) {
-                g_ams_panel->init_subjects();
+            if (!panel.are_subjects_initialized()) {
+                panel.init_subjects();
             }
 
             // Setup the panel
-            g_ams_panel->setup(s_ams_panel_obj, screen);
+            panel.setup(s_ams_panel_obj, screen);
             lv_obj_add_flag(s_ams_panel_obj, LV_OBJ_FLAG_HIDDEN); // Hidden by default
 
-            NavigationManager::instance().register_overlay_instance(s_ams_panel_obj,
-                                                                    g_ams_panel.get());
+            // Kept alive between opens: building it is most of an open's cost on
+            // slow hardware. Closing runs AmsPanel::on_closed(); memory pressure, a
+            // theme change, a hot reload, a printer switch and the unit-count flip
+            // drop the tree. open_ams_detail_panel() registers the overlay and its
+            // close callback on every open.
+            helix::nav::register_overlay(s_ams_panel_obj, &panel);
 
-            // Destroy on overlay close to free memory on tight devices (AD5M/AD5X
-            // ~107MB RAM). The C++ instance survives via g_ams_panel for state
-            // preservation; widgets are recreated on next open.
-            NavigationManager::instance().register_overlay_close_callback(
-                s_ams_panel_obj, []() { destroy_ams_panel_ui(); });
-
-            spdlog::info("[AMS Panel] Lazy-created panel UI with close callback");
+            spdlog::info("[AMS Panel] Lazy-created panel UI");
         } else {
             spdlog::error("[AMS Panel] Failed to create panel from XML");
         }
     }
 
-    return *g_ams_panel;
+    return panel;
 }
 
 AmsPanel* get_existing_ams_panel() {
-    return g_ams_panel.get();
+    return helix::lazy_global_if_exists<AmsPanel>();
 }

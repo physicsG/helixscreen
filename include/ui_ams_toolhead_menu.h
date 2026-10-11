@@ -12,7 +12,9 @@
 #include <memory>
 
 // Forward declaration
+namespace helix {
 class AmsBackend;
+} // namespace helix
 
 namespace helix::ui {
 
@@ -22,9 +24,9 @@ namespace helix::ui {
  *
  * Opened by tapping a nozzle on a PARALLEL (tool changer) canvas. The nozzle
  * and the spool above it ask different questions — "which head is on the
- * carriage" versus "what filament is in this lane" — and before this menu both
- * regions opened the per-slot AmsContextMenu, so mounting or parking a head had
- * no UI at all.
+ * carriage" versus "what filament is in this lane" — so the nozzle gets this
+ * menu rather than the per-slot AmsContextMenu, which has no way to mount or
+ * park a head.
  *
  * Mirrors AmsSelectorMenu (the hub/selector menu): ContextMenu::active_as<>()
  * callback dispatch, the shared backdrop, capability gating at show time. This
@@ -34,24 +36,22 @@ namespace helix::ui {
  *
  * ## The two index spaces
  *
- * Both canvases hand back THE TOOL NUMBER ON THE BADGE the user tapped — the
- * system-path canvas has always said so, and the filament-path canvas now
- * reports the same rule its badge draws with (`mapped_tool` when it was given
- * one, else the lane). Every backend call the menu makes is SLOT-indexed, so
- * the tool is resolved to a slot ONCE, at show time, through the same rule the
- * filament panel's op buttons use (toolhead_slot_for_tool), and that slot
- * travels with the action. The menu used to reverse-map a number that one
- * canvas reported as a lane and the other as a tool, which under ASSIGN_TOOL
- * remapping acted on a different head than the one tapped.
+ * Both canvases hand back THE TOOL NUMBER ON THE BADGE the user tapped, by the
+ * rule the badge draws with (`mapped_tool` when the canvas was given one, else
+ * the lane). Every backend call the menu makes is SLOT-indexed, so the tool is
+ * resolved to a slot ONCE, at show time, through the same rule the filament
+ * panel's op buttons use (toolhead_slot_for_tool), and that slot travels with
+ * the action. A lane and a tool are different numbers under ASSIGN_TOOL
+ * remapping, so reading one as the other acts on a head that was not tapped.
  *
  * ## Only on a toolchanger
  *
  * show_at() refuses (returns false) unless the backend's topology is PARALLEL.
  * Every entry is a carriage or per-head operation: on a hub or selector backend
  * `mounted_tool` is a concept that does not exist (always -1), so the rule
- * offered "Select" — which on Happy Hare drives the selector, on an ACE runs a
- * full filament feed, and on CFS/AFC is a guaranteed refusal — from a nozzle
- * tap that had been inert before the menu existed.
+ * would offer "Select" for every head — which on Happy Hare drives the
+ * selector, on an ACE runs a full filament feed, and on CFS/AFC is a
+ * guaranteed refusal.
  */
 
 /**
@@ -109,8 +109,7 @@ struct ToolheadMenuModel {
  * tool_to_slot_map entry says otherwise. (The resolver's single-tool arm
  * answers current_slot — the loaded lane of a multi-lane AMS — which is never
  * what a nozzle tap means.) One rule with the filament panel's op buttons, so
- * the menu and the buttons can never name different slots for one tool;
- * ams_tool_map_sync.h records the two encodings shipping out of step twice.
+ * the menu and the buttons can never name different slots for one tool.
  */
 [[nodiscard]] int toolhead_slot_for_tool(const AmsSystemInfo& info, int tool_index);
 
@@ -189,18 +188,17 @@ class AmsToolheadMenu : public ContextMenu {
     //
     // ONE set for the class, not one per instance. The XML binds these by fixed
     // name, and both the AMS panel and the overview own an instance: with
-    // per-instance subjects registered under the same names, whichever instance
-    // registered LAST owned the names, and the other's publish_model() wrote to
-    // subjects no card was bound to any more -- a blank or wrong-buttoned menu,
-    // reachable on every multi-unit rig. One menu is on screen at a time, so
-    // one set of subjects is exactly what the XML needs. Initialised once and
-    // torn down through StaticSubjectRegistry like every other static subject.
+    // per-instance subjects registered under the same names, the last
+    // registrant would own them and the other's publish_model() would write to
+    // subjects no card is bound to. One menu is on screen at a time, so one set
+    // of subjects is exactly what the XML needs. Initialised once and torn down
+    // through StaticSubjectRegistry like every other static subject.
     static lv_subject_t s_show_select_subject_; ///< 1 = offer "Select T{n}"
     static lv_subject_t s_show_park_subject_;   ///< 1 = offer "Park"
     static lv_subject_t s_show_load_subject_;   ///< 1 = offer "Load"
     static lv_subject_t s_show_unload_subject_; ///< 1 = offer "Unload"
     static lv_subject_t s_title_subject_;       ///< Card header, e.g. "Toolhead T3"
-    static char s_title_buf_[32];
+    static char s_title_buf_[64];               ///< sized for a translated noun
     static bool s_subjects_initialized_;
 
     static void init_subjects();
@@ -248,8 +246,8 @@ void dispatch_toolhead_menu_action(AmsToolheadMenu::ToolheadAction action, int t
  *
  * Range-checks the tool, reads the live touch point while the indev still
  * reports it, lazily builds the panel's menu instance, wires the shared
- * dispatch, shows. Both panels had a ~40-line copy of this, and a range check
- * had already been lost once in the copying.
+ * dispatch, shows. One copy for both panels, so the range check cannot go
+ * missing from either.
  *
  * @param menu The panel's instance, created on first use and reused: a menu
  *        holds its own widget tree between shows.

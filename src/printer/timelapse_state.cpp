@@ -9,7 +9,9 @@
 #include "ui_update_queue.h"
 
 #include "app_globals.h"
+#include "observer_factory.h"
 #include "printer_state.h"
+#include "replace_method_callback.h"
 #include "state/subject_macros.h"
 #include "static_subject_registry.h"
 
@@ -24,6 +26,22 @@ TimelapseState& TimelapseState::instance() {
     return instance;
 }
 
+namespace {
+constexpr const char* TIMELAPSE_EVENT_METHOD = "notify_timelapse_event";
+constexpr const char* TIMELAPSE_HANDLER = "timelapse_state";
+} // namespace
+
+void TimelapseState::attach(IMoonrakerClient& client) {
+    replace_method_callback(client, TIMELAPSE_EVENT_METHOD, TIMELAPSE_HANDLER,
+                            [](const nlohmann::json& data) {
+                                TimelapseState::instance().handle_timelapse_event(data);
+                            });
+}
+
+void TimelapseState::detach(IMoonrakerClient& client) {
+    client.unregister_method_callback(TIMELAPSE_EVENT_METHOD, TIMELAPSE_HANDLER);
+}
+
 void TimelapseState::init_subjects(bool register_xml) {
     if (subjects_initialized_) {
         spdlog::debug("[TimelapseState] Subjects already initialized, skipping");
@@ -36,6 +54,11 @@ void TimelapseState::init_subjects(bool register_xml) {
     std::strncpy(timelapse_render_status_buf_, lv_tr("idle"),
                  sizeof(timelapse_render_status_buf_) - 1);
     std::memset(timelapse_capture_info_buf_, 0, sizeof(timelapse_capture_info_buf_));
+    {
+        // A fresh subject set starts with no finished render, like the subjects it pairs with.
+        std::lock_guard<std::mutex> lock(render_mutex_);
+        last_rendered_filename_.clear();
+    }
 
     INIT_SUBJECT_INT(timelapse_render_progress, 0, subjects_, register_xml);
     INIT_SUBJECT_STRING(timelapse_render_status, lv_tr("idle"), subjects_, register_xml);
@@ -43,6 +66,16 @@ void TimelapseState::init_subjects(bool register_xml) {
     INIT_SUBJECT_STRING(timelapse_capture_info, "", subjects_, register_xml);
 
     subjects_initialized_ = true;
+
+    // RAW_PRINT_STATE_OK: the plugin captures frames only while the printer
+    // runs a job, so the wire state is what decides where one print ends.
+    PrinterState& printer = get_printer_state();
+    print_in_progress_ = false;
+    print_ended_ = false;
+    print_state_obs_ = helix::ui::observe_print_state<TimelapseState>(
+        printer.print_state().get_print_state_enum_subject(), this,
+        [](TimelapseState* self, PrintJobState state) { self->on_print_state_changed(state); },
+        printer.get_subjects_lifetime());
 
     // Self-register cleanup — ensures deinit runs before lv_deinit()
     StaticSubjectRegistry::instance().register_deinit(
@@ -61,10 +94,39 @@ void TimelapseState::deinit_subjects() {
     // next drain writes into a deinited subject and lv_subject_notify walks a
     // stale observer list (#1165, #1146).
     async_lifetime_.invalidate();
+    print_state_obs_.reset();
 
     subjects_.deinit_all();
     subjects_initialized_ = false;
     last_notified_progress_ = -1;
+}
+
+void TimelapseState::on_print_state_changed(PrintJobState state) {
+    // RAW_PRINT_STATE_OK: wire state by design, see init_subjects().
+    switch (state) {
+    case PrintJobState::PRINTING:
+        // PAUSED -> PRINTING is the same print resuming, and a print running
+        // before anything was seen to end is one this app joined; only a print
+        // that follows an ended one starts the count over.
+        if (!print_in_progress_ && print_ended_) {
+            reset();
+        }
+        print_in_progress_ = true;
+        print_ended_ = false;
+        break;
+    case PrintJobState::PAUSED:
+        print_in_progress_ = true;
+        break;
+    // RAW_PRINT_STATE_OK: STANDBY after a job is the wire's report that it ended.
+    case PrintJobState::STANDBY:
+        print_ended_ = print_ended_ || print_in_progress_;
+        print_in_progress_ = false;
+        break;
+    default:
+        print_ended_ = true;
+        print_in_progress_ = false;
+        break;
+    }
 }
 
 void TimelapseState::handle_timelapse_event(const nlohmann::json& event) {
@@ -91,7 +153,7 @@ void TimelapseState::handle_timelapse_event(const nlohmann::json& event) {
 
             // On first frame, set capture info with print filename and timestamp
             if (current == 0) {
-                auto* fn_subject = get_printer_state().get_print_filename_subject();
+                auto* fn_subject = get_printer_state().print_state().get_print_filename_subject();
                 const char* filename = fn_subject ? lv_subject_get_string(fn_subject) : "";
                 auto date_str = helix::ui::format_short_date(std::time(nullptr));
                 std::string info;

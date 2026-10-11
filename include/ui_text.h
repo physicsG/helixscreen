@@ -14,6 +14,8 @@
 
 #include "lvgl/lvgl.h"
 
+#include <string>
+
 /**
  * Semantic text widgets for theme-aware typography
  *
@@ -69,3 +71,30 @@ void ui_text_set_stroke(lv_obj_t* label, int32_t width, lv_color_t color, lv_opa
  * @param transform Transform name: "uppercase" (or nullptr/empty to remove)
  */
 void ui_text_apply_transform(lv_obj_t* label, const char* transform);
+
+namespace helix::ui {
+
+/**
+ * Fit text into a width by replacing its middle with an ellipsis
+ *
+ * Text that measures within @p max_width comes back unchanged. Text that
+ * overflows keeps its head and its tail, each given half of the width left
+ * beside the ellipsis, so a filename such as
+ * "Delta filament barrel base_Hyper PLA_49m" keeps both the name that
+ * identifies the job and the material/duration suffix that tells it apart from
+ * its neighbours. Width is measured with @p font, never counted in bytes or
+ * characters, so a Cyrillic name is cut where it is drawn, not where a Latin
+ * one would be.
+ *
+ * Pure over its arguments; it neither reads nor writes a widget.
+ *
+ * @param text         UTF-8 text to fit
+ * @param max_width    Width the result must fit in, in pixels
+ * @param font         Font the text is drawn with
+ * @param letter_space Letter spacing the text is drawn with
+ * @return The text, or "<head>…<tail>" when it does not fit
+ */
+std::string middle_ellipsize(const char* text, int32_t max_width, const lv_font_t* font,
+                             int32_t letter_space = 0);
+
+} // namespace helix::ui

@@ -350,13 +350,7 @@ std::optional<TrackerModule> TrackerModule::load_from_memory(const uint8_t* data
         return std::nullopt;
     }
 
-    // Check MED magic first — "MMD0", "MMD1", "MMD2", "MMD3"
-    if (data[0] == 'M' && data[1] == 'M' && data[2] == 'D' && (data[3] >= '0' && data[3] <= '3')) {
-        spdlog::debug("tracker: detected MED format (MMD{})", data[3]);
-        return parse_med(data, size);
-    }
-
-    // Try MOD (magic at offset 1080)
+    // MOD magic lives at offset 1080
     return parse_mod(data, size);
 }
 

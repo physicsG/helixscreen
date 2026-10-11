@@ -62,6 +62,14 @@ TEST_CASE("QrDecoder spoolman ID parsing", "[qr]") {
         REQUIRE(QrDecoder::parse_spoolman_id("web+spoolman:s-999") == 999);
     }
 
+    SECTION("web+spoolman scheme matches case-insensitively") {
+        REQUIRE(QrDecoder::parse_spoolman_id("WEB+SPOOLMAN:S-3") == 3);
+        REQUIRE(QrDecoder::parse_spoolman_id("Web+Spoolman:S-12") == 12);
+        // Caps-Lock-only scanner: '+' arrives as '=', ':' as ';'
+        REQUIRE(QrDecoder::parse_spoolman_id("WEB=SPOOLMAN;S-5") == 5);
+        REQUIRE(QrDecoder::parse_spoolman_id("WEB+SPOOLMAN:S-") == -1);
+    }
+
     SECTION("SM:SPOOL format") {
         REQUIRE(QrDecoder::parse_spoolman_id("SM:SPOOL=7") == 7);
         REQUIRE(QrDecoder::parse_spoolman_id("SM:SPOOL=123") == 123);

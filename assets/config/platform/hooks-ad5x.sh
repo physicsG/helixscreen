@@ -12,7 +12,7 @@
 #   - The install root is /srv/helixscreen (Z-Mod ships and launches it there via
 #     its own /etc/init.d/S80helixscreen), not /opt/helixscreen or /data/helixscreen.
 #   - /data does not exist on this machine at all, on the host or in the chroot.
-#     The AD5M hooks export HELIX_CACHE_DIR=/data/helixscreen/cache, which would
+#     The AD5M hooks export HELIX_CACHE_DIR=/data/.helixscreen/cache, which would
 #     silently point at nothing here.
 #
 # Durable storage is /usr/data (mmcblk0p7, ~5.5G); / is read-only squashfs and
@@ -65,7 +65,12 @@ platform_wait_for_services() {
 platform_pre_start() {
     # Durable and NOT collected by TAR_CONFIG, so a support archive does not carry
     # a cache. /srv/helixscreen lives on /usr/data inside the chroot.
-    export HELIX_CACHE_DIR="/srv/helixscreen/cache"
+    # Cache and logs live beside the payload, never inside it. The install root
+    # is what an update replaces, and not only by our own hand: a Moonraker
+    # `type: web` entry does shutil.rmtree(path) before extracting. Anything
+    # under it goes on every update - logs vanish exactly when someone needs
+    # them, and the thumbnail cache is rebuilt from nothing.
+    export HELIX_CACHE_DIR="${HELIX_CACHE_DIR:-/srv/helixscreen-state/cache}"
     mkdir -p "$HELIX_CACHE_DIR" 2>/dev/null || true
 
     # Log where the user can actually send it from. ghzserg's tar_config.sh has a
@@ -81,10 +86,10 @@ platform_pre_start() {
     # hardcodes LOGFILE=/opt/config/mod_data/log/helixscreen.log and redirects the
     # launcher subshell into it. That file is theirs and carries the
     # [helix-launcher] stream; reusing the name interleaves two writers.
-    export HELIX_LOG_DEST=file
-    export HELIX_LOG_FILE="/opt/config/mod_data/log/helix.log"
-    export HELIX_LOG_ROTATE_BYTES=1048576
-    export HELIX_LOG_ROTATE_FILES=3
+    export HELIX_LOG_DEST="${HELIX_LOG_DEST:-file}"
+    export HELIX_LOG_FILE="${HELIX_LOG_FILE:-/opt/config/mod_data/log/helix.log}"
+    export HELIX_LOG_ROTATE_BYTES="${HELIX_LOG_ROTATE_BYTES:-1048576}"
+    export HELIX_LOG_ROTATE_FILES="${HELIX_LOG_ROTATE_FILES:-3}"
     mkdir -p "/opt/config/mod_data/log" 2>/dev/null || true
 
     # Remote control (helix-screen ctl) stays OFF by default. To enable it on this

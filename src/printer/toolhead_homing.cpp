@@ -23,8 +23,8 @@ bool toolhead_is_homed(const PrinterState& ps) {
     // Klipper reports homed_axes as a subset of "xyz". Anything short of all
     // three is not homed for our purposes: every caller needs full XYZ before
     // it can move the toolhead safely.
-    const char* axes =
-        lv_subject_get_string(const_cast<PrinterState&>(ps).get_homed_axes_subject());
+    const char* axes = lv_subject_get_string(
+        const_cast<PrinterState&>(ps).motion_state().get_homed_axes_subject());
     if (axes == nullptr) {
         return false;
     }
@@ -36,8 +36,8 @@ bool toolhead_is_homed(const PrinterState& ps) {
 bool axis_is_homed(const PrinterState& ps, Axis axis) {
     // Same const_cast as toolhead_is_homed() directly above: the subject
     // accessors are all non-const, but this only reads the string value.
-    const char* axes =
-        lv_subject_get_string(const_cast<PrinterState&>(ps).get_homed_axes_subject());
+    const char* axes = lv_subject_get_string(
+        const_cast<PrinterState&>(ps).motion_state().get_homed_axes_subject());
     if (axes == nullptr) {
         return false;
     }
@@ -81,6 +81,12 @@ void ensure_homed_then(IMoonrakerAPI* api, AsyncLifetimeGuard& guard, std::funct
                        guard.bg_cb("ensure_homed_then::g28_done",
                                    [then = std::move(then)]() {
                                        spdlog::info("[ensure_homed_then] G28 complete, proceeding");
+                                       // A homing macro can still be moving when G28
+                                       // acks, so idle_timeout reads "Printing". That
+                                       // busy is ours: without this stamp the motion
+                                       // guard refuses the continuation's move as an
+                                       // external operation.
+                                       get_printer_state().app_motion_activity().note_done();
                                        if (then) {
                                            then();
                                        }

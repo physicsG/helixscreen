@@ -20,7 +20,7 @@
 extern "C" {
 #endif
 
-#define HELIX_BT_API_VERSION 2
+#define HELIX_BT_API_VERSION 3
 
 /// Plugin metadata returned by helix_bt_get_info()
 typedef struct {
@@ -60,12 +60,15 @@ typedef helix_bt_context* (*helix_bt_init_fn)(void);
 /// Shut down plugin. Stops event loop, frees resources.
 typedef void (*helix_bt_deinit_fn)(helix_bt_context*);
 
-/// Start discovery. Calls cb per device found. Stops after timeout_ms.
-/// Returns 0 on success, negative on error.
+/// Start discovery. Calls cb per device found. Stops after timeout_ms, once *cancel becomes
+/// nonzero (read atomically; null for none), or on stop_discovery(). Scans on one context run
+/// one at a time, and a cancel set before this scan starts ends it at once. cancel ends only
+/// this scan; stop_discovery() ends every scan on the context.
+/// Returns 0 on success (including cancelled), negative on error.
 typedef int (*helix_bt_discover_fn)(helix_bt_context*, int timeout_ms, helix_bt_discover_cb cb,
-                                    void* user_data);
+                                    void* user_data, const int* cancel);
 
-/// Stop an in-progress discovery early.
+/// Stop every in-progress or queued discovery on the context early.
 typedef void (*helix_bt_stop_discovery_fn)(helix_bt_context*);
 
 /// Enumerate devices BlueZ already knows about (paired or previously seen) without

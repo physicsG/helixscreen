@@ -16,6 +16,7 @@
 #include <cerrno>
 #include <cstring>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 namespace helix {
@@ -117,7 +118,8 @@ void BrotherQLPrinter::print_label(const std::string& host, int port, const Labe
         }
 
         // Dispatch callback to UI thread
-        helix::ui::queue_update([callback, success, error]() { callback(success, error); });
+        helix::ui::queue_update("BrotherQLPrinter::print_label",
+                                [callback, success, error]() { callback(success, error); });
     });
 }
 

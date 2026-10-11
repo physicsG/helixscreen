@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Generate src/generated/theme_token_table.cpp from ui_xml/*.xml.
 
-Mirrors theme_manager.cpp's runtime scan exactly: top-level *.xml only
+Mirrors theme_token_scan.cpp's runtime scan exactly: top-level *.xml only
 (no recursion), files sorted alphabetically, collecting the name=/value=
 attributes of every <color>, <px> and <string> element at any depth,
 last-wins on duplicate (type, name) across and within files.
@@ -25,7 +25,7 @@ def cstr(s: str) -> str:
 
 def collect() -> dict:
     # Uses raw xml.parsers.expat (no namespace processing) rather than
-    # xml.etree.ElementTree, matching theme_manager.cpp's own
+    # xml.etree.ElementTree, matching theme_token_scan.cpp's own
     # XML_ParserCreate(nullptr) exactly. ui_xml/*.xml uses colon-suffixed
     # pseudo-attributes for state variants (e.g. style_text_color:checked)
     # which ElementTree's namespace-aware parser rejects as an

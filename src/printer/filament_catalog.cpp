@@ -1,30 +1,49 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "filament_catalog.h"
 
+#include "data_root_resolver.h"
 #include "filament_database.h"
+#include "helix_fs.h"
 #include "json_utils.h"
+#include "system/helix_paths.h"
+#include "text_io.h"
 
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <atomic>
-#include <filesystem>
-#include <fstream>
+#include <cerrno>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <set>
-#include <system_error>
+#include <string>
 
 #include "hv/json.hpp"
 
 namespace helix::printer {
 
+namespace hfs = helix::fs;
+namespace tio = helix::text_io;
+
+namespace detail {
+std::string& user_overlay_dir_ref() {
+    static std::string dir;
+    return dir;
+}
+} // namespace detail
+
 namespace {
 
-// Search paths for the built-in catalog (mirrors the old CFS loader).
-const char* BUILTIN_PATHS[] = {"assets/filaments.json", "../assets/filaments.json",
-                               "/opt/helixscreen/assets/filaments.json"};
-const char* USER_PATHS[] = {"config/user_filaments.json", "../config/user_filaments.json"};
+/// The user overlay sits in the user config dir with the app's other writable
+/// files, so the installer can link it out to printer_data. Resolved per call:
+/// HELIX_CONFIG_DIR is read at the time of use, like every writable_path().
+std::vector<std::string> user_paths() {
+    const std::string& dir = detail::user_overlay_dir_ref();
+    if (!dir.empty())
+        return {dir + "/user_filaments.json"};
+    return {helix::writable_path("user_filaments.json"), "../config/user_filaments.json"};
+}
 
 int get_int(const nlohmann::json& j, const char* key, int def) {
     auto it = j.find(key);
@@ -91,20 +110,36 @@ std::vector<nlohmann::json> object_entries(const nlohmann::json& arr, const char
     return out;
 }
 
-std::vector<nlohmann::json> read_products(const char* const* paths, size_t n) {
-    for (size_t i = 0; i < n; ++i) {
-        std::ifstream f(paths[i]);
-        if (!f.is_open())
+enum class FileRead { Absent, Parsed, Corrupt };
+
+/// The one way a filament JSON file is read. A missing file and one holding
+/// nothing but whitespace are both Absent: an empty file is an overlay nobody
+/// has written yet (a truncated seed, or `touch`), not a damaged one.
+FileRead read_json_file(const std::string& path, nlohmann::json& doc) {
+    if (path.empty())
+        return FileRead::Absent;
+    auto text = tio::read_file(path);
+    if (!text)
+        return FileRead::Absent;
+    if (text->find_first_not_of(" \t\r\n") == std::string::npos)
+        return FileRead::Absent;
+    doc = nlohmann::json::parse(*text, nullptr, /*allow_exceptions=*/false);
+    if (doc.is_discarded()) {
+        spdlog::warn("[filament] {} does not parse as JSON", path);
+        return FileRead::Corrupt;
+    }
+    return FileRead::Parsed;
+}
+
+std::vector<nlohmann::json> read_products(const std::vector<std::string>& paths) {
+    for (const auto& path : paths) {
+        nlohmann::json doc;
+        if (read_json_file(path, doc) != FileRead::Parsed)
             continue;
-        try {
-            auto doc = nlohmann::json::parse(f);
-            if (doc.is_object() && doc.contains("filaments") && doc["filaments"].is_array())
-                return object_entries(doc["filaments"], paths[i]);
-            if (doc.is_array()) // user overlay is a bare array
-                return object_entries(doc, paths[i]);
-        } catch (const std::exception& e) {
-            spdlog::warn("[filament] parse failed {}: {}", paths[i], e.what());
-        }
+        if (doc.is_object() && doc.contains("filaments") && doc["filaments"].is_array())
+            return object_entries(doc["filaments"], path.c_str());
+        if (doc.is_array()) // user overlay is a bare array
+            return object_entries(doc, path.c_str());
     }
     return {};
 }
@@ -124,9 +159,8 @@ void FilamentCatalog::index() {
 
 FilamentCatalog FilamentCatalog::load_from_file(const std::string& path, bool codes_only,
                                                 const std::string& scheme) {
-    const char* paths[] = {path.c_str()};
     FilamentCatalog cat;
-    for (const auto& jp : read_products(paths, 1)) {
+    for (const auto& jp : read_products({path})) {
         auto e = to_effective(jp);
         if (codes_only && e.codes.find(scheme) == e.codes.end())
             continue;
@@ -138,19 +172,16 @@ FilamentCatalog FilamentCatalog::load_from_file(const std::string& path, bool co
 
 FilamentCatalog FilamentCatalog::load_with_overlay(const std::string& builtin_path,
                                                    const std::string& overlay_path) {
-    const char* bpaths[] = {builtin_path.c_str()};
-    const char* opaths[] = {overlay_path.c_str()};
-
     // Raw product JSON keyed by id, so overlay can override before resolution.
     std::unordered_map<std::string, nlohmann::json> merged;
     std::vector<std::string> order;
-    for (const auto& jp : read_products(bpaths, 1)) {
+    for (const auto& jp : read_products({builtin_path})) {
         std::string id = helix::json_util::safe_string(jp, "id");
         if (merged.find(id) == merged.end())
             order.push_back(id);
         merged[id] = jp;
     }
-    for (const auto& jp : read_products(opaths, 1)) {
+    for (const auto& jp : read_products({overlay_path})) {
         std::string id = helix::json_util::safe_string(jp, "id");
         if (merged.find(id) == merged.end()) {
             order.push_back(id);
@@ -209,13 +240,13 @@ FilamentCatalog::load_codes_cached(const std::string& scheme) {
 
 FilamentCatalog FilamentCatalog::load_codes(const std::string& scheme) {
     FilamentCatalog cat;
-    for (const auto& jp : read_products(BUILTIN_PATHS, std::size(BUILTIN_PATHS))) {
+    for (const auto& jp : read_products(builtin_candidate_paths())) {
         auto e = to_effective(jp);
         if (e.codes.find(scheme) != e.codes.end())
             cat.products_.push_back(std::move(e));
     }
     // User overlay may add coded products too.
-    for (const auto& jp : read_products(USER_PATHS, std::size(USER_PATHS))) {
+    for (const auto& jp : read_products(user_paths())) {
         auto e = to_effective(jp);
         if (e.codes.find(scheme) != e.codes.end())
             cat.products_.push_back(std::move(e));
@@ -227,77 +258,97 @@ FilamentCatalog FilamentCatalog::load_codes(const std::string& scheme) {
 namespace {
 
 /// First path in the list that exists on disk, or "" if none do.
-std::string first_existing(const char* const* paths, size_t n) {
-    for (size_t i = 0; i < n; ++i) {
-        std::ifstream f(paths[i]);
-        if (f.is_open())
-            return paths[i];
+std::string first_existing(const std::vector<std::string>& paths) {
+    for (const auto& path : paths) {
+        if (tio::open_file(path, "rb"))
+            return path;
     }
     return "";
 }
 
 } // namespace
 
+std::vector<std::string> FilamentCatalog::builtin_candidate_paths() {
+    return {helix::asset_path("assets/filaments.json"), "../assets/filaments.json",
+            "/opt/helixscreen/assets/filaments.json"};
+}
+
 FilamentCatalog FilamentCatalog::load_full() {
-    return load_with_overlay(first_existing(BUILTIN_PATHS, std::size(BUILTIN_PATHS)),
-                             first_existing(USER_PATHS, std::size(USER_PATHS)));
+    return load_with_overlay(first_existing(builtin_candidate_paths()),
+                             first_existing(user_paths()));
 }
 
 std::map<std::string, std::string> FilamentCatalog::load_user_orca_type_map() {
-    return load_user_orca_type_map_from(first_existing(USER_PATHS, std::size(USER_PATHS)));
+    return load_user_orca_type_map_from(first_existing(user_paths()));
 }
 
 std::map<std::string, std::string>
 FilamentCatalog::load_user_orca_type_map_from(const std::string& path) {
     std::map<std::string, std::string> out;
-    if (path.empty())
+    nlohmann::json doc;
+    if (read_json_file(path, doc) != FileRead::Parsed)
         return out;
-    std::ifstream f(path);
-    if (!f.is_open())
+    // Only the object form carries orca_type_map. A bare array is a
+    // product-only overlay (the historical minimum) and contributes nothing
+    // here — by design, since users add Orca hints via the UI, which writes
+    // the object form.
+    if (!doc.is_object())
         return out;
-    try {
-        auto doc = nlohmann::json::parse(f);
-        // Only the object form carries orca_type_map. A bare array is a
-        // product-only overlay (the historical minimum) and contributes nothing
-        // here — by design, since users add Orca hints via the UI, which writes
-        // the object form.
-        if (!doc.is_object())
-            return out;
-        auto it = doc.find("orca_type_map");
-        if (it == doc.end() || !it->is_object())
-            return out;
-        for (const auto& [k, v] : it->items()) {
-            if (v.is_string())
-                out[k] = v.get<std::string>();
-        }
-    } catch (const std::exception& e) {
-        spdlog::warn("[filament] user orca_type_map parse failed {}: {}", path, e.what());
+    auto it = doc.find("orca_type_map");
+    if (it == doc.end() || !it->is_object())
+        return out;
+    for (const auto& [k, v] : it->items()) {
+        if (v.is_string())
+            out[k] = v.get<std::string>();
     }
     return out;
 }
 
-std::string FilamentCatalog::choose_overlay_write_path(const char* const* paths, std::size_t n) {
-    std::string path = first_existing(paths, n);
+std::string FilamentCatalog::choose_overlay_write_path(const std::vector<std::string>& paths) {
+    std::string path = first_existing(paths);
     // Fresh install: no overlay exists yet, so first_existing() is empty. Fall
     // back to the primary path so the file can be created — without this the
     // very first save (from the edit modal) has nowhere to write and fails.
-    if (path.empty() && n > 0)
-        path = paths[0];
+    if (path.empty() && !paths.empty())
+        path = paths.front();
     return path;
 }
 
 bool FilamentCatalog::save_user_products(const std::vector<nlohmann::json>& products) {
-    return save_user_products_to(products,
-                                 choose_overlay_write_path(USER_PATHS, std::size(USER_PATHS)));
+    return save_user_products_to(products, choose_overlay_write_path(user_paths()));
 }
 
 std::vector<nlohmann::json> FilamentCatalog::load_user_products() {
-    return read_products(USER_PATHS, std::size(USER_PATHS));
+    return read_products(user_paths());
 }
 
 std::vector<nlohmann::json> FilamentCatalog::load_user_products_from(const std::string& path) {
-    const char* paths[] = {path.c_str()};
-    return read_products(paths, 1);
+    return read_products({path});
+}
+
+std::vector<nlohmann::json> FilamentCatalog::load_user_types() {
+    return load_user_types_from(first_existing(user_paths()));
+}
+
+std::vector<nlohmann::json> FilamentCatalog::load_user_types_from(const std::string& path) {
+    nlohmann::json doc;
+    if (read_json_file(path, doc) == FileRead::Parsed && doc.is_object() && doc.contains("types") &&
+        doc["types"].is_array())
+        return object_entries(doc["types"], path.c_str());
+    return {};
+}
+
+bool FilamentCatalog::overlay_file_is_corrupt(const std::string& path) {
+    nlohmann::json doc;
+    return read_json_file(path, doc) == FileRead::Corrupt;
+}
+
+std::string FilamentCatalog::builtin_asset_path() {
+    return first_existing(builtin_candidate_paths());
+}
+
+std::string FilamentCatalog::user_overlay_path() {
+    return first_existing(user_paths());
 }
 
 bool FilamentCatalog::upsert_product(std::vector<nlohmann::json>& products,
@@ -336,83 +387,75 @@ bool FilamentCatalog::remove_product(std::vector<nlohmann::json>& products, cons
 
 bool FilamentCatalog::save_user_products_to(const std::vector<nlohmann::json>& products,
                                             const std::string& path) {
+    return save_user_section_to("filaments", products, path);
+}
+
+bool FilamentCatalog::save_user_types(const std::vector<nlohmann::json>& types) {
+    return save_user_types_to(types, choose_overlay_write_path(user_paths()));
+}
+
+bool FilamentCatalog::save_user_types_to(const std::vector<nlohmann::json>& types,
+                                         const std::string& path) {
+    return save_user_section_to("types", types, path);
+}
+
+bool FilamentCatalog::save_user_section_to(const char* key, nlohmann::json value,
+                                           const std::string& path) {
     if (path.empty()) {
-        spdlog::warn("[filament] save_user_products: no overlay path configured");
+        spdlog::warn("[filament] save {}: no overlay path configured", key);
         return false;
     }
 
-    // Read-modify-write: preserve any existing `orca_type_map`. If the file is
+    // Read-modify-write: preserve the sections this call does not own. If the file is
     // missing, a bare array (legacy), or unparseable, start fresh with an empty
     // object — a corrupt existing file must not block the user's save.
     nlohmann::json doc = nlohmann::json::object();
-    {
-        std::ifstream in(path);
-        if (in.is_open()) {
-            try {
-                auto parsed = nlohmann::json::parse(in);
-                if (parsed.is_object())
-                    doc = std::move(parsed);
-                // Bare array or other shape: silently start fresh. The legacy
-                // bare-array form carried only products, never orca_type_map,
-                // so nothing is lost by replacing it with object form here.
-            } catch (const std::exception& e) {
-                // The existing file is unparseable — we must not block the save,
-                // but the user may have hand-authored an orca_type_map in there.
-                // Preserve the original as a .bak (best-effort) so it stays
-                // recoverable, then start fresh with an empty object.
-                const std::string bak = path + ".bak";
-                std::error_code bak_ec;
-                std::filesystem::copy_file(
-                    path, bak, std::filesystem::copy_options::overwrite_existing, bak_ec);
-                spdlog::warn("[filament] existing overlay parse failed on save ({}): {}; {} to {}",
-                             path, e.what(), bak_ec ? "could not back up" : "backed up", bak);
-            }
-        }
+    nlohmann::json parsed;
+    switch (read_json_file(path, parsed)) {
+    case FileRead::Absent:
+        break;
+    case FileRead::Parsed:
+        // The legacy bare-array form carries only products: kept as the
+        // `filaments` section, so a types save does not drop them, and a
+        // products save overwrites them with the full list it was given.
+        // Any other shape starts fresh.
+        if (parsed.is_object())
+            doc = std::move(parsed);
+        else if (parsed.is_array())
+            doc["filaments"] = std::move(parsed);
+        break;
+    case FileRead::Corrupt: {
+        // We must not block the save, but the user may have hand-authored
+        // sections in there. Preserve the original as a .bak (best-effort) so
+        // it stays recoverable, then start fresh with an empty object.
+        const std::string bak = path + ".bak";
+        const bool backed_up = hfs::copy_file(path, bak, /*overwrite=*/true);
+        spdlog::warn("[filament] starting {} fresh; {} the unparseable original to {}", path,
+                     backed_up ? "backed up" : "could not back up", bak);
+        break;
+    }
     }
 
     // Atomic write: tmp file + rename. POSIX rename is atomic within a single
     // filesystem. The tmp file lives next to the target so the rename never
     // crosses a mount boundary.
-    std::filesystem::path target(path);
-    std::filesystem::path tmp = target;
-    tmp += ".tmp";
+    std::string target = helix::paths::write_target(path);
 
     // Ensure parent dir exists (the on-device runtime config dir is created
     // elsewhere, but tests / fresh installs may hit this path first).
-    std::error_code ec;
-    if (auto parent = target.parent_path(); !parent.empty()) {
-        std::filesystem::create_directories(parent, ec);
-        // Ignore "already exists"; report everything else.
-        if (ec && !std::filesystem::is_directory(parent)) {
-            spdlog::warn("[filament] save_user_products: cannot create parent dir {}: {}",
-                         parent.string(), ec.message());
+    if (std::string parent{hfs::parent_path(target)}; !parent.empty()) {
+        // False only when `parent` is not a directory afterwards.
+        if (!hfs::create_directories(parent)) {
+            spdlog::warn("[filament] save {}: cannot create parent dir {}: {}", key, parent,
+                         std::strerror(errno));
             return false;
         }
     }
 
-    doc["filaments"] = products;
+    doc[key] = std::move(value);
 
-    {
-        std::ofstream out(tmp, std::ios::trunc);
-        if (!out) {
-            spdlog::warn("[filament] save_user_products: cannot open {} for writing", tmp.string());
-            return false;
-        }
-        out << doc.dump(2);
-        if (!out) {
-            spdlog::warn("[filament] save_user_products: error writing to {}", tmp.string());
-            std::error_code rm_ec;
-            std::filesystem::remove(tmp, rm_ec);
-            return false;
-        }
-    } // ofstream closed here, buffers flushed, before rename
-
-    std::filesystem::rename(tmp, target, ec);
-    if (ec) {
-        spdlog::warn("[filament] save_user_products: rename failed ({} -> {}): {}", tmp.string(),
-                     target.string(), ec.message());
-        std::error_code rm_ec;
-        std::filesystem::remove(tmp, rm_ec);
+    if (!tio::write_file_atomic(target, helix::json_util::safe_dump(doc, 2))) {
+        spdlog::warn("[filament] save {}: cannot write {}: {}", key, target, std::strerror(errno));
         return false;
     }
 

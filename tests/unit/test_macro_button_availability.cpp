@@ -199,7 +199,7 @@ TEST_CASE_METHOD(HelixTestFixture, "Missing Load macro falls through to the raw-
     const auto& info = macros.get(StandardMacroSlot::LoadFilament);
     REQUIRE(info.has_missing_macro());
 
-    AmsSystemInfo sys;
+    helix::AmsSystemInfo sys;
     helix::ui::BackendCaps caps; // no filament system present
     const auto plan = helix::ui::plan_load(sys, caps, -1, !info.is_empty(),
                                            info.get_source() == MacroSource::CONFIGURED);
@@ -219,7 +219,7 @@ TEST_CASE_METHOD(HelixTestFixture, "Present Load macro still wins tier 1",
     const auto& info = macros.get(StandardMacroSlot::LoadFilament);
     REQUIRE_FALSE(info.has_missing_macro());
 
-    AmsSystemInfo sys;
+    helix::AmsSystemInfo sys;
     helix::ui::BackendCaps caps;
     caps.present = true; // a filament system the configured macro must outrank
     caps.requires_slot_selection_for_load = true;
@@ -243,7 +243,7 @@ class ControlsMacroFixture : public LVGLUITestFixture {
 
     ~ControlsMacroFixture() override {
         if (panel_obj) {
-            panel.on_deactivate();
+            panel.on_deactivate(DeactivateReason::NavigateAway);
             lv_obj_delete(panel_obj);
             panel_obj = nullptr;
         }

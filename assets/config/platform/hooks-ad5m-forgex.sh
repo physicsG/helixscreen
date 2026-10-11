@@ -38,7 +38,11 @@ FORGEX_BACKLIGHT="/root/printer_data/py/backlight.py"
 # still reports 1.4.1, and tag 1.3.1 ships a version.txt reading 1.3.0.
 #
 # Sourced at file scope by both helixscreen.init and helix-launcher.sh, so one
-# assignment covers both. An explicit HELIX_NO_SPLASH in the environment wins.
+# assignment covers both: every consumer reads it in the shell that did the
+# sourcing (helixscreen.init's early-splash decision, the launcher's splash
+# blocks). Assigned, deliberately not exported: the launcher inherits the init
+# script's environment, and an exported value here arrives as "already set"
+# ahead of helixscreen.env, outranking the operator's file.
 FORGEX_SPLASH_BIN="${FORGEX_SPLASH_BIN:-/opt/config/mod/.bin/exec/splash}"
 if [ -z "${HELIX_NO_SPLASH}" ]; then
     if [ -x "$FORGEX_SPLASH_BIN" ]; then
@@ -46,7 +50,6 @@ if [ -z "${HELIX_NO_SPLASH}" ]; then
     else
         HELIX_NO_SPLASH=0
     fi
-    export HELIX_NO_SPLASH
 fi
 
 # ForgeX 1.4.2 introduced netd, which owns every network decision in non-Stock
@@ -63,8 +66,52 @@ FORGEX_NET_SYSFS="${FORGEX_NET_SYSFS:-/sys/class/net}"
 FORGEX_WPA_BIN="${FORGEX_WPA_BIN:-/usr/sbin/wpa_supplicant}"
 FORGEX_WPA_CONF="${FORGEX_WPA_CONF:-/etc/wpa_supplicant.conf}"
 
+FORGEX_NETD_SOCK="${FORGEX_NETD_SOCK:-/run/netd.sock}"
+FORGEX_NETWORK_CONF="${FORGEX_NETWORK_CONF:-/opt/config/mod_data/network.conf}"
+
 forgex_netd_owns_network() {
     [ -x "$FORGEX_NETD_BIN" ]
+}
+
+# Bring netd back when it ships but is not running.
+#
+# S55boot starts netd and waits on it; when the network does not come up inside
+# that wait it kills the daemon, unlinks the socket and hands the machine back to
+# stock, skipping the MCU bringup and Klipper on the way. netd loads the Wi-Fi
+# driver and owns the radio, so a carrier-less boot arrives here with no daemon
+# and no wlan0 -- the WiFi wizard has nothing to configure, and our installer
+# de-execs the stock UI, so the owner cannot get the printer online from the
+# screen at all. A machine that can never reach a network never escapes that on
+# its own.
+#
+# Starting the daemon itself is not the stray-process hazard the comment above
+# warns about: that is about a second driver or supplicant racing netd's own
+# teardown. This is the owner, started the way boot.sh starts it, and only when
+# nothing is already serving. Idempotent.
+platform_start_netd() {
+    forgex_netd_owns_network || return 0
+    if pidof netd >/dev/null 2>&1; then
+        return 0
+    fi
+    echo "Network daemon not running - starting it so WiFi setup stays reachable..."
+    # Safe because nothing is serving: a live daemon returned above.
+    rm -f "$FORGEX_NETD_SOCK"
+    # --adopt-existing takes over a link that is already up instead of tearing it
+    # down; it needs a stored mode to adopt, so a machine that has never been
+    # configured gets the plain bootstrap.
+    if [ -f "$FORGEX_NETWORK_CONF" ]; then
+        _netd_args="--adopt-existing"
+    else
+        _netd_args=""
+    fi
+    if command -v start-stop-daemon >/dev/null 2>&1; then
+        # shellcheck disable=SC2086  # deliberate word-splitting: empty means no flag
+        start-stop-daemon -Sb --exec "$FORGEX_NETD_BIN" -- $_netd_args
+    else
+        # shellcheck disable=SC2086
+        "$FORGEX_NETD_BIN" $_netd_args &
+    fi
+    unset _netd_args
 }
 
 # Stop stock FlashForge UI and competing screen UIs.
@@ -246,7 +293,7 @@ platform_start_wpa_supplicant() {
 # This must happen BEFORE stopping competing UIs or enabling backlight, because
 # ForgeX's screen.sh could run at any time via Klipper's delayed_gcode.
 platform_pre_start() {
-    export HELIX_CACHE_DIR="/data/helixscreen/cache"
+    export HELIX_CACHE_DIR="${HELIX_CACHE_DIR:-/data/.helixscreen/cache}"
 
     # Logging policy: write to flash (/data is ext4 with ~4.6 GB free), NOT
     # to /tmp. AD5M has only ~107 MB RAM and /tmp is a 54 MB tmpfs — under
@@ -254,13 +301,14 @@ platform_pre_start() {
     # actively steals from the UI. Worse, /var/log is a symlink to /tmp here
     # (Yocto convention), so spdlog's syslog target also lands in RAM. Force
     # the file sink to flash to bypass both paths.
-    export HELIX_LOG_DEST=file
-    export HELIX_LOG_FILE="/data/helixscreen/logs/helix.log"
-    export HELIX_LOG_ROTATE_BYTES=1048576
-    export HELIX_LOG_ROTATE_FILES=3
-    mkdir -p "/data/helixscreen/logs" 2>/dev/null || true
+    export HELIX_LOG_DEST="${HELIX_LOG_DEST:-file}"
+    export HELIX_LOG_FILE="${HELIX_LOG_FILE:-/data/.helixscreen/logs/helix.log}"
+    export HELIX_LOG_ROTATE_BYTES="${HELIX_LOG_ROTATE_BYTES:-1048576}"
+    export HELIX_LOG_ROTATE_FILES="${HELIX_LOG_ROTATE_FILES:-3}"
+    mkdir -p "/data/.helixscreen/logs" 2>/dev/null || true
 
     touch /tmp/helixscreen_active
+    platform_start_netd
     platform_load_wifi_driver
     platform_start_wpa_supplicant
 }

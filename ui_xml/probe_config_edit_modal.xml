@@ -23,7 +23,7 @@
       <lv_obj width="100%"
               height="content" style_pad_all="0" flex_flow="row" style_flex_cross_place="center"
               style_pad_gap="#space_md" scrollable="false">
-        <text_body text="Current:" translation_tag="Current:" style_text_color="#text_muted"/>
+        <text_body text="Current:" style_text_color="#text_muted"/>
         <text_body bind_text="probe_config_edit_current" style_text_color="#primary"/>
       </lv_obj>
 
@@ -32,8 +32,7 @@
                   width="100%" keyboard_hint="numeric" bind_text="probe_config_edit_value" max_length="12"/>
 
       <!-- Warning about firmware restart -->
-      <text_small text="Saves to Klipper config and restarts firmware."
-                  translation_tag="Saves to Klipper config and restarts firmware." style_text_color="#warning"/>
+      <text_small text="Saves to Klipper config and restarts firmware." style_text_color="#warning"/>
     </lv_obj>
 
     <!-- Action buttons -->

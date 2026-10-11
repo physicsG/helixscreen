@@ -24,21 +24,24 @@
 
 #include "ams_backend_ace.h"
 #include "ams_types.h"
+#include "test_helpers/ace_test_access.h"
 
 #include <json.hpp> // nlohmann/json from libhv
 #include <string>
 
 #include "../catch_amalgamated.hpp"
 
+using helix::SlotStatus;
+
 using json = nlohmann::json;
 
 namespace {
 
 /// Drives the production paths: the WebSocket object path via
-/// handle_status_update(), and the REST fallback via the two poll parsers.
-class AcePerSlotLoadedHelper : public AmsBackendAce {
+/// handle_status(), and the REST fallback via the two poll parsers.
+class AcePerSlotLoadedHelper : public helix::AmsBackendAce {
   public:
-    AcePerSlotLoadedHelper() : AmsBackendAce(nullptr, nullptr) {}
+    AcePerSlotLoadedHelper() : helix::AmsBackendAce(nullptr, nullptr) {}
 
     /// Wrap an ACE object in a notify_status_update envelope under `key`
     /// ("filament_hub" for native GoKlipper, "ace" for community ValgACE).
@@ -57,9 +60,7 @@ class AcePerSlotLoadedHelper : public AmsBackendAce {
     }
 
     void force_aggregate(int slot, bool loaded) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        system_info_.current_slot = slot;
-        system_info_.filament_loaded = loaded;
+        helix::AceTestAccess::set_seat(*this, slot, loaded);
     }
 };
 

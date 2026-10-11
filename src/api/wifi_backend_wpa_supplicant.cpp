@@ -4,8 +4,11 @@
 #include "wifi_backend_wpa_supplicant.h"
 
 #include "ui_error_reporting.h"
+#include "ui_update_queue.h"
 
+#include "helix_thread.h"
 #include "log_redact.h"
+#include "lvgl/src/others/translation/lv_translation.h"
 #include "spdlog/fmt/fmt.h"
 #include "spdlog/spdlog.h"
 #include "wifi_5ghz_detection.h"
@@ -440,12 +443,19 @@ WiFiError WifiBackendWpaSupplicant::start() {
             spdlog::debug("[WifiBackend] Pre-flight failed (silent mode): {}",
                           preflight_result.technical_msg);
         } else if (preflight_result.result == WiFiResult::SERVICE_NOT_RUNNING) {
-            NOTIFY_ERROR_MODAL("WiFi Service Not Running",
-                               "wpa_supplicant is not running. WiFi features unavailable.");
+            // start() runs on the async init worker; the modal is main-thread only.
+            helix::ui::queue_update("WifiBackend::service_not_running", []() {
+                NOTIFY_ERROR_MODAL(
+                    lv_tr("WiFi Service Not Running"), "{}",
+                    lv_tr("wpa_supplicant is not running. WiFi features unavailable."));
+            });
         } else if (preflight_result.result == WiFiResult::PERMISSION_DENIED) {
-            NOTIFY_ERROR_MODAL("WiFi Permission Denied", "{}",
-                               preflight_result.user_msg.empty() ? preflight_result.technical_msg
-                                                                 : preflight_result.user_msg);
+            helix::ui::queue_update(
+                "WifiBackend::permission_denied",
+                [detail = preflight_result.user_msg.empty() ? preflight_result.technical_msg
+                                                            : preflight_result.user_msg]() {
+                    NOTIFY_ERROR_MODAL(lv_tr("WiFi Permission Denied"), "{}", detail);
+                });
         } else {
             LOG_ERROR_INTERNAL("Pre-flight check failed: {}", preflight_result.technical_msg);
         }
@@ -473,6 +483,7 @@ WiFiError WifiBackendWpaSupplicant::start() {
         init_complete_ = false;
         try {
             hv::EventLoopThread::start(true, [this]() -> int {
+                helix::install_thread_altstack();
                 WifiBackendWpaSupplicant::init_wpa();
                 return 0;
             });
@@ -538,7 +549,7 @@ void WifiBackendWpaSupplicant::start_async() {
 
     // Wrap — EAGAIN under thread exhaustion throws std::system_error ([L083]).
     try {
-        async_init_thread_ = std::thread([this]() {
+        async_init_thread_ = helix::make_thread([this]() {
             WiFiError result = start();
             bool ran_init = init_complete_.load();
             async_init_in_progress_ = false;
@@ -618,21 +629,6 @@ void WifiBackendWpaSupplicant::stop() {
     }
 
     spdlog::debug("[WifiBackend] WiFi backend disabled");
-}
-
-void WifiBackendWpaSupplicant::register_event_callback(
-    const std::string& name, std::function<void(const std::string&)> callback) {
-    // THREAD SAFETY: Lock callbacks map during access
-    std::lock_guard<std::mutex> lock(callbacks_mutex_);
-
-    const auto& entry = callbacks.find(name);
-    if (entry == callbacks.end()) {
-        callbacks.insert({name, callback});
-        spdlog::debug("[WifiBackend] Registered callback '{}'", name);
-    } else {
-        // Callback already exists - could replace it, but parent doesn't
-        LOG_WARN_INTERNAL("Callback '{}' already registered (not replacing)", name);
-    }
 }
 
 // ============================================================================
@@ -1222,28 +1218,7 @@ void WifiBackendWpaSupplicant::handle_wpa_events(void* data, int len) {
         resolve_scan();
     }
 
-    // THREAD SAFETY: Copy callback out under the mutex, then release BEFORE
-    // invoking. Holding callbacks_mutex_ across the callback invites deadlock
-    // if a handler acquires another backend lock or re-enters the backend.
-    std::function<void(const std::string&)> cb;
-    {
-        std::lock_guard<std::mutex> lock(callbacks_mutex_);
-        auto it = callbacks.find(callback_name);
-        if (it == callbacks.end()) {
-            spdlog::trace("[WifiBackend] No callback registered for event type: {}", callback_name);
-            return;
-        }
-        cb = it->second;
-    }
-
-    spdlog::debug("[WifiBackend] Dispatching {} event to callback", callback_name);
-    try {
-        cb(event);
-    } catch (const std::exception& e) {
-        LOG_ERROR_INTERNAL("Exception in callback '{}': {}", callback_name, e.what());
-    } catch (...) {
-        LOG_ERROR_INTERNAL("Unknown exception in callback '{}'", callback_name);
-    }
+    dispatch_event(callback_name, event);
 }
 
 void WifiBackendWpaSupplicant::_handle_wpa_events(hio_t* io, void* data, int readbyte) {
@@ -1253,31 +1228,6 @@ void WifiBackendWpaSupplicant::_handle_wpa_events(hio_t* io, void* data, int rea
         instance->handle_wpa_events(data, readbyte);
     } else {
         LOG_ERROR_INTERNAL("Static callback invoked with NULL context");
-    }
-}
-
-void WifiBackendWpaSupplicant::dispatch_event(const std::string& event_name,
-                                              const std::string& message) {
-    // Dispatch to a specific registered callback (for synthetic events like INIT_FAILED).
-    // Copy the callback out under the mutex, then release BEFORE invoking — same
-    // deadlock-avoidance rationale as handle_wpa_events().
-    std::function<void(const std::string&)> cb;
-    {
-        std::lock_guard<std::mutex> lock(callbacks_mutex_);
-        auto it = callbacks.find(event_name);
-        if (it == callbacks.end()) {
-            return;
-        }
-        cb = it->second;
-    }
-
-    spdlog::debug("[WifiBackend] Dispatching synthetic event '{}': {}", event_name, message);
-    try {
-        cb(message);
-    } catch (const std::exception& e) {
-        LOG_ERROR_INTERNAL("Exception in callback '{}': {}", event_name, e.what());
-    } catch (...) {
-        LOG_ERROR_INTERNAL("Unknown exception in callback '{}'", event_name);
     }
 }
 
@@ -1605,7 +1555,7 @@ void WifiBackendWpaSupplicant::reconcile_saved_networks() {
 }
 
 WiFiError WifiBackendWpaSupplicant::connect_network(const std::string& ssid,
-                                                    const std::string& password) {
+                                                    const std::string& password, bool is_hidden) {
     if (!is_running()) {
         return WiFiError(WiFiResult::NOT_INITIALIZED, "Backend not started",
                          "WiFi system not ready");
@@ -1649,7 +1599,7 @@ WiFiError WifiBackendWpaSupplicant::connect_network(const std::string& ssid,
     } else {
         std::string add_result = send_command("ADD_NETWORK");
         if (add_result.empty() || add_result == "FAIL\n") {
-            NOTIFY_ERROR("Failed to save WiFi network");
+            NOTIFY_ERROR("{}", lv_tr("Failed to save WiFi network"));
             return WiFiErrorHelper::connection_failed("Failed to add network to wpa_supplicant");
         }
 
@@ -1682,8 +1632,25 @@ WiFiError WifiBackendWpaSupplicant::connect_network(const std::string& ssid,
         if (!reused_existing) {
             send_command("REMOVE_NETWORK " + network_id);
         }
-        NOTIFY_ERROR("Failed to save WiFi network");
+        NOTIFY_ERROR("{}", lv_tr("Failed to save WiFi network"));
         return WiFiErrorHelper::connection_failed("Failed to configure network SSID");
+    }
+
+    // A hidden AP broadcasts no SSID, so it never appears in scan results;
+    // scan_ssid=1 makes the supplicant direct-probe for it instead of
+    // matching beacons only. Applied to reused entries too: one saved as
+    // visible still needs the probe when the user re-joins it as hidden.
+    if (is_hidden) {
+        const std::string scan_ssid_cmd = "SET_NETWORK " + network_id + " scan_ssid 1";
+        if (send_command(scan_ssid_cmd) != "OK\n") {
+            LOG_ERROR_INTERNAL("Failed to set scan_ssid: {}", scan_ssid_cmd);
+            // Never remove a reused id — see the Step 1 comment.
+            if (!reused_existing) {
+                send_command("REMOVE_NETWORK " + network_id);
+            }
+            NOTIFY_ERROR("{}", lv_tr("Failed to save WiFi network"));
+            return WiFiErrorHelper::connection_failed("Failed to configure hidden network scan");
+        }
     }
 
     // Step 3: Set security (PSK for secured networks, key_mgmt for open)
@@ -1697,7 +1664,7 @@ WiFiError WifiBackendWpaSupplicant::connect_network(const std::string& ssid,
             if (!reused_existing) {
                 send_command("REMOVE_NETWORK " + network_id);
             }
-            NOTIFY_ERROR("Failed to save WiFi network");
+            NOTIFY_ERROR("{}", lv_tr("Failed to save WiFi network"));
             return WiFiErrorHelper::connection_failed("Failed to configure open network security");
         }
         spdlog::debug("[WifiBackend] Configured as open network");
@@ -1712,7 +1679,7 @@ WiFiError WifiBackendWpaSupplicant::connect_network(const std::string& ssid,
             if (!reused_existing) {
                 send_command("REMOVE_NETWORK " + network_id);
             }
-            NOTIFY_ERROR("Failed to connect to '{}'. Check password.",
+            NOTIFY_ERROR(lv_tr("Failed to connect to '{}'. Check password."),
                          helix::redact::ssid(clean_ssid));
             return WiFiErrorHelper::authentication_failed(ssid);
         }
@@ -1728,7 +1695,7 @@ WiFiError WifiBackendWpaSupplicant::connect_network(const std::string& ssid,
         if (!reused_existing) {
             send_command("REMOVE_NETWORK " + network_id);
         }
-        NOTIFY_ERROR("Failed to save WiFi network");
+        NOTIFY_ERROR("{}", lv_tr("Failed to save WiFi network"));
         return WiFiErrorHelper::connection_failed("Failed to enable network configuration");
     }
     spdlog::debug("[WifiBackend] Network {} enabled, selecting for connection", network_id);
@@ -1742,7 +1709,7 @@ WiFiError WifiBackendWpaSupplicant::connect_network(const std::string& ssid,
         if (!reused_existing) {
             send_command("REMOVE_NETWORK " + network_id);
         }
-        NOTIFY_ERROR("Failed to connect to '{}'", helix::redact::ssid(clean_ssid));
+        NOTIFY_ERROR(lv_tr("Failed to connect to '{}'"), helix::redact::ssid(clean_ssid));
         return WiFiErrorHelper::connection_failed("Failed to select network for connection");
     }
 
@@ -2083,7 +2050,8 @@ WifiBackend::ConnectionStatus WifiBackendWpaSupplicant::get_status() {
 
     if (status_changed) {
         spdlog::trace("[WifiBackend] Status: connected={} ssid='{}' ip='{}' signal={}%",
-                      status.connected, status.ssid, status.ip_address, status.signal_strength);
+                      status.connected, helix::redact::ssid(status.ssid), status.ip_address,
+                      status.signal_strength);
         last_logged_status_ = status;
     }
 
@@ -2181,7 +2149,7 @@ std::vector<WiFiNetwork> WifiBackendWpaSupplicant::parse_scan_results(const std:
 
         // Skip hidden networks (empty or missing SSID)
         if (ssid.empty()) {
-            spdlog::trace("[WifiBackend] Skipping hidden network: {}", bssid);
+            spdlog::trace("[WifiBackend] Skipping hidden network: {}", helix::redact::mac(bssid));
             continue;
         }
 
@@ -2213,8 +2181,8 @@ std::vector<WiFiNetwork> WifiBackendWpaSupplicant::parse_scan_results(const std:
         WiFiNetwork network(ssid, signal_percent, is_secured, security_type, freq_mhz);
         networks.push_back(network);
 
-        spdlog::trace("[WifiBackend] Parsed network: '{}' {}% {} {}", ssid, signal_percent,
-                      security_type, bssid);
+        spdlog::trace("[WifiBackend] Parsed network: '{}' {}% {} {}", helix::redact::ssid(ssid),
+                      signal_percent, security_type, helix::redact::mac(bssid));
     }
 
     spdlog::debug("[WifiBackend] Parsed {} networks from scan results", networks.size());

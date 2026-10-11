@@ -6,8 +6,12 @@
 #include "ams_backend.h"
 #include "ams_state.h"
 #include "ams_types.h"
+#include "app_globals.h"
 #include "filament_database.h"
+#include "lane_source_store.h"
+#include "load_cell_manager.h"
 #include "lvgl/lvgl.h"
+#include "printer_state.h"
 
 #include <spdlog/spdlog.h>
 
@@ -20,10 +24,26 @@ namespace {
 constexpr uint32_t PERSIST_INTERVAL_MS = 60'000;
 constexpr float DELTA_WRITE_THRESHOLD_G = 0.05f;
 constexpr float REBASELINE_THRESHOLD_G = 0.5f;
-// TODO(filament-diameter): SlotInfo/external-spool don't carry filament
-// diameter yet. 1.75 mm is correct for ~99% of hobbyist setups; wire from
-// a per-spool field once Spoolman exposes it.
-constexpr float DEFAULT_DIAMETER_MM = 1.75f;
+
+// Neither SlotInfo nor the external spool carries a diameter, so every spool is
+// metered at the diameter the printer's extruder is configured for.
+float printer_filament_diameter_mm() {
+    return get_printer_state().get_discovery().filament_diameter_mm();
+}
+
+// The counted weight files as the bypass lane's Metered record so resolve()
+// ranks a live meter above the weight a manual edit left - the same source
+// AmsBackend::update_slot_weight files for a slot.
+void file_metered_weight(float remaining_weight_g, float total_weight_g) {
+    helix::ams::Observation metered(helix::ams::ObservationSource::Metered);
+    if (remaining_weight_g >= 0.0F) {
+        metered.remaining_weight_g = remaining_weight_g;
+    }
+    if (total_weight_g >= 0.0F) {
+        metered.total_weight_g = total_weight_g;
+    }
+    helix::ams::ingest(helix::ams::BYPASS_LANE_ID, metered);
+}
 } // namespace
 
 std::string_view ExternalSpoolSink::name() const {
@@ -40,12 +60,23 @@ uint32_t ExternalSpoolSink::persist_interval_ms() const {
 
 void ExternalSpoolSink::snapshot(float filament_used_mm) {
     active_ = false;
-    auto info_opt = AmsState::instance().get_external_spool_info();
+
+    // If a spool weight load cell is available, use it as the source of truth instead.
+    if (sensors::LoadCellManager::instance().has_spool_weight_load_cell()) {
+        return;
+    }
+
+    auto info_opt = AmsState::instance().raw_external_spool_info();
     if (!info_opt.has_value()) {
         spdlog::debug("[ConsumptionSink:external] No external spool; skipping");
         return;
     }
     const auto& info = *info_opt;
+    if (info.spoolman_id != 0) {
+        spdlog::debug("[ConsumptionSink:external] Spoolman-linked (id={}); skipping",
+                      info.spoolman_id);
+        return;
+    }
     if (info.remaining_weight_g < 0.0f) {
         spdlog::debug("[ConsumptionSink:external] Unknown remaining weight; skipping");
         return;
@@ -58,7 +89,7 @@ void ExternalSpoolSink::snapshot(float filament_used_mm) {
         return;
     }
     density_g_cm3_ = material->density_g_cm3;
-    diameter_mm_ = DEFAULT_DIAMETER_MM;
+    diameter_mm_ = printer_filament_diameter_mm();
     snapshot_mm_ = filament_used_mm;
     snapshot_weight_g_ = info.remaining_weight_g;
     last_written_weight_g_ = info.remaining_weight_g;
@@ -74,11 +105,21 @@ void ExternalSpoolSink::apply_delta(float filament_used_mm) {
         return;
     }
 
-    auto info_opt = AmsState::instance().get_external_spool_info();
+    auto info_opt = AmsState::instance().raw_external_spool_info();
     if (!info_opt.has_value()) {
         return;
     }
     SlotInfo info = *info_opt;
+
+    // Same rule as a slot: a linked spool's server tracks its own consumption,
+    // and the poll re-fetches that number, so a local meter would only fight
+    // it. Re-evaluated each tick because the user can link mid-print.
+    if (info.spoolman_id != 0) {
+        spdlog::info("[ConsumptionSink:external] Spoolman-linked mid-stream (id={}); pausing",
+                     info.spoolman_id);
+        active_ = false;
+        return;
+    }
 
     // External-write detection: someone other than us updated remaining_weight_g.
     // Treat as authoritative and rebase our snapshot from it.
@@ -112,6 +153,7 @@ void ExternalSpoolSink::apply_delta(float filament_used_mm) {
 
     info.remaining_weight_g = new_remaining_g;
     AmsState::instance().set_external_spool_info_in_memory(info);
+    file_metered_weight(new_remaining_g, info.total_weight_g);
 
     // Throttled disk persist (crash-safety).
     if (lv_tick_elaps(last_persist_tick_ms_) >= persist_interval_ms()) {
@@ -122,7 +164,7 @@ void ExternalSpoolSink::apply_delta(float filament_used_mm) {
 }
 
 void ExternalSpoolSink::flush() {
-    auto info_opt = AmsState::instance().get_external_spool_info();
+    auto info_opt = AmsState::instance().raw_external_spool_info();
     if (!info_opt.has_value()) {
         return;
     }
@@ -133,7 +175,7 @@ void ExternalSpoolSink::flush() {
 }
 
 void ExternalSpoolSink::rebaseline(float filament_used_mm) {
-    auto info_opt = AmsState::instance().get_external_spool_info();
+    auto info_opt = AmsState::instance().raw_external_spool_info();
     if (!info_opt.has_value()) {
         active_ = false;
         return;
@@ -141,6 +183,10 @@ void ExternalSpoolSink::rebaseline(float filament_used_mm) {
     snapshot_mm_ = filament_used_mm;
     snapshot_weight_g_ = info_opt->remaining_weight_g;
     last_written_weight_g_ = info_opt->remaining_weight_g;
+    // The external number is now the meter's baseline, so the lane's Metered
+    // record must say so - otherwise resolve() keeps showing the count the
+    // external write just replaced.
+    file_metered_weight(info_opt->remaining_weight_g, info_opt->total_weight_g);
 }
 
 // ---------------------------------------------------------------------------
@@ -205,7 +251,7 @@ void AmsSlotSink::snapshot(float filament_used_mm) {
         return;
     }
     density_g_cm3_ = material->density_g_cm3;
-    diameter_mm_ = DEFAULT_DIAMETER_MM;
+    diameter_mm_ = printer_filament_diameter_mm();
     snapshot_mm_ = filament_used_mm;
     snapshot_weight_g_ = info.remaining_weight_g;
     last_written_weight_g_ = info.remaining_weight_g;
@@ -274,8 +320,8 @@ void AmsSlotSink::apply_delta(float filament_used_mm) {
     info.remaining_weight_g = new_remaining_g;
     const bool persist_now = lv_tick_elaps(last_persist_tick_ms_) >= persist_interval_ms();
     // Weight-only update: must NOT re-emit material/color or re-lock identity.
-    // set_slot_info() here re-wrote the firmware store every persist and reverted
-    // externally-set materials (#981).
+    // apply_user_edit() here would rewrite the firmware store on every persist and
+    // revert externally-set materials (#981).
     backend->update_slot_weight(slot_index_, info.remaining_weight_g, info.total_weight_g,
                                 /*persist=*/persist_now);
     if (persist_now) {

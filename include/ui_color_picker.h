@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 
 namespace helix {
 
@@ -128,7 +129,7 @@ class ColorPicker : public Modal {
 
     // === Subjects for XML binding ===
     SubjectManager subjects_;
-    lv_subject_t name_subject_;
+    lv_subject_t name_subject_{};
     char hex_buf_[16] = {0};
     char name_buf_[64] = {0};
     bool subjects_initialized_ = false;
@@ -153,18 +154,14 @@ class ColorPicker : public Modal {
     lv_obj_t* btn_tab_presets_ = nullptr;
     lv_obj_t* btn_tab_custom_ = nullptr;
 
-    // Currently highlighted preset swatch (outline shown), cleared when the
-    // active color diverges from any preset via HSV picker or hex input.
-    lv_obj_t* selected_swatch_ = nullptr;
-
     // === Internal Methods ===
     void init_subjects();
     void deinit_subjects();
     void update_preview(uint32_t color_rgb, bool from_hsv_picker = false,
                         bool from_hex_input = false);
     void switch_tab(bool show_custom);
-    void highlight_swatch(lv_obj_t* swatch);
-    lv_obj_t* find_swatch_for_color(uint32_t color_rgb);
+    /// Rings the preset matching @p color_rgb in the current palette, or none.
+    void highlight_preset(uint32_t color_rgb);
 
     // === Event Handlers (called by static callbacks) ===
     void handle_swatch_clicked(lv_obj_t* swatch);
@@ -178,14 +175,7 @@ class ColorPicker : public Modal {
     static ColorPicker* active_instance_;
 
     // === Static Callbacks (traverse widget tree to find modal instance) ===
-    static void on_close_cb(lv_event_t* e);
     static void on_swatch_cb(lv_event_t* e);
-    static void on_cancel_cb(lv_event_t* e);
-    static void on_select_cb(lv_event_t* e);
-    static void on_hex_input_changed_cb(lv_event_t* e);
-    static void on_hex_input_defocused_cb(lv_event_t* e);
-    static void on_tab_presets_cb(lv_event_t* e);
-    static void on_tab_custom_cb(lv_event_t* e);
 
     /**
      * @brief Get the currently active ColorPicker instance
@@ -197,5 +187,23 @@ class ColorPicker : public Modal {
      */
     static ColorPicker* get_instance_from_event(lv_event_t* e);
 };
+
+/// The preset colors a swatch grid offers, 30 per palette, row-major in six
+/// columns. XML renders them through the general_/theme_swatch_color_<i> pools.
+const std::vector<uint32_t>& swatch_palette(ColorPicker::Palette palette);
+
+/// Whether a swatch filled with @p rgb blends into @p surface (too little
+/// luminance contrast, dark-on-dark or light-on-light) and needs a #border edge.
+bool swatch_needs_edge(uint32_t rgb, uint32_t surface);
+
+/// swatch_needs_edge() against the current theme's panel and dialog surfaces.
+bool swatch_needs_edge_here(uint32_t rgb);
+
+/// Recomputes the grids' edge pools for the current theme.
+void refresh_swatch_edges();
+
+/// Registers the grids' color and edge pools and color_picker_selected_swatch.
+/// Idempotent; call before any swatch grid is created.
+void ensure_swatch_grid_subjects();
 
 } // namespace helix::ui

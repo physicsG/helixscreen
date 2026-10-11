@@ -6,6 +6,7 @@
 #include "lvgl/lvgl.h"
 #include "panel_widget.h"
 #include "panel_widget_registry.h"
+#include "src/ui/panel_widgets/tile_sizing.h"
 #include "theme_manager.h"
 
 #include <algorithm>
@@ -61,7 +62,10 @@ class PanelWidgetHarnessBase {
         lv_obj_set_size(obj_, width_px, height_px);
         lv_obj_update_layout(obj_);
         if (instance_) {
-            instance_->on_size_changed(colspan, rowspan, width_px, height_px);
+            // notify_size_changed(), not on_size_changed(): the manager calls the
+            // recording entry point, and a widget that replays the last granted
+            // size on rebuild only sees one if the harness records it too.
+            instance_->notify_size_changed(colspan, rowspan, width_px, height_px);
         }
         lv_obj_update_layout(obj_);
     }
@@ -81,17 +85,35 @@ class PanelWidgetHarnessBase {
     ///
     /// `require` is false for the registry sweep, which must report an
     /// unbuildable component rather than abort the whole run on it.
+    /// The track geometry of the panel being simulated, so a tile measures its
+    /// floor against the same cell the manager would give it.
+    void set_cell_metrics(const helix::CellMetrics& m) {
+        cell_metrics_ = m;
+        has_cell_metrics_ = true;
+    }
+
     bool create_and_attach(lv_obj_t* screen, PanelWidget& widget, bool require = true) {
         instance_ = &widget;
         const std::string component = widget.get_component_name();
-        obj_ = static_cast<lv_obj_t*>(lv_xml_create(screen, component.c_str(), nullptr));
+        // The same attributes PanelWidgetManager hands lv_xml_create(). Passing
+        // nullptr here builds a tile whose per-instance subject names never
+        // reach its XML, so every binding on them is dropped at parse time and
+        // the tile cannot answer its own sizing verdict: it measures as though
+        // the feature were absent.
+        obj_ = static_cast<lv_obj_t*>(lv_xml_create(screen, component.c_str(), widget.xml_attrs()));
         if (require) {
             REQUIRE(obj_ != nullptr);
         }
         if (!obj_) {
             return false;
         }
-        widget.attach(obj_, screen);
+        if (auto* sizing = widget.tile_sizing()) {
+            sizing->set_content_root(obj_);
+            if (has_cell_metrics_) {
+                sizing->set_cell_metrics(cell_metrics_);
+            }
+        }
+        widget.attach_tile(obj_, screen);
         return true;
     }
 
@@ -105,6 +127,8 @@ class PanelWidgetHarnessBase {
 
     PanelWidget* instance_ = nullptr;
     lv_obj_t* obj_ = nullptr;
+    helix::CellMetrics cell_metrics_{};
+    bool has_cell_metrics_ = false;
 };
 
 /// Creates a widget's real XML component, attaches the widget to it, and
@@ -133,7 +157,7 @@ template <typename W> class PanelWidgetHarness : public PanelWidgetHarnessBase {
     }
 
     ~PanelWidgetHarness() {
-        widget_.detach();
+        widget_.detach_tile();
     }
 
     PanelWidgetHarness(const PanelWidgetHarness&) = delete;
@@ -160,7 +184,11 @@ template <typename W> class PanelWidgetHarness : public PanelWidgetHarnessBase {
 /// created, there is just no instance to attach or resize.
 class RegistryWidgetHarness : public PanelWidgetHarnessBase {
   public:
-    RegistryWidgetHarness(lv_obj_t* screen, const PanelWidgetDef& def) {
+    RegistryWidgetHarness(lv_obj_t* screen, const PanelWidgetDef& def,
+                          const helix::CellMetrics* metrics = nullptr) {
+        if (metrics) {
+            set_cell_metrics(*metrics);
+        }
         if (def.factory) {
             owned_ = def.factory(def.id);
         }
@@ -174,7 +202,7 @@ class RegistryWidgetHarness : public PanelWidgetHarnessBase {
 
     ~RegistryWidgetHarness() {
         if (owned_) {
-            owned_->detach();
+            owned_->detach_tile();
         }
         // Deleted here rather than left to the fixture's screen teardown: the
         // sweep builds every definition once per geometry, and a live tree of

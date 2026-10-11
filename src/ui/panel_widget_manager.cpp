@@ -4,30 +4,43 @@
 #include "panel_widget_manager.h"
 
 #include "ui_ams_mini_status.h"
-#include "ui_emergency_stop.h"
 #include "ui_notification.h"
+#include "ui_toast_manager.h"
 #include "ui_utils.h"
 
+#include "ams_state.h"
+#include "app_globals.h"
 #include "config.h"
+#include "filament_sensor_manager.h"
 #include "grid_edit_mode.h"
 #include "grid_layout.h"
+#include "humidity_sensor_manager.h"
 #include "layout_manager.h"
 #include "layout_port.h"
+#include "led/led_controller.h"
 #include "observer_factory.h"
 #include "panel_widget.h"
 #include "panel_widget_config.h"
 #include "panel_widget_registry.h"
 #include "printer_cache_registry.h"
+#include "printer_state.h"
+#include "runtime_config.h"
+#include "src/ui/panel_widgets/tile_sizing.h"
 #include "system/crash_handler.h"
 #include "system/telemetry_manager.h"
+#include "temperature_sensor_manager.h"
 #include "theme_manager.h"
+#include "width_sensor_manager.h"
 
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
+#include <optional>
 #include <queue>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -149,6 +162,174 @@ void port_legacy_page_layouts(PanelWidgetConfig& widget_config, const std::strin
 
 } // namespace
 
+std::vector<CardRect> card_background_rects(const std::vector<CardFootprint>& footprints) {
+    // Tracks covered by widgets that share the fused card, and tracks blocked
+    // by widgets that bring a background of their own.
+    struct TrackHash {
+        size_t operator()(const std::pair<int, int>& p) const {
+            return std::hash<int>()(p.first) ^ (std::hash<int>()(p.second) << 16);
+        }
+    };
+    std::unordered_set<std::pair<int, int>, TrackHash> merged_tracks;
+    std::unordered_set<std::pair<int, int>, TrackHash> occupied_by_own_card;
+    // Footprints of the merging widgets, so no card piece ends inside one.
+    std::vector<const CardFootprint*> merged_footprints;
+    for (const auto& f : footprints) {
+        auto& covered = f.merges ? merged_tracks : occupied_by_own_card;
+        if (f.merges) {
+            merged_footprints.push_back(&f);
+        }
+        for (int r = f.row; r < f.row + f.rowspan; r++) {
+            for (int c = f.col; c < f.col + f.colspan; c++) {
+                covered.insert({c, r});
+            }
+        }
+    }
+
+    std::vector<CardRect> cards;
+    // BFS flood-fill to find connected components (4-directional adjacency)
+    std::unordered_set<std::pair<int, int>, TrackHash> visited;
+    for (const auto& track : merged_tracks) {
+        if (visited.count(track)) {
+            continue;
+        }
+
+        // BFS from this track to collect the connected component
+        std::queue<std::pair<int, int>> q;
+        q.push(track);
+        visited.insert(track);
+
+        std::vector<std::pair<int, int>> component_tracks;
+        while (!q.empty()) {
+            auto [c, r] = q.front();
+            q.pop();
+            component_tracks.push_back({c, r});
+
+            const std::pair<int, int> neighbors[] = {
+                {c - 1, r}, {c + 1, r}, {c, r - 1}, {c, r + 1}};
+            for (const auto& n : neighbors) {
+                if (merged_tracks.count(n) && !visited.count(n)) {
+                    visited.insert(n);
+                    q.push(n);
+                }
+            }
+        }
+
+        // Build the card coverage: bounding box of the component, filling
+        // gaps between merging widgets, but excluding tracks occupied by a
+        // widget that paints its own background and intrudes on the region.
+        int min_col = component_tracks[0].first;
+        int max_col = min_col;
+        int min_row = component_tracks[0].second;
+        int max_row_card = min_row;
+        for (const auto& [c, r] : component_tracks) {
+            min_col = std::min(min_col, c);
+            max_col = std::max(max_col, c);
+            min_row = std::min(min_row, r);
+            max_row_card = std::max(max_row_card, r);
+        }
+
+        // Cover the component's bounding box, minus any track a non-merging
+        // widget sits in, then split what is left into maximal rectangles.
+        //
+        // Both halves of that matter. Running the bounding box straight
+        // over a non-merging widget makes the card butt against that
+        // widget's own card with no gutter, and two abutting Card surfaces
+        // read as one continuous slab — a readout block and the graph below
+        // it stop looking like separate things. Carving the tracks out is
+        // what keeps the gutter.
+        //
+        // Every emitted piece is a rectangle.
+        std::unordered_set<std::pair<int, int>, TrackHash> remaining;
+        for (int r = min_row; r <= max_row_card; r++) {
+            for (int c = min_col; c <= max_col; c++) {
+                if (!occupied_by_own_card.count({c, r})) {
+                    remaining.insert({c, r});
+                }
+            }
+        }
+
+        while (!remaining.empty()) {
+            // Top-left of what is left: min row, then min col.
+            auto top_left = *std::min_element(
+                remaining.begin(), remaining.end(), [](const auto& a, const auto& b) {
+                    return a.second < b.second || (a.second == b.second && a.first < b.first);
+                });
+
+            int start_col = top_left.first;
+            int start_row = top_left.second;
+
+            int max_end_col = start_col;
+            while (remaining.count({max_end_col + 1, start_row})) {
+                max_end_col++;
+            }
+
+            // A piece that ends partway through a widget draws that widget
+            // across two cards with a seam through it, so every widget the
+            // piece touches must lie wholly inside it.
+            auto cuts_a_widget = [&](int c0, int r0, int c1, int r1) {
+                for (const CardFootprint* w : merged_footprints) {
+                    const int w_c1 = w->col + w->colspan - 1;
+                    const int w_r1 = w->row + w->rowspan - 1;
+                    const bool touches = w->col <= c1 && c0 <= w_c1 && w->row <= r1 && r0 <= w_r1;
+                    const bool inside = c0 <= w->col && w_c1 <= c1 && r0 <= w->row && w_r1 <= r1;
+                    if (touches && !inside) {
+                        return true;
+                    }
+                }
+                return false;
+            };
+
+            // Widest run first, then as tall as it extends as a full
+            // rectangle, backing off until no widget is cut. The widget (or
+            // bare gap track) at the top-left always qualifies on its own,
+            // because pieces never take part of a widget, so this ends.
+            int end_col = start_col;
+            int end_row = start_row;
+            for (int c1 = max_end_col; c1 >= start_col; c1--) {
+                int r1 = start_row;
+                for (;;) {
+                    bool can_extend = true;
+                    for (int c = start_col; c <= c1; c++) {
+                        if (!remaining.count({c, r1 + 1})) {
+                            can_extend = false;
+                            break;
+                        }
+                    }
+                    if (!can_extend) {
+                        break;
+                    }
+                    r1++;
+                }
+                while (r1 >= start_row && cuts_a_widget(start_col, start_row, c1, r1)) {
+                    r1--;
+                }
+                if (r1 >= start_row) {
+                    end_col = c1;
+                    end_row = r1;
+                    break;
+                }
+            }
+
+            for (int r = start_row; r <= end_row; r++) {
+                for (int c = start_col; c <= end_col; c++) {
+                    remaining.erase({c, r});
+                }
+            }
+
+            cards.push_back(
+                {start_col, start_row, end_col - start_col + 1, end_row - start_row + 1});
+        }
+    }
+    return cards;
+}
+
+PanelWidgetManager::PanelWidgetManager() = default;
+
+PanelWidgetManager::~PanelWidgetManager() {
+    s_destroyed_ = true;
+}
+
 PanelWidgetManager& PanelWidgetManager::instance() {
     static PanelWidgetManager instance;
     return instance;
@@ -159,13 +340,12 @@ void PanelWidgetManager::clear_shared_resources() {
 }
 
 void PanelWidgetManager::init_widget_subjects() {
-    if (widget_subjects_initialized_) {
-        return;
-    }
-
     // Register all widget factories explicitly (avoids SIOF from file-scope statics)
     init_widget_registrations();
 
+    // Every call, not once: a printer switch deinits these subjects through
+    // StaticSubjectRegistry and withdraws their XML names, and the rebuilt panels
+    // bind those names again. Each hook is a no-op while its subjects are live.
     for (const auto& def : get_all_widget_defs()) {
         if (def.init_subjects) {
             spdlog::debug("[PanelWidgetManager] Initializing subjects for widget '{}'", def.id);
@@ -173,10 +353,13 @@ void PanelWidgetManager::init_widget_subjects() {
         }
     }
 
+    if (widget_subjects_initialized_) {
+        return;
+    }
     widget_subjects_initialized_ = true;
 
-    // Self-register per-printer cache invalidation. panel_configs_ / active_configs_ /
-    // grid_descriptors_ all derive from /printers/<active>/panel_widgets/<panel>, so an
+    // Self-register per-printer cache invalidation. panel_configs_ / active_configs_
+    // both derive from /printers/<active>/panel_widgets/<panel>, so an
     // active-printer change must drop them (#804). This manager is a process-lifetime
     // singleton, so there is no matching unregister().
     PrinterCacheRegistry::instance().register_invalidator(
@@ -191,7 +374,20 @@ void PanelWidgetManager::register_rebuild_callback(const std::string& panel_id,
 }
 
 void PanelWidgetManager::unregister_rebuild_callback(const std::string& panel_id) {
-    rebuild_callbacks_.erase(panel_id);
+    if (s_destroyed_) {
+        return;
+    }
+    instance().rebuild_callbacks_.erase(panel_id);
+}
+
+bool PanelWidgetManager::refuse_layout_edit() {
+    if (!get_runtime_config()->crash_loop_safe_mode) {
+        return false;
+    }
+    spdlog::warn("[PanelWidgetManager] Layout edit refused: crash-loop safe mode");
+    ToastManager::instance().show(ToastSeverity::WARNING,
+                                  lv_tr("Layout changes are off in safe mode. Restart to edit."));
+    return true;
 }
 
 void PanelWidgetManager::notify_config_changed(const std::string& panel_id) {
@@ -206,6 +402,245 @@ void PanelWidgetManager::notify_config_changed(const std::string& panel_id) {
         it->second();
     }
 }
+
+namespace {
+// Widget builds that stall the UI thread, split into XML creation and the rest
+// (placement, gating, attach). Silent below the threshold, so only a slow
+// device or a pathological widget ever logs.
+void log_if_slow_build(const char* what, std::chrono::steady_clock::time_point t0,
+                       std::chrono::steady_clock::time_point t_split) {
+    using std::chrono::duration_cast;
+    using std::chrono::milliseconds;
+    constexpr long SLOW_BUILD_MS = 100;
+    const auto now = std::chrono::steady_clock::now();
+    const long total = static_cast<long>(duration_cast<milliseconds>(now - t0).count());
+    if (total < SLOW_BUILD_MS)
+        return;
+    spdlog::info("[PanelWidgetManager] slow build '{}': {}ms (xml {}ms, rest {}ms)", what, total,
+                 static_cast<long>(duration_cast<milliseconds>(t_split - t0).count()),
+                 static_cast<long>(duration_cast<milliseconds>(now - t_split).count()));
+}
+
+// Resolved widget slot: holds the widget ID, resolved XML component name,
+// per-widget config, and optionally a pre-created PanelWidget instance.
+struct WidgetSlot {
+    std::string widget_id;
+    std::string component_name;
+    nlohmann::json config;
+    std::unique_ptr<PanelWidget> instance; // nullptr for pure-XML widgets
+    bool hardware_gated = false;           // Gate subject is 0
+    const char* gate_hint = nullptr;       // Human-readable hint
+};
+
+// The gate subject named by @p def reads 0: the widget is placed, dimmed and
+// badged, with no PanelWidget attached. Gates are checked here instead of via
+// XML bind_flag_if_eq to avoid orphaned dividers.
+const char* gate_hint_if_gated(const PanelWidgetDef* def, bool& gated) {
+    gated = false;
+    if (def && def->hardware_gate_subject) {
+        lv_subject_t* gate = lv_xml_get_subject(nullptr, def->hardware_gate_subject);
+        if (gate && lv_subject_get_int(gate) == 0) {
+            gated = true;
+            return def->hardware_gate_hint;
+        }
+    }
+    return nullptr;
+}
+
+std::string visible_id(const std::string& widget_id, bool gated) {
+    return gated ? widget_id + GATED_ID_SUFFIX : widget_id;
+}
+
+// Resolve one enabled config entry: its gate state, and its PanelWidget (taken
+// from @p reuse or made by the factory) configured for @p panel_id. A malformed
+// per-widget config or a throwing factory skips only this widget (nullopt).
+std::optional<WidgetSlot> resolve_slot(const std::string& panel_id, const PanelWidgetEntry& entry,
+                                       WidgetReuseMap& reuse) {
+    const auto* def = find_widget_def(entry.id);
+    WidgetSlot slot;
+    slot.widget_id = entry.id;
+    slot.config = entry.config;
+    slot.gate_hint = gate_hint_if_gated(def, slot.hardware_gated);
+#if defined(__cpp_exceptions)
+    try {
+#else
+    {
+#endif
+        auto reuse_it = reuse.find(entry.id);
+        if (reuse_it != reuse.end()) {
+            slot.instance = std::move(reuse_it->second);
+            reuse.erase(reuse_it);
+            spdlog::debug("[PanelWidgetManager] Reusing widget instance '{}'", entry.id);
+        } else if (def && def->factory) {
+            slot.instance = def->factory(entry.id);
+        }
+
+        if (slot.instance) {
+            slot.instance->set_panel_id(panel_id);
+            slot.instance->set_config(entry.config);
+            slot.component_name = slot.instance->get_component_name();
+        } else {
+            slot.component_name = "panel_widget_" + entry.id;
+        }
+#if defined(__cpp_exceptions)
+    } catch (const std::exception& e) {
+        spdlog::error("[PanelWidgetManager] Widget '{}' configuration failed: {}", entry.id,
+                      e.what());
+        return std::nullopt;
+    }
+#else
+    }
+#endif
+    return slot;
+}
+
+/// Create the card-styled background object for @p card in @p container,
+/// placed in its grid cell.
+lv_obj_t* create_card_background(lv_obj_t* container, const CardRect& card,
+                                 const CellMetrics& metrics) {
+    lv_obj_t* card_bg = lv_obj_create(container);
+    lv_obj_remove_style(card_bg, nullptr, LV_PART_MAIN);
+    lv_obj_add_style(card_bg, ThemeManager::instance().get_style(StyleRole::Card), LV_PART_MAIN);
+    lv_obj_set_style_pad_all(card_bg, 0, 0);
+    lv_obj_remove_flag(card_bg, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(card_bg, LV_OBJ_FLAG_SCROLLABLE);
+    // Set initial size from the track dimensions so the card renders at
+    // approximately the right shape on the first frame, before the grid layout
+    // resolves. Grid STRETCH overrides once layout runs.
+    if (metrics.cell_w > 0 && metrics.cell_h > 0) {
+        lv_obj_set_size(
+            card_bg,
+            static_cast<int>(grid_track_extent(metrics.cell_w, metrics.gutter, card.colspan)),
+            static_cast<int>(grid_track_extent(metrics.cell_h, metrics.gutter, card.rowspan)));
+    }
+    lv_obj_set_grid_cell(card_bg, LV_GRID_ALIGN_STRETCH, card.col, card.colspan,
+                         LV_GRID_ALIGN_STRETCH, card.row, card.rowspan);
+    spdlog::debug("[PanelWidgetManager] Card background at ({},{} {}x{} tracks)", card.col,
+                  card.row, card.colspan, card.rowspan);
+    return card_bg;
+}
+
+struct TileCell {
+    int col, row, colspan, rowspan;
+};
+
+// Tell a tile the cell it holds: its attached instance (if any) through
+// notify_size_changed(), which records the grant first so a widget that
+// rebuilds its contents later lays them out against the same cell, and the AMS
+// mini status (a pure XML widget) its width.
+void announce_tile_size(lv_obj_t* tile, const std::string& widget_id, PanelWidget* instance,
+                        const TileCell& cell, const CellMetrics& metrics) {
+    const int width =
+        static_cast<int>(grid_track_extent(metrics.cell_w, metrics.gutter, cell.colspan));
+    if (instance) {
+        instance->notify_size_changed(
+            cell.colspan, cell.rowspan, width,
+            static_cast<int>(grid_track_extent(metrics.cell_h, metrics.gutter, cell.rowspan)));
+    }
+    if (widget_id == "ams") {
+        lv_obj_t* ams_child = lv_obj_get_child(tile, 0);
+        if (ams_child && ui_ams_mini_status_is_valid(ams_child)) {
+            ui_ams_mini_status_set_width(ams_child, width);
+        }
+    }
+}
+
+// Create one tile in its grid cell: the XML component, its name and tile flag,
+// the gated treatment or the attached PanelWidget (moved into @p result), and
+// the size notification. Returns the tile root, or nullptr if creation failed.
+lv_obj_t* create_tile(lv_obj_t* container, WidgetSlot& slot, const TileCell& cell,
+                      const CellMetrics& metrics,
+                      std::vector<std::unique_ptr<PanelWidget>>& result) {
+    const auto t_create = std::chrono::steady_clock::now();
+
+    // Create XML component
+    auto* widget =
+        static_cast<lv_obj_t*>(lv_xml_create(container, slot.component_name.c_str(),
+                                             slot.instance ? slot.instance->xml_attrs() : nullptr));
+    if (!widget) {
+        spdlog::warn("[PanelWidgetManager] Failed to create widget: {} (component: {})",
+                     slot.widget_id, slot.component_name);
+        return nullptr;
+    }
+
+    const auto t_attach = std::chrono::steady_clock::now();
+
+    // Place in grid cell
+    lv_obj_set_grid_cell(widget, LV_GRID_ALIGN_STRETCH, cell.col, cell.colspan,
+                         LV_GRID_ALIGN_STRETCH, cell.row, cell.rowspan);
+
+    // Tag widget with its config ID so GridEditMode can identify it
+    lv_obj_set_name(widget, slot.widget_id.c_str());
+
+    // Mark the tile root so tree walks that only make sense at page
+    // level stop here. See PANEL_WIDGET_TILE_FLAG in panel_widget.h.
+    lv_obj_add_flag(widget, PANEL_WIDGET_TILE_FLAG);
+
+    spdlog::debug("[PanelWidgetManager] Placed widget '{}' at ({},{} {}x{})", slot.widget_id,
+                  cell.col, cell.row, cell.colspan, cell.rowspan);
+
+    // Apply gated visual treatment — widget is placed but hardware not detected.
+    // Stack the widget's own type icon underneath a slash-circle badge, both
+    // centered, so the user can tell *which* widget is disabled (filament,
+    // AMS, etc.) and that it's currently inactive. Both icons are FLOATING
+    // so they sit on top of any existing widget content.
+    if (slot.hardware_gated) {
+        lv_obj_set_style_opa(widget, LV_OPA_40, 0);
+        lv_obj_add_state(widget, LV_STATE_DISABLED);
+        // LV_STATE_DISABLED alone is not enough. A tile's tap handler is
+        // usually declared as an <event_cb> on its XML component root, so
+        // it is bound when the tile is PLACED - independent of gating -
+        // and a gated tile could still open a panel describing hardware
+        // that is not there. Clearing CLICKABLE takes it out of the
+        // indev hit test entirely, so the press walks up to the parent
+        // instead. Safe without a restore path: an un-gate rebuilds the
+        // tile from scratch (see the gate observers' rebuild).
+        lv_obj_remove_flag(widget, LV_OBJ_FLAG_CLICKABLE);
+
+        const auto* gated_def = find_widget_def(slot.widget_id);
+        const char* type_icon = (gated_def && gated_def->icon) ? gated_def->icon : "cancel";
+
+        // One step down from the badge (lg 48px vs xl 64px). Both glyphs
+        // are round, so at equal size they coincide almost exactly and
+        // the pair reads as one muddy shape rather than "this widget,
+        // unavailable" - the badge has to ring the type icon, not sit on
+        // top of it.
+        const char* type_icon_attrs[] = {
+            "src",    type_icon,   "size",  "lg",           "variant", "muted", "align",
+            "center", "clickable", "false", "event_bubble", "true",    nullptr};
+        if (auto* type_overlay =
+                static_cast<lv_obj_t*>(lv_xml_create(widget, "icon", type_icon_attrs))) {
+            lv_obj_add_flag(type_overlay, LV_OBJ_FLAG_FLOATING);
+            lv_obj_set_style_opa(type_overlay, LV_OPA_COVER, 0);
+        }
+
+        const char* badge_attrs[] = {"src",          "cancel", "size",   "xl",        "variant",
+                                     "muted",        "align",  "center", "clickable", "false",
+                                     "event_bubble", "true",   nullptr};
+        if (auto* badge = static_cast<lv_obj_t*>(lv_xml_create(widget, "icon", badge_attrs))) {
+            lv_obj_add_flag(badge, LV_OBJ_FLAG_FLOATING);
+            lv_obj_set_style_opa(badge, LV_OPA_COVER, 0);
+        }
+
+        spdlog::debug("[PanelWidgetManager] Widget '{}' gated: {}", slot.widget_id,
+                      slot.gate_hint ? slot.gate_hint : "hardware not detected");
+    }
+
+    // Attach the pre-created PanelWidget instance if present and NOT gated
+    PanelWidget* attached = nullptr;
+    if (slot.instance && !slot.hardware_gated) {
+        if (auto* sizing = slot.instance->tile_sizing()) {
+            sizing->set_content_root(widget);
+        }
+        slot.instance->attach_tile(widget, lv_scr_act());
+        attached = slot.instance.get();
+        result.push_back(std::move(slot.instance));
+    }
+    announce_tile_size(widget, slot.widget_id, attached, cell, metrics);
+    log_if_slow_build(slot.widget_id.c_str(), t_create, t_attach);
+    return widget;
+}
+} // namespace
 
 std::vector<std::unique_ptr<PanelWidget>>
 PanelWidgetManager::populate_widgets(const std::string& panel_id, lv_obj_t* container,
@@ -225,116 +660,14 @@ PanelWidgetManager::populate_widgets(const std::string& panel_id, lv_obj_t* cont
 
     auto& widget_config = get_widget_config(panel_id);
 
-    // Resolved widget slot: holds the widget ID, resolved XML component name,
-    // per-widget config, and optionally a pre-created PanelWidget instance.
-    struct WidgetSlot {
-        std::string widget_id;
-        std::string component_name;
-        nlohmann::json config;
-        std::unique_ptr<PanelWidget> instance; // nullptr for pure-XML widgets
-        bool hardware_gated = false;           // Gate subject is 0
-        const char* gate_hint = nullptr;       // Human-readable hint
-    };
-
     // Collect enabled + hardware-available widgets
     std::vector<WidgetSlot> enabled_widgets;
     for (const auto& entry : widget_config.page_entries(page_index)) {
         if (!entry.enabled) {
             continue;
         }
-
-        // Check hardware gate — flag widgets whose hardware isn't present.
-        // Gates are defined in PanelWidgetDef::hardware_gate_subject and checked
-        // here instead of XML bind_flag_if_eq to avoid orphaned dividers.
-        const auto* def = find_widget_def(entry.id);
-        bool gated = false;
-        const char* hint = nullptr;
-        if (def && def->hardware_gate_subject) {
-            lv_subject_t* gate = lv_xml_get_subject(nullptr, def->hardware_gate_subject);
-            if (gate && lv_subject_get_int(gate) == 0) {
-                gated = true;
-                hint = def->hardware_gate_hint;
-            }
-        }
-
-        WidgetSlot slot;
-        slot.widget_id = entry.id;
-        slot.config = entry.config;
-
-        // Build + configure the widget defensively: a malformed per-widget config
-        // (or a throwing factory/set_config) must skip only THIS widget, not abort
-        // the whole dashboard rebuild. Guard per-iteration so one bad entry never
-        // takes the page down with it.
-        try {
-            // Acquire instance: reuse existing or create via factory
-            auto reuse_it = reuse.find(entry.id);
-            if (reuse_it != reuse.end()) {
-                slot.instance = std::move(reuse_it->second);
-                reuse.erase(reuse_it);
-                spdlog::debug("[PanelWidgetManager] Reusing widget instance '{}'", entry.id);
-            } else if (def && def->factory) {
-                slot.instance = def->factory(entry.id);
-            }
-
-            if (slot.instance) {
-                slot.instance->set_panel_id(panel_id);
-                slot.instance->set_config(entry.config);
-                slot.component_name = slot.instance->get_component_name();
-            } else {
-                slot.component_name = "panel_widget_" + entry.id;
-            }
-        } catch (const std::exception& e) {
-            spdlog::error("[PanelWidgetManager] Widget '{}' configuration failed: {}", entry.id,
-                          e.what());
-            continue;
-        }
-
-        slot.hardware_gated = gated;
-        slot.gate_hint = hint;
-
-        enabled_widgets.push_back(std::move(slot));
-    }
-
-    // If firmware_restart is NOT already in the list (user disabled it),
-    // conditionally inject it as the LAST widget when Klipper is NOT READY.
-    // This ensures the restart button is always reachable during shutdown, error,
-    // or startup (e.g., stuck trying to connect to an MCU).
-    bool has_firmware_restart = false;
-    for (const auto& slot : enabled_widgets) {
-        if (slot.widget_id == "firmware_restart") {
-            has_firmware_restart = true;
-            break;
-        }
-    }
-    bool fw_restart_injected = false;
-    if (!has_firmware_restart) {
-        // Suppress injection until Moonraker has actually reported state — the
-        // klippy_state subject defaults to SHUTDOWN, which produced a brief
-        // firmware_restart widget flash on every launch once UpdateQueue began
-        // buffering (rather than dropping) freeze-window callbacks (1d13ed6b4).
-        lv_subject_t* conn = lv_xml_get_subject(nullptr, "printer_connection_state");
-        bool connected =
-            conn && lv_subject_get_int(conn) == static_cast<int>(ConnectionState::CONNECTED);
-        lv_subject_t* klippy = lv_xml_get_subject(nullptr, "klippy_state");
-        if (connected && klippy) {
-            int state = lv_subject_get_int(klippy);
-            // Don't inject the restart button for a transient SHUTDOWN caused by a
-            // SAVE_CONFIG or user-initiated restart — Klipper returns to READY on
-            // its own within seconds. is_expected_restart() is the same window the
-            // status icon and nav manager consult.
-            bool expected_restart = EmergencyStopOverlay::instance().is_expected_restart();
-            if (state != static_cast<int>(KlippyState::READY) && !expected_restart) {
-                const char* state_names[] = {"READY", "STARTUP", "SHUTDOWN", "ERROR"};
-                const char* name = (state >= 0 && state <= 3) ? state_names[state] : "UNKNOWN";
-                WidgetSlot slot;
-                slot.widget_id = "firmware_restart";
-                slot.component_name = "panel_widget_firmware_restart";
-                // Insert at front so auto-placement puts it upper-left (first in
-                // the free cell list), not bottom-right where it blocks real widgets.
-                enabled_widgets.insert(enabled_widgets.begin(), std::move(slot));
-                fw_restart_injected = true;
-                spdlog::debug("[PanelWidgetManager] Injected firmware_restart (Klipper {})", name);
-            }
+        if (auto slot = resolve_slot(panel_id, entry, reuse)) {
+            enabled_widgets.push_back(std::move(*slot));
         }
     }
 
@@ -346,7 +679,7 @@ PanelWidgetManager::populate_widgets(const std::string& panel_id, lv_obj_t* cont
         std::vector<std::string> new_ids;
         new_ids.reserve(enabled_widgets.size());
         for (const auto& slot : enabled_widgets) {
-            new_ids.push_back(slot.hardware_gated ? slot.widget_id + "~gated" : slot.widget_id);
+            new_ids.push_back(visible_id(slot.widget_id, slot.hardware_gated));
         }
 
         auto cache_key = make_cache_key(panel_id, page_index);
@@ -455,13 +788,20 @@ PanelWidgetManager::populate_widgets(const std::string& panel_id, lv_obj_t* cont
     // one. Ordering them anyway keeps the invariant that nothing reads a
     // coordinate before the pass that owns its units has run.
     //
-    // Neither runs while Klipper is not READY. A transient firmware_restart
-    // widget is occupying a cell then, so this is not the user's layout, and
-    // both of these persist — one stamps the grid, the other can reseat every
-    // coordinate. Freezing either from a transient arrangement is the same
-    // mistake the write-back below refuses to make; deferring costs nothing,
-    // because the next READY populate resolves it cleanly.
-    if (fw_restart_injected) {
+    // Neither runs while a connected printer reports Klipper not READY: that is
+    // not a view of the user's layout, and both of these persist — one stamps
+    // the grid, the other can reseat every coordinate. Freezing either from
+    // such an arrangement is the same mistake the write-back below refuses to
+    // make; deferring costs nothing, because the next READY populate resolves
+    // it cleanly. Both halves of the condition are load-bearing — see the
+    // write-back for why klippy_state alone is not enough.
+    lv_subject_t* conn_layout = lv_xml_get_subject(nullptr, "printer_connection_state");
+    lv_subject_t* klippy_layout = lv_xml_get_subject(nullptr, "klippy_state");
+    const bool layout_state_transient =
+        conn_layout &&
+        lv_subject_get_int(conn_layout) == static_cast<int>(ConnectionState::CONNECTED) &&
+        klippy_layout && lv_subject_get_int(klippy_layout) != static_cast<int>(KlippyState::READY);
+    if (layout_state_transient) {
         spdlog::debug("[PanelWidgetManager] '{}': deferring layout resolution — Klipper is not "
                       "READY, so this arrangement is transient",
                       panel_id);
@@ -489,6 +829,27 @@ PanelWidgetManager::populate_widgets(const std::string& panel_id, lv_obj_t* cont
     // Build grid placement tracker to compute positions
     GridLayout grid(breakpoint, grid_dims);
 
+    // Track geometry for the placement pass. The layout is activated much
+    // further down, so this is the only way to know a span's pixel extent while
+    // spans are still being decided; it comes from the same content box the
+    // track counts did, so the two cannot disagree.
+    const CellMetrics place_metrics = grid_cell_metrics(content_w, content_h, grid_dims.cols,
+                                                        grid_dims.rows, GridLayout::gutter_px());
+
+    // Hand the measured tracks to every tile BEFORE the placement pass asks
+    // fits_at(). TileSizing's whole-cell floor must be measured against the
+    // tracks this content box actually built: quantising to the nearest whole
+    // cell can deliver a track smaller than the tier's GRID_CELL target
+    // (31.25px against 34 at 480x272), and a tile left on the nominal target
+    // rejects its authored span, grows, and lands on a later anchor.
+    for (auto& slot : enabled_widgets) {
+        if (slot.instance) {
+            if (TileSizing* sizing = slot.instance->tile_sizing()) {
+                sizing->set_cell_metrics(place_metrics);
+            }
+        }
+    }
+
     // Correlate widget entries with config entries to get grid positions
     const auto& entries = widget_config.page_entries(page_index);
 
@@ -514,16 +875,13 @@ PanelWidgetManager::populate_widgets(const std::string& panel_id, lv_obj_t* cont
             std::find_if(entries.begin(), entries.end(),
                          [&](const PanelWidgetEntry& e) { return e.id == slot.widget_id; });
 
-        // entry_it->enabled matters here even though enabled_widgets was built
-        // from enabled entries only: the temporary firmware_restart tile is
-        // SYNTHESIZED into that list, so its config entry can be disabled while
-        // still carrying a stale col/row from a previous placement. Front-
-        // inserted, it is the first widget this pass examines - so without this
-        // check it re-anchors on that stale cell and a user-anchored widget
-        // whose saved rectangle overlaps it collides and falls to auto-place.
-        // Every GridEditMode occupancy loop already filters on enabled; this
-        // pass was the one that did not.
-        if (entry_it != entries.end() && entry_it->enabled && entry_it->has_grid_position()) {
+        // enabled_widgets is built from enabled entries only, so this is a guard
+        // on that invariant rather than a live filter. A disabled entry keeps
+        // whatever col/row it last held, and anchoring on that cell would let it
+        // outrank a user-anchored widget whose saved rectangle overlaps it.
+        // Every GridEditMode occupancy loop filters on enabled for the same
+        // reason.
+        if (entry_it != entries.end() && entry_it->is_placed()) {
             // Clamp the SPAN to the grid before clamping the position. A span
             // saved on a 6-column landscape grid cannot exist on a 2-column
             // portrait one; leaving it unclamped made can_place() fail, dropped
@@ -538,12 +896,30 @@ PanelWidgetManager::populate_widgets(const std::string& panel_id, lv_obj_t* cont
             int colspan = fitted.colspan;
             int rowspan = fitted.rowspan;
 
-            // Pin print_status to bottom row on first layout (no user edit yet).
-            // Skip pinning if the grid edit mode is active — user is positioning manually.
-            // We detect user-positioned widgets by checking if the row would differ;
-            // during initial layout (auto-placed), the row will be -1 and get_grid_position
-            // won't match, so this only fires for the default layout.
-            // TODO: replace with explicit "user_positioned" flag in config
+            // Reading fits_at here is safe only because of the ordering this
+            // pass runs in, all within one tick: the previous tree is detached
+            // and scheduled for deferred deletion but NOT yet freed, so an
+            // instance still holding a root from the last pass points at live
+            // memory, and attach() below replaces it before the free happens.
+            // Making the tree teardown synchronous, or deferring this grow to a
+            // later tick, would leave that root dangling.
+            //
+            // A span saved against a different panel, language or theme can be
+            // smaller than this widget can draw. Grow the PLACEMENT request
+            // only: want_colspan below stays the saved span, so the #1216 guard
+            // keeps a size this panel forced out of serialize_pages(). Growing
+            // before place() means a grown span that collides is refused here
+            // and falls through to auto-place, as any other span would.
+            if (slot.instance) {
+                const auto* grow_def = find_widget_def(slot.widget_id);
+                const auto [grown_c, grown_r] = grow_span_to_fit(
+                    [&](int w, int h) { return slot.instance->fits_at(w, h); }, colspan, rowspan,
+                    grow_def ? grow_def->effective_max_colspan() : colspan,
+                    grow_def ? grow_def->effective_max_rowspan() : rowspan, anchor_col_step,
+                    anchor_row_step, place_metrics);
+                colspan = grown_c;
+                rowspan = grown_r;
+            }
 
             if (grid.place({slot.widget_id, col, row, colspan, rowspan})) {
                 placed.push_back(
@@ -693,6 +1069,12 @@ PanelWidgetManager::populate_widgets(const std::string& panel_id, lv_obj_t* cont
             const int grow_rows = def ? std::min(want_rows, def->effective_max_rowspan()) : 1;
             const int min_cols = def ? std::min(def->effective_min_colspan(), want_cols) : 1;
             const int min_rows = def ? std::min(def->effective_min_rowspan(), want_rows) : 1;
+            // These are registry spans, not a fits_at answer: auto-place seats
+            // at the authored default, which every definition holds at or above
+            // its own minimum. A widget whose fits_at declines its authored
+            // default would be seated unmeasured here, where the anchored path
+            // above would have grown it. No definition is shaped that way; one
+            // that were would need this path to consult grow_span_to_fit too.
             // The boundaries this widget may sit on — a whole cell unless it
             // declares half-cell support. Same source edit mode snaps drags and
             // resizes to, so the two paths cannot disagree (#1126).
@@ -790,14 +1172,7 @@ PanelWidgetManager::populate_widgets(const std::string& panel_id, lv_obj_t* cont
     }
 
     for (const auto& f : failures) {
-        if (fw_restart_injected) {
-            // Grid is full only because the temporary firmware_restart widget is
-            // occupying a slot. Don't disable the widget or warn — it will get
-            // its space back once Klipper returns to READY.
-            spdlog::info("[PanelWidgetManager] Skipping widget '{}' — grid full due to "
-                         "temporary firmware_restart injection",
-                         f.widget_id);
-        } else if (f.reason == GridLayout::PlacementFailure::GridFull) {
+        if (f.reason == GridLayout::PlacementFailure::GridFull) {
             evict_for_full_grid(f.widget_id);
         } else {
             disable_unplaceable(f.widget_id, f.reason);
@@ -806,33 +1181,37 @@ PanelWidgetManager::populate_widgets(const std::string& panel_id, lv_obj_t* cont
 
     for (const auto& p : placed) {
         if (p.colspan != p.want_colspan || p.rowspan != p.want_rowspan) {
-            spdlog::debug("[PanelWidgetManager] Widget '{}' placed at reduced span {}x{} "
+            spdlog::debug("[PanelWidgetManager] Widget '{}' placed at span {}x{} "
                           "(wanted {}x{}, grid is {}x{})",
                           enabled_widgets[p.slot_index].widget_id, p.colspan, p.rowspan,
                           p.want_colspan, p.want_rowspan, grid.cols(), grid.rows());
         }
     }
 
-    // Write computed positions back to config entries and persist to disk.
-    // This ensures auto-placed positions survive the next load() call
-    // (get_widget_config reloads from the JSON store after mark_dirty).
-    // Only write positions for widgets that are enabled in config — skip
-    // temporarily injected widgets (e.g., firmware_restart during Klipper error)
-    // whose positions would block cells for real widgets on subsequent layouts.
-    // Never write back OR persist a layout computed while Klipper is not READY.
-    // When fw_restart_injected is true a temporary firmware_restart widget is
-    // occupying a grid cell, so this placement is not the user's intended layout.
-    //   - Saving it freezes the transient arrangement to disk, so it survives the
-    //     next boot (raza616: "tiles revert to a previous layout after any reset").
-    //   - Even just mutating the in-memory entries locks the transient slot in:
-    //     the gate observer rebuilds on the next klippy_state transition WITHOUT
-    //     reloading the cached config, so the following READY populate would see
-    //     an explicit position, never re-derive it, and never persist it.
-    // The widgets for THIS frame are placed from `placed` regardless (the per-cell
-    // assignment below uses it, not entry.col), so skipping the write-back only
-    // defers auto-placed positions to the next READY populate, which re-derives
-    // and persists them cleanly.
-    if (!fw_restart_injected) {
+    // Write computed positions back to config entries and persist to disk, so
+    // auto-placed positions survive the next load() call (get_widget_config
+    // reloads from the JSON store after mark_dirty). Only widgets that are
+    // enabled in config get a position written.
+    //
+    // Never persist a layout computed while a CONNECTED printer reports Klipper
+    // not READY. A populate in that state is not a view of the user's intended
+    // arrangement, and freezing it to disk is what makes tiles revert to a
+    // previous layout after a power cycle or a FIRMWARE_RESTART. The widgets for
+    // THIS frame are placed from `placed` regardless, so skipping the write-back
+    // only defers auto-placed positions to the next READY populate, which
+    // re-derives and persists them.
+    //
+    // The connection half is load-bearing: klippy_state reads SHUTDOWN before
+    // Moonraker has reported anything, so gating on it alone would also refuse
+    // the first write-back of every launch, and an auto-placed layout would
+    // never reach disk at all.
+    lv_subject_t* conn_now = lv_xml_get_subject(nullptr, "printer_connection_state");
+    lv_subject_t* klippy_now = lv_xml_get_subject(nullptr, "klippy_state");
+    const bool connected =
+        conn_now && lv_subject_get_int(conn_now) == static_cast<int>(ConnectionState::CONNECTED);
+    const bool klippy_not_ready =
+        klippy_now && lv_subject_get_int(klippy_now) != static_cast<int>(KlippyState::READY);
+    if (!(connected && klippy_not_ready)) {
         auto& mut_entries = widget_config.page_entries_mut(page_index);
         bool any_written = false;
         for (const auto& p : placed) {
@@ -879,11 +1258,9 @@ PanelWidgetManager::populate_widgets(const std::string& panel_id, lv_obj_t* cont
     // Generate grid descriptors sized to actual content
     // Columns: use breakpoint column count (fills available width)
     // Rows: use max of current and cached row count for stable sizing
-    // Installing a fresh generation for this key is the first moment a
-    // previously-retired one is unreferenced (the container's style re-points
-    // to the new arrays at the end of this populate) — drop it now.
-    retired_grid_descriptors_.erase(make_cache_key(panel_id, page_index));
-    auto& dsc = grid_descriptors_[make_cache_key(panel_id, page_index)];
+    // Built as a local and handed to the container's slot at install time
+    // (near the end of this populate) — that handoff owns the arrays' lifetime.
+    GridDescriptors dsc;
     dsc.col_dsc = GridLayout::make_col_dsc(cols);
     dsc.row_dsc = GridLayout::make_row_dsc(grid_rows);
 
@@ -904,40 +1281,18 @@ PanelWidgetManager::populate_widgets(const std::string& panel_id, lv_obj_t* cont
     lv_obj_set_style_pad_row(container, gutter, 0);
 
     // Compute cell pixel dimensions for size callbacks and card backgrounds.
-    // Same content box the track counts came from, so the two cannot disagree.
-    CellMetrics metrics = grid_cell_metrics(content_w, content_h, cols, grid_rows, gutter);
-    int cell_w = static_cast<int>(metrics.cell_w);
-    int cell_h = static_cast<int>(metrics.cell_h);
+    // Same derivation the placement pass used, not a second one: the promise a
+    // widget is sized against and the fits_at() answers that seated it must
+    // come from one CellMetrics.
+    const CellMetrics& metrics = place_metrics;
     spdlog::debug("[PanelWidgetManager] Track geometry: {:.2f}x{:.2f}px, gutter {}px",
                   metrics.cell_w, metrics.cell_h, gutter);
 
-    // Create merged card backgrounds behind adjacent widgets that ask for one.
-    // BFS flood-fill finds connected components of merging widgets, then a
-    // single card object spans each component's bounding rectangle.
-    //
-    // All analysis happens in TRACK coordinates - the same units the grid is
-    // addressed in. It used to work in cells and convert back, which forced
-    // every widget off a cell boundary out of the merge entirely: a widget that
-    // supports half-cell resolution can be dragged onto an odd track, and
-    // dividing that position into cells truncates it, so the card would have
-    // landed half a cell from the widget it belongs to. Excluding those left
-    // them with no background at all. Tracks divide exactly, so there is
-    // nothing to exclude.
-    //
-    // Use ALL enabled config entries (not just currently-placed ones) so that
-    // cards for hardware-gated widgets appear from the first frame, preventing
-    // the grid from visually jumping when hardware gates fire.
+    // Card backgrounds behind adjacent widgets that ask for one, from ALL
+    // enabled config entries (not just currently-placed ones) so that cards for
+    // hardware-gated widgets appear from the first frame, preventing the grid
+    // from visually jumping when hardware gates fire.
     {
-        // Tracks covered by widgets that share the fused card, and tracks
-        // blocked by widgets that bring a background of their own.
-        struct TrackHash {
-            size_t operator()(const std::pair<int, int>& p) const {
-                return std::hash<int>()(p.first) ^ (std::hash<int>()(p.second) << 16);
-            }
-        };
-        std::unordered_set<std::pair<int, int>, TrackHash> merged_tracks;
-        std::unordered_set<std::pair<int, int>, TrackHash> occupied_by_own_card;
-
         // Where each widget ACTUALLY landed, which is not always where its entry
         // asks for. Auto-placement and span reduction both move a widget without
         // touching the saved entry, so the authored position is a request, not a
@@ -950,8 +1305,9 @@ PanelWidgetManager::populate_widgets(const std::string& panel_id, lv_obj_t* cont
             }
         }
 
+        std::vector<CardFootprint> footprints;
         for (const auto& entry : widget_config.page_entries(page_index)) {
-            if (!entry.enabled || !entry.has_grid_position()) {
+            if (!entry.is_placed()) {
                 continue;
             }
             // Prefer where the widget actually landed; fall back to the authored
@@ -996,147 +1352,12 @@ PanelWidgetManager::populate_widgets(const std::string& panel_id, lv_obj_t* cont
             // a widget that opts out blocks merges through the tracks it
             // touches and is on its own for a background.
             const auto* def = find_widget_def(entry.id);
-            auto& covered = (def && def->merges_into_card) ? merged_tracks : occupied_by_own_card;
-            for (int r = fitted.row; r < fitted.row + fitted.rowspan; r++) {
-                for (int c = fitted.col; c < fitted.col + fitted.colspan; c++) {
-                    covered.insert({c, r});
-                }
-            }
+            footprints.push_back({fitted.col, fitted.row, fitted.colspan, fitted.rowspan,
+                                  def && def->merges_into_card});
         }
 
-        // BFS flood-fill to find connected components (4-directional adjacency)
-        std::unordered_set<std::pair<int, int>, TrackHash> visited;
-        for (const auto& track : merged_tracks) {
-            if (visited.count(track)) {
-                continue;
-            }
-
-            // BFS from this track to collect the connected component
-            std::queue<std::pair<int, int>> q;
-            q.push(track);
-            visited.insert(track);
-
-            std::vector<std::pair<int, int>> component_tracks;
-            while (!q.empty()) {
-                auto [c, r] = q.front();
-                q.pop();
-                component_tracks.push_back({c, r});
-
-                const std::pair<int, int> neighbors[] = {
-                    {c - 1, r}, {c + 1, r}, {c, r - 1}, {c, r + 1}};
-                for (const auto& n : neighbors) {
-                    if (merged_tracks.count(n) && !visited.count(n)) {
-                        visited.insert(n);
-                        q.push(n);
-                    }
-                }
-            }
-
-            // Build the card coverage: bounding box of the component, filling
-            // gaps between merging widgets, but excluding tracks occupied by a
-            // widget that paints its own background and intrudes on the region.
-            int min_col = component_tracks[0].first;
-            int max_col = min_col;
-            int min_row = component_tracks[0].second;
-            int max_row_card = min_row;
-            for (const auto& [c, r] : component_tracks) {
-                min_col = std::min(min_col, c);
-                max_col = std::max(max_col, c);
-                min_row = std::min(min_row, r);
-                max_row_card = std::max(max_row_card, r);
-            }
-
-            // Cover the component's bounding box, minus any track a non-merging
-            // widget sits in, then split what is left into maximal rectangles.
-            //
-            // Both halves of that matter. Running the bounding box straight
-            // over a non-merging widget makes the card butt against that
-            // widget's own card with no gutter, and two abutting Card surfaces
-            // read as one continuous slab — a readout block and the graph below
-            // it stop looking like separate things. Carving the tracks out is
-            // what keeps the gutter.
-            //
-            // Every emitted piece is still a rectangle. The ragged look this
-            // used to have came from carving a hole in the MIDDLE of a run:
-            // ams sat one cell into the readout row while painting its own
-            // card, which split that row into three pieces of differing
-            // heights. It merges now, so a carve-out only ever trims an edge.
-            std::unordered_set<std::pair<int, int>, TrackHash> remaining;
-            for (int r = min_row; r <= max_row_card; r++) {
-                for (int c = min_col; c <= max_col; c++) {
-                    if (!occupied_by_own_card.count({c, r})) {
-                        remaining.insert({c, r});
-                    }
-                }
-            }
-
-            while (!remaining.empty()) {
-                // Top-left of what is left: min row, then min col.
-                auto top_left = *std::min_element(
-                    remaining.begin(), remaining.end(), [](const auto& a, const auto& b) {
-                        return a.second < b.second || (a.second == b.second && a.first < b.first);
-                    });
-
-                int start_col = top_left.first;
-                int start_row = top_left.second;
-
-                int end_col = start_col;
-                while (remaining.count({end_col + 1, start_row})) {
-                    end_col++;
-                }
-
-                // Extend down only while every column in the run is present, so
-                // the result is always a full rectangle.
-                int end_row = start_row;
-                for (;;) {
-                    bool can_extend = true;
-                    for (int c = start_col; c <= end_col; c++) {
-                        if (!remaining.count({c, end_row + 1})) {
-                            can_extend = false;
-                            break;
-                        }
-                    }
-                    if (!can_extend) {
-                        break;
-                    }
-                    end_row++;
-                }
-
-                for (int r = start_row; r <= end_row; r++) {
-                    for (int c = start_col; c <= end_col; c++) {
-                        remaining.erase({c, r});
-                    }
-                }
-
-                // Already in track coordinates, which is what the grid takes.
-                int track_col = start_col;
-                int track_row = start_row;
-                int track_colspan = end_col - start_col + 1;
-                int track_rowspan = end_row - start_row + 1;
-
-                // Create a plain lv_obj with Card styling as the background
-                lv_obj_t* card_bg = lv_obj_create(container);
-                lv_obj_remove_style(card_bg, nullptr, LV_PART_MAIN);
-                lv_obj_add_style(card_bg, ThemeManager::instance().get_style(StyleRole::Card),
-                                 LV_PART_MAIN);
-                lv_obj_set_style_pad_all(card_bg, 0, 0);
-                lv_obj_remove_flag(card_bg, LV_OBJ_FLAG_CLICKABLE);
-                lv_obj_remove_flag(card_bg, LV_OBJ_FLAG_SCROLLABLE);
-                // Set initial size from cached track dimensions so the card renders
-                // at approximately the right shape on the first frame, before the
-                // grid layout resolves. Grid STRETCH overrides once layout runs.
-                if (cell_w > 0 && cell_h > 0) {
-                    lv_obj_set_size(
-                        card_bg,
-                        static_cast<int>(grid_track_extent(metrics.cell_w, gutter, track_colspan)),
-                        static_cast<int>(grid_track_extent(metrics.cell_h, gutter, track_rowspan)));
-                }
-                lv_obj_set_grid_cell(card_bg, LV_GRID_ALIGN_STRETCH, track_col, track_colspan,
-                                     LV_GRID_ALIGN_STRETCH, track_row, track_rowspan);
-
-                spdlog::debug("[PanelWidgetManager] Card background at ({},{} {}x{} tracks)",
-                              track_col, track_row, track_colspan, track_rowspan);
-            }
+        for (const CardRect& card : card_background_rects(footprints)) {
+            create_card_background(container, card, metrics);
         }
     }
 
@@ -1144,106 +1365,21 @@ PanelWidgetManager::populate_widgets(const std::string& panel_id, lv_obj_t* cont
     std::vector<std::unique_ptr<PanelWidget>> result;
 
     for (const auto& p : placed) {
+#if defined(__cpp_exceptions)
         try {
-            auto& slot = enabled_widgets[p.slot_index];
-
-            // Create XML component
-            auto* widget = static_cast<lv_obj_t*>(
-                lv_xml_create(container, slot.component_name.c_str(), nullptr));
-            if (!widget) {
-                spdlog::warn("[PanelWidgetManager] Failed to create widget: {} (component: {})",
-                             slot.widget_id, slot.component_name);
-                continue;
-            }
-
-            // Place in grid cell
-            lv_obj_set_grid_cell(widget, LV_GRID_ALIGN_STRETCH, p.col, p.colspan,
-                                 LV_GRID_ALIGN_STRETCH, p.row, p.rowspan);
-
-            // Tag widget with its config ID so GridEditMode can identify it
-            lv_obj_set_name(widget, slot.widget_id.c_str());
-
-            // Mark the tile root so tree walks that only make sense at page
-            // level stop here. See PANEL_WIDGET_TILE_FLAG in panel_widget.h.
-            lv_obj_add_flag(widget, PANEL_WIDGET_TILE_FLAG);
-
-            spdlog::debug("[PanelWidgetManager] Placed widget '{}' at ({},{} {}x{})",
-                          slot.widget_id, p.col, p.row, p.colspan, p.rowspan);
-
-            // Apply gated visual treatment — widget is placed but hardware not detected.
-            // Stack the widget's own type icon underneath a slash-circle badge, both
-            // centered, so the user can tell *which* widget is disabled (filament,
-            // AMS, etc.) and that it's currently inactive. Both icons are FLOATING
-            // so they sit on top of any existing widget content.
-            if (slot.hardware_gated) {
-                lv_obj_set_style_opa(widget, LV_OPA_40, 0);
-                lv_obj_add_state(widget, LV_STATE_DISABLED);
-                // LV_STATE_DISABLED alone is not enough. A tile's tap handler is
-                // usually declared as an <event_cb> on its XML component root, so
-                // it is bound when the tile is PLACED - independent of gating -
-                // and a gated tile could still open a panel describing hardware
-                // that is not there. Clearing CLICKABLE takes it out of the
-                // indev hit test entirely, so the press walks up to the parent
-                // instead. Safe without a restore path: an un-gate rebuilds the
-                // tile from scratch (see the gate observers' rebuild).
-                lv_obj_remove_flag(widget, LV_OBJ_FLAG_CLICKABLE);
-
-                const auto* gated_def = find_widget_def(slot.widget_id);
-                const char* type_icon = (gated_def && gated_def->icon) ? gated_def->icon : "cancel";
-
-                // One step down from the badge (lg 48px vs xl 64px). Both glyphs
-                // are round, so at equal size they coincide almost exactly and
-                // the pair reads as one muddy shape rather than "this widget,
-                // unavailable" - the badge has to ring the type icon, not sit on
-                // top of it.
-                const char* type_icon_attrs[] = {
-                    "src",    type_icon,   "size",  "lg",           "variant", "muted", "align",
-                    "center", "clickable", "false", "event_bubble", "true",    nullptr};
-                if (auto* type_overlay =
-                        static_cast<lv_obj_t*>(lv_xml_create(widget, "icon", type_icon_attrs))) {
-                    lv_obj_add_flag(type_overlay, LV_OBJ_FLAG_FLOATING);
-                    lv_obj_set_style_opa(type_overlay, LV_OPA_COVER, 0);
-                }
-
-                const char* badge_attrs[] = {
-                    "src",    "cancel",    "size",  "xl",           "variant", "muted", "align",
-                    "center", "clickable", "false", "event_bubble", "true",    nullptr};
-                if (auto* badge =
-                        static_cast<lv_obj_t*>(lv_xml_create(widget, "icon", badge_attrs))) {
-                    lv_obj_add_flag(badge, LV_OBJ_FLAG_FLOATING);
-                    lv_obj_set_style_opa(badge, LV_OPA_COVER, 0);
-                }
-
-                spdlog::debug("[PanelWidgetManager] Widget '{}' gated: {}", slot.widget_id,
-                              slot.gate_hint ? slot.gate_hint : "hardware not detected");
-            }
-
-            // Attach the pre-created PanelWidget instance if present and NOT gated
-            if (slot.instance && !slot.hardware_gated) {
-                slot.instance->attach(widget, lv_scr_act());
-
-                // Notify widget of its grid allocation and approximate pixel size
-                slot.instance->on_size_changed(
-                    p.colspan, p.rowspan,
-                    static_cast<int>(grid_track_extent(metrics.cell_w, metrics.gutter, p.colspan)),
-                    static_cast<int>(grid_track_extent(metrics.cell_h, metrics.gutter, p.rowspan)));
-
-                result.push_back(std::move(slot.instance));
-            }
-
-            // Propagate width to AMS mini status (pure XML widget, no PanelWidget)
-            if (slot.widget_id == "ams") {
-                lv_obj_t* ams_child = lv_obj_get_child(widget, 0);
-                if (ams_child && ui_ams_mini_status_is_valid(ams_child)) {
-                    ui_ams_mini_status_set_width(
-                        ams_child, static_cast<int>(grid_track_extent(metrics.cell_w,
-                                                                      metrics.gutter, p.colspan)));
-                }
-            }
+#else
+        {
+#endif
+            create_tile(container, enabled_widgets[p.slot_index],
+                        TileCell{p.col, p.row, p.colspan, p.rowspan}, metrics, result);
+#if defined(__cpp_exceptions)
         } catch (const std::exception& e) {
             spdlog::error("[PanelWidgetManager] Widget '{}' creation failed: {}",
                           enabled_widgets[p.slot_index].widget_id, e.what());
         }
+#else
+        }
+#endif
     }
 
     spdlog::debug("[PanelWidgetManager] Populated {} widgets ({} with factories) via grid for '{}'",
@@ -1253,17 +1389,350 @@ PanelWidgetManager::populate_widgets(const std::string& panel_id, lv_obj_t* cont
     // per-cell grid placement. Install the grid descriptor + activate the grid
     // layout last so the very first grid_update runs over a complete, valid grid
     // in a single clean pass — never over a half-built one (#983).
+    // install_grid_descriptors stores the arrays in the container's
+    // grid_descriptors_ slot (re-pointing the style and only then freeing the
+    // previous generation), so they remain valid for the lifetime of the grid.
     // lv_obj_set_grid_dsc_array() is what turns the container into a live grid;
     // lv_obj_set_layout() is belt-and-suspenders. The explicit update_layout
     // forces that pass now and re-flows widgets whose attach() read a pre-grid
-    // size. `dsc` is stored in grid_descriptors_ (a member), so its backing
-    // arrays remain valid for the lifetime of the active grid.
-    lv_obj_set_grid_dsc_array(container, dsc.col_dsc.data(), dsc.row_dsc.data());
+    // size.
+    install_grid_descriptors(container, std::move(dsc));
     lv_obj_set_layout(container, LV_LAYOUT_GRID);
+    const auto t_layout = std::chrono::steady_clock::now();
     lv_obj_update_layout(container);
+    log_if_slow_build("(grid layout)", t_layout, t_layout);
 
     populating_ = false;
     return result;
+}
+
+std::optional<std::vector<PanelWidgetManager::GateFlip>>
+PanelWidgetManager::gate_flips_only(const std::vector<std::string>& before,
+                                    const std::vector<std::string>& after) {
+    if (before.size() != after.size()) {
+        return std::nullopt;
+    }
+    const std::string_view suffix = GATED_ID_SUFFIX;
+    auto split = [suffix](std::string_view id) {
+        const bool gated =
+            id.size() >= suffix.size() && id.substr(id.size() - suffix.size()) == suffix;
+        if (gated) {
+            id.remove_suffix(suffix.size());
+        }
+        return std::make_pair(id, gated);
+    };
+    std::vector<GateFlip> flips;
+    for (size_t i = 0; i < before.size(); ++i) {
+        const auto b = split(before[i]);
+        const auto a = split(after[i]);
+        if (b.first != a.first) {
+            return std::nullopt;
+        }
+        if (b.second != a.second) {
+            flips.push_back({i, a.second});
+        }
+    }
+    return flips;
+}
+
+std::optional<std::vector<PanelWidget*>>
+PanelWidgetManager::swap_gated_tiles(const std::string& panel_id, lv_obj_t* container,
+                                     int page_index, const std::vector<std::string>& visible_ids,
+                                     const std::vector<GateFlip>& flips,
+                                     std::vector<std::unique_ptr<PanelWidget>>& widgets) {
+    if (!container || populating_) {
+        return std::nullopt;
+    }
+    const int cols =
+        grid_count_tracks(lv_obj_get_style_grid_column_dsc_array(container, LV_PART_MAIN));
+    const int rows =
+        grid_count_tracks(lv_obj_get_style_grid_row_dsc_array(container, LV_PART_MAIN));
+    if (cols <= 0 || rows <= 0) {
+        return std::nullopt;
+    }
+
+    // Locate every flipped tile before touching any, so a miss changes nothing.
+    struct Target {
+        const PanelWidgetEntry* entry;
+        lv_obj_t* tile;
+        TileCell cell;
+        uint32_t index;
+    };
+    std::vector<Target> targets;
+    const auto& entries = get_widget_config(panel_id).page_entries(page_index);
+    for (const auto& flip : flips) {
+        if (flip.index >= visible_ids.size()) {
+            return std::nullopt;
+        }
+        std::string id = visible_ids[flip.index];
+        if (flip.now_gated) {
+            id.resize(id.size() - std::strlen(GATED_ID_SUFFIX));
+        }
+        auto entry = std::find_if(entries.begin(), entries.end(),
+                                  [&id](const auto& e) { return e.enabled && e.id == id; });
+        if (entry == entries.end()) {
+            return std::nullopt;
+        }
+        lv_obj_t* tile = nullptr;
+        const uint32_t count = lv_obj_get_child_count(container);
+        for (uint32_t i = 0; i < count && !tile; ++i) {
+            lv_obj_t* child = lv_obj_get_child(container, static_cast<int32_t>(i));
+            const char* name = lv_obj_get_name(child);
+            if (lv_obj_has_flag(child, PANEL_WIDGET_TILE_FLAG) && name && id == name) {
+                tile = child;
+            }
+        }
+        if (!tile) {
+            return std::nullopt;
+        }
+        targets.push_back({&*entry, tile,
+                           TileCell{lv_obj_get_style_grid_cell_column_pos(tile, LV_PART_MAIN),
+                                    lv_obj_get_style_grid_cell_row_pos(tile, LV_PART_MAIN),
+                                    lv_obj_get_style_grid_cell_column_span(tile, LV_PART_MAIN),
+                                    lv_obj_get_style_grid_cell_row_span(tile, LV_PART_MAIN)},
+                           static_cast<uint32_t>(lv_obj_get_index(tile))});
+    }
+
+    const CellMetrics metrics =
+        grid_cell_metrics(lv_obj_get_content_width(container), lv_obj_get_content_height(container),
+                          cols, rows, GridLayout::gutter_px());
+    populating_ = true;
+    std::vector<std::unique_ptr<PanelWidget>> attached;
+    for (auto& t : targets) {
+        auto inst = std::find_if(widgets.begin(), widgets.end(),
+                                 [&t](const auto& w) { return w && t.entry->id == w->id(); });
+        if (inst != widgets.end()) {
+            (*inst)->detach_tile();
+            widgets.erase(inst);
+        }
+        helix::ui::safe_delete_deferred(t.tile);
+
+        WidgetReuseMap no_reuse;
+        auto slot = resolve_slot(panel_id, *t.entry, no_reuse);
+        if (!slot) {
+            continue;
+        }
+        if (slot->instance) {
+            if (TileSizing* sizing = slot->instance->tile_sizing()) {
+                sizing->set_cell_metrics(metrics);
+            }
+        }
+#if defined(__cpp_exceptions)
+        try {
+#else
+        {
+#endif
+            if (lv_obj_t* tile = create_tile(container, *slot, t.cell, metrics, attached)) {
+                lv_obj_move_to_index(tile, static_cast<int32_t>(t.index));
+            }
+#if defined(__cpp_exceptions)
+        } catch (const std::exception& e) {
+            spdlog::error("[PanelWidgetManager] Widget '{}' creation failed: {}", t.entry->id,
+                          e.what());
+        }
+#else
+        }
+#endif
+    }
+    active_configs_[make_cache_key(panel_id, page_index)] = ActiveWidgetConfig{visible_ids};
+    lv_obj_update_layout(container);
+    populating_ = false;
+
+    std::vector<PanelWidget*> fresh;
+    for (auto& w : attached) {
+        fresh.push_back(w.get());
+        widgets.push_back(std::move(w));
+    }
+    spdlog::debug("[PanelWidgetManager] Swapped {} gate-flipped tile(s) in place for '{}:{}'",
+                  targets.size(), panel_id, page_index);
+    return fresh;
+}
+
+bool PanelWidgetManager::relayout_tiles(const std::string& panel_id, lv_obj_t* container,
+                                        int page_index, const std::vector<std::string>& changed_ids,
+                                        const std::string& resized_id,
+                                        std::vector<std::unique_ptr<PanelWidget>>& widgets) {
+    return relayout_tiles_impl(panel_id, container, page_index, changed_ids, resized_id, widgets,
+                               /*reseat_all=*/false);
+}
+
+bool PanelWidgetManager::reseat_tiles(const std::string& panel_id, lv_obj_t* container,
+                                      int page_index,
+                                      std::vector<std::unique_ptr<PanelWidget>>& widgets) {
+    return relayout_tiles_impl(panel_id, container, page_index, {}, "", widgets,
+                               /*reseat_all=*/true);
+}
+
+bool PanelWidgetManager::relayout_tiles_impl(const std::string& panel_id, lv_obj_t* container,
+                                             int page_index,
+                                             const std::vector<std::string>& changed_ids,
+                                             const std::string& resized_id,
+                                             std::vector<std::unique_ptr<PanelWidget>>& widgets,
+                                             bool reseat_all) {
+    if (!container || populating_) {
+        return false;
+    }
+    const int cols =
+        grid_count_tracks(lv_obj_get_style_grid_column_dsc_array(container, LV_PART_MAIN));
+    const int rows =
+        grid_count_tracks(lv_obj_get_style_grid_row_dsc_array(container, LV_PART_MAIN));
+    if (cols <= 0 || rows <= 0) {
+        return false;
+    }
+    const CellMetrics metrics =
+        grid_cell_metrics(lv_obj_get_content_width(container), lv_obj_get_content_height(container),
+                          cols, rows, GridLayout::gutter_px());
+    const auto& entries = get_widget_config(panel_id).page_entries(page_index);
+
+    // An entry's cell as a populate seats it.
+    auto entry_cell = [&](const PanelWidgetEntry& e) {
+        const auto [col_step, row_step] = GridEditMode::snap_step_for(e.id);
+        const auto f =
+            clamp_to_grid(e.col, e.row, e.colspan, e.rowspan, cols, rows, col_step, row_step);
+        return TileCell{f.col, f.row, f.colspan, f.rowspan};
+    };
+
+    // Check every tile before touching any, so a refusal changes nothing.
+    struct Seat {
+        lv_obj_t* tile;
+        const PanelWidgetEntry* entry;
+        TileCell cell;
+        bool span_changed;
+    };
+    std::vector<Seat> seats;
+    std::vector<lv_obj_t*> cards;
+    const Seat* resized = nullptr;
+    const uint32_t count = lv_obj_get_child_count(container);
+    for (uint32_t i = 0; i < count; ++i) {
+        lv_obj_t* child = lv_obj_get_child(container, static_cast<int32_t>(i));
+        // A hidden child is condemned: safe_delete_deferred() hides what it
+        // queues for deletion.
+        if (lv_obj_has_flag(child, LV_OBJ_FLAG_HIDDEN)) {
+            continue;
+        }
+        const char* name = lv_obj_get_name(child);
+        if (!lv_obj_has_flag(child, PANEL_WIDGET_TILE_FLAG)) {
+            // Card backgrounds are the unnamed grid children; edit mode's own
+            // objects float.
+            if (!name && !lv_obj_has_flag(child, LV_OBJ_FLAG_FLOATING)) {
+                cards.push_back(child);
+            }
+            continue;
+        }
+        auto entry = std::find_if(entries.begin(), entries.end(), [name](const auto& e) {
+            return name && e.enabled && e.id == name;
+        });
+        if (entry == entries.end() || !entry->is_placed()) {
+            return false;
+        }
+        // A tile the edit did not touch must already sit where its entry says.
+        // Populate can seat one elsewhere (auto-placement, a span reduced or
+        // grown for this grid) and does not always write that back, and moving
+        // it to its entry here could land it on another tile.
+        const TileCell cell = entry_cell(*entry);
+        const bool changed = reseat_all || std::find(changed_ids.begin(), changed_ids.end(),
+                                                     entry->id) != changed_ids.end();
+        const bool span_changed =
+            lv_obj_get_style_grid_cell_column_span(child, LV_PART_MAIN) != cell.colspan ||
+            lv_obj_get_style_grid_cell_row_span(child, LV_PART_MAIN) != cell.rowspan;
+        if (!changed &&
+            (lv_obj_get_style_grid_cell_column_pos(child, LV_PART_MAIN) != cell.col ||
+             lv_obj_get_style_grid_cell_row_pos(child, LV_PART_MAIN) != cell.row || span_changed)) {
+            return false;
+        }
+        seats.push_back({child, &*entry, cell, span_changed});
+    }
+    for (const auto& seat : seats) {
+        if (!resized_id.empty() && seat.entry->id == resized_id) {
+            resized = &seat;
+        }
+    }
+    if (!resized_id.empty() && !resized) {
+        return false;
+    }
+    auto instance = std::find_if(widgets.begin(), widgets.end(),
+                                 [&](const auto& w) { return w && resized_id == w->id(); });
+    if (resized && instance != widgets.end() &&
+        !(*instance)->fits_at(static_cast<int>(grid_track_extent(metrics.cell_w, metrics.gutter,
+                                                                 resized->cell.colspan)),
+                              static_cast<int>(grid_track_extent(metrics.cell_h, metrics.gutter,
+                                                                 resized->cell.rowspan)))) {
+        return false;
+    }
+    // Re-seating everything, every tile whose span changes is a resize: each must fit.
+    auto instance_for = [&](const std::string& id) -> PanelWidget* {
+        auto it = std::find_if(widgets.begin(), widgets.end(),
+                               [&](const auto& w) { return w && w->id() == id; });
+        return it != widgets.end() ? it->get() : nullptr;
+    };
+    if (reseat_all) {
+        for (const auto& seat : seats) {
+            PanelWidget* w = seat.span_changed ? instance_for(seat.entry->id) : nullptr;
+            if (w && !w->fits_at(static_cast<int>(grid_track_extent(metrics.cell_w, metrics.gutter,
+                                                                    seat.cell.colspan)),
+                                 static_cast<int>(grid_track_extent(metrics.cell_h, metrics.gutter,
+                                                                    seat.cell.rowspan)))) {
+                return false;
+            }
+        }
+    }
+
+    populating_ = true;
+    for (const auto& seat : seats) {
+        lv_obj_set_grid_cell(seat.tile, LV_GRID_ALIGN_STRETCH, seat.cell.col, seat.cell.colspan,
+                             LV_GRID_ALIGN_STRETCH, seat.cell.row, seat.cell.rowspan);
+    }
+
+    // The resized tile keeps its tree: what a widget builds depends on its
+    // config, never its span, so the new size reaches it the way a populate's
+    // does, through on_size_changed().
+    if (resized) {
+        announce_tile_size(resized->tile, resized_id,
+                           instance != widgets.end() ? instance->get() : nullptr, resized->cell,
+                           metrics);
+    }
+    if (reseat_all) {
+        for (const auto& seat : seats) {
+            if (seat.span_changed) {
+                announce_tile_size(seat.tile, seat.entry->id, instance_for(seat.entry->id),
+                                   seat.cell, metrics);
+            }
+        }
+    }
+
+    // Cards: keep the ones the new arrangement still has, replace the rest.
+    std::vector<CardFootprint> footprints;
+    for (const auto& e : entries) {
+        if (e.is_placed()) {
+            const TileCell c = entry_cell(e);
+            const auto* def = find_widget_def(e.id);
+            footprints.push_back(
+                {c.col, c.row, c.colspan, c.rowspan, def && def->merges_into_card});
+        }
+    }
+    std::vector<CardRect> wanted = card_background_rects(footprints);
+    for (lv_obj_t* card : cards) {
+        const CardRect have{lv_obj_get_style_grid_cell_column_pos(card, LV_PART_MAIN),
+                            lv_obj_get_style_grid_cell_row_pos(card, LV_PART_MAIN),
+                            lv_obj_get_style_grid_cell_column_span(card, LV_PART_MAIN),
+                            lv_obj_get_style_grid_cell_row_span(card, LV_PART_MAIN)};
+        auto kept = std::find(wanted.begin(), wanted.end(), have);
+        if (kept != wanted.end()) {
+            wanted.erase(kept);
+        } else {
+            helix::ui::safe_delete_deferred(card);
+        }
+    }
+    for (const CardRect& card : wanted) {
+        lv_obj_move_to_index(create_card_background(container, card, metrics), 0);
+    }
+
+    lv_obj_update_layout(container);
+    populating_ = false;
+
+    spdlog::debug("[PanelWidgetManager] Relaid out {} tile(s) in place for '{}:{}'{}", seats.size(),
+                  panel_id, page_index, resized ? " (one resized)" : "");
+    return true;
 }
 
 std::vector<std::string> PanelWidgetManager::compute_visible_widget_ids(const std::string& panel_id,
@@ -1276,40 +1745,59 @@ std::vector<std::string> PanelWidgetManager::compute_visible_widget_ids(const st
             continue;
         }
         // Include gate status in the ID so rebuild detects gated→ungated transitions
-        const auto* def = find_widget_def(entry.id);
         bool gated = false;
-        if (def && def->hardware_gate_subject) {
-            lv_subject_t* gate = lv_xml_get_subject(nullptr, def->hardware_gate_subject);
-            if (gate && lv_subject_get_int(gate) == 0) {
-                gated = true;
-            }
-        }
-        ids.push_back(gated ? entry.id + "~gated" : entry.id);
-    }
-
-    // Conditional firmware_restart injection (same logic as populate_widgets)
-    bool has_fw_restart = std::find(ids.begin(), ids.end(), "firmware_restart") != ids.end();
-    if (!has_fw_restart) {
-        lv_subject_t* klippy = lv_xml_get_subject(nullptr, "klippy_state");
-        if (klippy && lv_subject_get_int(klippy) != static_cast<int>(KlippyState::READY)) {
-            ids.push_back("firmware_restart");
-        }
+        gate_hint_if_gated(find_widget_def(entry.id), gated);
+        ids.push_back(visible_id(entry.id, gated));
     }
 
     return ids;
 }
 
+// Hardware-gate subjects live in several owners, so the death signal is
+// resolved per gate name. A def whose subject has no entry here is left
+// unobserved with a warning: handing observe_*() a token from the wrong
+// owner would read as defended while defending nothing. Map the owner here
+// when adding a gated widget.
+SubjectLifetime gate_subject_lifetime(const char* name) {
+    if (std::strcmp(name, "ams_slot_count") == 0 || std::strcmp(name, "ams_supports_bypass") == 0 ||
+        std::strcmp(name, "clog_meter_mode") == 0 || std::strcmp(name, "buffer_present") == 0) {
+        return AmsState::instance().get_subjects_lifetime();
+    }
+    if (std::strcmp(name, "filament_sensor_count") == 0) {
+        return FilamentSensorManager::instance().get_subjects_lifetime();
+    }
+    if (std::strcmp(name, "humidity_sensor_count") == 0) {
+        return sensors::HumiditySensorManager::instance().get_subjects_lifetime();
+    }
+    if (std::strcmp(name, "temp_sensor_count") == 0) {
+        return sensors::TemperatureSensorManager::instance().get_subjects_lifetime();
+    }
+    if (std::strcmp(name, "width_sensor_count") == 0) {
+        return sensors::WidthSensorManager::instance().get_subjects_lifetime();
+    }
+    if (std::strcmp(name, "led_controllable") == 0 || std::strcmp(name, "led_has_devices") == 0) {
+        return led::LedController::instance().get_subjects_lifetime();
+    }
+    if (std::strcmp(name, "platform_host_power_supported") == 0) {
+        return get_app_globals_subjects_lifetime();
+    }
+    if (std::strcmp(name, "power_device_count") == 0 ||
+        std::strcmp(name, "printer_has_chamber") == 0) {
+        return get_printer_state().get_subjects_lifetime();
+    }
+    return nullptr;
+}
+
 void PanelWidgetManager::setup_gate_observers(const std::string& panel_id,
                                               RebuildCallback rebuild_cb) {
-    using helix::ui::observe_int_sync;
+    using helix::ui::observe;
 
     gate_observers_.erase(panel_id);
     auto& observers = gate_observers_[panel_id];
 
     // Walk the registry and observe every distinct hardware_gate_subject —
     // these are the same names compute_visible_widget_ids consults, so this
-    // automatically tracks any new gated widget added in the future. Plus
-    // klippy_state, which drives firmware_restart conditional injection.
+    // automatically tracks any new gated widget added in the future.
     //
     // Each observer schedules a coalesced rebuild via lv_async_call:
     //   * The first gate firing in a tick sets rebuild_pending_[panel_id]=true
@@ -1363,7 +1851,6 @@ void PanelWidgetManager::setup_gate_observers(const std::string& panel_id,
         if (!dup)
             gate_names.push_back(def.hardware_gate_subject);
     }
-    gate_names.push_back("klippy_state");
 
     for (const char* name : gate_names) {
         lv_subject_t* subject = lv_xml_get_subject(nullptr, name);
@@ -1371,11 +1858,22 @@ void PanelWidgetManager::setup_gate_observers(const std::string& panel_id,
             spdlog::trace("[PanelWidgetManager] Gate subject '{}' not registered yet", name);
             continue;
         }
+        // A hand-maintained name->owner table, replace with a lifetime
+        // carried by the subject registry if gate names start churning
+        SubjectLifetime gate_lifetime = gate_subject_lifetime(name);
+        if (!gate_lifetime) {
+            spdlog::warn(
+                "[PanelWidgetManager] Gate subject '{}' has no owner lifetime mapped; "
+                "gate changes will not rebuild until it is added to gate_subject_lifetime()",
+                name);
+            continue;
+        }
         // Capture panel_id by value into the lambda so the async rebuild
         // can find the right rebuild_pending_ entry even if `this` outlives
         // a particular panel registration.
-        observers.push_back(observe_int_sync<PanelWidgetManager>(
-            subject, this, [name, panel_id](PanelWidgetManager* self, int value) {
+        observers.push_back(observe<int>(
+            subject, this,
+            [name, panel_id](PanelWidgetManager* self, int value) {
                 spdlog::debug("[PanelWidgetManager] gate '{}' -> {} (rebuild)", name, value);
                 crash_handler::breadcrumb::note("gate", name, value);
 
@@ -1396,10 +1894,13 @@ void PanelWidgetManager::setup_gate_observers(const std::string& panel_id,
                 s.pending = true;
                 // Stable user_data — no allocation in the hot path. Avoids
                 // std::bad_alloc → terminate → SIGABRT on memory-tight AD5X
-                // ([L083] family). lv_async_call escapes the UpdateQueue
-                // batch per CLAUDE.md "safe escape routes".
-                lv_async_call(&PanelWidgetManager::gate_rebuild_trampoline, &s);
-            }));
+                // ([L083] family), which is why this is raw lv_async_call
+                // and not run_next_tick. It escapes the UpdateQueue batch
+                // per CLAUDE.md "safe escape routes".
+                // LV_ASYNC_OK: allocation-free hot path, cancelled by slot address
+                lv_async_call(&PanelWidgetManager::gate_rebuild_trampoline, &s); // LV_ASYNC_OK
+            },
+            gate_lifetime));
         spdlog::trace("[PanelWidgetManager] Observing gate subject '{}' for panel '{}'", name,
                       panel_id);
     }
@@ -1409,22 +1910,42 @@ void PanelWidgetManager::setup_gate_observers(const std::string& panel_id,
 }
 
 void PanelWidgetManager::clear_gate_observers(const std::string& panel_id) {
-    auto it = gate_observers_.find(panel_id);
-    if (it != gate_observers_.end()) {
+    if (s_destroyed_) {
+        return;
+    }
+    PanelWidgetManager& mgr = instance();
+    auto it = mgr.gate_observers_.find(panel_id);
+    if (it != mgr.gate_observers_.end()) {
         spdlog::debug("[PanelWidgetManager] Clearing {} gate observers for panel '{}'",
                       it->second.size(), panel_id);
-        gate_observers_.erase(it);
+        mgr.gate_observers_.erase(it);
     }
     // Cancel any in-flight async rebuild *before* destroying the slot it
     // points at. Without this, a rebuild queued via lv_async_call could fire
     // after the slot's storage is freed → UAF on ud / on the captured
     // rebuild_cb (which closes over the registering panel's `this`).
-    auto sit = gate_rebuild_slots_.find(panel_id);
-    if (sit != gate_rebuild_slots_.end()) {
+    auto sit = mgr.gate_rebuild_slots_.find(panel_id);
+    if (sit != mgr.gate_rebuild_slots_.end()) {
         lv_async_call_cancel(&PanelWidgetManager::gate_rebuild_trampoline, &sit->second);
-        gate_rebuild_slots_.erase(sit);
+        mgr.gate_rebuild_slots_.erase(sit);
     }
-    gate_rebuild_callbacks_.erase(panel_id);
+    mgr.gate_rebuild_callbacks_.erase(panel_id);
+}
+
+void PanelWidgetManager::notify_widget_defs_changed() {
+    clear_all_panel_configs();
+    // Queue each registered gate panel's rebuild through its async slot, the
+    // same coalesced route a gate firing takes (see setup_gate_observers):
+    // this can run inside an UpdateQueue drain, where a synchronous rebuild
+    // would corrupt LVGL's event list.
+    for (auto& [panel_id, slot] : gate_rebuild_slots_) {
+        (void)panel_id;
+        if (slot.pending)
+            continue;
+        slot.pending = true;
+        // LV_ASYNC_OK: same slot trampoline as setup_gate_observers, cancelled by address
+        lv_async_call(&PanelWidgetManager::gate_rebuild_trampoline, &slot); // LV_ASYNC_OK
+    }
 }
 
 void PanelWidgetManager::gate_rebuild_trampoline(void* ud) {
@@ -1464,12 +1985,10 @@ void PanelWidgetManager::clear_panel_config(const std::string& panel_id) {
             ++it;
         }
     }
-    // Also erase grid descriptors for all pages of this panel. The vectors are
-    // RETIRED, not freed: the containers laid out with them may still exist and
-    // their grid style holds the raw dsc pointers (LVGL does not copy them).
-    // Freeing here was the 2026-08-17 nightly's heap-use-after-free —
-    // GridEditMode::current_metrics -> grid_count_tracks read the freed arrays.
-    retire_grid_descriptors_matching(prefix);
+    // Grid descriptors are keyed by container, not by this panel's pages: the
+    // containers laid out with them may still exist and their grid style holds
+    // the raw dsc pointers (LVGL does not copy them). They are freed when their
+    // container is deleted.
 }
 
 void PanelWidgetManager::clear_all_panel_configs() {
@@ -1481,30 +2000,39 @@ void PanelWidgetManager::clear_all_panel_configs() {
         (void)panel_id;
         config.mark_dirty();
     }
-    // Drop the per-page derived caches wholesale — they key on "panel:page" and
-    // describe the old printer's resolved widget list / grid geometry. Descriptors
-    // are retired (see clear_panel_config) so grids laid out for the previous
-    // printer keep reading valid memory until their containers are destroyed.
+    // Drop the per-page widget-list cache wholesale — it keys on "panel:page" and
+    // describes the old printer's resolved widget list. Grid descriptors stay
+    // put: they are keyed by container, so grids laid out for the previous
+    // printer keep reading valid memory until their containers are deleted.
     active_configs_.clear();
-    retire_grid_descriptors_matching({});
 }
 
-void PanelWidgetManager::retire_grid_descriptors_matching(const std::string& prefix) {
-    // Move descriptor arrays whose cache key starts with `prefix` (empty prefix:
-    // all of them) out of grid_descriptors_ and into the retirement map. LVGL's
-    // grid style holds the raw dsc pointers without copying, and the clear paths
-    // have no container handle to unstyle, so an array must outlive every
-    // container still laid out with it. populate_page() drops the retired entry
-    // for a key at the same moment it installs a fresh one — the re-point of the
-    // container's style is what makes the old array unreferenced.
-    for (auto it = grid_descriptors_.begin(); it != grid_descriptors_.end();) {
-        if (prefix.empty() || it->first.compare(0, prefix.size(), prefix) == 0) {
-            retired_grid_descriptors_[it->first] = std::move(it->second);
-            it = grid_descriptors_.erase(it);
-        } else {
-            ++it;
-        }
+void PanelWidgetManager::install_grid_descriptors(lv_obj_t* container, GridDescriptors&& fresh) {
+    auto [slot, inserted] = grid_descriptors_.try_emplace(container);
+    if (inserted) {
+        // First generation for this container: drop the slot when the container
+        // dies, keeping the map bounded by live containers.
+        // DECLARATIVE_OK: LV_EVENT_DELETE cleanup has no declarative equivalent.
+        lv_obj_add_event_cb(container, &PanelWidgetManager::on_container_delete, LV_EVENT_DELETE,
+                            nullptr);
     }
+    GridDescriptors retired = std::move(slot->second);
+    slot->second = std::move(fresh);
+    lv_obj_set_grid_dsc_array(container, slot->second.col_dsc.data(), slot->second.row_dsc.data());
+    // `retired` frees the previous generation's buffers HERE, after the
+    // container's style has been re-pointed above: the style holds the raw
+    // pointers, so freeing any earlier would leave every reader of the old
+    // arrays (a layout pass, GridEditMode::current_metrics) on freed memory.
+}
+
+bool PanelWidgetManager::s_destroyed_ = false;
+
+void PanelWidgetManager::on_container_delete(lv_event_t* e) {
+    if (s_destroyed_) {
+        return;
+    }
+    auto* container = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
+    PanelWidgetManager::instance().grid_descriptors_.erase(container);
 }
 
 PanelWidgetConfig& PanelWidgetManager::get_widget_config(const std::string& panel_id) {
@@ -1527,6 +2055,7 @@ PanelWidgetConfig& PanelWidgetManager::get_widget_config(const std::string& pane
 // -- PanelWidget base class --
 
 PanelWidget::~PanelWidget() {
+    unbind_root();
     // The tile tree can outlive this widget: the manager drops non-reused
     // instances after a rebuild, and app shutdown destroys panels before
     // lv_deinit(). Uninstall the delete hook while the object is still valid,
@@ -1534,6 +2063,48 @@ PanelWidget::~PanelWidget() {
     // freed memory. A null delete_hook_root_ means the tree already died (the
     // hook fired) or detach() removed it — nothing left to uninstall.
     uninstall_delete_hook();
+}
+
+void PanelWidget::attach_tile(lv_obj_t* root, lv_obj_t* parent_screen) {
+    bind_root(root);
+    attach(root, parent_screen);
+}
+
+void PanelWidget::detach_tile() {
+    detach();
+    unbind_root();
+}
+
+void PanelWidget::bind_root(lv_obj_t* obj) {
+    unbind_root();
+    if (!obj) {
+        return;
+    }
+    root_ = obj;
+    lv_obj_set_user_data(obj, this);
+    // DECLARATIVE_OK: LV_EVENT_DELETE cleanup has no declarative equivalent.
+    lv_obj_add_event_cb(obj, on_bound_root_deleted, LV_EVENT_DELETE, this);
+}
+
+void PanelWidget::unbind_root() {
+    if (!root_ || !lv_is_initialized()) {
+        root_ = nullptr;
+        return;
+    }
+    lv_obj_remove_event_cb_with_user_data(root_, on_bound_root_deleted, this);
+    if (lv_obj_get_user_data(root_) == this) {
+        lv_obj_set_user_data(root_, nullptr);
+    }
+    root_ = nullptr;
+}
+
+// A raw lv_obj_delete() of the tree gives the widget no detach(); the root
+// pointer must not outlive it.
+void PanelWidget::on_bound_root_deleted(lv_event_t* e) {
+    auto* self = static_cast<PanelWidget*>(lv_event_get_user_data(e));
+    if (self && lv_event_get_current_target(e) == self->root_) {
+        self->root_ = nullptr;
+    }
 }
 
 void PanelWidget::record_interaction() {
@@ -1591,8 +2162,9 @@ void PanelWidget::save_widget_config(const nlohmann::json& config) {
         spdlog::warn("[PanelWidget] save_widget_config called with no panel_id set for '{}'", id());
         return;
     }
-    auto& wc = PanelWidgetManager::instance().get_widget_config(panel_id_);
-    wc.set_widget_config(id(), config);
+    auto& mgr = PanelWidgetManager::instance();
+    mgr.get_widget_config(panel_id_).set_widget_config(id(), config);
+    mgr.note_widget_config_saved();
 }
 
 } // namespace helix

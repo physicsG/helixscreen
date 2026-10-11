@@ -55,6 +55,29 @@ class PWMSoundBackend : public SoundBackend {
     void set_render_source(std::function<void(float*, size_t, int)> fn) override;
     void clear_render_source() override;
 
+    /// Write the channel to pwmchipN/export when initialize() finds it missing.
+    /// Off by default; call before initialize().
+    void set_auto_export(bool on) {
+        auto_export_ = on;
+    }
+
+    /// Whether klippy's tone_player writes this channel too (the AD5M buzzer).
+    /// A channel the user named for HelixScreen alone says false, so a
+    /// Klipper M300 macro never takes the buzzer away from it.
+    void set_klippy_shares_channel(bool shared) {
+        klippy_shares_channel_ = shared;
+    }
+
+    /// A user-named buzzer channel: the HELIX_PWM_SOUND override when it is
+    /// set, else the saved setting, each as "<chip>:<channel>". A malformed
+    /// value is skipped with a warning. Returns false when neither names one.
+    static bool resolve_channel(const std::string& setting, const char* env, int& chip,
+                                int& channel);
+
+    /// Disable the initialized channel. Async-signal-safe (lseek + write on a
+    /// cached fd), for the SIGTERM fast exit.
+    static void silence_signal_safe();
+
     /// Initialize: verify sysfs paths exist and are writable
     /// @return false if paths don't exist or aren't writable
     bool initialize();
@@ -176,6 +199,8 @@ class PWMSoundBackend : public SoundBackend {
     std::string base_path_;
     int chip_;
     int channel_;
+    bool auto_export_ = false;
+    bool klippy_shares_channel_ = true;
     bool enabled_ = false;
     bool initialized_ = false;
     Waveform current_wave_ = Waveform::SQUARE;

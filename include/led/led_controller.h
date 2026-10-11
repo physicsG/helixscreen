@@ -5,11 +5,15 @@
 
 #include "async_lifetime_guard.h"
 #include "led/led_backend.h"
+#include "led/led_devices.h"
+#include "subject_managed_panel.h"
 
 #include <cstdint>
 #include <functional>
 #include <lvgl.h>
 #include <memory>
+#include <optional>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -59,7 +63,10 @@ class NativeBackend {
     }
 
     void add_strip(const LedStripInfo& strip);
+    /// Drops the strip list only; the color cache survives a re-discovery.
     void clear();
+    /// Drops the color cache (printer switch or teardown).
+    void forget_state();
 
     /// Update channel capabilities from configfile config (called during discovery).
     /// Sets has_red_pin, has_green_pin, etc. for strips with configfile data.
@@ -76,19 +83,20 @@ class NativeBackend {
     // release a caller-side in-flight counter on that path. It means "accepted for
     // later execution", never "the strip changed", and it runs synchronously on
     // the calling thread. See moonraker_api.h for the full contract.
+    // `silent` (here and on the other send entry points) marks a non-interactive
+    // caller — LedAutoState applying the state theme. The busy-queue toast
+    // exists to explain a command the user made, so an automatic send neither
+    // shows nor claims it.
     void set_color(const std::string& strip_id, double r, double g, double b, double w,
                    SuccessCallback on_success = nullptr, ErrorCallback on_error = nullptr,
-                   SuccessCallback on_queued = nullptr);
-    void set_brightness(const std::string& strip_id, int brightness_pct, double r, double g,
-                        double b, double w, SuccessCallback on_success = nullptr,
-                        ErrorCallback on_error = nullptr, SuccessCallback on_queued = nullptr);
-    void turn_on(const std::string& strip_id, SuccessCallback on_success = nullptr,
-                 ErrorCallback on_error = nullptr, SuccessCallback on_queued = nullptr);
+                   SuccessCallback on_queued = nullptr, bool silent = false);
     void turn_off(const std::string& strip_id, SuccessCallback on_success = nullptr,
-                  ErrorCallback on_error = nullptr, SuccessCallback on_queued = nullptr);
+                  ErrorCallback on_error = nullptr, SuccessCallback on_queued = nullptr,
+                  bool silent = false);
 
-    /// Update per-strip color cache from Moonraker status update JSON
-    void update_from_status(const nlohmann::json& status);
+    /// Update per-strip color cache from Moonraker status update JSON.
+    /// True when @p status carried one of this backend's strips.
+    bool update_from_status(const nlohmann::json& status);
 
     /// Get cached color for a strip (returns white if unknown)
     [[nodiscard]] StripColor get_strip_color(const std::string& strip_id) const;
@@ -142,15 +150,15 @@ class LedEffectBackend {
                          NativeBackend::SuccessCallback on_success = nullptr,
                          NativeBackend::ErrorCallback on_error = nullptr,
                          NativeBackend::SuccessCallback on_queued = nullptr,
-                         bool caller_surfaces_errors = true);
+                         bool caller_surfaces_errors = true, bool silent = false);
     void stop_all_effects(NativeBackend::SuccessCallback on_success = nullptr,
                           NativeBackend::ErrorCallback on_error = nullptr,
                           NativeBackend::SuccessCallback on_queued = nullptr,
-                          bool caller_surfaces_errors = true);
+                          bool caller_surfaces_errors = true, bool silent = false);
     void stop_effect(const std::string& effect_name,
                      NativeBackend::SuccessCallback on_success = nullptr,
                      NativeBackend::ErrorCallback on_error = nullptr,
-                     NativeBackend::SuccessCallback on_queued = nullptr);
+                     NativeBackend::SuccessCallback on_queued = nullptr, bool silent = false);
 
     // Set target LEDs for a specific effect by name
     void set_effect_targets(const std::string& effect_name,
@@ -159,8 +167,9 @@ class LedEffectBackend {
     // Return only effects whose target_leds contains the given strip ID
     [[nodiscard]] std::vector<LedEffectInfo> effects_for_strip(const std::string& strip_id) const;
 
-    /// Update effect enabled states from Moonraker status update JSON
-    void update_from_status(const nlohmann::json& status);
+    /// Update effect enabled states from Moonraker status update JSON.
+    /// True when @p status carried one of this backend's effects.
+    bool update_from_status(const nlohmann::json& status);
 
     /// Get whether a specific effect is currently enabled
     [[nodiscard]] bool is_effect_enabled(const std::string& effect_name) const;
@@ -216,34 +225,27 @@ class WledBackend {
     void toggle(const std::string& strip_name, NativeBackend::SuccessCallback on_success = nullptr,
                 NativeBackend::ErrorCallback on_error = nullptr);
 
-    // Per-strip address management (IP/hostname from Moonraker server config)
-    void set_strip_address(const std::string& strip_id, const std::string& address);
-    [[nodiscard]] std::string get_strip_address(const std::string& strip_id) const;
-
-    // Per-strip preset management (fetched from WLED device)
-    void set_strip_presets(const std::string& strip_id, const std::vector<WledPresetInfo>& presets);
-    [[nodiscard]] const std::vector<WledPresetInfo>&
-    get_strip_presets(const std::string& strip_id) const;
-
     // Per-strip runtime state (from Moonraker status polling)
     void update_strip_state(const std::string& strip_id, const WledStripState& state);
     [[nodiscard]] WledStripState get_strip_state(const std::string& strip_id) const;
+    [[nodiscard]] bool has_strip_state(const std::string& strip_id) const;
 
     // Poll Moonraker for current WLED status and update strip_states_
     void poll_status(std::function<void()> on_complete = nullptr);
 
-    // Fetch preset names from WLED device directly (http://<address>/presets.json)
-    void fetch_presets_from_device(const std::string& strip_id,
-                                   std::function<void()> on_complete = nullptr);
-
   private:
+    /// One wled_set_strip call; -1 leaves brightness or preset unchanged.
+    void send(const std::string& strip_name, const char* action, int brightness, int preset,
+              NativeBackend::SuccessCallback on_success, NativeBackend::ErrorCallback on_error);
+
     IMoonrakerAPI* api_ = nullptr;
     IMoonrakerClient* client_ = nullptr;
     std::vector<LedStripInfo> strips_;
-    std::unordered_map<std::string, std::string> strip_addresses_;
-    std::unordered_map<std::string, std::vector<WledPresetInfo>> strip_presets_;
     std::unordered_map<std::string, WledStripState> strip_states_;
-    static const std::vector<WledPresetInfo> empty_presets_;
+
+    // Declared last: reverse-declaration destruction invalidates outstanding
+    // tokens before any member they touch is gone.
+    helix::AsyncLifetimeGuard lifetime_;
 };
 
 class MacroBackend {
@@ -284,6 +286,11 @@ class MacroBackend {
     [[nodiscard]] bool has_known_state(const std::string& macro_name) const;
 
   private:
+    /// Run the macro's gcode_field, or its toggle macro when that is empty.
+    void run(const std::string& macro_name, std::string LedMacroInfo::*gcode_field,
+             const char* what, NativeBackend::SuccessCallback on_success,
+             NativeBackend::ErrorCallback on_error);
+
     IMoonrakerAPI* api_ = nullptr;
     std::vector<LedMacroInfo> macros_;
 };
@@ -307,7 +314,10 @@ class OutputPinBackend {
     }
 
     void add_pin(const LedStripInfo& pin);
+    /// Drops the pin list only; the pin values survive a re-discovery.
     void clear();
+    /// Drops the pin values (printer switch or teardown).
+    void forget_state();
 
     // Control methods. `on_queued` mirrors NativeBackend: when the emitted G-code is
     // discretionary and an external blocking op holds Klipper's gcode lock, the
@@ -317,22 +327,24 @@ class OutputPinBackend {
     void set_value(const std::string& pin_id, double value,
                    NativeBackend::SuccessCallback on_success = nullptr,
                    NativeBackend::ErrorCallback on_error = nullptr,
-                   NativeBackend::SuccessCallback on_queued = nullptr);
+                   NativeBackend::SuccessCallback on_queued = nullptr, bool silent = false);
     void turn_on(const std::string& pin_id, NativeBackend::SuccessCallback on_success = nullptr,
                  NativeBackend::ErrorCallback on_error = nullptr,
-                 NativeBackend::SuccessCallback on_queued = nullptr);
+                 NativeBackend::SuccessCallback on_queued = nullptr, bool silent = false);
     void turn_off(const std::string& pin_id, NativeBackend::SuccessCallback on_success = nullptr,
                   NativeBackend::ErrorCallback on_error = nullptr,
-                  NativeBackend::SuccessCallback on_queued = nullptr);
+                  NativeBackend::SuccessCallback on_queued = nullptr, bool silent = false);
     void set_brightness(const std::string& pin_id, int brightness_pct,
                         NativeBackend::SuccessCallback on_success = nullptr,
                         NativeBackend::ErrorCallback on_error = nullptr,
-                        NativeBackend::SuccessCallback on_queued = nullptr);
+                        NativeBackend::SuccessCallback on_queued = nullptr, bool silent = false);
 
-    /// Update pin values from Moonraker status JSON
-    void update_from_status(const nlohmann::json& status);
+    /// Update pin values from Moonraker status JSON.
+    /// True when @p status carried one of this backend's pins.
+    bool update_from_status(const nlohmann::json& status);
 
     [[nodiscard]] double get_value(const std::string& pin_id) const;
+    [[nodiscard]] bool has_value(const std::string& pin_id) const;
     [[nodiscard]] int brightness_pct(const std::string& pin_id) const;
     [[nodiscard]] bool is_pwm(const std::string& pin_id) const;
 
@@ -392,15 +404,27 @@ class LedController {
     void discover_from_hardware(const helix::PrinterDiscovery& hardware);
     void discover_wled_strips(); ///< Async WLED discovery via Moonraker HTTP bridge
 
-    // Update effect target LEDs from configfile config section
-    void update_effect_targets(const nlohmann::json& configfile_config);
+    /// Called on the main thread when a WLED discovery settles (see
+    /// wled_discovery_pending()), so the app can re-run whatever waited for the
+    /// full device set. Survives deinit().
+    void set_on_wled_settled(std::function<void()> cb) {
+        on_wled_settled_ = std::move(cb);
+    }
 
-    // Update output_pin PWM config from configfile config section
-    void update_output_pin_config(const nlohmann::json& configfile_config);
+    /// How long a WLED discovery may go unanswered before it counts as settled.
+    static constexpr uint32_t WLED_DISCOVERY_TIMEOUT_MS = 5000;
 
-    // Update LED channel capabilities from configfile config section
-    // (detects red_pin, green_pin, blue_pin, white_pin for generic [led] sections)
-    void update_led_pin_config(const nlohmann::json& configfile_config);
+    /// True from discover_wled_strips() until that discovery settles: strips
+    /// arrive, none are configured, it fails, or WLED_DISCOVERY_TIMEOUT_MS passes.
+    [[nodiscard]] bool wled_discovery_pending() const {
+        return wled_discovery_pending_;
+    }
+
+    /// Apply configfile.config: led_effect targets, output_pin PWM, and generic
+    /// [led] channel pins. Kept and re-applied by every discover_from_hardware(),
+    /// which rebuilds the lists these land on, so the order the two arrive in
+    /// does not matter.
+    void apply_configfile(const nlohmann::json& configfile_config);
 
     // Queries
     [[nodiscard]] bool has_any_backend() const;
@@ -410,56 +434,65 @@ class LedController {
     void load_config();
     void save_config();
 
-    /// Set light state and dispatch to all selected backends.
-    /// This is the primary API for turning lights on/off — always updates light_on_.
-    void light_set(bool on);
+    /// Every device the LEDs overlay lists: all_selectable_strips(), then each
+    /// named PRESET macro as "macro:<name>".
+    [[nodiscard]] std::vector<LedStripInfo> all_devices() const;
 
-    /// Query tracked LED state from Moonraker to sync subjects after toggle.
-    void query_tracked_led_state();
+    /// Ids of the devices a light button can switch on and off.
+    [[nodiscard]] std::vector<std::string> switchable_ids() const;
 
-    /// Convenience: turn off all selected strips.
-    void turn_off_all();
+    /// The printer's main light (see resolve_chamber_light()).
+    [[nodiscard]] std::string chamber_light() const;
 
-    /// Set color on all selected native/output_pin strips. Sets light_on_ = true.
-    void set_color_all(double r, double g, double b, double w = 0.0);
+    /// Device ids a light button whose `led` config is @p key drives.
+    [[nodiscard]] std::vector<std::string> light_targets(const std::string& key) const;
 
-    /// Set brightness on all selected native/output_pin strips. Sets light_on_ = (pct > 0).
-    void set_brightness_all(int brightness_pct);
+    /// What is known about one device's power, brightness and hue right now.
+    [[nodiscard]] DeviceState device_state(const std::string& id) const;
 
-    // Determine which backend a given strip belongs to
-    [[nodiscard]] LedBackendType backend_for_strip(const std::string& strip_id) const;
+    /// Switch exactly @p ids on or off.
+    void set_power(const std::vector<std::string>& ids, bool on, bool silent = false);
+
+    /// Switch @p ids per next_power_on(); returns the state sent.
+    bool toggle_power(const std::vector<std::string>& ids);
+
+    /// Show a look (an RGB tint plus a W level 0.0-1.0) at @p brightness_pct on
+    /// the native and output_pin devices among @p ids, fitted to each device as
+    /// fit_look() fits it. 0 switches them off, as set_power(ids, false).
+    void set_look(const std::vector<std::string>& ids, uint32_t rgb, double w, int brightness_pct,
+                  bool silent = false);
+
+    /// Set brightness on the native and output_pin devices among @p ids, keeping the
+    /// last color. 0 switches every device in @p ids off, as set_power(ids, false).
+    void set_brightness(const std::vector<std::string>& ids, int brightness_pct,
+                        bool silent = false);
+
+    /// Route a Moonraker status frame to the backends; bumps led_state_version
+    /// when it carried an LED object. Main thread only; dispatch_status_frame()
+    /// is the caller.
+    void update_from_status(const nlohmann::json& status);
+
+    /// Hand a printer.objects.query response for LED objects to every status
+    /// consumer, as a notification would be. Callable from any thread.
+    static void apply_query_response(const nlohmann::json& response);
+
+    /// Poll WLED state over Moonraker, then bump led_state_version on the main
+    /// thread and run @p on_done there.
+    void refresh_wled_state(std::function<void()> on_done = nullptr);
+
+    /// The backend that owns @p strip_id; nullopt for an id no backend owns, so
+    /// nothing is ever sent to a device that is not there. A "macro:" id is always
+    /// MACRO, even after its macro device is deleted.
+    [[nodiscard]] std::optional<LedBackendType>
+    backend_for_strip(const std::string& strip_id) const;
 
     /// Get all selectable strips across all backends (native + WLED + non-PRESET macros)
     /// Macro entries use "macro:" prefixed IDs.
     [[nodiscard]] std::vector<LedStripInfo> all_selectable_strips() const;
 
-    /// Get the first available strip to use as default selection.
-    /// Priority: first selected > first native > first WLED > first non-PRESET macro.
-    /// Returns empty string if nothing available.
+    /// The chamber light's fallback: first native > first WLED > first non-PRESET
+    /// macro > first output_pin. Empty string if nothing available.
     [[nodiscard]] std::string first_available_strip() const;
-
-    /// The selected strip whose live on/off state Klipper publishes under
-    /// printer.objects. Macro devices are synthetic "macro:" IDs and WLED
-    /// strips live behind Moonraker's HTTP proxy, so neither ever appears in a
-    /// status payload — tracking one leaves the PrinterLedState subjects frozen
-    /// at their defaults, and a light button that reads them computes its next
-    /// command from a value that can never move. Empty when the selection holds
-    /// no such strip; callers must then fall back to light_is_on().
-    [[nodiscard]] std::string status_tracked_strip() const;
-
-    /// Whether the current selection's state can be reliably tracked.
-    /// Returns false if ANY selected strip is a TOGGLE macro (state unknown).
-    [[nodiscard]] bool light_state_trackable() const;
-
-    /// Toggle light state and dispatch to all selected backends.
-    void light_toggle();
-
-    /// Get composite on/off state across all selected backends.
-    [[nodiscard]] bool light_is_on() const;
-
-    /// Sync internal light state from actual hardware (e.g., from PrinterLedState subjects).
-    /// Call this when the real LED state is known so that light_toggle() sends the correct command.
-    void sync_light_state(bool is_on);
 
     // LED on at start preference
     [[nodiscard]] bool get_led_on_at_start() const;
@@ -468,25 +501,32 @@ class LedController {
     [[nodiscard]] int get_startup_brightness() const;
     void set_startup_brightness(int brightness_pct);
 
-    /// Apply the "LED on at start" preference. Called from the discovery-complete
-    /// handler, which re-runs on every Klippy restart — this applies at most once
-    /// per printer session (see startup_preference_applied_).
-    void apply_startup_preference();
+    /// Apply the "LED on at start" preference to @p targets. Called from the
+    /// discovery-complete handler, which re-runs on every Klippy restart — this
+    /// applies at most once per printer session (see startup_preference_applied_).
+    /// No targets defers to a later call without spending the one shot.
+    void apply_startup_preference(const std::vector<std::string>& targets);
 
-    // Config accessors
-    [[nodiscard]] const std::vector<std::string>& selected_strips() const {
-        return selected_strips_;
-    }
-    void set_selected_strips(const std::vector<std::string>& strips);
-
-    /// Version subject bumped on discover_from_hardware() and set_selected_strips().
+    /// Version subject bumped on discover_from_hardware().
     /// UI widgets observe this to rebind when LED config changes.
     lv_subject_t* get_led_config_version_subject() {
         return &led_config_version_;
     }
 
-    /// Boolean subject (0/1) reflecting whether at least one strip is selected and
-    /// therefore controllable. Drives visibility of action-style UI (Print Status
+    /// Int subject bumped whenever a device's live state may have changed.
+    /// Registered globally as "led_state_version".
+    lv_subject_t* get_led_state_version_subject() {
+        return &led_state_version_;
+    }
+
+    /// Death signal for led_config_version_ and sibling subjects; pass to
+    /// observe_*() — the registry deinit frees their observer nodes.
+    [[nodiscard]] SubjectLifetime get_subjects_lifetime() const {
+        return subjects_.get_subjects_lifetime();
+    }
+
+    /// Boolean subject (0/1): a chamber light resolves, so a light button has
+    /// something to drive. Drives visibility of action-style UI (Print Status
     /// light toggle, Home LED widgets). Registered globally as "led_controllable"
     /// for direct XML binding.
     lv_subject_t* get_led_controllable_subject() {
@@ -556,6 +596,10 @@ class LedController {
     IMoonrakerAPI* api_ = nullptr;
     IMoonrakerClient* client_ = nullptr;
     helix::AsyncLifetimeGuard lifetime_;
+    std::function<void()> on_wled_settled_;
+    bool wled_discovery_pending_ = false;
+    unsigned wled_discovery_gen_ = 0; ///< A late answer or timeout settles only its own discovery
+    void settle_wled_discovery(unsigned gen);
 
     NativeBackend native_;
     LedEffectBackend effects_;
@@ -564,7 +608,9 @@ class LedController {
     OutputPinBackend output_pin_;
 
     // Config state
-    std::vector<std::string> selected_strips_;
+    /// The pre-1.1 leds/selected_strips (or older leds/selected, leds/strip) as
+    /// loaded: migrate_legacy_selection()'s input. Read only, never saved.
+    std::vector<std::string> legacy_selection_;
     LastColor last_color_;
     int last_brightness_ = 100;
     std::vector<uint32_t> color_presets_;
@@ -572,7 +618,6 @@ class LedController {
     std::vector<std::string> discovered_led_macros_; // Raw macro names from hardware
     bool led_on_at_start_ = false;
     int startup_brightness_ = 80;
-    bool light_on_ = false; // Internal light state for abstract API
 
     /// One-shot latch for apply_startup_preference(). Deliberately NOT reset by
     /// init(): printer_discovery re-runs init() on every discovery, and a Klippy
@@ -581,22 +626,22 @@ class LedController {
     /// case that really is a fresh start.
     bool startup_preference_applied_ = false;
 
-    /// Dispatch on/off to all selected strips (low-level — callers should use light_set())
-    void toggle_all(bool on);
+    /// Send a look to one native strip: fit_look() fitted to it (a look that
+    /// lights nothing is white), scaled to @p brightness_pct, where 0 means 100%.
+    void send_look(const std::string& strip_id, uint32_t rgb, double w, int brightness_pct,
+                   NativeBackend::SuccessCallback on_success = nullptr,
+                   NativeBackend::ErrorCallback on_error = nullptr,
+                   NativeBackend::SuccessCallback on_queued = nullptr, bool silent = false);
 
-    /// RGBW (0.0-1.0) values computed from saved last_color_/last_white for a
-    /// "turn on at given brightness" operation. Applies a safety floor: if
-    /// saved state has no color at all (RGB==0 && white==0), returns full
-    /// white. If brightness_pct is 0 but saved color is nonzero, treats
-    /// effective brightness as 100% to preserve user intent.
-    struct ScaledColor {
-        double r, g, b, w;
-    };
-    [[nodiscard]] ScaledColor compute_scaled_last_color(int brightness_pct) const;
+    /// Tells light buttons the set of devices changed: discovery, WLED
+    /// strips arriving, a macro device added, edited or deleted.
+    void bump_config_version();
 
     lv_subject_t led_config_version_{};    // Bumped on discover/config changes
-    lv_subject_t led_controllable_{};      // 0/1 mirror of !selected_strips_.empty()
+    lv_subject_t led_controllable_{};      // 0/1: at least one switchable device exists
+    lv_subject_t led_has_devices_{};       // 0/1: the LEDs overlay has a device, PRESET included
     lv_subject_t led_command_in_flight_{}; // 0/1: a light toggle is awaiting its gcode ACK
+    lv_subject_t led_state_version_{};     // Bumped when device state may have changed
     int in_flight_count_ = 0;              // outstanding toggle commands awaiting ACK
     ObserverGuard conn_observer_;          // clears in-flight count on any non-CONNECTED transition
     // Clears in-flight count on any exit from klippy READY. A Klipper restart leaves
@@ -605,19 +650,42 @@ class LedController {
     // singleton-lifetime subject (no lifetime-token overload).
     ObserverGuard klippy_observer_;
     bool version_subject_initialized_ = false;
+    /// Owns the four subjects above: when the registry deinit calls
+    /// deinit_all(), the death signal expires before they are freed.
+    SubjectManager subjects_;
 
-    /// Push the current selected_strips_ emptiness into led_controllable_.
+    /// Push whether a chamber light resolves into led_controllable_, and whether
+    /// any LED device exists into led_has_devices_ (the LED Controls tile's gate).
     /// Cheap no-op if the value is unchanged. Safe before subject init (skips).
     void publish_controllable_state();
     void update_in_flight_subject();
     void note_command_dispatched();
     void note_command_settled();
     void force_clear_in_flight();
+    void bump_state_version();
 
-    // Default color presets
-    static constexpr uint32_t DEFAULT_COLOR_PRESETS[] = {0xFFFFFF, 0xFFD700, 0xFF6B35, 0x4FC3F7,
-                                                         0xFF4444, 0x66BB6A, 0x9C27B0, 0x00BCD4};
-    static constexpr size_t DEFAULT_COLOR_PRESETS_COUNT = 8;
+    /// Query printer.objects for the Klipper devices set_power() touched, so their
+    /// state is read back even when the command changed nothing Klipper publishes.
+    void query_led_state();
+    std::set<std::string> pending_query_ids_;
+
+    /// The LED sections of the last configfile.config applied; deinit() drops it.
+    nlohmann::json configfile_config_;
+    void apply_stored_configfile();
+    void update_effect_targets(const nlohmann::json& configfile_config);
+    void update_output_pin_config(const nlohmann::json& configfile_config);
+    // Detects red_pin, green_pin, blue_pin, white_pin for generic [led] sections.
+    void update_led_pin_config(const nlohmann::json& configfile_config);
+
+    /// Macro devices have no readable state; toggle_power() alternates on this.
+    std::unordered_map<std::string, bool> macro_last_sent_on_;
+
+    /// Stage a saved leds/selected_strips once, the first discovery with no
+    /// leds/auto_state/strips saved (see plan_selection_migration()).
+    void migrate_legacy_selection();
 };
+
+/// Whether the chamber light is known to be on.
+[[nodiscard]] bool chamber_light_on();
 
 } // namespace helix::led

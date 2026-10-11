@@ -8,6 +8,7 @@
 #include <functional>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 /**
  * @file moonraker_client_mock_internal.h
@@ -24,12 +25,9 @@ namespace mock_internal {
 // Mock Printer Configuration Constants
 // ============================================================================
 
-// Bed dimensions (mm)
+// Bed origin (mm). The far edge is the persona's descriptor().axis_max.
 constexpr double MOCK_BED_X_MIN = 0.0;
-constexpr double MOCK_BED_X_MAX = 250.0;
 constexpr double MOCK_BED_Y_MIN = 0.0;
-constexpr double MOCK_BED_Y_MAX = 250.0;
-constexpr double MOCK_BED_Z_MAX = 300.0;
 
 // Probe margins - typical probes can't reach bed edges
 constexpr double MOCK_PROBE_MARGIN = 15.0;
@@ -39,11 +37,19 @@ constexpr double MOCK_PROBE_MARGIN = 15.0;
 // the mock's SCREWS_TILT_CALCULATE output agrees with the config it reports.
 constexpr const char* MOCK_SCREW_THREAD = "CW-M3";
 
-// Derived mesh bounds (bed size minus probe margins)
-constexpr double MOCK_MESH_X_MIN = MOCK_BED_X_MIN + MOCK_PROBE_MARGIN;
-constexpr double MOCK_MESH_X_MAX = MOCK_BED_X_MAX - MOCK_PROBE_MARGIN;
-constexpr double MOCK_MESH_Y_MIN = MOCK_BED_Y_MIN + MOCK_PROBE_MARGIN;
-constexpr double MOCK_MESH_Y_MAX = MOCK_BED_Y_MAX - MOCK_PROBE_MARGIN;
+/// Area a probe can reach: the persona's bed inset by MOCK_PROBE_MARGIN.
+struct MeshBounds {
+    double x_min;
+    double x_max;
+    double y_min;
+    double y_max;
+};
+
+[[nodiscard]] inline MeshBounds mesh_bounds(helix::mock::PrinterType type) {
+    const auto max = helix::mock::descriptor(type).axis_max;
+    return {MOCK_BED_X_MIN + MOCK_PROBE_MARGIN, max.x - MOCK_PROBE_MARGIN,
+            MOCK_BED_Y_MIN + MOCK_PROBE_MARGIN, max.y - MOCK_PROBE_MARGIN};
+}
 
 /**
  * @brief Type for method handler functions
@@ -125,6 +131,8 @@ void register_history_handlers(std::unordered_map<std::string, MethodHandler>& r
  * - server.connection.identify
  * - server.info
  * - printer.info
+ * - server.config (job_queue.automatic_transition; env-overridable)
+ * - server.database.get_item / post_item / delete_item (the client's own store)
  *
  * @param registry Map to register handlers into
  */
@@ -158,19 +166,26 @@ json get_mock_gcode_macro_config();
  *
  * Accelerometer modules have no get_status(), so Klipper never lists them in
  * printer.objects.list — configfile.config is the only place they appear.
- * Single source of truth for populate_capabilities(), discover_printer() and
- * the objects.query / objects.subscribe handlers, which previously carried
- * separate copies and disagreed: the query handler omitted it entirely.
+ * Single source of truth for populate_capabilities() and the objects.query /
+ * objects.subscribe handlers.
  */
 json get_mock_accel_config();
 
 /**
+ * @brief The probe profile the mock reports for a persona
+ *
+ * HELIX_MOCK_PROBE_TYPE when set. Otherwise "cartographer" for a persona that
+ * inherits the default probe, else the persona's own probe
+ * (PersonaDescriptor::probe), else "none".
+ */
+std::string mock_probe_type(helix::mock::PrinterType type);
+
+/**
  * @brief Get the mock probe's configfile.config section
  *
- * Keyed off HELIX_MOCK_PROBE_TYPE — the same variable that picks the probe
- * object in populate_capabilities() and the probe status in
- * dispatch_initial_state() — so all three stay in step. Returns an empty object
- * for "none".
+ * Keyed off mock_probe_type() — the same profile that picks the probe objects
+ * in populate_capabilities() and the probe status in dispatch_initial_state()
+ * — so all three stay in step. Returns an empty object for "none".
  *
  * Values are STRINGS, matching Klipper: configfile.config is the verbatim
  * printer.cfg text, and ProbeSensorManager::discover_from_config() parses
@@ -181,22 +196,37 @@ json get_mock_accel_config();
  * seeding exists for, and it is the only profile where the seeded value is
  * observably different from what a status update would have produced.
  */
-json get_mock_probe_config();
+json get_mock_probe_config(helix::mock::PrinterType type);
 
 /**
  * @brief Get mock Happy Hare "mmu" status (--real-ams)
  *
- * Minimal static 4-gate setup with a mix of loaded/empty gates. The only
- * reachable caller today is MoonrakerClientMock's post-discovery dispatch
- * that seeds AmsBackendHappyHare's initial state (moonraker_client_mock.cpp).
- * The objects.query and printer.objects.subscribe handlers in
- * moonraker_client_mock_objects.cpp also call this for a requested "mmu"
- * object, but neither is reached in practice: AmsBackendHappyHare's
- * printer.objects.query sites all request "configfile", never "mmu", and
- * printer.objects.subscribe is issued only by MoonrakerDiscoverySequence,
- * which MoonrakerClientMock::discover_printer() overrides and never calls.
- * Those branches are reserved for a future caller, not dead code to remove.
+ * Minimal static 4-gate setup with a mix of loaded/empty gates, answered for a
+ * requested "mmu" object by the objects.query and printer.objects.subscribe
+ * handlers. The discovery sequence's subscription delivers it to
+ * AmsBackendHappyHare as the initial state.
  */
 json get_mock_mmu_status();
 
 } // namespace mock_internal
+
+namespace helix::sim {
+/**
+ * @brief Extra macro names from HELIX_MOCK_MACRO_COUNT=N (MOCK_MACRO_000 ...)
+ *
+ * Empty when the variable is unset. Lets list-scale macro UI run against a
+ * long list; get_mock_gcode_macro_config() describes every third one.
+ */
+std::vector<std::string> mock_padded_macro_names();
+
+/**
+ * @brief Get the mock probe's printer objects and their status, keyed by object
+ *
+ * Keyed off mock_internal::mock_probe_type(type). The keys are the objects the probe registers
+ * (a module that also claims the generic "probe" object lists both), and each
+ * value is the full get_status() payload that module returns, per the per-type
+ * table in docs/devel/SENSOR_MANAGEMENT.md. Empty for "none".
+ */
+nlohmann::json mock_probe_status(helix::mock::PrinterType type);
+
+} // namespace helix::sim

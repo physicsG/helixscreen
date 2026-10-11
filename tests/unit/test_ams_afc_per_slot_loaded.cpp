@@ -23,6 +23,7 @@
  * tripped.
  */
 
+#include "test_helpers/afc_test_access.h"
 #include "ams_backend_afc.h"
 #include "ams_backend_mock.h"
 #include "ams_types.h"
@@ -33,13 +34,15 @@
 
 using namespace helix;
 
+namespace helix {
+
 /// Feeds the real Moonraker status path so the parse chain under test is the
 /// production one (parse_afc_state -> parse_afc_stepper -> parse_afc_extruder).
 class AfcPerSlotLoadedHelper : public AmsBackendAfc {
   public:
     AfcPerSlotLoadedHelper() : AmsBackendAfc(nullptr, nullptr) {
         std::vector<std::string> names{"lane1", "lane2", "lane3", "lane4"};
-        initialize_slots(names);
+        AfcTestAccess::initialize_slots(*this, names);
     }
 
     void feed(const nlohmann::json& params_inner) {
@@ -62,6 +65,7 @@ class AfcPerSlotLoadedHelper : public AmsBackendAfc {
         system_info_.filament_loaded = loaded;
     }
 };
+} // namespace helix
 
 namespace {
 

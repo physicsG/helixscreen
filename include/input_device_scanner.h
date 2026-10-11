@@ -64,9 +64,41 @@ bool is_vid_pid_blacklisted(const std::string& vendor, const std::string& produc
 /// initialized or the key is absent/malformed.
 std::vector<std::string> read_device_blacklist_from_config();
 
+/// How a pointer device positions itself, which decides the frame its samples arrive in.
+enum class PointerKind {
+    /// Absolute axes on the panel (touchscreens). The driver reports where on the panel
+    /// the contact is, in the panel's own frame.
+    PanelAbsolute,
+    /// REL_X/REL_Y motion (mice, trackpads). The driver accumulates motion into a position
+    /// on the display the user is moving the cursor across.
+    Relative,
+};
+
+/// "panel" or "relative", for logs.
+const char* pointer_kind_name(PointerKind kind);
+
+/// Classify a pointer device from its sysfs capability bitmaps. Touchscreen capabilities
+/// (ABS_X+ABS_Y, ABS_MT_POSITION_X+Y, or BTN_TOUCH) win over relative axes; REL_X+REL_Y
+/// otherwise makes it Relative. A device with neither is PanelAbsolute.
+PointerKind classify_pointer_capabilities(const std::string& abs_caps, const std::string& rel_caps,
+                                          const std::string& key_caps);
+
+/// Classify the device opened from @p device_path, an /dev/input/eventN node or a link
+/// to one, from its sysfs capabilities. PanelAbsolute when the path names no event node.
+PointerKind pointer_kind_for_device(const std::string& device_path);
+PointerKind pointer_kind_for_device(const std::string& device_path, const std::string& sysfs_base);
+
 /// Scan /dev/input/event* for mouse devices (REL_X + REL_Y + BTN_LEFT, no ABS_X/ABS_Y).
 std::optional<ScannedDevice> find_mouse_device();
 std::optional<ScannedDevice> find_mouse_device(const std::string& dev_base,
+                                               const std::string& sysfs_base);
+
+/// Scan /dev/input/event* for the touchscreen: a device with ABS_X+ABS_Y or
+/// ABS_MT_POSITION_X+Y. Candidates score +2 for a known touchscreen name, +2 for
+/// INPUT_PROP_DIRECT, +1 for a USB phys; the highest score wins and the lowest
+/// event number breaks a tie.
+std::optional<ScannedDevice> find_touch_device();
+std::optional<ScannedDevice> find_touch_device(const std::string& dev_base,
                                                const std::string& sysfs_base);
 
 /// Scan /dev/input/event* for keyboard devices (KEY_A set).

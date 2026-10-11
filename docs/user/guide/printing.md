@@ -15,6 +15,10 @@ Everything about selecting, starting, monitoring, and tuning your prints.
 
 If your printer exposes a USB drive, the top-left of the panel shows **Printer** and **USB** tabs. Tap a tab to switch which storage the file browser lists — **Printer** shows files on the printer's storage (Moonraker's virtual SD card), **USB** shows files on the attached USB drive. The tabs only appear when more than one source is available.
 
+Printing (or queueing) a file from the **USB** tab first copies it to the printer's storage, into a folder named `usb_prints`, with a progress bar while it copies. The copy stays there afterwards, so the file is also listed under **Printer** and can be reprinted without the stick. If `usb_prints` already holds the same file, it is printed from there without copying again. If it holds a different file with the same name, nothing is overwritten: the new copy is saved as `name (2).gcode`, then `name (3).gcode`, and so on. HelixScreen never deletes these copies, so clear out `usb_prints` from the file list when it fills up.
+
+**USB sticks on boards that do not mount them.** Some printer boards have nothing that mounts a USB stick when you plug it in. There, HelixScreen mounts the stick itself, read-only, at `/mnt/usb/<device>` (for example `/mnt/usb/sda1`), and a stick plugged in while HelixScreen is running shows up within about a second. HelixScreen never touches a stick the system has already mounted, and it only does this when it runs as root. It unmounts its own mounts when a stick is removed and when HelixScreen shuts down. FAT, exFAT and NTFS sticks are supported. On a board whose kernel only mounts FAT sticks with short names, a file like `3DBenchy.gcode` appears as `3DBENC~1.GCO` and still prints. To turn this off, set `HELIX_USB_AUTOMOUNT=0` in `helixscreen.env`.
+
 **View options:**
 
 - **Card View** (default): Thumbnails with file info — estimated time, filament usage, slicer
@@ -59,7 +63,7 @@ Once connected, OrcaSlicer's **Print** button uploads the sliced file and (optio
 
 Tap a file to see the preview panel:
 
-- **3D G-code preview**: Rotatable with touch, showing the toolpath
+- **3D G-code preview**: Rotatable with touch, showing the toolpath. On slower boards, the preview shows a simplified model while you drag and sharpens a moment after you let go.
 - **Metadata**: Estimated time, filament weight, layer count, material, and layer height
 - **Pre-print steps**: Shows which calibration steps will run before printing (e.g., bed mesh)
 - **Timelapse toggle**: Enable recording if you have the timelapse plugin installed
@@ -79,7 +83,7 @@ Before starting, you can enable or disable:
 
 These options modify the G-code on-the-fly — if you disable "Auto Bed Mesh" but your G-code contains `BED_MESH_CALIBRATE`, HelixScreen comments it out so it doesn't run.
 
-> **Note:** This only works for operations in the sliced file itself. If a step like bed mesh or QGL lives *inside* your `PRINT_START` macro, HelixScreen can't comment it out — run [Advanced → Configure PRINT_START](advanced.md#configure-print_start) once to make those steps skippable, and then these toggles will control them.
+> **Note:** This only works for operations in the sliced file itself. If a step like bed mesh or QGL lives *inside* your `PRINT_START` macro, HelixScreen can't comment it out. The toggle can only skip it if your macro accepts a skip parameter for that step (for example `SKIP_BED_MESH=1`).
 
 > **Tip:** Pre-print options remember your preferences per slicer. If you always run bed mesh before PrusaSlicer prints, that preference persists.
 
@@ -149,8 +153,14 @@ The Print Status panel shows:
 | **Light** | Toggles the printer's LED/case light. Only appears when HelixScreen has a controllable light configured. |
 | **Pause** | Parks nozzle safely, pauses print |
 | **Resume** | Continues from paused state |
-| **Cancel** | Stops print (confirmation required). By default, waits for the printer's cancel routine to finish. If **Cancel Escalation** is enabled in **Settings > Safety & Notifications**, an emergency stop triggers automatically after the configured timeout. |
+| **Cancel** | Stops print (confirmation required). By default, waits for the printer's cancel routine to finish. If **Cancel Escalation** is enabled in **Settings > Safety & Alerts**, an emergency stop triggers automatically after the configured timeout. |
 | **Tune** | Opens Print Tune overlay for real-time adjustments |
+
+**Files button.** While a print runs, a folder icon in the print screen's header opens the file list, so you can line up the next job without leaving the print view. A second print can never start while one runs; when your printer has a job queue, the button becomes **Add to Queue** instead (see [Queueing a Print](#queueing-a-print)).
+
+**Camera button.** If HelixScreen runs on a separate screen or device from the printer (see [Camera](camera.md)) and the printer has a webcam, the header also gains a **Camera** button that opens the full-screen webcam view. On the printer's own screen it stays hidden - you can already see the print.
+
+**Pause ticks on the progress bar.** Scheduled stops in the file - filament changes (`M600`), `PAUSE`/`M601` commands, and slicer pause-at-layer markers - each draw a small tick on the progress bar where they fall, on both the print screen and the home print card. On a file sliced with `M73` progress markers, the ticks sit at the slicer's own percentages.
 
 ### View Toggle (Progress / Complete)
 
@@ -173,6 +183,29 @@ During printing, frame captures happen automatically based on your timelapse set
 
 ---
 
+## Queueing a Print
+
+> Added in 1.1.
+
+You don't have to wait for a print to end before picking the next one. While a print is running - or still preparing, before its first layer - open any file and its **Print** button becomes **Add to Queue**, marked with a clock icon. A toast confirms the job's position ("Added to queue (position 2)").
+
+- The pre-print options you set on that screen (bed mesh, nozzle cleaning and so on) are saved with the queued job and come back when the job starts.
+- The filament mapping is not saved: it is worked out again when the job actually starts, against the filament loaded at that moment.
+
+**Where to see the queue:**
+
+- the **Up next** line on the print status screen while a print runs, and on the home print card ("Up next: benchy (+2)" when more jobs follow). Tapping it while a print runs opens the Job Queue.
+- the **Job Queue** itself (see [Home Panel - Job Queue Manager](home-panel.md#job-queue-manager)).
+
+**Starting the next job:**
+
+- When a print finishes, the completion dialog offers a **Start next** button whenever the queue has jobs.
+- When the printer is idle, tap the **Up next** line or a job in the Job Queue. The file opens in the file view with your saved options already set - check that the bed is clear, then tap **Print**. The job leaves the queue only once the print actually starts, so backing out of the file view leaves it queued for later.
+
+> **Note:** The queue is Moonraker's `[job_queue]` component. Without it in `moonraker.conf`, the button stays a disabled **Print**. If you set `automatic_transition: True` there, Moonraker starts queued jobs itself as each print finishes - HelixScreen is not involved in that start, so the options card is hidden while queueing and your options are not applied.
+
+---
+
 ## Print Tune Overlay
 
 ![Print Tune Overlay](../../images/user/print-tune.png)
@@ -183,6 +216,17 @@ Access by tapping **Tune** during an active print.
 |-----------|-------|--------------|
 | Speed % | 50-200% | Overall print speed multiplier |
 | Flow % | 75-125% | Extrusion rate multiplier |
+
+Next to each percentage, the overlay shows what it means right now: how fast the toolhead is actually moving in mm/s (0 when it is standing still) and the live volumetric flow in mm³/s.
+
+**Percent or mm/s.** Anything marked with the ⇄ swap icon switches between the two ways of reading speed and flow. Tap the Speed / Flow line on the Print Status screen, or either readout here, and both places change together:
+
+- **Percent** (default): Print Status shows `Speed 100% · Flow 100%`, and the overlay leads with the percentages.
+- **mm/s**: Print Status shows the live toolhead speed and volumetric flow, for example `Speed 148 mm/s · Flow 11.8 mm³/s`, and the overlay leads with those, with the percentage beside them.
+
+The choice is remembered. On the smallest screens Print Status has no Speed / Flow line, but the overlay readouts still switch.
+
+> **Note:** Volumetric flow assumes 1.75 mm filament. On a 2.85 mm printer it reads low.
 
 The overlay also includes Z-Offset / baby-step controls (see below).
 
@@ -208,7 +252,9 @@ Fine-tune your first layer height, during a print or while idle.
 
 **Adjusting:**
 
-Choose a step size (0.05 / 0.025 / 0.01 / 0.005 mm), then tap up/down to raise or lower the nozzle.
+Choose a step size (0.05 / 0.025 / 0.01 / 0.005 mm), then tap up/down to raise or lower the nozzle. The step size you pick is remembered: next time the controls open, they start at that size instead of the default.
+
+**On multi-tool printers** (tool changers, and printers with more than one nozzle), the Tune overlay's Z-offset row shows a selector for which tool the offset applies to, plus a **Global** option that moves every tool together. Adjusting one tool's offset leaves the others alone - useful when one nozzle sits slightly higher or lower than its siblings.
 
 **Signs you need to adjust:**
 
@@ -222,8 +268,10 @@ Choose a step size (0.05 / 0.025 / 0.01 / 0.005 mm), then tap up/down to raise o
 **Saving your Z-Offset:**
 
 1. Get the first layer looking good
-2. Tap **Save Z-Offset** to write to Klipper config
+2. Tap **Save Z-Offset** on the Controls panel to write to Klipper config
 3. Future prints use this as the starting point
+
+An adjustment made from the Tune overlay is temporary - it lasts for this print unless you save it from Controls.
 
 **If there is no Save Z-Offset button**, your printer's firmware stores the offset
 itself and there is nothing to save - what you dialed in is already kept and is
@@ -282,9 +330,9 @@ If the power dies mid-print, some printers keep a recovery point of the interrup
 - **Resume** — continues the interrupted file from where the power failed
 - **Discard** — clears the recovery data so the printer starts fresh next time
 
-The dialog names the file and warns that the layer in progress when the power dropped may not line up perfectly — a small seam at the resume point is normal.
+The dialog names the file when the printer reports one, and warns that the layer in progress when the power dropped may not line up perfectly — a small seam at the resume point is normal.
 
-This works on Creality's Klipper firmware (K1, K1C, K1 Max, K2 Plus, Ender 3 V3, Hi, and i7) and on the Snapmaker U1. On the Creality printers, HelixScreen asks the printer itself to confirm that a recoverable print exists before offering Resume — if the printer's own check does not pass, the offer never appears, because resuming without it can make the printer home straight through the part left on the bed.
+This works on Creality's Klipper firmware (K1, K1C, K1 Max, K2 Plus, Ender 3 V3, Hi, and i7), on the Snapmaker U1, and on Qidi printers running their stock firmware (Q2, Q1 Pro, and Plus 4). On the Creality printers, HelixScreen asks the printer itself to confirm that a recoverable print exists before offering Resume — if the printer's own check does not pass, the offer never appears, because resuming without it can make the printer home straight through the part left on the bed.
 
 The offer appears once per connection while the printer is idle; if it went unanswered, it comes back the next time HelixScreen connects.
 

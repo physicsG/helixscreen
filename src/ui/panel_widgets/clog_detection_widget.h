@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "ui_widget_ref.h"
+
 #include "panel_widget.h"
 
 #include <memory>
@@ -12,16 +14,14 @@ class ClogDetectionConfigModal;
 namespace helix {
 namespace ui {
 class UiClogBar;
-class UiBufferMeter;
 } // namespace ui
 
-/// Panel widget for filament health monitoring on the home panel.
+/// Panel widget for clog detection on the home panel: the FlowGuard bar.
 ///
-/// Shows a carousel with the FlowGuard bar and, on Happy Hare, a buffer meter
-/// page. The bar replaced the arc at 2x1 (#1017): the widget is authored wide
-/// and short, which is the shape a horizontal scale wants — and it lets both
-/// ends carry a label, so a Flowguard reading says which fault it is leaning
-/// toward. UiClogMeter's arc is still what the AMS sidebar and loaded card use.
+/// A bar rather than an arc (#1017): the widget is authored wide and short,
+/// the shape a horizontal scale wants, and both ends can carry a label, so a
+/// Flowguard reading says which fault it is leaning toward. UiClogMeter's arc
+/// is what the AMS sidebar and loaded card use.
 class ClogDetectionWidget : public PanelWidget {
   public:
     ClogDetectionWidget() = default;
@@ -31,7 +31,6 @@ class ClogDetectionWidget : public PanelWidget {
     void attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) override;
     void detach() override;
     void on_size_changed(int colspan, int rowspan, int width_px, int height_px) override;
-    void on_activate() override;
     const char* id() const override {
         return "clog_detection";
     }
@@ -43,17 +42,11 @@ class ClogDetectionWidget : public PanelWidget {
 
   private:
     void apply_config();
-    void build_carousel_pages();
 
     nlohmann::json config_;
-    lv_obj_t* widget_obj_ = nullptr;
-    lv_obj_t* carousel_ = nullptr;
-    lv_obj_t* clog_page_ = nullptr;
-    lv_obj_t* buffer_page_ = nullptr;
+    helix::ui::WidgetRef widget_obj_;
     std::unique_ptr<ui::UiClogBar> clog_bar_;
-    std::unique_ptr<ui::UiBufferMeter> buffer_meter_;
     std::unique_ptr<ClogDetectionConfigModal> config_modal_;
-    bool has_buffer_page_ = false;
 };
 
 } // namespace helix

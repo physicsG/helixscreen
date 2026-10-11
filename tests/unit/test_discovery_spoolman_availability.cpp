@@ -86,12 +86,13 @@ TEST_CASE("Discovery does not flap Spoolman availability when the component is p
     init_printer_subjects();
 
     // Settle into the steady state a running printer is already in.
-    get_printer_state().set_spoolman_available(true);
+    get_printer_state().capabilities_state().set_spoolman_available(true);
     drain();
     REQUIRE(get_printer_state().is_spoolman_available());
 
     FallingEdgeCounter counter;
-    auto* subject = get_printer_state().get_printer_has_spoolman_subject();
+    auto* subject =
+        get_printer_state().capabilities_state().subject(helix::Capability::HasSpoolman);
     REQUIRE(subject != nullptr);
     lv_observer_t* obs = lv_subject_add_observer(
         subject,
@@ -131,7 +132,7 @@ TEST_CASE("Discovery still clears Spoolman availability when the component is go
 
     init_printer_subjects();
 
-    get_printer_state().set_spoolman_available(true);
+    get_printer_state().capabilities_state().set_spoolman_available(true);
     drain();
     REQUIRE(get_printer_state().is_spoolman_available());
 

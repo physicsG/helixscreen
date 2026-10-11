@@ -41,8 +41,7 @@
       <!-- Integration message - static text -->
       <text_muted width="85%"
                   style_text_align="center"
-                  text="HelixScreen will integrate with your filament changer for multi-spool/color print operations."
-                  translation_tag="HelixScreen will integrate with your filament changer for multi-spool/color print operations."/>
+                  text="HelixScreen will integrate with your filament changer for multi-spool/color print operations."/>
 
     </ui_card>
 

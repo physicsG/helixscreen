@@ -261,8 +261,15 @@ class NetdFakeServer {
                 return; // EAGAIN: backlog drained (or transient error)
             // accept() does not inherit the listener's flags, so the client fd
             // needs its own: drain_client() must never park on a peer that
-            // announced readability and then sent nothing.
-            (void)helix::netd::set_nonblocking(cfd, true);
+            // announced readability and then sent nothing. A blocking client fd
+            // wedges drain_client() inside recv() while it holds mtx_, and the
+            // single acceptor thread never returns — push_line, close_clients
+            // and connection_count all deadlock behind it. Drop the descriptor
+            // rather than admit it to clients_.
+            if (!helix::netd::set_nonblocking(cfd, true)) {
+                ::close(cfd);
+                continue;
+            }
             std::lock_guard<std::mutex> lock(mtx_);
             clients_.push_back(cfd);
             assemblers_.emplace(cfd, helix::netd::LineAssembler{});

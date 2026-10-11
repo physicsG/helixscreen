@@ -18,8 +18,11 @@
 #include "printer_state.h"
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <unistd.h>
 
 #include "../catch_amalgamated.hpp"
@@ -298,9 +301,11 @@ TEST_CASE_METHOD(MoonrakerAPIMockTestFixture,
     std::atomic<bool> error_called{false};
     std::string received_path;
 
-    // Use a temp file for the destination
-    std::string dest_path = "/tmp/helix_test_download_" +
-                            std::to_string(std::hash<std::string>{}("3DBenchy.gcode")) + ".gcode";
+    // Per-process path, like the three download cases below it. Hashing a fixed
+    // filename yields the same path in every process, so two runs of this shard
+    // at once delete and re-create one another's destination and fail on a
+    // file_size that races a std::remove.
+    std::string dest_path = "/tmp/helix_test_download_" + std::to_string(getpid()) + ".gcode";
 
     // Clean up any existing file
     std::remove(dest_path.c_str());
@@ -459,217 +464,6 @@ TEST_CASE_METHOD(MoonrakerAPIMockTestFixture,
 }
 
 // ============================================================================
-// Slot-Spool Mapping Tests
-// ============================================================================
-
-TEST_CASE_METHOD(MoonrakerAPIMockTestFixture,
-                 "MoonrakerAPIMock slot-spool mapping is empty initially", "[mock][filament]") {
-    // No spools should be assigned to slots initially
-    REQUIRE(api_->spoolman_mock().get_spool_for_slot(0) == 0);
-    REQUIRE(api_->spoolman_mock().get_spool_for_slot(1) == 0);
-    REQUIRE(api_->spoolman_mock().get_spool_for_slot(7) == 0);
-    REQUIRE_FALSE(api_->spoolman_mock().get_spool_info_for_slot(0).has_value());
-}
-
-TEST_CASE_METHOD(MoonrakerAPIMockTestFixture, "MoonrakerAPIMock can assign spool to slot",
-                 "[mock][filament]") {
-    // Spool 1 exists in mock data (Polymaker Jet Black PLA)
-    api_->spoolman_mock().assign_spool_to_slot(0, 1);
-
-    REQUIRE(api_->spoolman_mock().get_spool_for_slot(0) == 1);
-
-    auto spool_info = api_->spoolman_mock().get_spool_info_for_slot(0);
-    REQUIRE(spool_info.has_value());
-    REQUIRE(spool_info->id == 1);
-    REQUIRE(spool_info->vendor == "Polymaker");
-    REQUIRE(spool_info->material == "PLA");
-}
-
-TEST_CASE_METHOD(MoonrakerAPIMockTestFixture,
-                 "MoonrakerAPIMock can assign multiple spools to different slots",
-                 "[mock][filament]") {
-    api_->spoolman_mock().assign_spool_to_slot(0, 1); // Polymaker PLA
-    api_->spoolman_mock().assign_spool_to_slot(1, 3); // Elegoo ASA
-    api_->spoolman_mock().assign_spool_to_slot(2, 6); // Overture TPU
-
-    REQUIRE(api_->spoolman_mock().get_spool_for_slot(0) == 1);
-    REQUIRE(api_->spoolman_mock().get_spool_for_slot(1) == 3);
-    REQUIRE(api_->spoolman_mock().get_spool_for_slot(2) == 6);
-    REQUIRE(api_->spoolman_mock().get_spool_for_slot(3) == 0); // Not assigned
-
-    auto slot0 = api_->spoolman_mock().get_spool_info_for_slot(0);
-    auto slot1 = api_->spoolman_mock().get_spool_info_for_slot(1);
-    auto slot2 = api_->spoolman_mock().get_spool_info_for_slot(2);
-
-    REQUIRE(slot0->material == "PLA");
-    REQUIRE(slot1->material == "ASA");
-    REQUIRE(slot2->material == "TPU");
-}
-
-TEST_CASE_METHOD(MoonrakerAPIMockTestFixture, "MoonrakerAPIMock can unassign spool from slot",
-                 "[mock][filament]") {
-    api_->spoolman_mock().assign_spool_to_slot(0, 1);
-    REQUIRE(api_->spoolman_mock().get_spool_for_slot(0) == 1);
-
-    api_->spoolman_mock().unassign_spool_from_slot(0);
-    REQUIRE(api_->spoolman_mock().get_spool_for_slot(0) == 0);
-    REQUIRE_FALSE(api_->spoolman_mock().get_spool_info_for_slot(0).has_value());
-}
-
-TEST_CASE_METHOD(MoonrakerAPIMockTestFixture,
-                 "MoonrakerAPIMock reassigning spool replaces previous", "[mock][filament]") {
-    api_->spoolman_mock().assign_spool_to_slot(0, 1);
-    REQUIRE(api_->spoolman_mock().get_spool_for_slot(0) == 1);
-
-    api_->spoolman_mock().assign_spool_to_slot(0, 5); // Replace with different spool
-    REQUIRE(api_->spoolman_mock().get_spool_for_slot(0) == 5);
-
-    auto spool_info = api_->spoolman_mock().get_spool_info_for_slot(0);
-    REQUIRE(spool_info->vendor == "Kingroon");
-    REQUIRE(spool_info->material == "PETG");
-}
-
-TEST_CASE_METHOD(MoonrakerAPIMockTestFixture, "MoonrakerAPIMock assigning spool_id 0 unassigns",
-                 "[mock][filament]") {
-    api_->spoolman_mock().assign_spool_to_slot(0, 1);
-    REQUIRE(api_->spoolman_mock().get_spool_for_slot(0) == 1);
-
-    api_->spoolman_mock().assign_spool_to_slot(0, 0); // Assign 0 = unassign
-    REQUIRE(api_->spoolman_mock().get_spool_for_slot(0) == 0);
-}
-
-TEST_CASE_METHOD(MoonrakerAPIMockTestFixture,
-                 "MoonrakerAPIMock ignores assignment of nonexistent spool", "[mock][filament]") {
-    api_->spoolman_mock().assign_spool_to_slot(0, 9999); // Doesn't exist
-    REQUIRE(api_->spoolman_mock().get_spool_for_slot(0) == 0);
-}
-
-// ============================================================================
-// Filament Consumption Tests
-// ============================================================================
-
-TEST_CASE_METHOD(MoonrakerAPIMockTestFixture,
-                 "MoonrakerAPIMock consume_filament decrements active spool weight",
-                 "[mock][filament]") {
-    auto& spools = api_->spoolman_mock().get_mock_spools();
-
-    // Find the currently active spool (don't assume index 0 is active)
-    SpoolInfo* active_spool = nullptr;
-    for (auto& s : spools) {
-        if (s.is_active) {
-            active_spool = &s;
-            break;
-        }
-    }
-    REQUIRE(active_spool != nullptr);
-
-    // Record initial weight before consumption
-    float initial_weight = active_spool->remaining_weight_g;
-    REQUIRE(initial_weight > 50.0f); // Sanity check: enough to consume
-
-    api_->spoolman_mock().consume_filament(50.0f); // Consume 50 grams
-
-    // Verify weight decreased by exactly 50 grams
-    REQUIRE(active_spool->remaining_weight_g == Catch::Approx(initial_weight - 50.0f));
-}
-
-TEST_CASE_METHOD(MoonrakerAPIMockTestFixture,
-                 "MoonrakerAPIMock consume_filament uses slot's assigned spool",
-                 "[mock][filament]") {
-    auto& spools = api_->spoolman_mock().get_mock_spools();
-
-    // Find spool 5 by ID (don't assume array index)
-    SpoolInfo* spool5 = nullptr;
-    for (auto& s : spools) {
-        if (s.id == 5) {
-            spool5 = &s;
-            break;
-        }
-    }
-    REQUIRE(spool5 != nullptr);
-
-    // Assign spool 5 to slot 2
-    api_->spoolman_mock().assign_spool_to_slot(2, 5);
-
-    // Record initial weight before consumption
-    float initial_weight = spool5->remaining_weight_g;
-    REQUIRE(initial_weight >= 75.0f); // Sanity check: enough to consume
-
-    api_->spoolman_mock().consume_filament(75.0f, 2); // Consume from slot 2
-
-    // Verify spool 5's weight decreased by exactly 75 grams
-    REQUIRE(spool5->remaining_weight_g == Catch::Approx(initial_weight - 75.0f));
-}
-
-TEST_CASE_METHOD(MoonrakerAPIMockTestFixture,
-                 "MoonrakerAPIMock consume_filament doesn't go negative", "[mock][filament]") {
-    auto& spools = api_->spoolman_mock().get_mock_spools();
-
-    // Find a spool with limited remaining weight (find by ID, not index)
-    SpoolInfo* test_spool = nullptr;
-    for (auto& s : spools) {
-        if (s.id == 4) {
-            test_spool = &s;
-            break;
-        }
-    }
-    REQUIRE(test_spool != nullptr);
-
-    // Set this spool as active
-    api_->spoolman_mock().set_active_spool(4, []() {}, nullptr);
-
-    // Verify it's now active
-    REQUIRE(test_spool->is_active);
-
-    // Record initial weight
-    float initial_weight = test_spool->remaining_weight_g;
-    REQUIRE(initial_weight > 0); // Sanity check: spool has some filament
-
-    // Try to consume more than available
-    float excess_consumption = initial_weight + 100.0f;
-    api_->spoolman_mock().consume_filament(excess_consumption);
-
-    // Should clamp to 0, not go negative
-    REQUIRE(test_spool->remaining_weight_g >= 0.0f);
-    REQUIRE(test_spool->remaining_weight_g == 0.0f);
-}
-
-TEST_CASE_METHOD(MoonrakerAPIMockTestFixture,
-                 "MoonrakerAPIMock consume_filament updates remaining length", "[mock][filament]") {
-    auto& spools = api_->spoolman_mock().get_mock_spools();
-
-    // Find the currently active spool
-    SpoolInfo* active_spool = nullptr;
-    for (auto& s : spools) {
-        if (s.is_active) {
-            active_spool = &s;
-            break;
-        }
-    }
-    REQUIRE(active_spool != nullptr);
-
-    float initial_length = active_spool->remaining_length_m;
-    float initial_weight = active_spool->remaining_weight_g;
-    REQUIRE(initial_length > 0);
-    REQUIRE(initial_weight > 0);
-
-    // Consume some filament
-    float consumption_grams = 100.0f;
-    REQUIRE(initial_weight >= consumption_grams); // Sanity check
-    api_->spoolman_mock().consume_filament(consumption_grams);
-
-    // Length should decrease
-    REQUIRE(active_spool->remaining_length_m < initial_length);
-
-    // Verify proportional relationship:
-    // length reduction should be approximately proportional to weight reduction
-    float weight_ratio = (initial_weight - consumption_grams) / initial_weight;
-    float expected_length = initial_length * weight_ratio;
-    // Allow 10% tolerance for calculation differences
-    REQUIRE(active_spool->remaining_length_m == Catch::Approx(expected_length).epsilon(0.1));
-}
-
-// ============================================================================
 // JSON-RPC Handler Tests
 // ============================================================================
 
@@ -693,31 +487,107 @@ TEST_CASE_METHOD(MoonrakerAPIMockTestFixture,
 }
 
 TEST_CASE_METHOD(MoonrakerAPIMockTestFixture,
-                 "MoonrakerAPIMock set_active_spool updates is_active flag", "[mock][filament]") {
-    auto& spools = api_->spoolman_mock().get_mock_spools();
-    REQUIRE(spools.size() >= 2); // Need at least 2 spools for this test
+                 "set_active_spool reaches the mock server and status reports it",
+                 "[mock][filament][spoolman]") {
+    bool set = false;
+    api_->spoolman().set_active_spool(2, [&]() { set = true; }, nullptr);
+    REQUIRE(set);
+    CHECK(client_.spoolman_mock().get_mock_active_spool_id() == 2);
 
-    // Find spool with ID 1 and spool with ID 2 (don't assume array index)
-    SpoolInfo* spool1 = nullptr;
-    SpoolInfo* spool2 = nullptr;
-    for (auto& s : spools) {
-        if (s.id == 1)
-            spool1 = &s;
-        if (s.id == 2)
-            spool2 = &s;
+    int reported = -1;
+    api_->spoolman().get_spoolman_status([&](bool, int active) { reported = active; }, nullptr);
+    CHECK(reported == 2);
+}
+
+// ============================================================================
+// Simulation Frames as Method Callbacks
+// ============================================================================
+
+TEST_CASE_METHOD(MoonrakerAPIMockTestFixture,
+                 "MoonrakerClientMock simulation delivers status frames to method callbacks",
+                 "[mock][api][moonraker]") {
+    std::mutex mu;
+    std::condition_variable cv;
+    int frames = 0;
+
+    // The live WebSocket path reaches notify_status_update registrants (plugin
+    // subscriptions among them); the simulated frames the mock pushes each tick
+    // must arrive through that same door, not only through register_notify_update.
+    client_.register_method_callback(
+        "notify_status_update", "sim_status_probe", [&](const json& msg) {
+            std::lock_guard<std::mutex> lk(mu);
+            if (msg.contains("params") && msg["params"].is_array() && !msg["params"].empty() &&
+                msg["params"][0].is_object()) {
+                ++frames;
+            }
+            cv.notify_all();
+        });
+
+    client_.start_temperature_simulation();
+    bool delivered = false;
+    {
+        std::unique_lock<std::mutex> lk(mu);
+        delivered = cv.wait_for(lk, std::chrono::seconds(10), [&] { return frames >= 2; });
     }
-    REQUIRE(spool1 != nullptr);
-    REQUIRE(spool2 != nullptr);
+    client_.stop_temperature_simulation();
 
-    // First set spool 1 as active to establish known state
-    api_->spoolman_mock().set_active_spool(1, []() {}, nullptr);
-    REQUIRE(spool1->is_active == true);
-    REQUIRE(spool2->is_active == false);
+    REQUIRE(delivered);
+    CHECK(frames >= 2);
+}
 
-    // Now set spool 2 as active
-    api_->spoolman_mock().set_active_spool(2, []() {}, nullptr);
+// ============================================================================
+// Config-Root Downloads
+// ============================================================================
 
-    // Verify spool 2 is now active and spool 1 is not
-    REQUIRE(spool1->is_active == false);
-    REQUIRE(spool2->is_active == true);
+TEST_CASE_METHOD(MoonrakerAPIMockTestFixture,
+                 "MoonrakerAPIMock download_file_to_path serves the injected config root",
+                 "[mock][api][download][moonraker]") {
+    const std::string body = R"({"id": "union-probe"})";
+    api_->set_config_files({{"plugins/union-probe/manifest.json", body}});
+
+    const std::string dest_path =
+        "/tmp/helix_test_config_download_" + std::to_string(getpid()) + ".json";
+    std::remove(dest_path.c_str());
+
+    bool success_called = false;
+    std::string received_path;
+    bool error_called = false;
+    MoonrakerError received_error;
+    api_->transfers().download_file_to_path(
+        "config", "plugins/union-probe/manifest.json", dest_path,
+        [&](const std::string& path) {
+            received_path = path;
+            success_called = true;
+        },
+        [&](const MoonrakerError& err) {
+            received_error = err;
+            error_called = true;
+        });
+
+    REQUIRE(success_called);
+    CHECK_FALSE(error_called);
+    CHECK(received_path == dest_path);
+
+    std::ifstream file(dest_path, std::ios::binary);
+    std::ostringstream streamed;
+    streamed << file.rdbuf();
+    file.close();
+    CHECK(streamed.str() == body);
+    std::remove(dest_path.c_str());
+
+    // A path the config root does not hold is a not-found, never a fall-through
+    // that could resolve some same-basename file from the test asset dirs.
+    bool absent_ok = false;
+    MoonrakerError absent_error;
+    bool absent_error_called = false;
+    api_->transfers().download_file_to_path(
+        "config", "plugins/union-probe/nope.json", dest_path,
+        [&](const std::string&) { absent_ok = true; },
+        [&](const MoonrakerError& err) {
+            absent_error = err;
+            absent_error_called = true;
+        });
+    CHECK_FALSE(absent_ok);
+    REQUIRE(absent_error_called);
+    CHECK(absent_error.method == "download_file_to_path");
 }

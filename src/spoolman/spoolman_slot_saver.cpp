@@ -4,7 +4,10 @@
 
 #include "filament_database.h"
 #include "i_moonraker_api.h"
+#include "lane_translation.h"
+#include "spoolman_catalog_search.h"
 #include "spoolman_manager.h"
+#include "text_io.h"
 
 #include <spdlog/spdlog.h>
 
@@ -16,21 +19,20 @@
 
 namespace helix {
 
-namespace {
+SpoolmanSlotSaver::SpoolmanSlotSaver(IMoonrakerAPI* api, float filament_diameter_mm)
+    : api_(api), filament_diameter_mm_(filament_diameter_mm) {}
 
-std::string to_lower(std::string s) {
-    std::transform(s.begin(), s.end(), s.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return s;
+MissingFilamentFields SpoolmanSlotSaver::missing_filament_fields(const SlotInfo& slot) {
+    MissingFilamentFields missing;
+    missing.brand = slot.brand.empty();
+    missing.material = slot.material.empty();
+    // The default grey is a slot with no colour, not a grey filament.
+    missing.color = !helix::ams::is_declarable_color(slot.color_rgb);
+    return missing;
 }
 
-} // namespace
-
-SpoolmanSlotSaver::SpoolmanSlotSaver(IMoonrakerAPI* api) : api_(api) {}
-
 bool SpoolmanSlotSaver::is_filament_complete(const SlotInfo& slot) {
-    return !slot.brand.empty() && !slot.material.empty() &&
-           slot.color_rgb != AMS_DEFAULT_SLOT_COLOR;
+    return !missing_filament_fields(slot).any();
 }
 
 ChangeSet SpoolmanSlotSaver::detect_changes(const SlotInfo& original, const SlotInfo& edited) {
@@ -50,7 +52,10 @@ ChangeSet SpoolmanSlotSaver::detect_changes(const SlotInfo& original, const Slot
     // matches on material + color and therefore resolves back to the same
     // filament record: a repoint that is a no-op by construction.
     if (original.brand != edited.brand || original.material != edited.material ||
-        original.color_rgb != edited.color_rgb || original.catalog_id != edited.catalog_id ||
+        original.color_rgb != edited.color_rgb) {
+        changes.filament_identity = true;
+    }
+    if (changes.filament_identity || original.catalog_id != edited.catalog_id ||
         original.product_name != edited.product_name) {
         changes.filament_level = true;
     }
@@ -88,11 +93,13 @@ void SpoolmanSlotSaver::build_spool_patches(const SpoolInfo& original, const Spo
     if (edited.location != original.location) {
         spool_patch["location"] = edited.location;
     }
+    // The spool's own tare weight, which Spoolman copies from the filament
+    // when the spool is created and reads from the spool from then on.
+    if (std::abs(edited.spool_weight_g - original.spool_weight_g) > 0.1) {
+        spool_patch["spool_weight"] = edited.spool_weight_g;
+    }
 
     // Filament-level fields (affect all spools of this filament definition)
-    if (std::abs(edited.spool_weight_g - original.spool_weight_g) > 0.1) {
-        filament_patch["spool_weight"] = edited.spool_weight_g;
-    }
     if (edited.color_hex != original.color_hex) {
         filament_patch["color_hex"] = edited.color_hex;
     }
@@ -163,11 +170,16 @@ void SpoolmanSlotSaver::save_impl(const SlotInfo& original, const SlotInfo& edit
                                   CompletionCallback on_complete) {
     // New-spool-on-save path — user entered manual filament info on an unlinked slot.
     if (!edited.spoolman_id) {
-        if (!is_filament_complete(edited)) {
-            spdlog::debug(
-                "[SpoolmanSlotSaver] No spoolman_id and incomplete fields — nothing to send");
+        const MissingFilamentFields missing = missing_filament_fields(edited);
+        if (missing.any()) {
+            // A new spool is a new filament, and Spoolman identifies one by
+            // vendor, material and colour. Nothing is sent, and the caller is
+            // told which field it wanted rather than that the save succeeded.
+            spdlog::info("[SpoolmanSlotSaver] A new spool needs a brand, a material and a "
+                         "colour (brand missing: {}, material missing: {}, colour missing: {})",
+                         missing.brand, missing.material, missing.color);
             if (on_complete)
-                on_complete(SaveResult{.success = true});
+                on_complete(SaveResult{.success = false, .missing = missing});
             return;
         }
 
@@ -256,9 +268,24 @@ void SpoolmanSlotSaver::save_impl(const SlotInfo& original, const SlotInfo& edit
                      "(brand={}, material={}, color={:#08x})",
                      spool_id, edited.brand, edited.material, edited.color_rgb);
 
-        if (!is_filament_complete(edited)) {
-            spdlog::info("[SpoolmanSlotSaver] Filament fields incomplete for spool {} — "
-                         "skipping Spoolman filament write",
+        const MissingFilamentFields missing = missing_filament_fields(edited);
+        if (missing.any()) {
+            if (changes.filament_identity) {
+                // The user moved one of the three fields a filament is
+                // identified by, and the slot cannot name all three. One Save
+                // is one outcome, so the weight waits with the rest rather
+                // than landing beside a failure.
+                spdlog::info("[SpoolmanSlotSaver] Spool {} needs a brand, a material and a "
+                             "colour (brand missing: {}, material missing: {}, colour "
+                             "missing: {})",
+                             spool_id, missing.brand, missing.material, missing.color);
+                if (on_complete)
+                    on_complete(SaveResult{.success = false, .missing = missing});
+                return;
+            }
+            // A catalog pick is HelixScreen's own, so an incomplete filament
+            // leaves Spoolman nothing to do and the rest of the save stands.
+            spdlog::info("[SpoolmanSlotSaver] Catalog pick alone for spool {}; no filament write",
                          spool_id);
             if (changes.spool_level) {
                 update_weight(spool_id, edited.remaining_weight_g, on_complete);
@@ -376,11 +403,11 @@ void SpoolmanSlotSaver::update_weight(int spool_id, float weight_g,
 
 void SpoolmanSlotSaver::find_or_create_vendor(const std::string& vendor_name,
                                               VendorCallback on_found, ErrorCallback on_error) {
-    const std::string needle = to_lower(vendor_name);
+    const std::string needle = helix::text_io::to_lower(vendor_name);
     api_->spoolman().get_spoolman_vendors(
         [this, vendor_name, needle, on_found, on_error](const std::vector<VendorInfo>& vendors) {
             for (const auto& v : vendors) {
-                if (to_lower(v.name) == needle) {
+                if (helix::text_io::to_lower(v.name) == needle) {
                     spdlog::debug("[SpoolmanSlotSaver] Reusing vendor '{}' -> id={}", v.name, v.id);
                     if (on_found)
                         on_found(v.id);
@@ -401,25 +428,11 @@ void SpoolmanSlotSaver::find_or_create_vendor(const std::string& vendor_name,
         on_error);
 }
 
-std::string SpoolmanSlotSaver::normalize_color_hex(const std::string& in) {
-    std::string s = in;
-    if (!s.empty() && s[0] == '#')
-        s.erase(0, 1);
-    if (s.size() != 6)
-        return "";
-    for (char& c : s) {
-        if (!std::isxdigit(static_cast<unsigned char>(c)))
-            return "";
-        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-    }
-    return s;
-}
-
 void SpoolmanSlotSaver::find_or_create_filament(int vendor_id, const std::string& material,
                                                 const std::string& color_hex,
                                                 const std::string& filament_name,
                                                 FilamentCallback on_found, ErrorCallback on_error) {
-    const std::string needle_color = normalize_color_hex(color_hex);
+    const std::string needle_color = spoolman::normalize_color_hex(color_hex);
     if (needle_color.empty()) {
         spdlog::warn("[SpoolmanSlotSaver] Invalid color hex '{}', aborting find_or_create_filament",
                      color_hex);
@@ -435,15 +448,14 @@ void SpoolmanSlotSaver::find_or_create_filament(int vendor_id, const std::string
         vendor_id,
         [this, vendor_id, material, needle_color, filament_name, on_found,
          on_error](const std::vector<FilamentInfo>& filaments) {
-            for (const auto& f : filaments) {
-                if (f.material == material && normalize_color_hex(f.color_hex) == needle_color) {
-                    spdlog::debug("[SpoolmanSlotSaver] Reusing filament id={} "
-                                  "(vendor={}, material={}, color={})",
-                                  f.id, vendor_id, material, needle_color);
-                    if (on_found)
-                        on_found(f.id);
-                    return;
-                }
+            if (const FilamentInfo* f =
+                    spoolman::find_matching_filament(filaments, material, needle_color)) {
+                spdlog::debug("[SpoolmanSlotSaver] Reusing filament id={} "
+                              "(vendor={}, material={}, color={})",
+                              f->id, vendor_id, material, needle_color);
+                if (on_found)
+                    on_found(f->id);
+                return;
             }
             nlohmann::json payload;
             payload["vendor_id"] = vendor_id;
@@ -455,11 +467,11 @@ void SpoolmanSlotSaver::find_or_create_filament(int vendor_id, const std::string
             payload["name"] = filament_name.empty() ? material : filament_name;
             // density and diameter are REQUIRED by Spoolman (no defaults in their API).
             // Look up density from the material database; fall back to 1.24 g/cm³ (PLA).
-            // Diameter defaults to 1.75 mm — correct for ~99% of hobbyist setups.
+            // Diameter is the printer's, which the owner passes in.
             auto mat_info = filament::find_material(material);
             payload["density"] =
                 (mat_info && mat_info->density_g_cm3 > 0.0f) ? mat_info->density_g_cm3 : 1.24;
-            payload["diameter"] = 1.75;
+            payload["diameter"] = filament_diameter_mm_;
             spdlog::info("[SpoolmanSlotSaver] Creating filament "
                          "(vendor={}, material={}, color={})",
                          vendor_id, material, needle_color);

@@ -42,7 +42,7 @@ TEST_CASE_METHOD(XMLTestFixture, "U1StockSource emits Spaghetti on paused+code2"
     });
     src.start();
 
-    // The print-state-enum observer is deferred via the UpdateQueue (observe_int_sync),
+    // The print-state-enum observer is deferred via the UpdateQueue (observe<int>),
     // so drain after each frame to run on_print_state() once the frame is fully parsed.
     auto drain = [] {
         helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
@@ -103,4 +103,31 @@ TEST_CASE_METHOD(XMLTestFixture, "U1StockSource fires once per pause edge", "[de
     state().update_from_status(json{{"print_stats", {{"state", "paused"}}}});
     helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
     REQUIRE(fired == 1);
+}
+
+TEST_CASE_METHOD(XMLTestFixture, "U1StockSource fires when the noodle code lands after the pause",
+                 "[detection][u1]") {
+    helix::detection::U1StockSource src(&state());
+    src.set_capable(true);
+    int fired = 0;
+    src.set_callback([&](const helix::detection::DetectionEvent&) { ++fired; });
+    src.start();
+    auto drain = [] {
+        helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+    };
+
+    state().update_from_status(
+        json{{"print_stats", {{"state", "printing"}, {"exception", json::object()}}}});
+    drain();
+    state().update_from_status(json{{"print_stats", {{"state", "paused"}}}});
+    drain();
+    state().update_from_status(json{{"print_stats",
+                                     {{"exception",
+                                       {{"id", 532},
+                                        {"index", 0},
+                                        {"code", 2},
+                                        {"message", "detected noodle"},
+                                        {"level", 2}}}}}});
+    drain();
+    CHECK(fired == 1);
 }

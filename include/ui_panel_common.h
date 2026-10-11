@@ -93,6 +93,37 @@ void ui_panel_setup_resize_callback(ui_panel_resize_context_t* context);
 // ============================================================================
 
 /**
+ * @brief Create an XML component that is hidden for its whole construction
+ *
+ * A widget built during lv_xml_create() can force a layout pass (a bound
+ * dropdown scrolls to its selection). If the root is visible then, its full
+ * area is invalidated and the next refresh redraws it even though the caller
+ * hides it on return, so an overlay open pays for one full-screen render
+ * before NavigationManager::push_overlay() shows it and pays for another.
+ * Building under a hidden holder keeps every invalidation of the new tree off
+ * the display.
+ *
+ * @return The component root, hidden and parented to @p parent, or nullptr
+ */
+namespace helix::ui {
+lv_obj_t* create_xml_hidden(lv_obj_t* parent, const char* component, const char** attrs = nullptr);
+
+/**
+ * @brief Create an XML component that appears already at its final size
+ *
+ * LVGL sizes children before their parents, so a new tree's first layout sees
+ * width:100% parents still 0 wide: a wrapping label is one glyph a line and
+ * hundreds of px tall, and height:content carries that up the tree. A visible
+ * root invalidates every one of those sizes, most of the screen for a toast.
+ * Laid out while hidden, only the final area is redrawn.
+ *
+ * @return The component root, visible and parented to @p parent, or nullptr
+ */
+lv_obj_t* create_xml_laid_out(lv_obj_t* parent, const char* component,
+                              const char** attrs = nullptr);
+} // namespace helix::ui
+
+/**
  * @brief Standard setup for overlay panels using overlay_panel.xml wrapper
  *
  * Overlay panels use the overlay_panel.xml component which provides:

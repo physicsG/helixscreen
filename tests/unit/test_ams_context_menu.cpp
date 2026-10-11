@@ -3,8 +3,14 @@
 
 #include "ui_ams_context_menu.h"
 
+#include "../lvgl_ui_test_fixture.h"
+#include "../test_helpers/backend_user_edit.h"
 #include "../test_helpers/print_state_test_drivers.h"
+#include "../test_helpers/registered_backend.h"
+#include "../test_helpers/snapmaker_test_access.h"
+#include "../ui_test_utils.h"
 #include "ams_backend_mock.h"
+#include "ams_backend_snapmaker.h"
 #include "ams_backend_toolchanger.h"
 #include "ams_types.h"
 #include "filament_database.h"
@@ -57,9 +63,18 @@ class AmsContextMenuTestAccess {
                                                      cold_ops_print_gated);
     }
 
+    using SlotOpDecision = AmsContextMenu::SlotOpDecision;
+
+    static SlotOpDecision decide_slot_ops(const AmsBackend* backend, int slot_index,
+                                          bool pending_is_loaded, bool system_busy,
+                                          bool print_blocks_op, bool toolhead_unaccounted) {
+        return AmsContextMenu::decide_slot_ops(backend, slot_index, pending_is_loaded, system_busy,
+                                               print_blocks_op, toolhead_unaccounted);
+    }
+
     static bool decide_show_backup_row(const helix::printer::EndlessSpoolCapabilities& caps,
-                                       bool has_relation) {
-        return AmsContextMenu::decide_show_backup_row(caps, has_relation);
+                                       const helix::printer::EndlessSpoolConfig& cfg, int slot) {
+        return AmsContextMenu::decide_show_backup_row(caps, cfg, slot);
     }
 
     using BackupEligibleFn = AmsContextMenu::BackupEligibleFn;
@@ -67,23 +82,51 @@ class AmsContextMenuTestAccess {
 
     static std::string build_backup_options_for(int total_slots, int item_index,
                                                 const BackupEligibleFn& eligible,
+                                                LaneNoun noun = LaneNoun::Slot,
                                                 const SlotDisplayNumberFn& display_number = {}) {
-        return AmsContextMenu::build_backup_options_for(total_slots, item_index, eligible,
-                                                        display_number);
+        std::vector<int> bays;
+        for (int i = 0; i < total_slots; ++i) {
+            bays.push_back(i);
+        }
+        return AmsContextMenu::build_backup_options_for(
+            noun, AmsContextMenu::backup_candidates_for(bays, item_index), item_index, eligible,
+            display_number);
+    }
+
+    static std::string build_backup_options_from(const std::vector<int>& candidates,
+                                                 int item_index) {
+        return AmsContextMenu::build_backup_options_for(LaneNoun::Slot, candidates, item_index,
+                                                        nullptr);
+    }
+
+    static std::vector<int> backup_candidates_for(const std::vector<int>& bays, int item_index) {
+        return AmsContextMenu::backup_candidates_for(bays, item_index);
     }
 
     static bool decide_backup_refused(int item_index, int backup_slot,
                                       const BackupEligibleFn& eligible) {
         return AmsContextMenu::decide_backup_refused(item_index, backup_slot, eligible);
     }
+
+    // Production reaches this only through the tool dropdown's value_changed
+    // event, which needs a live widget + a real user selection. The function
+    // itself just reads tool_dropdown_/backend_/get_item_index(), so a test
+    // that has built those (show_near_widget() + a selected dropdown value)
+    // can call it directly.
+    static void handle_tool_changed(AmsContextMenu& menu) {
+        menu.handle_tool_changed();
+    }
 };
 
-// The backup dropdown had no test at all, and CFS is what exposed the gap: it
-// reports the feature as available and read-only but has no per-slot relation of
-// any kind, so the row rendered with a permanently empty value.
+// A read-only backend's row is only worth drawing on a slot that has a backup:
+// anywhere else it reads a permanent "None" that looks like "nothing configured".
 TEST_CASE("AmsContextMenu::decide_show_backup_row needs a relation, not just availability",
           "[ams][context_menu][endless_spool]") {
     using namespace helix::printer;
+
+    // Slot 0 backs onto slot 1; nothing else has an edge.
+    const EndlessSpoolConfig none;
+    const EndlessSpoolConfig edge_0_to_1 = endless_spool_config_from_edges({1, -1, -1, -1});
 
     const EndlessSpoolCapabilities unsupported;
 
@@ -118,35 +161,46 @@ TEST_CASE("AmsContextMenu::decide_show_backup_row needs a relation, not just ava
         .restriction = EndlessSpoolRestriction::PluginMissing};
 
     SECTION("no such feature: never") {
-        CHECK_FALSE(AmsContextMenuTestAccess::decide_show_backup_row(unsupported, false));
-        CHECK_FALSE(AmsContextMenuTestAccess::decide_show_backup_row(unsupported, true));
+        CHECK_FALSE(AmsContextMenuTestAccess::decide_show_backup_row(unsupported, none, 0));
+        CHECK_FALSE(AmsContextMenuTestAccess::decide_show_backup_row(unsupported, edge_0_to_1, 0));
     }
 
     SECTION("plugin not installed: never - there is nothing to configure yet") {
         CHECK_FALSE(
-            AmsContextMenuTestAccess::decide_show_backup_row(synthetic_plugin_missing, false));
-        CHECK_FALSE(
-            AmsContextMenuTestAccess::decide_show_backup_row(synthetic_plugin_missing, true));
+            AmsContextMenuTestAccess::decide_show_backup_row(synthetic_plugin_missing, none, 0));
+        CHECK_FALSE(AmsContextMenuTestAccess::decide_show_backup_row(synthetic_plugin_missing,
+                                                                     edge_0_to_1, 0));
     }
 
     SECTION("AD5X stock zMod: same shape as CFS, hides when no relation") {
         // FirmwareManaged + ReadOnly + no per-slot relation -> the CFS rule.
-        CHECK_FALSE(AmsContextMenuTestAccess::decide_show_backup_row(ad5x_stock, false));
+        CHECK_FALSE(AmsContextMenuTestAccess::decide_show_backup_row(ad5x_stock, none, 0));
     }
 
     SECTION("editable: always, even before anything is configured") {
-        CHECK(AmsContextMenuTestAccess::decide_show_backup_row(afc, false));
-        CHECK(AmsContextMenuTestAccess::decide_show_backup_row(afc, true));
+        CHECK(AmsContextMenuTestAccess::decide_show_backup_row(afc, none, 0));
+        CHECK(AmsContextMenuTestAccess::decide_show_backup_row(afc, edge_0_to_1, 0));
+        CHECK(AmsContextMenuTestAccess::decide_show_backup_row(afc, edge_0_to_1, 2));
     }
 
     SECTION("read-only WITH a relation: shown, so the user can see it") {
-        CHECK(AmsContextMenuTestAccess::decide_show_backup_row(hh_multi_unit, true));
+        CHECK(AmsContextMenuTestAccess::decide_show_backup_row(hh_multi_unit, edge_0_to_1, 0));
     }
 
     SECTION("read-only with NO relation: hidden - this is the CFS fix") {
         // Showing it produced a dropdown stuck on "None" that could never be
         // told apart from "no backup configured".
-        CHECK_FALSE(AmsContextMenuTestAccess::decide_show_backup_row(cfs, false));
+        CHECK_FALSE(AmsContextMenuTestAccess::decide_show_backup_row(cfs, none, 0));
+    }
+
+    SECTION("read-only: only the slot that HAS an edge shows the row (#1464)") {
+        // The CFS fork publishes one edge, for the loaded slot. Every other
+        // slot would render a disabled "None" the firmware never stated.
+        CHECK(AmsContextMenuTestAccess::decide_show_backup_row(cfs, edge_0_to_1, 0));
+        CHECK_FALSE(AmsContextMenuTestAccess::decide_show_backup_row(cfs, edge_0_to_1, 1));
+        CHECK_FALSE(AmsContextMenuTestAccess::decide_show_backup_row(cfs, edge_0_to_1, 2));
+        CHECK_FALSE(
+            AmsContextMenuTestAccess::decide_show_backup_row(hh_multi_unit, edge_0_to_1, 3));
     }
 }
 
@@ -527,6 +581,17 @@ TEST_CASE("Backup options are tagged by the backend's eligibility rule",
                                             : BackupEligibility::GradeDiffers;
     };
 
+    SECTION("a bay of a box that is not there is not offered") {
+        // Bays 0-3 and 8-11 exist; 4-7 belong to an absent box.
+        const std::vector<int> bays = {0, 1, 2, 3, 8, 9, 10, 11};
+        const auto candidates = Access::backup_candidates_for(bays, 9);
+        CHECK(candidates == std::vector<int>{0, 1, 2, 3, 8, 10, 11});
+        const auto opts = Access::build_backup_options_from(candidates, 9);
+        CHECK(opts.find("Slot 5") == std::string::npos);
+        CHECK(opts.find("Slot 9") != std::string::npos);
+        CHECK(opts.find("Slot 12") != std::string::npos);
+    }
+
     SECTION("the current slot is skipped and None leads") {
         const auto opts = Access::build_backup_options_for(4, 1, default_rule);
         CHECK(opts.rfind("None", 0) == 0);
@@ -664,6 +729,18 @@ TEST_CASE("Backup options are tagged by the backend's eligibility rule",
         CHECK_FALSE(called);
         CHECK(opts.find("(incompatible)") == std::string::npos);
     }
+
+    SECTION("every option is spelled in the backend's own word") {
+        const auto always = [](int, int) { return BackupEligibility::Eligible; };
+        const auto opts = Access::build_backup_options_for(4, 0, always, LaneNoun::Lane);
+        // An AFC user picks a backup Lane, not a backup Slot, and the numbers
+        // stay 1-based whichever word spells them.
+        CHECK(opts.find("Lane 2") != std::string::npos);
+        CHECK(opts.find("Lane 3") != std::string::npos);
+        CHECK(opts.find("Lane 4") != std::string::npos);
+        CHECK(opts.find("Slot") == std::string::npos);
+        CHECK(opts.find("Lane 1") == std::string::npos); // the open slot is skipped
+    }
 }
 
 TEST_CASE("The change handler refuses exactly what the option list tagged",
@@ -750,7 +827,7 @@ TEST_CASE("The option list is built from the live backend virtual, not a local r
         SlotInfo info = backend.get_slot_info(slot);
         info.material = material;
         info.status = SlotStatus::AVAILABLE;
-        REQUIRE(backend.set_slot_info(slot, info));
+        REQUIRE(helix::test::apply_edit(backend, slot, info));
     };
     set_material(0, "PLA");
     set_material(1, "PLA");
@@ -824,7 +901,8 @@ TEST_CASE("Backup options use the badge's spool number, not slot + 1",
         const std::vector<int> shown = {1, 2, 3, 4, 4, 5, 6, 7};
         const auto display = [&shown](int slot) { return shown[static_cast<size_t>(slot)]; };
 
-        const auto opts = Access::build_backup_options_for(8, 0, allow_all, display);
+        const auto opts =
+            Access::build_backup_options_for(8, 0, allow_all, LaneNoun::Slot, display);
         CHECK(opts.find("Slot 7") != std::string::npos);
         CHECK(opts.find("Slot 8") == std::string::npos); // the whole point
     }
@@ -841,13 +919,13 @@ TEST_CASE("Backup options use the badge's spool number, not slot + 1",
 // ============================================================================
 // A backend that withdraws its unmount offer has to be able to make it stick.
 //
-// AmsContextMenu composes the loaded signal as an OR (ui_ams_context_menu.cpp,
-// on_created): the snapshot taken when the menu opens
-// (can_unload_from_toolhead) OR the live pair (slot_is_actively_loaded ||
-// slot_has_filament_at_toolhead). A rule that lives in only one of those three
-// is put back by the other two, so a withdrawal that reads correct in the
-// backend never reaches the button. On a tool changer the button dispatches
-// UNSELECT_TOOL, which moves a physical machine.
+// AmsContextMenu composes the loaded signal as an OR
+// (`src/ui/ui_ams_context_menu.cpp#AmsContextMenu::decide_slot_ops`): the
+// snapshot taken when the menu opens (can_unload_from_toolhead) OR the live pair
+// (slot_is_actively_loaded || slot_has_filament_at_toolhead). A rule that lives
+// in only one of those three is put back by the other two, so a withdrawal that
+// reads correct in the backend never reaches the button. On a tool changer the
+// button dispatches UNSELECT_TOOL, which moves a physical machine.
 // ============================================================================
 
 namespace {
@@ -869,17 +947,88 @@ class DockSensorToolChanger : public AmsBackendToolChanger {
         handle_status_update(nlohmann::json{{"method", "notify_status_update"},
                                             {"params", nlohmann::json::array({status, 0.0})}});
     }
-
-    /// The menu's own composition of the three accessors, spelled as on_created()
-    /// spells it. Kept in one place so both halves of the case below ask the
-    /// same question the UI asks.
-    [[nodiscard]] bool menu_reads_slot_loaded(int slot) {
-        return can_unload_from_toolhead(slot) || slot_is_actively_loaded(slot) ||
-               slot_has_filament_at_toolhead(slot);
-    }
 };
 
+/// The AMS panels' call site, so a case supplies the inputs the UI supplies:
+/// both panels snapshot AmsBackend::can_unload_from_toolhead() for the slot and
+/// hand that to the menu as `pending_is_loaded`. The decision itself is
+/// production's - this only wires the arguments.
+[[nodiscard]] AmsContextMenuTestAccess::SlotOpDecision ops_for(const AmsBackend& backend, int slot,
+                                                               bool print_blocks_op = false) {
+    return AmsContextMenuTestAccess::decide_slot_ops(
+        &backend, slot, backend.can_unload_from_toolhead(slot), backend.get_system_info().is_busy(),
+        print_blocks_op, backend.toolhead_filament_unaccounted().value_or(false));
+}
+
 } // namespace
+
+// A U1 head whose toolhead switch reads filament while channel_state says
+// preload_finish: filament parked short of the nozzle. The menu offers the
+// heated Unload for it and keeps Load, since the head is not loaded.
+TEST_CASE("Snapmaker lane menu offers Unload and Load for filament parked in the toolhead",
+          "[ams][context_menu][snapmaker][parked]") {
+    using UnloadMode = AmsContextMenuTestAccess::UnloadMode;
+    helix::test::RegisteredBackend<helix::AmsBackendSnapmaker> reg(nullptr, nullptr);
+    auto& backend = *reg;
+    auto feed = [&](const char* channel_state, bool switch_detected) {
+        helix::SnapmakerTestAccess::handle_status(
+            backend,
+            nlohmann::json{
+                {"toolhead", {{"extruder", "extruder3"}}},
+                {"filament_feed right",
+                 {{"extruder3", {{"filament_detected", true}, {"channel_state", channel_state}}}}},
+                {"filament_motion_sensor e3_filament", {{"filament_detected", switch_detected}}}});
+    };
+
+    SECTION("parked") {
+        feed("preload_finish", true);
+        const auto d = ops_for(backend, 3);
+        CHECK(d.unload_mode == UnloadMode::Unload);
+        CHECK(d.unload_enabled);
+        CHECK(d.can_load);
+    }
+    SECTION("switch clear: nothing to unload") {
+        feed("preload_finish", false);
+        const auto d = ops_for(backend, 3);
+        CHECK(d.unload_mode == UnloadMode::Unavailable);
+        CHECK_FALSE(d.unload_enabled);
+        CHECK(d.can_load);
+    }
+    SECTION("loaded to the nozzle") {
+        feed("load_finish", true);
+        const auto d = ops_for(backend, 3);
+        CHECK(d.unload_mode == UnloadMode::Unload);
+        CHECK(d.unload_enabled);
+        CHECK_FALSE(d.can_load);
+    }
+}
+
+TEST_CASE("Lane menus withdraw Unload while the toolhead is unaccounted",
+          "[ams][context_menu][1324]") {
+    // Filament at the toolhead with no lane claiming it: the lane the menu is
+    // open on may not be the seated one, so neither the heated unload nor a
+    // cold eject is offered on any lane. The computed mode is left alone - a
+    // relabel to Eject would cold-retract the lane that is secretly seated -
+    // only the enablement withdraws, and the sidebar's active-head Unload
+    // covers the state instead.
+    using UnloadMode = AmsContextMenuTestAccess::UnloadMode;
+
+    AmsBackendMock loaded(4);
+    REQUIRE(loaded.start());
+    // Slot 0 is the mock's default loaded lane.
+    REQUIRE(loaded.can_unload_from_toolhead(0));
+    CHECK(ops_for(loaded, 0).unload_enabled);
+    loaded.stop();
+
+    AmsBackendMock unaccounted(4);
+    unaccounted.set_initial_state_scenario("unaccounted");
+    REQUIRE(unaccounted.start());
+    REQUIRE(unaccounted.toolhead_filament_unaccounted().value_or(false));
+    const auto d = ops_for(unaccounted, 0);
+    CHECK(d.unload_mode == UnloadMode::Unload);
+    CHECK_FALSE(d.unload_enabled);
+    unaccounted.stop();
+}
 
 TEST_CASE("A dock-sensor fault disables Unmount and says why", "[ams][context_menu][toolchanger]") {
     using UnloadMode = AmsContextMenuTestAccess::UnloadMode;
@@ -888,7 +1037,7 @@ TEST_CASE("A dock-sensor fault disables Unmount and says why", "[ams][context_me
     backend.feed(nlohmann::json{{"medusahc", {{"operation", "idle"}, {"current_tool", 1}}}});
 
     // The settled machine: tool 1 on the carriage, Unmount offered for it.
-    REQUIRE(backend.menu_reads_slot_loaded(1));
+    REQUIRE(ops_for(backend, 1).is_loaded);
 
     // -2 is the sensors saying they cannot tell which tool is mounted. The parse
     // deliberately HOLDS the last known tool, so everything derived from
@@ -900,29 +1049,15 @@ TEST_CASE("A dock-sensor fault disables Unmount and says why", "[ams][context_me
     // ERROR is excluded from is_busy() (AmsSystemInfo::is_busy), so the busy
     // term cannot be what greys the button — the loaded signal has to.
     REQUIRE_FALSE(backend.get_system_info().is_busy());
-    REQUIRE_FALSE(backend.menu_reads_slot_loaded(1));
+    // Nothing is loaded and this backend has no cold lane op to fall back on, so
+    // the Unload button has no operation at all and is disabled.
+    const auto faulted = ops_for(backend, 1);
+    REQUIRE_FALSE(faulted.is_loaded);
+    CHECK(faulted.unload_mode == UnloadMode::Unavailable);
+    CHECK_FALSE(faulted.unload_enabled);
 
-    // From there the menu's own predicates: nothing is loaded, this backend has
-    // no cold lane op to fall back on, so the Unload button has no operation at
-    // all and is disabled.
-    const SlotInfo slot = backend.get_slot_info(1);
-    const std::optional<bool> presence = helix::ui::slot_presence(slot);
-    const bool is_loaded = backend.menu_reads_slot_loaded(1);
-    const bool toolhead_unload = backend.slot_unloads_to_toolhead(1, is_loaded);
-    const UnloadMode mode = AmsContextMenuTestAccess::decide_unload_mode(
-        toolhead_unload, backend.can_recover_lane_position(1),
-        backend.lane_recovery_is_attributed(), backend.supports_lane_eject(),
-        presence.value_or(false), backend.supports_force_eject(), !presence.value_or(false));
-    CHECK(mode == UnloadMode::Unavailable);
-
-    const bool unload_enabled = AmsContextMenuTestAccess::decide_unload_enabled(
-        backend.get_system_info().is_busy(), mode, /*print_active=*/false,
-        backend.cold_lane_ops_refused_during_print());
-    CHECK_FALSE(unload_enabled);
-
-    // The hint is gated on !unload_enabled, so both halves of the fix live or
-    // die together: a still-enabled button also never explains itself.
-    REQUIRE_FALSE(unload_enabled);
+    // The hint is gated on !unload_enabled, so both halves live or die together:
+    // a still-enabled button also never explains itself.
     CHECK_FALSE(backend.unload_blocked_reason(1).empty());
 }
 
@@ -932,18 +1067,350 @@ TEST_CASE("The dock-sensor withdrawal is not a permanent blanking",
     // never clears would strand the user with no way to unmount at all.
     DockSensorToolChanger backend;
     backend.feed(nlohmann::json{{"medusahc", {{"operation", "idle"}, {"current_tool", 2}}}});
-    REQUIRE(backend.menu_reads_slot_loaded(2));
+    REQUIRE(ops_for(backend, 2).is_loaded);
 
     backend.feed(nlohmann::json{{"medusahc", {{"operation", "idle"}, {"current_tool", -2}}}});
-    REQUIRE_FALSE(backend.menu_reads_slot_loaded(2));
+    REQUIRE_FALSE(ops_for(backend, 2).is_loaded);
 
     backend.feed(nlohmann::json{{"medusahc", {{"operation", "idle"}, {"current_tool", 2}}}});
-    CHECK(backend.menu_reads_slot_loaded(2));
+    CHECK(ops_for(backend, 2).is_loaded);
     CHECK(backend.unload_blocked_reason(2).empty());
 
     // And the docked tools were never a target, fault or no fault.
     for (int slot : {0, 1, 3}) {
         CAPTURE(slot);
-        CHECK_FALSE(backend.menu_reads_slot_loaded(slot));
+        CHECK_FALSE(ops_for(backend, slot).is_loaded);
+    }
+}
+
+// ============================================================================
+// Mount / Unmount are a carriage question, not a filament question
+// ============================================================================
+
+TEST_CASE("Mount and Unmount follow the carriage rather than filament presence",
+          "[ams][context_menu][toolchanger]") {
+    // Each tool on a changer carries its own filament permanently, so SlotInfo
+    // presence is true for all four at once and can decide nothing here. A gate
+    // reading presence alone offers Unmount on the three tools sitting in their
+    // docks and refuses Mount on every one of them. Which tool is on the
+    // carriage is the only term this axis may use.
+    DockSensorToolChanger backend;
+    backend.feed(nlohmann::json{{"medusahc", {{"operation", "idle"}, {"current_tool", 1}}}});
+
+    REQUIRE(backend.load_mounts_tool());
+    REQUIRE(backend.get_current_slot() == 1);
+    REQUIRE_FALSE(backend.get_system_info().is_busy());
+
+    // The state that makes presence useless as a discriminator.
+    for (int slot = 0; slot < 4; ++slot) {
+        CAPTURE(slot);
+        REQUIRE(backend.get_slot_info(slot).is_present());
+    }
+
+    // T1 is on the carriage: it is the only unmount target, and mounting the
+    // tool already mounted is the firmware no-op plan_load() refuses.
+    const auto mounted = ops_for(backend, 1);
+    CHECK_FALSE(mounted.can_load);
+    CHECK(mounted.unload_enabled);
+
+    for (int slot : {0, 2, 3}) {
+        CAPTURE(slot);
+        const auto docked = ops_for(backend, slot);
+        CHECK(docked.can_load);
+        CHECK_FALSE(docked.unload_enabled);
+    }
+}
+
+TEST_CASE("The mount target moves with the carriage", "[ams][context_menu][toolchanger]") {
+    // A swap must hand both buttons over: the tool that left the carriage
+    // becomes mountable, and the one that arrived becomes the unmount target.
+    DockSensorToolChanger backend;
+    backend.feed(nlohmann::json{{"medusahc", {{"operation", "idle"}, {"current_tool", 1}}}});
+    REQUIRE(ops_for(backend, 1).unload_enabled);
+
+    backend.feed(nlohmann::json{{"medusahc", {{"operation", "idle"}, {"current_tool", 3}}}});
+
+    const auto arrived = ops_for(backend, 3);
+    CHECK(arrived.unload_enabled);
+    CHECK_FALSE(arrived.can_load);
+
+    const auto departed = ops_for(backend, 1);
+    CHECK_FALSE(departed.unload_enabled);
+    CHECK(departed.can_load);
+}
+
+// ============================================================================
+// handle_tool_changed: remap conflict toast
+// ============================================================================
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "AmsContextMenu: a conflicting tool selection names both tools as labels",
+                 "[ui][ams][context_menu]") {
+    std::vector<std::pair<ToastSeverity, std::string>> toasts;
+    helix::ui::set_test_toast_hook([&](ToastSeverity sev, const std::string& msg, uint32_t) {
+        toasts.emplace_back(sev, msg);
+    });
+
+    auto backend = std::make_unique<AmsBackendMock>(4);
+    backend->set_operation_delay(0);
+    backend->set_tool_mapping(0, 2); // T0 already routes to slot 2
+
+    // Unlike most components, ams_context_menu.xml is registered lazily by
+    // AmsPanel/AmsOverviewPanel rather than helix::register_xml_components(),
+    // so LVGLUITestFixture's "every component" registration does not cover it.
+    REQUIRE(lv_xml_register_component_from_file("A:ui_xml/ams_context_menu.xml") == LV_RESULT_OK);
+
+    AmsContextMenu menu;
+    REQUIRE(menu.show_near_widget(test_screen(), /*slot_index=*/2, test_screen(),
+                                  /*is_loaded=*/false, backend.get()));
+
+    lv_obj_t* dd = lv_obj_find_by_name(test_screen(), "tool_dropdown");
+    REQUIRE(dd != nullptr);
+    // Options are "None", T0, T1, T2, T3 - index 2 selects T1, which collides
+    // with T0's existing mapping to this same slot.
+    lv_dropdown_set_options(dd, "None\nT0\nT1\nT2\nT3");
+    lv_dropdown_set_selected(dd, 2);
+
+    AmsContextMenuTestAccess::handle_tool_changed(menu);
+
+    helix::ui::set_test_toast_hook(nullptr);
+
+    REQUIRE(toasts.size() == 1);
+    CHECK(toasts[0].first == ToastSeverity::WARNING);
+    CHECK(toasts[0].second.find("T1") != std::string::npos);
+    CHECK(toasts[0].second.find("T0") != std::string::npos);
+    CHECK(toasts[0].second.find("Tool 1") == std::string::npos);
+    CHECK(toasts[0].second.find("Tool 0") == std::string::npos);
+}
+
+// ============================================================================
+// on_created: the header names the position in the backend's own word
+// ============================================================================
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "AmsContextMenu: the slot header uses the backend's own word for a position",
+                 "[ui][ams][context_menu]") {
+    // AmsBackendMock reports Happy Hare, whose noun is Gate. A header reading
+    // "Slot 3" on this backend is the English word for something the firmware,
+    // the macros and every other surface call a gate.
+    auto backend = std::make_unique<AmsBackendMock>(4);
+    REQUIRE(backend->lane_noun() == LaneNoun::Gate);
+
+    // ams_context_menu.xml is registered lazily by AmsPanel/AmsOverviewPanel
+    // rather than by helix::register_xml_components(), so the fixture's
+    // "every component" registration does not cover it.
+    REQUIRE(lv_xml_register_component_from_file("A:ui_xml/ams_context_menu.xml") == LV_RESULT_OK);
+
+    AmsContextMenu menu;
+    REQUIRE(menu.show_near_widget(test_screen(), /*slot_index=*/2, test_screen(),
+                                  /*is_loaded=*/false, backend.get()));
+
+    lv_obj_t* header = lv_obj_find_by_name(test_screen(), "slot_header");
+    REQUIRE(header != nullptr);
+    CHECK(std::string(lv_label_get_text(header)) == "Gate 3");
+}
+
+// ============================================================================
+// on_created: Clear Spool greys out with a reason while its lane feeds the job
+// ============================================================================
+
+namespace {
+
+/// Pin the lifecycle through the wire driver for one case and restore a
+/// machine-free state on scope exit, even when an assertion throws: the
+/// lifecycle subject outlives every test in this binary, and a latched
+/// PRINTING changes what any later test's Clear Spool is allowed to do.
+class ScopedWireState {
+  public:
+    ScopedWireState(PrinterState& st, helix::PrintJobState s) : st_(st) {
+        helix::test::set_wire_state(st_, s);
+    }
+    ~ScopedWireState() {
+        helix::test::set_wire_state(st_, helix::PrintJobState::STANDBY);
+    }
+
+  private:
+    PrinterState& st_;
+};
+
+} // namespace
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "AmsContextMenu: Clear Spool greys out with a reason while its lane feeds the job",
+                 "[ui][ams][context_menu][1661]") {
+    auto backend = std::make_unique<AmsBackendMock>(4);
+    REQUIRE(backend->lane_noun() == LaneNoun::Gate);
+    // create_mock()'s seed, restated for a directly-constructed mock: slot 0 is
+    // the loaded, current lane, the one a job draws from.
+    REQUIRE(backend->slot_is_actively_loaded(0));
+
+    // ams_context_menu.xml is registered lazily by AmsPanel/AmsOverviewPanel
+    // rather than by helix::register_xml_components(), so the fixture's
+    // "every component" registration does not cover it.
+    REQUIRE(lv_xml_register_component_from_file("A:ui_xml/ams_context_menu.xml") == LV_RESULT_OK);
+
+    SECTION("mid-print, on the lane the job is drawing from") {
+        ScopedWireState printing(state(), helix::PrintJobState::PRINTING);
+
+        AmsContextMenu menu;
+        REQUIRE(menu.show_near_widget(test_screen(), /*slot_index=*/0, test_screen(),
+                                      /*is_loaded=*/true, backend.get()));
+
+        lv_subject_t* can_clear = lv_xml_get_subject(nullptr, "ams_slot_can_clear");
+        REQUIRE(can_clear != nullptr);
+        CHECK(lv_subject_get_int(can_clear) == 0);
+
+        // The reason is on screen in the backend's own word for the position.
+        lv_subject_t* hint = lv_xml_get_subject(nullptr, "ams_slot_clear_hint");
+        REQUIRE(hint != nullptr);
+        const std::string hint_text = lv_subject_get_string(hint);
+        CHECK(hint_text.find("Gate 1") != std::string::npos);
+        CHECK(hint_text.find("feeding the current print") != std::string::npos);
+
+        lv_subject_t* hint_visible = lv_xml_get_subject(nullptr, "ams_slot_clear_hint_visible");
+        REQUIRE(hint_visible != nullptr);
+        CHECK(lv_subject_get_int(hint_visible) == 1);
+
+        // The bound button itself: revealed (the slot carries a spool) but
+        // disabled, so the finger cannot fire a clear the dispatch would refuse.
+        lv_obj_t* btn_clear = lv_obj_find_by_name(test_screen(), "btn_clear_spool");
+        REQUIRE(btn_clear != nullptr);
+        CHECK_FALSE(lv_obj_has_flag(btn_clear, LV_OBJ_FLAG_HIDDEN));
+        CHECK(lv_obj_has_state(btn_clear, LV_STATE_DISABLED));
+    }
+
+    SECTION("same lane, machine free") {
+        ScopedWireState idle(state(), helix::PrintJobState::STANDBY);
+
+        AmsContextMenu menu;
+        REQUIRE(menu.show_near_widget(test_screen(), /*slot_index=*/0, test_screen(),
+                                      /*is_loaded=*/true, backend.get()));
+
+        lv_subject_t* can_clear = lv_xml_get_subject(nullptr, "ams_slot_can_clear");
+        REQUIRE(can_clear != nullptr);
+        CHECK(lv_subject_get_int(can_clear) == 1);
+
+        lv_subject_t* hint_visible = lv_xml_get_subject(nullptr, "ams_slot_clear_hint_visible");
+        REQUIRE(hint_visible != nullptr);
+        CHECK(lv_subject_get_int(hint_visible) == 0);
+
+        lv_obj_t* btn_clear = lv_obj_find_by_name(test_screen(), "btn_clear_spool");
+        REQUIRE(btn_clear != nullptr);
+        CHECK_FALSE(lv_obj_has_state(btn_clear, LV_STATE_DISABLED));
+    }
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "AmsContextMenu: an external menu resets a lane's Clear refusal",
+                 "[ui][ams][context_menu][1661]") {
+    auto backend = std::make_unique<AmsBackendMock>(4);
+    REQUIRE(backend->slot_is_actively_loaded(0));
+
+    REQUIRE(lv_xml_register_component_from_file("A:ui_xml/ams_context_menu.xml") == LV_RESULT_OK);
+
+    // Stage the refusal: a lane menu rendered mid-print on the feeding lane
+    // leaves can_clear=0 and the hint published. The subjects are static and
+    // outlive the menu, so this is the state the bypass menu inherits.
+    {
+        ScopedWireState printing(state(), helix::PrintJobState::PRINTING);
+        AmsContextMenu lane_menu;
+        REQUIRE(lane_menu.show_near_widget(test_screen(), /*slot_index=*/0, test_screen(),
+                                           /*is_loaded=*/true, backend.get()));
+    }
+    lv_subject_t* can_clear = lv_xml_get_subject(nullptr, "ams_slot_can_clear");
+    REQUIRE(can_clear != nullptr);
+    REQUIRE(lv_subject_get_int(can_clear) == 0); // the refusal is staged
+
+    AmsContextMenu ext_menu;
+    REQUIRE(ext_menu.show_for_external_spool(test_screen(), test_screen()));
+
+    // The bypass spool's own Clear erases its assignment, not a lane's
+    // metadata, so the lane's refusal must not render under it.
+    CHECK(lv_subject_get_int(can_clear) == 1);
+
+    lv_subject_t* hint = lv_xml_get_subject(nullptr, "ams_slot_clear_hint");
+    REQUIRE(hint != nullptr);
+    CHECK(std::string(lv_subject_get_string(hint)).empty());
+
+    lv_subject_t* hint_visible = lv_xml_get_subject(nullptr, "ams_slot_clear_hint_visible");
+    REQUIRE(hint_visible != nullptr);
+    CHECK(lv_subject_get_int(hint_visible) == 0);
+
+    // The fresh XML tree binds from the subjects at creation, so a stale
+    // refusal would draw the bypass menu's own Clear disabled.
+    lv_obj_t* btn_clear = lv_obj_find_by_name(test_screen(), "btn_clear_spool");
+    REQUIRE(btn_clear != nullptr);
+    CHECK_FALSE(lv_obj_has_state(btn_clear, LV_STATE_DISABLED));
+}
+
+// ============================================================================
+// on_created: Preload follows the backend capability and the print gate
+// ============================================================================
+
+namespace {
+/// A mock whose "filament at the toolhead" answer the test sets.
+class PreloadMock : public AmsBackendMock {
+  public:
+    using AmsBackendMock::AmsBackendMock;
+    bool loaded = false;
+    [[nodiscard]] bool is_filament_loaded() const override {
+        return loaded;
+    }
+};
+} // namespace
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "AmsContextMenu: Preload shows for a preloading backend and greys when blocked",
+                 "[ui][ams][context_menu][preload]") {
+    auto backend = std::make_unique<PreloadMock>(4);
+    REQUIRE(backend->supports_lane_preload());
+
+    REQUIRE(lv_xml_register_component_from_file("A:ui_xml/ams_context_menu.xml") == LV_RESULT_OK);
+
+    SECTION("machine free, nothing loaded: shown and enabled") {
+        ScopedWireState idle(state(), helix::PrintJobState::STANDBY);
+        AmsContextMenu menu;
+        REQUIRE(menu.show_near_widget(test_screen(), /*slot_index=*/1, test_screen(),
+                                      /*is_loaded=*/false, backend.get()));
+        lv_obj_t* btn = lv_obj_find_by_name(test_screen(), "btn_preload");
+        REQUIRE(btn != nullptr);
+        CHECK_FALSE(lv_obj_has_flag(btn, LV_OBJ_FLAG_HIDDEN));
+        CHECK_FALSE(lv_obj_has_state(btn, LV_STATE_DISABLED));
+    }
+
+    SECTION("filament loaded: shown but disabled") {
+        ScopedWireState idle(state(), helix::PrintJobState::STANDBY);
+        backend->loaded = true;
+        AmsContextMenu menu;
+        REQUIRE(menu.show_near_widget(test_screen(), /*slot_index=*/1, test_screen(),
+                                      /*is_loaded=*/false, backend.get()));
+        lv_obj_t* btn = lv_obj_find_by_name(test_screen(), "btn_preload");
+        REQUIRE(btn != nullptr);
+        CHECK_FALSE(lv_obj_has_flag(btn, LV_OBJ_FLAG_HIDDEN));
+        CHECK(lv_obj_has_state(btn, LV_STATE_DISABLED));
+    }
+
+    SECTION("mid-print: shown but disabled") {
+        ScopedWireState printing(state(), helix::PrintJobState::PRINTING);
+        AmsContextMenu menu;
+        REQUIRE(menu.show_near_widget(test_screen(), /*slot_index=*/1, test_screen(),
+                                      /*is_loaded=*/false, backend.get()));
+        lv_obj_t* btn = lv_obj_find_by_name(test_screen(), "btn_preload");
+        REQUIRE(btn != nullptr);
+        CHECK_FALSE(lv_obj_has_flag(btn, LV_OBJ_FLAG_HIDDEN));
+        CHECK(lv_obj_has_state(btn, LV_STATE_DISABLED));
+    }
+
+    SECTION("external spool: hidden, even after a lane menu showed it") {
+        {
+            AmsContextMenu lane_menu;
+            REQUIRE(lane_menu.show_near_widget(test_screen(), /*slot_index=*/1, test_screen(),
+                                               /*is_loaded=*/false, backend.get()));
+        }
+        AmsContextMenu ext_menu;
+        REQUIRE(ext_menu.show_for_external_spool(test_screen(), test_screen()));
+        lv_obj_t* btn = lv_obj_find_by_name(test_screen(), "btn_preload");
+        REQUIRE(btn != nullptr);
+        CHECK(lv_obj_has_flag(btn, LV_OBJ_FLAG_HIDDEN));
     }
 }

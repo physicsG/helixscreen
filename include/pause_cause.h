@@ -17,6 +17,7 @@ enum class PauseCause {
 struct PauseSignals {
     std::string message;         ///< print_stats.message (firmware reason text)
     int exception_id = -1;       ///< print_stats.exception id (-1 = unknown)
+    int exception_code = -1;     ///< print_stats.exception code (-1 = unknown)
     bool sdcard_active = true;   ///< virtual_sdcard.is_active
     bool runout_tripped = false; ///< a runout sensor is currently latched
 };
@@ -29,6 +30,7 @@ struct TerminalMatcher {
     std::string message_substr;           ///< case-insensitive substring; "" = ignore
     int exception_id = -1;                ///< exact match; -1 = ignore
     bool require_sdcard_inactive = false; ///< if true, only when sdcard_active == false
+    int exception_code = -1;              ///< exact match; -1 = ignore
 };
 
 /// Classify why a print paused. Pure: no LVGL, threading, or singletons.

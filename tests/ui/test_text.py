@@ -23,7 +23,7 @@ def test_text_matches_a_subject_we_set(helix_app):
     # any other plausible-but-wrong string, would still pass every other test
     # in this file — only this one proves the read path end-to-end.
     #
-    # `about_copyright` (Settings > Help > About) is set once at overlay
+    # `about_copyright` (Settings > Help & About > About) is set once at overlay
     # construction and never touched again by any background system, so
     # there is nothing racing our write.
     helix_app.navigate("settings")

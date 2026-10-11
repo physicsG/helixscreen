@@ -84,7 +84,7 @@ TEST_CASE("AD5X IFS produces no topology until the wire tool_map is discovered",
     CHECK_FALSE(helix::build_ams_topology(&ad5x, 0).has_value());
 
     // The module's echo shape: string tool keys, 1-based lanes.
-    Ad5xIfsTestAccess::deliver_identity_tool_map(ad5x);
+    helix::Ad5xIfsTestAccess::deliver_identity_tool_map(ad5x);
     CHECK(helix::build_ams_topology(&ad5x, 0).has_value());
 }
 

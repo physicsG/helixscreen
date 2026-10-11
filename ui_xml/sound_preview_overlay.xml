@@ -2,7 +2,7 @@
 <!-- Copyright (C) 2025-2026 356C LLC -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <component>
-  <view extends="overlay_panel" title="Preview Sounds" title_tag="Preview Sounds">
+  <view extends="overlay_panel" title="Preview Sounds">
     <lv_obj name="overlay_content"
             width="100%" flex_grow="1" style_pad_all="#space_md" flex_flow="column" scrollable="true">
       <!-- Buttons are created dynamically in C++ -->

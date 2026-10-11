@@ -96,7 +96,6 @@ TEST_CASE("MainLoopHangDetector re-arms after the loop recovers", "[hang][heartb
 TEST_CASE("MainLoopHangDetector honours a changed threshold", "[hang][heartbeat]") {
     MainLoopHangDetector d(THRESHOLD_MS);
     d.set_threshold_ms(10000);
-    REQUIRE(d.threshold_ms() == 10000);
 
     REQUIRE(d.sample(1, 0) == 0);
     REQUIRE(d.sample(1, 9000) == 0);

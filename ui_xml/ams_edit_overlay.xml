@@ -50,11 +50,10 @@
     <px name="swatch_col_height_xxlarge" value="230"/>
   </consts>
   <view name="ams_edit_overlay"
-        extends="overlay_panel" title="Edit Slot" title_tag="Edit Slot" hide_action_button="false"
-        action_button_text="Save" action_button_text_tag="Save" action_button_callback="ams_edit_save_cb"
-        action_button_disabled_subject="ams_edit_save_disabled" action_button_hidden_subject="ams_edit_save_hidden"
-        title_badge_image="spoolman_mark" title_badge_subject="ams_edit_is_managed"
-        back_button_callback="ams_edit_back_cb">
+        extends="overlay_panel" title="Edit Slot" hide_action_button="false" action_button_text="Save"
+        action_button_callback="ams_edit_save_cb" action_button_disabled_subject="ams_edit_save_disabled"
+        action_button_hidden_subject="ams_edit_save_hidden" title_badge_image="spoolman_mark"
+        title_badge_subject="ams_edit_is_managed" back_button_callback="ams_edit_back_cb">
     <lv_obj name="overlay_content"
             width="100%" flex_grow="1" style_pad_all="0" flex_flow="column" style_pad_gap="0" scrollable="true"
             scrollbar_mode="auto">
@@ -77,10 +76,9 @@
             <lv_obj name="tool_remap_row"
                     width="100%" height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xxs"
                     scrollable="false" hidden="true">
-              <text_small text="Remap Tool" translation_tag="Remap Tool"/>
+              <text_small text="Remap Tool"/>
               <lv_dropdown name="tool_dropdown"
-                           width="100%" height="content" style_radius="#border_radius" style_border_width="0"
-                           options="None">
+                           width="100%" height="content" style_radius="#border_radius" options="None">
                 <event_cb trigger="value_changed" callback="ams_edit_tool_changed_cb"/>
               </lv_dropdown>
             </lv_obj>
@@ -93,6 +91,7 @@
                   height="content" flex_grow="1" style_bg_color="#elevated_bg" style_bg_opa="255"
                   style_radius="#border_radius" style_pad_all="#space_md" flex_flow="column" style_pad_gap="#space_sm"
                   clickable="true" scrollable="false">
+            <style name="styles.press_wash" selector="pressed"/>
             <event_cb trigger="clicked" callback="ams_edit_card_clicked_cb"/>
             <!-- Row 1: swatch + name + mark + pencil -->
             <lv_obj width="100%"
@@ -160,13 +159,11 @@
                 style_pad_bottom="#space_sm" flex_flow="row_wrap" style_flex_main_place="center"
                 style_flex_cross_place="center" style_pad_gap="#space_md" scrollable="false">
           <ui_button name="btn_change_filament"
-                     height="#button_height" text="Change Filament" translation_tag="Change Filament"
-                     variant="secondary" icon="arrow_left_right">
+                     height="#button_height" text="Change Filament" variant="secondary" icon="arrow_left_right">
             <event_cb trigger="clicked" callback="ams_edit_change_filament_cb"/>
           </ui_button>
           <ui_button name="btn_scan_qr_code"
-                     height="#button_height" text="Scan QR Code" translation_tag="Scan QR Code" variant="secondary"
-                     icon="qrcode_scan">
+                     height="#button_height" text="Scan QR Code" variant="secondary" icon="qrcode_scan">
             <event_cb trigger="clicked" callback="ams_edit_scan_qr_cb"/>
           </ui_button>
         </lv_obj>
@@ -194,16 +191,17 @@
         <centered_column name="picker_loading" width="100%" height="120" hidden="true">
           <bind_flag_if_not_eq subject="edit_picker_state" flag="hidden" ref_value="0"/>
           <spinner size="md"/>
-          <text_body text="Loading spools..." translation_tag="Loading spools..." style_text_align="center"/>
+          <text_body text="Loading spools..." style_text_align="center"/>
         </centered_column>
 
         <!-- Empty state: the FETCH failed - tap retries the fetch -->
-        <lv_obj name="picker_empty" width="100%" height="120" scrollable="false" hidden="true" clickable="true">
+        <lv_obj name="picker_empty"
+                width="100%" height="120" scrollable="false" hidden="true" clickable="true"
+                style_radius="#border_radius">
+          <style name="styles.press_wash" selector="pressed"/>
           <bind_flag_if_not_eq subject="edit_picker_state" flag="hidden" ref_value="1"/>
           <event_cb trigger="clicked" callback="ams_edit_picker_retry_cb"/>
-          <empty_state icon="spoolman"
-                       text="No spools found — tap to retry" translation_tag="No spools found — tap to retry"
-                       clickable="false" event_bubble="true"/>
+          <empty_state icon="spoolman" text="No spools found — tap to retry" clickable="false" event_bubble="true"/>
         </lv_obj>
 
         <!-- No-match state: the fetch succeeded, the term just matches nothing
@@ -211,9 +209,7 @@
              the retry card above so a narrowing search never reads as an error. -->
         <lv_obj name="picker_no_match" width="100%" height="120" scrollable="false" hidden="true">
           <bind_flag_if_not_eq subject="edit_picker_state" flag="hidden" ref_value="3"/>
-          <empty_state icon="magnify"
-                       text="No spools match your search" translation_tag="No spools match your search"
-                       clickable="false"/>
+          <empty_state icon="magnify" text="No spools match your search" clickable="false"/>
         </lv_obj>
 
         <!-- Spool list (populated dynamically by C++) -->
@@ -232,9 +228,9 @@
                 width="100%" height="content" style_bg_opa="0" style_border_width="1" style_border_color="#text_muted"
                 style_border_opa="120" style_radius="#border_radius" style_pad_all="#space_sm" flex_flow="row"
                 style_flex_main_place="center" clickable="true" scrollable="false">
+          <style name="styles.press_wash" selector="pressed"/>
           <event_cb trigger="clicked" callback="ams_edit_setup_entry_cb"/>
-          <text_body text="Not in your spools? Set it up"
-                     translation_tag="Not in your spools? Set it up" clickable="false"/>
+          <text_body text="Not in your spools? Set it up" clickable="false"/>
           <icon src="chevron_right" size="sm" variant="muted" clickable="false"/>
         </lv_obj>
 
@@ -268,7 +264,7 @@
             <lv_obj width="100%"
                     height="content" style_pad_all="0" flex_flow="row" style_pad_gap="#space_sm"
                     style_flex_cross_place="center" scrollable="false">
-              <text_small text="Color" translation_tag="Color"/>
+              <text_small text="Color"/>
               <!-- Selected-color preview -->
               <lv_obj name="details_color_preview"
                       width="28" height="28" style_radius="#border_radius_small" style_bg_color="#card_bg"
@@ -280,13 +276,43 @@
               </ui_button>
             </lv_obj>
             <color_swatch_grid swatch_callback="ams_edit_quick_swatch_cb"/>
+            <!-- Inline scanner reading (hint only): shown when the slot has a scan -->
+            <lv_obj name="details_scan_row"
+                    width="100%" height="content" style_pad_all="0" flex_flow="row" style_pad_gap="#space_sm"
+                    style_flex_cross_place="center" scrollable="false">
+              <bind_flag_if cond="ams_edit_has_scan eq 0" flag="hidden"/>
+              <lv_obj name="details_scan_swatch"
+                      width="28" height="28" style_radius="#border_radius_small" style_bg_color="#card_bg"
+                      style_bg_opa="255" style_border_width="2" style_border_color="#text_muted" style_border_opa="80"
+                      scrollable="false"/>
+              <text_small bind_text="ams_edit_scan_text"/>
+              <ui_button name="btn_use_scanned_color"
+                         width="content" height="#button_height_sm" text="Use scan" variant="secondary">
+                <event_cb trigger="clicked" callback="ams_edit_use_scan_cb"/>
+              </ui_button>
+            </lv_obj>
           </lv_obj>
           <!-- RIGHT: Brand / Material / product. Pinned to the color column's exact
                height (#swatch_col_height) so the flex_grow product list has real
                slack and lands flush with the bottom of the last swatch row. -->
           <lv_obj height="content"
                   flex_grow="1" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xs" scrollable="false">
-            <filament_catalog_selector name="details_catalog_selector" height="#swatch_col_height"/>
+            <!-- Spoolman owns a linked spool's brand and material, so with the
+                 server unreachable the selector gives way to a row that states
+                 what the slot carries. Both operands are Phase 9a subjects, so
+                 this is a cond= and not a subject_expr. -->
+            <filament_catalog_selector name="details_catalog_selector" height="#swatch_col_height">
+              <bind_flag_if cond="ams_edit_identity_is_spoolmans eq 1 and printer_has_spoolman eq 0" flag="hidden"/>
+            </filament_catalog_selector>
+            <lv_obj name="details_identity_readonly"
+                    width="100%" height="content" hidden="true" style_pad_all="0" flex_flow="column"
+                    style_pad_gap="#space_xs" scrollable="false" clickable="false">
+              <bind_flag_if cond="ams_edit_identity_is_spoolmans eq 0 or printer_has_spoolman eq 1" flag="hidden"/>
+              <text_body name="details_identity_label"
+                         bind_text="ams_edit_identity_text" long_mode="dots" clickable="false"/>
+              <text_small text="Spoolman is offline. Brand and material can change once it's back."
+                          style_text_color="#text_muted" long_mode="wrap" clickable="false"/>
+            </lv_obj>
           </lv_obj>
         </lv_obj>
 
@@ -302,7 +328,7 @@
                 height="content" style_pad_all="0" flex_flow="row_wrap" style_pad_gap="#space_md" scrollable="false">
           <lv_obj width="content"
                   height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xxs" scrollable="false">
-            <text_small text="Remaining (g)" translation_tag="Remaining (g)"/>
+            <text_small text="Remaining (g)"/>
             <text_input name="detail_field_remaining"
                         width="#field_w_num" keyboard_hint="numeric" placeholder="1000" max_length="8">
               <event_cb trigger="value_changed" callback="ams_edit_detail_field_changed_cb"/>
@@ -310,7 +336,7 @@
           </lv_obj>
           <lv_obj width="content"
                   height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xxs" scrollable="false">
-            <text_small text="Spool wt (g)" translation_tag="Spool wt (g)"/>
+            <text_small text="Spool wt (g)"/>
             <text_input name="detail_field_spool_weight"
                         width="#field_w_num" keyboard_hint="numeric" placeholder="0" max_length="8">
               <event_cb trigger="value_changed" callback="ams_edit_detail_field_changed_cb"/>
@@ -320,7 +346,7 @@
                   height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xxs" scrollable="false"
                   hidden="true">
             <bind_flag_if_eq subject="ams_edit_is_managed" flag="hidden" ref_value="0"/>
-            <text_small text="Price" translation_tag="Price"/>
+            <text_small text="Price"/>
             <text_input name="detail_field_price"
                         width="#field_w_num" keyboard_hint="numeric" placeholder="0.00" max_length="10">
               <event_cb trigger="value_changed" callback="ams_edit_detail_field_changed_cb"/>
@@ -330,7 +356,7 @@
                   height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xxs" scrollable="false"
                   hidden="true">
             <bind_flag_if_eq subject="ams_edit_is_managed" flag="hidden" ref_value="0"/>
-            <text_small text="Location" translation_tag="Location"/>
+            <text_small text="Location"/>
             <text_input name="detail_field_location"
                         width="#field_w_text" placeholder="Shelf A" placeholder_tag="Shelf A" max_length="64">
               <event_cb trigger="value_changed" callback="ams_edit_detail_field_changed_cb"/>
@@ -340,7 +366,7 @@
                   height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xxs" scrollable="false"
                   hidden="true">
             <bind_flag_if_eq subject="ams_edit_is_managed" flag="hidden" ref_value="0"/>
-            <text_small text="Lot/Batch Nr" translation_tag="Lot/Batch Nr"/>
+            <text_small text="Lot/Batch Nr"/>
             <text_input name="detail_field_lot_nr" width="#field_w_text" placeholder="" max_length="32">
               <event_cb trigger="value_changed" callback="ams_edit_detail_field_changed_cb"/>
             </text_input>
@@ -354,7 +380,7 @@
                   style_flex_main_place="end" style_flex_cross_place="center" style_pad_gap="#space_sm"
                   scrollable="false">
             <bind_flag_if_eq subject="printer_has_spoolman" flag="hidden" ref_value="0"/>
-            <text_small text="Save to Spoolman" translation_tag="Save to Spoolman"/>
+            <text_small text="Save to Spoolman"/>
             <ui_switch name="save_to_spoolman_switch" size="small">
               <bind_state_if_eq subject="ams_edit_is_managed" state="checked" ref_value="1"/>
             </ui_switch>
@@ -371,7 +397,7 @@
           <!-- Notes (full width) -->
           <lv_obj width="100%"
                   height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xxs" scrollable="false">
-            <text_small text="Notes" translation_tag="Notes"/>
+            <text_small text="Notes"/>
             <text_input name="detail_field_comment"
                         width="100%" height="#notes_height" placeholder="" max_length="256" multiline="true">
               <event_cb trigger="value_changed" callback="ams_edit_detail_field_changed_cb"/>
@@ -388,8 +414,8 @@
              without label-printer support, where `label_printer_configured` is
              never registered and this binding is skipped. -->
         <ui_button name="btn_detail_print_label"
-                   width="100%" height="#button_height" text="Print Label" translation_tag="Print Label"
-                   variant="secondary" icon="printer" hidden="true">
+                   width="100%" height="#button_height" text="Print Label" variant="secondary" icon="printer"
+                   hidden="true">
           <bind_flag_if_eq subject="label_printer_configured" flag="hidden" ref_value="0"/>
           <event_cb trigger="clicked" callback="ams_edit_print_label_cb"/>
         </ui_button>
@@ -409,7 +435,7 @@
         <!-- Preset swatches: tap applies + returns -->
         <lv_obj height="content"
                 flex_grow="1" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xs" scrollable="false">
-          <text_small text="Presets" translation_tag="Presets"/>
+          <text_small text="Presets"/>
           <color_swatch_grid swatch_callback="ams_edit_color_swatch_cb"/>
         </lv_obj>
 
@@ -427,11 +453,10 @@
                     style_border_opa="80" scrollable="false"/>
             <text_input name="ams_color_hex_input"
                         width="100" height="content" max_length="9" text="#808080" placeholder_text="#hex_placeholder"
-                        style_border_width="0" style_outline_width="0" scrollable="false">
+                        style_outline_width="0" scrollable="false">
               <event_cb trigger="value_changed" callback="ams_edit_color_hex_changed_cb"/>
             </text_input>
-            <ui_button name="btn_color_apply"
-                       width="100" height="#button_height_sm" text="Select" translation_tag="Select" variant="primary">
+            <ui_button name="btn_color_apply" width="100" height="#button_height_sm" text="Select" variant="primary">
               <event_cb trigger="clicked" callback="ams_edit_color_apply_cb"/>
             </ui_button>
           </lv_obj>

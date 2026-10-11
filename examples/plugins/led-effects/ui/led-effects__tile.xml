@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<component>
+  <!-- Home tile: the effect's state as Klipper reports it. The two icons swap
+       on led-effects__active, and the effect's name shows only once the tile
+       spans two cells. The id carries a hyphen, so cond cannot be used;
+       bind_flag_if_eq is the show/hide rule. -->
+  <view extends="lv_obj"
+        width="100%" height="100%" clickable="true" style_pad_all="#space_sm" style_pad_gap="#space_xs"
+        flex_flow="column" scrollable="false">
+    <event_cb trigger="clicked" callback="plugin_event" user_data="led-effects__toggle"/>
+    <icon name="led-effects__on" src="lightbulb_on" size="lg" variant="primary">
+      <bind_flag_if_eq subject="led-effects__active" flag="hidden" ref_value="0"/>
+    </icon>
+    <icon name="led-effects__off" src="lightbulb_outline" size="lg" variant="secondary">
+      <bind_flag_if_eq subject="led-effects__active" flag="hidden" ref_value="1"/>
+    </icon>
+    <text_body name="led-effects__state" bind_text="led-effects__state"/>
+    <text_small name="led-effects__effect" bind_text="led-effects__effect">
+      <bind_flag_if_eq subject="led-effects__wide" flag="hidden" ref_value="0"/>
+    </text_small>
+  </view>
+</component>

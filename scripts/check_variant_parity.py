@@ -21,10 +21,19 @@ What this gate compares, per (base, variant) pair:
                             and subject="..." on <bind_flag_*>/<bind_state_*>/
                             <bind_style*> children
   - event callbacks         <event_cb callback="...">, *_callback="..."
+  - api props               <prop name="..."> declarations, by name only
+  - conditions              cond= and *_cond= attributes, by presence only,
+                            keyed as element@attribute
 
 Deliberately NOT compared: attributes, element structure, ordering, consts,
 styles. Reflowing a panel is the entire point of a variant — only the wiring has
-to match.
+to match. Prop defaults are part of that reflow: ui_xml/micro/header_bar.xml
+legitimately narrows action_button_2_min_width to 72 against the base's 90, so
+comparing defaults would fail on correct code. A condition's expression text is
+likewise free to be reworded as long as the binding still installs — parsing
+expressions to name the subjects inside them would false-positive on legitimate
+rewordings, and presence is what catches the defect (a variant lacking the
+attribute entirely never installs the binding).
 
 Exit 0 when every pair agrees, 1 otherwise.
 """
@@ -78,7 +87,7 @@ ALLOWED_OMISSIONS: dict[str, dict[str, dict[str, str]]] = {
     },
     "ui_xml/portrait/print_status_panel.xml": {
         "subject": {
-            "ui_breakpoint": "the base hides speed_flow_row at breakpoints 1-2 because the "
+            "ui_breakpoint": "the base hides speed_flow_row below MEDIUM (breakpoints 0-2) because the "
             "landscape controls column has no room for it. Portrait merged Speed/Flow and the "
             "filament+AMS cluster into ONE row that fits at every portrait width, so there is "
             "nothing left to hide — the row is rendered unconditionally, not dropped.",
@@ -105,6 +114,7 @@ class Collected:
         self.subjects: set[str] = set()
         self.callbacks: set[str] = set()
         self.props: set[str] = set()
+        self.conds: set[str] = set()
 
 
 def collect(path: Path) -> Collected:
@@ -145,6 +155,11 @@ def collect(path: Path) -> Collected:
             elif CALLBACK_ATTR_RE.match(attr):
                 if not is_param_ref:
                     out.callbacks.add(value)
+            elif attr == "cond" or attr.endswith("_cond"):
+                # Presence only, keyed element@attribute — a $param reference
+                # still resolves to a live expression at instantiation, so it
+                # counts as present like any other value would.
+                out.conds.add(f"{el.tag}@{attr}")
 
     return out
 
@@ -220,6 +235,7 @@ def main() -> int:
         bad |= report("subject", base_rel, variant_rel, base.subjects, var.subjects)
         bad |= report("callback", base_rel, variant_rel, base.callbacks, var.callbacks)
         bad |= report("api prop", base_rel, variant_rel, base.props, var.props)
+        bad |= report("condition", base_rel, variant_rel, base.conds, var.conds)
         if bad:
             failures += 1
 
@@ -229,7 +245,8 @@ def main() -> int:
             "\n"
             "  A variant may reflow anything — attributes, nesting, order. What it may not do\n"
             "  is drop or invent wiring: a name the C++ resolves with lv_obj_find_by_name, a\n"
-            "  subject binding, or an event callback. Those failures are silent at runtime.\n"
+            "  subject binding, an event callback, an api prop, or a condition. Those failures\n"
+            "  are silent at runtime.\n"
             "\n"
             "  If the base legitimately changed, mirror the change into the variant.\n"
         )

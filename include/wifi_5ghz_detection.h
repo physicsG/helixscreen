@@ -3,8 +3,10 @@
 
 #pragma once
 
-#include <sstream>
+#include "text_io.h"
+
 #include <string>
+#include <string_view>
 
 /**
  * @brief Parse wpa_supplicant GET_CAPABILITY freq response for 5GHz support
@@ -20,17 +22,11 @@ inline bool wifi_parse_freq_list_has_5ghz(const std::string& freq_response) {
         return false;
     }
 
-    std::istringstream stream(freq_response);
-    std::string token;
-
-    while (stream >> token) {
-        try {
-            int freq = std::stoi(token);
-            if (freq >= 5000) {
-                return true;
-            }
-        } catch (const std::exception&) {
-            // Skip non-numeric tokens (FAIL, UNKNOWN, etc.)
+    for (std::string_view token : helix::text_io::split_ws(freq_response)) {
+        // Non-numeric tokens (FAIL, UNKNOWN, etc.) parse as nullopt and are skipped.
+        auto freq = helix::text_io::parse_int<int>(token);
+        if (freq && *freq >= 5000) {
+            return true;
         }
     }
 
@@ -50,10 +46,7 @@ inline bool wifi_parse_iw_phy_has_5ghz(const std::string& iw_output) {
         return false;
     }
 
-    std::istringstream stream(iw_output);
-    std::string line;
-
-    while (std::getline(stream, line)) {
+    for (std::string_view line : helix::text_io::lines(iw_output)) {
         // Look for lines like "        * 5180 MHz [36] (20.0 dBm)"
         auto mhz_pos = line.find("MHz");
         if (mhz_pos == std::string::npos) {
@@ -75,13 +68,9 @@ inline bool wifi_parse_iw_phy_has_5ghz(const std::string& iw_output) {
             continue;
         }
 
-        try {
-            int freq = std::stoi(line.substr(num_start, num_end - num_start));
-            if (freq >= 5000) {
-                return true;
-            }
-        } catch (const std::exception&) {
-            // Skip malformed lines
+        auto freq = helix::text_io::parse_int<int>(line.substr(num_start, num_end - num_start));
+        if (freq && *freq >= 5000) {
+            return true;
         }
     }
 

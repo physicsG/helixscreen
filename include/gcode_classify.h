@@ -15,9 +15,11 @@
 
 #pragma once
 
+#include "text_io.h"
+
 #include <cctype>
-#include <sstream>
 #include <string>
+#include <string_view>
 
 namespace helix {
 
@@ -127,10 +129,9 @@ inline GcodeCat categorize_gcode_token(const std::string& t) {
 /// Whole-token matching keeps prefixes out: "M1090", "G10", "M10", and
 /// "SET_FAN_SPEED_EXTRA" all return false — a substring match would wrongly trip.
 inline bool is_discretionary_gcode(const std::string& script) {
-    std::istringstream lines(script);
-    std::string line;
     bool saw_command = false;
-    while (std::getline(lines, line)) {
+    for (std::string_view line_view : helix::text_io::lines(script)) {
+        const std::string line(line_view);
         const std::string token = detail::gcode_first_token_upper(line);
         if (token.empty()) {
             continue; // blank / whitespace-only / comment-only line
@@ -151,9 +152,8 @@ inline bool is_discretionary_gcode(const std::string& script) {
 /// rejecting moves while it lets the benign rest queue. Whole-token, comment-aware
 /// (so "G10"/"G100" do not trip). Bare G90/G91 are modal-only, not moves.
 inline bool gcode_contains_move(const std::string& script) {
-    std::istringstream lines(script);
-    std::string line;
-    while (std::getline(lines, line)) {
+    for (std::string_view line_view : helix::text_io::lines(script)) {
+        const std::string line(line_view);
         const std::string token = detail::gcode_first_token_upper(line);
         if (detail::categorize_gcode_token(token) == detail::GcodeCat::Move) {
             return true;
@@ -170,9 +170,8 @@ inline bool gcode_contains_move(const std::string& script) {
 /// fan line. SET_PIN (GcodeCat::Pin) always falls through to the generic "change"
 /// — it can't be told apart from a non-LED output_pin fan at this layer.
 inline std::string discretionary_gcode_noun(const std::string& script) {
-    std::istringstream lines(script);
-    std::string line;
-    while (std::getline(lines, line)) {
+    for (std::string_view line_view : helix::text_io::lines(script)) {
+        const std::string line(line_view);
         const std::string token = detail::gcode_first_token_upper(line);
         switch (detail::categorize_gcode_token(token)) {
         case detail::GcodeCat::Temp:

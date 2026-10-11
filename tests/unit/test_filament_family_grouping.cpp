@@ -79,6 +79,8 @@ std::vector<std::string> types_of(const std::vector<const EffectiveFilament*>& p
     return out;
 }
 
+// TEST_MIRROR_OK: contains() is a one-line assertion utility (vector membership), not logic
+// under test
 bool contains(const std::vector<std::string>& v, const std::string& s) {
     return std::find(v.begin(), v.end(), s) != v.end();
 }
@@ -287,10 +289,10 @@ TEST_CASE("is_filled_grade identifies the abrasive side", "[filament][family][gr
 }
 
 TEST_CASE("every filled database material reads as filled", "[filament][family][grade]") {
-    // The affix table and MATERIALS[] are edited independently. Any row whose
+    // The affix table and the `types` table are edited independently. Any row whose
     // NAME advertises a filler must be visible to is_filled_grade(), or the
     // warning silently skips that material.
-    for (const auto& mat : filament::MATERIALS) {
+    for (const auto& mat : *filament::shipped_materials()) {
         std::string name = mat.name;
         const bool advertises_filler =
             name.find("-CF") != std::string::npos || name.find("-GF") != std::string::npos ||
@@ -320,7 +322,7 @@ TEST_CASE("materials_compatible reduces before comparing groups", "[filament][fa
 TEST_CASE("materials_compatible sees through a decorated product name",
           "[filament][family][compat]") {
     // The bug this function exists to close: are_materials_compatible() looks a
-    // name up in MATERIALS[] and reads a miss as "unknown, compatible with
+    // name up in the `types` table and reads a miss as "unknown, compatible with
     // everything". A name the family reducer CAN read must never reach that
     // fallback, or a lane the user labelled from a spool database silently
     // pairs with any other lane.
@@ -355,7 +357,7 @@ TEST_CASE("base extraction preserves compat group for every database material",
     // to its base kept the same compat group, every materials_match() outcome
     // is provably unchanged by the affix table. This guards the whole
     // endless-spool / preflight / slot-picker surface at once.
-    for (const auto& mat : filament::MATERIALS) {
+    for (const auto& mat : *filament::shipped_materials()) {
         std::string base = filament::extract_base_material(mat.name);
         const char* g_orig = filament::get_compatibility_group(mat.name);
         const char* g_base = filament::get_compatibility_group(base);
@@ -743,8 +745,9 @@ TEST_CASE_METHOD(XMLTestFixture, "AD5X whitelist filters entries, not just headi
     FilamentCatalogSelector sel;
     sel.attach(root);
     // Stock AD5X firmware whitelist, derived from the backend rather than re-typed.
-    sel.configure(std::nullopt, std::vector<std::string>(AmsBackendAd5xIfs::STOCK_WHITELIST.begin(),
-                                                         AmsBackendAd5xIfs::STOCK_WHITELIST.end()));
+    sel.configure(std::nullopt,
+                  std::vector<std::string>(helix::AmsBackendAd5xIfs::STOCK_WHITELIST.begin(),
+                                           helix::AmsBackendAd5xIfs::STOCK_WHITELIST.end()));
     sel.populate();
 
     // Headings collapse to the four allowed families.

@@ -12,10 +12,9 @@
  * lv_draw_line (float coords — we build with LV_USE_FLOAT) and corners as a fan
  * of short straight chords sampled from the arc's exact float parametrization
  * (also lv_draw_line, NOT lv_draw_arc, whose integer center / outer radius would
- * round the band ~0.5px out of alignment with the adjoining lines). Round caps
- * live only on the very first seg-start and last seg-end of the path; interior
- * joints (including chord-to-chord) use butt caps (segments join tangentially,
- * so butt joints are seamless and translucent passes don't double-blend).
+ * round the band ~0.5px out of alignment with the adjoining lines). Opaque
+ * passes round-cap every joint, chord to chord included, so angled joints leave
+ * no wedge notches.
  *
  * This layer is shared by both AMS path canvases:
  *   - ui_filament_path_canvas (single-unit detail panel)
@@ -37,14 +36,15 @@ namespace pg = pathgeo;
 // internally, so tight layouts degrade gracefully to jogs / straight runs).
 inline constexpr float FILLET_RADIUS = 12.0f;
 
-// Soft bloom behind active filament paths. A wide, low-opacity line in a lighter
-// tint of the filament color.
-inline constexpr lv_opa_t GLOW_OPA = 60;       // Base glow opacity
-inline constexpr int32_t GLOW_WIDTH_EXTRA = 6; // Extra width beyond tube on each side
+// Halo around the active route: two opaque bands pre-blended from the background
+// toward the wall color, so overlapping chords and bends never double-blend.
+inline constexpr int32_t HALO_WIDTH_EXTRA = 6; // outer band: gauge + 6
+inline constexpr int32_t HALO_INNER_EXTRA = 3; // inner band: gauge + 3
+inline constexpr float HALO_OUTER_MIX = 0.25f; // wall share, outer band
+inline constexpr float HALO_INNER_MIX = 0.55f; // wall share, inner band
 
 /// Detect low-performance platforms (K1/K2/MIPS or constrained-memory devices).
-/// When true, the stroker drops the glow / outline / core-highlight passes and
-/// renders a single body pass, matching the legacy "simple" tube look.
+/// When true, the stroker drops the halo; walls and bore still draw.
 bool reduced_effects();
 
 /// Color helpers (delegate to ams_draw::* — kept here so callers and the
@@ -53,10 +53,6 @@ lv_color_t tube_darken(lv_color_t c, uint8_t amt);
 lv_color_t tube_lighten(lv_color_t c, uint8_t amt);
 lv_color_t tube_blend(lv_color_t c1, lv_color_t c2, float factor);
 
-/// Get a suitable glow color from a filament color. Very dark filaments get a
-/// contrasting blue tint so the glow is still visible.
-lv_color_t get_glow_color(lv_color_t color);
-
 // One concentric stroke pass.
 struct TubePass {
     lv_color_t color;
@@ -64,67 +60,39 @@ struct TubePass {
     lv_opa_t opa;
 };
 
-// Build-from-state descriptor for a lane's tube.
+// A PTFE sleeve: 1 px walls around a bore that shows the filament when loaded.
 struct LaneStyle {
-    bool solid;       // solid filament tube vs hollow idle PTFE
-    lv_color_t color; // filament color (solid) or idle wall color (hollow)
-    lv_color_t bg;    // background for hollow bore
-    int32_t width;    // tube outer width
-    bool glow;        // wide low-opacity backdrop (active lanes only)
+    lv_color_t wall; // idle wall token, theme accent on the active route, error on error
+    lv_color_t bore; // filament color when loaded, background when empty
+    lv_color_t bg;   // background the halo bands pre-blend against
+    int32_t width;   // outer gauge, walls included
+    bool halo;       // active route only; halo color is the wall color
 };
+
+// Paint layers of one tube, bottom to top.
+enum class TubeLayer : uint8_t { Halo, Wall, Bore };
 
 /// Stroke a path with N concentric passes.
 void stroke_path(lv_layer_t* layer, const pg::FilamentPath& path, const TubePass* passes,
                  int n_passes);
 
-/// Build the concentric pass list for a LaneStyle. Returns the number of passes
-/// written into @p out (caller sizes out for at least 4).
-int build_passes(const LaneStyle& style, TubePass* out);
+/// Build one layer's concentric passes for a LaneStyle. Returns the number of
+/// passes written into @p out (at most 2). @p simple drops the halo.
+int build_passes(const LaneStyle& style, TubeLayer layer, TubePass* out,
+                 bool simple = reduced_effects());
 
-/// Build a LaneStyle from slot state in ONE place.
-LaneStyle lane_style(bool has_filament, lv_color_t tool_color, lv_color_t idle_color, lv_color_t bg,
-                     int32_t active_w);
+/// Build a LaneStyle from slot state in ONE place. Only a loaded lane on the
+/// active route gets accent walls and the halo.
+LaneStyle lane_style(bool has_filament, bool active, lv_color_t fill, lv_color_t idle_wall,
+                     lv_color_t accent, lv_color_t bg, int32_t gauge);
 
-/// Draw a path with a style; optionally record (append) the path's segments into
-/// @p record so a flow-dot / tip animation walks exactly what was drawn.
-void draw_lane(lv_layer_t* layer, const pg::FilamentPath& path, const LaneStyle& style,
-               pg::FilamentPath* record = nullptr);
+/// A lane's passes for every layer, in paint order (Halo, Wall, Bore). Returns
+/// the count; @p out holds at least 4.
+int lane_passes(const LaneStyle& style, TubePass* out, bool simple = reduced_effects());
 
-/// Convenience: vertical tube run from (x,y0) to (x,y1). Only records forward
-/// (downward) verticals into @p record (preserves the legacy guard).
-void draw_lane_vline(lv_layer_t* layer, int32_t x, int32_t y0, int32_t y1, const LaneStyle& style,
-                     pg::FilamentPath* record = nullptr);
-
-/// Convenience: orthogonal route (vertical -> fillet -> horizontal -> fillet ->
-/// vertical) from (x0,y0) down to (x1,y1).
-void draw_lane_route(lv_layer_t* layer, int32_t x0, int32_t y0, int32_t x1, int32_t y1,
-                     float fillet_r, const LaneStyle& style, pg::FilamentPath* record = nullptr);
-
-/// Convenience: horizontal tube run from (x0,y) to (x1,y).
-void draw_lane_hline(lv_layer_t* layer, int32_t x0, int32_t x1, int32_t y, const LaneStyle& style,
-                     pg::FilamentPath* record = nullptr);
-
-// One lane in a hub merge fan: its source column / diagonal-start height, draw
-// style, and an optional active-path record sink. Used by draw_merge_fan.
-struct MergeFanLane {
-    int32_t slot_x;
-    int32_t start_y;
-    LaneStyle style;
-    pg::FilamentPath* record = nullptr; // append the drawn path here (active lane)
-};
-
-// Shared hub-merge renderer: parallel diagonals per side, separation by
-// construction (see pathgeo::build_merge_fan). Computes widened hub-top entries
-// + one common slope per side so no two lanes ever overlap or pinch, then routes
-// and draws each lane. Consumed by BOTH AMS path canvases (detail HUB renderer,
-// detail mixed-topology, overview multi-tool routes, overview single-tool hub
-// convergence). @p hub_top is the verticals' final destination; @p fillet_r is
-// the corner-fillet radius (8 on the detail panel, 9 on the overview).
-//
-// If @p entry_x_out is non-null it receives each lane's computed hub-top entry x
-// (size >= n) so the caller can place sensor dots exactly where the tubes land.
-void draw_merge_fan(lv_layer_t* layer, const MergeFanLane* lanes, int n, int32_t hub_cx,
-                    int32_t hub_top, int32_t hub_w, float fillet_r, int32_t* entry_x_out = nullptr);
+/// Active-route wall color: the theme's "primary", lightened in light theme so
+/// it reads blue rather than navy against the card.
+lv_color_t tube_accent();
 
 } // namespace ui
 } // namespace helix

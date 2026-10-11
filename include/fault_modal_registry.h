@@ -58,6 +58,42 @@ void track_fault_modal(lv_obj_t* dialog);
 int dismiss_fault_modals();
 
 /**
+ * @brief Name the dialog that now restates the printer fault
+ *
+ * One fault gets one dialog. The Klipper recovery dialog shows klippy's own
+ * shutdown reason plus the restart actions, so a "Printer Error" alert beside
+ * it only stacks a second OK on top. Naming a carrier retires every tracked
+ * fault alert, whatever fault it describes; their history rows remain. While
+ * the carrier is on screen, fault_alert_gets_modal() demotes every new fault
+ * to a toast and a history row.
+ *
+ * Pass nullptr when the carrier stops restating the fault (its text went
+ * generic); modals already up are then left alone. A dialog that is no longer
+ * on the stack counts as nullptr. The carrier is forgotten automatically when
+ * it is deleted.
+ *
+ * **Main thread only.**
+ */
+void set_fault_carrier(lv_obj_t* dialog);
+
+/**
+ * @brief True while a fault carrier is on screen and not animating out
+ *
+ * **Main thread only.**
+ */
+bool fault_carrier_showing();
+
+/**
+ * @brief Whether an error alert should still be raised as a modal
+ *
+ * @p modal is what the caller asked for; a printer @p fault is demoted to a
+ * toast while a fault carrier is on screen. Non-fault alerts are unaffected.
+ *
+ * **Main thread only.**
+ */
+bool fault_alert_gets_modal(bool modal, bool fault);
+
+/**
  * @brief Number of dialogs currently tracked (live or not). Test seam.
  */
 int tracked_fault_modal_count();

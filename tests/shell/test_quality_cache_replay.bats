@@ -1,0 +1,61 @@
+#!/usr/bin/env bats
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# scripts/quality-checks.sh caches a passing full sweep on the working-tree
+# state and short-circuits the next identical run. That cached pass has to say
+# what the full run examined: a tick that names no counts is indistinguishable
+# from a gate that looked at nothing, which is the failure the counted verdicts
+# exist to rule out (prestonbrown/helixscreen#1488).
+
+load helpers
+
+setup() {
+  cd "$BATS_TEST_DIRNAME/../.." || return 1
+  STAMP="$BATS_TEST_TMPDIR/stamps/abc"
+  COUNTS="$BATS_TEST_TMPDIR/counts"
+  export STAMP COUNTS
+}
+
+# Loads qc_stamp_write / qc_stamp_replay from the real driver and the count
+# helpers from scripts/qc/_lib.sh, with QC_COUNTS pointed at the test's own file.
+with_stamp_helpers() {
+  bash -c '
+    QC_COUNTS="$1"
+    . scripts/qc/_lib.sh
+    eval "$(sed -n "/^qc_stamp_write() {/,/^}/p; /^qc_stamp_replay() {/,/^}/p" scripts/quality-checks.sh)"
+    eval "$2"
+  ' _ "$COUNTS" "$1"
+}
+
+@test "qc_count prints the verdict and records it" {
+  run with_stamp_helpers 'qc_count "✅ All shell scripts pass shellcheck (78 file(s) linted)"'
+  [ "$status" -eq 0 ]
+  contains "78 file(s) linted" "$output"
+  run cat "$COUNTS"
+  contains "78 file(s) linted" "$output"
+}
+
+@test "a cached pass replays the counts of the run that made the stamp" {
+  run with_stamp_helpers 'qc_note "✅ All shell scripts pass shellcheck (78 file(s) linted)"; qc_note "✅ All files properly formatted (1183 file(s) checked)"; qc_stamp_write "$STAMP" "$QC_COUNTS"; qc_stamp_replay "$STAMP"'
+  [ "$status" -eq 0 ]
+  contains "cached" "$output"
+  contains "78 file(s) linted" "$output"
+  contains "1183 file(s) checked" "$output"
+  contains "QC_NO_CACHE=1" "$output"
+}
+
+@test "the stamp names the commit the full run was made on" {
+  run with_stamp_helpers 'qc_stamp_write "$STAMP" "$QC_COUNTS"; head -n 1 "$STAMP"'
+  [ "$status" -eq 0 ]
+  head_sha="$(git rev-parse --short HEAD)"
+  contains "run: $head_sha at " "$output"
+}
+
+@test "an empty stamp from an older run replays as uncounted, not as a count" {
+  mkdir -p "$(dirname "$STAMP")"
+  : > "$STAMP"
+  run with_stamp_helpers 'qc_stamp_replay "$STAMP"'
+  [ "$status" -eq 0 ]
+  contains "recorded no counts" "$output"
+  lacks "file(s)" "$output"
+}

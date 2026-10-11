@@ -3,6 +3,7 @@
 #include "printer_excluded_objects_state.h"
 
 #include "../catch_amalgamated.hpp"
+#include "hv/json.hpp"
 
 using Catch::Approx;
 using namespace helix;
@@ -54,5 +55,88 @@ TEST_CASE("Object geometry storage and retrieval", "[exclude_object][geometry]")
         REQUIRE(v2 > v1);
     }
 
+    state.deinit_subjects();
+}
+
+TEST_CASE("exclude_object status parse", "[exclude_object][geometry]") {
+    PrinterExcludedObjectsState state;
+    state.init_subjects(false);
+
+    state.update_from_status(nlohmann::json::parse(R"({"exclude_object": {
+        "objects": [
+            {"name": "part_a", "center": [10, 20], "polygon": [[0, 0], ["x", 5], [30, 40]]},
+            {"name": "part_b"},
+            {"center": [1, 1]},
+            7
+        ],
+        "excluded_objects": ["part_a", 3],
+        "current_object": "part_a"
+    }})"));
+
+    REQUIRE(state.get_defined_objects().size() == 2);
+    CHECK(state.get_excluded_objects() == std::unordered_set<std::string>{"part_a"});
+    CHECK(state.get_current_object() == "part_a");
+
+    auto a = state.get_object_geometry("part_a");
+    REQUIRE(a.has_value());
+    CHECK(a->has_center);
+    CHECK(a->center.x == Approx(10.0f));
+    CHECK(a->center.y == Approx(20.0f));
+    // The non-numeric point is skipped: it neither throws nor moves the bbox.
+    CHECK(a->has_bbox);
+    CHECK(a->polygon.size() == 2);
+    CHECK(a->bbox_min.x == Approx(0.0f));
+    CHECK(a->bbox_min.y == Approx(0.0f));
+    CHECK(a->bbox_max.x == Approx(30.0f));
+    CHECK(a->bbox_max.y == Approx(40.0f));
+
+    auto b = state.get_object_geometry("part_b");
+    REQUIRE(b.has_value());
+    CHECK_FALSE(b->has_center);
+    CHECK_FALSE(b->has_bbox);
+
+    SECTION("a null current_object clears it") {
+        state.update_from_status(
+            nlohmann::json::parse(R"({"exclude_object": {"current_object": null}})"));
+        CHECK(state.get_current_object().empty());
+        CHECK(state.get_defined_objects().size() == 2);
+    }
+
+    SECTION("a frame without exclude_object changes nothing") {
+        state.update_from_status(nlohmann::json::parse(R"({"toolhead": {}})"));
+        CHECK(state.get_current_object() == "part_a");
+        CHECK(state.get_defined_objects().size() == 2);
+    }
+
+    state.deinit_subjects();
+}
+
+TEST_CASE("make_object_info derives the bbox from the polygon",
+          "[exclude_object][geometry][pre_start_exclude]") {
+    using S = PrinterExcludedObjectsState;
+    const auto info = S::make_object_info("A", glm::vec2(5.0f, 6.0f), {{1, 2}, {9, 3}, {4, 8}});
+    CHECK(info.name == "A");
+    CHECK(info.has_center);
+    CHECK(info.center == glm::vec2(5.0f, 6.0f));
+    CHECK(info.has_bbox);
+    CHECK(info.bbox_min == glm::vec2(1.0f, 2.0f));
+    CHECK(info.bbox_max == glm::vec2(9.0f, 8.0f));
+    CHECK(info.polygon.size() == 3);
+
+    const auto bare = S::make_object_info("B", std::nullopt, {});
+    CHECK_FALSE(bare.has_center);
+    CHECK_FALSE(bare.has_bbox);
+}
+
+TEST_CASE("A status polygon with no usable point gives no bbox",
+          "[exclude_object][geometry][pre_start_exclude]") {
+    PrinterExcludedObjectsState state;
+    state.init_subjects(false);
+    state.update_from_status(nlohmann::json::parse(R"({"exclude_object": {
+        "objects": [{"name": "A", "center": [1, 1], "polygon": [["x", "y"]]}]}})"));
+    const auto geom = state.get_object_geometry("A");
+    REQUIRE(geom.has_value());
+    CHECK(geom->has_center);
+    CHECK_FALSE(geom->has_bbox);
     state.deinit_subjects();
 }

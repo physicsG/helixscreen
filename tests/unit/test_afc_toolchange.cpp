@@ -1,6 +1,7 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "test_helpers/afc_test_access.h"
 #include "ams_backend_afc.h"
 #include "ams_backend_happy_hare.h"
 #include "ams_backend_mock.h"
@@ -9,6 +10,8 @@
 #include "../catch_amalgamated.hpp"
 
 using namespace helix;
+
+namespace helix {
 
 // Test helper — inherits from AmsBackendAfc to call protected parse methods
 class AfcToolchangeTestHelper : public AmsBackendAfc {
@@ -20,7 +23,7 @@ class AfcToolchangeTestHelper : public AmsBackendAfc {
         for (int i = 0; i < count; ++i) {
             names.push_back("lane" + std::to_string(i + 1));
         }
-        initialize_slots(names);
+        AfcTestAccess::initialize_slots(*this, names);
     }
 
     void feed_afc_state(const nlohmann::json& afc_data) {
@@ -35,6 +38,7 @@ class AfcToolchangeTestHelper : public AmsBackendAfc {
         return system_info_;
     }
 };
+} // namespace helix
 
 TEST_CASE("AFC toolchange fields in AmsSystemInfo default to safe values", "[afc][toolchange]") {
     AmsSystemInfo info;
@@ -98,6 +102,8 @@ TEST_CASE("AFC backend parses toolchange fields from status update", "[afc][tool
 // Regression tests for #379: AFC + toolchanger lane tracking
 // ============================================================================
 
+namespace helix {
+
 // Extended helper that supports toolchanger updates and multi-extruder setup
 class AfcToolchangerLaneHelper : public AmsBackendAfc {
   public:
@@ -114,7 +120,7 @@ class AfcToolchangerLaneHelper : public AmsBackendAfc {
         for (int i = 0; i < count; ++i) {
             names.push_back("lane" + std::to_string(i + 1));
         }
-        initialize_slots(names);
+        AfcTestAccess::initialize_slots(*this, names);
     }
 
     void initialize_test_lanes_with_tool_map(int count) {
@@ -141,6 +147,7 @@ class AfcToolchangerLaneHelper : public AmsBackendAfc {
         return system_info_;
     }
 };
+} // namespace helix
 
 TEST_CASE("AFC backend parses toolchanger.tool_number from Klipper status (#379)",
           "[afc][toolchange][regression]") {
@@ -253,6 +260,8 @@ TEST_CASE("AFC backend parses toolchanger.tool_number from Klipper status (#379)
     }
 }
 
+namespace helix {
+
 // Test helper for HH toolchange — reuses the pattern from test_ams_backend_happy_hare.cpp
 class HHToolchangeTestHelper : public AmsBackendHappyHare {
   public:
@@ -270,6 +279,7 @@ class HHToolchangeTestHelper : public AmsBackendHappyHare {
         return system_info_;
     }
 };
+} // namespace helix
 
 TEST_CASE("Happy Hare backend parses toolchange fields", "[hh][toolchange]") {
     HHToolchangeTestHelper hh;

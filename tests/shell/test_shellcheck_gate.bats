@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# Meta-tests for the shellcheck section of scripts/quality-checks.sh.
+# Meta-tests for the shellcheck gate, scripts/qc/shellcheck.sh.
 #
 # The gate used to cover config/platform/*.sh and config/helixscreen.init and
 # nothing else, so every script under scripts/ — the installer modules, the
@@ -16,7 +16,7 @@
 # must be clean. Without those the baseline silently becomes a permanent
 # exemption list and the gate stops meaning anything.
 
-QC="scripts/quality-checks.sh"
+QC="scripts/qc/shellcheck.sh"
 
 setup() {
     cd "$BATS_TEST_DIRNAME/../.." || return 1
@@ -72,8 +72,7 @@ check_as_gate_does() {
 
 # Every scripts/*.sh the gate would actually collect in full-scan mode.
 gate_scripts() {
-    git ls-files 'scripts/*.sh' 'scripts/**/*.sh' 2>/dev/null | sort -u \
-        | grep -vE '^scripts/(install|uninstall)\.sh$'
+    git ls-files 'scripts/*.sh' 'scripts/**/*.sh' 2>/dev/null | sort -u
 }
 
 # ------------------------------------------------------- scope (the actual bug)
@@ -100,14 +99,7 @@ gate_scripts() {
     # Widening to scripts/ must not drop the original coverage.
     filter_selects config/platform/foo.sh
     filter_selects config/helixscreen.init
-}
-
-@test "the generated installer bundles are excluded" {
-    # install.sh/uninstall.sh are bundled from install-dev.sh + lib/installer/,
-    # which are themselves checked. Linting the artifact would double-report
-    # every finding and make it unfixable at source.
-    run bash -c "gate_scripts() { git ls-files 'scripts/*.sh' 'scripts/**/*.sh' | sort -u | grep -vE '^scripts/(install|uninstall)\.sh\$'; }; gate_scripts | grep -c -E '^scripts/(install|uninstall)\.sh\$' || true"
-    [ "$output" = "0" ]
+    filter_selects config/creality-backend.init
 }
 
 @test "non-shell files are not selected" {

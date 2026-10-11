@@ -242,14 +242,14 @@ struct KeypadCeilingFixture {
         // rather than `state`, so those need their subjects too - same pair the
         // SafetyTextHarness in test_safety_limits_negative_min_temp.cpp sets up.
         helix::ToolState::instance().init_subjects(true);
-        AmsState::instance().init_subjects(true);
+        helix::AmsState::instance().init_subjects(true);
         helix::PanelWidgetManager::instance().register_shared_resource(controller);
         panel = std::make_unique<::FilamentPanel>(state, &api);
     }
 
     ~KeypadCeilingFixture() {
         // Ordered teardown, same rule as ParseFixture below. Constructing the
-        // panel installs observe_int_sync guards, and each one queues its apply
+        // panel installs observe<int> guards, and each one queues its apply
         // on the UpdateQueue; a fixture that returns with them still queued
         // hands them to whichever test drains next, which then notifies the
         // subjects that died here (#1166, #1146). Drain before each owner dies.
@@ -428,4 +428,19 @@ TEST_CASE_METHOD(KeypadCeilingFixture,
 
     // Still un-initialized, still intact: the update never ran.
     REQUIRE_FALSE(panel->are_subjects_initialized());
+}
+
+TEST_CASE("The parse records a temperature_fan's own max_temp", "[safety_limits][heater_generic]") {
+    // A temperature_fan target is settable from the thermistor tile, whose keypad
+    // ceiling is this per-object max_temp.
+    ParseFixture f;
+    f.mock_client_.set_config_settings_section("temperature_fan exhaust", {{"max_temp", 70.0}});
+    f.mock_client_.set_config_settings_section("heater_generic filament_dryer",
+                                               {{"max_temp", 90.0}});
+    REQUIRE(f.run_update());
+
+    const SafetyLimits& limits = f.api_->get_safety_limits();
+    REQUIRE(limits.has_max_temp_for("temperature_fan exhaust"));
+    REQUIRE(limits.max_temp_for("temperature_fan exhaust") == 70.0);
+    REQUIRE(limits.max_temp_for("heater_generic filament_dryer") == 90.0);
 }

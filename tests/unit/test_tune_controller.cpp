@@ -72,3 +72,35 @@ TEST_CASE("a null api sends nothing and does not crash", "[tune_controller]") {
     helix::tune::set_flow_percent(nullptr, 120);
     SUCCEED();
 }
+
+TEST_CASE("volumetric_flow_mm3_s multiplies extruder velocity by the filament cross-section",
+          "[tune_controller][tune_units]") {
+    // 5 mm/s of 1.75 mm filament, 2.405 mm^2
+    CHECK(helix::tune::volumetric_flow_mm3_s(500, 1.75) == Catch::Approx(12.026).epsilon(1e-3));
+    CHECK(helix::tune::volumetric_flow_mm3_s(0, 1.75) == Catch::Approx(0.0));
+    // 5 mm/s of 2.85 mm filament, 6.379 mm^2
+    CHECK(helix::tune::volumetric_flow_mm3_s(500, 2.85) == Catch::Approx(31.897).epsilon(1e-3));
+}
+
+TEST_CASE("status_speed_flow_text shows override percentages or physical units",
+          "[tune_controller][tune_units]") {
+    SECTION("percent mode ignores the physical inputs") {
+        auto text = helix::tune::status_speed_flow_text(false, 120, 95, 150, 500, 1.75);
+        CHECK(text.speed == "120%");
+        CHECK(text.flow == "95%");
+    }
+    SECTION("physical mode shows the measured speed as-is and the volumetric flow") {
+        // The measured speed already carries the override; scaling it by
+        // speed_pct again would read 216 here.
+        auto text = helix::tune::status_speed_flow_text(true, 120, 95, 180, 500, 1.75);
+        CHECK(text.speed == "180 mm/s");
+        CHECK(text.flow == "12.0 mm\xC2\xB3/s");
+        CHECK(helix::tune::status_speed_flow_text(true, 120, 95, 180, 500, 2.85).flow ==
+              "31.9 mm\xC2\xB3/s");
+    }
+    SECTION("physical mode with the toolhead still reads zero") {
+        auto text = helix::tune::status_speed_flow_text(true, 100, 100, 0, 0, 1.75);
+        CHECK(text.speed == "0 mm/s");
+        CHECK(text.flow == "0.0 mm\xC2\xB3/s");
+    }
+}

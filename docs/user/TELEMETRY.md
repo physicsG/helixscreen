@@ -124,7 +124,7 @@ Recorded every 4 hours and when HelixScreen closes. Shows which screens are used
 
 ### Performance Snapshots
 
-Recorded every 4 hours alongside panel usage. Measures UI responsiveness so we can identify and fix slow panels across different hardware.
+Recorded every hour, and once more when HelixScreen closes. Measures UI responsiveness so we can identify and fix slow panels across different hardware.
 
 | Field | Description | Example |
 |-------|-------------|---------|
@@ -243,9 +243,9 @@ Telemetry is **OFF by default**. No data is collected, queued, or transmitted un
 
 ## How to Enable or Disable
 
-1. Navigate to **Settings** on the HelixScreen home panel
-2. Find the **Telemetry** section
-3. Toggle **Share Usage Data** on or off
+1. Go to **Settings > System**
+2. Find the **Share Usage Data** toggle
+3. Toggle it on or off
 
 When you disable telemetry:
 - No new events are recorded
@@ -263,9 +263,8 @@ When you re-enable telemetry:
 
 You can inspect exactly what HelixScreen has queued for transmission:
 
-1. Navigate to **Settings**
-2. Tap **Telemetry**
-3. Tap **View Telemetry Data**
+1. Go to **Settings > System**
+2. Tap **View Telemetry Data** (visible when sharing is on)
 
 This opens an overlay showing all queued events in their raw JSON format, which is exactly what would be sent to the server.
 
@@ -275,7 +274,7 @@ This opens an overlay showing all queued events in their raw JSON format, which 
 
 To delete all locally queued telemetry events:
 
-1. Navigate to **Settings** > **Telemetry** > **View Telemetry Data**
+1. Go to **Settings > System > View Telemetry Data**
 2. Tap **Clear All Events**
 
 This permanently removes all queued events from your device. Events that have already been transmitted to the server cannot be individually deleted (see the [Privacy Policy](PRIVACY_POLICY.md) for details on why server-side data is inherently anonymous).
@@ -327,5 +326,5 @@ For developers and the technically curious:
 - **Implementation**: handled by the telemetry and crash-handling modules built into HelixScreen itself — no external agents, scripts, or third-party trackers are involved
 - **Crash handling**: written to keep working even while the app is crashing, so a crash is still captured and queued for sending
 - **Schema version**: `2` (all events include `schema_version` for forward compatibility)
-- **Identity files**: telemetry_device.json (UUID + salt), telemetry_config.json (enabled state), telemetry_queue.json (event queue)
+- **Local files**: telemetry_device.json (UUID + salt) and telemetry_queue.json (event queue) in the config directory; the enabled state is a setting in settings.json
 - **Privacy policy**: [PRIVACY_POLICY.md](PRIVACY_POLICY.md)

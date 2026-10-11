@@ -16,7 +16,9 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
-from esp32_stage_assets import minify_xml, stage_translations  # noqa: E402
+import esp32_printer_images  # noqa: E402
+from esp32_stage_assets import (minify_xml, stage_config, stage_printer_images,  # noqa: E402
+                                stage_translations)
 
 
 def test_strips_single_line_comment():
@@ -123,34 +125,100 @@ def test_globals_xml_round_trips_and_preserves_content():
     assert collect(original_root) == collect(minified_root)
 
 
-def test_stage_translations_hard_errors_when_en_does_not_fit(tmp_path):
-    # The "en always ships" invariant must be a hard failure, not a silently
-    # dropped language, if en.xml's minified size doesn't fit the remaining
-    # on-flash budget.
+def test_stage_translations_ships_every_language_but_the_identity_en(tmp_path):
     translations_dir = tmp_path / "ui_xml" / "translations"
     translations_dir.mkdir(parents=True)
-    (translations_dir / "en.xml").write_text(
-        "<translations><entry key=\"a\">Hello, World!</entry></translations>",
-        encoding="utf-8",
-    )
+    for lang in ("en", "fr", "de", "ja", "zh"):
+        (translations_dir / f"{lang}.xml").write_text(
+            f"<translations languages=\"{lang}\"><translation tag=\"a\" {lang}=\"x\"/></translations>",
+            encoding="utf-8")
+    (translations_dir / "translations.xml").write_text("<translations/>", encoding="utf-8")
 
-    with pytest.raises(SystemExit) as exc_info:
-        stage_translations(tmp_path / "ui_xml", tmp_path / "out", remaining_budget=0)
+    _, included = stage_translations(tmp_path / "ui_xml", tmp_path / "out")
 
-    assert exc_info.value.code != 0
-    # nothing should have been staged
-    assert not (tmp_path / "out" / "ui_xml" / "translations" / "en.xml").exists()
+    staged = tmp_path / "out" / "ui_xml" / "translations"
+    assert included == ["de", "fr"]
+    assert sorted(p.name for p in staged.iterdir()) == ["de.xml", "fr.xml"]
 
 
-def test_stage_translations_hard_errors_when_en_missing(tmp_path):
+def test_stage_translations_ships_cjk_only_when_asked(tmp_path):
     translations_dir = tmp_path / "ui_xml" / "translations"
     translations_dir.mkdir(parents=True)
-    (translations_dir / "fr.xml").write_text(
-        "<translations><entry key=\"a\">Bonjour</entry></translations>",
-        encoding="utf-8",
-    )
+    for lang in ("en", "fr", "ja", "zh"):
+        (translations_dir / f"{lang}.xml").write_text(
+            f"<translations languages=\"{lang}\"><translation tag=\"a\" {lang}=\"x\"/></translations>",
+            encoding="utf-8")
 
-    with pytest.raises(SystemExit) as exc_info:
-        stage_translations(tmp_path / "ui_xml", tmp_path / "out", remaining_budget=1_000_000)
+    _, included = stage_translations(tmp_path / "ui_xml", tmp_path / "out", with_cjk=True)
+    assert included == ["fr", "ja", "zh"]
 
-    assert exc_info.value.code != 0
+
+def test_stage_config_ships_the_default_print_start_profile(tmp_path):
+    profiles = tmp_path / "assets" / "config" / "print_start_profiles"
+    profiles.mkdir(parents=True)
+    (profiles / "default.json").write_text('{"name": "Generic"}', encoding="utf-8")
+    (profiles / "forge_x.json").write_text('{"name": "Forge-X"}', encoding="utf-8")
+
+    stage_config(tmp_path / "assets", tmp_path / "out")
+
+    staged = tmp_path / "out" / "assets" / "config" / "print_start_profiles"
+    assert sorted(p.name for p in staged.iterdir()) == ["default.json"]
+
+
+def test_stage_config_ships_printer_presets(tmp_path):
+    presets = tmp_path / "assets" / "config" / "presets"
+    presets.mkdir(parents=True)
+    (presets / "ad5m_pro_forgex.json").write_text('{"printer": {}}', encoding="utf-8")
+    (presets / "README.md").write_text("docs", encoding="utf-8")
+
+    stage_config(tmp_path / "assets", tmp_path / "out")
+
+    staged = tmp_path / "out" / "assets" / "config" / "presets"
+    assert sorted(p.name for p in staged.iterdir()) == ["ad5m_pro_forgex.json"]
+
+
+def test_stage_printer_images_generates_absent_renditions(tmp_path):
+    pytest.importorskip("PIL")
+    renditions = tmp_path / "renditions"
+
+    stage_printer_images(tmp_path / "out", renditions)
+
+    staged = tmp_path / "out" / "assets" / "images" / "printers"
+    expected = {f"{name}.png" for name in esp32_printer_images.ESP32_PRINTERS}
+    assert expected <= {p.name for p in staged.iterdir()}
+    assert esp32_printer_images.is_fresh(renditions)
+
+
+def test_stage_printer_images_reuses_fresh_renditions(tmp_path, monkeypatch):
+    renditions = tmp_path / "renditions"
+    renditions.mkdir()
+    for name in esp32_printer_images.ESP32_PRINTERS:
+        (renditions / f"{name}.png").write_bytes(b"png")
+    monkeypatch.setattr(esp32_printer_images, "generate",
+                        lambda out: pytest.fail("fresh renditions were regenerated"))
+
+    stage_printer_images(tmp_path / "out", renditions)
+
+    assert (tmp_path / "out" / "assets" / "images" / "printers" / "generic-corexy.png").read_bytes() == b"png"
+
+
+def test_stage_printer_images_regenerates_when_a_rendition_is_missing(tmp_path, monkeypatch):
+    renditions = tmp_path / "renditions"
+    renditions.mkdir()
+    (renditions / "generic-corexy.png").write_bytes(b"png")
+    calls = []
+    monkeypatch.setattr(esp32_printer_images, "generate", lambda out: calls.append(out) or 1)
+
+    with pytest.raises(SystemExit):
+        stage_printer_images(tmp_path / "out", renditions)
+    assert calls == [renditions]
+
+
+def test_stage_printer_images_fails_without_pillow(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "PIL", None)
+
+    with pytest.raises(SystemExit) as exc:
+        stage_printer_images(tmp_path / "out", tmp_path / "renditions")
+
+    assert exc.value.code not in (0, None)
+    assert not (tmp_path / "out" / "assets" / "images" / "printers").exists()

@@ -20,9 +20,11 @@
 // Shared helper: MAC to D-Bus path
 // ---------------------------------------------------------------------------
 
-std::string mac_to_dbus_path(const char* mac) {
-    // "AA:BB:CC:DD:EE:FF" -> "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF"
-    std::string path = "/org/bluez/hci0/dev_";
+std::string helix::bluetooth::device_dbus_path(sd_bus* bus, const char* mac) {
+    std::string path = find_adapter_path(bus);
+    if (path.empty())
+        path = "/org/bluez/hci0";
+    path += "/dev_";
     if (mac) {
         std::string m(mac);
         std::replace(m.begin(), m.end(), ':', '_');
@@ -94,7 +96,7 @@ extern "C" void helix_bt_deinit(helix_bt_context* ctx) {
             ctx->bus_thread->run_sync([ctx](sd_bus* /*bus*/) {
                 std::lock_guard<std::mutex> lock(ctx->ble_mutex);
                 for (auto& conn : ctx->ble_connections) {
-                    if (conn->notify_slot) {
+                    if (conn && conn->notify_slot) {
                         sd_bus_slot_unref(conn->notify_slot);
                         conn->notify_slot = nullptr;
                     }
@@ -125,6 +127,8 @@ extern "C" void helix_bt_deinit(helix_bt_context* ctx) {
     {
         std::lock_guard<std::mutex> lock(ctx->ble_mutex);
         for (auto& conn : ctx->ble_connections) {
+            if (!conn)
+                continue;
             if (conn->acquired_fd >= 0) {
                 close(conn->acquired_fd);
                 conn->acquired_fd = -1;

@@ -38,6 +38,7 @@
 #include "ui_update_queue.h"
 
 #include "../lvgl_test_fixture.h"
+#include "../test_helpers/gcode_narration_router_test_access.h"
 #include "ams_backend_afc.h"
 #include "ams_state.h"
 #include "gcode_narration_router.h"
@@ -48,20 +49,6 @@
 #include "../catch_amalgamated.hpp"
 
 using namespace helix;
-
-// Test-only friend of GcodeNarrationRouter (declared in
-// gcode_narration_router.h as `friend struct ::GcodeNarrationRouterTestAccess`).
-// Exposes BOTH private entry points. This definition MUST stay token-identical
-// to the one in test_gcode_narration_router.cpp (same struct, global namespace)
-// to avoid an ODR violation across translation units.
-struct GcodeNarrationRouterTestAccess {
-    static void feed(GcodeNarrationRouter& r, const std::string& line) {
-        r.process_line(line);
-    }
-    static void notify(GcodeNarrationRouter& r, const nlohmann::json& msg) {
-        r.on_notify_gcode_response(msg);
-    }
-};
 
 namespace {
 
@@ -302,4 +289,31 @@ TEST_CASE("parse_unknown_command extracts the missing command", "[afc][narration
     CHECK_FALSE(parse_unknown_command("Purging with an unknown command:\"X\"").has_value());
     CHECK_FALSE(parse_unknown_command("AFC_Brush: Clean Nozzle").has_value());
     CHECK_FALSE(parse_unknown_command("").has_value());
+}
+
+TEST_CASE("is_template_residue tells a malformed Jinja tag from a missing command",
+          "[afc][narration][corpus]") {
+    // A stray `%}` from a macro's template is reported exactly like a missing command.
+    CHECK(is_template_residue("%}"));
+    CHECK(is_template_residue("{%"));
+    CHECK(is_template_residue("}}"));
+    CHECK(is_template_residue("{"));
+    CHECK(is_template_residue(*parse_unknown_command("// Unknown command:\"%}\"")));
+
+    CHECK_FALSE(is_template_residue("STATUS_PURGING"));
+    CHECK_FALSE(is_template_residue("M600"));
+    CHECK_FALSE(is_template_residue("_IFS_VARS"));
+}
+
+TEST_CASE("parse_unknown_command reads a whole console line, prefix and all",
+          "[afc][narration][corpus]") {
+    // Collectors see the raw notify_gcode_response line, `//` included.
+    CHECK(parse_unknown_command("// Unknown command:\"LOAD_CELL_SAVE_TARE\"") ==
+          std::optional<std::string>("LOAD_CELL_SAVE_TARE"));
+    CHECK(parse_unknown_command("//Unknown command:\"M729\"") ==
+          std::optional<std::string>("M729"));
+
+    CHECK_FALSE(parse_unknown_command("// Skipping Unknown command:\"FOO\"").has_value());
+    CHECK_FALSE(parse_unknown_command("//").has_value());
+    CHECK_FALSE(parse_unknown_command("// ").has_value());
 }

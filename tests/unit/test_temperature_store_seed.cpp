@@ -26,27 +26,9 @@
 #include "../../include/temperature_history_manager.h"
 #include "../../include/ui_update_queue.h"
 #include "../../lvgl/lvgl.h"
+#include "../test_helpers/temperature_history_manager_test_access.h"
 #include "../test_helpers/update_queue_test_access.h"
 #include "../ui_test_utils.h"
-
-// Grants tests access to add_sample_internal via the friend declared in
-// temperature_history_manager.h. Definition is token-identical to the one in
-// test_temperature_history_manager.cpp so the ODR is satisfied across TUs.
-class TemperatureHistoryManagerTestAccess {
-  public:
-    static bool add_sample(TemperatureHistoryManager& m, const std::string& heater_name,
-                           int temp_deci, int target_deci, int64_t timestamp_ms) {
-        bool stored;
-        {
-            std::lock_guard<std::mutex> lock(m.mutex_);
-            stored = m.add_sample_internal(heater_name, temp_deci, target_deci, timestamp_ms);
-        }
-        if (stored) {
-            m.notify_observers(heater_name);
-        }
-        return stored;
-    }
-};
 
 #include <algorithm>
 #include <chrono>

@@ -30,6 +30,7 @@
 
 #include "../lvgl_ui_test_fixture.h"
 #include "../test_helpers/filament_panel_test_access.h"
+#include "../test_helpers/log_capture.h"
 #include "ams_backend_mock.h"
 #include "ams_state.h"
 #include "ams_types.h"
@@ -39,10 +40,20 @@
 #include "tool_state.h"
 
 #include <lvgl.h>
+#include <map>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "../catch_amalgamated.hpp"
+
+using helix::AmsAction;
+using helix::AmsSystemInfo;
+using helix::AmsType;
+using helix::AmsUnit;
+using helix::PathTopology;
+using helix::SlotInfo;
+using helix::SlotStatus;
 
 using helix::ToolState;
 using helix::ToolTopology;
@@ -55,9 +66,9 @@ namespace {
 // controls the system snapshot and observes the slot the executors dispatch.
 // Subclasses the production mock (test infrastructure per CLAUDE L065) so all the
 // unrelated pure-virtuals are already satisfied.
-class RecordingBackend : public AmsBackendMock {
+class RecordingBackend : public helix::AmsBackendMock {
   public:
-    RecordingBackend() : AmsBackendMock(4) {}
+    RecordingBackend() : helix::AmsBackendMock(4) {}
 
     AmsSystemInfo sys_{};  ///< Snapshot returned to the panel (test sets fields)
     int loaded_slot_ = -1; ///< Which slot reports "loaded at toolhead"
@@ -84,6 +95,9 @@ class RecordingBackend : public AmsBackendMock {
     [[nodiscard]] PathTopology get_topology() const override {
         return topology_;
     }
+    [[nodiscard]] int get_current_slot() const override {
+        return sys_.current_slot;
+    }
     [[nodiscard]] AmsType get_type() const override {
         return sys_.type;
     }
@@ -97,6 +111,11 @@ class RecordingBackend : public AmsBackendMock {
     [[nodiscard]] bool slot_has_filament_at_toolhead(int slot) const override {
         return slot == loaded_slot_;
     }
+    std::map<int, std::string> material_; ///< Per-slot material name (absent = none)
+    int parked_slot_ = -1;                ///< Which slot reports filament parked in its toolhead
+    [[nodiscard]] bool slot_filament_parked_in_toolhead(int slot) const override {
+        return slot == parked_slot_;
+    }
     // Deterministic per-lane presence for the button gating (the base mock owns
     // its own slot table, which this test does not populate).
     [[nodiscard]] SlotInfo get_slot_info(int slot) const override {
@@ -105,26 +124,31 @@ class RecordingBackend : public AmsBackendMock {
         info.global_index = slot;
         info.mapped_tool = slot;
         info.status = (slot == loaded_slot_) ? SlotStatus::LOADED : slot_status_;
+        if (auto it = material_.find(slot); it != material_.end()) {
+            info.material = it->second;
+        }
         return info;
     }
-    [[nodiscard]] bool filament_ops_self_home() const override {
-        return self_homes_;
+    [[nodiscard]] helix::BackendTraits traits() const override {
+        helix::BackendTraits t = helix::AmsBackendMock::traits();
+        t.filament_ops_self_home = self_homes_;
+        return t;
     }
 
-    AmsError load_filament(int slot) override {
+    helix::AmsError load_filament(int slot) override {
         last_load_slot = slot;
         ++load_calls;
-        return AmsErrorHelper::success();
+        return helix::AmsErrorHelper::success();
     }
-    AmsError unload_filament(int slot) override {
+    helix::AmsError unload_filament(int slot) override {
         last_unload_slot = slot;
         ++unload_calls;
-        return AmsErrorHelper::success();
+        return helix::AmsErrorHelper::success();
     }
-    AmsError change_tool(int t) override {
+    helix::AmsError change_tool(int t) override {
         last_change_tool = t;
         ++change_tool_calls;
-        return AmsErrorHelper::success();
+        return helix::AmsErrorHelper::success();
     }
 };
 
@@ -143,15 +167,15 @@ struct OpSlotHarness {
         // The panel wires observers on ToolState + AmsState in its ctor, so their
         // subjects must exist first.
         ToolState::instance().init_subjects(true);
-        AmsState::instance().init_subjects(true);
+        helix::AmsState::instance().init_subjects(true);
 
         // Inject the recording backend + topology BEFORE constructing the panel.
         auto owned = std::make_unique<RecordingBackend>();
         owned->sys_ = sys;
         owned->loaded_slot_ = loaded_slot;
         mock = owned.get();
-        AmsState::instance().set_backend(std::move(owned));
-        AmsState::instance().sync_from_backend(); // publishes ams_type != NONE
+        helix::AmsState::instance().set_backend(std::move(owned));
+        helix::AmsState::instance().sync_from_backend(); // publishes ams_type != NONE
         ToolState::instance().set_ams_topology(topo);
 
         panel = std::make_unique<FilamentPanel>(fx.state(), fx.api());
@@ -182,9 +206,9 @@ struct OpSlotHarness {
         }
         fx.process_lvgl(10);
         panel.reset(); // dtor deinits subjects + removes observers (subjects valid)
-        AmsState::instance().set_backend(nullptr);
+        helix::AmsState::instance().set_backend(nullptr);
         ToolState::instance().clear_ams_topology();
-        AmsState::instance().deinit_subjects();
+        helix::AmsState::instance().deinit_subjects();
         ToolState::instance().deinit_subjects();
     }
 };
@@ -349,10 +373,18 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     h.mock->topology_ = PathTopology::PARALLEL;
     h.select_tool(1); // != active T0
 
+    // RecordingBackend::change_tool() succeeds synchronously, so on_success()
+    // (the "Switched to {}" toast) runs inside this call, on this thread.
+    helix::LogCapture log(64);
     TA::handle_extruder_changed(*h.panel);
 
     REQUIRE(h.mock->change_tool_calls == 1);
     CHECK(h.mock->last_change_tool == 1);
+    // NOTIFY_SUCCESS logs once itself and the test stub's ui_notification_success
+    // echoes it a second time, so at least one line is the assertion, not exactly one.
+    // The toast names the tool the user tapped, never the 0-based G-code form.
+    CHECK(log.count_containing("Switched to Tool 2") >= 1);
+    CHECK(log.count_containing("Switched to T1") == 0);
 }
 
 // ============================================================================
@@ -431,7 +463,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     REQUIRE_FALSE(cd.has_pending_timer());
 
     set_wire_state(state(), "standby");
-    state().set_print_start_state(helix::PrintStartPhase::BED_MESH, "", 0);
+    state().print_state().set_print_start_state(helix::PrintStartPhase::BED_MESH, "", 0);
     process_lvgl(10);
 
     TA::restore_heater_after_preheat(*h.panel);
@@ -439,7 +471,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     CHECK_FALSE(cd.has_pending_timer());
 
     // The block ending hands the behaviour back, so the guard cannot latch.
-    state().set_print_start_state(helix::PrintStartPhase::IDLE, "", 0);
+    state().print_state().set_print_start_state(helix::PrintStartPhase::IDLE, "", 0);
     process_lvgl(10);
     TA::restore_heater_after_preheat(*h.panel);
     process_lvgl(30);
@@ -474,7 +506,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     REQUIRE(h.mock->change_tool_calls == 1);
 
     // Backend signals progress, then completion, via the shared AMS action subject.
-    lv_subject_t* action = AmsState::instance().get_ams_action_subject();
+    lv_subject_t* action = helix::AmsState::instance().get_ams_action_subject();
     lv_subject_set_int(action, static_cast<int>(AmsAction::LOADING));
     process_lvgl(10);
     lv_subject_set_int(action, static_cast<int>(AmsAction::IDLE));
@@ -625,7 +657,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     // pre-start G-code homes and probes. Raising the phase is what makes the
     // lifecycle Preparing.
     auto set_preprint_phase = [this](helix::PrintStartPhase phase) {
-        state().set_print_start_state(phase, "", 0);
+        state().print_state().set_print_start_state(phase, "", 0);
         process_lvgl(10);
     };
 
@@ -673,6 +705,31 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     // Cancelling/finishing the print hands the buttons back.
     set_job_state(helix::PrintJobState::STANDBY);
     CHECK(read("filament_load_disabled") == 1); // still loaded
+    CHECK(read("filament_unload_disabled") == 0);
+}
+
+// Filament parked in the toolhead short of the nozzle is not loaded, so Load
+// stays lit, and a heated unload still acts on it, so Unload and Purge light too.
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "Filament panel offers Load and Unload for filament parked in the toolhead",
+                 "[filament][op_slot][panel][op_gating]") {
+    auto read = [](const char* name) {
+        lv_subject_t* s = lv_xml_get_subject(nullptr, name);
+        REQUIRE(s != nullptr);
+        return lv_subject_get_int(s);
+    };
+
+    OpSlotHarness h(*this, boxturtle_sys(), /*loaded_slot=*/-1, identity_topo());
+    h.select_tool(2);
+    TA::handle_extruder_changed(*h.panel);
+    process_lvgl(10);
+    REQUIRE(read("filament_load_disabled") == 0);
+    REQUIRE(read("filament_unload_disabled") == 1);
+
+    h.mock->parked_slot_ = 2;
+    TA::handle_extruder_changed(*h.panel);
+    process_lvgl(10);
+    CHECK(read("filament_load_disabled") == 0);
     CHECK(read("filament_unload_disabled") == 0);
 }
 
@@ -746,7 +803,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "Filament panel greys Load/Unload while the 
     // An unload kicked off from the AMS panel. AmsSystemInfo::is_busy() is
     // "action is neither IDLE nor ERROR"; publishing it must re-gate here.
     h.mock->sys_.action = AmsAction::UNLOADING;
-    lv_subject_set_int(AmsState::instance().get_ams_action_subject(),
+    lv_subject_set_int(helix::AmsState::instance().get_ams_action_subject(),
                        static_cast<int>(AmsAction::UNLOADING));
     process_lvgl(10);
     CHECK(read("filament_load_disabled") == 1);
@@ -754,8 +811,115 @@ TEST_CASE_METHOD(LVGLUITestFixture, "Filament panel greys Load/Unload while the 
 
     // ...and hands them back when it finishes.
     h.mock->sys_.action = AmsAction::IDLE;
-    lv_subject_set_int(AmsState::instance().get_ams_action_subject(),
+    lv_subject_set_int(helix::AmsState::instance().get_ams_action_subject(),
                        static_cast<int>(AmsAction::IDLE));
     process_lvgl(10);
     CHECK(read("filament_unload_disabled") == 0);
+}
+
+// The cold-nozzle "heat first" warning is hidden when the op preheats for a
+// known material, and Load/Unload preheat for the dropdown-selected slot. So the
+// material that hides the warning has to be the selected slot's, not the loaded
+// lane's.
+//
+// Mutation check: make has_known_op_material() read the loaded lane instead of
+// selected_op_slot(), or drop the update_safety_state() call in
+// update_filament_op_buttons(), and the first section fails.
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "Filament panel heat-first warning follows the selected slot's material",
+                 "[filament][op_slot][panel][op_gating]") {
+    auto warning = [] {
+        lv_subject_t* s = lv_xml_get_subject(nullptr, "filament_safety_warning_visible");
+        REQUIRE(s != nullptr);
+        return lv_subject_get_int(s);
+    };
+
+    // Lane 4 (slot 3) is loaded and active; the dropdown selects T0.
+    auto with_materials = [](std::string active_mat, std::string selected_mat) {
+        AmsSystemInfo sys = boxturtle_sys();
+        sys.units[0].slots[3].material = active_mat;
+        sys.units[0].slots[0].material = selected_mat;
+        return sys;
+    };
+
+    SECTION("nothing loaded: the warning follows the dropdown") {
+        AmsSystemInfo sys = with_materials("", "PETG");
+        sys.current_slot = -1;
+        sys.filament_loaded = false;
+        OpSlotHarness h(*this, sys, /*loaded_slot=*/-1, identity_topo());
+        h.mock->material_ = {{0, "PETG"}};
+        REQUIRE_FALSE(helix::AmsState::instance().get_external_spool_info().has_value());
+        // Cold nozzle with T3 (no material) selected, then only the dropdown moves:
+        // the selection change alone has to re-evaluate the warning.
+        h.select_tool(3);
+        TA::handle_extruder_changed(*h.panel);
+        h.panel->set_temp(20, 0);
+        process_lvgl(10);
+        REQUIRE(warning() == 1);
+        h.select_tool(0);
+        TA::handle_extruder_changed(*h.panel);
+        process_lvgl(10);
+        CHECK(warning() == 0);
+    }
+
+    SECTION("the active lane names PETG, the selected slot names nothing") {
+        OpSlotHarness h(*this, with_materials("PETG", ""), /*loaded_slot=*/3, identity_topo());
+        h.mock->material_ = {{3, "PETG"}};
+        REQUIRE_FALSE(helix::AmsState::instance().get_external_spool_info().has_value());
+        h.select_tool(0);
+        TA::handle_extruder_changed(*h.panel);
+        h.panel->set_temp(20, 0);
+        process_lvgl(10);
+        CHECK(warning() == 1);
+    }
+}
+
+// Purge, Extrude and Retract heat for the loaded lane, Load and Unload for the
+// selected one, and all five share one warning. On a single-extruder hub AMS the
+// two lanes differ, so the warning may hide only when both name a material.
+//
+// Mutation check: drop the loaded-lane term from has_known_op_material() and
+// "the loaded lane names nothing" fails.
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "Filament panel heat-first warning needs the loaded lane's material too",
+                 "[filament][op_slot][panel][op_gating]") {
+    auto warning = [] {
+        lv_subject_t* s = lv_xml_get_subject(nullptr, "filament_safety_warning_visible");
+        REQUIRE(s != nullptr);
+        return lv_subject_get_int(s);
+    };
+    // Single extruder, four lanes mapped T0..T3; T0 (lane 0, PETG) selected.
+    auto hub_sys = [](int current_slot) {
+        AmsSystemInfo sys = boxturtle_sys();
+        sys.current_slot = current_slot;
+        sys.filament_loaded = current_slot >= 0;
+        return sys;
+    };
+    auto cold_on_t0 = [this](OpSlotHarness& h) {
+        REQUIRE_FALSE(helix::AmsState::instance().get_external_spool_info().has_value());
+        h.select_tool(0);
+        TA::handle_extruder_changed(*h.panel);
+        h.panel->set_temp(20, 0);
+        process_lvgl(10);
+        REQUIRE(TA::selected_op_slot(*h.panel) == 0);
+    };
+
+    SECTION("the loaded lane names nothing") {
+        OpSlotHarness h(*this, hub_sys(2), /*loaded_slot=*/2, identity_topo());
+        h.mock->material_ = {{0, "PETG"}};
+        cold_on_t0(h);
+        CHECK(warning() == 1);
+    }
+    SECTION("the loaded lane names a material too") {
+        OpSlotHarness h(*this, hub_sys(2), /*loaded_slot=*/2, identity_topo());
+        h.mock->material_ = {{0, "PETG"}, {2, "PLA"}};
+        cold_on_t0(h);
+        CHECK(warning() == 0);
+    }
+    SECTION("nothing loaded keeps the selected lane's answer") {
+        OpSlotHarness h(*this, hub_sys(-1), /*loaded_slot=*/-1, identity_topo());
+        h.mock->material_ = {{0, "PETG"}};
+        cold_on_t0(h);
+        CHECK(warning() == 0);
+    }
 }

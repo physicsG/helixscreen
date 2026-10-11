@@ -1,8 +1,10 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "../test_helpers/unique_temp_dir.h"
 #include "app_constants.h"
 #include "config_backup.h"
+#include "text_io.h"
 
 #include <cstdlib>
 #include <filesystem>
@@ -38,11 +40,6 @@ void write_file(const std::string& path, const std::string& content) {
     f << content;
 }
 
-std::string read_file(const std::string& path) {
-    std::ifstream f(path);
-    return {std::istreambuf_iterator<char>(f), {}};
-}
-
 } // namespace
 
 // ─── write_backup_file ────────────────────────────────────────────────────────
@@ -54,10 +51,10 @@ TEST_CASE("write_backup_file copies source to backup atomically", "[config_backu
     write_file(src, R"({"key":"value"})");
 
     REQUIRE(write_backup_file(src, dst));
-    REQUIRE(read_file(dst) == R"({"key":"value"})");
+    REQUIRE(helix::text_io::read_file(dst).value_or("") == R"({"key":"value"})");
 
     // Tmp file should not linger
-    REQUIRE_FALSE(fs::exists(dst + ".tmp"));
+    REQUIRE(helix::test::staging_files_beside(dst) == 0);
 }
 
 TEST_CASE("write_backup_file returns false when source does not exist", "[config_backup]") {
@@ -72,7 +69,7 @@ TEST_CASE("write_backup_file creates parent directories for backup path", "[conf
     write_file(src, "hello");
 
     REQUIRE(write_backup_file(src, dst));
-    REQUIRE(read_file(dst) == "hello");
+    REQUIRE(helix::text_io::read_file(dst).value_or("") == "hello");
 }
 
 TEST_CASE("write_backup_file overwrites existing backup", "[config_backup]") {
@@ -82,11 +79,11 @@ TEST_CASE("write_backup_file overwrites existing backup", "[config_backup]") {
 
     write_file(src, "v1");
     REQUIRE(write_backup_file(src, dst));
-    REQUIRE(read_file(dst) == "v1");
+    REQUIRE(helix::text_io::read_file(dst).value_or("") == "v1");
 
     write_file(src, "v2");
     REQUIRE(write_backup_file(src, dst));
-    REQUIRE(read_file(dst) == "v2");
+    REQUIRE(helix::text_io::read_file(dst).value_or("") == "v2");
 }
 
 TEST_CASE("write_backup_file cleans up tmp on rename failure", "[config_backup]") {
@@ -128,7 +125,7 @@ TEST_CASE("write_rolling_backup uses primary when available", "[config_backup]")
     write_rolling_backup(src, primary, fallback);
 
     REQUIRE(fs::exists(primary));
-    REQUIRE(read_file(primary) == "config_data");
+    REQUIRE(helix::text_io::read_file(primary).value_or("") == "config_data");
     REQUIRE_FALSE(fs::exists(fallback));
 }
 
@@ -156,7 +153,7 @@ TEST_CASE("write_rolling_backup falls back when primary dir is unwritable", "[co
 
     REQUIRE_FALSE(fs::exists(primary));
     REQUIRE(fs::exists(fallback));
-    REQUIRE(read_file(fallback) == "config_data");
+    REQUIRE(helix::text_io::read_file(fallback).value_or("") == "config_data");
 }
 
 TEST_CASE("write_rolling_backup handles both paths failing gracefully", "[config_backup]") {
@@ -202,7 +199,7 @@ TEST_CASE("restore_from_backup restores missing file from backup", "[config_back
     write_file(backup, R"({"restored":true})");
 
     REQUIRE(restore_from_backup(target, "Config", {backup}));
-    REQUIRE(read_file(target) == R"({"restored":true})");
+    REQUIRE(helix::text_io::read_file(target).value_or("") == R"({"restored":true})");
 }
 
 TEST_CASE("restore_from_backup skips when target exists", "[config_backup]") {
@@ -213,7 +210,7 @@ TEST_CASE("restore_from_backup skips when target exists", "[config_backup]") {
     write_file(backup, "backup_data");
 
     REQUIRE_FALSE(restore_from_backup(target, "Config", {backup}));
-    REQUIRE(read_file(target) == "original");
+    REQUIRE(helix::text_io::read_file(target).value_or("") == "original");
 }
 
 TEST_CASE("restore_from_backup returns false when no backups exist", "[config_backup]") {
@@ -231,7 +228,7 @@ TEST_CASE("restore_from_backup creates parent directory for target", "[config_ba
 
     std::string target = (dir.path / "new_dir" / "config.json").string();
     REQUIRE(restore_from_backup(target, "Config", {backup}));
-    REQUIRE(read_file(target) == "data");
+    REQUIRE(helix::text_io::read_file(target).value_or("") == "data");
 }
 
 TEST_CASE("restore_from_backup uses priority order across backups", "[config_backup]") {
@@ -243,7 +240,7 @@ TEST_CASE("restore_from_backup uses priority order across backups", "[config_bac
 
     std::string target = dir.file("config.json");
     REQUIRE(restore_from_backup(target, "Config", {primary, fallback}));
-    REQUIRE(read_file(target) == "primary_data");
+    REQUIRE(helix::text_io::read_file(target).value_or("") == "primary_data");
 }
 
 TEST_CASE("restore_from_backup falls back to second backup", "[config_backup]") {
@@ -253,7 +250,7 @@ TEST_CASE("restore_from_backup falls back to second backup", "[config_backup]") 
 
     std::string target = dir.file("config.json");
     REQUIRE(restore_from_backup(target, "Config", {"/nonexistent/primary", fallback}));
-    REQUIRE(read_file(target) == "fallback_data");
+    REQUIRE(helix::text_io::read_file(target).value_or("") == "fallback_data");
 }
 
 // ─── backup_fallback_dir (app_constants.h) ────────────────────────────────────
@@ -331,8 +328,8 @@ TEST_CASE("full backup-restore cycle survives simulated Moonraker wipe", "[confi
     REQUIRE(restore_from_backup(config_path, "Config", {primary_config}));
     REQUIRE(restore_from_backup(env_path, "Env", {primary_env}));
 
-    REQUIRE(read_file(config_path) == R"({"printer":"voron"})");
-    REQUIRE(read_file(env_path) == "MOONRAKER_HOST=192.168.1.100");
+    REQUIRE(helix::text_io::read_file(config_path).value_or("") == R"({"printer":"voron"})");
+    REQUIRE(helix::text_io::read_file(env_path).value_or("") == "MOONRAKER_HOST=192.168.1.100");
 }
 
 // ─── upgrade safety: backup freshness ─────────────────────────────────────────
@@ -357,7 +354,8 @@ TEST_CASE("rolling backup written on startup ensures fresh recovery data", "[con
     write_rolling_backup(config, primary, fallback);
 
     REQUIRE(fs::exists(primary));
-    REQUIRE(read_file(primary) == R"({"moonraker_host":"192.168.1.50","wizard_completed":true})");
+    REQUIRE(helix::text_io::read_file(primary).value_or("") ==
+            R"({"moonraker_host":"192.168.1.50","wizard_completed":true})");
 
     // Simulate upgrade wiping the config (tarball default removed, Phase 6 failed)
     fs::remove(config);
@@ -365,7 +363,8 @@ TEST_CASE("rolling backup written on startup ensures fresh recovery data", "[con
 
     // restore_from_backup should recover from the fresh rolling backup
     REQUIRE(restore_from_backup(config, "Config", {primary, fallback}));
-    REQUIRE(read_file(config) == R"({"moonraker_host":"192.168.1.50","wizard_completed":true})");
+    REQUIRE(helix::text_io::read_file(config).value_or("") ==
+            R"({"moonraker_host":"192.168.1.50","wizard_completed":true})");
 }
 
 TEST_CASE("default config blocks backup recovery without tarball removal fix", "[config_backup]") {
@@ -384,7 +383,7 @@ TEST_CASE("default config blocks backup recovery without tarball removal fix", "
     // restore_from_backup refuses because target exists — this is the bug scenario
     REQUIRE_FALSE(restore_from_backup(target, "Config", {backup}));
     // User's config is NOT recovered; default remains
-    REQUIRE(read_file(target) == R"({"moonraker_host":"127.0.0.1"})");
+    REQUIRE(helix::text_io::read_file(target).value_or("") == R"({"moonraker_host":"127.0.0.1"})");
 }
 
 TEST_CASE("missing config triggers backup recovery after tarball removal fix", "[config_backup]") {
@@ -400,7 +399,8 @@ TEST_CASE("missing config triggers backup recovery after tarball removal fix", "
     REQUIRE_FALSE(fs::exists(target));
 
     REQUIRE(restore_from_backup(target, "Config", {backup}));
-    REQUIRE(read_file(target) == R"({"moonraker_host":"192.168.1.50"})");
+    REQUIRE(helix::text_io::read_file(target).value_or("") ==
+            R"({"moonraker_host":"192.168.1.50"})");
 }
 
 TEST_CASE("restore_from_backup falls back to legacy backup names", "[config_backup]") {

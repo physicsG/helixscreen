@@ -3,13 +3,12 @@
 
 /**
  * @file ui_settings_about.h
- * @brief About Settings overlay - version info, updates, easter eggs, contributors
+ * @brief About Settings overlay - version info, easter eggs, contributors
  *
  * This overlay displays:
  * - Branding header with logo and scrolling contributor marquee
  * - Printer name (7-tap snake easter egg)
  * - Version info (7-tap beta features toggle)
- * - Update channel selection and update controls
  * - Klipper/Moonraker/OS version info
  * - Print hours (opens history dashboard)
  *
@@ -17,23 +16,27 @@
  * @threading Main thread only
  *
  * @see SettingsPanel for parent panel
- * @see UpdateChecker for update logic
  */
 
 #pragma once
 
 #include "lvgl/lvgl.h"
 #include "overlay_base.h"
+#include "static_panel_registry.h"
 #include "subject_managed_panel.h"
 
 #include <chrono>
 #include <string>
 
+namespace helix {
+class IMoonrakerClient;
+}
+
 namespace helix::settings {
 
 /**
  * @class AboutSettingsOverlay
- * @brief Overlay for displaying about/version info and update controls
+ * @brief Overlay for displaying about/version info
  *
  * ## Usage:
  *
@@ -44,16 +47,7 @@ namespace helix::settings {
  */
 class AboutSettingsOverlay : public OverlayBase {
   public:
-    AboutSettingsOverlay();
     ~AboutSettingsOverlay() override;
-
-    // Non-copyable
-    AboutSettingsOverlay(const AboutSettingsOverlay&) = delete;
-    AboutSettingsOverlay& operator=(const AboutSettingsOverlay&) = delete;
-
-    //
-    // === OverlayBase Interface ===
-    //
 
     void init_subjects() override;
     void register_callbacks() override;
@@ -61,20 +55,15 @@ class AboutSettingsOverlay : public OverlayBase {
     const char* get_name() const override {
         return "About Settings";
     }
+    const char* xml_component() const override {
+        return "about_settings_overlay";
+    }
 
     void on_activate() override;
-    void on_deactivate() override;
+    void on_deactivating(DeactivateReason reason) override;
 
-    //
-    // === UI Creation ===
-    //
-
+    /// Builds the overlay and its contributor marquee.
     lv_obj_t* create(lv_obj_t* parent) override;
-    void show(lv_obj_t* parent_screen);
-
-    bool is_created() const {
-        return overlay_root_ != nullptr;
-    }
 
     //
     // === Public Methods ===
@@ -88,19 +77,19 @@ class AboutSettingsOverlay : public OverlayBase {
      */
     void fetch_print_hours();
 
+    /// Fetch print hours now and again whenever a job finishes. Idempotent: a repeat
+    /// call (every discovery) replaces the earlier subscription.
+    void attach_print_hours(IMoonrakerClient& client);
+
+    /// Drop the subscription attach_print_hours() made. Safe when never attached.
+    void detach_print_hours(IMoonrakerClient& client);
+
     /**
      * @brief Refresh version and printer info subjects
      *
      * Called on activate to ensure info is current.
      */
     void populate_info_rows();
-
-    // Update download modal management.
-    // When start_immediately is true, skip the Confirming state and begin the
-    // download directly — used when the user already confirmed on the "New
-    // Version Available" notification modal (#prestonbrown/helixscreen).
-    void show_update_download_modal(bool start_immediately = false);
-    void hide_update_download_modal();
 
   private:
     //
@@ -126,7 +115,6 @@ class AboutSettingsOverlay : public OverlayBase {
     lv_subject_t cache_dir_value_subject_{};
     lv_subject_t log_dest_value_subject_{};
     lv_subject_t host_arch_value_subject_{};
-    lv_subject_t update_current_version_subject_{};
     lv_subject_t about_copyright_subject_{};
 
     // Static buffers for string subjects
@@ -139,48 +127,14 @@ class AboutSettingsOverlay : public OverlayBase {
     char cache_dir_value_buf_[256];
     char log_dest_value_buf_[256];
     char host_arch_value_buf_[64];
-    char update_current_version_buf_[32];
     char about_copyright_buf_[48];
-
-    // Update download modal
-    lv_obj_t* update_download_modal_ = nullptr;
-
-    // History dashboard overlay (lazy-created)
-    lv_obj_t* history_dashboard_panel_ = nullptr;
 
     // Debounce tracker restart on inadvertent re-open
     std::chrono::steady_clock::time_point last_deactivate_{};
-
-    //
-    // === Static Callbacks ===
-    //
-
-    static void on_about_printer_name_clicked(lv_event_t* e);
-    static void on_about_version_clicked(lv_event_t* e);
-    static void on_about_update_channel_changed(lv_event_t* e);
-    static void on_about_check_updates_clicked(lv_event_t* e);
-    static void on_about_install_update_clicked(lv_event_t* e);
-    static void on_about_updates_unavailable_clicked(lv_event_t* e);
-    static void on_about_print_hours_clicked(lv_event_t* e);
-    static void on_about_update_download_start(lv_event_t* e);
-    static void on_about_update_download_cancel(lv_event_t* e);
-    static void on_about_update_download_dismiss(lv_event_t* e);
-
-    //
-    // === Private Handlers ===
-    //
-
-    void handle_print_hours_clicked();
 };
 
-/**
- * @brief Global instance accessor
- *
- * Creates the overlay on first access and registers it for cleanup
- * with StaticPanelRegistry.
- *
- * @return Reference to singleton AboutSettingsOverlay
- */
-AboutSettingsOverlay& get_about_settings_overlay();
+inline AboutSettingsOverlay& get_about_settings_overlay() {
+    return lazy_global<AboutSettingsOverlay>("AboutSettingsOverlay");
+}
 
 } // namespace helix::settings

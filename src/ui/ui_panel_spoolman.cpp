@@ -4,9 +4,7 @@
 #include "ui_panel_spoolman.h"
 
 #include "ui_callback_helpers.h"
-#include "ui_global_panel_helper.h"
 #include "ui_modal.h"
-#include "ui_nav_manager.h"
 #include "ui_panel_common.h"
 #include "ui_spool_canvas.h"
 #include "ui_subject_registry.h"
@@ -15,6 +13,8 @@
 
 #include "ams_state.h"
 #include "app_globals.h"
+#include "static_panel_registry.h"
+#include "ui/ui_widget_helpers.h"
 #if HELIX_HAS_LABEL_PRINTER
 #include "ipp_print_modal.h"
 #include "label_printer_settings.h"
@@ -27,7 +27,6 @@
 #include "spoolman_manager.h"
 #include "spoolman_types.h" // apply_spool_to_slot
 #include "theme_manager.h"
-#include "ui/ui_lazy_panel_helper.h"
 
 #include <spdlog/spdlog.h>
 
@@ -36,18 +35,11 @@
 #include <cstring>
 
 // ============================================================================
-// Global Instance
-// ============================================================================
-
-DEFINE_GLOBAL_PANEL(SpoolmanPanel, g_spoolman_panel, get_global_spoolman_panel)
-
-// ============================================================================
 // Constructor
 // ============================================================================
 
 SpoolmanPanel::SpoolmanPanel()
     : search_debounce_([this](const std::string&) { populate_spool_list(); }) {
-    spdlog::trace("[{}] Constructor", get_name());
     std::memset(header_title_buf_, 0, sizeof(header_title_buf_));
 }
 
@@ -85,25 +77,95 @@ void SpoolmanPanel::deinit_subjects() {
 // ============================================================================
 
 void SpoolmanPanel::register_callbacks() {
-    if (callbacks_registered_) {
-        spdlog::debug("[{}] Callbacks already registered", get_name());
-        return;
-    }
-
-    spdlog::debug("[{}] Registering event callbacks", get_name());
-
-    // Register XML event callbacks
     register_xml_callbacks({
-        {"on_spoolman_spool_row_clicked", on_spool_row_clicked},
-        {"on_spoolman_refresh_clicked", on_refresh_clicked},
-        {"on_spoolman_add_spool_clicked", on_add_spool_clicked},
-        {"on_spoolman_search_changed", on_search_changed},
-        {"on_spoolman_search_clear", on_search_clear},
-        {"on_spoolman_location_filter_changed", on_location_filter_changed},
-    });
+        {"on_spoolman_spool_row_clicked",
+         [](lv_event_t* e) {
+             lv_obj_t* target = static_cast<lv_obj_t*>(lv_event_get_target(e));
 
-    callbacks_registered_ = true;
-    spdlog::debug("[{}] Event callbacks registered", get_name());
+             // Capture click point from the input device while event is still active
+             lv_point_t click_pt = {0, 0};
+             lv_indev_t* indev = lv_indev_active();
+             if (indev) {
+                 lv_indev_get_point(indev, &click_pt);
+             }
+
+             // The target might be a child of the row, walk up to find the row
+             lv_obj_t* row = target;
+             while (row && lv_obj_get_user_data(row) == nullptr) {
+                 row = lv_obj_get_parent(row);
+             }
+
+             if (row) {
+                 get_global_spoolman_panel().handle_spool_clicked(row, click_pt);
+             }
+         }},
+        {"on_spoolman_refresh_clicked",
+         [](lv_event_t*) {
+             spdlog::debug("[Spoolman] Refresh clicked");
+             get_global_spoolman_panel().refresh_spools();
+         }},
+        {"on_spoolman_add_spool_clicked",
+         [](lv_event_t*) {
+             spdlog::info("[SpoolmanPanel] Add spool clicked — launching wizard");
+             auto& panel = get_global_spoolman_panel();
+
+             // Set completion callback on the wizard to refresh spool list after creation
+             auto& wizard = get_global_spool_wizard();
+             wizard.set_completion_callback([]() { get_global_spoolman_panel().refresh_spools(); });
+
+             wizard.show(lv_display_get_screen_active(nullptr));
+         }},
+        {"on_spoolman_search_changed",
+         [](lv_event_t* e) {
+             lv_obj_t* textarea = static_cast<lv_obj_t*>(lv_event_get_target(e));
+             if (!textarea) {
+                 return;
+             }
+
+             auto& panel = get_global_spoolman_panel();
+
+             // Store the new query text
+             const char* text = lv_textarea_get_text(textarea);
+             panel.search_query_ = text ? text : "";
+
+             // Debounced: empty applies immediately, anything else waits out the delay.
+             panel.search_debounce_.schedule(panel.search_query_);
+         }},
+        {"on_spoolman_search_clear",
+         [](lv_event_t*) {
+             // The clear button's lv_textarea_set_text("") already fired value_changed,
+             // whose immediate empty-filter apply repopulated once. Applying again here
+             // would double the rebuild, so this only drops a straggling trigger.
+             get_global_spoolman_panel().search_debounce_.cancel();
+         }},
+        {"on_spoolman_location_filter_changed",
+         [](lv_event_t* e) {
+             lv_obj_t* dropdown = static_cast<lv_obj_t*>(lv_event_get_target(e));
+             if (!dropdown) {
+                 return;
+             }
+
+             auto& panel = get_global_spoolman_panel();
+
+             // Guard: if we're programmatically updating the dropdown, ignore the event
+             if (panel.updating_location_dropdown_) {
+                 return;
+             }
+
+             uint32_t selected = lv_dropdown_get_selected(dropdown);
+             if (selected == 0) {
+                 // "All" selected
+                 panel.selected_location_.clear();
+             } else {
+                 char buf[128];
+                 lv_dropdown_get_selected_str(dropdown, buf, sizeof(buf));
+                 panel.selected_location_ = buf;
+             }
+
+             spdlog::debug("[Spoolman] Location filter: '{}'", panel.selected_location_);
+             panel.populate_spool_list();
+         }},
+    });
 }
 
 // ============================================================================
@@ -111,20 +173,13 @@ void SpoolmanPanel::register_callbacks() {
 // ============================================================================
 
 lv_obj_t* SpoolmanPanel::create(lv_obj_t* parent) {
-    register_callbacks();
-
-    if (!create_overlay_from_xml(parent, "spoolman_panel")) {
+    if (!OverlayBase::create(parent)) {
         return nullptr;
     }
 
     // Find widget references
-    lv_obj_t* content = lv_obj_find_by_name(overlay_root_, "overlay_content");
-    if (content) {
-        spool_list_ = lv_obj_find_by_name(content, "spool_list");
-    }
-
+    spool_list_ = helix::ui::find_required(overlay_root_, "spool_list", get_name());
     if (!spool_list_) {
-        spdlog::error("[{}] spool_list not found!", get_name());
         return nullptr;
     }
 
@@ -135,9 +190,9 @@ lv_obj_t* SpoolmanPanel::create(lv_obj_t* parent) {
     lv_obj_add_event_cb(spool_list_, on_scroll, LV_EVENT_SCROLL, this);
 
     // Bind header title to subject for dynamic "Spoolman: XX Spools" text
-    lv_obj_t* header = lv_obj_find_by_name(overlay_root_, "overlay_header");
+    lv_obj_t* header = helix::ui::find_required(overlay_root_, "overlay_header", get_name());
     if (header) {
-        lv_obj_t* title = lv_obj_find_by_name(header, "header_title");
+        lv_obj_t* title = helix::ui::find_required(header, "header_title", get_name());
         if (title) {
             lv_label_bind_text(title, &header_title_subject_, nullptr);
         }
@@ -160,7 +215,7 @@ void SpoolmanPanel::on_activate() {
     // Clear search and location filter on activation
     search_query_.clear();
     selected_location_.clear();
-    lv_obj_t* search_box = lv_obj_find_by_name(overlay_root_, "search_box");
+    lv_obj_t* search_box = helix::ui::find_required(overlay_root_, "search_box", get_name());
     if (search_box) {
         lv_textarea_set_text(search_box, "");
     }
@@ -172,7 +227,7 @@ void SpoolmanPanel::on_activate() {
     SpoolmanManager::instance().start_spoolman_polling();
 }
 
-void SpoolmanPanel::on_deactivate() {
+void SpoolmanPanel::on_deactivating(DeactivateReason) {
     SpoolmanManager::instance().stop_spoolman_polling();
 
     // Clean up debounce timer
@@ -181,10 +236,7 @@ void SpoolmanPanel::on_deactivate() {
     // Reset visible state but keep pool intact for reactivation
     list_view_.reset();
 
-    spdlog::debug("[{}] on_deactivate()", get_name());
-
-    // Call base class
-    OverlayBase::on_deactivate();
+    spdlog::debug("[{}] on_deactivating()", get_name());
 }
 
 // ============================================================================
@@ -218,8 +270,6 @@ void SpoolmanPanel::refresh_spools() {
 
     // Shared handler: update cached spools and active ID, then repopulate
     auto apply_spools = [this, tok](std::vector<SpoolInfo> spools, int active_id) {
-        if (tok.expired())
-            return;
         tok.defer([this, spools = std::move(spools), active_id]() {
             cached_spools_ = spools;
             active_spool_id_ = active_id;
@@ -231,7 +281,8 @@ void SpoolmanPanel::refresh_spools() {
 
     api->spoolman().get_spoolman_spools(
         [name, apply_spools, tok](const std::vector<SpoolInfo>& spools) {
-            if (tok.expired())
+            // L081_OK: skips the active-spool RPC for a dead panel; apply_spools defers.
+            if (tok.expired_no_lvgl())
                 return;
             spdlog::info("[{}] Received {} spools from Spoolman", name, spools.size());
 
@@ -254,8 +305,6 @@ void SpoolmanPanel::refresh_spools() {
                 });
         },
         [this, name, tok](const MoonrakerError& err) {
-            if (tok.expired())
-                return;
             spdlog::error("[{}] Failed to fetch spools: {}", name, err.message);
             tok.defer([this]() {
                 cached_spools_.clear();
@@ -328,7 +377,7 @@ void SpoolmanPanel::populate_spool_list() {
 
     // Sync search_query_ from the actual search box text so the filter always
     // matches what the user sees (handles refresh after wizard completion, etc.)
-    lv_obj_t* search_box = lv_obj_find_by_name(overlay_root_, "search_box");
+    lv_obj_t* search_box = helix::ui::find_required(overlay_root_, "search_box", get_name());
     if (search_box) {
         const char* text = lv_textarea_get_text(search_box);
         search_query_ = text ? text : "";
@@ -359,7 +408,7 @@ void SpoolmanPanel::apply_filter() {
 }
 
 void SpoolmanPanel::update_location_filter_dropdown() {
-    lv_obj_t* dropdown = lv_obj_find_by_name(overlay_root_, "location_filter");
+    lv_obj_t* dropdown = helix::ui::find_required(overlay_root_, "location_filter", get_name());
     if (!dropdown) {
         return;
     }
@@ -524,12 +573,12 @@ void SpoolmanPanel::set_active_spool(int spool_id) {
     // S1 server set gated on the round-trip, S5 store subset with the
     // emptiness predicate, S6 identity-cache invalidation of the replaced
     // link (prestonbrown/helixscreen#1283).
-    SlotInfo slot;
+    helix::SlotInfo slot;
     slot.slot_index = -2;
     slot.global_index = -2;
     apply_spool_to_slot(slot, *found);
 
-    AmsState::instance().commit_external_spool_edit(
+    helix::AmsState::instance().commit_external_spool_edit(
         slot,
         [this, spool_id, spool_name, name, tok]() {
             // Main-thread-only: AmsState::commit_external_spool_edit marshals
@@ -612,7 +661,7 @@ void SpoolmanPanel::duplicate_spool(int spool_id) {
         body,
         [token, display](const SpoolInfo& created) {
             spdlog::info("[Spoolman] Duplicated '{}' as spool #{}", display, created.id);
-            helix::ui::queue_update([token, created]() {
+            helix::ui::queue_update("SpoolmanPanel::duplicate_spool", [token, created]() {
                 std::string msg =
                     std::string(lv_tr("Duplicated")) + ": #" + std::to_string(created.id);
                 ToastManager::instance().show(ToastSeverity::SUCCESS, msg.c_str(), 3000);
@@ -625,7 +674,7 @@ void SpoolmanPanel::duplicate_spool(int spool_id) {
         },
         [display](const MoonrakerError& err) {
             spdlog::error("[Spoolman] Failed to duplicate '{}': {}", display, err.message);
-            helix::ui::queue_update([]() {
+            helix::ui::queue_update("SpoolmanPanel::duplicate_spool", []() {
                 ToastManager::instance().show(ToastSeverity::ERROR,
                                               lv_tr("Failed to duplicate spool"), 3000);
             });
@@ -664,7 +713,7 @@ void SpoolmanPanel::archive_spool(int spool_id) {
                 spool_id, body,
                 [spool_id]() {
                     spdlog::info("[Spoolman] Spool {} archived successfully", spool_id);
-                    helix::ui::queue_update([spool_id]() {
+                    helix::ui::queue_update("SpoolmanPanel::archive_spool", [spool_id]() {
                         ToastManager::instance().show(ToastSeverity::SUCCESS,
                                                       lv_tr("Spool archived"), 2000);
                         auto& panel = get_global_spoolman_panel();
@@ -675,7 +724,7 @@ void SpoolmanPanel::archive_spool(int spool_id) {
                 [spool_id](const MoonrakerError& err) {
                     spdlog::error("[Spoolman] Failed to archive spool {}: {}", spool_id,
                                   err.message);
-                    helix::ui::queue_update([]() {
+                    helix::ui::queue_update("SpoolmanPanel::archive_spool", []() {
                         ToastManager::instance().show(ToastSeverity::ERROR,
                                                       lv_tr("Failed to archive spool"), 3000);
                     });
@@ -703,7 +752,7 @@ void SpoolmanPanel::delete_spool(int spool_id) {
                 spool_id,
                 [spool_id]() {
                     spdlog::info("[Spoolman] Spool {} deleted successfully", spool_id);
-                    helix::ui::queue_update([spool_id]() {
+                    helix::ui::queue_update("SpoolmanPanel::delete_spool", [spool_id]() {
                         ToastManager::instance().show(ToastSeverity::SUCCESS,
                                                       lv_tr("Spool deleted"), 2000);
                         auto& panel = get_global_spoolman_panel();
@@ -714,7 +763,7 @@ void SpoolmanPanel::delete_spool(int spool_id) {
                 [spool_id](const MoonrakerError& err) {
                     spdlog::error("[Spoolman] Failed to delete spool {}: {}", spool_id,
                                   err.message);
-                    helix::ui::queue_update([]() {
+                    helix::ui::queue_update("SpoolmanPanel::delete_spool", []() {
                         ToastManager::instance().show(ToastSeverity::ERROR,
                                                       lv_tr("Failed to delete spool"), 3000);
                     });
@@ -723,103 +772,14 @@ void SpoolmanPanel::delete_spool(int spool_id) {
 }
 
 // ============================================================================
-// Static Event Callbacks
+// Scroll Handler
 // ============================================================================
-
-void SpoolmanPanel::on_spool_row_clicked(lv_event_t* e) {
-    lv_obj_t* target = static_cast<lv_obj_t*>(lv_event_get_target(e));
-
-    // Capture click point from the input device while event is still active
-    lv_point_t click_pt = {0, 0};
-    lv_indev_t* indev = lv_indev_active();
-    if (indev) {
-        lv_indev_get_point(indev, &click_pt);
-    }
-
-    // The target might be a child of the row, walk up to find the row
-    lv_obj_t* row = target;
-    while (row && lv_obj_get_user_data(row) == nullptr) {
-        row = lv_obj_get_parent(row);
-    }
-
-    if (row) {
-        get_global_spoolman_panel().handle_spool_clicked(row, click_pt);
-    }
-}
-
-void SpoolmanPanel::on_refresh_clicked(lv_event_t* /*e*/) {
-    spdlog::debug("[Spoolman] Refresh clicked");
-    get_global_spoolman_panel().refresh_spools();
-}
-
-void SpoolmanPanel::on_add_spool_clicked(lv_event_t* /*e*/) {
-    spdlog::info("[SpoolmanPanel] Add spool clicked — launching wizard");
-    auto& panel = get_global_spoolman_panel();
-
-    // Set completion callback on the wizard to refresh spool list after creation
-    auto& wizard = get_global_spool_wizard();
-    wizard.set_completion_callback([]() { get_global_spoolman_panel().refresh_spools(); });
-
-    helix::ui::lazy_create_and_push_overlay<SpoolWizardOverlay>(
-        get_global_spool_wizard, panel.wizard_panel_, lv_display_get_screen_active(nullptr),
-        "Spool Wizard", "SpoolmanPanel");
-}
 
 void SpoolmanPanel::on_scroll(lv_event_t* e) {
     auto* self = static_cast<SpoolmanPanel*>(lv_event_get_user_data(e));
     if (self) {
         self->list_view_.update_visible(self->filtered_spools_, self->active_spool_id_);
     }
-}
-
-void SpoolmanPanel::on_search_changed(lv_event_t* e) {
-    lv_obj_t* textarea = static_cast<lv_obj_t*>(lv_event_get_target(e));
-    if (!textarea) {
-        return;
-    }
-
-    auto& panel = get_global_spoolman_panel();
-
-    // Store the new query text
-    const char* text = lv_textarea_get_text(textarea);
-    panel.search_query_ = text ? text : "";
-
-    // Debounced: empty applies immediately, anything else waits out the delay.
-    panel.search_debounce_.schedule(panel.search_query_);
-}
-
-void SpoolmanPanel::on_search_clear(lv_event_t* /*e*/) {
-    // The clear button's lv_textarea_set_text("") already fired value_changed,
-    // whose immediate empty-filter apply repopulated once. Applying again here
-    // would double the rebuild, so this only drops a straggling trigger.
-    get_global_spoolman_panel().search_debounce_.cancel();
-}
-
-void SpoolmanPanel::on_location_filter_changed(lv_event_t* e) {
-    lv_obj_t* dropdown = static_cast<lv_obj_t*>(lv_event_get_target(e));
-    if (!dropdown) {
-        return;
-    }
-
-    auto& panel = get_global_spoolman_panel();
-
-    // Guard: if we're programmatically updating the dropdown, ignore the event
-    if (panel.updating_location_dropdown_) {
-        return;
-    }
-
-    uint32_t selected = lv_dropdown_get_selected(dropdown);
-    if (selected == 0) {
-        // "All" selected
-        panel.selected_location_.clear();
-    } else {
-        char buf[128];
-        lv_dropdown_get_selected_str(dropdown, buf, sizeof(buf));
-        panel.selected_location_ = buf;
-    }
-
-    spdlog::debug("[Spoolman] Location filter: '{}'", panel.selected_location_);
-    panel.populate_spool_list();
 }
 
 #if HELIX_HAS_LABEL_PRINTER
@@ -854,3 +814,7 @@ void SpoolmanPanel::print_label_for_spool(int spool_id) {
     }
 }
 #endif
+
+SpoolmanPanel& get_global_spoolman_panel() {
+    return helix::lazy_global<SpoolmanPanel>("SpoolmanPanel");
+}

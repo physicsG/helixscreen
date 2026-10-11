@@ -23,19 +23,34 @@ class TimelapseVideosOverlay : public OverlayBase {
   public:
     explicit TimelapseVideosOverlay(IMoonrakerAPI* api);
 
-    void init_subjects() override;
     lv_obj_t* create(lv_obj_t* parent) override;
+    void register_callbacks() override;
 
     [[nodiscard]] const char* get_name() const override {
         return "Timelapse Videos";
     }
+    [[nodiscard]] const char* xml_component() const override {
+        return "timelapse_videos_overlay";
+    }
 
     void on_activate() override;
-    void on_deactivate() override;
+    void on_deactivating(DeactivateReason reason) override;
     void cleanup() override;
 
     void set_api(IMoonrakerAPI* api) {
         api_ = api;
+    }
+
+    /**
+     * @brief Play one video through the detected player
+     *
+     * Downloads first when Moonraker is remote. Without a player (no mpv or
+     * ffplay on the host) this logs and returns; can_play() says so up front.
+     */
+    void play_video(const std::string& filename);
+
+    [[nodiscard]] bool can_play() const {
+        return can_play_;
     }
 
   private:
@@ -47,6 +62,7 @@ class TimelapseVideosOverlay : public OverlayBase {
     };
 
     void fetch_frame_info();
+    void fetch_timelapse_root();
     void fetch_video_list();
     TimelapseCardDimensions calculate_card_dimensions();
     void populate_video_grid(const std::vector<FileInfo>& files);
@@ -55,19 +71,25 @@ class TimelapseVideosOverlay : public OverlayBase {
     void clear_video_grid();
 
     void detect_playback_capability();
-    void play_video(const std::string& filename);
+    /// Adopt Moonraker's "timelapse" root from a server.files.roots answer.
+    void apply_timelapse_root(const std::vector<FileRoot>& roots);
+    /// Where a same-host player opens `filename`: under the reported root,
+    /// or the stock data_path layout until one is reported.
+    [[nodiscard]] std::string local_video_path(const std::string& filename) const;
 
     void confirm_delete(const std::string& filename);
 
-    static void on_render_now(lv_event_t* e);
     static void on_card_clicked(lv_event_t* e);
     static void on_card_long_pressed(lv_event_t* e);
+
+    friend struct TimelapseVideosOverlayTestAccess;
 
     IMoonrakerAPI* api_;
     std::vector<VideoEntry> videos_;
     bool can_play_ = false;
     std::string player_command_;
     bool is_local_moonraker_ = false;
+    std::string timelapse_root_; ///< Moonraker's "timelapse" root on disk, when reported
 
     helix::AsyncLifetimeGuard thumb_lifetime_;
 
@@ -89,3 +111,20 @@ class TimelapseVideosOverlay : public OverlayBase {
 TimelapseVideosOverlay& get_global_timelapse_videos();
 void init_global_timelapse_videos(IMoonrakerAPI* api);
 void open_timelapse_videos();
+
+namespace helix::ui {
+
+/**
+ * @brief Open the timelapse browser on a specific video and play it
+ *
+ * The browser is pushed first so the user lands on the library either way;
+ * playback then starts when a player exists, and a toast says so when none
+ * does. A no-op (with a log line) on builds without the viewer.
+ */
+void open_timelapse_video(const std::string& filename);
+
+/// False on builds compiled without the viewer (HELIX_HAS_TIMELAPSE_VIEWER=0),
+/// where every open_* entry point is inert.
+bool timelapse_viewer_available();
+
+} // namespace helix::ui

@@ -17,6 +17,7 @@ Solutions to common problems with HelixScreen.
 - [Calibration Issues](#calibration-issues)
 - [Performance Issues](#performance-issues)
 - [Configuration Issues](#configuration-issues)
+- [Creality K1 Series Issues](#creality-k1-series-issues)
 - [Flashforge Adventurer 5M Issues](#flashforge-adventurer-5m-issues)
 - [Gathering Diagnostic Information](#gathering-diagnostic-information)
   - [Enabling Debug Logging](#enabling-debug-logging)
@@ -32,7 +33,7 @@ Solutions to common problems with HelixScreen.
 1. **Settings → System → Log Level → Debug** (or Trace for the deepest detail)
 2. Reproduce the problem
 3. **Settings → Help & About → Upload Debug Bundle** — collects the verbose log + system info and gives you a short share code to paste into a bug report
-4. Set Log Level back to **Warn** when done — Debug and Trace add CPU and log volume
+4. Set Log Level back to **Info** when done. Debug and Trace add CPU and log volume
 
 That's the path for almost everyone. Use the alternatives below only if you can't reach Settings.
 
@@ -56,13 +57,15 @@ sudo systemctl restart helixscreen        # Raspberry Pi
 Then tail the log:
 
 ```bash
-sudo journalctl -u helixscreen -f         # Raspberry Pi (systemd)
-tail -f /var/log/messages | grep helix    # AD5M / non-systemd
+sudo journalctl -u helixscreen -f          # Raspberry Pi (systemd)
+tail -f /data/.helixscreen/logs/helix.log   # AD5M
 ```
 
+The app log's location varies by platform; see [Collecting Logs](#collecting-logs) for the path on yours.
+
 **Verbosity levels:**
-- `warn` — production default (errors and warnings only)
-- `info` — connection events, panel changes
+- `warn` - errors and warnings only
+- `info` - production default: connection events, panel changes
 - `debug` — detailed state changes, API calls
 - `trace` — everything including LVGL internals
 
@@ -91,9 +94,9 @@ tail -f /var/log/messages | grep helix    # AD5M / non-systemd
    curl -sSL https://releases.helixscreen.org/install.sh | sh
    reboot
    ```
-4. To instead go back to the stock screen, run the uninstaller: `curl -sSL https://raw.githubusercontent.com/prestonbrown/helixscreen/main/scripts/install.sh | sh -s -- --uninstall && reboot`.
+4. To instead go back to the stock screen, run the uninstaller: `curl -sSL https://releases.helixscreen.org/install.sh | sh -s -- --uninstall && reboot`.
 
-See [INSTALL.md → Recovery](INSTALL.md#recovery-screen-is-blank-or-the-printer-is-off-the-network) for the full procedure and the manual reset fallback.
+See [Snapmaker U1 install guide → Recovery](guide/install-u1.md#recovery-screen-is-blank-or-the-printer-is-off-the-network) for the full procedure and the manual reset fallback.
 
 ### Update failed in Mainsail — screen won't start after update (AD5X)
 
@@ -104,7 +107,7 @@ See [INSTALL.md → Recovery](INSTALL.md#recovery-screen-is-blank-or-the-printer
 
 **What happened:** Moonraker's in-place update wiped part of `/srv/helixscreen` (including the `bin/helix-screen` binary) before something interrupted it. The install directory now has leftover files but no working binary, so the launcher can't start anything, and a retry from Mainsail trips over those leftovers.
 
-**Fix:** Re-run the CLI installer from inside the ZMOD chroot — it cleans up the broken state and lays down a fresh install while preserving your settings. Full procedure: [UPGRADING.md → Adventurer 5X (ZMOD)](UPGRADING.md#quick-upgrade).
+**Fix:** Re-run the CLI installer from inside the ZMOD chroot - it cleans up the broken state and lays down a fresh install while preserving your settings. Full procedure: [Adventurer 5X install guide → Updating](guide/install-ad5x.md#updating).
 
 Quick form, from a Mainsail Shell or SSH:
 
@@ -542,28 +545,44 @@ sudo usermod -aG video $USER
 
 **Solutions:**
 
-HelixScreen auto-detects resolution from DRM and framebuffer backends. If auto-detection picks the wrong resolution, override it with the `-s` flag:
+HelixScreen auto-detects resolution from DRM and framebuffer backends. If auto-detection picks the wrong resolution, set `HELIX_SCREEN_SIZE` in your `helixscreen.env` file (typically `~/helixscreen/config/helixscreen.env`, which is a symlink to `~/printer_data/config/helixscreen/helixscreen.env`):
 
 ```bash
-# In helixscreen.service ExecStart, add -s with a named size or WxH:
-ExecStart=/opt/helixscreen/bin/helix-launcher.sh -s large
-# or: -s 1024x600
+HELIX_SCREEN_SIZE=large
+# or: HELIX_SCREEN_SIZE=1024x600
 # Named sizes: micro, tiny, small, medium, large, xlarge
 ```
 
-Then reload:
+Despite the name, this is a resolution, not a UI scale factor. The named values are
+aliases for resolutions (`large` is 1024x600), and the layout follows from whichever
+resolution you set. If the resolution is already correct and only the interface looks
+too big or too small, you want the UI Scale setting instead, covered in
+[UI elements look too large or too small](#ui-elements-look-too-large-or-too-small).
+
+Then restart:
 ```bash
-sudo systemctl daemon-reload
 sudo systemctl restart helixscreen
 ```
 
+Confirm it took effect in the log:
+```bash
+journalctl -u helixscreen -b | grep "Screen size from HELIX_SCREEN_SIZE"
+```
+
+> **Do not edit `/etc/systemd/system/helixscreen.service`.** HelixScreen rewrites that unit
+> from its install-dir template on every start, so an `ExecStart` edit is gone before the app
+> launches. `helixscreen.env` is the supported place for persistent settings: it lives in your
+> Klipper config directory, survives updates, and is restored from backup if an update wipes it.
+> If you need a systemd-level change anyway, use a drop-in (`sudo systemctl edit --force
+> helixscreen`). Drop-ins under `helixscreen.service.d/` are left alone by the refresh.
+
 ---
 
-### Resolution stuck at the wrong size, or `-s` has no effect
+### Resolution stuck at the wrong size, or the size override has no effect
 
 **Symptoms:**
 - HelixScreen shows a "Cannot set HelixScreen to selected resolution" message on startup
-- Display is locked at 800x480 (or similar) even though you passed `-s large` or `-s 1024x600`
+- Display is locked at 800x480 (or similar) even though you set `HELIX_SCREEN_SIZE=large` or `HELIX_SCREEN_SIZE=1024x600`
 - System journal contains `[DRM Backend]` or `[fbdev Backend]` warnings about the requested size
 
 **Cause:** HelixScreen can only use resolutions the kernel exposes to it. If the kernel display driver is misconfigured, or if a fallback driver like `simpledrm` is active, the display is locked to whatever the bootloader programmed at power-on — HelixScreen cannot override this at runtime.
@@ -590,11 +609,40 @@ sudo systemctl restart helixscreen
    ```
    You should see something like `card0-HDMI-A-1`. If you still see only `card0` and `dmesg | grep -i drm` mentions `simpledrm`, the vc4 overlay did not load — double-check /boot/firmware/config.txt for typos and any conflicting `dtoverlay` lines.
 
+**Fix on Armbian (BTT CB1 / CB2, Manta, and other Allwinner / Rockchip SBCs):**
+
+Armbian has no config.txt. Kernel parameters go in /boot/armbianEnv.txt instead.
+
+1. Find your connector name:
+   ```bash
+   ls /sys/class/drm/
+   ```
+   Look for a `card0-*` entry such as `card0-HDMI-A-1`. The connector name is everything
+   after `card0-`.
+
+2. Force the mode on the kernel command line:
+   ```bash
+   sudo nano /boot/armbianEnv.txt
+   ```
+   Add or extend the `extraargs` line (many images ship without one, so add it if missing):
+   ```
+   extraargs=video=HDMI-A-1:800x480@60
+   ```
+   Keep any existing `extraargs` values on the same line, separated by spaces. If the kernel
+   thinks nothing is connected, append `e` to force the connector on: `800x480@60e`.
+
+3. Reboot, then confirm the mode took, using the check below.
+
+> **A mode list of exactly `1024x768`, `800x600`, `848x480`, `800x480`, `640x480` and nothing
+> else is the kernel's built-in fallback set**, which means no EDID was read from the panel at
+> all. Forcing the mode as above is the fix. The panel does not have to supply working EDID for
+> a forced mode to drive it, so you do not need to replace the screen or the cable.
+
 **Check what modes the kernel knows about:**
 ```bash
 cat /sys/class/drm/card0-HDMI-A-1/modes
 ```
-This lists the resolutions the DRM driver will accept for the `-s` flag.
+This lists the resolutions the DRM driver will accept for `HELIX_SCREEN_SIZE`.
 
 ---
 
@@ -606,27 +654,16 @@ This lists the resolutions the DRM driver will accept for the `-s` flag.
 - The resolution is correct (the whole screen is used), but the *scale* of the interface looks wrong
 
 **Cause:**
-HelixScreen sizes spacing and padding from the display's DPI (dots per inch). On unusual or high-density panels the auto-detected DPI can be off, so the layout is scaled too large or too small.
+The interface is sized by the screen's resolution and by the **UI Scale** setting. On Automatic the scale is 100% on every supported printer and only grows on very high-density screens such as a phone. The scale never goes below 100%.
 
-**Fix:** Override the DPI in your `helixscreen.env` file (typically `~/helixscreen/config/helixscreen.env`), then restart HelixScreen. The default is `160`; valid range is `50` to `500`.
+**Fix:**
 
-- **Everything too large / cramped / overflowing** — set a **lower** DPI:
-  ```
-  HELIX_DPI=100
-  ```
-- **Everything too small / lots of empty space** — set a **higher** DPI:
-  ```
-  HELIX_DPI=200
-  ```
+- **Everything too small:** open **Settings > Display > UI Scale**, pick a size above 100%, and restart HelixScreen. See [UI Scale](guide/settings/display.md#ui-scale). The `helixscreen.env` equivalent is a `HELIX_DPI` above `225` (for example `300` is about 124%, `400` about 156%), which only applies while UI Scale is on Automatic.
+- **Everything too large:** if UI Scale is above 100%, set it to 100%. Nothing shrinks the interface below 100%, and a `HELIX_DPI` of 225 or lower changes nothing. Controls are sized for the resolution's layout size, so on a monitor that offers several modes a higher resolution (`HELIX_SCREEN_SIZE`) gives them proportionally less of the screen.
 
-Restart after editing:
-```bash
-sudo systemctl restart helixscreen
-```
+UI Scale and the DPI-driven scale are new in 1.1. On 1.0 the resolution is the only lever.
 
-Adjust in steps (e.g. 110, 100, 90 or 160, 200, 240) until the interface looks right. Lower DPI = tighter/smaller; higher DPI = larger/roomier.
-
-> **Tip:** If instead the *whole layout tier* is wrong — for example a compact phone-style layout on a big screen, or vice versa — the resolution rather than the DPI is being mis-detected. Force a layout size with `HELIX_SCREEN_SIZE` (named preset `micro`/`tiny`/`small`/`medium`/`large`/`xlarge`, or `WxH` like `1024x600`), which is the persistent equivalent of the `-s` flag covered in [Wrong screen size or resolution](#wrong-screen-size-or-resolution).
+> **Tip:** If instead the *whole layout tier* is wrong — for example a compact phone-style layout on a big screen, or vice versa — the resolution rather than the DPI is being mis-detected. Force a layout size with `HELIX_SCREEN_SIZE` (named preset `micro`/`tiny`/`small`/`medium`/`large`/`xlarge`, or `WxH` like `1024x600`), covered in [Wrong screen size or resolution](#wrong-screen-size-or-resolution).
 
 ---
 
@@ -645,7 +682,7 @@ HelixScreen detects both orientations and adjusts the navigation bar and grid si
 **What you can do:**
 
 - **On a portrait panel, rotate it to landscape.** This is the well-tested path and what the Creality K2 does out of the box. Set `"rotate": 90` (or `270`) in the `display` section of your config — see [Display upside down or rotated](#display-upside-down-or-rotated).
-- **On an ultrawide screen,** there is no better fallback today. Reducing DPI (`HELIX_DPI`) can claw back some usable density, but the layout will still be a landscape layout stretched wide.
+- **On an ultrawide screen,** there is no better fallback today. The layout will be a landscape layout stretched wide.
 - **Force the standard layout** if the alpha layout is worse than the fallback: `--layout standard`, or `"layout": "standard"` in the `display` section.
 
 Contributions are very welcome here and only need XML, not C++ — see the [UI Contributor Guide](../devel/UI_CONTRIBUTOR_GUIDE.md).
@@ -724,17 +761,17 @@ Edit your config file (typically `~/helixscreen/config/settings.json` or `/opt/h
 
 Valid values: `0`, `90`, `180`, `270`. Restart HelixScreen after changing this value. Touch coordinates are automatically adjusted to match — no separate touch configuration is needed.
 
+**All four values work on every printer.** GPU-enabled DRM builds rotate the final image on the GPU. Other DRM builds switch to the framebuffer path automatically when the display hardware cannot rotate the image itself, so you do not need to set `HELIX_DISPLAY_BACKEND` or install anything. If the picture stays unrotated after a restart, the fallback failed and the log will say `Continuing without rotation`. In that case rotate the panel in the kernel with `video=...,rotate=90` instead.
+
 **How rotation works under the hood:**
 
-When you set a rotation value, HelixScreen checks whether your display hardware supports rotating the image directly (hardware rotation). Most embedded displays — including DSI screens on Raspberry Pi — do not support hardware rotation for 180°.
-
-When hardware rotation is not available, HelixScreen automatically switches from the GPU-accelerated DRM backend to the framebuffer (fbdev) backend, which handles software rotation flicker-free. This happens transparently — you don't need to configure anything. You'll see this in the logs:
+When you set a rotation value, a GPU-enabled DRM build rotates the completed image efficiently and remains on DRM. Its log contains:
 
 ```
-DRM lacks hardware rotation for 180°, falling back to fbdev (flicker-free software rotation)
+GPU presentation rotation 90° (OpenGL ES)
 ```
 
-The fbdev backend with software rotation works well for normal UI usage. If you notice any issues, you can also force the fbdev backend manually:
+Without GPU acceleration, HelixScreen uses display hardware rotation when available and otherwise switches to fbdev for flicker-free software rotation. If you notice any issues, you can also force the fbdev backend manually:
 
 ```bash
 sudo systemctl edit helixscreen
@@ -802,6 +839,51 @@ After restart, flags on the language selection screen should show correct colors
 
 ---
 
+### Screen goes dark at sleep but the backlight stays on
+
+**Symptoms:**
+- When the screen sleeps (idle timeout), the picture goes black but the panel still glows: you can see the backlight shining through, especially in a dark room
+- Touching the screen wakes it normally
+
+**Cause:**
+By default, sleep turns the backlight off and leaves the panel powered, so waking is instant. Some panel controllers treat "backlight at zero" as "very dim" rather than "off", so the LEDs stay lit. Powering the whole panel down fixes these screens, but it breaks others (see the next section), so it is not the default.
+
+**Fix - power the panel down at sleep:**
+
+1. SSH into your printer
+2. Edit `settings.json` (typically `~/helixscreen/config/settings.json`; see [Configuration](CONFIGURATION.md) for other platforms)
+3. Find the `"display"` section and set:
+
+   ```json
+   "panel_power_off": 1
+   ```
+
+4. Save the file and restart HelixScreen:
+
+   ```bash
+   sudo systemctl restart helixscreen
+   ```
+
+   (Use your platform's restart command - see [Quick Debugging Guide](#quick-debugging-guide) for the SysV-init variants.)
+
+5. Let the screen sleep, then touch it to wake it.
+
+To confirm the setting was picked up, look for this line in the log after the restart:
+
+```
+[DisplayManager] Display power-off: true (config override)
+```
+
+If it says `false (config override)`, your display driver has no way to power the panel down, and this setting cannot help on your hardware.
+
+**If it makes things worse:**
+On some screens, a full power-down causes flashing colours, edges that glow white, a colour test pattern, or a screen that does not come back when touched. If you see any of these, SSH in, set `"panel_power_off": -1` (automatic) or remove the line, and restart HelixScreen. Screen sleep in **Settings → Display** can also be set to **Never** as a fallback.
+
+**Helping us fix it:**
+If `panel_power_off: 1` works for you, please tell us your printer and screen model (or send a debug bundle from **Settings → Help & About → Upload Debug Bundle**). We can then turn it on automatically for that hardware.
+
+---
+
 ### Random solid colors during screen sleep (AD5X)
 
 **Symptoms:**
@@ -811,26 +893,16 @@ After restart, flags on the language selection screen should show correct colors
 - Only affects the FlashForge Adventurer 5X
 
 **Cause:**
-A driver-level quirk in the AD5X's Allwinner display pipeline. When HelixScreen tells the screen to sleep, the display controller on some AD5X units emits a solid primary-color fill instead of a blank frame. This is not a HelixScreen rendering bug — it does not affect printing, connectivity, or anything else. We have not yet been able to reproduce it reliably on our hardware, so there is no code fix available today.
+The panel has been fully powered down at sleep. A driver-level quirk in the AD5X's Allwinner display pipeline makes the display controller cycle solid primary-color fills when the panel is powered down and brought back. HelixScreen only powers a screen down when it cannot control the screen's backlight, or when `/display/panel_power_off` in `settings.json` forces it; normally it leaves the panel powered and just turns the backlight off, which does not trigger the colors. This is not a HelixScreen rendering bug - it does not affect printing, connectivity, or anything else.
 
-**Workaround 1 — Disable screen sleep (simplest):**
-
-1. Tap the gear icon to open **Settings**
-2. Open **Display**
-3. Set **Sleep** to **Never**
-
-The screen will stay on continuously. Power the touchscreen off at the wall if you want it dark when not in use.
-
-**Workaround 2 — Keep backlight on during sleep (preserves sleep logic):**
-
-This keeps the normal sleep timeout but prevents the backlight from being cut, which avoids the color fill. The screen stays lit showing the last-drawn frame.
+**Fix - stop the panel from being powered down:**
 
 1. SSH into your printer (or open a shell on the AD5X directly)
 2. Edit `settings.json`. On the AD5X (ZMOD firmware) the install lives under the ZMOD data directory, not `~/helixscreen` — the config file is at something like `/usr/data/.mod/.zmod/srv/helixscreen/config/settings.json` (or `/srv/helixscreen/config/settings.json` from inside the ZMOD chroot).
 3. Find the `"display"` section and set:
 
    ```json
-   "sleep_backlight_off": false
+   "panel_power_off": 0
    ```
 
 4. Save the file and restart HelixScreen. The AD5X uses ZMOD's SysV init, not systemd:
@@ -841,7 +913,15 @@ This keeps the normal sleep timeout but prevents the backlight from being cut, w
 
    (or restart via the ZMOD launcher / Mainsail if you manage it that way)
 
-Caveat: the panel stays fully lit 24/7 with this option. If long-term backlight wear is a concern, prefer Workaround 1 and manually power off the screen when not needed.
+With the power-down forbidden, sleep blanks the screen instead: the panel stays powered and dark. Waking is immediate.
+
+**Workaround - disable screen sleep entirely:**
+
+1. Tap the gear icon to open **Settings**
+2. Open **Display**
+3. Set **Sleep** to **Never**
+
+The screen will stay on continuously. Power the touchscreen off at the wall if you want it dark when not in use.
 
 **Helping us fix it:**
 If you are experiencing this and are willing to help, please send a debug bundle from **Settings → Help & About → Upload Debug Bundle**. Include a note that mentions the sleep color issue so we can correlate configs and logs.
@@ -987,23 +1067,20 @@ sudo usermod -aG input $USER
 
 ### Touch Feel — Which Setting Do I Tune?
 
-Three separate settings control the feel of taps vs. scrolls. Match the symptom to the right knob before changing anything — they have different effects and tuning the wrong one makes things worse.
+Two separate settings control the feel of taps vs. scrolls. Match the symptom to the right knob before changing anything - they have different effects and tuning the wrong one makes things worse.
 
 | Symptom | What's happening | Setting to change | Direction |
 |---|---|---|---|
 | Stationary taps register as swipes/scrolls | Touch controller drifts a few pixels while finger is still, crossing the scroll threshold | `scroll_limit` | **Raise** (e.g., 15–20) |
 | You scroll a list and a button in it fires mid-gesture | Finger released before moving far enough to commit to scroll, so the press becomes a click | `scroll_limit` | **Lower** (e.g., 5) |
-| You scroll, lift your finger, and a button fires right as you lift | Touch controller reports release→re-press on lift-off | `scroll_guard` | **Set to `true`** |
 | Lists feel sluggish — long coast after a flick | Scroll momentum decays too slowly | `scroll_throw` | **Raise** (e.g., 35) |
 | Short flicks never travel far enough — list barely moves | Momentum decays too fast | `scroll_throw` | **Lower** (e.g., 15) |
 
-All three live under `input` in `settings.json` (path varies by platform — see [Config File Locations](guide/touch-calibration.md#config-file-locations)). See [CONFIGURATION.md § Input Configuration](CONFIGURATION.md#input-settings) for the full reference.
+Both live under `input` in `settings.json` (path varies by platform - see [Config File Locations](guide/touch-calibration.md#config-file-locations)). See [CONFIGURATION.md § Input Configuration](CONFIGURATION.md#input-settings) for the full reference.
 
 > **Stop the service before editing `settings.json`** — the daemon rewrites the file periodically and your edits can be clobbered. Stop, edit, start.
 >
-> **Want to try a value before committing it?** All three are sliders under **Settings → System → Touch & Input** on the printer itself, so you can feel the change immediately and keep it only if it helps. `scroll_guard` and `scroll_limit` apply straight away; the panel prompts for a restart where one is needed.
-
-FlashForge AD5M and AD5X presets ship with `scroll_guard: true` out of the box. Other platforms default to `false`.
+> **Want to try a value before committing it?** `scroll_limit` is a slider under **Settings > Touch & Input** on the printer itself (Scroll Engage Distance), so you can feel the change immediately and keep it only if it helps; it takes effect on the next touch, no restart needed. `scroll_throw` has no on-screen control, so set it in `settings.json` directly.
 
 ---
 
@@ -1026,7 +1103,7 @@ FlashForge AD5M and AD5X presets ship with `scroll_guard: true` out of the box. 
 }
 ```
 
-Or set it from the printer itself: **Settings → System → Touch & Input → Scroll Engage Distance**.
+Or set it from the printer itself: **Settings → Touch & Input → Scroll Engage Distance**.
 
 Raising it too far makes real scrolls feel unresponsive, so move in steps of a few pixels.
 
@@ -1104,7 +1181,7 @@ If taps are landing in the wrong place on screen:
    ```bash
    helix-screen --debug-touches
    ```
-2. **Recalibrate from the UI:** Go to **Settings > System > Touch Calibration**.
+2. **Recalibrate from the UI:** Go to **Settings > Touch & Input > Touch Calibration**.
 3. **If the option isn't visible:** Your screen may not normally need calibration. SSH in, **stop the service**, then run:
    ```bash
    sudo systemctl stop helixscreen
@@ -1186,7 +1263,7 @@ This is common on devices where the touch controller is mounted at a different o
 
 HelixScreen automatically detects swapped touch axes during calibration and corrects them. Just recalibrate:
 ```bash
-# Settings > System > Touch & Input > Touch Calibration
+# Settings > Touch & Input > Touch Calibration
 ```
 
 **2. Manual axis swap (fallback):**
@@ -1498,6 +1575,30 @@ Navigate away from and back to the AMS panel to trigger refresh.
 sudo journalctl -u moonraker | grep -i spoolman
 ```
 
+### Color set on the printer's own screen reverts (AD5X with Spoolman)
+
+**Known limitation.** On an AD5X, once a lane has been assigned a Spoolman spool,
+changing that lane's color from the printer's own color menu does not stick: the panel
+goes back to showing the spool's color within a second.
+
+This is the lane ranking working as designed. When more than one source can describe a
+lane, HelixScreen takes each detail from the most trustworthy source rather than from
+whichever wrote last: a color you pick on the lane's editor outranks the linked spool's,
+and a linked spool's color outranks what the machine itself reports. A change made in
+the printer's own color menu is a machine report, so while a Spoolman spool is linked
+to that lane it loses to the spool's record. The same ranking protects your own pick:
+a color set on the lane's editor in HelixScreen sticks, and the machine cannot
+overwrite it either.
+
+**What works instead:** change the color in HelixScreen, on the lane's own editor
+(tap the lane, then edit it), or change the spool's color in Spoolman. Both take
+effect and persist.
+
+**Unaffected:** lanes with no Spoolman spool assigned. With no spool record to lose
+to, the machine's report is the strongest source and the change shows as set. Note
+that a linked spool also owns the lane's material and spool name, so machine-side
+changes to those revert the same way while the link is in place.
+
 ### Only some spools showing in Spoolman lists
 
 **Symptoms:**
@@ -1590,11 +1691,11 @@ ps aux | grep helix-screen
 | Cause | Fix |
 |-------|-----|
 | Debug mode in production | Remove `-vv`/`-vvv` from service, don't use `--test` |
-| Animations on slow hardware | Settings → Display & Sound → disable Animations |
+| Animations on slow hardware | Settings → Appearance → disable Animations |
 | Too many G-code files | Large directories with thumbnails use more RAM |
 | Other processes hogging CPU | Check `top` for culprits |
 | Swapping to SD card | Reduce memory usage or add swap to USB |
-| Hardware issues | Settings → Hardware & Devices → Hardware Issues - check for problems |
+| Hardware issues | Settings → Devices → Hardware Health - check for problems |
 
 **To disable verbose logging:**
 
@@ -1762,6 +1863,58 @@ Auto-detection only commits to a model when it is confident enough. Below that b
 
 ---
 
+### Reset HelixScreen or re-run the setup wizard
+
+**Option 1: Factory Reset from the UI (easiest).** Go to **Settings > System > Factory Reset** and confirm. This wipes all HelixScreen settings, clears the backup copies so the old settings cannot come back, and restarts the Setup Wizard on the next start. It does not touch Klipper, Moonraker, or any files on the printer itself.
+
+**Option 2: touch is unusable, recalibrate only.** A full reset is not needed just to fix touch. Either add `HELIX_TOUCH_CALIBRATE=1` to the `helixscreen.env` file in your install's `config/` directory and restart the service (remove the line once calibration succeeds, the env var does not self-clear), or stop the service, add `"force_calibration": true` inside the `"input"` section of `settings.json`, and start it again (the flag clears itself after a successful calibration). See [Forcing Recalibration](guide/touch-calibration.md#forcing-recalibration) for the full walkthrough.
+
+**Option 3: full manual reset over SSH.** Deleting `settings.json` alone does not re-run the wizard: HelixScreen keeps rolling backup copies outside the install directory and restores the most recent one the next time the file is missing. To truly start over:
+
+1. Stop the service (`sudo systemctl stop helixscreen` on Raspberry Pi; `/etc/init.d/S99helixscreen stop` on K1 / K2 / Snapmaker U1; `/etc/init.d/S80helixscreen stop` on AD5M, AD5X and Creator 5 (Z-Mod); `/etc/init.d/helixscreen stop` on CC1)
+2. Delete the config and every backup copy (the install directory for your platform is in [Config File Locations](guide/touch-calibration.md#config-file-locations), for example `/srv/helixscreen` on FlashForge Z-Mod installs). Drop `sudo` on printers where you are already root (FlashForge, Creality, Snapmaker U1):
+   ```bash
+   sudo rm -f /srv/helixscreen/config/settings.json   # your install dir here
+   sudo rm -f /var/lib/helixscreen/*.backup
+   sudo rm -f ~/.helixscreen/*.backup                 # HOME is /root on Z-Mod installs, so /root/.helixscreen
+   ```
+3. Start the service again. The Setup Wizard runs from scratch.
+
+To re-run the wizard without wiping your settings, stop the service and start the app once by hand with `helix-screen --wizard`.
+
+---
+
+## Creality K1 Series Issues
+
+Covers the K1, K1C and K1 Max on stock or Guilouz Helper Script firmware.
+
+### Creality Print can no longer find or connect to the printer
+
+**Symptoms:**
+- Creality Print stops discovering the printer on the LAN, and typing its IP directly does not work either
+- The Creality Cloud app stops reaching the printer
+- Port 80 on the printer is closed
+- HelixScreen, Fluidd, Mainsail and Moonraker all work normally
+
+**Cause:**
+Current HelixScreen installs keep the stock Creality backend (`master-server`, `app-server`, `web-server`) running beside the screen UI, so Creality Print and Creality Cloud work normally. If they cannot reach the printer, the backend is not running: most often the installed HelixScreen predates the backend support, or the backend init script (`/etc/init.d/S99creality-backend`) failed to start. On a Simple AF install the stock stack was already disabled before HelixScreen arrived, so a lost Creality Print connection there predates HelixScreen. Full setup path and background: [K1 / K1C / K1 Max setup guide](guide/creality-k1c-setup.md).
+
+**Fix:** update to the current HelixScreen release; the update installs and starts the backend script:
+
+```bash
+cp /usr/data/helixscreen/install.sh /tmp/install.sh && sh /tmp/install.sh --update
+```
+
+After the update (and after a reboot), `pidof web-server` should answer with a PID. If it does not, check `/etc/init.d/S99creality-backend` exists and start it with `/etc/init.d/S99creality-backend start`.
+
+**If you would rather have the stock screen back:** uninstalling removes the backend script and re-enables the stock UI services it replaced:
+
+```bash
+cp /usr/data/helixscreen/install.sh /tmp/install.sh && sh /tmp/install.sh --uninstall
+```
+
+Keeping the Creality backend alive alongside HelixScreen is prestonbrown/helixscreen#1468; the original breakage was #1447.
+
 ## Flashforge Adventurer 5M Issues
 
 The Flashforge Adventurer 5M (AD5M) has unique characteristics due to its embedded Linux environment and ForgeX/Klipper Mod firmware.
@@ -1815,8 +1968,10 @@ ls -la /opt/config/mod/.root/S80guppyscreen
 
 **Check HelixScreen is running:**
 ```bash
-/etc/init.d/S90helixscreen status
-cat /opt/helixscreen/logs/launcher.log    # AD5M launcher capture
+/etc/init.d/S90helixscreen status                        # Forge-X (Klipper Mod: S80helixscreen)
+tail /data/.helixscreen/logs/helix.log                    # structured app log
+cat /opt/helixscreen/logs/launcher.log                   # Forge-X launcher capture
+cat /root/printer_software/helixscreen/logs/launcher.log # Klipper Mod launcher capture
 ```
 
 ### Service commands (SysV init)
@@ -1827,15 +1982,15 @@ AD5M uses SysV init, not systemd. Commands are different:
 # Forge-X
 /etc/init.d/S90helixscreen start|stop|restart|status
 cat /opt/helixscreen/logs/launcher.log
-grep helix-screen /var/log/messages | tail -100    # structured app log
+tail -100 /data/.helixscreen/logs/helix.log    # structured app log
 
 # Klipper Mod
 /etc/init.d/S80helixscreen start|stop|restart|status
-cat /opt/helixscreen/logs/launcher.log
-grep helix-screen /var/log/messages | tail -100
+cat /root/printer_software/helixscreen/logs/launcher.log
+tail -100 /data/.helixscreen/logs/helix.log
 ```
 
-> The `launcher.log` file captures startup messages and crash output from the supervisor shell. The full structured app log (everything the app itself logs) goes to the system log (`/var/log/messages`). You usually want both when reporting an issue. On pre-v0.99.62 installs the launcher log lived at `/tmp/helixscreen.log` — check that path if `launcher.log` doesn't exist.
+> The `launcher.log` file captures startup messages and crash output from the supervisor shell. The full structured app log (everything the app itself logs) goes to `/data/.helixscreen/logs/helix.log`, written directly to flash and rotated; `/var/log/messages` carries only the earliest startup output, before the app's own logging takes over. You usually want both when reporting an issue. On pre-v0.99.62 installs the launcher log lived at `/tmp/helixscreen.log` — check that path if `launcher.log` doesn't exist.
 
 ### SSH/SCP notes
 
@@ -1883,7 +2038,7 @@ To go back to GuppyScreen:
 
 ```bash
 # Automated (recommended)
-curl -sSL https://raw.githubusercontent.com/prestonbrown/helixscreen/main/scripts/install.sh | bash -s -- --uninstall
+curl -sSL https://releases.helixscreen.org/install.sh | bash -s -- --uninstall
 
 # Manual
 /etc/init.d/S90helixscreen stop
@@ -1902,14 +2057,14 @@ When reporting issues, gather this information. **Most importantly, enable debug
 
 ### Enabling Debug Logging
 
-By default, HelixScreen only logs warnings and errors. To capture useful diagnostic information, you need to temporarily enable debug-level logging, reproduce the problem, then collect the logs.
+By default, HelixScreen logs warnings, errors and milestones (connections, panel changes, updates). To capture more diagnostic information, you need to temporarily enable debug-level logging, reproduce the problem, then collect the logs.
 
-**Quickest method:** Go to **Settings > System > Log Level** and select **Debug**. This takes effect immediately with no restart needed. Remember to set it back to **Warn** when done.
+**Quickest method:** Go to **Settings > System > Log Level** and select **Debug**. This takes effect immediately with no restart needed. Remember to set it back to **Info** when done.
 
 **Verbosity levels:**
 | Flag | Level | What it captures |
 |------|-------|-----------------|
-| *(none)* | WARN | Errors and warnings only (production default) |
+| *(none)* | INFO | Errors, warnings and milestones (production default) |
 | `-v` | INFO | Connection events, panel changes, milestones |
 | `-vv` | DEBUG | State changes, API calls, component init (**use this for bug reports**) |
 | `-vvv` | TRACE | Everything including LVGL internals (very verbose, rarely needed) |
@@ -1945,13 +2100,16 @@ sudo ./bin/helix-launcher.sh --debug --log-dest=console
 # Reproduce the issue, then Ctrl+C to stop
 ```
 
-**Option C: Environment variable**
+**Option C: Environment variable (persistent, works on every platform)**
 
-Add to the service file:
+Add to your `helixscreen.env` (typically `~/helixscreen/config/helixscreen.env`), then restart:
 ```ini
-[Service]
-Environment="HELIX_LOG_LEVEL=debug"
+HELIX_LOG_LEVEL=debug
 ```
+
+Editing `/etc/systemd/system/helixscreen.service` directly does not work: the unit is rewritten
+from the install-dir template on every start. See the note under
+[Wrong screen size or resolution](#wrong-screen-size-or-resolution).
 
 #### Flashforge Adventurer 5M / Forge-X (SysV init)
 
@@ -2018,22 +2176,41 @@ Two streams to collect — both are needed when reporting an issue:
 
 ```bash
 # 1) Structured app log (everything from spdlog: connection events, errors, etc.)
-grep helix-screen /var/log/messages | tail -200
+tail -200 /data/.helixscreen/logs/helix.log
 
 # 2) Launcher / supervisor capture (startup banner, crash output, glibc abort messages)
-tail -200 /opt/helixscreen/logs/launcher.log    # pre-v0.99.62 installs: /tmp/helixscreen.log
+#    Forge-X: /opt/helixscreen/logs/launcher.log
+#    Klipper Mod: /root/printer_software/helixscreen/logs/launcher.log
+#    pre-v0.99.62 installs: /tmp/helixscreen.log
+tail -200 /opt/helixscreen/logs/launcher.log
 
-# Follow the system log live while reproducing the issue
-tail -f /var/log/messages | grep helix-screen
+# Follow the app log live while reproducing the issue
+tail -f /data/.helixscreen/logs/helix.log
 ```
 
-**Creality K1 / K1C / K2 (BusyBox in-memory syslog):**
+**Creality K1 / K1C (BusyBox):**
 ```bash
-# Structured app log — held in a RAM ring buffer, vanishes on reboot
-logread | grep helix-screen | tail -200
+# Structured app log (on flash, rotated)
+tail -200 /usr/data/.helixscreen/logs/helix.log
 
 # Launcher / supervisor capture
 tail -200 /usr/data/helixscreen/logs/launcher.log
+
+# Anything that reached the in-memory syslog before the app log opened
+logread | grep helix-screen | tail -200
+```
+
+**Creality K2:**
+```bash
+# Structured app log (on the UDISK data partition, rotated)
+tail -200 /mnt/UDISK/helixscreen/logs/helix.log
+
+# Launcher / crash capture (lives beside the install; on builds whose
+# /var/log is persistent it lands at /var/log/helixscreen/launcher.log)
+tail -200 /opt/helixscreen/logs/launcher.log
+
+# Anything that reached the OpenWrt syslog
+logread | grep helix-screen | tail -200
 ```
 
 **Flashforge AD5X (ZMOD MIPS):**
@@ -2048,7 +2225,7 @@ tail -200 /opt/config/mod_data/log/helixscreen.log
 tail -200 /usr/data/config/mod_data/log/helix.log
 
 # Older installs, before the app log moved under /opt/config
-tail -200 /data/helixscreen/logs/helix.log
+tail -200 /data/.helixscreen/logs/helix.log
 tail -200 /srv/helixscreen/logs/launcher.log
 
 logread | grep helix-screen | tail -200
@@ -2062,8 +2239,14 @@ tail -200 /var/log/helixscreen/launcher.log
 
 **Elegoo Centauri Carbon (COSMOS):**
 ```bash
-logread | grep helix-screen | tail -200
+# Structured app log (on flash, rotated)
+tail -200 /user-resource/helixscreen/logs/helix.log
+
+# Launcher / supervisor capture
 tail -200 /user-resource/helixscreen/logs/launcher.log
+
+# Anything that reached the in-memory syslog before the app log opened
+logread | grep helix-screen | tail -200
 ```
 
 ### Configuration

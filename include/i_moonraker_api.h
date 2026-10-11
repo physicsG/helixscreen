@@ -3,10 +3,10 @@
 
 #pragma once
 
+#include "i_moonraker_client.h"   // for helix::ConnectionState, helix::SubscriptionId
 #include "i_moonraker_sub_apis.h" // sub-API interfaces returned by the accessors
 #include "json_fwd.h"
-#include "lvgl.h"             // lv_subject_t
-#include "moonraker_client.h" // for helix::ConnectionState, helix::SubscriptionId
+#include "lvgl.h" // lv_subject_t
 #include "moonraker_error.h"
 #include "moonraker_types.h" // SafetyLimits, PowerDevice, GcodeStoreEntry
 
@@ -137,19 +137,6 @@ class IMoonrakerAPI {
                     std::function<void(const MoonrakerError&)> on_error) = 0;
 
     // ========================================================================
-    // Helix Plugin
-    // ========================================================================
-
-    /// @brief Get phase tracking plugin status
-    virtual void get_phase_tracking_status(std::function<void(bool enabled)> on_success,
-                                           ErrorCallback on_error = nullptr) = 0;
-
-    /// @brief Enable or disable phase tracking plugin
-    virtual void set_phase_tracking_enabled(bool enabled,
-                                            std::function<void(bool success)> on_success,
-                                            ErrorCallback on_error = nullptr) = 0;
-
-    // ========================================================================
     // Moonraker Database
     // ========================================================================
 
@@ -199,10 +186,14 @@ class IMoonrakerAPI {
     /// @param caller_surfaces_errors Whether @p on_error actually shows the user
     ///        something. Forwarded to execute_gcode() — see its contract and
     ///        include/rpc_error_policy.h. Pass false when the callback only logs.
+    /// @param silent Non-interactive caller (e.g. LedAutoState applying the state
+    ///        theme): suppresses warning logs and the busy-queue toast, which
+    ///        exists to explain a command the user made. Forwarded to
+    ///        execute_gcode().
     virtual void set_led(const std::string& led, double red, double green, double blue,
                          double white, SuccessCallback on_success, ErrorCallback on_error,
-                         SuccessCallback on_queued = nullptr,
-                         bool caller_surfaces_errors = true) = 0;
+                         SuccessCallback on_queued = nullptr, bool caller_surfaces_errors = true,
+                         bool silent = false) = 0;
 
     // ========================================================================
     // System Control
@@ -216,10 +207,15 @@ class IMoonrakerAPI {
     ///        something. Pass false when it only logs — a spdlog line is not a
     ///        report, and claiming otherwise silences Klipper's `!!` broadcast,
     ///        the surface that would have explained the failure.
+    /// @param bypass_busy_gate Skip the discretionary-gcode busy gate. For the
+    ///        print-launch send ONLY: its on_success chains the job launch, so
+    ///        queueing it fire-and-forget behind the START macro would orphan
+    ///        the print start. Everything interactive keeps the gate.
     virtual void execute_gcode(const std::string& gcode, SuccessCallback on_success,
                                ErrorCallback on_error, uint32_t timeout_ms = 0, bool silent = false,
                                SuccessCallback on_queued = nullptr,
-                               bool caller_surfaces_errors = true) = 0;
+                               bool caller_surfaces_errors = true,
+                               bool bypass_busy_gate = false) = 0;
 
     /// @brief Check if a string is safe to use as a G-code parameter
     static bool is_safe_gcode_param(const std::string& str);

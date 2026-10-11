@@ -6,22 +6,35 @@
 #include "ui_keyboard_manager.h"
 #include "ui_modal.h"
 #include "ui_nav_manager.h"
+#include "ui_panel_home.h"
 #include "ui_toast_manager.h"
 #include "ui_update_queue.h"
 
 #include "app_globals.h"
 #include "demo_overlays.h"
 #include "display_settings_manager.h"
+#include "grid_edit_drop.h"
 #include "http_executor.h"
 #include "input_settings_manager.h"
+#include "klipper_config_includes.h"
 #include "logging_init.h"
 #include "mock_scenarios.h"
+#ifdef HELIX_ENABLE_MOCKS
+#include "moonraker_client_mock.h"
+#endif
 #include "panel_factory.h"
+#include "panel_widget_config.h"
+#include "panel_widget_manager.h"
+#include "panel_widget_registry.h"
+#include "panel_widget_size.h"
 #include "printer_state.h"
 #include "remote_client.h"
 #include "remote_pointer.h"
+#include "runtime_config.h"
 #include "screenshot.h"
 #include "subject_debug_registry.h"
+#include "system/diag_upload_gate.h"
+#include "thumbnail_processor.h"
 #include "widget_resolution.h"
 
 // LVGL XML subject lookup
@@ -90,11 +103,6 @@ static void wake_display() {
     lv_display_trigger_activity(nullptr);
 }
 
-RemoteControlServer& RemoteControlServer::instance() {
-    static RemoteControlServer instance;
-    return instance;
-}
-
 RemoteControlServer::~RemoteControlServer() {
     stop();
 }
@@ -104,10 +112,8 @@ std::string resolve_socket_path(const std::string& override_path) {
         return override_path; // Explicit --remote-socket always wins.
     }
 
-    const char* xdg_runtime = getenv("XDG_RUNTIME_DIR");
-    const std::string dir =
-        (xdg_runtime && xdg_runtime[0] != '\0') ? std::string(xdg_runtime) : std::string("/tmp");
-    const std::string well_known = dir + "/helixscreen-control.sock";
+    const std::string dir = control_socket_dir();
+    const std::string well_known = well_known_socket_path();
 
     // Clear sockets left by instances that died without teardown before deciding
     // anything, so a run of crashed sessions cannot litter the directory forever.
@@ -136,7 +142,8 @@ bool RemoteControlServer::start(const RemoteConfig& config) {
 
     switch (config.transport) {
     case RemoteConfig::Transport::Http:
-        transport_ = std::make_unique<HttpTransport>(config.http_bind, config.http_port);
+        transport_ =
+            std::make_unique<HttpTransport>(config.http_bind, config.http_port, config.http_token);
         break;
     case RemoteConfig::Transport::UnixSocket:
     default:
@@ -249,13 +256,14 @@ nlohmann::json RemoteControlServer::execute_on_ui_thread(std::function<nlohmann:
     auto promise = std::make_shared<std::promise<nlohmann::json>>();
     auto future = promise->get_future();
 
-    helix::ui::queue_update([promise, fn = std::move(fn)]() {
-        try {
-            promise->set_value(fn());
-        } catch (const std::exception& e) {
-            promise->set_exception(std::current_exception());
-        }
-    });
+    helix::ui::queue_update("RemoteControlServer::execute_on_ui_thread",
+                            [promise, fn = std::move(fn)]() {
+                                try {
+                                    promise->set_value(fn());
+                                } catch (const std::exception& e) {
+                                    promise->set_exception(std::current_exception());
+                                }
+                            });
 
     // Wait with timeout, polling running_ so a concurrent stop() unblocks this
     // promptly. This runs on the transport accept thread; at app teardown the
@@ -337,6 +345,9 @@ void RemoteControlServer::register_builtin_handlers() {
     handlers_["pointer_release"] = [this](const nlohmann::json& p) {
         return handle_pointer_release(p);
     };
+    handlers_["pointer_tap"] = [this](const nlohmann::json& p) { return handle_pointer_tap(p); };
+    handlers_["overflow"] = [this](const nlohmann::json& p) { return handle_overflow(p); };
+    handlers_["home"] = [this](const nlohmann::json& p) { return handle_home(p); };
     handlers_["geom"] = [this](const nlohmann::json& p) { return handle_geom(p); };
     handlers_["text"] = [this](const nlohmann::json& p) { return handle_text(p); };
     handlers_["state"] = [this](const nlohmann::json& p) { return handle_state(p); };
@@ -501,10 +512,10 @@ nlohmann::json RemoteControlServer::handle_reset(const nlohmann::json& /*params*
                          actual_depth, MAX_DEPTH, MAX_DEPTH);
         }
         for (int i = 0; i < overlays_popped; ++i) {
-            nav.go_back();
+            helix::nav::go_back();
         }
 
-        nav.set_active(helix::PanelId::Home);
+        helix::nav::set_active(helix::PanelId::Home);
 
         return {{"panel", panel_id_to_name(nav.get_active())},
                 {"overlays_popped", overlays_popped},
@@ -514,6 +525,19 @@ nlohmann::json RemoteControlServer::handle_reset(const nlohmann::json& /*params*
 }
 
 nlohmann::json RemoteControlServer::handle_log(const nlohmann::json& params) {
+    // Same upload gate as the bundle and crash-report pipes: the log ring is
+    // the densest diagnostics surface the app holds, so a build that may not
+    // ship diagnostics does not serve it over RPC either
+    // (prestonbrown/helixscreen#1410). Scripts read the log file instead.
+    // Throw, like every other refusal here: dispatch() wraps a handler's
+    // RETURN as a success result, so a returned error object would read as a
+    // served log request.
+    if (!helix::diag::uploads_enabled()) {
+        spdlog::info("[RemoteControl] log RPC refused: diagnostic uploads are "
+                     "disabled in this build");
+        throw std::runtime_error("Diagnostic log RPC is disabled in this build");
+    }
+
     // Serve the in-memory ring buffer the debug bundle already fills, so a
     // scripted run can read the app's own log without tee-ing it to a file.
     int lines = 50;
@@ -545,7 +569,7 @@ nlohmann::json RemoteControlServer::handle_log(const nlohmann::json& params) {
 
 nlohmann::json RemoteControlServer::handle_go_back(const nlohmann::json& /*params*/) {
     return execute_on_ui_thread([]() -> nlohmann::json {
-        bool result = NavigationManager::instance().go_back();
+        bool result = helix::nav::go_back();
         return {{"success", result}};
     });
 }
@@ -677,7 +701,7 @@ nlohmann::json RemoteControlServer::handle_screenshot(const nlohmann::json& para
     int stable_frames = 0;
     if (stable) {
         constexpr int REQUIRED = 3;
-        constexpr int MAX_SAMPLES = 180; // ~3s at 16ms
+        constexpr int MAX_SAMPLES = 180; // 16 ms sleep plus up to 33 ms drain wait each: ~3-9 s
         uint64_t last = 0;
         int run = 0;
         for (int i = 0; i < MAX_SAMPLES; i++) {
@@ -747,8 +771,9 @@ nlohmann::json RemoteControlServer::handle_status(const nlohmann::json& /*params
         std::string current_panel = panel_id_to_name(nav.get_active());
 
         auto& ps = get_printer_state();
-        int conn_state = lv_subject_get_int(ps.get_printer_connection_state_subject());
-        int klippy_state = lv_subject_get_int(ps.get_klippy_state_subject());
+        int conn_state =
+            lv_subject_get_int(ps.network_state().get_printer_connection_state_subject());
+        int klippy_state = lv_subject_get_int(ps.network_state().get_klippy_state_subject());
 
         return {{"panel", current_panel},
                 {"overlays", nav.overlay_stack_names()},
@@ -939,7 +964,7 @@ nlohmann::json RemoteControlServer::handle_wait_for(const nlohmann::json& params
 
     // Prevent WaitState from being destroyed while observer is alive by capturing
     // shared_ptr in the observer's setup closure (ensures ref count stays > 0)
-    helix::ui::queue_update([name, state, setup_promise]() {
+    helix::ui::queue_update("RemoteControlServer::handle_wait_for", [name, state, setup_promise]() {
         lv_subject_t* subject = find_subject_by_name(name);
         if (!subject) {
             setup_promise->set_value(false);
@@ -1028,7 +1053,7 @@ nlohmann::json RemoteControlServer::handle_wait_for(const nlohmann::json& params
         auto cleanup_promise = std::make_shared<std::promise<void>>();
         auto cleanup_future = cleanup_promise->get_future();
 
-        helix::ui::queue_update([state, cleanup_promise]() {
+        helix::ui::queue_update("RemoteControlServer::handle_wait_for", [state, cleanup_promise]() {
             if (state->observer) {
                 lv_observer_remove(state->observer);
                 state->observer = nullptr;
@@ -1060,76 +1085,13 @@ static bool is_glob(const std::string& s) {
     return s.find('*') != std::string::npos || s.find('?') != std::string::npos;
 }
 
-// Shell-style glob: '*' matches any run (including empty), '?' exactly one char.
-// Iterative with backtracking, so a pathological pattern can't blow the stack.
-static bool glob_match(const char* pat, const char* str) {
-    const char* star = nullptr;
-    const char* retry = str;
-    while (*str) {
-        if (*pat == '?' || *pat == *str) {
-            pat++;
-            str++;
-        } else if (*pat == '*') {
-            star = pat++; // remember where the star was
-            retry = str;  // and how much of str it had consumed
-        } else if (star) {
-            pat = star + 1; // backtrack: let the star eat one more char
-            str = ++retry;
-        } else {
-            return false;
-        }
-    }
-    while (*pat == '*') {
-        pat++;
-    }
-    return *pat == '\0';
-}
-
-// Every visible widget in a subtree whose name matches the pattern.
-//
-// A widget the author never named is not nameless: lv_obj_get_name_resolved()
-// crafts "<class>_<index>" for it ("lv_label_0"), and lv_obj_find_by_name()
-// already matches that form, so it was addressable all along and only this
-// walker hid it. Reporting it costs nothing — the crafted name is built on
-// demand, never stored, which matters on the ESP32 target where naming every
-// widget for real would be paid in heap.
-//
-// Explicit names are still the better answer for anything a test drives: a
-// crafted index counts siblings, so inserting a widget renumbers the ones
-// after it.
-static void collect_glob_matches(lv_obj_t* parent, const std::string& pattern,
-                                 std::vector<lv_obj_t*>& out) {
-    if (!parent) {
-        return;
-    }
-    uint32_t count = lv_obj_get_child_count(parent);
-    for (uint32_t i = 0; i < count; ++i) {
-        lv_obj_t* child = lv_obj_get_child(parent, i);
-        if (!child || lv_obj_has_flag(child, LV_OBJ_FLAG_HIDDEN)) {
-            continue; // hidden subtree — not on screen, same rule as describe_walk
-        }
-        char resolved[128];
-        lv_obj_get_name_resolved(child, resolved, sizeof(resolved));
-        const char* raw = lv_obj_get_name(child);
-        const char* name = resolved[0] != '\0' ? resolved : raw;
-        if (name && name[0] != '\0' && glob_match(pattern.c_str(), name)) {
-            out.push_back(child);
-        }
-        collect_glob_matches(child, pattern, out);
-    }
-}
-
 // Match a name pattern within @p scope, or across the active screen and the top
-// layer (modals) when no scope is given.
+// layer (modals) when no scope is given. Hidden subtrees are skipped, same rule
+// as describe_walk.
 static std::vector<lv_obj_t*> glob_widgets(const std::string& pattern, lv_obj_t* scope = nullptr) {
-    std::vector<lv_obj_t*> out;
-    if (scope) {
-        collect_glob_matches(scope, pattern, out);
-        return out;
-    }
-    collect_glob_matches(lv_screen_active(), pattern, out);
-    collect_glob_matches(lv_layer_top(), pattern, out);
-    return out;
+    return search_widgets(scope, [&pattern](const char* name) {
+        return name[0] != '\0' && helix::system::config_glob_match(pattern, name);
+    });
 }
 
 // Drop matches that sit inside another match. `ls row_*` on a settings page hits
@@ -1200,7 +1162,7 @@ static std::string topmost_layer() {
     return {};
 }
 
-// "settings > display_sound_overlay > theme_preview_overlay" — the breadcrumb
+// "settings > appearance_overlay > theme_preview_overlay" — the breadcrumb
 // of what is on screen right now. Echoed in mutating responses so a caller can
 // tell at a glance that it is driving the screen it thinks it is (a first-run
 // wizard swallows every navigate/click otherwise, and every response still
@@ -1212,35 +1174,6 @@ static std::string active_screen_label() {
         label += " > " + overlay;
     }
     return label;
-}
-
-// Collect every visible widget with this exact resolved name. Mirrors
-// collect_glob_matches: hidden subtrees are skipped, because a widget the user
-// cannot see is never what `click <name>` meant. `state` asks
-// include_hidden=true for its retry: asking "is it hidden?" requires finding
-// the hidden widget first.
-static void collect_by_name(lv_obj_t* parent, const std::string& name, std::vector<lv_obj_t*>& out,
-                            bool include_hidden = false) {
-    if (!parent) {
-        return;
-    }
-    uint32_t count = lv_obj_get_child_count(parent);
-    for (uint32_t i = 0; i < count; ++i) {
-        lv_obj_t* child = lv_obj_get_child(parent, i);
-        if (!child || (!include_hidden && lv_obj_has_flag(child, LV_OBJ_FLAG_HIDDEN))) {
-            continue;
-        }
-        // Unnamed widgets match on LVGL's crafted "<class>_<index>" — see the
-        // note on collect_glob_matches.
-        char resolved[128];
-        lv_obj_get_name_resolved(child, resolved, sizeof(resolved));
-        const char* raw = lv_obj_get_name(child);
-        const char* candidate = resolved[0] != '\0' ? resolved : raw;
-        if (candidate && name == candidate) {
-            out.push_back(child);
-        }
-        collect_by_name(child, name, out, include_hidden);
-    }
 }
 
 // The subtree a search is confined to — the caller's working directory, sent as
@@ -1258,22 +1191,18 @@ static lv_obj_t* scope_root(const nlohmann::json& params) {
     return scope.empty() ? nullptr : resolve_path(scope);
 }
 
-// Every visible widget matching @p name, confined to @p scope when given.
-static std::vector<lv_obj_t*> matches_for_name(const std::string& name, lv_obj_t* scope) {
-    std::vector<lv_obj_t*> matches;
-    if (scope) {
-        collect_by_name(scope, name, matches);
-        return matches;
-    }
-    // lv_obj_find_by_name() returns the first depth-first hit, which on a
-    // screen with stacked overlays is the one in the *bottom* overlay — a
-    // widget the user cannot see. Clicking it looks like a successful no-op.
-    // Collect every match instead so the caller can prefer the visible one.
-    if (lv_obj_t* screen = lv_screen_active()) {
-        collect_by_name(screen, name, matches);
-    }
-    collect_by_name(lv_layer_top(), name, matches);
-    return matches;
+// Every widget with this exact resolved name, confined to @p scope when given.
+// Hidden widgets are skipped unless @p include_hidden: `state` asks for them
+// because "is it hidden?" requires finding the hidden widget first.
+//
+// lv_obj_find_by_name() returns the first depth-first hit, which on a screen
+// with stacked overlays is the one in the *bottom* overlay — a widget the user
+// cannot see. Clicking it looks like a successful no-op, so every match is
+// collected and the caller prefers the visible one.
+static std::vector<lv_obj_t*> matches_for_name(const std::string& name, lv_obj_t* scope,
+                                               bool include_hidden = false) {
+    return search_widgets(
+        scope, [&name](const char* candidate) { return name == candidate; }, include_hidden);
 }
 
 static lv_obj_t* resolve_widget(const nlohmann::json& params) {
@@ -1379,32 +1308,37 @@ nlohmann::json RemoteControlServer::handle_wait_idle(const nlohmann::json& param
     struct Counters {
         size_t queue = 0;
         size_t http = 0;
+        size_t thumbnail = 0;
         bool idle() const {
-            return queue == 0 && http == 0;
+            return queue == 0 && http == 0 && thumbnail == 0;
         }
     };
 
     auto sample = [this]() -> Counters {
         auto j = execute_on_ui_thread([]() -> nlohmann::json {
-            // Read http before queue (list-init evaluates left-to-right): a
-            // worker decrements its inflight count only after the job body
-            // returns, and any UI work that job posted via queue_update() is
-            // already sitting in pending_ by then. Reading http first means
-            // "http already dropped to 0" implies "its queued follow-up work,
-            // if any, is already visible in queue" — reading queue first
-            // could catch it empty a moment before the worker's own
-            // queue_update() call lands, then see http already decremented
-            // too, missing both signals in one sample.
-            return {{"http", helix::http::HttpExecutor::fast().inflight() +
+            // Read thumbnail and http before queue (list-init evaluates
+            // left-to-right): a worker decrements its own counter only after
+            // the job body returns, and any UI work that job posted via
+            // queue_update() is already sitting in pending_ by then. Reading
+            // the producers first means "producer already dropped to 0"
+            // implies "its queued follow-up work, if any, is already visible
+            // in queue"; reading queue first could catch it empty a moment
+            // before the worker's own queue_update() call lands, then see the
+            // producer already decremented too, missing both signals in one
+            // sample. ThumbnailProcessor::deliver_result() follows the same
+            // queue_update()-before-return shape as HttpExecutor's workers.
+            return {{"thumbnail", helix::ThumbnailProcessor::instance().pending_tasks()},
+                    {"http", helix::http::HttpExecutor::fast().inflight() +
                                  helix::http::HttpExecutor::slow().inflight()},
                     {"queue", helix::ui::UpdateQueue::instance().pending_count()}};
         });
-        return Counters{j["queue"].get<size_t>(), j["http"].get<size_t>()};
+        return Counters{j["queue"].get<size_t>(), j["http"].get<size_t>(),
+                        j["thumbnail"].get<size_t>()};
     };
 
     const auto start = std::chrono::steady_clock::now();
     const auto deadline = start + std::chrono::duration<double>(timeout_s);
-    Counters last{1, 1}; // force at least two samples before declaring idle
+    Counters last{1, 1, 1}; // force at least two samples before declaring idle
 
     while (true) {
         Counters now = sample();
@@ -1419,9 +1353,9 @@ nlohmann::json RemoteControlServer::handle_wait_idle(const nlohmann::json& param
         if (std::chrono::steady_clock::now() >= deadline) {
             // fmt::format, not std::to_string(double) — the latter renders
             // "0.000000s", unreadable in the log someone reads at 2am.
-            throw std::runtime_error(
-                fmt::format("wait_idle timed out after {:.1f}s — update_queue={} http={}",
-                            timeout_s, now.queue, now.http));
+            throw std::runtime_error(fmt::format(
+                "wait_idle timed out after {:.1f}s, update_queue={} http={} thumbnail={}",
+                timeout_s, now.queue, now.http, now.thumbnail));
         }
         last = now;
         std::this_thread::sleep_for(std::chrono::milliseconds(16));
@@ -1474,10 +1408,23 @@ nlohmann::json RemoteControlServer::handle_freeze(const nlohmann::json& /*params
             }
             t = next;
         }
+        // The mock printer simulates on its own std::thread, not an lv_timer, so
+        // pausing timers leaves it pushing a full status snapshot every second.
+        // PrinterState applies any field that differs from the subject, which
+        // overwrites values a frozen caller has set by hand.
+        bool sim_parked = false;
+#ifdef HELIX_ENABLE_MOCKS
+        if (auto* mock = get_moonraker_client_mock()) {
+            mock->set_simulation_paused(true);
+            sim_parked = true;
+        }
+#endif
+
         frozen_ = true;
 
-        spdlog::debug("[RemoteControl] freeze: paused {} timers (skipped queue+refresh)",
-                      paused_timers_.size());
+        spdlog::debug("[RemoteControl] freeze: paused {} timers (skipped queue+refresh), "
+                      "mock simulation parked={}",
+                      paused_timers_.size(), sim_parked);
         return {{"frozen", true}, {"timers_paused", static_cast<int>(paused_timers_.size())}};
     });
 }
@@ -1510,6 +1457,11 @@ nlohmann::json RemoteControlServer::handle_unfreeze(const nlohmann::json& /*para
         }
         paused_timers_.clear();
         frozen_ = false;
+#ifdef HELIX_ENABLE_MOCKS
+        if (auto* mock = get_moonraker_client_mock()) {
+            mock->set_simulation_paused(false);
+        }
+#endif
         // Restore the exact pre-freeze value (not a hardcoded "on") via the
         // subject directly — see handle_freeze() for why set_animations_enabled()
         // (which persists to settings.json) must not be used here.
@@ -1537,8 +1489,23 @@ nlohmann::json RemoteControlServer::handle_click(const nlohmann::json& params) {
         std::vector<lv_obj_t*> ambiguous;
         lv_obj_t* widget = resolve_actionable(target, &descended, &ambiguous);
 
+        const bool force = params.value("force", false);
+        if (const char* blocked = helix::click_blocker(widget)) {
+            if (!force) {
+                throw std::invalid_argument(
+                    "Widget '" + target_label(params) + "' is " + blocked +
+                    " - a real tap would not reach it. Pass --force to send the event anyway.");
+            }
+        }
+
         nlohmann::json result;
         result["clicked"] = target_label(params);
+        if (const char* blocked = helix::click_blocker(widget)) {
+            // Forced. Say so in the response: a transcript that reads like an
+            // ordinary click is exactly how a synthetic success gets mistaken
+            // for a reachable control.
+            result["forced"] = blocked;
+        }
         // Always report the widget actually hit, and whether anything is
         // listening. A click on a widget with no handlers is a no-op, and
         // without this the response is indistinguishable from a real one.
@@ -1556,11 +1523,16 @@ nlohmann::json RemoteControlServer::handle_click(const nlohmann::json& params) {
             result["candidates"] = cands; // clicked the container; @path one of these
         }
 
-        // A synthetic CLICKED does not flip a switch/checkbox (LVGL toggles those
-        // on the indev press/release). Toggle the state explicitly and notify, so
-        // `click <switch>` behaves like a real tap.
-        if (lv_obj_check_type(widget, &lv_switch_class) ||
-            lv_obj_check_type(widget, &lv_checkbox_class)) {
+        // A synthetic CLICKED does not flip a switch/checkbox/checkable object
+        // (LVGL toggles those on the indev press/release). Toggle the state
+        // explicitly and notify, so `click <switch>` and
+        // `click <option_tile_*>` behave like a real tap. An object that is
+        // only CHECKABLE (a tile, a checkable button) still gets CLICKED after
+        // the toggle: a real tap delivers both, and checkable buttons act on
+        // CLICKED (extruder selector, gcode test Travels).
+        bool toggle_class = lv_obj_check_type(widget, &lv_switch_class) ||
+                            lv_obj_check_type(widget, &lv_checkbox_class);
+        if (toggle_class || lv_obj_has_flag(widget, LV_OBJ_FLAG_CHECKABLE)) {
             bool now = !lv_obj_has_state(widget, LV_STATE_CHECKED);
             if (now) {
                 lv_obj_add_state(widget, LV_STATE_CHECKED);
@@ -1568,6 +1540,9 @@ nlohmann::json RemoteControlServer::handle_click(const nlohmann::json& params) {
                 lv_obj_remove_state(widget, LV_STATE_CHECKED);
             }
             lv_obj_send_event(widget, LV_EVENT_VALUE_CHANGED, nullptr);
+            if (!toggle_class) {
+                lv_obj_send_event(widget, LV_EVENT_CLICKED, nullptr);
+            }
             result["toggled_to"] = now ? 1 : 0;
             return result;
         }
@@ -1597,6 +1572,16 @@ nlohmann::json RemoteControlServer::handle_set_widget_value(const nlohmann::json
         lv_obj_t* descended = nullptr;
         lv_obj_t* widget = resolve_actionable(target, &descended, nullptr);
         std::string widget_name = target_label(params);
+
+        // Narrower than click_blocker(): this path also pokes labels, which are
+        // never clickable, so only the disabled state is checked. It still ends
+        // in LV_EVENT_VALUE_CHANGED "as if the user changed it", and on a
+        // disabled control the user could not have.
+        if (!params.value("force", false) && lv_obj_has_state(widget, LV_STATE_DISABLED)) {
+            throw std::invalid_argument("Widget '" + widget_name +
+                                        "' is disabled - the user could not change it. Pass "
+                                        "--force to set it anyway.");
+        }
 
         // Try to set value based on widget type
         if (value_json.is_number()) {
@@ -1725,6 +1710,22 @@ static nlohmann::json describe_one(lv_obj_t* o, const char* name, const std::str
     return entry;
 }
 
+// The name to report for a widget a locator resolved to. lv_obj_get_name_
+// resolved() builds a "<class>_#" name for an unnamed CHILD, indexing it
+// against its siblings; for a parentless object (a screen or layer) it
+// instead copies obj->spec_attr->name, which is NULL when the object is
+// unnamed. Only that one combination is answered here with "" (the path is
+// its address); everything else goes to LVGL, named or not.
+static std::string resolved_name(const lv_obj_t* obj) {
+    const char* raw = lv_obj_get_name(obj);
+    if (!lv_obj_get_parent(obj) && (!raw || raw[0] == '\0')) {
+        return {};
+    }
+    char resolved[128];
+    lv_obj_get_name_resolved(obj, resolved, sizeof(resolved));
+    return resolved[0] != '\0' ? resolved : (raw ? raw : "");
+}
+
 // Recursively collect named, non-hidden widgets under `parent` into `out`.
 // Only named widgets are emitted (unnamed ones can't be addressed), but the
 // walk still descends through them to reach named descendants.
@@ -1787,11 +1788,7 @@ nlohmann::json RemoteControlServer::handle_describe_screen(const nlohmann::json&
                 scopes.push_back(root_path);
                 // Include the root itself, then its subtree, so the listing is
                 // self-contained (you can see what you scoped to).
-                char resolved[128];
-                lv_obj_get_name_resolved(root, resolved, sizeof(resolved));
-                const char* raw = lv_obj_get_name(root);
-                widgets.push_back(describe_one(
-                    root, resolved[0] != '\0' ? resolved : (raw ? raw : ""), root_path));
+                widgets.push_back(describe_one(root, resolved_name(root).c_str(), root_path));
                 describe_walk(root, root_path, widgets);
             }
             if (scopes.size() == 1) {
@@ -1827,6 +1824,150 @@ nlohmann::json RemoteControlServer::handle_describe_screen(const nlohmann::json&
     });
 }
 
+nlohmann::json RemoteControlServer::handle_overflow(const nlohmann::json& params) {
+    const bool scoped = params.contains("name") || params.contains("path");
+    return execute_on_ui_thread([params, scoped]() -> nlohmann::json {
+        std::vector<lv_obj_t*> roots;
+        if (scoped) {
+            lv_obj_t* one = resolve_widget(params);
+            if (!one) {
+                throw std::invalid_argument("Widget not found: " + target_label(params));
+            }
+            roots.push_back(one);
+        } else {
+            roots = {lv_screen_active(), lv_layer_top()};
+        }
+        nlohmann::json out = nlohmann::json::array();
+        for (lv_obj_t* root : roots) {
+            for (const auto& ov : helix::find_overflow(root)) {
+                out.push_back({{"name", resolved_name(ov.obj)},
+                               {"path", path_of(ov.obj)},
+                               {"layer", layer_of(ov.obj)},
+                               {"scrollable", lv_obj_has_flag(ov.obj, LV_OBJ_FLAG_SCROLLABLE)},
+                               {"top", ov.top},
+                               {"bottom", ov.bottom},
+                               {"left", ov.left},
+                               {"right", ov.right}});
+            }
+        }
+        return {{"overflowing", out}, {"count", out.size()}, {"topmost_layer", topmost_layer()}};
+    });
+}
+
+// Home-grid layout editing without Edit Mode's gestures. Spans and positions
+// cross the wire in cells, 1.5 included, and are stored in tracks.
+nlohmann::json RemoteControlServer::handle_home(const nlohmann::json& params) {
+    return execute_on_ui_thread([params]() -> nlohmann::json {
+        constexpr int kTracks = helix::GridLayout::TRACKS_PER_CELL;
+        auto& config = helix::PanelWidgetManager::instance().get_widget_config("home");
+        auto& home = get_global_home_panel();
+        const std::string action = params.value("action", "list");
+
+        const auto cells = [](int tracks) {
+            return tracks % kTracks == 0 ? nlohmann::json(tracks / kTracks)
+                                         : nlohmann::json(static_cast<double>(tracks) / kTracks);
+        };
+        if (action == "list") {
+            nlohmann::json pages = nlohmann::json::array();
+            for (size_t p = 0; p < config.page_count(); ++p) {
+                const auto grid = home.page_grid(static_cast<int>(p));
+                nlohmann::json widgets = nlohmann::json::array();
+                for (const auto& e : config.page_entries(p)) {
+                    if (!e.is_placed()) {
+                        continue;
+                    }
+                    widgets.push_back({{"id", e.id},
+                                       {"col", cells(e.col)},
+                                       {"row", cells(e.row)},
+                                       {"w", cells(e.colspan)},
+                                       {"h", cells(e.rowspan)}});
+                }
+                pages.push_back({{"page", p},
+                                 {"cols", cells(grid.cols)},
+                                 {"rows", cells(grid.rows)},
+                                 {"widgets", widgets}});
+            }
+            return {{"pages", pages}};
+        }
+
+        if (get_runtime_config()->crash_loop_safe_mode) {
+            throw std::invalid_argument("Layout changes are off in crash-loop safe mode");
+        }
+        const std::string id = params.value("id", "");
+        if (id.empty()) {
+            throw std::invalid_argument("Missing required parameter: id");
+        }
+        // The entry's page and index, or the page given and -1 for an entry
+        // that is not placed anywhere yet.
+        int page = -1, index = -1;
+        for (size_t p = 0; p < config.page_count() && index < 0; ++p) {
+            const auto& entries = config.page_entries(p);
+            for (size_t i = 0; i < entries.size(); ++i) {
+                if (entries[i].id == id && entries[i].is_placed()) {
+                    page = static_cast<int>(p);
+                    index = static_cast<int>(i);
+                    break;
+                }
+            }
+        }
+
+        if (action == "remove") {
+            if (index < 0) {
+                throw std::invalid_argument("Not on the home grid: " + id);
+            }
+            config.remove_from_page(static_cast<size_t>(page), static_cast<size_t>(index));
+        } else if (action == "place") {
+            const auto* def = helix::find_widget_def(id);
+            if (!def) {
+                throw std::invalid_argument("No such widget: " + id);
+            }
+            const auto tracks = [&](const char* key, int fallback) {
+                if (!params.contains(key)) {
+                    return fallback;
+                }
+                const double t = params[key].get<double>() * kTracks;
+                if (t != static_cast<int>(t)) {
+                    throw std::invalid_argument(std::string(key) + " must be a whole or half cell");
+                }
+                return static_cast<int>(t);
+            };
+            const auto* cur =
+                index >= 0
+                    ? &config.page_entries(static_cast<size_t>(page))[static_cast<size_t>(index)]
+                    : nullptr;
+            page = params.contains("page") ? params["page"].get<int>() : std::max(page, 0);
+            if (page < 0 || page >= static_cast<int>(config.page_count())) {
+                throw std::invalid_argument("No page " + std::to_string(page));
+            }
+            const int col = tracks("col", cur ? cur->col : -1);
+            const int row = tracks("row", cur ? cur->row : -1);
+            const int colspan = tracks("w", cur ? cur->colspan : def->colspan);
+            const int rowspan = tracks("h", cur ? cur->rowspan : def->rowspan);
+            if (col < 0 || row < 0) {
+                throw std::invalid_argument(id + " is not placed: give col and row");
+            }
+            helix::GridLayout occupancy(helix::widget_size::current_breakpoint(),
+                                        home.page_grid(page));
+            for (const auto& e : config.page_entries(static_cast<size_t>(page))) {
+                if (e.is_placed() && e.id != id) {
+                    occupancy.place({e.id, e.col, e.row, e.colspan, e.rowspan});
+                }
+            }
+            const std::string why =
+                helix::placement_refusal(*def, occupancy, col, row, colspan, rowspan);
+            if (!why.empty()) {
+                throw std::invalid_argument(why);
+            }
+            config.place_entry(id, static_cast<size_t>(page), col, row, colspan, rowspan);
+        } else {
+            throw std::invalid_argument("Unknown home action: " + action);
+        }
+        config.save();
+        helix::PanelWidgetManager::instance().notify_config_changed("home");
+        return {{"action", action}, {"id", id}, {"page", page}};
+    });
+}
+
 // `cd <target>` needs the absolute locator of wherever it landed, so the client
 // can hold it as a working directory. Read-only — unlike the old `cd`, which
 // reached its destination by clicking.
@@ -1840,10 +1981,8 @@ nlohmann::json RemoteControlServer::handle_resolve(const nlohmann::json& params)
         if (!obj) {
             throw std::invalid_argument("Widget not found: " + target_label(params));
         }
-        char resolved[128];
-        lv_obj_get_name_resolved(obj, resolved, sizeof(resolved));
         return {{"path", path_of(obj)},
-                {"name", resolved},
+                {"name", resolved_name(obj)},
                 {"children", lv_obj_get_child_count(obj)},
                 {"active_screen", active_screen_label()}};
     });
@@ -2002,15 +2141,8 @@ nlohmann::json RemoteControlServer::handle_state(const nlohmann::json& params) {
             // is a discovery aid like `ls`, which also filters).
             const std::string name = params["name"].get<std::string>();
             if (!is_glob(name)) {
-                std::vector<lv_obj_t*> matches;
-                if (lv_obj_t* scope = scope_root(params)) {
-                    collect_by_name(scope, name, matches, /*include_hidden=*/true);
-                } else {
-                    if (lv_obj_t* screen = lv_screen_active()) {
-                        collect_by_name(screen, name, matches, /*include_hidden=*/true);
-                    }
-                    collect_by_name(lv_layer_top(), name, matches, /*include_hidden=*/true);
-                }
+                std::vector<lv_obj_t*> matches =
+                    matches_for_name(name, scope_root(params), /*include_hidden=*/true);
                 if (!matches.empty()) {
                     target = topmost_visible(matches);
                 }
@@ -2133,6 +2265,16 @@ nlohmann::json RemoteControlServer::handle_pointer_release(const nlohmann::json&
     return apply_pointer_state(x, y, false, "release");
 }
 
+nlohmann::json RemoteControlServer::handle_pointer_tap(const nlohmann::json& params) {
+    if (!params.contains("x") || !params.contains("y")) {
+        throw std::invalid_argument("Missing required parameters: x and y");
+    }
+    const int32_t x = params["x"].get<int32_t>();
+    const int32_t y = params["y"].get<int32_t>();
+    apply_pointer_state(x, y, true, "tap");
+    return apply_pointer_state(x, y, false, "tap");
+}
+
 nlohmann::json RemoteControlServer::handle_pointer_long_press(const nlohmann::json& params) {
     if (!params.contains("x") || !params.contains("y")) {
         throw std::invalid_argument("Missing required parameters: x and y");
@@ -2154,10 +2296,10 @@ nlohmann::json RemoteControlServer::handle_pointer_long_press(const nlohmann::js
 
     // Hold without touching the pointer. The press is already latched in
     // RemotePointer and LVGL keeps sampling it on its own timer, so the gesture
-    // accumulates here exactly as it does under a resting finger. Doing this
-    // server-side is the whole point: a shell doing press / sleep / release spends
-    // the hold with no client connected, and any command that lands in between
-    // resamples the device and can restart the press.
+    // accumulates here exactly as it does under a resting finger, the same as
+    // it does between a shell's press and release. This request holds for a
+    // time derived from the configured long-press time and always ends in its
+    // own release.
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(hold_ms);
     while (std::chrono::steady_clock::now() < deadline) {
         if (!running_.load()) {

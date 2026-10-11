@@ -16,7 +16,11 @@ namespace helix::timezone_env {
 //
 // Without the TZDIR fallback, glibc silently treats unresolved zone names as
 // UTC, producing times offset by the user's real timezone (#???).
-void apply(const char* iana_id);
+//
+// posix_tz is the zone's POSIX rule (e.g. "EST5EDT,M3.2.0,M11.1.0"). The ESP32
+// firmware applies it instead of the IANA name, since newlib has no zoneinfo
+// reader; elsewhere it is ignored.
+void apply(const char* iana_id, const char* posix_tz = nullptr);
 
 // Test hook: exposes the TZDIR configuration step with injectable probe paths.
 // system_probe: filesystem path that, if missing, triggers the bundled fallback

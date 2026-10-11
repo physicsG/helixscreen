@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component>
+  <!--
+    A glyph centred in a tinted disc, for a home tile whose icon reads as a
+    button. The disc and the glyph follow one rung subject together, so the
+    badge scales with its tile instead of spilling out of a fixed disc;
+    TileSizing measures the disc's edge (Content::icon_box). Empty
+    rung_subject installs no binding and keeps #icon_badge_size.
+
+    icon_name is a prop because the owning widget finds the glyph by name to
+    set its source and color.
+  -->
+  <api>
+    <prop name="rung_subject" type="string" default=""/>
+    <prop name="icon" type="string" default="play"/>
+    <prop name="icon_name" type="string" default="tile_badge_icon"/>
+  </api>
+  <view name="tile_badge"
+        extends="lv_obj" width="#icon_badge_size" height="#icon_badge_size" style_radius="9999" style_bg_opa="40"
+        style_bg_color="#secondary" style_border_width="0" style_pad_all="0" clickable="false" scrollable="false"
+        event_bubble="true">
+    <bind_tile_rung ladder="disc" subject="$rung_subject"/>
+    <icon name="$icon_name"
+          src="$icon" size="md" variant="secondary" clickable="false" event_bubble="true" align="center">
+      <bind_tile_rung ladder="icon" subject="$rung_subject"/>
+    </icon>
+  </view>
+</component>

@@ -41,7 +41,7 @@ struct ThumbnailIdentityProbe {
 void probe_cb(lv_observer_t* observer, lv_subject_t* subject) {
     auto* probe = static_cast<ThumbnailIdentityProbe*>(lv_observer_get_user_data(observer));
     probe->seen.emplace_back(lv_subject_get_string(subject),
-                             probe->state->get_print_thumbnail_file());
+                             probe->state->print_state().get_print_thumbnail_file());
 }
 
 } // namespace
@@ -72,13 +72,13 @@ TEST_CASE_METHOD(ThumbnailIdentityFixture,
     // Establish a DIFFERENT prior identity. Without this, "still holds the old
     // value" and "already holds the new value" are indistinguishable and the test
     // would pass with the writes in either order.
-    state().set_print_thumbnail("model_a.gcode", "A:/cache/a.bin");
-    REQUIRE(state().get_print_thumbnail_file() == "model_a.gcode");
+    state().print_state().set_print_thumbnail("model_a.gcode", "A:/cache/a.bin");
+    REQUIRE(state().print_state().get_print_thumbnail_file() == "model_a.gcode");
 
     ThumbnailIdentityProbe probe;
     probe.state = &state();
-    lv_observer_t* obs =
-        lv_subject_add_observer(state().get_print_thumbnail_path_subject(), probe_cb, &probe);
+    lv_observer_t* obs = lv_subject_add_observer(
+        state().print_state().get_print_thumbnail_path_subject(), probe_cb, &probe);
 
     // LVGL fires an observer once on registration with the current value.
     REQUIRE(probe.seen.size() == 1);
@@ -86,7 +86,7 @@ TEST_CASE_METHOD(ThumbnailIdentityFixture,
     CHECK(probe.seen[0].second == "model_a.gcode");
 
     SECTION("a new path publishes its file first") {
-        state().set_print_thumbnail("model_b.gcode", "A:/cache/b.bin");
+        state().print_state().set_print_thumbnail("model_b.gcode", "A:/cache/b.bin");
 
         REQUIRE(probe.seen.size() == 2);
         CHECK(probe.seen[1].first == "A:/cache/b.bin");
@@ -99,7 +99,7 @@ TEST_CASE_METHOD(ThumbnailIdentityFixture,
     SECTION("clearing the path also re-identifies it") {
         // The clear on a new print start is a write like any other: it means
         // "nothing for model_b yet", not "nothing for model_a".
-        state().set_print_thumbnail("model_b.gcode", "");
+        state().print_state().set_print_thumbnail("model_b.gcode", "");
 
         REQUIRE(probe.seen.size() == 2);
         CHECK(probe.seen[1].first.empty());
@@ -109,10 +109,10 @@ TEST_CASE_METHOD(ThumbnailIdentityFixture,
     SECTION("an identical path does not re-notify, but the file still updates") {
         // De-duplication is inherited from the old setter: the subject is only
         // copied when the string actually differs. The identity is unconditional.
-        state().set_print_thumbnail("model_b.gcode", "A:/cache/a.bin");
+        state().print_state().set_print_thumbnail("model_b.gcode", "A:/cache/a.bin");
 
         CHECK(probe.seen.size() == 1); // no second fire
-        CHECK(state().get_print_thumbnail_file() == "model_b.gcode");
+        CHECK(state().print_state().get_print_thumbnail_file() == "model_b.gcode");
     }
 
     lv_observer_remove(obs);
@@ -121,15 +121,17 @@ TEST_CASE_METHOD(ThumbnailIdentityFixture,
 TEST_CASE_METHOD(ThumbnailIdentityFixture,
                  "PrinterState: thumbnail identity starts empty and survives repeat writes",
                  "[printer_state][thumbnail]") {
-    CHECK(state().get_print_thumbnail_file().empty());
+    CHECK(state().print_state().get_print_thumbnail_file().empty());
 
-    state().set_print_thumbnail("benchy.gcode", "A:/cache/benchy.bin");
-    CHECK(state().get_print_thumbnail_file() == "benchy.gcode");
-    CHECK(std::string(lv_subject_get_string(state().get_print_thumbnail_path_subject())) ==
-          "A:/cache/benchy.bin");
+    state().print_state().set_print_thumbnail("benchy.gcode", "A:/cache/benchy.bin");
+    CHECK(state().print_state().get_print_thumbnail_file() == "benchy.gcode");
+    CHECK(std::string(lv_subject_get_string(
+              state().print_state().get_print_thumbnail_path_subject())) == "A:/cache/benchy.bin");
 
     // A full clear (print ended) drops both halves together.
-    state().set_print_thumbnail("", "");
-    CHECK(state().get_print_thumbnail_file().empty());
-    CHECK(std::string(lv_subject_get_string(state().get_print_thumbnail_path_subject())).empty());
+    state().print_state().set_print_thumbnail("", "");
+    CHECK(state().print_state().get_print_thumbnail_file().empty());
+    CHECK(
+        std::string(lv_subject_get_string(state().print_state().get_print_thumbnail_path_subject()))
+            .empty());
 }

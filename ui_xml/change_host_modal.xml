@@ -15,8 +15,12 @@
             style_pad_top="#space_lg" style_pad_bottom="#space_lg" flex_flow="column" style_flex_cross_place="center"
             style_pad_gap="#space_md">
       <!-- Title -->
-      <text_heading width="100%"
-                    text="Change Printer Host" translation_tag="Change Printer Host" style_text_align="center"/>
+      <text_heading name="title_change_host" width="100%" text="Change Printer Host" style_text_align="center">
+        <bind_flag_if_eq subject="change_host_adding" flag="hidden" ref_value="1"/>
+      </text_heading>
+      <text_heading name="title_add_printer" width="100%" text="Add Printer" style_text_align="center">
+        <bind_flag_if_eq subject="change_host_adding" flag="hidden" ref_value="0"/>
+      </text_heading>
       <!-- Input row: Host (75%) + Port (25%) -->
       <lv_obj width="100%"
               height="content" scrollable="false" style_pad_all="0" style_pad_gap="#space_sm" flex_flow="row">
@@ -24,7 +28,7 @@
         <lv_obj flex_grow="3"
                 style_pad_all="0" style_pad_gap="#space_xs" flex_flow="column" style_flex_main_place="start"
                 style_flex_cross_place="start">
-          <text_body width="100%" text="Host" translation_tag="Host"/>
+          <text_body width="100%" text="Host"/>
           <text_input name="host_input"
                       width="100%" bind_text="change_host_ip" placeholder_text="192.168.1.100"
                       placeholder_tag="192.168.1.100"/>
@@ -33,7 +37,7 @@
         <lv_obj flex_grow="1"
                 style_pad_all="0" style_pad_gap="#space_xs" flex_flow="column" style_flex_main_place="start"
                 style_flex_cross_place="start">
-          <text_body width="100%" text="Port" translation_tag="Port"/>
+          <text_body width="100%" text="Port"/>
           <text_input name="port_input"
                       width="100%" bind_text="change_host_port" placeholder_text="7125" keyboard_hint="numeric"/>
         </lv_obj>
@@ -42,7 +46,7 @@
       <lv_obj width="100%"
               height="content" style_pad_all="0" style_pad_gap="#space_md" flex_flow="row" style_flex_main_place="start"
               style_flex_cross_place="center">
-        <ui_button name="btn_test_connection" width="200" text="Test Connection" translation_tag="Test Connection">
+        <ui_button name="btn_test_connection" width="200" text="Test Connection">
           <bind_state_if_eq subject="change_host_testing" state="disabled" ref_value="1"/>
           <event_cb trigger="clicked" callback="on_change_host_test"/>
         </ui_button>
@@ -55,20 +59,9 @@
         </lv_obj>
       </lv_obj>
     </lv_obj>
-    <!-- Divider -->
-    <divider_horizontal/>
-    <!-- Button row -->
-    <lv_obj width="100%" height="#button_height" style_pad_all="0" style_pad_gap="0" flex_flow="row">
-      <ui_button name="modal_cancel_btn"
-                 height="100%" text="Cancel" translation_tag="Cancel" flex_grow="1" style_radius="0" focusable="false">
-        <event_cb trigger="clicked" callback="on_change_host_cancel"/>
-      </ui_button>
-      <divider_vertical/>
-      <ui_button name="modal_save_btn"
-                 height="100%" text="Save" translation_tag="Save" flex_grow="1" style_radius="0" focusable="false">
-        <bind_state_if_eq subject="change_host_validated" state="disabled" ref_value="0"/>
-        <event_cb trigger="clicked" callback="on_change_host_save"/>
-      </ui_button>
-    </lv_obj>
+    <modal_button_row secondary_name="modal_cancel_btn"
+                      secondary_text="Cancel" secondary_callback="on_change_host_cancel" primary_name="modal_save_btn"
+                      primary_text="Save" primary_callback="on_change_host_save"
+                      primary_disable_subject="change_host_save_locked"/>
   </view>
 </component>

@@ -11,10 +11,12 @@
 #include "overlay_base.h"
 #include "pid_progress_tracker.h"
 #include "save_config_restart.h"
+#include "static_panel_registry.h"
 #include "subject_managed_panel.h"
 
 #include <lvgl.h>
 #include <string>
+#include <vector>
 
 class IMoonrakerAPI;
 class MoonrakerAdvancedAPI;
@@ -72,6 +74,35 @@ class PIDCalibrationPanel : public OverlayBase {
      */
     enum class CalibMethod { PID, MPC };
 
+    /**
+     * @brief What the heater's config currently says, as opposed to the method
+     *        the user has selected
+     *
+     * UNKNOWN until the firmware answers a control-type query. Firmware without
+     * MPC support never answers, so UNKNOWN also means "not Kalico".
+     */
+    enum class ControlType { UNKNOWN, PID, MPC };
+
+    /**
+     * @brief Whether switching to @p target requires rewriting the config
+     *
+     * Only a known control type can disagree with the target: an unanswered
+     * query must not make the panel offer to rewrite a config it never read.
+     */
+    [[nodiscard]] static bool needs_control_migration(ControlType current, CalibMethod target);
+
+    /**
+     * @brief Config edits that move a heater section to @p target
+     *
+     * MPC needs `heater_power` to model the heater. PID clears the MPC keys the
+     * section may carry, which Klipper would reject once no MPC object reads
+     * them. Calibration results live in the autosave block and are left alone.
+     *
+     * @param heater_wattage Heater power in watts, used only for MPC
+     */
+    [[nodiscard]] static std::vector<helix::system::ConfigEdit>
+    build_control_migration_edits(CalibMethod target, int heater_wattage);
+
     PIDCalibrationPanel();
     ~PIDCalibrationPanel() override;
 
@@ -111,6 +142,9 @@ class PIDCalibrationPanel : public OverlayBase {
     const char* get_name() const override {
         return "PID Calibration";
     }
+    const char* xml_component() const override {
+        return "calibration_pid_panel";
+    }
 
     /**
      * @brief Called when overlay becomes visible
@@ -124,24 +158,22 @@ class PIDCalibrationPanel : public OverlayBase {
      *
      * Cancels pending timers, aborts calibration if in progress.
      */
-    void on_deactivate() override;
+    void on_deactivating(DeactivateReason reason) override;
 
     /**
      * @brief Clean up resources for async-safe destruction
      */
     void cleanup() override;
 
+    /// Freed on close; the next open rebuilds it. A run is aborted on the way out
+    /// and its state lives in the subjects and members, never the widgets.
+    bool destroy_on_close() const override {
+        return true;
+    }
+
     //
     // === Public API ===
     //
-
-    /**
-     * @brief Show overlay panel
-     *
-     * Pushes overlay onto navigation stack and registers with NavigationManager.
-     * on_activate() will be called automatically after animation completes.
-     */
-    void show();
 
     /**
      * @brief Set the Moonraker API for high-level operations
@@ -208,7 +240,6 @@ class PIDCalibrationPanel : public OverlayBase {
   private:
     // Client/API references
     // Note: overlay_root_ inherited from OverlayBase
-    lv_obj_t* parent_screen_ = nullptr;
     IMoonrakerAPI* api_ = nullptr;
 
     /// Owns the SAVE_CONFIG contract: absorbs the rpc the restart drops
@@ -262,6 +293,7 @@ class PIDCalibrationPanel : public OverlayBase {
     int fan_breakpoints_ = FAN_BP_QUICK;
     bool needs_migration_ = false;
     bool is_kalico_ = false;
+    ControlType current_control_ = ControlType::UNKNOWN;
 
     // MPC results
     MoonrakerAdvancedAPI::MPCResult mpc_result_;
@@ -273,70 +305,73 @@ class PIDCalibrationPanel : public OverlayBase {
     SubjectManager subjects_;
 
     // String subjects and buffers for reactive text updates
-    lv_subject_t subj_temp_display_;
+    lv_subject_t subj_temp_display_{};
     char buf_temp_display_[16];
 
-    lv_subject_t subj_temp_hint_;
+    lv_subject_t subj_temp_hint_{};
     char buf_temp_hint_[64];
 
-    lv_subject_t subj_calibrating_heater_;
+    lv_subject_t subj_calibrating_heater_{};
     char buf_calibrating_heater_[32];
 
-    lv_subject_t subj_pid_kp_;
+    lv_subject_t subj_migration_notice_{};
+    char buf_migration_notice_[128];
+
+    lv_subject_t subj_pid_kp_{};
     char buf_pid_kp_[32];
 
-    lv_subject_t subj_pid_ki_;
+    lv_subject_t subj_pid_ki_{};
     char buf_pid_ki_[32];
 
-    lv_subject_t subj_pid_kd_;
+    lv_subject_t subj_pid_kd_{};
     char buf_pid_kd_[32];
 
-    lv_subject_t subj_result_summary_;
+    lv_subject_t subj_result_summary_{};
     char buf_result_summary_[128];
 
-    lv_subject_t subj_error_message_;
+    lv_subject_t subj_error_message_{};
     char buf_error_message_[256];
 
     // Int subject for showing/hiding extruder-only sections
-    lv_subject_t subj_heater_is_extruder_;
+    lv_subject_t subj_heater_is_extruder_{};
 
     // MPC result string subjects and buffers
-    lv_subject_t subj_mpc_heat_capacity_;
+    lv_subject_t subj_mpc_heat_capacity_{};
     char buf_mpc_heat_capacity_[32];
-    lv_subject_t subj_mpc_sensor_resp_;
+    lv_subject_t subj_mpc_sensor_resp_{};
     char buf_mpc_sensor_resp_[32];
-    lv_subject_t subj_mpc_ambient_transfer_;
+    lv_subject_t subj_mpc_ambient_transfer_{};
     char buf_mpc_ambient_transfer_[32];
-    lv_subject_t subj_mpc_fan_transfer_;
+    lv_subject_t subj_mpc_fan_transfer_{};
     char buf_mpc_fan_transfer_[64];
 
     // Fan speed display subject and buffer
-    lv_subject_t subj_fan_speed_text_;
+    lv_subject_t subj_fan_speed_text_{};
     char buf_fan_speed_text_[8];
 
     // Wattage display subject and buffer
-    lv_subject_t subj_wattage_display_;
+    lv_subject_t subj_wattage_display_{};
     char buf_wattage_display_[16];
 
     // MPC-related int subjects
-    lv_subject_t subj_is_kalico_;       // int 0/1
-    lv_subject_t subj_method_is_mpc_;   // int 0/1
-    lv_subject_t subj_show_wattage_;    // int 0/1
-    lv_subject_t subj_needs_migration_; // int 0/1
-    lv_subject_t subj_show_fan_config_; // int 0/1
-    lv_subject_t subj_fan_is_quick_;    // int 0/1
-    lv_subject_t subj_fan_is_detailed_; // int 0/1
-    lv_subject_t subj_fan_is_thorough_; // int 0/1
-    lv_subject_t subj_show_pid_fan_;    // 1 when extruder + PID method
+    lv_subject_t subj_is_kalico_{};       // int 0/1
+    lv_subject_t subj_method_is_mpc_{};   // int 0/1
+    lv_subject_t subj_show_wattage_{};    // int 0/1
+    lv_subject_t subj_needs_migration_{}; // int 0/1
+    lv_subject_t subj_show_fan_config_{}; // int 0/1
+    lv_subject_t subj_fan_is_quick_{};    // int 0/1
+    lv_subject_t subj_fan_is_detailed_{}; // int 0/1
+    lv_subject_t subj_fan_is_thorough_{}; // int 0/1
+    lv_subject_t subj_show_pid_fan_{};    // 1 when extruder + PID method
 
     // Int subject: 1 when not idle (disables Start button in header)
-    lv_subject_t subj_cal_not_idle_;
+    lv_subject_t subj_cal_not_idle_{};
 
     // Progress tracking for calibration
-    lv_subject_t subj_pid_progress_; // int 0-100
-    lv_subject_t subj_pid_progress_text_;
+    lv_subject_t subj_pid_progress_{}; // int 0-100
+    lv_subject_t subj_pid_progress_text_{};
     char buf_pid_progress_text_[64];
-    lv_subject_t subj_pid_eta_;
+    lv_subject_t subj_pid_eta_{};
     char buf_pid_eta_[32];
     int pid_estimated_total_ = 3;      // Dynamic estimate, starts at 3
     bool has_kalico_progress_ = false; // True once first sample callback arrives
@@ -374,13 +409,15 @@ class PIDCalibrationPanel : public OverlayBase {
     // Persist measured calibration rates for future ETA estimates
     void save_calibration_history();
 
+    void on_ui_destroyed() override;
+
     // Widget references
     lv_obj_t* fan_slider_ = nullptr;
 
     // Temperature graph for calibrating state
     TemperatureService* temp_control_panel_ = nullptr;
     ui_temp_graph_t* pid_graph_ = nullptr;
-    int pid_graph_series_id_ = -1;
+    SeriesId pid_graph_series_id_ = SeriesId::None;
 
     // State management
     void set_state(State new_state);
@@ -407,8 +444,18 @@ class PIDCalibrationPanel : public OverlayBase {
     void fetch_old_pid_values();
 
     // MPC-specific methods
-    void detect_heater_control_type();
-    void start_migration();
+    /**
+     * @brief Query the firmware for the selected heater's control type
+     *
+     * @param preselect_mpc Select MPC once the answer arrives. Activation wants
+     *        this; a re-read triggered by the MPC button has already selected
+     *        it, and a late answer must not override a PID choice made since.
+     */
+    void detect_heater_control_type(bool preselect_mpc = true);
+    void start_migration(CalibMethod target);
+    void confirm_migration();
+    void begin_calibration(CalibMethod method);
+    void update_migration_notice();
     void on_mpc_result(const MoonrakerAdvancedAPI::MPCResult& result);
     void on_mpc_progress(int phase, int total_phases, const std::string& desc);
 
@@ -439,32 +486,15 @@ class PIDCalibrationPanel : public OverlayBase {
     void handle_fan_detailed_clicked();
     void handle_fan_thorough_clicked();
 
-    // Static trampolines
-    static void on_heater_extruder_clicked(lv_event_t* e);
-    static void on_heater_bed_clicked(lv_event_t* e);
-    static void on_temp_up(lv_event_t* e);
-    static void on_temp_down(lv_event_t* e);
-    static void on_start_clicked(lv_event_t* e);
-    static void on_abort_clicked(lv_event_t* e);
-    static void on_done_clicked(lv_event_t* e);
-    static void on_retry_clicked(lv_event_t* e);
     static void on_fan_slider_changed(lv_event_t* e);
-    // MPC method/config trampolines
-    static void on_method_pid_clicked(lv_event_t* e);
-    static void on_method_mpc_clicked(lv_event_t* e);
-    static void on_wattage_up(lv_event_t* e);
-    static void on_wattage_down(lv_event_t* e);
-    static void on_fan_quick_clicked(lv_event_t* e);
-    static void on_fan_detailed_clicked(lv_event_t* e);
-    static void on_fan_thorough_clicked(lv_event_t* e);
-    // Material preset trampolines (extruder)
+    // Material preset callbacks
     // One handler per heater; the preset slot is parsed from the clicked
     // button's name ("btn_preset_mN" / "btn_preset_bed_mN") and resolved to a
-    // material through helix::presets. Replaces the eight per-material
-    // trampolines that hardcoded PLA/PETG/ABS/PA/TPU.
+    // material through helix::presets.
     static void on_pid_preset_material(lv_event_t* e);
     static void on_pid_preset_bed_material(lv_event_t* e);
 };
 
 // Global instance accessor
+// Defined out of line: the ESP32 build, which excludes this panel, supplies its own.
 PIDCalibrationPanel& get_global_pid_cal_panel();

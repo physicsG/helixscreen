@@ -2,15 +2,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "ui_overlay_performance.h"
 
+#include "ui_panel_common.h"
 #include "ui_utils.h" // helix::ui::safe_clean_children
 
 #include "observer_factory.h"
 #include "performance_state.h" // helix::perf::PerformanceState::subjects_lifetime()
+#include "text_io.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/spdlog.h>
 
-#include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace helix {
@@ -25,14 +28,13 @@ lv_obj_t* UiOverlayPerformance::create(lv_obj_t* parent) {
     if (root_)
         return root_;
 
-    root_ = static_cast<lv_obj_t*>(lv_xml_create(parent, "performance_overlay", nullptr));
+    root_ = helix::ui::create_xml_hidden(parent, "performance_overlay");
     if (!root_) {
         spdlog::error("[UiOverlayPerformance] Failed to create root from XML");
         return nullptr;
     }
-    lv_obj_add_flag(root_, LV_OBJ_FLAG_HIDDEN);
 
-    mcu_card_ = lv_obj_find_by_name(root_, "mcu_card");
+    mcu_card_ = helix::ui::find_required(root_, "mcu_card", "UiOverlayPerformance");
 
     lv_subject_t* names_subj = lv_xml_get_subject(nullptr, "perf_mcu_names");
     if (names_subj) {
@@ -44,7 +46,7 @@ lv_obj_t* UiOverlayPerformance::create(lv_obj_t* parent) {
         // down — otherwise reset() would call lv_observer_remove() on a freed
         // subject → UAF at lv_observer.c:584 ([L077], mirrors 056bb40e9 for
         // HelixSparkline on perf_history_tick).
-        mcu_names_observer_ = helix::ui::observe_string<UiOverlayPerformance>(
+        mcu_names_observer_ = helix::ui::observe<const char*>(
             names_subj, this,
             [](UiOverlayPerformance* self, const char* /*v*/) { self->rebuild_mcu_rows(); },
             helix::perf::PerformanceState::instance().subjects_lifetime());
@@ -85,9 +87,8 @@ void UiOverlayPerformance::rebuild_mcu_rows() {
         return;
 
     std::vector<std::string> names;
-    std::stringstream ss(names_str);
-    std::string item;
-    while (std::getline(ss, item, ',')) {
+    for (std::string_view sv : helix::text_io::lines(names_str, ',')) {
+        std::string item(sv);
         if (!item.empty()) {
             names.push_back(item);
         }

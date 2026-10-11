@@ -3,25 +3,34 @@
 
 #pragma once
 
+#include "input_defaults.h"
 #include "lvgl/lvgl.h"
+#include "persisted_setting.h"
 #include "subject_managed_panel.h"
 
 namespace helix {
+
+/// Numeric keypad digit order. Phone puts 1-2-3 on top, calculator 7-8-9.
+enum class KeypadLayout { PHONE = 0, CALCULATOR = 1 };
 
 /**
  * @brief Domain-specific manager for input/scroll settings
  *
  * Owns all input-related LVGL subjects and persistence:
- * - scroll_throw (momentum decay rate, 5-50)        — restart required
- * - scroll_limit (pixels before scrolling starts, 1-20) — restart required
+ * - scroll_throw (momentum decay rate, 5-50)        — live-applied
+ * - scroll_limit (pixels before scrolling starts, 1-20) — live-applied
  * - scroll_guard (suppress phantom click after scroll)  — restart required
  * - debug_touches (draw ripple at each touch point)     — live-applied
+ * - keypad_layout (numeric keypad digit order)          — live-applied
  *
  * Thread safety: Single-threaded, main LVGL thread only.
  */
 class InputSettingsManager {
   public:
     static InputSettingsManager& instance();
+
+    /// Default scroll momentum decay; see helix::input_defaults::SCROLL_THROW.
+    static constexpr int DEFAULT_SCROLL_THROW = helix::input_defaults::SCROLL_THROW;
 
     // Non-copyable
     InputSettingsManager(const InputSettingsManager&) = delete;
@@ -37,93 +46,58 @@ class InputSettingsManager {
     // GETTERS / SETTERS
     // =========================================================================
 
-    /**
-     * @brief Get scroll throw (momentum decay rate)
-     * @return Scroll throw value (5-50, higher = faster decay)
-     */
-    int get_scroll_throw() const;
-
-    /**
-     * @brief Set scroll throw (momentum decay rate)
-     *
-     * Persists to config. Requires restart to take effect.
-     *
-     * @param value Scroll throw (5-50)
-     */
+    /** @brief Momentum decay rate (5-50, higher = faster decay), applied live to every pointer. */
+    int get_scroll_throw() const {
+        return settings_.get(Key::ScrollThrow);
+    }
     void set_scroll_throw(int value);
 
-    /**
-     * @brief Get scroll limit (pixels before scrolling starts)
-     * @return Scroll limit in pixels (1-20)
-     */
-    int get_scroll_limit() const;
-
-    /**
-     * @brief Set scroll limit (pixels before scrolling starts)
-     *
-     * Persists to config. Requires restart to take effect.
-     *
-     * @param value Scroll limit in pixels (1-20)
-     */
+    /** @brief Pixels before scrolling starts (1-20), applied live to every pointer. */
+    int get_scroll_limit() const {
+        return settings_.get(Key::ScrollLimit);
+    }
     void set_scroll_limit(int value);
 
     /**
-     * @brief Get the long-press hold time (ms) applied globally to the pointer
-     *        input device. Governs every long-press in the app (home grid edit
-     *        mode, file-card delete, macro edit, etc.), not just edit mode.
-     * @return Hold time in ms (300-1500; default 500)
+     * @brief Long-press hold time in ms (300-1500, default 500), applied live to
+     *        every pointer indev. Governs every long-press in the app, not just
+     *        home edit mode (#1245).
      */
-    int get_long_press_time() const;
-
-    /**
-     * @brief Set the global long-press hold time.
-     *
-     * Persists to config and applies LIVE (no restart): the filer's #1245
-     * report was that 500ms is easy to cross with a resting tablet finger, so
-     * this lets the user raise it. Reaches DisplayManager's pointer indev
-     * directly via lv_indev_set_long_press_time.
-     *
-     * @param value Hold time in ms (300-1500)
-     */
+    int get_long_press_time() const {
+        return settings_.get(Key::LongPressTime);
+    }
     void set_long_press_time(int value);
 
-    /** @brief Get scroll guard enable state */
-    bool get_scroll_guard() const;
-
-    /**
-     * @brief Set scroll guard (suppress phantom clicks after scrolling)
-     *
-     * Persists to config. Requires restart to take effect.
-     */
+    /** @brief Suppress phantom clicks after scrolling. Restart required. */
+    bool get_scroll_guard() const {
+        return settings_.get_bool(Key::ScrollGuard);
+    }
     void set_scroll_guard(bool enabled);
 
-    /** @brief Get touch debug visualization state */
-    bool get_debug_touches() const;
-
-    /**
-     * @brief Set touch debug visualization (ripple at each touch)
-     *
-     * Applied live via RuntimeConfig::set_debug_touches() — no restart needed.
-     * Also persists to settings.json so the value survives reboots.
-     */
+    /** @brief Ripple at each touch point, applied live via RuntimeConfig. */
+    bool get_debug_touches() const {
+        return settings_.get_bool(Key::DebugTouches);
+    }
     void set_debug_touches(bool enabled);
 
     /**
-     * @brief Get whether home-screen edit mode (long-press to rearrange) is
-     *        allowed. When false, the long-press is suppressed entirely —
-     *        the #1245 report was that edit mode triggers by accident with a
-     *        resting finger, and this is the hard kill-switch for it.
-     * @return true if edit mode is enabled (default)
+     * @brief Whether the long-press into home-screen edit mode is allowed.
+     *        Checked live by should_suppress_edit_mode (#1245).
      */
-    bool get_home_edit_mode_enabled() const;
+    bool get_home_edit_mode_enabled() const {
+        return settings_.get_bool(Key::HomeEditMode);
+    }
+    void set_home_edit_mode_enabled(bool enabled) {
+        settings_.set(Key::HomeEditMode, enabled);
+    }
 
-    /**
-     * @brief Enable/disable home-screen edit mode entirely.
-     *
-     * Persists to config and applies LIVE (no restart): should_suppress_edit_mode
-     * checks this on every long-press.
-     */
-    void set_home_edit_mode_enabled(bool enabled);
+    /** @brief Numeric keypad digit order; the keypad XML binds it live. */
+    KeypadLayout get_keypad_layout() const {
+        return static_cast<KeypadLayout>(settings_.get(Key::KeypadLayout));
+    }
+    void set_keypad_layout(KeypadLayout layout) {
+        settings_.set(Key::KeypadLayout, static_cast<int>(layout));
+    }
 
     /**
      * @brief Check if restart is pending due to settings changes
@@ -146,46 +120,58 @@ class InputSettingsManager {
 
     /** @brief Scroll throw subject (integer: 5-50) */
     lv_subject_t* subject_scroll_throw() {
-        return &scroll_throw_subject_;
+        return settings_.subject(Key::ScrollThrow);
     }
 
     /** @brief Scroll limit subject (integer: 1-20) */
     lv_subject_t* subject_scroll_limit() {
-        return &scroll_limit_subject_;
+        return settings_.subject(Key::ScrollLimit);
     }
 
     /** @brief Long-press time subject (integer ms: 300-1500) */
     lv_subject_t* subject_long_press_time() {
-        return &long_press_time_subject_;
+        return settings_.subject(Key::LongPressTime);
     }
 
     /** @brief Scroll guard subject (integer: 0 or 1) */
     lv_subject_t* subject_scroll_guard() {
-        return &scroll_guard_subject_;
+        return settings_.subject(Key::ScrollGuard);
     }
 
     /** @brief Touch debug subject (integer: 0 or 1) */
     lv_subject_t* subject_debug_touches() {
-        return &debug_touches_subject_;
+        return settings_.subject(Key::DebugTouches);
     }
 
     /** @brief Home edit mode enabled subject (integer: 0 or 1) */
     lv_subject_t* subject_home_edit_mode_enabled() {
-        return &home_edit_mode_enabled_subject_;
+        return settings_.subject(Key::HomeEditMode);
+    }
+
+    /** @brief Keypad layout subject (integer: KeypadLayout) */
+    lv_subject_t* subject_keypad_layout() {
+        return settings_.subject(Key::KeypadLayout);
     }
 
   private:
     InputSettingsManager();
     ~InputSettingsManager() = default;
 
-    SubjectManager subjects_;
+    void apply_to_pointers() const;
 
-    lv_subject_t scroll_throw_subject_;
-    lv_subject_t scroll_limit_subject_;
-    lv_subject_t long_press_time_subject_;
-    lv_subject_t scroll_guard_subject_;
-    lv_subject_t debug_touches_subject_;
-    lv_subject_t home_edit_mode_enabled_subject_;
+    enum class Key : uint8_t {
+        ScrollThrow,
+        ScrollLimit,
+        LongPressTime,
+        ScrollGuard,
+        DebugTouches,
+        HomeEditMode,
+        KeypadLayout,
+        COUNT
+    };
+
+    SubjectManager subjects_;
+    settings::PersistedSettings<Key, static_cast<size_t>(Key::COUNT)> settings_;
 
     bool subjects_initialized_ = false;
     bool restart_pending_ = false;

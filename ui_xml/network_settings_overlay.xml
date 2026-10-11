@@ -6,10 +6,9 @@
 <component>
   <!-- NOTE: All subjects for this overlay are managed by C++ (NetworkSettingsOverlay::init_subjects).
        Do NOT declare subjects here - XML declarations shadow C++ subjects [L046]. -->
-  <view name="network_settings_overlay"
-        extends="overlay_panel" title="Network Settings" title_tag="Network Settings" bg_color="#screen_bg">
+  <view name="network_settings_overlay" extends="overlay_panel" title="Network Settings" bg_color="#screen_bg">
     <!-- Two-Column Content Area -->
-    <lv_obj name="content_area"
+    <lv_obj name="overlay_content"
             width="100%" flex_grow="1" style_pad_all="#space_lg" style_pad_gap="#space_lg" scrollable="false"
             flex_flow="row" style_flex_main_place="start" style_flex_cross_place="start">
       <!-- ================================================================== -->
@@ -43,6 +42,7 @@
             </lv_obj>
             <!-- Toggle Switch -->
             <ui_switch name="wlan_toggle" size="small">
+              <bind_flag_if_eq subject="wifi_can_toggle_radio" flag="hidden" ref_value="0"/>
               <bind_state_if_eq subject="wifi_hardware_available" state="disabled" ref_value="0"/>
               <bind_state_if_eq subject="wifi_enabled" state="checked" ref_value="1"/>
               <event_cb trigger="value_changed" callback="on_wlan_toggle_changed"/>
@@ -60,7 +60,7 @@
                     style_flex_cross_place="center" style_pad_gap="#space_sm">
               <bind_flag_if_eq subject="wifi_hardware_available" flag="hidden" ref_value="1"/>
               <icon src="wifi_off" size="sm" variant="secondary"/>
-              <text_small text="WiFi hardware unavailable" translation_tag="WiFi hardware unavailable"/>
+              <text_small text="WiFi hardware unavailable"/>
             </lv_obj>
             <!-- Connected (shown when wifi_connected == 1) -->
             <lv_obj name="wifi_connected_state"
@@ -78,6 +78,7 @@
                 <!-- Forget the currently connected network (with confirmation) -->
                 <icon name="forget_network_icon"
                       src="trash_can_outline" size="sm" variant="danger" clickable="true" style_pad_all="#space_xs">
+                  <bind_flag_if_eq subject="wifi_can_forget" flag="hidden" ref_value="0"/>
                   <event_cb trigger="clicked" callback="on_network_settings_forget"/>
                 </icon>
               </lv_obj>
@@ -102,7 +103,7 @@
                     style_flex_cross_place="center" style_pad_gap="#space_sm">
               <bind_flag_if_eq subject="wifi_connected" flag="hidden" ref_value="1"/>
               <icon src="wifi_off" size="sm" variant="secondary"/>
-              <text_small text="Not connected" translation_tag="Not connected"/>
+              <text_small text="Not connected"/>
             </lv_obj>
           </lv_obj>
         </lv_obj>
@@ -136,7 +137,7 @@
                       height="content" style_pad_all="0" scrollable="false" flex_flow="row"
                       style_flex_main_place="start" style_flex_cross_place="center" style_pad_gap="#space_xs">
                 <icon src="check_circle" size="sm" variant="success"/>
-                <text_body text="Connected" translation_tag="Connected"/>
+                <text_body text="Connected"/>
               </lv_obj>
               <!-- IP Address -->
               <lv_obj width="100%"
@@ -159,7 +160,7 @@
                     style_flex_cross_place="center" style_pad_gap="#space_sm">
               <bind_flag_if_eq subject="eth_connected" flag="hidden" ref_value="1"/>
               <icon src="ethernet" size="sm" variant="secondary"/>
-              <text_small text="Not connected" translation_tag="Not connected"/>
+              <text_small text="Not connected"/>
             </lv_obj>
           </lv_obj>
         </lv_obj>
@@ -169,8 +170,7 @@
         <!-- ============================================================== -->
         <!-- Network Test Button (at bottom of left column) -->
         <!-- ============================================================== -->
-        <ui_button name="test_network_btn"
-                   width="100%" height="content" icon="lan" text="Test Network" translation_tag="Test Network">
+        <ui_button name="test_network_btn" width="100%" height="content" icon="lan" text="Test Network">
           <!-- Disable when no network connected -->
           <bind_state_if_eq subject="any_network_connected" state="disabled" ref_value="0"/>
           <event_cb trigger="clicked" callback="on_test_network_clicked"/>
@@ -192,7 +192,7 @@
           <lv_obj height="content"
                   style_pad_all="0" scrollable="false" flex_flow="row" style_flex_cross_place="center"
                   style_pad_gap="#space_sm">
-            <text_body text="Available networks" translation_tag="Available networks"/>
+            <text_body text="Available networks"/>
             <text_small name="network_count_label" bind_text="network_count"/>
           </lv_obj>
           <!-- Refresh Button -->
@@ -221,14 +221,13 @@
           <!-- Placeholder when hardware unavailable (shown when wifi_hardware_available == 0) -->
           <lv_obj name="wifi_hardware_unavailable_placeholder" width="100%" flex_grow="1" scrollable="false">
             <bind_flag_if_eq subject="wifi_hardware_available" flag="hidden" ref_value="1"/>
-            <empty_state icon="wifi_off"
-                         text="WiFi control unavailable" translation_tag="WiFi control unavailable" icon_size="md"/>
+            <empty_state icon="wifi_off" text="WiFi control unavailable" icon_size="md"/>
           </lv_obj>
           <!-- Placeholder when no networks (shown when WiFi disabled AND hardware available) -->
           <lv_obj name="wifi_disabled_placeholder" width="100%" flex_grow="1" scrollable="false">
             <bind_flag_if_eq subject="wifi_enabled" flag="hidden" ref_value="1"/>
             <bind_flag_if_eq subject="wifi_hardware_available" flag="hidden" ref_value="0"/>
-            <empty_state icon="wifi_off" text="Enable WiFi to scan" translation_tag="Enable WiFi to scan" icon_size="md"/>
+            <empty_state icon="wifi_off" text="Enable WiFi to scan" icon_size="md"/>
           </lv_obj>
           <!-- Scanning indicator (shown when scanning) -->
           <lv_obj name="scanning_placeholder"
@@ -237,14 +236,11 @@
                   hidden="true">
             <bind_flag_if_eq subject="wifi_scanning" flag="hidden" ref_value="0"/>
             <spinner size="md"/>
-            <text_small text="Scanning for networks..."
-                        translation_tag="Scanning for networks..." style_margin_top="#space_sm"/>
+            <text_small text="Scanning for networks..." style_margin_top="#space_sm"/>
           </lv_obj>
         </lv_obj>
         <!-- Add Hidden Network Button -->
-        <ui_button name="add_other_btn"
-                   width="100%" height="content" icon="wifi" text="Add Hidden Network"
-                   translation_tag="Add Hidden Network">
+        <ui_button name="add_other_btn" width="100%" height="content" icon="wifi" text="Add Hidden Network">
           <bind_state_if_eq subject="wifi_hardware_available" state="disabled" ref_value="0"/>
           <event_cb trigger="clicked" callback="on_add_other_clicked"/>
         </ui_button>

@@ -13,6 +13,7 @@
 #include "ui_temperature_utils.h"
 
 #include "chamber_heater_backend.h"
+#include "display_numbering.h"
 #include "klipper_extruder_naming.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "state/subject_macros.h"
@@ -22,6 +23,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cmath>
 
 namespace helix {
 
@@ -52,19 +54,37 @@ void PrinterTemperatureState::init_subjects(bool register_xml) {
     spdlog::trace("[PrinterTemperatureState] Initializing subjects (register_xml={})",
                   register_xml);
 
-    // Active extruder subjects (track whichever extruder is currently active)
-    // XML names stay as "extruder_temp"/"extruder_target" for XML binding compatibility
+    // Active extruder subjects (track whichever extruder is currently active).
+    // The XML names are "extruder_temp"/"extruder_target" while the members carry
+    // the active_ prefix, so INIT_SUBJECT_INT (which derives one from the other)
+    // does not fit. The name still goes to the manager: it withdraws each name
+    // before freeing its subject, and a PrinterState owned by a stack-allocated
+    // test fixture does not outlive the process, so without it the XML scope
+    // keeps resolving these names into storage that has gone away.
     lv_subject_init_int(&active_extruder_temp_, 0);
-    subjects_.register_subject(&active_extruder_temp_);
+    subjects_.register_subject(&active_extruder_temp_, register_xml ? "extruder_temp" : nullptr);
     if (register_xml) {
-        lv_xml_register_subject(nullptr, "extruder_temp", &active_extruder_temp_);
+        helix::xml::register_subject_in_current_scope("extruder_temp", &active_extruder_temp_);
     }
 
     lv_subject_init_int(&active_extruder_target_, 0);
-    subjects_.register_subject(&active_extruder_target_);
+    subjects_.register_subject(&active_extruder_target_,
+                               register_xml ? "extruder_target" : nullptr);
     if (register_xml) {
-        lv_xml_register_subject(nullptr, "extruder_target", &active_extruder_target_);
+        helix::xml::register_subject_in_current_scope("extruder_target", &active_extruder_target_);
     }
+
+    lv_subject_init_int(&active_extruder_power_, -1);
+    subjects_.register_subject(&active_extruder_power_, register_xml ? "extruder_power" : nullptr);
+    if (register_xml) {
+        helix::xml::register_subject_in_current_scope("extruder_power", &active_extruder_power_);
+    }
+
+    // Heater duty cycle, whole percent, -1 = the heater reports none.
+    INIT_SUBJECT_INT(bed_power, -1, subjects_, register_xml);
+    INIT_SUBJECT_INT(chamber_power, -1, subjects_,
+                     register_xml); // SUBJECT_OK: read by pointer via
+                                    // PrinterState::get_heater_power_subject(HeaterType::Chamber)
 
     // Bed and chamber temperature subjects
     INIT_SUBJECT_INT(bed_temp, 0, subjects_, register_xml);
@@ -90,12 +110,21 @@ void PrinterTemperatureState::init_subjects(bool register_xml) {
     chamber_heater_fault_lifetime_ = std::make_shared<bool>(true);
     INIT_SUBJECT_INT(chamber_heater_inhibited, 0, subjects_, register_xml);
     chamber_heater_inhibited_lifetime_ = std::make_shared<bool>(true);
+    INIT_SUBJECT_INT(chamber_heater_offline, 0, subjects_, register_xml);
+    chamber_heater_offline_lifetime_ = std::make_shared<bool>(true);
+    INIT_SUBJECT_INT(chamber_heater_externally_controlled, 0, subjects_, register_xml);
+    chamber_heater_externally_controlled_lifetime_ = std::make_shared<bool>(true);
     // Translated UI text derived from the backend's generic FaultReason kind —
     // vendor codes die at the backend border and only surface in logs.
     INIT_SUBJECT_STRING(chamber_heater_fault_reason_text, "", subjects_, register_xml);
     chamber_heater_fault_reason_text_lifetime_ = std::make_shared<bool>(true);
     INIT_SUBJECT_INT(chamber_filter_fan_on, -1, subjects_, register_xml);
     chamber_filter_fan_on_lifetime_ = std::make_shared<bool>(true);
+    INIT_SUBJECT_INT(chamber_filter_fan_requested, -1, subjects_, register_xml);
+    chamber_filter_fan_requested_lifetime_ = std::make_shared<bool>(true);
+    INIT_SUBJECT_INT(chamber_filter_fan_device_driven, 0, subjects_, register_xml);
+    chamber_filter_fan_device_driven_lifetime_ = std::make_shared<bool>(true);
+    chamber_filter_fan_percent_ = -1;
     // Display strings written alongside the raw ints — XML has no deci/percent
     // formatter (bind_text-fmt prints the raw int), and the fan toggle needs a
     // translated On/Off label, so the parse block owns the formatting.
@@ -103,13 +132,8 @@ void PrinterTemperatureState::init_subjects(bool register_xml) {
     chamber_heater_element_temp_text_lifetime_ = std::make_shared<bool>(true);
     INIT_SUBJECT_STRING(chamber_filter_fan_percent_text, "--", subjects_, register_xml);
     chamber_filter_fan_percent_text_lifetime_ = std::make_shared<bool>(true);
-    INIT_SUBJECT_STRING(chamber_filter_fan_on_text, lv_tr("Filter Fan: Off"), subjects_,
-                        register_xml);
-    chamber_filter_fan_on_text_lifetime_ = std::make_shared<bool>(true);
-    // Icon-name subject for the compact portrait card's icon-button toggle
-    // (bind_icon); mirrors chamber_filter_fan_on_text, set from the same pin.
-    INIT_SUBJECT_STRING(chamber_filter_fan_icon, "fan_off", subjects_, register_xml);
-    chamber_filter_fan_icon_lifetime_ = std::make_shared<bool>(true);
+    INIT_SUBJECT_INT(chamber_dryer_active, 0, subjects_, register_xml);
+    INIT_SUBJECT_STRING(chamber_dryer_text, "", subjects_, register_xml);
 
     // Extruder version subject (bumped when extruder list changes)
     INIT_SUBJECT_INT(extruder_version, 0, subjects_, register_xml);
@@ -155,24 +179,30 @@ void PrinterTemperatureState::deinit_subjects() {
     if (chamber_heater_inhibited_lifetime_)
         *chamber_heater_inhibited_lifetime_ = false;
     chamber_heater_inhibited_lifetime_.reset();
+    if (chamber_heater_offline_lifetime_)
+        *chamber_heater_offline_lifetime_ = false;
+    chamber_heater_offline_lifetime_.reset();
+    if (chamber_heater_externally_controlled_lifetime_)
+        *chamber_heater_externally_controlled_lifetime_ = false;
+    chamber_heater_externally_controlled_lifetime_.reset();
     if (chamber_heater_fault_reason_text_lifetime_)
         *chamber_heater_fault_reason_text_lifetime_ = false;
     chamber_heater_fault_reason_text_lifetime_.reset();
     if (chamber_filter_fan_on_lifetime_)
         *chamber_filter_fan_on_lifetime_ = false;
     chamber_filter_fan_on_lifetime_.reset();
+    if (chamber_filter_fan_requested_lifetime_)
+        *chamber_filter_fan_requested_lifetime_ = false;
+    chamber_filter_fan_requested_lifetime_.reset();
+    if (chamber_filter_fan_device_driven_lifetime_)
+        *chamber_filter_fan_device_driven_lifetime_ = false;
+    chamber_filter_fan_device_driven_lifetime_.reset();
     if (chamber_heater_element_temp_text_lifetime_)
         *chamber_heater_element_temp_text_lifetime_ = false;
     chamber_heater_element_temp_text_lifetime_.reset();
     if (chamber_filter_fan_percent_text_lifetime_)
         *chamber_filter_fan_percent_text_lifetime_ = false;
     chamber_filter_fan_percent_text_lifetime_.reset();
-    if (chamber_filter_fan_on_text_lifetime_)
-        *chamber_filter_fan_on_text_lifetime_ = false;
-    chamber_filter_fan_on_text_lifetime_.reset();
-    if (chamber_filter_fan_icon_lifetime_)
-        *chamber_filter_fan_icon_lifetime_ = false;
-    chamber_filter_fan_icon_lifetime_.reset();
     for (auto& [name, info] : extruders_) {
         if (info.temp_lifetime)
             *info.temp_lifetime = false;
@@ -180,6 +210,9 @@ void PrinterTemperatureState::deinit_subjects() {
         if (info.target_lifetime)
             *info.target_lifetime = false;
         info.target_lifetime.reset();
+        if (info.power_lifetime)
+            *info.power_lifetime = false;
+        info.power_lifetime.reset();
     }
 
     // Now safe to deinit dynamic per-extruder subjects
@@ -189,6 +222,9 @@ void PrinterTemperatureState::deinit_subjects() {
         }
         if (info.target_subject) {
             lv_subject_deinit(info.target_subject.get());
+        }
+        if (info.power_subject) {
+            lv_subject_deinit(info.power_subject.get());
         }
     }
     extruders_.clear();
@@ -200,91 +236,63 @@ void PrinterTemperatureState::deinit_subjects() {
     subjects_initialized_ = false;
 }
 
-void PrinterTemperatureState::register_xml_subjects() {
-    if (!subjects_initialized_) {
-        spdlog::warn("[PrinterTemperatureState] Cannot register XML subjects - not initialized");
-        return;
-    }
+namespace {
 
-    spdlog::debug("[PrinterTemperatureState] Re-registering subjects with XML system");
-    lv_xml_register_subject(nullptr, "extruder_temp", &active_extruder_temp_);
-    lv_xml_register_subject(nullptr, "extruder_target", &active_extruder_target_);
-    lv_xml_register_subject(nullptr, "bed_temp", &bed_temp_);
-    lv_xml_register_subject(nullptr, "bed_target", &bed_target_);
-    lv_xml_register_subject(nullptr, "chamber_temp", &chamber_temp_);
-    // chamber_target / chamber_fan_target intentionally omitted — internal inputs only.
-    lv_xml_register_subject(nullptr, "chamber_effective_target", &chamber_effective_target_);
-    lv_xml_register_subject(nullptr, "chamber_mode", &chamber_mode_);
-    lv_xml_register_subject(nullptr, "chamber_heater_fault", &chamber_heater_fault_);
-    lv_xml_register_subject(nullptr, "chamber_heater_inhibited", &chamber_heater_inhibited_);
-    lv_xml_register_subject(nullptr, "chamber_heater_fault_reason_text",
-                            &chamber_heater_fault_reason_text_);
-    // on_chamber_filter_fan_clicked() reads this one by name to compute the toggle.
-    lv_xml_register_subject(nullptr, "chamber_filter_fan_on", &chamber_filter_fan_on_);
-    lv_xml_register_subject(nullptr, "chamber_heater_element_temp_text",
-                            &chamber_heater_element_temp_text_);
-    lv_xml_register_subject(nullptr, "chamber_filter_fan_percent_text",
-                            &chamber_filter_fan_percent_text_);
-    lv_xml_register_subject(nullptr, "chamber_filter_fan_on_text", &chamber_filter_fan_on_text_);
-    lv_xml_register_subject(nullptr, "chamber_filter_fan_icon", &chamber_filter_fan_icon_);
-    lv_xml_register_subject(nullptr, "extruder_version", &extruder_version_);
+/// Single extruder: "Nozzle". Multiple: "Nozzle 1", "Nozzle 2", ... in the
+/// current language.
+std::string extruder_display_name(size_t index, bool multi) {
+    if (!multi) {
+        return lv_tr("Nozzle");
+    }
+    return std::string(lv_tr("Nozzle")) + " " +
+           helix::ui::lane_number_text(static_cast<int>(index));
 }
 
+} // namespace
+
 void PrinterTemperatureState::init_extruders(const std::vector<std::string>& heaters) {
-    // Signal subject death FIRST — sets the pointed-to bool to false so that
-    // ALL ObserverGuards (including those in other services that still hold
-    // shared_ptr copies) detect the subject as dead and skip lv_observer_remove()
-    // on the about-to-be-freed observers. (#816)
-    for (auto& [name, info] : extruders_) {
-        if (info.temp_lifetime)
-            *info.temp_lifetime = false;
-        info.temp_lifetime.reset();
-        if (info.target_lifetime)
-            *info.target_lifetime = false;
-        info.target_lifetime.reset();
-    }
-
-    // Now safe to deinit existing per-extruder subjects
-    for (auto& [name, info] : extruders_) {
-        if (info.temp_subject) {
-            lv_subject_deinit(info.temp_subject.get());
-        }
-        if (info.target_subject) {
-            lv_subject_deinit(info.target_subject.get());
-        }
-    }
-    extruders_.clear();
-
-    // Filter for extruder* names and count them
+    // Accept "extruder" and "extruderN" (digit suffix), reject "extruder_stepper" etc.
     std::vector<std::string> extruder_names;
     for (const auto& name : heaters) {
-        // Accept "extruder" and "extruderN" (digit suffix), reject "extruder_stepper" etc.
         if (is_extruder_name(name)) {
             extruder_names.push_back(name);
         }
     }
-    // Sort so the "Nozzle N" suffix matches the lexical (and numeric, for N < 10)
-    // order — both the chip row and the config modal sort by name elsewhere, so
-    // skipping the sort here would otherwise misalign labels with extruder index
-    // when Klipper returns heaters in a non-deterministic order.
-    std::sort(extruder_names.begin(), extruder_names.end());
 
-    bool multi = extruder_names.size() > 1;
+    // Discovery re-runs on every klippy ready. A tool still present keeps its
+    // subjects and lifetimes, so every observer bound to it stays live; only a
+    // tool that disappeared is freed.
+    bool changed = false;
+    for (auto it = extruders_.begin(); it != extruders_.end();) {
+        if (std::find(extruder_names.begin(), extruder_names.end(), it->first) !=
+            extruder_names.end()) {
+            ++it;
+            continue;
+        }
+        // Signal subject death FIRST - sets the pointed-to bool to false so that
+        // ALL ObserverGuards (including those in other services that still hold
+        // shared_ptr copies) detect the subject as dead and skip
+        // lv_observer_remove() on the about-to-be-freed observers. (#816)
+        auto& info = it->second;
+        for (auto* lt : {&info.temp_lifetime, &info.target_lifetime, &info.power_lifetime}) {
+            if (*lt)
+                **lt = false;
+            lt->reset();
+        }
+        for (auto* subj : {&info.temp_subject, &info.target_subject, &info.power_subject}) {
+            if (*subj)
+                lv_subject_deinit(subj->get());
+        }
+        it = extruders_.erase(it);
+        changed = true;
+    }
 
-    extruders_.reserve(extruder_names.size());
-    for (size_t i = 0; i < extruder_names.size(); ++i) {
-        const auto& name = extruder_names[i];
+    for (const auto& name : extruder_names) {
+        if (extruders_.count(name) != 0) {
+            continue;
+        }
         ExtruderInfo info;
         info.name = name;
-
-        // Single extruder: "Nozzle". Multiple: "Nozzle 1", "Nozzle 2", ...
-        // Translated at init time; mid-session language changes won't refresh
-        // cached names until the next extruder rediscover (e.g., reconnect).
-        if (multi) {
-            info.display_name = std::string(lv_tr("Nozzle")) + " " + std::to_string(i + 1);
-        } else {
-            info.display_name = lv_tr("Nozzle");
-        }
 
         // Create heap-allocated subjects (stable across rehash)
         info.temp_subject = std::make_unique<lv_subject_t>();
@@ -295,15 +303,43 @@ void PrinterTemperatureState::init_extruders(const std::vector<std::string>& hea
         lv_subject_init_int(info.target_subject.get(), 0);
         info.target_lifetime = std::make_shared<bool>(true);
 
-        spdlog::trace("[PrinterTemperatureState] Registered extruder: {} -> \"{}\"", name,
-                      info.display_name);
+        // Duty in whole percent, -1 until the heater reports one - the same
+        // unknown-sentinel the active-extruder and bed power subjects use.
+        info.power_subject = std::make_unique<lv_subject_t>();
+        lv_subject_init_int(info.power_subject.get(), -1);
+        info.power_lifetime = std::make_shared<bool>(true);
+
+        spdlog::trace("[PrinterTemperatureState] Registered extruder: {}", name);
         extruders_.emplace(name, std::move(info));
+        changed = true;
     }
 
-    // Bump version to notify UI of extruder list change
-    lv_subject_set_int(&extruder_version_, lv_subject_get_int(&extruder_version_) + 1);
-    spdlog::debug("[PrinterTemperatureState] Initialized {} extruders (version {})",
-                  extruders_.size(), lv_subject_get_int(&extruder_version_));
+    // The tool count decides between "Nozzle" and "Nozzle N", so a survivor's
+    // label can change when another tool comes or goes.
+    refresh_display_names();
+
+    // The version tells consumers the extruder SET changed; an unchanged set
+    // leaves every binding valid, so it does not bump.
+    if (changed) {
+        lv_subject_set_int(&extruder_version_, lv_subject_get_int(&extruder_version_) + 1);
+    }
+    spdlog::debug("[PrinterTemperatureState] Initialized {} extruders (version {}{})",
+                  extruders_.size(), lv_subject_get_int(&extruder_version_),
+                  changed ? "" : ", unchanged");
+}
+
+void PrinterTemperatureState::refresh_display_names() {
+    std::vector<std::string> names;
+    names.reserve(extruders_.size());
+    for (const auto& [name, info] : extruders_) {
+        names.push_back(name);
+    }
+    // Same order init_extruders() numbers them in.
+    std::sort(names.begin(), names.end());
+    const bool multi = names.size() > 1;
+    for (size_t i = 0; i < names.size(); ++i) {
+        extruders_[names[i]].display_name = extruder_display_name(i, multi);
+    }
 }
 
 lv_subject_t* PrinterTemperatureState::get_extruder_temp_subject(const std::string& name) {
@@ -344,6 +380,17 @@ lv_subject_t* PrinterTemperatureState::get_extruder_target_subject(const std::st
     return nullptr;
 }
 
+lv_subject_t* PrinterTemperatureState::get_extruder_power_subject(const std::string& name,
+                                                                  SubjectLifetime& lifetime) {
+    auto it = extruders_.find(name);
+    if (it != extruders_.end() && it->second.power_subject) {
+        lifetime = it->second.power_lifetime;
+        return it->second.power_subject.get();
+    }
+    lifetime.reset();
+    return nullptr;
+}
+
 void PrinterTemperatureState::set_active_extruder(const std::string& name) {
     // Verify the extruder exists in our map
     auto it = extruders_.find(name);
@@ -373,9 +420,14 @@ void PrinterTemperatureState::set_active_extruder(const std::string& name) {
     }
     if (info.target_subject) {
         int new_target = lv_subject_get_int(info.target_subject.get());
-        if (lv_subject_get_int(&active_extruder_target_) != new_target) {
-            lv_subject_set_int(&active_extruder_target_, new_target);
-        }
+        lv_subject_set_int(&active_extruder_target_, new_target);
+    }
+    // Duty resyncs with them: Moonraker deltas omit unchanged fields, so the
+    // new tool may not carry a power frame for a long time, and without this
+    // the mirror keeps displaying the previous tool's duty.
+    if (info.power_subject) {
+        int new_power = lv_subject_get_int(info.power_subject.get());
+        lv_subject_set_int(&active_extruder_power_, new_power);
     }
 }
 
@@ -384,6 +436,22 @@ const std::string& PrinterTemperatureState::active_extruder_name() const {
 }
 
 void PrinterTemperatureState::update_from_status(const nlohmann::json& status) {
+    // Klipper reports duty as 0.0-1.0 on a heater object. Publish whole percent
+    // and leave the subject alone when the field is absent: a frame that omits
+    // it says nothing, and a temperature_fan never carries one at all.
+    auto publish_power = [&status](const std::string& object, lv_subject_t* subject) {
+        if (object.empty() || !status.contains(object)) {
+            return;
+        }
+        const auto& obj = status[object];
+        if (!obj.contains("power") || !obj["power"].is_number()) {
+            return;
+        }
+        int pct = static_cast<int>(std::lround(obj["power"].get<double>() * 100.0));
+        pct = std::clamp(pct, 0, 100);
+        lv_subject_set_int(subject, pct);
+    };
+
     // Update dynamic per-extruder subjects
     for (auto& [name, info] : extruders_) {
         if (!status.contains(name)) {
@@ -420,10 +488,10 @@ void PrinterTemperatureState::update_from_status(const nlohmann::json& status) {
             if (info.target > 0.0f) {
                 info.last_nonzero_target = info.target;
             }
-            if (lv_subject_get_int(info.target_subject.get()) != target_deci) {
-                lv_subject_set_int(info.target_subject.get(), target_deci);
-            }
+            lv_subject_set_int(info.target_subject.get(), target_deci);
         }
+
+        publish_power(name, info.power_subject.get());
     }
 
     // Update active extruder subjects from the currently active extruder's data
@@ -441,9 +509,7 @@ void PrinterTemperatureState::update_from_status(const nlohmann::json& status) {
 
         if (active.contains("target") && active["target"].is_number()) {
             int target_deci = helix::units::json_to_decidegrees(active, "target");
-            if (lv_subject_get_int(&active_extruder_target_) != target_deci) {
-                lv_subject_set_int(&active_extruder_target_, target_deci);
-            }
+            lv_subject_set_int(&active_extruder_target_, target_deci);
         }
     }
 
@@ -472,52 +538,45 @@ void PrinterTemperatureState::update_from_status(const nlohmann::json& status) {
         }
     }
 
-    // Chamber temperature comes from the heater when one is configured (it has
-    // both current temp and target), otherwise from the sensor (temp only).
-    // The sensor is NOT a fallback when a heater is configured — on printers
-    // that have both (e.g. QIDI Q2: heater_generic chamber + thermal-protection
-    // thermistor), the "sensor" often tracks the bed or another nearby heat
-    // source and would pollute chamber_temp_ when partial subscription updates
-    // omit the heater object.
-    if (!chamber_heater_name_.empty()) {
-        if (status.contains(chamber_heater_name_)) {
-            const auto& chamber = status[chamber_heater_name_];
+    publish_power(active_extruder_name_, &active_extruder_power_);
+    publish_power("heater_bed", &bed_power_);
+    publish_power(chamber_heater_name_, &chamber_power_);
 
-            if (chamber.contains("temperature") && chamber["temperature"].is_number()) {
-                int temp_deci = helix::units::json_to_decidegrees(chamber, "temperature");
-                if (lv_subject_get_int(&chamber_temp_) != temp_deci) {
-                    lv_subject_set_int(&chamber_temp_, temp_deci);
-                    spdlog::trace("[PrinterTemperatureState] Chamber temp (heater): {}.{}C",
-                                  temp_deci / 10, temp_deci % 10);
-                }
-            }
-
-            // A temperature_fan's target is a cooling threshold, not a heating
-            // command: Klipper always reports its configured target_temp (40.0 on
-            // the K1C) even at speed 0. Wherever discovery resolves a
-            // temperature_fan into the heater slot (no heater_generic exists),
-            // that target flows through the cooling-fan branch below instead and
-            // is neutralized by the resting-target comparison in
-            // chamber_effective_setpoint().
-            if (chamber_heater_name_.rfind("temperature_fan ", 0) != 0 &&
-                chamber.contains("target") && chamber["target"].is_number()) {
-                int target_deci = helix::units::json_to_decidegrees(chamber, "target");
-                if (lv_subject_get_int(&chamber_target_) != target_deci) {
-                    lv_subject_set_int(&chamber_target_, target_deci);
-                    spdlog::trace("[PrinterTemperatureState] Chamber target: {}.{}C",
-                                  target_deci / 10, target_deci % 10);
-                }
-            }
-        }
-    } else if (!chamber_sensor_name_.empty() && status.contains(chamber_sensor_name_)) {
-        const auto& chamber = status[chamber_sensor_name_];
+    // The chamber reading comes from whichever object owns it, and the target
+    // from the heater alone. Those are the same object unless a sensor has
+    // been assigned to the chamber role by hand, which is the one way a probe
+    // outranks the heater that measures its own chamber.
+    const std::string& chamber_source = chamber_temperature_source();
+    if (!chamber_source.empty() && status.contains(chamber_source)) {
+        const auto& chamber = status[chamber_source];
 
         if (chamber.contains("temperature") && chamber["temperature"].is_number()) {
             int temp_deci = helix::units::json_to_decidegrees(chamber, "temperature");
             if (lv_subject_get_int(&chamber_temp_) != temp_deci) {
                 lv_subject_set_int(&chamber_temp_, temp_deci);
-                spdlog::trace("[PrinterTemperatureState] Chamber temp (sensor): {}.{}C",
+                spdlog::trace("[PrinterTemperatureState] Chamber temp ({}): {}.{}C", chamber_source,
                               temp_deci / 10, temp_deci % 10);
+            }
+        }
+    }
+
+    if (!chamber_heater_name_.empty() && status.contains(chamber_heater_name_)) {
+        const auto& chamber = status[chamber_heater_name_];
+
+        // A temperature_fan's target is a cooling threshold, not a heating
+        // command: Klipper always reports its configured target_temp (40.0 on
+        // the K1C) even at speed 0. Wherever discovery resolves a
+        // temperature_fan into the heater slot (no heater_generic exists),
+        // that target flows through the cooling-fan branch below instead and
+        // is neutralized by the resting-target comparison in
+        // chamber_effective_setpoint().
+        if (chamber_heater_name_.rfind("temperature_fan ", 0) != 0 && chamber.contains("target") &&
+            chamber["target"].is_number()) {
+            int target_deci = helix::units::json_to_decidegrees(chamber, "target");
+            if (lv_subject_get_int(&chamber_target_) != target_deci) {
+                lv_subject_set_int(&chamber_target_, target_deci);
+                spdlog::trace("[PrinterTemperatureState] Chamber target: {}.{}C", target_deci / 10,
+                              target_deci % 10);
             }
         }
     }
@@ -540,51 +599,119 @@ void PrinterTemperatureState::update_from_status(const nlohmann::json& status) {
     }
 
     // Chamber-heater diagnostics (backend-provided, capability-gated). Absent
-    // object in a delta frame = no news: subjects keep their last value.
-    // Vendor schema translation lives in the backend (chamber_heater_backend.h).
+    // object in a delta frame = no news, and the same holds field-wise: a
+    // delta carries only changed fields, so every unengaged optional (the
+    // frame did not mention it) leaves the subject at its last value. An
+    // engaged unknown — empty reason, negative percent, NAN temp — is a real
+    // report and does update. Vendor schema translation lives in the backend
+    // (chamber_heater_backend.h).
     if (!chamber_diagnostics_object_.empty() && status.contains(chamber_diagnostics_object_)) {
         const auto* backend = chamber::backend_by_id(chamber_backend_id_);
         if (backend) {
             if (auto d = backend->parse_diagnostics(status[chamber_diagnostics_object_])) {
-                lv_subject_set_int(&chamber_heater_fault_, d->fault ? 1 : 0);
-                lv_subject_set_int(&chamber_heater_inhibited_, d->inhibited ? 1 : 0);
-                lv_subject_copy_string(&chamber_heater_fault_reason_text_,
-                                       chamber_fault_reason_text(d->fault_reason_kind));
-                if (!d->fault_reason.empty()) {
+                if (d->fault.has_value()) {
+                    lv_subject_set_int(&chamber_heater_fault_, *d->fault ? 1 : 0);
+                }
+                if (d->inhibited.has_value()) {
+                    lv_subject_set_int(&chamber_heater_inhibited_, *d->inhibited ? 1 : 0);
+                }
+                if (d->fault_reason_kind.has_value()) {
+                    lv_subject_copy_string(&chamber_heater_fault_reason_text_,
+                                           chamber_fault_reason_text(*d->fault_reason_kind));
+                }
+                if (d->fault_reason.has_value() && !d->fault_reason->empty()) {
                     // Vendor code is log-only — the UI shows the translated kind.
                     spdlog::debug(
                         "[PrinterTemperatureState] Chamber heater fault: backend={} reason={}",
-                        backend->id(), d->fault_reason);
+                        backend->id(), *d->fault_reason);
                 }
-                if (std::isnan(d->element_temp_c)) {
-                    lv_subject_copy_string(&chamber_heater_element_temp_text_, "--");
-                } else {
-                    // Canonical decimal-drop rule (one decimal <100°C, whole
-                    // degrees at/above) — format_temperature_f wraps
-                    // format_temp_number plus the unit.
-                    helix::ui::temperature::format_temperature_f(
-                        static_cast<float>(d->element_temp_c),
-                        chamber_heater_element_temp_text_buf_,
-                        sizeof(chamber_heater_element_temp_text_buf_));
-                    lv_subject_copy_string(&chamber_heater_element_temp_text_,
-                                           chamber_heater_element_temp_text_buf_);
+                if (d->element_temp_c.has_value()) {
+                    if (std::isnan(*d->element_temp_c)) {
+                        lv_subject_copy_string(&chamber_heater_element_temp_text_, "--");
+                    } else {
+                        // Canonical decimal-drop rule (one decimal <100°C, whole
+                        // degrees at/above) — format_temperature_f wraps
+                        // format_temp_number plus the unit.
+                        helix::ui::temperature::format_temperature_f(
+                            static_cast<float>(*d->element_temp_c),
+                            chamber_heater_element_temp_text_buf_,
+                            sizeof(chamber_heater_element_temp_text_buf_));
+                        lv_subject_copy_string(&chamber_heater_element_temp_text_,
+                                               chamber_heater_element_temp_text_buf_);
+                    }
                 }
-                lv_subject_copy_string(&chamber_filter_fan_percent_text_,
-                                       d->filter_fan_percent < 0
-                                           ? "--"
-                                           : fmt::format("{}%", d->filter_fan_percent).c_str());
+                if (d->filter_fan_percent.has_value()) {
+                    lv_subject_copy_string(
+                        &chamber_filter_fan_percent_text_,
+                        *d->filter_fan_percent < 0
+                            ? "--"
+                            : fmt::format("{}%", *d->filter_fan_percent).c_str());
+                    chamber_filter_fan_percent_ = *d->filter_fan_percent;
+                }
+                if (d->filter_fan_driver.has_value()) {
+                    lv_subject_set_int(
+                        &chamber_filter_fan_device_driven_,
+                        *d->filter_fan_driver == chamber::FilterFanDriver::Device ? 1 : 0);
+                }
+                // Offline is asserted only on a report that the link is down.
+                // A backend that never speaks to connectivity leaves this 0,
+                // so a plain heater_generic chamber never claims to be offline.
+                if (d->device_connected.has_value()) {
+                    if (*d->device_connected) {
+                        chamber_offline_run_ = 0;
+                        lv_subject_set_int(&chamber_heater_offline_, 0);
+                    } else if (++chamber_offline_run_ >= CHAMBER_OFFLINE_CONSECUTIVE_REPORTS) {
+                        lv_subject_set_int(&chamber_heater_offline_, 1);
+                    }
+                }
+                // Another controller is driving the heater: the device's own
+                // web UI or a button on the unit. Informational, not a fault.
+                if (d->externally_controlled.has_value()) {
+                    lv_subject_set_int(&chamber_heater_externally_controlled_,
+                                       *d->externally_controlled ? 1 : 0);
+                }
+                if (d->drying_active.has_value()) {
+                    chamber_dryer_running_ = *d->drying_active;
+                }
+                if (d->drying_remaining_s.has_value()) {
+                    chamber_dryer_remaining_s_ = *d->drying_remaining_s;
+                }
+                if (d->drying_target_c.has_value()) {
+                    chamber_dryer_target_c_ = *d->drying_target_c;
+                }
+                if (d->link_error.has_value() && !d->link_error->empty()) {
+                    spdlog::debug("[PrinterTemperatureState] Chamber heater link error: "
+                                  "backend={} detail={}",
+                                  backend->id(), *d->link_error);
+                }
             }
         }
     }
     if (!chamber_filter_fan_pin_.empty() && status.contains(chamber_filter_fan_pin_)) {
         const auto& pin = status[chamber_filter_fan_pin_];
         if (pin.contains("value") && pin["value"].is_number()) {
-            int on = pin["value"].get<double>() > 0.5 ? 1 : 0;
-            lv_subject_set_int(&chamber_filter_fan_on_, on);
-            lv_subject_copy_string(&chamber_filter_fan_on_text_,
-                                   on ? lv_tr("Filter Fan: On") : lv_tr("Filter Fan: Off"));
-            lv_subject_copy_string(&chamber_filter_fan_icon_, on ? "fan" : "fan_off");
+            // The pin is our REQUEST, not the fan: the device also runs this
+            // fan on its own (heater warmup, thermal purge).
+            lv_subject_set_int(&chamber_filter_fan_requested_,
+                               pin["value"].get<double>() > 0.5 ? 1 : 0);
         }
+    }
+    // Filter-fan running state: the speed the backend reports wins when there
+    // is one, so the switch state agrees with the percent beside it. Backends
+    // with a pin but no reported speed fall back to the pin. Neither surface
+    // in the frame (delta) leaves the subjects at their last values.
+    if (chamber_filter_fan_percent_ >= 0 ||
+        lv_subject_get_int(&chamber_filter_fan_requested_) >= 0) {
+        const int running = chamber_filter_fan_percent_ >= 0
+                                ? (chamber_filter_fan_percent_ > 0 ? 1 : 0)
+                                : lv_subject_get_int(&chamber_filter_fan_requested_);
+        lv_subject_set_int(&chamber_filter_fan_on_, running);
+    }
+
+    // The dryer readout carries the live chamber temperature, so it follows
+    // every frame, not only the ones that mention the cycle.
+    if (chamber_dryer_running_ || lv_subject_get_int(&chamber_dryer_active_) != 0) {
+        publish_chamber_dryer();
     }
 
     // Effective chamber setpoint + control mode: delegate to the single source of
@@ -597,6 +724,29 @@ void PrinterTemperatureState::update_from_status(const nlohmann::json& status) {
         chamber_fan_resting_deci_);
     lv_subject_set_int(&chamber_effective_target_, sp.deci);
     lv_subject_set_int(&chamber_mode_, sp.mode);
+}
+
+// The actual chamber temperature sits beside the cycle's target: an appliance
+// alone often plateaus below target, and the readout shows that as a number
+// rather than a stall. Nothing waits on the target; the appliance's own
+// countdown ends the cycle. The countdown uses the AMS dryer's "H:MM left",
+// minutes rounded up so the last minute reads 0:01, and is omitted until the
+// device reports one.
+void PrinterTemperatureState::publish_chamber_dryer() {
+    lv_subject_set_int(&chamber_dryer_active_, chamber_dryer_running_ ? 1 : 0);
+    if (!chamber_dryer_running_) {
+        lv_subject_copy_string(&chamber_dryer_text_, "");
+        return;
+    }
+    const int current_c = static_cast<int>(std::lround(lv_subject_get_int(&chamber_temp_) / 10.0));
+    std::string text = chamber_dryer_target_c_ > 0
+                           ? fmt::format("{}/{}°C", current_c, chamber_dryer_target_c_)
+                           : fmt::format("{}°C", current_c);
+    const int minutes = (chamber_dryer_remaining_s_ + 59) / 60;
+    if (minutes > 0) {
+        text += fmt::format("  {}:{:02d} {}", minutes / 60, minutes % 60, lv_tr("left"));
+    }
+    lv_subject_copy_string(&chamber_dryer_text_, text.c_str());
 }
 
 } // namespace helix

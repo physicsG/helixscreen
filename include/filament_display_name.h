@@ -120,10 +120,11 @@ FilamentLabelParts resolve_filament_label_parts(const SlotInfo& slot, const Spoo
 /**
  * @brief Resolve the label shown for a slot
  *
- * Precedence, per field rather than per layer. `apply_overrides()` has already
- * merged user overrides onto `SlotInfo` by the time this runs, so "override"
- * and "firmware" are indistinguishable here and form one layer — but that layer
- * still wins field by field, with the Spoolman identity filling only the gaps.
+ * Precedence, per field rather than per layer. `apply_resolved_lane()` has
+ * already laid the lane's resolved identity onto `SlotInfo` by the time this
+ * runs, so "declared" and "firmware" are indistinguishable here and form one
+ * layer — but that layer still wins field by field, with the Spoolman identity
+ * filling only the gaps.
  * Blank is the unset sentinel for every string field, matching the merge policy
  * in `docs/devel/FILAMENT_SLOT_METADATA.md` §5.
  *

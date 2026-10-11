@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "plr_backend.h"
 
+#include "printer_discovery.h"
+#include "text_io.h"
+
 #include <spdlog/spdlog.h>
 
 #include <array>
-#include <fstream>
-#include <sstream>
 
 #include "hv/json.hpp"
 
@@ -56,16 +57,57 @@ std::string plr_creality_sdcard_relative_name(const std::string& path) {
 }
 
 PlrBackendType plr_select_backend(const PlrCapabilitySignals& caps) {
-    // Snapmaker first: its signal is passive, so choosing it never costs a
-    // side-effectful probe. The two markers come from different firmware forks
-    // and should never coexist, but the ordering makes the tie deterministic.
+    // Passive markers first: choosing them never costs a side-effectful probe.
+    // The markers come from different firmware forks and should never coexist,
+    // but the ordering makes the tie deterministic.
     if (caps.snapmaker_pl_env_valid) {
         return PlrBackendType::SNAPMAKER;
+    }
+    // Both halves required: the macro says Qidi stock firmware, the variable
+    // says an interrupted print is on record.
+    if (caps.qidi_resume_macro && caps.qidi_was_interrupted) {
+        return PlrBackendType::QIDI;
     }
     if (caps.creality_power_loss_field) {
         return PlrBackendType::CREALITY;
     }
     return PlrBackendType::NONE;
+}
+
+bool plr_resume_macro_present(const PrinterDiscovery& hw) {
+    return hw.has_macro(QIDI_DETECT_MACRO) || hw.has_macro(QIDI_RESUME_GCODE);
+}
+
+std::vector<std::string> plr_required_status_objects(const PrinterDiscovery& hw) {
+    if (!plr_resume_macro_present(hw)) {
+        return {};
+    }
+    return {std::string("save_variables")};
+}
+
+int plr_parse_interrupted_flag(const nlohmann::json& status) {
+    auto sv_it = status.find("save_variables");
+    if (sv_it == status.end() || !sv_it->is_object()) {
+        return -1;
+    }
+    auto vars_it = sv_it->find("variables");
+    if (vars_it == sv_it->end() || !vars_it->is_object()) {
+        return -1;
+    }
+    auto wi_it = vars_it->find("was_interrupted");
+    if (wi_it == vars_it->end() || !wi_it->is_boolean()) {
+        return -1;
+    }
+    return wi_it->get<bool>() ? 1 : 0;
+}
+
+bool plr_parse_power_loss_signal(const nlohmann::json& status) {
+    auto stats_it = status.find("print_stats");
+    if (stats_it == status.end() || !stats_it->is_object()) {
+        return false;
+    }
+    auto pl_it = stats_it->find("power_loss");
+    return pl_it != stats_it->end() && pl_it->is_number();
 }
 
 bool plr_creality_recovery_available(const PlrDetectResult& r) {
@@ -158,6 +200,15 @@ PlrRecoveryPlan plr_build_plan(PlrBackendType backend, const std::string& recove
             break;
         }
 
+    case PlrBackendType::QIDI:
+        // Passive backend: selection already required was_interrupted true,
+        // which only a print that never reached a normal end or cancel leaves
+        // behind. Both actions are plain macros with no parameters, so the
+        // filename is display-only and may be empty.
+        plan.resume_gcode = QIDI_RESUME_GCODE;
+        plan.discard_gcode = QIDI_DISCARD_GCODE;
+        break;
+
     case PlrBackendType::NONE:
         break;
     }
@@ -185,13 +236,11 @@ std::string plr_parse_creality_sidecar(const std::string& json_text) {
 std::string plr_read_creality_recovery_filename() {
     for (const char* root : CREALITY_DATA_ROOTS) {
         std::string path = std::string(root) + "/" + CREALITY_SIDECAR_REL_PATH;
-        std::ifstream in(path, std::ios::binary);
-        if (!in) {
+        auto text = helix::text_io::read_file(path);
+        if (!text) {
             continue;
         }
-        std::ostringstream buf;
-        buf << in.rdbuf();
-        std::string name = plr_parse_creality_sidecar(buf.str());
+        std::string name = plr_parse_creality_sidecar(*text);
         if (!name.empty()) {
             spdlog::info("[PLR] Creality recovery filename from {}: '{}'", path, name);
             return name;

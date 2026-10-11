@@ -80,7 +80,6 @@ ParsedGCodeFile make_two_object_tower(int layer_count) {
 
 void configure(GCodeLayerRenderer& r, ParsedGCodeFile& gcode, bool ghost) {
     r.set_gcode(&gcode);
-    r.set_view_mode(GCodeLayerRenderer::ViewMode::FRONT);
     r.set_ssao_enabled(false);      // isolate the ghost from the shading pass
     r.set_antialias_enabled(false); // and from the AA fringe, now a separate flag
     r.set_extrusion_color(lv_color_hex(0x3060C0));
@@ -316,7 +315,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "the ghost is washed toward white, not just di
     CHECK(ratio > 0.30);
 }
 
-TEST_CASE_METHOD(LVGLTestFixture, "an excluded object is recoloured in the ghost too",
+TEST_CASE_METHOD(LVGLTestFixture, "an excluded object is hatched in the ghost too",
                  "[layer_renderer][ghost]") {
     // Exclusion has to be visible on unprinted geometry: that is exactly the
     // geometry a user is deciding whether to cancel.
@@ -326,28 +325,66 @@ TEST_CASE_METHOD(LVGLTestFixture, "an excluded object is recoloured in the ghost
     static uint8_t buf[kBufBytes];
     lv_canvas_set_buffer(canvas, buf, kCanvas, kCanvas, LV_COLOR_FORMAT_ARGB8888);
 
+    // Layer 0 is solid and carries its own stripes, so compare against the same
+    // exclusion with the ghost off: only the ghost's stripes separate the two.
+    // The ghost blits faded, so its stripes are measured as red-dominant pixels
+    // rather than as the exact hatch hue.
+    auto red_dominant = [](const std::vector<uint8_t>& px) {
+        size_t n = 0;
+        for (size_t i = 0; i < px.size(); i += 4) {
+            const int b = px[i], g = px[i + 1], r = px[i + 2];
+            n += (px[i + 3] != 0 && r > 8 && r > 2 * g && r > 2 * b);
+        }
+        return n;
+    };
+
+    GCodeLayerRenderer no_ghost;
+    configure(no_ghost, gcode, false);
+    no_ghost.set_current_layer(0);
+    no_ghost.set_excluded_objects({"left_box"});
+    drive_with_ghost(no_ghost, canvas, buf);
+    const size_t red_without = red_dominant(snapshot(buf));
+
+    GCodeLayerRenderer with_ghost;
+    configure(with_ghost, gcode, true);
+    with_ghost.set_current_layer(0);
+    with_ghost.set_excluded_objects({"left_box"});
+    drive_with_ghost(with_ghost, canvas, buf);
+    const size_t red_with = red_dominant(snapshot(buf));
+
+    INFO("red-dominant pixels without ghost=" << red_without << " with ghost=" << red_with);
+    CHECK(red_with > red_without);
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "an excluded object is hatched in the solid cache",
+                 "[layer_renderer][exclude]") {
+    auto gcode = make_two_object_tower(30);
+    lv_obj_t* canvas = lv_canvas_create(test_screen());
+    REQUIRE(canvas != nullptr);
+    static uint8_t buf[kBufBytes];
+    lv_canvas_set_buffer(canvas, buf, kCanvas, kCanvas, LV_COLOR_FORMAT_ARGB8888);
+
+    const uint32_t hatch = selection::Palette{}.excluded;
+    const uint8_t ex_r = (hatch >> 16) & 0xFF;
+    const uint8_t ex_g = (hatch >> 8) & 0xFF;
+    const uint8_t ex_b = hatch & 0xFF;
+
     GCodeLayerRenderer plain;
-    configure(plain, gcode, true);
-    plain.set_current_layer(0);
+    configure(plain, gcode, false);
+    plain.set_current_layer(29);
     drive_with_ghost(plain, canvas, buf);
-    const auto before = snapshot(buf);
+    const size_t hue_before = near_hue(snapshot(buf), ex_r, ex_g, ex_b, 20);
 
     GCodeLayerRenderer excluded;
-    configure(excluded, gcode, true);
-    excluded.set_current_layer(0);
+    configure(excluded, gcode, false);
+    excluded.set_current_layer(29);
     excluded.set_excluded_objects({"left_box"});
     drive_with_ghost(excluded, canvas, buf);
-    const auto after = snapshot(buf);
+    const size_t hue_after = near_hue(snapshot(buf), ex_r, ex_g, ex_b, 20);
 
-    const selection::Palette pal;
-    const uint8_t ex_r = pal.excluded_r();
-    const uint8_t ex_g = pal.excluded_g();
-    const uint8_t ex_b = pal.excluded_b();
-
-    const size_t hue_before = near_hue(before, ex_r, ex_g, ex_b, 60);
-    const size_t hue_after = near_hue(after, ex_r, ex_g, ex_b, 60);
-    INFO("exclusion-hue pixels before=" << hue_before << " after=" << hue_after);
-    CHECK(hue_after > hue_before);
+    INFO("hatch-hue pixels before=" << hue_before << " after=" << hue_after);
+    CHECK(hue_before == 0);
+    CHECK(hue_after > 0);
 }
 
 TEST_CASE_METHOD(LVGLTestFixture, "selecting an object marks it in the ghost",

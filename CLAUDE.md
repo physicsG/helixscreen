@@ -4,10 +4,44 @@
 
 **HelixScreen**: LVGL 9.5 touchscreen UI for Klipper 3D printers. XML engine in `lib/helix-xml/` — our own MIT fork of the engine LVGL removed in 9.5, and its own repo ([prestonbrown/helix-xml](https://github.com/prestonbrown/helix-xml)), so a fresh clone needs `git submodule update --init --recursive`. Pattern: XML → Subjects → C++.
 
-**Before compiling:** Check for existing build processes (`pgrep -x -d' ' 'make|cc1plus'`, or `ps -eo pid,args | grep '[m]ake -j'`) — concurrent compilations thrash the machine. Never `pgrep -f` here: it matches the checking command's own line, so it always reports a false hit, and in a wait loop it never exits. And `pgrep` takes ONE pattern: `pgrep -x make cc1plus` errors with "only one pattern can be provided", so with stderr suppressed it prints nothing and reads as an all-clear. Use the alternation form above, or one `pgrep -x` per name. **Check `free -h`'s Mem AND Swap rows together:** the `helix-tests` link is gated by memory headroom, not cores, and neither row decides on its own. An exhausted swap row is NOT a throttle signal while `Mem:` `available` is still tens of GB: a full `make -j6` built clean at 80Gi available with 14Mi free swap. The failure case is both tight at once, low `available` *and* swap near 0, where `-j8` dies mid-link with *no* `oom-kill` line while load average still looks healthy. `-j6` clears it. Dying at the *same* step twice **can** be a resource ceiling, but rule out a peer first: a second `make` in the SAME tree deletes your freshly linked binary, because `prune-orphan-test-objs` (`mk/tests.mk`) runs `rm -f $(TEST_BIN)` whenever it finds one orphan object, and it is a *sibling* prerequisite of the link, so `-j` gives them no order. The tell is in the log: `[LD] helix-tests` followed by `✓ Unit test binary ready` and NO `✗ Test linking failed!` means the linker exited 0 and something else removed the output. Every shard then reports `No such file or directory` and the suite reads RED with nothing wrong in your code. Memory is not the cause there - a starved link fails loudly and stops make. Under pressure, the peer is often another Claude session you can TALK to, not just a `pgrep` hit: `ListAgents` lists the other Claude sessions on this machine (the name is the address) and `SendMessage` asks directly — which tree, what target, how long — so you coordinate (wait for theirs, drop to `-j2`, take turns at the link) instead of racing blind; send with `notify_when_idle: true` to get ONE notice when that session goes idle instead of polling `free -h`. The symmetric duty: when the box is yours — no peer build, `available` in the tens of GB — MAXIMIZE. `-j` at full `nproc`, every core and all headroom spent, nothing rationed out of caution, and ramp back to full the moment a peer finishes. A stale `-j2` left running after pressure clears is just a slower way to waste the same machine.
+**macOS is a development platform only — never a deployment target.** The app ships to embedded Linux (MIPS, ARM, aarch64) and Raspberry Pi. A Mac exists to build, run `--test`, and iterate on UI; nothing is released for it and no user runs it there. Host-portability work is justified by *a developer being able to build and run the suite*, never by production correctness — so fix a portability break when it blocks your own iteration, and don't add CI jobs or abstractions to defend macOS as a runtime. **On a Mac build with `gmake`**: Homebrew installs GNU make 4.x only as `gmake`, bare `make` is Apple's 3.81, and the Makefile hard-errors below 4.2 — 3.81 parses it but silently no-ops every `$(file ...)` (test-link response file, flags stamp), so a 3.81 "build" links a stale manifest.
+
+**Planned work lives in GitHub issues** (`gh issue list --milestone Backlog`; milestone = scheduling axis, labels = kind: docs-debt, hw-verify, tech-debt). In-flight plans and specs live in `docs/devel/plans/`: point-in-time scaffolding, deleted in the change that ships the work (convention: `docs/CLAUDE.md`).
+
+**Before compiling, check for a build already running** — concurrent compilations thrash the machine:
 
 ```bash
-make -j                              # Build ONLY the program binary (NOT tests)
+pgrep -x -d' ' 'make|clang++|cc1plus'   # ONE pattern. Never pgrep -f: it matches its own command line
+#   The compiler is auto-detected in `Makefile`'s `origin CXX` block: clang++
+#   when it can link, else g++; mk/cross.mk uses $(CROSS_COMPILE)g++. Native
+#   builds on this box show `clang++` and NOT `cc1plus`; cross builds show
+#   `cc1plus`. A pattern naming only one of them reads 0 against a box at full
+#   tilt. A 0 does not prove idle either: everything is wrapped in ccache, and
+#   a cache hit finishes in milliseconds, so sampling between translation units
+#   legitimately catches nothing mid-build. `make` is the process that stays up
+#   for the whole build; treat it as the signal, compilers as corroboration.
+free -h                          # read the Mem row: `available` is the only number that matters
+#   A nearly-full Swap row is NORMAL here and is NOT a problem by itself. Linux
+#   never reclaims swap it has already written, so `used` only ratchets up over
+#   an uptime measured in weeks; those pages are cold and cost nothing. If ANY
+#   swap is free and `available` is healthy, the box is fine: do not throttle,
+#   do not wait for it to drain, do not narrate it.
+jobpool status                   # where jobpool is installed: pool size, free tokens, consumers
+ps -eo pid,etime,time,pcpu,comm --sort=-time | head   # abandoned spinners
+#   A helix-tests left behind by a deleted worktree can hold a core at 100% for
+#   a day: high TIME, high %CPU, and `readlink /proc/<pid>/cwd` ends in
+#   "(deleted)". Kill that PID by number - never by name, it is shared.
+```
+
+- **Plain `make` (or `make -j`) picks the `-j` for you; do not hand-pick a `-jN`.** Without jobpool (CI, a Mac, a fresh clone) the Makefile takes it from `scripts/helix-claim jobs`: the cores, capped at one job per GB of `available`, and an explicit `-jN` passes through untouched. If jobpool (a machine-wide GNU make jobserver) is installed, as it is on thelio and zeus for this project's own machines (repo: `~/Code/Tools/jobpool` on thelio, mirrored to zeus), `make` on `PATH` is its shim: every build on the box draws its jobs from one machine-wide pool sized from cores and memory, a tree that is linking or testing hands its share to whoever is compiling, and the shim strips any `-j` you type. `jobpool status` shows the pool; `JOBPOOL=0 make ...` bypasses it for one run. Container builds (`scripts/pool-docker.sh`) and the bats suite join it too; anything else that takes its own `-j` runs under `scripts/helix-claim hold [--min M] -- sh -c '... -j "$JOBPOOL_SLOTS"'`. **`helix-claim jobs` is make's `-j` only**: with a pool live it is the whole pool, so `docker run --cpus $(scripts/helix-claim jobs)`, `ninja -j$(...)` or `parallel -j$(...)` runs that many jobs ON TOP of every build. Size non-make work with `hold` (it exports `JOBPOOL_SLOTS`) or `scripts/pool-docker.sh` for a container.
+- The unit sweep runs 3 shards per slot of `helix-claim jobs` (the pool's size when one is live; `SHARD_CONCURRENCY` overrides). With a pool live, shards run three to a pool token, so every sweep on the box together stays within three shards per token. Every make renices itself to 10, so its compilers and test shards yield to the desktop: thelio's system76-scheduler drops `make` to nice 19 `SCHED_IDLE` only when it happens to notice it, and never lists `helix-tests`. `HELIX_NICE=0` opts out.
+- Dying at the same step twice **can** be a resource ceiling, but rule out a peer first: a second `make` in the SAME tree deletes your freshly linked binary (`prune-orphan-test-objs` in `mk/tests.mk` runs `rm -f $(TEST_BIN)` as a sibling prerequisite of the link, so `-j` gives them no order). The tell: `[LD] helix-tests`, then `✓ Unit test binary ready`, NO `✗ Test linking failed!`, then every shard reports `No such file or directory`. Nothing is wrong with your code; a starved link fails loudly and stops make.
+- **A build here goes minutes at a time printing nothing, and that is normal.** Judge liveness by the log growing, and compare its mtime against `date` in the SAME command before calling it stale - an `etime` and an mtime are not comparable by eye. A parent `make` in `do_wait` and a sub-make in `poll_schedule_timeout` are a make waiting on children and a jobserver poll, not a deadlock. Nothing short of a log that has not grown across two checks minutes apart justifies killing someone's build.
+- Who else is building, and in which tree, is a question you ask them: `ListAgents` + `SendMessage`, not a `pgrep` guess.
+- **The commit hook builds too.** `scripts/quality-checks.sh` verifies an incremental build of the app with a bounded `-j` from `helix-claim jobs` (`qc_build_jobs`), so N sessions committing never become N unbounded builds; under the jobpool shim the pool bounds it instead. `HELIX_QC_JOBS` overrides it. `scripts/qc_timing.py [--staged-only]` runs the gate and prints where its time went, which is how you find out whether you are waiting on that build or on a check.
+
+```bash
+make                                 # Build ONLY the program binary (NOT tests); it picks its own -j
 ./build/bin/helix-screen --test -vv  # Mock printer + DEBUG logs
 # ALWAYS use verbosity: -v=INFO, -vv=DEBUG, -vvv=TRACE (default=WARN)
 
@@ -21,30 +55,105 @@ HELIX_MOCK_AUTO_PRINT=1 ./build/bin/helix-screen --test --sim-speed 6 -vv
 #   Confirm via log: "[MoonrakerManager] Creating MOCK client (<printer>, <n>x speed)"
 
 make test                            # Build tests only (does NOT run them)
-make test-run                        # Build AND run tests in parallel
+make t F='[tag]'                     # Build, then run ONE tag or case (the inner loop)
+./build/bin/helix-tests '[tag]'      # Same run WITHOUT make's dependency scan (0.05-0.6s).
+#   Correct only when you have not edited code since the last `make test`:
+#   `make -j` builds the app alone, so after an edit the bare binary reports the
+#   PREVIOUS build's numbers. `make t` costs 5-18s and buys exactly that guarantee.
+make unit-sweep                      # C++ unit tests only, sharded (~50s idle)
+make full-test-run                   # unit-sweep + the bats suite (~2m) - the completion gate
+#   Nothing else runs bats locally: not the commit hook, not test-xml. Without this
+#   the shell suite reaches CI unrun. [.] and [slow] stay outside it deliberately -
+#   quality-checks.sh runs [.] on any staged code change, nightly CI runs [slow].
+#   `make test-run` runs nothing: it prints which of these fits the question
+#   you have and exits non-zero. Cadence table: tests/CLAUDE.md.
+
+make dev-timing                      # What the dev loop costs, measured (ledger from transcripts)
+#   Medians for every build, suite and test run, so "is this worth running" is
+#   answered from data. Derived + gitignored; rebuilding it takes a few seconds.
+
+scripts/syntax_check.py <file>...    # "does this compile?" in seconds
+#   Takes the file's own flags from compile_commands.json and runs -fsyntax-only,
+#   instead of the minutes `make test` spends re-linking. Proves nothing about
+#   behaviour: run the tag for that. A brand-new file borrows a sibling's flags.
 ./build/bin/helix-tests "[tag]"      # Run specific test tags
 make pi-test                         # Build on thelio + deploy + run
 
+# Building on a remote host: send the DELTA, not the tree.
+make remote-test TAG='[ams]'         # build tests on $REMOTE_HOST, run one tag
+make remote-native                   # build the app there
+#   The host clones and fetches from GitHub itself; your link carries one patch
+#   (unpushed commits AND uncommitted edits) plus untracked files — a few KB.
+#   `make remote-sync` rsyncs the whole tree and is for the Docker cross targets
+#   only; a fresh REMOTE_DIR costs ~260MB, so never make one per branch.
+
+scripts/test-host-run.sh mutate --tests '[tag]'   # mutation gate on the test host
+scripts/test-host-run.sh asan '[tag]'            # AddressSanitizer on the test host
+scripts/test-host-run.sh sweep                   # make unit-sweep on the test host
+#   The test host is any Linux box with Docker, named in
+#   ~/.config/helixscreen/build-hosts.env (HELIX_TEST_HOST=..., zeus here) and set
+#   up once by scripts/test-host-setup.sh; docs/devel/BUILD_SYSTEM.md "Using your
+#   own build/test host". With none configured these refuse in one line.
+#   bats stays local (`make test-shell`): the container runs as root with no
+#   shellcheck, so about 190 shell tests fail there on the environment alone.
+#   All three are expensive and non-interactive, so they belong on the idle
+#   big box. `test-host-run.sh test` with no tag runs the suite in ONE process,
+#   where cross-test contamination fails cases no branch touched: not a gate.
+#   ASAN especially: thelio's /etc/ld.so.preload makes ASAN's runtime load
+#   second, so the binary produces NO test output and exits 0 - a pass that ran
+#   nothing. The container has no ld.so.preload and its image matches CI's.
+#   It runs your tree as it is on disk, uncommitted edits included: an rsync to
+#   a per-tree mirror (/work/trees/<tree>) whose build/ persists, so a warm run
+#   rebuilds only what changed, and different trees run at once. The output says
+#   HEAD + clean or + dirty <hash>. `--commit` runs the pushed HEAD instead, for a
+#   verdict others must reproduce (mutate always does). `make full-test-run`
+#   runs the sweep there while bats runs here when the link pays (TEST_HOST=1
+#   forces it, TEST_HOST=0 keeps both local). On a ZFS host keep
+#   build headroom with the zfs_arc_sys_free tunable (zeus keeps 64 GiB). The
+#   container joins the host's jobpool when one is installed there, else sizes
+#   -j from MemAvailable.
+
 # Worktrees — MUST use for MAJOR work. Always in .worktrees/ (project root).
-scripts/setup-worktree.sh feature/my-branch  # Symlinks deps, builds fast
-#   Also writes .claude/settings.local.json (gitignored) with PROJECT_DIR set to
-#   the MAIN tree, so claude-recall writes lessons and stats there instead of to
-#   a per-worktree .claude-recall/ that `git worktree remove` would discard.
-#   A worktree made by hand (plain `git worktree add`) does NOT get this.
+scripts/setup-worktree.sh feature/my-branch  # Symlinks shared deps, builds fast
+#   lib/lvgl, lib/libhv, lib/lua and lib/helix-xml get a PRIVATE checkout per worktree
+#   (patches/ is per-branch); everything else in lib/ is a symlink shared with
+#   the main tree. Also writes .claude/settings.local.json with PROJECT_DIR set
+#   to the MAIN tree so claude-recall writes lessons and stats there.
+#   The directory is named after the branch's LAST segment, so it refuses an
+#   existing .worktrees/<name>: a re-setup needs --setup-only, the same branch,
+#   and no other session's live worktree: claim on it.
+#   A worktree the harness makes on its own (EnterWorktree → .claude/worktrees/)
+#   gets NONE of this: no lib/ symlinks, no submodules, no build. Prefer this
+#   script; if you are already in one, `git submodule update --init --recursive`
+#   and a full build before trusting anything it produces.
+
+scripts/teardown-worktree.sh my-branch       # Remove a finished worktree + branch
+scripts/teardown-worktree.sh my-branch -n    # ...or just print the plan
+#   `git worktree remove` REFUSES here ("working trees containing submodules
+#   cannot be moved or removed") because of those private checkouts, so removal
+#   is a guarded rm -rf plus a prune. rm -rf removes a lib/ symlink, never its
+#   target, so the main tree's shared copies survive.
+#   Refuses to discard anything unique: uncommitted changes (--force overrides),
+#   unpushed commits in lib/helix-xml (ours, edited directly), a branch not
+#   contained in --into (default main), or a live build/test/git process with
+#   its cwd inside the tree. Also releases the tree's helix-claim, which would
+#   otherwise read LIVE forever against a directory that no longer exists.
+#   If `git branch -d` refuses on a branch this script has CONFIRMED is merged,
+#   the cause is almost always that -d also checks the branch's UPSTREAM: the
+#   work is on local main but main has not been pushed. Push, or --force-branch.
 ```
 
-**XML changes need no rebuild:** `ui_xml/*.xml` is loaded at runtime — edit XML, then **relaunch** the binary to see changes (no `make` needed). Better: hot reload is **on by default for native dev builds** (cross-compiled release builds default it off) — the running app re-registers components within ~500ms of a save and rebuilds the active panel/overlay/modal in place. `HELIX_HOT_RELOAD=1`/`0` overrides the default either way. Invalid XML (mid-write truncation, syntax errors) is silently skipped on the polling thread — the existing UI stays live and the next poll retries.
+**XML changes need no rebuild:** `ui_xml/*.xml` is loaded at runtime. Hot reload is **on by default for native dev builds** (cross-compiled release builds default it off): the running app re-registers components within ~500ms of a save and rebuilds the active panel/overlay/modal in place. `HELIX_HOT_RELOAD=1`/`0` overrides the default either way. Invalid XML (mid-write truncation, syntax errors) is silently skipped on the polling thread; the existing UI stays live and the next poll retries.
 
 **Screenshots:** Press 'S' in UI, or `./scripts/screenshot.sh helix-screen output-name [token]` (drives a fresh instance via `helix-screen ctl`; token = panel/overlay/`demo` screen from `scripts/screenshot-recipes.sh`).
 
-**Driving the UI (screenshots, debugging, bringing up any panel/overlay/modal):** `helix-screen ctl` remote-controls a running instance — `navigate`/`click`/`ls`/`text`/`geom`/`set_value`/`scroll`/`demo`/`screenshot`, or a `helix-screen repl` REPL. The server auto-starts in `--test` (or `--remote`). See `docs/devel/HELIXCTL.md`. (Replaces the removed `-p`/`--panel` flags.)
+**Driving the UI (screenshots, debugging, bringing up any panel/overlay/modal):** `helix-screen ctl` remote-controls a running instance — `navigate`/`click`/`ls`/`text`/`geom`/`set_value`/`scroll`/`demo`/`screenshot`, or a `helix-screen repl` REPL. The server auto-starts in `--test` (or `--remote`). See `docs/devel/HELIXCTL.md`.
 
 > **Always pin the socket — never run a bare `ctl`.** The default path is per-user and
 > fixed, so with two instances up, `ctl` silently drives **whichever started first** and
-> still reports success. That is how you "verify" a change against another session's app.
-> Derive both the socket and the config dir from the worktree so parallel agents can't
-> collide — and you need *both*, since `--remote-socket` alone still contends on the
-> config flock:
+> still reports success. Derive both the socket and the config dir from the worktree so
+> parallel agents can't collide — you need *both*, since `--remote-socket` alone still
+> contends on the config flock:
 > ```bash
 > TREE=$(basename "$(git rev-parse --show-toplevel)")
 > export HELIX_SOCK="/tmp/helix-$TREE.sock" HELIX_CONFIG_DIR="/tmp/helix-config-$TREE"
@@ -54,16 +163,143 @@ scripts/setup-worktree.sh feature/my-branch  # Symlinks deps, builds fast
 > ```
 > **An empty `HELIX_CONFIG_DIR` is isolated for the lock and socket, not for the printer
 > address.** Finding no `settings.json` there, `Config` bootstraps one from
-> `~/.helixscreen/settings.json.backup` — look for `[Config] Config missing — restoring
-> from backup:` in the log. That inherits the real `moonraker_host`, so a run **without**
-> `--test` opens a WebSocket to the actual printer. Keep `--test` (the mock client ignores
-> the host entirely), or name the target explicitly with `--moonraker ws://HOST:7125`, which
-> **does** take precedence over the saved `moonraker_host` (the flag is `--moonraker`, not
-> `--moonraker-url`; verified 2026-08-27 — a seeded config defaulting to port 7125 connected
-> to `ws://127.0.0.1:7199/websocket` when the flag named it).
+> `~/.helixscreen/settings.json.backup` (`[Config] Config missing — restoring from backup:`
+> in the log). That inherits the real `moonraker_host`, so a run **without** `--test`
+> opens a WebSocket to the actual printer. Keep `--test` (the mock client ignores the host
+> entirely), or name the target explicitly with `--moonraker ws://HOST:7125`, which takes
+> precedence over the saved host. The flag is `--moonraker`; there is no `--moonraker-url`.
+>
+> **Writing your own `settings.json` there does NOT preset anything unless it carries
+> `config_version`.** A config whose `config_version` is absent or 0 is read as the
+> packaged tarball default and replaced *wholesale* from the rolling backup (`[Config]
+> Loaded config is a tarball default (no config_version) — restoring from backup:`), which
+> is how a Moonraker web update recovers real settings after `rmtree()`. So a hand-written
+> file presetting `beta_features`, `display/screensaver_type` or anything else is discarded
+> before the app reads it, and every value you thought you set is the backup's. Copy a real
+> `settings.json` and edit it, or read the value back from the log rather than trusting the
+> file you wrote.
 >
 > Prefer `ctl text <name>` / `ctl geom <name>` over reading a screenshot — they are exact,
 > and a screenshot only proves what a scroll position happened to expose.
+
+---
+
+## Sharing This Tree With Other Sessions
+
+**Message the other session first.** Overlapping work - a claim on a tree you need, a
+branch touching your files - gets a message BEFORE you read their diff, pick a winner or
+plan a rebase, including before you file or comment publicly on it.
+
+- Keep it short: the ask first, then the branch names and SHAs they need to answer.
+- A claim says a resource is taken, never what the holder is doing or how far along. Ask.
+- Address a peer by the `message=uds:...sock` in their `helix-claim list` row. Every live
+  claim carries one; `ListAgents` names do not map to claims, so guessing one reaches the
+  wrong session.
+- A successful send is not a delivery and silence is not agreement. Never merge, rebase or
+  delete on an unanswered message.
+
+**Settle it between sessions; bring Preston outcomes, not questions.** He runs several
+sessions at once, and every question routed back to him stalls all of them.
+
+- Coordination is yours: who builds, who holds a tree, merge order, conflicts, release
+  timing. Resolve it session-to-session, then tell him what happened.
+- Ask him only for what no session can settle: a product call nobody has made yet, or
+  judging what pixels look like.
+- Be proactive. When a peer's work affects yours, message them before they have to ask.
+  When you learn something another session needs, send it.
+
+What is shared here:
+
+- **The main working tree is live.** Other sessions commit in it. Never let git autostash
+  (`-c merge.autoStash=false`), and commit your own edits promptly, with explicit pathspecs.
+  Pushing main pushes peers' commits too: read `git log origin/main..main` and push only when their gates are green.
+- **Whoever moves main pushes it, in the same claim.** Gate the branch first, then
+  `take worktree:main`, merge or fast-forward, push, verify `origin/main == main`, release.
+  Never leave main ahead of origin: no other session will push work that is not theirs, so
+  an unpushed main stalls every merge behind it until its owner is found.
+- **Land in batches and gate once.** Before taking main, message whoever holds it or is
+  queued and fold your ready branch into one landing: one session merges every ready branch
+  and runs ONE `make full-test-run` on the combined result. A full gate per branch turns N
+  landings into N serial 10-minute gates, and parallel gates leave thelio's CPU spinning on
+  the same suite. Run the full gate once per branch, at the end: a review fix gets its tags
+  (`make t F=...`), and the batch gate covers the rest.
+- **`MM` does not mean a peer is mid-commit.** It is ambiguous, and one command settles it:
+  `git diff HEAD -- <path>`. Empty means the committed content is what is on disk, only the
+  INDEX holds an older copy, and nothing is in flight. A `git commit -- <paths>` whose
+  pre-commit hook reformats the file leaves exactly that: the pre-format copy stranded in the
+  index. Clear it with `git add <path>`: index becomes HEAD, so there is nothing unpublished
+  for a peer to sweep, and it discards nothing. A non-empty `git diff HEAD` is the case worth
+  waiting on; confirm with `pgrep -x git` plus each pid's cwd and `helix-claim check
+  worktree:main` before concluding anything about who owns it.
+- **Do not `git add` in this tree: commit the pathspec directly.** `git add` then `git commit` is not atomic: your change sits in the *shared* index for however long your hook runs (20s for a script, minutes for a staged header), and a peer committing in that window takes it into their commit. `git commit -- <paths>` commits those paths' current content without going through the index, so there is no window, though it takes a peer's hunks in the same file too (check `git diff HEAD -- <path>`), and a new file needs `git add -N <path> && git commit -- <path>`, which exposes only an empty intent-to-add entry. The one exception is the stale-index case above, where the content is already in HEAD and staging it exposes nothing.
+- **A live merge and an abandoned one look identical from outside.** `MERGE_HEAD` present, zero `UU` entries, and an index mtime minutes old and not moving describe a `git commit` whose hook is *building* — the index stops the moment the hook starts, and a staged header takes the full-build path. An absent `ListAgents` row is not evidence either. The only discriminator is process state:
+  ```bash
+  pgrep -x git | while read p; do echo "$p $(readlink /proc/$p/cwd)"; done
+  ps -o pid,etime,args --ppid <pid>      # quality-checks.sh + make = still building
+  ```
+  Run that before concluding anything about a foreign index. Completing someone's merge is non-destructive and aborting is destructive, but both are theirs to run.
+- **`build/bin/helix-tests` and `helix-screen` can be one inode across worktrees**: whoever linked last set the bytes both trees run. Compare `stat` inodes before trusting a control run against a sibling tree.
+- **The default `ctl` socket is per-user, not per-instance.** Pin it (box above) or you drive a peer's app and it reports success.
+- **One session per physical printer at a time.** Ask who holds a device before pointing anything at it. Claim `device:` around a deploy with an EXIT trap (box below) and never kill a deploy mid-phase; the name is a role, so put the IP in `--note`.
+- **Claim before you take a shared resource: `scripts/helix-claim`.** Plain shell, no Claude
+  dependency — opencode, a human or a script can use it, and `AGENTS.md` is a symlink to this
+  file so every agent reads the same rule.
+
+  ```bash
+  scripts/helix-claim check worktree:main        # FREE | LIVE | STALE  (exit 1 if LIVE)
+  if scripts/helix-claim take device:k2plus deploy --pid $$ --note 192.168.1.50; then  # gate on the exit code; never pipe take
+      trap 'scripts/helix-claim release-if-owned-by $$ device:k2plus' EXIT; make deploy-k2plus; fi
+  scripts/helix-claim list                       # everything, with derived liveness
+  scripts/helix-claim resources                  # memory, load, claims, top RSS, test host: before heavy work
+  scripts/helix-claim run heavy:sweep -- make unit-sweep   # claimed while it runs
+  scripts/helix-claim jobs -v                    # make's -j: the jobpool's size, or cores capped by memory. Never size docker/ninja/parallel from it: `hold`
+  ```
+
+  Resource names for worktrees are **derived, not trusted**: `worktree:main`,
+  `worktree:helixscreen` and a bare `worktree:` all resolve to the same tree, matched by
+  directory basename or checked-out branch. Free-form names let two sessions claim one tree
+  under two spellings and both read FREE, and an advisory lock must never fail open.
+  **`build:<tree>` and `worktree:<tree>` name the same directory and exclude each other**,
+  in both directions and for the same reason: writing under a running build corrupts the
+  build, and building while files move gives a binary matching no commit. A take consults
+  its sibling, so `check worktree:main` reports a live `build:` holder instead of FREE.
+  One session may hold both on its own tree; only a different owner blocks.
+
+  Liveness is **derived from process state, never asserted**: a claim records its owner's pid
+  and that pid's kernel start-time, so a crashed owner reads STALE on its own, pid reuse
+  cannot fake LIVE, and nothing needs cleaning up. Use it for `worktree:<name>` (hold it
+  from your FIRST edit until the commit lands - not merely for a merge, rebase or long
+  commit: uncommitted files with no claim and an old mtime are indistinguishable from
+  abandoned work, and `build:<name>` reserves nothing),
+  `build:<name>`, `device:<printer>`, `heavy:<what>`, `gh:issue:<n>` (check it first), `socket:<path>`.
+
+  **Before concluding anything about someone else's work, run `check`.** A merge mid-commit
+  and an abandoned one look identical in the tree — same `MERGE_HEAD`, same resolved index,
+  same frozen mtime. A `git commit` here can hold the shared tree for 40 minutes while its
+  hook builds. FREE is not proof: look for a `make` whose cwd is the tree too.
+  A missing claim does not make work free: uncommitted work is someone's until they answer.
+
+  **What the git hooks now do** (`core.hooksPath` is `.githooks`, tracked, so this reaches
+  every worktree and every tool — opencode, plain `git`, a human — with no install step):
+
+  | Hook | Behaviour |
+  |------|-----------|
+  | `pre-commit` | If `MERGE_HEAD` exists, claims this tree under the **git process's** pid so the merge announces itself. Prints nothing unless another session already holds the tree. Then runs the existing quality checks unchanged. |
+  | `post-commit` | Releases that claim **only if the claim names this commit's own pid**, so a session claim spanning several commits survives. |
+
+  Ordinary human git use stays silent: the hooks speak only on a real conflict. Advisory by
+  design; `HELIX_CLAIM_STRICT=1` makes `pre-commit` refuse instead of warn. `--no-verify`
+  bypasses both, as before.
+
+  A merge here can hold the tree for **40 minutes** while the hook builds. Its owner claims it,
+  announces a long one to peers, and releases when done.
+
+- **`scripts/helix-claim jobs` is where every default `-j` comes from** when no jobpool shim
+  decides: the Makefile's `JOBS`, the sweep's shard concurrency, the commit hook's build and
+  the resource advisor. With a jobpool daemon live it answers the pool's size, so all of them
+  read the machine budget; without one, the cores capped by `MemAvailable`. `JOBPOOL=0`
+  bypasses the pool here too.
+- **Never `pkill helix-screen`**, nor `pkill -x helix-screen`, nor `pkill -f`. The name is shared, so it reaps every other session's instance, not yours. The victim sees only `[Application] SIGTERM — fast exit` with no cause, so a long mock or `ctl` run dies looking like a crash. `$!` can name a parent that forked, so resolve the PID from your own socket: `for p in $(pgrep -x helix-screen); do grep -qz "$HELIX_SOCK" /proc/$p/cmdline && echo $p; done`.
 
 ---
 
@@ -87,6 +323,18 @@ Most commonly needed:
 | `docs/devel/LOGGING.md` | spdlog levels: info vs debug vs trace |
 | `docs/devel/BUILD_SYSTEM.md` | Makefile, cross-compilation |
 
+## Path-Scoped Rules (`.claude/rules/`)
+
+These load automatically when you work on matching files. They are the contract, not background reading; every one is lint-gated.
+
+| Rule | Loads for | Covers |
+|------|-----------|--------|
+| `.claude/rules/declarative-ui.md` | `src/ui/`, `ui_xml/`, `include/ui_*.h` | DATA in C++, APPEARANCE in XML: the eight declarative rules, the structural exceptions, design tokens |
+| `.claude/rules/vendor-abstraction.md` | `src/`, `include/` | A vendor name appears in ONE module per capability; generic code asks capability questions |
+| `.claude/rules/threading.md` | `src/`, `include/`, `tests/unit/` | The five lifecycle invariants; `docs/devel/THREADING.md` is the full text |
+| `.claude/rules/submodules.md` | `lib/`, `patches/`, `mk/patches.mk` | `lib/helix-xml/` is ours and edited directly; everything else goes through `patches/` |
+| `.claude/rules/filament-backends.md` | `src/printer/ams_*`, `include/ams_*`, `*filament_*` | Which doc to read before touching a filament backend |
+
 ---
 
 ## Above a Bugfix: Investigate, Then Scope
@@ -108,37 +356,32 @@ Features, refactors, new panels/widgets/managers — **scope AFTER investigating
 | **SPDX headers** | 20-line GPL boilerplate | `// SPDX-License-Identifier: GPL-3.0-or-later` |
 | **RAII widgets** | `lv_malloc()` / `lv_free()` | `lvgl_make_unique<T>()` + `release()` |
 | **Class-based** | `ui_panel_*_init()` functions | Classes: `MotionPanel`, `WiFiManager` |
-| **Observer factory** | Static callback + `lv_observer_get_user_data()` | `observe_int_sync<Panel>()` from `observer_factory.h` |
-| **Icon sync** | Add icon, forget fonts | `include/ui_icon_codepoints.h` + `make regen-fonts` + rebuild |
+| **Observer factory** | Static callback + `lv_observer_get_user_data()` | `observe<int>()` from `observer_factory.h` |
+| **Icon sync** | Add icon, forget fonts | TWO hand-kept lists: `include/ui_icon_codepoints.h` (name -> codepoint) AND `scripts/regen_mdi_fonts.sh` `MDI_ICONS` (what the font contains) + `make regen-fonts` (regenerates the ESP32 firmware's twins too) + rebuild. `validate_icon_fonts.sh` fails the build if either font set is missing an icon |
 | **Formatting** | Manual formatting | Let pre-commit hook (clang-format) fix |
-| **Doc citations** | Citing a line number (`src/printer/printer_state.cpp:638`), or hand-writing the markdown link | Cite a PLACE: `` `src/printer/printer_state.cpp#update_from_status` `` - a path, then a `#` fragment naming the enclosing scopes. Line numbers are never committed; `scripts/doc_anchors.py` resolves the name to a line on demand, so code that moves rots nothing. `make check-doc-anchors` reports any citation whose name no longer resolves (advisory - `.githooks/pre-push` runs it and never blocks on it), and `make docs-pinned` renders every doc with real line numbers into `build/docs-pinned/` for reading. `quality-checks.sh` still fails a doc citing a file that does not exist. The one thing you must fix by hand: a RENAMED symbol, because the sentence around the citation may no longer be true. **Never write a bare `` `:NNN` ``** (a line number with no path, meaning "and also line N of whatever file this sentence just named") - it carries nothing a reader or a tool can check, and `--check` reports it. Name the thing instead. |
+| **Doc citations** | A line number (`src/printer/printer_state.cpp:638`), or a bare `:NNN` with no path | A place: `` `src/printer/printer_state.cpp#update_from_status` `` - path, then a `#` fragment naming the enclosing scopes. `scripts/doc_anchors.py` resolves it to a line on demand (`make check-doc-anchors`, advisory), so code that moves rots nothing. A RENAMED symbol is the one case you fix by hand, because the sentence around it may no longer be true |
 | **No auto-mock** | `if(!start()) return Mock()` | Check `RuntimeConfig::should_mock_*()` |
 | **JSON include** | `#include <nlohmann/json.hpp>` | `#include "hv/json.hpp"` (libhv's bundled version) |
 | **Build system** | `cmake`, `ninja` | `make -j` (pure Makefile) |
 | **No RTTI** | `dynamic_cast`, `typeid`, `std::type_index`, `any.type()` | `helix::type_tag<T>()` keys, virtual kind queries (`HELIX_CONTEXT_MENU_KIND`), pointer-form `any_cast`. Firmware builds `-fno-rtti`; lint-gated, escape hatch `// RTTI_OK: <reason>` |
+| **No exceptions (firmware)** | `try`/`catch`/`throw`, `j.value("k", d)`, `j.at("k")`, one-arg `json::parse`, `std::stoi`, value-form `any_cast` in firmware-compiled code | `json_util::safe_*`/`as_*`, `json::parse(s, nullptr, false)`, `text_io::parse_leading`, `any_cast<T>(&a)`; `exception_policy.h` for shared code. The ESP32 image builds `-fno-exceptions`, so a throw is an abort; `scripts/check_esp32_app_srcs.py` gates the calls |
+| **No std::regex** | `std::regex`, `#include <regex>` in app code | `helix::Regex` (`include/helix_regex.h`, heap backtracking). libstdc++'s matcher recurses per input character and overflows musl's small thread stacks with no crash file. Lint-gated in `tests/shell/test_code_lint.bats`; escape hatch `// STD_REGEX_OK: <reason>` |
 | **Bug commits** | Filing an issue just so the commit can cite one | Cite the issue when one already exists: `fix(scope): thing (prestonbrown/helixscreen#123)`. No issue? `fix(scope): thing` is complete on its own — the commit body carries the explanation. |
-| **Unproven tests** | Claiming "tests pass" as evidence the change is tested | `make mutate-diff` (reverts each hunk, looks for red) and one line in the commit body naming the mutation. A green suite is not evidence: 11 changes in one release range revert green. See `tests/CLAUDE.md` § "Proving a test can fail" |
-| **Commit body length** | 3-paragraph Tests / Verification / Mutation essay | Subject + ~4-line paragraph (cf. `feat(z-offset)` 25e1505e7). Reserve the long form for genuine state-machine fixes that touch multiple subsystems (cf. `fix(ams): DRY unload API` 504905a2). |
-| **Comment archaeology** | `// unlike the three widgets 3d0875bff fixed`, `// this used to memcpy the whole canvas`, `// #1401 grew the offset to 2.515mm`, `// pre-fix the stream wrote into freed memory` | State the constraint, not the history: `// Invalidating here freezes a fullscreen view the user is watching`. See § "Comments describe the code, not its past" |
-| **Submodule mods** | Edit `lib/lvgl/...` / `lib/libhv/...` directly | Add/amend `patches/*.patch` — `mk/patches.mk` auto-applies. **Exception: `lib/helix-xml/` is our own submodule** ([prestonbrown/helix-xml](https://github.com/prestonbrown/helix-xml)) — edit it directly, commit and push *in the submodule*, then commit the bumped pointer in this repo. Never write a patch for it. A worktree gets its own checkout of it (not a symlink), so engine edits stay in that branch. |
+| **Unproven tests** | "Tests pass" as evidence the change is tested | `make mutate-diff`, once per branch. A green suite is not evidence. `tests/CLAUDE.md` § "Proving a test can fail" |
+| **Commit body length** | 3-paragraph Tests / Verification / Mutation essay | Subject + ~4-line paragraph. Reserve the long form for genuine state-machine fixes that touch multiple subsystems |
+| **Comment archaeology** | `// unlike the three widgets 3d0875bff fixed`, `// this used to memcpy the whole canvas`, `// pre-fix the stream wrote into freed memory` | State the constraint, not the history: `// Invalidating here freezes a fullscreen view the user is watching`. § below |
+| **Submodule mods** | Edit `lib/lvgl/...` / `lib/libhv/...` directly | `patches/*.patch`; `lib/helix-xml/` is ours and edited directly. `.claude/rules/submodules.md` |
 
 **ALWAYS:** Search the SAME FILE you're editing for similar patterns before implementing.
 
 ### Comments describe the code, not its past
 
-A comment earns its place by helping someone understand the code **as it is now**.
-Development history — what it used to do, which commit changed it, what bug prompted
-it, what a review found, what a mutation run proved — belongs in the commit message,
-which is exactly where `git log` and `git blame` will surface it when someone asks
-"why is this here?". Putting it in the source means every future reader pays for it
-forever, and it rots: the commit gets squashed, the issue gets closed, the "recent"
-fix becomes ancient, and the comment now misleads.
-
-**The deletion test.** Cut the historical clause. Does the comment still explain the
-code to someone reading this file for the first time who will never look at git
-history? If yes, the clause was archaeology — leave it cut. If the sentence collapses,
-you were relying on history to carry an explanation that should stand on its own, so
-rewrite it as a present-tense fact about the code.
+A comment earns its place by helping someone understand the code **as it is now**. How it
+got here — what it used to do, which commit changed it, what bug or review or mutation run
+prompted it — belongs in the commit message, where `git blame` surfaces it on demand.
+**The deletion test:** cut the historical clause. If the comment still explains the code to
+a first-time reader, leave it cut. If the sentence collapses, rewrite it as a present-tense
+fact about the system.
 
 | Keep — a constraint that still binds | Cut — how we got here |
 |---|---|
@@ -147,164 +390,17 @@ rewrite it as a present-tense fact about the code.
 | `// A wrapper existing does not prove it persists anything` | `// #1401 grew a probe offset 0.060 -> 2.515mm over five save cycles` |
 | `// Rows arriving with no scan pending would accumulate unbounded` | `// this file used to have several data races` |
 
-Specific forms that are almost always archaeology: a commit SHA; `used to`,
-`previously`, `originally`, `before this`, `no longer`, `pre-fix`; a narrated issue
-(`#123 found that…`) as opposed to a bare cite; "the bug where…"; and in tests, a
-recap of what a review or mutation run discovered.
+Almost always archaeology: a commit SHA; `used to`, `previously`, `originally`, `before
+this`, `no longer`, `pre-fix`; a narrated issue as opposed to a bare cite; "the bug
+where…"; and in tests, a recap of what a review or mutation run discovered. Tests, shell
+scripts, gates and Makefiles included.
 
-**This applies to tests, shell scripts, gates and Makefiles too**, not just C++. A
-bats file's header comment is the most common offender — describe what the gate
-checks and why that matters, not the sweep that motivated writing it.
-
-**The legitimate need is real, and it is narrower than it feels.** When a
-counter-intuitive line exists because the obvious alternative is wrong, say what
-breaks — in the present tense, as a property of the system. "Do not invalidate here:
-a token the running stream already captured never recovers" is a constraint the next
-reader must respect. "3d0875bff invalidates here but we can't" is trivia about a
-different file.
-
-**Issue references are welcome — keep them short.** `(prestonbrown/helixscreen#1394)`
-appended to a sentence that already stands on its own is exactly right: it points at
-the full story for anyone who wants it, costs one reader half a second, and cannot
-rot. Do not strip these. What to avoid is *narrating* the issue inline — the cite is
-a pointer, not a summary:
+Issue references are welcome as pointers, not summaries:
 
 - ✅ `// A wrapper existing does not prove it persists anything (prestonbrown/helixscreen#1401)`
 - ❌ `// #1401: a Helper-Script box folded the offset into the probe, SAVE_CONFIG restarted klipper, and the boot gcode re-applied it, growing 0.060 -> 2.515mm over five cycles`
 
-**Submodule patch workflow** — third-party submodules ONLY (`lib/lvgl/`, `lib/libhv/`, …). **Never run it on `lib/helix-xml/`**: that repo is ours, its edits are meant to be committed, and the `git restore .` below would destroy them.
-
-Edit the file under `lib/<sub>/`, then `cd lib/<sub> && git diff -- <the files you touched> > ../../patches/<name>.patch && git restore -- <those files>`. **Scope the diff** — a bare `git diff` captures every patch currently applied. And if two patches touch the same file (a dozen-plus files are; `src/misc/lv_event.c` has seven) even a scoped diff folds the others in, so use the pristine-file method in `patches/README.md` § "Regenerating a patch whose file is shared". The patch in `patches/` is the source of truth — direct edits get wiped on the next `git submodule update`. Check `mk/patches.mk` (`LVGL_PATCHED_FILES`, `LIBHV_PATCHED_FILES`, etc.) and existing `patches/*.patch` before creating a new one — amend an existing patch when the change is in the same area (e.g., `lvgl_sdl_window.patch` already owns `lv_sdl_window.c`).
-
----
-
-## CRITICAL RULES - Declarative UI
-
-**DATA in C++, APPEARANCE in XML, Subjects connect them.**
-
-**Absolute for new code.** The tree still has 367 sites that break these rules
-(`scripts/check_imperative_ui.py --list`). Some were deliberate pragmatism from when the XML
-engine could not express what was needed; some are plain mistakes that got through review.
-Both are debt, tracked in prestonbrown/helixscreen#1140 and being ported. **Existing imperative
-code is not precedent** — do not imitate a nearby site just because it is there, and do not
-opportunistically refactor one as a side effect of an unrelated change. The gate ratchets: the
-count may fall, never rise.
-
-| # | Rule | ❌ NEVER | ✅ ALWAYS |
-|---|------|----------|----------|
-| 1 | **NO lv_obj_add_event_cb()** | `lv_obj_add_event_cb(btn, cb)` | XML `<event_cb trigger="clicked" callback="name"/>` + `lv_xml_register_event_cb()` |
-| 2 | **NO imperative visibility** | `lv_obj_add_flag(obj, HIDDEN)` | XML `<bind_flag_if_eq subject="state" flag="hidden" ref_value="0"/>` for cheap show/hide of an already-built subtree. `<if cond="X">…<else/>…</if>` is the structural sibling — use it when the *creation* itself is expensive (a whole card, an alternate layout); it builds only the matching branch instead of both. See `docs/devel/LVGL9_XML_GUIDE.md` § "Structural conditionals with `<if>` / `<else>`". |
-| 3 | **NO lv_label_set_text** | `lv_label_set_text(lbl, val)` | Subject binding: `<text_body bind_text="my_subject"/>` |
-| 4 | **NO C++ styling** | `lv_obj_set_style_bg_color()` | XML: `style_bg_color="#card_bg"` |
-| 5 | **NO manual LVGL cleanup** | `lv_display_delete()`, `lv_group_delete()` | Just `lv_deinit()` - handles everything |
-| 6 | **bind_style priority** | `style_bg_color` + `bind_style` | Inline attrs override - use TWO bind_styles |
-| 7 | **NO C++ derived subject for compound conditions** | Hand-written observer that combines 2+ subjects (`a \|\| b > c`) | XML `<subject_expr name="x" expr="a or b gt c"/>` or inline `cond="a or b gt c"` on `bind_flag_if`/`bind_state_if`/`bind_style_if` (word forms — `&&`/`<` need XML escaping). |
-| 8 | **NO C++ create-and-wire loop for repeated fragments** | `for(int i=0;i<n;i++) { lv_obj_create(...); ... }` in C++ | XML `<repeat count="4">…$i…</repeat>` (fixed) or `<repeat count="a_subject">…${i}…</repeat>` (reactive rebuild on subject change) — see `docs/devel/LVGL9_XML_GUIDE.md` § "Repeating fragments with `<repeat>`". Measured layout, computed callbacks, and data population still belong in C++ — `<repeat>` only replaces the widget-creation loop itself. |
-
-**Structural exceptions — C++ is correct here, permanently:**
-
-| Case | Why |
-|------|-----|
-| Custom XML widget implementations — the 29 files calling `lv_xml_register_widget` | The file *is* the widget; there is no XML beneath it to bind to |
-| `LV_EVENT_DELETE` cleanup, draw hooks (`DRAW_MAIN`/`DRAW_POST`), `SIZE_CHANGED`, gestures/scroll | No declarative equivalent exists |
-| Measured layout and computed fonts (`decide_nozzle_layout()`, breakpoint fonts) | Depends on runtime pixel measurement — see rule 8 |
-| Widgets created in C++ (`lv_*_create`) — canvas and procedural rendering | Never had an XML layer |
-| Per-item payload on generated collections | `lv_obj_set_user_data()` on a `ui_button` overwrites `UiButtonData*` (`src/ui/temperature_service.cpp#setup_panel`) |
-| `helix-screen ctl` remote control (`remote_control_server.cpp`) | Its job is reaching into an arbitrary live widget tree on command |
-| CLI stdout (`cli_args.cpp`, `detect_printer_cmd.cpp`, `helix_splash.cpp`) | stdout *is* the product there; spdlog is for logging |
-| Widget pool recycling, chart data, animations | Churn or per-frame data that a subject would not model |
-
-Genuinely un-declarative site? Annotate it: `// DECLARATIVE_OK: <reason>`.
-
----
-
-## CRITICAL RULES - Vendor Knowledge Stays Behind an Abstraction
-
-**A vendor, firmware, or mod name may appear in ONE module per capability. Generic code asks
-that module a capability question and never names the vendor.**
-
-Generic code is anything whose job is not "support vendor X": `PrinterState` and its
-sub-states, the discovery/subscription builder, `Application` startup, panels, widgets,
-formatters. When one of those grows an `if (zmod) … else if (creality) …`, the vendor matrix
-is now spread across every layer and the next firmware means editing all of them.
-
-| ❌ WRONG | ✅ CORRECT |
-|----------|-----------|
-| `zmod::parse_persisted_z_offset(status)` in `PrinterMotionState::update_from_status` | `zoffset::read_persisted_offset_microns(status)` — the module owns which firmwares and which schema |
-| `if (hw.has_macro("SAVE_ZMOD_DATA")) subs["save_variables"] = nullptr;` in the subscription builder | `for (auto& o : zoffset::required_status_objects(hw)) subs[o] = nullptr;` |
-| `api->execute_gcode("SAVE_ZMOD_DATA LOAD_ZOFFSET=1")` in `Application` | `zoffset::persistence_enable_gcode(hw)` — empty string when the printer needs none |
-
-**The test: adding a second firmware with the same capability must touch exactly one file.**
-If it would touch the status parser *and* the subscription builder *and* startup, the
-abstraction is missing. Model it as a provider table keyed on a detection predicate, with the
-capability questions as free functions over it — `include/z_offset_persistence.h` +
-`src/printer/z_offset_persistence.cpp` is the reference shape (~40 lines of table, three
-questions: what to subscribe, how to read it, how to enable it).
-
-**Naming follows the same rule.** Subjects, accessors, and headers name the *capability*
-(`persisted_z_offset`, `firmware_persists_z_offset`), never the vendor (`zmod_z_offset`). A
-vendor-named symbol reachable from generic code is the smell even when the call site looks
-clean.
-
-Existing vendor-dispatch that already lives behind an interface is the pattern working, not an
-exception: `AmsBackend*` (one class per filament system, `AmsState` never names one),
-`ZOffsetCalibrationStrategy`, `PrinterDetector` capability lookups. Follow those.
-
-Genuinely unavoidable vendor branch in generic code? Annotate it: `// VENDOR_OK: <reason>`.
-
----
-
-## Design Tokens (MANDATORY)
-
-| Category | ❌ WRONG | ✅ CORRECT |
-|----------|----------|-----------|
-| **Colors** | `lv_color_hex(0xE0E0E0)` | `theme_manager_get_color("card_bg")` |
-| **Spacing** | `style_pad_all="12"` | `style_pad_all="#space_md"` |
-| **Typography** | `<lv_label style_text_font="...">` | `<text_heading>`, `<text_body>`, `<text_small>` |
-
-Note: `theme_manager_get_color()` for tokens, `theme_manager_parse_hex_color()` for hex strings only (NOT tokens).
-
----
-
-## Threading & Lifecycle
-
-> **Full rules: `docs/devel/THREADING.md`** (routed by the `helix-threading` skill). Read it
-> before writing code that crosses a thread boundary, observes a subject, or destroys a widget.
-> The invariants below are the always-loaded safety net — each one fails silently at compile
-> time and crashes later, usually on a customer's printer.
-
-1. **Never touch LVGL from a background thread.** WebSocket/libhv, HTTP, and timer callbacks
-   are background threads; `lv_subject_set_*()` counts, because it fires observers that call
-   widget APIs. Route through `ui_queue_update()` (`ui_update_queue.h`). Pattern:
-   `printer_state.cpp` `set_*_internal()`.
-2. **Never write bare `if (tok.expired()) return;` on a background thread** and then touch
-   `this` — TOCTOU use-after-free (L081 Mechanism C, #707). Use `lifetime_.bg_cb(tag, fn)`, or
-   `tok.defer(tag, fn)` when you have bg-side parsing worth keeping off the main thread.
-   `lifetime_.defer()` is main-thread only. Gate: `scripts/check_l081_anti_pattern.py`.
-3. **Never delete synchronously inside a queued callback.** `safe_delete()`,
-   `lv_obj_delete()`, and `lv_obj_clean()` corrupt LVGL's event list mid-batch (#776, #190,
-   #80). Use `safe_delete_deferred()`, `lv_obj_delete_async()`, `safe_clean_children()`.
-   **`lifetime_.defer` does NOT escape the batch** — it fires in the next `process_pending`
-   tick, which is still a batch.
-4. **If you fetch a `SubjectLifetime`, you must hand it to `observe_*`.** The factories take it
-   as a defaulted 4th parameter (`const SubjectLifetime& lifetime = {}`), so omitting it is
-   silent: the guard gets no token, never sees the subject die, and `reset()` calls
-   `lv_observer_remove()` on freed memory (#705). Local vs member is *not* what decides
-   correctness — the `get_*_subject(name, lifetime)` accessors assign the owner's own
-   `shared_ptr`, so a caller's copy dying never expires the guard.
-5. **A raw `lv_timer_t*` cancelled in `cleanup()` must also be cancelled in the destructor.**
-   `StaticPanelRegistry::destroy_all()` runs *before* `lv_deinit()`, so any teardown that
-   skips the explicit stop leaves the timer armed on a freed `this` (#1173, twice). Share one
-   `cancel_*_timer()` between both paths and use `lv_timer_cancel_safe()` — it self-guards on
-   `lv_is_initialized()` and neuters instead of unlinking, so it is safe from a destructor and
-   from inside `lv_timer_handler` (#750, #751). A `LifetimeToken`-guarded callback is the other
-   valid answer; annotate those `// TIMER_DTOR_OK: <reason>`. Gate:
-   `scripts/check_timer_destructor_cancel.py`.
-
-Also: no `std::thread(...).detach()` for one-shot work — `EAGAIN` → `std::terminate` on
-AD5M/CC1 (#724, #837); use `HttpExecutor::fast()/slow()` or `BusThread`. `ObserverGuard::reset()`
-for all normal cleanup, never `release()` (#579). Every `init_subjects()` self-registers its
-`deinit_subjects()` with `StaticSubjectRegistry`.
+`scripts/check_comment_archaeology.py` ratchets the SHA half; the phrasing half is the reviewer's.
 
 ---
 
@@ -313,11 +409,11 @@ for all normal cleanup, never `release()` (#579). Every `init_subjects()` self-r
 | Pattern | Key Point | Exemplar |
 |---------|-----------|----------|
 | Subject init order | Register components → init subjects → create XML | `src/application/subject_initializer.cpp`, called from `Application::register_xml_components()` |
-| Widget lookup | `lv_obj_find_by_name()` not `lv_obj_get_child()` — indices break when layout changes | any panel; 1100+ call sites |
+| Widget lookup | `lv_obj_find_by_name()` not `lv_obj_get_child()` — indices break when layout changes | any panel |
 | Overlays | `NavigationManager::instance().push_overlay(root)` / `.go_back()` (`ui_nav_manager.h`) — pair every push with `register_overlay_instance(root, this)` or `on_deactivate()` never fires (tests abort; `HELIX_STRICT_OVERLAY_CHECK=1`) | `src/ui/ui_settings_safety.cpp` |
 | Modals (simple) | `Modal::show("component_name")` / `Modal::hide(dialog)` | `src/ui/ui_job_queue_modal.cpp` |
 | Modals (subclass) | Extend `Modal`, implement `get_name()` + `component_name()`, override `on_ok()`/`on_cancel()` | `include/ui_info_qr_modal.h` + `src/ui/ui_info_qr_modal.cpp` (42 + 62 lines — the whole pattern, nothing else) |
-| Confirmation dialog | `modal_confirm(title, msg, severity, btn_text, on_confirm, ConfirmOptions)` (in `helix::ui`) for new code - `std::function` throughout, closes its own dialog; the options struct carries `on_cancel`/`cancel_text`/`on_dismiss`/`owner_token`, and `owner_token` gates **all three** callbacks. The `lv_event_cb_t` spellings (`modal_show_confirmation()`/`modal_show_alert()`) are gone. All are owned, so a dismissal (backdrop tap, ESC, hot-reload rebuild) reaches `on_dismiss` - **pass it whenever the caller holds a guard/flag/pending entry the buttons were meant to clear**, or that state leaks | `src/ui/ui_change_host_modal.cpp#show_connection_failed_modal`; subclass form: `include/lan_client_auth_router.h` |
+| Confirmation dialog | `modal_confirm(title, msg, severity, btn_text, on_confirm, ConfirmOptions)` (in `helix::ui`) for new code - `std::function` throughout, closes its own dialog; the options struct carries `on_cancel`/`cancel_text`/`on_dismiss`/`owner_token`, and `owner_token` gates **all three** callbacks. All are owned, so a dismissal (backdrop tap, ESC, hot-reload rebuild) reaches `on_dismiss` - **pass it whenever the caller holds a guard/flag/pending entry the buttons were meant to clear**, or that state leaks | `src/ui/ui_change_host_modal.cpp#show_connection_failed_modal`; subclass form: `include/lan_client_auth_router.h` |
 | Modal buttons (XML) | `<modal_button_row primary_text="Save" primary_callback="on_save"/>` | `ui_xml/bed_mesh_rename_modal.xml` |
 | Home-panel widget | Subclass `PanelWidget`; `attach()` + `on_size_changed()`. Instances are **recycled** across rebuilds, so any imperative apply must run from `attach()` too, not only on size change | `src/ui/panel_widgets/motion_widget.cpp` (64 lines) |
 | Background → UI | Never touch LVGL off the main thread; `ui_queue_update()` or `tok.defer()` | `src/printer/printer_state.cpp` `set_*_internal()` |
@@ -327,7 +423,7 @@ for all normal cleanup, never `release()` (#579). Every `init_subjects()` self-r
 ## Where Things Live
 
 **Singletons** (classic `::instance()` unless noted):
-`SettingsManager` (persistent settings), `NavigationManager` (panel/overlay stack), `UpdateQueue` (thread-safe UI updates), `SoundManager`, `DisplayManager`, `ModalStack`, `ToolState` (multi-tool tracking), `AmsState` (multi-backend filament systems). Two look like singletons but are not: `PrinterState` (all printer data/subjects) is a Meyers singleton reached via `get_printer_state()` (`include/app_globals.h#get_printer_state`) — there is no `PrinterState::instance()`; `PrinterDetector` (printer DB + capabilities) is a static class, no instance exists. Full census (76 `::instance()` singletons plus four other access shapes): `docs/devel/architecture/05-printer-state.md`.
+`SettingsManager` (persistent settings), `NavigationManager` (panel/overlay stack), `UpdateQueue` (thread-safe UI updates), `SoundManager`, `DisplayManager`, `ModalStack`, `ToolState` (multi-tool tracking), `AmsState` (multi-backend filament systems). Two look like singletons but are not: `PrinterState` (all printer data/subjects) is a Meyers singleton reached via `get_printer_state()` (`include/app_globals.h#get_printer_state`) — there is no `PrinterState::instance()`; `PrinterDetector` (printer DB + capabilities) is a static class, no instance exists. Full census: `docs/devel/architecture/05-printer-state.md`.
 
 `TemperatureController` — single authority for ALL nozzle/bed/chamber target sends (NOT a `::instance()` singleton: owned by `SubjectInitializer`, reached via `get_temperature_controller()` in `app_globals.h`). New temp-setting UI MUST call `TemperatureController::set_target()`, never raw `MoonrakerAPI::set_temperature()` — lint-enforced by `tests/shell/test_code_lint.bats`. See the TemperatureController section of `docs/devel/architecture/05-printer-state.md`.
 
@@ -350,7 +446,7 @@ for all normal cleanup, never `release()` (#579). Every `init_subjects()` self-r
 
 **Mock-facing interfaces**: `IMoonrakerAPI` (`include/i_moonraker_api.h`), `helix::IMoonrakerClient` (`include/i_moonraker_client.h`), and the ten sub-API interfaces in `include/i_moonraker_sub_apis.h` are the consumer contract for the Moonraker network layer — consumers depend on these interfaces ONLY, never the concrete classes. The concretes (`MoonrakerAPI`, `helix::MoonrakerClient`, the ten `Moonraker*API` sub-classes) live behind `MoonrakerManager` (`include/moonraker_manager.h`), which owns them via `std::unique_ptr<MoonrakerAPI>` (the concrete façade — the mock inherits it) / `std::unique_ptr<helix::IMoonrakerClient>` and constructs them in `create_api()` / `create_client()`. Mocks still inherit the concretes. Drift protection in `tests/unit/test_interface_drift_*.cpp` (`[compile][drift]` tag). Lint-enforced by `tests/shell/test_code_lint.bats` — naming a concrete type outside the network layer fails CI.
 
-**Test isolation**: `HelixTestFixture` (`tests/helix_test_fixture.h`) is the base for every test fixture. Ctor + dtor call `reset_all()` which drains `UpdateQueue`, resets `SystemSettingsManager` language, clears `ModalStack`. `LVGLTestFixture` inherits it. `XMLTestFixture` owns per-instance `PrinterState` / `MoonrakerClient` / `MoonrakerAPI` (no more static test state). XML subjects still register into LVGL's global scope — per-test scopes were blocked by LVGL internals; subjects are refreshed by each test's `init_subjects(true)`.
+**Test isolation**: `HelixTestFixture` (`tests/helix_test_fixture.h`) is the base for every test fixture. Ctor + dtor call `reset_all()` which drains `UpdateQueue`, resets `SystemSettingsManager` language, clears `ModalStack`. `LVGLTestFixture` inherits it. `XMLTestFixture` owns per-instance `PrinterState` / `MoonrakerClient` / `MoonrakerAPI`. XML subjects still register into LVGL's global scope — per-test scopes were blocked by LVGL internals; subjects are refreshed by each test's `init_subjects(true)`.
 
 ---
 
@@ -359,13 +455,12 @@ for all normal cleanup, never `release()` (#579). Every `init_subjects()` self-r
 **NEVER debug without flags!** Use `-vv` minimum.
 Trust debug output. Impossible values = bug is UPSTREAM. Ask "what ELSE?" not "did first fix work?"
 
-**A plain `> file` redirect drops the console log — but `--test` is exempt.** The console
-sink attaches for a TTY always, for a PIPE only with an explicit `-v`/`--log-level`, and for a
-regular file or socket never (a plain redirect is indistinguishable from the daemon redirect).
-`--test` overrides all of it and logs to any stdout kind, which is why most runs never hit
-this. A **non-`--test`** background run needs `2>&1 | tee /tmp/x.log` or
-`HELIX_LOG_DEST=console` — measured on one binary, identical flags: 645 lines through `tee`,
-3 through `>`. Full decision table: `docs/devel/LOGGING.md` § "Console sink".
+**A plain `> file` redirect drops the console log, except under `--test`.** The console
+sink attaches for a TTY always, for a pipe only with an explicit `-v`/`--log-level`, and for
+a regular file or socket never (a plain redirect is indistinguishable from the daemon's).
+`--test` logs to any stdout kind. A **non-`--test`** background run needs
+`2>&1 | tee /tmp/x.log` or `HELIX_LOG_DEST=console`. Decision table: `docs/devel/LOGGING.md`
+§ "Console sink".
 
 **Debug bundles**: `--save` writes `debug-bundle-<code>.json` to the **current working directory** — run it from `/tmp` so the bundle never lands in the repo: `cd /tmp && <repo>/scripts/debug-bundle.sh <SHARE_CODE> --save`. Investigate there, never commit a bundle. (If one ends up in the repo, move it to `/tmp`.)
 
@@ -377,7 +472,7 @@ this look right"), and even then drive to the state first and tell him exactly w
 at. `ctl text` / `state` / `geom` are exact; a screenshot only proves what a scroll position
 happened to expose.
 
-**Local mock — always allowed, no permission needed.** Use the pinned-socket recipe in Quick
+**Local mock — always allowed, no permission needed.** The pinned-socket recipe in Quick
 Start with `--test`, `SDL_VIDEODRIVER=dummy`, and `--sim-speed 4-10` when you need an active
 print. This is the default answer to "does my change work".
 
@@ -385,43 +480,62 @@ print. This is the default answer to "does my change work".
 command that touches a real machine. After that, read-only commands (`ping`, `status`,
 `current`, `ls`, `text`, `state`, `geom`, `screenshot`) need no further asking. Anything that
 moves the machine or changes a print — gcode, home, heat, move, print/cancel,
-`FIRMWARE_RESTART`, emergency stop — is confirmed **every** time; one unconfirmed call cost a
-26-minute print. `ctl current` before you navigate and navigate back when you are done: that
-is his printer's screen, and he is standing in front of it.
+`FIRMWARE_RESTART`, emergency stop — is confirmed **every** time. `ctl current` before you
+navigate and navigate back when you are done: that is his printer's screen, and he may be
+standing in front of it.
 
 Two shapes, and they are not the same thing:
 
 | Shape | What it is | How |
 |-------|-----------|-----|
-| desktop UI → real Moonraker | your local build, real printer data, no device walk | `--moonraker ws://HOST:7125` |
-
-Both shapes are verified. Pointing a local `SDL_VIDEODRIVER=dummy` build at the CB1/Voron
-discovered its real hardware (`AFC_BoxTurtle Turtle_1`, 4 lanes, 10 AFC objects,
-quad_gantry_level) and `ctl` drove the resulting UI, so an AFC question does not need a
-device deploy - only the printer's Moonraker port on the LAN.
+| desktop UI → real Moonraker | your local build, real printer data, no device walk | `--moonraker ws://HOST:7125`. Enough for most hardware questions: a local `SDL_VIDEODRIVER=dummy` build pointed at a printer discovers its real hardware (AFC lanes, QGL, …) and `ctl` drives the result |
 | `ctl` → app on the device | the app actually running on the printer | ssh, then `<install>/bin/helix-screen ctl <cmd>` |
 
-**The device build gate — check the binary, never the help text.** `ENABLE_REMOTE_CONTROL`
+**The device build gate - check the binary, not just the help text.** `ENABLE_REMOTE_CONTROL`
 defaults to `yes`, but `HELIX_PACKAGING=1` forces it to `no`, so **an installed release has no
-ctl server**. The `--remote*` flags still appear in `--help` on those builds, so they look
-supported and buy nothing:
+ctl server**; `--help` on those builds omits `--remote*` and passing one anyway warns
+("ignoring unknown argument") instead of being silently accepted. Confirm what actually
+shipped rather than trusting either:
 
 ```bash
 strings -a <install>/bin/helix-screen | grep -c list_callbacks   # 0 = no server compiled in
 ```
 
-Verified 2026-08-27: CB1/Voron running packaged 0.99.116 → `0`, and `ctl` was rejected as an
-unknown argument. K2 Plus running dev cross-build 0.99.117 → `2`, with `ctl ping` answering
-`pong` over `/tmp/helixscreen-control.sock`, plus `navigate`/`ls`/`state`/`geom`/`screenshot`
-all working against the live machine. A device also needs `HELIX_REMOTE_CONTROL=1` in its
-`helixscreen.env` for the server to listen; `make deploy-*` sets that from the
-`.build-features` stamp `mk/rules.mk` writes beside the binary.
+A device also needs `HELIX_REMOTE_CONTROL=1` in its `helixscreen.env` for the server to
+listen; `make deploy-*` sets that from the `.build-features` stamp `mk/rules.mk` writes
+beside the binary.
 
 ---
 
 ## Critical Paths (always MAJOR work)
 
 PrinterState, WebSocket/threading, shutdown, DisplayManager, XML processing
+
+---
+
+## Superpowers Skills Here
+
+Worktrees come from `scripts/setup-worktree.sh` and go away with
+`scripts/teardown-worktree.sh`. These replace the create step in
+`superpowers:using-git-worktrees` (a native or plain `git worktree add` tree has no lib/
+symlinks, submodules or build) and the `git worktree remove` step in
+`superpowers:finishing-a-development-branch`, which refuses here.
+
+Design work overrides `superpowers:brainstorming` and `superpowers:writing-plans` here:
+
+- **Ask in batches.** Put 4-5 independent questions in one round (AskUserQuestion takes four;
+  a companion page can carry more visual ones). Ask one at a time only when an answer changes
+  the next question.
+- **Explain the signal first.** UI for a hardware reading opens with what each signal measures,
+  which hardware and backends publish it, and which printers have none, before any option:
+  two readings from one sensor can still answer different questions and need different UI.
+- **Measure before suggesting.** `ctl geom` every surface an option will occupy (a 1x1 and 2x1
+  home cell, the sidebar card, the path canvas segment, the modal) at 800x480 and the smallest
+  breakpoint, and draw options inside those numbers.
+- **Plans state interfaces, tests and constraints, not finished code.** Give exact signatures,
+  test cases and values; leave the bodies to the implementer. Every header a plan defines gets a
+  `scripts/syntax_check.py` pass before execution starts. A plan of uncompiled code is a second
+  codebase that drifts from the first.
 
 ---
 

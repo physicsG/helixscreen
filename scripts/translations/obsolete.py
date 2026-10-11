@@ -125,7 +125,7 @@ def find_obsolete_keys(
     xml_dir: Path,
     yaml_dir: Path,
     base_locale: str = "en",
-    cpp_dir: Path = None,
+    cpp_dirs: list = None,
     repo_root: Path = None,
     extracted: Set[str] = None,
 ) -> Set[str]:
@@ -136,11 +136,11 @@ def find_obsolete_keys(
         xml_dir: Directory containing XML files to scan
         yaml_dir: Directory containing translation YAML files
         base_locale: The base language to check keys from
-        cpp_dir: Optional directory containing C++ source files
+        cpp_dirs: Optional list of directories containing C++ source files
         repo_root: Repository root for the reference scan (defaults to the
             parent of xml_dir, i.e. the checkout containing ui_xml/)
-        extracted: The extractor's result for the same xml_dir/cpp_dir, when the
-            caller already has it. `sync` does - it extracts the very same two
+        extracted: The extractor's result for the same xml_dir/cpp_dirs, when
+            the caller already has it. `sync` does - it extracts the very same
             trees to decide which keys are new - and re-running the C++ scan
             here cost a second full second, half of what the whole dry run took
             after the YAML loader was fixed. Purely a cache: passing it must not
@@ -157,10 +157,11 @@ def find_obsolete_keys(
         # Extract all strings used in XML
         used_strings = extract_strings_from_directory(xml_dir, recursive=True)
 
-        # Also extract from C++ if directory provided
-        if cpp_dir and cpp_dir.exists():
-            cpp_strings = extract_strings_from_cpp_directory(cpp_dir, recursive=True)
-            used_strings.update(cpp_strings)
+        # Also extract from C++ if directories provided
+        for cpp_dir in cpp_dirs or []:
+            if cpp_dir.exists():
+                cpp_strings = extract_strings_from_cpp_directory(cpp_dir, recursive=True)
+                used_strings.update(cpp_strings)
 
     # Union in the recall-oriented reference scan. Without this, keys that are
     # only reached indirectly look unused and get deleted.

@@ -15,6 +15,7 @@
  * - Channel config: integer-to-enum mapping with fallback
  */
 
+#include "system/update_checker.h"
 #include "version.h"
 
 #include <string>
@@ -33,13 +34,6 @@ using json = nlohmann::json;
 namespace {
 
 // --- Shared helpers (same pattern as test_update_checker.cpp) ---------------
-
-std::string strip_version_prefix(const std::string& tag) {
-    if (!tag.empty() && (tag[0] == 'v' || tag[0] == 'V')) {
-        return tag.substr(1);
-    }
-    return tag;
-}
 
 std::string json_string_or_empty(const json& j, const std::string& key) {
     if (!j.contains(key)) {

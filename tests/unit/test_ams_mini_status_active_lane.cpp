@@ -17,7 +17,10 @@
 #include "ui_update_queue.h"
 
 #include "../lvgl_ui_test_fixture.h"
+#include "../test_helpers/backend_user_edit.h"
+#include "../test_helpers/cfs_test_access.h"
 #include "../ui_test_utils.h"
+#include "ams_backend_cfs.h"
 #include "ams_backend_mock.h"
 #include "ams_state.h"
 #include "theme_manager.h"
@@ -30,6 +33,12 @@
 
 #include "../catch_amalgamated.hpp"
 
+using helix::AmsBackendMock;
+using helix::AmsState;
+using helix::AmsSystemInfo;
+using helix::SlotInfo;
+using helix::SlotStatus;
+
 namespace {
 
 /**
@@ -41,9 +50,9 @@ namespace {
  *  - The aggregate pair (current_slot / filament_loaded), so an idle unload can
  *    be staged without driving the mock's timed unload simulation.
  *  - has_per_slot_loaded_authority(), to exercise the AFC/CFS rule.
- *  - Per-slot SlotStatus. AmsBackendMock::set_slot_info() deliberately copies
+ *  - Per-slot SlotStatus. AmsBackendMock::apply_user_edit() deliberately copies
  *    only the filament fields (color, material, brand, weights, Spoolman ids) —
- *    status is firmware-derived there, so writing it through set_slot_info() is
+ *    status is firmware-derived there, so writing it through apply_user_edit() is
  *    silently dropped.
  *
  * Both read paths are patched, because they are genuinely different call sites:
@@ -62,15 +71,17 @@ class ActiveLaneMock : public AmsBackendMock {
     bool aggregate_loaded = true;
     int current = 0;
 
-    /// Force a lane's status (the field set_slot_info() drops).
+    /// Force a lane's status (the field apply_user_edit() drops).
     void set_status(int slot_index, SlotStatus status) {
         if (slot_index >= 0 && slot_index < MAX_SLOTS) {
             status_override_[slot_index] = status;
         }
     }
 
-    [[nodiscard]] bool has_per_slot_loaded_authority() const override {
-        return per_slot_authority;
+    [[nodiscard]] BackendTraits traits() const override {
+        BackendTraits t = AmsBackendMock::traits();
+        t.has_per_slot_loaded_authority = per_slot_authority;
+        return t;
     }
     [[nodiscard]] bool is_filament_loaded() const override {
         return aggregate_loaded;
@@ -123,8 +134,8 @@ void teardown_ams() {
 /**
  * @brief Give a lane a known identity and status.
  *
- * Filament fields go through the backend's own set_slot_info(); status goes
- * through the mock's override, since set_slot_info() drops it.
+ * Filament fields go through the backend's own apply_user_edit(); status goes
+ * through the mock's override, since apply_user_edit() drops it.
  */
 void set_slot(ActiveLaneMock* mock, int index, SlotStatus status, const char* material,
               float total_g = 1000.0f, float remaining_g = 500.0f) {
@@ -135,7 +146,7 @@ void set_slot(ActiveLaneMock* mock, int index, SlotStatus status, const char* ma
     s.spoolman_id = 0;
     s.total_weight_g = total_g;
     s.remaining_weight_g = remaining_g;
-    mock->set_slot_info(index, s);
+    helix::test::apply_edit(*mock, index, s);
     mock->set_status(index, status);
 }
 
@@ -157,7 +168,7 @@ lv_obj_t* bar_bg_for(lv_obj_t* widget, int lane) {
     return lv_obj_get_child(column, 0);
 }
 
-/** style_slot_bar() gives only the loaded lane a 2px outline. */
+/** The lane bar gives only the loaded lane a 2px outline. */
 bool bar_is_loaded(lv_obj_t* widget, int lane) {
     return lv_obj_get_style_border_width(bar_bg_for(widget, lane), LV_PART_MAIN) == 2;
 }
@@ -244,7 +255,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini: per-slot authority beats a stale 
     set_slot(mock, 0, SlotStatus::AVAILABLE, "PETG"); // per-slot parse: NOT seated
     set_slot(mock, 1, SlotStatus::LOADED, "ABS");     // per-slot parse: seated
 
-    // Fixture precondition. AmsBackendMock::set_slot_info() silently drops
+    // Fixture precondition. AmsBackendMock::apply_user_edit() silently drops
     // status, so ActiveLaneMock's override is the only thing staging this — if
     // it ever stops working, fail HERE rather than quietly asserting about a
     // lane whose status is still the mock's ctor default.
@@ -307,7 +318,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
 
     // Assigned lane: material kept, and dimmed in lockstep with the spool visual.
     CHECK(std::string(lv_label_get_text(mat0)) == "PETG");
-    CHECK(lv_obj_get_style_text_opa(mat0, LV_PART_MAIN) == LV_OPA_20);
+    CHECK(lv_obj_get_style_text_opa(mat0, LV_PART_MAIN) == LV_OPA_30);
 
     // Unassigned lane: names its purpose, at full strength (nothing to ghost).
     CHECK(std::string(lv_label_get_text(mat1)) == std::string(lv_tr("Empty")));
@@ -350,6 +361,48 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini: spent lane keeps the shared fill 
     // min_pct 0 hid the fill entirely; the shared default keeps the sliver.
     CHECK_FALSE(lv_obj_has_flag(bar_fill, LV_OBJ_FLAG_HIDDEN));
     CHECK(lv_obj_get_style_height(bar_fill, LV_PART_MAIN) == LV_PCT(shared_floor));
+
+    lv_obj_delete(w);
+    teardown_ams();
+}
+
+// A box held at its address while off the bus draws no spool cells: the strip
+// shows the bays that exist, as the unit card says Not connected (#1464).
+TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini: an absent unit's bays draw no cells",
+                 "[ams][mini_status][1464]") {
+    auto& ams = AmsState::instance();
+    ams.init_subjects(false);
+    auto owned = std::make_unique<helix::printer::AmsBackendCfs>(nullptr, nullptr);
+    auto* cfs = owned.get();
+    ams.set_backend(std::move(owned));
+
+    nlohmann::json box = {{"state", "connect"}, {"filament", 0}, {"map", nlohmann::json::object()}};
+    for (const char* unit : {"T1", "T3"}) {
+        box[unit] = {{"state", "connect"},
+                     {"filament", "None"},
+                     {"vender", {"none", "none", "none", "none"}},
+                     {"remain_len", {"-1", "-1", "-1", "-1"}},
+                     {"color_value", {"-1", "-1", "-1", "-1"}},
+                     {"material_type", {"-1", "-1", "-1", "-1"}}};
+    }
+    box["T2"] = {{"state", "None"}};
+    helix::CfsTestAccess::handle_status(
+        *cfs, nlohmann::json{{"params", nlohmann::json::array({nlohmann::json{{"box", box}}, 0})}});
+    REQUIRE(cfs->get_system_info().slot_absent(5));
+
+    ui_ams_mini_status_init();
+    lv_obj_t* w = ui_ams_mini_status_create(test_screen(), 60);
+    ui_ams_mini_status_set_width(w, 600); // spool mode
+    helix::ui::UpdateQueue::instance().drain();
+    ams.sync_from_backend();
+    helix::ui::UpdateQueue::instance().drain();
+
+    CHECK(UITest::find_by_name(w, "spool_cell_0") != nullptr);
+    CHECK(UITest::find_by_name(w, "spool_cell_8") != nullptr);
+    for (int bay = 4; bay < 8; ++bay) {
+        INFO("bay " << bay);
+        CHECK(UITest::find_by_name(w, ("spool_cell_" + std::to_string(bay)).c_str()) == nullptr);
+    }
 
     lv_obj_delete(w);
     teardown_ams();

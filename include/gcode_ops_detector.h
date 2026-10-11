@@ -3,17 +3,25 @@
 
 #pragma once
 
+#include "gcode_parser.h"
 #include "operation_patterns.h"
 
 #include <chrono>
-#include <filesystem>
 #include <functional>
 #include <optional>
+#include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace helix {
 namespace gcode {
+
+/// A line that runs one of the commands a caller is looking for.
+struct CommandHit {
+    std::string command;    ///< The command word as the file writes it
+    size_t line_number = 0; ///< 1-indexed
+};
 
 /**
  * @brief Type of pre-print operation detected in G-code
@@ -95,6 +103,8 @@ struct ScanResult {
     size_t bytes_scanned = 0;
     bool reached_limit = false;     ///< True if scan stopped due to limits
     PrintStartCallInfo print_start; ///< Info about PRINT_START call (if found)
+    /// EXCLUDE_OBJECT_DEFINE objects in the scanned head, in file order.
+    std::vector<GCodeObject> objects;
 
     /**
      * @brief Check if a specific operation type was detected
@@ -160,7 +170,7 @@ class GCodeOpsDetector {
      * @param filepath Path to the G-code file
      * @return ScanResult containing all detected operations
      */
-    [[nodiscard]] ScanResult scan_file(const std::filesystem::path& filepath) const;
+    [[nodiscard]] ScanResult scan_file(const std::string& filepath) const;
 
     /**
      * @brief Scan G-code content from a string (for testing)
@@ -203,9 +213,10 @@ class GCodeOpsDetector {
     void init_default_patterns();
 
     /**
-     * @brief Scan a stream of G-code lines
+     * @brief Scan G-code lines drawn from `next_line`, which fills its argument
+     * and returns false at the end. Defined and instantiated in the .cpp only.
      */
-    [[nodiscard]] ScanResult scan_stream(std::istream& stream) const;
+    template <typename NextLine> [[nodiscard]] ScanResult scan_lines(NextLine next_line) const;
 
     /**
      * @brief Check a line against all patterns
@@ -231,6 +242,27 @@ class GCodeOpsDetector {
 
     DetectionConfig config_;
     std::vector<OperationPattern> patterns_;
+
+  public:
+    /**
+     * @brief The command word of one G-code line
+     *
+     * The first token after any leading whitespace, ending at whitespace or a `;`.
+     * Empty for a blank or comment-only line.
+     */
+    [[nodiscard]] static std::string_view command_word(std::string_view line);
+
+    /**
+     * @brief The first line of @p content whose command word is one of @p commands
+     *
+     * Case-insensitive and exact on the whole word, so `m729 S1` is M729 and
+     * `M7290` is not. Only the command word counts: a name in a comment or in a
+     * later token is not a call. Scans every line of @p content.
+     *
+     * @param commands Upper-case command names.
+     */
+    [[nodiscard]] static std::optional<CommandHit>
+    find_first_command(std::string_view content, const std::set<std::string>& commands);
 };
 
 } // namespace gcode

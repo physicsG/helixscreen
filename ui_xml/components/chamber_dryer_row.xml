@@ -1,0 +1,41 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component>
+  <!-- One-row chamber filament dryer: Start Drying while idle; while a cycle
+       runs, the live chamber temperature against the cycle's target and the
+       countdown, plus Stop. Instantiated by both orientation branches of the
+       chamber card in temp_graph_overlay.xml and hidden unless the matched
+       chamber backend has a drying cycle. Start is disabled while a job holds
+       the machine (the cycle takes the chamber from the print) or the
+       appliance is offline; Stop stays live, since ending a cycle is always
+       safe. Both fire TemperatureService XML callbacks that delegate to the
+       globally registered TemperatureController. -->
+  <view name="chamber_dryer_row"
+        width="100%" height="content" flex_flow="row" style_pad_all="0" style_pad_gap="#space_xs"
+        style_flex_cross_place="center" scrollable="false">
+    <bind_flag_if_eq subject="printer_has_chamber_dryer" flag="hidden" ref_value="0"/>
+    <icon name="dryer_icon" src="heat_wave" size="xs"/>
+    <text_small name="dryer_text" bind_text="chamber_dryer_text" flex_grow="1" long_mode="dots">
+      <bind_flag_if cond="chamber_dryer_active" flag="hidden" invert="true"/>
+    </text_small>
+    <lv_obj name="dryer_spacer" height="1" flex_grow="1" style_pad_all="0" scrollable="false">
+      <bind_flag_if cond="chamber_dryer_active" flag="hidden"/>
+    </lv_obj>
+    <ui_button name="dryer_start_button"
+               height="#button_height_sm_tiny" text="Start Drying" variant="ghost" style_text_font="#font_small"
+               style_pad_left="#space_xs" style_pad_right="#space_xs" style_border_width="#border_width"
+               style_border_color="#border" style_border_opa="255" moves_machine="true">
+      <bind_flag_if cond="chamber_dryer_active" flag="hidden"/>
+      <bind_state_if cond="chamber_heater_offline" state="disabled"/>
+      <event_cb trigger="clicked" callback="on_chamber_dryer_start_clicked"/>
+    </ui_button>
+    <ui_button name="dryer_stop_button"
+               height="#button_height_sm_tiny" text="Stop" variant="ghost" style_text_font="#font_small"
+               style_pad_left="#space_xs" style_pad_right="#space_xs" style_border_width="#border_width"
+               style_border_color="#border" style_border_opa="255">
+      <bind_flag_if cond="chamber_dryer_active" flag="hidden" invert="true"/>
+      <event_cb trigger="clicked" callback="on_chamber_dryer_stop_clicked"/>
+    </ui_button>
+  </view>
+</component>

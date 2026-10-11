@@ -3,12 +3,21 @@
 
 #include "ui_utils.h"
 
+#include "lvgl/src/core/lv_obj_draw_private.h" // lv_obj_get_ext_draw_size: no public getter
+#include "lvgl/src/indev/lv_indev_private.h"   // pointer.act_obj: no public getter outside dispatch
 #include "theme_manager.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <string>
+#include <unordered_set>
 
 // ============================================================================
 // Responsive Layout
@@ -169,6 +178,106 @@ const char* get_owned_user_string(lv_obj_t* obj) {
         return nullptr;
     }
     return static_cast<const char*>(lv_obj_get_user_data(obj));
+}
+
+// ============================================================================
+// Input reset scoped to a subtree
+// ============================================================================
+
+namespace {
+
+bool in_subtree(const lv_obj_t* obj, const lv_obj_t* subtree) {
+    for (; obj != nullptr; obj = lv_obj_get_parent(obj)) {
+        if (obj == subtree) {
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+void reset_input_within(lv_obj_t* subtree) {
+    if (!subtree) {
+        return;
+    }
+    for (lv_indev_t* indev = lv_indev_get_next(nullptr); indev != nullptr;
+         indev = lv_indev_get_next(indev)) {
+        if (lv_indev_get_type(indev) != LV_INDEV_TYPE_POINTER) {
+            continue;
+        }
+        if (in_subtree(indev->pointer.act_obj, subtree) ||
+            in_subtree(lv_indev_get_scroll_obj(indev), subtree)) {
+            lv_indev_reset(indev, subtree);
+        }
+    }
+}
+
+// ============================================================================
+// Required widget lookups
+// ============================================================================
+
+namespace {
+std::atomic<bool> g_strict_ui_checks{false};
+} // namespace
+
+void set_strict_ui_checks(bool enabled) noexcept {
+    g_strict_ui_checks.store(enabled, std::memory_order_release);
+}
+
+bool strict_ui_checks() noexcept {
+    return g_strict_ui_checks.load(std::memory_order_acquire);
+}
+
+void report_ui_contract_breach(const char* message) {
+    spdlog::error("{}", message);
+#ifndef HELIX_RELEASE_BUILD
+    if (g_strict_ui_checks.load(std::memory_order_acquire)) {
+        std::fprintf(stderr, "\n[UI contract] STRICT MODE: %s\n", message);
+        std::abort();
+    }
+#endif
+}
+
+lv_obj_t* find_required(lv_obj_t* root, const char* name, const char* owner) {
+    if (!root) {
+        return nullptr;
+    }
+    lv_obj_t* obj = lv_obj_find_by_name(root, name);
+    if (!obj) {
+        // One report per (owner, name): a lookup on every activate would
+        // otherwise flood the log in release builds.
+        static std::unordered_set<std::string> reported;
+        if (reported.insert(std::string(owner) + '/' + name).second) {
+            std::string msg = std::string("[") + owner + "] required widget '" + name +
+                              "' not found in its component's XML";
+            report_ui_contract_breach(msg.c_str());
+        }
+    }
+    return obj;
+}
+
+static void child_overhang_cb(lv_event_t* e) {
+    lv_obj_t* obj = lv_event_get_current_target_obj(e);
+    int32_t s = 0;
+    for (uint32_t i = 0; i < lv_obj_get_child_count(obj); i++) {
+        lv_obj_t* child = lv_obj_get_child(obj, i);
+        if (!lv_obj_has_flag(child, LV_OBJ_FLAG_HIDDEN))
+            s = std::max<int32_t>(s, lv_obj_get_ext_draw_size(child));
+    }
+    lv_event_set_ext_draw_size(e, s);
+}
+
+void pass_child_overhang(lv_obj_t* obj) {
+    lv_obj_add_flag(obj, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+    lv_obj_add_event_cb(obj, child_overhang_cb, LV_EVENT_REFR_EXT_DRAW_SIZE, nullptr);
+}
+
+void refresh_overhang_chain(lv_obj_t* child) {
+    lv_obj_refresh_ext_draw_size(child);
+    for (lv_obj_t* p = lv_obj_get_parent(child);
+         p && lv_obj_has_flag(p, LV_OBJ_FLAG_OVERFLOW_VISIBLE); p = lv_obj_get_parent(p))
+        lv_obj_refresh_ext_draw_size(p);
 }
 
 } // namespace helix::ui

@@ -15,39 +15,6 @@
 #include <cstring>
 
 /**
- * Map severity string to theme color constant name
- */
-static const char* severity_to_color_const(const char* severity) {
-    if (!severity || strcmp(severity, "info") == 0) {
-        return "info";
-    } else if (strcmp(severity, "error") == 0) {
-        return "danger";
-    } else if (strcmp(severity, "warning") == 0) {
-        return "warning";
-    } else if (strcmp(severity, "success") == 0) {
-        return "success";
-    }
-    return "info";
-}
-
-/**
- * Map severity string to icon glyph
- * Uses LVGL built-in symbols
- */
-static const char* severity_to_icon(const char* severity) {
-    if (!severity || strcmp(severity, "info") == 0) {
-        return "\xEF\x81\x9A"; // F05A - circle-info (i in circle)
-    } else if (strcmp(severity, "error") == 0) {
-        return LV_SYMBOL_WARNING; // F071 - exclamation-triangle
-    } else if (strcmp(severity, "warning") == 0) {
-        return LV_SYMBOL_WARNING; // F071 - exclamation-triangle
-    } else if (strcmp(severity, "success") == 0) {
-        return LV_SYMBOL_OK; // F00C - check
-    }
-    return "\xEF\x81\x9A"; // F05A - circle-info (i in circle)
-}
-
-/**
  * Get the shared severity style for a given severity string.
  * These styles are managed by ThemeManager and update automatically when theme changes.
  */
@@ -141,11 +108,9 @@ void ui_severity_card_finalize(lv_obj_t* obj) {
         severity = "info";
     }
 
-    // New pattern: XML defines 4 icons (icon_info, icon_success, icon_warning, icon_error)
-    // all hidden by default. We just unhide the correct one.
-    // This keeps all styling (text, color) in XML.
-
-    // Map severity to icon name
+    // The card's XML defines four icons (icon_info, icon_success, icon_warning,
+    // icon_error), all hidden. Unhiding the matching one keeps every glyph and
+    // colour in XML.
     const char* icon_name = nullptr;
     if (strcmp(severity, "info") == 0) {
         icon_name = "icon_info";
@@ -166,21 +131,6 @@ void ui_severity_card_finalize(lv_obj_t* obj) {
         spdlog::debug("[SeverityCard] Finalized: showing '{}' for severity='{}'", icon_name,
                       severity);
     } else {
-        // Fallback: try legacy severity_icon pattern for backward compatibility
-        lv_obj_t* legacy_icon = lv_obj_find_by_name(obj, "severity_icon");
-        if (legacy_icon) {
-            const char* icon_text = severity_to_icon(severity);
-            lv_label_set_text(legacy_icon, icon_text);
-            lv_obj_set_style_text_color(legacy_icon, ui_severity_get_color(severity), LV_PART_MAIN);
-            spdlog::debug("[SeverityCard] Finalized via legacy pattern for severity='{}'",
-                          severity);
-        } else {
-            spdlog::warn("[SeverityCard] Could not find icon for severity='{}'", severity);
-        }
+        spdlog::warn("[SeverityCard] Could not find icon for severity='{}'", severity);
     }
-}
-
-lv_color_t ui_severity_get_color(const char* severity) {
-    const char* color_const = severity_to_color_const(severity);
-    return theme_manager_get_color(color_const);
 }

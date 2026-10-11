@@ -25,6 +25,7 @@ constexpr int KLIPPY_STARTUP = static_cast<int>(KlippyState::STARTUP);
 constexpr int KLIPPY_SHUTDOWN = static_cast<int>(KlippyState::SHUTDOWN);
 constexpr int KLIPPY_ERROR = static_cast<int>(KlippyState::ERROR);
 
+// TEST_MIRROR_OK: state() forwards to the shipped PrinterStatusIcon::compute_state()
 PrinterIconState state(int conn, int klippy, bool ever_connected, bool expected_restart) {
     return PrinterStatusIcon::compute_state(conn, klippy, ever_connected, expected_restart);
 }

@@ -28,13 +28,21 @@ namespace helix {
 class PrinterState;
 }
 class PrintStartCollector;
+namespace helix {
+class MoonrakerManagerTestAccess;
+}
 
 // Need full enum definition for inline helper function
 #include "printer_state.h"
 
 namespace helix {
-class MacroModificationManager;
-}
+/// Settle the saved printer type for a launch with HELIX_MOCK_PRINTER set.
+/// A persona that declares a type (PersonaEntry::saved_type) writes it; any
+/// other value, recognised or not, clears a stale saved type so detection
+/// re-resolves. nullptr or "" leaves config alone. Does not save: returns true
+/// when it changed config, and the caller saves.
+bool apply_mock_printer_identity(Config& config, const char* mock_printer_env);
+} // namespace helix
 
 /**
  * @brief Manages Moonraker client and API lifecycle
@@ -62,7 +70,7 @@ class MacroModificationManager;
 class MoonrakerManager {
   public:
     // Out-of-line on purpose: the class holds unique_ptr members of
-    // forward-declared types (e.g. MacroModificationManager), and a defaulted
+    // forward-declared types (MoonrakerAPI, IMoonrakerClient), and a defaulted
     // constructor here would instantiate in every TU that constructs the
     // manager, requiring those types to be complete there.
     MoonrakerManager();
@@ -138,12 +146,16 @@ class MoonrakerManager {
     size_t pending_notification_count() const;
 
     /**
-     * @brief Initialize print start collector after connection
+     * @brief Create the print start collector for the printer about to connect
      *
-     * Sets up observers to monitor print startup phases.
-     * Call after successful connect().
+     * Sets up observers to monitor print startup phases. Call before connect(), so the
+     * observers it installs on the API are in place before the WebSocket task can call
+     * them. Replaces (detaches) any previous collector.
      */
     void init_print_start_collector();
+
+    /// Detach and drop the print start collector, if there is one.
+    void release_print_start_collector();
 
     /**
      * @brief The pre-print detection collector, if one exists yet
@@ -213,9 +225,7 @@ class MoonrakerManager {
         // pre-print phase tracking. Gating on prev==STANDBY fixes that while still
         // skipping the real boot-into-active-print case (which presents as
         // STANDBY -> PRINTING).
-        bool prev_is_terminal = (prev_state == helix::PrintJobState::COMPLETE ||
-                                 prev_state == helix::PrintJobState::CANCELLED ||
-                                 prev_state == helix::PrintJobState::ERROR);
+        bool prev_is_terminal = helix::job_has_ended(prev_state);
         if (is_initial_transition && !prev_is_terminal &&
             (current_progress > 0 || current_print_duration > 0)) {
             return false; // App joined mid-print (booted into a running print), skip collector
@@ -276,6 +286,18 @@ class MoonrakerManager {
      */
     static inline bool should_stop_collector_on_retirement(helix::PrintJobState job_state) {
         return should_stop_print_collector(job_state, /*has_preparing_job=*/false);
+    }
+
+    /**
+     * @brief Decide whether a Klippy state change should stop the collector
+     *
+     * A shutdown or error ends the print, but print_stats does not always say
+     * so: some firmware (Snapmaker U1) reports PAUSED after a verify_heater
+     * shutdown, which should_stop_print_collector() spares. Klippy's own state
+     * is the signal that no PRINT_START is still running.
+     */
+    static inline bool should_stop_collector_on_klippy_state(helix::KlippyState state) {
+        return state == helix::KlippyState::SHUTDOWN || state == helix::KlippyState::ERROR;
     }
 
     /**
@@ -360,21 +382,9 @@ class MoonrakerManager {
         return print_duration > 0;
     }
 
-    /**
-     * @brief Initialize macro analysis manager
-     *
-     * Creates the manager for PRINT_START macro analysis and wizard.
-     * Call after init() but before connect().
-     */
-    void init_macro_analysis(helix::Config* config);
-
-    /**
-     * @brief Get macro modification manager
-     * @return Pointer to manager, or nullptr if not initialized
-     */
-    helix::MacroModificationManager* macro_analysis() const;
-
   private:
+    friend class helix::MoonrakerManagerTestAccess;
+
     // Initialization helpers
     void create_client(const RuntimeConfig& runtime_config);
     void configure_timeouts(helix::Config* config);
@@ -383,7 +393,7 @@ class MoonrakerManager {
 
     /// Present one Moonraker event. MAIN THREAD ONLY — the registered event
     /// handler marshals here through lifetime_.bg_cb(), because everything this
-    /// touches (lv_tr, toasts, modals) is LVGL-facing while the handler itself
+    /// touches (toasts, modals) is LVGL-facing while the handler itself
     /// runs on whatever thread raised the event (#1219).
     void present_event(const MoonrakerEvent& evt);
 
@@ -391,8 +401,15 @@ class MoonrakerManager {
     std::unique_ptr<helix::IMoonrakerClient> m_client;
     std::unique_ptr<MoonrakerAPI> m_api;
 
+    /// A notification and the klippy session it was received in (see
+    /// PrinterState::klippy_epoch()).
+    struct QueuedNotification {
+        nlohmann::json body;
+        uint64_t klippy_epoch = 0;
+    };
+
     // Thread-safe notification queue
-    std::queue<nlohmann::json> m_notification_queue;
+    std::queue<QueuedNotification> m_notification_queue;
     mutable std::mutex m_notification_mutex;
 
     // Print start collector (monitors PRINT_START macro progress)
@@ -400,13 +417,19 @@ class MoonrakerManager {
     ObserverGuard m_preparing_epoch_observer;
     ObserverGuard m_print_start_observer;
     ObserverGuard m_print_start_phase_observer;
+    ObserverGuard m_print_klippy_state_observer;
     SubjectLifetime m_print_bed_target_fallback_lifetime;
     ObserverGuard m_print_bed_target_fallback_observer;
     ObserverGuard m_print_ext_target_fallback_observer;
+    ObserverGuard m_print_homed_axes_fallback_observer;
     /// Toolhead position observers feeding the print-start collector's
     /// silent-window inference (one guard per axis subject; the callback
     /// reads all three coherently).
     ObserverGuard m_print_position_observers[3];
+    /// Extruder velocity and filament-system action, sampled for a purge
+    /// that holds the toolhead still.
+    ObserverGuard m_print_extruder_velocity_observer;
+    ObserverGuard m_print_ams_action_observer;
     // Pre-print completion observers. The hand-off to the printing phase is
     // gated on the REAL first layer (print_stats.info.current_layer >= 1) — see
     // should_complete_preprint(). The layer observer is the primary signal; the
@@ -417,9 +440,6 @@ class MoonrakerManager {
     // Snapmaker U1).
     ObserverGuard m_print_layer_observer;
     ObserverGuard m_print_duration_observer;
-
-    // Macro modification manager (PRINT_START wizard integration)
-    std::unique_ptr<helix::MacroModificationManager> m_macro_analysis;
 
 #ifdef HELIX_ENABLE_MOCKS
     /// Loopback HTTP server backing thumbnail/gcode downloads under --test.

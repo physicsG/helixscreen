@@ -26,21 +26,20 @@
                 text="#icon_triangle_exclamation" hidden="true" style_text_font="mdi_icons_24"
                 style_text_color="#warning"/>
       <lv_label name="icon_error"
-                text="#icon_triangle_exclamation" hidden="true" style_text_font="mdi_icons_24"
-                style_text_color="#danger"/>
+                text="#icon_alert_octagon" hidden="true" style_text_font="mdi_icons_24" style_text_color="#danger"/>
     </lv_obj>
     <!-- Content column (flex grow) -->
     <lv_obj flex_grow="1"
             style_pad_all="0" flex_flow="column" style_pad_gap="#space_xxs" clickable="false" event_bubble="true">
-      <!-- Title row with timestamp -->
+      <!-- Headline row: the title, or the message itself for an untitled entry -->
       <lv_obj width="100%"
-              height="content" style_pad_all="0" flex_flow="row" style_flex_main_place="space_between"
-              style_flex_cross_place="center" clickable="false" event_bubble="true">
-        <text_body name="item_title" text="$title"/>
+              height="content" style_pad_all="0" style_pad_gap="#space_sm" flex_flow="row"
+              style_flex_cross_place="start" clickable="false" event_bubble="true">
+        <text_body name="item_title" flex_grow="1" text="$title" long_mode="wrap"/>
         <text_small name="item_timestamp" text="$timestamp"/>
       </lv_obj>
-      <!-- Message -->
-      <text_small name="item_message" width="100%" text="$message" long_mode="wrap"/>
+      <!-- Message (hidden when it was promoted to the headline) -->
+      <text_small name="item_message" width="100%" text="$message" long_mode="wrap" hidden_if_empty="$message"/>
     </lv_obj>
   </view>
 </component>

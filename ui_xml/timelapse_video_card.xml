@@ -26,7 +26,7 @@
         style_min_width="#card_min_width" style_max_width="#card_max_width" style_pad_all="0" style_clip_corner="true"
         clickable="true">
     <!-- Pre-rendered gradient background -->
-    <lv_image name="gradient_bg" width="100%" height="100%" inner_align="stretch"/>
+    <lv_image name="gradient_bg" width="100%" height="100%"/>
     <!-- Thumbnail image -->
     <lv_image name="thumbnail" width="100%" height="100%" src="$thumbnail_src" align="center" inner_align="contain"/>
     <!-- No-thumbnail placeholder -->

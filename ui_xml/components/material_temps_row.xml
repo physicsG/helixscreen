@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component>
+  <!-- One material in the material temperatures list:
+       [material name ....] [tune icon if overridden] [nozzle-range / bed].
+       C++ creates one per material, names the row after the material, sets the
+       name text (user-defined names are user text, and as a prop a leading
+       '#' would read as a const) and wires the click that opens the editor. -->
+  <api>
+    <prop name="temps_text" type="string" default=""/>
+    <prop name="hide_override" type="boolean" default="true"/>
+  </api>
+  <view extends="lv_obj"
+        width="100%" height="content" flex_flow="row" style_flex_cross_place="center" style_bg_opa="0"
+        style_border_width="0" style_pad_all="#space_sm" style_radius="8" scrollable="false" clickable="true">
+    <style name="styles.press_wash" selector="pressed"/>
+    <lv_label name="material_name" text="" flex_grow="1" style_text_color="#text" event_bubble="true"/>
+    <lv_label text="#icon_tune"
+              hidden="$hide_override" style_text_font="mdi_icons_16" style_text_color="#primary"
+              style_pad_right="#space_xs" event_bubble="true"/>
+    <lv_label text="$temps_text" style_text_color="#text_muted" event_bubble="true"/>
+  </view>
+</component>

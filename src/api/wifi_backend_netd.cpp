@@ -3,6 +3,7 @@
 
 #include "wifi_backend_netd.h"
 
+#include "helix_thread.h"
 #include "spdlog/spdlog.h"
 #include "wifi_ui_utils.h"
 
@@ -143,6 +144,7 @@ WiFiError WifiBackendNetd::start() {
         try {
             spdlog::info("[WifiBackendNetd] Starting event loop thread");
             hv::EventLoopThread::start(true, [this]() -> int {
+                helix::install_thread_altstack();
                 init_netd();
                 return 0;
             });
@@ -195,7 +197,7 @@ void WifiBackendNetd::start_async() {
 
     // Wrap — EAGAIN under thread exhaustion throws std::system_error.
     try {
-        async_init_thread_ = std::thread([this]() {
+        async_init_thread_ = helix::make_thread([this]() {
             const WiFiError result = start();
             const bool ran_init = init_complete_.load();
             async_init_in_progress_.store(false);
@@ -250,18 +252,6 @@ bool WifiBackendNetd::is_running() const {
     // Mirrors init success only: a dropped daemon socket does NOT flip this
     // (the reconnect timer owns that); the last snapshot keeps being served.
     return init_succeeded_.load();
-}
-
-void WifiBackendNetd::register_event_callback(const std::string& name,
-                                              std::function<void(const std::string&)> callback) {
-    std::lock_guard<std::mutex> lock(callbacks_mutex_);
-    const auto& entry = callbacks_.find(name);
-    if (entry == callbacks_.end()) {
-        callbacks_.insert({name, callback});
-        spdlog::debug("[WifiBackendNetd] Registered callback '{}'", name);
-    } else {
-        spdlog::warn("[WifiBackendNetd] Callback '{}' already registered (not replacing)", name);
-    }
 }
 
 // ============================================================================
@@ -347,12 +337,26 @@ bool WifiBackendNetd::open_connection(std::string& error_out) {
     // join. One second to connect, then the reconnect cadence owns the retry.
     // The fd STAYS nonblocking: libhv owns it from here.
     const int fd = helix::netd::connect_unix(path, 1000, &error_out);
-    // The connect is the whole reachability verdict. Reaching the daemon means
-    // it owns the radio, the supplicant and DHCP, so every failure PAST this
-    // point still leaves wpa_supplicant locked out; failing the connect itself
-    // is the one outcome that frees the hardware for it.
+    // Reaching the daemon means it owns the radio, the supplicant and DHCP, so
+    // every failure PAST this point still leaves wpa_supplicant locked out;
+    // failing the connect is what frees the hardware for it.
+    //
+    // A failed connect is NOT proof the daemon is gone, and this flag treats it
+    // as though it were. ENOENT and ECONNREFUSED do say that. A connect that
+    // times out says the opposite: the accept backlog is full, which is a daemon
+    // that is running and wedged, and is the case the bounded connect above
+    // exists to survive. Classifying it as absent admits wpa_supplicant onto a
+    // radio the daemon still holds, which is the outcome this flag exists to
+    // prevent. Narrowing it changes when the fallback engages on real hardware,
+    // so it is left as-is here and the misread is made visible instead.
     daemon_unreachable_.store(fd < 0);
     if (fd < 0) {
+        if (error_out.find("timed out") != std::string::npos) {
+            spdlog::warn("[WifiBackendNetd] Connect timed out; treating the daemon as absent and "
+                         "allowing the wpa_supplicant fallback. If the daemon is in fact running "
+                         "but not accepting, both clients now hold the radio: {}",
+                         error_out);
+        }
         return false;
     }
 
@@ -658,12 +662,11 @@ void WifiBackendNetd::finish_scan(helix::netd::Ack::Kind completing) {
         scan_watchdog_timer_ = kNoTimer;
     }
     if (!scan_pending_.exchange(false)) {
-        // No scan was outstanding, so there is nothing to publish — but rows
-        // may still be sitting in the staging cache (cleanup_netd() clears
+        // No scan was outstanding, so there is nothing to publish, but rows
+        // may still be sitting in the staging cache: cleanup_netd() clears
         // scan_pending_ without completing, and open_connection() calls this
-        // to retire an orphaned scan). Returning above the clear kept them
-        // alive to be swapped into a LATER scan's results, so they grew for
-        // the life of the process and contaminated the next published list.
+        // to retire that orphaned scan. Rows left staged would be swapped
+        // into the next scan's published list as networks it never reported.
         std::lock_guard<std::mutex> lock(scan_mutex_);
         incoming_rows_.clear();
         return;
@@ -687,28 +690,6 @@ void WifiBackendNetd::finish_scan(helix::netd::Ack::Kind completing) {
     }
     spdlog::debug("[WifiBackendNetd] Scan complete ({} rows)", rows);
     dispatch_event("SCAN_COMPLETE", "");
-}
-
-void WifiBackendNetd::dispatch_event(const std::string& event_name, const std::string& message) {
-    // Copy the callback out under the mutex, release BEFORE invoking —
-    // holding callbacks_mutex_ across the callback invites deadlock if a
-    // handler re-enters the backend.
-    std::function<void(const std::string&)> cb;
-    {
-        std::lock_guard<std::mutex> lock(callbacks_mutex_);
-        const auto it = callbacks_.find(event_name);
-        if (it == callbacks_.end())
-            return;
-        cb = it->second;
-    }
-    spdlog::debug("[WifiBackendNetd] Dispatching '{}'", event_name);
-    try {
-        cb(message);
-    } catch (const std::exception& e) {
-        spdlog::error("[WifiBackendNetd] Exception in callback '{}': {}", event_name, e.what());
-    } catch (...) {
-        spdlog::error("[WifiBackendNetd] Unknown exception in callback '{}'", event_name);
-    }
 }
 
 // ============================================================================
@@ -942,7 +923,8 @@ WiFiError WifiBackendNetd::get_scan_results(std::vector<WiFiNetwork>& networks) 
     return WiFiErrorHelper::success();
 }
 
-WiFiError WifiBackendNetd::connect_network(const std::string& ssid, const std::string& password) {
+WiFiError WifiBackendNetd::connect_network(const std::string& ssid, const std::string& password,
+                                           bool) {
     if (ssid.empty()) {
         return WiFiError(WiFiResult::INVALID_PARAMETERS, "SSID must not be empty",
                          "Enter a network name");
@@ -1054,6 +1036,30 @@ WifiBackend::ConnectionStatus WifiBackendNetd::get_status() {
     return status;
 }
 
+bool WifiBackendNetd::join_displaces_wired_link() {
+    // netd runs a single transport: a Wi-Fi join makes it down eth0 and move
+    // the address to wlan0, so whatever wired address the caller is reachable
+    // on stops answering. The join still goes through - the daemon's own
+    // events are the only verdict on it - so this only reports the cost.
+    //
+    // Liveness is a conjunct because the snapshot outlives the socket: with
+    // no daemon to act on the join, nothing gets displaced and the stale
+    // ETHERNET row would advise the user about a consequence that cannot
+    // happen. A snapshot that has not caught up yet (empty mode) answers
+    // false for the same reason.
+    //
+    // Sampled in this order so cmd_mutex_ is never taken under
+    // snapshot_mutex_ — the write path holds cmd_mutex_ and the loop thread
+    // merges snapshots under snapshot_mutex_, so nesting them would invent a
+    // lock order this file does not otherwise have. Neither read has to be
+    // atomic with the other: a race makes the advisory one poll stale.
+    if (!connection_live()) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+    return snapshot_.mode == "ETHERNET" && snapshot_.connected_state();
+}
+
 bool WifiBackendNetd::supports_5ghz() const {
     // Derived from evidence, not asserted: the moment any scan row lands on
     // the 5 GHz band, the radio demonstrably sees it. Until a scan has been
@@ -1063,6 +1069,17 @@ bool WifiBackendNetd::supports_5ghz() const {
 
 WiFiError WifiBackendNetd::set_radio_enabled(bool on) {
     (void)on;
+    // A connect that found nothing there means the daemon is not managing the
+    // radio, so reporting a missing capability would name the wrong thing. It
+    // also loads the WiFi driver, so with it down there is no interface at all
+    // - the honest answer is that the service is absent, which is what the user
+    // can act on. Before any connect is attempted the daemon may be perfectly
+    // healthy, so this asks what a connect actually found, not whether this
+    // backend happens to be started.
+    if (daemon_unreachable_.load()) {
+        return WiFiError(WiFiResult::SERVICE_NOT_RUNNING, "the network daemon is not running",
+                         "The printer's network service is not running");
+    }
     // NOT_SUPPORTED, not BACKEND_ERROR: nothing failed and nothing is broken.
     // The daemon owns the radio and its protocol has no verb for this, so the
     // capability is absent. The distinction is what the user sees — an error
@@ -1085,7 +1102,12 @@ bool WifiBackendNetd::supports_wpa_supplicant_fallback() const {
     // so wpa_supplicant may only be started when the daemon is provably absent
     // — an init failure with a live daemon must leave WiFi down rather than
     // put two clients on one radio. open_connection() supplies that proof.
-    return daemon_unreachable_.load();
+    // ...and only when the daemon is absent from the SYSTEM, not merely from the
+    // socket. netd is what loads the WiFi driver, so on a firmware that ships it
+    // a down daemon leaves no interface for wpa_supplicant to take: swapping
+    // would replace an accurate failure with a misleading one and abandon the
+    // reconnect that recovers when the daemon returns.
+    return daemon_unreachable_.load() && !helix::netd::binary_present();
 }
 
 bool WifiBackendNetd::supports_radio_toggle() const {

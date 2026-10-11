@@ -128,6 +128,7 @@ void ThemeManager::register_style_configs() {
     styles_[static_cast<size_t>(StyleRole::InputBg)].configure = configure_input_bg;
     styles_[static_cast<size_t>(StyleRole::Disabled)].configure = configure_disabled;
     styles_[static_cast<size_t>(StyleRole::Pressed)].configure = configure_pressed;
+    styles_[static_cast<size_t>(StyleRole::CardPressed)].configure = helix::configure_card_pressed;
     styles_[static_cast<size_t>(StyleRole::Focused)].configure = configure_focused;
 
     styles_[static_cast<size_t>(StyleRole::TextPrimary)].configure = configure_text_primary;

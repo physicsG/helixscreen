@@ -1,12 +1,42 @@
 <?xml version="1.0"?>
 <component name="panel_widget_tool_switcher">
+  <api>
+    <!-- Per-instance subject names, supplied by the widget at creation. They
+         must exist before this component is parsed: a binding whose subject is
+         missing at parse time is dropped permanently and silently. -->
+    <prop name="tile_icon_subject" type="string" default=""/>
+    <prop name="tile_label_subject" type="string" default=""/>
+    <prop name="tile_dir_subject" type="string" default=""/>
+    <prop name="tile_target_subject" type="string" default=""/>
+  </api>
   <view name="tool_switcher_root"
         extends="lv_obj" width="100%" height="100%" flex_flow="column" style_flex_main_place="center"
-        style_flex_cross_place="center" style_pad_all="#space_xs" scrollable="false" style_bg_opa="0"
-        style_border_width="0">
+        style_flex_cross_place="center" style_pad_all="0" scrollable="false" style_bg_opa="0" style_border_width="0">
+    <!-- One pill per tool, built by the widget, while there is room for them -->
     <lv_obj name="tool_switcher_container"
             width="100%" height="100%" flex_flow="row" style_flex_main_place="start" style_flex_cross_place="center"
-            style_pad_all="0" style_pad_column="#space_xs" scrollable="true" scroll_dir="hor" scrollbar_mode="off"
-            style_bg_opa="0" style_border_width="0"/>
+            style_pad_all="#space_md" style_pad_column="#space_xs" scrollable="true" scroll_dir="hor"
+            scrollbar_mode="off" style_bg_opa="0" style_border_width="0">
+      <bind_flag_if_eq subject="tool_switcher_compact" flag="hidden" ref_value="1"/>
+    </lv_obj>
+    <!-- Compact: the swap glyph over the active tool, sized like any other
+         tile; a tap raises the tool picker. -->
+    <lv_obj name="tool_switcher_compact"
+            width="100%" height="100%" style_pad_ver="0" style_pad_gap="#space_xxs" style_bg_opa="0"
+            style_border_width="0" scrollable="false" hidden="true" style_radius="#border_radius">
+      <style name="styles.press_wash" selector="pressed"/>
+      <bind_flag_if_eq subject="tool_switcher_compact" flag="hidden" ref_value="0"/>
+      <style name="styles.tile_column"/>
+      <bind_style_if_eq name="styles.tile_row" subject="$tile_dir_subject" ref_value="1"/>
+      <event_cb trigger="clicked" callback="tool_compact_cb"/>
+      <icon name="tool_switcher_compact_icon"
+            src="arrow_left_right" size="sm" variant="secondary" clickable="false" event_bubble="true">
+        <bind_tile_rung ladder="icon" subject="$tile_icon_subject"/>
+      </icon>
+      <text_body name="tool_switcher_compact_label"
+                 bind_text="tool_switcher_active_label" style_text_align="center" clickable="false" event_bubble="true">
+        <bind_tile_rung ladder="value" subject="$tile_icon_subject"/>
+      </text_body>
+    </lv_obj>
   </view>
 </component>

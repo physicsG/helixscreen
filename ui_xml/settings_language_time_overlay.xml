@@ -1,0 +1,41 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Language &amp; Time Settings Overlay: language, timezone, time format -->
+<!-- Uses setting_* components for consistency with main settings panel -->
+<component>
+  <styles>
+    <!-- Cards own the horizontal inset (setting_group side margins); content has none. -->
+    <style name="content_standard" pad_top="0" pad_left="0" pad_right="0" pad_bottom="#space_lg"/>
+    <style name="content_micro" pad_top="0" pad_left="0" pad_right="0" pad_bottom="#space_sm"/>
+    <style name="spacer_standard" height="#space_lg"/>
+    <style name="spacer_micro" height="#space_md"/>
+  </styles>
+  <view name="settings_language_time_overlay" extends="overlay_panel" title="Language &amp; Time" bg_color="#screen_bg">
+    <!-- Content Area - no padding, rows handle their own -->
+    <lv_obj name="overlay_content" width="100%" flex_grow="1" scrollable="true" flex_flow="column">
+      <bind_style_if_eq name="content_micro" subject="ui_breakpoint" ref_value="0"/>
+      <bind_style_if_ge name="content_standard" subject="ui_breakpoint" ref_value="1"/>
+      <setting_group name="group_language_time">
+        <!-- Language Dropdown -->
+        <setting_dropdown_row name="row_language"
+                              label="Language" icon="translate" description="Choose display language"
+                              callback="on_language_changed"/>
+        <!-- Timezone Dropdown (options populated dynamically in C++) -->
+        <setting_dropdown_row name="row_timezone"
+                              label="Timezone" icon="clock" description="Set local timezone for time display" options=""
+                              callback="on_timezone_changed"/>
+        <!-- Time Format Dropdown -->
+        <setting_dropdown_row name="row_time_format"
+                              label="Time Format" icon="clock" description="Choose 12-hour or 24-hour time display"
+                              options="12 Hour&#10;24 Hour" options_tag="12 Hour&#10;24 Hour"
+                              bind_selected="settings_time_format" callback="on_time_format_changed"/>
+      </setting_group>
+      <!-- Bottom padding for scroll -->
+      <lv_obj width="100%" scrollable="false">
+        <bind_style_if_eq name="spacer_micro" subject="ui_breakpoint" ref_value="0"/>
+        <bind_style_if_ge name="spacer_standard" subject="ui_breakpoint" ref_value="1"/>
+      </lv_obj>
+    </lv_obj>
+  </view>
+</component>

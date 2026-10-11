@@ -18,6 +18,7 @@
 
 #include "../helix_test_fixture.h"
 #include "../test_helpers/config_test_access.h"
+#include "../test_helpers/unique_temp_dir.h"
 #include "config.h"
 #include "hardware_validator.h"
 #include "led/led_auto_state.h"
@@ -91,7 +92,7 @@ class ConfigPollutionFixture : public HelixTestFixture {
     Config* saved_instance_ = nullptr;
 
     void SetUp() {
-        temp_dir = (fs::temp_directory_path() / "helix_config_pollution_test").string();
+        temp_dir = helix::test::unique_temp_dir("helix_config_pollution_test");
         fs::remove_all(temp_dir);
         fs::create_directories(temp_dir);
 
@@ -184,8 +185,6 @@ TEST_CASE_METHOD(ConfigPollutionFixture,
     REQUIRE(nulls.empty());
 
     // The real value must survive the round trip.
-    REQUIRE(ctrl.selected_strips().size() == 1);
-    REQUIRE(ctrl.selected_strips()[0] == "neopixel case_lights");
     REQUIRE(saved["printers"]["voronv2"]["leds"]["selected_strips"] ==
             json::array({"neopixel case_lights"}));
 }
@@ -380,7 +379,6 @@ TEST_CASE_METHOD(ConfigPollutionFixture,
     auto& ctrl = helix::led::LedController::instance();
     ctrl.deinit();
     ctrl.init(nullptr, nullptr);
-    REQUIRE(ctrl.selected_strips() == std::vector<std::string>{"neopixel legacy_light"});
     REQUIRE(ctrl.last_color() == 0xAA5500);
     REQUIRE(ctrl.last_brightness() == 55);
     REQUIRE(ctrl.color_presets().size() == 2);
@@ -396,7 +394,8 @@ TEST_CASE_METHOD(ConfigPollutionFixture,
     // Idempotent: a second boot (config is now v20) changes nothing.
     ctrl.deinit();
     ctrl.init(nullptr, nullptr);
-    REQUIRE(ctrl.selected_strips() == std::vector<std::string>{"neopixel legacy_light"});
+    REQUIRE(config.get_string_array("/printers/voronv2/leds/selected_strips") ==
+            std::vector<std::string>{"neopixel legacy_light"});
     REQUIRE(ctrl.last_color() == 0xAA5500);
     REQUIRE(ctrl.configured_macros().size() == 1);
     REQUIRE_FALSE(config.exists("/led"));

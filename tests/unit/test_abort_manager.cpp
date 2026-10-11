@@ -19,10 +19,14 @@
  */
 
 #include "../lvgl_test_fixture.h"
+#include "../test_helpers/abort_manager_test_access.h"
 #include "../test_helpers/printer_state_test_access.h"
 #include "../ui_test_utils.h"
 #include "abort_manager.h"
 #include "app_globals.h"
+#include "moonraker_api_mock.h"
+#include "moonraker_client_mock.h"
+#include "printer_discovery.h"
 #include "safety_settings_manager.h"
 #include "settings_manager.h"
 
@@ -32,138 +36,6 @@
 
 using namespace helix;
 using namespace helix::ui;
-
-// ============================================================================
-// Test Access Helper (friend class)
-// ============================================================================
-
-namespace helix {
-
-class AbortManagerTestAccess {
-  public:
-    static void reset(AbortManager& m) {
-        reset_state(m);
-        m.kalico_status_ = AbortManager::KalicoStatus::UNKNOWN;
-        m.commands_sent_ = 0;
-        m.api_ = nullptr;
-        m.printer_state_ = nullptr;
-    }
-
-    static void reset_state(AbortManager& m) {
-        m.cancel_all_timers();
-        m.klippy_observer_.reset();
-        m.cancel_state_observer_.reset();
-        m.abort_state_ = AbortManager::State::IDLE;
-        m.escalation_level_ = 0;
-        m.shutdown_recovery_in_progress_ = false;
-        m.seen_shutdown_during_reconnect_ = false;
-        {
-            std::lock_guard<std::mutex> lock(m.message_mutex_);
-            m.last_result_message_.clear();
-        }
-        if (m.subjects_initialized_) {
-            lv_subject_set_int(&m.abort_state_subject_,
-                               static_cast<int>(AbortManager::State::IDLE));
-            lv_subject_copy_string(&m.progress_message_subject_, "");
-            m.update_visibility();
-        }
-    }
-
-    static void on_heater_interrupt_success(AbortManager& m) {
-        m.on_heater_interrupt_success();
-    }
-
-    static void on_heater_interrupt_error(AbortManager& m) {
-        m.on_heater_interrupt_error();
-    }
-
-    static void on_heater_interrupt_timeout(AbortManager& m) {
-        m.on_heater_interrupt_timeout();
-    }
-
-    static void on_probe_response(AbortManager& m) {
-        m.on_probe_response();
-    }
-
-    static void on_probe_timeout(AbortManager& m) {
-        m.on_probe_timeout();
-    }
-
-    static void on_cancel_success(AbortManager& m) {
-        m.on_cancel_success();
-    }
-
-    static void on_cancel_timeout(AbortManager& m) {
-        m.on_cancel_timeout();
-    }
-
-    static void on_estop_sent(AbortManager& m) {
-        m.on_estop_sent();
-    }
-
-    static void on_restart_sent(AbortManager& m) {
-        m.on_restart_sent();
-    }
-
-    static void on_klippy_ready(AbortManager& m) {
-        m.on_klippy_state_changed(KlippyState::READY);
-    }
-
-    static void on_reconnect_timeout(AbortManager& m) {
-        m.reconnect_timer_.reset();
-        m.complete_abort("Abort complete (reconnect timeout). Check printer status.");
-    }
-
-    static void on_klippy_state_change(AbortManager& m, KlippyState state) {
-        m.on_klippy_state_changed(state);
-    }
-
-    static void set_kalico_status(AbortManager& m, AbortManager::KalicoStatus status) {
-        m.kalico_status_ = status;
-    }
-
-    // Backdrop modal accessors — the modal is now created lazily by
-    // update_visibility() on the first visible state, not eagerly in
-    // init_subjects().
-    static lv_obj_t* backdrop(AbortManager& m) {
-        return m.backdrop_;
-    }
-
-    static void set_state(AbortManager& m, AbortManager::State state) {
-        m.abort_state_ = state;
-    }
-
-    static void call_update_visibility(AbortManager& m) {
-        m.update_visibility();
-    }
-
-    static void on_print_state_during_cancel(AbortManager& m, PrintJobState state) {
-        m.on_print_state_during_cancel(state);
-    }
-
-    static void on_api_error(AbortManager& m, const std::string& /* error */) {
-        switch (m.abort_state_.load()) {
-        case AbortManager::State::TRY_HEATER_INTERRUPT:
-            m.on_heater_interrupt_error();
-            break;
-        case AbortManager::State::PROBE_QUEUE:
-            m.on_probe_timeout();
-            break;
-        case AbortManager::State::SENT_CANCEL:
-            if (SafetySettingsManager::instance().get_cancel_escalation_enabled()) {
-                m.escalate_to_estop();
-            } else {
-                m.complete_abort("Cancel command failed. Use E-Stop if print continues.");
-            }
-            break;
-        default:
-            spdlog::warn("[AbortManager] API error in state {}", m.get_state_name());
-            break;
-        }
-    }
-};
-
-} // namespace helix
 
 // Minimal reset helper using public API only
 
@@ -260,6 +132,58 @@ class AbortManagerTestFixture : public LVGLTestFixture {
     }
 };
 
+namespace {
+
+/// Keeps execute_gcode's success callbacks instead of answering, so a test can
+/// deliver a reply after the manager has moved on.
+class HeldReplyApi : public MoonrakerAPIMock {
+  public:
+    using MoonrakerAPIMock::MoonrakerAPIMock;
+
+    void execute_gcode(const std::string& /*gcode*/, SuccessCallback on_success,
+                       ErrorCallback /*on_error*/, uint32_t /*timeout_ms*/ = 0,
+                       bool /*silent*/ = false, SuccessCallback /*on_queued*/ = nullptr,
+                       bool /*caller_surfaces_errors*/ = true,
+                       bool /*bypass_busy_gate*/ = false) override {
+        held.push_back(std::move(on_success));
+    }
+
+    std::vector<SuccessCallback> held;
+};
+
+} // namespace
+
+// A reply still in flight when a sequence ends belongs to that sequence;
+// delivering it must not advance the next one.
+TEST_CASE_METHOD(AbortManagerTestFixture, "AbortManager: reply to an earlier sequence is dropped",
+                 "[abort][lifetime]") {
+    PrinterState state;
+    state.init_subjects(false);
+    MoonrakerClientMock client(MoonrakerClientMock::PrinterType::VORON_24);
+    HeldReplyApi api(client, state);
+
+    AbortManager::instance().init(&api, nullptr);
+    AbortManager::instance().start_abort();
+    REQUIRE(AbortManager::instance().get_state() == AbortManager::State::PROBE_QUEUE);
+    REQUIRE(api.held.size() == 1);
+
+    // The first sequence ends, its M115 still unanswered, and a second starts.
+    AbortManagerTestAccess::on_reconnect_timeout(AbortManager::instance());
+    REQUIRE(AbortManager::instance().get_state() == AbortManager::State::COMPLETE);
+    AbortManager::instance().start_abort();
+    REQUIRE(AbortManager::instance().get_state() == AbortManager::State::PROBE_QUEUE);
+    REQUIRE(api.held.size() == 2);
+
+    api.held[0]();
+    helix::ui::UpdateQueue::instance().drain();
+    REQUIRE(AbortManager::instance().get_state() == AbortManager::State::PROBE_QUEUE);
+
+    // The current sequence's own reply still advances it.
+    api.held[1]();
+    helix::ui::UpdateQueue::instance().drain();
+    CHECK(AbortManager::instance().get_state() != AbortManager::State::PROBE_QUEUE);
+}
+
 // ============================================================================
 // Initial State Tests
 // ============================================================================
@@ -352,7 +276,8 @@ TEST_CASE_METHOD(AbortManagerTestFixture,
                  "AbortManager: First abort without printer_state skips to PROBE_QUEUE",
                  "[abort][kalico][start]") {
     // Without printer_state_, Kalico status stays UNKNOWN → skip to PROBE_QUEUE
-    REQUIRE(AbortManager::instance().get_kalico_status() == AbortManager::KalicoStatus::UNKNOWN);
+    REQUIRE(AbortManager::instance().get_heater_interrupt_support() ==
+            AbortManager::HeaterInterruptSupport::UNKNOWN);
 
     AbortManager::instance().start_abort();
 
@@ -364,8 +289,8 @@ TEST_CASE_METHOD(AbortManagerTestFixture,
                  "AbortManager: First abort with Kalico detected sends HEATER_INTERRUPT",
                  "[abort][kalico][start]") {
     // Pre-set Kalico detected (as printer.info would during discovery)
-    AbortManagerTestAccess::set_kalico_status(AbortManager::instance(),
-                                              AbortManager::KalicoStatus::DETECTED);
+    AbortManagerTestAccess::set_heater_interrupt_support(
+        AbortManager::instance(), AbortManager::HeaterInterruptSupport::SUPPORTED);
 
     AbortManager::instance().start_abort();
 
@@ -380,8 +305,8 @@ TEST_CASE_METHOD(AbortManagerTestFixture,
 TEST_CASE_METHOD(AbortManagerTestFixture, "AbortManager: HEATER_INTERRUPT success on Kalico",
                  "[abort][kalico][detection]") {
     // Pre-set Kalico detected so HEATER_INTERRUPT is sent
-    AbortManagerTestAccess::set_kalico_status(AbortManager::instance(),
-                                              AbortManager::KalicoStatus::DETECTED);
+    AbortManagerTestAccess::set_heater_interrupt_support(
+        AbortManager::instance(), AbortManager::HeaterInterruptSupport::SUPPORTED);
     AbortManager::instance().start_abort();
     REQUIRE(AbortManager::instance().get_state() == AbortManager::State::TRY_HEATER_INTERRUPT);
 
@@ -389,7 +314,8 @@ TEST_CASE_METHOD(AbortManagerTestFixture, "AbortManager: HEATER_INTERRUPT succes
     simulate_kalico_detected();
 
     // Kalico should remain DETECTED
-    REQUIRE(AbortManager::instance().get_kalico_status() == AbortManager::KalicoStatus::DETECTED);
+    REQUIRE(AbortManager::instance().get_heater_interrupt_support() ==
+            AbortManager::HeaterInterruptSupport::SUPPORTED);
 
     // Should transition to PROBE_QUEUE
     REQUIRE(AbortManager::instance().get_state() == AbortManager::State::PROBE_QUEUE);
@@ -399,8 +325,8 @@ TEST_CASE_METHOD(AbortManagerTestFixture,
                  "AbortManager: HEATER_INTERRUPT error transitions to PROBE_QUEUE",
                  "[abort][kalico][detection]") {
     // Pre-set Kalico detected so HEATER_INTERRUPT is sent
-    AbortManagerTestAccess::set_kalico_status(AbortManager::instance(),
-                                              AbortManager::KalicoStatus::DETECTED);
+    AbortManagerTestAccess::set_heater_interrupt_support(
+        AbortManager::instance(), AbortManager::HeaterInterruptSupport::SUPPORTED);
     AbortManager::instance().start_abort();
     REQUIRE(AbortManager::instance().get_state() == AbortManager::State::TRY_HEATER_INTERRUPT);
 
@@ -408,8 +334,8 @@ TEST_CASE_METHOD(AbortManagerTestFixture,
     simulate_kalico_not_present();
 
     // Kalico should be cached as NOT_PRESENT
-    REQUIRE(AbortManager::instance().get_kalico_status() ==
-            AbortManager::KalicoStatus::NOT_PRESENT);
+    REQUIRE(AbortManager::instance().get_heater_interrupt_support() ==
+            AbortManager::HeaterInterruptSupport::UNSUPPORTED);
 
     // Should transition to PROBE_QUEUE
     REQUIRE(AbortManager::instance().get_state() == AbortManager::State::PROBE_QUEUE);
@@ -419,8 +345,8 @@ TEST_CASE_METHOD(AbortManagerTestFixture,
                  "AbortManager: HEATER_INTERRUPT timeout treated as not-Kalico",
                  "[abort][kalico][timeout]") {
     // Pre-set Kalico detected so HEATER_INTERRUPT is sent
-    AbortManagerTestAccess::set_kalico_status(AbortManager::instance(),
-                                              AbortManager::KalicoStatus::DETECTED);
+    AbortManagerTestAccess::set_heater_interrupt_support(
+        AbortManager::instance(), AbortManager::HeaterInterruptSupport::SUPPORTED);
     AbortManager::instance().start_abort();
     REQUIRE(AbortManager::instance().get_state() == AbortManager::State::TRY_HEATER_INTERRUPT);
 
@@ -428,8 +354,8 @@ TEST_CASE_METHOD(AbortManagerTestFixture,
     AbortManagerTestAccess::on_heater_interrupt_timeout(AbortManager::instance());
 
     // Kalico should be cached as NOT_PRESENT
-    REQUIRE(AbortManager::instance().get_kalico_status() ==
-            AbortManager::KalicoStatus::NOT_PRESENT);
+    REQUIRE(AbortManager::instance().get_heater_interrupt_support() ==
+            AbortManager::HeaterInterruptSupport::UNSUPPORTED);
 
     // Should transition to PROBE_QUEUE
     REQUIRE(AbortManager::instance().get_state() == AbortManager::State::PROBE_QUEUE);
@@ -443,13 +369,14 @@ TEST_CASE_METHOD(AbortManagerTestFixture,
                  "AbortManager: Second abort uses cached Kalico status - DETECTED",
                  "[abort][kalico][caching]") {
     // Pre-set Kalico detected
-    AbortManagerTestAccess::set_kalico_status(AbortManager::instance(),
-                                              AbortManager::KalicoStatus::DETECTED);
+    AbortManagerTestAccess::set_heater_interrupt_support(
+        AbortManager::instance(), AbortManager::HeaterInterruptSupport::SUPPORTED);
 
     // First abort - sends HEATER_INTERRUPT
     AbortManager::instance().start_abort();
     simulate_kalico_detected();
-    REQUIRE(AbortManager::instance().get_kalico_status() == AbortManager::KalicoStatus::DETECTED);
+    REQUIRE(AbortManager::instance().get_heater_interrupt_support() ==
+            AbortManager::HeaterInterruptSupport::SUPPORTED);
 
     // Complete first abort
     simulate_queue_responsive();
@@ -464,15 +391,16 @@ TEST_CASE_METHOD(AbortManagerTestFixture,
 
     // Should STILL try HEATER_INTERRUPT when Kalico is detected (it's a soft interrupt)
     REQUIRE(AbortManager::instance().get_state() == AbortManager::State::TRY_HEATER_INTERRUPT);
-    REQUIRE(AbortManager::instance().get_kalico_status() == AbortManager::KalicoStatus::DETECTED);
+    REQUIRE(AbortManager::instance().get_heater_interrupt_support() ==
+            AbortManager::HeaterInterruptSupport::SUPPORTED);
 }
 
 TEST_CASE_METHOD(AbortManagerTestFixture,
                  "AbortManager: Second abort skips probe when NOT_PRESENT cached",
                  "[abort][kalico][caching]") {
     // First abort with NOT_PRESENT cached (resolved from printer.info)
-    AbortManagerTestAccess::set_kalico_status(AbortManager::instance(),
-                                              AbortManager::KalicoStatus::NOT_PRESENT);
+    AbortManagerTestAccess::set_heater_interrupt_support(
+        AbortManager::instance(), AbortManager::HeaterInterruptSupport::UNSUPPORTED);
     AbortManager::instance().start_abort();
 
     // Should go directly to PROBE_QUEUE
@@ -489,8 +417,8 @@ TEST_CASE_METHOD(AbortManagerTestFixture,
     AbortManager::instance().start_abort();
 
     REQUIRE(AbortManager::instance().get_state() == AbortManager::State::PROBE_QUEUE);
-    REQUIRE(AbortManager::instance().get_kalico_status() ==
-            AbortManager::KalicoStatus::NOT_PRESENT);
+    REQUIRE(AbortManager::instance().get_heater_interrupt_support() ==
+            AbortManager::HeaterInterruptSupport::UNSUPPORTED);
 }
 
 // ============================================================================
@@ -738,7 +666,8 @@ TEST_CASE_METHOD(AbortManagerTestFixture, "AbortManager: HEATER_INTERRUPT NOT se
     AbortManager::instance().init(nullptr, nullptr);
 
     // Kalico status should remain UNKNOWN after init
-    REQUIRE(AbortManager::instance().get_kalico_status() == AbortManager::KalicoStatus::UNKNOWN);
+    REQUIRE(AbortManager::instance().get_heater_interrupt_support() ==
+            AbortManager::HeaterInterruptSupport::UNKNOWN);
 
     // State should be IDLE
     REQUIRE(AbortManager::instance().get_state() == AbortManager::State::IDLE);
@@ -753,7 +682,8 @@ TEST_CASE_METHOD(AbortManagerTestFixture, "AbortManager: init_subjects does not 
     AbortManager::instance().init_subjects();
 
     // Kalico should still be UNKNOWN
-    REQUIRE(AbortManager::instance().get_kalico_status() == AbortManager::KalicoStatus::UNKNOWN);
+    REQUIRE(AbortManager::instance().get_heater_interrupt_support() ==
+            AbortManager::HeaterInterruptSupport::UNKNOWN);
     REQUIRE(AbortManager::instance().get_commands_sent_count() == 0);
 }
 
@@ -769,17 +699,35 @@ TEST_CASE_METHOD(AbortManagerTestFixture,
     get_printer_state().init_subjects(false);
     AbortManager::instance().init(nullptr, &get_printer_state());
 
-    REQUIRE(AbortManager::instance().get_kalico_status() == AbortManager::KalicoStatus::UNKNOWN);
+    REQUIRE(AbortManager::instance().get_heater_interrupt_support() ==
+            AbortManager::HeaterInterruptSupport::UNKNOWN);
 
     AbortManager::instance().start_abort();
 
     // Should resolve to NOT_PRESENT from printer.info and skip to PROBE_QUEUE
-    REQUIRE(AbortManager::instance().get_kalico_status() ==
-            AbortManager::KalicoStatus::NOT_PRESENT);
+    REQUIRE(AbortManager::instance().get_heater_interrupt_support() ==
+            AbortManager::HeaterInterruptSupport::UNSUPPORTED);
     REQUIRE(AbortManager::instance().get_state() == AbortManager::State::PROBE_QUEUE);
 
     // No HEATER_INTERRUPT command should have been sent
     REQUIRE(AbortManager::instance().get_commands_sent_count() == 0);
+}
+
+TEST_CASE_METHOD(AbortManagerTestFixture,
+                 "AbortManager: Discovery that reports HEATER_INTERRUPT support starts with it",
+                 "[abort][kalico][printer_info]") {
+    PrinterStateTestAccess::reset(get_printer_state());
+    get_printer_state().init_subjects(false);
+    helix::PrinterDiscovery hw;
+    hw.set_is_kalico(true);
+    get_printer_state().set_hardware(hw);
+    AbortManager::instance().init(nullptr, &get_printer_state());
+
+    AbortManager::instance().start_abort();
+
+    REQUIRE(AbortManager::instance().get_heater_interrupt_support() ==
+            AbortManager::HeaterInterruptSupport::SUPPORTED);
+    REQUIRE(AbortManager::instance().get_state() == AbortManager::State::TRY_HEATER_INTERRUPT);
 }
 
 // ============================================================================
@@ -808,8 +756,8 @@ TEST_CASE_METHOD(AbortManagerTestFixture, "AbortManager: get_state_name returns 
     }
 
     SECTION("TRY_HEATER_INTERRUPT") {
-        AbortManagerTestAccess::set_kalico_status(AbortManager::instance(),
-                                                  AbortManager::KalicoStatus::DETECTED);
+        AbortManagerTestAccess::set_heater_interrupt_support(
+            AbortManager::instance(), AbortManager::HeaterInterruptSupport::SUPPORTED);
         AbortManager::instance().start_abort();
         REQUIRE(state_name() == "TRY_HEATER_INTERRUPT");
     }
@@ -978,8 +926,8 @@ TEST_CASE_METHOD(AbortManagerTestFixture,
                  "[abort][error][robustness]") {
     SECTION("API error during HEATER_INTERRUPT escalates correctly") {
         // Pre-set Kalico detected so HEATER_INTERRUPT is sent
-        AbortManagerTestAccess::set_kalico_status(AbortManager::instance(),
-                                                  AbortManager::KalicoStatus::DETECTED);
+        AbortManagerTestAccess::set_heater_interrupt_support(
+            AbortManager::instance(), AbortManager::HeaterInterruptSupport::SUPPORTED);
         AbortManager::instance().start_abort();
 
         // Simulate API error (not "Unknown command", but actual network error)
@@ -1044,8 +992,8 @@ TEST_CASE_METHOD(AbortManagerTestFixture, "AbortManager: Edge cases", "[abort][e
 
         REQUIRE(AbortManager::instance().get_state() == AbortManager::State::IDLE);
         REQUIRE(AbortManager::instance().is_aborting() == false);
-        REQUIRE(AbortManager::instance().get_kalico_status() ==
-                AbortManager::KalicoStatus::UNKNOWN);
+        REQUIRE(AbortManager::instance().get_heater_interrupt_support() ==
+                AbortManager::HeaterInterruptSupport::UNKNOWN);
     }
 
     SECTION("Callbacks during COMPLETE state are ignored") {
@@ -1117,15 +1065,16 @@ TEST_CASE_METHOD(AbortManagerTestFixture,
 TEST_CASE_METHOD(AbortManagerTestFixture, "AbortManager: Happy path with Kalico",
                  "[abort][happy][kalico]") {
     // Kalico detected via printer.info - HEATER_INTERRUPT helps with M109 waits
-    AbortManagerTestAccess::set_kalico_status(AbortManager::instance(),
-                                              AbortManager::KalicoStatus::DETECTED);
+    AbortManagerTestAccess::set_heater_interrupt_support(
+        AbortManager::instance(), AbortManager::HeaterInterruptSupport::SUPPORTED);
 
     AbortManager::instance().start_abort();
     REQUIRE(AbortManager::instance().get_state() == AbortManager::State::TRY_HEATER_INTERRUPT);
 
     // Kalico detected
     simulate_kalico_detected();
-    REQUIRE(AbortManager::instance().get_kalico_status() == AbortManager::KalicoStatus::DETECTED);
+    REQUIRE(AbortManager::instance().get_heater_interrupt_support() ==
+            AbortManager::HeaterInterruptSupport::SUPPORTED);
     REQUIRE(AbortManager::instance().get_state() == AbortManager::State::PROBE_QUEUE);
 
     // Queue responds (HEATER_INTERRUPT helped free it)
@@ -1197,7 +1146,7 @@ TEST_CASE_METHOD(AbortManagerTestFixture,
 
     // Initial print_outcome should be NONE
     auto initial = static_cast<PrintOutcome>(
-        lv_subject_get_int(get_printer_state().get_print_outcome_subject()));
+        lv_subject_get_int(get_printer_state().print_state().get_print_outcome_subject()));
     REQUIRE(initial == PrintOutcome::NONE);
 
     // Start abort and run through to completion (soft cancel path)
@@ -1216,7 +1165,7 @@ TEST_CASE_METHOD(AbortManagerTestFixture,
     // print_outcome should now be CANCELLED
     // THIS WILL FAIL until AbortManager calls set_print_outcome(CANCELLED)
     auto outcome = static_cast<PrintOutcome>(
-        lv_subject_get_int(get_printer_state().get_print_outcome_subject()));
+        lv_subject_get_int(get_printer_state().print_state().get_print_outcome_subject()));
     REQUIRE(outcome == PrintOutcome::CANCELLED);
 }
 
@@ -1231,7 +1180,7 @@ TEST_CASE_METHOD(AbortManagerTestFixture,
 
     // Initial print_outcome should be NONE
     auto initial = static_cast<PrintOutcome>(
-        lv_subject_get_int(get_printer_state().get_print_outcome_subject()));
+        lv_subject_get_int(get_printer_state().print_state().get_print_outcome_subject()));
     REQUIRE(initial == PrintOutcome::NONE);
 
     // Start abort and escalate through to M112 + FIRMWARE_RESTART
@@ -1251,7 +1200,7 @@ TEST_CASE_METHOD(AbortManagerTestFixture,
 
     // print_outcome should be CANCELLED even after escalation
     auto outcome = static_cast<PrintOutcome>(
-        lv_subject_get_int(get_printer_state().get_print_outcome_subject()));
+        lv_subject_get_int(get_printer_state().print_state().get_print_outcome_subject()));
     REQUIRE(outcome == PrintOutcome::CANCELLED);
 }
 
@@ -1351,7 +1300,7 @@ TEST_CASE_METHOD(AbortManagerTestFixture,
     get_printer_state().init_subjects(false);
 
     // Set print state to PAUSED (simulates: user is cancelling a paused print)
-    lv_subject_set_int(get_printer_state().get_print_state_enum_subject(),
+    lv_subject_set_int(get_printer_state().print_state().get_print_state_enum_subject(),
                        static_cast<int>(PrintJobState::PAUSED));
 
     AbortManager::instance().init(nullptr, &get_printer_state());
@@ -1364,7 +1313,7 @@ TEST_CASE_METHOD(AbortManagerTestFixture,
     REQUIRE(AbortManager::instance().get_state() == AbortManager::State::SENT_CANCEL);
 
     // Now simulate Klipper finishing the cancel macro → STANDBY
-    lv_subject_set_int(get_printer_state().get_print_state_enum_subject(),
+    lv_subject_set_int(get_printer_state().print_state().get_print_state_enum_subject(),
                        static_cast<int>(PrintJobState::STANDBY));
 
     // Observer should complete the abort
@@ -1382,7 +1331,7 @@ TEST_CASE_METHOD(AbortManagerTestFixture,
     get_printer_state().init_subjects(false);
 
     // Print state is already STANDBY (print ended on its own)
-    lv_subject_set_int(get_printer_state().get_print_state_enum_subject(),
+    lv_subject_set_int(get_printer_state().print_state().get_print_state_enum_subject(),
                        static_cast<int>(PrintJobState::STANDBY));
 
     AbortManager::instance().init(nullptr, &get_printer_state());

@@ -1,0 +1,11 @@
+name: second-command fixture
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/init-submodules
+      - name: Apply then re-apply
+        run: |
+          make apply-patches
+          make apply-patches HELIX_PATCHES_FROM_CLEAN=1

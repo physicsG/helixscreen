@@ -4,6 +4,7 @@
 #include "ui_panel_base.h"
 
 #include "ui_nav_manager.h"
+#include "ui_panel_common.h"
 #include "ui_utils.h"
 
 #include "helix-xml/src/xml/lv_xml.h"
@@ -132,7 +133,7 @@ bool PanelBase::rebuild() {
 
     bool was_hidden = lv_obj_has_flag(panel_, LV_OBJ_FLAG_HIDDEN);
 
-    on_deactivate();
+    on_deactivate(DeactivateReason::Rebuild);
     cleanup_observers();
 
     lv_obj_t* old_widget = panel_;
@@ -152,7 +153,7 @@ bool PanelBase::rebuild() {
     // the panel empty rather than crashing later.
     helix::ui::safe_delete_subtree(old_widget);
 
-    auto* new_widget = static_cast<lv_obj_t*>(lv_xml_create(parent, component, nullptr));
+    auto* new_widget = helix::ui::create_xml_hidden(parent, component);
     if (!new_widget) {
         spdlog::error("[PanelBase::rebuild] {} — lv_xml_create failed; panel is now empty, "
                       "restart to recover",
@@ -160,9 +161,7 @@ bool PanelBase::rebuild() {
         return false;
     }
 
-    if (was_hidden) {
-        lv_obj_add_flag(new_widget, LV_OBJ_FLAG_HIDDEN);
-    } else {
+    if (!was_hidden) {
         lv_obj_remove_flag(new_widget, LV_OBJ_FLAG_HIDDEN);
     }
 

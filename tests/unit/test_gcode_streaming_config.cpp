@@ -3,9 +3,10 @@
 
 /**
  * @file test_gcode_streaming_config.cpp
- * @brief Unit tests for G-code streaming configuration and low-RAM force-streaming
+ * @brief Unit tests for G-code streaming configuration and the low-RAM threshold cap
  */
 
+#include "config.h"
 #include "gcode_streaming_config.h"
 #include "memory_utils.h"
 
@@ -27,53 +28,111 @@ static constexpr size_t MB = 1024 * 1024;
 static constexpr size_t GB_KB = 1024ULL * 1024; // 1GB in KB
 
 // ============================================================================
-// MemoryInfo::should_force_streaming() tests
+// MemoryInfo::is_low_ram_device() tests (the <=2GB tier)
 // ============================================================================
 
-TEST_CASE("should_force_streaming returns true for 1GB device", "[gcode]") {
+TEST_CASE("is_low_ram_device returns true for 1GB device", "[gcode]") {
     auto mem = make_mem(1 * GB_KB);
-    REQUIRE(mem.should_force_streaming());
+    REQUIRE(mem.is_low_ram_device());
 }
 
-TEST_CASE("should_force_streaming returns true for 2GB device", "[gcode]") {
+TEST_CASE("is_low_ram_device returns true for 2GB device", "[gcode]") {
     auto mem = make_mem(2 * GB_KB);
-    REQUIRE(mem.should_force_streaming());
+    REQUIRE(mem.is_low_ram_device());
 }
 
-TEST_CASE("should_force_streaming returns false for 4GB device", "[gcode]") {
+TEST_CASE("is_low_ram_device returns false for 4GB device", "[gcode]") {
     auto mem = make_mem(4 * GB_KB);
-    REQUIRE_FALSE(mem.should_force_streaming());
+    REQUIRE_FALSE(mem.is_low_ram_device());
 }
 
-TEST_CASE("should_force_streaming returns false for just above 2GB", "[gcode]") {
+TEST_CASE("is_low_ram_device returns false for just above 2GB", "[gcode]") {
     auto mem = make_mem(2 * GB_KB + 1);
-    REQUIRE_FALSE(mem.should_force_streaming());
+    REQUIRE_FALSE(mem.is_low_ram_device());
 }
 
-TEST_CASE("should_force_streaming returns false for 8GB device", "[gcode]") {
+TEST_CASE("is_low_ram_device returns false for 8GB device", "[gcode]") {
     auto mem = make_mem(8 * GB_KB);
-    REQUIRE_FALSE(mem.should_force_streaming());
+    REQUIRE_FALSE(mem.is_low_ram_device());
 }
 
-TEST_CASE("should_force_streaming returns false for 16GB device", "[gcode]") {
+TEST_CASE("is_low_ram_device returns false for 16GB device", "[gcode]") {
     auto mem = make_mem(16 * GB_KB);
-    REQUIRE_FALSE(mem.should_force_streaming());
+    REQUIRE_FALSE(mem.is_low_ram_device());
 }
 
-TEST_CASE("should_force_streaming returns false when total_kb is 0 (unknown)", "[gcode]") {
+TEST_CASE("is_low_ram_device returns false when total_kb is 0 (unknown)", "[gcode]") {
     auto mem = make_mem(0);
-    REQUIRE_FALSE(mem.should_force_streaming());
+    REQUIRE_FALSE(mem.is_low_ram_device());
 }
 
 // ============================================================================
 // should_use_gcode_streaming(file_size, mem) testable overload
 // ============================================================================
 
-TEST_CASE("Testable overload returns true for small file on 2GB device", "[gcode]") {
-    // Even a tiny file should stream on a low-RAM device
+TEST_CASE("Testable overload full-parses a small file on a 2GB device with memory to spare",
+          "[gcode]") {
+    // Low-RAM boards get a smaller threshold PERCENTAGE, not a blanket force:
+    // with 512MB available the ceiling stays multi-MB, so a 100KB file fits.
     auto mem = make_mem(2 * GB_KB, 512 * KB); // 2GB total, 512MB available
     size_t small_file = 100 * KB;             // 100KB file
-    REQUIRE(should_use_gcode_streaming(small_file, mem));
+    REQUIRE_FALSE(should_use_gcode_streaming(small_file, mem));
+}
+
+// ============================================================================
+// Low-RAM fit check: the Pi 3B numbers the plan measured (856MB total,
+// ~600MB available with the app running; a Benchy's 3D geometry is ~25-35MB
+// on top of the parse)
+// ============================================================================
+
+TEST_CASE("A low-RAM board full-parses a Benchy-sized file", "[gcode]") {
+    // 2.9MB Benchy on a Pi 3B: the print-status preview must be allowed to
+    // load 3D and follow the print.
+    auto mem = make_mem(856 * 1024, 600 * 1024); // 856MB total, 600MB available
+    size_t benchy = 2970 * KB;                   // ~2.9MB
+    REQUIRE_FALSE(should_use_gcode_streaming(benchy, mem));
+}
+
+TEST_CASE("A low-RAM board still streams a 45MB file", "[gcode]") {
+    auto mem = make_mem(856 * 1024, 600 * 1024); // 856MB total, 600MB available
+    size_t big_file = 45 * MB;
+    REQUIRE(should_use_gcode_streaming(big_file, mem));
+}
+
+TEST_CASE("A low-RAM board streams again once available memory collapses", "[gcode]") {
+    // The low-RAM rule is a fit check, not a force: the same 856MB board with
+    // only 200MB available cannot afford the Benchy parse any more.
+    auto mem = make_mem(856 * 1024, 200 * 1024);
+    size_t benchy = 2970 * KB;
+    REQUIRE(should_use_gcode_streaming(benchy, mem));
+}
+
+TEST_CASE("A configured threshold below 15 is honoured on a low-RAM board", "[gcode][streaming]") {
+    // The 15% low-RAM share is a cap on big configured values, not a floor on
+    // small ones: a user's 10 must stay 10, or a memory-starved board silently
+    // full-parses files the smaller ceiling was meant to stream.
+    const char* key = "/gcode_viewer/streaming_threshold_percent";
+    helix::Config* config = helix::Config::get_instance();
+    const int original = config->get<int>(key, 40);
+    struct Restore {
+        helix::Config* config;
+        const char* key;
+        int value;
+        ~Restore() {
+            config->set<int>(key, value);
+        }
+    } restore{config, key, original};
+
+    config->set<int>(key, 10);
+    REQUIRE(get_streaming_threshold_percent() == 10);
+
+    // 2GB board, 512MB available: 10% of it over the 15x expansion is a
+    // ~3.4MB ceiling; the 15% cap would give ~5.1MB. A 4.5MB file sits between
+    // the two, so it streams only while the configured 10 is in force.
+    auto mem = make_mem(2 * GB_KB, 512 * KB);
+    REQUIRE(mem.is_low_ram_device());
+    REQUIRE(should_use_gcode_streaming(size_t(4.5 * MB), mem));
+    REQUIRE_FALSE(should_use_gcode_streaming(3 * MB, mem));
 }
 
 TEST_CASE("Testable overload uses threshold logic for 8GB device", "[gcode]") {
@@ -102,6 +161,38 @@ TEST_CASE("Testable overload falls back for unknown available memory on 8GB devi
 
     size_t large_file = 3 * MB; // 3MB > 2MB threshold
     REQUIRE(should_use_gcode_streaming(large_file, mem));
+}
+
+// ============================================================================
+// The "streaming" config section feeds the same decision
+// ============================================================================
+
+namespace {
+template <typename T> struct ScopedConfigValue {
+    const char* key;
+    T original;
+    ScopedConfigValue(const char* k, T value)
+        : key(k), original(helix::Config::get_instance()->get<T>(k, T{})) {
+        helix::Config::get_instance()->set<T>(key, value);
+    }
+    ~ScopedConfigValue() {
+        helix::Config::get_instance()->set<T>(key, original);
+    }
+};
+} // namespace
+
+TEST_CASE("force_streaming in the streaming section forces streaming mode", "[gcode][streaming]") {
+    ScopedConfigValue<std::string> mode("/gcode_viewer/streaming_mode", "auto");
+    ScopedConfigValue<bool> force("/streaming/force_streaming", true);
+    CHECK(get_gcode_streaming_mode() == GCodeStreamingMode::ON);
+}
+
+TEST_CASE("threshold_mb streams files above it even when RAM would allow a full load",
+          "[gcode][streaming]") {
+    ScopedConfigValue<int> threshold("/streaming/threshold_mb", 2);
+    auto mem = make_mem(8 * GB_KB, 4 * GB_KB); // RAM alone would full-load ~109MB
+    CHECK(should_use_gcode_streaming(3 * MB, mem));
+    CHECK_FALSE(should_use_gcode_streaming(1 * MB, mem));
 }
 
 // ============================================================================

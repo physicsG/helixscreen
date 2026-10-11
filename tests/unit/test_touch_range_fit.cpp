@@ -651,6 +651,60 @@ TEST_CASE_METHOD(LVGLTestFixture, "calibrated_read_cb: stashes the raw reading f
     lv_indev_delete(indev);
 }
 
+TEST_CASE_METHOD(LVGLTestFixture,
+                 "calibrated_read_cb: places a rotated capture's affine in panel space",
+                 "[touch][touch-calibration][range-fit][wrapper][rotation][1394]") {
+    // The callback receives PANEL-space coordinates - it runs before
+    // lv_display_rotate_point() - while the wizard solves against logical,
+    // post-rotation targets. Handing a panel coordinate straight to that matrix
+    // evaluates it in the wrong basis, a quarter turn out on a 90 or 270 capture.
+    //
+    // K2 shape: 480x800 portrait glass, a matrix captured at 270. The affine is a
+    // pure translation so the derivation below is readable end to end:
+    //   panel (100,200) -> logical  {p.y, panel_w - p.x - 1} = (200, 379)
+    //   + (10,20)                                            = (210, 399)
+    //   logical -> panel {panel_w - q.y - 1, q.x}             = ( 80, 210)
+    // The display's own rotation deliberately stays 0 here: the placement is driven
+    // by the capture rotation the record carries, never by what the display is doing
+    // now, and reading the live rotation instead collapses this to (110,220).
+    lv_indev_t* indev = lv_indev_create();
+    REQUIRE(indev != nullptr);
+    lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
+
+    TouchCalibration cal;
+    cal.valid = true;
+    cal.a = 1.0f, cal.b = 0.0f, cal.c = 10.0f;
+    cal.d = 0.0f, cal.e = 1.0f, cal.f = 20.0f;
+    cal.capture_rotation = 270;
+
+    CalibrationContext ctx;
+    install_calibration_wrapper(indev, ctx, cal, 480, 800);
+
+    lv_indev_data_t data{};
+    data.point.x = 100;
+    data.point.y = 200;
+    data.state = LV_INDEV_STATE_PRESSED;
+    calibrated_read_cb(indev, &data);
+
+    CHECK(data.point.x == 80);
+    CHECK(data.point.y == 210);
+
+    // The same numbers through the helper, so a change to the rotation convention
+    // moves both together rather than leaving one of them stale.
+    const Point placed = apply_calibration_in_panel_space(cal, {100, 200}, 270, 480, 800);
+    CHECK(data.point.x == placed.x);
+    CHECK(data.point.y == placed.y);
+
+    // And what the matrix applied directly in panel space would have produced. The
+    // two differ, which is the whole reason the placement exists.
+    const Point unplaced = transform_point(cal, {100, 200}, 479, 799);
+    CHECK(unplaced.x == 110);
+    CHECK(data.point.x != unplaced.x);
+
+    uninstall_calibration_wrapper(indev, ctx);
+    lv_indev_delete(indev);
+}
+
 // ============================================================================
 // Committing: exactly one of the two shapes, never both
 // ============================================================================
@@ -659,6 +713,9 @@ namespace {
 
 struct RangeFakeSink : ICalibrationSink {
     TouchCalibration stored{};
+    bool range_known = true; ///< the device reports the range it runs now
+    TouchRangeSource live_source = TouchRangeSource::Declared;
+    int live_capture_rotation = -1;
     bool range_accepted = true;
     bool range_called = false;
     bool cleared = false;
@@ -683,7 +740,17 @@ struct RangeFakeSink : ICalibrationSink {
         stored = TouchCalibration{};
         cleared = true;
     }
-    bool apply_touch_range(bool swap, int min_x, int min_y, int max_x, int max_y) override {
+    LiveTouchRange current_touch_range() const override {
+        LiveTouchRange live;
+        live.range.valid = range_known;
+        live.range.max_x = 479;
+        live.range.max_y = 799;
+        live.range.capture_rotation = live_capture_rotation;
+        live.source = live_source;
+        return live;
+    }
+    bool apply_touch_range(bool swap, int min_x, int min_y, int max_x, int max_y,
+                           TouchRangeSource) override {
         range_called = true;
         last_swap = swap;
         last_min_x = min_x;
@@ -708,10 +775,10 @@ TouchCalibration some_affine() {
 
 /// Leave the shared Config singleton the way a fresh one looks for these keys.
 void reset_stored_calibration_keys() {
-    if (Config* cfg = Config::get_instance()) {
-        cfg->set<bool>("/input/calibration/valid", false);
-        cfg->set<bool>("/input/touch_range/valid", false);
-    }
+    Config* cfg = Config::get_instance();
+    cfg->set<bool>("/input/calibration/valid", false);
+    cfg->set<bool>("/input/touch_range/valid", false);
+    cfg->get_json("/input/touch_range").erase("rotation");
 }
 
 } // namespace
@@ -743,17 +810,17 @@ TEST_CASE("commit_calibration_result: a solved range replaces the full affine",
     CHECK(sink.cleared);
     CHECK(sink.applied_count == 0);
 
-    if (Config* cfg = Config::get_instance()) {
-        CHECK(cfg->get<bool>("/input/touch_range/valid", false));
-        CHECK(cfg->get<bool>("/input/touch_range/swap_axes", false));
-        CHECK(cfg->get<int>("/input/touch_range/min_y", 0) == 243);
-        CHECK(cfg->get<int>("/input/touch_range/max_y", 0) == 16);
-        CHECK_FALSE(cfg->get<bool>("/input/calibration/valid", true));
-    }
+    Config* cfg = Config::get_instance();
+    CHECK(cfg->get<bool>("/input/touch_range/valid", false));
+    CHECK(cfg->get<bool>("/input/touch_range/swap_axes", false));
+    CHECK(cfg->get<int>("/input/touch_range/min_y", 0) == 243);
+    CHECK(cfg->get<int>("/input/touch_range/max_y", 0) == 16);
+    CHECK_FALSE(cfg->get<bool>("/input/calibration/valid", true));
+
     reset_stored_calibration_keys();
 }
 
-TEST_CASE("commit_calibration_result: a rotated panel keeps the residual affine",
+TEST_CASE("commit_calibration_result: a fit with a residual keeps the affine stage",
           "[touch][touch-calibration][range-fit][commit]") {
     RangeFakeSink sink;
     TouchRangeFit fit{};
@@ -770,11 +837,11 @@ TEST_CASE("commit_calibration_result: a rotated panel keeps the residual affine"
     CHECK(sink.applied_count == 1);
     CHECK_FALSE(sink.cleared);
 
-    if (Config* cfg = Config::get_instance()) {
-        CHECK(cfg->get<bool>("/input/touch_range/valid", false));
-        CHECK(cfg->get<bool>("/input/calibration/valid", false));
-        CHECK(cfg->get<double>("/input/calibration/a", 0.0) == Approx(1.7));
-    }
+    Config* cfg = Config::get_instance();
+    CHECK(cfg->get<bool>("/input/touch_range/valid", false));
+    CHECK(cfg->get<bool>("/input/calibration/valid", false));
+    CHECK(cfg->get<double>("/input/calibration/a", 0.0) == Approx(1.7));
+
     reset_stored_calibration_keys();
 }
 
@@ -783,10 +850,9 @@ TEST_CASE("commit_calibration_result: no fit persists the full affine and clears
     // The pre-#1259 path, and the one every non-evdev install stays on. A range
     // left over from an earlier calibration must be cleared here: stacked under a
     // full-pipeline affine it would apply both stages.
-    if (Config* cfg = Config::get_instance()) {
-        cfg->set<bool>("/input/touch_range/valid", true);
-        cfg->set<int>("/input/touch_range/min_x", 111);
-    }
+    Config* cfg = Config::get_instance();
+    cfg->set<bool>("/input/touch_range/valid", true);
+    cfg->set<int>("/input/touch_range/min_x", 111);
 
     RangeFakeSink sink;
     TouchRangeFit fit{}; // valid == false
@@ -796,10 +862,9 @@ TEST_CASE("commit_calibration_result: no fit persists the full affine and clears
     CHECK(sink.applied_count == 1);
     CHECK(sink.stored.a == Approx(1.7f));
 
-    if (Config* cfg = Config::get_instance()) {
-        CHECK_FALSE(cfg->get<bool>("/input/touch_range/valid", true));
-        CHECK(cfg->get<bool>("/input/calibration/valid", false));
-    }
+    CHECK_FALSE(cfg->get<bool>("/input/touch_range/valid", true));
+    CHECK(cfg->get<bool>("/input/calibration/valid", false));
+
     reset_stored_calibration_keys();
 }
 
@@ -822,10 +887,10 @@ TEST_CASE("commit_calibration_result: a backend that refuses the range falls bac
     CHECK(sink.applied_count == 1);
     CHECK(sink.stored.a == Approx(1.7f));
 
-    if (Config* cfg = Config::get_instance()) {
-        CHECK_FALSE(cfg->get<bool>("/input/touch_range/valid", true));
-        CHECK(cfg->get<bool>("/input/calibration/valid", false));
-    }
+    Config* cfg = Config::get_instance();
+    CHECK_FALSE(cfg->get<bool>("/input/touch_range/valid", true));
+    CHECK(cfg->get<bool>("/input/calibration/valid", false));
+
     reset_stored_calibration_keys();
 }
 
@@ -840,10 +905,255 @@ TEST_CASE("commit_calibration_result: a null sink still persists the affine-only
 
     CHECK_FALSE(commit_calibration_result(nullptr, some_affine(), fit));
 
-    if (Config* cfg = Config::get_instance()) {
-        CHECK_FALSE(cfg->get<bool>("/input/touch_range/valid", true));
-        CHECK(cfg->get<bool>("/input/calibration/valid", false));
-        CHECK(cfg->get<double>("/input/calibration/e", 0.0) == Approx(1.6));
-    }
+    Config* cfg = Config::get_instance();
+    CHECK_FALSE(cfg->get<bool>("/input/touch_range/valid", true));
+    CHECK(cfg->get<bool>("/input/calibration/valid", false));
+    CHECK(cfg->get<double>("/input/calibration/e", 0.0) == Approx(1.6));
+
     reset_stored_calibration_keys();
+}
+
+TEST_CASE("commit_calibration_result: the persisted affine carries the solve's rotation",
+          "[touch][touch-calibration][range-fit][commit][rotation]") {
+    // The residual re-parameterises the same solve over the same logical targets,
+    // so it means something only against the same rotation. Persisting it with the
+    // struct's own zero asserts the matrix was solved on an unrotated panel, and
+    // the next boot places it in a basis it was never solved in.
+    //
+    // The pairing is built here rather than driven through TouchCalibrationPanel,
+    // which solves a range only on an unrotated display. That gate lives in
+    // another file; this pins the write site on its own terms so the record stays
+    // honest whether or not the gate moves.
+    RangeFakeSink sink;
+    TouchCalibration cal = some_affine();
+    cal.capture_rotation = 90;
+
+    TouchRangeFit fit{};
+    fit.valid = true;
+    fit.min_x = 0;
+    fit.max_x = 799;
+    fit.min_y = 0;
+    fit.max_y = 479;
+    fit.residual_px = 40.0f;
+    fit.residual = some_affine();
+    REQUIRE(fit.residual.capture_rotation == 0);
+
+    CHECK(commit_calibration_result(&sink, cal, fit));
+
+    // The residual is what got installed and persisted, so both copies of it have
+    // to name the basis it was solved in.
+    REQUIRE(sink.range_called);
+    REQUIRE(sink.applied_count == 1);
+    CHECK(sink.stored.capture_rotation == 90);
+
+    Config* cfg = Config::get_instance();
+    CHECK(cfg->get<int>("/input/calibration/rotation", -1) == 90);
+
+    reset_stored_calibration_keys();
+}
+
+TEST_CASE("commit_calibration_result: a device that cannot report its range keeps it",
+          "[touch][touch-calibration][range-fit][commit][1714]") {
+    // A session can only undo a range it could read first, so a preview on such a
+    // device must not install one, and commit has to agree with the preview.
+    RangeFakeSink sink;
+    sink.range_known = false;
+    TouchRangeFit fit{};
+    fit.valid = true;
+    fit.min_x = 0;
+    fit.max_x = 479;
+    fit.min_y = 0;
+    fit.max_y = 799;
+
+    CHECK(apply_calibration_result(&sink, some_affine(), fit));
+    CHECK_FALSE(sink.range_called);
+    CHECK(sink.stored.a == Approx(1.7f));
+
+    CHECK(commit_calibration_result(&sink, some_affine(), fit));
+    CHECK_FALSE(sink.range_called);
+    CHECK_FALSE(Config::get_instance()->get<bool>("/input/touch_range/valid", true));
+
+    reset_stored_calibration_keys();
+}
+
+TEST_CASE("resolve_touch_range_source: a stored range is not live on a rotated display",
+          "[touch][touch-calibration][range-fit][1394][1714]") {
+    TouchRangeSettings stored{};
+    stored.valid = true;
+    stored.max_x = 479;
+    stored.max_y = 799;
+
+    CHECK(resolve_touch_range_source(false, stored, 0) == TouchRangeSource::Stored);
+    // The backends skip programming it here, so the recorded pipeline (and a
+    // calibration session's snapshot of it) must say Declared.
+    CHECK(resolve_touch_range_source(false, stored, 90) == TouchRangeSource::Declared);
+    CHECK(resolve_touch_range_source(false, stored, 270) == TouchRangeSource::Declared);
+    CHECK(resolve_touch_range_source(true, stored, 0) == TouchRangeSource::Environment);
+    CHECK(resolve_touch_range_source(true, stored, 90) == TouchRangeSource::Environment);
+    CHECK(resolve_touch_range_source(false, TouchRangeSettings{}, 0) == TouchRangeSource::Declared);
+}
+
+TEST_CASE("resolve_touch_range_source: a range stamped unrotated is live at any rotation",
+          "[touch][touch-calibration][range-fit][1394][rotated-stored-range]") {
+    // lv_evdev scales into the display's native resolution and the wrapper rotates
+    // afterwards, so a range solved at rotation 0 is native digitizer space.
+    TouchRangeSettings stored{};
+    stored.valid = true;
+    stored.min_x = -11;
+    stored.max_x = 692;
+    stored.min_y = -7;
+    stored.max_y = 479;
+
+    stored.capture_rotation = 0;
+    CHECK(resolve_touch_range_source(false, stored, 90) == TouchRangeSource::Stored);
+    CHECK(resolve_touch_range_source(false, stored, 270) == TouchRangeSource::Stored);
+    CHECK(resolve_touch_range_source(true, stored, 90) == TouchRangeSource::Environment);
+
+    // No basis recorded: it may have been solved through a rotation.
+    stored.capture_rotation = -1;
+    CHECK(resolve_touch_range_source(false, stored, 90) == TouchRangeSource::Declared);
+    CHECK(resolve_touch_range_source(false, stored, 0) == TouchRangeSource::Stored);
+
+    stored.capture_rotation = 90;
+    CHECK(resolve_touch_range_source(false, stored, 90) == TouchRangeSource::Declared);
+}
+
+TEST_CASE("touch range persistence: the capture rotation round-trips",
+          "[touch][touch-calibration][range-fit][rotated-stored-range]") {
+    Config* cfg = Config::get_instance();
+    TouchRangeSettings range{};
+    range.valid = true;
+    range.min_x = -11;
+    range.max_x = 692;
+    range.min_y = -7;
+    range.max_y = 479;
+    range.capture_rotation = 0;
+    cfg->set<int>("/input/calibration/rotation", 90);
+
+    save_touch_range(range);
+    CHECK(cfg->get<int>("/input/touch_range/rotation", -1) == 0);
+    // Its own stamp wins over a later affine-only recalibration's.
+    CHECK(load_touch_range().capture_rotation == 0);
+
+    SECTION("a range with no stamp of its own takes the calibration record's") {
+        cfg->get_json("/input/touch_range").erase("rotation");
+        cfg->set<int>("/input/calibration/rotation", 0);
+        CHECK(load_touch_range().capture_rotation == 0);
+        cfg->set<int>("/input/calibration/rotation", 180);
+        CHECK(load_touch_range().capture_rotation == 180);
+    }
+    SECTION("no stamp anywhere is unknown") {
+        cfg->get_json("/input/touch_range").erase("rotation");
+        cfg->get_json("/input/calibration").erase("rotation");
+        const TouchRangeSettings loaded = load_touch_range();
+        CHECK(loaded.valid);
+        CHECK(loaded.capture_rotation == -1);
+    }
+
+    reset_stored_calibration_keys();
+    cfg->get_json("/input/calibration").erase("rotation");
+}
+
+TEST_CASE("commit_calibration_result: a solved range is stamped with the solve's rotation",
+          "[touch][touch-calibration][range-fit][commit][rotated-stored-range]") {
+    RangeFakeSink sink;
+    TouchCalibration cal = some_affine();
+    cal.capture_rotation = 0;
+    TouchRangeFit fit{};
+    fit.valid = true;
+    fit.max_x = 479;
+    fit.max_y = 799;
+
+    CHECK(commit_calibration_result(&sink, cal, fit));
+    CHECK(Config::get_instance()->get<int>("/input/touch_range/rotation", -1) == 0);
+
+    reset_stored_calibration_keys();
+}
+
+TEST_CASE("commit_calibration_result: no fit keeps a live stored range and its stamp",
+          "[touch][touch-calibration][range-fit][commit][rotated-stored-range]") {
+    // An affine-only recalibration on a rotated display is solved on top of the
+    // stored range that is live there; dropping it would leave the next boot
+    // running that affine over the declared range instead.
+    Config* cfg = Config::get_instance();
+    RangeFakeSink sink;
+    sink.live_source = TouchRangeSource::Stored;
+    sink.live_capture_rotation = 0;
+    TouchCalibration cal = some_affine();
+    cal.capture_rotation = 90;
+    TouchRangeFit fit{}; // valid == false
+
+    CHECK(commit_calibration_result(&sink, cal, fit));
+    CHECK_FALSE(sink.range_called);
+
+    CHECK(cfg->get<bool>("/input/touch_range/valid", false));
+    CHECK(cfg->get<int>("/input/touch_range/max_x", 0) == 479);
+    CHECK(cfg->get<int>("/input/touch_range/max_y", 0) == 799);
+    CHECK(cfg->get<int>("/input/touch_range/rotation", -1) == 0);
+    CHECK(cfg->get<int>("/input/calibration/rotation", -1) == 90);
+    const TouchRangeSettings reloaded = load_touch_range();
+    CHECK(resolve_touch_range_source(false, reloaded, 90) == TouchRangeSource::Stored);
+
+    SECTION("a declared live range is still cleared") {
+        sink.live_source = TouchRangeSource::Declared;
+        CHECK(commit_calibration_result(&sink, cal, fit));
+        CHECK_FALSE(cfg->get<bool>("/input/touch_range/valid", true));
+    }
+
+    reset_stored_calibration_keys();
+    cfg->get_json("/input/calibration").erase("rotation");
+}
+
+// ============================================================================
+// A driver whose advertised ABS range is the display transposed
+// ============================================================================
+
+// The FlashForge Creator 5's Goodix controller advertises ABS_MT_POSITION_X/Y as
+// 800x480 while the framebuffer is 480x800 portrait, and emits coordinates that
+// span the framebuffer the normal way round. The advertised range is the display's
+// own dimensions with the axes swapped, so it is not a resolution mismatch the
+// wizard can fit an affine to — it is a range that is simply the wrong way up.
+TEST_CASE("A transposed declared ABS range is scaled by the display size instead",
+          "[touch][touch-calibration][range-fit][abs-transposed]") {
+    constexpr int W = 480;
+    constexpr int H = 800;
+    constexpr int DECLARED_MAX_X = 800;
+    constexpr int DECLARED_MAX_Y = 480;
+    // What the digitizer actually emits.
+    constexpr int RAW_MAX_X = 480;
+    constexpr int RAW_MAX_Y = 800;
+
+    REQUIRE(has_transposed_abs_range(DECLARED_MAX_X, DECLARED_MAX_Y, W, H));
+
+    SECTION("scaling by the advertised range loses reach on X and flattens Y") {
+        auto declared = [](int rx, int ry) {
+            return Point{evdev_calibrate(rx, 0, DECLARED_MAX_X, 0, W - 1),
+                         evdev_calibrate(ry, 0, DECLARED_MAX_Y, 0, H - 1)};
+        };
+
+        // The far corner lands 40% short across X.
+        CHECK(declared(RAW_MAX_X, RAW_MAX_Y).x == 287);
+        // Every raw Y at or past the advertised maximum clamps onto the bottom edge,
+        // so the lower 40% of the panel collapses to one row.
+        CHECK(declared(RAW_MAX_X, DECLARED_MAX_Y).y == H - 1);
+        CHECK(declared(RAW_MAX_X, RAW_MAX_Y).y == H - 1);
+        // A touch at the centre of the panel reports up and to the left of it.
+        CHECK(declared(RAW_MAX_X / 2, RAW_MAX_Y / 2).x == 143);
+        CHECK(declared(RAW_MAX_X / 2, RAW_MAX_Y / 2).y == 665);
+    }
+
+    SECTION("scaling by the display size maps the panel corner to corner") {
+        // The calibration the backend applies: lv_evdev_set_calibration(touch_, 0, 0,
+        // screen_width_, screen_height_).
+        auto by_display = [](int rx, int ry) {
+            return Point{evdev_calibrate(rx, 0, W, 0, W - 1), evdev_calibrate(ry, 0, H, 0, H - 1)};
+        };
+
+        CHECK(by_display(0, 0).x == 0);
+        CHECK(by_display(0, 0).y == 0);
+        CHECK(by_display(RAW_MAX_X, RAW_MAX_Y).x == W - 1);
+        CHECK(by_display(RAW_MAX_X, RAW_MAX_Y).y == H - 1);
+        CHECK(by_display(RAW_MAX_X / 2, RAW_MAX_Y / 2).x == 239);
+        CHECK(by_display(RAW_MAX_X / 2, RAW_MAX_Y / 2).y == 399);
+    }
 }

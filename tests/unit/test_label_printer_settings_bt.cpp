@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "../lvgl_test_fixture.h"
+#include "config.h"
 #include "label_printer_settings.h"
 
 #include "../catch_amalgamated.hpp"
@@ -15,7 +16,7 @@ TEST_CASE("Label printer settings - bluetooth type", "[label][settings]") {
     settings.init_subjects();
 
     settings.set_printer_type("bluetooth");
-    REQUIRE(settings.get_printer_type() == "bluetooth");
+    REQUIRE(Config::get_instance()->get<std::string>("/label_printer/type", "") == "bluetooth");
 }
 
 TEST_CASE("Label printer settings - bt_address persistence", "[label][settings]") {

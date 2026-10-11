@@ -197,7 +197,8 @@ static void start_material_spinner_animations(lv_obj_t* arc) {
  * Creates a Material Design-style indeterminate spinner with:
  * - Responsive size based on "size" attribute (xs, sm, md, lg)
  * - Primary color indicator arc
- * - "Chasing tail" animation where arc grows/shrinks while rotating
+ * - "Chasing tail" animation where arc grows/shrinks while rotating, unless
+ *   animated="false"
  *
  * @param state XML parser state
  * @param attrs XML attributes
@@ -255,8 +256,12 @@ static void* ui_spinner_create(lv_xml_parser_state_t* state, const char** attrs)
     // start=0, end=270 gives a large initial arc
     lv_arc_set_angles(arc, 0, ARC_MAX_SWEEP);
 
-    // Start the Material Design animations
-    start_material_spinner_animations(arc);
+    // animated="false" leaves a static arc: a busy mark that never repaints, for screens
+    // that cannot afford a continuous partial redraw.
+    const char* animated = lv_xml_get_value_of(attrs, "animated");
+    if (!animated || strcmp(animated, "false") != 0) {
+        start_material_spinner_animations(arc);
+    }
 
     // Register cleanup callback to stop animations when spinner is deleted
     lv_obj_add_event_cb(arc, spinner_delete_cb, LV_EVENT_DELETE, nullptr);

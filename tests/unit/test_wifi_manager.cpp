@@ -10,7 +10,9 @@
 #include "../../include/wifi_interface.h"
 #include "../../include/wifi_manager.h"
 #include "../../lvgl/lvgl.h"
+#include "../lvgl_test_fixture.h"
 #include "../test_helpers/scoped_runtime_config.h"
+#include "../test_helpers/wifi_manager_test_access.h"
 #include "../ui_test_utils.h"
 
 #include <atomic>
@@ -23,22 +25,6 @@
 #include "../catch_amalgamated.hpp"
 
 using namespace helix;
-
-namespace helix {
-// Friend accessor — lets this file point WiFiManager's stranding-prevention
-// check (has_non_wifi_network_path, Task 15) at a fixture sysfs tree instead
-// of the real /sys, mirroring the os_link_probe_ seam in
-// test_wifi_os_link_fallback.cpp.
-class WiFiManagerTestAccess {
-  public:
-    static void set_sys_root(const std::string& root) {
-        WiFiManager::sys_root_ = root;
-    }
-    static void reset_sys_root() {
-        WiFiManager::sys_root_ = "/sys";
-    }
-};
-} // namespace helix
 
 namespace {
 
@@ -101,6 +87,7 @@ struct SysFixture {
 // Global LVGL Initialization (called once)
 // ============================================================================
 
+namespace {
 struct LVGLInitializer {
     LVGLInitializer() {
         lv_init_safe();
@@ -109,6 +96,7 @@ struct LVGLInitializer {
         lv_display_set_buffers(disp, buf, NULL, sizeof(buf), LV_DISPLAY_RENDER_MODE_PARTIAL);
     }
 };
+} // namespace
 
 static LVGLInitializer lvgl_init;
 
@@ -147,7 +135,7 @@ struct MockWifiGuard {
 
 } // namespace
 
-class WiFiManagerTestFixture {
+class WiFiManagerTestFixture : public LVGLTestFixture {
   public:
     WiFiManagerTestFixture() {
         // Create fresh instance for each test as shared_ptr
@@ -163,7 +151,7 @@ class WiFiManagerTestFixture {
         connection_error.clear();
     }
 
-    ~WiFiManagerTestFixture() {
+    ~WiFiManagerTestFixture() override {
         // Cleanup - ensure scan stopped and backend disabled
         if (wifi_manager) {
             wifi_manager->stop_scan();
@@ -283,6 +271,22 @@ TEST_CASE_METHOD(WiFiManagerTestFixture, "WiFiManager instance creation",
 // ============================================================================
 // Backend Initialization Tests
 // ============================================================================
+
+// Fixtures elsewhere in the binary shut the process-wide UpdateQueue down in
+// their destructors, and a shut-down queue drops every callback. Every result
+// these tests wait for arrives through that queue, so the fixture has to leave
+// it accepting work whatever ran before it.
+TEST_CASE("WiFiManagerTestFixture re-arms an UpdateQueue a previous fixture shut down",
+          "[wifi][isolation]") {
+    helix::ui::update_queue_shutdown();
+    WiFiManagerTestFixture fixture;
+
+    bool ran = false;
+    helix::ui::queue_update("wifi_isolation_probe", [&ran] { ran = true; });
+    helix::ui::UpdateQueue::instance().drain();
+
+    CHECK(ran);
+}
 
 TEST_CASE_METHOD(WiFiManagerTestFixture, "Backend initialization state",
                  "[.slow][macos-wifi][network][backend][init]") {
@@ -531,7 +535,7 @@ TEST_CASE_METHOD(WiFiManagerTestFixture, "WiFi connection management",
     SECTION("Connect to network (mock)") {
         wifi_manager->set_enabled(true);
 
-        auto callback = [this](bool success, const std::string& error) {
+        auto callback = [this](bool success, const std::string& error, WiFiResult) {
             this->connection_callback(success, error);
         };
 
@@ -558,6 +562,40 @@ TEST_CASE_METHOD(WiFiManagerTestFixture, "WiFi connection management",
         REQUIRE_NOTHROW(wifi_manager->disconnect());
     }
 #endif // HELIX_ENABLE_MOCKS
+}
+
+// The hidden-network flag must survive the manager layer: WiFiManager::connect
+// is the only path the UI has to the backend, so dropping is_hidden there
+// would silently turn every hidden join back into a scan-cache match (which a
+// hidden SSID can never satisfy). The mock's NETWORK_NOT_FOUND refusal is the
+// proof the request reached the backend: "NotInScanList" is by construction
+// absent from the seeded scan list.
+TEST_CASE("WiFiManager::connect threads the hidden-network flag to the backend",
+          "[wifi][manager][hidden]") {
+    auto backend = std::make_unique<WifiBackendMock>();
+    WifiBackendMock* raw = backend.get();
+    WiFiManager manager(std::move(backend));
+    helix::ui::UpdateQueue::instance().drain(); // settle the construction reassert
+
+    bool refused = false;
+    bool reported_success = true;
+    manager.connect(
+        "NotInScanList", "pw",
+        [&](bool success, const std::string&, WiFiResult) {
+            refused = true;
+            reported_success = success;
+        },
+        /*is_hidden=*/true);
+    REQUIRE(refused);
+    REQUIRE_FALSE(reported_success);
+    CHECK(raw->last_connect_hidden());
+
+    // The default stays "visible": a scan-list connect must not ask for a
+    // hidden association.
+    manager.connect("NotInScanList", "pw", [](bool, const std::string&, WiFiResult) {});
+    CHECK_FALSE(raw->last_connect_hidden());
+
+    helix::ui::UpdateQueue::instance().drain();
 }
 
 // ============================================================================
@@ -651,7 +689,8 @@ TEST_CASE_METHOD(WiFiManagerTestFixture, "WiFi edge cases",
 
         auto networks = wifi_manager->scan_once();
         REQUIRE_FALSE(networks.empty());
-        wifi_manager->connect(networks[0].ssid, "password", [](bool, const std::string&) {});
+        wifi_manager->connect(networks[0].ssid, "password",
+                              [](bool, const std::string&, WiFiResult) {});
 
         // Destroy while connecting - should cleanup safely
         REQUIRE_NOTHROW(wifi_manager.reset());
@@ -783,7 +822,7 @@ TEST_CASE_METHOD(WiFiManagerTestFixture, "State observer fires when backend disp
     NetworkPick pick = pick_strong_secured_network(*wifi_manager);
     REQUIRE_FALSE(pick.ssid.empty());
 
-    wifi_manager->connect(pick.ssid, pick.password, [](bool, const std::string&) {});
+    wifi_manager->connect(pick.ssid, pick.password, [](bool, const std::string&, WiFiResult) {});
 
     // Connect thread sleeps 2-3s before firing CONNECTED. Drain the UpdateQueue
     // from the poll loop so deferred observer callbacks actually run.
@@ -821,7 +860,7 @@ TEST_CASE_METHOD(WiFiManagerTestFixture, "State observer with expired token is n
     NetworkPick pick = pick_strong_secured_network(*wifi_manager);
     REQUIRE_FALSE(pick.ssid.empty());
 
-    wifi_manager->connect(pick.ssid, pick.password, [](bool, const std::string&) {});
+    wifi_manager->connect(pick.ssid, pick.password, [](bool, const std::string&, WiFiResult) {});
 
     // Wait long enough for CONNECTED to have fired, draining all the while.
     // The deferred observer callback sees an expired token and skips silently.
@@ -1093,6 +1132,9 @@ TEST_CASE("READY refuses to disable the radio when interface resolution is incon
 TEST_CASE("READY clears a stale soft radio block when the stored setting is WiFi on",
           "[wifi][manager][radio][persistence]") {
     Config::get_instance();
+    // The CC1 this case models had WiFi configured in HelixScreen — the
+    // block-clearing reassert is reserved for such machines (#1697).
+    Config::get_instance()->set_wifi_expected(true);
     SystemSettingsManager::instance().init_subjects();
     SystemSettingsManager::instance().set_wifi_enabled(true);
 
@@ -1119,6 +1161,9 @@ TEST_CASE("READY clears a stale soft radio block when the stored setting is WiFi
     CHECK(SystemSettingsManager::instance().get_wifi_enabled());
 
     SystemSettingsManager::instance().deinit_subjects();
+    // /wifi_expected shares Config's process-lifetime data with every later
+    // test in this binary — restore the "never configured" default.
+    Config::get_instance()->set_wifi_expected(false);
 }
 
 // Steady-state case: stored setting is on and the radio already agrees. The
@@ -1146,6 +1191,46 @@ TEST_CASE("READY leaves an already-enabled radio alone when the stored setting i
     SystemSettingsManager::instance().deinit_subjects();
 }
 
+// #1697: a soft-blocked radio on a machine where WiFi was never configured
+// in HelixScreen is the administrator's decision, not a stale block. The
+// stored setting reads on because /wifi_enabled defaults to on, so the
+// stale-block branch would fire — and run `nmcli radio wifi on` / clear the
+// rfkill soft block an admin put there on purpose. wifi_expected is written
+// only by the wizard and the network-settings toggle, so it is exactly "this
+// HelixScreen ever configured WiFi". The block must survive us.
+TEST_CASE("READY leaves an admin's radio block alone when WiFi was never configured here",
+          "[wifi][manager][radio][persistence][1697]") {
+    Config::get_instance();
+    // Defensive: /wifi_expected lives in Config's in-memory data, which
+    // persists across tests in this binary. Pin both flags, not just the
+    // one this test is about, so a prior test's residue cannot mask the
+    // guard.
+    Config::get_instance()->set_wifi_expected(false);
+    SystemSettingsManager::instance().init_subjects();
+    SystemSettingsManager::instance().set_wifi_enabled(true);
+
+    auto backend = std::make_unique<WifiBackendMock>();
+    WifiBackendMock* raw = backend.get();
+    helix::wifi::WifiInterface iface;
+    iface.netdev = "wlan0";
+    raw->set_resolved_interface_for_test(iface);
+
+    // The radio carries an admin's rfkill/nmcli block: is_radio_enabled()
+    // is seeded from hardware ahead of READY firing.
+    raw->set_radio_enabled(false);
+    REQUIRE_FALSE(raw->is_radio_enabled());
+
+    WiFiManager manager(std::move(backend));
+    helix::ui::UpdateQueue::instance().drain();
+
+    CHECK_FALSE(raw->is_radio_enabled());
+    // Nothing rewritten to manufacture agreement with a block we declined
+    // to clear: stored setting stays as the default left it.
+    CHECK(SystemSettingsManager::instance().get_wifi_enabled());
+
+    SystemSettingsManager::instance().deinit_subjects();
+}
+
 // The Task-15 refusal path (stored off, no wired fallback) corrects the
 // stored setting back to on — but a device that had already accumulated a
 // stale soft block before this fix would end up with wifi_enabled=true while
@@ -1155,6 +1240,10 @@ TEST_CASE("READY leaves an already-enabled radio alone when the stored setting i
 TEST_CASE("READY refusal path also clears a stale radio block, not just the stored setting",
           "[wifi][manager][radio][persistence]") {
     Config::get_instance();
+    // The device this case models accumulated its block while WiFi was
+    // configured in HelixScreen — the block-clearing half of the refusal
+    // path is reserved for such machines (#1697).
+    Config::get_instance()->set_wifi_expected(true);
     SystemSettingsManager::instance().init_subjects();
     SystemSettingsManager::instance().set_wifi_enabled(false);
 
@@ -1187,6 +1276,7 @@ TEST_CASE("READY refusal path also clears a stale radio block, not just the stor
 
     SystemSettingsManager::instance().deinit_subjects();
     WiFiManagerTestAccess::reset_sys_root();
+    Config::get_instance()->set_wifi_expected(false);
 }
 
 // ============================================================================

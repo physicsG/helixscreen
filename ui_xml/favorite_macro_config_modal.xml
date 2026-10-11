@@ -17,8 +17,7 @@
 
     <!-- Header: title + close. Responsive padding handled by modal_header. -->
     <modal_header title="Customize Macro Button"
-                  title_tag="Customize Macro Button" hide_icon="true" hide_close="false"
-                  close_callback="fav_macro_config_close_cb"/>
+                  hide_icon="true" hide_close="false" close_callback="fav_macro_config_close_cb"/>
     <divider_horizontal/>
 
     <!-- Tab bar -->
@@ -26,22 +25,22 @@
             height="content" style_pad_left="#space_md" style_pad_right="#space_md" style_pad_top="#space_sm"
             style_pad_bottom="0" flex_flow="row" style_pad_gap="#space_sm" scrollable="false">
       <ui_button name="tab_macro"
-                 height="#button_height_sm" text="Macro" translation_tag="Macro" flex_grow="1" variant="ghost"
-                 focusable="false" click_focusable="false">
+                 height="#button_height_sm" text="Macro" flex_grow="1" variant="ghost" focusable="false"
+                 click_focusable="false">
         <style name="tab_active" selector="checked"/>
         <bind_state_if_eq subject="fav_macro_config_tab" state="checked" ref_value="0"/>
         <event_cb trigger="clicked" callback="fav_macro_config_tab_macro_cb"/>
       </ui_button>
       <ui_button name="tab_appearance"
-                 height="#button_height_sm" text="Appearance" translation_tag="Appearance" flex_grow="1" variant="ghost"
-                 focusable="false" click_focusable="false">
+                 height="#button_height_sm" text="Appearance" flex_grow="1" variant="ghost" focusable="false"
+                 click_focusable="false">
         <style name="tab_active" selector="checked"/>
         <bind_state_if_eq subject="fav_macro_config_tab" state="checked" ref_value="1"/>
         <event_cb trigger="clicked" callback="fav_macro_config_tab_appearance_cb"/>
       </ui_button>
       <ui_button name="tab_options"
-                 height="#button_height_sm" text="Options" translation_tag="Options" flex_grow="1" variant="ghost"
-                 focusable="false" click_focusable="false">
+                 height="#button_height_sm" text="Options" flex_grow="1" variant="ghost" focusable="false"
+                 click_focusable="false">
         <style name="tab_active" selector="checked"/>
         <bind_state_if_eq subject="fav_macro_config_tab" state="checked" ref_value="2"/>
         <event_cb trigger="clicked" callback="fav_macro_config_tab_options_cb"/>
@@ -71,7 +70,7 @@
       <lv_obj width="1"
               height="content" flex_grow="3" flex_flow="column" style_pad_all="0" style_pad_gap="#space_xs"
               scrollable="false">
-        <text_small text="Icon" translation_tag="Icon"/>
+        <text_small text="Icon"/>
         <lv_obj name="icon_grid"
                 width="100%" height="content" flex_flow="row_wrap" style_pad_all="#space_xs" style_pad_gap="#space_xs"
                 scrollable="false"/>
@@ -80,7 +79,7 @@
       <lv_obj width="1"
               height="content" flex_grow="2" flex_flow="column" style_pad_all="0" style_pad_gap="#space_xs"
               scrollable="false">
-        <text_small text="Color" translation_tag="Color"/>
+        <text_small text="Color"/>
         <lv_obj name="color_grid"
                 width="100%" height="content" flex_flow="row_wrap" style_pad_all="#space_xs" style_pad_gap="#space_xs"
                 scrollable="false"/>
@@ -95,17 +94,26 @@
             scrollable="true" hidden="true">
       <bind_flag_if_not_eq subject="fav_macro_config_tab" flag="hidden" ref_value="2"/>
       <setting_toggle_row name="row_require_confirm"
-                          label="Require Confirmation?" label_tag="Require Confirmation?" icon="script_text"
-                          description="Prompt before running this macro"
-                          description_tag="Prompt before running this macro" subject="fav_macro_require_confirm"
+                          label="Require Confirmation?" icon="script_text"
+                          description="Prompt before running this macro" subject="fav_macro_require_confirm"
                           callback="fav_macro_config_confirm_cb"/>
+      <!-- Saved parameter defaults. Only macros with a declared parameter list
+           have defaults to edit (the subject is recomputed per macro). The
+           visibility bind lives on a plain wrapper: a hidden flex child drops
+           out of layout, so the wrapper costs nothing when the row is absent. -->
+      <lv_obj name="default_params_wrap"
+              width="100%" height="content" style_pad_all="0" style_border_width="0" style_bg_opa="0" scrollable="false">
+        <bind_flag_if_eq subject="fav_macro_has_param_defaults" flag="hidden" ref_value="0"/>
+        <setting_action_row name="row_default_params"
+                            label="Default Parameters" icon="tune"
+                            description="Saved values, and whether to ask before running"
+                            callback="fav_macro_config_defaults_cb"/>
+      </lv_obj>
       <!-- Visible only while confirmation is off. Dangerous macros are named
            explicitly because the per-widget opt-out deliberately does not
            reach them. -->
       <info_note name="run_immediately_hint"
-                 icon="flash" icon_variant="warning"
-                 text="One tap runs this macro with no parameters. Dangerous macros still ask."
-                 text_tag="One tap runs this macro with no parameters. Dangerous macros still ask.">
+                 icon="flash" icon_variant="warning" text="One tap runs this macro. Dangerous macros still ask.">
         <bind_flag_if_eq subject="fav_macro_require_confirm" flag="hidden" ref_value="1"/>
       </info_note>
     </lv_obj>

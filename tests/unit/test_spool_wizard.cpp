@@ -4,6 +4,9 @@
 #include "ui_spool_wizard.h"
 
 #include "filament_database.h"
+#include "moonraker_api_mock.h"
+#include "moonraker_client_mock.h"
+#include "printer_state.h"
 #include "spoolman_types.h"
 
 #include <algorithm>
@@ -170,99 +173,29 @@ TEST_CASE("SpoolWizardOverlay on_create_requested enters creating state", "[spoo
 }
 
 // ============================================================================
-// Vendor Merge Tests
+// Vendor List Tests
 // ============================================================================
 
-TEST_CASE("merge_vendors deduplicates by name, server takes priority", "[spool_wizard]") {
-    // External DB has "Polymaker", "Bambu Lab"
-    std::vector<SpoolWizardOverlay::VendorEntry> ext_vendors;
-    ext_vendors.push_back({"Polymaker", -1, false, true});
-    ext_vendors.push_back({"Bambu Lab", -1, false, true});
-
-    // Server has "Polymaker" (id=5), "Hatchbox" (id=10)
-    std::vector<SpoolWizardOverlay::VendorEntry> server_vendors;
-    {
-        SpoolWizardOverlay::VendorEntry v;
-        v.name = "Polymaker";
-        v.server_id = 5;
-        v.from_server = true;
-        server_vendors.push_back(v);
-    }
-    {
-        SpoolWizardOverlay::VendorEntry v;
-        v.name = "Hatchbox";
-        v.server_id = 10;
-        v.from_server = true;
-        server_vendors.push_back(v);
-    }
-
-    auto result = SpoolWizardOverlay::merge_vendors(ext_vendors, server_vendors);
-
-    // Should have 3 unique vendors: Bambu Lab, Hatchbox, Polymaker
-    REQUIRE(result.size() == 3);
-
-    // Find Polymaker — should have server_id=5, from_server=true, from_database=true
-    auto it =
-        std::find_if(result.begin(), result.end(), [](const SpoolWizardOverlay::VendorEntry& e) {
-            return e.name == "Polymaker";
-        });
-    REQUIRE(it != result.end());
-    CHECK(it->server_id == 5);
-    CHECK(it->from_server == true);
-    CHECK(it->from_database == true);
-
-    // Find Hatchbox — server only
-    it = std::find_if(result.begin(), result.end(), [](const SpoolWizardOverlay::VendorEntry& e) {
-        return e.name == "Hatchbox";
-    });
-    REQUIRE(it != result.end());
-    CHECK(it->server_id == 10);
-    CHECK(it->from_server == true);
-    CHECK(it->from_database == false);
-
-    // Find Bambu Lab — DB only
-    it = std::find_if(result.begin(), result.end(), [](const SpoolWizardOverlay::VendorEntry& e) {
-        return e.name == "Bambu Lab";
-    });
-    REQUIRE(it != result.end());
-    CHECK(it->server_id == -1);
-    CHECK(it->from_server == false);
-    CHECK(it->from_database == true);
-}
-
-TEST_CASE("merge_vendors sorts alphabetically", "[spool_wizard]") {
-    std::vector<SpoolWizardOverlay::VendorEntry> ext_vendors;
-    ext_vendors.push_back({"Zyltech", -1, false, true});
-    ext_vendors.push_back({"Atomic Filament", -1, false, true});
-    ext_vendors.push_back({"Overture", -1, false, true});
-    auto result = SpoolWizardOverlay::merge_vendors(ext_vendors, {});
+TEST_CASE("sorted_vendors sorts by name, case-insensitive", "[spool_wizard]") {
+    auto result = SpoolWizardOverlay::sorted_vendors(
+        {{"Zyltech", 3, true}, {"atomic Filament", 1, true}, {"Overture", 2, true}});
 
     REQUIRE(result.size() == 3);
-    CHECK(result[0].name == "Atomic Filament");
+    CHECK(result[0].name == "atomic Filament");
     CHECK(result[1].name == "Overture");
     CHECK(result[2].name == "Zyltech");
 }
 
-TEST_CASE("merge_vendors case-insensitive dedup", "[spool_wizard]") {
-    std::vector<SpoolWizardOverlay::VendorEntry> ext_vendors;
-    ext_vendors.push_back({"polymaker", -1, false, true});
-
-    std::vector<SpoolWizardOverlay::VendorEntry> server_vendors;
-    {
-        SpoolWizardOverlay::VendorEntry v;
-        v.name = "Polymaker";
-        v.server_id = 1;
-        v.from_server = true;
-        server_vendors.push_back(v);
-    }
-
-    auto result = SpoolWizardOverlay::merge_vendors(ext_vendors, server_vendors);
-    // "polymaker" and "Polymaker" should merge into one entry
+TEST_CASE("sorted_vendors keeps one vendor per case-insensitive name", "[spool_wizard]") {
+    // Spoolman does not keep vendor names unique.
+    auto result =
+        SpoolWizardOverlay::sorted_vendors({{"polymaker", 1, true}, {"Polymaker", 2, true}});
     REQUIRE(result.size() == 1);
-    // Server entry name is kept (it was inserted first)
-    CHECK(result[0].server_id == 1);
-    CHECK(result[0].from_server == true);
-    CHECK(result[0].from_database == true);
+    CHECK(result[0].server_id == 2);
+}
+
+TEST_CASE("sorted_vendors handles an empty list", "[spool_wizard]") {
+    CHECK(SpoolWizardOverlay::sorted_vendors({}).empty());
 }
 
 // ============================================================================
@@ -271,8 +204,8 @@ TEST_CASE("merge_vendors case-insensitive dedup", "[spool_wizard]") {
 
 TEST_CASE("filter_vendor_list returns all when query is empty", "[spool_wizard]") {
     std::vector<SpoolWizardOverlay::VendorEntry> vendors;
-    vendors.push_back({"Alpha", -1, false, true});
-    vendors.push_back({"Beta", -1, false, true});
+    vendors.push_back({"Alpha", -1, false});
+    vendors.push_back({"Beta", -1, false});
 
     auto filtered = SpoolWizardOverlay::filter_vendor_list(vendors, "");
     CHECK(filtered.size() == 2);
@@ -280,9 +213,9 @@ TEST_CASE("filter_vendor_list returns all when query is empty", "[spool_wizard]"
 
 TEST_CASE("filter_vendor_list case-insensitive substring match", "[spool_wizard]") {
     std::vector<SpoolWizardOverlay::VendorEntry> vendors;
-    vendors.push_back({"Polymaker", 5, true, true});
-    vendors.push_back({"Hatchbox", 10, true, false});
-    vendors.push_back({"PolyTerra", -1, false, true});
+    vendors.push_back({"Polymaker", 5, true});
+    vendors.push_back({"Hatchbox", 10, true});
+    vendors.push_back({"PolyTerra", -1, false});
 
     auto filtered = SpoolWizardOverlay::filter_vendor_list(vendors, "poly");
     REQUIRE(filtered.size() == 2);
@@ -292,7 +225,7 @@ TEST_CASE("filter_vendor_list case-insensitive substring match", "[spool_wizard]
 
 TEST_CASE("filter_vendor_list no matches returns empty", "[spool_wizard]") {
     std::vector<SpoolWizardOverlay::VendorEntry> vendors;
-    vendors.push_back({"Polymaker", 5, true, true});
+    vendors.push_back({"Polymaker", 5, true});
 
     auto filtered = SpoolWizardOverlay::filter_vendor_list(vendors, "xyz");
     CHECK(filtered.empty());
@@ -304,11 +237,6 @@ TEST_CASE("filter_vendor_list no matches returns empty", "[spool_wizard]") {
 
 TEST_CASE("select_vendor sets can_proceed and stores selection", "[spool_wizard]") {
     SpoolWizardOverlay wizard;
-    // Manually populate the filtered vendors (no LVGL needed)
-    // Use the static merge to build the list, then assign
-    std::vector<SpoolWizardOverlay::VendorEntry> ext = {{"Polymaker", -1, false, true},
-                                                        {"Hatchbox", -1, false, true}};
-    auto merged = SpoolWizardOverlay::merge_vendors(ext, {});
     // Hack: we can't set filtered_vendors_ directly since it's private,
     // but select_vendor uses filtered_vendors_. We use filter_vendors which
     // also requires all_vendors_. We'll test via the public API path.
@@ -352,161 +280,6 @@ TEST_CASE("set_new_vendor with empty name clears vendor info", "[spool_wizard]")
     CHECK(wizard.new_vendor_url().empty());
 }
 
-TEST_CASE("merge_vendors handles empty inputs", "[spool_wizard]") {
-    // Both empty
-    auto result = SpoolWizardOverlay::merge_vendors({}, {});
-    CHECK(result.empty());
-
-    // Only external
-    std::vector<SpoolWizardOverlay::VendorEntry> ext = {{"Alpha", -1, false, true}};
-    result = SpoolWizardOverlay::merge_vendors(ext, {});
-    REQUIRE(result.size() == 1);
-    CHECK(result[0].name == "Alpha");
-    CHECK(result[0].from_database == true);
-    CHECK(result[0].from_server == false);
-
-    // Only server
-    SpoolWizardOverlay::VendorEntry sv;
-    sv.name = "Beta";
-    sv.server_id = 3;
-    sv.from_server = true;
-    result = SpoolWizardOverlay::merge_vendors({}, {sv});
-    REQUIRE(result.size() == 1);
-    CHECK(result[0].name == "Beta");
-    CHECK(result[0].server_id == 3);
-}
-
-// ============================================================================
-// Filament Merge Tests
-// ============================================================================
-
-TEST_CASE("merge_filaments deduplicates by material+color_hex, server priority", "[spool_wizard]") {
-    // Server has PLA Red (id=1)
-    FilamentInfo server_pla;
-    server_pla.id = 1;
-    server_pla.vendor_id = 5;
-    server_pla.material = "PLA";
-    server_pla.color_hex = "FF0000";
-    server_pla.filament_name = "Red";
-    server_pla.nozzle_temp_min = 190;
-    server_pla.nozzle_temp_max = 220;
-    server_pla.density = 1.24;
-
-    // External DB also has PLA Red (same material+color)
-    FilamentInfo ext_pla;
-    ext_pla.id = 0;
-    ext_pla.material = "PLA";
-    ext_pla.color_hex = "FF0000";
-    ext_pla.nozzle_temp_min = 195;
-    ext_pla.nozzle_temp_max = 215;
-    ext_pla.bed_temp_min = 50;
-    ext_pla.bed_temp_max = 60;
-
-    // External DB has additional PETG Blue (not on server)
-    FilamentInfo ext_petg;
-    ext_petg.id = 0;
-    ext_petg.material = "PETG";
-    ext_petg.color_hex = "0000FF";
-    ext_petg.nozzle_temp_min = 230;
-    ext_petg.nozzle_temp_max = 250;
-    ext_petg.density = 1.27;
-
-    auto result = SpoolWizardOverlay::merge_filaments({server_pla}, {ext_pla, ext_petg});
-
-    // Should have 2 entries: PLA Red (merged), PETG Blue (DB-only)
-    REQUIRE(result.size() == 2);
-
-    // Find PLA Red — server takes priority for id, but DB fills in bed temps
-    auto it =
-        std::find_if(result.begin(), result.end(), [](const SpoolWizardOverlay::FilamentEntry& e) {
-            return e.material == "PLA" && e.color_hex == "FF0000";
-        });
-    REQUIRE(it != result.end());
-    CHECK(it->server_id == 1);
-    CHECK(it->from_server == true);
-    CHECK(it->from_database == true);
-    CHECK(it->nozzle_temp_min == 190); // Server value kept
-    CHECK(it->nozzle_temp_max == 220); // Server value kept
-    CHECK(it->bed_temp_min == 50);     // Filled from DB (server had 0)
-    CHECK(it->bed_temp_max == 60);     // Filled from DB (server had 0)
-
-    // Find PETG Blue — DB only
-    it = std::find_if(result.begin(), result.end(), [](const SpoolWizardOverlay::FilamentEntry& e) {
-        return e.material == "PETG";
-    });
-    REQUIRE(it != result.end());
-    CHECK(it->server_id == -1);
-    CHECK(it->from_server == false);
-    CHECK(it->from_database == true);
-    CHECK(it->nozzle_temp_min == 230);
-}
-
-TEST_CASE("merge_filaments sorts by material then name", "[spool_wizard]") {
-    FilamentInfo petg_a;
-    petg_a.material = "PETG";
-    petg_a.color_hex = "AA0000";
-
-    FilamentInfo pla_b;
-    pla_b.material = "PLA";
-    pla_b.color_hex = "BB0000";
-
-    FilamentInfo abs_c;
-    abs_c.material = "ABS";
-    abs_c.color_hex = "CC0000";
-
-    auto result = SpoolWizardOverlay::merge_filaments({}, {petg_a, pla_b, abs_c});
-
-    REQUIRE(result.size() == 3);
-    CHECK(result[0].material == "ABS");
-    CHECK(result[1].material == "PETG");
-    CHECK(result[2].material == "PLA");
-}
-
-TEST_CASE("merge_filaments handles empty inputs", "[spool_wizard]") {
-    // Both empty
-    auto result = SpoolWizardOverlay::merge_filaments({}, {});
-    CHECK(result.empty());
-
-    // Only server
-    FilamentInfo sf;
-    sf.id = 1;
-    sf.material = "PLA";
-    sf.color_hex = "000000";
-    result = SpoolWizardOverlay::merge_filaments({sf}, {});
-    REQUIRE(result.size() == 1);
-    CHECK(result[0].from_server == true);
-    CHECK(result[0].from_database == false);
-
-    // Only external
-    FilamentInfo ext;
-    ext.id = 0;
-    ext.material = "PETG";
-    ext.color_hex = "FFFFFF";
-    result = SpoolWizardOverlay::merge_filaments({}, {ext});
-    REQUIRE(result.size() == 1);
-    CHECK(result[0].from_server == false);
-    CHECK(result[0].from_database == true);
-}
-
-TEST_CASE("merge_filaments case-insensitive dedup on material+color", "[spool_wizard]") {
-    FilamentInfo sf;
-    sf.id = 1;
-    sf.material = "PLA";
-    sf.color_hex = "ff0000"; // lowercase
-
-    FilamentInfo ext;
-    ext.id = 0;
-    ext.material = "pla";     // lowercase material
-    ext.color_hex = "FF0000"; // uppercase
-
-    auto result = SpoolWizardOverlay::merge_filaments({sf}, {ext});
-    // Should merge into one entry
-    REQUIRE(result.size() == 1);
-    CHECK(result[0].server_id == 1);
-    CHECK(result[0].from_server == true);
-    CHECK(result[0].from_database == true);
-}
-
 // ============================================================================
 // Filament Selection Tests
 // ============================================================================
@@ -526,19 +299,8 @@ TEST_CASE("select_filament stores filament and enables proceed", "[spool_wizard]
     CHECK(wizard.current_step() == SpoolWizardOverlay::Step::FILAMENT);
     CHECK_FALSE(wizard.can_proceed()); // Reset on step transition
 
-    // Simulate loading filaments by merging directly
-    // (We can't call load_filaments without LVGL/API, so test via merge + select)
-    FilamentInfo ext;
-    ext.id = 0;
-    ext.material = "PLA";
-    ext.color_hex = "FF0000";
-    ext.nozzle_temp_min = 190;
-    ext.nozzle_temp_max = 220;
-
-    // We can't set all_filaments_ directly since it's private.
-    // But merge_filaments is static and returns a vector we can test with.
-    // For the integration test, we verify select_filament behavior via the public API.
-    // select_filament(0) on an empty list should not crash or set proceed.
+    // all_filaments_ is private and load_filaments() needs LVGL and an API,
+    // so select_filament(0) on the empty list must not crash or set proceed.
     wizard.select_filament(0);
     CHECK_FALSE(wizard.can_proceed());
 }
@@ -641,53 +403,6 @@ TEST_CASE("set_new_filament_color with empty hex clears color", "[spool_wizard]"
 }
 
 // ============================================================================
-// Filament DB Entries for New Vendor Tests
-// ============================================================================
-
-TEST_CASE("merge_filaments: external entries serve as templates for new vendor", "[spool_wizard]") {
-    // New vendor (server_id=-1) should still show external DB filaments as templates
-    FilamentInfo ext1;
-    ext1.id = 0;
-    ext1.material = "PLA";
-    ext1.color_hex = "FF0000";
-    ext1.filament_name = "Red";
-    ext1.nozzle_temp_min = 190;
-    ext1.nozzle_temp_max = 220;
-    ext1.density = 1.24;
-    ext1.weight = 1000;
-
-    FilamentInfo ext2;
-    ext2.id = 0;
-    ext2.material = "PETG";
-    ext2.color_hex = "0000FF";
-    ext2.nozzle_temp_min = 230;
-    ext2.nozzle_temp_max = 260;
-
-    // No server filaments (vendor is new/DB-only)
-    auto result = SpoolWizardOverlay::merge_filaments({}, {ext1, ext2});
-
-    REQUIRE(result.size() == 2);
-
-    // All should be from_database only, server_id=-1
-    for (const auto& entry : result) {
-        CHECK(entry.server_id == -1);
-        CHECK(entry.from_server == false);
-        CHECK(entry.from_database == true);
-    }
-
-    // Check values are preserved
-    auto it =
-        std::find_if(result.begin(), result.end(), [](const SpoolWizardOverlay::FilamentEntry& e) {
-            return e.material == "PLA";
-        });
-    REQUIRE(it != result.end());
-    CHECK(it->name == "Red PLA");
-    CHECK(it->nozzle_temp_min == 190);
-    CHECK(it->density == Catch::Approx(1.24));
-    CHECK(it->weight == Catch::Approx(1000));
-}
-
-// ============================================================================
 // Spool Details State Tests
 // ============================================================================
 
@@ -766,4 +481,69 @@ TEST_CASE("on_create_requested fires completion when vendor+filament exist", "[s
     // This test verifies the no-API path does not crash and handles gracefully.
     wizard.on_create_requested();
     CHECK_FALSE(completed);
+}
+
+// ============================================================================
+// Filament creation payload
+// ============================================================================
+
+TEST_CASE("filament_create_payload sends Spoolman one integer per temperature",
+          "[spool_wizard][spoolman]") {
+    // A catalog filament carries a nozzle range; Spoolman stores one integer
+    // and answers anything else with 422.
+    SpoolWizardOverlay::FilamentEntry f;
+    f.material = "PLA";
+    f.color_hex = "FF0000";
+    f.nozzle_temp_min = 190;
+    f.nozzle_temp_max = 220;
+    f.bed_temp_min = 60;
+    f.bed_temp_max = 60;
+
+    const nlohmann::json payload = SpoolWizardOverlay::filament_create_payload(f, 7);
+    CHECK(payload["settings_extruder_temp"] == 205);
+    CHECK(payload["settings_bed_temp"] == 60);
+
+    helix::PrinterState state;
+    MoonrakerClientMock client;
+    MoonrakerAPIMock api(client, state);
+    bool created = false;
+    api.spoolman().create_spoolman_filament(
+        payload, [&](const FilamentInfo&) { created = true; },
+        [](const MoonrakerError& err) { FAIL("Spoolman rejected the payload: " << err.message); });
+    CHECK(created);
+}
+
+TEST_CASE("filament_create_payload omits unset temperatures", "[spool_wizard][spoolman]") {
+    SpoolWizardOverlay::FilamentEntry f;
+    f.material = "PLA";
+    f.nozzle_temp_max = 215;
+
+    const nlohmann::json payload = SpoolWizardOverlay::filament_create_payload(f, 7);
+    CHECK(payload["settings_extruder_temp"] == 215);
+    CHECK_FALSE(payload.contains("settings_bed_temp"));
+}
+
+TEST_CASE("vendor_create_payload keeps the website Spoolman has no field for",
+          "[spool_wizard][spoolman]") {
+    // Spoolman's vendor has no url field and silently drops unknown keys, so
+    // the website lands in the vendor's comment.
+    helix::PrinterState state;
+    MoonrakerClientMock client;
+    MoonrakerAPIMock api(client, state);
+
+    const nlohmann::json payload =
+        SpoolWizardOverlay::vendor_create_payload("Acme", "https://acme.example");
+    int vendor_id = 0;
+    api.spoolman().create_spoolman_vendor(
+        payload, [&](const VendorInfo& v) { vendor_id = v.id; }, nullptr);
+    REQUIRE(vendor_id > 0);
+
+    nlohmann::json served;
+    client.send_jsonrpc(
+        "server.spoolman.proxy", {{"request_method", "GET"}, {"path", "/v1/vendor"}},
+        [&](const nlohmann::json& r) { served = r["result"]; }, [](const MoonrakerError&) {});
+    const auto it = std::find_if(served.begin(), served.end(),
+                                 [&](const nlohmann::json& v) { return v["id"] == vendor_id; });
+    REQUIRE(it != served.end());
+    CHECK((*it)["comment"] == "https://acme.example");
 }

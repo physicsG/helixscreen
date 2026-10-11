@@ -36,6 +36,11 @@
 
 #include "../catch_amalgamated.hpp"
 
+using helix::AmsSystemInfo;
+using helix::AmsUnit;
+using helix::SlotInfo;
+
+using helix::ui::ACTIVE_HEAD_SLOT;
 using helix::ui::AmsCall;
 using helix::ui::BackendCaps;
 using helix::ui::EXTERNAL_SPOOL_SLOT;
@@ -505,6 +510,51 @@ TEST_CASE("plan_unload: an unresolved slot is still refused, sentinel or not",
                             /*macro_user_configured=*/false);
     CHECK(plan.tier == FilamentTier::Refused);
     CHECK(plan.refusal == FilamentRefusal::NothingLoaded);
+}
+
+TEST_CASE("unload_target_is_loaded: the active head counts when the toolhead is unaccounted",
+          "[filament][dispatch][1324]") {
+    // Filament at the toolhead that no lane claims (a power-cycled IFS whose
+    // IFS_STATUS reports Chan=0). The per-slot sensors answer for lanes and
+    // there is no lane to ask about, so the backend's unaccounted answer is the
+    // only evidence anything is pullable.
+    CHECK(unload_target_is_loaded(ACTIVE_HEAD_SLOT, /*slot_actively_loaded=*/false,
+                                  /*slot_filament_at_toolhead=*/false, /*is_current_slot=*/true,
+                                  /*any_filament_loaded=*/false, /*toolhead_unaccounted=*/true));
+
+    // A backend that cannot tell (nullopt, flattened to false) keeps the
+    // refusal: "no slot resolved" must not dispatch on a guess.
+    CHECK_FALSE(unload_target_is_loaded(ACTIVE_HEAD_SLOT, false, false, true, true, false));
+
+    // The unaccounted answer speaks for the active head only; any other
+    // negative slot is still "nothing resolved".
+    CHECK_FALSE(unload_target_is_loaded(-3, true, true, true, true, true));
+}
+
+TEST_CASE("plan_unload: an unaccounted toolhead unloads from the active head, and only from there",
+          "[filament][dispatch][1324]") {
+    BackendCaps ams = fresh_ams();
+    ams.toolhead_unaccounted = true;
+
+    auto plan = plan_unload(ams, ACTIVE_HEAD_SLOT, /*target_is_loaded=*/true,
+                            /*macro_available=*/true, /*macro_user_configured=*/false);
+    CHECK(plan.tier == FilamentTier::AmsBackend);
+    CHECK(plan.ams_call == AmsCall::Unload);
+    // -1 reaches unload_filament(), which every backend resolves to the real
+    // channel from firmware.
+    CHECK(plan.ams_arg == ACTIVE_HEAD_SLOT);
+
+    // nullopt and false flatten to the same input: still NothingLoaded.
+    BackendCaps silent = fresh_ams();
+    auto refused = plan_unload(silent, ACTIVE_HEAD_SLOT, /*target_is_loaded=*/false,
+                               /*macro_available=*/true, /*macro_user_configured=*/false);
+    CHECK(refused.tier == FilamentTier::Refused);
+    CHECK(refused.refusal == FilamentRefusal::NothingLoaded);
+
+    // Any other negative slot never dispatches, unaccounted or not.
+    auto other = plan_unload(ams, /*target_slot=*/-3, /*target_is_loaded=*/true,
+                             /*macro_available=*/true, /*macro_user_configured=*/false);
+    CHECK(other.tier == FilamentTier::Refused);
 }
 
 // =============================================================================

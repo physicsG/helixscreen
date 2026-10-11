@@ -39,6 +39,19 @@ enum class HardwareIssueSeverity {
 };
 
 /**
+ * @brief Which badge summarizes a validation result in the health headline
+ *
+ * Coarser than HardwareIssueSeverity. Newly discovered hardware is INFO on its
+ * own row but still asks the user for attention in the headline, so INFO and
+ * WARNING share one level here.
+ */
+enum class HardwareStatusLevel {
+    OK = 0,        ///< Nothing to report
+    ATTENTION = 1, ///< Hardware is missing, newly discovered, or changed
+    CRITICAL = 2   ///< Core hardware missing
+};
+
+/**
  * @brief Type of hardware component
  */
 enum class HardwareType {
@@ -154,6 +167,22 @@ struct HardwareValidationResult {
             return HardwareIssueSeverity::WARNING;
         }
         return HardwareIssueSeverity::INFO;
+    }
+
+    /**
+     * @brief Get the headline badge level for this result
+     *
+     * Only critical issues earn the critical badge; every other kind of issue
+     * shares the attention badge.
+     */
+    [[nodiscard]] HardwareStatusLevel headline_level() const {
+        if (!has_issues()) {
+            return HardwareStatusLevel::OK;
+        }
+        if (has_critical()) {
+            return HardwareStatusLevel::CRITICAL;
+        }
+        return HardwareStatusLevel::ATTENTION;
     }
 };
 

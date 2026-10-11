@@ -15,6 +15,7 @@
 
 #include "../../include/belt_capture.h"
 #include "../../include/belt_tension_types.h"
+#include "text_io.h"
 
 #include <chrono>
 #include <filesystem>
@@ -209,7 +210,7 @@ TEST_CASE("parse_capture_sample_rate returns 0 when the key is missing",
 
 namespace {
 
-/// RAII temp directory, same pattern as InputShaperCacheTestFixture.
+/// RAII temp directory.
 class TempDirFixture {
   public:
     TempDirFixture() {
@@ -229,13 +230,6 @@ class TempDirFixture {
   private:
     fs::path dir_;
 };
-
-std::string read_file(const fs::path& p) {
-    std::ifstream in(p);
-    std::stringstream ss;
-    ss << in.rdbuf();
-    return ss.str();
-}
 
 size_t count_files(const fs::path& dir) {
     size_t n = 0;
@@ -293,15 +287,19 @@ TEST_CASE("BeltCaptureWriter writes the detection window and ring-down as separa
     // The two files hold different buffers - the whole point of writing them
     // separately - so their data rows must differ, and each must parse back
     // to the buffer it was given.
-    const auto parsed_detection = parse_accel_csv(read_file(detection_file));
-    const auto parsed_ringdown = parse_accel_csv(read_file(ringdown_file));
+    const auto parsed_detection =
+        parse_accel_csv(helix::text_io::read_file(detection_file).value_or(""));
+    const auto parsed_ringdown =
+        parse_accel_csv(helix::text_io::read_file(ringdown_file).value_or(""));
     REQUIRE(parsed_detection.size() == detection.size());
     REQUIRE(parsed_ringdown.size() == ringdown.size());
     CHECK(parsed_detection[0].x == detection[0].x);
     CHECK(parsed_ringdown[0].x == ringdown[0].x);
 
-    CHECK(read_file(detection_file).find("detection window") != std::string::npos);
-    CHECK(read_file(ringdown_file).find("ring-down") != std::string::npos);
+    CHECK(helix::text_io::read_file(detection_file).value_or("").find("detection window") !=
+          std::string::npos);
+    CHECK(helix::text_io::read_file(ringdown_file).value_or("").find("ring-down") !=
+          std::string::npos);
 }
 
 TEST_CASE("BeltCaptureWriter writes only the detection window when no ring-down was extracted",
@@ -371,7 +369,7 @@ TEST_CASE("BeltCaptureWriter writes the quiet buffer with no verdict",
     for (const auto& entry : fs::directory_iterator(tmp.dir())) {
         const std::string name = entry.path().filename().string();
         CHECK(name.find("quiet_0000") != std::string::npos);
-        const std::string content = read_file(entry.path());
+        const std::string content = helix::text_io::read_file(entry.path()).value_or("");
         CHECK(content.find("verdict=") == std::string::npos);
         CHECK(parse_accel_csv(content).size() == 2);
     }

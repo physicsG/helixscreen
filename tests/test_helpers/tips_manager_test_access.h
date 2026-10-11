@@ -20,6 +20,25 @@ namespace helix {
 /// moved into get_instance(), which put real titles of every length in front
 /// of the content-fit sweep and made it fail on a random set of geometries.
 struct TipsManagerTestAccess {
+    /// Return the singleton, if one exists, to its never-loaded state: the next
+    /// get_instance() reads the shipped database again. A case that pinned the
+    /// cache to one title, or init()ed it from its own file, would otherwise
+    /// leave every later widget on that data.
+    static void reset_if_created() {
+        TipsManager* mgr = TipsManager::instance;
+        if (!mgr) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(mgr->tips_mutex);
+        mgr->path.clear();
+        mgr->data = decltype(mgr->data){};
+        mgr->tips_cache.clear();
+        mgr->viewed_tip_ids_.clear();
+        mgr->categories_.clear();
+        mgr->version_ = "unknown";
+        mgr->load_attempted_ = false;
+    }
+
     /// Reduce the database to its single longest title.
     ///
     /// The longest one rather than a fixed seed's pick: a tile that holds the

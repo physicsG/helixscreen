@@ -4,6 +4,7 @@
 #pragma once
 
 #include "json_fwd.h"
+#include "text_io.h"
 
 #include <algorithm>
 #include <cctype>
@@ -49,7 +50,12 @@ struct SafetyLimits {
     /// normalize_heater_key(), and a raw insert is how the key casing drifts
     /// apart from the lookup.
     std::map<std::string, double> heater_max_temp_celsius;
-    double min_extrude_temp_celsius = 170.0; ///< Minimum temp for extrusion (Klipper default)
+    /// Per-extruder extrusion minimums, keyed like heater_max_temp_celsius. Read
+    /// through min_extrude_temp_for() and written through set_min_extrude_temp_for().
+    std::map<std::string, double> heater_min_extrude_temp_celsius;
+    /// The primary extruder's extrusion minimum (Klipper default 170), for callers
+    /// that have no extruder name to hand.
+    double min_extrude_temp_celsius = 170.0;
     double max_fan_speed_percent = 100.0;
     double min_fan_speed_percent = 0.0;
     double max_feedrate_mm_min = 50000.0;
@@ -84,10 +90,28 @@ struct SafetyLimits {
         return it != heater_max_temp_celsius.end() ? it->second : max_temperature_celsius;
     }
 
+    /// Whether the printer's configfile gave this heater its own max_temp.
+    bool has_max_temp_for(const std::string& heater) const {
+        return heater_max_temp_celsius.count(normalize_heater_key(heater)) > 0;
+    }
+
     /// Record one heater's ceiling, normalizing the key the same way
     /// max_temp_for() normalizes its lookup.
     void set_max_temp_for(const std::string& heater, double max_temp) {
         heater_max_temp_celsius[normalize_heater_key(heater)] = max_temp;
+    }
+
+    /// Extrusion minimum for one extruder, by Klipper object name. An extruder
+    /// whose section was not read takes min_extrude_temp_celsius, the primary
+    /// extruder's, since Klipper's own default is the same for every extruder.
+    double min_extrude_temp_for(const std::string& extruder) const {
+        const auto it = heater_min_extrude_temp_celsius.find(normalize_heater_key(extruder));
+        return it != heater_min_extrude_temp_celsius.end() ? it->second : min_extrude_temp_celsius;
+    }
+
+    /// Record one extruder's extrusion minimum, keyed the way min_extrude_temp_for() looks it up.
+    void set_min_extrude_temp_for(const std::string& extruder, double min_extrude_temp) {
+        heater_min_extrude_temp_celsius[normalize_heater_key(extruder)] = min_extrude_temp;
     }
 
     /// Fold a heater name to its map key.
@@ -101,8 +125,7 @@ struct SafetyLimits {
     /// sanity net - which is #1355 again, on the one heater (a chamber) most
     /// likely to sit far below it.
     static std::string normalize_heater_key(std::string heater) {
-        std::transform(heater.begin(), heater.end(), heater.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        heater = helix::text_io::to_lower(heater);
         return heater;
     }
 
@@ -131,6 +154,11 @@ struct SafetyLimits {
         }
         if (min_extrude_temp_celsius < 0.0) {
             min_extrude_temp_celsius = 0.0;
+        }
+        for (auto& [extruder, min_extrude] : heater_min_extrude_temp_celsius) {
+            if (min_extrude < 0.0) {
+                min_extrude = 0.0;
+            }
         }
     }
 };
@@ -236,6 +264,36 @@ struct ThumbnailInfo {
 };
 
 /**
+ * @brief The thumbnail to fetch for a box of @p target_w x @p target_h
+ *
+ * The smallest entry that covers the box (least to download and scale), else
+ * the largest. A box with no size (either side <= 0) is one nobody has measured
+ * yet, so it takes the largest rather than letting every entry "cover" it and
+ * picking the smallest icon. Ties keep the entry listed first.
+ *
+ * @return nullptr only when @p thumbnails is empty
+ */
+[[nodiscard]] inline const ThumbnailInfo*
+select_thumbnail(const std::vector<ThumbnailInfo>& thumbnails, int target_w, int target_h) {
+    if (thumbnails.empty()) {
+        return nullptr;
+    }
+    const bool sized = target_w > 0 && target_h > 0;
+    const ThumbnailInfo* smallest_cover = nullptr;
+    const ThumbnailInfo* largest = &thumbnails[0];
+    for (const auto& t : thumbnails) {
+        if (t.pixel_count() > largest->pixel_count()) {
+            largest = &t;
+        }
+        if (sized && t.width >= target_w && t.height >= target_h &&
+            (!smallest_cover || t.pixel_count() < smallest_cover->pixel_count())) {
+            smallest_cover = &t;
+        }
+    }
+    return smallest_cover ? smallest_cover : largest;
+}
+
+/**
  * @brief Resolve a Moonraker thumbnail relative_path to be relative to the gcodes root.
  *
  * Moonraker's metadata returns thumbnail relative_path values that are relative to the
@@ -258,6 +316,33 @@ struct ThumbnailInfo {
     }
     return gcode_dir + "/" + thumb_relative_path;
 }
+
+namespace helix {
+
+/// The directory a gcodes-root path sits in: "sub/dir/Foo.gcode" -> "sub/dir", "Foo.gcode" -> "".
+[[nodiscard]] inline std::string gcode_dir_of(const std::string& gcode_path) {
+    const auto slash = gcode_path.find_last_of('/');
+    return slash == std::string::npos ? std::string() : gcode_path.substr(0, slash);
+}
+
+/**
+ * @brief Which of a file's thumbnails to fetch for a box, as a path from the gcodes root
+ *
+ * The one size and subfolder rule every consumer uses: select_thumbnail()'s
+ * choice for @p target_w x @p target_h (an unmeasured box takes the largest),
+ * resolved against @p gcode_dir, the directory of the gcode file the
+ * thumbnails came from.
+ *
+ * @return Empty when there are no thumbnails
+ */
+[[nodiscard]] inline std::string
+select_and_resolve_thumbnail(const std::vector<ThumbnailInfo>& thumbnails,
+                             const std::string& gcode_dir, int target_w, int target_h) {
+    const ThumbnailInfo* best = select_thumbnail(thumbnails, target_w, target_h);
+    return best ? resolve_thumbnail_path(best->relative_path, gcode_dir) : std::string();
+}
+
+} // namespace helix
 
 /**
  * @brief File metadata structure (detailed file info)
@@ -290,73 +375,6 @@ struct FileMetadata {
     uint64_t gcode_end_byte = 0;
     std::string uuid;                      // Slicer-generated UUID (for history matching)
     std::vector<ThumbnailInfo> thumbnails; // Thumbnails with dimensions
-
-    /**
-     * @brief Get the largest thumbnail path
-     * @return Path to largest thumbnail, or empty string if none available
-     */
-    [[nodiscard]] std::string get_largest_thumbnail() const {
-        if (thumbnails.empty())
-            return "";
-        const ThumbnailInfo* best = &thumbnails[0];
-        for (const auto& t : thumbnails) {
-            if (t.pixel_count() > best->pixel_count()) {
-                best = &t;
-            }
-        }
-        return best->relative_path;
-    }
-
-    /**
-     * @brief Get the best thumbnail for a target display size
-     *
-     * Selects the smallest thumbnail that meets or exceeds the target dimensions.
-     * This minimizes download size while ensuring sufficient resolution for display.
-     *
-     * Selection priority:
-     * 1. Smallest thumbnail where width >= target_w AND height >= target_h
-     * 2. Fallback: largest available thumbnail (better to upscale slightly than use tiny)
-     *
-     * @param target_w Minimum acceptable width in pixels
-     * @param target_h Minimum acceptable height in pixels
-     * @return Pointer to best thumbnail, or nullptr if no thumbnails available
-     *
-     * Example usage:
-     * @code
-     *   // For a 160x160 display card
-     *   const ThumbnailInfo* best = metadata.get_best_thumbnail(160, 160);
-     *   if (best) {
-     *       // 300x300 slicer thumb chosen over 32x32 icon
-     *       download(best->relative_path);
-     *   }
-     * @endcode
-     */
-    [[nodiscard]] const ThumbnailInfo* get_best_thumbnail(int target_w, int target_h) const {
-        if (thumbnails.empty()) {
-            return nullptr;
-        }
-
-        const ThumbnailInfo* best_adequate = nullptr;  // Smallest that meets target
-        const ThumbnailInfo* largest = &thumbnails[0]; // Fallback
-
-        for (const auto& t : thumbnails) {
-            // Track largest for fallback
-            if (t.pixel_count() > largest->pixel_count()) {
-                largest = &t;
-            }
-
-            // Check if this thumbnail meets minimum requirements
-            if (t.width >= target_w && t.height >= target_h) {
-                // Prefer smaller adequate thumbnails (less to download/process)
-                if (!best_adequate || t.pixel_count() < best_adequate->pixel_count()) {
-                    best_adequate = &t;
-                }
-            }
-        }
-
-        // Return adequate thumbnail if found, otherwise largest available
-        return best_adequate ? best_adequate : largest;
-    }
 };
 
 // ============================================================================
@@ -365,12 +383,19 @@ struct FileMetadata {
 
 /// Webcam information from Moonraker
 struct WebcamInfo {
-    std::string name;         ///< Webcam name/identifier
-    std::string service;      ///< Service type (e.g., "mjpegstreamer")
-    std::string snapshot_url; ///< URL for snapshot image
-    std::string stream_url;   ///< URL for MJPEG stream
-    std::string uid;          ///< Unique identifier
-    bool enabled = true;      ///< Whether the webcam is enabled
+    std::string name;             ///< Webcam name/identifier
+    std::string service;          ///< Service type (e.g., "mjpegstreamer")
+    std::string snapshot_url;     ///< URL for snapshot image
+    std::string stream_url;       ///< URL for MJPEG stream
+    std::string uid;              ///< Unique identifier
+    bool enabled = true;          ///< Whether the webcam is enabled
+    bool flip_horizontal = false; ///< Moonraker's own flip, applied before any user transform
+    bool flip_vertical = false;
+    int target_fps = 15; ///< Configured frame rate (Moonraker default 15)
+    /// Empty when the camera can be shown. Otherwise why discovery ruled it
+    /// out — its serving process is not running, or its absolute snapshot URL
+    /// did not answer — so the auto-pick skips it and a picker can say so.
+    std::string unavailable_reason;
 };
 
 // ============================================================================

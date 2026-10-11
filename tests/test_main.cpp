@@ -3,6 +3,8 @@
 // Catch2 test runner main file
 // This file compiles the Catch2 implementation once
 #define CATCH_CONFIG_MAIN
+#include "helix_test_fixture.h"
+
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -76,13 +78,62 @@ __attribute__((constructor(101))) static void helix_pin_test_cache_sandbox() {
     snprintf(g_cache_sandbox, sizeof(g_cache_sandbox), "%s", root);
 }
 
+/// Pin both diagnostic ingest endpoints to a refused loopback port, so no run
+/// of this binary can reach the production ingest under any environment.
+///
+/// Unconditional by design, unlike the cache pins above: for these two
+/// variables an inherited value is itself the hazard, and the suite must fail
+/// fast against a refused port rather than succeed against the real worker.
+///
+/// The side effect is load-bearing: with this pin in place, every test's
+/// EnvVarGuard saves the loopback as its restore target, so a guard that dies
+/// before a deferred upload executes can only ever retarget to a refused
+/// port, never to production.
+__attribute__((constructor(101))) static void helix_pin_test_ingest_loopback() {
+    setenv("HELIX_BUNDLE_WORKER_URL", "http://127.0.0.1:9/", 1);
+    setenv("HELIX_CRASH_WORKER_URL", "http://127.0.0.1:9/", 1);
+}
+
+/// Pin the in-app USB automounter off for the whole binary.
+///
+/// Same unconditional shape as the ingest pins, and for the same reason: an
+/// armed value is itself the hazard. UsbBackendLinux::start() constructs the
+/// fallback mounter, CI containers run as root, and a host with a USB stick
+/// attached must never take real mount(2) calls from a test run. The
+/// automounter's create() refuses to arm while HELIX_USB_AUTOMOUNT=0, so this
+/// constructor disarms every current and future test that touches the
+/// backend - with or without a fixture, at any euid, even if the caller
+/// exported a different value.
+__attribute__((constructor(101))) static void helix_disarm_test_usb_automount() {
+    setenv("HELIX_USB_AUTOMOUNT", "0", 1);
+}
+
+/// Keep the Bluetooth plugin unloaded for the whole binary.
+///
+/// The plugin is built beside helix-tests, so on a host with an adapter the loader
+/// would open the system bus and register a BlueZ pairing agent on the developer's
+/// machine the first time a test reaches a plugin context. Tests that exercise
+/// plugin consumers swap fakes into BluetoothLoader's function pointers instead.
+__attribute__((constructor(101))) static void helix_disable_test_bluetooth_plugin() {
+    setenv("HELIX_BLUETOOTH", "0", 1);
+}
+
 namespace {
 
 /// Remove the sandbox once the run is over. Only the teardown lives in a
 /// listener — by testRunEnded the ordering hazard above is long past.
+///
+/// Every case also starts from HelixTestFixture's baseline, not only the ones
+/// that derive from it: CI shards run in random order, so a plain-fixture or
+/// fixture-less case would otherwise inherit whatever the case before it left in
+/// the process-wide singletons and the shared config sandbox.
 class CacheSandboxListener : public Catch::EventListenerBase {
   public:
     using Catch::EventListenerBase::EventListenerBase;
+
+    void testCaseStarting(Catch::TestCaseInfo const&) override {
+        HelixTestFixture::reset_all();
+    }
 
     void testRunEnded(Catch::TestRunStats const&) override {
         // Best-effort: a leftover sandbox is litter, never a test failure.

@@ -5,6 +5,8 @@
 
 #include "ui_container_delete_net.h"
 #include "ui_observer_guard.h"
+#include "ui_timer_guard.h"
+#include "ui_virtual_list.h"
 
 #if defined(HELIX_PLATFORM_ESP32)
 #include "esp_psram_thumbnail.h"
@@ -31,7 +33,7 @@ namespace helix::ui {
  * This enables displaying thousands of files without creating thousands of widgets.
  *
  * ## Key Features:
- * - Fixed widget pool (POOL_SIZE cards created once)
+ * - Widget pool sized to the visible window, grown when scrolling needs more
  * - Spacer-based virtualization for smooth scrolling
  * - Per-card subjects for declarative text binding
  * - Observer cleanup in destructor prevents crashes
@@ -53,20 +55,20 @@ namespace helix::ui {
  * at pool creation, then updated via lv_subject_copy_string() when card is recycled.
  */
 struct CardWidgetData {
-    lv_subject_t filename_subject;
+    lv_subject_t filename_subject{};
     char filename_buf[128] = {0};
 
-    lv_subject_t time_subject;
+    lv_subject_t time_subject{};
     char time_buf[32] = {0};
 
-    lv_subject_t filament_subject;
+    lv_subject_t filament_subject{};
     char filament_buf[32] = {0};
 
     /// Folder type for declarative binding: 0=file, 1=directory, 2=parent directory (..)
-    lv_subject_t folder_type_subject;
+    lv_subject_t folder_type_subject{};
 
     /// Thumbnail state: 0=real thumbnail, 1=placeholder (show icon), 2=directory (hide both)
-    lv_subject_t thumbnail_state_subject;
+    lv_subject_t thumbnail_state_subject{};
 
     // Observer handles (saved for cleanup before DELETE)
     lv_observer_t* filename_observer = nullptr;
@@ -132,8 +134,7 @@ class PrintSelectCardView : public ContainerDeleteNet {
 
     // === Configuration ===
 
-    static constexpr int POOL_SIZE = 24;         ///< Fixed pool of card widgets
-    static constexpr int BUFFER_ROWS = 1;        ///< Extra rows above/below viewport
+    static constexpr int BUFFER_ROWS = 0;        ///< Extra rows above/below viewport
     static constexpr int MIN_WIDTH = 150;        ///< Minimum card width
     static constexpr int MAX_WIDTH = 230;        ///< Maximum card width
     static constexpr int DEFAULT_HEIGHT = 245;   ///< Default card height
@@ -228,13 +229,53 @@ class PrintSelectCardView : public ContainerDeleteNet {
      */
     void refresh_content(const std::vector<PrintFileData>& file_list, const CardDimensions& dims);
 
+    /**
+     * @brief Build the cards the first screen needs, one per timer tick
+     *
+     * Building a card costs tens of ms on slow hardware, so building a whole
+     * window inside the listing's fill blocks the UI for all of them at once.
+     * Started while the listing is still on its way, the pool is ready when it
+     * lands; a populate() that comes first builds whatever is still missing.
+     *
+     * @param expected_files File count the window is sized for
+     */
+    void prebuild(const CardDimensions& dims, size_t expected_files);
+
+    /// Stops a prebuild in progress. Cards already built stay in the pool.
+    void stop_prebuild();
+
+    [[nodiscard]] bool is_prebuilding() const {
+        return static_cast<bool>(prebuild_timer_);
+    }
+
+    /// The prebuild's periodic timer, which the unit-test harness does not run
+    /// unless a test gives it a finite repeat count.
+    [[nodiscard]] lv_timer_t* prebuild_timer_for_test() const {
+        return prebuild_timer_.get();
+    }
+
+    /**
+     * @brief Shows @p file's thumbnail on the one card bound to @p file_index
+     *
+     * A thumbnail arriving changes one card; rebinding the whole window for it
+     * repaints every visible card. Nothing happens when no card shows the file.
+     *
+     * @return true when a card was updated
+     */
+    bool update_thumbnail(size_t file_index, const PrintFileData& file);
+
     // === State Queries ===
 
     /**
      * @brief Check if pool has been initialized
      */
     [[nodiscard]] bool is_initialized() const {
-        return !card_pool_.empty();
+        return pool_initialized_;
+    }
+
+    /// Card widgets built so far: the most any window has needed.
+    [[nodiscard]] size_t pool_size() const {
+        return card_pool_.size();
     }
 
     /**
@@ -264,11 +305,13 @@ class PrintSelectCardView : public ContainerDeleteNet {
     std::vector<lv_obj_t*> card_pool_;
     std::vector<ssize_t> card_pool_indices_;
     std::vector<std::unique_ptr<CardWidgetData>> card_data_pool_;
+    bool pool_initialized_ = false; ///< Gradient + theme observer set up
 
     // === Visible Range ===
     int cards_per_row_ = 3;
     int visible_start_row_ = -1;
     int visible_end_row_ = -1;
+    int total_items_ = 0;
 
     // === Cached Spacer Heights (avoid redundant lv_obj_set_height → relayout) ===
     int last_leading_height_ = -1;
@@ -279,6 +322,7 @@ class PrintSelectCardView : public ContainerDeleteNet {
     int32_t cached_gradient_w_ = 0;
     int32_t cached_gradient_h_ = 0;
     bool cached_gradient_dark_ = true;
+    uint32_t cached_gradient_behind_ = 0; ///< solid color the corners are flattened onto, 0 = none
 
     /// Ensure gradient buffer matches current card dimensions and theme
     void ensure_gradient_cache(int32_t card_width, int32_t card_height);
@@ -301,10 +345,22 @@ class PrintSelectCardView : public ContainerDeleteNet {
     // === Internal Methods ===
 
     /**
-     * @brief Initialize the fixed card pool
+     * @brief Set up what every pool card shares (gradient, theme observer)
      * @param dims Initial card dimensions
      */
     void init_pool(const CardDimensions& dims);
+
+    /// Build cards until the pool holds @p count.
+    void grow_pool(size_t count, const CardDimensions& dims);
+
+    /// The rows a window at @p scroll_y shows for @p file_count files
+    [[nodiscard]] VirtualWindow window_at(int32_t scroll_y, size_t file_count,
+                                          const CardDimensions& dims) const;
+
+    LvglTimerGuard prebuild_timer_;
+    std::unique_ptr<CardDimensions> prebuild_dims_;
+    size_t prebuild_target_ = 0;
+    static void on_prebuild_tick(lv_timer_t* timer);
 
     /**
      * @brief Configure a pool card to display a specific file
@@ -316,6 +372,20 @@ class PrintSelectCardView : public ContainerDeleteNet {
      */
     void configure_card(lv_obj_t* card, size_t pool_index, size_t file_index,
                         const PrintFileData& file, const CardDimensions& dims);
+
+    /// Points a card's image at @p file's thumbnail, or its placeholder state.
+    static void apply_thumbnail(lv_obj_t* card, CardWidgetData& data, const PrintFileData& file);
+
+#if defined(HELIX_PLATFORM_ESP32)
+    /// Drops a card's thumbnail, so the window's budget is all that holds them.
+    static void release_esp_thumbnail(lv_obj_t* card, CardWidgetData& data);
+
+  public:
+    /// Drops every card's thumbnail; cards show the placeholder until rebound.
+    void release_esp_thumbnails();
+
+  private:
+#endif
 
     /**
      * @brief Create spacers for virtualization

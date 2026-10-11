@@ -24,6 +24,58 @@ struct HistoryListPanelTestAccess {
     static void set_jobs(HistoryListPanel& p, std::vector<PrintHistoryJob> jobs) {
         p.jobs_ = std::move(jobs);
     }
+
+    // The detail overlay's Delete button reaches handle_delete() with the row
+    // the user opened already selected; seeding both here skips the overlay.
+    static void select_job(HistoryListPanel& p, std::vector<PrintHistoryJob> jobs, size_t index) {
+        p.filtered_jobs_ = std::move(jobs);
+        p.selected_job_index_ = index;
+    }
+
+    static void handle_delete(HistoryListPanel& p) {
+        p.handle_delete();
+    }
+
+    static lv_obj_t* delete_dialog(HistoryListPanel& p) {
+        return p.delete_confirmation_dialog_;
+    }
+
+    static void handle_view_timelapse(HistoryListPanel& p) {
+        p.handle_view_timelapse();
+    }
+
+    static void update_detail_subjects(HistoryListPanel& p, const PrintHistoryJob& job) {
+        p.update_detail_subjects(job);
+    }
+
+    static void apply_sort(HistoryListPanel& p, std::vector<PrintHistoryJob>& jobs,
+                           HistorySortColumn column, HistorySortDirection direction) {
+        p.sort_column_ = column;
+        p.sort_direction_ = direction;
+        p.apply_sort(jobs);
+    }
+
+    /// Give the panel the two containers create() would find in its XML, so
+    /// the virtual-scroll list can be driven without the whole overlay.
+    static void set_list_containers(HistoryListPanel& p, lv_obj_t* content, lv_obj_t* rows) {
+        p.list_content_ = content;
+        p.list_rows_ = rows;
+    }
+
+    static void set_history_manager(HistoryListPanel& p, PrintHistoryManager* manager) {
+        p.history_manager_ = manager;
+    }
+
+    static void refresh_from_manager(HistoryListPanel& p) {
+        p.refresh_from_manager();
+    }
+
+    // Production opens the detail overlay from a row click on a created panel.
+    static void show_detail_overlay(HistoryListPanel& p, lv_obj_t* parent,
+                                    const PrintHistoryJob& job) {
+        p.parent_screen_ = parent;
+        p.show_detail_overlay(job);
+    }
 };
 
 } // namespace helix::ui

@@ -28,18 +28,18 @@
  *    ObserverGuard::reset() must skip lv_observer_remove() on the dead subjects.
  */
 
-#include "../test_fixtures.h"
-#include "../test_helpers/controls_panel_test_access.h"
-#include "../test_helpers/update_queue_test_access.h"
-
-#include "printer_state.h"
 #include "ui_panel_controls.h"
 #include "ui_update_queue.h"
 
-#include "../catch_amalgamated.hpp"
+#include "../test_fixtures.h"
+#include "../test_helpers/controls_panel_test_access.h"
+#include "../test_helpers/update_queue_test_access.h"
+#include "printer_state.h"
 
 #include <string>
 #include <vector>
+
+#include "../catch_amalgamated.hpp"
 
 using helix::PrinterState;
 using helix::ui::ControlsPanelTestAccess;
@@ -53,7 +53,7 @@ TEST_CASE_METHOD(XMLTestFixture,
     // Step 1: 3 GENERIC secondary fans (A/B/C) plus a bare PART_COOLING "fan"
     // (excluded from the secondary list). init_subjects() was already called by
     // the XMLTestFixture constructor.
-    st.init_fans({"fan", "fan_generic A", "fan_generic B", "fan_generic C"});
+    st.fan_state().init_fans({"fan", "fan_generic A", "fan_generic B", "fan_generic C"});
 
     // Step 2: trivial ctor — no setup()/XML.
     ControlsPanel panel(st, nullptr);
@@ -76,7 +76,7 @@ TEST_CASE_METHOD(XMLTestFixture,
     // Step 5: force fan rediscovery that ORPHANS the 3 generic fans. In
     // PrinterFanState::init_fans, orphaned fans get *lifetime = false and their
     // subject is lv_subject_deinit'd.
-    st.init_fans({"fan"});
+    st.fan_state().init_fans({"fan"});
 
     // Step 6: LOAD-BEARING assertion. Each retained member token now reads false.
     // This only passes because the panel holds a live shared copy of the token in

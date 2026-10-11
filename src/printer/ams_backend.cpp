@@ -5,10 +5,13 @@
 
 #include "ams_backend_afc.h"
 #include "ams_backend_happy_hare.h"
+#include "ams_backend_openams.h"
 #include "ams_state.h"
+#include "settings_manager.h"
 #ifdef HELIX_ENABLE_MOCKS
 #include "ams_backend_mock.h"
 #include "app_globals.h"
+#include "mock_persona.h"
 #include "moonraker_client_mock.h"
 #endif
 #if HELIX_HAS_IFS
@@ -29,10 +32,17 @@
 #endif
 #include "ams_backend_toolchanger.h"
 #include "filament_database.h"
+#include "filament_slot_override.h"
+#include "filament_slot_override_store.h"
 #include "filament_variants.h"
 #include "i_moonraker_api.h"
+#include "lane_apply.h"
+#include "lane_legacy_migration.h"
+#include "lane_translation.h"
+#include "lvgl/src/others/translation/lv_translation.h"
 #include "printer_discovery.h"
 #include "runtime_config.h"
+#include "text_io.h"
 
 #include <spdlog/spdlog.h>
 
@@ -40,8 +50,9 @@
 #include <cctype>
 #include <cstdlib>
 #include <string_view>
+#include <tuple>
 
-using namespace helix;
+namespace helix {
 
 namespace {
 // Task 15 R2: ACE (500ms REST poll) and AD5X IFS (5s whole-file HTTP poll)
@@ -119,11 +130,11 @@ AmsError AmsBackend::set_endless_spool_backup(int slot_index, int backup_slot) {
     const int max_slot = slot_count - 1;
 
     if (slot_index < 0 || slot_index > max_slot) {
-        return AmsErrorHelper::invalid_slot(slot_index, max_slot);
+        return AmsErrorHelper::invalid_slot(lane_noun(), slot_index, max_slot);
     }
     if (backup_slot != -1) {
         if (backup_slot < 0 || backup_slot > max_slot) {
-            return AmsErrorHelper::invalid_slot(backup_slot, max_slot);
+            return AmsErrorHelper::invalid_slot(lane_noun(), backup_slot, max_slot);
         }
         if (backup_slot == slot_index) {
             return endless_spool_self_backup_error(slot_index);
@@ -199,6 +210,70 @@ lv_subject_t* AmsBackend::get_operation_step_index_subject(StepOperationType op)
     return nullptr;
 }
 
+std::vector<helix::printer::EnvironmentZone> AmsBackend::get_environment_zones(int unit) const {
+    using helix::printer::EnvironmentZone;
+    using helix::printer::ZoneDryingState;
+
+    std::vector<EnvironmentZone> zones;
+    const AmsSystemInfo info = get_system_info();
+
+    for (size_t u = 0; u < info.units.size(); ++u) {
+        const int unit_idx = static_cast<int>(u);
+        if (unit >= 0 && unit_idx != unit) {
+            continue;
+        }
+        const AmsUnit& au = info.units[u];
+        const DryerInfo dryer = get_dryer_info(unit_idx);
+        // Only a running cycle is visible here. Queued needs a firmware report that
+        // this layer does not receive, so a backend that caps concurrent heaters
+        // overrides to say so.
+        const ZoneDryingState state =
+            dryer.active ? ZoneDryingState::Active : ZoneDryingState::Idle;
+
+        const bool per_slot = std::any_of(au.slots.begin(), au.slots.end(), [](const SlotInfo& s) {
+            return s.environment.has_value();
+        });
+
+        if (per_slot) {
+            for (const SlotInfo& s : au.slots) {
+                if (!s.environment.has_value()) {
+                    continue;
+                }
+                // slot_index is unit-relative; a zone's gates are global.
+                const int gate = au.first_slot_global_index + s.slot_index;
+                EnvironmentZone z;
+                z.id = au.name + "#" + std::to_string(gate);
+                z.gates = {gate};
+                z.unit_index = unit_idx;
+                z.env = *s.environment;
+                z.dryer = dryer;
+                z.state = state;
+                zones.push_back(std::move(z));
+            }
+        } else if (au.environment.has_value() || dryer.supported) {
+            EnvironmentZone z;
+            // Falls back to an ordinal rather than the empty string: AmsUnit::name
+            // carries no non-empty invariant, and two empty names would otherwise
+            // collide on id == "" and let update_from_backend()'s id-match bind the
+            // wrong zone's values.
+            z.id = au.name.empty() ? "unit-" + std::to_string(unit_idx) : au.name;
+            z.label = au.display_name.empty() ? au.name : au.display_name;
+            z.unit_index = unit_idx;
+            z.gates.reserve(static_cast<size_t>(au.slot_count));
+            for (int g = 0; g < au.slot_count; ++g) {
+                z.gates.push_back(au.first_slot_global_index + g);
+            }
+            if (au.environment.has_value()) {
+                z.env = *au.environment;
+            }
+            z.dryer = dryer;
+            z.state = state;
+            zones.push_back(std::move(z));
+        }
+    }
+    return zones;
+}
+
 AmsError AmsBackend::unload_active_filament() {
     // Single source of truth for "unload active slot". Reads current_slot ONCE
     // from the same get_system_info() snapshot the caller would use, then
@@ -254,6 +329,182 @@ std::pair<int, int> AmsBackend::own_write_expectation(int slot_index, int firmwa
     return {old_id, new_id};
 }
 
+helix::ams::BindingVerdict AmsBackend::reconcile_lane_binding(int slot_index,
+                                                              int firmware_spool_id) {
+    helix::ams::BindingReading reading;
+    reading.firmware_spool_id = firmware_spool_id;
+    reading.printer_reports_spool_ids = printer_reports_spool_ids();
+    reading.keep_spool_info_on_eject =
+        helix::SettingsManager::instance().get_ams_keep_spool_info_on_eject();
+    std::tie(reading.own_write_old_id, reading.own_write_new_id) =
+        own_write_expectation(slot_index, firmware_spool_id);
+    return helix::ams::reconcile_binding(lane_id(slot_index), reading);
+}
+
+void AmsBackend::update_slot_weight(int slot_index, float remaining_weight_g, float total_weight_g,
+                                    bool persist) {
+    // File the reading before the backend stores it, so a backend that refuses
+    // the write still leaves the meter's own number on the lane rather than a
+    // record that disagrees with every store.
+    //
+    // Only what this call states is filed. A total below zero is the caller
+    // saying it has no total to report, and the record says so rather than
+    // carrying an old one forward: an unobserved total leaves whatever the
+    // backend holds standing, which is the same "leave it unchanged" the
+    // parameter asks for.
+    helix::ams::Observation metered(helix::ams::ObservationSource::Metered);
+    if (remaining_weight_g >= 0.0F) {
+        metered.remaining_weight_g = remaining_weight_g;
+    }
+    if (total_weight_g >= 0.0F) {
+        metered.total_weight_g = total_weight_g;
+    }
+    if (metered.remaining_weight_g.has_value() || metered.total_weight_g.has_value()) {
+        helix::ams::ingest(lane_id(slot_index), metered);
+    }
+
+    update_slot_weight_impl(slot_index, remaining_weight_g, total_weight_g, persist);
+}
+
+void AmsBackend::persist_external_identity(int slot_index) {
+    const std::optional<helix::ams::Observation> spoolman =
+        helix::ams::lane_sources(lane_id(slot_index)).spoolman;
+    if (!spoolman.has_value()) {
+        return;
+    }
+    persist_external_identity_impl(slot_index, *spoolman);
+}
+
+void AmsBackend::apply_resolved_lane(SlotInfo& slot, int slot_index) {
+    helix::ams::apply_resolved(slot, helix::ams::resolved_lane(lane_id(slot_index)));
+}
+
+AmsError AmsBackend::commit_user_edit(int slot_index, const SlotInfo& original,
+                                      const SlotInfo& info) {
+    // The user's statement, answered once from the editor's own before and
+    // after. apply_user_edit() records the stored authorship from this same
+    // answer rather than diffing its own read of the slot, which a frame
+    // landing while the editor was open has already moved.
+    helix::ams::Observation declaration = helix::ams::user_edit_observation(original, info);
+    if (firmware_stores_color_and_material(slot_index)) {
+        declaration.color_rgb.reset();
+        declaration.color_name.reset();
+        declaration.material.reset();
+    }
+    const bool binding_changed = original.spoolman_id != info.spoolman_id;
+
+    // An edit that keeps a spool cannot move what the spool states about
+    // itself: firmware, the stored record and the lane all get the spool's
+    // material, brand, spool name and vendor id instead of the edit's.
+    //
+    // A catalog pick names the product of the spool that was bound, so binding
+    // a different spool takes it off the slot and out of the stored record,
+    // as the drop below takes the colour picked for that spool. An unlink
+    // keeps it: the slot still describes what is loaded.
+    SlotInfo applied = helix::ams::keep_spool_owned_identity(
+        original, info, helix::ams::lane_sources(lane_id(slot_index)).spoolman);
+    if (binding_changed && info.spoolman_id > 0) {
+        applied.catalog_id.clear();
+        applied.product_name.clear();
+    }
+
+    // The slot's staging stamp before the dispatch: a backend that stages its
+    // echo guard inside apply_user_edit() moves it, and a refusal must cancel
+    // that staging without erasing the armed guard of an earlier edit whose
+    // write did go out.
+    const std::uint64_t echo_sequence = own_write_echo_sequence(slot_index);
+    AmsError err = apply_user_edit(slot_index, applied, declaration);
+    // A partly applied edit still changed what it applied: a binding that
+    // reached firmware is bound whatever the call says about the rest.
+    if (!err.success() && !err.partially_applied) {
+        // The dispatch refused the edit, so firmware holds nothing it could
+        // echo back. A backend that had staged its guard by then would
+        // withhold the next genuine reading as its own failed write, so the
+        // refusal cancels it here rather than in each backend's failure path.
+        // Matched to the staging this refusal created: an unmoved stamp means
+        // this edit staged nothing, and the cancel restores rather than erases
+        // any armed predecessor the staging suspended.
+        const std::uint64_t refused_sequence = own_write_echo_sequence(slot_index);
+        if (refused_sequence != 0 && refused_sequence != echo_sequence) {
+            abandon_own_write_echoes(slot_index, refused_sequence);
+        }
+        return err;
+    }
+
+    const helix::ams::LaneId lane = lane_id(slot_index);
+
+    // A changed binding leaves every record that described the old spool
+    // describing one that is no longer on the lane, the user's own included.
+    // The Spoolman record outranks the user's, so standing it would keep naming
+    // the old spool over an unlink and make a relink's own echo read as someone
+    // else's rebind, which erases the stored record the user just saved; a
+    // colour the user picked for the old spool would paint over the new one.
+    // The id alone decides, so a return to an id the lane held before drops
+    // too: telling the same spool back from another carrying that id would take
+    // asking Spoolman.
+    //
+    // Only once the backend applied it: a refused edit leaves the old binding
+    // in place, which the records still describe truly. And before the filing
+    // below, which amends: dropping first files the new binding on a fresh
+    // record, where dropping after would erase it.
+    if (binding_changed) {
+        helix::ams::drop_previous_spool_declarations(lane);
+    }
+
+    // Record the user's statement in the lane model, once the backend has
+    // applied it. The lane is the one this edit was written through, so the
+    // declaration cannot land on a backend the edit never reached, and a slot
+    // the backend refused gets no declaration at all. Every backend paints its
+    // slots from this record through apply_resolved_lane(), so it is what the
+    // lane shows for each field the user declared.
+    helix::ams::commit_slot_edit(lane, declaration);
+
+    // An unlink that kept the slot's identity stops tracking the spool, not
+    // what is loaded, so what the slot kept goes back on the lane at the rungs
+    // its stored record reloads it on. That record names no spool and, the
+    // binding having changed, declares nothing, so the record translation
+    // itself files the identity as Remembered and the catalog pick as the
+    // user's. An unlink that cleared the slot has nothing to file. Weights are
+    // not identity, and the drop leaves the meter's own record standing.
+    if (binding_changed && info.spoolman_id <= 0) {
+        const helix::ams::FilamentSlotOverride kept = helix::ams::user_override_from_slot_info(
+            declaration, applied, applied.material, nullptr);
+        helix::ams::file_kept_identity(lane, slot_index, kept);
+    }
+
+    // A backend that paints from the lane while it applies an edit painted the
+    // lane before the drop and the filings above.
+    repaint_slot_from_lane(slot_index);
+
+    // The rest of the edit is saved, but a field the user moved and the spool
+    // kept is not, and reporting success would tell them it was.
+    const std::vector<std::string_view> kept =
+        helix::ams::spool_owned_fields_dropped(original, info, applied);
+    if (kept.empty()) {
+        return err;
+    }
+    std::string kept_names;
+    for (const std::string_view name : kept) {
+        if (!kept_names.empty()) {
+            kept_names += ", ";
+        }
+        kept_names += name;
+    }
+    if (!err.success()) {
+        spdlog::warn("[AMS Backend] slot {} kept spool {}'s {} beside its own error: {}",
+                     slot_index, info.spoolman_id, kept_names, err.technical_msg);
+        return err;
+    }
+    AmsError kept_by_spool(AmsResult::WRONG_STATE,
+                           fmt::format("slot {} is linked to spool {}; kept Spoolman's {}",
+                                       slot_index, info.spoolman_id, kept_names),
+                           lv_tr("Brand and material come from Spoolman"),
+                           lv_tr("Everything else was saved. Change them in Spoolman."),
+                           slot_index);
+    kept_by_spool.partially_applied = true;
+    return kept_by_spool;
+}
+
 std::string AmsBackend::normalize_material(const std::string& material) const {
     auto supported = get_supported_materials();
     if (!supported || supported->empty()) {
@@ -263,8 +514,7 @@ std::string AmsBackend::normalize_material(const std::string& material) const {
 
     // Case-insensitive lowercase helper.
     auto lower = [](std::string s) {
-        std::transform(s.begin(), s.end(), s.begin(),
-                       [](unsigned char c) { return std::tolower(c); });
+        s = helix::text_io::to_lower(s);
         return s;
     };
 
@@ -303,13 +553,6 @@ std::string AmsBackend::normalize_material(const std::string& material) const {
 }
 
 #ifdef HELIX_ENABLE_MOCKS
-// Helper: lowercase a string for case-insensitive comparison
-static std::string to_lower(const std::string& s) {
-    std::string result = s;
-    std::transform(result.begin(), result.end(), result.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
-    return result;
-}
 
 // Helper to create mock backend with optional features.
 //
@@ -348,12 +591,8 @@ create_mock_with_features(int gate_count, IMoonrakerClient* mock_client = nullpt
     // ========================================================================
     // HELIX_MOCK_AMS — topology/type selection
     // ========================================================================
-    const char* mock_ams_env = std::getenv("HELIX_MOCK_AMS");
-    std::string ams_type;
-
-    if (mock_ams_env) {
-        ams_type = to_lower(mock_ams_env);
-    }
+    const std::string ams_type = helix::mock::effective_mock_ams(std::getenv("HELIX_MOCK_AMS"),
+                                                                 std::getenv("HELIX_MOCK_PRINTER"));
 
     if (!ams_type.empty()) {
         if (ams_type == "afc" || ams_type == "box_turtle" || ams_type == "boxturtle") {
@@ -371,6 +610,9 @@ create_mock_with_features(int gate_count, IMoonrakerClient* mock_client = nullpt
         } else if (ams_type == "torture") {
             mock->set_torture_mode(true);
             spdlog::info("[AMS Backend] Mock torture profile enabled (5 units / 16 lanes)");
+        } else if (ams_type == "stealth") {
+            mock->set_stealth_mode(true);
+            spdlog::info("[AMS Backend] Mock stealth profile enabled (5 units / 7 toolheads)");
         } else if (ams_type == "vivid") {
             mock->set_vivid_mixed_mode(true);
             spdlog::info("[AMS Backend] Mock ViViD mixed mode enabled");
@@ -425,7 +667,7 @@ create_mock_with_features(int gate_count, IMoonrakerClient* mock_client = nullpt
     std::string state_scenario;
 
     if (mock_state_env) {
-        state_scenario = to_lower(mock_state_env);
+        state_scenario = helix::text_io::to_lower(mock_state_env);
     }
 
     if (!state_scenario.empty() && state_scenario != "idle") {
@@ -463,7 +705,7 @@ create_mock_with_features(int gate_count, IMoonrakerClient* mock_client = nullpt
     // Environment sensor mode (auto-detects from dryer state if not specified)
     const char* env_mode_env = std::getenv("HELIX_MOCK_AMS_ENV");
     if (env_mode_env) {
-        std::string env_mode = to_lower(env_mode_env);
+        std::string env_mode = helix::text_io::to_lower(env_mode_env);
         mock->set_environment_mode(env_mode);
         spdlog::info("[AMS Backend] Mock environment mode: {}", env_mode);
     }
@@ -481,8 +723,9 @@ static std::unique_ptr<AmsBackend> try_create_mock(IMoonrakerClient* mock_client
         return nullptr;
     }
 
-    const char* mock_ams_env = std::getenv("HELIX_MOCK_AMS");
-    if (mock_ams_env && to_lower(mock_ams_env) == "none") {
+    const std::string mode = helix::mock::effective_mock_ams(std::getenv("HELIX_MOCK_AMS"),
+                                                             std::getenv("HELIX_MOCK_PRINTER"));
+    if (mode == "none") {
         spdlog::info("[AMS Backend] Mock AMS disabled via HELIX_MOCK_AMS=none");
         return nullptr;
     }
@@ -491,15 +734,22 @@ static std::unique_ptr<AmsBackend> try_create_mock(IMoonrakerClient* mock_client
     // the point is to exercise the production AmsBackendToolChanger +
     // toolchanger_addon path against them. Declining here is what lets real
     // discovery run, the same escape hatch HELIX_MOCK_AMS=none uses.
-    if (mock_ams_env) {
-        const std::string mode = to_lower(mock_ams_env);
-        if (mode == "medusahc" || mode == "medusa" || mode == "mhc" || mode == "medusahc-fork" ||
-            mode == "medusa-fork") {
-            spdlog::info("[AMS Backend] HELIX_MOCK_AMS={} selects mock hardware, not a mock "
-                         "backend - deferring to real discovery",
-                         mode);
-            return nullptr;
-        }
+    if (mode == "medusahc" || mode == "medusa" || mode == "mhc" || mode == "medusahc-fork" ||
+        mode == "medusa-fork") {
+        spdlog::info("[AMS Backend] HELIX_MOCK_AMS={} selects mock hardware, not a mock "
+                     "backend - deferring to real discovery",
+                     mode);
+        return nullptr;
+    }
+    // Personas that model firmware HelixScreen talks to through a production
+    // backend are mock hardware too: decline, and real discovery builds that
+    // backend against the mock's objects. Decided from the header-only persona table: the
+    // firmware build's link check reads this object and must find no MoonrakerClientMock symbol.
+    const char* printer_env = std::getenv("HELIX_MOCK_PRINTER");
+    if (mode.empty() && printer_env && helix::mock::is_hardware_persona(printer_env)) {
+        spdlog::info("[AMS Backend] Mock printer persona is mock hardware - deferring to real "
+                     "discovery");
+        return nullptr;
     }
 
     spdlog::debug("[AMS Backend] Creating mock backend with {} gates (mock mode enabled)",
@@ -538,99 +788,10 @@ bool AmsBackend::sensor_belongs_to_backend(AmsType type, const std::string& bare
     case AmsType::SNAPMAKER:
     case AmsType::MULTIACE:
     case AmsType::QIDI_BOX:
+    case AmsType::OPENAMS:
     case AmsType::NONE:
     default:
         return false;
-    }
-}
-
-std::unique_ptr<AmsBackend> AmsBackend::create(AmsType detected_type) {
-#ifdef HELIX_ENABLE_MOCKS
-    const auto* config = get_runtime_config();
-    if (auto mock = try_create_mock()) {
-        return mock;
-    }
-#endif
-
-    // Without API/client dependencies, we can only return mock backends
-    switch (detected_type) {
-    case AmsType::HAPPY_HARE:
-#ifdef HELIX_ENABLE_MOCKS
-        spdlog::warn("[AMS Backend] Happy Hare detected but no API/client provided - using mock");
-        return std::make_unique<AmsBackendMock>(config->mock_ams_gate_count);
-#else
-        spdlog::warn("[AMS Backend] Happy Hare detected but no API/client provided");
-        return nullptr;
-#endif
-
-    case AmsType::AFC:
-#ifdef HELIX_ENABLE_MOCKS
-        spdlog::warn("[AMS Backend] AFC detected but no API/client provided - using mock");
-        return std::make_unique<AmsBackendMock>(config->mock_ams_gate_count);
-#else
-        spdlog::warn("[AMS Backend] AFC detected but no API/client provided");
-        return nullptr;
-#endif
-
-    case AmsType::ACE:
-#if HELIX_HAS_ACE && defined(HELIX_ENABLE_MOCKS)
-        spdlog::warn("[AMS Backend] ACE detected but no API/client provided - using mock");
-        return std::make_unique<AmsBackendMock>(config->mock_ams_gate_count);
-#else
-        spdlog::warn("[AMS Backend] ACE detected but no API/client provided");
-        return nullptr;
-#endif
-
-    case AmsType::TOOL_CHANGER:
-#ifdef HELIX_ENABLE_MOCKS
-        spdlog::warn("[AMS Backend] Tool changer detected but no API/client provided - using mock");
-        return std::make_unique<AmsBackendMock>(config->mock_ams_gate_count);
-#else
-        spdlog::warn("[AMS Backend] Tool changer detected but no API/client provided");
-        return nullptr;
-#endif
-
-    case AmsType::AD5X_IFS:
-#if HELIX_HAS_IFS && defined(HELIX_ENABLE_MOCKS)
-        spdlog::warn("[AMS Backend] AD5X IFS detected but no API/client provided - using mock");
-        return std::make_unique<AmsBackendMock>(config->mock_ams_gate_count);
-#else
-        spdlog::warn("[AMS Backend] AD5X IFS detected but no API/client provided");
-        return nullptr;
-#endif
-
-    case AmsType::CFS:
-#ifdef HELIX_ENABLE_MOCKS
-        spdlog::warn("[AMS Backend] CFS detected but no API/client provided - using mock");
-        return std::make_unique<AmsBackendMock>(config->mock_ams_gate_count);
-#else
-        spdlog::warn("[AMS Backend] CFS detected but no API/client provided");
-        return nullptr;
-#endif
-
-    case AmsType::SNAPMAKER:
-    case AmsType::MULTIACE:
-#if HELIX_HAS_SNAPMAKER && defined(HELIX_ENABLE_MOCKS)
-        spdlog::warn("[AMS Backend] Snapmaker detected but no API/client provided - using mock");
-        return std::make_unique<AmsBackendMock>(config->mock_ams_gate_count);
-#else
-        spdlog::warn("[AMS Backend] Snapmaker detected but no API/client provided");
-        return nullptr;
-#endif
-
-    case AmsType::QIDI_BOX:
-#if HELIX_HAS_QIDI && defined(HELIX_ENABLE_MOCKS)
-        spdlog::warn("[AMS Backend] QIDI Box detected but no API/client provided - using mock");
-        return std::make_unique<AmsBackendMock>(config->mock_ams_gate_count);
-#else
-        spdlog::warn("[AMS Backend] QIDI Box detected but no API/client provided");
-        return nullptr;
-#endif
-
-    case AmsType::NONE:
-    default:
-        spdlog::debug("[AMS Backend] No AMS detected");
-        return nullptr;
     }
 }
 
@@ -729,12 +890,17 @@ std::unique_ptr<AmsBackend> AmsBackend::create(AmsType detected_type, IMoonraker
 #endif
 
     case AmsType::MULTIACE:
+#if HELIX_HAS_SNAPMAKER
         if (!api || !client) {
             spdlog::error("[AMS Backend] multiACE requires IMoonrakerAPI and MoonrakerClient");
             return nullptr;
         }
         spdlog::debug("[AMS Backend] Creating multiACE backend (U1 SnapSwap + ACE units)");
         return std::make_unique<AmsBackendMultiAce>(api, client);
+#else
+        spdlog::info("[AMS Backend] multiACE support not compiled in");
+        return nullptr;
+#endif
 
     case AmsType::QIDI_BOX:
 #if HELIX_HAS_QIDI
@@ -749,9 +915,77 @@ std::unique_ptr<AmsBackend> AmsBackend::create(AmsType detected_type, IMoonraker
         return nullptr;
 #endif
 
+    case AmsType::OPENAMS:
+        if (!api || !client) {
+            spdlog::error("[AMS Backend] OpenAMS requires IMoonrakerAPI and MoonrakerClient");
+            return nullptr;
+        }
+        spdlog::debug("[AMS Backend] Creating OpenAMS backend");
+        return std::make_unique<AmsBackendOpenAms>(api, client);
+
     case AmsType::NONE:
     default:
         spdlog::debug("[AMS Backend] No AMS detected");
         return nullptr;
     }
 }
+
+// ============================================================================
+// Routing provenance
+// ============================================================================
+
+AmsError AmsBackend::set_tool_mapping(int tool_number, int slot_index) {
+    AmsError result = set_tool_mapping_impl(tool_number, slot_index);
+    if (!result.success()) {
+        return result;
+    }
+    std::lock_guard<std::mutex> lock(authored_mappings_mutex_);
+    authored_mappings_[tool_number] = slot_index;
+    return result;
+}
+
+helix::printer::ToolMappingOrigin AmsBackend::tool_mapping_origin() const {
+    // A printer that publishes its own live table has already said what will
+    // print. Nothing about the shape of that answer makes it less true, so it
+    // needs no second opinion from us.
+    if (reports_firmware_tool_mapping() && firmware_tool_mapping_generation() > 0) {
+        return helix::printer::ToolMappingOrigin::Deliberate;
+    }
+
+    // Otherwise the routing is vouched for only where it still reflects a lane
+    // somebody aimed a tool at here. A table that has moved on since is back to
+    // speaking for itself.
+    const std::vector<int> routing = get_tool_mapping();
+    std::lock_guard<std::mutex> lock(authored_mappings_mutex_);
+    for (const auto& [tool, slot] : authored_mappings_) {
+        if (tool >= 0 && static_cast<size_t>(tool) < routing.size() &&
+            routing[static_cast<size_t>(tool)] == slot) {
+            return helix::printer::ToolMappingOrigin::Deliberate;
+        }
+    }
+    return helix::printer::ToolMappingOrigin::Unvouched;
+}
+
+const char* filament_op_eligibility_reason(AmsBackend::FilamentOpEligibility e) {
+    switch (e) {
+    case AmsBackend::FilamentOpEligibility::Eligible:
+        return "";
+    case AmsBackend::FilamentOpEligibility::Empty:
+        return "empty";
+    case AmsBackend::FilamentOpEligibility::AlreadyLoaded:
+        return "already loaded";
+    case AmsBackend::FilamentOpEligibility::NotLoaded:
+        return "not loaded";
+    case AmsBackend::FilamentOpEligibility::FeederUnavailable:
+        return "feeder not in automatic mode";
+    case AmsBackend::FilamentOpEligibility::SensorDisabled:
+        return "filament sensor disabled";
+    case AmsBackend::FilamentOpEligibility::Busy:
+        return "busy";
+    case AmsBackend::FilamentOpEligibility::Error:
+        return "feeder error";
+    }
+    return "";
+}
+
+} // namespace helix

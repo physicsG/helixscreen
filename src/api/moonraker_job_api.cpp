@@ -3,8 +3,10 @@
 
 #include "moonraker_job_api.h"
 
+#include "i_moonraker_client.h"
+#include "json_utils.h"
 #include "moonraker_api_internal.h"
-#include "moonraker_client.h"
+#include "moonraker_gcode_guards.h"
 #include "spdlog/spdlog.h"
 
 using namespace moonraker_internal;
@@ -13,7 +15,13 @@ using namespace moonraker_internal;
 // MoonrakerJobAPI Implementation
 // ============================================================================
 
-MoonrakerJobAPI::MoonrakerJobAPI(helix::IMoonrakerClient& client) : client_(client) {}
+MoonrakerJobAPI::MoonrakerJobAPI(helix::IMoonrakerClient& client, const helix::PrinterState* state)
+    : client_(client), state_(state) {}
+
+bool MoonrakerJobAPI::refused_by_spool_latch(const char* method,
+                                             const ErrorCallback& on_error) const {
+    return helix::api::reject_job_while_spools_on_bed(state_, method, on_error);
+}
 
 // ============================================================================
 // Job Control Operations
@@ -23,6 +31,8 @@ void MoonrakerJobAPI::start_print(const std::string& filename, SuccessCallback o
                                   ErrorCallback on_error) {
     // Validate filename path
     if (reject_invalid_path(filename, "start_print", on_error))
+        return;
+    if (refused_by_spool_latch("printer.print.start", on_error))
         return;
 
     json params = {{"filename", filename}};
@@ -35,7 +45,7 @@ void MoonrakerJobAPI::start_print(const std::string& filename, SuccessCallback o
             spdlog::debug("[Moonraker API] Print started successfully");
             on_success();
         },
-        on_error);
+        on_error, PRINT_START_TIMEOUT_MS);
 }
 
 void MoonrakerJobAPI::pause_print(SuccessCallback on_success, ErrorCallback on_error) {
@@ -51,6 +61,8 @@ void MoonrakerJobAPI::pause_print(SuccessCallback on_success, ErrorCallback on_e
 }
 
 void MoonrakerJobAPI::resume_print(SuccessCallback on_success, ErrorCallback on_error) {
+    if (refused_by_spool_latch("printer.print.resume", on_error))
+        return;
     spdlog::info("[Moonraker API] Resuming print");
 
     client_.send_jsonrpc(
@@ -83,14 +95,15 @@ void MoonrakerJobAPI::check_helix_plugin(BoolCallback on_result, ErrorCallback o
 
     client_.send_jsonrpc(
         "server.helix.status", json::object(),
-        [on_result](json response) {
+        [on_result](const json& response) {
             // Plugin is available
             bool enabled = true;
             std::string version = "unknown";
             if (response.contains("result")) {
                 const auto& r = response["result"];
-                enabled = r.value("enabled", true);
-                version = r.value("version", "1.0.0"); // Old plugins lack version
+                enabled = helix::json_util::safe_bool(r, "enabled", true);
+                version = helix::json_util::safe_string(r, "version",
+                                                        "1.0.0"); // Old plugins lack version
             }
             spdlog::info("[Moonraker API] helix_print plugin v{} detected (enabled={})", version,
                          enabled);
@@ -116,6 +129,8 @@ void MoonrakerJobAPI::start_modified_print(const std::string& original_filename,
         return;
     if (reject_invalid_path(temp_file_path, "start_modified_print", on_error))
         return;
+    if (refused_by_spool_latch("server.helix.print_modified", on_error))
+        return;
 
     // Build modifications array
     json mods_array = json::array();
@@ -134,14 +149,15 @@ void MoonrakerJobAPI::start_modified_print(const std::string& original_filename,
 
     client_.send_jsonrpc(
         "server.helix.print_modified", params,
-        [on_success, original_filename](json response) {
+        [on_success, original_filename](const json& response) {
             ModifiedPrintResult result;
             if (response.contains("result")) {
                 const auto& r = response["result"];
-                result.original_filename = r.value("original_filename", original_filename);
-                result.print_filename = r.value("print_filename", "");
-                result.temp_filename = r.value("temp_filename", "");
-                result.status = r.value("status", "unknown");
+                result.original_filename =
+                    helix::json_util::safe_string(r, "original_filename", original_filename);
+                result.print_filename = helix::json_util::safe_string(r, "print_filename", "");
+                result.temp_filename = helix::json_util::safe_string(r, "temp_filename", "");
+                result.status = helix::json_util::safe_string(r, "status", "unknown");
             } else {
                 result.original_filename = original_filename;
                 result.status = "printing";
@@ -153,7 +169,7 @@ void MoonrakerJobAPI::start_modified_print(const std::string& original_filename,
         // Resilience fallback: the helix_print plugin's print_modified endpoint is
         // broken in shipped plugin v1.0.0 (fails for every field), so an already-
         // deployed plugin leaves the user unable to start ANY print until they
-        // update it. When the plugin call fails, fall back to the stock
+        // update it. When the plugin answers and refuses, fall back to the stock
         // printer.print.start on the already-uploaded temp file so the user can
         // still print. `this` is safe to capture: MoonrakerJobAPI is a long-lived
         // API wrapper owned by MoonrakerAPI (same lifetime as the client), matching
@@ -162,6 +178,22 @@ void MoonrakerJobAPI::start_modified_print(const std::string& original_filename,
         // spdlog + client_ (via start_print) — no LVGL/subject work here; the
         // caller's on_success/on_error handle their own thread bouncing.
         [this, original_filename, temp_file_path, on_success, on_error](const MoonrakerError& err) {
+            // Only an answer from the plugin justifies a second start. The endpoint
+            // starts the print before it replies, so an error carrying no reply
+            // leaves the print's fate unknown and it may already be running. Firing
+            // printer.print.start at a live machine is worse than reporting the
+            // failure: the caller's error path deletes the temp file that print is
+            // reading through the plugin's symlink.
+            if (err.type == MoonrakerErrorType::TIMEOUT ||
+                err.type == MoonrakerErrorType::CONNECTION_LOST) {
+                spdlog::warn("[Moonraker API] helix_print plugin print_modified gave no answer "
+                             "({}); NOT falling back to printer.print.start - the plugin starts "
+                             "the print before it replies, so '{}' may already be printing.",
+                             err.message, temp_file_path);
+                on_error(err);
+                return;
+            }
+
             spdlog::warn("[Moonraker API] helix_print plugin print_modified failed ({}); falling "
                          "back to direct printer.print.start on temp file '{}'. Job history will "
                          "show the temp filename (known degraded mode — update the helix_print "
@@ -187,5 +219,6 @@ void MoonrakerJobAPI::start_modified_print(const std::string& original_filename,
                 },
                 // Fallback ALSO failed — only now surface the error to the caller.
                 on_error);
-        });
+        },
+        PRINT_MODIFIED_TIMEOUT_MS);
 }

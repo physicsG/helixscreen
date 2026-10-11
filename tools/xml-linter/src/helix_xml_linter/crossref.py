@@ -86,6 +86,13 @@ class ProjectRegistry:
         for path in paths:
             file_registry = _collect_registry_from_file(path)
             registry.merge(file_registry)
+        # The theme registers the base name of every <name>_light/<name>_dark
+        # pair at runtime, resolved for the current mode, so `#name` is valid.
+        registry.const_names |= {
+            name[: -len("_light")]
+            for name in registry.const_names
+            if name.endswith("_light") and name[: -len("_light")] + "_dark" in registry.const_names
+        }
         return registry
 
     def merge(self, other: ProjectRegistry) -> None:
@@ -257,7 +264,10 @@ class CrossRefValidator:
         # Check style block references (<bind_style>, <lv_obj-style>, aliases).
         if elem.tag in _STYLE_REF_TAGS and "name" in elem.attributes:
             style_name = elem.attributes["name"]
-            if not self._style_exists(style_name):
+            # A `$param` reference resolves at runtime from the component's
+            # <api> default or the instantiating element, so it cannot be
+            # statically resolved — same skip as subject references.
+            if not style_name.startswith("$") and not self._style_exists(style_name):
                 diagnostics.append(
                     Diagnostic(
                         file=elem.source_file,

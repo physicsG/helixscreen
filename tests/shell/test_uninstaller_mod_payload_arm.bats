@@ -14,7 +14,7 @@
 # uninstall: display-mode restore FIRST (while the payload is still in place),
 # then the stanza, then the payload subtree.
 #
-# The tests drive the GENERATED scripts/uninstall.sh, because the arm's value
+# The tests drive the GENERATED uninstall.sh, because the arm's value
 # is reachability: a lib function nothing calls is the exact dead-code shape
 # test_uninstall_platform_restore_wiring.bats was written to catch.
 #
@@ -37,10 +37,11 @@ setup() {
           _HELIX_SERVICE_SOURCED _HELIX_MOONRAKER_SOURCED \
           _HELIX_CAMERA_SOURCED _HELIX_UNINSTALL_SOURCED
     # shellcheck disable=SC1090
-    . "$WORKTREE_ROOT/scripts/uninstall.sh"
+    . "$UNINSTALL_BUNDLE"
 
     # An AD5X-shaped mod host, post payload install:
-    #   - payload root (.bin/helixscreen) inside the mod tree
+    #   - payload root at the mod_data sibling of the mod tree (the probed
+    #     default), recorded by the install
     #   - display mode taken over (HEADLESS) with the arrival recorded (STOCK)
     #   - an --auto-update stanza in the mod's user.moonraker.conf
     #
@@ -49,7 +50,7 @@ setup() {
     SANDBOX="$BATS_TEST_TMPDIR/root"
     MOD_ROOT="$SANDBOX/usr/data/config/mod"
     MOD_DATA="$SANDBOX/usr/data/config/mod_data"
-    PAYLOAD_ROOT="$MOD_ROOT/.bin/helixscreen"
+    PAYLOAD_ROOT="$MOD_DATA/helixscreen"
     USER_CONF="$MOD_DATA/user.moonraker.conf"
 
     mkdir -p "$MOD_ROOT/.shell" \
@@ -71,7 +72,7 @@ setup() {
 # HelixScreen auto-update stanza (written by the installer's --auto-update)
 [update_manager helixscreen]
 type: web
-path: /usr/data/config/mod/.bin/helixscreen
+path: /usr/data/config/mod_data/helixscreen
 
 [server]
 host: 0.0.0.0
@@ -90,7 +91,7 @@ EOF
 
 @test "the uninstaller defines the payload uninstall" {
     type uninstall_mod_payload >/dev/null 2>&1 \
-        || fail "scripts/uninstall.sh has no uninstall_mod_payload"
+        || fail "uninstall.sh has no uninstall_mod_payload"
 }
 
 @test "armed run restores the mod display mode and removes the payload root" {
@@ -123,9 +124,11 @@ EOF
         || fail "an unrelated section was dropped"
 }
 
-@test "unarmed run leaves the mod tree alone" {
-    # Without the arm the mod-owned refusal must stand: nothing the arm does
-    # may happen as a side effect of a plain uninstall run.
+@test "unarmed run leaves the payload root alone" {
+    # Without the arm nothing the arm does may happen as a side effect of a
+    # plain uninstall run: the removal is gated on HELIX_MOD_PAYLOAD itself,
+    # which stands guard wherever the root sits - inside the mod's namespaces
+    # or, like the default, beside them.
     HELIX_MOD_PAYLOAD=""
 
     run uninstall_mod_payload
@@ -315,7 +318,7 @@ _bundle_main_body() {
     # main()'s own body with comments stripped, so a comment naming the arm
     # cannot satisfy the grep (the same trap the platform-restore wiring hit).
     awk '/^main\(\) \{/{c=1} c{print} c&&/^\}/{exit}' \
-        "$WORKTREE_ROOT/scripts/uninstall.sh" | sed 's/#.*//'
+        "$UNINSTALL_BUNDLE" | sed 's/#.*//'
 }
 
 @test "bundle main() accepts a --mod-payload flag" {
@@ -358,7 +361,7 @@ _bundle_main_body() {
 }
 
 @test "the bundle help text documents the arm" {
-    grep -q -- '--mod-payload' "$WORKTREE_ROOT/scripts/uninstall.sh"
+    grep -q -- '--mod-payload' "$UNINSTALL_BUNDLE"
 }
 
 # --- R2b: a root that is not recognisably ours is refused, never removed ---

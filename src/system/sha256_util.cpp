@@ -6,40 +6,7 @@
 #include <cstdio>
 #include <cstring>
 
-#ifdef __APPLE__
-#include <CommonCrypto/CommonDigest.h>
-#endif
-
 namespace helix {
-
-#ifdef __APPLE__
-
-std::string compute_file_sha256(const std::string& file_path) {
-    FILE* f = std::fopen(file_path.c_str(), "rb");
-    if (!f)
-        return {};
-
-    CC_SHA256_CTX ctx;
-    CC_SHA256_Init(&ctx);
-
-    unsigned char buf[8192];
-    size_t n;
-    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) {
-        CC_SHA256_Update(&ctx, buf, static_cast<CC_LONG>(n));
-    }
-    std::fclose(f);
-
-    unsigned char hash[CC_SHA256_DIGEST_LENGTH];
-    CC_SHA256_Final(hash, &ctx);
-
-    char hex[CC_SHA256_DIGEST_LENGTH * 2 + 1];
-    for (int i = 0; i < CC_SHA256_DIGEST_LENGTH; ++i) {
-        std::snprintf(hex + i * 2, 3, "%02x", hash[i]);
-    }
-    return std::string(hex, CC_SHA256_DIGEST_LENGTH * 2);
-}
-
-#else
 
 // Minimal portable SHA-256 implementation (public domain)
 // Based on RFC 6234 / FIPS 180-4
@@ -192,7 +159,26 @@ static void sha256_final(Sha256Ctx& ctx, unsigned char hash[32]) {
     }
 }
 
+std::string to_hex(const unsigned char hash[32]) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string hex(64, '0');
+    for (int i = 0; i < 32; ++i) {
+        hex[i * 2] = kHex[hash[i] >> 4];
+        hex[i * 2 + 1] = kHex[hash[i] & 0xF];
+    }
+    return hex;
+}
+
 } // anonymous namespace
+
+std::string sha256_hex(std::string_view data) {
+    Sha256Ctx ctx;
+    sha256_init(ctx);
+    sha256_update(ctx, reinterpret_cast<const unsigned char*>(data.data()), data.size());
+    unsigned char hash[32];
+    sha256_final(ctx, hash);
+    return to_hex(hash);
+}
 
 std::string compute_file_sha256(const std::string& file_path) {
     FILE* f = std::fopen(file_path.c_str(), "rb");
@@ -211,14 +197,7 @@ std::string compute_file_sha256(const std::string& file_path) {
 
     unsigned char hash[32];
     sha256_final(ctx, hash);
-
-    char hex[65];
-    for (int i = 0; i < 32; ++i) {
-        std::snprintf(hex + i * 2, 3, "%02x", hash[i]);
-    }
-    return std::string(hex, 64);
+    return to_hex(hash);
 }
-
-#endif // !__APPLE__
 
 } // namespace helix

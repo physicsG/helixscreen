@@ -5,8 +5,7 @@
 <!-- Configures G10/G11 retraction parameters (retract length, speed, unretract extra, etc.) -->
 <!-- XML-First Design: All layout/styling here; C++ only provides subjects and callbacks -->
 <component>
-  <view name="retraction_settings_overlay"
-        extends="overlay_panel" title="Retraction Settings" title_tag="Retraction Settings" bg_color="#screen_bg">
+  <view name="retraction_settings_overlay" extends="overlay_panel" title="Retraction Settings" bg_color="#screen_bg">
     <!-- Content Area -->
     <lv_obj name="overlay_content"
             width="100%" flex_grow="1" style_pad_all="#space_lg" scrollable="true" flex_flow="column"
@@ -23,8 +22,8 @@
                 style_pad_gap="#space_sm">
           <icon src="arrow_up_right" size="sm" variant="secondary"/>
           <lv_obj height="content" style_pad_all="0" scrollable="false" flex_flow="column" style_pad_gap="#space_xxs">
-            <text_body text="Enable Retraction" translation_tag="Enable Retraction"/>
-            <text_small text="Use G10/G11 firmware retraction" translation_tag="Use G10/G11 firmware retraction"/>
+            <text_body text="Enable Retraction"/>
+            <text_small text="Use G10/G11 firmware retraction"/>
           </lv_obj>
         </lv_obj>
         <!-- Toggle Switch -->
@@ -45,8 +44,8 @@
                 height="content" style_pad_all="0" scrollable="false" flex_flow="row"
                 style_flex_main_place="space_between" style_flex_cross_place="center">
           <lv_obj height="content" style_pad_all="0" scrollable="false" flex_flow="column" style_pad_gap="#space_xxs">
-            <text_body text="Retract Length" translation_tag="Retract Length"/>
-            <text_small text="0.4-2mm direct drive, 4-6mm bowden" translation_tag="0.4-2mm direct drive, 4-6mm bowden"/>
+            <text_body text="Retract Length"/>
+            <text_small text="0.4-2mm direct drive, 4-6mm bowden"/>
           </lv_obj>
           <!-- Current value: tap to type an exact number -->
           <setting_value_field name="retract_length_field"
@@ -79,8 +78,8 @@
                 height="content" style_pad_all="0" scrollable="false" flex_flow="row"
                 style_flex_main_place="space_between" style_flex_cross_place="center">
           <lv_obj height="content" style_pad_all="0" scrollable="false" flex_flow="column" style_pad_gap="#space_xxs">
-            <text_body text="Retract Speed" translation_tag="Retract Speed"/>
-            <text_small text="Speed of retraction movement" translation_tag="Speed of retraction movement"/>
+            <text_body text="Retract Speed"/>
+            <text_small text="Speed of retraction movement"/>
           </lv_obj>
           <!-- Current value: tap to type an exact number -->
           <setting_value_field name="retract_speed_field"
@@ -113,8 +112,8 @@
                 height="content" style_pad_all="0" scrollable="false" flex_flow="row"
                 style_flex_main_place="space_between" style_flex_cross_place="center">
           <lv_obj height="content" style_pad_all="0" scrollable="false" flex_flow="column" style_pad_gap="#space_xxs">
-            <text_body text="Unretract Extra" translation_tag="Unretract Extra"/>
-            <text_small text="Extra prime to compensate ooze" translation_tag="Extra prime to compensate ooze"/>
+            <text_body text="Unretract Extra"/>
+            <text_small text="Extra prime to compensate ooze"/>
           </lv_obj>
           <!-- Current value: tap to type an exact number -->
           <setting_value_field name="unretract_extra_field"
@@ -147,8 +146,8 @@
                 height="content" style_pad_all="0" scrollable="false" flex_flow="row"
                 style_flex_main_place="space_between" style_flex_cross_place="center">
           <lv_obj height="content" style_pad_all="0" scrollable="false" flex_flow="column" style_pad_gap="#space_xxs">
-            <text_body text="Unretract Speed" translation_tag="Unretract Speed"/>
-            <text_small text="Speed of prime movement" translation_tag="Speed of prime movement"/>
+            <text_body text="Unretract Speed"/>
+            <text_small text="Speed of prime movement"/>
           </lv_obj>
           <!-- Current value: tap to type an exact number -->
           <setting_value_field name="unretract_speed_field"
@@ -175,8 +174,7 @@
               height="content" style_pad_all="0" scrollable="false" flex_flow="row" style_flex_cross_place="center"
               style_pad_gap="#space_sm">
         <icon src="info" size="xs" variant="secondary"/>
-        <text_small text="Changes apply immediately. Adjust during print for tuning."
-                    translation_tag="Changes apply immediately. Adjust during print for tuning."/>
+        <text_small text="Changes apply immediately. Adjust during print for tuning."/>
       </lv_obj>
     </lv_obj>
   </view>

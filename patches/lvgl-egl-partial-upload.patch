@@ -1,0 +1,374 @@
+diff --git a/src/drivers/display/drm/lv_linux_drm.h b/src/drivers/display/drm/lv_linux_drm.h
+--- a/src/drivers/display/drm/lv_linux_drm.h
++++ b/src/drivers/display/drm/lv_linux_drm.h
+@@ -114,6 +114,30 @@
+  * @param vsync  true to wait for each flip
+  */
+ void lv_linux_drm_egl_set_vsync(lv_display_t * disp, bool vsync);
++
++/**
++ * @brief Send the display texture only the areas LVGL flushed, instead of the whole frame
++ *
++ * The first frame, a frame into a new texture or at a new size, and the frame after
++ * lv_linux_drm_egl_request_full_upload() still upload the whole buffer. Sending a
++ * sub-rectangle needs GL_UNPACK_ROW_LENGTH (OpenGL ES 3, or GL_EXT_unpack_subimage on
++ * OpenGL ES 2); a context without it keeps uploading whole frames.
++ *
++ * @param disp    display created with lv_linux_drm_create() and set up by lv_linux_drm_set_file()
++ * @param enable  true to upload only the flushed areas
++ * @return        whether the display now uploads only the flushed areas
++ */
++bool lv_linux_drm_egl_set_partial_upload(lv_display_t * disp, bool enable);
++
++/**
++ * @brief Upload the whole buffer on the next frame
++ *
++ * For pixels that changed without being flushed to this driver: frames rendered while
++ * another flush callback stood in for it, or pixels rewritten on the way to it.
++ *
++ * @param disp    display created with lv_linux_drm_create()
++ */
++void lv_linux_drm_egl_request_full_upload(lv_display_t * disp);
+ #endif
+ 
+ /**
+diff --git a/src/drivers/display/drm/lv_linux_drm_egl_private.h b/src/drivers/display/drm/lv_linux_drm_egl_private.h
+--- a/src/drivers/display/drm/lv_linux_drm_egl_private.h
++++ b/src/drivers/display/drm/lv_linux_drm_egl_private.h
+@@ -24,6 +24,7 @@
+ #include "../../opengles/lv_opengles_egl.h"
+ #include "../../opengles/lv_opengles_egl_private.h"
+ #include "lv_linux_drm.h"
++#include "lv_linux_drm_egl_upload.h"
+ 
+ /*********************
+  *      DEFINES
+@@ -52,6 +53,7 @@
+     struct gbm_bo * gbm_bo_presented;
+ 
+     lv_linux_drm_select_mode_cb_t mode_select_cb;
++    lv_linux_drm_egl_upload_state_t upload;
+     int fd;
+     bool crtc_isset;
+ } lv_drm_ctx_t;
+diff --git a/src/drivers/display/drm/lv_linux_drm_egl.c b/src/drivers/display/drm/lv_linux_drm_egl.c
+--- a/src/drivers/display/drm/lv_linux_drm_egl.c
++++ b/src/drivers/display/drm/lv_linux_drm_egl.c
+@@ -66,6 +66,9 @@
+ static void drm_destroy_window(void * driver_data, void * native_window);
+ static size_t drm_egl_select_config_cb(void * driver_data, const lv_egl_config_t * configs, size_t config_count);
+ static inline void set_viewport(lv_display_t * display);
++#if !(LV_USE_DRAW_OPENGLES || LV_USE_DRAW_NANOVG)
++static bool sub_image_upload_supported(void);
++#endif
+ 
+ /**********************
+  *  STATIC VARIABLES
+@@ -166,6 +169,46 @@
+     lv_opengles_egl_set_vsync(ctx->egl_ctx, vsync);
+ }
+ 
++bool lv_linux_drm_egl_set_partial_upload(lv_display_t * disp, bool enable)
++{
++    if(!disp) {
++        LV_LOG_ERROR("Cannot set partial upload on a NULL display");
++        return false;
++    }
++    lv_drm_ctx_t * ctx = lv_display_get_driver_data(disp);
++    if(!ctx || !ctx->egl_ctx) {
++        LV_LOG_WARN("Display has no EGL context, partial upload left off");
++        return false;
++    }
++#if LV_USE_DRAW_OPENGLES || LV_USE_DRAW_NANOVG
++    /*The GPU draws straight into the texture, so there is no buffer to upload from*/
++    if(enable) {
++        LV_LOG_WARN("Partial upload needs software rendering, left off");
++    }
++    enable = false;
++#else
++    if(enable && !sub_image_upload_supported()) {
++        LV_LOG_WARN("GL_UNPACK_ROW_LENGTH is unsupported, partial upload left off");
++        enable = false;
++    }
++#endif
++    ctx->upload.partial = enable;
++    return enable;
++}
++
++void lv_linux_drm_egl_request_full_upload(lv_display_t * disp)
++{
++    if(!disp) {
++        LV_LOG_ERROR("Cannot request a full upload on a NULL display");
++        return;
++    }
++    lv_drm_ctx_t * ctx = lv_display_get_driver_data(disp);
++    if(!ctx) {
++        return;
++    }
++    ctx->upload.full_pending = true;
++}
++
+ /**********************
+  *   STATIC FUNCTIONS
+  **********************/
+@@ -192,6 +235,8 @@
+                 if(res != LV_RESULT_OK) {
+                     LV_LOG_ERROR("Failed to resize display");
+                 }
++                /*A reshaped texture holds no pixels yet*/
++                ctx->upload.full_pending = true;
+             }
+             break;
+         default:
+@@ -240,34 +285,74 @@
+ 
+ #else
+ 
++static bool sub_image_upload_supported(void)
++{
++    /*GL_UNPACK_ROW_LENGTH is core in OpenGL ES 3 and an extension in OpenGL ES 2*/
++    static const char es_prefix[] = "OpenGL ES ";
++    const size_t major_at = sizeof(es_prefix) - 1;
++    const char * version = (const char *)glGetString(GL_VERSION);
++    if(version && strncmp(version, es_prefix, major_at) == 0 && version[major_at] >= '3' && version[major_at] <= '9') {
++        return true;
++    }
++    const char * extensions = (const char *)glGetString(GL_EXTENSIONS);
++    return extensions && strstr(extensions, "GL_EXT_unpack_subimage") != NULL;
++}
++
+ static void flush_cb(lv_display_t * disp, const lv_area_t * area, uint8_t * px_map)
+ {
+     LV_UNUSED(px_map);
+-    LV_UNUSED(area);
+-    if(lv_display_flush_is_last(disp)) {
+-        lv_drm_ctx_t * ctx = lv_display_get_driver_data(disp);
+-        int32_t disp_width = lv_display_get_horizontal_resolution(disp);
+-        int32_t disp_height = lv_display_get_vertical_resolution(disp);
+-
+-        set_viewport(disp);
++    lv_drm_ctx_t * ctx = lv_display_get_driver_data(disp);
++    int32_t disp_width = lv_display_get_horizontal_resolution(disp);
++    int32_t disp_height = lv_display_get_vertical_resolution(disp);
++    bool last = lv_display_flush_is_last(disp);
++
++    bool in_place = lv_linux_drm_egl_upload_in_place(lv_display_get_render_mode(disp),
++                                                     lv_display_get_matrix_rotation(disp));
++    lv_area_t upload_area;
++    lv_linux_drm_egl_upload_t upload = lv_linux_drm_egl_upload_plan(&ctx->upload, ctx->texture.texture_id,
++                                                                     disp_width, disp_height, in_place, last,
++                                                                     area, &upload_area);
+ 
++    if(upload != LV_LINUX_DRM_EGL_UPLOAD_NONE) {
+         lv_color_format_t cf = lv_display_get_color_format(disp);
+-        uint32_t stride = lv_draw_buf_width_to_stride(lv_display_get_horizontal_resolution(disp), cf);
++        uint32_t px_size = lv_color_format_get_size(cf);
++        uint32_t stride = lv_draw_buf_width_to_stride(disp_width, cf);
+         GL_CALL(glBindTexture(GL_TEXTURE_2D, ctx->texture.texture_id));
+ 
+         GL_CALL(glPixelStorei(GL_UNPACK_ALIGNMENT, 1));
+-        GL_CALL(glPixelStorei(GL_UNPACK_ROW_LENGTH, stride / lv_color_format_get_size(cf)));
+-        /*Color depth: 16 (RGB565), 32 (ARGB8888)*/
++        GL_CALL(glPixelStorei(GL_UNPACK_ROW_LENGTH, stride / px_size));
++        if(upload == LV_LINUX_DRM_EGL_UPLOAD_FULL) {
++            /*Color depth: 16 (RGB565), 32 (ARGB8888)*/
+ #if LV_COLOR_DEPTH == 16
+-        GL_CALL(glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB565, disp_width, disp_height, 0, GL_RGB, GL_UNSIGNED_SHORT_5_6_5,
+-                             ctx->texture.fb1));
++            GL_CALL(glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB565, disp_width, disp_height, 0, GL_RGB, GL_UNSIGNED_SHORT_5_6_5,
++                                 ctx->texture.fb1));
+ #elif LV_COLOR_DEPTH == 32
+-        GL_CALL(glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, disp_width, disp_height, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+-                             ctx->texture.fb1));
++            GL_CALL(glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, disp_width, disp_height, 0, GL_RGBA, GL_UNSIGNED_BYTE,
++                                 ctx->texture.fb1));
+ #else
+ #error("Unsupported color format")
+ #endif
++        }
++        else {
++            /*GL_UNPACK_ROW_LENGTH steps each row by the buffer's stride, so the sub-image
++             *starts at the area's first pixel inside the whole buffer*/
++            const uint8_t * first_px = ctx->texture.fb1 +
++                                       lv_linux_drm_egl_upload_first_byte(&upload_area, stride, px_size);
++            int32_t upload_w = lv_area_get_width(&upload_area);
++            int32_t upload_h = lv_area_get_height(&upload_area);
++#if LV_COLOR_DEPTH == 16
++            GL_CALL(glTexSubImage2D(GL_TEXTURE_2D, 0, upload_area.x1, upload_area.y1, upload_w, upload_h, GL_RGB,
++                                    GL_UNSIGNED_SHORT_5_6_5, first_px));
++#elif LV_COLOR_DEPTH == 32
++            GL_CALL(glTexSubImage2D(GL_TEXTURE_2D, 0, upload_area.x1, upload_area.y1, upload_w, upload_h, GL_RGBA,
++                                    GL_UNSIGNED_BYTE, first_px));
++#endif
++        }
++    }
++    lv_linux_drm_egl_upload_record(&ctx->upload, upload, ctx->texture.texture_id, disp_width, disp_height);
+ 
++    if(last) {
++        set_viewport(disp);
+         lv_opengles_render_params_t params = {
+             .h_flip = false,
+             .v_flip = false,
+diff --git a/src/drivers/display/drm/lv_linux_drm_egl_upload.h b/src/drivers/display/drm/lv_linux_drm_egl_upload.h
+new file mode 100644
+--- /dev/null
++++ b/src/drivers/display/drm/lv_linux_drm_egl_upload.h
+@@ -0,0 +1,158 @@
++/**
++ * @file lv_linux_drm_egl_upload.h
++ *
++ * Which pixels the EGL DRM flush sends to the display texture. Holds no GL or DRM
++ * state, so it builds on every target and can be tested without a GPU.
++ */
++
++#ifndef LV_LINUX_DRM_EGL_UPLOAD_H
++#define LV_LINUX_DRM_EGL_UPLOAD_H
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/*********************
++ *      INCLUDES
++ *********************/
++
++#include "../../../misc/lv_area.h"
++#include "../../../misc/lv_math.h"
++#include "../../../display/lv_display.h"
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++/**********************
++ *      TYPEDEFS
++ **********************/
++
++typedef enum {
++    LV_LINUX_DRM_EGL_UPLOAD_NONE,   /**< send nothing for this flush */
++    LV_LINUX_DRM_EGL_UPLOAD_AREA,   /**< send the flushed area, clipped to the texture */
++    LV_LINUX_DRM_EGL_UPLOAD_FULL,   /**< send the whole buffer */
++} lv_linux_drm_egl_upload_t;
++
++typedef struct {
++    bool partial;               /**< flushed areas may be sent on their own */
++    bool full_pending;          /**< a full upload was requested and has not happened yet */
++    unsigned int texture_id;    /**< texture the last full upload filled; 0, which no GL texture uses, before the first */
++    int32_t width;              /**< size of that upload */
++    int32_t height;
++} lv_linux_drm_egl_upload_state_t;
++
++/**********************
++ * GLOBAL PROTOTYPES
++ **********************/
++
++/**
++ * Whether the draw buffer holds every flushed area at its display coordinates, which is
++ * what sending one area on its own needs. Direct render mode draws the whole frame at the
++ * display's rotated resolution, the size the texture is reshaped to, and the presentation
++ * pass applies the rotation. Matrix rotation draws at the original resolution instead.
++ * @param render_mode      the display's render mode
++ * @param matrix_rotation  whether LVGL rotates the drawing with its transform matrix
++ * @return                 true when a flushed area can be sent on its own
++ */
++static inline bool lv_linux_drm_egl_upload_in_place(lv_display_render_mode_t render_mode,
++                                                    bool matrix_rotation)
++{
++    return render_mode == LV_DISPLAY_RENDER_MODE_DIRECT && !matrix_rotation;
++}
++
++/**
++ * Decide what one flush sends to the display texture.
++ *
++ * A texture holds only what was uploaded into it, so sending one area is correct only
++ * while the texture holds the rest of the frame: the last full upload filled this same
++ * texture at this same size, no full upload was requested since, and the buffer holds the
++ * whole frame at display coordinates. Otherwise the whole buffer is sent once, on the
++ * frame's last flush, when every area of the frame has been rendered into it.
++ *
++ * @param state       upload bookkeeping for the display
++ * @param texture_id  texture the frame is presented from
++ * @param width       display width in pixels
++ * @param height      display height in pixels
++ * @param in_place    lv_linux_drm_egl_upload_in_place() for the display
++ * @param last        this is the frame's last flush
++ * @param area        the flushed area
++ * @param clipped     receives `area` clipped to the texture when the result is AREA
++ * @return            what to send
++ */
++static inline lv_linux_drm_egl_upload_t lv_linux_drm_egl_upload_plan(const lv_linux_drm_egl_upload_state_t * state,
++                                                                     unsigned int texture_id, int32_t width,
++                                                                     int32_t height, bool in_place, bool last,
++                                                                     const lv_area_t * area, lv_area_t * clipped)
++{
++    bool texture_holds_frame = state->partial && in_place && !state->full_pending &&
++                               state->texture_id == texture_id && state->width == width &&
++                               state->height == height;
++    if(!texture_holds_frame) {
++        return last ? LV_LINUX_DRM_EGL_UPLOAD_FULL : LV_LINUX_DRM_EGL_UPLOAD_NONE;
++    }
++
++    clipped->x1 = LV_MAX(area->x1, 0);
++    clipped->y1 = LV_MAX(area->y1, 0);
++    clipped->x2 = LV_MIN(area->x2, width - 1);
++    clipped->y2 = LV_MIN(area->y2, height - 1);
++    if(clipped->x1 > clipped->x2 || clipped->y1 > clipped->y2) {
++        return LV_LINUX_DRM_EGL_UPLOAD_NONE;
++    }
++    return LV_LINUX_DRM_EGL_UPLOAD_AREA;
++}
++
++/**
++ * Byte offset of an area's first pixel inside the whole-frame buffer. Rows step by the
++ * buffer's stride, which can be wider than the width times the pixel size; columns step
++ * by the pixel size.
++ * @param area     the area, at display coordinates
++ * @param stride   bytes per buffer row
++ * @param px_size  bytes per pixel
++ * @return         offset of the area's top-left pixel
++ */
++static inline size_t lv_linux_drm_egl_upload_first_byte(const lv_area_t * area, uint32_t stride, uint32_t px_size)
++{
++    return (size_t)area->y1 * stride + (size_t)area->x1 * px_size;
++}
++
++/**
++ * Record that the whole buffer was sent into `texture_id` at `width` x `height`.
++ * @param state       upload bookkeeping for the display
++ * @param texture_id  texture that was filled
++ * @param width       width of the upload
++ * @param height      height of the upload
++ */
++static inline void lv_linux_drm_egl_upload_filled(lv_linux_drm_egl_upload_state_t * state, unsigned int texture_id,
++                                                  int32_t width, int32_t height)
++{
++    state->texture_id = texture_id;
++    state->width = width;
++    state->height = height;
++    state->full_pending = false;
++}
++
++/**
++ * Record what one flush sent. Only a whole-buffer upload fills the texture: a sub-area
++ * upload adds to a texture that already held the rest of the frame, and a flush that sent
++ * nothing changed nothing.
++ * @param state       upload bookkeeping for the display
++ * @param sent        what lv_linux_drm_egl_upload_plan() decided and the flush sent
++ * @param texture_id  texture the flush sent to
++ * @param width       display width in pixels
++ * @param height      display height in pixels
++ */
++static inline void lv_linux_drm_egl_upload_record(lv_linux_drm_egl_upload_state_t * state,
++                                                  lv_linux_drm_egl_upload_t sent, unsigned int texture_id,
++                                                  int32_t width, int32_t height)
++{
++    if(sent == LV_LINUX_DRM_EGL_UPLOAD_FULL) {
++        lv_linux_drm_egl_upload_filled(state, texture_id, width, height);
++    }
++}
++
++#ifdef __cplusplus
++} /*extern "C"*/
++#endif
++
++#endif /*LV_LINUX_DRM_EGL_UPLOAD_H*/

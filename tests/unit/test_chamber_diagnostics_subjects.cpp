@@ -9,6 +9,7 @@
 #include "../test_helpers/printer_state_test_access.h"
 #include "../ui_test_utils.h"
 #include "app_globals.h"
+#include "chamber_heater_assignment.h"
 #include "chamber_heater_backend.h"
 #include "printer_capabilities_state.h"
 #include "printer_discovery.h"
@@ -24,6 +25,7 @@
 #include "../catch_amalgamated.hpp"
 #include "hv/json.hpp"
 
+using helix::Capability;
 using helix::PrinterCapabilitiesState;
 using helix::PrinterTemperatureState;
 
@@ -129,6 +131,256 @@ TEST_CASE("absent diagnostics objects in a delta frame keep last values", "[cham
     CHECK(lv_subject_get_int(ts.get_chamber_filter_fan_on_subject()) == 1);
 }
 
+// A delta frame carries only changed fields, so an absent field is not a
+// report of absence. The frame after a fault latch mentions only ptc_temp
+// (the one field that moves every poll) and must leave the latched fault,
+// its reason, and the reported fan speed exactly where they were.
+TEST_CASE("a ptc_temp-only delta keeps the latched fault, reason, and fan percent",
+          "[chamber][subjects][1290]") {
+    LVGLTestFixture fixture;
+
+    PrinterTemperatureState ts;
+    ts.init_subjects(false);
+    ts.set_chamber_diagnostics_source("dragonbreath", "dragonbreath",
+                                      "output_pin dragonbreath_filter");
+
+    ts.update_from_status(nlohmann::json::parse(R"({
+      "dragonbreath": {"fault": true, "inhibited": true, "fault_reason": "ptc_overtemp",
+        "ptc_temp": 80.0, "fan_percent": 100, "fan_reason": "thermal_purge",
+        "mode": "off", "source": "device", "lease_owned": false}})"));
+    REQUIRE(lv_subject_get_int(ts.get_chamber_heater_fault_subject()) == 1);
+    REQUIRE(lv_subject_get_int(ts.get_chamber_heater_inhibited_subject()) == 1);
+    REQUIRE(std::string(lv_subject_get_string(ts.get_chamber_heater_fault_reason_text_subject())) ==
+            std::string(lv_tr("Heater over-temperature")));
+    REQUIRE(std::string(lv_subject_get_string(ts.get_chamber_filter_fan_percent_text_subject())) ==
+            "100%");
+    REQUIRE(std::string(lv_subject_get_string(ts.get_chamber_heater_element_temp_text_subject())) ==
+            "80.0°C");
+
+    ts.update_from_status({{"dragonbreath", {{"ptc_temp", 81.0}}}});
+
+    CHECK(lv_subject_get_int(ts.get_chamber_heater_fault_subject()) == 1);
+    CHECK(lv_subject_get_int(ts.get_chamber_heater_inhibited_subject()) == 1);
+    CHECK(std::string(lv_subject_get_string(ts.get_chamber_heater_fault_reason_text_subject())) ==
+          std::string(lv_tr("Heater over-temperature")));
+    CHECK(std::string(lv_subject_get_string(ts.get_chamber_filter_fan_percent_text_subject())) ==
+          "100%");
+    CHECK(lv_subject_get_int(ts.get_chamber_filter_fan_device_driven_subject()) == 1);
+    // The delta was processed: the one field it carried did land.
+    CHECK(std::string(lv_subject_get_string(ts.get_chamber_heater_element_temp_text_subject())) ==
+          "81.0°C");
+}
+
+// A delta that toggles only the fan carries no ptc_temp, so recognition of a
+// dragonbreath frame cannot hinge on that one field: the frame must parse and
+// the reported speed must land.
+TEST_CASE("a fan-percent-only delta updates the reported speed", "[chamber][subjects][1290]") {
+    LVGLTestFixture fixture;
+
+    PrinterTemperatureState ts;
+    ts.init_subjects(false);
+    ts.set_chamber_diagnostics_source("dragonbreath", "dragonbreath",
+                                      "output_pin dragonbreath_filter");
+
+    ts.update_from_status(nlohmann::json::parse(R"({
+      "dragonbreath": {"fault": false, "fault_reason": null, "ptc_temp": 40.0,
+        "fan_percent": 0, "fan_reason": "off", "mode": "off", "source": "klipper",
+        "lease_owned": false}})"));
+    REQUIRE(std::string(lv_subject_get_string(ts.get_chamber_filter_fan_percent_text_subject())) ==
+            "0%");
+    REQUIRE(lv_subject_get_int(ts.get_chamber_filter_fan_on_subject()) == 0);
+
+    ts.update_from_status({{"dragonbreath", {{"fan_percent", 100}}}});
+    CHECK(std::string(lv_subject_get_string(ts.get_chamber_filter_fan_percent_text_subject())) ==
+          "100%");
+    CHECK(lv_subject_get_int(ts.get_chamber_filter_fan_on_subject()) == 1);
+}
+
+// Absence and false are different reports: a frame that carries fault: false
+// is the device clearing the latch, and must clear it.
+TEST_CASE("an explicit fault false delta clears a latched fault", "[chamber][subjects][1290]") {
+    LVGLTestFixture fixture;
+
+    PrinterTemperatureState ts;
+    ts.init_subjects(false);
+    ts.set_chamber_diagnostics_source("dragonbreath", "dragonbreath",
+                                      "output_pin dragonbreath_filter");
+
+    ts.update_from_status(faulted_diagnostics_status());
+    REQUIRE(lv_subject_get_int(ts.get_chamber_heater_fault_subject()) == 1);
+
+    ts.update_from_status({{"dragonbreath", {{"fault", false}, {"ptc_temp", 24.9}}}});
+    CHECK(lv_subject_get_int(ts.get_chamber_heater_fault_subject()) == 0);
+}
+
+// fault_reason: null in a frame is the device ANSWERING "no reason", not the
+// field being absent: it engages as an empty reason and clears the text.
+TEST_CASE("a fault_reason null delta clears the reason text", "[chamber][subjects][1290]") {
+    LVGLTestFixture fixture;
+
+    PrinterTemperatureState ts;
+    ts.init_subjects(false);
+    ts.set_chamber_diagnostics_source("dragonbreath", "dragonbreath",
+                                      "output_pin dragonbreath_filter");
+
+    ts.update_from_status(faulted_diagnostics_status());
+    REQUIRE(lv_subject_get_int(ts.get_chamber_heater_fault_subject()) == 1);
+    REQUIRE(std::string(lv_subject_get_string(ts.get_chamber_heater_fault_reason_text_subject())) ==
+            std::string(lv_tr("Heater over-temperature")));
+
+    ts.update_from_status(
+        {{"dragonbreath", {{"fault", true}, {"fault_reason", nullptr}, {"ptc_temp", 106.3}}}});
+    CHECK(lv_subject_get_int(ts.get_chamber_heater_fault_subject()) == 1);
+    CHECK(std::string(lv_subject_get_string(ts.get_chamber_heater_fault_reason_text_subject()))
+              .empty());
+}
+
+// The pin is a REQUEST; the device also runs the filter fan on its own while
+// heating and while purging residual element heat (measured on the rig,
+// issue #1290). The running-state subjects must follow the reported fan
+// speed, not the pin, or the card shows "100%" beside a
+// switch that is off.
+TEST_CASE("device-driven filter fan keeps the switch on the reported speed",
+          "[chamber][subjects]") {
+    LVGLTestFixture fixture;
+
+    PrinterTemperatureState ts;
+    ts.init_subjects(false);
+    ts.set_chamber_diagnostics_source("dragonbreath", "dragonbreath",
+                                      "output_pin dragonbreath_filter");
+
+    // Device heating at target with our pin still 0: the fan runs on the
+    // device's own initiative.
+    ts.update_from_status(nlohmann::json::parse(R"({
+      "dragonbreath": {"fault": false, "inhibited": false, "ptc_temp": 41.0,
+        "fan_percent": 100, "fan_reason": "heater",
+        "mode": "power_on", "source": "klipper", "lease_owned": true},
+      "output_pin dragonbreath_filter": {"value": 0.0}})"));
+
+    CHECK(std::string(lv_subject_get_string(ts.get_chamber_filter_fan_percent_text_subject())) ==
+          "100%");
+    CHECK(lv_subject_get_int(ts.get_chamber_filter_fan_on_subject()) == 1);
+    // The pin stays our request; the device-driven flag is what the card's
+    // Device badge and toggle-disable bind.
+    CHECK(lv_subject_get_int(ts.get_chamber_filter_fan_requested_subject()) == 0);
+    CHECK(lv_subject_get_int(ts.get_chamber_filter_fan_device_driven_subject()) == 1);
+
+    // The device reporting the fan stopped is what flips the running pair.
+    ts.update_from_status(nlohmann::json::parse(R"({
+      "dragonbreath": {"fault": false, "inhibited": false, "ptc_temp": 39.4,
+        "fan_percent": 0, "fan_reason": "off",
+        "mode": "off", "source": "klipper", "lease_owned": false},
+      "output_pin dragonbreath_filter": {"value": 0.0}})"));
+    CHECK(lv_subject_get_int(ts.get_chamber_filter_fan_on_subject()) == 0);
+    CHECK(lv_subject_get_int(ts.get_chamber_filter_fan_device_driven_subject()) == 0);
+}
+
+// Comms health: the appliance reports its own radio link. An engaged false is
+// the device saying it is unreachable — that drives chamber_heater_offline.
+// Unknown (absent key, or a backend with no link report at all) is NOT
+// offline.
+TEST_CASE("connected reports drive chamber_heater_offline", "[chamber][subjects][1290]") {
+    LVGLTestFixture fixture;
+
+    PrinterTemperatureState ts;
+    ts.init_subjects(false);
+    ts.set_chamber_diagnostics_source("dragonbreath", "dragonbreath",
+                                      "output_pin dragonbreath_filter");
+    REQUIRE(lv_subject_get_int(ts.get_chamber_heater_offline_subject()) == 0);
+
+    // One report is a missed poll, not an outage: the run has to build.
+    const nlohmann::json down{
+        {"dragonbreath", {{"connected", false}, {"protocol_error", nullptr}}}};
+    for (int i = 0; i < 3; ++i) {
+        ts.update_from_status(down);
+        CHECK(lv_subject_get_int(ts.get_chamber_heater_offline_subject()) == 0);
+    }
+    ts.update_from_status(down);
+    CHECK(lv_subject_get_int(ts.get_chamber_heater_offline_subject()) == 1);
+    // protocol_error: null is inert — no UI subject moves on it.
+    CHECK(lv_subject_get_int(ts.get_chamber_heater_fault_subject()) == 0);
+    CHECK(std::string(lv_subject_get_string(ts.get_chamber_heater_fault_reason_text_subject()))
+              .empty());
+
+    ts.update_from_status({{"dragonbreath", {{"connected", true}, {"ptc_temp", 24.9}}}});
+    CHECK(lv_subject_get_int(ts.get_chamber_heater_offline_subject()) == 0);
+}
+
+// Delta rule applied to the link field: after an offline report, a frame that
+// does not mention connected carries no news about it, so the heater stays
+// offline — while the field the frame DOES carry (ptc_temp) lands, proving
+// the frame was parsed rather than dropped.
+TEST_CASE("a delta without connected keeps the offline state", "[chamber][subjects][1290]") {
+    LVGLTestFixture fixture;
+
+    PrinterTemperatureState ts;
+    ts.init_subjects(false);
+    ts.set_chamber_diagnostics_source("dragonbreath", "dragonbreath",
+                                      "output_pin dragonbreath_filter");
+
+    const nlohmann::json down =
+        nlohmann::json::parse(R"({"dragonbreath": {"fault": false, "fault_reason": null,
+      "ptc_temp": 40.0, "fan_percent": 0, "fan_reason": "off", "connected": false}})");
+    for (int i = 0; i < 4; ++i) {
+        ts.update_from_status(down);
+    }
+    REQUIRE(lv_subject_get_int(ts.get_chamber_heater_offline_subject()) == 1);
+    REQUIRE(std::string(lv_subject_get_string(ts.get_chamber_heater_element_temp_text_subject())) ==
+            "40.0°C");
+
+    ts.update_from_status({{"dragonbreath", {{"ptc_temp", 41.0}}}});
+
+    CHECK(lv_subject_get_int(ts.get_chamber_heater_offline_subject()) == 1);
+    CHECK(std::string(lv_subject_get_string(ts.get_chamber_heater_element_temp_text_subject())) ==
+          "41.0°C");
+}
+
+// A backend with no link report (a plain heater_generic chamber) must leave
+// the offline subject at 0 forever, even when some other object in the frame
+// carries connected: false — unknown is not offline.
+TEST_CASE("a generic chamber heater never reports offline", "[chamber][subjects][1290]") {
+    LVGLTestFixture fixture;
+
+    PrinterTemperatureState ts;
+    ts.init_subjects(false);
+    ts.set_chamber_heater_name("heater_generic chamber");
+    ts.set_chamber_diagnostics_source("generic", "", "");
+
+    REQUIRE(lv_subject_get_int(ts.get_chamber_heater_offline_subject()) == 0);
+
+    ts.update_from_status({{"heater_generic chamber", {{"temperature", 24.2}, {"target", 0.0}}},
+                           {"dragonbreath", {{"connected", false}}}});
+    // The frame was processed — the heater branch landed its temperature —
+    // yet no link report was read off the stray appliance-shaped object.
+    CHECK(lv_subject_get_int(ts.get_chamber_temp_subject()) == 242);
+    CHECK(lv_subject_get_int(ts.get_chamber_heater_offline_subject()) == 0);
+    CHECK(lv_subject_get_int(ts.get_chamber_heater_fault_subject()) == 0);
+}
+
+// The vendor protocol_error string dies at the subject border: the frame is
+// parsed (its other fields land) and the error reaches no UI subject.
+TEST_CASE("protocol_error never reaches a UI subject", "[chamber][subjects][1290]") {
+    LVGLTestFixture fixture;
+
+    PrinterTemperatureState ts;
+    ts.init_subjects(false);
+    ts.set_chamber_diagnostics_source("dragonbreath", "dragonbreath",
+                                      "output_pin dragonbreath_filter");
+
+    ts.update_from_status({{"dragonbreath",
+                            {{"protocol_error", "frame_crc"},
+                             {"connected", true},
+                             {"ptc_temp", 24.9},
+                             {"fan_percent", 0}}}});
+
+    CHECK(lv_subject_get_int(ts.get_chamber_heater_offline_subject()) == 0);
+    CHECK(lv_subject_get_int(ts.get_chamber_heater_fault_subject()) == 0);
+    CHECK(std::string(lv_subject_get_string(ts.get_chamber_heater_fault_reason_text_subject()))
+              .empty());
+    CHECK(std::string(lv_subject_get_string(ts.get_chamber_heater_element_temp_text_subject())) ==
+          "24.9°C");
+}
+
 TEST_CASE("filter fan pin maps output_pin value to on/off", "[chamber][subjects]") {
     LVGLTestFixture fixture;
 
@@ -139,11 +391,17 @@ TEST_CASE("filter fan pin maps output_pin value to on/off", "[chamber][subjects]
 
     // Unknown until the first pin frame arrives.
     REQUIRE(lv_subject_get_int(ts.get_chamber_filter_fan_on_subject()) == -1);
+    REQUIRE(lv_subject_get_int(ts.get_chamber_filter_fan_requested_subject()) == -1);
 
+    // No diagnostics frames here: a backend with a pin but no reported speed
+    // drives the running state from the pin.
     ts.update_from_status({{"output_pin dragonbreath_filter", {{"value", 0.0}}}});
+    CHECK(lv_subject_get_int(ts.get_chamber_filter_fan_requested_subject()) == 0);
     CHECK(lv_subject_get_int(ts.get_chamber_filter_fan_on_subject()) == 0);
+    CHECK(lv_subject_get_int(ts.get_chamber_filter_fan_device_driven_subject()) == 0);
 
     ts.update_from_status({{"output_pin dragonbreath_filter", {{"value", 1.0}}}});
+    CHECK(lv_subject_get_int(ts.get_chamber_filter_fan_requested_subject()) == 1);
     CHECK(lv_subject_get_int(ts.get_chamber_filter_fan_on_subject()) == 1);
 }
 
@@ -170,9 +428,10 @@ TEST_CASE("chamber diagnostics subjects are XML-registered", "[chamber][xml][str
     ts.init_subjects(true); // register_xml=true: full production path
 
     for (const char* name :
-         {"chamber_heater_fault", "chamber_heater_inhibited", "chamber_heater_fault_reason_text",
-          "chamber_heater_element_temp_text", "chamber_filter_fan_percent_text",
-          "chamber_filter_fan_on", "chamber_filter_fan_on_text", "chamber_filter_fan_icon"}) {
+         {"chamber_heater_fault", "chamber_heater_inhibited", "chamber_heater_offline",
+          "chamber_heater_fault_reason_text", "chamber_heater_element_temp_text",
+          "chamber_filter_fan_percent_text", "chamber_filter_fan_on",
+          "chamber_filter_fan_requested", "chamber_filter_fan_device_driven"}) {
         CAPTURE(name);
         REQUIRE(lv_xml_get_subject(nullptr, name) != nullptr);
     }
@@ -182,6 +441,7 @@ TEST_CASE("chamber diagnostics subjects are XML-registered", "[chamber][xml][str
     caps.init_subjects(true);
     REQUIRE(lv_xml_get_subject(nullptr, "printer_has_chamber_heater_diagnostics") != nullptr);
     REQUIRE(lv_xml_get_subject(nullptr, "printer_has_chamber_filter_fan") != nullptr);
+    REQUIRE(lv_xml_get_subject(nullptr, "printer_has_chamber_element_temp") != nullptr);
     caps.deinit_subjects();
 }
 
@@ -191,18 +451,23 @@ TEST_CASE("chamber diagnostics capability setters round-trip", "[chamber][capabi
     PrinterCapabilitiesState caps;
     caps.init_subjects(false);
 
-    REQUIRE(lv_subject_get_int(caps.get_printer_has_chamber_heater_diagnostics_subject()) == 0);
-    REQUIRE(lv_subject_get_int(caps.get_printer_has_chamber_filter_fan_subject()) == 0);
+    REQUIRE(lv_subject_get_int(caps.subject(Capability::HasChamberHeaterDiagnostics)) == 0);
+    REQUIRE(lv_subject_get_int(caps.subject(Capability::HasChamberFilterFan)) == 0);
+    REQUIRE(lv_subject_get_int(caps.subject(Capability::HasChamberElementTemp)) == 0);
 
     caps.set_has_chamber_heater_diagnostics(true);
     caps.set_has_chamber_filter_fan(true);
-    CHECK(lv_subject_get_int(caps.get_printer_has_chamber_heater_diagnostics_subject()) == 1);
-    CHECK(lv_subject_get_int(caps.get_printer_has_chamber_filter_fan_subject()) == 1);
+    caps.set_has_chamber_element_temp(true);
+    CHECK(lv_subject_get_int(caps.subject(Capability::HasChamberHeaterDiagnostics)) == 1);
+    CHECK(lv_subject_get_int(caps.subject(Capability::HasChamberFilterFan)) == 1);
+    CHECK(lv_subject_get_int(caps.subject(Capability::HasChamberElementTemp)) == 1);
 
     caps.set_has_chamber_heater_diagnostics(false);
     caps.set_has_chamber_filter_fan(false);
-    CHECK(lv_subject_get_int(caps.get_printer_has_chamber_heater_diagnostics_subject()) == 0);
-    CHECK(lv_subject_get_int(caps.get_printer_has_chamber_filter_fan_subject()) == 0);
+    caps.set_has_chamber_element_temp(false);
+    CHECK(lv_subject_get_int(caps.subject(Capability::HasChamberHeaterDiagnostics)) == 0);
+    CHECK(lv_subject_get_int(caps.subject(Capability::HasChamberFilterFan)) == 0);
+    CHECK(lv_subject_get_int(caps.subject(Capability::HasChamberElementTemp)) == 0);
 }
 
 TEST_CASE("chamber required_status_objects lists only non-empty surfaces", "[chamber][subjects]") {
@@ -236,7 +501,8 @@ TEST_CASE("set_hardware wires diagnostics only when the resolved heater is the d
     auto& caps = helix::PrinterStateTestAccess::get_capabilities_state(state);
 
     helix::PrinterDiscovery hw;
-    nlohmann::json objects = {"heater_generic dragonbreath", "extruder", "heater_bed"};
+    nlohmann::json objects = {"heater_generic dragonbreath", "heater_generic ptc_heater",
+                              "extruder", "heater_bed"};
     hw.parse_objects(objects);
     REQUIRE(hw.chamber_heater_name() == "heater_generic dragonbreath");
     REQUIRE(hw.chamber_heater_backend_id() == "dragonbreath");
@@ -252,8 +518,9 @@ TEST_CASE("set_hardware wires diagnostics only when the resolved heater is the d
         state.set_hardware(hw);
 
         CHECK(ts.chamber_diagnostics_object() == "dragonbreath");
-        CHECK(lv_subject_get_int(caps.get_printer_has_chamber_heater_diagnostics_subject()) == 1);
-        CHECK(lv_subject_get_int(caps.get_printer_has_chamber_filter_fan_subject()) == 1);
+        CHECK(lv_subject_get_int(caps.subject(Capability::HasChamberHeaterDiagnostics)) == 1);
+        CHECK(lv_subject_get_int(caps.subject(Capability::HasChamberFilterFan)) == 1);
+        CHECK(lv_subject_get_int(caps.subject(Capability::HasChamberElementTemp)) == 1);
 
         // End-to-end: a diagnostics frame through the full status path lands.
         state.update_from_status(faulted_diagnostics_status());
@@ -263,13 +530,13 @@ TEST_CASE("set_hardware wires diagnostics only when the resolved heater is the d
     }
 
     SECTION("manual override to a different heater detaches diagnostics") {
-        settings.set_chamber_heater_assignment("heater_generic chamber");
+        settings.set_chamber_heater_assignment("heater_generic ptc_heater");
         state.set_hardware(hw);
 
-        CHECK(ts.chamber_heater_name() == "heater_generic chamber");
+        CHECK(ts.chamber_heater_name() == "heater_generic ptc_heater");
         CHECK(ts.chamber_diagnostics_object().empty());
-        CHECK(lv_subject_get_int(caps.get_printer_has_chamber_heater_diagnostics_subject()) == 0);
-        CHECK(lv_subject_get_int(caps.get_printer_has_chamber_filter_fan_subject()) == 0);
+        CHECK(lv_subject_get_int(caps.subject(Capability::HasChamberHeaterDiagnostics)) == 0);
+        CHECK(lv_subject_get_int(caps.subject(Capability::HasChamberFilterFan)) == 0);
 
         // The frame is ignored — subjects keep their defaults.
         state.update_from_status(faulted_diagnostics_status());
@@ -285,8 +552,8 @@ TEST_CASE("set_hardware wires diagnostics only when the resolved heater is the d
 
         CHECK(ts.chamber_heater_name().empty());
         CHECK(ts.chamber_diagnostics_object().empty());
-        CHECK(lv_subject_get_int(caps.get_printer_has_chamber_heater_diagnostics_subject()) == 0);
-        CHECK(lv_subject_get_int(caps.get_printer_has_chamber_filter_fan_subject()) == 0);
+        CHECK(lv_subject_get_int(caps.subject(Capability::HasChamberHeaterDiagnostics)) == 0);
+        CHECK(lv_subject_get_int(caps.subject(Capability::HasChamberFilterFan)) == 0);
 
         state.update_from_status(faulted_diagnostics_status());
         CHECK(lv_subject_get_int(ts.get_chamber_heater_fault_subject()) == 0);
@@ -294,4 +561,265 @@ TEST_CASE("set_hardware wires diagnostics only when the resolved heater is the d
     }
 
     restore_settings();
+}
+
+// The stock Panda Breath binding (issue #1290) publishes link state and which
+// control loop holds the heater, and nothing else the card draws: no fault, no
+// filtration speed, no element temperature. Discovery must wire the diagnostics
+// object while leaving both readout capabilities off, or the card renders two
+// rows that can only ever say "--".
+TEST_CASE("set_hardware wires the stock panda_breath surfaces and no others",
+          "[chamber][subjects][state][hardware][1290]") {
+    lv_init_safe();
+    helix::PrinterState& state = get_printer_state();
+    helix::PrinterStateTestAccess::reset(state);
+    state.init_subjects(false);
+
+    auto& settings = helix::SettingsManager::instance();
+    settings.init_subjects();
+    settings.set_chamber_sensor_assignment("auto");
+    settings.set_chamber_heater_assignment("auto");
+
+    auto& ts = helix::PrinterStateTestAccess::get_temperature_state(state);
+    auto& caps = helix::PrinterStateTestAccess::get_capabilities_state(state);
+
+    helix::PrinterDiscovery hw;
+    nlohmann::json objects = {"heater_generic panda_breath", "panda_breath", "extruder",
+                              "heater_bed"};
+    hw.parse_objects(objects);
+    REQUIRE(hw.chamber_heater_name() == "heater_generic panda_breath");
+    REQUIRE(hw.chamber_heater_backend_id() == "panda_breath");
+    REQUIRE(hw.chamber_diagnostics_object() == "panda_breath");
+    CHECK(hw.chamber_filter_fan_pin().empty());
+
+    state.set_hardware(hw);
+    CHECK(lv_subject_get_int(caps.subject(Capability::HasChamberHeaterDiagnostics)) == 1);
+    CHECK(lv_subject_get_int(caps.subject(Capability::HasChamberFilterFan)) == 0);
+    CHECK(lv_subject_get_int(caps.subject(Capability::HasChamberElementTemp)) == 0);
+
+    // The appliance holding its own auto target while our target reads 0 — the
+    // state the rig sits in at rest.
+    state.update_from_status(nlohmann::json::parse(R"({
+      "panda_breath": {"temperature": 23.0, "target": 0.0, "connected": true,
+                       "work_mode": 1, "work_on": true, "device_target": 60.0,
+                       "auto_enabled": true}})"));
+    CHECK(lv_subject_get_int(ts.get_chamber_heater_externally_controlled_subject()) == 1);
+    CHECK(lv_subject_get_int(ts.get_chamber_heater_offline_subject()) == 0);
+    CHECK(lv_subject_get_int(ts.get_chamber_heater_fault_subject()) == 0);
+    CHECK(std::string(lv_subject_get_string(ts.get_chamber_heater_element_temp_text_subject())) ==
+          "--");
+
+    // The stock schema's own link field reaches the shared offline debounce
+    // (whose run length is pinned on the other appliance source).
+    const nlohmann::json down{{"panda_breath", {{"connected", false}}}};
+    for (int i = 0; i < 3; ++i) {
+        state.update_from_status(down);
+        CHECK(lv_subject_get_int(ts.get_chamber_heater_offline_subject()) == 0);
+    }
+    state.update_from_status(down);
+    CHECK(lv_subject_get_int(ts.get_chamber_heater_offline_subject()) == 1);
+
+    settings.set_chamber_heater_assignment("auto");
+    settings.set_chamber_sensor_assignment("auto");
+}
+
+// externally_controlled is computed from mode + source + lease_owned, so it is
+// an answer only when a frame carries all three. Its surface is informational:
+// another controller driving the heater is not a fault.
+TEST_CASE("externally-controlled reaches its subject only on a complete trio",
+          "[chamber][subjects][1290]") {
+    LVGLTestFixture fixture;
+
+    PrinterTemperatureState ts;
+    ts.init_subjects(false);
+    ts.set_chamber_diagnostics_source("dragonbreath", "dragonbreath",
+                                      "output_pin dragonbreath_filter");
+
+    // Heating, and neither our lease nor a klipper source: somebody else.
+    ts.update_from_status(nlohmann::json::parse(R"({
+      "dragonbreath": {"ptc_temp": 55.0, "mode": "power_on", "source": "device",
+                       "lease_owned": false}})"));
+    REQUIRE(lv_subject_get_int(ts.get_chamber_heater_externally_controlled_subject()) == 1);
+
+    // Same heat, driven through klipper: ours.
+    ts.update_from_status(nlohmann::json::parse(R"({
+      "dragonbreath": {"ptc_temp": 56.0, "mode": "power_on", "source": "klipper",
+                       "lease_owned": true}})"));
+    CHECK(lv_subject_get_int(ts.get_chamber_heater_externally_controlled_subject()) == 0);
+
+    // Back to somebody else, then a delta carrying only part of the trio. A
+    // partial trio is not a confident "no", so the subject holds.
+    ts.update_from_status(nlohmann::json::parse(R"({
+      "dragonbreath": {"ptc_temp": 57.0, "mode": "power_on", "source": "device",
+                       "lease_owned": false}})"));
+    REQUIRE(lv_subject_get_int(ts.get_chamber_heater_externally_controlled_subject()) == 1);
+
+    ts.update_from_status(nlohmann::json::parse(R"({
+      "dragonbreath": {"ptc_temp": 58.0, "mode": "power_on"}})"));
+    CHECK(lv_subject_get_int(ts.get_chamber_heater_externally_controlled_subject()) == 1);
+    // The delta was processed: the field it did carry landed.
+    CHECK(std::string(lv_subject_get_string(ts.get_chamber_heater_element_temp_text_subject())) ==
+          "58.0°C");
+}
+
+// Measured on a U1: the appliance reports connected:false for exactly one poll
+// roughly every twenty minutes and recovers on the next frame. Raising the
+// banner on that would flash an alarm several times an hour for nothing.
+TEST_CASE("a one-poll link flap never reaches the banner", "[chamber][subjects][1290]") {
+    LVGLTestFixture fixture;
+
+    PrinterTemperatureState ts;
+    ts.init_subjects(false);
+    ts.set_chamber_diagnostics_source("dragonbreath", "dragonbreath",
+                                      "output_pin dragonbreath_filter");
+
+    ts.update_from_status({{"dragonbreath", {{"connected", true}, {"ptc_temp", 30.0}}}});
+    REQUIRE(lv_subject_get_int(ts.get_chamber_heater_offline_subject()) == 0);
+
+    // The flap, at the longest length measured on hardware (two reports).
+    ts.update_from_status({{"dragonbreath", {{"connected", false}, {"ptc_temp", 30.05}}}});
+    CHECK(lv_subject_get_int(ts.get_chamber_heater_offline_subject()) == 0);
+    ts.update_from_status({{"dragonbreath", {{"connected", false}, {"ptc_temp", 30.1}}}});
+    CHECK(lv_subject_get_int(ts.get_chamber_heater_offline_subject()) == 0);
+    ts.update_from_status({{"dragonbreath", {{"connected", true}, {"ptc_temp", 30.2}}}});
+    CHECK(lv_subject_get_int(ts.get_chamber_heater_offline_subject()) == 0);
+
+    // A recovered flap must not leave the run part-built: a later lone flap
+    // still has to start from zero rather than tipping the banner over.
+    ts.update_from_status({{"dragonbreath", {{"connected", false}, {"ptc_temp", 30.3}}}});
+    CHECK(lv_subject_get_int(ts.get_chamber_heater_offline_subject()) == 0);
+    ts.update_from_status({{"dragonbreath", {{"connected", true}, {"ptc_temp", 30.4}}}});
+    CHECK(lv_subject_get_int(ts.get_chamber_heater_offline_subject()) == 0);
+
+    // The frames landed, so this is not a test passing on a dropped payload.
+    CHECK(std::string(lv_subject_get_string(ts.get_chamber_heater_element_temp_text_subject())) ==
+          "30.4°C");
+}
+
+// ============================================================================
+// Dryer (#1299)
+// ============================================================================
+
+// The drying cycle reaches two subjects: whether it runs, and the readout the
+// card shows. The readout pairs the live chamber temperature with the cycle's
+// target, since an appliance alone often plateaus below it, and follows every
+// frame; a delta that names only the countdown leaves the running flag alone,
+// and the cycle ending clears both.
+TEST_CASE("stock drying status drives the dryer subjects", "[chamber][subjects][dryer][1299]") {
+    LVGLTestFixture fixture;
+
+    PrinterTemperatureState ts;
+    ts.init_subjects(false);
+    ts.set_chamber_heater_name("heater_generic panda_breath");
+    ts.set_chamber_diagnostics_source("panda_breath", "panda_breath", "");
+
+    auto text = [&ts] {
+        return std::string(lv_subject_get_string(ts.get_chamber_dryer_text_subject()));
+    };
+    const std::string left = lv_tr("left");
+    CHECK(lv_subject_get_int(ts.get_chamber_dryer_active_subject()) == 0);
+
+    // Started, before the appliance has reported a countdown.
+    ts.update_from_status(nlohmann::json::parse(R"({
+        "heater_generic panda_breath": {"temperature": 24.0, "target": 0.0},
+        "panda_breath": {"work_mode": 3, "work_on": true, "filament_drying_active": true,
+                         "filament_temp": 55, "filament_timer": 4, "remaining_seconds": 0}})"));
+    CHECK(lv_subject_get_int(ts.get_chamber_dryer_active_subject()) == 1);
+    CHECK(text() == "24/55°C");
+
+    // 3h 12m left, rounded up to the minute the way the countdown reads.
+    ts.update_from_status(nlohmann::json{{"panda_breath", {{"remaining_seconds", 11481}}}});
+    CHECK(lv_subject_get_int(ts.get_chamber_dryer_active_subject()) == 1);
+    CHECK(text() == "24/55°C  3:12 " + left);
+
+    // A plateau below target is just a number: the chamber moving updates the
+    // readout and nothing else changes.
+    ts.update_from_status(nlohmann::json{{"heater_generic panda_breath", {{"temperature", 41.4}}}});
+    CHECK(lv_subject_get_int(ts.get_chamber_dryer_active_subject()) == 1);
+    CHECK(text() == "41/55°C  3:12 " + left);
+
+    ts.update_from_status(nlohmann::json::parse(R"({"panda_breath": {
+        "work_on": false, "filament_drying_active": false, "remaining_seconds": 0}})"));
+    CHECK(lv_subject_get_int(ts.get_chamber_dryer_active_subject()) == 0);
+    CHECK(text().empty());
+}
+
+// The dryer capability follows the backend the resolved heater matched, like
+// every other chamber surface: stock has one, DragonBreath does not.
+TEST_CASE("set_hardware raises the dryer capability for a backend with one",
+          "[chamber][subjects][state][hardware][dryer][1299]") {
+    lv_init_safe();
+    helix::PrinterState& state = get_printer_state();
+    helix::PrinterStateTestAccess::reset(state);
+    state.init_subjects(false);
+
+    auto& settings = helix::SettingsManager::instance();
+    settings.init_subjects();
+    settings.set_chamber_sensor_assignment("auto");
+    settings.set_chamber_heater_assignment("auto");
+    auto& caps = helix::PrinterStateTestAccess::get_capabilities_state(state);
+
+    helix::PrinterDiscovery stock;
+    stock.parse_objects(
+        nlohmann::json{"heater_generic panda_breath", "panda_breath", "extruder", "heater_bed"});
+    state.set_hardware(stock);
+    CHECK(lv_subject_get_int(caps.subject(Capability::HasChamberDryer)) == 1);
+
+    helix::PrinterDiscovery dragon;
+    dragon.parse_objects(nlohmann::json{"heater_generic dragonbreath", "dragonbreath",
+                                        "output_pin dragonbreath_filter", "extruder",
+                                        "heater_bed"});
+    state.set_hardware(dragon);
+    CHECK(lv_subject_get_int(caps.subject(Capability::HasChamberDryer)) == 0);
+
+    // A manual override to another heater detaches the backend's surfaces.
+    state.set_hardware(stock);
+    REQUIRE(lv_subject_get_int(caps.subject(Capability::HasChamberDryer)) == 1);
+    settings.set_chamber_heater_assignment("none");
+    state.set_hardware(stock);
+    CHECK(lv_subject_get_int(caps.subject(Capability::HasChamberDryer)) == 0);
+
+    settings.set_chamber_heater_assignment("auto");
+    settings.set_chamber_sensor_assignment("auto");
+}
+
+TEST_CASE("chamber::apply_resolution publishes the resolved chamber to its domains",
+          "[chamber][subjects][hardware]") {
+    LVGLTestFixture fixture;
+
+    PrinterTemperatureState ts;
+    ts.init_subjects(false);
+    PrinterCapabilitiesState caps;
+    caps.init_subjects(false);
+
+    helix::PrinterDiscovery hw;
+    hw.parse_objects(nlohmann::json{"heater_generic dragonbreath", "heater_generic ptc_heater",
+                                    "temperature_sensor cavity", "extruder", "heater_bed"});
+
+    SECTION("auto attaches the discovered backend's surfaces") {
+        helix::chamber::apply_resolution(hw, "temperature_sensor cavity", "auto", ts, caps,
+                                         nullptr);
+        CHECK(ts.chamber_sensor_name() == "temperature_sensor cavity");
+        CHECK(ts.chamber_heater_name() == "heater_generic dragonbreath");
+        CHECK(ts.chamber_diagnostics_object() == "dragonbreath");
+        CHECK(lv_subject_get_int(caps.subject(Capability::HasChamberSensor)) == 1);
+        CHECK(lv_subject_get_int(caps.subject(Capability::HasChamberHeater)) == 1);
+        CHECK(lv_subject_get_int(caps.subject(Capability::HasChamberHeaterDiagnostics)) == 1);
+        CHECK(lv_subject_get_int(caps.subject(Capability::HasChamberFilterFan)) == 1);
+    }
+
+    SECTION("an override to another heater detaches them") {
+        helix::chamber::apply_resolution(hw, "none", "heater_generic ptc_heater", ts, caps,
+                                         nullptr);
+        CHECK(ts.chamber_sensor_name().empty());
+        CHECK(ts.chamber_heater_name() == "heater_generic ptc_heater");
+        CHECK(ts.chamber_diagnostics_object().empty());
+        CHECK(lv_subject_get_int(caps.subject(Capability::HasChamberSensor)) == 0);
+        CHECK(lv_subject_get_int(caps.subject(Capability::HasChamberHeater)) == 1);
+        CHECK(lv_subject_get_int(caps.subject(Capability::HasChamberHeaterDiagnostics)) == 0);
+        CHECK(lv_subject_get_int(caps.subject(Capability::HasChamberFilterFan)) == 0);
+    }
+
+    caps.deinit_subjects();
+    ts.deinit_subjects();
 }

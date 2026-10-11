@@ -18,6 +18,7 @@ enum class HardwareRoleId {
     HotendFan,
     ChamberFan,
     ExhaustFan,
+    AuxFan,
 };
 
 enum class HardwareCategory { Fan, Heater, Led, FilamentSensor };
@@ -66,6 +67,13 @@ std::string resolve_role_from_config(HardwareRoleId id, Config* config,
                                      const std::vector<std::string>& discovered,
                                      bool persist_autoheal);
 
+/// Re-resolve the hotend and bed heater roles against `heaters` and persist every
+/// AutoHealed replacement in ONE config save, so the validator that follows sees the
+/// resolved names instead of toasting a stale saved role every boot. A role with no
+/// confident replacement is left as saved.
+/// @return true if any role changed.
+bool heal_heater_roles(Config* config, const std::vector<std::string>& heaters);
+
 /// Collect the deduped, registry-ordered set of wizard steps whose guided
 /// hardware roles cannot be confidently resolved against discovered hardware.
 ///
@@ -85,5 +93,14 @@ std::vector<helix::wizard::StepId> unresolved_guided_steps(Config* config,
 /// re-offered on every reconnect. Absent keys and resolvable roles are left
 /// untouched. Returns true if any key was changed.
 bool decline_unresolved_guided_roles(Config* config, const PrinterDiscovery& hw);
+
+/// End of a targeted reconfig session, shared by its Finish and Cancel paths:
+/// decline every guided role still Unresolved against `hw`. A session step can
+/// only resolve the roles it has a control for — the fan step has no aux
+/// dropdown — so a preset-saved role with no live match (e.g. fans/aux naming
+/// a fan the printer does not have) can never be satisfied inside the session;
+/// skipping this on Finish relaunches the wizard on every boot. Returns true
+/// if any key was changed.
+bool settle_targeted_reconfig(Config* config, const PrinterDiscovery& hw);
 
 } // namespace helix

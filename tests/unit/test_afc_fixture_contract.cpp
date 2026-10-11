@@ -29,6 +29,7 @@
  *   the new schema, do not weaken the assertion.
  */
 
+#include "test_helpers/afc_test_access.h"
 #include "ams_backend_afc.h"
 #include "ams_types.h"
 
@@ -75,11 +76,13 @@ void require_keys(const nlohmann::json& j, const std::string& what,
 
 } // namespace
 
+namespace helix {
+
 class AfcFixtureHelper : public AmsBackendAfc {
   public:
     AfcFixtureHelper() : AmsBackendAfc(nullptr, nullptr) {
         std::vector<std::string> names{"lane1", "lane2", "lane3", "lane4"};
-        initialize_slots(names);
+        AfcTestAccess::initialize_slots(*this, names);
     }
 
     void feed(const nlohmann::json& params_inner) {
@@ -94,6 +97,7 @@ class AfcFixtureHelper : public AmsBackendAfc {
         feed(params);
     }
 };
+} // namespace helix
 
 // ============================================================================
 // Field presence — the keys our parsers read must still exist upstream

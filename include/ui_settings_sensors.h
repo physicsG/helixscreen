@@ -11,7 +11,6 @@
  * - Width sensors (filament diameter)
  * - Humidity sensors (chamber/dryer)
  * - Accelerometer sensors (input shaper)
- * - Color sensors (TD-1)
  *
  * Each sensor type has its own section, hidden when no sensors of that type exist.
  *
@@ -26,6 +25,7 @@
 
 #include "lvgl/lvgl.h"
 #include "overlay_base.h"
+#include "static_panel_registry.h"
 
 #include <string>
 #include <vector>
@@ -40,7 +40,6 @@ struct ProbeSensorConfig;
 struct WidthSensorConfig;
 struct HumiditySensorConfig;
 struct AccelSensorConfig;
-struct ColorSensorConfig;
 struct TemperatureSensorConfig;
 } // namespace helix::sensors
 
@@ -56,7 +55,6 @@ namespace helix::settings {
  * - Width sensors: Role dropdown for flow compensation
  * - Humidity sensors: Role dropdown for chamber/dryer
  * - Accelerometers: Display-only status
- * - Color sensors: Display-only TD-1 status
  *
  * ## State Management:
  *
@@ -80,72 +78,20 @@ namespace helix::settings {
 class SensorSettingsOverlay : public OverlayBase {
   public:
     /**
-     * @brief Default constructor
-     */
-    SensorSettingsOverlay();
-
-    /**
-     * @brief Destructor
-     */
-    ~SensorSettingsOverlay() override;
-
-    // Non-copyable
-    SensorSettingsOverlay(const SensorSettingsOverlay&) = delete;
-    SensorSettingsOverlay& operator=(const SensorSettingsOverlay&) = delete;
-
-    //
-    // === Initialization ===
-    //
-
-    /**
      * @brief Register event callbacks with lv_xml system
      *
      * Registers callbacks for:
      * - on_switch_master_toggle_changed (switch sensor master enable)
+     * - on_chamber_heater_changed / on_chamber_sensor_changed (chamber assignment)
      */
     void register_callbacks() override;
 
-    //
-    // === UI Creation ===
-    //
-
-    /**
-     * @brief Create the overlay UI (called lazily)
-     *
-     * @param parent Parent widget to attach overlay to (usually screen)
-     * @return Root object of overlay, or nullptr on failure
-     */
-    lv_obj_t* create(lv_obj_t* parent) override;
-
-    /**
-     * @brief Show the overlay (populates all sensor lists first)
-     *
-     * This method:
-     * 1. Ensures overlay is created
-     * 2. Updates all sensor count labels
-     * 3. Populates all sensor lists
-     * 4. Pushes overlay onto navigation stack
-     *
-     * @param parent_screen The parent screen for overlay creation
-     */
-    void show(lv_obj_t* parent_screen);
-
-    //
-    // === Accessors ===
-    //
-
-    /**
-     * @brief Get human-readable overlay name
-     * @return "Sensors"
-     */
     const char* get_name() const override {
         return "Sensors";
     }
-
-    /**
-     * @brief Initialize subjects (none needed for this overlay)
-     */
-    void init_subjects() override {}
+    const char* xml_component() const override {
+        return "sensors_overlay";
+    }
 
     /**
      * @brief Called when overlay becomes visible
@@ -153,13 +99,6 @@ class SensorSettingsOverlay : public OverlayBase {
      * Calls OverlayBase::on_activate() then populates all sensor lists.
      */
     void on_activate() override;
-
-    /**
-     * @brief Called when overlay is being hidden
-     *
-     * Calls OverlayBase::on_deactivate().
-     */
-    void on_deactivate() override;
 
     //
     // === Event Handlers (public for static callbacks) ===
@@ -170,6 +109,10 @@ class SensorSettingsOverlay : public OverlayBase {
      * @param enabled New master enable state
      */
     void handle_switch_master_toggle_changed(bool enabled);
+
+  protected:
+    /// Refreshes the section count badges on every open.
+    void before_show() override;
 
   private:
     //
@@ -240,19 +183,19 @@ class SensorSettingsOverlay : public OverlayBase {
     void update_accel_sensor_count();
 
     /**
-     * @brief Populate color sensor list from ColorSensorManager
-     */
-    void populate_color_sensors();
-
-    /**
-     * @brief Update color sensor count label
-     */
-    void update_color_sensor_count();
-
-    /**
      * @brief Populate chamber assignment dropdowns from PrinterDiscovery
      */
     void populate_chamber_assignment();
+
+    /**
+     * @brief Populate load cell list from LoadCellManager
+     */
+    void populate_load_cells();
+
+    /**
+     * @brief Update load cell count label
+     */
+    void update_load_cell_count();
 
     /**
      * @brief Populate temperature sensor list from TemperatureSensorManager
@@ -279,21 +222,19 @@ class SensorSettingsOverlay : public OverlayBase {
     //
     // Note: overlay_root_ and parent_screen_ are inherited from OverlayBase
 
-    //
-    // === Static Callbacks ===
-    //
-
-    static void on_switch_master_toggle_changed(lv_event_t* e);
+    /// Klipper object behind each chamber dropdown's option index i + 1, rebuilt
+    /// with the options on every populate.
+    std::vector<std::string> chamber_heater_names_;
+    std::vector<std::string> chamber_sensor_names_;
 };
 
-/**
- * @brief Global instance accessor
- *
- * Creates the overlay on first access and registers it for cleanup
- * with StaticPanelRegistry.
- *
- * @return Reference to singleton SensorSettingsOverlay
- */
-SensorSettingsOverlay& get_sensor_settings_overlay();
+inline SensorSettingsOverlay& get_sensor_settings_overlay() {
+    return lazy_global<SensorSettingsOverlay>("SensorSettingsOverlay");
+}
+
+struct ChamberAssignmentLabels;
+
+/// Translated labels both chamber assignment dropdowns are built from.
+ChamberAssignmentLabels chamber_assignment_labels();
 
 } // namespace helix::settings

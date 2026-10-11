@@ -3,6 +3,10 @@
 
 #include "phomemo_printer.h"
 
+#include <filesystem>
+#include <fstream>
+#include <string>
+
 #include "../catch_amalgamated.hpp"
 
 TEST_CASE("PhomemoPrinter::build_raster_commands header has speed, density, media type",
@@ -176,4 +180,24 @@ TEST_CASE("PhomemoPrinter::build_raster_commands wider label", "[label]") {
     // num_lines = 3
     REQUIRE(commands[17] == 3); // lo
     REQUIRE(commands[18] == 0); // hi
+}
+
+TEST_CASE("PhomemoPrinter::read_sysfs_usb_id never throws on a bad sysfs value",
+          "[label][usb-detect]") {
+    // A device unplugged mid-read leaves idVendor empty; the reader runs on a
+    // detached print thread, where a throw is std::terminate.
+    const auto dir = std::filesystem::temp_directory_path() / "helix_phomemo_sysfs";
+    std::filesystem::create_directories(dir);
+    auto write = [&](const std::string& name, const std::string& content) {
+        std::ofstream(dir / name) << content;
+        return (dir / name).string();
+    };
+
+    CHECK(helix::PhomemoPrinter::read_sysfs_usb_id(write("ok", "0493\n")) == 0x0493);
+    CHECK(helix::PhomemoPrinter::read_sysfs_usb_id((dir / "missing").string()) == 0);
+    CHECK(helix::PhomemoPrinter::read_sysfs_usb_id(write("empty", "")) == 0);
+    CHECK(helix::PhomemoPrinter::read_sysfs_usb_id(write("junk", "zz\n")) == 0);
+    CHECK(helix::PhomemoPrinter::read_sysfs_usb_id(write("wide", "12345\n")) == 0);
+
+    std::filesystem::remove_all(dir);
 }

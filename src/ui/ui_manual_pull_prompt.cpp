@@ -51,16 +51,18 @@ void arm_manual_pull_prompt() {
 
     // Only worth watching when the sensor currently SEES filament. Anything else
     // (already clear, or no sensor at all) can produce no meaningful 1 -> 0 edge,
-    // and observe_int_sync fires once on registration — hooking it up in those
+    // and observe<int> fires once on registration — hooking it up in those
     // states would toast immediately, before the retract has moved anything.
     const bool watchable = toolhead && lv_subject_get_int(toolhead) == TOOLHEAD_DETECTED;
     if (watchable) {
-        s_toolhead_observer = observe_int_sync<FilamentSensorManager>(
-            toolhead, &sensors, [](FilamentSensorManager*, int detected) {
+        s_toolhead_observer = observe<int>(
+            toolhead, &sensors,
+            [](FilamentSensorManager*, int detected) {
                 if (detected == TOOLHEAD_CLEAR) {
                     fire("toolhead sensor");
                 }
-            });
+            },
+            sensors.get_subjects_lifetime());
     }
 
     if (!s_registered) {

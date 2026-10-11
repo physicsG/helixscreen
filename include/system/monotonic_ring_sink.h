@@ -70,6 +70,14 @@ class MonotonicRingSink final : public spdlog::sinks::base_sink<std::mutex> {
         return out;
     }
 
+    /// Drop every held entry.
+    void clear() {
+        std::lock_guard<std::mutex> lock(base_sink<std::mutex>::mutex_);
+        while (!q_.empty()) {
+            q_.pop_front();
+        }
+    }
+
     /// Entry count currently held.
     size_t size() {
         std::lock_guard<std::mutex> lock(base_sink<std::mutex>::mutex_);

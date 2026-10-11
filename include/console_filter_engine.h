@@ -3,7 +3,8 @@
 
 #pragma once
 
-#include <regex>
+#include "helix_regex.h"
+
 #include <string>
 #include <string_view>
 #include <vector>
@@ -73,7 +74,7 @@ class ConsoleFilterEngine {
     struct Pattern {
         Type type{Type::Prefix};
         std::string text;
-        std::regex compiled; ///< Populated only when type == Regex
+        helix::Regex compiled; ///< Populated only when type == Regex
     };
 
     std::vector<Pattern> patterns_;

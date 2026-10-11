@@ -1,0 +1,72 @@
+diff --git a/src/drivers/opengles/lv_opengles_driver.h b/src/drivers/opengles/lv_opengles_driver.h
+--- a/src/drivers/opengles/lv_opengles_driver.h
++++ b/src/drivers/opengles/lv_opengles_driver.h
+@@ -24,6 +24,9 @@
+  *      DEFINES
+  *********************/
+ 
++/** lv_opengles_render_display() draws an XRGB8888 display with its X byte ignored */
++#define HELIX_LV_OPENGLES_XRGB_IGNORES_X 1
++
+ /**********************
+  *      TYPEDEFS
+  **********************/
+diff --git a/src/drivers/opengles/lv_opengles_driver.c b/src/drivers/opengles/lv_opengles_driver.c
+--- a/src/drivers/opengles/lv_opengles_driver.c
++++ b/src/drivers/opengles/lv_opengles_driver.c
+@@ -236,7 +236,9 @@
+     };
+ 
+     lv_opengles_shader_bind();
+-    lv_opengles_shader_set_uniform1f("u_ColorDepth", LV_COLOR_DEPTH);
++    /*An XRGB8888 display leaves its X byte undefined, so it is drawn as 24-bit, without alpha*/
++    lv_opengles_shader_set_uniform1f("u_ColorDepth",
++                                     lv_display_get_color_format(display) == LV_COLOR_FORMAT_XRGB8888 ? 24 : LV_COLOR_DEPTH);
+     lv_opengles_shader_set_uniform1i("u_Texture", 0);
+     lv_opengles_shader_set_uniformmatrix3fv("u_VertexTransform", 1, transposed_matrix);
+     lv_opengles_shader_set_uniform1f("u_Opa", 1);
+diff --git a/src/drivers/opengles/assets/lv_opengles_shader.c b/src/drivers/opengles/assets/lv_opengles_shader.c
+--- a/src/drivers/opengles/assets/lv_opengles_shader.c
++++ b/src/drivers/opengles/assets/lv_opengles_shader.c
+@@ -102,6 +102,8 @@
+         if (abs(u_ColorDepth - 8.0) < 0.1) {
+             float gray = texColor.r;
+             gl_FragColor = vec4(vec3(gray * u_Opa), u_Opa);
++        } else if (abs(u_ColorDepth - 24.0) < 0.1) {
++            gl_FragColor = vec4(texColor.rgb * u_Opa, u_Opa);
+         } else {
+             float combinedAlpha = texColor.a * u_Opa;
+             gl_FragColor = vec4(texColor.rgb * combinedAlpha, combinedAlpha);
+@@ -176,6 +178,7 @@
+     out vec2 v_TexCoord;
+     flat out lowp vec4 fill_color_alpha;
+     flat out lowp int is_gray;
++    flat out lowp int ignore_alpha;
+ 
+     uniform lowp float u_Opa;
+     uniform bool u_IsFill;
+@@ -188,6 +191,7 @@
+         gl_Position = vec4((u_VertexTransform * vec3(position.xy, 1)).xy, position.zw);
+         v_TexCoord = texCoord;
+         is_gray = (abs(u_ColorDepth - 8.0) < 0.1) ? 1 : 0;
++        ignore_alpha = (abs(u_ColorDepth - 24.0) < 0.1) ? 1 : 0;
+ 
+         if (u_IsFill) {
+             if (is_gray == 1) {
+@@ -209,6 +213,7 @@
+     in vec2 v_TexCoord;
+     flat in lowp vec4 fill_color_alpha;
+     flat in lowp int is_gray;
++    flat in lowp int ignore_alpha;
+     
+     uniform sampler2D u_Texture;
+     uniform lowp float u_Opa;
+@@ -232,6 +237,8 @@
+             if (is_gray != 0) {
+                 color.r *= u_Opa;
+                 color.gba = vec3(color.rr, u_Opa);
++            } else if (ignore_alpha != 0) {
++                color = vec4(color.rgb * u_Opa, u_Opa);
+             } else {
+                 color.a *= u_Opa;
+                 color.rgb *= color.a;

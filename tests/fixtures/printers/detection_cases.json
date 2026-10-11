@@ -1,0 +1,1261 @@
+[
+  {
+    "name": "Detect FlashForge AD5M Pro by tvocValue sensor",
+    "note": "LED strip + hostname + tvoc sensor separate the Pro from every other machine",
+    "capture": "flashforge_ad5m_pro",
+    "autosave": true,
+    "expect": "FlashForge Adventurer 5M Pro"
+  },
+  {
+    "name": "Detect by hostname - Creality K1",
+    "note": "Hostname \"k1-max\" matches K1 Max specifically",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan", "chamber_fan"],
+      "leds": [],
+      "hostname": "k1-max"
+    },
+    "expect": "Creality K1 Max"
+  },
+  {
+    "name": "Detect by hostname - Creality Ender 3",
+    "note": "Avoid \"v2\" pattern conflict \"ender3\" hostname is a specific match: no other entry scores at all",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan", "heater_fan hotend_fan"],
+      "leds": [],
+      "hostname": "ender3-pro"
+    },
+    "expect": "Creality Ender 3"
+  },
+  {
+    "name": "Detect by hostname - Creality Ender 3 V3 KE",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan", "heater_fan hotend_fan"],
+      "leds": [],
+      "hostname": "Creality_Ender_3_V3_KE",
+      "printer_objects": ["adxl345"],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z"],
+      "kinematics": "cartesian"
+    },
+    "expect": "Creality Ender-3 V3 KE"
+  },
+  {
+    "name": "Distinguish Ender-3 V3 KE from Ender-3 V3",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan", "heater_fan hotend_fan"],
+      "leds": [],
+      "hostname": "creality-ender3-v3-ke",
+      "printer_objects": ["adxl345"],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z"],
+      "kinematics": "cartesian"
+    },
+    "expect": "Creality Ender-3 V3 KE"
+  },
+  {
+    "name": "V3 KE hostname does not match V3 (hostname_exclude)",
+    "note": "\"ender-3-v3-ke\" contains \"ender-3-v3\" as a substring, so without hostname_exclude the V3 non-KE entry would also match at high confidence. The hostname_exclude heuristic on V3 disqualifies it when \"v3-ke\" is present.",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan", "heater_fan hotend_fan"],
+      "leds": [],
+      "hostname": "ender-3-v3-ke",
+      "printer_objects": ["adxl345"],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z"],
+      "kinematics": "cartesian"
+    },
+    "expect": "Creality Ender-3 V3 KE"
+  },
+  {
+    "name": "V3 hostname without KE still detects V3",
+    "note": "Ensure the exclusion doesn't break normal V3 detection",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan", "heater_fan hotend_fan"],
+      "leds": [],
+      "hostname": "ender-3-v3",
+      "printer_objects": ["adxl345"],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z"],
+      "kinematics": "corexy"
+    },
+    "expect": "Creality Ender-3 V3"
+  },
+  {
+    "name": "Case-insensitive sensor matching",
+    "note": "Uppercase LED distinguishes AD5M Pro from Adventurer 5M High-confidence sensor match (tvocValue is distinctive)",
+    "hardware": {
+      "heaters": ["extruder"],
+      "sensors": ["TVOCVALUE", "temperature_sensor chamber"],
+      "fans": [],
+      "leds": ["led chamber_light"],
+      "hostname": "test"
+    },
+    "autosave": true,
+    "expect": "FlashForge Adventurer 5M Pro"
+  },
+  {
+    "name": "Case-insensitive hostname matching",
+    "note": "chamber_light LED distinguishes AD5M Pro from regular 5M Uppercase The chamber_light LED is the case-insensitive signal under test",
+    "hardware": {
+      "heaters": ["extruder"],
+      "sensors": [],
+      "fans": [],
+      "leds": ["led chamber_light"],
+      "hostname": "FLASHFORGE-AD5M"
+    },
+    "expect": "FlashForge Adventurer 5M Pro"
+  },
+  {
+    "name": "Case-insensitive fan matching",
+    "note": "Mixed case Medium-high confidence fan combo match",
+    "hardware": {
+      "heaters": ["extruder"],
+      "sensors": [],
+      "fans": ["BED_FANS", "EXHAUST_fan"],
+      "leds": [],
+      "hostname": "test"
+    },
+    "expect": "Voron 2.4"
+  },
+  {
+    "name": "fan_combo heuristic - multiple patterns required",
+    "note": "Medium-high confidence with combo fan_combo has higher confidence than single fan_match",
+    "hardware": {
+      "heaters": ["extruder"],
+      "sensors": [],
+      "fans": ["bed_fans", "chamber_fan", "exhaust_fan"],
+      "leds": [],
+      "hostname": "test"
+    },
+    "expect": "Voron 2.4"
+  },
+  {
+    "name": "Real Voron 2.4 fingerprint",
+    "note": "Typical Voron 2.4 configuration Remove LEDs entirely to avoid AD5M Pro pattern match",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": ["temperature_sensor chamber", "temperature_sensor raspberry_pi", "temperature_sensor octopus"],
+      "fans": ["fan", "heater_fan hotend_fan", "controller_fan octopus_fan", "temperature_fan bed_fans", "fan_generic exhaust_fan"],
+      "leds": [],
+      "hostname": "voron2-4159"
+    },
+    "expect": "Voron 2.4"
+  },
+  {
+    "name": "Voron 2.4 without v2 in hostname",
+    "note": "Voron V2 with generic hostname (only hardware detection available) Generic hostname Add kinematics to confirm Voron pattern",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": ["temperature_sensor chamber"],
+      "fans": ["bed_fans", "exhaust_fan", "controller_fan"],
+      "leds": [],
+      "hostname": "mainsailos",
+      "printer_objects": [],
+      "steppers": [],
+      "kinematics": "corexy"
+    },
+    "expect": "Voron 2.4"
+  },
+  {
+    "name": "Voron 0.1 by hostname only",
+    "note": "Use v01 to match 0.1 specifically Database matches V0.2, not V0.1",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan", "heater_fan hotend_fan"],
+      "leds": [],
+      "hostname": "voron-v01"
+    },
+    "expect": "Voron 0.2"
+  },
+  {
+    "name": "Voron Trident by hostname",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan"],
+      "leds": [],
+      "hostname": "voron-trident-300"
+    },
+    "expect": "Voron Trident"
+  },
+  {
+    "name": "Voron Switchwire by hostname",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan"],
+      "leds": [],
+      "hostname": "switchwire-250"
+    },
+    "expect": "Voron Switchwire"
+  },
+  {
+    "name": "Creality K1 with chamber fan",
+    "note": "Hostname has \"k1-max\" so it should match K1 Max",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan", "chamber_fan"],
+      "leds": [],
+      "hostname": "creality-k1-max"
+    },
+    "expect": "Creality K1 Max"
+  },
+  {
+    "name": "Creality Ender 3 V2",
+    "note": "NOTE: Hostname must contain \"ender3\" pattern but avoid \"v2\" substring which would match Voron 2.4 at higher confidence (85% vs 80%) Contains \"ender3\" without \"v2\"",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan", "heater_fan hotend_fan"],
+      "leds": [],
+      "hostname": "my-ender3-printer"
+    },
+    "expect": "Creality Ender 3"
+  },
+  {
+    "name": "Creality Ender 5 Plus",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan"],
+      "leds": [],
+      "hostname": "ender5-plus"
+    },
+    "expect": "Creality Ender 5"
+  },
+  {
+    "name": "Creality CR-10",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan"],
+      "leds": [],
+      "hostname": "cr-10-s5"
+    },
+    "expect": "Creality CR-10"
+  },
+  {
+    "name": "kinematics_match heuristic - CoreXZ (Switchwire)",
+    "note": "CoreXZ is Switchwire signature",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": [],
+      "leds": [],
+      "hostname": "test",
+      "printer_objects": [],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z"],
+      "kinematics": "corexz"
+    },
+    "expect": "Voron Switchwire"
+  },
+  {
+    "name": "kinematics_match heuristic - Cartesian",
+    "note": "To help distinguish",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": [],
+      "leds": [],
+      "hostname": "ender3-test",
+      "printer_objects": [],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z"],
+      "kinematics": "cartesian"
+    },
+    "expect": "Creality Ender 3"
+  },
+  {
+    "name": "stepper_count heuristic - 4 Z steppers (Voron 2.4)",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": [],
+      "leds": [],
+      "hostname": "test",
+      "printer_objects": ["quad_gantry_level"],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z", "stepper_z1", "stepper_z2", "stepper_z3"],
+      "kinematics": "corexy"
+    },
+    "expect": "Voron 2.4"
+  },
+  {
+    "name": "stepper_count heuristic - 3 Z steppers (Trident)",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": [],
+      "leds": [],
+      "hostname": "test",
+      "printer_objects": ["z_tilt"],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z", "stepper_z1", "stepper_z2"],
+      "kinematics": "corexy"
+    },
+    "expect": "Voron Trident"
+  },
+  {
+    "name": "stepper_count heuristic - Single Z stepper",
+    "note": "Help identify V0",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": [],
+      "leds": [],
+      "hostname": "voron-v0",
+      "printer_objects": [],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z"],
+      "kinematics": "corexy"
+    },
+    "expect": "Voron 0.2"
+  },
+  {
+    "name": "build_volume_range heuristic - Small (V0)",
+    "note": "Use v02 to specifically match Voron 0.2",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": [],
+      "leds": [],
+      "hostname": "voron-v02",
+      "printer_objects": [],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z"],
+      "kinematics": "corexy",
+      "build_volume": {"x_min": 0, "x_max": 120, "y_min": 0, "y_max": 120, "z_max": 120}
+    },
+    "expect": "Voron 0.2"
+  },
+  {
+    "name": "build_volume_range heuristic - K1 vs K1 Max",
+    "note": "K1 Max has ~300mm build volume Specific K1 Max hostname",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["chamber_fan"],
+      "leds": [],
+      "hostname": "creality-k1max",
+      "printer_objects": [],
+      "steppers": [],
+      "kinematics": "corexy",
+      "build_volume": {"x_min": 0, "x_max": 300, "y_min": 0, "y_max": 300, "z_max": 300}
+    },
+    "expect": "Creality K1 Max"
+  },
+  {
+    "name": "build_volume_range heuristic - Large (Ender 5 Max)",
+    "note": "Add \"max\" to specifically match Ender 5 Max The dedicated Ender 5 Max entry wins: hostname 'ender5-max' + large build volume + cartesian kinematics. Qidi Max 4 (same ~400mm footprint) is ruled out by its kinematics_exclude on cartesian, so it can't shadow the Ender.",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": [],
+      "leds": [],
+      "hostname": "ender5-max",
+      "printer_objects": [],
+      "steppers": [],
+      "kinematics": "cartesian",
+      "build_volume": {"x_min": 0, "x_max": 400, "y_min": 0, "y_max": 400, "z_max": 400}
+    },
+    "expect": "Creality Ender 5 Max"
+  },
+  {
+    "name": "Doron Velta wins over Klippain addon",
+    "note": "Doron Velta hardware with Klippain Shake&Tune macros installed A real printer always beats a non-printer addon",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": [],
+      "leds": [],
+      "hostname": "doron-velta",
+      "printer_objects": ["delta_calibrate", "gcode_macro AXES_SHAPER_CALIBRATION", "gcode_macro BELTS_SHAPER_CALIBRATION"],
+      "steppers": ["stepper_a", "stepper_b", "stepper_c"],
+      "kinematics": "delta"
+    },
+    "expect": "Doron Velta"
+  },
+  {
+    "name": "object_exists heuristic - quad_gantry_level",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": [],
+      "leds": [],
+      "hostname": "test",
+      "printer_objects": ["quad_gantry_level"],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z", "stepper_z1", "stepper_z2", "stepper_z3"],
+      "kinematics": "corexy"
+    },
+    "expect": "Voron 2.4"
+  },
+  {
+    "name": "object_exists heuristic - z_tilt",
+    "note": "z_tilt with 3 Z steppers = Trident",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": [],
+      "leds": [],
+      "hostname": "test",
+      "printer_objects": ["z_tilt"],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z", "stepper_z1", "stepper_z2"],
+      "kinematics": "corexy"
+    },
+    "expect": "Voron Trident"
+  },
+  {
+    "name": "Combined heuristics - Full Voron 2.4 fingerprint",
+    "note": "Full Voron 2.4 setup with all data sources Note: Avoid using \"neopixel\" in leds as it matches AD5M Pro at 92% confidence Voron-specific LED name, not \"neopixel\"",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": ["temperature_sensor chamber"],
+      "fans": ["bed_fans", "exhaust_fan", "nevermore"],
+      "leds": ["stealthburner_leds"],
+      "hostname": "voron-2-4",
+      "printer_objects": ["quad_gantry_level"],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z", "stepper_z1", "stepper_z2", "stepper_z3"],
+      "kinematics": "corexy",
+      "build_volume": {"x_min": 0, "x_max": 350, "y_min": 0, "y_max": 350, "z_max": 330}
+    },
+    "expect": "Voron 2.4"
+  },
+  {
+    "name": "Combined heuristics - Full Creality K1 fingerprint",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": ["temperature_sensor chamber_temp"],
+      "fans": ["fan", "chamber_fan"],
+      "leds": [],
+      "hostname": "k1-printer",
+      "printer_objects": ["temperature_fan chamber_fan"],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z"],
+      "kinematics": "corexy",
+      "build_volume": {"x_min": 0, "x_max": 220, "y_min": 0, "y_max": 220, "z_max": 250}
+    },
+    "expect": "Creality K1"
+  },
+  {
+    "name": "board_match heuristic - Fysetc board identifies Doron Velta",
+    "note": "Doron Velta with Fysetc R4 mainboard visible as temperature_sensor",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": ["temperature_sensor Fysetc_R4"],
+      "fans": ["fan"],
+      "leds": [],
+      "hostname": "dv",
+      "printer_objects": ["temperature_sensor Fysetc_R4", "probe_eddy_current fly_eddy_probe"],
+      "steppers": ["stepper_a", "stepper_b", "stepper_c"],
+      "kinematics": "delta"
+    },
+    "expect": "Doron Velta"
+  },
+  {
+    "name": "board_match is case insensitive",
+    "note": "Board name in different case should still match Should still match Doron Velta due to case-insensitive fysetc match",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": [],
+      "leds": [],
+      "hostname": "test",
+      "printer_objects": ["temperature_sensor fysetc_spider"],
+      "steppers": ["stepper_a", "stepper_b", "stepper_c"],
+      "kinematics": "delta"
+    },
+    "expect": "Doron Velta"
+  },
+  {
+    "name": "AD5M Pro distinguished by LED chamber light",
+    "note": "AD5M Pro has LED chamber light - this is the key differentiator from regular AD5M LED chamber light - AD5M Pro exclusive Generic AD5M hostname LED chamber light should distinguish Pro from regular 5M The reported chamber light is what separates the Pro from the rest",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": ["tvocValue", "temperature_sensor chamber_temp"],
+      "fans": ["fan", "fan_generic exhaust_fan"],
+      "leds": ["led chamber_light"],
+      "hostname": "flashforge-ad5m",
+      "printer_objects": [],
+      "steppers": [],
+      "kinematics": "cartesian"
+    },
+    "autosave": true,
+    "expect": "FlashForge Adventurer 5M Pro"
+  },
+  {
+    "name": "AD5M Pro with chamber_light LED",
+    "note": "AD5M Pro has \"led chamber_light\" - the key differentiator AD5M Pro chamber LED The reported chamber light separates the Pro from the family",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": ["tvocValue"],
+      "fans": ["fan"],
+      "leds": ["led chamber_light"],
+      "hostname": "ad5m",
+      "printer_objects": [],
+      "steppers": [],
+      "kinematics": "cartesian"
+    },
+    "autosave": true,
+    "expect": "FlashForge Adventurer 5M Pro"
+  },
+  {
+    "name": "Prusa MK3S+ fingerprint",
+    "note": "Use \"i3-mk3s\" to be more specific Database matches MK4 (MK3S+ might not be in database)",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": ["temperature_sensor board_temp"],
+      "fans": ["fan", "heater_fan hotend_fan"],
+      "leds": [],
+      "hostname": "prusa-i3-mk3s",
+      "printer_objects": [],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z", "stepper_e"],
+      "kinematics": "cartesian",
+      "build_volume": {"x_min": 0, "x_max": 250, "y_min": 0, "y_max": 210, "z_max": 210}
+    },
+    "expect": "Prusa MK4"
+  },
+  {
+    "name": "Prusa MINI fingerprint",
+    "note": "Use \"mini-plus\" to be more specific Database matches MK4 (MINI might not be in database)",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan"],
+      "leds": [],
+      "hostname": "prusa-mini-plus",
+      "printer_objects": [],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z"],
+      "kinematics": "cartesian",
+      "build_volume": {"x_min": 0, "x_max": 180, "y_min": 0, "y_max": 180, "z_max": 180}
+    },
+    "expect": "Prusa MK4"
+  },
+  {
+    "name": "Rat Rig V-Core 3 fingerprint",
+    "note": "Database has \"RatRig\" (no space)",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": ["temperature_sensor chamber"],
+      "fans": ["fan", "heater_fan hotend_fan"],
+      "leds": [],
+      "hostname": "ratrig-vcore3",
+      "printer_objects": ["z_tilt"],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z", "stepper_z1", "stepper_z2"],
+      "kinematics": "corexy",
+      "build_volume": {"x_min": 0, "x_max": 300, "y_min": 0, "y_max": 300, "z_max": 300}
+    },
+    "expect": "RatRig V-Core 3"
+  },
+  {
+    "name": "RatOS V-Core 3 by RatOS marker with renamed host",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "hostname": "my-printer",
+      "printer_objects": ["gcode_macro RatOS", "z_tilt"],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z", "stepper_z1", "stepper_z2"],
+      "kinematics": "corexy",
+      "build_volume": {"x_min": 0, "x_max": 300, "y_min": 0, "y_max": 300, "z_max": 300}
+    },
+    "expect": "RatRig V-Core 3"
+  },
+  {
+    "name": "RatOS V-Minion is Cartesian (kinematics fix)",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "hostname": "ratrig-vminion",
+      "printer_objects": ["gcode_macro RatOS"],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z"],
+      "kinematics": "cartesian",
+      "build_volume": {"x_min": 0, "x_max": 180, "y_min": 0, "y_max": 180, "z_max": 180}
+    },
+    "expect": "RatRig V-Minion"
+  },
+  {
+    "name": "RatOS V-Minion by Cartesian + RatOS marker (renamed host)",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "hostname": "tinybox",
+      "printer_objects": ["gcode_macro RatOS"],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z"],
+      "kinematics": "cartesian",
+      "build_volume": {"x_min": 0, "x_max": 180, "y_min": 0, "y_max": 180, "z_max": 180}
+    },
+    "expect": "RatRig V-Minion"
+  },
+  {
+    "name": "RatOS V-Core 4 by hostname",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "hostname": "ratrig-vcore4",
+      "printer_objects": ["gcode_macro RatOS", "z_tilt"],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z"],
+      "kinematics": "corexy",
+      "build_volume": {"x_min": 0, "x_max": 300, "y_min": 0, "y_max": 300, "z_max": 300}
+    },
+    "expect": "RatRig V-Core 4"
+  },
+  {
+    "name": "RatOS V-Core 4 IDEX by ratos_hybrid_corexy + dual_carriage",
+    "hardware": {
+      "heaters": ["extruder", "extruder1", "heater_bed"],
+      "hostname": "ratrig-vcore4-idex",
+      "printer_objects": ["gcode_macro RatOS", "z_tilt", "dual_carriage"],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z", "dual_carriage"],
+      "kinematics": "ratos_hybrid_corexy",
+      "build_volume": {"x_min": 0, "x_max": 300, "y_min": 0, "y_max": 300, "z_max": 300}
+    },
+    "expect": "RatRig V-Core 4 IDEX"
+  },
+  {
+    "name": "RatOS V-Core Pro by hostname",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "hostname": "ratrig-vcore-pro",
+      "printer_objects": ["gcode_macro RatOS", "z_tilt"],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z", "stepper_z1", "stepper_z2"],
+      "kinematics": "corexy",
+      "build_volume": {"x_min": 0, "x_max": 300, "y_min": 0, "y_max": 300, "z_max": 300}
+    },
+    "expect": "RatRig V-Core Pro"
+  },
+  {
+    "name": "Anycubic Kobra fingerprint",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan", "heater_fan hotend_fan"],
+      "leds": [],
+      "hostname": "anycubic-kobra",
+      "printer_objects": [],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z"],
+      "kinematics": "cartesian",
+      "build_volume": {"x_min": 0, "x_max": 220, "y_min": 0, "y_max": 220, "z_max": 250}
+    },
+    "expect": "Anycubic Kobra"
+  },
+  {
+    "name": "Elegoo Neptune fingerprint",
+    "note": "Remove \"3\" to match generic Neptune Database has Neptune 4",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan"],
+      "leds": [],
+      "hostname": "elegoo-neptune",
+      "printer_objects": [],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z"],
+      "kinematics": "cartesian",
+      "build_volume": {"x_min": 0, "x_max": 220, "y_min": 0, "y_max": 220, "z_max": 280}
+    },
+    "expect": "Elegoo Neptune 4"
+  },
+  {
+    "name": "Sovol SV06 fingerprint",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan"],
+      "leds": [],
+      "hostname": "sovol-sv06",
+      "printer_objects": [],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z"],
+      "kinematics": "cartesian",
+      "build_volume": {"x_min": 0, "x_max": 220, "y_min": 0, "y_max": 220, "z_max": 250}
+    },
+    "expect": "Sovol SV06"
+  },
+  {
+    "name": "Sovol SV06 ACE detected hostname-free (load-cell stack)",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan"],
+      "leds": [],
+      "hostname": "",
+      "printer_objects": ["smart_effector", "hx711", "lis2dw hotend", "lis2dw bed", "probe", "z_tilt"],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z", "stepper_z1"],
+      "kinematics": "cartesian",
+      "build_volume": {"x_min": 0, "x_max": 220, "y_min": 0, "y_max": 235, "z_max": 250}
+    },
+    "expect": "Sovol SV06 ACE"
+  },
+  {
+    "name": "Sovol Zero detected hostname-free (eddy + single-Z + tiny bed)",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan"],
+      "leds": [],
+      "hostname": "",
+      "printer_objects": ["probe_eddy_current eddy", "z_offset_calibration"],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z"],
+      "kinematics": "corexy",
+      "build_volume": {"x_min": 0, "x_max": 152, "y_min": 0, "y_max": 152, "z_max": 155}
+    },
+    "expect": "Sovol Zero"
+  },
+  {
+    "name": "Artillery Sidewinder fingerprint",
+    "note": "Add more specific model Dual Z Hostname \"sidewinder\" matches Sidewinder X2 entry",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan"],
+      "leds": [],
+      "hostname": "artillery-sidewinder-x2",
+      "printer_objects": [],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z", "stepper_z1"],
+      "kinematics": "cartesian",
+      "build_volume": {"x_min": 0, "x_max": 300, "y_min": 0, "y_max": 300, "z_max": 400}
+    },
+    "expect": "Artillery Sidewinder X2"
+  },
+  {
+    "name": "MCU match - STM32H723 (BTT Octopus Pro)",
+    "note": "BTT Octopus Pro MCU Main + EBB CAN + Linux host STM32H7 + QGL + 4 Z steppers = Voron 2.4 with BTT board",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan"],
+      "leds": [],
+      "hostname": "test",
+      "printer_objects": ["quad_gantry_level"],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z", "stepper_z1", "stepper_z2", "stepper_z3"],
+      "kinematics": "corexy",
+      "mcu": "stm32h723xx",
+      "mcu_list": ["stm32h723xx", "rp2040", "linux"]
+    },
+    "expect": "Voron 2.4"
+  },
+  {
+    "name": "MCU match - HC32F460 Anycubic Kobra 2",
+    "note": "HC32F460 is a Huada chip almost exclusively used by Anycubic",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan"],
+      "leds": [],
+      "hostname": "kobra2",
+      "printer_objects": [],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z"],
+      "kinematics": "cartesian",
+      "mcu": "HC32F460",
+      "mcu_list": ["HC32F460"]
+    },
+    "expect": "Anycubic Kobra 2"
+  },
+  {
+    "name": "MCU match - HC32F460 Anycubic Kobra 2 Max",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan"],
+      "leds": [],
+      "hostname": "kobra-2-max",
+      "printer_objects": [],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z"],
+      "kinematics": "cartesian",
+      "mcu": "HC32F460",
+      "mcu_list": ["HC32F460"],
+      "build_volume": {"x_min": 0, "x_max": 420, "y_min": 0, "y_max": 420, "z_max": 500}
+    },
+    "expect": "Anycubic Kobra 2 Max"
+  },
+  {
+    "name": "MCU match - HC32F460 Anycubic Kobra S1",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan"],
+      "leds": [],
+      "hostname": "kobra-s1",
+      "printer_objects": [],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z"],
+      "kinematics": "cartesian",
+      "mcu": "HC32F460",
+      "mcu_list": ["HC32F460"],
+      "build_volume": {"x_min": 0, "x_max": 250, "y_min": 0, "y_max": 250, "z_max": 250}
+    },
+    "expect": "Anycubic Kobra S1"
+  },
+  {
+    "name": "MCU match - HC32F460 Anycubic Kobra S1 Max",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan"],
+      "leds": [],
+      "hostname": "kobra-s1-max",
+      "printer_objects": [],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z"],
+      "kinematics": "cartesian",
+      "mcu": "HC32F460",
+      "mcu_list": ["HC32F460"],
+      "build_volume": {"x_min": 0, "x_max": 400, "y_min": 0, "y_max": 400, "z_max": 450}
+    },
+    "expect": "Anycubic Kobra S1 Max"
+  },
+  {
+    "name": "MCU match - GD32F303 FLSUN V400",
+    "note": "The MCU is what separates the delta vendors",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan"],
+      "leds": [],
+      "hostname": "flsun-v400",
+      "printer_objects": ["delta_calibrate"],
+      "steppers": ["stepper_a", "stepper_b", "stepper_c"],
+      "kinematics": "delta",
+      "mcu": "GD32F303",
+      "mcu_list": ["GD32F303"]
+    },
+    "expect": "FLSUN V400"
+  },
+  {
+    "name": "MCU match - GD32F303 FLSUN Super Racer",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan"],
+      "leds": [],
+      "hostname": "flsun-sr",
+      "printer_objects": ["delta_calibrate"],
+      "steppers": ["stepper_a", "stepper_b", "stepper_c"],
+      "kinematics": "delta",
+      "mcu": "GD32F303",
+      "mcu_list": ["GD32F303"]
+    },
+    "expect": "FLSUN Super Racer"
+  },
+  {
+    "name": "MCU match - STM32H723 Creality K1",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": ["temperature_sensor chamber_temp"],
+      "fans": ["fan", "chamber_fan"],
+      "leds": [],
+      "hostname": "creality-k1",
+      "printer_objects": [],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z"],
+      "kinematics": "corexy",
+      "mcu": "STM32H723",
+      "mcu_list": ["STM32H723"],
+      "build_volume": {"x_min": 0, "x_max": 220, "y_min": 0, "y_max": 220, "z_max": 250}
+    },
+    "expect": "Creality K1"
+  },
+  {
+    "name": "MCU match - STM32H723 Creality K1 Max",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": ["temperature_sensor chamber_temp"],
+      "fans": ["fan", "chamber_fan"],
+      "leds": [],
+      "hostname": "creality-k1-max",
+      "printer_objects": [],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z"],
+      "kinematics": "corexy",
+      "mcu": "STM32H723",
+      "mcu_list": ["STM32H723"],
+      "build_volume": {"x_min": 0, "x_max": 300, "y_min": 0, "y_max": 300, "z_max": 300}
+    },
+    "expect": "Creality K1 Max"
+  },
+  {
+    "name": "MCU match - STM32H723 Creality K1C",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": ["temperature_sensor chamber_temp"],
+      "fans": ["fan", "chamber_fan"],
+      "leds": [],
+      "hostname": "creality-k1c",
+      "printer_objects": [],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z"],
+      "kinematics": "corexy",
+      "mcu": "STM32H723",
+      "mcu_list": ["STM32H723"]
+    },
+    "expect": "Creality K1C"
+  },
+  {
+    "name": "MCU match - STM32F401 Elegoo Neptune 4",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan"],
+      "leds": [],
+      "hostname": "elegoo-neptune4",
+      "printer_objects": [],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z"],
+      "kinematics": "cartesian",
+      "mcu": "STM32F401",
+      "mcu_list": ["STM32F401"]
+    },
+    "expect": "Elegoo Neptune 4"
+  },
+  {
+    "name": "MCU match - STM32F401 Elegoo Neptune 4 Pro",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan"],
+      "leds": [],
+      "hostname": "elegoo-neptune4-pro",
+      "printer_objects": [],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z"],
+      "kinematics": "cartesian",
+      "mcu": "STM32F401",
+      "mcu_list": ["STM32F401"]
+    },
+    "expect": "Elegoo Neptune 4 Pro"
+  },
+  {
+    "name": "MCU match - STM32F402 Qidi Plus 4",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed", "heater_chamber"],
+      "sensors": ["temperature_sensor chamber"],
+      "fans": ["fan", "chamber_fan"],
+      "leds": [],
+      "hostname": "qidi-plus4",
+      "printer_objects": [],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z"],
+      "kinematics": "corexy",
+      "mcu": "STM32F402",
+      "mcu_list": ["STM32F402"],
+      "build_volume": {"x_min": 0, "x_max": 305, "y_min": 0, "y_max": 305, "z_max": 305}
+    },
+    "expect": "Qidi Plus 4"
+  },
+  {
+    "name": "MCU match - STM32F103 Sovol SV08",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan"],
+      "leds": [],
+      "hostname": "sovol-sv08",
+      "printer_objects": ["quad_gantry_level"],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z", "stepper_z1", "stepper_z2", "stepper_z3"],
+      "kinematics": "corexy",
+      "mcu": "STM32F103",
+      "mcu_list": ["STM32F103"]
+    },
+    "expect": "Sovol SV08"
+  },
+  {
+    "name": "build_volume_range - Kobra S1 (250mm)",
+    "note": "Specific Kobra S1 hostname 250mm build volume + HC32F460 + \"kobra-s1\" hostname should match Kobra S1",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan"],
+      "leds": [],
+      "hostname": "kobra-s1",
+      "printer_objects": [],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z"],
+      "kinematics": "cartesian",
+      "mcu": "HC32F460",
+      "mcu_list": ["HC32F460"],
+      "build_volume": {"x_min": 0, "x_max": 250, "y_min": 0, "y_max": 250, "z_max": 250}
+    },
+    "expect": "Anycubic Kobra S1"
+  },
+  {
+    "name": "build_volume_range - Kobra 2 Max (420mm)",
+    "note": "Specific Kobra 2 Max hostname Large build volume + HC32F460 should identify as Kobra 2 Max",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan"],
+      "leds": [],
+      "hostname": "kobra-2-max",
+      "printer_objects": [],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z"],
+      "kinematics": "cartesian",
+      "mcu": "HC32F460",
+      "mcu_list": ["HC32F460"],
+      "build_volume": {"x_min": 0, "x_max": 420, "y_min": 0, "y_max": 420, "z_max": 500}
+    },
+    "expect": "Anycubic Kobra 2 Max"
+  },
+  {
+    "name": "Anycubic Kobra 2 Pro by hostname + build volume",
+    "note": "Kobra 2 Pro: cartesian bedslinger, LeviQ probe, ~220mm bed. The \"kobra2pro\" hostname outranks the sibling entries",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan", "heater_fan hotend_fan"],
+      "leds": [],
+      "hostname": "anycubic-kobra2pro",
+      "printer_objects": ["probe"],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z"],
+      "kinematics": "cartesian",
+      "build_volume": {"x_min": 0, "x_max": 220, "y_min": 0, "y_max": 220, "z_max": 250}
+    },
+    "expect": "Anycubic Kobra 2 Pro"
+  },
+  {
+    "name": "Anycubic Kobra 3 by ACE + CS1237 (cartesian, no hostname)",
+    "note": "Kobra 3 is a CARTESIAN bedslinger (confirmed via Anycubic's official printer_k3c_k3v2c.cfg), NOT corexy. The ACE multi-material unit and the CS1237 nozzle-load cell are its hardware discriminators. With no hostname it must still resolve to the Kobra 3 over any other cartesian bedslinger. generic - no Anycubic hint Must be the cartesian Kobra 3, NOT the corexy Kobra S1 and NOT a Kobra 2. filament_hub + cs1237 are hardware no other cartesian bedslinger carries",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan", "heater_fan hotend_fan"],
+      "leds": [],
+      "hostname": "mainsailos",
+      "printer_objects": ["filament_hub", "cs1237", "probe"],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z"],
+      "kinematics": "cartesian",
+      "build_volume": {"x_min": 0, "x_max": 250, "y_min": 0, "y_max": 250, "z_max": 260}
+    },
+    "expect": "Anycubic Kobra 3"
+  },
+  {
+    "name": "Anycubic Kobra 3 with hostname",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan", "heater_fan hotend_fan"],
+      "leds": [],
+      "hostname": "anycubic-kobra3",
+      "printer_objects": ["filament_hub", "cs1237"],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z"],
+      "kinematics": "cartesian",
+      "build_volume": {"x_min": 0, "x_max": 250, "y_min": 0, "y_max": 250, "z_max": 260}
+    },
+    "expect": "Anycubic Kobra 3"
+  },
+  {
+    "name": "Anycubic Kobra 3 V2 disambiguated by hostname",
+    "note": "Kobra 3 V2 shares hardware with the Kobra 3 (same ACE + CS1237 cartesian platform). The hostname is the only discriminator. \"kobra3v2\" must out-rank the plain Kobra 3's \"kobra3\" match.",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan", "heater_fan hotend_fan"],
+      "leds": [],
+      "hostname": "anycubic-kobra3v2",
+      "printer_objects": ["filament_hub", "cs1237"],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z"],
+      "kinematics": "cartesian",
+      "build_volume": {"x_min": 0, "x_max": 250, "y_min": 0, "y_max": 250, "z_max": 260}
+    },
+    "expect": "Anycubic Kobra 3 V2"
+  },
+  {
+    "name": "Anycubic Kobra S1 by corexy + ACE + filament_tracker",
+    "note": "Kobra S1 is an ENCLOSED CoreXY (confirmed via Anycubic printer_s1c.cfg) with the ACE unit and an ADC filament_tracker. With no hostname it must resolve to the S1, not the cartesian Kobra 3 (which shares the ~250mm bed). generic - no Anycubic hint CoreXY kinematics rules out the cartesian Kobra 3; ACE + filament_tracker + HC32F460 confirm the S1 over the S1 Max (which needs a chamber).",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan", "heater_fan hotend_fan"],
+      "leds": [],
+      "hostname": "mainsailos",
+      "printer_objects": ["filament_hub", "filament_tracker"],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z"],
+      "kinematics": "corexy",
+      "mcu": "HC32F460",
+      "mcu_list": ["HC32F460"],
+      "build_volume": {"x_min": 0, "x_max": 250, "y_min": 0, "y_max": 250, "z_max": 250}
+    },
+    "expect": "Anycubic Kobra S1"
+  },
+  {
+    "name": "Anycubic Kobra S1 Max by chamber + ACE",
+    "note": "Kobra S1 Max: enclosed CoreXY with a heated chamber (its exclusive discriminator over the S1) plus ACE, on the HC32F460. hostname + chamber + ACE separate the S1 Max",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan", "heater_fan hotend_fan"],
+      "leds": [],
+      "hostname": "anycubic-kobra-s1-max",
+      "printer_objects": ["chamber", "filament_hub"],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z"],
+      "kinematics": "corexy",
+      "mcu": "HC32F460",
+      "mcu_list": ["HC32F460"],
+      "build_volume": {"x_min": 0, "x_max": 350, "y_min": 0, "y_max": 350, "z_max": 350}
+    },
+    "expect": "Anycubic Kobra S1 Max"
+  },
+  {
+    "name": "Combined - Anycubic Kobra 2 full fingerprint",
+    "note": "Full Anycubic Kobra 2 setup with all data sources The HC32F460 MCU is hardware only the Kobra 2 family carries, so the full fingerprint names the model: like the FLSUN V400's GD32F303, the machine's own board separates it from the plain Kobra, whose entry claims no MCU and falls behind on identifying evidence.",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": ["temperature_sensor mcu_temp"],
+      "fans": ["fan", "heater_fan hotend_fan"],
+      "leds": [],
+      "hostname": "anycubic-kobra-2",
+      "printer_objects": [],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z"],
+      "kinematics": "cartesian",
+      "mcu": "HC32F460PETB",
+      "mcu_list": ["HC32F460PETB"],
+      "build_volume": {"x_min": 0, "x_max": 220, "y_min": 0, "y_max": 220, "z_max": 250}
+    },
+    "autosave": true,
+    "expect": "Anycubic Kobra 2"
+  },
+  {
+    "name": "Combined - FLSUN V400 full fingerprint",
+    "note": "Full FLSUN V400 setup with all data sources The MCU is what separates the delta vendors here",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": [],
+      "fans": ["fan", "heater_fan hotend_fan"],
+      "leds": [],
+      "hostname": "flsun-v400-delta",
+      "printer_objects": ["delta_calibrate", "bed_mesh"],
+      "steppers": ["stepper_a", "stepper_b", "stepper_c"],
+      "kinematics": "delta",
+      "mcu": "GD32F303RET6",
+      "mcu_list": ["GD32F303RET6"],
+      "build_volume": {"x_min": -150, "x_max": 150, "y_min": -150, "y_max": 150, "z_max": 400}
+    },
+    "expect": "FLSUN V400"
+  },
+  {
+    "name": "Combined - Qidi Plus 4 full fingerprint",
+    "note": "Full Qidi Plus 4 setup Remove LEDs to avoid matching AD5M Pro LED patterns Main + toolhead",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed", "heater_chamber"],
+      "sensors": ["temperature_sensor chamber"],
+      "fans": ["fan", "chamber_fan", "auxiliary_fan"],
+      "leds": [],
+      "hostname": "qidi-plus-4",
+      "printer_objects": ["z_tilt"],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z", "stepper_z1"],
+      "kinematics": "corexy",
+      "mcu": "STM32F402",
+      "mcu_list": ["STM32F402", "rp2040"],
+      "build_volume": {"x_min": 0, "x_max": 305, "y_min": 0, "y_max": 305, "z_max": 305}
+    },
+    "expect": "Qidi Plus 4"
+  },
+  {
+    "name": "MCU alone should not override strong hostname match",
+    "note": "Voron with Anycubic MCU (user swapped board) - hostname should win Note: Avoid using \"neopixel\" in leds as it matches AD5M Pro at 92% confidence Voron-specific LED name Anycubic MCU in Voron (unusual) Strong Voron evidence (QGL + 4Z + corexy + hostname) should override MCU",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": ["temperature_sensor chamber"],
+      "fans": ["bed_fans", "exhaust_fan"],
+      "leds": ["stealthburner_leds"],
+      "hostname": "voron-2-4-350",
+      "printer_objects": ["quad_gantry_level"],
+      "steppers": ["stepper_x", "stepper_y", "stepper_z", "stepper_z1", "stepper_z2", "stepper_z3"],
+      "kinematics": "corexy",
+      "mcu": "HC32F460",
+      "mcu_list": ["HC32F460"]
+    },
+    "expect": "Voron 2.4"
+  },
+  {
+    "name": "tool_count heuristic matches 4 extruders for AD5X",
+    "note": "4 extruders + ad5x hostname separate the AD5X from every other machine",
+    "hardware": {
+      "heaters": ["extruder", "extruder1", "extruder2", "extruder3", "heater_bed"],
+      "sensors": [],
+      "fans": [],
+      "leds": [],
+      "hostname": "ad5x-printer",
+      "printer_objects": [],
+      "steppers": [],
+      "kinematics": "corexy"
+    },
+    "expect": "FlashForge Adventurer 5X"
+  },
+  {
+    "name": "tool_count excludes extruder_stepper from count",
+    "note": "4 extruders + extruder_stepper should still count as 4 (not 5) extruder_stepper would be in printer_objects, not heaters, but verify the logic works by confirming the 4-extruder case still matches",
+    "hardware": {
+      "heaters": ["extruder", "extruder1", "extruder2", "extruder3", "heater_bed"],
+      "sensors": [],
+      "fans": [],
+      "leds": [],
+      "hostname": "ad5x-test",
+      "printer_objects": [],
+      "steppers": [],
+      "kinematics": "corexy"
+    },
+    "expect": "FlashForge Adventurer 5X"
+  },
+  {
+    "name": "cpu_arch_match heuristic matches MIPS architecture",
+    "hardware": {
+      "heaters": ["extruder", "extruder1", "extruder2", "extruder3", "heater_bed"],
+      "sensors": [],
+      "fans": [],
+      "leds": [],
+      "hostname": "ad5x-printer",
+      "printer_objects": [],
+      "steppers": [],
+      "kinematics": "corexy",
+      "cpu_arch": "MIPS Ingenic X2600"
+    },
+    "expect": "FlashForge Adventurer 5X"
+  },
+  {
+    "name": "cpu_arch_match is case-insensitive",
+    "note": "All lowercase",
+    "hardware": {
+      "heaters": ["extruder", "extruder1", "extruder2", "extruder3", "heater_bed"],
+      "sensors": [],
+      "fans": [],
+      "leds": [],
+      "hostname": "ad5x-test",
+      "printer_objects": [],
+      "steppers": [],
+      "kinematics": "corexy",
+      "cpu_arch": "mips ingenic x2600"
+    },
+    "expect": "FlashForge Adventurer 5X"
+  },
+  {
+    "name": "AD5X wins over AD5M when both share FlashForge characteristics",
+    "note": "Both AD5X and AD5M share: flashforge hostname, weight sensor, corexy AD5X should win due to IFS objects and 4-extruder tool count",
+    "hardware": {
+      "heaters": ["extruder", "extruder1", "extruder2", "extruder3", "heater_bed"],
+      "sensors": ["weightValue", "weight"],
+      "fans": [],
+      "leds": [],
+      "hostname": "flashforge",
+      "printer_objects": ["zmod_ifs_switch_sensor _ifs_port_sensor_1", "gcode_macro SET_EXTRUDER_SLOT"],
+      "steppers": [],
+      "kinematics": "corexy"
+    },
+    "expect": "FlashForge Adventurer 5X"
+  },
+  {
+    "name": "macro_exclude prevents stock match when ForgeX present",
+    "note": "Stock AD5M Pro entry has macro_exclude for SUPPORT_FORGE_X When ForgeX IS present, only the ForgeX entry should match",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": ["tvocValue", "weightValue"],
+      "fans": [],
+      "leds": ["led chamber_light"],
+      "hostname": "flashforge-ad5m-pro",
+      "printer_objects": ["mod_params", "gcode_macro SUPPORT_FORGE_X"],
+      "steppers": [],
+      "kinematics": "corexy"
+    },
+    "expect": "FlashForge Adventurer 5M Pro (ForgeX)"
+  },
+  {
+    "name": "genuine AD5M Pro shape still detects as AD5M Pro",
+    "note": "Stock AD5M Pro fingerprint: chamber_light LED + tvoc/weight sensors + FlashForge hostname. The LED heuristic stays a useful corroborating signal (it breaks the Pro-vs-5M tie), and the sensor/hostname heuristics alone carry detection well past the high-confidence bar.",
+    "hardware": {
+      "heaters": ["extruder", "heater_bed"],
+      "sensors": ["tvocValue", "weightValue", "temperature_sensor chamber_temp"],
+      "fans": ["fan", "fan_generic exhaust_fan"],
+      "leds": ["led chamber_light"],
+      "hostname": "flashforge-ad5m-pro",
+      "kinematics": "corexy"
+    },
+    "expect": "FlashForge Adventurer 5M Pro"
+  }
+]

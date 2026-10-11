@@ -4,17 +4,17 @@
 // MacrosPanel edit-mode model: the pure per-row decision logic
 // (macro_edit_logic.h), the SettingsManager hidden-set round-trip, and the
 // panel model methods (enter/exit edit mode, toggle_row) driven through a
-// friend test accessor. Widget instantiation is intentionally NOT exercised
-// here — the row widgets are owned by the XML <repeat> and the singleton panel
-// has the known PrintStatusPanel-style lifetime hazard, so we validate the
-// subject-driving logic (the panel's sole responsibility) instead.
+// friend test accessor. Rows here are the values a row binds, not widgets;
+// test_ui_panel_macros_rows.cpp drives the real row widgets.
 
 #include "ui_panel_macros.h"
 #include "ui_update_queue.h"
 
 #include "../lvgl_test_fixture.h"
+#include "../test_helpers/macros_panel_test_access.h"
 #include "config.h"
 #include "macro_edit_logic.h"
+#include "macro_param_cache.h"
 #include "settings_manager.h"
 
 #include <algorithm>
@@ -23,66 +23,9 @@
 #include <vector>
 
 #include "../catch_amalgamated.hpp"
+#include "hv/json.hpp"
 
 using namespace helix::macros;
-
-// ---------------------------------------------------------------------------
-// Friend accessor — private model access without prod-header test methods (L088)
-// ---------------------------------------------------------------------------
-struct MacrosPanelTestAccess {
-    static void prepare(MacrosPanel& p, std::vector<std::string> macros) {
-        // HelixTestFixture::reset_all() does NOT clear Config data, and the
-        // per-printer "macros/hidden" key is a process-singleton — reset it so
-        // each case starts key-absent (first-run seed) regardless of order.
-        helix::Config::get_instance()->reset_to_defaults();
-        // The test build's get_moonraker_api() stub always returns nullptr
-        // (ui_test_utils.cpp), so refresh_macros() no-ops and keeps the
-        // injected list — no live API can clobber it.
-        p.init_subjects();
-        p.ui_alive_ = true;
-        p.edit_mode_ = false;
-        p.pending_hidden_.clear();
-        p.all_macros_ = std::move(macros);
-        std::sort(p.all_macros_.begin(), p.all_macros_.end());
-    }
-    static void teardown(MacrosPanel& p) {
-        p.edit_mode_ = false;
-        p.pending_hidden_.clear();
-        p.all_macros_.clear();
-        p.displayed_.clear();
-        p.ui_alive_ = false;
-    }
-    static void enter(MacrosPanel& p) {
-        p.enter_edit_mode();
-    }
-    static void exit(MacrosPanel& p, bool save) {
-        p.exit_edit_mode(save);
-    }
-    static void toggle(MacrosPanel& p, size_t i) {
-        p.toggle_row(i);
-    }
-    static const std::vector<std::string>& displayed(MacrosPanel& p) {
-        return p.displayed_;
-    }
-    static const std::set<std::string>& pending_hidden(MacrosPanel& p) {
-        return p.pending_hidden_;
-    }
-    static bool edit_mode(MacrosPanel& p) {
-        return p.edit_mode_;
-    }
-    static int visible_int(MacrosPanel& p, size_t i) {
-        return lv_subject_get_int(p.visible_pool_.at(i));
-    }
-    static int row_count(MacrosPanel& p) {
-        return lv_subject_get_int(&p.macro_row_count_);
-    }
-    static int edit_mode_subject(MacrosPanel& p) {
-        return lv_subject_get_int(&p.macro_edit_mode_);
-    }
-    static int save_hidden_subject(MacrosPanel& p) {
-        return lv_subject_get_int(&p.macros_edit_save_hidden_);
-    }
-};
 
 static size_t index_of(MacrosPanel& p, const std::string& name) {
     const auto& d = MacrosPanelTestAccess::displayed(p);
@@ -157,6 +100,22 @@ TEST_CASE("per-row values: edit mode hides chevron but keeps desc, visible track
     REQUIRE(hidden.visible == 0); // hidden -> unchecked
 }
 
+TEST_CASE("per-row values: the defaults button needs edit mode AND known params",
+          "[macros][editmode]") {
+    // Edit mode + KNOWN_PARAMS -> the tune button shows.
+    auto editable = compute_row_values(/*edit=*/true, /*hidden=*/false, /*has_desc=*/true,
+                                       /*no_params=*/false, /*has_params=*/true);
+    REQUIRE(editable.defaults_hidden == 0);
+
+    // Every other combination hides it: edit mode without a declared parameter
+    // list (nothing to save), and normal mode even with one (a run-mode row
+    // must stay a one-tap run).
+    auto no_list = compute_row_values(true, false, true, false, /*has_params=*/false);
+    REQUIRE(no_list.defaults_hidden == 1);
+    auto run_mode = compute_row_values(/*edit=*/false, false, true, false, /*has_params=*/true);
+    REQUIRE(run_mode.defaults_hidden == 1);
+}
+
 // ===========================================================================
 // SettingsManager round-trip
 // ===========================================================================
@@ -203,7 +162,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "enter edit mode shows all macros incl. _-pref
     MacrosPanelTestAccess::teardown(p);
 }
 
-TEST_CASE_METHOD(LVGLTestFixture, "toggle_row flips pending_hidden_ and the visible pool int",
+TEST_CASE_METHOD(LVGLTestFixture, "toggle_row flips pending_hidden_ and the row's visible value",
                  "[macros][editmode]") {
     auto& p = get_global_macros_panel();
     MacrosPanelTestAccess::prepare(p, {"CLEAN_NOZZLE", "LOAD", "_HOME_Z"});
@@ -276,4 +235,62 @@ TEST_CASE_METHOD(LVGLTestFixture, "normal mode after save excludes the hidden ma
     REQUIRE(std::find(shown.begin(), shown.end(), "_HOME_Z") == shown.end());
 
     MacrosPanelTestAccess::teardown(p);
+}
+
+TEST_CASE_METHOD(LVGLTestFixture,
+                 "edit mode offers the defaults editor only on rows with known params",
+                 "[macros][editmode]") {
+    auto& cache = helix::MacroParamCache::instance();
+    cache.clear();
+    nlohmann::json config;
+    config["gcode_macro WITH_PARAMS"]["gcode"] = "G1 E{params.TEMP|default(10)}";
+    config["gcode_macro NO_PARAMS"]["gcode"] = "G28";
+    const std::string with_params = "WITH_PARAMS";
+    const std::string no_params = "NO_PARAMS";
+    cache.populate_from_configfile(config, {with_params, no_params});
+
+    auto& p = get_global_macros_panel();
+    MacrosPanelTestAccess::prepare(p, {"WITH_PARAMS", "NO_PARAMS"});
+
+    MacrosPanelTestAccess::enter(p);
+    const size_t i_params = index_of(p, "WITH_PARAMS");
+    const size_t i_plain = index_of(p, "NO_PARAMS");
+    REQUIRE(MacrosPanelTestAccess::defaults_hidden_int(p, i_params) == 0);
+    REQUIRE(MacrosPanelTestAccess::defaults_hidden_int(p, i_plain) == 1);
+
+    // Leaving edit mode hides the affordance on every row again.
+    MacrosPanelTestAccess::exit(p, /*save=*/false);
+    helix::ui::UpdateQueue::instance().drain();
+    REQUIRE(MacrosPanelTestAccess::defaults_hidden_int(p, i_params) == 1);
+
+    MacrosPanelTestAccess::teardown(p);
+    cache.clear();
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "opening the panel builds its rows once", "[macros][editmode]") {
+    // destroy_on_close: create() builds the rows for every open, so activation rebuilds
+    // only when the discovered macros have changed since.
+    MacrosPanel p;
+    MacrosPanelTestAccess::prepare(p, {"CLEAN_NOZZLE"});
+    MacrosPanelTestAccess::rebuild(p);
+    REQUIRE(MacrosPanelTestAccess::displayed(p).size() == 1);
+
+    // A list that differs from what was built but did not come from discovery: a rebuild
+    // here would pick it up.
+    MacrosPanelTestAccess::set_macros(p, {"CLEAN_NOZZLE", "PRINT_START"});
+    p.on_activate();
+    helix::ui::UpdateQueue::instance().drain();
+
+    CHECK(MacrosPanelTestAccess::displayed(p).size() == 1);
+    MacrosPanelTestAccess::teardown(p);
+}
+
+TEST_CASE("panel_macros leaves out the leveling-skip wrappers", "[macros][skip_wrappers]") {
+    const std::unordered_set<std::string> macros = {"PRINT_START", "BED_MESH_CALIBRATE",
+                                                    "QUAD_GANTRY_LEVEL", "_HELIX_PREP"};
+    CHECK(panel_macros(macros, {"BED_MESH_CALIBRATE", "BED_MESH_CLEAR", "QUAD_GANTRY_LEVEL"}) ==
+          std::vector<std::string>{"PRINT_START", "_HELIX_PREP"});
+    // Not wrapped: the printer's own BED_MESH_CALIBRATE macro stays listed.
+    CHECK(panel_macros(macros, {}) == std::vector<std::string>{"BED_MESH_CALIBRATE", "PRINT_START",
+                                                               "QUAD_GANTRY_LEVEL", "_HELIX_PREP"});
 }

@@ -5,26 +5,34 @@
 
 #include "ui_callback_helpers.h"
 #include "ui_color_picker.h"
-#include "ui_global_panel_helper.h"
 #include "ui_modal.h"
-#include "ui_nav_manager.h"
+#include "ui_nav.h"
 #include "ui_panel_common.h"
+#include "ui_search_debounce.h"
 #include "ui_subject_registry.h"
+#include "ui_swatch.h"
+#include "ui_temperature_utils.h"
+#include "ui_timer_guard.h"
 #include "ui_toast_manager.h"
 #include "ui_update_queue.h"
 #include "ui_utils.h"
 
 #include "app_globals.h"
+#include "color_utils.h"
 #include "filament_database.h"
+#include "filament_display_name.h"
 #include "i_moonraker_api.h"
+#include "static_panel_registry.h"
+#include "text_io.h"
 #include "theme_manager.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
-#include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <unordered_map>
 
@@ -36,49 +44,27 @@ namespace {
 constexpr size_t MAX_VENDOR_NAME_LEN = 256;
 constexpr size_t MAX_VENDOR_URL_LEN = 2048;
 
-/// Return a lowercased copy of the input string
-std::string to_lower(std::string s) {
-    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); });
-    return s;
-}
-
-/// Return a whitespace-trimmed copy of the input string
-std::string trim(const std::string& s) {
-    auto start = s.find_first_not_of(" \t\n\r\f\v");
-    if (start == std::string::npos)
-        return "";
-    auto end = s.find_last_not_of(" \t\n\r\f\v");
-    return s.substr(start, end - start + 1);
-}
-
-/// Set a JSON temperature range object, only including fields with positive values
-void set_temp_range(nlohmann::json& data, const char* key, int min_val, int max_val) {
-    if (min_val > 0 || max_val > 0) {
-        data[key] = nlohmann::json::object();
-        if (min_val > 0)
-            data[key]["min"] = min_val;
-        if (max_val > 0)
-            data[key]["max"] = max_val;
+/// Spoolman stores one integer temperature per filament. A catalog range
+/// becomes its midpoint; a range with one end set becomes that end.
+void set_spoolman_temp(nlohmann::json& data, const char* key, int min_val, int max_val) {
+    if (min_val > 0 && max_val > 0) {
+        data[key] = (min_val + max_val) / 2;
+    } else if (min_val > 0 || max_val > 0) {
+        data[key] = std::max(min_val, max_val);
     }
 }
 
 } // namespace
 
 // ============================================================================
-// Global Instance
-// ============================================================================
-
-DEFINE_GLOBAL_PANEL(SpoolWizardOverlay, g_spool_wizard, get_global_spool_wizard)
-
-// ============================================================================
 // Constructor / Destructor
 // ============================================================================
 
-SpoolWizardOverlay::SpoolWizardOverlay() {
-    spdlog::trace("[{}] Constructor", get_name());
-}
+// Out of line: ColorPicker is incomplete in the header.
+SpoolWizardOverlay::SpoolWizardOverlay() = default;
 
 SpoolWizardOverlay::~SpoolWizardOverlay() {
+    cancel_search_timer();
     deinit_subjects();
 }
 
@@ -112,6 +98,9 @@ void SpoolWizardOverlay::init_subjects() {
                                   "wizard_summary_vendor", subjects_);
         UI_MANAGED_SUBJECT_STRING(summary_filament_subject_, summary_filament_buf_, "",
                                   "wizard_summary_filament", subjects_);
+        UI_MANAGED_SUBJECT_COLOR(summary_color_subject_, lv_color_hex(0x808080),
+                                 "wizard_summary_color", subjects_);
+        UI_MANAGED_SUBJECT_INT(summary_edge_subject_, 0, "wizard_summary_edge", subjects_);
 
         // Create vendor/filament form visibility toggles
         UI_MANAGED_SUBJECT_INT(show_create_vendor_subject_, 0, "spool_wizard_show_create_vendor",
@@ -131,11 +120,26 @@ void SpoolWizardOverlay::init_subjects() {
         // Can create vendor (form validation)
         UI_MANAGED_SUBJECT_INT(can_create_vendor_subject_, 0, "spool_wizard_can_create_vendor",
                                subjects_);
+
+        // SpoolmanDB search: whether this server has it, what the section
+        // shows, and one row's worth of subjects per result
+        UI_MANAGED_SUBJECT_INT(catalog_available_subject_, 0, "spool_db_available", subjects_);
+        UI_MANAGED_SUBJECT_INT(catalog_state_subject_, 0, "spool_db_state", subjects_);
+        UI_MANAGED_SUBJECT_INT(catalog_count_subject_, 0, "spool_db_result_count", subjects_);
+        const size_t rows = static_cast<size_t>(helix::SpoolmanCatalogSearch::kResultLimit);
+        catalog_titles_.ensure_size(rows);
+        catalog_details_.ensure_size(rows);
+        catalog_colors_.ensure_size(rows);
+        catalog_edges_.ensure_size(rows);
     });
 }
 
 void SpoolWizardOverlay::deinit_subjects() {
     deinit_subjects_base(subjects_);
+    catalog_titles_.reclaim();
+    catalog_details_.reclaim();
+    catalog_colors_.reclaim();
+    catalog_edges_.reclaim();
 }
 
 // ============================================================================
@@ -143,63 +147,191 @@ void SpoolWizardOverlay::deinit_subjects() {
 // ============================================================================
 
 void SpoolWizardOverlay::register_callbacks() {
-    if (callbacks_registered_) {
-        spdlog::debug("[{}] Callbacks already registered", get_name());
-        return;
-    }
-
-    spdlog::debug("[{}] Registering event callbacks", get_name());
-
     register_xml_callbacks({
-        // Navigation
-        {"on_wizard_back", on_wizard_back},
-        {"on_wizard_next", on_wizard_next},
-        {"on_wizard_create", on_wizard_create},
+        {"on_wizard_back",
+         [](lv_event_t*) {
+             spdlog::debug("[SpoolWizard] Back clicked");
+             get_global_spool_wizard().navigate_back();
+         }},
+        {"on_wizard_next",
+         [](lv_event_t*) {
+             spdlog::debug("[SpoolWizard] Next clicked");
+             get_global_spool_wizard().navigate_next();
+         }},
+        {"on_wizard_create",
+         [](lv_event_t*) {
+             spdlog::debug("[SpoolWizard] Create clicked");
+             get_global_spool_wizard().on_create_requested();
+         }},
+        {"on_wizard_vendor_selected",
+         [](lv_event_t* e) {
+             lv_obj_t* target = static_cast<lv_obj_t*>(lv_event_get_target(e));
+             auto index =
+                 static_cast<int>(reinterpret_cast<intptr_t>(lv_obj_get_user_data(target)));
+             spdlog::debug("[SpoolWizard] Vendor selected, index={}", index);
+             get_global_spool_wizard().select_vendor(index);
+         }},
+        {"on_wizard_show_create_vendor_modal",
+         [](lv_event_t*) { get_global_spool_wizard().show_create_vendor_modal(); }},
+        {"on_wizard_cancel_create_vendor",
+         [](lv_event_t*) {
+             spdlog::debug("[SpoolWizard] Cancel create vendor");
+             auto& wiz = get_global_spool_wizard();
+             if (wiz.create_vendor_dialog_) {
+                 Modal::hide(wiz.create_vendor_dialog_);
+                 wiz.create_vendor_dialog_ = nullptr;
+             }
+         }},
+        {"on_wizard_vendor_search_changed",
+         [](lv_event_t*) { get_global_spool_wizard().on_search_key(); }},
+        {"on_wizard_catalog_result_selected",
+         [](lv_event_t* e) {
+             const char* index = static_cast<const char*>(lv_event_get_user_data(e));
+             get_global_spool_wizard().select_catalog_result(index ? std::atoi(index) : -1);
+         }},
+        {"on_wizard_new_vendor_name_changed",
+         [](lv_event_t* e) {
+             lv_obj_t* ta = static_cast<lv_obj_t*>(lv_event_get_target(e));
+             const char* text = lv_textarea_get_text(ta);
+             spdlog::debug("[SpoolWizard] New vendor name: '{}'", text ? text : "");
+             auto& wiz = get_global_spool_wizard();
+             wiz.set_new_vendor(text ? text : "", wiz.new_vendor_url_);
+         }},
+        {"on_wizard_new_vendor_url_changed",
+         [](lv_event_t* e) {
+             lv_obj_t* ta = static_cast<lv_obj_t*>(lv_event_get_target(e));
+             const char* text = lv_textarea_get_text(ta);
+             spdlog::debug("[SpoolWizard] New vendor URL: '{}'", text ? text : "");
+             auto& wiz = get_global_spool_wizard();
+             wiz.set_new_vendor(wiz.new_vendor_name_, text ? text : "");
+         }},
+        {"on_wizard_confirm_create_vendor",
+         [](lv_event_t*) { get_global_spool_wizard().confirm_create_vendor(); }},
+        {"on_wizard_filament_selected",
+         [](lv_event_t* e) {
+             lv_obj_t* target = static_cast<lv_obj_t*>(lv_event_get_target(e));
+             auto index =
+                 static_cast<int>(reinterpret_cast<intptr_t>(lv_obj_get_user_data(target)));
+             spdlog::debug("[SpoolWizard] Filament selected, index={}", index);
+             get_global_spool_wizard().select_filament(index);
+         }},
+        {"on_wizard_show_create_filament_modal",
+         [](lv_event_t*) { get_global_spool_wizard().show_create_filament_modal(); }},
+        {"on_wizard_cancel_create_filament",
+         [](lv_event_t*) {
+             spdlog::debug("[SpoolWizard] Cancel create filament");
+             auto& wiz = get_global_spool_wizard();
+             wiz.creating_new_filament_ = false;
+             if (wiz.create_filament_dialog_) {
+                 Modal::hide(wiz.create_filament_dialog_);
+                 wiz.create_filament_dialog_ = nullptr;
+             }
+         }},
+        {"on_wizard_material_changed",
+         [](lv_event_t* e) {
+             lv_obj_t* dropdown = static_cast<lv_obj_t*>(lv_event_get_target(e));
+             char buf[64] = {};
+             lv_dropdown_get_selected_str(dropdown, buf, sizeof(buf));
+             spdlog::debug("[SpoolWizard] Material changed: '{}'", buf);
+             get_global_spool_wizard().set_new_filament_material(buf);
+         }},
+        {"on_wizard_new_filament_name_changed",
+         [](lv_event_t* e) {
+             lv_obj_t* ta = static_cast<lv_obj_t*>(lv_event_get_target(e));
+             const char* text = lv_textarea_get_text(ta);
+             spdlog::debug("[SpoolWizard] New filament name: '{}'", text ? text : "");
+             auto& wiz = get_global_spool_wizard();
+             wiz.new_filament_name_ = text ? text : "";
+         }},
+        {"on_wizard_pick_filament_color",
+         [](lv_event_t*) { get_global_spool_wizard().pick_filament_color(); }},
+        {"on_wizard_nozzle_temp_changed",
+         [](lv_event_t* e) {
+             lv_obj_t* ta = static_cast<lv_obj_t*>(lv_event_get_target(e));
+             const char* text = lv_textarea_get_text(ta);
+             int val = text ? std::atoi(text) : 0;
+             auto& wiz = get_global_spool_wizard();
 
-        // Vendor step
-        {"on_wizard_vendor_selected", on_wizard_vendor_selected},
-        {"on_wizard_show_create_vendor_modal", on_wizard_show_create_vendor_modal},
-        {"on_wizard_cancel_create_vendor", on_wizard_cancel_create_vendor},
-        {"on_wizard_vendor_search_changed", on_wizard_vendor_search_changed},
-        {"on_wizard_new_vendor_name_changed", on_wizard_new_vendor_name_changed},
-        {"on_wizard_new_vendor_url_changed", on_wizard_new_vendor_url_changed},
-        {"on_wizard_confirm_create_vendor", on_wizard_confirm_create_vendor},
+             // Determine if this is min or max based on widget name
+             const char* name = lv_obj_get_name(ta);
+             if (name && std::string_view(name) == "nozzle_temp_min") {
+                 wiz.new_filament_nozzle_min_ = val;
+             } else {
+                 wiz.new_filament_nozzle_max_ = val;
+             }
 
-        // Filament step
-        {"on_wizard_filament_selected", on_wizard_filament_selected},
-        {"on_wizard_show_create_filament_modal", on_wizard_show_create_filament_modal},
-        {"on_wizard_cancel_create_filament", on_wizard_cancel_create_filament},
-        {"on_wizard_material_changed", on_wizard_material_changed},
-        {"on_wizard_new_filament_name_changed", on_wizard_new_filament_name_changed},
-        {"on_wizard_pick_filament_color", on_wizard_pick_filament_color},
-        {"on_wizard_nozzle_temp_changed", on_wizard_nozzle_temp_changed},
-        {"on_wizard_bed_temp_changed", on_wizard_bed_temp_changed},
-        {"on_wizard_filament_weight_changed", on_wizard_filament_weight_changed},
-        {"on_wizard_spool_weight_changed", on_wizard_spool_weight_changed},
-        {"on_wizard_confirm_create_filament", on_wizard_confirm_create_filament},
+             spdlog::debug("[SpoolWizard] Nozzle temp changed: {}-{}", wiz.new_filament_nozzle_min_,
+                           wiz.new_filament_nozzle_max_);
+         }},
+        {"on_wizard_bed_temp_changed",
+         [](lv_event_t* e) {
+             lv_obj_t* ta = static_cast<lv_obj_t*>(lv_event_get_target(e));
+             const char* text = lv_textarea_get_text(ta);
+             int val = text ? std::atoi(text) : 0;
+             auto& wiz = get_global_spool_wizard();
 
-        // Spool details step
-        {"on_wizard_remaining_weight_changed", on_wizard_remaining_weight_changed},
-        {"on_wizard_price_changed", on_wizard_price_changed},
-        {"on_wizard_lot_changed", on_wizard_lot_changed},
-        {"on_wizard_notes_changed", on_wizard_notes_changed},
+             const char* name = lv_obj_get_name(ta);
+             if (name && std::string_view(name) == "bed_temp_min") {
+                 wiz.new_filament_bed_min_ = val;
+             } else {
+                 wiz.new_filament_bed_max_ = val;
+             }
+
+             spdlog::debug("[SpoolWizard] Bed temp changed: {}-{}", wiz.new_filament_bed_min_,
+                           wiz.new_filament_bed_max_);
+         }},
+        {"on_wizard_filament_weight_changed",
+         [](lv_event_t* e) {
+             lv_obj_t* ta = static_cast<lv_obj_t*>(lv_event_get_target(e));
+             const char* text = lv_textarea_get_text(ta);
+             auto& wiz = get_global_spool_wizard();
+             wiz.new_filament_weight_ = text ? std::atof(text) : 0;
+             spdlog::debug("[SpoolWizard] Filament weight: {:.0f}g", wiz.new_filament_weight_);
+         }},
+        {"on_wizard_spool_weight_changed",
+         [](lv_event_t* e) {
+             lv_obj_t* ta = static_cast<lv_obj_t*>(lv_event_get_target(e));
+             const char* text = lv_textarea_get_text(ta);
+             auto& wiz = get_global_spool_wizard();
+             wiz.new_filament_spool_weight_ = text ? std::atof(text) : 0;
+             spdlog::debug("[SpoolWizard] Spool weight: {:.0f}g", wiz.new_filament_spool_weight_);
+         }},
+        {"on_wizard_confirm_create_filament",
+         [](lv_event_t*) { get_global_spool_wizard().confirm_create_filament(); }},
+        {"on_wizard_remaining_weight_changed",
+         [](lv_event_t* e) {
+             lv_obj_t* ta = static_cast<lv_obj_t*>(lv_event_get_target(e));
+             const char* text = lv_textarea_get_text(ta);
+             auto& wiz = get_global_spool_wizard();
+             wiz.spool_remaining_weight_ = text ? std::atof(text) : 0;
+             wiz.set_can_proceed(wiz.spool_remaining_weight_ > 0);
+             spdlog::debug("[SpoolWizard] Remaining weight: {:.0f}g", wiz.spool_remaining_weight_);
+         }},
+        {"on_wizard_price_changed",
+         [](lv_event_t* e) {
+             lv_obj_t* ta = static_cast<lv_obj_t*>(lv_event_get_target(e));
+             const char* text = lv_textarea_get_text(ta);
+             auto& wiz = get_global_spool_wizard();
+             wiz.spool_price_ = text ? std::atof(text) : 0;
+             spdlog::debug("[SpoolWizard] Price: {:.2f}", wiz.spool_price_);
+         }},
+        {"on_wizard_lot_changed",
+         [](lv_event_t* e) {
+             lv_obj_t* ta = static_cast<lv_obj_t*>(lv_event_get_target(e));
+             const char* text = lv_textarea_get_text(ta);
+             auto& wiz = get_global_spool_wizard();
+             wiz.spool_lot_nr_ = text ? text : "";
+             spdlog::debug("[SpoolWizard] Lot: '{}'", wiz.spool_lot_nr_);
+         }},
+        {"on_wizard_notes_changed",
+         [](lv_event_t* e) {
+             lv_obj_t* ta = static_cast<lv_obj_t*>(lv_event_get_target(e));
+             const char* text = lv_textarea_get_text(ta);
+             auto& wiz = get_global_spool_wizard();
+             wiz.spool_notes_ = text ? text : "";
+             spdlog::debug("[SpoolWizard] Notes: '{}'", wiz.spool_notes_);
+         }},
     });
-
-    callbacks_registered_ = true;
-    spdlog::debug("[{}] Event callbacks registered", get_name());
-}
-
-// ============================================================================
-// Create
-// ============================================================================
-
-lv_obj_t* SpoolWizardOverlay::create(lv_obj_t* parent) {
-    if (!create_overlay_from_xml(parent, "spool_wizard")) {
-        return nullptr;
-    }
-
-    spdlog::info("[{}] Overlay created successfully", get_name());
-    return overlay_root_;
 }
 
 // ============================================================================
@@ -218,10 +350,17 @@ void SpoolWizardOverlay::on_activate() {
 
     // Load vendors for step 0
     load_vendors();
+    probe_catalog_search();
 }
 
-void SpoolWizardOverlay::on_deactivate() {
-    spdlog::debug("[{}] on_deactivate()", get_name());
+void SpoolWizardOverlay::on_deactivating(DeactivateReason) {
+    spdlog::debug("[{}] on_deactivating()", get_name());
+
+    // A search answering after the wizard closed has nothing to show.
+    cancel_search_timer();
+    catalog_.invalidate();
+    catalog_in_flight_ = false;
+    catalog_has_pending_ = false;
 
     // Close create vendor modal if open
     if (create_vendor_dialog_) {
@@ -234,8 +373,6 @@ void SpoolWizardOverlay::on_deactivate() {
         Modal::hide(create_filament_dialog_);
         create_filament_dialog_ = nullptr;
     }
-
-    OverlayBase::on_deactivate();
 }
 
 void SpoolWizardOverlay::reset_state() {
@@ -269,6 +406,14 @@ void SpoolWizardOverlay::reset_state() {
     spool_lot_nr_.clear();
     spool_notes_.clear();
 
+    // SpoolmanDB search state
+    catalog_.invalidate();
+    catalog_in_flight_ = false;
+    catalog_has_pending_ = false;
+    catalog_pending_query_.clear();
+    catalog_results_.clear();
+    catalog_state_ = CatalogState::Idle;
+
     // Creation flow tracking
     created_vendor_id_ = -1;
     created_filament_id_ = -1;
@@ -285,6 +430,8 @@ void SpoolWizardOverlay::reset_state() {
         lv_subject_set_int(&vendor_count_subject_, -1);
         lv_subject_set_int(&filament_count_subject_, -1);
         lv_subject_set_int(&can_create_vendor_subject_, 0);
+        lv_subject_set_int(&catalog_state_subject_, 0);
+        lv_subject_set_int(&catalog_count_subject_, 0);
     }
 
     spdlog::debug("[{}] State reset for new wizard session", get_name());
@@ -313,31 +460,37 @@ void SpoolWizardOverlay::navigate_next() {
     if (next_step == Step::FILAMENT) {
         load_filaments();
     } else if (next_step == Step::SPOOL_DETAILS) {
-        // Pre-fill remaining weight from selected filament's net weight
-        spool_remaining_weight_ = selected_filament_.weight;
+        enter_spool_details();
+    }
+}
 
-        // Update UI fields if overlay is active
-        if (overlay_root_) {
-            lv_obj_t* weight_input = lv_obj_find_by_name(overlay_root_, "remaining_weight");
-            if (weight_input && spool_remaining_weight_ > 0) {
-                char buf[16];
-                std::snprintf(buf, sizeof(buf), "%.0f", spool_remaining_weight_);
-                lv_textarea_set_text(weight_input, buf);
-            }
+void SpoolWizardOverlay::enter_spool_details() {
+    // Pre-fill remaining weight from selected filament's net weight
+    spool_remaining_weight_ = selected_filament_.weight;
 
-            // Update summary color swatch from selected filament
-            lv_obj_t* swatch = lv_obj_find_by_name(overlay_root_, "summary_color_swatch");
-            if (swatch && !selected_filament_.color_hex.empty()) {
-                uint32_t color_val =
-                    std::strtoul(selected_filament_.color_hex.c_str(), nullptr, 16);
-                lv_obj_set_style_bg_color(swatch, lv_color_hex(color_val), 0);
-            }
+    // Update UI fields if overlay is active
+    if (overlay_root_) {
+        lv_obj_t* weight_input =
+            helix::ui::find_required(overlay_root_, "remaining_weight", get_name());
+        if (weight_input && spool_remaining_weight_ > 0) {
+            char buf[16];
+            std::snprintf(buf, sizeof(buf), "%.0f", spool_remaining_weight_);
+            lv_textarea_set_text(weight_input, buf);
         }
+    }
 
-        // Enable proceed if weight is pre-filled
-        if (spool_remaining_weight_ > 0) {
-            set_can_proceed(true);
-        }
+    // The summary swatch, edged where its colour would vanish into the card
+    uint32_t color_val = 0x808080;
+    helix::parse_hex_color(selected_filament_.color_hex.c_str(), color_val);
+    if (subjects_initialized_) {
+        lv_subject_set_color(&summary_color_subject_, lv_color_hex(color_val));
+        lv_subject_set_int(&summary_edge_subject_,
+                           helix::ui::swatch_needs_edge_here(color_val) ? 1 : 0);
+    }
+
+    // Enable proceed if weight is pre-filled
+    if (spool_remaining_weight_ > 0) {
+        set_can_proceed(true);
     }
 }
 
@@ -410,7 +563,7 @@ void SpoolWizardOverlay::update_step_label() {
 
     // Update header title directly
     if (overlay_root_) {
-        lv_obj_t* title = lv_obj_find_by_name(overlay_root_, "header_title");
+        lv_obj_t* title = helix::ui::find_required(overlay_root_, "header_title", get_name());
         if (title) {
             lv_label_set_text(title, step_label_buf_);
         }
@@ -436,6 +589,18 @@ void SpoolWizardOverlay::set_creating(bool val) {
     }
 }
 
+nlohmann::json SpoolWizardOverlay::vendor_create_payload(const std::string& name,
+                                                         const std::string& url) {
+    nlohmann::json data;
+    data["name"] = name;
+    // Spoolman's vendor has no URL field and drops unknown keys, so the
+    // website the user typed goes in the vendor's comment.
+    if (!url.empty()) {
+        data["comment"] = url;
+    }
+    return data;
+}
+
 void SpoolWizardOverlay::create_vendor_then_filament_then_spool() {
     IMoonrakerAPI* api = get_moonraker_api();
     if (!api) {
@@ -443,11 +608,7 @@ void SpoolWizardOverlay::create_vendor_then_filament_then_spool() {
         return;
     }
 
-    nlohmann::json data;
-    data["name"] = selected_vendor_.name;
-    if (!new_vendor_url_.empty()) {
-        data["url"] = new_vendor_url_;
-    }
+    const nlohmann::json data = vendor_create_payload(selected_vendor_.name, new_vendor_url_);
 
     api->spoolman().create_spoolman_vendor(
         data,
@@ -474,6 +635,33 @@ void SpoolWizardOverlay::create_vendor_then_filament_then_spool() {
         }));
 }
 
+nlohmann::json SpoolWizardOverlay::filament_create_payload(const FilamentEntry& f, int vendor_id) {
+    nlohmann::json data;
+    data["vendor_id"] = vendor_id;
+    data["name"] = f.name.empty() ? f.material + " " + f.color_name : f.name;
+    data["material"] = f.material;
+    if (!f.multi_color_hexes.empty()) {
+        data["multi_color_hexes"] = f.multi_color_hexes;
+        if (!f.multi_color_direction.empty()) {
+            data["multi_color_direction"] = f.multi_color_direction;
+        }
+    } else if (!f.color_hex.empty()) {
+        data["color_hex"] = f.color_hex;
+    }
+    // density and diameter are REQUIRED by Spoolman (no defaults in their API)
+    data["density"] = f.density > 0 ? f.density : 1.24;
+    data["diameter"] = f.diameter > 0 ? f.diameter : 1.75;
+    if (f.weight > 0) {
+        data["weight"] = f.weight;
+    }
+    if (f.spool_weight > 0) {
+        data["spool_weight"] = f.spool_weight;
+    }
+    set_spoolman_temp(data, "settings_extruder_temp", f.nozzle_temp_min, f.nozzle_temp_max);
+    set_spoolman_temp(data, "settings_bed_temp", f.bed_temp_min, f.bed_temp_max);
+    return data;
+}
+
 void SpoolWizardOverlay::create_filament_then_spool(int vendor_id) {
     IMoonrakerAPI* api = get_moonraker_api();
     if (!api) {
@@ -481,28 +669,7 @@ void SpoolWizardOverlay::create_filament_then_spool(int vendor_id) {
         return;
     }
 
-    nlohmann::json data;
-    data["vendor_id"] = vendor_id;
-    data["name"] = selected_filament_.name.empty()
-                       ? selected_filament_.material + " " + selected_filament_.color_name
-                       : selected_filament_.name;
-    data["material"] = selected_filament_.material;
-    if (!selected_filament_.color_hex.empty()) {
-        data["color_hex"] = selected_filament_.color_hex;
-    }
-    // density and diameter are REQUIRED by Spoolman (no defaults in their API)
-    data["density"] = selected_filament_.density > 0 ? selected_filament_.density : 1.24;
-    data["diameter"] = selected_filament_.diameter > 0 ? selected_filament_.diameter : 1.75;
-    if (selected_filament_.weight > 0) {
-        data["weight"] = selected_filament_.weight;
-    }
-    if (selected_filament_.spool_weight > 0) {
-        data["spool_weight"] = selected_filament_.spool_weight;
-    }
-    set_temp_range(data, "settings_extruder_temp", selected_filament_.nozzle_temp_min,
-                   selected_filament_.nozzle_temp_max);
-    set_temp_range(data, "settings_bed_temp", selected_filament_.bed_temp_min,
-                   selected_filament_.bed_temp_max);
+    const nlohmann::json data = filament_create_payload(selected_filament_, vendor_id);
 
     api->spoolman().create_spoolman_filament(
         data,
@@ -578,7 +745,7 @@ void SpoolWizardOverlay::on_creation_success(const SpoolInfo& spool) {
     }
 
     // Close the wizard overlay
-    NavigationManager::instance().go_back();
+    helix::nav::go_back();
 }
 
 void SpoolWizardOverlay::on_creation_error(const std::string& message, int rollback_vendor_id,
@@ -625,46 +792,15 @@ void SpoolWizardOverlay::on_creation_error(const std::string& message, int rollb
 }
 
 // ============================================================================
-// Static Event Callbacks
-// ============================================================================
-
-void SpoolWizardOverlay::on_wizard_back(lv_event_t* /*e*/) {
-    spdlog::debug("[SpoolWizard] Back clicked");
-    get_global_spool_wizard().navigate_back();
-}
-
-void SpoolWizardOverlay::on_wizard_next(lv_event_t* /*e*/) {
-    spdlog::debug("[SpoolWizard] Next clicked");
-    get_global_spool_wizard().navigate_next();
-}
-
-void SpoolWizardOverlay::on_wizard_create(lv_event_t* /*e*/) {
-    spdlog::debug("[SpoolWizard] Create clicked");
-    get_global_spool_wizard().on_create_requested();
-}
-
-// ============================================================================
 // Vendor Step Logic
 // ============================================================================
 
 std::vector<SpoolWizardOverlay::VendorEntry>
-SpoolWizardOverlay::merge_vendors(const std::vector<VendorEntry>& external_vendors,
-                                  const std::vector<VendorEntry>& server_vendors) {
-    // Build a map keyed by lowercased name for deduplication
+SpoolWizardOverlay::sorted_vendors(const std::vector<VendorEntry>& server_vendors) {
+    // Spoolman does not keep vendor names unique; the last of a name wins.
     std::unordered_map<std::string, VendorEntry> by_name;
-
-    // Server vendors first (they have IDs, so they take priority)
     for (const auto& sv : server_vendors) {
-        by_name[to_lower(sv.name)] = sv;
-    }
-
-    // Merge in external DB vendors -- mark from_database, keep server ID if already present
-    for (const auto& ext : external_vendors) {
-        auto [it, inserted] =
-            by_name.try_emplace(to_lower(ext.name), VendorEntry{ext.name, -1, false, true});
-        if (!inserted) {
-            it->second.from_database = true;
-        }
+        by_name[helix::text_io::to_lower(sv.name)] = sv;
     }
 
     // Collect and sort alphabetically by name (case-insensitive)
@@ -674,7 +810,7 @@ SpoolWizardOverlay::merge_vendors(const std::vector<VendorEntry>& external_vendo
         result.push_back(std::move(entry));
     }
     std::sort(result.begin(), result.end(), [](const VendorEntry& a, const VendorEntry& b) {
-        return to_lower(a.name) < to_lower(b.name);
+        return helix::text_io::to_lower(a.name) < helix::text_io::to_lower(b.name);
     });
 
     return result;
@@ -687,11 +823,11 @@ SpoolWizardOverlay::filter_vendor_list(const std::vector<VendorEntry>& vendors,
         return vendors;
     }
 
-    std::string lower_query = to_lower(query);
+    std::string lower_query = helix::text_io::to_lower(query);
 
     std::vector<VendorEntry> result;
     for (const auto& v : vendors) {
-        if (to_lower(v.name).find(lower_query) != std::string::npos) {
+        if (helix::text_io::to_lower(v.name).find(lower_query) != std::string::npos) {
             result.push_back(v);
         }
     }
@@ -716,7 +852,6 @@ void SpoolWizardOverlay::load_vendors() {
         lv_subject_set_int(&show_create_vendor_subject_, 0);
     }
 
-    // Get server + external vendors (both async via IMoonrakerAPI)
     IMoonrakerAPI* api = get_moonraker_api();
     if (!api) {
         spdlog::warn("[{}] No API available, showing empty vendors", get_name());
@@ -728,84 +863,44 @@ void SpoolWizardOverlay::load_vendors() {
         return;
     }
 
-    // Shared context to coordinate two async calls (atomic counter for thread safety)
-    struct VendorLoadContext {
-        std::vector<VendorEntry> server_vendors;
-        std::vector<VendorEntry> external_vendors;
-        std::atomic<int> completed{0};
-    };
-    auto ctx = std::make_shared<VendorLoadContext>();
+    // The server's vendors only: Spoolman serves its external database as one
+    // multi-megabyte file with no vendor listing, too heavy to pull here.
+    // Captures a lifetime token rather than touching `this->lifetime_`
+    // off-thread (#707 TOCTOU); the deferred body is skipped outright if the
+    // overlay was deactivated in the meantime.
+    auto apply = [this, tok = lifetime_.token()](std::vector<VendorEntry> server_vendors) {
+        tok.defer("SpoolWizard::load_vendors_apply",
+                  [this, server_vendors = std::move(server_vendors)]() {
+                      all_vendors_ = sorted_vendors(server_vendors);
+                      filtered_vendors_ = filter_vendor_list(all_vendors_, vendor_search_query_);
 
-    // Helper lambda — called by whichever callback completes second, on whichever
-    // background thread got there. Captures a lifetime token rather than touching
-    // `this->lifetime_` off-thread (#707 TOCTOU); the deferred body is skipped
-    // outright if the overlay was deactivated in the meantime.
-    auto finish = [this, ctx, tok = lifetime_.token()]() {
-        tok.defer("SpoolWizard::load_vendors_apply", [this, ctx]() {
-            all_vendors_ = merge_vendors(ctx->external_vendors, ctx->server_vendors);
-            filtered_vendors_ = filter_vendor_list(all_vendors_, vendor_search_query_);
+                      if (subjects_initialized_) {
+                          lv_subject_set_int(&vendors_loading_subject_, 0);
+                          lv_subject_set_int(&vendor_count_subject_,
+                                             static_cast<int32_t>(filtered_vendors_.size()));
+                      }
 
-            if (subjects_initialized_) {
-                lv_subject_set_int(&vendors_loading_subject_, 0);
-                lv_subject_set_int(&vendor_count_subject_,
-                                   static_cast<int32_t>(filtered_vendors_.size()));
-            }
-
-            populate_vendor_list();
-            spdlog::info("[SpoolWizard] Loaded {} vendors total ({} server + {} external)",
-                         all_vendors_.size(), ctx->server_vendors.size(),
-                         ctx->external_vendors.size());
-        });
+                      populate_vendor_list();
+                      spdlog::info("[SpoolWizard] Loaded {} vendors", all_vendors_.size());
+                  });
     };
 
-    // Fetch server vendors
-    // Fetch server vendors
     api->spoolman().get_spoolman_vendors(
-        [ctx, finish](const std::vector<VendorInfo>& server_list) {
-            ctx->server_vendors.reserve(server_list.size());
+        [apply](const std::vector<VendorInfo>& server_list) {
+            std::vector<VendorEntry> server_vendors;
+            server_vendors.reserve(server_list.size());
             for (const auto& vi : server_list) {
                 VendorEntry entry;
                 entry.name = vi.name;
                 entry.server_id = vi.id;
                 entry.from_server = true;
-                entry.from_database = false;
-                ctx->server_vendors.push_back(std::move(entry));
+                server_vendors.push_back(std::move(entry));
             }
-            spdlog::debug("[SpoolWizard] Got {} vendors from server", ctx->server_vendors.size());
-            if (ctx->completed.fetch_add(1) == 1) {
-                finish();
-            }
+            apply(std::move(server_vendors));
         },
-        [ctx, finish](const MoonrakerError& err) {
+        [apply](const MoonrakerError& err) {
             spdlog::warn("[SpoolWizard] Failed to fetch server vendors: {}", err.message);
-            if (ctx->completed.fetch_add(1) == 1) {
-                finish();
-            }
-        });
-
-    // Fetch external DB vendors
-    api->spoolman().get_spoolman_external_vendors(
-        [ctx, finish](const std::vector<VendorInfo>& ext_list) {
-            ctx->external_vendors.reserve(ext_list.size());
-            for (const auto& vi : ext_list) {
-                VendorEntry entry;
-                entry.name = vi.name;
-                entry.server_id = -1;
-                entry.from_server = false;
-                entry.from_database = true;
-                ctx->external_vendors.push_back(std::move(entry));
-            }
-            spdlog::debug("[SpoolWizard] Got {} vendors from external DB",
-                          ctx->external_vendors.size());
-            if (ctx->completed.fetch_add(1) == 1) {
-                finish();
-            }
-        },
-        [ctx, finish](const MoonrakerError& err) {
-            spdlog::warn("[SpoolWizard] Failed to fetch external vendors: {}", err.message);
-            if (ctx->completed.fetch_add(1) == 1) {
-                finish();
-            }
+            apply({});
         });
 }
 
@@ -837,7 +932,7 @@ void SpoolWizardOverlay::select_vendor(int index) {
 
     // Update checked state on vendor rows
     if (overlay_root_) {
-        lv_obj_t* vendor_list = lv_obj_find_by_name(overlay_root_, "vendor_list");
+        lv_obj_t* vendor_list = helix::ui::find_required(overlay_root_, "vendor_list", get_name());
         if (vendor_list) {
             uint32_t count = lv_obj_get_child_count(vendor_list);
             for (uint32_t i = 0; i < count; i++) {
@@ -847,7 +942,12 @@ void SpoolWizardOverlay::select_vendor(int index) {
         }
     }
 
-    // Update subjects for display on filament step
+    publish_vendor_selection();
+    set_can_proceed(true);
+}
+
+void SpoolWizardOverlay::publish_vendor_selection() {
+    // Shown on the filament step header and the spool step summary
     if (subjects_initialized_) {
         std::snprintf(selected_vendor_name_buf_, sizeof(selected_vendor_name_buf_), "%s",
                       selected_vendor_.name.c_str());
@@ -857,15 +957,13 @@ void SpoolWizardOverlay::select_vendor(int index) {
                       selected_vendor_.name.c_str());
         lv_subject_copy_string(&summary_vendor_subject_, summary_vendor_buf_);
     }
-
-    set_can_proceed(true);
 }
 
 void SpoolWizardOverlay::set_new_vendor(const std::string& name, const std::string& url) {
     new_vendor_name_ = name.substr(0, MAX_VENDOR_NAME_LEN);
     new_vendor_url_ = url.substr(0, MAX_VENDOR_URL_LEN);
 
-    bool valid = !trim(new_vendor_name_).empty();
+    bool valid = !helix::text_io::trim(new_vendor_name_).empty();
 
     if (subjects_initialized_) {
         lv_subject_set_int(&can_create_vendor_subject_, valid ? 1 : 0);
@@ -880,9 +978,8 @@ void SpoolWizardOverlay::populate_vendor_list() {
         return;
     }
 
-    lv_obj_t* vendor_list = lv_obj_find_by_name(overlay_root_, "vendor_list");
+    lv_obj_t* vendor_list = helix::ui::find_required(overlay_root_, "vendor_list", get_name());
     if (!vendor_list) {
-        spdlog::error("[{}] vendor_list widget not found", get_name());
         return;
     }
 
@@ -904,21 +1001,18 @@ void SpoolWizardOverlay::populate_vendor_list() {
         lv_obj_set_user_data(row, reinterpret_cast<void*>(static_cast<intptr_t>(i)));
 
         // Set vendor name
-        lv_obj_t* name_label = lv_obj_find_by_name(row, "vendor_name");
+        lv_obj_t* name_label = helix::ui::find_required(row, "vendor_name", get_name());
         if (name_label) {
             lv_label_set_text(name_label, vendor.name.c_str());
         }
 
         // Set source badge
-        lv_obj_t* source_label = lv_obj_find_by_name(row, "vendor_source");
+        lv_obj_t* source_label = helix::ui::find_required(row, "vendor_source", get_name());
         if (source_label) {
-            if (vendor.from_server && vendor.from_database) {
-                lv_label_set_text(source_label, lv_tr("Both"));
-            } else if (vendor.from_server) {
-                lv_label_set_text(source_label, "Spoolman"); // i18n: product name, do not translate
-            } else {
-                lv_label_set_text(source_label, lv_tr("Database"));
-            }
+            // A vendor not yet on the server is one the user is creating.
+            lv_label_set_text(source_label, vendor.from_server
+                                                ? "Spoolman"
+                                                : ""); // i18n: product name, do not translate
         }
     }
 
@@ -926,89 +1020,48 @@ void SpoolWizardOverlay::populate_vendor_list() {
 }
 
 // ============================================================================
-// Vendor Step Event Callbacks
+// Vendor Step Handlers
 // ============================================================================
 
-void SpoolWizardOverlay::on_wizard_vendor_selected(lv_event_t* e) {
-    lv_obj_t* target = static_cast<lv_obj_t*>(lv_event_get_target(e));
-    auto index = static_cast<int>(reinterpret_cast<intptr_t>(lv_obj_get_user_data(target)));
-    spdlog::debug("[SpoolWizard] Vendor selected, index={}", index);
-    get_global_spool_wizard().select_vendor(index);
-}
-
-void SpoolWizardOverlay::on_wizard_show_create_vendor_modal(lv_event_t* /*e*/) {
+void SpoolWizardOverlay::show_create_vendor_modal() {
     spdlog::debug("[SpoolWizard] Show create vendor modal");
-    auto& wiz = get_global_spool_wizard();
 
     // Clear previous input state
-    wiz.new_vendor_name_.clear();
-    wiz.new_vendor_url_.clear();
-    if (wiz.subjects_initialized_) {
-        lv_subject_set_int(&wiz.can_create_vendor_subject_, 0);
+    new_vendor_name_.clear();
+    new_vendor_url_.clear();
+    if (subjects_initialized_) {
+        lv_subject_set_int(&can_create_vendor_subject_, 0);
     }
 
     // Show the modal
-    wiz.create_vendor_dialog_ = Modal::show("create_vendor_modal");
+    create_vendor_dialog_ = Modal::show("create_vendor_modal");
 
-    if (wiz.create_vendor_dialog_) {
+    if (create_vendor_dialog_) {
         // Register keyboards for text inputs
-        lv_obj_t* name_input = lv_obj_find_by_name(wiz.create_vendor_dialog_, "new_vendor_name");
+        lv_obj_t* name_input = lv_obj_find_by_name(create_vendor_dialog_, "new_vendor_name");
         if (name_input) {
-            helix::ui::modal_register_keyboard(wiz.create_vendor_dialog_, name_input);
+            helix::ui::modal_register_keyboard(create_vendor_dialog_, name_input);
         }
-        lv_obj_t* url_input = lv_obj_find_by_name(wiz.create_vendor_dialog_, "new_vendor_url");
+        lv_obj_t* url_input = lv_obj_find_by_name(create_vendor_dialog_, "new_vendor_url");
         if (url_input) {
-            helix::ui::modal_register_keyboard(wiz.create_vendor_dialog_, url_input);
+            helix::ui::modal_register_keyboard(create_vendor_dialog_, url_input);
         }
     }
 }
 
-void SpoolWizardOverlay::on_wizard_cancel_create_vendor(lv_event_t* /*e*/) {
-    spdlog::debug("[SpoolWizard] Cancel create vendor");
-    auto& wiz = get_global_spool_wizard();
-    if (wiz.create_vendor_dialog_) {
-        Modal::hide(wiz.create_vendor_dialog_);
-        wiz.create_vendor_dialog_ = nullptr;
-    }
-}
-
-void SpoolWizardOverlay::on_wizard_vendor_search_changed(lv_event_t* e) {
-    lv_obj_t* ta = static_cast<lv_obj_t*>(lv_event_get_target(e));
-    const char* text = lv_textarea_get_text(ta);
-    spdlog::debug("[SpoolWizard] Vendor search: '{}'", text ? text : "");
-    get_global_spool_wizard().filter_vendors(text ? text : "");
-}
-
-void SpoolWizardOverlay::on_wizard_new_vendor_name_changed(lv_event_t* e) {
-    lv_obj_t* ta = static_cast<lv_obj_t*>(lv_event_get_target(e));
-    const char* text = lv_textarea_get_text(ta);
-    spdlog::debug("[SpoolWizard] New vendor name: '{}'", text ? text : "");
-    auto& wiz = get_global_spool_wizard();
-    wiz.set_new_vendor(text ? text : "", wiz.new_vendor_url_);
-}
-
-void SpoolWizardOverlay::on_wizard_new_vendor_url_changed(lv_event_t* e) {
-    lv_obj_t* ta = static_cast<lv_obj_t*>(lv_event_get_target(e));
-    const char* text = lv_textarea_get_text(ta);
-    spdlog::debug("[SpoolWizard] New vendor URL: '{}'", text ? text : "");
-    auto& wiz = get_global_spool_wizard();
-    wiz.set_new_vendor(wiz.new_vendor_name_, text ? text : "");
-}
-
-void SpoolWizardOverlay::on_wizard_confirm_create_vendor(lv_event_t* /*e*/) {
+void SpoolWizardOverlay::confirm_create_vendor() {
     spdlog::debug("[SpoolWizard] Confirm create vendor");
-    auto& wiz = get_global_spool_wizard();
 
-    std::string name = trim(wiz.new_vendor_name_);
+    std::string name(helix::text_io::trim(new_vendor_name_));
     if (name.empty()) {
         spdlog::warn("[SpoolWizard] Cannot create vendor with empty name");
         return;
     }
 
     // Check for duplicate vendor name (case-insensitive)
-    std::string name_lower = to_lower(name);
-    for (const auto& v : wiz.all_vendors_) {
-        if (to_lower(v.name) == name_lower) {
+    std::string name_lower = helix::text_io::to_lower(name);
+    for (const auto& v : all_vendors_) {
+        if (helix::text_io::to_lower(v.name) == name_lower) {
             spdlog::warn("[SpoolWizard] Duplicate vendor name: '{}'", name);
             ToastManager::instance().show(ToastSeverity::WARNING, lv_tr("Vendor already exists"));
             return;
@@ -1016,45 +1069,45 @@ void SpoolWizardOverlay::on_wizard_confirm_create_vendor(lv_event_t* /*e*/) {
     }
 
     // Close the modal first (before touching the list, to avoid focus/scroll side effects)
-    if (wiz.create_vendor_dialog_) {
-        Modal::hide(wiz.create_vendor_dialog_);
-        wiz.create_vendor_dialog_ = nullptr;
+    if (create_vendor_dialog_) {
+        Modal::hide(create_vendor_dialog_);
+        create_vendor_dialog_ = nullptr;
     }
 
     // Set as selected vendor with server_id = -1 (will be created on final submit)
-    VendorEntry new_vendor = {name, -1, false, false};
-    wiz.selected_vendor_ = new_vendor;
+    VendorEntry new_vendor = {name, -1, false};
+    selected_vendor_ = new_vendor;
 
     // Add to vendor lists and re-sort alphabetically
-    wiz.all_vendors_.push_back(new_vendor);
-    std::sort(wiz.all_vendors_.begin(), wiz.all_vendors_.end(),
+    all_vendors_.push_back(new_vendor);
+    std::sort(all_vendors_.begin(), all_vendors_.end(),
               [](const VendorEntry& a, const VendorEntry& b) {
-                  return to_lower(a.name) < to_lower(b.name);
+                  return helix::text_io::to_lower(a.name) < helix::text_io::to_lower(b.name);
               });
-    wiz.filtered_vendors_ = filter_vendor_list(wiz.all_vendors_, wiz.vendor_search_query_);
+    filtered_vendors_ = filter_vendor_list(all_vendors_, vendor_search_query_);
 
     // Update display subjects
-    if (wiz.subjects_initialized_) {
-        std::snprintf(wiz.selected_vendor_name_buf_, sizeof(wiz.selected_vendor_name_buf_), "%s",
+    if (subjects_initialized_) {
+        std::snprintf(selected_vendor_name_buf_, sizeof(selected_vendor_name_buf_), "%s",
                       name.c_str());
-        lv_subject_copy_string(&wiz.selected_vendor_name_subject_, wiz.selected_vendor_name_buf_);
+        lv_subject_copy_string(&selected_vendor_name_subject_, selected_vendor_name_buf_);
 
-        std::snprintf(wiz.summary_vendor_buf_, sizeof(wiz.summary_vendor_buf_), "%s", name.c_str());
-        lv_subject_copy_string(&wiz.summary_vendor_subject_, wiz.summary_vendor_buf_);
+        std::snprintf(summary_vendor_buf_, sizeof(summary_vendor_buf_), "%s", name.c_str());
+        lv_subject_copy_string(&summary_vendor_subject_, summary_vendor_buf_);
 
-        lv_subject_set_int(&wiz.vendor_count_subject_,
-                           static_cast<int32_t>(wiz.filtered_vendors_.size()));
+        lv_subject_set_int(&vendor_count_subject_, static_cast<int32_t>(filtered_vendors_.size()));
     }
 
     // Repopulate the list and select the new vendor
-    wiz.populate_vendor_list();
+    populate_vendor_list();
 
     // Find the new vendor's index in filtered list and highlight it
-    for (size_t i = 0; i < wiz.filtered_vendors_.size(); i++) {
-        if (to_lower(wiz.filtered_vendors_[i].name) == to_lower(name)) {
+    for (size_t i = 0; i < filtered_vendors_.size(); i++) {
+        if (helix::text_io::to_lower(filtered_vendors_[i].name) == helix::text_io::to_lower(name)) {
             // Set checked state on the matching row
-            if (wiz.overlay_root_) {
-                lv_obj_t* vendor_list = lv_obj_find_by_name(wiz.overlay_root_, "vendor_list");
+            if (overlay_root_) {
+                lv_obj_t* vendor_list =
+                    helix::ui::find_required(overlay_root_, "vendor_list", get_name());
                 if (vendor_list) {
                     uint32_t count = lv_obj_get_child_count(vendor_list);
                     for (uint32_t j = 0; j < count; j++) {
@@ -1072,106 +1125,13 @@ void SpoolWizardOverlay::on_wizard_confirm_create_vendor(lv_event_t* /*e*/) {
         }
     }
 
-    wiz.set_can_proceed(true);
+    set_can_proceed(true);
     spdlog::info("[SpoolWizard] New vendor '{}' confirmed (will be created on submit)", name);
 }
 
 // ============================================================================
 // Filament Step Logic
 // ============================================================================
-
-std::vector<SpoolWizardOverlay::FilamentEntry>
-SpoolWizardOverlay::merge_filaments(const std::vector<FilamentInfo>& server_filaments,
-                                    const std::vector<FilamentInfo>& external_filaments) {
-    // Build a dedup set keyed by lowercase(material) + "|" + lowercase(color_hex)
-    std::unordered_map<std::string, FilamentEntry> by_key;
-
-    auto make_key = [](const std::string& material, const std::string& color_hex) {
-        return to_lower(material) + "|" + to_lower(color_hex);
-    };
-
-    // Helper to create a FilamentEntry from a FilamentInfo
-    auto to_entry = [](const FilamentInfo& fi, bool is_server) -> FilamentEntry {
-        FilamentEntry entry;
-        entry.name = fi.display_name();
-        entry.material = fi.material;
-        entry.color_hex = fi.color_hex;
-        // FilamentEntry::color_name means a colour word ("Red") — it is what the
-        // colour picker fills on the create-new path. FilamentInfo::filament_name
-        // is the filament's own name and already reaches the entry through
-        // display_name() above, so it must not be copied here.
-        entry.server_id = is_server ? fi.id : -1;
-        entry.vendor_id = is_server ? fi.vendor_id : -1;
-        entry.density = fi.density;
-        entry.diameter = fi.diameter;
-        entry.weight = fi.weight;
-        entry.spool_weight = fi.spool_weight;
-        entry.nozzle_temp_min = fi.nozzle_temp_min;
-        entry.nozzle_temp_max = fi.nozzle_temp_max;
-        entry.bed_temp_min = fi.bed_temp_min;
-        entry.bed_temp_max = fi.bed_temp_max;
-        entry.from_server = is_server;
-        entry.from_database = !is_server;
-        return entry;
-    };
-
-    // Server filaments first (they have real IDs, so they take priority)
-    for (const auto& sf : server_filaments) {
-        std::string key = make_key(sf.material, sf.color_hex);
-        by_key[key] = to_entry(sf, true);
-    }
-
-    // Merge in external DB filaments — fill in extras, mark from_database
-    for (const auto& ext : external_filaments) {
-        std::string key = make_key(ext.material, ext.color_hex);
-        auto it = by_key.find(key);
-        if (it != by_key.end()) {
-            // Already have this from server — mark as also from external DB
-            it->second.from_database = true;
-            // Fill in missing temperature data from external if server has none
-            if (it->second.nozzle_temp_min == 0 && ext.nozzle_temp_min > 0) {
-                it->second.nozzle_temp_min = ext.nozzle_temp_min;
-            }
-            if (it->second.nozzle_temp_max == 0 && ext.nozzle_temp_max > 0) {
-                it->second.nozzle_temp_max = ext.nozzle_temp_max;
-            }
-            if (it->second.bed_temp_min == 0 && ext.bed_temp_min > 0) {
-                it->second.bed_temp_min = ext.bed_temp_min;
-            }
-            if (it->second.bed_temp_max == 0 && ext.bed_temp_max > 0) {
-                it->second.bed_temp_max = ext.bed_temp_max;
-            }
-            if (it->second.density == 0 && ext.density > 0) {
-                it->second.density = ext.density;
-            }
-            if (it->second.weight == 0 && ext.weight > 0) {
-                it->second.weight = ext.weight;
-            }
-            if (it->second.spool_weight == 0 && ext.spool_weight > 0) {
-                it->second.spool_weight = ext.spool_weight;
-            }
-        } else {
-            // External DB-only entry
-            by_key[key] = to_entry(ext, false);
-        }
-    }
-
-    // Collect and sort by material then name
-    std::vector<FilamentEntry> result;
-    result.reserve(by_key.size());
-    for (auto& [_, entry] : by_key) {
-        result.push_back(std::move(entry));
-    }
-    std::sort(result.begin(), result.end(), [](const FilamentEntry& a, const FilamentEntry& b) {
-        std::string a_mat = to_lower(a.material);
-        std::string b_mat = to_lower(b.material);
-        if (a_mat != b_mat)
-            return a_mat < b_mat;
-        return a.name < b.name;
-    });
-
-    return result;
-}
 
 void SpoolWizardOverlay::load_filaments() {
     spdlog::debug("[{}] Loading filaments for vendor '{}' (server_id={})", get_name(),
@@ -1257,11 +1217,12 @@ void SpoolWizardOverlay::load_filaments() {
                             // Sort by material then name
                             std::sort(all_filaments_.begin(), all_filaments_.end(),
                                       [](const FilamentEntry& a, const FilamentEntry& b) {
-                                          std::string a_mat = to_lower(a.material);
-                                          std::string b_mat = to_lower(b.material);
+                                          std::string a_mat = helix::text_io::to_lower(a.material);
+                                          std::string b_mat = helix::text_io::to_lower(b.material);
                                           if (a_mat != b_mat)
                                               return a_mat < b_mat;
-                                          return to_lower(a.name) < to_lower(b.name);
+                                          return helix::text_io::to_lower(a.name) <
+                                                 helix::text_io::to_lower(b.name);
                                       });
 
                             if (subjects_initialized_) {
@@ -1301,7 +1262,8 @@ void SpoolWizardOverlay::select_filament(int index) {
 
     // Update checked state on filament rows
     if (overlay_root_) {
-        lv_obj_t* filament_list = lv_obj_find_by_name(overlay_root_, "filament_list");
+        lv_obj_t* filament_list =
+            helix::ui::find_required(overlay_root_, "filament_list", get_name());
         if (filament_list) {
             uint32_t count = lv_obj_get_child_count(filament_list);
             for (uint32_t i = 0; i < count; i++) {
@@ -1311,17 +1273,19 @@ void SpoolWizardOverlay::select_filament(int index) {
         }
     }
 
-    // Update summary subject
+    publish_filament_summary();
+    set_can_proceed(true);
+}
+
+void SpoolWizardOverlay::publish_filament_summary() {
     if (subjects_initialized_) {
-        std::string summary = selected_filament_.material;
-        if (!selected_filament_.name.empty()) {
-            summary += " - " + selected_filament_.name;
-        }
+        // The shared label rule, so a name that already says the material
+        // does not repeat it
+        const std::string summary =
+            helix::compose_filament_label("", selected_filament_.name, selected_filament_.material);
         std::snprintf(summary_filament_buf_, sizeof(summary_filament_buf_), "%s", summary.c_str());
         lv_subject_copy_string(&summary_filament_subject_, summary_filament_buf_);
     }
-
-    set_can_proceed(true);
 }
 
 void SpoolWizardOverlay::set_new_filament_material(const std::string& material) {
@@ -1399,9 +1363,8 @@ void SpoolWizardOverlay::populate_filament_list() {
         return;
     }
 
-    lv_obj_t* filament_list = lv_obj_find_by_name(overlay_root_, "filament_list");
+    lv_obj_t* filament_list = helix::ui::find_required(overlay_root_, "filament_list", get_name());
     if (!filament_list) {
-        spdlog::error("[{}] filament_list widget not found", get_name());
         return;
     }
 
@@ -1423,14 +1386,14 @@ void SpoolWizardOverlay::populate_filament_list() {
         lv_obj_set_user_data(row, reinterpret_cast<void*>(static_cast<intptr_t>(i)));
 
         // Set color swatch
-        lv_obj_t* swatch = lv_obj_find_by_name(row, "color_swatch");
+        lv_obj_t* swatch = helix::ui::find_required(row, "color_swatch", get_name());
         if (swatch && !fil.color_hex.empty()) {
             uint32_t color_val = std::strtoul(fil.color_hex.c_str(), nullptr, 16);
-            lv_obj_set_style_bg_color(swatch, lv_color_hex(color_val), 0);
+            helix::ui::apply_swatch_color(swatch, color_val, "");
         }
 
         // Set combined material - name label
-        lv_obj_t* material_label = lv_obj_find_by_name(row, "filament_material");
+        lv_obj_t* material_label = helix::ui::find_required(row, "filament_material", get_name());
         if (material_label) {
             std::string display = fil.material;
             if (!fil.name.empty()) {
@@ -1440,14 +1403,12 @@ void SpoolWizardOverlay::populate_filament_list() {
         }
 
         // Set temps label
-        lv_obj_t* temps_label = lv_obj_find_by_name(row, "filament_temps");
+        lv_obj_t* temps_label = helix::ui::find_required(row, "filament_temps", get_name());
         if (temps_label) {
             char temp_buf[32] = {};
-            if (fil.nozzle_temp_min > 0 && fil.nozzle_temp_max > 0) {
-                std::snprintf(temp_buf, sizeof(temp_buf), "%d-%d\u00B0C", fil.nozzle_temp_min,
-                              fil.nozzle_temp_max);
-            } else if (fil.nozzle_temp_max > 0) {
-                std::snprintf(temp_buf, sizeof(temp_buf), "%d\u00B0C", fil.nozzle_temp_max);
+            if (fil.nozzle_temp_max > 0) {
+                helix::ui::temperature::format_temperature_range(
+                    fil.nozzle_temp_min, fil.nozzle_temp_max, temp_buf, sizeof(temp_buf));
             }
             lv_label_set_text(temps_label, temp_buf);
         }
@@ -1469,76 +1430,68 @@ void SpoolWizardOverlay::update_new_filament_can_proceed() {
 }
 
 // ============================================================================
-// Filament Step Event Callbacks
+// Filament Step Handlers
 // ============================================================================
 
-void SpoolWizardOverlay::on_wizard_filament_selected(lv_event_t* e) {
-    lv_obj_t* target = static_cast<lv_obj_t*>(lv_event_get_target(e));
-    auto index = static_cast<int>(reinterpret_cast<intptr_t>(lv_obj_get_user_data(target)));
-    spdlog::debug("[SpoolWizard] Filament selected, index={}", index);
-    get_global_spool_wizard().select_filament(index);
-}
-
-void SpoolWizardOverlay::on_wizard_show_create_filament_modal(lv_event_t* /*e*/) {
+void SpoolWizardOverlay::show_create_filament_modal() {
     spdlog::debug("[SpoolWizard] Show create filament modal");
-    auto& wiz = get_global_spool_wizard();
 
     // Clear previous filament input state, default material to first in database
-    wiz.new_filament_name_.clear();
-    wiz.new_filament_material_ = filament::MATERIALS[0].name; // "PLA"
-    wiz.new_filament_color_hex_.clear();
-    wiz.new_filament_color_name_.clear();
-    wiz.new_filament_nozzle_min_ = 0;
-    wiz.new_filament_nozzle_max_ = 0;
-    wiz.new_filament_bed_min_ = 0;
-    wiz.new_filament_bed_max_ = 0;
-    wiz.new_filament_density_ = 0;
-    wiz.new_filament_weight_ = 0;
-    wiz.new_filament_spool_weight_ = 0;
-    wiz.creating_new_filament_ = true;
+    new_filament_name_.clear();
+    const auto table = filament::materials();
+    new_filament_material_ = table->empty() ? "PLA" : table->front().name;
+    new_filament_color_hex_.clear();
+    new_filament_color_name_.clear();
+    new_filament_nozzle_min_ = 0;
+    new_filament_nozzle_max_ = 0;
+    new_filament_bed_min_ = 0;
+    new_filament_bed_max_ = 0;
+    new_filament_density_ = 0;
+    new_filament_weight_ = 0;
+    new_filament_spool_weight_ = 0;
+    creating_new_filament_ = true;
 
     // Clear previous selection so can_proceed is false until form is confirmed
-    wiz.selected_filament_ = {};
-    wiz.set_can_proceed(false);
+    selected_filament_ = {};
+    set_can_proceed(false);
 
     // Show the modal
-    wiz.create_filament_dialog_ = Modal::show("create_filament_modal");
+    create_filament_dialog_ = Modal::show("create_filament_modal");
 
-    if (wiz.create_filament_dialog_) {
+    if (create_filament_dialog_) {
         // Register keyboards for text inputs
-        lv_obj_t* name_input =
-            lv_obj_find_by_name(wiz.create_filament_dialog_, "new_filament_name");
+        lv_obj_t* name_input = lv_obj_find_by_name(create_filament_dialog_, "new_filament_name");
         if (name_input) {
-            helix::ui::modal_register_keyboard(wiz.create_filament_dialog_, name_input);
+            helix::ui::modal_register_keyboard(create_filament_dialog_, name_input);
         }
-        lv_obj_t* nozzle_min = lv_obj_find_by_name(wiz.create_filament_dialog_, "nozzle_temp_min");
+        lv_obj_t* nozzle_min = lv_obj_find_by_name(create_filament_dialog_, "nozzle_temp_min");
         if (nozzle_min) {
-            helix::ui::modal_register_keyboard(wiz.create_filament_dialog_, nozzle_min);
+            helix::ui::modal_register_keyboard(create_filament_dialog_, nozzle_min);
         }
-        lv_obj_t* nozzle_max = lv_obj_find_by_name(wiz.create_filament_dialog_, "nozzle_temp_max");
+        lv_obj_t* nozzle_max = lv_obj_find_by_name(create_filament_dialog_, "nozzle_temp_max");
         if (nozzle_max) {
-            helix::ui::modal_register_keyboard(wiz.create_filament_dialog_, nozzle_max);
+            helix::ui::modal_register_keyboard(create_filament_dialog_, nozzle_max);
         }
-        lv_obj_t* bed_min = lv_obj_find_by_name(wiz.create_filament_dialog_, "bed_temp_min");
+        lv_obj_t* bed_min = lv_obj_find_by_name(create_filament_dialog_, "bed_temp_min");
         if (bed_min) {
-            helix::ui::modal_register_keyboard(wiz.create_filament_dialog_, bed_min);
+            helix::ui::modal_register_keyboard(create_filament_dialog_, bed_min);
         }
-        lv_obj_t* bed_max = lv_obj_find_by_name(wiz.create_filament_dialog_, "bed_temp_max");
+        lv_obj_t* bed_max = lv_obj_find_by_name(create_filament_dialog_, "bed_temp_max");
         if (bed_max) {
-            helix::ui::modal_register_keyboard(wiz.create_filament_dialog_, bed_max);
+            helix::ui::modal_register_keyboard(create_filament_dialog_, bed_max);
         }
-        lv_obj_t* weight = lv_obj_find_by_name(wiz.create_filament_dialog_, "filament_weight");
+        lv_obj_t* weight = lv_obj_find_by_name(create_filament_dialog_, "filament_weight");
         if (weight) {
-            helix::ui::modal_register_keyboard(wiz.create_filament_dialog_, weight);
+            helix::ui::modal_register_keyboard(create_filament_dialog_, weight);
         }
         lv_obj_t* spool_weight =
-            lv_obj_find_by_name(wiz.create_filament_dialog_, "filament_spool_weight");
+            lv_obj_find_by_name(create_filament_dialog_, "filament_spool_weight");
         if (spool_weight) {
-            helix::ui::modal_register_keyboard(wiz.create_filament_dialog_, spool_weight);
+            helix::ui::modal_register_keyboard(create_filament_dialog_, spool_weight);
         }
 
         // Populate material dropdown from filament database
-        lv_obj_t* dropdown = lv_obj_find_by_name(wiz.create_filament_dialog_, "material_dropdown");
+        lv_obj_t* dropdown = lv_obj_find_by_name(create_filament_dialog_, "material_dropdown");
         if (dropdown) {
             auto names = filament::get_all_material_names();
             std::string options;
@@ -1551,48 +1504,21 @@ void SpoolWizardOverlay::on_wizard_show_create_filament_modal(lv_event_t* /*e*/)
 
             // Default to first material (PLA) and trigger auto-fill
             lv_dropdown_set_selected(dropdown, 0);
-            wiz.set_new_filament_material(names[0]);
+            set_new_filament_material(names[0]);
         }
     }
 }
 
-void SpoolWizardOverlay::on_wizard_cancel_create_filament(lv_event_t* /*e*/) {
-    spdlog::debug("[SpoolWizard] Cancel create filament");
-    auto& wiz = get_global_spool_wizard();
-    wiz.creating_new_filament_ = false;
-    if (wiz.create_filament_dialog_) {
-        Modal::hide(wiz.create_filament_dialog_);
-        wiz.create_filament_dialog_ = nullptr;
-    }
-}
-
-void SpoolWizardOverlay::on_wizard_material_changed(lv_event_t* e) {
-    lv_obj_t* dropdown = static_cast<lv_obj_t*>(lv_event_get_target(e));
-    char buf[64] = {};
-    lv_dropdown_get_selected_str(dropdown, buf, sizeof(buf));
-    spdlog::debug("[SpoolWizard] Material changed: '{}'", buf);
-    get_global_spool_wizard().set_new_filament_material(buf);
-}
-
-void SpoolWizardOverlay::on_wizard_new_filament_name_changed(lv_event_t* e) {
-    lv_obj_t* ta = static_cast<lv_obj_t*>(lv_event_get_target(e));
-    const char* text = lv_textarea_get_text(ta);
-    spdlog::debug("[SpoolWizard] New filament name: '{}'", text ? text : "");
-    auto& wiz = get_global_spool_wizard();
-    wiz.new_filament_name_ = text ? text : "";
-}
-
-void SpoolWizardOverlay::on_wizard_pick_filament_color(lv_event_t* /*e*/) {
+void SpoolWizardOverlay::pick_filament_color() {
     spdlog::debug("[SpoolWizard] Pick filament color");
-    auto& wiz = get_global_spool_wizard();
 
     // Create picker on first use (lazy initialization)
-    if (!wiz.color_picker_) {
-        wiz.color_picker_ = std::make_unique<helix::ui::ColorPicker>();
+    if (!color_picker_) {
+        color_picker_ = std::make_unique<helix::ui::ColorPicker>();
     }
 
     // Set callback for when color is selected (access global, don't capture reference)
-    wiz.color_picker_->set_color_callback([](uint32_t color_rgb, const std::string& color_name) {
+    color_picker_->set_color_callback([](uint32_t color_rgb, const std::string& color_name) {
         char hex_buf[8];
         std::snprintf(hex_buf, sizeof(hex_buf), "%06X", color_rgb);
         get_global_spool_wizard().set_new_filament_color(hex_buf, color_name);
@@ -1600,76 +1526,24 @@ void SpoolWizardOverlay::on_wizard_pick_filament_color(lv_event_t* /*e*/) {
 
     // Parse current color for initial value
     uint32_t initial_color = 0x808080;
-    if (!wiz.new_filament_color_hex_.empty()) {
-        initial_color = std::strtoul(wiz.new_filament_color_hex_.c_str(), nullptr, 16);
+    if (!new_filament_color_hex_.empty()) {
+        initial_color = std::strtoul(new_filament_color_hex_.c_str(), nullptr, 16);
     }
 
     // Show color picker on the screen (it creates its own modal)
-    lv_obj_t* parent = wiz.create_filament_dialog_
-                           ? lv_obj_get_parent(wiz.create_filament_dialog_)
-                           : (wiz.overlay_root_ ? lv_obj_get_parent(wiz.overlay_root_) : nullptr);
+    lv_obj_t* parent = create_filament_dialog_
+                           ? lv_obj_get_parent(create_filament_dialog_)
+                           : (overlay_root_ ? lv_obj_get_parent(overlay_root_) : nullptr);
     if (parent) {
-        wiz.color_picker_->show_with_color(parent, initial_color);
+        color_picker_->show_with_color(parent, initial_color);
     }
 }
 
-void SpoolWizardOverlay::on_wizard_nozzle_temp_changed(lv_event_t* e) {
-    lv_obj_t* ta = static_cast<lv_obj_t*>(lv_event_get_target(e));
-    const char* text = lv_textarea_get_text(ta);
-    int val = text ? std::atoi(text) : 0;
-    auto& wiz = get_global_spool_wizard();
-
-    // Determine if this is min or max based on widget name
-    const char* name = lv_obj_get_name(ta);
-    if (name && std::string_view(name) == "nozzle_temp_min") {
-        wiz.new_filament_nozzle_min_ = val;
-    } else {
-        wiz.new_filament_nozzle_max_ = val;
-    }
-
-    spdlog::debug("[SpoolWizard] Nozzle temp changed: {}-{}", wiz.new_filament_nozzle_min_,
-                  wiz.new_filament_nozzle_max_);
-}
-
-void SpoolWizardOverlay::on_wizard_bed_temp_changed(lv_event_t* e) {
-    lv_obj_t* ta = static_cast<lv_obj_t*>(lv_event_get_target(e));
-    const char* text = lv_textarea_get_text(ta);
-    int val = text ? std::atoi(text) : 0;
-    auto& wiz = get_global_spool_wizard();
-
-    const char* name = lv_obj_get_name(ta);
-    if (name && std::string_view(name) == "bed_temp_min") {
-        wiz.new_filament_bed_min_ = val;
-    } else {
-        wiz.new_filament_bed_max_ = val;
-    }
-
-    spdlog::debug("[SpoolWizard] Bed temp changed: {}-{}", wiz.new_filament_bed_min_,
-                  wiz.new_filament_bed_max_);
-}
-
-void SpoolWizardOverlay::on_wizard_filament_weight_changed(lv_event_t* e) {
-    lv_obj_t* ta = static_cast<lv_obj_t*>(lv_event_get_target(e));
-    const char* text = lv_textarea_get_text(ta);
-    auto& wiz = get_global_spool_wizard();
-    wiz.new_filament_weight_ = text ? std::atof(text) : 0;
-    spdlog::debug("[SpoolWizard] Filament weight: {:.0f}g", wiz.new_filament_weight_);
-}
-
-void SpoolWizardOverlay::on_wizard_spool_weight_changed(lv_event_t* e) {
-    lv_obj_t* ta = static_cast<lv_obj_t*>(lv_event_get_target(e));
-    const char* text = lv_textarea_get_text(ta);
-    auto& wiz = get_global_spool_wizard();
-    wiz.new_filament_spool_weight_ = text ? std::atof(text) : 0;
-    spdlog::debug("[SpoolWizard] Spool weight: {:.0f}g", wiz.new_filament_spool_weight_);
-}
-
-void SpoolWizardOverlay::on_wizard_confirm_create_filament(lv_event_t* /*e*/) {
+void SpoolWizardOverlay::confirm_create_filament() {
     spdlog::debug("[SpoolWizard] Confirm create filament");
-    auto& wiz = get_global_spool_wizard();
 
     // Helper to set/clear error highlighting on a named label within the modal
-    lv_obj_t* dialog = wiz.create_filament_dialog_;
+    lv_obj_t* dialog = create_filament_dialog_;
     auto& theme = ThemeManager::instance();
     auto set_field_error = [dialog, &theme](const char* label_name, bool error) {
         if (!dialog)
@@ -1684,13 +1558,13 @@ void SpoolWizardOverlay::on_wizard_confirm_create_filament(lv_event_t* /*e*/) {
     // Validate required fields
     bool has_error = false;
 
-    bool material_missing = wiz.new_filament_material_.empty();
+    bool material_missing = new_filament_material_.empty();
     set_field_error("material_label", material_missing);
     if (material_missing) {
         has_error = true;
     }
 
-    bool color_missing = wiz.new_filament_color_hex_.empty();
+    bool color_missing = new_filament_color_hex_.empty();
     set_field_error("color_label", color_missing);
     if (color_missing) {
         has_error = true;
@@ -1704,81 +1578,82 @@ void SpoolWizardOverlay::on_wizard_confirm_create_filament(lv_event_t* /*e*/) {
     }
 
     // Check for duplicate (case-insensitive material + name match)
-    std::string mat_lower = to_lower(wiz.new_filament_material_);
-    std::string name_lower = to_lower(trim(wiz.new_filament_name_));
-    for (const auto& f : wiz.all_filaments_) {
-        if (to_lower(f.material) == mat_lower && to_lower(f.name) == name_lower) {
-            spdlog::warn("[SpoolWizard] Duplicate filament: {} '{}'", wiz.new_filament_material_,
-                         wiz.new_filament_name_);
+    std::string mat_lower = helix::text_io::to_lower(new_filament_material_);
+    std::string name_lower =
+        helix::text_io::to_lower(std::string(helix::text_io::trim(new_filament_name_)));
+    for (const auto& f : all_filaments_) {
+        if (helix::text_io::to_lower(f.material) == mat_lower &&
+            helix::text_io::to_lower(f.name) == name_lower) {
+            spdlog::warn("[SpoolWizard] Duplicate filament: {} '{}'", new_filament_material_,
+                         new_filament_name_);
             ToastManager::instance().show(ToastSeverity::WARNING, lv_tr("Filament already exists"));
             return;
         }
     }
 
     // Close the modal first
-    if (wiz.create_filament_dialog_) {
-        Modal::hide(wiz.create_filament_dialog_);
-        wiz.create_filament_dialog_ = nullptr;
+    if (create_filament_dialog_) {
+        Modal::hide(create_filament_dialog_);
+        create_filament_dialog_ = nullptr;
     }
 
     // Build a display summary for the filament
-    std::string summary = wiz.new_filament_material_;
-    if (!wiz.new_filament_name_.empty()) {
-        summary += " - " + wiz.new_filament_name_;
-    } else if (!wiz.new_filament_color_name_.empty()) {
-        summary += " " + wiz.new_filament_color_name_;
+    std::string summary = new_filament_material_;
+    if (!new_filament_name_.empty()) {
+        summary += " - " + new_filament_name_;
+    } else if (!new_filament_color_name_.empty()) {
+        summary += " " + new_filament_color_name_;
     }
 
     // Build the new filament entry
     FilamentEntry new_fil;
-    new_fil.name = wiz.new_filament_name_;
-    new_fil.material = wiz.new_filament_material_;
-    new_fil.color_hex = wiz.new_filament_color_hex_;
-    new_fil.color_name = wiz.new_filament_color_name_;
+    new_fil.name = new_filament_name_;
+    new_fil.material = new_filament_material_;
+    new_fil.color_hex = new_filament_color_hex_;
+    new_fil.color_name = new_filament_color_name_;
     new_fil.server_id = -1;
-    new_fil.vendor_id = wiz.selected_vendor_.server_id;
-    new_fil.density = wiz.new_filament_density_;
-    new_fil.weight = wiz.new_filament_weight_;
-    new_fil.spool_weight = wiz.new_filament_spool_weight_;
-    new_fil.nozzle_temp_min = wiz.new_filament_nozzle_min_;
-    new_fil.nozzle_temp_max = wiz.new_filament_nozzle_max_;
-    new_fil.bed_temp_min = wiz.new_filament_bed_min_;
-    new_fil.bed_temp_max = wiz.new_filament_bed_max_;
+    new_fil.vendor_id = selected_vendor_.server_id;
+    new_fil.density = new_filament_density_;
+    new_fil.weight = new_filament_weight_;
+    new_fil.spool_weight = new_filament_spool_weight_;
+    new_fil.nozzle_temp_min = new_filament_nozzle_min_;
+    new_fil.nozzle_temp_max = new_filament_nozzle_max_;
+    new_fil.bed_temp_min = new_filament_bed_min_;
+    new_fil.bed_temp_max = new_filament_bed_max_;
 
     // Set as selected filament
-    wiz.selected_filament_ = new_fil;
+    selected_filament_ = new_fil;
 
     // Add to filament list and re-sort by material then name
-    wiz.all_filaments_.push_back(new_fil);
-    std::sort(wiz.all_filaments_.begin(), wiz.all_filaments_.end(),
+    all_filaments_.push_back(new_fil);
+    std::sort(all_filaments_.begin(), all_filaments_.end(),
               [](const FilamentEntry& a, const FilamentEntry& b) {
-                  std::string a_mat = to_lower(a.material);
-                  std::string b_mat = to_lower(b.material);
+                  std::string a_mat = helix::text_io::to_lower(a.material);
+                  std::string b_mat = helix::text_io::to_lower(b.material);
                   if (a_mat != b_mat)
                       return a_mat < b_mat;
                   return a.name < b.name;
               });
 
     // Update filament count subject
-    if (wiz.subjects_initialized_) {
-        lv_subject_set_int(&wiz.filament_count_subject_,
-                           static_cast<int32_t>(wiz.all_filaments_.size()));
+    if (subjects_initialized_) {
+        lv_subject_set_int(&filament_count_subject_, static_cast<int32_t>(all_filaments_.size()));
 
         // Update summary display
-        std::snprintf(wiz.summary_filament_buf_, sizeof(wiz.summary_filament_buf_), "%s",
-                      summary.c_str());
-        lv_subject_copy_string(&wiz.summary_filament_subject_, wiz.summary_filament_buf_);
+        std::snprintf(summary_filament_buf_, sizeof(summary_filament_buf_), "%s", summary.c_str());
+        lv_subject_copy_string(&summary_filament_subject_, summary_filament_buf_);
     }
 
     // Repopulate the list and highlight the new entry
-    wiz.populate_filament_list();
+    populate_filament_list();
 
     // Find the new filament's index and set checked state
-    for (size_t i = 0; i < wiz.all_filaments_.size(); i++) {
-        if (to_lower(wiz.all_filaments_[i].material) == mat_lower &&
-            to_lower(wiz.all_filaments_[i].name) == name_lower) {
-            if (wiz.overlay_root_) {
-                lv_obj_t* filament_list = lv_obj_find_by_name(wiz.overlay_root_, "filament_list");
+    for (size_t i = 0; i < all_filaments_.size(); i++) {
+        if (helix::text_io::to_lower(all_filaments_[i].material) == mat_lower &&
+            helix::text_io::to_lower(all_filaments_[i].name) == name_lower) {
+            if (overlay_root_) {
+                lv_obj_t* filament_list =
+                    helix::ui::find_required(overlay_root_, "filament_list", get_name());
                 if (filament_list) {
                     uint32_t count = lv_obj_get_child_count(filament_list);
                     for (uint32_t j = 0; j < count; j++) {
@@ -1797,44 +1672,317 @@ void SpoolWizardOverlay::on_wizard_confirm_create_filament(lv_event_t* /*e*/) {
         }
     }
 
-    wiz.creating_new_filament_ = false;
-    wiz.set_can_proceed(true);
+    creating_new_filament_ = false;
+    set_can_proceed(true);
     spdlog::info("[SpoolWizard] New filament '{}' confirmed (will be created on submit)", summary);
 }
 
 // ============================================================================
-// Spool Details Event Callbacks
+// SpoolmanDB Search
 // ============================================================================
 
-void SpoolWizardOverlay::on_wizard_remaining_weight_changed(lv_event_t* e) {
-    lv_obj_t* ta = static_cast<lv_obj_t*>(lv_event_get_target(e));
-    const char* text = lv_textarea_get_text(ta);
-    auto& wiz = get_global_spool_wizard();
-    wiz.spool_remaining_weight_ = text ? std::atof(text) : 0;
-    wiz.set_can_proceed(wiz.spool_remaining_weight_ > 0);
-    spdlog::debug("[SpoolWizard] Remaining weight: {:.0f}g", wiz.spool_remaining_weight_);
+SpoolWizardOverlay::FilamentEntry
+SpoolWizardOverlay::entry_from_catalog(const helix::ExternalFilament& f) {
+    FilamentEntry e;
+    e.name = f.name;
+    e.material = f.material;
+    if (!f.color_hexes.empty()) {
+        e.color_hex = f.color_hexes.front();
+        for (const auto& hex : f.color_hexes) {
+            e.multi_color_hexes += (e.multi_color_hexes.empty() ? "" : ",") + hex;
+        }
+        e.multi_color_direction = f.multi_color_direction;
+    } else {
+        e.color_hex = f.color_hex;
+    }
+    e.density = f.density;
+    e.diameter = f.diameter > 0 ? f.diameter : 1.75;
+    e.weight = f.weight;
+    e.spool_weight = f.spool_weight;
+    e.nozzle_temp_min = e.nozzle_temp_max = f.extruder_temp;
+    e.bed_temp_min = e.bed_temp_max = f.bed_temp;
+    return e;
 }
 
-void SpoolWizardOverlay::on_wizard_price_changed(lv_event_t* e) {
-    lv_obj_t* ta = static_cast<lv_obj_t*>(lv_event_get_target(e));
-    const char* text = lv_textarea_get_text(ta);
-    auto& wiz = get_global_spool_wizard();
-    wiz.spool_price_ = text ? std::atof(text) : 0;
-    spdlog::debug("[SpoolWizard] Price: {:.2f}", wiz.spool_price_);
+int SpoolWizardOverlay::find_server_vendor(const std::vector<VendorEntry>& vendors,
+                                           const std::string& name) {
+    auto folded = [](const std::string& s) {
+        return helix::text_io::to_lower(std::string(helix::text_io::trim(s)));
+    };
+    const std::string needle = folded(name);
+    for (size_t i = 0; i < vendors.size(); ++i) {
+        if (vendors[i].server_id >= 0 && folded(vendors[i].name) == needle) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
 }
 
-void SpoolWizardOverlay::on_wizard_lot_changed(lv_event_t* e) {
-    lv_obj_t* ta = static_cast<lv_obj_t*>(lv_event_get_target(e));
-    const char* text = lv_textarea_get_text(ta);
-    auto& wiz = get_global_spool_wizard();
-    wiz.spool_lot_nr_ = text ? text : "";
-    spdlog::debug("[SpoolWizard] Lot: '{}'", wiz.spool_lot_nr_);
+void SpoolWizardOverlay::set_catalog_state(CatalogState state) {
+    catalog_state_ = state;
+    if (subjects_initialized_) {
+        lv_subject_set_int(&catalog_state_subject_, static_cast<int32_t>(state));
+    }
 }
 
-void SpoolWizardOverlay::on_wizard_notes_changed(lv_event_t* e) {
-    lv_obj_t* ta = static_cast<lv_obj_t*>(lv_event_get_target(e));
-    const char* text = lv_textarea_get_text(ta);
-    auto& wiz = get_global_spool_wizard();
-    wiz.spool_notes_ = text ? text : "";
-    spdlog::debug("[SpoolWizard] Notes: '{}'", wiz.spool_notes_);
+void SpoolWizardOverlay::sync_catalog_available() {
+    IMoonrakerAPI* api = get_moonraker_api();
+    const bool available = api && helix::SpoolmanCatalogSearch::availability(
+                                      api->get_client().connection_generation()) ==
+                                      helix::SpoolmanCatalogSearch::Availability::Available;
+    if (subjects_initialized_) {
+        lv_subject_set_int(&catalog_available_subject_, available ? 1 : 0);
+    }
+}
+
+void SpoolWizardOverlay::probe_catalog_search() {
+    sync_catalog_available();
+    IMoonrakerAPI* api = get_moonraker_api();
+    if (!api) {
+        return;
+    }
+    const uint64_t conn = api->get_client().connection_generation();
+    if (helix::SpoolmanCatalogSearch::availability(conn) !=
+        helix::SpoolmanCatalogSearch::Availability::Unknown) {
+        return;
+    }
+    // The cheapest question the route can answer: does it exist.
+    api->spoolman().search_spoolman_external_filaments(
+        "", 1,
+        lifetime_.bg_cb("SpoolWizard::catalog_probe_ok",
+                        [this, conn](const std::vector<helix::ExternalFilament>&) {
+                            helix::SpoolmanCatalogSearch::record_success(conn);
+                            sync_catalog_available();
+                        }),
+        lifetime_.bg_cb("SpoolWizard::catalog_probe_error",
+                        [this, conn](const MoonrakerError& err) {
+                            helix::SpoolmanCatalogSearch::record_error(conn, err);
+                            sync_catalog_available();
+                            spdlog::debug("[SpoolWizard] SpoolmanDB search probe: {} (code {})",
+                                          err.message, err.code);
+                        }));
+}
+
+void SpoolWizardOverlay::on_search_key() {
+    // One one-shot timer for the session, made on the first keystroke and kept
+    // (not auto-deleted) between bursts, so every later keystroke only re-arms it.
+    if (!search_timer_) {
+        search_timer_ = lv_timer_create(search_timer_cb, helix::ui::kDefaultSearchDebounceMs, this);
+        lv_timer_set_auto_delete(search_timer_, false);
+    }
+    lv_timer_set_repeat_count(search_timer_, 1);
+    lv_timer_reset(search_timer_);
+    lv_timer_resume(search_timer_);
+    spdlog::debug("[SpoolWizard] search keystroke");
+}
+
+void SpoolWizardOverlay::search_timer_cb(lv_timer_t* timer) {
+    static_cast<SpoolWizardOverlay*>(lv_timer_get_user_data(timer))->apply_search_text();
+}
+
+void SpoolWizardOverlay::cancel_search_timer() {
+    if (search_timer_ && lv_is_initialized()) {
+        // A kept one-shot: hand it back to LVGL's reaping, which deletes an
+        // auto-delete timer whose count is spent but never runs a paused one.
+        lv_timer_set_auto_delete(search_timer_, true);
+        lv_timer_resume(search_timer_);
+        helix::ui::lv_timer_cancel_safe(search_timer_);
+    }
+    search_timer_ = nullptr;
+}
+
+void SpoolWizardOverlay::apply_search_text() {
+    lv_obj_t* input = helix::ui::find_required(overlay_root_, "vendor_search", get_name());
+    const char* text = input ? lv_textarea_get_text(input) : nullptr;
+    const std::string query = text ? text : "";
+    spdlog::debug("[SpoolWizard] search settled on '{}'", query);
+    filter_vendors(query);
+    run_catalog_search(query);
+}
+
+void SpoolWizardOverlay::run_catalog_search(const std::string& query) {
+    IMoonrakerAPI* api = get_moonraker_api();
+    const uint64_t conn = api ? api->get_client().connection_generation() : 0;
+    if (!api ||
+        helix::SpoolmanCatalogSearch::availability(conn) ==
+            helix::SpoolmanCatalogSearch::Availability::Unavailable ||
+        !helix::SpoolmanCatalogSearch::is_searchable(query)) {
+        catalog_.invalidate();
+        catalog_has_pending_ = false;
+        set_catalog_state(CatalogState::Idle);
+        return;
+    }
+
+    if (catalog_in_flight_) {
+        // One search in flight at most: this query waits, and the in-flight
+        // answer is dropped when it lands.
+        catalog_.invalidate();
+        catalog_pending_query_ = query;
+        catalog_has_pending_ = true;
+        set_catalog_state(CatalogState::Loading);
+        return;
+    }
+    send_catalog_search(query);
+}
+
+void SpoolWizardOverlay::send_catalog_search(std::string query) {
+    IMoonrakerAPI* api = get_moonraker_api();
+    if (!api) {
+        return;
+    }
+    const uint64_t conn = api->get_client().connection_generation();
+    const uint64_t ticket = catalog_.begin();
+    catalog_in_flight_ = true;
+    set_catalog_state(CatalogState::Loading);
+    spdlog::debug("[SpoolWizard] SpoolmanDB search #{} sent for '{}'", ticket, query);
+
+    // Whichever way it ends, the in-flight slot frees and a waiting query goes.
+    auto finish = [this]() {
+        catalog_in_flight_ = false;
+        if (catalog_has_pending_) {
+            catalog_has_pending_ = false;
+            send_catalog_search(std::move(catalog_pending_query_));
+            return true;
+        }
+        return false;
+    };
+
+    api->spoolman().search_spoolman_external_filaments(
+        std::string(helix::text_io::trim(query)), helix::SpoolmanCatalogSearch::kResultLimit,
+        lifetime_.bg_cb("SpoolWizard::catalog_results",
+                        [this, ticket, conn, finish](std::vector<helix::ExternalFilament> results) {
+                            helix::SpoolmanCatalogSearch::record_success(conn);
+                            sync_catalog_available();
+                            const bool current = catalog_.is_current(ticket);
+                            if (finish() || !current) {
+                                spdlog::debug("[SpoolWizard] SpoolmanDB search #{} superseded; "
+                                              "answer dropped",
+                                              ticket);
+                                return;
+                            }
+                            apply_catalog_results(std::move(results));
+                        }),
+        lifetime_.bg_cb(
+            "SpoolWizard::catalog_error", [this, ticket, conn, finish](const MoonrakerError& err) {
+                helix::SpoolmanCatalogSearch::record_error(conn, err);
+                sync_catalog_available();
+                const bool current = catalog_.is_current(ticket);
+                if (finish() || !current) {
+                    return;
+                }
+                spdlog::warn("[SpoolWizard] SpoolmanDB search failed: {} (code {})", err.message,
+                             err.code);
+                set_catalog_state(helix::SpoolmanCatalogSearch::availability(conn) ==
+                                          helix::SpoolmanCatalogSearch::Availability::Unavailable
+                                      ? CatalogState::Idle
+                                      : CatalogState::Error);
+            }));
+}
+
+void SpoolWizardOverlay::apply_catalog_results(std::vector<helix::ExternalFilament> results) {
+    const auto started = std::chrono::steady_clock::now();
+    const size_t limit = static_cast<size_t>(helix::SpoolmanCatalogSearch::kResultLimit);
+    if (results.size() > limit) {
+        results.resize(limit);
+    }
+    catalog_results_ = std::move(results);
+
+    if (subjects_initialized_) {
+        // The rows bind to these when the count rebuilds them, so they go first.
+        for (size_t i = 0; i < catalog_results_.size(); ++i) {
+            const auto& f = catalog_results_[i];
+            catalog_titles_.set_string(i, f.name.empty() ? f.id : f.name);
+            catalog_details_.set_string(i, f.material.empty()
+                                               ? f.manufacturer
+                                               : f.manufacturer + " \xC2\xB7 " + f.material);
+            const std::string& hex = f.color_hexes.empty() ? f.color_hex : f.color_hexes.front();
+            uint32_t rgb = 0x808080;
+            helix::parse_hex_color(hex.c_str(), rgb);
+            catalog_colors_.set_color(i, rgb);
+            catalog_edges_.set_int(i, helix::ui::swatch_needs_edge_here(rgb) ? 1 : 0);
+        }
+        lv_subject_set_int(&catalog_count_subject_, static_cast<int32_t>(catalog_results_.size()));
+    }
+    set_catalog_state(catalog_results_.empty() ? CatalogState::NoResults : CatalogState::Results);
+    spdlog::debug("[SpoolWizard] SpoolmanDB rows applied: {} in {} us", catalog_results_.size(),
+                  std::chrono::duration_cast<std::chrono::microseconds>(
+                      std::chrono::steady_clock::now() - started)
+                      .count());
+}
+
+void SpoolWizardOverlay::select_catalog_result(int index) {
+    if (index < 0 || index >= static_cast<int>(catalog_results_.size())) {
+        spdlog::warn("[{}] Invalid SpoolmanDB result index: {}", get_name(), index);
+        return;
+    }
+    const helix::ExternalFilament picked = catalog_results_[static_cast<size_t>(index)];
+
+    // The pick ends the search: typing that settles now, or an answer still on
+    // its way, must not run over it.
+    if (search_timer_) {
+        lv_timer_set_repeat_count(search_timer_, 0);
+        lv_timer_pause(search_timer_);
+    }
+    catalog_has_pending_ = false;
+
+    // A vendor the server already has is reused; otherwise it is created on save.
+    const int vendor = find_server_vendor(all_vendors_, picked.manufacturer);
+    selected_vendor_ = vendor >= 0 ? all_vendors_[static_cast<size_t>(vendor)]
+                                   : VendorEntry{picked.manufacturer, -1, false};
+    new_vendor_name_.clear();
+    new_vendor_url_.clear();
+    // The filament step behind the spool step lists this vendor's filaments,
+    // so Back lands on a loaded list. It resets the selection, so it goes first.
+    load_filaments();
+    selected_filament_ = entry_from_catalog(picked);
+    creating_new_filament_ = false;
+    spdlog::info("[{}] Picked SpoolmanDB '{}' ({}; vendor server_id={})", get_name(), picked.name,
+                 picked.id, selected_vendor_.server_id);
+    publish_vendor_selection();
+    publish_filament_summary();
+
+    auto show_details = [this]() {
+        navigate_to_step(Step::SPOOL_DETAILS);
+        enter_spool_details();
+    };
+    IMoonrakerAPI* api = get_moonraker_api();
+    if (selected_vendor_.server_id < 0 || !api) {
+        show_details();
+        return;
+    }
+
+    // An existing vendor may already have this filament; reuse it rather than
+    // create a duplicate.
+    const int vendor_id = selected_vendor_.server_id;
+    const uint64_t ticket = catalog_.begin();
+    api->spoolman().get_spoolman_filaments(
+        vendor_id,
+        lifetime_.bg_cb(
+            "SpoolWizard::catalog_pick_filaments",
+            [this, ticket, vendor_id, show_details](const std::vector<FilamentInfo>& filaments) {
+                if (!catalog_.is_current(ticket)) {
+                    return;
+                }
+                const std::string& colors = selected_filament_.multi_color_hexes.empty()
+                                                ? selected_filament_.color_hex
+                                                : selected_filament_.multi_color_hexes;
+                if (const FilamentInfo* f = helix::spoolman::find_catalog_filament(
+                        filaments, vendor_id, selected_filament_.name, selected_filament_.material,
+                        colors)) {
+                    selected_filament_.server_id = f->id;
+                    selected_filament_.vendor_id = vendor_id;
+                    selected_filament_.from_server = true;
+                }
+                show_details();
+            }),
+        lifetime_.bg_cb("SpoolWizard::catalog_pick_filaments_error",
+                        [this, ticket, show_details](const MoonrakerError& err) {
+                            if (!catalog_.is_current(ticket)) {
+                                return;
+                            }
+                            spdlog::warn("[SpoolWizard] Could not list the vendor's filaments "
+                                         "({}); a new one will be created",
+                                         err.message);
+                            show_details();
+                        }));
 }

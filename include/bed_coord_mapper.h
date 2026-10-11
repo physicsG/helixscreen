@@ -33,6 +33,10 @@ class BedCoordMapper {
                    float origin_x = 0.0f, float origin_y = 0.0f);
 
     std::pair<float, float> mm_to_px(float x_mm, float y_mm) const;
+    /// Exact inverse of mm_to_px (offset, Y flip, origin undone). Unclamped
+    /// by design: a point in the letterbox margin maps outside the bed range;
+    /// callers clamp to their own tolerance.
+    std::pair<float, float> px_to_mm(float x_px, float y_px) const;
     PixelRect bbox_to_rect(glm::vec2 bbox_min, glm::vec2 bbox_max) const;
 
     float scale() const {

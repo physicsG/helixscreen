@@ -33,6 +33,7 @@ class CheckType(Enum):
     UNKNOWN_FONT_REF = "unknown-font-ref"
     DEPRECATED_ATTRIBUTE = "deprecated-attribute"
     INVALID_STATE_QUALIFIER = "invalid-state-qualifier"
+    NEGATED_CONST_REF = "negated-const-ref"
 
 
 @dataclass

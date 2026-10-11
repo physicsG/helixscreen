@@ -6,6 +6,13 @@
 
 #include "../catch_amalgamated.hpp"
 
+using helix::AmsBackend;
+using helix::AmsBackendMock;
+using helix::AmsSystemInfo;
+using helix::AmsType;
+using helix::PathTopology;
+using helix::SlotStatus;
+
 /**
  * @file test_ams_mock_mixed_topology.cpp
  * @brief Unit tests for mixed topology mock backend (HELIX_MOCK_AMS=mixed)

@@ -1,0 +1,83 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component>
+  <!-- Bed tab: the plate seen from above (rear on top) with the toolhead
+       marker, and a readout below. MotionPanel sizes the plate to the bed's
+       aspect inside the touch area and places the marker; everything here is
+       how they look. Shared by the portrait and landscape layouts. -->
+  <styles>
+    <style name="bed_plate_live" bg_color="#card_bg" bg_opa="255" border_color="#primary" border_opa="255"/>
+    <!-- Unhomed, printing or not ready: the plate greys out. -->
+    <style name="bed_plate_dim" bg_color="#card_bg" bg_opa="120" border_color="#text_muted" border_opa="120"/>
+    <style name="bed_plate_round" radius="9999"/>
+    <!-- A warning wash under the finger; keeps the circle's radius. -->
+    <style name="bed_home_pressed" bg_color="#warning" bg_opa="60"/>
+  </styles>
+  <view name="motion_bed_map"
+        extends="lv_obj" width="100%" height="100%" style_pad_all="0" style_border_opa="0" scrollable="false"
+        flex_flow="column" style_pad_gap="#space_xs">
+    <!-- The touch surface is the whole slot, not just the plate: a touch in
+         the margin beside the plate clamps to its nearest edge. Press lock
+         keeps a drag that leaves the surface reporting until release. -->
+    <lv_obj name="bed_map_area"
+            width="100%" height="0" flex_grow="1" style_pad_all="#bed_map_inset" style_border_opa="0" style_bg_opa="0"
+            scrollable="false" press_lock="true" gesture_bubble="false" moves_machine="true">
+      <!-- Not idle_timeout: it reads Printing during any move, this drag's
+           own included, and a surface disabled under a pressed finger stops
+           receiving its drag. The panel refuses to START a gesture while
+           another operation holds the toolhead instead. -->
+      <bind_state_if_eq subject="nav_buttons_enabled" state="disabled" ref_value="0"/>
+      <event_cb trigger="pressed" callback="on_motion_bed_pressed"/>
+      <event_cb trigger="pressing" callback="on_motion_bed_pressing"/>
+      <event_cb trigger="released" callback="on_motion_bed_released"/>
+      <event_cb trigger="press_lost" callback="on_motion_bed_press_lost"/>
+      <event_cb trigger="size_changed" callback="on_motion_bed_size_changed"/>
+      <lv_obj name="bed_map_plate"
+              style_border_width="2" style_radius="#border_radius" style_pad_all="0" scrollable="false"
+              clickable="false">
+        <bind_style_if name="bed_plate_live"
+                       cond="motion_x_homed eq 1 and motion_y_homed eq 1 and motion_z_homed eq 1 and nav_buttons_enabled eq 1 and machine_motion_blocked eq 0"/>
+        <bind_style_if name="bed_plate_dim"
+                       cond="motion_x_homed eq 0 or motion_y_homed eq 0 or motion_z_homed eq 0 or nav_buttons_enabled eq 0 or machine_motion_blocked eq 1"/>
+        <bind_style_if name="bed_plate_round" cond="motion_bed_circular eq 1"/>
+        <!-- Crosshair guides through the marker, edge to edge: thin and faint
+             so they place the head without competing with the marker.
+             MotionPanel sets their position and length (a chord on a round
+             plate); the plate clips them to its rectangle. -->
+        <lv_obj name="bed_map_guide_x"
+                width="1" style_bg_color="#primary" style_bg_opa="90" style_border_width="0" style_radius="0"
+                scrollable="false" clickable="false">
+          <bind_flag_if cond="motion_x_homed eq 0 or motion_y_homed eq 0 or motion_z_homed eq 0" flag="hidden"/>
+        </lv_obj>
+        <lv_obj name="bed_map_guide_y"
+                height="1" style_bg_color="#primary" style_bg_opa="90" style_border_width="0" style_radius="0"
+                scrollable="false" clickable="false">
+          <bind_flag_if cond="motion_x_homed eq 0 or motion_y_homed eq 0 or motion_z_homed eq 0" flag="hidden"/>
+        </lv_obj>
+      </lv_obj>
+      <!-- Hidden, not drawn at a guess, until every axis is homed: with Z
+           unknown no clearance lift can be computed, so the map homes first. Its size
+           and the surface inset live in motion_panel.xml: responsive consts
+           resolve only from top-level layout files. -->
+      <lv_obj name="bed_map_marker"
+              width="#bed_map_marker_size" height="#bed_map_marker_size" style_radius="9999" style_bg_color="#primary"
+              style_bg_opa="255" style_border_width="2" style_border_color="#text" style_border_opa="255"
+              scrollable="false" clickable="false">
+        <bind_flag_if cond="motion_x_homed eq 0 or motion_y_homed eq 0 or motion_z_homed eq 0" flag="hidden"/>
+      </lv_obj>
+      <!-- The jog pad's unhomed centre button, as a widget: elevated circle,
+           warning ring and warning home icon (ui_jog_pad.cpp draws the same). -->
+      <lv_obj name="bed_map_home"
+              width="#bed_map_home_size" height="#bed_map_home_size" align="center" style_radius="9999"
+              style_bg_color="#elevated_bg" style_bg_opa="255" style_border_width="3" style_border_color="#warning"
+              style_border_opa="255" style_pad_all="0" scrollable="false" moves_machine="true">
+        <style name="bed_home_pressed" selector="pressed"/>
+        <bind_flag_if cond="motion_x_homed eq 1 and motion_y_homed eq 1 and motion_z_homed eq 1" flag="hidden"/>
+        <icon src="home" size="lg" variant="warning" align="center" clickable="false" event_bubble="true"/>
+        <event_cb trigger="clicked" callback="on_motion_bed_home"/>
+      </lv_obj>
+    </lv_obj>
+    <text_small name="bed_map_readout" width="100%" bind_text="motion_bed_readout" style_text_align="center"/>
+  </view>
+</component>

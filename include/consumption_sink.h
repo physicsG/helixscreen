@@ -4,6 +4,7 @@
 #pragma once
 
 #include "ams_types.h"
+#include "filament_database.h"
 
 #include <cstdint>
 #include <optional>
@@ -87,7 +88,7 @@ class ExternalSpoolSink : public IConsumptionSink {
     float snapshot_mm_ = 0.0f;
     float snapshot_weight_g_ = 0.0f;
     float density_g_cm3_ = 0.0f;
-    float diameter_mm_ = 1.75f;
+    float diameter_mm_ = filament::DEFAULT_DIAMETER_MM;
     float last_written_weight_g_ = 0.0f;
     uint32_t last_persist_tick_ms_ = 0;
     uint32_t persist_interval_override_ms_ = 0;
@@ -97,7 +98,7 @@ class ExternalSpoolSink : public IConsumptionSink {
 
 /// Sink for a single AMS slot. Reads current SlotInfo via
 /// AmsBackend::get_slot_info() and writes updates via
-/// AmsBackend::set_slot_info(), which routes persistence through the backend's
+/// AmsBackend::update_slot_weight(), which routes persistence through the backend's
 /// override store (Moonraker `lane_data/<backend>/lane<N>`).
 ///
 /// Gating (per spec 4): a slot sink is trackable only when all of:
@@ -143,7 +144,7 @@ class AmsSlotSink : public IConsumptionSink {
     float snapshot_mm_ = 0.0f;
     float snapshot_weight_g_ = 0.0f;
     float density_g_cm3_ = 0.0f;
-    float diameter_mm_ = 1.75f;
+    float diameter_mm_ = filament::DEFAULT_DIAMETER_MM;
     float last_written_weight_g_ = 0.0f;
     uint32_t last_persist_tick_ms_ = 0;
     uint32_t persist_interval_override_ms_ = 0;

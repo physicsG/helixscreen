@@ -6,9 +6,14 @@
 #include "backlight_backend.h"
 #include "color_transform.h"
 #include "display_backend.h"
+#include "display_sleep_controller.h"
+#include "indev_delete_watch.h"
+#include "refresh_timing.h"
 #include "remote_screen_manager.h"
+#include "scroll_click_guard.h"
 #include "touch_calibration.h"
 #include "touch_calibration_session.h"
+#include "touch_calibration_wrapper.h"
 
 #include <functional>
 #include <lvgl.h>
@@ -47,6 +52,12 @@
  * display_mgr.shutdown();
  * @endcode
  */
+#ifdef HELIX_ENABLE_SCREENSAVER
+namespace helix::ui {
+struct SaverHost;
+}
+#endif
+
 class DisplayManager : public helix::ICalibrationSink {
   public:
     /**
@@ -124,6 +135,12 @@ class DisplayManager : public helix::ICalibrationSink {
         return m_pointer;
     }
 
+    /// Pixels of travel after which the post-scroll click guard counts a touch
+    /// as a scroll. Follows the live scroll_limit setting.
+    void set_scroll_guard_limit(int px) {
+        m_scroll_guard.scroll_limit_px = px;
+    }
+
     /**
      * @brief Get keyboard input device
      * @return Input device pointer, or nullptr if not available
@@ -152,10 +169,15 @@ class DisplayManager : public helix::ICalibrationSink {
 
     /**
      * @brief Get current display width
+     *
+     * Read from the display, never cached: a backend may settle rotation itself
+     * (a DRM plane taking 90/270 un-swaps LVGL's resolution) and a window resize
+     * changes it underneath us, so any copy taken earlier can be stale.
+     *
      * @return Width in pixels, or 0 if not initialized
      */
     int width() const {
-        return m_width;
+        return m_display ? lv_display_get_horizontal_resolution(m_display) : m_width;
     }
 
     /**
@@ -163,132 +185,12 @@ class DisplayManager : public helix::ICalibrationSink {
      * @return Height in pixels, or 0 if not initialized
      */
     int height() const {
-        return m_height;
+        return m_display ? lv_display_get_vertical_resolution(m_display) : m_height;
     }
 
     // ========================================================================
     // Display Sleep Management
     // ========================================================================
-
-    /**
-     * @brief Decide whether real panel power-off (FB_BLANK_POWERDOWN / DRM DPMS)
-     *        may be used as the sleep mechanism (#1049). Pure, no side effects.
-     *
-     * Power-off is a LAST RESORT — only for devices with NO controllable
-     * backlight (generic HDMI / Backlight-None like the #1049 reporter and CB1),
-     * where it is the only way to actually cut the panel. Any device WITH a
-     * hardware blank OR a usable backlight must NOT power off the panel: it turns
-     * the backlight off instead, which is safer and avoids driver-specific
-     * CRTC-disable wedges (e.g. Snapmaker U1: DRM DPMS-off disables the Rockchip
-     * VOP2 CRTC and never recovers — even though it has a working pwm backlight).
-     *
-     * @param use_hardware_blank        Whether a hardware backlight blank is used
-     * @param has_usable_backlight      Whether a controllable backlight is available
-     * @param backend_supports_power_off Whether the display backend can power off
-     * @return true only when there is neither a hardware blank nor a usable
-     *         backlight AND the backend can power off
-     */
-    static bool should_use_power_off(bool use_hardware_blank, bool has_usable_backlight,
-                                     bool backend_supports_power_off) {
-        return !use_hardware_blank && !has_usable_backlight && backend_supports_power_off;
-    }
-
-    /**
-     * @brief How enter_sleep() actually cuts the panel on this device.
-     *
-     * Selected by select_sleep_mechanism(); recorded in m_last_sleep_mechanism so
-     * the wake path and the logs agree on what was done.
-     */
-    enum class SleepMechanism {
-        HardwareBlank,   ///< FBIOBLANK at the display controller (AD5M/Allwinner)
-        PanelPowerOff,   ///< FB_BLANK_POWERDOWN / DRM DPMS-off (#1049)
-        HostSleep,       ///< Let the OS power the panel off (Android, #1245)
-        SoftwareOverlay, ///< Black LVGL rect over a lit panel — universal fallback
-    };
-
-    /** @brief Human-readable name for a mechanism (logging + test failure output). */
-    static const char* sleep_mechanism_name(SleepMechanism m) {
-        switch (m) {
-        case SleepMechanism::HardwareBlank:
-            return "hardware blank";
-        case SleepMechanism::PanelPowerOff:
-            return "panel power-off";
-        case SleepMechanism::HostSleep:
-            return "host sleep (keep-screen-on cleared)";
-        case SleepMechanism::SoftwareOverlay:
-            break;
-        }
-        return "software overlay";
-    }
-
-    /** @brief True when this binary was built for Android. Compile-time constant. */
-    static constexpr bool platform_is_android() {
-#ifdef __ANDROID__
-        return true;
-#else
-        return false;
-#endif
-    }
-
-    /**
-     * @brief Decide how idle entry should cut the panel (#1245). Pure, no side effects.
-     *
-     * Ordering is "most direct control first": if we can blank or power the panel
-     * ourselves we always do, because that honors the user's timeout exactly.
-     * Host sleep is the Android last resort — no backlight sysfs is reachable from
-     * an untrusted app and DisplayBackendSDL has no blank/power-off, so the only
-     * real way to darken the panel is to stop asserting FLAG_KEEP_SCREEN_ON and
-     * let Android's own display timeout run. Everything else keeps the software
-     * overlay, which is what every platform did before.
-     *
-     * @p sleep_timeout_sec is the configured Display Sleep value; 0 (and any
-     * non-positive value) means "Never", and must never select HostSleep — a
-     * wall-mounted tablet has to stay lit even though the panel is idle.
-     *
-     * With @p platform_is_android false this reduces exactly to the pre-#1245
-     * if/else-if/else chain, so non-Android platforms are unaffected.
-     *
-     * @param platform_is_android  Built for Android (see platform_is_android())
-     * @param use_hardware_blank   A hardware backlight blank is in use
-     * @param can_power_off        Panel power-off is enabled AND a backend exists
-     * @param sleep_timeout_sec    Configured Display Sleep timeout (0 = Never)
-     */
-    static SleepMechanism select_sleep_mechanism(bool platform_is_android, bool use_hardware_blank,
-                                                 bool can_power_off, int sleep_timeout_sec) {
-        if (use_hardware_blank) {
-            return SleepMechanism::HardwareBlank;
-        }
-        if (can_power_off) {
-            return SleepMechanism::PanelPowerOff;
-        }
-        if (platform_is_android && sleep_timeout_sec > 0) {
-            return SleepMechanism::HostSleep;
-        }
-        return SleepMechanism::SoftwareOverlay;
-    }
-
-    /**
-     * @brief Whether a host-sleeping display must self-wake (#1245). Pure.
-     *
-     * Android pauses the app when it powers the panel down and resumes it when the
-     * panel comes back — and neither transition is a touch, so the normal
-     * activity-based wake never fires. Left alone, m_display_sleeping would stay
-     * true with keep-screen-on still cleared: the device would immediately re-sleep
-     * and the sleep callbacks (camera suspend) would never resume.
-     * HelixActivity.onResume() bumps a counter; a change in it while host-sleeping
-     * means the panel is on again.
-     *
-     * Only meaningful while HostSleep is the active mechanism — a resume must not
-     * spuriously wake a hardware-blank / power-off / overlay device.
-     *
-     * @param sleeping_via_host   Currently asleep via SleepMechanism::HostSleep
-     * @param resume_seq_at_sleep Resume counter captured when sleep was entered
-     * @param resume_seq_now      Resume counter right now
-     */
-    static bool host_sleep_needs_wake(bool sleeping_via_host, int resume_seq_at_sleep,
-                                      int resume_seq_now) {
-        return sleeping_via_host && resume_seq_now != resume_seq_at_sleep;
-    }
 
     /**
      * @brief Check inactivity and trigger display sleep if timeout exceeded
@@ -312,10 +214,11 @@ class DisplayManager : public helix::ICalibrationSink {
     void wake_display();
 
     /**
-     * @brief Force display ON at startup
+     * @brief Force display ON at startup, at the saved brightness
      *
-     * Called early in app initialization to ensure display is visible regardless
-     * of previous app's sleep state.
+     * Clears any sleep or dim state a previous instance left behind and applies
+     * DisplaySettingsManager's brightness, so it must run after that manager's
+     * subjects exist (after PrinterSession::init_core_subjects()).
      */
     void ensure_display_on();
 
@@ -350,6 +253,14 @@ class DisplayManager : public helix::ICalibrationSink {
      * @param type Screensaver type to preview
      */
     void preview_screensaver(int type);
+
+    /**
+     * @brief What the screensaver gate needs from this app
+     *
+     * The print callback asks job_holds_machine() of the published print lifecycle; the
+     * display path is `backend`'s display_backend_key(), or "unknown" without a backend.
+     */
+    static helix::ui::SaverHost screensaver_host(const DisplayBackend* backend);
 #endif
 
     /**
@@ -357,7 +268,12 @@ class DisplayManager : public helix::ICalibrationSink {
      * @return true if backlight is off due to inactivity
      */
     bool is_display_sleeping() const {
-        return m_display_sleeping;
+        return m_sleep.is_sleeping();
+    }
+
+    /// Refresh pacing read from the environment by init(); the main loop sleeps by it.
+    const helix::RefreshTiming& refresh_timing() const {
+        return m_refresh_timing;
     }
 
     /**
@@ -370,7 +286,7 @@ class DisplayManager : public helix::ICalibrationSink {
      * @param cb Callback receiving true=sleep, false=wake
      */
     void register_sleep_callback(std::function<void(bool sleeping)> cb) {
-        m_sleep_callbacks.push_back(std::move(cb));
+        m_sleep.register_callback(std::move(cb));
     }
 
     /**
@@ -378,7 +294,7 @@ class DisplayManager : public helix::ICalibrationSink {
      * @return true if backlight is at reduced brightness
      */
     bool is_display_dimmed() const {
-        return m_display_dimmed;
+        return m_sleep.is_dimmed();
     }
 
     /**
@@ -426,7 +342,7 @@ class DisplayManager : public helix::ICalibrationSink {
      * @return true if using hardware blank, false if using software overlay
      */
     bool uses_hardware_blank() const {
-        return m_use_hardware_blank;
+        return m_sleep.uses_hardware_blank();
     }
 
     /**
@@ -436,6 +352,15 @@ class DisplayManager : public helix::ICalibrationSink {
      * Identity transform (gamma=1, warmth=0) skips the transform entirely.
      */
     void set_color_transform(float gamma, int warmth, int tint);
+
+    /**
+     * @brief Put back the flush callback a no-op stood in for.
+     *
+     * Frames rendered meanwhile never reached the backend, so it is asked to present the
+     * whole next frame (DisplayBackend::request_full_upload()). No-op without a display
+     * or a callback.
+     */
+    void restore_flush_cb(lv_display_flush_cb_t flush_cb);
 
     /** @brief Access the color transform (read-only — used by flush hook). */
     const helix::ColorTransform& color_transform() const {
@@ -525,9 +450,12 @@ class DisplayManager : public helix::ICalibrationSink {
             m_backend->clear_calibration();
         }
     }
-    bool apply_touch_range(bool swap_axes, int min_x, int min_y, int max_x, int max_y) override {
-        return m_backend && m_backend->apply_touch_range(swap_axes, min_x, min_y, max_x, max_y);
+    bool apply_touch_range(bool swap_axes, int min_x, int min_y, int max_x, int max_y,
+                           helix::TouchRangeSource source) override {
+        return m_backend &&
+               m_backend->apply_touch_range(swap_axes, min_x, min_y, max_x, max_y, source);
     }
+    helix::LiveTouchRange current_touch_range() const override;
 
     /**
      * @brief Mark whether a touch-calibration UI (overlay or wizard) is on screen
@@ -538,6 +466,12 @@ class DisplayManager : public helix::ICalibrationSink {
      */
     void set_touch_calibration_active(bool active) {
         m_touch_calibration_active = active;
+    }
+    /// ICalibrationSink spelling of set_touch_calibration_active(). Also holds the
+    /// evdev range still for the capture (helix::set_touch_capture_active).
+    void set_capture_active(bool active) override {
+        set_touch_calibration_active(active);
+        helix::set_touch_capture_active(active);
     }
     bool is_touch_calibration_active() const {
         return m_touch_calibration_active;
@@ -554,16 +488,6 @@ class DisplayManager : public helix::ICalibrationSink {
      * No-op on SDL/DRM backends.
      */
     void run_rotation_probe();
-
-    /**
-     * @brief Apply display rotation at runtime
-     *
-     * Used when auto-detection discovers panel orientation after init() has
-     * already run. Sets LVGL rotation + backend rotation (matrix or hardware).
-     *
-     * @param degrees Rotation in degrees (0, 90, 180, 270)
-     */
-    void apply_rotation(int degrees);
 
     // ========================================================================
     // Static Timing Functions (portable across platforms)
@@ -647,8 +571,13 @@ class DisplayManager : public helix::ICalibrationSink {
     // full init(). See tests/test_helpers/display_manager_test_access.h.
     friend class DisplayManagerTestAccess;
 
+    /// Rotates the display through the backend. width()/height() then read whatever it settled on.
+    void settle_display_rotation(lv_display_rotation_t rot, int phys_w, int phys_h);
+
     bool m_initialized = false;
     bool m_shutting_down = false;
+    /// Unrotated size requested of the backend, which may create the display at another size;
+    /// width()/height() report the display's actual size.
     int m_width = 0;
     int m_height = 0;
     bool m_size_was_explicit = false;
@@ -658,6 +587,11 @@ class DisplayManager : public helix::ICalibrationSink {
     lv_indev_t* m_pointer = nullptr;
     lv_indev_t* m_keyboard = nullptr;
     lv_group_t* m_input_group = nullptr;
+    // Clears m_pointer/m_keyboard the moment LVGL deletes the indev underneath
+    // them - lv_evdev on an unplugged panel's ENODEV, or lv_deinit() at
+    // shutdown - so a later swap or read never reaches a freed device through
+    // either member.
+    helix::IndevDeleteWatch m_indev_delete_watch;
 
     // Backlight control
     std::unique_ptr<BacklightBackend> m_backlight;
@@ -671,70 +605,20 @@ class DisplayManager : public helix::ICalibrationSink {
     // flush hook per dirty area; a cheap early-out when no sinks are attached.
     helix::RemoteScreenManager m_remote_screen;
 
-    // Display sleep state
-    bool m_display_sleeping = false;
-    bool m_display_dimmed = false;
+    // Refresh pacing from the environment, parsed once by init() and applied after its
+    // input devices exist, since new devices start at LVGL's default read period.
+    helix::RefreshTiming m_refresh_timing;
+
+    // Dim, screensaver, sleep and wake. Reads m_backend, m_backlight and m_display through
+    // references, so it must be declared after them.
+    helix::DisplaySleepController m_sleep;
+
     bool m_touch_calibration_active = false; // suppresses the debug-touches ripple (#943)
-#ifdef HELIX_ENABLE_SCREENSAVER
-    bool m_screensaver_active = false;
-    bool m_screensaver_is_preview = false;
-    // Tick at which preview was started; used to gate activity-based dismiss
-    // so the click that *launched* the preview doesn't immediately close it.
-    uint32_t m_preview_start_tick_ms = 0;
-#endif
-    bool m_wake_requested = false; // Set by input wrapper when touch detected while sleeping
-    int m_dim_timeout_sec = 600;
-    int m_dim_brightness_percent = 30;
-
-    // Hardware vs software blank strategy
-    bool m_use_hardware_blank = false;
-    // Real panel power-off (fbdev FB_BLANK_POWERDOWN / DRM DPMS) for HDMI/fbdev
-    // devices with no hardware backlight blank. When true and the screensaver is
-    // OFF, idle entry powers the panel off instead of painting a software overlay
-    // (#1049). Falls back to the overlay when no backend supports power-off.
-    bool m_use_power_off = false;
-    bool m_sleep_backlight_off = true; // Whether to power off backlight during sleep
-    lv_obj_t* m_sleep_overlay = nullptr;
-
-    // Which branch the most recent enter_sleep() actually took (#1245). Not just
-    // the selector's answer: the power-off branch can degrade to the overlay when
-    // power_off() refuses at runtime, and the Android self-wake must only fire for
-    // a sleep that really handed the panel to the OS.
-    SleepMechanism m_last_sleep_mechanism = SleepMechanism::SoftwareOverlay;
-
-    // Mirror of the Android window's FLAG_KEEP_SCREEN_ON state (#1245). SDL asserts
-    // the flag at video init (SDL_video.c disables the screensaver unless
-    // SDL_HINT_VIDEO_ALLOW_SCREENSAVER is set), so true is the startup truth. Used
-    // to make set_keep_screen_on() transition-guarded — JNI is only crossed when
-    // the state actually changes. Always true off Android.
-    bool m_keep_screen_on = true;
-
-    // HelixActivity.onResume() counter captured at host-sleep entry, so a
-    // suspend/resume round trip can be detected without a touch. See
-    // host_sleep_needs_wake().
-    int m_resume_seq_at_sleep = 0;
-
-    // Power-off sleep flush suppression (#1049 regression guard). When the panel
-    // is powered down via DRM DPMS-off / FB_BLANK_POWERDOWN, the very next LVGL
-    // page-flip re-asserts DPMS-on and relights the panel on the home screen.
-    // Pausing the refresh timer is insufficient — any invalidation fires
-    // LV_EVENT_REFR_REQUEST and resumes it. So we disable invalidation and swap
-    // the flush callback for a no-op while powered off (mirroring Application's
-    // proven splash flush-suppression). Restored on wake.
-    lv_display_flush_cb_t m_saved_flush_cb_for_sleep = nullptr;
-    bool m_flush_suppressed_for_sleep = false;
-
     // Original pointer read callback (before sleep-aware wrapper)
     lv_indev_read_cb_t m_original_pointer_read_cb = nullptr;
 
-    // Last scroll config applied to the pointer, remembered so a post-swap input
-    // rebuild (rotation fallback) can reapply it. Defaults match the clamped
-    // InputSettingsManager defaults.
-    int m_scroll_throw = 25;
-    int m_scroll_limit = 10;
-
-    // Sleep/wake callbacks (e.g. camera stream suspend)
-    std::vector<std::function<void(bool sleeping)>> m_sleep_callbacks;
+    // Runs inside sleep_aware_read_cb, so only where that wrapper is installed
+    helix::ScrollClickGuard m_scroll_guard;
 
     // Resize handler state
     std::vector<ResizeCallback> m_resize_callbacks;
@@ -746,71 +630,50 @@ class DisplayManager : public helix::ICalibrationSink {
     static void resize_timer_cb(lv_timer_t* timer);
 
     /**
-     * @brief Transition display to sleep state (hardware blank or software overlay)
-     * @param timeout_sec Sleep timeout for logging
-     */
-    void enter_sleep(int timeout_sec);
-
-    /**
-     * @brief Restore panel output on wake (unblank / power-on / remove overlay).
-     *
-     * Mirrors enter_sleep()'s branch selection. Runs BEFORE the post-wake
-     * lv_refr_now() so the framebuffer is ready when LVGL paints (#303).
-     */
-    void restore_display_output();
-
-    /**
-     * @brief Neutralize LVGL rendering while the panel is powered off (#1049).
-     *
-     * Disables invalidation and replaces the display flush callback with a no-op
-     * so no page-flip reaches the panel and re-asserts DPMS-on while it is
-     * powered down. Idempotent; no-op if no display or already suppressed.
-     */
-    void suppress_flush_for_sleep();
-
-    /**
-     * @brief Undo suppress_flush_for_sleep() on wake. Idempotent; safe to call
-     *        even when suppression was never engaged (overlay / hardware-blank
-     *        path), so wake/shutdown paths can call it unconditionally.
-     */
-    void restore_flush_after_sleep();
-
-    /**
-     * @brief Assert or release the host window's "keep screen on" request (#1245).
-     *
-     * Android only — a no-op everywhere else, where nothing but us decides when
-     * the panel goes dark. Transition-guarded against m_keep_screen_on so the JNI
-     * boundary is only crossed on a real change; safe to call unconditionally from
-     * any sleep/wake path.
-     *
-     * @param keep_on true to hold the screen awake, false to let the OS sleep it
-     */
-    void set_keep_screen_on(bool keep_on);
-
-    /**
-     * @brief Create fullscreen black overlay on lv_layer_top() for software sleep
-     */
-    void create_sleep_overlay();
-
-    /**
-     * @brief Destroy the software sleep overlay
-     */
-    void destroy_sleep_overlay();
-
-    /**
      * @brief Configure scroll behavior on pointer device
      */
     void configure_scroll(int scroll_throw, int scroll_limit);
 
+    /// Applies scroll, long-press, the sleep-aware wrapper and the scroll guard to
+    /// a freshly created m_pointer, from finish_input_setup().
+    void configure_pointer(int scroll_throw, int scroll_limit);
+
+    /// Registers m_pointer/m_keyboard with m_indev_delete_watch, right after
+    /// the device is created.
+    void watch_pointer();
+    void watch_keyboard();
+
     /**
-     * @brief Recreate input devices on the current backend after a backend swap
+     * @brief Create the debug-touch ripple timer
      *
-     * Used by the DRM→fbdev rotation fallback when it runs post-init: the old
-     * indevs are bound to the freed DRM backend and the deleted display, so they
-     * are deleted and rebuilt (mirroring init()'s input setup) on the fbdev
-     * backend. No-op-safe to call with null input devices.
+     * No-op (returns nullptr) when m_pointer is null. The timer runs
+     * unconditionally once created; RuntimeConfig::debug_touches() is checked
+     * inside so the Settings toggle takes effect without a restart. Reads the
+     * pointer through pointer_input() on every tick rather than a copy
+     * captured at creation time, so an unplug (which clears m_pointer) is
+     * seen here too.
+     *
+     * @return The created timer, so a caller can force it ready (lv_timer_ready())
      */
-    void rebuild_input_after_backend_swap();
+    lv_timer_t* install_debug_touch_timer();
+
+    /// The debug-touch timer's tick, named so a test can call it directly
+    /// instead of only through lv_timer_handler().
+    static void debug_touch_tick(lv_timer_t* t);
+
+    /// The single assignment behind instance(): init() publishes this manager
+    /// through it, shutdown() clears it. Named so both call sites read as the
+    /// same action instead of a bare pointer write repeated twice.
+    static void set_active_instance(DisplayManager* dm);
+
+    /// The input setup init() runs once m_pointer exists: configures the pointer,
+    /// creates the keyboard, then applies m_refresh_timing to the timers both
+    /// devices just created.
+    void finish_input_setup(int scroll_throw, int scroll_limit);
+
+    /// Create the backend's keyboard indev, report whether it is a physical
+    /// keyboard to DisplaySettingsManager, and watch and group it.
+    void create_keyboard_input();
 
     /**
      * @brief Set up keyboard input group

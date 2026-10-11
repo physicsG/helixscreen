@@ -3,6 +3,9 @@
 
 #pragma once
 
+#include "ui_observer_guard.h"
+
+#include "async_lifetime_guard.h"
 #include "subject_managed_panel.h"
 
 #include <lvgl/lvgl.h>
@@ -21,7 +24,7 @@ class PrinterState;
  * @brief Light and timelapse button controls extracted from PrintStatusPanel
  *
  * Manages the light and timelapse toggle buttons on the print status panel:
- * - Light button: Toggles configured LED on/off via Moonraker
+ * - Light button: Toggles the chamber light and shows its state
  * - Timelapse button: Enables/disables timelapse recording via Moonraker plugin
  *
  * This class is a helper owned by PrintStatusPanel, not a standalone component.
@@ -63,33 +66,6 @@ class PrintLightTimelapseControls {
     }
 
     /**
-     * @brief Set configured LEDs (multi-LED support)
-     * @param leds Vector of LED names to control
-     */
-    void set_configured_leds(const std::vector<std::string>& leds) {
-        configured_leds_ = leds;
-    }
-
-    /**
-     * @brief Set single configured LED (compatibility shim)
-     * @param led LED name
-     */
-    void set_configured_led(const std::string& led) {
-        configured_leds_.clear();
-        if (!led.empty()) {
-            configured_leds_.push_back(led);
-        }
-    }
-
-    /**
-     * @brief Get configured LEDs
-     * @return Vector of configured LED names (empty if none)
-     */
-    const std::vector<std::string>& get_configured_leds() const {
-        return configured_leds_;
-    }
-
-    /**
      * @brief Handle light button click
      *
      * Toggles the LED state via Moonraker API.
@@ -104,15 +80,11 @@ class PrintLightTimelapseControls {
      */
     void handle_timelapse_button();
 
-    /**
-     * @brief Update LED state from PrinterState observer
-     *
-     * Called when LED state changes (from PrinterState subject).
-     * Updates the light button icon accordingly.
-     *
-     * @param on true if LED is on, false if off
-     */
-    void update_led_state(bool on);
+    /// Show the chamber light's power on the light button icon. Runs on every
+    /// led_state_version bump once init_subjects() has run.
+    void refresh_light_state();
+    /// Icon and translated On/Off label for timelapse_enabled_.
+    void refresh_timelapse_display();
 
     /**
      * @brief Check if subjects have been initialized
@@ -140,9 +112,9 @@ class PrintLightTimelapseControls {
     // === Light State ===
     //
 
-    std::vector<std::string> configured_leds_;
-    bool led_on_ = false;
-    lv_subject_t light_button_subject_;
+    ObserverGuard led_state_observer_;
+    ObserverGuard language_observer_;
+    lv_subject_t light_button_subject_{};
     char light_button_buf_[8] = "\xF3\xB0\x8C\xB6"; // MDI lightbulb_outline (off state)
 
     //
@@ -150,10 +122,12 @@ class PrintLightTimelapseControls {
     //
 
     bool timelapse_enabled_ = false;
-    lv_subject_t timelapse_button_subject_;
-    lv_subject_t timelapse_label_subject_;
+    lv_subject_t timelapse_button_subject_{};
+    lv_subject_t timelapse_label_subject_{};
     char timelapse_button_buf_[8] = ""; // MDI video/video-off icon
     char timelapse_label_buf_[16] = "Off";
+
+    helix::AsyncLifetimeGuard lifetime_;
 };
 
 /**

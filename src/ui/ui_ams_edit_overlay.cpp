@@ -5,9 +5,10 @@
 
 #include "ui_button.h"
 #include "ui_callback_helpers.h"
+#include "ui_color_picker.h"
 #include "ui_error_reporting.h"
 #include "ui_hsv_picker.h"
-#include "ui_nav_manager.h"
+#include "ui_nav.h"
 #include "ui_swatch.h"
 #include "ui_update_queue.h"
 #include "ui_utils.h"
@@ -16,13 +17,15 @@
 #include "ams_state.h"
 #include "app_globals.h"
 #include "color_utils.h"
+#include "display_numbering.h"
 #include "filament_database.h"
 #include "filament_display_name.h"
 #include "filament_mapper.h"
 #include "format_utils.h"
+#include "lane_translation.h"
 #include "spoolman_manager.h"
 #include "static_panel_registry.h"
-#include "ui/ui_lazy_panel_helper.h"
+#include "ui/ui_widget_helpers.h"
 #if HELIX_HAS_LABEL_PRINTER
 #include "ipp_print_modal.h"
 #include "label_printer_settings.h"
@@ -49,9 +52,6 @@
 
 namespace helix::ui {
 
-// Static member initialization
-bool AmsEditOverlay::callbacks_registered_ = false;
-
 // Fire-and-forget: notify Moonraker of the active spool so other clients
 // (Mainsail, Fluidd) see the change and filament tracking works.
 // Pass 0 to clear the active spool (unlink).
@@ -72,29 +72,13 @@ static void sync_active_spool(IMoonrakerAPI* api, int spool_id) {
 // Construction / Destruction
 // ============================================================================
 
-namespace {
-std::unique_ptr<AmsEditOverlay> g_ams_edit_overlay;
-} // namespace
-
-AmsEditOverlay& get_ams_edit_overlay() {
-    if (!g_ams_edit_overlay) {
-        g_ams_edit_overlay = std::make_unique<AmsEditOverlay>();
-        StaticPanelRegistry::instance().register_destroy("AmsEditOverlay",
-                                                         []() { g_ams_edit_overlay.reset(); });
-    }
-    return *g_ams_edit_overlay;
-}
-
 AmsEditOverlay::AmsEditOverlay()
     : picker_search_debounce_(
-          [this](const std::string& query) { handle_picker_search(query.c_str()); }) {
-    spdlog::debug("[AmsEditOverlay] Constructed");
-}
+          [this](const std::string& query) { handle_picker_search(query.c_str()); }) {}
 
 AmsEditOverlay::~AmsEditOverlay() {
     // Deinitialize subjects first to disconnect observers [L041]
     deinit_subjects();
-    spdlog::trace("[AmsEditOverlay] Destroyed");
 }
 
 lv_obj_t* AmsEditOverlay::find_widget(const char* name) const {
@@ -108,15 +92,8 @@ lv_obj_t* AmsEditOverlay::find_widget(const char* name) const {
 bool AmsEditOverlay::show_for_slot(lv_obj_t* parent, int slot_index, const SlotInfo& initial_info,
                                    IMoonrakerAPI* api, CompletionCallback on_complete,
                                    bool open_on_picker) {
-    // A previous widget tree may have died with its screen (display rebuild,
-    // test teardown) without the destroy-on-close path running — drop the
-    // stale cache so lazy_create_and_push_overlay rebuilds from XML.
-    if (cached_overlay_widget_ && !lv_obj_is_valid(cached_overlay_widget_)) {
-        spdlog::debug("[AmsEditOverlay] Cached overlay widget is stale - rebuilding");
-        overlay_root_ = nullptr;
-        on_ui_destroyed();
-    }
-
+    // Its preset grids draw edges by contrast with the current theme's surfaces.
+    refresh_swatch_edges();
     // Store per-invocation state (QrScannerOverlay pattern: params + callback
     // stored on the singleton before push)
     slot_index_ = slot_index;
@@ -135,10 +112,7 @@ bool AmsEditOverlay::show_for_slot(lv_obj_t* parent, int slot_index, const SlotI
 
     // Always prefer the active screen so the overlay renders above everything
     lv_obj_t* screen = lv_screen_active();
-    bool ok = lazy_create_and_push_overlay<AmsEditOverlay>(
-        get_ams_edit_overlay, cached_overlay_widget_, screen ? screen : parent, "AMS Slot Editor",
-        "AmsEditOverlay");
-    if (!ok) {
+    if (!show(screen ? screen : parent)) {
         spdlog::error("[AmsEditOverlay] Failed to push overlay for slot {}", slot_index);
         return false;
     }
@@ -151,14 +125,14 @@ bool AmsEditOverlay::show_for_slot(lv_obj_t* parent, int slot_index, const SlotI
     // list + logistics fields + color view) and is opened only to edit a spool,
     // so keeping it resident for the whole app lifetime wastes memory on 111MB
     // devices (CC1, AD5M). Subjects and overlay state survive; the next open
-    // rebuilds via the stale-cache path above + lazy_create_and_push_overlay.
+    // rebuilds through show().
     // It has to be ONE combined callback: NavigationManager keeps a single close
     // callback per widget, so a separate destroy_on_close registration would
     // just overwrite this one (or be overwritten by it).
-    NavigationManager::instance().register_overlay_close_callback(cached_overlay_widget_, []() {
+    helix::nav::on_close(overlay_root_, []() {
         auto& overlay = get_ams_edit_overlay();
         overlay.fire_completion(false);
-        overlay.destroy_overlay_ui(overlay.cached_overlay_widget_);
+        overlay.destroy_overlay_ui();
     });
 
     // Reset per-session view state HERE (covered-safe — on_deactivate must not
@@ -255,7 +229,7 @@ bool AmsEditOverlay::show_for_slot(lv_obj_t* parent, int slot_index, const SlotI
 // ============================================================================
 
 lv_obj_t* AmsEditOverlay::create(lv_obj_t* parent) {
-    if (!create_overlay_from_xml(parent, "ams_edit_overlay")) {
+    if (!OverlayBase::create(parent)) {
         return nullptr;
     }
 
@@ -279,26 +253,30 @@ lv_obj_t* AmsEditOverlay::create(lv_obj_t* parent) {
         lv_label_bind_text(badge_text, &spoolman_id_subject_, nullptr);
     }
 
-    lv_obj_t* temp_nozzle_label = find_widget("temp_nozzle_label");
+    lv_obj_t* temp_nozzle_label =
+        helix::ui::find_required(overlay_root_, "temp_nozzle_label", get_name());
     if (temp_nozzle_label) {
         lv_label_bind_text(temp_nozzle_label, &temp_nozzle_subject_, nullptr);
     }
 
-    lv_obj_t* temp_bed_label = find_widget("temp_bed_label");
+    lv_obj_t* temp_bed_label =
+        helix::ui::find_required(overlay_root_, "temp_bed_label", get_name());
     if (temp_bed_label) {
         lv_label_bind_text(temp_bed_label, &temp_bed_subject_, nullptr);
     }
 
-    lv_obj_t* remaining_pct_label = find_widget("remaining_pct_label");
+    lv_obj_t* remaining_pct_label =
+        helix::ui::find_required(overlay_root_, "remaining_pct_label", get_name());
     if (remaining_pct_label) {
         lv_label_bind_text(remaining_pct_label, &remaining_pct_subject_, nullptr);
     }
 
-    lv_obj_t* card_identity_label = find_widget("card_identity_label");
+    lv_obj_t* card_identity_label =
+        helix::ui::find_required(overlay_root_, "card_identity_label", get_name());
     if (card_identity_label) {
         lv_label_bind_text(card_identity_label, &chip_text_subject_, nullptr);
     }
-    lv_obj_t* hsv = find_widget("ams_color_hsv");
+    lv_obj_t* hsv = helix::ui::find_required(overlay_root_, "ams_color_hsv", get_name());
     if (hsv) {
         ui_hsv_picker_set_callback(
             hsv,
@@ -319,7 +297,6 @@ void AmsEditOverlay::on_ui_destroyed() {
     // static destruction — after the map itself is gone — corrupting the heap
     // at process exit (and leaving a stale key at runtime).
     details_selector_.detach();
-    cached_overlay_widget_ = nullptr;
 }
 
 void AmsEditOverlay::on_activate() {
@@ -331,17 +308,16 @@ void AmsEditOverlay::on_activate() {
     update_spoolman_button_state();
 }
 
-void AmsEditOverlay::on_deactivate() {
+void AmsEditOverlay::on_deactivating(DeactivateReason) {
     // Fires when POPPED **and** when COVERED (e.g. QR scanner pushed on top).
     // Must NOT fire completion or reset the view subject — session state
     // resets happen in show_for_slot(). Base invalidates lifetime_ (pending
     // Spoolman fetches for this activation are dropped; token() re-arms).
-    OverlayBase::on_deactivate();
     // A pending debounced search belongs to the session being left; firing it
     // into a covered or popped picker is wasted work at best. show_for_slot()
     // re-arms state on the next open.
     picker_search_debounce_.cancel();
-    spdlog::debug("[AmsEditOverlay] on_deactivate()");
+    spdlog::debug("[AmsEditOverlay] on_deactivating()");
 }
 
 // ============================================================================
@@ -394,10 +370,22 @@ void AmsEditOverlay::init_subjects() {
         // details row, and (Phase 5) the Save-to-Spoolman toggle default.
         UI_MANAGED_SUBJECT_INT(is_managed_subject_, 0, "ams_edit_is_managed", subjects_);
 
+        // The slot's identity belongs to the linked spool. Paired in XML with
+        // printer_has_spoolman to decide whether the catalog selector or the
+        // read-only row shows.
+        UI_MANAGED_SUBJECT_INT(identity_is_spoolmans_subject_, 0, "ams_edit_identity_is_spoolmans",
+                               subjects_);
+        UI_MANAGED_SUBJECT_STRING(identity_text_subject_, identity_text_buf_, "",
+                                  "ams_edit_identity_text", subjects_);
+
         chip_text_buf_[0] = '\0';
         lv_subject_init_string(&chip_text_subject_, chip_text_buf_, nullptr, sizeof(chip_text_buf_),
                                "");
         subjects_.register_subject(&chip_text_subject_);
+
+        UI_MANAGED_SUBJECT_INT(has_scan_subject_, 0, "ams_edit_has_scan", subjects_);
+        UI_MANAGED_SUBJECT_STRING(scan_text_subject_, scan_text_buf_, "", "ams_edit_scan_text",
+                                  subjects_);
 
         // Spoolman spool number shown beside the tracked mark on the overview
         // card ("#19"). Named so the label binds via bind_text in XML rather than
@@ -498,7 +486,7 @@ void AmsEditOverlay::populate_picker() {
     lv_subject_set_int(&picker_state_subject_, 0);
 
     // Clear search input
-    lv_obj_t* search = find_widget("picker_search");
+    lv_obj_t* search = helix::ui::find_required(overlay_root_, "picker_search", get_name());
     if (search) {
         lv_textarea_set_text(search, "");
     }
@@ -559,7 +547,7 @@ void AmsEditOverlay::populate_picker() {
 }
 
 void AmsEditOverlay::render_spool_list(const std::string& filter) {
-    lv_obj_t* spool_list = find_widget("picker_spool_list");
+    lv_obj_t* spool_list = helix::ui::find_required(overlay_root_, "picker_spool_list", get_name());
     if (!spool_list) {
         return;
     }
@@ -579,17 +567,11 @@ void AmsEditOverlay::render_spool_list(const std::string& filter) {
     lv_subject_t* bp_subj = theme_manager_get_breakpoint_subject();
     UiBreakpoint bp = bp_subj ? as_breakpoint(lv_subject_get_int(bp_subj)) : UiBreakpoint::Medium;
     const bool is_compact = bp <= UiBreakpoint::Medium;
-    const char* attrs_plain[] = {"compact",     is_compact ? "true" : "false",
-                                 "detail_flow", is_compact ? "row" : "column",
-                                 nullptr,       nullptr};
-    const char* attrs_current[] = {"compact",
-                                   is_compact ? "true" : "false",
-                                   "detail_flow",
-                                   is_compact ? "row" : "column",
-                                   "hide_edit_pencil",
-                                   "false",
-                                   nullptr,
-                                   nullptr};
+    const char* flow = is_compact ? "row" : "column";
+    const char* name_grow = is_compact ? "1" : "0";
+    const char* attrs_plain[] = {"detail_flow", flow, "name_grow", name_grow, nullptr, nullptr};
+    const char* attrs_current[] = {"detail_flow",      flow,    "name_grow", name_grow,
+                                   "hide_edit_pencil", "false", nullptr,     nullptr};
 
     // Pre-selection (spec §3.2, resolution §2.5): the current spool if linked,
     // otherwise the FIRST selectable row — so a single-candidate list is one
@@ -607,28 +589,23 @@ void AmsEditOverlay::render_spool_list(const std::string& filter) {
 
         lv_obj_set_user_data(item, reinterpret_cast<void*>(static_cast<intptr_t>(spool.id)));
 
-        lv_obj_t* name_label = lv_obj_find_by_name(item, "spool_name");
+        lv_obj_t* name_label = helix::ui::find_required(item, "spool_name", get_name());
+        // display_name() carries Spoolman's filament name, the only text that
+        // tells two spools of one vendor and material apart, and this is the
+        // only name label the row has.
         if (name_label) {
-            std::string name = "#" + std::to_string(spool.id) + " ";
-            name += spool.vendor.empty() ? spool.material : (spool.vendor + " " + spool.material);
+            const std::string name = "#" + std::to_string(spool.id) + " " + spool.display_name();
             lv_label_set_text(name_label, name.c_str());
         }
 
-        // The XML widget kept its "spool_color" name; the string is Spoolman's
-        // filament.name, which is the only per-spool label Spoolman stores.
-        lv_obj_t* color_label = lv_obj_find_by_name(item, "spool_color");
-        if (color_label && !spool.filament_name.empty()) {
-            lv_label_set_text(color_label, spool.filament_name.c_str());
-        }
-
-        lv_obj_t* weight_label = lv_obj_find_by_name(item, "spool_weight");
+        lv_obj_t* weight_label = helix::ui::find_required(item, "spool_weight", get_name());
         if (weight_label && spool.remaining_weight_g > 0) {
             char buf[32];
             snprintf(buf, sizeof(buf), "%.0fg", spool.remaining_weight_g);
             lv_label_set_text(weight_label, buf);
         }
 
-        lv_obj_t* swatch = lv_obj_find_by_name(item, "spool_swatch");
+        lv_obj_t* swatch = helix::ui::find_required(item, "spool_swatch", get_name());
         if (swatch) {
             uint32_t rgb = helix::parse_hex_color(spool.color_hex).value_or(0x808080);
             helix::ui::apply_swatch_color(swatch, rgb, spool.multi_color_hexes);
@@ -651,7 +628,7 @@ void AmsEditOverlay::render_spool_list(const std::string& filter) {
         if (is_selected) {
             have_preselection = true;
             lv_obj_set_state(item, LV_STATE_CHECKED, true);
-            lv_obj_t* check_icon = lv_obj_find_by_name(item, "selected_icon");
+            lv_obj_t* check_icon = helix::ui::find_required(item, "selected_icon", get_name());
             if (check_icon) {
                 lv_obj_remove_flag(check_icon, LV_OBJ_FLAG_HIDDEN);
             }
@@ -737,9 +714,25 @@ bool AmsEditOverlay::populate_spool_edit_view() {
         return false;
     }
 
-    lv_obj_t* preview = find_widget("details_color_preview");
+    lv_obj_t* preview =
+        helix::ui::find_required(overlay_root_, "details_color_preview", get_name());
     if (preview) {
         helix::ui::apply_swatch_color(preview, details_color_, {});
+    }
+
+    const bool scanned = working_info_.has_scan();
+    lv_subject_set_int(&has_scan_subject_, scanned ? 1 : 0);
+    if (scanned) {
+        if (working_info_.scanned_td >= 0.0f) {
+            lv_subject_copy_string(&scan_text_subject_,
+                                   fmt::format("TD {:.1f}", working_info_.scanned_td).c_str());
+        } else {
+            lv_subject_copy_string(&scan_text_subject_, "");
+        }
+        if (lv_obj_t* swatch =
+                helix::ui::find_required(overlay_root_, "details_scan_swatch", get_name())) {
+            helix::ui::apply_swatch_color(swatch, *working_info_.scanned_color_rgb, {});
+        }
     }
 
     populate_detail_fields();
@@ -809,11 +802,6 @@ void AmsEditOverlay::enter_spool_edit() {
     // overwrite detail_original_/detail_working_ wholesale from the Spoolman
     // record below, so this seed is untracked-only.)
     detail_original_.spool_weight_g = working_info_.total_weight_g;
-    if (working_info_.color_rgb != 0) {
-        char hex_buf[8];
-        snprintf(hex_buf, sizeof(hex_buf), "#%06X", working_info_.color_rgb);
-        detail_original_.color_hex = hex_buf;
-    }
     detail_working_ = detail_original_;
     // A missing catalog fragment means the view cannot be filled in, so stay
     // where we are rather than switching to a half-built editor.
@@ -877,8 +865,17 @@ void AmsEditOverlay::handle_spool_edit_save(bool finish) {
             return std::tolower(x) == std::tolower(y);
         });
     };
+    // A linked spool's brand and material are Spoolman's, so with the server
+    // unreachable the selector states the slot rather than editing it, and
+    // nothing it shows reaches working_info_. Read fresh: availability can flip
+    // while this view is open.
+    const bool identity_is_locked =
+        identity_locked(original_info_, working_info_, get_printer_state().is_spoolman_available());
     const helix::printer::EffectiveFilament* ef = details_selector_.highlighted();
-    if (ef) {
+    if (identity_is_locked) {
+        spdlog::debug("[AmsEditOverlay] Spoolman offline: keeping the linked spool's '{} {}'",
+                      working_info_.brand, working_info_.material);
+    } else if (ef) {
         working_info_.material = ef->type;
         // Preserve the user's stored brand string when the highlighted product
         // is the SAME vendor (case-insensitive). The selector is seeded to the
@@ -944,7 +941,8 @@ void AmsEditOverlay::handle_spool_edit_save(bool finish) {
     // Capture the explicit tracking decision.
     auto* subj = lv_xml_get_subject(nullptr, "printer_has_spoolman");
     const bool has_spoolman = subj && lv_subject_get_int(subj) == 1;
-    lv_obj_t* toggle = find_widget("save_to_spoolman_switch");
+    lv_obj_t* toggle =
+        helix::ui::find_required(overlay_root_, "save_to_spoolman_switch", get_name());
     const bool opted_in = toggle && lv_obj_has_state(toggle, LV_STATE_CHECKED);
     save_to_spoolman_opt_in_ = has_spoolman && opted_in;
 
@@ -1114,8 +1112,10 @@ void AmsEditOverlay::handle_spool_edit_save(bool finish) {
         // total_weight_g is withheld on an unlink-in-place, where the on-screen
         // "Spool wt" came from Spoolman's spool_weight (empty-spool CORE weight)
         // and would clobber a correct filament total.
-        lv_obj_t* remaining_w = find_widget("detail_field_remaining");
-        lv_obj_t* spool_wt_w = find_widget("detail_field_spool_weight");
+        lv_obj_t* remaining_w =
+            helix::ui::find_required(overlay_root_, "detail_field_remaining", get_name());
+        lv_obj_t* spool_wt_w =
+            helix::ui::find_required(overlay_root_, "detail_field_spool_weight", get_name());
         const char* remaining_t = remaining_w ? lv_textarea_get_text(remaining_w) : nullptr;
         const char* spool_wt_t = spool_wt_w ? lv_textarea_get_text(spool_wt_w) : nullptr;
 
@@ -1154,24 +1154,17 @@ void AmsEditOverlay::handle_quick_swatch(lv_obj_t* swatch) {
     details_color_ = (static_cast<uint32_t>(c.red) << 16) | (static_cast<uint32_t>(c.green) << 8) |
                      static_cast<uint32_t>(c.blue);
     details_color_set_ = true;
-    lv_obj_t* preview = find_widget("details_color_preview");
+    lv_obj_t* preview =
+        helix::ui::find_required(overlay_root_, "details_color_preview", get_name());
     if (preview) {
         helix::ui::apply_swatch_color(preview, details_color_, {});
     }
     spdlog::debug("[AmsEditOverlay] Quick swatch picked: {:#08x}", details_color_);
 }
 
-void AmsEditOverlay::on_quick_swatch_cb(lv_event_t* e) {
-    auto* self = get_instance_from_event(e);
-    if (self) {
-        self->handle_quick_swatch(static_cast<lv_obj_t*>(lv_event_get_target(e)));
-    }
-}
-
-void AmsEditOverlay::on_custom_color_cb(lv_event_t* e) {
-    auto* self = get_instance_from_event(e);
-    if (self) {
-        self->open_color_view();
+void AmsEditOverlay::handle_use_scanned_color() {
+    if (working_info_.has_scan()) {
+        apply_color(*working_info_.scanned_color_rgb);
     }
 }
 
@@ -1241,15 +1234,9 @@ void AmsEditOverlay::read_detail_fields() {
     detail_working_.comment = text_of("detail_field_comment");
 }
 
-void AmsEditOverlay::on_detail_field_changed_cb(lv_event_t* e) {
-    auto* self = get_instance_from_event(e);
-    if (self) {
-        self->read_detail_fields();
-    }
-}
-
 void AmsEditOverlay::handle_scan_qr() {
-#if HELIX_HAS_CAMERA
+#if !defined(                                                                                      \
+    HELIX_PLATFORM_ESP32) // the ESP32 build has no QR scanner overlay; its button stays hidden
     spdlog::info("[AmsEditOverlay] Scan QR requested for slot {}", slot_index_);
 
     // The scanner overlay pushes ON TOP of the editor (spec §13.5). Our
@@ -1267,34 +1254,33 @@ void AmsEditOverlay::handle_scan_qr() {
             // user confirms with Save.
             SlotInfo scanned;
             apply_spool_to_slot(scanned, spool);
-            helix::ui::queue_update([scanned = std::move(scanned)]() {
-                auto& editor = get_ams_edit_overlay();
-                if (!editor.get_root()) {
-                    return; // editor tree gone (shutdown) — drop silently
-                }
-                int keep_slot = editor.working_info_.slot_index;
-                int keep_global = editor.working_info_.global_index;
-                int keep_tool = editor.working_info_.mapped_tool;
-                editor.working_info_ = scanned;
-                editor.working_info_.slot_index = keep_slot;
-                editor.working_info_.global_index = keep_global;
-                editor.working_info_.mapped_tool = keep_tool;
-                editor.switch_to_form();
-                editor.update_ui();
-                editor.update_temp_display();
-                editor.update_sync_button_state();
-                editor.update_spoolman_button_state();
-                NOTIFY_INFO("{} {} scanned — review and Save", scanned.brand, scanned.material);
-            });
+            helix::ui::queue_update(
+                "AmsEditOverlay::handle_scan_qr", [scanned = std::move(scanned)]() {
+                    auto& editor = get_ams_edit_overlay();
+                    if (!editor.get_root()) {
+                        return; // editor tree gone (shutdown) — drop silently
+                    }
+                    int keep_slot = editor.working_info_.slot_index;
+                    int keep_global = editor.working_info_.global_index;
+                    int keep_tool = editor.working_info_.mapped_tool;
+                    editor.working_info_ = scanned;
+                    editor.working_info_.slot_index = keep_slot;
+                    editor.working_info_.global_index = keep_global;
+                    editor.working_info_.mapped_tool = keep_tool;
+                    editor.switch_to_form();
+                    editor.update_ui();
+                    editor.update_temp_display();
+                    editor.update_sync_button_state();
+                    editor.update_spoolman_button_state();
+                    NOTIFY_INFO("{} {} scanned — review and Save", scanned.brand, scanned.material);
+                });
         },
         []() {
             // Cancel: scanner pops, editor resurfaces via on_activate. Nothing
             // to do — session state was never torn down.
             spdlog::debug("[AmsEditOverlay] QR scan cancelled - editor resumes");
         });
-#else
-    spdlog::debug("[AmsEditOverlay] Scan QR unavailable (no camera) for slot {}", slot_index_);
-#endif // HELIX_HAS_CAMERA
+#endif
 }
 
 #if HELIX_HAS_LABEL_PRINTER
@@ -1358,7 +1344,7 @@ void AmsEditOverlay::update_spoolman_button_state() {
     // without Spoolman. Only the Scan QR button is gated on Spoolman: it has no
     // offline analogue. When hidden it drops out of the flex row, leaving the
     // lone Change Filament button centered.
-    lv_obj_t* scan_btn = find_widget("btn_scan_qr_code");
+    lv_obj_t* scan_btn = helix::ui::find_required(overlay_root_, "btn_scan_qr_code", get_name());
     if (scan_btn) {
 #if defined(HELIX_PLATFORM_ESP32)
         // No camera on the v1 Core+AMS cut — Scan QR has no offline analogue,
@@ -1399,15 +1385,14 @@ void AmsEditOverlay::update_ui() {
         snprintf(slot_indicator_buf_, sizeof(slot_indicator_buf_), "%s",
                  lv_tr("External Filament"));
     } else {
-        // The SPOOL number the slot's badge shows, not slot_index + 1. Those
-        // diverge once one slot views another's spool, and the editor opened
-        // from a badge reading "5" was titling itself "Slot 6 Filament" while
-        // showing that badge's spool — right data under the wrong name.
-        auto* number_backend = AmsState::instance().get_backend();
-        const int shown =
-            number_backend ? number_backend->spool_display_number(slot_index_) : slot_index_ + 1;
-        snprintf(slot_indicator_buf_, sizeof(slot_indicator_buf_), lv_tr("Slot %d Filament"),
-                 shown);
+        // Named as the slot's badge is: the two differ from the plain position
+        // once one slot views another's spool, and an editor titled with a
+        // number its badge does not show reads as the wrong spool's.
+        const helix::AmsBackend* label_backend = helix::AmsState::instance().get_backend();
+        snprintf(slot_indicator_buf_, sizeof(slot_indicator_buf_), lv_tr("%s Filament"),
+                 (label_backend ? helix::ui::backend_lane_label(*label_backend, slot_index_)
+                                : helix::ui::lane_label(helix::ui::active_lane_noun(), slot_index_))
+                     .c_str());
     }
     lv_subject_copy_string(&slot_indicator_subject_, slot_indicator_buf_);
 
@@ -1439,17 +1424,29 @@ void AmsEditOverlay::update_ui() {
         }
     }
 
+    // "Brand \xC2\xB7 Material": what the untracked chip shows, and what the
+    // offline read-only row states a linked slot as. Built once, so the two
+    // cannot drift into different spellings of the same slot.
+    snprintf(identity_text_buf_, sizeof(identity_text_buf_), "%s \xC2\xB7 %s",
+             working_info_.brand.empty() ? "Generic" : working_info_.brand.c_str(),
+             working_info_.material.empty() ? "\xE2\x80\x94" : working_info_.material.c_str());
+    lv_subject_copy_string(&identity_text_subject_, identity_text_buf_);
+
     if (managed && !chip_name.empty()) {
         const std::string chip =
             helix::compose_filament_label(chip_brand, chip_name, working_info_.material);
         snprintf(chip_text_buf_, sizeof(chip_text_buf_), "%s", chip.c_str());
     } else {
-        const char* brand = working_info_.brand.empty() ? "Generic" : working_info_.brand.c_str();
-        const char* material =
-            working_info_.material.empty() ? "—" : working_info_.material.c_str();
-        snprintf(chip_text_buf_, sizeof(chip_text_buf_), "%s \xC2\xB7 %s", brand, material);
+        snprintf(chip_text_buf_, sizeof(chip_text_buf_), "%s", identity_text_buf_);
     }
     lv_subject_copy_string(&chip_text_subject_, chip_text_buf_);
+
+    // The identity is the linked spool's while the edit stays on that spool. A
+    // relink staged in working_info_ points at a different spool, whose record
+    // the editor has not read, so the rule does not apply to it.
+    const bool identity_is_spoolmans =
+        original_info_.spoolman_id > 0 && working_info_.spoolman_id == original_info_.spoolman_id;
+    lv_subject_set_int(&identity_is_spoolmans_subject_, identity_is_spoolmans ? 1 : 0);
 
     // Spool number beside the tracked mark. Empty for untracked slots; the label's
     // own hidden-flag binding on ams_edit_is_managed keeps it off screen there.
@@ -1462,7 +1459,8 @@ void AmsEditOverlay::update_ui() {
 
     // Card color swatch (grandfathered dynamic bg-color write, same as the old
     // big overview swatch).
-    lv_obj_t* card_color_swatch = find_widget("card_color_swatch");
+    lv_obj_t* card_color_swatch =
+        helix::ui::find_required(overlay_root_, "card_color_swatch", get_name());
     if (card_color_swatch) {
         helix::ui::apply_swatch_color(card_color_swatch, working_info_.color_rgb,
                                       working_info_.multi_color_hexes);
@@ -1490,8 +1488,10 @@ void AmsEditOverlay::update_ui() {
     // known. This imperative hide is the SOLE writer of the container's hidden
     // state — the XML edit_remaining_mode binding was retired with the inline
     // remaining editor.
-    lv_obj_t* progress_container = find_widget("remaining_progress_container");
-    lv_obj_t* progress_fill = find_widget("remaining_progress_fill");
+    lv_obj_t* progress_container =
+        helix::ui::find_required(overlay_root_, "remaining_progress_container", get_name());
+    lv_obj_t* progress_fill =
+        helix::ui::find_required(overlay_root_, "remaining_progress_fill", get_name());
     if (has_weight) {
         if (progress_container) {
             lv_obj_remove_flag(progress_container, LV_OBJ_FLAG_HIDDEN);
@@ -1507,8 +1507,9 @@ void AmsEditOverlay::update_ui() {
     update_temp_display();
 
     // Tool remap dropdown (backends that support it)
-    lv_obj_t* tool_remap_row = find_widget("tool_remap_row");
-    lv_obj_t* tool_dropdown = find_widget("tool_dropdown");
+    lv_obj_t* tool_remap_row =
+        helix::ui::find_required(overlay_root_, "tool_remap_row", get_name());
+    lv_obj_t* tool_dropdown = helix::ui::find_required(overlay_root_, "tool_dropdown", get_name());
     auto* backend = AmsState::instance().get_backend();
     // This dropdown EDITS the backend's table through set_tool_mapping(), so the
     // question is whether such a write lands — not the broader "can the user's
@@ -1537,7 +1538,7 @@ void AmsEditOverlay::update_ui() {
             if (!tool_options.empty()) {
                 tool_options += '\n';
             }
-            tool_options += "T" + std::to_string(i);
+            tool_options += helix::ui::tool_label(i);
         }
         lv_dropdown_set_options(tool_dropdown, tool_options.c_str());
 
@@ -1605,6 +1606,12 @@ bool AmsEditOverlay::is_dirty() const {
     // slot that never had a catalog pick report itself dirty. Nothing is lost —
     // handle_spool_edit_save(finish=true) is the only production caller and it
     // routes straight into commit_and_close(), which never consults is_dirty().
+    //
+    // helix::ams::user_edit_observation (lane_translation.h) excludes the same
+    // two fields for the same reason. The two lists answer different questions
+    // - "is there an unsaved change" against "what did this person declare" -
+    // and so differ on a cleared field, but they must agree on which fields a
+    // person can be said to have touched at all.
     return working_info_.color_rgb != original_info_.color_rgb ||
            working_info_.material != original_info_.material ||
            working_info_.brand != original_info_.brand ||
@@ -1623,32 +1630,51 @@ void AmsEditOverlay::update_sync_button_state() {
     // can't see them. Overview: dirty-gated (replaces the modal's Save/Close text
     // morph). Reads (never writes) the view subject.
     const int view = lv_subject_get_int(&view_mode_subject_);
-    const bool disabled = (view == VIEW_SPOOL_EDIT) ? false : !is_dirty();
-    lv_subject_set_int(&save_disabled_subject_, disabled ? 1 : 0);
+    lv_subject_set_int(&save_disabled_subject_,
+                       save_is_disabled(view, save_in_flight_, is_dirty()) ? 1 : 0);
+}
+
+bool AmsEditOverlay::identity_locked(const SlotInfo& original, const SlotInfo& working,
+                                     bool spoolman_available) {
+    if (spoolman_available) {
+        return false;
+    }
+    // Only the spool the editor opened on. A relink names a spool whose record
+    // this editor never read, and a slot with no link owns its own identity.
+    return original.spoolman_id > 0 && working.spoolman_id == original.spoolman_id;
+}
+
+bool AmsEditOverlay::save_is_disabled(int view, bool save_in_flight, bool dirty) {
+    // A save in flight holds Save shut on either view: the editor stays open
+    // while it runs, so a second tap would start a second save.
+    if (save_in_flight) {
+        return true;
+    }
+    return (view == VIEW_SPOOL_EDIT) ? false : !dirty;
 }
 
 void AmsEditOverlay::open_color_view() {
     // Seed custom sub-state from the spool-edit view's pending color (the only
-    // entry point).
+    // entry point). Black seeds as-is — it is a real colour, and a coerced
+    // grey here is one unnoticed Apply away from overwriting it
+    // (prestonbrown/helixscreen#1608).
     custom_color_ = details_color_;
-    if (custom_color_ == 0) {
-        custom_color_ = 0x808080;
-    }
     populate_color_view();
     set_view(VIEW_COLOR);
     spdlog::debug("[AmsEditOverlay] Color view opened (returns to spool-edit)");
 }
 
 void AmsEditOverlay::populate_color_view() {
-    lv_obj_t* hsv = find_widget("ams_color_hsv");
+    lv_obj_t* hsv = helix::ui::find_required(overlay_root_, "ams_color_hsv", get_name());
     if (hsv) {
         ui_hsv_picker_set_color_rgb(hsv, custom_color_);
     }
-    lv_obj_t* preview = find_widget("ams_color_preview");
+    lv_obj_t* preview = helix::ui::find_required(overlay_root_, "ams_color_preview", get_name());
     if (preview) {
         helix::ui::apply_swatch_color(preview, custom_color_, {});
     }
-    lv_obj_t* hex_input = find_widget("ams_color_hex_input");
+    lv_obj_t* hex_input =
+        helix::ui::find_required(overlay_root_, "ams_color_hex_input", get_name());
     if (hex_input) {
         char buf[10];
         snprintf(buf, sizeof(buf), "#%06X", custom_color_);
@@ -1660,11 +1686,12 @@ void AmsEditOverlay::apply_color(uint32_t rgb) {
     // Color staging always goes to the spool-edit working state — committed on
     // the spool-edit Save. The overview swatch entry point was retired, so
     // there is no direct-slot color edit path anymore.
-    details_color_ = rgb;
+    details_color_ = helix::ams::picked_color(rgb);
     details_color_set_ = true;
-    lv_obj_t* preview = find_widget("details_color_preview");
+    lv_obj_t* preview =
+        helix::ui::find_required(overlay_root_, "details_color_preview", get_name());
     if (preview) {
-        helix::ui::apply_swatch_color(preview, rgb, {});
+        helix::ui::apply_swatch_color(preview, details_color_, {});
     }
     set_view(VIEW_SPOOL_EDIT);
 }
@@ -1681,11 +1708,12 @@ void AmsEditOverlay::handle_color_swatch(lv_obj_t* swatch) {
 
 void AmsEditOverlay::handle_custom_color_changed(uint32_t rgb) {
     custom_color_ = rgb;
-    lv_obj_t* preview = find_widget("ams_color_preview");
+    lv_obj_t* preview = helix::ui::find_required(overlay_root_, "ams_color_preview", get_name());
     if (preview) {
         helix::ui::apply_swatch_color(preview, rgb, {});
     }
-    lv_obj_t* hex_input = find_widget("ams_color_hex_input");
+    lv_obj_t* hex_input =
+        helix::ui::find_required(overlay_root_, "ams_color_hex_input", get_name());
     if (hex_input) {
         char buf[10];
         snprintf(buf, sizeof(buf), "#%06X", rgb);
@@ -1694,7 +1722,8 @@ void AmsEditOverlay::handle_custom_color_changed(uint32_t rgb) {
 }
 
 void AmsEditOverlay::handle_color_hex_changed() {
-    lv_obj_t* hex_input = find_widget("ams_color_hex_input");
+    lv_obj_t* hex_input =
+        helix::ui::find_required(overlay_root_, "ams_color_hex_input", get_name());
     if (!hex_input) {
         return;
     }
@@ -1702,11 +1731,12 @@ void AmsEditOverlay::handle_color_hex_changed() {
     uint32_t rgb = 0;
     if (text && helix::parse_hex_color(text, rgb)) {
         custom_color_ = rgb;
-        lv_obj_t* hsv = find_widget("ams_color_hsv");
+        lv_obj_t* hsv = helix::ui::find_required(overlay_root_, "ams_color_hsv", get_name());
         if (hsv) {
             ui_hsv_picker_set_color_rgb(hsv, rgb);
         }
-        lv_obj_t* preview = find_widget("ams_color_preview");
+        lv_obj_t* preview =
+            helix::ui::find_required(overlay_root_, "ams_color_preview", get_name());
         if (preview) {
             helix::ui::apply_swatch_color(preview, rgb, {});
         }
@@ -1715,27 +1745,6 @@ void AmsEditOverlay::handle_color_hex_changed() {
 
 void AmsEditOverlay::handle_color_apply() {
     apply_color(custom_color_);
-}
-
-void AmsEditOverlay::on_color_swatch_cb(lv_event_t* e) {
-    auto* self = get_instance_from_event(e);
-    if (self) {
-        self->handle_color_swatch(static_cast<lv_obj_t*>(lv_event_get_target(e)));
-    }
-}
-
-void AmsEditOverlay::on_color_apply_cb(lv_event_t* e) {
-    auto* self = get_instance_from_event(e);
-    if (self) {
-        self->handle_color_apply();
-    }
-}
-
-void AmsEditOverlay::on_color_hex_changed_cb(lv_event_t* e) {
-    auto* self = get_instance_from_event(e);
-    if (self) {
-        self->handle_color_hex_changed();
-    }
 }
 
 // ============================================================================
@@ -1760,7 +1769,7 @@ void AmsEditOverlay::fire_completion(bool saved) {
 
 void AmsEditOverlay::close_editor(bool saved) {
     fire_completion(saved);
-    NavigationManager::instance().go_back();
+    helix::nav::go_back();
 }
 
 // ============================================================================
@@ -1838,6 +1847,21 @@ void AmsEditOverlay::commit_and_close() {
         api_ = get_moonraker_api();
     }
 
+    // Spoolman can go away between staging a brand or material and saving it.
+    // The change has nowhere to go, and committing it locally would leave the
+    // slot claiming an identity the server never heard, so the edit stays on
+    // screen. Back is the way out, and it discards.
+    if (identity_locked(original_info_, working_info_,
+                        get_printer_state().is_spoolman_available()) &&
+        (working_info_.brand != original_info_.brand ||
+         working_info_.material != original_info_.material)) {
+        ToastManager::instance().show(
+            ToastSeverity::ERROR,
+            lv_tr("Spoolman is offline, so brand and material can't be saved."), 3000);
+        stay_open_after_failed_save();
+        return;
+    }
+
     // Switching the linked spool (A>0 -> B>0, or 0 -> B>0) is a pure RELINK, not
     // an edit of the linked spool's record. The newly linked spool already owns
     // its identity/weight in Spoolman, so there is nothing to confirm and nothing
@@ -1873,6 +1897,19 @@ void AmsEditOverlay::commit_and_close() {
             return;
         }
 
+        // The toggle is the user asking for this spool to exist in Spoolman.
+        // It cannot while a field a filament is identified by is missing, so
+        // the save stops here instead of closing with the toggle ignored.
+        if (save_to_spoolman_opt_in_ && working_info_.spoolman_id == 0) {
+            const helix::MissingFilamentFields missing =
+                helix::SpoolmanSlotSaver::missing_filament_fields(working_info_);
+            if (missing.any()) {
+                show_missing_filament_toast(missing);
+                stay_open_after_failed_save();
+                return;
+            }
+        }
+
         if ((has_linked_spool && changes.any()) || can_create_new) {
             do_spoolman_save();
             return; // Async path - close_editor called from callback
@@ -1883,23 +1920,68 @@ void AmsEditOverlay::commit_and_close() {
     close_editor(true);
 }
 
+void AmsEditOverlay::stay_open_after_failed_save() {
+    // The spool-edit view's Save detaches its catalog selector on the way to
+    // the save, so the view needs it back before the user can try again.
+    if (lv_subject_get_int(&view_mode_subject_) == VIEW_SPOOL_EDIT) {
+        reattach_details_selector();
+    }
+    update_sync_button_state();
+}
+
+void AmsEditOverlay::show_missing_filament_toast(const helix::MissingFilamentFields& missing) {
+    const char* message = nullptr;
+    if (missing.brand) {
+        message = lv_tr("Spoolman needs a brand for this filament.");
+    } else if (missing.material) {
+        message = lv_tr("Spoolman needs a material for this filament.");
+    } else if (missing.color) {
+        message = lv_tr("Spoolman needs a color for this filament.");
+    }
+    if (message) {
+        ToastManager::instance().show(ToastSeverity::ERROR, message, 3000);
+    }
+}
+
 void AmsEditOverlay::do_spoolman_save(helix::SpoolmanSlotSaver::LinkIntent intent) {
     auto token = lifetime_.token();
-    auto saver = std::make_shared<helix::SpoolmanSlotSaver>(api_);
+    auto saver = std::make_shared<helix::SpoolmanSlotSaver>(
+        api_, get_printer_state().get_discovery().filament_diameter_mm());
+    // One save at a time. The editor stays open while this runs, so a second
+    // tap on Save is reachable until the answer arrives.
+    save_in_flight_ = true;
+    update_sync_button_state();
     saver->save(original_info_, working_info_, intent,
                 [this, token, saver](const helix::SaveResult& result) {
                     // Spoolman callback arrives on a background thread — defer
                     // to the UI thread before touching LVGL subjects/widgets.
                     token.defer([this, result]() {
+                        save_in_flight_ = false;
+                        if (result.missing.any()) {
+                            // Spoolman was given no filament to write, so
+                            // nothing was sent. Naming the field is what lets
+                            // the user finish the save.
+                            spdlog::info("[AmsEditOverlay] Spoolman save stopped: the filament is "
+                                         "missing a field it is identified by");
+                            show_missing_filament_toast(result.missing);
+                            stay_open_after_failed_save();
+                            return;
+                        }
                         if (!result.success) {
-                            // Local save still proceeds; only the Spoolman mirror failed.
-                            spdlog::error("[AmsEditOverlay] Spoolman save failed, saving locally");
+                            // Nothing reached Spoolman and nothing is committed
+                            // here, so the edit stays on screen to retry.
+                            spdlog::error("[AmsEditOverlay] Spoolman save failed; nothing written");
                             ToastManager::instance().show(
                                 ToastSeverity::ERROR,
-                                lv_tr("Couldn't update Spoolman — saved locally"), 3000);
-                        } else if (result.created_new_spool || result.repointed_filament) {
+                                lv_tr("Couldn't save to Spoolman. Nothing changed on this "
+                                      "printer."),
+                                3000);
+                            stay_open_after_failed_save();
+                            return;
+                        }
+                        if (result.created_new_spool || result.repointed_filament) {
                             // Persist new Spoolman IDs into working_info_ so the
-                            // completion callback's backend->set_slot_info() writes
+                            // completion callback's commit_slot_edit() writes
                             // the link back to the slot. Without this, a subsequent
                             // edit would not know the spool exists and would create
                             // a duplicate.
@@ -1927,7 +2009,16 @@ void AmsEditOverlay::do_spoolman_save(helix::SpoolmanSlotSaver::LinkIntent inten
                             }
                             // Repoint is silent — IDs change but no toast.
                         }
+                        // A created spool's id is stamped onto working_info_
+                        // above, so this is the id the commit binds either way.
+                        const int saved_spool_id = working_info_.spoolman_id;
                         close_editor(true);
+                        // After the commit, so the slot already names the spool
+                        // the answer has to be filed against. The lane's
+                        // Spoolman record is what a linked spool's identity
+                        // resolves from, and the poll would leave it showing
+                        // what the user just changed for a whole interval.
+                        SpoolmanManager::refresh_spool(saved_spool_id);
                     });
                 });
 }
@@ -2020,9 +2111,9 @@ void AmsEditOverlay::reattach_details_selector() {
 }
 
 bool AmsEditOverlay::setup_details_selector() {
-    lv_obj_t* fragment = find_widget("details_catalog_selector");
+    lv_obj_t* fragment =
+        helix::ui::find_required(overlay_root_, "details_catalog_selector", get_name());
     if (!fragment) {
-        spdlog::warn("[AmsEditOverlay] details_catalog_selector fragment missing");
         return false;
     }
     auto* backend = AmsState::instance().get_backend();
@@ -2123,164 +2214,79 @@ void AmsEditOverlay::maybe_merge_spoolman_vendors() {
 }
 
 // ============================================================================
-// Static Callback Registration
+// Callback Registration
 // ============================================================================
 
 void AmsEditOverlay::register_callbacks() {
-    if (callbacks_registered_) {
-        return;
-    }
-
     // The details fragment needs catalog_select_* registered even if the
     // standalone picker never opened.
     FilamentCatalogSelector::register_callbacks();
 
     register_xml_callbacks({
-        {"ams_edit_back_cb", on_back_cb},
-        {"ams_edit_card_clicked_cb", on_card_clicked_cb},
-        {"ams_edit_change_filament_cb", on_change_filament_cb},
-        {"ams_edit_setup_entry_cb", on_setup_entry_cb},
-        {"ams_edit_quick_swatch_cb", on_quick_swatch_cb},
-        {"ams_edit_custom_color_cb", on_custom_color_cb},
-        {"ams_edit_color_swatch_cb", on_color_swatch_cb},
-        {"ams_edit_color_apply_cb", on_color_apply_cb},
-        {"ams_edit_color_hex_changed_cb", on_color_hex_changed_cb},
-        {"ams_edit_detail_field_changed_cb", on_detail_field_changed_cb},
-        {"ams_edit_save_cb", on_save_cb},
-        {"ams_edit_print_label_cb", on_print_label_cb},
-        {"ams_edit_scan_qr_cb", on_scan_qr_cb},
-        {"ams_edit_picker_search_cb", on_picker_search_cb},
-        {"ams_edit_picker_retry_cb", on_picker_retry_cb},
-        // Shared spool_item component uses this callback name
-        {"spoolman_spool_item_clicked_cb", on_spool_item_cb},
-        {"spoolman_spool_item_edit_cb", on_spool_item_edit_cb},
-        {"ams_edit_tool_changed_cb", on_tool_changed_cb},
-    });
-
-    callbacks_registered_ = true;
-    spdlog::debug("[AmsEditOverlay] Callbacks registered");
-}
-
-// ============================================================================
-// Static Callbacks
-// ============================================================================
-
-AmsEditOverlay* AmsEditOverlay::get_instance_from_event(lv_event_t* /*e*/) {
-    // Process-lifetime singleton — the accessor IS the instance resolution.
-    return &get_ams_edit_overlay();
-}
-
-void AmsEditOverlay::on_back_cb(lv_event_t* e) {
-    auto* self = get_instance_from_event(e);
-    if (self) {
-        self->handle_back();
-    }
-}
-
-void AmsEditOverlay::handle_setup_entry() {
-    spdlog::debug("[AmsEditOverlay] Setup entry tapped - opening spool-edit");
-    enter_spool_edit();
-}
-
-void AmsEditOverlay::on_setup_entry_cb(lv_event_t* e) {
-    auto* self = get_instance_from_event(e);
-    if (self) {
-        self->handle_setup_entry();
-    }
-}
-
-void AmsEditOverlay::on_card_clicked_cb(lv_event_t* e) {
-    auto* self = get_instance_from_event(e);
-    if (self) {
-        self->handle_card_clicked();
-    }
-}
-
-void AmsEditOverlay::on_change_filament_cb(lv_event_t* e) {
-    auto* self = get_instance_from_event(e);
-    if (self) {
-        self->handle_change_filament();
-    }
-}
-
-void AmsEditOverlay::on_save_cb(lv_event_t* e) {
-    auto* self = get_instance_from_event(e);
-    if (self) {
-        self->handle_save();
-    }
-}
-
-void AmsEditOverlay::on_print_label_cb(lv_event_t* e) {
-    auto* self = get_instance_from_event(e);
-    if (!self)
-        return;
+        {"ams_edit_back_cb", [](lv_event_t*) { get_ams_edit_overlay().handle_back(); }},
+        {"ams_edit_card_clicked_cb",
+         [](lv_event_t*) { get_ams_edit_overlay().handle_card_clicked(); }},
+        {"ams_edit_change_filament_cb",
+         [](lv_event_t*) { get_ams_edit_overlay().handle_change_filament(); }},
+        {"ams_edit_setup_entry_cb", [](lv_event_t*) { get_ams_edit_overlay().enter_spool_edit(); }},
+        {"ams_edit_quick_swatch_cb",
+         [](lv_event_t* e) {
+             get_ams_edit_overlay().handle_quick_swatch(lv_event_get_target_obj(e));
+         }},
+        {"ams_edit_use_scan_cb",
+         [](lv_event_t*) { get_ams_edit_overlay().handle_use_scanned_color(); }},
+        {"ams_edit_custom_color_cb", [](lv_event_t*) { get_ams_edit_overlay().open_color_view(); }},
+        {"ams_edit_color_swatch_cb",
+         [](lv_event_t* e) {
+             get_ams_edit_overlay().handle_color_swatch(lv_event_get_target_obj(e));
+         }},
+        {"ams_edit_color_apply_cb",
+         [](lv_event_t*) { get_ams_edit_overlay().handle_color_apply(); }},
+        {"ams_edit_color_hex_changed_cb",
+         [](lv_event_t*) { get_ams_edit_overlay().handle_color_hex_changed(); }},
+        {"ams_edit_detail_field_changed_cb",
+         [](lv_event_t*) { get_ams_edit_overlay().read_detail_fields(); }},
+        {"ams_edit_save_cb", [](lv_event_t*) { get_ams_edit_overlay().handle_save(); }},
+        {"ams_edit_print_label_cb",
+         [](lv_event_t*) {
 #if HELIX_HAS_LABEL_PRINTER
-    self->handle_print_label();
+             get_ams_edit_overlay().handle_print_label();
 #endif
-}
-
-void AmsEditOverlay::on_scan_qr_cb(lv_event_t* e) {
-    auto* self = get_instance_from_event(e);
-    if (self) {
-        self->handle_scan_qr();
-    }
-}
-
-void AmsEditOverlay::on_picker_search_cb(lv_event_t* e) {
-    auto* self = get_instance_from_event(e);
-    if (self) {
-        auto* ta = static_cast<lv_obj_t*>(lv_event_get_target(e));
-        const char* text = lv_textarea_get_text(ta);
-        // Debounced: a burst of keystrokes re-renders the list once, after the
-        // user pauses. Empty text fires immediately (shows all spools again).
-        self->picker_search_debounce_.schedule(text ? text : "");
-    }
-}
-
-void AmsEditOverlay::on_picker_retry_cb(lv_event_t* e) {
-    auto* self = get_instance_from_event(e);
-    if (self) {
-        spdlog::info("[AmsEditOverlay] Picker retry requested by user");
-        self->populate_picker();
-    }
-}
-
-void AmsEditOverlay::on_tool_changed_cb(lv_event_t* e) {
-    auto* self = get_instance_from_event(e);
-    if (self) {
-        auto* dropdown = static_cast<lv_obj_t*>(lv_event_get_target(e));
-        int index = lv_dropdown_get_selected(dropdown);
-        self->handle_tool_changed(index);
-    }
-}
-
-void AmsEditOverlay::on_spool_item_edit_cb(lv_event_t* e) {
-    // Pencil on the current spool's row: edit THIS filament's identity
-    // (spec §3.3 reachability) instead of picking a different spool.
-    auto* self = get_instance_from_event(e);
-    if (self) {
-        spdlog::debug("[AmsEditOverlay] Edit pencil tapped - editing current spool identity");
-        self->enter_spool_edit();
-    }
-}
-
-void AmsEditOverlay::on_spool_item_cb(lv_event_t* e) {
-    auto* self = get_instance_from_event(e);
-    if (!self) {
-        return;
-    }
-
-    // Use current_target (the button with the handler), not target (the clicked child)
-    lv_obj_t* item = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
-    if (!item) {
-        return;
-    }
-    auto spool_id = static_cast<int>(reinterpret_cast<intptr_t>(lv_obj_get_user_data(item)));
-    if (spool_id <= 0) {
-        spdlog::warn("[AmsEditOverlay] Spool item clicked with invalid spool_id={}", spool_id);
-        return;
-    }
-    self->handle_spool_selected(spool_id);
+         }},
+        {"ams_edit_scan_qr_cb", [](lv_event_t*) { get_ams_edit_overlay().handle_scan_qr(); }},
+        {"ams_edit_picker_search_cb",
+         [](lv_event_t* e) {
+             const char* text = lv_textarea_get_text(lv_event_get_target_obj(e));
+             // Debounced: a burst of keystrokes re-renders the list once, after the
+             // user pauses. Empty text fires immediately (shows all spools again).
+             get_ams_edit_overlay().picker_search_debounce_.schedule(text ? text : "");
+         }},
+        {"ams_edit_picker_retry_cb",
+         [](lv_event_t*) {
+             spdlog::info("[AmsEditOverlay] Picker retry requested by user");
+             get_ams_edit_overlay().populate_picker();
+         }},
+        // Shared spool_item component uses these callback names. The pencil on the
+        // current spool's row edits THIS filament's identity instead of picking a
+        // different spool.
+        {"spoolman_spool_item_clicked_cb",
+         [](lv_event_t* e) {
+             // current_target is the button with the handler, not the clicked child
+             lv_obj_t* item = lv_event_get_current_target_obj(e);
+             auto spool_id =
+                 static_cast<int>(reinterpret_cast<intptr_t>(lv_obj_get_user_data(item)));
+             if (spool_id <= 0) {
+                 spdlog::warn("[AmsEditOverlay] Spool item clicked with invalid spool_id={}",
+                              spool_id);
+                 return;
+             }
+             get_ams_edit_overlay().handle_spool_selected(spool_id);
+         }},
+        {"spoolman_spool_item_edit_cb",
+         [](lv_event_t*) { get_ams_edit_overlay().enter_spool_edit(); }},
+        {"ams_edit_tool_changed_cb",
+         [](lv_event_t* e) { get_ams_edit_overlay().handle_tool_changed(event_selected(e)); }},
+    });
 }
 
 } // namespace helix::ui

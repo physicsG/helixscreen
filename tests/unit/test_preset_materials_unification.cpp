@@ -13,6 +13,7 @@
 #include "ui_ams_environment_overlay.h"
 
 #include "../helix_test_fixture.h"
+#include "filament_catalog.h"
 #include "filament_database.h"
 #include "material_settings_manager.h"
 #include "preheat_widget.h"
@@ -135,6 +136,36 @@ TEST_CASE_METHOD(HelixTestFixture,
         const auto t = PreheatWidget::targets_for_slot(i);
         REQUIRE(t.nozzle == mat->nozzle_recommended());
         REQUIRE(t.bed == mat->bed_temp);
+    }
+}
+
+// ABS and ASA share a nozzle range and compat group, so the unbranded ABS
+// button stands for both. The material key stays "ABS" for temps and compat.
+TEST_CASE_METHOD(HelixTestFixture, "Unbranded ABS preset displays ABS/ASA",
+                 "[presets][preset_label]") {
+    PresetSlotGuard guard;
+
+    SECTION("default slot 2 is ABS and reads ABS/ASA") {
+        REQUIRE(presets::name(2) == "ABS");
+        REQUIRE(presets::display_label(2) == "ABS/ASA");
+    }
+
+    SECTION("a branded ABS slot keeps its brand and plain material") {
+        helix::printer::EffectiveFilament ef;
+        ef.id = "test_abs";
+        ef.brand = "Polymaker";
+        ef.name = "PolyLite ABS";
+        ef.type = "ABS";
+        ef.nozzle_recommended = 250;
+        ef.bed_temp = 100;
+        MaterialSettingsManager::instance().set_preset_filament(2, ef);
+        REQUIRE(presets::name(2) == "ABS");
+        REQUIRE(presets::display_label(2) == "Polymaker ABS");
+    }
+
+    SECTION("an ASA slot reads ASA") {
+        PresetSlotGuard::assign(2, "ASA");
+        REQUIRE(presets::display_label(2) == "ASA");
     }
 }
 

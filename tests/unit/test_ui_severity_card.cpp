@@ -10,8 +10,12 @@
  * - Severity card border color updates reactively when theme changes
  */
 
+#include "ui_severity_card.h"
+
 #include "../lvgl_ui_test_fixture.h"
 #include "theme_manager.h"
+
+#include <string>
 
 #include "../catch_amalgamated.hpp"
 
@@ -235,4 +239,97 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     lv_obj_delete(card_warning);
     lv_obj_delete(card_error);
     lv_obj_delete(card_success);
+}
+
+// ============================================================================
+// Severity Icon Selection
+// ============================================================================
+// A hardware issue row must be readable as critical-or-not from its glyph.
+// Colour alone carries too little on a small panel, and the headline badge
+// above the list already separates the two by shape.
+// ============================================================================
+
+/// Names of the four icons a severity_card row defines, all hidden until
+/// ui_severity_card_finalize() unhides the one matching the row's severity.
+static constexpr const char* kSeverityIconNames[] = {"icon_info", "icon_success", "icon_warning",
+                                                     "icon_error"};
+
+/// The components carrying a four-icon severity column that finalize drives.
+/// Both are near twins, so both need the same glyph guarantees.
+static constexpr const char* kSeverityRowComponents[] = {"hardware_issue_row",
+                                                         "notification_history_item"};
+
+/// Build one of those rows at the given severity and finalize it.
+static lv_obj_t* make_severity_row(lv_obj_t* parent, const char* component, const char* severity) {
+    const char* attrs[] = {"severity", severity, nullptr};
+    lv_obj_t* row = static_cast<lv_obj_t*>(lv_xml_create(parent, component, attrs));
+    if (row) {
+        ui_severity_card_finalize(row);
+    }
+    return row;
+}
+
+/// The name of the single icon left visible on a finalized row.
+static std::string visible_icon_name(lv_obj_t* row) {
+    std::string found;
+    for (const char* name : kSeverityIconNames) {
+        lv_obj_t* icon = lv_obj_find_by_name(row, name);
+        REQUIRE(icon != nullptr);
+        if (!lv_obj_has_flag(icon, LV_OBJ_FLAG_HIDDEN)) {
+            REQUIRE(found.empty());
+            found = name;
+        }
+    }
+    return found;
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture, "ui_severity_card: finalize unhides one icon per severity",
+                 "[reactive-severity][hardware]") {
+    struct Expectation {
+        const char* severity;
+        const char* icon_name;
+    };
+    const Expectation cases[] = {{"info", "icon_info"},
+                                 {"warning", "icon_warning"},
+                                 {"error", "icon_error"},
+                                 {"success", "icon_success"}};
+
+    for (const char* component : kSeverityRowComponents) {
+        for (const auto& c : cases) {
+            INFO("component=" << component << " severity=" << c.severity);
+            lv_obj_t* row = make_severity_row(test_screen(), component, c.severity);
+            REQUIRE(row != nullptr);
+
+            REQUIRE(visible_icon_name(row) == c.icon_name);
+
+            lv_obj_delete(row);
+        }
+    }
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "ui_severity_card: critical and warning rows use distinct glyphs",
+                 "[reactive-severity][hardware]") {
+    for (const char* component : kSeverityRowComponents) {
+        INFO("component=" << component);
+        lv_obj_t* warning_row = make_severity_row(test_screen(), component, "warning");
+        lv_obj_t* error_row = make_severity_row(test_screen(), component, "error");
+        REQUIRE(warning_row != nullptr);
+        REQUIRE(error_row != nullptr);
+
+        lv_obj_t* warning_icon = lv_obj_find_by_name(warning_row, "icon_warning");
+        lv_obj_t* error_icon = lv_obj_find_by_name(error_row, "icon_error");
+        REQUIRE(warning_icon != nullptr);
+        REQUIRE(error_icon != nullptr);
+
+        std::string warning_glyph = lv_label_get_text(warning_icon);
+        std::string error_glyph = lv_label_get_text(error_icon);
+
+        REQUIRE_FALSE(warning_glyph.empty());
+        REQUIRE_FALSE(error_glyph.empty());
+        REQUIRE(warning_glyph != error_glyph);
+
+        lv_obj_delete(warning_row);
+        lv_obj_delete(error_row);
+    }
 }

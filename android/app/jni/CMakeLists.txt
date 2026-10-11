@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.14)
 project(HelixScreen)
 
 # Project root is three levels up from android/app/jni/
@@ -25,7 +25,26 @@ set(WITH_OPENSSL OFF CACHE BOOL "" FORCE)
 set(WITH_NGHTTP2 OFF CACHE BOOL "" FORCE)
 set(BUILD_SHARED OFF CACHE BOOL "" FORCE)
 set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-add_subdirectory(${LIBHV_DIR} libhv)
+
+# libhv's CMakeLists writes its generated hconfig.h (and the include/hv copies)
+# into its own SOURCE directory, the same files the desktop build's ./configure
+# writes with WITH_OPENSSL on. Configuring it in place makes the two builds
+# overwrite each other's config, and an Android build that follows a native one
+# compiles libhv's OpenSSL backend against headers the NDK does not have.
+# Configure a staging directory instead: every libhv entry is a symlink back to
+# the real tree except hconfig.h and include/, which are generated here, so the
+# source tree is read but never written and edits still show up live.
+set(LIBHV_STAGE_DIR "${CMAKE_CURRENT_BINARY_DIR}/libhv-src")
+file(MAKE_DIRECTORY "${LIBHV_STAGE_DIR}")
+file(GLOB _libhv_entries RELATIVE "${LIBHV_DIR}" "${LIBHV_DIR}/*")
+foreach(_entry IN LISTS _libhv_entries)
+    if(_entry STREQUAL "hconfig.h" OR _entry STREQUAL "include")
+        continue()
+    endif()
+    file(REMOVE "${LIBHV_STAGE_DIR}/${_entry}")
+    file(CREATE_LINK "${LIBHV_DIR}/${_entry}" "${LIBHV_STAGE_DIR}/${_entry}" SYMBOLIC)
+endforeach()
+add_subdirectory(${LIBHV_STAGE_DIR} libhv)
 
 # ============================================================================
 # libjpeg-turbo (shared — dlopen'd at runtime by CameraStream)
@@ -226,9 +245,9 @@ target_include_directories(main PRIVATE
     "${PROJECT_ROOT}/lib"                   # For lvgl/lvgl.h, spdlog/spdlog.h etc.
     "${PROJECT_ROOT}/lib/lvgl"              # For direct lvgl includes
     "${PROJECT_ROOT}/lib/lvgl/src"          # For drivers/sdl/lv_sdl_window.h etc.
-    "${PROJECT_ROOT}/lib/libhv/include"
-    "${PROJECT_ROOT}/lib/libhv/cpputil"     # For json.hpp (nlohmann)
-    "${PROJECT_ROOT}/lib/libhv"             # For hv/ includes
+    "${LIBHV_STAGE_DIR}/include"            # Android's own generated hv/hconfig.h
+    "${LIBHV_STAGE_DIR}/cpputil"            # For json.hpp (nlohmann)
+    "${LIBHV_STAGE_DIR}"                    # For hv/ includes
     "${PROJECT_ROOT}/lib/spdlog/include"
     "${PROJECT_ROOT}/lib/stb" # For stb_image.h
     "${PROJECT_ROOT}/lib/glm"
@@ -247,10 +266,24 @@ target_include_directories(main PRIVATE
 # Read version from VERSION.txt
 file(READ "${PROJECT_ROOT}/VERSION.txt" HELIX_VERSION)
 string(STRIP "${HELIX_VERSION}" HELIX_VERSION)
-string(REPLACE "." ";" VERSION_PARTS "${HELIX_VERSION}")
-list(GET VERSION_PARTS 0 HELIX_VERSION_MAJOR)
-list(GET VERSION_PARTS 1 HELIX_VERSION_MINOR)
-list(GET VERSION_PARTS 2 HELIX_VERSION_PATCH)
+# The numeric fields come from the version's core triple only. A prerelease or
+# build suffix has to be cut off first: splitting the full string on "." puts
+# "0-beta" in the patch field, which reaches every translation unit as
+# -DHELIX_VERSION_PATCH=0-beta, and helix_version_at_least() compares that as an
+# integer. Mirrors the HELIX_VERSION_CORE rule in the top-level Makefile.
+string(REGEX MATCH "^([0-9]+)\\.([0-9]+)\\.([0-9]+)" _helix_version_core "${HELIX_VERSION}")
+if(NOT _helix_version_core)
+    message(FATAL_ERROR "VERSION.txt does not start with a MAJOR.MINOR.PATCH triple: '${HELIX_VERSION}'")
+endif()
+set(HELIX_VERSION_MAJOR "${CMAKE_MATCH_1}")
+set(HELIX_VERSION_MINOR "${CMAKE_MATCH_2}")
+set(HELIX_VERSION_PATCH "${CMAKE_MATCH_3}")
+
+# Diagnostic uploads (prestonbrown/helixscreen#1410): the Android counterpart of the
+# Makefile's ENABLE_DIAGNOSTIC_UPLOADS. Off for a plain build; build.gradle turns it on
+# for builds signed with the release keystore. An app has no environment to carry the
+# HELIX_DIAGNOSTIC_UPLOADS runtime opt-in, so a dev APK opts in with -PhelixDiagUploads.
+option(HELIX_DIAGNOSTIC_UPLOADS "Mark this build as allowed to upload diagnostics" OFF)
 
 target_compile_definitions(main PRIVATE
     HELIX_DISPLAY_SDL
@@ -262,10 +295,23 @@ target_compile_definitions(main PRIVATE
     # stub implementation.
     HELIX_HAS_GCODE_VIEWER=1
     HELIX_HAS_BED_MESH_3D=1
-    HELIX_HAS_PLUGINS=1
+    # The Lua plugin runtime is not built for Android.
+    HELIX_HAS_PLUGINS=0
     HELIX_HAS_TIMELAPSE_VIEWER=1
+    # FONT_SOURCES above globs every face under assets/fonts/*.c with no tier
+    # filtering, so the 48/64pt and 32/40pt hi-DPI CJK rungs are linked into
+    # libmain.so same as every other tier. Left undefined, HELIX_HAS_HIDPI_FONTS
+    # falls back to a conservative 0 (src/system/cjk_font_manager.cpp and
+    # src/application/asset_manager.cpp both assume "not linked" when unset),
+    # which drops those faces' mappings and asset registrations at compile time
+    # even though the symbols are there. HELIX_MAX_FONT_TIER already falls back
+    # to 6 by the same convention, matching this glob; declared here too so
+    # both macros are explicit rather than one being coincidentally right.
+    HELIX_MAX_FONT_TIER=6
+    HELIX_HAS_HIDPI_FONTS=1
     ENABLE_GLES_3D
     $<$<CONFIG:Debug>:HELIX_ENABLE_MOCKS>
+    $<$<BOOL:${HELIX_DIAGNOSTIC_UPLOADS}>:HELIX_ENABLE_DIAGNOSTIC_UPLOADS>
     LV_CONF_INCLUDE_SIMPLE
     HELIX_VERSION="${HELIX_VERSION}"
     HELIX_VERSION_MAJOR=${HELIX_VERSION_MAJOR}
@@ -284,6 +330,25 @@ target_compile_options(main PRIVATE
 target_precompile_headers(main PRIVATE
     "$<$<COMPILE_LANGUAGE:CXX>:${PROJECT_ROOT}/include/lvgl_pch.h>"
 )
+
+# Large-file support on 32-bit ABIs (armeabi-v7a), mirroring the per-object
+# -D_FILE_OFFSET_BITS=64 in mk/rules.mk: bionic's LP32 off_t is 32-bit, so the
+# G-code reader's fseeko/ftello and helix_fs's stat() fail on a file past 2 GB.
+# The define must precede every system header, and the precompiled header has
+# already latched off_t, so these sources skip the PCH and force-include it as
+# plain source instead, as the Makefile build does. 64-bit ABIs are unaffected.
+if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+    set(HELIX_LFS_SOURCES
+        "${PROJECT_ROOT}/src/rendering/gcode_data_source.cpp"
+        "${PROJECT_ROOT}/src/system/text_io.cpp"
+        "${PROJECT_ROOT}/src/system/helix_fs.cpp"
+    )
+    set_source_files_properties(${HELIX_LFS_SOURCES} PROPERTIES
+        SKIP_PRECOMPILE_HEADERS ON
+        COMPILE_DEFINITIONS _FILE_OFFSET_BITS=64
+        COMPILE_OPTIONS "-include;${PROJECT_ROOT}/include/lvgl_pch.h"
+    )
+endif()
 
 # Link everything
 find_library(log-lib log)

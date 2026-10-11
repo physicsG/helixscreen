@@ -45,3 +45,12 @@ TEST_CASE_METHOD(HelixTestFixture,
     pool->reclaim(); // idempotent — no crash / double free
     pool.reset();    // dtor reclaim on empty — safe
 }
+
+TEST_CASE_METHOD(HelixTestFixture, "IndexedSubjectPool: color slots", "[xml][pool]") {
+    IndexedSubjectPool pool("t_color", IndexedSubjectPool::Type::Color);
+    pool.ensure_size(2);
+    pool.set_color(1, 0x2962FF);
+    lv_subject_t* s = lv_xml_get_subject(nullptr, "t_color_1");
+    REQUIRE(s == pool.at(1));
+    CHECK(lv_color_to_u32(lv_subject_get_color(s)) == lv_color_to_u32(lv_color_hex(0x2962FF)));
+}

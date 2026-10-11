@@ -49,6 +49,19 @@ make test
 | Symlinks | Replaces existing symlink | ✅ Written |
 | Tracking | Tracks active print | ✅ Written |
 | Paths | Handles subdirectory paths | ✅ Written |
+| History ID | `history:history_changed` "added" records the id | ✅ Written |
+| History ID | Klipper print_stats never supplies one | ✅ Written |
+| History ID | Another print's filename is ignored | ✅ Written |
+| History ID | "finished" action and an id-less payload are ignored | ✅ Written |
+| History ID | The handler is registered | ✅ Written |
+| History Patch | Filename rewritten to the original | ✅ Written |
+| History Patch | Symlink dir prefix stripped | ✅ Written |
+| History Patch | Other providers' auxiliary_data survives | ✅ Written |
+| History Patch | Re-patching replaces our own entry | ✅ Written |
+| History Patch | Hex-string and int job ids | ✅ Written |
+| History Patch | Missing job, no job id, absent `save_job` | ✅ Written |
+| History Patch | A throwing history component never raises | ✅ Written |
+| History Patch | Event id reaches the patch end to end | ✅ Written |
 
 **Run with:**
 ```bash

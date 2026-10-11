@@ -5,15 +5,19 @@
 
 #include "filament_database.h"
 #include "klipper_extruder_naming.h"
+#include "translation_loader.h"
 
 #include <algorithm>
 #include <any>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 /**
@@ -29,8 +33,15 @@
  * of these structures should only occur in the backend layer.
  */
 
+namespace helix {
+
 /// Default color for slots without filament info (medium gray)
 constexpr uint32_t AMS_DEFAULT_SLOT_COLOR = 0x808080;
+
+/// Units the AMS UI addresses. The overview's path canvas draws this many and
+/// AmsState allocates this many sets of per-unit subjects, so a unit the path
+/// shows always has a badge to bind; both caps derive from this one constant.
+constexpr int AMS_MAX_UNITS = 16;
 
 /**
  * @brief Type of AMS system detected
@@ -48,12 +59,14 @@ enum class AmsType {
     AD5X_IFS = 5,     ///< FlashForge AD5X IFS (Intelligent Filament Switching)
     CFS = 6,          ///< Creality Filament System (K2 series, RS-485)
     SNAPMAKER = 7,    ///< Snapmaker U1 SnapSwap toolchanger
-    QIDI_BOX = 8, ///< QIDI Box filament changer (PLUS4, Q2, MAX4 — hub AMS, 4 slots chainable to 16)
+    QIDI_BOX =
+        8, ///< QIDI Box filament changer (PLUS4, Q2, MAX4 — hub AMS, 4 slots chainable to 16)
+    OPENAMS = 9, ///< klipper_openams through its own versioned oams_manager API
     /// multiACE (decay71/multiACE): 1-4 Anycubic ACE Pro / ACE 2 units bolted onto a
     /// Snapmaker U1's four toolheads. Registers a Klipper object literally named `ace`,
     /// which is ALSO the community Anycubic driver's name — see PrinterDiscovery for how
     /// the two are told apart. Superset of SNAPMAKER: the U1's own heads plus the ACE units.
-    MULTIACE = 9
+    MULTIACE = 10
 };
 
 /**
@@ -79,6 +92,8 @@ inline const char* ams_type_to_string(AmsType type) {
         return "Snapmaker";
     case AmsType::QIDI_BOX:
         return "QIDI Box"; // i18n: do not translate - product name
+    case AmsType::OPENAMS:
+        return "OpenAMS"; // i18n: do not translate - product name
     case AmsType::MULTIACE:
         return "multiACE"; // i18n: do not translate - product name
     default:
@@ -121,6 +136,9 @@ inline AmsType ams_type_from_string(std::string_view str) {
     if (str == "qidi_box" || str == "QIDI Box" || str == "qidibox") {
         return AmsType::QIDI_BOX;
     }
+    if (str == "openams" || str == "OpenAMS" || str == "oams_manager") {
+        return AmsType::OPENAMS;
+    }
     return AmsType::NONE;
 }
 
@@ -139,8 +157,7 @@ inline bool is_tool_changer(AmsType type) {
     // MULTIACE is a Snapmaker U1 with ACE units bolted on — still four physical
     // toolheads, so every tool-changer behaviour applies exactly as it does to
     // SNAPMAKER.
-    return type == AmsType::TOOL_CHANGER || type == AmsType::SNAPMAKER ||
-           type == AmsType::MULTIACE;
+    return type == AmsType::TOOL_CHANGER || type == AmsType::SNAPMAKER || type == AmsType::MULTIACE;
 }
 
 /**
@@ -156,7 +173,7 @@ inline bool is_tool_changer(AmsType type) {
 inline bool is_filament_system(AmsType type) {
     return type == AmsType::HAPPY_HARE || type == AmsType::AFC || type == AmsType::ACE ||
            type == AmsType::AD5X_IFS || type == AmsType::CFS || type == AmsType::SNAPMAKER ||
-           type == AmsType::QIDI_BOX || type == AmsType::MULTIACE;
+           type == AmsType::QIDI_BOX || type == AmsType::OPENAMS || type == AmsType::MULTIACE;
 }
 
 /**
@@ -194,6 +211,48 @@ inline const char* slot_status_to_string(SlotStatus status) {
     default:
         return "Unknown";
     }
+}
+
+/**
+ * @brief What a slot status STATES about filament being in the bay
+ *
+ * Three answers, not two, and that is the whole reason this sits beside
+ * SlotInfo::is_present() rather than replacing it. They answer different
+ * questions and agree on every status but one:
+ *
+ *   - is_present() asks "should this lane behave and draw as occupied". A
+ *     caller lighting a button or painting a cell has to decide, so UNKNOWN
+ *     folds into "not present" - there is no third thing to draw.
+ *     helix::ui::classify_lane() (ams_lane_state.h) makes the same fold for
+ *     the same reason.
+ *   - this asks "did the machine state occupancy at all", which a lane
+ *     observation must be able to answer with "it did not". An unset result is
+ *     no reading, and under the lane store's whole-record replacement that is
+ *     what RETRACTS a stale reading instead of asserting an empty bay.
+ *
+ * UNKNOWN is the one divergence, and it is the point: a backend saying it does
+ * not know is not the backend reporting an empty bay.
+ *
+ * BLOCKED is filament. A jam is filament stuck in the path, which is why both
+ * rules above count it present, and retracting a reading the moment a lane
+ * jams would be the stale assertion this model exists to remove.
+ *
+ * @param status The slot status enum value
+ * @return true/false when the status states occupancy, nullopt when it does not
+ */
+[[nodiscard]] inline std::optional<bool> slot_status_reports_filament(SlotStatus status) {
+    switch (status) {
+    case SlotStatus::EMPTY:
+        return false;
+    case SlotStatus::AVAILABLE:
+    case SlotStatus::LOADED:
+    case SlotStatus::FROM_BUFFER:
+    case SlotStatus::BLOCKED:
+        return true;
+    case SlotStatus::UNKNOWN:
+        break;
+    }
+    return std::nullopt;
 }
 
 /**
@@ -302,6 +361,8 @@ inline bool ams_action_is_busy(AmsAction action) {
  *
  * SELECTING is deliberately absent: a filament system passes through it on the
  * way to a slot, and the step bar is already tracking the load that follows.
+ * PURGING is deliberately present: a purge moves filament, so an operation that
+ * starts outside the UI with a purge shows the step bar like any other.
  */
 inline bool ams_action_is_filament_operation(AmsAction action) {
     switch (action) {
@@ -524,17 +585,17 @@ inline const char* tip_method_to_string(TipMethod method) {
 /**
  * @brief Get user-friendly step label for tip handling
  * @param method The tip method enum value
- * @return Label suitable for step progress display
+ * @return Untranslated English key; the display site passes it through lv_tr()
  */
 inline const char* tip_method_step_label(TipMethod method) {
     switch (method) {
     case TipMethod::CUT:
-        return "Cut & retract";
+        return TR_NOOP("Cut & retract");
     case TipMethod::TIP_FORM:
-        return "Form tip & retract";
+        return TR_NOOP("Form tip & retract");
     case TipMethod::NONE:
     default:
-        return "Retract";
+        return TR_NOOP("Retract");
     }
 }
 
@@ -757,6 +818,11 @@ struct EnvironmentData {
     float temperature_c = 0.0f; ///< Temperature in Celsius
     float humidity_pct = 0.0f;  ///< Relative humidity percentage (0-100)
     bool has_humidity = false;  ///< true when backend provides humidity sensor
+
+    /// A reading with no temperature source carries 0 (humidity-only sensors).
+    [[nodiscard]] bool has_temperature() const {
+        return temperature_c > 0.0f;
+    }
 };
 
 /// Error targeting level for multi-level error reporting
@@ -811,9 +877,10 @@ struct BufferHealth {
     /// -1 = not reported (fault detection off, or older firmware).
     float fault_timer = -1.0f;
 
-    /// Filament pressure sensor, present only on an `AFC_buffer` configured
-    /// `type: FPS_PSF` (AFCFPSBuffer, AFC v1.2.0+). A TurtleNeck buffer is
-    /// `type: switched` and reports none of these; -1 = not reported.
+    /// Filament pressure sensor: an `AFC_buffer` configured `type: FPS_PSF`
+    /// (AFCFPSBuffer, AFC v1.2.0+), or an OpenAMS lane's `pressure` and
+    /// `set_point`. A TurtleNeck buffer is `type: switched` and reports none of
+    /// these; -1 = not reported.
     ///
     /// `smoothed_fps` is the one to read: AFC's own advance/trailing triggers
     /// compare it, not the raw `fps_value`, so it is what the firmware means by
@@ -822,7 +889,7 @@ struct BufferHealth {
     /// Note what is NOT here. `low_point` / `high_point` / `deadband` are
     /// config-only — AFCFPSBuffer::get_status publishes `fps_value`,
     /// `smoothed_fps` and `set_point` and nothing else — so the tuning range
-    /// cannot be read at runtime. afc_fps_to_bias() normalizes against the
+    /// cannot be read at runtime. fps_to_bias() normalizes against the
     /// sensor's own 0..1 rail instead.
     float fps_value = -1.0f;
     float smoothed_fps = -1.0f;
@@ -837,29 +904,41 @@ struct BufferHealth {
     /// meter exactly then.
     bool fps_reported = false;
 
+    /// The sensor has one spring and measures compression only: 0 is no
+    /// pressure, 1 is fully compressed, and a reading below the set point is
+    /// less compression rather than tension. Such a sensor is shown as a
+    /// one-sided gauge, never through fps_to_bias()'s two-ended scale.
+    bool compression_only = false;
+
+    /// Filament is loaded on the lane this sensor serves. A compression-only
+    /// sensor near zero only means the feed is not engaging while there is
+    /// filament to feed.
+    bool filament_loaded = false;
+
     /// Whether this buffer publishes a proportional pressure reading at all.
     /// False for the switched TurtleNeck every BoxTurtle ships with.
     [[nodiscard]] bool has_fps() const {
         return fps_reported && fps_set_point > 0.0f;
     }
 
-    /// Map an AFC filament-pressure reading onto the -1..+1 sync-feedback bias
-    /// Happy Hare publishes directly, so one buffer meter can draw both.
+    /// Map a two-ended filament-pressure reading onto the -1..+1 sync-feedback bias
+    /// Happy Hare publishes directly, so one bias feeds every buffer surface.
     ///
     /// Sign follows the existing convention: negative is tension (filament
-    /// pulling tight), positive is compression (filament loose). AFC agrees —
-    /// its `low_point` is max tension and `high_point` max compression.
+    /// pulling tight), positive is compression (filament loose). Below
+    /// `set_point` the extruder is pulling harder than the feeder pushes; above
+    /// it the feeder is overfeeding. AFC's `low_point` is max tension and
+    /// `high_point` max compression.
     ///
-    /// The scale is the honest part. The plan for this wanted to normalize
-    /// against `high_point - set_point`, but neither point is published, so
-    /// each side is normalized against the distance from `set_point` to the
-    /// sensor's own rail (0.0 and 1.0). With the default set_point of 0.5 the
-    /// two agree; with an off-centre one this reads slightly conservative,
-    /// which is the right direction to be wrong in for a fault indicator.
+    /// Neither point is published, so each side is normalized against the
+    /// distance from `set_point` to the sensor's own rail (0.0 and 1.0). With
+    /// the default set_point of 0.5 the two agree; with an off-centre one this
+    /// reads slightly conservative, which is the right direction to be wrong in
+    /// for a fault indicator.
     ///
     /// Returns -1.5 (the "no data" sentinel the rest of the UI gates on) when
-    /// the buffer is not an FPS one.
-    [[nodiscard]] float afc_fps_to_bias() const {
+    /// the buffer is not an FPS one or its set_point is unknown.
+    [[nodiscard]] float fps_to_bias() const {
         if (!has_fps()) {
             return -1.5f;
         }
@@ -892,9 +971,18 @@ struct BufferHealth {
         return std::clamp(v, 0, 100);
     }
 
+    /// danger_value() from which the fault is close enough to warn about.
+    static constexpr int kWarningDangerPct = 75;
+
     /// Whether the danger level warrants a warning indicator
     bool is_warning() const {
-        return danger_value() > 75;
+        return danger_value() > kWarningDangerPct;
+    }
+
+    /// Whether distance_to_fault is a live countdown. Negative means the fault
+    /// timer is stopped; above the threshold it has just reset.
+    bool is_tracking() const {
+        return distance_to_fault >= 0 && distance_to_fault <= fault_threshold();
     }
 };
 
@@ -963,8 +1051,33 @@ struct SlotInfo {
     // Error state
     std::optional<SlotError> error; ///< Per-slot error state (nullopt = no error)
 
+    /// Whether the lane needs attention: a carried error, or a lane its unit
+    /// reports jammed (BLOCKED) without one.
+    [[nodiscard]] bool has_fault() const {
+        return status == SlotStatus::BLOCKED || error.has_value();
+    }
+
+    /// Severity to draw has_fault() in. A jam stops the lane, so it is an error
+    /// whatever the carried error says.
+    [[nodiscard]] SlotError::Severity fault_severity() const {
+        if (status == SlotStatus::BLOCKED) {
+            return SlotError::ERROR;
+        }
+        return error.has_value() ? error->severity : SlotError::INFO;
+    }
+
     // Length-based remaining filament (CFS measuring wheel, etc.)
     float remaining_length_m = 0.0f; ///< Remaining filament in meters (0 = unknown)
+
+    // Inline filament scanner reading (e.g. a TD-1). Advisory only: nothing
+    // writes it into color_rgb on its own.
+    std::optional<uint32_t> scanned_color_rgb; ///< Measured colour (0xRRGGBB), nullopt = no scan
+    float scanned_td = -1.0f;                  ///< Measured transmission distance (<0 = unknown)
+    std::string scanned_time;                  ///< Scan timestamp as the producer states it
+
+    [[nodiscard]] bool has_scan() const {
+        return scanned_color_rgb.has_value();
+    }
 
     // Per-slot environment sensors (optional — most backends don't have these)
     std::optional<EnvironmentData> environment; ///< nullopt = no per-slot sensors
@@ -1004,10 +1117,44 @@ struct SlotInfo {
 
     /**
      * @brief Check if filament is present in this slot
+     *
+     * Two-valued on purpose: a caller drawing a cell or gating an affordance
+     * has to decide, so UNKNOWN reads as not present. A caller recording what
+     * the machine STATED wants slot_status_reports_filament() instead, which
+     * can answer "no reading" and so can retract one.
+     *
      * @return true for AVAILABLE, LOADED, FROM_BUFFER, BLOCKED; false for EMPTY, UNKNOWN
      */
     [[nodiscard]] bool is_present() const {
         return status != SlotStatus::EMPTY && status != SlotStatus::UNKNOWN;
+    }
+
+    /**
+     * @brief The identity fields: colour, material, brand, catalog pick,
+     * Spoolman link and weights, as a tuple of references into @p s
+     */
+    template <class S> static auto identity_fields(S& s) {
+        return std::tie(s.color_rgb, s.color_name, s.material, s.brand, s.catalog_id,
+                        s.product_name, s.spool_name, s.spoolman_id, s.spoolman_filament_id,
+                        s.spoolman_vendor_id, s.remaining_weight_g, s.total_weight_g);
+    }
+
+    /**
+     * @brief Copy the filament fields an edit or an identity sync carries
+     *
+     * Colour, material, brand, catalog pick, Spoolman link, weights and
+     * temperatures. Tool mapping, status and indices are the caller's.
+     *
+     * @return Whether any of them changed
+     */
+    bool assign_filament_fields(const SlotInfo& other) {
+        auto fields = [](auto& s) {
+            return std::tuple_cat(identity_fields(s),
+                                  std::tie(s.nozzle_temp_min, s.nozzle_temp_max, s.bed_temp));
+        };
+        const bool changed = fields(*this) != fields(other);
+        fields(*this) = fields(other);
+        return changed;
     }
 
     /**
@@ -1050,11 +1197,20 @@ struct SlotInfo {
      * half-bar nobody reads as "unknown". Else nullopt (leave unchanged).
      */
     [[nodiscard]] std::optional<float> display_fill_level() const {
-        if (status == SlotStatus::EMPTY) {
-            return 0.0f;
-        }
+        // A real weight wins over presence. The spool graphic answers "how much
+        // is on this spool"; whether the lane is in the machine is carried by
+        // the ghost and the placeholder. Draining a spool that has a recorded
+        // weight asserts a second, different thing - that the spool itself is
+        // empty - which is wrong for a tool changer, where an absent tool took
+        // its filament with it.
         if (total_weight_g > 0.0f && remaining_weight_g >= 0.0f) {
             return remaining_weight_g / total_weight_g;
+        }
+        // No weight to go on: an absent lane reads empty rather than falling
+        // through to the metadata fallback below, which would render an ejected
+        // lane as a full spool.
+        if (status == SlotStatus::EMPTY) {
+            return 0.0f;
         }
         if (has_filament_info()) {
             return 1.0f;
@@ -1104,24 +1260,22 @@ struct SlotInfo {
     }
 
     /**
-     * @brief The slot's remaining-filament display string: length when it is
-     *        a measurement, weight when only the weight is known, "" when
+     * @brief Everything known about what is left on the spool: weight when a
+     *        total is known, then measured length ("750g · 212m"), "" when
      *        neither.
-     *
-     * The length-then-weight fallback lives here so every push site renders
-     * the same string: the length helper already hides the CFS sentinels
-     * (#1387), and the weight carries the display when it yields nothing.
-     * A weight <= 0 is the "unknown" default, not a measurement.
      */
-    [[nodiscard]] std::string remaining_display() const {
-        std::string length = remaining_length_display();
-        if (!length.empty()) {
-            return length;
+    [[nodiscard]] std::string remaining_summary() const {
+        std::string weight;
+        if (total_weight_g > 0.0f && remaining_weight_g >= 0.0f) {
+            char buf[24];
+            snprintf(buf, sizeof(buf), "%.0fg", remaining_weight_g);
+            weight = buf;
         }
-        if (remaining_weight_g > 0) {
-            return std::to_string(static_cast<int>(remaining_weight_g)) + "g";
+        const std::string length = remaining_length_display();
+        if (weight.empty() || length.empty()) {
+            return weight.empty() ? length : weight;
         }
-        return {};
+        return weight + " \xC2\xB7 " + length;
     }
 };
 
@@ -1141,7 +1295,15 @@ struct AmsUnit {
     std::vector<SlotInfo> slots; ///< Slot information
 
     // Unit-level status
-    bool connected = false;                     ///< Unit communication status
+    /// False only when the backend reports the unit offline or switched off.
+    /// A backend that publishes no connection state leaves it true, so a unit
+    /// never reads disconnected before its first report.
+    bool connected = true;
+    /// An address no unit answers from, below one that does. Firmware that
+    /// numbers bays by box address keeps the gap's indices reserved, so this
+    /// stands in for the missing box: its bays are EMPTY, nothing may be sent
+    /// to them, and they are not counted or offered as bays that exist.
+    bool absent = false;
     std::string firmware_version;               ///< Firmware version if available
     std::string serial_number;                  ///< Hardware serial number
     std::optional<EnvironmentData> environment; ///< Per-unit temp/humidity (nullopt = no sensors)
@@ -1165,6 +1327,12 @@ struct AmsUnit {
     /// -1 means "use min(mapped_tool) from lanes" (the default/PARALLEL behavior).
     int hub_tool_label = -1;
 
+    /// Identity of the hub (and so the filament lane and nozzle) this unit
+    /// feeds, when the backend knows it. Units that name the same non-empty
+    /// hub converge into ONE hub and feed ONE toolhead; empty means the unit's
+    /// hub is its own as far as the backend can tell.
+    std::string hub_id;
+
     /// Per-lane hub routing flag. true = lane routes through hub, false = direct to extruder.
     /// Empty vector means routing info unavailable (treat as uniform topology).
     std::vector<bool> lane_is_hub_routed;
@@ -1175,7 +1343,7 @@ struct AmsUnit {
      */
     [[nodiscard]] bool has_any_error() const {
         return std::any_of(slots.begin(), slots.end(),
-                           [](const SlotInfo& s) { return s.error.has_value(); });
+                           [](const SlotInfo& s) { return s.has_fault(); });
     }
 
     /**
@@ -1286,6 +1454,31 @@ struct FlowguardInfo {
     float level = 0;     // -1.0 (tangle) to +1.0 (clog)
     float max_clog = 0;
     float max_tangle = 0; // negative value
+    std::string reason;   ///< Why the last trip fired (v4 `flowguard.reason`); "" when none
+};
+
+/// Tangle prevention: the proportional buffer sensor boosts the gate stepper
+/// to untangle before the flow detector trips.
+struct TanglePreventionInfo {
+    bool present = false; ///< The selected unit published the object (it has a buffer)
+    bool enabled = false;
+    bool active = false;  ///< Armed: filament monitoring is on
+    bool boosted = false; ///< The gate stepper is currently boosted
+    float threshold = 0;
+    float release = 0;
+};
+
+/**
+ * @brief The state a user tells the filament system it is really in
+ *
+ * AmsBackend::recover_with_state() re-syncs the firmware's tracking to this.
+ * Anything left unset is not asserted, so the firmware keeps (or detects)
+ * its own answer for it.
+ */
+struct RecoverStateRequest {
+    int slot = -1;              ///< 0-based slot, -1 = keep the firmware's current one
+    bool bypass = false;        ///< Bypass is selected; slot is then ignored
+    std::optional<bool> loaded; ///< Filament at the extruder; nullopt = let firmware detect
 };
 
 /**
@@ -1301,6 +1494,13 @@ struct AmsSystemInfo {
     // Current state
     int current_tool = -1; ///< Active tool (-1=none, -2=bypass for HH)
     int current_slot = -1; ///< Active slot (-1=none, -2=bypass for HH)
+
+    /// The head a load/unload operation is working on right now: the batch
+    /// cursor while a batch runs, else the head whose channel is mid-op, else
+    /// -1. current_slot stays the carriage answer ("tool on the carriage"),
+    /// which is what its other consumers read; only the "Current: ..." header
+    /// follows the work through this field.
+    int operation_working_slot = -1;
 
     /// Whether a toolhead is on the carriage. UNKNOWN on machines without one,
     /// which is every backend except the toolchanger-capable ones — they are
@@ -1421,7 +1621,8 @@ struct AmsSystemInfo {
     int clog_detection = 0;          ///< Clog detection: 0=off, 1=manual, 2=auto
     int encoder_flow_rate = -1;      ///< Encoder flow rate (-1=unavailable)
     EncoderClogInfo encoder_info;    ///< Encoder-based clog detection state
-    FlowguardInfo flowguard_info;    ///< Flowguard clog/tangle detection state
+    TanglePreventionInfo tangle_prevention;
+    FlowguardInfo flowguard_info;       ///< Flowguard clog/tangle detection state
     float sync_feedback_flow_rate = -1; ///< Sync feedback flow rate
     float sync_feedback_bias = -2;      ///< Modelled bias [-1.0,1.0], -2=unavailable
     float sync_feedback_bias_raw = -2;  ///< Raw sensor bias [-1.0,1.0], -2=unavailable
@@ -1466,10 +1667,78 @@ struct AmsSystemInfo {
      * @brief Get the currently active slot info
      * @return Pointer to active slot or nullptr if none selected
      */
+    /**
+     * @brief Whether @p global_index is a bay some unit actually reported
+     *
+     * False for an index no unit covers and for one inside an absent unit.
+     */
+    [[nodiscard]] bool slot_exists(int global_index) const {
+        const AmsUnit* unit = unit_for_slot(global_index);
+        return unit != nullptr && !unit->absent;
+    }
+
+    /// True when @p global_index sits inside an absent unit's reserved range.
+    [[nodiscard]] bool slot_absent(int global_index) const {
+        const AmsUnit* unit = unit_for_slot(global_index);
+        return unit != nullptr && unit->absent;
+    }
+
+    /**
+     * @brief The number of bays that exist, for anything shown to the user
+     *
+     * total_slots is the index span and counts an absent unit's reserved
+     * bays; this does not.
+     */
+    [[nodiscard]] int present_slot_count() const {
+        int count = 0;
+        for (const auto& unit : units) {
+            if (!unit.absent) {
+                count += unit.slot_count;
+            }
+        }
+        return count;
+    }
+
+    /// The global indices of every bay that exists, ascending: what a list of
+    /// bays offered to the user walks.
+    [[nodiscard]] std::vector<int> present_slots() const {
+        std::vector<int> slots;
+        for (int i = 0; i < total_slots; ++i) {
+            if (slot_exists(i)) {
+                slots.push_back(i);
+            }
+        }
+        return slots;
+    }
+
+    [[nodiscard]] const AmsUnit* unit_for_slot(int global_index) const {
+        for (const auto& unit : units) {
+            if (global_index >= unit.first_slot_global_index &&
+                global_index < unit.first_slot_global_index + unit.slot_count) {
+                return &unit;
+            }
+        }
+        return nullptr;
+    }
+
     [[nodiscard]] const SlotInfo* get_active_slot() const {
         if (current_slot < 0)
             return nullptr;
         return get_slot_global(current_slot);
+    }
+
+    /**
+     * @brief The lane the filament path draws as active
+     *
+     * The destination of a toolchange under way, else the seated slot. An
+     * unload is still retracting the seated strand, so it keeps the seated
+     * lane even while the toolchange already names its target.
+     */
+    [[nodiscard]] int path_active_slot() const {
+        if (pending_target_slot >= 0 && action != AmsAction::UNLOADING) {
+            return pending_target_slot;
+        }
+        return current_slot;
     }
 
     /**
@@ -1573,9 +1842,59 @@ struct AmsSystemInfo {
             return -1;
         return unit->unit_index;
     }
-};
 
-namespace helix {
+    /// Index of the unit whose filament pressure sensor feeds the toolhead: the
+    /// current slot's unit, else the first unit that reports pressure (with
+    /// several lanes loaded there is no current slot). -1 when none does. A
+    /// sensor without a set point counts: it has a reading, just nothing to
+    /// centre it on.
+    [[nodiscard]] int feeding_pressure_unit() const {
+        auto reports = [this](int pos) {
+            const auto& health = units[static_cast<size_t>(pos)].buffer_health;
+            return health && health->fps_reported;
+        };
+        const int active = get_unit_position_for_slot(current_slot);
+        if (active >= 0 && reports(active)) {
+            return active;
+        }
+        for (int pos = 0; pos < static_cast<int>(units.size()); ++pos) {
+            if (reports(pos)) {
+                return pos;
+            }
+        }
+        return -1;
+    }
+
+    /// System-level bias from feeding_pressure_unit(): -1.5 when that sensor has no set
+    /// point, measures compression only, or when no unit reports pressure.
+    [[nodiscard]] float pressure_sensor_bias() const {
+        const int pos = feeding_pressure_unit();
+        if (pos < 0 || units[static_cast<size_t>(pos)].buffer_health->compression_only) {
+            return -1.5f; // a one-sided gauge has no place on the two-ended scale
+        }
+        return units[static_cast<size_t>(pos)].buffer_health->fps_to_bias();
+    }
+
+    /// Which clog-meter sources this snapshot can feed. The meter's source
+    /// picker offers exactly these, and AmsState picks among them.
+    struct ClogSources {
+        bool flowguard = false;
+        bool encoder = false;
+        bool afc_buffer = false;
+    };
+    [[nodiscard]] ClogSources clog_sources() const {
+        ClogSources s;
+        s.flowguard = flowguard_info.enabled;
+        s.encoder = encoder_info.enabled;
+        for (const auto& unit : units) {
+            if (unit.buffer_health && unit.buffer_health->fault_detection_enabled) {
+                s.afc_buffer = true;
+                break;
+            }
+        }
+        return s;
+    }
+};
 
 /**
  * @brief Decide whether enabling bypass must be preceded by an implicit unload.
@@ -1599,8 +1918,6 @@ namespace helix {
                                                       bool allows_implicit_chaining) {
     return allows_implicit_chaining && info.current_slot >= 0 && info.filament_loaded;
 }
-
-} // namespace helix
 
 /**
  * @brief Filament requirement from G-code analysis
@@ -1682,7 +1999,51 @@ struct DryerInfo {
     float min_temp_c = 35.0f;          ///< Minimum settable temperature
     float max_temp_c = 70.0f;          ///< Maximum settable temperature
     int max_duration_min = 720;        ///< Maximum drying time (12h default)
+    int duration_step_min = 1;         ///< Granularity the firmware takes a duration in
     bool supports_fan_control = false; ///< Can fan speed be set independently?
+
+    /**
+     * Can a running cycle be retargeted without stopping it?
+     *
+     * Two flags because the hardware splits the same way. A backend can retarget the
+     * heater mid-run and still have no way to move the clock: the temperature is a
+     * setpoint it can re-send, while the duration is owned by a firmware timer that
+     * only accepts a fresh cycle. Where a flag is false the caller must stop and
+     * restart, which is a visible interruption and worth warning about, so the two
+     * cases cannot be collapsed into one "adjustable" bool.
+     *
+     * Both default false: a backend that has not been checked against real hardware
+     * should force the stop-and-restart path rather than silently drop an adjustment.
+     */
+    bool supports_live_temp = false;     ///< Target temp re-sends without stopping
+    bool supports_live_duration = false; ///< Remaining time changes without stopping
+
+    /// @p temp_c inside this dryer's settable range. A bound of 0 is unset and
+    /// clamps nothing on its side. Every surface offering a preset clamps
+    /// through here, so the value it shows is the value it sends.
+    [[nodiscard]] float clamp_temp(float temp_c) const {
+        if (max_temp_c > 0.0f && temp_c > max_temp_c) {
+            temp_c = max_temp_c;
+        }
+        if (min_temp_c > 0.0f && temp_c < min_temp_c) {
+            temp_c = min_temp_c;
+        }
+        return temp_c;
+    }
+
+    /// @p minutes rounded UP to whole duration steps, at least one step and at
+    /// most max_duration_min. Rounding up keeps a preset from drying for less
+    /// time than it names.
+    [[nodiscard]] int clamp_duration(int minutes) const {
+        const int step = duration_step_min > 0 ? duration_step_min : 1;
+        int steps = (std::max(minutes, 0) + step - 1) / step;
+        steps = std::max(steps, 1);
+        int clamped = steps * step;
+        if (max_duration_min > 0 && clamped > max_duration_min) {
+            clamped = (max_duration_min / step) * step;
+        }
+        return clamped;
+    }
 
     /**
      * @brief Get progress as percentage
@@ -1769,7 +2130,7 @@ inline std::vector<DryingPreset> get_default_drying_presets() {
 // Endless Spool Types
 // ============================================================================
 
-namespace helix::printer {
+namespace printer {
 
 /**
  * @brief Does the endless-spool mechanism exist on this printer at all?
@@ -2125,6 +2486,57 @@ struct DeviceAction {
     int slot_index = -1;              ///< If action is per-slot (-1 = system-wide)
     bool enabled = true;              ///< Whether action is currently available
     std::string disable_reason;       ///< Why disabled (if applicable)
+
+    // Factories for the four control types. Argument order is fixed: id, label, section, the
+    // type-specific fields, then optional icon and description. scripts/translations/
+    // cpp_tables.py reads the label and description positions of each call, so keep them literal.
+
+    static DeviceAction button(std::string id, std::string label, std::string section,
+                               std::string icon = {}, std::string description = {}) {
+        DeviceAction a;
+        a.id = std::move(id);
+        a.label = std::move(label);
+        a.section = std::move(section);
+        a.icon = std::move(icon);
+        a.description = std::move(description);
+        a.type = ActionType::BUTTON;
+        return a;
+    }
+
+    /// @p value is stored as given; its type (bool, float, ...) is what the UI casts back.
+    static DeviceAction toggle(std::string id, std::string label, std::string section,
+                               std::any value = {}, std::string icon = {},
+                               std::string description = {}) {
+        DeviceAction a = button(std::move(id), std::move(label), std::move(section),
+                                std::move(icon), std::move(description));
+        a.type = ActionType::TOGGLE;
+        a.current_value = std::move(value);
+        return a;
+    }
+
+    static DeviceAction slider(std::string id, std::string label, std::string section,
+                               std::any value, float min_value, float max_value, std::string unit,
+                               std::string icon = {}, std::string description = {}) {
+        DeviceAction a = toggle(std::move(id), std::move(label), std::move(section),
+                                std::move(value), std::move(icon), std::move(description));
+        a.type = ActionType::SLIDER;
+        a.min_value = min_value;
+        a.max_value = max_value;
+        a.unit = std::move(unit);
+        return a;
+    }
+
+    static DeviceAction dropdown(std::string id, std::string label, std::string section,
+                                 std::vector<std::string> options, std::any value,
+                                 std::string icon = {}, std::string description = {}) {
+        DeviceAction a = toggle(std::move(id), std::move(label), std::move(section),
+                                std::move(value), std::move(icon), std::move(description));
+        a.type = ActionType::DROPDOWN;
+        a.options = std::move(options);
+        return a;
+    }
 };
 
-} // namespace helix::printer
+} // namespace printer
+
+} // namespace helix

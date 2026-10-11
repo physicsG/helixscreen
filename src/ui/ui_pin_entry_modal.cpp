@@ -9,11 +9,14 @@
 #include "ui_pin_entry_modal.h"
 
 #include "ui_callback_helpers.h"
+#include "ui_effects.h"
 #include "ui_event_safety.h"
+#include "ui_next_tick.h"
 #include "ui_pin_utils.h"
 #include "ui_utils.h"
 
 #include "theme_manager.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/spdlog.h>
 
@@ -92,7 +95,7 @@ void PinEntryModal::create() {
     lv_obj_set_style_radius(backdrop_, 0, 0);
     lv_obj_add_flag(backdrop_, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_flag(backdrop_, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_move_foreground(backdrop_);
+    helix::ui::bring_to_front(backdrop_);
 
     // Create the dialog from XML component
     dialog_ = static_cast<lv_obj_t*>(lv_xml_create(backdrop_, "pin_entry_modal", nullptr));
@@ -104,7 +107,7 @@ void PinEntryModal::create() {
     }
 
     // Set heading text
-    lv_obj_t* heading_lbl = lv_obj_find_by_name(dialog_, "pin_heading");
+    lv_obj_t* heading_lbl = helix::ui::find_required(dialog_, "pin_heading", "PinEntryModal");
     if (heading_lbl) {
         lv_label_set_text(heading_lbl, heading_.c_str());
     }
@@ -134,7 +137,7 @@ void PinEntryModal::destroy_async() {
     }
     digit_buffer_.clear();
     // Defer C++ cleanup (destructor is trivial — just logging)
-    lv_async_call([](void* ud) { delete static_cast<PinEntryModal*>(ud); }, this);
+    helix::ui::run_next_tick([self = this]() { delete self; });
     spdlog::debug("[PinEntryModal] Async destruction scheduled");
 }
 
@@ -156,16 +159,14 @@ void PinEntryModal::on_digit(int digit) {
     update_dots();
     hide_error();
 
-    // Auto-submit at max digits — defer via lv_async_call so on_digit() returns
+    // Auto-submit at max digits — defer via run_next_tick so on_digit() returns
     // before on_confirm() can delete this modal (avoids UB from delete-this-in-member)
     if (static_cast<int>(digit_buffer_.size()) == MAX_DIGITS) {
-        lv_async_call(
-            [](void*) {
-                if (g_active_modal) {
-                    g_active_modal->on_confirm();
-                }
-            },
-            nullptr);
+        helix::ui::run_next_tick([]() {
+            if (g_active_modal) {
+                g_active_modal->on_confirm();
+            }
+        });
     }
 }
 

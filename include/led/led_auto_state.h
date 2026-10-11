@@ -4,9 +4,11 @@
 #include "ui_observer_guard.h"
 
 #include "led/led_backend.h"
+#include "led/led_devices.h"
 
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "hv/json.hpp"
 
@@ -50,6 +52,16 @@ class LedAutoState {
         return mappings_;
     }
 
+    /// Devices the actions drive, as saved; empty means the chamber light.
+    [[nodiscard]] const std::vector<std::string>& strips() const {
+        return strips_;
+    }
+    void set_strips(const std::vector<std::string>& ids) {
+        strips_ = ids;
+    }
+    /// strips() that are switchable now, or the chamber light when none are.
+    [[nodiscard]] std::vector<std::string> targets() const;
+
     // Config persistence
     void load_config();
     void save_config();
@@ -61,6 +73,7 @@ class LedAutoState {
     void evaluate();
 
   private:
+    friend class LedAutoStateTestAccess;
     LedAutoState() = default;
     ~LedAutoState() {
         // Release observers without touching LVGL — during process exit,
@@ -85,11 +98,16 @@ class LedAutoState {
 
     std::string last_applied_key_;
     std::unordered_map<std::string, LedStateAction> mappings_;
+    std::vector<std::string> strips_;
 
     // Observers — only active when enabled
     ObserverGuard print_state_observer_;
     ObserverGuard klippy_state_observer_;
     ObserverGuard extruder_target_observer_;
 };
+
+/// Persist @p m: the auto-state strips, and the device a home light button without
+/// its own `led` key adopts the first time it binds.
+void stage_light_selection(const SelectionMigration& m);
 
 } // namespace helix::led

@@ -1,0 +1,1 @@
+-- The component check rejects this plugin before main.lua ever runs.

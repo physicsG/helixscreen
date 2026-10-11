@@ -77,6 +77,35 @@ void GCodeCamera::zoom(float factor) {
     update_matrices();
 }
 
+float GCodeCamera::world_units_per_pixel() const {
+    if (viewport_height_ <= 0 || zoom_level_ <= 0.0f) {
+        return 0.0f;
+    }
+    return distance_ / (zoom_level_ * static_cast<float>(viewport_height_));
+}
+
+void GCodeCamera::pan_pixels(float dx, float dy) {
+    const float wpp = world_units_per_pixel();
+    if (wpp <= 0.0f) {
+        return;
+    }
+    // Content follows the finger, so the target moves the opposite way. Screen Y
+    // grows downward while camera-up grows upward.
+    pan(-dx * wpp, dy * wpp);
+}
+
+void GCodeCamera::zoom_at(float factor, float anchor_x, float anchor_y) {
+    const float before = world_units_per_pixel();
+    if (before <= 0.0f) {
+        return;
+    }
+    zoom(factor);
+    const float shift = before - world_units_per_pixel();
+    const float off_x = anchor_x - static_cast<float>(viewport_width_) * 0.5f;
+    const float off_y = anchor_y - static_cast<float>(viewport_height_) * 0.5f;
+    pan(off_x * shift, -off_y * shift);
+}
+
 void GCodeCamera::fit_to_bounds(const AABB& raw_bounds) {
     // Order any inverted axis before the emptiness test — one bad axis must not
     // discard the others. Shared with compute_auto_fit() so the 3D and 2D paths

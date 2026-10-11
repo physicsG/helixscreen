@@ -11,6 +11,23 @@
 LV_FONT_DECLARE(mdi_icons_128); // Oversized hero icons (XXLARGE displays)
 LV_FONT_DECLARE(mdi_icons_96);  // Large hero icons (XXLARGE displays)
 LV_FONT_DECLARE(mdi_icons_80);  // Large hero icons (XLARGE displays)
+
+// Whether each face above 64px is linked into this build. Each ships with its
+// tier (80 from xlarge, 96/128 from xxlarge), and mk/fonts.mk also links one
+// into a platform below that tier by defining the macro (EXTRA_ICON_FONTS).
+// Taking the address of a face that is not linked fails the link.
+#ifndef HELIX_MAX_FONT_TIER
+#define HELIX_MAX_FONT_TIER 6 // default: all tiers (micro=0 .. xxlarge=6)
+#endif
+#ifndef HELIX_HAS_MDI_ICONS_80
+#define HELIX_HAS_MDI_ICONS_80 (HELIX_MAX_FONT_TIER >= 5)
+#endif
+#ifndef HELIX_HAS_MDI_ICONS_96
+#define HELIX_HAS_MDI_ICONS_96 (HELIX_MAX_FONT_TIER >= 6)
+#endif
+#ifndef HELIX_HAS_MDI_ICONS_128
+#define HELIX_HAS_MDI_ICONS_128 (HELIX_MAX_FONT_TIER >= 6)
+#endif
 // mdi_icons_16/24/32/48/64 are declared non-const (not LV_FONT_DECLARE) because
 // on embedded targets (ESP32) their glyph data is loaded from a runtime .bin
 // and struct-copied into these symbols at boot (see

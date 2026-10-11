@@ -17,7 +17,7 @@
  * settings_sounds_enabled & co. for the remaining lifetime of the binary, and
  * every later attempt to rebuild them is a silent no-op.
  *
- * The damage is not a crash. settings_display_sound_overlay.xml and
+ * The damage is not a crash. settings_sound_overlay.xml and
  * settings_safety_overlay.xml still parse; their toggles just bind to nothing
  * and log "No subject was found". A test that builds either one fails on a
  * value that looks like a broken binding, dozens of test cases downstream of
@@ -45,8 +45,8 @@ namespace {
 
 // Every name AudioSettingsManager::init_subjects() publishes.
 const std::vector<const char*> AUDIO_SUBJECTS{
-    "settings_sounds_enabled", "settings_ui_sounds_enabled", "settings_volume",
-    "settings_completion_alert", "settings_audio_device_available"};
+    "settings_sounds_enabled",   "settings_ui_sounds_enabled",      "settings_volume",
+    "settings_completion_alert", "settings_audio_device_available", "settings_music_available"};
 
 // Every name SafetySettingsManager::init_subjects() publishes.
 const std::vector<const char*> SAFETY_SUBJECTS{"settings_estop_confirm",

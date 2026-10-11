@@ -93,12 +93,23 @@ def parse_report(path, strict=True):
     return out
 
 
-# Catch2 test specs give , [ ] * ~ \ their own meaning, so a case named
-# "Drag end uses snap preview position, not release point" parses as two specs
-# and the run dies with `Invalid Filter`. Worse, it dies for the WHOLE file: the
-# report comes back with nothing but an XML header, which reads as "no findings"
-# unless something checks. Escape first, and verify cases actually ran.
-SPEC_META = re.compile(r'([,\[\]\\*~])')
+# Catch2 test specs give , [ ] * ~ \ " their own meaning, and Catch2's
+# --input-file reader drops any line that begins with # as a comment before the
+# spec parser ever sees it. Each unescaped form loses the file's verdict a
+# different way, and none of them says so:
+#
+#   ,   a case named "Drag end uses snap position, not release point" parses as
+#       two specs and the run dies with `Invalid Filter` -- for the WHOLE file,
+#       leaving a report with nothing but an XML header.
+#   "   a name carrying a quote is re-quoted by the reader into a spec that
+#       matches nothing, so the case is judged by nobody.
+#   #   the line is dropped outright. A file whose names ALL begin with # (an
+#       issue-numbered file: "#1127 ...") leaves an empty spec file, which is no
+#       filter at all -- Catch2 then runs the entire suite in the name of one
+#       file and the run is killed by the timeout.
+#
+# Escape first, and verify cases actually ran.
+SPEC_META = re.compile(r'([,\[\]\\*~#"])')
 
 
 def escape_spec(name):
@@ -135,11 +146,12 @@ def _retain_evidence(dest, tmp):
 def run_isolated(binary, names, workdir, timeout, evidence=None, suite_failed=()):
     """Run exactly these cases in one fresh process; {name: passed}.
 
-    A timeout is not optional. Some files deadlock when run as an isolated set
-    while passing in the full suite -- test_gcode_vase_streaming.cpp sat in
-    futex_do_wait for 30 minutes and blocked the entire scan, because one stuck
-    worker starves the pool and nothing else ever reports. A file that times out
-    is un-judgeable, which is a finding to surface, not a reason to hang.
+    A timeout is not optional. An isolated run can outlive the whole scan --
+    a file whose cases deadlock, and equally a spec Catch2 accepts but does not
+    read as a filter, which runs the entire suite in the name of one file. One
+    stuck worker starves the pool and nothing else ever reports. A file that
+    times out is un-judgeable, which is a finding to surface, not a reason to
+    hang.
 
     Evidence retention: a run that is not green for every requested case copies
     its XML report, captured stdout/stderr, and the escaped spec into

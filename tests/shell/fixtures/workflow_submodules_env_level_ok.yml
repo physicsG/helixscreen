@@ -1,0 +1,23 @@
+name: env-level fixture
+on: [push]
+env:
+  HELIX_PATCHES_FROM_CLEAN: "1"
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/init-submodules
+      - name: Build
+        run: make -j4
+      - name: Judge from clean via the workflow env
+        run: make apply-patches
+  shell:
+    runs-on: ubuntu-latest
+    env:
+      HELIX_PATCHES_FROM_CLEAN: "1"
+    steps:
+      - uses: ./.github/actions/init-submodules
+      - name: Apply in a subdirectory, after a cd
+        run: cd lib && make apply-patches
+      - name: Run shell tests
+        run: bats tests/shell/

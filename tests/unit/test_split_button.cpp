@@ -126,9 +126,21 @@ TEST_CASE("text_format produces correct output", "[split_button]") {
 
 TEST_CASE("ui_split_button_init does not crash", "[split_button]") {
     lv_init_safe();
-    // Should be safe to call (may warn if XML not fully initialized)
-    // We mainly test that the function exists and links correctly
+    // Other files register the real widget into the same global registry, so
+    // shadow it with a placeholder first: only this init can replace that.
+    auto placeholder_create = [](lv_xml_parser_state_t*, const char**) -> void* { return nullptr; };
+    // TEST_WIDGET_OK: placeholder the init below must replace; it never creates a widget
+    lv_xml_register_widget("ui_split_button", placeholder_create, nullptr);
+    REQUIRE(lv_xml_widget_get_processor("ui_split_button")->create_cb ==
+            static_cast<lv_xml_widget_create_cb_t>(placeholder_create));
+
     ui_split_button_init();
+
+    lv_widget_processor_t* proc = lv_xml_widget_get_processor("ui_split_button");
+    REQUIRE(proc != nullptr);
+    REQUIRE(proc->create_cb != static_cast<lv_xml_widget_create_cb_t>(placeholder_create));
+    REQUIRE(proc->create_cb != nullptr);
+    REQUIRE(proc->apply_cb != nullptr);
 }
 
 // =============================================================================
@@ -151,9 +163,9 @@ class SplitButtonXmlFixture : public XMLTestFixture {
 /**
  * @brief Redirects the default spdlog logger into a string for its scope.
  *
- * Same shape as the helper in test_widget_helpers.cpp. Both halves of the #980
- * assertion below are log lines, because that is the only place the widget-safe
- * guard and the label-width body surface anything observable.
+ * Both halves of the #980 assertion below are log lines, because that is the
+ * only place the widget-safe guard and the label-width body surface anything
+ * observable.
  */
 namespace {
 class SplitButtonLogCapture {
@@ -197,11 +209,10 @@ class SplitButtonLogCapture {
 // freed lv_obj is not sanitizer-poisoned. "It did not crash" is therefore an
 // outcome this test cannot fail on, and asserting it would be theatre.
 //
-// What IS falsifiable is the skip. helix::ui::async_call(widget, ...) logs
-// "Widget-safe guard: widget destroyed, skipping async_call" on the drop path.
-// Drop the widget argument at ui_split_button.cpp - i.e. revert the #980 fix to
-// a plain async_call - and that line disappears, so the first CHECK below goes
-// red. Verified by mutation.
+// What IS falsifiable is the skip. helix::ui::queue_widget_update() logs
+// "Widget-safe guard: widget destroyed, skipping callback" on the drop path.
+// Replace it at ui_split_button.cpp with an unguarded queue_update and that
+// line disappears, so the first CHECK below goes red.
 //
 // The second CHECK is the weaker half and is documented as such: under the
 // reverted fix the callback DOES run, but get_data() on the freed container

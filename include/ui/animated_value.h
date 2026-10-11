@@ -140,12 +140,12 @@ template <typename T> class AnimatedValue {
 
         // Create observer for subject changes (immediate - callback only updates animation state,
         // never modifies observer lifecycle)
-        observer_ = helix::ui::observe_int_immediate<AnimatedValue<T>>(
+        observer_ = helix::ui::observe<int>(
             subject, this,
             [](AnimatedValue<T>* self, int value) {
                 self->on_subject_changed(static_cast<T>(value));
             },
-            lifetime);
+            lifetime, helix::ui::Dispatch::Immediate);
     }
 
     /**

@@ -379,7 +379,7 @@ class BlockLineReader {
 } // namespace
 
 bool GCodeLayerIndex::build_from_file(const std::string& filepath,
-                                      const std::function<void(float)>& on_progress) {
+                                      const std::function<bool(float)>& on_progress) {
     auto start_time = std::chrono::high_resolution_clock::now();
 
     // Clear any previous data
@@ -449,6 +449,9 @@ bool GCodeLayerIndex::build_from_file(const std::string& filepath,
     const double total_for_progress =
         stats_.total_bytes > 0 ? static_cast<double>(stats_.total_bytes) : 1.0;
 
+    PauseScan pause_scan;
+    pause_scan.begin(stats_.total_bytes);
+
     while (reader.next(line)) {
         size_t line_len = line.length();
         // Computed once and reused by every axis lookup on this line — the
@@ -458,9 +461,20 @@ bool GCodeLayerIndex::build_from_file(const std::string& filepath,
         stats_.total_lines++;
 
         if (on_progress && (stats_.total_lines % INDEX_PROGRESS_LINE_INTERVAL) == 0) {
-            on_progress(
-                static_cast<float>(static_cast<double>(current_offset) / total_for_progress));
+            if (!on_progress(
+                    static_cast<float>(static_cast<double>(current_offset) / total_for_progress))) {
+                spdlog::info("[LayerIndex] Build cancelled at line {} ({:.0f}%)",
+                             stats_.total_lines,
+                             100.0 * static_cast<double>(current_offset) / total_for_progress);
+                return false;
+            }
         }
+
+        // Scheduled-pause + M73 tracking. current_offset still points at this
+        // line's first byte, and the layer in progress is the last entry
+        // pushed (none yet = prologue = -1).
+        pause_scan.feed_line(line, current_offset,
+                             entries_.empty() ? -1 : static_cast<int32_t>(entries_.size() - 1));
 
         // Check for layer marker
         if (is_layer_marker(line.c_str(), line_len)) {
@@ -692,6 +706,8 @@ bool GCodeLayerIndex::build_from_file(const std::string& filepath,
 
     stats_.total_layers = entries_.size();
     uses_layer_markers_ = use_layer_markers;
+    stats_.scheduled_pauses = pause_scan.pauses();
+    stats_.has_m73 = pause_scan.has_m73();
 
     // Release the slack left by the reserve(100) growth doubling. A 1200-layer
     // print reserves 1600 entries; handing 400 × 40 bytes back matters on a

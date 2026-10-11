@@ -204,7 +204,7 @@ TEST_CASE_METHOD(MacroActivityFixture,
     // The latch must still be claimable: suppression short-circuits BEFORE
     // claim_busy_queue_toast(), so a genuinely external op later in the same
     // episode can still announce itself.
-    CHECK(state.claim_busy_queue_toast());
+    CHECK(state.calibration_state().claim_busy_queue_toast());
 
     // The command itself still went out fire-and-forget — suppression is about
     // the notification only.
@@ -229,7 +229,7 @@ TEST_CASE_METHOD(MacroActivityFixture,
 
     api->execute_gcode(DISCRETIONARY, nullptr, nullptr);
 
-    CHECK(state.claim_busy_queue_toast());
+    CHECK(state.calibration_state().claim_busy_queue_toast());
 }
 
 TEST_CASE_METHOD(MacroActivityFixture,
@@ -247,7 +247,7 @@ TEST_CASE_METHOD(MacroActivityFixture,
 
     // The toast consumed the once-per-episode latch, so it is no longer
     // claimable.
-    CHECK_FALSE(state.claim_busy_queue_toast());
+    CHECK_FALSE(state.calibration_state().claim_busy_queue_toast());
 }
 
 // ============================================================================
@@ -346,5 +346,5 @@ TEST_CASE_METHOD(MacroActivityFixture,
 
     // Suppression is off, so the toast fired and consumed the once-per-episode
     // latch — normal #1108 behaviour is fully restored despite the leak.
-    CHECK_FALSE(state.claim_busy_queue_toast());
+    CHECK_FALSE(state.calibration_state().claim_busy_queue_toast());
 }

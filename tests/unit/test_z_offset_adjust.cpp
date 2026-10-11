@@ -35,7 +35,7 @@ class ZOffsetFixture : public LVGLTestFixture {
     }
 
     void set_homed(const char* axes) {
-        lv_subject_copy_string(state.get_homed_axes_subject(), axes);
+        lv_subject_copy_string(state.motion_state().get_homed_axes_subject(), axes);
     }
 
     const std::string& last_sent() const {
@@ -142,14 +142,14 @@ TEST_CASE_METHOD(ZOffsetFixture, "adjust accumulates the pending delta",
     helix::zoffset::adjust(api.get(), &state, 0.0, 0.05, -0.01);
 
     // +50um then -10um = +40um still unsaved.
-    REQUIRE(lv_subject_get_int(state.get_pending_z_offset_delta_subject()) == 40);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_pending_z_offset_delta_subject()) == 40);
 }
 
 TEST_CASE_METHOD(ZOffsetFixture, "a firmware-managed save also clears the pending delta",
                  "[z_offset][adjust][mock]") {
     set_homed("xyz");
     helix::zoffset::adjust(api.get(), &state, 0.0, 0.0, 0.05);
-    REQUIRE(lv_subject_get_int(state.get_pending_z_offset_delta_subject()) == 50);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_pending_z_offset_delta_subject()) == 50);
 
     bool saved = false;
     helix::ui::SaveConfigWatch save_watch;
@@ -158,7 +158,7 @@ TEST_CASE_METHOD(ZOffsetFixture, "a firmware-managed save also clears the pendin
         [&]() { saved = true; }, [](const std::string&) {}, &state);
 
     REQUIRE(saved);
-    REQUIRE(lv_subject_get_int(state.get_pending_z_offset_delta_subject()) == 0);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_pending_z_offset_delta_subject()) == 0);
 }
 
 TEST_CASE_METHOD(ZOffsetFixture,
@@ -167,7 +167,7 @@ TEST_CASE_METHOD(ZOffsetFixture,
                  "[z_offset][adjust][mock]") {
     set_homed("xyz");
     helix::zoffset::adjust(api.get(), &state, 0.0, 0.0, 0.05);
-    REQUIRE(lv_subject_get_int(state.get_pending_z_offset_delta_subject()) == 50);
+    REQUIRE(lv_subject_get_int(state.motion_state().get_pending_z_offset_delta_subject()) == 50);
 
     bool saved = false;
     std::string error;
@@ -194,7 +194,7 @@ TEST_CASE_METHOD(ZOffsetFixture,
     REQUIRE(wait_until([&] { return saved; }, 3000));
 
     CHECK(error.empty());
-    CHECK(lv_subject_get_int(state.get_pending_z_offset_delta_subject()) == 0);
+    CHECK(lv_subject_get_int(state.motion_state().get_pending_z_offset_delta_subject()) == 0);
 }
 
 TEST_CASE_METHOD(LVGLTestFixture, "the z step index round-trips through Config",

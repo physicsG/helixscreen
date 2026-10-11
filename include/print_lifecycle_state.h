@@ -37,6 +37,13 @@ enum class PrintState {
  */
 PrintState derive_print_state(helix::PrintJobState job_state, int start_phase);
 
+namespace helix {
+
+/// The state's name as log lines spell it ("Printing", "Complete", ...).
+const char* print_state_name(PrintState state);
+
+} // namespace helix
+
 /**
  * @brief Does a job own the machine right now?
  *
@@ -53,9 +60,9 @@ PrintState derive_print_state(helix::PrintJobState job_state, int start_phase);
  * G-code of its own.
  *
  * @warning Not a substitute for switching on the lifecycle when a caller must
- *          distinguish `Paused`. `ams_subscription_backend.cpp` deliberately
- *          ALLOWS a filament op on a paused print when the backend does not
- *          self-home, because then no firmware macro can hide a `G28`. This
+ *          distinguish `Paused`. A filament op is ALLOWED on a paused print when
+ *          the backend does not self-home, because then no firmware macro can
+ *          hide a `G28`; `print_blocks_filament_op()` below is that rule. This
  *          predicate is a convenience over the lifecycle, never a replacement
  *          for it.
  */
@@ -63,6 +70,60 @@ constexpr bool job_holds_machine(PrintState state) {
     return state == PrintState::Preparing || state == PrintState::Printing ||
            state == PrintState::Paused;
 }
+
+/**
+ * @brief Would a print refuse a toolhead-motion filament op right now?
+ *
+ * The single authority for that question, in both directions. The backend gate
+ * (`AmsSubscriptionBackend::refuse_if_printing()`) maps a `true` to an
+ * `AmsError`; the UI maps it to a disabled button. Neither derives the rule
+ * itself, so a surface cannot offer what the backend will refuse, and the
+ * backend cannot refuse what the surface still offers.
+ *
+ * It lives beside `job_holds_machine()` rather than with the filament-op UI
+ * helpers because the printer layer is one of its two callers, and a rule the
+ * printer layer reaches through a UI header is a rule that will be copied
+ * instead of called.
+ *
+ *   PREPARING                           -> refuse. A host-side pre-start block
+ *                                         is homing/probing; a firmware-side
+ *                                         PRINT_START is doing the same inside
+ *                                         a job that already reads PRINTING.
+ *   PRINTING                            -> refuse. The nozzle is laying plastic.
+ *   PAUSED, backend homes itself        -> refuse. AD5X IFS only: its
+ *                                         `_IFS_REMOVE_CURRENT_PRUTOK` runs a
+ *                                         buried `_G28` that probes a loadcell-Z
+ *                                         nozzle into the part (bundle XWPBR2DX).
+ *   PAUSED, backend does NOT self-home  -> ALLOW. Pause-then-swap is the runout
+ *                                         and colour-change recovery workflow on
+ *                                         AFC / Happy Hare / CFS / ACE / QIDI /
+ *                                         toolchangers / Snapmaker.
+ *
+ * Takes the LIFECYCLE, not the raw job state: `PrintJobState` cannot express
+ * Preparing, so a host-side pre-print block reads as "nothing blocks" while the
+ * pre-start G-code is homing and probing.
+ *
+ * @param lifecycle           The derived PrintState (print_lifecycle subject).
+ * @param backend_self_homes  AmsBackend::filament_ops_self_home(). Pass false
+ *                            when there is no backend — a plain macro/gcode path
+ *                            has no firmware macro that could hide a home, and
+ *                            Layer 1 (reject_homing_during_active_print) still
+ *                            refuses any G28 the app itself emits.
+ */
+namespace helix {
+
+[[nodiscard]] constexpr bool print_blocks_filament_op(PrintState lifecycle,
+                                                      bool backend_self_homes) {
+    // Paused first: job_holds_machine() is true for it too, and the whole point
+    // of this predicate is that PAUSED is the one state where the backend's own
+    // capability decides.
+    if (lifecycle == PrintState::Paused) {
+        return backend_self_homes;
+    }
+    return job_holds_machine(lifecycle);
+}
+
+} // namespace helix
 
 /**
  * @brief Result of a state transition attempt

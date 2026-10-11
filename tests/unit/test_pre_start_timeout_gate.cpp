@@ -17,24 +17,20 @@
 #include "ui_print_preparation_manager.h"
 #include "ui_update_queue.h"
 
+#include "../test_helpers/print_preparation_manager_test_access.h"
+#include "app_globals.h"
 #include "lvgl_test_fixture.h"
 #include "moonraker_api_mock.h"
 #include "moonraker_client_mock.h"
 #include "moonraker_error.h"
 #include "moonraker_job_api.h"
+#include "moonraker_request_tracker.h"
+#include "pre_start_exclude.h"
 #include "print_job_ref.h"
 #include "printer_state.h"
 #include "test_helpers/printer_state_test_access.h"
 
 #include "../catch_amalgamated.hpp"
-
-// Minimal local twin of the accessor in test_print_preparation_manager.cpp —
-// the manager declares `friend class ::PrintPreparationManagerTestAccess`, so
-// any class with this exact name reaches its privates.
-class PrintPreparationManagerTestAccess {
-  public:
-    static lv_timer_t* pending_wait_timer(const helix::ui::PrintPreparationManager& m);
-};
 
 namespace {
 
@@ -65,7 +61,8 @@ struct PreStartGateAPI : public MoonrakerAPIMock {
     void execute_gcode(const std::string& gcode, IMoonrakerAPI::SuccessCallback on_success,
                        IMoonrakerAPI::ErrorCallback on_error, uint32_t timeout_ms = 0,
                        bool /*silent*/ = false, IMoonrakerAPI::SuccessCallback = nullptr,
-                       bool /*caller_surfaces_errors*/ = true) override {
+                       bool /*caller_surfaces_errors*/ = true,
+                       bool /*bypass_busy_gate*/ = false) override {
         captured_gcode = gcode;
         captured_success = std::move(on_success);
         captured_error = std::move(on_error);
@@ -84,11 +81,6 @@ struct PreStartGateAPI : public MoonrakerAPIMock {
 };
 
 } // namespace
-
-lv_timer_t*
-PrintPreparationManagerTestAccess::pending_wait_timer(const helix::ui::PrintPreparationManager& m) {
-    return m.pre_start_wait_guard_.pending_timer();
-}
 
 class PreStartGateFixture : public LVGLTestFixture {
   public:
@@ -115,7 +107,8 @@ class PreStartGateFixture : public LVGLTestFixture {
     }
 
     void set_busy(bool busy) {
-        lv_subject_set_int(state.get_idle_timeout_printing_subject(), busy ? 1 : 0);
+        lv_subject_set_int(state.calibration_state().get_idle_timeout_printing_subject(),
+                           busy ? 1 : 0);
     }
 
     MoonrakerClientMock mock_client;
@@ -239,7 +232,7 @@ TEST_CASE_METHOD(PreStartGateFixture,
     // starting a print the user already cancelled is the worst outcome here.
     // Cancel is expressed by retiring the preparing job, which is the same token
     // the start was armed with.
-    state.begin_preparing(helix::PrintJobRef{"part.gcode", "", ""});
+    state.print_state().begin_preparing(helix::PrintJobRef{"part.gcode", "", ""});
     set_busy(true);
 
     manager.start_print("part.gcode", "", []() {}, completion());
@@ -247,7 +240,7 @@ TEST_CASE_METHOD(PreStartGateFixture,
     REQUIRE(api->captured_error);
 
     // User cancels while the macro is still running.
-    state.retire_preparing(helix::PreparingExit::Cancelled);
+    state.print_state().retire_preparing(helix::PreparingExit::Cancelled);
 
     // Macro finishes and the printer goes idle.
     api->captured_error(
@@ -273,4 +266,92 @@ TEST_CASE_METHOD(PreStartGateFixture, "A start with no preparing job still runs"
     drain();
 
     CHECK(jobs.start_print_calls == 1);
+}
+
+// ============================================================================
+// printer.print.start's own RPC ceiling
+// ============================================================================
+
+TEST_CASE("start_print outlives a print-start macro that heats synchronously",
+          "[moonraker][job][pre_start][1451]") {
+    // Moonraker confirms printer.print.start only once Klipper acknowledges
+    // SDCARD_PRINT_FILE. A print-start macro that blocks on M109/M190 holds
+    // that ack for the whole heat-up, so on a cold machine the RPC answers
+    // minutes after the print is already running. At the tracker's default
+    // ceiling the app reports a timeout over a print that started fine.
+    MoonrakerClientMock client(MoonrakerClientMock::PrinterType::VORON_24);
+    client.connect("ws://mock/websocket", []() {}, []() {});
+
+    MoonrakerJobAPI job(client);
+
+    bool started = false;
+    job.start_print("part.gcode", [&started]() { started = true; }, [](const MoonrakerError&) {});
+
+    REQUIRE(started);
+    REQUIRE(client.last_send_method() == "printer.print.start");
+    CHECK(client.last_send_timeout_ms() == MoonrakerJobAPI::PRINT_START_TIMEOUT_MS);
+    CHECK(MoonrakerJobAPI::PRINT_START_TIMEOUT_MS == 600000u);
+    // The ceiling only helps while it clears the default — pin the relation too.
+    CHECK(MoonrakerJobAPI::PRINT_START_TIMEOUT_MS >
+          helix::MoonrakerRequestTracker::DEFAULT_REQUEST_TIMEOUT_MS);
+}
+
+TEST_CASE_METHOD(PreStartGateFixture,
+                 "Pre-start path without the plugin prints the original instead of rewriting it",
+                 "[print_preparation][pre_start][plugin_gate]") {
+    // The user turned off an op the sliced file embeds. Stripping it needs the
+    // HelixPrint plugin, which this printer does not report.
+    manager.set_option_state_provider([](const std::string& id) {
+        if (id == "bed_mesh")
+            return 1;
+        return id == "nozzle_clean" ? 0 : -1;
+    });
+    helix::gcode::ScanResult scan;
+    helix::gcode::DetectedOperation op;
+    op.type = helix::gcode::OperationType::NOZZLE_CLEAN;
+    op.embedding = helix::gcode::OperationEmbedding::DIRECT_COMMAND;
+    op.line_number = 5;
+    scan.operations.push_back(op);
+    manager.set_cached_scan_result(scan, "part.gcode");
+    REQUIRE_FALSE(manager.can_modify_gcode());
+
+    manager.start_print("part.gcode", "", []() {}, completion());
+    drain();
+    REQUIRE(api->captured_success);
+
+    api->captured_success();
+    drain();
+
+    CHECK(completed);
+    CHECK(completion_success);
+    CHECK(jobs.start_print_calls == 1);
+    CHECK(jobs.last_filename == "part.gcode");
+}
+
+// The pre-start wait confirms through the navigate callback it was handed, so
+// object picks wrapped around it are sent once the print starts, not before.
+TEST_CASE_METHOD(PreStartGateFixture, "A start behind the pre-start block sends the picks after it",
+                 "[print_preparation][pre_start][pre_start_exclude]") {
+    set_busy(false);
+    set_moonraker_api(api.get());
+    int navigated = 0;
+    manager.start_print(
+        "part.gcode", "",
+        helix::ui::with_pre_start_exclusions([&navigated]() { ++navigated; }, {"Cube_id_1"}),
+        completion());
+    drain();
+    REQUIRE(api->captured_success);
+    CHECK(navigated == 0);
+    CHECK(jobs.start_print_calls == 0);
+
+    auto pre_start_done = std::move(api->captured_success);
+    api->captured_gcode.clear();
+    pre_start_done();
+    drain();
+
+    CHECK(jobs.start_print_calls == 1);
+    CHECK(navigated == 1);
+    // execute_gcode is captured here: the last block sent is the exclusion.
+    CHECK(api->captured_gcode == "EXCLUDE_OBJECT NAME=Cube_id_1");
+    set_moonraker_api(nullptr);
 }

@@ -142,41 +142,31 @@ Use `observer_factory.h` for type-safe, auto-cleaned observers. **Never use raw 
 #include "observer_factory.h"
 
 // In setup_observers():
-// Integer observer with async UI update
-add_observer(observe_int_async<MyPanel>(
+// Integer observer; the handler runs deferred on the UI thread
+add_observer(observe<int>(
     get_printer_state().temperature_state().get_active_extruder_temp_subject(),
     this,
     [](MyPanel* self, int32_t temp) {
         self->update_temp_display(temp);
-    }
+    },
+    get_printer_state().get_subjects_lifetime()
 ));
 
 // String observer
-add_observer(observe_string<MyPanel>(
-    get_printer_state().get_print_filename_subject(),
+add_observer(observe<const char*>(
+    get_printer_state().print_state().get_print_filename_subject(),
     this,
     [](MyPanel* self, const char* name) {
         lv_label_set_text(self->filename_label_, name);
-    }
-));
-
-// Connection state observer (special case).
-// Signature: observe_connection_state(subject, panel, on_connected);
-// on_connected is void(Panel*) — fired when the state becomes CONNECTED.
-add_observer(observe_connection_state<MyPanel>(
-    get_printer_state().get_printer_connection_state_subject(),
-    this,
-    [](MyPanel* self) {
-        self->set_controls_enabled(true);
-    }
+    },
+    get_printer_state().get_subjects_lifetime()
 ));
 ```
 
 **Key patterns:**
-- `observe_int_sync<Panel>()` - Direct callback (same thread)
-- `observe_int_async<Panel>()` - Queued to LVGL thread (safe from WebSocket)
-- `observe_string<Panel>()` - String subjects
-- `observe_connection_state<Panel>()` - Connection status
+- `observe<int>()` / `observe<const char*>()` - int and string subjects; the handler is deferred through the UpdateQueue by default
+- `Dispatch::Immediate` (last argument) - handler runs inside the subject notification; only when it cannot touch observer lifecycle
+- The 4th argument is the subject owner's lifetime token (`subject_never_freed()` only for subjects that outlive the process)
 
 ---
 
@@ -286,9 +276,9 @@ Font-based MDI icons (~50KB total vs ~4.6MB for images).
 
 **C++ API:**
 ```cpp
-ui_icon_set_source(icon, "wifi_strength_4");
-ui_icon_set_size(icon, "lg");
-ui_icon_set_variant(icon, "accent");
+helix::ui::icon::set_source(icon, "wifi_strength_4");
+helix::ui::icon::set_size(icon, "lg");
+helix::ui::icon::set_variant(icon, "accent");
 ```
 
 **Adding icons:** canonical path in [DEVELOPMENT.md](DEVELOPMENT.md) § "Icon & Font Workflow" (header edit + `make regen-fonts`).
@@ -334,22 +324,17 @@ ui_step_progress_set_current(progress, 2);  // Advance to step 3
 
 ## Sensor Framework
 
-Extensible sensor system via `ISensorManager` interface (`include/sensor_registry.h`). Headers live flat in `include/` (`*_sensor_manager.h`).
+One singleton manager per sensor category, called directly (`Manager::instance()`). Headers live flat in `include/` (`*_sensor_manager.h`).
 
 **Available managers:**
 - `AccelSensorManager` - ADXL345, LIS2DW, LIS3DH, MPU9250, ICM20948
 - `FilamentSensorManager` - Runout detection
 - `ProbeSensorManager` - Z-probe tracking
-- `ColorSensorManager` - Filament color
 - `WidthSensorManager` - Filament diameter
 - `HumiditySensorManager` - Chamber humidity
 - `TemperatureSensorManager` - `temperature_sensor` / `temperature_fan` objects
 
-**Registration:**
-```cpp
-auto& registry = SensorRegistry::instance();
-registry.register_manager("accel", std::make_unique<AccelSensorManager>());
-```
+**Wiring:** discovery calls each manager's `discover()` / `discover_from_config()` from `src/printer/printer_discovery.cpp#init_subsystems_from_hardware` and the configfile discovery step; status frames reach every manager from `dispatch_status_frame()` (`src/application/moonraker_manager.cpp`).
 
 **Accessing state:** Sensors expose LVGL subjects for reactive binding.
 
@@ -422,6 +407,8 @@ lv_xml_create(...);                           // 6. Create UI
 
 ⚠️ In `<styles>`: bare names (`bg_color`). On widgets: `style_` prefix (`style_bg_color`).
 
+A `<styles>` block is file-local. A style two files share goes in `ui_xml/styles.xml` and is borrowed as `<style name="styles.press_wash"/>` (see `LVGL9_XML_GUIDE.md` § "Defining Styles").
+
 ```xml
 <styles>
     <style name="my_style" bg_color="#ff0000"/>  <!-- NO prefix -->
@@ -461,7 +448,7 @@ style_flex_cross_place="center"
 | `lv_label_set_text()` for reactive data | `bind_text` subject binding | [ch. 01 — Declarative UI](architecture/01-declarative-ui.md) |
 | Hardcoded colors in C++ | `theme_manager_get_color("card_bg")` | [Responsive Design Tokens](#responsive-design-tokens) |
 | `lv_subject_set_*()` from WebSocket | `helix::ui::queue_update()` | [Threading Model](#threading-model) |
-| Raw `lv_subject_add_observer_*()` | `observe_int_async<Panel>()` from factory | [Observer Factory](#observer-factory-critical) |
+| Raw `lv_subject_add_observer_*()` | `observe<int>()` from factory | [Observer Factory](#observer-factory-critical) |
 
 ---
 
@@ -566,14 +553,14 @@ Versioned migration system for upgrading existing user configs on update.
 
 **Adding a migration:**
 1. Bump `CURRENT_CONFIG_VERSION` in `include/config.h`
-2. Write `migrate_vN_to_vM()` in `src/system/config.cpp` (anonymous namespace)
-3. Add `if (version < M) migrate_vN_to_vM(config);` in `run_versioned_migrations()`
+2. Write `migrate_vN_to_vM(json& config, const std::string& config_path)` in `src/system/config_migrations.cpp` (anonymous namespace)
+3. Add `{M, migrate_vN_to_vM},` to the end of `kMigrations`
 4. Update `get_default_config()` if the new key needs a default for fresh installs
 5. Write tests in `tests/unit/test_config.cpp` with tags `[config][migration][versioning]`
 
 **Rules:** Migrations are append-only, idempotent, never overwrite user data, and log what they do.
 
-**Full docs:** [CONFIG_MIGRATION.md](CONFIG_MIGRATION.md) | **Key files:** `include/config.h`, `src/system/config.cpp`
+**Full docs:** [CONFIG_MIGRATION.md](CONFIG_MIGRATION.md) | **Key files:** `include/config.h`, `src/system/config_migrations.cpp`
 
 ---
 
@@ -637,9 +624,10 @@ for (const auto& [name, info] : pts.extruders()) {
 }
 
 // React to extruder list changes
-add_observer(observe_int_async<MyPanel>(
+add_observer(observe<int>(
     pts.get_extruder_version_subject(), this,
-    [](MyPanel* self, int32_t) { self->rebuild_temp_display(); }
+    [](MyPanel* self, int32_t) { self->rebuild_temp_display(); },
+    get_printer_state().get_subjects_lifetime()
 ));
 ```
 
@@ -675,9 +663,10 @@ for (const auto& tool : ts.tools()) {
 }
 
 // Observe tool changes
-add_observer(observe_int_async<MyPanel>(
+add_observer(observe<int>(
     ts.get_tools_version_subject(), this,
-    [](MyPanel* self, int32_t) { self->rebuild_tool_list(); }
+    [](MyPanel* self, int32_t) { self->rebuild_tool_list(); },
+    get_printer_state().get_subjects_lifetime()
 ));
 
 // Hide UI element on single-tool printers (XML)

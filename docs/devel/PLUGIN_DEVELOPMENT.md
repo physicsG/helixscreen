@@ -1,1439 +1,758 @@
-# HelixScreen Plugin Development Guide
+# Writing a Lua Plugin
 
-**Last Updated:** July 2026
-**API Version:** 1.0
-**Minimum HelixScreen Version:** 1.0
+A HelixScreen plugin is a folder of Lua and XML that runs on the printer's screen. It can
+add home-panel tiles, overlays and settings without compiling anything: an author needs a
+text editor and the plugin folder, nothing else. This guide is the contract; every rule in
+it is enforced by code, cited so it can be verified against the source.
 
----
+Six complete plugins ship in the repository:
 
-## Table of Contents
+- `examples/plugins/temp-spark` - a heater sparkline tile. No permissions.
+- `examples/plugins/led-effects` - an LED effect toggle. The `gcode` permission.
+- `examples/plugins/maintenance-meter` - consumable hour meters as an adaptive
+  tile. The `storage` permission; the step-by-step build of it is
+  `docs/devel/PLUGIN_TUTORIAL.md`.
+- `examples/plugins/print-watcher` - print-event notifications to ntfy,
+  Discord, Telegram or a webhook. The `http` permission; the worked example
+  for `helix.settings.set` as a control surface and for `i18n/` translation
+  packs.
+- `examples/plugins/ambient-tile` - room temperature and humidity from Home
+  Assistant or any JSON endpoint. The `http` reading example: `http.get`
+  against untrusted JSON, pointer resolution, a poll cadence, and a canvas
+  sparkline from a plugin-side window.
+- `examples/plugins/calibration-bridge` - slicer-side filament calibration at
+  the printer, over Moonraker agent events. A proof of concept: no companion
+  ships yet, the plugin implements the proposed contract alone. The first
+  **overlay-only** example (`widgets: []`): the companion event is the front
+  door, a settings action row the manual one; also the `moonraker_write`
+  example (`printer.print.start`) and the worked use of an event-fed dropdown
+  with `bind_value`.
 
-1. [Overview](#overview)
-2. [Quick Start](#quick-start)
-3. [Plugin Structure](#plugin-structure)
-4. [Plugin Lifecycle](#plugin-lifecycle)
-5. [PluginAPI Reference](#pluginapi-reference)
-6. [UI Development](#ui-development)
-7. [Threading Model](#threading-model)
-8. [Common Patterns](#common-patterns)
-9. [Building Plugins](#building-plugins)
-10. [Debugging](#debugging)
-11. [Best Practices and Gotchas](#best-practices-and-gotchas)
-12. [Complete Examples](#complete-examples)
+## 1. What a plugin is
 
----
-
-## Overview
-
-The HelixScreen plugin system allows third-party developers to extend the 3D printer touchscreen interface with custom functionality. Plugins are dynamically loaded shared libraries that can:
-
-- **Monitor printer state** - Subscribe to temperature, print status, and other real-time data
-- **Respond to events** - React to print start/pause/complete, filament changes, etc.
-- **Inject UI widgets** - Add custom widgets to designated areas of existing panels
-- **Register services** - Expose functionality for other plugins to use
-- **Subscribe to Moonraker** - Receive raw Klipper object updates
-
-### Prerequisites
-
-- C++17 or later compiler
-- LVGL 9.5 knowledge (for UI development)
-- Familiarity with HelixScreen's declarative XML UI system
-- Understanding of the Klipper/Moonraker architecture (for printer integration)
-
----
-
-## Quick Start
-
-This section gets you from zero to a working plugin as quickly as possible.
-
-### Minimal "Hello World" Plugin
-
-**Directory structure:**
-```
-plugins/
-  hello-world/
-    manifest.json
-    hello_world.cpp
-    Makefile
-```
-
-**manifest.json:**
-```json
-{
-  "id": "hello-world",
-  "name": "Hello World",
-  "version": "1.0.0",
-  "author": "Your Name",
-  "description": "A minimal example plugin",
-  "helix_version": ">=1.0"
-}
-```
-
-**hello_world.cpp:**
-```cpp
-// SPDX-License-Identifier: GPL-3.0-or-later
-
-#include "plugin_api.h"
-
-using namespace helix::plugin;
-
-// Store API pointer for use in callbacks
-static PluginAPI* g_api = nullptr;
-
-// Required: Plugin initialization
-extern "C" bool helix_plugin_init(PluginAPI* api, const char* plugin_dir) {
-    g_api = api;
-
-    api->log_info("Hello World plugin initialized!");
-    api->log_info("Plugin directory: " + std::string(plugin_dir));
-
-    // Subscribe to printer connection events
-    api->on_event(events::PRINTER_CONNECTED, [](const EventData& event) {
-        g_api->log_info("Printer connected!");
-    });
-
-    return true;  // Return false to abort loading
-}
-
-// Required: Plugin cleanup
-extern "C" void helix_plugin_deinit() {
-    if (g_api) {
-        g_api->log_info("Hello World plugin shutting down");
-    }
-    g_api = nullptr;
-}
-
-// Optional: API version for compatibility checking
-extern "C" const char* helix_plugin_api_version() {
-    return "1.0";
-}
-```
-
-**Makefile:**
-```makefile
-CXX = g++
-CXXFLAGS = -std=c++17 -fPIC -O2 -Wall -Wextra
-LDFLAGS = -shared
-
-# Adjust this path to your HelixScreen installation
-HELIX_INCLUDE = /path/to/helixscreen/include
-
-PLUGIN_NAME = hello-world
-SOURCES = hello_world.cpp
-OUTPUT = libhelix_$(PLUGIN_NAME).so
-
-ifeq ($(shell uname),Darwin)
-    OUTPUT = libhelix_$(PLUGIN_NAME).dylib
-endif
-
-all: $(OUTPUT)
-
-$(OUTPUT): $(SOURCES)
-	$(CXX) $(CXXFLAGS) -I$(HELIX_INCLUDE) $(LDFLAGS) -o $@ $^
-
-clean:
-	rm -f $(OUTPUT)
-
-.PHONY: all clean
-```
-
-### Build and Test
-
-```bash
-cd plugins/hello-world
-make
-
-# Run HelixScreen. Plugins are discovered from ./plugins/ in the working
-# directory at startup — there is no --plugins-dir flag. Each plugin must
-# also be enabled in settings.json before it loads.
-./helix-screen --test -vv
-```
-
-You should see in the logs:
-```
-[plugin:hello-world] Hello World plugin initialized!
-[plugin:hello-world] Plugin directory: ./plugins/hello-world
-```
-
----
-
-## Plugin Structure
-
-### Directory Layout
-
-Each plugin lives in its own directory under the plugins folder:
+A folder named after the plugin id:
 
 ```
-plugins/
-  my-plugin/
-    manifest.json          # Required: Plugin metadata
-    libhelix_my-plugin.so  # Required: Compiled plugin library
-    my_widget.xml          # Optional: XML UI components
-    assets/                # Optional: Images, fonts, etc.
-      icon.png
-    README.md              # Optional: Documentation
+my-plugin/
+  manifest.json     describes the plugin: id, name, widgets, settings, permissions
+  main.lua          runs when the plugin loads
+  ui/               XML components, one file per component
+    my-plugin__tile.xml
 ```
 
-### manifest.json Schema
+The plugin runs in its own sandboxed Lua 5.4 state (`src/plugin/lua_runtime.cpp#LuaRuntime`).
+It cannot freeze or crash the screen: each Lua entry gets a time budget, the state has a
+memory cap, and repeated errors disable the plugin while the app keeps running
+(§10 Limits and faults).
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `id` | string | Yes | Unique identifier (alphanumeric, hyphens, underscores) |
-| `name` | string | Yes | Human-readable display name |
-| `version` | string | Yes | Semantic version (e.g., "1.2.3") |
-| `helix_version` | string | No | Required HelixScreen version (e.g., ">=1.0") |
-| `author` | string | No | Plugin author name |
-| `description` | string | No | Brief description |
-| `entry_point` | string | No | Init function name (default: "helix_plugin_init") |
-| `dependencies` | array | No | Other plugin IDs this plugin requires |
-| `ui` | object | No | UI configuration (see below) |
+Deliberately out of scope: plugin-implemented capability backends (the binding design
+leaves room; none is built), multi-instance plugin widgets, plugin-to-plugin calls, raw
+`lv_obj` access, nav bar panels, and a plugin catalog, signing or install-from-URL (§3 covers sharing).
 
-**UI Configuration:**
-```json
-{
-  "ui": {
-    "settings_page": true,
-    "navbar_panel": false,
-    "injection_points": ["print_status_extras"]
-  }
-}
+## 2. Quick start
+
+Run HelixScreen from a checkout and point it at a local plugin folder:
+
+```sh
+cp -r examples/plugins/temp-spark examples/plugins/my-plugin
+cd examples/plugins/my-plugin
+# rename the id everywhere: the folder, manifest.json's "id", and every
+# temp-spark__ name in manifest.json, main.lua and the ui/ file names
+HELIX_PLUGIN_DIR=examples/plugins ./build/bin/helix-screen --test -vv
 ```
 
-### Library Naming Conventions
+The `--test` flag runs a mock printer, so nothing touches a real machine. Then:
 
-The plugin manager searches for libraries in this order:
+1. Settings > Plugins > Temperature Sparkline (your plugin's `name`) > enable. A plugin
+   with no permissions asks nothing; one with permissions shows a consent dialog first.
+2. Add the tile from the home panel's widget catalog, under the Plugins category. A tile
+   needs free cells: remove or shrink a stock widget first if the page is full.
 
-**Linux:**
-1. `libhelix_<plugin_id>.so`
-2. `lib<plugin_id>.so`
-3. `<plugin_id>.so`
-4. Any `.so` file in the directory
+Saving any file of the plugin reloads it within about a second in native dev builds (the
+same `HELIX_HOT_RELOAD` gate as XML hot reload; `HELIX_PLUGIN_DIR` documents it in
+`ENVIRONMENT_VARIABLES.md`). Cross-compiled release builds do not poll.
 
-**macOS:**
-1. `libhelix_<plugin_id>.dylib`
-2. `lib<plugin_id>.dylib`
-3. `<plugin_id>.dylib`
-4. Any `.dylib` file in the directory
+`HELIX_PLUGIN_DIR` replaces the printer's plugin source with your directory while it is
+set, so the fastest loop is: edit, save, watch the log line naming your plugin reload.
 
----
+## 3. Installing on a printer
 
-## Plugin Lifecycle
-
-### Plugin States
-
-Plugins exist in one of four states:
-
-| State | Description |
-|-------|-------------|
-| **Discovered** | Plugin found in plugins directory with valid manifest |
-| **Disabled** | Discovered but not in config's enabled list - silently skipped |
-| **Enabled** | In config's enabled list, will attempt to load |
-| **Loaded** | Successfully initialized and running |
-| **Failed** | Enabled but failed to load (version mismatch, missing library, init error) |
-
-### Enabling and Disabling Plugins
-
-Plugins must be **explicitly enabled** in the configuration file. Simply placing a plugin in the `plugins/` directory does not activate it.
-
-**Config file location:** `~/helixscreen/config/settings.json` (or platform equivalent)
-
-**Enable a plugin:**
-```json
-{
-  "plugins": {
-    "enabled": ["hello-world", "led-effects", "spoolman"]
-  }
-}
-```
-
-**Disable a plugin:**
-Remove it from the `enabled` array, or use the UI:
-- If a plugin fails to load, a toast notification appears with a **[Disable]** button
-- Go to **Settings > Plugins** to see all plugins and disable failed ones
-
-**Why explicit enable?**
-- Security: prevents accidentally running unknown code
-- Performance: only loads what you need
-- Control: easily test plugins by toggling in config
-
-### Lifecycle Stages
+Copy the plugin folder into the printer's Moonraker config:
 
 ```
-┌─────────────┐
-│  Discovery  │  Plugin manager scans plugins directory for manifest.json files
-└──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│ Enable Check│  Is plugin ID in config's /plugins/enabled list?
-└──────┬──────┘
-       │ Yes                          │ No
-       ▼                              ▼
-┌─────────────┐                ┌─────────────┐
-│    Load     │                │  (Skipped)  │  Plugin stays discovered but inactive
-└──────┬──────┘                └─────────────┘
-       │
-       ▼
-┌─────────────┐
-│    Init     │  helix_plugin_init() called with PluginAPI
-└──────┬──────┘
-       │ Success                      │ Failure
-       ▼                              ▼
-┌─────────────┐                ┌─────────────┐
-│   Running   │                │   Failed    │  Error logged, toast shown with [Disable]
-└──────┬──────┘                └─────────────┘
-       │
-       ▼
-┌─────────────┐
-│   Deinit    │  helix_plugin_deinit() called for cleanup
-└──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│   Unload    │  dlclose() unloads the library
-└─────────────┘
+printer_data/config/helixscreen/plugins/<id>/
 ```
 
-### Handling Load Failures
+The Mainsail or Fluidd file manager works; no restart is needed. The screen mirrors the
+folder into a local cache on connect and whenever the files change, shows a toast when a
+new plugin arrives, and never enables one on its own - the user enables it in
+Settings > Plugins (`src/application/printer_session.cpp#on_plugin_sync`).
 
-When an enabled plugin fails to load:
+A plugin over a sync limit is skipped whole and keeps its previous installed version
+(`include/plugin_source.h`): at most 128 files, 8 MB per plugin, 4 MB per file, and 32
+plugins in one listing.
 
-1. **Toast notification** appears:
-   - Single failure: `"plugin-id" failed to load [Disable]`
-   - Multiple failures: `N plugins failed to load [Manage]`
+To share a plugin, or to find ones other people wrote, use the `#plugin-showcase` channel
+on the [HelixScreen Discord](https://discord.gg/RZCT2StKhr). Plugins posted there come from
+the community and are not reviewed by the HelixScreen project: read a plugin's
+`manifest.json` permissions and its Lua before you enable it. There is no in-app catalog
+(prestonbrown/helixscreen#1771).
 
-2. **[Disable] button** removes the plugin from config's enabled list (no restart needed)
+## 4. Naming
 
-3. **Settings > Plugins** shows all plugins organized by state:
-   - ✅ **Loaded** - Running plugins
-   - ⚠️ **Disabled** - Discovered but not enabled
-   - ❌ **Failed** - Enabled but couldn't load (with error details and disable button)
+A plugin id matches `^[a-z][a-z0-9-]{1,31}$`: lowercase, 2 to 32 characters, digits and
+hyphens, never an underscore (`src/plugin/plugin_manifest.cpp#is_valid_plugin_id`). The
+folder name must equal the id.
 
-### Entry Point Contract
+Everything a plugin registers is named `<id>__<rest>` with a double underscore
+(`kPluginNameSeparator`, `include/plugin_manifest.h#kPluginNameSeparator`):
 
-Every plugin must export these C functions:
+- XML component files: `ui/<id>__<name>.xml`, and the component's name inside
+- widget ids and their components in the manifest
+- subjects (Lua hands only the short `<name>`; see §8)
+- object `name=` attributes in XML
+- `plugin_event` handler names in `user_data`
 
-```cpp
-// Required: Called during plugin loading
-// Return true to complete loading, false to abort
-extern "C" bool helix_plugin_init(PluginAPI* api, const char* plugin_dir);
+One global XML and subject scope is shared by the app and every plugin. The app's own
+names use single underscores (`extruder_temp`, `settings_*`); only the double underscore
+proves a name belongs to a plugin, and a plugin can reach only its own names.
 
-// Required: Called during plugin unloading
-// Clean up any resources allocated during init/running
-extern "C" void helix_plugin_deinit();
+## 5. manifest.json
 
-// Optional: Return API version for compatibility checking
-// If provided, must match host's PLUGIN_API_VERSION ("1.0")
-extern "C" const char* helix_plugin_api_version();
+Parsed by `src/plugin/plugin_manifest.cpp#parse_manifest`. Any error in one field rejects
+the whole manifest; Settings > Plugins shows the reasons.
+
+Every user-facing string in the manifest - `name`, `description`, settings
+`label`s, widget `name`/`description` - is English source: the file stays
+English and the render sites translate it through the plugin's `i18n/` pack
+(§13 Translations), falling back to the literal text.
+
+| Field | Type | Default | Rules |
+|---|---|---|---|
+| `id` | string | required | the id pattern above; must match the folder name |
+| `name` | string | required | single line, at most 48 bytes; shown in the UI |
+| `version` | string | required | single line, at most 32 bytes |
+| `author` | string | empty | single line, at most 64 bytes |
+| `description` | string | empty | shown in the Plugins screen |
+| `helix_version` | string | empty | a HelixScreen version constraint; a plugin whose constraint fails the running version shows as *incompatible* |
+| `permissions` | array | `[]` | zero or more of `gcode`, `moonraker_write`, `http`, `storage` (§9) |
+| `memory_mb` | integer | `2` | 1 to 64; the plugin's share of the plugin memory budget |
+| `widgets` | array | `[]` | up to 8 home tiles |
+| `settings` | array | `[]` | the settings schema (§6) |
+| `settings_overlay` | string | empty | one of the plugin's own components, opened instead of the generated settings screen |
+
+Each `widgets` entry:
+
+| Field | Type | Default | Rules |
+|---|---|---|---|
+| `id` | string | required | `<id>__<name>`, unique in the array |
+| `name` | string | required | the catalog entry's display name |
+| `component` | string | required | `<id>__<name>`, a file in `ui/` |
+| `icon` | string | `puzzle_outline` | an icon name from `include/ui_icon_codepoints.h` |
+| `description` | string | empty | catalog help text |
+| `colspan`, `rowspan` | number | `1` | 1 to 8 grid cells; whole cells unless `half_cells` |
+| `max_colspan`, `max_rowspan` | number | `0` | `0` = not resizable on that axis; otherwise `colspan` to 8 |
+| `half_cells` | boolean | `false` | resizes in half cells, and the spans above may be written as halves (`1.5`) |
+
+Widget tiles appear in the home panel's widget catalog under the Plugins category, never
+enabled by default, one instance each. A tile's saved placement survives a disabled or
+absent plugin and returns when it loads again.
+
+## 6. Settings
+
+Each `settings` entry has `key` (matching `[a-z0-9_]{1,64}`), `label` and `type`, and
+becomes one row of the plugin's settings screen
+(`src/plugin/plugin_settings_overlay.cpp#setting_row_spec`):
+
+| Type | Extra fields | Row |
+|---|---|---|
+| `bool` | `default` | toggle |
+| `int` | `min` < `max`, `default` in range | slider, whole numbers |
+| `float` | `min` < `max`, `default` in range | slider, value scaled by 100 |
+| `enum` | `options`: non-empty array of strings without newlines; `default` one of them | dropdown |
+| `string` | `default`, a string | text input; a stored value over 1024 bytes reads as the default |
+| `action` | `callback`: `<id>__<name>` of a `helix.ui.on` handler | button that fires the handler |
+| `info` | `subject`: `<id>__<name>` of a plugin subject | read-only row bound to the subject |
+
+In Lua, `helix.settings.get(key)` returns the stored value if it still fits the
+declaration, else the default (`src/plugin/lua_bind_io.cpp#effective_setting`).
+`helix.settings.set(key, value)` writes one of the plugin's own declared settings
+through the same validation, persistence and `on_change` notification the generated
+settings screen uses, so a plugin's own overlay can be the control surface; an
+undeclared key, a read-only `action`/`info` row, or a value the declaration rejects
+(min/max, enum membership, string size) raises.
+`helix.settings.on_change(key, fn)` calls `fn(value)` after each accepted change, from
+either path; several handlers per key are allowed. An `action` row reaches its handler
+through the same path as a `plugin_event`.
+
+Enable state and settings are shared across printers: enabling a plugin once enables it
+on every printer that ships it, under the same permission check.
+
+**Validate any setting that reaches G-code.** A stored string is whatever was typed. The
+led-effects plugin anchors and bounds its effect name before building a command line
+(§12): anchor the match (`^...$`), bound the length, and refuse rather than send.
+
+## 7. XML
+
+Each `ui/<id>__<name>.xml` file defines one component and is registered under its file
+stem. The whole file passes `src/plugin/plugin_xml_policy.cpp#check_plugin_xml` before
+anything is registered; a rejection fails the load and Settings > Plugins shows the
+reason with the file name.
+
+Allowed elements (`src/plugin/plugin_xml_policy.cpp#is_allowed_element`):
+
+- `lv_*` widgets (`lv_label`, `lv_bar`, `lv_obj`, and so on)
+- the structural `component`, `view`, `api`, `prop`
+- `style`, `remove_style*`, `play_timeline_event`, `bind_*` elements
+- `event_cb`
+- the app chrome widgets `overlay_panel`, `ui_card`, `icon`, `text_heading`,
+  `text_body`, `text_muted`, `text_small`, `text_xs`, `text_tiny`
+- `plugin_canvas`, the plugin drawing surface (below)
+- the plugin's own components, by name
+
+A `view` may `extends` only another allowed name. `screen_load_event` and
+`screen_create_event` are never available. The `subject_*_event` elements are rejected
+outright: they hold a raw subject pointer with no observer, and `plugin_event` plus
+`s:set()` in Lua reaches the same effect by name.
+
+Attribute rules (`src/plugin/plugin_xml_policy.cpp#check_plugin_attr`):
+
+- The only callback is `plugin_event`: any `callback`, `event_cb`, `*_callback` or `*_cb`
+  attribute must read `plugin_event`.
+- `user_data` carries the target: `<id>__<name>` optionally followed by `:arg`. The host
+  runs the `helix.ui.on` handler `name` with `arg` as a string, or `nil` without a colon.
+- Every subject reference (`subject`, `*_subject`, and any `bind_*` attribute) must name a
+  subject this plugin owns, spelled `<id>__<name>`.
+- Object `name=` attributes must be `<id>__<name>`, so a screen-wide lookup never
+  resolves a plugin object.
+- A `$`-prop indirection on any of these attributes is refused.
+- `cond` and `*_cond` expressions may name only the plugin's own subjects. Identifiers in
+  the expression grammar are `[A-Za-z_][A-Za-z0-9_]*`, and every owned name starts with
+  the id, so **a plugin whose id contains a hyphen cannot use `cond` at all**. Use
+  `bind_flag_if_eq` (and the other `bind_flag_*` elements) instead; led-effects does.
+
+Because every `bind_*` attribute value must be an owned subject name, `bind_text-fmt` is
+rejected: a plugin-supplied printf format bound to a subject is a format-string hazard.
+Format in Lua and set a string subject.
+
+A component prop must be declared inside an `<api>` block to exist, and
+`helix.ui.overlay(component, attrs)` fills those props at open time - the way
+data rides into an overlay that XML cannot build dynamically (the options of
+a dropdown, for instance: `examples/plugins/calibration-bridge`). A
+dropdown's `bind_value` is the way a selection comes back: it is a two-way
+subject binding, so the pick lands on a plugin-owned int subject without any
+widget access.
+
+Styling uses the app's design tokens, for example `style_pad_all="#space_sm"`,
+`style_text_color="#text"`, `style_text_font="#font_heading"`
+(`docs/devel/UI_CONTRIBUTOR_GUIDE.md` has the full token list).
+
+**Font tokens are base tokens only**: `font_xs`, `font_small`, `font_body`,
+`font_body_bold`, `font_heading`, `font_xl`, `font_display`, `font_mono`. A size-suffixed
+variant (`font_heading_medium`, `font_body_large`) names a face the theme registers only
+from its breakpoint tier upward, so on most screens the XML engine silently substitutes the
+default font - a trap an author cannot see on an oversized dev display. The policy rejects
+a suffixed token on `style_text_font`, and `helix.canvas` text enforces the same rule
+(`src/ui/theme_fonts.cpp#theme_manager_font_token_is_base`).
+
+### plugin_canvas
+
+`<plugin_canvas name="<id>__<name>" .../>` is the plugin drawing surface
+(`src/plugin/plugin_canvas.cpp#canvas_xml_create`): an empty object that replays whatever
+display list Lua last committed under that name (§8). Its `name=` follows the owned-name
+rule and is the registry key the drawing publishes under. It defaults to 100% width and
+100% height of its parent, is not scrollable, and is not clickable, so a canvas inside a
+clickable tile does not swallow the tile's tap; set `width`/`flex_grow` to shape it like
+any other child. A canvas with no committed list draws nothing.
+
+## 8. The Lua API
+
+Every entry - the top level of `main.lua`, each handler, each timer callback - runs as
+its own coroutine. Async calls yield and come back on the main thread, returning `value`
+or `nil, err`; synchronous errors raise Lua errors, which count toward the error limit.
+An async call is legal at the top level of `main.lua` and inside any function the runtime
+calls, and nowhere else: not in a metamethod, a table iterator, a sort comparator, the
+top level of a `require`d module, or a coroutine the plugin creates itself
+(`src/plugin/lua_runtime.cpp#await_async`).
+
+### helix.log (`src/plugin/lua_bind_core.cpp`)
+
+| Call | Returns | Notes |
+|---|---|---|
+| `helix.log.debug(msg)` | | also `info`, `warn`, `error` |
+| `print(...)` | | the sandbox's `print` logs at info with the plugin tag, one line capped at 4096 bytes |
+
+### helix.subject (`src/plugin/lua_bind_ui.cpp`)
+
+| Call | Returns | Notes |
+|---|---|---|
+| `helix.subject.int(name[, init])` | handle | `name` is 1-48 chars of `[a-z0-9_-]`; registered as `<id>__<name>`; at most 128 subjects per plugin |
+| `helix.subject.string(name[, init])` | handle | strings are at most 1023 bytes |
+| `s:get()` | number or string | |
+| `s:set(v)` | | int range is int32; a string over 1023 bytes is an error |
+| `s:observe(fn)` | | `fn(value)` on each change, not for the current value; observers and printer watches share a quota of 256 per plugin |
+
+Subjects are the plugin's whole output: XML binds to them, Lua sets them.
+
+### helix.ui (`src/plugin/lua_bind_ui.cpp`)
+
+| Call | Returns | Notes |
+|---|---|---|
+| `helix.ui.on(name, fn)` | | registers the handler a `plugin_event` or an `action` setting row fires; `name` is 1-48 chars of `[a-z0-9_-]`; `fn(arg)` receives the `user_data` argument string or `nil` |
+| `helix.ui.toast(msg[, severity])` | | `severity` is `"info"` (default), `"success"`, `"warning"` or `"error"` |
+| `helix.ui.confirm(title, msg[, opts])` | | `opts.severity` (`"info"`, `"warning"`, `"error"`), `opts.confirm_text` (default `"OK"`), `opts.on_confirm`, `opts.on_cancel`; a dismissed dialog runs `on_cancel` too; at most one open dialog per plugin; not during `on_unload` |
+| `helix.ui.overlay(component[, attrs])` | handle | opens one of the plugin's own components full-screen; a component the plugin already has open is a no-op returning the same handle (the showing overlay keeps its attrs and `on_close`); `attrs` is a table of string attributes passed to the component plus an optional `on_close` function; `handle.close()` closes it; the plugin unloading closes every open overlay; not during `on_unload` |
+
+### helix.widget (`src/plugin/lua_bind_widget.cpp`)
+
+`helix.widget(id, hooks)` registers hooks for one declared widget; `id` is the short name
+after `<id>__`, and the widget must be in the manifest's `widgets` array. Hooks, all
+optional:
+
+| Hook | Called with |
+|---|---|
+| `on_attach()` | the tile's tree enters the home panel |
+| `on_detach()` | the tile's tree leaves it |
+| `on_size(cols, rows, w, h)` | `cols`/`rows` in cells (a `half_cells` tile can get `1.5`), `w`/`h` in pixels |
+| `on_activate()` / `on_deactivate()` | the page holding the tile is shown / hidden |
+
+### helix.canvas (`src/plugin/lua_bind_canvas.cpp`)
+
+`helix.canvas(name)` returns a handle for one drawing surface. `name` is the short name
+after `<id>__` (like a subject name) and must match a `plugin_canvas` element's `name=` in
+the plugin's XML (§7). One canvas name is one drawing: every live `plugin_canvas` with
+that name shows the same committed list, so give a tile canvas and an overlay canvas
+different names. Calling `helix.canvas("x")` again returns a handle onto the same canvas.
+A plugin holds at most 8 canvases; an empty name is an error.
+
+Drawing is staged, then published:
+
+- The draw methods append to a list being built. `c:commit()` publishes that list to every
+  live widget with the name and starts a new empty list; committing an empty list blanks
+  the canvas. `c:clear()` discards the list being built without publishing.
+- Coordinates are content-box pixels with the origin at the widget's top-left corner:
+  finite numbers within +-16384. Stroke widths and `border_width` are 0 to
+  64. Angles are degrees.
+- Colors are the XML color tokens without the `#` (`"primary"`, `"text_muted"`, ...); an
+  unknown color token is an error. Fonts are base tokens without the `font_` prefix
+  (`"body"`, `"heading"`, ...); the base-token rule in §7 applies and is enforced by the
+  same check.
+- Every options table accepts only the keys listed for its call; an unknown key is an
+  error. Omitted options use the defaults in the table.
+- Each staged primitive charges the plugin's memory cap for the exact bytes it adds
+  (`include/plugin_canvas.h#DisplayList/bytes`). A call that would cross the cap raises
+  "list would exceed the plugin memory cap" and adds nothing. `commit()` moves the charge
+  onto the published list and releases the bytes of the list it replaces; `clear()`
+  releases the pending charge.
+
+| Call | Options | Defaults |
+|---|---|---|
+| `c:line(x1, y1, x2, y2[, opts])` | `color`, `width`, `opa` | `"text"`, 1, 100 |
+| `c:polyline(points[, opts])` | `color`, `width`, `opa`, `fill`, `fill_opa`, `baseline` | `"text"`, 1, 100, -, 100, - |
+| `c:rect(x, y, w, h[, opts])` | `fill`, `border`, `border_width`, `radius`, `opa` | -, -, 1, 0, 100 |
+| `c:circle(cx, cy, r[, opts])` | `fill`, `border`, `border_width`, `opa` | -, -, 1, 100 |
+| `c:arc(cx, cy, r, a1, a2[, opts])` | `color`, `width`, `opa` | `"text"`, 1, 100 |
+| `c:text(x, y, str[, opts])` | `font`, `color` | `"body"`, `"text"` |
+
+`opa` is the primitive's alpha as a percent, 0 to 100 (default 100, fully opaque); it
+covers a stroke, a fill and a border alike.
+
+`polyline` fills the area between the line and `baseline` (a y coordinate, drawn with
+`fill` at `fill_opa` percent) as one continuous shape: the fill's edge follows the line
+instead of stepping at the samples. `fill` and `baseline` are one option in practice and
+neither is accepted alone. The fill's triangles are derived at draw time from the
+polyline's own points, so it adds no units to the cap.
+
+`points` is one flat array `{x1, y1, x2, y2, ...}`: an even-length array of at least two
+points. A polyline counts each of its points toward the list's 4096-unit cap (§10); every
+other primitive counts one. `rect` and `circle` need `fill` or `border` (either alone is
+enough), and `radius` rounds a rect's corners. `str` is at most 256 bytes.
+
+`c:size()` returns the content size as two values `w, h`, both `0` before the widget is
+laid out. `c:on_size(fn)` registers `fn(w, h)` for each size the handler has not been
+told: once after first layout and again on every real resize, coalesced when resizes
+arrive faster than the main loop drains them. `c:on_size(nil)` removes the handler.
+Rebuild the drawing for the new size inside the handler.
+
+A commit publishes a retained list: the widget replays it in its own draw event, so Lua
+never runs during rendering, and tokens resolve at draw time, so a theme switch is just
+the next repaint. Rebuild the whole list for a new state; a list cannot be patched in
+place.
+
+### helix.printer (`src/plugin/lua_bind_printer.cpp`)
+
+| Call | Returns | Notes |
+|---|---|---|
+| `helix.printer.get(name)` | value or `nil` | `nil` before the app subject exists; an unknown name is an error |
+| `helix.printer.watch(name, fn)` | | `fn(value)` on each change, not for the current value; a watch lives until the plugin unloads, there is no unwatch |
+
+Fields (`src/plugin/lua_bind_printer.cpp#printer_fields`):
+
+| Name | Type |
+|---|---|
+| `connected` | boolean |
+| `print_state` | string |
+| `progress` | integer (percent) |
+| `filename` | string |
+| `extruder_temp`, `extruder_target` | degrees C |
+| `bed_temp`, `bed_target` | degrees C |
+| `chamber_temp`, `chamber_target` | degrees C |
+
+The table is the contract: these Lua names stay stable while the subjects behind them can
+change. No permission is needed for either call.
+
+### helix.moonraker and helix.gcode (`src/plugin/lua_bind_moonraker.cpp`)
+
+| Call | Permission | Returns | Notes |
+|---|---|---|---|
+| `helix.moonraker.query(objects)` | none | table or `nil, err` | `objects` maps a status object name to `true` (every field) or a list of field names |
+| `helix.moonraker.call(method[, params])` | none for the seven read-only methods below, else `moonraker_write` | value or `nil, err` | |
+| `helix.moonraker.upload(root, path, content)` | `moonraker_write` | `true` or `nil, err` | writes a file through Moonraker; `root` is `"gcodes"` or `"config"` |
+| `helix.moonraker.download(root, path)` | `moonraker_write` | string or `nil, err` | `root` is `"gcodes"` or `"config"`; a body over the memory cap comes back as an error, not a fault |
+| `helix.moonraker.on_agent_event(event, fn)` | none | | `fn(agent, data)` when Moonraker posts that agent event; the channel to a companion process on the printer (a slicer-side calibration wizard, an OrcaSlicer plugin); at most 16 handlers per plugin |
+| `helix.moonraker.subscribe(objects, fn)` | none | handle | live status, see below |
+| `helix.gcode(script)` | `gcode` | `true` or `nil, err` | runs one G-code script |
+
+Read-only methods callable through `helix.moonraker.call` without any permission
+(`src/plugin/plugin_permissions.cpp#is_readonly_moonraker_method`):
+`printer.objects.query`, `printer.objects.list`, `server.info`, `server.files.list`,
+`server.files.metadata`, `server.temperature_store`, `machine.system_info`.
+
+`subscribe` mirrors Klipper's status subscription: `objects` maps an object name to
+`true` or a field-name list, and `fn(status)` receives a table `{[object] = {field = value}}`.
+The first delivery carries the queried current values; later ones carry each change, so
+the tile always shows what Klipper reports, including changes made elsewhere. The
+returned handle's `cancel()` stops it. Limits, each raising an error that names it: at
+most 8 subscriptions per plugin totalling 16 objects, 32 fields per object, object names
+at most 64 bytes of printable ASCII.
+
+### helix.http (`src/plugin/lua_bind_io.cpp`)
+
+| Call | Permission | Returns |
+|---|---|---|
+| `helix.http.get(url[, opts])` | `http` | `{status = code, body = text}` or `nil, err` |
+| `helix.http.post(url[, opts])` | `http` | same |
+
+`opts` is a table: `body` (string), `headers` (table of strings), `timeout_ms` (default
+10000, clamped to 1-60000). Only `http://` and `https://` URLs. At most 2 requests in
+flight per plugin. Requests do not follow redirects and refuse the printer's own host
+and local interface addresses, which carry the control the `gcode` and `moonraker_write`
+permissions gate (`include/plugin_backend.h#plan_http_target`). A response over the
+memory cap comes back as an error.
+
+### helix.storage (`src/plugin/lua_bind_io.cpp`)
+
+| Call | Permission | Returns | Notes |
+|---|---|---|---|
+| `helix.storage.get(key)` | `storage` | value or `nil` | one JSON object in `plugin-data/<id>.json` beside the app settings; invalid JSON starts empty |
+| `helix.storage.set(key, value)` | `storage` | | `value` of `nil` erases the key; the whole store is capped at 256 KB. Changes reach disk about 0.5 s later, one write per burst, and on unload or shutdown; a SIGTERM (supervisor kill) inside that 0.5 s loses them |
+
+### helix.settings (`src/plugin/lua_bind_io.cpp`)
+
+| Call | Returns | Notes |
+|---|---|---|
+| `helix.settings.get(key)` | value | the key must be declared in the manifest; returns the stored value if it fits the declaration, else the default |
+| `helix.settings.set(key, value)` | | writes one of the plugin's own declared keys through the same validation, persistence and `on_change` path as the generated settings screen; undeclared keys, `action`/`info` rows and rejected values raise |
+| `helix.settings.on_change(key, fn)` | | `fn(value)` after each accepted change, from either path |
+
+### helix.i18n (`src/plugin/lua_bind_core.cpp`)
+
+| Call | Returns | Notes |
+|---|---|---|
+| `helix.i18n.t(s)` | string | resolves the English source through the plugin's `i18n/` pack, then the app catalog, then returns `s` unchanged |
+| `helix.i18n.locale()` | string | the active language code (`"en"`, `"de"`, ...) |
+| `helix.i18n.on_change(fn)` | | `fn(code)` after a language change, once the formatting tables are updated; several handlers allowed |
+
+### helix.timer, helix.sleep, helix.json (`src/plugin/lua_bind_core.cpp`)
+
+| Call | Returns | Notes |
+|---|---|---|
+| `helix.timer.after(ms, fn)` | handle | one shot; `handle.cancel()` |
+| `helix.timer.every(ms, fn)` | handle | repeating; `handle.cancel()` |
+| `helix.sleep(ms)` | | async; yields the entry and resumes after the delay |
+
+Intervals are 1 ms to 24 h; a plugin holds at most 64 live timers.
+
+| Call | Returns | Notes |
+|---|---|---|
+| `helix.json.encode(value)` | string | tables deeper than 32, cycles, and non-string object keys are errors |
+| `helix.json.decode(s)` | value or `nil, err` | invalid JSON, or nesting deeper than 64, returns `nil` plus an error string |
+
+### The sandbox
+
+Libraries: `base`, `string`, `table`, `math`, `utf8`, `coroutine`. There is no `io`, `os`,
+`package` or `debug`. `load` and `require` accept text chunks only; `dofile`, `loadfile`
+and `string.dump` are nil; `collectgarbage` accepts only `count`, `collect` and `step`
+(`src/plugin/lua_runtime.cpp#install_sandbox`). `require("name")` loads
+`<plugin>/name.lua` or `<plugin>/lib/name.lua`, with dotted names mapping to folders,
+rejects `..` and absolute paths, and caches the result
+(`src/plugin/lua_runtime.cpp#lua_require`).
+
+Define a global `on_unload` function to run once before the plugin closes, on reload,
+disable, removal and shutdown. A faulted plugin's `on_unload` does not run, so never keep
+state there that a fault would lose. It may not open overlays or confirm dialogs.
+
+## 9. Permissions and consent
+
+Four permissions (`src/plugin/plugin_permissions.cpp`):
+
+| Permission | Unlocks |
+|---|---|
+| `gcode` | `helix.gcode` |
+| `moonraker_write` | `helix.moonraker.call` beyond the read-only methods, `upload`, `download` |
+| `http` | `helix.http.get`, `helix.http.post` |
+| `storage` | `helix.storage.get`, `helix.storage.set` |
+
+Everything else - subjects, the UI calls, `helix.printer`, `helix.moonraker.query`,
+`subscribe`, `on_agent_event`, timers, settings - needs no permission. A call without its
+permission raises a Lua error naming it.
+
+Enabling a plugin shows what the user is approving, in the consent dialog's own words
+(`src/plugin/plugin_consent.cpp#permission_line`; rewording these is a product change):
+
+- `gcode`: "Send any G-code command. This is full control of the printer: every macro,
+  including ones that run shell commands, is reachable."
+- `moonraker_write`: "Change printer settings through Moonraker, including uploading,
+  rewriting and deleting files in the printer's config folder."
+- `http`: "Connect to servers on your network and the internet."
+- `storage`: "Keep its own data on this screen (up to 256 KB)."
+
+A plugin with no permissions reads "This plugin asks for no special permissions." An
+update that asks for a permission the user has not granted parks the plugin at *needs
+approval* instead of loading; enabling it again approves only the new lines.
+
+## 10. Limits and faults
+
+| Limit | Value | Source |
+|---|---|---|
+| Time per Lua entry | 50 ms of the main thread's CPU time, so a busy machine cannot trip it, or 1 s in all, which bounds an entry stalled off-CPU; once tripped, no depth of `pcall` holds the entry open | `include/lua_runtime.h#LuaRuntime/Limits`, `src/plugin/lua_runtime.cpp#budget_hook` |
+| Memory per plugin | the manifest's `memory_mb` (1-64, default 2) | `src/plugin/plugin_host.cpp#load` |
+| Memory, all plugins | min(RAM / 16, 64 MB); a plugin that does not fit stays *over memory budget* | `src/plugin/plugin_host.cpp#plugin_memory_budget` |
+| Errors | the third within 60 s faults the plugin | `src/plugin/lua_runtime.cpp#report_error` |
+| Async results | a body that would cross the memory cap arrives as an error, not a fault | `include/lua_bindings.h#push_rpc_capped_body` |
+| Canvases per plugin | 8 | `src/plugin/lua_bind_canvas.cpp` |
+| Canvas list units | 4096 per list; a polyline counts each point, its area fill none | `include/plugin_canvas.h#kMaxCanvasUnits` |
+| Canvas tokens | 32 distinct color and font tokens per list | `include/plugin_canvas.h#kMaxCanvasTokens` |
+| Canvas coordinates | finite, within +-16384; stroke and border widths 0 to 64 | `include/plugin_canvas.h#kMaxCanvasCoord` |
+| Canvas opa | 0 to 100 percent on line/polyline/arc/rect/circle, and fill_opa on polyline | `src/plugin/lua_bind_canvas.cpp` |
+| Canvas text | at most 256 bytes per string | `src/plugin/lua_bind_canvas.cpp` |
+| Canvas list bytes | charged against the plugin memory cap as staged | `include/plugin_canvas.h#DisplayList/bytes` |
+
+A fault (time budget, memory, error count, or `main.lua` failing to load) unloads the
+plugin, marks it *faulted* with the reason in Settings > Plugins, and shows a "Plugin
+disabled" toast. The app keeps running. Turn the plugin off and on in Settings > Plugins
+to reload it.
+
+## 11. Debugging
+
+Run with `-vv`: every plugin line is tagged `[plugin <id>]`, including Lua errors with a
+traceback and the reason a load or a fault happened. `helix.log.debug` shows at `-vv`
+(`docs/devel/LOGGING.md`).
+
+- Settings > Plugins shows each plugin's status and reason: *loaded*, *disabled*,
+  *needs approval*, *invalid* (manifest or XML rejected, with the reason), *incompatible*,
+  *over memory budget*, *faulted*.
+- Read a subject exactly: with the app's remote control running,
+  `helix-screen ctl text <id>__<subject>` (`docs/devel/HELIXCTL.md`; pin the socket as
+  that doc says when several instances run).
+- `HELIX_MOCK_PLUGINS_DIR=<dir>` makes a `--test` run serve that directory as the
+  printer's `config/helixscreen/plugins/` folder, exercising install and sync end to end
+  without a printer (`docs/devel/MOCK_ENVIRONMENT_VARIABLES.md`).
+- The `--test` mock printer defines the LED effects `breathing`, `fire_comet`, `rainbow`
+  and `static_white`, so led-effects works against it out of the box.
+
+## 12. Worked examples
+
+**temp-spark** (`examples/plugins/temp-spark`) - no permissions, and the canvas worked
+example: subjects carry the tile's text, `helix.canvas` carries the sparkline, and the
+sample timer drives both:
+
+```lua
+local value_text = helix.subject.string("value", "--")
+...
+timer = helix.timer.every(helix.settings.get("interval_s") * 1000, tick)
 ```
 
-### Initialization Order
+Live readings come from `helix.printer.watch` with no permission, and the window is
+seeded from Moonraker's own history through the read-only
+`server.temperature_store`:
 
-Plugins are loaded in dependency order using topological sort:
-
-1. If plugin A depends on plugin B, B is loaded first
-2. Circular dependencies cause both plugins to fail loading
-3. Missing dependencies cause the dependent plugin to fail
-
-### Cleanup Guarantees
-
-When `helix_plugin_deinit()` is called:
-
-1. All UI widgets injected by your plugin have already been removed
-2. Event subscriptions are automatically unsubscribed
-3. Registered services are automatically unregistered
-4. Moonraker subscriptions are automatically cleaned up
-
-You should still clean up:
-- Any allocated memory you own
-- File handles, network connections
-- Background threads you started
-
----
-
-## PluginAPI Reference
-
-The `PluginAPI` class is your plugin's interface to HelixScreen. A pointer is passed to `helix_plugin_init()` and remains valid until `helix_plugin_deinit()` is called.
-
-### Core Services
-
-#### moonraker_api()
-
-```cpp
-MoonrakerAPI* moonraker_api() const;
+```lua
+local ok, e = pcall(helix.printer.watch, h.temp, function(v) ... end)
+local store, err = helix.moonraker.call("server.temperature_store", {include_monitors = false})
 ```
 
-Returns the high-level Moonraker API for common printer operations.
+The sparkline and the overlay plot are one `draw()` that rebuilds a canvas's whole
+list from the window and commits it, quoted verbatim from `main.lua`; `render()` calls
+it for the tile's `spark` canvas and for the overlay's `graph` with the detail flag set
+(gridlines, area fill, dot, dashed target), and `on_size` re-renders on every resize:
 
-**Nullability:** May be `nullptr` if Moonraker is not connected. Always check before use.
+```lua
+local function draw(c, detail)
+    local w, h = c:size()
+    if w > 4 and h > 4 and #samples >= 2 then
+        local lo, hi = stats()
+        lo, hi = range(lo, hi, detail)
+        -- The newest dot needs its radius clear of the right edge, so the line
+        -- stops a little short of it instead of touching the canvas border.
+        local xmax = w - 1 - (detail and 4 or 3)
+        local pts = {}
+        for i, t in ipairs(samples) do
+            pts[#pts + 1] = (i - 1) * xmax / (#samples - 1)
+            pts[#pts + 1] = (h - 1) * (1 - (t - lo) / (hi - lo))
+        end
 
-```cpp
-if (auto* api = g_api->moonraker_api()) {
-    // execute_gcode(gcode, on_success, on_error, timeout_ms=0, silent=false, source)
-    api->execute_gcode(
-        "G28",                                       // Home all axes
-        []() { /* on success */ },
-        [](const MoonrakerError& e) { /* on error */ });
-}
+        local labels = {}
+        if detail then
+            -- Gridlines at a whole-degree step (1, 2, 5, 10, 25, 50) labelled
+            -- at the left edge; the built-in graph picks its step the same way.
+            local step = 50
+            for _, s in ipairs({1, 2, 5, 10, 25, 50}) do
+                if s >= (hi - lo) / 4 then
+                    step = s
+                    break
+                end
+            end
+            local v = math.ceil(lo / step) * step
+            while v <= hi do
+                local y = (h - 1) * (1 - (v - lo) / (hi - lo))
+                c:line(0, y, w - 1, y, {color = "border"})
+                if y >= 14 then
+                    -- math.ceil yields a float, so the label goes through %d
+                    -- to read "100°" instead of "100.0°".
+                    c:text(2, y - 13, ("%d\u{00B0}"):format(v), {font = "xs", color = "text_muted"})
+                    labels[#labels + 1] = y
+                end
+                v = v + step
+            end
+        end
+
+        -- One polyline carries the stroke and the area fill down to the plot's
+        -- floor; the fill's edge follows the line instead of stepping at the
+        -- samples.
+        c:polyline(pts, {
+            color = "primary",
+            width = 2,
+            fill = "primary",
+            fill_opa = FILL_OPA,
+            baseline = h - 1,
+        })
+
+        -- A dot marks the newest sample.
+        c:circle(pts[#pts - 1], pts[#pts], detail and 3 or 2, {fill = "primary"})
+
+        if detail and target_on() then
+            -- Dashes 6 on, 4 off, like the built-in graph's target trace.
+            local y = (h - 1) * (1 - (target_now - lo) / (hi - lo))
+            local x = 0
+            while x < w - 1 do
+                c:line(x, y, math.min(x + 6, w - 1), y, {color = "text_muted"})
+                x = x + 10
+            end
+            -- "Target" sits on the left, above the dashed line, in the first
+            -- band clear of the degree labels; the newest data rides the right
+            -- edge, so the label never meets the dot.
+            for _, ty in ipairs({y - 15, y + 4, y - 29, y + 18}) do
+                local free = ty >= 0 and ty + 13 <= h
+                for _, gy in ipairs(labels) do
+                    if ty < gy and ty + 13 > gy - 13 then
+                        free = false
+                    end
+                end
+                if free then
+                    c:text(2, ty, "Target", {font = "xs", color = "text_muted"})
+                    break
+                end
+            end
+        end
+    end
+    c:commit()
+end
 ```
 
-#### moonraker_client()
-
-```cpp
-helix::MoonrakerClient* moonraker_client() const;
+```lua
+spark:on_size(render)
+graph:on_size(render)
 ```
 
-Returns the low-level WebSocket client for raw Moonraker communication.
+The tile's tap is one `event_cb` in XML and one handler in Lua:
 
-**Nullability:** May be `nullptr` if not connected.
-
-#### printer_state()
-
-```cpp
-PrinterState& printer_state() const;
+```lua
+helix.ui.on("open", function() helix.ui.overlay("temp-spark__detail", {title = selected().label}) end)
 ```
 
-Returns the reactive printer state object. Use this to read current values or access LVGL subjects for binding.
+**led-effects** (`examples/plugins/led-effects`) - the `gcode` permission. The user-typed
+effect name is validated before it reaches a command line: anchored character class,
+length bound tied to subscribe's 64-byte object-name cap, refuse and toast otherwise:
 
-**Nullability:** Always valid (never null).
-
-```cpp
-PrinterState& state = g_api->printer_state();
-// Temperatures are exposed as LVGL subjects, not plain getters. The no-lifetime
-// overload is for read-only reads (temps are stored in tenths of a degree).
-lv_subject_t* temp = state.get_extruder_temp_subject("extruder");
-int nozzle_deci = lv_subject_get_int(temp);   // e.g. 2105 == 210.5 °C
+```lua
+if type(name) == "string" and #name <= 64 - #"led_effect " and name:match("^[%w_]+$") then
 ```
 
-#### config()
+The toggle sends G-code and lets the live subscription report the result, so the tile
+never guesses its own state:
 
-```cpp
-Config* config() const;
+```lua
+local ok, err = helix.gcode(line)
+sub = helix.moonraker.subscribe({[object] = {"enabled"}}, function(status) ... end)
 ```
 
-Returns the configuration manager for reading/writing settings.
+The plugin's id contains a hyphen, so its XML uses `bind_flag_if_eq` instead of `cond`,
+and `on_size` adapts the tile to its width in whole cells:
 
-**Nullability:** May be `nullptr` during early initialization.
-
-#### plugin_id()
-
-```cpp
-const std::string& plugin_id() const;
+```lua
+helix.widget("tile", { on_size = function(cols) wide:set(cols >= 2 and 1 or 0) end })
 ```
 
-Returns this plugin's ID (as declared in manifest.json).
+The maintainer's view of the same system - the sync pipeline, the sandbox internals, the
+subscription union - is `docs/devel/architecture/12-system-services.md`.
 
----
+## 13. Translations
 
-### Event System
+A plugin's user-facing strings are English by default and translate through the
+same machinery the app uses. Ship an optional `i18n/` folder beside `main.lua`
+with one or more LVGL translation packs:
 
-#### on_event()
-
-```cpp
-EventSubscriptionId on_event(const std::string& event_name, EventCallback callback);
-```
-
-Subscribe to an application event. Callbacks are invoked on the main thread.
-
-**Parameters:**
-- `event_name`: One of the `events::*` constants
-- `callback`: Function to call when event occurs
-
-**Returns:** Subscription ID for later unsubscription.
-
-```cpp
-auto sub_id = api->on_event(events::PRINT_STARTED, [](const EventData& event) {
-    std::string filename = event.payload.value("filename", "unknown");
-    g_api->log_info("Print started: " + filename);
-});
-```
-
-#### off_event()
-
-```cpp
-bool off_event(EventSubscriptionId id);
-```
-
-Unsubscribe from an event. Returns `true` if subscription was found and removed.
-
-**Note:** Subscriptions are automatically cleaned up when your plugin unloads.
-
-### Event Reference Table
-
-| Event Name | Payload Fields | Description |
-|------------|----------------|-------------|
-| `events::PRINTER_CONNECTED` | (none) | Moonraker WebSocket connected |
-| `events::PRINTER_DISCONNECTED` | (none) | Moonraker WebSocket disconnected |
-| `events::PRINT_STARTED` | `filename` | Print job started |
-| `events::PRINT_PAUSED` | (none) | Print job paused |
-| `events::PRINT_RESUMED` | (none) | Print job resumed |
-| `events::PRINT_COMPLETED` | (none) | Print job completed successfully |
-| `events::PRINT_CANCELLED` | (none) | Print job cancelled by user |
-| `events::PRINT_ERROR` | `error` | Print job failed |
-| `events::TEMPERATURE_UPDATED` | `heater`, `current`, `target` | Heater temperature changed |
-| `events::FILAMENT_LOADED` | `slot`, `material`, `color` | Filament loaded into extruder |
-| `events::FILAMENT_UNLOADED` | `slot` | Filament unloaded |
-| `events::KLIPPER_STATE_CHANGED` | `state` | Klipper state (ready/shutdown/error/startup) |
-| `events::THEME_CHANGED` | `theme` | Light/dark theme changed |
-| `events::NAVIGATION_CHANGED` | `panel` | User navigated to different panel |
-
----
-
-### Moonraker Subscriptions
-
-#### subscribe_moonraker()
-
-```cpp
-MoonrakerSubscriptionId subscribe_moonraker(
-    const std::vector<std::string>& objects,
-    MoonrakerCallback callback
-);
-```
-
-Subscribe to Klipper object updates. Unlike direct MoonrakerClient subscriptions, this method:
-
-- Queues subscriptions if Moonraker isn't connected yet
-- Automatically applies them when connection is established
-- Cleans up automatically when plugin unloads
-
-**Parameters:**
-- `objects`: Klipper objects to subscribe to (e.g., `{"extruder", "heater_bed"}`)
-- `callback`: Function receiving JSON updates
-
-**Returns:** Subscription ID (use with `unsubscribe_moonraker()`).
-
-```cpp
-api->subscribe_moonraker({"extruder", "heater_bed"}, [](const json& update) {
-    if (update.contains("extruder")) {
-        float temp = update["extruder"].value("temperature", 0.0f);
-        g_api->log_debug("Extruder temp: " + std::to_string(temp));
-    }
-});
-```
-
-> **WARNING:** The callback runs on a background thread. See [Threading Model](#threading-model) before updating UI.
-
-#### unsubscribe_moonraker()
-
-```cpp
-bool unsubscribe_moonraker(MoonrakerSubscriptionId id);
-```
-
-Remove a Moonraker subscription. Returns `true` if found and removed.
-
----
-
-### Subject Registration
-
-#### register_subject()
-
-```cpp
-void register_subject(const std::string& name, lv_subject_t* subject);
-```
-
-Register an LVGL subject for reactive UI binding. Registered subjects can be referenced in XML layouts using `bind_text`, `bind_flag_if_eq`, etc.
-
-**Parameters:**
-- `name`: Subject identifier (convention: `"plugin_id.subject_name"`)
-- `subject`: Pointer to your `lv_subject_t` (you own the memory)
-
-```cpp
-static lv_subject_t s_status_subject;
-
-bool helix_plugin_init(PluginAPI* api, const char*) {
-    lv_subject_init_pointer(&s_status_subject, "Idle");
-    api->register_subject("my-plugin.status", &s_status_subject);
-    return true;
-}
-```
-
-Then in XML:
-```xml
-<text_body bind_text="my-plugin.status"/>
-```
-
-#### unregister_subject()
-
-```cpp
-bool unregister_subject(const std::string& name);
-```
-
-Unregister a previously registered subject.
-
----
-
-### Service Registration
-
-The service registry enables plugin-to-plugin communication.
-
-#### register_service()
-
-```cpp
-void register_service(const std::string& name, void* service);
-```
-
-Register a service for other plugins to use.
-
-**Parameters:**
-- `name`: Service identifier (convention: `"plugin_id.service_name"`)
-- `service`: Pointer to your service instance (you own the memory)
-
-```cpp
-class LedController {
-public:
-    void set_color(uint32_t rgb);
-    void set_brightness(float percent);
-};
-
-static LedController s_controller;
-
-bool helix_plugin_init(PluginAPI* api, const char*) {
-    api->register_service("led-effects.controller", &s_controller);
-    return true;
-}
-```
-
-#### unregister_service()
-
-```cpp
-bool unregister_service(const std::string& name);
-```
-
-Remove a registered service.
-
-#### get_service()
-
-```cpp
-void* get_service(const std::string& name) const;
-
-// Template version for convenience
-template<typename T>
-T* get_service(const std::string& name) const;
-```
-
-Retrieve a service registered by another plugin.
-
-```cpp
-auto* led = api->get_service<LedController>("led-effects.controller");
-if (led) {
-    led->set_color(0xFF0000);  // Red
-}
-```
-
----
-
-### UI Injection
-
-#### inject_widget()
-
-```cpp
-bool inject_widget(
-    const std::string& point_id,
-    const std::string& xml_component,
-    const WidgetCallbacks& callbacks = {}
-);
-```
-
-Inject an XML component into a designated injection point.
-
-**Parameters:**
-- `point_id`: Injection point identifier (see table below)
-- `xml_component`: Name of registered XML component
-- `callbacks`: Optional lifecycle callbacks
-
-**Returns:** `true` if injection succeeded.
-
-```cpp
-api->inject_widget("print_status_extras", "my_status_widget", {
-    .on_create = [](lv_obj_t* widget) {
-        g_api->log_debug("Widget created!");
-    },
-    .on_destroy = [](lv_obj_t* widget) {
-        g_api->log_debug("Widget being destroyed");
-    }
-});
-```
-
-#### register_xml_component()
-
-```cpp
-bool register_xml_component(const std::string& plugin_dir, const std::string& filename);
-```
-
-Register an XML component from your plugin directory.
-
-**Parameters:**
-- `plugin_dir`: The directory path passed to `helix_plugin_init()`
-- `filename`: XML file name (e.g., `"my_widget.xml"`)
-
-```cpp
-bool helix_plugin_init(PluginAPI* api, const char* plugin_dir) {
-    if (!api->register_xml_component(plugin_dir, "status_widget.xml")) {
-        api->log_error("Failed to register status_widget.xml");
-        return false;
-    }
-
-    api->inject_widget("print_status_extras", "status_widget");
-    return true;
-}
-```
-
-#### has_injection_point()
-
-```cpp
-bool has_injection_point(const std::string& point_id) const;
-```
-
-Check if an injection point is currently available.
-
-**Note:** Injection points are registered by panels when they load. If a panel hasn't been shown yet, its injection points won't be available.
-
----
-
-### Logging
-
-All logging methods are thread-safe and automatically prefix messages with your plugin ID.
-
-```cpp
-void log_info(const std::string& message) const;   // Visible with -v
-void log_warn(const std::string& message) const;   // Always visible
-void log_error(const std::string& message) const;  // Always visible
-void log_debug(const std::string& message) const;  // Visible with -vv
-```
-
-**Example output:**
-```
-[plugin:my-plugin] Initializing...
-```
-
----
-
-## UI Development
-
-### XML Component Registration
-
-Plugins can define UI components using HelixScreen's declarative XML system.
-
-**my_widget.xml:**
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
-<component>
-  <view extends="lv_obj" name="my_status_widget"
-        style_width="content" style_height="content"
-        style_pad_all="#space_sm" style_radius="8"
-        style_bg_color="#card_bg" style_bg_opa="cover">
-
-    <lv_obj style_flex_flow="row" style_flex_gap_row="#space_xs">
-      <icon name="icon" codepoint="0xF0425" style_text_color="#success_color"/>
-      <text_body name="status" bind_text="my-plugin.status"/>
-    </lv_obj>
-
-  </view>
-</component>
+<translations languages="de">
+  <translation tag="No events yet" de="Noch keine Ereignisse"/>
+</translations>
 ```
 
-Register and inject in your plugin:
+The host registers every `i18n/*.xml` when the plugin loads. Packs cannot be
+unregistered (LVGL keeps them until the app exits), so a reload reuses what is
+already loaded, and two plugins mapping the same English string differently is
+last-registered-wins - keep translations faithful to the source.
+
+English is the identity locale: `lv_tr()` returns the key itself when nothing
+translates it, so an English-only plugin ships no `i18n/` at all, and a pack
+with a missing entry simply falls back. Lookup order is the plugin's pack, then
+the app's own catalog - words the app already says (`Started`, `Paused`,
+`Completed`, `Cancelled`, `Failed`, common settings vocabulary) translate for
+free and **must not be duplicated in a plugin pack**: the pack is consulted
+first, so a duplicate tag does not "also translate" that string, it silently
+overrides the system's translation for the whole UI while the plugin is
+loaded. `scripts/check_plugin_i18n_shadow.py` (run from quality-checks) fails
+on any example or fixture pack entry whose tag exists in
+`translations/<lang>.yml`.
+
+Where strings resolve:
+
+- **manifest.json** `name`, `description`, settings `label`s and widget
+  `name`/`description` translate at render time (the Plugins screen, the
+  generated settings rows, the widget catalog). The file stays English.
+- **XML** static text: add `translation_tag="English text"` to a widget; the
+  engine resolves and hot-reloads it on a language change like any app string.
+- **Lua**: `helix.i18n.t("English text")` resolves through the same table.
+  `helix.i18n.locale()` returns the active code (`"en"`, `"de"`, ...), and
+  `helix.i18n.on_change(fn)` calls `fn(code)` after a language change so
+  subject-carried strings re-render. Anything the plugin sends outward (a
+  notification payload, a toast) follows the screen's language by translating
+  through `t()` at send time.
+
+`print-watcher` is the worked example: its `i18n/de.xml` carries only the
+strings the app catalog does not already say. `ambient-tile` ships one too,
+including a `%d` format specifier its German entry preserves in place.
 
-```cpp
-bool helix_plugin_init(PluginAPI* api, const char* plugin_dir) {
-    // Register the XML component
-    api->register_xml_component(plugin_dir, "my_widget.xml");
 
-    // Inject into home panel
-    api->inject_widget("print_status_extras", "my_status_widget");
-
-    return true;
-}
-```
-
-### Injection Points
-
-| Point ID | Location | Description |
-|----------|----------|-------------|
-| `print_status_extras` | Print Status panel | Extra widgets area in the print status overlay |
-
-**Note:** `print_status_extras` is currently the **only** registered injection point
-(registered in `src/ui/ui_panel_print_status.cpp`). Other points (a home-panel widget area,
-a settings section) are not yet registered — `has_injection_point()` returns `false` for
-them, so `inject_widget()` is a no-op. Always call `has_injection_point()` first, and expect
-more points to be added in future versions.
-
-### Widget Lifecycle Callbacks
-
-```cpp
-struct WidgetCallbacks {
-    std::function<void(lv_obj_t*)> on_create;   // After widget added to container
-    std::function<void(lv_obj_t*)> on_destroy;  // Before widget is deleted
-};
-```
-
-Use these to:
-- Bind subjects to widget elements in `on_create`
-- Clean up observers or custom data in `on_destroy`
-
-### Design Tokens
-
-Always use design tokens from `globals.xml` for consistent theming:
-
-| Category | Wrong | Correct |
-|----------|-------|---------|
-| Colors | `style_bg_color="#E0E0E0"` | `style_bg_color="#card_bg"` |
-| Spacing | `style_pad_all="12"` | `style_pad_all="#space_md"` |
-| Typography | `<lv_label>` | `<text_heading>`, `<text_body>`, `<text_small>` |
-
-See [LVGL9_XML_GUIDE.md](LVGL9_XML_GUIDE.md) for complete XML reference.
-
----
-
-## Threading Model
-
-> **CRITICAL:** Understanding the threading model is essential to avoid crashes and race conditions.
-
-### Thread Overview
-
-| Thread | Purpose | LVGL Safe? |
-|--------|---------|------------|
-| **Main thread** | LVGL rendering, event callbacks | Yes |
-| **Background thread** | Moonraker WebSocket callbacks | **NO** |
-
-### The Golden Rules
-
-1. **Event callbacks run on the main thread** - Safe to update UI
-2. **Moonraker callbacks run on a background thread** - NOT safe for LVGL
-3. **All `lv_*()` functions must be called from the main thread only**
-
-### The helix::ui::queue_update() Pattern
-
-When you receive data on a background thread (e.g., Moonraker callback), use `helix::ui::queue_update()` to defer LVGL updates to the main thread:
-
-```cpp
-#include "ui_update_queue.h"
-
-api->subscribe_moonraker({"extruder"}, [](const json& update) {
-    // This runs on BACKGROUND thread!
-
-    if (update.contains("extruder")) {
-        float temp = update["extruder"].value("temperature", 0.0f);
-
-        // Defer LVGL update to main thread
-        helix::ui::queue_update([temp]() {
-            // This runs on MAIN thread - LVGL safe
-            lv_subject_set_int(&s_temp_subject, static_cast<int>(temp));
-        });
-    }
-});
-```
-
-> **WARNING:** Never call `lv_subject_set_*()`, `lv_label_set_text()`, or any `lv_*()` function directly from a Moonraker callback. This will cause crashes or undefined behavior.
-
-### What NOT to Do
-
-```cpp
-// BAD - Moonraker callback runs on background thread!
-api->subscribe_moonraker({"extruder"}, [](const json& update) {
-    // CRASH: Calling LVGL from background thread
-    lv_label_set_text(my_label, "Updated!");  // DON'T DO THIS
-    lv_subject_set_int(&subject, 42);          // DON'T DO THIS
-});
-
-// GOOD - Defer to main thread
-api->subscribe_moonraker({"extruder"}, [](const json& update) {
-    helix::ui::queue_update([]() {
-        lv_subject_set_int(&subject, 42);  // Safe on main thread
-    });
-});
-```
-
----
-
-## Common Patterns
-
-### Monitor Printer State
-
-```cpp
-static PluginAPI* g_api = nullptr;
-static EventSubscriptionId s_temp_sub = 0;
-
-bool helix_plugin_init(PluginAPI* api, const char*) {
-    g_api = api;
-
-    // Check current temperature immediately (subjects store tenths of a degree)
-    PrinterState& state = api->printer_state();
-    int current_deci = lv_subject_get_int(state.get_extruder_temp_subject("extruder"));
-    api->log_info("Current nozzle temp: " + std::to_string(current_deci / 10.0));
-
-    // Subscribe to temperature changes
-    s_temp_sub = api->on_event(events::TEMPERATURE_UPDATED, [](const EventData& e) {
-        std::string heater = e.payload.value("heater", "");
-        float temp = e.payload.value("current", 0.0f);
-        float target = e.payload.value("target", 0.0f);
-
-        if (heater == "extruder" && temp > 200.0f) {
-            g_api->log_warn("Nozzle is hot!");
-        }
-    });
-
-    return true;
-}
-
-void helix_plugin_deinit() {
-    // Subscriptions are auto-cleaned, but explicit cleanup is good practice
-    if (g_api && s_temp_sub != 0) {
-        g_api->off_event(s_temp_sub);
-    }
-}
-```
-
-### Respond to Print Events
-
-```cpp
-bool helix_plugin_init(PluginAPI* api, const char*) {
-    api->on_event(events::PRINT_STARTED, [](const EventData& e) {
-        std::string file = e.payload.value("filename", "unknown");
-        g_api->log_info("Starting print: " + file);
-
-        // Maybe trigger LED effect, play sound, etc.
-    });
-
-    api->on_event(events::PRINT_COMPLETED, [](const EventData&) {
-        g_api->log_info("Print complete!");
-
-        // Maybe trigger celebration LED pattern
-        if (auto* led = g_api->get_service<LedController>("led-effects.controller")) {
-            led->play_effect("celebration");
-        }
-    });
-
-    api->on_event(events::PRINT_ERROR, [](const EventData& e) {
-        std::string error = e.payload.value("error", "Unknown error");
-        g_api->log_error("Print failed: " + error);
-    });
-
-    return true;
-}
-```
-
-### Inter-Plugin Communication
-
-**Provider plugin (led-effects):**
-```cpp
-class LedEffectsService {
-public:
-    void set_mode(const std::string& mode) { current_mode_ = mode; }
-    void set_color(uint32_t rgb) { color_ = rgb; }
-    std::string get_mode() const { return current_mode_; }
-
-private:
-    std::string current_mode_ = "off";
-    uint32_t color_ = 0xFFFFFF;
-};
-
-static LedEffectsService s_service;
-
-bool helix_plugin_init(PluginAPI* api, const char*) {
-    api->register_service("led-effects.service", &s_service);
-    return true;
-}
-```
-
-**Consumer plugin:**
-```cpp
-bool helix_plugin_init(PluginAPI* api, const char*) {
-    // Check if LED effects plugin is available
-    auto* led = api->get_service<LedEffectsService>("led-effects.service");
-    if (led) {
-        api->log_info("LED Effects available, current mode: " + led->get_mode());
-        led->set_mode("rainbow");
-    } else {
-        api->log_info("LED Effects plugin not installed");
-    }
-
-    return true;
-}
-```
-
----
-
-## Building Plugins
-
-### Compiler Flags
-
-Required flags for plugin compilation:
-
-```makefile
-CXXFLAGS = -std=c++17 -fPIC -O2 -Wall -Wextra
-LDFLAGS = -shared
-```
-
-**Important:**
-- `-fPIC`: Required for position-independent code in shared libraries
-- `-std=c++17`: Minimum C++ standard version
-- `-shared`: Create a shared library
-
-### Complete Makefile Template
-
-```makefile
-# Plugin Makefile Template
-CXX ?= g++
-CXXFLAGS = -std=c++17 -fPIC -O2 -Wall -Wextra
-LDFLAGS = -shared
-
-# HelixScreen include path
-HELIX_ROOT ?= /path/to/helixscreen
-HELIX_INCLUDE = $(HELIX_ROOT)/include
-
-# Plugin settings
-PLUGIN_NAME = my-plugin
-SOURCES = $(wildcard *.cpp)
-OBJECTS = $(SOURCES:.cpp=.o)
-
-# Output library name (platform-specific)
-ifeq ($(shell uname),Darwin)
-    OUTPUT = libhelix_$(PLUGIN_NAME).dylib
-    LDFLAGS += -dynamiclib
-else
-    OUTPUT = libhelix_$(PLUGIN_NAME).so
-endif
-
-# Include paths
-INCLUDES = -I$(HELIX_INCLUDE) -I$(HELIX_ROOT)/lib/lvgl \
-           -I$(HELIX_ROOT)/lib/spdlog/include \
-           -I$(HELIX_ROOT)/lib/libhv/include   # JSON via #include "hv/json.hpp"
-
-# Build targets
-all: $(OUTPUT)
-
-$(OUTPUT): $(OBJECTS)
-	$(CXX) $(LDFLAGS) -o $@ $^
-
-%.o: %.cpp
-	$(CXX) $(CXXFLAGS) $(INCLUDES) -c -o $@ $<
-
-clean:
-	rm -f $(OUTPUT) $(OBJECTS)
-
-install: $(OUTPUT)
-	mkdir -p $(DESTDIR)/plugins/$(PLUGIN_NAME)
-	cp $(OUTPUT) manifest.json $(DESTDIR)/plugins/$(PLUGIN_NAME)/
-	@if [ -d xml ]; then cp -r xml/* $(DESTDIR)/plugins/$(PLUGIN_NAME)/; fi
-
-.PHONY: all clean install
-```
-
-### Cross-Compilation for Raspberry Pi
-
-```makefile
-# Pi cross-compilation
-pi:
-	$(MAKE) CXX=aarch64-linux-gnu-g++ \
-	        CXXFLAGS="$(CXXFLAGS) -march=armv8-a" \
-	        OUTPUT=libhelix_$(PLUGIN_NAME).so
-```
-
-### Cross-Compilation for Adventurer 5M
-
-```makefile
-# AD5M cross-compilation (MIPS architecture)
-ad5m:
-	$(MAKE) CXX=mipsel-linux-gnu-g++ \
-	        CXXFLAGS="$(CXXFLAGS) -march=mips32r2 -mfp32" \
-	        OUTPUT=libhelix_$(PLUGIN_NAME).so
-```
-
----
-
-## Debugging
-
-### Verbosity Flags
-
-**Always use verbosity flags when testing plugins!**
-
-| Flag | Level | Usage |
-|------|-------|-------|
-| (none) | WARN | Never use for debugging |
-| `-v` | INFO | Basic logging |
-| `-vv` | DEBUG | Detailed logging (recommended) |
-| `-vvv` | TRACE | Very verbose |
-
-```bash
-./helix-screen --test -vv
-```
-
-### Common Error Messages
-
-| Error Type | Message | Solution |
-|------------|---------|----------|
-| `MANIFEST_PARSE_ERROR` | "JSON parse error: ..." | Fix JSON syntax in manifest.json |
-| `MANIFEST_MISSING_FIELD` | "Missing required field: id" | Add required fields to manifest |
-| `LIBRARY_NOT_FOUND` | "No .so/.dylib file found" | Build your plugin library |
-| `LOAD_FAILED` | "dlopen error: ..." | Check library dependencies, linking |
-| `SYMBOL_NOT_FOUND` | "helix_plugin_init not found" | Add `extern "C"` to entry points |
-| `INIT_FAILED` | "Plugin init returned false" | Debug your init function |
-| `VERSION_MISMATCH` | "API version mismatch" | Update plugin to current API version |
-| `MISSING_DEPENDENCY` | "Dependency not found: ..." | Install required plugin or remove dep |
-| `DEPENDENCY_CYCLE` | "Plugin involved in dependency cycle" | Fix circular dependencies |
-
-### Testing Without a Printer
-
-Always use `--test` flag when no real printer is connected:
-
-```bash
-./helix-screen --test -vv
-```
-
-This enables mock data for printer state, temperatures, etc.
-
-### Debugging Tips
-
-1. **Add timestamps to logs** for timing issues:
-   ```cpp
-   api->log_debug("[" + std::to_string(time(nullptr)) + "] Event received");
-   ```
-
-2. **Check if services exist** before using:
-   ```cpp
-   if (!api->has_injection_point("print_status_extras")) {
-       api->log_warn("Injection point not available yet");
-   }
-   ```
-
-3. **Validate manifest.json** with a JSON linter before testing
-
-4. **Use on_destroy callbacks** to verify cleanup:
-   ```cpp
-   .on_destroy = [](lv_obj_t*) {
-       g_api->log_debug("Widget cleanup - verify no leaks");
-   }
-   ```
-
----
-
-## Best Practices and Gotchas
-
-### Do
-
-- Store the `PluginAPI*` pointer globally for use in callbacks
-- Use `extern "C"` for all exported functions
-- Check for `nullptr` before using `moonraker_api()`, `moonraker_client()`, `config()`
-- Use `helix::ui::queue_update()` for LVGL updates from background threads
-- Prefix subjects and services with your plugin ID
-- Use design tokens in XML for consistent theming
-- Handle exceptions in callbacks (uncaught exceptions may crash HelixScreen)
-- Clean up resources in `helix_plugin_deinit()`
-
-### Don't
-
-- Call `lv_*()` functions from Moonraker callbacks (use `helix::ui::queue_update()`)
-- Assume injection points are always available
-- Block in event callbacks (keep them fast)
-- Use raw pointers to PluginAPI after `helix_plugin_deinit()`
-- Forget `extern "C"` on entry points (causes `SYMBOL_NOT_FOUND`)
-- Hardcode colors - use design tokens for theme compatibility
-- Create circular dependencies between plugins
-- Assume Moonraker is always connected
-
-### Common Mistakes
-
-**Mistake: Forgetting extern "C"**
-```cpp
-// WRONG - C++ name mangling breaks symbol lookup
-bool helix_plugin_init(PluginAPI* api, const char* dir);
-
-// CORRECT
-extern "C" bool helix_plugin_init(PluginAPI* api, const char* dir);
-```
-
-**Mistake: LVGL from background thread**
-```cpp
-// WRONG - Moonraker callback is background thread
-api->subscribe_moonraker({"extruder"}, [](const json& j) {
-    lv_label_set_text(label, "crash incoming");
-});
-
-// CORRECT
-api->subscribe_moonraker({"extruder"}, [](const json& j) {
-    helix::ui::queue_update([]() {
-        lv_subject_set_string(&subject, "safe update");
-    });
-});
-```
-
-**Mistake: Not checking for nullptr**
-```cpp
-// WRONG - may crash if Moonraker not connected
-api->moonraker_api()->execute_gcode("G28", []() {}, [](const MoonrakerError&) {});
-
-// CORRECT
-if (auto* mrapi = api->moonraker_api()) {
-    mrapi->execute_gcode("G28", []() {}, [](const MoonrakerError&) {});
-}
-```
-
----
-
-## Complete Examples
-
-### Hello World (Minimal)
-
-See [Quick Start](#quick-start) section for the complete minimal example.
-
-### Temperature Widget (UI Injection)
-
-This example creates a custom temperature display widget and injects it into the home panel.
-
-**plugins/temp-widget/manifest.json:**
-```json
-{
-  "id": "temp-widget",
-  "name": "Temperature Widget",
-  "version": "1.0.0",
-  "author": "HelixScreen",
-  "description": "Displays nozzle temperature with custom styling",
-  "ui": {
-    "injection_points": ["print_status_extras"]
-  }
-}
-```
-
-**plugins/temp-widget/temp_display.xml:**
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<component>
-  <view extends="lv_obj" name="temp_display"
-        style_width="160" style_height="80"
-        style_pad_all="#space_md" style_radius="12"
-        style_bg_color="#card_bg" style_bg_opa="cover"
-        style_flex_flow="column" style_flex_main_place="center"
-        style_flex_cross_place="center">
-
-    <text_small style_text_color="#text_muted">Nozzle</text_small>
-
-    <lv_obj style_flex_flow="row" style_flex_cross_place="center"
-            style_flex_gap_column="#space_xs">
-      <icon codepoint="0xF18B6" style_text_color="#warning_color"/>
-      <text_heading name="temp_value" bind_text="temp-widget.nozzle_temp"/>
-      <text_body style_text_color="#text_muted">C</text_body>
-    </lv_obj>
-
-  </view>
-</component>
-```
-
-**plugins/temp-widget/temp_widget.cpp:**
-```cpp
-// SPDX-License-Identifier: GPL-3.0-or-later
-
-#include "plugin_api.h"
-#include "ui_update_queue.h"
-#include "lvgl.h"
-
-#include <sstream>
-#include <iomanip>
-
-using namespace helix::plugin;
-
-static PluginAPI* g_api = nullptr;
-static std::string g_plugin_dir;
-
-// Subject for reactive temperature display
-static lv_subject_t s_nozzle_temp_subject;
-static char s_temp_buffer[16] = "---";
-
-static void update_temperature(float temp) {
-    std::ostringstream oss;
-    oss << std::fixed << std::setprecision(1) << temp;
-    strncpy(s_temp_buffer, oss.str().c_str(), sizeof(s_temp_buffer) - 1);
-
-    helix::ui::queue_update([]() {
-        lv_subject_set_pointer(&s_nozzle_temp_subject, s_temp_buffer);
-    });
-}
-
-extern "C" bool helix_plugin_init(PluginAPI* api, const char* plugin_dir) {
-    g_api = api;
-    g_plugin_dir = plugin_dir;
-
-    // Initialize subject with default value
-    lv_subject_init_pointer(&s_nozzle_temp_subject, s_temp_buffer);
-    api->register_subject("temp-widget.nozzle_temp", &s_nozzle_temp_subject);
-
-    // Register XML component
-    if (!api->register_xml_component(plugin_dir, "temp_display.xml")) {
-        api->log_error("Failed to register temp_display.xml");
-        return false;
-    }
-
-    // Subscribe to temperature events (main thread - safe for subjects)
-    api->on_event(events::TEMPERATURE_UPDATED, [](const EventData& event) {
-        if (event.payload.value("heater", "") == "extruder") {
-            float temp = event.payload.value("current", 0.0f);
-            update_temperature(temp);
-        }
-    });
-
-    // Subscribe to Moonraker for real-time updates
-    api->subscribe_moonraker({"extruder"}, [](const json& update) {
-        if (update.contains("extruder")) {
-            float temp = update["extruder"].value("temperature", 0.0f);
-            update_temperature(temp);
-        }
-    });
-
-    // Inject widget when home panel is available
-    api->on_event(events::NAVIGATION_CHANGED, [](const EventData& event) {
-        if (event.payload.value("panel", "") == "home") {
-            if (g_api->has_injection_point("print_status_extras")) {
-                g_api->inject_widget("print_status_extras", "temp_display");
-            }
-        }
-    });
-
-    // Try immediate injection (in case home is already showing)
-    if (api->has_injection_point("print_status_extras")) {
-        api->inject_widget("print_status_extras", "temp_display");
-    }
-
-    api->log_info("Temperature Widget initialized");
-    return true;
-}
-
-extern "C" void helix_plugin_deinit() {
-    if (g_api) {
-        g_api->unregister_subject("temp-widget.nozzle_temp");
-        g_api->log_info("Temperature Widget shutdown");
-    }
-    g_api = nullptr;
-}
-
-extern "C" const char* helix_plugin_api_version() {
-    return "1.0";
-}
-```
-
-### LED Effects Plugin (Full-Featured Reference)
-
-This outline demonstrates a more complex plugin with services, events, and inter-plugin communication.
-
-**Key features:**
-- Exposes a service for other plugins to control LEDs
-- Subscribes to print events to trigger effects
-- Provides settings UI
-- Communicates with Klipper via G-code
-
-```cpp
-// plugins/led-effects/led_effects.cpp (outline)
-
-class LedEffectsController {
-public:
-    void set_effect(const std::string& effect);
-    void set_color(uint32_t rgb);
-    void set_brightness(float percent);
-    std::string current_effect() const;
-
-private:
-    std::string m_effect = "off";
-    uint32_t m_color = 0xFFFFFF;
-    float m_brightness = 1.0f;
-};
-
-static LedEffectsController s_controller;
-static PluginAPI* g_api = nullptr;
-
-extern "C" bool helix_plugin_init(PluginAPI* api, const char* plugin_dir) {
-    g_api = api;
-
-    // Register service for other plugins
-    api->register_service("led-effects.controller", &s_controller);
-
-    // Automatic effects based on print state
-    api->on_event(events::PRINT_STARTED, [](const EventData&) {
-        s_controller.set_effect("printing");
-        send_led_gcode();
-    });
-
-    api->on_event(events::PRINT_COMPLETED, [](const EventData&) {
-        s_controller.set_effect("complete");
-        send_led_gcode();
-    });
-
-    api->on_event(events::PRINT_ERROR, [](const EventData&) {
-        s_controller.set_effect("error");
-        send_led_gcode();
-    });
-
-    // Register settings UI. NOTE: "settings_section" is not a registered injection
-    // point yet (only "print_status_extras" is), so this inject_widget() is a no-op
-    // today — guarded here to show the intended pattern once it lands.
-    api->register_xml_component(plugin_dir, "led_settings.xml");
-    if (api->has_injection_point("settings_section")) {
-        api->inject_widget("settings_section", "led_settings");
-    }
-
-    return true;
-}
-
-static void send_led_gcode() {
-    if (auto* mrapi = g_api->moonraker_api()) {
-        std::string gcode = "SET_LED LED=status_led " +
-                           s_controller.get_led_params();
-        mrapi->execute_gcode(gcode, []() {}, [](const MoonrakerError&) {});
-    }
-}
-```
-
----
-
-## Known Limitations
-
-These are documented limitations accepted in the current design.
-
-### Moonraker Subscription Persistence
-
-Once a plugin registers a Moonraker subscription via `MoonrakerClient::register_notify_update()`, the subscription cannot be removed until the client is destroyed. Calling `unsubscribe_moonraker()` marks the subscription as removed in plugin tracking, and the `alive_flag_` pattern ensures callbacks are skipped. The actual WebSocket subscription persists until reconnect. This is minor overhead for long-running sessions.
-
-### Subject Name Collisions
-
-Subjects are registered globally. Two plugins using the same subject name will conflict. Always prefix with your plugin ID: `"my-plugin.subject_name"`. There is no technical enforcement — convention is sufficient.
-
-### Single Injection Point Instance
-
-Each injection point can only exist once in the UI at a time. Injected widgets are removed when navigating away from the panel. This matches HelixScreen's single-panel navigation model. Plugins can re-inject on `NAVIGATION_CHANGED` events.
-
-### Subject Unregistration
-
-Subjects registered via `api->register_subject()` are tracked but not actually unregistered from the XML system during cleanup — `lib/helix-xml/` provides no `lv_xml_unregister_subject()`. That is our own gap, not an upstream one: LVGL 9.5 has no XML engine at all, so nobody is going to add it for us (see `HELIX_XML_FORK.md`). Re-loading a plugin with the same subject names works fine (registration is idempotent). Only affects development scenarios with frequent plugin reloads.
-
----
-
-## Future Directions
-
-These are enhancement ideas captured for future consideration. Implementation should be driven by actual user needs.
-
-### Filter System
-
-Allow plugins to intercept and modify data, not just observe. Events are fire-and-forget; filters would allow transformation (e.g., G-code preprocessing, temperature calibration offsets). Would require a new `FilterManager` class. Implement when a real use case emerges.
-
-### Plugin Hot-Reload
-
-Reload plugins without restarting the application. Deferred due to complexity: LVGL widget cleanup, subject/observer lifecycle, service dependencies, state preservation, and `dlclose()` limitations. Current approach (restart app after changes) is simple and reliable.
-
-### Plugin Marketplace
-
-In-app discovery and installation of community plugins. Would require registry infrastructure, code signing, version compatibility matrix. Simpler alternatives: documented manual installation, curated plugin lists, GitHub releases, or a CLI install tool.
-
-### Plugin Sandboxing
-
-Currently plugins are trusted code with full access (similar to VS Code extensions, Klipper macros, OctoPrint plugins). Sandboxing would require separate processes with IPC, capability-based permissions, and significantly increased complexity. The trust-based model is appropriate for the user base.
-
----
-
-## Additional Resources
-
-- [LVGL9_XML_GUIDE.md](LVGL9_XML_GUIDE.md) - Complete XML component reference
-- [ARCHITECTURE.md](ARCHITECTURE.md) - HelixScreen system architecture
-- [DEVELOPMENT.md](DEVELOPMENT.md) - Development environment setup
-- [TESTING.md](TESTING.md) - Testing infrastructure
-
----
-
-*This documentation is for HelixScreen Plugin API version 1.0. Please check for updates when upgrading HelixScreen versions.*

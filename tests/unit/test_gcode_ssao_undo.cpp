@@ -114,7 +114,6 @@ void drive(GCodeLayerRenderer& renderer, lv_obj_t* canvas, uint8_t* buf) {
 /// comparison is the thing under test.
 void configure(GCodeLayerRenderer& renderer, ParsedGCodeFile& gcode, bool ssao) {
     renderer.set_gcode(&gcode);
-    renderer.set_view_mode(GCodeLayerRenderer::ViewMode::FRONT);
     renderer.set_ghost_mode(false); // no background thread: deterministic
 
     // A BRIGHT filament colour, and it is load-bearing. The SSAO pass darkens by

@@ -100,7 +100,7 @@ TEST_CASE("populate_discovery: non-object info is skipped", "[detect_cmd]") {
 // reads printer_objects() for its object_exists, macro_match and macro_exclude
 // heuristics - 73 of the 94 database entries use at least one of those - so
 // `--detect-printer` scored blind against the strongest signals in the database,
-// and scripts/install.sh seeds a preset from exactly this path.
+// and the installer (scripts/lib/installer/printer_seed.sh) seeds a preset from exactly this path.
 
 TEST_CASE("populate_discovery: the raw object list reaches detection", "[detect_cmd][objects]") {
     nlohmann::json info = {{"hostname", "voron"}};
@@ -141,8 +141,9 @@ TEST_CASE("populate_discovery: a macro_exclude heuristic actually excludes",
     nlohmann::json info = {{"hostname", "ad5m-pro"}};
     nlohmann::json cfg = {
         {"configfile", {{"settings", {{"printer", {{"kinematics", "corexy"}}}}}}}};
-    nlohmann::json objects = nlohmann::json::array(
-        {"extruder", "heater_bed", "mod_params", "gcode_macro SUPPORT_FORGE_X"});
+    nlohmann::json objects =
+        nlohmann::json::array({"extruder", "heater_bed", "mod_params",
+                               "gcode_macro SUPPORT_FORGE_X", "led chamber_light"});
 
     helix::PrinterDiscovery disc;
     helix::detect::populate_discovery(disc, objects, info, cfg);

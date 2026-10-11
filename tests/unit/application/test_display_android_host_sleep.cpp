@@ -33,7 +33,7 @@
 
 #include "../../catch_amalgamated.hpp"
 
-using SleepMechanism = DisplayManager::SleepMechanism;
+using SleepMechanism = helix::SleepMechanism;
 
 namespace {
 
@@ -144,15 +144,14 @@ TEST_CASE("Android idle sleep hands the panel to the OS instead of painting an o
     // The shipping Android configuration: SDL backend, no backlight backend, so
     // neither hardware blank nor panel power-off is available. Before the fix this
     // landed on SoftwareOverlay (black rect over a lit panel).
-    REQUIRE(DisplayManager::select_sleep_mechanism(/*is_android=*/true,
-                                                   /*use_hardware_blank=*/false,
-                                                   /*can_power_off=*/false,
-                                                   /*sleep_timeout_sec=*/60) ==
-            SleepMechanism::HostSleep);
+    REQUIRE(helix::select_sleep_mechanism(/*is_android=*/true,
+                                          /*use_hardware_blank=*/false,
+                                          /*can_power_off=*/false,
+                                          /*sleep_timeout_sec=*/60) == SleepMechanism::HostSleep);
 
     // Every finite timeout behaves the same — the value only gates "Never".
     for (int timeout : {1, 30, 300, 3600}) {
-        REQUIRE(DisplayManager::select_sleep_mechanism(true, false, false, timeout) ==
+        REQUIRE(helix::select_sleep_mechanism(true, false, false, timeout) ==
                 SleepMechanism::HostSleep);
     }
 }
@@ -162,11 +161,11 @@ TEST_CASE("Display Sleep = Never never hands the panel to the OS (wall-mounted t
     // get_display_sleep_sec() returns 0 for "Never"; check_display_sleep() treats
     // <= 0 as disabled. The selector must agree, so no code path can ever clear
     // keep-screen-on for a user who asked the screen to stay on forever.
-    REQUIRE(DisplayManager::select_sleep_mechanism(true, false, false, 0) ==
+    REQUIRE(helix::select_sleep_mechanism(true, false, false, 0) ==
             SleepMechanism::SoftwareOverlay);
 
     // Defensive: a negative timeout is equally "not a real timeout".
-    REQUIRE(DisplayManager::select_sleep_mechanism(true, false, false, -1) ==
+    REQUIRE(helix::select_sleep_mechanism(true, false, false, -1) ==
             SleepMechanism::SoftwareOverlay);
 }
 
@@ -175,9 +174,9 @@ TEST_CASE("host sleep is the last resort — real panel control still wins",
     // Not reachable on today's Android build (no backlight, no power-off), but the
     // ordering must stay: cutting the panel ourselves is strictly better than
     // handing control to a timeout we don't own.
-    REQUIRE(DisplayManager::select_sleep_mechanism(true, /*hw_blank=*/true, false, 60) ==
+    REQUIRE(helix::select_sleep_mechanism(true, /*hw_blank=*/true, false, 60) ==
             SleepMechanism::HardwareBlank);
-    REQUIRE(DisplayManager::select_sleep_mechanism(true, false, /*power_off=*/true, 60) ==
+    REQUIRE(helix::select_sleep_mechanism(true, false, /*power_off=*/true, 60) ==
             SleepMechanism::PanelPowerOff);
 }
 
@@ -190,9 +189,8 @@ TEST_CASE("non-Android sleep selection is bit-for-bit the pre-#1245 behaviour",
         for (bool power_off : {false, true}) {
             for (int timeout : {-1, 0, 1, 60, 3600}) {
                 CAPTURE(hw_blank, power_off, timeout);
-                REQUIRE(
-                    DisplayManager::select_sleep_mechanism(false, hw_blank, power_off, timeout) ==
-                    legacy_mechanism(hw_blank, power_off));
+                REQUIRE(helix::select_sleep_mechanism(false, hw_blank, power_off, timeout) ==
+                        legacy_mechanism(hw_blank, power_off));
             }
         }
     }
@@ -210,17 +208,17 @@ TEST_CASE("a suspend/resume cycle while host-sleeping forces a wake",
     // keep-screen-on still cleared — the display would keep re-sleeping and the
     // sleep callbacks (camera suspend) would never resume. HelixActivity bumps a
     // resume counter; a change in it while host-sleeping means the panel is back.
-    REQUIRE(DisplayManager::host_sleep_needs_wake(/*sleeping_via_host=*/true,
-                                                  /*seq_at_sleep=*/7, /*seq_now=*/8));
+    REQUIRE(helix::host_sleep_needs_wake(/*sleeping_via_host=*/true,
+                                         /*seq_at_sleep=*/7, /*seq_now=*/8));
 
     // No resume yet — stay asleep. This is the window between clearing the flag
     // and Android's own timeout expiring; waking here would mean never sleeping.
-    REQUIRE_FALSE(DisplayManager::host_sleep_needs_wake(true, 7, 7));
+    REQUIRE_FALSE(helix::host_sleep_needs_wake(true, 7, 7));
 
     // Not host-sleeping: hardware blank / power-off / overlay devices are
     // unaffected, and a resume must not spuriously wake them.
-    REQUIRE_FALSE(DisplayManager::host_sleep_needs_wake(false, 7, 8));
-    REQUIRE_FALSE(DisplayManager::host_sleep_needs_wake(false, 7, 7));
+    REQUIRE_FALSE(helix::host_sleep_needs_wake(false, 7, 8));
+    REQUIRE_FALSE(helix::host_sleep_needs_wake(false, 7, 7));
 }
 
 // ============================================================================
@@ -290,4 +288,8 @@ TEST_CASE_METHOD(LVGLTestFixture, "a failed power_off() still falls back to the 
     REQUIRE(DisplayManagerTestAccess::last_sleep_mechanism(mgr) == SleepMechanism::SoftwareOverlay);
     REQUIRE(DisplayManagerTestAccess::sleep_overlay(mgr) != nullptr);
     REQUIRE_FALSE(DisplayManagerTestAccess::is_flush_suppressed(mgr));
+
+    // The overlay and the screen hold it takes outlive this never-init()'d manager,
+    // whose destructor skips shutdown().
+    DisplayManagerTestAccess::restore_display_output(mgr);
 }

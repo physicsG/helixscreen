@@ -4,6 +4,7 @@
 #pragma once
 
 #include "gcode_parser.h"
+#include "gcode_pause_scan.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -141,6 +142,14 @@ struct LayerIndexStats {
     /// want that convention apply it themselves (ui_gcode_viewer_get_tools_used
     /// does), matching scan_tools_used_from_file()'s documented behaviour.
     std::set<int> tools_used;
+    /// Scheduled pauses (M600 / PAUSE / M601 / M0) with their position on both
+    /// progress axes, from the same single pass (see gcode_pause_scan.h).
+    /// Empty for a pause-free file — the correct "no markers" answer.
+    std::vector<ScheduledPause> scheduled_pauses;
+    /// True when the file carries M73 P lines, i.e. the progress bar will fill
+    /// on slicer time rather than file position. PauseScan::axis() is the
+    /// consumer-facing form.
+    bool has_m73{false};
 };
 
 /**
@@ -186,11 +195,15 @@ class GCodeLayerIndex {
      *        fraction of the file consumed (0.0-1.0). Called from the scanning
      *        thread at a coarse interval — it exists so a UI can show a real
      *        bar instead of an indeterminate spinner, not to drive animation.
-     *        Must be cheap and must NOT touch LVGL.
-     * @return true if successful, false on error
+     *        Must be cheap and must NOT touch LVGL. Returning false withdraws
+     *        consent: the build unwinds at the next callback and
+     *        build_from_file() returns false. This is how close() keeps a
+     *        join with an in-flight index from freezing the caller's thread
+     *        for the rest of the scan.
+     * @return true if successful, false on error or cancellation
      */
     bool build_from_file(const std::string& filepath,
-                         const std::function<void(float)>& on_progress = {});
+                         const std::function<bool(float)>& on_progress = {});
 
     /**
      * @brief Get entry for a specific layer

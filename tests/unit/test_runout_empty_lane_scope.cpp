@@ -51,21 +51,20 @@ using namespace helix;
 using namespace helix::printer;
 using json = nlohmann::json;
 
+namespace helix {
+
 // Friend shim (declared as friend in ams_backend_snapmaker.h) to reach the
-// protected handle_status_update() so tests can drive slot state through the
+// protected handle_status() so tests can drive slot state through the
 // real firmware parse. Distinct from test_ams_backend_snapmaker.cpp's
 // SnapmakerTestAccess to avoid an ODR clash when both TUs link.
 class RunoutScopeTestAccess {
   public:
     static void handle_status(AmsBackendSnapmaker& b, const json& n) {
-        b.handle_status_update(n);
+        b.handle_status(n);
     }
 
-    // Set a sensor's role directly, bypassing set_sensor_role()'s single-RUNOUT
-    // exclusivity. Production reaches this multi-RUNOUT state via load_config
-    // (settings.json restore), which writes sensor->role per entry with no
-    // exclusivity check — exactly how a Snapmaker U1's four e{N}_filament
-    // sensors all end up RUNOUT-roled.
+    // Set a sensor's role directly, the way load_config (settings.json restore)
+    // writes sensor->role per entry without going through set_sensor_role().
     static void force_role(helix::FilamentSensorManager& mgr, const std::string& klipper,
                            helix::FilamentSensorRole role) {
         std::lock_guard<std::recursive_mutex> lock(mgr.mutex_);
@@ -84,13 +83,13 @@ class RunoutScopeTestAccess {
     static void reset(helix::FilamentSensorManager& mgr) {
         std::lock_guard<std::recursive_mutex> lock(mgr.mutex_);
         mgr.sensors_.clear();
-        mgr.states_.clear();
         mgr.master_enabled_ = true;
         mgr.sync_mode_ = true;
         mgr.initial_status_received_ = false;
         mgr.startup_time_ = std::chrono::steady_clock::now() - std::chrono::seconds(10);
     }
 };
+} // namespace helix
 
 namespace {
 
@@ -146,8 +145,8 @@ void drain() {
 
 // Sets up FilamentSensorManager with four per-lane runout sensors enabled, all
 // initially showing filament present. Roles are forced directly (mirroring the
-// settings.json restore path) so all four lanes are RUNOUT-roled — the real
-// Snapmaker U1 configuration, which set_sensor_role()'s exclusivity can't model.
+// settings.json restore path) so all four lanes are RUNOUT-roled, the real
+// Snapmaker U1 configuration.
 void setup_four_lane_sensors(FilamentSensorManager& fsm) {
     RunoutScopeTestAccess::reset(fsm);
     fsm.set_master_enabled(true);

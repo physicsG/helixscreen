@@ -31,11 +31,15 @@
 
 #include "ui_update_queue.h"
 
+#include "../test_helpers/backend_user_edit.h"
 #include "ams_backend_cfs.h"
 #include "ams_backend_mock.h"
 #include "ams_backend_toolchanger.h"
+#include "ams_remap.h"
 #include "ams_types.h"
+#include "config.h"
 #include "filament_op_slot_resolver.h"
+#include "toolchanger_addon.h"
 
 #include <functional>
 #include <string>
@@ -52,13 +56,13 @@ using helix::ui::resolve_op_button_slot;
 namespace {
 
 // Slot -> tool as the AMS panel reads it, by global index.
-int mapped_tool_of(const AmsSystemInfo& info, int global_index) {
+int mapped_tool_of(const helix::AmsSystemInfo& info, int global_index) {
     const auto* slot = info.get_slot_global(global_index);
     return slot ? slot->mapped_tool : -99; // -99: slot absent, distinct from "unmapped"
 }
 
 // Tool -> slot as resolve_op_button_slot reads it.
-int slot_of_tool(const AmsSystemInfo& info, int tool) {
+int slot_of_tool(const helix::AmsSystemInfo& info, int tool) {
     if (tool < 0 || tool >= static_cast<int>(info.tool_to_slot_map.size())) {
         return -99; // no entry at all — the shape that caused the bug
     }
@@ -70,7 +74,7 @@ int slot_of_tool(const AmsSystemInfo& info, int tool) {
 /// The generic half of every case below: whatever the mapping is, a lane that
 /// claims tool T must be the lane tool T resolves to, and vice versa. A
 /// one-sided write fails here even if the case's own expectations are updated.
-void require_symmetric(const AmsSystemInfo& info) {
+void require_symmetric(const helix::AmsSystemInfo& info) {
     for (int i = 0; i < info.total_slots; ++i) {
         int tool = mapped_tool_of(info, i);
         if (tool >= 0) {
@@ -138,16 +142,17 @@ class CfsToolMapProbe : public AmsBackendCfs {
                                   {"params", json::array({json{{"box", box}}, 0})}});
     }
 
-    AmsError execute_gcode(const std::string& gcode) override {
+    helix::AmsError execute_gcode(const std::string& gcode) override {
         captured.push_back(gcode);
-        return AmsErrorHelper::success();
+        return helix::AmsErrorHelper::success();
     }
-    AmsError execute_gcode(const std::string& gcode, std::function<void()> on_complete) override {
+    helix::AmsError execute_gcode(const std::string& gcode,
+                                  std::function<void()> on_complete) override {
         captured.push_back(gcode);
         if (on_complete) {
             on_complete();
         }
-        return AmsErrorHelper::success();
+        return helix::AmsErrorHelper::success();
     }
 
     std::vector<std::string> captured;
@@ -156,9 +161,9 @@ class CfsToolMapProbe : public AmsBackendCfs {
 // --- ToolChanger ----------------------------------------------------------
 
 /// Drives the real toolchanger backend's protected status handler.
-class ToolChangerMapProbe : public AmsBackendToolChanger {
+class ToolChangerMapProbe : public helix::AmsBackendToolChanger {
   public:
-    explicit ToolChangerMapProbe(int tool_count) : AmsBackendToolChanger(nullptr, nullptr) {
+    explicit ToolChangerMapProbe(int tool_count) : helix::AmsBackendToolChanger(nullptr, nullptr) {
         std::vector<std::string> names;
         names.reserve(static_cast<size_t>(tool_count));
         for (int i = 0; i < tool_count; ++i) {
@@ -181,16 +186,17 @@ class ToolChangerMapProbe : public AmsBackendToolChanger {
 
     // client_ is null, so ensure_homed_then() routes straight to execute_gcode();
     // both overloads are captured because dispatch paths use the 2-arg form.
-    AmsError execute_gcode(const std::string& gcode) override {
+    helix::AmsError execute_gcode(const std::string& gcode) override {
         captured.push_back(gcode);
-        return AmsErrorHelper::success();
+        return helix::AmsErrorHelper::success();
     }
-    AmsError execute_gcode(const std::string& gcode, std::function<void()> on_complete) override {
+    helix::AmsError execute_gcode(const std::string& gcode,
+                                  std::function<void()> on_complete) override {
         captured.push_back(gcode);
         if (on_complete) {
             on_complete();
         }
-        return AmsErrorHelper::success();
+        return helix::AmsErrorHelper::success();
     }
 
     std::vector<std::string> captured;
@@ -422,16 +428,16 @@ TEST_CASE("ToolChanger set_tool_mapping moves the lane badge with the map",
     CHECK(backend.captured.back() == "ASSIGN_TOOL TOOL=T2 N=0");
 }
 
-TEST_CASE("ToolChanger set_slot_info remap moves the lane badge with the map",
+TEST_CASE("ToolChanger apply_user_edit remap moves the lane badge with the map",
           "[ams][toolchanger][tool_map]") {
     // The AMS slot-edit modal's path into the same remap. It wrote both fields
     // by hand and evicted neither, so a swap ended with two lanes claiming one
     // tool number.
     ToolChangerMapProbe backend(4);
 
-    SlotInfo edit = backend.get_slot_info(1);
+    helix::SlotInfo edit = backend.get_slot_info(1);
     edit.mapped_tool = 3;
-    REQUIRE(backend.set_slot_info(1, edit).success());
+    REQUIRE(helix::test::apply_edit(backend, 1, edit).success());
 
     auto info = backend.get_system_info();
     CHECK(mapped_tool_of(info, 1) == 3);
@@ -460,6 +466,54 @@ TEST_CASE("ToolChanger reset_tool_mappings restores identity in both directions"
         CHECK(slot_of_tool(info, i) == i);
     }
     require_symmetric(info);
+}
+
+TEST_CASE("ToolChanger without klipper-toolchanger has no remap route",
+          "[ams][toolchanger][tool_map][medusahc]") {
+    // A changer driven by its own T<n> macros (MedusaHC without
+    // klipper-toolchanger) has no ASSIGN_TOOL and no tool-number indirection:
+    // its T<n> macros name the physical tool outright. Klipper answers an
+    // unknown command by logging it and carrying on, so the refusal has to
+    // happen here - sending it reads as a successful remap, and the print runs
+    // on the firmware's own mapping with nothing to show for the user's pick.
+    ToolChangerMapProbe backend(6);
+    helix::toolchanger_addon::ToolCommands own_commands;
+    own_commands.present = true;
+    own_commands.provider_name = "MedusaHC";
+    own_commands.select_prefix = "T";
+    backend.set_tool_commands(own_commands);
+
+    // The file's own tool numbers are the only thing left to change, so the
+    // route is a rewrite of the job. It carries the user's pick, so can_remap()
+    // is true - but it writes no table, so the AMS edit overlay's inline tool
+    // dropdown stays hidden and print-start takes no generic send.
+    CHECK(backend.get_remap_strategy() == helix::AmsBackend::RemapStrategy::GcodeRewrite);
+    CHECK(helix::printer::can_remap(backend));
+    CHECK_FALSE(helix::printer::can_write_mapping_table(backend));
+
+    backend.captured.clear();
+    CHECK_FALSE(backend.set_tool_mapping(/*tool_number=*/2, /*slot_index=*/4).success());
+    CHECK(backend.captured.empty());
+
+    // The restore path is the same command and must refuse for the same reason.
+    backend.captured.clear();
+    backend.reset_tool_mappings();
+    CHECK(backend.captured.empty());
+}
+
+TEST_CASE("ToolChanger with klipper-toolchanger keeps its remap route",
+          "[ams][toolchanger][tool_map]") {
+    // resolve_tool_commands() returns an ABSENT capability when [toolchanger]
+    // is present, because SELECT_TOOL and ASSIGN_TOOL are then the machine's
+    // own answer. The default-constructed probe is that machine.
+    ToolChangerMapProbe backend(6);
+
+    CHECK(backend.get_remap_strategy() == helix::AmsBackend::RemapStrategy::Native);
+    CHECK(helix::printer::can_write_mapping_table(backend));
+
+    backend.captured.clear();
+    REQUIRE(backend.set_tool_mapping(/*tool_number=*/2, /*slot_index=*/4).success());
+    CHECK(backend.captured.back() == "ASSIGN_TOOL TOOL=T4 N=2");
 }
 
 TEST_CASE("ToolChanger change_tool takes a SLOT and bypasses the remap",
@@ -495,10 +549,10 @@ TEST_CASE("ToolChanger resolves the carriage lane through the map",
 
     const auto* seated = info.get_slot_global(2);
     REQUIRE(seated != nullptr);
-    CHECK(seated->status == SlotStatus::LOADED);
+    CHECK(seated->status == helix::SlotStatus::LOADED);
     const auto* lane0 = info.get_slot_global(0);
     REQUIRE(lane0 != nullptr);
-    CHECK(lane0->status == SlotStatus::AVAILABLE);
+    CHECK(lane0->status == helix::SlotStatus::AVAILABLE);
 
     CHECK(backend.can_unload_from_toolhead(2));
     CHECK_FALSE(backend.can_unload_from_toolhead(0));
@@ -525,7 +579,7 @@ TEST_CASE("Mock IFS mode publishes both directions", "[ams][mock]") {
     // set_ifs_mode wrote mapped_tool onto the registry entries and the forward
     // map onto system_info_ — which get_system_info() does not read. The mode
     // therefore shipped a reverse map with no forward map at all.
-    AmsBackendMock backend(4);
+    helix::AmsBackendMock backend(4);
     backend.set_operation_delay(0);
     backend.set_ifs_mode(true);
 
@@ -545,7 +599,7 @@ TEST_CASE("Mock IFS mode publishes both directions", "[ams][mock]") {
 }
 
 TEST_CASE("Mock Snapmaker mode publishes both directions", "[ams][mock]") {
-    AmsBackendMock backend(4);
+    helix::AmsBackendMock backend(4);
     backend.set_operation_delay(0);
     backend.set_snapmaker_mode(true);
 
@@ -563,7 +617,7 @@ TEST_CASE("Mock HELIX_MOCK_REMAP override publishes both directions", "[ams][moc
     // The knob exists to stage a remapped printer. It wrote mapped_tool only,
     // so it staged a system whose two halves disagreed — a shape no backend can
     // produce, and therefore a useless thing to test a UI against.
-    AmsBackendMock backend(4);
+    helix::AmsBackendMock backend(4);
     backend.set_operation_delay(0);
     backend.set_snapmaker_mode(true);
     backend.apply_remap_overrides("0:2,2:0");
@@ -581,7 +635,7 @@ TEST_CASE("Mock HELIX_MOCK_REMAP override publishes both directions", "[ams][moc
 }
 
 TEST_CASE("Mock remap override clears a previous override", "[ams][mock]") {
-    AmsBackendMock backend(4);
+    helix::AmsBackendMock backend(4);
     backend.set_operation_delay(0);
     backend.set_snapmaker_mode(true);
     backend.apply_remap_overrides("0:3");
@@ -597,27 +651,27 @@ TEST_CASE("Mock remap override clears a previous override", "[ams][mock]") {
     require_symmetric(info);
 }
 
-TEST_CASE("Mock set_slot_info does not change slot status", "[ams][mock]") {
+TEST_CASE("Mock apply_user_edit does not change slot status", "[ams][mock]") {
     // Same contract as every real backend: status is firmware-derived, so this
     // path carries filament metadata only. It used to drop `status` in silence,
     // which cost a debugging cycle — a test helper wrote status through here,
     // nothing took effect, and the resulting failures read as implementation
     // bugs. force_slot_status() is the path that works.
-    AmsBackendMock backend(4);
+    helix::AmsBackendMock backend(4);
     backend.set_operation_delay(0);
-    backend.force_slot_status(1, SlotStatus::EMPTY);
-    REQUIRE(backend.get_slot_info(1).status == SlotStatus::EMPTY);
+    backend.force_slot_status(1, helix::SlotStatus::EMPTY);
+    REQUIRE(backend.get_slot_info(1).status == helix::SlotStatus::EMPTY);
 
-    SlotInfo edit = backend.get_slot_info(1);
-    edit.status = SlotStatus::LOADED; // ignored
-    edit.material = "PETG";           // applied
-    REQUIRE(backend.set_slot_info(1, edit).success());
+    helix::SlotInfo edit = backend.get_slot_info(1);
+    edit.status = helix::SlotStatus::LOADED; // ignored
+    edit.material = "PETG";                  // applied
+    REQUIRE(helix::test::apply_edit(backend, 1, edit).success());
 
     auto after = backend.get_slot_info(1);
-    CHECK(after.status == SlotStatus::EMPTY);
+    CHECK(after.status == helix::SlotStatus::EMPTY);
     CHECK(after.material == "PETG");
 
     // And the documented path does take effect.
-    backend.force_slot_status(1, SlotStatus::AVAILABLE);
-    CHECK(backend.get_slot_info(1).status == SlotStatus::AVAILABLE);
+    backend.force_slot_status(1, helix::SlotStatus::AVAILABLE);
+    CHECK(backend.get_slot_info(1).status == helix::SlotStatus::AVAILABLE);
 }

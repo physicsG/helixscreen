@@ -40,7 +40,6 @@ class ChangeHostConfigFixture : public Config {
 TEST_CASE("Change host: Config read returns current values", "[change_host][config]") {
     ChangeHostConfigFixture config;
     auto* cfg = Config::get_instance();
-    REQUIRE(cfg != nullptr);
 
     std::string host = cfg->get<std::string>(cfg->df() + "moonraker_host", "");
     int port = cfg->get<int>(cfg->df() + "moonraker_port", 7125);

@@ -80,7 +80,7 @@ void ui_button_init();
  * icon_font_sm is responsive, and this widget resolves it once for the whole
  * process. Called from theme_manager_register_responsive_fonts() so a
  * breakpoint change reaches button icons too (#1210); see
- * ui_icon_invalidate_font_cache() for the same problem in <icon>.
+ * helix::ui::icon::invalidate_font_cache() for the same problem in <icon>.
  */
 void ui_button_invalidate_icon_font_cache();
 
@@ -97,7 +97,7 @@ void ui_button_set_text(lv_obj_t* btn, const char* text);
 /**
  * @brief Change the icon of an existing ui_button at runtime
  *
- * Looks up the icon name via ui_icon::lookup_codepoint and updates the
+ * Looks up the icon name via helix::ui::icon::lookup_codepoint and updates the
  * icon label text. Safe to call on any lv_obj — returns silently if not
  * a ui_button or if the button has no icon.
  */
@@ -112,6 +112,19 @@ void ui_button_set_icon(lv_obj_t* btn, const char* icon_name);
  * returns silently if not a ui_button or if the button has no label.
  */
 void ui_button_set_label_hidden(lv_obj_t* btn, bool hidden);
+
+/**
+ * @brief Restack a ui_button icon-over-label (or back to icon-beside-label)
+ *
+ * stacked=true applies the create-time icon_position="top" recipe: column flex,
+ * icon first, small label with a space_xxs pad_top, and the button's height set
+ * to 100% of its parent (a stacked button lives in a growable row).
+ * stacked=false restores the row layout and fixed button_height. Safe to call
+ * on any lv_obj; returns silently if not a ui_button or if the button has no
+ * icon or label.
+ */
+// NAMESPACE_OK: joins this header's global ui_button_* free-function API
+void ui_button_set_stacked(lv_obj_t* btn, bool stacked);
 
 /**
  * @brief Get the internal icon glyph label of a ui_button

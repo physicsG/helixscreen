@@ -32,13 +32,32 @@ platform_stop_competing_uis() {
     # respawn it (no respawn param), so a one-shot kill here is sufficient.
     killall boot-play 2>/dev/null || true
 
-    # Note: web-server is intentionally NOT killed — it serves the
-    # Creality Cloud integration and camera stream (webrtc_local).
-    # Stopping it would break remote monitoring via Creality app.
+    # web-server is intentionally NOT killed by the sweep above — it serves
+    # the LAN web interface (ports 80/443 redirect to Fluidd on :4408; 9999
+    # is the local status websocket). Stopping it would take that interface
+    # away from every browser and tool on the network.
 
-    # Persistently disable the stock UI service (reversible)
+    # Persistently disable the stock UI service (reversible). Only `stop`
+    # above kills — the stock stop_service runs killall -9 over the set —
+    # while `disable` just removes the app's rc.d links.
     if [ -x /etc/init.d/app ]; then
         /etc/init.d/app disable 2>/dev/null || true
+    fi
+
+    # The stop's killall -9 takes any live web-server down, and a killed pid
+    # leaves the table within ~0.03s (measured on the K2 Plus) — before the
+    # restore below samples it. A killed instance is procd's job to
+    # respawn, so nothing waits between the disable and the restore.
+    # Liveness is guaranteed HERE, not by a boot script beside it: the
+    # restore below is the one path that runs at every boot and every
+    # restart. Restore web-server through our init script when it is
+    # installed (pidof-guarded inside), else with a guarded direct launch.
+    # After every HelixScreen start on K2, the carve-out is serving
+    # (prestonbrown/helixscreen#1617).
+    if [ -x /etc/init.d/helix-k2-webserver ]; then
+        /etc/init.d/helix-k2-webserver start 2>/dev/null || true
+    elif ! pidof web-server >/dev/null 2>&1 && [ -x /usr/bin/web-server ]; then
+        /usr/bin/web-server >/dev/null 2>&1 &
     fi
 }
 
@@ -109,7 +128,7 @@ PY
 }
 
 platform_pre_start() {
-    export HELIX_CACHE_DIR="/mnt/UDISK/helixscreen/cache"
+    export HELIX_CACHE_DIR="${HELIX_CACHE_DIR:-/mnt/UDISK/helixscreen-state/cache}"
 
     # Logging policy: write to /mnt/UDISK (27 GB UDISK partition, ext4).
     # K2 /tmp is a 244 MB tmpfs (more headroom than CC1/AD5M) and /var/log
@@ -118,15 +137,15 @@ platform_pre_start() {
     # spdlog stream to UDISK too keeps everything in one place and avoids
     # filling the 240 MB overlay with debug volume when someone leaves
     # HELIX_LOG_LEVEL=debug enabled in helixscreen.env.
-    export HELIX_LOG_DEST=file
-    export HELIX_LOG_FILE="/mnt/UDISK/helixscreen/logs/helix.log"
-    export HELIX_LOG_ROTATE_BYTES=2097152
-    export HELIX_LOG_ROTATE_FILES=3
-    mkdir -p "/mnt/UDISK/helixscreen/logs" 2>/dev/null || true
+    export HELIX_LOG_DEST="${HELIX_LOG_DEST:-file}"
+    export HELIX_LOG_FILE="${HELIX_LOG_FILE:-/mnt/UDISK/helixscreen-state/logs/helix.log}"
+    export HELIX_LOG_ROTATE_BYTES="${HELIX_LOG_ROTATE_BYTES:-2097152}"
+    export HELIX_LOG_ROTATE_FILES="${HELIX_LOG_ROTATE_FILES:-3}"
+    mkdir -p "/mnt/UDISK/helixscreen-state/logs" 2>/dev/null || true
 
     # K2 has no curl — ensure HelixScreen knows to skip HTTPS features
     # SSL is disabled in the K2 build, but set this for safety
-    export HELIX_DISABLE_SSL=1
+    export HELIX_DISABLE_SSL="${HELIX_DISABLE_SSL:-1}"
 
     # Bring up WiFi in the background. The stock wifi-server manages
     # wpa_supplicant but we killed it in platform_stop_competing_uis(),

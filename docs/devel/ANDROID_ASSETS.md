@@ -61,7 +61,7 @@ That has cost real time:
 - `mk/filaments.mk` copied `assets/filaments.json` into the staged tree after
   every `make regen-filaments`, refreshing exactly one file out of 592 and making
   a dead directory look maintained. Removed.
-- `RELEASE_1_0_CHECKLIST.md` told developers the Android tree "carries its own
+- The 1.0 release checklist told developers the Android tree "carries its own
   copy", i.e. mirror your edit there. It was followed at least once; the edit was
   erased by the next build. Fixed.
 

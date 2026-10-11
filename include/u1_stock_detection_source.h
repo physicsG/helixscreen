@@ -33,6 +33,11 @@ class U1StockSource : public DetectionSource {
     bool can_tune() const override {
         return true;
     }
+    /// The stock firmware pauses the print on the same snapshot it reports,
+    /// so the pause-on-detect setting cannot govern this source.
+    bool self_pauses() const override {
+        return true;
+    }
     void set_callback(Callback cb) override {
         cb_ = std::move(cb);
     }
@@ -41,17 +46,22 @@ class U1StockSource : public DetectionSource {
         capable_ = v;
     }
 
+    /// DEFECT_DETECTION_CONFIG NOODLE_SENSITIVITY=low, the stock firmware's
+    /// one-step-down sensitivity command.
+    void tune() override;
+
     /// Install the print-state observer. Called once.
     void start();
 
   private:
-    void on_print_state(int state_enum);
+    void evaluate();
 
     helix::PrinterState* state_ = nullptr;
     Callback cb_;
     bool capable_ = false;
-    int last_state_ = -1;
+    bool fired_this_pause_ = false;
     ObserverGuard state_observer_;
+    ObserverGuard exception_observer_;
 };
 
 } // namespace helix::detection

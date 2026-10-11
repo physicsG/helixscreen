@@ -6,6 +6,15 @@
 #include <memory>
 #include <string>
 
+// Lowest raw backlight level a panel still renders visibly, as a percent of
+// the raw range. 0 (Makefile default) keeps the plain linear percent map;
+// per-target values live in mk/cross.mk and apply to the sysfs and Sonic Pad
+// CLI backends, never the Allwinner /dev/disp one. /display/backlight_floor_percent
+// in settings.json overrides it on every backend.
+#ifndef HELIX_BACKLIGHT_FLOOR_PERCENT
+#define HELIX_BACKLIGHT_FLOOR_PERCENT 0
+#endif
+
 /**
  * @brief Abstract backlight control interface
  *

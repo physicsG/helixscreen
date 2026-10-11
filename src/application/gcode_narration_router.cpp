@@ -7,6 +7,7 @@
 
 #include "ams_backend.h"
 #include "ams_state.h"
+#include "gcode_response_lines.h"
 #include "i_moonraker_client.h"
 
 #include <spdlog/spdlog.h>
@@ -52,33 +53,6 @@ GcodeNarrationRouter::~GcodeNarrationRouter() {
     if (client_) {
         client_->unregister_method_callback("notify_gcode_response", NOTIFY_HANDLER_NAME);
     }
-}
-
-std::optional<std::string> parse_unknown_command(const std::string& body) {
-    // Klipper reports a macro that hit an undefined command as
-    // `// Unknown command:"STATUS_PURGING"` — respond_info, NOT `!!` — and
-    // Moonraker still answers `ok` for the enclosing script. Anchored at the
-    // start of the body so an ordinary narration line that happens to mention
-    // the phrase cannot claim to be one.
-    static constexpr std::string_view PREFIX = "unknown command";
-    if (body.size() <= PREFIX.size())
-        return std::nullopt;
-    for (size_t i = 0; i < PREFIX.size(); ++i) {
-        if (static_cast<char>(std::tolower(static_cast<unsigned char>(body[i]))) != PREFIX[i])
-            return std::nullopt;
-    }
-
-    // Only a colon and whitespace may separate the phrase from the quoted name.
-    size_t i = PREFIX.size();
-    while (i < body.size() && (body[i] == ':' || body[i] == ' ' || body[i] == '\t'))
-        ++i;
-    if (i >= body.size() || body[i] != '"')
-        return std::nullopt;
-
-    size_t close = body.find('"', i + 1);
-    if (close == std::string::npos || close == i + 1)
-        return std::nullopt;
-    return body.substr(i + 1, close - i - 1);
 }
 
 void GcodeNarrationRouter::process_line(const std::string& line) {
@@ -153,24 +127,7 @@ void GcodeNarrationRouter::process_line(const std::string& line) {
 }
 
 void GcodeNarrationRouter::on_notify_gcode_response(const nlohmann::json& msg) {
-    if (!msg.contains("params") || !msg["params"].is_array() || msg["params"].empty()) {
-        return;
-    }
-
-    const auto& params = msg["params"];
-    if (params[0].is_array()) {
-        for (const auto& line : params[0]) {
-            if (line.is_string()) {
-                process_line(line.get<std::string>());
-            }
-        }
-    } else if (params[0].is_string()) {
-        for (const auto& line : params) {
-            if (line.is_string()) {
-                process_line(line.get<std::string>());
-            }
-        }
-    }
+    for_each_gcode_response_line(msg, [this](const std::string& line) { process_line(line); });
 }
 
 } // namespace helix

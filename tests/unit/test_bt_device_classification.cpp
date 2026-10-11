@@ -3,13 +3,8 @@
 
 /**
  * @file test_bt_device_classification.cpp
- * @brief Tests for the is_scanner classification logic used in bt_discovery.cpp.
- *
- * bt_discovery.cpp classifies devices using:
- *   is_scanner = dominated_by_scanner && !dominated_by_uuid && !dominated_by_name
- *
- * These tests verify the decision matrix ensuring barcode scanners are correctly
- * identified and excluded from the label printer dropdown (#779).
+ * @brief The is_scanner decision discovery reports for each device (#779):
+ * classify_device() is what bt_discovery.cpp calls.
  */
 
 #include "bluetooth_plugin.h"
@@ -22,30 +17,8 @@ using namespace helix::bluetooth;
 
 namespace {
 
-/// Replicates the is_scanner classification from bt_discovery.cpp process_device_properties()
 bool classify_is_scanner(const char* name, const char* const* uuids, int uuid_count) {
-    bool has_printer_uuid = false;
-    for (int i = 0; i < uuid_count; ++i) {
-        if (is_label_printer_uuid(uuids[i])) {
-            has_printer_uuid = true;
-            break;
-        }
-    }
-
-    bool is_printer_name = (name && name[0]) && is_likely_label_printer(name);
-
-    bool is_scanner = false;
-    for (int i = 0; i < uuid_count; ++i) {
-        if (is_hid_scanner_uuid(uuids[i])) {
-            is_scanner = true;
-            break;
-        }
-    }
-    if (!is_scanner && name && name[0]) {
-        is_scanner = is_likely_bt_scanner(name);
-    }
-
-    return is_scanner && !has_printer_uuid && !is_printer_name;
+    return classify_device(name, std::vector<std::string>(uuids, uuids + uuid_count)).is_scanner();
 }
 
 } // namespace
@@ -93,6 +66,20 @@ TEST_CASE("classify_is_scanner - device with both printer and scanner UUIDs pref
         "00001124-0000-1000-8000-00805f9b34fb", // HID (scanner)
     };
     REQUIRE_FALSE(classify_is_scanner("Unknown Device", uuids, 2));
+}
+
+TEST_CASE("classify_is_scanner - printer brand name advertising HID is NOT scanner",
+          "[bluetooth][scanner][classification]") {
+    const char* uuids[] = {"00001124-0000-1000-8000-00805f9b34fb"}; // HID
+    REQUIRE_FALSE(classify_is_scanner("Phomemo M110", uuids, 1));
+}
+
+TEST_CASE("classify_device - a nameless device with no known UUID has no traits",
+          "[bluetooth][scanner][classification]") {
+    auto t = classify_device(nullptr, {"0000180f-0000-1000-8000-00805f9b34fb"}); // Battery
+    CHECK_FALSE(t.printer_uuid);
+    CHECK_FALSE(t.printer_name);
+    CHECK_FALSE(t.scanner);
 }
 
 TEST_CASE("classify_is_scanner - scanner brand names detected",

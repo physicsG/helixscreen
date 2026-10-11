@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- One effect or preset chip on the LEDs overlay: led_chip_label_<index>, lit while
+     led_active_chip equals index. Same look as led_action_chip, text from a subject. -->
+<component>
+  <api>
+    <prop name="index" type="string" default="0"/>
+    <prop name="label_subject" type="string" default=""/>
+  </api>
+  <view extends="ui_button"
+        height="#led_chip_height" variant="ghost" style_radius="#led_chip_height" style_min_width="#led_chip_min_width"
+        style_pad_left="#space_md" style_pad_right="#space_md" ext_click_area="#led_chip_gap_half">
+    <!-- Idle first, active after: the later style wins while it is enabled. -->
+    <style name="styles.led_chip_idle"/>
+    <bind_style_if_eq name="styles.led_chip_active" subject="led_active_chip" ref_value="$index"/>
+    <text_body bind_text="$label_subject" align="center" clickable="false" event_bubble="true"/>
+    <event_cb trigger="clicked" callback="led_list_chip_cb" user_data="$index"/>
+  </view>
+</component>

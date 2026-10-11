@@ -35,6 +35,7 @@ struct DiscoveryFixture {
     std::vector<std::string> sensors;
     std::vector<std::string> fans;
     std::vector<std::string> leds;
+    std::vector<std::string> load_cells;
     std::vector<std::string> afc_objects;
     std::vector<std::string> filament_sensors;
     std::vector<std::string> mcus;
@@ -54,6 +55,8 @@ struct DiscoveryFixture {
                 leds.push_back(name);
             else if (c == "afc")
                 afc_objects.push_back(name);
+            else if (c == "load_cell")
+                load_cells.push_back(name);
             else if (c == "filament_sensor")
                 filament_sensors.push_back(name);
             else if (c == "mcu")
@@ -64,8 +67,13 @@ struct DiscoveryFixture {
     json build() const {
         PrinterDiscovery hw;
         hw.parse_objects(all_objects);
+        return build(hw);
+    }
+
+    /// For a snapshot a test finished itself, e.g. one with a status claim settled.
+    json build(const PrinterDiscovery& hw) const {
         return MoonrakerDiscoverySequence::build_subscription_objects(
-            hw, heaters, sensors, fans, leds, afc_objects, filament_sensors, mcus);
+            hw, heaters, sensors, load_cells, fans, leds, afc_objects, filament_sensors, mcus);
     }
 };
 
@@ -105,7 +113,9 @@ TEST_CASE("Subscription: core motion objects subscribe every field their parsers
         REQUIRE(has_field(subs, "gcode_move", "homing_origin"));
     }
 
-    SECTION("motion_report — printer_motion_state.cpp line 171") {
+    SECTION("motion_report - PrinterMotionState motion_report parser") {
+        REQUIRE(has_field(subs, "motion_report", "live_position"));
+        REQUIRE(has_field(subs, "motion_report", "live_velocity"));
         REQUIRE(has_field(subs, "motion_report", "live_extruder_velocity"));
     }
 
@@ -152,7 +162,8 @@ TEST_CASE("Subscription: virtual_sdcard fields cover printer_print_state reads",
     REQUIRE(has_field(subs, "virtual_sdcard", "is_active"));
 }
 
-TEST_CASE("Subscription: heaters narrow to {temperature, target}", "[moonraker][subscription]") {
+TEST_CASE("Subscription: heaters narrow to {temperature, target, power}",
+          "[moonraker][subscription]") {
     DiscoveryFixture fx;
     fx.add("extruder", {"heater"});
     fx.add("extruder1", {"heater"});
@@ -165,8 +176,11 @@ TEST_CASE("Subscription: heaters narrow to {temperature, target}", "[moonraker][
         CAPTURE(heater);
         REQUIRE(has_field(subs, heater, "temperature"));
         REQUIRE(has_field(subs, heater, "target"));
+        // Duty distinguishes an element working flat out from one ticking over
+        // at the same temperature, which is what the power readouts render.
+        REQUIRE(has_field(subs, heater, "power"));
         // Should NOT contain extra fields — narrowing contract
-        REQUIRE(subs[heater].size() == 2);
+        REQUIRE(subs[heater].size() == 3);
     }
 }
 
@@ -355,6 +369,67 @@ TEST_CASE("Subscription: AFC objects narrow per type", "[moonraker][subscription
     }
 }
 
+// The subscription is a strict allowlist, so a field dropped from these lists
+// silently never reaches the AFC parsers. Pin the lists exactly.
+TEST_CASE("Subscription: AFC field lists are exactly the parsers' inputs",
+          "[moonraker][subscription][afc]") {
+    DiscoveryFixture fx;
+    fx.add("AFC", {"afc"});
+    fx.add("afc", {"afc"});
+    fx.add("AFC_stepper lane1", {"afc"});
+    fx.add("AFC_lane lane2", {"afc"});
+    fx.add("AFC_hub turtle1", {"afc"});
+    fx.add("AFC_buffer buffer1", {"afc"});
+    fx.add("AFC_extruder extruder", {"afc"});
+    fx.add("AFC_BoxTurtle turtle1", {"afc"});
+    json subs = fx.build();
+
+    const json state = json::array({"connected",
+                                    "bypass_state",
+                                    "quiet_mode",
+                                    "current_load",
+                                    "current_lane",
+                                    "current_state",
+                                    "current_tool",
+                                    "current_toolchange",
+                                    "error_state",
+                                    "filament_loaded",
+                                    "lane_loaded",
+                                    "led_state",
+                                    "message",
+                                    "name",
+                                    "number_of_toolchanges",
+                                    "num_extruders",
+                                    "status",
+                                    "system",
+                                    "tool_sensor_after_extruder",
+                                    "tool_stn",
+                                    "tool_stn_unload",
+                                    "type",
+                                    "units",
+                                    "lanes",
+                                    "hubs",
+                                    "extruders",
+                                    "buffers"});
+    const json stepper =
+        json::array({"buffer_status",   "color",         "current_map", "dist_hub",      "extruder",
+                     "filament_status", "hub",           "load",        "loaded_to_hub", "map",
+                     "material",        "prep",          "runout_lane", "spool_id",      "status",
+                     "td1_color",       "td1_scan_time", "td1_td",      "tool_loaded",   "weight"});
+
+    CHECK(subs["AFC"] == state);
+    CHECK(subs["afc"] == state);
+    CHECK(subs["AFC_stepper lane1"] == stepper);
+    CHECK(subs["AFC_lane lane2"] == stepper);
+    CHECK(subs["AFC_hub turtle1"] == json::array({"state", "afc_bowden_length"}));
+    CHECK(subs["AFC_buffer buffer1"] ==
+          json::array({"state", "distance_to_fault", "error_sensitivity", "fault_detection_enabled",
+                       "lanes"}));
+    CHECK(subs["AFC_extruder extruder"] ==
+          json::array({"lane_loaded", "tool_end_status", "tool_start_status"}));
+    CHECK(subs["AFC_BoxTurtle turtle1"] == json::array({"lanes", "extruders", "hubs", "buffers"}));
+}
+
 TEST_CASE("Subscription: bed_mesh covers moonraker_advanced_api parser",
           "[moonraker][subscription]") {
     DiscoveryFixture fx;
@@ -437,6 +512,66 @@ TEST_CASE("Subscription: filament + width sensors narrow correctly", "[moonraker
     }
 }
 
+TEST_CASE("Subscription: probe objects narrow to ProbeSensorManager reads",
+          "[moonraker][subscription][probe]") {
+    const auto build_with = [](std::initializer_list<const char*> names) {
+        DiscoveryFixture fx;
+        for (const auto& name : names) {
+            fx.add(name, {});
+        }
+        return fx.build();
+    };
+    const auto requires_fields = [](const json& subs, const char* obj,
+                                    std::initializer_list<const char*> fields) {
+        CAPTURE(obj);
+        REQUIRE(subs.contains(obj));
+        for (const auto* f : fields) {
+            CAPTURE(f);
+            REQUIRE(has_field(subs, obj, f));
+        }
+        REQUIRE(subs[obj].size() == fields.size());
+    };
+
+    // z_offset is requested everywhere: the Creality and QIDI forks publish it
+    // on their probe, and Klipper answers a module without it with null.
+    SECTION("ProbeCommandHelper objects: last_query + last_z_result + z_offset") {
+        for (const auto* name : {"probe", "bltouch", "smart_effector"}) {
+            requires_fields(build_with({name}), name, {"last_query", "last_z_result", "z_offset"});
+        }
+    }
+
+    SECTION("objects with no usable last_query: last_z_result + z_offset") {
+        requires_fields(build_with({"beacon"}), "beacon", {"last_z_result", "z_offset"});
+        requires_fields(build_with({"probe_eddy_current btt"}), "probe_eddy_current btt",
+                        {"last_z_result", "z_offset"});
+    }
+
+    SECTION("Cartographer reads its status from the probe object it registers") {
+        json subs = build_with({"probe", "cartographer"});
+        requires_fields(subs, "probe", {"last_query", "last_z_result", "z_offset"});
+        REQUIRE_FALSE(subs.contains("cartographer"));
+    }
+
+    SECTION("the [probe] alias is not subscribed beside the specific object") {
+        json subs = build_with({"bltouch", "probe"});
+        requires_fields(subs, "bltouch", {"last_query", "last_z_result", "z_offset"});
+        REQUIRE_FALSE(subs.contains("probe"));
+    }
+
+    SECTION("an eddy object beside a Cartographer is not subscribed") {
+        json subs = build_with({"probe", "probe_eddy_current carto", "cartographer"});
+        requires_fields(subs, "probe", {"last_query", "last_z_result", "z_offset"});
+        REQUIRE_FALSE(subs.contains("cartographer"));
+        REQUIRE_FALSE(subs.contains("probe_eddy_current carto"));
+    }
+
+    SECTION("accelerometers and probe-named macros are not probes") {
+        json subs = build_with({"adxl345", "gcode_macro probe_wrapper"});
+        REQUIRE_FALSE(subs.contains("adxl345"));
+        REQUIRE_FALSE(subs.contains("gcode_macro probe_wrapper"));
+    }
+}
+
 TEST_CASE("Subscription: toolchanger + per-tool fields cover ToolState reads",
           "[moonraker][subscription]") {
     DiscoveryFixture fx;
@@ -511,6 +646,23 @@ TEST_CASE("Subscription: fan_feedback subscribed only when present", "[moonraker
     }
 }
 
+// Only the Happy Hare backend reads `mmu`; other filament systems never publish it.
+TEST_CASE("Subscription: mmu subscribed only for Happy Hare", "[moonraker][subscription]") {
+    SECTION("Happy Hare subscribes mmu") {
+        DiscoveryFixture fx;
+        fx.add("mmu", {});
+        json subs = fx.build();
+        REQUIRE(has_field(subs, "mmu", "gate"));
+    }
+
+    SECTION("CFS does not subscribe mmu") {
+        DiscoveryFixture fx;
+        fx.add("box", {});
+        json subs = fx.build();
+        REQUIRE_FALSE(subs.contains("mmu"));
+    }
+}
+
 // MCU subscriptions cover MoonrakerPerformanceSource's reads. These MUST ride
 // the single union subscription built here — Moonraker docs:
 // "A new request will override a previous request." A separate
@@ -575,6 +727,56 @@ TEST_CASE("Subscription: MCU objects narrow to PerformanceSource reads",
     }
 }
 
+TEST_CASE("Subscription: fault-code firmware subscribes its standing-fault object",
+          "[moonraker][subscription]") {
+    SECTION("exception_manager discovered -> subscribed") {
+        // A fault that survived a restart is never printed to the console
+        // again, so the exceptions array in this object is the only channel
+        // that carries it.
+        DiscoveryFixture fx;
+        fx.add("exception_manager", {});
+        json subs = fx.build();
+
+        REQUIRE(subs.contains("exception_manager"));
+    }
+
+    SECTION("no fault-code object -> not subscribed") {
+        // Printers whose firmware does not report structured faults must not
+        // subscribe an object nothing reads.
+        DiscoveryFixture fx;
+        fx.add("gcode_macro START_PRINT", {});
+        fx.add("extruder", {"heater"});
+        json subs = fx.build();
+
+        REQUIRE_FALSE(subs.contains("exception_manager"));
+    }
+}
+
+TEST_CASE("Subscription: mains-monitor firmware subscribes its power-loss object",
+          "[moonraker][subscription]") {
+    SECTION("power_loss_check discovered -> subscribed") {
+        // The debug bundle's printer-state query reads this object, so the
+        // subscription keeps it arriving in status frames too.
+        DiscoveryFixture fx;
+        fx.add("power_loss_check", {});
+        json subs = fx.build();
+
+        REQUIRE(subs.contains("power_loss_check"));
+    }
+
+    SECTION("per-extruder siblings alone -> not subscribed") {
+        // The firmware also publishes power_loss_check e0..e3, all
+        // uninitialised. Only the bare name is the mains monitor; a prefix
+        // match would subscribe a sibling that never takes a reading.
+        DiscoveryFixture fx;
+        fx.add("power_loss_check e0", {});
+        fx.add("power_loss_check e1", {});
+        json subs = fx.build();
+
+        REQUIRE_FALSE(subs.contains("power_loss_check"));
+    }
+}
+
 TEST_CASE("Subscription: ZMOD printers subscribe save_variables for the persisted z-offset",
           "[moonraker][subscription][zmod]") {
     SECTION("SAVE_ZMOD_DATA present -> save_variables subscribed") {
@@ -605,5 +807,123 @@ TEST_CASE("Subscription: ZMOD printers subscribe save_variables for the persiste
         json subs = fx.build();
 
         REQUIRE(subs.contains("save_variables"));
+    }
+}
+
+TEST_CASE("Subscription: Qidi PLR subscribes save_variables when the recovery macro exists",
+          "[moonraker][subscription]") {
+    // Without this the was_interrupted flag never arrives past the initial
+    // bootstrap query, so a power loss recovered on the reconnect goes
+    // unnoticed. The not-subscribed-by-default half is pinned by the ZMOD
+    // case above.
+    DiscoveryFixture fx;
+    fx.add("gcode_macro DETECT_INTERRUPTION", {});
+    json subs = fx.build();
+
+    REQUIRE(subs.contains("save_variables"));
+}
+
+TEST_CASE("Subscription: the U1 batch macro subscribes under its config-case key",
+          "[moonraker][subscription]") {
+    SECTION("uppercase config subscribes the uppercase object") {
+        DiscoveryFixture fx;
+        fx.add("filament_detect", {});
+        fx.add("gcode_macro AUTO_FEEDING_BATCH", {});
+        json subs = fx.build();
+
+        REQUIRE(subs.contains("gcode_macro AUTO_FEEDING_BATCH"));
+    }
+
+    SECTION("lowercase config subscribes the lowercase object, not a guessed caps key") {
+        // Klipper keeps the config's case in status object keys, so a
+        // subscription spelled in caps never matches — and an object Moonraker
+        // does not know rejects the WHOLE subscription (blank printer state).
+        DiscoveryFixture fx;
+        fx.add("filament_detect", {});
+        fx.add("gcode_macro auto_feeding_batch", {});
+        json subs = fx.build();
+
+        REQUIRE(subs.contains("gcode_macro auto_feeding_batch"));
+        REQUIRE_FALSE(subs.contains("gcode_macro AUTO_FEEDING_BATCH"));
+    }
+
+    SECTION("no batch macro -> no batch object subscribed") {
+        DiscoveryFixture fx;
+        fx.add("filament_detect", {});
+        json subs = fx.build();
+
+        REQUIRE_FALSE(subs.contains("gcode_macro AUTO_FEEDING_BATCH"));
+        REQUIRE_FALSE(subs.contains("gcode_macro auto_feeding_batch"));
+    }
+}
+
+TEST_CASE("Subscription: OpenAMS subscribes every oams_manager field its backend reads",
+          "[moonraker][subscription][openams]") {
+    // Mirrors ams_backend_openams.cpp#parse_snapshot_locked.
+    DiscoveryFixture fx;
+    fx.add("oams_manager", {});
+    fx.add("extruder", {"heater"});
+
+    SECTION("a settled v1 claim subscribes them") {
+        PrinterDiscovery hw;
+        hw.parse_objects(fx.all_objects);
+        hw.settle_status_claims(
+            json{{"oams_manager", {{"api_version", 1}, {"schema", "openams.manager"}}}});
+        json subs = fx.build(hw);
+
+        for (const char* field : {"api_version", "schema", "ready", "commands", "lanes", "units",
+                                  "groups", "devices", "lanes_by_fps"}) {
+            INFO(field);
+            CHECK(has_field(subs, "oams_manager", field));
+        }
+    }
+
+    SECTION("the name alone subscribes nothing") {
+        json subs = fx.build();
+
+        CHECK_FALSE(subs.contains("oams_manager"));
+    }
+}
+
+TEST_CASE("Subscription: a firmware that stores pre-print settings gets its store subscribed",
+          "[moonraker][subscription][firmware_seeded]") {
+    SECTION("from the provider table, whatever the AMS type") {
+        DiscoveryFixture fx;
+        fx.add("print_task_config", {});
+        PrinterDiscovery hw;
+        hw.parse_objects(fx.all_objects);
+        REQUIRE(hw.mmu_type() != helix::AmsType::SNAPMAKER);
+
+        json subs = fx.build(hw);
+        REQUIRE(subs.contains("print_task_config"));
+        CHECK(subs["print_task_config"].is_null()); // every field
+    }
+
+    SECTION("not for a printer without one") {
+        DiscoveryFixture fx;
+        json subs = fx.build();
+        CHECK_FALSE(subs.contains("print_task_config"));
+    }
+}
+
+TEST_CASE("Subscription: loaded leveling-skip wrappers subscribe their gates and flags",
+          "[moonraker][subscription][skip_wrappers]") {
+    using helix::skip_wrappers::Op;
+    DiscoveryFixture fx;
+    PrinterDiscovery hw;
+    hw.parse_objects(json::array({"bed_mesh", "quad_gantry_level"}));
+
+    SECTION("active wrappers") {
+        hw.set_skip_wrappers({Op::BedMesh, Op::Qgl}, {Op::BedMesh, Op::Qgl});
+        const json subs = fx.build(hw);
+        CHECK(has_field(subs, "quad_gantry_level", "applied"));
+        CHECK(has_field(subs, "gcode_macro _HELIX_PREP", "run_qgl"));
+        CHECK(has_field(subs, "gcode_macro _HELIX_PREP", "run_bed_mesh"));
+    }
+    SECTION("wrappable but not loaded") {
+        hw.set_skip_wrappers({Op::BedMesh, Op::Qgl}, {});
+        const json subs = fx.build(hw);
+        CHECK_FALSE(subs.contains("gcode_macro _HELIX_PREP"));
+        CHECK_FALSE(subs.contains("quad_gantry_level"));
     }
 }

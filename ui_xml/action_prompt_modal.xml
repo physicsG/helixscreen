@@ -26,7 +26,7 @@
             style_pad_gap="#space_sm" scrollable="false">
       <!-- ERROR icon - default-hidden; toggled imperatively in populate_content() for severity="error" -->
       <icon name="icon_error" src="alert_octagon" size="md" variant="danger" hidden="true"/>
-      <text_heading name="dialog_title" text="Action Required" translation_tag="Action Required" flex_grow="1"/>
+      <text_heading name="dialog_title" text="Action Required" flex_grow="1"/>
     </lv_obj>
     <!-- Horizontal divider below title -->
     <divider_horizontal/>
@@ -47,12 +47,13 @@
       <afc_fault_path name="fault_path"/>
       <bind_flag_if_eq subject="afc_fault_segment" flag="hidden" ref_value="0"/>
     </lv_obj>
-    <!-- Regular button container (row_wrap for grouped action buttons) -->
+    <!-- Regular buttons: one action_prompt_button_row per button group or run
+         of ungrouped buttons, stacked -->
     <lv_obj name="button_container"
             width="100%" height="content" style_pad_left="#space_md" style_pad_right="#space_md"
-            style_pad_top="#space_sm" style_pad_bottom="#space_sm" flex_flow="row_wrap" style_flex_main_place="center"
-            style_flex_cross_place="center" style_pad_gap="#space_sm" scrollable="false">
-      <!-- Buttons will be added dynamically based on PromptData.buttons -->
+            style_pad_top="#space_sm" style_pad_bottom="#space_sm" flex_flow="column" style_pad_gap="#space_sm"
+            scrollable="false">
+      <!-- Rows are added dynamically based on PromptData.buttons -->
     </lv_obj>
     <!-- Horizontal divider above footer -->
     <divider_horizontal name="footer_divider" hidden="true"/>

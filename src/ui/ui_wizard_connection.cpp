@@ -25,8 +25,9 @@
 #include "runtime_config.h"
 #include "static_panel_registry.h"
 #include "theme_manager.h"
+#include "ui/ui_widget_helpers.h"
+#include "utils/network_validation.h"
 #include "wizard_config_paths.h"
-#include "wizard_validation.h"
 
 #include <spdlog/spdlog.h>
 
@@ -47,15 +48,8 @@ extern lv_subject_t connection_test_passed;
 // Global Instance
 // ============================================================================
 
-static std::unique_ptr<WizardConnectionStep> g_wizard_connection_step;
-
 WizardConnectionStep* get_wizard_connection_step() {
-    if (!g_wizard_connection_step) {
-        g_wizard_connection_step = std::make_unique<WizardConnectionStep>();
-        StaticPanelRegistry::instance().register_destroy(
-            "WizardConnectionStep", []() { g_wizard_connection_step.reset(); });
-    }
-    return g_wizard_connection_step.get();
+    return &helix::lazy_global<WizardConnectionStep>("WizardConnectionStep");
 }
 
 // ============================================================================
@@ -145,10 +139,15 @@ void WizardConnectionStep::init_subjects() {
                       connection_ip_buffer_, connection_port_buffer_);
     }
 
-    UI_SUBJECT_INIT_AND_REGISTER_STRING(connection_ip_, connection_ip_buffer_,
-                                        connection_ip_buffer_, "connection_ip");
+    // The macro snprintf()s initial_value INTO buffer; passing the buffer as
+    // its own initial value aliases source and destination, and glibc yields
+    // an empty string, losing the seed. Seed from a copy.
+    const std::string ip_seed = connection_ip_buffer_;
+    const std::string port_seed = connection_port_buffer_;
+    UI_SUBJECT_INIT_AND_REGISTER_STRING(connection_ip_, connection_ip_buffer_, ip_seed.c_str(),
+                                        "connection_ip");
     UI_SUBJECT_INIT_AND_REGISTER_STRING(connection_port_, connection_port_buffer_,
-                                        connection_port_buffer_, "connection_port");
+                                        port_seed.c_str(), "connection_port");
     UI_SUBJECT_INIT_AND_REGISTER_STRING(connection_status_icon_, connection_status_icon_buffer_, "",
                                         "connection_status_icon");
     UI_SUBJECT_INIT_AND_REGISTER_STRING(connection_status_text_, connection_status_text_buffer_, "",
@@ -212,7 +211,7 @@ void WizardConnectionStep::handle_test_connection_clicked() {
         port_clean = "7125";
         lv_subject_copy_string(&connection_port_, "7125");
         if (screen_root_) {
-            lv_obj_t* port_input = lv_obj_find_by_name(screen_root_, "port_input");
+            lv_obj_t* port_input = helix::ui::find_required(screen_root_, "port_input", get_name());
             if (port_input) {
                 lv_textarea_set_text(port_input, "7125");
             }
@@ -775,7 +774,7 @@ lv_obj_t* WizardConnectionStep::create(lv_obj_t* parent) {
     }
 
     // Find and configure test button - pass 'this' as user_data
-    lv_obj_t* test_btn = lv_obj_find_by_name(screen_root_, "btn_test_connection");
+    lv_obj_t* test_btn = helix::ui::find_required(screen_root_, "btn_test_connection", get_name());
     if (test_btn) {
         lv_obj_add_event_cb(test_btn, on_test_connection_clicked_static, LV_EVENT_CLICKED, this);
         spdlog::debug("[{}] Test button callback attached", get_name());
@@ -789,7 +788,7 @@ lv_obj_t* WizardConnectionStep::create(lv_obj_t* parent) {
     // (bind_text observer-on-add ordering). The buffer is the source of truth:
     // it's seeded from config/defaults on first init and preserved across
     // step revisits by the subjects_initialized_ guard in init_subjects().
-    lv_obj_t* ip_input = lv_obj_find_by_name(screen_root_, "ip_input");
+    lv_obj_t* ip_input = helix::ui::find_required(screen_root_, "ip_input", get_name());
     if (ip_input) {
         if (connection_ip_buffer_[0] != '\0') {
             lv_textarea_set_text(ip_input, connection_ip_buffer_);
@@ -801,7 +800,7 @@ lv_obj_t* WizardConnectionStep::create(lv_obj_t* parent) {
         spdlog::debug("[{}] IP input configured", get_name());
     }
 
-    lv_obj_t* port_input = lv_obj_find_by_name(screen_root_, "port_input");
+    lv_obj_t* port_input = helix::ui::find_required(screen_root_, "port_input", get_name());
     if (port_input) {
         // Note: NOT using lv_textarea_set_accepted_chars() here because it conflicts
         // with bind_text two-way binding — set_text adds chars one-by-one, each fires
@@ -819,7 +818,8 @@ lv_obj_t* WizardConnectionStep::create(lv_obj_t* parent) {
     lv_obj_update_layout(screen_root_);
 
     // Set initial dropdown text (bind_options doesn't work for dropdowns)
-    lv_obj_t* printer_dropdown = lv_obj_find_by_name(screen_root_, "printer_dropdown");
+    lv_obj_t* printer_dropdown =
+        helix::ui::find_required(screen_root_, "printer_dropdown", get_name());
     if (printer_dropdown) {
         lv_dropdown_set_options(printer_dropdown, lv_tr("Searching..."));
     }
@@ -831,18 +831,26 @@ lv_obj_t* WizardConnectionStep::create(lv_obj_t* parent) {
         lv_timer_set_repeat_count(auto_probe_timer_, 1); // One-shot timer
     }
 
-    // Lazy-create mDNS discovery if none was injected
-    if (!mdns_discovery_) {
-        mdns_discovery_ = std::make_unique<MdnsDiscovery>();
+    // Discovery is a thread plus multicast traffic, so it only runs when the
+    // layout shows its results (#1217).
+    lv_obj_t* discovery_section =
+        helix::ui::find_required(screen_root_, "discovery_section", get_name());
+    if (!discovery_section || lv_obj_has_flag(discovery_section, LV_OBJ_FLAG_HIDDEN)) {
+        spdlog::debug("[{}] Discovery section hidden, not starting mDNS discovery", get_name());
+    } else {
+        // Lazy-create mDNS discovery if none was injected
+        if (!mdns_discovery_) {
+            mdns_discovery_ = std::make_unique<MdnsDiscovery>();
+        }
+        spdlog::debug("[{}] Starting mDNS discovery", get_name());
+        auto mdns_tok = lifetime_.token();
+        mdns_discovery_->start_discovery(
+            [this, mdns_tok](const std::vector<DiscoveredPrinter>& printers) {
+                if (mdns_tok.expired())
+                    return;
+                on_printers_discovered(printers);
+            });
     }
-    spdlog::debug("[{}] Starting mDNS discovery", get_name());
-    auto mdns_tok = lifetime_.token();
-    mdns_discovery_->start_discovery(
-        [this, mdns_tok](const std::vector<DiscoveredPrinter>& printers) {
-            if (mdns_tok.expired())
-                return;
-            on_printers_discovered(printers);
-        });
 
     // Set initial help text (bind_text only fires on changes, not initial value)
     set_status(nullptr, StatusVariant::None,
@@ -894,7 +902,8 @@ void WizardConnectionStep::cleanup() {
     // (lv_arc_event → lv_event_send → update_obj_state → lv_malloc_zeroed)
     // can touch freed style memory. Seen on back-nav 3→2 in DM626HYE (#843).
     if (screen_root_ && lv_is_initialized()) {
-        lv_obj_t* spinner = lv_obj_find_by_name(screen_root_, "connection_spinner");
+        lv_obj_t* spinner =
+            helix::ui::find_required(screen_root_, "connection_spinner", get_name());
         if (spinner) {
             lv_anim_delete(spinner, nullptr);
         }
@@ -944,7 +953,7 @@ void WizardConnectionStep::on_printers_discovered(const std::vector<DiscoveredPr
 
     // Set dropdown options directly (bind_options doesn't work for dropdowns)
     if (screen_root_) {
-        lv_obj_t* dropdown = lv_obj_find_by_name(screen_root_, "printer_dropdown");
+        lv_obj_t* dropdown = helix::ui::find_required(screen_root_, "printer_dropdown", get_name());
         if (dropdown) {
             lv_dropdown_set_options(dropdown, options.c_str());
         }
@@ -975,11 +984,13 @@ void WizardConnectionStep::on_printer_selected_cb(lv_event_t* e) {
 
         // Also update the text areas directly so user sees the change
         if (self->screen_root_) {
-            lv_obj_t* ip_input = lv_obj_find_by_name(self->screen_root_, "ip_input");
+            lv_obj_t* ip_input =
+                helix::ui::find_required(self->screen_root_, "ip_input", "Wizard Connection");
             if (ip_input) {
                 lv_textarea_set_text(ip_input, printer.ip_address.c_str());
             }
-            lv_obj_t* port_input = lv_obj_find_by_name(self->screen_root_, "port_input");
+            lv_obj_t* port_input =
+                helix::ui::find_required(self->screen_root_, "port_input", "Wizard Connection");
             if (port_input) {
                 lv_textarea_set_text(port_input, port_str);
             }
@@ -1009,7 +1020,8 @@ void WizardConnectionStep::set_status(const char* icon_name, StatusVariant varia
     }
 
     // Find and update icon
-    lv_obj_t* icon_label = lv_obj_find_by_name(screen_root_, "connection_status_icon");
+    lv_obj_t* icon_label =
+        helix::ui::find_required(screen_root_, "connection_status_icon", get_name());
     if (icon_label) {
         // Get icon codepoint
         const char* icon_text = icon_name ? lv_xml_get_const(nullptr, icon_name) : "";
@@ -1036,7 +1048,8 @@ void WizardConnectionStep::set_status(const char* icon_name, StatusVariant varia
     }
 
     // Find and update text
-    lv_obj_t* text_label = lv_obj_find_by_name(screen_root_, "connection_status_text");
+    lv_obj_t* text_label =
+        helix::ui::find_required(screen_root_, "connection_status_text", get_name());
     if (text_label) {
         lv_label_set_text(text_label, text ? text : "");
     }

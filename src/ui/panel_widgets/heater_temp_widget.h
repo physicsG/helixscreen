@@ -8,7 +8,7 @@
 #include "ui_overlay_temp_graph.h"
 
 #include "async_lifetime_guard.h"
-#include "panel_widget.h"
+#include "src/ui/panel_widgets/tiled_panel_widget.h"
 
 class TemperatureService;
 
@@ -26,7 +26,7 @@ namespace helix {
 // subjects to observe, which icon/button names the XML uses, and which overlay
 // mode to open. That difference is captured by Config, so there is exactly one
 // implementation instead of three near-identical copies.
-class HeaterTempWidget : public PanelWidget {
+class HeaterTempWidget : public TiledPanelWidget {
   public:
     // Resolves the per-heater subjects from PrinterState. Captureless lambdas
     // convert to these plain function pointers, so each Config is a trivial,

@@ -186,6 +186,18 @@ char* format_frequency_hz(double hz, char* buf, size_t size);
 // Duration Formatting
 // =============================================================================
 
+/// Looks up a unit format ("%dh %dm") in the current language.
+using Translator = const char* (*)(const char*);
+
+/**
+ * @brief Install the lookup the duration formatters translate their units with
+ *
+ * Until one is set they print English. This module stays free of LVGL so the
+ * Moonraker inspector tool can link it alone; the app installs
+ * lv_translation_get() when it sets the language.
+ */
+void set_translator(Translator translator);
+
 /**
  * @brief Format duration in seconds to human-readable string
  *
@@ -276,6 +288,17 @@ std::string format_filament_length(double mm);
  * @return Formatted string like "(~2:45 PM)" or "(~14:45)", or "" if remaining_seconds <= 0
  */
 std::string eta_clock_time(int remaining_seconds, std::time_t now = 0, bool use_24h = false);
+
+/**
+ * @brief Parse an HTTP Date header (RFC 7231 IMF-fixdate) to Unix seconds
+ *
+ * Accepts only the form servers must send: "Sun, 06 Nov 1994 08:49:37 GMT".
+ *
+ * @param value Header value
+ * @param[out] epoch_s Seconds since the Unix epoch, UTC; untouched on failure
+ * @return true if value parsed and every field is in range
+ */
+bool parse_http_date(const char* value, std::time_t& epoch_s);
 
 /**
  * @brief Round ETA seconds for stable display

@@ -4,9 +4,11 @@
 #include "ui_spoolman_list_view.h"
 
 #include "ui_spool_canvas.h"
+#include "ui_virtual_list.h"
 
 #include "format_utils.h"
 #include "theme_manager.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/spdlog.h>
 
@@ -104,14 +106,14 @@ void SpoolmanListView::cleanup() {
 static SpoolmanListView::RowWidgets cache_row_widgets(lv_obj_t* row) {
     SpoolmanListView::RowWidgets rw;
     rw.root = row;
-    rw.canvas = lv_obj_find_by_name(row, "spool_canvas");
-    rw.id_label = lv_obj_find_by_name(row, "spool_id_label");
-    rw.name_label = lv_obj_find_by_name(row, "spool_name");
-    rw.vendor_label = lv_obj_find_by_name(row, "spool_vendor");
-    rw.weight_label = lv_obj_find_by_name(row, "weight_text");
-    rw.percent_label = lv_obj_find_by_name(row, "percent_text");
-    rw.low_stock_icon = lv_obj_find_by_name(row, "low_stock_indicator");
-    rw.active_indicator = lv_obj_find_by_name(row, "active_indicator");
+    rw.canvas = helix::ui::find_required(row, "spool_canvas", "SpoolmanListView");
+    rw.id_label = helix::ui::find_required(row, "spool_id_label", "SpoolmanListView");
+    rw.name_label = helix::ui::find_required(row, "spool_name", "SpoolmanListView");
+    rw.vendor_label = helix::ui::find_required(row, "spool_vendor", "SpoolmanListView");
+    rw.weight_label = helix::ui::find_required(row, "weight_text", "SpoolmanListView");
+    rw.percent_label = helix::ui::find_required(row, "percent_text", "SpoolmanListView");
+    rw.low_stock_icon = helix::ui::find_required(row, "low_stock_indicator", "SpoolmanListView");
+    rw.active_indicator = helix::ui::find_required(row, "active_indicator", "SpoolmanListView");
     return rw;
 }
 
@@ -153,7 +155,8 @@ void SpoolmanListView::init_pool() {
             static_cast<lv_obj_t*>(lv_xml_create(container_, "spoolman_spool_row", nullptr));
 
         if (row) {
-            lv_obj_add_flag(row, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(
+                row, LV_OBJ_FLAG_HIDDEN); // XML_HIDDEN_OK: pooled row, built once with its list
             pool_.push_back(cache_row_widgets(row));
         }
     }
@@ -320,14 +323,8 @@ void SpoolmanListView::update_visible(const std::vector<SpoolInfo>& spools, int 
         for (auto& rw : pool_) {
             lv_obj_add_flag(rw.root, LV_OBJ_FLAG_HIDDEN);
         }
-        if (leading_spacer_) {
-            lv_obj_set_height(leading_spacer_, 0);
-            last_leading_height_ = 0;
-        }
-        if (trailing_spacer_) {
-            lv_obj_set_height(trailing_spacer_, 0);
-            last_trailing_height_ = 0;
-        }
+        sync_list_spacers(container_, leading_spacer_, trailing_spacer_, VirtualWindow{},
+                          last_leading_height_, last_trailing_height_);
         visible_start_ = -1;
         visible_end_ = -1;
         total_items_ = 0;
@@ -340,13 +337,12 @@ void SpoolmanListView::update_visible(const std::vector<SpoolInfo>& spools, int 
     int total_rows = static_cast<int>(spools.size());
 
     int row_height = cached_row_height_ > 0 ? cached_row_height_ : 56;
-    int row_gap = cached_row_gap_;
-    int row_stride = row_height + row_gap;
+    int row_stride = row_height + cached_row_gap_;
 
-    // Calculate visible range with buffer
-    int first_visible = std::max(0, static_cast<int>(scroll_y / row_stride) - BUFFER_ROWS);
-    int last_visible = std::min(
-        total_rows, static_cast<int>((scroll_y + viewport_height) / row_stride) + 1 + BUFFER_ROWS);
+    const VirtualWindow win =
+        compute_window(scroll_y, viewport_height, row_stride, total_rows, BUFFER_ROWS);
+    const int first_visible = win.first;
+    const int last_visible = win.last;
 
     // Force re-render if total item count changed (e.g. filter applied)
     bool data_changed = (total_rows != total_items_);
@@ -362,61 +358,20 @@ void SpoolmanListView::update_visible(const std::vector<SpoolInfo>& spools, int 
         "[SpoolmanListView] Rendering rows {}-{} of {} (scroll_y={} viewport={} data_changed={})",
         first_visible, last_visible, total_rows, scroll_y, viewport_height, data_changed);
 
-    // Update spacer heights (only when changed to avoid redundant relayout)
-    int leading_height = first_visible * row_stride;
-    if (leading_spacer_) {
-        if (leading_height != last_leading_height_) {
-            lv_obj_set_height(leading_spacer_, leading_height);
-            last_leading_height_ = leading_height;
-        }
-        if (lv_obj_get_index(leading_spacer_) != 0) {
-            lv_obj_move_to_index(leading_spacer_, 0);
-        }
-    }
+    sync_list_spacers(container_, leading_spacer_, trailing_spacer_, win, last_leading_height_,
+                      last_trailing_height_);
 
-    int trailing_height = std::max(0, (total_rows - last_visible) * row_stride);
-    if (trailing_spacer_) {
-        if (trailing_height != last_trailing_height_) {
-            lv_obj_set_height(trailing_spacer_, trailing_height);
-            last_trailing_height_ = trailing_height;
-        }
-    }
-
-    // Assign pool rows to visible indices, skipping rows that already show correct data
-    size_t pool_idx = 0;
-    for (int spool_idx = first_visible; spool_idx < last_visible && pool_idx < pool_.size();
-         spool_idx++, pool_idx++) {
-        auto& rw = pool_[pool_idx];
-
-        if (data_changed || pool_indices_[pool_idx] != spool_idx) {
-            configure_row(rw, spools[spool_idx], active_spool_id);
-            pool_indices_[pool_idx] = spool_idx;
-        }
-
-        // Ensure row is in correct position (guard to avoid redundant relayout)
-        int target_index = static_cast<int>(pool_idx) + 1;
-        if (lv_obj_get_index(rw.root) != target_index) {
-            lv_obj_move_to_index(rw.root, target_index);
-        }
-    }
-
-    // Hide unused pool rows
-    for (; pool_idx < pool_.size(); pool_idx++) {
-        lv_obj_add_flag(pool_[pool_idx].root, LV_OBJ_FLAG_HIDDEN);
-        pool_indices_[pool_idx] = -1;
-    }
-
-    // Ensure trailing spacer is always last child
-    if (trailing_spacer_) {
-        int32_t child_count = lv_obj_get_child_count(container_);
-        if (lv_obj_get_index(trailing_spacer_) != child_count - 1) {
-            lv_obj_move_to_index(trailing_spacer_, child_count - 1);
-        }
-    }
+    show_window(
+        container_, pool_indices_, first_visible, last_visible, data_changed,
+        [this](size_t slot) { return pool_[slot].root; },
+        [&](size_t slot, ssize_t spool_idx) {
+            configure_row(pool_[slot], spools[static_cast<size_t>(spool_idx)], active_spool_id);
+        },
+        [this](size_t slot) { lv_obj_add_flag(pool_[slot].root, LV_OBJ_FLAG_HIDDEN); });
 
     spdlog::debug("[SpoolmanListView] Spacers: leading={}px trailing={}px, visible rows={}, "
                   "container content_h={} child_count={}",
-                  leading_height, trailing_height, last_visible - first_visible,
+                  win.leading_px, win.trailing_px, last_visible - first_visible,
                   lv_obj_get_content_height(container_), lv_obj_get_child_count(container_));
 
     visible_start_ = first_visible;

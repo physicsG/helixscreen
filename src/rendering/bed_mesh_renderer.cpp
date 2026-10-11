@@ -5,8 +5,6 @@
 
 #include "bed_mesh_renderer.h"
 
-#include "ui_fonts.h"
-
 #include "bed_mesh_buffer.h"
 #include "bed_mesh_coordinate_transform.h"
 #include "bed_mesh_geometry.h"
@@ -16,7 +14,6 @@
 #include "bed_mesh_projection.h"
 #include "bed_mesh_rasterizer.h"
 #include "memory_monitor.h"
-#include "theme_manager.h"
 
 #include <spdlog/spdlog.h>
 
@@ -65,15 +62,9 @@ static void compute_centering_offset(int mesh_min_x, int mesh_max_x, int mesh_mi
 static void calibrate_fov_scale(bed_mesh_renderer_t* renderer, int canvas_width, int canvas_height);
 static void compute_initial_centering(bed_mesh_renderer_t* renderer, int canvas_width,
                                       int canvas_height, int layer_offset_x, int layer_offset_y);
-static void render_quad(lv_layer_t* layer, const bed_mesh_quad_3d_t& quad, bool use_gradient);
 static void prepare_render_frame(bed_mesh_renderer_t* renderer, int canvas_width, int canvas_height,
                                  int layer_offset_x, int layer_offset_y);
-static void render_mesh_surface(lv_layer_t* layer, bed_mesh_renderer_t* renderer, int canvas_width,
-                                int canvas_height);
-static void render_decorations(lv_layer_t* layer, bed_mesh_renderer_t* renderer, int canvas_width,
-                               int canvas_height);
 
-// Buffer-targeted rendering helpers (forward declarations)
 static void render_quad_to_buffer(helix::mesh::PixelBuffer& buf, const bed_mesh_quad_3d_t& quad,
                                   bool use_gradient);
 static void render_mesh_surface_to_buffer(helix::mesh::PixelBuffer& buf,
@@ -84,13 +75,12 @@ static void render_decorations_to_buffer(helix::mesh::PixelBuffer& buf,
                                          int canvas_height, uint8_t grid_r, uint8_t grid_g,
                                          uint8_t grid_b);
 
-// Phase 4: Adaptive render mode helpers (forward declarations)
+// Adaptive render mode and 2D heatmap
 static void record_frame_time(bed_mesh_renderer_t* renderer, float frame_ms);
 static float calculate_average_fps(const bed_mesh_renderer_t* renderer);
 static bool is_fps_below_threshold(const bed_mesh_renderer_t* renderer, float min_fps);
-static lv_color_t z_to_heatmap_color(float z, float z_min, float z_max);
-static void render_2d_heatmap(lv_layer_t* layer, bed_mesh_renderer_t* renderer, int canvas_width,
-                              int canvas_height, int offset_x, int offset_y);
+static void render_2d_heatmap_to_buffer(helix::mesh::PixelBuffer& buf,
+                                        const bed_mesh_renderer_t* renderer);
 
 // ============================================================================
 // Public API Implementation
@@ -122,7 +112,6 @@ bed_mesh_renderer_t* bed_mesh_renderer_create(void) {
     renderer->bed_min_y = 0.0;
     renderer->bed_max_x = 0.0;
     renderer->bed_max_y = 0.0;
-    renderer->has_bed_bounds = false;
 
     // Initialize mesh bounds (probe area, will be set via set_bounds)
     renderer->mesh_area_min_x = 0.0;
@@ -159,6 +148,8 @@ bed_mesh_renderer_t* bed_mesh_renderer_create(void) {
     // Initialize layer offsets to zero (updated every frame during render)
     renderer->view_state.layer_offset_x = 0;
     renderer->view_state.layer_offset_y = 0;
+
+    bed_mesh_projection_reset_zoom(&renderer->view_state);
 
     spdlog::debug("[Bed Mesh Renderer] Created bed mesh renderer");
     return renderer;
@@ -277,6 +268,22 @@ void bed_mesh_renderer_set_rotation(bed_mesh_renderer_t* renderer, double angle_
     }
 }
 
+// NAMESPACE_OK: joins bed_mesh_renderer_set_rotation, this file's global-scope C API
+void bed_mesh_renderer_apply_two_finger(bed_mesh_renderer_t* renderer, double pan_dx, double pan_dy,
+                                        double zoom, double anchor_x, double anchor_y,
+                                        int canvas_width, int canvas_height) {
+    if (!renderer) {
+        return;
+    }
+    bed_mesh_projection_pan(&renderer->view_state, pan_dx, pan_dy);
+    bed_mesh_projection_zoom_at(&renderer->view_state, zoom, anchor_x, anchor_y, canvas_width,
+                                canvas_height);
+    // Zoom and pan change every projected vertex (READY_TO_RENDER -> MESH_LOADED)
+    if (renderer->state == RendererState::READY_TO_RENDER) {
+        renderer->state = RendererState::MESH_LOADED;
+    }
+}
+
 void bed_mesh_renderer_set_bounds(bed_mesh_renderer_t* renderer, double bed_x_min, double bed_x_max,
                                   double bed_y_min, double bed_y_max, double mesh_x_min,
                                   double mesh_x_max, double mesh_y_min, double mesh_y_max) {
@@ -289,7 +296,6 @@ void bed_mesh_renderer_set_bounds(bed_mesh_renderer_t* renderer, double bed_x_mi
     renderer->bed_max_x = bed_x_max;
     renderer->bed_min_y = bed_y_min;
     renderer->bed_max_y = bed_y_max;
-    renderer->has_bed_bounds = true;
 
     // Set mesh bounds (probe area - used for positioning mesh surface within bed)
     renderer->mesh_area_min_x = mesh_x_min;
@@ -318,6 +324,9 @@ void bed_mesh_renderer_set_bounds(bed_mesh_renderer_t* renderer, double bed_x_mi
                   bed_x_min, bed_x_max, bed_y_min, bed_y_max, mesh_x_min, mesh_x_max, mesh_y_min,
                   mesh_y_max, renderer->bed_center_x, renderer->bed_center_y,
                   renderer->coord_scale);
+
+    // The auto-fit that follows projects through the magnify, so it must see the fitted view.
+    bed_mesh_projection_reset_zoom(&renderer->view_state);
 
     // Reset FOV scale and centering to trigger auto-calibration on next render
     // This ensures the view zooms to fit the new bed bounds
@@ -349,156 +358,8 @@ void bed_mesh_renderer_set_dragging(bed_mesh_renderer_t* renderer, bool is_dragg
     renderer->view_state.is_dragging = is_dragging;
 }
 
-bool bed_mesh_renderer_render(bed_mesh_renderer_t* renderer, lv_layer_t* layer, int canvas_width,
-                              int canvas_height, int widget_x, int widget_y) {
-    if (!renderer || !layer) {
-        spdlog::error("[Bed Mesh Renderer] Invalid parameters for render: renderer={}, layer={}",
-                      (void*)renderer, (void*)layer);
-        return false;
-    }
-
-    // State validation: Cannot render in UNINITIALIZED or ERROR state
-    // Use debug level since UNINITIALIZED is expected when panel opens before mesh loads
-    if (renderer->state == RendererState::UNINITIALIZED) {
-        spdlog::debug("[Bed Mesh Renderer] No mesh data loaded (state: UNINITIALIZED)");
-        return false;
-    }
-
-    if (renderer->state == RendererState::ERROR) {
-        spdlog::error("[Bed Mesh Renderer] Cannot render: renderer in ERROR state");
-        return false;
-    }
-
-    // Redundant check for backwards compatibility
-    if (!renderer->has_mesh_data) {
-        spdlog::debug("[Bed Mesh Renderer] No mesh data loaded");
-        return false;
-    }
-
-    // Skip rendering if dimensions are invalid
-    if (canvas_width <= 0 || canvas_height <= 0) {
-        spdlog::debug("[Bed Mesh Renderer] Skipping render: invalid dimensions {}x{}", canvas_width,
-                      canvas_height);
-        return false;
-    }
-
-    spdlog::debug("[Bed Mesh Renderer] Rendering mesh to {}x{} layer (dragging={})", canvas_width,
-                  canvas_height, renderer->view_state.is_dragging);
-
-    // DEBUG: Log mesh Z bounds and coordinate parameters (using cached z_center)
-    double debug_grid_z =
-        helix::mesh::compute_grid_z(renderer->cached_z_center, renderer->view_state.z_scale);
-    spdlog::debug("[Bed Mesh Renderer] [COORDS] mesh_min_z={:.4f}, mesh_max_z={:.4f}, "
-                  "z_center={:.4f}, z_scale={:.2f}, "
-                  "grid_z={:.2f}",
-                  renderer->mesh_min_z, renderer->mesh_max_z, renderer->cached_z_center,
-                  renderer->view_state.z_scale, debug_grid_z);
-    spdlog::debug("[Bed Mesh Renderer] [COORDS] angle_x={:.1f}, angle_z={:.1f}, fov_scale={:.2f}, "
-                  "center_offset=({},{})",
-                  renderer->view_state.angle_x, renderer->view_state.angle_z,
-                  renderer->view_state.fov_scale, renderer->view_state.center_offset_x,
-                  renderer->view_state.center_offset_y);
-
-    // Use widget's absolute position for projection offset (stable across partial redraws).
-    // IMPORTANT: Do NOT use clip_area for the offset — during partial redraws LVGL splits the
-    // widget into horizontal bands, each with a different clip_area. Using clip_area->y1 as
-    // offset would project the mesh at a different position per band, causing triple rendering.
-    int layer_offset_x = widget_x;
-    int layer_offset_y = widget_y;
-
-    // Clip area is only used for background fill (LVGL clips draw calls automatically)
-    const lv_area_t* clip_area = &layer->_clip_area;
-
-    spdlog::debug("[Bed Mesh Renderer] [LAYER] Widget: {}x{} at ({},{}), clip: ({},{})→({},{})",
-                  canvas_width, canvas_height, widget_x, widget_y, clip_area->x1, clip_area->y1,
-                  clip_area->x2, clip_area->y2);
-
-    // Draw background to fill the clip area (not the full canvas)
-    // LVGL will clip this to the dirty region during partial redraws
-    lv_draw_rect_dsc_t bg_dsc;
-    lv_draw_rect_dsc_init(&bg_dsc);
-    bg_dsc.bg_color = theme_manager_get_color("screen_bg");
-    bg_dsc.bg_opa = LV_OPA_COVER;
-    lv_draw_rect(layer, &bg_dsc, clip_area);
-
-    // Performance tracking for complete render pipeline
-    auto t_frame_start = std::chrono::high_resolution_clock::now();
-
-    // Check render mode and dispatch to 3D or 2D rendering
-    bool use_2d = bed_mesh_renderer_is_using_2d(renderer);
-
-    if (use_2d) {
-        // Fast 2D heatmap rendering (for slow hardware)
-        render_2d_heatmap(layer, renderer, canvas_width, canvas_height, layer_offset_x,
-                          layer_offset_y);
-
-        auto t_frame_end = std::chrono::high_resolution_clock::now();
-        auto ms_total =
-            std::chrono::duration<double, std::milli>(t_frame_end - t_frame_start).count();
-
-        // Record frame time for FPS tracking
-        record_frame_time(renderer, static_cast<float>(ms_total));
-
-        spdlog::trace("[Bed Mesh Renderer] [2D] Heatmap render: {:.2f}ms (FPS: {:.1f})", ms_total,
-                      calculate_average_fps(renderer));
-    } else {
-        // Full 3D perspective rendering
-
-        // Phase 1: Prepare rendering frame (projection parameters, view state)
-        prepare_render_frame(renderer, canvas_width, canvas_height, layer_offset_x, layer_offset_y);
-        auto t_prepare = std::chrono::high_resolution_clock::now();
-
-        // Phase 2: Render reference grids FIRST (behind mesh)
-        // Floor and walls use printer bed dimensions, mesh "floats" inside
-        helix::mesh::render_reference_grids(layer, renderer, canvas_width, canvas_height);
-
-        // Phase 3: Render mesh surface (quads with gradient/solid colors)
-        // Mesh is drawn on top, naturally occluding parts of the reference grids
-        render_mesh_surface(layer, renderer, canvas_width, canvas_height);
-        auto t_surface = std::chrono::high_resolution_clock::now();
-
-        // Phase 4: Render overlay decorations (on top of mesh)
-        render_decorations(layer, renderer, canvas_width, canvas_height);
-        auto t_decorations = std::chrono::high_resolution_clock::now();
-
-        // PERF: Log overall render performance breakdown
-        auto ms_prepare =
-            std::chrono::duration<double, std::milli>(t_prepare - t_frame_start).count();
-        auto ms_surface = std::chrono::duration<double, std::milli>(t_surface - t_prepare).count();
-        auto ms_decorations =
-            std::chrono::duration<double, std::milli>(t_decorations - t_surface).count();
-        auto ms_total =
-            std::chrono::duration<double, std::milli>(t_decorations - t_frame_start).count();
-
-        // Record frame time for FPS tracking
-        record_frame_time(renderer, static_cast<float>(ms_total));
-
-        spdlog::trace("[Bed Mesh Renderer] [PERF] Total: {:.2f}ms | Prepare: {:.2f}ms ({:.0f}%) | "
-                      "Surface: {:.2f}ms ({:.0f}%) | "
-                      "Decorations: {:.2f}ms ({:.0f}%) | FPS: {:.1f}",
-                      ms_total, ms_prepare, 100.0 * ms_prepare / ms_total, ms_surface,
-                      100.0 * ms_surface / ms_total, ms_decorations,
-                      100.0 * ms_decorations / ms_total, calculate_average_fps(renderer));
-
-        // Output canvas dimensions and view coordinates
-        spdlog::trace(
-            "[Bed Mesh Renderer] [CANVAS_SIZE] Widget dimensions: {}x{} | Alt: {:.1f}° | Az: "
-            "{:.1f}° | Zoom: {:.2f}x",
-            canvas_width, canvas_height, renderer->view_state.angle_x, renderer->view_state.angle_z,
-            renderer->view_state.fov_scale / INITIAL_FOV_SCALE);
-    }
-
-    // State transition: MESH_LOADED → READY_TO_RENDER (successful render with cached projections)
-    if (renderer->state == RendererState::MESH_LOADED) {
-        renderer->state = RendererState::READY_TO_RENDER;
-    }
-
-    spdlog::trace("[Bed Mesh Renderer] Mesh rendering complete");
-    return true;
-}
-
 // ============================================================================
-// Buffer-targeted rendering (no LVGL calls — safe for background threads)
+// Rendering (no LVGL calls - runs on the render thread)
 // ============================================================================
 
 bool bed_mesh_renderer_render_to_buffer(bed_mesh_renderer_t* renderer,
@@ -538,6 +399,20 @@ bool bed_mesh_renderer_render_to_buffer(bed_mesh_renderer_t* renderer,
     buffer.clear(colors.bg_r, colors.bg_g, colors.bg_b, 255);
 
     auto t_frame_start = std::chrono::high_resolution_clock::now();
+
+    buffer.info.heatmap = bed_mesh_renderer_is_using_2d(renderer);
+    buffer.info.rows = renderer->rows;
+    buffer.info.cols = renderer->cols;
+    if (buffer.info.heatmap) {
+        render_2d_heatmap_to_buffer(buffer, renderer);
+        auto ms_total = std::chrono::duration<double, std::milli>(
+                            std::chrono::high_resolution_clock::now() - t_frame_start)
+                            .count();
+        record_frame_time(renderer, static_cast<float>(ms_total));
+        spdlog::trace("[Bed Mesh Renderer] [2D] Heatmap render: {:.2f}ms (FPS: {:.1f})", ms_total,
+                      calculate_average_fps(renderer));
+        return true;
+    }
 
     // Step 2: Prepare render frame (pure math, no LVGL calls)
     // For buffer rendering, layer offset is (0,0) since we render into local widget space
@@ -886,27 +761,13 @@ static void calibrate_fov_scale(bed_mesh_renderer_t* renderer, int canvas_width,
     int min_x, max_x, min_y, max_y;
     compute_projected_mesh_bounds(renderer, &min_x, &max_x, &min_y, &max_y);
 
-    // ALSO include wall corners in bounds calculation
-    // This prevents walls from being clipped when they extend above the mesh
-    // Must match render_reference_grids() - use BED bounds when available, not mesh
-    double bed_half_width, bed_half_height;
-    if (renderer->has_bed_bounds) {
-        bed_half_width = (renderer->bed_max_x - renderer->bed_min_x) / 2.0 * renderer->coord_scale;
-        bed_half_height = (renderer->bed_max_y - renderer->bed_min_y) / 2.0 * renderer->coord_scale;
-    } else {
-        bed_half_width = (renderer->cols - 1) / 2.0 * BED_MESH_SCALE;
-        bed_half_height = (renderer->rows - 1) / 2.0 * BED_MESH_SCALE;
-    }
-    double z_min_world = helix::mesh::mesh_z_to_world_z(
-        renderer->mesh_min_z, renderer->cached_z_center, renderer->view_state.z_scale);
-    double z_max_world = helix::mesh::mesh_z_to_world_z(
-        renderer->mesh_max_z, renderer->cached_z_center, renderer->view_state.z_scale);
-
-    // Calculate wall bounds using centralized function
-    auto bounds =
-        helix::mesh::compute_wall_bounds(z_min_world, z_max_world, bed_half_width, bed_half_height);
-    double wall_z_max = bounds.ceiling_z;
-    double wall_z_floor = bounds.floor_z;
+    // ALSO include wall corners in bounds calculation, so walls that extend above
+    // the mesh are not clipped. Same extent render_reference_grids() draws.
+    const auto ext = helix::mesh::compute_bed_extent(renderer);
+    const double bed_half_width = ext.half_width;
+    const double bed_half_height = ext.half_height;
+    double wall_z_max = ext.walls.ceiling_z;
+    double wall_z_floor = ext.walls.floor_z;
 
     // Project wall/floor corners and expand bounds
     // Include grid margin to account for tick label positions
@@ -1066,240 +927,8 @@ static void prepare_render_frame(bed_mesh_renderer_t* renderer, int canvas_width
     project_and_cache_vertices(renderer, canvas_width, canvas_height);
 }
 
-/**
- * @brief Render mesh surface as colored quads
- *
- * Projects all quad vertices, sorts by depth (painter's algorithm), and renders
- * each quad as two triangles. Uses gradient interpolation when static, solid
- * colors when dragging for performance.
- *
- * @param layer LVGL draw layer
- * @param renderer Renderer with prepared view state
- * @param canvas_width Actual canvas width (NOT clip_area width, to avoid partial render bugs)
- * @param canvas_height Actual canvas height (NOT clip_area height)
- */
-static void render_mesh_surface(lv_layer_t* layer, bed_mesh_renderer_t* renderer, int canvas_width,
-                                int canvas_height) {
-    // PERF: Track rendering pipeline timings
-    auto t_start = std::chrono::high_resolution_clock::now();
-
-    // Note: canvas_width/height are passed in from the main render function
-    // DO NOT use clip_area dimensions here - they can be smaller during partial redraws
-    // which corrupts the 3D projection math
-
-    // Project all quad vertices once and cache screen coordinates + depths
-    // This replaces 3 separate projection passes (depth calc, bounds tracking, rendering)
-    project_and_cache_quads(renderer, canvas_width, canvas_height);
-    auto t_project = std::chrono::high_resolution_clock::now();
-
-    // Sort quads by depth using cached avg_depth (painter's algorithm - furthest first)
-    helix::mesh::sort_quads_by_depth(renderer->quads);
-    auto t_sort = std::chrono::high_resolution_clock::now();
-
-    spdlog::trace("[Bed Mesh Renderer] Rendering {} quads with {} mode", renderer->quads.size(),
-                  renderer->view_state.is_dragging ? "solid" : "gradient");
-
-    // DEBUG: Track overall gradient quad bounds using cached coordinates
-    int quad_min_x = INT_MAX, quad_max_x = INT_MIN;
-    int quad_min_y = INT_MAX, quad_max_y = INT_MIN;
-    for (const auto& quad : renderer->quads) {
-        for (int i = 0; i < 4; i++) {
-            quad_min_x = std::min(quad_min_x, quad.screen_x[i]);
-            quad_max_x = std::max(quad_max_x, quad.screen_x[i]);
-            quad_min_y = std::min(quad_min_y, quad.screen_y[i]);
-            quad_max_y = std::max(quad_max_y, quad.screen_y[i]);
-        }
-    }
-    spdlog::trace("[Bed Mesh Renderer] [GRADIENT_OVERALL] All quads bounds: x=[{},{}] y=[{},{}] "
-                  "quads={} canvas={}x{}",
-                  quad_min_x, quad_max_x, quad_min_y, quad_max_y, renderer->quads.size(),
-                  canvas_width, canvas_height);
-
-    // DEBUG: Log first quad vertex positions using cached coordinates
-    if (!renderer->quads.empty()) {
-        const auto& first_quad = renderer->quads[0];
-        spdlog::trace("[Bed Mesh Renderer] [FIRST_QUAD] Vertices (world -> cached screen):");
-        for (int i = 0; i < 4; i++) {
-            spdlog::trace(
-                "[Bed Mesh Renderer]   v{}: world=({:.2f},{:.2f},{:.2f}) -> screen=({},{})", i,
-                first_quad.vertices[i].x, first_quad.vertices[i].y, first_quad.vertices[i].z,
-                first_quad.screen_x[i], first_quad.screen_y[i]);
-        }
-    }
-
-    // Render quads using cached screen coordinates
-    bool use_gradient = !renderer->view_state.is_dragging;
-    for (const auto& quad : renderer->quads) {
-        render_quad(layer, quad, use_gradient);
-    }
-    auto t_rasterize = std::chrono::high_resolution_clock::now();
-
-    // PERF: Log performance breakdown (use -vvv to see)
-    auto ms_project = std::chrono::duration<double, std::milli>(t_project - t_start).count();
-    auto ms_sort = std::chrono::duration<double, std::milli>(t_sort - t_project).count();
-    auto ms_rasterize = std::chrono::duration<double, std::milli>(t_rasterize - t_sort).count();
-
-    spdlog::trace("[Bed Mesh Renderer] [PERF] Surface render: Proj: {:.2f}ms ({:.0f}%) | Sort: "
-                  "{:.2f}ms ({:.0f}%) | "
-                  "Raster: {:.2f}ms ({:.0f}%) | Mode: {}",
-                  ms_project, 100.0 * ms_project / (ms_project + ms_sort + ms_rasterize), ms_sort,
-                  100.0 * ms_sort / (ms_project + ms_sort + ms_rasterize), ms_rasterize,
-                  100.0 * ms_rasterize / (ms_project + ms_sort + ms_rasterize),
-                  renderer->view_state.is_dragging ? "solid" : "gradient");
-}
-
-/**
- * @brief Render decorations (reference grids, grid lines, axis labels, tick marks)
- *
- * Renders overlay elements on top of the mesh surface:
- * - Reference grids (bottom, back, side walls)
- * - Wireframe grid on mesh surface
- * - Axis labels (X, Y, Z)
- * - Numeric tick labels on axes
- *
- * @param layer LVGL draw layer
- * @param renderer Renderer with prepared view state
- * @param canvas_width Canvas width in pixels
- * @param canvas_height Canvas height in pixels
- */
-static void render_decorations(lv_layer_t* layer, bed_mesh_renderer_t* renderer, int canvas_width,
-                               int canvas_height) {
-    auto t_start = std::chrono::high_resolution_clock::now();
-
-    // Note: Reference grids are now rendered BEFORE mesh surface (in main render loop)
-    // to ensure mesh properly obscures them
-
-    // Render wireframe grid on top of mesh surface
-    helix::mesh::render_grid_lines(layer, renderer, canvas_width, canvas_height);
-
-    // Render axis labels
-    helix::mesh::render_axis_labels(layer, renderer, canvas_width, canvas_height);
-
-    // Render numeric tick labels on axes
-    helix::mesh::render_numeric_axis_ticks(layer, renderer, canvas_width, canvas_height);
-
-    auto t_end = std::chrono::high_resolution_clock::now();
-    auto ms_overlays = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-
-    spdlog::trace("[Bed Mesh Renderer] [PERF] Decorations render: {:.2f}ms", ms_overlays);
-}
-
 // ============================================================================
-// Quad Rendering
-// ============================================================================
-
-/**
- * @brief Render a single quad using cached screen coordinates
- *
- * IMPORTANT: Assumes quad screen coordinates are already computed via
- * project_and_cache_quads(). Does NOT perform projection - uses cached values.
- *
- * Uses helix::mesh rasterizer module for triangle fills - LVGL handles clipping
- * automatically via the layer system.
- *
- * For uniform-color quads (like the zero plane), uses LVGL's polygon fill to
- * avoid visible triangle seams along the diagonal.
- *
- * @param layer LVGL draw layer
- * @param quad Quad with cached screen_x[], screen_y[] coordinates
- * @param use_gradient true = gradient interpolation, false = solid color
- */
-static void render_quad(lv_layer_t* layer, const bed_mesh_quad_3d_t& quad, bool use_gradient) {
-    /**
-     * Quad vertex layout:
-     *
-     *    [2]TL ──────── [3]TR
-     *      │              │
-     *      │     QUAD     │
-     *      │              │
-     *    [0]BL ──────── [1]BR
-     */
-
-    // Use quad's opacity (LV_OPA_COVER for mesh quads, translucent for zero plane)
-    lv_opa_t opacity = quad.opacity;
-
-    // For translucent quads (zero plane), use polygon fill instead of triangles
-    // to avoid visible diagonal seams. The plane is uniform color.
-    bool is_translucent = (opacity != LV_OPA_COVER);
-
-    if (is_translucent) {
-        // Render as a single filled polygon (no diagonal line)
-        // Vertex order: BL -> BR -> TR -> TL (clockwise for LVGL)
-        lv_point_precise_t points[4] = {
-            {static_cast<lv_value_precise_t>(quad.screen_x[0]),
-             static_cast<lv_value_precise_t>(quad.screen_y[0])}, // BL
-            {static_cast<lv_value_precise_t>(quad.screen_x[1]),
-             static_cast<lv_value_precise_t>(quad.screen_y[1])}, // BR
-            {static_cast<lv_value_precise_t>(quad.screen_x[3]),
-             static_cast<lv_value_precise_t>(quad.screen_y[3])}, // TR
-            {static_cast<lv_value_precise_t>(quad.screen_x[2]),
-             static_cast<lv_value_precise_t>(quad.screen_y[2])}, // TL
-        };
-
-        lv_draw_triangle_dsc_t tri_dsc;
-        lv_draw_triangle_dsc_init(&tri_dsc);
-        tri_dsc.color = quad.center_color;
-        tri_dsc.opa = opacity;
-
-        // LVGL 9 doesn't have polygon fill, so use 2 triangles but without gradient
-        // to minimize seam visibility. Use the native triangle draw for cleaner edges.
-        // Triangle 1: BL, BR, TR
-        tri_dsc.p[0] = points[0];
-        tri_dsc.p[1] = points[1];
-        tri_dsc.p[2] = points[2];
-        lv_draw_triangle(layer, &tri_dsc);
-
-        // Triangle 2: BL, TR, TL
-        tri_dsc.p[0] = points[0];
-        tri_dsc.p[1] = points[2];
-        tri_dsc.p[2] = points[3];
-        lv_draw_triangle(layer, &tri_dsc);
-        return;
-    }
-
-    // For opaque mesh quads, use triangle rasterizer with gradient support
-    bool should_use_gradient = use_gradient;
-
-    /**
-     * Render quad as 2 triangles (diagonal split from BL to TR):
-     *
-     *    [2]TL ──────── [3]TR
-     *      │  ╲          │
-     *      │    ╲  Tri2  │     Tri1: [0]BL → [1]BR → [2]TL (lower-right)
-     *      │ Tri1 ╲      │     Tri2: [1]BR → [3]TR → [2]TL (upper-left)
-     *      │        ╲    │
-     *    [0]BL ──────── [1]BR
-     *
-     * Using indices [0,1,2] and [1,3,2] creates CCW winding for front-facing triangles
-     */
-
-    // Triangle 1: [0]BL → [1]BR → [2]TL
-    if (should_use_gradient) {
-        helix::mesh::fill_triangle_gradient(
-            layer, quad.screen_x[0], quad.screen_y[0], quad.vertices[0].color, quad.screen_x[1],
-            quad.screen_y[1], quad.vertices[1].color, quad.screen_x[2], quad.screen_y[2],
-            quad.vertices[2].color, opacity);
-    } else {
-        helix::mesh::fill_triangle_solid(layer, quad.screen_x[0], quad.screen_y[0],
-                                         quad.screen_x[1], quad.screen_y[1], quad.screen_x[2],
-                                         quad.screen_y[2], quad.center_color, opacity);
-    }
-
-    // Triangle 2: [1]BR → [3]TR → [2]TL
-    if (should_use_gradient) {
-        helix::mesh::fill_triangle_gradient(
-            layer, quad.screen_x[1], quad.screen_y[1], quad.vertices[1].color, quad.screen_x[2],
-            quad.screen_y[2], quad.vertices[2].color, quad.screen_x[3], quad.screen_y[3],
-            quad.vertices[3].color, opacity);
-    } else {
-        helix::mesh::fill_triangle_solid(layer, quad.screen_x[1], quad.screen_y[1],
-                                         quad.screen_x[2], quad.screen_y[2], quad.screen_x[3],
-                                         quad.screen_y[3], quad.center_color, opacity);
-    }
-}
-
-// ============================================================================
-// Buffer-targeted quad/surface/decorations (no LVGL calls)
+// Quad, surface and decorations
 // ============================================================================
 
 /**
@@ -1378,7 +1007,7 @@ static void render_decorations_to_buffer(helix::mesh::PixelBuffer& buf,
 }
 
 // ============================================================================
-// Phase 4: Adaptive Render Mode (FPS-based 3D/2D switching)
+// Adaptive Render Mode (FPS-based 3D/2D switching)
 // ============================================================================
 
 /**
@@ -1417,238 +1046,63 @@ static bool is_fps_below_threshold(const bed_mesh_renderer_t* renderer, float mi
 }
 
 /**
- * @brief Map Z value to heatmap color (purple → green → red)
- *
- * Uses the same color gradient as 3D mode for visual consistency.
- */
-static lv_color_t z_to_heatmap_color(float z, float z_min, float z_max) {
-    // Use the shared bed mesh gradient function (handles normalization internally)
-    return bed_mesh_gradient_height_to_color(static_cast<double>(z), static_cast<double>(z_min),
-                                             static_cast<double>(z_max));
-}
-
-/**
  * @brief Render mesh as 2D heatmap with triangle-based color blending
  *
  * Each cell is rendered as 4 triangles meeting at center, with colors
  * averaged from the corner Z values. This provides smooth color transitions
  * while maintaining honest probe resolution (N-1 cells for N probe points).
+ * The border and touch tooltip are drawn on the main thread
+ * (helix::mesh::render_heatmap_overlay).
  */
-static void render_2d_heatmap(lv_layer_t* layer, bed_mesh_renderer_t* renderer, int canvas_width,
-                              int canvas_height, int offset_x, int offset_y) {
-    if (!renderer->has_mesh_data) {
-        return;
-    }
-
-    // Layout parameters
-    int padding = 8;
-    int grid_width = canvas_width - 2 * padding;
-    int grid_height = canvas_height - 2 * padding;
-
-    // Calculate cell dimensions at actual mesh resolution
-    // Grid shows honest probe resolution (N-1 cells for N probe points)
-    int num_cells_x = renderer->cols - 1;
-    int num_cells_y = renderer->rows - 1;
-
-    // Guard against 1x1 mesh (no cells to render)
-    if (num_cells_x <= 0 || num_cells_y <= 0) {
+static void render_2d_heatmap_to_buffer(helix::mesh::PixelBuffer& buf,
+                                        const bed_mesh_renderer_t* renderer) {
+    const auto l = helix::mesh::compute_heatmap_layout(renderer->rows, renderer->cols, buf.width(),
+                                                       buf.height());
+    if (!l.valid) {
         spdlog::warn("[Bed Mesh] 2D heatmap requires at least 2x2 mesh (got {}x{})", renderer->cols,
                      renderer->rows);
         return;
     }
 
-    int cell_w = grid_width / num_cells_x;
-    int cell_h = grid_height / num_cells_y;
-    if (cell_w < 1)
-        cell_w = 1;
-    if (cell_h < 1)
-        cell_h = 1;
-
-    // Center the grid
-    int grid_x = offset_x + padding + (grid_width - cell_w * num_cells_x) / 2;
-    int grid_y = offset_y + padding + (grid_height - cell_h * num_cells_y) / 2;
-
-    // Z range for coloring
-    float z_min = static_cast<float>(renderer->auto_color_range ? renderer->mesh_min_z
-                                                                : renderer->color_min_z);
-    float z_max = static_cast<float>(renderer->auto_color_range ? renderer->mesh_max_z
-                                                                : renderer->color_max_z);
-    float z_range = z_max - z_min;
-    if (z_range < 0.001f)
-        z_range = 0.001f;
-
-    // Contour interval (in mm) - adaptive based on range
-    float contour_interval = 0.05f; // 50 microns
-    if (z_range > 0.5f)
-        contour_interval = 0.1f;
-    if (z_range < 0.1f)
-        contour_interval = 0.02f;
-
-    // Triangle-based rendering: each cell is 4 triangles meeting at center
-    // Vertex colors come from actual mesh Z values - smooth blending without fake resolution
-    lv_draw_triangle_dsc_t tri_dsc;
-    lv_draw_triangle_dsc_init(&tri_dsc);
-    tri_dsc.opa = LV_OPA_COVER;
-
-    // Helper to blend colors (average RGB)
-    auto blend_colors = [](lv_color_t c1, lv_color_t c2, lv_color_t c3) -> lv_color_t {
+    double z_min = renderer->auto_color_range ? renderer->mesh_min_z : renderer->color_min_z;
+    double z_max = renderer->auto_color_range ? renderer->mesh_max_z : renderer->color_max_z;
+    auto color_of = [&](double z) { return bed_mesh_gradient_height_to_color(z, z_min, z_max); };
+    auto blend = [](lv_color_t c1, lv_color_t c2, lv_color_t c3) -> lv_color_t {
         return lv_color_make((c1.red + c2.red + c3.red) / 3, (c1.green + c2.green + c3.green) / 3,
                              (c1.blue + c2.blue + c3.blue) / 3);
     };
 
-    // Render each cell as 4 triangles
-    for (int row = 0; row < num_cells_y; row++) {
-        for (int col = 0; col < num_cells_x; col++) {
-            // Get Z values at the 4 corners of this cell
-            float z_tl = static_cast<float>(
-                renderer->mesh[static_cast<size_t>(row)][static_cast<size_t>(col)]);
-            float z_tr = static_cast<float>(
-                renderer->mesh[static_cast<size_t>(row)][static_cast<size_t>(col + 1)]);
-            float z_bl = static_cast<float>(
-                renderer->mesh[static_cast<size_t>(row + 1)][static_cast<size_t>(col)]);
-            float z_br = static_cast<float>(
-                renderer->mesh[static_cast<size_t>(row + 1)][static_cast<size_t>(col + 1)]);
-            float z_center = (z_tl + z_tr + z_bl + z_br) / 4.0f;
+    for (int row = 0; row < l.cells_y; row++) {
+        const auto& top = renderer->mesh[static_cast<size_t>(row)];
+        const auto& bottom = renderer->mesh[static_cast<size_t>(row + 1)];
+        for (int col = 0; col < l.cells_x; col++) {
+            double z_tl = top[static_cast<size_t>(col)];
+            double z_tr = top[static_cast<size_t>(col + 1)];
+            double z_bl = bottom[static_cast<size_t>(col)];
+            double z_br = bottom[static_cast<size_t>(col + 1)];
 
-            // Convert Z values to colors
-            lv_color_t c_tl = z_to_heatmap_color(z_tl, z_min, z_max);
-            lv_color_t c_tr = z_to_heatmap_color(z_tr, z_min, z_max);
-            lv_color_t c_bl = z_to_heatmap_color(z_bl, z_min, z_max);
-            lv_color_t c_br = z_to_heatmap_color(z_br, z_min, z_max);
-            lv_color_t c_center = z_to_heatmap_color(z_center, z_min, z_max);
+            lv_color_t c_tl = color_of(z_tl);
+            lv_color_t c_tr = color_of(z_tr);
+            lv_color_t c_bl = color_of(z_bl);
+            lv_color_t c_br = color_of(z_br);
+            lv_color_t c_center = color_of((z_tl + z_tr + z_bl + z_br) / 4.0);
 
-            // Screen coordinates for corners and center
-            int x_left = grid_x + col * cell_w;
-            int x_right = grid_x + (col + 1) * cell_w;
-            int y_top = grid_y + row * cell_h;
-            int y_bottom = grid_y + (row + 1) * cell_h;
+            int x_left = l.grid_x + col * l.cell_w;
+            int x_right = l.grid_x + (col + 1) * l.cell_w;
+            int y_top = l.grid_y + row * l.cell_h;
+            int y_bottom = l.grid_y + (row + 1) * l.cell_h;
             int x_mid = (x_left + x_right) / 2;
             int y_mid = (y_top + y_bottom) / 2;
 
-            // Top triangle (TL - TR - Center)
-            tri_dsc.color = blend_colors(c_tl, c_tr, c_center);
-            tri_dsc.p[0].x = x_left;
-            tri_dsc.p[0].y = y_top;
-            tri_dsc.p[1].x = x_right;
-            tri_dsc.p[1].y = y_top;
-            tri_dsc.p[2].x = x_mid;
-            tri_dsc.p[2].y = y_mid;
-            lv_draw_triangle(layer, &tri_dsc);
-
-            // Right triangle (TR - BR - Center)
-            tri_dsc.color = blend_colors(c_tr, c_br, c_center);
-            tri_dsc.p[0].x = x_right;
-            tri_dsc.p[0].y = y_top;
-            tri_dsc.p[1].x = x_right;
-            tri_dsc.p[1].y = y_bottom;
-            tri_dsc.p[2].x = x_mid;
-            tri_dsc.p[2].y = y_mid;
-            lv_draw_triangle(layer, &tri_dsc);
-
-            // Bottom triangle (BR - BL - Center)
-            tri_dsc.color = blend_colors(c_br, c_bl, c_center);
-            tri_dsc.p[0].x = x_right;
-            tri_dsc.p[0].y = y_bottom;
-            tri_dsc.p[1].x = x_left;
-            tri_dsc.p[1].y = y_bottom;
-            tri_dsc.p[2].x = x_mid;
-            tri_dsc.p[2].y = y_mid;
-            lv_draw_triangle(layer, &tri_dsc);
-
-            // Left triangle (BL - TL - Center)
-            tri_dsc.color = blend_colors(c_bl, c_tl, c_center);
-            tri_dsc.p[0].x = x_left;
-            tri_dsc.p[0].y = y_bottom;
-            tri_dsc.p[1].x = x_left;
-            tri_dsc.p[1].y = y_top;
-            tri_dsc.p[2].x = x_mid;
-            tri_dsc.p[2].y = y_mid;
-            lv_draw_triangle(layer, &tri_dsc);
+            helix::mesh::fill_triangle_solid(buf, x_left, y_top, x_right, y_top, x_mid, y_mid,
+                                             blend(c_tl, c_tr, c_center));
+            helix::mesh::fill_triangle_solid(buf, x_right, y_top, x_right, y_bottom, x_mid, y_mid,
+                                             blend(c_tr, c_br, c_center));
+            helix::mesh::fill_triangle_solid(buf, x_right, y_bottom, x_left, y_bottom, x_mid, y_mid,
+                                             blend(c_br, c_bl, c_center));
+            helix::mesh::fill_triangle_solid(buf, x_left, y_bottom, x_left, y_top, x_mid, y_mid,
+                                             blend(c_bl, c_tl, c_center));
         }
-    }
-
-    // NOTE: Contour lines disabled - the smooth gradient + hillshade provides
-    // sufficient depth perception without the visual noise of disconnected segments.
-    // A proper marching squares algorithm would be needed for smooth contour curves.
-    (void)contour_interval; // Suppress unused warning
-
-    // Draw subtle border around the entire grid
-    lv_draw_rect_dsc_t border_dsc;
-    lv_draw_rect_dsc_init(&border_dsc);
-    border_dsc.bg_opa = LV_OPA_TRANSP;
-    border_dsc.border_color = theme_manager_get_color("elevated_bg");
-    border_dsc.border_width = 1;
-    border_dsc.border_opa = LV_OPA_60;
-    border_dsc.radius = 2;
-
-    lv_area_t border_area;
-    border_area.x1 = static_cast<int16_t>(grid_x - 1);
-    border_area.y1 = static_cast<int16_t>(grid_y - 1);
-    border_area.x2 = static_cast<int16_t>(grid_x + num_cells_x * cell_w + 1);
-    border_area.y2 = static_cast<int16_t>(grid_y + num_cells_y * cell_h + 1);
-    lv_draw_rect(layer, &border_dsc, &border_area);
-
-    // Draw tooltip for touched cell
-    if (renderer->touch_valid) {
-        // cell_w and cell_h already calculated above at mesh resolution
-        // Highlight the touched mesh cell
-        lv_draw_rect_dsc_t highlight_dsc;
-        lv_draw_rect_dsc_init(&highlight_dsc);
-        highlight_dsc.bg_opa = LV_OPA_20;
-        highlight_dsc.bg_color = lv_color_white();
-        highlight_dsc.border_color = lv_color_white();
-        highlight_dsc.border_width = 2;
-        highlight_dsc.border_opa = LV_OPA_COVER;
-        highlight_dsc.radius = 2;
-
-        lv_area_t highlight_area;
-        highlight_area.x1 = static_cast<int16_t>(grid_x + renderer->touched_col * cell_w);
-        highlight_area.y1 = static_cast<int16_t>(grid_y + renderer->touched_row * cell_h);
-        highlight_area.x2 = static_cast<int16_t>(highlight_area.x1 + cell_w - 1);
-        highlight_area.y2 = static_cast<int16_t>(highlight_area.y1 + cell_h - 1);
-        lv_draw_rect(layer, &highlight_dsc, &highlight_area);
-
-        // Draw Z value tooltip (add display offset to show original probe height)
-        char z_text[32];
-        snprintf(z_text, sizeof(z_text), "%.3f mm",
-                 static_cast<double>(renderer->touched_z) + renderer->z_display_offset);
-
-        // Position tooltip above the cell (or below if near top)
-        int tooltip_x = highlight_area.x1 + cell_w / 2 - 30;
-        int tooltip_y = highlight_area.y1 - 24;
-        if (tooltip_y < offset_y + 5) {
-            tooltip_y = highlight_area.y2 + 5;
-        }
-
-        // Draw tooltip background with shadow effect
-        lv_draw_rect_dsc_t tooltip_bg;
-        lv_draw_rect_dsc_init(&tooltip_bg);
-        tooltip_bg.bg_color = theme_manager_get_color("card_bg");
-        tooltip_bg.bg_opa = LV_OPA_90;
-        tooltip_bg.radius = 6;
-        tooltip_bg.border_color = theme_manager_get_color("elevated_bg");
-        tooltip_bg.border_width = 1;
-        tooltip_bg.border_opa = LV_OPA_60;
-
-        lv_area_t tooltip_area = {.x1 = static_cast<int16_t>(tooltip_x - 8),
-                                  .y1 = static_cast<int16_t>(tooltip_y - 4),
-                                  .x2 = static_cast<int16_t>(tooltip_x + 68),
-                                  .y2 = static_cast<int16_t>(tooltip_y + 18)};
-        lv_draw_rect(layer, &tooltip_bg, &tooltip_area);
-
-        // Draw tooltip text
-        lv_draw_label_dsc_t label_dsc;
-        lv_draw_label_dsc_init(&label_dsc);
-        label_dsc.color = lv_color_white();
-        label_dsc.font = &noto_sans_14;
-        label_dsc.text = z_text;
-        label_dsc.align = LV_TEXT_ALIGN_CENTER;
-
-        lv_area_t label_area = {.x1 = static_cast<int16_t>(tooltip_x),
-                                .y1 = static_cast<int16_t>(tooltip_y),
-                                .x2 = static_cast<int16_t>(tooltip_x + 60),
-                                .y2 = static_cast<int16_t>(tooltip_y + 14)};
-        lv_draw_label(layer, &label_dsc, &label_area);
     }
 }
 
@@ -1660,6 +1114,7 @@ void bed_mesh_renderer_set_render_mode(bed_mesh_renderer_t* renderer, BedMeshRen
     if (!renderer)
         return;
     renderer->render_mode = mode;
+    bed_mesh_projection_reset_zoom(&renderer->view_state);
 
     // If forcing a mode, update the fallback flag immediately
     if (mode == BedMeshRenderMode::Force2D) {
@@ -1719,39 +1174,22 @@ void bed_mesh_renderer_evaluate_render_mode(bed_mesh_renderer_t* renderer) {
 // ============================================================================
 
 bool bed_mesh_renderer_handle_touch(bed_mesh_renderer_t* renderer, int touch_x, int touch_y,
-                                    int canvas_width, int canvas_height) {
+                                    const helix::mesh::HeatmapLayout& l) {
     if (!renderer || !renderer->has_mesh_data)
         return false;
 
-    // Only handle touch in 2D mode
-    if (!bed_mesh_renderer_is_using_2d(renderer))
-        return false;
-
-    // Calculate grid dimensions (must match render_2d_heatmap)
-    // N probe points = N-1 cells
-    int padding = 8;
-    int grid_width = canvas_width - 2 * padding;
-    int grid_height = canvas_height - 2 * padding;
-    int num_cells_x = renderer->cols - 1;
-    int num_cells_y = renderer->rows - 1;
-
-    // Guard against 1x1 mesh (no cells)
-    if (num_cells_x <= 0 || num_cells_y <= 0) {
+    if (!l.valid) {
         renderer->touch_valid = false;
         return false;
     }
 
-    int cell_w = grid_width / num_cells_x;
-    int cell_h = grid_height / num_cells_y;
-    int grid_x = padding + (grid_width - cell_w * num_cells_x) / 2;
-    int grid_y = padding + (grid_height - cell_h * num_cells_y) / 2;
-
     // Convert touch to cell coordinates
-    int col = (touch_x - grid_x) / cell_w;
-    int row = (touch_y - grid_y) / cell_h;
+    int col = (touch_x - l.grid_x) / l.cell_w;
+    int row = (touch_y - l.grid_y) / l.cell_h;
 
-    // Check bounds (N-1 cells)
-    if (col < 0 || col >= num_cells_x || row < 0 || row >= num_cells_y) {
+    // Check bounds (N-1 cells); the shown frame may predate a smaller mesh
+    if (col < 0 || col >= l.cells_x || row < 0 || row >= l.cells_y || row >= renderer->rows ||
+        col >= renderer->cols) {
         renderer->touch_valid = false;
         return false;
     }

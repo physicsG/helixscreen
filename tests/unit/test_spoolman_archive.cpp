@@ -60,12 +60,12 @@ struct SpoolmanArchiveFixture : LVGLUITestFixture {
 
         // Controlled server-side state: two spools, so the refetch assertion
         // can tell "archived one removed" from "list emptied".
-        auto& server = api.spoolman_mock().get_mock_spools();
+        auto& server = client.spoolman_mock().get_mock_spools();
         server.clear();
         server.push_back(make_spool(41, "Ambrosia Pink"));
         server.push_back(make_spool(42, "Jet Black"));
 
-        api.spoolman_mock().set_mock_spoolman_enabled(true);
+        client.set_mock_spoolman_enabled(true);
         set_moonraker_api(&api);
     }
 
@@ -118,7 +118,7 @@ TEST_CASE("archive confirm sends one archived PATCH and the refetch drops the sp
     REQUIRE_FALSE(ModalStack::instance().stack_empty());
     f.answer_modal("btn_primary");
 
-    const auto& updates = f.api.spoolman_mock().spool_updates;
+    const auto& updates = f.client.spoolman_mock().spool_updates;
     REQUIRE(updates.size() == 1);
     REQUIRE(updates[0].spool_id == 41);
     REQUIRE(updates[0].patch == nlohmann::json{{"archived", true}});
@@ -145,7 +145,7 @@ TEST_CASE("archive confirm sends one archived PATCH and the refetch drops the sp
 
 TEST_CASE("archive error path records no PATCH and only toasts", "[spoolman][archive]") {
     SpoolmanArchiveFixture f;
-    f.api.spoolman_mock().set_mock_spoolman_enabled(false);
+    f.client.set_mock_spoolman_enabled(false);
 
     SpoolmanPanel& panel = get_global_spoolman_panel();
     SpoolmanPanelTestAccess::seed_cached_spools(panel, {make_spool(41, "Ambrosia Pink")});
@@ -153,7 +153,7 @@ TEST_CASE("archive error path records no PATCH and only toasts", "[spoolman][arc
     SpoolmanPanelTestAccess::archive_spool(panel, 41);
     f.answer_modal("btn_primary");
 
-    CHECK(f.api.spoolman_mock().spool_updates.empty());
+    CHECK(f.client.spoolman_mock().spool_updates.empty());
     CHECK(ModalStack::instance().stack_empty());
 }
 
@@ -165,7 +165,7 @@ TEST_CASE("archive cancel fires no PATCH", "[spoolman][archive]") {
     SpoolmanPanelTestAccess::archive_spool(panel, 41);
     f.answer_modal("btn_secondary");
 
-    CHECK(f.api.spoolman_mock().spool_updates.empty());
+    CHECK(f.client.spoolman_mock().spool_updates.empty());
     CHECK(ModalStack::instance().stack_empty());
     CHECK(server_serves(f.api, 41));
 }

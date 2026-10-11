@@ -184,3 +184,77 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     inj.shutdown();
     process_lvgl(20);
 }
+
+// Print Files fills its list after NavigationManager has already walked the
+// panel, so the container is empty (and fits) when the walk runs.
+TEST_CASE_METHOD(LVGLUITestFixture, "AutoInject attaches when a container overflows after the walk",
+                 "[page_scroll_buttons][page_scroll_late_fill][ui]") {
+    auto& dsm = helix::DisplaySettingsManager::instance();
+    dsm.init_subjects();
+    auto& inj = PageScrollAutoInject::instance();
+    inj.shutdown();
+    inj.init();
+    dsm.set_page_scroll_buttons(true);
+
+    lv_obj_t* root = lv_obj_create(test_screen());
+    lv_obj_set_size(root, 480, 320);
+    lv_obj_t* list = add_vscroll(root, 0);
+    lv_obj_update_layout(root);
+
+    inj.on_root_shown(root);
+    REQUIRE(inj.managed_count() == 0);
+
+    for (int i = 0; i < 20; ++i) {
+        lv_obj_t* r = lv_obj_create(list);
+        lv_obj_set_size(r, lv_pct(100), 60);
+    }
+    lv_obj_update_layout(root); // the display refresh does this each frame
+    process_lvgl(50);
+
+    CHECK(inj.managed_count() == 1);
+    CHECK(lv_obj_find_by_name(list, "up") != nullptr);
+
+    inj.shutdown();
+    process_lvgl(20);
+}
+
+// LVGL lays out a hidden subtree, but the walk never claims inside one, so the
+// late-fill watch must not re-walk for a list that overflows while hidden.
+TEST_CASE_METHOD(LVGLUITestFixture, "AutoInject does not re-walk for a list filled while hidden",
+                 "[page_scroll_buttons][page_scroll_late_fill][ui]") {
+    auto& dsm = helix::DisplaySettingsManager::instance();
+    dsm.init_subjects();
+    auto& inj = PageScrollAutoInject::instance();
+    inj.shutdown();
+    inj.init();
+    dsm.set_page_scroll_buttons(true);
+
+    lv_obj_t* root = lv_obj_create(test_screen());
+    lv_obj_set_size(root, 480, 320);
+    lv_obj_t* list = add_vscroll(root, 0);
+    lv_obj_update_layout(root);
+    inj.on_root_shown(root);
+    REQUIRE(inj.managed_count() == 0);
+
+    lv_obj_add_flag(root, LV_OBJ_FLAG_HIDDEN);
+    for (int i = 0; i < 20; ++i) {
+        lv_obj_t* r = lv_obj_create(list);
+        lv_obj_set_size(r, lv_pct(100), 60);
+    }
+    const std::size_t before = inj.late_rewalk_count();
+    for (int pass = 0; pass < 10; ++pass) {
+        lv_obj_mark_layout_as_dirty(list);
+        lv_obj_update_layout(root);
+        process_lvgl(10);
+    }
+    CHECK(inj.late_rewalk_count() == before);
+    CHECK(inj.managed_count() == 0);
+
+    lv_obj_remove_flag(root, LV_OBJ_FLAG_HIDDEN);
+    inj.on_root_shown(root);
+    CHECK(inj.managed_count() == 1);
+    CHECK(lv_obj_find_by_name(list, "up") != nullptr);
+
+    inj.shutdown();
+    process_lvgl(20);
+}

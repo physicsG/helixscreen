@@ -15,6 +15,8 @@
  * - Optional auto-scroll timer
  * - Optional wrap-around
  * - Subject binding for current page
+ * - A page that only a swipe or a goto moves: a control that takes focus never
+ *   scrolls the carousel to its page
  *
  * Usage in XML:
  *   <ui_carousel wrap="true" auto_scroll_ms="5000" show_indicators="true">
@@ -22,6 +24,18 @@
  *     <lv_obj>Page 2 content</lv_obj>
  *   </ui_carousel>
  */
+
+namespace helix::ui {
+
+/**
+ * @brief When a carousel's pages respond to a horizontal swipe
+ */
+enum class CarouselSwipe {
+    Auto,     ///< Swipe when the carousel has more than one page
+    Disabled, ///< Never swipe
+};
+
+} // namespace helix::ui
 
 struct CarouselState {
     static constexpr uint32_t MAGIC = 0x43415231; // "CAR1"
@@ -37,6 +51,10 @@ struct CarouselState {
     bool wrap = true;
     bool show_indicators = true;
     bool user_touching = false;
+    bool bubble_events = false; ///< Pages' events continue to the carousel's parent
+    helix::ui::CarouselSwipe swipe = helix::ui::CarouselSwipe::Auto; ///< Applied at every rebuild
+    bool goto_scrolling = false; ///< A goto is starting its scroll and sets the page itself
+    bool trailing_tiles_reachable = true; ///< Tiles past real_page_count can be reached
 };
 
 /**
@@ -56,6 +74,10 @@ CarouselState* ui_carousel_get_state(lv_obj_t* obj);
 
 /**
  * @brief Navigate to a specific page
+ *
+ * Wraps or clamps @p page to the page count (real_page_count when set), then
+ * navigates as helix::ui::carousel_goto_tile does.
+ *
  * @param carousel The carousel container object
  * @param page Zero-based page index
  * @param animate Whether to animate the transition
@@ -84,7 +106,15 @@ int ui_carousel_get_page_count(lv_obj_t* carousel);
 void ui_carousel_add_item(lv_obj_t* carousel, lv_obj_t* item);
 
 /**
- * @brief Rebuild the indicator dots to match current page count
+ * @brief Apply the input flags for the current page count, then rebuild the indicator dots
+ *
+ * Writes the scroll container's swipe (LV_OBJ_FLAG_SCROLLABLE and scroll
+ * direction, from the swipe policy), LV_OBJ_FLAG_CLICKABLE and
+ * LV_OBJ_FLAG_EVENT_BUBBLE on the scroll container and every tile, and
+ * LV_OBJ_FLAG_HIDDEN on the tiles out of reach (see
+ * helix::ui::carousel_set_trailing_tiles_reachable), then recreates the dots.
+ * The flags are written even when the carousel has no indicator row.
+ *
  * @param carousel The carousel container object
  */
 void ui_carousel_rebuild_indicators(lv_obj_t* carousel);
@@ -141,14 +171,65 @@ void ui_carousel_set_real_page_count(lv_obj_t* carousel, int count);
  */
 void ui_carousel_remove_item(lv_obj_t* carousel, int index);
 
+namespace helix::ui {
+
 /**
- * @brief Enable or disable scroll input on the carousel
+ * @brief Route the pages' input events on to the carousel's parent
  *
- * When disabled, the scroll container loses LV_OBJ_FLAG_SCROLLABLE
- * and scroll direction is set to LV_DIR_NONE. When enabled, scrollable
- * flag and horizontal direction are restored.
+ * Sets LV_OBJ_FLAG_EVENT_BUBBLE on the carousel, its scroll container and
+ * every tile, and keeps it through later add_item, remove_item and
+ * set_real_page_count calls. For a parent that handles its pages' input
+ * itself. The default (false) lets a multi-page carousel's tiles keep input
+ * to themselves; a single-page carousel always passes it through. Writes
+ * input flags only; the indicator dots are untouched.
  *
  * @param carousel The carousel container object
- * @param enabled Whether scrolling should be enabled
+ * @param bubble Whether page events should reach the carousel's parent
  */
-void ui_carousel_set_scroll_enabled(lv_obj_t* carousel, bool enabled);
+void carousel_set_bubble_events(lv_obj_t* carousel, bool bubble);
+
+/**
+ * @brief Set when the carousel's pages respond to a horizontal swipe
+ *
+ * Stores the policy and writes the scroll container's LV_OBJ_FLAG_SCROLLABLE
+ * and scroll direction from it; add_item, remove_item and set_real_page_count
+ * apply it again at each page count. Writes input flags only, leaving the
+ * indicator dots untouched, so it is safe inside input dispatch. Which
+ * objects capture input still follows the page count.
+ *
+ * @param carousel The carousel container object
+ * @param policy Auto (the default) swipes when there is more than one page
+ */
+void carousel_set_swipe(lv_obj_t* carousel, CarouselSwipe policy);
+
+/**
+ * @brief Navigate to a tile, including tiles past real_page_count while they are reachable
+ *
+ * Wraps or clamps @p tile to the tiles within reach, scrolls to it, and sets
+ * the current page, the page subject and the indicator dots to it. The
+ * SCROLL_END of a scroll animation this navigation replaces leaves the page
+ * alone.
+ *
+ * @param carousel The carousel container object
+ * @param tile Zero-based tile index
+ * @param animate Whether to animate the transition
+ */
+void carousel_goto_tile(lv_obj_t* carousel, int tile, bool animate = true);
+
+/**
+ * @brief Set whether the tiles past real_page_count can be reached
+ *
+ * Out of reach, those tiles are hidden, so nothing reaches them: a swipe ends
+ * at the last page, carousel_goto_tile() stops there, and nothing on them takes
+ * a press. Writes flags only, creating, deleting and scrolling nothing, so it is
+ * safe inside input dispatch and a slide under way runs on; the carousel keeps
+ * the setting through later page-count changes. The carousel does not move
+ * itself: a caller takes it off those tiles before they go out of reach.
+ * Reachable by default.
+ *
+ * @param carousel The carousel container object
+ * @param reachable Whether the tiles past real_page_count can be reached
+ */
+void carousel_set_trailing_tiles_reachable(lv_obj_t* carousel, bool reachable);
+
+} // namespace helix::ui

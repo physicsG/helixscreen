@@ -5,6 +5,7 @@
 
 #include "calibration_types.h" // For ScrewTiltResult
 #include "overlay_base.h"
+#include "static_panel_registry.h"
 #include "subject_managed_panel.h"
 
 #include <array>
@@ -34,7 +35,7 @@ class IMoonrakerAPI;
  * ```cpp
  * ScrewsTiltPanel& panel = get_global_screws_tilt_panel();
  * panel.setup(lv_obj, parent_screen, moonraker_client, moonraker_api);
- * NavigationManager::instance().push_overlay(lv_obj);
+ * helix::nav::push_overlay(lv_obj);
  * ```
  */
 class ScrewsTiltPanel : public OverlayBase {
@@ -81,6 +82,10 @@ class ScrewsTiltPanel : public OverlayBase {
      * @brief Get human-readable overlay name
      * @return "Screws Tilt Adjust"
      */
+    const char* xml_component() const override {
+        return "screws_tilt_panel";
+    }
+
     const char* get_name() const override {
         return "Screws Tilt Adjust";
     }
@@ -97,7 +102,7 @@ class ScrewsTiltPanel : public OverlayBase {
      *
      * Aborts probing if in progress, clears results.
      */
-    void on_deactivate() override;
+    void on_deactivating(DeactivateReason reason) override;
 
     /**
      * @brief Clean up resources for async-safe destruction
@@ -107,14 +112,6 @@ class ScrewsTiltPanel : public OverlayBase {
     //
     // === Public API ===
     //
-
-    /**
-     * @brief Show overlay panel
-     *
-     * Pushes overlay onto navigation stack and registers with NavigationManager.
-     * on_activate() will be called automatically after animation completes.
-     */
-    void show();
 
     /**
      * @brief Set Moonraker client and API references
@@ -193,7 +190,6 @@ class ScrewsTiltPanel : public OverlayBase {
 
     // Widget references
     // Note: overlay_root_ inherited from OverlayBase
-    lv_obj_t* parent_screen_ = nullptr;
     helix::IMoonrakerClient* client_ = nullptr;
     IMoonrakerAPI* api_ = nullptr;
 
@@ -212,9 +208,9 @@ class ScrewsTiltPanel : public OverlayBase {
     static constexpr size_t SCREW_NAME_BUF_SIZE = 32;
     static constexpr size_t SCREW_ADJ_BUF_SIZE = 24; // "Tighten ¼ turn" etc.
 
-    std::array<lv_subject_t, MAX_SCREWS> screw_visible_subjects_;
-    std::array<lv_subject_t, MAX_SCREWS> screw_name_subjects_;
-    std::array<lv_subject_t, MAX_SCREWS> screw_adjustment_subjects_;
+    std::array<lv_subject_t, MAX_SCREWS> screw_visible_subjects_{};
+    std::array<lv_subject_t, MAX_SCREWS> screw_name_subjects_{};
+    std::array<lv_subject_t, MAX_SCREWS> screw_adjustment_subjects_{};
 
     // Fixed char arrays for string subjects (LVGL requires stable buffers)
     char screw_name_bufs_[MAX_SCREWS][SCREW_NAME_BUF_SIZE] = {};
@@ -223,11 +219,11 @@ class ScrewsTiltPanel : public OverlayBase {
     // Subjects for status labels
     static constexpr size_t PROBE_COUNT_BUF_SIZE = 64;
     static constexpr size_t ERROR_MSG_BUF_SIZE = 256;
-    lv_subject_t probe_count_subject_;
-    lv_subject_t error_message_subject_;
-    lv_subject_t recenter_hint_subject_;   ///< Alternative that turns fewer screws
-    lv_subject_t recenter_hint_available_; ///< 1 when the hint is worth showing
-    lv_subject_t results_is_leveled_subject_;
+    lv_subject_t probe_count_subject_{};
+    lv_subject_t error_message_subject_{};
+    lv_subject_t recenter_hint_subject_{};   ///< Alternative that turns fewer screws
+    lv_subject_t recenter_hint_available_{}; ///< 1 when the hint is worth showing
+    lv_subject_t results_is_leveled_subject_{};
     char probe_count_buf_[PROBE_COUNT_BUF_SIZE] = {};
     char error_message_buf_[ERROR_MSG_BUF_SIZE] = {};
     static constexpr size_t RECENTER_HINT_BUF_SIZE = 160;
@@ -250,10 +246,8 @@ class ScrewsTiltPanel : public OverlayBase {
 };
 
 // Global instance accessor
+// Defined out of line: the ESP32 build, which excludes this panel, supplies its own.
 ScrewsTiltPanel& get_global_screws_tilt_panel();
-
-// Destroy the global instance (call during shutdown)
-void destroy_screws_tilt_panel();
 
 /**
  * @brief Register XML event callbacks for screws tilt panel

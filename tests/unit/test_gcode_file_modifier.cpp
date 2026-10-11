@@ -407,12 +407,6 @@ G1 X10 Y10 Z0.2 E0.5
 // Streaming Mode Tests
 // ============================================================================
 
-TEST_CASE("GCodeFileModifier - Streaming mode constants", "[gcode][modifier][streaming]") {
-    // Verify the threshold constant is reasonable for embedded devices
-    REQUIRE(MAX_BUFFERED_FILE_SIZE == 5 * 1024 * 1024); // 5MB
-    REQUIRE(MAX_BUFFERED_FILE_SIZE < 10 * 1024 * 1024); // Less than 10MB
-}
-
 TEST_CASE("GCodeFileModifier - Streaming comment out", "[gcode][modifier][streaming]") {
     GCodeFileModifier modifier;
 
@@ -532,6 +526,86 @@ TEST_CASE("GCodeFileModifier - Streaming replace line", "[gcode][modifier][strea
     REQUIRE(content.find("OLD_LINE3") != std::string::npos);
 
     // Cleanup
+    std::filesystem::remove(test_path);
+    std::filesystem::remove(result.modified_path);
+}
+
+TEST_CASE("GCodeFileModifier - Streaming replace on the last line",
+          "[gcode][modifier][streaming]") {
+    // Streaming emits the separating newline BEFORE each line rather than after
+    // it, so the final line is the one place that bookkeeping can drop a
+    // separator or emit a spare one. The output is never newline-terminated,
+    // whether or not the source was.
+    auto run = [](const std::string& source, const std::string& replacement) {
+        GCodeFileModifier modifier;
+        std::string test_path =
+            "/tmp/helix_stream_test_last_" + std::to_string(getpid()) + ".gcode";
+        {
+            std::ofstream out(test_path);
+            out << source;
+        }
+
+        modifier.add_modification(Modification::replace(3, replacement, "Replaced"));
+        auto result = modifier.apply_streaming(test_path);
+
+        std::string content;
+        {
+            std::ifstream in(result.modified_path);
+            content.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        }
+
+        std::filesystem::remove(test_path);
+        std::filesystem::remove(result.modified_path);
+        return std::make_tuple(result.success, result.lines_modified, content);
+    };
+
+    SECTION("source ends with a newline") {
+        auto [ok, modified, content] = run("L1\nL2\nOLD_LAST\n", "NEW_LAST");
+        REQUIRE(ok);
+        REQUIRE(modified == 1);
+        REQUIRE(content == "L1\nL2\nNEW_LAST");
+    }
+
+    SECTION("source has no trailing newline") {
+        auto [ok, modified, content] = run("L1\nL2\nOLD_LAST", "NEW_LAST");
+        REQUIRE(ok);
+        REQUIRE(modified == 1);
+        REQUIRE(content == "L1\nL2\nNEW_LAST");
+    }
+
+    SECTION("multi-line replacement of the last line") {
+        auto [ok, modified, content] = run("L1\nL2\nOLD_LAST\n", "NEW_A\nNEW_B");
+        REQUIRE(ok);
+        REQUIRE(modified == 1);
+        REQUIRE(content == "L1\nL2\nNEW_A\nNEW_B");
+    }
+}
+
+TEST_CASE("GCodeFileModifier - Streaming with no modifications", "[gcode][modifier][streaming]") {
+    // apply_buffered() has an explicit empty-set branch; streaming relies on
+    // every line falling through its lookup miss. Both must produce the source
+    // back, at a temp path, with nothing counted as changed.
+    GCodeFileModifier modifier;
+
+    std::string test_path = "/tmp/helix_stream_test_empty_" + std::to_string(getpid()) + ".gcode";
+    {
+        std::ofstream out(test_path);
+        out << "G28\nG1 X0 Y0\nM104 S200\n";
+    }
+
+    auto result = modifier.apply_streaming(test_path);
+
+    REQUIRE(result.success);
+    REQUIRE(result.error_message.empty());
+    REQUIRE(result.lines_modified == 0);
+    REQUIRE(result.lines_added == 0);
+    REQUIRE(result.lines_removed == 0);
+    REQUIRE(result.modified_path != test_path);
+
+    std::ifstream in(result.modified_path);
+    std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    REQUIRE(content == "G28\nG1 X0 Y0\nM104 S200");
+
     std::filesystem::remove(test_path);
     std::filesystem::remove(result.modified_path);
 }

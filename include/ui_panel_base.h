@@ -40,6 +40,7 @@ class IMoonrakerAPI;
  * - Two-phase initialization (init_subjects -> XML creation -> setup)
  *
  * @implements IPanelLifecycle for NavigationManager dispatch
+ * @see ViewLifecycleBase for the two lifetime guards and which one to use
  *
  * ## Usage Pattern:
  *
@@ -74,7 +75,7 @@ class IMoonrakerAPI;
  *
  * @see TemperatureService for a complete implementation example
  */
-class PanelBase : public IPanelLifecycle {
+class PanelBase : public ViewLifecycleBase {
   public:
     /**
      * @brief Construct panel with injected dependencies
@@ -151,14 +152,6 @@ class PanelBase : public IPanelLifecycle {
      * Default implementation does nothing.
      */
     void on_activate() override {}
-
-    /**
-     * @brief Called when panel is hidden
-     *
-     * Override to pause animations, stop timers, or cleanup temporary state.
-     * Default implementation does nothing.
-     */
-    void on_deactivate() override {}
 
     /**
      * @brief Rebuild this panel's widget tree from its XML component

@@ -6,6 +6,7 @@
 #include "ui_ams_context_menu.h"
 #include "ui_ams_detail.h"
 #include "ui_ams_environment_overlay.h"
+#include "ui_ams_lane_bar.h"
 #include "ui_ams_sidebar.h"
 #include "ui_ams_slot.h"
 #include "ui_ams_slot_layout.h"
@@ -13,7 +14,7 @@
 #include "ui_event_safety.h"
 #include "ui_external_spool_menu.h"
 #include "ui_filament_path_canvas.h"
-#include "ui_nav_manager.h"
+#include "ui_nav.h"
 #include "ui_overlay_qr_scanner.h"
 #include "ui_panel_ams.h"
 #include "ui_panel_common.h"
@@ -25,25 +26,31 @@
 #include "ams_backend.h"
 #include "ams_state.h"
 #include "ams_types.h"
+#include "ams_unit_pages.h"
 #include "app_globals.h"
 #include "color_utils.h"
 #include "data_root_resolver.h"
+#include "display_numbering.h"
 #include "display_settings_manager.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "i_moonraker_api.h"
 #include "lvgl/src/others/translation/lv_translation.h"
+#include "memory_monitor.h"
 #include "observer_factory.h"
+#include "overlay_base.h"
 #include "printer_detector.h"
 #include "static_panel_registry.h"
 #include "system/crash_handler.h"
 #include "theme_manager.h"
 #include "ui/ams_drawing_utils.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cstring>
+#include <functional>
 #include <memory>
-#include <numeric>
 #include <vector>
 
 using namespace helix;
@@ -52,13 +59,12 @@ using namespace helix;
 // Layout Constants
 // ============================================================================
 
-// The MINI_BAR_* geometry moved to ams_drawing_utils.h: the AMS slot draws the
-// same bars for a position fed from another unit, and two private copies of the
-// same four numbers is exactly how those two surfaces would drift apart.
+// The mini-bar geometry lives in ams_drawing_utils.h: the AMS slot draws the
+// same bars for a position fed from another unit, and the two surfaces must
+// agree on them.
 using ams_draw::MINI_BAR_HEIGHT_PX;
 using ams_draw::MINI_BAR_MAX_WIDTH_PX;
 using ams_draw::MINI_BAR_MIN_WIDTH_PX;
-using ams_draw::MINI_BAR_RADIUS_PX;
 
 /// Zoom animation duration (ms) for detail view transitions
 static constexpr uint32_t DETAIL_ZOOM_DURATION_MS = 200;
@@ -72,35 +78,61 @@ static constexpr int32_t DETAIL_ZOOM_SCALE_MAX = 256;
 // Global instance pointer for XML callback access (used by back button and animation callbacks)
 static std::atomic<AmsOverviewPanel*> g_overview_panel_instance{nullptr};
 
-/**
- * @brief Is this lane the one firmware considers seated and loaded?
- *
- * SINGLE SOURCE OF TRUTH for the active-lane highlight: the per-slot
- * active-loaded subject (AmsBackend::slot_is_actively_loaded(i)) — the same read
- * apply_current_slot_highlight() makes in ui_ams_slot.cpp. The mini bars used to
- * ask `global_idx == current_slot`, which disagreed with the slot widgets on the
- * very same panel: an idle unload left the bar outlined after the detail view's
- * glow had cleared, and on AFC/CFS a current_slot that names a lane the per-slot
- * parse disagrees with (#1194) put the highlight on two different lanes.
- *
- * The bars are rebuilt wholesale on every refresh (see create_mini_bars), and
- * AmsState bumps slots_version on every slot_active_loaded delta, so the panel's
- * existing slots_version observer is what keeps this live — no per-slot observer,
- * which would race the rebuild (#705/#776).
- */
-static bool slot_is_active_loaded(int global_slot_index) {
-    lv_subject_t* subject = AmsState::instance().get_slot_active_loaded_subject(global_slot_index);
-    return subject && lv_subject_get_int(subject) != 0;
-}
-
-/// Set a label to "N slots" text, with null-safety
-static void set_slot_count_label(lv_obj_t* label, int slot_count) {
+/// Set a label to "N slots" / "N lanes" text, with null-safety
+static void set_slot_count_label(lv_obj_t* label, helix::ui::LaneNoun noun, int slot_count) {
     if (!label) {
         return;
     }
-    char buf[16];
-    snprintf(buf, sizeof(buf), lv_tr("%d slots"), slot_count);
-    lv_label_set_text(label, buf);
+    lv_label_set_text(label, helix::ui::lane_count_label(noun, slot_count).c_str());
+}
+
+/// The measured width one mini bar gets for this container and lane count.
+/// Both create_mini_bars() and the update-path rebuild check recompute it, so
+/// the two can never disagree about when a rebuild is due.
+static int32_t measured_bar_width(lv_obj_t* bars_container, int slot_count) {
+    lv_obj_update_layout(bars_container);
+    int32_t container_width = lv_obj_get_content_width(bars_container);
+    if (container_width <= 0) {
+        container_width = 80; // Fallback if layout not yet calculated
+    }
+    int32_t gap = theme_manager_get_spacing("space_xxs");
+    return ams_draw::calc_bar_width(container_width, slot_count, gap, MINI_BAR_MIN_WIDTH_PX,
+                                    MINI_BAR_MAX_WIDTH_PX);
+}
+
+/// Local indices of the slots of @p unit that hold a spool of their own. A slot
+/// fed from another unit shows that unit's spool, so it is counted and drawn
+/// on that unit's card, not this one: counting it here would show one
+/// physical spool on two cards.
+static std::vector<int> owned_unit_slots(const AmsUnit& unit) {
+    const AmsBackend* backend = AmsState::instance().get_backend();
+    std::vector<int> owned;
+    owned.reserve(unit.slots.size());
+    for (int s = 0; s < static_cast<int>(unit.slots.size()); ++s) {
+        if (!backend ||
+            !backend->slot_identity_owner_unit(unit.first_slot_global_index + s).has_value()) {
+            owned.push_back(s);
+        }
+    }
+    return owned;
+}
+
+/// Whether @p bars_container already holds exactly one bar per slot in
+/// @p owned, in order. Which slots a unit owns can change without their count
+/// changing, which the geometry check alone cannot see.
+static bool bars_match_slots(lv_obj_t* bars_container, const AmsUnit& unit,
+                             const std::vector<int>& owned) {
+    if (lv_obj_get_child_count(bars_container) != owned.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < owned.size(); ++i) {
+        if (helix::ui::ams_lane_bar_slot_index(
+                lv_obj_get_child(bars_container, static_cast<int32_t>(i))) !=
+            unit.first_slot_global_index + owned[i]) {
+            return false;
+        }
+    }
+    return true;
 }
 
 // ============================================================================
@@ -122,64 +154,47 @@ void AmsOverviewPanel::init_subjects() {
         // Overview panel reuses existing AMS subjects (slots_version, etc.)
         AmsState::instance().init_subjects(true);
 
-        // Observe slots_version to auto-refresh when slot data changes.
-        // In detail mode, per-slot observers handle visual updates (color, pulse,
-        // highlight) automatically — we only need to react to structural changes
-        // (slot count changed) or refresh the overview cards.
-        using helix::ui::observe_int_sync;
-        slots_version_observer_ = observe_int_sync<AmsOverviewPanel>(
+        // Observe slots_version to auto-refresh when slot data changes. In the unit view the
+        // per-slot observers drive the visual state (color, pulse, highlight); what the view
+        // has to react to is a change in which pages exist or what a page shows. In the
+        // overview it is the unit cards that refresh.
+        using helix::ui::observe;
+        slots_version_observer_ = observe<int>(
             AmsState::instance().get_slots_version_subject(), this,
             [](AmsOverviewPanel* self, int) {
-                if (!self->panel_)
-                    return;
-                if (self->detail_unit_index_ >= 0) {
-                    // In detail mode — only rebuild slots if
-                    // count changed. Per-slot observers drive
-                    // all visual state (color, pulse, etc.)
-                    self->refresh_detail_if_needed();
-                    return;
-                }
-                // Defer rebuild (#80) AND use safe_clean_children
-                // in refresh_units callees (#776): lifetime_.defer
-                // moves work off the observer callback's stack, and
-                // safe_clean_children schedules child deletion via
-                // lv_obj_delete_async so sync lv_obj_clean() can't
-                // corrupt LVGL's event linked list.
-                if (!self->units_rebuild_pending_) {
-                    self->units_rebuild_pending_ = true;
-                    self->lifetime_.defer("AmsOverviewPanel::refresh_units", [self]() {
-                        self->units_rebuild_pending_ = false;
-                        if (self->panel_ && self->cards_row_ && self->detail_unit_index_ < 0)
-                            self->refresh_units();
-                    });
-                }
-            });
+                self->on_state_changed("AmsOverviewPanel::refresh_units");
+            },
+            AmsState::instance().get_subjects_lifetime());
 
         // Observe current_slot to reactively update lane highlights when the active
         // slot changes (e.g., slot selected without load/unload).
-        current_slot_observer_ = observe_int_sync<AmsOverviewPanel>(
-            AmsState::instance().get_current_slot_subject(), this, [](AmsOverviewPanel* self, int) {
-                if (!self->panel_)
-                    return;
-                if (self->detail_unit_index_ >= 0) {
-                    self->refresh_detail_if_needed();
-                    return;
-                }
-                if (!self->units_rebuild_pending_) {
-                    self->units_rebuild_pending_ = true;
-                    self->lifetime_.defer("AmsOverviewPanel::refresh_units/slot", [self]() {
-                        self->units_rebuild_pending_ = false;
-                        if (self->panel_ && self->cards_row_ && self->detail_unit_index_ < 0)
-                            self->refresh_units();
-                    });
-                }
-            });
+        current_slot_observer_ = observe<int>(
+            AmsState::instance().get_current_slot_subject(), this,
+            [](AmsOverviewPanel* self, int) {
+                self->on_state_changed("AmsOverviewPanel::refresh_units/slot");
+            },
+            AmsState::instance().get_subjects_lifetime());
+
+        // Which units' dryers run decides the drying glyph on the hub's off-page stubs.
+        dryer_version_observer_ = observe<int>(
+            AmsState::instance().get_units_dryer_version_subject(), this,
+            [](AmsOverviewPanel* self, int) {
+                if (self->open_ && self->panel_ && self->unit_view_active_)
+                    self->request_pages_sync();
+            },
+            AmsState::instance().get_subjects_lifetime());
+
+        // The dots are built from this count; their pitch follows it.
+        page_count_observer_ = observe<int>(
+            AmsState::instance().get_ams_page_count_subject(), this,
+            [](AmsOverviewPanel* self, int) { self->layout_page_dots(); },
+            AmsState::instance().get_subjects_lifetime());
 
         // Observe external spool color changes to reactively update bypass display.
         // NOTE: set_external_spool_info() calls lv_subject_set_int() directly (not via
         // ui_queue_update) which is safe because all current callers are on the LVGL thread.
         // If callers from background threads are added, those must use ui_queue_update().
-        external_spool_observer_ = observe_int_sync<AmsOverviewPanel>(
+        external_spool_observer_ = observe<int>(
             AmsState::instance().get_external_spool_color_subject(), this,
             [](AmsOverviewPanel* self, int /*color_int*/) {
                 // Delegate to existing refresh helper which reads full spool info
@@ -189,10 +204,44 @@ void AmsOverviewPanel::init_subjects() {
 
         // Engaging bypass changes no slot, so neither the path refresh nor the
         // external-spool observer above fires for it. The ring needs its own.
-        bypass_active_observer_ = observe_int_sync<AmsOverviewPanel>(
+        bypass_active_observer_ = observe<int>(
             AmsState::instance().get_bypass_active_subject(), this,
             [](AmsOverviewPanel* self, int /*active*/) { self->refresh_bypass_display(); },
             AmsState::instance().get_subjects_lifetime());
+    });
+}
+
+void AmsOverviewPanel::on_state_changed(const char* tag) {
+    if (!open_ || !panel_)
+        return;
+    if (unit_view_active_) {
+        request_pages_sync();
+        return;
+    }
+    // Defer rebuild (#80) AND use safe_clean_children in refresh_units callees (#776):
+    // object_lifetime_.defer moves work off the observer callback's stack, and
+    // safe_clean_children schedules child deletion via lv_obj_delete_async so sync
+    // lv_obj_clean() can't corrupt LVGL's event linked list.
+    if (!units_rebuild_pending_) {
+        units_rebuild_pending_ = true;
+        object_lifetime_.defer(tag, [this]() {
+            units_rebuild_pending_ = false;
+            if (panel_ && cards_row_ && !unit_view_active_)
+                refresh_units();
+        });
+    }
+}
+
+void AmsOverviewPanel::request_pages_sync() {
+    // slots_version, current_slot and the dryer version often move inside one backend sync;
+    // one deferred pass shows the state they settle on.
+    if (pages_sync_pending_)
+        return;
+    pages_sync_pending_ = true;
+    object_lifetime_.defer("AmsOverviewPanel::sync_pages", [this]() {
+        pages_sync_pending_ = false;
+        if (open_ && panel_ && unit_view_active_)
+            sync_pages(/*reopen=*/false);
     });
 }
 
@@ -210,16 +259,15 @@ void AmsOverviewPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
     ui_overlay_panel_setup_standard(panel_, parent_screen_, "overlay_header", "overview_content");
 
     // Find the unit cards row container from XML
-    cards_row_ = lv_obj_find_by_name(panel_, "unit_cards_row");
+    cards_row_ = helix::ui::find_required(panel_, "unit_cards_row", get_name());
     if (!cards_row_) {
-        spdlog::error("[{}] Could not find 'unit_cards_row' in XML", get_name());
         return;
     }
     lv_obj_add_event_cb(cards_row_, &AmsOverviewPanel::on_cards_row_scrolled, LV_EVENT_SCROLL,
                         this);
 
     // Find system path area and create path canvas widget
-    system_path_area_ = lv_obj_find_by_name(panel_, "system_path_area");
+    system_path_area_ = helix::ui::find_required(panel_, "system_path_area", get_name());
     if (system_path_area_) {
         system_path_ = ui_system_path_canvas_create(system_path_area_);
         if (system_path_) {
@@ -237,31 +285,51 @@ void AmsOverviewPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
                 system_path_area_, &AmsOverviewPanel::on_bypass_spool_clicked, this);
             // SIZE_CHANGED only — listening to DRAW events would invalidate
             // during render and trip lv_inv_area assertions in LVGL 9.
-            lv_obj_add_event_cb(
-                system_path_,
-                [](lv_event_t* e) {
-                    auto* self = static_cast<AmsOverviewPanel*>(lv_event_get_user_data(e));
-                    if (self) {
-                        self->update_bypass_widgets_position();
-                    }
-                },
-                LV_EVENT_SIZE_CHANGED, this);
+            lv_obj_add_event_cb(system_path_, &AmsOverviewPanel::on_system_path_size_changed,
+                                LV_EVENT_SIZE_CHANGED, this);
         }
     }
 
-    // Find detail view containers
-    detail_container_ = lv_obj_find_by_name(panel_, "unit_detail_container");
-    lv_obj_t* detail_unit = lv_obj_find_by_name(panel_, "detail_unit_detail");
+    // Find the unit view's widgets
+    detail_container_ = helix::ui::find_required(panel_, "unit_detail_container", get_name());
+    lv_obj_t* detail_unit = helix::ui::find_required(panel_, "detail_unit_detail", get_name());
     detail_widgets_ = ams_detail_find_widgets(detail_unit);
-    detail_path_canvas_ = lv_obj_find_by_name(panel_, "detail_path_canvas");
+    detail_path_canvas_ = helix::ui::find_required(panel_, "detail_path_canvas", get_name());
+    path_container_ = helix::ui::find_required(panel_, "detail_path_container", get_name());
+    prev_button_ = helix::ui::find_required(panel_, "page_prev_button", get_name());
+    next_button_ = helix::ui::find_required(panel_, "page_next_button", get_name());
+    page_dots_ = helix::ui::find_required(panel_, "page_dots", get_name());
+
+    if (detail_container_) {
+        // A horizontal swipe anywhere over the unit pages it; gestures have no declarative
+        // form. Only the unit view listens, so a swipe over the overview pages nothing.
+        lv_obj_add_event_cb(detail_container_, &AmsOverviewPanel::on_unit_view_gesture,
+                            LV_EVENT_GESTURE, this);
+    }
+    if (detail_path_canvas_) {
+        // The arrows follow the hub box, and the bypass spool follows the merge point:
+        // both are measured from the canvas, so both wait for its size.
+        // SIZE_CHANGED only — listening to DRAW events would invalidate during render
+        // and trip lv_inv_area assertions in LVGL 9.
+        lv_obj_add_event_cb(detail_path_canvas_, &AmsOverviewPanel::on_path_layout_changed,
+                            LV_EVENT_SIZE_CHANGED, this);
+    }
+    if (page_dots_) {
+        lv_obj_add_event_cb(page_dots_, &AmsOverviewPanel::on_page_dots_resized,
+                            LV_EVENT_SIZE_CHANGED, this);
+        lv_obj_add_event_cb(page_dots_, &AmsOverviewPanel::on_page_dots_resized,
+                            LV_EVENT_CHILD_CHANGED, this);
+    }
+    if (path_container_) {
+        page_bypass_widgets_ = helix::ui::bypass_spool_create(
+            path_container_, &AmsOverviewPanel::on_bypass_spool_clicked, this);
+    }
 
     // Store global instance for callback access (back button + animation callbacks)
     g_overview_panel_instance.store(this);
 
     // Set up the shared sidebar component
-    sidebar_ = std::make_unique<helix::ui::AmsOperationSidebar>(printer_state_);
-    sidebar_->setup(panel_);
-    sidebar_->init_observers();
+    sidebar_ = helix::ui::AmsOperationSidebar::attach(printer_state_, panel_);
 
     // Initial population from backend state
     refresh_units();
@@ -272,31 +340,71 @@ void AmsOverviewPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
 void AmsOverviewPanel::on_activate() {
     // Reset coalescing flag to prevent stale state from a previous deactivation
     units_rebuild_pending_ = false;
+    pages_sync_pending_ = false;
 
     spdlog::debug("[{}] Activated - syncing from backend", get_name());
 
+    const bool opening = !open_;
+    open_ = true;
+    if (!sidebar_) {
+        sidebar_ = helix::ui::AmsOperationSidebar::attach(printer_state_, panel_);
+    }
+
     AmsState::instance().sync_from_backend();
+
+    // The closed panel's card observers skipped every change; rebuild once.
+    if (opening && cards_row_ && !unit_view_active_) {
+        refresh_units();
+    }
 
     if (sidebar_)
         sidebar_->sync_from_state();
 
-    if (detail_unit_index_ >= 0) {
-        // Re-entering while in detail mode — refresh the detail slots
-        show_unit_detail(detail_unit_index_);
+    // Coming back from an overlay keeps the page it was on.
+    if (unit_view_active_) {
+        sync_pages(/*reopen=*/false);
     }
 }
 
-void AmsOverviewPanel::on_deactivate() {
+void AmsOverviewPanel::run_close() {
+    if (auto* p = helix::lazy_global_if_exists<AmsOverviewPanel>()) {
+        p->on_closed();
+    }
+}
+
+void AmsOverviewPanel::on_closed() {
+    // A close callback can run after a reopen has already pushed the panel again.
+    // Its own callback was consumed by that run, so arm the next close again.
+    if (panel_ && (helix::nav::is_in_stack(panel_) || helix::nav::is_push_pending(panel_))) {
+        helix::nav::on_close(panel_, &AmsOverviewPanel::run_close);
+        return;
+    }
+    open_ = false;
+    sidebar_.reset();
+    // The next open starts at the overview.
+    if (unit_view_active_) {
+        reset_to_overview();
+    }
+    if (detail_path_canvas_) {
+        helix::ui::filament_path_canvas_release_buffer(detail_path_canvas_);
+    }
+}
+
+bool AmsOverviewPanel::rebuild() {
+    if (!panel_ || helix::nav::is_showing(panel_)) {
+        return false;
+    }
+    destroy_ams_overview_panel_ui();
+    return true;
+}
+
+void AmsOverviewPanel::on_deactivating(DeactivateReason) {
     spdlog::debug("[{}] Deactivated", get_name());
 
-    // Deliberately does NOT reset to the cards view. on_deactivate() fires both
-    // when the user leaves AMS *and* when something is merely pushed on top of
-    // it — the slot editor, a modal — and resetting here made the second case
-    // lose the open unit, so closing the editor returned to the cards rather
-    // than to the ACE or SnapSwap detail it was opened from. The "start at the
-    // cards" reset belongs to opening the panel, and lives in
-    // navigate_to_ams_panel(); on_activate() restores detail_unit_index_ when a
-    // cover is dismissed.
+    // Dismiss context menu if open
+    if (context_menu_ && context_menu_->is_visible()) {
+        context_menu_->hide();
+    }
 }
 
 // ============================================================================
@@ -307,6 +415,7 @@ void AmsOverviewPanel::refresh_units() {
     if (!cards_row_) {
         return;
     }
+    ++units_refreshes_;
 
     // Overview shows units from the active backend. Multi-unit support handles
     // backends with multiple physical units (e.g., 2x Box Turtle on one AFC system).
@@ -326,13 +435,13 @@ void AmsOverviewPanel::refresh_units() {
         // Unit count changed - rebuild all cards
         spdlog::debug("[{}] Unit count changed {} -> {}, rebuilding cards", get_name(),
                       old_unit_count, new_unit_count);
-        create_unit_cards(info);
+        create_unit_cards(info, backend->lane_noun());
     } else {
         // Same number of units - update existing cards in place. unit_cards_ is in
         // DISPLAY order (see create_unit_cards), so each card names its own unit.
         for (auto& uc : unit_cards_) {
             if (uc.unit_index >= 0 && uc.unit_index < new_unit_count)
-                update_unit_card(uc, info.units[uc.unit_index], info);
+                update_unit_card(uc, info.units[uc.unit_index], backend->lane_noun());
         }
     }
 
@@ -340,7 +449,7 @@ void AmsOverviewPanel::refresh_units() {
     refresh_system_path(info, current_slot);
 }
 
-void AmsOverviewPanel::create_unit_cards(const AmsSystemInfo& info) {
+void AmsOverviewPanel::create_unit_cards(const AmsSystemInfo& info, helix::ui::LaneNoun noun) {
     if (!cards_row_) {
         return;
     }
@@ -364,31 +473,10 @@ void AmsOverviewPanel::create_unit_cards(const AmsSystemInfo& info) {
                      get_name(), unit_count, AmsState::MAX_UNITS, AmsState::MAX_UNITS + 1);
     }
 
-    // Lay the cards out in nozzle order, not backend order.
-    //
-    // Which unit a backend lists first has nothing to do with which toolhead it
-    // feeds: a Claymore wired to e0 can be last in the list while e0's nozzle is
-    // the leftmost of four. Left in backend order, its connector ran diagonally
-    // across every other unit's. Sorting by the unit's first physical nozzle
-    // makes the card row monotonic with the toolhead row, so the lanes below only
-    // cross where the plumbing genuinely does - and it parks units that share a
-    // nozzle (a Box Turtle and a Claymore both on e0) side by side.
-    //
-    // stable_sort, so a system whose order is already monotonic (every one-unit
-    // rig, and most multi-unit ones) is left exactly as it was.
-    std::vector<int> order(unit_count);
-    std::iota(order.begin(), order.end(), 0);
-    {
-        auto layout =
-            ams_draw::compute_system_tool_layout(info, AmsState::instance().get_backend());
-        auto first_nozzle = [&layout](int unit) {
-            return (unit < static_cast<int>(layout.units.size()))
-                       ? layout.units[unit].first_physical_tool
-                       : unit;
-        };
-        std::stable_sort(order.begin(), order.end(),
-                         [&](int a, int b) { return first_nozzle(a) < first_nozzle(b); });
-    }
+    // Cards run in nozzle order (SystemToolLayout::display_order).
+    const std::vector<int> order =
+        ams_draw::compute_system_tool_layout(info, AmsState::instance().get_backend())
+            .display_order;
 
     for (int slot = 0; slot < unit_count; ++slot) {
         const int i = order[slot];
@@ -402,7 +490,13 @@ void AmsOverviewPanel::create_unit_cards(const AmsSystemInfo& info) {
         // past MAX_UNITS get the always-off placeholders — AmsState owns which is
         // which, since it owns the cap and the registrations.
         const AmsState::EnvIndicatorSubjectNames s = AmsState::env_indicator_subject_names(i);
-        const char* attrs[] = {"temp_text",
+        const std::string absent = AmsState::unit_absent_subject_name(i);
+        const std::string disconnected = AmsState::unit_disconnected_subject_name(i);
+        const char* attrs[] = {"absent",
+                               absent.c_str(),
+                               "disconnected",
+                               disconnected.c_str(),
+                               "temp_text",
                                s.temp_text.c_str(),
                                "humidity_text",
                                s.humidity_text.c_str(),
@@ -434,14 +528,14 @@ void AmsOverviewPanel::create_unit_cards(const AmsSystemInfo& info) {
         lv_obj_add_event_cb(uc.card, on_unit_card_clicked, LV_EVENT_CLICKED, this);
 
         // Find child widgets declared in XML
-        uc.logo_image = lv_obj_find_by_name(uc.card, "unit_logo");
-        uc.name_label = lv_obj_find_by_name(uc.card, "unit_name");
-        uc.bars_container = lv_obj_find_by_name(uc.card, "bars_container");
-        uc.slot_count_label = lv_obj_find_by_name(uc.card, "slot_count");
+        uc.logo_image = helix::ui::find_required(uc.card, "unit_logo", get_name());
+        uc.name_label = helix::ui::find_required(uc.card, "unit_name", get_name());
+        uc.bars_container = helix::ui::find_required(uc.card, "bars_container", get_name());
+        uc.slot_count_label = helix::ui::find_required(uc.card, "slot_count", get_name());
 
         // Stamp the unit index on the environment indicator so its click handler
         // knows which unit's overlay to open.
-        if (lv_obj_t* ind = lv_obj_find_by_name(uc.card, "env_indicator")) {
+        if (lv_obj_t* ind = helix::ui::find_required(uc.card, "env_indicator", get_name())) {
             lv_obj_set_user_data(ind, reinterpret_cast<void*>(static_cast<intptr_t>(i)));
         }
 
@@ -454,7 +548,8 @@ void AmsOverviewPanel::create_unit_cards(const AmsSystemInfo& info) {
             lv_label_set_text(uc.name_label, uc.display_name.c_str());
         }
 
-        set_owned_slot_count_label(uc, unit, info);
+        set_slot_count_label(uc.slot_count_label, noun,
+                             static_cast<int>(owned_unit_slots(unit).size()));
 
         // Create the mini bars for this unit (dynamic — slot count varies)
         create_mini_bars(uc, unit);
@@ -478,22 +573,8 @@ void AmsOverviewPanel::create_unit_cards(const AmsSystemInfo& info) {
                   static_cast<int>(unit_cards_.size()), info.supports_bypass);
 }
 
-void AmsOverviewPanel::set_owned_slot_count_label(UnitCard& card, const AmsUnit& unit,
-                                                  const AmsSystemInfo& info) {
-    // Not unit.slot_count: a slot fed from another unit is a view of that
-    // unit's spool, not one of this unit's, and counting it here double-counts
-    // one physical spool across two cards. On multiACE the U1 card reads 3,
-    // because its fourth head shows the ACE's spool. The overload that takes
-    // `info` -- every caller here already holds it -- rather than the one that
-    // re-fetches the whole system per card.
-    auto* backend = AmsState::instance().get_backend();
-    set_slot_count_label(card.slot_count_label,
-                         backend ? backend->unit_spool_slot_count(card.unit_index, info)
-                                 : unit.slot_count);
-}
-
 void AmsOverviewPanel::update_unit_card(UnitCard& card, const AmsUnit& unit,
-                                        const AmsSystemInfo& info) {
+                                        helix::ui::LaneNoun noun) {
     if (!card.card) {
         return;
     }
@@ -505,7 +586,9 @@ void AmsOverviewPanel::update_unit_card(UnitCard& card, const AmsUnit& unit,
         lv_label_set_text(card.name_label, card.display_name.c_str());
     }
 
-    // Rebuild mini bars (slot colors/status may have changed).
+    // Rebuild the mini bars only when a geometry input changed (lane count or
+    // the measured width). Color, fill, active and error repaint in place
+    // through the per-slot subjects each ams_lane_bar observes.
     // Flush pending layout first — deferred callbacks can run between layout
     // passes, and cleaning children while LVGL still references them causes
     // use-after-free in layout_update_core (issue #711). Called from refresh_units
@@ -514,12 +597,20 @@ void AmsOverviewPanel::update_unit_card(UnitCard& card, const AmsUnit& unit,
     // event linked list (#776).
     if (card.bars_container) {
         lv_obj_update_layout(card.bars_container);
-        helix::ui::safe_clean_children(card.bars_container);
-        create_mini_bars(card, unit);
+        const std::vector<int> owned = owned_unit_slots(unit);
+        int slot_count = static_cast<int>(owned.size());
+        if (helix::ui::lane_bars_stale(card.bars_built,
+                                       {unit.first_slot_global_index, slot_count,
+                                        measured_bar_width(card.bars_container, slot_count)}) ||
+            !bars_match_slots(card.bars_container, unit, owned)) {
+            helix::ui::safe_clean_children(card.bars_container);
+            create_mini_bars(card, unit);
+        }
     }
 
-    // Update slot count — the spools this unit OWNS, not the slots it has.
-    set_owned_slot_count_label(card, unit, info);
+    // Update slot count: the spools this unit OWNS, not the slots it has.
+    set_slot_count_label(card.slot_count_label, noun,
+                         static_cast<int>(owned_unit_slots(unit).size()));
 
     // Update error badge visibility and color
     if (card.error_badge) {
@@ -534,59 +625,28 @@ void AmsOverviewPanel::create_mini_bars(UnitCard& card, const AmsUnit& unit) {
         return;
     }
 
-    // One bar per spool this unit OWNS — the card's count says the same thing, and
-    // a fourth bar beside "3 slots" reads as a bug. A slot fed from another unit
-    // shows that unit's spool, so it belongs on that unit's card, not this one.
-    auto* bars_backend = AmsState::instance().get_backend();
-    std::vector<int> owned_local;
-    for (int s = 0; s < static_cast<int>(unit.slots.size()); ++s) {
-        const int global_idx = unit.first_slot_global_index + s;
-        if (!bars_backend || !bars_backend->slot_identity_owner_unit(global_idx).has_value()) {
-            owned_local.push_back(s);
-        }
-    }
+    // One bar per spool this unit OWNS, matching the card's count.
+    const std::vector<int> owned_local = owned_unit_slots(unit);
 
     int slot_count = static_cast<int>(owned_local.size());
     if (slot_count <= 0) {
+        card.bars_built = {unit.first_slot_global_index, 0, 0};
         return;
     }
 
-    // Calculate bar width to fit within bars_container
-    lv_obj_update_layout(card.bars_container);
-    int32_t container_width = lv_obj_get_content_width(card.bars_container);
-    if (container_width <= 0) {
-        container_width = 80; // Fallback if layout not yet calculated
-    }
-    int32_t gap = theme_manager_get_spacing("space_xxs");
-    int32_t bar_width = ams_draw::calc_bar_width(container_width, slot_count, gap,
-                                                 MINI_BAR_MIN_WIDTH_PX, MINI_BAR_MAX_WIDTH_PX);
+    // Bar width is measured to fit the container (rule 8's measured-layout
+    // exception keeps it in C++); everything else - state, fill, color, the
+    // active and error decorations - flows from AmsState's per-slot subjects
+    // inside ams_lane_bar, so the bars repaint in place instead of being
+    // rebuilt on every refresh.
+    int32_t bar_width = measured_bar_width(card.bars_container, slot_count);
+    card.bars_built = {unit.first_slot_global_index, slot_count, bar_width};
 
-    for (int bar = 0; bar < slot_count; ++bar) {
-        const int s = owned_local[static_cast<size_t>(bar)];
-        const SlotInfo& slot = unit.slots[s];
-        int global_idx = unit.first_slot_global_index + s;
-        bool is_loaded = slot_is_active_loaded(global_idx);
-
-        auto col = ams_draw::create_slot_column(card.bars_container, bar_width, MINI_BAR_HEIGHT_PX,
-                                                MINI_BAR_RADIUS_PX);
-
-        ams_draw::BarStyleParams params;
-        params.color_rgb = slot.color_rgb;
-        // These mini bars are rebuilt wholesale (safe_clean_children) on every
-        // overview refresh, so fill is read from this snapshot rather than via a
-        // per-slot fill subject observer — an observer would race the rebuild
-        // (#705/#776). Semantics stay unified: fill_percent_from_slot uses
-        // SlotInfo::display_fill_pct. -1 = "no data" → render an empty bar (0)
-        // rather than a phantom fill; style_slot_bar hides the fill anyway for a
-        // non-present lane.
-        int fp = ams_draw::fill_percent_from_slot(slot);
-        params.fill_pct = fp < 0 ? 0 : fp;
-        params.is_present = slot.is_present();
-        params.is_loaded = is_loaded;
-        params.has_error = (slot.status == SlotStatus::BLOCKED || slot.error.has_value());
-        params.severity = slot.error.has_value() ? slot.error->severity : SlotError::INFO;
-
-        ams_draw::style_slot_bar(col, params, MINI_BAR_RADIUS_PX);
+    // ams_lane_bar_create_range() builds a contiguous run, and the owned slots
+    // need not be one, so each bar is its own run of one.
+    for (int s : owned_local) {
+        helix::ui::ams_lane_bar_create_range(card.bars_container, unit.first_slot_global_index + s,
+                                             1, bar_width, MINI_BAR_HEIGHT_PX);
     }
 }
 
@@ -752,11 +812,29 @@ void AmsOverviewPanel::refresh_system_path(const AmsSystemInfo& info, int curren
         ui_system_path_canvas_set_unit_hub_sensor(system_path_, i, unit.has_hub_sensor,
                                                   unit.hub_sensor_triggered);
 
+        // The unit's furthest-loaded lane colors its route when it is not the
+        // active unit.
+        PathSegment lane_seg = PathSegment::NONE;
+        uint32_t lane_color = 0;
+        if (backend) {
+            for (int s = 0; s < unit.slot_count; ++s) {
+                const int global = unit.first_slot_global_index + s;
+                const PathSegment seg = backend->get_slot_filament_segment(global);
+                if (seg > lane_seg) {
+                    lane_seg = seg;
+                    lane_color = backend->get_slot_info(global).color_rgb;
+                }
+            }
+        }
+        ui_system_path_canvas_set_unit_lane(system_path_, i, static_cast<int>(lane_seg),
+                                            lane_color);
+
         PathTopology topo = unit.topology;
         if (backend) {
             topo = backend->get_unit_topology(i);
         }
         ui_system_path_canvas_set_unit_topology(system_path_, i, static_cast<int>(topo));
+        helix::ui::ui_system_path_canvas_set_unit_absent(system_path_, i, unit.absent);
 
         if (i < static_cast<int>(tool_layout.units.size())) {
             const auto& utl = tool_layout.units[i];
@@ -770,6 +848,17 @@ void AmsOverviewPanel::refresh_system_path(const AmsSystemInfo& info, int curren
             // the nozzles (UnitToolLayout::feeds_mask); this panel only forwards
             // it. A mask of 0 is a real answer here -- every head fed elsewhere.
             ui_system_path_canvas_set_unit_tool_mask(system_path_, i, utl.feeds_mask);
+
+            // The unit's hub and the buffer under it: the box the unit view shows
+            // for the hub's first unit. Units on one hub get one group number.
+            const int buffer_unit = helix::ui::overview_buffer_unit(tool_layout, i);
+            helix::ui::BufferBoxState buffer;
+            if (buffer_unit >= 0) {
+                buffer = helix::ui::ams_detail_buffer_box(info, buffer_unit);
+            }
+            helix::ui::ui_system_path_canvas_set_unit_hub(
+                system_path_, i, helix::ui::overview_hub_group(tool_layout, i), buffer.present,
+                buffer.fault, buffer.label);
         }
     }
 
@@ -802,15 +891,25 @@ void AmsOverviewPanel::refresh_system_path(const AmsSystemInfo& info, int curren
         }
     }
 
-    // Set toolhead sensor state
+    // The buffer on the output line (single toolhead): the unit view's box for the
+    // system reading.
     {
-        auto segment = static_cast<PathSegment>(
+        const helix::ui::BufferBoxState box = helix::ui::ams_detail_buffer_box(info, -1);
+        helix::ui::ui_system_path_canvas_set_buffer(system_path_, box.present, box.fault,
+                                                    box.label);
+    }
+
+    // Filament reach, error and the toolhead sensor
+    {
+        ui_system_path_canvas_set_filament_segment(
+            system_path_,
             lv_subject_get_int(AmsState::instance().get_path_filament_segment_subject()));
-        bool toolhead_triggered = (segment >= PathSegment::TOOLHEAD);
+        ui_system_path_canvas_set_error_segment(
+            system_path_, backend ? static_cast<int>(backend->infer_error_segment()) : 0);
 
         bool has_toolhead = std::any_of(info.units.begin(), info.units.end(),
                                         [](const AmsUnit& u) { return u.has_toolhead_sensor; });
-        ui_system_path_canvas_set_toolhead_sensor(system_path_, has_toolhead, toolhead_triggered);
+        ui_system_path_canvas_set_toolhead_sensor(system_path_, has_toolhead);
     }
 
     // Status text now shown in shared sidebar component (ams_sidebar.xml)
@@ -835,10 +934,10 @@ void AmsOverviewPanel::on_unit_card_clicked(lv_event_t* e) {
     lv_obj_t* target = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
     int unit_index = static_cast<int>(reinterpret_cast<intptr_t>(lv_obj_get_user_data(target)));
 
-    spdlog::info("[AMS Overview] Unit {} clicked - showing inline detail", unit_index);
+    spdlog::info("[AMS Overview] Unit {} clicked - showing its page", unit_index);
 
-    // Show detail view inline (swaps left column content, no overlay push)
-    self->show_unit_detail(unit_index);
+    // Zoom into the unit view inline (swaps left column content, no overlay push)
+    self->show_unit_view(unit_index);
 
     LVGL_SAFE_EVENT_CB_END();
 }
@@ -867,38 +966,171 @@ void AmsOverviewPanel::on_detail_slot_clicked(lv_event_t* e) {
 }
 
 // ============================================================================
-// Detail View (inline unit zoom)
+// Unit view (one unit per page)
 // ============================================================================
 
-void AmsOverviewPanel::refresh_detail_if_needed() {
-    if (detail_unit_index_ < 0 || !panel_)
+namespace {
+
+/// A unit's identity across rebuilds: its name, or its first slot when it has none. The
+/// position in the backend's list is not stable, and neither is the slot a unit starts at
+/// when a backend that sorts its units gains one.
+std::string unit_key(const AmsUnit& unit) {
+    return unit.name.empty() ? "#" + std::to_string(unit.first_slot_global_index) : unit.name;
+}
+
+/// What makes two page lists the same screen: the same units in the same order, grouped the
+/// same way. The drying flags are not part of it; they only repaint the stubs.
+bool same_page_structure(const std::vector<helix::ui::UnitPage>& a,
+                         const std::vector<std::string>& units_a,
+                         const std::vector<helix::ui::UnitPage>& b,
+                         const std::vector<std::string>& units_b) {
+    if (units_a != units_b || a.size() != b.size())
+        return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (a[i].group != b[i].group || a[i].same_hub_before != b[i].same_hub_before ||
+            a[i].same_hub_after != b[i].same_hub_after)
+            return false;
+    }
+    return true;
+}
+
+} // namespace
+
+void AmsOverviewPanel::sync_pages(bool reopen, int focus_unit) {
+    if (!panel_ || !unit_view_active_)
+        return;
+    ++pages_refreshes_;
+
+    auto* backend = AmsState::instance().get_backend();
+    if (!backend) {
+        show_overview();
+        return;
+    }
+
+    const AmsSystemInfo info = backend->get_system_info();
+    auto pages = helix::ui::build_unit_pages(info, [&](int pos) {
+        const DryerInfo dryer = backend->get_dryer_info(info.units[pos].unit_index);
+        return dryer.supported && dryer.active;
+    });
+    if (pages.empty()) {
+        show_overview();
+        return;
+    }
+    std::vector<std::string> units;
+    units.reserve(pages.size());
+    for (const auto& p : pages)
+        units.push_back(unit_key(info.units[p.unit_index]));
+
+    int target = focus_unit >= 0 ? helix::ui::page_of_unit(pages, focus_unit) : -1;
+    if (target < 0 && reopen) {
+        target = helix::ui::initial_unit_page(pages, info);
+    } else if (target < 0) {
+        // The unit on screen stays on screen while it still has a page; otherwise the page
+        // number holds, clamped into the pages that remain.
+        for (size_t i = 0; i < units.size(); ++i) {
+            if (units[i] == shown_unit_key_)
+                target = static_cast<int>(i);
+        }
+        if (target < 0)
+            target = std::clamp(page_, 0, static_cast<int>(pages.size()) - 1);
+    }
+
+    const bool restructured = !same_page_structure(pages_, page_units_, pages, units);
+    const bool moved = target != page_;
+    pages_ = std::move(pages);
+    page_units_ = std::move(units);
+    page_ = target;
+
+    const bool new_unit = page_units_[page_] != shown_unit_key_;
+    if (reopen || restructured || moved || new_unit) {
+        spdlog::debug("[{}] Pages {} (page {}, {} units)", get_name(),
+                      reopen ? "opened" : "changed", page_, pages_.size());
+    }
+    // An open lays the spool box out again: it was last measured at whatever size the panel
+    // had when it was hidden.
+    show_current_page(info, /*relayout=*/reopen);
+}
+
+void AmsOverviewPanel::show_current_page(const AmsSystemInfo& info, bool relayout) {
+    if (!panel_ || page_ < 0 || page_ >= static_cast<int>(pages_.size()))
         return;
 
+    const helix::ui::UnitPage& page = pages_[page_];
+    if (page.unit_index < 0 || page.unit_index >= static_cast<int>(info.units.size()))
+        return;
+    const AmsUnit& unit = info.units[page.unit_index];
+
+    const std::string key = unit_key(unit);
+    const bool new_unit = key != shown_unit_key_;
+    shown_unit_key_ = key;
+    shown_unit_pos_ = page.unit_index;
+
+    auto& ams = AmsState::instance();
+    ams.set_unit_page(static_cast<int>(pages_.size()), page_);
+    // The unit's own number, not its position: that is what the viewed-unit flag and the
+    // environment mirror are keyed on.
+    ams.set_viewed_unit(unit.unit_index);
+    ams.set_unit_page_header(ams_draw::get_unit_display_name(unit, page.unit_index),
+                             ams_draw::unit_logo_path(unit, info));
+
+    if (relayout || new_unit || detail_slot_count_ != std::min(unit.slot_count, MAX_DETAIL_SLOTS)) {
+        create_detail_slots(info, page.unit_index);
+    }
+    helix::ui::ams_detail_sync_slot_states(detail_slot_widgets_, detail_slot_count_, info);
+
+    if (detail_path_canvas_) {
+        // The hub box is sized for the widest unit of this hub, at the lane pitch that
+        // unit's slot row has, so it holds still as the pages go by.
+        int hub_lanes = 0;
+        for (const auto& other : pages_) {
+            if (other.group == page.group && other.unit_index < static_cast<int>(info.units.size()))
+                hub_lanes = std::max(hub_lanes, info.units[other.unit_index].slot_count);
+        }
+        int32_t lane_pitch = 0;
+        if (hub_lanes > 0 && detail_widgets_.slot_grid) {
+            lv_obj_t* slot_area = lv_obj_get_parent(detail_widgets_.slot_grid);
+            lv_obj_update_layout(slot_area);
+            const AmsSlotLayout widest =
+                helix::ui::ams_detail_slot_layout(lv_obj_get_content_width(slot_area), hub_lanes);
+            lane_pitch = widest.slot_width - widest.overlap;
+        }
+        ui_filament_path_canvas_set_fixed_hub(detail_path_canvas_, hub_lanes, lane_pitch);
+        ui_filament_path_canvas_set_offpage_units(detail_path_canvas_, page.same_hub_before,
+                                                  page.drying_before, page.same_hub_after,
+                                                  page.drying_after);
+    }
+    update_path_canvas(info);
+    layout_paging_controls();
+    scroll_current_dot_into_view();
+}
+
+void AmsOverviewPanel::step_page(int delta) {
+    const int next = page_ + delta;
+    if (!unit_view_active_ || page_ < 0 || next < 0 || next >= static_cast<int>(pages_.size()))
+        return;
+    page_ = next;
+    // Paging by hand leaves the page "Open in <unit>" landed on, so Back is the
+    // cards again.
+    return_unit_key_.clear();
     auto* backend = AmsState::instance().get_backend();
     if (!backend)
         return;
-
-    AmsSystemInfo info = backend->get_system_info();
-    if (detail_unit_index_ >= static_cast<int>(info.units.size()))
-        return;
-
-    const AmsUnit& unit = info.units[detail_unit_index_];
-    int new_slot_count = static_cast<int>(unit.slots.size());
-
-    if (new_slot_count != detail_slot_count_) {
-        // Structural change — rebuild slots (no animation restart)
-        spdlog::debug("[{}] Detail slot count changed {} -> {}, rebuilding", get_name(),
-                      detail_slot_count_, new_slot_count);
-        create_detail_slots(unit);
-        update_detail_header(unit, info);
-    }
-
-    // Always update path canvas — segment/action changes need to propagate
-    // even when slot count hasn't changed (e.g., load/unload animations)
-    setup_detail_path_canvas(unit, info);
+    show_current_page(backend->get_system_info(), /*relayout=*/false);
 }
 
-void AmsOverviewPanel::show_unit_detail(int unit_index) {
+bool AmsOverviewPanel::next_page() {
+    const int before = page_;
+    step_page(+1);
+    return page_ != before;
+}
+
+bool AmsOverviewPanel::prev_page() {
+    const int before = page_;
+    step_page(-1);
+    return page_ != before;
+}
+
+void AmsOverviewPanel::show_unit_view(int unit_index) {
     if (!panel_ || !detail_container_ || !cards_row_)
         return;
 
@@ -927,40 +1159,17 @@ void AmsOverviewPanel::show_unit_detail(int unit_index) {
         lv_obj_get_coords(card_it->card, &card_coords);
     }
 
-    // Drilling from one unit's detail straight into another's ("Open in <unit>")
-    // is entered while already in detail mode, and Back from it belongs at the
-    // unit we came from rather than at the cards. Entering from the cards clears
-    // the target, so Back there stays the cards. RE-ENTERING the unit already
-    // shown -- on_activate()'s refresh after a cover (the slot editor, a modal)
-    // is dismissed -- is neither: it changes nothing about how the user got
-    // here, so the target it found is the target it keeps. Recomputing it there
-    // reset it to the cards, and Back from an ACE opened via "Open in ACE" then
-    // skipped the U1 detail the moment any editor had been opened and closed.
-    if (detail_unit_index_ < 0) {
-        detail_return_unit_ = -1; // from the cards
-    } else if (detail_unit_index_ != unit_index) {
-        detail_return_unit_ = detail_unit_index_; // drilled from another unit
-    }
+    spdlog::info("[{}] Showing the page of unit {} ({})", get_name(), unit_index,
+                 info.units[unit_index].name);
 
-    detail_unit_index_ = unit_index;
-    const AmsUnit& unit = info.units[unit_index];
-
-    spdlog::info("[{}] Showing detail for unit {} ({})", get_name(), unit_index, unit.name);
-
-    // Update detail header (logo + name)
-    update_detail_header(unit, info);
-
-    // Create slot widgets for this unit
-    create_detail_slots(unit);
-
-    // Configure path canvas for this unit's filament routing
-    setup_detail_path_canvas(unit, info);
-
-    // Swap visibility: hide overview elements, show detail
-    lv_obj_add_flag(cards_row_, LV_OBJ_FLAG_HIDDEN);
-    if (system_path_area_)
-        lv_obj_add_flag(system_path_area_, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_remove_flag(detail_container_, LV_OBJ_FLAG_HIDDEN);
+    // Swap visibility: the overview's elements hide, the unit view shows. Its widgets are
+    // laid out before the page measures them.
+    unit_view_active_ = true;
+    AmsState::instance().set_unit_view_active(true);
+    lv_obj_update_layout(detail_container_);
+    sync_pages(/*reopen=*/true, unit_index);
+    if (!unit_view_active_)
+        return;
 
     // Zoom-in animation (scale + fade) — gated on animations setting
     if (DisplaySettingsManager::instance().get_animations_enabled()) {
@@ -1007,17 +1216,32 @@ void AmsOverviewPanel::show_unit_detail(int unit_index) {
     }
 }
 
-void AmsOverviewPanel::leave_unit_detail() {
-    // Take the target before show_unit_detail() recomputes it: re-entering the
-    // previous unit is itself a detail->detail move, which would otherwise set a
-    // return target pointing back at the unit we are leaving and trap Back
-    // between the two.
-    const int back_to = detail_return_unit_;
-    detail_return_unit_ = -1;
-    if (back_to >= 0) {
-        show_unit_detail(back_to);
-        detail_return_unit_ = -1;
+void AmsOverviewPanel::open_source_unit(int owner_unit) {
+    if (!unit_view_active_) {
+        show_unit_view(owner_unit);
         return;
+    }
+    // Back from the owner's page belongs at the page it was opened from, not at
+    // the cards the user never visited on the way.
+    return_unit_key_ = shown_unit_key_;
+    sync_pages(/*reopen=*/false, owner_unit);
+}
+
+void AmsOverviewPanel::leave_unit_view() {
+    // Consumed before paging: the page it names is where this lands, and Back
+    // from there is the cards.
+    const std::string back_to = std::move(return_unit_key_);
+    return_unit_key_.clear();
+    if (unit_view_active_ && !back_to.empty() && back_to != shown_unit_key_) {
+        if (auto* backend = AmsState::instance().get_backend()) {
+            const AmsSystemInfo info = backend->get_system_info();
+            for (int pos = 0; pos < static_cast<int>(info.units.size()); ++pos) {
+                if (unit_key(info.units[pos]) == back_to) {
+                    sync_pages(/*reopen=*/false, pos);
+                    return;
+                }
+            }
+        }
     }
     show_overview();
 }
@@ -1036,20 +1260,11 @@ void AmsOverviewPanel::show_overview() {
 
     spdlog::info("[{}] Returning to overview mode", get_name());
 
-    detail_unit_index_ = -1;
+    // The page no longer follows the backend from here on, even while the zoom-out plays.
+    unit_view_active_ = false;
+    AmsState::instance().set_viewed_unit(-1);
     // The cards are the top of this panel; nothing is left to go back to.
-    detail_return_unit_ = -1;
-
-    // Restore header to overview mode: show title, hide detail elements
-    lv_obj_t* title = lv_obj_find_by_name(panel_, "header_title");
-    if (title)
-        lv_obj_remove_flag(title, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_t* logo = lv_obj_find_by_name(panel_, "detail_logo");
-    if (logo)
-        lv_obj_add_flag(logo, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_t* name_label = lv_obj_find_by_name(panel_, "detail_unit_name");
-    if (name_label)
-        lv_obj_add_flag(name_label, LV_OBJ_FLAG_HIDDEN);
+    return_unit_key_.clear();
 
     if (DisplaySettingsManager::instance().get_animations_enabled()) {
         // Zoom-out animation: scale down + fade out, then swap visibility
@@ -1066,7 +1281,6 @@ void AmsOverviewPanel::show_overview() {
         // On complete: swap visibility and clean up
         lv_anim_set_completed_cb(&scale_anim, [](lv_anim_t* anim) {
             auto* container = static_cast<lv_obj_t*>(anim->var);
-            lv_obj_add_flag(container, LV_OBJ_FLAG_HIDDEN);
             // Reset transform properties for next use
             lv_obj_set_style_transform_scale(container, DETAIL_ZOOM_SCALE_MAX, LV_PART_MAIN);
             lv_obj_set_style_opa(container, LV_OPA_COVER, LV_PART_MAIN);
@@ -1074,12 +1288,7 @@ void AmsOverviewPanel::show_overview() {
             // Show overview elements (use global instance since lambda has no 'this')
             AmsOverviewPanel* self = g_overview_panel_instance.load();
             if (self) {
-                self->destroy_detail_slots();
-                if (self->cards_row_)
-                    lv_obj_remove_flag(self->cards_row_, LV_OBJ_FLAG_HIDDEN);
-                if (self->system_path_area_)
-                    lv_obj_remove_flag(self->system_path_area_, LV_OBJ_FLAG_HIDDEN);
-                self->refresh_units();
+                self->reset_to_overview();
             }
         });
         lv_anim_start(&scale_anim);
@@ -1097,58 +1306,46 @@ void AmsOverviewPanel::show_overview() {
         lv_anim_start(&fade_anim);
     } else {
         // No animation — instant swap
-        destroy_detail_slots();
-        lv_obj_remove_flag(cards_row_, LV_OBJ_FLAG_HIDDEN);
-        if (system_path_area_)
-            lv_obj_remove_flag(system_path_area_, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(detail_container_, LV_OBJ_FLAG_HIDDEN);
-        refresh_units();
+        reset_to_overview();
     }
 }
 
-void AmsOverviewPanel::update_detail_header(const AmsUnit& unit, const AmsSystemInfo& info) {
-    // Hide overview title, show detail elements in main header
-    lv_obj_t* title = lv_obj_find_by_name(panel_, "header_title");
-    if (title)
-        lv_obj_add_flag(title, LV_OBJ_FLAG_HIDDEN);
-
-    // Update and show logo
-    lv_obj_t* logo = lv_obj_find_by_name(panel_, "detail_logo");
-    if (logo) {
-        ams_draw::apply_logo(logo, unit, info);
-        lv_obj_remove_flag(logo, LV_OBJ_FLAG_HIDDEN);
+void AmsOverviewPanel::reset_to_overview() {
+    // Zoom-out has finished or is skipped; whatever else was in flight is moot.
+    unit_view_active_ = false;
+    if (detail_container_) {
+        lv_obj_set_style_transform_scale(detail_container_, DETAIL_ZOOM_SCALE_MAX, LV_PART_MAIN);
+        lv_obj_set_style_opa(detail_container_, LV_OPA_COVER, LV_PART_MAIN);
+    }
+    if (context_menu_ && context_menu_->is_visible()) {
+        context_menu_->hide();
     }
 
-    // Update and show name
-    lv_obj_t* name = lv_obj_find_by_name(panel_, "detail_unit_name");
-    if (name) {
-        lv_label_set_text(name, ams_draw::get_unit_display_name(unit, detail_unit_index_).c_str());
-        lv_obj_remove_flag(name, LV_OBJ_FLAG_HIDDEN);
-    }
+    auto& ams = AmsState::instance();
+    ams.set_viewed_unit(-1);
+    ams.set_unit_view_active(false);
+    ams.set_unit_page(0, 0);
+    ams.set_unit_page_header("", nullptr);
+
+    destroy_detail_slots();
+    pages_.clear();
+    page_units_.clear();
+    page_ = -1;
+    shown_unit_key_.clear();
+    shown_unit_pos_ = -1;
+    return_unit_key_.clear();
+
+    refresh_units();
 }
 
-void AmsOverviewPanel::create_detail_slots(const AmsUnit& unit) {
-    ams_detail_destroy_slots(detail_widgets_, detail_slot_widgets_, detail_slot_count_);
+void AmsOverviewPanel::create_detail_slots(const AmsSystemInfo& info, int unit_pos) {
+    destroy_detail_slots();
 
-    // Find unit index from backend
-    auto* backend = AmsState::instance().get_backend();
-    if (!backend)
-        return;
-
-    AmsSystemInfo info = backend->get_system_info();
-    int unit_index = -1;
-    for (int i = 0; i < static_cast<int>(info.units.size()); ++i) {
-        if (info.units[i].first_slot_global_index == unit.first_slot_global_index) {
-            unit_index = i;
-            break;
-        }
-    }
-
-    // Pre-show environment indicator so flex layout accounts for its width
-    ams_detail_pre_show_env_indicator(detail_widgets_, detail_unit_index_);
+    // The environment readout is keyed on the unit's own number.
+    ams_detail_pre_show_env_indicator(detail_widgets_, info.units[unit_pos].unit_index);
 
     auto result = ams_detail_create_slots(detail_widgets_, detail_slot_widgets_, MAX_DETAIL_SLOTS,
-                                          unit_index, on_detail_slot_clicked, this);
+                                          unit_pos, on_detail_slot_clicked, this);
 
     detail_slot_count_ = result.slot_count;
 
@@ -1156,43 +1353,125 @@ void AmsOverviewPanel::create_detail_slots(const AmsUnit& unit) {
                              result.layout);
     ams_detail_update_badges(detail_widgets_, detail_slot_widgets_, result.slot_count,
                              result.layout);
-    ams_detail_update_tray(detail_widgets_);
+    ams_detail_update_tray(detail_widgets_, detail_slot_widgets_, result.slot_count, unit_pos);
+    helix::ui::ams_detail_sync_lane_entry(detail_path_canvas_, detail_widgets_.slot_grid);
 
     spdlog::debug("[{}] Created {} detail slots via shared helpers", get_name(), result.slot_count);
 }
 
 void AmsOverviewPanel::destroy_detail_slots() {
+    // The canvas caches the slots' spool containers and reads them whenever it lays out,
+    // including while the next unit's slots are being created.
+    if (detail_path_canvas_) {
+        ui_filament_path_canvas_set_slot_grid(detail_path_canvas_, nullptr);
+    }
     ams_detail_destroy_slots(detail_widgets_, detail_slot_widgets_, detail_slot_count_);
 }
 
-void AmsOverviewPanel::setup_detail_path_canvas(const AmsUnit& unit, const AmsSystemInfo& info) {
-    if (!detail_path_canvas_)
+void AmsOverviewPanel::update_path_canvas(const AmsSystemInfo& info) {
+    if (!detail_path_canvas_ || shown_unit_pos_ < 0)
+        return;
+    const AmsBackend* backend = AmsState::instance().get_backend();
+    if (!backend)
+        return;
+    // The whole path: lanes, hub, buffer, toolhead and bypass, as AmsPanel draws it.
+    ams_detail_setup_path_canvas(detail_path_canvas_, detail_widgets_.slot_grid, shown_unit_pos_,
+                                 backend, info);
+    refresh_page_bypass(helix::ui::bypass_node_visible_for(backend, info));
+}
+
+void AmsOverviewPanel::layout_paging_controls() {
+    if (!path_container_ || !detail_path_canvas_ || !prev_button_ || !next_button_)
         return;
 
-    // Find unit index
-    int unit_index = -1;
-    for (int i = 0; i < static_cast<int>(info.units.size()); ++i) {
-        if (info.units[i].first_slot_global_index == unit.first_slot_global_index) {
-            unit_index = i;
-            break;
-        }
+    lv_obj_update_layout(path_container_);
+    const int32_t hit = lv_obj_get_width(prev_button_);
+    const int32_t gap = theme_manager_get_spacing("space_xs");
+    lv_area_t content;
+    lv_obj_get_content_coords(path_container_, &content);
+    lv_area_t canvas;
+    lv_obj_get_coords(detail_path_canvas_, &canvas);
+
+    // Level with the hub box, which only the canvas knows; the middle of the canvas until
+    // it has drawn one. On a screen so narrow that the box leaves no room for an arrow
+    // beside it, the arrows sit just below it instead, either side of the trunk.
+    int32_t center_y = (canvas.y1 + canvas.y2) / 2;
+    bool beside_hub = true;
+    lv_area_t hub;
+    if (ui_filament_path_canvas_get_hub_box(detail_path_canvas_, &hub)) {
+        beside_hub = hub.x1 - canvas.x1 >= hit + gap && canvas.x2 - hub.x2 >= hit + gap;
+        center_y = beside_hub ? (hub.y1 + hub.y2) / 2 : hub.y2 + gap + hit / 2;
+    }
+    // The canvas keeps its stubs and their labels clear of arrows standing at their level.
+    ui_filament_path_canvas_set_edge_reserve(detail_path_canvas_, beside_hub ? hit + gap : 0,
+                                             center_y - hit / 2, center_y + hit / 2);
+
+    const int32_t y = center_y - hit / 2 - content.y1;
+    lv_obj_set_pos(prev_button_, 0, y);
+    lv_obj_set_pos(next_button_, lv_area_get_width(&content) - hit, y);
+}
+
+void AmsOverviewPanel::layout_page_dots() {
+    if (!page_dots_)
+        return;
+    const int n = lv_subject_get_int(AmsState::instance().get_ams_page_count_subject());
+    if (n < 2)
+        return;
+
+    // The nominal pitch, closing toward a floor of space_xxs between dots as pages are added
+    // so the row keeps fitting. Past the floor the row stays at that pitch and scrolls to
+    // keep the current page's dot in view.
+    const int32_t dot = theme_manager_get_spacing("ams_page_dot_size");
+    const int32_t nominal = theme_manager_get_spacing("space_sm");
+    const int32_t floor_gap = theme_manager_get_spacing("space_xxs");
+    const int32_t room = lv_obj_get_content_width(page_dots_) - n * dot;
+    const int32_t gap = std::clamp(room / (n - 1), floor_gap, nominal);
+    if (lv_obj_get_style_pad_column(page_dots_, LV_PART_MAIN) != gap)
+        lv_obj_set_style_pad_column(page_dots_, gap, LV_PART_MAIN);
+}
+
+void AmsOverviewPanel::scroll_current_dot_into_view() {
+    if (!page_dots_ || page_ < 0)
+        return;
+    if (lv_obj_t* dot = lv_obj_get_child(page_dots_, page_))
+        lv_obj_scroll_to_view(dot, LV_ANIM_OFF);
+}
+
+void AmsOverviewPanel::on_unit_view_gesture(lv_event_t* e) {
+    LVGL_SAFE_EVENT_CB_BEGIN("[AMS Overview] on_unit_view_gesture");
+
+    auto* self = static_cast<AmsOverviewPanel*>(lv_event_get_user_data(e));
+    lv_indev_t* indev = lv_indev_active();
+    if (!self || !indev)
+        return;
+
+    // Swipe left brings the next page, swipe right the previous; where that arrow is
+    // hidden the swipe goes nowhere. The release that follows a swipe is not a tap, so the
+    // spool it began on is not clicked.
+    const lv_dir_t dir = lv_indev_get_gesture_dir(indev);
+    if (dir == LV_DIR_LEFT) {
+        self->next_page();
+        lv_indev_wait_release(indev);
+    } else if (dir == LV_DIR_RIGHT) {
+        self->prev_page();
+        lv_indev_wait_release(indev);
     }
 
-    // hub_only stops the drawing at this unit's hub, which is right when the
-    // downstream is shared and this view cannot say whose nozzle it reaches. A
-    // unit whose lanes all feed ONE known head can say exactly that, so let it
-    // draw the rest: an ACE bound to a U1 head then shows bays -> combiner ->
-    // that head, which is the whole point of opening it.
-    bool single_known_head = !unit.slots.empty();
-    const int head = unit.slots.empty() ? -1 : unit.slots.front().mapped_tool;
-    for (const auto& s : unit.slots) {
-        if (s.mapped_tool < 0 || s.mapped_tool != head) {
-            single_known_head = false;
-            break;
-        }
+    LVGL_SAFE_EVENT_CB_END();
+}
+
+void AmsOverviewPanel::on_path_layout_changed(lv_event_t* e) {
+    if (auto* self = static_cast<AmsOverviewPanel*>(lv_event_get_user_data(e))) {
+        self->layout_paging_controls();
+        self->update_page_bypass_widgets_position();
     }
-    ams_detail_setup_path_canvas(detail_path_canvas_, detail_widgets_.slot_grid, unit_index,
-                                 /*hub_only=*/!single_known_head);
+}
+
+void AmsOverviewPanel::on_page_dots_resized(lv_event_t* e) {
+    if (auto* self = static_cast<AmsOverviewPanel*>(lv_event_get_user_data(e))) {
+        self->layout_page_dots();
+        self->scroll_current_dot_into_view();
+    }
 }
 
 // ============================================================================
@@ -1200,6 +1479,7 @@ void AmsOverviewPanel::setup_detail_path_canvas(const AmsUnit& unit, const AmsSy
 // ============================================================================
 
 void AmsOverviewPanel::clear_panel_reference() {
+    open_ = false;
     // Cancel animations and dismiss menus while widget pointers are still valid
     if (detail_container_) {
         lv_anim_delete(detail_container_, nullptr);
@@ -1208,18 +1488,20 @@ void AmsOverviewPanel::clear_panel_reference() {
         context_menu_->hide();
     }
 
-    // Destroy detail slot widgets BEFORE the parent tree deletion.
-    // When on_deactivate() → show_overview() starts an animation whose completed
-    // callback calls destroy_detail_slots(), and we cancel that animation above,
-    // the slots are never cleaned up. Their DELETE handlers release() observers
-    // instead of properly removing them, leaving dangling entries in AmsState
-    // subjects. Explicitly destroying them here ensures proper cleanup.
+    // Destroy detail slot widgets BEFORE the parent tree deletion. A zoom-out animation
+    // cancelled above never reaches its completion, so its slots would otherwise survive:
+    // their DELETE handlers release() observers instead of properly removing them, leaving
+    // dangling entries in AmsState subjects. Explicitly destroying them here ensures proper
+    // cleanup.
     destroy_detail_slots();
 
     // Clear observer guards before clearing widget pointers
     slots_version_observer_.reset();
     current_slot_observer_.reset();
     external_spool_observer_.reset();
+    bypass_active_observer_.reset();
+    dryer_version_observer_.reset();
+    page_count_observer_.reset();
 
     // Clean up sidebar before clearing panel references
     sidebar_.reset();
@@ -1228,6 +1510,7 @@ void AmsOverviewPanel::clear_panel_reference() {
     g_overview_panel_instance.store(nullptr);
 
     // Clear widget references
+    detach_widget_hooks();
     system_path_ = nullptr;
     system_path_area_ = nullptr;
     panel_ = nullptr;
@@ -1235,13 +1518,24 @@ void AmsOverviewPanel::clear_panel_reference() {
     cards_row_ = nullptr;
     unit_cards_.clear();
 
-    // Clear detail view state
+    // Clear unit view state
     detail_container_ = nullptr;
+    path_container_ = nullptr;
+    prev_button_ = nullptr;
+    next_button_ = nullptr;
+    page_dots_ = nullptr;
+    bypass_widgets_ = {};
+    page_bypass_widgets_ = {};
     detail_widgets_ = AmsDetailWidgets{};
     detail_path_canvas_ = nullptr;
-    detail_unit_index_ = -1;
+    unit_view_active_ = false;
     detail_slot_count_ = 0;
     std::fill(std::begin(detail_slot_widgets_), std::end(detail_slot_widgets_), nullptr);
+    pages_.clear();
+    page_units_.clear();
+    page_ = -1;
+    shown_unit_key_.clear();
+    shown_unit_pos_ = -1;
 
     // Reset subjects_initialized_ so observers are recreated on next access
     subjects_initialized_ = false;
@@ -1251,8 +1545,9 @@ void AmsOverviewPanel::clear_panel_reference() {
 // Global Instance
 // ============================================================================
 
-static std::unique_ptr<AmsOverviewPanel> g_ams_overview_panel;
 static lv_obj_t* s_ams_overview_panel_obj = nullptr;
+// Theme generation the cached tree was built under.
+static int s_ams_overview_theme_gen = 0;
 
 // Lazy registration flag for XML component
 static bool s_overview_registered = false;
@@ -1269,15 +1564,25 @@ static void ensure_overview_registered() {
     // Tool text observers initialized in ui_ams_current_tool_init() at startup.
 
     // Register context-aware back button callback for header
-    // Detail mode: return to overview. Overview mode: close the overlay.
+    // Unit view: return to overview. Overview mode: close the overlay.
     lv_xml_register_event_cb(nullptr, "on_ams_overview_back_clicked", [](lv_event_t* e) {
         LV_UNUSED(e);
         AmsOverviewPanel* panel = g_overview_panel_instance.load();
-        if (panel && panel->is_in_detail_mode()) {
-            panel->leave_unit_detail();
+        if (panel && panel->is_in_unit_view()) {
+            panel->leave_unit_view();
         } else {
-            NavigationManager::instance().go_back();
+            helix::nav::go_back();
         }
+    });
+    lv_xml_register_event_cb(nullptr, "on_ams_page_prev_clicked", [](lv_event_t* e) {
+        LV_UNUSED(e);
+        if (auto* panel = helix::lazy_global_if_exists<AmsOverviewPanel>())
+            panel->prev_page();
+    });
+    lv_xml_register_event_cb(nullptr, "on_ams_page_next_clicked", [](lv_event_t* e) {
+        LV_UNUSED(e);
+        if (auto* panel = helix::lazy_global_if_exists<AmsOverviewPanel>())
+            panel->next_page();
     });
 
     // Register the environment-indicator badge (component + click callback).
@@ -1294,10 +1599,11 @@ static void ensure_overview_registered() {
     ui_system_path_canvas_register();
     ui_filament_path_canvas_register();
 
-    // Register AMS slot widgets for inline detail view
+    // Register AMS slot widgets for the unit view
     // (safe to call multiple times — each register function has an internal guard)
     ui_spool_canvas_register();
     ui_ams_slot_register();
+    ui_ams_lane_bar_register();
 
     // Register the XML components (dependencies must be registered before overview panel)
     lv_xml_register_component_from_file(
@@ -1319,108 +1625,83 @@ static void ensure_overview_registered() {
     spdlog::debug("[AMS Overview] XML registration complete");
 }
 
-// NOTE: this deliberately does NOT call OverlayBase::destroy_overlay_ui().
-// AmsOverviewPanel derives from PanelBase, not OverlayBase — the two are
-// sibling IPanelLifecycle implementations, so the helper is not reachable from
-// here (there is no overlay_root_ and no on_ui_destroyed() on this hierarchy).
-// The sequence below mirrors the helper's, with two required deviations:
-//   1. clear_panel_reference() runs BEFORE deletion (the helper's
-//      on_ui_destroyed() runs after), because it destroys sub-objects that own
-//      widgets in this subtree.
-//   2. safe_delete_subtree() instead of safe_delete_deferred() — see #983.
+// The shared sequence lives in helix::ui::teardown_overlay_ui(); this site
+// differs from OverlayBase::destroy_overlay_ui() only in the two things a
+// site is allowed to differ in:
+//   1. DetachSubtree deletion — the root contains grid/flex layouts whose
+//      grid_update/flex_update must be structurally unable to race teardown
+//      (#983).
+//   2. clear_panel_reference() as the before-delete hook — it destroys the
+//      sidebar and context-menu sub-objects that own widgets in this subtree,
+//      so it must run while the tree is still attached.
 void destroy_ams_overview_panel_ui() {
-    if (s_ams_overview_panel_obj) {
-        spdlog::info("[AMS Overview] Destroying panel UI to free memory");
-
-        // Drain deferred observer callbacks while all pointers are still valid.
-        // observe_int_sync queues lambdas via queue_update() that capture raw
-        // panel/sidebar pointers. If subject changes fired observers between
-        // the last timer tick and now, those lambdas are pending. Processing
-        // them here prevents use-after-free when the panel is destroyed below.
-        auto freeze = helix::ui::UpdateQueue::instance().scoped_freeze();
-        helix::ui::UpdateQueue::instance().drain();
-
-        NavigationManager::instance().unregister_overlay_close_callback(s_ams_overview_panel_obj);
-        NavigationManager::instance().unregister_overlay_instance(s_ams_overview_panel_obj);
-
-        // Breadcrumb the destroy so crashes in the close path can be pinned to
-        // which overlay was being torn down. Pairs with the "overlay+" crumb on
-        // push, and matches OverlayBase::destroy_overlay_ui().
-        crash_handler::breadcrumb::note("ovrl_dst", "AmsOverviewPanel");
-
-        if (g_ams_overview_panel) {
-            g_ams_overview_panel->clear_panel_reference();
-        }
-
-        // safe_delete_subtree (not safe_delete) because the AMS overview panel
-        // root contains grid/flex layouts whose grid_update/flex_update could
-        // race teardown if an ancestor relayouts during this drain. Detaching
-        // the subtree off-tree before deferred deletion makes that race
-        // structurally impossible (#983). Null the pointer ourselves — the
-        // subtree helper takes a raw pointer and does not null its argument.
-        helix::ui::safe_delete_subtree(s_ams_overview_panel_obj);
-        s_ams_overview_panel_obj = nullptr;
-    }
+    helix::ui::teardown_overlay_ui(
+        s_ams_overview_panel_obj, "AmsOverviewPanel", helix::ui::TeardownDelete::DetachSubtree,
+        nullptr, helix::ui::TeardownHooks::before([]() {
+            if (auto* panel = helix::lazy_global_if_exists<AmsOverviewPanel>()) {
+                panel->clear_panel_reference();
+            }
+        }));
 }
 
 AmsOverviewPanel& get_global_ams_overview_panel() {
-    if (!g_ams_overview_panel) {
-        g_ams_overview_panel =
-            std::make_unique<AmsOverviewPanel>(get_printer_state(), get_moonraker_api());
-        StaticPanelRegistry::instance().register_destroy("AmsOverviewPanel", []() {
-            destroy_ams_overview_panel_ui();
-            g_ams_overview_panel.reset();
-        });
+    AmsOverviewPanel& panel = helix::lazy_global_with_teardown<AmsOverviewPanel>(
+        "AmsOverviewPanel", destroy_ams_overview_panel_ui, get_printer_state(),
+        get_moonraker_api());
+
+    const int theme_gen = lv_subject_get_int(theme_manager_get_changed_subject());
+    if (s_ams_overview_panel_obj && s_ams_overview_theme_gen != theme_gen &&
+        !helix::nav::is_showing(s_ams_overview_panel_obj)) {
+        destroy_ams_overview_panel_ui();
     }
 
     // Lazy create the panel UI if not yet created
-    if (!s_ams_overview_panel_obj && g_ams_overview_panel) {
+    if (!s_ams_overview_panel_obj) {
+        s_ams_overview_theme_gen = theme_gen;
         ensure_overview_registered();
 
         // Initialize AmsState subjects BEFORE XML creation so bindings work
         AmsState::instance().init_subjects(true);
+        // A new tree opens on the overview, whatever a dropped one left in the subjects.
+        AmsState::instance().set_unit_view_active(false);
+        AmsState::instance().set_unit_page(0, 0);
 
         // Create the panel on the active screen
         lv_obj_t* screen = lv_scr_act();
-        s_ams_overview_panel_obj =
-            static_cast<lv_obj_t*>(lv_xml_create(screen, "ams_overview_panel", nullptr));
+        s_ams_overview_panel_obj = helix::ui::create_xml_hidden(screen, "ams_overview_panel");
 
         if (s_ams_overview_panel_obj) {
             // Initialize panel observers
-            if (!g_ams_overview_panel->are_subjects_initialized()) {
-                g_ams_overview_panel->init_subjects();
+            if (!panel.are_subjects_initialized()) {
+                panel.init_subjects();
             }
 
             // Setup the panel
-            g_ams_overview_panel->setup(s_ams_overview_panel_obj, screen);
+            panel.setup(s_ams_overview_panel_obj, screen);
             lv_obj_add_flag(s_ams_overview_panel_obj, LV_OBJ_FLAG_HIDDEN);
 
-            // Register overlay instance for lifecycle management
-            NavigationManager::instance().register_overlay_instance(s_ams_overview_panel_obj,
-                                                                    g_ams_overview_panel.get());
+            // Kept alive between opens, like the AMS panel; open_ams_overview_panel()
+            // registers the overlay and its close callback on every open.
+            helix::nav::register_overlay(s_ams_overview_panel_obj, &panel);
 
-            // Register close callback to destroy UI when overlay is closed
-            NavigationManager::instance().register_overlay_close_callback(
-                s_ams_overview_panel_obj, []() { destroy_ams_overview_panel_ui(); });
-
-            spdlog::info("[AMS Overview] Lazy-created panel UI with close callback");
+            spdlog::info("[AMS Overview] Lazy-created panel UI");
         } else {
             spdlog::error("[AMS Overview] Failed to create panel from XML");
         }
     }
 
-    return *g_ams_overview_panel;
+    return panel;
 }
 
 // ============================================================================
-// Slot Context Menu (detail view)
+// Slot Context Menu (unit view)
 // ============================================================================
 
 void AmsOverviewPanel::handle_detail_slot_tap(int global_slot_index, lv_point_t click_pt) {
     spdlog::info("[{}] Detail slot {} tapped", get_name(), global_slot_index);
 
     // Find the local widget for positioning the menu
-    if (detail_unit_index_ < 0)
+    if (shown_unit_pos_ < 0)
         return;
 
     auto* backend = AmsState::instance().get_backend();
@@ -1428,10 +1709,10 @@ void AmsOverviewPanel::handle_detail_slot_tap(int global_slot_index, lv_point_t 
         return;
 
     AmsSystemInfo info = backend->get_system_info();
-    if (detail_unit_index_ >= static_cast<int>(info.units.size()))
+    if (shown_unit_pos_ >= static_cast<int>(info.units.size()))
         return;
 
-    const auto& unit = info.units[detail_unit_index_];
+    const auto& unit = info.units[shown_unit_pos_];
     int local_index = global_slot_index - unit.first_slot_global_index;
 
     if (local_index < 0 || local_index >= detail_slot_count_)
@@ -1449,106 +1730,20 @@ void AmsOverviewPanel::show_detail_context_menu(int slot_index, lv_obj_t* near_w
     if (!parent_screen_ || !near_widget)
         return;
 
-    // Create context menu on first use
     if (!context_menu_) {
         context_menu_ = std::make_unique<helix::ui::AmsContextMenu>();
     }
 
-    context_menu_->set_action_callback([this](helix::ui::AmsContextMenu::MenuAction action,
-                                              int slot) {
-        AmsBackend* backend = AmsState::instance().get_backend();
-
-        // EJECT / RECOVER_POSITION / SELECT_GATE / CHECK_GATE / CLEAR_SPOOL are
-        // identical in both AMS panels — see ams_dispatch_backend_action().
-        if (helix::ui::ams_dispatch_backend_action(action, slot, detail_path_canvas_)) {
-            return;
-        }
-
-        switch (action) {
-        case helix::ui::AmsContextMenu::MenuAction::LOAD:
-            if (sidebar_) {
-                sidebar_->handle_load_with_preheat(slot);
-            }
-            break;
-
-        case helix::ui::AmsContextMenu::MenuAction::UNLOAD:
-            // Route through the sidebar so start_operation(UNLOAD) builds the
-            // correct stepper (mirrors how LOAD routes via handle_load_with_preheat).
-            if (sidebar_) {
-                sidebar_->handle_unload(slot);
-            } else if (backend) {
-                AmsError error = backend->unload_filament(slot);
-                if (error.result != AmsResult::SUCCESS) {
-                    helix::ui::notify_ams_error(error);
-                }
-            } else {
-                NOTIFY_WARNING(lv_tr("Multi-Filament System not available"));
-                return;
-            }
-            break;
-
-        case helix::ui::AmsContextMenu::MenuAction::EDIT:
-            show_edit_modal(slot);
-            break;
-
-        case helix::ui::AmsContextMenu::MenuAction::SPOOLMAN:
-            show_edit_modal(slot, /*open_on_picker=*/true);
-            break;
-
-        case helix::ui::AmsContextMenu::MenuAction::OPEN_SOURCE_UNIT: {
-            // The slot's spool is described by another unit — go there, which is
-            // the whole point of offering this instead of a dead edit button.
-            AmsBackend* b = AmsState::instance().get_backend();
-            if (b) {
-                if (auto owner = b->slot_identity_owner_unit(slot)) {
-                    show_unit_detail(*owner);
-                }
-            }
-            break;
-        }
-
-        case helix::ui::AmsContextMenu::MenuAction::SCAN_QR: {
-#if HELIX_HAS_CAMERA
-            spdlog::info("[AmsOverview] SCAN_QR action for slot {}", slot);
-            auto& scanner = helix::ui::get_qr_scanner_overlay();
-            scanner.show(parent_screen_, slot, [slot](const SpoolInfo& spool) {
-                AmsBackend* be = AmsState::instance().get_backend();
-                if (!be)
-                    return;
-
-                // Capture the pre-edit slot BEFORE the commit — its unlink arm
-                // (clear the server active spool) needs the old link.
-                SlotInfo original = be->get_slot_info(slot);
-                SlotInfo applied = original;
-                apply_spool_to_slot(applied, spool);
-                AmsError err = AmsState::instance().commit_slot_edit(slot, original, applied);
-                if (!err.success()) {
-                    helix::ui::notify_ams_error(err);
-                    return;
-                }
-                spdlog::info("[AmsOverview] QR scan assigned spool #{} to slot {}", spool.id, slot);
-            });
-#endif // HELIX_HAS_CAMERA
-            break;
-        }
-
-        case helix::ui::AmsContextMenu::MenuAction::CANCELLED:
-        default:
-            break;
-        }
-    });
-
-    // Determine whether to offer Unload for this slot. Decoupled from the
-    // display LOADED status so a runout that clears the head sensor doesn't
-    // disable Unload on the firmware's active slot (#995).
-    bool is_loaded = false;
-    AmsBackend* backend = AmsState::instance().get_backend();
-    if (backend) {
-        is_loaded = backend->can_unload_from_toolhead(slot_index);
-    }
-
-    context_menu_->set_click_point(click_pt);
-    context_menu_->show_near_widget(parent_screen_, slot_index, near_widget, is_loaded, backend);
+    helix::ui::SlotMenuHost host;
+    host.parent_screen = parent_screen_;
+    host.api = api_;
+    host.log_tag = "[AmsOverview]";
+    host.path_canvas = [this] { return detail_path_canvas_; };
+    host.sidebar = [this] { return sidebar_.get(); };
+    // The slot's spool is described by another unit, and this panel can show
+    // that unit's page in place.
+    host.open_source_unit = [this](int owner_unit) { open_source_unit(owner_unit); };
+    helix::ui::open_slot_context_menu(*context_menu_, host, slot_index, near_widget, click_pt);
 }
 
 // ============================================================================
@@ -1575,11 +1770,42 @@ void AmsOverviewPanel::on_bypass_spool_clicked(lv_event_t* e) {
 
 void AmsOverviewPanel::handle_bypass_click() {
     helix::ui::show_external_spool_menu(
-        parent_screen_, system_path_, context_menu_,
-        [this](bool open_on_picker) { show_edit_modal(-2, open_on_picker); });
+        parent_screen_, unit_view_active_ ? detail_path_canvas_ : system_path_, context_menu_,
+        helix::ui::sidebar_external_spool_hooks(sidebar_.get()));
 }
 
 void AmsOverviewPanel::refresh_bypass_display() {
+    refresh_system_bypass();
+    refresh_page_bypass();
+}
+
+void AmsOverviewPanel::refresh_page_bypass() {
+    if (!page_bypass_widgets_.valid() || !unit_view_active_) {
+        return;
+    }
+    refresh_page_bypass(helix::ui::bypass_node_visible_for(AmsState::instance().get_backend()));
+}
+
+void AmsOverviewPanel::refresh_page_bypass(bool node) {
+    if (!page_bypass_widgets_.valid() || !unit_view_active_) {
+        return;
+    }
+    helix::ui::bypass_spool_sync_from_state(page_bypass_widgets_, node);
+    // The canvas draws the tube to the spool; its own state follows the same subjects.
+    if (detail_path_canvas_ && shown_unit_pos_ >= 0) {
+        auto ext = AmsState::instance().get_external_spool_info();
+        ui_filament_path_canvas_set_bypass_has_spool(detail_path_canvas_, ext.has_value() && node);
+        if (ext && node)
+            ui_filament_path_canvas_set_bypass_color(detail_path_canvas_, ext->color_rgb);
+        ui_filament_path_canvas_set_bypass_active(
+            detail_path_canvas_,
+            node && lv_subject_get_int(AmsState::instance().get_bypass_active_subject()) != 0);
+        ui_filament_path_canvas_refresh(detail_path_canvas_);
+    }
+    update_page_bypass_widgets_position();
+}
+
+void AmsOverviewPanel::refresh_system_bypass() {
     if (!system_path_) {
         return;
     }
@@ -1625,6 +1851,27 @@ void AmsOverviewPanel::refresh_bypass_display() {
     ui_system_path_canvas_refresh(system_path_);
 }
 
+void AmsOverviewPanel::on_system_path_size_changed(lv_event_t* e) {
+    if (auto* self = static_cast<AmsOverviewPanel*>(lv_event_get_user_data(e)))
+        self->update_bypass_widgets_position();
+}
+
+void AmsOverviewPanel::detach_widget_hooks() {
+    // These widgets can outlive this panel; their callbacks must not.
+    helix::ui::remove_event_cb_if_alive(cards_row_, &AmsOverviewPanel::on_cards_row_scrolled, this);
+    helix::ui::remove_event_cb_if_alive(system_path_,
+                                        &AmsOverviewPanel::on_system_path_size_changed, this);
+    helix::ui::remove_event_cb_if_alive(detail_container_, &AmsOverviewPanel::on_unit_view_gesture,
+                                        this);
+    helix::ui::remove_event_cb_if_alive(detail_path_canvas_,
+                                        &AmsOverviewPanel::on_path_layout_changed, this);
+    helix::ui::remove_event_cb_if_alive(page_dots_, &AmsOverviewPanel::on_page_dots_resized, this);
+}
+
+AmsOverviewPanel::~AmsOverviewPanel() {
+    detach_widget_hooks();
+}
+
 void AmsOverviewPanel::update_bypass_widgets_position() {
     if (!bypass_widgets_.valid() || !system_path_ || !system_path_area_) {
         return;
@@ -1641,70 +1888,104 @@ void AmsOverviewPanel::update_bypass_widgets_position() {
                                          abs_cy - parent_abs.y1);
 }
 
-void AmsOverviewPanel::show_edit_modal(int slot_index, bool open_on_picker) {
-    if (!parent_screen_) {
-        spdlog::warn("[{}] Cannot show slot editor - no parent screen", get_name());
+void AmsOverviewPanel::update_page_bypass_widgets_position() {
+    if (!page_bypass_widgets_.valid() || !detail_path_canvas_ || !path_container_) {
         return;
     }
-
-    auto& editor = helix::ui::get_ams_edit_overlay();
-
-    // External spool (bypass/direct) - not managed by backend
-    if (slot_index == -2) {
-        auto ext = AmsState::instance().get_external_spool_info();
-        SlotInfo initial_info = ext.value_or(SlotInfo{});
-        initial_info.slot_index = -2;
-        initial_info.global_index = -2;
-
-        editor.show_for_slot(
-            parent_screen_, -2, initial_info, api_,
-            [](const helix::ui::AmsEditOverlay::EditResult& result) {
-                if (result.saved) {
-                    AmsState::instance().commit_external_spool_edit(result.slot_info);
-                    // bypass display update handled reactively by external_spool_observer_
-                    NOTIFY_INFO(lv_tr("External spool updated"));
-                }
-            },
-            open_on_picker);
+    int32_t abs_cx = 0;
+    int32_t abs_cy = 0;
+    if (!ui_filament_path_canvas_get_bypass_merge_pos(detail_path_canvas_, &abs_cx, &abs_cy)) {
         return;
     }
-
-    // Regular AMS slot
-    AmsBackend* backend = AmsState::instance().get_backend();
-    if (!backend) {
-        NOTIFY_WARNING(lv_tr("Multi-Filament System not available"));
-        return;
-    }
-
-    SlotInfo initial_info = backend->get_slot_info(slot_index);
-
-    editor.show_for_slot(
-        parent_screen_, slot_index, initial_info, api_,
-        [](const helix::ui::AmsEditOverlay::EditResult& result) {
-            if (result.saved && result.slot_index >= 0) {
-                AmsBackend* backend = AmsState::instance().get_backend();
-                if (backend) {
-                    // Capture the pre-edit slot BEFORE the commit — its unlink
-                    // arm (clear the server active spool) needs the old link.
-                    SlotInfo original = backend->get_slot_info(result.slot_index);
-                    AmsError err = AmsState::instance().commit_slot_edit(
-                        result.slot_index, original, result.slot_info);
-                    if (!err.success()) {
-                        helix::ui::notify_ams_error(err);
-                        return;
-                    }
-                    // The badge's spool number — see spool_display_number().
-                    NOTIFY_INFO(lv_tr("Slot {} updated"),
-                                backend->spool_display_number(result.slot_index));
-                }
-            }
-        },
-        open_on_picker);
+    lv_obj_update_layout(path_container_);
+    lv_area_t parent_abs;
+    lv_obj_get_content_coords(path_container_, &parent_abs);
+    helix::ui::bypass_spool_set_position(page_bypass_widgets_, abs_cx - parent_abs.x1,
+                                         abs_cy - parent_abs.y1);
 }
 
 // ============================================================================
 // Multi-unit Navigation
 // ============================================================================
+
+namespace {
+
+void drop_hidden_ams_panel_ui() {
+    const AmsPanel* detail = get_existing_ams_panel();
+    if (detail && detail->get_panel() && !helix::nav::is_showing(detail->get_panel())) {
+        destroy_ams_panel_ui();
+    }
+}
+
+void drop_hidden_overview_ui() {
+    if (s_ams_overview_panel_obj && !helix::nav::is_showing(s_ams_overview_panel_obj)) {
+        destroy_ams_overview_panel_ui();
+    }
+}
+
+// Critical memory pressure drops the hidden cached AMS trees, which the small-RAM
+// printers (AD5M/AD5X) need back. Linux only in practice: the monitor is never
+// started on the ESP32.
+void ensure_ams_pressure_responder() {
+    static bool registered = false;
+    if (registered) {
+        return;
+    }
+    registered = true;
+    helix::MemoryMonitor::instance().add_pressure_responder([](helix::MemoryPressureLevel level) {
+        if (level < helix::MemoryPressureLevel::critical) {
+            return;
+        }
+        helix::ui::queue_update("AMS::drop_hidden_ui", []() {
+            drop_hidden_ams_panel_ui();
+            drop_hidden_overview_ui();
+        });
+    });
+}
+
+// The panels outlive a close, so a reopen usually has nothing to build; only a
+// first open (or one after the tree was dropped) waits under the loading pill.
+void open_ams_overlay(bool built, const std::function<void()>& open) {
+    ensure_ams_pressure_responder();
+    if (built) {
+        open();
+    } else {
+        helix::nav::build_under_loading_pill(open);
+    }
+}
+
+// Close callbacks fire once, so every open registers its own.
+void push_ams_overlay(lv_obj_t* root, IPanelLifecycle* lifecycle,
+                      helix::OverlayCloseCallback on_closed) {
+    helix::nav::register_overlay(root, lifecycle);
+    helix::nav::on_close(root, std::move(on_closed));
+    helix::nav::push_overlay(root);
+}
+
+void open_ams_overview_panel(int units) {
+    drop_hidden_ams_panel_ui();
+    open_ams_overlay(s_ams_overview_panel_obj != nullptr, [units]() {
+        spdlog::info("[AMS] Multi-unit setup ({} units) - showing overview", units);
+        auto& overview = get_global_ams_overview_panel();
+        if (lv_obj_t* panel = overview.get_panel()) {
+            push_ams_overlay(panel, &overview, &AmsOverviewPanel::run_close);
+        }
+    });
+}
+
+} // namespace
+
+void helix::ui::open_ams_detail_panel() {
+    drop_hidden_overview_ui();
+    const AmsPanel* existing = get_existing_ams_panel();
+    open_ams_overlay(existing && existing->get_panel(), []() {
+        spdlog::info("[AMS] Single-unit setup - showing detail panel directly");
+        auto& detail = get_global_ams_panel();
+        if (lv_obj_t* panel = detail.get_panel()) {
+            push_ams_overlay(panel, &detail, &AmsPanel::run_close);
+        }
+    });
+}
 
 void navigate_to_ams_panel() {
     auto* backend = AmsState::instance().get_backend();
@@ -1713,37 +1994,12 @@ void navigate_to_ams_panel() {
         return;
     }
 
-    AmsSystemInfo info = backend->get_system_info();
-
+    // Only one of the two panels serves a given unit count; opening one drops the
+    // other's hidden tree rather than holding both.
+    const AmsSystemInfo info = backend->get_system_info();
     if (info.is_multi_unit()) {
-        // Multi-unit: show overview panel
-        spdlog::info("[AMS] Multi-unit setup ({} units) - showing overview", info.unit_count());
-        auto& overview = get_global_ams_overview_panel();
-        lv_obj_t* panel = overview.get_panel();
-        if (panel) {
-            // Re-register before push: switch_to_panel_impl() clears
-            // overlay_instances_ on navbar switches (keeping only the
-            // persistent map), so a cached panel re-opened after a navbar tap
-            // loses its lifecycle registration. Idempotent (keyed by widget).
-            NavigationManager::instance().register_overlay_instance(panel, &overview);
-            // Opening the AMS panel afresh starts at the cards. This used to be
-            // done from on_deactivate(), which cannot tell "the user navigated
-            // away" from "an overlay covered me for a moment" — so pushing the
-            // slot editor threw away which unit was open, and closing it landed
-            // back on the cards instead of the unit you were editing.
-            overview.show_overview();
-            NavigationManager::instance().push_overlay(panel);
-        }
+        open_ams_overview_panel(info.unit_count());
     } else {
-        // Single-unit (or no units): go directly to detail panel
-        spdlog::info("[AMS] Single-unit setup - showing detail panel directly");
-        auto& detail = get_global_ams_panel();
-        lv_obj_t* panel = detail.get_panel();
-        if (panel) {
-            // Re-register before push (see multi-unit branch above): cached
-            // panel re-opened after a navbar switch loses its registration.
-            NavigationManager::instance().register_overlay_instance(panel, &detail);
-            NavigationManager::instance().push_overlay(panel);
-        }
+        helix::ui::open_ams_detail_panel();
     }
 }

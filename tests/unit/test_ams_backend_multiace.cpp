@@ -21,6 +21,8 @@
 
 #include "../catch_amalgamated.hpp"
 
+using namespace helix;
+
 using json = nlohmann::json;
 using HeadSource = AmsBackendMultiAce::HeadSource;
 
@@ -49,7 +51,15 @@ class CapturingMultiAce : public AmsBackendMultiAce {
         captured_gcodes.push_back(gcode);
         return AmsErrorHelper::success();
     }
-    using AmsBackendMultiAce::handle_status_update;
+    /// Takes a notify frame or a bare status object (a query result).
+    void handle_status_update(const json& n) {
+        if (n.contains("params")) {
+            AmsBackendMultiAce::handle_status_update(n);
+        } else {
+            handle_status(n);
+        }
+    }
+    using AmsBackendMultiAce::preload_finish_ends_unload;
 };
 
 json wrap(const json& ace) {
@@ -58,16 +68,16 @@ json wrap(const json& ace) {
 
 } // namespace
 
-/// Reaches the private static override parser. The friend declaration for this
-/// name has been on AmsBackendMultiAce since it was written; this is the first
-/// definition of it. Named at namespace scope, not inside the anonymous one, so
-/// it matches the friend.
+namespace helix {
+/// Reaches the private static override parser. Named in namespace helix, not
+/// inside the anonymous one, so it matches the backend's friend declaration.
 class MultiAceTestAccess {
   public:
     static AmsBackendMultiAce::OverrideMap parse_slot_overrides(const std::string& content) {
         return AmsBackendMultiAce::parse_slot_overrides(content);
     }
 };
+} // namespace helix
 
 TEST_CASE_METHOD(HelixTestFixture, "multiACE reads head source kinds off the live frame",
                  "[ams][multiace]") {
@@ -850,17 +860,6 @@ TEST_CASE_METHOD(HelixTestFixture, "multiACE reports environment sensors", "[ams
     CHECK_FALSE(plain.has_environment_sensors()); // a stock U1 still has none
 }
 
-TEST_CASE("multiACE inherits the U1's no-homing answer", "[ams][multiace][homing]") {
-    // Inherited from AmsBackendSnapmaker rather than restated, and worth a test
-    // precisely because it is inherited: an ACE-fed head loads with
-    // `ACE_LOAD_HEAD`, a feeder head with `AUTO_FEEDING`, and neither routes
-    // through ensure_homed_then(). If a future override on this class forgets
-    // it, the "home printer first?" prompt comes back on a printer that will
-    // never emit the G28 -- and declining it cancels the load.
-    CapturingMultiAce backend;
-    CHECK_FALSE(backend.filament_ops_may_home());
-}
-
 // =============================================================================
 // An ACE-fed head's unload ends at preload_finish
 //
@@ -1138,14 +1137,17 @@ TEST_CASE_METHOD(HelixTestFixture, "the unload step names the ACE as the destina
     const auto unload = backend.get_operation_step_model(StepOperationType::UNLOAD);
     REQUIRE_FALSE(unload.steps.empty());
     CHECK(unload.steps.back().label == std::string("Retract filament"));
-    // A rename, not an extra step: the firmware drives the index (unload phase
+    // A rename, not an extra step: the firmware drives the index (unload step
     // 3), so a fifth step would sit Pending forever.
     CHECK(unload.steps.size() == 4);
-    CHECK(unload.steps.back().phase_id == AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 3);
+    CHECK(unload.steps.back().phase_id == 3);
 
     // The load direction is untouched.
     const auto load = backend.get_operation_step_model(StepOperationType::LOAD_FRESH);
-    CHECK(load.steps.size() == 5);
+    CHECK(load.steps.size() ==
+          AmsBackendSnapmaker(nullptr, nullptr)
+              .get_operation_step_model(StepOperationType::LOAD_FRESH)
+              .steps.size());
 }
 
 TEST_CASE_METHOD(HelixTestFixture, "a feeder head's unload keeps the plain Retract label",
@@ -1469,29 +1471,30 @@ TEST_CASE_METHOD(HelixTestFixture, "the swap step model carries both halves in o
     REQUIRE(backend.load_filament(5).success()); // names head 3 as the target
 
     const auto model = backend.get_operation_step_model(StepOperationType::LOAD_SWAP);
-    REQUIRE(model.steps.size() == 6);
+    REQUIRE(model.steps.size() == 7);
     CHECK(model.steps[0].label == "Home");
     CHECK(model.steps[1].label == "Select");
     CHECK(model.steps[2].label == "Heat nozzle");
     CHECK(model.steps[3].label == "Retract filament");
     CHECK(model.steps[4].label == "Feed filament");
-    CHECK(model.steps[5].label == "Purge");
+    CHECK(model.steps[5].label == "Extrude");
+    CHECK(model.steps[6].label == "Purge");
 
-    // The ids are the point: steps 1-4 are driven by the UNLOAD half and 5-6 by
-    // the LOAD half, in one bar. Nothing covers the gap between them -- measured
-    // at ~4s on a live U1, too short to earn a row.
-    CHECK(model.steps[0].phase_id == AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 0);
-    CHECK(model.steps[3].phase_id == AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 3);
-    CHECK(model.steps[4].phase_id == AmsBackendSnapmaker::LOAD_PHASE_BASE + 3);
-    CHECK(model.steps[5].phase_id == AmsBackendSnapmaker::LOAD_PHASE_BASE + 4);
+    // Steps 1-4 are driven by the UNLOAD half and 5-7 by the LOAD half, in one
+    // bar. Nothing covers the gap between them -- measured at ~4s on a live U1,
+    // too short to earn a row.
+    CHECK(model.steps[AmsBackendMultiAce::SWAP_STEP_RETRACT].label == "Retract filament");
+    CHECK(model.steps[AmsBackendMultiAce::SWAP_STEP_FEED].label == "Feed filament");
+    CHECK(model.steps[AmsBackendMultiAce::SWAP_STEP_PURGE].label == "Purge");
     CHECK(model.steps[2].live_temp);
 
-    // No two steps claim the same id — without that the bar cannot tell the
-    // retract from the feed, which was the original defect.
-    std::set<int> ids;
-    for (const auto& s : model.steps) {
-        INFO("duplicate phase id " << s.phase_id);
-        CHECK(ids.insert(s.phase_id).second);
+    // Every step's id is its own position, so the published step index names
+    // one row whether it is read as an id or as a position. In particular the
+    // retract and the feed cannot be told apart by the per-direction index
+    // alone: unload step 3 and load step 3 are different rows here.
+    for (size_t i = 0; i < model.steps.size(); ++i) {
+        INFO("step " << i);
+        CHECK(model.steps[i].phase_id == static_cast<int>(i));
     }
 }
 
@@ -1506,7 +1509,10 @@ TEST_CASE_METHOD(HelixTestFixture, "a feeder head's swap keeps the plain load mo
     REQUIRE(backend.unload_filament(0).success()); // names head 0 as the target
 
     const auto model = backend.get_operation_step_model(StepOperationType::LOAD_SWAP);
-    CHECK(model.steps.size() == 5);
+    CHECK(model.steps.size() ==
+          AmsBackendSnapmaker(nullptr, nullptr)
+              .get_operation_step_model(StepOperationType::LOAD_FRESH)
+              .steps.size());
     CHECK(model.steps.back().label == "Purge");
 }
 
@@ -1523,18 +1529,24 @@ TEST_CASE_METHOD(LVGLTestFixture, "preload_finish is a boundary mid-swap, not an
 
     backend.handle_status_update(feed_frame(3, "unload_doing"));
     CHECK(backend.get_current_action() == AmsAction::UNLOADING);
-    CHECK(backend.get_system_info().operation_phase ==
-          AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 3);
+    CHECK(backend.get_system_info().operation_phase == AmsBackendMultiAce::SWAP_STEP_RETRACT);
 
     // The boundary. Resolving to IDLE here hid the step bar, brought the action
     // buttons back and armed a post-op cooldown -- mid-swap, with the new spool
     // not yet fed. The bar holds on the retract step across the gap.
     backend.handle_status_update(feed_frame(3, "preload_finish"));
     CHECK(backend.get_current_action() != AmsAction::IDLE);
+    CHECK(backend.get_system_info().operation_phase == AmsBackendMultiAce::SWAP_STEP_RETRACT);
 
-    // The load half takes over and the latch disarms.
+    // The load half's own Home and Select have no row: the bar keeps holding.
+    backend.handle_status_update(feed_frame(3, "load_picking"));
+    CHECK(backend.get_system_info().operation_phase == AmsBackendMultiAce::SWAP_STEP_RETRACT);
+
+    // The load half takes over, on the positions after the retract.
     backend.handle_status_update(feed_frame(3, "load_feeding"));
-    CHECK(backend.get_system_info().operation_phase == AmsBackendSnapmaker::LOAD_PHASE_BASE + 3);
+    CHECK(backend.get_system_info().operation_phase == AmsBackendMultiAce::SWAP_STEP_FEED);
+    backend.handle_status_update(feed_frame(3, "load_flushing"));
+    CHECK(backend.get_system_info().operation_phase == AmsBackendMultiAce::SWAP_STEP_PURGE);
 
     backend.handle_status_update(feed_frame(3, "load_finish"));
     CHECK(backend.get_current_action() == AmsAction::IDLE);

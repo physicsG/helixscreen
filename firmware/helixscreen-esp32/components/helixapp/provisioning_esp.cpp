@@ -68,6 +68,7 @@ bool provisioning_run_portal() {
 #include "lwip/sockets.h"
 #include "lwip/sys.h"
 #include "nvs.h"
+#include "text_io.h"
 #include "utils/network_validation.h"
 #include "wifi_backend_esp.h"
 #include "wifi_manager.h"
@@ -80,7 +81,6 @@ bool provisioning_run_portal() {
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
-#include <sstream>
 #include <string>
 #include <vector>
 
@@ -330,8 +330,9 @@ std::string render_form_page(const std::string& ap_ssid, const std::vector<std::
         error_html = "<p class=\"err\">" + html_escape(error_msg) + "</p>";
     }
 
-    std::ostringstream html;
-    html << "<!doctype html><html><head><meta charset=\"utf-8\">"
+    std::string html;
+    html += std::string() +
+            "<!doctype html><html><head><meta charset=\"utf-8\">"
             "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
             "<title>HelixScreen Setup</title><style>"
             "body{font-family:sans-serif;max-width:420px;margin:24px auto;padding:0 16px;"
@@ -340,28 +341,28 @@ std::string render_form_page(const std::string& ap_ssid, const std::vector<std::
             "font-size:1em;margin-top:4px}button{margin-top:20px;width:100%;padding:12px;"
             "font-size:1.05em;background:#2b7a3f;color:#fff;border:0;border-radius:4px}"
             ".err{color:#b00020;font-weight:bold}.hint{color:#666;font-size:0.85em}"
-            "</style></head><body>"
-         << "<h1>Set up " << html_escape(ap_ssid) << "</h1>" << error_html
-         << "<form method=\"POST\" action=\"/save\">"
+            "</style></head><body>" +
+            "<h1>Set up " + html_escape(ap_ssid) + "</h1>" + error_html +
+            "<form method=\"POST\" action=\"/save\">"
             "<label for=\"ssid\">WiFi network</label>"
             "<input list=\"ssids\" id=\"ssid\" name=\"ssid\" required autocomplete=\"off\">"
-            "<datalist id=\"ssids\">"
-         << datalist
-         << "</datalist>"
+            "<datalist id=\"ssids\">" +
+            datalist +
+            "</datalist>"
             "<label for=\"password\">WiFi password</label>"
             "<input type=\"password\" id=\"password\" name=\"password\" autocomplete=\"off\">"
             "<label for=\"host\">Moonraker host (optional)</label>"
-            "<input id=\"host\" name=\"host\" value=\""
-         << html_escape(cur_host)
-         << "\" placeholder=\"e.g. 192.168.1.50\">"
+            "<input id=\"host\" name=\"host\" value=\"" +
+            html_escape(cur_host) +
+            "\" placeholder=\"e.g. 192.168.1.50\">"
             "<label for=\"port\">Moonraker port</label>"
-            "<input id=\"port\" name=\"port\" value=\""
-         << cur_port
-         << "\">"
+            "<input id=\"port\" name=\"port\" value=\"" +
+            std::to_string(cur_port) +
+            "\">"
             "<p class=\"hint\">Leave host blank to keep the current setting.</p>"
             "<button type=\"submit\">Connect</button>"
             "</form></body></html>";
-    return html.str();
+    return html;
 }
 
 constexpr const char SUCCESS_PAGE[] =
@@ -484,7 +485,9 @@ esp_err_t save_post_handler(httpd_req_t* req) {
         helix::Config* config = helix::Config::get_instance();
         config->set(config->df() + "moonraker_host", host);
         if (!port_str.empty()) {
-            config->set(config->df() + "moonraker_port", std::stoi(port_str));
+            // is_valid_port() has already held it to 1-65535.
+            config->set(config->df() + "moonraker_port",
+                        helix::text_io::parse_leading<int>(port_str).value_or(7125));
         }
         config->save();
     }
@@ -499,7 +502,7 @@ esp_err_t save_post_handler(httpd_req_t* req) {
     // the LVGL thread. The poll below is unchanged — s_connect_state is already
     // PENDING, so a not-yet-drained hop just reads as "still connecting".
     helix::ui::queue_update("provisioning::connect", [wifi, ssid, password]() {
-        wifi->connect(ssid, password, [](bool success, const std::string& error) {
+        wifi->connect(ssid, password, [](bool success, const std::string& error, WiFiResult) {
             s_connect_error = error;
             s_connect_state.store(success ? JoinState::CONNECTED : JoinState::FAILED);
         });
@@ -550,7 +553,7 @@ bool start_httpd() {
     config.max_uri_handlers = 8;
     config.lru_purge_enable = true;
     // Default (4096) is sized for C-string handlers; render_form_page() below
-    // builds several std::string/ostringstream temporaries per request, so
+    // builds several std::string temporaries per request, so
     // give the httpd task's own stack more headroom (transient — this task
     // exists only while the portal is up).
     config.stack_size = 8192;

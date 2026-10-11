@@ -5,6 +5,7 @@
 
 #include "lvgl/lvgl.h"
 #include "overlay_base.h"
+#include "static_panel_registry.h"
 
 namespace helix::settings {
 
@@ -21,52 +22,32 @@ namespace helix::settings {
  */
 class HardwareSettingsOverlay : public OverlayBase {
   public:
-    HardwareSettingsOverlay();
-    ~HardwareSettingsOverlay() override;
-
-    // === OverlayBase Interface ===
-
-    void init_subjects() override;
     void register_callbacks() override;
 
     const char* get_name() const override {
-        return "Hardware & Devices";
+        return "Devices";
+    }
+    const char* xml_component() const override {
+        return "settings_hardware_overlay";
     }
 
-    void on_activate() override;
-    void on_deactivate() override;
-
-    // === UI Creation ===
-
+    /// Default create() plus the live Hardware Health row binding.
     lv_obj_t* create(lv_obj_t* parent) override;
-    void show(lv_obj_t* parent_screen);
-
-    bool is_created() const {
-        return overlay_root_ != nullptr;
-    }
-
-  private:
-    // === Static Callbacks ===
-
-    static void on_printers_clicked(lv_event_t* e);
-    static void on_camera_view_clicked(lv_event_t* e);
-    static void on_ams_settings_clicked(lv_event_t* e);
-    static void on_fans_settings_clicked(lv_event_t* e);
-    static void on_filament_sensors_clicked(lv_event_t* e);
-    static void on_led_settings_clicked(lv_event_t* e);
-    static void on_power_devices_clicked(lv_event_t* e);
-    static void on_spoolman_settings_clicked(lv_event_t* e);
-    static void on_macro_buttons_clicked(lv_event_t* e);
 };
 
+inline HardwareSettingsOverlay& get_hardware_settings_overlay() {
+    return lazy_global<HardwareSettingsOverlay>("HardwareSettingsOverlay");
+}
+
 /**
- * @brief Global instance accessor
+ * @brief Bind the Hardware Health row to live validation state
  *
- * Creates the overlay on first access and registers it for cleanup
- * with StaticPanelRegistry.
+ * Points the row's label at the issue-count summary and its icon colour at
+ * hardware_status_level. The row lives inside settings_hardware_overlay, so
+ * only something holding that tree can reach the widgets by name.
  *
- * @return Reference to singleton HardwareSettingsOverlay
+ * @param overlay_root A settings_hardware_overlay tree
  */
-HardwareSettingsOverlay& get_hardware_settings_overlay();
+void bind_hardware_health_row(lv_obj_t* overlay_root);
 
 } // namespace helix::settings

@@ -54,14 +54,14 @@ diff --git a/http/client/WebSocketClient.cpp b/http/client/WebSocketClient.cpp
 -    }
 -
 +    // PATCH NOTE(helixscreen): install the TcpClient-level channel callbacks
-+    // exactly ONCE, here in the constructor. open() used to reassign these
-+    // std::function members on every call — from the CALLER's thread while the
-+    // event-loop thread could be mid-invoke on the previous attempt's closure,
-+    // destroying the function's heap storage under the running lambda (heap
-+    // corruption / SIGABRT "free(): invalid next size" under concurrent
-+    // connect(); the redirect path even reassigned the very closure it was
-+    // running in). The bodies reference only members (state, http_req_, ...)
-+    // that open() prepares before start(), so installing once is equivalent.
++    // exactly ONCE, here in the constructor. open() runs on the caller's
++    // thread, and the loop thread may be invoking onConnection for the previous
++    // attempt's disconnect at that moment; reassigning a std::function while it
++    // executes is a data race. The redirect path calls open() from inside
++    // onMessage, which would reassign the closure that is running.
++    // The bodies reference only members (state, http_req_, ...) that open()
++    // prepares before start(), so installing them once is equivalent to
++    // installing them on every open().
      onConnection = [this](const WebSocketChannelPtr& channel) {
          if (channel->isConnected()) {
              // TcpClient resets the reconnect backoff in its own onconnect, right

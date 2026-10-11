@@ -37,6 +37,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC_DIR = REPO_ROOT / "src"
+INCLUDE_DIR = REPO_ROOT / "include"
 TRANS_DIR = REPO_ROOT / "translations"
 
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
@@ -116,10 +117,18 @@ def specifiers(s: str):
     return out
 
 
-def _collect_sink_tags(sink_re) -> set:
+def _collect_sink_tags(sink_re, roots) -> set:
     """Format strings passed via lv_tr() to a call matching sink_re."""
     tags = set()
-    for path in SRC_DIR.rglob("*.cpp"):
+    seen = set()
+    paths = []
+    for root in roots:
+        for pattern in ("*.cpp", "*.h"):
+            for path in root.rglob(pattern):
+                if path not in seen:
+                    seen.add(path)
+                    paths.append(path)
+    for path in paths:
         text = path.read_text(encoding="utf-8", errors="replace")
         # For each sink call, scan the call's argument region (up to the next
         # ';') for the first lv_tr literal — that's the format argument.
@@ -134,18 +143,18 @@ def _collect_sink_tags(sink_re) -> set:
     return tags
 
 
-def collect_format_tags() -> set:
+def collect_format_tags(roots) -> set:
     """printf-style source formats (only those that carry specifiers)."""
-    return {t for t in _collect_sink_tags(FORMAT_SINK_RE) if specifiers(t)}
+    return {t for t in _collect_sink_tags(FORMAT_SINK_RE, roots) if specifiers(t)}
 
 
-def collect_fmt_tags() -> set:
+def collect_fmt_tags(roots) -> set:
     """{fmt}-style source formats (only those that carry replacement fields)."""
-    return {t for t in _collect_sink_tags(FMT_SINK_RE) if fmt_arg_count(t) > 0}
+    return {t for t in _collect_sink_tags(FMT_SINK_RE, roots) if fmt_arg_count(t) > 0}
 
 
-def _iter_locales():
-    for yml in sorted(TRANS_DIR.glob("*.yml")):
+def _iter_locales(trans_dir):
+    for yml in sorted(trans_dir.glob("*.yml")):
         locale = yml.stem
         if locale == "en":
             continue  # en is the source; nothing to compare against
@@ -163,7 +172,7 @@ def _iter_locales():
 UNRESOLVED_ESCAPE_RE = re.compile(r"\\(?:x[0-9a-fA-F]|[nrtabfve0-7\\\"']|u[0-9a-fA-F]{4})")
 
 
-def check_unresolved_escapes() -> list:
+def check_unresolved_escapes(trans_dir) -> list:
     """Report every YAML key or value still carrying a literal C escape.
 
     lv_tr("%d\\xc2\\xb0") looks up a key containing the degree sign, and
@@ -173,7 +182,7 @@ def check_unresolved_escapes() -> list:
     the raw escape text in every locale, including English.
     """
     problems = []
-    for yml in sorted(TRANS_DIR.glob("*.yml")):
+    for yml in sorted(trans_dir.glob("*.yml")):
         data = yaml.safe_load(yml.read_text(encoding="utf-8")) or {}
         trans = data.get("translations", data)
         if not isinstance(trans, dict):
@@ -186,8 +195,8 @@ def check_unresolved_escapes() -> list:
     return problems
 
 
-def check(verbose: bool) -> int:
-    escapes = check_unresolved_escapes()
+def check(verbose: bool, src_roots=None, trans_dir=None) -> int:
+    escapes = check_unresolved_escapes(trans_dir if trans_dir else TRANS_DIR)
     if escapes:
         print("✗ Translation strings carrying an unresolved C escape:\n")
         for locale, kind, text in escapes:
@@ -200,8 +209,9 @@ def check(verbose: bool) -> int:
         )
         return 1
 
-    printf_tags = collect_format_tags()
-    fmt_tags = collect_fmt_tags()
+    roots = src_roots if src_roots else [SRC_DIR, INCLUDE_DIR]
+    printf_tags = collect_format_tags(roots)
+    fmt_tags = collect_fmt_tags(roots)
     if verbose:
         print(
             f"Discovered {len(printf_tags)} printf and {len(fmt_tags)} "
@@ -209,7 +219,7 @@ def check(verbose: bool) -> int:
         )
 
     problems = []
-    for locale, trans in _iter_locales():
+    for locale, trans in _iter_locales(trans_dir if trans_dir else TRANS_DIR):
         # printf-style: specifier sequence (count + type) must match.
         for tag in printf_tags:
             val = trans.get(tag)
@@ -275,8 +285,12 @@ def check(verbose: bool) -> int:
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-v", "--verbose", action="store_true")
+    ap.add_argument("--src", action="append", type=Path, default=None,
+                    help="source root(s) to scan instead of src/ and include/")
+    ap.add_argument("--trans", type=Path, default=None,
+                    help="translations dir instead of translations/")
     args = ap.parse_args()
-    sys.exit(check(args.verbose))
+    sys.exit(check(args.verbose, src_roots=args.src, trans_dir=args.trans))
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -341,27 +342,6 @@ class TestLinterStyleSelectors:
         assert len(style_errors) == 1
         assert f"Did you mean '{expected}'?" in style_errors[0].message
 
-    def test_selector_underscore_typo_with_state_suggests_dash_and_colon(
-        self, schema: Schema
-    ) -> None:
-        """Internal state syntax is displayed as the original ':' syntax."""
-        from helix_xml_linter.xml_parser import ParsedElement
-
-        linter = Linter(schema, LinterConfig(enable_xref=False))
-        elem = ParsedElement(
-            tag="lv_obj",
-            attributes={"style_bg_color_indicator__checked": "#primary"},
-            line=1,
-            column=1,
-            source_file=Path("test.xml"),
-        )
-        diagnostics = linter.lint_element(elem)
-        style_errors = [
-            d for d in diagnostics if d.check == CheckType.UNKNOWN_STYLE_PROP
-        ]
-        assert len(style_errors) == 1
-        assert "Did you mean 'style_bg_color-indicator:checked'?" in style_errors[0].message
-
     def test_selector_underscore_suggestion_requires_valid_base_prop(
         self, schema: Schema
     ) -> None:
@@ -474,134 +454,104 @@ class TestLinterBindAttributes:
 
 
 class TestLinterStateQualifiers:
-    """Tests for state qualifier validation in style attributes.
-
-    State-qualified attributes use LVGL syntax like
-    ``style_text_color:checked="#text"`` which is preprocessed to
-    ``style_text_color__checked="#text"`` before parsing.
+    """``style_text_color:checked="#text"`` is preprocessed to
+    ``style_text_color__checked`` so the file parses. helix-xml has no ':'
+    selector syntax and drops such an attribute, so each one is an error
+    naming the '-' spelling that does apply.
     """
 
     @pytest.mark.parametrize(
-        "attr_name,attr_value",
+        "attr_name,expected",
         [
-            ("style_text_color__checked", "#text"),
-            ("style_bg_opa__checked", "200"),
-            ("style_bg_color__checked", "#primary"),
-            ("style_border_color__focused", "#primary"),
-            ("style_bg_color__hovered", "#primary"),
-            ("style_bg_opa__disabled", "100"),
-            ("style_text_opa__disabled", "100"),
-            ("style_bg_color__pressed", "#primary"),
-            ("style_bg_opa__scrolled", "128"),
-            ("style_bg_color__default", "#primary"),
+            ("style_text_color__checked", "style_text_color-checked"),
+            ("style_bg_opa__disabled", "style_bg_opa-disabled"),
+            ("style_bg_color-indicator__checked", "style_bg_color-indicator-checked"),
+            ("style_text_color__cheked", "style_text_color-cheked"),
         ],
     )
-    def test_valid_state_qualifier(
-        self, schema: Schema, attr_name: str, attr_value: str
+    def test_colon_selector_is_an_error_naming_the_dash_form(
+        self, schema: Schema, attr_name: str, expected: str
     ) -> None:
-        """Test style attributes with valid state qualifiers produce no errors."""
         from helix_xml_linter.xml_parser import ParsedElement
 
         linter = Linter(schema, LinterConfig(enable_xref=False))
         elem = ParsedElement(
             tag="lv_obj",
-            attributes={attr_name: attr_value},
+            attributes={attr_name: "#text"},
             line=1,
             column=1,
             source_file=Path("test.xml"),
         )
-        diagnostics = linter.lint_element(elem)
-        errors = [d for d in diagnostics if d.severity == Severity.ERROR]
-        assert len(errors) == 0, f"Unexpected errors: {[d.message for d in errors]}"
-
-    def test_invalid_state_qualifier_warns(self, schema: Schema) -> None:
-        """Test unknown state qualifier produces a warning."""
-        from helix_xml_linter.xml_parser import ParsedElement
-
-        linter = Linter(schema, LinterConfig(enable_xref=False))
-        elem = ParsedElement(
-            tag="lv_obj",
-            attributes={"style_text_color__cheked": "#text"},
-            line=1,
-            column=1,
-            source_file=Path("test.xml"),
-        )
-        diagnostics = linter.lint_element(elem)
-        state_warnings = [
-            d for d in diagnostics
-            if d.check == CheckType.INVALID_STATE_QUALIFIER
+        errors = [
+            d for d in linter.lint_element(elem)
+            if d.check == CheckType.INVALID_STATE_QUALIFIER and d.severity == Severity.ERROR
         ]
-        assert len(state_warnings) >= 1
-        assert "cheked" in state_warnings[0].message
+        assert len(errors) == 1
+        assert f"Write '{expected}'" in errors[0].message
+        assert ":" in errors[0].message
 
-    def test_state_qualifier_display_uses_colon(self, schema: Schema) -> None:
-        """Test that diagnostic messages show the original ':' syntax."""
+    @pytest.mark.parametrize(
+        "attr_name",
+        ["style_bg_opa-checked", "style_bg_color-indicator-checked", "style_text_opa-disabled"],
+    )
+    def test_dash_selector_is_clean(self, schema: Schema, attr_name: str) -> None:
         from helix_xml_linter.xml_parser import ParsedElement
 
         linter = Linter(schema, LinterConfig(enable_xref=False))
         elem = ParsedElement(
             tag="lv_obj",
-            attributes={"style_text_color__cheked": "#text"},
+            attributes={attr_name: "100"},
             line=1,
             column=1,
             source_file=Path("test.xml"),
         )
-        diagnostics = linter.lint_element(elem)
-        state_warnings = [
-            d for d in diagnostics
-            if d.check == CheckType.INVALID_STATE_QUALIFIER
-        ]
-        assert len(state_warnings) >= 1
-        # Message should show ':cheked' not '__cheked'
-        assert ":" in state_warnings[0].message
+        errors = [d for d in linter.lint_element(elem) if d.severity == Severity.ERROR]
+        assert errors == []
 
-    def test_combined_part_selector_and_state(self, schema: Schema) -> None:
-        """Test combined part selector + state qualifier is valid."""
-        from helix_xml_linter.xml_parser import ParsedElement
-
-        linter = Linter(schema, LinterConfig(enable_xref=False))
-        elem = ParsedElement(
-            tag="lv_obj",
-            attributes={
-                "style_bg_color-indicator__checked": "#primary",
-                "style_bg_opa-knob__pressed": "200",
-            },
-            line=1,
-            column=1,
-            source_file=Path("test.xml"),
-        )
-        diagnostics = linter.lint_element(elem)
-        errors = [d for d in diagnostics if d.severity == Severity.ERROR]
-        assert len(errors) == 0, f"Unexpected errors: {[d.message for d in errors]}"
-
-    def test_state_qualifier_with_invalid_prop_still_error(self, schema: Schema) -> None:
-        """Test that an unknown style prop with valid state is still an error."""
-        from helix_xml_linter.xml_parser import ParsedElement
-
-        linter = Linter(schema, LinterConfig(enable_xref=False))
-        elem = ParsedElement(
-            tag="lv_obj",
-            attributes={"style_nonexistent__checked": "100"},
-            line=1,
-            column=1,
-            source_file=Path("test.xml"),
-        )
-        diagnostics = linter.lint_element(elem)
-        prop_errors = [
-            d for d in diagnostics
-            if d.check == CheckType.UNKNOWN_STYLE_PROP and d.severity == Severity.ERROR
-        ]
-        assert len(prop_errors) >= 1
-        assert "nonexistent" in prop_errors[0].message
-
-    def test_valid_state_qualifier_file(
+    def test_every_colon_attribute_in_a_file_is_reported(
         self, schema: Schema, state_qualifiers_xml: Path
     ) -> None:
-        """Test linting state_qualifiers.xml produces no errors."""
         linter = Linter(schema, LinterConfig(enable_xref=False))
         result = linter.lint_file(state_qualifiers_xml)
-        errors = [d for d in result.diagnostics if d.severity == Severity.ERROR]
-        assert len(errors) == 0, f"Unexpected errors: {[d.message for d in errors]}"
+        errors = [
+            d for d in result.diagnostics if d.check == CheckType.INVALID_STATE_QUALIFIER
+        ]
+        colon_attrs = re.findall(r"style_[\w-]+(?::|__)\w+=", state_qualifiers_xml.read_text())
+        assert len(colon_attrs) >= 10
+        assert len(errors) == len(colon_attrs)
+
+
+class TestLinterNegatedConst:
+    """helix-xml resolves an attribute value only when it starts with '#'."""
+
+    @pytest.mark.parametrize("attr_name", ["y", "style_translate_y"])
+    def test_negated_const_is_an_error(self, schema: Schema, attr_name: str) -> None:
+        from helix_xml_linter.xml_parser import ParsedElement
+
+        linter = Linter(schema, LinterConfig(enable_xref=False))
+        elem = ParsedElement(
+            tag="lv_obj",
+            attributes={attr_name: "-#space_md"},
+            line=1,
+            column=1,
+            source_file=Path("test.xml"),
+        )
+        errors = [d for d in linter.lint_element(elem) if d.check == CheckType.NEGATED_CONST_REF]
+        assert len(errors) == 1
+        assert errors[0].severity == Severity.ERROR
+
+    def test_negative_literal_is_not_a_negated_const(self, schema: Schema) -> None:
+        from helix_xml_linter.xml_parser import ParsedElement
+
+        linter = Linter(schema, LinterConfig(enable_xref=False))
+        elem = ParsedElement(
+            tag="lv_obj",
+            attributes={"y": "-8"},
+            line=1,
+            column=1,
+            source_file=Path("test.xml"),
+        )
+        assert not [d for d in linter.lint_element(elem) if d.check == CheckType.NEGATED_CONST_REF]
 
 
 class TestLinterNewSyntax:

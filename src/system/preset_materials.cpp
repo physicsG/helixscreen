@@ -9,6 +9,8 @@
 #include "material_settings_manager.h"
 #include "static_subject_registry.h"
 #include "subject_debug_registry.h"
+#include "subject_managed_panel.h"
+#include "text_io.h"
 
 #include <spdlog/spdlog.h>
 
@@ -30,6 +32,7 @@ struct SubjectState {
     std::array<std::array<char, LABEL_BUF_SIZE>, PRESET_COUNT> name_bufs{};
     std::array<std::array<char, TEMP_BUF_SIZE>, PRESET_COUNT> temp_bufs{};
     lv_subject_t count_subject{};
+    SubjectManager subjects;
     bool ready = false;
 };
 
@@ -47,11 +50,7 @@ void deinit_subjects() {
     if (!s.ready) {
         return;
     }
-    for (int i = 0; i < PRESET_COUNT; ++i) {
-        lv_subject_deinit(&s.name_subjects[i]);
-        lv_subject_deinit(&s.temp_subjects[i]);
-    }
-    lv_subject_deinit(&s.count_subject);
+    s.subjects.deinit_all();
     s.ready = false;
     spdlog::debug("[PresetMaterials] Subjects deinitialized");
 }
@@ -79,6 +78,11 @@ std::string display_label(int slot) {
         // e.g. "Bambu PLA" — brand + generic type are kept in lockstep by
         // MaterialSettingsManager::set_preset_filament()/reassign.
         return branded->brand + " " + material;
+    }
+    // ABS and ASA share a nozzle range and compat group, so the generic ABS
+    // button stands for both. name() stays "ABS": it keys temps and compat.
+    if (helix::text_io::to_lower(material) == "abs") {
+        return "ABS/ASA";
     }
     return material;
 }
@@ -124,19 +128,19 @@ void init_subjects() {
 
         lv_subject_init_string(&s.name_subjects[i], s.name_bufs[i].data(), nullptr,
                                s.name_bufs[i].size(), s.name_bufs[i].data());
-        lv_xml_register_subject(nullptr, NAME_SUBJECTS[i], &s.name_subjects[i]);
+        s.subjects.publish(NAME_SUBJECTS[i], &s.name_subjects[i]);
         SubjectDebugRegistry::instance().register_subject(
             &s.name_subjects[i], NAME_SUBJECTS[i], LV_SUBJECT_TYPE_STRING, __FILE__, __LINE__);
 
         lv_subject_init_string(&s.temp_subjects[i], s.temp_bufs[i].data(), nullptr,
                                s.temp_bufs[i].size(), s.temp_bufs[i].data());
-        lv_xml_register_subject(nullptr, TEMP_SUBJECTS[i], &s.temp_subjects[i]);
+        s.subjects.publish(TEMP_SUBJECTS[i], &s.temp_subjects[i]);
         SubjectDebugRegistry::instance().register_subject(
             &s.temp_subjects[i], TEMP_SUBJECTS[i], LV_SUBJECT_TYPE_STRING, __FILE__, __LINE__);
     }
 
     lv_subject_init_int(&s.count_subject, PRESET_COUNT);
-    lv_xml_register_subject(nullptr, "preset_material_count", &s.count_subject);
+    s.subjects.publish("preset_material_count", &s.count_subject);
     SubjectDebugRegistry::instance().register_subject(&s.count_subject, "preset_material_count",
                                                       LV_SUBJECT_TYPE_INT, __FILE__, __LINE__);
 

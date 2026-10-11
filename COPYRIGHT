@@ -40,7 +40,6 @@ This project includes third-party components with their own licenses:
 - spdlog (lib/spdlog) - MIT License
 - SDL2 (lib/sdl2) - Zlib License
 - GLM (lib/glm) - The Happy Bunny License or MIT License
-- OpenVDB (lib/openvdb) - Apache License 2.0
 - wpa_supplicant (lib/wpa_supplicant) - BSD 3-Clause License
 - libnl (lib/libnl) - GNU Lesser General Public License 2.1
 - minilzo (lib/minilzo) - GNU General Public License 2.0 or later
@@ -48,12 +47,9 @@ This project includes third-party components with their own licenses:
 - lv_i18n (lib/lv_i18n) - MIT License
 - lv_markdown (lib/lv_markdown) - MIT License
 - linenoise (lib/linenoise) - BSD 2-Clause License
-- ftxui (lib/ftxui) - MIT License
 - cpp-terminal (lib/cpp-terminal) - MIT License
 - mdns (lib/mdns) - Public Domain
 - stb libraries (lib/stb) - MIT License / Public Domain
-- picosha2 (lib/picosha2.h) - MIT License
-- tuibox (lib/tuibox.h) - MIT License (vendored, not currently compiled)
 
 Bundled inside the libraries above, and linked into the binary:
 

@@ -101,7 +101,9 @@ TEST_CASE("Mock Snapmaker with no task leaves the slicer palette alone", "[ams][
     // for a routing — with nothing published the app has no routing at all and
     // the file's own tool colours survive.
     REQUIRE(app_routing(mock).empty());
-    CHECK(FilamentMapper::routed_tool_colors(app_routing(mock), lanes_of(mock)).empty());
+    CHECK(FilamentMapper::routed_tool_colors(app_routing(mock), lanes_of(mock),
+                                             helix::printer::ToolMappingOrigin::Unvouched)
+              .empty());
 }
 
 // ============================================================================
@@ -123,7 +125,8 @@ TEST_CASE("Mock Snapmaker publishes the configured task routing", "[ams][snapmak
     // And it reaches the renderer as the task's colours, not the lanes' order:
     // T0 gets head 2's filament and T2 gets head 0's. Identity would hand each
     // tool its own lane, so a crossover is what tells the two answers apart.
-    const auto colors = FilamentMapper::routed_tool_colors(app_routing(mock), lanes_of(mock));
+    const auto colors = FilamentMapper::routed_tool_colors(
+        app_routing(mock), lanes_of(mock), helix::printer::ToolMappingOrigin::Unvouched);
     REQUIRE(colors.size() == 4);
     CHECK(colors[0] == mock.get_slot_info(2).color_rgb);
     CHECK(colors[2] == mock.get_slot_info(0).color_rgb);
@@ -185,4 +188,34 @@ TEST_CASE("A non-Snapmaker mock stays lane-per-tool", "[ams][snapmaker][mock][ro
 
     mock.set_tool_changer_mode(true);
     CHECK(mock.firmware_default_routing().head(7) == 7);
+}
+
+// ============================================================================
+// Capability answers: the mock must not disagree with the hardware
+// ============================================================================
+
+// select_slot_moves_toolhead() is deliberately absent here: it belongs to
+// AmsSubscriptionBackend, and the mock derives straight from AmsBackend, so
+// there is no pair to compare.
+
+TEST_CASE("Mock Snapmaker answers capability questions like the U1",
+          "[ams][snapmaker][mock][capability]") {
+    AmsBackendMock mock(4);
+    mock.set_snapmaker_mode(true);
+    SnapmakerProbe real;
+
+    // Compared against the real backend, never a literal: a capability whose
+    // right answer changes on hardware must not need editing in two places.
+    CHECK(mock.lane_noun() == real.lane_noun());
+    // The BackendTraits answers are pinned in test_ams_backend_traits.cpp.
+}
+
+TEST_CASE("A non-Snapmaker mock keeps the base capability answers",
+          "[ams][snapmaker][mock][capability]") {
+    // The overrides are scoped to the emulated machine: every other mode this
+    // mock wears is a lane-per-tool system feeding one nozzle, so a U1's answers
+    // would describe hardware it is not standing in for.
+    AmsBackendMock mock(4); // defaults to Happy Hare
+    CHECK(mock.lane_noun() == helix::ui::LaneNoun::Gate);
+    // The BackendTraits answers are pinned in test_ams_backend_traits.cpp.
 }

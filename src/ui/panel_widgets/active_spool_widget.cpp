@@ -8,6 +8,7 @@
 #include "ui_error_reporting.h"
 #include "ui_event_safety.h"
 #include "ui_spool_canvas.h"
+#include "ui_tile_rung.h"
 #include "ui_toast_manager.h"
 #include "ui_utils.h"
 
@@ -36,7 +37,19 @@ void register_active_spool_widget() {
     });
 }
 
-ActiveSpoolWidget::ActiveSpoolWidget(IMoonrakerAPI* api) : api_(api) {}
+// The compact form: a spool one line of the rung's icon face square, over one
+// caption line whose text is either "Active Spool" or "No Spool". The caption is
+// budgeted whatever show_widget_labels says, because "No Spool" draws regardless.
+ActiveSpoolWidget::ActiveSpoolWidget(IMoonrakerAPI* api)
+    : TiledPanelWidget("active_spool", TileSizing::Content{"", "", "Active Spool", false, "",
+                                                           /*label_always_drawn=*/true,
+                                                           TileSizing::IconBox::Square}),
+      api_(api) {
+    // Registered before the manager parses the component, which drops a
+    // binding whose subject is missing at parse time.
+    UI_MANAGED_SUBJECT_INT(wide_subject_, 0, "active_spool_wide", subjects_);
+    UI_MANAGED_SUBJECT_INT(loaded_subject_, 0, "active_spool_loaded", subjects_);
+}
 
 ActiveSpoolWidget::~ActiveSpoolWidget() {
     detach();
@@ -49,8 +62,6 @@ void ActiveSpoolWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
     if (!widget_obj_)
         return;
 
-    lv_obj_set_user_data(widget_obj_, this);
-
     // Register click handler via per-callback user_data
     auto* btn = lv_obj_find_by_name(widget_obj_, "spoolman_btn");
     if (btn) {
@@ -59,18 +70,16 @@ void ActiveSpoolWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
 
     // Cache element pointers
     spool_compact_ = lv_obj_find_by_name(widget_obj_, "spool_compact");
-    wide_layout_ = lv_obj_find_by_name(widget_obj_, "spoolman_wide_layout");
     spool_wide_ = lv_obj_find_by_name(widget_obj_, "spool_wide");
     material_label_ = lv_obj_find_by_name(widget_obj_, "spoolman_material");
     brand_color_label_ = lv_obj_find_by_name(widget_obj_, "spoolman_brand_color");
     weight_label_ = lv_obj_find_by_name(widget_obj_, "spoolman_weight");
-    no_spool_label_ = lv_obj_find_by_name(widget_obj_, "spoolman_no_spool_label");
 
     // Observe spool changes from all sources
     auto token = lifetime_.token();
 
     // External spool changes
-    spool_color_observer_ = helix::ui::observe_int_sync<ActiveSpoolWidget>(
+    spool_color_observer_ = helix::ui::observe<int>(
         AmsState::instance().get_external_spool_color_subject(), this,
         [token](ActiveSpoolWidget* self, int /*color*/) {
             if (token.expired())
@@ -80,7 +89,7 @@ void ActiveSpoolWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
         AmsState::instance().get_subjects_lifetime());
 
     // AMS backend active slot changes
-    current_slot_observer_ = helix::ui::observe_int_sync<ActiveSpoolWidget>(
+    current_slot_observer_ = helix::ui::observe<int>(
         AmsState::instance().get_current_slot_subject(), this,
         [token](ActiveSpoolWidget* self, int /*slot*/) {
             if (token.expired())
@@ -90,7 +99,7 @@ void ActiveSpoolWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
         AmsState::instance().get_subjects_lifetime());
 
     // AMS slot info changes (material/color edits)
-    slots_version_observer_ = helix::ui::observe_int_sync<ActiveSpoolWidget>(
+    slots_version_observer_ = helix::ui::observe<int>(
         AmsState::instance().get_slots_version_subject(), this,
         [token](ActiveSpoolWidget* self, int /*version*/) {
             if (token.expired())
@@ -99,16 +108,8 @@ void ActiveSpoolWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
         },
         AmsState::instance().get_subjects_lifetime());
 
-    // Size spool canvases to match responsive icon size
+    lv_subject_set_int(&wide_subject_, is_wide_ ? 1 : 0);
     resize_spool_canvases();
-
-    // Sync layout visibility to the persisted is_wide_ state. Widget instances
-    // are recycled across rebuilds (PanelWidgetManager reuse path), but a fresh
-    // XML component always starts with wide_layout hidden + spool_compact shown.
-    // Without this, a recycled 2x1 instance keeps is_wide_==true, on_size_changed
-    // early-returns (wide == is_wide_), and the default-white spool_compact is
-    // left visible — the #1109 "static white spool" symptom.
-    apply_layout_visibility();
 
     // Initial display update
     update_spool_display();
@@ -123,73 +124,57 @@ void ActiveSpoolWidget::detach() {
     current_slot_observer_.reset();
     slots_version_observer_.reset();
 
-    if (widget_obj_) {
-        lv_obj_set_user_data(widget_obj_, nullptr);
-    }
-
     widget_obj_ = nullptr;
     parent_screen_ = nullptr;
     spool_compact_ = nullptr;
-    wide_layout_ = nullptr;
     spool_wide_ = nullptr;
     material_label_ = nullptr;
     brand_color_label_ = nullptr;
     weight_label_ = nullptr;
-    no_spool_label_ = nullptr;
 
     spdlog::debug("[ActiveSpoolWidget] Detached");
 }
 
 void ActiveSpoolWidget::on_size_changed(int /*colspan*/, int /*rowspan*/, int width_px,
-                                        int /*height_px*/) {
-    bool wide = (width_px >= widget_size::w_normal());
-    if (wide == is_wide_)
-        return;
+                                        int height_px) {
+    sizing_.measure_and_publish(width_px, height_px);
+    const bool wide = is_wide_at(width_px, height_px);
+    const bool mode_changed = wide != is_wide_;
     is_wide_ = wide;
+    lv_subject_set_int(&wide_subject_, wide ? 1 : 0);
 
     if (!widget_obj_)
         return;
 
-    apply_layout_visibility();
-
-    // Refresh display for the now-visible elements
-    update_spool_display();
-
-    spdlog::debug("[ActiveSpoolWidget] on_size_changed width_px={} -> {}", width_px,
+    resize_spool_canvases();
+    if (mode_changed) {
+        // Refresh display for the now-visible elements
+        update_spool_display();
+    }
+    spdlog::debug("[ActiveSpoolWidget] on_size_changed {}x{} -> {}", width_px, height_px,
                   wide ? "wide" : "compact");
 }
 
-void ActiveSpoolWidget::apply_layout_visibility() {
-    if (is_wide_) {
-        // Show wide layout, hide compact spool
-        if (wide_layout_)
-            lv_obj_remove_flag(wide_layout_, LV_OBJ_FLAG_HIDDEN);
-        if (spool_compact_)
-            lv_obj_add_flag(spool_compact_, LV_OBJ_FLAG_HIDDEN);
-    } else {
-        // Show compact spool, hide wide layout
-        if (wide_layout_)
-            lv_obj_add_flag(wide_layout_, LV_OBJ_FLAG_HIDDEN);
-        if (spool_compact_)
-            lv_obj_remove_flag(spool_compact_, LV_OBJ_FLAG_HIDDEN);
-    }
+int ActiveSpoolWidget::wide_spool_edge() {
+    const lv_font_t* icon_font = theme_manager_get_font("icon_font_xl");
+    return icon_font ? lv_font_get_line_height(icon_font) : 48;
+}
+
+bool ActiveSpoolWidget::is_wide_at(int width_px, int height_px) {
+    return width_px >= widget_size::w_normal() && height_px >= wide_spool_edge();
 }
 
 void ActiveSpoolWidget::resize_spool_canvases() {
-    // Use the responsive icon font that matches #icon_size (the standard widget icon)
-    // icon_size resolves to md/lg/xl per breakpoint; icon_font_{size} gives the font
-    // We use icon_font_lg which scales: tiny=32, small=48, medium=48, large=48
-    // For the spool we want it slightly bigger, matching #icon_size mapping:
-    //   tiny/small=md(32), medium=lg(48), large=xl(64)
-    const lv_font_t* icon_font = theme_manager_get_font("icon_font_xl");
-    int32_t spool_size = icon_font ? lv_font_get_line_height(icon_font) : 48;
-
-    if (spool_compact_)
-        ui_spool_canvas_set_size(spool_compact_, spool_size);
+    // The wide row keeps the tier's largest icon edge; the compact spool is
+    // one line of the icon face the tile's rung names, the square TileSizing
+    // measured.
     if (spool_wide_)
-        ui_spool_canvas_set_size(spool_wide_, spool_size);
-
-    spdlog::debug("[ActiveSpoolWidget] Spool canvas size: {}px (from icon font)", spool_size);
+        ui_spool_canvas_set_size(spool_wide_, wide_spool_edge());
+    if (spool_compact_) {
+        const ui::TileFace face = ui::tile_rung_face(ui::TileLadder::Icon, sizing_.icon_rung());
+        if (face.font)
+            ui_spool_canvas_set_size(spool_compact_, face.px(lv_font_get_line_height(face.font)));
+    }
 }
 
 void ActiveSpoolWidget::update_spool_display() {
@@ -251,7 +236,12 @@ void ActiveSpoolWidget::update_spool_display() {
             lv_label_set_text(material_label_, active->material_name.c_str());
             lv_obj_set_style_text_align(material_label_, LV_TEXT_ALIGN_LEFT, 0);
         } else {
-            lv_label_set_text(material_label_, is_wide_ ? lv_tr("No Spool") : "");
+            // A tag, not lv_tr() text: the label then re-translates itself.
+            if (is_wide_) {
+                lv_label_set_translation_tag(material_label_, "No Spool");
+            } else {
+                lv_label_set_text(material_label_, "");
+            }
             lv_obj_set_style_text_align(material_label_, LV_TEXT_ALIGN_CENTER, 0);
         }
     }
@@ -291,14 +281,7 @@ void ActiveSpoolWidget::update_spool_display() {
         }
     }
 
-    // Show/hide no-spool label (compact mode only -- wide mode uses material_label)
-    if (no_spool_label_) {
-        if (has_spool || is_wide_) {
-            lv_obj_add_flag(no_spool_label_, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_remove_flag(no_spool_label_, LV_OBJ_FLAG_HIDDEN);
-        }
-    }
+    lv_subject_set_int(&loaded_subject_, has_spool ? 1 : 0);
 }
 
 void ActiveSpoolWidget::handle_clicked() {

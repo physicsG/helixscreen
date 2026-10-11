@@ -171,7 +171,7 @@ TEST_CASE_METHOD(ExecuteGcodeFixture,
     // params object and short-circuits before the normal send. It is a separate
     // code path and must be verbatim too. An externally-initiated blocking op
     // (idle_timeout "Printing" without a file print) is what routes into it.
-    lv_subject_set_int(state.get_print_state_enum_subject(),
+    lv_subject_set_int(state.print_state().get_print_state_enum_subject(),
                        static_cast<int>(helix::PrintJobState::STANDBY));
     helix::PrinterStateTestAccess::set_sustained_idle_timeout_printing(state, true);
 

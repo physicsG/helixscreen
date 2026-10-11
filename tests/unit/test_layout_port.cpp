@@ -13,8 +13,10 @@
  * stay flush, and a widget the port cannot seat costs only itself its position.
  */
 
+#include "../test_helpers/scoped_whole_cell_def.h"
 #include "grid_layout.h"
 #include "layout_port.h"
+#include "panel_widget_registry.h"
 
 #include <algorithm>
 #include <vector>
@@ -156,12 +158,19 @@ TEST_CASE("port_legacy_layout: widgets that were flush stay flush", "[layout_por
 }
 
 TEST_CASE("port_legacy_layout: a whole-cell widget never straddles a cell", "[layout_port][grid]") {
-    // temperature has neither supports_half_col nor supports_half_row, so both
-    // its origin and its span must stay even however the proportions fall.
-    std::vector<LegacyPlacement> saved = {{"temperature", 1, 1, 1, 1}};
+    // control_buttons has neither supports_half_col nor supports_half_row, so
+    // both its origin and its span must stay even however the proportions fall.
+    // Assert that premise: a widget that later gains a half flag would turn
+    // every check below into a test of nothing.
+    const auto* whole = find_widget_def("control_buttons");
+    REQUIRE(whole != nullptr);
+    REQUIRE_FALSE(whole->supports_half_col);
+    REQUIRE_FALSE(whole->supports_half_row);
+
+    std::vector<LegacyPlacement> saved = {{"control_buttons", 1, 1, 1, 1}};
     auto out = port_legacy_layout(saved, 3, 3, 14, 14);
 
-    const auto& p = by_id(out, "temperature");
+    const auto& p = by_id(out, "control_buttons");
     REQUIRE(p.seated);
     CHECK(p.col % GridLayout::TRACKS_PER_CELL == 0);
     CHECK(p.row % GridLayout::TRACKS_PER_CELL == 0);
@@ -201,16 +210,24 @@ TEST_CASE("port_legacy_layout: a collision costs only the colliding widget",
     // Two widgets stacked in a 1x2 old grid, ported onto a grid one cell tall.
     // The second cannot be seated; the first must keep its position, and the
     // loser must come back unseated rather than overlapping or vanishing.
+    // The loser must be a whole-cell widget: one that snaps by a single track
+    // could seat in the remainder and there would be no collision to observe.
+    ScopedWholeCellDef whole_cell("width_sensor");
+    const auto* loser = find_widget_def("width_sensor");
+    REQUIRE(loser != nullptr);
+    REQUIRE_FALSE(loser->supports_half_col);
+    REQUIRE_FALSE(loser->supports_half_row);
+
     std::vector<LegacyPlacement> saved = {
         {"printer_image", 0, 0, 1, 1},
-        {"temperature", 0, 1, 1, 1},
+        {"width_sensor", 0, 1, 1, 1},
     };
     auto out = port_legacy_layout(saved, 1, 2, 2, 2);
 
     REQUIRE(out.size() == 2);
     CHECK(by_id(out, "printer_image").seated);
-    CHECK_FALSE(by_id(out, "temperature").seated);
-    CHECK(by_id(out, "temperature").col == -1);
+    CHECK_FALSE(by_id(out, "width_sensor").seated);
+    CHECK(by_id(out, "width_sensor").col == -1);
     CHECK_FALSE(any_overlap(out));
 }
 

@@ -1,0 +1,22 @@
+HelixScreen installer v1.0.0 (stable)
+  Printer    x86 · systemd · user root
+  Install    v1.0.0 (stable) · local file, <size>
+  Add        Moonraker update manager
+
+[1/6] Checked system ... ok (x86 · systemd · user root)
+[2/6] Unpacked local archive ... ok (<size>)
+[3/6] Installed files ... ok (~/helixscreen)
+[4/6] Set up service ... ok
+      [WARN] Could not locate the Moonraker source to verify asset_name support.
+      [WARN] Configuring the updater anyway. If Moonraker is older than v0.10.0,
+      [WARN] use HelixScreen's built-in updater (Settings -> Updates) instead of
+      [WARN] the Update button in Mainsail/Fluidd.
+      [WARN] Could not find a way to restart Moonraker - restart it manually for the configuration change to take effect.
+[5/6] Connected to Moonraker ... ok (update manager · config editable in Mainsail/Fluidd)
+[6/6] Started HelixScreen ... ok
+
+HelixScreen v1.0.0 is running (stable channel).
+
+  Config     ~/printer_data/config/helixscreen  (editable in Mainsail/Fluidd)
+  Updates    Mainsail/Fluidd update manager, or re-run with --update
+  Log        ~/printer_data/logs/helixscreen-install.log

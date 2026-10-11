@@ -27,6 +27,8 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 from frogfs_reader import djb2_hash, load  # noqa: E402
 
+import esp32_pack_assets  # noqa: E402
+
 MKFROGFS = (REPO_ROOT / "firmware" / "helixscreen-esp32" / "managed_components" /
            "jkent__frogfs" / "tools" / "mkfrogfs.py")
 
@@ -196,3 +198,11 @@ def test_empty_file_round_trips(tmp_path):
 
     assert img.read_path("empty.xml") == b""
     assert files["empty.xml"] == b""
+
+
+def test_storage_partition_size_comes_from_the_table(tmp_path):
+    table = tmp_path / "partitions.csv"
+    table.write_text("# Name, Type, SubType, Offset, Size\n"
+                     "ota_0,    app,  ota_0,   0x20000,  0x680000,\n"
+                     "storage,  data, spiffs,  0xd20000, 0x2c0000,  # packed assets\n")
+    assert esp32_pack_assets.storage_partition_bytes(table) == 0x2C0000

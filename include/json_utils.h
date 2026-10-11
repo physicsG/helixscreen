@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "text_io.h"
+
 #include <cctype>
 #include <cmath>
 #include <cstddef>
@@ -14,124 +16,31 @@
 
 namespace helix::json_util {
 
-/// Safely extract a string from a JSON field that may be null.
-/// nlohmann .value("key", "") throws type_error.302 when the field is JSON null.
+/// Serialize @p j with invalid UTF-8 replaced instead of thrown on.
 ///
-/// @param accept_number  Also accept a JSON integer, returned as its decimal
-///        text. Off by default because a number arriving where a string was
-///        declared is usually a bug worth defaulting away. Some firmwares do
-///        send one anyway - a field they format back unquoted makes the round
-///        trip as a number even though their own schema calls it a string -
-///        and a reader that has confirmed that is the case opts in here rather
-///        than hand-rolling the widened copy.
-inline std::string safe_string(const nlohmann::json& j, const char* key,
-                               const std::string& def = "", bool accept_number = false) {
-    if (!j.contains(key) || j[key].is_null()) {
-        return def;
-    }
-    const auto& v = j[key];
-    if (v.is_string()) {
-        return v.get<std::string>();
-    }
-    if (accept_number && v.is_number_integer()) {
-        return std::to_string(v.get<long long>());
-    }
-    return def;
+/// nlohmann defaults to error_handler_t::strict, which raises
+/// json::type_error.316 for any string holding bytes UTF-8 cannot decode.
+/// The text that reaches a save path is the text nothing validates — SSIDs,
+/// printer and tool names, file names, macro text, gcode responses — so under
+/// strict a single stray byte costs the whole document: the write either
+/// terminates the process or, behind a catch, silently drops a change the user
+/// made. ::replace substitutes U+FFFD for the offending bytes and keeps
+/// everything else, so the save still lands.
+///
+/// Serialization can still run out of memory on a RAM-constrained target; this
+/// removes the one failure free-form text makes routine.
+///
+/// @param indent  As json::dump(): -1 is compact, >= 0 pretty-prints.
+inline std::string safe_dump(const nlohmann::json& j, int indent = -1) {
+    return j.dump(indent, ' ', false, nlohmann::json::error_handler_t::replace);
 }
 
-// Forward declaration: safe_int is defined below the detail:: converters it uses,
-// but is declared here to keep the four original helpers together.
-inline int safe_int(const nlohmann::json& j, const char* key, int def = 0);
-
-/// Safely extract a float from a JSON field that may be number, string, or null.
-inline float safe_float(const nlohmann::json& j, const char* key, float def = 0.0f) {
-    if (!j.contains(key) || j[key].is_null()) {
-        return def;
-    }
-    const auto& v = j[key];
-    float result = def;
-    if (v.is_number()) {
-        result = v.get<float>();
-    } else if (v.is_string()) {
-        try {
-            result = std::stof(v.get<std::string>());
-        } catch (...) {
-            return def;
-        }
-    }
-    return std::isfinite(result) ? result : def;
-}
-
-/// Safely extract a double from a JSON field that may be number, string, or null.
-inline double safe_double(const nlohmann::json& j, const char* key, double def = 0.0) {
-    if (!j.contains(key) || j[key].is_null()) {
-        return def;
-    }
-    const auto& v = j[key];
-    double result = def;
-    if (v.is_number()) {
-        result = v.get<double>();
-    } else if (v.is_string()) {
-        try {
-            result = std::stod(v.get<std::string>());
-        } catch (...) {
-            return def;
-        }
-    }
-    return std::isfinite(result) ? result : def;
-}
-
-/// Safely extract a bool from a JSON field that may be bool, number, string, or null.
-///
-/// Coercion policy (deliberate — do not widen without thought):
-///   - JSON bool              -> used directly
-///   - JSON number            -> 0 is false, any other finite value is true.
-///                               Non-finite (NaN/Inf) returns `def`.
-///   - JSON string            -> ONLY an exact, case-insensitive match against
-///                               "true"/"false", "1"/"0", "yes"/"no", "on"/"off"
-///                               is honored. Anything else returns `def`.
-///   - null / missing / other -> `def`
-///
-/// The string whitelist is closed on purpose. The tempting shorthand — treating
-/// any non-empty string as true — reads the string "false" as TRUE, which is
-/// strictly worse than having no value at all. An unrecognized spelling is a
-/// payload we do not understand, so we return the caller's default rather than
-/// guess at it.
-///
-/// Prefer `.find()` + `is_boolean()` at sites where a wrong-typed value should
-/// be treated as "no reading available" and skipped entirely, rather than
-/// silently collapsing to `def` — see ams_backend_snapmaker.cpp for that idiom.
-/// Use this helper when a default genuinely is the right answer.
-inline bool safe_bool(const nlohmann::json& j, const char* key, bool def = false) {
-    if (!j.contains(key) || j[key].is_null()) {
-        return def;
-    }
-    const auto& v = j[key];
-    if (v.is_boolean()) {
-        return v.get<bool>();
-    }
-    if (v.is_number()) {
-        const double d = v.get<double>();
-        if (!std::isfinite(d)) {
-            return def;
-        }
-        return d != 0.0;
-    }
-    if (v.is_string()) {
-        std::string s = v.get<std::string>();
-        for (char& c : s) {
-            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        }
-        if (s == "true" || s == "1" || s == "yes" || s == "on") {
-            return true;
-        }
-        if (s == "false" || s == "0" || s == "no" || s == "off") {
-            return false;
-        }
-        return def;
-    }
-    return def;
-}
+// Every reader below is non-throwing: a missing key, a JSON null, a value of the
+// wrong type or one out of range for the result yields the caller's default.
+// nlohmann's own get<T>() and value() throw on all of those, and the ESP32
+// build has no exceptions to catch them with, so a throwing read there is an
+// abort. The as_* forms read a value already in hand (an array element, a
+// found iterator); the safe_* forms look a key up in an object first.
 
 namespace detail {
 
@@ -161,12 +70,12 @@ inline bool to_i64(const nlohmann::json& v, std::int64_t& out) {
         return true;
     }
     if (v.is_string()) {
-        try {
-            out = std::stoll(v.get<std::string>());
-            return true;
-        } catch (...) {
+        const auto parsed = text_io::parse_leading<long long>(v.get_ref<const std::string&>());
+        if (!parsed) {
             return false;
         }
+        out = *parsed;
+        return true;
     }
     return false;
 }
@@ -196,8 +105,8 @@ inline bool to_u64(const nlohmann::json& v, std::uint64_t& out) {
         return true;
     }
     if (v.is_string()) {
-        const std::string s = v.get<std::string>();
-        // std::stoull silently WRAPS a negative literal ("-1" -> 2^64-1), so
+        const std::string& s = v.get_ref<const std::string&>();
+        // strtoull silently WRAPS a negative literal ("-1" -> 2^64-1), so
         // reject a sign explicitly before parsing.
         for (char c : s) {
             if (std::isspace(static_cast<unsigned char>(c))) {
@@ -208,70 +117,145 @@ inline bool to_u64(const nlohmann::json& v, std::uint64_t& out) {
             }
             break;
         }
-        try {
-            out = std::stoull(s);
-            return true;
-        } catch (...) {
+        const auto parsed = text_io::parse_leading<unsigned long long>(s);
+        if (!parsed) {
             return false;
         }
+        out = *parsed;
+        return true;
     }
     return false;
 }
 
 } // namespace detail
 
-/// Safely extract an int from a JSON field that may be number, string, or null.
-/// Returns `def` for null/missing/wrong-type, for non-finite floats, and for
-/// values outside the int range — a JSON 5000000000 yields `def`, not a
-/// truncated 705032704.
-inline int safe_int(const nlohmann::json& j, const char* key, int def) {
-    if (!j.contains(key) || j[key].is_null()) {
+/// The value under @p key, or nullptr when @p j is not an object or lacks it.
+inline const nlohmann::json* find_member(const nlohmann::json& j, const char* key) {
+    if (!j.is_object()) {
+        return nullptr;
+    }
+    const auto it = j.find(key);
+    return it == j.end() ? nullptr : &*it;
+}
+
+/// A string value. @p accept_number also takes a JSON integer, returned as its
+/// decimal text. Off by default because a number arriving where a string was
+/// declared is usually a bug worth defaulting away. Some firmwares do send one
+/// anyway - a field they format back unquoted makes the round trip as a number
+/// even though their own schema calls it a string - and a reader that has
+/// confirmed that is the case opts in here rather than hand-rolling the
+/// widened copy.
+inline std::string as_string(const nlohmann::json& v, const std::string& def = "",
+                             bool accept_number = false) {
+    if (v.is_string()) {
+        return v.get<std::string>();
+    }
+    if (accept_number && v.is_number_integer()) {
+        return std::to_string(v.get<long long>());
+    }
+    return def;
+}
+
+/// A float from a number or a numeric string; non-finite values yield @p def.
+inline float as_float(const nlohmann::json& v, float def = 0.0f) {
+    float result = def;
+    if (v.is_number()) {
+        result = v.get<float>();
+    } else if (v.is_string()) {
+        result = text_io::parse_leading<float>(v.get_ref<const std::string&>()).value_or(def);
+    }
+    return std::isfinite(result) ? result : def;
+}
+
+/// A double from a number or a numeric string; non-finite values yield @p def.
+inline double as_double(const nlohmann::json& v, double def = 0.0) {
+    double result = def;
+    if (v.is_number()) {
+        result = v.get<double>();
+    } else if (v.is_string()) {
+        result = text_io::parse_leading<double>(v.get_ref<const std::string&>()).value_or(def);
+    }
+    return std::isfinite(result) ? result : def;
+}
+
+/// A bool from a bool, number or string.
+///
+/// Coercion policy (deliberate — do not widen without thought):
+///   - JSON bool              -> used directly
+///   - JSON number            -> 0 is false, any other finite value is true.
+///                               Non-finite (NaN/Inf) returns `def`.
+///   - JSON string            -> ONLY an exact, case-insensitive match against
+///                               "true"/"false", "1"/"0", "yes"/"no", "on"/"off"
+///                               is honored. Anything else returns `def`.
+///   - null / missing / other -> `def`
+///
+/// The string whitelist is closed on purpose. The tempting shorthand — treating
+/// any non-empty string as true — reads the string "false" as TRUE, which is
+/// strictly worse than having no value at all. An unrecognized spelling is a
+/// payload we do not understand, so we return the caller's default rather than
+/// guess at it.
+///
+/// Prefer `.find()` + `is_boolean()` at sites where a wrong-typed value should
+/// be treated as "no reading available" and skipped entirely, rather than
+/// silently collapsing to `def` — see ams_backend_snapmaker.cpp for that idiom.
+/// Use this helper when a default genuinely is the right answer.
+inline bool as_bool(const nlohmann::json& v, bool def = false) {
+    if (v.is_boolean()) {
+        return v.get<bool>();
+    }
+    if (v.is_number()) {
+        const double d = v.get<double>();
+        if (!std::isfinite(d)) {
+            return def;
+        }
+        return d != 0.0;
+    }
+    if (v.is_string()) {
+        std::string s = v.get<std::string>();
+        for (char& c : s) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        if (s == "true" || s == "1" || s == "yes" || s == "on") {
+            return true;
+        }
+        if (s == "false" || s == "0" || s == "no" || s == "off") {
+            return false;
+        }
         return def;
     }
+    return def;
+}
+
+/// An int from a number or a numeric string. Values outside the int range
+/// yield @p def: a JSON 5000000000 is `def`, not a truncated 705032704.
+inline int as_int(const nlohmann::json& v, int def = 0) {
     std::int64_t out = 0;
-    if (!detail::to_i64(j[key], out)) {
-        return def;
-    }
-    if (out < static_cast<std::int64_t>(std::numeric_limits<int>::min()) ||
-        out > static_cast<std::int64_t>(std::numeric_limits<int>::max())) {
+    if (!detail::to_i64(v, out) || out < std::numeric_limits<int>::min() ||
+        out > std::numeric_limits<int>::max()) {
         return def;
     }
     return static_cast<int>(out);
 }
 
-/// Safely extract an int64_t from a JSON field that may be number, string, or null.
-/// Returns `def` for null/missing/wrong-type, for non-finite floats, and for
-/// values outside the int64_t range.
-inline std::int64_t safe_int64(const nlohmann::json& j, const char* key, std::int64_t def = 0) {
-    if (!j.contains(key) || j[key].is_null()) {
-        return def;
-    }
+/// An int64_t from a number or a numeric string.
+inline std::int64_t as_int64(const nlohmann::json& v, std::int64_t def = 0) {
     std::int64_t out = 0;
-    return detail::to_i64(j[key], out) ? out : def;
+    return detail::to_i64(v, out) ? out : def;
 }
 
-/// Safely extract a uint64_t from a JSON field that may be number, string, or null.
-/// Returns `def` for null/missing/wrong-type, for non-finite floats, for negative
-/// values (including the string "-1", which std::stoull would otherwise wrap), and
-/// for values outside the uint64_t range.
-inline std::uint64_t safe_uint64(const nlohmann::json& j, const char* key, std::uint64_t def = 0) {
-    if (!j.contains(key) || j[key].is_null()) {
-        return def;
-    }
+/// A uint64_t from a number or a numeric string. Negative values, including
+/// the string "-1" that strtoull would otherwise wrap, yield @p def.
+inline std::uint64_t as_uint64(const nlohmann::json& v, std::uint64_t def = 0) {
     std::uint64_t out = 0;
-    return detail::to_u64(j[key], out) ? out : def;
+    return detail::to_u64(v, out) ? out : def;
 }
 
-/// Safely extract a size_t from a JSON field that may be number, string, or null.
-/// As safe_uint64, plus a narrowing guard: on 32-bit targets (AD5M/MIPS32, K1
-/// armv7) a value that fits in a uint64_t but not a size_t returns `def` rather
-/// than truncating.
-inline std::size_t safe_size_t(const nlohmann::json& j, const char* key, std::size_t def = 0) {
-    if (!j.contains(key) || j[key].is_null()) {
-        return def;
-    }
+/// As as_uint64, plus a narrowing guard: on 32-bit targets (AD5M/MIPS32, K1
+/// armv7) a value that fits in a uint64_t but not a size_t yields @p def
+/// rather than truncating.
+inline std::size_t as_size_t(const nlohmann::json& v, std::size_t def = 0) {
     std::uint64_t out = 0;
-    if (!detail::to_u64(j[key], out)) {
+    if (!detail::to_u64(v, out)) {
         return def;
     }
     // Round-trip rather than compare against size_t's max. Where the two types
@@ -284,6 +268,103 @@ inline std::size_t safe_size_t(const nlohmann::json& j, const char* key, std::si
         return def;
     }
     return narrowed;
+}
+
+inline std::string safe_string(const nlohmann::json& j, const char* key,
+                               const std::string& def = "", bool accept_number = false) {
+    const auto* v = find_member(j, key);
+    return v ? as_string(*v, def, accept_number) : def;
+}
+
+inline float safe_float(const nlohmann::json& j, const char* key, float def = 0.0f) {
+    const auto* v = find_member(j, key);
+    return v ? as_float(*v, def) : def;
+}
+
+inline double safe_double(const nlohmann::json& j, const char* key, double def = 0.0) {
+    const auto* v = find_member(j, key);
+    return v ? as_double(*v, def) : def;
+}
+
+inline bool safe_bool(const nlohmann::json& j, const char* key, bool def = false) {
+    const auto* v = find_member(j, key);
+    return v ? as_bool(*v, def) : def;
+}
+
+inline int safe_int(const nlohmann::json& j, const char* key, int def = 0) {
+    const auto* v = find_member(j, key);
+    return v ? as_int(*v, def) : def;
+}
+
+inline std::int64_t safe_int64(const nlohmann::json& j, const char* key, std::int64_t def = 0) {
+    const auto* v = find_member(j, key);
+    return v ? as_int64(*v, def) : def;
+}
+
+inline std::uint64_t safe_uint64(const nlohmann::json& j, const char* key, std::uint64_t def = 0) {
+    const auto* v = find_member(j, key);
+    return v ? as_uint64(*v, def) : def;
+}
+
+inline std::size_t safe_size_t(const nlohmann::json& j, const char* key, std::size_t def = 0) {
+    const auto* v = find_member(j, key);
+    return v ? as_size_t(*v, def) : def;
+}
+
+/// The payload object of a Moonraker notification frame, or nullptr.
+///
+/// Notifications carry their payload as the single element of a `params` array
+/// - `notify_history_changed` and `notify_filelist_changed` both do - and a
+/// method callback is handed the whole JSON-RPC message, so every reader has to
+/// walk down to it. Returns nullptr for a frame shaped any other way, which is
+/// what a caller must treat as "nothing to act on"; reading the fields is left
+/// to the caller, because each notification names different ones.
+inline const nlohmann::json* notification_payload(const nlohmann::json& msg) {
+    const auto params_it = msg.find("params");
+    if (params_it == msg.end() || !params_it->is_array() || params_it->empty()) {
+        return nullptr;
+    }
+    const nlohmann::json& payload = (*params_it)[0];
+    return payload.is_object() ? &payload : nullptr;
+}
+
+/// The `action` field of a Moonraker notification payload, or an empty string.
+inline std::string notification_action(const nlohmann::json& msg) {
+    const nlohmann::json* payload = notification_payload(msg);
+    return payload ? safe_string(*payload, "action") : std::string();
+}
+
+/**
+ * @brief Whether a notify_filelist_changed operation is one the gcodes listing
+ * cares about.
+ *
+ * Moonraker fires the same notification for every registered directory, and
+ * printers write to `config` constantly: an AFC unit rewrites `AFC/AFC.var.unit`
+ * on every SET_* command and a SAVE_VARIABLE delayed_gcode rewrites
+ * `saved_variables.cfg`. Consumers that only track gcode files must filter on
+ * the root or pay a full round trip for each of those writes.
+ *
+ * `item` always describes the operation's DESTINATION; a move or copy attaches
+ * its origin as `source_item`, and either end being `gcodes` counts, because a
+ * file moved out of gcodes leaves the listing stale just as one moved in
+ * changes it. The two ends fail differently on empty: an empty item root means
+ * the payload had no shape we recognise, so treat it as relevant, because going
+ * stale is worse than one extra round trip — but `source_item` rides along only
+ * on a move or copy, so an empty source root is the norm for uploads, creates
+ * and deletes, and treating it as relevant would admit every root again and
+ * make the filter inert.
+ *
+ * Exact match, not a prefix: a separately registered root such as
+ * "gcodes_backup" is a different directory.
+ *
+ * Both ends are required arguments. A caller that looks at the item root alone
+ * is the failure this predicate exists to prevent, and a default would let the
+ * compiler wave the next one through; pass an empty string for the frames that
+ * carry no `source_item`.
+ */
+inline bool filelist_change_affects_gcodes(const std::string& item_root,
+                                           const std::string& source_root) {
+    return item_root.empty() || item_root == "gcodes" || source_root == "gcodes";
 }
 
 } // namespace helix::json_util

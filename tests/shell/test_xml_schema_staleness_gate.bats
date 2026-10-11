@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# Meta-tests for the helix-xml-linter block in scripts/quality-checks.sh — the
+# Meta-tests for the helix-xml-linter gate, scripts/qc/xml_linter.sh — the
 # gate that keeps tools/xml-linter/schema/schema.json in step with the inputs
 # `make regen-xml-schema` extracts from.
 #
@@ -25,7 +25,7 @@
 # reach the check, and an ordinary src/ commit must not, because paying make's
 # startup on every commit is exactly what the content-based trigger avoids.
 
-QC="scripts/quality-checks.sh"
+QC="scripts/qc/xml_linter.sh"
 
 load helpers
 
@@ -33,27 +33,12 @@ setup() {
     cd "$BATS_TEST_DIRNAME/../.." || return 1
     REPO_ROOT="$PWD"
     FIX="${BATS_TEST_TMPDIR:-$(mktemp -d)}/schema_fix"
-    BLOCK="${BATS_TEST_TMPDIR:-$(mktemp -d)}/block.sh"
-    extract_block
     build_fixture
 }
 
 # ---------------------------------------------------------------------------
 # Harness
 # ---------------------------------------------------------------------------
-
-# Pull the real linter/staleness block out of quality-checks.sh so these tests
-# exercise the shipped code rather than a restatement of it. Aborts loudly if
-# the markers move: an empty block would make every assertion below vacuous.
-extract_block() {
-    awk '/^XML_LINTER_SCHEMA_PATH=/{f=1} f && /^# ={20}/{exit} f' "$REPO_ROOT/$QC" \
-        > "$BLOCK"
-    [ -s "$BLOCK" ] || fail "could not extract the XML linter block from $QC"
-    grep -q 'regen-xml-schema' "$BLOCK" \
-        || fail "extracted block has no regen step — markers moved?"
-    grep -q 'run_xml_linter' "$BLOCK" \
-        || fail "extracted block has no run_xml_linter — markers moved?"
-}
 
 # A throwaway git repo shaped like the parts of the tree the block touches:
 #   ui_xml/t.xml                   references #probe_token
@@ -87,13 +72,18 @@ PY
     printf 'regen-xml-schema:\n\t@cp "$$(cat .regen_source)" tools/xml-linter/schema/schema.json\n' \
         > "$FIX/Makefile"
 
+    # Sources the real gate so these tests exercise the shipped code rather
+    # than a restatement of it, and calls it the way the driver does: errexit
+    # off, its return value as the verdict.
     cat > "$FIX/run_block.sh" <<'EOF'
 #!/bin/bash
-set -e
-EXIT_CODE=0
 # shellcheck disable=SC1090
-. "$BLOCK_PATH"
-echo "BLOCK_EXIT_CODE=$EXIT_CODE"
+. "$REPO_ROOT/scripts/qc/_lib.sh"
+# shellcheck disable=SC1090
+. "$REPO_ROOT/$QC"
+rc=0
+qc_xml_linter || rc=$?
+echo "BLOCK_EXIT_CODE=$rc"
 EOF
 
     git -C "$FIX" init -q
@@ -110,11 +100,11 @@ seed_committed_schema() {
     git -C "$FIX" commit -qm seed
 }
 
-# Run the extracted block in the fixture. $1 = AUTO_FIX, $2 = STAGED_ONLY
+# Run the gate in the fixture. $1 = AUTO_FIX, $2 = STAGED_ONLY
 # (both default true, the pre-commit invocation).
 run_block() {
     local auto_fix="${1:-true}" staged_only="${2:-true}"
-    run bash -c "cd '$FIX' && BLOCK_PATH='$BLOCK' AUTO_FIX='$auto_fix' \
+    run bash -c "cd '$FIX' && REPO_ROOT='$REPO_ROOT' QC='$QC' AUTO_FIX='$auto_fix' \
         STAGED_ONLY='$staged_only' bash run_block.sh"
 }
 
@@ -415,7 +405,7 @@ trigger_re() {
     # Guards every assertion below it.
     run trigger_re widget
     [ "$status" -eq 0 ]
-    [[ "$output" == *"lv_xml_register_widget"* ]]
+    contains "lv_xml_register_widget" "$output"
     run trigger_re const
     [ "$status" -eq 0 ]
     [[ "$output" == *"lv_xml_register_const"* ]]

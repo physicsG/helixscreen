@@ -6,9 +6,7 @@
 #include "ui_callback_helpers.h"
 #include "ui_error_reporting.h"
 #include "ui_event_safety.h"
-#include "ui_global_panel_helper.h"
 #include "ui_modal.h"
-#include "ui_nav_manager.h"
 #include "ui_overlay_console_settings.h"
 #include "ui_panel_common.h"
 #include "ui_subject_registry.h"
@@ -17,13 +15,15 @@
 
 #include "app_globals.h"
 #include "console_filter_engine.h"
+#include "console_line.h"
 #include "i_moonraker_api.h"
 #include "lvgl/src/others/translation/lv_translation.h"
-#include "observer_factory.h"
 #include "printer_detector.h"
 #include "printer_state.h"
 #include "settings_manager.h"
+#include "static_panel_registry.h"
 #include "theme_manager.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/spdlog.h>
 
@@ -34,125 +34,9 @@
 #include <utility>
 #include <vector>
 
-// ============================================================================
-// Global Instance
-// ============================================================================
-
-DEFINE_GLOBAL_PANEL(ConsolePanel, g_console_panel, get_global_console_panel)
-
-// ============================================================================
-// HTML Span Parsing (for AFC/Happy Hare colored output)
-// ============================================================================
+using helix::ui::find_required;
 
 namespace {
-
-// HTML span tag delimiters used by AFC/Happy Hare plugins (Mainsail-style)
-constexpr const char SPAN_OPEN[] = "<span class=";
-constexpr size_t SPAN_OPEN_LEN = sizeof(SPAN_OPEN) - 1; // 12
-constexpr const char SPAN_CLOSE[] = "</span>";
-constexpr size_t SPAN_CLOSE_LEN = sizeof(SPAN_CLOSE) - 1; // 7
-
-struct TextSegment {
-    std::string text;
-    std::string color_class; // empty = default, "success", "info", "warning", "error"
-};
-
-/**
- * @brief Extract a color class name from a span's class attribute
- *
- * Maps "success--text" -> "success", "info--text" -> "info", etc.
- * Returns empty string for unrecognized classes.
- */
-std::string extract_color_class(const std::string& class_attr) {
-    static constexpr std::pair<const char*, const char*> mappings[] = {
-        {"success--text", "success"},
-        {"info--text", "info"},
-        {"warning--text", "warning"},
-        {"error--text", "error"},
-    };
-    for (const auto& [pattern, name] : mappings) {
-        if (class_attr.find(pattern) != std::string::npos) {
-            return name;
-        }
-    }
-    return {};
-}
-
-/**
- * @brief Check if a message contains HTML spans we can parse
- *
- * Looks for Mainsail-style spans from AFC/Happy Hare plugins:
- * <span class=success--text>LOADED</span>
- */
-bool contains_html_spans(const std::string& message) {
-    return message.find(SPAN_OPEN) != std::string::npos &&
-           (message.find("success--text") != std::string::npos ||
-            message.find("info--text") != std::string::npos ||
-            message.find("warning--text") != std::string::npos ||
-            message.find("error--text") != std::string::npos);
-}
-
-/**
- * @brief Parse HTML span tags into text segments with color classes
- *
- * Parses Mainsail-style spans: <span class=XXX--text>content</span>
- * Returns vector of segments, each with text and optional color class.
- */
-std::vector<TextSegment> parse_html_spans(const std::string& message) {
-    std::vector<TextSegment> segments;
-
-    size_t pos = 0;
-    const size_t len = message.size();
-
-    while (pos < len) {
-        size_t span_start = message.find(SPAN_OPEN, pos);
-
-        if (span_start == std::string::npos) {
-            std::string remaining = message.substr(pos);
-            if (!remaining.empty()) {
-                segments.push_back({std::move(remaining), {}});
-            }
-            break;
-        }
-
-        // Add any text before the span as a plain segment
-        if (span_start > pos) {
-            segments.push_back({message.substr(pos, span_start - pos), {}});
-        }
-
-        // Find the class value (ends at >)
-        size_t class_start = span_start + SPAN_OPEN_LEN;
-        size_t class_end = message.find('>', class_start);
-
-        if (class_end == std::string::npos) {
-            // Malformed - add rest as plain text
-            segments.push_back({message.substr(span_start), {}});
-            break;
-        }
-
-        std::string color_class =
-            extract_color_class(message.substr(class_start, class_end - class_start));
-
-        // Find the closing </span>
-        size_t content_start = class_end + 1;
-        size_t span_close = message.find(SPAN_CLOSE, content_start);
-
-        if (span_close == std::string::npos) {
-            // No closing tag - add rest as colored text
-            segments.push_back({message.substr(content_start), color_class});
-            break;
-        }
-
-        std::string content = message.substr(content_start, span_close - content_start);
-        if (!content.empty()) {
-            segments.push_back({std::move(content), std::move(color_class)});
-        }
-
-        pos = span_close + SPAN_CLOSE_LEN;
-    }
-
-    return segments;
-}
 
 /**
  * @brief Format a Unix timestamp as HH:MM:SS local time
@@ -181,10 +65,6 @@ std::string format_timestamp(double timestamp) {
 // Constructor
 // ============================================================================
 
-ConsolePanel::ConsolePanel() {
-    spdlog::trace("[{}] Constructor", get_name());
-}
-
 ConsolePanel::~ConsolePanel() {
     deinit_subjects();
 }
@@ -194,37 +74,19 @@ ConsolePanel::~ConsolePanel() {
 // ============================================================================
 
 void ConsolePanel::init_subjects() {
-    init_subjects_guarded([this]() {
-        // Initialize status subject for reactive binding
-        UI_MANAGED_SUBJECT_STRING(status_subject_, status_buf_, lv_tr("Loading history..."),
-                                  "console_status", subjects_);
-        // Status label visibility (1 = visible, 0 = hidden)
-        UI_MANAGED_SUBJECT_INT(status_visible_subject_, 1, "console_status_visible", subjects_);
-        // Entry presence (1 = has entries, 0 = empty/show empty state)
-        UI_MANAGED_SUBJECT_INT(has_entries_subject_, 0, "console_has_entries", subjects_);
-
-        // Seed filter flags from SettingsManager and observe future changes.
-        // SettingsManager subjects are static (singleton-owned) — no SubjectLifetime needed.
-        auto& sm = helix::SettingsManager::instance();
-        filter_temps_ = sm.get_console_filter_temps();
-        filter_firmware_noise_ = sm.get_console_filter_firmware_noise();
-
-        filter_temps_observer_ = helix::ui::observe_int_sync(
-            sm.subject_console_filter_temps(), this,
-            [](ConsolePanel* self, int v) { self->filter_temps_ = (v != 0); });
-        filter_firmware_observer_ = helix::ui::observe_int_sync(
-            sm.subject_console_filter_firmware_noise(), this,
-            [](ConsolePanel* self, int v) { self->filter_firmware_noise_ = (v != 0); });
-    });
+    // Initialize status subject for reactive binding
+    UI_MANAGED_SUBJECT_STRING(status_subject_, status_buf_, lv_tr("Loading history..."),
+                              "console_status", subjects_);
+    // Status label visibility (1 = visible, 0 = hidden)
+    UI_MANAGED_SUBJECT_INT(status_visible_subject_, 1, "console_status_visible", subjects_);
+    // Entry presence (1 = has entries, 0 = empty/show empty state)
+    UI_MANAGED_SUBJECT_INT(has_entries_subject_, 0, "console_has_entries", subjects_);
 }
 
 void ConsolePanel::deinit_subjects() {
     if (!subjects_initialized_) {
         return;
     }
-    // Drop observers before subjects (subjects are static so order is mainly cosmetic here).
-    filter_temps_observer_.reset();
-    filter_firmware_observer_.reset();
     subjects_.deinit_all();
     subjects_initialized_ = false;
     spdlog::debug("[{}] Subjects deinitialized", get_name());
@@ -234,8 +96,12 @@ void ConsolePanel::rebuild_firmware_filter() {
     // Always rebuild on activate so user-edited pattern lists take effect when
     // the user returns from the settings overlay. Cost is trivial — a few
     // dozen prefix-string copies plus optional regex compilation.
-    const std::string& printer = get_printer_state().get_printer_type();
-    firmware_filter_.clear();
+    load_firmware_filter(firmware_filter_);
+}
+
+void ConsolePanel::load_firmware_filter(helix::ui::ConsoleFilterEngine& filter) {
+    const std::string& printer = get_printer_state().profile_state().printer_type();
+    filter.clear();
 
     auto preset = PrinterDetector::get_console_filter_patterns(printer);
     auto& sm = helix::SettingsManager::instance();
@@ -244,11 +110,46 @@ void ConsolePanel::rebuild_firmware_filter() {
         if (std::find(user_remove.begin(), user_remove.end(), spec) != user_remove.end()) {
             continue; // User chose to drop this preset entry.
         }
-        firmware_filter_.add(spec);
+        filter.add(spec);
     }
-    firmware_filter_.add_all(sm.get_console_filter_user_add());
-    spdlog::debug("[{}] Firmware filter rebuilt for '{}': {} patterns", get_name(), printer,
-                  firmware_filter_.size());
+    filter.add_all(sm.get_console_filter_user_add());
+    spdlog::debug("[Console] Firmware filter rebuilt for '{}': {} patterns", printer,
+                  filter.size());
+}
+
+ConsolePanel::GcodeEntry ConsolePanel::entry_from_store(const GcodeStoreEntry& stored) {
+    GcodeEntry e;
+    e.message = stored.message;
+    e.timestamp = stored.time;
+    e.type = (stored.type == "command") ? GcodeEntry::Type::COMMAND : GcodeEntry::Type::RESPONSE;
+    e.is_error = helix::ui::is_console_error_message(stored.message);
+    return e;
+}
+
+std::optional<ConsolePanel::GcodeEntry>
+ConsolePanel::entry_from_gcode_response(const nlohmann::json& msg) {
+    // Parse notify_gcode_response format: {"method": "...", "params": ["line"]}
+    if (!msg.contains("params") || !msg["params"].is_array() || msg["params"].empty()) {
+        return std::nullopt;
+    }
+
+    // I4: Type-check params[0] before extracting string reference
+    if (!msg["params"][0].is_string()) {
+        return std::nullopt;
+    }
+    const std::string& line = msg["params"][0].get_ref<const std::string&>();
+
+    // Skip empty lines and common noise
+    if (line.empty() || line == "ok") {
+        return std::nullopt;
+    }
+
+    GcodeEntry entry;
+    entry.message = line;
+    entry.timestamp = 0.0; // Real-time entries don't have timestamps
+    entry.type = GcodeEntry::Type::RESPONSE;
+    entry.is_error = helix::ui::is_console_error_message(line);
+    return entry;
 }
 
 // ============================================================================
@@ -256,14 +157,6 @@ void ConsolePanel::rebuild_firmware_filter() {
 // ============================================================================
 
 void ConsolePanel::register_callbacks() {
-    if (callbacks_registered_) {
-        spdlog::debug("[{}] Callbacks already registered", get_name());
-        return;
-    }
-
-    spdlog::debug("[{}] Registering event callbacks", get_name());
-
-    // Register XML event callbacks for send, clear, and filter buttons
     register_xml_callbacks({
         {"on_console_send_clicked",
          [](lv_event_t* /*e*/) {
@@ -281,20 +174,9 @@ void ConsolePanel::register_callbacks() {
         {"on_console_settings_clicked",
          [](lv_event_t* /*e*/) {
              spdlog::debug("[Console] Settings gear clicked - opening overlay");
-             auto& overlay = get_global_console_settings();
-             auto* root = overlay.get_root();
-             if (!root) {
-                 root = overlay.create(lv_screen_active());
-             }
-             if (root) {
-                 NavigationManager::instance().register_overlay_instance(root, &overlay);
-                 NavigationManager::instance().push_overlay(root);
-             }
+             get_global_console_settings().show(lv_screen_active());
          }},
     });
-
-    callbacks_registered_ = true;
-    spdlog::debug("[{}] Event callbacks registered", get_name());
 }
 
 // ============================================================================
@@ -302,32 +184,20 @@ void ConsolePanel::register_callbacks() {
 // ============================================================================
 
 lv_obj_t* ConsolePanel::create(lv_obj_t* parent) {
-    if (!create_overlay_from_xml(parent, "console_panel")) {
+    if (!OverlayBase::create(parent)) {
         return nullptr;
     }
 
     // Find widget references
-    lv_obj_t* overlay_content = lv_obj_find_by_name(overlay_root_, "overlay_content");
-    if (overlay_content) {
-        console_container_ = lv_obj_find_by_name(overlay_content, "console_container");
-        empty_state_ =
-            console_container_ ? lv_obj_find_by_name(console_container_, "empty_state") : nullptr;
-        status_label_ = lv_obj_find_by_name(overlay_content, "status_message");
-
-        // Find the input row and get the text input
-        lv_obj_t* input_row = lv_obj_find_by_name(overlay_content, "input_row");
-        if (input_row) {
-            gcode_input_ = lv_obj_find_by_name(input_row, "gcode_input");
-            if (gcode_input_) {
-                spdlog::debug("[{}] Found gcode_input textarea", get_name());
-            }
-        }
-    }
-
+    lv_obj_t* overlay_content = find_required(overlay_root_, "overlay_content", get_name());
+    console_container_ = find_required(overlay_content, "console_container", get_name());
     if (!console_container_) {
-        spdlog::error("[{}] console_container not found!", get_name());
         return nullptr;
     }
+    empty_state_ = find_required(console_container_, "empty_state", get_name());
+    status_label_ = find_required(overlay_content, "status_message", get_name());
+    gcode_input_ = find_required(find_required(overlay_content, "input_row", get_name()),
+                                 "gcode_input", get_name());
 
     // Track user scroll position for smart auto-scroll behavior.
     // When user scrolls up to read history, auto-scroll is paused.
@@ -342,9 +212,7 @@ lv_obj_t* ConsolePanel::create(lv_obj_t* parent) {
         },
         LV_EVENT_SCROLL, this);
 
-    if (!gcode_input_) {
-        spdlog::warn("[{}] gcode_input not found - input disabled", get_name());
-    } else {
+    if (gcode_input_) {
         // Enter key submits the command (LV_EVENT_READY fires on Enter
         // in a one-line textarea)
         lv_obj_add_event_cb(
@@ -408,7 +276,6 @@ lv_obj_t* ConsolePanel::create(lv_obj_t* parent) {
     spdlog::debug("[{}] Timestamps {} (min_dim={})", get_name(),
                   show_timestamps_ ? "enabled" : "disabled", resp_res);
 
-    spdlog::info("[{}] Overlay created successfully", get_name());
     return overlay_root_;
 }
 
@@ -436,14 +303,11 @@ void ConsolePanel::on_activate() {
     subscribe_to_gcode_responses();
 }
 
-void ConsolePanel::on_deactivate() {
-    spdlog::debug("[{}] on_deactivate()", get_name());
+void ConsolePanel::on_deactivating(DeactivateReason) {
+    spdlog::debug("[{}] on_deactivating()", get_name());
 
     // Unsubscribe from real-time updates
     unsubscribe_from_gcode_responses();
-
-    // Call base class
-    OverlayBase::on_deactivate();
 }
 
 void ConsolePanel::on_ui_destroyed() {
@@ -498,13 +362,7 @@ void ConsolePanel::fetch_history() {
             converted.reserve(entries.size());
 
             for (const auto& entry : entries) {
-                GcodeEntry e;
-                e.message = entry.message;
-                e.timestamp = entry.time;
-                e.type = (entry.type == "command") ? GcodeEntry::Type::COMMAND
-                                                   : GcodeEntry::Type::RESPONSE;
-                e.is_error = is_error_message(entry.message);
-                converted.push_back(e);
+                converted.push_back(entry_from_store(entry));
             }
 
             // Defer LVGL operations to main thread; defer has its own atomic
@@ -537,8 +395,7 @@ void ConsolePanel::populate_entries(const std::vector<GcodeEntry>& entries) {
     std::vector<const GcodeEntry*> kept;
     kept.reserve(entries.size());
     for (const auto& entry : entries) {
-        if (should_display(entry.message, is_temp_message(entry.message), filter_temps_,
-                           filter_firmware_noise_, firmware_filter_)) {
+        if (accepts(entry, firmware_filter_)) {
             kept.push_back(&entry);
         }
     }
@@ -575,31 +432,7 @@ void ConsolePanel::create_entry_widget(const GcodeEntry& entry) {
     }
 
     const bool is_command = (entry.type == GcodeEntry::Type::COMMAND);
-
-    // Color based on entry type: errors red, responses green, commands default
-    auto entry_color = [&]() -> lv_color_t {
-        if (entry.is_error) {
-            return theme_manager_get_color("danger");
-        }
-        if (entry.type == GcodeEntry::Type::RESPONSE) {
-            return theme_manager_get_color("success");
-        }
-        return theme_manager_get_color("text");
-    };
-
-    // Resolve a span color class name to a theme color, falling back to entry color
-    auto resolve_span_color = [&](const std::string& color_class) -> lv_color_t {
-        // "error" class maps to "danger" theme token; others map directly
-        if (color_class == "error") {
-            return theme_manager_get_color("danger");
-        }
-        if (!color_class.empty()) {
-            return theme_manager_get_color(color_class.c_str());
-        }
-        return entry_color();
-    };
-
-    bool has_html = contains_html_spans(entry.message);
+    const bool has_html = helix::ui::contains_console_html_spans(entry.message);
 
     // Tap-to-paste: a sent command can be tapped to refill the input field.
     // Applied to BOTH render paths below — show_timestamps_ and HTML spans decide
@@ -643,16 +476,9 @@ void ConsolePanel::create_entry_widget(const GcodeEntry& entry) {
             add_span(ts.c_str(), theme_manager_get_color("text_muted"));
         }
 
-        if (is_command) {
-            add_span("> ", theme_manager_get_color("text"));
-        }
-
-        if (has_html) {
-            for (const auto& seg : parse_html_spans(entry.message)) {
-                add_span(seg.text.c_str(), resolve_span_color(seg.color_class));
-            }
-        } else {
-            add_span(entry.message.c_str(), entry_color());
+        for (const auto& span :
+             helix::ui::console_line_spans(entry.message, is_command, entry.is_error)) {
+            add_span(span.text.c_str(), theme_manager_get_color(span.color_token));
         }
 
         lv_spangroup_refresh(spangroup);
@@ -667,7 +493,10 @@ void ConsolePanel::create_entry_widget(const GcodeEntry& entry) {
             lv_label_set_text(label, entry.message.c_str());
         }
         lv_obj_set_width(label, LV_PCT(100));
-        lv_obj_set_style_text_color(label, entry_color(), 0);
+        lv_obj_set_style_text_color(label,
+                                    theme_manager_get_color(helix::ui::console_line_color_token(
+                                        is_command, entry.is_error)),
+                                    0);
         lv_obj_set_style_text_font(label, font, 0);
         make_tappable(label);
     }
@@ -753,21 +582,12 @@ void ConsolePanel::scroll_to_bottom() {
     }
 }
 
-bool ConsolePanel::is_error_message(const std::string& message) {
-    if (message.size() >= 2 && message[0] == '!' && message[1] == '!') {
-        return true;
-    }
-
-    // Case-insensitive check for "error" at start (covers "Error:", "ERROR:", etc.)
-    if (message.size() >= 5) {
-        auto ci_eq = [](char a, char b) {
-            return std::tolower(static_cast<unsigned char>(a)) ==
-                   std::tolower(static_cast<unsigned char>(b));
-        };
-        return std::equal(message.begin(), message.begin() + 5, "error", ci_eq);
-    }
-
-    return false;
+bool ConsolePanel::accepts(const GcodeEntry& entry,
+                           const helix::ui::ConsoleFilterEngine& firmware_filter) {
+    auto& sm = helix::SettingsManager::instance();
+    return should_display(entry.message, helix::ui::is_console_temp_message(entry.message),
+                          sm.get_console_filter_temps(), sm.get_console_filter_firmware_noise(),
+                          firmware_filter);
 }
 
 bool ConsolePanel::should_display(const std::string& message, bool is_temp, bool filter_temps,
@@ -780,37 +600,6 @@ bool ConsolePanel::should_display(const std::string& message, bool is_temp, bool
         return false;
     }
     return true;
-}
-
-bool ConsolePanel::is_temp_message(const std::string& message) {
-    if (message.empty()) {
-        return false;
-    }
-
-    // Temperature status messages look like:
-    // "ok T:210.5 /210.0 B:60.2 /60.0"
-    // "T:210.5 /210.0 B:60.2 /60.0"
-    // "ok B:60.0 /60.0 T0:210.0 /210.0"
-
-    // Check for "T:" or "B:" followed immediately by a digit, with "/" somewhere after
-    size_t t_pos = message.find("T:");
-    size_t b_pos = message.find("B:");
-
-    auto check_temp_pattern = [&](size_t pos) -> bool {
-        if (pos == std::string::npos)
-            return false;
-        // Require digit immediately after the colon (e.g. "T:210" not "T: see docs")
-        size_t val_start = pos + 2; // skip "T:" or "B:"
-        if (val_start < message.size() &&
-            std::isdigit(static_cast<unsigned char>(message[val_start]))) {
-            // Also require "/" somewhere after the pattern (target temp separator)
-            size_t slash_pos = message.find('/', val_start);
-            return slash_pos != std::string::npos;
-        }
-        return false;
-    };
-
-    return check_temp_pattern(t_pos) || check_temp_pattern(b_pos);
 }
 
 void ConsolePanel::update_visibility() {
@@ -839,13 +628,23 @@ void ConsolePanel::subscribe_to_gcode_responses() {
     static std::atomic<uint64_t> s_handler_id{0};
     gcode_handler_name_ = "console_panel_" + std::to_string(++s_handler_id);
 
-    // Register for notify_gcode_response notifications
-    // Guard with lifetime token in case panel is destroyed before unsubscribe
+    // Register for notify_gcode_response notifications. The callback runs on the
+    // WebSocket thread: it parses from captured values only and touches no member
+    // until token.defer() has moved it to the main thread. Filtering happens there
+    // too, so the engine's pattern vector is read on the thread that mutates it.
     api->register_method_callback("notify_gcode_response", gcode_handler_name_,
                                   [this, token = lifetime_.token()](const nlohmann::json& msg) {
-                                      if (token.expired())
+                                      auto entry = entry_from_gcode_response(msg);
+                                      if (!entry) {
                                           return;
-                                      on_gcode_response(msg);
+                                      }
+                                      token.defer("ConsolePanel::gcode_entry",
+                                                  [this, e = std::move(*entry)]() {
+                                                      if (!accepts(e, firmware_filter_)) {
+                                                          return;
+                                                      }
+                                                      add_entry(e);
+                                                  });
                                   });
 
     is_subscribed_ = true;
@@ -866,48 +665,6 @@ void ConsolePanel::unsubscribe_from_gcode_responses() {
 
     is_subscribed_ = false;
     gcode_handler_name_.clear();
-}
-
-void ConsolePanel::on_gcode_response(const nlohmann::json& msg) {
-    // Parse notify_gcode_response format: {"method": "...", "params": ["line"]}
-    if (!msg.contains("params") || !msg["params"].is_array() || msg["params"].empty()) {
-        return;
-    }
-
-    // I4: Type-check params[0] before extracting string reference
-    if (!msg["params"][0].is_string()) {
-        return;
-    }
-    const std::string& line = msg["params"][0].get_ref<const std::string&>();
-
-    // Skip empty lines and common noise
-    if (line.empty() || line == "ok") {
-        return;
-    }
-
-    // Build entry on background thread (no LVGL calls, only pure C++).
-    // is_temp_message / is_error_message are pure functions, safe on any thread.
-    const bool is_temp = is_temp_message(line);
-
-    GcodeEntry entry;
-    entry.message = line;
-    entry.timestamp = 0.0; // Real-time entries don't have timestamps
-    entry.type = GcodeEntry::Type::RESPONSE;
-    entry.is_error = is_error_message(line);
-
-    // CRITICAL: Defer LVGL operations to main thread via token.defer
-    // WebSocket callbacks run on libhv thread - direct LVGL calls cause crashes.
-    // Use token.defer() (not lifetime_.defer()) to avoid TOCTOU race (#707).
-    // Filtering decisions also happen on the main thread so the engine's pattern
-    // vector is mutated and read on the same thread (no lock required).
-    auto tok = lifetime_.token();
-    tok.defer("ConsolePanel::gcode_entry", [this, entry = std::move(entry), is_temp]() {
-        if (!should_display(entry.message, is_temp, filter_temps_, filter_firmware_noise_,
-                            firmware_filter_)) {
-            return;
-        }
-        add_entry(entry);
-    });
 }
 
 void ConsolePanel::add_entry(const GcodeEntry& entry) {
@@ -980,9 +737,9 @@ void ConsolePanel::send_gcode_command() {
     if (api) {
         api->execute_gcode(command, nullptr, // success: no-op, response comes via WS subscription
                            [token = lifetime_.token()](const MoonrakerError& err) {
-                               if (token.expired())
-                                   return;
-                               NOTIFY_ERROR(lv_tr("Failed to send command: {}"), err.message);
+                               token.defer("ConsolePanel::send_error", [msg = err.message]() {
+                                   NOTIFY_ERROR(lv_tr("Failed to send command: {}"), msg);
+                               });
                            });
     } else {
         spdlog::warn("[{}] No IMoonrakerAPI available", get_name());

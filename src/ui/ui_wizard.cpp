@@ -5,9 +5,11 @@
 
 #include "ui_error_reporting.h"
 #include "ui_keyboard_manager.h"
-#include "ui_nav_manager.h"
+#include "ui_nav.h"
+#include "ui_next_tick.h"
 #include "ui_panel_home.h"
 #include "ui_subject_registry.h"
+#include "ui_timer_guard.h"
 #include "ui_update_queue.h"
 #include "ui_utils.h"
 #include "ui_wizard_ams_identify.h"
@@ -28,6 +30,7 @@
 #include "app_globals.h"
 #include "config.h"
 #include "filament_sensor_manager.h"
+#include "first_run_tour.h"
 #include "hardware_validator.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "i_moonraker_api.h"
@@ -42,10 +45,12 @@
 #include "subject_managed_panel.h"
 #include "system/crash_handler.h"
 #include "theme_manager.h"
+#include "ui/ui_widget_helpers.h"
 #include "wizard_config_paths.h"
 #include "wizard_step.h"
 #include "wizard_step_logic.h"
 #include "wizard_step_registry.h"
+#include "xml_registration.h"
 
 #include <spdlog/spdlog.h>
 
@@ -62,13 +67,14 @@ static lv_subject_t total_steps;
 static lv_subject_t wizard_title;
 static lv_subject_t wizard_step_current;  // String for display, e.g., "1"
 static lv_subject_t wizard_step_total;    // String for display, e.g., "7"
+static lv_subject_t wizard_total_visible; // Int: 0 until the denominator is settled
 static lv_subject_t wizard_is_final_step; // Int: 0=not final, 1=final (for button visibility)
 static lv_subject_t wizard_back_visible;
 
 // Non-static: accessible from other wizard step files
-lv_subject_t connection_test_passed; // Global: 0=connection not validated, 1=validated or N/A
-lv_subject_t wizard_subtitle;        // Global: accessible for dynamic subtitle updates
-lv_subject_t wizard_show_skip;       // Global: 0=show Next, 1=show Skip (for touch calibration)
+lv_subject_t connection_test_passed{}; // Global: 0=connection not validated, 1=validated or N/A
+lv_subject_t wizard_subtitle{};        // Global: accessible for dynamic subtitle updates
+lv_subject_t wizard_show_skip{};       // Global: 0=show Next, 1=show Skip (for touch calibration)
 
 // SubjectManager for RAII cleanup of wizard subjects
 static SubjectManager wizard_subjects_;
@@ -96,6 +102,105 @@ static bool navigating = false;
 static std::vector<helix::wizard::StepId> g_step_subset;
 static std::function<void()> g_targeted_on_complete;
 
+namespace helix {
+
+// Deferred one-shots armed by ui_wizard_complete(): a 500 ms runout-modal check
+// and a 100 ms navigation to Home. They reach only singletons, but nothing else
+// in the wizard outlives them, so they need an owner that a new wizard session
+// and shutdown can tell to stand down — a dismissal or app exit inside their
+// window must not fire them into state being torn down
+// (prestonbrown/helixscreen#1577).
+struct WizardCompletionTimers {
+    lv_timer_t* runout_check_timer_ = nullptr;
+    lv_timer_t* home_nav_timer_ = nullptr;
+
+    void arm_runout_check();
+    void arm_home_navigation();
+    void cancel();
+    ~WizardCompletionTimers();
+};
+
+static WizardCompletionTimers g_completion_timers;
+
+} // namespace helix
+
+void helix::WizardCompletionTimers::arm_runout_check() {
+    // Re-arming must not stack a second one-shot behind a still-pending one.
+    if (runout_check_timer_) {
+        helix::ui::lv_timer_cancel_safe(runout_check_timer_);
+        runout_check_timer_ = nullptr;
+    }
+    // user_data is `this` (module-static storage), so the trampoline can null
+    // the member before the one-shot retires itself.
+    runout_check_timer_ = lv_timer_create(
+        [](lv_timer_t* timer) {
+            auto* self = static_cast<WizardCompletionTimers*>(lv_timer_get_user_data(timer));
+            if (!self) {
+                return;
+            }
+            // One-shot: LVGL deletes it immediately after this callback
+            // returns. Null the member FIRST so no later cancel can touch
+            // freed memory.
+            self->runout_check_timer_ = nullptr;
+
+            auto& fsm = helix::FilamentSensorManager::instance();
+            if (fsm.has_real_runout() && get_runtime_config()->should_show_runout_modal()) {
+                spdlog::debug("[Wizard] Deferred runout check - triggering modal");
+                get_global_home_panel().trigger_idle_runout_check();
+            }
+        },
+        500, this);
+    lv_timer_set_repeat_count(runout_check_timer_, 1);
+}
+
+void helix::WizardCompletionTimers::arm_home_navigation() {
+    if (home_nav_timer_) {
+        helix::ui::lv_timer_cancel_safe(home_nav_timer_);
+        home_nav_timer_ = nullptr;
+    }
+    home_nav_timer_ = lv_timer_create(
+        [](lv_timer_t* timer) {
+            auto* self = static_cast<WizardCompletionTimers*>(lv_timer_get_user_data(timer));
+            if (!self) {
+                return;
+            }
+            self->home_nav_timer_ = nullptr;
+
+            spdlog::info("[Wizard] Deferred navigation to Home panel");
+            helix::nav::set_active(PanelId::Home);
+            // Home is already the active panel here, so set_active() returns
+            // without running on_activate(), which is the tour's only other
+            // entry point. Finishing the wizard is what opens the tour's gate,
+            // so this is where it gets re-checked.
+            helix::tour::FirstRunTour::instance().maybe_start();
+        },
+        100, this);
+    lv_timer_set_repeat_count(home_nav_timer_, 1);
+}
+
+void helix::WizardCompletionTimers::cancel() {
+    // Neuter rather than delete: safe from inside lv_timer_handler, from the
+    // destructor, and after lv_deinit() (self-guarding no-op). The cancels stay
+    // inline — spelling lv_timer_cancel_safe(member) here is what keeps the
+    // timer-destructor gate matching this struct; folding them behind a helper
+    // would silently untrack it.
+    if (runout_check_timer_) {
+        helix::ui::lv_timer_cancel_safe(runout_check_timer_);
+        runout_check_timer_ = nullptr;
+    }
+    if (home_nav_timer_) {
+        helix::ui::lv_timer_cancel_safe(home_nav_timer_);
+        home_nav_timer_ = nullptr;
+    }
+}
+
+helix::WizardCompletionTimers::~WizardCompletionTimers() {
+    // Last-resort cancel for non-static storage; with static storage this runs
+    // after lv_deinit(), where lv_timer_cancel_safe() no-ops. The real shutdown
+    // cancel is the one in ui_wizard_deinit_subjects().
+    cancel();
+}
+
 // Index of `step` within the active subset, or -1 if not present.
 static int subset_index_of(helix::wizard::StepId step) {
     for (size_t i = 0; i < g_step_subset.size(); ++i) {
@@ -104,6 +209,15 @@ static int subset_index_of(helix::wizard::StepId step) {
         }
     }
     return -1;
+}
+
+// Whether Klipper answered and hardware discovery actually ran. Read from live
+// hardware rather than a wizard flag: Klipper always reports at least an
+// [extruder], so an empty heater list is the one unambiguous "discovery never
+// ran" signal available at any point in the run, including from the two
+// Connection-step escape hatches that unblock Next without it.
+static bool wizard_discovery_succeeded(IMoonrakerAPI* api) {
+    return api != nullptr && !api->hardware().heaters().empty();
 }
 
 // Forward declarations
@@ -173,15 +287,8 @@ static void ui_wizard_purge_subtree_anims(lv_obj_t* root) {
 // race corrupts the global event linked list and aborts in libc (#848/#843).
 // The caller sets navigating=true first; the callback path clears it when
 // navigate_to_step finishes.
-static void navigate_to_step_async_cb(void* data) {
-    auto step =
-        static_cast<helix::wizard::StepId>(static_cast<int>(reinterpret_cast<intptr_t>(data)));
-    ui_wizard_navigate_to_step(step);
-}
-
 static void schedule_navigate_to_step(helix::wizard::StepId step) {
-    lv_async_call(navigate_to_step_async_cb,
-                  reinterpret_cast<void*>(static_cast<intptr_t>(static_cast<int>(step))));
+    helix::ui::run_next_tick([step]() { ui_wizard_navigate_to_step(step); });
 }
 
 // ============================================================================
@@ -261,11 +368,11 @@ void ui_wizard_init_subjects() {
     auto* cfg = Config::get_instance();
     helix::wizard::StepContext init_ctx = helix::wizard::build_context();
     if (init_ctx.preset.first_run) {
-        spdlog::info("[Wizard] Preset mode active (preset: {})", cfg ? cfg->get_preset() : "");
+        spdlog::info("[Wizard] Preset mode active (preset: {})", cfg->get_preset());
     } else if (init_ctx.preset.skip_hardware) {
         spdlog::info("[Wizard] Subsequent printer with preset '{}': hardware steps will be "
                      "skipped, summary shown",
-                     cfg ? cfg->get_preset() : "");
+                     cfg->get_preset());
     }
 
     // Initialize subjects with defaults using managed macros for RAII cleanup
@@ -280,6 +387,7 @@ void ui_wizard_init_subjects() {
                               "wizard_step_current", wizard_subjects_);
     UI_MANAGED_SUBJECT_STRING(wizard_step_total, wizard_step_total_buffer, "9", "wizard_step_total",
                               wizard_subjects_);
+    UI_MANAGED_SUBJECT_INT(wizard_total_visible, 1, "wizard_total_visible", wizard_subjects_);
     UI_MANAGED_SUBJECT_INT(wizard_is_final_step, 0, "wizard_is_final_step", wizard_subjects_);
     UI_MANAGED_SUBJECT_STRING(wizard_subtitle, wizard_subtitle_buffer, "", "wizard_subtitle",
                               wizard_subjects_);
@@ -306,6 +414,12 @@ void ui_wizard_init_subjects() {
 }
 
 void ui_wizard_deinit_subjects() {
+    // Shutdown cancel for the completion one-shots: this runs from
+    // StaticPanelRegistry::destroy_all() while LVGL is still alive, the last
+    // point where an armed runout check or Home navigation can be stood down
+    // before the state they reach is torn down.
+    g_completion_timers.cancel();
+
     if (!wizard_subjects_initialized) {
         return;
     }
@@ -395,6 +509,8 @@ void ui_wizard_container_register_responsive_constants() {
     // Register to wizard_container scope (parent)
     lv_xml_component_scope_t* parent_scope = lv_xml_component_get_scope("wizard_container");
     register_constants_to_scope(parent_scope, constants);
+    if (parent_scope)
+        helix::keep_xml_component_registered("wizard_container");
 
     // Define child components that inherit this constant
     const char* children[] = {
@@ -409,6 +525,7 @@ void ui_wizard_container_register_responsive_constants() {
         "wizard_filament_sensor_select",
         "wizard_input_shaper",
         "wizard_language_chooser",
+        "wizard_preferences",
         "wizard_summary",
         "wizard_telemetry",
         nullptr // Sentinel
@@ -420,6 +537,7 @@ void ui_wizard_container_register_responsive_constants() {
         lv_xml_component_scope_t* child_scope = lv_xml_component_get_scope(children[i]);
         if (child_scope) {
             register_constants_to_scope(child_scope, constants);
+            helix::keep_xml_component_registered(children[i]);
             child_count++;
         }
     }
@@ -437,6 +555,10 @@ void ui_wizard_register_event_callbacks() {
 
 lv_obj_t* ui_wizard_create(lv_obj_t* parent) {
     spdlog::debug("[Wizard] Creating wizard container");
+
+    // A new wizard session starting inside the completion window must not have
+    // the deferred Home navigation or runout check fire mid-wizard.
+    g_completion_timers.cancel();
 
     // Create wizard from XML (constants already registered)
     wizard_container = (lv_obj_t*)lv_xml_create(parent, "wizard_container", nullptr);
@@ -523,6 +645,7 @@ void ui_wizard_navigate_to_step(helix::wizard::StepId step) {
     int display_total;
     bool at_first_visible;
     bool is_last_step;
+    bool total_visible = true;
     if (!g_step_subset.empty()) {
         int sub_idx = subset_index_of(step);
         if (sub_idx < 0) {
@@ -535,6 +658,12 @@ void ui_wizard_navigate_to_step(helix::wizard::StepId step) {
     } else {
         display_step = helix::wizard_display_number(step, skips);
         display_total = helix::wizard_visible_count(skips);
+        // The denominator is an estimate until the connection settles what
+        // exists on this printer (AMS, sensors, and a detection-applied
+        // preset all reshape the skip vector mid-run); show it only once it
+        // cannot lurch.
+        total_visible = helix::wizard_total_is_settled(step, skips, ctx.preset.skip_hardware,
+                                                       wizard_discovery_succeeded(ctx.api));
         at_first_visible = !helix::wizard_prev(step, skips).has_value();
         is_last_step = helix::wizard_is_last(step, skips);
     }
@@ -542,6 +671,8 @@ void ui_wizard_navigate_to_step(helix::wizard::StepId step) {
     // Update current_step subject (internal step index for UI bindings)
     crash_handler::breadcrumb::note("wiz", "notify_current", static_cast<long>(step_idx));
     lv_subject_set_int(&current_step, step_idx);
+    crash_handler::breadcrumb::note("wiz", "notify_total_vis", static_cast<long>(step_idx));
+    lv_subject_set_int(&wizard_total_visible, total_visible ? 1 : 0);
 
     // Back button: visible when there is a previous non-skipped step, or when an
     // add-printer cancel callback is registered (shown as "Cancel" on step one).
@@ -551,7 +682,7 @@ void ui_wizard_navigate_to_step(helix::wizard::StepId step) {
 
     // Show "Cancel" instead of "Back" on the first step when add-printer cancel is available
     if (wizard_container) {
-        lv_obj_t* btn_back = lv_obj_find_by_name(wizard_container, "btn_back");
+        lv_obj_t* btn_back = helix::ui::find_required(wizard_container, "btn_back", "Wizard");
         if (btn_back) {
             bool is_first_step = at_first_visible;
             const char* btn_label_text = (is_first_step && has_cancel) ? "Cancel" : "Back";
@@ -687,9 +818,8 @@ static void ui_wizard_load_screen(helix::wizard::StepId step) {
     }
 
     // Find wizard_content container
-    lv_obj_t* content = lv_obj_find_by_name(wizard_container, "wizard_content");
+    lv_obj_t* content = helix::ui::find_required(wizard_container, "wizard_content", "Wizard");
     if (!content) {
-        spdlog::error("[Wizard] wizard_content container not found");
         return;
     }
 
@@ -802,20 +932,12 @@ static void ui_wizard_load_screen(helix::wizard::StepId step) {
         lv_subject_copy_string(&wizard_subtitle,
                                get_wizard_printer_identify_step()->get_detection_status());
         break;
-    case StepId::FilamentSensor: {
-        // Schedule refresh in case sensors are discovered after screen creation
-        // (handles race condition when jumping directly to the filament step).
-        auto* fstep = get_wizard_filament_sensor_select_step();
-        fstep->refresh_timer_ = lv_timer_create(
-            [](lv_timer_t*) {
-                auto* fs = get_wizard_filament_sensor_select_step();
-                fs->refresh_timer_ = nullptr;
-                fs->refresh();
-            },
-            1500, nullptr);
-        lv_timer_set_repeat_count(fstep->refresh_timer_, 1);
+    case StepId::FilamentSensor:
+        // Sensors can be discovered after screen creation (jumping directly to
+        // this step outruns discovery), so refresh once more on a timer. The
+        // step owns the one-shot and cancels it on cleanup and destruction.
+        get_wizard_filament_sensor_select_step()->schedule_deferred_refresh();
         break;
-    }
     default:
         break;
     }
@@ -944,35 +1066,27 @@ void ui_wizard_complete() {
 
     // 1. Mark wizard as completed in config
     Config* config = Config::get_instance();
-    if (config) {
-        spdlog::debug("[Wizard] Setting wizard_completed flag");
-        config->set<bool>(config->df() + "wizard_completed", true);
-        // Also set root-level for backward compat
-        config->set<bool>("/wizard_completed", true);
+    spdlog::debug("[Wizard] Setting wizard_completed flag");
+    config->set<bool>(config->df() + "wizard_completed", true);
+    // Also set root-level for backward compat
+    config->set<bool>("/wizard_completed", true);
 
-        // 1b. Populate expected_hardware from wizard selections so later
-        // discoveries don't report already-present hardware as newly appeared.
-        const size_t recorded = ui_wizard_record_expected_hardware(config);
+    // 1b. Populate expected_hardware from wizard selections so later
+    // discoveries don't report already-present hardware as newly appeared.
+    const size_t recorded = ui_wizard_record_expected_hardware(config);
 
-        // 1c. A run that never reached Klipper had empty pickers and recorded
-        // nothing. Committing that emptiness as the final snapshot makes the
-        // first boot where Klipper does come up flag every fan, filament sensor
-        // and LED as new (#1160). Record the debt instead; the first successful
-        // discovery pays it and offers the skipped hardware steps.
-        //
-        // Discovery success is read from the live hardware rather than a wizard
-        // flag: Klipper always reports at least an [extruder], so an empty heater
-        // list is the one unambiguous "discovery never ran" signal available at
-        // completion, and it stays correct no matter which path reached Finish.
-        IMoonrakerAPI* api = get_moonraker_api();
-        const bool discovery_succeeded = api != nullptr && !api->hardware().heaters().empty();
-        helix::wizard_apply_hardware_snapshot_decision(config, discovery_succeeded, recorded > 0);
+    // 1c. A run that never reached Klipper had empty pickers and recorded
+    // nothing. Committing that emptiness as the final snapshot makes the
+    // first boot where Klipper does come up flag every fan, filament sensor
+    // and LED as new (#1160). Record the debt instead; the first successful
+    // discovery pays it and offers the skipped hardware steps.
+    //
+    // Stays correct no matter which path reached Finish.
+    const bool discovery_succeeded = wizard_discovery_succeeded(get_moonraker_api());
+    helix::wizard_apply_hardware_snapshot_decision(config, discovery_succeeded, recorded > 0);
 
-        if (!config->save()) {
-            NOTIFY_ERROR(lv_tr("Failed to save setup completion"));
-        }
-    } else {
-        LOG_ERROR_INTERNAL("[Wizard] Failed to get config instance to mark wizard complete");
+    if (!config->save()) {
+        NOTIFY_ERROR(lv_tr("Failed to save setup completion"));
     }
 
     // 2-5. Shared container teardown (cleanup screen, hide keyboard, delete
@@ -980,20 +1094,11 @@ void ui_wizard_complete() {
     dismiss_wizard_container();
 
     // 6. Schedule deferred runout check - modal may need to show after wizard
-    lv_timer_create(
-        [](lv_timer_t* timer) {
-            auto& fsm = helix::FilamentSensorManager::instance();
-            if (fsm.has_real_runout() && get_runtime_config()->should_show_runout_modal()) {
-                spdlog::debug("[Wizard] Deferred runout check - triggering modal");
-                get_global_home_panel().trigger_idle_runout_check();
-            }
-            lv_timer_delete(timer);
-        },
-        500, nullptr); // 500ms delay for UI to stabilize
+    g_completion_timers.arm_runout_check(); // 500ms delay for UI to stabilize
 
     // 7. Trigger re-discovery through Application's pre-registered callbacks.
     // Discovery callbacks (set_hardware, init_fans, hardware validation, plugin detection,
-    // etc.) were registered in Application::init_moonraker() via setup_discovery_callbacks().
+    // etc.) were registered in PrinterSession::init_moonraker() via setup_discovery_callbacks().
     IMoonrakerClient* client = get_moonraker_client();
     if (client && client->get_connection_state() == ConnectionState::CONNECTED) {
         client->discover_printer([]() { spdlog::info("[Wizard] Post-wizard discovery complete"); });
@@ -1008,16 +1113,10 @@ void ui_wizard_complete() {
     // Defer navigation to Home panel — discovery callbacks queue deferred subject updates
     // via ui_queue_update() that can override panel state. A short timer ensures we
     // navigate AFTER those queued updates have been processed.
-    lv_timer_create(
-        [](lv_timer_t* timer) {
-            spdlog::info("[Wizard] Deferred navigation to Home panel");
-            NavigationManager::instance().set_active(PanelId::Home);
-            lv_timer_delete(timer);
-        },
-        100, nullptr);
+    g_completion_timers.arm_home_navigation();
 
     // Show success toast when adding a subsequent printer
-    if (config && config->get_printer_ids().size() > 1) {
+    if (config->get_printer_ids().size() > 1) {
         NOTIFY_SUCCESS(lv_tr("New printer successfully added"));
     }
 

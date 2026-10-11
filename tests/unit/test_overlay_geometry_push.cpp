@@ -3,7 +3,7 @@
 
 /**
  * @file test_overlay_geometry_push.cpp
- * @brief Portrait overlays are top-anchored and stop above the nav bar
+ * @brief Portrait overlays are top-anchored, stop above the nav bar, and slide on X
  *
  * The pure formula is covered by test_overlay_height_portrait.cpp. This file
  * covers the wiring: ui_set_overlay_geometry() writing height and alignment
@@ -18,6 +18,8 @@
 #include "ui_update_queue.h"
 
 #include "../lvgl_test_fixture.h"
+#include "../test_helpers/navigation_manager_test_access.h"
+#include "display_settings_manager.h"
 #include "layout_manager.h"
 #include "lvgl/lvgl.h"
 #include "panel_lifecycle.h"
@@ -36,7 +38,7 @@ class FakeOverlay : public IPanelLifecycle {
     explicit FakeOverlay(const char* name, bool destination = false)
         : name_(name), destination_(destination) {}
     void on_activate() override {}
-    void on_deactivate() override {}
+    void on_deactivate(DeactivateReason) override {}
     const char* get_name() const override {
         return name_;
     }
@@ -102,10 +104,42 @@ TEST_CASE("Portrait geometry stops the overlay above the nav bar",
     const auto h = compute_overlay_heights(480, 800, NAV_HEIGHT, GAP);
     const auto w = compute_overlay_widths(480, 800, 54, GAP);
 
-    // Full width, short height, top-anchored — the three properties that
-    // together make the overlay drop from the top and leave the nav bar visible.
+    // Full width, short height, top-anchored: together they leave the nav bar
+    // visible below the overlay.
     CHECK(w.destination == 480);
     CHECK(h.destination == 688);
     CHECK(h.transient == 672);
     CHECK(is_portrait_layout(detect_layout_type(480, 800)));
+}
+
+TEST_CASE_METHOD(OverlayGeometryFixture, "Portrait overlays slide in and out on the X axis",
+                 "[navigation][overlay-geometry][portrait]") {
+    // The display is restored to landscape by the next fixture's reclaim_display().
+    lv_display_set_resolution(lv_display_get_default(), 480, 800);
+    REQUIRE(is_portrait_layout(detect_layout_type(lv_obj_get_width(lv_screen_active()),
+                                                  lv_obj_get_height(lv_screen_active()))));
+
+    auto& settings = DisplaySettingsManager::instance();
+    const bool animations_were_enabled = settings.get_animations_enabled();
+    settings.set_animations_enabled(true);
+
+    lv_obj_t* w = lv_obj_create(lv_screen_active());
+    lv_obj_set_size(w, 480, 688);
+    lv_obj_set_align(w, LV_ALIGN_TOP_MID);
+    lv_obj_update_layout(w);
+
+    auto& nav = NavigationManager::instance();
+    NavigationManagerTestAccess::animate_slide_in(nav, w);
+    CHECK(lv_obj_get_style_translate_x(w, LV_PART_MAIN) == 480);
+    CHECK(lv_obj_get_style_translate_y(w, LV_PART_MAIN) == 0);
+
+    process_lvgl(500);
+    CHECK(lv_obj_get_style_translate_x(w, LV_PART_MAIN) == 0);
+
+    NavigationManagerTestAccess::animate_slide_out(nav, w);
+    process_lvgl(100);
+    CHECK(lv_obj_get_style_translate_x(w, LV_PART_MAIN) > 0);
+    CHECK(lv_obj_get_style_translate_y(w, LV_PART_MAIN) == 0);
+
+    settings.set_animations_enabled(animations_were_enabled);
 }

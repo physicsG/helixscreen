@@ -5,8 +5,11 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstddef>
 #include <optional>
+#include <string>
 #include <string_view>
+#include <vector>
 
 /**
  * @file klipper_extruder_naming.h
@@ -85,6 +88,25 @@ namespace helix {
  */
 [[nodiscard]] inline bool is_extruder_name(std::string_view name) {
     return tool_number_for_extruder(name).has_value();
+}
+
+/**
+ * @brief How many of @p names are Klipper extruder object names.
+ *
+ * The one spelling of "how many tools does this printer have" that every
+ * counting site (printer detection's tool_count heuristic, discovery's
+ * synthesized tool names, telemetry's session and hardware-profile events)
+ * must share, so their counts cannot drift apart. It is is_extruder_name() applied per element: a
+ * tool count counts tools, so an `extruder`-prefixed name that is not a numbered extruder
+ * (extruder_mixing, extruder_stepper) does not inflate it.
+ *
+ * @param names Object names, e.g. a PrinterDiscovery heaters list
+ * @return Number of elements that are extruder object names
+ */
+[[nodiscard]] inline std::size_t count_extruder_names(const std::vector<std::string>& names) {
+    return static_cast<std::size_t>(
+        std::count_if(names.begin(), names.end(),
+                      [](const std::string& name) { return is_extruder_name(name); }));
 }
 
 } // namespace helix

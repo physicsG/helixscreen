@@ -36,7 +36,7 @@ The bed mesh rendering system is a **complete 3D graphics pipeline** implemented
 
 1. **Software-only rendering:** No GPU dependencies (works on framebuffer displays)
 2. **Reactive data binding:** Mesh updates trigger automatic re-rendering
-3. **Touch interactivity:** Drag to rotate, pinch to zoom (future)
+3. **Touch interactivity:** Drag to rotate; pinch to zoom and two-finger drag to pan (screen-space magnify, see Projection)
 4. **Declarative XML:** UI layout separate from rendering logic
 
 ---
@@ -57,7 +57,7 @@ The bed mesh rendering system is a **complete 3D graphics pipeline** implemented
 │   ui_bed_mesh.cpp (443 lines)              │
 │   - LVGL widget wrapper                    │
 │   - Touch event handling (drag rotation)   │
-│   - DRAW_POST callback integration         │
+│   - DRAW_POST: blit frame, draw text       │
 └────────────────┬────────────────────────────┘
                  │
 ┌────────────────▼────────────────────────────┐
@@ -68,6 +68,26 @@ The bed mesh rendering system is a **complete 3D graphics pipeline** implemented
 │   - Overlay rendering (grid, axes, labels) │
 └─────────────────────────────────────────────┘
 ```
+
+### One Render Path: Off-Screen Frames
+
+Every view, the 3D surface and the 2D heatmap alike, is rendered by
+`src/rendering/bed_mesh_renderer.cpp#bed_mesh_renderer_render_to_buffer` into a
+`helix::mesh::PixelBuffer` on `BedMeshRenderThread`. That function makes no LVGL calls.
+Two buffers exist while rendering is on; they move between the render thread and the
+widget by pointer swap (`BedMeshRenderThread::acquire_frame`), so a draw with no new frame
+copies nothing. `src/ui/ui_bed_mesh.cpp#bed_mesh_draw_cb` blits the newest frame with
+`lv_draw_image()`, then draws what needs LVGL's font engine on the main thread, holding
+the render mutex: axis letters and tick labels in 3D (`render_axis_labels`,
+`render_numeric_axis_ticks`), the border, touched-cell highlight and Z tooltip in 2D
+(`render_heatmap_overlay`). The panel turns rendering off while hidden
+(`ui_bed_mesh_set_async_mode(false)`), which frees both buffers; with rendering off the
+widget draws nothing.
+
+The reference-grid extent (bed bounds once `bed_mesh_renderer_set_bounds` has run, the mesh
+index grid otherwise) and the wall floor/ceiling come from one function,
+`src/rendering/bed_mesh_overlays.cpp#compute_bed_extent`, shared by the FOV fit, the grids
+and the labels, so labels cannot drift off the walls.
 
 ### Coordinate Space Transformations
 
@@ -183,7 +203,7 @@ struct bed_mesh_quad_3d_t {
    │ e) Render overlays (grid, axes, labels) │ ← 0.5-1ms (1-7%)
    └─────────────────────────────────────────┘
 
-5. Output to LVGL Layer (DRAW_POST callback)
+5. Output to a PixelBuffer, blitted by the widget's DRAW_POST callback
 ```
 
 ### Detailed Pipeline Stages
@@ -237,9 +257,9 @@ renderer->quads.reserve(expected_quads);  // Avoids ~9 reallocations
 4. Translate camera back
    final_z += BED_MESH_CAMERA_DISTANCE
 
-5. Perspective projection (similar triangles)
-   screen_x = (final_x * fov_scale) / final_z
-   screen_y = (final_y * fov_scale) / final_z
+5. Perspective projection (similar triangles), then the two-finger magnify
+   screen_x = ((final_x * fov_scale) / final_z) * zoom + pan_x
+   screen_y = ((final_y * fov_scale) / final_z) * zoom + pan_y
 
 6. Convert to pixel coordinates (centered in canvas)
    pixel_x = canvas_width/2 + screen_x + center_offset_x
@@ -247,6 +267,17 @@ renderer->quads.reserve(expected_quads);  // Avoids ~9 reallocations
 
 7. Cache results in quad.screen_x[], quad.screen_y[], quad.depths[]
 ```
+
+**Two-finger zoom and pan** apply in screen space, after the perspective divide
+(`view_state.zoom` / `pan_x` / `pan_y`;
+`src/rendering/bed_mesh_projection.cpp#bed_mesh_projection_zoom_at` and
+`src/rendering/bed_mesh_projection.cpp#bed_mesh_projection_pan`, driven by
+`src/rendering/bed_mesh_renderer.cpp#bed_mesh_renderer_apply_two_finger`).
+Zoom is clamped to `BED_MESH_ZOOM_MIN`..`BED_MESH_ZOOM_MAX` (1.0-8.0); pan is a no-op at
+the minimum, and reaching it resets pan to zero, so pinching fully out returns the fitted
+view. `bed_mesh_renderer_set_bounds` and `bed_mesh_renderer_set_render_mode` also reset
+zoom and pan via `bed_mesh_projection_reset_zoom` - bounds first, because the auto-fit
+that follows projects through the zoomed function.
 
 **Optimization:** Cache trigonometric values (computed once per frame)
 ```cpp
@@ -276,7 +307,7 @@ std::sort(quads.begin(), quads.end(), [](const quad& a, const quad& b) {
 
 #### Stage 4: Rasterization (Every Frame) **[BOTTLENECK]**
 
-**Function:** `render_quad()` → `fill_triangle_gradient()`
+**Function:** `render_quad_to_buffer()` → `PixelBuffer::fill_triangle_gradient()`
 **Frequency:** Every frame, for each quad (722 triangles for 20×20 mesh)
 **Complexity:** O(triangles × scanlines × gradient_segments)
 
@@ -325,7 +356,8 @@ for (int seg = 0; seg < 6; seg++) {
 
 #### Stage 5: Overlay Rendering (Every Frame)
 
-**Functions:** `render_grid_lines()`, `render_axis_labels()`, `render_numeric_axis_ticks()`
+**Functions:** `render_grid_lines()` (into the buffer), `render_axis_labels()` and
+`render_numeric_axis_ticks()` (LVGL, main thread)
 **Frequency:** Every frame
 **Complexity:** O(rows × cols) for grid lines
 

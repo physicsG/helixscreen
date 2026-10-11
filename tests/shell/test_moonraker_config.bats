@@ -497,6 +497,120 @@ NET_DEPLOY_NO_ASSET='class NetDeploy(AppDeploy):
 }
 
 # =============================================================================
+# update channel in the stanza
+# =============================================================================
+
+@test "add_update_manager_section: stanza channel follows R2_CHANNEL=beta" {
+    local conf
+    conf=$(setup_moonraker_home)
+    create_moonraker_conf "$conf"
+    R2_CHANNEL=beta
+
+    add_update_manager_section "$conf"
+
+    awk '/^\[update_manager helixscreen\]/{found=1; next} found && /^\[/{exit} found && /^channel:/{print; exit}' \
+        "$conf" | grep -qx 'channel: beta'
+}
+
+@test "add_update_manager_section: dev channel maps to beta in the stanza" {
+    local conf
+    conf=$(setup_moonraker_home)
+    create_moonraker_conf "$conf"
+    R2_CHANNEL=dev
+
+    add_update_manager_section "$conf"
+
+    awk '/^\[update_manager helixscreen\]/{found=1; next} found && /^\[/{exit} found && /^channel:/{print; exit}' \
+        "$conf" | grep -qx 'channel: beta'
+}
+
+@test "add_update_manager_section: stanza defaults to stable with no R2_CHANNEL" {
+    local conf
+    conf=$(setup_moonraker_home)
+    create_moonraker_conf "$conf"
+    unset R2_CHANNEL
+
+    add_update_manager_section "$conf"
+
+    awk '/^\[update_manager helixscreen\]/{found=1; next} found && /^\[/{exit} found && /^channel:/{print; exit}' \
+        "$conf" | grep -qx 'channel: stable'
+}
+
+@test "sync_update_manager_channel rewrites a stale channel line" {
+    local conf
+    conf=$(setup_moonraker_home)
+    create_moonraker_conf_with_helix "$conf"
+    R2_CHANNEL=beta
+
+    sync_update_manager_channel "$conf"
+
+    awk '/^\[update_manager helixscreen\]/{found=1; next} found && /^\[/{exit} found && /^channel:/{print; exit}' \
+        "$conf" | grep -qx 'channel: beta'
+    # The mainsail stanza's channel line is not ours to touch.
+    awk '/^\[update_manager mainsail\]/{found=1; next} found && /^\[/{exit} found && /^channel:/{print; exit}' \
+        "$conf" | grep -qx 'channel: stable'
+}
+
+@test "sync_update_manager_channel is a no-op when the channel already matches" {
+    local conf
+    conf=$(setup_moonraker_home)
+    create_moonraker_conf_with_helix "$conf"
+    unset R2_CHANNEL
+
+    sync_update_manager_channel "$conf"
+
+    refute [ -f "${conf}.bak.helixscreen" ]
+    grep -qx 'channel: stable' "$conf"
+}
+
+@test "configure_moonraker_updates syncs an existing stanza to the resolved channel" {
+    local conf
+    conf=$(setup_moonraker_home)
+    create_moonraker_conf_with_helix "$conf"
+    MOONRAKER_CONF_PATHS="$conf"
+    rm -f "$INSTALL_DIR/bin/helix-screen"
+    R2_CHANNEL=beta
+
+    configure_moonraker_updates "pi"
+
+    awk '/^\[update_manager helixscreen\]/{found=1; next} found && /^\[/{exit} found && /^channel:/{print; exit}' \
+        "$conf" | grep -qx 'channel: beta'
+}
+
+@test "configure_moonraker_updates restarts Moonraker when it rewrites the stanza's channel" {
+    local conf restarted="$BATS_TEST_TMPDIR/restarted"
+    conf=$(setup_moonraker_home)
+    create_moonraker_conf_with_helix "$conf"
+    MOONRAKER_CONF_PATHS="$conf"
+    rm -f "$INSTALL_DIR/bin/helix-screen"
+    awk -v d="$INSTALL_DIR" '/^path:/ { print "path: " d; next } { print }' "$conf" > "$conf.new"
+    mv "$conf.new" "$conf"
+    restart_moonraker() { touch "$restarted"; }
+    R2_CHANNEL=beta
+
+    configure_moonraker_updates "pi"
+
+    [ -f "$restarted" ]
+}
+
+@test "configure_moonraker_updates leaves Moonraker running when the stanza already matches" {
+    local conf restarted="$BATS_TEST_TMPDIR/restarted"
+    conf=$(setup_moonraker_home)
+    create_moonraker_conf_with_helix "$conf"
+    MOONRAKER_CONF_PATHS="$conf"
+    rm -f "$INSTALL_DIR/bin/helix-screen"
+    awk -v d="$INSTALL_DIR" '/^path:/ { print "path: " d; next } { print }' "$conf" > "$conf.new"
+    mv "$conf.new" "$conf"
+    restart_moonraker() { touch "$restarted"; }
+    R2_CHANNEL=stable
+
+    configure_moonraker_updates "pi"
+
+    grep -qx 'channel: stable' "$conf"
+    [ ! -e "$restarted" ]
+}
+
+# =============================================================================
 # migrate_to_web_type
 # =============================================================================
 
@@ -1460,13 +1574,15 @@ CONF
     conf=$(setup_moonraker_home)
     create_moonraker_conf "$conf"
     # Add section WITHOUT persistent_files (already clean — nothing to remove)
-    cat >> "$conf" << 'CONF'
+    # path: has to name INSTALL_DIR, or the drift rewrite fires and this stops
+    # being a no-op for a reason that has nothing to do with persistent_files.
+    cat >> "$conf" << CONF
 
 [update_manager helixscreen]
 type: web
 channel: stable
 repo: prestonbrown/helixscreen
-path: /usr/data/helixscreen
+path: ${INSTALL_DIR}
 CONF
     MOONRAKER_CONF_PATHS="$conf"
     rm -f "$INSTALL_DIR/bin/helix-screen"

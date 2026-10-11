@@ -17,6 +17,8 @@
 #include "ams_types.h"
 #include "filament_database.h"
 #include "filament_variants.h"
+#include "test_helpers/afc_test_access.h"
+#include "test_helpers/happy_hare_test_access.h"
 
 #include <algorithm>
 
@@ -396,7 +398,7 @@ TEST_CASE("Backup eligibility separates a grade change from a material mismatch"
     auto set_material = [&backend](int slot, const char* material) {
         SlotInfo info = backend.get_slot_info(slot);
         info.material = material;
-        REQUIRE(backend.set_slot_info(slot, info, false));
+        REQUIRE(backend.sync_external_identity(slot, info));
     };
 
     set_material(0, "PLA");
@@ -435,7 +437,7 @@ TEST_CASE("Backup eligibility separates a grade change from a material mismatch"
 
     SECTION("a decorated product name is not a free pass") {
         // are_materials_compatible() would call this pair compatible, because
-        // "PLA SnapSpeed" is not a row in MATERIALS[].
+        // "PLA SnapSpeed" is not a row in the material-type table.
         set_material(0, "PLA SnapSpeed");
         CHECK(backend.endless_spool_backup_eligibility(0, 3) == BackupEligibility::Incompatible);
         CHECK(backend.endless_spool_backup_eligibility(0, 1) == BackupEligibility::Eligible);
@@ -447,6 +449,8 @@ TEST_CASE("Backup eligibility separates a grade change from a material mismatch"
 // =============================================================================
 // AFC - PerSlot, always enabled, SET_RUNOUT transport
 // =============================================================================
+
+namespace helix {
 
 class AmsBackendAfcEndlessSpoolHelper : public AmsBackendAfc {
   public:
@@ -476,7 +480,7 @@ class AmsBackendAfcEndlessSpoolHelper : public AmsBackendAfc {
         }
 
         system_info_.units.push_back(unit);
-        slots_.initialize("AFC Test Unit", names);
+        AfcTestAccess::slots(*this).initialize("AFC Test Unit", names);
     }
 
     // G-code capture for verification
@@ -498,6 +502,7 @@ class AmsBackendAfcEndlessSpoolHelper : public AmsBackendAfc {
         captured_gcodes.clear();
     }
 };
+} // namespace helix
 
 TEST_CASE("AFC endless spool - per-slot, always on", "[ams][endless_spool][afc]") {
     AmsBackendAfcEndlessSpoolHelper helper;
@@ -569,6 +574,8 @@ TEST_CASE("AFC endless spool - per-slot, always on", "[ams][endless_spool][afc]"
 // Happy Hare - Group editing, gated on the ENABLE bit
 // =============================================================================
 
+namespace helix {
+
 class AmsBackendHappyHareEndlessSpoolHelper : public AmsBackendHappyHare {
   public:
     AmsBackendHappyHareEndlessSpoolHelper() : AmsBackendHappyHare(nullptr, nullptr) {}
@@ -603,9 +610,9 @@ class AmsBackendHappyHareEndlessSpoolHelper : public AmsBackendHappyHare {
         for (int i = 0; i < count; ++i) {
             slot_names.push_back(std::to_string(i));
         }
-        slots_.initialize("MMU", slot_names);
+        HappyHareTestAccess::slots(*this).initialize("MMU", slot_names);
         for (int i = 0; i < count; ++i) {
-            auto* entry = slots_.get_mut(i);
+            auto* entry = HappyHareTestAccess::slots(*this).get_mut(i);
             if (entry) {
                 entry->info.status = SlotStatus::AVAILABLE;
                 entry->info.endless_spool_group = -1;
@@ -616,7 +623,7 @@ class AmsBackendHappyHareEndlessSpoolHelper : public AmsBackendHappyHare {
     void set_endless_spool_groups(const std::vector<int>& groups) {
         // Simulate data from printer.mmu.endless_spool_groups via registry
         for (size_t i = 0; i < groups.size(); ++i) {
-            auto* entry = slots_.get_mut(static_cast<int>(i));
+            auto* entry = HappyHareTestAccess::slots(*this).get_mut(static_cast<int>(i));
             if (entry) {
                 entry->info.endless_spool_group = groups[i];
             }
@@ -647,6 +654,7 @@ class AmsBackendHappyHareEndlessSpoolHelper : public AmsBackendHappyHare {
                captured_gcodes.end();
     }
 };
+} // namespace helix
 
 TEST_CASE("Happy Hare endless spool - group editing", "[ams][endless_spool][happy_hare]") {
     AmsBackendHappyHareEndlessSpoolHelper helper;

@@ -72,8 +72,8 @@
         style_bg_color="#card_bg" style_pad_all="0" style_border_width="0" scrollable="false" flex_flow="column">
     <!-- Header Bar with CALIBRATE action button -->
     <header_bar name="overlay_header"
-                title="Bed Mesh" title_tag="Bed Mesh" action_button_text="Probe" action_button_text_tag="Probe"
-                action_button_height="#button_height" action_button_pad="#space_md" hide_action_button="false"
+                title="Bed Mesh" action_button_text="Probe" action_button_height="#button_height"
+                action_button_pad="#space_md" hide_action_button="false"
                 action_button_callback="on_bed_mesh_calibrate_clicked"
                 action_button_disabled_cond="nav_buttons_enabled eq 0"/>
     <!-- Content Area: landscape is a row (canvas left, cards in a fixed-width

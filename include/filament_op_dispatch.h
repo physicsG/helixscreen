@@ -85,6 +85,12 @@ struct BackendCaps {
     /// backend that simply does not need a slot, and the two want opposite
     /// treatment when the user has named a specific lane.
     bool bypass_active = false;
+    /// AmsBackend::toolhead_filament_unaccounted(), flattened with
+    /// value_or(false): a backend that cannot tell (nullopt) is treated like
+    /// one that says no. True means filament sits at the toolhead that no lane
+    /// claims, which is what makes the active-head sentinel a resolvable
+    /// unload target.
+    bool toolhead_unaccounted = false;
 };
 
 /**
@@ -213,6 +219,14 @@ struct BackendCaps {
 /// physical target rather than "nothing resolved".
 inline constexpr int EXTERNAL_SPOOL_SLOT = -2;
 
+/// Slot sentinel meaning "the active head: whatever the firmware has at the
+/// nozzle", reached when no lane resolved (current_slot is -1). The sidebar's
+/// own Unload button and the Filament panel's Unload with no resolvable slot
+/// both target it, and every backend's unload_filament(-1) resolves the real
+/// channel from firmware. It names a real target only while the backend
+/// reports the toolhead unaccounted (see BackendCaps::toolhead_unaccounted).
+inline constexpr int ACTIVE_HEAD_SLOT = -1;
+
 /**
  * @brief Is there anything at `slot` worth unloading?
  *
@@ -239,15 +253,24 @@ inline constexpr int EXTERNAL_SPOOL_SLOT = -2;
  * @param target_slot         Lane index, or EXTERNAL_SPOOL_SLOT for bypass.
  * @param any_filament_loaded AmsSystemInfo::filament_loaded — the toolhead-wide
  *                            answer, consulted for the bypass target only.
+ * @param toolhead_unaccounted AmsBackend::toolhead_filament_unaccounted(),
+ *                            flattened with value_or(false). Consulted for the
+ *                            active-head sentinel only: with no lane to ask
+ *                            about, it is the whole question there.
  */
 [[nodiscard]] inline bool unload_target_is_loaded(int target_slot, bool slot_actively_loaded,
                                                   bool slot_filament_at_toolhead,
-                                                  bool is_current_slot, bool any_filament_loaded) {
+                                                  bool is_current_slot, bool any_filament_loaded,
+                                                  bool toolhead_unaccounted = false) {
     if (target_slot == EXTERNAL_SPOOL_SLOT) {
         return any_filament_loaded;
     }
     if (target_slot < 0) {
-        return false;
+        // The active head is the one negative slot besides the bypass sentinel
+        // that can name a real target: filament is at the toolhead and no lane
+        // claims it, so the per-lane arms below have nothing to consult and the
+        // backend's unaccounted answer decides on its own.
+        return target_slot == ACTIVE_HEAD_SLOT && toolhead_unaccounted;
     }
     return slot_actively_loaded || slot_filament_at_toolhead || is_current_slot;
 }
@@ -293,10 +316,14 @@ inline constexpr int EXTERNAL_SPOOL_SLOT = -2;
         // EXTERNAL_SPOOL_SLOT is a target, not an absence: the backends all
         // handle it (CFS ignores the slot and runs its unload script, AFC
         // resolves the lane name to "" and sends a bare TOOL_UNLOAD, Happy Hare
-        // sends MMU_UNLOAD). Every other negative slot still means "nothing
-        // resolved" and must not dispatch against whatever the firmware last
-        // touched.
-        const bool resolvable = target_slot >= 0 || target_slot == EXTERNAL_SPOOL_SLOT;
+        // sends MMU_UNLOAD). ACTIVE_HEAD_SLOT joins it only while the backend
+        // reports the toolhead unaccounted: filament at the nozzle that no
+        // lane claims, so only the backend can resolve the real channel, which
+        // every backend's unload_filament(-1) does. Any other negative slot
+        // still means "nothing resolved" and must not dispatch against whatever
+        // the firmware last touched.
+        const bool resolvable = target_slot >= 0 || target_slot == EXTERNAL_SPOOL_SLOT ||
+                                (target_slot == ACTIVE_HEAD_SLOT && caps.toolhead_unaccounted);
         if (!resolvable || !target_is_loaded) {
             return {FilamentTier::Refused, FilamentRefusal::NothingLoaded, AmsCall::None, -1};
         }

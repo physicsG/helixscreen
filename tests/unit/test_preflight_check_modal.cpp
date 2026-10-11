@@ -10,6 +10,7 @@
 #include "preflight_validator.h"
 
 #include <memory>
+#include <string>
 
 // LVGLUITestFixture registers ALL XML components (via
 // helix::register_xml_components()), including preflight_check_modal.xml and
@@ -96,6 +97,93 @@ TEST_CASE_METHOD(LVGLUITestFixture, "PreflightCheckModal renders one visible row
     process_lvgl(50);
 }
 
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "PreflightCheckModal explanation names the tool and slot as labels, not numbers",
+                 "[preflight][modal][ui]") {
+    SECTION("no lane mapped at all (mapped_slot < 0)") {
+        helix::PreflightResult pf;
+        pf.checks = {
+            make_check(2, 0xF5A623, "PETG", -1, false, helix::ToolCheck::Severity::EmptySlot)};
+
+        auto owned = std::make_unique<helix::ui::PreflightCheckModal>();
+        auto* modal = owned.get();
+        modal->set_checks(pf);
+        REQUIRE(Modal::show_owned(std::move(owned), test_screen()));
+        process_lvgl(50);
+
+        lv_obj_t* explain = lv_obj_find_by_name(test_screen(), "preflight_explanation");
+        REQUIRE(explain != nullptr);
+        std::string text = lv_label_get_text(explain);
+        CHECK(text.find("T2") != std::string::npos);
+        CHECK(text.find("Tool 2") == std::string::npos);
+
+        modal->hide();
+        process_lvgl(50);
+    }
+
+    SECTION("mapped to an empty lane (mapped_slot >= 0)") {
+        helix::PreflightResult pf;
+        pf.checks = {
+            make_check(3, 0xF5A623, "PETG", 4, false, helix::ToolCheck::Severity::EmptySlot)};
+
+        auto owned = std::make_unique<helix::ui::PreflightCheckModal>();
+        auto* modal = owned.get();
+        modal->set_checks(pf);
+        REQUIRE(Modal::show_owned(std::move(owned), test_screen()));
+        process_lvgl(50);
+
+        lv_obj_t* explain = lv_obj_find_by_name(test_screen(), "preflight_explanation");
+        REQUIRE(explain != nullptr);
+        std::string text = lv_label_get_text(explain);
+        CHECK(text.find("T3") != std::string::npos);
+        CHECK(text.find("Slot 5") != std::string::npos); // mapped_slot 4 -> "Slot 5"
+        CHECK(text.find("Tool 3") == std::string::npos);
+        CHECK(text.find("tool 3") == std::string::npos);
+
+        modal->hide();
+        process_lvgl(50);
+    }
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "PreflightCheckModal explanation names a multi-unit lane within its own unit",
+                 "[preflight][modal][ui]") {
+    // Box Turtle 1 (global 0-3) + Night Owl (global 4-5): global slot 5 is
+    // Night Owl's second lane, local index 1 - "Night Owl · Lane 2" on every
+    // other surface (mapping chip, remap modal). The explanation must agree,
+    // not spell it "Lane 6" from the global index.
+    auto& ams = helix::AmsState::instance();
+    ams.init_subjects(false);
+    auto owned_backend = std::make_unique<helix::AmsBackendMock>();
+    auto* backend = owned_backend.get();
+    backend->set_operation_delay(0);
+    ams.set_backend(std::move(owned_backend));
+    backend->set_multi_unit_mode(true);
+
+    helix::PreflightResult pf;
+    pf.checks = {
+        make_check(0, 0xF5A623, "PETG", /*slot=*/5, false, helix::ToolCheck::Severity::EmptySlot)};
+
+    auto owned = std::make_unique<helix::ui::PreflightCheckModal>();
+    auto* modal = owned.get();
+    modal->set_checks(pf);
+    REQUIRE(Modal::show_owned(std::move(owned), test_screen()));
+    process_lvgl(50);
+
+    lv_obj_t* explain = lv_obj_find_by_name(test_screen(), "preflight_explanation");
+    REQUIRE(explain != nullptr);
+    std::string text = lv_label_get_text(explain);
+    CHECK(text.find("Night Owl") != std::string::npos);
+    CHECK(text.find("Lane 2") != std::string::npos);
+    CHECK(text.find("Lane 6") == std::string::npos);
+
+    modal->hide();
+    process_lvgl(50);
+    helix::ui::UpdateQueue::instance().drain();
+    ams.clear_backends();
+    ams.deinit_subjects();
+}
+
 // The Remap affordance is offered only when the backend can actually carry out
 // the pick — the declared route AND its readiness. Asking the route alone
 // offered the button on an AD5X before `_IFS_VARS` discovery, where
@@ -109,12 +197,12 @@ namespace {
 
 /// Installs a mock backend into AmsState for the life of the case.
 struct ScopedAmsBackend {
-    AmsBackendMock* backend = nullptr;
+    helix::AmsBackendMock* backend = nullptr;
 
     explicit ScopedAmsBackend(int slot_count) {
-        auto& ams = AmsState::instance();
+        auto& ams = helix::AmsState::instance();
         ams.init_subjects(false);
-        auto owned = std::make_unique<AmsBackendMock>(slot_count);
+        auto owned = std::make_unique<helix::AmsBackendMock>(slot_count);
         backend = owned.get();
         backend->set_operation_delay(0);
         ams.set_backend(std::move(owned));
@@ -125,7 +213,7 @@ struct ScopedAmsBackend {
         if (backend) {
             backend->stop();
         }
-        auto& ams = AmsState::instance();
+        auto& ams = helix::AmsState::instance();
         ams.clear_backends();
         ams.deinit_subjects();
     }
@@ -171,7 +259,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
 
     SECTION("a backend with no route at all is not") {
         ScopedAmsBackend ams(4);
-        ams.backend->set_remap_strategy(AmsBackend::RemapStrategy::None);
+        ams.backend->set_remap_strategy(helix::AmsBackend::RemapStrategy::None);
         REQUIRE_FALSE(helix::printer::can_remap(*ams.backend));
         CHECK_FALSE(remap_button_offered(test_screen(), pump));
     }
@@ -181,7 +269,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
         // firmware object it writes through has not been discovered.
         ScopedAmsBackend ams(4);
         ams.backend->set_remap_ready(false);
-        REQUIRE(ams.backend->get_remap_strategy() != AmsBackend::RemapStrategy::None);
+        REQUIRE(ams.backend->get_remap_strategy() != helix::AmsBackend::RemapStrategy::None);
         REQUIRE_FALSE(helix::printer::can_remap(*ams.backend));
         CHECK_FALSE(remap_button_offered(test_screen(), pump));
     }

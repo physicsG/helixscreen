@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "http_executor.h"
 
+#include "helix_thread.h"
+
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -25,6 +27,9 @@ HttpExecutor::~HttpExecutor() {
 }
 
 void HttpExecutor::start() {
+#if defined(ESP_PLATFORM)
+    return;
+#endif
     if (running_) {
         return;
     }
@@ -41,7 +46,7 @@ void HttpExecutor::start() {
         auto state = std::atomic_load(&state_); // shared_ptr copy for the thread to hold
         auto name = name_;
         auto* owner = this;
-        w->thread = std::thread([state, w, owner, name, i]() {
+        w->thread = helix::make_thread([state, w, owner, name, i]() {
             loop(state, owner, name, i);
             // Safe even if stop() has already cleared `workers_`: `w` is a
             // captured shared_ptr, so the Worker object lives until the
@@ -149,7 +154,30 @@ void HttpExecutor::loop(std::shared_ptr<SharedState> state, HttpExecutor* owner,
     tls_current_executor_ = owner;
     spdlog::debug("[HttpExecutor:{}] worker {} started", name, worker_index);
 
+    // Scope-guard the decrement so a throwing item still releases its inflight
+    // slot — wait_idle (and anyone else polling inflight()) must never see a
+    // stuck counter because a job threw.
+    //
+    // Release, paired with the acquire in inflight(): a caller that waits for
+    // the count to reach 0 and then reads what the item produced needs a
+    // happens-before edge to that item's writes. Under relaxed there is none,
+    // and the read is a data race that can also simply see the old value.
+    //
+    // Armed only once an item is actually dequeued, because it is declared
+    // ahead of the item and so outlives it: zero has to mean the item is fully
+    // gone, captures and promise included, not merely finished running. A
+    // teardown sequenced on inflight() reaching zero would otherwise be racing
+    // the destruction of objects those captures still hold.
+    struct InflightGuard {
+        std::atomic<std::size_t>* c = nullptr;
+        ~InflightGuard() {
+            if (c)
+                c->fetch_sub(1, std::memory_order_release);
+        }
+    };
+
     while (true) {
+        InflightGuard guard;
         std::pair<HttpWork, std::promise<void>> item;
         {
             std::unique_lock<std::mutex> lk(state->mu);
@@ -162,23 +190,9 @@ void HttpExecutor::loop(std::shared_ptr<SharedState> state, HttpExecutor* owner,
             item = std::move(state->queue.front());
             state->queue.pop_front();
         }
+        guard.c = &state->inflight;
 
-        // Scope-guard the decrement so a throwing item still releases its
-        // inflight slot — wait_idle (and anyone else polling inflight())
-        // must never see a stuck counter because a job threw.
-        //
-        // Release, paired with the acquire in inflight(): a caller that waits
-        // for the count to reach 0 and then reads what the item produced needs
-        // a happens-before edge to that item's writes. Under relaxed there is
-        // none, and the read is a data race that can also simply see the old
-        // value.
-        struct InflightGuard {
-            std::atomic<std::size_t>& c;
-            ~InflightGuard() {
-                c.fetch_sub(1, std::memory_order_release);
-            }
-        } guard{state->inflight};
-
+#if defined(__cpp_exceptions)
         try {
             item.first();
             item.second.set_value();
@@ -190,6 +204,10 @@ void HttpExecutor::loop(std::shared_ptr<SharedState> state, HttpExecutor* owner,
                 // Promise already satisfied or no shared state — nothing to do.
             }
         }
+#else
+        item.first();
+        item.second.set_value();
+#endif
     }
 
     // NOTE: `owner` may already be destroyed by the time we reach here if

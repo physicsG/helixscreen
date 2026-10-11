@@ -8,6 +8,8 @@
 #include "app_globals.h"
 #include "http_executor.h"
 #include "i_moonraker_api.h"
+#include "printer_state.h"
+#include "spool_latch_gate.h"
 
 #include <spdlog/spdlog.h>
 
@@ -133,6 +135,15 @@ void PrinterRecoveryService::recover(SuccessCallback on_success, ErrorCallback o
     if (!api_) {
         spdlog::error("[Recovery] No Moonraker API — cannot recover");
         on_error(MoonrakerError::connection_lost("printer_recovery"));
+        return;
+    }
+    // Refused here, before the chain: a refused firmware_restart would
+    // otherwise escalate to the local script and a service restart, which
+    // release the steppers just the same (prestonbrown/helixscreen#1730).
+    if (get_printer_state().print_state().spool_latch_active()) {
+        spdlog::warn("[Recovery] Refusing firmware restart while spools are on the bed");
+        on_error(
+            MoonrakerError::refusal("printer.firmware_restart", spool_latch_restart_message()));
         return;
     }
 

@@ -37,7 +37,7 @@
             style_pad_right="#space_md" style_pad_top="#space_sm" style_pad_bottom="#space_sm" style_pad_gap="#space_sm"
             scrollable="false">
       <icon src="layers" size="sm" variant="success"/>
-      <text_body text="Profiles" translation_tag="Profiles" flex_grow="1"/>
+      <text_body text="Profiles" flex_grow="1"/>
     </lv_obj>
     <!-- Divider -->
     <divider_horizontal/>
@@ -114,8 +114,7 @@
       <!-- Empty state message (shown when no profiles) -->
       <lv_obj name="no_profiles_message" width="100%" height="content" style_pad_all="#space_md" scrollable="false">
         <bind_flag_if_gt subject="bed_mesh_profile_count" flag="hidden" ref_value="0"/>
-        <text_small width="100%"
-                    text="No profiles available" translation_tag="No profiles available" style_text_align="center"/>
+        <text_small width="100%" text="No profiles available" style_text_align="center"/>
       </lv_obj>
     </lv_obj>
   </view>

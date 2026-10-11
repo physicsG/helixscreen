@@ -459,7 +459,7 @@ TEST_CASE_METHOD(ExcludeObjectTestFixture,
             [this](const MoonrakerError& err) { this->error_callback(err); });
 
         REQUIRE(error_called);
-        REQUIRE(captured_error.message.find("illegal") != std::string::npos);
+        REQUIRE(captured_error.message.find("unsafe characters") != std::string::npos);
     }
 
     SECTION("Error includes method name") {

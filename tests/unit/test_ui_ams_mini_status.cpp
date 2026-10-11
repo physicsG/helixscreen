@@ -6,10 +6,12 @@
  * @brief Tests for the ams_mini_status home dashboard widget (wide spool view)
  */
 
+#include "ui_ams_lane_bar.h"
 #include "ui_ams_mini_status.h"
 #include "ui_update_queue.h"
 
 #include "../lvgl_ui_test_fixture.h"
+#include "../test_helpers/backend_user_edit.h"
 #include "../ui_test_utils.h"
 #include "ams_backend_mock.h"
 #include "ams_state.h"
@@ -40,8 +42,8 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini: set_width applies its width argum
     helix::ui::UpdateQueue::instance().drain();
 
     ui_ams_mini_status_set_slot_count(w, 2);
-    ui_ams_mini_status_set_slot_full(w, 0, 0xFF0000, 70, true, "PLA", 70);
-    ui_ams_mini_status_set_slot_full(w, 1, 0x00FF00, 40, true, "PETG", 40);
+    ui_ams_mini_status_set_slot_label(w, 0, "PLA", 70);
+    ui_ams_mini_status_set_slot_label(w, 1, "PETG", 40);
 
     // Note: set_width does NOT resize the widget object itself (the manager
     // owns the grid cell); width_px is a render hint. The observable effect of
@@ -61,6 +63,13 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini: set_width applies its width argum
     REQUIRE(UITest::find_by_name(w, "ams_spools_container") == spools);
     REQUIRE(lv_obj_has_flag(spools, LV_OBJ_FLAG_HIDDEN));
 
+    // Bar mode renders ams_lane_bar widgets, each bound to its slot.
+    lv_obj_t* bars = UITest::find_by_name(w, "ams_bars_container");
+    REQUIRE(bars != nullptr);
+    lv_obj_t* bar0 = lv_obj_get_child(bars, 0);
+    REQUIRE(bar0 != nullptr);
+    REQUIRE(helix::ui::ams_lane_bar_slot_index(bar0) == 0);
+
     // ...and coming back up shows it again.
     ui_ams_mini_status_set_width(w, 260);
     helix::ui::UpdateQueue::instance().drain();
@@ -78,8 +87,8 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini: width_px >= w_normal() selects sp
     // AmsState and sync_from_ams_state() would otherwise clobber slot_count below.
     helix::ui::UpdateQueue::instance().drain();
     ui_ams_mini_status_set_slot_count(w, 2);
-    ui_ams_mini_status_set_slot_full(w, 0, 0xFF0000, 70, true, "PLA", 70);
-    ui_ams_mini_status_set_slot_full(w, 1, 0x00FF00, 40, true, "PETG", 40);
+    ui_ams_mini_status_set_slot_label(w, 0, "PLA", 70);
+    ui_ams_mini_status_set_slot_label(w, 1, "PETG", 40);
 
     ui_ams_mini_status_set_width(w, 130); // narrow -> bar mode, no spools container
     helix::ui::UpdateQueue::instance().drain();
@@ -100,7 +109,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini spool mode: cell has spool + mater
     lv_obj_t* w = ui_ams_mini_status_create(test_screen(), 60);
     helix::ui::UpdateQueue::instance().drain(); // flush stray auto-sync
     ui_ams_mini_status_set_slot_count(w, 1);
-    ui_ams_mini_status_set_slot_full(w, 0, 0xFF0000, 73, true, "PLA", 73);
+    ui_ams_mini_status_set_slot_label(w, 0, "PLA", 73);
     ui_ams_mini_status_set_width(w, 260);
     helix::ui::UpdateQueue::instance().drain();
     lv_obj_t* mat = UITest::find_by_name(w, "spool_material_0");
@@ -121,7 +130,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini spool mode: unassigned empty slot 
     lv_obj_t* w = ui_ams_mini_status_create(test_screen(), 60);
     helix::ui::UpdateQueue::instance().drain();
     ui_ams_mini_status_set_slot_count(w, 1);
-    ui_ams_mini_status_set_slot_full(w, 0, 0x808080, 0, false, "", -1);
+    ui_ams_mini_status_set_slot_label(w, 0, "", -1);
     ui_ams_mini_status_set_width(w, 260);
     helix::ui::UpdateQueue::instance().drain();
     REQUIRE(std::string(lv_label_get_text(UITest::find_by_name(w, "spool_material_0"))) ==
@@ -137,7 +146,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini spool mode: all slots present incl
     helix::ui::UpdateQueue::instance().drain();
     ui_ams_mini_status_set_slot_count(w, 12); // > MAX_VISIBLE(8): uncapped vector
     for (int i = 0; i < 12; ++i)
-        ui_ams_mini_status_set_slot_full(w, i, 0xFF0000, 50, true, "PLA", 50);
+        ui_ams_mini_status_set_slot_label(w, i, "PLA", 50);
     ui_ams_mini_status_set_width(w, 520);
     helix::ui::UpdateQueue::instance().drain();
     lv_obj_t* spools = UITest::find_by_name(w, "ams_spools_container");
@@ -150,33 +159,33 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini spool mode: all slots present incl
 // Drives the SPOOL view through the REAL canonical data path: a mock backend is
 // installed into AmsState, sync_from_backend() bumps slots_version, the widget's
 // observer fires sync_from_ams_state(), and the spool labels must reflect the
-// backend's material + remaining percent (not external set_slot_full). This is the
+// backend's material + remaining percent (not external set_slot_label). This is the
 // path that guards bar/spool cache divergence on every AmsState event.
 TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini spool mode: sync_from_ams_state feeds spool cells",
                  "[ui][ams_mini][spool][sync]") {
     using namespace helix;
-    auto& ams = AmsState::instance();
+    auto& ams = helix::AmsState::instance();
     ams.init_subjects(false);
 
-    auto mock = std::make_unique<AmsBackendMock>(2);
+    auto mock = std::make_unique<helix::AmsBackendMock>(2);
     auto* mock_ptr = mock.get();
     ams.set_backend(std::move(mock));
     mock_ptr->start();
 
     // Deterministic known data: slot 0 = PETG @ 60%, slot 1 = ABS @ 25%.
-    SlotInfo s0 = mock_ptr->get_slot_info(0);
-    s0.status = SlotStatus::AVAILABLE;
+    helix::SlotInfo s0 = mock_ptr->get_slot_info(0);
+    s0.status = helix::SlotStatus::AVAILABLE;
     s0.material = "PETG";
     s0.total_weight_g = 1000.0f;
     s0.remaining_weight_g = 600.0f; // -> 60%
-    mock_ptr->set_slot_info(0, s0);
+    helix::test::apply_edit(*mock_ptr, 0, s0);
 
-    SlotInfo s1 = mock_ptr->get_slot_info(1);
-    s1.status = SlotStatus::AVAILABLE;
+    helix::SlotInfo s1 = mock_ptr->get_slot_info(1);
+    s1.status = helix::SlotStatus::AVAILABLE;
     s1.material = "ABS";
     s1.total_weight_g = 1000.0f;
     s1.remaining_weight_g = 250.0f; // -> 25%
-    mock_ptr->set_slot_info(1, s1);
+    helix::test::apply_edit(*mock_ptr, 1, s1);
 
     ui_ams_mini_status_init();
     lv_obj_t* w = ui_ams_mini_status_create(test_screen(), 60);
@@ -213,27 +222,27 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini spool mode: sync_from_ams_state fe
 TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini spool mode: active lane badge uses success color",
                  "[ui][ams_mini][spool]") {
     using namespace helix;
-    auto& ams = AmsState::instance();
+    auto& ams = helix::AmsState::instance();
     ams.init_subjects(false);
 
-    auto mock = std::make_unique<AmsBackendMock>(2);
+    auto mock = std::make_unique<helix::AmsBackendMock>(2);
     auto* mock_ptr = mock.get();
     ams.set_backend(std::move(mock));
     mock_ptr->start();
 
     // Mock initializes slot 0 LOADED with current_slot=0 -> lane 0 is the active lane.
-    SlotInfo s0 = mock_ptr->get_slot_info(0);
+    helix::SlotInfo s0 = mock_ptr->get_slot_info(0);
     s0.material = "PETG";
     s0.total_weight_g = 1000.0f;
     s0.remaining_weight_g = 600.0f;
-    mock_ptr->set_slot_info(0, s0);
+    helix::test::apply_edit(*mock_ptr, 0, s0);
 
-    SlotInfo s1 = mock_ptr->get_slot_info(1);
-    s1.status = SlotStatus::AVAILABLE;
+    helix::SlotInfo s1 = mock_ptr->get_slot_info(1);
+    s1.status = helix::SlotStatus::AVAILABLE;
     s1.material = "ABS";
     s1.total_weight_g = 1000.0f;
     s1.remaining_weight_g = 250.0f;
-    mock_ptr->set_slot_info(1, s1);
+    helix::test::apply_edit(*mock_ptr, 1, s1);
 
     ui_ams_mini_status_init();
     lv_obj_t* w = ui_ams_mini_status_create(test_screen(), 60);
@@ -261,14 +270,18 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini spool mode: active lane badge uses
     ams.deinit_subjects();
 }
 
-TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini spool mode: unchanged sync skips cell rebuild",
+// Cells are pooled: created once per lane and updated in place, so a sync that
+// changes only lane DATA keeps the same cell objects (only a lane-count change
+// may recreate). Guards both the churn the pooling exists for and the in-place
+// label update actually landing.
+TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini spool mode: data changes update cells in place",
                  "[ui][ams_mini][spool]") {
     ui_ams_mini_status_init();
     lv_obj_t* w = ui_ams_mini_status_create(test_screen(), 60);
     helix::ui::UpdateQueue::instance().drain();
     ui_ams_mini_status_set_slot_count(w, 2);
-    ui_ams_mini_status_set_slot_full(w, 0, 0xFF0000, 70, true, "PLA", 70);
-    ui_ams_mini_status_set_slot_full(w, 1, 0x00FF00, 40, true, "PETG", 40);
+    ui_ams_mini_status_set_slot_label(w, 0, "PLA", 70);
+    ui_ams_mini_status_set_slot_label(w, 1, "PETG", 40);
     ui_ams_mini_status_set_width(w, 260);
     helix::ui::UpdateQueue::instance().drain();
     lv_obj_t* sc = UITest::find_by_name(w, "ams_spools_container");
@@ -276,17 +289,18 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini spool mode: unchanged sync skips c
     lv_obj_t* cell0_before = UITest::find_by_name(w, "spool_cell_0");
     REQUIRE(cell0_before != nullptr);
 
-    // Re-feed IDENTICAL data + refresh -> should NOT recreate cells.
-    ui_ams_mini_status_set_slot_full(w, 0, 0xFF0000, 70, true, "PLA", 70);
-    ui_ams_mini_status_set_slot_full(w, 1, 0x00FF00, 40, true, "PETG", 40);
+    // Re-feed IDENTICAL data + refresh -> same cell objects.
+    ui_ams_mini_status_set_slot_label(w, 0, "PLA", 70);
+    ui_ams_mini_status_set_slot_label(w, 1, "PETG", 40);
     ui_ams_mini_status_refresh(w);
     helix::ui::UpdateQueue::instance().drain();
     REQUIRE(UITest::find_by_name(w, "spool_cell_0") == cell0_before); // same object => no rebuild
 
-    // Change data -> cells rebuilt (pointer differs or content updates).
-    ui_ams_mini_status_set_slot_full(w, 0, 0x0000FF, 20, true, "ABS", 20);
+    // Change data -> still the same cell, with the new label applied to it.
+    ui_ams_mini_status_set_slot_label(w, 0, "ABS", 20);
     ui_ams_mini_status_refresh(w);
     helix::ui::UpdateQueue::instance().drain();
+    REQUIRE(UITest::find_by_name(w, "spool_cell_0") == cell0_before); // pooled, not recreated
     lv_obj_t* mat0 = UITest::find_by_name(w, "spool_material_0");
     REQUIRE(mat0 != nullptr);
     REQUIRE(std::string(lv_label_get_text(mat0)) == "ABS");
@@ -298,8 +312,8 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini: 2x->1x restores bar view", "[ui][
     lv_obj_t* w = ui_ams_mini_status_create(test_screen(), 60);
     helix::ui::UpdateQueue::instance().drain();
     ui_ams_mini_status_set_slot_count(w, 2);
-    ui_ams_mini_status_set_slot_full(w, 0, 0xFF0000, 70, true, "PLA", 70);
-    ui_ams_mini_status_set_slot_full(w, 1, 0x00FF00, 40, true, "PETG", 40);
+    ui_ams_mini_status_set_slot_label(w, 0, "PLA", 70);
+    ui_ams_mini_status_set_slot_label(w, 1, "PETG", 40);
 
     ui_ams_mini_status_set_width(w, 260); // -> SPOOL (hides bars_container)
     helix::ui::UpdateQueue::instance().drain();
@@ -313,4 +327,191 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini: 2x->1x restores bar view", "[ui][
     REQUIRE(bars != nullptr);
     REQUIRE_FALSE(lv_obj_has_flag(bars, LV_OBJ_FLAG_HIDDEN)); // bars visible again
     lv_obj_delete(w);
+}
+
+// Both observers the widget attaches watch AmsState-owned subjects, and
+// AmsState::deinit_subjects() frees every observer node on them at once. A
+// guard that never learned its subject died stays truthy with a dangling
+// lv_observer_t*, so on_delete()'s reset() removes an observer that no longer
+// exists. The widget is deleted AFTER the owner's teardown here because that is
+// the order a test binary produces: one test tears the singleton down, a later
+// one destroys a widget built before it.
+TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini: observers survive AmsState's subject teardown",
+                 "[ui][ams_mini][teardown][observer]") {
+    struct SubjectOwnerRestore {
+        ~SubjectOwnerRestore() {
+            helix::AmsState::instance().init_subjects(true);
+        }
+    } restore_ams_subjects;
+
+    helix::AmsState::instance().init_subjects(true);
+    REQUIRE(helix::AmsState::instance().get_current_slot_subject() != nullptr);
+
+    ui_ams_mini_status_init();
+    lv_obj_t* w = ui_ams_mini_status_create(test_screen(), 60);
+    REQUIRE(w != nullptr);
+    helix::ui::UpdateQueue::instance().drain();
+
+    helix::AmsState::instance().deinit_subjects();
+
+    lv_obj_delete(w);
+    helix::ui::UpdateQueue::instance().drain();
+
+    SUCCEED("widget teardown completed without walking freed observer nodes");
+}
+
+namespace {
+/// A mock whose slots split into units of the given sizes.
+class UnitSplitMock : public AmsBackendMock {
+  public:
+    explicit UnitSplitMock(int slot_count) : AmsBackendMock(slot_count) {}
+    std::vector<int> unit_sizes;
+
+    [[nodiscard]] AmsSystemInfo get_system_info() const override {
+        AmsSystemInfo info = AmsBackendMock::get_system_info();
+        std::vector<SlotInfo> all;
+        for (const auto& unit : info.units)
+            all.insert(all.end(), unit.slots.begin(), unit.slots.end());
+        info.units.clear();
+        int first = 0;
+        for (size_t u = 0; u < unit_sizes.size(); ++u) {
+            AmsUnit unit;
+            unit.unit_index = static_cast<int>(u);
+            unit.name = "Unit_" + std::to_string(u);
+            unit.slot_count = unit_sizes[u];
+            unit.first_slot_global_index = first;
+            for (int s = 0; s < unit_sizes[u] && first + s < static_cast<int>(all.size()); ++s)
+                unit.slots.push_back(all[first + s]);
+            info.units.push_back(unit);
+            first += unit_sizes[u];
+        }
+        return info;
+    }
+};
+} // namespace
+
+// Bars are pooled across rebuilds while unit rows come and go. A row condemned
+// with bars still inside would free them under the pool's pointers.
+TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini: a condemned unit row keeps its pooled bars",
+                 "[ui][ams_mini]") {
+    auto& ams = AmsState::instance();
+    ams.init_subjects(false);
+    auto mock = std::make_unique<UnitSplitMock>(8);
+    auto* raw = mock.get();
+    raw->unit_sizes = {3, 3, 2};
+    ams.set_backend(std::move(mock));
+    ams.sync_from_backend();
+
+    ui_ams_mini_status_init();
+    lv_obj_t* w = ui_ams_mini_status_create(test_screen(), 60);
+    ui_ams_mini_status_set_width(w, 130);
+    helix::ui::UpdateQueue::instance().drain();
+
+    auto bar_for_slot = [&](int slot) -> lv_obj_t* {
+        lv_obj_t* bars = UITest::find_by_name(w, "ams_bars_container");
+        std::vector<lv_obj_t*> stack{bars};
+        while (!stack.empty()) {
+            lv_obj_t* o = stack.back();
+            stack.pop_back();
+            if (helix::ui::ams_lane_bar_slot_index(o) == slot)
+                return o;
+            for (uint32_t i = 0; i < lv_obj_get_child_count(o); ++i)
+                stack.push_back(lv_obj_get_child(o, static_cast<int32_t>(i)));
+        }
+        return nullptr;
+    };
+    REQUIRE(bar_for_slot(7) != nullptr);
+
+    // Three units -> two: the third unit's row is condemned. Its bars must
+    // survive the deferred delete.
+    raw->unit_sizes = {3, 3};
+    ams.sync_from_backend();
+    ams.bump_slots_version(); // a unit split alone moves no slot field
+    helix::ui::UpdateQueue::instance().drain();
+    process_lvgl(50);
+    lv_obj_t* bar7 = bar_for_slot(7);
+    REQUIRE(bar7 != nullptr);
+    CHECK(lv_obj_has_flag(bar7, LV_OBJ_FLAG_HIDDEN));
+
+    // ...and come back when the unit does.
+    raw->unit_sizes = {3, 3, 2};
+    ams.sync_from_backend();
+    ams.bump_slots_version(); // a unit split alone moves no slot field
+    helix::ui::UpdateQueue::instance().drain();
+    process_lvgl(50);
+    bar7 = bar_for_slot(7);
+    REQUIRE(bar7 != nullptr);
+    CHECK_FALSE(lv_obj_has_flag(bar7, LV_OBJ_FLAG_HIDDEN));
+
+    lv_obj_delete(w);
+    ams.clear_backends();
+    ams.deinit_subjects();
+}
+
+// The widget syncs when it is created, so the frame that first shows it draws
+// its lanes instead of the next frame repainting them in.
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "ams_mini: a widget created with AMS data has its lanes at once",
+                 "[ui][ams_mini][sync]") {
+    auto& ams = helix::AmsState::instance();
+    ams.init_subjects(false);
+    auto mock = std::make_unique<helix::AmsBackendMock>(2);
+    auto* mock_ptr = mock.get();
+    ams.set_backend(std::move(mock));
+    mock_ptr->start();
+    ams.sync_from_backend();
+    helix::ui::UpdateQueue::instance().drain();
+
+    ui_ams_mini_status_init();
+    lv_obj_t* w = ui_ams_mini_status_create(test_screen(), 60);
+    ui_ams_mini_status_set_width(w, 260); // spool mode sizes from width_px, not layout
+
+    CHECK(UITest::find_by_name(w, "spool_material_0") != nullptr);
+    CHECK_FALSE(lv_obj_has_flag(w, LV_OBJ_FLAG_HIDDEN));
+
+    lv_obj_delete(w);
+    mock_ptr->stop();
+    ams.clear_backends();
+    ams.deinit_subjects();
+}
+
+namespace {
+int s_mini_invalidations = 0;
+void count_mini_invalidation(lv_event_t* /*e*/) {
+    ++s_mini_invalidations;
+}
+} // namespace
+
+// Every AmsState event re-syncs the widget; one that reads the same lanes must
+// not rebuild and repaint it.
+TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini: a sync that reads nothing new repaints nothing",
+                 "[ui][ams_mini][sync]") {
+    auto& ams = helix::AmsState::instance();
+    ams.init_subjects(false);
+    auto mock = std::make_unique<helix::AmsBackendMock>(2);
+    auto* mock_ptr = mock.get();
+    ams.set_backend(std::move(mock));
+    mock_ptr->start();
+    ams.sync_from_backend();
+
+    ui_ams_mini_status_init();
+    lv_obj_t* w = ui_ams_mini_status_create(test_screen(), 60);
+    lv_obj_set_width(w, 200); // bar mode, sized by layout
+    lv_obj_update_layout(test_screen());
+    helix::ui::UpdateQueue::instance().drain();
+    lv_refr_now(nullptr);
+
+    lv_display_t* disp = lv_obj_get_display(w);
+    s_mini_invalidations = 0;
+    lv_display_add_event_cb(disp, count_mini_invalidation, LV_EVENT_INVALIDATE_AREA, nullptr);
+    ams.sync_from_backend(); // bumps slots_version with the same lanes
+    helix::ui::UpdateQueue::instance().drain();
+    lv_display_remove_event_cb_with_user_data(disp, count_mini_invalidation, nullptr);
+
+    CHECK(s_mini_invalidations == 0);
+
+    lv_obj_delete(w);
+    mock_ptr->stop();
+    ams.clear_backends();
+    ams.deinit_subjects();
 }

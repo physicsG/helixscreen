@@ -23,12 +23,14 @@
 #include "ui_wizard.h"
 
 #include "../lvgl_ui_test_fixture.h"
+#include "../test_helpers/scoped_runtime_config.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "wizard_step.h"
 
 #include <spdlog/spdlog.h>
 
 #include <cstdlib>
+#include <memory>
 #include <string>
 
 #include "../catch_amalgamated.hpp"
@@ -50,6 +52,20 @@ int env_iterations(int default_count) {
 class WizardStressFixture : public LVGLUITestFixture {
   public:
     WizardStressFixture() {
+        // Step 2 (WiFi) calls get_wifi_manager(), whose backend selection is
+        // should_mock_wifi(). Without test_mode the platform probe on a Linux
+        // host picks a real backend (wpa_supplicant/NetworkManager), which
+        // start_async() hands a worker thread to the process-lifetime
+        // singleton. Real hardware is not what this stress case exercises —
+        // it drives step transitions — and the worker has no join site inside
+        // the case, so the isolation listener counts it as a leaked
+        // hv::EventLoopThread (prestonbrown/helixscreen#1531). The mock keeps
+        // the case hermetic; production lifecycle (backend joined when the
+        // manager is destroyed) is unchanged.
+        scoped_config_ = std::make_unique<ScopedRuntimeConfig>();
+        get_runtime_config()->test_mode = true;
+        get_runtime_config()->use_real_wifi = false;
+
         wizard_ = ui_wizard_create(test_screen());
         if (!wizard_) {
             spdlog::error("[WizardStressFixture] ui_wizard_create returned null");
@@ -97,6 +113,9 @@ class WizardStressFixture : public LVGLUITestFixture {
 
     lv_obj_t* wizard_ = nullptr;
     bool ready_ = false;
+    /// Restores the process-global RuntimeConfig (test_mode/use_real_wifi set
+    /// in the ctor) whatever way the case exits.
+    std::unique_ptr<ScopedRuntimeConfig> scoped_config_;
 };
 
 } // namespace

@@ -81,16 +81,24 @@
 #include "ui_update_queue.h"
 
 #include "../lvgl_ui_test_fixture.h"
+#include "../test_helpers/job_queue_state_test_access.h"
+#include "../test_helpers/job_queue_subjects_fixture.h"
 #include "../test_helpers/panel_widget_size_harness.h"
+#include "../test_helpers/print_state_test_drivers.h"
 #include "../test_helpers/printer_state_test_access.h"
+#include "../test_helpers/scoped_animations_enabled.h"
 #include "../test_helpers/update_queue_test_access.h"
+#include "../ui_test_utils.h"
 #include "app_globals.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "panel_widget_size.h"
 #include "print_lifecycle_state.h"
 #include "printer_state.h"
 #include "src/ui/panel_widgets/print_status_widget.h"
+#include "theme_manager.h"
 #include "tool_state.h"
+
+#include <memory>
 
 #include "../catch_amalgamated.hpp"
 
@@ -280,10 +288,13 @@ TEST_CASE_METHOD(LVGLUITestFixture, "print_status idle detailed filename spans t
 
         // A scrolling long mode is gated on the animations preference, so say so
         // here instead of inheriting whatever value another test left registered.
-        if (lv_subject_t* animations = lv_xml_get_subject(nullptr, "settings_animations_enabled")) {
-            lv_subject_set_int(animations, 1);
-            lv_obj_update_layout(test_screen());
-        }
+        // The guard is what puts it back: the preference is a process-global
+        // subject that the global PrintStatusPanel watches through
+        // observe<int>, and HelixTestFixture restores it AFTER its own drain,
+        // so a value left flipped queues an apply callback nothing runs.
+        ScopedAnimationsEnabled animations(true);
+        REQUIRE(animations.available());
+        lv_obj_update_layout(test_screen());
 
         // Long names must still scroll rather than ellipsize or clip.
         CHECK(lv_label_get_long_mode(filename) == LV_LABEL_LONG_SCROLL_CIRCULAR);
@@ -306,6 +317,9 @@ TEST_CASE_METHOD(LVGLUITestFixture, "print_status column/row card layout follows
     heal_global_print_status_panel_subjects();
     {
         PanelWidgetHarness<PrintStatusWidget> h(test_screen());
+        // The card layout exists only while a print holds the machine.
+        helix::test::set_wire_state(get_printer_state(), PrintJobState::PRINTING);
+        process_lvgl(30);
 
         lv_obj_t* layout = h.child("print_card_layout");
         lv_obj_t* thumb_wrap = h.child("print_card_thumb_wrap");
@@ -360,7 +374,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     ps.init_subjects(false);
     ToolState::instance().init_subjects(false);
     heal_global_print_status_panel_subjects();
-    lv_subject_set_int(ps.get_print_filament_used_subject(), 0);
+    lv_subject_set_int(ps.print_state().get_print_filament_used_subject(), 0);
 
     {
         PanelWidgetHarness<PrintStatusWidget> h(test_screen(),
@@ -370,14 +384,14 @@ TEST_CASE_METHOD(LVGLUITestFixture,
         // doesn't mask a broken predicate later.
         UpdateQueueTestAccess::drain_all(UpdateQueue::instance());
 
+        // The detailed active view exists only while a print holds the machine.
+        helix::test::set_wire_state(ps, PrintJobState::PRINTING);
+        process_lvgl(30);
         lv_obj_t* data_col = h.child("detailed_data_col");
         REQUIRE(data_col != nullptr);
         REQUIRE(lv_obj_get_child_count(data_col) == 3); // layer, time, filament
         lv_obj_t* filament_label = h.child("detailed_filament_text");
         REQUIRE(filament_label != nullptr);
-
-        h.widget().on_print_state_changed_for_test(PrintState::Printing);
-        process_lvgl(30);
         REQUIRE(lv_subject_get_int(PrintStatusWidget::view_subject_for_test()) ==
                 4); // active_detailed
 
@@ -390,7 +404,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
         // Wide band, filament now used: visible. Isolates on_size_changed's
         // half of the gate (:461) — re-run on_size_changed at the SAME
         // pixels so its own recomputation also agrees with the new used_mm.
-        lv_subject_set_int(ps.get_print_filament_used_subject(), 1500);
+        lv_subject_set_int(ps.print_state().get_print_filament_used_subject(), 1500);
         UpdateQueueTestAccess::drain_all(UpdateQueue::instance());
         h.resize(1, 1, w_wide(), 400);
         CHECK(lv_subject_get_int(PrintStatusWidget::show_filament_active_subject_for_test()) == 1);
@@ -411,15 +425,211 @@ TEST_CASE_METHOD(LVGLUITestFixture,
         // Only DetailedFormatter::update_filament_text()'s mirror
         // (:1728-1731) can be responsible for the gate tracking these
         // transitions.
-        lv_subject_set_int(ps.get_print_filament_used_subject(), 0); // e.g. print re-sliced
+        lv_subject_set_int(ps.print_state().get_print_filament_used_subject(),
+                           0); // e.g. print re-sliced
         UpdateQueueTestAccess::drain_all(UpdateQueue::instance());
         CHECK(lv_subject_get_int(PrintStatusWidget::show_filament_active_subject_for_test()) == 0);
         CHECK(lv_obj_has_flag(filament_label, LV_OBJ_FLAG_HIDDEN));
 
-        lv_subject_set_int(ps.get_print_filament_used_subject(), 2000); // extrusion resumes
+        lv_subject_set_int(ps.print_state().get_print_filament_used_subject(),
+                           2000); // extrusion resumes
         UpdateQueueTestAccess::drain_all(UpdateQueue::instance());
         CHECK(lv_subject_get_int(PrintStatusWidget::show_filament_active_subject_for_test()) == 1);
         CHECK_FALSE(lv_obj_has_flag(filament_label, LV_OBJ_FLAG_HIDDEN));
+    }
+    PrintStatusWidget::destroy_formatter_for_test();
+}
+
+// --- Up next row fits inside the active card in BOTH layout variants ---------
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "up next row stays inside the active print card in both layouts",
+                 "[widget_size][print_status][up_next]") {
+    PrintStatusWidget::destroy_formatter_for_test();
+    PrinterStateTestAccess::reset(get_printer_state());
+    get_printer_state().init_subjects(false);
+    ToolState::instance().init_subjects(false);
+    heal_global_print_status_panel_subjects();
+    {
+        // The queue subjects must be live before the component parses, or
+        // up_next_row's bind_flag_if_eq on job_queue_count is dropped at
+        // parse time and the row keeps whatever default the XML gives it.
+        JobQueueState jqs(nullptr, nullptr);
+        ScopedJobQueueSubjects subject_guard; // destroyed AFTER the harness
+        jqs.init_subjects();
+        JobQueueStateTestAccess::deliver_status(jqs, status_with(3));
+        REQUIRE(lv_subject_get_int(lv_xml_get_subject(nullptr, "job_queue_count")) == 3);
+
+        PanelWidgetHarness<PrintStatusWidget> h(test_screen(),
+                                                HarnessConfig{{{"layout_style", "detailed"}}});
+        // Drain attach-time observers first: they fire with STANDBY and would
+        // otherwise override the forced active state on the next pump.
+        process_lvgl(30);
+        auto force_active = [&]() {
+            h.widget().on_print_state_changed_for_test(PrintState::Printing);
+            process_lvgl(30);
+        };
+
+        // Both checks share one contract: the row is VISIBLE (a hidden=false
+        // read is not visibility) and its bottom edge lands inside the card's
+        // content box, with nothing pushed past the card's bottom into a
+        // scroll region the user cannot reach.
+        auto check = [&](int expect_view) {
+            REQUIRE(lv_subject_get_int(PrintStatusWidget::view_subject_for_test()) ==
+                    expect_view); // proves WHICH variant is on stage
+            lv_obj_t* card = h.child("print_card_printing");
+            lv_obj_t* row = h.child("up_next_row");
+            REQUIRE(card != nullptr);
+            REQUIRE(row != nullptr);
+            CHECK_FALSE(lv_obj_has_flag(row, LV_OBJ_FLAG_HIDDEN));
+            lv_obj_update_layout(card);
+            const int content_bottom = lv_obj_get_height(card) -
+                                       lv_obj_get_style_pad_top(card, LV_PART_MAIN) -
+                                       lv_obj_get_style_pad_bottom(card, LV_PART_MAIN);
+            INFO("row y=" << lv_obj_get_y(row) << " h=" << lv_obj_get_height(row)
+                          << " content_bottom=" << content_bottom);
+            CHECK(lv_obj_get_y(row) + lv_obj_get_height(row) <= content_bottom);
+            CHECK(lv_obj_get_scroll_bottom(card) == 0);
+        };
+
+        // Detailed active (view 4) at the granted cell height 800x480 gives
+        // this card. The detailed body flex_grows into the space the Up next
+        // row leaves, rather than claiming 100% and pushing the row out.
+        h.resize(8, 4, w_wide(), 208);
+        force_active();
+        check(4);
+
+        // Compact width forces the library active view (view 3) even with
+        // layout_style=detailed; 480x320 grants the card ~this height.
+        h.resize(8, 4, w_normal() - 1, 142);
+        force_active();
+        check(3);
+    }
+    PrintStatusWidget::destroy_formatter_for_test();
+}
+
+// --- Tiny landscape stacks the action grid -----------------------------------
+//
+// The full-screen print_status_panel (not the home widget above) grows its two
+// action rows into the grid's leftover column height at ui_breakpoint < 2 and
+// stacks each button icon over label. Pinned at 480x320 and 480x272: every visible action
+// button's label must be inside the button's content box, and the grid must
+// fill the column bottom.
+
+namespace {
+
+/// lv_display_set_resolution + theme_manager_refresh_layout_constants, undone
+/// on scope exit: theme_manager writes into a SHARED XML scope, so a stale
+/// tier would decide layout for every later test in this binary (same shape as
+/// test_chamber_panel_diagnostics.cpp's ScopedGeometry).
+class ScopedTinyLandscape {
+  public:
+    explicit ScopedTinyLandscape(int32_t w, int32_t h)
+        : disp_(lv_display_get_default()), w0_(lv_display_get_horizontal_resolution(disp_)),
+          h0_(lv_display_get_vertical_resolution(disp_)) {
+        lv_display_set_resolution(disp_, w, h);
+        theme_manager_refresh_layout_constants(disp_);
+    }
+
+    ~ScopedTinyLandscape() {
+        lv_display_set_resolution(disp_, w0_, h0_);
+        theme_manager_refresh_layout_constants(disp_);
+    }
+
+    ScopedTinyLandscape(const ScopedTinyLandscape&) = delete;
+    ScopedTinyLandscape& operator=(const ScopedTinyLandscape&) = delete;
+
+  private:
+    lv_display_t* disp_;
+    int32_t w0_;
+    int32_t h0_;
+};
+
+} // namespace
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "print_status action grid stacks and fills the column at tiny and micro",
+                 "[widget_size][print_status][small_screen]") {
+    PrintStatusWidget::destroy_formatter_for_test();
+    PrinterStateTestAccess::reset(get_printer_state());
+    get_printer_state().init_subjects(false);
+    ToolState::instance().init_subjects(false);
+    heal_global_print_status_panel_subjects();
+
+    const struct {
+        int32_t w;
+        int32_t h;
+    } canvases[] = {{480, 320}, {480, 272}};
+    for (const auto& c : canvases) {
+        CAPTURE(c.w, c.h);
+        ScopedTinyLandscape tiny(c.w, c.h);
+        // Pause/Resume's icon+label subjects belong to PrintControlButtons; its
+        // subjects must be live before the panel parses, or bind_icon is
+        // dropped and the button never stacks.
+        helix::ui::PrintControlButtons::instance().init_subjects();
+        auto panel = std::make_unique<PrintStatusPanel>(get_printer_state(), nullptr);
+        panel->init_subjects();
+        lv_obj_t* root = panel->create(test_screen());
+
+        // Timelapse is hidden while printer_has_timelapse is 0; an active
+        // print (print_outcome 0) keeps Pause and Cancel visible. Either
+        // subject may be absent here (they belong to the capabilities and
+        // print-state subsystems, not the panel): an absent subject means the
+        // bind was dropped at parse, leaving the button's inline default
+        // (visible), so the assertions below still see four buttons.
+        if (lv_subject_t* timelapse = lv_xml_get_subject(nullptr, "printer_has_timelapse")) {
+            lv_subject_set_int(timelapse, 1);
+        }
+        if (lv_subject_t* outcome = lv_xml_get_subject(nullptr, "print_outcome")) {
+            lv_subject_set_int(outcome, 0);
+        }
+        process_lvgl(30);
+
+        // Speed/Flow gives its height to the buttons below MEDIUM.
+        lv_obj_t* speed_flow = lv_obj_find_by_name(root, "speed_flow_row");
+        REQUIRE(speed_flow != nullptr);
+        CHECK(lv_obj_has_flag(speed_flow, LV_OBJ_FLAG_HIDDEN));
+
+        lv_obj_t* grid = lv_obj_find_by_name(root, "button_grid");
+        REQUIRE(grid != nullptr);
+        lv_obj_update_layout(grid);
+
+        // Rows grown: the two rows tile the grid's content height exactly.
+        REQUIRE(lv_obj_get_child_count(grid) == 2);
+        lv_obj_t* row1 = lv_obj_get_child(grid, 0);
+        lv_obj_t* row2 = lv_obj_get_child(grid, 1);
+        CHECK(lv_obj_get_y(row1) == 0);
+        CHECK(lv_obj_get_style_flex_grow(row1, LV_PART_MAIN) == 1);
+        CHECK(lv_obj_get_y(row2) + lv_obj_get_height(row2) == lv_obj_get_height(grid));
+
+        // Every visible action button stacks icon over label, and the label
+        // fits inside the button's content box.
+        const char* action_buttons[] = {"btn_light", "btn_timelapse", "btn_pause", "btn_tune",
+                                        "btn_cancel"};
+        int visible = 0;
+        for (const char* name : action_buttons) {
+            lv_obj_t* btn = lv_obj_find_by_name(root, name);
+            REQUIRE(btn != nullptr);
+            if (lv_obj_has_flag(btn, LV_OBJ_FLAG_HIDDEN)) {
+                continue;
+            }
+            visible++;
+            CAPTURE(name);
+            lv_obj_update_layout(btn);
+            CHECK(lv_obj_get_style_flex_flow(btn, LV_PART_MAIN) == LV_FLEX_FLOW_COLUMN);
+            CHECK(lv_obj_get_height(btn) == lv_obj_get_height(lv_obj_get_parent(btn)));
+            lv_obj_t* label = UITest::button_label(btn);
+            REQUIRE(label != nullptr);
+            CHECK_FALSE(lv_obj_has_flag(label, LV_OBJ_FLAG_HIDDEN));
+            const int32_t content_h = lv_obj_get_height(btn) -
+                                      lv_obj_get_style_pad_top(btn, LV_PART_MAIN) -
+                                      lv_obj_get_style_pad_bottom(btn, LV_PART_MAIN);
+            CHECK(lv_obj_get_y(label) + lv_obj_get_height(label) <= content_h);
+        }
+        CHECK(visible >= 4); // all five except an optional one
+
+        lv_obj_delete(root);
+        UpdateQueue::instance().drain();
     }
     PrintStatusWidget::destroy_formatter_for_test();
 }

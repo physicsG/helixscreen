@@ -14,7 +14,9 @@
  * PrintState lifecycle -- the two do not share numbering.
  */
 
-#include "../test_fixtures.h"
+#include "ui_runout_guidance_modal.h"
+
+#include "../lvgl_ui_test_fixture.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "printer_state.h"
 #include "ui_update_queue.h"
@@ -25,19 +27,6 @@
 
 namespace {
 
-/// File-scope, not a local: Catch2 re-enters the TEST_CASE body once per
-/// SECTION, and a stack subject would be re-registered at a new address while
-/// the previous section's observers still pointed at the dead one.
-lv_subject_t& autofeed_subject() {
-    static lv_subject_t s{};
-    static bool inited = false;
-    if (!inited) {
-        lv_subject_init_int(&s, 0);
-        inited = true;
-    }
-    return s;
-}
-
 bool row_hidden(lv_obj_t* root) {
     lv_obj_t* row = lv_obj_find_by_name(root, "manual_action_row");
     REQUIRE(row != nullptr);
@@ -46,26 +35,23 @@ bool row_hidden(lv_obj_t* root) {
 
 } // namespace
 
-TEST_CASE_METHOD(XMLTestFixture, "Runout manual actions survive a paused autofeed runout",
+TEST_CASE_METHOD(LVGLUITestFixture, "Runout manual actions survive a paused autofeed runout",
                  "[ui][runout][modal][snapmaker]") {
-    // `runout_autofeed_capable` is normally a RunoutGuidanceModal static
-    // registered into this component's scope. That registration is one-shot and
-    // order-dependent, so the test owns a subject of the same name in the global
-    // scope instead -- the cond resolver falls back to global when the component
-    // scope has no entry, which is exactly the case with no modal constructed.
-    lv_subject_t& autofeed = autofeed_subject();
-    REQUIRE(lv_xml_register_subject(nullptr, "runout_autofeed_capable", &autofeed) ==
-            LV_RESULT_OK);
+    // The modal owns runout_autofeed_capable; it is static and outlives any one
+    // instance, so the case hands it back cleared.
+    RunoutGuidanceModal modal;
+    modal.set_autofeed_capable(false);
 
-    REQUIRE(register_component("runout_guidance_modal"));
-    lv_obj_t* root = create_component("runout_guidance_modal");
+    auto* root =
+        static_cast<lv_obj_t*>(lv_xml_create(test_screen(), "runout_guidance_modal", nullptr));
     REQUIRE(root != nullptr);
 
     lv_subject_t* wire_subject = lv_xml_get_subject(nullptr, "print_state_enum");
     REQUIRE(wire_subject != nullptr);
+    const int wire_before = lv_subject_get_int(wire_subject);
 
     const auto apply = [&](bool autofeed_capable, helix::PrintJobState wire) {
-        lv_subject_set_int(&autofeed, autofeed_capable ? 1 : 0);
+        modal.set_autofeed_capable(autofeed_capable);
         lv_subject_set_int(wire_subject, static_cast<int>(wire));
         helix::ui::UpdateQueue::instance().drain();
     };
@@ -104,4 +90,7 @@ TEST_CASE_METHOD(XMLTestFixture, "Runout manual actions survive a paused autofee
         apply(/*autofeed_capable=*/false, helix::PrintJobState::STANDBY);
         CHECK_FALSE(row_hidden(root));
     }
+    modal.set_autofeed_capable(false);
+    lv_subject_set_int(wire_subject, wire_before);
+    lv_obj_delete(root);
 }

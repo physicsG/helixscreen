@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "ui_observer_guard.h"
+
 #include "async_lifetime_guard.h"
 #include "subject_managed_panel.h"
 
@@ -15,6 +17,9 @@
 #include "hv/json.hpp"
 
 namespace helix {
+
+class IMoonrakerClient;
+enum class PrintJobState;
 
 /**
  * @brief Manages timelapse recording state and render progress
@@ -56,6 +61,13 @@ class TimelapseState {
      * @param event JSON event from notify_timelapse_event
      */
     void handle_timelapse_event(const nlohmann::json& event);
+
+    /// Route notify_timelapse_event from @p client into handle_timelapse_event().
+    /// Idempotent: a repeat call (every discovery) replaces the earlier subscription.
+    void attach(IMoonrakerClient& client);
+
+    /// Drop the subscription attach() made. Safe when never attached.
+    void detach(IMoonrakerClient& client);
 
     /**
      * @brief Reset all state (on disconnect or new print)
@@ -135,6 +147,16 @@ class TimelapseState {
 
     // Notification throttling: last progress value that triggered a notification
     std::atomic<int> last_notified_progress_{-1};
+
+    /// Watches the printer's job state so each new print starts its frame
+    /// count and capture info over; a render clears them only when one runs
+    /// and succeeds. Main thread only, like the two flags below.
+    ObserverGuard print_state_obs_;
+    bool print_in_progress_ = false;
+    /// A print was seen to end. Only then is the next PRINTING a new print:
+    /// joining one already running (app start, re-subscription) keeps its frames.
+    bool print_ended_ = false;
+    void on_print_state_changed(PrintJobState state);
 
     // Protects last_rendered_filename_ and on_render_complete_ (accessed from
     // both the WebSocket background thread and the UI thread)

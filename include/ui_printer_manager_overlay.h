@@ -18,6 +18,7 @@
 
 #include "lvgl/lvgl.h"
 #include "overlay_base.h"
+#include "static_panel_registry.h"
 #include "subject_managed_panel.h"
 
 #include <string>
@@ -35,18 +36,11 @@
  * ## Usage:
  *
  * @code
- * auto& overlay = get_printer_manager_overlay();
- * overlay.init_subjects();
- * overlay.create(parent_screen);
+ * get_printer_manager_overlay().show(parent_screen);
  * @endcode
  */
 class PrinterManagerOverlay : public OverlayBase {
   public:
-    /**
-     * @brief Default constructor - zeroes all buffers
-     */
-    PrinterManagerOverlay();
-
     /**
      * @brief Destructor - cleans up subjects if LVGL still initialized
      */
@@ -67,7 +61,7 @@ class PrinterManagerOverlay : public OverlayBase {
     void init_subjects() override;
 
     /**
-     * @brief Create the overlay UI from XML
+     * @brief Create the overlay UI from XML and wire the name editor
      *
      * @param parent Parent widget to attach overlay to (usually screen)
      * @return Root object of overlay, or nullptr on failure
@@ -90,6 +84,10 @@ class PrinterManagerOverlay : public OverlayBase {
         return "Printer Manager";
     }
 
+    const char* xml_component() const override {
+        return "printer_manager_overlay";
+    }
+
     /**
      * @brief Called when overlay becomes visible
      *
@@ -103,9 +101,18 @@ class PrinterManagerOverlay : public OverlayBase {
      * Cancels any in-progress name edit and hides the keyboard
      * to restore screen position.
      */
-    void on_deactivate() override;
+    void on_deactivating(DeactivateReason reason) override;
+
+    /// Freed on close; the next open rebuilds it.
+    bool destroy_on_close() const override {
+        return true;
+    }
 
   private:
+    friend struct PrinterManagerOverlayTestAccess;
+
+    void on_ui_destroyed() override;
+
     //
     // === Internal Methods ===
     //
@@ -123,13 +130,13 @@ class PrinterManagerOverlay : public OverlayBase {
 
     SubjectManager subjects_;
 
-    lv_subject_t printer_manager_name_;
-    lv_subject_t printer_manager_model_;
-    lv_subject_t helix_version_;
+    lv_subject_t printer_manager_name_{};
+    lv_subject_t printer_manager_model_{};
+    lv_subject_t helix_version_{};
 
-    char name_buf_[128];
-    char model_buf_[128];
-    char version_buf_[32];
+    char name_buf_[128] = {};
+    char model_buf_[128] = {};
+    char version_buf_[32] = {};
 
     //
     // === Widget References ===
@@ -139,7 +146,7 @@ class PrinterManagerOverlay : public OverlayBase {
     lv_obj_t* printer_image_obj_ = nullptr;
 
     // Name editing state (subject-driven visibility via bind_flag_if_eq in XML)
-    lv_subject_t name_editing_;
+    lv_subject_t name_editing_{};
     lv_obj_t* name_input_ = nullptr;
 
     void start_name_edit();
@@ -148,58 +155,14 @@ class PrinterManagerOverlay : public OverlayBase {
 
     /// Stored image path (must outlive lv_image_set_src for path stability)
     std::string current_image_path_;
-
-    // Cached panel pointers for lazy creation
-    lv_obj_t* bed_mesh_panel_ = nullptr;
-    lv_obj_t* spoolman_panel_ = nullptr;
-    lv_obj_t* screws_tilt_panel_ = nullptr;
-    lv_obj_t* input_shaper_panel_ = nullptr;
-    lv_obj_t* retraction_panel_ = nullptr;
-    lv_obj_t* timelapse_panel_ = nullptr;
-    lv_obj_t* fan_control_panel_ = nullptr;
-
-    //
-    // === Static Callbacks ===
-    //
-
-    // Chip navigation callbacks
-    static void on_chip_bed_mesh_clicked(lv_event_t* e);
-    static void on_chip_leds_clicked(lv_event_t* e);
-    static void on_chip_adxl_clicked(lv_event_t* e);
-    static void on_chip_retraction_clicked(lv_event_t* e);
-    static void on_chip_spoolman_clicked(lv_event_t* e);
-    static void on_chip_timelapse_clicked(lv_event_t* e);
-    static void on_chip_screws_tilt_clicked(lv_event_t* e);
-    static void on_chip_ams_clicked(lv_event_t* e);
-    static void on_chip_fans_clicked(lv_event_t* e);
-    static void on_chip_power_clicked(lv_event_t* e);
-    static void on_chip_speaker_clicked(lv_event_t* e);
-
-    // Name editing callbacks
-    static void pm_printer_name_clicked_cb(lv_event_t* e);
-    static void pm_name_input_ready_cb(lv_event_t* e);
-    static void pm_name_input_cancel_cb(lv_event_t* e);
-
-    // Action row callbacks
-    static void change_printer_image_clicked_cb(lv_event_t* e);
-    static void change_printer_model_clicked_cb(lv_event_t* e);
-    static void pm_manage_printers_clicked_cb(lv_event_t* e);
-    void handle_change_printer_image_clicked();
-    void handle_change_printer_model_clicked();
-    void handle_manage_printers_clicked();
 };
 
-/**
- * @brief Global instance accessor
- *
- * Creates the overlay on first access and registers it for cleanup
- * with StaticPanelRegistry.
- *
- * @return Reference to singleton PrinterManagerOverlay
- */
-PrinterManagerOverlay& get_printer_manager_overlay();
+/// Global instance, built on first use and freed with StaticPanelRegistry.
+inline PrinterManagerOverlay& get_printer_manager_overlay() {
+    return helix::lazy_global<PrinterManagerOverlay>("PrinterManagerOverlay");
+}
 
-/**
- * @brief Destroy the global PrinterManagerOverlay instance
- */
-void destroy_printer_manager_overlay();
+/// Free the global instance now; the next accessor call builds a fresh one.
+inline void destroy_printer_manager_overlay() {
+    helix::detail::lazy_global_slot<PrinterManagerOverlay>().reset();
+}

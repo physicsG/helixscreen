@@ -168,8 +168,9 @@ FilamentLabelParts resolve_filament_label_parts(const SlotInfo& slot, const Spoo
     const std::string_view id_name = id ? std::string_view(id->filament_name) : std::string_view();
     const std::string_view id_material = id ? std::string_view(id->material) : std::string_view();
 
-    // Per-field precedence. The slot layer (user override already merged over
-    // firmware by apply_overrides) wins field by field; the Spoolman identity
+    // Per-field precedence. The slot layer (the lane's resolved identity
+    // already laid over firmware by apply_resolved_lane) wins field by field;
+    // the Spoolman identity
     // fills only the gaps. color_fallback is the algorithmic color name, which
     // names nothing about the filament and so sits below every real name.
     FilamentLabelParts parts;

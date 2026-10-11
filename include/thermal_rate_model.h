@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -27,6 +28,13 @@ class ThermalRateModel {
     static constexpr float EMA_NEW_WEIGHT = 0.3f;      // Weight for new instantaneous rate
     static constexpr float EMA_OLD_WEIGHT = 0.7f;      // Weight for existing EMA rate
 
+    /// A heater that has not beaten its highest reading by RISE_EPSILON_C for
+    /// this long is holding, not climbing. Until it rises again every reading
+    /// restarts the step, so a hold between two climbs (a probing temperature,
+    /// then the print temperature) is counted in neither.
+    static constexpr uint32_t STALL_REANCHOR_MS = 30000;
+    static constexpr float RISE_EPSILON_C = 1.0f;
+
     // Blending constants for persistence (saving to history)
     static constexpr float SAVE_NEW_WEIGHT = 0.7f; // Weight for current measurement when saving
     static constexpr float SAVE_OLD_WEIGHT = 0.3f; // Weight for historical rate when saving
@@ -42,7 +50,8 @@ class ThermalRateModel {
     /// Returns 0 if current >= target.
     float estimate_seconds(float current, float target) const;
 
-    /// Current measured rate, or nullopt if not yet established.
+    /// Current measured rate, or nullopt if not yet established. Weighted
+    /// toward the latest steps, so it tracks how the heater is heating now.
     std::optional<float> measured_rate() const;
 
     /// Best available rate: measured > history > default.
@@ -51,7 +60,9 @@ class ThermalRateModel {
     /// Load a historical rate from previous sessions.
     void load_history(float rate_s_per_deg);
 
-    /// Blended rate suitable for persisting to history.
+    /// Rate to persist: seconds per degree across every step of the climb
+    /// measured so far, blended with history. A heater's last degrees are its
+    /// slowest, so the latest steps alone would overstate a whole climb.
     /// Returns 0 if no measurement has been taken.
     float blended_rate_for_save() const;
 
@@ -70,10 +81,19 @@ class ThermalRateModel {
 
     float default_rate_ = FALLBACK_DEFAULT_RATE;
 
-    float start_temp_ = 0.0f;
-    float last_temp_ = 0.0f;
+    float last_temp_ = 0.0f; ///< where the current step started
     uint32_t last_tick_ = 0;
     uint32_t start_tick_ = 0;
+
+    /// Highest reading since the last rise; while holding it follows the
+    /// reading down to within RISE_EPSILON_C, so a heater that cooled can
+    /// climb again, and a swing smaller than that never counts as a rise.
+    float high_temp_ = 0.0f;
+    uint32_t last_rise_tick_ = 0;
+    bool holding_ = false;
+
+    float climb_seconds_ = 0.0f; ///< time across counted steps
+    float climb_degrees_ = 0.0f; ///< degrees across counted steps
 };
 
 namespace helix {
@@ -91,13 +111,20 @@ class Config;
  */
 class ThermalRateManager {
   public:
+    /// Heaters whose rates load_from_config() reads back between sessions; a
+    /// rate kept under any other name is never used again.
+    static constexpr std::array<const char*, 2> PERSISTED_HEATERS = {"extruder", "heater_bed"};
+
     static ThermalRateManager& instance();
     ThermalRateModel& get_model(const std::string& heater_name);
     float estimate_heating_seconds(const std::string& heater_name, float current_temp,
                                    float target_temp) const;
     void load_from_config(helix::Config& config);
     void save_to_config(helix::Config& config);
-    void apply_archetype_defaults(float bed_x_max);
+    /// Default heating rates for a printer with no learned history: the
+    /// database entry's measured `thermal_rates` where it has them, otherwise
+    /// a guess from the bed's X extent.
+    void apply_archetype_defaults(float bed_x_max, const std::string& printer_type);
     void reset(); // For testing
 
     ThermalRateManager() = default;

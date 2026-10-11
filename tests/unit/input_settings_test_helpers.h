@@ -26,9 +26,6 @@ namespace helix_test {
 /// Drop the persisted /input node so the next load sees a fresh install.
 inline void forget_input_settings() {
     helix::Config* config = helix::Config::get_instance();
-    if (config == nullptr) {
-        return;
-    }
     json& data = helix::ConfigTestAccess::data(*config);
     if (data.is_object()) {
         data.erase("input");

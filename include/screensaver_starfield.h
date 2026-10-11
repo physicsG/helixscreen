@@ -4,9 +4,12 @@
 
 #ifdef HELIX_ENABLE_SCREENSAVER
 
-#include "screensaver.h"
+#include "screensaver_base.h"
+#include "screensaver_starfield_sim.h"
 
+#include <cstdint>
 #include <lvgl.h>
+#include <optional>
 #include <vector>
 
 /**
@@ -16,65 +19,48 @@
  * and dim near the center, growing larger and brighter as it approaches
  * the edges.
  *
- * Renders via direct pixel writes to the canvas buffer — no LVGL draw API
- * in the hot loop. Previous star positions are incrementally erased each
- * frame to avoid a full-buffer clear.
+ * helix::ui::StarfieldSim draws each frame with direct pixel writes, erasing only where
+ * stars were, and moves the stars by the time since the previous frame; each frame
+ * invalidates one small box per star it moved, so a scattered sky stays a partial
+ * invalidation.
  */
-class StarfieldScreensaver : public Screensaver {
+class StarfieldScreensaver : public helix::ui::SaverBase {
   public:
-    StarfieldScreensaver() = default;
-    ~StarfieldScreensaver() override;
-
-    void start() override;
-    void stop() override;
-    bool is_active() const override {
-        return active_;
-    }
     ScreensaverType type() const override {
         return ScreensaverType::STARFIELD;
     }
 
+  protected:
+    std::optional<lv_color_format_t> canvas_format() const override {
+        return helix::ui::SAVER_BUILD_CANVAS_FORMAT;
+    }
+    bool on_start() override;
+    void on_frame(uint32_t dt_ms, std::vector<helix::ui::DirtyRect>& dirty) override;
+    void on_stop() override;
+    size_t ladder_size() const override {
+        return sizeof(LEVEL_PERIODS_MS) / sizeof(LEVEL_PERIODS_MS[0]);
+    }
+    uint32_t ladder_period_ms(size_t level) const override {
+        return LEVEL_PERIODS_MS[level];
+    }
+    /// Applies a level at once; the rungs past full rate thin the star population.
+    void on_level_request(size_t level) override;
+
   private:
-    struct Star {
-        float x;        // normalized position (-1..1)
-        float y;        // normalized position (-1..1)
-        float z;        // depth (0..1, 1=far, approaches 0)
-        float speed;    // z decrement per frame
-        uint8_t tint_r; // color tint (assigned at birth, visible when close)
-        uint8_t tint_g;
-        uint8_t tint_b;
-        // Previous frame screen position for incremental erase
-        int16_t prev_sx;
-        int16_t prev_sy;
-        uint8_t prev_size; // 0 = not yet drawn
-    };
+    // Test-only seam: reads and places the stars. See tests/test_helpers/screensaver_test_access.h.
+    friend class StarfieldScreensaverTestAccess;
 
-    void init_stars();
-    void recycle_star(Star& star);
+    /// Frame period per level. Past full rate the rungs thin the star population instead
+    /// of slowing further, because a slower frame that still flies every star saves little
+    /// of a scattered sky's redraw: see LEVEL_STAR_COUNTS, indexed by the same level.
+    static constexpr uint32_t LEVEL_PERIODS_MS[] = {helix::ui::SAVER_FAST_PERIOD, 33, 33, 33};
+    /// Stars flown at `level`.
+    static constexpr int LEVEL_STAR_COUNTS[] = {helix::ui::StarfieldSim::NUM_STARS, 96, 64, 32};
 
-    static void frame_timer_cb(lv_timer_t* timer);
-    void render_frame();
+    /// Stars moved and drawn at `level`.
+    size_t star_count(size_t level) const;
 
-    /// Shared by stop() and the destructor — a timer cancelled only in stop()
-    /// stays armed on a freed `this` on any teardown that skips it.
-    void cancel_timer();
-
-    bool active_ = false;
-    lv_obj_t* overlay_ = nullptr;
-    lv_obj_t* canvas_ = nullptr;
-    lv_timer_t* timer_ = nullptr;
-
-    // Draw buffer owned by the canvas
-    uint8_t* draw_buf_ = nullptr;
-
-    std::vector<Star> stars_;
-
-    // Cached screen dimensions and projection constants
-    int screen_w_ = 0;
-    int screen_h_ = 0;
-    float cx_ = 0;    // screen center X
-    float cy_ = 0;    // screen center Y
-    float focal_ = 0; // projection focal length
+    helix::ui::StarfieldSim sim_;
 };
 
 #endif // HELIX_ENABLE_SCREENSAVER

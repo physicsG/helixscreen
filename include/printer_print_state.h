@@ -4,6 +4,8 @@
 #include "ui_observer_guard.h" // SubjectLifetime
 
 #include "async_lifetime_guard.h"
+#include "gcode_pause_scan.h"
+#include "print_eta_estimator.h"
 #include "print_job_ref.h"
 #include "print_lifecycle_state.h"
 #include "subject_managed_panel.h"
@@ -15,8 +17,10 @@
 #include <atomic>
 #include <lvgl.h>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "hv/json.hpp"
 
@@ -71,8 +75,12 @@ class PrinterPrintState {
     /**
      * @brief Update print state from Moonraker status JSON
      * @param status JSON object containing print_stats, virtual_sdcard data
+     * @param whole_objects true when @p status is a printer.objects.subscribe
+     *        response (the discovery replay or a subscription refresh), which
+     *        carries every field of each object whether or not it changed, rather
+     *        than a delta naming only the fields that did.
      */
-    void update_from_status(const nlohmann::json& status);
+    void update_from_status(const nlohmann::json& status, bool whole_objects = false);
 
     /// True if a Moonraker status object indicates an active (printing or paused) print.
     /// Pure: depends only on status["print_stats"]["state"]. Used by both the
@@ -111,6 +119,49 @@ class PrinterPrintState {
         return &print_progress_text_;
     }
 
+    // ========================================================================
+    // Scheduled-pause markers (prestonbrown/helixscreen#1509)
+    //
+    // The pauses found in the active print's gcode, when a path already
+    // reading that file scanned for them (see gcode_pause_scan.h for why each
+    // pause carries two fractions). Absent by default: an external start
+    // whose file was never fetched, a file over the 2D-streaming gate, or a
+    // print begun during the setup wizard all simply have no list — never a
+    // wrong one.
+    // ========================================================================
+
+    /// Publish a scan result. The list stays hidden unless the print's
+    /// identity (get_effective_print_filename()) still equals @p
+    /// source_filename, so a scan that finishes after a print switch can
+    /// never paint the new print with the old file's pauses.
+    void set_scheduled_pauses(std::vector<helix::gcode::ScheduledPause> pauses,
+                              helix::gcode::ProgressAxis axis, const std::string& source_filename);
+
+    /// The collected pauses of the scanned file; empty when none were found.
+    const std::vector<helix::gcode::ScheduledPause>& get_scheduled_pauses() const {
+        return scheduled_pauses_;
+    }
+
+    /// Which axis the progress bar fills on for the scanned file; marker
+    /// placement must use helix::gcode::display_fraction() with this axis.
+    helix::gcode::ProgressAxis get_pause_marker_axis() const {
+        return pause_marker_axis_;
+    }
+
+    /// True when the collected list belongs to the print now identified by
+    /// get_effective_print_filename(). This is the draw-side gate: markers
+    /// render only while it holds.
+    bool pause_markers_match_current_file() const {
+        return !scheduled_pauses_.empty() && pause_source_filename_ == effective_print_filename_;
+    }
+
+    /// Bumped whenever the pause list is published or cleared so marker
+    /// renderers can invalidate. The list itself is read via
+    /// get_scheduled_pauses(); the subject only signals change.
+    lv_subject_t* get_pause_markers_version_subject() {
+        return &pause_markers_version_;
+    }
+
     /// Raw filename from Moonraker
     lv_subject_t* get_print_filename_subject() {
         return &print_filename_;
@@ -132,18 +183,24 @@ class PrinterPrintState {
         return &print_state_enum_;
     }
 
+    /// print_stats.exception code as a subject (-1 when none is latched), so a
+    /// consumer sees a code that arrives in a later frame than the pause.
+    lv_subject_t* get_print_exception_subject() {
+        return &print_exception_;
+    }
+
     /**
      * @brief Lifetime token for the "static" print subjects (e.g. print_state_enum).
      *
      * Production-wise these subjects live for the process, but tests call
      * `deinit_subjects()` / `init_subjects()` between cases. Cross-singleton
      * observers (e.g. AmsState's print-state observer) MUST pass this token to
-     * `observe_int_sync(...)` — otherwise an ObserverGuard outliving a
+     * `observe<int>(...)` — otherwise an ObserverGuard outliving a
      * `deinit_subjects()` cycle will UAF in `lv_observer_remove()` (subject
      * deinit already freed the observer node).
      */
     [[nodiscard]] SubjectLifetime get_static_subjects_lifetime() const {
-        return static_subjects_lifetime_;
+        return subjects_.get_subjects_lifetime();
     }
 
     /// 1 when PRINTING or PAUSED, 0 otherwise
@@ -267,7 +324,7 @@ class PrinterPrintState {
      *
      * These subjects are still **dynamic** ([L077]): they are re-created on
      * `deinit_subjects()` / `init_subjects()` cycles. Observers MUST pass a
-     * SubjectLifetime token and subscribe via `observe_int_sync(..., lifetime)`
+     * SubjectLifetime token and subscribe via `observe<int>(..., lifetime)`
      * — otherwise ObserverGuard dangles on reconnect.
      *
      * @param extruder_idx 0-based extruder index (0 = "extruder", 1 = "extruder1", ...)
@@ -422,6 +479,32 @@ class PrinterPrintState {
         return &job_holds_machine_;
     }
 
+    /**
+     * @brief Whether anything may move the toolhead: a job holds the machine,
+     *        or spools lie on the bed (prestonbrown/helixscreen#1730)
+     *
+     * What `moves_machine="true"` controls bind to. job_holds_machine keeps its
+     * own meaning, "a print owns the machine", for the C++ readers that ask it.
+     */
+    lv_subject_t* get_machine_motion_blocked_subject() {
+        return &machine_motion_blocked_;
+    }
+    lv_subject_t* get_spool_latch_subject() {
+        return &spool_latch_;
+    }
+
+    /// Set or clear the spools-on-the-bed latch. @p extra_tokens are commands a
+    /// running dry cycle needs past the send-layer allowlist. Main thread.
+    void set_spool_latch(bool on, std::vector<std::string> extra_tokens = {});
+    /// Readable from any thread: the send layer asks it.
+    [[nodiscard]] bool spool_latch_active() const {
+        return spool_latch_active_.load();
+    }
+    [[nodiscard]] std::vector<std::string> spool_latch_extra_tokens() const {
+        std::lock_guard<std::mutex> lock(spool_latch_mutex_);
+        return spool_latch_tokens_;
+    }
+
     lv_subject_t* get_print_start_phase_subject() {
         return &print_start_phase_;
     }
@@ -523,14 +606,52 @@ class PrinterPrintState {
     /// explicit null for a subscribed-but-unpopulated field does not count.
     /// Latches UP only (status arrives as deltas) and is reset by the offer
     /// controller on the disconnect edge. See docs/devel/POWER_LOSS_RECOVERY.md.
-    lv_subject_t* get_creality_plr_capable_subject() {
-        return &creality_plr_capable_;
+    lv_subject_t* get_plr_power_loss_signal_subject() {
+        return &plr_power_loss_signal_;
     }
 
     /// True when print_stats.power_loss has been seen. See
-    /// get_creality_plr_capable_subject().
-    [[nodiscard]] bool is_creality_plr_capable() const {
-        return lv_subject_get_int(const_cast<lv_subject_t*>(&creality_plr_capable_)) != 0;
+    /// get_plr_power_loss_signal_subject().
+    [[nodiscard]] bool is_plr_power_loss_signal() const {
+        return lv_subject_get_int(const_cast<lv_subject_t*>(&plr_power_loss_signal_)) != 0;
+    }
+
+    /// PLR passive-backend capability: discovery found a resume macro the PLR
+    /// module knows (plr_backend owns which firmwares carry one; the macro is
+    /// what makes the backend's interrupted flag ours to act on). Set from the
+    /// discovery snapshot by PrinterState::set_hardware; the offer controller
+    /// resets it on the disconnect edge. See docs/devel/POWER_LOSS_RECOVERY.md.
+    lv_subject_t* get_plr_resume_macro_subject() {
+        return &plr_resume_macro_;
+    }
+
+    /// True when the recovery resume macro was discovered. See
+    /// get_plr_resume_macro_subject().
+    [[nodiscard]] bool is_plr_resume_macro_present() const {
+        return lv_subject_get_int(const_cast<lv_subject_t*>(&plr_resume_macro_)) != 0;
+    }
+
+    /// Set/clear the resume-macro capability from the discovery snapshot.
+    /// In-place subject write, matching the capability markers in
+    /// update_from_status.
+    void set_plr_resume_macro_present(bool capable) {
+        lv_subject_set_int(&plr_resume_macro_, capable ? 1 : 0);
+    }
+
+    /// PLR passive-backend availability: the interrupted flag the backend's
+    /// firmware maintains across boots (plr_parse_interrupted_flag owns the
+    /// key and the boolean-only rule). True at boot after power loss AND
+    /// during every normal print (the offer's idle gate scopes it); frames
+    /// without the key leave it unchanged (Moonraker sends deltas).
+    /// Main-thread only for reads.
+    lv_subject_t* get_plr_interrupted_flag_subject() {
+        return &plr_interrupted_flag_;
+    }
+
+    /// True when the interrupted flag arrived as a boolean true. See
+    /// get_plr_interrupted_flag_subject().
+    [[nodiscard]] bool is_plr_interrupted_flag() const {
+        return lv_subject_get_int(const_cast<lv_subject_t*>(&plr_interrupted_flag_)) != 0;
     }
 
     // ========================================================================
@@ -818,6 +939,32 @@ class PrinterPrintState {
     /// No-ops while progress_frozen_ is set.
     void publish_progress_display(int percent);
 
+    /// Take a candidate percentage from a status payload and decide whether it
+    /// becomes the print's progress. The sole writer of print_progress_, so the
+    /// clamp, the terminal-state ratchet and the paused hold are stated once and
+    /// every source is judged by the same rules.
+    void commit_progress(int percent);
+
+    /// Which kind of source wrote the value currently in print_layer_current_.
+    /// Echo is the gcode-response path (SET_PRINT_STATS_INFO / ;LAYER:N),
+    /// Reported is a status field (print_stats.info / virtual_sdcard.layer),
+    /// Estimate is a fabricated tier (progress fraction / Z-height).
+    enum class LayerSource { Estimate, Echo, Reported };
+
+    /// Take a candidate current-layer value from any source (print_stats.info,
+    /// virtual_sdcard.layer, the gcode fallback setter, or the estimate tiers)
+    /// and decide whether it becomes the layer. The sole writer of
+    /// print_layer_current_ besides reset_for_new_print(), so the lag rule is
+    /// stated once: a status value never lowers a value the gcode echo just
+    /// reported while a print is active, because a status frame generated
+    /// before the newest echo can carry an older number (the layer bouncing
+    /// 1 -> 0 -> 1 at print start, which downstream consumers read as a new
+    /// print). Echo writes are always accepted (sequential one-object-at-a-time
+    /// prints restart ;LAYER:N per object), and a status decrease against a
+    /// status-sourced value stands. Estimates never latch real provenance, so
+    /// the first real value supersedes an estimate even when it is lower.
+    void apply_layer_current(int layer, LayerSource kind, const char* source);
+
     /// Hold the current display progress until the next print starts. Called on
     /// the transition into COMPLETE/CANCELLED/ERROR; completion pins 100 first.
     void freeze_progress_display(bool complete);
@@ -828,33 +975,38 @@ class PrinterPrintState {
     /**
      * @brief Internal setter for print-in-progress flag
      *
-     * Called via helix::async::invoke from set_print_in_progress().
+     * Called on the main thread from set_print_in_progress().
      */
     void set_print_in_progress_internal(bool in_progress);
 
     SubjectManager subjects_;
     bool subjects_initialized_ = false;
 
-    /// Lifetime for the "static" subjects below. Reset (to false then released)
-    /// in `deinit_subjects()` so cross-singleton observers can detect subject
-    /// death and skip `lv_observer_remove()` on freed observer nodes.
-    SubjectLifetime static_subjects_lifetime_;
-
     /// Generation guard for the setters that defer their subject writes to the
     /// main thread. Invalidated by `deinit_subjects()` and by destruction, so a
     /// callback still sitting in the UpdateQueue when the subjects go away is
     /// dropped instead of notifying a freed observer list (#1165, #1146).
-    /// Distinct from `static_subjects_lifetime_`, which is a `shared_ptr<bool>`
-    /// read by observers and carries no deferral machinery.
+    /// Distinct from the SubjectLifetime death signal handed to observers,
+    /// which carries no deferral machinery.
     AsyncLifetimeGuard async_lifetime_;
 
     // Print progress subjects
     lv_subject_t print_progress_{};         // Integer 0-100
     lv_subject_t print_progress_display_{}; // Integer 0-100, frozen after completion
     lv_subject_t print_progress_text_{};    // String: print_progress_display_ as "N%"
+
+    // Scheduled-pause markers: pauses collected from the active print's gcode
+    // by whichever path parsed the file. All writes happen on the main thread
+    // (publish from the viewer load callback, clear from
+    // reset_for_new_print()), so the vector needs no lock.
+    std::vector<helix::gcode::ScheduledPause> scheduled_pauses_;
+    std::string pause_source_filename_;
+    helix::gcode::ProgressAxis pause_marker_axis_{helix::gcode::ProgressAxis::BytePosition};
+    lv_subject_t pause_markers_version_{};  // Integer: bumped on publish/clear
     lv_subject_t print_filename_{};         // String buffer
     lv_subject_t print_state_{};            // String buffer (for UI display)
     lv_subject_t print_state_enum_{};       // Integer: PrintJobState enum
+    lv_subject_t print_exception_{};        // Integer: print_stats.exception code, -1 = none
     lv_subject_t print_active_{};           // Integer: 1 when PRINTING/PAUSED
     lv_subject_t print_outcome_{};          // Integer: PrintOutcome enum
     lv_subject_t print_show_progress_{};    // Integer: 1 when active AND not starting
@@ -912,10 +1064,16 @@ class PrinterPrintState {
     void create_extruder_filament_entry(int extruder_idx);
 
     // Print start progress subjects
-    lv_subject_t print_start_phase_{};    // Integer: PrintStartPhase enum
-    lv_subject_t print_lifecycle_{};      // Integer: PrintState enum (derived)
-    lv_subject_t print_lifecycle_prev_{}; // Integer: PrintState enum, value before the current
-    lv_subject_t job_holds_machine_{};    // Integer 0/1: job_holds_machine(print_lifecycle)
+    lv_subject_t print_start_phase_{};      // Integer: PrintStartPhase enum
+    lv_subject_t print_lifecycle_{};        // Integer: PrintState enum (derived)
+    lv_subject_t print_lifecycle_prev_{};   // Integer: PrintState enum, value before the current
+    lv_subject_t job_holds_machine_{};      // Integer 0/1: job_holds_machine(print_lifecycle)
+    lv_subject_t machine_motion_blocked_{}; // Integer 0/1: job_holds_machine_ || spool_latch_
+    lv_subject_t spool_latch_{};            // Integer 0/1: spools lie on the bed
+    std::atomic<bool> spool_latch_active_{false};
+    mutable std::mutex spool_latch_mutex_;
+    std::vector<std::string> spool_latch_tokens_;
+    void publish_machine_motion_blocked();
 
     /// The job we are preparing; empty when none. See begin_preparing().
     PrintJobRef preparing_job_{};
@@ -953,10 +1111,8 @@ class PrinterPrintState {
     // Slicer estimated total print time (not a subject - no XML binding needed)
     int estimated_print_time_ = 0;
 
-    // Exponential moving average for time remaining estimate.
-    // Smooths out wild jumps at low progress where the extrapolation is noisy.
-    double smoothed_remaining_ = 0.0;
-    bool has_smoothed_remaining_ = false;
+    // The remaining-time ladder, including its smoothing state.
+    PrintEtaEstimator eta_estimator_;
 
     // Layer tracking: true when real layer data received from print_stats.info or gcode fallback.
     // When false, current_layer is estimated from progress * total_layers.
@@ -966,6 +1122,14 @@ class PrinterPrintState {
     // re-observed. Do NOT use it to decide whether a printer reports layers at
     // all; use printer_reports_layers_ for that (see below).
     std::atomic<bool> has_real_layer_data_{false};
+
+    // Provenance of the value currently in print_layer_current_ (see
+    // LayerSource). Per-print (reset to Estimate by reset_for_new_print).
+    // Gates the lag rule in apply_layer_current(); distinct from
+    // has_real_layer_data_ because that latches as soon as the printer reports
+    // ANY real layer field, while this tracks the subject's value itself.
+    // Atomic: written on the same paths as has_real_layer_data_.
+    std::atomic<LayerSource> layer_source_{LayerSource::Estimate};
 
     // True when the current layer value came from the Z-height derivation (tier
     // 3) rather than the progress-fraction estimate (tier 4). Drives the display
@@ -1010,7 +1174,13 @@ class PrinterPrintState {
 
     // print_stats.power_loss — Creality-fork PLR capability marker. Integer:
     // 1 once the key has been seen as a JSON number (presence, not value).
-    lv_subject_t creality_plr_capable_{};
+    lv_subject_t plr_power_loss_signal_{};
+
+    // PLR passive backend. plr_resume_macro_: 1 once discovery found the
+    // backend's resume macro. plr_interrupted_flag_: the live interrupted-flag
+    // value (1/0, booleans only; plr_backend owns the wire key).
+    lv_subject_t plr_resume_macro_{};
+    lv_subject_t plr_interrupted_flag_{};
 
     // Slicer progress from display_status (M73 gcode command)
     // When active, preferred over virtual_sdcard file-position progress

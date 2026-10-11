@@ -22,6 +22,7 @@
 // Forward declarations
 namespace helix {
 class IMoonrakerClient;
+class PrinterState;
 } // namespace helix
 
 /**
@@ -46,14 +47,31 @@ class MoonrakerJobAPI : public IJobAPI {
     using BoolCallback = std::function<void(bool)>;
     using ModifiedPrintCallback = std::function<void(const ModifiedPrintResult&)>;
 
+    // Moonraker confirms printer.print.start only once Klipper acknowledges
+    // SDCARD_PRINT_FILE. A print-start macro that heats synchronously holds that
+    // ack for the whole heat-up, so a cold machine legitimately takes minutes to
+    // answer while the print is already running. 10 min covers a cold heat-up; a
+    // genuinely lost request still surfaces, just later.
+    // (prestonbrown/helixscreen#1451)
+    static constexpr uint32_t PRINT_START_TIMEOUT_MS = 600000; // 10 min
+
+    // The helix_print plugin answers print_modified only after awaiting that same
+    // SDCARD_PRINT_FILE ack, and it gets there after copying metadata and creating
+    // its symlink. Strictly more work for the same wait, so this endpoint can never
+    // deserve the shorter ceiling of the two.
+    static constexpr uint32_t PRINT_MODIFIED_TIMEOUT_MS = PRINT_START_TIMEOUT_MS;
+
     static constexpr uint32_t CANCEL_TIMEOUT_MS = 300000; // 5 min — CANCEL_PRINT macros can be slow
 
     /**
      * @brief Constructor
      *
      * @param client MoonrakerClient instance (must remain valid during API lifetime)
+     * @param state Printer state the spools-on-the-bed latch is read from; null
+     *        refuses nothing
      */
-    explicit MoonrakerJobAPI(helix::IMoonrakerClient& client);
+    explicit MoonrakerJobAPI(helix::IMoonrakerClient& client,
+                             const helix::PrinterState* state = nullptr);
     virtual ~MoonrakerJobAPI() = default;
 
     // ========================================================================
@@ -131,5 +149,9 @@ class MoonrakerJobAPI : public IJobAPI {
     void cancel_print(SuccessCallback on_success, ErrorCallback on_error) override;
 
   protected:
+    /// True, with @p on_error called, while spools lie on the bed.
+    bool refused_by_spool_latch(const char* method, const ErrorCallback& on_error) const;
+
     helix::IMoonrakerClient& client_;
+    const helix::PrinterState* state_ = nullptr;
 };

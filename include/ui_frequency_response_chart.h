@@ -47,6 +47,7 @@
 #include "platform_capabilities.h"
 
 #include <cstddef>
+#include <vector>
 
 // Forward declaration
 struct ui_frequency_response_chart_t;
@@ -118,6 +119,26 @@ void ui_frequency_response_chart_show_series(ui_frequency_response_chart_t* char
                                              bool visible);
 
 /**
+ * @brief Change a series' color, for callers whose colors are theme tokens
+ *
+ * @param chart Chart instance
+ * @param series_id Series ID
+ * @param color New line color
+ */
+// NAMESPACE_OK: matches this file's C-style chart API
+void ui_frequency_response_chart_set_series_color(ui_frequency_response_chart_t* chart,
+                                                  int series_id, lv_color_t color);
+
+/**
+ * @brief Report a series' color
+ *
+ * @return The series color, or black for an unknown series
+ */
+// NAMESPACE_OK: matches this file's C-style chart API
+lv_color_t ui_frequency_response_chart_get_series_color(ui_frequency_response_chart_t* chart,
+                                                        int series_id);
+
+/**
  * @brief Render a series as a muted background curve
  *
  * The chart's built-in renderer draws every series at the same line width and
@@ -144,6 +165,127 @@ void ui_frequency_response_chart_set_series_muted(ui_frequency_response_chart_t*
  */
 bool ui_frequency_response_chart_is_series_muted(ui_frequency_response_chart_t* chart,
                                                  int series_id);
+
+/**
+ * @brief Show or hide the amplitude labels and their left gutter
+ *
+ * Relative comparisons (two curves against each other) read better without
+ * absolute PSD numbers; the plot then takes the gutter's width.
+ */
+// NAMESPACE_OK: matches this file's C-style chart API
+void ui_frequency_response_chart_set_y_labels_visible(ui_frequency_response_chart_t* chart,
+                                                      bool visible);
+
+/**
+ * @brief Label the amplitude gridlines as percentages
+ *
+ * For callers that normalise their data to 0-100 and set the amplitude range
+ * to match: each gridline reads "100%", "75%", ... instead of a raw value.
+ */
+// NAMESPACE_OK: matches this file's C-style chart API
+void ui_frequency_response_chart_set_y_labels_percent(ui_frequency_response_chart_t* chart,
+                                                      bool percent);
+
+/**
+ * @brief Report whether a series is currently visible
+ *
+ * @param chart Chart instance
+ * @param series_id Series ID
+ * @return true when visible, false when hidden (or for an unknown series)
+ */
+// NAMESPACE_OK: matches this file's C-style chart API
+bool ui_frequency_response_chart_is_series_visible(ui_frequency_response_chart_t* chart,
+                                                   int series_id);
+
+/**
+ * @brief Per-series draw style for the custom draw pass
+ *
+ * A series whose effective style has glow or fill set is drawn entirely by
+ * the chart's draw-post pass (its built-in lv_chart series is hidden); a
+ * default-styled series keeps the built-in renderer. Muted series ignore
+ * style and keep their 1px treatment.
+ */
+// NAMESPACE_OK: joins this header's global ui_frequency_response_chart_* API
+struct FrChartSeriesStyle {
+    int32_t line_width = 2;
+    bool glow = false; ///< two wider, fainter strokes under the line
+    bool fill = false; ///< vertical gradient from 35% of the series color to transparent
+};
+
+/**
+ * @brief What a tier may draw (pure)
+ *
+ * EMBEDDED never reaches here (no chart); BASIC drops glow; STANDARD with
+ * animations keeps everything.
+ */
+// NAMESPACE_OK: joins this header's global ui_frequency_response_chart_* API
+[[nodiscard]] FrChartSeriesStyle fr_chart_effective_style(const FrChartSeriesStyle& requested,
+                                                          helix::PlatformTier tier,
+                                                          bool supports_animations);
+
+/**
+ * @brief Set a series' draw style, gated by the configured tier
+ *
+ * Stores fr_chart_effective_style(style, tier, supports_animations) where the
+ * tier and animation support are those captured at configure_for_platform()
+ * time; a later configure_for_platform() re-derives it from the requested
+ * style. A series whose effective style has glow or fill switches to the
+ * chart's custom draw pass; the default style keeps the built-in LVGL series.
+ *
+ * @param chart Chart instance
+ * @param series_id Series ID
+ * @param style Requested style
+ */
+// NAMESPACE_OK: joins this header's global ui_frequency_response_chart_* API
+void ui_frequency_response_chart_set_series_style(ui_frequency_response_chart_t* chart,
+                                                  int series_id, const FrChartSeriesStyle& style);
+
+/**
+ * @brief Get the effective style stored for a series
+ *
+ * @param chart Chart instance
+ * @param series_id Series ID
+ * @return Effective style, or the default for an unknown series
+ */
+// NAMESPACE_OK: joins this header's global ui_frequency_response_chart_* API
+[[nodiscard]] FrChartSeriesStyle
+ui_frequency_response_chart_get_series_style(ui_frequency_response_chart_t* chart, int series_id);
+
+/**
+ * @brief Report whether a series is drawn by the custom draw pass
+ *
+ * True for muted series and for series whose effective style has glow or
+ * fill; false means the built-in lv_chart series is the renderer.
+ *
+ * @param chart Chart instance
+ * @param series_id Series ID
+ * @return true when the chart's own draw callback renders the series
+ */
+// NAMESPACE_OK: joins this header's global ui_frequency_response_chart_* API
+bool ui_frequency_response_chart_series_uses_custom_draw(ui_frequency_response_chart_t* chart,
+                                                         int series_id);
+
+/**
+ * @brief Show a vertical sweep cursor at freq_hz
+ *
+ * Tints the swept region [range min, freq_hz] and draws a 2px vertical line
+ * in the given color, in the chart's draw-post pass.
+ *
+ * @param chart Chart instance
+ * @param freq_hz Cursor frequency in Hz
+ * @param color Cursor color
+ */
+// NAMESPACE_OK: joins this header's global ui_frequency_response_chart_* API
+void ui_frequency_response_chart_set_cursor(ui_frequency_response_chart_t* chart, float freq_hz,
+                                            lv_color_t color);
+
+/**
+ * @brief Remove the sweep cursor
+ *
+ * @param chart Chart instance
+ */
+// NAMESPACE_OK: joins this header's global ui_frequency_response_chart_* API
+void ui_frequency_response_chart_clear_cursor(ui_frequency_response_chart_t* chart);
 
 // ============================================================================
 // Data Management
@@ -203,6 +345,42 @@ void ui_frequency_response_chart_mark_peak(ui_frequency_response_chart_t* chart,
  */
 void ui_frequency_response_chart_clear_peak(ui_frequency_response_chart_t* chart, int series_id);
 
+/**
+ * @brief One marker on a series' curve
+ *
+ * number > 0 draws a filled dot in the series color carrying that number (1-9);
+ * number == 0 draws a hollow ring. The marker sits on the curve at the data
+ * point nearest freq_hz.
+ */
+// NAMESPACE_OK: joins this header's global ui_frequency_response_chart_* API
+struct FrChartMarker {
+    float freq_hz = 0.0f;
+    int number = 0;
+};
+
+/**
+ * @brief Replace a series' markers (count 0 clears them)
+ */
+// NAMESPACE_OK: joins this header's global ui_frequency_response_chart_* API
+void ui_frequency_response_chart_set_markers(ui_frequency_response_chart_t* chart, int series_id,
+                                             const FrChartMarker* markers, size_t count);
+
+/**
+ * @brief Amplitudes the series currently draws, after any downsampling
+ *        (empty for an unknown series)
+ */
+// NAMESPACE_OK: joins this header's global ui_frequency_response_chart_* API
+[[nodiscard]] std::vector<float>
+ui_frequency_response_chart_get_series_amplitudes(ui_frequency_response_chart_t* chart,
+                                                  int series_id);
+
+/**
+ * @brief Markers currently set on a series (empty for an unknown series)
+ */
+// NAMESPACE_OK: joins this header's global ui_frequency_response_chart_* API
+[[nodiscard]] std::vector<FrChartMarker>
+ui_frequency_response_chart_get_markers(ui_frequency_response_chart_t* chart, int series_id);
+
 // ============================================================================
 // Configuration
 // ============================================================================
@@ -255,6 +433,23 @@ lv_obj_t* ui_frequency_response_chart_get_obj(ui_frequency_response_chart_t* cha
  */
 void ui_frequency_response_chart_configure_for_platform(ui_frequency_response_chart_t* chart,
                                                         helix::PlatformTier tier);
+
+/**
+ * @brief Configure chart for a platform tier with explicit animation support
+ *
+ * Same as the two-argument form, but the caller supplies the platform's
+ * animation support instead of it being read from
+ * PlatformCapabilities::detect() (tests control it this way). The value is
+ * captured once here and gates series styles set afterwards.
+ *
+ * @param chart Chart instance
+ * @param tier Platform tier from PlatformCapabilities
+ * @param supports_animations whether the platform may draw animated effects (glow)
+ */
+// NAMESPACE_OK: joins this header's global ui_frequency_response_chart_* API
+void ui_frequency_response_chart_configure_for_platform(ui_frequency_response_chart_t* chart,
+                                                        helix::PlatformTier tier,
+                                                        bool supports_animations);
 
 /**
  * @brief Get maximum data points for current configuration

@@ -196,7 +196,7 @@ void generate_mesh_quads(bed_mesh_renderer_t* renderer) {
         double grid_spacing_x, grid_spacing_y;
         int plane_cols, plane_rows;
 
-        if (renderer->geometry_computed && renderer->has_bed_bounds) {
+        if (renderer->geometry_computed) {
             // Use FULL BED bounds for the zero plane
             plane_min_x = renderer->bed_min_x;
             plane_max_x = renderer->bed_max_x;

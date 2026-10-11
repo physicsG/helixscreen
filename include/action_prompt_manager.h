@@ -3,7 +3,10 @@
 
 #pragma once
 
+#include "async_lifetime_guard.h"
+
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -30,6 +33,13 @@
  * - `prompt_show` - Display the prompt
  * - `prompt_end` - Close the prompt
  * - `notify <message>` - Show a standalone notification
+ *
+ * ## Threading
+ *
+ * Every state change runs on the main thread. Lines from the WebSocket thread
+ * go through make_line_sink(), which hops them to the main thread, so
+ * process_line() and the on_show/on_close callbacks are always main-thread
+ * calls. is_showing() and current_prompt_name() may be called from any thread.
  *
  * ## Usage
  *
@@ -78,6 +88,17 @@ struct PromptData {
 };
 
 /**
+ * @brief How a prompt's dialog was closed on this screen
+ */
+enum class PromptCloseKind {
+    ButtonWithGcode,    ///< A button tap that sent its own gcode
+    ButtonWithoutGcode, ///< A button with no gcode: a plain dismiss
+    UserDismiss,        ///< Backdrop tap or ESC
+    HotReload,          ///< XML hot reload rebuilt the dialog (dev builds)
+    External,           ///< A system sweep closed it (ctl reset, fault-modal dismissal)
+};
+
+/**
  * @brief Parsed result from an action line
  */
 struct ActionLineResult {
@@ -108,7 +129,13 @@ class ActionPromptManager {
     using NotifyCallback = std::function<void(const std::string&)>;
 
     ActionPromptManager() = default;
-    ~ActionPromptManager() = default;
+    /// Unregisters itself if it is the instance, so the accessors stop reporting its prompt.
+    ~ActionPromptManager();
+
+    /// Echoed back by Klipper as `// action:prompt_end`, which closes the prompt
+    /// on every connected client. Sent when the user closes it here.
+    static constexpr const char* PROMPT_END_GCODE =
+        "RESPOND TYPE=command MSG=\"action:prompt_end\"";
 
     // ========================================================================
     // Static Instance Access
@@ -119,57 +146,55 @@ class ActionPromptManager {
      *
      * Called by Application when the ActionPromptManager is created/destroyed.
      * Enables other translation units (e.g., AmsBackendAfc) to query prompt state.
+     * Main thread only; publishes the instance's current prompt for the accessors.
      *
      * @param instance Pointer to the active manager, or nullptr to clear
      */
-    static void set_instance(ActionPromptManager* instance) {
-        s_instance.store(instance, std::memory_order_release);
-    }
+    static void set_instance(ActionPromptManager* instance);
 
     /**
      * @brief Check if an action prompt is currently being displayed
      *
-     * Thread-safe static accessor (s_instance is atomic). Returns false
-     * if no instance is set or if the manager is not in the SHOWING state.
-     * See current_prompt_name() for relaxed consistency notes.
+     * Safe from any thread: reads only the published title, never the prompt
+     * the main thread is editing. A reader on another thread may see a value
+     * one transition old.
      *
      * @return true if a prompt is currently visible
      */
     [[nodiscard]] static bool is_showing() {
-        auto* inst = s_instance.load(std::memory_order_acquire);
-        return inst != nullptr && inst->has_active_prompt();
+        return std::atomic_load(&s_showing_title) != nullptr;
     }
 
     /**
      * @brief Get the title/name of the currently displayed prompt
      *
-     * Returns the title from prompt_begin if a prompt is currently showing.
-     * Returns empty string if no prompt is active or no instance is set.
-     *
-     * Note: Relaxed consistency — prompt state is only mutated on the main
-     * thread, so reads from the websocket thread may see stale data. Worst
-     * case is a false negative on toast suppression (toast shows when it
-     * could have been suppressed), which is the safe default.
+     * Returns the title from prompt_begin if a prompt is currently showing,
+     * otherwise an empty string. Safe from any thread, with the same staleness
+     * as is_showing().
      *
      * @return Current prompt title, or empty string
      */
     [[nodiscard]] static std::string current_prompt_name() {
-        auto* inst = s_instance.load(std::memory_order_acquire);
-        if (inst == nullptr) {
-            return {};
-        }
-        const auto* prompt = inst->get_current_prompt();
-        if (prompt == nullptr) {
-            return {};
-        }
-        return prompt->title;
+        auto title = std::atomic_load(&s_showing_title);
+        return title ? *title : std::string{};
     }
 
-    // Non-copyable, movable
+    /**
+     * @brief Close the prompt on screen locally, as if prompt_end had arrived
+     *
+     * For a prompt that another dialog already covers. Main thread only.
+     */
+    static void dismiss_active() {
+        if (auto* inst = s_instance.load(std::memory_order_acquire)) {
+            inst->handle_prompt_end();
+        }
+    }
+
+    // Non-copyable, non-movable: make_line_sink() hands out callables bound to `this`
     ActionPromptManager(const ActionPromptManager&) = delete;
     ActionPromptManager& operator=(const ActionPromptManager&) = delete;
-    ActionPromptManager(ActionPromptManager&&) = default;
-    ActionPromptManager& operator=(ActionPromptManager&&) = default;
+    ActionPromptManager(ActionPromptManager&&) = delete;
+    ActionPromptManager& operator=(ActionPromptManager&&) = delete;
 
     // ========================================================================
     // Static Parsing Functions (can be tested without instance)
@@ -234,11 +259,34 @@ class ActionPromptManager {
      * @brief Process a single line from notify_gcode_response
      *
      * Main entry point for feeding lines to the state machine.
-     * Non-action lines are silently ignored.
+     * Non-action lines are silently ignored. Main thread only; other threads
+     * feed lines through make_line_sink().
      *
      * @param line The raw line to process
      */
     void process_line(const std::string& line);
+
+    /**
+     * @brief A callable that feeds lines to process_line() from any thread
+     *
+     * Call on the main thread. The returned callable may run on any thread: it
+     * drops non-action lines where it runs and defers the rest to the main
+     * thread, where they are skipped once this manager is destroyed.
+     */
+    [[nodiscard]] std::function<void(const std::string&)> make_line_sink();
+
+    /**
+     * @brief The showing prompt's dialog was closed on this screen
+     *
+     * Brings the state in line with the screen without firing on_close: the
+     * dialog is already going away. A user close and an External sweep end the
+     * prompt; HotReload keeps it and re-shows it on a later tick. Does nothing
+     * unless a prompt is SHOWING. Telling the firmware is the caller's job.
+     * Main thread only.
+     *
+     * @return true when the caller should send PROMPT_END_GCODE to Klipper
+     */
+    bool closed_on_screen(PromptCloseKind kind);
 
     // ========================================================================
     // Callbacks
@@ -297,8 +345,21 @@ class ActionPromptManager {
     // Static instance for cross-TU access
     static std::atomic<ActionPromptManager*> s_instance;
 
-    // State machine
+    // The registered instance's showing prompt title, for readers on any thread;
+    // null unless it is SHOWING. Readers never touch the instance itself, which
+    // the main thread may be destroying. Accessed only through
+    // std::atomic_load/std::atomic_store.
+    static std::shared_ptr<const std::string> s_showing_title;
+
+    // State machine. Change it through set_state(), which publishes s_showing_title.
     State m_state = State::IDLE;
+
+    // Counts prompt_show transitions, so a deferred re-show can tell its prompt
+    // is still the one on screen.
+    uint64_t m_show_count = 0;
+
+    // Expires the deferred lines of make_line_sink() and re-shows when this manager dies.
+    AsyncLifetimeGuard m_lifetime;
 
     // Current prompt being built or shown
     std::unique_ptr<PromptData> m_current_prompt;
@@ -316,6 +377,9 @@ class ActionPromptManager {
     // Command Handlers
     // ========================================================================
 
+    void set_state(State state);
+    void publish_title() const;
+    void end_showing();
     void handle_prompt_begin(const std::string& payload);
     void handle_prompt_text(const std::string& payload);
     void handle_prompt_button(const std::string& payload, bool is_footer);

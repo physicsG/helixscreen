@@ -5,6 +5,7 @@
 
 #include "ui_busy_overlay.h"
 #include "ui_error_reporting.h"
+#include "ui_filename_utils.h"
 #include "ui_panel_print_status.h"
 #include "ui_pre_print_options_renderer.h"
 #include "ui_temperature_utils.h"
@@ -13,42 +14,98 @@
 #include "active_print_media_manager.h"
 #include "app_globals.h"
 #include "gcode_tool_remapper.h"
+#include "helix_fs.h"
+#include "http_executor.h"
 #include "lvgl/src/others/translation/lv_translation.h"
-#include "macro_modification_manager.h"
+#include "macro_param_cache.h"
 #include "memory_monitor.h"
 #include "memory_utils.h"
 #include "moonraker_manager.h"
 #include "observer_factory.h"
 #include "operation_registry.h"
+#include "preprint_skip_wrappers.h"
 #include "print_start_collector.h"
 #include "system/telemetry_manager.h"
+#include "text_io.h"
 
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdlib>
-#include <filesystem>
-#include <fstream>
+#include <cstring>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
-#include <sstream>
 
 // Forward declaration for global print status panel (declared in ui_panel_print_status.h)
 PrintStatusPanel& get_global_print_status_panel();
 
 namespace helix::ui {
 
+namespace hfs = helix::fs;
+
 // Bring helix:: types into scope for cleaner code
 using helix::CapabilityOrigin;
 using helix::OperationCategory;
+
+namespace {
+
+/// The PRINT_START operations macro analysis can turn into an option, in row order.
+struct MacroOptionId {
+    helix::PrintStartOpCategory category;
+    const char* id;
+    PrePrintCategory group;
+};
+constexpr MacroOptionId MACRO_OPTION_IDS[] = {
+    {helix::PrintStartOpCategory::BED_MESH, "bed_mesh", PrePrintCategory::Mechanical},
+    {helix::PrintStartOpCategory::QGL, "qgl", PrePrintCategory::Mechanical},
+    {helix::PrintStartOpCategory::Z_TILT, "z_tilt", PrePrintCategory::Mechanical},
+    {helix::PrintStartOpCategory::NOZZLE_CLEAN, "nozzle_clean", PrePrintCategory::Quality},
+};
+
+/// The MacroParam option for one of MACRO_OPTION_IDS, or nullopt when the analysis
+/// did not find that operation controllable. Rows and the skip params sent at print
+/// start both come from here, so they cannot disagree.
+std::optional<PrePrintOption>
+macro_option_for(const std::optional<helix::PrintStartAnalysis>& analysis,
+                 const MacroOptionId& entry) {
+    if (!analysis || !analysis->found) {
+        return std::nullopt;
+    }
+    CapabilityMatrix matrix;
+    matrix.add_from_macro_analysis(*analysis);
+    const auto source = matrix.get_best_source(entry.category);
+    if (!source) {
+        return std::nullopt;
+    }
+
+    PrePrintOption opt;
+    opt.id = entry.id;
+    opt.category = entry.group;
+    opt.order = static_cast<int>(&entry - MACRO_OPTION_IDS);
+    opt.default_enabled = true; // the macro runs the operation unless told to skip it
+    opt.strategy_kind = PrePrintStrategyKind::MacroParam;
+    PrePrintStrategyMacroParam param;
+    param.param_name = source->param_name;
+    param.enable_value = source->enable_value;
+    param.skip_value = source->skip_value;
+    opt.strategy = std::move(param);
+    return opt;
+}
+
+} // namespace
 
 // ============================================================================
 // Construction / Destruction
 // ============================================================================
 
 PrintPreparationManager::~PrintPreparationManager() {
+    if (printer_state_) {
+        printer_state_->set_skip_pending_handler(nullptr);
+    }
     // lifetime_ destructor calls invalidate() automatically
 }
 
@@ -59,7 +116,7 @@ PrintPreparationManager::~PrintPreparationManager() {
 const PrePrintOptionSet& PrintPreparationManager::get_cached_options() const {
     // Delegate to PrinterState which owns the cache
     if (printer_state_) {
-        return printer_state_->get_pre_print_option_set();
+        return printer_state_->profile_state().pre_print_option_set();
     }
 
     // Return empty set if PrinterState not set
@@ -115,19 +172,105 @@ PrePrintOptionState PrintPreparationManager::get_option_state(const std::string&
 void PrintPreparationManager::set_dependencies(IMoonrakerAPI* api, PrinterState* printer_state) {
     api_ = api;
     printer_state_ = printer_state;
-
-    // Trigger PRINT_START analysis when connected.
-    // analyze_print_start_macro() checks MacroModificationManager's cache first
-    // to avoid a duplicate HTTP download of printer config files.
-    if (printer_state_) {
-        connection_observer_ = helix::ui::observe_int_sync<PrintPreparationManager>(
-            printer_state_->get_printer_connection_state_subject(), this,
-            [](PrintPreparationManager* self, int state) {
-                if (state == static_cast<int>(ConnectionState::CONNECTED)) {
-                    self->analyze_print_start_macro();
-                }
-            });
+    // Answered now, while the API is known alive: a queued observer handler can
+    // run after its owner has freed it.
+    keeps_local_copies_ = keeps_local_copies(api);
+    if (!printer_state_) {
+        plugin_observer_.reset(); // nothing left to publish to
     }
+
+    if (printer_state_) {
+        connection_observer_ = helix::ui::observe<int>(
+            printer_state_->network_state().get_printer_connection_state_subject(), this,
+            [](PrintPreparationManager* self, int state) { self->on_connection_state(state); },
+            printer_state_->get_subjects_lifetime());
+        klippy_observer_ = helix::ui::observe<int>(
+            printer_state_->network_state().get_klippy_state_subject(), this,
+            [](PrintPreparationManager* self, int state) { self->on_klippy_state(state); },
+            printer_state_->get_subjects_lifetime());
+        job_holds_observer_ = helix::ui::observe<int>(
+            printer_state_->print_state().get_job_holds_machine_subject(), this,
+            [](PrintPreparationManager* self, int) { self->reset_pending_skips(); },
+            printer_state_->get_subjects_lifetime());
+        printer_state_->set_skip_pending_handler([this]() { reset_pending_skips(); });
+        // Whether rewrite-gated macro rows render turns on the plugin and the
+        // transport. Observing fires once now, which covers a new transport.
+        plugin_observer_ = helix::ui::observe<int>(
+            printer_state_->plugin_status_state().get_helix_plugin_installed_subject(), this,
+            [](PrintPreparationManager* self, int) { self->publish_macro_option_count(); },
+            printer_state_->get_subjects_lifetime());
+    }
+}
+
+void PrintPreparationManager::on_connection_state(int state) {
+    const int connected = static_cast<int>(ConnectionState::CONNECTED);
+    const bool reconnected = state == connected && last_connection_state_ != connected;
+    last_connection_state_ = state;
+    if (reconnected) {
+        // A new connection can be a different printer, or one whose config changed.
+        klippy_restarting_ = false;
+        refresh_macro_analysis();
+    } else if (state == connected) {
+        analyze_print_start_macro();
+    }
+}
+
+void PrintPreparationManager::on_klippy_state(int state) {
+    // A restart is how an edited macro takes effect. Klippy reads not-ready
+    // before the first connect too; only a dip seen while connected counts.
+    if (state != static_cast<int>(KlippyState::READY)) {
+        klippy_restarting_ = last_connection_state_ == static_cast<int>(ConnectionState::CONNECTED);
+        return;
+    }
+    if (klippy_restarting_) {
+        klippy_restarting_ = false;
+        refresh_macro_analysis();
+    }
+}
+
+void PrintPreparationManager::reset_pending_skips() {
+    if (!api_ || !printer_state_) {
+        return;
+    }
+    if (!printer_state_->skip_pending()) {
+        skip_reset_sent_ = false;
+        return;
+    }
+    if (skip_reset_sent_ ||
+        lv_subject_get_int(printer_state_->print_state().get_job_holds_machine_subject()) != 0) {
+        return;
+    }
+    skip_reset_sent_ = true;
+    spdlog::info("[PrintPreparationManager] Leveling skip set with no job running; resetting");
+    api_->execute_gcode(
+        helix::skip_wrappers::PREP_MACRO, []() {},
+        [](const MoonrakerError& err) {
+            spdlog::warn("[PrintPreparationManager] Resetting the leveling skips failed: {}",
+                         err.message);
+        },
+        0, true, nullptr, /*caller_surfaces_errors=*/false);
+}
+
+void PrintPreparationManager::refresh_macro_analysis() {
+    macro_analysis_.reset();
+    publish_macro_option_count();
+    if (macro_analysis_in_progress_) {
+        macro_analysis_stale_ = true;
+        return;
+    }
+    analyze_print_start_macro();
+}
+
+bool PrintPreparationManager::restart_stale_macro_analysis() {
+    if (!macro_analysis_stale_) {
+        return false;
+    }
+    macro_analysis_stale_ = false;
+    macro_analysis_retry_count_ = 0;
+    spdlog::debug("[PrintPreparationManager] Printer changed during PRINT_START analysis, "
+                  "analyzing again");
+    analyze_print_start_macro_internal();
+    return true;
 }
 
 void PrintPreparationManager::ensure_estimate_subject_initialized() {
@@ -147,8 +290,9 @@ lv_subject_t* PrintPreparationManager::get_preprint_estimate_subject() {
 }
 
 void PrintPreparationManager::recalculate_estimate() {
-    if (!estimate_subject_initialized_)
-        return;
+    // Callers reach this before any getter fetch (the detail view computes
+    // the estimate on open), so the subject is initialised here.
+    ensure_estimate_subject_initialized();
 
     if (!printer_state_)
         return;
@@ -157,22 +301,19 @@ void PrintPreparationManager::recalculate_estimate() {
 
     // Current temps (decidegrees -> degrees)
     float ext_temp = helix::ui::temperature::deci_to_degrees_f(
-        lv_subject_get_int(printer_state_->get_active_extruder_temp_subject()));
-    float ext_target = helix::ui::temperature::deci_to_degrees_f(
-        lv_subject_get_int(printer_state_->get_active_extruder_target_subject()));
+        lv_subject_get_int(printer_state_->temperature_state().get_active_extruder_temp_subject()));
+    float ext_target = helix::ui::temperature::deci_to_degrees_f(lv_subject_get_int(
+        printer_state_->temperature_state().get_active_extruder_target_subject()));
     float bed_temp = helix::ui::temperature::deci_to_degrees_f(
-        lv_subject_get_int(printer_state_->get_bed_temp_subject()));
+        lv_subject_get_int(printer_state_->temperature_state().get_bed_temp_subject()));
     float bed_target = helix::ui::temperature::deci_to_degrees_f(
-        lv_subject_get_int(printer_state_->get_bed_target_subject()));
+        lv_subject_get_int(printer_state_->temperature_state().get_bed_target_subject()));
 
     float total = 0.0f;
 
     // Heating estimates
     total += mgr.estimate_heating_seconds("extruder", ext_temp, ext_target);
     total += mgr.estimate_heating_seconds("heater_bed", bed_temp, bed_target);
-
-    // Homing always happens
-    total += 20.0f;
 
     // Non-heating ops from predictor (cached to avoid reparsing config JSON on every toggle)
     if (!predictor_cached_) {
@@ -183,6 +324,9 @@ void PrintPreparationManager::recalculate_estimate() {
                                        is_warm ? StartCondition::WARM : StartCondition::COLD);
         predictor_cached_ = true;
     }
+
+    // Homing always happens, and takes the collector's estimate for it
+    total += static_cast<float>(cached_predictor_.predicted_homing_seconds());
     auto phases = cached_predictor_.predicted_phases();
 
     // Add phase estimate if the option is currently enabled. State is read
@@ -204,9 +348,7 @@ void PrintPreparationManager::recalculate_estimate() {
     add_if_enabled("purge_line", static_cast<int>(helix::PrintStartPhase::PURGING), 10.0f);
 
     int estimate_s = static_cast<int>(total);
-    if (lv_subject_get_int(&preprint_estimate_subject_) != estimate_s) {
-        lv_subject_set_int(&preprint_estimate_subject_, estimate_s);
-    }
+    lv_subject_set_int(&preprint_estimate_subject_, estimate_s);
 
     spdlog::debug("[PrintPreparationManager] Pre-print estimate: {}s", estimate_s);
 }
@@ -229,41 +371,11 @@ void PrintPreparationManager::analyze_print_start_macro() {
     // Skip if we already have a cached result
     if (macro_analysis_.has_value()) {
         spdlog::debug("[PrintPreparationManager] Using cached PRINT_START analysis");
+        publish_macro_option_count();
         if (on_macro_analysis_complete_) {
             on_macro_analysis_complete_(*macro_analysis_);
         }
         return;
-    }
-
-    // Check if MacroModificationManager already has a cached analysis from
-    // the discovery-triggered check_and_notify(). Reusing it avoids a
-    // duplicate HTTP download of printer config files (~500ms saved).
-    if (auto* mgr = get_moonraker_manager()) {
-        if (auto* macro_mgr = mgr->macro_analysis()) {
-            const auto& cached = macro_mgr->get_cached_analysis();
-            if (cached.found) {
-                spdlog::debug(
-                    "[PrintPreparationManager] Reusing MacroModificationManager analysis");
-                macro_analysis_ = cached;
-                if (on_macro_analysis_complete_) {
-                    on_macro_analysis_complete_(cached);
-                }
-                return;
-            }
-        }
-    }
-
-    // Check if MacroModificationManager is currently analyzing — defer to its result
-    // instead of starting a duplicate analysis
-    if (auto* mgr = get_moonraker_manager()) {
-        if (auto* macro_mgr = mgr->macro_analysis()) {
-            if (macro_mgr->is_analyzing()) {
-                spdlog::debug("[PrintPreparationManager] MacroModificationManager analysis in "
-                              "progress, deferring");
-                schedule_deferred_macro_check();
-                return;
-            }
-        }
     }
 
     // Reset retry counter when starting fresh
@@ -271,25 +383,6 @@ void PrintPreparationManager::analyze_print_start_macro() {
 
     // Delegate to internal implementation
     analyze_print_start_macro_internal();
-}
-
-void PrintPreparationManager::schedule_deferred_macro_check() {
-    struct DeferData {
-        PrintPreparationManager* mgr;
-        helix::LifetimeToken token;
-    };
-    auto data = std::make_unique<DeferData>(DeferData{this, lifetime_.token()});
-
-    lv_timer_t* timer = lv_timer_create(
-        [](lv_timer_t* t) {
-            std::unique_ptr<DeferData> d(static_cast<DeferData*>(lv_timer_get_user_data(t)));
-            lv_timer_delete(t);
-            if (d && !d->token.expired()) {
-                d->mgr->analyze_print_start_macro();
-            }
-        },
-        500, data.release());
-    lv_timer_set_repeat_count(timer, 1);
 }
 
 void PrintPreparationManager::analyze_print_start_macro_internal() {
@@ -301,6 +394,9 @@ void PrintPreparationManager::analyze_print_start_macro_internal() {
     // Check if WebSocket connection is actually established
     if (api_->get_connection_state() != ConnectionState::CONNECTED) {
         spdlog::debug("[PrintPreparationManager] Deferring PRINT_START analysis - not connected");
+        // A retry can land here mid-analysis; the next connect starts over.
+        macro_analysis_in_progress_ = false;
+        macro_analysis_stale_ = false;
         return;
     }
 
@@ -318,10 +414,14 @@ void PrintPreparationManager::analyze_print_start_macro_internal() {
         // marshals to main via tok.defer (no inline LVGL or member writes).
         [this, token](const helix::PrintStartAnalysis& analysis) {
             token.defer("PrintPreparationManager::macro_analysis_success", [this, analysis]() {
+                if (restart_stale_macro_analysis()) {
+                    return;
+                }
                 spdlog::debug("[PrintPreparationManager] PRINT_START analysis complete: {}",
                               analysis.summary());
                 macro_analysis_ = analysis;
                 macro_analysis_in_progress_ = false;
+                publish_macro_option_count();
                 if (on_macro_analysis_complete_) {
                     on_macro_analysis_complete_(analysis);
                 }
@@ -330,6 +430,9 @@ void PrintPreparationManager::analyze_print_start_macro_internal() {
         // Error callback - runs on HTTP thread; same pattern as success.
         [this, token](const MoonrakerError& error) {
             token.defer("PrintPreparationManager::macro_analysis_error", [this, error]() {
+                if (restart_stale_macro_analysis()) {
+                    return;
+                }
                 spdlog::warn(
                     "[PrintPreparationManager] PRINT_START analysis failed (attempt {}): {}",
                     macro_analysis_retry_count_ + 1, error.message);
@@ -378,6 +481,7 @@ void PrintPreparationManager::analyze_print_start_macro_internal() {
                 helix::PrintStartAnalysis not_found;
                 not_found.found = false;
                 macro_analysis_ = not_found;
+                publish_macro_option_count();
                 if (on_macro_analysis_complete_) {
                     on_macro_analysis_complete_(not_found);
                 }
@@ -385,39 +489,25 @@ void PrintPreparationManager::analyze_print_start_macro_internal() {
         });
 }
 
-bool PrintPreparationManager::is_macro_op_controllable(helix::PrintStartOpCategory category) const {
-    if (!macro_analysis_.has_value() || !macro_analysis_->found) {
-        return false;
+PrePrintOptionSet PrintPreparationManager::displayed_options() const {
+    PrePrintOptionSet displayed = get_cached_options();
+    const bool database_declares_options =
+        printer_state_ &&
+        !PrinterDetector::get_pre_print_option_set(printer_state_->profile_state().printer_type())
+             .options.empty();
+    if (database_declares_options) {
+        return displayed;
     }
-
-    const auto* op = macro_analysis_->get_operation(category);
-    return op && op->has_skip_param;
-}
-
-std::string
-PrintPreparationManager::get_macro_skip_param(helix::PrintStartOpCategory category) const {
-    if (!macro_analysis_.has_value() || !macro_analysis_->found) {
-        return "";
+    for (const auto& entry : MACRO_OPTION_IDS) {
+        if (displayed.find(entry.id)) {
+            continue;
+        }
+        if (auto opt = macro_option_for(macro_analysis_, entry)) {
+            displayed.options.push_back(std::move(*opt));
+        }
     }
-
-    const auto* op = macro_analysis_->get_operation(category);
-    if (op && op->has_skip_param) {
-        return op->skip_param_name;
-    }
-    return "";
-}
-
-helix::ParameterSemantic
-PrintPreparationManager::get_macro_param_semantic(helix::PrintStartOpCategory category) const {
-    if (!macro_analysis_.has_value() || !macro_analysis_->found) {
-        return helix::ParameterSemantic::OPT_OUT; // Default assumption
-    }
-
-    const auto* op = macro_analysis_->get_operation(category);
-    if (op && op->has_skip_param) {
-        return op->param_semantic;
-    }
-    return helix::ParameterSemantic::OPT_OUT; // Default assumption
+    sort_pre_print_options(displayed.options);
+    return displayed;
 }
 
 // ============================================================================
@@ -448,12 +538,35 @@ CapabilityMatrix PrintPreparationManager::build_capability_matrix() const {
 
 void PrintPreparationManager::set_macro_analysis(const helix::PrintStartAnalysis& analysis) {
     macro_analysis_ = analysis;
+    publish_macro_option_count();
+}
+
+// The options card shows only when some row will render, and the rows this
+// analysis adds are invisible to PrinterState otherwise.
+void PrintPreparationManager::publish_macro_option_count() {
+    if (!printer_state_) {
+        return;
+    }
+    const PrePrintOptionSet displayed = displayed_options();
+    const PrePrintOptionSet& declared = get_cached_options();
+    size_t macro_rows = displayed.options.size() - declared.options.size();
+    // A row the detail view hides for want of a rewrite never renders, so it
+    // cannot be what makes the options card worth showing.
+    if (helix::gcode_rewrite_available(gcode_rewrite_block()) == 0) {
+        for (const auto& opt : displayed.options) {
+            if (!declared.find(opt.id) && disabling_option_requires_plugin(opt)) {
+                --macro_rows;
+            }
+        }
+    }
+    printer_state_->set_macro_option_count(macro_rows);
 }
 
 void PrintPreparationManager::set_cached_scan_result(const gcode::ScanResult& scan,
                                                      const std::string& filename) {
     cached_scan_result_ = scan;
     cached_scan_filename_ = filename;
+    cached_scan_key_ = filename;
 }
 
 // ============================================================================
@@ -461,80 +574,172 @@ void PrintPreparationManager::set_cached_scan_result(const gcode::ScanResult& sc
 // ============================================================================
 
 void PrintPreparationManager::scan_file_for_operations(const std::string& filename,
-                                                       const std::string& current_path) {
-    // Skip if already cached for this file
-    if (cached_scan_filename_ == filename && cached_scan_result_.has_value()) {
-        spdlog::debug("[PrintPreparationManager] Using cached scan result for {}", filename);
+                                                       const std::string& current_path,
+                                                       const std::string& local_path) {
+    // The cached result is reusable only while its printer-stopping command
+    // answer still holds. An answer computed before the printer's macros were
+    // read, or against a macro set it has since replaced, says nothing about
+    // this printer, so the file is scanned again.
+    const std::string file_path = current_path.empty() ? filename : current_path + "/" + filename;
+    const std::string key = local_path.empty() ? file_path : local_path;
+    if (cached_scan_key_ == key && cached_scan_filename_ == filename &&
+        cached_scan_result_.has_value() && has_printer_stop_answer_for(filename)) {
+        spdlog::debug("[PrintPreparationManager] Using cached scan result for {}", key);
         return;
+    }
+    // Every answer below belongs to this key; a same-named file's answer must
+    // not stand in for it while this one is pending.
+    requested_scan_key_ = key;
+    if (cached_scan_key_ != key) {
+        cached_scan_result_.reset();
+        cached_scan_filename_.clear();
+        printer_stop_check_filename_.clear();
     }
 
     if (!api_) {
         spdlog::warn("[PrintPreparationManager] Cannot scan G-code - no API connection");
+        answer_printer_stop_check(filename, helix::printer_stop_not_run("no printer connection"));
         return;
     }
 
-    // Build path for download
-    std::string file_path = current_path.empty() ? filename : current_path + "/" + filename;
+    if (helix::gcode::is_3mf(filename)) {
+        // An empty result, not none: every cache reader must stop seeing the
+        // previously opened file's operations.
+        cached_scan_result_ = gcode::ScanResult{};
+        cached_scan_filename_ = filename;
+        cached_scan_key_ = key;
+        answer_printer_stop_check(filename,
+                                  printer_stop_not_run("a .3mf project holds no G-code to scan"));
+        return;
+    }
 
     spdlog::info("[PrintPreparationManager] Scanning G-code for embedded operations: {}",
-                 file_path);
+                 local_path.empty() ? file_path : local_path);
 
     auto token = lifetime_.token();
 
-    // Use partial download - only first 200KB is needed for preamble scanning
-    // (thumbnails + slicer metadata + START_PRINT call + any early G-code ops)
-    // This avoids downloading multi-MB files just to scan the first few hundred lines
-    constexpr size_t SCAN_DOWNLOAD_LIMIT = 200 * 1024; // 200KB
+    // Only the file's head is needed for preamble scanning (thumbnails + slicer
+    // metadata + START_PRINT call + any early G-code ops), which avoids
+    // downloading multi-MB files just to scan the first few hundred lines.
+    // Both callbacks run on a background thread: parse there, then defer the
+    // shared state updates to the main thread.
+    auto on_content = [this, token, filename, key](const std::string& content) {
+        gcode::GCodeOpsDetector detector;
+        auto scan_result = detector.scan_content(content);
+        // The whole downloaded head, not the detector's shorter op window:
+        // a large thumbnail block can push the definitions past that.
+        scan_result.objects = gcode::collect_exclude_object_defines(content);
+
+        if (scan_result.operations.empty()) {
+            spdlog::debug("[PrintPreparationManager] No embedded operations found in {}", filename);
+        } else {
+            spdlog::info("[PrintPreparationManager] Found {} embedded operations in {}:",
+                         scan_result.operations.size(), filename);
+            for (const auto& op : scan_result.operations) {
+                spdlog::info("[PrintPreparationManager]   - {} at line {} ({})", op.display_name(),
+                             op.line_number, op.raw_line.substr(0, 50));
+            }
+        }
+
+        helix::PrinterStopCheck stop_check =
+            helix::printer_stop_check_in(content, helix::PRINTER_STOP_SCAN_BYTES);
+        if (stop_check.state == helix::PrinterStopCheck::State::Stops) {
+            spdlog::warn("[PrintPreparationManager] {} line {} calls {}, which stops this printer",
+                         filename, stop_check.line_number, stop_check.command);
+        }
+
+        token.defer("PrintPreparationManager::scan_success",
+                    [this, filename, key, scan_result, stop_check]() {
+                        if (key != requested_scan_key_) {
+                            return;
+                        }
+                        cached_scan_result_ = scan_result;
+                        cached_scan_filename_ = filename;
+                        cached_scan_key_ = key;
+                        answer_printer_stop_check(filename, stop_check);
+                    });
+    };
+    // A failed read just logs; it never blocks the UI.
+    auto on_failure = [this, token, filename, key](const std::string& message) {
+        spdlog::warn("[PrintPreparationManager] Failed to scan G-code {}: {}", filename, message);
+        std::string reason = "the file could not be read: " + message;
+        token.defer("PrintPreparationManager::scan_error", [this, filename, key, reason]() {
+            if (key != requested_scan_key_) {
+                return;
+            }
+            cached_scan_result_.reset();
+            cached_scan_filename_.clear();
+            cached_scan_key_.clear();
+            answer_printer_stop_check(filename, helix::printer_stop_not_run(reason));
+        });
+    };
+
+    // A bounded read, on the fast lane: the slow lane's one worker can sit
+    // behind a multi-minute upload.
+    if (!local_path.empty()) {
+        helix::http::HttpExecutor::fast().submit([local_path, on_content, on_failure]() {
+            auto head = helix::text_io::read_file(local_path, helix::PRINTER_STOP_SCAN_BYTES);
+            if (!head) {
+                on_failure("cannot read " + local_path);
+                return;
+            }
+            on_content(*head);
+        });
+        return;
+    }
 
     api_->transfers().download_file_partial(
-        "gcodes", file_path, SCAN_DOWNLOAD_LIMIT,
-        // Success: parse content and cache result
-        // NOTE: This callback runs on a background HTTP thread, so we must defer
-        // shared state updates and LVGL calls to the main thread via lv_async_call
-        [this, token, filename](const std::string& content) {
-            // Parse on background thread (safe - no shared state access)
-            gcode::GCodeOpsDetector detector;
-            auto scan_result = detector.scan_content(content);
-
-            // Log on background thread (spdlog is thread-safe)
-            if (scan_result.operations.empty()) {
-                spdlog::debug("[PrintPreparationManager] No embedded operations found in {}",
-                              filename);
-            } else {
-                spdlog::info("[PrintPreparationManager] Found {} embedded operations in {}:",
-                             scan_result.operations.size(), filename);
-                for (const auto& op : scan_result.operations) {
-                    spdlog::info("[PrintPreparationManager]   - {} at line {} ({})",
-                                 op.display_name(), op.line_number, op.raw_line.substr(0, 50));
-                }
-            }
-
-            token.defer("PrintPreparationManager::scan_success", [this, filename, scan_result]() {
-                cached_scan_result_ = scan_result;
-                cached_scan_filename_ = filename;
-            });
-        },
-        // Error: just log, don't block the UI
-        // NOTE: Also runs on background thread
-        [this, token, filename](const MoonrakerError& error) {
-            spdlog::warn("[PrintPreparationManager] Failed to scan G-code {}: {}", filename,
-                         error.message);
-
-            token.defer("PrintPreparationManager::scan_error", [this]() {
-                cached_scan_result_.reset();
-                cached_scan_filename_.clear();
-            });
-        });
+        "gcodes", file_path, helix::PRINTER_STOP_SCAN_BYTES, on_content,
+        [on_failure](const MoonrakerError& error) { on_failure(error.message); });
 }
 
 void PrintPreparationManager::clear_scan_cache() {
     cached_scan_result_.reset();
     cached_scan_filename_.clear();
+    cached_scan_key_.clear();
+    requested_scan_key_.clear();
     cached_file_size_.reset();
+    printer_stop_check_ = {};
+    printer_stop_check_filename_.clear();
+}
+
+helix::PrinterStopCheck
+PrintPreparationManager::printer_stop_check_for(const std::string& filename) const {
+    if (has_printer_stop_answer_for(filename)) {
+        return printer_stop_check_;
+    }
+    return helix::printer_stop_not_run(
+        "the file scan has not answered for the printer's current macros");
+}
+
+bool PrintPreparationManager::has_printer_stop_answer_for(const std::string& filename) const {
+    return !filename.empty() && printer_stop_check_filename_ == filename &&
+           printer_stop_check_.macro_generation == helix::MacroParamCache::instance().generation();
+}
+
+void PrintPreparationManager::set_on_scan_answered(std::function<void()> cb) {
+    on_scan_answered_ = std::move(cb);
+}
+
+void PrintPreparationManager::answer_printer_stop_check(const std::string& filename,
+                                                        helix::PrinterStopCheck check) {
+    printer_stop_check_ = std::move(check);
+    printer_stop_check_filename_ = filename;
+    if (on_scan_answered_) {
+        on_scan_answered_();
+    }
 }
 
 bool PrintPreparationManager::has_scan_result_for(const std::string& filename) const {
     return cached_scan_filename_ == filename && cached_scan_result_.has_value();
+}
+
+const gcode::PrintStartCallInfo*
+PrintPreparationManager::print_start_for(const std::string& filename) const {
+    if (!has_scan_result_for(filename) || !cached_scan_result_->print_start.found) {
+        return nullptr;
+    }
+    return &cached_scan_result_->print_start;
 }
 
 // ============================================================================
@@ -552,29 +757,38 @@ std::string PrintPreparationManager::get_temp_directory() const {
     return get_helix_cache_dir("gcode_temp");
 }
 
-ModificationCapability PrintPreparationManager::check_modification_capability() const {
-    ModificationCapability result;
+bool PrintPreparationManager::can_modify_gcode() const {
+    return gcode_rewrite_block() == GcodeRewriteBlock::None;
+}
 
-    // Pre-print modifications require the HelixPrint plugin to keep print history clean.
-    // Without the plugin, modified files show up as ugly temp file names in Moonraker's
-    // job history (e.g., ".helix_temp/modified_1766807545_filename.gcode").
-    // The plugin handles this by creating symlinks and patching history metadata.
-    if (printer_state_ && printer_state_->service_has_helix_plugin()) {
-        result.can_modify = true;
-        result.has_plugin = true;
-        result.has_disk_space = true;
-        result.reason = "Using server-side plugin";
-        spdlog::debug("[PrintPreparationManager] Plugin available - modifications enabled");
-        return result;
-    }
+GcodeRewriteBlock PrintPreparationManager::gcode_rewrite_block() const {
+    return rewrite_block_with(printer_state_, keeps_local_copies_);
+}
 
-    // No plugin = no modifications. This prevents print history clutter.
-    result.can_modify = false;
-    result.has_plugin = false;
-    result.has_disk_space = false;
-    result.reason = "Requires HelixPrint plugin";
-    spdlog::debug("[PrintPreparationManager] No plugin - modifications disabled");
-    return result;
+GcodeRewriteBlock PrintPreparationManager::gcode_rewrite_block_for(PrinterState* printer_state,
+                                                                   IMoonrakerAPI* api) {
+    return rewrite_block_with(printer_state, keeps_local_copies(api));
+}
+
+GcodeRewriteBlock PrintPreparationManager::rewrite_block_with(PrinterState* printer_state,
+                                                              bool local_copies) {
+    // Pre-print modifications rewrite the job file, and the plugin is what puts
+    // the original filename back in Moonraker's history afterwards. Without it
+    // finished jobs are listed as ".helix_temp/modified_1766807545p_name.gcode",
+    // so we decline rather than clutter the history. No printer state reads as
+    // the plugin absent.
+    const int plugin =
+        printer_state ? printer_state->plugin_status_state().helix_plugin_state() : 0;
+    return helix::gcode_rewrite_block(plugin, local_copies);
+}
+
+bool PrintPreparationManager::keeps_local_copies(IMoonrakerAPI* api) {
+    // No API is refused where a download would start, not here.
+    return api == nullptr || api->transfers().supports_local_copies();
+}
+
+bool PrintPreparationManager::transport_keeps_local_copies() const {
+    return keeps_local_copies_;
 }
 
 // ============================================================================
@@ -605,7 +819,7 @@ void PrintPreparationManager::start_print(const std::string& filename,
     // Snapshot whether this start is under a preparing job. Only then does the
     // job disappearing later mean the user cancelled; a caller that never armed
     // one must still be able to start a print.
-    armed_at_start_ = printer_state_ && printer_state_->has_preparing_job();
+    armed_at_start_ = printer_state_ && printer_state_->print_state().has_preparing_job();
 
     if (!api_) {
         spdlog::error("[PrintPreparationManager] Cannot start print - not connected to printer");
@@ -709,6 +923,11 @@ void PrintPreparationManager::start_print(const std::string& filename,
     // block to Klipper as a single gcode_script.
     const auto& db_options = get_cached_options();
     std::vector<std::string> pre_start_lines = collect_pre_start_gcode_lines(filename_to_print);
+    // A skip an earlier print left unconsumed must not ride into this one,
+    // including for a step whose toggle is hidden now.
+    if (printer_state_ && !printer_state_->get_discovery().skip_active().empty()) {
+        pre_start_lines.insert(pre_start_lines.begin(), helix::skip_wrappers::PREP_MACRO);
+    }
     const bool emit_printer_setup = !macro_skip_params.empty() && !db_options.setup_gcode.empty();
     std::string combined =
         build_pre_start_gcode_block(db_options.setup_gcode, pre_start_lines, emit_printer_setup);
@@ -724,7 +943,7 @@ void PrintPreparationManager::start_print(const std::string& filename,
         // into the collector's own adaptive timeout.
         if (auto* mgr = get_moonraker_manager()) {
             if (auto collector = mgr->print_start_collector()) {
-                collector->note_host_side_pre_start();
+                collector->note_host_side_pre_start(combined);
             }
         }
 
@@ -735,7 +954,13 @@ void PrintPreparationManager::start_print(const std::string& filename,
         // ack can be judged on whether the job it belongs to still exists
         // rather than on how long it took to arrive.
         pre_start_epoch_ =
-            printer_state_ ? lv_subject_get_int(printer_state_->get_preparing_epoch_subject()) : 0;
+            printer_state_
+                ? lv_subject_get_int(printer_state_->print_state().get_preparing_epoch_subject())
+                : 0;
+        // The busy gate must not queue this send fire-and-forget: its on_success
+        // is the only trigger that launches the job, so a discretionary block
+        // (a pre_start_gcode heater template) would never fire it and the print
+        // would never start.
         api_->execute_gcode(
             combined,
             [this, token, filename_to_print, ops_to_disable, on_navigate_to_status,
@@ -758,7 +983,9 @@ void PrintPreparationManager::start_print(const std::string& filename,
                                                              wrapped_completion);
                             });
             },
-            IMoonrakerAPI::PRE_START_MACRO_TIMEOUT_MS);
+            IMoonrakerAPI::PRE_START_MACRO_TIMEOUT_MS,
+            /*silent=*/false, /*on_queued=*/nullptr, /*caller_surfaces_errors=*/true,
+            /*bypass_busy_gate=*/true);
         return;
     }
 
@@ -768,37 +995,15 @@ void PrintPreparationManager::start_print(const std::string& filename,
 
     if (needs_file_modification || needs_macro_params) {
         helix::MemoryMonitor::log_now("print_modification_start", spdlog::level::debug);
-        // SAFETY CHECK: Verify we can safely modify the G-code file
-        // On resource-constrained devices (e.g., AD5M with 512MB RAM), loading large
-        // G-code files into memory can exhaust resources and crash both Moonraker and Klipper.
-        ModificationCapability capability = check_modification_capability();
-
-        if (!capability.can_modify) {
-            spdlog::warn("[PrintPreparationManager] Cannot modify G-code safely: {}",
-                         capability.reason);
-            spdlog::warn(
-                "[PrintPreparationManager] Skipping modification - printing original file");
-            // Name the features being dropped. "Cannot modify G-code" alone left
-            // the user guessing which of the print dialog's controls it referred
-            // to — #1269 was filed against filament remapping, which does not
-            // touch G-code at all, because the toast fires at the same moment.
-            const std::string dropped = describe_dropped_modifications(ops_to_disable);
+        if (!can_modify_gcode()) {
+            warn_modifications_dropped(ops_to_disable);
             // Clear modifications so we fall through to normal print path
             ops_to_disable.clear();
             macro_skip_params.clear();
-            // Show user notification about skipped modification
-            if (dropped.empty()) {
-                NOTIFY_WARNING(lv_tr("Cannot modify G-code: {}. Printing original file."),
-                               capability.reason);
-            } else {
-                NOTIFY_WARNING(lv_tr("{} needs the HelixPrint plugin. Printing original file."),
-                               dropped);
-            }
         } else {
-            spdlog::info("[PrintPreparationManager] Modifying G-code: {} file ops, {} macro params "
-                         "(method: {})",
-                         ops_to_disable.size(), macro_skip_params.size(),
-                         capability.has_plugin ? "server-side plugin" : "streaming fallback");
+            spdlog::info("[PrintPreparationManager] Modifying G-code server-side: {} file ops, "
+                         "{} macro params",
+                         ops_to_disable.size(), macro_skip_params.size());
             modify_and_print(filename_to_print, ops_to_disable, macro_skip_params,
                              on_navigate_to_status);
             return; // modify_and_print handles everything including navigation
@@ -812,7 +1017,7 @@ void PrintPreparationManager::start_print(const std::string& filename,
 }
 
 bool PrintPreparationManager::is_print_in_progress() const {
-    return printer_state_ && printer_state_->is_print_in_progress();
+    return printer_state_ && printer_state_->print_state().is_print_in_progress();
 }
 
 // ============================================================================
@@ -839,6 +1044,22 @@ std::optional<gcode::OperationType> file_embeddable_op_for_id(const std::string&
     return std::nullopt;
 }
 
+// Whether turning this option off may strip its op out of the sliced file. Not
+// when a self-storing firmware holds the option's value (supplied through
+// preprint_prefs::read_persisted_defaults()): that firmware skips the file's
+// own command when its setting is off, so the option only drives its
+// pre-start line. Nor for a leveling-skip toggle: its wrapper intercepts the
+// file's own command too. Every other option may.
+bool option_may_strip_file(const PrePrintOption& opt) {
+    return !opt.default_from_firmware && !helix::skip_wrappers::is_wrapper_option(opt);
+}
+
+// Transfer callbacks run on the HTTP thread. BusyOverlay is process-wide, so
+// these updates belong to no object and still run if the manager is gone.
+void queue_busy_hide() {
+    helix::ui::queue_update("PrintPreparationManager::busy_hide", []() { BusyOverlay::hide(); });
+}
+
 } // namespace
 
 std::vector<gcode::OperationType> PrintPreparationManager::collect_ops_to_disable() const {
@@ -853,11 +1074,19 @@ std::vector<gcode::OperationType> PrintPreparationManager::collect_ops_to_disabl
     // State resolution flows through the new framework via get_option_state(id).
     for (const char* id : {"bed_mesh", "qgl", "z_tilt", "nozzle_clean"}) {
         const std::optional<gcode::OperationType> op = file_embeddable_op_for_id(id);
-        if (get_option_state(id) == PrePrintOptionState::DISABLED &&
-            cached_scan_result_->has_operation(*op)) {
-            ops_to_disable.push_back(*op);
-            spdlog::debug("[PrintPreparationManager] User disabled '{}', file has it embedded", id);
+        if (get_option_state(id) != PrePrintOptionState::DISABLED ||
+            !cached_scan_result_->has_operation(*op)) {
+            continue;
         }
+        const PrePrintOption* opt = get_cached_options().find(id);
+        if (opt && !option_may_strip_file(*opt)) {
+            spdlog::debug("[PrintPreparationManager] '{}' is gated by the firmware's stored "
+                          "setting, leaving the file's embedded op alone",
+                          id);
+            continue;
+        }
+        ops_to_disable.push_back(*op);
+        spdlog::debug("[PrintPreparationManager] User disabled '{}', file has it embedded", id);
     }
 
     return ops_to_disable;
@@ -870,7 +1099,8 @@ bool PrintPreparationManager::disabling_option_requires_plugin(const PrePrintOpt
     //     embedded in the currently-scanned file?
     const std::optional<gcode::OperationType> embedded_op = file_embeddable_op_for_id(opt.id);
     const bool file_embedded = embedded_op.has_value() && cached_scan_result_.has_value() &&
-                               cached_scan_result_->has_operation(*embedded_op);
+                               cached_scan_result_->has_operation(*embedded_op) &&
+                               option_may_strip_file(opt);
 
     // (b) is the MacroParam skip-rewrite path. If neither (a) nor a MacroParam
     //     skip is in play, nothing about this option needs the plugin.
@@ -878,30 +1108,53 @@ bool PrintPreparationManager::disabling_option_requires_plugin(const PrePrintOpt
         return false;
     }
 
-    // Would start_print() short-circuit into a plugin-free pre-start path BEFORE
-    // reaching check_modification_capability()? That happens when a pre-start
-    // gcode block is emitted:
-    //   - printer-level setup_gcode fires (it is gated on a MacroParam skip
-    //     being present — see emit_printer_setup in start_print()), OR
-    //   - any per-option PreStartGcode line is present.
-    // In that path, embedded-op removal goes through modify_and_print (streaming,
-    // no capability check) and the MacroParam skip is handled by the native
-    // setup_gcode macro — so the plugin is NOT required. This is exactly the K2
-    // Plus PREPARE case (MacroParam bed_mesh + setup_gcode): it must stay visible
-    // even without the plugin. Note this makes (a) narrower than "file-embedded
-    // always needs the plugin": a printer with a pre-start mechanism strips the
-    // embedded op without one.
+    // Does disabling it still do something without the plugin? A PreStartGcode
+    // option always emits its own line. A MacroParam skip rides a pre-start
+    // block: printer-level setup_gcode (gated on a MacroParam skip, see
+    // emit_printer_setup in start_print()) or any PreStartGcode line. This is
+    // the K2 Plus PREPARE case (MacroParam bed_mesh + setup_gcode), which must
+    // stay visible without the plugin.
     const auto& option_set = get_cached_options();
-    const bool setup_gcode_fires = is_macro_param && !option_set.setup_gcode.empty();
-    const bool pre_start_lines_present = !collect_pre_start_gcode_lines().empty();
-    if (setup_gcode_fires || pre_start_lines_present) {
+    const bool pre_start_block =
+        !option_set.setup_gcode.empty() || !collect_pre_start_gcode_lines({}, false).empty();
+    if (opt.strategy_kind == PrePrintStrategyKind::PreStartGcode ||
+        (is_macro_param && pre_start_block)) {
         return false;
     }
 
-    // No short-circuit: start_print() reaches check_modification_capability(),
-    // which warns "Requires HelixPrint plugin" and drops the modification when
-    // the plugin is absent. So disabling this option genuinely needs the plugin.
+    // Left: an embedded-op strip or a MacroParam rewrite of the START_PRINT
+    // call, both of which every start path drops when the plugin is absent.
     return true;
+}
+
+void PrintPreparationManager::warn_modifications_dropped(
+    const std::vector<gcode::OperationType>& ops_to_disable) const {
+    // Name the features being dropped: "Cannot modify G-code" alone leaves the
+    // user guessing which of the print dialog's controls it refers to (#1269).
+    const std::string dropped = describe_dropped_modifications(ops_to_disable);
+    if (gcode_rewrite_block() == GcodeRewriteBlock::NoLocalCopies) {
+        // Installing the plugin would change nothing here, so it goes unnamed.
+        spdlog::warn("[PrintPreparationManager] Transport keeps no local copy - skipping "
+                     "modification, printing original file");
+        if (dropped.empty()) {
+            NOTIFY_WARNING(
+                lv_tr("Modifying G-code is not available on this device. Printing original file."));
+        } else {
+            NOTIFY_WARNING(lv_tr("{} is not available on this device. Printing original file."),
+                           dropped);
+        }
+        return;
+    }
+    spdlog::warn("[PrintPreparationManager] No HelixPrint plugin - skipping modification, "
+                 "printing original file");
+    if (dropped.empty()) {
+        // A fixed sentence rather than an interpolated reason, so no English
+        // fragment shows up in other locales.
+        NOTIFY_WARNING(
+            lv_tr("Modifying G-code needs the HelixPrint plugin. Printing original file."));
+    } else {
+        NOTIFY_WARNING(lv_tr("{} needs the HelixPrint plugin. Printing original file."), dropped);
+    }
 }
 
 // Translated, comma-joined names of the features a dropped modification would
@@ -935,25 +1188,14 @@ std::string PrintPreparationManager::describe_dropped_modifications(
     }
 
     // LAYER 2 mirror: collect_macro_skip_params() also emits for ops the DB
-    // never declared, picked up from PRINT_START analysis. Those have no
-    // PrePrintOption to read a label from, so synthesize one — label_key_for()
-    // carries hardcoded names for exactly these four legacy ids.
-    if (macro_analysis_.has_value() && macro_analysis_->found) {
-        const std::pair<helix::PrintStartOpCategory, const char*> categories[] = {
-            {helix::PrintStartOpCategory::BED_MESH, "bed_mesh"},
-            {helix::PrintStartOpCategory::QGL, "qgl"},
-            {helix::PrintStartOpCategory::Z_TILT, "z_tilt"},
-            {helix::PrintStartOpCategory::NOZZLE_CLEAN, "nozzle_clean"},
-        };
-        for (const auto& [cat, id] : categories) {
-            if (covered.count(id) || !is_macro_op_controllable(cat) ||
-                get_option_state(id) != PrePrintOptionState::DISABLED ||
-                get_macro_skip_param(cat).empty()) {
-                continue;
-            }
-            PrePrintOption synthetic;
-            synthetic.id = id;
-            names.push_back(PrePrintOptionsRenderer::label_for(synthetic));
+    // never declared, picked up from PRINT_START analysis.
+    for (const auto& entry : MACRO_OPTION_IDS) {
+        if (covered.count(entry.id) ||
+            get_option_state(entry.id) != PrePrintOptionState::DISABLED) {
+            continue;
+        }
+        if (auto synthetic = macro_option_for(macro_analysis_, entry)) {
+            names.push_back(PrePrintOptionsRenderer::label_for(*synthetic));
         }
     }
 
@@ -989,13 +1231,13 @@ std::string PrintPreparationManager::describe_dropped_modifications(
 // macro runs its own default mesh, which is exactly what happens today after
 // the drop - minus the warning.
 bool PrintPreparationManager::adaptive_emit_is_deliverable() const {
-    if (check_modification_capability().can_modify) {
+    if (can_modify_gcode()) {
         return true;
     }
     if (!get_cached_options().setup_gcode.empty()) {
         return true;
     }
-    return !collect_pre_start_gcode_lines().empty();
+    return !collect_pre_start_gcode_lines({}, false).empty();
 }
 
 std::vector<std::pair<std::string, std::string>>
@@ -1093,34 +1335,18 @@ PrintPreparationManager::collect_macro_skip_params() const {
     // LAYER 2: Macro analysis. Picks up ops the DB didn't cover (e.g. QGL on a
     // Voron whose entry only declares bed_mesh). DB-handled ids are skipped to
     // avoid double-emission.
-    if (macro_analysis_.has_value() && macro_analysis_->found) {
-        auto emit_if_disabled = [this, &skip_params, &handled_ids](helix::PrintStartOpCategory cat,
-                                                                   const std::string& id) {
-            if (handled_ids.count(id)) {
-                return;
-            }
-            if (!is_macro_op_controllable(cat)) {
-                return;
-            }
-            if (get_option_state(id) != PrePrintOptionState::DISABLED) {
-                return;
-            }
-            std::string param = get_macro_skip_param(cat);
-            if (param.empty()) {
-                return;
-            }
-            auto semantic = get_macro_param_semantic(cat);
-            // OPT_OUT (SKIP_*): "1" means skip. OPT_IN (PERFORM_*): "0" means don't do.
-            std::string value = (semantic == helix::ParameterSemantic::OPT_OUT) ? "1" : "0";
-            skip_params.emplace_back(param, value);
-            spdlog::debug("[PrintPreparationManager] Macro-analysis param: {}={} (id={})", param,
-                          value, id);
-        };
-
-        emit_if_disabled(helix::PrintStartOpCategory::BED_MESH, "bed_mesh");
-        emit_if_disabled(helix::PrintStartOpCategory::QGL, "qgl");
-        emit_if_disabled(helix::PrintStartOpCategory::Z_TILT, "z_tilt");
-        emit_if_disabled(helix::PrintStartOpCategory::NOZZLE_CLEAN, "nozzle_clean");
+    for (const auto& entry : MACRO_OPTION_IDS) {
+        if (handled_ids.count(entry.id) ||
+            get_option_state(entry.id) != PrePrintOptionState::DISABLED) {
+            continue;
+        }
+        const auto opt = macro_option_for(macro_analysis_, entry);
+        const auto* param = opt ? std::get_if<PrePrintStrategyMacroParam>(&opt->strategy) : nullptr;
+        if (param) {
+            skip_params.emplace_back(param->param_name, param->skip_value);
+            spdlog::debug("[PrintPreparationManager] Macro-analysis param: {}={} (id={})",
+                          param->param_name, param->skip_value, entry.id);
+        }
     }
 
     if (!skip_params.empty()) {
@@ -1132,7 +1358,8 @@ PrintPreparationManager::collect_macro_skip_params() const {
 }
 
 std::vector<std::string>
-PrintPreparationManager::collect_pre_start_gcode_lines(const std::string& filename) const {
+PrintPreparationManager::collect_pre_start_gcode_lines(const std::string& filename,
+                                                       bool with_skip_toggles) const {
     std::vector<std::string> lines;
 
     const auto& db_options = get_cached_options();
@@ -1141,7 +1368,8 @@ PrintPreparationManager::collect_pre_start_gcode_lines(const std::string& filena
     }
 
     for (const auto& opt : db_options.options) {
-        if (opt.strategy_kind != PrePrintStrategyKind::PreStartGcode) {
+        if (opt.strategy_kind != PrePrintStrategyKind::PreStartGcode ||
+            (!with_skip_toggles && helix::skip_wrappers::is_wrapper_option(opt))) {
             continue;
         }
 
@@ -1182,10 +1410,9 @@ PrintPreparationManager::collect_pre_start_gcode_lines(const std::string& filena
         // otherwise 0 lets the firmware macro keep its own default.
         PreStartGcodeContext ctx;
         ctx.filename = filename;
-        if (cached_scan_result_ && cached_scan_filename_ == filename &&
-            cached_scan_result_->print_start.found) {
-            ctx.bed_temp = cached_scan_result_->print_start.bed_temp;
-            ctx.extruder_temp = cached_scan_result_->print_start.extruder_temp;
+        if (const auto* start = print_start_for(filename)) {
+            ctx.bed_temp = start->bed_temp;
+            ctx.extruder_temp = start->extruder_temp;
         }
         std::string line = render_pre_start_gcode(opt, enabled, ctx);
         if (line.empty()) {
@@ -1215,10 +1442,12 @@ void PrintPreparationManager::continue_print_start(
     // blocking pre-start macro was running, or another print superseded ours.
     // A pre-start macro can run for ten minutes; starting the job after the user
     // has already cancelled it is the worst outcome available.
-    if (armed_at_start_ && printer_state_ && !printer_state_->has_preparing_job()) {
-        spdlog::info("[PrintPreparationManager] Start abandoned - '{}' is no longer being "
-                     "prepared ({})",
-                     filename, helix::preparing_exit_name(printer_state_->last_preparing_exit()));
+    if (armed_at_start_ && printer_state_ && !printer_state_->print_state().has_preparing_job()) {
+        spdlog::info(
+            "[PrintPreparationManager] Start abandoned - '{}' is no longer being "
+            "prepared ({})",
+            filename,
+            helix::preparing_exit_name(printer_state_->print_state().last_preparing_exit()));
         if (on_completion) {
             on_completion(false, "");
         }
@@ -1241,7 +1470,8 @@ void PrintPreparationManager::continue_print_start(
     // A late ack and a slow-but-wanted macro are the same code path with the
     // same signature; only the epoch tells them apart.
     if (pre_start_epoch_ != 0 && printer_state_) {
-        const int now_epoch = lv_subject_get_int(printer_state_->get_preparing_epoch_subject());
+        const int now_epoch =
+            lv_subject_get_int(printer_state_->print_state().get_preparing_epoch_subject());
         if (now_epoch != pre_start_epoch_) {
             spdlog::warn("[PrintPreparationManager] Dropping pre-start completion for a retired "
                          "job (epoch {} -> {}) - not starting '{}'",
@@ -1272,9 +1502,12 @@ void PrintPreparationManager::continue_print_start(
         }
     }
 
-    if (!ops_to_disable.empty()) {
+    if (ops_to_disable.empty()) {
+        start_print_directly(filename, on_navigate_to_status, on_completion);
+    } else if (can_modify_gcode()) {
         modify_and_print(filename, ops_to_disable, {}, on_navigate_to_status);
     } else {
+        warn_modifications_dropped(ops_to_disable);
         start_print_directly(filename, on_navigate_to_status, on_completion);
     }
 }
@@ -1285,10 +1518,15 @@ void PrintPreparationManager::handle_pre_start_gcode_error(
     NavigateToStatusCallback on_navigate_to_status, PrintCompletionCallback on_completion) {
     // The RPC ceiling is not the printer's ceiling: execute_gcode blocks until
     // the macro finishes, and a long pre-start macro can outlive the request.
-    // A timeout while Klipper still reports idle_timeout "Printing" means the
-    // macro is still running — fail only once the printer itself stops.
-    if (error.type == MoonrakerErrorType::TIMEOUT && printer_state_ &&
-        lv_subject_get_int(printer_state_->get_idle_timeout_printing_subject()) == 1) {
+    // A timeout or dropped socket while Klipper still reports idle_timeout
+    // "Printing" means the macro is still running — fail only once the printer
+    // itself stops (prestonbrown/helixscreen#1543: the transport vanishing is
+    // not the printer's opinion of the macro).
+    if ((error.type == MoonrakerErrorType::TIMEOUT ||
+         error.type == MoonrakerErrorType::CONNECTION_LOST) &&
+        printer_state_ &&
+        lv_subject_get_int(
+            printer_state_->calibration_state().get_idle_timeout_printing_subject()) == 1) {
         begin_pre_start_completion_wait(error, filename, ops_to_disable, on_navigate_to_status,
                                         on_completion);
         return;
@@ -1325,7 +1563,8 @@ void PrintPreparationManager::begin_pre_start_completion_wait(
         [this, filename, ops_to_disable, on_navigate_to_status, on_completion, timeout_error]() {
             const bool still_busy =
                 printer_state_ &&
-                lv_subject_get_int(printer_state_->get_idle_timeout_printing_subject()) == 1;
+                lv_subject_get_int(
+                    printer_state_->calibration_state().get_idle_timeout_printing_subject()) == 1;
             finish_pre_start_wait();
             if (!still_busy) {
                 spdlog::info("[PrintPreparationManager] Pre-start macro finished "
@@ -1343,11 +1582,11 @@ void PrintPreparationManager::begin_pre_start_completion_wait(
             }
         });
 
-    // The busy->idle edge is the normal completion signal. observe_int_sync
+    // The busy->idle edge is the normal completion signal. observe<int>
     // defers the handler through UpdateQueue, so the observer can be torn down
     // from inside the handler without re-entrancy.
-    pre_start_wait_observer_ = helix::ui::observe_int_sync<PrintPreparationManager>(
-        printer_state_->get_idle_timeout_printing_subject(), this,
+    pre_start_wait_observer_ = helix::ui::observe<int>(
+        printer_state_->calibration_state().get_idle_timeout_printing_subject(), this,
         [this, filename, ops_to_disable, on_navigate_to_status,
          on_completion](PrintPreparationManager* self, int busy) {
             if (!self->pre_start_wait_active_ || busy == 1) {
@@ -1358,7 +1597,8 @@ void PrintPreparationManager::begin_pre_start_completion_wait(
                          "starting print");
             self->continue_print_start(filename, ops_to_disable, on_navigate_to_status,
                                        on_completion);
-        });
+        },
+        printer_state_->get_subjects_lifetime());
 }
 
 void PrintPreparationManager::finish_pre_start_wait() {
@@ -1391,7 +1631,7 @@ void PrintPreparationManager::abandon_start(const char* where) {
     }
     spdlog::warn("[PrintPreparationManager] Start abandoned at {} - retiring the preparing job",
                  where);
-    printer_state_->retire_preparing(helix::PreparingExit::Failed);
+    printer_state_->print_state().retire_preparing(helix::PreparingExit::Failed);
 }
 
 void PrintPreparationManager::modify_and_print(
@@ -1437,9 +1677,10 @@ void PrintPreparationManager::modify_and_print(
     // 4. If plugin available: use path-based API for symlink/history patching
     //    Otherwise: use standard start_print
     //
-    // This prevents TTC errors on memory-constrained devices like AD5M (512MB RAM)
+    // This prevents TTC errors on memory-constrained devices like AD5M (~108MB RAM)
     // by never loading the entire G-code file into memory.
-    bool has_plugin = printer_state_ && printer_state_->service_has_helix_plugin();
+    bool has_plugin =
+        printer_state_ && printer_state_->plugin_status_state().service_has_helix_plugin();
     spdlog::info("[PrintPreparationManager] Using unified streaming modification flow (plugin: {})",
                  has_plugin);
     modify_and_print_streaming(file_path, display_filename, ops_to_disable, macro_skip_params,
@@ -1473,7 +1714,7 @@ void PrintPreparationManager::modify_and_print_streaming(
     // Generate unique temp file paths
     auto timestamp = std::to_string(std::time(nullptr));
     std::string local_download_path = temp_dir + "/helix_download_" + timestamp + ".gcode";
-    std::string remote_temp_path = ".helix_temp/modified_" + timestamp + "_" + display_filename;
+    std::string remote_temp_path = gcode::make_rewritten_gcode_path(file_path);
 
     spdlog::info("[PrintPreparationManager] Streaming modification: downloading to {}",
                  local_download_path);
@@ -1483,15 +1724,7 @@ void PrintPreparationManager::modify_and_print_streaming(
 
     // Progress callback for download - NOTE: called from HTTP thread
     auto download_progress = [](size_t received, size_t total) {
-        float pct = (total > 0)
-                        ? (100.0f * static_cast<float>(received) / static_cast<float>(total))
-                        : 0.0f;
-        helix::ui::async_call(
-            [](void* data) {
-                auto pct_val = static_cast<float>(reinterpret_cast<uintptr_t>(data)) / 100.0f;
-                BusyOverlay::set_progress("Downloading", pct_val);
-            },
-            reinterpret_cast<void*>(static_cast<uintptr_t>(pct * 100.0f)));
+        BusyOverlay::queue_progress("Downloading", received, total);
     };
 
     // Step 1: Download file to disk (streaming, not memory)
@@ -1528,15 +1761,14 @@ void PrintPreparationManager::modify_and_print_streaming(
 
             // Clean up download file (no longer needed) — bg-safe filesystem op,
             // runs even if owner is destroyed.
-            std::error_code ec;
-            std::filesystem::remove(local_download_path, ec);
-            if (ec) {
+            if (!hfs::remove(local_download_path) && errno != ENOENT) {
                 spdlog::warn("[PrintPreparationManager] Failed to clean up download file: {}",
-                             ec.message());
+                             std::strerror(errno));
             }
 
             if (!result.success) {
-                NOTIFY_ERROR(lv_tr("Failed to modify G-code: {}"), result.error_message);
+                helix::ui::notify_error_tr(TR_NOOP("Failed to modify G-code: {}"),
+                                           result.error_message);
                 // Defer this-> access to main thread.
                 token.defer("PrintPreparationManager::modify_fail_clear_progress",
                             [this]() { abandon_start("modify_failed"); });
@@ -1566,12 +1798,10 @@ void PrintPreparationManager::modify_and_print_streaming(
                     [this, token, modified_path, display_filename, remote_temp_path, file_path,
                      mod_names, on_navigate_to_status, use_plugin]() {
                         // Clean up local modified file (safe - filesystem op, always do it)
-                        std::error_code ec;
-                        std::filesystem::remove(modified_path, ec);
-                        if (ec) {
+                        if (!hfs::remove(modified_path) && errno != ENOENT) {
                             spdlog::warn(
                                 "[PrintPreparationManager] Failed to clean up modified file: {}",
-                                ec.message());
+                                std::strerror(errno));
                         }
 
                         spdlog::info("[PrintPreparationManager] Modified file uploaded, starting "
@@ -1622,8 +1852,9 @@ void PrintPreparationManager::modify_and_print_streaming(
                                             // call: PrinterState is the single authority, so
                                             // the panel and the media manager can no longer
                                             // disagree about which print this is.
-                                            get_printer_state().set_print_identity_override(
-                                                d->original_path);
+                                            get_printer_state()
+                                                .print_state()
+                                                .set_print_identity_override(d->original_path);
 
                                             if (d->navigate_cb) {
                                                 d->navigate_cb();
@@ -1633,11 +1864,10 @@ void PrintPreparationManager::modify_and_print_streaming(
 
                                 auto on_print_error = [this, token, remote_temp_path](
                                                           const MoonrakerError& error) {
-                                    // Hide overlay on error (defer to main thread)
-                                    helix::ui::async_call([](void*) { BusyOverlay::hide(); },
-                                                          nullptr);
+                                    queue_busy_hide();
 
-                                    NOTIFY_ERROR(lv_tr("Failed to start print: {}"), error.message);
+                                    helix::ui::notify_error_tr(TR_NOOP("Failed to start print: {}"),
+                                                               error);
                                     LOG_ERROR_INTERNAL(
                                         "[PrintPreparationManager] Print start failed for {}: {}",
                                         remote_temp_path, error.message);
@@ -1692,14 +1922,13 @@ void PrintPreparationManager::modify_and_print_streaming(
                     },
                     // Upload error - clean up local file. Runs on HTTP bg thread.
                     [this, token, modified_path](const MoonrakerError& error) {
-                        // Hide overlay on error (defer to main thread)
-                        helix::ui::async_call([](void*) { BusyOverlay::hide(); }, nullptr);
+                        queue_busy_hide();
 
                         // Clean up local file even on error (bg-safe filesystem op)
-                        std::error_code ec;
-                        std::filesystem::remove(modified_path, ec);
+                        hfs::remove(modified_path);
 
-                        NOTIFY_ERROR(lv_tr("Failed to upload modified G-code: {}"), error.message);
+                        helix::ui::notify_error_tr(TR_NOOP("Failed to upload modified G-code: {}"),
+                                                   error);
                         LOG_ERROR_INTERNAL("[PrintPreparationManager] Upload failed: {}",
                                            error.message);
                         // L081 Mechanism C: printer_state_ is a this->member.
@@ -1708,30 +1937,19 @@ void PrintPreparationManager::modify_and_print_streaming(
                     },
                     // Upload progress callback
                     [](size_t sent, size_t total) {
-                        float pct =
-                            (total > 0)
-                                ? (100.0f * static_cast<float>(sent) / static_cast<float>(total))
-                                : 0.0f;
-                        helix::ui::async_call(
-                            [](void* data) {
-                                auto pct_val =
-                                    static_cast<float>(reinterpret_cast<uintptr_t>(data)) / 100.0f;
-                                BusyOverlay::set_progress("Uploading", pct_val);
-                            },
-                            reinterpret_cast<void*>(static_cast<uintptr_t>(pct * 100.0f)));
+                        BusyOverlay::queue_progress("Uploading", sent, total);
                     });
             }); // close PrintPreparationManager::modify_upload_kickoff defer
         },
         // Download error - clean up partial download. Runs on HTTP bg thread.
         [this, token, file_path, local_download_path](const MoonrakerError& error) {
-            // Hide overlay on error (defer to main thread)
-            helix::ui::async_call([](void*) { BusyOverlay::hide(); }, nullptr);
+            queue_busy_hide();
 
             // Clean up partial download if any (bg-safe filesystem op)
-            std::error_code ec;
-            std::filesystem::remove(local_download_path, ec);
+            hfs::remove(local_download_path);
 
-            NOTIFY_ERROR(lv_tr("Failed to download G-code for modification: {}"), error.message);
+            helix::ui::notify_error_tr(TR_NOOP("Failed to download G-code for modification: {}"),
+                                       error);
             LOG_ERROR_INTERNAL("[PrintPreparationManager] Download failed for {}: {}", file_path,
                                error.message);
             // L081 Mechanism C: printer_state_ is a this->member.
@@ -1752,6 +1970,14 @@ void PrintPreparationManager::modify_and_print_with_remap(
         return;
     }
 
+    // Printing the original instead would run the job on the tools the user just
+    // remapped away from, so this refuses rather than falls back.
+    if (!transport_keeps_local_copies()) {
+        NOTIFY_ERROR(lv_tr("Remapping G-code is not available on this device."));
+        abandon_start("remap_no_local_copies");
+        return;
+    }
+
     // Extract just the filename for display / temp naming.
     size_t last_slash = file_path.rfind('/');
     std::string display_filename =
@@ -1759,16 +1985,19 @@ void PrintPreparationManager::modify_and_print_with_remap(
 
     auto token = lifetime_.token();
 
-    std::string temp_dir = get_temp_directory();
-    if (temp_dir.empty()) {
+    // The download lands in the gcode_mod cache under the mod_ prefix, which is
+    // the only shape GCodeFileModifier::cleanup_temp_files() reaps. A crash
+    // between the download and the delete below otherwise leaves a full copy of
+    // the job on a board that has no room for one and no sweeper that sees it.
+    const std::string local_download_path =
+        gcode::GCodeFileModifier::generate_temp_path("remap_dl_" + display_filename);
+    if (local_download_path.empty()) {
         NOTIFY_ERROR(lv_tr("Cannot remap G-code: no temp directory available"));
         abandon_start("remap_no_temp_dir");
         return;
     }
 
-    auto timestamp = std::to_string(std::time(nullptr));
-    std::string local_download_path = temp_dir + "/helix_remap_dl_" + timestamp + ".gcode";
-    std::string remote_temp_path = ".helix_temp/remapped_" + timestamp + "_" + display_filename;
+    const std::string remote_temp_path = gcode::make_rewritten_gcode_path(file_path);
 
     spdlog::info("[PrintPreparationManager] Remap modification: {} tool mapping(s), downloading {}",
                  remap.size(), file_path);
@@ -1776,15 +2005,7 @@ void PrintPreparationManager::modify_and_print_with_remap(
     BusyOverlay::show("Preparing print...");
 
     auto download_progress = [](size_t received, size_t total) {
-        float pct = (total > 0)
-                        ? (100.0f * static_cast<float>(received) / static_cast<float>(total))
-                        : 0.0f;
-        helix::ui::async_call(
-            [](void* data) {
-                auto pct_val = static_cast<float>(reinterpret_cast<uintptr_t>(data)) / 100.0f;
-                BusyOverlay::set_progress("Downloading", pct_val);
-            },
-            reinterpret_cast<void*>(static_cast<uintptr_t>(pct * 100.0f)));
+        BusyOverlay::queue_progress("Downloading", received, total);
     };
 
     // Step 1: Download original file to disk (streaming).
@@ -1795,23 +2016,12 @@ void PrintPreparationManager::modify_and_print_with_remap(
         // this->/api_-> access is deferred to the main thread via token.defer.
         [this, token, file_path, display_filename, remap, local_download_path, remote_temp_path,
          on_navigate_to_status](const std::string& /*dest_path*/) {
-            // Read the downloaded gcode into memory to feed the remapper. The
-            // remapper needs full content to map each line from its ORIGINAL
-            // index in one collision-safe pass.
-            std::string content;
-            {
-                std::ifstream in(local_download_path, std::ios::binary);
-                if (in) {
-                    std::ostringstream ss;
-                    ss << in.rdbuf();
-                    content = ss.str();
-                }
-            }
-
-            std::error_code ec;
-            if (content.empty()) {
-                std::filesystem::remove(local_download_path, ec);
-                NOTIFY_ERROR(lv_tr("Failed to read G-code for remap"));
+            // A download that produced nothing is a failed download, not a file
+            // whose every line happens to be unchanged, and the two must not
+            // take the same exit.
+            if (helix::text_io::file_size(local_download_path).value_or(0) == 0) {
+                hfs::remove(local_download_path);
+                helix::ui::notify_error_tr(TR_NOOP("Failed to read G-code for remap"));
                 token.defer("PrintPreparationManager::remap_read_fail", [this]() {
                     BusyOverlay::hide();
                     abandon_start("remap_read_failed");
@@ -1819,13 +2029,25 @@ void PrintPreparationManager::modify_and_print_with_remap(
                 return;
             }
 
-            // Compute exactly the changed lines.
-            auto replacements = helix::GcodeToolRemapper::build_line_replacements(content, remap);
+            // Rewrite file-to-file. Peak memory is one line, so a 400MB job
+            // costs what a 4MB one does; holding the content to find the
+            // changed lines would put the whole file in RAM on a board that
+            // has none to spare.
+            const std::string modified_path =
+                gcode::GCodeFileModifier::generate_temp_path(local_download_path);
+            // nullopt covers a failed flush too: a volume that fills mid-write
+            // opens fine and yields a truncated file that would otherwise upload
+            // and print as if whole.
+            const std::optional<size_t> rewrite =
+                helix::GcodeToolRemapper::apply_to_file(local_download_path, modified_path, remap);
+            const bool rewrite_ok = rewrite.has_value();
+            const size_t lines_changed = rewrite.value_or(0);
 
             // Identity remap (nothing changes): print the original directly,
-            // no temp copy. Clean up the download and dispatch a plain start.
-            if (replacements.empty()) {
-                std::filesystem::remove(local_download_path, ec);
+            // no temp copy. Clean up both local files and dispatch a plain start.
+            if (rewrite_ok && lines_changed == 0) {
+                hfs::remove(modified_path);
+                hfs::remove(local_download_path);
                 spdlog::info("[PrintPreparationManager] Remap produced no changes; "
                              "printing original {}",
                              file_path);
@@ -1846,21 +2068,13 @@ void PrintPreparationManager::modify_and_print_with_remap(
                 return;
             }
 
-            // Step 2: Convert each replacement -> a single-line REPLACE
-            // modification and apply file-to-file (streaming, minimal memory).
-            gcode::GCodeFileModifier modifier;
-            for (const auto& r : replacements) {
-                modifier.add_modification(gcode::Modification::replace(
-                    static_cast<size_t>(r.line_number), r.new_line, "tool remap"));
-            }
-
-            auto result = modifier.apply_streaming(local_download_path);
-
             // Download file no longer needed (bg-safe filesystem op).
-            std::filesystem::remove(local_download_path, ec);
+            hfs::remove(local_download_path);
 
-            if (!result.success) {
-                NOTIFY_ERROR(lv_tr("Failed to remap G-code: {}"), result.error_message);
+            if (!rewrite_ok) {
+                hfs::remove(modified_path);
+                helix::ui::notify_error_tr(TR_NOOP("Failed to remap G-code: {}"),
+                                           std::string("could not write ") + modified_path);
                 token.defer("PrintPreparationManager::remap_apply_fail", [this]() {
                     BusyOverlay::hide();
                     abandon_start("remap_apply_failed");
@@ -1869,10 +2083,9 @@ void PrintPreparationManager::modify_and_print_with_remap(
             }
 
             spdlog::info("[PrintPreparationManager] Remap applied ({} lines), uploading {}",
-                         result.lines_modified, result.modified_path);
+                         lines_changed, modified_path);
 
             // Step 3: Upload modified copy from disk — defer api_-> kickoff to main.
-            std::string modified_path = result.modified_path;
             std::vector<std::string> mod_names;
             mod_names.reserve(remap.size());
             for (const auto& [logical, physical] : remap) {
@@ -1892,8 +2105,7 @@ void PrintPreparationManager::modify_and_print_with_remap(
                     // Upload success - runs on HTTP bg thread.
                     [this, token, modified_path, remote_temp_path, file_path, display_filename,
                      mod_names, on_navigate_to_status]() {
-                        std::error_code ec;
-                        std::filesystem::remove(modified_path, ec);
+                        hfs::remove(modified_path);
 
                         spdlog::info("[PrintPreparationManager] Remapped file uploaded, "
                                      "starting print via plugin");
@@ -1920,8 +2132,9 @@ void PrintPreparationManager::modify_and_print_with_remap(
                                             display_filename, file_path, on_navigate_to_status}),
                                         [](PrintStartedData* d) {
                                             BusyOverlay::hide();
-                                            get_printer_state().set_print_identity_override(
-                                                d->original_path);
+                                            get_printer_state()
+                                                .print_state()
+                                                .set_print_identity_override(d->original_path);
                                             if (d->navigate_cb)
                                                 d->navigate_cb();
                                         });
@@ -1929,9 +2142,9 @@ void PrintPreparationManager::modify_and_print_with_remap(
 
                                 auto on_print_error = [this, token, remote_temp_path](
                                                           const MoonrakerError& error) {
-                                    helix::ui::async_call([](void*) { BusyOverlay::hide(); },
-                                                          nullptr);
-                                    NOTIFY_ERROR(lv_tr("Failed to start print: {}"), error.message);
+                                    queue_busy_hide();
+                                    helix::ui::notify_error_tr(TR_NOOP("Failed to start print: {}"),
+                                                               error);
                                     LOG_ERROR_INTERNAL(
                                         "[PrintPreparationManager] Remapped print start "
                                         "failed for {}: {}",
@@ -1965,10 +2178,10 @@ void PrintPreparationManager::modify_and_print_with_remap(
                     },
                     // Upload error - runs on HTTP bg thread.
                     [this, token, modified_path](const MoonrakerError& error) {
-                        helix::ui::async_call([](void*) { BusyOverlay::hide(); }, nullptr);
-                        std::error_code ec;
-                        std::filesystem::remove(modified_path, ec);
-                        NOTIFY_ERROR(lv_tr("Failed to upload remapped G-code: {}"), error.message);
+                        queue_busy_hide();
+                        hfs::remove(modified_path);
+                        helix::ui::notify_error_tr(TR_NOOP("Failed to upload remapped G-code: {}"),
+                                                   error);
                         LOG_ERROR_INTERNAL("[PrintPreparationManager] Remap upload failed: {}",
                                            error.message);
                         token.defer("PrintPreparationManager::remap_upload_fail_clear",
@@ -1976,26 +2189,15 @@ void PrintPreparationManager::modify_and_print_with_remap(
                     },
                     // Upload progress callback
                     [](size_t sent, size_t total) {
-                        float pct =
-                            (total > 0)
-                                ? (100.0f * static_cast<float>(sent) / static_cast<float>(total))
-                                : 0.0f;
-                        helix::ui::async_call(
-                            [](void* data) {
-                                auto pct_val =
-                                    static_cast<float>(reinterpret_cast<uintptr_t>(data)) / 100.0f;
-                                BusyOverlay::set_progress("Uploading", pct_val);
-                            },
-                            reinterpret_cast<void*>(static_cast<uintptr_t>(pct * 100.0f)));
+                        BusyOverlay::queue_progress("Uploading", sent, total);
                     });
             });
         },
         // Download error - runs on HTTP bg thread.
         [this, token, file_path, local_download_path](const MoonrakerError& error) {
-            helix::ui::async_call([](void*) { BusyOverlay::hide(); }, nullptr);
-            std::error_code ec;
-            std::filesystem::remove(local_download_path, ec);
-            NOTIFY_ERROR(lv_tr("Failed to download G-code for remap: {}"), error.message);
+            queue_busy_hide();
+            hfs::remove(local_download_path);
+            helix::ui::notify_error_tr(TR_NOOP("Failed to download G-code for remap: {}"), error);
             LOG_ERROR_INTERNAL("[PrintPreparationManager] Remap download failed for {}: {}",
                                file_path, error.message);
             token.defer("PrintPreparationManager::remap_download_fail_clear",
@@ -2023,7 +2225,7 @@ void PrintPreparationManager::start_print_directly(const std::string& filename,
         },
         // Error callback
         [filename, on_completion](const MoonrakerError& error) {
-            NOTIFY_ERROR(lv_tr("Failed to start print: {}"), error.message);
+            helix::ui::notify_error_tr(TR_NOOP("Failed to start print: {}"), error);
             LOG_ERROR_INTERNAL("[PrintPreparationManager] Print start failed for {}: {} ({})",
                                filename, error.message, error.get_type_string());
 

@@ -12,6 +12,8 @@
 #include "asset_manager.h"
 #include "theme_manager.h"
 
+#include <algorithm>
+
 #include "../catch_amalgamated.hpp"
 
 using namespace helix::ui;
@@ -254,4 +256,33 @@ TEST_CASE_METHOD(MultiSelectTestFixture, "UiMultiselect: move constructor", "[mu
     REQUIRE(ms2.item_count() == 2);
     REQUIRE(ms2.get_selected_count() == 1);
     REQUIRE_FALSE(ms.is_attached()); // NOLINT - testing moved-from state
+}
+
+TEST_CASE_METHOD(MultiSelectTestFixture,
+                 "UiMultiselect: rows and checkboxes are addressable by name", "[multiselect]") {
+    UiMultiselect ms;
+    lv_obj_t* container = lv_obj_create(test_screen());
+    ms.attach(container);
+
+    ms.set_items({{"lane_a", "Lane A"}, {"lane_b", "Lane B"}});
+
+    // The row carries the key in its name so remote control and tests can
+    // reach it without knowing child indices.
+    lv_obj_t* row_a = lv_obj_find_by_name(container, "item_lane_a");
+    lv_obj_t* row_b = lv_obj_find_by_name(container, "item_lane_b");
+    REQUIRE(row_a != nullptr);
+    REQUIRE(row_b != nullptr);
+    REQUIRE(row_a != row_b);
+
+    lv_obj_t* check_a = lv_obj_find_by_name(row_a, "check");
+    REQUIRE(check_a != nullptr);
+    REQUIRE_FALSE(lv_obj_has_state(check_a, LV_STATE_CHECKED));
+
+    // The checkbox itself is not clickable; the row click toggles it.
+    lv_obj_send_event(row_a, LV_EVENT_CLICKED, nullptr);
+
+    REQUIRE(lv_obj_has_state(check_a, LV_STATE_CHECKED));
+    const auto keys = ms.get_selected_keys();
+    REQUIRE(std::find(keys.begin(), keys.end(), "lane_a") != keys.end());
+    REQUIRE(ms.get_selected_count() == 1);
 }

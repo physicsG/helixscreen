@@ -37,6 +37,12 @@ namespace helix::spoolman_detail {
  * throw here aborts the whole spool-list parse (#1087).
  */
 SpoolInfo parse_spool_info(const nlohmann::json& spool_json);
+
+/**
+ * @brief Parse one SpoolmanDB filament, or nullopt for an entry that is not an
+ * object or carries no id. Never throws.
+ */
+std::optional<ExternalFilament> parse_external_filament(const nlohmann::json& filament_json);
 } // namespace helix::spoolman_detail
 
 /**
@@ -235,22 +241,9 @@ class MoonrakerSpoolmanAPI : public ISpoolmanAPI {
     void delete_spoolman_filament(int filament_id, SuccessCallback on_success,
                                   ErrorCallback on_error) override;
 
-    // ========================================================================
-    // External Database Operations (SpoolmanDB)
-    // ========================================================================
-
-    /**
-     * @brief Get list of vendors from SpoolmanDB (external database)
-     */
-    void get_spoolman_external_vendors(helix::VendorListCallback on_success,
-                                       ErrorCallback on_error) override;
-
-    /**
-     * @brief Get list of filaments from SpoolmanDB filtered by vendor name
-     */
-    void get_spoolman_external_filaments(const std::string& vendor_name,
-                                         helix::FilamentListCallback on_success,
-                                         ErrorCallback on_error) override;
+    void search_spoolman_external_filaments(const std::string& query, int limit,
+                                            helix::ExternalFilamentListCallback on_success,
+                                            ErrorCallback on_error) override;
 
   protected:
     helix::IMoonrakerClient& client_;

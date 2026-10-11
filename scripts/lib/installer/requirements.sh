@@ -4,7 +4,7 @@
 # Pre-flight checks: commands, dependencies, disk space, init system
 #
 # Reads: PLATFORM, SUDO
-# Writes: INIT_SYSTEM
+# Writes: INIT_SYSTEM, MISSING_UNZIP_PKG, MISSING_RUNTIME_DEPS, DISK_CHECK_DEFERRED
 
 # Source guard
 [ -n "${_HELIX_REQUIREMENTS_SOURCED:-}" ] && return 0
@@ -45,21 +45,13 @@ check_requirements() {
     # unzip but ship python3). The fallback needs zipfile + zlib (release zips
     # are DEFLATE-compressed), so gate on those modules rather than mere python
     # presence — otherwise a zlib-less python passes here and the install dies
-    # in extract_release instead of failing fast with a clear message. Try a
-    # transparent apt-install of unzip on Debian/Ubuntu images that lack it
-    # (notably Snapmaker U1 extended firmware); only mark it missing when
-    # there's no apt AND no usable python zipfile fallback.
-    if ! command -v unzip >/dev/null 2>&1; then
-        if command -v apt-get >/dev/null 2>&1 && ! _has_no_new_privs; then
-            log_info "Installing missing dependency: unzip"
-            _apt_update_once
-            $SUDO apt-get install -y --no-install-recommends unzip >/dev/null 2>&1 || true
-            if ! command -v unzip >/dev/null 2>&1 && ! _py_has_module zipfile zlib; then
-                _helix_add_missing "unzip"
-            fi
-        elif ! _py_has_module zipfile zlib; then
-            _helix_add_missing "unzip"
-        fi
+    # in extract_release instead of failing fast with a clear message. Where
+    # apt can install unzip (detect_missing_unzip), install_missing_unzip does
+    # that after the confirm point; only mark it missing when there's no apt
+    # AND no usable python zipfile fallback.
+    if ! command -v unzip >/dev/null 2>&1 && [ -z "${MISSING_UNZIP_PKG:-}" ] \
+        && ! _py_has_module zipfile zlib; then
+        _helix_add_missing "unzip"
     fi
 
     if [ -n "$missing" ]; then
@@ -71,11 +63,40 @@ check_requirements() {
     log_success "All required commands available"
 }
 
-# Install runtime dependencies for Pi platform
-# Required for DRM display and evdev input handling
-# AD5M uses framebuffer with static linking, no deps needed
-install_runtime_deps() {
+# unzip is missing and apt can install it (notably Snapmaker U1 extended
+# firmware). Read-only: sets MISSING_UNZIP_PKG to "unzip" or empty.
+detect_missing_unzip() {
+    MISSING_UNZIP_PKG=""
+    command -v unzip >/dev/null 2>&1 && return 0
+    if command -v apt-get >/dev/null 2>&1 && ! _has_no_new_privs; then
+        MISSING_UNZIP_PKG=unzip
+    fi
+    return 0
+}
+
+# Install what detect_missing_unzip found. Exits when zip extraction is still
+# impossible afterwards.
+install_missing_unzip() {
+    [ -n "${MISSING_UNZIP_PKG:-}" ] || return 0
+    local rc=0
+    log_info "Installing missing dependency: $MISSING_UNZIP_PKG"
+    _apt_update_once
+    run_logged $SUDO apt-get install -y --no-install-recommends "$MISSING_UNZIP_PKG" || rc=1
+    if ! command -v unzip >/dev/null 2>&1 && ! _py_has_module zipfile zlib; then
+        log_error "Missing required commands: unzip"
+        log_error "Please install them and try again."
+        exit 1
+    fi
+    return "$rc"
+}
+
+# Runtime libraries the Pi build needs that are not installed yet. Read-only:
+# sets MISSING_RUNTIME_DEPS (space-separated package names, empty if none).
+# Required for DRM display and evdev input handling; AD5M uses framebuffer
+# with static linking, no deps needed.
+detect_missing_runtime_deps() {
     local platform=$1
+    MISSING_RUNTIME_DEPS=""
 
     # Only needed for Pi (32-bit and 64-bit) - AD5M uses framebuffer with static linking
     if [ "$platform" != "pi" ] && [ "$platform" != "pi32" ]; then
@@ -90,7 +111,6 @@ install_runtime_deps() {
     #   Debian names it libturbojpeg0, Ubuntu names it libturbojpeg
     # Note: OpenSSL is statically linked for Pi builds, no runtime libssl needed
     local deps="libdrm2 libinput10 libgbm1 libegl1 libgles2"
-    local missing=""
 
     # turbojpeg: package name varies by distro (Debian=libturbojpeg0, Ubuntu=libturbojpeg)
     local turbo_pkg=""
@@ -104,36 +124,47 @@ install_runtime_deps() {
     if [ -n "$turbo_pkg" ]; then
         deps="$deps $turbo_pkg"
     else
-        log_warn "No turbojpeg package found (tried libturbojpeg0, libturbojpeg)"
-        log_warn "JPEG thumbnail decoding may not work"
+        log_info "No turbojpeg package found (tried libturbojpeg0, libturbojpeg)"
+        log_info "JPEG thumbnail decoding may not work"
     fi
 
     for dep in $deps; do
         # Check if package is installed (dpkg-query returns 0 if installed)
         if ! dpkg-query -W -f='${Status}' "$dep" 2>/dev/null | grep -q "install ok installed"; then
-            if [ -n "$missing" ]; then
-                missing="$missing $dep"
-            else
-                missing="$dep"
-            fi
+            MISSING_RUNTIME_DEPS="${MISSING_RUNTIME_DEPS:+$MISSING_RUNTIME_DEPS }$dep"
         fi
     done
 
+    # Under NoNewPrivileges (self-update from the running app) sudo is
+    # blocked, so the install cannot add them. The binary may still run, and
+    # verify_binary_deps stops the install if a library it needs is missing.
+    if [ -n "$MISSING_RUNTIME_DEPS" ] && _has_no_new_privs; then
+        log_warn "Missing runtime libraries (cannot install under self-update): $MISSING_RUNTIME_DEPS"
+        log_warn "Install them manually: sudo apt-get install $MISSING_RUNTIME_DEPS"
+        MISSING_RUNTIME_DEPS=""
+    fi
+    return 0
+}
+
+# Install what detect_missing_runtime_deps found, detecting first when it has
+# not run. Returns non-zero when apt could not install them.
+install_runtime_deps() {
+    [ -n "${MISSING_RUNTIME_DEPS+x}" ] || detect_missing_runtime_deps "$1"
+    local missing="${MISSING_RUNTIME_DEPS:-}"
+
+    # Only needed for Pi (32-bit and 64-bit) - AD5M uses framebuffer with static linking
+    if [ "$1" != "pi" ] && [ "$1" != "pi32" ]; then
+        return 0
+    fi
+
     if [ -n "$missing" ]; then
-        # Under NoNewPrivileges (self-update from the running app), sudo is blocked.
-        # Warn about missing deps but don't fail — the binary may still work, and
-        # verify_binary_deps() will catch truly fatal missing libraries later.
-        if _has_no_new_privs; then
-            log_warn "Missing runtime libraries (cannot install under self-update): $missing"
-            log_warn "Install manually after update: sudo apt-get install $missing"
-            return 0
-        fi
         log_info "Installing missing libraries: $missing"
         _apt_update_once
         # shellcheck disable=SC2086
-        if ! $SUDO apt-get install -y --no-install-recommends $missing; then
+        if ! run_logged $SUDO apt-get install -y --no-install-recommends $missing; then
             log_warn "Failed to install some runtime libraries: $missing"
-            log_warn "The update will continue. Install manually: sudo apt-get install $missing"
+            log_warn "The install will continue. Install manually: sudo apt-get install $missing"
+            return 1
         else
             log_success "Runtime libraries installed"
         fi
@@ -148,9 +179,18 @@ install_runtime_deps() {
 # ENOSPC the filesystem is asked directly instead. Shared by
 # check_service_dest_space and check_disk_space's no-df-target fallback so
 # both ask the same way.
+#
+# Before the confirm point sudo must not prompt, so a probe that would need a
+# password returns 2 (undetermined) and DISK_CHECK_DEFERRED asks main() to
+# repeat the check once confirm_point has been granted sudo.
 _fs_probe_write_kb() {
     local dir="$1" kb="$2"
     local probe="${dir%/}/.helixscreen-space-probe.$$"
+    if [ -n "$SUDO" ] && [ "${HELIX_CONFIRMED:-}" != 1 ] && ! $SUDO -n true 2>/dev/null; then
+        # shellcheck disable=SC2034  # consumed by main.sh and plan.sh (confirm_point)
+        DISK_CHECK_DEFERRED=1
+        return 2
+    fi
     if $SUDO dd if=/dev/zero of="$probe" bs=1024 count="$kb" \
             >/dev/null 2>&1; then
         $SUDO rm -f "$probe" 2>/dev/null || true
@@ -201,23 +241,16 @@ check_disk_space() {
     # point df at)
     local available_mb=""
     if [ "$check_dir" != "/" ]; then
-        case "$platform" in
-            ad5m|ad5x|k1|k2)
-                # BusyBox df: blocks are in KB by default
-                available_mb=$(df "$check_dir" 2>/dev/null | tail -1 | awk '{print int($4/1024)}')
-                ;;
-            *)
-                # GNU df with -m flag outputs in MB
-                available_mb=$(df -m "$check_dir" 2>/dev/null | tail -1 | awk '{print $4}')
-                ;;
-        esac
+        available_mb=$(_fs_free_mb "$check_dir")
     fi
 
     if [ -z "$available_mb" ]; then
         # df could not answer (no directory to point it at, or df itself
         # failed). Ask the filesystem with a real write instead.
-        if _fs_probe_write_kb "$check_dir" "$SERVICE_DEST_PROBE_KB"; then
-            log_info "Disk space check: $check_dir accepts a real write"
+        local probe_rc=0
+        _fs_probe_write_kb "$check_dir" "$SERVICE_DEST_PROBE_KB" || probe_rc=$?
+        if [ "$probe_rc" -ne 1 ]; then
+            [ "$probe_rc" -eq 0 ] && log_info "Disk space check: $check_dir accepts a real write"
             # INSTALL_DIR is not the only filesystem this install writes to.
             check_service_dest_space
             return 0
@@ -309,10 +342,13 @@ check_service_dest_space() {
     done
     [ "$(_fs_id "$dest_dir")" != "$(_fs_id "$install_probe")" ] || return 0
 
-    if _fs_probe_write_kb "$dest_dir" "$SERVICE_DEST_PROBE_KB"; then
-        log_info "Service directory check: $(_fs_free_mb "$dest_dir")MB available on $dest_dir"
-        return 0
-    fi
+    local probe_rc=0
+    _fs_probe_write_kb "$dest_dir" "$SERVICE_DEST_PROBE_KB" || probe_rc=$?
+    case "$probe_rc" in
+        0) log_info "Service directory check: $(_fs_free_mb "$dest_dir")MB available on $dest_dir"
+           return 0 ;;
+        2) return 0 ;;
+    esac
 
     local upper
     upper=$(_overlay_upperdir)
@@ -428,24 +464,19 @@ Moonraker is running but not responding on http://127.0.0.1:7125."
     log_warn "HelixScreen requires Klipper and Moonraker to function."
     log_warn "It will install but won't work until these services are available."
 
-    # Non-interactive mode: just warn and continue
-    if [ ! -t 0 ]; then
-        log_warn "Non-interactive mode: continuing anyway."
+    # A dry run and --update never ask; tty_confirm answers yes itself under
+    # --yes.
+    if [ "${DRY_RUN:-false}" = true ] || [ "${update_mode:-false}" = true ]; then
+        log_warn "Continuing without them."
         return 0
     fi
 
-    printf "Continue anyway? [y/N] "
-    read -r answer
-    case "$answer" in
-        [Yy]|[Yy][Ee][Ss])
-            log_info "Continuing installation..."
-            return 0
-            ;;
-        *)
-            log_error "Installation cancelled."
-            exit 1
-            ;;
-    esac
+    if tty_confirm "Continue anyway?" y; then
+        log_info "Continuing installation..."
+        return 0
+    fi
+    log_error "Installation cancelled."
+    exit 1
 }
 
 # Verify a binary that was built for the mod's chroot, from outside it.
@@ -559,7 +590,7 @@ verify_binary_deps() {
                 # Try installing the compat package if available
                 if apt-cache show libssl1.1 >/dev/null 2>&1; then
                     log_info "Installing libssl1.1 compatibility package..."
-                    $SUDO apt-get install -y --no-install-recommends libssl1.1
+                    run_logged $SUDO apt-get install -y --no-install-recommends libssl1.1
                 else
                     log_error "libssl1.1 package not available in your repositories."
                     log_error "This binary was built against OpenSSL 1.1 but your system has OpenSSL 3."

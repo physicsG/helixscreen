@@ -1,0 +1,15 @@
+diff --git a/src/core/lv_obj_pos.c b/src/core/lv_obj_pos.c
+--- a/src/core/lv_obj_pos.c
++++ b/src/core/lv_obj_pos.c
+@@ -375,6 +375,11 @@
+ 
+     /*Mark the screen as dirty too to mark that there is something to do on this screen*/
+     lv_obj_t * scr = lv_obj_get_screen(obj);
++
++    /*A screen already marked has a refresh request pending since its last layout
++     *pass, which clears the mark. Every label awaiting a text refresh
++     *holds a display event callback, so each request walks all of them.*/
++    if(scr->scr_layout_inv) return;
+     scr->scr_layout_inv = 1;
+ 
+     /*Make the display refreshing*/

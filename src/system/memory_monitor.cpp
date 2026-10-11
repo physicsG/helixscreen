@@ -5,6 +5,10 @@
 
 #include "ui_update_queue.h"
 
+#include "exception_policy.h"
+#include "helix_thread.h"
+#include "text_io.h"
+
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -16,8 +20,6 @@
 #endif
 
 #ifdef __linux__
-#include <fstream>
-#include <sstream>
 #include <string>
 #endif
 
@@ -119,14 +121,14 @@ void MemoryMonitor::start(int interval_ms) {
                  thresholds_.warn_available_kb / 1024, thresholds_.critical_available_kb / 1024,
                  thresholds_.growth_5min_kb / 1024, tier, sys_info.total_mb());
 
-    // Wrap — EAGAIN under thread exhaustion throws std::system_error ([L083]).
-    try {
-        monitor_thread_ = std::thread([this]() { monitor_loop(); });
-        spdlog::debug("[MemoryMonitor] Started (interval={}ms)", interval_ms);
-    } catch (const std::system_error& e) {
-        spdlog::error("[MemoryMonitor] Failed to spawn monitor thread: {}", e.what());
+    // EAGAIN under thread exhaustion throws std::system_error ([L083]).
+    if (!helix::contain_exceptions("[MemoryMonitor] Spawning the monitor thread", [&] {
+            monitor_thread_ = helix::make_thread([this]() { monitor_loop(); });
+        })) {
         running_.store(false);
+        return;
     }
+    spdlog::debug("[MemoryMonitor] Started (interval={}ms)", interval_ms);
 }
 
 void MemoryMonitor::stop() {
@@ -226,13 +228,13 @@ MemoryStats MemoryMonitor::get_current_stats() {
     MemoryStats stats;
 
 #ifdef __linux__
-    std::ifstream status("/proc/self/status");
-    if (!status.is_open()) {
+    helix::text_io::LineReader status("/proc/self/status");
+    if (!status) {
         return stats;
     }
 
     std::string line;
-    while (std::getline(status, line)) {
+    while (status.next(line)) {
         if (line.compare(0, 7, "VmSize:") == 0) {
             sscanf(line.c_str(), "VmSize: %zu", &stats.vm_size_kb);
         } else if (line.compare(0, 6, "VmRSS:") == 0) {
@@ -273,7 +275,8 @@ void MemoryMonitor::log_now(const char* context, spdlog::level::level_enum level
 MemoryPressureLevel compute_pressure_level(const MemoryStats& stats,
                                            const MemoryThresholds& thresholds,
                                            MemoryPressureLevel current_level,
-                                           const MemoryInfo& sys_info, int64_t growth_kb) {
+                                           const MemoryInfo& sys_info, int64_t growth_kb,
+                                           uint32_t sustained_warning_secs) {
     MemoryPressureLevel level = MemoryPressureLevel::none;
 
     // RSS thresholds — check escalations first, then hysteresis holds
@@ -329,6 +332,15 @@ MemoryPressureLevel compute_pressure_level(const MemoryStats& stats,
         }
     }
 
+    // A warning that will not clear is the steady state, not a spike. Escalate
+    // it so the responders gated at critical are reachable on a device whose
+    // idle free memory never rises out of the warning band. Escalation reads
+    // the level computed above, so it can only promote real pressure.
+    if (level == MemoryPressureLevel::warning &&
+        sustained_warning_secs >= thresholds.sustained_warning_secs_to_critical) {
+        level = MemoryPressureLevel::critical;
+    }
+
     return level;
 }
 
@@ -362,8 +374,16 @@ void MemoryMonitor::evaluate_thresholds(const MemoryStats& stats) {
     }
 
     auto current = pressure_level_.load();
-    MemoryPressureLevel level =
-        compute_pressure_level(stats, thresholds_, current, sys_info, growth_kb);
+
+    const auto now_tp = std::chrono::steady_clock::now();
+    if (current < MemoryPressureLevel::warning) {
+        warning_since_ = now_tp;
+    }
+    const auto sustained =
+        std::chrono::duration_cast<std::chrono::seconds>(now_tp - warning_since_);
+
+    MemoryPressureLevel level = compute_pressure_level(
+        stats, thresholds_, current, sys_info, growth_kb, static_cast<uint32_t>(sustained.count()));
 
     // Update atomic level
     pressure_level_.store(level);
@@ -474,11 +494,11 @@ void MemoryMonitor::fire_warning(MemoryPressureLevel level, const std::string& r
     size_t responders_threw = 0;
 
     for (const auto& [id, responder] : responders) {
-        try {
-            responder(level);
+        const auto& respond = responder; // a lambda cannot capture a structured binding in C++17
+        if (helix::contain_exceptions(fmt::format("[MemoryMonitor] Pressure responder {}", id),
+                                      [&] { respond(level); })) {
             ++responders_fired;
-        } catch (const std::exception& e) {
-            spdlog::error("[MemoryMonitor] Pressure responder {} threw: {}", id, e.what());
+        } else {
             ++responders_threw;
         }
     }
@@ -493,37 +513,38 @@ void MemoryMonitor::fire_warning(MemoryPressureLevel level, const std::string& r
         spdlog::warn("[MemoryMonitor] No pressure responders registered — nothing to free");
     }
 
-    // Deferred completion log: both new responders (PrintStatusPanel tree,
-    // LVGL image cache) hop to the UI thread via queue_update, and a
-    // destroyed widget tree is actually freed by lv_obj_delete_async on the
-    // next LVGL async-handler pass. A sync get_current_stats() right after
-    // the loop would systematically undercount — the RSS delta would read
-    // "+0kB" even when multi-hundred-KB reclaim succeeded. Instead, hop
-    // through queue_update (runs in the next UpdateQueue tick, after our
-    // deferred reclaim work) and lv_async_call (runs AFTER process_pending's
-    // async-delete drain in the same lv_timer_handler pass), so the
-    // post-sample reflects sync responders, cache drops, AND widget deletes.
+    // Deferred completion log: responders (print-status tree, LVGL image
+    // cache) hop to the UI thread via queue_update, and a destroyed widget
+    // tree is actually freed by lv_obj_delete_async — a period-0 one-shot
+    // timer. A sync get_current_stats() right after the loop would
+    // systematically undercount: the RSS delta would read "+0kB" even when
+    // multi-hundred-KB reclaim succeeded. So would a single queue hop: the
+    // responders' callbacks run in this same UpdateQueue drain, before the
+    // lv_timer_handler pass that fires the delete timers. A period-based
+    // delay would not fix it either — readiness is timing, and a drain that
+    // spends longer than the period in callbacks makes the timer come due in
+    // the very pass the deletes fire. So the completion hops UpdateQueue
+    // twice: process_pending() swaps the queue before running callbacks, so
+    // work queued from inside a drain lands in the NEXT drain — one full
+    // handler pass after the delete timers of any responder that defers its
+    // delete within one hop. A responder that needed a second hop for its
+    // delete would queue that hop ahead of this sample, so its tree frees
+    // after it. The inner callback only samples and logs (no LVGL calls), so
+    // nothing else can reorder it.
     if (responders_fired > 0) {
 #ifdef __linux__
-        struct CompletionCtx {
-            size_t before_rss_kb;
-            size_t fired;
-        };
-        auto* ctx = new CompletionCtx{before_stats.vm_rss_kb, responders_fired};
-        helix::ui::queue_update([ctx]() {
-            lv_async_call(
-                [](void* ud) {
-                    auto* c = static_cast<CompletionCtx*>(ud);
-                    MemoryStats after = MemoryMonitor::get_current_stats();
-                    int64_t delta_kb = static_cast<int64_t>(after.vm_rss_kb) -
-                                       static_cast<int64_t>(c->before_rss_kb);
-                    spdlog::warn("[MemoryMonitor] Pressure response complete: {} responder(s), "
-                                 "RSS {}MB -> {}MB ({:+}kB)",
-                                 c->fired, c->before_rss_kb / 1024, after.vm_rss_kb / 1024,
-                                 delta_kb);
-                    delete c;
-                },
-                ctx);
+        const size_t before_rss_kb = before_stats.vm_rss_kb;
+        const size_t fired = responders_fired;
+        helix::ui::queue_update("MemoryMonitor::fire_warning", [before_rss_kb, fired]() {
+            helix::ui::queue_update("MemoryMonitor::fire_warning", [before_rss_kb, fired]() {
+                MemoryStats after = MemoryMonitor::get_current_stats();
+                int64_t delta_kb =
+                    static_cast<int64_t>(after.vm_rss_kb) - static_cast<int64_t>(before_rss_kb);
+                spdlog::warn("[MemoryMonitor] Pressure response complete: "
+                             "{} responder(s), "
+                             "RSS {}MB -> {}MB ({:+}kB)",
+                             fired, before_rss_kb / 1024, after.vm_rss_kb / 1024, delta_kb);
+            });
         });
 #endif
     }

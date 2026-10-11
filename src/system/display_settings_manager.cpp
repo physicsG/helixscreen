@@ -8,9 +8,13 @@
 #include "config.h"
 #include "display_manager.h"
 #include "display_metrics.h"
+#include "helix-xml/src/xml/lv_xml_style.h"
 #include "lvgl/src/others/translation/lv_translation.h"
+#include "observer_factory.h"
 #include "platform_capabilities.h"
 #include "platform_info.h"
+#include "screensaver_canvas.h"
+#include "screensaver_registry.h"
 #include "spdlog/spdlog.h"
 #include "static_subject_registry.h"
 #include "theme_loader.h"
@@ -66,6 +70,7 @@ static const int SLEEP_OPTIONS_COUNT = sizeof(SLEEP_OPTIONS) / sizeof(SLEEP_OPTI
 struct TimezoneEntry {
     const char* display_name;
     const char* iana_id;
+    const char* posix_tz; // the zone's TZif footer: for libcs that cannot read zoneinfo
 };
 
 // Ordered by UTC offset so the list scans west-to-east. Names are the countries
@@ -81,67 +86,67 @@ struct TimezoneEntry {
 // offered here but not bundled resolves to UTC on devices without system
 // tzdata — silently, with the wrong time and no error.
 static const TimezoneEntry TIMEZONE_ENTRIES[] = {
-    {"UTC (+0:00)", "UTC"},
-    {"Samoa (-11:00)", "Pacific/Pago_Pago"},
-    {"Hawaii (-10:00)", "Pacific/Honolulu"},
-    {"Alaska (-9:00)", "America/Anchorage"},
-    {"Pacific (-8:00)", "America/Los_Angeles"},
-    {"Mountain (-7:00)", "America/Denver"},
-    {"Arizona (-7:00)", "America/Phoenix"},
-    {"Central (-6:00)", "America/Chicago"},
-    {"Mexico City (-6:00)", "America/Mexico_City"},
-    {"Saskatchewan (-6:00)", "America/Regina"},
-    {"Eastern (-5:00)", "America/New_York"},
-    {"Colombia/Peru (-5:00)", "America/Bogota"},
-    {"Atlantic (-4:00)", "America/Halifax"},
-    {"Venezuela (-4:00)", "America/Caracas"},
-    {"Chile (-4:00)", "America/Santiago"},
-    {"Newfoundland (-3:30)", "America/St_Johns"},
-    {"Brazil - Sao Paulo (-3:00)", "America/Sao_Paulo"},
-    {"Argentina (-3:00)", "America/Argentina/Buenos_Aires"},
-    {"Fernando de Noronha (-2:00)", "America/Noronha"},
-    {"Azores (-1:00)", "Atlantic/Azores"},
-    {"Cape Verde (-1:00)", "Atlantic/Cape_Verde"},
-    {"Iceland (+0:00)", "Atlantic/Reykjavik"},
-    {"London (+0:00)", "Europe/London"},
-    {"Central Europe (+1:00)", "Europe/Berlin"},
-    {"West Africa - Lagos (+1:00)", "Africa/Lagos"},
-    {"Eastern Europe (+2:00)", "Europe/Bucharest"},
-    {"Egypt (+2:00)", "Africa/Cairo"},
-    {"South Africa (+2:00)", "Africa/Johannesburg"},
-    {"Israel (+2:00)", "Asia/Jerusalem"},
-    {"Moscow (+3:00)", "Europe/Moscow"},
-    {"Turkey (+3:00)", "Europe/Istanbul"},
-    {"Saudi Arabia (+3:00)", "Asia/Riyadh"},
-    {"East Africa - Nairobi (+3:00)", "Africa/Nairobi"},
-    {"Iran (+3:30)", "Asia/Tehran"},
-    {"Gulf (+4:00)", "Asia/Dubai"},
-    {"Afghanistan (+4:30)", "Asia/Kabul"},
-    {"Pakistan (+5:00)", "Asia/Karachi"},
-    {"India (+5:30)", "Asia/Kolkata"},
-    {"Sri Lanka (+5:30)", "Asia/Colombo"},
-    {"Nepal (+5:45)", "Asia/Kathmandu"},
-    {"Bangladesh (+6:00)", "Asia/Dhaka"},
-    {"Myanmar (+6:30)", "Asia/Yangon"},
-    {"Thailand (+7:00)", "Asia/Bangkok"},
-    {"Vietnam (+7:00)", "Asia/Ho_Chi_Minh"},
-    {"Indonesia - Jakarta (+7:00)", "Asia/Jakarta"},
-    {"China (+8:00)", "Asia/Shanghai"},
-    {"Hong Kong (+8:00)", "Asia/Hong_Kong"},
-    {"Taiwan (+8:00)", "Asia/Taipei"},
-    {"Singapore/Malaysia (+8:00)", "Asia/Singapore"},
-    {"Philippines (+8:00)", "Asia/Manila"},
-    {"Australia Western (+8:00)", "Australia/Perth"},
-    {"Japan (+9:00)", "Asia/Tokyo"},
-    {"Korea (+9:00)", "Asia/Seoul"},
-    {"Australia Central (+9:30)", "Australia/Adelaide"},
-    {"Australia Northern (+9:30)", "Australia/Darwin"},
-    {"Australia Eastern (+10:00)", "Australia/Sydney"},
-    {"Australia Queensland (+10:00)", "Australia/Brisbane"},
-    {"New Caledonia (+11:00)", "Pacific/Noumea"},
-    {"New Zealand (+12:00)", "Pacific/Auckland"},
-    {"Fiji (+12:00)", "Pacific/Fiji"},
-    {"Tonga (+13:00)", "Pacific/Tongatapu"},
+    {"UTC (+0:00)", "UTC", "UTC0"},
+    {"Samoa (-11:00)", "Pacific/Pago_Pago", "SST11"},
+    {"Hawaii (-10:00)", "Pacific/Honolulu", "HST10"},
+    {"Alaska (-9:00)", "America/Anchorage", "AKST9AKDT,M3.2.0,M11.1.0"},
+    {"Pacific (-8:00)", "America/Los_Angeles", "PST8PDT,M3.2.0,M11.1.0"},
+    {"Mountain (-7:00)", "America/Denver", "MST7MDT,M3.2.0,M11.1.0"},
+    {"Arizona (-7:00)", "America/Phoenix", "MST7"},
+    {"Central (-6:00)", "America/Chicago", "CST6CDT,M3.2.0,M11.1.0"},
+    {"Mexico City (-6:00)", "America/Mexico_City", "CST6"},
+    {"Saskatchewan (-6:00)", "America/Regina", "CST6"},
+    {"Eastern (-5:00)", "America/New_York", "EST5EDT,M3.2.0,M11.1.0"},
+    {"Colombia/Peru (-5:00)", "America/Bogota", "<-05>5"},
+    {"Atlantic (-4:00)", "America/Halifax", "AST4ADT,M3.2.0,M11.1.0"},
+    {"Venezuela (-4:00)", "America/Caracas", "<-04>4"},
+    {"Chile (-4:00)", "America/Santiago", "<-04>4<-03>,M9.1.6/24,M4.1.6/24"},
+    {"Newfoundland (-3:30)", "America/St_Johns", "NST3:30NDT,M3.2.0,M11.1.0"},
+    {"Brazil - Sao Paulo (-3:00)", "America/Sao_Paulo", "<-03>3"},
+    {"Argentina (-3:00)", "America/Argentina/Buenos_Aires", "<-03>3"},
+    {"Fernando de Noronha (-2:00)", "America/Noronha", "<-02>2"},
+    {"Azores (-1:00)", "Atlantic/Azores", "<-01>1<+00>,M3.5.0/0,M10.5.0/1"},
+    {"Cape Verde (-1:00)", "Atlantic/Cape_Verde", "<-01>1"},
+    {"Iceland (+0:00)", "Atlantic/Reykjavik", "GMT0"},
+    {"London (+0:00)", "Europe/London", "GMT0BST,M3.5.0/1,M10.5.0"},
+    {"Central Europe (+1:00)", "Europe/Berlin", "CET-1CEST,M3.5.0,M10.5.0/3"},
+    {"West Africa - Lagos (+1:00)", "Africa/Lagos", "WAT-1"},
+    {"Eastern Europe (+2:00)", "Europe/Bucharest", "EET-2EEST,M3.5.0/3,M10.5.0/4"},
+    {"Egypt (+2:00)", "Africa/Cairo", "EET-2EEST,M4.5.5/0,M10.5.4/24"},
+    {"South Africa (+2:00)", "Africa/Johannesburg", "SAST-2"},
+    {"Israel (+2:00)", "Asia/Jerusalem", "IST-2IDT,M3.4.4/26,M10.5.0"},
+    {"Moscow (+3:00)", "Europe/Moscow", "MSK-3"},
+    {"Turkey (+3:00)", "Europe/Istanbul", "<+03>-3"},
+    {"Saudi Arabia (+3:00)", "Asia/Riyadh", "<+03>-3"},
+    {"East Africa - Nairobi (+3:00)", "Africa/Nairobi", "EAT-3"},
+    {"Iran (+3:30)", "Asia/Tehran", "<+0330>-3:30"},
+    {"Gulf (+4:00)", "Asia/Dubai", "<+04>-4"},
+    {"Afghanistan (+4:30)", "Asia/Kabul", "<+0430>-4:30"},
+    {"Pakistan (+5:00)", "Asia/Karachi", "PKT-5"},
+    {"India (+5:30)", "Asia/Kolkata", "IST-5:30"},
+    {"Sri Lanka (+5:30)", "Asia/Colombo", "<+0530>-5:30"},
+    {"Nepal (+5:45)", "Asia/Kathmandu", "<+0545>-5:45"},
+    {"Bangladesh (+6:00)", "Asia/Dhaka", "<+06>-6"},
+    {"Myanmar (+6:30)", "Asia/Yangon", "<+0630>-6:30"},
+    {"Thailand (+7:00)", "Asia/Bangkok", "<+07>-7"},
+    {"Vietnam (+7:00)", "Asia/Ho_Chi_Minh", "<+07>-7"},
+    {"Indonesia - Jakarta (+7:00)", "Asia/Jakarta", "WIB-7"},
+    {"China (+8:00)", "Asia/Shanghai", "CST-8"},
+    {"Hong Kong (+8:00)", "Asia/Hong_Kong", "HKT-8"},
+    {"Taiwan (+8:00)", "Asia/Taipei", "CST-8"},
+    {"Singapore/Malaysia (+8:00)", "Asia/Singapore", "<+08>-8"},
+    {"Philippines (+8:00)", "Asia/Manila", "PST-8"},
+    {"Australia Western (+8:00)", "Australia/Perth", "AWST-8"},
+    {"Japan (+9:00)", "Asia/Tokyo", "JST-9"},
+    {"Korea (+9:00)", "Asia/Seoul", "KST-9"},
+    {"Australia Central (+9:30)", "Australia/Adelaide", "ACST-9:30ACDT,M10.1.0,M4.1.0/3"},
+    {"Australia Northern (+9:30)", "Australia/Darwin", "ACST-9:30"},
+    {"Australia Eastern (+10:00)", "Australia/Sydney", "AEST-10AEDT,M10.1.0,M4.1.0/3"},
+    {"Australia Queensland (+10:00)", "Australia/Brisbane", "AEST-10"},
+    {"New Caledonia (+11:00)", "Pacific/Noumea", "<+11>-11"},
+    {"New Zealand (+12:00)", "Pacific/Auckland", "NZST-12NZDT,M9.5.0,M4.1.0/3"},
+    {"Fiji (+12:00)", "Pacific/Fiji", "<+12>-12"},
+    {"Tonga (+13:00)", "Pacific/Tongatapu", "<+13>-13"},
 };
 static const int TIMEZONE_COUNT = sizeof(TIMEZONE_ENTRIES) / sizeof(TIMEZONE_ENTRIES[0]);
 
@@ -172,12 +177,49 @@ static int validate_timeout_option(int value, const int (&options)[N], int defau
     return nearest;
 }
 
+// Page-scroll buttons: opt-in on desktop/embedded Linux; on by default on ESP32,
+// where finger-drag scrolling is too slow on that panel.
+#if defined(ESP_PLATFORM)
+static constexpr int PAGE_SCROLL_DEFAULT = 1;
+#else
+static constexpr int PAGE_SCROLL_DEFAULT = 0;
+#endif
+
+using settings::Scope;
+// Row order is DisplaySettingsManager::Key.
+static constexpr settings::PersistedSetting DISPLAY_SETTINGS[] = {
+    {"settings_sleep_while_printing", "/display/sleep_while_printing", Scope::Global, true, 1, 0, 1,
+     nullptr},
+    // Minimum 10% prevents a black screen; DisplayManager drives the hardware.
+    {"settings_brightness", "/brightness", Scope::Global, false, 80, 10, 100, nullptr},
+    {"settings_use_system_keyboard", "/display/use_system_keyboard", Scope::Global, true, 0, 0, 1,
+     nullptr},
+    // Opt-in: an unlisted barcode scanner is a HID keyboard too.
+    {"settings_hide_keyboard_with_hardware", "/display/hide_keyboard_with_hardware", Scope::Global,
+     true, 0, 0, 1, nullptr},
+    {"settings_page_scroll_buttons", "/display/page_scroll_buttons", Scope::Global, true,
+     PAGE_SCROLL_DEFAULT, 0, 1, nullptr},
+    {"settings_speed_flow_physical_units", "/display/speed_flow_physical_units", Scope::Global,
+     true, 0, 0, 1, nullptr},
+    // Android only (#908)
+    {"settings_keep_navbar_visible", "/display/keep_navbar_visible", Scope::Global, true, 0, 0, 1,
+     nullptr},
+    // 0=Auto, 1=3D, 2=2D
+    {"settings_bed_mesh_render_mode", "/display/bed_mesh_render_mode", Scope::Global, false, 0, 0,
+     2, nullptr},
+    // 0=Auto, 1=3D, 2=2D, 3=Thumbnail Only
+    {"settings_gcode_render_mode", "/display/gcode_render_mode", Scope::Global, false, 0, 0, 3,
+     nullptr},
+    // 0=12H, 1=24H
+    {"settings_time_format", "/display/time_format", Scope::Global, false, 0, 0, 1, nullptr},
+};
+
 DisplaySettingsManager& DisplaySettingsManager::instance() {
     static DisplaySettingsManager instance;
     return instance;
 }
 
-DisplaySettingsManager::DisplaySettingsManager() {
+DisplaySettingsManager::DisplaySettingsManager() : settings_(DISPLAY_SETTINGS) {
     spdlog::trace("[DisplaySettingsManager] Constructor");
 }
 
@@ -223,11 +265,7 @@ void DisplaySettingsManager::init_subjects() {
 
     UI_MANAGED_SUBJECT_INT(display_sleep_subject_, sleep_sec, "settings_display_sleep", subjects_);
 
-    // Brightness: Read from config (DisplayManager handles hardware)
-    int brightness = config->get<int>("/brightness", 80);
-    brightness = std::clamp(brightness, 10, 100);
-    UI_MANAGED_SUBJECT_INT(brightness_subject_, brightness, "settings_brightness", subjects_);
-    spdlog::debug("[DisplaySettingsManager] Brightness initialized to {}%", brightness);
+    settings_.init(subjects_);
 
     // Has backlight control subject (for UI visibility) - check DisplayManager
     bool has_backlight = false;
@@ -250,11 +288,6 @@ void DisplaySettingsManager::init_subjects() {
     // enabled screensaver requires the coupling too (#1049), and
     // should_couple_sleep_to_dim() reads that subject.
 
-    // Sleep while printing (default: true = allow sleep during prints)
-    bool sleep_while_printing = config->get<bool>("/display/sleep_while_printing", true);
-    UI_MANAGED_SUBJECT_INT(sleep_while_printing_subject_, sleep_while_printing ? 1 : 0,
-                           "settings_sleep_while_printing", subjects_);
-
     // Animations enabled. Default from platform tier, but software-rotated
     // displays (fbdev + rotation) can't animate smoothly, so the default is
     // forced off there (#986). An explicit user setting always wins.
@@ -270,31 +303,28 @@ void DisplaySettingsManager::init_subjects() {
     UI_MANAGED_SUBJECT_INT(animations_enabled_subject_, animations ? 1 : 0,
                            "settings_animations_enabled", subjects_);
 
-    // System keyboard preference (default: off — use built-in LVGL keyboard)
-    bool sys_kb = config->get<bool>("/display/use_system_keyboard", false);
-    UI_MANAGED_SUBJECT_INT(use_system_keyboard_subject_, sys_kb ? 1 : 0,
-                           "settings_use_system_keyboard", subjects_);
+    // Drive the XML style engine's transition scale from this preference —
+    // the engine has no notion of a user setting, so this is the one place
+    // the two meet. lv_subject_add_observer() invokes the handler immediately
+    // with the subject's current value, so the scale matches the preference
+    // before any panel XML is created: a user with animations off never sees
+    // one animated transition before their first toggle. The handler runs
+    // inline on whichever thread writes the subject; every writer (Settings
+    // panel toggles, the ctl freeze/unfreeze pair) is main-thread already,
+    // matching this class's single-threaded contract above.
+    transition_scale_observer_ = helix::ui::observe<int>(
+        &animations_enabled_subject_, this,
+        [](DisplaySettingsManager*, int enabled) {
+            lv_xml_set_transition_scale(enabled ? 256 : 0);
+        },
+        get_subjects_lifetime(), helix::ui::Dispatch::Immediate);
 
-    // Page-scroll buttons. Desktop/embedded-Linux default: off (opt-in). ESP32
-    // default: on — finger-drag scrolling is too slow on that panel, so the
-    // buttons are the usable path. An explicit user setting always wins.
-#if defined(ESP_PLATFORM)
-    constexpr bool page_scroll_default = true;
-#else
-    constexpr bool page_scroll_default = false;
-#endif
-    bool page_scroll = config->exists("/display/page_scroll_buttons")
-                           ? config->get<bool>("/display/page_scroll_buttons", page_scroll_default)
-                           : page_scroll_default;
-    UI_MANAGED_SUBJECT_INT(page_scroll_buttons_subject_, page_scroll ? 1 : 0,
-                           "settings_page_scroll_buttons", subjects_);
+    // Presence is ephemeral: it is whatever the display backend opened this run.
+    UI_MANAGED_SUBJECT_INT(hardware_keyboard_present_subject_, hardware_keyboard_present_ ? 1 : 0,
+                           "settings_hardware_keyboard_present", subjects_);
 
-    // Keep navbar onscreen preference (Android only, issue #908, default: off)
-    bool keep_navbar = config->get<bool>("/display/keep_navbar_visible", false);
-    UI_MANAGED_SUBJECT_INT(keep_navbar_visible_subject_, keep_navbar ? 1 : 0,
-                           "settings_keep_navbar_visible", subjects_);
 #ifdef __ANDROID__
-    android_set_navbar_always_visible(keep_navbar);
+    android_set_navbar_always_visible(get_keep_navbar_visible());
 #endif
 
     // Platform flag for XML conditional visibility (ephemeral, not persisted)
@@ -306,23 +336,6 @@ void DisplaySettingsManager::init_subjects() {
     // the dropdown is seeded from config when the overlay activates.
     UI_MANAGED_SUBJECT_INT(rotation_available_subject_, rotation_setting_available() ? 1 : 0,
                            "settings_rotation_available", subjects_);
-
-    // Bed mesh render mode (default: 0 = Auto)
-    int bed_mesh_mode = config->get<int>("/display/bed_mesh_render_mode", 0);
-    bed_mesh_mode = std::clamp(bed_mesh_mode, 0, 2);
-    UI_MANAGED_SUBJECT_INT(bed_mesh_render_mode_subject_, bed_mesh_mode,
-                           "settings_bed_mesh_render_mode", subjects_);
-
-    // G-code render mode (default: 0 = Auto)
-    int gcode_mode = config->get<int>("/display/gcode_render_mode", 0);
-    gcode_mode = std::clamp(gcode_mode, 0, 3);
-    UI_MANAGED_SUBJECT_INT(gcode_render_mode_subject_, gcode_mode, "settings_gcode_render_mode",
-                           subjects_);
-
-    // Time format (default: 0 = 12-hour)
-    int time_format = config->get<int>("/display/time_format", 0);
-    time_format = std::clamp(time_format, 0, 1);
-    UI_MANAGED_SUBJECT_INT(time_format_subject_, time_format, "settings_time_format", subjects_);
 
     // Timezone (default: "UTC")
     std::string tz = config->get<std::string>("/display/timezone", "UTC");
@@ -345,24 +358,20 @@ void DisplaySettingsManager::init_subjects() {
     // Elegoo Centauri Carbon / OpenCentauri COSMOS), this points TZDIR at the
     // bundled assets/zoneinfo/ so the zone resolves instead of silently falling
     // back to UTC.
-    helix::timezone_env::apply(tz.c_str());
+    helix::timezone_env::apply(tz.c_str(), TIMEZONE_ENTRIES[tz_index].posix_tz);
     spdlog::info("[DisplaySettingsManager] Timezone set to '{}' (index {})", tz, tz_index);
 
 #ifdef HELIX_ENABLE_SCREENSAVER
-    // Screensaver type — tier-aware default via supports_animations.
-    // Devices that can run smooth animations (STANDARD tier on Pi 4/5, desktop)
-    // default to Flying Toasters (1). BASIC (Pi 3B-class) and EMBEDDED (AD5M,
-    // AD5X) default to OFF (0) because animated screensavers starve Klipper's
-    // CPU budget and cause print failures.
-    const int screensaver_default = PlatformCapabilities::detect().supports_animations ? 1 : 0;
+    // Screensaver type. A fresh install runs the registry default for this build's colour
+    // depth; a stored choice is kept as it is.
+    const int screensaver_default =
+        static_cast<int>(helix::ui::default_screensaver_type(helix::ui::SAVER_BUILD_DEPTH));
 
     int screensaver_type = screensaver_default;
     if (config->exists("/display/screensaver_type")) {
         screensaver_type = config->get<int>("/display/screensaver_type", screensaver_default);
     } else if (config->exists("/display/screensaver_enabled")) {
-        // Legacy migration: true → tier default, false → Off.
-        // The v14→v15 migration will later flip Flying Toasters to Off on low tiers anyway,
-        // but honouring the tier default here avoids writing a value we're about to overwrite.
+        // Legacy screensaver_enabled: true reads as the default type, false as Off.
         bool old_enabled = config->get<bool>("/display/screensaver_enabled", true);
         screensaver_type = old_enabled ? screensaver_default : 0;
         config->set<int>("/display/screensaver_type", screensaver_type);
@@ -371,7 +380,7 @@ void DisplaySettingsManager::init_subjects() {
             "[DisplaySettingsManager] Migrated screensaver_enabled={} → screensaver_type={}",
             old_enabled, screensaver_type);
     }
-    screensaver_type = std::clamp(screensaver_type, 0, 3);
+    screensaver_type = helix::ui::clamp_screensaver_type(screensaver_type);
     UI_MANAGED_SUBJECT_INT(screensaver_type_subject_, screensaver_type, "settings_screensaver_type",
                            subjects_);
 #endif
@@ -399,8 +408,8 @@ void DisplaySettingsManager::init_subjects() {
         "DisplaySettingsManager", []() { DisplaySettingsManager::instance().deinit_subjects(); });
 
     spdlog::debug("[DisplaySettingsManager] Subjects initialized: dark_mode={}, theme={}, "
-                  "dim={}s, sleep={}s, brightness={}, animations={}",
-                  dark_mode, get_theme_name(), dim_sec, sleep_sec, brightness, animations);
+                  "dim={}s, sleep={}s, animations={}",
+                  dark_mode, get_theme_name(), dim_sec, sleep_sec, animations);
 }
 
 void DisplaySettingsManager::deinit_subjects() {
@@ -409,16 +418,6 @@ void DisplaySettingsManager::deinit_subjects() {
     }
 
     spdlog::trace("[DisplaySettingsManager] Deinitializing subjects");
-    // Death signal BEFORE the subjects go away: deinit frees every observer
-    // node on them, so outside ObserverGuards must learn they are gone or their
-    // next reset() calls lv_observer_remove() on freed memory. Replaced, not
-    // cleared — an empty token reads as "dead" and would suppress removal for
-    // observers registered after this teardown.
-    if (subjects_lifetime_) {
-        *subjects_lifetime_ = false;
-    }
-    subjects_lifetime_ = std::make_shared<bool>(true);
-
     subjects_.deinit_all();
     subjects_initialized_ = false;
     spdlog::trace("[DisplaySettingsManager] Subjects deinitialized");
@@ -503,8 +502,7 @@ std::string DisplaySettingsManager::get_theme_name() const {
     }
     // Fallback to config if theme_manager not initialized yet
     Config* config = Config::get_instance();
-    return config ? config->get<std::string>("/display/theme", helix::DEFAULT_THEME)
-                  : helix::DEFAULT_THEME;
+    return config->get<std::string>("/display/theme", helix::DEFAULT_THEME);
 }
 
 void DisplaySettingsManager::set_theme_name(const std::string& name) {
@@ -621,15 +619,11 @@ void DisplaySettingsManager::set_display_sleep_sec(int seconds) {
     spdlog::debug("[DisplaySettingsManager] Display sleep set to {}s", seconds);
 }
 
-int DisplaySettingsManager::get_brightness() const {
-    return lv_subject_get_int(const_cast<lv_subject_t*>(&brightness_subject_));
-}
-
 int DisplaySettingsManager::preview_brightness(int percent) {
     // Clamp to valid range (10-100, minimum 10% to prevent black screen)
     int clamped = std::clamp(percent, 10, 100);
 
-    lv_subject_set_int(&brightness_subject_, clamped);
+    lv_subject_set_int(settings_.subject(Key::Brightness), clamped);
 
     if (auto* dm = DisplayManager::instance()) {
         dm->set_backlight_brightness(clamped);
@@ -642,12 +636,10 @@ int DisplaySettingsManager::preview_brightness(int percent) {
 }
 
 void DisplaySettingsManager::set_brightness(int percent) {
-    int clamped = preview_brightness(percent);
-    spdlog::info("[DisplaySettingsManager] set_brightness({})", clamped);
-
-    Config* config = Config::get_instance();
-    config->set<int>("/brightness", clamped);
-    config->save();
+    settings_.set(Key::Brightness, percent);
+    if (auto* dm = DisplayManager::instance()) {
+        dm->set_backlight_brightness(get_brightness());
+    }
 }
 
 bool DisplaySettingsManager::has_backlight_control() const {
@@ -677,20 +669,6 @@ bool DisplaySettingsManager::should_couple_sleep_to_dim() const {
     // backlight dim on dimming-capable devices, or — on no-backlight fbdev/DRM
     // devices — an enabled screensaver. Couple in either case (#1049).
     return has_dimming_control() || screensaver_enabled();
-}
-
-bool DisplaySettingsManager::get_sleep_while_printing() const {
-    return lv_subject_get_int(const_cast<lv_subject_t*>(&sleep_while_printing_subject_)) != 0;
-}
-
-void DisplaySettingsManager::set_sleep_while_printing(bool enabled) {
-    spdlog::info("[DisplaySettingsManager] set_sleep_while_printing({})", enabled);
-
-    lv_subject_set_int(&sleep_while_printing_subject_, enabled ? 1 : 0);
-
-    Config* config = Config::get_instance();
-    config->set<bool>("/display/sleep_while_printing", enabled);
-    config->save();
 }
 
 // =============================================================================
@@ -781,46 +759,21 @@ void DisplaySettingsManager::set_animations_enabled(bool enabled) {
     config->save();
 }
 
-bool DisplaySettingsManager::get_use_system_keyboard() const {
-    return lv_subject_get_int(const_cast<lv_subject_t*>(&use_system_keyboard_subject_)) != 0;
+void DisplaySettingsManager::set_hardware_keyboard_present(bool present) {
+    spdlog::info("[DisplaySettingsManager] Hardware keyboard {}",
+                 present ? "attached" : "not attached");
+    hardware_keyboard_present_ = present;
+    if (subjects_initialized_) {
+        lv_subject_set_int(&hardware_keyboard_present_subject_, present ? 1 : 0);
+    }
 }
 
-void DisplaySettingsManager::set_use_system_keyboard(bool enabled) {
-    spdlog::info("[DisplaySettingsManager] set_use_system_keyboard({})", enabled);
-
-    lv_subject_set_int(&use_system_keyboard_subject_, enabled ? 1 : 0);
-
-    Config* config = Config::get_instance();
-    config->set<bool>("/display/use_system_keyboard", enabled);
-    config->save();
-}
-
-bool DisplaySettingsManager::get_page_scroll_buttons() const {
-    return lv_subject_get_int(const_cast<lv_subject_t*>(&page_scroll_buttons_subject_)) != 0;
-}
-
-void DisplaySettingsManager::set_page_scroll_buttons(bool enabled) {
-    spdlog::info("[DisplaySettingsManager] set_page_scroll_buttons({})", enabled);
-
-    lv_subject_set_int(&page_scroll_buttons_subject_, enabled ? 1 : 0);
-
-    Config* config = Config::get_instance();
-    config->set<bool>("/display/page_scroll_buttons", enabled);
-    config->save();
-}
-
-bool DisplaySettingsManager::get_keep_navbar_visible() const {
-    return lv_subject_get_int(const_cast<lv_subject_t*>(&keep_navbar_visible_subject_)) != 0;
+bool DisplaySettingsManager::soft_keyboard_suppressed() const {
+    return subjects_initialized_ && hardware_keyboard_present_ && get_hide_keyboard_with_hardware();
 }
 
 void DisplaySettingsManager::set_keep_navbar_visible(bool enabled) {
-    spdlog::info("[DisplaySettingsManager] set_keep_navbar_visible({})", enabled);
-
-    lv_subject_set_int(&keep_navbar_visible_subject_, enabled ? 1 : 0);
-
-    Config* config = Config::get_instance();
-    config->set<bool>("/display/keep_navbar_visible", enabled);
-    config->save();
+    settings_.set(Key::KeepNavbarVisible, enabled);
 
 #ifdef __ANDROID__
     android_set_navbar_always_visible(enabled);
@@ -850,66 +803,15 @@ void DisplaySettingsManager::set_ui_scale_percent(int percent) {
                                                                 : std::to_string(stored) + "%");
 }
 
-int DisplaySettingsManager::get_bed_mesh_render_mode() const {
-    return lv_subject_get_int(const_cast<lv_subject_t*>(&bed_mesh_render_mode_subject_));
-}
-
-void DisplaySettingsManager::set_bed_mesh_render_mode(int mode) {
-    // Clamp to valid range (0=Auto, 1=3D, 2=2D)
-    int clamped = std::clamp(mode, 0, 2);
-    spdlog::info("[DisplaySettingsManager] set_bed_mesh_render_mode({})", clamped);
-
-    lv_subject_set_int(&bed_mesh_render_mode_subject_, clamped);
-
-    Config* config = Config::get_instance();
-    config->set<int>("/display/bed_mesh_render_mode", clamped);
-    config->save();
-
-    spdlog::debug("[DisplaySettingsManager] Bed mesh render mode set to {} ({})", clamped,
-                  clamped == 0 ? "Auto" : (clamped == 1 ? "3D" : "2D"));
-}
-
-int DisplaySettingsManager::get_gcode_render_mode() const {
-    return lv_subject_get_int(const_cast<lv_subject_t*>(&gcode_render_mode_subject_));
-}
-
 void DisplaySettingsManager::set_gcode_render_mode(int mode) {
-    // Clamp to valid range (0=Auto, 1=3D, 2=2D, 3=Thumbnail Only)
-    int clamped = std::clamp(mode, 0, 3);
-    spdlog::info("[DisplaySettingsManager] set_gcode_render_mode({})", clamped);
-
-    lv_subject_set_int(&gcode_render_mode_subject_, clamped);
-
-    Config* config = Config::get_instance();
-    config->set<int>("/display/gcode_render_mode", clamped);
-    // An explicit user render-mode pick re-enables the GPU path: clear the
+    // An explicit user render-mode pick re-enables the GPU paths: clear the
     // persistent crash-loop block (issues #966 / #1084 / #1085) so the user can
-    // retry 3D even after a prior driver crash promoted /display/gpu_3d_blocked.
-    config->set<bool>("/display/gpu_3d_blocked", false);
-    // Mirror for the 2D backdrop-blur block: a deliberate render-mode change is a
-    // clear signal the user wants GPU features retried, so clear the blur block too.
-    config->set<bool>("/display/gpu_blur_blocked", false);
-    config->save();
-
-    static const char* MODE_NAMES[] = {"Auto", "3D", "2D", "Thumbnail Only"};
-    spdlog::debug("[DisplaySettingsManager] G-code render mode set to {} ({})", clamped,
-                  MODE_NAMES[clamped]);
-}
-
-TimeFormat DisplaySettingsManager::get_time_format() const {
-    int val = lv_subject_get_int(const_cast<lv_subject_t*>(&time_format_subject_));
-    return static_cast<TimeFormat>(std::clamp(val, 0, 1));
-}
-
-void DisplaySettingsManager::set_time_format(TimeFormat format) {
-    int val = static_cast<int>(format);
-    spdlog::info("[DisplaySettingsManager] set_time_format({})", val == 0 ? "12H" : "24H");
-
-    lv_subject_set_int(&time_format_subject_, val);
-
+    // retry 3D after a driver crash promoted /display/gpu_3d_blocked, and the
+    // 2D backdrop-blur block with it. set() below saves all three.
     Config* config = Config::get_instance();
-    config->set<int>("/display/time_format", val);
-    config->save();
+    config->set<bool>("/display/gpu_3d_blocked", false);
+    config->set<bool>("/display/gpu_blur_blocked", false);
+    settings_.set(Key::GcodeRenderMode, mode);
 }
 
 // =============================================================================
@@ -948,7 +850,7 @@ void DisplaySettingsManager::set_timezone_by_index(int index) {
     lv_subject_set_int(&timezone_subject_, index);
 
     // Apply timezone to process (see init_subjects for bundled-zoneinfo note).
-    helix::timezone_env::apply(iana_id);
+    helix::timezone_env::apply(iana_id, TIMEZONE_ENTRIES[index].posix_tz);
 
     // Persist
     Config* config = Config::get_instance();
@@ -980,7 +882,7 @@ int DisplaySettingsManager::get_screensaver_type() const {
 }
 
 void DisplaySettingsManager::set_screensaver_type(int type) {
-    type = std::clamp(type, 0, 3);
+    type = helix::ui::clamp_screensaver_type(type);
     spdlog::info("[DisplaySettingsManager] set_screensaver_type({})", type);
 
     lv_subject_set_int(&screensaver_type_subject_, type);
@@ -997,15 +899,11 @@ void DisplaySettingsManager::set_screensaver_type(int type) {
 
 std::string DisplaySettingsManager::get_printer_image() const {
     Config* config = Config::get_instance();
-    if (!config)
-        return "";
     return config->get<std::string>(config->df() + PRINTER_IMAGE, "");
 }
 
 void DisplaySettingsManager::set_printer_image(const std::string& id) {
     Config* config = Config::get_instance();
-    if (!config)
-        return;
     config->set<std::string>(config->df() + PRINTER_IMAGE, id);
     config->save();
     spdlog::info("[DisplaySettingsManager] Printer image set to: '{}'",

@@ -5,7 +5,10 @@
 
 #include "ui_ams_context_menu.h"
 #include "ui_ams_slot_layout.h"
+#include "ui_insert_notice.h"
 
+#include "ams_tray_projection.h"
+#include "ams_types.h"
 #include "lvgl/lvgl.h"
 
 /**
@@ -73,7 +76,8 @@ void ams_detail_destroy_slots(AmsDetailWidgets& w, lv_obj_t* slot_widgets[], int
  * @brief Size tray to 1/4 of slot grid height (minimum 20px) with 3D box effect
  * @param w Widget pointers — uses slot_grid height and positions slot_tray
  */
-void ams_detail_update_tray(AmsDetailWidgets& w);
+void ams_detail_update_tray(AmsDetailWidgets& w, lv_obj_t* const slot_widgets[] = nullptr,
+                            int slot_count = 0, int unit_index = -1);
 
 /**
  * @brief Move material labels to overlay layer for 5+ overlapping slots
@@ -104,10 +108,14 @@ void ams_detail_update_badges(AmsDetailWidgets& w, lv_obj_t* slot_widgets[], int
  * @param canvas     The filament_path_canvas widget
  * @param slot_grid  The slot grid (for sizing sync) — may be nullptr
  * @param unit_index Backend unit index (-1 = whole backend)
- * @param hub_only   If true, only draw slots → hub (skip downstream)
  */
+void ams_detail_setup_path_canvas(lv_obj_t* canvas, lv_obj_t* slot_grid, int unit_index);
+
+/// The same, for a caller that already holds the system info it just read from @p backend.
+// NAMESPACE_OK: an overload of the global three-argument ams_detail_setup_path_canvas
 void ams_detail_setup_path_canvas(lv_obj_t* canvas, lv_obj_t* slot_grid, int unit_index,
-                                  bool hub_only);
+                                  const helix::AmsBackend* backend,
+                                  const helix::AmsSystemInfo& info);
 
 /**
  * @brief Pre-show environment indicator if backend has environment sensors
@@ -128,6 +136,52 @@ void ams_detail_pre_show_env_indicator(AmsDetailWidgets& w, int unit_index);
 
 namespace helix {
 namespace ui {
+
+/// Whether the system's filament error belongs to the view of @p unit_index
+/// (the all-units view is every unit's): the loaded lane is in the unit, or with
+/// none loaded, one of its slots reports an error.
+bool ams_detail_error_in_view(const AmsSystemInfo& info, int unit_index);
+
+/// Tell the path canvas where the spool box's front edge is, so its lanes enter
+/// there. Call after ams_detail_update_tray(); no box leaves the canvas's own
+/// entry row.
+void ams_detail_sync_lane_entry(lv_obj_t* canvas, lv_obj_t* slot_grid);
+
+/// Slot sizing for the detail view: in a box, spools stand at the tray pitch
+/// (ams_tray_projection.h) instead of spreading across the width.
+AmsSlotLayout ams_detail_slot_layout(int32_t available_width, int slot_count);
+
+/// The box, lid and lane lids the last ams_detail_update_tray() laid out,
+/// relative to the slot_container. False when no box is drawn.
+bool ams_detail_tray_geometry(tray::TrayBox& box, tray::LidMode& lid, float& lid_height,
+                              float& lane_half_width);
+/// What the path canvas's buffer box draws for one view.
+struct BufferBoxState {
+    bool present = false;
+    int state = 0;             ///< Coil shape: 0 neutral, 1 compressed, 2 tension
+    const char* label = "BUF"; ///< "FPS" for a filament pressure sensor
+    /// ClogMeterStatus: the AFC fault distance or the buffer bands, worse wins;
+    /// -1 for a pressure reading with nothing to judge it against (no set
+    /// point, or a one-sided gauge inside its rails), which draws untinted.
+    int fault = 0;
+    float bias = -2.0f; ///< The reading's bias, or -2 with none (a one-sided gauge has no bias)
+};
+
+/// The buffer box for @p unit_index; -1 is the whole-backend view, which shows
+/// the system-level reading (buffer_reading(info, -1)).
+BufferBoxState ams_detail_buffer_box(const AmsSystemInfo& info, int unit_index);
+
+/**
+ * @brief Disable the slot widgets of bays in an absent unit, enable the rest
+ *
+ * Runs on every slot refresh: a box leaving or rejoining the chain changes no
+ * slot count, so no rebuild would otherwise pick it up.
+ */
+void ams_detail_sync_slot_states(lv_obj_t* slot_widgets[], int slot_count);
+
+/// The same, for a caller that already holds the system info.
+void ams_detail_sync_slot_states(lv_obj_t* slot_widgets[], int slot_count,
+                                 const AmsSystemInfo& info);
 
 /**
  * @brief Dispatch the context-menu actions that are pure backend calls

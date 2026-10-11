@@ -151,6 +151,15 @@ static SoundDefinition make_multi_step(std::vector<std::pair<float, float>> freq
 
 // Wait for playback to finish with timeout.
 // First waits for playing to start, then waits for it to end.
+/// The sequencer scales every amplitude by AudioSettingsManager's volume, which
+/// reads a subject that only exists after init_subjects(). Setting the volume
+/// before then leaves it at 0, so every amplitude this file measures reads 0.
+static void set_full_volume() {
+    lv_init_safe();
+    SettingsManager::instance().init_subjects();
+    AudioSettingsManager::instance().set_volume(100);
+}
+
 static bool wait_until_done(SoundSequencer& seq, int timeout_ms = 5000) {
     auto start = std::chrono::steady_clock::now();
 
@@ -387,9 +396,7 @@ TEST_CASE("SoundSequencer: sub-floor steps are stretched to the min_tick_ms inte
 // ============================================================================
 
 TEST_CASE("SoundSequencer: ADSR attack ramps amplitude up", "[sound][sequencer][slow]") {
-    lv_init_safe();
-    SettingsManager::instance().init_subjects();
-    AudioSettingsManager::instance().set_volume(100);
+    set_full_volume();
     auto backend = std::make_shared<MockBackend>();
     SoundSequencer seq(backend);
     seq.start();
@@ -465,7 +472,7 @@ TEST_CASE("SoundSequencer: ADSR attack ramps amplitude up", "[sound][sequencer][
 // ============================================================================
 
 TEST_CASE("SoundSequencer: ADSR decay drops amplitude toward sustain", "[sound][sequencer][slow]") {
-    AudioSettingsManager::instance().set_volume(100);
+    set_full_volume();
     auto backend = std::make_shared<MockBackend>();
     SoundSequencer seq(backend);
     seq.start();
@@ -520,7 +527,7 @@ TEST_CASE("SoundSequencer: ADSR decay drops amplitude toward sustain", "[sound][
 // ============================================================================
 
 TEST_CASE("SoundSequencer: ADSR sustain holds amplitude", "[sound][sequencer][slow]") {
-    AudioSettingsManager::instance().set_volume(100);
+    set_full_volume();
     auto backend = std::make_shared<MockBackend>();
     SoundSequencer seq(backend);
     seq.start();
@@ -670,9 +677,7 @@ TEST_CASE("SoundSequencer: LFO modulates frequency", "[sound][sequencer][slow]")
 // ============================================================================
 
 TEST_CASE("SoundSequencer: LFO modulates amplitude", "[sound][sequencer][slow]") {
-    lv_init_safe();
-    SettingsManager::instance().init_subjects();
-    AudioSettingsManager::instance().set_volume(100);
+    set_full_volume();
     auto backend = std::make_shared<MockBackend>();
     SoundSequencer seq(backend);
     seq.start();
@@ -1117,5 +1122,76 @@ TEST_CASE("SoundSequencer: wakes the device to play and parks it again after",
     // ...and parked again once the queue drained.
     CHECK(UITest::wait_until([&] { return backend->suspend_calls.load() > suspends_before; }));
 
+    seq.shutdown();
+}
+
+// ============================================================================
+// External tick handover
+// ============================================================================
+//
+// SoundManager frees the TrackerPlayer the tick callback points at as soon as
+// set_external_tick(nullptr) returns, so the call must not return while the
+// sequencer thread is still inside the old callback.
+
+TEST_CASE("SoundSequencer: clearing the external tick waits out a tick in flight",
+          "[sound][sequencer][threading]") {
+    auto backend = std::make_shared<MockBackend>();
+    SoundSequencer seq(backend);
+    seq.start();
+
+    std::atomic<bool> in_tick{false};
+    std::atomic<bool> release{false};
+    std::atomic<bool> tick_done{false};
+    seq.set_external_tick([&](float) {
+        if (tick_done.load()) {
+            return;
+        }
+        in_tick.store(true);
+        while (!release.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        tick_done.store(true);
+    });
+    REQUIRE(UITest::wait_until([&] { return in_tick.load(); }));
+
+    std::atomic<bool> cleared{false};
+    std::atomic<bool> done_when_cleared{false};
+    std::thread clearer([&] {
+        seq.set_external_tick(nullptr);
+        done_when_cleared.store(tick_done.load());
+        cleared.store(true);
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    CHECK_FALSE(cleared.load());
+
+    release.store(true);
+    clearer.join();
+    CHECK(done_when_cleared.load());
+
+    seq.shutdown();
+}
+
+TEST_CASE("SoundSequencer: setting the external tick from inside it is refused",
+          "[sound][sequencer][threading]") {
+    auto backend = std::make_shared<MockBackend>();
+    SoundSequencer seq(backend);
+    seq.start();
+
+    std::atomic<int> ticks{0};
+    std::atomic<bool> inner_call_returned{false};
+    seq.set_external_tick([&](float) {
+        if (ticks.fetch_add(1) == 0) {
+            seq.set_external_tick(nullptr);
+            inner_call_returned.store(true);
+        }
+    });
+
+    REQUIRE(UITest::wait_until([&] { return inner_call_returned.load(); }, 2000));
+    // The refused call left the callback installed: it keeps ticking.
+    const int after_inner = ticks.load();
+    CHECK(UITest::wait_until([&] { return ticks.load() > after_inner; }, 2000));
+
+    seq.set_external_tick(nullptr);
     seq.shutdown();
 }

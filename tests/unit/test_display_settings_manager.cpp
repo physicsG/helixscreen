@@ -4,7 +4,13 @@
 #include "../lvgl_test_fixture.h"
 #include "config.h"
 #include "display_settings_manager.h"
+#include "gcode_preview_setup.h"
+#include "gcode_render_mode_policy.h"
+#include "runtime_config.h"
+#include "screensaver_registry.h"
 #include "settings_manager.h"
+
+#include <cstdlib>
 
 #include "../catch_amalgamated.hpp"
 
@@ -194,6 +200,33 @@ TEST_CASE_METHOD(LVGLTestFixture, "DisplaySettingsManager set/get round trips",
     DisplaySettingsManager::instance().deinit_subjects();
 }
 
+// The preview asks one question before it fetches anything: is the G-code viewer
+// used at all. Thumbnail Only answers no, and that answer has to reach the live
+// reader, because the whole G-code pipeline - download, layer index, background
+// render pass - hangs off it.
+TEST_CASE_METHOD(LVGLTestFixture, "preview_viewer_enabled follows the persisted render mode",
+                 "[display_settings][render_mode]") {
+    DisplaySettingsManager::instance().init_subjects();
+
+    // The ladder puts a command-line mode above the setting, so this test only
+    // says anything about the settings tier while nothing is pinned above it.
+    const RuntimeConfig* runtime = get_runtime_config();
+    REQUIRE((runtime == nullptr || runtime->gcode_render_mode < 0));
+    REQUIRE(std::getenv("HELIX_GCODE_MODE") == nullptr);
+
+    DisplaySettingsManager::instance().set_gcode_render_mode(
+        helix::gcode_viewer::RENDER_MODE_THUMBNAIL_ONLY);
+    CHECK_FALSE(helix::ui::preview_viewer_enabled());
+
+    DisplaySettingsManager::instance().set_gcode_render_mode(2);
+    CHECK(helix::ui::preview_viewer_enabled());
+
+    DisplaySettingsManager::instance().set_gcode_render_mode(0);
+    CHECK(helix::ui::preview_viewer_enabled());
+
+    DisplaySettingsManager::instance().deinit_subjects();
+}
+
 // An explicit render-mode pick is a clear "retry GPU features" signal, so it must
 // clear BOTH persistent crash-loop blocks (3D GLES viewer + 2D backdrop blur) so
 // a user isn't stuck on the CPU paths forever after one prior driver crash.
@@ -376,3 +409,69 @@ TEST_CASE_METHOD(LVGLTestFixture, "DisplaySettingsManager preview_brightness doe
         CHECK(config->get<int>("/brightness", -1) == 55);
     }
 }
+
+#ifdef HELIX_ENABLE_SCREENSAVER
+
+// The default saver comes from the registry on every tier, not from a platform probe:
+// the gate steps a too-heavy default down on the device instead of disabling it up
+// front. The legacy screensaver_enabled key migrates onto the same value.
+TEST_CASE_METHOD(LVGLTestFixture, "screensaver type defaults to the registry default on every tier",
+                 "[display_settings][screensaver]") {
+    Config* config = Config::get_instance();
+    config->set<int>("/display/sleep_sec", 1200); // makes sure the /display group exists
+    const bool had_type = config->exists("/display/screensaver_type");
+    const int stored_type = config->get<int>("/display/screensaver_type", 0);
+    const bool had_legacy = config->exists("/display/screensaver_enabled");
+    const bool stored_legacy = config->get<bool>("/display/screensaver_enabled", true);
+
+    config->get_json("/display").erase("screensaver_type");
+    config->get_json("/display").erase("screensaver_enabled");
+    DisplaySettingsManager::instance().deinit_subjects();
+
+    const int registry_default = static_cast<int>(helix::ui::DEFAULT_SCREENSAVER_TYPE);
+    DisplaySettingsManager& mgr = DisplaySettingsManager::instance();
+
+    SECTION("a fresh install runs the registry default") {
+        mgr.init_subjects();
+        REQUIRE(mgr.get_screensaver_type() == registry_default);
+    }
+
+    SECTION("legacy screensaver_enabled=true migrates onto the registry default") {
+        config->set<bool>("/display/screensaver_enabled", true);
+        mgr.init_subjects();
+        REQUIRE(mgr.get_screensaver_type() == registry_default);
+        // The migration persists its answer, so the legacy key is read once.
+        REQUIRE(config->exists("/display/screensaver_type"));
+    }
+
+    SECTION("legacy screensaver_enabled=false migrates to Off") {
+        config->set<bool>("/display/screensaver_enabled", false);
+        mgr.init_subjects();
+        REQUIRE(mgr.get_screensaver_type() == 0);
+    }
+
+    SECTION("a stored type at the registry's top end survives re-init") {
+        const int fireworks = static_cast<int>(ScreensaverType::FIREWORKS);
+        config->set<int>("/display/screensaver_type", fireworks);
+        mgr.init_subjects();
+        REQUIRE(mgr.get_screensaver_type() == fireworks);
+    }
+
+    // Restore both keys and re-derive the live subject from them. A later test may
+    // call init_subjects() without deinit_subjects() first, and that init is a no-op
+    // while subjects are already up, so the subject must hold the restored value.
+    if (had_type) {
+        config->set<int>("/display/screensaver_type", stored_type);
+    } else {
+        config->get_json("/display").erase("screensaver_type");
+    }
+    if (had_legacy) {
+        config->set<bool>("/display/screensaver_enabled", stored_legacy);
+    } else {
+        config->get_json("/display").erase("screensaver_enabled");
+    }
+    mgr.deinit_subjects();
+    mgr.init_subjects();
+}
+
+#endif // HELIX_ENABLE_SCREENSAVER

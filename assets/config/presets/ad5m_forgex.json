@@ -46,7 +46,8 @@
         "fan_generic fanM106",
         "heater_fan heat_fan",
         "controller_fan driver_fan",
-        "filament_switch_sensor e0_sensor"
+        "filament_switch_sensor e0_sensor",
+        "filament_switch_sensor e1_sensor"
       ]
     },
     "default_macros": {

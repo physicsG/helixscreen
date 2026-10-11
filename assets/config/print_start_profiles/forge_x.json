@@ -125,14 +125,5 @@
       "message": "Purging...",
       "weight": 20
     }
-  ],
-  "phase_weights": {
-    "INITIALIZING": 5,
-    "HOMING": 5,
-    "HEATING_BED": 15,
-    "HEATING_NOZZLE": 15,
-    "CLEANING": 20,
-    "BED_MESH": 25,
-    "PURGING": 10
-  }
+  ]
 }

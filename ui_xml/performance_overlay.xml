@@ -2,13 +2,12 @@
 <!-- Copyright (C) 2025-2026 356C LLC -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <component>
-  <view name="performance_overlay"
-        extends="overlay_panel" title="Performance" title_tag="Performance" bg_color="#screen_bg">
+  <view name="performance_overlay" extends="overlay_panel" title="Performance" bg_color="#screen_bg">
     <lv_obj name="overlay_content"
             width="100%" flex_grow="1" style_pad_top="0" style_pad_left="#space_lg" style_pad_right="#space_lg"
             style_pad_bottom="#space_lg" scrollable="true" flex_flow="column">
 
-      <text_small text="HOST" translation_tag="HOST" style_text_color="#text_muted" style_pad_top="#space_md"/>
+      <text_small text="HOST" style_text_color="#text_muted" style_pad_top="#space_md"/>
       <ui_card width="100%" flex_flow="column" style_pad_gap="#space_sm">
         <perf_metric_row label="CPU"
                          label_tag="CPU" bind_value="perf_host_cpu_pct" bind_text="perf_host_cpu_pct_text"
@@ -21,7 +20,7 @@
         </text_muted>
       </ui_card>
 
-      <text_small text="MCU" translation_tag="MCU" style_text_color="#text_muted" style_pad_top="#space_md"/>
+      <text_small text="MCU" style_text_color="#text_muted" style_pad_top="#space_md"/>
       <ui_card name="mcu_card" width="100%" flex_flow="column" style_pad_gap="#space_sm"/>
 
     </lv_obj>

@@ -8,6 +8,7 @@
 #include <cstring>
 #include <ctime>
 #include <string>
+#include <utility>
 
 #include "../catch_amalgamated.hpp"
 
@@ -468,4 +469,97 @@ TEST_CASE("eta_clock_time formats 24-hour clock when use_24h is true", "[format_
         auto eta = eta_clock_time(15 * 60, make_ref_time(9, 0), true);
         CHECK(eta == "(~9:15)");
     }
+}
+
+namespace {
+
+/// Stands in for lv_translation_get(): tags each unit format so a test can see
+/// that every duration formatter looked its format up.
+const char* bracket_units(const char* format) {
+    static const std::pair<const char*, const char*> kTable[] = {
+        {"%ds", "[%d s]"},
+        {"%dm", "[%d m]"},
+        {"%dh", "[%d h]"},
+        {"%dh %dm", "[%d h %d m]"},
+        {"%dm %02ds", "[%d m %02d s]"},
+        {"%dh %02dm", "[%d h %02d m]"},
+        {"%d min", "[%d min]"},
+        {"%d:%02d left", "[%d:%02d left]"},
+        {"%d min left", "[%d min left]"},
+    };
+    for (const auto& [from, to] : kTable) {
+        if (std::strcmp(from, format) == 0) {
+            return to;
+        }
+    }
+    return format;
+}
+
+struct TranslatorGuard {
+    explicit TranslatorGuard(Translator translator) {
+        set_translator(translator);
+    }
+    ~TranslatorGuard() {
+        set_translator(nullptr);
+    }
+};
+
+} // namespace
+
+TEST_CASE("Every duration formatter looks its unit format up", "[format_utils][duration][i18n]") {
+    TranslatorGuard guard(bracket_units);
+
+    CHECK(duration(0) == "[0 s]");
+    CHECK(duration(45) == "[45 s]");
+    CHECK(duration(600) == "[10 m]");
+    CHECK(duration(7200) == "[2 h]");
+    CHECK(duration(3900) == "[1 h 5 m]");
+
+    char buf[64];
+    CHECK(duration_to_buffer(buf, sizeof(buf), 3900) == std::strlen("[1 h 5 m]"));
+    CHECK(std::string(buf) == "[1 h 5 m]");
+
+    CHECK(duration_from_minutes(0) == "[0 min]");
+    CHECK(duration_from_minutes(5) == "[5 min]");
+    CHECK(duration_from_minutes(120) == "[2 h]");
+    CHECK(duration_from_minutes(65) == "[1 h 5 m]");
+
+    CHECK(duration_remaining(0) == "[0 min left]");
+    CHECK(duration_remaining(125) == "[2:05 left]");
+    CHECK(duration_remaining(45) == "[0:45 left]");
+    CHECK(duration_remaining(600) == "[10 min left]");
+    CHECK(duration_remaining(3900) == "[1:05 left]");
+
+    CHECK(duration_padded(0) == "[0 s]");
+    CHECK(duration_padded(125) == "[2 m 05 s]");
+    CHECK(duration_padded(600) == "[10 m]");
+    CHECK(duration_padded(3900) == "[1 h 05 m]");
+}
+
+TEST_CASE("parse_http_date reads an IMF-fixdate as UTC", "[format_utils][http_date]") {
+    std::time_t t = 0;
+    REQUIRE(helix::format::parse_http_date("Sun, 06 Nov 1994 08:49:37 GMT", t));
+    CHECK(t == 784111777);
+    REQUIRE(helix::format::parse_http_date("Mon, 05 Oct 2026 05:30:40 GMT", t));
+    CHECK(t == 1791178240);
+    // Leap day, and the first second of a year (January is the March-based year's tail).
+    REQUIRE(helix::format::parse_http_date("Thu, 29 Feb 2024 00:00:00 GMT", t));
+    CHECK(t == 1709164800);
+    REQUIRE(helix::format::parse_http_date("Thu, 01 Jan 1970 00:00:00 GMT", t));
+    CHECK(t == 0);
+}
+
+TEST_CASE("parse_http_date rejects what is not an IMF-fixdate", "[format_utils][http_date]") {
+    std::time_t t = 42;
+    CHECK_FALSE(helix::format::parse_http_date(nullptr, t));
+    CHECK_FALSE(helix::format::parse_http_date("", t));
+    CHECK_FALSE(helix::format::parse_http_date("Sun, 06 Nov 1994 08:49:37 PST", t));
+    CHECK_FALSE(helix::format::parse_http_date("Sun, 06 Foo 1994 08:49:37 GMT", t));
+    CHECK_FALSE(helix::format::parse_http_date("Sun, 06 Nov 1994 25:49:37 GMT", t));
+    CHECK_FALSE(helix::format::parse_http_date("Sunday, 06-Nov-94 08:49:37 GMT", t));
+    CHECK_FALSE(helix::format::parse_http_date("Sun, 06 Nov 1994 08:49:37 GMTX", t));
+    CHECK_FALSE(helix::format::parse_http_date("Tue, 31 Feb 2026 00:00:00 GMT", t));
+    CHECK_FALSE(helix::format::parse_http_date("Thu, 29 Feb 2026 00:00:00 GMT", t));
+    CHECK_FALSE(helix::format::parse_http_date("Thu, 31 Apr 2026 00:00:00 GMT", t));
+    CHECK(t == 42);
 }

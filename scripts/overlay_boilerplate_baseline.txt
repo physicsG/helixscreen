@@ -1,0 +1,5 @@
+# Hand-rolled overlay boilerplate in src/ui (scripts/check_overlay_boilerplate.py).
+# Shrink-only: convert the site to OverlayBase::show / lazy_global<T>, then
+# re-run with --write-baseline.
+already_exists=3
+static_unique=3

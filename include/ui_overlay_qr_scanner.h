@@ -20,6 +20,7 @@
 #include "qr_decoder.h"
 #include "snapshot_qr_scanner.h"
 #include "spoolman_types.h"
+#include "static_panel_registry.h"
 #include "subject_managed_panel.h"
 #include "usb_scanner_monitor.h"
 
@@ -62,13 +63,22 @@ class QrScannerOverlay : public OverlayBase {
 
     // OverlayBase interface
     void init_subjects() override;
+    /// Fullscreen: built directly from XML, without the standard overlay header setup.
     lv_obj_t* create(lv_obj_t* parent) override;
     void register_callbacks() override;
+    /// Freed on close; the next open rebuilds it.
+    bool destroy_on_close() const override {
+        return true;
+    }
+
     const char* get_name() const override {
         return "QR Scanner";
     }
+    const char* xml_component() const override {
+        return "qr_scanner_overlay";
+    }
     void on_activate() override;
-    void on_deactivate() override;
+    void on_deactivating(DeactivateReason reason) override;
     void on_ui_destroyed() override;
 
     /**
@@ -88,10 +98,8 @@ class QrScannerOverlay : public OverlayBase {
     void show_for_active_spool(lv_obj_t* parent, ResultCallback on_result,
                                CancelCallback on_cancel = nullptr);
 
-    // Static event callbacks (registered with XML)
-    static void on_close_clicked(lv_event_t* e);
-
   private:
+    void handle_close();
     void start_scanning();
     void stop_scanning();
     void on_spool_id_detected(int spool_id);
@@ -135,9 +143,7 @@ class QrScannerOverlay : public OverlayBase {
     char status_buf_[128]{};
 
     // Cached widget pointers
-    lv_obj_t* cached_overlay_ = nullptr;
     lv_obj_t* viewfinder_ = nullptr;
-    lv_obj_t* status_text_ = nullptr;
     lv_obj_t* success_flash_ = nullptr;
 
     // Timers (tracked for cleanup)
@@ -150,14 +156,8 @@ class QrScannerOverlay : public OverlayBase {
     lv_timer_t* timeout_timer_ = nullptr; // TIMER_DTOR_OK: token-guarded, see above
 };
 
-/**
- * @brief Global instance accessor
- *
- * Creates the overlay on first access and registers it for cleanup
- * with StaticPanelRegistry.
- *
- * @return Reference to singleton QrScannerOverlay
- */
-QrScannerOverlay& get_qr_scanner_overlay();
+inline QrScannerOverlay& get_qr_scanner_overlay() {
+    return lazy_global<QrScannerOverlay>("QrScannerOverlay");
+}
 
 } // namespace helix::ui

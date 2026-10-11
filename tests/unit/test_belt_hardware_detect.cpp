@@ -33,7 +33,9 @@
 #include "../../include/moonraker_client_mock.h"
 #include "../../include/printer_state.h"
 #include "../lvgl_test_fixture.h"
+#include "../test_helpers/mock_kinematics_env.h"
 
+#include <memory>
 #include <string>
 
 #include "../catch_amalgamated.hpp"
@@ -57,14 +59,37 @@ void seed_accel_manager(const nlohmann::json& config) {
     helix::ui::UpdateQueue::instance().drain();
 }
 
+/// Points HELIX_MOCK_KINEMATICS at `value` for the scope and restores whatever
+/// was there before; see tests/test_helpers/mock_kinematics_env.h.
+using MockKinematicsGuard = helix_test::MockKinematicsEnv;
+
+/// Runs detect_belt_hardware against a mock whose configfile reports
+/// HELIX_MOCK_KINEMATICS and returns the hardware it detected.
+helix::calibration::BeltTensionHardware detect_with_kinematics(const char* kinematics) {
+    MockKinematicsGuard env(kinematics);
+    PrinterState state;
+    state.init_subjects(false);
+    MoonrakerClientMock client(MoonrakerClientMock::PrinterType::GENERIC_COREXY);
+    MoonrakerAPI api(client, state);
+    MoonrakerAdvancedAPI advanced(client, api);
+
+    bool completed = false;
+    helix::calibration::BeltTensionHardware detected;
+    advanced.detect_belt_hardware(
+        [&](const helix::calibration::BeltTensionHardware& hw) {
+            completed = true;
+            detected = hw;
+        },
+        [&](const MoonrakerError&) {});
+    REQUIRE(completed);
+    return detected;
+}
+
 } // namespace
 
-// Step 2 (printer.objects.query for kinematics) already reads through "result"
-// correctly, but it cannot be asserted here: the mock's configfile.settings.printer
-// carries only max_velocity/max_accel, with no kinematics key
-// (moonraker_client_mock_objects.cpp:211). Covering that path needs the mock to
-// report a per-printer-type kinematics first — worth doing, but it is mock
-// fidelity work rather than part of this fix.
+// Step 2 (printer.objects.query for kinematics) reads the mock's
+// configfile.settings.printer.kinematics, which follows HELIX_MOCK_KINEMATICS
+// (MoonrakerClientMock::kinematics), so every kinematics can be exercised here.
 
 // A malformed envelope must not throw out of the callback or skip on_complete.
 // The kinematics parse sits behind a try/catch that reports through
@@ -193,4 +218,59 @@ TEST_CASE("detect_belt_hardware reports has_adxl false with no accelerometer sec
         [&](const MoonrakerError&) {});
     REQUIRE(completed);
     CHECK_FALSE(detected.has_adxl);
+}
+
+// ============================================================================
+// Kinematics classification: COREXY only where the two diagonals are the two
+// belt paths (prestonbrown/helixscreen#1721)
+// ============================================================================
+
+TEST_CASE("detect_belt_hardware classifies only belt-path kinematics as COREXY", "[belt][detect]") {
+    auto detected = detect_with_kinematics("corexz");
+    CHECK(detected.kinematics == helix::calibration::KinematicsType::UNKNOWN);
+    CHECK(detected.kinematics_name == "corexz");
+
+    detected = detect_with_kinematics("limited_corexy");
+    CHECK(detected.kinematics == helix::calibration::KinematicsType::COREXY);
+    CHECK(detected.kinematics_name == "limited_corexy");
+
+    detected = detect_with_kinematics("hybrid_corexy");
+    CHECK(detected.kinematics == helix::calibration::KinematicsType::UNKNOWN);
+
+    detected = detect_with_kinematics("delta");
+    CHECK(detected.kinematics == helix::calibration::KinematicsType::UNKNOWN);
+}
+
+TEST_CASE("the mock's kinematics persona is fixed when the mock is constructed",
+          "[belt][detect][mock]") {
+    // The simulation thread reports kinematics every tick; a getenv() there
+    // races a setenv() on the main thread and can fault inside libc. Changing
+    // the variable after construction must therefore change nothing.
+    PrinterState state;
+    state.init_subjects(false);
+    auto client = [] {
+        MockKinematicsGuard env("corexz");
+        return std::make_unique<MoonrakerClientMock>(
+            MoonrakerClientMock::PrinterType::GENERIC_COREXY);
+    }();
+    MockKinematicsGuard flipped("cartesian");
+    CHECK(client->kinematics() == "corexz");
+
+    MoonrakerAPI api(*client, state);
+    MoonrakerAdvancedAPI advanced(*client, api);
+    helix::calibration::BeltTensionHardware detected;
+    advanced.detect_belt_hardware(
+        [&](const helix::calibration::BeltTensionHardware& hw) { detected = hw; },
+        [&](const MoonrakerError&) {});
+    CHECK(detected.kinematics_name == "corexz");
+    helix::ui::UpdateQueue::instance().drain();
+}
+
+TEST_CASE("detect_belt_hardware classifies cartesian family as CARTESIAN", "[belt][detect]") {
+    auto detected = detect_with_kinematics("cartesian");
+    CHECK(detected.kinematics == helix::calibration::KinematicsType::CARTESIAN);
+    CHECK(detected.kinematics_name == "cartesian");
+
+    detected = detect_with_kinematics("limited_cartesian");
+    CHECK(detected.kinematics == helix::calibration::KinematicsType::CARTESIAN);
 }

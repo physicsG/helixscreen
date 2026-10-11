@@ -2,8 +2,12 @@ name: Nightly Full Test Suite
 
 on:
   schedule:
-    # Run at 4:00 AM UTC every day (11 PM ET / 8 PM PT)
-    - cron: '0 4 * * *'
+    # GitHub queues scheduled workflows and the delay is worst on the hour, so
+    # this fires hours after the time it names: at '0 4' it landed 08:22-10:34
+    # UTC across ten runs. An off-hour, off-peak minute shortens that queue, and
+    # starting the evening before lands the results before morning either way.
+    # Re-measure the actual fire times before trusting any target hour.
+    - cron: '37 23 * * *'
   workflow_dispatch:  # Allow manual trigger
 
 # Cancel in-progress nightly runs (only one should run at a time)
@@ -57,12 +61,18 @@ concurrency:
 #
 # test-asan and test-tsan restore nothing at all. -fsanitize=... is part of
 # every object hash, so build.yml's objects can never match them: a restore
-# there would download ~1.7 GB for a guaranteed 0% hit rate. Their 240-minute
-# caps already cover a cold sanitizer build.
+# there would download ~1.7 GB for a guaranteed 0% hit rate, and saving their
+# own family would cost ~3 GB of the budget above. They build cold every night,
+# which is wall clock nobody waits on -- but a cold sanitizer build runs 3-4
+# hours, so each job budgets its build and its test phase as separate steps.
+# One cap covering both let a slow build consume the test phase instead.
 
+# CC/CXX ride the same block as the from-clean flag (see build.yml for why the
+# flag is environment-wide rather than per-step).
 env:
   CC: ccache clang
   CXX: ccache clang++
+  HELIX_PATCHES_FROM_CLEAN: "1"
 
 jobs:
   gate:
@@ -79,7 +89,20 @@ jobs:
     name: Build
     needs: gate
     runs-on: ubuntu-22.04
-    timeout-minutes: 180
+    # Covers the three build/check step budgets below (80 + 45 + 85 = 210)
+    # plus setup: apt, caches, npm install, venv, artifact upload.
+    timeout-minutes: 225
+    # Matches build.yml's DBGLEVEL, which is part of every ccache key: at the
+    # default -g2 no object in the restored build.yml cache can hit.
+    env:
+      DBGLEVEL: "0"
+    # old_toolchain_check carries the GCC-10 step's outcome past its own
+    # continue-on-error, so nightly-status can fail the run on it without the
+    # job itself failing -- a job failure here would skip every downstream
+    # job that needs build (test-all, test-eventloop, suite-report, ...),
+    # dropping the rest of nightly's coverage on the one run this fires.
+    outputs:
+      old_toolchain_check: ${{ steps.old_toolchain_check.outcome }}
 
     steps:
     - name: Checkout repository
@@ -99,9 +122,10 @@ jobs:
         timeout_minutes: 20
         max_attempts: 3
         command: |
+          sudo rm -f /etc/apt/sources.list.d/google-chrome*.list
           sudo apt-get update
           sudo apt-get install -y \
-            libsdl2-dev clang make python3 python3-venv npm \
+            libsdl2-dev clang g++-10 make python3 python3-venv npm \
             libssl-dev pkg-config libfmt-dev libcairo2-dev \
             libpango1.0-dev libpng-dev libjpeg-dev \
             libnl-3-dev libnl-genl-3-dev libxml2-utils libusb-1.0-0-dev \
@@ -131,10 +155,18 @@ jobs:
         restore-keys: |
           ccache-ubuntu-22.04-
 
+    - name: Cache npm downloads
+      uses: actions/cache@v5
+      with:
+        path: ~/.npm
+        key: npm-${{ runner.os }}-${{ hashFiles('package.json') }}
+        restore-keys: |
+          npm-${{ runner.os }}-
+
     - name: Install Node.js dependencies
       uses: nick-fields/retry@v4
       with:
-        timeout_minutes: 2
+        timeout_minutes: 6
         max_attempts: 3
         command: npm install
 
@@ -154,18 +186,44 @@ jobs:
     - name: Setup Python venv
       run: make venv-setup
 
-    # This step does the same work build.yml splits across two steps, but on a
-    # smaller budget: build.yml allows 75 + 70 = 145 minutes, this one allowed
-    # 120 for both. On a cold cache that is not enough: the 2026-08-09 run died
-    # having compiled 754 of 754 test objects, killed at the link. Sized to the
-    # same work, within the job's own 180-minute cap.
-    #
-    # `make test` needs no -j: mk/tests.mk re-execs itself with -j$(NPROC) when
-    # MAKEFLAGS carries no jobserver, so it is already parallel here.
-    - name: Build application + tests
-      timeout-minutes: 165
+    # This budget assumes the warm ccache build.yml's save step restores (see
+    # the ccache policy comment at the top of this file); a cold nightly run
+    # compiling every object from empty needs closer to build.yml's own
+    # cold-cache budget for the same work.
+    - name: Build application
+      timeout-minutes: 80
       run: |
         make -j$(nproc)
+        ccache -s
+
+    # The Pi, AD5M, K1, K2 and CC1 cross builds link against libstdc++ 10 or
+    # older, well behind this runner's clang. A construct the runner's newer
+    # library accepts and an older one rejects (std::from_chars<float>, absent
+    # before GCC 11) compiles clean here and only breaks on a cross build or a
+    # device. This re-parses every src/ translation unit's own recorded flags
+    # from compile_commands.json (written by the build above) against g++-10
+    # with -fsyntax-only: no codegen, no linking. Runs nightly rather than in
+    # build.yml's per-push queue, so it costs nothing on every push's own
+    # verdict and still bounds this class of break to under a day.
+    #
+    # continue-on-error keeps a failure here from cancelling "Build tests" and
+    # "Upload build artifacts" below, which would otherwise skip every
+    # downstream job that needs build; nightly-status reads this step's
+    # outcome (via the job's old_toolchain_check output) and fails the run on
+    # it separately.
+    - name: Check old-toolchain compatibility (GCC 10)
+      id: old_toolchain_check
+      continue-on-error: true
+      # ~790 TUs at several seconds each of g++-10 parsing on a 4-core runner.
+      # -u so a timeout still shows how far the check got.
+      timeout-minutes: 45
+      run: python3 -u scripts/check_old_toolchain.py --jobs "$(nproc)"
+
+    # `make test` needs no -j: mk/tests.mk re-execs itself with -j$(NPROC) when
+    # MAKEFLAGS carries no jobserver, so it is already parallel here.
+    - name: Build tests
+      timeout-minutes: 85
+      run: |
         make test
         ccache -s
 
@@ -201,6 +259,7 @@ jobs:
 
     - name: Install runtime deps
       run: |
+        sudo rm -f /etc/apt/sources.list.d/google-chrome*.list
         sudo apt-get update
         sudo apt-get install -y libsdl2-dev libfmt-dev libcairo2 libpango-1.0-0 libpng16-16 libjpeg8 libnl-3-200 libnl-genl-3-200
 
@@ -315,6 +374,7 @@ jobs:
 
     - name: Install runtime deps
       run: |
+        sudo rm -f /etc/apt/sources.list.d/google-chrome*.list
         sudo apt-get update
         sudo apt-get install -y libsdl2-dev libfmt-dev libcairo2 libpango-1.0-0 libpng16-16 libjpeg8 libnl-3-200 libnl-genl-3-200
 
@@ -332,6 +392,67 @@ jobs:
       run: |
         ./build/bin/helix-tests "[eventloop]" --durations yes
         echo "Event loop tests passed"
+
+  # ===========================================================================
+  # Slow out-of-process UI tests (pytest -m slow): whole-app screen sweeps
+  # too long for build.yml's UI step.
+  # ===========================================================================
+  test-ui-slow:
+    name: Slow UI Tests (pytest)
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+      with:
+        submodules: false
+
+    - name: Initialize submodules
+      uses: ./.github/actions/init-submodules
+
+    - name: Prepare apt
+      uses: ./.github/actions/apt-prepare
+
+    - name: Install runtime deps
+      run: |
+        sudo rm -f /etc/apt/sources.list.d/google-chrome*.list
+        sudo apt-get update
+        sudo apt-get install -y libsdl2-dev libfmt-dev libcairo2 libpango-1.0-0 libpng16-16 libjpeg8 libnl-3-200 libnl-genl-3-200
+
+    - name: Download build
+      uses: actions/download-artifact@v8
+      with:
+        name: nightly-build
+        path: build/bin/
+
+    - name: Fix permissions
+      run: chmod +x build/bin/helix-screen
+
+    - name: Setup Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: '3.11'
+
+    - name: Install Python test dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pytest
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+    - name: Run slow UI tests
+      timeout-minutes: 15
+      run: pytest tests/ui/ -v -m slow
+
+    - name: Upload UI failure artifacts
+      if: failure()
+      uses: actions/upload-artifact@v7
+      with:
+        name: ui-slow-artifacts-${{ github.run_id }}
+        path: ui-artifacts/
+        if-no-files-found: ignore
+        retention-days: 7
 
   # ===========================================================================
   # Shell / BATS tests (installer, service, platform scripts)
@@ -372,7 +493,11 @@ jobs:
     name: AddressSanitizer
     needs: gate
     runs-on: ubuntu-22.04
-    timeout-minutes: 240
+    # The job cap has to clear the sum of its step caps plus checkout,
+    # dependency setup and artifact upload. Below that, a step that reaches
+    # its own limit is killed by the job first and reports as a test failure
+    # rather than a timeout.
+    timeout-minutes: 360
 
     steps:
     - name: Checkout repository
@@ -392,6 +517,7 @@ jobs:
         timeout_minutes: 20
         max_attempts: 3
         command: |
+          sudo rm -f /etc/apt/sources.list.d/google-chrome*.list
           sudo apt-get update
           sudo apt-get install -y \
             libsdl2-dev clang make python3 python3-venv npm \
@@ -411,16 +537,24 @@ jobs:
         key: deps-ubuntu-22.04-${{ hashFiles('lib/libhv/**/*.c', 'lib/libhv/**/*.cpp', 'lib/libhv/**/*.h', 'lib/wpa_supplicant/src/**/*.c', 'lib/wpa_supplicant/src/**/*.h', 'Makefile', 'mk/deps.mk') }}
         restore-keys: deps-ubuntu-22.04-
 
-    # No ccache restore here on purpose. -fsanitize=address is part of every
-    # object hash (ASAN_FLAGS, mk/tests.mk), and this job runs only
-    # `make test-asan`, so build.yml's ordinary objects can never match:
-    # restoring would download ~1.7 GB for a guaranteed 0% hit rate. The
-    # 240-minute cap already covers a fully cold ASAN build.
+    # No ccache here, restored or saved. -fsanitize=address is part of every
+    # object hash (ASAN_FLAGS, mk/tests.mk), so build.yml's objects can never match;
+    # saving this job's own family would cost ~3 GB of the 10 GB repo budget the
+    # policy at the top of this file exists to protect. This job builds cold, and
+    # the step split below is what keeps that affordable.
+
+    - name: Cache npm downloads
+      uses: actions/cache@v5
+      with:
+        path: ~/.npm
+        key: npm-${{ runner.os }}-${{ hashFiles('package.json') }}
+        restore-keys: |
+          npm-${{ runner.os }}-
 
     - name: Install Node.js dependencies
       uses: nick-fields/retry@v4
       with:
-        timeout_minutes: 2
+        timeout_minutes: 6
         max_attempts: 3
         command: npm install
 
@@ -436,8 +570,12 @@ jobs:
     - name: Apply submodule patches
       run: make apply-patches
 
-    - name: Build and run with ASAN
-      timeout-minutes: 230
+    - name: Build with ASAN
+      timeout-minutes: 300
+      run: make test-asan-build
+
+    - name: Run ASAN tests
+      timeout-minutes: 45
       run: |
         make test-asan
         echo "ASAN tests complete"
@@ -457,7 +595,11 @@ jobs:
     name: ThreadSanitizer
     needs: gate
     runs-on: ubuntu-22.04
-    timeout-minutes: 240
+    # The job cap has to clear the sum of its step caps plus checkout,
+    # dependency setup and artifact upload. Below that, a step that reaches
+    # its own limit is killed by the job first and reports as a test failure
+    # rather than a timeout.
+    timeout-minutes: 375
 
     steps:
     - name: Checkout repository
@@ -477,6 +619,7 @@ jobs:
         timeout_minutes: 20
         max_attempts: 3
         command: |
+          sudo rm -f /etc/apt/sources.list.d/google-chrome*.list
           sudo apt-get update
           sudo apt-get install -y \
             libsdl2-dev clang make python3 python3-venv npm \
@@ -496,16 +639,24 @@ jobs:
         key: deps-ubuntu-22.04-${{ hashFiles('lib/libhv/**/*.c', 'lib/libhv/**/*.cpp', 'lib/libhv/**/*.h', 'lib/wpa_supplicant/src/**/*.c', 'lib/wpa_supplicant/src/**/*.h', 'Makefile', 'mk/deps.mk') }}
         restore-keys: deps-ubuntu-22.04-
 
-    # No ccache restore here on purpose. -fsanitize=thread is part of every
-    # object hash (TSAN_FLAGS, mk/tests.mk), and this job runs only
-    # `make test-tsan`, so build.yml's ordinary objects can never match:
-    # restoring would download ~1.7 GB for a guaranteed 0% hit rate. The
-    # 240-minute cap already covers a fully cold TSAN build.
+    # No ccache here, restored or saved. -fsanitize=thread is part of every
+    # object hash (TSAN_FLAGS, mk/tests.mk), so build.yml's objects can never match;
+    # saving this job's own family would cost ~3 GB of the 10 GB repo budget the
+    # policy at the top of this file exists to protect. This job builds cold, and
+    # the step split below is what keeps that affordable.
+
+    - name: Cache npm downloads
+      uses: actions/cache@v5
+      with:
+        path: ~/.npm
+        key: npm-${{ runner.os }}-${{ hashFiles('package.json') }}
+        restore-keys: |
+          npm-${{ runner.os }}-
 
     - name: Install Node.js dependencies
       uses: nick-fields/retry@v4
       with:
-        timeout_minutes: 2
+        timeout_minutes: 6
         max_attempts: 3
         command: npm install
 
@@ -521,12 +672,16 @@ jobs:
     - name: Apply submodule patches
       run: make apply-patches
 
-    - name: Build and run with TSAN
-      timeout-minutes: 230
+    - name: Build with TSAN
+      timeout-minutes: 300
+      run: make test-tsan-build
+
+    - name: Run TSAN tests
+      timeout-minutes: 60
       run: |
         # Exclude [eventloop] and [slow] tests — eventloop tests have their own
         # dedicated CI job, and [slow] tests (MoonrakerClientMock fixture) are
-        # too expensive under TSAN's 10-50x overhead, causing 230-min timeout.
+        # too expensive to finish under TSAN's 10-50x overhead.
         make test-tsan TSAN_FILTER="~[.] ~[eventloop] ~[slow]"
         echo "TSAN tests complete"
 
@@ -583,6 +738,10 @@ jobs:
     # Has to cover a fully cold build of BOTH the app and the test suite. The
     # per-step budgets below sum to 105; the rest is brew, submodules and npm.
     timeout-minutes: 140
+    # Matches build.yml's DBGLEVEL, which is part of every ccache key: at the
+    # default -g2 no object in the restored build.yml cache can hit.
+    env:
+      DBGLEVEL: "0"
 
     steps:
     - name: Checkout repository
@@ -619,10 +778,18 @@ jobs:
         restore-keys: |
           ccache-macos-14-
 
+    - name: Cache npm downloads
+      uses: actions/cache@v5
+      with:
+        path: ~/.npm
+        key: npm-${{ runner.os }}-${{ hashFiles('package.json') }}
+        restore-keys: |
+          npm-${{ runner.os }}-
+
     - name: Install Node.js dependencies
       uses: nick-fields/retry@v4
       with:
-        timeout_minutes: 2
+        timeout_minutes: 6
         max_attempts: 3
         command: npm install
 
@@ -698,6 +865,7 @@ jobs:
 
     - name: Install runtime deps
       run: |
+        sudo rm -f /etc/apt/sources.list.d/google-chrome*.list
         sudo apt-get update
         sudo apt-get install -y libsdl2-dev libfmt-dev libcairo2 libpango-1.0-0 libpng16-16 libjpeg8 libnl-3-200 libnl-genl-3-200
 
@@ -710,14 +878,21 @@ jobs:
     - name: Fix permissions
       run: chmod +x build/bin/helix-tests
 
+    # A healthy unsharded pass is 5-8 minutes, so this cap is headroom, not a
+    # budget. It is spent, not exceeded, when the suite hangs
+    # (prestonbrown/helixscreen#1524); raising it buys a slower red, not a pass.
     - name: Run suite unsharded
       timeout-minutes: 30
       run: |
         # 2>&1 is REQUIRED: the isolation listener reports leaks via fprintf(stderr)
         # while Catch2's summary goes to stdout. The gate rejects a log missing
         # either stream rather than reading it as "zero leaks".
+        #
+        # The inner timeout sits below the step cap so a hung suite is killed by
+        # `timeout` and leaves a log the ratchet can reject, rather than by the
+        # runner, which takes the log with it.
         set -o pipefail
-        timeout 1800 ./build/bin/helix-tests "~[.] ~[slow]" 2>&1 | tee unsharded.log
+        timeout 1500 ./build/bin/helix-tests "~[.] ~[slow]" 2>&1 | tee unsharded.log
 
     - name: UpdateQueue leak ratchet
       # Runs even if the suite failed: a crash mid-run is exactly when the leak
@@ -737,9 +912,80 @@ jobs:
         retention-days: 14
 
   # ===========================================================================
+  # One suite report, produced once and shared.
+  # ===========================================================================
+  # The report is a whole-suite XML dump, identical whoever asks for it, and the
+  # order-dependence gate below needs it on all eight shards. Producing it per
+  # shard costs eight runs of the suite for eight copies of one file.
+  # ===========================================================================
+  suite-report:
+    name: Shared Suite Report
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+      with:
+        submodules: false
+
+    - name: Prepare apt
+      uses: ./.github/actions/apt-prepare
+
+    - name: Install runtime deps
+      run: |
+        sudo rm -f /etc/apt/sources.list.d/google-chrome*.list
+        sudo apt-get update
+        sudo apt-get install -y libsdl2-dev libfmt-dev libcairo2 libpango-1.0-0 libpng16-16 libjpeg8 libnl-3-200 libnl-genl-3-200
+
+    - name: Download build
+      uses: actions/download-artifact@v8
+      with:
+        name: nightly-build
+        path: build/bin/
+
+    - name: Fix permissions
+      run: chmod +x build/bin/helix-screen build/bin/helix-tests
+
+    # --out is not optional. Tests that shell out print ANSI status to stdout,
+    # and with the report on stdout too the XML comes back complete but
+    # unparseable. The `|| true` is deliberate: a red suite is test-all's job to
+    # report, and these gates still have something to say about the report.
+    - name: Produce the suite report
+      timeout-minutes: 45
+      env:
+        # Below the step timeout, so the run that gets stopped is the one that
+        # can name the case it stopped in.
+        SUITE_REPORT_MAX_SECS: 2400
+      run: |
+        # ~[subprocess] and ~[socket_discovery] fork; the child shares the
+        # report file description and its writes interleave with the XML,
+        # producing a structurally corrupt report. See mk/tests.mk. The filter
+        # comes from the makefile so this job cannot hold a different one from
+        # `make test-vacuous`, and the script exits non-zero if no report lands.
+        scripts/run_suite_report.sh ./build/bin/helix-tests \
+          "$(make -s print-vacuous-filter | tail -1)" build/suite-report.xml
+
+    - name: Assertions that cannot fail
+      run: |
+        python3 scripts/check_vacuous_tests.py build/suite-report.xml \
+          --max-allowed "$(make -s print-vacuous-max | tail -1)"
+
+    # Uploaded even when the vacuous-test gate fired, so a failure can be read
+    # from the report rather than reproduced.
+    - name: Upload suite report
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: suite-report
+        path: build/suite-report.xml
+        retention-days: 7
+
+  # ===========================================================================
   test-quality-gates:
     name: Test Quality Gates
-    needs: build
+    needs: [build, suite-report]
     runs-on: ubuntu-22.04
     timeout-minutes: 75
     strategy:
@@ -760,6 +1006,7 @@ jobs:
 
     - name: Install runtime deps
       run: |
+        sudo rm -f /etc/apt/sources.list.d/google-chrome*.list
         sudo apt-get update
         sudo apt-get install -y libsdl2-dev libfmt-dev libcairo2 libpango-1.0-0 libpng16-16 libjpeg8 libnl-3-200 libnl-genl-3-200
 
@@ -772,27 +1019,13 @@ jobs:
     - name: Fix permissions
       run: chmod +x build/bin/helix-screen build/bin/helix-tests
 
-    # --out is not optional. Tests that shell out print ANSI status to stdout,
-    # and with the report on stdout too the XML comes back complete but
-    # unparseable. The `|| true` is deliberate: a red suite is test-all's job to
-    # report, and these gates still have something to say about the report.
-    - name: Produce the shared suite report
-      timeout-minutes: 25
-      run: |
-        # ~[subprocess] and ~[socket_discovery] fork; the child shares the
-        # report file description and its writes interleave with the XML,
-        # producing a structurally corrupt report. See mk/tests.mk.
-        ./build/bin/helix-tests "~[.]~[slow]~[subprocess]~[socket_discovery]" \
-          --reporter xml --success \
-          --out build/suite-report.xml > /dev/null 2>&1 || true
-        test -s build/suite-report.xml
-
-    # Cheap, and identical on every shard - only worth running once.
-    - name: Assertions that cannot fail
-      if: matrix.shard == 0
-      run: |
-        python3 scripts/check_vacuous_tests.py build/suite-report.xml \
-          --max-allowed "$(make -s print-vacuous-max | tail -1)"
+    # The gate re-runs one process per source file against this report, so the
+    # shards need the binary as well as the XML.
+    - name: Download suite report
+      uses: actions/download-artifact@v8
+      with:
+        name: suite-report
+        path: build/
 
     - name: Tests that pass only because of what ran before them
       timeout-minutes: 45
@@ -816,7 +1049,7 @@ jobs:
   nightly-status:
     name: Nightly Status
     runs-on: ubuntu-latest
-    needs: [test-all, test-eventloop, test-shell, test-asan, test-tsan, test-python, test-macos, test-unsharded-leaks, test-quality-gates]
+    needs: [build, test-all, test-eventloop, test-ui-slow, test-shell, test-asan, test-tsan, test-python, test-macos, test-unsharded-leaks, suite-report, test-quality-gates]
     if: always()
 
     steps:
@@ -825,30 +1058,44 @@ jobs:
         echo "=== Nightly Test Results ==="
         echo "All C++ tests:    ${{ needs.test-all.result }}"
         echo "Event loop:       ${{ needs.test-eventloop.result }}"
+        echo "Slow UI:          ${{ needs.test-ui-slow.result }}"
         echo "Shell (BATS):     ${{ needs.test-shell.result }}"
         echo "ASAN:             ${{ needs.test-asan.result }}"
         echo "TSAN:             ${{ needs.test-tsan.result }}"
         echo "Python:           ${{ needs.test-python.result }}"
         echo "macOS (build):    ${{ needs.test-macos.result }}"
         echo "Unsharded+leaks:  ${{ needs.test-unsharded-leaks.result }}"
+        echo "Suite report:     ${{ needs.suite-report.result }}"
         echo "Test quality:     ${{ needs.test-quality-gates.result }}"
+        echo "Old-toolchain:    ${{ needs.build.outputs.old_toolchain_check }}"
         echo "==========================="
 
         FAILED=0
-        for job in test-all test-eventloop test-shell test-asan test-tsan test-python test-macos test-unsharded-leaks test-quality-gates; do
+        for job in test-all test-eventloop test-ui-slow test-shell test-asan test-tsan test-python test-macos test-unsharded-leaks suite-report test-quality-gates; do
           result="${{ needs[job].result }}" 2>/dev/null || result="unknown"
         done
 
         if [ "${{ needs.test-all.result }}" != "success" ] || \
            [ "${{ needs.test-eventloop.result }}" != "success" ] || \
+           [ "${{ needs.test-ui-slow.result }}" != "success" ] || \
            [ "${{ needs.test-shell.result }}" != "success" ] || \
            [ "${{ needs.test-asan.result }}" != "success" ] || \
            [ "${{ needs.test-tsan.result }}" != "success" ] || \
            [ "${{ needs.test-python.result }}" != "success" ] || \
            [ "${{ needs.test-macos.result }}" != "success" ] || \
            [ "${{ needs.test-unsharded-leaks.result }}" != "success" ] || \
+           [ "${{ needs.suite-report.result }}" != "success" ] || \
            [ "${{ needs.test-quality-gates.result }}" != "success" ]; then
           echo "::error::Nightly test suite had failures!"
+          exit 1
+        fi
+
+        # build's own job result stays 'success' even when this fails --
+        # continue-on-error keeps its failure from skipping every job above
+        # that needs build (see the build job's outputs comment) -- so it is
+        # checked separately here, by outcome rather than job result.
+        if [ "${{ needs.build.outputs.old_toolchain_check }}" = "failure" ]; then
+          echo "::error::Old-toolchain compatibility check (GCC 10) failed - see the build job's 'Check old-toolchain compatibility (GCC 10)' step"
           exit 1
         fi
         echo "All nightly tests passed!"

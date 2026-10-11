@@ -8,7 +8,7 @@ Scanning is a shortcut for assigning spools — see [Filament Tracking & Spoolma
 
 ![Barcode Scanner Settings](../../images/user/settings-barcode-scanner.png)
 
-The Barcode Scanner settings overlay lives at **Settings → Hardware & Devices → Spoolman → Barcode Scanner**.
+The Barcode Scanner settings overlay lives at **Settings → Devices → Spoolman → Barcode Scanner**.
 
 ---
 
@@ -17,7 +17,7 @@ The Barcode Scanner settings overlay lives at **Settings → Hardware & Devices 
 Most USB barcode scanners present themselves to the Pi as a plain HID keyboard — no driver install needed.
 
 1. Plug the scanner into any USB port.
-2. Open **Settings → Hardware & Devices → Spoolman → Barcode Scanner**.
+2. Open **Settings → Devices → Spoolman → Barcode Scanner**.
 3. If the scanner appears under "USB devices", tap it to select. Otherwise "Auto-detect" will pick the first HID keyboard that isn't your physical keyboard.
 4. Open the QR scanner overlay (wherever the app offers it — e.g. from the filament panel) and test by scanning a Spoolman QR code.
 
@@ -34,7 +34,7 @@ HelixScreen supports Bluetooth HID barcode scanners (the kind that pair as a key
 ### Pairing
 
 1. Power on the scanner. Make sure it's in Classic Bluetooth pairing mode (not BLE). The scanner's manual will have a config barcode to select Classic mode if needed — most default to Classic.
-2. Open **Settings → Hardware & Devices → Spoolman → Barcode Scanner**, then under **Bluetooth Scanners** tap **Scan**.
+2. Open **Settings → Devices → Spoolman → Barcode Scanner**, then under **Bluetooth Scanners** tap **Scan**.
 3. When your scanner appears in the dropdown, tap **Pair**.
 4. If pairing succeeds, the scanner becomes selected automatically.
 
@@ -88,7 +88,7 @@ You can tell HelixScreen to leave a specific device alone by adding its USB ID t
 
 The ID is a `vendor:product` pair like `002c:261a`. Find it either way:
 
-- **In HelixScreen:** open **Settings → Hardware & Devices → Spoolman → Barcode Scanner**. Each entry in the USB device list shows its ID.
+- **In HelixScreen:** open **Settings → Devices → Spoolman → Barcode Scanner**. Each entry in the USB device list shows its ID.
 - **Over SSH:** run `lsusb` and look for your scanner. The ID is the pair right after `ID`, e.g. `Bus 001 Device 005: ID 002c:261a ...`.
 
 ### 2. Add it to your settings

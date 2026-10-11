@@ -18,7 +18,7 @@
               text="#icon_plus" style_text_font="#icon_font_xs" style_text_color="#primary" style_min_width="16"
               clickable="false" event_bubble="true"/>
     <lv_label name="add_label"
-              text="Add custom filament" translation_tag="Add custom filament" flex_grow="1"
-              style_text_font="#font_body" style_text_color="#primary" clickable="false" event_bubble="true"/>
+              text="Add custom filament" flex_grow="1" style_text_font="#font_body" style_text_color="#primary"
+              clickable="false" event_bubble="true"/>
   </view>
 </component>

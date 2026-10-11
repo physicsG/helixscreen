@@ -283,7 +283,7 @@ void PixelBuffer::fill_triangle_solid(int x1, int y1, int x2, int y2, int x3, in
 
 namespace {
 
-// Gradient rasterization constants (matching bed_mesh_rasterizer.h)
+// Adaptive gradient rasterization: span widths and how many color segments each gets
 constexpr int GRADIENT_MIN_LINE_WIDTH = 3;
 constexpr int GRADIENT_THIN_LINE_THRESHOLD = 20;
 constexpr int GRADIENT_MEDIUM_LINE_THRESHOLD = 50;

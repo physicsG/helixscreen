@@ -129,19 +129,20 @@ namespace {
 /// `default:` precisely so `-Wswitch` names this function when AmsType grows a
 /// value. Should one slip through anyway, the fallthrough is false, i.e. keep
 /// the generic modal: a redundant dialog beats silence about a real runout.
-bool backend_owns_runout_surface(AmsType type) {
+bool backend_owns_runout_surface(helix::AmsType type) {
     switch (type) {
-    case AmsType::HAPPY_HARE: // classify_error()
-    case AmsType::AFC:        // classify_error() + current_error()
-    case AmsType::AD5X_IFS:   // current_error() (unattended-runout detector)
-    case AmsType::CFS:        // classify_error() (auto-refill give-up messages)
+    case helix::AmsType::HAPPY_HARE: // classify_error()
+    case helix::AmsType::AFC:        // classify_error() + current_error()
+    case helix::AmsType::AD5X_IFS:   // current_error() (unattended-runout detector)
+    case helix::AmsType::CFS:        // classify_error() (auto-refill give-up messages)
         return true;
-    case AmsType::ACE:
-    case AmsType::QIDI_BOX:
-    case AmsType::TOOL_CHANGER:
-    case AmsType::SNAPMAKER:
-    case AmsType::MULTIACE: // inherits Snapmaker's handling; no classify_error()
-    case AmsType::NONE:
+    case helix::AmsType::ACE:
+    case helix::AmsType::QIDI_BOX:
+    case helix::AmsType::OPENAMS: // no error hook
+    case helix::AmsType::TOOL_CHANGER:
+    case helix::AmsType::SNAPMAKER:
+    case helix::AmsType::MULTIACE: // inherits Snapmaker's handling; no classify_error()
+    case helix::AmsType::NONE:
         return false;
     }
     return false;
@@ -149,23 +150,25 @@ bool backend_owns_runout_surface(AmsType type) {
 
 } // namespace
 
-bool backend_owns_runout_during_job(AmsType type) {
+bool backend_owns_runout_during_job(helix::AmsType type) {
     switch (type) {
-    case AmsType::HAPPY_HARE: // classify_error() fires while a job runs
-    case AmsType::AFC:        // classify_error() + current_error()
-    case AmsType::CFS:        // classify_error() (the ActionPromptModal #1388 observed)
+    case helix::AmsType::HAPPY_HARE: // classify_error() fires while a job runs
+    case helix::AmsType::AFC:        // classify_error() + current_error()
+    case helix::AmsType::CFS:        // classify_error() (the ActionPromptModal #1388 observed)
         return true;
-    case AmsType::AD5X_IFS: // the runout detector fires only while PAUSED and
-                            // only after a 30-180s confirm dwell, so at the
-                            // sensor edge nothing has fired yet and quieting
-                            // the toast would open a silent window; the toast
-                            // is the immediate surface mid-print
-    case AmsType::ACE:      // no error hook: the toast is the only runout signal
-    case AmsType::QIDI_BOX: // current_error() reports lane-BLOCKED faults, not
-                            // runout; for runout the toast is the only signal
-    case AmsType::TOOL_CHANGER:
-    case AmsType::SNAPMAKER:
-    case AmsType::NONE:
+    case helix::AmsType::AD5X_IFS: // the runout detector fires only while PAUSED and
+                                   // only after a 30-180s confirm dwell, so at the
+                                   // sensor edge nothing has fired yet and quieting
+                                   // the toast would open a silent window; the toast
+                                   // is the immediate surface mid-print
+    case helix::AmsType::ACE:      // no error hook: the toast is the only runout signal
+    case helix::AmsType::QIDI_BOX: // current_error() reports lane-BLOCKED faults, not
+                                   // runout; for runout the toast is the only signal
+    case helix::AmsType::OPENAMS:  // no error hook: the toast is the only runout signal
+    case helix::AmsType::TOOL_CHANGER:
+    case helix::AmsType::SNAPMAKER:
+    case helix::AmsType::MULTIACE: // inherits Snapmaker's handling
+    case helix::AmsType::NONE:
         return false;
     }
     return false;
@@ -184,7 +187,7 @@ bool RuntimeConfig::should_show_runout_modal() const {
     }
 
     // Check AMS state
-    auto& ams = AmsState::instance();
+    auto& ams = helix::AmsState::instance();
     if (ams.is_available()) {
         // Tool changers (Snapmaker U1, generic TOOL_CHANGER) have one extruder
         // per slot and no shared hub — runout on a tool cannot be auto-resolved
@@ -208,15 +211,15 @@ bool RuntimeConfig::should_show_runout_modal() const {
         int bypass_active = lv_subject_get_int(ams.get_bypass_active_subject());
         if (bypass_active == 0) {
             auto* backend = ams.get_backend(0);
-            const AmsType type = backend ? backend->get_type() : AmsType::NONE;
+            const helix::AmsType type = backend ? backend->get_type() : helix::AmsType::NONE;
             if (backend_owns_runout_surface(type)) {
                 spdlog::debug("[RuntimeConfig] Suppressing runout modal - {} raises its own "
                               "runout fault",
-                              ams_type_to_string(type));
+                              helix::ams_type_to_string(type));
                 return false;
             }
             spdlog::debug("[RuntimeConfig] {} has no runout fault of its own - showing modal",
-                          ams_type_to_string(type));
+                          helix::ams_type_to_string(type));
             return true;
         }
         spdlog::debug("[RuntimeConfig] AMS bypass active - showing runout modal");

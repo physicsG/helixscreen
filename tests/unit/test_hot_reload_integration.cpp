@@ -59,7 +59,7 @@ class FakePanel : public PanelBase {
         ++activate_count_;
     }
 
-    void on_deactivate() override {
+    void on_deactivating(DeactivateReason) override {
         ++deactivate_count_;
     }
 

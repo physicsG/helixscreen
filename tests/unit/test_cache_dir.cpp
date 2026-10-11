@@ -33,6 +33,7 @@ static void cleanup_dir(const std::string& path) {
 }
 
 // RAII guard for env vars - restores original value on destruction
+namespace {
 struct EnvGuard {
     std::string name;
     std::string original;
@@ -53,6 +54,7 @@ struct EnvGuard {
         }
     }
 };
+} // namespace
 
 // ============================================================================
 // get_helix_cache_dir() Tests
@@ -378,11 +380,11 @@ bool all_viable(const std::string&) {
 /// so rung 1 wins and the platform rung does not.
 std::vector<CacheCandidate> device_shape() {
     return {
-        {"/usr/data/helixscreen/cache/helix_thumbs", "HELIX_CACHE_DIR", false, false},
-        {"/usr/data/helixscreen/cache/helix_thumbs", "MIPS", false, true},
-        {"/root/.cache/helix/helix_thumbs", nullptr, false, false},
-        {"/var/tmp/helix_helix_thumbs", nullptr, false, false},
-        {"/tmp/helix_helix_thumbs", nullptr, true, false},
+        {"/usr/data/helixscreen/cache/helix_thumbs", "HELIX_CACHE_DIR", false},
+        {"/usr/data/helixscreen/cache/helix_thumbs", "MIPS", true},
+        {"/root/.cache/helix/helix_thumbs", nullptr, false},
+        {"/var/tmp/helix_helix_thumbs", nullptr, false},
+        {"/tmp/helix_helix_thumbs", nullptr, false},
     };
 }
 } // namespace
@@ -401,10 +403,10 @@ TEST_CASE("sweep runs when the env rung wins but a platform rung exists", "[cach
 TEST_CASE("select_stale_paths never reclaims a deliberate rung", "[cache]") {
     // env wins, config sits below it. A config base_directory is stated intent.
     std::vector<CacheCandidate> c = {
-        {"/pinned/helix_thumbs", "HELIX_CACHE_DIR", false, false},
-        {"/configured/helix_thumbs", "config", false, false},
-        {"/platform/helix_thumbs", "MIPS", false, true},
-        {"/home/dev/.cache/helix/helix_thumbs", nullptr, false, false},
+        {"/pinned/helix_thumbs", "HELIX_CACHE_DIR", false},
+        {"/configured/helix_thumbs", "config", false},
+        {"/platform/helix_thumbs", "MIPS", true},
+        {"/home/dev/.cache/helix/helix_thumbs", nullptr, false},
     };
     const std::vector<std::string> stale = select_stale_paths(c, all_viable);
 
@@ -415,9 +417,9 @@ TEST_CASE("select_stale_paths never reclaims a deliberate rung", "[cache]") {
 TEST_CASE("select_stale_paths returns nothing without a platform rung", "[cache]") {
     // Desktop build: even with HELIX_CACHE_DIR redirected, ~/.cache/helix lives.
     std::vector<CacheCandidate> c = {
-        {"/pinned/helix_thumbs", "HELIX_CACHE_DIR", false, false},
-        {"/home/dev/.cache/helix/helix_thumbs", nullptr, false, false},
-        {"/tmp/helix_helix_thumbs", nullptr, true, false},
+        {"/pinned/helix_thumbs", "HELIX_CACHE_DIR", false},
+        {"/home/dev/.cache/helix/helix_thumbs", nullptr, false},
+        {"/tmp/helix_helix_thumbs", nullptr, false},
     };
     CHECK(select_stale_paths(c, all_viable).empty());
 }
@@ -438,4 +440,90 @@ TEST_CASE("select_stale_paths ignores rungs above the winner", "[cache]") {
 TEST_CASE("select_stale_paths returns nothing when no rung is usable", "[cache]") {
     auto none_viable = [](const std::string&) { return false; };
     CHECK(select_stale_paths(device_shape(), none_viable).empty());
+}
+
+// ---------------------------------------------------------------------------
+// migrate_state_root() — the state-root rename over a real temp tree. Which
+// roots a platform uses is a platform question; this is the filesystem half,
+// so any two paths drive it.
+// ---------------------------------------------------------------------------
+
+using helix::cache_internal::migrate_state_root;
+
+namespace {
+/// <root>/<sub>/marker, so a move has real content to carry.
+std::string seed_state(const std::string& root, const std::string& sub) {
+    const std::string dir = root + "/" + sub;
+    std::filesystem::create_directories(dir);
+    std::ofstream(dir + "/marker") << "x";
+    return dir;
+}
+} // namespace
+
+TEST_CASE("migrate_state_root renames the whole root when the new one is absent", "[cache]") {
+    std::string root = make_test_tmpdir("migrate_whole");
+    const std::string legacy = root + "/helixscreen";
+    const std::string current = root + "/.helixscreen";
+    seed_state(legacy, "cache");
+    seed_state(legacy, "logs");
+
+    REQUIRE(migrate_state_root(legacy, current) == 1);
+    REQUIRE_FALSE(std::filesystem::exists(legacy));
+    REQUIRE(std::filesystem::exists(current + "/cache/marker"));
+    REQUIRE(std::filesystem::exists(current + "/logs/marker"));
+
+    cleanup_dir(root);
+}
+
+TEST_CASE("migrate_state_root is a no-op without a legacy root", "[cache]") {
+    std::string root = make_test_tmpdir("migrate_absent");
+    const std::string legacy = root + "/helixscreen";
+    const std::string current = root + "/.helixscreen";
+    seed_state(current, "logs");
+
+    REQUIRE(migrate_state_root(legacy, current) == 0);
+    // A missing legacy root must not conjure or disturb anything.
+    REQUIRE(std::filesystem::exists(current + "/logs/marker"));
+
+    cleanup_dir(root);
+}
+
+TEST_CASE("migrate_state_root carries a subtree across but never clobbers", "[cache]") {
+    std::string root = make_test_tmpdir("migrate_merge");
+    const std::string legacy = root + "/helixscreen";
+    const std::string current = root + "/.helixscreen";
+    // Both sides hold a cache — the new side's EMPTY, which a bare rename()
+    // would replace without complaint — and only the legacy side holds logs.
+    seed_state(legacy, "cache");
+    seed_state(legacy, "logs");
+    std::filesystem::create_directories(current + "/cache");
+
+    REQUIRE(migrate_state_root(legacy, current) >= 1);
+    // logs existed only on the legacy side: carried across.
+    REQUIRE(std::filesystem::exists(current + "/logs/marker"));
+    // cache existed on both: the new side keeps its own (empty) copy, and the
+    // legacy twin stays for the operator to inspect.
+    REQUIRE_FALSE(std::filesystem::exists(current + "/cache/marker"));
+    REQUIRE(std::filesystem::exists(legacy + "/cache/marker"));
+    // The non-empty legacy cache keeps the legacy root alive.
+    REQUIRE(std::filesystem::exists(legacy));
+
+    cleanup_dir(root);
+}
+
+TEST_CASE("migrate_state_root drops empty legacy scaffolding", "[cache]") {
+    std::string root = make_test_tmpdir("migrate_scaffold");
+    const std::string legacy = root + "/helixscreen";
+    const std::string current = root + "/.helixscreen";
+    seed_state(current, "cache");
+    seed_state(current, "logs");
+    // The hook's pre-start recreates <legacy>/logs even after a completed
+    // migration; an empty one is scaffolding, not data.
+    std::filesystem::create_directories(legacy + "/logs");
+
+    REQUIRE(migrate_state_root(legacy, current) >= 1);
+    REQUIRE_FALSE(std::filesystem::exists(legacy));
+    REQUIRE(std::filesystem::exists(current + "/logs/marker"));
+
+    cleanup_dir(root);
 }

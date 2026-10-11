@@ -5,11 +5,11 @@
   <!--
     Persistent top-banner that prompts the user to upgrade when
     UpgradeNudge::should_show_banner() is true. Ships invisible: the C++
-    side (UpgradeBanner singleton) attaches an instance to lv_layer_top
+    side (Application's UpgradeBanner) attaches an instance to lv_layer_top
     during app init, then observes UpgradeNudge + UpdateChecker state and
     toggles visibility. Dismiss button persists per-version via
     UpgradeNudge::dismiss_current_version(); Update button navigates to
-    Settings > About where the install can be triggered.
+    Settings > Updates where the install can be triggered.
 
     Visual language mirrors toast_notification.xml: neutral elevated_bg
     surface with an info-colored icon accent. Keeps buttons readable and
@@ -29,7 +29,7 @@
       <text_body name="upgrade_banner_message" width="1" flex_grow="1" bind_text="upgrade_banner_text" long_mode="dots"/>
     </lv_obj>
     <!-- Right: primary Update CTA + ghost dismiss (matches toast pattern) -->
-    <ui_button name="upgrade_banner_update_btn" text="Update" translation_tag="Update" variant="primary">
+    <ui_button name="upgrade_banner_update_btn" text="Update" variant="primary">
       <event_cb trigger="clicked" callback="on_upgrade_banner_update"/>
     </ui_button>
     <ui_button name="upgrade_banner_dismiss_btn" icon="xmark" variant="ghost">

@@ -11,13 +11,20 @@
             style_pad_all="0">
       <!-- Title: "Printer Setup: Network", etc. -->
       <text_heading name="wizard_title" bind_text="wizard_title"/>
-      <!-- Progress: "Step X of Y" - separate elements for translation -->
+      <!-- Progress: "Step X of Y" - separate elements for translation.
+           The "of Y" pair hides while the denominator is still an estimate:
+           the skip vector reshapes itself once the connection settles the
+           printer's hardware, and a total that can lurch reads as a lie. -->
       <lv_obj name="wizard_progress"
               width="content" height="content" flex_flow="row" style_pad_all="0" style_pad_gap="4">
-        <text_small text="Step" translation_tag="Step"/>
+        <text_small text="Step"/>
         <text_small name="wizard_step_current" bind_text="wizard_step_current"/>
-        <text_small text="of" translation_tag="of"/>
-        <text_small name="wizard_step_total" bind_text="wizard_step_total"/>
+        <text_small text="of">
+          <bind_flag_if_not_eq subject="wizard_total_visible" flag="hidden" ref_value="1"/>
+        </text_small>
+        <text_small name="wizard_step_total" bind_text="wizard_step_total">
+          <bind_flag_if_not_eq subject="wizard_total_visible" flag="hidden" ref_value="1"/>
+        </text_small>
       </lv_obj>
     </lv_obj>
     <!-- Row 2: Subtitle (contextual hint) -->

@@ -53,7 +53,7 @@ std::string extract_base_material(std::string_view name);
  *
  * Exact match, else reduce both through extract_base_material() and compare
  * their filament-database compat groups. The reduction is the point: comparing
- * groups on RAW names sends anything that is not literally a MATERIALS[] row
+ * groups on RAW names sends anything that is not literally a material-type row
  * ("PLA SnapSpeed", "HT-PLA-GF", most spool-database names) into
  * are_materials_compatible()'s unknown-material fallback, which answers
  * "compatible with everything".

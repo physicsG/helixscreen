@@ -15,6 +15,8 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #endif
+#include "text_io.h"
+
 #include <unistd.h>
 #include <unordered_map>
 
@@ -24,17 +26,10 @@ namespace {
 std::mutex g_cache_mutex;
 std::unordered_map<std::string, bool> g_cache;
 
-std::string to_lower(std::string_view s) {
-    std::string out(s);
-    for (auto& c : out)
-        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    return out;
-}
-
 bool is_loopback_literal(std::string_view host) {
     if (host.empty())
         return true;
-    const std::string h = to_lower(host);
+    const std::string h = helix::text_io::to_lower(host);
     return h == "localhost" || h == "127.0.0.1" || h == "::1";
 }
 
@@ -49,7 +44,7 @@ bool matches_own_hostname(std::string_view host) {
     char buf[256] = {};
     if (gethostname(buf, sizeof(buf)) != 0)
         return false;
-    return to_lower(host) == to_lower(buf);
+    return helix::text_io::to_lower(host) == helix::text_io::to_lower(buf);
 }
 #endif
 

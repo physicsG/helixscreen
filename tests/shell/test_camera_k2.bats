@@ -205,7 +205,12 @@ teardown() {
 }
 
 @test "recorded webrtc disables are reversed by reenable_disabled_services" {
-    unset _HELIX_UNINSTALL_SOURCED
+    unset _HELIX_UNINSTALL_SOURCED _HELIX_SERVICE_SOURCED
+    # service.sh before uninstall.sh, the order every production entry
+    # point uses: uninstall.sh's rc.common shebang checks call
+    # is_rc_common_script from service.sh.
+    # shellcheck disable=SC1090
+    . "$WORKTREE_ROOT/scripts/lib/installer/service.sh"
     . "$WORKTREE_ROOT/scripts/lib/installer/uninstall.sh"
 
     local w1 w2
@@ -662,9 +667,11 @@ EOF
     run install_camera_k2 "k2"
     [ "$status" -eq 0 ]
 
-    # It was migrated to match the current bundled source byte-for-byte.
-    cmp -s "$INSTALL_DIR/config/helixscreen-ustreamer-k2.sh" "$HELIX_INITD_DIR/ustreamer"
+    # It matches the bundled source except for the templated binary path.
     ! grep -q 'OLD STALE VERSION' "$HELIX_INITD_DIR/ustreamer"
+    grep -q "^USTREAMER_BIN=\"$INSTALL_DIR/bin/ustreamer\"$" "$HELIX_INITD_DIR/ustreamer"
+    diff <(grep -v '^USTREAMER_BIN=' "$INSTALL_DIR/config/helixscreen-ustreamer-k2.sh") \
+         <(grep -v '^USTREAMER_BIN=' "$HELIX_INITD_DIR/ustreamer")
 }
 
 @test "install: init script is NOT rewritten when already current" {
@@ -680,7 +687,8 @@ EOF
     # install uses `$SUDO cp` (SUDO="" in tests, so a bare `cp`); stub `cp` to
     # record any invocation that writes the init dest. cmp -s should match, so
     # the install must take the "already current" branch and never call cp.
-    cp "$INSTALL_DIR/config/helixscreen-ustreamer-k2.sh" "$HELIX_INITD_DIR/ustreamer"
+    sed "s|^USTREAMER_BIN=.*|USTREAMER_BIN=\"${INSTALL_DIR}/bin/ustreamer\"|" \
+        "$INSTALL_DIR/config/helixscreen-ustreamer-k2.sh" > "$HELIX_INITD_DIR/ustreamer"
     chmod +x "$HELIX_INITD_DIR/ustreamer"
 
     local cp_log="$BATS_TEST_TMPDIR/cp.log"
@@ -775,9 +783,9 @@ EOF
     # buffers the endless MJPEG stream to a temp file on the same tmpfs at
     # ~950 KB/s, which fills it in about two minutes.
     run awk '/location \/webcam\/ \{/,/\}/' "$conf"
-    [[ "$output" == *"access_log off;"* ]]
-    [[ "$output" == *"proxy_buffering off;"* ]]
-    [[ "$output" == *"helix-managed"* ]]
+    contains "access_log off;" "$output"
+    contains "proxy_buffering off;" "$output"
+    contains "helix-managed" "$output"
 
     # Marker recorded for reversal.
     [ -f "$INSTALL_DIR/config/.nginx_webcam_accesslog" ]
@@ -799,7 +807,7 @@ EOF
 
     # /webcam2/ did not get the directive.
     run awk '/location \/webcam2\/ \{/,/\}/' "$conf"
-    [[ "$output" != *"access_log off;"* ]]
+    lacks "access_log off;" "$output"
 
     # Exactly one insertion tree-wide.
     [ "$(grep -c 'helix-managed' "$conf")" -eq 2 ]
@@ -1013,7 +1021,7 @@ EOF
     [ "$status" -eq 0 ]
 
     run awk '/location \/webcam\/ \{/,/\}/' "$conf"
-    [[ "$output" == *"access_log off;"* ]]
+    contains "access_log off;" "$output"
     [[ "$output" == *"proxy_buffering off;"* ]]
 }
 
@@ -1039,4 +1047,39 @@ EOF
 
 skip_if_no_python() {
     command -v python3 >/dev/null 2>&1 || skip "python3 not available"
+}
+
+# --- ustreamer launch wrapper ------------------------------------------------
+
+# Sources the init script with procd stubbed, captures the wrapper command, and
+# runs it with stub killall/ustreamer. Echoes the wrapper's exit status.
+_run_k2_wrapper() {
+    local ustreamer_secs="$1" ustreamer_rc="$2"
+    local d="$BATS_TEST_TMPDIR/wrap" ; mkdir -p "$d"
+    printf '#!/bin/sh\nsleep %s\nexit %s\n' "$ustreamer_secs" "$ustreamer_rc" > "$d/ustreamer"
+    printf '#!/bin/sh\necho kill >> "%s/killall.log"\nexit 1\n' "$d" > "$d/killall"
+    chmod +x "$d/ustreamer" "$d/killall"
+    sed -e "s|^USTREAMER_BIN=.*|USTREAMER_BIN=\"$d/ustreamer\"|" \
+        -e 's|^RECLAIM_INTERVAL=.*|RECLAIM_INTERVAL="1"|' \
+        "$WORKTREE_ROOT/config/helixscreen-ustreamer-k2.sh" > "$d/init.sh"
+    sh -c '
+        procd_open_instance() { :; }; procd_close_instance() { :; }
+        procd_set_param() { [ "$1" = command ] && { shift; printf "%s\0" "$@" > "$0.cmd"; }; }
+        . "$0"; start_service' "$d/init.sh"
+    # The wrapper is the last NUL-separated argument of: /bin/sh -c <script>
+    local script
+    script="$(tr '\0' '\n' < "$d/init.sh.cmd" | sed '1,2d')"
+    PATH="$d:$PATH" sh -c "$script"
+}
+
+@test "k2 ustreamer wrapper: keeps reclaiming the camera while ustreamer runs" {
+    run _run_k2_wrapper 3 0
+    [ "$status" -eq 0 ]
+    # One kill before launch plus at least two in-loop kills over 3s at 1s interval.
+    [ "$(wc -l < "$BATS_TEST_TMPDIR/wrap/killall.log")" -ge 3 ]
+}
+
+@test "k2 ustreamer wrapper: exits with ustreamer's status so procd respawns" {
+    run _run_k2_wrapper 1 7
+    [ "$status" -eq 7 ]
 }

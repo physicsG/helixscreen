@@ -70,14 +70,11 @@ class PowerPanel : public PanelBase {
   private:
     lv_obj_t* cached_overlay_ = nullptr; // Single shared overlay widget
 
-    // Guards async API callbacks from accessing a destroyed instance
-    helix::AsyncLifetimeGuard lifetime_;
-
     // Subject manager for automatic cleanup
     SubjectManager subjects_;
 
     // Subjects for reactive binding
-    lv_subject_t status_subject_;
+    lv_subject_t status_subject_{};
     char status_buf_[128] = "Loading devices...";
 
     // Widget references into a tree this panel does not own. forget_widget_tree()

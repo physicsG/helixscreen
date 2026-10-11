@@ -236,3 +236,66 @@ void f(const nlohmann::json& response) {
     [ "$status" -eq 0 ]
     [[ "$output" == *"Subscription null-safety: 0"* ]]
 }
+
+# ------------------------------------------------------- --staged-only content
+#
+# --staged-only picks its file SET from `git diff --cached`, but must read
+# each file's STAGED content (the index blob), not the working tree. Stage a
+# violation and then revert the working file to something clean, and a gate
+# that reads the working tree reports nothing while the bad blob commits.
+# Both rules share one collect_files() implementation, so one repo covers both.
+
+GATE_ABS="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)/scripts/check_subscription_null_safety.py"
+
+setup_tmp_repo() {
+    TMP_REPO="$(mktemp -d "${BATS_TEST_TMPDIR:-${BATS_TMPDIR:-/tmp}}/null-safety-XXXXXX")"
+    cd "$TMP_REPO" || return 1
+    git init -q
+    git config user.email "test@example.com"
+    git config user.name "Test"
+    mkdir -p src/printer
+    printf 'void PrinterState::update_from_status(const json& j) {\n    int x = 0;\n}\n' \
+        > src/printer/foo.cpp
+    git add -A && git commit -qm base
+}
+
+@test "rule 1 --staged-only catches a violation in the STAGED blob, not a reverted working file" {
+    setup_tmp_repo
+    printf 'void PrinterState::update_from_status(const json& j) {\n    int x = j["temp"].get<int>();\n}\n' \
+        > src/printer/foo.cpp
+    git add src/printer/foo.cpp
+    printf 'void PrinterState::update_from_status(const json& j) {\n    int x = 0;\n}\n' \
+        > src/printer/foo.cpp
+    run python3 "$GATE_ABS" --staged-only --rule 1 --max-allowed 0
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'exceeds baseline'* ]]
+}
+
+@test "rule 1 --staged-only stays silent on a clean staged file with a dirty violation on disk" {
+    setup_tmp_repo
+    # Genuinely different from the base commit (a second clean statement), so
+    # the file shows up as staged at all - content byte-identical to HEAD
+    # stages nothing for git to report, which would pass this test for free.
+    printf 'void PrinterState::update_from_status(const json& j) {\n    int x = 0;\n    int y = 1;\n}\n' \
+        > src/printer/foo.cpp
+    git add src/printer/foo.cpp
+    printf 'void PrinterState::update_from_status(const json& j) {\n    int x = j["temp"].get<int>();\n}\n' \
+        > src/printer/foo.cpp
+    run python3 "$GATE_ABS" --staged-only --rule 1 --max-allowed 0
+    [ "$status" -eq 0 ]
+}
+
+@test "rule 2 --staged-only skips files outside the roots its baseline covers" {
+    setup_tmp_repo
+    mkdir -p tests/unit
+    printf 'void f() {\n    token.defer("t", [response]() { use(response["result"]["x"]); });\n}\n' \
+        > tests/unit/foo.cpp
+    git add tests/unit/foo.cpp
+    run python3 "$GATE_ABS" --staged-only --rule 2
+    [ "$status" -eq 0 ]
+
+    mv tests/unit/foo.cpp src/printer/bar.cpp
+    git add -A
+    run python3 "$GATE_ABS" --staged-only --rule 2
+    [ "$status" -eq 1 ]
+}

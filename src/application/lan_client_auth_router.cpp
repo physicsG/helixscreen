@@ -139,10 +139,10 @@ void LanClientAuthRouter::on_request(const std::string& method, const nlohmann::
                               pending_.reset();
                           });
 
-    helix::ui::modal_configure(ModalSeverity::Warning, true, lv_tr("Allow"), lv_tr("Deny"));
-    const char* attrs[] = {"title", lv_tr("Connection Request"), "message", message.c_str(),
-                           nullptr};
-    if (!prompt_->show(lv_screen_active(), attrs)) {
+    helix::ui::ModalDialogAttrs attrs(lv_tr("Connection Request"), message, ModalSeverity::Warning,
+                                      lv_tr("Allow"), lv_tr("Deny"),
+                                      /*show_cancel=*/true);
+    if (!prompt_->show(lv_screen_active(), attrs.get())) {
         // Nothing on screen means nothing can answer, so do not hold the gate
         // shut against the client's next attempt.
         spdlog::error("[LanAuth] could not show the prompt; leaving {} unanswered",

@@ -45,9 +45,10 @@
 #pragma once
 
 #include "async_lifetime_guard.h"
+#include "http_request_epoch.h"
 #include "i_moonraker_api.h"
+#include "i_moonraker_client.h"
 #include "moonraker_advanced_api.h"
-#include "moonraker_client.h"
 #include "moonraker_error.h"
 #include "moonraker_file_api.h"
 #include "moonraker_file_transfer_api.h"
@@ -154,10 +155,14 @@ class MoonrakerAPI : public IMoonrakerAPI {
      *        include/rpc_error_policy.h. Pass false when the callback only logs.
      *        Default must stay in sync with IMoonrakerAPI's declaration: default
      *        arguments on virtuals resolve from the static type.
+     * @param silent Non-interactive caller (e.g. LedAutoState applying the state
+     *        theme): suppresses warning logs and the busy-queue toast, which
+     *        exists to explain a command the user made.
      */
     void set_led(const std::string& led, double red, double green, double blue, double white,
                  SuccessCallback on_success, ErrorCallback on_error,
-                 SuccessCallback on_queued = nullptr, bool caller_surfaces_errors = true) override;
+                 SuccessCallback on_queued = nullptr, bool caller_surfaces_errors = true,
+                 bool silent = false) override;
 
     // ========================================================================
     // Power Device Control Operations
@@ -237,11 +242,17 @@ class MoonrakerAPI : public IMoonrakerAPI {
      *        user-visible report, and letting it claim ownership of the report
      *        suppresses Klipper's `!!` broadcast for the same failure — the
      *        surface that would have explained it. See rpc_error_policy.h.
+     * @param bypass_busy_gate Skip the discretionary-gcode busy gate. For the
+     *        print-launch send ONLY: its on_success chains the job launch, so
+     *        queueing it fire-and-forget behind the START macro would orphan
+     *        the print start. Default must stay in sync with IMoonrakerAPI's
+     *        declaration: default arguments on virtuals resolve from the
+     *        static type.
      */
     void execute_gcode(const std::string& gcode, SuccessCallback on_success, ErrorCallback on_error,
                        uint32_t timeout_ms = 0, bool silent = false,
-                       SuccessCallback on_queued = nullptr,
-                       bool caller_surfaces_errors = true) override;
+                       SuccessCallback on_queued = nullptr, bool caller_surfaces_errors = true,
+                       bool bypass_busy_gate = false) override;
 
     // is_safe_gcode_param() is a static utility declared on IMoonrakerAPI
     // (inherited here) so consumers can validate without the concrete type.
@@ -465,7 +476,9 @@ class MoonrakerAPI : public IMoonrakerAPI {
      * @param base_url HTTP base URL (e.g., "http://192.168.1.100:7125")
      */
     void set_http_base_url(const std::string& base_url) override {
+        const bool moved = base_url != http_base_url_;
         http_base_url_ = base_url;
+        helix::http_epoch::set_base_url(base_url, moved);
     }
 
     /**
@@ -577,18 +590,6 @@ class MoonrakerAPI : public IMoonrakerAPI {
     void get_gcode_store(int count,
                          std::function<void(const std::vector<GcodeStoreEntry>&)> on_success,
                          std::function<void(const MoonrakerError&)> on_error) override;
-
-    // ========================================================================
-    // Helix Plugin Operations
-    // ========================================================================
-
-    /// Get phase tracking plugin status
-    void get_phase_tracking_status(std::function<void(bool enabled)> on_success,
-                                   ErrorCallback on_error = nullptr) override;
-
-    /// Enable or disable phase tracking plugin
-    void set_phase_tracking_enabled(bool enabled, std::function<void(bool success)> on_success,
-                                    ErrorCallback on_error = nullptr) override;
 
     // ========================================================================
     // Database Operations
@@ -847,7 +848,7 @@ class MoonrakerAPI : public IMoonrakerAPI {
     helix::PrinterDiscovery hardware_;
 
     /// Subject for notifying when build_volume changes (version counter)
-    lv_subject_t build_volume_version_;
+    lv_subject_t build_volume_version_{};
     std::atomic<int> build_volume_version_counter_{0};
 
     /// Generation guard for the subject writes this class defers to the main

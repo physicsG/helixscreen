@@ -19,6 +19,7 @@
  *     the mapping lands — query_lane_data() is one-shot and never retried
  */
 
+#include "test_helpers/afc_test_access.h"
 #include "ams_backend_afc.h"
 #include "ams_types.h"
 
@@ -40,6 +41,8 @@ nlohmann::json tool_record(const char* color, const char* material, const char* 
 
 constexpr uint32_t kDefaultColor = AMS_DEFAULT_SLOT_COLOR;
 
+namespace helix {
+
 /// Namespace scope, not anonymous: ams_backend_afc.h befriends this by name.
 /// Slots known (post-discovery), mapping-free unless a stepper delta says
 /// otherwise. Pass an empty vector for the pre-discovery registry.
@@ -48,13 +51,13 @@ class AfcLaneDataToolKeyHelper : public AmsBackendAfc {
     explicit AfcLaneDataToolKeyHelper(const std::vector<std::string>& names)
         : AmsBackendAfc(nullptr, nullptr) {
         if (!names.empty()) {
-            initialize_slots(names);
+            AfcTestAccess::initialize_slots(*this, names);
         }
     }
 
     void feed_lane_data(const nlohmann::json& lane_data) {
         std::lock_guard<std::mutex> lock(mutex_);
-        parse_lane_data(lane_data);
+        AfcTestAccess::parse_lane_data(*this, lane_data);
     }
 
     /// Drive the live status path — the only source of tool mappings.
@@ -67,11 +70,11 @@ class AfcLaneDataToolKeyHelper : public AmsBackendAfc {
     }
 
     [[nodiscard]] int slot_count() const {
-        return slots_.slot_count();
+        return AfcTestAccess::slots(*this).slot_count();
     }
 
     [[nodiscard]] std::string lane_name(int slot_index) const {
-        return slots_.name_of(slot_index);
+        return AfcTestAccess::slots(*this).name_of(slot_index);
     }
 
     [[nodiscard]] uint32_t color(int slot_index) const {
@@ -94,6 +97,7 @@ class AfcLaneDataToolKeyHelper : public AmsBackendAfc {
         return get_slot_info(slot_index).spoolman_id;
     }
 };
+} // namespace helix
 
 // ============================================================================
 // T(n) keys resolve through the tool mapping

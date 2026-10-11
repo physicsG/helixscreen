@@ -13,14 +13,69 @@
  * - OverlayBase: Modal overlays (widget-indexed, create() pattern)
  *
  * ## Lifecycle Contract:
- * - on_deactivate() called BEFORE a panel/overlay becomes hidden
+ * - on_deactivate(reason) called BEFORE a panel/overlay becomes hidden
  * - on_activate() called AFTER animation completes and panel/overlay is visible
  * - get_name() used for debugging/logging only
+ *
+ * ## Async Lifetime Contract:
+ * ViewLifecycleBase (below) owns the two AsyncLifetimeGuards every panel and
+ * overlay gets, and owns the deactivation sequence. Subclasses override
+ * on_deactivating(DeactivateReason), which the base calls before it invalidates
+ * the screen-scoped guard — there is no base call to forget.
  *
  * @threading Main thread only
  */
 
 #pragma once
+
+#include "async_lifetime_guard.h"
+
+/**
+ * @enum DeactivateReason
+ * @brief Why a view is being deactivated
+ *
+ * Deactivation is one notification with three meanings, and a view that reacts
+ * to it usually cares which. The reason arrives as a parameter so no view has
+ * to query NavigationManager to find out.
+ */
+// NAMESPACE_OK: joins the global view-lifecycle API (prestonbrown/helixscreen#1516)
+enum class DeactivateReason {
+    /// Another view is taking the screen. This one stays constructed and gets
+    /// on_activate() again if the user comes back.
+    NavigateAway,
+    /// The application is tearing down. Nothing will reactivate this view, and
+    /// an operation started here has no UI left to report into.
+    Shutdown,
+    /// XML hot-reload is re-creating this view's widget tree. Every widget
+    /// pointer the view holds is about to dangle; the view object itself
+    /// survives and create()/setup() runs again immediately. Dev-only path.
+    Rebuild,
+    /// The screen went idle - the screensaver is up, the display slept, or the
+    /// app moved to the background. The view stays on the stack and gets
+    /// on_activate() again on the next wake, so an operation started here still
+    /// has a UI to report into. A view must NOT cancel in-flight work on this:
+    /// nobody walked away, and the work outlives the blanked screen. It MUST
+    /// still stop timers, animations and polling - a suspended view that keeps
+    /// drawing burns the CPU the suspend exists to free. Guard per statement,
+    /// not per function: the two jobs live in the same on_deactivating().
+    Suspended,
+};
+
+/// Human-readable reason, for log lines that need to say which one fired.
+// NAMESPACE_OK: joins the global view-lifecycle API (prestonbrown/helixscreen#1516)
+inline const char* deactivate_reason_name(DeactivateReason reason) {
+    switch (reason) {
+    case DeactivateReason::NavigateAway:
+        return "navigate-away";
+    case DeactivateReason::Shutdown:
+        return "shutdown";
+    case DeactivateReason::Rebuild:
+        return "rebuild";
+    case DeactivateReason::Suspended:
+        return "suspended";
+    }
+    return "unknown";
+}
 
 /**
  * @class IPanelLifecycle
@@ -46,8 +101,13 @@ class IPanelLifecycle {
      *
      * Used to stop background operations before animation starts.
      * Safe to call multiple times (implementations should be idempotent).
+     *
+     * Panels and overlays inherit this through ViewLifecycleBase, which makes
+     * it final and dispatches to on_deactivating(reason) instead.
+     *
+     * @param reason Why the view is going away
      */
-    virtual void on_deactivate() = 0;
+    virtual void on_deactivate(DeactivateReason reason) = 0;
 
     /**
      * @brief Tear down and re-create this view from its XML component definition
@@ -111,4 +171,78 @@ class IPanelLifecycle {
      * @return Panel/overlay name (e.g., "Motion Panel", "Network Settings")
      */
     virtual const char* get_name() const = 0;
+};
+
+/**
+ * @class ViewLifecycleBase
+ * @brief Shared async-lifetime contract for PanelBase and OverlayBase
+ *
+ * Owns both lifetime guards and the deactivation sequence, so the two bases
+ * agree on what deactivation costs a subclass's in-flight work.
+ *
+ * ## Which guard
+ *
+ * Every view gets two, and the choice is about what the callback is *for*:
+ *
+ * - `lifetime_` — the screen. The result only matters while the user is
+ *   looking at this view: a fetch that populates visible widgets, a debounced
+ *   repaint, an animation step. Dropped on every deactivation; on_activate()
+ *   re-arms whatever still matters.
+ * - `object_lifetime_` — the object. The view owes the completion to the
+ *   machine rather than to the screen: an abort the printer must acknowledge,
+ *   a settings write, a power-off handshake. It survives navigation and dies
+ *   with the view, so its callbacks must be safe to run off screen — they may
+ *   touch members, but must not assume any widget is visible.
+ *
+ * Reaching for `object_lifetime_` to stop a callback from being cancelled is
+ * the wrong reason; reach for it when the work is genuinely not the screen's.
+ *
+ * ## Deactivation sequence
+ *
+ * on_deactivate() is final. It calls on_deactivating(reason) — the subclass's
+ * one chance to act while its in-flight work is still live — and only then
+ * invalidates `lifetime_`. A subclass that wants to schedule work from inside
+ * the hook must park it on `object_lifetime_`, or the invalidation that
+ * follows will drop it.
+ *
+ * @threading Main thread only
+ */
+// NAMESPACE_OK: joins the global view-lifecycle API (prestonbrown/helixscreen#1516)
+class ViewLifecycleBase : public IPanelLifecycle {
+  public:
+    void on_deactivate(DeactivateReason reason) final {
+        on_deactivating(reason);
+        lifetime_.invalidate();
+        on_view_hidden();
+    }
+
+  protected:
+    /**
+     * @brief React to this view leaving the screen
+     *
+     * Stop scanning, cancel pending operations, pause timers. Runs before
+     * `lifetime_` is invalidated, so anything this hook cancels by hand is
+     * still live when it does so.
+     *
+     * @param reason Why the view is going away
+     */
+    virtual void on_deactivating(DeactivateReason reason) {
+        (void)reason;
+    }
+
+    /// @see ViewLifecycleBase class docs — screen-scoped.
+    helix::AsyncLifetimeGuard lifetime_;
+
+    /// @see ViewLifecycleBase class docs — object-scoped.
+    helix::AsyncLifetimeGuard object_lifetime_;
+
+  private:
+    /**
+     * @brief Base-class bookkeeping, after the subclass hook and the invalidate
+     *
+     * Private so that only PanelBase and OverlayBase implement it: a view
+     * overrides on_deactivating() instead, and cannot displace the tracking
+     * its own base does here.
+     */
+    virtual void on_view_hidden() {}
 };

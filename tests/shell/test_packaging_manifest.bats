@@ -13,8 +13,7 @@
 # These tests catch that class of bug at CI time.
 
 # Overridable so the fixture case can be proven to FIRE against a hand-broken
-# copy of the script (same convention as HELIX_PLUGIN_INSTALL_SH in
-# test_moonraker_plugin_install.bats).
+# copy of the script.
 SCRIPT="${HELIX_TEST_MANIFEST_SH:-scripts/gen-packaging-manifest.sh}"
 
 @test "manifest runs cleanly and produces non-empty output" {

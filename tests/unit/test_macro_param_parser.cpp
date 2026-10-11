@@ -1,10 +1,15 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "../test_helpers/load_filament_expression_default.h"
+#include "../ui_test_utils.h"
 #include "favorite_macro_widget.h"
+#include "lvgl/src/others/translation/lv_translation.h"
 
 #include "../catch_amalgamated.hpp"
 
+using helix::macro_param_placeholder;
+using helix::MacroDefaultKind;
 using helix::MacroParam;
 using helix::parse_macro_params;
 
@@ -270,4 +275,171 @@ TEST_CASE("parse_macro_params - no default value", "[macro_params]") {
     REQUIRE(result.size() == 1);
     CHECK(result[0].name == "TEMP");
     CHECK(result[0].default_value.empty());
+}
+
+// ============================================================================
+// Default kinds, and the hint an empty field shows
+// ============================================================================
+
+namespace {
+
+MacroParam only_param(const std::string& gcode) {
+    auto result = parse_macro_params(gcode);
+    REQUIRE(result.size() == 1);
+    return result[0];
+}
+
+} // namespace
+
+TEST_CASE("parse_macro_params - a default read from printer state is an expression",
+          "[macro_params][macro_defaults]") {
+    lv_init_safe();
+    auto result = parse_macro_params(helix::test::LOAD_FILAMENT_EXPRESSION_DEFAULT);
+
+    REQUIRE(result.size() == 1);
+    const MacroParam& param = result[0];
+    CHECK(param.name == "EXTRUDER_TEMP");
+    CHECK(param.default_kind == MacroDefaultKind::Expression);
+    // Template source means nothing to the person at the screen, and it is not a
+    // value they could type back in.
+    CHECK(macro_param_placeholder(param) != "global.extruder_temp.loading");
+    CHECK(macro_param_placeholder(param) == std::string(lv_tr("Printer default")));
+}
+
+TEST_CASE("macro_param_placeholder - a literal default is shown as written",
+          "[macro_params][macro_defaults]") {
+    lv_init_safe();
+
+    SECTION("an integer") {
+        MacroParam p = only_param("{% set t = params.TEMP|default(220)|int %}");
+        CHECK(p.default_kind == MacroDefaultKind::Literal);
+        CHECK(macro_param_placeholder(p) == "220");
+    }
+    SECTION("a signed decimal") {
+        MacroParam p = only_param("{% set z = params.Z_ADJUST|default(-0.5)|float %}");
+        CHECK(p.default_kind == MacroDefaultKind::Literal);
+        CHECK(macro_param_placeholder(p) == "-0.5");
+    }
+    SECTION("a single-quoted string") {
+        MacroParam p = only_param(R"({% set m = params.MATERIAL|default('PLA') %})");
+        CHECK(p.default_kind == MacroDefaultKind::Literal);
+        CHECK(macro_param_placeholder(p) == "PLA");
+    }
+    SECTION("a double-quoted string") {
+        MacroParam p = only_param(R"({% set m = params.MATERIAL|default("PETG") %})");
+        CHECK(p.default_kind == MacroDefaultKind::Literal);
+        CHECK(macro_param_placeholder(p) == "PETG");
+    }
+    SECTION("a boolean") {
+        MacroParam p = only_param("{% set w = params.WIPE|default(false) %}");
+        CHECK(p.default_kind == MacroDefaultKind::Literal);
+        CHECK(macro_param_placeholder(p) == "false");
+    }
+}
+
+TEST_CASE("macro_param_placeholder - no default shows the parameter name",
+          "[macro_params][macro_defaults]") {
+    lv_init_safe();
+    MacroParam p = only_param("{% set t = params.TEMP %}");
+
+    CHECK(p.default_kind == MacroDefaultKind::Absent);
+    CHECK(macro_param_placeholder(p) == "TEMP");
+}
+
+TEST_CASE("parse_macro_params - a default containing parentheses is read whole",
+          "[macro_params][macro_defaults]") {
+    SECTION("a parenthesised expression") {
+        MacroParam p = only_param(
+            "{% set s = params.SPEED|default((printer.toolhead.max_velocity * 60))|int %}");
+        CHECK(p.default_value == "(printer.toolhead.max_velocity * 60)");
+        CHECK(p.default_kind == MacroDefaultKind::Expression);
+    }
+    SECTION("a parenthesis inside a quoted string") {
+        MacroParam p = only_param(R"({% set m = params.MSG|default('done (ok)') %})");
+        CHECK(p.default_value == "done (ok)");
+        CHECK(p.default_kind == MacroDefaultKind::Literal);
+    }
+}
+
+TEST_CASE("parse_macro_params - quotes at both ends do not make a string literal",
+          "[macro_params][macro_defaults]") {
+    MacroParam p = only_param(R"({% set n = params.NAME|default('a' ~ suffix ~ 'b') %})");
+
+    CHECK(p.default_kind == MacroDefaultKind::Expression);
+    CHECK(p.default_value == "'a' ~ suffix ~ 'b'");
+}
+
+// ============================================================================
+// Template shapes at the edges of the default filter
+// ============================================================================
+
+TEST_CASE("parse_macro_params - a template that ends at a parameter name",
+          "[macro_params][macro_defaults]") {
+    SECTION("dot access") {
+        MacroParam p = only_param("M117 {params.MSG");
+        CHECK(p.name == "MSG");
+        CHECK(p.default_kind == MacroDefaultKind::Absent);
+        CHECK(p.default_value.empty());
+    }
+    SECTION("bracket access") {
+        MacroParam p = only_param("M117 {params['MSG']");
+        CHECK(p.name == "MSG");
+        CHECK(p.default_kind == MacroDefaultKind::Absent);
+    }
+}
+
+TEST_CASE("parse_macro_params - a default whose parenthesis never closes is no default",
+          "[macro_params][macro_defaults]") {
+    MacroParam p = only_param("{% set t = params.TEMP|default(220 %}\nM109 S{t}");
+
+    CHECK(p.name == "TEMP");
+    CHECK(p.default_kind == MacroDefaultKind::Absent);
+    CHECK(p.default_value.empty());
+}
+
+TEST_CASE("parse_macro_params - an escaped quote does not end a string default",
+          "[macro_params][macro_defaults]") {
+    SECTION("single quotes") {
+        MacroParam p = only_param(R"GC({% set m = params.MSG|default('it\'s done (ok)') %})GC");
+        CHECK(p.default_kind == MacroDefaultKind::Literal);
+        CHECK(p.default_value == R"GC(it\'s done (ok))GC");
+    }
+    SECTION("double quotes") {
+        MacroParam p = only_param(R"GC({% set m = params.MSG|default("say \"hi\"") %})GC");
+        CHECK(p.default_kind == MacroDefaultKind::Literal);
+        CHECK(p.default_value == R"GC(say \"hi\")GC");
+    }
+}
+
+TEST_CASE("parse_macro_params - Jinja's capitalised None and True are literals",
+          "[macro_params][macro_defaults]") {
+    MacroParam none = only_param("{% set x = params.X|default(None) %}");
+    CHECK(none.default_kind == MacroDefaultKind::Literal);
+    CHECK(none.default_value == "None");
+
+    MacroParam yes = only_param("{% set y = params.Y|default(True) %}");
+    CHECK(yes.default_kind == MacroDefaultKind::Literal);
+    CHECK(yes.default_value == "True");
+}
+
+TEST_CASE("parse_macro_params - whitespace before the default's parenthesis",
+          "[macro_params][macro_defaults]") {
+    MacroParam p = only_param("{% set t = params.TEMP | default (5) | int %}");
+
+    CHECK(p.default_kind == MacroDefaultKind::Literal);
+    CHECK(p.default_value == "5");
+}
+
+TEST_CASE("parse_macro_params - a default that reads another parameter yields both",
+          "[macro_params][macro_defaults]") {
+    auto result = parse_macro_params("{% set a = params.A|default(params.B|default(1)) %}");
+
+    REQUIRE(result.size() == 2);
+    // A's default is computed on the printer from B, so it is not a value to show.
+    CHECK(result[0].name == "A");
+    CHECK(result[0].default_kind == MacroDefaultKind::Expression);
+    CHECK(result[0].default_value == "params.B|default(1)");
+    CHECK(result[1].name == "B");
+    CHECK(result[1].default_kind == MacroDefaultKind::Literal);
+    CHECK(result[1].default_value == "1");
 }

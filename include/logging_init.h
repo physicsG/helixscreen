@@ -439,6 +439,24 @@ spdlog::level::level_enum verbosity_to_level(int verbosity);
 int to_hv_level(spdlog::level::level_enum level);
 
 /**
+ * @brief libhv level for an app log level, never more verbose than WARN
+ *
+ * libhv's INFO lines are event-loop and HTTP-client lifecycle chatter, so it
+ * stays at WARN even when the app logs at INFO or below.
+ */
+int libhv_level_for(spdlog::level::level_enum level);
+
+#ifndef HELIX_WATCHDOG
+/**
+ * @brief Send libhv's log lines to the spdlog default logger, tagged [libhv]
+ *
+ * Without it libhv writes its own file in the working directory. libhv calls
+ * the handler from its own threads, so it touches nothing but spdlog.
+ */
+void route_libhv_to_spdlog();
+#endif
+
+/**
  * @brief Change log level at runtime (no restart needed)
  *
  * Updates both spdlog and libhv log levels immediately.
@@ -483,6 +501,13 @@ spdlog::level::level_enum resolve_log_level(int cli_verbosity, const std::string
  * @return Newline-joined recent log lines, or empty string
  */
 std::string tail_ring_buffer(int num_lines);
+
+/**
+ * @brief Empty the debug-bundle ring. The ring is process-wide, so a bundle
+ * assembled in one test otherwise carries every line logged by the tests
+ * before it.
+ */
+void clear_ring_buffer();
 
 /// Number of messages the ring buffer currently retains (capacity), for the
 /// bundle's log_meta diagnostic key. 0 before init() installs the sink.

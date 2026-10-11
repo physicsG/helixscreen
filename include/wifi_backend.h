@@ -18,7 +18,9 @@
 
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -383,11 +385,13 @@ class WifiBackend {
      * - "DISCONNECTED" - Disconnected from network
      * - "AUTH_FAILED" - Authentication failed (wrong password, etc.)
      *
+     * One handler per event name: a second registration for a name is ignored.
+     *
      * @param name Event type identifier
      * @param callback Handler function
      */
-    virtual void register_event_callback(const std::string& name,
-                                         std::function<void(const std::string&)> callback) = 0;
+    void register_event_callback(const std::string& name,
+                                 std::function<void(const std::string&)> callback);
 
     // ========================================================================
     // Network Scanning
@@ -435,9 +439,14 @@ class WifiBackend {
      *
      * @param ssid Network name
      * @param password Password (empty string for open networks)
+     * @param is_hidden true when the SSID was typed by the user rather than
+     *        picked from the scan list — the network is by definition absent
+     *        from any scan cache, so a backend that matches SSIDs against one
+     *        must explicitly request a hidden association
      * @return WiFiError with detailed status information
      */
-    virtual WiFiError connect_network(const std::string& ssid, const std::string& password) = 0;
+    virtual WiFiError connect_network(const std::string& ssid, const std::string& password,
+                                      bool is_hidden = false) = 0;
 
     /**
      * @brief Disconnect from current network
@@ -505,6 +514,39 @@ class WifiBackend {
     /// it to false. WifiBackendNetd is the only one today.
     virtual bool supports_radio_toggle() const {
         return true;
+    }
+
+    /// Whether forget_network() can remove a saved network at all.
+    ///
+    /// The UI hides its Forget control when this is false rather than offering
+    /// one that can only answer NOT_SUPPORTED. Must agree with forget_network():
+    /// a backend that overrides forget_network() overrides this to true.
+    virtual bool supports_forget() const {
+        return false;
+    }
+
+    /// Whether joining a Wi-Fi network right now would take the link away
+    /// from a wired transport that currently holds it.
+    ///
+    /// A printer network daemon that enforces a single transport answers a
+    /// join by downing eth0 and moving the address to wlan0, so the wired
+    /// address the user may be reachable on dies with the join. That is a
+    /// consequence worth warning about, not a reason to refuse: the join
+    /// itself succeeds, and the daemon's own verdict is the only trustworthy
+    /// answer to whether it can. Callers therefore use this to ADVISE and
+    /// still send the join.
+    ///
+    /// A virtual query rather than a `dynamic_cast` to the concrete backend,
+    /// because the firmware builds -fno-rtti.
+    ///
+    /// Non-const like get_status(), the sibling that reads the same live
+    /// backend state: answering may take the lock the event thread writes
+    /// under.
+    ///
+    /// Default false — a backend that runs the radio alongside the wired
+    /// interface displaces nothing.
+    virtual bool join_displaces_wired_link() {
+        return false;
     }
 
     /// The interface identity this backend resolved (netdev, control socket,
@@ -579,6 +621,12 @@ class WifiBackend {
      */
     virtual bool supports_5ghz() const = 0;
 
+    /// True when get_status() fills ConnectionStatus::frequency_mhz while connected.
+    /// A backend that cannot says so, so a missing band is not read as "no band change".
+    virtual bool reports_frequency() const {
+        return false;
+    }
+
     // ========================================================================
     // Factory Methods
     // ========================================================================
@@ -613,7 +661,19 @@ class WifiBackend {
     static std::unique_ptr<WifiBackend> create(bool silent = false);
 
   protected:
+    /**
+     * @brief Invoke the handler registered for @p event_name, if any
+     *
+     * The handler runs outside the registry lock, so it may re-enter the
+     * backend or take other backend locks without deadlocking.
+     */
+    void dispatch_event(const std::string& event_name, const std::string& data = "");
+
     bool silent_ = false; ///< When true, suppress error modals on startup
+
+  private:
+    std::mutex event_callbacks_mutex_;
+    std::map<std::string, std::function<void(const std::string&)>> event_callbacks_;
 };
 
 namespace helix {

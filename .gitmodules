@@ -20,12 +20,6 @@
 [submodule "glm"]
 	path = lib/glm
 	url = https://github.com/g-truc/glm.git
-[submodule "openvdb"]
-	path = lib/openvdb
-	url = https://github.com/AcademySoftwareFoundation/openvdb.git
-[submodule "lib/ftxui"]
-	path = lib/ftxui
-	url = https://github.com/ArthurSonzogni/FTXUI.git
 [submodule "lib/cpp-terminal"]
 	path = lib/cpp-terminal
 	url = https://github.com/jupyter-xeus/cpp-terminal.git
@@ -48,3 +42,7 @@
 [submodule "lib/libjpeg-turbo"]
 	path = lib/libjpeg-turbo
 	url = https://github.com/libjpeg-turbo/libjpeg-turbo.git
+[submodule "lib/lua"]
+	path = lib/lua
+	url = https://github.com/lua/lua.git
+	ignore = dirty

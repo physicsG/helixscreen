@@ -17,6 +17,7 @@
  */
 
 #include "../mocks/mock_printer_state.h"
+#include "../test_helpers/mock_printer.h"
 #include "moonraker_api_mock.h"
 #include "moonraker_client_mock.h"
 #include "printer_state.h"
@@ -282,10 +283,8 @@ TEST_CASE("MoonrakerClientMock works without shared state",
 
 TEST_CASE("MoonrakerAPIMock returns empty collections without shared state",
           "[mock][shared_state][backward_compat]") {
-    MoonrakerClientMock client(MoonrakerClientMock::PrinterType::VORON_24);
-    PrinterState state;
-    state.init_subjects(false);
-    MoonrakerAPIMock api(client, state);
+    MockPrinter mock_printer;
+    auto& api = mock_printer.api;
     // Note: NOT setting shared state
 
     SECTION("get_excluded_objects_from_mock returns empty set") {

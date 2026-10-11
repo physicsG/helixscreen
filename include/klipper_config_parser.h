@@ -1,16 +1,20 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include "klipper_config_editor.h"
+
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 /**
  * @brief Parser for Klipper's INI-like config format.
  *
- * Handles Klipper-specific quirks: colon and equals separators, multi-line
- * gcode values, prefixed section names (e.g. [gcode_macro NAME]), comment
- * preservation, and format-preserving roundtrip serialization.
+ * A read/modify view over one file's text. Structure scanning and in-place
+ * edits come from KlipperConfigEditor, so both follow Klipper's configparser
+ * rules: first `:` or `=` separates, option names are case-insensitive, `#`
+ * and `;` start comments, a repeated key takes its last value, and
+ * `[include ...]` is a directive, not a section. Comments, blank lines and
+ * separator style survive serialize().
  */
 class KlipperConfigParser {
   public:
@@ -45,7 +49,7 @@ class KlipperConfigParser {
     /// Matches "prefix" exactly or "prefix " followed by anything.
     std::vector<std::string> get_sections_matching(const std::string& prefix) const;
 
-    /// Get all keys in a section, in order of appearance.
+    /// Get all keys in a section (lowercased, as Klipper reads them), in order of appearance.
     std::vector<std::string> get_keys(const std::string& section) const;
 
     /// Serialize back to string, preserving comments, blank lines, and formatting.
@@ -55,34 +59,12 @@ class KlipperConfigParser {
     bool is_modified() const;
 
   private:
-    /// Represents one line of the config file, preserving original text.
-    struct Line {
-        enum Type { COMMENT, BLANK, SECTION_HEADER, KEY_VALUE, CONTINUATION };
-        Type type;
-        std::string raw; // Original line text (without trailing newline)
+    const helix::system::ConfigKey* find_key(const std::string& section,
+                                             const std::string& key) const;
+    /// Re-run the structure scan after content_ changed.
+    void reindex();
 
-        // Populated for SECTION_HEADER
-        std::string section_name;
-
-        // Populated for KEY_VALUE
-        std::string key;
-        std::string value;        // Trimmed value (first line only for multi-line)
-        char separator = ':';     // ':' or '='
-        std::string separator_ws; // Whitespace around separator for exact reproduction
-
-        // For multi-line values: indices of continuation lines in lines_
-        std::vector<size_t> continuation_indices;
-    };
-
-    std::vector<Line> lines_;
-    // section_name -> (key -> line index in lines_)
-    std::unordered_map<std::string, std::unordered_map<std::string, size_t>> section_map_;
-    // Ordered list of section names
-    std::vector<std::string> section_order_;
+    std::string content_;
+    helix::system::ConfigStructure structure_;
     bool modified_ = false;
-
-    static std::string trim(const std::string& s);
-    std::string get_multiline_value(size_t key_line_idx) const;
-    void rebuild_indices_after_insert(size_t inserted_idx, const std::string& section,
-                                      const std::string& key);
 };

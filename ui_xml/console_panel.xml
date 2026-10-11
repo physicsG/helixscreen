@@ -2,7 +2,7 @@
 <!-- Copyright (C) 2025-2026 356C LLC -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <component>
-  <view name="console_panel" extends="overlay_panel" title="Console" title_tag="Console">
+  <view name="console_panel" extends="overlay_panel" title="Console">
     <!-- Content Area -->
     <lv_obj name="overlay_content"
             width="100%" flex_grow="1" style_pad_all="#space_md" style_pad_top="0" scrollable="false" flex_flow="column"
@@ -25,10 +25,8 @@
                 scrollable="false">
           <bind_flag_if_eq subject="console_has_entries" flag="hidden" ref_value="1"/>
           <icon src="console" size="xl" variant="secondary"/>
-          <text_heading width="content" text="No History" translation_tag="No History" style_text_align="center"/>
-          <text_muted width="content"
-                      text="G-code commands will appear here" translation_tag="G-code commands will appear here"
-                      style_text_align="center"/>
+          <text_heading width="content" text="No History" style_text_align="center"/>
+          <text_muted width="content" text="G-code commands will appear here" style_text_align="center"/>
         </lv_obj>
       </lv_obj>
       <!-- G-code composer: one recessed field with the actions living inside it.

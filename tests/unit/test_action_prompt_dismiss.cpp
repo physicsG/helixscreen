@@ -1,19 +1,9 @@
 // Copyright (C) 2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// An ActionPromptModal button with an empty gcode means DO NOTHING.
-//
-// It used to mean "send the LABEL as gcode" (action_prompt_modal.cpp's
-// `btn.gcode.empty() ? btn.label : btn.gcode`), so a button marked "OK" or
-// "Dismiss" transmitted `OK` to Klipper (#1172). Both in-tree dismiss
-// affordances worked around it by smuggling a Klipper comment through as the
-// gcode — `"; error-dismiss"` and `"; qidi-blocked-dismiss"` — which is
-// exactly the tribal knowledge a silent fallback creates.
-//
-// Klipper's own `action:prompt_button` protocol genuinely does default gcode
-// to the label, but ActionPromptManager::parse_button_spec() applies that
-// convention explicitly before the data ever reaches the modal, so wire
-// prompts are unaffected by dropping the fallback here.
+// How an ActionPromptModal closes: an empty-gcode button is a dismiss that sends
+// nothing (#1172), and every close the owner did not ask for reaches the dismiss
+// callback, which is how a firmware prompt closed on screen gets ended.
 
 #include "ui_modal.h"
 
@@ -24,6 +14,7 @@
 
 #include <functional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "../catch_amalgamated.hpp"
@@ -36,6 +27,8 @@ class DismissFixture : public LVGLUITestFixture {
         prev_animations_ = helix::DisplaySettingsManager::instance().get_animations_enabled();
         helix::DisplaySettingsManager::instance().set_animations_enabled(false);
         modal_.set_gcode_callback([this](const std::string& g) { sent_.push_back(g); });
+        modal_.set_dismiss_callback(
+            [this](helix::PromptCloseKind kind) { dismissals_.push_back(kind); });
     }
     ~DismissFixture() override {
         helix::DisplaySettingsManager::instance().set_animations_enabled(prev_animations_);
@@ -60,6 +53,7 @@ class DismissFixture : public LVGLUITestFixture {
 
     helix::ui::ActionPromptModal modal_;
     std::vector<std::string> sent_;
+    std::vector<helix::PromptCloseKind> dismissals_; ///< One entry per dismiss callback
     bool prev_animations_ = true;
 };
 
@@ -113,4 +107,65 @@ TEST_CASE_METHOD(DismissFixture, "a button with a gcode still sends it",
     REQUIRE(sent_.size() == 1);
     CHECK(sent_[0] == "RESUME");
     CHECK_FALSE(modal_.is_visible());
+}
+
+TEST_CASE_METHOD(DismissFixture, "closes the owner did not ask for reach the dismiss callback",
+                 "[action_prompt][dismiss][ui_integration]") {
+    using helix::PromptCloseKind;
+
+    SECTION("a button with a gcode reports that it sent one") {
+        REQUIRE(modal_.show_prompt(test_screen(), two_button_prompt()));
+        lv_obj_send_event(nth_button(0), LV_EVENT_CLICKED, nullptr);
+        process_lvgl(40);
+        REQUIRE(dismissals_.size() == 1);
+        CHECK(dismissals_[0] == PromptCloseKind::ButtonWithGcode);
+    }
+
+    SECTION("a button without a gcode reports that it sent none") {
+        REQUIRE(modal_.show_prompt(test_screen(), two_button_prompt()));
+        lv_obj_send_event(nth_button(1), LV_EVENT_CLICKED, nullptr);
+        process_lvgl(40);
+        REQUIRE(dismissals_.size() == 1);
+        CHECK(dismissals_[0] == PromptCloseKind::ButtonWithoutGcode);
+    }
+
+    SECTION("each other close reason maps to its kind") {
+        const std::pair<ModalCloseReason, PromptCloseKind> cases[] = {
+            {ModalCloseReason::BackdropTap, PromptCloseKind::UserDismiss},
+            {ModalCloseReason::EscKey, PromptCloseKind::UserDismiss},
+            {ModalCloseReason::HotReload, PromptCloseKind::HotReload},
+            {ModalCloseReason::External, PromptCloseKind::External},
+        };
+        for (const auto& [reason, kind] : cases) {
+            dismissals_.clear();
+            REQUIRE(modal_.show_prompt(test_screen(), two_button_prompt()));
+            modal_.hide(reason);
+            process_lvgl(40);
+            REQUIRE(dismissals_.size() == 1);
+            CHECK(dismissals_[0] == kind);
+        }
+    }
+
+    SECTION("the owner's own hide is not a dismissal") {
+        REQUIRE(modal_.show_prompt(test_screen(), two_button_prompt()));
+        modal_.hide();
+        process_lvgl(40);
+        // Replacing the content hides the old dialog too.
+        REQUIRE(modal_.show_prompt(test_screen(), two_button_prompt()));
+        REQUIRE(modal_.show_prompt(test_screen(), two_button_prompt()));
+        modal_.hide();
+        process_lvgl(40);
+        CHECK(dismissals_.empty());
+    }
+
+    SECTION("a gcode sent before a reshow does not leak into the next close") {
+        REQUIRE(modal_.show_prompt(test_screen(), two_button_prompt()));
+        lv_obj_send_event(nth_button(0), LV_EVENT_CLICKED, nullptr);
+        process_lvgl(40);
+        REQUIRE(modal_.show_prompt(test_screen(), two_button_prompt()));
+        lv_obj_send_event(nth_button(1), LV_EVENT_CLICKED, nullptr);
+        process_lvgl(40);
+        REQUIRE(dismissals_.size() == 2);
+        CHECK(dismissals_[1] == PromptCloseKind::ButtonWithoutGcode);
+    }
 }

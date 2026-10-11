@@ -11,6 +11,7 @@
  */
 
 #include "bed_mesh_render_thread.h"
+#include "bed_mesh_renderer.h"
 
 #include <atomic>
 #include <chrono>
@@ -68,8 +69,8 @@ TEST_CASE("BedMeshRenderThread buffer state before any render", "[bed_mesh][slow
         REQUIRE_FALSE(thread.has_ready_buffer());
     }
 
-    SECTION("get_ready_buffer returns nullptr when no frame rendered") {
-        REQUIRE(thread.get_ready_buffer() == nullptr);
+    SECTION("acquire_frame returns nullptr when no frame rendered") {
+        REQUIRE(thread.acquire_frame() == nullptr);
     }
 
     SECTION("last_render_time_ms is zero initially") {
@@ -148,6 +149,98 @@ TEST_CASE("BedMeshRenderThread set_colors is safe while running", "[bed_mesh][sl
 
     // Should be safe to call from main thread while render thread is alive
     thread.set_colors(colors);
+
+    thread.stop();
+}
+
+// ============================================================================
+// Buffer ownership
+// ============================================================================
+
+namespace {
+struct MeshFixture {
+    bed_mesh_renderer_t* renderer = bed_mesh_renderer_create();
+    float rows[3][3] = {{0.f, 0.1f, 0.f}, {0.1f, 0.2f, 0.1f}, {0.f, 0.1f, 0.f}};
+    MeshFixture() {
+        const float* p[3] = {rows[0], rows[1], rows[2]};
+        bed_mesh_renderer_set_mesh_data(renderer, p, 3, 3);
+    }
+    ~MeshFixture() {
+        bed_mesh_renderer_destroy(renderer);
+    }
+};
+
+bool wait_for(BedMeshRenderThread& t, std::atomic<int>& frames, int n) {
+    for (int i = 0; i < 400 && frames.load() < n; i++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return frames.load() >= n;
+}
+} // namespace
+
+TEST_CASE("BedMeshRenderThread keeps exactly two buffers and frees them on stop",
+          "[bed_mesh][slow]") {
+    BedMeshRenderThread thread;
+    REQUIRE(thread.resident_buffer_count() == 0);
+    thread.start(64, 48);
+    REQUIRE(thread.resident_buffer_count() == 2);
+    thread.stop();
+    REQUIRE(thread.resident_buffer_count() == 0);
+    REQUIRE(thread.acquire_frame() == nullptr);
+}
+
+TEST_CASE("BedMeshRenderThread acquire_frame hands over each frame once without copying",
+          "[bed_mesh][slow]") {
+    MeshFixture mesh;
+    BedMeshRenderThread thread;
+    std::atomic<int> frames{0};
+    thread.set_renderer(mesh.renderer);
+    thread.set_frame_ready_callback([&frames]() { frames++; });
+    thread.start(64, 48);
+
+    thread.request_render();
+    REQUIRE(wait_for(thread, frames, 1));
+
+    const auto* first = thread.acquire_frame();
+    REQUIRE(first != nullptr);
+    REQUIRE(first->width() == 64);
+    REQUIRE(thread.resident_buffer_count() == 2);
+
+    SECTION("no new frame: same buffer, nothing moves") {
+        for (int i = 0; i < 5; i++) {
+            REQUIRE(thread.acquire_frame() == first);
+        }
+    }
+
+    SECTION("a new frame is picked up once, in the other buffer") {
+        thread.request_render();
+        REQUIRE(wait_for(thread, frames, 2));
+        const auto* second = thread.acquire_frame();
+        REQUIRE(second != nullptr);
+        REQUIRE(second != first);
+        REQUIRE(thread.acquire_frame() == second);
+        REQUIRE(thread.resident_buffer_count() == 2);
+    }
+
+    SECTION("the consumer's buffer is not written while a render is pending") {
+        const auto* shown = thread.acquire_frame();
+        std::vector<uint8_t> snapshot(shown->data(), shown->data() + shown->stride() * 48);
+        // A different mesh makes any stray write into the shown buffer change its bytes.
+        {
+            std::lock_guard<std::mutex> lock(thread.render_mutex());
+            mesh.rows[1][1] = 0.9f;
+            mesh.rows[0][0] = -0.4f;
+            const float* p[3] = {mesh.rows[0], mesh.rows[1], mesh.rows[2]};
+            bed_mesh_renderer_set_mesh_data(mesh.renderer, p, 3, 3);
+        }
+        // Rendering finishes into the other buffer and then stalls until acquire_frame().
+        for (int i = 0; i < 3; i++) {
+            thread.request_render();
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        REQUIRE(std::equal(snapshot.begin(), snapshot.end(), shown->data()));
+        REQUIRE(frames.load() == 2);
+    }
 
     thread.stop();
 }

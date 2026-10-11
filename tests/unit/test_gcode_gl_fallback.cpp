@@ -15,6 +15,8 @@
 
 #include "gcode_gl_fallback.h"
 
+#include <lvgl.h>
+
 #include "../catch_amalgamated.hpp"
 
 using helix::gcode::gl_draw_error_is_fatal;
@@ -102,3 +104,134 @@ TEST_CASE("gl_renderer_is_denylisted does not match bare Mali without Panfrost",
     // real hard-fault, so we don't have to predict every bad string here.
     REQUIRE_FALSE(gl_renderer_is_denylisted("Mali-G52"));
 }
+
+// ---------------------------------------------------------------------------
+// Software-renderer refusal: the EGL presentation rung must not accept llvmpipe
+//
+// A software rasterizer creates a context and answers every GL call, so the
+// only signal that the GPU was never reached is the renderer string. Accepting
+// it costs more CPU than the software path it replaces, which is the opposite
+// of why the rung exists. These tests FAIL if the predicate stops recognising
+// a software renderer, or starts rejecting real hardware.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Software renderers are refused", "[gcode][gl_fallback][egl]") {
+    using helix::gcode::gl_renderer_is_software;
+
+    SECTION("Mesa software rasterizers") {
+        REQUIRE(gl_renderer_is_software("llvmpipe (LLVM 15.0.6, 128 bits)"));
+        REQUIRE(gl_renderer_is_software("softpipe"));
+        REQUIRE(gl_renderer_is_software("swrast"));
+        REQUIRE(gl_renderer_is_software("kms_swrast"));
+    }
+
+    SECTION("case-insensitive") {
+        REQUIRE(gl_renderer_is_software("LLVMpipe"));
+        REQUIRE(gl_renderer_is_software("KMS_SWRAST"));
+    }
+
+    SECTION("real GPUs are accepted") {
+        REQUIRE_FALSE(gl_renderer_is_software("V3D 7.1.7"));
+        REQUIRE_FALSE(gl_renderer_is_software("Mali-G31 (Panfrost)"));
+        REQUIRE_FALSE(gl_renderer_is_software("Mali-G52 (Panfrost)"));
+        REQUIRE_FALSE(gl_renderer_is_software("AMD Radeon Graphics (radeonsi)"));
+        REQUIRE_FALSE(gl_renderer_is_software("VC4 V3D 2.1"));
+    }
+
+    SECTION("absent renderer string is not a software claim") {
+        // A null string means the query failed, which the caller reports as a
+        // failed probe on its own. Guessing "software" here would conflate the
+        // two and hide a broken context behind a renderer verdict.
+        REQUIRE_FALSE(gl_renderer_is_software(nullptr));
+        REQUIRE_FALSE(gl_renderer_is_software(""));
+    }
+}
+
+TEST_CASE("Software refusal and the 3D draw denylist are independent",
+          "[gcode][gl_fallback][egl]") {
+    using helix::gcode::gl_renderer_is_denylisted;
+    using helix::gcode::gl_renderer_is_software;
+
+    // Panfrost faults inside glDrawArrays but presents through EGL correctly:
+    // the measured CB1 gain is real. Folding these two questions into one
+    // predicate would cost that board the presentation rung.
+    REQUIRE(gl_renderer_is_denylisted("Mali-G31 (Panfrost)"));
+    REQUIRE_FALSE(gl_renderer_is_software("Mali-G31 (Panfrost)"));
+
+    // And the inverse: llvmpipe is safe to draw 3D on, but must never be
+    // chosen for presentation.
+    REQUIRE_FALSE(gl_renderer_is_denylisted("llvmpipe (LLVM 15.0.6, 128 bits)"));
+    REQUIRE(gl_renderer_is_software("llvmpipe (LLVM 15.0.6, 128 bits)"));
+}
+
+// ---------------------------------------------------------------------------
+// GPU triangle budget: slow render drivers cap geometry by triangle count
+//
+// Memory is not the only ceiling on 3D geometry. VideoCore IV (Pi 0-3) draws
+// ~4M triangles/s, so a memory-approved tier whose frames take multiple
+// seconds trips the kernel's GPU hang check and wedges the GPU until reboot.
+// The budget is keyed off the kernel driver behind the DRM render node, not
+// the GL_RENDERER string, because the tier is chosen before any GL context
+// exists. These tests FAIL if the vc4 cap or its exclusions stop working.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("gpu_triangle_budget caps vc4 render drivers", "[gcode][gl_fallback]") {
+    using helix::gcode::gpu_triangle_budget;
+    using helix::gcode::VC4_TRIANGLE_BUDGET;
+
+    // "vc4-drm" is the kernel driver symlink target on a Pi 3B render node.
+    REQUIRE(gpu_triangle_budget("vc4-drm") == VC4_TRIANGLE_BUDGET);
+    REQUIRE(gpu_triangle_budget("VC4-DRM") == VC4_TRIANGLE_BUDGET);
+    REQUIRE(gpu_triangle_budget("vc4") == VC4_TRIANGLE_BUDGET);
+    REQUIRE(VC4_TRIANGLE_BUDGET == 1'000'000);
+}
+
+TEST_CASE("gpu_triangle_budget leaves every other driver uncapped", "[gcode][gl_fallback]") {
+    using helix::gcode::gpu_triangle_budget;
+
+    // v3d (Pi 4/5) and panfrost draw far faster than vc4; 0 means no cap.
+    REQUIRE(gpu_triangle_budget("v3d") == 0);
+    REQUIRE(gpu_triangle_budget("panfrost") == 0);
+    REQUIRE(gpu_triangle_budget("") == 0);
+    REQUIRE(gpu_triangle_budget(nullptr) == 0);
+}
+
+// ---------------------------------------------------------------------------
+// Init-failure fallback: "no GL at all" must reach the viewer (issue #1555)
+//
+// The denylist and fatal-draw-error layers above only fire once a GL context
+// exists. When the context itself cannot be created — a --test run under
+// SDL_VIDEODRIVER=dummy has no GL, and headless/embedded boards can lack EGL
+// devices — render() returns "GPU not available" every frame without drawing
+// and without any signal the viewer can poll. The viewer's only fallback
+// trigger is render_failed(), so an init failure must surface there too, or
+// the pane stays blank for a whole print with the 2D CPU renderer idle.
+//
+// The test binary forces SDL's dummy video driver process-wide (static
+// initializer in tests/helix_test_fixture.cpp), and SDL2 self-initializes
+// video inside SDL_CreateWindow — so on a desktop with working GL the window
+// would otherwise succeed and this test would spuriously fail. The dummy
+// driver has no OpenGL, which is the same wall a --test run of the app hits.
+// Escape hatch: SDL_VIDEODRIVER already set to something else wins (the
+// fixture forces with overwrite=0), so a developer who exports x11 on a GL
+// box gets a red here that is environmental, not a code bug.
+// ---------------------------------------------------------------------------
+
+#ifdef ENABLE_GLES_3D
+#include "gcode_camera.h"
+#include "gcode_gles_renderer.h"
+#include "gcode_parser.h"
+
+TEST_CASE("GLES init failure surfaces through render_failed", "[gcode][gl_fallback][1555]") {
+    helix::gcode::GCodeGLESRenderer renderer;
+    const helix::gcode::ParsedGCodeFile empty_gcode;
+    const helix::gcode::GCodeCamera camera;
+
+    // render() attempts GL init first and returns before touching the layer
+    // or geometry when init fails, so null layer/coords are safe here.
+    renderer.render(nullptr, empty_gcode, camera, nullptr);
+
+    REQUIRE(renderer.render_failed());
+}
+
+#endif // ENABLE_GLES_3D

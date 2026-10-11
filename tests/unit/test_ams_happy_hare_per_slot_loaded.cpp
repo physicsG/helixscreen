@@ -38,7 +38,7 @@ using namespace helix;
 
 namespace {
 
-/// Feeds the production status path (handle_status_update -> parse_mmu_state).
+/// Feeds the production status path (handle_status -> parse_mmu_state).
 class HappyHarePerSlotLoadedHelper : public AmsBackendHappyHare {
   public:
     HappyHarePerSlotLoadedHelper() : AmsBackendHappyHare(nullptr, nullptr) {}

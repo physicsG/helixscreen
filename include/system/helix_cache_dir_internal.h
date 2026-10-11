@@ -23,7 +23,6 @@ struct CacheCandidate {
     /// Labels the rung in the log; nullptr means resolve quietly. Non-null also
     /// marks the rung deliberate - chosen on purpose, never reclaimed.
     const char* tier = nullptr;
-    bool ram_backed = false;
     /// True for the compile-time platform rung. Its presence marks an embedded
     /// build; it need not win, since every device hook exports HELIX_CACHE_DIR.
     bool platform = false;
@@ -46,5 +45,22 @@ inline bool is_deliberate(const CacheCandidate& c) {
  */
 std::vector<std::string> select_stale_paths(const std::vector<CacheCandidate>& candidates,
                                             const std::function<bool(const std::string&)>& viable);
+
+/**
+ * @brief Rename a state root whose name changed, keeping its contents.
+ *
+ * Moves @p legacy_root to @p current_root when only the old one exists. When
+ * both exist (a half-finished migration), carries the known state subtrees
+ * ("cache", "logs") across without clobbering, then drops the legacy side only
+ * where it is empty — a platform hook still on the old layout recreates the
+ * legacy "logs" dir at every pre-start, so an empty legacy tree must not
+ * outlive the boot that renamed it. Never deletes a non-empty legacy subtree.
+ *
+ * Pure filesystem logic over the two paths: which roots a platform uses, and
+ * any environment repair that has to go with the rename, live with the caller.
+ *
+ * @return Number of actions taken (renames, subtree moves, removals).
+ */
+int migrate_state_root(const std::string& legacy_root, const std::string& current_root);
 
 } // namespace helix::cache_internal

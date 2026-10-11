@@ -11,10 +11,10 @@
 //   Native       — backend owns the T0..Tn slot mapping internally (HH, AFC,
 //                  CFS, AD5X IFS, ToolChanger); helix does NOT rewrite gcode
 //   GcodeRewrite — helix must rewrite T-commands in the gcode file because the
-//                  backend has no internal tool-routing. No backend declares it
-//                  today: it was written for ACE, which declares None until the
+//                  backend has no internal tool-routing. Declared by ToolChanger
+//                  on a changer with no ASSIGN_TOOL; ACE declares None until the
 //                  ACE_CHANGE_TOOL family is handled
-//   SnapmakerNative — firmware pre-print send, no gcode rewrite (Snapmaker U1)
+//   PrePrintSend: firmware pre-print send, no gcode rewrite (Snapmaker U1)
 //
 // The per-backend probes come from tests/test_helpers/ams_backend_probes.h.
 
@@ -34,6 +34,14 @@
 
 #include "../catch_amalgamated.hpp"
 
+using helix::AmsBackend;
+using helix::AmsBackendMock;
+using helix::AmsError;
+using helix::AmsErrorHelper;
+using helix::GcodeRewriteBlock;
+
+using helix::Ad5xIfsTestAccess;
+
 namespace {
 
 // Minimal concrete subclass of the base to test the default.
@@ -48,17 +56,17 @@ class BaseProbe : public AmsBackend {
         return false;
     }
     void set_event_callback(EventCallback) override {}
-    [[nodiscard]] AmsSystemInfo get_system_info() const override {
+    [[nodiscard]] helix::AmsSystemInfo get_system_info() const override {
         return {};
     }
-    [[nodiscard]] AmsType get_type() const override {
-        return AmsType::NONE;
+    [[nodiscard]] helix::AmsType get_type() const override {
+        return helix::AmsType::NONE;
     }
-    [[nodiscard]] SlotInfo get_slot_info(int) const override {
+    [[nodiscard]] helix::SlotInfo get_slot_info(int) const override {
         return {};
     }
-    [[nodiscard]] AmsAction get_current_action() const override {
-        return AmsAction::IDLE;
+    [[nodiscard]] helix::AmsAction get_current_action() const override {
+        return helix::AmsAction::IDLE;
     }
     [[nodiscard]] int get_current_tool() const override {
         return -1;
@@ -69,17 +77,17 @@ class BaseProbe : public AmsBackend {
     [[nodiscard]] bool is_filament_loaded() const override {
         return false;
     }
-    [[nodiscard]] PathTopology get_topology() const override {
-        return PathTopology::LINEAR;
+    [[nodiscard]] helix::PathTopology get_topology() const override {
+        return helix::PathTopology::LINEAR;
     }
-    [[nodiscard]] PathSegment get_filament_segment() const override {
-        return PathSegment::NONE;
+    [[nodiscard]] helix::PathSegment get_filament_segment() const override {
+        return helix::PathSegment::NONE;
     }
-    [[nodiscard]] PathSegment get_slot_filament_segment(int) const override {
-        return PathSegment::NONE;
+    [[nodiscard]] helix::PathSegment get_slot_filament_segment(int) const override {
+        return helix::PathSegment::NONE;
     }
-    [[nodiscard]] PathSegment infer_error_segment() const override {
-        return PathSegment::NONE;
+    [[nodiscard]] helix::PathSegment infer_error_segment() const override {
+        return helix::PathSegment::NONE;
     }
     AmsError load_filament(int) override {
         return AmsErrorHelper::success();
@@ -102,10 +110,16 @@ class BaseProbe : public AmsBackend {
     AmsError cancel() override {
         return AmsErrorHelper::success();
     }
-    AmsError set_slot_info(int, const SlotInfo&, bool) override {
+    AmsError apply_user_edit(int, const helix::SlotInfo&, const helix::ams::Observation&) override {
         return AmsErrorHelper::success();
     }
-    AmsError set_tool_mapping(int, int) override {
+    AmsError sync_external_identity(int, const helix::SlotInfo&) override {
+        return AmsErrorHelper::success();
+    }
+    AmsError can_set_tool_mapping(int, int) const override {
+        return AmsErrorHelper::success();
+    }
+    AmsError set_tool_mapping_impl(int, int) override {
         return AmsErrorHelper::success();
     }
     AmsError enable_bypass() override {
@@ -169,10 +183,10 @@ TEST_CASE("Native-strategy backends return RemapStrategy::Native", "[ams][strate
     }
 }
 
-TEST_CASE("Snapmaker returns RemapStrategy::SnapmakerNative", "[ams][strategy]") {
+TEST_CASE("Snapmaker returns RemapStrategy::PrePrintSend", "[ams][strategy]") {
     SECTION("Snapmaker") {
         SnapmakerProbe sm;
-        REQUIRE(sm.get_remap_strategy() == AmsBackend::RemapStrategy::SnapmakerNative);
+        REQUIRE(sm.get_remap_strategy() == AmsBackend::RemapStrategy::PrePrintSend);
     }
 }
 
@@ -240,8 +254,8 @@ TEST_CASE("can_remap needs both a declared route and readiness", "[ams][strategy
     const Case cases[] = {
         {"Native and ready", RS::Native, true, true},
         {"Native, not ready", RS::Native, false, false},
-        {"SnapmakerNative and ready", RS::SnapmakerNative, true, true},
-        {"SnapmakerNative, not ready", RS::SnapmakerNative, false, false},
+        {"PrePrintSend and ready", RS::PrePrintSend, true, true},
+        {"PrePrintSend, not ready", RS::PrePrintSend, false, false},
         {"GcodeRewrite and ready", RS::GcodeRewrite, true, true},
         {"None but ready", RS::None, true, false},
         {"None and not ready", RS::None, false, false},
@@ -263,12 +277,14 @@ TEST_CASE("can_write_mapping_table needs a table-writing route AND readiness", "
     };
     const Case cases[] = {
         {"Native and ready", RS::Native, true, true},
-        // The two rows that make this a different question from can_remap():
-        // the U1 can remap and writes no table, and a Native backend that has
-        // not discovered its firmware object yet writes nothing that lands.
-        {"SnapmakerNative and ready", RS::SnapmakerNative, true, false},
+        // The rows that make this a different question from can_remap(): the
+        // U1 can remap and writes no table, a GcodeRewrite backend honors the
+        // pick by rewriting the job file and has no table either, and a Native
+        // backend that has not discovered its firmware object yet writes
+        // nothing that lands.
+        {"PrePrintSend and ready", RS::PrePrintSend, true, false},
         {"Native, not ready", RS::Native, false, false},
-        {"GcodeRewrite and ready", RS::GcodeRewrite, true, true},
+        {"GcodeRewrite and ready", RS::GcodeRewrite, true, false},
         {"GcodeRewrite, not ready", RS::GcodeRewrite, false, false},
         {"None but ready", RS::None, true, false},
     };
@@ -279,14 +295,16 @@ TEST_CASE("can_write_mapping_table needs a table-writing route AND readiness", "
     }
 }
 
-TEST_CASE("remap_is_persistent separates the table-writing routes from the pre-send",
-          "[ams][strategy]") {
+TEST_CASE("remap_is_persistent separates the routes that outlive the send", "[ams][strategy]") {
     using RS = AmsBackend::RemapStrategy;
+    // Where this parts company with can_write_mapping_table(): GcodeRewrite's
+    // answer outlives the send because it is in the job file, but there is no
+    // table for set_tool_mapping() to write.
     // Native writes the machine's own table; GcodeRewrite writes the job file.
     CHECK(helix::printer::remap_is_persistent(RS::Native));
     CHECK(helix::printer::remap_is_persistent(RS::GcodeRewrite));
-    // SnapmakerNative tells the firmware once, before PRINT_START. Nothing keeps it.
-    CHECK_FALSE(helix::printer::remap_is_persistent(RS::SnapmakerNative));
+    // PrePrintSend tells the firmware once, before PRINT_START. Nothing keeps it.
+    CHECK_FALSE(helix::printer::remap_is_persistent(RS::PrePrintSend));
     CHECK_FALSE(helix::printer::remap_is_persistent(RS::None));
 }
 
@@ -338,7 +356,7 @@ TEST_CASE("owns_tool_mapping_table is answered independently of remap capability
 // requires_preprint_send(): a backend capability that gates whether
 // PrintStartController must emit build_preprint_gcode() BEFORE PRINT_START.
 // Previously the controller proxied this as
-// `get_remap_strategy() == SnapmakerNative` (a backend-type check disguised as
+// `get_remap_strategy() == PrePrintSend` (a backend-type check disguised as
 // a strategy comparison). Only Snapmaker U1 needs the pre-send; everyone else
 // takes the unchanged synchronous start path. Pin each backend so a regression
 // (e.g. accidentally enabling the pre-send for a Native backend) fails here.
@@ -477,4 +495,181 @@ TEST_CASE("Mock Snapmaker pre-print gcode is byte-identical to the real backend"
     // Empty tool set is the one input that legitimately yields nothing, on both.
     REQUIRE(mock.build_preprint_gcode({}, {}).empty());
     REQUIRE(real.build_preprint_gcode({}, {}).empty());
+}
+
+TEST_CASE("remap_block answers the backend's half before anything else", "[ams][strategy][block]") {
+    using helix::printer::remap_block;
+    using helix::printer::RemapBlock;
+    AmsBackendMock backend;
+
+    SECTION("a backend with no route is blocked whatever the job or plugin say") {
+        backend.set_remap_strategy(AmsBackend::RemapStrategy::None);
+        CHECK(remap_block(backend, GcodeRewriteBlock::None, 4) == RemapBlock::NoStrategy);
+        CHECK(remap_block(backend, GcodeRewriteBlock::Probing, 0) == RemapBlock::NoStrategy);
+    }
+
+    SECTION("a route that is not up yet outranks the job and plugin terms") {
+        backend.set_remap_strategy(AmsBackend::RemapStrategy::Native);
+        backend.set_remap_ready(false);
+        CHECK(remap_block(backend, GcodeRewriteBlock::None, 4) == RemapBlock::NotReady);
+    }
+}
+
+TEST_CASE("remap_block names the job before it names the plugin", "[ams][strategy][block]") {
+    using helix::printer::remap_block;
+    using helix::printer::RemapBlock;
+    AmsBackendMock backend;
+    backend.set_remap_strategy(AmsBackend::RemapStrategy::GcodeRewrite);
+
+    // Installing the plugin would not make a toolless job mappable, so the
+    // plugin must not be the reason offered for one.
+    SECTION("no tools reads as NothingToRemap even with the plugin absent") {
+        CHECK(remap_block(backend, GcodeRewriteBlock::NeedsPlugin, 0) ==
+              RemapBlock::NothingToRemap);
+    }
+
+    SECTION("no tools reads as NothingToRemap even while the probe is in flight") {
+        CHECK(remap_block(backend, GcodeRewriteBlock::Probing, 0) == RemapBlock::NothingToRemap);
+    }
+
+    SECTION("a negative count is treated as none, not as a mappable job") {
+        CHECK(remap_block(backend, GcodeRewriteBlock::None, -1) == RemapBlock::NothingToRemap);
+    }
+}
+
+TEST_CASE("Only GcodeRewrite consults the plugin", "[ams][strategy][block]") {
+    using helix::printer::remap_block;
+    using helix::printer::RemapBlock;
+    AmsBackendMock backend;
+
+    SECTION("GcodeRewrite without the plugin is blocked") {
+        backend.set_remap_strategy(AmsBackend::RemapStrategy::GcodeRewrite);
+        CHECK(remap_block(backend, GcodeRewriteBlock::NeedsPlugin, 4) == RemapBlock::NeedsPlugin);
+    }
+
+    SECTION("GcodeRewrite with the plugin is available") {
+        backend.set_remap_strategy(AmsBackend::RemapStrategy::GcodeRewrite);
+        CHECK(remap_block(backend, GcodeRewriteBlock::None, 4) == RemapBlock::None);
+    }
+
+    SECTION("an unprobed plugin is Probing, never NeedsPlugin") {
+        // The probe lands after first paint. Reading -1 as absent is what makes
+        // a card show its refusal on every boot and then withdraw it.
+        backend.set_remap_strategy(AmsBackend::RemapStrategy::GcodeRewrite);
+        CHECK(remap_block(backend, GcodeRewriteBlock::Probing, 4) == RemapBlock::Probing);
+    }
+
+    SECTION("routes that write firmware state ignore the plugin entirely") {
+        for (auto strategy :
+             {AmsBackend::RemapStrategy::Native, AmsBackend::RemapStrategy::PrePrintSend}) {
+            backend.set_remap_strategy(strategy);
+            CHECK(remap_block(backend, GcodeRewriteBlock::NeedsPlugin, 4) == RemapBlock::None);
+            CHECK(remap_block(backend, GcodeRewriteBlock::Probing, 4) == RemapBlock::None);
+            CHECK(remap_block(backend, GcodeRewriteBlock::None, 4) == RemapBlock::None);
+            CHECK(remap_block(backend, GcodeRewriteBlock::NoLocalCopies, 4) == RemapBlock::None);
+        }
+    }
+
+    SECTION("GcodeRewrite on a transport without local copies is not offered on this device") {
+        backend.set_remap_strategy(AmsBackend::RemapStrategy::GcodeRewrite);
+        CHECK(remap_block(backend, GcodeRewriteBlock::NoLocalCopies, 4) ==
+              RemapBlock::NotOnThisDevice);
+        // A job with nothing to map still says so first.
+        CHECK(remap_block(backend, GcodeRewriteBlock::NoLocalCopies, 0) ==
+              RemapBlock::NothingToRemap);
+    }
+}
+
+TEST_CASE("gcode_rewrite_block: the transport outranks the plugin", "[ams][strategy][block]") {
+    using helix::gcode_rewrite_available;
+    using helix::gcode_rewrite_block;
+    CHECK(gcode_rewrite_block(1, true) == GcodeRewriteBlock::None);
+    CHECK(gcode_rewrite_block(0, true) == GcodeRewriteBlock::NeedsPlugin);
+    CHECK(gcode_rewrite_block(-1, true) == GcodeRewriteBlock::Probing);
+    for (int plugin : {-1, 0, 1}) {
+        CHECK(gcode_rewrite_block(plugin, false) == GcodeRewriteBlock::NoLocalCopies);
+    }
+    // A pending probe keeps a gated row visible; every refusal hides it.
+    CHECK(gcode_rewrite_available(GcodeRewriteBlock::None) == 1);
+    CHECK(gcode_rewrite_available(GcodeRewriteBlock::Probing) == -1);
+    CHECK(gcode_rewrite_available(GcodeRewriteBlock::NeedsPlugin) == 0);
+    CHECK(gcode_rewrite_available(GcodeRewriteBlock::NoLocalCopies) == 0);
+}
+
+TEST_CASE("remap_block agrees with can_remap wherever can_remap has an opinion",
+          "[ams][strategy][block]") {
+    using helix::printer::can_remap;
+    using helix::printer::remap_block;
+    using helix::printer::RemapBlock;
+    AmsBackendMock backend;
+
+    // can_remap() is the backend-only half, so it must never say yes where
+    // remap_block() reports a backend-side block, nor no where it reports None.
+    for (auto strategy :
+         {AmsBackend::RemapStrategy::None, AmsBackend::RemapStrategy::Native,
+          AmsBackend::RemapStrategy::GcodeRewrite, AmsBackend::RemapStrategy::PrePrintSend}) {
+        for (bool ready : {false, true}) {
+            backend.set_remap_strategy(strategy);
+            backend.set_remap_ready(ready);
+            const auto block = remap_block(backend, GcodeRewriteBlock::None, 4);
+            const bool backend_side_block =
+                block == RemapBlock::NoStrategy || block == RemapBlock::NotReady;
+            CHECK(can_remap(backend) == !backend_side_block);
+        }
+    }
+}
+
+TEST_CASE("remap_block_name covers every rung", "[ams][strategy][block]") {
+    using helix::printer::remap_block_name;
+    using helix::printer::RemapBlock;
+    // A name falling through to "unknown" means a rung was added without a
+    // spelling, and every log line about it would then be indistinguishable.
+    for (auto block :
+         {RemapBlock::None, RemapBlock::Probing, RemapBlock::NoStrategy, RemapBlock::NotReady,
+          RemapBlock::NeedsPlugin, RemapBlock::NothingToRemap, RemapBlock::NotOnThisDevice}) {
+        CHECK(std::string(remap_block_name(block)) != "unknown");
+    }
+}
+
+TEST_CASE("Only a file rewrite reports start macro params it leaves alone", "[ams][strategy]") {
+    using helix::printer::start_params_remap_leaves;
+    using S = AmsBackend::RemapStrategy;
+    const std::string_view line = "PRINT_START INITIAL_TOOL=0 EXTRUDER1_TEMP=0 BED_TEMP=60";
+
+    CHECK(start_params_remap_leaves(S::GcodeRewrite, line) ==
+          std::vector<std::string>{"EXTRUDER1_TEMP"});
+    // No start line scanned for this file: nothing to say.
+    CHECK(start_params_remap_leaves(S::GcodeRewrite, "").empty());
+    // The other routes never rewrite the file, so the rewrite's blind spots are not theirs.
+    CHECK(start_params_remap_leaves(S::Native, line).empty());
+    CHECK(start_params_remap_leaves(S::PrePrintSend, line).empty());
+    CHECK(start_params_remap_leaves(S::None, line).empty());
+}
+
+namespace {
+helix::ToolMapping picked(int tool, int slot) {
+    helix::ToolMapping m;
+    m.tool_index = tool;
+    m.mapped_slot = slot;
+    return m;
+}
+} // namespace
+
+TEST_CASE("gcode_rewrite_remap keeps only the tools a pick actually sends", "[ams][strategy]") {
+    using helix::printer::gcode_rewrite_remap;
+    CHECK(gcode_rewrite_remap({picked(0, 1), picked(1, -1), picked(-1, 2), picked(2, 2)}) ==
+          std::map<int, int>{{0, 1}, {2, 2}});
+    CHECK(gcode_rewrite_remap({}).empty());
+}
+
+TEST_CASE("The start macro note follows the picks", "[ams][strategy]") {
+    using helix::printer::start_macro_note_shown;
+    // Identity: the rewrite changes no tool number, so nothing is left behind.
+    CHECK_FALSE(start_macro_note_shown(true, {picked(0, 0), picked(1, 1)}));
+    // One tool moved.
+    CHECK(start_macro_note_shown(true, {picked(0, 0), picked(1, 0)}));
+    // An unmapped or auto tool is not sent, so it moves nothing.
+    CHECK_FALSE(start_macro_note_shown(true, {picked(0, -1), picked(1, 1)}));
+    // A move with nothing the rewrite leaves: no note.
+    CHECK_FALSE(start_macro_note_shown(false, {picked(0, 1)}));
 }

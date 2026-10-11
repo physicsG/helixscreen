@@ -61,6 +61,11 @@ class IdleTimeoutBusy {
         return printing_ && (now - printing_since_) >= SETTLE;
     }
 
+    /// When the current "Printing" episode began; meaningful while printing.
+    [[nodiscard]] clock::time_point printing_since() const {
+        return printing_since_;
+    }
+
   private:
     bool printing_ = false;
     clock::time_point printing_since_{};

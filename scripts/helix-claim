@@ -1,0 +1,624 @@
+#!/usr/bin/env bash
+# Advisory claims on resources shared between concurrent agent sessions.
+#
+# Liveness is DERIVED from process state, never asserted by the claim itself: a
+# claim names a pid plus that pid's kernel start-time, so a crashed owner's
+# claim reads STALE with no heartbeat, timeout or cleanup pass. Start-time is
+# what makes it safe against pid reuse.
+#
+# Advisory by design. It stops a reader reaching a confident wrong conclusion
+# about work in progress; it does not stop a writer that ignores it.
+
+set -uo pipefail
+
+# The store belongs to the REPOSITORY, not to whichever worktree is asking.
+# --show-toplevel is per-worktree, so anchoring there hands every worktree a
+# private store: two sessions claim one resource, neither sees the other, and
+# both read FREE - the fail-open this tool exists to prevent. A session asking
+# "is main free?" is almost never standing in main, so that is the normal case,
+# not the corner case. --git-common-dir is the same path from every worktree.
+claim_root() {
+    local common
+    common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) ||
+        common=$(git rev-parse --git-common-dir 2>/dev/null) || common=""
+    [ -n "$common" ] || { printf '%s' "$PWD"; return; }
+    case "$common" in /*) ;; *) common="$PWD/$common";; esac
+    printf '%s' "$(dirname "$common")"
+}
+
+CLAIM_DIR="${HELIX_CLAIM_DIR:-$(claim_root)/.helix-claims}"
+
+# A tree has three names people reach for: its directory basename, the branch
+# checked out in it, and "main". Free-form strings let two sessions claim one
+# resource under two names and both read FREE - an advisory lock that fails OPEN.
+# Resolve every spelling to the directory basename, which is unique per tree.
+# worktree: and build: share this name space: both are scoped to one tree.
+canon() {
+    local pfx
+    case "$1" in
+        worktree:*) pfx=worktree;;
+        build:*)    pfx=build;;
+        *) printf '%s' "$1"; return;;
+    esac
+    local want=${1#*:} path branch base match=""
+    [ -z "$want" ] && { printf '%s:%s' "$pfx" "$(basename "$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")")"; return; }
+    while read -r key val; do
+        case "$key" in
+            worktree) path=$val; base=$(basename "$path");;
+            branch)   branch=${val#refs/heads/}
+                      [ "$want" = "$base" ] || [ "$want" = "$branch" ] && match=$base;;
+        esac
+    done <<EOF
+$(git worktree list --porcelain 2>/dev/null)
+EOF
+    # A detached or branchless tree still matches on basename alone.
+    [ -z "$match" ] && for path in $(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2}'); do
+        [ "$want" = "$(basename "$path")" ] && match=$(basename "$path")
+    done
+    printf '%s:%s' "$pfx" "${match:-$want}"
+}
+
+die() { printf 'helix-claim: %s\n' "$1" >&2; exit 2; }
+slug() { printf '%s' "$1" | tr '/:' '__' | tr -cd '[:alnum:]_.-'; }
+
+# Field 22 of /proc/PID/stat. comm can contain spaces and parens, so count from
+# the last ')' rather than splitting the whole line.
+pid_starttime() {
+    local stat; stat=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
+    printf '%s' "${stat##*) }" | awk '{print $20}'
+}
+
+# A Bash tool call is a transient shell, so its own pid is useless as an owner.
+# Walk to the nearest `claude` ancestor, which lives as long as the session.
+session_pid() {
+    local p=$$ ppid comm hops=0 pgid
+    while [ "$p" -gt 1 ] && [ "$hops" -lt 40 ]; do
+        comm=$(cat "/proc/$p/comm" 2>/dev/null) || break
+        [ "$comm" = "claude" ] && { printf '%s' "$p"; return 0; }
+        # /proc/PID/stat: comm may hold spaces and parens, so cut through the
+        # final ") "; the remaining fields begin at state, making ppid $2.
+        ppid=$(sed 's/.*) //' "/proc/$p/stat" 2>/dev/null | awk '{print $2}')
+        case "$ppid" in ''|*[!0-9]*) break;; esac
+        [ "$ppid" = "$p" ] && break
+        p=$ppid; hops=$((hops+1))
+    done
+    # Outside a Claude session $PPID names whichever shell happened to invoke
+    # this, so a take and a release in the same run can derive different owners
+    # and the claim becomes unreleasable by the run that took it. Every process
+    # in a run shares one process group, and the group leader is itself a pid
+    # with a start time, so liveness is derived exactly as before.
+    pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')
+    case "$pgid" in ''|*[!0-9]*) printf '%s' "$PPID"; return 0;; esac
+    [ -e "/proc/$pgid" ] || [ "$(uname -s)" != Linux ] || { printf '%s' "$PPID"; return 0; }
+    printf '%s' "$pgid"
+}
+
+json_get() { sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\"\{0,1\}\([^\",}]*\)\"\{0,1\}.*/\1/p" <<<"$1" | head -1; }
+
+# LIVE = owner process still exists AND is the same process that claimed.
+state_of() {
+    local f=$1 body pid st now
+    [ -f "$f" ] || { printf 'FREE'; return; }
+    body=$(tr -d '\n' < "$f")
+    pid=$(json_get "$body" pid); st=$(json_get "$body" pid_start)
+    [ -z "$pid" ] && { printf 'LIVE'; return; }          # pid-less claim: manual release only
+    kill -0 "$pid" 2>/dev/null || { printf 'STALE'; return; }
+    now=$(pid_starttime "$pid") || { printf 'STALE'; return; }
+    [ "$now" = "$st" ] && printf 'LIVE' || printf 'STALE'   # pid reused => stale
+}
+
+# build: and worktree: are two prefixes over ONE directory, stored as two files.
+# Left unrelated, a session holding build: while it edits is invisible to a
+# session taking worktree:, which reads FREE and writes into a tree somebody is
+# already in. Physically they exclude each other in both directions: writing
+# under a running build corrupts the build, and building while files move gives
+# a binary that matches no commit. So a tree-scoped take consults its sibling.
+#
+# Same owner is exempt: one session legitimately holds both on its own tree.
+sibling_file() {
+    local pfx=${1%%:*} name=${1#*:} other
+    case "$pfx" in
+        worktree) other=build;;
+        build)    other=worktree;;
+        *) return 1;;
+    esac
+    printf '%s/%s.json' "$CLAIM_DIR" "$(slug "$other:$name")"
+}
+
+# Echoes the sibling's file when a DIFFERENT live session holds the same tree.
+blocking_sibling() {
+    local f; f=$(sibling_file "$1") || return 1
+    [ -f "$f" ] || return 1
+    [ "$(state_of "$f")" = "LIVE" ] || return 1
+    local body; body=$(tr -d '\n' < "$f")
+    [ "$(json_get "$body" pid)" = "$2" ] && return 1
+    printf '%s' "$f"
+}
+
+# 90 -> 1m30s, 7200 -> 2h00m, 200000 -> 2d07h: two units are enough to compare.
+fmt_age() {
+    local s=${1:-0}
+    if   [ "$s" -ge 86400 ]; then printf '%dd%02dh' $((s/86400)) $((s%86400/3600))
+    elif [ "$s" -ge 3600 ];  then printf '%dh%02dm' $((s/3600)) $((s%3600/60))
+    elif [ "$s" -ge 60 ];    then printf '%dm%02ds' $((s/60)) $((s%60))
+    else printf '%ds' "$s"; fi
+}
+
+# A pid and all its descendants, one per line, the root first.
+tree_pids() {
+    ps -eo pid=,ppid= 2>/dev/null | awk -v root="$1" '
+        { kids[$2] = kids[$2] " " $1 }
+        END {
+            n = 1; q[1] = root
+            for (i = 1; i <= n; i++) {
+                print q[i]
+                m = split(kids[q[i]], k, " ")
+                for (j = 1; j <= m; j++) q[++n] = k[j]
+            }
+        }'
+}
+
+# RSS of a pid plus all its descendants, in KB. A heavy job is a make or a
+# shard runner whose own RSS is nothing next to its children's.
+tree_rss_kb() {
+    ps -o rss= -p "$(tree_pids "$1" | paste -sd,)" 2>/dev/null | awk '{ t += $1 } END { print t + 0 }'
+}
+
+# Only a LIVE heavy: claim has a job behind it worth measuring.
+heavy_rss() {
+    local f=$1 body; body=$(tr -d '\n' < "$f")
+    case "$(json_get "$body" resource)" in heavy:*) ;; *) return 1;; esac
+    [ "$(state_of "$f")" = LIVE ] || return 1
+    awk -v kb="$(tree_rss_kb "$(json_get "$body" pid)")" 'BEGIN { printf "%.1fGB", kb / 1048576 }'
+}
+
+describe() {
+    local f=$1 body
+    body=$(tr -d '\n' < "$f")
+    printf '%-10s %-26s %s\n  owner=%s pid=%s since=%s\n' \
+        "$(state_of "$f")" "$(json_get "$body" resource)" "$(json_get "$body" op)" \
+        "$(json_get "$body" session)" "$(json_get "$body" pid)" "$(json_get "$body" started)"
+    local rss; rss=$(heavy_rss "$f") && printf '  rss=%s (process tree)\n' "$rss"
+    local sock; sock=$(json_get "$body" socket)
+    [ -n "$sock" ] && printf '  message=uds:%s\n' "$sock"
+    local sid; sid=$(json_get "$body" session_id)
+    [ -n "$sid" ] && printf '  session_id=%s\n' "$sid"
+    local note; note=$(json_get "$body" note)
+    [ -n "$note" ] && printf '  note=%s\n' "$note"
+    return 0
+}
+
+# The script `resources` runs on the test host: $1 is the container, $2 the
+# lock directory. It stays out of the $(...) that runs it, because bash 3.2
+# (a Mac's /bin/bash) ends a command substitution at the first `)` inside a
+# here-document, case patterns included, and then runs the rest as this script.
+# shellcheck disable=SC2016  # the script body expands on the test host
+test_host_probe() {
+    cat <<'HOST'
+read -r l1 l5 l15 _ < /proc/loadavg
+printf '%.1fGB available, load %s %s %s on %s cpus\n' \
+    "$(awk '/^MemAvailable:/{print $2/1048576}' /proc/meminfo)" "$l1" "$l5" "$l15" "$(nproc)"
+jobs=0
+# The --commit lock keeps the zeus-run.sh name; the global lock names no job.
+for lock in "$2"/helix-test-host-run*.lock "$2"/helix-zeus-run-*.lock; do
+    case "$lock" in *.global.lock) continue ;; esac
+    [ -e "$lock" ] || continue
+    flock -n "$lock" true 2>/dev/null && continue
+    printf '  test-host-run job: %s\n' "$(tail -n 1 "$lock")"; jobs=$((jobs + 1))
+done
+if [ "$jobs" -gt 0 ]; then
+    :
+elif sudo -n docker exec "$1" pgrep -x -r R,S,D make >/dev/null 2>&1; then
+    printf '  test-host-run job: none, but a make is running in %s\n' "$1"
+else
+    printf '  test-host-run job: none\n'
+fi
+HOST
+}
+
+# The live jobpool's target, or exit 1 when there is none. `jobpool target`
+# takes no lock and moves no tokens, so this is safe on every make and under a
+# timeout. JOBPOOL=0 is jobpool's own bypass, so it bypasses here too.
+# HELIX_JOBPOOL names the jobpool binary (tests point it at a fake).
+pool_target() {
+    local t
+    [ "${JOBPOOL:-}" != 0 ] || return 1
+    t=$("${HELIX_JOBPOOL:-jobpool}" target 2>/dev/null) && [ "$t" -gt 0 ] 2>/dev/null || return 1
+    printf '%s\n' "$t"
+}
+
+# Heavy runners outside the pool: a bats, GNU parallel or ninja, or a docker
+# run, with neither JOBPOOL_SLOTS (`jobpool hold`) nor a jobserver in its own
+# environment or any ancestor's. bats and parallel are scripts, so their comm
+# is the interpreter's and they are matched by argv. A container's processes
+# descend from containerd, not the docker client, so they are judged by the
+# environment the run gave them. Prints "pid etime args" for the outermost of
+# each tree.
+unpooled_runners() {
+    ps -eo pid=,ppid=,etime=,comm=,args= 2>/dev/null | awk '
+        function base(w) { sub(/.*\//, "", w); return w }
+        $4 == "ninja" || ($4 == "docker" && $6 == "run") ||
+            base($5) ~ /^(bats|parallel)$/ ||
+            ($4 ~ /^(bash|sh|perl)$/ && base($6) ~ /^(bats|parallel)$/) { heavy[$1] = 1 }
+        { parent[$1] = $2; line[$1] = $1 " " $3; for (i = 5; i <= NF; i++) line[$1] = line[$1] " " $i }
+        END {
+            for (p in heavy) {
+                for (q = parent[p]; q > 1 && !(q in heavy); q = parent[q]) ;
+                if (!(q in heavy)) print line[p]
+            }
+        }' | while read -r pid rest; do
+        p=$pid
+        while [ "${p:-0}" -gt 1 ]; do
+            tr '\0' '\n' 2>/dev/null < "/proc/$p/environ" |
+                grep -qE '^(JOBPOOL_SLOTS=|MAKEFLAGS=.*--jobserver-(auth|fds)=)' && continue 2
+            st=$(cat "/proc/$p/stat" 2>/dev/null) || break
+            st=${st##*) }; st=${st#* }; p=${st%% *}
+        done
+        printf '%s %s\n' "$pid" "$rest"
+    done
+}
+
+cmd=${1:-}; shift 2>/dev/null || true
+case "$cmd" in
+take)
+    res=${1:-}; op=${2:-}; shift 2 2>/dev/null || true
+    res=$(canon "$res")
+    [ -n "$res" ] && [ -n "$op" ] || die "usage: helix-claim take <resource> <op> [--note X] [--pid N]"
+    note=""; pid=""
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --note) [ $# -ge 2 ] || die "--note needs a value"; note=$2; shift 2;;
+            --pid)  [ $# -ge 2 ] || die "--pid needs a value";  pid=$2;  shift 2;;
+            *) die "unknown option: $1";;
+        esac
+    done
+    [ -n "$pid" ] || pid=$(session_pid)
+    mkdir -p "$CLAIM_DIR" || die "cannot create $CLAIM_DIR"
+    f="$CLAIM_DIR/$(slug "$res").json"
+    if [ "$(state_of "$f")" = "LIVE" ]; then
+        printf 'REFUSED: already claimed\n'; describe "$f"; exit 1
+    fi
+    if sib=$(blocking_sibling "$res" "$pid"); then
+        printf 'REFUSED: another session holds the same tree\n'; describe "$sib"; exit 1
+    fi
+    tmp="$f.$$.tmp"
+    # session_id/socket let a reader address this claim's holder directly rather
+    # than resolving a pid back to a session by hand. Both are empty for a caller
+    # outside a Claude session, so describe() prints each only when it is set;
+    # HELIX_SESSION_ID and HELIX_SESSION_SOCKET let any other agent fill them in.
+    cat > "$tmp" <<EOF
+{
+  "resource": "$res",
+  "op": "$op",
+  "session": "${HELIX_SESSION_NAME:-$(hostname)-$pid}",
+  "session_id": "${HELIX_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}",
+  "socket": "${HELIX_SESSION_SOCKET:-${CLAUDE_CODE_MESSAGING_SOCKET:-}}",
+  "pid": $pid,
+  "pid_start": "$(pid_starttime "$pid")",
+  "cwd": "$PWD",
+  "started": "$(date -Is)",
+  "note": "$note"
+}
+EOF
+    mv -f "$tmp" "$f" || die "cannot write $f"
+    printf 'CLAIMED %s (pid %s)\n' "$res" "$pid"
+    ;;
+check)
+    res=$(canon "${1:-}"); [ -n "$res" ] || die "usage: helix-claim check <resource>"
+    f="$CLAIM_DIR/$(slug "$res").json"
+    s=$(state_of "$f")
+    if [ "$s" = "FREE" ]; then
+        # Answering FREE here while a sibling prefix holds the tree is the
+        # fail-open: the caller proceeds into a directory someone else is in.
+        if sib=$(blocking_sibling "$res" "$(session_pid)"); then
+            printf 'HELD BY SIBLING - %s names the same tree\n' "$res"
+            describe "$sib"
+            exit 1
+        fi
+        printf 'FREE       %s\n' "$res"; exit 0
+    fi
+    describe "$f"
+    [ "$s" = "LIVE" ] && exit 1 || exit 0
+    ;;
+list)
+    shopt -s nullglob
+    n=0
+    for f in "$CLAIM_DIR"/*.json; do describe "$f"; n=$((n+1)); done
+    [ "$n" = 0 ] && printf 'no claims\n'
+    ;;
+pool)
+    pool_target
+    ;;
+hold)
+    # Run a command that sizes its own parallelism (bats -j, ninja -j, a
+    # container build) from JOBPOOL_SLOTS. With jobpool installed it holds
+    # that many pool tokens for the command's life (`jobpool hold`, which
+    # starts the daemon and has its own unpooled fallback); without it
+    # (CI, a Mac, a fresh clone) JOBPOOL_SLOTS is -n, or the cores.
+    # --min/--min-wait pass through to jobpool; with no pool they mean nothing.
+    # With no --min, a hold waits (jobpool's bounded wait, 60s by default) for
+    # a third of the pool, capped by -n: a hold takes what is free when it
+    # starts and never grows, so on a busy pool a runner without a floor gets
+    # one slot for its whole life. A third keeps it within about 3x its
+    # full-pool time and leaves two thirds to compiles.
+    # --grow FILE: a jobpool that has it keeps the live slot count in FILE,
+    # growing and shrinking it with the pool, for a command that re-reads it
+    # (GNU parallel --jobs FILE). Otherwise FILE is never written, which is
+    # the caller's cue to size from JOBPOOL_SLOTS.
+    usage="usage: helix-claim hold [-n N] [--min M] [--min-wait SECS] [--grow FILE] -- <cmd...>"
+    n="" min_given="" grow="" pass=()
+    while :; do
+        case ${1:-} in
+            -n) [ $# -ge 2 ] || die "$usage"; n=$2; pass+=(-n "$2"); shift 2 ;;
+            --grow) [ $# -ge 2 ] || die "$usage"; grow=$2; shift 2 ;;
+            --min) [ $# -ge 2 ] || die "$usage"; min_given=1; pass+=("$1" "$2"); shift 2 ;;
+            --min-wait) [ $# -ge 2 ] || die "$usage"; pass+=("$1" "$2"); shift 2 ;;
+            *) break ;;
+        esac
+    done
+    [ "${1:-}" = -- ] && shift
+    [ $# -gt 0 ] || die "$usage"
+    jp=${HELIX_JOBPOOL:-jobpool}
+    if [ "${JOBPOOL:-}" != 0 ] && command -v "$jp" >/dev/null 2>&1; then
+        if [ -z "$min_given" ] && target=$(pool_target); then
+            floor=$(( target / 3 > 0 ? target / 3 : 1 ))
+            [ -n "$n" ] && [ "$floor" -gt "$n" ] && floor=$n
+            pass+=(--min "$floor")
+        fi
+        if [ -n "$grow" ]; then
+            jp_usage=$("$jp" 2>&1) || true
+            case $jp_usage in *"--grow FILE"*) pass+=(--grow "$grow") ;; esac
+        fi
+        exec "$jp" hold "${pass[@]}" -- "$@"
+    fi
+    JOBPOOL_SLOTS=${n:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}
+    export JOBPOOL_SLOTS
+    exec "$@"
+    ;;
+jobs)
+    # The -j a build should take. With jobpool installed, every make on the box
+    # draws from one machine pool, so the answer is the pool's size and the
+    # pool divides it between builds as they run. Without it (CI, a Mac, a
+    # contributor's box) it is the cores, capped by memory at ~1GB per
+    # compile.
+    avail_kb=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo 2>/dev/null)
+    mem_gb=$(( ${avail_kb:-0} / 1048576 ))
+    if target=$(pool_target); then
+        if [ "${1:-}" = "-v" ]; then
+            # status drains the FIFO and writes the tokens back, so a signal
+            # between the two loses them; the advisor runs this under timeout.
+            free=$( (trap '' INT TERM HUP PIPE; "${HELIX_JOBPOOL:-jobpool}" status --json 2>/dev/null) |
+                sed -n 's/.*"available":\([0-9][0-9]*\).*/\1/p')
+            printf 'pool target=%s available=%s availGB=%s -> -j%s\n' \
+                "$target" "${free:-0}" "$mem_gb" "$target" >&2
+        else
+            # The whole pool is right for a make, which draws its jobs from the
+            # pool, and wrong for anything else, which would run that many on
+            # top of it. A make below this one carries the jobserver; the
+            # Makefile's own callers discard stderr.
+            case " ${MAKEFLAGS:-} " in
+                *--jobserver-auth=*|*--jobserver-fds=*) ;;
+                *) printf '%s\n' "helix-claim: jobs is make's -j (the whole pool, $target). Size other work with: scripts/helix-claim hold [--min M] -- cmd (exports JOBPOOL_SLOTS), or scripts/pool-docker.sh for a container." >&2 ;;
+            esac
+        fi
+        printf '%s\n' "$target"
+        exit 0
+    fi
+    ncpu=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)
+    j=$ncpu
+    # No /proc/meminfo (a Mac): cores alone.
+    [ -n "$avail_kb" ] && [ "$j" -gt "$mem_gb" ] && j=$mem_gb
+    [ "$j" -lt 2 ] && j=2
+    [ "$j" -gt "$ncpu" ] && j=$ncpu
+    [ "${1:-}" = "-v" ] &&
+        printf 'ncpu=%s availGB=%s -> -j%s\n' "$ncpu" "$mem_gb" "$j" >&2
+    printf '%s\n' "$j"
+    ;;
+run)
+    # The claim's owner is the command itself: it is started stopped, claimed
+    # under its own pid, then continued. exec keeps that pid and its start time,
+    # so the claim reads LIVE exactly as long as the work runs, whatever happens
+    # to this wrapper.
+    res=${1:-}; shift 2>/dev/null || true
+    usage="usage: helix-claim run heavy:<what> [--note X] -- <cmd> [args...]"
+    case "$res" in heavy:?*) ;; *) die "$usage";; esac
+    note=""
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --note) [ $# -ge 2 ] || die "$usage"; note=$2; shift 2;;
+            --) shift; break;;
+            *) die "unknown option: $1";;
+        esac
+    done
+    [ $# -gt 0 ] || die "$usage"
+    self="${BASH_SOURCE[0]}"
+    op=$(printf '%s' "$*" | tr -d '"\\' | cut -c1-80)
+    # A background command's stdin defaults to /dev/null; hand it the caller's.
+    exec 3<&0
+    ( kill -STOP "$BASHPID"; exec "$@" <&3 3<&- ) &
+    child=$!
+    exec 3<&-
+    for _ in $(seq 500); do
+        st=$(cat "/proc/$child/stat" 2>/dev/null) || break
+        st=${st##*) }; [ "${st%% *}" = T ] && break
+        sleep 0.01
+    done
+    "$self" take "$res" "$op" --note "$note" --pid "$child" >&2
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        kill -KILL "$child" 2>/dev/null
+        [ "$rc" -eq 1 ] && exit 75 || exit "$rc"
+    fi
+    trap '"$self" release-if-owned-by "$child" "$res"' EXIT
+    # A signal reaches the whole tree: make's recipe shells die without passing
+    # it on, which would leave the shards running under a released claim.
+    # shellcheck disable=SC2046  # one pid per word
+    stop_tree() { kill "-$1" $(tree_pids "$child") 2>/dev/null; wait "$child"; exit "$2"; }
+    trap 'stop_tree TERM 143' TERM
+    trap 'stop_tree HUP 129' HUP
+    trap 'stop_tree INT 130' INT
+    kill -CONT "$child"
+    wait "$child"
+    exit $?
+    ;;
+resources)
+    # A snapshot to read before starting heavy work. Read-only.
+    remote=1
+    [ "${1:-}" = "--no-test-host" ] && remote=0
+    avail_kb=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)
+    read -r l1 l5 l15 _ < /proc/loadavg
+    if j=$(pool_target); then jl="jobpool target $j"; else jl="build -j$("${BASH_SOURCE[0]}" jobs)"; fi
+    printf '%s: %.1fGB available, load %s %s %s on %s cpus, %s\n' \
+        "$(hostname -s)" "$(awk -v kb="$avail_kb" 'BEGIN{print kb/1048576}')" \
+        "$l1" "$l5" "$l15" "$(nproc)" "$jl"
+    shopt -s nullglob
+    live=0
+    for f in "$CLAIM_DIR"/*.json; do
+        [ "$(state_of "$f")" = LIVE ] || continue
+        [ "$live" = 0 ] && printf 'live claims:\n'; live=$((live+1))
+        body=$(tr -d '\n' < "$f")
+        since=$(date -d "$(json_get "$body" started)" +%s 2>/dev/null) &&
+            age=$(fmt_age $(( $(date +%s) - since ))) || age='?'
+        rss=$(heavy_rss "$f") && rss=" rss=$rss" || rss=""
+        printf '  %-30s %-16s %6s%s  %s\n' "$(json_get "$body" resource)" \
+            "$(json_get "$body" session)" "$age" "$rss" "$(json_get "$body" note)"
+    done
+    [ "$live" = 0 ] && printf 'live claims: none\n'
+    if pool_target >/dev/null; then
+        runners=$(unpooled_runners)
+        if [ -n "$runners" ]; then
+            printf "unpooled heavy runners (outside the jobpool budget; wrap in \`helix-claim hold\`):\n"
+            printf '%s\n' "$runners" | cut -c1-160 | sed 's/^/  pid /'
+        else
+            printf 'unpooled heavy runners: none\n'
+        fi
+    fi
+    # The named groups always show when present; clangd in particular grows
+    # without bound per session. The rest fill in by size.
+    printf 'memory by command (count, total RSS, largest):\n'
+    ps -eo rss=,pid=,etimes=,comm= 2>/dev/null | awk '
+        function age(s) {
+            if (s >= 86400) return sprintf("%dd%02dh", s/86400, s%86400/3600)
+            if (s >= 3600)  return sprintf("%dh%02dm", s/3600, s%3600/60)
+            return sprintf("%dm%02ds", s/60, s%60)
+        }
+        BEGIN {
+            split("clangd cc1plus/clang++ helix-tests helix-screen docker addr2line/gdb", w, " ")
+            for (i in w) named[w[i]] = 1
+        }
+        {
+            g = $4
+            if (g ~ /^clangd/) g = "clangd"   # its worker threads rename the process
+            else if (g ~ /^(cc1plus|clang\+\+|clang|g\+\+)$/) g = "cc1plus/clang++"
+            else if (g ~ /^(addr2line|eu-addr2line|llvm-symbolizer|llvm-addr2line|gdb)$/) g = "addr2line/gdb"
+            else if (g ~ /^(docker|containerd)/) g = "docker"
+            n[g]++; tot[g] += $1
+            if ($1 > big[g]) { big[g] = $1; bpid[g] = $2; bage[g] = $3 }
+        }
+        END {
+            for (g in tot)
+                printf "%d\t%d\t  %-16s x%-3d %5.1fGB  largest pid %-8s %5.1fGB up %s\n",
+                    tot[g], (g in named), g, n[g], tot[g] / 1048576,
+                    bpid[g], big[g] / 1048576, age(bage[g])
+        }' | sort -t "$(printf '\t')" -k1,1rn |
+        awk -F '\t' '$2 == 1 || others++ < 3 { print $3 }'
+    [ "$remote" = 1 ] || exit 0
+    # The test host scripts/test-host-run.sh drives, from the same config; with
+    # none configured there is nothing to ask. Each held run lock names its job.
+    # shellcheck source-path=SCRIPTDIR source=lib/build_hosts.sh
+    . "$(dirname "${BASH_SOURCE[0]}")/lib/build_hosts.sh"
+    thost=${HELIX_TEST_HOST:-}
+    [ -n "$thost" ] || exit 0
+    tline=$(test_host_probe | timeout 8 ssh -o ConnectTimeout=3 -o BatchMode=yes "$thost" \
+            bash -s -- "${HELIX_TEST_CONTAINER:-helix-test}" "${HELIX_TEST_LOCK_DIR:-/tmp}" 2>/dev/null) &&
+        [ -n "$tline" ] || { printf 'test host (%s): unreachable\n' "$thost"; exit 0; }
+    printf 'test host %s: %s\n' "$thost" "$tline"
+    ;;
+held-by-other)
+    # Exit 0 (and describe the claim) only when a LIVE claim on the resource, or
+    # on the sibling prefix naming the same tree, belongs to another session.
+    # Your own claim, a stale one and no claim all exit 1.
+    res=$(canon "${1:-}"); [ -n "$res" ] || die "usage: helix-claim held-by-other <resource>"
+    me=$(session_pid)
+    f="$CLAIM_DIR/$(slug "$res").json"
+    if [ -f "$f" ] && [ "$(state_of "$f")" = "LIVE" ]; then
+        body=$(tr -d '\n' < "$f")
+        [ "$(json_get "$body" pid)" != "$me" ] && { describe "$f"; exit 0; }
+    fi
+    if sib=$(blocking_sibling "$res" "$me"); then describe "$sib"; exit 0; fi
+    exit 1
+    ;;
+release-if-owned-by)
+    # Release only when the claim names this exact pid, so a hook cannot drop a
+    # claim a session is holding across several commits.
+    owner=${1:-}; res=$(canon "${2:-}")
+    f="$CLAIM_DIR/$(slug "$res").json"
+    [ -f "$f" ] || exit 0
+    body=$(tr -d '\n' < "$f")
+    [ "$(json_get "$body" pid)" = "$owner" ] && rm -f "$f"
+    exit 0
+    ;;
+release)
+    # A failed `take` is loud, but an unconditional release is silent on both
+    # sides: it hands the lock away and the holder is never told. So a claim a
+    # DIFFERENT live process holds is refused here, and --force is the only way
+    # past it. A stale claim, a pid-less one, and your own still release freely,
+    # which is what teardown-worktree.sh needs to clear a dead tree's claim.
+    force=0; res=""
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --force) force=1; shift;;
+            *) [ -n "$res" ] && die "unknown option: $1"; res=$1; shift;;
+        esac
+    done
+    res=$(canon "$res"); [ -n "$res" ] || die "usage: helix-claim release <resource> [--force]"
+    f="$CLAIM_DIR/$(slug "$res").json"
+    [ -f "$f" ] || { printf 'not claimed: %s\n' "$res"; exit 0; }
+    if [ "$force" -eq 0 ]; then
+        owner=$(json_get "$(tr -d '\n' < "$f")" pid)
+        if [ -n "$owner" ] && [ "$owner" != "$(session_pid)" ] && [ "$(state_of "$f")" = "LIVE" ]; then
+            printf 'REFUSED: held by another live session\n'
+            describe "$f"
+            printf '  release it from that session, or --force if you know it is abandoned\n'
+            exit 1
+        fi
+    fi
+    rm -f "$f" && printf 'RELEASED %s\n' "$res"
+    ;;
+*)
+    cat <<'USAGE'
+helix-claim - advisory claims on resources shared between agent sessions
+
+  take <resource> <op> [--note X] [--pid N]   claim; refuses if a LIVE claim exists
+  check <resource>                            FREE | LIVE | STALE (exit 1 if LIVE)
+  list                                        all claims with derived liveness
+  release <resource> [--force]                drop your claim; refuses one another
+                                              live session holds unless forced
+  release-if-owned-by <pid> <resource>        drop it only if that pid claimed it
+  held-by-other <resource>                    exit 0 if ANOTHER live session holds it
+  run heavy:<what> [--note X] -- <cmd...>     hold heavy:<what> while cmd runs and
+                                              exit with its status; exits 75 with
+                                              cmd unrun if the claim is held
+  jobs [-v]                                   the -j a build takes: the jobpool's
+                                              target, else cores capped by memory
+  pool                                        the live jobpool's target; exit 1 if none
+  hold [-n N] [--min M] [--min-wait S] [--grow FILE] -- <cmd...>
+                                              run cmd with JOBPOOL_SLOTS set: up to N
+                                              pool tokens (waiting up to S seconds
+                                              for M) under jobpool, else N or cores;
+                                              --grow keeps the live count in FILE
+  resources [--no-test-host]                  memory, load, build -j, live claims,
+                                              unpooled heavy runners, top memory
+                                              users, and the configured test host
+
+worktree: and build: names are resolved (basename, branch, or bare = the tree
+you are in), so two spellings cannot claim one resource twice.
+Other resources are free-form; the useful ones are
+  worktree:<name>  build:<name>  device:<printer>  gh:issue:<n>  heavy:<what>
+  socket:<path>
+
+LIVE means the owning process still exists and is the same process that claimed
+it. A crashed owner reads STALE automatically - there is nothing to clean up.
+USAGE
+    exit 2;;
+esac

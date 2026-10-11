@@ -11,13 +11,41 @@
 #include "../../include/pending_startup_warnings.h"
 #include "config.h"
 #include "drm_rotation_strategy.h"
+#include "env_knobs.h"
 #include "helix_display_telemetry.h"
 #include "input_device_scanner.h"
+#include "refresh_timing_env.h"
+#include "touch_calibration.h"
 #include "touch_calibration_wrapper.h"
 
 #include <spdlog/spdlog.h>
 
 #include <lvgl.h>
+
+// lv_conf_internal.h derives LV_LINUX_DRM_USE_EGL from LV_USE_OPENGLES and
+// redefines it with no #ifndef guard, so a value set in lv_conf.h does not
+// survive. Ask the preprocessor what it resolved to, never the header.
+//
+// Both directions are errors, and they fail differently. A request with no
+// result gives a binary that believes it is GPU-accelerated and presents
+// through dumb buffers. A result with no request is worse: mk/egl-link.mk
+// builds two binaries from one set of objects and tells them apart by this
+// macro alone, so LV_USE_OPENGLES turned on in lv_conf.h would put the EGL
+// driver in BOTH of them, leaving nothing to step down to when the probe
+// declines.
+#if defined(HELIX_ENABLE_OPENGLES) && !LV_LINUX_DRM_USE_EGL
+#error "HELIX_ENABLE_OPENGLES set but LVGL resolved LV_LINUX_DRM_USE_EGL to 0"
+#endif
+#if !defined(HELIX_ENABLE_OPENGLES) && LV_LINUX_DRM_USE_EGL
+#error "LVGL resolved LV_LINUX_DRM_USE_EGL to 1 without HELIX_ENABLE_OPENGLES: \
+set ENABLE_OPENGLES in the build, do not edit LV_USE_OPENGLES in lv_conf.h"
+#endif
+
+// HELIX_EGL_XRGB leaves the X byte of an XRGB8888 display undefined, which is safe only
+// while the display shader ignores it. The LVGL patch that makes it do so defines this.
+#if LV_LINUX_DRM_USE_EGL && !defined(HELIX_LV_OPENGLES_XRGB_IGNORES_X)
+#error "lib/lvgl lacks lvgl-egl-xrgb-shader.patch: HELIX_EGL_XRGB would present the X byte as alpha"
+#endif
 
 // System includes for device access checks and DRM capability detection
 #include <algorithm>
@@ -221,6 +249,10 @@ DisplayBackendDRM::~DisplayBackendDRM() {
     // pointer indev outlives this backend; if an indev read fired between our
     // destruction and lv_deinit(), calibrated_read_cb would reach the freed
     // calibration_context_ (use-after-free / SIGSEGV). Mirrors ~DisplayBackendFbdev.
+    // The pointer frame hook comes off first. Where it fronts the calibration
+    // wrapper that hands the wrapper back, and uninstall only silences a device
+    // whose read callback is the wrapper itself.
+    pointer_frames_.restore_all();
     helix::uninstall_calibration_wrapper(pointer_, calibration_context_);
     restore_console();
 }
@@ -403,8 +435,16 @@ lv_display_t* DisplayBackendDRM::create_display(int width, int height) {
     }
 
     // Apply the preferred-mode override BEFORE lv_linux_drm_set_file picks a mode.
+    // lv_linux_drm_set_preferred_mode() lives in the dumb-buffer driver, which
+    // compiles to nothing when the EGL driver is selected, so the override is
+    // unavailable there and the connector's own preferred mode is what we get.
     if (chosen_w > 0 && chosen_h > 0) {
+#if LV_LINUX_DRM_USE_EGL
+        spdlog::warn("[DRM Backend] Ignoring {}x{} mode override: not supported on the EGL path",
+                     chosen_w, chosen_h);
+#else
         lv_linux_drm_set_preferred_mode(display_, chosen_w, chosen_h);
+#endif
     }
 
     lv_result_t result = lv_linux_drm_set_file(display_, drm_device_.c_str(), -1);
@@ -414,6 +454,53 @@ lv_display_t* DisplayBackendDRM::create_display(int width, int height) {
         display_ = nullptr;
         return nullptr;
     }
+
+#if LV_LINUX_DRM_USE_EGL
+    // LVGL's 32bpp native format is XRGB8888 and it leaves the X byte at 0x00. The EGL path
+    // uploads that buffer as GL_RGBA, so X arrives as alpha.
+    // By default (HELIX_EGL_XRGB) the display stays XRGB8888 and the display shader presents
+    // it with the X byte ignored, so nothing depends on LVGL maintaining it. It must ignore the
+    // byte outright: on aarch64 LVGL's NEON blends into XRGB8888 write 0 there.
+    // HELIX_EGL_XRGB=0 switches the display to ARGB8888. There the fragment shader multiplies
+    // RGB by the alpha byte, so LVGL must maintain it as a real alpha or every pixel it did not
+    // make fully opaque loses its colour. Same defect the AD5M hit through its LCD controller
+    // (see DisplayBackendFbdev::init), reached here through a different consumer. An XRGB8888
+    // image or canvas drawn into the ARGB8888 display is copied byte for byte, so its X byte
+    // arrives as alpha too.
+    if (lv_display_get_color_format(display_) == LV_COLOR_FORMAT_XRGB8888) {
+        if (helix::egl_xrgb_from_env()) {
+            spdlog::info("[DRM Backend] Color format stays XRGB8888 on the EGL path, X byte "
+                         "ignored (HELIX_EGL_XRGB)");
+        } else {
+            lv_display_set_color_format(display_, LV_COLOR_FORMAT_ARGB8888);
+            spdlog::info("[DRM Backend] Color format XRGB8888 -> ARGB8888 for the EGL path "
+                         "(HELIX_EGL_XRGB=0)");
+        }
+    }
+
+    if (helix::apply_egl_vsync_from_env(
+            [this](bool vsync) { lv_linux_drm_egl_set_vsync(display_, vsync); })) {
+        spdlog::info("[DRM Backend] EGL presentation waits for each page flip (HELIX_EGL_VSYNC)");
+    } else {
+        spdlog::info(
+            "[DRM Backend] EGL presentation does not wait for page flips (HELIX_EGL_VSYNC=0)");
+    }
+
+    switch (helix::apply_egl_switch_from_env("HELIX_EGL_PARTIAL_UPLOAD", [this] {
+        return lv_linux_drm_egl_set_partial_upload(display_, true);
+    })) {
+    case helix::EglSwitch::On:
+        spdlog::info("[DRM Backend] EGL uploads only the flushed areas (HELIX_EGL_PARTIAL_UPLOAD)");
+        break;
+    case helix::EglSwitch::Declined:
+        spdlog::warn("[DRM Backend] The EGL driver refused HELIX_EGL_PARTIAL_UPLOAD (its own "
+                     "warning above says why); uploading whole frames");
+        break;
+    case helix::EglSwitch::Off:
+        spdlog::info("[DRM Backend] EGL uploads whole frames (HELIX_EGL_PARTIAL_UPLOAD=0)");
+        break;
+    }
+#endif
 
     // Belt and suspenders: after LVGL sets up, check the actual resolution
     // it landed on. If it differs from what the user asked for and we
@@ -434,12 +521,12 @@ lv_display_t* DisplayBackendDRM::create_display(int width, int height) {
         }
     }
 
-#ifdef HELIX_ENABLE_OPENGLES
-    using_egl_ = true;
-    spdlog::info("[DRM Backend] GPU-accelerated display active (EGL/OpenGL ES)");
-#else
-    spdlog::info("[DRM Backend] DRM display active (dumb buffers, CPU rendering)");
-#endif
+    using_egl_ = (LV_LINUX_DRM_USE_EGL != 0);
+    if (using_egl_) {
+        spdlog::info("[DRM Backend] GPU-accelerated display active (EGL/OpenGL ES)");
+    } else {
+        spdlog::info("[DRM Backend] DRM display active (dumb buffers, CPU rendering)");
+    }
 
     suppress_console();
 
@@ -449,7 +536,53 @@ lv_display_t* DisplayBackendDRM::create_display(int width, int height) {
     return display_;
 }
 
+void DisplayBackendDRM::request_full_upload() {
+#if LV_LINUX_DRM_USE_EGL
+    if (display_ != nullptr) {
+        lv_linux_drm_egl_request_full_upload(display_);
+    }
+#endif
+}
+
 lv_indev_t* DisplayBackendDRM::create_input_pointer() {
+    open_pointer_devices();
+
+    // The calibration wrapper places its affine on a panel-space sample, so it
+    // has to sit beneath the pointer frame hook. Device opening installs it for a
+    // discovered touch panel; every other path installs it here, a passthrough
+    // until a valid calibration is set.
+    if (pointer_ != nullptr && !calibration_wrapper_installed_) {
+        helix::install_calibration_wrapper(pointer_, calibration_context_, calibration_,
+                                           screen_width_, screen_height_);
+        calibration_wrapper_installed_ = true;
+    }
+
+    // LVGL rotates pointer input from the display's rotation, which the plane
+    // path clears, so a touch panel's samples turn with the plane on the
+    // device's own read instead. A relative pointer's position is already on
+    // the picture, so it is never turned by either. Every device
+    // open_pointer_devices() opens passes through here, whichever path found
+    // it, and its kind comes from the device itself.
+    if (pointer_ != nullptr) {
+        if (const auto kind =
+                pointer_frames_.install(pointer_, pointer_path_, pointer_is_evdev_, &pointer_)) {
+            spdlog::info(
+                "[DRM Backend] Pointer frame hook installed on {} ({} device, plane at {}°)",
+                pointer_path_, helix::input::pointer_kind_name(*kind), plane_rotation_degrees_);
+        }
+    }
+    if (mouse_ != nullptr) {
+        if (const auto kind = pointer_frames_.install(mouse_, mouse_path_, true, &mouse_)) {
+            spdlog::info("[DRM Backend] Mouse frame hook installed on {} ({} device, plane at {}°)",
+                         mouse_path_, helix::input::pointer_kind_name(*kind),
+                         plane_rotation_degrees_);
+        }
+    }
+
+    return pointer_;
+}
+
+void DisplayBackendDRM::open_pointer_devices() {
     std::string device_override;
 
     // Priority 1: Environment variable override (for debugging/testing)
@@ -474,16 +607,19 @@ lv_indev_t* DisplayBackendDRM::create_input_pointer() {
 #if LV_USE_LIBINPUT
         pointer_ = lv_libinput_create(LV_INDEV_TYPE_POINTER, device_override.c_str());
         if (pointer_ != nullptr) {
+            pointer_path_ = device_override;
             spdlog::info("[DRM Backend] Libinput pointer device created on {}", device_override);
-            return pointer_;
+            return;
         }
 #endif
         // Try evdev as fallback for the specified device
         pointer_ = lv_evdev_create(LV_INDEV_TYPE_POINTER, device_override.c_str());
         if (pointer_ != nullptr) {
             pointer_is_evdev_ = true;
+            pointer_path_ = device_override;
             spdlog::info("[DRM Backend] Evdev pointer device created on {}", device_override);
-            return pointer_;
+            configure_touch_gestures(pointer_);
+            return;
         }
         spdlog::warn("[DRM Backend] Could not open specified touch device: {}", device_override);
     }
@@ -502,11 +638,7 @@ lv_indev_t* DisplayBackendDRM::create_input_pointer() {
             pointer_is_evdev_ = true;
             spdlog::info("[DRM Backend] Evdev touch device created on {} (multi-touch enabled)",
                          touch_path);
-#if LV_USE_GESTURE_RECOGNITION
-            lv_indev_set_pinch_up_threshold(pointer_, 1.15f);
-            lv_indev_set_pinch_down_threshold(pointer_, 0.85f);
-            lv_indev_set_rotation_rad_threshold(pointer_, 3.14f);
-#endif
+            configure_touch_gestures(pointer_);
         } else {
             // Fall back to libinput if evdev fails
             pointer_ = lv_libinput_create(LV_INDEV_TYPE_POINTER, touch_path);
@@ -518,29 +650,25 @@ lv_indev_t* DisplayBackendDRM::create_input_pointer() {
         }
     }
 #else
-    // No libinput — use evdev scanner to find touch/pointer device
+    // No libinput: the sysfs scanner finds the touchscreen
     const char* touch_path = nullptr;
-    auto mouse = helix::input::find_mouse_device("/dev/input", "/sys/class/input");
-    std::string touch_path_str;
-    if (mouse) {
-        touch_path_str = mouse->path;
-        touch_path = touch_path_str.c_str();
-        spdlog::info("[DRM Backend] Found touch/pointer device via evdev scan: {}", touch_path_str);
+    auto touch = helix::input::find_touch_device();
+    if (touch) {
+        touch_path = touch->path.c_str();
+        spdlog::info("[DRM Backend] Found touch device via evdev scan: {} ({})", touch->path,
+                     touch->name);
         pointer_ = lv_evdev_create(LV_INDEV_TYPE_POINTER, touch_path);
         if (pointer_ != nullptr) {
             pointer_is_evdev_ = true;
-            spdlog::info("[DRM Backend] Evdev touch device created on {}", touch_path_str);
-#if LV_USE_GESTURE_RECOGNITION
-            lv_indev_set_pinch_up_threshold(pointer_, 1.15f);
-            lv_indev_set_pinch_down_threshold(pointer_, 0.85f);
-            lv_indev_set_rotation_rad_threshold(pointer_, 3.14f);
-#endif
+            spdlog::info("[DRM Backend] Evdev touch device created on {}", touch->path);
+            configure_touch_gestures(pointer_);
         }
     }
 #endif
 
     // --- Touch calibration detection ---
     if (pointer_ && touch_path) {
+        pointer_path_ = touch_path;
         // Parse event number from path like "/dev/input/event0"
         int event_num = -1;
         const char* event_pos = strstr(touch_path, "event");
@@ -621,14 +749,15 @@ lv_indev_t* DisplayBackendDRM::create_input_pointer() {
                         if (!needs_calibration_ && abs_x.maximum <= 0 && abs_y.maximum <= 0) {
                             needs_calibration_ = true;
                             needs_cal_forced_by_abs = true;
-                            spdlog::warn("[DRM Backend] ABS range is zero — forcing calibration");
+                            spdlog::warn(
+                                "[DRM Backend] ABS range is zero — panel needs affine calibration");
                         } else if (!needs_calibration_ &&
                                    helix::has_abs_display_mismatch(abs_x.maximum, abs_y.maximum,
                                                                    screen_width_, screen_height_)) {
                             needs_calibration_ = true;
                             needs_cal_forced_by_abs = true;
                             spdlog::warn("[DRM Backend] ABS range ({},{}) mismatches display "
-                                         "({}x{}) — forcing calibration",
+                                         "({}x{}) — panel needs affine calibration",
                                          abs_x.maximum, abs_y.maximum, screen_width_,
                                          screen_height_);
                         }
@@ -690,7 +819,7 @@ lv_indev_t* DisplayBackendDRM::create_input_pointer() {
             // Setting the true emitted range here restores 1:1 mapping. To invert
             // an axis, swap min/max (e.g. MIN_Y=3200 MAX_Y=900).
             const char* swap_axes = std::getenv("HELIX_TOUCH_SWAP_AXES");
-            if (swap_axes != nullptr && strcmp(swap_axes, "1") == 0) {
+            if (helix::env_truthy(swap_axes)) {
                 if (pointer_is_evdev_) {
                     spdlog::info("[DRM Backend] Touch axes swapped (HELIX_TOUCH_SWAP_AXES=1)");
                     lv_evdev_set_swap_axes(pointer_, true);
@@ -731,39 +860,35 @@ lv_indev_t* DisplayBackendDRM::create_input_pointer() {
             const bool env_swap_override = swap_axes != nullptr;
             const helix::TouchRangeSettings stored_range =
                 pointer_is_evdev_ ? helix::load_touch_range() : helix::TouchRangeSettings{};
+            // Asked of the display, not of `/display/rotate`, and via the same
+            // helper the calibration solver gates on - the key is only the
+            // request, and it differs from the applied rotation both ways
+            // (CLI/env rotation with no key; a failed DRM->fbdev rotation
+            // fallback leaving the key set on an unrotated display). This runs
+            // from create_input_pointer(), which DisplayManager calls after it
+            // applies rotation, so the display is already at its final rotation.
+            const int applied_rotation = display_rotation_degrees();
+            const helix::TouchRangeSource range_source = helix::resolve_touch_range_source(
+                env_range_override, stored_range, applied_rotation);
             if (env_range_override) {
                 spdlog::info("[DRM Backend] Touch range source: environment override{}",
                              stored_range.valid ? " (stored calibration range ignored)" : "");
-            } else if (stored_range.valid) {
-                // A stored range solved on a rotated panel folds the rotation
-                // into (min,max,swap) and double-applies it at runtime
-                // (prestonbrown/helixscreen#1394). Asked of the display, not
-                // of `/display/rotate`, and via the same helper the
-                // calibration solver gates on - the key is only the request,
-                // and it differs from the applied rotation both ways (CLI/env
-                // rotation with no key; a failed DRM->fbdev rotation fallback
-                // leaving the key set on an unrotated display). This runs from
-                // create_input_pointer(), which DisplayManager calls after it
-                // applies rotation, so the display is already at its final
-                // rotation.
-                const int applied_rotation = display_rotation_degrees();
-                if (applied_rotation != 0) {
-                    spdlog::warn("[DRM Backend] Ignoring stored touch range on a"
-                                 " {}°-rotated display - solved through the rotation,"
-                                 " affine-only path applies",
-                                 applied_rotation);
-                } else {
-                    if (!env_swap_override) {
-                        lv_evdev_set_swap_axes(pointer_, stored_range.swap_axes);
-                    }
-                    lv_evdev_set_calibration(pointer_, stored_range.min_x, stored_range.min_y,
-                                             stored_range.max_x, stored_range.max_y);
-                    spdlog::info("[DRM Backend] Touch range source: stored calibration "
-                                 "X({}..{}) Y({}..{}) swap={}{}",
-                                 stored_range.min_x, stored_range.max_x, stored_range.min_y,
-                                 stored_range.max_y, stored_range.swap_axes,
-                                 env_swap_override ? " (swap held by environment override)" : "");
+            } else if (range_source == helix::TouchRangeSource::Stored) {
+                if (!env_swap_override) {
+                    lv_evdev_set_swap_axes(pointer_, stored_range.swap_axes);
                 }
+                lv_evdev_set_calibration(pointer_, stored_range.min_x, stored_range.min_y,
+                                         stored_range.max_x, stored_range.max_y);
+                spdlog::info("[DRM Backend] Touch range source: stored calibration "
+                             "X({}..{}) Y({}..{}) swap={}{}",
+                             stored_range.min_x, stored_range.max_x, stored_range.min_y,
+                             stored_range.max_y, stored_range.swap_axes,
+                             env_swap_override ? " (swap held by environment override)" : "");
+            } else if (stored_range.valid) {
+                spdlog::warn("[DRM Backend] Ignoring stored touch range on a"
+                             " {}°-rotated display - not stamped as solved unrotated"
+                             " (rotation={}), affine-only path applies",
+                             applied_rotation, stored_range.capture_rotation);
             } else {
                 spdlog::info("[DRM Backend] Touch range source: kernel/MT-declared ABS range");
             }
@@ -776,29 +901,28 @@ lv_indev_t* DisplayBackendDRM::create_input_pointer() {
             // coordinate space — those panels now ride on evdev's linear scaling
             // above. The v17→v18 migration set recheck_pending; decide here, where
             // the device's resistive nature and live ABS range are known.
-            if (helix::Config* cfg = helix::Config::get_instance()) {
-                bool recheck_pending = cfg->get<bool>("/input/calibration/recheck_pending", false);
-                bool changed = false;
-                if (recheck_pending) {
-                    bool is_resistive = helix::is_resistive_touchscreen_name(dev_name);
-                    bool abs_mismatch =
-                        got_range && helix::has_abs_display_mismatch(abs_x.maximum, abs_y.maximum,
-                                                                     screen_width_, screen_height_);
-                    if (helix::should_invalidate_legacy_calibration(recheck_pending, is_resistive,
-                                                                    abs_mismatch)) {
-                        spdlog::info("[DRM Backend] Invalidating legacy pre-#943 affine "
-                                     "calibration (non-resistive panel, ABS/display mismatch)");
-                        calibration_.valid = false;
-                        cfg->set<bool>("/input/calibration/valid", false);
-                        changed = true;
-                    }
-                    // One-shot: clear the flag regardless of the decision above.
-                    cfg->set<bool>("/input/calibration/recheck_pending", false);
+            helix::Config* cfg = helix::Config::get_instance();
+            bool recheck_pending = cfg->get<bool>("/input/calibration/recheck_pending", false);
+            bool changed = false;
+            if (recheck_pending) {
+                bool is_resistive = helix::is_resistive_touchscreen_name(dev_name);
+                bool abs_mismatch =
+                    got_range && helix::has_abs_display_mismatch(abs_x.maximum, abs_y.maximum,
+                                                                 screen_width_, screen_height_);
+                if (helix::should_invalidate_legacy_calibration(recheck_pending, is_resistive,
+                                                                abs_mismatch)) {
+                    spdlog::info("[DRM Backend] Invalidating legacy pre-#943 affine "
+                                 "calibration (non-resistive panel, ABS/display mismatch)");
+                    calibration_.valid = false;
+                    cfg->set<bool>("/input/calibration/valid", false);
                     changed = true;
                 }
-                if (changed) {
-                    cfg->save();
-                }
+                // One-shot: clear the flag regardless of the decision above.
+                cfg->set<bool>("/input/calibration/recheck_pending", false);
+                changed = true;
+            }
+            if (changed) {
+                cfg->save();
             }
 
             // needs_calibration_ stays a STABLE capability flag: "this panel uses
@@ -851,8 +975,9 @@ lv_indev_t* DisplayBackendDRM::create_input_pointer() {
                 pipeline.declared_max_y = abs_y.maximum;
                 pipeline.stored = stored_range;
                 pipeline.swap_axes = env_swap_override
-                                         ? (strcmp(swap_axes, "1") == 0)
-                                         : (stored_range.valid && stored_range.swap_axes);
+                                         ? helix::env_truthy(swap_axes)
+                                         : (range_source == helix::TouchRangeSource::Stored &&
+                                            stored_range.swap_axes);
                 if (!pointer_is_evdev_) {
                     // A libinput pointer has no evdev range stage at all, so
                     // neither a range nor a swap describes what happens to a
@@ -867,7 +992,7 @@ lv_indev_t* DisplayBackendDRM::create_input_pointer() {
                     pipeline.max_x = std::atoi(env_max_x);
                     pipeline.min_y = std::atoi(env_min_y);
                     pipeline.max_y = std::atoi(env_max_y);
-                } else if (stored_range.valid) {
+                } else if (range_source == helix::TouchRangeSource::Stored) {
                     pipeline.source = helix::TouchRangeSource::Stored;
                     pipeline.configured_valid = true;
                     pipeline.min_x = stored_range.min_x;
@@ -901,6 +1026,7 @@ lv_indev_t* DisplayBackendDRM::create_input_pointer() {
             spdlog::info("[DRM Backend] Found pointer device: {}", pointer_path);
             pointer_ = lv_libinput_create(LV_INDEV_TYPE_POINTER, pointer_path);
             if (pointer_ != nullptr) {
+                pointer_path_ = pointer_path;
                 spdlog::info("[DRM Backend] Libinput pointer device created on {}", pointer_path);
             } else {
                 spdlog::warn("[DRM Backend] Failed to create libinput device for: {}",
@@ -919,7 +1045,9 @@ lv_indev_t* DisplayBackendDRM::create_input_pointer() {
         for (const char* dev : fallback_devices) {
             pointer_ = lv_evdev_create(LV_INDEV_TYPE_POINTER, dev);
             if (pointer_ != nullptr) {
+                pointer_path_ = dev;
                 spdlog::info("[DRM Backend] Evdev pointer device created on {}", dev);
+                configure_touch_gestures(pointer_);
                 break;
             }
         }
@@ -938,6 +1066,7 @@ lv_indev_t* DisplayBackendDRM::create_input_pointer() {
     if (!mouse_override.empty()) {
         mouse_ = lv_evdev_create(LV_INDEV_TYPE_POINTER, mouse_override.c_str());
         if (mouse_) {
+            mouse_path_ = mouse_override;
             spdlog::info("[DRM Backend] Mouse created on {} (env override)", mouse_override);
         } else {
             spdlog::warn("[DRM Backend] Could not open specified mouse device: {}", mouse_override);
@@ -953,6 +1082,7 @@ lv_indev_t* DisplayBackendDRM::create_input_pointer() {
         if (mouse_dev) {
             mouse_ = lv_evdev_create(LV_INDEV_TYPE_POINTER, mouse_dev->path.c_str());
             if (mouse_) {
+                mouse_path_ = mouse_dev->path;
                 spdlog::info("[DRM Backend] Mouse created on {} via evdev ({})", mouse_dev->path,
                              mouse_dev->name);
             } else {
@@ -978,8 +1108,6 @@ lv_indev_t* DisplayBackendDRM::create_input_pointer() {
     if (!pointer_ && !mouse_) {
         spdlog::error("[DRM Backend] Failed to create any input device");
     }
-
-    return pointer_;
 }
 
 lv_indev_t* DisplayBackendDRM::create_input_keyboard() {
@@ -1019,11 +1147,12 @@ lv_indev_t* DisplayBackendDRM::create_input_keyboard() {
     return nullptr;
 }
 
-void DisplayBackendDRM::set_display_rotation(lv_display_rotation_t rot, int phys_w, int phys_h) {
+void DisplayBackendDRM::set_display_rotation(lv_display_t* disp, lv_display_rotation_t rot,
+                                             int phys_w, int phys_h) {
     (void)phys_w;
     (void)phys_h;
 
-    if (display_ == nullptr) {
+    if (disp == nullptr) {
         spdlog::warn("[DRM Backend] Cannot set rotation — display not created");
         return;
     }
@@ -1045,54 +1174,62 @@ void DisplayBackendDRM::set_display_rotation(lv_display_rotation_t rot, int phys
         break;
     }
 
-    // Query hardware capabilities and choose strategy.
-    // On EGL builds, lv_linux_drm_get_plane_rotation_mask() and
-    // lv_linux_drm_set_rotation() do not exist (only in the dumb-buffer
-    // driver), so force SOFTWARE fallback.
-#ifdef HELIX_ENABLE_OPENGLES
+    // Query plane capabilities and choose the cheapest available strategy.
+    // EGL rotates the completed display texture in its OpenGL ES presentation
+    // pass, so it does not need the plane's rotation property.
+#if LV_LINUX_DRM_USE_EGL
     uint64_t supported_mask = 0;
 #else
-    uint64_t supported_mask = lv_linux_drm_get_plane_rotation_mask(display_);
+    uint64_t supported_mask = lv_linux_drm_get_plane_rotation_mask(disp);
 #endif
-    auto strategy = choose_drm_rotation_strategy(drm_rot, supported_mask);
+    auto strategy =
+        choose_drm_rotation_strategy(drm_rot, supported_mask, LV_LINUX_DRM_USE_EGL != 0);
 
-    switch (strategy) {
-    case DrmRotationStrategy::HARDWARE:
-#ifndef HELIX_ENABLE_OPENGLES
-        lv_linux_drm_set_rotation(display_, drm_rot);
-        spdlog::info("[DRM Backend] Hardware plane rotation set to {}°",
-                     static_cast<int>(rot) * 90);
-#endif
-        break;
-
-    case DrmRotationStrategy::SOFTWARE:
-        // CPU in-place 180° pixel reversal in drm_flush (lv_linux_drm.c patch).
-        // The dumb-buffer flush callback checks lv_display_get_rotation() and
-        // reverses the pixel array before the page flip. FULL render mode
-        // ensures the entire buffer is redrawn each frame.
-        lv_display_set_render_mode(display_, LV_DISPLAY_RENDER_MODE_FULL);
-        lv_display_set_rotation(display_, rot);
-
-        spdlog::info("[DRM Backend] Software rotation set to {}° "
-                     "(CPU in-place reversal, plane supports 0x{:X})",
-                     static_cast<int>(rot) * 90, supported_mask);
-        break;
-
-    case DrmRotationStrategy::NONE:
-        lv_display_set_rotation(display_, LV_DISPLAY_ROTATION_0);
-        lv_display_set_matrix_rotation(display_, false);
-        spdlog::debug("[DRM Backend] No rotation needed");
-        break;
+    if (drm_rotation_needs_full_render(strategy)) {
+        lv_display_set_render_mode(disp, LV_DISPLAY_RENDER_MODE_FULL);
     }
+
+    if (lvgl_rotation_action_for(strategy) == LvglRotationAction::CLEAR_TO_ZERO) {
+        lv_display_set_rotation(disp, LV_DISPLAY_ROTATION_0);
+        lv_display_set_matrix_rotation(disp, false);
+    } else {
+        lv_display_set_rotation(disp, rot);
+    }
+
+    // Only the plane path leaves a non-zero angle here: on every other path
+    // LVGL carries the rotation and transforms pointer input itself.
+    plane_rotation_degrees_ = 0;
+    if (strategy == DrmRotationStrategy::HARDWARE) {
+#if !LV_LINUX_DRM_USE_EGL
+        lv_linux_drm_set_rotation(disp, drm_rot);
+        plane_rotation_degrees_ = static_cast<int>(rot) * 90;
+        panel_w_ = phys_w;
+        panel_h_ = phys_h;
+        spdlog::info("[DRM Backend] Plane rotation {}° (LVGL left unrotated, touch follows)",
+                     plane_rotation_degrees_);
+#endif
+    } else if (strategy == DrmRotationStrategy::GPU) {
+        spdlog::info("[DRM Backend] GPU presentation rotation {}° (OpenGL ES)",
+                     static_cast<int>(rot) * 90);
+    } else if (strategy == DrmRotationStrategy::SOFTWARE) {
+        spdlog::info("[DRM Backend] Software rotation {}° (plane supports 0x{:X})",
+                     static_cast<int>(rot) * 90, supported_mask);
+    } else {
+        spdlog::debug("[DRM Backend] No rotation needed");
+    }
+    pointer_frames_.set_plane_rotation(plane_rotation_degrees_, panel_w_, panel_h_);
+}
+
+int DisplayBackendDRM::applied_rotation_degrees(lv_display_t* disp) const {
+    if (plane_rotation_degrees_ != 0) {
+        return plane_rotation_degrees_;
+    }
+    return DisplayBackend::applied_rotation_degrees(disp);
 }
 
 bool DisplayBackendDRM::supports_hardware_rotation(lv_display_rotation_t rot) const {
     if (rot == LV_DISPLAY_ROTATION_0) {
         return true;
-    }
-
-    if (display_ == nullptr) {
-        return false;
     }
 
     uint64_t drm_rot = DRM_MODE_ROTATE_0;
@@ -1110,13 +1247,14 @@ bool DisplayBackendDRM::supports_hardware_rotation(lv_display_rotation_t rot) co
         return true;
     }
 
-#ifdef HELIX_ENABLE_OPENGLES
-    // EGL rotation not yet supported: lv_display_set_rotation() triggers
-    // layer_reshape_draw_buf which conflicts with the EGL-sized draw buffer.
-    // Needs a GL-only rotation path that bypasses LVGL's buffer reshape.
-    // For now, fall back to fbdev (works) or panel_orientation (kernel).
-    return false;
+#if LV_LINUX_DRM_USE_EGL
+    // The OpenGL ES presentation pass rotates the completed display texture,
+    // including 90°/270°, without depending on a KMS plane rotation property.
+    return choose_drm_rotation_strategy(drm_rot, 0, true) == DrmRotationStrategy::GPU;
 #else
+    if (!plane_may_own_rotation() || display_ == nullptr) {
+        return false;
+    }
     uint64_t supported_mask =
         lv_linux_drm_get_plane_rotation_mask(const_cast<lv_display_t*>(display_));
     return choose_drm_rotation_strategy(drm_rot, supported_mask) == DrmRotationStrategy::HARDWARE;
@@ -1415,17 +1553,12 @@ bool DisplayBackendDRM::set_calibration(const helix::TouchCalibration& cal) {
     // and writing cal through a non-null garbage pointer faults.
     calibration_context_.calibration = cal;
 
-    if (pointer_ && !calibration_wrapper_installed_) {
-        // Wrapper not yet installed — install it now
-        helix::install_calibration_wrapper(pointer_, calibration_context_, calibration_,
-                                           screen_width_, screen_height_);
-        calibration_wrapper_installed_ = true;
-        spdlog::info("[DRM Backend] Calibration callback installed at runtime");
-    } else {
-        spdlog::info("[DRM Backend] Calibration updated: a={:.4f} b={:.4f} c={:.4f} d={:.4f} "
-                     "e={:.4f} f={:.4f}",
-                     cal.a, cal.b, cal.c, cal.d, cal.e, cal.f);
-    }
+    // Never installs the wrapper: installing it now would put it above the
+    // pointer frame hook. create_input_pointer() installs it beneath the hook, and a
+    // calibration set before any pointer exists reaches it through calibration_.
+    spdlog::info("[DRM Backend] Calibration updated: a={:.4f} b={:.4f} c={:.4f} d={:.4f} "
+                 "e={:.4f} f={:.4f}",
+                 cal.a, cal.b, cal.c, cal.d, cal.e, cal.f);
 
     return true;
 }
@@ -1444,7 +1577,7 @@ void DisplayBackendDRM::enable_affine_calibration() {
 }
 
 bool DisplayBackendDRM::apply_touch_range(bool swap_axes, int min_x, int min_y, int max_x,
-                                          int max_y) {
+                                          int max_y, helix::TouchRangeSource source) {
     if (!pointer_ || !pointer_is_evdev_) {
         return false;
     }
@@ -1457,8 +1590,7 @@ bool DisplayBackendDRM::apply_touch_range(bool swap_axes, int min_x, int min_y, 
     }
     lv_evdev_set_swap_axes(pointer_, swap_axes);
     lv_evdev_set_calibration(pointer_, min_x, min_y, max_x, max_y);
-    helix::set_touch_configured_range(swap_axes, min_x, min_y, max_x, max_y,
-                                      helix::TouchRangeSource::Stored);
+    helix::set_touch_configured_range(swap_axes, min_x, min_y, max_x, max_y, source);
     spdlog::info("[DRM Backend] Touch range re-programmed: swap={} X({}..{}) Y({}..{})", swap_axes,
                  min_x, max_x, min_y, max_y);
     return true;

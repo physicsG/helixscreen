@@ -42,10 +42,22 @@ struct PrinterDetectionResult {
     /// Scores before the 100 ceiling, for the winner and for that runner-up.
     /// The published confidence saturates, which flattens a real lead between
     /// two strong candidates into an apparent tie, so margin() is measured on
-    /// these. Zero on a result assembled by hand rather than returned by
-    /// detect(), where the published confidence is the only score there is.
+    /// these. The bonus inside them counts identifying matches only: a
+    /// corroborating match that raised it would separate look-alikes by how
+    /// much corroboration one entry happens to author. Zero on a result
+    /// assembled by hand rather than returned by detect(), where the published
+    /// confidence is the only score there is. A separator's weight lands here
+    /// and nowhere else: it is separation between look-alikes, not confidence
+    /// in the identification.
     int uncapped_confidence = 0;
     int runner_up_uncapped_confidence = 0;
+
+    /// The printers a person has to choose between. The winner comes first.
+    /// When ambiguous(), every other candidate picturing a different machine
+    /// that the winner does not lead by PrinterDetector::DETECT_MIN_MARGIN
+    /// follows, one name per machine. Only the winner when the detection
+    /// separated; empty when nothing was identified.
+    std::vector<std::string> contenders;
 
     /**
      * @brief Check if detection succeeded
@@ -55,12 +67,17 @@ struct PrinterDetectionResult {
         return confidence > 0;
     }
 
+    /// How far the winner leads a candidate that scored @p rival_confidence
+    /// published and @p rival_uncapped before the ceiling (0 when unknown).
+    int lead_over(int rival_confidence, int rival_uncapped) const {
+        const int winner = uncapped_confidence > 0 ? uncapped_confidence : confidence;
+        const int rival = rival_uncapped > 0 ? rival_uncapped : rival_confidence;
+        return winner - rival;
+    }
+
     /// How far the winner leads the best candidate with a different outcome.
     int margin() const {
-        const int winner = uncapped_confidence > 0 ? uncapped_confidence : confidence;
-        const int rival = runner_up_uncapped_confidence > 0 ? runner_up_uncapped_confidence
-                                                            : runner_up_confidence;
-        return winner - rival;
+        return lead_over(runner_up_confidence, runner_up_uncapped_confidence);
     }
 
     /// A detection that named a printer without separating it from an
@@ -70,14 +87,26 @@ struct PrinterDetectionResult {
 };
 
 /**
- * @brief Build volume dimensions from bed_mesh configuration
+ * @brief Build volume dimensions from the configfile
+ *
+ * The extents are [stepper_*] travel, which covers the bed plus any overtravel
+ * to a purge or nozzle-clean position. The declared bed is the size a
+ * firmware's own config states for its bed, where it states one.
  */
 struct BuildVolume {
     float x_min = 0.0f;
     float x_max = 0.0f;
     float y_min = 0.0f;
     float y_max = 0.0f;
-    float z_max = 0.0f; ///< Maximum Z height (if available)
+    float z_max = 0.0f;          ///< Maximum Z height (if available)
+    float declared_bed_x = 0.0f; ///< Bed X the firmware config declares (0 if none)
+    float declared_bed_y = 0.0f; ///< Bed Y the firmware config declares (0 if none)
+    /// Rectangular plate from [bed_mesh] mesh_min/mesh_max, machine space.
+    /// All zero when the config declares none (no bed_mesh, or a round bed).
+    float plate_x_min = 0.0f;
+    float plate_x_max = 0.0f;
+    float plate_y_min = 0.0f;
+    float plate_y_max = 0.0f;
 };
 
 /**
@@ -98,6 +127,25 @@ struct PrinterHardwareData {
     std::vector<std::string> mcu_list{}; ///< All MCU chips (primary + secondary, CAN toolheads)
     BuildVolume build_volume{};          ///< Build volume dimensions from bed_mesh
     std::string cpu_arch{};              ///< Host CPU architecture (e.g., "ARMv7", "MIPS")
+    /// True once an objects list was parsed, so heaters/sensors/fans/leds/
+    /// printer_objects are complete and an empty list means "none", not
+    /// "not reported yet". Absence-scoring heuristics (led_required) only
+    /// fire when this is set: an unreported list says nothing about the
+    /// hardware, and scoring it would turn a slow discovery into a wrong model.
+    bool objects_reported = false;
+};
+
+/**
+ * @brief One row of the printer selection list, with its manufacturer
+ *
+ * Selection UIs group the list by manufacturer (vendor tiles). The pseudo
+ * entries appended to every list ("Custom/Other", "Unknown") have no database
+ * row, so their manufacturer is empty.
+ */
+// NAMESPACE_OK: joins this header's global-scope types (PrinterDetectionResult et al.)
+struct PrinterListEntry {
+    std::string name;         ///< Display name, as get_list_names() returns it
+    std::string manufacturer; ///< Database `manufacturer` field; empty for pseudo-entries
 };
 
 /**
@@ -150,17 +198,6 @@ class PrinterDetector {
     static std::string get_image_for_printer(const std::string& printer_name);
 
     /**
-     * @brief Get image filename for a printer by ID
-     *
-     * Looks up the image field from the printer database JSON using the printer ID.
-     * Returns just the filename (e.g., "voron-v2.png"), not the full path.
-     *
-     * @param printer_id Printer ID (e.g., "voron_2_4", "flashforge_adventurer_5m")
-     * @return Image filename if found, empty string if not found
-     */
-    static std::string get_image_for_printer_id(const std::string& printer_id);
-
-    /**
      * @brief Get console filter pattern preset for a printer
      *
      * Looks up the `console_filter_patterns` array from the database entry for
@@ -182,6 +219,9 @@ class PrinterDetector {
      * `name` (e.g. preset "ad5x" → "FlashForge Adventurer 5X"). Used to populate
      * the per-printer `type` field when a platform preset is applied from the
      * installer, so the home panel can resolve the correct printer image.
+     * Several entries can share one preset; the one marked
+     * `"preset_default": true` answers for the family, and a family without a
+     * marked entry answers with its first entry in database order.
      *
      * @param preset_name Platform preset name (e.g., "ad5x", "k1", "cc1")
      * @return Matching printer name, empty string if no entry matches
@@ -315,6 +355,20 @@ class PrinterDetector {
     static int get_unknown_list_index(const std::string& kinematics);
 
     /**
+     * @brief Get list names plus manufacturers, filtered by kinematics
+     *
+     * Element i is exactly get_list_names(kinematics)[i] with its manufacturer
+     * attached, so an index into one addresses the same machine in the other.
+     * The pseudo-entries ("Custom/Other", "Unknown") carry an empty
+     * manufacturer; every visible database machine carries its `manufacturer`
+     * field verbatim.
+     *
+     * @param kinematics Kinematics filter. Empty = unfiltered.
+     * @return Vector of {name, manufacturer} in list order
+     */
+    static const std::vector<PrinterListEntry>& get_list_entries(const std::string& kinematics);
+
+    /**
      * @brief Get the pre-print option set for a printer
      *
      * Looks up the `pre_print_options` field from the printer database JSON for
@@ -338,6 +392,21 @@ class PrinterDetector {
      */
     static std::string get_z_offset_calibration_strategy(const std::string& printer_name);
 
+    /**
+     * @brief Does automatic tool offset calibration replace manual Z calibration?
+     *
+     * Looks up the `hide_manual_z_calibration` field from the printer
+     * database JSON. True only for printers whose CALIBRATE_TOOL_OFFSETS
+     * routine sets every tool's Z, the reference tool included, so the paper
+     * test has nothing left to set. Defaults to false: klipper-toolchanger's
+     * example macro measures the other tools against T0 and writes nothing
+     * for T0, so the paper test stays unless the database says otherwise.
+     *
+     * @param printer_name Printer name (e.g., "FlashForge Creator 5 Pro")
+     * @return True when the field is set to true, false otherwise
+     */
+    static bool hide_manual_z_calibration(const std::string& printer_name);
+
     /// Look up probe type override from the printer database.
     /// @return Probe type string (e.g., "prtouch_v2"), or empty if not specified
     static std::string get_probe_type(const std::string& printer_name);
@@ -345,29 +414,30 @@ class PrinterDetector {
     /**
      * @brief Printer-specific bed-mesh calibration gcode template
      *
-     * Some printers need pre-probe housekeeping that helixscreen can't express
-     * with a single macro slot — notably the Elegoo Centauri Carbon whose
-     * mainline-Klipper `[load_cell_probe]` requires `LOAD_CELL_SAVE_TARE` and
-     * a nozzle-wipe wrapper before `BED_MESH_CALIBRATE`. The database entry
-     * may supply a multi-line template under `calibration.bed_mesh_gcode`;
-     * the Bed Mesh panel substitutes `{profile}` with the temporary profile
-     * name and sends the whole block as a single gcode script.
+     * For a printer whose firmware mesh macro takes parameters a bare macro slot
+     * cannot carry, or needs housekeeping helixscreen cannot infer. The database
+     * entry may supply a template, one line or several, under
+     * `calibration.bed_mesh_gcode`.
      *
-     * @return Template with `{profile}` placeholder, or empty string if the
-     *         printer has no override (callers fall back to `StandardMacros`).
+     * Read through StandardMacros rather than directly: this feeds the SHIPPED
+     * tier, so the user's own Settings override still outranks it and
+     * resolve_macro_script() substitutes its placeholders.
+     *
+     * @return Template, possibly with placeholders, or empty string if the
+     *         printer ships no sequence for this operation.
      */
     static std::string get_bed_mesh_calibrate_gcode(const std::string& printer_name);
 
     /**
-     * @brief Belt-span offset in mm for a printer model, or a negative value
+     * @brief Whether the printer's shipped bed-mesh sequence prepares the machine itself
      *
-     * Free belt span at gantry position Y is about `Y + offset`. Geometry, so
-     * it is per-model, and it is measured rather than derived. A negative
-     * return means this model has no measured value: the caller must fall back
-     * to span-independent A-vs-B matching and suppress the absolute frequency
-     * target rather than guessing.
+     * `calibration.bed_mesh_self_prepares` in the database entry. True means the
+     * sequence heats, homes and does its own probe preparation, so nothing is sent
+     * ahead of it. A shipped sequence without the flag gets the app's preparation.
+     *
+     * @return false when the entry, its calibration object or the flag is absent.
      */
-    static double get_belt_span_offset_mm(const std::string& printer_name);
+    static bool get_bed_mesh_self_prepares(const std::string& printer_name);
 
     /**
      * @brief Get print start profile name for a printer
@@ -403,6 +473,20 @@ class PrinterDetector {
      * @return phase_enum_int → seconds; empty map falls back to generic defaults.
      */
     static std::map<int, int> get_print_start_default_phases(const std::string& printer_name);
+
+    /**
+     * @brief Measured heating rates for a printer, in seconds per degree C
+     *
+     * Database field `thermal_rates` maps a heater name to the rate a first
+     * print should assume, e.g. `{"heater_bed": 6.0, "extruder": 0.4}`.
+     * ThermalRateManager uses these in place of its build-volume guess; a rate
+     * learned from this printer's own prints still wins. Only heaters in
+     * ThermalRateManager::PERSISTED_HEATERS are returned.
+     *
+     * @param printer_name Printer name (e.g., "Elegoo Centauri Carbon")
+     * @return heater name -> s/°C; empty when the entry declares none
+     */
+    static std::map<std::string, float> get_thermal_rates(const std::string& printer_name);
 
     // =========================================================================
     // User Extensions API
@@ -494,31 +578,15 @@ class PrinterDetector {
     static void compact_database();
 
     /**
-     * @brief Check if the configured printer type is a Voron variant
-     *
-     * Reads the printer type from config and does a case-insensitive check
-     * for "voron". Used to select Stealthburner toolhead rendering in the
-     * filament path canvas.
-     *
-     * @return true if printer type contains "Voron" (case-insensitive)
-     */
-    static bool is_voron_printer();
-
-    /**
-     * @brief Check if the detected printer is a PrintersForAnts (PFA) model
-     *
-     * Used to select AntHead toolhead rendering when toolhead style is Auto.
-     *
-     * @return true if printer type contains "PFA" (case-insensitive)
-     */
-    static bool is_pfa_printer();
-
-    /**
      * @brief Get the native toolhead style for a printer from the database
      * @param printer_name Printer name (case-insensitive match)
      * @return Toolhead style string (e.g., "creality_k1") or empty if none
      */
     static std::string get_toolhead_style(const std::string& printer_name);
+
+    /// The database's `"enclosed": true` flag for @p printer_name
+    /// (prestonbrown/helixscreen#1730); false when absent or unknown.
+    static bool is_enclosed(const std::string& printer_name);
 
     /**
      * @brief Check if connected printer is a Creality K1 series
@@ -587,7 +655,7 @@ class PrinterDetector {
     static std::string canonical_type_name(const std::string& printer_name);
 
     /// Minimum winning confidence before detection may persist a printer type.
-    /// Mirrors HELIX_DETECT_MIN_CONFIDENCE in scripts/install.sh.
+    /// Mirrors HELIX_DETECT_MIN_CONFIDENCE in scripts/lib/installer/printer_seed.sh.
     static constexpr int AUTOSAVE_MIN_CONFIDENCE = 85;
 
     /// Minimum detection confidence before the saved-vs-detected type warning
@@ -611,7 +679,7 @@ class PrinterDetector {
     /// printers this database identifies correctly today.
     ///
     /// Independent of the installer's HELIX_DETECT_MIN_MARGIN in
-    /// scripts/install.sh, which chooses between two seeding depths rather than
+    /// scripts/lib/installer/printer_seed.sh, which chooses between two seeding depths rather than
     /// between saving and declining.
     static constexpr int DETECT_MIN_MARGIN = 1;
 
@@ -645,23 +713,25 @@ class PrinterDetector {
      * re-arms the warning once).
      *
      * @param detected_margin PrinterDetectionResult::margin() for the detection
-     *        being classified. Callers that hold no candidate field - a bare
-     *        confidence from a stored verdict - leave it at the default, which
-     *        asserts nothing about rivals rather than inventing an ambiguity.
+     *        being classified. Every caller states it: a margin left implicit
+     *        is a tie that reaches the decision as a separation, and the whole
+     *        Ambiguous branch goes dark without a compile error. A caller that
+     *        holds no candidate field - a bare confidence from a stored
+     *        verdict - passes DETECT_MIN_MARGIN, asserting nothing about rivals
+     *        rather than inventing an ambiguity.
      */
     static MismatchDecision classify_type_mismatch(const std::string& saved_type,
                                                    const std::string& detected_type,
                                                    int detected_confidence,
                                                    const std::string& flag_value,
-                                                   int detected_margin = DETECT_MIN_MARGIN);
+                                                   int detected_margin);
 
     /**
      * @brief Classify a detection result against the saved type.
      *
      * The overload callers holding a whole result should use: it reads the
-     * fields the decision depends on - including the margin, which the scalar
-     * form defaults away when a caller does not supply one - so a caller cannot
-     * silently drop one and still compile.
+     * fields the decision depends on - the margin included - off the result,
+     * so a caller cannot silently drop one and still compile.
      *
      * @param detected A result from detect()/auto_detect(). A result that
      *        identified nothing classifies as NoDetection.
@@ -669,15 +739,6 @@ class PrinterDetector {
     static MismatchDecision classify_type_mismatch(const std::string& saved_type,
                                                    const PrinterDetectionResult& detected,
                                                    const std::string& flag_value);
-
-    /**
-     * @brief Decide whether to show the one-time saved-vs-detected type warning.
-     *
-     * Convenience wrapper over classify_type_mismatch().
-     */
-    static bool should_warn_type_mismatch(const std::string& saved_type,
-                                          const std::string& detected_type, int detected_confidence,
-                                          const std::string& flag_value);
 
     /**
      * @brief Decide whether a detection result is solid enough to persist.

@@ -21,21 +21,11 @@
  * separate sub-row reappeared.
  */
 
+#include "ui_pre_print_options_renderer.h"
 #include "ui_print_preparation_manager.h"
 
 #include "../helix_test_fixture.h"
 #include "../test_helpers/printer_state_test_access.h"
-
-// Friend accessors (mirror test_print_preparation_manager.cpp).
-class PrintPreparationManagerTestAccess {
-  public:
-    static std::vector<std::pair<std::string, std::string>>
-    get_skip_params(const helix::ui::PrintPreparationManager& m) {
-        return m.collect_macro_skip_params();
-    }
-};
-
-#include "ui_pre_print_options_renderer.h"
 
 namespace helix::ui {
 // Exposes the private static label_for() so the relabel logic is unit-testable.
@@ -49,9 +39,12 @@ class PrePrintOptionsRendererTestAccess {
 
 #include "ui_update_queue.h"
 
+#include "../test_helpers/print_preparation_manager_test_access.h"
 #include "../ui_test_utils.h"
 #include "app_globals.h"
+#include "macro_param_cache.h"
 #include "pre_print_option.h"
+#include "preprint_skip_wrappers.h"
 #include "printer_detector.h"
 #include "printer_state.h"
 
@@ -391,4 +384,30 @@ TEST_CASE("PrePrint adaptive: AD5M mock identity resolves to adaptive-capable op
     const auto* mp = std::get_if<PrePrintStrategyMacroParam>(&bed->strategy);
     REQUIRE(mp != nullptr);
     REQUIRE(mp->adaptive_param == "ADAPTIVE");
+}
+
+TEST_CASE_METHOD(HelixTestFixture,
+                 "PrePrint adaptive: a leveling-skip toggle line delivers no params",
+                 "[adaptive][preprint][skip_wrappers]") {
+    lv_init_safe();
+    PrinterState& ps = get_printer_state();
+    PrinterStateTestAccess::reset(ps);
+    ps.init_subjects(false);
+    // The toggle's line is live: its _HELIX_PREP gate is open.
+    helix::MacroParamCache::instance().populate_from_configfile(
+        {{"gcode_macro _helix_prep", {{"gcode", "SET_GCODE_VARIABLE"}}}}, {});
+
+    MockOptionState state;
+    state.enable("bed_mesh");
+
+    // The wrapper sets a flag and has no START_PRINT parameter to carry, so a
+    // printer with only it still cannot deliver the adaptive pair.
+    PrePrintOptionSet set = make_bed_mesh_set("ADAPTIVE", /*active=*/true);
+    set.options.push_back(helix::skip_wrappers::option_for(helix::skip_wrappers::Op::Qgl));
+    PrintPreparationManager manager;
+    configure_manager(manager, ps, std::move(set), state, /*has_plugin=*/false);
+    REQUIRE_FALSE(PrintPreparationManagerTestAccess::get_pre_start_gcode_lines(manager).empty());
+
+    CHECK(PrintPreparationManagerTestAccess::get_skip_params(manager).empty());
+    helix::MacroParamCache::instance().clear();
 }

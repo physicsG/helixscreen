@@ -13,7 +13,8 @@ namespace helix {
 /**
  * @brief Phomemo M110 USB label printer backend
  *
- * Implements the Phomemo raster protocol over USB bulk transfer.
+ * Implements the Phomemo raster protocol over the kernel usblp driver: the
+ * raster is written to the /dev/usb/lpN node whose sysfs VID:PID matches.
  * USB VID:PID 0x0493:0x8760, 203 DPI, 20-50mm print width.
  *
  * Thread safety: print() runs async on a detached thread. Callbacks
@@ -44,6 +45,10 @@ class PhomemoPrinter : public ILabelPrinter {
     /// Build the raw raster command buffer (public for testing)
     static std::vector<uint8_t> build_raster_commands(const LabelBitmap& bitmap,
                                                       const LabelSize& size);
+
+    /// A sysfs idVendor/idProduct file as a USB id; 0 when it is missing,
+    /// empty or not a 16-bit hex number (public for testing)
+    static uint16_t read_sysfs_usb_id(const std::string& path);
 
   private:
     uint16_t vid_ = 0;

@@ -43,17 +43,16 @@ bool ConsoleFilterEngine::add(std::string_view spec) {
         return false;
     }
     if (p.type == Type::Regex) {
-        try {
-            p.compiled = std::regex(p.text, std::regex::ECMAScript | std::regex::optimize);
-        } catch (const std::regex_error& e) {
-            spdlog::warn("[ConsoleFilter] Invalid regex '{}': {}", p.text, e.what());
+        p.compiled = helix::Regex(p.text);
+        if (!p.compiled.ok()) {
+            spdlog::warn("[ConsoleFilter] Invalid regex '{}': {}", p.text, p.compiled.error());
             return false;
         }
     }
     // Keep the list ordered Prefix < Substring < Regex so should_filter() always
     // spends the cheapest matcher first. Measured over a 1220-line capture from a
     // real K1C and K2 Plus (16 patterns, x86 -O2): prefix 17us/1000 lines,
-    // substring 88us, std::regex 3796us. Insertion order is otherwise arbitrary —
+    // substring 88us, regex 3796us. Insertion order is otherwise arbitrary —
     // user patterns append after the presets — and a single regex landing ahead of
     // the prefixes would make every console line pay the 200x cost before reaching
     // them. This runs on the LVGL main thread, so that matters.
@@ -95,7 +94,7 @@ bool ConsoleFilterEngine::should_filter(std::string_view line) const {
             }
             break;
         case Type::Regex:
-            if (std::regex_search(std::string(line), p.compiled)) {
+            if (helix::regex_search(line, p.compiled)) {
                 return true;
             }
             break;

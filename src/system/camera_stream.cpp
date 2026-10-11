@@ -2,6 +2,7 @@
 
 #include "camera_stream.h"
 
+#include "helix_thread.h"
 #include "lvgl.h"
 
 #if HELIX_HAS_CAMERA
@@ -12,6 +13,7 @@
 #include "printer_state.h"
 #include "spdlog/spdlog.h"
 #include "stb_image.h"
+#include "webcam_selection.h"
 
 #include <algorithm>
 #include <chrono>
@@ -90,6 +92,25 @@ CameraStream::CameraStream() {
     }
 }
 
+namespace {
+std::mutex g_streams_mutex;
+std::vector<CameraStream*> g_streams;
+} // namespace
+
+CameraFrame CameraStream::latest_running_frame(const WebcamInfo& feed, int max_w, int max_h) {
+    std::lock_guard<std::mutex> reg(g_streams_mutex);
+    for (CameraStream* s : g_streams) {
+        std::lock_guard<std::mutex> lock(s->buf_mutex_);
+        if (!s->running_.load() || !s->has_frame_ || s->stream_url_ != feed.stream_url ||
+            s->snapshot_url_ != feed.snapshot_url)
+            continue;
+        return downscale_bgr(static_cast<const uint8_t*>(s->front_buf_->data), s->frame_width_,
+                             s->frame_height_, static_cast<int>(s->front_buf_->header.stride),
+                             max_w, max_h);
+    }
+    return {};
+}
+
 CameraStream::~CameraStream() {
     stop();
     // Only clean up turbojpeg if stop() successfully joined the thread.
@@ -111,26 +132,42 @@ CameraStream::~CameraStream() {
 // Public API
 // ============================================================================
 
-bool CameraStream::configure_from_printer(std::string& stream_url, std::string& snapshot_url) {
+std::optional<WebcamInfo> CameraStream::resolve_from_printer(const std::string& source) {
     // Lazy includes — avoid header dependency on printer_state/moonraker in camera_stream.h
     auto& state = get_printer_state();
-    stream_url = state.get_webcam_stream_url();
-    snapshot_url = state.get_webcam_snapshot_url();
-
-    if (stream_url.empty() && snapshot_url.empty()) {
-        return false;
+    auto feed = webcam::select_webcam(state.capabilities_state().get_webcams(), source);
+    if (!feed) {
+        return std::nullopt;
+    }
+    if (!source.empty() && feed->name != source) {
+        spdlog::info("[CameraStream] Configured camera '{}' is not available; showing '{}'", source,
+                     feed->name.empty() ? "<auto>" : feed->name);
+    }
+    if (feed->stream_url.empty() && feed->snapshot_url.empty()) {
+        return std::nullopt;
     }
 
     // Resolve relative URLs against the web frontend (nginx on port 80)
     auto* api = get_moonraker_api();
     if (api) {
-        api->resolve_webcam_url(stream_url);
-        api->resolve_webcam_url(snapshot_url);
+        api->resolve_webcam_url(feed->stream_url);
+        api->resolve_webcam_url(feed->snapshot_url);
     }
 
     // Flip/rotation are set by the caller (CameraWidget::apply_transform)
     // which XORs Moonraker values with user overrides.
+    return feed;
+}
 
+bool CameraStream::configure_from_printer(std::string& stream_url, std::string& snapshot_url) {
+    auto feed = resolve_from_printer("");
+    if (!feed) {
+        stream_url.clear();
+        snapshot_url.clear();
+        return false;
+    }
+    stream_url = feed->stream_url;
+    snapshot_url = feed->snapshot_url;
     return true;
 }
 
@@ -149,15 +186,19 @@ void CameraStream::start(const std::string& stream_url, const std::string& snaps
     on_error_ = std::move(on_error);
     stream_fail_count_ = 0;
     running_.store(true);
+    {
+        std::lock_guard<std::mutex> reg(g_streams_mutex);
+        g_streams.push_back(this);
+    }
 
     spdlog::info("[CameraStream] Starting — stream={}, snapshot={}", stream_url_, snapshot_url_);
 
     if (!stream_url_.empty()) {
         spdlog::info("[CameraStream] Using MJPEG streaming mode");
-        stream_thread_ = std::thread(&CameraStream::stream_thread_func, this);
+        stream_thread_ = helix::make_thread(&CameraStream::stream_thread_func, this);
     } else if (!snapshot_url_.empty()) {
         spdlog::info("[CameraStream] Using snapshot mode (interval={}ms)", SNAPSHOT_INTERVAL_MS);
-        stream_thread_ = std::thread(&CameraStream::snapshot_poll_loop, this);
+        stream_thread_ = helix::make_thread(&CameraStream::snapshot_poll_loop, this);
     } else {
         spdlog::warn("[CameraStream] No stream or snapshot URL provided");
         running_.store(false);
@@ -165,6 +206,10 @@ void CameraStream::start(const std::string& stream_url, const std::string& snaps
 }
 
 void CameraStream::stop() {
+    {
+        std::lock_guard<std::mutex> reg(g_streams_mutex);
+        g_streams.erase(std::remove(g_streams.begin(), g_streams.end(), this), g_streams.end());
+    }
     // Invalidate lifetime guard FIRST — http_cb closures capture a token
     // and bail out before accessing any member state
     lifetime_.invalidate();
@@ -200,7 +245,7 @@ void CameraStream::stop() {
         std::thread join_helper;
         bool helper_spawned = false;
         try {
-            join_helper = std::thread([this, joined]() {
+            join_helper = helix::make_thread([this, joined]() {
                 stream_thread_.join();
                 joined->store(true);
             });
@@ -716,11 +761,12 @@ void CameraStream::transpose_pixels_cw(const uint8_t* src, uint8_t* dst, int src
 // Transform Helpers
 // ============================================================================
 
-CameraStream::TransformParams CameraStream::resolve_transform(int src_w, int src_h) const {
+CameraStream::TransformParams CameraStream::resolve_transform(const Transform& t, int src_w,
+                                                              int src_h) {
     TransformParams p;
-    p.rotation = static_cast<CameraRotation>(rotation_.load());
-    p.flip_h = flip_h_.load();
-    p.flip_v = flip_v_.load();
+    p.rotation = t.rotation;
+    p.flip_h = t.flip_h;
+    p.flip_v = t.flip_v;
 
     // 180° is equivalent to flip_h + flip_v
     if (p.rotation == CameraRotation::Rotate180) {
@@ -736,11 +782,66 @@ CameraStream::TransformParams CameraStream::resolve_transform(int src_w, int src
     return p;
 }
 
+CameraStream::TransformParams CameraStream::resolve_transform(int src_w, int src_h) const {
+    return resolve_transform(
+        Transform{static_cast<CameraRotation>(rotation_.load()), flip_h_.load(), flip_v_.load()},
+        src_w, src_h);
+}
+
+CameraStream::Transform CameraStream::transform_from_config(const nlohmann::json& config,
+                                                            const WebcamInfo& feed) {
+    Transform t;
+    if (config.contains("rotation") && config["rotation"].is_number_integer()) {
+        switch (config["rotation"].get<int>()) {
+        case 90:
+            t.rotation = CameraRotation::Rotate90;
+            break;
+        case 180:
+            t.rotation = CameraRotation::Rotate180;
+            break;
+        case 270:
+            t.rotation = CameraRotation::Rotate270;
+            break;
+        default:
+            break;
+        }
+    }
+    bool user_flip_h =
+        config.contains("flip_h") && config["flip_h"].is_boolean() && config["flip_h"].get<bool>();
+    bool user_flip_v =
+        config.contains("flip_v") && config["flip_v"].is_boolean() && config["flip_v"].get<bool>();
+    t.flip_h = feed.flip_horizontal != user_flip_h;
+    t.flip_v = feed.flip_vertical != user_flip_v;
+    return t;
+}
+
+CameraFrame CameraStream::decode_snapshot(const std::string& jpeg, int max_w, int max_h,
+                                          const Transform& t) {
+    // A throwaway decoder: same turbojpeg path, header check and decode-time
+    // scaling as a stream, aimed at the preview box instead of a widget.
+    CameraStream decoder;
+    decoder.set_target_size(max_w, max_h);
+    decoder.set_rotation(t.rotation);
+    decoder.set_flip(t.flip_h, t.flip_v);
+    if (!decoder.decode_jpeg(reinterpret_cast<const uint8_t*>(jpeg.data()), jpeg.size()) ||
+        !decoder.back_buf_)
+        return {};
+    return downscale_bgr(static_cast<const uint8_t*>(decoder.back_buf_->data), decoder.frame_width_,
+                         decoder.frame_height_, static_cast<int>(decoder.back_buf_->header.stride),
+                         max_w, max_h);
+}
+
 void CameraStream::apply_pixel_transform(const uint8_t* src, int src_w, int src_h, int src_stride,
                                          bool swap_rb, const TransformParams& params) {
-    auto* dst = static_cast<uint8_t*>(back_buf_->data);
-    int dst_stride = static_cast<int>(back_buf_->header.stride);
+    transform_pixels(
+        src, src_w, src_h, src_stride, swap_rb, params, static_cast<uint8_t*>(back_buf_->data),
+        static_cast<int>(back_buf_->header.stride), transpose_buf_, transpose_buf_size_);
+}
 
+void CameraStream::transform_pixels(const uint8_t* src, int src_w, int src_h, int src_stride,
+                                    bool swap_rb, const TransformParams& params, uint8_t* dst,
+                                    int dst_stride, std::unique_ptr<uint8_t[]>& scratch,
+                                    size_t& scratch_size) {
     if (params.needs_transpose) {
         // 270° CW = 90° CW + flip both axes
         bool eff_fh = params.flip_h;
@@ -756,13 +857,13 @@ void CameraStream::apply_pixel_transform(const uint8_t* src, int src_w, int src_
             // Transpose to cached scratch buffer, then flip-copy to dst
             int trans_stride = params.out_w * 3;
             auto trans_size = static_cast<size_t>(trans_stride) * static_cast<size_t>(params.out_h);
-            if (trans_size > transpose_buf_size_) {
-                transpose_buf_ = std::make_unique<uint8_t[]>(trans_size);
-                transpose_buf_size_ = trans_size;
+            if (trans_size > scratch_size) {
+                scratch = std::make_unique<uint8_t[]>(trans_size);
+                scratch_size = trans_size;
             }
-            transpose_pixels_cw(src, transpose_buf_.get(), src_w, src_h, src_stride, trans_stride,
+            transpose_pixels_cw(src, scratch.get(), src_w, src_h, src_stride, trans_stride,
                                 swap_rb);
-            copy_pixels_to_lvgl(transpose_buf_.get(), dst, params.out_w, params.out_h, trans_stride,
+            copy_pixels_to_lvgl(scratch.get(), dst, params.out_w, params.out_h, trans_stride,
                                 dst_stride, eff_fh, eff_fv, false);
         }
     } else {
@@ -1005,16 +1106,15 @@ void CameraStream::deliver_frame() {
     {
         std::lock_guard<std::mutex> lock(buf_mutex_);
         std::swap(front_buf_, back_buf_);
+        has_frame_ = true;
     }
 
     // No frame_pending_ gate — camera continues decoding immediately.
     // The callback queues lv_image_set_src() to the UI thread, which
-    // processes it BEFORE rendering (UpdateQueue design). Typically the
-    // ~3ms decode time (with downscaling) exceeds the UI tick interval,
-    // so set_src runs before the next swap. If the UI thread stalls and
-    // two swaps occur between ticks, the camera may write to a buffer
-    // LVGL is still rendering — this can cause a torn frame (visual
-    // artifact) but NOT a crash, since both buffers remain allocated.
+    // applies it at a later UpdateQueue drain (once per LV_DEF_REFR_PERIOD).
+    // If the next frame decodes before that drain, it is written into the
+    // buffer LVGL is still showing. That can tear a frame (visual artifact)
+    // but NOT crash, since both buffers remain allocated.
     // The throughput gain (~3x fps) outweighs occasional tearing.
     frame_cb(front_buf_);
 }
@@ -1060,6 +1160,7 @@ void CameraStream::ensure_buffers(int width, int height) {
     }
 
     spdlog::debug("[CameraStream] Allocating buffers for {}x{}", width, height);
+    has_frame_ = false;
 
     // Retire old front buffer — LVGL may still reference it via lv_image_set_src
     // until the widget processes the next frame and updates the source pointer.
@@ -1105,6 +1206,7 @@ void CameraStream::free_buffers() {
     transpose_buf_size_ = 0;
     frame_width_ = 0;
     frame_height_ = 0;
+    has_frame_ = false;
 }
 
 } // namespace helix

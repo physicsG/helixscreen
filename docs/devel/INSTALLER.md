@@ -54,14 +54,9 @@ Modules use source guards (`_HELIX_*_SOURCED`) to prevent double-sourcing. The l
 | **Usage** | Development, from repo checkout | End-user, via `curl \| sh` |
 | **Modules** | Sources from `lib/installer/` at runtime | All modules inlined by `bundle-installer.sh` |
 | **Guard** | Checks `_HELIX_BUNDLED_INSTALLER` is unset | Sets `_HELIX_BUNDLED_INSTALLER=1` |
-| **Regeneration** | N/A | `./scripts/bundle-installer.sh -o scripts/install.sh` |
+| **Regeneration** | N/A | `make installer` (writes `build/installer/`) |
 
-When modifying any module in `lib/installer/`, you must regenerate the bundled scripts:
-
-```bash
-./scripts/bundle-installer.sh -o scripts/install.sh
-./scripts/bundle-uninstaller.sh -o scripts/uninstall.sh
-```
+The bundles are generated, never committed. `make installer` writes `build/installer/install.sh` and `build/installer/uninstall.sh`, rebuilding only when a module or bundler changed. Every consumer takes them from there: the `release-*` and `deploy-*` targets, `release.yml` (which builds once and publishes that file as both the GitHub release asset and the one-line installer at https://releases.helixscreen.org/install.sh), and `scripts/dev-release.sh`. The bats suite builds its own copies once per run in `tests/shell/setup_suite.bash` (`$INSTALL_BUNDLE`, `$UNINSTALL_BUNDLE`).
 
 The bundler uses `awk` to strip shebangs, SPDX headers, and source guards from each module, then concatenates them with the main orchestration code.
 
@@ -74,7 +69,7 @@ The bundler uses `awk` to strip shebangs, SPDX headers, and source guards from e
 The primary end-user method. Downloads and runs the bundled `install.sh`:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/prestonbrown/helixscreen/main/scripts/install.sh | sh
+curl -sSL https://releases.helixscreen.org/install.sh | sh
 ```
 
 **Options:**
@@ -117,26 +112,43 @@ From a repo checkout, the modular installer sources modules directly:
 
 ## Installation Flow
 
-The `main()` function orchestrates this sequence:
+`main()` (`scripts/lib/installer/main.sh#main`) is split at the confirm point (`scripts/lib/installer/plan.sh#confirm_point`). Everything before it only reads; everything after it, `apply_install()`, changes the machine. `tests/shell/test_installer_confirm_point.bats` holds every call before the confirm point to a read-only allowlist, so a new detection step has to be allowlisted there (its header says what is covered).
 
-1. **Platform detection** -- `detect_platform()` returns one of `cc1`, `k2`, `ad5m`, `ad5x`, `k1`, `snapmaker-u1`, `m1`, `pi`, `pi32`, `x86`, or `unsupported` (plus zmod/guilouz sub-detectors)
-2. **Firmware detection** -- AD5M: `klipper_mod` or `forge_x`; K1: `simple_af` or `stock_klipper`
-3. **Path configuration** -- `set_install_paths()` sets `INSTALL_DIR`, `INIT_SCRIPT_DEST`, `PREVIOUS_UI_SCRIPT`, `TMP_DIR`
-4. **Permission check** -- Root required on AD5M/K1; sudo on Pi
-5. **Pre-flight checks** -- Required commands, runtime deps (libdrm2/libinput10 on Pi), disk space, init system detection
-6. **Klipper ecosystem check** -- Verifies Klipper/Moonraker running (AD5M/K1 only, warns if missing)
-7. **Platform configuration** -- ForgeX: display mode, screen.sh patching, logged wrapper
-8. **Stop competing UIs** -- GuppyScreen, KlipperScreen, Xorg, stock FlashForge UI
-9. **Download release** -- R2 CDN primary (`releases.helixscreen.org`), GitHub Releases fallback
-10. **Extract with atomic swap** -- Validates ELF architecture, backs up config, `mv` old to `.old`, re-checks free space when the swap crosses filesystems, rollback on failure
-11. **Platform hooks** -- Deploys `hooks-{platform}.sh` to `$INSTALL_DIR/platform/hooks.sh`
-12. **Install service** -- systemd unit or SysV init script (templated with `@@HELIX_USER@@`, etc.)
-13. **Moonraker integration** -- Adds `[update_manager helixscreen]` section, writes release_info.json
-14. **KIAUH extension** -- Auto-installs if KIAUH detected. `main.sh` calls `install_kiauh_extension` (honoring a `--skip-kiauh-registration` flag), as described in the "How the Extension Gets Installed" section below.
-15. **Install-time printer detection** -- Tier-1 model fingerprint, falling back to Tier-2 Moonraker detection with a B/C confidence gate. Seeds device defaults (and, when confident, a full preset) into `settings.json` before first launch. See [Install-Time Printer Detection](#install-time-printer-detection) below.
-16. **Config symlink** -- `printer_data/config/helixscreen` symlink for Mainsail/Fluidd access
-17. **Start service** -- Waits up to 5 seconds for startup confirmation
-18. **Cleanup** -- Remove temp files, remove `.old` backup
+### Before the confirm point (read-only)
+
+1. **Host probe and arguments** -- `host_profile_probe`, `parse_installer_args`, `mod_payload_autodetect`
+2. **Guards** -- refuse an uninstall run from the install dir; refuse to install over a firmware-managed HelixScreen
+3. **Platform detection** -- `detect_platform()` returns one of `cc1`, `k2`, `ad5m`, `ad5x`, `k1`, `snapmaker-u1`, `m1`, `pi`, `pi32`, `x86`, or `unsupported` (plus zmod/guilouz sub-detectors); `unsupported` exits
+4. **Firmware detection** -- AD5M/AD5X: `detect_mod_flavor`; K1: `detect_k1_firmware`
+5. **Path configuration** -- `set_install_paths()` sets `INSTALL_DIR`, `INIT_SCRIPT_DEST`, `PREVIOUS_UI_SCRIPT`, `TMP_DIR`; `mod_payload_mode_block` settles payload mode
+6. **Permission check** -- Root required on AD5M/K1; sudo on Pi. `--uninstall` branches off here and exits, so it never reaches the confirm point; `parse_installer_args` refuses `--uninstall --dry-run`
+7. **Pre-flight checks** -- `detect_missing_unzip`, `check_requirements`, `detect_missing_runtime_deps`, `check_disk_space`, `detect_init_system`, `check_klipper_ecosystem`
+8. **Version and release** -- `resolve_update_channel` (update or existing install), then `--local` filename, `--version` or `get_latest_version`; `probe_release` HEADs the archive so the plan only offers a release that exists
+9. **Detection for the plan** -- `detect_competing_uis` (only stock UIs that are running or would start at boot; one an earlier install already disabled is not listed), `detect_moonraker_integration`, `detect_kiauh` (no Add when the extension is already installed)
+
+### The confirm point
+
+`confirm_point` prints the logo banner and the plan screen (Printer, Found, Install or `Update A -> B`, Remove, Libraries, Disable, Add, Disk, sudo). Then:
+
+- `--dry-run` prints "Dry run, nothing changed." and exits 0. A check that would stop the install has already exited non-zero before this.
+- A fresh install with a terminal asks `Continue? [Y/n]`, read from `/dev/tty` (`HELIX_TTY_DEVICE` overrides it). EOF means no. `--yes`, no terminal and `--update` do not ask.
+- `--clean` always asks, `Continue? [y/N]`, since that answer is the consent to delete what the Remove line lists. With no terminal it refuses unless `--yes` was given, before anything changes.
+- If sudo is needed it asks for the password once, so later steps do not stall on a prompt. The plan's sudo row lists only the reasons that apply, and is left out under NoNewPrivileges, where sudo cannot run.
+- It sets `HELIX_CONFIRMED=1`, counts the steps (`plan_count_steps`), closes the "Checking system" step and opens the log.
+
+### After the confirm point (`apply_install`)
+
+One numbered step per phase; a step with nothing to do is skipped under the same conditions that left it out of the count.
+
+1. **Installing libraries** -- apt for unzip and runtime deps (libdrm2/libinput10 on Pi). If apt fails the step reads FAILED and the install continues; `verify_binary_deps` stops it later if a library the binary needs is missing. Under NoNewPrivileges detection plans no libraries and warns which to install by hand
+2. **Downloading** (or **Unpacking local archive**) -- R2 CDN primary (`releases.helixscreen.org`), GitHub Releases fallback. This runs before anything touches the running printer, so a failed download leaves it as it was.
+3. **Stopping the stock screen** -- `configure_platform` (ForgeX: display mode, screen.sh patching, logged wrapper), then `stop_competing_uis` (GuppyScreen, KlipperScreen, Xorg, stock FlashForge UI)
+4. **Installing files** -- `--clean` removal, `stop_service` on update, state migration, then `extract_release`: validates ELF architecture, backs up config, `mv` old to `.old`, re-checks free space when the swap crosses filesystems, rollback on failure
+5. **Setting up service** -- systemd unit or SysV init script (templated with `@@HELIX_USER@@`, etc.), `hooks-{platform}.sh` to `$INSTALL_DIR/platform/hooks.sh`, udev/polkit rules, KIAUH extension (`install_kiauh_extension`, honoring `--skip-kiauh-registration`; see "How the Extension Gets Installed"), K1 extras, `verify_binary_deps`
+6. **Connecting to Moonraker** -- `printer_data/config/helixscreen` symlink for Mainsail/Fluidd, `[update_manager helixscreen]` section, the release info file
+7. **Starting HelixScreen** -- recovery script, install-time printer detection (see [Install-Time Printer Detection](#install-time-printer-detection)), then `start_service`, which waits up to 5 seconds for startup confirmation. On a payload install, where the mod starts the UI at boot, the same step is titled **Finishing setup**.
+
+Then `INSTALL_COMPLETE=1`, the old-install cleanups, `finalize_install_log`, `cleanup_on_success` and `print_summary`.
 
 ### Install-Time Printer Detection
 
@@ -283,12 +295,12 @@ redundant with the packaging fix: archives published before it still carry the o
 > Creality box. GNU tar accepts `-o` as an alias for `--no-same-owner` when extracting.
 > Verified on BusyBox 1.29.3 (AD5M), 1.31.1 (K1), 1.33.2 (K2), 1.36.1 (CC1, U1).
 
-**Repair** — `fix_install_ownership()` normalises the whole tree, including on root-run
-platforms (ad5m/ad5x/k1/k2/cc1/u1), which it used to skip entirely. That is what heals
-installs made before the above landed; a measured K2 had 890 of 915 files owned by uid 1001.
+**Repair** - `fix_install_ownership()` normalises the whole tree on every platform, root-run
+ones (ad5m/ad5x/k1/k2/cc1/u1) included. Repair is what heals an install whose archive arrived
+carrying foreign ids: a measured K2 had 890 of 915 files owned by uid 1001.
 
-The `deploy-*` targets extract with `-o` on the device for the same reason — a dev deploy
-was a second way for the build host's uid to reach a printer.
+The `deploy-*` targets extract with `-o` on the device for the same reason - a dev deploy is
+a second way for the build host's uid to reach a printer.
 
 ### `NoNewPrivileges` and Self-Update on Pi (systemd)
 
@@ -325,6 +337,19 @@ sudo rm -rf ~/helixscreen.old
 
 ---
 
+## Output and logging
+
+The output layer is in `scripts/lib/installer/common.sh` (steps, logging), `plan.sh` (plan, summary) and `logo.sh` (banner).
+
+- **Banner and plan.** `print_banner` draws the logo from `scripts/lib/installer/logo.sh`, a generated file (`scripts/render-installer-logo.sh` with `scripts/installer_logo_art.py`, needs Pillow). On a color terminal it first asks the terminal what it can draw (a kitty graphics query, `CSI 16 t` for the cell size, then DA1, which ends the read) and shows a kitty, iTerm2 or sixel image with the logotype beside it; anything else gets half-block (`▀ ▄`) text art, which every terminal font has. `print_plan` (`plan.sh`) lists the rows `confirm_point` set with `plan_set`.
+- **Steps.** `step "running title" ["done title"]` opens a step; `step_done [detail]`, `step_fail` and `step_skip` close it. On a terminal the open step is a spinner that becomes a check mark or cross (ASCII marks when the locale is not UTF-8). Without a terminal each step prints one line, `[n/N] <title> ... ok (<detail>)`. A run ends with `print_summary`.
+- **Terminal probe.** `ui_detect` looks at stderr, where every log line goes. `HELIX_INSTALL_TTY=0|1` forces no-terminal or terminal.
+- **`log_info` vs `log_note`.** `log_info`/`log_success` go to the log file and reach the screen only with `--verbose` or `HELIX_INSTALL_VERBOSE=1`. `log_warn` and `log_error` always show. `log_note` is always shown and always logged; use it for the rare line a regular user must see.
+- **`run_logged cmd...`.** Runs a command with its output captured to a temp file and appended to the log. Silent on success; on failure it prints the command, its exit status and the last `RUN_LOGGED_TAIL` (15) lines. With verbose on, the output streams as it arrives. Use it for apt, systemctl and helper scripts instead of letting them write to the terminal.
+- **Failure report.** The EXIT trap (`installer_exit_report`) runs only for a run that passed the confirm point. It prints the failed step, a state line from `install_state_line` saying what the run actually changed (nothing, what was stopped, the new install in place but not set up, rolled back), and `Full log: <path>`.
+- **Log location.** The log is written to the scratch dir while the run is going, then `finalize_install_log` moves it to `install_log_dest`: `$KLIPPER_HOME/printer_data/logs/helixscreen-install.log` when `printer_data` exists (Mainsail and Fluidd list it), otherwise `logs/helixscreen-install.log` under `install_state_root` (outside the install dir, which an update replaces whole). The previous run's log is kept as `.1`.
+- **Environment.** `HELIX_INSTALL_VERBOSE`, `HELIX_INSTALL_TTY`, `HELIX_INSTALL_LOGO=kitty|iterm|sixel|text` (skips the terminal query and forces that logo), and `HELIX_TTY_DEVICE` (the file the `Continue?` prompt and the logo query use; tests point it at a nonexistent path so no prompt can block).
+
 ## Mod-Managed Hosts: the Payload Contract (Forge-X)
 
 Some Adventurer hosts run a firmware **mod** - a git-managed tree that owns the machine's
@@ -357,11 +382,20 @@ never anything else under the mod's tree.
 
 On a verified mod host a bare install is the payload contract, no flags:
 
+- The payload root is `<mod-tree-parent>/mod_data/helixscreen` - a **sibling of the mod's
+  git tree** (`/opt/config/mod_data/helixscreen` on AD5M, `/usr/data/config/mod_data/`
+  `helixscreen` on AD5X), never inside it: Forge-X's OTA is a `git_repo` update_manager and
+  a Feather "reset" runs `git reset --hard` + `git clean -fd`, which deletes every untracked
+  path in the tree. `mod_data` is the one directory per layout that exists on the host and
+  is chroot-visible on both boards (the `/opt/config` bind) yet outside that reach. Because
+  the root is outside the mod namespaces, `host_path_is_mod_owned` does not match it - the
+  guard protects the *mod's* files, and this root is ours.
 - Contents are replaced **in place** - the root's inode never changes; `config/` and
   `platform/` survive every update; an existing `helixscreen.env` is preserved byte-identical
   (the incoming one lands beside it as `.env.new`).
-- **No service is installed anywhere.** The mod's bootstrap (.shell/helixscreen.sh) starts
-  the UI; nothing on the host iterates an `/etc/init.d` we would write.
+- **No service is installed on the host.** The service lands inside the mod chroot's
+  `/etc/init.d`, which the mod's own bootstrap (`<chroot>/.root/start.sh`) starts at boot; nothing
+  host-side iterates an `/etc/init.d`, and the installer never starts the UI itself.
 - **Nothing is written to any mod-owned Moonraker conf.** The mod's `moonraker.conf` is
   git-tracked - dirtying it breaks their OTA. The sanctioned include point is
   `mod_data/user.moonraker.conf`, and even that only gains an `[update_manager helixscreen]`
@@ -403,7 +437,8 @@ AD5M Forge-X hosts that installed HelixScreen before this contract run a standal
 and offers **adopt-or-warn**: adopting makes the legacy root the payload root (outside the
 mod's tree - also the OTA-durable answer - recorded like any payload root), and **keeps the
 S90 service, which is then the payload's only boot path** (the mod's bootstrap only starts
-its own tree; the payload contract installs no service; the S90 bakes `DAEMON_DIR` at
+its own tree; the payload contract installs no HOST service, and the adopted root keeps
+its S90 as the only boot path; the S90 bakes `DAEMON_DIR` at
 install time so it boots the adopted root's refreshed `bin/`). Declining proceeds at the
 mod's default with the exact manual migration commands printed. Neither branch deletes or
 de-execs anything; the operator executes those steps.
@@ -427,7 +462,7 @@ record never falls back to rewriting a display mode the rig did not have.
 | **Klipper user** | Detected via systemd service owner, process table, printer_data scan, or well-known users (biqu, pi, mks) |
 | **Init system** | systemd (service template with `@@HELIX_USER@@` substitution) |
 | **Runtime deps** | `libdrm2`, `libinput10` installed via apt |
-| **Config symlink** | `~/printer_data/config/helixscreen` -> `$INSTALL_DIR/config` for web UI access |
+| **Config symlink** | Per-file: user-owned config lives in `~/printer_data/config/helixscreen/` and each `$INSTALL_DIR/config/<file>` is a symlink into it (`setup_config_symlink`). Per-file, not a directory symlink, because the install's `config/` also holds packaged files an update replaces - only `HELIX_USER_CONFIG_FILES` (settings.json, helixscreen.env, .disabled_services, tool_spools.json, crash_history.json) and `HELIX_USER_CONFIG_DIRS` (custom_images, themes, printer_database.d) outlive an update |
 
 #### Pi install-directory cascade
 
@@ -464,23 +499,42 @@ See `UPDATE_SYSTEM.md` for how `self_update_supported()` reads the resulting tre
 
 ### FlashForge Adventurer 5M -- Forge-X Firmware (`ad5m`, `forge_x`)
 
+The `--standalone` layout on this firmware (the payload contract above is what a bare
+install uses):
+
 | Setting | Value |
 |---------|-------|
 | **Detection** | `armv7l` + kernel contains `ad5m` or `5.4.61` |
 | **Firmware** | Forge-X detected by `/opt/config/mod/.root` directory |
-| **Install dir** | `/opt/helixscreen` |
-| **Init script** | `/etc/init.d/S90helixscreen` |
+| **Install dir** | `/opt/helixscreen` (`--standalone` only) |
+| **Init script** | `/etc/init.d/S90helixscreen` (host-side, `--standalone` only) |
 | **Previous UI** | `/opt/config/mod/.root/S80guppyscreen` |
 
 **ForgeX-specific patches (all reversible on uninstall):**
 
-- **Display mode**: Sets `variables.cfg` display to `GUPPY` mode (required for backlight)
-- **GuppyScreen disable**: `chmod -x` on `/opt/config/mod/.root/S80guppyscreen`
-- **tslib disable**: `chmod -x` on `/opt/config/mod/.root/S35tslib`
+- **Display mode**: switches `variables.cfg` display to `HEADLESS` -- the slot Forge-X asks custom screens to occupy, because any other slot risks failed OTA updates and repeated Moonraker recovery prompts. The takeover probes `STOCK`/`FEATHER`/`GUPPY` (and `HEADLESS` as an arrival state for upgrades) and records the pre-install mode to `mod_data/helixscreen_prev_display`. Under `HEADLESS` the mod's start.sh starts neither tslib nor GuppyScreen; the installer still de-execs `S80guppyscreen`, the `guppyscreen` launcher (reachable via zdisplay.sh in any mode) and `S35tslib` as belt-and-braces. Backlight is not a reason to pick a mode: the mod's screen.sh path is mode-independent.
 - **Stock UI disable**: Comments out `ffstartup-arm` in /opt/auto_run.sh
 - **screen.sh backlight patch**: Blocks non-100 backlight changes when HelixScreen active (allows S99root init cycle)
-- **screen.sh drawing patch**: Skips `draw_splash`, `draw_loading`, `boot_message` when HelixScreen active
+- **screen.sh drawing patch**: Guards whichever of `draw_splash`, `draw_loading`, `boot_message`, `splash_start` the installed Forge-X version actually has, each label verified individually, so the mod's splash cannot draw over us
 - **logged wrapper**: Wraps `/opt/config/mod/.bin/exec/logged` to strip `--send-to-screen` flag (prevents direct framebuffer writes)
+
+### FlashForge Adventurer -- Forge-X Payload Mode (`ad5m`/`ad5x`, `forge_x`)
+
+What a bare install actually does on a verified Forge-X host (either board - the probe keys
+on the mod's shape, `mips` selects the AD5X hook, everything else the AD5M's):
+
+| Setting | Value |
+|---------|-------|
+| **Detection** | mod tree + Buildroot chroot probed by `host_profile.sh` (.shell/platform.sh marker) |
+| **Install dir** | `<mod-tree-parent>/mod_data/helixscreen` - `/opt/config/mod_data/helixscreen` (AD5M), `/usr/data/config/mod_data/helixscreen` (AD5X). A **sibling** of the mod's git tree: the OTA's `git clean -fd` and a Feather reset cannot reach it, and the `/opt/config` bind makes it chroot-visible on both boards |
+| **Config** | `mod_data/helixscreen/config` - interior to the payload root, preserved by every in-place update |
+| **Init script** | inside the mod chroot: `<chroot>/etc/init.d/S90helixscreen` (AD5M) / `S80helixscreen` (AD5X), started by the mod's `<chroot>/.root/start.sh` |
+| **Cache / logs** | AD5M: `/data/.helixscreen/{cache,logs}`. AD5X: `/opt/config/mod_data/helixscreen-state/cache` and `/opt/config/mod_data/log/helix.log` - never inside the payload root, which every update replaces |
+| **Payload root record** | `mod_data/helixscreen_payload_root` (the uninstaller's `flag > record > default` resolver) |
+| **Uninstall** | `install.sh --uninstall` auto-arms; the standalone `uninstall.sh` needs `--mod-payload` (optionally `--payload-root`) |
+
+Runtime caches never live inside the payload root: an update replaces everything in it
+except `config/` and `platform/`, so a cache there would be wiped on every refresh.
 
 ### FlashForge Adventurer 5M -- Klipper Mod (`ad5m`, `klipper_mod`)
 
@@ -614,17 +668,17 @@ Moonraker update_manager is skipped on AD5M (typically no Mainsail/Fluidd web UI
 
 ## Uninstaller
 
-The uninstaller (`scripts/uninstall.sh`) reverses the installation:
+The uninstaller (`uninstall.sh`, bundled from `lib/installer/uninstall.sh` and its dependencies) reverses the installation:
 
 1. **Stop service** -- systemd or SysV, plus kill remaining processes (watchdog first to prevent crash dialog)
 2. **Remove service** -- Delete systemd unit or init script
 3. **Re-enable disabled services** -- Reads `config/.disabled_services` state file and re-enables each recorded entry
-4. **Remove installation** -- Checks all known paths: `/opt/helixscreen`, `/root/printer_software/helixscreen`, `/usr/data/helixscreen`
+4. **Remove installation** -- Checks every known install path (`HELIX_INSTALL_DIRS` in `scripts/lib/installer/common.sh`: `/root/printer_software/helixscreen`, `/opt/helixscreen`, `/mnt/UDISK/helixscreen`, `/usr/data/helixscreen`, `/srv/helixscreen`, `/user-resource/helixscreen`, `/userdata/helixscreen`)
 5. **Restore previous UI** -- Platform-specific:
    - Klipper Mod: Re-enable Xorg and KlipperScreen
    - K1: Re-enable GuppyScreen
    - ForgeX: Full cleanup via `uninstall_forgex()` (restore display mode, unpatch screen.sh, remove logged wrapper, re-enable GuppyScreen/tslib)
-6. **Remove caches** -- Thumbnail caches, temp files, PID files, log files
+6. **Remove caches** -- `cache/` and `logs/` under every declared state root (`HELIX_STATE_DIRS` in `scripts/lib/installer/common.sh`, mirroring `kStateRoots` in `include/helix_install_roots.h`), plus the legacy in-payload locations, temp files, PID files
 7. **Remove Moonraker section** -- Strips `[update_manager helixscreen]` from moonraker.conf
 
 ### Disabled Services State File
@@ -737,7 +791,10 @@ _The table above is a representative subset; the suite has well over 100 bats fi
 - **`setup_mock_pi`** -- Create temp directory structure mimicking a Pi system
 - **`create_fake_elf`** / **`create_fake_arm32_elf`** / **`create_fake_aarch64_elf`** -- Generate minimal ELF headers for architecture validation tests
 - **`SUDO=""`** -- Exported no-op for tests that call `$SUDO`
+- **`HELIX_INSTALL_VERBOSE=1`** -- Exported so `log_info` and command output reach the screen, where `run`/`assert_output` can see them
+- **`HELIX_TTY_DEVICE`** -- Set to a nonexistent path so the `Continue?` prompt never reads a real terminal
 - Logging stubs (`log_info`, `log_warn`, etc.) suppressed during tests
+- End-to-end golden transcripts of whole installer runs live in `tests/shell/fixtures/install_transcripts/`
 
 ### Writing New Tests
 
@@ -820,11 +877,10 @@ Create tests/shell/test_myplatform.bats covering:
 - Any firmware-specific patching
 - Uninstall/restore behavior
 
-### Step 6: Regenerate Bundles
+### Step 6: Check the Bundles
 
 ```bash
-./scripts/bundle-installer.sh -o scripts/install.sh
-./scripts/bundle-uninstaller.sh -o scripts/uninstall.sh
+make installer    # build/installer/install.sh + uninstall.sh
 ```
 
 ### Step 7: Release Asset
@@ -878,7 +934,11 @@ That trap only ever cleans the **current** run's scratch dir. Directories leaked
 *previous* installs are reclaimed separately: `cleanup_stale_cache_dirs()`
 (`scripts/lib/installer/release.sh`) removes the paths a platform declares in
 `STALE_CACHE_DIRS` — on the K2, the old `/usr/data/helixscreen/cache` thumbnail/gcode
-location (the app now caches on `/mnt/UDISK`), plus installer scratch dirs like
+location (the app now caches on `/mnt/UDISK`); on the AD5M, `/data/helixscreen/cache`,
+whatever `migrate_state_root()` leaves there after carrying the state root to its
+dot-prefixed `/data/.helixscreen` (a plainly named directory at `/data` top level shows in
+Moonraker's print-file picker, because the vendor symlinks the whole partition in as the
+gcodes root); plus installer scratch dirs like
 `/usr/data/helixscreen-install` and `/opt/.helixscreen-install` left behind by pre-EXIT-trap
 installers (one unit held a 60MB archive for two months). It runs after the service starts,
 never touches the scratch dir this run is staging into, and applies the same shape of name

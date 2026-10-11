@@ -36,6 +36,7 @@ namespace {
 class ReadyToastFixture : public XMLTestFixture {
   public:
     ReadyToastFixture() {
+        ToastManager::instance().init();
         auto& estop = EmergencyStopOverlay::instance();
         estop.init(state(), &api());
         estop.init_subjects();
@@ -81,9 +82,8 @@ class ReadyToastFixture : public XMLTestFixture {
 
     /// Drive one klippy READY transition with every toast routed into `shown`.
     void go_ready() {
-        helix::ui::set_test_toast_hook([this](ToastSeverity severity, const std::string& message) {
-            shown.push_back({severity, message});
-        });
+        helix::ui::set_test_toast_hook([this](ToastSeverity severity, const std::string& message,
+                                              uint32_t) { shown.push_back({severity, message}); });
         state().set_klippy_state_sync(KlippyState::READY);
         settle();
         settle(); // the READY branch hops through async_call before toasting

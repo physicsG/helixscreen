@@ -2,6 +2,7 @@
 
 #include "snapshot_qr_scanner.h"
 
+#include "helix_thread.h"
 #include "hv/requests.h"
 #include "stb_image.h"
 
@@ -34,7 +35,7 @@ void SnapshotQrScanner::start(const std::string& snapshot_url, FrameCallback on_
 
     // Wrap — EAGAIN under thread exhaustion throws std::system_error ([L083]).
     try {
-        poll_thread_ = std::thread([this]() { poll_loop(); });
+        poll_thread_ = helix::make_thread([this]() { poll_loop(); });
         spdlog::info("[SnapshotQR] Started polling {}", snapshot_url_);
     } catch (const std::system_error& e) {
         spdlog::error("[SnapshotQR] Failed to spawn poll thread: {}", e.what());

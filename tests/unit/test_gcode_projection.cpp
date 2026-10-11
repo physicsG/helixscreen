@@ -648,10 +648,9 @@ TEST_CASE("parity_content_offset_y - pins the model centre, not its edges",
 // ===========================================================================
 // Clip-space projection helpers (DRY-4)
 //
-// These replaced three hand-written copies of the same eight-corner /
-// point-to-segment math in gcode_gles_renderer.cpp, gcode_renderer.cpp and
-// gcode_layer_renderer.cpp. The copies had drifted on the one predicate that
-// matters, which is what these cases pin.
+// One copy of the eight-corner / point-to-segment math shared by
+// gcode_gles_renderer.cpp and gcode_layer_renderer.cpp. These cases pin the
+// predicate that matters.
 // ===========================================================================
 
 namespace {

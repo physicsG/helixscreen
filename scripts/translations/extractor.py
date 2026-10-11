@@ -65,6 +65,107 @@ EXPLICIT_TAG_ATTRIBUTES = (
     "text_tag",
 )
 
+# Implied tags. A literal text attribute is its own translation key: the engine
+# reads `text="Save"` as `translation_tag="Save"`, and `label="Fan"` on a
+# component declaring label_tag as `label_tag="Fan"`. This is the Python half of
+# implied_tag_value()/collect_implied_tags() in lib/helix-xml/src/xml/lv_xml.c;
+# the extractor, the redundant-tag lint and the coverage gate all go through
+# implied_tags() so none of them can disagree with the engine on its own.
+# options_tag and placeholder_tag are never implied: code replaces a dropdown's
+# options and an input's placeholder at runtime, and a tagged one puts its XML
+# value back on every language change.
+NEVER_IMPLIED_TAGS = ("options_tag", "placeholder_tag")
+
+# One element's open tag, capturing name and attribute blob.
+ELEMENT_RE = re.compile(r'<([A-Za-z_][\w.-]*)((?:\s+[\w:.-]+\s*=\s*"[^"]*")*)\s*/?>')
+ATTR_RE = re.compile(r'([\w:.-]+)\s*=\s*"([^"]*)"')
+_TAG_PROP_RE = re.compile(r'<prop\b[^>]*?\bname="(\w+_tag)"')
+
+
+def implied_tag_value(attrs: Dict[str, str], tag: str) -> Optional[str]:
+    """The raw literal an absent `tag` is implied from, or None.
+
+    translation_tag pairs with text; any other X_tag with X, else X_text. An
+    explicit tag (empty included), bind_text, a $prop / #const / ${} value,
+    and a literal should_skip_text() rejects imply nothing. The engine gets
+    that last verdict from helix::ui::is_translation_key()."""
+    if tag in attrs or "bind_text" in attrs:
+        return None
+    if tag == "translation_tag":
+        value = attrs.get("text")
+    elif tag.endswith("_tag") and len(tag) > 4:
+        base = tag[:-4]
+        value = attrs.get(base, attrs.get(base + "_text"))
+    else:
+        return None
+    if not value or value[0] in "$#" or "${" in value:
+        return None
+    if should_skip_text(_decode_xml_entities(value)):
+        return None
+    return value
+
+
+def implied_tags(element: str, attrs: Dict[str, str], component_tag_props) -> Dict[str, str]:
+    """Every tag the engine implies on this element: tag name -> raw value.
+
+    `component_tag_props` maps a component name to the *_tag props it declares.
+    A <view extends="X"> is an X instance."""
+    if element == "view":
+        element = attrs.get("extends", "lv_obj")
+    candidates = ["translation_tag"] + [
+        t
+        for t in sorted(component_tag_props.get(element, ()))
+        if t != "translation_tag" and t not in NEVER_IMPLIED_TAGS
+    ]
+    found = {}
+    for tag in candidates:
+        value = implied_tag_value(attrs, tag)
+        if value is not None:
+            found[tag] = value
+    return found
+
+
+_component_tag_props_cache: Dict[Path, Dict[str, Set[str]]] = {}
+
+
+def component_tag_props(ui_xml_dir: Path) -> Dict[str, Set[str]]:
+    """Component name (file stem) -> the *_tag props its <api> declares."""
+    ui_xml_dir = ui_xml_dir.resolve()
+    if ui_xml_dir not in _component_tag_props_cache:
+        props: Dict[str, Set[str]] = {}
+        for xml in ui_xml_dir.rglob("*.xml"):
+            if "translations" in xml.relative_to(ui_xml_dir).parts:
+                continue
+            names = _TAG_PROP_RE.findall(_blank_xml_comments(xml.read_text(encoding="utf-8")))
+            if names:
+                props.setdefault(xml.stem, set()).update(names)
+        _component_tag_props_cache[ui_xml_dir] = props
+    return _component_tag_props_cache[ui_xml_dir]
+
+
+def _ui_xml_root(xml_path: Path) -> Path:
+    for parent in xml_path.resolve().parents:
+        if parent.name == "ui_xml":
+            return parent
+    return xml_path.resolve().parent
+
+
+def iter_elements(content: str):
+    """Yield (element, attrs, match) for each open tag outside comments."""
+    for match in ELEMENT_RE.finditer(_blank_xml_comments(content)):
+        yield match.group(1), dict(ATTR_RE.findall(match.group(2))), match
+
+
+def _iter_implied_tag_texts(content: str, xml_path: Path):
+    """Yield (text, match_start) for each key an implied tag makes translatable."""
+    props = component_tag_props(_ui_xml_root(xml_path))
+    for element, attrs, match in iter_elements(content):
+        for raw in implied_tags(element, attrs, props).values():
+            text = _decode_xml_entities(raw)
+            if not should_skip_text(text):
+                yield text, match.start()
+
+
 # Inline element text: <text_muted>Foo</text_muted>. The C parser
 # (lib/helix-xml/src/xml/lv_xml.c) applies this as text= + translation_tag=,
 # so it is translatable by default. Matches an open tag (capturing its
@@ -124,8 +225,9 @@ CARET_DIRECTION_PATTERN = re.compile(r'^\^')  # Direction labels like ^ FRONT
 SNAKE_CASE_PATTERN = re.compile(r'^[a-z][a-z0-9]*(_[a-z0-9]+)+$')  # snake_case identifiers
 URL_PATTERN = re.compile(r'https?://')  # URLs
 MATERIAL_TEMP_PATTERN = re.compile(r'^[A-Z]+ \d+$')  # Material presets like "PLA 205", "ABS 100"
-# Temperature values: "60°C", "200°C", "210°C / 60°C", "200-230°C"
-TEMP_VALUE_PATTERN = re.compile(r'^\d[\d\-–]*°C(\s*/\s*\d+°C)?$')
+# Temperature values: "60°C", "200°C", "210°C / 60°C", "200-230°C", and the
+# compact callout chip's "215°" or "215°  100%" (temperature, then fan speed)
+TEMP_VALUE_PATTERN = re.compile(r'^\d[\d\-–]*°C?(\s*/\s*\d+°C?)?(\s+\d+%)?$')
 # Pure measurement values: "10mm", "5mm", "850g" (units handled by formatters)
 MEASUREMENT_PATTERN = re.compile(r'^\d+(\.\d+)?\s*(mm|cm|g|kg|ml|l|s|ms)$')
 # Numeric data placeholders: " 0 / 0", "0 / 0"
@@ -158,9 +260,9 @@ I18N_DO_NOT_TRANSLATE_RE = re.compile(
 I18N_UNIVERSAL_RE = re.compile(r"//[^\n]*\bi18n:\s*universal", re.IGNORECASE)
 
 # File-level opt-out for XML files: an `i18n: skip-file` marker anywhere in an
-# XML comment excludes the whole file from extraction. Used by dev/test-only
-# panels (test_panel.xml, gcode_test_panel.xml, step_test_panel.xml) whose demo
-# strings are never shown to end users and shouldn't pollute the locale packs.
+# XML comment excludes the whole file from extraction, for dev/test-only
+# panels whose demo strings are never shown to end users and shouldn't pollute
+# the locale packs.
 I18N_SKIP_FILE_RE = re.compile(r"<!--[^>]*\bi18n:\s*skip-file", re.IGNORECASE)
 
 # Language names displayed in their native script (never translated)
@@ -190,7 +292,10 @@ CPP_TRANSLATABLE_PATTERNS = [
     r"TR_NOOP\s*\(\s*" + ADJACENT_LITERALS_GROUP,
     # lv_label_set_text(label, "text")
     r"lv_label_set_text\s*\([^,]+,\s*" + ADJACENT_LITERALS_GROUP,
-    # return "Status Text"  (for status strings) — single literal only
+    # return "Status Text"  (for status strings) — single literal only.
+    # Applied to .cpp files only: a bare Title-Case return in a header is as
+    # likely an identifier (log_name, *_to_string) as a label, so headers must
+    # mark their strings explicitly.
     r'return\s+"([A-Z][a-z][^"]{2,30})"',
 ]
 
@@ -365,12 +470,23 @@ def _marker_applies(content: str, literal_pos: int, marker_re) -> bool:
 
     return False
 
-# C++ patterns to skip (not user-facing)
-CPP_SKIP_PATTERNS = [
+# C++ patterns to skip (not user-facing). Two kinds, because they match
+# different things: context patterns are searched against the SOURCE around a
+# literal, text patterns against the extracted string itself.
+CPP_CONTEXT_SKIP_PATTERNS = [
     r"spdlog::",  # Logging
     r"LOG_",  # Logging macros
     r"fmt::",  # Format strings
     r"\.c_str\(\)",  # Variable strings
+    # Registry and log identifiers: component_name() names the XML component a
+    # class implements, get_name() and log_name() name the instance for logs.
+    # None is ever rendered, and translating one would desync the lookup.
+    r"component_name\s*\(\s*\)",
+    r"get_name\s*\(\s*\)",
+    r"log_name\s*\(\s*\)",
+]
+
+CPP_TEXT_SKIP_PATTERNS = [
     r"\{\}",  # Format placeholders
     r"\\x[0-9a-fA-F]",  # Hex escapes (icons)
     r"^[a-z_]+$",  # snake_case identifiers
@@ -529,6 +645,33 @@ def _iter_inline_texts(content: str):
             continue
         yield text, match.start(3)
 
+# <prop name="message" default="..."/> in a component's <api>. The default is
+# what a $message reference renders when the caller passes nothing, so where
+# the component forwards that prop into a translation key the default IS a key.
+_PROP_DEFAULT_RE = re.compile(r"<prop\b([^>]*)>")
+_PROP_ATTR_RE = re.compile(r'(?<![\w])(name|default)="([^"]*)"')
+
+
+def _iter_tag_prop_defaults(content: str):
+    """Yield (text, match_start) for prop defaults forwarded into an explicit tag.
+
+    A prop forwarded only as ``text="$x"`` stays out: that renders the default
+    verbatim and never retranslates, so it is not a key."""
+    scanned = _blank_xml_comments(content)
+    for match in _PROP_DEFAULT_RE.finditer(scanned):
+        attrs = dict(_PROP_ATTR_RE.findall(match.group(1)))
+        name, default = attrs.get("name"), attrs.get("default")
+        if not name or not default or default.startswith(("$", "#")):
+            continue
+        if not any(
+            re.search(rf'(?<![\w]){attr}="\${re.escape(name)}"', scanned)
+            for attr in EXPLICIT_TAG_ATTRIBUTES
+        ):
+            continue
+        text = _decode_xml_entities(default)
+        if not should_skip_text(text):
+            yield text, match.start()
+
 
 def should_skip_cpp_text(text: str) -> bool:
     """Determine if C++ text should be skipped (not user-facing)."""
@@ -536,7 +679,7 @@ def should_skip_cpp_text(text: str) -> bool:
         return True
 
     # Check against skip patterns
-    for pattern in CPP_SKIP_PATTERNS:
+    for pattern in CPP_TEXT_SKIP_PATTERNS:
         if re.search(pattern, text):
             return True
 
@@ -573,7 +716,11 @@ def extract_strings_from_cpp(cpp_path: Path) -> Set[str]:
         return result
 
     for pattern in CPP_TRANSLATABLE_PATTERNS:
-        is_lv_tr = "lv_tr" in pattern
+        if pattern.startswith("return") and cpp_path.suffix == ".h":
+            continue
+        # lv_tr() and TR_NOOP() are both explicit marks: the heuristics below
+        # (a format string, a short unit) do not second-guess them.
+        is_lv_tr = "lv_tr" in pattern or "TR_NOOP" in pattern
         is_adjacent = ADJACENT_LITERALS_GROUP in pattern
         for match in re.finditer(pattern, content):
             # The key must equal what the compiler produces, not the source form.
@@ -610,7 +757,7 @@ def extract_strings_from_cpp(cpp_path: Path) -> Set[str]:
 
             # Skip if context indicates non-translatable
             skip = False
-            for skip_pattern in CPP_SKIP_PATTERNS[:4]:  # Check first few patterns on context
+            for skip_pattern in CPP_CONTEXT_SKIP_PATTERNS:
                 if re.search(skip_pattern, context):
                     skip = True
                     break
@@ -663,7 +810,7 @@ def extract_strings_from_cpp_directory(
 
         for cpp_path in cpp_files:
             # Skip generated files
-            if "generated" in str(cpp_path):
+            if "generated" in str(cpp_path.relative_to(directory)):
                 continue
             strings = extract_strings_from_cpp(cpp_path)
             result.update(strings)
@@ -779,6 +926,12 @@ def extract_strings_from_xml(xml_path: Path) -> Set[str]:
     for text, _pos in _iter_inline_texts(content):
         result.add(text)
 
+    for text, _pos in _iter_tag_prop_defaults(content):
+        result.add(text)
+
+    for text, _pos in _iter_implied_tag_texts(content, xml_path):
+        result.add(text)
+
     return result
 
 
@@ -864,7 +1017,11 @@ def extract_strings_with_locations(xml_path: Path) -> Dict[str, List[Tuple[str, 
                 result[decoded] = []
             result[decoded].append((filename, line_num))
 
-    for text, pos in _iter_inline_texts(content):
+    for text, pos in [
+        *_iter_inline_texts(content),
+        *_iter_tag_prop_defaults(content),
+        *_iter_implied_tag_texts(content, xml_path),
+    ]:
         line_num = content[:pos].count("\n") + 1
         result.setdefault(text, []).append((filename, line_num))
 

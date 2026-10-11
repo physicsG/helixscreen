@@ -3,6 +3,7 @@
 #include "preprint_predictor.h"
 
 #include "config.h"
+#include "json_utils.h"
 #include "printer_detector.h"
 #include "printer_state.h"
 #include "wizard_config_paths.h"
@@ -13,8 +14,14 @@
 #include <chrono>
 #include <cmath>
 #include <mutex>
+#include <set>
+#include <string>
 
 namespace helix {
+
+namespace {
+constexpr const char* HISTORY_PATH = "/print_start_history/entries";
+}
 
 void PreprintPredictor::load_entries(const std::vector<PreprintEntry>& entries,
                                      StartCondition condition) {
@@ -133,14 +140,12 @@ std::map<int, int> PreprintPredictor::default_phase_durations() {
     // Per-printer DB override wins over the generic defaults so first-print
     // ETAs aren't wildly off on printers whose PRINT_START / slicer start
     // gcode doesn't exercise the full QGL/mesh/wipe flow (e.g. Elegoo CC1).
-    if (auto* cfg = Config::get_instance()) {
-        std::string printer_type =
-            cfg->get<std::string>(cfg->df() + helix::wizard::PRINTER_TYPE, "");
-        if (!printer_type.empty()) {
-            auto db_phases = PrinterDetector::get_print_start_default_phases(printer_type);
-            if (!db_phases.empty()) {
-                return db_phases;
-            }
+    auto* cfg = Config::get_instance();
+    std::string printer_type = cfg->get<std::string>(cfg->df() + helix::wizard::PRINTER_TYPE, "");
+    if (!printer_type.empty()) {
+        auto db_phases = PrinterDetector::get_print_start_default_phases(printer_type);
+        if (!db_phases.empty()) {
+            return db_phases;
         }
     }
 
@@ -237,6 +242,13 @@ std::map<int, int> PreprintPredictor::predicted_phases() const {
     return result;
 }
 
+int PreprintPredictor::predicted_homing_seconds() const {
+    const auto phases = predicted_phases();
+    const auto it = phases.find(static_cast<int>(PrintStartPhase::HOMING));
+    const int predicted = it != phases.end() ? it->second : 0;
+    return std::max(predicted, MIN_HOMING_SECONDS);
+}
+
 int PreprintPredictor::predicted_total() const {
     // With no history, fall back to sum of default phase durations so UI
     // callers still get a ballpark.
@@ -262,87 +274,125 @@ int PreprintPredictor::predicted_total() const {
     return static_cast<int>(std::round(weighted_sum));
 }
 
-int PreprintPredictor::remaining_seconds(const std::set<int>& completed_phases, int current_phase,
-                                         int elapsed_in_current_phase_seconds) const {
-    // Only return remaining time when we have real history entries.
-    // Defaults are useful for predicted_total()/has_predictions() but not here —
-    // the collector uses thermal model for heating and profile weights for progress
-    // when no history exists yet.
-    if (entries_.empty()) {
-        return 0;
-    }
-    auto phases = predicted_phases();
-    int remaining = 0;
-
-    for (const auto& [phase, predicted_duration] : phases) {
-        if (completed_phases.count(phase)) {
-            // Already done, actual time was spent (not predicted)
-            continue;
-        }
-
-        if (phase == current_phase && current_phase != 0) {
-            // Currently in this phase - subtract elapsed
-            remaining += std::max(0, predicted_duration - elapsed_in_current_phase_seconds);
-        } else {
-            // Future phase
-            remaining += predicted_duration;
-        }
-    }
-
-    return remaining;
-}
-
 std::vector<PreprintEntry> PreprintPredictor::load_entries_from_config() {
     auto* cfg = Config::get_instance();
-    if (!cfg) {
+
+    auto entries_json = cfg->get<nlohmann::json>(HISTORY_PATH, nlohmann::json::array());
+    if (!entries_json.is_array() || entries_json.empty()) {
         return {};
     }
 
-    try {
-        auto entries_json =
-            cfg->get<nlohmann::json>("/print_start_history/entries", nlohmann::json::array());
-        if (!entries_json.is_array() || entries_json.empty()) {
-            return {};
+    std::vector<PreprintEntry> entries;
+    int dropped_legacy = 0;
+    int dropped_phases = 0;
+    // A record with a wrongly typed field is dropped; the rest of the history
+    // stays, and a zero-filled record never enters a prediction.
+    const auto wrongly_typed = [](const nlohmann::json& ej, const char* key) {
+        return ej.contains(key) && !ej[key].is_number();
+    };
+    for (const auto& ej : entries_json) {
+        if (!ej.is_object() || wrongly_typed(ej, "total") || wrongly_typed(ej, "timestamp") ||
+            wrongly_typed(ej, "temp_bucket") || wrongly_typed(ej, "window")) {
+            continue;
         }
+        PreprintEntry entry;
+        entry.total_seconds = json_util::safe_int(ej, "total", 0);
+        entry.timestamp = json_util::safe_int64(ej, "timestamp", 0);
+        entry.temp_bucket = json_util::safe_int(ej, "temp_bucket", 0);
+        const int window_raw =
+            json_util::safe_int(ej, "window", static_cast<int>(PreprintWindow::Unknown));
+        entry.window = (window_raw == static_cast<int>(PreprintWindow::PrinterEdge) ||
+                        window_raw == static_cast<int>(PreprintWindow::HostPreStart))
+                           ? static_cast<PreprintWindow>(window_raw)
+                           : PreprintWindow::Unknown;
+        // Drop legacy entries that predate the cold/warm bucket scheme.
+        // Older versions stored the raw nozzle target temperature here
+        // (e.g. 200, 225, 250). Only 0 (unknown), 1 (cold), and 2 (warm)
+        // are valid under the current scheme. Dropping at load time
+        // causes the next save_prediction_entry() to persist a clean
+        // list, so this acts as a one-shot migration.
+        if (entry.temp_bucket != 0 && entry.temp_bucket != 1 && entry.temp_bucket != 2) {
+            ++dropped_legacy;
+            continue;
+        }
+        if (ej.contains("phases") && ej["phases"].is_object()) {
+            for (auto& [key, val] : ej["phases"].items()) {
+                // A name this build does not know belongs to a newer one.
+                // The rest of the entry is still a real measurement, so the
+                // key is dropped rather than the entry.
+                const auto phase = print_start_phase_from_name(key);
+                if (!phase || !val.is_number()) {
+                    ++dropped_phases;
+                    continue;
+                }
+                entry.phase_durations[static_cast<int>(*phase)] = val.get<int>();
+            }
+        }
+        entries.push_back(std::move(entry));
+    }
+    if (dropped_legacy > 0) {
+        spdlog::info("[PreprintPredictor] Dropped {} legacy history entries "
+                     "(pre-cold/warm-bucket scheme)",
+                     dropped_legacy);
+    }
+    if (dropped_phases > 0) {
+        spdlog::info("[PreprintPredictor] Skipped {} history phase durations with an "
+                     "unrecognised name",
+                     dropped_phases);
+    }
+    return entries;
+}
 
-        std::vector<PreprintEntry> entries;
-        int dropped_legacy = 0;
-        for (const auto& ej : entries_json) {
-            PreprintEntry entry;
-            entry.total_seconds = ej.value("total", 0);
-            entry.timestamp = ej.value("timestamp", static_cast<int64_t>(0));
-            entry.temp_bucket = ej.value("temp_bucket", 0);
-            const int window_raw = ej.value("window", static_cast<int>(PreprintWindow::Unknown));
-            entry.window = (window_raw == static_cast<int>(PreprintWindow::PrinterEdge) ||
-                            window_raw == static_cast<int>(PreprintWindow::HostPreStart))
-                               ? static_cast<PreprintWindow>(window_raw)
-                               : PreprintWindow::Unknown;
-            // Drop legacy entries that predate the cold/warm bucket scheme.
-            // Older versions stored the raw nozzle target temperature here
-            // (e.g. 200, 225, 250). Only 0 (unknown), 1 (cold), and 2 (warm)
-            // are valid under the current scheme. Dropping at load time
-            // causes the next save_prediction_entry() to persist a clean
-            // list, so this acts as a one-shot migration.
-            if (entry.temp_bucket != 0 && entry.temp_bucket != 1 && entry.temp_bucket != 2) {
-                ++dropped_legacy;
+json PreprintPredictor::entries_to_json(const std::vector<PreprintEntry>& entries) {
+    json entries_json = json::array();
+    for (const auto& e : entries) {
+        json entry_json;
+        entry_json["total"] = e.total_seconds;
+        entry_json["timestamp"] = e.timestamp;
+
+        json phases_json = json::object();
+        for (const auto& [phase, duration] : e.phase_durations) {
+            const auto name = print_start_phase_name(static_cast<PrintStartPhase>(phase));
+            if (name.empty()) {
+                spdlog::warn("[PreprintPredictor] Dropping duration for unnamed phase {}", phase);
                 continue;
             }
-            if (ej.contains("phases") && ej["phases"].is_object()) {
-                for (auto& [key, val] : ej["phases"].items()) {
-                    entry.phase_durations[std::stoi(key)] = val.get<int>();
-                }
-            }
-            entries.push_back(std::move(entry));
+            phases_json[std::string(name)] = duration;
         }
-        if (dropped_legacy > 0) {
-            spdlog::info("[PreprintPredictor] Dropped {} legacy history entries "
-                         "(pre-cold/warm-bucket scheme)",
-                         dropped_legacy);
+        entry_json["phases"] = phases_json;
+        if (e.temp_bucket > 0) {
+            entry_json["temp_bucket"] = e.temp_bucket;
         }
-        return entries;
-    } catch (...) {
-        return {};
+        // Omitted for Unknown so the field only appears once it means
+        // something; a reader treats its absence as PrinterEdge.
+        if (e.window != PreprintWindow::Unknown) {
+            entry_json["window"] = static_cast<int>(e.window);
+        }
+        entries_json.push_back(std::move(entry_json));
     }
+    return entries_json;
+}
+
+void PreprintPredictor::append_to_config(const PreprintEntry& entry) {
+    auto entries = load_entries_from_config();
+    entries.push_back(entry);
+
+    const auto same_population = [&entry](const PreprintEntry& e) {
+        return e.temp_bucket == entry.temp_bucket && e.window == entry.window;
+    };
+    auto population = std::count_if(entries.begin(), entries.end(), same_population);
+    for (auto it = entries.begin(); population > MAX_ENTRIES && it != entries.end();) {
+        if (same_population(*it)) {
+            it = entries.erase(it);
+            --population;
+        } else {
+            ++it;
+        }
+    }
+    while (entries.size() > MAX_STORED_ENTRIES) {
+        entries.erase(entries.begin());
+    }
+    Config::get_instance()->set<json>(HISTORY_PATH, entries_to_json(entries));
 }
 
 int PreprintPredictor::predicted_total_from_config() {

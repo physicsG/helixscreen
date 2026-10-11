@@ -13,8 +13,6 @@
 #      install upstream's binary under it.
 
 RELEASE_SH="scripts/lib/installer/release.sh"
-INSTALL_SH="scripts/install.sh"
-UNINSTALL_SH="scripts/uninstall.sh"
 FORK_SH="scripts/install-fork.sh"
 
 setup() {
@@ -48,14 +46,14 @@ setup() {
     # The defect this pins: a bare `GITHUB_REPO="prestonbrown/helixscreen"` in
     # the bundle header. Every assignment in the shipped installer must be the
     # soft form, or a fork install silently targets upstream.
-    run grep -n '^GITHUB_REPO=' "$INSTALL_SH"
+    run grep -n '^GITHUB_REPO=' "$INSTALL_BUNDLE"
     [ "$status" -ne 0 ]
-    run grep -c ': "${GITHUB_REPO:=' "$INSTALL_SH"
+    run grep -c ': "${GITHUB_REPO:=' "$INSTALL_BUNDLE"
     [ "$status" -eq 0 ]
 }
 
 @test "uninstall.sh lets the environment set GITHUB_REPO" {
-    run grep -n '^GITHUB_REPO=' "$UNINSTALL_SH"
+    run grep -n '^GITHUB_REPO=' "$UNINSTALL_BUNDLE"
     [ "$status" -ne 0 ]
 }
 
@@ -131,9 +129,9 @@ EOF
     unset GITHUB_REPO
     run sh "$tmp/install-fork.sh" --update
     [ "$status" -eq 0 ]
-    [[ "$output" == *"LOCAL_INSTALLER"* ]]
-    [[ "$output" == *"repo=physicsG/helixscreen"* ]]
-    [[ "$output" == *"only=1"* ]]
+    contains "LOCAL_INSTALLER" "$output"
+    contains "repo=physicsG/helixscreen" "$output"
+    contains "only=1" "$output"
     [[ "$output" == *"args=--update"* ]]
 }
 
@@ -170,13 +168,13 @@ EOF2
 
     run sh "$tmp/install-fork.sh"
     [ "$status" -ne 0 ]
-    [[ "$output" != *"OLD_INSTALLER_RAN"* ]]
+    lacks "OLD_INSTALLER_RAN" "$output"
     [[ "$output" == *"predates fork support"* ]]
 }
 
 @test "install-fork.sh accepts the shipped install.sh, which carries fork support" {
     # The real bundle must pass the same check the stand-ins are held to.
-    run grep -q 'HELIX_GITHUB_ONLY' "$INSTALL_SH"
+    run grep -q 'HELIX_GITHUB_ONLY' "$INSTALL_BUNDLE"
     [ "$status" -eq 0 ]
     tmp="$BATS_TEST_TMPDIR/rel4"
     mkdir -p "$tmp"

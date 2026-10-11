@@ -288,6 +288,86 @@ TEST_CASE("PrinterDiscovery detects z_tilt", "[printer_discovery]") {
 }
 
 // ============================================================================
+// Capability Detection Tests - Screws Tilt (upstream + Snapmaker U1 dialect)
+// ============================================================================
+
+TEST_CASE("PrinterDiscovery detects standard screws_tilt_adjust", "[printer_discovery]") {
+    SECTION("objects/list entry") {
+        PrinterDiscovery hw;
+        json objects = {"extruder", "heater_bed", "screws_tilt_adjust"};
+        hw.parse_objects(objects);
+        REQUIRE(hw.has_screws_tilt());
+        REQUIRE(hw.screws_tilt_dialect() == ScrewsTiltDialect::Standard);
+    }
+
+    SECTION("configfile key fallback") {
+        // screws_tilt_adjust has no get_status(), so Klipper never lists it in
+        // objects/list — configfile.settings is the reliable source.
+        PrinterDiscovery hw;
+        json config = {{"screws_tilt_adjust", json::object()}};
+        hw.parse_config_keys(config);
+        REQUIRE(hw.has_screws_tilt());
+        REQUIRE(hw.screws_tilt_dialect() == ScrewsTiltDialect::Standard);
+    }
+}
+
+TEST_CASE("PrinterDiscovery detects the Snapmaker auto_screws_tilt_adjust dialect",
+          "[printer_discovery]") {
+    SECTION("objects/list entry sets the capability and the dialect") {
+        PrinterDiscovery hw;
+        json objects = {"extruder", "heater_bed", "auto_screws_tilt_adjust"};
+        hw.parse_objects(objects);
+        REQUIRE(hw.has_screws_tilt());
+        REQUIRE(hw.screws_tilt_dialect() == ScrewsTiltDialect::SnapmakerAuto);
+    }
+
+    SECTION("configfile key sets the capability and the dialect") {
+        PrinterDiscovery hw;
+        json config = {{"auto_screws_tilt_adjust",
+                        {{"screw1", "15,15"}, {"screw1_name", "front left screw"}}}};
+        hw.parse_config_keys(config);
+        REQUIRE(hw.has_screws_tilt());
+        REQUIRE(hw.screws_tilt_dialect() == ScrewsTiltDialect::SnapmakerAuto);
+    }
+}
+
+TEST_CASE("PrinterDiscovery resolves both screws-tilt dialects present to Standard",
+          "[printer_discovery]") {
+    // A user can drop upstream [screws_tilt_adjust] into a U1's
+    // extended/klipper/*.cfg alongside Snapmaker's own section, so both can be
+    // detected at once. SCREWS_TILT_CALCULATE is the simpler, working path, so
+    // Standard wins.
+    SECTION("both objects/list entries") {
+        PrinterDiscovery hw;
+        json objects = {"extruder", "screws_tilt_adjust", "auto_screws_tilt_adjust"};
+        hw.parse_objects(objects);
+        REQUIRE(hw.has_screws_tilt());
+        REQUIRE(hw.screws_tilt_dialect() == ScrewsTiltDialect::Standard);
+    }
+
+    SECTION("both configfile keys") {
+        PrinterDiscovery hw;
+        json config = {{"screws_tilt_adjust", json::object()},
+                       {"auto_screws_tilt_adjust",
+                        {{"screw1", "15,15"}, {"screw1_name", "front left screw"}}}};
+        hw.parse_config_keys(config);
+        REQUIRE(hw.has_screws_tilt());
+        REQUIRE(hw.screws_tilt_dialect() == ScrewsTiltDialect::Standard);
+    }
+}
+
+TEST_CASE("PrinterDiscovery without any screws_tilt module reports no capability",
+          "[printer_discovery]") {
+    PrinterDiscovery hw;
+    hw.parse_objects(json::array({"extruder", "heater_bed", "bed_mesh"}));
+    hw.parse_config_keys(json::object({{"extruder", json::object()}}));
+    REQUIRE_FALSE(hw.has_screws_tilt());
+    // The dialect is meaningless until some screws_tilt module is detected; the
+    // default must not claim the Snapmaker dialect.
+    REQUIRE(hw.screws_tilt_dialect() == ScrewsTiltDialect::Standard);
+}
+
+// ============================================================================
 // Capability Detection Tests - Probes
 // ============================================================================
 
@@ -360,6 +440,23 @@ TEST_CASE("PrinterDiscovery detects macros and caches common patterns", "[printe
         REQUIRE(hw.has_macro("CLEAN_NOZZLE"));
         REQUIRE(hw.has_macro("clean_nozzle"));
         REQUIRE(hw.has_macro("Clean_Nozzle"));
+    }
+}
+
+TEST_CASE("PrinterDiscovery detects the U1 batch feeding macro", "[printer_discovery]") {
+    SECTION("firmware with AUTO_FEEDING_BATCH") {
+        PrinterDiscovery hw;
+        json objects = {"gcode_macro AUTO_FEEDING", "gcode_macro AUTO_FEEDING_BATCH",
+                        "filament_feed left"};
+        hw.parse_objects(objects);
+        REQUIRE(hw.has_auto_feeding_batch());
+    }
+
+    SECTION("firmware with only AUTO_FEEDING") {
+        PrinterDiscovery hw;
+        json objects = {"gcode_macro AUTO_FEEDING", "filament_feed left"};
+        hw.parse_objects(objects);
+        REQUIRE_FALSE(hw.has_auto_feeding_batch());
     }
 }
 
@@ -586,6 +683,17 @@ TEST_CASE("PrinterDiscovery detects new AFC object types", "[printer_discovery][
         for (int i = 0; i < 12; ++i) {
             REQUIRE(lanes[i] == "lane" + std::to_string(i));
         }
+    }
+
+    SECTION("Natural sort: a suffix too long for an int sorts last instead of throwing") {
+        json objects = {"AFC", "AFC_lane lane2", "AFC_lane lane99999999999", "AFC_lane lane1"};
+        hw.parse_objects(objects);
+
+        auto lanes = hw.afc_lane_names();
+        REQUIRE(lanes.size() == 3);
+        REQUIRE(lanes[0] == "lane1");
+        REQUIRE(lanes[1] == "lane2");
+        REQUIRE(lanes[2] == "lane99999999999");
     }
 
     SECTION("Natural sort: buffer names with numeric suffixes") {
@@ -1103,12 +1211,14 @@ TEST_CASE("PrinterDiscovery detects chamber heater and sensor", "[printer_discov
         REQUIRE(hw.supports_chamber());
     }
 
-    SECTION("Both chamber heater and sensor") {
+    SECTION("A chamber heater takes the chamber from a chamber-named probe") {
         json objects = {"heater_generic chamber", "temperature_sensor chamber_temp"};
         hw.parse_objects(objects);
 
         REQUIRE(hw.has_chamber_heater());
-        REQUIRE(hw.has_chamber_sensor());
+        REQUIRE(hw.supports_chamber());
+        // The heater measures its own chamber, so the probe keeps its own role.
+        REQUIRE_FALSE(hw.has_chamber_sensor());
     }
 
     SECTION("Cavity sensor is treated as chamber (Snapmaker U1)") {
@@ -1133,6 +1243,40 @@ TEST_CASE("PrinterDiscovery detects chamber heater and sensor", "[printer_discov
         hw.parse_objects(objects);
 
         REQUIRE(hw.has_chamber_heater());
+    }
+
+    SECTION("A chamber temperature_fan drives the chamber and supplies its reading") {
+        json objects = {"temperature_fan chamber_exhaust_fans", "temperature_sensor mcu_temp"};
+        hw.parse_objects(objects);
+
+        REQUIRE(hw.has_chamber_heater());
+        REQUIRE(hw.chamber_heater_name() == "temperature_fan chamber_exhaust_fans");
+        REQUIRE(hw.supports_chamber());
+        REQUIRE_FALSE(hw.has_chamber_sensor());
+    }
+
+    SECTION("A chamber fan beside a chamber probe takes the chamber in either order") {
+        // The fan drives air temperature, so it reaches the chamber through the
+        // heater slot and the probe keeps its own role. The outcome must not
+        // depend on Moonraker's iteration order.
+        json fan_first = {"temperature_fan chamber", "temperature_sensor chamber"};
+        hw.parse_objects(fan_first);
+        REQUIRE(hw.chamber_heater_name() == "temperature_fan chamber");
+        REQUIRE_FALSE(hw.has_chamber_sensor());
+
+        PrinterDiscovery hw2;
+        json fan_last = {"temperature_sensor chamber", "temperature_fan chamber"};
+        hw2.parse_objects(fan_last);
+        REQUIRE(hw2.chamber_heater_name() == "temperature_fan chamber");
+        REQUIRE_FALSE(hw2.has_chamber_sensor());
+    }
+
+    SECTION("Stronger fan keyword beats weaker sensor keyword for the chamber") {
+        json objects = {"temperature_fan chamber", "temperature_sensor enclosure"};
+        hw.parse_objects(objects);
+
+        REQUIRE(hw.chamber_heater_name() == "temperature_fan chamber");
+        REQUIRE_FALSE(hw.has_chamber_sensor());
     }
 
     SECTION("Box sensor is treated as chamber (Elegoo COSMOS)") {
@@ -1172,8 +1316,8 @@ TEST_CASE("PrinterDiscovery detects chamber heater and sensor", "[printer_discov
         PrinterDiscovery hw2;
         hw2.parse_objects(objects);
 
-        REQUIRE(hw2.has_chamber_sensor());
         REQUIRE(hw2.has_chamber_heater());
+        REQUIRE(hw2.supports_chamber());
     }
 }
 
@@ -1203,7 +1347,7 @@ TEST_CASE("PrinterDiscovery chamber-keyword scoring prefers 'chamber' over 'box'
 
         REQUIRE(hw.chamber_heater_name() == "heater_generic chamber");
         REQUIRE(hw.chamber_heater_object_name() == "chamber");
-        REQUIRE(hw.chamber_sensor_name() == "temperature_sensor Chamber_Thermal_Protection_Sensor");
+        REQUIRE(hw.chamber_sensor_name().empty());
     }
 
     SECTION("QIDI Q2: chamber heater still wins when box1_* objects come LAST") {
@@ -1221,7 +1365,7 @@ TEST_CASE("PrinterDiscovery chamber-keyword scoring prefers 'chamber' over 'box'
 
         REQUIRE(hw.chamber_heater_name() == "heater_generic chamber");
         REQUIRE(hw.chamber_heater_object_name() == "chamber");
-        REQUIRE(hw.chamber_sensor_name() == "temperature_sensor Chamber_Thermal_Protection_Sensor");
+        REQUIRE(hw.chamber_sensor_name().empty());
     }
 
     SECTION("box1_* alone (no chamber) does NOT register as chamber") {
@@ -1264,6 +1408,29 @@ TEST_CASE("PrinterDiscovery chamber-keyword scoring prefers 'chamber' over 'box'
 
         // chamber (conf 100) > enclosure (conf 90)
         REQUIRE(hw.chamber_sensor_name() == "temperature_sensor chamber");
+    }
+
+    SECTION("QIDI Box dryer heaters are never the chamber heater") {
+        json objects = {"box_stepper slot0",
+                        "box_stepper slot1",
+                        "heater_generic heater_box1",
+                        "aht20_f heater_box1",
+                        "heater_generic heater_box2",
+                        "aht20_f heater_box2",
+                        "heater_bed",
+                        "extruder"};
+        hw.parse_objects(objects);
+
+        REQUIRE_FALSE(hw.has_chamber_heater());
+        REQUIRE(hw.chamber_heater_name().empty());
+    }
+
+    SECTION("a real chamber heater alongside QIDI Box heaters is still picked") {
+        json objects = {"heater_generic heater_box1", "heater_generic chamber",
+                        "heater_generic heater_box2", "box_stepper slot0"};
+        hw.parse_objects(objects);
+
+        REQUIRE(hw.chamber_heater_name() == "heater_generic chamber");
     }
 }
 
@@ -1442,7 +1609,7 @@ TEST_CASE("PrinterDiscovery handles full Voron 2.4 config", "[printer_discovery]
     REQUIRE(hw.has_probe());
     REQUIRE(hw.has_heater_bed());
     REQUIRE(hw.has_chamber_heater());
-    REQUIRE(hw.has_chamber_sensor());
+    REQUIRE(hw.supports_chamber());
     REQUIRE(hw.has_led());
 
     // Macros
@@ -1724,6 +1891,80 @@ TEST_CASE("PrinterDiscovery: build volume parsed from configfile.settings steppe
     REQUIRE(discovery.build_volume().z_max == 340.0f);
 }
 
+TEST_CASE("PrinterDiscovery: bed_mesh mesh_min/max declares the plate",
+          "[printer_discovery][build_volume]") {
+    helix::PrinterDiscovery discovery;
+    json settings = {{"stepper_x", {{"position_min", 0.0}, {"position_max", 271.0}}},
+                     {"stepper_y", {{"position_min", 0.0}, {"position_max", 335.0}}},
+                     {"bed_mesh", {{"mesh_min", {3.0, 3.0}}, {"mesh_max", {267.0, 267.0}}}}};
+    REQUIRE(discovery.parse_build_volume(settings));
+    CHECK(discovery.build_volume().y_max == 335.0f);
+    CHECK(discovery.build_volume().plate_x_min == 3.0f);
+    CHECK(discovery.build_volume().plate_x_max == 267.0f);
+    CHECK(discovery.build_volume().plate_y_min == 3.0f);
+    CHECK(discovery.build_volume().plate_y_max == 267.0f);
+
+    // A round bed's mesh is mesh_radius, and a malformed mesh_min is ignored.
+    json delta = {{"stepper_x", {{"position_min", -100.0}, {"position_max", 100.0}}},
+                  {"stepper_y", {{"position_min", -100.0}, {"position_max", 100.0}}},
+                  {"bed_mesh", {{"mesh_radius", 90.0}, {"mesh_min", "3,3"}}}};
+    helix::PrinterDiscovery round;
+    REQUIRE(round.parse_build_volume(delta));
+    CHECK(round.build_volume().plate_x_max == 0.0f);
+    CHECK(round.build_volume().plate_y_max == 0.0f);
+}
+
+TEST_CASE("PrinterDiscovery: sensor toggle command follows a SET_FILAMENT_SENSOR wrapper",
+          "[printer_discovery][filament]") {
+    helix::PrinterDiscovery discovery;
+    REQUIRE(discovery.sensor_toggle_command() == "SET_FILAMENT_SENSOR");
+
+    SECTION("no wrapper keeps the builtin name") {
+        CHECK_FALSE(discovery.parse_sensor_toggle_command(
+            json{{"gcode_macro other", {{"rename_existing", "_OTHER"}}}}));
+        CHECK(discovery.sensor_toggle_command() == "SET_FILAMENT_SENSOR");
+    }
+
+    SECTION("a wrapper's rename_existing names the builtin") {
+        REQUIRE(discovery.parse_sensor_toggle_command(
+            json{{"gcode_macro set_filament_sensor",
+                  {{"rename_existing", "_SET_FILAMENT_SENSOR"}, {"gcode", "..."}}}}));
+        CHECK(discovery.sensor_toggle_command() == "_SET_FILAMENT_SENSOR");
+
+        discovery.clear();
+        CHECK(discovery.sensor_toggle_command() == "SET_FILAMENT_SENSOR");
+    }
+
+    SECTION("a malformed rename_existing is ignored") {
+        CHECK_FALSE(discovery.parse_sensor_toggle_command(
+            json{{"gcode_macro set_filament_sensor", {{"rename_existing", ""}}}}));
+        CHECK_FALSE(discovery.parse_sensor_toggle_command(
+            json{{"gcode_macro set_filament_sensor", {{"rename_existing", 3}}}}));
+        CHECK(discovery.sensor_toggle_command() == "SET_FILAMENT_SENSOR");
+    }
+}
+
+TEST_CASE("PrinterDiscovery: filament diameter comes from the extruder section",
+          "[printer_discovery][filament_diameter]") {
+    helix::PrinterDiscovery discovery;
+    REQUIRE(discovery.filament_diameter_mm() == Catch::Approx(1.75f));
+
+    SECTION("a 2.85 mm extruder is read") {
+        discovery.parse_filament_diameter(json{{"extruder", {{"filament_diameter", 2.85}}}});
+        CHECK(discovery.filament_diameter_mm() == Catch::Approx(2.85f));
+
+        discovery.clear();
+        CHECK(discovery.filament_diameter_mm() == Catch::Approx(1.75f));
+    }
+
+    SECTION("a missing, null or non-positive value keeps the default") {
+        discovery.parse_filament_diameter(json{{"heater_bed", {{"max_temp", 120}}}});
+        discovery.parse_filament_diameter(json{{"extruder", {{"filament_diameter", nullptr}}}});
+        discovery.parse_filament_diameter(json{{"extruder", {{"filament_diameter", 0}}}});
+        CHECK(discovery.filament_diameter_mm() == Catch::Approx(1.75f));
+    }
+}
+
 TEST_CASE("PrinterDiscovery: build volume keeps negative axis minimums",
           "[printer_discovery][build_volume]") {
     // Voron-style configs park X/Y off the bed, so position_min is negative.
@@ -1736,6 +1977,58 @@ TEST_CASE("PrinterDiscovery: build volume keeps negative axis minimums",
     REQUIRE(discovery.build_volume().x_min == -5.0f);
     REQUIRE(discovery.build_volume().y_min == -2.5f);
     REQUIRE(discovery.build_volume().x_max == 355.0f);
+}
+
+TEST_CASE("PrinterDiscovery: build volume carries the firmware's declared bed size",
+          "[printer_discovery][build_volume][1606]") {
+    // Stepper travel also covers overtravel to a purge or nozzle-clean
+    // position, so a bed size the firmware's config declares is read beside it.
+    // Shapes from a real K2 Plus, whose product_param macro variables reach
+    // configfile.settings as strings.
+    auto k2_settings = [](const json& bed_x, const json& bed_y) {
+        return json{{"stepper_x", {{"position_min", -10.0}, {"position_max", 352.5}}},
+                    {"stepper_y", {{"position_min", -6.2}, {"position_max", 400.0}}},
+                    {"gcode_macro product_param",
+                     {{"variable_bed_size_x", bed_x}, {"variable_bed_size_y", bed_y}}}};
+    };
+
+    SECTION("product_param's string variables are stored beside the stepper travel") {
+        helix::PrinterDiscovery discovery;
+        REQUIRE(discovery.parse_build_volume(k2_settings("350", "350")));
+        CHECK(discovery.build_volume().x_max == 352.5f);
+        CHECK(discovery.build_volume().declared_bed_x == 350.0f);
+        CHECK(discovery.build_volume().declared_bed_y == 350.0f);
+    }
+
+    SECTION("numeric variables are read too") {
+        helix::PrinterDiscovery discovery;
+        REQUIRE(discovery.parse_build_volume(k2_settings(300, 300)));
+        CHECK(discovery.build_volume().declared_bed_x == 300.0f);
+        CHECK(discovery.build_volume().declared_bed_y == 300.0f);
+    }
+
+    SECTION("a size that is not a positive number on both axes declares nothing") {
+        const std::vector<std::pair<json, json>> malformed = {
+            {"abc", "350"}, {"350", ""},      {"350mm", "350"},
+            {"0", "0"},     {nullptr, "350"}, {"350", json::array({350})}};
+        for (const auto& [bed_x, bed_y] : malformed) {
+            CAPTURE(bed_x.dump(), bed_y.dump());
+            helix::PrinterDiscovery discovery;
+            REQUIRE_NOTHROW(discovery.parse_build_volume(k2_settings(bed_x, bed_y)));
+            CHECK(discovery.build_volume().x_max == 352.5f);
+            CHECK(discovery.build_volume().declared_bed_x == 0.0f);
+            CHECK(discovery.build_volume().declared_bed_y == 0.0f);
+        }
+    }
+
+    SECTION("a config without product_param declares nothing") {
+        helix::PrinterDiscovery discovery;
+        json settings = k2_settings("350", "350");
+        settings.erase("gcode_macro product_param");
+        REQUIRE(discovery.parse_build_volume(settings));
+        CHECK(discovery.build_volume().declared_bed_x == 0.0f);
+        CHECK(discovery.build_volume().declared_bed_y == 0.0f);
+    }
 }
 
 TEST_CASE("PrinterDiscovery: build volume rejects unusable payloads",
@@ -1779,4 +2072,21 @@ TEST_CASE("PrinterDiscovery: build volume rejects unusable payloads",
         REQUIRE(discovery.build_volume().x_max == 180.0f);
         REQUIRE(discovery.build_volume().y_max == 0.0f);
     }
+}
+
+TEST_CASE("temperature_sensor_objects adds every heater_generic to the sensors",
+          "[printer_discovery][heater_generic]") {
+    helix::PrinterDiscovery hw;
+    hw.parse_objects(json{"extruder", "heater_bed", "heater_generic chamber",
+                          "heater_generic filament_dryer", "temperature_sensor mcu_temp"});
+
+    const auto objects = helix::temperature_sensor_objects(hw);
+    auto has = [&](const char* name) {
+        return std::find(objects.begin(), objects.end(), name) != objects.end();
+    };
+    CHECK(has("temperature_sensor mcu_temp"));
+    CHECK(has("heater_generic chamber"));
+    CHECK(has("heater_generic filament_dryer"));
+    CHECK_FALSE(has("extruder"));
+    CHECK_FALSE(has("heater_bed"));
 }

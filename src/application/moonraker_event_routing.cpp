@@ -81,6 +81,11 @@ MoonrakerEventDecision decide_moonraker_event(MoonrakerEventType type, bool is_e
     if (wizard_active) {
         return {MoonrakerEventRoute::Ignore, nullptr, MoonrakerEventSuppression::Wizard};
     }
+    // A restored connection is good news: a toast, but no history row or bell
+    // count. The loss that preceded it keeps its warning row.
+    if (type == MoonrakerEventType::RECONNECTED) {
+        return {MoonrakerEventRoute::SuccessToast, nullptr, MoonrakerEventSuppression::None};
+    }
     return {MoonrakerEventRoute::WarningToast, nullptr, MoonrakerEventSuppression::None};
 }
 

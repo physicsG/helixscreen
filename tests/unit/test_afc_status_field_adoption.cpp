@@ -32,6 +32,7 @@
  */
 
 #include "active_material_provider.h"
+#include "test_helpers/afc_test_access.h"
 #include "ams_backend_afc.h"
 #include "ams_types.h"
 #include "filament_database.h"
@@ -45,13 +46,15 @@
 using namespace helix;
 using json = nlohmann::json;
 
+namespace helix {
+
 /// Drives the real status parser with no client, the way the fixture-contract
 /// test does, and exposes the version member the readers under test write.
 class AfcStatusFieldHelper : public AmsBackendAfc {
   public:
     AfcStatusFieldHelper() : AmsBackendAfc(nullptr, nullptr) {
         std::vector<std::string> names{"lane1", "lane2"};
-        initialize_slots(names);
+        AfcTestAccess::initialize_slots(*this, names);
     }
 
     void feed_lane(const json& data) {
@@ -71,13 +74,14 @@ class AfcStatusFieldHelper : public AmsBackendAfc {
     }
 
     bool apply_db_version(const json& response) {
-        return apply_afc_version_response(response);
+        return AfcTestAccess::apply_afc_version_response(*this, response);
     }
 
     std::string version() const {
-        return afc_version_;
+        return AfcTestAccess::afc_version(*this);
     }
 };
+} // namespace helix
 
 namespace {
 

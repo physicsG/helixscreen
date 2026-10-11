@@ -22,6 +22,19 @@
 #include <xf86drmMode.h>
 #endif
 
+void DisplayBackend::configure_touch_gestures(lv_indev_t* indev) {
+#if LV_USE_GESTURE_RECOGNITION
+    if (!indev) {
+        return;
+    }
+    lv_indev_set_pinch_up_threshold(indev, 1.15f);
+    lv_indev_set_pinch_down_threshold(indev, 0.85f);
+    lv_indev_set_rotation_rad_threshold(indev, 3.14f);
+#else
+    (void)indev;
+#endif
+}
+
 int DisplayBackend::detect_panel_orientation() {
 #ifdef __linux__
     // Method 1: Parse /proc/cmdline for video=*:panel_orientation=*

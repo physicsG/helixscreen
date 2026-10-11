@@ -8,8 +8,9 @@
  * @brief Double-buffered worker thread for off-screen bed mesh rendering
  *
  * Renders bed mesh frames into pixel buffers in the background so the main
- * LVGL thread can blit the ready buffer without blocking. Uses two PixelBuffers
- * (front/back) and swaps pointers after each completed render.
+ * LVGL thread can blit the ready buffer without blocking. Exactly two
+ * PixelBuffers exist; ownership moves between the render thread and the
+ * consumer by pointer swap under swap_mutex_.
  *
  * Usage:
  *   BedMeshRenderThread rt;
@@ -24,7 +25,7 @@
  *   // ... on mesh data change:
  *   rt.request_render();
  *   // ... in draw callback:
- *   if (auto* buf = rt.get_ready_buffer()) { blit(buf); }
+ *   if (auto* buf = rt.acquire_frame()) { blit(buf); }
  */
 
 #include "bed_mesh_buffer.h"
@@ -54,12 +55,12 @@ class BedMeshRenderThread {
 
     /**
      * Start the render thread with buffer dimensions.
-     * Allocates two PixelBuffers (front + back).
+     * Allocates the two PixelBuffers.
      */
     void start(int width, int height);
 
     /**
-     * Stop and join the thread. Safe to call multiple times.
+     * Stop and join the thread, then free both buffers. Safe to call multiple times.
      * Safe to call if never started.
      */
     void stop();
@@ -85,16 +86,23 @@ class BedMeshRenderThread {
      */
     void request_render();
 
-    /** True if a rendered frame is available for reading. */
+    /** True once the render thread has published at least one frame since start(). */
     bool has_ready_buffer() const;
 
     /**
-     * Get the ready (front) buffer for blitting.
-     * Returns nullptr if no frame has been rendered yet.
-     * Valid until the next buffer swap (when the render thread finishes
-     * its next frame).
+     * Consumer side (main thread only). Takes the newest published frame, if
+     * any, by swapping it with the buffer the consumer was showing; the old
+     * buffer goes back to the render thread. Without a new frame nothing moves
+     * and the same pointer is returned.
+     *
+     * Returns nullptr until the first frame has been taken. The returned buffer
+     * is owned by the consumer and never written by the render thread, so it
+     * stays valid and unchanged until the next acquire_frame() or stop().
      */
-    const PixelBuffer* get_ready_buffer() const;
+    const PixelBuffer* acquire_frame();
+
+    /** Buffers currently allocated (2 while started, 0 otherwise). */
+    int resident_buffer_count() const;
 
     /**
      * Set a callback invoked from the render thread when a frame is ready.
@@ -121,22 +129,9 @@ class BedMeshRenderThread {
         return renderer_mutex_;
     }
 
-    /**
-     * Lock the front buffer for reading. Returns the buffer and a lock guard.
-     * The buffer is guaranteed stable while the guard is alive, preventing
-     * the render thread from swapping buffers during a blit.
-     */
-    struct LockedBuffer {
-        const PixelBuffer* buffer;
-        std::unique_lock<std::mutex> lock;
-        explicit operator bool() const {
-            return buffer != nullptr;
-        }
-    };
-    LockedBuffer lock_ready_buffer() const;
-
   private:
     void render_loop();
+    void return_target(std::unique_ptr<PixelBuffer> buf);
 
     // Thread management
     std::thread thread_;
@@ -145,11 +140,21 @@ class BedMeshRenderThread {
     std::condition_variable cv_;
     std::mutex cv_mutex_;
 
-    // Double buffer: front (read by main thread), back (written by render thread)
-    std::unique_ptr<PixelBuffer> front_buffer_;
-    std::unique_ptr<PixelBuffer> back_buffer_;
+    // Two buffers, each owned by exactly one party at a time (guarded by swap_mutex_):
+    //   back_  - idle, the render thread's next target (null while it renders or a
+    //            finished frame waits in ready_)
+    //   ready_ - finished frame waiting for the consumer
+    //   shown_ - what the consumer is reading; the render thread never touches it
+    // The render thread moves back_ out, renders without the lock, then moves it
+    // into ready_. acquire_frame() swaps ready_ with shown_ and returns the old
+    // shown_ to back_. With no new frame, acquire_frame() copies nothing.
+    std::unique_ptr<PixelBuffer> back_;
+    std::unique_ptr<PixelBuffer> ready_;
+    std::unique_ptr<PixelBuffer> shown_;
     mutable std::mutex swap_mutex_;
+    std::atomic<bool> back_available_{false};
     std::atomic<bool> buffer_ready_{false};
+    bool shown_has_frame_{false}; // main thread only
 
     // Renderer (not owned)
     bed_mesh_renderer_t* renderer_{nullptr};

@@ -46,6 +46,11 @@ concurrency:
   group: test-quality-deep-${{ github.ref }}
   cancel-in-progress: true
 
+# Every patch is judged from clean here (see build.yml for why the flag is
+# environment-wide rather than per-step).
+env:
+  HELIX_PATCHES_FROM_CLEAN: "1"
+
 jobs:
   cov-diff:
     name: Diff coverage
@@ -69,6 +74,7 @@ jobs:
 
     - name: Install build deps
       run: |
+        sudo rm -f /etc/apt/sources.list.d/google-chrome*.list
         sudo apt-get update
         sudo apt-get install -y libsdl2-dev libfmt-dev libcairo2-dev libpango1.0-dev \
           libpng-dev libjpeg-dev libnl-3-dev libnl-genl-3-dev
@@ -112,6 +118,7 @@ jobs:
 
     - name: Install build deps
       run: |
+        sudo rm -f /etc/apt/sources.list.d/google-chrome*.list
         sudo apt-get update
         sudo apt-get install -y libsdl2-dev libfmt-dev libcairo2-dev libpango1.0-dev \
           libpng-dev libjpeg-dev libnl-3-dev libnl-genl-3-dev
@@ -128,6 +135,10 @@ jobs:
     #
     # A SURVIVED hunk fails the job. That means no test in the scoped filter
     # detects that change, whatever test files the diff also touched.
+    #
+    # An INCOMPLETE run fails it too (exit 3): the gate answers CLEAN only when
+    # it examined the whole change, so a diff carrying paths it cannot mutate --
+    # or a run narrowed by `limit` -- is reported rather than passed.
     - name: Revert each hunk and look for red
       timeout-minutes: 330
       run: |

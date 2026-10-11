@@ -69,6 +69,8 @@ import re
 import subprocess
 import sys
 
+from staged_content import catfile_batch
+
 SCAN_DIR = os.path.join('ui_xml', 'components')
 SCAN_GLOB = 'panel_widget_*.xml'
 
@@ -145,32 +147,6 @@ def _git_text(args, root):
                           capture_output=True, text=True, check=False).stdout
 
 
-def _catfile_batch(root, revs, rels):
-    """Yield (rel, text) for each blob rev via one `git cat-file --batch`.
-
-    The byte-count header makes this robust to newlines/binary in content, and
-    one streaming process beats spawning a `git show` per file.
-    """
-    proc = subprocess.Popen(['git', '-C', root, 'cat-file', '--batch'],
-                            stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-    try:
-        for rev, rel in zip(revs, rels):
-            proc.stdin.write((rev + '\n').encode())
-            proc.stdin.flush()
-            header = proc.stdout.readline().decode('utf-8', 'replace').split()
-            # "<sha> blob <size>" - skip "missing" / non-blob (submodule) entries.
-            if len(header) < 3 or header[1] != 'blob':
-                continue
-            size = int(header[2])
-            content = proc.stdout.read(size)
-            proc.stdout.read(1)  # trailing newline after each blob
-            yield (rel, content.decode('utf-8', 'ignore'))
-    finally:
-        if proc.stdin is not None:
-            proc.stdin.close()
-        proc.wait()
-
-
 def _in_scope(rel):
     """True if rel is a file the gate scans - mirrors the default walk's scope.
 
@@ -216,7 +192,7 @@ def collect(args, root):
             return  # not a git repo / no index - nothing to check
         rels = [f for f in _git_text(['ls-tree', '-r', '--name-only', tree],
                                      root).split('\n') if f and _in_scope(f)]
-        yield from _catfile_batch(root, [f'{tree}:{r}' for r in rels], rels)
+        yield from catfile_batch(((r, f'{tree}:{r}') for r in rels), root)
         return
 
     # Default: the whole working tree, relative to wherever the gate was run.

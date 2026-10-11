@@ -16,7 +16,7 @@ namespace helix::ui {
 namespace {
 
 /// Where the filament stopped, as a PathSegment. 0 (NONE) hides the graphic.
-lv_subject_t g_fault_segment;
+lv_subject_t g_fault_segment{};
 SubjectManager g_subjects;
 bool g_initialized = false;
 

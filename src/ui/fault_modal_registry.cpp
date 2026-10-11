@@ -32,6 +32,50 @@ void forget_fault_modal(lv_event_t* e) {
     }
 }
 
+// The dialog currently restating the printer fault, or nullptr.
+lv_obj_t* s_fault_carrier = nullptr;
+
+void forget_fault_carrier(lv_event_t* e) {
+    if (lv_event_get_target(e) == s_fault_carrier) {
+        s_fault_carrier = nullptr;
+    }
+}
+
+// True when `dialog` is on the stack and not already animating out.
+bool modal_live(lv_obj_t* dialog) {
+    auto& stack = ModalStack::instance();
+    lv_obj_t* backdrop = stack.backdrop_for(dialog);
+    return backdrop && !stack.is_exiting(backdrop);
+}
+
+// Hide every tracked fault modal still live; returns how many it hid.
+int hide_fault_modals() {
+    if (s_fault_modals.empty()) {
+        return 0;
+    }
+
+    // Modal::hide() can delete the backdrop synchronously when there is no exit
+    // animation to run, which fires forget_fault_modal() and mutates
+    // s_fault_modals mid-iteration. Walk a detached copy.
+    std::vector<lv_obj_t*> pending;
+    pending.swap(s_fault_modals);
+
+    int dismissed = 0;
+    for (lv_obj_t* dialog : pending) {
+        // Untracked = already acknowledged and the widgets are gone. Exiting =
+        // acknowledged a frame ago and still animating out. Counting either
+        // would report dismissals this sweep did not make.
+        if (!modal_live(dialog)) {
+            continue;
+        }
+        // External, not Programmatic: this sweep is not the dialog's caller,
+        // so on_dismiss still reports the close to whoever armed it.
+        Modal::hide(dialog, ModalCloseReason::External);
+        dismissed++;
+    }
+    return dismissed;
+}
+
 } // namespace
 
 void track_fault_modal(lv_obj_t* dialog) {
@@ -44,36 +88,42 @@ void track_fault_modal(lv_obj_t* dialog) {
 }
 
 int dismiss_fault_modals() {
-    if (s_fault_modals.empty()) {
-        return 0;
-    }
-
-    // Modal::hide() can delete the backdrop synchronously when there is no exit
-    // animation to run, which fires forget_fault_modal() and mutates
-    // s_fault_modals mid-iteration. Walk a detached copy.
-    std::vector<lv_obj_t*> pending;
-    pending.swap(s_fault_modals);
-
-    auto& stack = ModalStack::instance();
-    int dismissed = 0;
-    for (lv_obj_t* dialog : pending) {
-        lv_obj_t* backdrop = stack.backdrop_for(dialog);
-        // Untracked = already acknowledged and the widgets are gone. Exiting =
-        // acknowledged a frame ago and still animating out. Counting either
-        // would report dismissals this sweep did not make.
-        if (!backdrop || stack.is_exiting(backdrop)) {
-            continue;
-        }
-        // External, not Programmatic: this sweep is not the dialog's caller,
-        // so on_dismiss still reports the close to whoever armed it.
-        Modal::hide(dialog, ModalCloseReason::External);
-        dismissed++;
-    }
-
+    const int dismissed = hide_fault_modals();
     if (dismissed > 0) {
         spdlog::info("[FaultModal] Printer fault cleared - dismissed {} stale modal(s)", dismissed);
     }
     return dismissed;
+}
+
+void set_fault_carrier(lv_obj_t* dialog) {
+    // Callers may hold a dialog a backdrop tap already deleted. backdrop_for()
+    // only compares pointers, so asking about a dead one is safe.
+    if (dialog && !modal_live(dialog)) {
+        dialog = nullptr;
+    }
+    if (dialog == s_fault_carrier) {
+        return;
+    }
+    s_fault_carrier = dialog;
+    if (!dialog) {
+        return;
+    }
+    // DECLARATIVE_OK: LV_EVENT_DELETE cleanup has no declarative equivalent.
+    lv_obj_remove_event_cb(dialog, forget_fault_carrier);
+    lv_obj_add_event_cb(dialog, forget_fault_carrier, LV_EVENT_DELETE, nullptr);
+    const int dismissed = hide_fault_modals();
+    if (dismissed > 0) {
+        spdlog::info("[FaultModal] Fault now shown by another dialog - dismissed {} modal(s)",
+                     dismissed);
+    }
+}
+
+bool fault_carrier_showing() {
+    return s_fault_carrier && modal_live(s_fault_carrier);
+}
+
+bool fault_alert_gets_modal(bool modal, bool fault) {
+    return modal && !(fault && fault_carrier_showing());
 }
 
 int tracked_fault_modal_count() {

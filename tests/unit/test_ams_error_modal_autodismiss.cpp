@@ -63,7 +63,7 @@ class FaultCountingBackend : public AmsBackendMock {
 /// XMLTestFixture plus the AmsPanel scaffold every case below needs.
 class AmsErrorModalFixture : public XMLTestFixture {
   public:
-    /// Drain queued observer callbacks, then let LVGL settle. observe_int_sync
+    /// Drain queued observer callbacks, then let LVGL settle. observe<int>
     /// defers handlers onto the UpdateQueue, so both halves are required.
     void pump(int ms = 20) {
         helix::ui::UpdateQueue::instance().drain();
@@ -96,12 +96,14 @@ class AmsErrorModalFixture : public XMLTestFixture {
         auto* obj = static_cast<lv_obj_t*>(lv_xml_create(test_screen(), "ams_panel", nullptr));
         REQUIRE(obj != nullptr);
         panel.setup(obj, test_screen());
+        panel.on_activate(); // shown, the way a push shows it
         lv_obj_update_layout(test_screen());
         pump(50);
         return obj;
     }
 
     void teardown_panel(AmsPanel& panel, lv_obj_t* obj) {
+        panel.on_deactivate(DeactivateReason::NavigateAway);
         panel.clear_panel_reference();
         lv_obj_delete(obj);
         pump(20);
@@ -111,7 +113,8 @@ class AmsErrorModalFixture : public XMLTestFixture {
     }
 
     void set_print_state(helix::PrintJobState s) {
-        lv_subject_set_int(state().get_print_state_enum_subject(), static_cast<int>(s));
+        lv_subject_set_int(state().print_state().get_print_state_enum_subject(),
+                           static_cast<int>(s));
     }
 
     /// Drive the real inputs so print_lifecycle is republished alongside the
@@ -123,7 +126,7 @@ class AmsErrorModalFixture : public XMLTestFixture {
     /// edge-into-Printing observer would fire on, making the keep-raw case pass
     /// against a lifecycle reader it is supposed to catch.
     void set_wire_and_phase(helix::PrintJobState s, helix::PrintStartPhase phase) {
-        state().set_print_start_state(phase, "", 0);
+        state().print_state().set_print_start_state(phase, "", 0);
         pump();
         helix::test::set_wire_state(state(), s);
         pump();
@@ -313,11 +316,11 @@ TEST_CASE_METHOD(AmsErrorModalFixture,
     REQUIRE(panel.is_error_modal_visible());
 
     // Further PRINTING updates are not transitions and must leave it alone.
-    lv_subject_notify(state().get_print_state_enum_subject());
+    lv_subject_notify(state().print_state().get_print_state_enum_subject());
     pump();
     CHECK(panel.is_error_modal_visible());
 
-    lv_subject_notify(state().get_print_state_enum_subject());
+    lv_subject_notify(state().print_state().get_print_state_enum_subject());
     pump();
     CHECK(panel.is_error_modal_visible());
 
@@ -327,15 +330,17 @@ TEST_CASE_METHOD(AmsErrorModalFixture,
 TEST_CASE_METHOD(AmsErrorModalFixture,
                  "AmsPanel observers' first tick is not a transition (#1185 sentinel)",
                  "[ui_integration][ams][regression][1185]") {
-    // Both observers sync once at registration; observe_int_sync defers that
+    // Both observers sync once at registration; observe<int> defers that
     // tick onto the UpdateQueue, so it lands AFTER setup() when the panel can
     // actually show a modal. With the AMS already faulted and the print already
     // running, the action tick shows the dialog and the print tick follows
     // immediately — the -1 sentinel is what stops that first tick from being
     // read as an edge into PRINTING and tearing the dialog straight back down.
-    install_backend();
+    auto* backend = install_backend();
     set_print_state(helix::PrintJobState::PRINTING);
-    AmsState::instance().set_action(AmsAction::ERROR);
+    // Faulted in the backend itself, so the sync an open runs keeps it faulted.
+    backend->simulate_error(AmsResult::FILAMENT_JAM);
+    AmsState::instance().sync_from_backend();
 
     AmsPanel panel(state(), &api());
     lv_obj_t* obj = build_panel(panel);
@@ -371,7 +376,7 @@ TEST_CASE_METHOD(AmsErrorModalFixture,
     REQUIRE(panel.is_error_modal_visible());
 
     set_wire_and_phase(helix::PrintJobState::PRINTING, helix::PrintStartPhase::HOMING);
-    REQUIRE(state().get_print_lifecycle() == PrintState::Preparing);
+    REQUIRE(state().print_state().get_print_lifecycle() == PrintState::Preparing);
 
     CHECK_FALSE(panel.is_error_modal_visible());
 

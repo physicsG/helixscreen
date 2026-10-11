@@ -13,7 +13,6 @@ regen-filaments:
 	@python3 scripts/import_orca_filaments.py \
 		--orca "$(ORCA_TMP)/resources/profiles" \
 		--cfs-seed scripts/fixtures/cfs_seed.json \
-		--type-ranges scripts/fixtures/type_ranges.json \
 		--orca-tag $(ORCA_TAG) \
 		--out assets/filaments.json
 	@rm -rf "$(ORCA_TMP)"

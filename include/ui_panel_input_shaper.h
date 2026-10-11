@@ -13,6 +13,7 @@
 #include "overlay_base.h"
 #include "platform_capabilities.h"
 #include "shaper_selection.h"
+#include "static_panel_registry.h"
 #include "subject_managed_panel.h"
 
 #include <algorithm>
@@ -64,8 +65,7 @@ struct InputShaperPanelTestAccess; // test-only friend (tests/test_helpers/)
  * ```cpp
  * InputShaperPanel& panel = get_global_input_shaper_panel();
  * panel.init_subjects();  // Once at startup
- * panel.create(screen);   // Lazy create
- * panel.show();           // Opens overlay
+ * panel.show(screen);   // Creates on first open
  * ```
  */
 class InputShaperPanel : public OverlayBase {
@@ -121,8 +121,16 @@ class InputShaperPanel : public OverlayBase {
      * @brief Get human-readable overlay name
      * @return "Input Shaper"
      */
+    /// Freed on close; the next open rebuilds it.
+    bool destroy_on_close() const override {
+        return true;
+    }
+
     const char* get_name() const override {
         return "Input Shaper";
+    }
+    const char* xml_component() const override {
+        return "input_shaper_panel";
     }
 
     /**
@@ -137,7 +145,7 @@ class InputShaperPanel : public OverlayBase {
      *
      * Cancels calibration if in progress.
      */
-    void on_deactivate() override;
+    void on_deactivating(DeactivateReason reason) override;
 
     /**
      * @brief Clean up resources for async-safe destruction
@@ -152,14 +160,6 @@ class InputShaperPanel : public OverlayBase {
     //
     // === Public API ===
     //
-
-    /**
-     * @brief Show overlay panel
-     *
-     * Pushes overlay onto navigation stack and registers with NavigationManager.
-     * on_activate() will be called automatically after animation completes.
-     */
-    void show();
 
     /**
      * @brief Set Moonraker client and API for G-code commands
@@ -186,12 +186,10 @@ class InputShaperPanel : public OverlayBase {
     void handle_calibrate_x_clicked();
     void handle_calibrate_y_clicked();
     void handle_calibrate_all_clicked();
-    void handle_measure_noise_clicked();
     void handle_cancel_clicked();
     void handle_apply_clicked();
     void handle_close_clicked();
     void handle_retry_clicked();
-    void handle_save_config_clicked();
     void handle_save_clicked();
     void handle_print_test_pattern_clicked();
     void handle_help_clicked();
@@ -211,7 +209,6 @@ class InputShaperPanel : public OverlayBase {
 
     // Calibration commands
     void start_calibration(char axis);
-    void measure_noise();
     void cancel_calibration();
     void apply_recommendation();
     void save_configuration();
@@ -294,7 +291,6 @@ class InputShaperPanel : public OverlayBase {
     [[nodiscard]] helix::calibration::SelectedShaper selected_shaper_for(char axis) const;
 
     // Widget/client references (overlay_root_ inherited from OverlayBase)
-    lv_obj_t* parent_screen_ = nullptr;
     helix::IMoonrakerClient* client_ = nullptr;
     IMoonrakerAPI* api_ = nullptr;
 
@@ -557,6 +553,7 @@ class InputShaperPanel : public OverlayBase {
 };
 
 // Global instance accessor
+// Defined out of line: the ESP32 build, which excludes this panel, supplies its own.
 InputShaperPanel& get_global_input_shaper_panel();
 
 /**

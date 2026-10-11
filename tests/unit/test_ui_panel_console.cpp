@@ -19,31 +19,21 @@
 
 #include "../catch_amalgamated.hpp"
 
-// Tap-to-paste tests call the real ConsolePanel::find_entry_by_id, unlike the
-// replicated helpers below. ui_panel_console.o is linked into the test binary
+// Tap-to-paste tests call the real ConsolePanel::find_entry_by_id.
+// ui_panel_console.o is linked into the test binary
 // (it is absent from the TEST_APP_OBJS filter-out list in mk/tests.mk).
 #include "ui_panel_console.h"
 
-// ============================================================================
-// Test is_error_message() detection logic
-// (Replicated from ui_panel_console.cpp since it's a private static method)
-// ============================================================================
+// The pure line decisions under test, shared by the console overlay and the
+// home console tile.
+#include "console_line.h"
 
-static bool is_error_message(const std::string& message) {
-    if (message.size() >= 2 && message[0] == '!' && message[1] == '!') {
-        return true;
-    }
-
-    if (message.size() >= 5) {
-        auto ci_eq = [](char a, char b) {
-            return std::tolower(static_cast<unsigned char>(a)) ==
-                   std::tolower(static_cast<unsigned char>(b));
-        };
-        return std::equal(message.begin(), message.begin() + 5, "error", ci_eq);
-    }
-
-    return false;
-}
+namespace {
+const auto is_error_message = &helix::ui::is_console_error_message;
+const auto is_temp_message = &helix::ui::is_console_temp_message;
+const auto contains_html_spans = &helix::ui::contains_console_html_spans;
+const auto parse_html_spans = &helix::ui::parse_console_html_spans;
+} // namespace
 
 // ============================================================================
 // Error Message Detection Tests
@@ -107,43 +97,6 @@ TEST_CASE("Console: typical Klipper info messages", "[ui][error_detection]") {
     REQUIRE(is_error_message("// probe at 150.000,150.000 is z=1.234567") == false);
     REQUIRE(is_error_message("echo: G28 homing completed") == false);
     REQUIRE(is_error_message("Recv: ok") == false);
-}
-
-// ============================================================================
-// Temperature Message Filtering Tests
-// (Replicated from ui_panel_console.cpp since it's a private static method)
-// ============================================================================
-
-/**
- * @brief Check if a message is a temperature status update
- *
- * Filters out periodic temperature reports like:
- * "ok T:210.0 /210.0 B:60.0 /60.0"
- */
-static bool is_temp_message(const std::string& message) {
-    if (message.empty()) {
-        return false;
-    }
-
-    // Check for "T:" or "B:" followed immediately by a digit, with "/" somewhere after
-    size_t t_pos = message.find("T:");
-    size_t b_pos = message.find("B:");
-
-    auto check_temp_pattern = [&](size_t pos) -> bool {
-        if (pos == std::string::npos)
-            return false;
-        // Require digit immediately after the colon (e.g. "T:210" not "T: see docs")
-        size_t val_start = pos + 2; // skip "T:" or "B:"
-        if (val_start < message.size() &&
-            std::isdigit(static_cast<unsigned char>(message[val_start]))) {
-            // Also require "/" somewhere after the pattern (target temp separator)
-            size_t slash_pos = message.find('/', val_start);
-            return slash_pos != std::string::npos;
-        }
-        return false;
-    };
-
-    return check_temp_pattern(t_pos) || check_temp_pattern(b_pos);
 }
 
 // ============================================================================
@@ -340,95 +293,6 @@ TEST_CASE("Console: command history deque operations", "[ui][command_history]") 
 }
 
 // ============================================================================
-// HTML Span Parsing
-// (Replicated from ui_panel_console.cpp since it's in anonymous namespace)
-// ============================================================================
-
-static constexpr const char SPAN_OPEN[] = "<span class=";
-static constexpr size_t SPAN_OPEN_LEN = sizeof(SPAN_OPEN) - 1;
-static constexpr const char SPAN_CLOSE[] = "</span>";
-static constexpr size_t SPAN_CLOSE_LEN = sizeof(SPAN_CLOSE) - 1;
-
-struct TextSegment {
-    std::string text;
-    std::string color_class; // empty = default, "success", "info", "warning", "error"
-};
-
-static std::string extract_color_class(const std::string& class_attr) {
-    static constexpr std::pair<const char*, const char*> mappings[] = {
-        {"success--text", "success"},
-        {"info--text", "info"},
-        {"warning--text", "warning"},
-        {"error--text", "error"},
-    };
-    for (const auto& [pattern, name] : mappings) {
-        if (class_attr.find(pattern) != std::string::npos) {
-            return name;
-        }
-    }
-    return {};
-}
-
-static bool contains_html_spans(const std::string& message) {
-    return message.find(SPAN_OPEN) != std::string::npos &&
-           (message.find("success--text") != std::string::npos ||
-            message.find("info--text") != std::string::npos ||
-            message.find("warning--text") != std::string::npos ||
-            message.find("error--text") != std::string::npos);
-}
-
-static std::vector<TextSegment> parse_html_spans(const std::string& message) {
-    std::vector<TextSegment> segments;
-
-    size_t pos = 0;
-    const size_t len = message.size();
-
-    while (pos < len) {
-        size_t span_start = message.find(SPAN_OPEN, pos);
-
-        if (span_start == std::string::npos) {
-            std::string remaining = message.substr(pos);
-            if (!remaining.empty()) {
-                segments.push_back({std::move(remaining), {}});
-            }
-            break;
-        }
-
-        if (span_start > pos) {
-            segments.push_back({message.substr(pos, span_start - pos), {}});
-        }
-
-        size_t class_start = span_start + SPAN_OPEN_LEN;
-        size_t class_end = message.find('>', class_start);
-
-        if (class_end == std::string::npos) {
-            segments.push_back({message.substr(span_start), {}});
-            break;
-        }
-
-        std::string color_class =
-            extract_color_class(message.substr(class_start, class_end - class_start));
-
-        size_t content_start = class_end + 1;
-        size_t span_close = message.find(SPAN_CLOSE, content_start);
-
-        if (span_close == std::string::npos) {
-            segments.push_back({message.substr(content_start), color_class});
-            break;
-        }
-
-        std::string content = message.substr(content_start, span_close - content_start);
-        if (!content.empty()) {
-            segments.push_back({std::move(content), std::move(color_class)});
-        }
-
-        pos = span_close + SPAN_CLOSE_LEN;
-    }
-
-    return segments;
-}
-
-// ============================================================================
 // HTML Span Detection Tests
 // ============================================================================
 
@@ -568,9 +432,7 @@ TEST_CASE("Console: parse_html_spans() quoted class attribute", "[ui][html_parse
 // Tap-to-Paste: entry id resolution
 //
 // These exercise the REAL ConsolePanel::find_entry_by_id, not a replica. The
-// function is static and takes the container, so no panel instance is built —
-// see docs/devel/specs/2026-07-20-print-status-panel-test-isolation.md for why
-// constructing a panel in a test is unsafe.
+// function is static and takes the container, so no panel instance is built.
 // ============================================================================
 
 namespace {

@@ -64,8 +64,8 @@ TEST_CASE_METHOD(XMLTestFixture, "hide_target_when_off hides the target while th
     REQUIRE(hides_when_off != nullptr);
     REQUIRE(always != nullptr);
 
-    lv_subject_t* target_subj = state().get_active_extruder_target_subject();
-    lv_subject_t* current_subj = state().get_active_extruder_temp_subject();
+    lv_subject_t* target_subj = state().temperature_state().get_active_extruder_target_subject();
+    lv_subject_t* current_subj = state().temperature_state().get_active_extruder_temp_subject();
 
     auto settle = [&](int current_deci, int target_deci) {
         lv_subject_set_int(target_subj, target_deci);

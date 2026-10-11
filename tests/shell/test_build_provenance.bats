@@ -8,6 +8,8 @@
 # evidence you collected on a printer turns out to be unattributable, or when
 # `helix-screen ctl` cannot reach a device you deliberately built ctl into.
 
+load helpers
+
 setup() {
     cd "$BATS_TEST_DIRNAME/../.." || return 1
 }
@@ -95,8 +97,14 @@ setup() {
 @test "DOCKER_HOST_CONTEXT carries both the worktree mount and the git hash" {
     run grep -E '^DOCKER_HOST_CONTEXT *=' mk/cross.mk
     [ "$status" -eq 0 ]
-    [[ "$output" == *'DOCKER_WORKTREE_MOUNT'* ]]
+    contains 'DOCKER_WORKTREE_MOUNT' "$output"
     [[ "$output" == *'DOCKER_GIT_HASH_ENV'* ]]
+}
+
+@test "DOCKER_HOST_CONTEXT runs an init so make is not the container's PID 1" {
+    run grep -E '^DOCKER_HOST_CONTEXT *=' mk/cross.mk
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'--init'* ]]
 }
 
 @test "an inherited HELIX_GIT_HASH wins over the local git lookup" {
@@ -174,6 +182,14 @@ PY
 # rig you cannot drive reads as "ctl is broken", and a release that ships the
 # server exposes a socket that can drive the whole UI on a customer's printer.
 
+@test "a container build leaves the tree's compile_commands.json alone" {
+    # Its fragments name /src, a path the host's syntax check cannot open.
+    run make -n mips-docker
+    [ "$status" -eq 0 ]
+    contains 'toolchain-mips' "$output"
+    contains '-e SKIP_COMPILE_COMMANDS=1' "$output"
+}
+
 @test "a developer cross build gets the remote-control server" {
     run make -n k2-docker
     [ "$status" -eq 0 ]
@@ -186,25 +202,25 @@ PY
     # was emitted is what proves make expanded the recipe before it stopped —
     # without it, a makefile that failed EARLIER would read green.
     run make -n package-k2
-    [[ "$output" == *'toolchain-k2'* ]]
-    [[ "$output" == *'ENABLE_REMOTE_CONTROL=no'* ]]
+    contains 'toolchain-k2' "$output"
+    contains 'ENABLE_REMOTE_CONTROL=no' "$output"
     [[ "$output" != *'ENABLE_REMOTE_CONTROL=yes'* ]]
 }
 
 @test "an explicit ENABLE_REMOTE_CONTROL still wins over the default" {
     run make -n k2-docker ENABLE_REMOTE_CONTROL=no
     [ "$status" -eq 0 ]
-    [[ "$output" == *'ENABLE_REMOTE_CONTROL=no'* ]]
+    contains 'ENABLE_REMOTE_CONTROL=no' "$output"
     [[ "$output" != *'ENABLE_REMOTE_CONTROL=yes'* ]]
 }
 
 @test "package-% marks packaging for every platform, shared docker targets included" {
-    # package-k1 and package-ad5x both drive mips-docker. A per-target variable
-    # written on the docker rule instead of the package rule would give one of
-    # them the developer default.
-    for t in package-ad5m package-cc1 package-pi package-pi32 package-k1 \
-             package-ad5x package-k1-dynamic package-k2 package-snapmaker-u1 \
-             package-x86; do
+    # package-mips, package-k1 and package-ad5x all drive mips-docker. A
+    # per-target variable written on the docker rule instead of the package rule
+    # would give one of them the developer default.
+    for t in package-ad5m package-cc1 package-pi package-pi32 package-mips \
+             package-k1 package-ad5x package-k1-dynamic package-k2 \
+             package-snapmaker-u1 package-x86; do
         run make -n "$t"
         # See the note above on why status is not asserted here.
         [[ "$output" == *'ENABLE_REMOTE_CONTROL=no'* ]] || {

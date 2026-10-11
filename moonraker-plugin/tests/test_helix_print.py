@@ -181,22 +181,73 @@ class MockKlippyApis:
         self.get_klippy_info = AsyncMock(return_value={})
 
 
+class PrinterJob:
+    """Stand-in for Moonraker's PrinterJob with the same attribute round-trip.
+
+    HelixPrint resolves PrinterJob from the module that defines the live
+    history component, so MockHistory's module has to offer one.
+    """
+
+    def __init__(self, data: Dict[str, Any] = None):
+        self.user = "No User"
+        self.filename = None
+        self.status = "in_progress"
+        self.start_time = 0.0
+        self.end_time = None
+        self.print_duration = 0.0
+        self.total_duration = 0.0
+        self.filament_used = 0.0
+        self.metadata: Dict[str, Any] = {}
+        self.auxiliary_data: list = []
+        self.update_from_ps(data or {})
+
+    def update_from_ps(self, data: Dict[str, Any]) -> None:
+        for i in data:
+            if hasattr(self, i) and data[i] is not None:
+                setattr(self, i, data[i])
+
+
 class MockHistory:
     """Mock history component for testing.
 
-    Mirrors the real Moonraker v0.10.0 `history` component: get_job(job_id) and
-    save_job(job, job_id). There is NO `modify_job` - that method does not exist
-    on modern Moonraker. HelixPrint's history filename-patching feature degrades
-    safely (best-effort) when it isn't available; see
-    HelixPrint._patch_history_entry.
+    Mirrors the real Moonraker v0.10.0 `history` component: get_job(job_id)
+    accepts a hex string or an int and returns a plain column dict, and
+    save_job(job, job_id) takes a PrinterJob plus the numeric id. There is no
+    `modify_job` - that method is not part of the component.
     """
 
     def __init__(self):
-        self.jobs = {}
+        self.jobs: Dict[int, Dict[str, Any]] = {}
         self.save_job_calls = []
 
-    async def get_job(self, job_id: str):
-        return self.jobs.get(job_id)
+    @staticmethod
+    def _key(job_id) -> int:
+        return int(job_id, 16) if isinstance(job_id, str) else int(job_id)
+
+    def add_job(self, job_id, **columns) -> Dict[str, Any]:
+        """Seed a job row with the columns job_history actually carries."""
+        key = self._key(job_id)
+        job = {
+            "job_id": f"{key:06X}",
+            "user": "helix",
+            "filename": ".helix_print/abcd_benchy.gcode",
+            "status": "completed",
+            "start_time": 100.0,
+            "end_time": 200.0,
+            "print_duration": 90.0,
+            "total_duration": 100.0,
+            "filament_used": 1.5,
+            "metadata": {},
+            "auxiliary_data": [],
+            "instance_id": "default",
+        }
+        job.update(columns)
+        self.jobs[key] = job
+        return job
+
+    async def get_job(self, job_id):
+        job = self.jobs.get(self._key(job_id))
+        return dict(job) if job is not None else None
 
     async def save_job(self, job, job_id=None):
         self.save_job_calls.append((job, job_id))
@@ -373,7 +424,7 @@ class TestStatusAPI:
         assert result["temp_dir"] == ".helix_temp"
         assert result["symlink_dir"] == ".helix_print"
         assert result["cleanup_delay"] == 3600
-        assert result["version"] == "1.0.1"
+        assert result["version"] == "1.1.0"
         assert result["active_prints"] == 0
 
 
@@ -500,7 +551,7 @@ class TestPrintModifiedAPI:
         klippy_apis = mock_server.components["klippy_apis"]
         assert klippy_apis.run_gcode.await_count == 1
         sent_command = klippy_apis.run_gcode.await_args.args[0]
-        assert ".helix_print/benchy.gcode" in sent_command
+        assert ".helix_print/full/benchy.gcode" in sent_command
 
     @pytest.mark.asyncio
     async def test_print_start_calls_klippy_apis_not_klippy_connection(
@@ -540,7 +591,7 @@ class TestPrintModifiedAPI:
         assert klippy_apis.run_gcode.await_count == 1
         sent_command = klippy_apis.run_gcode.await_args.args[0]
         assert "SDCARD_PRINT_FILE" in sent_command
-        assert 'FILENAME=".helix_print/benchy.gcode"' in sent_command
+        assert 'FILENAME=".helix_print/full/benchy.gcode"' in sent_command
 
         # klippy_connection must never be touched for this - it has no
         # run_gcode method on real Moonraker.
@@ -598,7 +649,8 @@ class TestSymlinkConflicts:
         # Create existing symlink
         symlink_dir = Path(temp_gcodes_dir) / ".helix_print"
         symlink_dir.mkdir(parents=True, exist_ok=True)
-        existing_symlink = symlink_dir / "benchy.gcode"
+        existing_symlink = symlink_dir / "full" / "benchy.gcode"
+        existing_symlink.parent.mkdir(parents=True, exist_ok=True)
         existing_symlink.symlink_to("/nonexistent")
 
         # Initialize component
@@ -692,711 +744,421 @@ class TestPathValidation:
         result = await handler(request)
         assert result["status"] == "printing"
 
+    @staticmethod
+    def _stage_nested(gcodes_dir):
+        subdir = Path(gcodes_dir) / "prints" / "2024"
+        subdir.mkdir(parents=True, exist_ok=True)
+        (subdir / "benchy.gcode").write_text("G28\n")
+        temp_dir = Path(gcodes_dir) / ".helix_temp"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        (temp_dir / "mod_benchy.gcode").write_text("G28\n")
+        return MockWebRequest({
+            "original_filename": "prints/2024/benchy.gcode",
+            "temp_file_path": ".helix_temp/mod_benchy.gcode",
+            "modifications": [],
+        })
+
+    @pytest.mark.asyncio
+    async def test_symlink_mirrors_the_original_full_path(
+        self, helix_print_component, mock_server, temp_gcodes_dir
+    ):
+        """The printed filename names the original's whole path, so a client
+        recovers it from print_stats alone."""
+        request = self._stage_nested(temp_gcodes_dir)
+        await helix_print_component.component_init()
+
+        result = await mock_server.endpoints["/server/helix/print_modified"](request)
+
+        assert result["print_filename"] == ".helix_print/full/prints/2024/benchy.gcode"
+        assert (Path(temp_gcodes_dir) / result["print_filename"]).is_symlink()
+
+    @pytest.mark.asyncio
+    async def test_rejects_a_symlink_path_that_escapes(
+        self, helix_print_component, mock_server, temp_gcodes_dir
+    ):
+        """A directory under the symlink dir that links back into the user's
+        files cannot carry the print symlink there, where it would replace the
+        original itself."""
+        request = self._stage_nested(temp_gcodes_dir)
+        await helix_print_component.component_init()
+        user_dir = Path(temp_gcodes_dir) / "prints"
+        full_dir = Path(temp_gcodes_dir) / ".helix_print" / "full"
+        full_dir.mkdir(parents=True, exist_ok=True)
+        (full_dir / "prints").symlink_to(user_dir)
+
+        with pytest.raises(Exception) as exc_info:
+            await mock_server.endpoints["/server/helix/print_modified"](request)
+
+        assert "traversal" in str(exc_info.value).lower()
+        original = user_dir / "2024" / "benchy.gcode"
+        assert not original.is_symlink()
+        assert original.read_text() == "G28\n"
+
+    @pytest.mark.asyncio
+    async def test_cleanup_removes_the_empty_directories(
+        self, helix_print_component, mock_server, temp_gcodes_dir
+    ):
+        request = self._stage_nested(temp_gcodes_dir)
+        await helix_print_component.component_init()
+        result = await mock_server.endpoints["/server/helix/print_modified"](request)
+        symlink_root = Path(temp_gcodes_dir) / ".helix_print"
+        full_dir = symlink_root / "full"
+        # A sibling keeps its directory; only what empties goes.
+        (full_dir / "prints" / "keep.gcode").write_text("")
+
+        info = helix_print_component.active_prints[result["print_filename"]]
+        await helix_print_component._schedule_cleanup(info)
+
+        assert not (full_dir / "prints" / "2024").exists()
+        assert (full_dir / "prints").is_dir()
+        assert symlink_root.is_dir()
+
+        (full_dir / "prints" / "keep.gcode").unlink()
+        helix_print_component._remove_symlink(full_dir / "prints" / "gone.gcode")
+        assert not (full_dir / "prints").exists()
+        assert symlink_root.is_dir()
+
+    @pytest.mark.asyncio
+    async def test_failed_link_leaves_no_directories(
+        self, helix_print_component, mock_server, temp_gcodes_dir, monkeypatch
+    ):
+        request = self._stage_nested(temp_gcodes_dir)
+        await helix_print_component.component_init()
+
+        def refuse(symlink_path, target_path):
+            raise OSError("link refused")
+
+        monkeypatch.setattr(helix_print_component, "_create_symlink_atomic", refuse)
+        with pytest.raises(Exception):
+            await mock_server.endpoints["/server/helix/print_modified"](request)
+
+        symlink_root = Path(temp_gcodes_dir) / ".helix_print"
+        assert symlink_root.is_dir()
+        assert not (symlink_root / "full").exists()
+
 
 # ============================================================================
-# Phase Tracking Instrumentation Tests
+# History Patching Tests
 # ============================================================================
 
-class TestInstrumentGcode:
-    """Tests for the _instrument_gcode method."""
-
-    @pytest.fixture
-    def helix(self, mock_server):
-        """Create a HelixPrint instance for testing instrumentation."""
-        config = MockConfigHelper(mock_server)
-        return load_component(config)
-
-    def test_no_starting_marker_before_first_line(self, helix):
-        """v2 emits no preamble marker - phases are tracked as they occur.
-
-        The first output line is the original G-code; the first tracking block
-        appears immediately AFTER the line that triggers it (the HELIX_PHASE_*
-        macro, wrapped in begin/end markers).
-        """
-        gcode = "G28\nG0 X0 Y0\n"
-        result = helix._instrument_gcode(gcode)
-
-        lines = result.split("\n")
-        assert lines[0] == "G28"  # original gcode, no injected preamble
-        assert lines[1] == helix.TRACKING_MARKER_BEGIN
-        assert lines[2] == "HELIX_PHASE_HOMING"
-        assert lines[3] == helix.TRACKING_MARKER_END
-
-    def test_adds_ready_marker_at_end(self, helix):
-        """v2 signals preparation complete with a HELIX_READY block at the end."""
-        gcode = "G28\nG0 X0 Y0\n"
-        result = helix._instrument_gcode(gcode)
-
-        lines = result.split("\n")
-        assert lines[-3] == helix.TRACKING_MARKER_BEGIN
-        assert lines[-2] == "HELIX_READY"
-        assert lines[-1] == helix.TRACKING_MARKER_END
-
-    def test_detects_g28_homing(self, helix):
-        """Test G28 is detected and emits the HELIX_PHASE_HOMING macro."""
-        result = helix._instrument_gcode("G28\n")
-        assert "HELIX_PHASE_HOMING" in result
-
-    def test_detects_quad_gantry_level(self, helix):
-        """Test QUAD_GANTRY_LEVEL emits the HELIX_PHASE_QGL macro."""
-        result = helix._instrument_gcode("QUAD_GANTRY_LEVEL\n")
-        assert "HELIX_PHASE_QGL" in result
-
-    def test_detects_z_tilt_adjust(self, helix):
-        """Test Z_TILT_ADJUST emits the HELIX_PHASE_Z_TILT macro."""
-        result = helix._instrument_gcode("Z_TILT_ADJUST\n")
-        assert "HELIX_PHASE_Z_TILT" in result
-
-    def test_detects_bed_mesh_calibrate(self, helix):
-        """Test BED_MESH_CALIBRATE emits the HELIX_PHASE_BED_MESH macro."""
-        result = helix._instrument_gcode("BED_MESH_CALIBRATE ADAPTIVE=1\n")
-        assert "HELIX_PHASE_BED_MESH" in result
-
-    def test_detects_clean_nozzle(self, helix):
-        """Test CLEAN_NOZZLE variants emit the HELIX_PHASE_CLEANING macro."""
-        for cmd in ["CLEAN_NOZZLE", "WIPE_NOZZLE"]:
-            result = helix._instrument_gcode(f"{cmd}\n")
-            assert "HELIX_PHASE_CLEANING" in result, f"Failed for {cmd}"
-
-    def test_detects_purge_macros(self, helix):
-        """Test purge-related macros emit the HELIX_PHASE_PURGING macro."""
-        for cmd in ["PURGE", "PURGE_LINE", "LINE_PURGE", "VORON_PURGE"]:
-            result = helix._instrument_gcode(f"{cmd}\n")
-            assert "HELIX_PHASE_PURGING" in result, f"Failed for {cmd}"
-
-    def test_detects_m109_heating(self, helix):
-        """Test M109 emits the HELIX_PHASE_HEATING_NOZZLE macro."""
-        result = helix._instrument_gcode("M109 S220\n")
-        assert "HELIX_PHASE_HEATING_NOZZLE" in result
-
-    def test_detects_m190_heating(self, helix):
-        """Test M190 emits the HELIX_PHASE_HEATING_BED macro."""
-        result = helix._instrument_gcode("M190 S60\n")
-        assert "HELIX_PHASE_HEATING_BED" in result
-
-    def test_ignores_comments(self, helix):
-        """Test that comment lines are ignored."""
-        gcode = "# G28 - this is just a comment\nG0 X0\n"
-        result = helix._instrument_gcode(gcode)
-
-        # G28 is inside a comment, so no HOMING phase macro should be injected
-        assert "HELIX_PHASE_HOMING" not in result
-
-    def test_preserves_original_gcode(self, helix):
-        """Test that original gcode lines are preserved."""
-        gcode = "G28\nG0 X150 Y150\nM104 S220\n"
-        result = helix._instrument_gcode(gcode)
-
-        assert "G28" in result
-        assert "G0 X150 Y150" in result
-        assert "M104 S220" in result
-
-    def test_multiple_phases_in_sequence(self, helix):
-        """Test a realistic PRINT_START macro with multiple phases."""
-        gcode = """G28
-QUAD_GANTRY_LEVEL
-BED_MESH_CALIBRATE
-M109 S220
-LINE_PURGE
-"""
-        result = helix._instrument_gcode(gcode)
-
-        # All phase macros are emitted, in source order, and preparation ends
-        # with HELIX_READY. v2 has no STARTING preamble.
-        expected_order = [
-            "HELIX_PHASE_HOMING",
-            "HELIX_PHASE_QGL",
-            "HELIX_PHASE_BED_MESH",
-            "HELIX_PHASE_HEATING_NOZZLE",
-            "HELIX_PHASE_PURGING",
-            "HELIX_READY",
-        ]
-        positions = [result.find(macro) for macro in expected_order]
-        assert all(
-            pos != -1 for pos in positions
-        ), f"missing macro(s): {list(zip(expected_order, positions))}"
-        assert positions == sorted(positions), "phase macros emitted out of order"
-
-    def test_only_one_marker_per_line(self, helix):
-        """Test that only one phase macro is added per matched line."""
-        result = helix._instrument_gcode("G28\n")
-
-        # G28 should produce exactly one HELIX_PHASE_HOMING injection
-        assert result.count("HELIX_PHASE_HOMING") == 1
+def _print_info(job_id="00001A", modifications=None):
+    info = PrintInfo(
+        original_filename="prints/benchy.gcode",
+        temp_filename=".helix_temp/mod_benchy.gcode",
+        symlink_filename=".helix_print/abcd_benchy.gcode",
+        modifications=modifications if modifications is not None else ["pa_tuning"],
+        start_time=100.0,
+    )
+    info.job_id = job_id
+    return info
 
 
-class TestStripInstrumentation:
-    """Tests for the _strip_instrumentation method."""
-
-    @pytest.fixture
-    def helix(self, mock_server):
-        """Create a HelixPrint instance for testing."""
-        config = MockConfigHelper(mock_server)
-        return load_component(config)
-
-    def test_removes_tracking_blocks(self, helix):
-        """Test that tracking blocks are removed."""
-        gcode = f"""G28
-{helix.TRACKING_MARKER_BEGIN}
-SET_GCODE_VARIABLE MACRO=_HELIX_PHASE_STATE VARIABLE=phase VALUE='"HOMING"'
-{helix.TRACKING_MARKER_END}
-G0 X0 Y0
-"""
-        result = helix._strip_instrumentation(gcode)
-
-        assert helix.TRACKING_MARKER_BEGIN not in result
-        assert helix.TRACKING_MARKER_END not in result
-        assert "HELIX_PHASE_STATE" not in result
-        assert "G28" in result
-        assert "G0 X0 Y0" in result
-
-    def test_handles_multiple_blocks(self, helix):
-        """Test that multiple tracking blocks are removed."""
-        gcode = f"""{helix.TRACKING_MARKER_BEGIN}
-SET_GCODE_VARIABLE MACRO=_HELIX_PHASE_STATE VARIABLE=phase VALUE='"STARTING"'
-{helix.TRACKING_MARKER_END}
-G28
-{helix.TRACKING_MARKER_BEGIN}
-SET_GCODE_VARIABLE MACRO=_HELIX_PHASE_STATE VARIABLE=phase VALUE='"HOMING"'
-{helix.TRACKING_MARKER_END}
-BED_MESH_CALIBRATE
-{helix.TRACKING_MARKER_BEGIN}
-SET_GCODE_VARIABLE MACRO=_HELIX_PHASE_STATE VARIABLE=phase VALUE='"BED_MESH"'
-{helix.TRACKING_MARKER_END}
-{helix.TRACKING_MARKER_BEGIN}
-SET_GCODE_VARIABLE MACRO=_HELIX_PHASE_STATE VARIABLE=phase VALUE='"COMPLETE"'
-{helix.TRACKING_MARKER_END}
-"""
-        result = helix._strip_instrumentation(gcode)
-
-        # All markers should be gone
-        assert result.count(helix.TRACKING_MARKER_BEGIN) == 0
-        assert result.count(helix.TRACKING_MARKER_END) == 0
-
-        # Original gcode preserved
-        assert "G28" in result
-        assert "BED_MESH_CALIBRATE" in result
-
-    def test_preserves_non_tracking_content(self, helix):
-        """Test that non-tracking content is preserved."""
-        gcode = "G28\nQUAD_GANTRY_LEVEL\nBED_MESH_CALIBRATE\n"
-        result = helix._strip_instrumentation(gcode)
-
-        # Should be unchanged since no tracking markers
-        assert result == gcode
-
-    def test_roundtrip_instrument_then_strip(self, helix):
-        """Test that stripping instrumented gcode returns to original."""
-        original = "G28\nQUAD_GANTRY_LEVEL\nM109 S220\nLINE_PURGE\n"
-
-        instrumented = helix._instrument_gcode(original)
-        stripped = helix._strip_instrumentation(instrumented)
-
-        # Should return to original (allowing for some whitespace variation)
-        assert "G28" in stripped
-        assert "QUAD_GANTRY_LEVEL" in stripped
-        assert "M109 S220" in stripped
-        assert "LINE_PURGE" in stripped
-
-        # No tracking code should remain
-        assert "HELIX_PHASE_STATE" not in stripped
-        assert helix.TRACKING_MARKER_BEGIN not in stripped
+def _helix_entry(job):
+    return [e for e in job.auxiliary_data if e.get("provider") == "helix_print"]
 
 
-class TestPhaseTrackingEndpoints:
-    """Tests for the phase tracking API endpoints."""
+class TestHistoryPatching:
+    """Tests for rewriting the history entry after a modified print."""
 
-    @pytest.fixture
-    def helix_with_klippy(self, mock_server, temp_gcodes_dir):
-        """Create a HelixPrint instance with a mock klippy connection."""
+    @pytest.mark.asyncio
+    async def test_rewrites_filename_to_original(self, helix_print_component,
+                                                 mock_server):
+        history = mock_server.components["history"]
+        history.add_job("00001A")
+        await helix_print_component.component_init()
+
+        await helix_print_component._patch_history_entry(_print_info(), "complete")
+
+        assert len(history.save_job_calls) == 1
+        job, job_id = history.save_job_calls[0]
+        assert job.filename == "prints/benchy.gcode"
+        assert job_id == 0x1A
+        # Columns that are not ours survive the round trip
+        assert job.status == "completed"
+        assert job.total_duration == 100.0
+
+    @pytest.mark.asyncio
+    async def test_strips_symlink_dir_prefix(self, helix_print_component,
+                                             mock_server):
+        history = mock_server.components["history"]
+        history.add_job("00001A")
+        await helix_print_component.component_init()
+
+        info = _print_info()
+        info.original_filename = ".helix_print/benchy.gcode"
+        await helix_print_component._patch_history_entry(info, "complete")
+
+        job, _ = history.save_job_calls[0]
+        assert job.filename == "benchy.gcode"
+
+    @pytest.mark.asyncio
+    async def test_appends_to_existing_auxiliary_data(self, helix_print_component,
+                                                      mock_server):
+        history = mock_server.components["history"]
+        other = {"provider": "spoolman", "name": "spool_id", "value": 7}
+        history.add_job("00001A", auxiliary_data=[other])
+        await helix_print_component.component_init()
+
+        await helix_print_component._patch_history_entry(_print_info(), "complete")
+
+        job, _ = history.save_job_calls[0]
+        assert isinstance(job.auxiliary_data, list)
+        assert other in job.auxiliary_data
+        ours = _helix_entry(job)
+        assert len(ours) == 1
+        assert ours[0]["value"]["original"] == "prints/benchy.gcode"
+        assert ours[0]["value"]["modifications"] == ["pa_tuning"]
+        assert ours[0]["value"]["temp_file"] == ".helix_temp/mod_benchy.gcode"
+
+    @pytest.mark.asyncio
+    async def test_repatch_replaces_own_entry(self, helix_print_component,
+                                              mock_server):
+        history = mock_server.components["history"]
+        stale = {"provider": "helix_print", "name": "modifications", "value": {}}
+        history.add_job("00001A", auxiliary_data=[stale])
+        await helix_print_component.component_init()
+
+        await helix_print_component._patch_history_entry(_print_info(), "complete")
+
+        job, _ = history.save_job_calls[0]
+        ours = _helix_entry(job)
+        assert len(ours) == 1
+        assert ours[0]["value"]["modifications"] == ["pa_tuning"]
+
+    @pytest.mark.asyncio
+    async def test_hex_string_job_id(self, helix_print_component, mock_server):
+        history = mock_server.components["history"]
+        history.add_job("00FF01")
+        await helix_print_component.component_init()
+
+        await helix_print_component._patch_history_entry(
+            _print_info(job_id="00FF01"), "complete"
+        )
+
+        job, job_id = history.save_job_calls[0]
+        assert job_id == 0xFF01
+        assert job.filename == "prints/benchy.gcode"
+
+    @pytest.mark.asyncio
+    async def test_int_job_id(self, helix_print_component, mock_server):
+        history = mock_server.components["history"]
+        history.add_job(26)
+        await helix_print_component.component_init()
+
+        await helix_print_component._patch_history_entry(
+            _print_info(job_id=26), "complete"
+        )
+
+        _, job_id = history.save_job_calls[0]
+        assert job_id == 26
+
+    @pytest.mark.asyncio
+    async def test_missing_job_is_quiet(self, helix_print_component, mock_server):
+        history = mock_server.components["history"]
+        await helix_print_component.component_init()
+
+        await helix_print_component._patch_history_entry(_print_info(), "complete")
+
+        assert history.save_job_calls == []
+
+    @pytest.mark.asyncio
+    async def test_no_job_id_skips_lookup(self, helix_print_component, mock_server):
+        history = mock_server.components["history"]
+        history.add_job("00001A")
+        await helix_print_component.component_init()
+
+        info = _print_info()
+        info.job_id = None
+        await helix_print_component._patch_history_entry(info, "complete")
+
+        assert history.save_job_calls == []
+
+    @pytest.mark.asyncio
+    async def test_history_without_save_job_warns(self, mock_server,
+                                                  temp_gcodes_dir, caplog):
+        class AncientHistory:
+            async def get_job(self, job_id):
+                return {"job_id": job_id, "filename": "x.gcode"}
+
         mock_server.components["file_manager"] = MockFileManager(temp_gcodes_dir)
         mock_server.components["database"] = MockDatabase()
-        mock_server.components["klippy_connection"] = MockKlippy()
         mock_server.components["klippy_apis"] = MockKlippyApis()
-        mock_server.components["history"] = MockHistory()
-
-        config = MockConfigHelper(mock_server, {
+        mock_server.components["history"] = AncientHistory()
+        component = load_component(MockConfigHelper(mock_server, {
             "temp_dir": ".helix_temp",
             "symlink_dir": ".helix_print",
             "cleanup_delay": 3600,
             "enabled": True,
-        })
+        }))
+        await component.component_init()
 
-        return load_component(config)
+        await component._patch_history_entry(_print_info(), "complete")
 
-    @pytest.mark.asyncio
-    async def test_status_not_instrumented(self, helix_with_klippy, mock_server):
-        """Test status endpoint when not instrumented."""
-        # Initialize component to set up klippy reference
-        await helix_with_klippy.component_init()
-
-        handler = mock_server.endpoints["/server/helix/phase_tracking/status"]
-        request = MockWebRequest({})
-
-        result = await handler(request)
-
-        # Should report not enabled (klippy mock doesn't provide macros)
-        assert result["enabled"] is False
+        assert "History filename-rename unavailable" in caplog.text
 
     @pytest.mark.asyncio
-    async def test_enable_endpoint_registered(self, helix_with_klippy, mock_server):
-        """Test that the enable endpoint is registered."""
-        assert "/server/helix/phase_tracking/enable" in mock_server.endpoints
+    async def test_missing_printer_job_class_warns(self, helix_print_component,
+                                                   mock_server, caplog,
+                                                   monkeypatch):
+        history = mock_server.components["history"]
+        history.add_job("00001A")
+        await helix_print_component.component_init()
+        monkeypatch.delattr(sys.modules[MockHistory.__module__], "PrinterJob")
+
+        await helix_print_component._patch_history_entry(_print_info(), "complete")
+
+        assert history.save_job_calls == []
+        assert "no PrinterJob" in caplog.text
 
     @pytest.mark.asyncio
-    async def test_disable_endpoint_registered(self, helix_with_klippy, mock_server):
-        """Test that the disable endpoint is registered."""
-        assert "/server/helix/phase_tracking/disable" in mock_server.endpoints
+    async def test_failing_history_does_not_raise(self, helix_print_component,
+                                                  mock_server):
+        history = mock_server.components["history"]
+        history.add_job("00001A")
+        await helix_print_component.component_init()
+
+        async def boom(job, job_id=None):
+            raise RuntimeError("database is locked")
+
+        history.save_job = boom
+        await helix_print_component._patch_history_entry(_print_info(), "complete")
+
+
 
     @pytest.mark.asyncio
-    async def test_status_endpoint_registered(self, helix_with_klippy, mock_server):
-        """Test that the status endpoint is registered."""
-        assert "/server/helix/phase_tracking/status" in mock_server.endpoints
+    async def test_dict_shaped_auxiliary_data_is_dropped_not_walked(
+        self, helix_print_component, mock_server
+    ):
+        # auxiliary_data is a list from Moonraker v0.9.0, the same release that
+        # added save_job. A fork handing back the older mapping would otherwise
+        # be iterated by element - yielding its KEYS - and written back as a
+        # list of strings over the real thing.
+        history = mock_server.components["history"]
+        history.add_job("00001A", auxiliary_data={"spoolman_id": 7, "other": 1})
+        await helix_print_component.component_init()
 
+        await helix_print_component._patch_history_entry(_print_info(), "complete")
 
-class TestPhasePatterns:
-    """Tests for the PHASE_PATTERNS regex patterns."""
-
-    @pytest.fixture
-    def helix(self, mock_server):
-        """Create a HelixPrint instance."""
-        config = MockConfigHelper(mock_server)
-        return load_component(config)
-
-    def test_pattern_count(self, helix):
-        """Test expected number of phase patterns."""
-        assert len(helix.PHASE_PATTERNS) == 8
-
-    def test_all_patterns_have_tuple_format(self, helix):
-        """Test all patterns are (regex, phase_name) tuples."""
-        for pattern in helix.PHASE_PATTERNS:
-            assert isinstance(pattern, tuple)
-            assert len(pattern) == 2
-            assert isinstance(pattern[0], str)  # regex
-            assert isinstance(pattern[1], str)  # phase name
-
-    def test_pattern_phases_are_uppercase(self, helix):
-        """Test all phase names are uppercase."""
-        for _, phase in helix.PHASE_PATTERNS:
-            assert phase == phase.upper()
-
-
-class TestMarkerConstants:
-    """Tests for the tracking marker constants."""
-
-    @pytest.fixture
-    def helix(self, mock_server):
-        """Create a HelixPrint instance."""
-        config = MockConfigHelper(mock_server)
-        return load_component(config)
-
-    def test_marker_begin_contains_version(self, helix):
-        """Test that the begin marker contains version info."""
-        assert "v2" in helix.TRACKING_MARKER_BEGIN
-
-    def test_marker_end_matches_begin(self, helix):
-        """Test that end marker is the closing version of begin marker."""
-        assert "HELIX_TRACKING" in helix.TRACKING_MARKER_BEGIN
-        assert "HELIX_TRACKING" in helix.TRACKING_MARKER_END
-        assert "/" in helix.TRACKING_MARKER_END  # closing marker
-
-    def test_markers_are_comments(self, helix):
-        """Test that markers are G-code comments (start with #)."""
-        assert helix.TRACKING_MARKER_BEGIN.startswith("#")
-        assert helix.TRACKING_MARKER_END.startswith("#")
-
-
-# ============================================================================
-# Config Write-Path Tests
-# ============================================================================
-
-# A PRINT_START whose gcode: block contains genuinely empty lines - no trailing
-# whitespace, the shape any editor that strips trailing whitespace produces.
-# This is what breaks a "each body line starts with [ \t]+" regex: an empty line
-# has nothing to match, so the body looks like it ends there.
-PRINTER_CFG_WITH_BLANK_LINES = """\
-[stepper_x]
-step_pin: PB0
-dir_pin: PB1
-
-[gcode_macro PRINT_START]
-description: Start of print routine
-gcode:
-    {% set BED = params.BED|default(60)|int %}
-    {% set EXTRUDER = params.EXTRUDER|default(200)|int %}
-
-    M190 S{BED}
-    G28
-
-    QUAD_GANTRY_LEVEL
-    BED_MESH_CALIBRATE
-
-    M109 S{EXTRUDER}
-    LINE_PURGE
-
-[gcode_macro PRINT_END]
-gcode:
-    M104 S0
-    M140 S0
-"""
-
-# The HELIX_PHASE_* / HELIX_READY macros the instrumentation calls. Installed by
-# helix_macros.cfg on a real printer; seeded here so the write-path tests are
-# testing the write path and not the fail-closed guard.
-HELIX_MACROS_CFG = """\
-# helix_macros v2.0.0
-[gcode_macro HELIX_READY]
-gcode:
-    RESPOND PREFIX=HELIX MSG=READY
-
-[gcode_macro HELIX_PHASE_HOMING]
-gcode:
-    RESPOND PREFIX=HELIX MSG=PHASE:HOMING
-
-[gcode_macro HELIX_PHASE_HEATING_BED]
-gcode:
-    RESPOND PREFIX=HELIX MSG=PHASE:HEATING_BED
-
-[gcode_macro HELIX_PHASE_HEATING_NOZZLE]
-gcode:
-    RESPOND PREFIX=HELIX MSG=PHASE:HEATING_NOZZLE
-
-[gcode_macro HELIX_PHASE_BED_MESH]
-gcode:
-    RESPOND PREFIX=HELIX MSG=PHASE:BED_MESH
-
-[gcode_macro HELIX_PHASE_QGL]
-gcode:
-    RESPOND PREFIX=HELIX MSG=PHASE:QGL
-
-[gcode_macro HELIX_PHASE_Z_TILT]
-gcode:
-    RESPOND PREFIX=HELIX MSG=PHASE:Z_TILT
-
-[gcode_macro HELIX_PHASE_CLEANING]
-gcode:
-    RESPOND PREFIX=HELIX MSG=PHASE:CLEANING
-
-[gcode_macro HELIX_PHASE_PURGING]
-gcode:
-    RESPOND PREFIX=HELIX MSG=PHASE:PURGING
-"""
-
-
-def _macro_body(config_text: str, macro_name: str) -> str:
-    """Extract a macro's raw gcode: body from config text, for assertions.
-
-    Deliberately independent of the plugin's own parser - a test that reuses the
-    code under test to check that code proves nothing.
-    """
-    lines = config_text.split("\n")
-    body = []
-    in_macro = False
-    in_gcode = False
-
-    for line in lines:
-        if line.strip().startswith(f"[gcode_macro {macro_name}]"):
-            in_macro = True
-            continue
-        if in_macro and line.startswith("["):
-            break
-        if in_macro and line.strip().startswith("gcode:"):
-            in_gcode = True
-            continue
-        if in_gcode:
-            body.append(line)
-
-    # Drop trailing blank lines - they belong to the gap before the next section
-    while body and not body[-1].strip():
-        body.pop()
-    return "\n".join(body)
-
-
-class TestConfigWritePath:
-    """Tests for _update_macro / _read_macro_from_config against real files.
-
-    These exercise the only code in the plugin that writes to a user's printer
-    config. Every other phase-tracking test operates on strings in memory.
-    """
-
-    @pytest.fixture
-    def config_dir(self):
-        """A temp Klipper config dir with a blank-line PRINT_START."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir)
-            (path / "printer.cfg").write_text(PRINTER_CFG_WITH_BLANK_LINES)
-            (path / "helix_macros.cfg").write_text(HELIX_MACROS_CFG)
-            yield path
-
-    @pytest.fixture
-    def helix(self, mock_server, temp_gcodes_dir, config_dir):
-        """A HelixPrint instance pointed at the temp config dir."""
-        mock_server.components["file_manager"] = MockFileManager(temp_gcodes_dir)
-        mock_server.components["database"] = MockDatabase()
-        mock_server.components["klippy_connection"] = MockKlippy()
-        mock_server.components["klippy_apis"] = MockKlippyApis()
-        mock_server.components["history"] = MockHistory()
-
-        component = load_component(MockConfigHelper(mock_server, {"enabled": True}))
-        component._get_config_dir = AsyncMock(return_value=config_dir)
-        return component
-
-    def test_ignores_a_commented_out_macro_header(self, helix, config_dir):
-        """A commented-out [gcode_macro PRINT_START] must not shadow the real one.
-
-        Section headers are column-0 constructs; matching one anywhere in a line
-        finds it inside a '#' comment too, and the scan then walks into the
-        commented block instead of the definition.
-        """
-        printer_cfg = config_dir / "printer.cfg"
-        printer_cfg.write_text(
-            "# Old version, kept for reference:\n"
-            "#[gcode_macro PRINT_START]\n"
-            "#gcode:\n"
-            "#    G28\n"
-            "\n" + PRINTER_CFG_WITH_BLANK_LINES
-        )
-
-        gcode = helix._read_macro_from_config(config_dir, "PRINT_START")
-
-        assert gcode is not None
-        assert "QUAD_GANTRY_LEVEL" in gcode
-
-    def test_reads_body_past_a_blank_line(self, helix, config_dir):
-        """The reader must not stop at the first empty line in the body."""
-        gcode = helix._read_macro_from_config(config_dir, "PRINT_START")
-
-        assert gcode is not None
-        # Everything after the first blank line
-        assert "QUAD_GANTRY_LEVEL" in gcode
-        assert "LINE_PURGE" in gcode
+        job, _ = history.save_job_calls[0]
+        assert isinstance(job.auxiliary_data, list)
+        assert job.auxiliary_data == _helix_entry(job)
+        assert "spoolman_id" not in job.auxiliary_data
 
     @pytest.mark.asyncio
-    async def test_update_macro_replaces_body_past_a_blank_line(self, helix, config_dir):
-        """_update_macro must replace the WHOLE body, not just up to the blank line.
+    async def test_a_list_of_other_providers_is_kept(
+        self, helix_print_component, mock_server
+    ):
+        history = mock_server.components["history"]
+        spoolman = {"provider": "spoolman", "name": "spool_id", "value": 7}
+        history.add_job("00001A", auxiliary_data=[spoolman])
+        await helix_print_component.component_init()
 
-        The bug: the replacement regex stops at the first empty line, so the tail
-        of the original body survives and gets concatenated after the new body.
-        """
-        assert await helix._update_macro("PRINT_START", "G28\nM117 replaced\n")
+        await helix_print_component._patch_history_entry(_print_info(), "complete")
 
-        body = _macro_body((config_dir / "printer.cfg").read_text(), "PRINT_START")
-
-        assert "M117 replaced" in body
-        # None of the original body may survive the replace
-        assert "QUAD_GANTRY_LEVEL" not in body
-        assert "LINE_PURGE" not in body
-        assert "M190" not in body
-
-    @pytest.mark.asyncio
-    async def test_update_macro_leaves_neighbouring_sections_intact(self, helix, config_dir):
-        """Replacing one macro must not disturb the sections around it."""
-        assert await helix._update_macro("PRINT_START", "G28\n")
-
-        content = (config_dir / "printer.cfg").read_text()
-
-        assert "[stepper_x]" in content
-        assert "step_pin: PB0" in content
-        assert _macro_body(content, "PRINT_END") == "    M104 S0\n    M140 S0"
-
-    @pytest.mark.asyncio
-    async def test_update_macro_preserves_the_description_line(self, helix, config_dir):
-        """Section keys above gcode: are not part of the body and must survive."""
-        assert await helix._update_macro("PRINT_START", "G28\n")
-
-        content = (config_dir / "printer.cfg").read_text()
-        assert "description: Start of print routine" in content
-
-    @pytest.mark.asyncio
-    async def test_enable_does_not_duplicate_the_startup_sequence(self, helix, mock_server, config_dir):
-        """Enabling phase tracking must not leave two copies of the body.
-
-        This is the reported failure: PRINT_START ends up containing the
-        instrumented body followed by the leftover original tail, so Klipper
-        homes twice, runs QGL twice, and heat-soaks twice on every print.
-        """
-        await helix.component_init()
-        handler = mock_server.endpoints["/server/helix/phase_tracking/enable"]
-
-        result = await handler(MockWebRequest({}))
-        assert result["success"] is True
-
-        body = _macro_body((config_dir / "printer.cfg").read_text(), "PRINT_START")
-
-        assert body.count("G28") == 1
-        assert body.count("QUAD_GANTRY_LEVEL") == 1
-        assert body.count("BED_MESH_CALIBRATE") == 1
-        assert body.count("LINE_PURGE") == 1
-        assert body.count("M190 S{BED}") == 1
-
-    @pytest.mark.asyncio
-    async def test_enable_then_disable_restores_the_original_file(self, helix, mock_server, config_dir):
-        """A full round-trip through disk must be byte-identical to the original.
-
-        Catches both the duplication and the indentation drift: _update_macro
-        re-indents a body that already carries its own indentation, so each
-        toggle used to add four more spaces to every line.
-        """
-        await helix.component_init()
-        printer_cfg = config_dir / "printer.cfg"
-        original = printer_cfg.read_text()
-
-        enable = mock_server.endpoints["/server/helix/phase_tracking/enable"]
-        disable = mock_server.endpoints["/server/helix/phase_tracking/disable"]
-
-        assert (await enable(MockWebRequest({})))["success"] is True
-        assert (await disable(MockWebRequest({})))["success"] is True
-
-        assert printer_cfg.read_text() == original
-
-    @pytest.mark.asyncio
-    async def test_repeated_toggles_are_stable(self, helix, mock_server, config_dir):
-        """Enable/disable three times over - the file must not grow each pass."""
-        await helix.component_init()
-        printer_cfg = config_dir / "printer.cfg"
-        original = printer_cfg.read_text()
-
-        enable = mock_server.endpoints["/server/helix/phase_tracking/enable"]
-        disable = mock_server.endpoints["/server/helix/phase_tracking/disable"]
-
-        for _ in range(3):
-            await enable(MockWebRequest({}))
-            await disable(MockWebRequest({}))
-
-        assert printer_cfg.read_text() == original
-
-    @pytest.mark.asyncio
-    async def test_enable_instruments_every_detected_phase(self, helix, mock_server, config_dir):
-        """The point of the feature: each phase gets its HELIX_PHASE_* call."""
-        await helix.component_init()
-        handler = mock_server.endpoints["/server/helix/phase_tracking/enable"]
-
-        await handler(MockWebRequest({}))
-        body = _macro_body((config_dir / "printer.cfg").read_text(), "PRINT_START")
-
-        assert "HELIX_PHASE_HOMING" in body
-        assert "HELIX_PHASE_QGL" in body
-        assert "HELIX_PHASE_BED_MESH" in body
-        assert "HELIX_PHASE_HEATING_BED" in body
-        assert "HELIX_PHASE_HEATING_NOZZLE" in body
-        assert "HELIX_PHASE_PURGING" in body
-        assert "HELIX_READY" in body
-
-    @pytest.mark.asyncio
-    async def test_instrumented_body_stays_indented(self, helix, mock_server, config_dir):
-        """Injected macro calls must be indented into the gcode: block.
-
-        An unindented line ends the block as far as Klipper is concerned, which
-        turns the rest of the macro into a config parse error.
-        """
-        await helix.component_init()
-        handler = mock_server.endpoints["/server/helix/phase_tracking/enable"]
-
-        await handler(MockWebRequest({}))
-        body = _macro_body((config_dir / "printer.cfg").read_text(), "PRINT_START")
-
-        for line in body.split("\n"):
-            if line.strip():
-                assert line[0] in " \t", f"body line is not indented: {line!r}"
-
-    @pytest.mark.asyncio
-    async def test_enable_does_not_deepen_indentation(self, helix, mock_server, config_dir):
-        """Original body lines keep their original indent, not indent + 4."""
-        await helix.component_init()
-        handler = mock_server.endpoints["/server/helix/phase_tracking/enable"]
-
-        await handler(MockWebRequest({}))
-        body = _macro_body((config_dir / "printer.cfg").read_text(), "PRINT_START")
-
-        assert "    G28" in body
-        assert "        G28" not in body
-
-
-class TestPhaseTrackingRequiresHelixMacros:
-    """Enabling must fail closed when helix_macros.cfg is not installed.
-
-    The instrumentation injects calls to HELIX_PHASE_* / HELIX_READY. Klipper
-    does not validate gcode_macro bodies at config load, so instrumenting
-    against missing macros looks like it worked and only fails when the macro
-    actually runs - aborting print start with "Unknown command".
-    """
-
-    @pytest.fixture
-    def config_dir(self):
-        """A config dir with PRINT_START but NO helix_macros.cfg."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir)
-            (path / "printer.cfg").write_text(PRINTER_CFG_WITH_BLANK_LINES)
-            yield path
-
-    @pytest.fixture
-    def helix(self, mock_server, temp_gcodes_dir, config_dir):
-        mock_server.components["file_manager"] = MockFileManager(temp_gcodes_dir)
-        mock_server.components["database"] = MockDatabase()
-        mock_server.components["klippy_connection"] = MockKlippy()
-        mock_server.components["klippy_apis"] = MockKlippyApis()
-        mock_server.components["history"] = MockHistory()
-
-        component = load_component(MockConfigHelper(mock_server, {"enabled": True}))
-        component._get_config_dir = AsyncMock(return_value=config_dir)
-        return component
-
-    @pytest.mark.asyncio
-    async def test_enable_reports_failure(self, helix, mock_server):
-        await helix.component_init()
-        handler = mock_server.endpoints["/server/helix/phase_tracking/enable"]
-
-        result = await handler(MockWebRequest({}))
-
-        assert result["success"] is False
-        assert "helix_macros" in result["error"]
-
-    @pytest.mark.asyncio
-    async def test_enable_does_not_touch_the_config(self, helix, mock_server, config_dir):
-        await helix.component_init()
-        handler = mock_server.endpoints["/server/helix/phase_tracking/enable"]
-        printer_cfg = config_dir / "printer.cfg"
-        original = printer_cfg.read_text()
-
-        await handler(MockWebRequest({}))
-
-        assert printer_cfg.read_text() == original
-
-    @pytest.mark.asyncio
-    async def test_enable_does_not_restart_klipper(self, helix, mock_server):
-        """No restart when nothing was written - a restart implies a config change."""
-        await helix.component_init()
-        handler = mock_server.endpoints["/server/helix/phase_tracking/enable"]
-
-        await handler(MockWebRequest({}))
-
-        mock_server.components["klippy_apis"].do_restart.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_disable_still_works_without_helix_macros(self, helix, mock_server, config_dir):
-        """Stripping instrumentation must never be gated - that is the escape hatch.
-
-        A printer can end up instrumented but missing the macros; refusing to
-        disable would strand it there.
-        """
-        await helix.component_init()
-        # Hand-instrument the macro so there is something to strip
-        instrumented = (
-            "    G28\n"
-            f"    {helix.TRACKING_MARKER_BEGIN}\n"
-            "    HELIX_PHASE_HOMING\n"
-            f"    {helix.TRACKING_MARKER_END}\n"
-        )
-        assert await helix._update_macro("PRINT_START", instrumented)
-
-        handler = mock_server.endpoints["/server/helix/phase_tracking/disable"]
-        result = await handler(MockWebRequest({}))
-
-        assert result["success"] is True
-        body = _macro_body((config_dir / "printer.cfg").read_text(), "PRINT_START")
-        assert "HELIX_PHASE_HOMING" not in body
-        assert "G28" in body
+        job, _ = history.save_job_calls[0]
+        assert spoolman in job.auxiliary_data
+        assert len(_helix_entry(job)) == 1
 
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+class TestHistoryIdCapture:
+    """The history id arrives on history's own event, not in print_stats."""
+
+    def _payload(self, action="added", filename=".helix_print/abcd_benchy.gcode",
+                 job_id="00001A"):
+        job = {"filename": filename, "status": "in_progress"}
+        if job_id is not None:
+            job["job_id"] = job_id
+        return {"action": action, "job": job}
+
+    def _staged(self, component, filename=".helix_print/abcd_benchy.gcode"):
+        info = PrintInfo(
+            original_filename="prints/benchy.gcode",
+            temp_filename=".helix_temp/modified_1_benchy.gcode",
+            symlink_filename=filename,
+            modifications=["remap_T1_to_T2"],
+            start_time=100.0,
+        )
+        component.active_prints[filename] = info
+        return info
+
+    @pytest.mark.asyncio
+    async def test_added_event_records_the_id(self, helix_print_component):
+        info = self._staged(helix_print_component)
+        assert info.job_id is None
+
+        await helix_print_component._on_history_changed(self._payload())
+
+        assert info.job_id == "00001A"
+
+    @pytest.mark.asyncio
+    async def test_klipper_print_stats_never_carry_an_id(self, helix_print_component):
+        # Klipper's print_stats has no job_id, so the job-state route is not
+        # where the id comes from. Planting one here and watching it be ignored
+        # is what makes that a claim about our code rather than about the
+        # fixture happening to leave the key out.
+        info = self._staged(helix_print_component)
+
+        await helix_print_component._on_job_state_changed(
+            None,
+            {"state": "standby", "filename": ".helix_print/abcd_benchy.gcode"},
+            {
+                "state": "printing",
+                "filename": ".helix_print/abcd_benchy.gcode",
+                "job_id": "00BEEF",
+            },
+        )
+
+        assert info.job_id is None
+
+    @pytest.mark.asyncio
+    async def test_other_peoples_prints_are_ignored(self, helix_print_component):
+        info = self._staged(helix_print_component)
+
+        await helix_print_component._on_history_changed(
+            self._payload(filename="prints/somebody_elses.gcode")
+        )
+
+        assert info.job_id is None
+
+    @pytest.mark.asyncio
+    async def test_finished_action_does_not_record(self, helix_print_component):
+        # Only the "added" action carries an id for a job we are still staging.
+        info = self._staged(helix_print_component)
+
+        await helix_print_component._on_history_changed(self._payload(action="finished"))
+
+        assert info.job_id is None
+
+    @pytest.mark.asyncio
+    async def test_payload_without_an_id_is_ignored(self, helix_print_component):
+        info = self._staged(helix_print_component)
+
+        await helix_print_component._on_history_changed(self._payload(job_id=None))
+
+        assert info.job_id is None
+
+    @pytest.mark.asyncio
+    async def test_the_handler_is_registered(self, helix_print_component, mock_server):
+        await helix_print_component.component_init()
+        assert "history:history_changed" in mock_server.event_handlers
+
+    @pytest.mark.asyncio
+    async def test_id_from_the_event_reaches_the_patch(self, helix_print_component,
+                                                       mock_server):
+        # The whole chain: history announces the row, we keep the id, and the
+        # patch uses it to address that row.
+        history = mock_server.components["history"]
+        history.add_job("00001A")
+        await helix_print_component.component_init()
+        info = self._staged(helix_print_component)
+
+        await helix_print_component._on_history_changed(self._payload())
+        await helix_print_component._patch_history_entry(info, "complete")
+
+        assert len(history.save_job_calls) == 1
+        job, job_id = history.save_job_calls[0]
+        assert job_id == 0x1A
+        assert job.filename == "prints/benchy.gcode"

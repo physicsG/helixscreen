@@ -114,9 +114,24 @@ class MoonrakerMotionAPI : public IMotionAPI {
                                                     double xy_feedrate, double z_feedrate);
 
     /**
+     * @brief Generate G-code for an absolute multi-axis move: Z first, then XY
+     * combined, unless the target descends below a known current_z (public for
+     * direct unit testing)
+     */
+    static std::string generate_absolute_move_gcode(const helix::AxisTarget& target,
+                                                    double xy_feedrate, double z_feedrate,
+                                                    std::optional<double> current_z = std::nullopt);
+
+    /**
+     * @brief Generate G-code for a single-axis absolute move (public for
+     * direct unit testing; E is valid here and not in the multi-axis form)
+     */
+    static std::string generate_absolute_move_gcode(char axis, double position, double feedrate);
+
+    /**
      * @brief Set absolute position for an axis
      *
-     * @param axis Axis name ('X', 'Y', 'Z')
+     * @param axis Axis name ('X', 'Y', 'Z', 'E')
      * @param position Absolute position in mm
      * @param feedrate Movement speed in mm/min (0 for default)
      * @param on_success Success callback
@@ -124,6 +139,27 @@ class MoonrakerMotionAPI : public IMotionAPI {
      */
     void move_to_position(char axis, double position, double feedrate, SuccessCallback on_success,
                           ErrorCallback on_error) override;
+
+    /**
+     * @brief Absolute multi-axis move as ONE gcode script
+     *
+     * X and Y combine on a single G0 at xy_feedrate; Z gets its own G0 at
+     * z_feedrate. Z moves FIRST (a lift clears the bed before travel) unless
+     * the target descends below a known current_z, in which case XY travels
+     * first and Z descends last. Unset axes are not commanded. An empty
+     * target -> on_success immediately, no RPC.
+     *
+     * @param target Axes to move and their absolute positions in mm
+     * @param xy_feedrate Movement speed for the XY move in mm/min (0 for default)
+     * @param z_feedrate Movement speed for the Z move in mm/min (0 for default)
+     * @param on_success Success callback
+     * @param on_error Error callback
+     * @param current_z Z the toolhead sits at when this script starts; nullopt
+     * when unknown (Z then always moves first)
+     */
+    void move_to(const helix::AxisTarget& target, double xy_feedrate, double z_feedrate,
+                 SuccessCallback on_success, ErrorCallback on_error,
+                 std::optional<double> current_z = std::nullopt) override;
 
   protected:
     helix::IMoonrakerClient& client_;
@@ -139,11 +175,6 @@ class MoonrakerMotionAPI : public IMotionAPI {
      * @brief Generate G-code for relative movement
      */
     std::string generate_move_gcode(char axis, double distance, double feedrate);
-
-    /**
-     * @brief Generate G-code for absolute movement
-     */
-    std::string generate_absolute_move_gcode(char axis, double position, double feedrate);
 
     /**
      * @brief Execute G-code via printer.gcode.script JSON-RPC

@@ -16,6 +16,13 @@
 # Logs (application logs to systemd journal automatically):
 #   sudo journalctl -u helixscreen -f
 #   sudo journalctl -t helix -f          # Filter by syslog identifier
+#
+# DO NOT EDIT THE DEPLOYED COPY of this file in /etc/systemd/system/.
+# The ExecStartPre refresh-service-units.sh hook below re-copies it from
+# INSTALL_DIR/config/ on every start, so local edits are discarded before the
+# app launches. Persistent settings belong in helixscreen.env; a systemd-level
+# change belongs in a drop-in (systemctl edit --force helixscreen), which the
+# refresh leaves alone.
 
 [Unit]
 Description=HelixScreen 3D Printer Touch UI
@@ -74,6 +81,14 @@ ExecStartPre=+/bin/sh -c '[ -x "@@INSTALL_DIR@@/config/refresh-service-units.sh"
 # when X11 isn't running (it polls xset, fails, and interprets that as "Off").
 ExecStartPre=+/bin/sh -c 'systemctl stop display-sleep.service 2>/dev/null || true'
 
+# Run the platform's stock-UI stop on every start, from the same hook file the
+# SysV init script sources. A vendor UI that a firmware update re-enables comes
+# back down here rather than fighting HelixScreen for the framebuffer.
+# Root (+prefix): stopping vendor units needs it, and it runs before the User=
+# drop. Platforms that ship no hook file, or whose hook leaves the function at
+# its default no-op, make this a no-op.
+ExecStartPre=+/bin/sh -c '[ -f "@@INSTALL_DIR@@/platform/hooks.sh" ] || exit 0; . "@@INSTALL_DIR@@/platform/hooks.sh"; command -v platform_stop_competing_uis >/dev/null 2>&1 && platform_stop_competing_uis; exit 0'
+
 # Fix un-substituted polkit template if present (self-heal from broken initial install).
 # The grep/sed patterns use quote-splitting so the installer's own sed pass
 # doesn't substitute them — they must remain literal to match a broken deployed file.
@@ -103,8 +118,10 @@ ExecStartPost=+/bin/sh -c '/bin/systemctl start helixscreen-update.path 2>/dev/n
 ExecStopPost=+/bin/sh -c '/bin/systemctl start helixscreen-update.path 2>/dev/null || true'
 
 # Environment variables
-# Display backend: auto-detected by launcher (DRM if GL libs present, else fbdev).
+# Display backend: auto-detected by launcher (GPU presentation when the probe
+# finds a hardware renderer, else DRM dumb buffers, else fbdev).
 # Uncomment to force a specific backend:
+# Environment="HELIX_DISPLAY_BACKEND=egl"
 # Environment="HELIX_DISPLAY_BACKEND=drm"
 # Environment="HELIX_DISPLAY_BACKEND=fbdev"
 # Override asset directory if ui_xml/assets/config are not under WorkingDirectory
@@ -115,6 +132,9 @@ ExecStopPost=+/bin/sh -c '/bin/systemctl start helixscreen-update.path 2>/dev/nu
 # Restart policy - always restart unless explicitly stopped
 Restart=always
 RestartSec=3
+# Tells helix-watchdog this unit restarts it, so after an update it exits and
+# lets the restart run ExecStartPre instead of respawning the app in place.
+Environment=HELIX_SERVICE_RESTARTS=1
 
 # Resource limits
 LimitNOFILE=65536

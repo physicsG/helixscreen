@@ -23,6 +23,28 @@ setup() {
     grep -qE "^trap .*(EXIT|INT|TERM)" "$MAIN_SH"
 }
 
+# A signal trap that only cleans up hands control back to the script, which
+# then carries on with its download deleted. Each signal must end the run.
+@test "a HUP, INT or TERM stops the installer: nothing after the signal runs" {
+    command -v dash >/dev/null 2>&1 || skip "dash not installed"
+    local traps sig code
+    traps=$(grep -E "^trap '" "$MAIN_SH")
+
+    for sig in HUP:129 INT:130 TERM:143; do
+        code="${sig#*:}"
+        sig="${sig%%:*}"
+        run dash -c "cleanup_on_success() { echo CLEANUP; }
+step_fail() { :; }
+installer_exit_report() { :; }
+$traps
+kill -$sig \$\$
+echo AFTER"
+        [ "$status" -eq "$code" ] || fail "$sig exited $status, wanted $code"
+        contains CLEANUP "$output" || fail "$sig skipped cleanup"
+        lacks AFTER "$output" || fail "$sig let the installer continue"
+    done
+}
+
 # Drive a real POSIX shell through an abnormal exit and assert the scratch dir
 # is gone. Uses dash when available, because that is the shell class where the
 # ERR trap silently does nothing.

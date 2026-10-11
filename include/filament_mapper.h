@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include "display_numbering.h"
 #include "firmware_routing.h"
+#include "tool_mapping_origin.h"
 
 #include <cstdint>
 #include <map>
@@ -69,6 +71,10 @@ struct AvailableSlot {
     /// Kept last for the same reason multi_color_hexes is - positional
     /// aggregate initializers in the tests stay valid.
     float remaining_weight_g = -1.0f;
+
+    /// The word this slot's backend uses for one position. Defaulted so the
+    /// ~200 aggregate initializers in the mapper tests stay valid.
+    helix::ui::LaneNoun noun = helix::ui::LaneNoun::Slot;
 
     /// Unique key for this slot across all backends
     SlotKey key() const {
@@ -245,12 +251,20 @@ class FilamentMapper {
     ///        lives; an EMPTY vector means the backend has no opinion and this
     ///        returns empty rather than assuming identity.
     /// @param slots Current lane state.
+    /// @param origin What stands behind @p tool_to_head. A routing that sends
+    ///        every routed tool to one head is read two ways and the numbers
+    ///        cannot tell them apart: Unvouched makes it a table nobody chose
+    ///        and the slicer palette stands, Deliberate makes it somebody's
+    ///        answer and the uniform lane colour is published. Required, so a
+    ///        new caller has to state what it knows instead of inheriting a
+    ///        default that silently suppresses a real answer.
     /// @return Dense tool-indexed colors, or EMPTY when nothing is knowable —
     ///         including when every resolved color is the neutral default, since
     ///         pushing an all-grey vector would only overwrite the slicer palette
     ///         the renderer already has. Pure; no LVGL/AMS.
     static std::vector<uint32_t> routed_tool_colors(const std::vector<int>& tool_to_head,
-                                                    const std::vector<AvailableSlot>& slots);
+                                                    const std::vector<AvailableSlot>& slots,
+                                                    helix::printer::ToolMappingOrigin origin);
 
     /// Which routing to colour by, given what a backend published and what its
     /// physical map says. Named and pure because getting it wrong is silent: an
@@ -333,10 +347,10 @@ class FilamentMapper {
     /// will be used without saying which spool it comes from. The number is
     /// what disambiguates them.
     ///
-    /// Reports `local_slot_index + 1` - the lane's position within its own
-    /// unit - to agree with format_slot_label() and the AMS slot badges. On a
-    /// multi-unit setup the global index would name a lane the hardware does
-    /// not, calling the second unit's first bay "Slot 5".
+    /// Reports the display number for `local_slot_index` - the lane's position
+    /// within its own unit - to agree with format_slot_label() and the AMS slot
+    /// badges. On a multi-unit setup the global index would name a lane the
+    /// hardware does not, calling the second unit's first bay "Slot 5".
     static int mapped_lane_display_number(const ToolMapping& mapping,
                                           const std::vector<AvailableSlot>& slots);
 

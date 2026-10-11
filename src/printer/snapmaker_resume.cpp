@@ -10,16 +10,18 @@ using json = nlohmann::json;
 } // namespace
 
 std::vector<TerminalMatcher> snapmaker_terminal_matchers() {
-    // Hardware-verified on a physical Snapmaker U1 (#991): dirty-bed aborts with
-    // exception {id:532, code:1, message:"detected dirty bed"} — Terminal. Match
-    // by message substring OR by exception id so either signal alone suffices.
-    // NOT gated on sdcard-inactive: runout (id 523) also deactivates the SD, so
-    // sdcard state cannot discriminate terminal-vs-recoverable here.
+    // Exception 532 is the defect_detection family: code 1 dirty bed, 2 noodle,
+    // 3 residue, 4 dirty nozzle. The firmware PAUSEs (does not cancel) for all
+    // four, so only the hardware-verified dirty-bed case (#991) is Terminal —
+    // the rest attempt RESUME. Match by message substring OR by id+code so
+    // either signal alone suffices. NOT gated on sdcard-inactive: runout
+    // (id 523) also deactivates the SD, so sdcard state cannot discriminate
+    // terminal-vs-recoverable here.
     return {
         TerminalMatcher{/*message_substr=*/"dirty bed", /*exception_id=*/-1,
                         /*require_sdcard_inactive=*/false},
         TerminalMatcher{/*message_substr=*/"", /*exception_id=*/532,
-                        /*require_sdcard_inactive=*/false},
+                        /*require_sdcard_inactive=*/false, /*exception_code=*/1},
     };
 }
 
@@ -66,10 +68,8 @@ std::string snapmaker_extract_coded_msg(const std::string& raw_error, const std:
     }
 
     std::string candidate = raw_error.substr(start, end - start + 1);
-    json parsed;
-    try {
-        parsed = json::parse(candidate);
-    } catch (const json::parse_error&) {
+    json parsed = json::parse(candidate, nullptr, false);
+    if (parsed.is_discarded()) {
         return fallback;
     }
     if (!parsed.is_object()) {

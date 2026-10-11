@@ -216,7 +216,4 @@ TEST_CASE("RuntimeConfig - static constants", "[runtime_config]") {
     REQUIRE(std::string(RuntimeConfig::DEFAULT_TEST_FILE) == "3DBenchy.gcode");
     REQUIRE(std::string(RuntimeConfig::PROD_CONFIG_PATH) == "config/settings.json");
     REQUIRE(std::string(RuntimeConfig::TEST_CONFIG_PATH) == "config/settings-test.json");
-    // Legacy constants still available for migration
-    REQUIRE(std::string(RuntimeConfig::LEGACY_PROD_CONFIG_PATH) == "config/helixconfig.json");
-    REQUIRE(std::string(RuntimeConfig::LEGACY_TEST_CONFIG_PATH) == "config/helixconfig-test.json");
 }

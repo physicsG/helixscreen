@@ -11,6 +11,7 @@
 #include "input_shaper_calibrator.h"
 
 #include "app_globals.h"
+#include "calibration_abort.h"
 #include "i_moonraker_api.h"
 #include "moonraker_error.h"
 #include "printer_state.h"
@@ -252,28 +253,7 @@ void InputShaperCalibrator::run_calibration(char axis, ProgressCallback on_progr
 
 void InputShaperCalibrator::emergency_abort() {
     state_ = State::IDLE;
-
-    if (!api_) {
-        spdlog::warn("[InputShaperCalibrator] emergency_abort called without API");
-        return;
-    }
-
-    spdlog::info("[InputShaperCalibrator] Emergency abort: sending M112 + firmware_restart");
-
-    IMoonrakerAPI* api = api_;
-    api_->emergency_stop(
-        [api]() {
-            spdlog::debug("[InputShaperCalibrator] M112 sent, restarting firmware");
-            api->restart_firmware(
-                []() { spdlog::debug("[InputShaperCalibrator] Firmware restart initiated"); },
-                [](const MoonrakerError& err) {
-                    spdlog::error("[InputShaperCalibrator] Firmware restart failed: {}",
-                                  err.message);
-                });
-        },
-        [](const MoonrakerError& err) {
-            spdlog::error("[InputShaperCalibrator] Emergency stop failed: {}", err.message);
-        });
+    helix::emergency_stop_and_restart(api_, "InputShaperCalibrator");
 }
 
 // ============================================================================

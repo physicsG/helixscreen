@@ -1,6 +1,7 @@
 // Copyright (C) 2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "text_io.h"
 #include "wifi_saved_config.h"
 
 #include <climits>
@@ -35,13 +36,6 @@
 using helix::wifi::detail::is_volatile_path;
 
 namespace {
-
-std::string read_file(const std::string& path) {
-    std::ifstream in(path, std::ios::binary);
-    std::ostringstream buf;
-    buf << in.rdbuf();
-    return buf.str();
-}
 
 constexpr const char* CONFIG_BODY = "ctrl_interface=/var/run/wpa_supplicant\n"
                                     "update_config=1\n"
@@ -136,7 +130,7 @@ TEST_CASE("A symlink to persistent storage is remembered and mirrored",
 
         REQUIRE(helix::wifi::mirror_to_persistent(link));
 
-        const std::string durable_contents = read_file(durable);
+        const std::string durable_contents = helix::text_io::read_file(durable).value_or("");
         CHECK(durable_contents.find("ssid=\"TestNet\"") != std::string::npos);
         CHECK(durable_contents.find("psk=\"testpass\"") != std::string::npos);
     }
@@ -192,7 +186,8 @@ TEST_CASE("An empty saved config is not mirrored over a good one",
     { std::ofstream out(link); } // empty
 
     CHECK_FALSE(helix::wifi::mirror_to_persistent(link));
-    CHECK(read_file(durable).find("ssid=\"TestNet\"") != std::string::npos);
+    CHECK(helix::text_io::read_file(durable).value_or("").find("ssid=\"TestNet\"") !=
+          std::string::npos);
 
     ::unlink(link.c_str());
     ::unlink(durable.c_str());

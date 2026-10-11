@@ -7,6 +7,8 @@
 #include <chrono>
 #include <mutex>
 
+namespace helix {
+
 // Friend access to FilamentSensorManager (declared as a friend in its header;
 // the manager lives in namespace helix but the friend is a global-namespace
 // class, matching the RunoutScopeTestAccess / BypassArmingTestAccess shims).
@@ -21,12 +23,31 @@ class PostUnloadGraceTestAccess {
     static void reset(helix::FilamentSensorManager& mgr) {
         std::lock_guard<std::recursive_mutex> lock(mgr.mutex_);
         mgr.sensors_.clear();
-        mgr.states_.clear();
         mgr.bypass_armed_.clear();
         mgr.master_enabled_ = true;
         mgr.sync_mode_ = true;
         mgr.initial_status_received_ = false;
+        mgr.pending_removal_toast_.clear();
         clear_startup_grace(mgr);
+    }
+
+    /// Backdate every outstanding removal dwell, so a test can reach the far side
+    /// of helix::RUNOUT_TOAST_DWELL without waiting it out.
+    static void age_removal_dwell(helix::FilamentSensorManager& mgr,
+                                  std::chrono::steady_clock::duration by) {
+        std::lock_guard<std::recursive_mutex> lock(mgr.mutex_);
+        for (auto& [klipper_name, since] : mgr.pending_removal_toast_) {
+            (void)klipper_name;
+            since -= by;
+        }
+    }
+
+    /// Is a removal toast being held? Distinguishes "the dwell swallowed it" from
+    /// "some other gate suppressed it", which otherwise look identical from the
+    /// toast side.
+    [[nodiscard]] static bool removal_dwell_pending(helix::FilamentSensorManager& mgr) {
+        std::lock_guard<std::recursive_mutex> lock(mgr.mutex_);
+        return !mgr.pending_removal_toast_.empty();
     }
 
     /// discover_sensors() re-anchors the grace to "Moonraker just connected", so
@@ -34,4 +55,21 @@ class PostUnloadGraceTestAccess {
     static void clear_startup_grace(helix::FilamentSensorManager& mgr) {
         mgr.startup_time_ = std::chrono::steady_clock::now() - std::chrono::minutes(1);
     }
+
+    /// Set a sensor's role directly, bypassing set_sensor_role()'s
+    /// single-RUNOUT exclusivity. Production reaches a multi-RUNOUT state via
+    /// load_config (settings.json restore), which writes sensor->role per
+    /// entry with no exclusivity check.
+    static void force_role(helix::FilamentSensorManager& mgr, const std::string& klipper,
+                           helix::FilamentSensorRole role) {
+        std::lock_guard<std::recursive_mutex> lock(mgr.mutex_);
+        for (auto& s : mgr.sensors_) {
+            if (s.klipper_name == klipper) {
+                s.role = role;
+                s.enabled = true;
+                return;
+            }
+        }
+    }
 };
+} // namespace helix

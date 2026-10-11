@@ -13,43 +13,43 @@ using namespace helix;
 
 TEST_CASE("operation_patterns - to_upper utility", "[operation_patterns][string]") {
     SECTION("Converts lowercase to uppercase") {
-        REQUIRE(to_upper("hello") == "HELLO");
-        REQUIRE(to_upper("world") == "WORLD");
+        REQUIRE(helix::text_io::to_upper("hello") == "HELLO");
+        REQUIRE(helix::text_io::to_upper("world") == "WORLD");
     }
 
     SECTION("Preserves uppercase") {
-        REQUIRE(to_upper("HELLO") == "HELLO");
+        REQUIRE(helix::text_io::to_upper("HELLO") == "HELLO");
     }
 
     SECTION("Handles mixed case") {
-        REQUIRE(to_upper("HeLLo WoRLd") == "HELLO WORLD");
+        REQUIRE(helix::text_io::to_upper("HeLLo WoRLd") == "HELLO WORLD");
     }
 
     SECTION("Handles empty string") {
-        REQUIRE(to_upper("") == "");
+        REQUIRE(helix::text_io::to_upper("") == "");
     }
 
     SECTION("Preserves non-alphabetic characters") {
-        REQUIRE(to_upper("123_test!@#") == "123_TEST!@#");
+        REQUIRE(helix::text_io::to_upper("123_test!@#") == "123_TEST!@#");
     }
 }
 
 TEST_CASE("operation_patterns - to_lower utility", "[operation_patterns][string]") {
     SECTION("Converts uppercase to lowercase") {
-        REQUIRE(to_lower("HELLO") == "hello");
-        REQUIRE(to_lower("WORLD") == "world");
+        REQUIRE(helix::text_io::to_lower("HELLO") == "hello");
+        REQUIRE(helix::text_io::to_lower("WORLD") == "world");
     }
 
     SECTION("Preserves lowercase") {
-        REQUIRE(to_lower("hello") == "hello");
+        REQUIRE(helix::text_io::to_lower("hello") == "hello");
     }
 
     SECTION("Handles mixed case") {
-        REQUIRE(to_lower("HeLLo WoRLd") == "hello world");
+        REQUIRE(helix::text_io::to_lower("HeLLo WoRLd") == "hello world");
     }
 
     SECTION("Handles empty string") {
-        REQUIRE(to_lower("") == "");
+        REQUIRE(helix::text_io::to_lower("") == "");
     }
 }
 

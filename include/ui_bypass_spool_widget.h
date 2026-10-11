@@ -7,7 +7,10 @@
 
 #include <cstdint>
 
+namespace helix {
 class AmsBackend;
+struct AmsSystemInfo;
+} // namespace helix
 
 namespace helix::ui {
 
@@ -30,19 +33,20 @@ namespace helix::ui {
  *
  * @param supports_bypass Backend reports a bypass position at all
  * @param bypass_active Bypass is currently engaged (firmware state, not a proxy)
- * @param is_afc Backend is AFC — the only one with a phantom virtual bypass
+ * @param bypass_is_virtual The reported bypass is virtual, not a physical
+ *        position (AmsBackend::bypass_is_virtual())
  * @param always_show User setting: keep it visible even when disengaged
  * @return true when the bypass node should be rendered
  */
 [[nodiscard]] constexpr bool bypass_node_visible(bool supports_bypass, bool bypass_active,
-                                                 bool is_afc, bool always_show) {
+                                                 bool bypass_is_virtual, bool always_show) {
     if (!supports_bypass) {
         return false;
     }
     if (bypass_active) {
         return true;
     }
-    if (!is_afc) {
+    if (!bypass_is_virtual) {
         return true;
     }
     return always_show;
@@ -51,6 +55,10 @@ namespace helix::ui {
 /// Gather bypass_node_visible()'s inputs from the live backend and settings.
 /// Returns false when no backend is attached.
 [[nodiscard]] bool bypass_node_visible_for(const AmsBackend* backend);
+
+/// The same answer from a system reading the caller already holds, which saves the copy of
+/// the whole system the one-argument form takes. @p info must be @p backend's own reading.
+[[nodiscard]] bool bypass_node_visible_for(const AmsBackend* backend, const AmsSystemInfo& info);
 
 /// Bag of widget pointers that make up the bypass-spool overlay: a small card
 /// containing the spool icon, with a material label above and "Bypass" label
@@ -120,6 +128,16 @@ void bypass_spool_set_active(BypassSpoolWidgets& w, bool active);
 /// Position the spool box so its center sits at (`cx`, `cy`) in parent-relative
 /// coordinates. The material label is placed above, the "Bypass" label below.
 void bypass_spool_set_position(BypassSpoolWidgets& w, int32_t cx, int32_t cy);
+
+/// Bring the whole overlay in line with AmsState: shown only where the bypass node
+/// belongs on the path, wearing the external spool's color, fill and material, and the
+/// active ring while bypass is engaged. The caller repositions it afterwards, since the
+/// material label's visibility changes what sits above the box.
+void bypass_spool_sync_from_state(BypassSpoolWidgets& w);
+
+/// The same, for a caller that has already decided whether the node belongs on the path
+/// (bypass_node_visible_for) and so avoids a second read of the system info.
+void bypass_spool_sync_from_state(BypassSpoolWidgets& w, bool node_visible);
 
 /// Show or hide the whole bypass overlay — card, spool and both labels. Used
 /// when the bypass node does not belong on the path at all; see

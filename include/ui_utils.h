@@ -5,6 +5,7 @@
 
 #include "ui_effects.h"
 #include "ui_update_queue.h"
+#include "ui_widget_ref.h"
 
 #include "lvgl/lvgl.h"
 #include "static_panel_registry.h"
@@ -49,7 +50,7 @@ lv_coord_t ui_get_responsive_header_height(lv_coord_t screen_height);
  * lightbulb_on (100%).
  *
  * @param brightness LED brightness 0-100%
- * @return Icon name string for ui_icon_set_source()
+ * @return Icon name string for helix::ui::icon::set_source()
  */
 const char* ui_brightness_to_lightbulb_icon(int brightness);
 
@@ -91,7 +92,7 @@ inline void toggle_list_empty_state(lv_obj_t* list, lv_obj_t* empty_state, bool 
  * The pointer is automatically set to nullptr after deletion (or if skipped).
  *
  * WARNING: This performs SYNCHRONOUS deletion. Do NOT call from inside
- * queue_update(), async_call(), or overlay close callbacks — multiple
+ * queue_update(), lifetime_.defer(), or overlay close callbacks — multiple
  * synchronous deletions in the same UpdateQueue batch corrupt LVGL's event
  * linked list (SIGSEGV in lv_event_mark_deleted). Use safe_delete_deferred()
  * in those contexts instead.
@@ -265,6 +266,14 @@ inline void safe_delete_deferred_raw(lv_obj_t* obj) {
     lv_obj_delete_async(obj);
 }
 
+/// safe_delete_deferred() for a WidgetRef: the handle lets go first, then the
+/// widget is deferred-deleted exactly as the pointer overload does it.
+inline void safe_delete_deferred(WidgetRef& ref) {
+    lv_obj_t* obj = ref.get();
+    ref = nullptr;
+    safe_delete_deferred(obj);
+}
+
 /**
  * @brief Safe replacement for lv_obj_clean() inside UpdateQueue callbacks
  *
@@ -292,6 +301,10 @@ inline void safe_clean_children(lv_obj_t* container) {
         StaticPanelRegistry::is_destroying_all()) {
         return;
     }
+    // The flush lays out the container's whole screen; with nothing to delete
+    // there is nothing for a pending layout to reach.
+    if (lv_obj_get_child_count(container) == 0)
+        return;
     lv_obj_update_layout(container);
     while (lv_obj_get_child_count(container) > 0) {
         const uint32_t before = lv_obj_get_child_count(container);
@@ -301,6 +314,36 @@ inline void safe_clean_children(lv_obj_t* container) {
         if (lv_obj_get_child_count(container) >= before) {
             break;
         }
+    }
+}
+
+/**
+ * @brief Recursively invalidate all widgets in the tree
+ *
+ * With LV_DISPLAY_RENDER_MODE_PARTIAL, lv_obj_invalidate() on a parent may not
+ * propagate to all descendants. This ensures every widget's area is explicitly
+ * marked dirty for a full framebuffer repaint.
+ */
+inline void invalidate_all_recursive(lv_obj_t* obj) {
+    if (!obj)
+        return;
+    lv_obj_invalidate(obj);
+    uint32_t child_cnt = lv_obj_get_child_count(obj);
+    for (uint32_t i = 0; i < child_cnt; i++) {
+        invalidate_all_recursive(lv_obj_get_child(obj, i));
+    }
+}
+
+/**
+ * @brief Remove @p owner's registrations of @p cb from @p obj if @p obj is still alive
+ *
+ * For an owner's destructor whose cached widget may be gone: its tree can die
+ * first, or LVGL can already be deinitialised. lv_obj_is_valid() walks the
+ * live tree and never dereferences @p obj, so a freed pointer is skipped.
+ */
+inline void remove_event_cb_if_alive(lv_obj_t* obj, lv_event_cb_t cb, void* owner) {
+    if (obj && lv_is_initialized() && lv_obj_is_valid(obj)) {
+        lv_obj_remove_event_cb_with_user_data(obj, cb, owner);
     }
 }
 
@@ -365,18 +408,54 @@ inline void safe_delete_subtree(lv_obj_t* obj) {
     // Free the whole condemned subtree (incl. obj and its descendants) off-tree
     // on the deferred path — escapes the UpdateQueue batch.
     helix::ui::defocus_tree(condemned);
+    if (StaticPanelRegistry::is_destroying_all()) {
+        // Inside the destroy_all() window the deferred delete silently skips,
+        // which would strand the whole subtree on layer_top for the rest of
+        // the session. Hand the condemned container to the registry instead:
+        // destroy_all()'s caller frees it once the window closes, with the
+        // subtree still inside this layout-less container (#983 guarantees
+        // hold until the delete). No-op outside the window.
+        StaticPanelRegistry::instance().record_orphaned_widget(condemned);
+        return;
+    }
     helix::ui::safe_delete_deferred(condemned);
+}
+
+/**
+ * @brief Destroy every StaticPanelRegistry panel, then free the overlay
+ *        widgets the panel destructors had to leave allocated
+ *
+ * destroy_all() forbids widget deletion inside its window (LV_EVENT_DELETE
+ * would fire into the half-destroyed panel set), so an OverlayBase whose root
+ * is still allocated records it with the registry instead of deleting it. This
+ * wrapper runs the destroy and frees what was handed back - the soft-restart
+ * (printer switch) teardown spelling of destroy_all().
+ *
+ * Full shutdown must NOT use this: it calls StaticPanelRegistry::destroy_all()
+ * directly, ignores the recorded roots, and lets lv_deinit() free every widget
+ * - deleting them mid-shutdown reopens the crash window the skip exists for.
+ */
+inline void destroy_static_panels() {
+    for (lv_obj_t* orphan_root : StaticPanelRegistry::instance().destroy_all()) {
+        safe_delete_deferred_raw(orphan_root);
+    }
 }
 
 // ============================================================================
 // Recursive Widget Flag Utilities
 // ============================================================================
 
+/// Marks an object whose CLICKABLE disable_widget_clicks_recursive() removed,
+/// so enable_widget_clicks_recursive() restores exactly those and leaves an
+/// object that was never clickable alone.
+constexpr lv_obj_flag_t EDIT_CLICK_SUPPRESSED_FLAG = LV_OBJ_FLAG_USER_2;
+
 /**
  * @brief Recursively remove CLICKABLE flag from all descendants of obj
  *
  * Used by edit mode to prevent widget click handlers from firing
- * while grid rearrangement is in progress.
+ * while grid rearrangement is in progress. Each object it disarms is marked
+ * with EDIT_CLICK_SUPPRESSED_FLAG for enable_widget_clicks_recursive().
  *
  * @param obj Parent object whose descendants will have CLICKABLE removed
  */
@@ -388,8 +467,33 @@ inline void disable_widget_clicks_recursive(lv_obj_t* obj) {
         lv_obj_t* child = lv_obj_get_child(obj, static_cast<int32_t>(i));
         if (!child)
             continue;
-        lv_obj_remove_flag(child, LV_OBJ_FLAG_CLICKABLE);
+        if (lv_obj_has_flag(child, LV_OBJ_FLAG_CLICKABLE)) {
+            lv_obj_remove_flag(child, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_add_flag(child, EDIT_CLICK_SUPPRESSED_FLAG);
+        }
         disable_widget_clicks_recursive(child);
+    }
+}
+
+/**
+ * @brief Give back CLICKABLE to every descendant of obj that
+ * disable_widget_clicks_recursive() took it from.
+ *
+ * @param obj Parent object whose descendants are restored
+ */
+inline void enable_widget_clicks_recursive(lv_obj_t* obj) {
+    if (!obj)
+        return;
+    uint32_t count = lv_obj_get_child_count(obj);
+    for (uint32_t i = 0; i < count; ++i) {
+        lv_obj_t* child = lv_obj_get_child(obj, static_cast<int32_t>(i));
+        if (!child)
+            continue;
+        if (lv_obj_has_flag(child, EDIT_CLICK_SUPPRESSED_FLAG)) {
+            lv_obj_remove_flag(child, EDIT_CLICK_SUPPRESSED_FLAG);
+            lv_obj_add_flag(child, LV_OBJ_FLAG_CLICKABLE);
+        }
+        enable_widget_clicks_recursive(child);
     }
 }
 
@@ -410,6 +514,18 @@ inline void clear_pressed_state_recursive(lv_obj_t* obj) {
         clear_pressed_state_recursive(lv_obj_get_child(obj, static_cast<int32_t>(i)));
     }
 }
+
+/**
+ * @brief Reset each pointer input device whose press or scroll target is inside @p subtree
+ *
+ * For a subtree being retired while a press may be in flight on it: the rest of that
+ * press (RELEASED, CLICKED) must not reach its objects. A pointer pressing or scrolling
+ * anything else keeps its gesture. lv_indev_reset() clears the target of every pointer
+ * it visits whatever object it names, and a press it clears never gets its RELEASED.
+ *
+ * @param subtree Root of the objects being retired; nullptr resets nothing
+ */
+void reset_input_within(lv_obj_t* subtree);
 
 // ============================================================================
 // Owned user_data strings
@@ -446,5 +562,20 @@ bool set_owned_user_string(lv_obj_t* obj, std::string_view s);
  * other than this helper — it never casts a foreign user_data pointer to char*.
  */
 const char* get_owned_user_string(lv_obj_t* obj);
+
+/**
+ * Let @p obj's children draw past its edges: makes it overflow-visible and
+ * gives it an ext draw size equal to its visible children's largest. LVGL
+ * clips an overflow-visible parent's children to the parent's own ext draw
+ * area, so a child's overhang (a spool glow) reaches the screen only if each
+ * such parent carries it. refresh_overhang_chain() after a child's changes.
+ */
+void pass_child_overhang(lv_obj_t* obj);
+
+/**
+ * Re-measure @p child's ext draw size and every overflow-visible ancestor's
+ * above it, after the child's overhang changed or it was shown or hidden.
+ */
+void refresh_overhang_chain(lv_obj_t* child);
 
 } // namespace helix::ui

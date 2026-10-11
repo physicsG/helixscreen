@@ -701,3 +701,54 @@ TEST_CASE("KlipperConfigParser: key with empty value after separator", "[klipper
     REQUIRE(parser.get("section", "empty_colon").empty());
     REQUIRE(parser.get("section", "empty_equals").empty());
 }
+
+// ============================================================================
+// Klipper configfile.py semantics (RawConfigParser, strict=False)
+// ============================================================================
+
+TEST_CASE("KlipperConfigParser: values follow Klipper's configparser", "[klipper_config]") {
+    struct Case {
+        const char* name;
+        const char* content;
+        const char* key;
+        const char* expected;
+    };
+    const Case cases[] = {
+        {"first separator wins over a later colon", "[s]\na=b: c\n", "a", "b: c"},
+        {"option names are case-insensitive", "[s]\nFoo: 1\n", "foo", "1"},
+        {"lookup name is case-insensitive", "[s]\nfoo: 1\n", "FOO", "1"},
+        {"semicolon full-line comment is not a key", "[s]\n; x: y\na: 1\n", "; x", ""},
+        {"inline semicolon comment", "[s]\na: 1 ; note\n", "a", "1"},
+        {"inline hash comment", "[s]\na: 1 # note\n", "a", "1"},
+        {"duplicate key: last wins", "[s]\na: 1\na: 2\n", "a", "2"},
+        {"duplicate section merges", "[s]\na: 1\n[t]\nb: 2\n[s]\nc: 3\n", "c", "3"},
+        {"blank line inside a multi-line value", "[s]\ng:\n  A\n\n  B\n", "g", "A\n\nB"},
+        {"comment inside a multi-line value is dropped", "[s]\ng:\n  A\n  # c\n  B\n", "g", "A\nB"},
+        {"section header with trailing comment", "[s] # hi\na: 1\n", "a", "1"},
+        {"tab around the separator", "[s]\na\t=\t1\n", "a", "1"},
+    };
+    for (const auto& c : cases) {
+        DYNAMIC_SECTION(c.name) {
+            KlipperConfigParser p;
+            REQUIRE(p.parse(c.content));
+            CHECK(p.get("s", c.key) == c.expected);
+        }
+    }
+}
+
+TEST_CASE("KlipperConfigParser: duplicate sections and includes", "[klipper_config]") {
+    KlipperConfigParser p;
+    p.parse("[include extra.cfg]\n[s]\na: 1\n[t]\nb: 2\n[s]\nc: 3\n");
+    CHECK(p.get_sections() == std::vector<std::string>{"s", "t"});
+    CHECK_FALSE(p.has_section("include extra.cfg"));
+    CHECK(p.get_keys("s") == std::vector<std::string>{"a", "c"});
+}
+
+TEST_CASE("KlipperConfigParser: set on a duplicated key edits the copy get() reads",
+          "[klipper_config]") {
+    KlipperConfigParser p;
+    p.parse("[s]\ncut: False\ng: A\ncut:\n  B\n  C\n[t]\nx: 1\n");
+    p.set("s", "cut", "True");
+    CHECK(p.get("s", "cut") == "True");
+    CHECK(p.serialize() == "[s]\ncut: False\ng: A\ncut: True\n[t]\nx: 1\n");
+}

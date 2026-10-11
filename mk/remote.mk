@@ -10,10 +10,10 @@
 #   make remote-sync            # Just sync source to remote (no build)
 #   make remote-fetch           # Just fetch binaries from remote
 #
-# Configuration:
-#   REMOTE_HOST=thelio.local    # Remote build host
-#   REMOTE_USER=                # Remote user (empty = use SSH config)
-#   REMOTE_DIR=~/Code/Printing/helixscreen  # Source location on remote
+# Configuration: REMOTE_HOST, REMOTE_USER (empty = your SSH config) and
+# REMOTE_DIR (the source location on the remote), from the build-hosts file
+# (scripts/lib/build_hosts.sh), the environment, or the make command line.
+# There are no defaults: a target that needs one stops and names the file.
 #
 # The remote host needs:
 #   - Docker (for pi-docker, ad5m-docker targets)
@@ -24,24 +24,41 @@
 # Remote Build Configuration
 # =============================================================================
 
-# Remote build host settings (override via environment or command line)
-# Example: make remote-pi REMOTE_HOST=buildbox.local REMOTE_USER=builder
-REMOTE_HOST ?= thelio.local
-REMOTE_USER ?=
-REMOTE_DIR ?= ~/Code/Printing/helixscreen
+# The build-hosts file has one parser, scripts/lib/build_hosts.sh, and make
+# asks it rather than reading the file itself. Each variable is read on first
+# use and remembered, so a make that uses no remote host never runs the parser
+# and a broken file cannot stop it. A value from the environment or the make
+# command line wins: ?= leaves it alone, and the parser puts the environment
+# first too.
+BUILD_HOSTS_FILE = $(or $(HELIX_BUILD_HOSTS_FILE),$(or $(XDG_CONFIG_HOME),$(HOME)/.config)/helixscreen/build-hosts.env)
+define build_host_lazy
+$(1) ?= $$(eval $(1) := $$(shell scripts/lib/build_hosts.sh --make $(1)))$$($(1))
+endef
+$(foreach v,REMOTE_HOST REMOTE_USER REMOTE_DIR,$(eval $(call build_host_lazy,$(v))))
 
-# Build SSH target string
-ifdef REMOTE_USER
-    REMOTE_SSH_TARGET := $(REMOTE_USER)@$(REMOTE_HOST)
-else
-    REMOTE_SSH_TARGET := $(REMOTE_HOST)
+REMOTE_SSH_TARGET = $(if $(REMOTE_USER),$(REMOTE_USER)@)$(REMOTE_HOST)
+
+# A remote target with no host stops before anything runs, in one line naming
+# the file. REMOTE_DIR is checked for every target that uses it: rsync --delete
+# to "$(REMOTE_HOST):/" is what an empty one would mean. remote-native and
+# remote-test go through scripts/remote-build.sh, which keeps its own clone.
+build_hosts_missing = $(error $(1) is not set: add $(1)=<value> to $(BUILD_HOSTS_FILE) (or export it))
+ifneq ($(filter remote-%,$(MAKECMDGOALS)),)
+ifeq ($(strip $(REMOTE_HOST)),)
+$(call build_hosts_missing,REMOTE_HOST)
+endif
+ifneq ($(filter-out remote-native remote-test,$(filter remote-%,$(MAKECMDGOALS))),)
+ifeq ($(strip $(REMOTE_DIR)),)
+$(call build_hosts_missing,REMOTE_DIR)
+endif
+endif
 endif
 
 # =============================================================================
 # Remote Sync Targets
 # =============================================================================
 
-.PHONY: remote-sync remote-fetch remote-fetch-full remote-clean remote-fetch-pi remote-fetch-ad5m remote-fetch-native remote-fetch-pi-full remote-fetch-ad5m-full
+.PHONY: remote-native remote-test remote-sync remote-fetch remote-fetch-full remote-clean remote-fetch-pi remote-fetch-ad5m remote-fetch-native remote-fetch-pi-full remote-fetch-ad5m-full
 
 # Sync source code to remote host
 # Note: We explicitly exclude build artifacts rather than using .gitignore filtering
@@ -185,16 +202,21 @@ remote-ad5m: remote-sync
 	@$(MAKE) --no-print-directory remote-fetch-ad5m
 	@echo "$(GREEN)$(BOLD)✓ AD5M build complete - binaries in build/ad5m/$(RESET)"
 
-# Build native Linux on remote host (no Docker needed)
-remote-native: remote-sync
-	@echo "$(CYAN)$(BOLD)Building native Linux on $(REMOTE_HOST)...$(RESET)"
-	@START_TIME=$$(date +%s); \
-	ssh $(REMOTE_SSH_TARGET) "cd $(REMOTE_DIR) && $(REMOTE_MAKE_ENV)make -j" || exit $$?; \
-	END_TIME=$$(date +%s); \
-	ELAPSED=$$((END_TIME - START_TIME)); \
-	echo "$(GREEN)✓ Remote build completed in $${ELAPSED}s$(RESET)"
-	@$(MAKE) --no-print-directory remote-fetch-native
-	@echo "$(GREEN)$(BOLD)✓ Native Linux build complete - binaries in build/$(RESET)"
+# Build native Linux on the remote host.
+#
+# Does NOT depend on remote-sync. The remote keeps its own git clone and pulls
+# committed history from GitHub itself; the only thing that crosses YOUR link is
+# a patch of whatever is not pushed yet, typically a few KB over one multiplexed
+# SSH connection. rsync stays for the Docker cross targets below, which need a
+# full mirror of the working tree on the remote.
+#
+# scripts/remote-build.sh carries the details and the flags (--run, --host, --dir).
+remote-native:
+	$(Q)scripts/remote-build.sh -j all
+
+# Build the unit tests remotely, then run a tag: make remote-test TAG='[ams]'
+remote-test:
+	$(Q)scripts/remote-build.sh $(if $(TAG),--run '$(TAG)',) test
 
 # Build all targets on remote (parallel Docker builds)
 remote-all: remote-sync
@@ -279,7 +301,9 @@ help-remote:
 	echo "  $${G}remote-all$${X}            - Build all cross-compile targets"; \
 	echo ""; \
 	echo "$${C}Sync & Fetch:$${X}"; \
-	echo "  $${G}remote-sync$${X}           - Sync source code to remote (no build)"; \
+	echo "  $${G}remote-native$${X}         - Build natively on remote (git + patch, no rsync)"; \
+	echo "  $${G}remote-test$${X}           - Build tests remotely; TAG='[ams]' also runs them"; \
+	echo "  $${G}remote-sync$${X}           - rsync the tree to remote (Docker cross builds need this)"; \
 	echo "  $${G}remote-fetch$${X}          - Fetch all binaries from remote"; \
 	echo "  $${G}remote-fetch-pi$${X}       - Fetch Pi binaries only (fast)"; \
 	echo "  $${G}remote-fetch-ad5m$${X}     - Fetch AD5M binaries only (fast)"; \

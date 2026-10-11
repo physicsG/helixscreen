@@ -71,7 +71,7 @@
 #     splash_screen_manager,remote_screen_*,android_asset_extractor}, src/bluetooth/*.
 #   Mocks (CONFIG_HELIX_MOCK_PRINTER only): see `# MOCK:` lines at end.
 #   New-since-audit files (audit was 2026-07-13): all are platform seams,
-#     excluded subsystems, or dev/test panels (ui_panel_test/step_test/glyphs/
+#     excluded subsystems, or dev/test panels (ui_panel_glyphs/
 #     memory_stats, screensaver_*, tools/xml_attribute_validator, lvgl-demo/) —
 #     none are Core+AMS. The link loop adds any genuinely-referenced core file.
 #
@@ -88,12 +88,17 @@ lib/lv_markdown/src/lv_markdown_style.c
 src/abort/abort_manager.cpp
 src/application/asset_manager.cpp
 src/application/data_root_resolver.cpp
+src/application/discovery_steps_core.cpp
 src/application/display_metrics.cpp
 # clean_error_text only (e-stop recovery dialog) — the full router stays excluded
 src/application/gcode_error_text.cpp
+src/application/hardware_fingerprint.cpp
 src/application/moonraker_event_routing.cpp
 src/application/panel_factory.cpp
 src/application/printer_cache_registry.cpp
+src/application/printer_retarget.cpp
+src/application/printer_switch_flow.cpp
+src/application/session_wiring.cpp
 src/application/static_panel_registry.cpp
 src/application/static_subject_registry.cpp
 src/application/subject_initializer.cpp
@@ -103,58 +108,96 @@ src/format_utils.cpp
 src/layout_manager.cpp
 src/led/led_auto_state.cpp
 src/led/led_controller.cpp
-src/plugin/injection_point_manager.cpp
+src/led/led_devices.cpp
+src/led/led_device_page.cpp
 src/print/active_print_media_manager.cpp
 src/print/filament_sensor_manager.cpp
 src/print/preprint_predictor.cpp
+src/print/print_eta_estimator.cpp
 src/print/thumbnail_write_journal.cpp
 src/print/print_completion.cpp
 src/print/print_file_data.cpp
 src/print/print_history_manager.cpp
 src/print/print_start_analyzer.cpp
-src/print/print_start_enhancer.cpp
 src/print/print_start_navigation.cpp
 src/print/thumbnail_cache.cpp
+src/print/thumbnail_downscale.cpp
+src/print/thumbnail_png_stream.cpp
+src/print/thumbnail_rules.cpp
+src/print/thumbnail_slot_pool.cpp
+src/print/thumbnail_target.cpp
 src/printer/active_material_provider.cpp
 src/printer/afc_config_manager.cpp
 src/printer/afc_defaults.cpp
 src/printer/afc_fault_position.cpp
 src/printer/ams_backend.cpp
+src/printer/ams_backend_registry.cpp
 src/printer/ams_backend_ace.cpp
 src/printer/ams_backend_ad5x_ifs.cpp
 src/printer/ams_backend_afc.cpp
 src/printer/ams_backend_cfs.cpp
 src/printer/ams_backend_happy_hare.cpp
 src/printer/ams_backend_multiace.cpp
+src/printer/ams_backend_openams.cpp
 src/printer/ams_bypass_policy.cpp
 src/printer/ams_backend_qidi.cpp
 src/printer/ams_backend_snapmaker.cpp
 src/printer/ams_backend_toolchanger.cpp
 src/printer/ams_endless_spool.cpp
+src/printer/ams_environment_zone.cpp
+src/printer/ams_runout_grace.cpp
 src/printer/ams_state.cpp
+src/printer/ams_state_buffer.cpp
+src/printer/ams_state_clog.cpp
+src/printer/ams_state_dryer.cpp
+src/printer/ams_state_external_spool.cpp
+src/printer/ams_state_subjects.cpp
+src/printer/ams_state_tool_mapping.cpp
+src/printer/buffer_reading.cpp
 src/printer/ams_subscription_backend.cpp
+src/printer/batch_feed_reconcile.cpp
+src/printer/cfs_status_parse.cpp
+src/printer/lane_echo.cpp
+src/printer/lane_resolver.cpp
+src/printer/lane_apply.cpp
+src/printer/lane_source_store.cpp
+src/printer/lane_translation.cpp
+src/printer/lane_legacy_migration.cpp
+src/printer/lane_binding.cpp
 src/printer/bed_dimensions.cpp
+src/printer/chamber_heater_assignment.cpp
 src/printer/chamber_heater_backend_dragonbreath.cpp
 src/printer/chamber_heater_backend_generic.cpp
 src/printer/chamber_heater_backend_panda_breath.cpp
 src/printer/consumption_sink.cpp
 src/printer/filament_catalog.cpp
 src/printer/filament_consumption_tracker.cpp
+src/printer/filament_database.cpp
 src/printer/filament_display_name.cpp
+src/printer/filament_macro_profiles.cpp
 src/printer/filament_mapper.cpp
 src/printer/filament_variants.cpp
+src/printer/firmware_fault_codes.cpp
 src/printer/hardware_role_registry.cpp
 src/printer/hardware_validator.cpp
+src/printer/happy_hare_status_parse.cpp
 src/printer/hh_defaults.cpp
+src/printer/klipper_error_table.cpp
 src/printer/macro_executor.cpp
-src/printer/macro_modification_manager.cpp
 src/printer/macro_param_cache.cpp
+src/printer/macro_param_defaults.cpp
+src/printer/macro_params.cpp
 src/printer/pause_cause.cpp
+src/printer/printer_discovery.cpp
+src/printer/printer_discovery_parse.cpp
 src/printer/power_device_state.cpp
+src/printer/power_loss_sensor.cpp
 src/printer/pre_print_option.cpp
+src/printer/pre_print_preferences.cpp
 src/printer/preflight_validator.cpp
 src/printer/print_lifecycle_state.cpp
 src/printer/print_start_checks.cpp
+src/printer/queued_job_options.cpp
 src/printer/printer_calibration_state.cpp
 src/printer/printer_capabilities_state.cpp
 src/printer/printer_composite_visibility_state.cpp
@@ -163,43 +206,59 @@ src/printer/printer_excluded_objects_state.cpp
 src/printer/printer_fan_state.cpp
 src/printer/printer_hardware.cpp
 src/printer/printer_hardware_validation_state.cpp
-src/printer/printer_led_state.cpp
 src/printer/printer_motion_state.cpp
 src/printer/printer_network_state.cpp
 src/printer/printer_plugin_status_state.cpp
 src/printer/printer_print_state.cpp
+src/printer/printer_profile_state.cpp
 src/printer/printer_recovery_service.cpp
 src/printer/printer_state.cpp
 src/printer/printer_temperature_state.cpp
 src/printer/printer_versions_state.cpp
 src/printer/sensor_state.cpp
 src/printer/slot_registry.cpp
+src/printer/snapmaker_channel_state.cpp
+src/printer/snapmaker_exceptions.cpp
+src/printer/snapmaker_print_preferences.cpp
 src/printer/snapmaker_resume.cpp
+src/printer/snapmaker_status_parse.cpp
+src/printer/status_dispatch.cpp
+src/printer/preprint_skip_wrappers.cpp
 src/printer/z_offset_persistence.cpp
 src/printer/plr_backend.cpp
 src/printer/plr_offer.cpp
 src/printer/standard_macros.cpp
 src/printer/toolchanger_addon.cpp
+src/printer/zmod_color_status.cpp
 src/printer/toolhead_homing.cpp
+src/printer/tool_offset_calibration.cpp
+src/printer/pa_calibration.cpp
 src/printer/tool_offsets.cpp
 src/printer/tool_state.cpp
 src/printer/tool_offsets.cpp
 src/sensors/accel_sensor_manager.cpp
 src/sensors/humidity_sensor_manager.cpp
+src/sensors/load_cell_manager.cpp
 src/sensors/probe_sensor_manager.cpp
 src/sensors/temperature_sensor_manager.cpp
 src/sensors/width_sensor_manager.cpp
+src/system/afc_message_dedup.cpp
 src/system/alsa_device_enum.cpp
 src/system/async_lifetime_guard.cpp
 src/system/audio_settings_manager.cpp
 src/system/capability_overrides.cpp
 src/system/cjk_font_manager.cpp
 src/system/config.cpp
+src/system/config_migrations.cpp
+src/system/config_trust.cpp
 src/system/config_backup.cpp
+src/system/diagnostics.cpp
 src/system/display_settings_manager.cpp
+src/system/filament_favorites.cpp
 src/system/helix_plugin_installer.cpp
 src/system/http_executor.cpp
 src/system/input_settings_manager.cpp
+src/system/helix_regex.cpp
 src/system/klipper_config_editor.cpp
 src/system/klipper_config_includes.cpp
 src/system/klipper_config_parser.cpp
@@ -213,35 +272,49 @@ src/system/network_tester.cpp
 src/system/panel_widget_config.cpp
 src/system/pending_startup_warnings.cpp
 src/system/performance_state.cpp
+src/system/persisted_setting.cpp
 src/system/platform_capabilities.cpp
+src/system/platform_table.cpp
 src/system/post_op_cooldown_manager.cpp
 src/system/log_redact.cpp
 src/system/preset_materials.cpp
+src/system/prerender_size_class.cpp
 src/system/prerendered_images.cpp
 src/system/printer_image_manager.cpp
+src/system/printer_image_regions.cpp
 src/system/printer_name_sync.cpp
 src/system/runtime_config.cpp
 src/system/safety_settings_manager.cpp
 src/system/settings_manager.cpp
+src/system/sha256_util.cpp
+src/system/simulated_clock.cpp
 src/system/sound_manager.cpp
 src/system/sound_sequencer.cpp
 src/system/sound_theme.cpp
 src/system/subject_debug_registry.cpp
 src/system/system_power.cpp
 src/system/system_settings_manager.cpp
+src/system/text_io.cpp
+src/system/helix_fs.cpp
 src/system/timezone_env.cpp
 src/system/tips_manager.cpp
 src/system/tools_used_cache.cpp
 src/system/translation_loader.cpp
+src/system/update_checker_subjects.cpp
 src/system/wizard_step_logic.cpp
 src/temperature/temperature_history_manager.cpp
 src/temperature/thermal_rate_model.cpp
 src/ui/action_prompt_manager.cpp
 src/ui/ams_drawing_utils.cpp
+src/ui/ams_tray_projection.cpp
+src/ui/ams_unit_pages.cpp
 src/ui/backdrop_blur.cpp
 src/ui/bed_coord_mapper.cpp
 src/ui/bed_mesh_profile_name.cpp
+src/ui/card_thumbnail_plan.cpp
+src/ui/chamber_assignment_options.cpp
 src/ui/console_filter_engine.cpp
+src/ui/console_line.cpp
 src/ui/fan_spin_animation.cpp
 src/ui/fault_modal_registry.cpp
 src/ui/filament_op_execute.cpp
@@ -251,8 +324,10 @@ src/ui/filament_tube_stroker.cpp
 src/ui/grid_layout.cpp
 src/ui/helix_sparkline.cpp
 src/ui/job_queue_state.cpp
+src/ui/job_queue_start.cpp
 src/ui/keyboard_layout_provider.cpp
 src/ui/layout_port.cpp
+src/ui/light_button_config.cpp
 src/ui/locale_formats.cpp
 src/ui/modals/buffer_status_modal.cpp
 src/ui/modals/camera_config_modal.cpp
@@ -260,11 +335,13 @@ src/ui/modals/clog_detection_config_modal.cpp
 src/ui/modals/favorite_macro_config_modal.cpp
 src/ui/modals/macro_param_modal.cpp
 src/ui/modals/ui_preflight_check_modal.cpp
+src/ui/observer_factory.cpp
 src/ui/operation_timeout_guard.cpp
 src/ui/overlay_base.cpp
 src/ui/page_scroll_auto_inject.cpp
 src/ui/page_scroll_controller.cpp
 src/ui/panel_widget_manager.cpp
+src/ui/buffer_slider_geometry.cpp
 src/ui/clog_meter_geometry.cpp
 src/ui/clog_meter_model.cpp
 src/ui/panel_widget_registry.cpp
@@ -276,6 +353,7 @@ src/ui/panel_widgets/clog_detection_widget.cpp
 src/ui/panel_widgets/control_buttons_widget.cpp
 src/ui/panel_widgets/fan_stack_widget.cpp
 src/ui/panel_widgets/fan_widget.cpp
+src/ui/panel_widgets/filament_buffer_widget.cpp
 src/ui/panel_widgets/filament_sensor_widget.cpp
 src/ui/panel_widgets/gcode_console_widget.cpp
 src/ui/panel_widgets/heater_temp_widget.cpp
@@ -293,6 +371,8 @@ src/ui/panel_widgets/print_stats_widget.cpp
 src/ui/panel_widgets/print_status_widget.cpp
 src/ui/panel_widgets/printer_image_widget.cpp
 src/ui/panel_widgets/shutdown_widget.cpp
+src/ui/panel_widgets/tile_sizing.cpp
+src/ui/panel_widgets/tile_widget.cpp
 src/ui/panel_widgets/temp_graph_widget.cpp
 src/ui/panel_widgets/temp_stack_widget.cpp
 src/ui/panel_widgets/thermistor_widget.cpp
@@ -302,16 +382,24 @@ src/ui/panel_widgets/width_sensor_widget.cpp
 src/ui/print_control_buttons.cpp
 src/ui/print_control_view.cpp
 src/ui/save_config_restart.cpp
+src/ui/scroll_blit.cpp
 src/ui/setting_group.cpp
+src/ui/settings_root_status.cpp
+src/ui/shared_font_style.cpp
+src/ui/text_metrics.cpp
 src/ui/style_configs.cpp
 src/ui/temp_graph_controller.cpp
+src/ui/print_progress_text.cpp
+src/ui/print_status_layout_fitter.cpp
 src/ui/temp_graph_tooltip.cpp
 src/ui/temperature_controller.cpp
+src/ui/bed_drying_controller.cpp
 src/ui/temperature_service.cpp
 src/ui/theme_loader.cpp
 src/ui/theme_manager_new.cpp
 src/ui/touch_calibration.cpp
 src/ui/touch_calibration_layout.cpp
+src/ui/touch_calibration_controller.cpp
 src/ui/touch_calibration_panel.cpp
 src/ui/touch_calibration_session.cpp
 src/ui/tour/first_run_tour.cpp
@@ -322,23 +410,31 @@ src/ui/ui_ams_context_menu.cpp
 src/ui/ui_ams_current_tool.cpp
 src/ui/ui_ams_device_operations_overlay.cpp
 src/ui/ui_ams_device_section_detail_overlay.cpp
+src/ui/ui_cfs_chute_calibration_overlay.cpp
 src/ui/ui_ams_edit_overlay.cpp
 src/ui/ui_ams_environment_overlay.cpp
+src/ui/ui_ams_zone_overview_overlay.cpp
 src/ui/ui_ams_lane_bar.cpp
+src/ui/ui_ams_lane_spool.cpp
 src/ui/ui_ams_loading_error_modal.cpp
 src/ui/ui_ams_mini_status.cpp
+src/ui/ui_ams_recover_state_modal.cpp
 src/ui/ui_ams_selector_menu.cpp
 src/ui/ui_afc_fault_path.cpp
+src/ui/ui_multiselect.cpp
+src/ui/ui_batch_filament_modal.cpp
 src/ui/ui_ams_sidebar.cpp
 src/ui/ui_ams_slot.cpp
 src/ui/ui_ams_toolhead_menu.cpp
-src/ui/ui_buffer_meter.cpp
+src/ui/ui_buffer_slider.cpp
 src/ui/ui_busy_overlay.cpp
 src/ui/ui_button.cpp
 src/ui/ui_bypass_spool_widget.cpp
 src/ui/ui_bypass_toggle_controller.cpp
 src/ui/ui_card.cpp
 src/ui/ui_carousel.cpp
+src/ui/ui_chamber_dryer_modal.cpp
+src/ui/ui_bed_drying_modal.cpp
 src/ui/ui_change_host_modal.cpp
 src/ui/ui_clog_bar.cpp
 src/ui/ui_clog_meter.cpp
@@ -352,6 +448,8 @@ src/ui/ui_dialog.cpp
 src/ui/ui_effects.cpp
 src/ui/ui_emergency_stop.cpp
 src/ui/ui_endless_spool_arrows.cpp
+src/ui/ui_exclude_mode_controller.cpp
+src/ui/ui_exclude_object_badges.cpp
 src/ui/ui_exclude_object_map_view.cpp
 src/ui/ui_exclude_object_modal.cpp
 src/ui/ui_exclude_object_side_list.cpp
@@ -369,37 +467,46 @@ src/ui/ui_filament_path_anim.cpp
 src/ui/ui_filament_path_canvas.cpp
 src/ui/ui_filament_path_glyphs.cpp
 src/ui/ui_filament_path_layers.cpp
+src/ui/ui_filament_path_plan.cpp
 src/ui/ui_filament_path_topology.cpp
 src/ui/ui_filament_runout_handler.cpp
 src/ui/ui_filament_slot_picker.cpp
 src/ui/ui_filename_utils.cpp
 src/ui/ui_format_utils.cpp
+src/ui/display_numbering.cpp
 src/ui/ui_gradient_canvas.cpp
 src/ui/ui_heater_icon_binder.cpp
 src/ui/ui_heating_animator.cpp
 src/ui/ui_history_list_view.cpp
 src/ui/ui_icon.cpp
+src/ui/ui_icon_picker.cpp
 src/ui/ui_info_qr_modal.cpp
 src/ui/ui_job_queue_modal.cpp
 src/ui/ui_jog_pad.cpp
 src/ui/ui_keyboard_manager.cpp
 src/ui/ui_keycap_style.cpp
+src/ui/ui_leader_line.cpp
 src/ui/ui_led_chip_factory.cpp
 src/ui/ui_led_control_overlay.cpp
 src/ui/ui_lock_screen.cpp
-src/ui/ui_macro_enhance_wizard.cpp
 src/ui/ui_manual_pull_prompt.cpp
 src/ui/ui_markdown.cpp
 src/ui/ui_modal.cpp
+src/ui/ui_nav_backdrop.cpp
 src/ui/ui_nav_manager.cpp
+src/ui/ui_nav_panel_registry.cpp
+src/ui/ui_nav_printer_badge.cpp
+src/ui/ui_navbar_button.cpp
 src/ui/ui_notification.cpp
 src/ui/ui_notification_badge.cpp
 src/ui/ui_notification_history.cpp
 src/ui/ui_notification_manager.cpp
+src/ui/ui_panel_notification_history.cpp
 src/ui/ui_overlay_console_settings.cpp
 src/ui/ui_overlay_network_settings.cpp
 src/ui/ui_overlay_performance.cpp
 src/ui/ui_overlay_printer_image.cpp
+src/ui/ui_overlay_printer_image_tagger.cpp
 src/ui/ui_overlay_printer_type.cpp
 src/ui/ui_overlay_retraction_settings.cpp
 src/ui/ui_overlay_temp_graph.cpp
@@ -410,16 +517,22 @@ src/ui/ui_panel_base.cpp
 src/ui/ui_panel_common.cpp
 src/ui/ui_panel_console.cpp
 src/ui/ui_panel_controls.cpp
+src/ui/quick_action_slots.cpp
+src/ui/quick_action_buttons.cpp
+src/ui/ui_motors_off.cpp
 src/ui/ui_panel_filament.cpp
 src/ui/ui_panel_history_dashboard.cpp
 src/ui/ui_panel_history_list.cpp
 src/ui/ui_panel_home.cpp
 src/ui/ui_panel_macros.cpp
+src/motion_presets.cpp
 src/ui/ui_panel_motion.cpp
 src/ui/ui_panel_power.cpp
 src/ui/ui_panel_print_select.cpp
 src/ui/ui_panel_print_status.cpp
 src/ui/ui_panel_settings.cpp
+src/ui/pre_start_exclude.cpp
+src/ui/print_select_button_view.cpp
 src/ui/ui_plr_offer_controller.cpp
 src/ui/ui_plr_prompt.cpp
 src/ui/ui_pin_entry_modal.cpp
@@ -446,26 +559,32 @@ src/ui/ui_printer_status_icon.cpp
 src/ui/ui_printer_switch_menu.cpp
 src/ui/ui_probe_overlay.cpp
 src/ui/ui_progress_arc.cpp
+src/ui/ui_pause_markers.cpp
 src/ui/ui_resume_dispatch.cpp
 src/ui/ui_runout_guidance_modal.cpp
 src/ui/ui_settings_about.cpp
-src/ui/ui_settings_display_sound.cpp
+src/ui/ui_settings_appearance.cpp
+src/ui/ui_settings_display.cpp
 src/ui/ui_settings_fans.cpp
 src/ui/ui_settings_hardware.cpp
 src/ui/ui_settings_hardware_health.cpp
 src/ui/ui_settings_help.cpp
+src/ui/ui_settings_language_time.cpp
 src/ui/ui_settings_led.cpp
 src/ui/ui_settings_machine_limits.cpp
 src/ui/ui_settings_macro_buttons.cpp
 src/ui/ui_settings_material_temps.cpp
-src/ui/ui_settings_plugins.cpp
+src/ui/ui_settings_motion.cpp
 src/ui/ui_settings_printing.cpp
 src/ui/ui_settings_safety.cpp
 src/ui/ui_settings_security.cpp
 src/ui/ui_settings_sensors.cpp
-src/ui/ui_settings_system.cpp
+src/ui/ui_settings_sound.cpp
 src/ui/ui_settings_telemetry_data.cpp
 src/ui/ui_settings_touch.cpp
+src/ui/ui_settings_system.cpp
+src/ui/ui_settings_connection.cpp
+src/ui/ui_settings_updates.cpp
 src/ui/ui_severity_card.cpp
 src/ui/ui_snake_game.cpp
 src/ui/ui_sound_preview_overlay.cpp
@@ -474,6 +593,7 @@ src/ui/ui_split_button.cpp
 src/ui/ui_spool_canvas.cpp
 src/ui/ui_spool_drawing.cpp
 src/ui/ui_spool_wizard.cpp
+src/spoolman/spoolman_catalog_search.cpp
 src/ui/ui_status_pill.cpp
 src/ui/ui_step_progress.cpp
 src/ui/ui_subscription_guard.cpp
@@ -482,10 +602,13 @@ src/ui/ui_coalesced_timer.cpp
 src/ui/ui_swatch.cpp
 src/ui/ui_switch.cpp
 src/ui/ui_system_path_canvas.cpp
+src/ui/ui_system_path_plan.cpp
+src/ui/ui_toolhead_badge.cpp
 src/ui/ui_temp_display.cpp
 src/ui/ui_temp_graph.cpp
 src/ui/ui_temperature_utils.cpp
 src/ui/ui_text.cpp
+src/ui/ui_tile_rung.cpp
 src/ui/ui_text_input.cpp
 src/ui/ui_theme_editor_overlay.cpp
 src/ui/ui_toast_manager.cpp
@@ -495,6 +618,7 @@ src/ui/ui_variant.cpp
 src/ui/ui_widget_catalog_overlay.cpp
 src/ui/ui_wizard.cpp
 src/ui/ui_z_offset_indicator.cpp
+src/ui/ui_zone_presentation.cpp
 src/ui/widgets/favorite_macro_config.cpp
 src/ui/widgets/favorite_macro_widget.cpp
 src/ui/widgets/power_device_widget.cpp
@@ -502,21 +626,37 @@ src/ui/wizard_step_registry.cpp
 src/ui/z_offset_utils.cpp
 src/util/indexed_subject_pool.cpp
 src/util/scoped_subject_registry.cpp
+src/util/version.cpp
 src/utils/network_validation.cpp
 src/xml_registration.cpp
 
 # ===== override->real swaps + Moonraker command surface + generated =====
 src/ui/theme_manager.cpp
+src/ui/theme_token_scan.cpp
+src/ui/theme_color_math.cpp
+src/ui/overlay_geometry.cpp
+src/ui/theme_fonts.cpp
+src/ui/theme_responsive.cpp
+src/ui/theme_lvgl_apply.cpp
+src/ui/theme_live_recolor.cpp
+src/ui/theme_tokens_register.cpp
 src/ui/grid_edit_mode.cpp
+src/ui/grid_edit_cross_page.cpp
+src/ui/grid_edit_drop.cpp
+src/ui/grid_edit_page_set.cpp
 src/ui/ui_hsv_picker.cpp
 src/ui/ui_progress_bar.cpp
 src/ui/ui_ams_detail.cpp
 src/system/helix_paths.cpp
 src/printer/filament_slot_override_store.cpp
+src/printer/filament_temperature_source.cpp
+src/api/screws_tilt_dialect.cpp
+src/api/snapmaker_screws_tilt.cpp
 src/api/wifi_ui_utils.cpp
 # Task 13: wifi_manager.cpp/wifi_backend.cpp were platform-seamed (stub in
 # helixapp_platform_stubs2.cpp) through Task 12 — now real, backed by
 # wifi_backend_esp.cpp (LOCAL_SRCS, CMakeLists.txt) against esp_wifi.
+src/api/wifi_ap_steering.cpp
 src/api/wifi_manager.cpp
 src/api/wifi_interface.cpp
 src/api/wifi_scan_scheduler.cpp
@@ -528,6 +668,7 @@ src/api/moonraker_api_led.cpp
 src/api/moonraker_api_print.cpp
 src/api/moonraker_gcode_guards.cpp
 src/api/moonraker_api_validation.cpp
+src/api/moonraker_error.cpp
 src/api/screws_tilt_parser.cpp
 src/api/moonraker_advanced_api.cpp
 src/api/moonraker_file_api.cpp
@@ -536,6 +677,7 @@ src/api/moonraker_job_api.cpp
 src/api/moonraker_motion_api.cpp
 src/api/moonraker_queue_api.cpp
 src/api/rpc_error_correlation.cpp
+src/api/webcam_selection.cpp
 src/application/moonraker_manager.cpp
 src/generated/theme_token_table.cpp
 # New-since-audit core files the link pass proved are referenced by kept core:
@@ -552,6 +694,7 @@ src/system/config_storage_file.cpp
 src/rendering/nozzle_renderer_a4t.cpp
 src/rendering/nozzle_renderer_anthead.cpp
 src/rendering/nozzle_renderer_bambu.cpp
+src/rendering/nozzle_renderer_common.cpp
 src/rendering/nozzle_renderer_creality_k1.cpp
 src/rendering/nozzle_renderer_creality_k2.cpp
 src/rendering/nozzle_renderer_jabberwocky.cpp
@@ -577,7 +720,9 @@ src/ui/ui_gcode_viewer.cpp
 #   mode ladder + bottom-occluder handoff). Both those panels are in this build
 #   and call it ungated; its only deps are the ui_gcode_viewer_* API above (the
 #   no-op branch defines all of it), DisplaySettingsManager and RuntimeConfig.
+src/ui/gcode_preview_fetcher.cpp
 src/ui/gcode_preview_setup.cpp
+src/ui/print_preview_controller.cpp
 #   bed-mesh viewer, compiled-out branch (HELIX_HAS_BED_MESH_3D=0): same trick
 #   as ui_gcode_viewer above — its #else no-op defines ui_bed_mesh_register()
 #   (registers a stub <bed_mesh> widget so layouts parse) plus the rest of the
@@ -613,6 +758,13 @@ src/print/print_start_profile.cpp
 #     probe_prep::database_rules(), which lives in printer_detector.cpp (already
 #     in this manifest); get_discovery()/get_macros() are header-inline.
 src/printer/probe_preparation.cpp
+#   resonance_console.cpp + shaper_csv_parser.cpp: moonraker_advanced_api.cpp
+#     (KEPT) drives the resonance-test and belt-compare collectors through their
+#     console-line and CSV parsers. Pure text parsing; deps are helix_regex.cpp
+#     and text_io.cpp (already in this manifest). The rest of src/calibration/
+#     stays excluded.
+src/calibration/resonance_console.cpp
+src/calibration/shaper_csv_parser.cpp
 
 # ===== mocks (CONFIG_HELIX_MOCK_PRINTER only) =====
 # MOCK: src/api/moonraker_api_mock.cpp
@@ -623,5 +775,7 @@ src/printer/probe_preparation.cpp
 # MOCK: src/api/moonraker_client_mock_print.cpp
 # MOCK: src/api/moonraker_client_mock_queue.cpp
 # MOCK: src/api/moonraker_client_mock_server.cpp
+# MOCK: src/api/moonraker_client_mock_skips.cpp
 # MOCK: src/printer/ams_backend_mock.cpp
 src/system/host_identity.cpp
+src/system/env_refusal_notice.cpp

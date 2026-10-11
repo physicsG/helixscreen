@@ -27,8 +27,8 @@ TEST_CASE("LedEffectBackend: stop_all with null API calls error callback", "[led
 TEST_CASE("LedEffectBackend: null callbacks with null API don't crash", "[led][effects]") {
     helix::led::LedEffectBackend backend;
 
-    backend.activate_effect("led_effect breathing", nullptr, nullptr);
-    backend.stop_all_effects(nullptr, nullptr);
+    REQUIRE_NOTHROW(backend.activate_effect("led_effect breathing", nullptr, nullptr));
+    REQUIRE_NOTHROW(backend.stop_all_effects(nullptr, nullptr));
 }
 
 TEST_CASE("LedEffectBackend: type is LED_EFFECT", "[led][effects]") {
@@ -133,8 +133,16 @@ TEST_CASE("LedEffectBackend: set_effect_targets assigns targets", "[led][effects
 TEST_CASE("LedEffectBackend: set_effect_targets on unknown effect is safe", "[led][effects]") {
     helix::led::LedEffectBackend backend;
 
-    // Should not crash
+    helix::led::LedEffectInfo e1;
+    e1.name = "led_effect breathing";
+    e1.target_leds = {"neopixel chamber_light"};
+    backend.add_effect(e1);
+
     backend.set_effect_targets("led_effect nonexistent", {"neopixel foo"});
+
+    // No effect is created for the unknown name and the known one keeps its targets.
+    REQUIRE(backend.effects().size() == 1);
+    REQUIRE(backend.effects()[0].target_leds == std::vector<std::string>{"neopixel chamber_light"});
 }
 
 TEST_CASE("LedEffectBackend: effects_for_strip filters by target", "[led][effects]") {

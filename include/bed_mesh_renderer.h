@@ -28,7 +28,7 @@ extern "C" {
 
 /**
  * @file bed_mesh_renderer.h
- * @brief 3D bed mesh visualization renderer using LVGL canvas
+ * @brief Bed mesh visualization renderer (3D perspective view and 2D heatmap)
  *
  * Implements complete 3D rendering pipeline for printer bed mesh height maps:
  * - Perspective projection with interactive rotation
@@ -97,9 +97,11 @@ extern "C" {
 #define BED_MESH_ANGLE_X_MAX (0.0)            // Edge-on view (horizontal)
 #define BED_MESH_DEFAULT_Z_SCALE 60.0         // Default height amplification factor
 #define BED_MESH_DEFAULT_Z_TARGET_HEIGHT 80.0 // Target projected height range (world units)
-#define BED_MESH_MIN_Z_SCALE 35.0             // Min Z scale (prevents flatness)
-#define BED_MESH_MAX_Z_SCALE 120.0            // Max Z scale (prevents extreme projection)
-#define BED_MESH_COLOR_COMPRESSION 0.8        // Color range compression (0.8 = 80% of data range)
+#define BED_MESH_ZOOM_MIN 1.0                 // Two-finger magnify range; 1.0 is the fitted view
+#define BED_MESH_ZOOM_MAX 8.0
+#define BED_MESH_MIN_Z_SCALE 35.0      // Min Z scale (prevents flatness)
+#define BED_MESH_MAX_Z_SCALE 120.0     // Max Z scale (prevents extreme projection)
+#define BED_MESH_COLOR_COMPRESSION 0.8 // Color range compression (0.8 = 80% of data range)
 #define BED_MESH_Z_ORIGIN_VERTICAL_POS                                                             \
     0.5 // Canvas Y position for Z=0 plane (0=top, 0.5=center, 1=bottom)
 #define BED_MESH_GRADIENT_SEGMENTS 6       // Max gradient segments per scanline
@@ -160,6 +162,12 @@ struct bed_mesh_view_state_t {
     // Layer offset (updated every frame to track panel position during animations)
     int layer_offset_x; // Layer's X position on screen (from clip area)
     int layer_offset_y; // Layer's Y position on screen (from clip area)
+
+    // Two-finger magnify, applied in screen space after the perspective divide.
+    // zoom == BED_MESH_ZOOM_MIN implies pan_x == pan_y == 0.
+    double zoom = 1.0;  // Magnification about the projection origin
+    double pan_x = 0.0; // Screen-space offset, canvas pixels
+    double pan_y = 0.0;
 };
 
 // Main renderer instance (opaque handle)
@@ -243,6 +251,15 @@ void bed_mesh_renderer_set_bounds(bed_mesh_renderer_t* renderer, double bed_x_mi
 void bed_mesh_renderer_set_rotation(bed_mesh_renderer_t* renderer, double angle_x, double angle_z);
 
 /**
+ * @brief Apply one frame of a two-finger gesture: pan by (pan_dx, pan_dy) canvas px,
+ * then zoom by `zoom` about canvas-local (anchor_x, anchor_y).
+ * Caller holds the render mutex in async mode.
+ */
+void bed_mesh_renderer_apply_two_finger(bed_mesh_renderer_t* renderer, double pan_dx, double pan_dy,
+                                        double zoom, double anchor_x, double anchor_y,
+                                        int canvas_width, int canvas_height);
+
+/**
  * @brief Get current view state (for interactive controls)
  *
  * The returned pointer aliases the renderer's live state — it stays valid for
@@ -268,11 +285,10 @@ void bed_mesh_renderer_set_dragging(bed_mesh_renderer_t* renderer, bool is_dragg
 /**
  * @brief Set the layer offset used for screen-space positioning
  *
- * In async (buffer) rendering the mesh is rendered at (0,0).  Overlay
+ * Buffer rendering projects the mesh at (0,0).  Overlay
  * elements drawn on the LVGL layer (axis labels, tick marks) need the
  * widget's actual screen position.  Call this before rendering overlays
- * in async mode so projected 3D→2D coordinates land at the correct
- * screen location.
+ * so projected 3D→2D coordinates land at the correct screen location.
  *
  * @param renderer Renderer instance
  * @param offset_x Widget's absolute screen X position
@@ -289,30 +305,6 @@ void bed_mesh_renderer_set_layer_offset(bed_mesh_renderer_t* renderer, int offse
  */
 void bed_mesh_renderer_get_layer_offset(const bed_mesh_renderer_t* renderer, int* offset_x,
                                         int* offset_y);
-
-/**
- * @brief Main rendering function
- *
- * Renders the 3D bed mesh to the provided LVGL layer (DRAW_POST pattern).
- *
- * Rendering pipeline:
- * 1. Clear background
- * 2. Compute projection parameters (Z-scale, FOV-scale)
- * 3. Generate 3D quads from mesh data with colors
- * 4. Project quads to 2D screen space
- * 5. Sort quads by depth (painter's algorithm)
- * 6. Render quads (gradient or solid based on dragging state)
- *
- * @param renderer Renderer instance
- * @param layer LVGL draw layer (from DRAW_POST event callback)
- * @param canvas_width Viewport width in pixels
- * @param canvas_height Viewport height in pixels
- * @param widget_x Widget's absolute screen X position (from lv_obj_get_coords)
- * @param widget_y Widget's absolute screen Y position (from lv_obj_get_coords)
- * @return true on success, false on error (NULL pointers, no mesh data)
- */
-bool bed_mesh_renderer_render(bed_mesh_renderer_t* renderer, lv_layer_t* layer, int canvas_width,
-                              int canvas_height, int widget_x, int widget_y);
 
 /**
  * @brief Set render mode (auto, force 3D, or force 2D)
@@ -357,22 +349,6 @@ bool bed_mesh_renderer_is_using_2d(bed_mesh_renderer_t* renderer);
 void bed_mesh_renderer_evaluate_render_mode(bed_mesh_renderer_t* renderer);
 
 /**
- * @brief Handle touch event in 2D mode
- *
- * When in 2D heatmap mode, converts touch coordinates to mesh cell and
- * stores the cell info for tooltip display. Call this on touch/press events.
- *
- * @param renderer Renderer instance
- * @param touch_x Touch X coordinate (screen space, relative to canvas)
- * @param touch_y Touch Y coordinate (screen space, relative to canvas)
- * @param canvas_width Current canvas width
- * @param canvas_height Current canvas height
- * @return true if touch hit a valid cell, false otherwise
- */
-bool bed_mesh_renderer_handle_touch(bed_mesh_renderer_t* renderer, int touch_x, int touch_y,
-                                    int canvas_width, int canvas_height);
-
-/**
  * @brief Clear touched cell state
  *
  * Call this on touch release to clear the tooltip.
@@ -411,7 +387,19 @@ void bed_mesh_renderer_set_z_display_offset(bed_mesh_renderer_t* renderer, doubl
 // C++ only: buffer-based rendering for background thread
 namespace helix::mesh {
 class PixelBuffer;
-}
+struct HeatmapLayout;
+} // namespace helix::mesh
+
+/**
+ * @brief Hit-test a touch against the 2D heatmap shown on screen
+ *
+ * Converts canvas-local touch coordinates to a mesh cell of `layout` (the layout
+ * of the frame being shown) and stores the cell for the tooltip.
+ *
+ * @return true if touch hit a valid cell, false otherwise
+ */
+bool bed_mesh_renderer_handle_touch(bed_mesh_renderer_t* renderer, int touch_x, int touch_y,
+                                    const helix::mesh::HeatmapLayout& layout);
 
 /**
  * @brief Colors needed for off-screen buffer rendering
@@ -427,12 +415,12 @@ struct bed_mesh_render_colors_t {
 /**
  * @brief Render full mesh into an off-screen pixel buffer
  *
- * Thread-safe: does NOT call any lv_* functions. Runs the full 3D rendering
- * pipeline (projection, sorting, rasterization, overlays) into a PixelBuffer.
- * The buffer should already be allocated at the correct size.
+ * Thread-safe: does NOT call any lv_* functions. Renders the 3D view (projection,
+ * sorting, rasterization, grids) or, when bed_mesh_renderer_is_using_2d(), the 2D
+ * heatmap cells into a PixelBuffer already allocated at the canvas size.
  *
- * Does NOT handle 2D heatmap fallback (stays on main thread).
- * Does NOT call lv_obj_invalidate() or any LVGL function.
+ * Text and the heatmap touch overlay are drawn on the main thread
+ * (bed_mesh_overlays.h).
  *
  * @param renderer Renderer instance with valid mesh data
  * @param buffer   Target pixel buffer (must be allocated at canvas dimensions)

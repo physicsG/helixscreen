@@ -20,47 +20,69 @@ PlrOfferController::PlrOfferController() {
     auto& ps = get_printer_state();
 
     // Seed last_conn_state_ from the live subject BEFORE registering the conn
-    // observer. observe_int_sync fires once at registration with the current
+    // observer. observe<int> fires once at registration with the current
     // value, so seeding here means that first firing sees prev == next and does
     // not spuriously re-arm the latch.
-    last_conn_state_ = lv_subject_get_int(ps.get_printer_connection_state_subject());
+    last_conn_state_ =
+        lv_subject_get_int(ps.network_state().get_printer_connection_state_subject());
 
-    // pl_env_valid is the PRIMARY Snapmaker trigger. observe_int_sync fires once
+    // pl_env_valid is the PRIMARY Snapmaker trigger. observe<int> fires once
     // at registration with the current value (deferred via the update queue), so
     // a pl_env_valid that is ALREADY true when we register still offers via this
     // registration-fire; thereafter a genuine 0->1 edge offers. See
     // on_connection_state_changed for how reconnect manufactures that edge.
-    pl_valid_observer_ = observe_int_sync(
-        ps.get_pl_env_valid_subject(), this,
-        [](PlrOfferController* self, int value) { self->on_pl_env_valid_changed(value); });
+    pl_valid_observer_ = observe<int>(
+        ps.print_state().get_pl_env_valid_subject(), this,
+        [](PlrOfferController* self, int value) { self->on_pl_env_valid_changed(value); },
+        ps.get_subjects_lifetime());
 
-    // creality_plr_capable is the PRIMARY Creality trigger. Unlike Snapmaker's
+    // plr_interrupted_flag is the PRIMARY passive-backend trigger after
+    // pl_env_valid, with the same shape: a value the status payload already
+    // carried at registration still offers via the registration-fire, and
+    // thereafter a 0->1 edge does. The capability half (the discovered resume
+    // macro) comes from discovery and is read live in evaluate_offer, so this
+    // observer alone is enough.
+    interrupted_flag_observer_ = observe<int>(
+        ps.print_state().get_plr_interrupted_flag_subject(), this,
+        [](PlrOfferController* self, int value) { self->on_plr_interrupted_flag_changed(value); },
+        ps.get_subjects_lifetime());
+
+    // plr_power_loss_signal is the PRIMARY Creality trigger. Unlike Snapmaker's
     // flag this only says the FIRMWARE supports recovery — whether a snapshot
     // exists takes a separate, side-effectful probe.
-    creality_capable_observer_ = observe_int_sync(
-        ps.get_creality_plr_capable_subject(), this,
-        [](PlrOfferController* self, int value) { self->on_creality_capable_changed(value); });
+    creality_capable_observer_ = observe<int>(
+        ps.print_state().get_plr_power_loss_signal_subject(), this,
+        [](PlrOfferController* self, int value) { self->on_creality_capable_changed(value); },
+        ps.get_subjects_lifetime());
 
-    conn_observer_ = observe_int_sync(
-        ps.get_printer_connection_state_subject(), this,
-        [](PlrOfferController* self, int value) { self->on_connection_state_changed(value); });
+    conn_observer_ = observe<int>(
+        ps.network_state().get_printer_connection_state_subject(), this,
+        [](PlrOfferController* self, int value) { self->on_connection_state_changed(value); },
+        ps.get_subjects_lifetime());
 
     // Wizard-active edge: re-evaluate when the wizard closes so a
     // wizard-suppressed offer fires. See evaluate_offer for the full rationale.
-    wizard_observer_ = observe_int_sync(
+    wizard_observer_ = observe<int>(
         &get_wizard_active_subject(), this,
-        [](PlrOfferController* self, int value) { self->on_wizard_active_changed(value); });
+        [](PlrOfferController* self, int value) { self->on_wizard_active_changed(value); },
+        get_app_globals_subjects_lifetime());
 }
 
 void PlrOfferController::evaluate_offer() {
     auto& ps = get_printer_state();
 
-    // Normalize the two firmware mechanisms into ONE availability signal so the
+    // Normalize the firmware mechanisms into ONE availability signal so the
     // pure decision below (and its latch/re-arm/wizard rules) stays
     // backend-agnostic. See docs/devel/POWER_LOSS_RECOVERY.md.
     PlrCapabilitySignals caps;
-    caps.snapmaker_pl_env_valid = lv_subject_get_int(ps.get_pl_env_valid_subject()) != 0;
-    caps.creality_power_loss_field = lv_subject_get_int(ps.get_creality_plr_capable_subject()) != 0;
+    caps.snapmaker_pl_env_valid =
+        lv_subject_get_int(ps.print_state().get_pl_env_valid_subject()) != 0;
+    caps.qidi_resume_macro =
+        lv_subject_get_int(ps.print_state().get_plr_resume_macro_subject()) != 0;
+    caps.qidi_was_interrupted =
+        lv_subject_get_int(ps.print_state().get_plr_interrupted_flag_subject()) != 0;
+    caps.creality_power_loss_field =
+        lv_subject_get_int(ps.print_state().get_plr_power_loss_signal_subject()) != 0;
     PlrBackendType backend = plr_select_backend(caps);
 
     bool recovery_available = false;
@@ -70,7 +92,15 @@ void PlrOfferController::evaluate_offer() {
         // Passive: the firmware already validated the snapshot against MCU
         // flash on boot, so pl_env_valid IS availability.
         recovery_available = true;
-        recovery_file = ps.pl_recovery_file();
+        recovery_file = ps.print_state().pl_recovery_file();
+        break;
+    case PlrBackendType::QIDI:
+        // Passive: selection already required was_interrupted true, which the
+        // stock firmware clears on every normal end or cancel. The macros
+        // record no filename; virtual_sdcard.file_path is display-only and may
+        // be empty (the prompt degrades to its generic body).
+        recovery_available = true;
+        recovery_file = ps.print_state().pl_recovery_file();
         break;
     case PlrBackendType::CREALITY:
         // Active: only a completed probe reporting both states counts.
@@ -85,7 +115,7 @@ void PlrOfferController::evaluate_offer() {
     // print_stats still reads standby, and offering "Resume interrupted print?"
     // on top of a start the user has already committed to is a modal ambush —
     // its Resume button would start a different file than the one they chose.
-    bool idle = !job_holds_machine(ps.get_print_lifecycle());
+    bool idle = !job_holds_machine(ps.print_state().get_print_lifecycle());
 
     PlrOfferSignals signals;
     signals.recovery_available = recovery_available;
@@ -141,6 +171,12 @@ void PlrOfferController::on_pl_env_valid_changed(int /*pl_env_valid*/) {
     evaluate_offer();
 }
 
+void PlrOfferController::on_plr_interrupted_flag_changed(int /*was_interrupted*/) {
+    // Same shape as on_pl_env_valid_changed: evaluate_offer reads the flag
+    // straight from the subject, so the notified value is not needed here.
+    evaluate_offer();
+}
+
 void PlrOfferController::on_creality_capable_changed(int capable) {
     if (capable == 0) {
         return;
@@ -161,7 +197,7 @@ void PlrOfferController::probe_creality_once() {
     // terminal state would clear exclude_object_info for no benefit.
     // RAW_PRINT_STATE_OK: mirrors a Klipper condition on print_stats.state
     // itself — the handler only arms power_loss from "standby".
-    auto state = ps.get_print_job_state();
+    auto state = ps.print_state().get_print_job_state();
     if (state != PrintJobState::STANDBY) {
         spdlog::debug("[PLR] Creality capable but print state is {} (not standby) — skipping probe",
                       static_cast<int>(state));
@@ -206,7 +242,7 @@ void PlrOfferController::on_creality_detect_result(const PlrDetectResult& result
     if (creality_recovery_file_.empty()) {
         // Fall back to whatever the status payload carried; virtual_sdcard's
         // file_path is parsed unconditionally, so it may be populated.
-        creality_recovery_file_ = get_printer_state().pl_recovery_file();
+        creality_recovery_file_ = get_printer_state().print_state().pl_recovery_file();
     }
     evaluate_offer();
 }
@@ -221,16 +257,19 @@ void PlrOfferController::on_connection_state_changed(int new_conn_state) {
         creality_detect_ = PlrDetectResult{};
         creality_recovery_file_.clear();
 
-        // Force both capability subjects back to 0 (and drop the stale recovery
-        // file) so the reconnect's full status re-dispatch produces genuine 0->1
-        // edges that re-fire the observers. The subjects dedup same-value
-        // writes, so without this forced 0 the values would stay 1 across the
-        // reconnect and no fresh edge would ever arrive. Safe on the main thread
-        // — observer callbacks are queue-deferred.
+        // Force the PLR capability and availability subjects back to 0 (and
+        // drop the stale recovery file) so the reconnect's full status
+        // re-dispatch produces genuine 0->1 edges that re-fire the observers.
+        // The subjects dedup same-value writes, so without this forced 0 the
+        // values would stay 1 across the reconnect and no fresh edge would
+        // ever arrive. Safe on the main thread: observer callbacks are
+        // queue-deferred.
         auto& ps = get_printer_state();
-        lv_subject_set_int(ps.get_pl_env_valid_subject(), 0);
-        lv_subject_set_int(ps.get_creality_plr_capable_subject(), 0);
-        ps.clear_pl_recovery_file();
+        lv_subject_set_int(ps.print_state().get_pl_env_valid_subject(), 0);
+        lv_subject_set_int(ps.print_state().get_plr_resume_macro_subject(), 0);
+        lv_subject_set_int(ps.print_state().get_plr_interrupted_flag_subject(), 0);
+        lv_subject_set_int(ps.print_state().get_plr_power_loss_signal_subject(), 0);
+        ps.print_state().clear_pl_recovery_file();
     }
     last_conn_state_ = new_conn_state;
 }

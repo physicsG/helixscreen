@@ -18,7 +18,11 @@ set(SHIM ${CMAKE_CURRENT_LIST_DIR}/shim)
 # helix::format::duration(); src/format_utils.cpp is its only definition and is
 # self-contained (format_utils.h + <cstdio> + <ctime> — no spdlog/lvgl/i18n), so
 # it compiles UNMODIFIED here rather than being stubbed.
-set(REPO_SRCS ${REPO_ROOT}/src/format_utils.cpp)
+# EspMoonrakerClient calls PrinterDiscovery::parse_objects(), defined out of line
+# in printer_discovery_parse.cpp; helixapp links before helixnet, so its copy
+# of that TU cannot satisfy a reference from here.
+set(REPO_SRCS ${REPO_ROOT}/src/format_utils.cpp
+              ${REPO_ROOT}/src/printer/printer_discovery_parse.cpp)
 
 idf_component_register(
     SRCS esp_moonraker_client.cpp esp_http_lane.cpp esp_rest_api.cpp coverage_assert.cpp

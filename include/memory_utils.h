@@ -58,6 +58,7 @@ struct MemoryInfo {
     size_t total_kb = 0;     ///< Total system memory in KB
     size_t available_kb = 0; ///< Available memory in KB (free + buffers/cache)
     size_t free_kb = 0;      ///< Strictly free memory in KB
+    size_t swap_free_kb = 0; ///< Unused swap in KB
 
     // RAM tier thresholds (total system RAM).
     //
@@ -71,8 +72,8 @@ struct MemoryInfo {
         256 * 1024; ///< < 256MB usable = constrained (AD5M, K1C)
     static constexpr size_t TIER_NORMAL_KB =
         448 * 1024; ///< 256-448MB usable = normal; >=448MB (512MB-class, e.g. AD5X) = good
-    static constexpr size_t TIER_FORCE_STREAMING_KB =
-        2ULL * 1024 * 1024; ///< <= 2GB = force streaming
+    static constexpr size_t TIER_LOW_RAM_KB =
+        2ULL * 1024 * 1024; ///< <= 2GB = low-RAM tier (usually co-hosts Klipper)
 
     /// Check if available memory is low (< 64MB available right now)
     bool is_low_memory() const {
@@ -94,9 +95,10 @@ struct MemoryInfo {
         return total_kb >= TIER_NORMAL_KB;
     }
 
-    /// Should force G-code streaming mode (total RAM <= 2GB)
-    bool should_force_streaming() const {
-        return total_kb > 0 && total_kb <= TIER_FORCE_STREAMING_KB;
+    /// Low-RAM tier (total RAM <= 2GB): these boards usually co-host Klipper
+    /// and Moonraker, so memory decisions take a smaller share of what is left.
+    bool is_low_ram_device() const {
+        return total_kb > 0 && total_kb <= TIER_LOW_RAM_KB;
     }
 
     /// Get total memory in MB
@@ -107,6 +109,11 @@ struct MemoryInfo {
     /// Get available memory in MB
     size_t available_mb() const {
         return available_kb / 1024;
+    }
+
+    /// What a new allocation can still get: available RAM plus unused swap, in MB
+    size_t headroom_mb() const {
+        return (available_kb + swap_free_kb) / 1024;
     }
 };
 
@@ -125,6 +132,34 @@ MemoryInfo get_system_memory_info();
 // (e.g. the 128 MB Elegoo CC1) into swap thrash, surfacing as klippy
 // "Timer Too Close" errors. Threshold chosen by the maintainer (200 MB).
 inline constexpr size_t RESONANCE_LOW_RAM_WARN_MB = 200;
+
+// Klipper's resonance analysis child needs about 45-50 MB on armv7. Below this
+// headroom the kernel OOM-kills it and klippy wedges until a host-side restart
+// or power cycle, so the check is refused rather than warned. Measured: an AD5M
+// with 74 MB headroom survived; a CC1 with 25-30 MB did not. Headroom, not
+// total RAM, decides it: the AD5M has less RAM than the CC1 but has swap.
+inline constexpr size_t RESONANCE_MIN_HEADROOM_MB = 64;
+
+enum class ResonanceMemory {
+    OK,     ///< enough memory; start without asking
+    WARN,   ///< small board; ask before starting
+    REFUSE, ///< the analysis would be OOM-killed and wedge klippy
+};
+
+/// Decide whether a resonance sweep (input shaper, belt tension) may start on
+/// this host. Unreadable memory info (total 0) never blocks.
+inline ResonanceMemory resonance_memory_check(const MemoryInfo& mem) {
+    if (mem.total_kb == 0) {
+        return ResonanceMemory::OK;
+    }
+    if (mem.headroom_mb() < RESONANCE_MIN_HEADROOM_MB) {
+        return ResonanceMemory::REFUSE;
+    }
+    if (mem.total_mb() < RESONANCE_LOW_RAM_WARN_MB) {
+        return ResonanceMemory::WARN;
+    }
+    return ResonanceMemory::OK;
+}
 
 /**
  * @brief Memory thresholds for G-code 3D rendering decisions
@@ -157,16 +192,20 @@ bool is_gcode_3d_render_safe(size_t file_size_bytes);
 /**
  * @brief Check if G-code 2D streaming rendering is safe for a given file
  *
- * 2D streaming mode uses layer-on-demand loading with LRU cache, so memory
- * requirements are much lower than 3D mode. File is streamed directly to disk
- * (no memory spike during download). Only needs RAM for:
- * - Layer index: ~24 bytes per layer (estimate 1 layer per 500 bytes of G-code)
- * - LRU cache: 1MB fixed budget for parsed layer segments
+ * 2D streaming mode uses layer-on-demand loading with an LRU cache, so memory
+ * requirements are much lower than 3D mode. It needs RAM for:
+ * - Layer index: one gcode::StreamingLayerEntry per layer (estimate 1 layer
+ *   per 500 bytes of G-code)
+ * - LRU cache: the budget GCodeStreamingController gives this RAM tier
  * - Ghost preview buffer: display_width * display_height * 4 bytes (ARGB8888)
  * - Safety margin: 3MB for other allocations
+ * - The file itself, when the G-code cache directory is RAM-backed: bytes on
+ *   tmpfs/ramfs are memory, so a "stream to disk" download spends the same
+ *   budget the render needs
  *
  * This is safe for much larger files than is_gcode_3d_render_safe().
- * Reads display dimensions from LVGL at runtime.
+ * Reads display dimensions from LVGL and the cache location from the cache
+ * cascade at runtime.
  *
  * @param file_size_bytes Size of the G-code file in bytes
  * @return true if 2D streaming rendering is safe, false if thumbnail-only recommended
@@ -181,12 +220,16 @@ bool is_gcode_2d_streaming_safe(size_t file_size_bytes);
  *
  * @param file_size_bytes Size of the G-code file in bytes
  * @param available_kb Available system memory in KB
+ * @param total_kb Total system memory in KB (picks the layer-cache budget tier)
  * @param display_width Display width in pixels (for ghost buffer calculation)
  * @param display_height Display height in pixels (for ghost buffer calculation)
+ * @param cache_dir_is_ram_backed True when the downloaded file lands on
+ *        tmpfs/ramfs, where it costs memory rather than storage
  * @return true if 2D streaming rendering is safe
  */
-bool is_gcode_2d_streaming_safe_impl(size_t file_size_bytes, size_t available_kb, int display_width,
-                                     int display_height);
+bool is_gcode_2d_streaming_safe_impl(size_t file_size_bytes, size_t available_kb, size_t total_kb,
+                                     int display_width, int display_height,
+                                     bool cache_dir_is_ram_backed);
 
 // ============================================================================
 // OOM priority

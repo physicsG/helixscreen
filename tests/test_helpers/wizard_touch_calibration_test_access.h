@@ -22,19 +22,28 @@
 class WizardTouchCalibrationTestAccess {
   public:
     static helix::TouchCalibrationPanel* panel(WizardTouchCalibrationStep& step) {
-        return step.panel_.get();
+        return step.controller_.panel();
     }
 
     // The wizard's calibration session — begin_capture/revert_for_retry/restore.
     static helix::TouchCalibrationSession& session(WizardTouchCalibrationStep& step) {
-        return step.session_;
+        return step.controller_.session();
     }
 
-    // Inject the calibration sink the retry path drives, so handle_retry_clicked()
-    // can be exercised without a live DisplayManager (#943).
+    // Inject the calibration sink every phase drives, so the session paths can be
+    // exercised without a live DisplayManager (#943).
     static void set_calibration_sink(WizardTouchCalibrationStep& step,
                                      helix::ICalibrationSink* sink) {
-        step.calibration_sink_override_ = sink;
+        step.controller_.set_sink_override(sink);
+    }
+
+    // Drive the completion handler the panel's callback reaches once create() has
+    // built the screen; `root` stands in for that screen.
+    static void invoke_calibration_complete(WizardTouchCalibrationStep& step,
+                                            const helix::TouchCalibration* cal, lv_obj_t* root) {
+        step.screen_root_ = root;
+        step.on_calibration_complete(cal);
+        step.screen_root_ = nullptr;
     }
 
     // Drive the real Retry handler (private in production).

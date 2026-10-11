@@ -3,10 +3,15 @@
 
 #include "ui_ams_selector_menu.h"
 
+#include "ui_ams_recover_state_modal.h"
 #include "ui_callback_helpers.h"
+#include "ui_error_reporting.h"
+#include "ui_modal.h"
 
 #include "ams_backend.h"
+#include "ams_state.h"
 #include "ams_types.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/spdlog.h>
 
@@ -81,7 +86,7 @@ void AmsSelectorMenu::on_created(lv_obj_t* menu_obj) {
     // Only LINEAR (selector) systems have a physical servo to position.
     bool has_servo = backend_ && backend_->get_topology() == PathTopology::LINEAR;
     if (!has_servo) {
-        lv_obj_t* servo_row = lv_obj_find_by_name(menu_obj, "servo_row");
+        lv_obj_t* servo_row = helix::ui::find_required(menu_obj, "servo_row", "AmsSelectorMenu");
         if (servo_row) {
             lv_obj_add_flag(servo_row, LV_OBJ_FLAG_HIDDEN);
         }
@@ -93,7 +98,8 @@ void AmsSelectorMenu::on_created(lv_obj_t* menu_obj) {
     // device action via MMU_SYNC_GEAR_MOTOR, with no read-back of the runtime
     // state). Default the switch OFF and treat each toggle as send-on-tap: tapping
     // it ON dispatches GEAR_SYNC_ON, tapping it OFF dispatches GEAR_SYNC_OFF.
-    lv_obj_t* gear_switch = lv_obj_find_by_name(menu_obj, "gear_sync_switch");
+    lv_obj_t* gear_switch =
+        helix::ui::find_required(menu_obj, "gear_sync_switch", "AmsSelectorMenu");
     if (gear_switch) {
         lv_obj_remove_state(gear_switch, LV_STATE_CHECKED);
     }
@@ -157,7 +163,7 @@ void AmsSelectorMenu::handle_gear_sync() {
     if (!menu()) {
         return;
     }
-    lv_obj_t* gear_switch = lv_obj_find_by_name(menu(), "gear_sync_switch");
+    lv_obj_t* gear_switch = helix::ui::find_required(menu(), "gear_sync_switch", "AmsSelectorMenu");
     bool checked = gear_switch && lv_obj_has_state(gear_switch, LV_STATE_CHECKED);
     spdlog::info("[AmsSelectorMenu] Gear sync toggled: {}", checked ? "on" : "off");
     dispatch_selector_action(checked ? SelectorAction::GEAR_SYNC_ON
@@ -266,6 +272,74 @@ void AmsSelectorMenu::on_recover_cb(lv_event_t* /*e*/) {
     auto* self = get_active_instance();
     if (self) {
         self->handle_recover();
+    }
+}
+
+// ============================================================================
+// Dispatch
+// ============================================================================
+
+void ams_dispatch_selector_action(AmsSelectorMenu::SelectorAction a) {
+    using SA = AmsSelectorMenu::SelectorAction;
+    AmsBackend* backend = AmsState::instance().get_backend();
+    if (!backend) {
+        NOTIFY_WARNING(lv_tr("Multi-Filament System not available"));
+        return;
+    }
+    AmsError err{};
+    // Feedback for these quick selector commands flows through the AMS status
+    // display (the ams_action_detail subject) — the backend sets a transient
+    // action/operation_detail and the UI observes it, matching how real Happy
+    // Hare reports "Checking"/"Selecting"/etc. automatically. No toasts here.
+    switch (a) {
+    case SA::HOME:
+        err = backend->reset(); // reset()==MMU_HOME for HH; reads as "Homing selector"
+        break;
+    case SA::CHECK_SLOTS:
+        err = backend->check_all_gates();
+        break;
+    case SA::SERVO_UP:
+        err = backend->execute_device_action("servo_up");
+        break;
+    case SA::SERVO_MOVE:
+        err = backend->execute_device_action("servo_move");
+        break;
+    case SA::SERVO_DOWN:
+        err = backend->execute_device_action("servo_down");
+        break;
+    case SA::JOG_PREV:
+        err = backend->move_selector(-1);
+        break;
+    case SA::JOG_NEXT:
+        err = backend->move_selector(+1);
+        break;
+    case SA::GEAR_SYNC_ON:
+        err = backend->execute_device_action("gear_sync", std::any(true));
+        break;
+    case SA::GEAR_SYNC_OFF:
+        err = backend->execute_device_action("gear_sync", std::any(false));
+        break;
+    case SA::RECOVER:
+        if (AmsRecoverStateModal::show_owned()) {
+            return;
+        }
+        // Re-fetch the backend inside the callback so it cannot dangle if the
+        // panel/backend changed while the dialog was open. Feedback comes from
+        // the backend action state.
+        helix::ui::modal_confirm(lv_tr("Recover MMU state?"),
+                                 lv_tr("Re-syncs Happy Hare's tracked state with the hardware."),
+                                 ModalSeverity::Warning, lv_tr("Recover"), [] {
+                                     AmsBackend* b = AmsState::instance().get_backend();
+                                     if (b) {
+                                         b->recover();
+                                     }
+                                 });
+        return;
+    case SA::CANCELLED:
+        return;
+    }
+    if (err.result != AmsResult::SUCCESS) {
+        helix::ui::notify_ams_error(err, lv_tr("MMU command failed"));
     }
 }
 

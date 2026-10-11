@@ -22,7 +22,7 @@
       <!-- E-Stop escape hatch -->
       <ui_button name="abort_estop_btn"
                  width="100%" height="#button_height_lg" variant="danger" icon="alert_octagon" text="EMERGENCY STOP"
-                 translation_tag="EMERGENCY STOP" style_margin_top="#space_sm">
+                 style_margin_top="#space_sm">
         <event_cb trigger="clicked" callback="on_abort_emergency_stop"/>
       </ui_button>
     </lv_obj>

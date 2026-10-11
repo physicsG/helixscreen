@@ -4,12 +4,9 @@
 #include "ui_panel_common.h"
 
 #include "ui_component_header_bar.h"
-#include "ui_icon.h"
-#include "ui_nav_manager.h"
 #include "ui_utils.h"
 
 #include "display_manager.h"
-#include "layout_manager.h"
 #include "theme_manager.h"
 
 #include <spdlog/spdlog.h>
@@ -149,6 +146,36 @@ void ui_panel_setup_resize_callback(ui_panel_resize_context_t* context) {
 // OVERLAY PANEL SETUP (For panels using overlay_panel.xml wrapper)
 // ============================================================================
 
+namespace helix::ui {
+lv_obj_t* create_xml_hidden(lv_obj_t* parent, const char* component, const char** attrs) {
+    if (!parent) {
+        return nullptr;
+    }
+    // A child of parent filling its content box, so the tree sees the same
+    // screen and resolves percentages and layout as it will once reparented.
+    lv_obj_t* holder = lv_obj_create(parent);
+    lv_obj_add_flag(holder, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_style_all(holder);
+    lv_obj_set_size(holder, lv_pct(100), lv_pct(100));
+    auto* root = static_cast<lv_obj_t*>(lv_xml_create(holder, component, attrs));
+    if (root) {
+        lv_obj_add_flag(root, LV_OBJ_FLAG_HIDDEN); // XML_HIDDEN_OK: built under the holder
+        lv_obj_set_parent(root, parent);
+    }
+    lv_obj_delete(holder);
+    return root;
+}
+
+lv_obj_t* create_xml_laid_out(lv_obj_t* parent, const char* component, const char** attrs) {
+    lv_obj_t* root = create_xml_hidden(parent, component, attrs);
+    if (root) {
+        lv_obj_update_layout(root);
+        lv_obj_remove_flag(root, LV_OBJ_FLAG_HIDDEN);
+    }
+    return root;
+}
+} // namespace helix::ui
+
 void ui_overlay_panel_setup_standard(lv_obj_t* panel, lv_obj_t* parent_screen,
                                      const char* header_name, const char* content_name) {
     if (!panel || !parent_screen) {
@@ -176,29 +203,6 @@ void ui_overlay_panel_setup_standard(lv_obj_t* panel, lv_obj_t* parent_screen,
             inited = true;
         }
         lv_obj_add_style(back_btn, &back_pressed, LV_PART_MAIN | LV_STATE_PRESSED);
-
-        // Portrait overlays drop from the top (ui_set_overlay_geometry +
-        // overlay_animate_slide_in), so a left-pointing chevron would point the
-        // wrong way out. chevron_up is the exact mirror of `back`. This is the
-        // ONLY place this swap runs: every real overlay panel (bed mesh, AMS,
-        // motion, power, ...) goes through here via
-        // OverlayBase/ui_overlay_panel_setup_standard.
-        // ui_component_header_bar.cpp's ui_component_header_bar_setup() is a
-        // separate, unreachable path (no caller of ui_panel_setup_header()
-        // above exists) — it does not carry this swap.
-        //
-        // DELIBERATELY on detect_layout_type() (physical), NOT LayoutManager —
-        // this must match overlay_animate_slide_in() in ui_nav_manager.cpp,
-        // which animates on the physical axis. A --layout override reshapes the
-        // XML and the canvas-height decisions, but the slide animation still
-        // follows the glass, and the chevron must agree with the slide. #1255.
-        if (helix::is_portrait_layout(helix::detect_layout_type(
-                lv_obj_get_width(parent_screen), lv_obj_get_height(parent_screen)))) {
-            lv_obj_t* icon = lv_obj_get_child(back_btn, 0);
-            if (icon) {
-                ui_icon_set_source(icon, "chevron_up");
-            }
-        }
     }
 
     // 2. Setup content padding (responsive vertical, fixed horizontal)

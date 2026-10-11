@@ -9,7 +9,7 @@
   </api>
   <view name="fan_control_overlay" extends="overlay_panel" title="$title" bg_color="#screen_bg">
     <!-- Main Content Area - minimal padding for maximum card space -->
-    <lv_obj name="content_area"
+    <lv_obj name="overlay_content"
             width="100%" flex_grow="1" style_pad_left="#space_md" style_pad_right="#space_md" style_pad_top="0"
             style_pad_bottom="#space_sm" style_pad_row="0" scrollable="false" flex_flow="column"
             style_flex_main_place="start" style_flex_cross_place="center">

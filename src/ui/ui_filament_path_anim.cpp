@@ -14,7 +14,7 @@
 // All systems share run_anim() (the lv_anim boilerplate) and write only their
 // AnimState fields + invalidate the widget — the actual painting happens in
 // the DRAW_POST pass (ui_filament_path_topology.cpp). Invalidation is deferred
-// via async_call because exec callbacks can run inside lv_timer_handler()
+// via queue_invalidate because exec callbacks can run inside lv_timer_handler()
 // overlapping the render phase. See ui_filament_path_internal.h.
 
 #include "ui_filament_path_internal.h"
@@ -30,13 +30,6 @@
 namespace helix::ui::fpath {
 
 namespace {
-
-// Defer invalidation to avoid calling during render phase: animation exec
-// callbacks can run during lv_timer_handler() which may overlap rendering.
-void invalidate_async(lv_obj_t* obj) {
-    helix::ui::async_call(
-        obj, [](void* data) { lv_obj_invalidate(static_cast<lv_obj_t*>(data)); }, obj);
-}
 
 // Shared lv_anim boilerplate. `playback` mirrors the value range back each
 // cycle (pulse); `infinite` repeats forever.
@@ -90,7 +83,7 @@ void segment_anim_cb(void* var, int32_t value) {
         }
     }
 
-    invalidate_async(obj);
+    queue_invalidate(obj);
 }
 
 void error_pulse_anim_cb(void* var, int32_t value) {
@@ -99,7 +92,7 @@ void error_pulse_anim_cb(void* var, int32_t value) {
     if (!data)
         return;
     data->anim.error_pulse_opa = static_cast<lv_opa_t>(value);
-    invalidate_async(obj);
+    queue_invalidate(obj);
 }
 
 void heat_pulse_anim_cb(void* var, int32_t value) {
@@ -108,7 +101,7 @@ void heat_pulse_anim_cb(void* var, int32_t value) {
     if (!data)
         return;
     data->anim.heat_pulse_opa = static_cast<lv_opa_t>(value);
-    invalidate_async(obj);
+    queue_invalidate(obj);
 }
 
 void flow_anim_cb(void* var, int32_t value) {
@@ -123,7 +116,7 @@ void flow_anim_cb(void* var, int32_t value) {
     // Throttle redraws: only invalidate when dots visibly move (~2px change).
     // Flow dots are 1px radius at low opacity — sub-pixel changes are invisible.
     if (std::abs(value - old_offset) >= 2) {
-        invalidate_async(obj);
+        queue_invalidate(obj);
     }
 }
 

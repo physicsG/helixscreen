@@ -16,6 +16,7 @@
 #include "translation_loader.h"
 
 #include <algorithm>
+#include <string_view>
 
 using namespace helix;
 
@@ -41,19 +42,39 @@ static int spdlog_level_to_index(spdlog::level::level_enum level) {
     return 0; // Default to Warn
 }
 
+#ifndef HELIX_HAS_CJK
+#define HELIX_HAS_CJK 1
+#endif
+
 // Language options - codes and display names
-// Order: en, de, fr, es, ru, pt, it, zh, ja (indices 0-8)
+// Order: en, de, fr, es, ru, pt, it, zh, ja (indices 0-8). The CJK pair comes
+// last so a build without CJK fonts (HELIX_HAS_CJK=0, the ESP32 firmware) drops
+// it by shortening the list, and every other index keeps its meaning. A saved
+// zh/ja there reads as English.
 static const char* LANGUAGE_CODES[] = {"en", "de", "fr", "es", "ru", "pt", "it", "zh", "ja"};
-static const int LANGUAGE_COUNT = sizeof(LANGUAGE_CODES) / sizeof(LANGUAGE_CODES[0]);
+static const int LANGUAGE_COUNT = HELIX_HAS_CJK ? 9 : 7;
 static const char* LANGUAGE_OPTIONS_TEXT =
-    "English\nDeutsch\nFrançais\nEspañol\nРусский\nPortuguês\nItaliano\n中文\n日本語";
+    HELIX_HAS_CJK
+        ? "English\nDeutsch\nFrançais\nEspañol\nРусский\nPortuguês\nItaliano\n中文\n日本語"
+        : "English\nDeutsch\nFrançais\nEspañol\nРусский\nPortuguês\nItaliano";
+
+using settings::Scope;
+// Row order is SystemSettingsManager::Key.
+static constexpr settings::PersistedSetting SYSTEM_SETTINGS[] = {
+    // 0=Stable, 1=Beta, 2=Dev
+    {"update_channel", "/update/channel", Scope::Global, false, 0, 0, 2, nullptr},
+    // Opt-in, default off
+    {"settings_telemetry_enabled", "/telemetry_enabled", Scope::Global, true, 0, 0, 1, nullptr},
+    // Default on: a device that has never seen this setting comes up with WiFi enabled
+    {"settings_wifi_enabled", "/wifi_enabled", Scope::Global, true, 1, 0, 1, nullptr},
+};
 
 SystemSettingsManager& SystemSettingsManager::instance() {
     static SystemSettingsManager instance;
     return instance;
 }
 
-SystemSettingsManager::SystemSettingsManager() {
+SystemSettingsManager::SystemSettingsManager() : settings_(SYSTEM_SETTINGS) {
     spdlog::trace("[SystemSettingsManager] Constructor");
 }
 
@@ -77,32 +98,19 @@ void SystemSettingsManager::init_subjects() {
     // Initialize locale formatting for the loaded language
     helix::ui::locale_set_language(lang_code);
 
-    // Update channel (default: 0 = Stable)
-    int update_channel = config->get<int>("/update/channel", 0);
-    update_channel = std::clamp(update_channel, 0, 2);
-    UI_MANAGED_SUBJECT_INT(update_channel_subject_, update_channel, "update_channel", subjects_);
+    settings_.init(subjects_);
 
-    // Telemetry (opt-in, default OFF)
-    bool telemetry_enabled = config->get<bool>("/telemetry_enabled", false);
-    UI_MANAGED_SUBJECT_INT(telemetry_enabled_subject_, telemetry_enabled ? 1 : 0,
-                           "settings_telemetry_enabled", subjects_);
-    spdlog::debug("[SystemSettingsManager] telemetry_enabled: {}", telemetry_enabled);
-
-    // WiFi radio on/off choice (default ON — a device that has never seen
-    // this setting must come up with WiFi enabled)
-    bool wifi_enabled = config->get<bool>("/wifi_enabled", true);
-    UI_MANAGED_SUBJECT_INT(wifi_enabled_subject_, wifi_enabled ? 1 : 0, "settings_wifi_enabled",
-                           subjects_);
-    spdlog::debug("[SystemSettingsManager] wifi_enabled: {}", wifi_enabled);
-
-    // Log level (default from current spdlog level)
+    // Log level. With nothing saved, report the level the persistent sinks
+    // actually run at. spdlog::get_level() is the logger's floor, which sits at
+    // debug whenever the ring-buffer sink is capturing debug for the debug
+    // bundle, so it reads "debug" on a device logging at warn.
     std::string config_log_level = config->get<std::string>("/log_level", "");
     int log_level_index;
     if (!config_log_level.empty()) {
         auto level = helix::logging::parse_level(config_log_level, spdlog::level::warn);
         log_level_index = spdlog_level_to_index(level);
     } else {
-        log_level_index = spdlog_level_to_index(spdlog::get_level());
+        log_level_index = spdlog_level_to_index(helix::logging::effective_log_level());
     }
     UI_MANAGED_SUBJECT_INT(log_level_subject_, log_level_index, "settings_log_level", subjects_);
     spdlog::debug("[SystemSettingsManager] log_level: {} (index {})",
@@ -114,9 +122,7 @@ void SystemSettingsManager::init_subjects() {
     StaticSubjectRegistry::instance().register_deinit(
         "SystemSettingsManager", []() { SystemSettingsManager::instance().deinit_subjects(); });
 
-    spdlog::debug("[SystemSettingsManager] Subjects initialized: language={}, update_channel={}, "
-                  "telemetry={}, wifi_enabled={}",
-                  lang_code, update_channel, telemetry_enabled, wifi_enabled);
+    spdlog::debug("[SystemSettingsManager] Subjects initialized: language={}", lang_code);
 }
 
 void SystemSettingsManager::deinit_subjects() {
@@ -160,6 +166,9 @@ void SystemSettingsManager::set_language(const std::string& lang) {
     // Load/unload CJK runtime fonts based on locale
     helix::system::CjkFontManager::instance().on_language_changed(lang);
 
+    // Subject strings translated when they were written re-render here
+    UpdateChecker::instance().on_language_changed();
+
     // 3. Update locale formatting tables
     helix::ui::locale_set_language(lang);
 
@@ -183,6 +192,23 @@ const char* SystemSettingsManager::get_language_options() {
     return LANGUAGE_OPTIONS_TEXT;
 }
 
+std::string SystemSettingsManager::get_language_display_name() const {
+    std::string_view options(LANGUAGE_OPTIONS_TEXT);
+    size_t pos = 0;
+    for (int i = 0; i < get_language_index() && pos != std::string_view::npos; ++i) {
+        pos = options.find('\n', pos);
+        if (pos != std::string_view::npos) {
+            ++pos;
+        }
+    }
+    if (pos == std::string_view::npos) {
+        return "";
+    }
+    size_t end = options.find('\n', pos);
+    return std::string(
+        options.substr(pos, end == std::string_view::npos ? std::string_view::npos : end - pos));
+}
+
 std::string SystemSettingsManager::language_index_to_code(int index) {
     if (index < 0 || index >= LANGUAGE_COUNT) {
         return "en"; // Default to English
@@ -203,24 +229,9 @@ int SystemSettingsManager::language_code_to_index(const std::string& code) {
 // UPDATE CHANNEL SETTINGS
 // =============================================================================
 
-int SystemSettingsManager::get_update_channel() const {
-    return lv_subject_get_int(const_cast<lv_subject_t*>(&update_channel_subject_));
-}
-
 void SystemSettingsManager::set_update_channel(int channel) {
-    int clamped = std::clamp(channel, 0, 2);
-    spdlog::info("[SystemSettingsManager] set_update_channel({})",
-                 clamped == 0 ? "Stable" : (clamped == 1 ? "Beta" : "Dev"));
-
-    // 1. Update subject (UI reacts)
-    lv_subject_set_int(&update_channel_subject_, clamped);
-
-    // 2. Persist to config
-    Config* config = Config::get_instance();
-    config->set<int>("/update/channel", clamped);
-    config->save();
-
-    // 3. Clear update checker cache (force re-check on new channel)
+    settings_.set(Key::UpdateChannel, channel);
+    // Force a re-check on the new channel
     UpdateChecker::instance().clear_cache();
 }
 
@@ -228,57 +239,9 @@ void SystemSettingsManager::set_update_channel(int channel) {
 // TELEMETRY SETTINGS
 // =============================================================================
 
-bool SystemSettingsManager::get_telemetry_enabled() const {
-    return lv_subject_get_int(const_cast<lv_subject_t*>(&telemetry_enabled_subject_)) != 0;
-}
-
 void SystemSettingsManager::set_telemetry_enabled(bool enabled) {
-    spdlog::info("[SystemSettingsManager] set_telemetry_enabled({})", enabled);
-
-    // Update subject (UI reacts)
-    lv_subject_set_int(&telemetry_enabled_subject_, enabled ? 1 : 0);
-
-    // Persist to config
-    Config* config = Config::get_instance();
-    config->set<bool>("/telemetry_enabled", enabled);
-    config->save();
-
-    // Apply to TelemetryManager
+    settings_.set(Key::TelemetryEnabled, enabled);
     TelemetryManager::instance().set_enabled(enabled);
-}
-
-// =============================================================================
-// WIFI SETTINGS
-// =============================================================================
-
-bool SystemSettingsManager::get_wifi_enabled() const {
-    // CAUTION: if called before init_subjects() has run, wifi_enabled_subject_
-    // is still zero-initialized (LV_SUBJECT_TYPE_INVALID). lv_subject_get_int()
-    // on that returns 0, which reads as "off" — the INVERSE of this setting's
-    // documented true/on default. WiFiManager's READY handler calls this to
-    // decide whether to force the radio off, so correctness here depends on
-    // init_subjects() always running before any WiFiManager is constructed.
-    // That ordering is structural today (Application::run() initializes
-    // subjects at Phase 9c, constructs WiFiManager no earlier than Phase 14b),
-    // not incidental — but a future phase reorder that breaks it would
-    // silently switch WiFi off on a remote printer with no physical access.
-    return lv_subject_get_int(const_cast<lv_subject_t*>(&wifi_enabled_subject_)) != 0;
-}
-
-void SystemSettingsManager::set_wifi_enabled(bool enabled) {
-    spdlog::info("[SystemSettingsManager] set_wifi_enabled({})", enabled);
-
-    // Update subject (UI reacts)
-    lv_subject_set_int(&wifi_enabled_subject_, enabled ? 1 : 0);
-
-    // Persist to config
-    Config* config = Config::get_instance();
-    config->set<bool>("/wifi_enabled", enabled);
-    config->save();
-
-    // Deliberately does NOT call into WiFiManager. WiFiManager reasserts this
-    // stored value against the radio itself once its backend is ready; a call
-    // back into it from here would create a feedback loop.
 }
 
 // =============================================================================

@@ -34,6 +34,20 @@ detect_kiauh_dir() {
     return 0
 }
 
+# Where install_kiauh_extension would add the extension, for the plan. Sets
+# KIAUH_DIR (empty when KIAUH is absent, the extension is already there, or
+# --skip-kiauh-registration was given).
+# shellcheck disable=SC2034  # KIAUH_DIR is read by main()'s plan
+detect_kiauh() {
+    KIAUH_DIR=""
+    [ "${skip_kiauh_registration:-false}" = "true" ] && return 0
+    KIAUH_DIR=$(detect_kiauh_dir)
+    if [ -n "$KIAUH_DIR" ] && [ -d "$KIAUH_DIR/helixscreen" ]; then
+        KIAUH_DIR=""
+    fi
+    return 0
+}
+
 # Install KIAUH extension for HelixScreen
 # Args: $1 = skip flag ("true" to skip, anything else to install)
 #
@@ -99,6 +113,7 @@ install_kiauh_extension() {
         log_success "KIAUH extension updated at $target_dir (restart KIAUH to pick it up)"
     else
         log_success "KIAUH extension installed at $target_dir"
-        log_info "  → Restart KIAUH (~/kiauh/kiauh.sh) and open the Extensions menu to use it"
+        # shellcheck disable=SC2034  # consumed by plan.sh (print_summary)
+        KIAUH_EXT_ADDED=1
     fi
 }

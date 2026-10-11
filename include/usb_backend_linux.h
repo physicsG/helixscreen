@@ -5,25 +5,39 @@
 
 #ifdef __linux__
 
+#include "usb_automount.h"
 #include "usb_backend.h"
 
 #include <atomic>
+#include <memory>
 #include <mutex>
 #include <thread>
 
 /**
- * @brief Linux USB backend using inotify and /proc/mounts
+ * @brief Linux USB backend watching /proc/self/mountinfo
  *
  * Monitors USB drive mount/unmount events using:
- * - inotify watch on /proc/mounts for mount changes
- * - Parsing /proc/mounts to detect USB drives (looking for /dev/sd* on /media or /mnt)
- * - statvfs() for capacity information
+ * - poll(POLLPRI|POLLERR) on /proc/self/mountinfo for event-driven mount
+ *   change notification (procfs has no inotify support, but its mount files
+ *   are pollable: POLLPRI fires on a mount table change once the file has been
+ *   read to EOF and rewound)
+ * - Parsing /proc/mounts to detect USB drives (looking for /dev/sd* on /media
+ *   or /mnt)
  *
  * Design notes:
  * - /proc/mounts changes whenever any filesystem is mounted/unmounted
  * - We filter for USB-like mounts (block devices on common USB mount points)
- * - Background thread polls inotify for mount changes
+ * - A 1s /proc/mounts content compare takes over when mountinfo cannot be
+ *   opened or its poll fails
+ * - Independently of the mechanism, a safety re-parse runs every 10s so
+ *   detection converges even on a kernel where the event path misbehaves;
+ *   a monitor that can silently never fire again is the defect this design
+ *   excludes
  */
+namespace helix::test {
+class UsbBackendLinuxTestAccess;
+} // namespace helix::test
+
 class UsbBackendLinux : public UsbBackend {
   public:
     UsbBackendLinux();
@@ -43,11 +57,9 @@ class UsbBackendLinux : public UsbBackend {
     UsbError scan_for_gcode(const std::string& mount_path, std::vector<UsbGcodeFile>& files,
                             int max_depth = 3) override;
 
-  private:
-    /**
-     * @brief Parse /proc/mounts and return USB drives
-     */
-    std::vector<UsbDrive> parse_mounts();
+    // ========================================================================
+    // Testable surface (pure classification / filesystem walk, no thread state)
+    // ========================================================================
 
     /**
      * @brief Check if a mount entry looks like a USB drive
@@ -60,25 +72,59 @@ class UsbBackendLinux : public UsbBackend {
                       const std::string& fs_type);
 
     /**
+     * @brief Is this mount point in a removable-media location?
+     *
+     * Shared contract: mounters must place USB mounts under one of these
+     * prefixes or the detection here will not surface the drive.
+     */
+    static bool is_usb_mount_point(const std::string& mount_point);
+
+    /**
+     * @brief Recursively scan a directory for printable G-code files
+     */
+    void scan_directory(const std::string& path, std::vector<UsbGcodeFile>& files,
+                        int current_depth, int max_depth);
+
+    /**
+     * @brief Is the mountinfo event path active? (valid while running)
+     *
+     * False means the 1s content-compare fallback is in effect.
+     */
+    bool using_mountinfo_events() const {
+        return !use_content_polling_.load();
+    }
+
+  private:
+    /**
+     * @brief Parse /proc/mounts and return USB drives
+     */
+    std::vector<UsbDrive> parse_mounts();
+
+    /**
      * @brief Get volume label for a device
      */
     std::string get_volume_label(const std::string& device, const std::string& mount_point);
 
     /**
-     * @brief Get capacity info for a mount point
-     */
-    void get_capacity(const std::string& mount_point, uint64_t& total, uint64_t& available);
-
-    /**
-     * @brief Background thread function - monitors /proc/mounts via inotify
+     * @brief Background thread function - monitors the mount table
      */
     void monitor_thread_func();
 
     /**
-     * @brief Recursively scan directory for .gcode files
+     * @brief Read /proc/self/mountinfo to EOF and rewind
+     *
+     * Procfs has no event queue: draining and rewinding the file is what
+     * re-arms POLLPRI for the next mount change.
      */
-    void scan_directory(const std::string& path, std::vector<UsbGcodeFile>& files,
-                        int current_depth, int max_depth);
+    void drain_mountinfo_fd();
+
+    /**
+     * @brief Abandon the event path and fall back to 1s content compare
+     *
+     * Closes the mountinfo fd and seeds the content snapshot. Callable from
+     * start() (mountinfo unopenable) and the monitor thread (poll failed).
+     */
+    void switch_to_content_polling();
 
     // State
     std::atomic<bool> running_{false};
@@ -87,21 +133,29 @@ class UsbBackendLinux : public UsbBackend {
     EventCallback event_callback_;
     std::vector<UsbDrive> cached_drives_;
 
-    // inotify (when available)
-    int inotify_fd_{-1};
-    int mounts_watch_fd_{-1};
+    // Event path: pollable fd on /proc/self/mountinfo
+    int mountinfo_fd_{-1};
     std::thread monitor_thread_;
 
-    // Polling fallback (when inotify unavailable)
-    // Note: We compare actual content rather than mtime because /proc/mounts
+    // Fallback mounter for boards where nothing else mounts USB sticks.
+    // Nullptr (disarmed) unless running as root. Owned here so its whole
+    // lifecycle - poll() passes and the shutdown unmount - stays on the
+    // monitor thread; it never touches LVGL.
+    std::unique_ptr<helix::usb::UsbAutomount> automount_;
+
+    // Content-compare fallback. Atomic: the monitor thread can demote itself
+    // to this mode after a poll failure while a reader checks the mode.
+    // We compare actual content rather than mtime because /proc/mounts
     // is often a symlink to /proc/self/mounts, and symlink mtime never changes.
-    bool use_polling_{false};
+    std::atomic<bool> use_content_polling_{false};
     std::string last_mounts_content_;
 
     /**
      * @brief Read contents of /proc/mounts for polling comparison
      */
     std::string read_mounts_content();
+
+    friend class helix::test::UsbBackendLinuxTestAccess;
 };
 
 #endif // __linux__

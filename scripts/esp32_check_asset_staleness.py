@@ -19,9 +19,8 @@ Usage:
 Exits 1 (and prints re-run instructions) if any regular file under any
 <source_path> has an mtime newer than <packed_image>, or if <packed_image>
 is missing. Exits 0 otherwise. Non-existent source paths are skipped
-(e.g. build/esp32_printer_images/ before the printer-image script has ever
-been run) since stage_printer_images() itself treats that as "nothing to
-stage yet", not an error.
+(e.g. build/esp32_printer_images/ in a tree that has never staged, where the
+missing packed image already fails the build).
 
 Caveat: this is a plain mtime comparison, same granularity limits as any
 timestamp-based build system (a source edit and a re-pack within the same

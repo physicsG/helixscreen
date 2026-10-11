@@ -21,6 +21,7 @@
 // Forward declarations
 namespace helix {
 class IMoonrakerClient;
+class PrinterState;
 } // namespace helix
 
 /**
@@ -48,7 +49,8 @@ class MoonrakerQueueAPI : public IQueueAPI {
      *
      * @param client MoonrakerClient instance (must remain valid during API lifetime)
      */
-    explicit MoonrakerQueueAPI(helix::IMoonrakerClient& client);
+    explicit MoonrakerQueueAPI(helix::IMoonrakerClient& client,
+                               const helix::PrinterState* state = nullptr);
     virtual ~MoonrakerQueueAPI() = default;
 
     /**
@@ -78,11 +80,15 @@ class MoonrakerQueueAPI : public IQueueAPI {
     /**
      * @brief Add a job to the queue
      *
+     * Success carries the resulting queue (Moonraker returns `queued_jobs`
+     * and `queue_state` from post_job), so the caller can find the new job's
+     * id: it is the one absent from the queue before the call.
+     *
      * @param filename G-code filename to enqueue
-     * @param on_success Success callback
+     * @param on_success Callback with the resulting queue status
      * @param on_error Error callback
      */
-    void add_job(const std::string& filename, SuccessCallback on_success,
+    void add_job(const std::string& filename, StatusCallback on_success,
                  ErrorCallback on_error) override;
 
     /**
@@ -97,4 +103,5 @@ class MoonrakerQueueAPI : public IQueueAPI {
 
   protected:
     helix::IMoonrakerClient& client_;
+    const helix::PrinterState* state_ = nullptr;
 };

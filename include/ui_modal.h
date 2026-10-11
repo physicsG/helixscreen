@@ -20,6 +20,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 // Forward declaration
@@ -420,6 +421,9 @@ class ModalStack {
     // Get backdrop for a dialog
     lv_obj_t* backdrop_for(lv_obj_t* dialog) const;
 
+    /// Component name a dialog was shown from, or "" if it is untracked.
+    std::string component_name_for(lv_obj_t* dialog) const;
+
     // Check if a backdrop is still tracked in the stack
     bool backdrop_for_backdrop(lv_obj_t* backdrop) const;
 
@@ -475,6 +479,10 @@ class ModalStack {
     std::vector<ModalEntry> stack_;
 
     static void exit_animation_done(lv_anim_t* anim);
+
+    /// Frees an owned instance, then queues the backdrop's delete: the instance's
+    /// destructor may still touch its widgets. A no-op once the entry is gone.
+    static void finish_exit(lv_obj_t* backdrop);
 };
 
 // ============================================================================
@@ -493,28 +501,36 @@ namespace helix::ui {
 inline constexpr const char* kModalTitleWidgetName = "dialog_title";
 
 /**
- * @brief Initialize subjects for modal_dialog.xml bindings
- *
- * Call once during app startup before any modal_dialog is shown.
+ * @brief Register the modal XML callbacks; call once during app startup
  */
 void modal_init_subjects();
 
 /**
- * @brief Deinitialize modal dialog subjects for clean shutdown
+ * @brief Owns the attribute strings for one modal_dialog instance
+ *
+ * Severity icon and button captions are per-dialog XML attrs, so stacked
+ * dialogs never share caption state. Holds the strings the attr array points
+ * into: keep it alive for the duration of the show() call and do not move it.
  */
-void modal_deinit_subjects();
+class ModalDialogAttrs {
+  public:
+    /// @param secondary Cancel-button caption; shown only when show_cancel
+    ModalDialogAttrs(std::string title, std::string message, ModalSeverity severity,
+                     std::string primary, std::string secondary, bool show_cancel);
+    ModalDialogAttrs(const ModalDialogAttrs&) = delete;
+    ModalDialogAttrs& operator=(const ModalDialogAttrs&) = delete;
 
-/**
- * @brief Configure modal_dialog before showing
- */
-void modal_configure(ModalSeverity severity, bool show_cancel, const char* primary_text,
-                     const char* cancel_text);
+    /// Null-terminated attr list for Modal::show()
+    const char** get();
 
-// Subject accessors
-lv_subject_t* modal_get_severity_subject();
-lv_subject_t* modal_get_show_cancel_subject();
-lv_subject_t* modal_get_primary_text_subject();
-lv_subject_t* modal_get_cancel_text_subject();
+  private:
+    std::string title_, message_, primary_, secondary_;
+    const char* hide_info_;
+    const char* hide_warning_;
+    const char* hide_error_;
+    const char* hide_secondary_;
+    std::vector<const char*> attrs_;
+};
 
 inline lv_obj_t* modal_show(const char* name, const char** attrs = nullptr) {
     return Modal::show(name, attrs);
@@ -601,6 +617,33 @@ lv_obj_t* modal_confirm(const char* title, const char* message, ModalSeverity se
                         const ConfirmOptions& options = {});
 
 /**
+ * @brief Message body for a confirmation whose action rewrites printer.cfg
+ *
+ * Callers supply one sentence naming what changes; this appends the shared
+ * consequence. Keeping the tail here means a caller can describe its own
+ * change but cannot quietly drop the warning that Klipper restarts.
+ *
+ * @param what One translated sentence, e.g. "Switching to MPC changes how the
+ *        extruder heater is controlled." May be empty.
+ */
+std::string config_rewrite_message(std::string_view what);
+
+/**
+ * @brief Warning confirmation for an action that rewrites printer.cfg
+ *
+ * Every such action disconnects the printer while Klipper restarts, so they
+ * share one severity and one consequence sentence rather than each writing
+ * its own copy.
+ *
+ * @param what See config_rewrite_message()
+ * @param options Passed through to modal_confirm() - pass `owner_token`
+ *        whenever a callback captures something that can outlive the caller
+ */
+lv_obj_t* confirm_config_rewrite(const char* title, std::string_view what, const char* confirm_text,
+                                 std::function<void()> on_confirm,
+                                 const ConfirmOptions& options = {});
+
+/**
  * @brief Single-button alert whose callback never touches a widget
  *
  * Single-button form of modal_confirm() - see there for the contract.
@@ -617,14 +660,24 @@ lv_obj_t* modal_alert(const char* title, const char* message,
  * diverge: pass the address of the stored handle and this helper clears it on
  * every close path - button press, backdrop/ESC dismissal, teardown - and
  * falls back to acting on a failed build only through the caller's own
- * null-handle check. @p options carries the decline callback and the owner
- * token (its on_dismiss slot belongs to the helper: clearing the handle IS
- * the dismissal report). Do NOT hand-roll an LV_EVENT_DELETE hook for this:
+ * null-handle check. @p options carries the decline callback, the dismissal
+ * callback and the owner token; the helper clears the handle ahead of each of
+ * them, so a caller keeps its own on_cancel and on_dismiss and does not clear
+ * the handle itself. Do NOT hand-roll an LV_EVENT_DELETE hook for this:
  * one that outlives its owner is the use-after-free that got
  * prestonbrown/helixscreen#1380 reverted.
  */
 lv_obj_t* show_low_ram_resonance_warning(size_t total_mb, lv_obj_t** dialog_handle,
                                          std::function<void()> on_confirm,
                                          const ConfirmOptions& options = {});
+
+/**
+ * @brief Tell the user a resonance sweep is refused for lack of memory.
+ *
+ * Shown instead of starting when resonance_memory_check() says REFUSE.
+ * @p on_close runs on OK and on dismissal alike.
+ */
+lv_obj_t* show_resonance_memory_refusal(size_t headroom_mb, std::function<void()> on_close = {},
+                                        const AlertOptions& options = {});
 
 } // namespace helix::ui

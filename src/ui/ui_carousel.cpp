@@ -14,9 +14,85 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <cstring>
 
 namespace {
+
+/// @p index wrapped into [0, count) when @p wrap, clamped into it otherwise.
+/// @p count must be positive.
+int wrap_or_clamp(int index, int count, bool wrap) {
+    if (wrap) {
+        return ((index % count) + count) % count;
+    }
+    return std::clamp(index, 0, count - 1);
+}
+
+/// Whether a carousel of @p page_count pages swipes under @p policy.
+bool swipe_enabled(helix::ui::CarouselSwipe policy, int page_count) {
+    switch (policy) {
+    case helix::ui::CarouselSwipe::Disabled:
+        return false;
+    case helix::ui::CarouselSwipe::Auto:
+        break;
+    }
+    return page_count > 1;
+}
+
+/// Pages the carousel shows: real_page_count when set, the tile count otherwise.
+int page_count(const CarouselState& state) {
+    return (state.real_page_count >= 0) ? state.real_page_count
+                                        : static_cast<int>(state.real_tiles.size());
+}
+
+/// Tiles a swipe or a goto can reach: every tile, or only the pages while the
+/// tiles past real_page_count are out of reach.
+int reachable_tile_count(const CarouselState& state) {
+    const int tiles = static_cast<int>(state.real_tiles.size());
+    if (state.trailing_tiles_reachable || state.real_page_count < 0) {
+        return tiles;
+    }
+    return std::min(state.real_page_count, tiles);
+}
+
+/**
+ * @brief Write the carousel's input flags for its page count
+ *
+ * The swipe (the scroll container's SCROLLABLE flag and scroll direction, from
+ * the swipe policy); CLICKABLE and EVENT_BUBBLE on the scroll container and
+ * every tile, where a single page passes input through and more pages capture
+ * it unless bubble_events is set; and HIDDEN on every tile out of reach. LVGL
+ * lays out, scrolls to, snaps to and hit-tests only shown children, so a hidden
+ * tile leaves the swipe no room and takes no press. Touches neither the
+ * indicator row nor its dots.
+ */
+void apply_input_flags(CarouselState* state) {
+    const int count = page_count(*state);
+    const bool multi_page = count > 1;
+    const bool bubble = !multi_page || state->bubble_events;
+
+    const int reachable = reachable_tile_count(*state);
+    if (state->scroll_container) {
+        // A reachable tile past the last page is somewhere to swipe to, so the
+        // strip scrolls for it as for a page.
+        const bool swipe = swipe_enabled(state->swipe, std::max(count, reachable));
+        lv_obj_update_flag(state->scroll_container, LV_OBJ_FLAG_SCROLLABLE, swipe);
+        lv_obj_set_scroll_dir(state->scroll_container, swipe ? LV_DIR_HOR : LV_DIR_NONE);
+        lv_obj_update_flag(state->scroll_container, LV_OBJ_FLAG_CLICKABLE, multi_page);
+        lv_obj_update_flag(state->scroll_container, LV_OBJ_FLAG_EVENT_BUBBLE, bubble);
+    }
+    for (size_t i = 0; i < state->real_tiles.size(); ++i) {
+        lv_obj_t* tile = state->real_tiles[i];
+        lv_obj_update_flag(tile, LV_OBJ_FLAG_CLICKABLE, multi_page);
+        lv_obj_update_flag(tile, LV_OBJ_FLAG_EVENT_BUBBLE, bubble);
+        // Written only on a change: showing or hiding redraws the tile, and the
+        // swipe policy rewrites these flags on every edit gesture.
+        const bool hide = static_cast<int>(i) >= reachable;
+        if (lv_obj_has_flag(tile, LV_OBJ_FLAG_HIDDEN) != hide) {
+            lv_obj_update_flag(tile, LV_OBJ_FLAG_HIDDEN, hide);
+        }
+    }
+}
 
 /**
  * @brief Update indicator dot styles without recreating them
@@ -67,27 +143,25 @@ void carousel_scroll_end_cb(lv_event_t* e) {
         return;
     }
 
+    // A goto sets the page itself. Starting its scroll deletes any running
+    // scroll animation, and LVGL sends that animation's SCROLL_END right then,
+    // with the offset wherever the animation had reached.
+    if (state->goto_scrolling) {
+        return;
+    }
+
     int32_t container_w = lv_obj_get_content_width(scroll);
     if (container_w <= 0) {
         return;
     }
 
+    // Nearest page: a scroll can settle a few px either side of a boundary.
     int32_t scroll_x = lv_obj_get_scroll_x(scroll);
-    int page = static_cast<int>(scroll_x / container_w);
+    int page = static_cast<int>((scroll_x + container_w / 2) / container_w);
 
-    int count = static_cast<int>(state->real_tiles.size());
+    const int count = reachable_tile_count(*state);
     if (count > 0) {
-        // Apply same wrap/clamp logic as goto_page
-        if (state->wrap) {
-            page = ((page % count) + count) % count;
-        } else {
-            if (page < 0) {
-                page = 0;
-            }
-            if (page >= count) {
-                page = count - 1;
-            }
-        }
+        page = wrap_or_clamp(page, count, state->wrap);
     }
 
     if (page != state->current_page) {
@@ -98,6 +172,48 @@ void carousel_scroll_end_cb(lv_event_t* e) {
         update_indicators(state);
         spdlog::trace("[ui_carousel] Scroll ended on page {}/{}", page, count);
     }
+}
+
+/// Whether a pointer is swiping @p scroll, from its drag through the snap that ends it.
+bool swiped_by_pointer(lv_obj_t* scroll) {
+    for (lv_indev_t* indev = lv_indev_get_next(nullptr); indev != nullptr;
+         indev = lv_indev_get_next(indev)) {
+        if (lv_indev_get_scroll_obj(indev) == scroll) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * @brief SCROLL_BEGIN event handler: only a swipe or a goto moves the page
+ *
+ * Any other animated scroll of the scroll container is aimed at the current
+ * page. Focus is the one that matters: LVGL scrolls every scrollable ancestor
+ * of an object that gains focus to show it, animated, and focus moves on by
+ * itself when the focused object is hidden or deleted. A control anywhere in
+ * the carousel that takes focus, whenever it was created, leaves the page where
+ * it is, while scrollables inside a page still bring it into view.
+ */
+void carousel_scroll_begin_cb(lv_event_t* e) {
+    lv_obj_t* scroll = lv_event_get_current_target_obj(e);
+    // Scrolls inside the pages bubble up to here; only the page strip's own counts.
+    if (lv_event_get_target_obj(e) != scroll) {
+        return;
+    }
+    // A scroll that is not animated has no animation to aim: a swipe's drag, or
+    // an offset set outright.
+    auto* anim = static_cast<lv_anim_t*>(lv_event_get_param(e));
+    if (!anim) {
+        return;
+    }
+    CarouselState* state = ui_carousel_get_state(lv_obj_get_parent(scroll));
+    if (!state || state->goto_scrolling || swiped_by_pointer(scroll)) {
+        return;
+    }
+    // A scroll animation runs over the negated scroll offset.
+    const int32_t page_x = state->current_page * lv_obj_get_content_width(scroll);
+    lv_anim_set_values(anim, anim->start_value, -page_x);
 }
 
 /**
@@ -290,7 +406,6 @@ static lv_obj_t* carousel_create_core(lv_obj_t* parent) {
     lv_obj_set_style_pad_column(scroll, 0, LV_PART_MAIN);
     lv_obj_set_scroll_snap_x(scroll, LV_SCROLL_SNAP_START);
     lv_obj_add_flag(scroll, LV_OBJ_FLAG_SCROLL_ONE);
-    lv_obj_set_scroll_dir(scroll, LV_DIR_HOR);
     lv_obj_set_style_border_width(scroll, 0, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(scroll, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_scrollbar_mode(scroll, LV_SCROLLBAR_MODE_OFF);
@@ -321,9 +436,15 @@ static lv_obj_t* carousel_create_core(lv_obj_t* parent) {
     // Register scroll-end handler for page tracking from swipe gestures
     lv_obj_add_event_cb(scroll, carousel_scroll_end_cb, LV_EVENT_SCROLL_END, nullptr);
 
+    // Only a swipe or a goto moves the page; focus never does
+    lv_obj_add_event_cb(scroll, carousel_scroll_begin_cb, LV_EVENT_SCROLL_BEGIN, nullptr);
+
     // Register touch handlers for auto-advance pause/resume
     lv_obj_add_event_cb(scroll, carousel_press_cb, LV_EVENT_PRESSED, nullptr);
     lv_obj_add_event_cb(scroll, carousel_release_cb, LV_EVENT_RELEASED, nullptr);
+
+    // Swipe and input flags for the empty carousel
+    apply_input_flags(cstate);
 
     spdlog::trace("[ui_carousel] Created carousel widget");
     return container;
@@ -356,41 +477,12 @@ void ui_carousel_goto_page(lv_obj_t* carousel, int page, bool animate) {
         return;
     }
 
-    int count = static_cast<int>(state->real_tiles.size());
-    // Use real_page_count for clamping when set
-    int effective_count = (state->real_page_count >= 0) ? state->real_page_count : count;
-    if (effective_count == 0) {
+    const int count = page_count(*state);
+    if (count == 0) {
         return;
     }
 
-    // Handle out-of-range pages: wrap or clamp
-    if (state->wrap) {
-        page = ((page % effective_count) + effective_count) % effective_count;
-    } else {
-        if (page < 0) {
-            page = 0;
-        }
-        if (page >= effective_count) {
-            page = effective_count - 1;
-        }
-    }
-
-    // Calculate scroll position based on page width
-    int32_t container_w = lv_obj_get_content_width(state->scroll_container);
-    int32_t scroll_x = page * container_w;
-
-    lv_obj_scroll_to_x(state->scroll_container, scroll_x, animate ? LV_ANIM_ON : LV_ANIM_OFF);
-    state->current_page = page;
-
-    // Update page subject if bound
-    if (state->page_subject) {
-        lv_subject_set_int(state->page_subject, page);
-    }
-
-    // Update indicator dot styles
-    update_indicators(state);
-
-    spdlog::trace("[ui_carousel] Navigated to page {}/{}", page, count);
+    helix::ui::carousel_goto_tile(carousel, wrap_or_clamp(page, count, state->wrap), animate);
 }
 
 int ui_carousel_get_current_page(lv_obj_t* carousel) {
@@ -438,45 +530,29 @@ void ui_carousel_add_item(lv_obj_t* carousel, lv_obj_t* item) {
 
 void ui_carousel_rebuild_indicators(lv_obj_t* carousel) {
     CarouselState* state = ui_carousel_get_state(carousel);
-    if (!state || !state->indicator_row) {
+    if (!state) {
+        return;
+    }
+
+    apply_input_flags(state);
+    if (!state->indicator_row) {
         return;
     }
 
     // Clear existing dots
     helix::ui::safe_clean_children(state->indicator_row);
 
-    // Use real_page_count for indicator dots when set
-    int count = (state->real_page_count >= 0) ? state->real_page_count
-                                              : static_cast<int>(state->real_tiles.size());
+    const int count = page_count(*state);
 
-    // Single page: hide indicators, disable swiping, allow click passthrough
+    // Single page: no indicators
     if (count <= 1) {
         lv_obj_add_flag(state->indicator_row, LV_OBJ_FLAG_HIDDEN);
-        if (state->scroll_container) {
-            lv_obj_set_scroll_dir(state->scroll_container, LV_DIR_NONE);
-            lv_obj_remove_flag(state->scroll_container, LV_OBJ_FLAG_CLICKABLE);
-            lv_obj_add_flag(state->scroll_container, LV_OBJ_FLAG_EVENT_BUBBLE);
-        }
-        for (auto* tile : state->real_tiles) {
-            lv_obj_remove_flag(tile, LV_OBJ_FLAG_CLICKABLE);
-            lv_obj_add_flag(tile, LV_OBJ_FLAG_EVENT_BUBBLE);
-        }
-        spdlog::trace("[ui_carousel] Single page — indicators hidden, scroll disabled");
+        spdlog::trace("[ui_carousel] Single page — indicators hidden");
         return;
     }
 
-    // Multiple pages: show indicators, enable horizontal scrolling, capture clicks
     if (state->show_indicators) {
         lv_obj_remove_flag(state->indicator_row, LV_OBJ_FLAG_HIDDEN);
-    }
-    if (state->scroll_container) {
-        lv_obj_set_scroll_dir(state->scroll_container, LV_DIR_HOR);
-        lv_obj_add_flag(state->scroll_container, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_remove_flag(state->scroll_container, LV_OBJ_FLAG_EVENT_BUBBLE);
-    }
-    for (auto* tile : state->real_tiles) {
-        lv_obj_add_flag(tile, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_remove_flag(tile, LV_OBJ_FLAG_EVENT_BUBBLE);
     }
 
     // Create one dot per real page
@@ -586,19 +662,66 @@ void ui_carousel_remove_item(lv_obj_t* carousel, int index) {
     spdlog::trace("[ui_carousel] Removed item at index {}, page count now {}", index, new_count);
 }
 
-void ui_carousel_set_scroll_enabled(lv_obj_t* carousel, bool enabled) {
+namespace helix::ui {
+
+void carousel_set_bubble_events(lv_obj_t* carousel, bool bubble) {
+    CarouselState* state = ui_carousel_get_state(carousel);
+    if (!state) {
+        return;
+    }
+    state->bubble_events = bubble;
+    lv_obj_update_flag(carousel, LV_OBJ_FLAG_EVENT_BUBBLE, bubble);
+    // The scroll container and tiles take the setting through their input flags.
+    apply_input_flags(state);
+}
+
+void carousel_set_swipe(lv_obj_t* carousel, CarouselSwipe policy) {
+    CarouselState* state = ui_carousel_get_state(carousel);
+    if (!state) {
+        return;
+    }
+    state->swipe = policy;
+    // Flags only: edit gestures change the policy inside input dispatch.
+    apply_input_flags(state);
+}
+
+void carousel_goto_tile(lv_obj_t* carousel, int tile, bool animate) {
     CarouselState* state = ui_carousel_get_state(carousel);
     if (!state || !state->scroll_container) {
         return;
     }
 
-    if (enabled) {
-        lv_obj_add_flag(state->scroll_container, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_scroll_dir(state->scroll_container, LV_DIR_HOR);
-    } else {
-        lv_obj_remove_flag(state->scroll_container, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_scroll_dir(state->scroll_container, LV_DIR_NONE);
+    const int count = reachable_tile_count(*state);
+    if (count == 0) {
+        return;
     }
+    tile = wrap_or_clamp(tile, count, state->wrap);
 
-    spdlog::trace("[ui_carousel] Scroll {}", enabled ? "enabled" : "disabled");
+    const int32_t container_w = lv_obj_get_content_width(state->scroll_container);
+    // The SCROLL_END this scroll provokes carries no page: see carousel_scroll_end_cb.
+    state->goto_scrolling = true;
+    lv_obj_scroll_to_x(state->scroll_container, tile * container_w,
+                       animate ? LV_ANIM_ON : LV_ANIM_OFF);
+    state->goto_scrolling = false;
+    state->current_page = tile;
+
+    if (state->page_subject) {
+        lv_subject_set_int(state->page_subject, tile);
+    }
+    update_indicators(state);
+
+    spdlog::trace("[ui_carousel] Navigated to tile {}/{}", tile, count);
 }
+
+void carousel_set_trailing_tiles_reachable(lv_obj_t* carousel, bool reachable) {
+    CarouselState* state = ui_carousel_get_state(carousel);
+    if (!state || state->trailing_tiles_reachable == reachable) {
+        return;
+    }
+    state->trailing_tiles_reachable = reachable;
+    // Flags only. A slide under way runs on: LVGL readjusts no scroll offset
+    // along an axis that snaps.
+    apply_input_flags(state);
+}
+
+} // namespace helix::ui

@@ -1,8 +1,11 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "../test_helpers/ams_backend_mock_timing_test_access.h"
+#include "../test_helpers/scoped_runtime_config.h"
 #include "ams_backend_mock.h"
 #include "runtime_config.h"
+#include "simulated_clock.h"
 
 #include <chrono>
 #include <mutex>
@@ -45,20 +48,11 @@ class FastTimingScope {
     double original_speedup_ = 1.0;
 };
 
-// Every case below that waits on the mock's operation thread is tagged [slow].
+// Cases that assert on an operation's result join its thread with
+// wait_for_operation_thread() before reading, so they hold under any load.
 //
-// They wait with wall-clock std::this_thread::sleep_for - 100ms to 1500ms sized
-// against the mock's phase timings - so under the 96-way parallel shard pool on a
-// loaded box the sleep expires before the phase advances and the assertion catches
-// an intermediate value. Observed twice: "realistic mode load operation phases"
-// reading a mid-load phase, and "error recovery sequence" seeing
-// infer_error_segment()==4 where NONE was expected. Both pass in isolation and in
-// their own shard, which is what makes them read as an unrelated regression in
-// whatever branch happens to be running.
-//
-// [slow] keeps them out of the parallel run. The real fix is condition-based
-// waiting (tests/CLAUDE.md, "condition-based-waiting"), which would let them come
-// back into the default run.
+// The cancel case alone stays [slow]: it samples the action mid-flight, and the
+// operation thread can re-set a phase between its cancel check and set_action().
 
 TEST_CASE("AmsBackendMock realistic mode defaults", "[ams][mock][realistic]") {
     AmsBackendMock backend(4);
@@ -80,8 +74,7 @@ TEST_CASE("AmsBackendMock realistic mode defaults", "[ams][mock][realistic]") {
     }
 }
 
-TEST_CASE("AmsBackendMock realistic mode load operation phases",
-          "[ams][mock][realistic][load][slow]") {
+TEST_CASE("AmsBackendMock realistic mode load operation phases", "[ams][mock][realistic][load]") {
     FastTimingScope timing_guard; // RAII: 1000x speedup, auto-restored
 
     // Declare before backend so they outlive it (backend destructor joins threads)
@@ -107,8 +100,7 @@ TEST_CASE("AmsBackendMock realistic mode load operation phases",
         auto result = backend.unload_active_filament();
         REQUIRE(result);
 
-        // Wait for unload to complete (with 1000x speedup: ~20ms total)
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        backend.wait_for_operation_thread();
         {
             std::lock_guard<std::mutex> lock(actions_mtx);
             observed_actions.clear();
@@ -118,8 +110,7 @@ TEST_CASE("AmsBackendMock realistic mode load operation phases",
         result = backend.load_filament(1);
         REQUIRE(result);
 
-        // Wait for operation to complete (with 1000x speedup: ~12ms total)
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        backend.wait_for_operation_thread();
 
         // Verify phase sequence: HEATING → LOADING → IDLE
         // (CHECKING is only used in recovery, not normal load)
@@ -151,7 +142,7 @@ TEST_CASE("AmsBackendMock realistic mode load operation phases",
 }
 
 TEST_CASE("AmsBackendMock realistic mode unload operation phases",
-          "[ams][mock][realistic][unload][slow]") {
+          "[ams][mock][realistic][unload]") {
     FastTimingScope timing_guard; // RAII: 1000x speedup, auto-restored
 
     // Declare before backend so they outlive it (backend destructor joins threads)
@@ -177,8 +168,7 @@ TEST_CASE("AmsBackendMock realistic mode unload operation phases",
         auto result = backend.unload_active_filament();
         REQUIRE(result);
 
-        // Wait for operation to complete (with 1000x speedup: ~15ms total)
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        backend.wait_for_operation_thread();
 
         // Verify phase sequence
         std::lock_guard<std::mutex> lock(actions_mtx);
@@ -209,7 +199,7 @@ TEST_CASE("AmsBackendMock realistic mode unload operation phases",
     backend.stop();
 }
 
-TEST_CASE("AmsBackendMock simple mode skips extra phases", "[ams][mock][realistic][simple][slow]") {
+TEST_CASE("AmsBackendMock simple mode skips extra phases", "[ams][mock][realistic][simple]") {
     FastTimingScope timing_guard; // RAII: 1000x speedup, auto-restored
 
     // Declare before backend so they outlive it (backend destructor joins threads)
@@ -235,7 +225,7 @@ TEST_CASE("AmsBackendMock simple mode skips extra phases", "[ams][mock][realisti
         auto result = backend.unload_active_filament();
         REQUIRE(result);
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        backend.wait_for_operation_thread();
 
         // Should NOT see HEATING or CUTTING in simple mode
         std::lock_guard<std::mutex> lock(actions_mtx);
@@ -260,8 +250,7 @@ TEST_CASE("AmsBackendMock simple mode skips extra phases", "[ams][mock][realisti
     backend.stop();
 }
 
-TEST_CASE("AmsBackendMock realistic mode completes to IDLE",
-          "[ams][mock][realistic][completion][slow]") {
+TEST_CASE("AmsBackendMock realistic mode completes to IDLE", "[ams][mock][realistic][completion]") {
     FastTimingScope timing_guard; // RAII: 1000x speedup, auto-restored
 
     AmsBackendMock backend(4);
@@ -272,11 +261,11 @@ TEST_CASE("AmsBackendMock realistic mode completes to IDLE",
     SECTION("load completes to IDLE state") {
         // Unload first
         backend.unload_active_filament();
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        backend.wait_for_operation_thread();
 
         // Load
         backend.load_filament(1);
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        backend.wait_for_operation_thread();
 
         auto action = backend.get_current_action();
         REQUIRE(action == AmsAction::IDLE);
@@ -288,7 +277,7 @@ TEST_CASE("AmsBackendMock realistic mode completes to IDLE",
 
     SECTION("unload completes to IDLE state") {
         backend.unload_active_filament();
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        backend.wait_for_operation_thread();
 
         auto action = backend.get_current_action();
         REQUIRE(action == AmsAction::IDLE);
@@ -331,8 +320,7 @@ TEST_CASE("AmsBackendMock realistic mode can be cancelled",
 // Phase 5: Mock Loading State Machine - SELECTING, PAUSED, Recovery
 // ============================================================================
 
-TEST_CASE("AmsBackendMock tool change shows SELECTING phase",
-          "[ams][mock][realistic][selecting][slow]") {
+TEST_CASE("AmsBackendMock tool change shows SELECTING phase", "[ams][mock][realistic][selecting]") {
     FastTimingScope timing_guard; // RAII: 1000x speedup, auto-restored
 
     // Declare before backend so they outlive it (backend destructor joins threads)
@@ -358,8 +346,7 @@ TEST_CASE("AmsBackendMock tool change shows SELECTING phase",
         auto result = backend.change_tool(1);
         REQUIRE(result);
 
-        // Wait for operation to complete (generous for slow CI)
-        std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+        backend.wait_for_operation_thread();
 
         // Verify SELECTING phase appears between UNLOADING and LOADING phases
         std::lock_guard<std::mutex> lock(actions_mtx);
@@ -427,7 +414,7 @@ TEST_CASE("AmsBackendMock PAUSED state handling", "[ams][mock][realistic][paused
     backend.stop();
 }
 
-TEST_CASE("AmsBackendMock error recovery sequence", "[ams][mock][realistic][recovery][slow]") {
+TEST_CASE("AmsBackendMock error recovery sequence", "[ams][mock][realistic][recovery]") {
     FastTimingScope timing_guard; // RAII: 1000x speedup, auto-restored
 
     // Declare before backend so they outlive it (backend destructor joins threads)
@@ -461,8 +448,7 @@ TEST_CASE("AmsBackendMock error recovery sequence", "[ams][mock][realistic][reco
         auto result = backend.recover();
         REQUIRE(result);
 
-        // Wait for recovery sequence to complete
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        backend.wait_for_operation_thread();
 
         // Verify recovery sequence: ERROR → CHECKING → IDLE
         std::lock_guard<std::mutex> lock(actions_mtx);
@@ -490,7 +476,7 @@ TEST_CASE("AmsBackendMock error recovery sequence", "[ams][mock][realistic][reco
         REQUIRE(backend.infer_error_segment() != PathSegment::NONE);
 
         backend.recover();
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        backend.wait_for_operation_thread();
 
         REQUIRE(backend.infer_error_segment() == PathSegment::NONE);
     }
@@ -576,17 +562,81 @@ TEST_CASE("Mock backend in AFC mode still reports manages_active_spool=false",
     REQUIRE(backend->manages_active_spool() == false);
 }
 
-TEST_CASE("Mock backend does not track weight locally", "[ams][mock][spoolman]") {
-    auto backend = std::make_unique<AmsBackendMock>(4);
-    REQUIRE(backend->tracks_weight_locally() == false);
+// ============================================================================
+// Simulated-Time Scaling
+// ============================================================================
+//
+// The mock applies --sim-speed in opposite directions: a load-phase delay is a
+// wait to be shortened, while the dryer is progress to be accelerated. The
+// cases below pin each direction as a comparison against 1x, so swapping the
+// two operations has to move a value the wrong way, not merely change it.
+
+TEST_CASE("AmsBackendMock: operation delays shorten as the flag rises",
+          "[ams][mock][realistic][simclock]") {
+    ScopedRuntimeConfig scoped_config;
+    AmsBackendMock backend(4);
+
+    get_runtime_config()->sim_speedup = 1.0;
+    const int at_1x = AmsBackendMockTimingTestAccess::effective_delay_ms(backend, 3000);
+    REQUIRE(at_1x == 3000);
+
+    get_runtime_config()->sim_speedup = 10.0;
+    const int at_10x = AmsBackendMockTimingTestAccess::effective_delay_ms(backend, 3000);
+    REQUIRE(at_10x == 300);
+    REQUIRE(at_10x < at_1x);
+
+    SECTION("a delay never rounds away to a busy loop") {
+        get_runtime_config()->sim_speedup = 1000.0;
+        REQUIRE(AmsBackendMockTimingTestAccess::effective_delay_ms(backend, 5) == 1);
+        REQUIRE(AmsBackendMockTimingTestAccess::effective_delay_ms(backend, 0) == 1);
+    }
+
+    SECTION("variance stays within its band") {
+        get_runtime_config()->sim_speedup = 1.0;
+        for (int i = 0; i < 50; ++i) {
+            const int ms = AmsBackendMockTimingTestAccess::effective_delay_ms(backend, 1000, 0.2f);
+            REQUIRE(ms >= 800);
+            REQUIRE(ms <= 1200);
+        }
+    }
 }
 
-TEST_CASE("The mock reports no homing, matching what it dispatches", "[ams][mock][homing]") {
-    // AmsBackendMock derives from AmsBackend directly, so ensure_homed_then()
-    // is not even reachable from it. The base default is what makes that the
-    // honest answer without the mock having to declare anything -- and it is
-    // why --real-ams exists to reach the confirmation path instead (see
-    // FILAMENT_MANAGEMENT.md § mock backends).
+TEST_CASE("AmsBackendMock: the dryer's own multiplier composes over the flag",
+          "[ams][mock][dryer][simclock]") {
+    ScopedRuntimeConfig scoped_config;
     AmsBackendMock backend(4);
-    CHECK_FALSE(backend.filament_ops_may_home());
+    AmsBackendMockTimingTestAccess::set_dryer_speed_x(backend, 60);
+
+    SECTION("with no flag the dryer keeps its own 60x") {
+        get_runtime_config()->sim_speedup = 1.0;
+        REQUIRE(AmsBackendMockTimingTestAccess::dryer_speed_x(backend) == 60);
+    }
+
+    SECTION("the flag multiplies the dryer rather than replacing it") {
+        get_runtime_config()->sim_speedup = 10.0;
+        REQUIRE(AmsBackendMockTimingTestAccess::dryer_speed_x(backend) == 600);
+    }
+
+    SECTION("a dryer at 1x tracks the flag exactly") {
+        AmsBackendMockTimingTestAccess::set_dryer_speed_x(backend, 1);
+        get_runtime_config()->sim_speedup = 10.0;
+        REQUIRE(AmsBackendMockTimingTestAccess::dryer_speed_x(backend) == 10);
+    }
+
+    SECTION("--sim-speed 50 gives 3000x, not the flag's own 1000 ceiling") {
+        get_runtime_config()->sim_speedup = 50.0;
+        REQUIRE(AmsBackendMockTimingTestAccess::dryer_speed_x(backend) == 3000);
+    }
+
+    SECTION("the flag's top end dries at 60000x") {
+        get_runtime_config()->sim_speedup = helix::sim::MAX_SPEED;
+        REQUIRE(AmsBackendMockTimingTestAccess::dryer_speed_x(backend) == 60000);
+    }
+
+    SECTION("only the overflow guard bounds the composed rate") {
+        AmsBackendMockTimingTestAccess::set_dryer_speed_x(backend, 1000);
+        get_runtime_config()->sim_speedup = helix::sim::MAX_SPEED;
+        REQUIRE(AmsBackendMockTimingTestAccess::dryer_speed_x(backend) ==
+                static_cast<int>(helix::sim::MAX_COMPOSED_SPEED));
+    }
 }

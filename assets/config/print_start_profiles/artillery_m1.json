@@ -48,14 +48,5 @@
       "message": "Heating nozzle to $1°C...",
       "weight": 15
     }
-  ],
-  "phase_weights": {
-    "INITIALIZING": 5,
-    "HEATING_BED": 20,
-    "HEATING_NOZZLE": 20,
-    "HOMING": 15,
-    "CLEANING": 10,
-    "BED_MESH": 20,
-    "PURGING": 10
-  }
+  ]
 }

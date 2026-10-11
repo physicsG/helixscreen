@@ -1,0 +1,76 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component>
+  <!--
+    One centred glyph over one label, filling its tile: the shape six home
+    widgets share.
+
+    button_name and icon_name are props because C++ finds these by name
+    (lv_obj_find_by_name) to wire state that is not expressible in XML, so each
+    call site keeps the name its widget already looks up.
+
+    disabled_cond takes a whole expression rather than a subject, because the
+    call sites do not agree on how many reasons there are to be disabled:
+    shutdown and firmware_restart have none, the other home tiles and the
+    calibration tiles have one. One expression covers both shapes; "0 eq 1" is
+    the default because it can never be true, so a tile that passes nothing is
+    never disabled. label_hidden_cond is an expression for the same reason:
+    home tiles follow show_widget_labels, and a tile elsewhere can follow the
+    breakpoint or nothing.
+
+    icon_swap_subject shows alt_icon in place of icon while the subject is 0,
+    for a tile whose glyph reports a state. Empty installs no binding, so
+    alt_icon stays hidden.
+  -->
+  <api>
+    <prop name="icon" type="string" default="power"/>
+    <prop name="icon_variant" type="string" default="secondary"/>
+    <prop name="label" type="string" default=""/>
+    <prop name="label_tag" type="string" default=""/>
+    <prop name="callback" type="string" default=""/>
+    <prop name="disabled_cond" type="string" default="0 eq 1"/>
+    <prop name="label_hidden_cond" type="string" default="show_widget_labels eq 0"/>
+    <prop name="moves_machine" type="string" default="false"/>
+    <prop name="alt_icon" type="string" default="power"/>
+    <prop name="alt_icon_variant" type="string" default="secondary"/>
+    <prop name="icon_swap_subject" type="string" default=""/>
+    <prop name="icon_size" type="string" default="#icon_size"/>
+    <prop name="button_name" type="string" default="home_action_tile_button"/>
+    <prop name="icon_name" type="string" default="home_action_tile_icon"/>
+    <!-- Per-instance rung subject from the owning tile. Empty installs no
+         binding, so a call site that does not size itself keeps #icon_size. -->
+    <prop name="tile_icon_subject" type="string" default=""/>
+    <prop name="tile_label_subject" type="string" default=""/>
+    <!-- 1 lays the label beside the glyph instead of under it. Empty installs
+         no binding, so the tile stays a column. -->
+    <prop name="tile_dir_subject" type="string" default=""/>
+  </api>
+  <view name="home_action_tile" extends="lv_obj" height="100%" flex_grow="1" style_pad_all="0" scrollable="false">
+    <ui_button name="$button_name"
+               width="100%" height="100%" style_pad_ver="0" variant="ghost" style_border_width="0" focusable="false"
+               moves_machine="$moves_machine">
+      <style name="styles.tile_column"/>
+      <bind_style_if_eq name="styles.tile_row" subject="$tile_dir_subject" ref_value="1"/>
+      <bind_state_if cond="$disabled_cond" state="disabled"/>
+      <icon name="$icon_name"
+            src="$icon" size="$icon_size" variant="$icon_variant" clickable="false" event_bubble="true">
+        <bind_tile_rung ladder="icon" subject="$tile_icon_subject"/>
+        <bind_flag_if_eq subject="$icon_swap_subject" flag="hidden" ref_value="0"/>
+      </icon>
+      <icon src="$alt_icon"
+            size="$icon_size" variant="$alt_icon_variant" clickable="false" event_bubble="true" hidden="true">
+        <bind_tile_rung ladder="icon" subject="$tile_icon_subject"/>
+        <bind_flag_if_eq subject="$icon_swap_subject" flag="hidden" ref_value="1"/>
+      </icon>
+      <text_tiny text="$label"
+                 translation_tag="$label_tag" style_text_color="#text_muted" style_text_align="center" clickable="false"
+                 event_bubble="true">
+        <bind_flag_if cond="$label_hidden_cond" flag="hidden"/>
+        <bind_tile_rung ladder="label" subject="$tile_icon_subject"/>
+        <bind_flag_if_eq subject="$tile_label_subject" flag="hidden" ref_value="0"/>
+      </text_tiny>
+      <event_cb trigger="clicked" callback="$callback"/>
+    </ui_button>
+  </view>
+</component>

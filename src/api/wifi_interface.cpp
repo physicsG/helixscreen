@@ -3,15 +3,16 @@
 
 #include "wifi_interface.h"
 
+#include "helix_fs.h"
+#include "text_io.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
-#include <filesystem>
-#include <fstream>
-#include <sstream>
 #include <vector>
 
-namespace fs = std::filesystem;
+namespace hfs = helix::fs;
+namespace tio = helix::text_io;
 
 namespace helix::wifi {
 
@@ -19,9 +20,8 @@ namespace detail {
 
 std::string parse_wpa_state(const std::string& status_reply) {
     static const std::string prefix = "wpa_state=";
-    std::istringstream iss(status_reply);
-    std::string line;
-    while (std::getline(iss, line)) {
+    for (std::string_view sv : tio::lines(status_reply)) {
+        std::string line(sv);
         if (line.compare(0, prefix.size(), prefix) != 0)
             continue;
         std::string value = line.substr(prefix.size());
@@ -35,56 +35,54 @@ std::string parse_wpa_state(const std::string& status_reply) {
 std::vector<DaemonInfo> list_wpa_daemons(const std::string& proc_root) {
     std::vector<DaemonInfo> daemons;
 
-    std::error_code ec;
-    if (proc_root.empty() || !fs::is_directory(proc_root, ec) || ec)
+    if (proc_root.empty() || !hfs::is_directory(proc_root))
         return daemons;
 
-    for (const auto& entry : fs::directory_iterator(proc_root, ec)) {
-        if (ec)
-            break;
+    if (auto entries = hfs::list_dir(proc_root)) {
+        for (const auto& e : *entries) {
+            // PID directories only.
+            const std::string name = e.name;
+            if (name.empty() || !std::all_of(name.begin(), name.end(),
+                                             [](unsigned char c) { return std::isdigit(c); }))
+                continue;
 
-        // PID directories only.
-        const std::string name = entry.path().filename().string();
-        if (name.empty() ||
-            !std::all_of(name.begin(), name.end(), [](unsigned char c) { return std::isdigit(c); }))
-            continue;
+            // /proc/<pid>/cmdline is NUL-separated argv.
+            tio::LineReader cmd(hfs::join_path(e.path, "cmdline"), '\0');
+            if (!cmd)
+                continue;
+            std::vector<std::string> argv;
+            std::string arg;
+            while (cmd.next(arg))
+                argv.push_back(arg);
+            if (argv.empty())
+                continue;
 
-        // /proc/<pid>/cmdline is NUL-separated argv.
-        std::ifstream cmd(entry.path() / "cmdline", std::ios::binary);
-        if (!cmd.is_open())
-            continue;
-        std::vector<std::string> argv;
-        std::string arg;
-        while (std::getline(cmd, arg, '\0'))
-            argv.push_back(arg);
-        if (argv.empty())
-            continue;
+            // argv[0] basename must be wpa_supplicant.
+            if (hfs::filename(argv[0]) != "wpa_supplicant")
+                continue;
 
-        // argv[0] basename must be wpa_supplicant.
-        if (fs::path(argv[0]).filename().string() != "wpa_supplicant")
-            continue;
-
-        // Collect -i/-iVALUE (interface) and -c/-cVALUE (config path). Both
-        // accept a separate "-X value" or a joined "-Xvalue" form.
-        std::string i_val, c_val;
-        for (size_t i = 1; i < argv.size(); ++i) {
-            const std::string& a = argv[i];
-            if (a == "-i" && i + 1 < argv.size()) {
-                i_val = argv[++i];
-            } else if (a.rfind("-i", 0) == 0 && a.size() > 2) {
-                i_val = a.substr(2);
-            } else if (a == "-c" && i + 1 < argv.size()) {
-                c_val = argv[++i];
-            } else if (a.rfind("-c", 0) == 0 && a.size() > 2) {
-                c_val = a.substr(2);
+            // Collect -i/-iVALUE (interface) and -c/-cVALUE (config path). Both
+            // accept a separate "-X value" or a joined "-Xvalue" form.
+            std::string i_val, c_val;
+            for (size_t i = 1; i < argv.size(); ++i) {
+                const std::string& a = argv[i];
+                if (a == "-i" && i + 1 < argv.size()) {
+                    i_val = argv[++i];
+                } else if (a.rfind("-i", 0) == 0 && a.size() > 2) {
+                    i_val = a.substr(2);
+                } else if (a == "-c" && i + 1 < argv.size()) {
+                    c_val = argv[++i];
+                } else if (a.rfind("-c", 0) == 0 && a.size() > 2) {
+                    c_val = a.substr(2);
+                }
             }
-        }
 
-        DaemonInfo d;
-        d.pid = static_cast<pid_t>(std::strtol(name.c_str(), nullptr, 10));
-        d.iface = std::move(i_val);
-        d.conf_path = std::move(c_val);
-        daemons.push_back(std::move(d));
+            DaemonInfo d;
+            d.pid = static_cast<pid_t>(std::strtol(name.c_str(), nullptr, 10));
+            d.iface = std::move(i_val);
+            d.conf_path = std::move(c_val);
+            daemons.push_back(std::move(d));
+        }
     }
     return daemons;
 }
@@ -107,44 +105,40 @@ pid_t find_daemon_for_interface(const std::string& proc_root, const std::string&
 }
 
 std::string find_rfkill_node(const std::string& sys_root, const std::string& netdev) {
-    std::error_code ec;
-
     // Try to find an rfkill entry in the netdev's phy80211 directory.
     const std::string phy_dir = sys_root + "/class/net/" + netdev + "/phy80211";
-    if (fs::is_directory(phy_dir, ec) && !ec) {
-        for (const auto& entry : fs::directory_iterator(phy_dir, ec)) {
-            if (ec)
-                break;
-            const std::string name = entry.path().filename().string();
-            if (name.compare(0, 6, "rfkill") == 0) {
-                return sys_root + "/class/rfkill/" + name;
+    if (hfs::is_directory(phy_dir)) {
+        if (auto entries = hfs::list_dir(phy_dir)) {
+            for (const auto& e : *entries) {
+                if (e.name.compare(0, 6, "rfkill") == 0) {
+                    return sys_root + "/class/rfkill/" + e.name;
+                }
             }
         }
     }
 
     // Fall back to the first "wlan" typed switch in /sys/class/rfkill/.
     const std::string rfkill_dir = sys_root + "/class/rfkill";
-    if (fs::is_directory(rfkill_dir, ec) && !ec) {
-        for (const auto& entry : fs::directory_iterator(rfkill_dir, ec)) {
-            if (ec)
-                break;
+    if (hfs::is_directory(rfkill_dir)) {
+        if (auto entries = hfs::list_dir(rfkill_dir)) {
+            for (const auto& e : *entries) {
+                const std::string rfkill_name = e.name;
+                const std::string type_file = hfs::join_path(e.path, "type");
 
-            const std::string rfkill_name = entry.path().filename().string();
-            const std::string type_file = entry.path() / "type";
+                auto type_line = tio::read_first_line(type_file);
+                if (!type_line)
+                    continue;
 
-            std::ifstream f(type_file);
-            if (!f.is_open())
-                continue;
+                std::string type_value = std::move(*type_line);
+                // Trim trailing whitespace.
+                while (!type_value.empty() &&
+                       (type_value.back() == '\r' || type_value.back() == '\n' ||
+                        type_value.back() == ' ' || type_value.back() == '\t'))
+                    type_value.pop_back();
 
-            std::string type_value;
-            std::getline(f, type_value);
-            // Trim trailing whitespace.
-            while (!type_value.empty() && (type_value.back() == '\r' || type_value.back() == '\n' ||
-                                           type_value.back() == ' ' || type_value.back() == '\t'))
-                type_value.pop_back();
-
-            if (type_value == "wlan") {
-                return rfkill_dir + "/" + rfkill_name;
+                if (type_value == "wlan") {
+                    return rfkill_dir + "/" + rfkill_name;
+                }
             }
         }
     }
@@ -153,36 +147,32 @@ std::string find_rfkill_node(const std::string& sys_root, const std::string& net
 }
 
 bool has_non_wifi_network_path(const std::string& sys_root, const std::string& wifi_netdev) {
-    std::error_code ec;
     const std::string net_dir = sys_root + "/class/net";
-    if (!fs::is_directory(net_dir, ec) || ec)
+    if (!hfs::is_directory(net_dir))
         return false;
 
-    for (const auto& entry : fs::directory_iterator(net_dir, ec)) {
-        if (ec)
-            break;
+    if (auto entries = hfs::list_dir(net_dir)) {
+        for (const auto& e : *entries) {
+            const std::string name = e.name;
+            if (name == "lo" || name == wifi_netdev)
+                continue;
 
-        const std::string name = entry.path().filename().string();
-        if (name == "lo" || name == wifi_netdev)
-            continue;
+            // A second wireless interface is not a fallback — it shares the same
+            // failure domain (radio) as the primary WiFi interface.
+            if (hfs::is_directory(hfs::join_path(e.path, "wireless")))
+                continue;
 
-        // A second wireless interface is not a fallback — it shares the same
-        // failure domain (radio) as the primary WiFi interface.
-        std::error_code wec;
-        if (fs::is_directory(entry.path() / "wireless", wec) && !wec)
-            continue;
+            auto operstate_line = tio::read_first_line(hfs::join_path(e.path, "operstate"));
+            if (!operstate_line)
+                continue;
+            std::string operstate = std::move(*operstate_line);
+            while (!operstate.empty() && (operstate.back() == '\r' || operstate.back() == '\n' ||
+                                          operstate.back() == ' '))
+                operstate.pop_back();
 
-        std::ifstream f(entry.path() / "operstate");
-        if (!f.is_open())
-            continue;
-        std::string operstate;
-        std::getline(f, operstate);
-        while (!operstate.empty() &&
-               (operstate.back() == '\r' || operstate.back() == '\n' || operstate.back() == ' '))
-            operstate.pop_back();
-
-        if (operstate == "up")
-            return true;
+            if (operstate == "up")
+                return true;
+        }
     }
     return false;
 }
@@ -190,15 +180,14 @@ bool has_non_wifi_network_path(const std::string& sys_root, const std::string& w
 } // namespace detail
 
 std::optional<WifiInterface> resolve_interface(const Roots& roots, const StatusProbe& probe) {
-    std::error_code ec;
-    if (roots.ctrl.empty() || !fs::is_directory(roots.ctrl, ec) || ec)
+    if (roots.ctrl.empty() || !hfs::is_directory(roots.ctrl))
         return std::nullopt;
 
     std::vector<std::string> names;
-    for (const auto& entry : fs::directory_iterator(roots.ctrl, ec)) {
-        if (ec)
-            break;
-        names.push_back(entry.path().filename().string());
+    if (auto entries = hfs::list_dir(roots.ctrl)) {
+        for (const auto& e : *entries) {
+            names.push_back(e.name);
+        }
     }
     // Sorted purely for determinism among equally-ranked candidates.
     std::sort(names.begin(), names.end());
@@ -216,9 +205,8 @@ std::optional<WifiInterface> resolve_interface(const Roots& roots, const StatusP
 
         // Filter out control-only sockets (p2p-dev-*, etc.) that have no
         // backing wireless netdev.
-        std::error_code wec;
         const std::string wireless_dir = roots.sys + "/class/net/" + name + "/wireless";
-        if (!fs::is_directory(wireless_dir, wec) || wec)
+        if (!hfs::is_directory(wireless_dir))
             continue;
 
         if (!have_fallback) {

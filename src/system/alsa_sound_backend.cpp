@@ -5,6 +5,8 @@
 #include "alsa_sound_backend.h"
 
 #include "alsa_clock_keepalive.h"
+#include "env_knobs.h"
+#include "helix_thread.h"
 
 #include <spdlog/spdlog.h>
 
@@ -175,7 +177,7 @@ bool ALSASoundBackend::initialize(const std::string& device) {
     }
     keep_clock_alive_ = helix::audio::device_needs_clock_keepalive(device, pcm_name);
     if (const char* env = std::getenv("HELIX_ALSA_KEEPALIVE"); env && env[0] != '\0') {
-        const bool forced = (env[0] != '0');
+        const bool forced = helix::env_truthy(env);
         if (forced != keep_clock_alive_)
             spdlog::info("[ALSASound] HELIX_ALSA_KEEPALIVE={} overrides detection ({})", env,
                          keep_clock_alive_ ? "keep-alive" : "park");
@@ -190,7 +192,7 @@ bool ALSASoundBackend::initialize(const std::string& device) {
 
     // Start render thread
     running_.store(true, std::memory_order_relaxed);
-    render_thread_ = std::thread(&ALSASoundBackend::render_loop, this);
+    render_thread_ = helix::make_thread(&ALSASoundBackend::render_loop, this);
 
     return true;
 }
@@ -231,8 +233,7 @@ void ALSASoundBackend::set_tone(float freq_hz, float amplitude, float duty_cycle
 
 void ALSASoundBackend::silence() {
     for (int v = 0; v < MAX_VOICES; ++v) {
-        voice_slots_[v].event.velocity = 0;
-        voice_slots_[v].generation.fetch_add(1, std::memory_order_release);
+        voice_slots_[v].edit([](NoteEvent& ev) { ev.velocity = 0; }, true);
     }
 }
 
@@ -243,31 +244,31 @@ void ALSASoundBackend::set_waveform(Waveform w) {
 void ALSASoundBackend::set_voice(int slot, float freq_hz, float amplitude, float duty_cycle) {
     if (slot < 0 || slot >= MAX_VOICES)
         return;
-    auto& s = voice_slots_[slot];
-    s.event.freq_hz = freq_hz;
-    s.event.velocity = amplitude;
-    s.event.duty_cycle = duty_cycle;
-    s.generation.fetch_add(1, std::memory_order_release);
+    voice_slots_[slot].edit(
+        [&](NoteEvent& ev) {
+            ev.freq_hz = freq_hz;
+            ev.velocity = amplitude;
+            ev.duty_cycle = duty_cycle;
+        },
+        true);
 }
 
 void ALSASoundBackend::set_voice_waveform(int slot, Waveform w) {
     if (slot < 0 || slot >= MAX_VOICES)
         return;
-    voice_slots_[slot].event.wave = w;
+    voice_slots_[slot].edit([w](NoteEvent& ev) { ev.wave = w; }, false);
 }
 
 void ALSASoundBackend::silence_voice(int slot) {
     if (slot < 0 || slot >= MAX_VOICES)
         return;
-    voice_slots_[slot].event.velocity = 0;
-    voice_slots_[slot].generation.fetch_add(1, std::memory_order_release);
+    voice_slots_[slot].edit([](NoteEvent& ev) { ev.velocity = 0; }, true);
 }
 
 void ALSASoundBackend::publish_note(int slot, const NoteEvent& event) {
     if (slot < 0 || slot >= MAX_VOICES)
         return;
-    voice_slots_[slot].event = event;
-    voice_slots_[slot].generation.fetch_add(1, std::memory_order_release);
+    voice_slots_[slot].publish(event);
 }
 
 void ALSASoundBackend::set_render_source(std::function<void(float*, size_t, int)> fn) {
@@ -386,10 +387,12 @@ void ALSASoundBackend::render_loop() {
             }
             {
                 std::unique_lock<std::mutex> lock(suspend_mutex_);
+                parked_.store(true, std::memory_order_release);
                 suspend_cv_.wait(lock, [this] {
                     return !suspended_.load(std::memory_order_relaxed) ||
                            !running_.load(std::memory_order_relaxed);
                 });
+                parked_.store(false, std::memory_order_release);
             }
             if (!running_.load(std::memory_order_relaxed))
                 break;
@@ -429,18 +432,7 @@ void ALSASoundBackend::render_loop() {
         for (int v = 0; v < MAX_VOICES; ++v) {
             auto& slot = voice_slots_[v];
 
-            // Check for new note (generation changed)
-            uint32_t gen = slot.generation.load(std::memory_order_acquire);
-            if (gen != slot.cb_generation) {
-                slot.cb_generation = gen;
-                slot.reset_for_new_note();
-                if (slot.active.filter_type != 0) {
-                    auto ft = (slot.active.filter_type == 1) ? helix::audio::FilterType::LOWPASS
-                                                             : helix::audio::FilterType::HIGHPASS;
-                    helix::audio::compute_biquad_coeffs(slot.filter, ft, slot.active.filter_cutoff,
-                                                        sr);
-                }
-            }
+            slot.start_pending_note(sr);
 
             // Skip if silent
             if (slot.active.velocity <= 0.001f && slot.current_amplitude <= 0.001f) {

@@ -4,12 +4,14 @@
 #include "ui_printer_switch_menu.h"
 
 #include "ui_callback_helpers.h"
+#include "ui_change_host_modal.h"
 #include "ui_event_safety.h"
 #include "ui_icon_codepoints.h"
+#include "ui_row_text.h"
 #include "ui_update_queue.h"
 
 #include "config.h"
-#include "theme_manager.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/spdlog.h>
 
@@ -56,17 +58,12 @@ void PrinterSwitchMenu::on_backdrop_clicked() {
 
 void PrinterSwitchMenu::populate_printer_list() {
     auto* cfg = Config::get_instance();
-    if (!cfg) {
-        spdlog::warn("[PrinterSwitchMenu] No config instance");
-        return;
-    }
 
     auto printer_ids = cfg->get_printer_ids();
     auto active_id = cfg->get_active_printer_id();
 
-    lv_obj_t* printer_list = lv_obj_find_by_name(menu(), "printer_list");
+    lv_obj_t* printer_list = helix::ui::find_required(menu(), "printer_list", "PrinterSwitchMenu");
     if (!printer_list) {
-        spdlog::error("[PrinterSwitchMenu] printer_list not found in XML");
         return;
     }
 
@@ -75,69 +72,24 @@ void PrinterSwitchMenu::populate_printer_list() {
     int screen_h = lv_obj_get_height(screen);
     lv_obj_set_style_max_height(printer_list, screen_h * 2 / 3, 0);
 
-    // Resolve spacing tokens
-    auto get_token = [](const char* name, int fallback) {
-        const char* s = lv_xml_get_const(nullptr, name);
-        return s ? std::atoi(s) : fallback;
-    };
-    int space_xs = get_token("space_xs", 4);
-    int space_sm = get_token("space_sm", 6);
-
-    lv_color_t accent = theme_manager_get_color("primary");
-    lv_color_t text_color = theme_manager_get_color("text");
-
-    // Resolve fonts via XML token system (same pattern as other context menus)
-    const char* body_font_name = lv_xml_get_const(nullptr, "font_body");
-    const lv_font_t* body_font =
-        body_font_name ? lv_xml_get_font(nullptr, body_font_name) : lv_font_get_default();
-    const char* icon_font_name = lv_xml_get_const(nullptr, "icon_font_xs");
-    const lv_font_t* icon_font =
-        icon_font_name ? lv_xml_get_font(nullptr, icon_font_name) : body_font;
-
     // Get check icon codepoint from our icon system
-    const char* check_codepoint = ui_icon::lookup_codepoint("check");
+    const char* check_codepoint = helix::ui::icon::lookup_codepoint("check");
 
     for (const auto& id : printer_ids) {
         bool is_active = (id == active_id);
-        std::string name = cfg->get<std::string>("/printers/" + id + "/printer_name", id);
+        std::string name = cfg->get_printer_display_name(id, id);
 
-        // Row container
-        lv_obj_t* row = lv_obj_create(printer_list);
-        lv_obj_set_width(row, LV_PCT(100));
-        lv_obj_set_height(row, LV_SIZE_CONTENT);
-        lv_obj_set_style_pad_all(row, space_sm, 0);
-        lv_obj_set_style_pad_gap(row, space_xs, 0);
-        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-        lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
-
-        // Pressed state styling
-        lv_obj_set_style_bg_opa(row, 30, LV_STATE_PRESSED);
-        lv_obj_set_style_bg_color(row, accent, LV_STATE_PRESSED);
-
-        // Checkmark icon (active) or spacer (inactive) — fixed width for alignment
-        lv_obj_t* indicator = lv_label_create(row);
-        lv_obj_set_style_text_font(indicator, icon_font, 0);
-        lv_obj_set_style_min_width(indicator, 16, 0);
-        if (is_active && check_codepoint) {
-            lv_label_set_text(indicator, check_codepoint);
-            lv_obj_set_style_text_color(indicator, text_color, 0);
-        } else {
-            lv_label_set_text(indicator, "");
+        const char* attrs[] = {
+            "check_text",
+            (is_active && check_codepoint) ? check_codepoint : "",
+            nullptr,
+        };
+        auto* row =
+            static_cast<lv_obj_t*>(lv_xml_create(printer_list, "printer_switch_row", attrs));
+        if (!row) {
+            continue;
         }
-        lv_obj_remove_flag(indicator, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_add_flag(indicator, LV_OBJ_FLAG_EVENT_BUBBLE);
-
-        // Printer name label
-        lv_obj_t* label = lv_label_create(row);
-        lv_label_set_text(label, name.c_str());
-        lv_obj_set_flex_grow(label, 1);
-        lv_label_set_long_mode(label, LV_LABEL_LONG_MODE_DOTS);
-        lv_obj_set_style_text_font(label, body_font, 0);
-        lv_obj_set_style_text_color(label, text_color, 0);
-        lv_obj_remove_flag(label, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_add_flag(label, LV_OBJ_FLAG_EVENT_BUBBLE);
+        helix::ui::set_row_label_text(row, "printer_name", name.c_str());
 
         // Store printer ID for click handler
         lv_obj_set_name(row, id.c_str());
@@ -164,11 +116,16 @@ void PrinterSwitchMenu::handle_add_printer() {
 }
 
 void PrinterSwitchMenu::dispatch_switch_action(MenuAction action, const std::string& printer_id) {
+    // The switch below is queued, so it has not run when the menu closes.
+    if (action != MenuAction::CANCELLED) {
+        drop_held_connection_failed();
+    }
     auto callback = switch_callback_;
     hide(); // Safe: uses lv_obj_delete_async internally
 
     if (callback) {
-        helix::ui::queue_update([callback, action, printer_id]() { callback(action, printer_id); });
+        helix::ui::queue_update("PrinterSwitchMenu::dispatch_switch_action",
+                                [callback, action, printer_id]() { callback(action, printer_id); });
     }
 }
 

@@ -143,7 +143,7 @@ void ui_button_init() {
     spdlog::debug("[ui_button] Registered semantic button widget");
 }
 
-void ui_icon_register_widget() {
+void helix::ui::icon::register_widget() {
     lv_xml_register_widget("icon", ui_icon_xml_create, ui_icon_xml_apply);
     spdlog::trace("[Icon] Font-based icon widget registered with XML system");
 }

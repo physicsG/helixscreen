@@ -3,7 +3,6 @@
 
 #include "ui_filament_runout_handler.h"
 
-#include "ui_nav_manager.h"
 #include "ui_resume_dispatch.h"
 #include "ui_update_queue.h"
 
@@ -80,18 +79,14 @@ void FilamentRunoutHandler::check_and_show_runout_guidance() {
     // has_real_runout() so an intentionally-empty AMS lane (e.g. head 1 left
     // unloaded for a multi-color print) doesn't pop guidance when the print is
     // paused for an unrelated reason. A loaded lane that lost filament still
-    // counts. (Snapmaker U1 false-alarm fix.)
+    // counts.
     if (sensor_mgr.has_real_runout()) {
-        // Auto-recover-on-pause was previously gated on `motion=false AND
-        // port=true` but field testing exposed two failure modes: (a) the
-        // "port=true" signal alone doesn't prove filament reached the
-        // extruder gear (e.g., Snapmaker assist motor pre-loads to ~4
-        // inches short of the toolhead and stops); (b) firmware load
-        // macros (AUTO_FEEDING/MANUAL_FEEDING) silently no-op outside an
-        // active print, so the recovery chain can't actually move filament
-        // either. Net result: silent air-prints. Pulled until we have a
-        // verified detection signal AND a recovery path that observably
-        // moves filament. Modal-driven Resume (user-initiated) still uses
+        // A runout during pause always asks the user; nothing recovers on its
+        // own. A lane sensor reporting filament does not prove it reached the
+        // extruder gear (the Snapmaker assist motor stops a few inches short
+        // of the toolhead), and firmware load macros (AUTO_FEEDING /
+        // MANUAL_FEEDING) no-op outside an active print, so an automatic
+        // recovery would air-print. The modal's Resume goes through
         // backend->prepare_for_resume.
         spdlog::info(
             "[FilamentRunoutHandler] Runout detected during pause - showing guidance modal");
@@ -144,8 +139,8 @@ void FilamentRunoutHandler::show_runout_guidance_modal() {
             int present =
                 lv_subject_get_int(AmsState::instance().get_active_tool_port_present_subject());
             runout_modal_.set_resume_blocked(present == 0);
-            // Static singleton subject → plain ObserverGuard, no SubjectLifetime.
-            port_present_observer_ = helix::ui::observe_int_sync<FilamentRunoutHandler>(
+            // AmsState frees the subject in deinit_subjects(); hold its lifetime.
+            port_present_observer_ = helix::ui::observe<int>(
                 AmsState::instance().get_active_tool_port_present_subject(), this,
                 [](FilamentRunoutHandler* self, int port_present) {
                     // Only gate while still on an auto-feed runout modal.
@@ -213,8 +208,8 @@ void FilamentRunoutHandler::show_runout_guidance_modal() {
         spdlog::info("[FilamentRunoutHandler] User chose to cancel print after runout");
         // Shared with the home Filament tile's paused modal, which offers the
         // same button. Raises the same confirmation the Stop button does and
-        // sends nothing until the user accepts — this dialog used to cancel on
-        // the first tap, alone among the printer's three cancel affordances.
+        // sends nothing until the user accepts, like every other cancel
+        // affordance on the printer.
         //
         // This dialog stays up behind the confirmation so declining returns to
         // it; closing it is the confirmed path's job. Without that the decline
@@ -254,18 +249,18 @@ void FilamentRunoutHandler::show_runout_guidance_modal() {
     }
 
     // Auto-close when the runout resolves EXTERNALLY. get_any_runout_subject() is
-    // int: 1=runout, 0=clear. observe_int_sync fires its INITIAL read the moment
+    // int: 1=runout, 0=clear. observe<int> fires its INITIAL read the moment
     // it's installed and again on every change — and the sensor can momentarily
     // read 0 during its startup-grace window (e.g. right after a UI restart),
-    // which previously closed the modal immediately (#991). Guards, in order:
+    // which must not close the modal (#991). Guards, in order:
     //   - value==1: latch a confirmed active runout for THIS modal (never closes)
     //   - startup-grace window: ignore (sensor not yet stabilized)
     //   - require runout_confirmed_active_: only a genuine confirmed runout→clear
     //     transition observed while this modal is up may auto-close
     //   - !user_took_manual_action_: user managing it in-dialog suppresses close
-    // observe_int_sync defers to the main thread; hiding here mirrors the
+    // observe<int> defers to the main thread; hiding here mirrors the
     // existing on_print_state_changed close path (precedent-safe).
-    runout_cleared_observer_ = helix::ui::observe_int_sync<FilamentRunoutHandler>(
+    runout_cleared_observer_ = helix::ui::observe<int>(
         helix::FilamentSensorManager::instance().get_any_runout_subject(), this,
         [](FilamentRunoutHandler* self, int any_runout) {
             if (any_runout != 0) {
@@ -287,7 +282,8 @@ void FilamentRunoutHandler::show_runout_guidance_modal() {
             spdlog::info(
                 "[FilamentRunoutHandler] Runout cleared externally — auto-closing guidance modal");
             self->hide_runout_guidance_modal();
-        });
+        },
+        helix::FilamentSensorManager::instance().get_subjects_lifetime());
 }
 
 // ============================================================================
@@ -331,10 +327,11 @@ void FilamentRunoutHandler::dispatch_unload() {
     // reachable in exactly that state (#995).
     bool loaded = false;
     if (backend) {
-        loaded = helix::ui::unload_target_is_loaded(slot, backend->slot_is_actively_loaded(slot),
-                                                    backend->slot_has_filament_at_toolhead(slot),
-                                                    /*is_current_slot=*/true,
-                                                    backend->get_system_info().filament_loaded);
+        loaded = helix::ui::unload_target_is_loaded(
+            slot, backend->slot_is_actively_loaded(slot),
+            backend->slot_has_filament_at_toolhead(slot),
+            /*is_current_slot=*/true, backend->get_system_info().filament_loaded,
+            backend->toolhead_filament_unaccounted().value_or(false));
     }
 
     helix::ui::execute_filament_unload(backend, slot, loaded, "[FilamentRunoutHandler]");
@@ -347,8 +344,7 @@ void FilamentRunoutHandler::dispatch_unload() {
 void FilamentRunoutHandler::dispatch_purge() {
     spdlog::info("[FilamentRunoutHandler] User chose to purge after runout");
     // Same shared two-tier ladder (configured PURGE macro, then raw gcode) the
-    // home Filament tile uses — execute_filament_purge() was extracted from the
-    // body that used to live here.
+    // home Filament tile uses.
     helix::ui::execute_filament_purge("[FilamentRunoutHandler]");
 }
 

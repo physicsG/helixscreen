@@ -3,6 +3,8 @@
 
 #include "display_metrics.h"
 
+#include "text_io.h"
+
 #include <algorithm>
 #include <cmath>
 
@@ -172,7 +174,7 @@ std::string DisplayMetrics::scaled_font_name(const std::string& font_name, doubl
         return font_name;
     }
 
-    const int authored = std::stoi(digits);
+    const int authored = text_io::parse_leading<int>(digits).value_or(0);
     const auto target = static_cast<double>(authored) * scale;
 
     for (const auto& family : kFontFamilies) {

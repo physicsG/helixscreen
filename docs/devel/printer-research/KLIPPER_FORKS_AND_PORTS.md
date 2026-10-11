@@ -255,7 +255,7 @@ different the target is from Moonraker, **not** with our codebase size:
   synthesize `notify_status_update` since the push model is baked into
   `PrinterState`, (b) translating SDCP's numeric cmd codes ↔ our gcode/object
   expectations, and (c) graceful no-op for Moonraker-only features
-  (`server.database.*`, the custom `server.helix.phase_tracking.*` plugin).
+  (`server.database.*`, the custom `server.helix.print_modified` plugin).
 - Plus, for a **vendor** protocol (not a clean SDCP impl), the real cost is
   up-front **reverse-engineering of an undocumented/closed wire format** — that
   bound is the vendor's protocol, not our code.
@@ -334,7 +334,7 @@ display**, pinned by version and SHA in its installer. Community ports are not
 only a compatibility burden — some of them are downstream distributors, and a
 parser gap here surfaced as an empty panel on every one of their installs.
 
-Details and the full field mapping: `../printers/CREALITY_K2_SUPPORT.md`
+Details and the full field mapping: `CREALITY_CFS_K2_INTERNALS.md`
 § "Community Kalico port".
 
 ---

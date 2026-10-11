@@ -11,7 +11,7 @@ There are two related fan screens:
 | Screen | Where | What it does |
 |--------|-------|--------------|
 | **Fan Control** | **Controls** panel — tap the cooling/fans card | Live speed control with animated dials |
-| **Fan Settings** | **Settings > Hardware & Devices > Fans** | List of all fans, used mainly for renaming |
+| **Fan Settings** | **Settings > Devices > Fans** | List of all fans, used mainly for renaming |
 
 The Fan Control overlay is also reached from the fan widget on the Home dashboard and from the print status screen.
 
@@ -53,7 +53,7 @@ Open it from the **Controls** panel by tapping the cooling/fans card. Fans are s
 
 Klipper fan names like `fan_generic exhaust_fan` aren't always friendly. You can give any fan a custom display name:
 
-**From the Fan Settings overlay** (Settings > Hardware & Devices > Fans):
+**From the Fan Settings overlay** (Settings > Devices > Fans):
 
 1. Tap a fan row in the list.
 2. Enter a new name in the dialog.

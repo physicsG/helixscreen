@@ -18,14 +18,10 @@
  * @brief Modal dialog for displaying Klipper action:prompt messages
  *
  * Displays interactive prompts from Klipper macros with dynamic buttons.
- * Buttons can be styled with different colors and grouped for layout.
+ * Buttons can be styled with different colors; each button group gets its own row.
  *
- * ## Integration Note
- * The component must be registered in main.cpp before use:
- * @code
- * lv_xml_register_component_from_file("action_prompt_modal",
- *     "ui_xml/action_prompt_modal.xml");
- * @endcode
+ * The action_prompt_modal and action_prompt_button_row components are
+ * registered in src/xml_registration.cpp.
  *
  * ## Usage:
  * @code
@@ -75,6 +71,12 @@ class ActionPromptModal : public Modal {
     bool show_prompt(lv_obj_t* parent, const PromptData& data);
 
     /**
+     * @brief Show a one-shot prompt whose instance the modal stack owns and frees on close
+     * @return true if shown; on failure the instance is freed
+     */
+    static bool show_owned_prompt(lv_obj_t* parent, const PromptData& data);
+
+    /**
      * @brief Set callback for when a button is clicked
      *
      * The callback receives the gcode string associated with the button.
@@ -83,6 +85,16 @@ class ActionPromptModal : public Modal {
      * @param callback Function to send gcode to printer
      */
     void set_gcode_callback(GcodeCallback callback);
+
+    /**
+     * @brief Callback for a close the owner did not ask for
+     *
+     * Fires from on_hide() for a button tap, backdrop tap, ESC or any other
+     * close that is not the owner's own hide(), saying which kind it was.
+     * It runs synchronously inside Modal::hide(), so it must not show a modal.
+     */
+    using DismissCallback = std::function<void(PromptCloseKind kind)>;
+    void set_dismiss_callback(DismissCallback callback);
 
     // Modal interface
     [[nodiscard]] const char* get_name() const override {
@@ -116,6 +128,8 @@ class ActionPromptModal : public Modal {
     // === State ===
     PromptData prompt_data_;
     GcodeCallback gcode_callback_;
+    DismissCallback dismiss_callback_;
+    bool button_sent_gcode_ = false;
 
     // === Dynamic button tracking ===
     std::vector<lv_obj_t*> created_buttons_;
@@ -129,8 +143,8 @@ class ActionPromptModal : public Modal {
     /**
      * @brief Create a single button inside @p container.
      *
-     * @param equal_width When true (>= 4 regular buttons whose labels all fit an
-     *        even share of the row) the button is laid out as an equal-width flex
+     * @param equal_width When true (>= 4 buttons in the row whose labels all fit
+     *        an even share of it) the button is laid out as an equal-width flex
      *        cell (grow=1, width 0) so several short labels share one
      *        non-wrapping row. When false the legacy content-sized layout is
      *        used, which row_wrap then spreads over as many lines as the labels
@@ -159,12 +173,11 @@ class ActionPromptModal : public Modal {
  * this toast would leave the failure with no surface at all. See
  * include/rpc_error_policy.h.
  *
- * Safe to call from the WebSocket background thread - the notification layer
- * marshals to the main thread itself.
+ * Main thread only: it shows a toast.
  *
  * @param error_message Klipper's message from the failed RPC (MoonrakerError::
- *                      user_message()). Empty falls back to a generic string so
- *                      the toast is never blank.
+ *                      localized_message()). Empty falls back to a generic string
+ *                      so the toast is never blank.
  */
 void report_action_prompt_gcode_failure(const std::string& error_message);
 

@@ -1,0 +1,1132 @@
+{
+  "active_printer_id": "printer-3",
+  "boot_connect_hold": false,
+  "boot_crash_streak": 0,
+  "config_version": 27,
+  "dark_mode": true,
+  "display": {
+    "bed_mesh_render_mode": 0,
+    "dim_brightness": 30,
+    "dim_sec": 600,
+    "drm_device": "",
+    "gcode_render_mode": 0,
+    "gpu_3d_blocked": false,
+    "gpu_blur_blocked": false,
+    "sleep_sec": 1200
+  },
+  "gcode_viewer": {
+    "shading_model": "phong",
+    "tube_sides": 4
+  },
+  "input": {
+    "calibration": {
+      "a": 1.0,
+      "b": 0.0,
+      "c": 0.0,
+      "d": 0.0,
+      "e": 1.0,
+      "f": 0.0,
+      "valid": false
+    },
+    "jitter_threshold": 5,
+    "scroll_limit": 10,
+    "scroll_throw": 35,
+    "touch_device": ""
+  },
+  "log_path": "/tmp/helixscreen.log",
+  "motion": {
+    "jog_mode": 1
+  },
+  "printers": {
+    "default": {
+      "default_macros": {
+        "cooldown": "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=0\nSET_HEATER_TEMPERATURE HEATER=heater_bed TARGET=0",
+        "load_filament": {
+          "gcode": "LOAD_FILAMENT",
+          "label": "Load"
+        },
+        "macro_1": {
+          "gcode": "HELIX_CLEAN_NOZZLE",
+          "label": "Clean Nozzle"
+        },
+        "macro_2": {
+          "gcode": "HELIX_BED_MESH_IF_NEEDED",
+          "label": "Bed Level"
+        },
+        "unload_filament": {
+          "gcode": "UNLOAD_FILAMENT",
+          "label": "Unload"
+        }
+      },
+      "extra_sensors": {},
+      "fans": {
+        "chamber": "",
+        "exhaust": "",
+        "hotend": "heater_fan hotend_fan",
+        "part": "fan"
+      },
+      "hardware": {
+        "expected": [],
+        "last_snapshot": {},
+        "optional": []
+      },
+      "heaters": {
+        "bed": "heater_bed",
+        "hotend": "extruder"
+      },
+      "leds": {
+        "auto_paired_bases": [
+          "SET_LOGO_LEDS",
+          "SET_NOZZLE_LEDS"
+        ],
+        "color_presets": [
+          "#FF4444",
+          "#FF6B35",
+          "#66BB6A",
+          "#00BCD4",
+          "#2962FF",
+          "#9C27B0",
+          "#FF4081"
+        ],
+        "last_brightness": 100,
+        "last_color": "#FFFFFF",
+        "last_white": 0.0,
+        "led_on_at_start": false,
+        "macro_devices": [
+          {
+            "name": "Set Logo LEDs",
+            "off_macro": "RRRRRRRRRRRRRRRRR",
+            "on_macro": "RRRRRRRRRRRRRRRR",
+            "presets": [],
+            "toggle_macro": "",
+            "type": "on_off"
+          },
+          {
+            "name": "Set Nozzle LEDs",
+            "off_macro": "RRRRRRRRRRRRRRRRRRR",
+            "on_macro": "RRRRRRRRRRRRRRRRRR",
+            "presets": [],
+            "toggle_macro": "",
+            "type": "on_off"
+          }
+        ],
+        "selected": [],
+        "startup_brightness": 80,
+        "strip": ""
+      },
+      "moonraker_api_key": false,
+      "moonraker_host": "RRRRRRRRRRRRR",
+      "moonraker_port": 7125,
+      "panel_widgets": {
+        "home": {
+          "grid": "12x8",
+          "main_page_index": 0,
+          "next_page_id": 1,
+          "pages": [
+            {
+              "id": "main",
+              "widgets": [
+                {
+                  "col": 0,
+                  "colspan": 4,
+                  "enabled": true,
+                  "id": "printer_image",
+                  "row": 0,
+                  "rowspan": 4
+                },
+                {
+                  "col": 0,
+                  "colspan": 4,
+                  "enabled": true,
+                  "id": "print_status",
+                  "row": 4,
+                  "rowspan": 4
+                },
+                {
+                  "col": -1,
+                  "colspan": 4,
+                  "enabled": false,
+                  "id": "tips",
+                  "row": -1,
+                  "rowspan": 4
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "shutdown",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "lock",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "power_device",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "network",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "firmware_restart",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "tool_switcher",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": 10,
+                  "colspan": 2,
+                  "enabled": true,
+                  "id": "led",
+                  "row": 6,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "led_controls",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": 8,
+                  "colspan": 2,
+                  "enabled": true,
+                  "id": "fan_stack",
+                  "row": 6,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "fan",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": 6,
+                  "colspan": 2,
+                  "enabled": true,
+                  "id": "temperature",
+                  "row": 6,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "nozzle_temps",
+                  "row": -1,
+                  "rowspan": 4
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "chamber_temperature",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "temp_stack",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "thermistor",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 4,
+                  "enabled": false,
+                  "id": "temp_graph",
+                  "row": -1,
+                  "rowspan": 4
+                },
+                {
+                  "col": -1,
+                  "colspan": 6,
+                  "enabled": false,
+                  "id": "preheat",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "ams",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "bypass",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "active_spool",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "filament",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "humidity",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "width_sensor",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "favorite_macro",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "macros",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "motion",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 4,
+                  "enabled": false,
+                  "id": "clock",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 4,
+                  "enabled": false,
+                  "id": "control_buttons",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 4,
+                  "enabled": false,
+                  "id": "job_queue",
+                  "row": -1,
+                  "rowspan": 4
+                },
+                {
+                  "col": -1,
+                  "colspan": 4,
+                  "enabled": false,
+                  "id": "clog_detection",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 4,
+                  "enabled": false,
+                  "id": "print_stats",
+                  "row": -1,
+                  "rowspan": 4
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "gcode_console",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": 10,
+                  "colspan": 2,
+                  "enabled": true,
+                  "id": "notifications",
+                  "row": 4,
+                  "rowspan": 2
+                },
+                {
+                  "col": 8,
+                  "colspan": 2,
+                  "enabled": true,
+                  "id": "bed_temperature",
+                  "row": 4,
+                  "rowspan": 2
+                },
+                {
+                  "col": 4,
+                  "colspan": 8,
+                  "enabled": true,
+                  "id": "temp_graph:1",
+                  "row": 0,
+                  "rowspan": 4
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "printer_name": "Voron 2.4",
+      "temp_sensors": {
+        "bed": "heater_bed",
+        "hotend": "extruder"
+      },
+      "type": "Voron 2.4"
+    },
+    "printer-2": {
+      "fans": {
+        "part": "fan_generic fanM106"
+      },
+      "leds": {
+        "auto_paired_bases": [
+          "LED"
+        ],
+        "color_presets": [
+          "#FF4444",
+          "#FF6B35",
+          "#66BB6A",
+          "#00BCD4",
+          "#2962FF",
+          "#9C27B0",
+          "#FF4081"
+        ],
+        "last_brightness": 100,
+        "last_color": "#FFFFFF",
+        "last_white": 0.0,
+        "led_on_at_start": false,
+        "macro_devices": [
+          {
+            "name": "LED",
+            "off_macro": "RRRRRRR",
+            "on_macro": "RRRRRR",
+            "presets": [],
+            "toggle_macro": "",
+            "type": "on_off"
+          }
+        ],
+        "startup_brightness": 80
+      },
+      "moonraker_host": "RRRRRRRRRRRR",
+      "moonraker_port": 7125,
+      "panel_widgets": {
+        "home": {
+          "grid": "12x8",
+          "main_page_index": 0,
+          "next_page_id": 1,
+          "pages": [
+            {
+              "id": "main",
+              "widgets": [
+                {
+                  "col": 0,
+                  "colspan": 4,
+                  "enabled": true,
+                  "id": "printer_image",
+                  "row": 0,
+                  "rowspan": 4
+                },
+                {
+                  "col": 0,
+                  "colspan": 4,
+                  "enabled": true,
+                  "id": "print_status",
+                  "row": 4,
+                  "rowspan": 4
+                },
+                {
+                  "col": 4,
+                  "colspan": 4,
+                  "enabled": true,
+                  "id": "tips",
+                  "row": 0,
+                  "rowspan": 4
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "shutdown",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "lock",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "power_device",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "network",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "firmware_restart",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "tool_switcher",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": 10,
+                  "colspan": 2,
+                  "enabled": true,
+                  "id": "led",
+                  "row": 6,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "led_controls",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": 8,
+                  "colspan": 2,
+                  "enabled": true,
+                  "id": "fan_stack",
+                  "row": 6,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "fan",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": 6,
+                  "colspan": 2,
+                  "enabled": true,
+                  "id": "temperature",
+                  "row": 6,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "nozzle_temps",
+                  "row": -1,
+                  "rowspan": 4
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "chamber_temperature",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "temp_stack",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "thermistor",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 4,
+                  "enabled": false,
+                  "id": "temp_graph",
+                  "row": -1,
+                  "rowspan": 4
+                },
+                {
+                  "col": -1,
+                  "colspan": 6,
+                  "enabled": false,
+                  "id": "preheat",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "ams",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "bypass",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "active_spool",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": 4,
+                  "colspan": 2,
+                  "enabled": true,
+                  "id": "filament",
+                  "row": 6,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "humidity",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "width_sensor",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "favorite_macro",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "macros",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "motion",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 4,
+                  "enabled": false,
+                  "id": "clock",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 4,
+                  "enabled": false,
+                  "id": "control_buttons",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 4,
+                  "enabled": false,
+                  "id": "job_queue",
+                  "row": -1,
+                  "rowspan": 4
+                },
+                {
+                  "col": -1,
+                  "colspan": 4,
+                  "enabled": false,
+                  "id": "clog_detection",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "filament_buffer",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 4,
+                  "enabled": false,
+                  "id": "print_stats",
+                  "row": -1,
+                  "rowspan": 4
+                },
+                {
+                  "col": -1,
+                  "colspan": 4,
+                  "enabled": false,
+                  "id": "gcode_console",
+                  "row": -1,
+                  "rowspan": 4
+                },
+                {
+                  "col": 10,
+                  "colspan": 2,
+                  "enabled": true,
+                  "id": "notifications",
+                  "row": 4,
+                  "rowspan": 2
+                },
+                {
+                  "col": 8,
+                  "colspan": 2,
+                  "enabled": true,
+                  "id": "bed_temperature",
+                  "row": 4,
+                  "rowspan": 2
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "printer_name": "AD5M",
+      "type": "FlashForge Adventurer 5M Pro (ForgeX)"
+    },
+    "printer-3": {
+      "moonraker_host": "RRRRRRRRRRRRR",
+      "moonraker_port": 7125,
+      "panel_widgets": {
+        "home": {
+          "anchors": "pending",
+          "main_page_index": 0,
+          "next_page_id": 1,
+          "pages": [
+            {
+              "id": "main",
+              "widgets": [
+                {
+                  "col": 0,
+                  "colspan": 4,
+                  "enabled": true,
+                  "id": "printer_image",
+                  "row": 0,
+                  "rowspan": 4
+                },
+                {
+                  "col": 0,
+                  "colspan": 4,
+                  "enabled": true,
+                  "id": "print_status",
+                  "row": 4,
+                  "rowspan": 4
+                },
+                {
+                  "col": 4,
+                  "colspan": 4,
+                  "enabled": true,
+                  "id": "tips",
+                  "row": 0,
+                  "rowspan": 4
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "shutdown",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "lock",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "power_device",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "network",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "firmware_restart",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "tool_switcher",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": true,
+                  "id": "led",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "led_controls",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": true,
+                  "id": "fan_stack",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "fan",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": true,
+                  "id": "temperature",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "nozzle_temps",
+                  "row": -1,
+                  "rowspan": 4
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "chamber_temperature",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "temp_stack",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "thermistor",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 4,
+                  "enabled": false,
+                  "id": "temp_graph",
+                  "row": -1,
+                  "rowspan": 4
+                },
+                {
+                  "col": -1,
+                  "colspan": 6,
+                  "enabled": false,
+                  "id": "preheat",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "ams",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "bypass",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "active_spool",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": true,
+                  "id": "filament",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "humidity",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "width_sensor",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "favorite_macro",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "macros",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "motion",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 4,
+                  "enabled": false,
+                  "id": "clock",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 4,
+                  "enabled": false,
+                  "id": "control_buttons",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 4,
+                  "enabled": false,
+                  "id": "job_queue",
+                  "row": -1,
+                  "rowspan": 4
+                },
+                {
+                  "col": -1,
+                  "colspan": 4,
+                  "enabled": false,
+                  "id": "clog_detection",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": false,
+                  "id": "filament_buffer",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 4,
+                  "enabled": false,
+                  "id": "print_stats",
+                  "row": -1,
+                  "rowspan": 4
+                },
+                {
+                  "col": -1,
+                  "colspan": 4,
+                  "enabled": false,
+                  "id": "gcode_console",
+                  "row": -1,
+                  "rowspan": 4
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": true,
+                  "id": "notifications",
+                  "row": -1,
+                  "rowspan": 2
+                },
+                {
+                  "col": -1,
+                  "colspan": 2,
+                  "enabled": true,
+                  "id": "bed_temperature",
+                  "row": -1,
+                  "rowspan": 2
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "show_printer_switcher": false
+  },
+  "switch_previous_printer_id": "printer-2",
+  "switch_restart_fallbacks": 18,
+  "switch_restart_streak": 0,
+  "theme": {
+    "preset": 0
+  },
+  "ui": {}
+}

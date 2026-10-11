@@ -37,6 +37,8 @@ void IndexedSubjectPool::ensure_size(size_t n) {
 
         if (type_ == Type::Int) {
             lv_subject_init_int(subject.get(), 0);
+        } else if (type_ == Type::Color) {
+            lv_subject_init_color(subject.get(), lv_color_hex(0));
         } else {
             auto buf = std::make_unique<char[]>(string_cap_);
             lv_subject_init_string(subject.get(), buf.get(), nullptr, string_cap_, "");
@@ -51,6 +53,11 @@ void IndexedSubjectPool::ensure_size(size_t n) {
 void IndexedSubjectPool::set_int(size_t i, int v) {
     assert(type_ == Type::Int);
     lv_subject_set_int(subjects_.at(i).get(), v);
+}
+
+void IndexedSubjectPool::set_color(size_t i, uint32_t rgb) {
+    assert(type_ == Type::Color);
+    lv_subject_set_color(subjects_.at(i).get(), lv_color_hex(rgb));
 }
 
 void IndexedSubjectPool::set_string(size_t i, const std::string& v) {

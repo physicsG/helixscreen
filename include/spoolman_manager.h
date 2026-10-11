@@ -6,6 +6,7 @@
 #include "ui_observer_guard.h"
 
 #include "filament_display_name.h"
+#include "lane_source_store.h"
 #include "lvgl/lvgl.h"
 #include "spoolman_types.h"
 
@@ -15,6 +16,10 @@
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
+
+namespace helix {
+class AmsBackend;
+} // namespace helix
 
 class IMoonrakerAPI;
 
@@ -31,13 +36,15 @@ class IMoonrakerAPI;
  * - Print state observer to auto-refresh weights on print start/end/pause
  * - Spoolman availability observer to auto-stop polling when Spoolman disappears
  * - The transient Spoolman **identity** cache (see below)
+ * - Each fetched spool record, filed as its lane's Spoolman record
+ *   (`file_spool_on_lane()`)
  *
  * @note The charter used to be "polling + circuit breaker, holds no spool data".
  *       It is deliberately wider now: this class also owns a per-`spool_id`
  *       cache of `helix::SpoolIdentity` (vendor / filament name / material).
  *       That data lives here rather than on `SlotInfo` on purpose — the weight
- *       poll writes slots with `persist=false` to break a G-code feedback loop
- *       (see the comment in `refresh_spoolman_weights()`), and the
+ *       poll files lane records and never writes a slot (a slot write would
+ *       restate identity to firmware and loop the poll), and the
  *       firmware-vs-override merge in `docs/devel/FILAMENT_SLOT_METADATA.md` §5
  *       is a clean two-way that a third writer would make ambiguous. Keeping
  *       identity in a side channel is the quarantine.
@@ -74,6 +81,22 @@ class SpoolmanManager {
     void set_api(IMoonrakerAPI* api);
 
     void refresh_spoolman_weights();
+
+    /**
+     * @brief Fetch one linked spool now, outside the poll's pacing
+     *
+     * A save the user just made is the one moment a lane's Spoolman record is
+     * known stale, and the poll would leave it that way for up to its interval.
+     * This is one request per slot linked to @p spool_id, so it is not gated on
+     * the poll timer, the debounce or the circuit breaker, and it does not
+     * write the debounce clock: none of those pace a single deliberate read.
+     *
+     * A spool linked on two lanes is fetched for both.
+     *
+     * @param spool_id Spoolman spool id; <= 0 and an unresolvable id do nothing
+     */
+    static void refresh_spool(int spool_id);
+
     void start_spoolman_polling();
     void stop_spoolman_polling();
 
@@ -89,6 +112,18 @@ class SpoolmanManager {
      * again from the availability observer when Spoolman appears.
      */
     void ensure_poll_timer();
+
+    /**
+     * @brief Issue one slot's spool fetch and file the answer
+     *
+     * One fetch does the same thing whoever asked for it: the request, the
+     * not-found drop, the filing onto the lane and the slot, and the circuit
+     * breaker's failure count. The poll walks every linked slot through here;
+     * refresh_spool() walks the slots linked to one id.
+     *
+     * Called with mutex_ held, which is what makes api_ safe to read.
+     */
+    void fetch_linked_slot(int backend_index, int slot_index, int spoolman_id);
 
   public:
     // ========================================================================
@@ -124,6 +159,45 @@ class SpoolmanManager {
      *         refresh_spoolman_weights(), which this deliberately runs before.
      */
     static bool cache_identity(const SpoolInfo& spool);
+
+    /**
+     * @brief File a fetched spool record as a lane's Spoolman record
+     *
+     * Replaces that record whole, so a field the newest record leaves unstated
+     * stops outranking the lane's other sources, and refiling an unchanged
+     * record changes nothing.
+     *
+     * Identity comes from helix::ams::spool_identity_observation(). The weights are filed
+     * only when Spoolman holds an initial weight. Spoolman owns the remaining
+     * weight of a spool it is linked on: resolve() ranks this record's weight
+     * above the meter's, so the backend's own firmware meter keeps filing
+     * Metered without the two fighting over the displayed number.
+     *
+     * Touches no manager state, so it needs no instance and no lock.
+     *
+     * @param lane The lane the spool is linked on
+     * @param spool The record Spoolman returned
+     * @return true when the lane's Spoolman record differs from the one it held
+     *         before, which is what makes the lane's slots worth repainting
+     */
+    static bool file_spool_on_lane(helix::ams::LaneId lane, const SpoolInfo& spool);
+
+    /**
+     * @brief File @p spool on a slot's lane and carry a changed lane onward.
+     *
+     * The poll's own step, so a caller holding a fresh spool does what a fetch
+     * does: the lane record, then the slot's stored record, the backend's
+     * cached slot and the slot's subjects. A filing that changes nothing stops
+     * at the lane.
+     *
+     * @param owner         The backend holding the slot
+     * @param backend_index Its index in AmsState
+     * @param slot_index    Slot the spool is linked on (0-based, global)
+     * @param spool         The record Spoolman returned
+     * @return whether the lane's Spoolman record changed
+     */
+    static bool apply_fetched_spool(helix::AmsBackend& owner, int backend_index, int slot_index,
+                                    const SpoolInfo& spool);
 
     /// Mark a spool id as unresolvable (Spoolman answered "no such spool").
     static void note_identity_unresolvable(int spool_id);

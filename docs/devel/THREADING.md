@@ -80,20 +80,36 @@ helix::ui::queue_update(std::move(data), [](MyData* d) {
 });
 ```
 
-`UpdateQueue` is a mutex-protected `std::queue<std::function>`. Lambdas are enqueued from any
-thread and drained on the main thread at the **start** of each `lv_timer_handler()` cycle,
-before rendering:
+`UpdateQueue` is a mutex-protected queue of tagged callbacks (`std::queue<TaggedCallback>`). Lambdas are enqueued from any
+thread and drained on the main thread by an LVGL timer that `UpdateQueue::init()` creates with
+LVGL's default refresh period, `LV_DEF_REFR_PERIOD` (33 ms)
+(`include/ui_update_queue.h#UpdateQueue/init/"LV_DEF_REFR_PERIOD"`), the period LVGL gives the
+display refresh timer (`lib/lvgl/src/display/lv_display.c#lv_display_create/"LV_DEF_REFR_PERIOD"`).
+One pass of `src/application/application.cpp#main_loop`:
 
 ```
-1. UpdateQueue::process_pending()  ← drains all queued lambdas (1 ms LVGL timer)
-2. LVGL timers (input polling, animations)
-3. process_notifications()         ← dequeue Moonraker JSON
-4. lv_refr_now()                   ← render to framebuffer
+1. process_notifications()   ← dequeue Moonraker JSON
+2. lv_timer_handler()        ← runs every LVGL timer whose period has elapsed:
+     UpdateQueue::process_pending()   drains all queued lambdas, once per period
+     display refresh timer            renders invalidated widgets
+     input reads, animations, the rest
+3. sleep until the next timer is due (5 ms floor, 33 ms cap while the display is awake)
 ```
 
-**Why not LVGL's native `lv_async_call()`?** It can fire *during* the render phase, causing
-the same assertion failure. `queue_update()` runs before rendering, so every subject value is
-current when widgets draw.
+The period is not shorter because the drain timer sets how often an idle loop wakes:
+`lv_timer_handler()` returns the time until the soonest timer and the loop sleeps that long, so
+a sub-frame drain period holds an idle loop at its 5 ms floor
+(`tests/unit/test_update_queue.cpp#"drain timer does not wake the main loop faster than a frame"`).
+A lambda waits up to one period for its drain, and a render can land in between. What the
+queue guarantees is serialization: the drain runs inside the same timer walk as rendering, so a
+queued `lv_subject_set_*()` never interleaves with a render in progress. Do not write code that
+depends on which of the two runs first in a given pass.
+
+**Why not LVGL's native `lv_async_call()`?** It does not cross threads. It creates a one-shot
+LVGL timer (`lib/lvgl/src/misc/lv_async.c#lv_async_call`), and `lv_timer_create()` links it
+into LVGL's timer list without taking the LVGL lock
+(`lib/lvgl/src/misc/lv_timer.c#lv_timer_create`), so a background thread calling it races the
+main thread's timer walk.
 
 ### When you need it
 
@@ -117,11 +133,11 @@ library, assume you are on a background thread.
 ```
 MAIN THREAD              LIBHV THREAD           UTILITY THREADS
 ─────────────            ─────────────          ───────────────
-lv_timer_handler()       libhv Event Loop       UpdateChecker
-  ├ process_pending()      ├ WebSocket conn     TelemetryManager
-  ├ LVGL timers            ├ JSON-RPC parse     CrashReporter
-  ├ process_notifs()       ├ Auto-reconnect     ───────────────
-  └ lv_refr_now()          └ HTTP transfers            │
+main_loop()              libhv Event Loop       UpdateChecker
+  ├ process_notifs()       ├ WebSocket conn     TelemetryManager
+  └ lv_timer_handler()     ├ JSON-RPC parse     CrashReporter
+     ├ process_pending()   ├ Auto-reconnect     ───────────────
+     └ display refresh     └ HTTP transfers            │
          ▲                        │                     │
          │                        │ queue_update(λ)     │ queue_update(λ)
          │                        ▼                     ▼
@@ -147,10 +163,14 @@ void WiFiManager::handle_scan_complete(const std::string& data) {
 
 ### Multi-backend coordination (AmsState)
 
-`AmsState` guards its `backends_` vector with a `std::recursive_mutex`. A backend emitting an
-event on a background thread acquires the mutex, reads backend state, then posts subject
-updates via `queue_update()`. Each backend's callback captures its index at registration time
-so events route to the correct per-backend subject storage.
+`AmsState`'s own state is main-thread only, with no lock: its methods assert
+`helix::ui::is_main_thread()`. A backend emitting an event on a background thread only posts a
+`queue_update()`; the queued body reads backend state and writes subjects on the main thread.
+Each backend's callback captures its index at registration time so events route to the
+correct per-backend subject storage. The queries background threads do make go to state with
+its own guard: `AmsBackendRegistry` (backend list, `std::mutex`, held across calls into a
+backend, so the order is registry -> `AmsBackend::mutex_`), `RunoutGrace` (unload grace, leaf
+mutex) and the action atomic.
 
 For secondary backends (index 1+), slot subjects live in `BackendSlotSubjects` structs rather
 than the flat `slot_colors_[]` / `slot_statuses_[]` arrays; `sync_backend(int)` and
@@ -167,7 +187,12 @@ modal/overlay/panel being dismissed before the callback fires. `AsyncLifetimeGua
 
 **Who has one already:**
 - `Modal` — `lifetime_` member; `hide()` calls `invalidate()` automatically
-- `OverlayBase` — `lifetime_` member; `cleanup()` / `on_deactivate()` call `invalidate()`
+- `PanelBase` and `OverlayBase` — both inherit two guards from `ViewLifecycleBase`
+  (`include/panel_lifecycle.h`). `lifetime_` is screen-scoped: every deactivation
+  invalidates it, so park work there whose result only matters while the view is on
+  screen. `object_lifetime_` is object-scoped: it survives deactivation and dies at
+  `cleanup()`/destruction, for work the view owes the machine rather than the screen
+  (an abort the printer must acknowledge, a settings write, a power-off handshake)
 - **Standalone classes** — declare your own: `helix::AsyncLifetimeGuard lifetime_;`
 
 ### Two correct forms
@@ -299,12 +324,46 @@ api->test([this, tok]() { ... });
   the owner
 - The destructor calls `invalidate()` automatically
 
+### A token guards the owner, never the widget: `WidgetRef`
+
+`AsyncLifetimeGuard` tokens, and `observe<int>`'s `weak_alive`, expire with their
+**owner**. A widget runs on a different clock: a raw `lv_obj_delete()` of the tree, a
+hot-reload rebuild, or a backdrop tap dismissing a modal frees it while the owner, and every
+token keyed on the owner, stays valid. A deferred callback that null-checks a cached raw
+`lv_obj_t*` member then walks freed memory with its guard reading "alive".
+
+Hold a cached widget as `helix::ui::WidgetRef` (`include/ui_widget_ref.h`). It listens for
+the widget's own `LV_EVENT_DELETE` and becomes `nullptr`, whichever path deleted it; assigning
+a new widget or `nullptr` unhooks the old one, and so does its destructor. It converts to
+`lv_obj_t*`, so call sites stay as they are, but null is still null: an LVGL setter handed a
+cleared handle crashes, so a path that can run after the widget dies checks it first. It
+neither copies nor moves (the hook carries its address), so it lives as a member or in a
+fixed-size array. `safe_delete_deferred()` takes one directly.
+
+A hand-written `LV_EVENT_DELETE` hook is still right when the delete has to do more than
+clear a pointer (drop rows, cancel a timer, clear a static owner). Raw `lv_obj_t*` members
+are ratcheted by `scripts/check_cached_widget_pointers.py`; opt out with
+`// WIDGET_PTR_OK: <reason>`.
+
+### One deferral form per job
+
+| Form | Use |
+|------|-----|
+| `object_lifetime_.defer(tag, fn)` / `lifetime_.defer(tag, fn)` | main thread, work bound to an object |
+| `guard.bg_cb(tag, fn)` | built on the main thread, handed to a background API; it defers and guards |
+| `queue_update(tag, fn)` | work bound to no object: singletons reached through `instance()`, process-wide UI such as `BusyOverlay`, work that must run even if its requester is gone |
+| `queue_widget_update(obj, fn)` / `queue_invalidate(obj)` | work bound to a widget, skipped once `lv_obj_is_valid()` fails |
+| `run_next_tick(token, fn)` / `run_next_tick(fn)` | needs LVGL's async list (outside the current event dispatch and outside the UpdateQueue batch) |
+
+`lv_async_call(` outside `include/ui_next_tick.h`, the `void*` `async_call`, and
+`helix::async::` are lint-gated in `tests/shell/test_code_lint.bats`; the opt-out is
+`// LV_ASYNC_OK: <reason>`.
+
 ### Deprecated — do not use in new code
 
 `shared_ptr<bool> callback_guard_` / `alive_guard_`, `shared_ptr<atomic<bool>> alive_`,
-`shared_ptr<atomic<uint64_t>>` generation counters, `weak_ptr<bool>` for callback safety, and
-`async_call(guard_widget, cb, data)` for modal/overlay guards. All replaced by
-`AsyncLifetimeGuard`.
+`shared_ptr<atomic<uint64_t>>` generation counters, and `weak_ptr<bool>` for callback
+safety. All replaced by `AsyncLifetimeGuard`.
 
 ---
 
@@ -318,11 +377,10 @@ event linked list → SIGSEGV in `lv_event_mark_deleted` (#776, #190, #80).
 `process_pending()`:
 
 - `helix::ui::queue_update(...)` / `ui_queue_update(...)` lambdas
-- `helix::ui::async_call(cb, ud)` — our wrapper, **not** LVGL's native call
 - `register_overlay_close_callback(...)` lambdas
 - `AsyncLifetimeGuard::defer(...)` / `lifetime_.defer(...)` lambdas
 - `LifetimeToken::defer(...)` / `tok.defer(...)` lambdas
-- `observe_int_sync` / `observe_string` callbacks (deferred through `queue_update` since #82)
+- `observe<int>` / `observe<const char*>` callbacks (deferred through `queue_update` since #82)
 
 **Banned APIs and their replacements:**
 
@@ -349,7 +407,7 @@ wrong; fix it.
 
 ```cpp
 // ❌ CRASH — sync deletion inside an UpdateQueue batch
-helix::ui::async_call([dialog]() {
+helix::ui::queue_update("close", [dialog]() {
     helix::ui::safe_delete(dialog);
 });
 
@@ -387,7 +445,8 @@ These genuinely run outside UpdateQueue batches:
   *structurally impossible* rather than merely time-shifted — the #983 teardown counterpart,
   for relayout racing the teardown of a grid during a modal close or panel rebuild.
 - `lv_obj_delete_async(obj)` — raw LVGL
-- `lv_async_call(cb, ud)` — raw LVGL, **not** our `helix::ui::async_call` wrapper
+- `helix::ui::run_next_tick(...)` (`include/ui_next_tick.h`), the one wrapper over raw
+  LVGL `lv_async_call`
 
 ---
 
@@ -503,16 +562,17 @@ factory.**
 // ❌ Token fetched, never handed to the observer
 SubjectLifetime lt;
 auto* s = tsm.get_temp_subject(name, lt);
-obs_ = observe_int_sync<Panel>(s, this, handler);          // lifetime arg defaults to {}
+obs_ = observe<int>(s, this, handler);          // does not compile: no lifetime argument
 
 // ✅
-obs_ = observe_int_sync<Panel>(s, this, handler, lt);
+obs_ = observe<int>(s, this, handler, lt);
 ```
 
-The lifetime parameter of `observe_int_sync` / `observe_string` / `AnimatedValue::bind` defaults
-to `{}` (`include/observer_factory.h`), so omitting it compiles silently. The guard's
-`has_alive_token_` stays `false`, `subject_dead` can therefore never become `true`, and
-`reset()` calls `lv_observer_remove()` on a subject `lv_subject_deinit()` already freed.
+The `lifetime` parameter of `observe<V>` has no default, so omitting it does not compile; pass the
+token, or `subject_never_freed()` for a subject that outlives the process. (`AnimatedValue::bind`
+still defaults it to `{}`, so a missing token there compiles silently.) Without a token the guard's
+`has_alive_token_` stays `false`, `subject_dead` can never become `true`, and `reset()` calls
+`lv_observer_remove()` on a subject `lv_subject_deinit()` already freed.
 
 ### Local or member? Not what decides correctness
 
@@ -524,7 +584,6 @@ not expire the guard's `weak_ptr`.
 
 Correct-today examples that the old rule would have flagged:
 `FanStackWidget::bind_fan_observer()` (`src/ui/panel_widgets/fan_stack_widget.cpp`),
-`ControlsPanel::subscribe_to_secondary_temp_subjects()` (`src/ui/ui_panel_controls.cpp`),
 `FanControlOverlay::subscribe_to_fan_speeds()` (`src/ui/ui_fan_control_overlay.cpp`),
 `src/ui/widgets/power_device_widget.cpp`.
 
@@ -582,7 +641,7 @@ carousel_observers_.clear();
 // Add, in lockstep
 auto& lt = carousel_lifetimes_.emplace_back();
 auto* s = state.get_subject(name, lt);
-carousel_observers_.push_back(observe_int_sync<Panel>(s, this, handler, lt));
+carousel_observers_.push_back(observe<int>(s, this, handler, lt));
 ```
 
 Real usage: `ThermistorWidget::bind_carousel_sensors()` in
@@ -592,7 +651,7 @@ lifetime slot so the two vectors stay aligned.
 ### Read-only access
 
 If you only need to read a value once, use the no-token overload —
-`tsm.get_temp_subject(name)` and `ps.get_extruder_temp_subject(name)` exist for exactly that, and
+`tsm.get_temp_subject(name)` and `ps.temperature_state().get_extruder_temp_subject(name)` exist for exactly that, and
 they make the intent obvious at the call site. Taking a token and never observing is harmless,
 just misleading.
 
@@ -623,7 +682,7 @@ INIT_SUBJECT_INT_VOLATILE(idle_timeout_printing, 0, subjects_, volatile_, regist
 ```
 
 `PrinterState::set_klippy_state_internal()` is the single chokepoint for every Klippy state
-change — the webhooks JSON parse, the `helix::async::call_method` wrapper, and
+change — the webhooks JSON parse, the deferred `set_klippy_state()`, and
 `set_klippy_state_sync()` all funnel through it — and it calls `reset_klippy_volatile()`
 on a genuine edge only.
 
@@ -656,12 +715,10 @@ Create observers with the factories in `include/observer_factory.h` rather than 
 
 | Factory | Use |
 |---------|-----|
-| `observe_int_sync<T>()` | int subject, callback deferred via `queue_update` |
-| `observe_int_async<T>()` | int subject, explicitly async |
-| `observe_string()` | string subject, callback deferred |
-| `observe_string_async()` | string subject, explicitly async |
-| `observe_print_state<T>()` | typed `PrintJobState` over the raw `print_state_enum` subject, deferred |
-| `observe_print_state_immediate<T>()` | the same typing, firing synchronously like `observe_int_immediate` |
+| `observe<int>()` | int subject, callback deferred via `queue_update` |
+| `observe<const char*>()` | string subject, callback deferred |
+| `observe<V>(..., Dispatch::Immediate)` | either subject type, callback inside the notification |
+| `observe_print_state<T>()` | typed `PrintJobState` over the raw `print_state_enum` subject, deferred; `Dispatch::Immediate` as the last argument fires synchronously |
 | `observe_print_lifecycle<T>()` | typed `PrintState` over the derived `print_lifecycle` subject |
 
 All return an `ObserverGuard` (`include/ui_observer_guard.h`) for RAII removal.
@@ -674,10 +731,11 @@ not hand-cast ints".
 
 ### Deferred by default
 
-`observe_int_sync` and `observe_string` **defer their callbacks** through `queue_update()` to
-prevent re-entrant observer destruction crashes (#82). Use the `observe_int_immediate` /
-`observe_string_immediate` variants **only** when you are certain the callback won't modify
-observer lifecycle — no reassignment, no widget destruction.
+`observe<int>` and `observe<const char*>` **defer their callbacks** through `queue_update()` to
+prevent re-entrant observer destruction crashes (#82). Pass `Dispatch::Immediate` as the last
+argument **only** when you are certain the callback won't modify observer lifecycle — no
+reassignment, no widget destruction. A handler that wants the value now and UI work later is
+`Immediate` plus an explicit `lifetime_.defer()` for the later half.
 
 ### `reset()` is the default; `release()` almost never is
 
@@ -687,7 +745,9 @@ observer lifecycle — no reassignment, no widget destruction.
   `StaticSubjectRegistry::deinit_all()`) and the `lv_is_initialized()` guard. The epoch
   replaced an older global `s_subjects_valid` boolean, which could not distinguish an observer
   created *during* a reinit window — on a live subject, so it must be removed — from one
-  created before teardown.
+  created before teardown. The epoch only applies to guards without an owner's lifetime
+  token; a guard holding the owner's `get_subjects_lifetime()` trusts that token alone, and
+  `subject_never_freed()` (no owner) still falls back to the epoch.
 - **`release()`** — *only* for the last pre-deinit cleanup inside
   `StaticSubjectRegistry::register_deinit()` callbacks, where the subject is already
   destroyed.
@@ -795,11 +855,10 @@ cycle the moment one of them calls out while holding its lock. TSan reports it a
 `lock-order-inversion (potential deadlock)`. It has happened twice:
 `AmsState` <-> `SpoolmanManager`, and `AmsState` <-> `FilamentSensorManager`.
 
-**Established order: `AmsState` -> `FilamentSensorManager`.** AmsState may notify the sensor
-layer while holding `mutex_`; the sensor layer must **not** hold its own lock when it queries
-AmsState. The direction is forced by arithmetic, not taste: `AmsState` takes its lock at ~49
-sites and `FilamentSensorManager` at ~2, so "the AMS lock is not held" is not a property
-anyone can maintain, while "the sensor lock is not held" is.
+**`AmsState` holds no lock when it calls out.** Its own state is main-thread only, and the
+one lock behind it, `AmsBackendRegistry::mutex_`, is held only across calls into a backend.
+The sensor layer still takes no lock of its own while it queries AmsState, which keeps the
+order one-way.
 
 Two shapes that keep a lock off an outbound call, both in
 `src/print/filament_sensor_manager.cpp`:
@@ -825,8 +884,8 @@ for (const auto& c : candidates) { ...ask AmsState... }
 
 **A `recursive_mutex` defeats the obvious fix.** Deferring the outbound call to the end of the
 locking function does *not* release the lock when a caller above you already holds it:
-`AmsState::sync_backend()` locks `mutex_` and then calls `sync_from_backend()`, so releasing
-the inner acquisition leaves the outer one held and the cycle intact. Any fix anchored to one
+a function that locks and then calls a sibling that locks again holds the outer acquisition
+across the inner one's release, and the cycle stays intact. Any fix anchored to one
 scope inside a recursive lock has this hole. Fix the side that can actually guarantee the
 invariant.
 
@@ -998,7 +1057,7 @@ Relevant tags: `[state]` (subjects/observers), `[connection]` (WebSocket lifecyc
 | `include/ui_update_queue.h` | `UpdateQueue`, `queue_update()`, `scoped_freeze()` |
 | `include/async_lifetime_guard.h` | `AsyncLifetimeGuard`, `LifetimeToken`, `bg_cb()` |
 | `include/ui_observer_guard.h` | `ObserverGuard`, `SubjectLifetime` |
-| `include/observer_factory.h` | `observe_int_sync/async`, `observe_string/async`, `observe_print_state[_immediate]`, `observe_print_lifecycle` |
+| `include/observer_factory.h` | `observe<V>` (`Dispatch::Deferred` / `Immediate`), `observe_print_state`, `observe_print_lifecycle` |
 | `include/ui_utils.h` | `safe_delete_deferred`, `safe_clean_children`, `safe_delete_subtree` |
 | `include/static_subject_registry.h` | Shutdown cleanup registry |
 | `include/http_executor.h` | `HttpExecutor::fast()` / `slow()` pools |

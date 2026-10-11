@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <dirent.h>
 #include <exception>
@@ -15,6 +16,7 @@
 #include <string>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
 #include <utility>
@@ -23,6 +25,91 @@
 static constexpr size_t MAX_CLIENT_BUFFER = 65536; // 64KB max per request line.
 
 namespace helix {
+
+std::string control_socket_dir() {
+    if (const char* runtime = getenv("RUNTIME_DIRECTORY"); runtime && runtime[0] != '\0') {
+        const char* colon = strchr(runtime, ':');
+        return colon ? std::string(runtime, colon) : std::string(runtime);
+    }
+    if (const char* xdg = getenv("XDG_RUNTIME_DIR"); xdg && xdg[0] != '\0') {
+        return {xdg};
+    }
+    return "/tmp";
+}
+
+std::string well_known_socket_path() {
+    return control_socket_dir() + "/helixscreen-control.sock";
+}
+
+std::vector<std::string> control_socket_search_dirs() {
+    std::vector<std::string> dirs;
+    auto add = [&dirs](const std::string& dir) {
+        if (!dir.empty() && std::find(dirs.begin(), dirs.end(), dir) == dirs.end()) {
+            dirs.push_back(dir);
+        }
+    };
+
+    add(control_socket_dir());
+    if (const char* xdg = getenv("XDG_RUNTIME_DIR"); xdg && xdg[0] != '\0') {
+        add(xdg);
+    }
+    // systemd's RuntimeDirectory=helixscreen resolves here. A client outside the
+    // unit never sees $RUNTIME_DIRECTORY, so the path has to be known, not read.
+    add("/run/helixscreen");
+    add("/tmp");
+    return dirs;
+}
+
+namespace {
+
+/// Found sockets from one search pass become a ClientSocketResolution, or
+/// nullopt when the pass found nothing and the caller should try the next
+/// one. Shared by both passes in resolve_client_socket_path so they can never
+/// apply different policies to the same kind of ambiguity.
+std::optional<ClientSocketResolution> decide_client_socket(std::vector<std::string> live) {
+    if (live.empty()) {
+        return std::nullopt;
+    }
+    ClientSocketResolution result;
+    if (live.size() == 1) {
+        result.status = ClientSocketResolution::Status::Found;
+        result.path = std::move(live.front());
+    } else {
+        result.status = ClientSocketResolution::Status::Ambiguous;
+        result.candidates = std::move(live);
+    }
+    return result;
+}
+
+} // namespace
+
+ClientSocketResolution resolve_client_socket_path(const std::vector<std::string>& dirs) {
+    std::vector<std::string> well_known_live;
+    for (const std::string& dir : dirs) {
+        const std::string candidate = dir + "/helixscreen-control.sock";
+        if (UnixSocketTransport::path_is_live(candidate)) {
+            well_known_live.push_back(candidate);
+        }
+    }
+    if (auto result = decide_client_socket(std::move(well_known_live))) {
+        return *result;
+    }
+
+    std::vector<std::string> instances;
+    for (const std::string& dir : dirs) {
+        for (std::string& found : UnixSocketTransport::discover_instances(dir)) {
+            instances.push_back(std::move(found));
+        }
+    }
+    if (auto result = decide_client_socket(std::move(instances))) {
+        return *result;
+    }
+
+    ClientSocketResolution result;
+    result.status = ClientSocketResolution::Status::NotRunning;
+    result.path = well_known_socket_path(); // Nothing running; report against the expected path.
+    return result;
+}
 
 namespace {
 

@@ -4,7 +4,6 @@
 #include "led_controls_widget.h"
 
 #include "ui_event_safety.h"
-#include "ui_nav_manager.h"
 
 #include "led/ui_led_control_overlay.h"
 #include "panel_widget_registry.h"
@@ -31,11 +30,6 @@ void LedControlsWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
     widget_obj_ = widget_obj;
     parent_screen_ = parent_screen;
 
-    // Set user_data on the root lv_obj, NOT on the ui_button child.
-    // ui_button allocates its own UiButtonData in user_data — overwriting it
-    // leaks memory and breaks button style/contrast auto-updates.
-    lv_obj_set_user_data(widget_obj_, this);
-
     // Register click handler via per-callback user_data
     lv_obj_t* btn = lv_obj_find_by_name(widget_obj_, "led_controls_button");
     if (btn) {
@@ -44,12 +38,8 @@ void LedControlsWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
 }
 
 void LedControlsWidget::detach() {
-    if (widget_obj_) {
-        lv_obj_set_user_data(widget_obj_, nullptr);
-    }
     widget_obj_ = nullptr;
     parent_screen_ = nullptr;
-    led_control_panel_ = nullptr;
 }
 
 void LedControlsWidget::on_led_controls_clicked(lv_event_t* e) {
@@ -64,26 +54,7 @@ void LedControlsWidget::on_led_controls_clicked(lv_event_t* e) {
 
 void LedControlsWidget::handle_clicked() {
     spdlog::debug("[LedControlsWidget] Clicked - opening LED control overlay");
-
-    if (!led_control_panel_ && parent_screen_) {
-        auto& overlay = get_led_control_overlay();
-
-        if (!overlay.are_subjects_initialized()) {
-            overlay.init_subjects();
-        }
-        overlay.register_callbacks();
-
-        led_control_panel_ = overlay.create(parent_screen_);
-        if (!led_control_panel_) {
-            spdlog::error("[LedControlsWidget] Failed to create LED control overlay");
-            return;
-        }
-        NavigationManager::instance().register_overlay_instance(led_control_panel_, &overlay);
-    }
-
-    if (led_control_panel_) {
-        NavigationManager::instance().push_overlay(led_control_panel_);
-    }
+    open_led_control_overlay(parent_screen_, "");
 }
 
 } // namespace helix

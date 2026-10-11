@@ -11,7 +11,7 @@
  *
  * Stage 1 of a DRY refactor: these primitives were previously reimplemented
  * (6+ times) across update_checker.cpp, log_path_probe.cpp,
- * input_shaper_cache.cpp, thumbnail_cache.cpp, app_globals.cpp,
+ * thumbnail_cache.cpp, app_globals.cpp,
  * app_constants.h, logging_init.cpp, and data_root_resolver.cpp. Each function
  * documents which existing implementation its semantics were converged from.
  *
@@ -39,10 +39,25 @@ bool is_writable_dir(const std::string& dir);
 std::uint64_t available_space(const std::string& dir);
 
 /**
+ * @brief Does `dir` live on a RAM-backed filesystem (tmpfs/ramfs)?
+ *
+ * Bytes written to tmpfs are memory, not storage, and on a box without swap
+ * they cannot be reclaimed at all. A cache that lands there spends the same
+ * budget the app is trying to protect, so callers that size a cache or pick a
+ * spill location need to tell the two apart.
+ *
+ * Stats the path itself, so a directory reached through symlinks is classified
+ * by the filesystem it actually resolves to. Returns false when the path cannot
+ * be stat'd and on platforms with no tmpfs concept: the answer gates a warning,
+ * and a warning invented from a failed syscall is noise.
+ */
+bool is_ram_backed(const std::string& dir);
+
+/**
  * @brief Robust probe: is `dir` writable AND does it have enough free space?
  *
  * Converges the create+write+remove write-test from
- * input_shaper_cache.cpp / thumbnail_cache.cpp try_create_cache_dir with the
+ * thumbnail_cache.cpp try_create_cache_dir with the
  * statvfs space check. Creates a UNIQUELY-named temp file inside `dir`
  * (".helix_write_test.<pid>.<tid>.<counter>", unique per process, per thread,
  * and per call so concurrent same-process probes of the same dir never collide),
@@ -119,8 +134,7 @@ std::string home();
  *
  * Base directories only — callers append "/helix/<subdir>" and try each in
  * order. Returning BOTH (rather than just the first) preserves the original
- * two-step fallback in app_globals.cpp get_helix_cache_dir (steps 4/5) and
- * input_shaper_cache.cpp determine_cache_dir (steps 1/2): if the XDG dir can't
+ * two-step fallback in app_globals.cpp get_helix_cache_dir (steps 4/5): if the XDG dir can't
  * be created, callers still fall through to $HOME/.cache before the next step.
  */
 std::vector<std::string> xdg_cache_bases();
@@ -152,5 +166,18 @@ std::string dirname(const std::string& path);
  * returns "".
  */
 std::string strip_trailing_slash(const std::string& path);
+
+/**
+ * @brief The file a tmp-file-plus-rename save of @p path must replace.
+ *
+ * rename(2) onto a symlink replaces the link rather than writing through it.
+ * The installer symlinks user files out of the install dir into printer_data,
+ * and that link is all that keeps them alive when Moonraker's update rmtree()s
+ * the install dir. So a save resolves the link first and renames onto its target.
+ *
+ * Returns @p path unchanged when it is not a symlink or does not resolve (a
+ * dangling link), since there is no better target to write.
+ */
+std::string write_target(const std::string& path);
 
 } // namespace helix::paths

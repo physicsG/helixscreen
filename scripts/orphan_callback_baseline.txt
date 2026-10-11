@@ -1,0 +1,38 @@
+# XML event callbacks whose C++ registration and XML use disagree.
+# Accepted debt, shrink-only: register it, reference it, give each owner
+# its own name, or delete it - then re-run with --write-baseline.
+unreferenced:bed_temperature
+unreferenced:chamber_temperature
+unreferenced:on_edit_colors_clicked
+unreferenced:on_ip_input_changed
+unreferenced:on_motion_header_settings_clicked
+unreferenced:on_port_input_changed
+unreferenced:on_print_status_files
+unreferenced:on_printer_image_card_clicked
+unreferenced:on_printer_image_usb_clicked
+unreferenced:on_printer_name_changed
+unreferenced:on_profile_0_clicked
+unreferenced:on_profile_0_delete
+unreferenced:on_profile_0_rename
+unreferenced:on_profile_1_clicked
+unreferenced:on_profile_1_delete
+unreferenced:on_profile_1_rename
+unreferenced:on_profile_2_clicked
+unreferenced:on_profile_2_delete
+unreferenced:on_profile_2_rename
+unreferenced:on_profile_3_clicked
+unreferenced:on_profile_3_delete
+unreferenced:on_profile_3_rename
+unreferenced:on_profile_4_clicked
+unreferenced:on_profile_4_delete
+unreferenced:on_profile_4_rename
+unreferenced:on_spoolman_add_spool_clicked
+unreferenced:on_test_connection_clicked
+unreferenced:on_zone_tab_clicked
+unreferenced:plugin_event
+unreferenced:temp_carousel_page_cb
+unreferenced:temperature
+unregistered:bed_temp_clicked_cb
+unregistered:chamber_temp_clicked_cb
+unregistered:my_close_cb
+unregistered:temp_clicked_cb

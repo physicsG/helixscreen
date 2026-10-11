@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -34,6 +35,8 @@ enum class WidgetCategory {
     Filament,
     Controls,
     System,
+    /// Runtime-added definitions (plugins). Last: reached for least.
+    Plugins,
 };
 
 struct WidgetCategoryDef {
@@ -65,25 +68,19 @@ struct PanelWidgetDef {
     int max_colspan = 0;         // Maximum columns (0 = use colspan, i.e. not scalable)
     int max_rowspan = 0;         // Maximum rows (0 = use rowspan, i.e. not scalable)
     bool multi_instance = false; // Allows dynamic instance creation with base_id:N IDs
-
-    /// True when this widget may occupy half a cell on that axis (#1126).
+    /// Whether this widget resolves to half a cell on the column / row axis.
     ///
-    /// The home grid lays out half-cell tracks, so an authored colspan of 1 is
-    /// GridLayout::TRACKS_PER_CELL tracks wide. A widget with the flag set may
-    /// also be placed and sized at odd track counts; edit mode snaps everything
-    /// else to even boundaries so a whole-cell widget can never straddle two.
+    /// An axis gets half-cell resolution when half a cell of extra room shows
+    /// MORE: continuous content (a chart, an aspect-fit frame, wrapping text, a
+    /// scrolling strip, stacked readout rows) and a centred glyph, which scales
+    /// to whatever box it is given (prestonbrown/helixscreen#1559). Leave it off
+    /// for a widget authored around a fixed number of cells, where the finer
+    /// drag snap costs real precision at a 34px track and buys nothing.
     ///
-    /// Set it on an axis when the widget's content is CONTINUOUS along it - a
-    /// chart, an aspect-fit image, wrapping text, a scrolling strip, stacked
-    /// readout rows, or a layout chosen by measurement (active_spool's
-    /// compact/wide switch, decide_nozzle_layout()). Half a cell of extra room
-    /// shows more there. Leave it off for a centred fixed glyph with a short
-    /// label - network, led, filament, humidity, the heater tiles - where the
-    /// intermediate size buys whitespace and nothing else, and costs a drag
-    /// snap that is twice as fussy on a 34px track.
-    ///
-    /// The minimum on every axis is a whole cell, so this only ever ADDS sizes
-    /// above a size the content already fits. It never makes a widget smaller.
+    /// A minimum below a whole cell on an axis additionally needs this flag on
+    /// that axis AND a widget that can refuse a box it cannot draw
+    /// (PanelWidget::fits_at), because a one-track span clips any layout
+    /// authored around whole cells. The rule is the same for columns and rows.
     bool supports_half_col = false;
     bool supports_half_row = false;
 
@@ -108,7 +105,7 @@ struct PanelWidgetDef {
     bool merges_into_card = true;
 
     WidgetFactory factory = nullptr;       // nullptr = pure XML or externally managed
-    SubjectInitFn init_subjects = nullptr; // Called once before XML creation
+    SubjectInitFn init_subjects = nullptr; // Called before XML creation; must be idempotent
 
     // Resolved accessors (0 = "use default colspan/rowspan")
     int effective_min_colspan() const {
@@ -139,6 +136,31 @@ const PanelWidgetDef* find_widget_def(std::string_view id);
 size_t widget_def_count();
 void register_widget_factory(std::string_view id, WidgetFactory factory);
 void register_widget_subjects(std::string_view id, SubjectInitFn init_fn);
+
+/// A widget definition added while the app runs. Spans are in grid tracks.
+struct RuntimeWidgetDef {
+    std::string id;
+    std::string display_name;
+    std::string icon;
+    std::string description;
+    int colspan = 2, rowspan = 2, max_colspan = 0, max_rowspan = 0;
+    bool supports_half_col = false, supports_half_row = false;
+    WidgetFactory factory;
+};
+
+/// Adds, or replaces, a Plugins-category definition whose strings the registry
+/// owns. False when `def.id` is a built-in widget. A definition pointer from
+/// find_widget_def() or get_all_widget_defs() is valid until the next register
+/// or unregister call.
+bool register_runtime_widget_def(RuntimeWidgetDef def);
+/// Deactivates a runtime definition. The id's storage is kept so pointers
+/// handed to LVGL user_data stay readable until the rows using them rebuild.
+void unregister_runtime_widget_def(std::string_view id);
+/// Bumped by every register/unregister of a runtime definition. A reload that
+/// re-registers the same ids leaves every id list unchanged while the
+/// factories now build widgets bound to a different owner, so caches keyed on
+/// the id list alone (home's page cache) must also compare this.
+uint64_t runtime_widget_generation();
 // Internal — called once from PanelWidgetManager::init_widget_subjects().
 // Do not call directly; widget factories require runtime context (singletons, shared resources).
 void init_widget_registrations();

@@ -6,6 +6,7 @@
 #include "../catch_amalgamated.hpp"
 
 using helix::CachedMacroInfo;
+using helix::find_printer_stop_call;
 using helix::MacroParamCache;
 using helix::MacroParamKnowledge;
 
@@ -200,4 +201,104 @@ TEST_CASE("MacroParamCache variable-only macro is KNOWN_NO_PARAMS", "[macro_para
     auto info = cache.get("BEDFANVARS");
     REQUIRE(info.knowledge == MacroParamKnowledge::KNOWN_NO_PARAMS);
     REQUIRE(info.params.empty());
+}
+
+// ============================================================================
+// Macros that stop the printer
+// ============================================================================
+
+TEST_CASE("find_printer_stop_call reads an action_emergency_stop call",
+          "[macro_param_cache][printer_stop]") {
+    SECTION("a double-quoted literal is the message") {
+        const auto call =
+            find_printer_stop_call("{action_emergency_stop(\"M729 is not supported\")}");
+        CHECK(call.calls);
+        CHECK(call.message == "M729 is not supported");
+    }
+    SECTION("a single-quoted literal with spacing is the message") {
+        const auto call = find_printer_stop_call("G28\n{ action_emergency_stop( 'Stop here' ) }");
+        CHECK(call.calls);
+        CHECK(call.message == "Stop here");
+    }
+    SECTION("an argument Klipper has to evaluate is a call with no message") {
+        CHECK(find_printer_stop_call("{action_emergency_stop(params.WHY)}").calls);
+        CHECK(find_printer_stop_call("{action_emergency_stop(params.WHY)}").message.empty());
+        const auto joined = find_printer_stop_call("{action_emergency_stop(\"Bad: \" ~ params.X)}");
+        CHECK(joined.calls);
+        CHECK(joined.message.empty());
+        const auto escaped = find_printer_stop_call(R"({action_emergency_stop("say \"no\"")})");
+        CHECK(escaped.calls);
+        CHECK(escaped.message.empty());
+    }
+    SECTION("no argument is a call with no message") {
+        const auto call = find_printer_stop_call("{action_emergency_stop()}");
+        CHECK(call.calls);
+        CHECK(call.message.empty());
+    }
+    SECTION("no call") {
+        CHECK_FALSE(find_printer_stop_call("M117 hello\nG28").calls);
+        CHECK_FALSE(find_printer_stop_call("{action_respond_info(\"x\")}").calls);
+        CHECK_FALSE(find_printer_stop_call("{my_action_emergency_stop(\"x\")}").calls);
+        CHECK_FALSE(find_printer_stop_call("{# action_emergency_stop is not used #}").calls);
+        CHECK_FALSE(find_printer_stop_call("").calls);
+    }
+}
+
+TEST_CASE("MacroParamCache records which macros stop the printer",
+          "[macro_param_cache][printer_stop]") {
+    auto& cache = MacroParamCache::instance();
+    cache.clear();
+    REQUIRE_FALSE(cache.is_populated());
+
+    nlohmann::json config;
+    config["gcode_macro M729"] = {{"gcode", "{action_emergency_stop(\"M729 is not supported\")}"}};
+    config["gcode_macro m8213"] = {{"gcode", "{action_emergency_stop(params.WHY)}"}};
+    config["gcode_macro clean_nozzle"] = {{"gcode", "G1 E10"}};
+    cache.populate_from_configfile(config, {});
+
+    CHECK(cache.is_populated());
+    CHECK(cache.get("M729").stops_printer);
+    CHECK(cache.get("M729").stop_message == "M729 is not supported");
+    CHECK(cache.get("M8213").stops_printer);
+    CHECK(cache.get("M8213").stop_message.empty());
+    CHECK_FALSE(cache.get("CLEAN_NOZZLE").stops_printer);
+    CHECK(cache.printer_stop_commands() ==
+          std::map<std::string, std::string>{{"M729", "M729 is not supported"}, {"M8213", ""}});
+
+    cache.clear();
+    CHECK_FALSE(cache.is_populated());
+    CHECK(cache.printer_stop_commands().empty());
+}
+
+TEST_CASE("MacroParamCache generation moves whenever the macro set may have changed",
+          "[macro_param_cache][printer_stop]") {
+    auto& cache = MacroParamCache::instance();
+    cache.clear();
+    const uint64_t cleared = cache.generation();
+
+    nlohmann::json config;
+    config["gcode_macro M729"] = {{"gcode", "{action_emergency_stop(\"no\")}"}};
+    cache.populate_from_configfile(config, {});
+    const uint64_t populated = cache.generation();
+    CHECK(populated != cleared);
+    CHECK(cache.is_populated());
+
+    SECTION("a clear moves it again") {
+        cache.clear();
+        CHECK(cache.generation() != populated);
+    }
+
+    SECTION("a second populate moves it, so an answer from the first is not current") {
+        cache.populate_from_configfile(config, {});
+        CHECK(cache.generation() != populated);
+    }
+
+    SECTION("a configfile that is not an object populates nothing and still moves it") {
+        cache.populate_from_configfile(nlohmann::json("not an object"), {});
+        CHECK_FALSE(cache.is_populated());
+        CHECK(cache.printer_stop_commands().empty());
+        CHECK(cache.generation() != populated);
+    }
+
+    cache.clear();
 }

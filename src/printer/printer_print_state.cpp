@@ -15,6 +15,8 @@
 
 #include "data_root_resolver.h"
 #include "format_utils.h"
+#include "json_utils.h"
+#include "plr_backend.h"
 #include "print_lifecycle_state.h"
 #include "printer_state.h" // For enum definitions
 #include "state/subject_macros.h"
@@ -58,20 +60,17 @@ void PrinterPrintState::init_subjects(bool register_xml) {
 
     spdlog::trace("[PrinterPrintState] Initializing subjects (register_xml={})", register_xml);
 
-    // Fresh lifetime for the static subjects below. Cross-singleton observers
-    // (e.g. AmsState's print-state observer) subscribe to this so they can
-    // detect subject death across deinit/init cycles in tests.
-    static_subjects_lifetime_ = std::make_shared<bool>(true);
-
     // Print progress subjects
     INIT_SUBJECT_INT(print_progress, 0, subjects_, register_xml);
     INIT_SUBJECT_INT(print_progress_display, 0, subjects_, register_xml);
     INIT_SUBJECT_STRING(print_progress_text, "0%", subjects_, register_xml);
+    INIT_SUBJECT_INT(pause_markers_version, 0, subjects_, register_xml);
     INIT_SUBJECT_STRING(print_filename, "", subjects_, register_xml);
     INIT_SUBJECT_STRING(print_state, "standby", subjects_, register_xml);
     // RAW_PRINT_STATE_OK: declaring the wire subject itself.
     INIT_SUBJECT_INT(print_state_enum, static_cast<int>(PrintJobState::STANDBY), subjects_,
                      register_xml);
+    INIT_SUBJECT_INT(print_exception, -1, subjects_, register_xml);
     INIT_SUBJECT_INT(print_outcome, static_cast<int>(PrintOutcome::NONE), subjects_, register_xml);
     INIT_SUBJECT_INT(print_active, 0, subjects_, register_xml);
     INIT_SUBJECT_INT(print_show_progress, 0, subjects_, register_xml);
@@ -101,6 +100,9 @@ void PrinterPrintState::init_subjects(bool register_xml) {
                      register_xml);
     INIT_SUBJECT_INT(print_lifecycle, static_cast<int>(PrintState::Idle), subjects_, register_xml);
     INIT_SUBJECT_INT(job_holds_machine, 0, subjects_, register_xml);
+    INIT_SUBJECT_INT(machine_motion_blocked, spool_latch_active_.load() ? 1 : 0, subjects_,
+                     register_xml);
+    INIT_SUBJECT_INT(spool_latch, spool_latch_active_.load() ? 1 : 0, subjects_, register_xml);
     INIT_SUBJECT_INT(preparing_epoch, 0, subjects_, false);
     INIT_SUBJECT_INT(print_identity_epoch, 0, subjects_, false);
     INIT_SUBJECT_INT(print_lifecycle_prev, static_cast<int>(PrintState::Idle), subjects_, false);
@@ -128,7 +130,14 @@ void PrinterPrintState::init_subjects(bool register_xml) {
 
     // print_stats.power_loss — Creality-fork Power-Loss-Recovery capability
     // marker. Default 0; set to 1 by presence of the key (see update_from_status).
-    INIT_SUBJECT_INT(creality_plr_capable, 0, subjects_, register_xml);
+    INIT_SUBJECT_INT(plr_power_loss_signal, 0, subjects_, register_xml);
+
+    // Power-loss recovery, passive-backend half: the discovered resume macro
+    // (capability, set from discovery by PrinterState::set_hardware) and the
+    // interrupted flag (availability, parsed in update_from_status via
+    // plr_backend). plr_backend owns which firmware carries them. Default 0.
+    INIT_SUBJECT_INT(plr_resume_macro, 0, subjects_, register_xml);
+    INIT_SUBJECT_INT(plr_interrupted_flag, 0, subjects_, register_xml);
 
     // Pre-populate per-extruder filament_used map. Freezing the map structure
     // here eliminates the BG-thread emplace vs UI-thread read rehash race
@@ -153,15 +162,6 @@ void PrinterPrintState::deinit_subjects() {
     // `this` and write the subjects being torn down below; without this the next
     // drain notifies a freed observer list (#1165, #1146).
     async_lifetime_.invalidate();
-
-    // Signal death of the "static" subjects (print_state_enum, etc.) BEFORE
-    // calling deinit_all() — observers in other singletons (AmsState) check
-    // this token in their guard's reset() path and skip lv_observer_remove()
-    // on observer nodes that are about to be freed by lv_subject_deinit().
-    if (static_subjects_lifetime_) {
-        *static_subjects_lifetime_ = false;
-    }
-    static_subjects_lifetime_.reset();
 
     // Per-extruder filament_used subjects are dynamic: for each entry, signal
     // subject death BEFORE deinit so all ObserverGuards (including those still
@@ -216,14 +216,50 @@ void PrinterPrintState::publish_progress_display(int percent) {
     if (progress_frozen_) {
         return;
     }
-    if (lv_subject_get_int(&print_progress_display_) != percent) {
-        lv_subject_set_int(&print_progress_display_, percent);
-    }
+    lv_subject_set_int(&print_progress_display_, percent);
     char buf[sizeof(print_progress_text_buf_)];
     helix::format::format_percent(percent, buf, sizeof(buf));
     if (strcmp(lv_subject_get_string(&print_progress_text_), buf) != 0) {
         lv_subject_copy_string(&print_progress_text_, buf);
     }
+}
+
+void PrinterPrintState::commit_progress(int percent) {
+    if (percent > 100) {
+        percent = 100;
+    }
+    if (percent < 0) {
+        percent = 0;
+    }
+
+    // print_stats is parsed before this runs, and publish_lifecycle_state() with
+    // it, so the lifecycle already describes THIS payload rather than the
+    // previous tick's.
+    const PrintState lifecycle = get_print_lifecycle();
+
+    // A paused print is not advancing, so no payload arriving during the pause
+    // carries a new position. Klipper expires the M73 value behind
+    // display_status.progress and substitutes virtual_sdcard's byte position into
+    // the same field, and a pause is precisely when M73 stops being refreshed. On
+    // a multi-material print that byte position runs far ahead of the slicer's
+    // time estimate - the wipe tower is dense and quick - so accepting it here
+    // walks the bar to a number the print has not reached, then walks it back on
+    // resume.
+    if (lifecycle == PrintState::Paused) {
+        return;
+    }
+
+    // A finished print never counts down: a late sample a fraction short of where
+    // it stopped must not drag the number backwards.
+    const bool is_terminal_state =
+        (lifecycle == PrintState::Complete || lifecycle == PrintState::Cancelled ||
+         lifecycle == PrintState::Error);
+
+    const int current_progress = lv_subject_get_int(&print_progress_);
+    if ((!is_terminal_state || percent >= current_progress) && current_progress != percent) {
+        lv_subject_set_int(&print_progress_, percent);
+    }
+    publish_progress_display(percent);
 }
 
 void PrinterPrintState::freeze_progress_display(bool complete) {
@@ -236,6 +272,19 @@ void PrinterPrintState::freeze_progress_display(bool complete) {
     progress_frozen_ = true;
     spdlog::debug("[PrinterPrintState] Progress display frozen at {}%",
                   lv_subject_get_int(&print_progress_display_));
+}
+
+void PrinterPrintState::set_scheduled_pauses(std::vector<helix::gcode::ScheduledPause> pauses,
+                                             helix::gcode::ProgressAxis axis,
+                                             const std::string& source_filename) {
+    scheduled_pauses_ = std::move(pauses);
+    pause_marker_axis_ = axis;
+    pause_source_filename_ = source_filename;
+    int version = lv_subject_get_int(&pause_markers_version_) + 1;
+    lv_subject_set_int(&pause_markers_version_, version);
+    spdlog::debug("[PrinterPrintState] Scheduled pauses published: {} (axis={})",
+                  scheduled_pauses_.size(),
+                  axis == helix::gcode::ProgressAxis::SlicerTime ? "slicer" : "bytes");
 }
 
 void PrinterPrintState::unfreeze_progress_display() {
@@ -251,8 +300,19 @@ void PrinterPrintState::reset_for_new_print() {
     // Filename is Moonraker's source of truth - it updates when the print actually starts.
     lv_subject_set_int(&print_progress_, 0);
     unfreeze_progress_display();
+    // Scheduled pauses belong to the previous job's file. A scan for the new
+    // file may still be in flight; the publish-side filename guard keeps its
+    // late result off the new print if the file differs.
+    if (!scheduled_pauses_.empty()) {
+        scheduled_pauses_.clear();
+        pause_source_filename_.clear();
+        pause_marker_axis_ = helix::gcode::ProgressAxis::BytePosition;
+        int version = lv_subject_get_int(&pause_markers_version_) + 1;
+        lv_subject_set_int(&pause_markers_version_, version);
+    }
     lv_subject_set_int(&print_layer_current_, 0);
     has_real_layer_data_ = false;
+    layer_source_ = LayerSource::Estimate;
     // Commanded Z belongs to the print run, not the file — clear it. Do NOT
     // clear layer_height_/first_layer_height_: like print_layer_total_ and
     // estimated_print_time_ they belong to the file and must survive a same-file
@@ -272,11 +332,33 @@ void PrinterPrintState::reset_for_new_print() {
     // For different files, the metadata callback updates both values.
     lv_subject_set_int(&print_time_left_, estimated_print_time_);
     // DON'T clear estimated_print_time_ - it belongs to the file, not the session
-    // Reset EMA so it seeds from the first real measurement
-    smoothed_remaining_ = 0.0;
-    has_smoothed_remaining_ = false;
+    // Reset the estimator so it seeds from the first real measurement
+    eta_estimator_.reset();
     spdlog::trace("[PrinterPrintState] Reset print progress for new print (slicer_est={}s)",
                   estimated_print_time_);
+}
+
+void PrinterPrintState::apply_layer_current(int layer, LayerSource kind, const char* source) {
+    const int current = lv_subject_get_int(&print_layer_current_);
+    // A status frame lags the gcode echo: while the subject holds a value the
+    // echo just reported, a lower status number is the stale frame, not the
+    // print going backward. Echo writes are never refused (sequential
+    // one-object-at-a-time prints restart ;LAYER:N per object), and a decrease
+    // against a status-sourced value is a genuine report from a status-only
+    // printer. The guard judges the value IN the subject, so it compares
+    // against the previous write's provenance, not this call's kind.
+    if (layer < current && kind == LayerSource::Reported &&
+        lv_subject_get_int(&print_active_) != 0 && layer_source_ == LayerSource::Echo) {
+        spdlog::debug("[LayerTracker] Refusing layer decrease {} -> {} (from {})", current, layer,
+                      source);
+        return;
+    }
+    if (layer != current) {
+        lv_subject_set_int(&print_layer_current_, layer);
+    }
+    // Provenance now traces to whichever source addressed the subject last,
+    // including on an equal write.
+    layer_source_ = kind;
 }
 
 bool PrinterPrintState::status_indicates_active_print(const nlohmann::json& status) {
@@ -294,7 +376,7 @@ bool PrinterPrintState::status_indicates_active_print(const nlohmann::json& stat
     return printer_has_job(parse_print_job_state(st.c_str()));
 }
 
-void PrinterPrintState::update_from_status(const nlohmann::json& status) {
+void PrinterPrintState::update_from_status(const nlohmann::json& status, bool whole_objects) {
     // Layer tracking has two sources within a single status update:
     //   primary  — print_stats.info.{current_layer,total_layer} (slicer
     //              SET_PRINT_STATS_INFO; authoritative when present)
@@ -312,25 +394,15 @@ void PrinterPrintState::update_from_status(const nlohmann::json& status) {
     if (status.contains("print_stats")) {
         const auto& stats = status["print_stats"];
 
-        // print_stats.power_loss — Creality-Klipper-fork Power-Loss-Recovery
-        // capability marker. The key exists ONLY in that fork, so PRESENCE (not
-        // value) is the signal: it normally reads 0 and only becomes 1 after the
-        // side-effectful detect probe. Two subtleties:
-        //   - "Present" must mean present AND numeric. We subscribe to a
-        //     narrowed field list, and Moonraker answers a subscribed-but-
-        //     unpopulated field with an explicit null, so on mainline Klipper the
-        //     key IS in the payload as null. is_number() is what discriminates.
-        //   - Latch UP only. Status arrives as deltas, so a later print_stats
-        //     notification carrying just print_duration has no power_loss key at
-        //     all; clearing on absence would manufacture a spurious 1->0->1 edge
-        //     and re-fire the probe. PlrOfferController resets this on the
-        //     disconnect edge instead.
-        if (auto plw_it = stats.find("power_loss"); plw_it != stats.end() && plw_it->is_number()) {
-            if (lv_subject_get_int(&creality_plr_capable_) != 1) {
-                spdlog::info("[PrinterPrintState] print_stats.power_loss present — Creality "
-                             "power-loss-recovery backend available");
-                lv_subject_set_int(&creality_plr_capable_, 1);
-            }
+        // plr_backend owns which print_stats key signals PLR support and the
+        // numeric-only rule. Latch UP only: status arrives as deltas, so a later
+        // frame without the key says nothing, and clearing on absence would
+        // manufacture a spurious 1->0->1 edge and re-fire the probe.
+        // PlrOfferController resets this on the disconnect edge instead.
+        if (helix::plr_parse_power_loss_signal(status) &&
+            lv_subject_get_int(&plr_power_loss_signal_) != 1) {
+            spdlog::info("[PrinterPrintState] PLR power-loss signal present");
+            lv_subject_set_int(&plr_power_loss_signal_, 1);
         }
 
         // Seed print_duration_ BEFORE updating print_state_enum_. The state-change
@@ -344,15 +416,11 @@ void PrinterPrintState::update_from_status(const nlohmann::json& status) {
         // "Starting Print..." stuck and dropping print_elapsed updates.
         if (auto pd_it = stats.find("print_duration"); pd_it != stats.end() && pd_it->is_number()) {
             int print_seconds = static_cast<int>(pd_it->get<double>());
-            if (lv_subject_get_int(&print_duration_) != print_seconds) {
-                lv_subject_set_int(&print_duration_, print_seconds);
-            }
+            lv_subject_set_int(&print_duration_, print_seconds);
         }
         if (auto td_it = stats.find("total_duration"); td_it != stats.end() && td_it->is_number()) {
             int total_elapsed = static_cast<int>(td_it->get<double>());
-            if (lv_subject_get_int(&print_elapsed_) != total_elapsed) {
-                lv_subject_set_int(&print_elapsed_, total_elapsed);
-            }
+            lv_subject_set_int(&print_elapsed_, total_elapsed);
         }
 
         if (auto state_it = stats.find("state"); state_it != stats.end() && state_it->is_string()) {
@@ -429,8 +497,7 @@ void PrinterPrintState::update_from_status(const nlohmann::json& status) {
                 // RAW_PRINT_STATE_OK: same handler, same reason as above. The
                 // previous-state arm asks the wire question - printer_has_job() -
                 // because a preparing job the printer never took set no M117.
-                if (new_state == PrintJobState::COMPLETE || new_state == PrintJobState::CANCELLED ||
-                    new_state == PrintJobState::ERROR ||
+                if (job_has_ended(new_state) ||
                     (new_state == PrintJobState::STANDBY && printer_has_job(current_state))) {
                     lv_subject_copy_string(&display_message_, "");
                     update_display_message_visible();
@@ -545,13 +612,17 @@ void PrinterPrintState::update_from_status(const nlohmann::json& status) {
                 print_exception_message_.clear();
             }
             // null or non-object: leave members unchanged.
+            if (lv_subject_get_int(&print_exception_) != print_exception_code_) {
+                lv_subject_set_int(&print_exception_, print_exception_code_);
+            }
         }
 
         // Update layer info from print_stats.info (sent by Moonraker/mock client)
         // Note: Moonraker can send null values for layer fields when not available
         if (stats.contains("info") && stats["info"].is_object()) {
             const auto& info = stats["info"];
-            spdlog::trace("[LayerTracker] print_stats.info received: {}", info.dump());
+            spdlog::trace("[LayerTracker] print_stats.info received: {}",
+                          helix::json_util::safe_dump(info));
 
             if (info.contains("current_layer") && info["current_layer"].is_number()) {
                 int current_layer = info["current_layer"].get<int>();
@@ -563,8 +634,8 @@ void PrinterPrintState::update_from_status(const nlohmann::json& status) {
                 if (current_layer != lv_subject_get_int(&print_layer_current_)) {
                     spdlog::debug("[LayerTracker] current_layer={} (from print_stats.info)",
                                   current_layer);
-                    lv_subject_set_int(&print_layer_current_, current_layer);
                 }
+                apply_layer_current(current_layer, LayerSource::Reported, "print_stats.info");
                 current_layer_from_info = true;
             }
 
@@ -597,84 +668,35 @@ void PrinterPrintState::update_from_status(const nlohmann::json& status) {
         // Track filament usage (Moonraker reports in mm)
         if (stats.contains("filament_used") && stats["filament_used"].is_number()) {
             int filament_mm = static_cast<int>(stats["filament_used"].get<double>());
-            if (filament_mm != lv_subject_get_int(&print_filament_used_)) {
-                lv_subject_set_int(&print_filament_used_, filament_mm);
-            }
+            lv_subject_set_int(&print_filament_used_, filament_mm);
         }
 
         // Update print time tracking (elapsed and remaining)
         if (stats.contains("print_duration") && stats["print_duration"].is_number()) {
             int print_seconds = static_cast<int>(stats["print_duration"].get<double>());
-            if (lv_subject_get_int(&print_duration_) != print_seconds) {
-                lv_subject_set_int(&print_duration_, print_seconds);
-            }
+            lv_subject_set_int(&print_duration_, print_seconds);
         }
 
         // total_duration = wall-clock elapsed since job started (includes prep, pauses)
         if (stats.contains("total_duration") && stats["total_duration"].is_number()) {
             int total_elapsed = static_cast<int>(stats["total_duration"].get<double>());
-            if (lv_subject_get_int(&print_elapsed_) != total_elapsed) {
-                lv_subject_set_int(&print_elapsed_, total_elapsed);
-            }
+            lv_subject_set_int(&print_elapsed_, total_elapsed);
 
             // Estimate remaining from progress using print_duration (actual print time),
             // NOT total_duration (which includes prep/preheat and inflates the estimate)
             int print_time = lv_subject_get_int(&print_duration_);
             int progress = lv_subject_get_int(&print_progress_);
 
-            // During pre-print phase: combine prep remaining with slicer print estimate
-            int preprint_remaining = lv_subject_get_int(&preprint_remaining_);
-            if (progress == 0 && preprint_remaining > 0 && estimated_print_time_ > 0) {
-                int total_remaining = preprint_remaining + estimated_print_time_;
-                if (lv_subject_get_int(&print_time_left_) != total_remaining) {
-                    lv_subject_set_int(&print_time_left_, total_remaining);
-                }
-            } else if (progress >= 1 && progress < 5 && estimated_print_time_ > 0) {
-                // Early print: use slicer estimate directly (extrapolation too noisy)
-                int remaining = estimated_print_time_ * (100 - progress) / 100;
-                if (lv_subject_get_int(&print_time_left_) != remaining) {
-                    lv_subject_set_int(&print_time_left_, remaining);
-                }
-            } else if (progress >= 1 && progress < 100 && print_time > 0) {
-                double raw_remaining =
-                    static_cast<double>(print_time) * (100 - progress) / progress;
+            PrintEtaInputs eta_in;
+            eta_in.progress_pct = progress;
+            eta_in.print_duration_s = print_time;
+            eta_in.slicer_estimate_s = estimated_print_time_;
+            eta_in.preprint_remaining_s = lv_subject_get_int(&preprint_remaining_);
 
-                // At low progress (<15%), blend with slicer estimate to dampen the
-                // noisy extrapolation from small samples
-                if (progress < 15 && estimated_print_time_ > 0) {
-                    double slicer_weight = (15.0 - progress) / 15.0;
-                    double slicer_remaining = estimated_print_time_ * (100.0 - progress) / 100.0;
-                    raw_remaining =
-                        slicer_weight * slicer_remaining + (1.0 - slicer_weight) * raw_remaining;
-                }
-
-                // Exponential smoothing: alpha increases with progress so the estimate
-                // is very stable early on and converges faster as data improves.
-                // At 1%: alpha=0.06 (very slow), at 15%: alpha=0.20, at 25%+: alpha=0.30
-                double alpha = std::min(0.3, 0.05 + progress * 0.01);
-                if (!has_smoothed_remaining_) {
-                    smoothed_remaining_ = raw_remaining;
-                    has_smoothed_remaining_ = true;
-                } else {
-                    smoothed_remaining_ =
-                        alpha * raw_remaining + (1.0 - alpha) * smoothed_remaining_;
-                }
-
-                int remaining = static_cast<int>(smoothed_remaining_);
-                if (lv_subject_get_int(&print_time_left_) != remaining) {
-                    lv_subject_set_int(&print_time_left_, remaining);
-                }
-            } else if (progress >= 1 && progress < 100 && print_time == 0 &&
-                       estimated_print_time_ > 0) {
-                // Fallback: use slicer estimate when print_duration hasn't started yet
-                int remaining = estimated_print_time_ * (100 - progress) / 100;
-                if (lv_subject_get_int(&print_time_left_) != remaining) {
-                    lv_subject_set_int(&print_time_left_, remaining);
-                }
-            } else if (progress >= 100) {
-                if (lv_subject_get_int(&print_time_left_) != 0) {
-                    lv_subject_set_int(&print_time_left_, 0);
-                }
+            const int remaining = eta_estimator_.remaining_seconds(eta_in);
+            if (remaining != PrintEtaEstimator::NO_ESTIMATE &&
+                lv_subject_get_int(&print_time_left_) != remaining) {
+                lv_subject_set_int(&print_time_left_, remaining);
             }
         }
     }
@@ -682,7 +704,15 @@ void PrinterPrintState::update_from_status(const nlohmann::json& status) {
     // Parse display_status (M73 progress + M117 message)
     if (status.contains("display_status")) {
         const auto& display = status["display_status"];
-        if (display.contains("progress") && display["progress"].is_number()) {
+        // Not while paused. Klipper expires the M73 value behind this field and
+        // substitutes virtual_sdcard's byte position, and a pause is exactly when
+        // M73 stops being refreshed. commit_progress() declines to publish during
+        // the pause, but recording the substituted value here would outlive it: a
+        // later display_status carrying only an M117 message leaves this member
+        // untouched and still reaches the publish below, handing it the byte
+        // position as though it were the slicer's estimate.
+        if (display.contains("progress") && display["progress"].is_number() &&
+            get_print_lifecycle() != PrintState::Paused) {
             double raw = display["progress"].get<double>();
             slicer_progress_ = raw;
             if (raw > 0.0 && !slicer_progress_active_) {
@@ -690,17 +720,23 @@ void PrinterPrintState::update_from_status(const nlohmann::json& status) {
                 spdlog::info("[PrinterPrintState] Slicer progress active (M73 detected)");
             }
         }
-        if (display.contains("message")) {
-            if (display["message"].is_string()) {
-                const auto& msg = display["message"].get_ref<const std::string&>();
-                if (strcmp(lv_subject_get_string(&display_message_), msg.c_str()) != 0) {
-                    lv_subject_copy_string(&display_message_, msg.c_str());
-                }
-            } else {
-                // null or non-string — clear the message
-                if (strcmp(lv_subject_get_string(&display_message_), "") != 0) {
-                    lv_subject_copy_string(&display_message_, "");
-                }
+        // Klipper keeps the last M117 after a job ends, so a subscription response for
+        // an ended job usually carries a PRINT_START message that the live path
+        // cleared at the end edge. A whole-object payload cannot say whether its text
+        // came before or after the end, and a replayed one may be older than the live
+        // frames, so it leaves the shown message alone. print_stats is parsed above,
+        // so this is the state the frame reports.
+        const bool job_ended =
+            job_has_ended(static_cast<PrintJobState>(lv_subject_get_int(&print_state_enum_)));
+        if (display.contains("message") && whole_objects && job_ended) {
+            spdlog::debug("[PrinterPrintState] Subscription response for an ended job: "
+                          "display message left as shown");
+        } else if (display.contains("message")) {
+            const char* msg = display["message"].is_string()
+                                  ? display["message"].get_ref<const std::string&>().c_str()
+                                  : ""; // null or non-string clears the message
+            if (strcmp(lv_subject_get_string(&display_message_), msg) != 0) {
+                lv_subject_copy_string(&display_message_, msg);
             }
             update_display_message_visible();
         }
@@ -710,22 +746,7 @@ void PrinterPrintState::update_from_status(const nlohmann::json& status) {
     // update print_progress_ directly from slicer value
     if (slicer_progress_active_ && status.contains("display_status") &&
         !status.contains("virtual_sdcard")) {
-        int progress_pct = static_cast<int>(slicer_progress_ * 100.0 + 0.5);
-        if (progress_pct > 100)
-            progress_pct = 100;
-        if (progress_pct < 0)
-            progress_pct = 0;
-
-        auto current_state = static_cast<PrintJobState>(lv_subject_get_int(&print_state_enum_));
-        bool is_terminal_state =
-            (current_state == PrintJobState::COMPLETE ||
-             current_state == PrintJobState::CANCELLED || current_state == PrintJobState::ERROR);
-        int current_progress = lv_subject_get_int(&print_progress_);
-        if ((!is_terminal_state || progress_pct >= current_progress) &&
-            current_progress != progress_pct) {
-            lv_subject_set_int(&print_progress_, progress_pct);
-        }
-        publish_progress_display(progress_pct);
+        commit_progress(static_cast<int>(slicer_progress_ * 100.0 + 0.5));
     }
 
     // Per-extruder filament_used (from Klipper's extruder/extruder1/... objects).
@@ -792,9 +813,7 @@ void PrinterPrintState::update_from_status(const nlohmann::json& status) {
         if (auto pl_it = sdcard.find("pl_env_valid");
             pl_it != sdcard.end() && pl_it->is_boolean()) {
             int val = pl_it->get<bool>() ? 1 : 0;
-            if (lv_subject_get_int(&pl_env_valid_) != val) {
-                lv_subject_set_int(&pl_env_valid_, val);
-            }
+            lv_subject_set_int(&pl_env_valid_, val);
         }
         if (auto fp_it = sdcard.find("file_path"); fp_it != sdcard.end() && fp_it->is_string()) {
             // get_ref borrows the stored string (no temporary); assign only when
@@ -818,25 +837,8 @@ void PrinterPrintState::update_from_status(const nlohmann::json& status) {
                 if (slicer_progress_active_) {
                     // Slicer active and display_status present — use slicer value
                     progress_pct = static_cast<int>(slicer_progress_ * 100.0 + 0.5);
-                    if (progress_pct > 100)
-                        progress_pct = 100;
-                    if (progress_pct < 0)
-                        progress_pct = 0;
                 }
-
-                // Guard: Don't reset progress to 0 in terminal print states
-                auto current_state =
-                    static_cast<PrintJobState>(lv_subject_get_int(&print_state_enum_));
-                bool is_terminal_state = (current_state == PrintJobState::COMPLETE ||
-                                          current_state == PrintJobState::CANCELLED ||
-                                          current_state == PrintJobState::ERROR);
-
-                int current_progress = lv_subject_get_int(&print_progress_);
-                if ((!is_terminal_state || progress_pct >= current_progress) &&
-                    current_progress != progress_pct) {
-                    lv_subject_set_int(&print_progress_, progress_pct);
-                }
-                publish_progress_display(progress_pct);
+                commit_progress(progress_pct);
             }
 
             // virtual_sdcard.layer / layer_count are the FALLBACK source —
@@ -855,8 +857,8 @@ void PrinterPrintState::update_from_status(const nlohmann::json& status) {
                 if (vsd_layer != lv_subject_get_int(&print_layer_current_)) {
                     spdlog::debug("[LayerTracker] current_layer={} (from virtual_sdcard)",
                                   vsd_layer);
-                    lv_subject_set_int(&print_layer_current_, vsd_layer);
                 }
+                apply_layer_current(vsd_layer, LayerSource::Reported, "virtual_sdcard");
             }
             if (!total_layer_from_info && sdcard.contains("layer_count") &&
                 sdcard["layer_count"].is_number_integer()) {
@@ -902,9 +904,7 @@ void PrinterPrintState::update_from_status(const nlohmann::json& status) {
                 lv_subject_get_int(&print_duration_) > 0) {
                 auto current_state =
                     static_cast<PrintJobState>(lv_subject_get_int(&print_state_enum_));
-                bool is_terminal_state = (current_state == PrintJobState::COMPLETE ||
-                                          current_state == PrintJobState::CANCELLED ||
-                                          current_state == PrintJobState::ERROR);
+                bool is_terminal_state = job_has_ended(current_state);
                 if (!is_terminal_state && file_progress_pct > 0) {
                     int total = lv_subject_get_int(&print_layer_total_);
                     if (total > 0) {
@@ -919,12 +919,24 @@ void PrinterPrintState::update_from_status(const nlohmann::json& status) {
                         if (estimated != current) {
                             spdlog::debug("[LayerTracker] Estimated layer {}/{} from progress {}%",
                                           estimated, total, file_progress_pct);
-                            lv_subject_set_int(&print_layer_current_, estimated);
+                            apply_layer_current(estimated, LayerSource::Estimate,
+                                                "progress estimate");
                         }
                     }
                 }
             }
         }
+    }
+
+    // Power-loss recovery: plr_backend owns which status key carries the
+    // interrupted flag and the boolean-only rule (-1 means this frame says
+    // nothing about it; see plr_parse_interrupted_flag). The offer controller
+    // resets the subject on the disconnect edge, like pl_env_valid.
+    const int plr_flag = helix::plr_parse_interrupted_flag(status);
+    if (plr_flag >= 0 && lv_subject_get_int(&plr_interrupted_flag_) != plr_flag) {
+        spdlog::debug("[PrinterPrintState] PLR interrupted flag = {} (power-loss recovery)",
+                      plr_flag);
+        lv_subject_set_int(&plr_interrupted_flag_, plr_flag);
     }
 
     // Z-height current-layer derivation (Mainsail/Fluidd parity) — tier 3.
@@ -957,9 +969,7 @@ void PrinterPrintState::update_from_status(const nlohmann::json& status) {
     if (!printer_reports_layers_ && layer_height_ > 0.0 && have_gcode_z_ &&
         lv_subject_get_int(&print_duration_) > 0) {
         auto current_state = static_cast<PrintJobState>(lv_subject_get_int(&print_state_enum_));
-        bool is_terminal_state =
-            (current_state == PrintJobState::COMPLETE ||
-             current_state == PrintJobState::CANCELLED || current_state == PrintJobState::ERROR);
+        bool is_terminal_state = job_has_ended(current_state);
         int total = lv_subject_get_int(&print_layer_total_);
         if (!is_terminal_state && total > 0) {
             int derived = static_cast<int>(std::lround((last_gcode_z_mm_ - first_layer_height_) /
@@ -976,7 +986,7 @@ void PrinterPrintState::update_from_status(const nlohmann::json& status) {
                 spdlog::debug("[LayerTracker] Derived layer {}/{} from Z={:.3f}mm "
                               "(first={:.3f}, height={:.3f})",
                               derived, total, last_gcode_z_mm_, first_layer_height_, layer_height_);
-                lv_subject_set_int(&print_layer_current_, derived);
+                apply_layer_current(derived, LayerSource::Estimate, "z-height derivation");
             }
         }
     }
@@ -1004,9 +1014,7 @@ void PrinterPrintState::update_display_message_visible() {
     // most M117 traffic originates. The collector's phase label lives in a
     // separate subject (print_start_message), so there is nothing to duplicate.
     int new_value = (strcmp(lv_subject_get_string(&display_message_), "") != 0) ? 1 : 0;
-    if (lv_subject_get_int(&display_message_visible_) != new_value) {
-        lv_subject_set_int(&display_message_visible_, new_value);
-    }
+    lv_subject_set_int(&display_message_visible_, new_value);
 }
 
 // ============================================================================
@@ -1116,11 +1124,8 @@ void PrinterPrintState::set_print_display_filename(const std::string& name) {
 }
 
 void PrinterPrintState::set_print_layer_total(int total) {
-    async_lifetime_.defer("PrinterPrintState::set_print_layer_total", [this, total]() {
-        if (lv_subject_get_int(&print_layer_total_) != total) {
-            lv_subject_set_int(&print_layer_total_, total);
-        }
-    });
+    async_lifetime_.defer("PrinterPrintState::set_print_layer_total",
+                          [this, total]() { lv_subject_set_int(&print_layer_total_, total); });
 }
 
 void PrinterPrintState::set_print_layer_heights(double layer_height, double first_layer_height) {
@@ -1139,9 +1144,7 @@ void PrinterPrintState::set_print_layer_current(int layer) {
             has_real_layer_data_ = true;
         }
         printer_reports_layers_ = true; // sticky printer capability
-        if (lv_subject_get_int(&print_layer_current_) != layer) {
-            lv_subject_set_int(&print_layer_current_, layer);
-        }
+        apply_layer_current(layer, LayerSource::Echo, "gcode response");
     });
 }
 
@@ -1198,9 +1201,7 @@ void PrinterPrintState::set_print_start_state(PrintStartPhase phase, const char*
             strcmp(lv_subject_get_string(&print_start_message_), msg.c_str()) != 0) {
             lv_subject_copy_string(&print_start_message_, msg.c_str());
         }
-        if (lv_subject_get_int(&print_start_progress_) != clamped_progress) {
-            lv_subject_set_int(&print_start_progress_, clamped_progress);
-        }
+        lv_subject_set_int(&print_start_progress_, clamped_progress);
         update_print_show_progress();
     });
 }
@@ -1238,26 +1239,18 @@ void PrinterPrintState::clear_print_start_time_left() {
     if (strcmp(lv_subject_get_string(&print_start_time_left_), "") != 0) {
         lv_subject_copy_string(&print_start_time_left_, "");
     }
-    if (lv_subject_get_int(&preprint_remaining_) != 0) {
-        lv_subject_set_int(&preprint_remaining_, 0);
-    }
-    if (lv_subject_get_int(&preprint_elapsed_) != 0) {
-        lv_subject_set_int(&preprint_elapsed_, 0);
-    }
+    lv_subject_set_int(&preprint_remaining_, 0);
+    lv_subject_set_int(&preprint_elapsed_, 0);
 }
 
 void PrinterPrintState::set_preprint_remaining_seconds(int seconds) {
     int val = std::max(0, seconds);
-    if (lv_subject_get_int(&preprint_remaining_) != val) {
-        lv_subject_set_int(&preprint_remaining_, val);
-    }
+    lv_subject_set_int(&preprint_remaining_, val);
 }
 
 void PrinterPrintState::set_preprint_elapsed_seconds(int seconds) {
     int val = std::max(0, seconds);
-    if (lv_subject_get_int(&preprint_elapsed_) != val) {
-        lv_subject_set_int(&preprint_elapsed_, val);
-    }
+    lv_subject_set_int(&preprint_elapsed_, val);
 }
 
 void PrinterPrintState::set_estimated_print_time(int seconds) {
@@ -1515,13 +1508,9 @@ void PrinterPrintState::publish_lifecycle_state() {
     // observer see the stale value. Ordering it first closes that, and is safe
     // in the other direction because job_holds_machine has only XML consumers
     // (bind_state_if_eq), none of which reads print_lifecycle back.
-    //
-    // Written only-if-changed for the same reason print_lifecycle is: several
-    // lifecycle values map to the same boolean.
     const int holds = job_holds_machine(static_cast<PrintState>(derived)) ? 1 : 0;
-    if (lv_subject_get_int(&job_holds_machine_) != holds) {
-        lv_subject_set_int(&job_holds_machine_, holds);
-    }
+    lv_subject_set_int(&job_holds_machine_, holds);
+    publish_machine_motion_blocked();
 
     if (current != derived) {
         // Previous first, so an observer of the current value already sees a
@@ -1529,6 +1518,22 @@ void PrinterPrintState::publish_lifecycle_state() {
         lv_subject_set_int(&print_lifecycle_prev_, current);
         lv_subject_set_int(&print_lifecycle_, derived);
     }
+}
+
+void PrinterPrintState::publish_machine_motion_blocked() {
+    const int blocked =
+        (lv_subject_get_int(&job_holds_machine_) != 0 || spool_latch_active_.load()) ? 1 : 0;
+    lv_subject_set_int(&machine_motion_blocked_, blocked);
+}
+
+void PrinterPrintState::set_spool_latch(bool on, std::vector<std::string> extra_tokens) {
+    {
+        std::lock_guard<std::mutex> lock(spool_latch_mutex_);
+        spool_latch_tokens_ = on ? std::move(extra_tokens) : std::vector<std::string>{};
+    }
+    spool_latch_active_.store(on);
+    lv_subject_set_int(&spool_latch_, on ? 1 : 0);
+    publish_machine_motion_blocked();
 }
 
 bool PrinterPrintState::is_in_print_start() const {

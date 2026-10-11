@@ -60,6 +60,11 @@ const PrePrintOption* PrePrintOptionSet::find(const std::string& id) const {
     return (it != options.end()) ? &(*it) : nullptr;
 }
 
+bool PrePrintOptionSet::declares_capability(const std::string& capability) const {
+    return std::any_of(options.begin(), options.end(),
+                       [&](const PrePrintOption& o) { return o.capability_key() == capability; });
+}
+
 std::optional<PrePrintOption> parse_pre_print_option(const nlohmann::json& j) {
     if (!j.is_object()) {
         spdlog::warn("[PrePrintOption] Skipping option: JSON value is not an object");
@@ -99,6 +104,7 @@ std::optional<PrePrintOption> parse_pre_print_option(const nlohmann::json& j) {
     // the required-field checks below now do that job for nulls too: a null
     // `param_name` reads as empty and is rejected with the accurate "requires
     // non-empty 'param_name'" message instead of throwing.
+    opt.capability = helix::json_util::safe_string(j, "capability");
     opt.label_key = helix::json_util::safe_string(j, "label_key");
     opt.description_key = helix::json_util::safe_string(j, "description_key");
     opt.icon = helix::json_util::safe_string(j, "icon");
@@ -214,15 +220,17 @@ PrePrintOptionSet parse_pre_print_option_set(const nlohmann::json& j) {
         }
     }
 
-    std::sort(set.options.begin(), set.options.end(),
-              [](const PrePrintOption& a, const PrePrintOption& b) {
-                  if (a.category != b.category) {
-                      return static_cast<int>(a.category) < static_cast<int>(b.category);
-                  }
-                  return a.order < b.order;
-              });
-
+    helix::sort_pre_print_options(set.options);
     return set;
+}
+
+void helix::sort_pre_print_options(std::vector<PrePrintOption>& options) {
+    std::sort(options.begin(), options.end(), [](const PrePrintOption& a, const PrePrintOption& b) {
+        if (a.category != b.category) {
+            return static_cast<int>(a.category) < static_cast<int>(b.category);
+        }
+        return a.order < b.order;
+    });
 }
 
 std::string render_macro_param(const PrePrintOption& opt, bool enabled) {

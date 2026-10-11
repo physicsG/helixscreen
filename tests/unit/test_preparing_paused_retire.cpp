@@ -65,37 +65,38 @@ struct PreparingPausedFixture : public LVGLTestFixture {
 
 TEST_CASE_METHOD(PreparingPausedFixture, "A paused print carrying our filename confirms the claim",
                  "[print][preparing][1365]") {
-    state().begin_preparing(PrintJobRef{"KNX-Deckel_ABS.gcode", "", ""});
-    REQUIRE(state().has_preparing_job());
+    state().print_state().begin_preparing(PrintJobRef{"KNX-Deckel_ABS.gcode", "", ""});
+    REQUIRE(state().print_state().has_preparing_job());
 
     // The reporter's soak: M25 in PRINT_START, so this is the only job state
     // Moonraker ever publishes between start and the closing M24.
     report("paused", "KNX-Deckel_ABS.gcode");
 
-    REQUIRE_FALSE(state().has_preparing_job());
-    REQUIRE(state().last_preparing_exit() == PreparingExit::Confirmed);
+    REQUIRE_FALSE(state().print_state().has_preparing_job());
+    REQUIRE(state().print_state().last_preparing_exit() == PreparingExit::Confirmed);
 }
 
 TEST_CASE_METHOD(PreparingPausedFixture, "Confirming from paused leaves the heaters alone",
                  "[print][preparing][1365]") {
-    state().begin_preparing(PrintJobRef{"soak.gcode", "", ""});
+    state().print_state().begin_preparing(PrintJobRef{"soak.gcode", "", ""});
     report("paused", "soak.gcode");
 
     // Pin the retirement first. last_preparing_exit_ is initialised to Confirmed,
     // so asserting cool_down alone passes on a build where reconcile never ran.
-    REQUIRE_FALSE(state().has_preparing_job());
-    REQUIRE(state().last_preparing_exit() == PreparingExit::Confirmed);
+    REQUIRE_FALSE(state().print_state().has_preparing_job());
+    REQUIRE(state().print_state().last_preparing_exit() == PreparingExit::Confirmed);
 
     // The bug's actual damage. TimedOut and Cancelled both cool down; Confirmed
     // must not, or the soak loses its bed the moment the claim retires.
-    REQUIRE_FALSE(decide_preparing_exit_action(state().last_preparing_exit()).cool_down);
+    REQUIRE_FALSE(
+        decide_preparing_exit_action(state().print_state().last_preparing_exit()).cool_down);
 }
 
 TEST_CASE_METHOD(PreparingPausedFixture, "A settled claim disarms the preparing watchdog",
                  "[print][preparing][1365]") {
     auto& pps = PrinterStateTestAccess::get_print_state(state());
 
-    state().begin_preparing(PrintJobRef{"soak.gcode", "", ""});
+    state().print_state().begin_preparing(PrintJobRef{"soak.gcode", "", ""});
     REQUIRE(PrinterPrintStateTestAccess::has_preparing_watchdog(pps));
 
     report("paused", "soak.gcode");
@@ -108,15 +109,15 @@ TEST_CASE_METHOD(PreparingPausedFixture, "A settled claim disarms the preparing 
 
 TEST_CASE_METHOD(PreparingPausedFixture, "A paused print naming a different job supersedes ours",
                  "[print][preparing][1365]") {
-    state().begin_preparing(PrintJobRef{"mine.gcode", "", ""});
+    state().print_state().begin_preparing(PrintJobRef{"mine.gcode", "", ""});
 
     // Someone paused a different print out from under us. The claim is still
     // settled - it is just not ours - and Superseded keeps the heaters alone
     // while dropping the identity override.
     report("paused", "theirs.gcode");
 
-    REQUIRE_FALSE(state().has_preparing_job());
-    REQUIRE(state().last_preparing_exit() == PreparingExit::Superseded);
+    REQUIRE_FALSE(state().print_state().has_preparing_job());
+    REQUIRE(state().print_state().last_preparing_exit() == PreparingExit::Superseded);
 }
 
 TEST_CASE_METHOD(PreparingPausedFixture, "Only a job the printer has taken settles the claim",
@@ -125,10 +126,10 @@ TEST_CASE_METHOD(PreparingPausedFixture, "Only a job the printer has taken settl
     // the printer is not holding a job, so our claim must survive - this is the
     // window begin_preparing() exists for.
     auto still_preparing = [&](const char* job_state) {
-        state().retire_preparing(PreparingExit::Cancelled);
-        state().begin_preparing(PrintJobRef{"mine.gcode", "", ""});
+        state().print_state().retire_preparing(PreparingExit::Cancelled);
+        state().print_state().begin_preparing(PrintJobRef{"mine.gcode", "", ""});
         report(job_state, "mine.gcode");
-        return state().has_preparing_job();
+        return state().print_state().has_preparing_job();
     };
 
     REQUIRE(still_preparing("standby"));
@@ -140,9 +141,9 @@ TEST_CASE_METHOD(PreparingPausedFixture, "Only a job the printer has taken settl
 TEST_CASE_METHOD(PreparingPausedFixture, "A printing report still confirms the claim",
                  "[print][preparing][1365]") {
     // Regression guard on the path that always worked.
-    state().begin_preparing(PrintJobRef{"normal.gcode", "", ""});
+    state().print_state().begin_preparing(PrintJobRef{"normal.gcode", "", ""});
     report("printing", "normal.gcode");
 
-    REQUIRE_FALSE(state().has_preparing_job());
-    REQUIRE(state().last_preparing_exit() == PreparingExit::Confirmed);
+    REQUIRE_FALSE(state().print_state().has_preparing_job());
+    REQUIRE(state().print_state().last_preparing_exit() == PreparingExit::Confirmed);
 }

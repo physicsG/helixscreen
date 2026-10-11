@@ -62,9 +62,8 @@ struct ToolInfo {
     std::optional<std::string> extruder_name = "extruder"; // Linked extruder ("extruder", "extruder1")
     std::optional<std::string> heater_name;           // Explicit heater override (nullopt = use extruder)
     std::optional<std::string> fan_name;              // Part cooling fan ("fan", "fan_generic fan1")
-    float gcode_x_offset = 0.0f;                     // Gcode X offset for tool
-    float gcode_y_offset = 0.0f;                     // Gcode Y offset
-    float gcode_z_offset = 0.0f;                     // Gcode Z offset
+    std::array<ToolAxisOffset, 3> gcode_offsets{};   // The tool's own X/Y/Z offsets, by axis_index()
+                                                     //   each: mm, known, saved_mm, dirty()
     bool active = false;                              // Klipper "active" state
     bool mounted = false;                             // Physically mounted on carriage
     DetectState detect_state = DetectState::UNAVAILABLE; // Physical presence detection
@@ -179,6 +178,20 @@ ToolInfo {
 
 Updates `active_tool_index_` and the `active_tool` subject.
 
+### The Empty Carriage
+
+Whether `-1` is a real active-tool value depends on the topology. When an AMS
+backend owns the tool list, `build_ams_topology()`
+(`src/printer/ams_state_tool_mapping.cpp#build_ams_topology`) fills
+`ToolTopology::allows_empty_carriage` from `AmsBackend::load_mounts_tool()`
+(`include/ams_backend.h#BackendTraits/load_mounts_tool`): true where selecting a slot physically
+mounts a tool, so the carriage can also hold nothing, as on a tool changer like
+the FlashForge Creator 5. `ToolState::set_ams_topology()`
+(`src/printer/tool_state.cpp#set_ams_topology`) then publishes `active_tool` = -1
+and the UI shows no head as active. Lane-based systems (AFC, AMS) leave the flag
+false and keep the fallback: an out-of-range report maps to T0, because a lane
+feeder always has a tool behind it.
+
 ### Per-Tool Objects
 
 Each tool's status is keyed as `"tool <name>"`:
@@ -203,13 +216,26 @@ Each tool's status is keyed as `"tool <name>"`:
 | `active` | bool | Klipper's active state for this tool |
 | `mounted` | bool | Physically mounted on carriage |
 | `detect_state` | string | `"present"`, `"absent"`, or absent key = UNAVAILABLE |
-| `gcode_x_offset` | float | Tool X offset (mm) |
-| `gcode_y_offset` | float | Tool Y offset (mm) |
-| `gcode_z_offset` | float | Tool Z offset (mm) |
+| `gcode_x_offset` | float | Tool X offset (mm) — see below |
+| `gcode_y_offset` | float | Tool Y offset (mm) — see below |
+| `gcode_z_offset` | float | Tool Z offset (mm) — see below |
 | `extruder` | string | Extruder assignment (can change at runtime) |
 | `fan` | string | Fan assignment |
 
 Any change bumps `tools_version` subject to trigger UI rebuilds.
+
+The three offsets are **not** parsed in the generic per-tool loop. Which store is
+authoritative for a tool's offset is a per-firmware question (`include/tool_offsets.h`):
+klipper-toolchanger keeps all three on the `tool T{n}` object and edits them with
+`SET_TOOL_PARAMETER`, while a MedusaHC-style machine keeps Z on a macro and never reads the
+tool object's copy. `ToolState::init_tools()` resolves that model once from discovery
+(`helix::tool_offsets::resolve_reader()`), and `ToolState::update_from_status()` hands the
+result to `read_tool_offset_microns()` per tool and per axis - each read a direct key lookup
+into the frame, never a scan of it - and only for the axes `supports_axis()` says the
+firmware keeps. `ToolInfo::gcode_offset(Axis)` returns the
+value with its `known` / `saved_mm` bookkeeping; the per-tool subjects
+(`per_tool_{x,y,z}_supported`, `any_tool_offset_dirty`) follow from it, and the values
+themselves are read through the `tool_offset_*()` accessors rather than subjects.
 
 ---
 
@@ -233,7 +259,7 @@ This allows a tool changer where T0 feeds from an AFC (backend 0) and T1 feeds f
 
 | Subject Name | Type | Description |
 |--------------|------|-------------|
-| `active_tool` | int | Index of the currently active tool |
+| `active_tool` | int | Index of the currently active tool; -1 = empty carriage (tool changer topologies only, see [The Empty Carriage](#the-empty-carriage)) |
 | `tool_count` | int | Total number of tools |
 | `tools_version` | int | Monotonically increasing counter, bumped on any tool data change |
 
@@ -262,9 +288,9 @@ if (tool) {
 
 ## UI Patterns
 
-### Active Tool Badge (HomePanel)
+### Active Tool Number (HomePanel)
 
-The home panel shows a tool badge (e.g., "T1") when multiple tools are present. Hidden on single-tool printers via `bind_flag_if_eq` on `tool_count`.
+On multi-tool printers the nozzle icon carries the active tool's number as a bold subscript digit beside the glyph (`ui_xml/components/nozzle_icon.xml#tool_badge`, bound to `tool_badge_text` — the 1-based digit from `lane_number_text()`, never a "T" prefix). Hidden on single-tool printers via `bind_flag_if_eq` on the badge subject.
 
 ### Tool-Prefixed Temperatures (PrintStatusPanel)
 

@@ -24,6 +24,7 @@
 
 #include "lvgl/lvgl.h"
 #include "overlay_base.h"
+#include "static_panel_registry.h"
 #include "subject_managed_panel.h"
 
 namespace helix::settings {
@@ -47,63 +48,23 @@ namespace helix::settings {
  */
 class TelemetryDataOverlay : public OverlayBase {
   public:
-    TelemetryDataOverlay();
     ~TelemetryDataOverlay() override;
 
-    // Non-copyable (inherited from OverlayBase)
-
-    //
-    // === OverlayBase Interface ===
-    //
-
-    /**
-     * @brief Initialize subjects for reactive binding
-     */
     void init_subjects() override;
 
-    /**
-     * @brief Create the overlay UI (called lazily)
-     * @param parent Parent widget to attach overlay to (usually screen)
-     * @return Root object of overlay, or nullptr on failure
-     */
-    lv_obj_t* create(lv_obj_t* parent) override;
-
-    /**
-     * @brief Get human-readable overlay name
-     * @return "Telemetry Data"
-     */
     const char* get_name() const override {
         return "Telemetry Data";
     }
+    const char* xml_component() const override {
+        return "telemetry_data_overlay";
+    }
 
-    /**
-     * @brief Register event callbacks with lv_xml system
-     */
     void register_callbacks() override;
 
-    /**
-     * @brief Called when overlay becomes visible - populates event list
-     */
+    /// Populates the status card and event list on each open.
     void on_activate() override;
 
-    /**
-     * @brief Called when overlay is being hidden
-     */
-    void on_deactivate() override;
-
-    //
-    // === Public Interface ===
-    //
-
-    /**
-     * @brief Show the overlay (populates events first)
-     * @param parent_screen The parent screen for overlay creation
-     */
-    void show(lv_obj_t* parent_screen);
-
-    /**
-     * @brief Handle clear queue button click
-     */
+    /// Purge the queued events and refresh the display.
     void handle_clear_queue();
 
   private:
@@ -129,24 +90,20 @@ class TelemetryDataOverlay : public OverlayBase {
     SubjectManager subjects_;
 
     /// Status text subjects
-    lv_subject_t status_subject_;
-    lv_subject_t detail_subject_;
-    lv_subject_t count_subject_;
+    lv_subject_t status_subject_{};
+    lv_subject_t detail_subject_{};
+    lv_subject_t count_subject_{};
 
     char status_buf_[64];
     char detail_buf_[128];
-
-    //
-    // === Static Callbacks ===
-    //
-
-    static void on_telemetry_clear_queue(lv_event_t* e);
 };
 
 /**
  * @brief Global instance accessor
  * @return Reference to singleton TelemetryDataOverlay
  */
-TelemetryDataOverlay& get_telemetry_data_overlay();
+inline TelemetryDataOverlay& get_telemetry_data_overlay() {
+    return lazy_global<TelemetryDataOverlay>("TelemetryDataOverlay");
+}
 
 } // namespace helix::settings

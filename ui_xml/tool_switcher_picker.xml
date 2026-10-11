@@ -7,7 +7,7 @@
     <!-- Card width matched to the widget tile, positioned by ContextMenu. The
          card is as narrow as the tile, so the title is one word, the X carries
          the dismiss, and there is no room to spend on a rule. -->
-    <context_menu_card title="Tool" title_tag="Tool" pad_all="#space_xs" pad_gap="#space_xs" hide_divider="true">
+    <context_menu_card title="Tool" pad_all="#space_xs" pad_gap="#space_xs" hide_divider="true">
       <!-- Tool buttons populated dynamically by C++ -->
       <!-- max_height set dynamically by C++ to ~60% screen height -->
       <lv_obj name="tool_list"

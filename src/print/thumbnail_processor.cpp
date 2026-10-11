@@ -10,9 +10,12 @@
 #include "ui_update_queue.h"
 
 #include "app_globals.h"
+#include "helix_thread.h"
 #include "lvgl_image_writer.h"
 #include "memory_monitor.h"
 #include "system/crash_handler.h"
+#include "thumbnail_cache.h"
+#include "thumbnail_rules.h"
 
 #include <hv/hthreadpool.h>
 #include <spdlog/spdlog.h>
@@ -37,17 +40,14 @@ namespace helix {
 // This is just a fallback for early initialization before ThumbnailCache runs.
 static constexpr const char* DEFAULT_CACHE_DIR = "/tmp/helix_thumbs";
 
-// LVGL 9 color format constant (magic comes from lv_image_dsc.h)
-static constexpr uint8_t COLOR_FORMAT_ARGB8888 = 0x10;
-
 // Thread pool configuration
 static constexpr int MIN_WORKER_THREADS = 1;
 static constexpr int MAX_WORKER_THREADS = 2; // Don't starve UI thread on single-core
 
 // Safety limits to prevent memory exhaustion and integer overflow
 static constexpr size_t MAX_PNG_INPUT_SIZE = 10 * 1024 * 1024; // 10 MB compressed
-static constexpr int MAX_SOURCE_DIMENSION = 4096;              // 4K max source
-static constexpr int MAX_OUTPUT_DIMENSION = 1024;              // 1K max output
+static constexpr int MAX_SOURCE_DIMENSION = THUMBNAIL_MAX_SOURCE_DIMENSION;
+static constexpr int MAX_OUTPUT_DIMENSION = 1024; // 1K max output
 
 // ============================================================================
 // Singleton
@@ -141,6 +141,8 @@ void ThumbnailProcessor::process_file_async(const std::string& png_path,
                                             ProcessErrorCallback on_error) {
     auto path_copy = png_path;
     auto source_copy = source_path;
+    // ThumbnailCache sweeps a source's variants by this same key.
+    std::string key = thumbnail_hash(source_path);
 
     // Same locked-commit structure as process_async() — see the #1202 commentary
     // there for why commit() must happen under mutex_.
@@ -151,10 +153,13 @@ void ThumbnailProcessor::process_file_async(const std::string& png_path,
             std::shared_ptr<ThumbnailWriteJournal> journal_copy = write_journal_.lock();
 
             thread_pool_->commit([this, path_copy = std::move(path_copy),
-                                  source_copy = std::move(source_copy),
+                                  source_copy = std::move(source_copy), key = std::move(key),
                                   cache_dir_copy = std::move(cache_dir_copy),
                                   journal_copy = std::move(journal_copy), target, on_success,
                                   on_error]() {
+                // libhv's HThreadPool spawns its own workers, so each task
+                // makes sure the worker it lands on has a signal stack.
+                helix::install_thread_altstack();
                 // The read happens HERE, on the worker. Callers used to slurp the
                 // PNG on the main thread purely to hand the bytes straight back
                 // to this pool - once per file while a listing populated.
@@ -178,7 +183,7 @@ void ThumbnailProcessor::process_file_async(const std::string& png_path,
                 file.close();
 
                 ProcessResult result =
-                    do_process(png_data, source_copy, target, cache_dir_copy, journal_copy);
+                    do_process(png_data, source_copy, key, target, cache_dir_copy, journal_copy);
                 deliver_result(result, source_copy, on_success, on_error);
             });
             return;
@@ -200,6 +205,7 @@ void ThumbnailProcessor::process_async(const std::vector<uint8_t>& png_data,
     // shutdown() needs to acquire.
     auto png_copy = png_data;
     auto source_copy = source_path;
+    std::string key = thumbnail_hash(source_path);
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -231,10 +237,11 @@ void ThumbnailProcessor::process_async(const std::vector<uint8_t>& png_data,
             // notifies. It does not block.
             thread_pool_->commit(
                 [this, png_copy = std::move(png_copy), source_copy = std::move(source_copy),
-                 cache_dir_copy = std::move(cache_dir_copy), journal_copy = std::move(journal_copy),
-                 target, on_success, on_error]() {
-                    ProcessResult result =
-                        do_process(png_copy, source_copy, target, cache_dir_copy, journal_copy);
+                 key = std::move(key), cache_dir_copy = std::move(cache_dir_copy),
+                 journal_copy = std::move(journal_copy), target, on_success, on_error]() {
+                    helix::install_thread_altstack();
+                    ProcessResult result = do_process(png_copy, source_copy, key, target,
+                                                      cache_dir_copy, journal_copy);
                     deliver_result(result, source_copy, on_success, on_error);
                 });
             return;
@@ -259,7 +266,8 @@ ProcessResult ThumbnailProcessor::process_sync(const std::vector<uint8_t>& png_d
         cache_dir_copy = cache_dir_;
         journal_copy = write_journal_.lock();
     }
-    return do_process(png_data, source_path, target, cache_dir_copy, journal_copy);
+    return do_process(png_data, source_path, thumbnail_hash(source_path), target, cache_dir_copy,
+                      journal_copy);
 }
 
 std::string ThumbnailProcessor::get_if_processed(const std::string& source_path,
@@ -271,7 +279,7 @@ std::string ThumbnailProcessor::get_if_processed(const std::string& source_path,
         cache_dir_copy = cache_dir_;
     }
 
-    std::string filename = generate_cache_filename(source_path, target);
+    std::string filename = thumbnail_file_name(thumbnail_hash(source_path), &target);
     std::string full_path = cache_dir_copy + "/" + filename;
 
     if (std::filesystem::exists(full_path)) {
@@ -280,129 +288,6 @@ std::string ThumbnailProcessor::get_if_processed(const std::string& source_path,
     }
 
     return "";
-}
-
-namespace {
-
-// Card size measured by PrintSelectPanel, or 0 when no card grid has reported one.
-// Read from the thumbnail worker threads while a fetch picks its target.
-std::atomic<int> g_card_hint_width{0};
-std::atomic<int> g_card_hint_height{0};
-
-} // namespace
-
-void ThumbnailProcessor::set_card_size_hint(int card_width, int card_height) {
-    if (card_width <= 0 || card_height <= 0) {
-        g_card_hint_width.store(0, std::memory_order_relaxed);
-        g_card_hint_height.store(0, std::memory_order_relaxed);
-        return;
-    }
-    g_card_hint_width.store(card_width, std::memory_order_relaxed);
-    g_card_hint_height.store(card_height, std::memory_order_relaxed);
-}
-
-ThumbnailTarget ThumbnailProcessor::get_target_for_card(int card_width, int card_height) {
-    ThumbnailTarget target;
-    target.color_format = COLOR_FORMAT_ARGB8888;
-
-    if (card_width <= 0 || card_height <= 0) {
-        target.width = 120;
-        target.height = 120;
-        return target;
-    }
-
-    // preview_offset_y in globals.xml lifts the art by 12% of its own height, so a
-    // square of side N clears the card's top edge only while (H - N)/2 >= 0.12N.
-    int height_bound = static_cast<int>(card_height / 1.24);
-    int side = std::min(card_width, height_bound);
-
-    side -= side % 4; // bound the number of distinct .bin cache entries
-    side = std::clamp(side, 64, 220);
-
-    target.width = side;
-    target.height = side;
-    return target;
-}
-
-ThumbnailTarget ThumbnailProcessor::get_target_for_resolution(int width, int height,
-                                                              ThumbnailSize size) {
-    ThumbnailTarget target;
-    target.color_format = COLOR_FORMAT_ARGB8888;
-
-    // Defensive: treat invalid dimensions as smallest breakpoint
-    if (width <= 0 || height <= 0) {
-        target.width = (size == ThumbnailSize::Detail) ? 200 : 120;
-        target.height = target.width;
-        return target;
-    }
-
-    int greater_res = std::max(width, height);
-
-    if (size == ThumbnailSize::Detail) {
-        // Detail view sizes — larger for status panel / detail overlay
-        if (greater_res <= 480) {
-            target.width = 200;
-            target.height = 200;
-        } else if (greater_res <= 800) {
-            target.width = 300;
-            target.height = 300;
-        } else {
-            target.width = 400;
-            target.height = 400;
-        }
-    } else {
-        // Card view sizes — small thumbnails for file lists
-        if (greater_res <= 480) {
-            // SMALL: 480x320 class → card ~107px → target 120x120
-            target.width = 120;
-            target.height = 120;
-        } else if (greater_res <= 800) {
-            // MEDIUM: 800x480 class (AD5M) → card ~151px → target 160x160
-            target.width = 160;
-            target.height = 160;
-        } else {
-            // LARGE: 1024x600, 1280x720+ → card ~205px → target 220x220
-            target.width = 220;
-            target.height = 220;
-        }
-    }
-
-    return target;
-}
-
-ThumbnailTarget ThumbnailProcessor::get_target_for_display(ThumbnailSize size) {
-    // A measured card beats guessing one from the display resolution. Card art has to
-    // fit the box the grid actually built, or LVGL crops the model (#1208).
-    if (size == ThumbnailSize::Card) {
-        int hint_w = g_card_hint_width.load(std::memory_order_relaxed);
-        int hint_h = g_card_hint_height.load(std::memory_order_relaxed);
-        if (hint_w > 0 && hint_h > 0) {
-            ThumbnailTarget target = get_target_for_card(hint_w, hint_h);
-            spdlog::trace("[ThumbnailProcessor] Card {}x{} → target {}x{} (measured)", hint_w,
-                          hint_h, target.width, target.height);
-            return target;
-        }
-    }
-
-    // Get the default display
-    lv_display_t* display = lv_display_get_default();
-    if (!display) {
-        // Fallback if no display initialized yet (shouldn't happen in normal use)
-        spdlog::debug("[ThumbnailProcessor] No display available, using medium defaults");
-        return get_target_for_resolution(800, 480, size);
-    }
-
-    // Query display resolution
-    int32_t hor_res = lv_display_get_horizontal_resolution(display);
-    int32_t ver_res = lv_display_get_vertical_resolution(display);
-
-    ThumbnailTarget target = get_target_for_resolution(hor_res, ver_res, size);
-
-    const char* size_str = (size == ThumbnailSize::Detail) ? "detail" : "card";
-    spdlog::trace("[ThumbnailProcessor] Display {}x{} → target {}x{} ({}, ARGB8888)", hor_res,
-                  ver_res, target.width, target.height, size_str);
-
-    return target;
 }
 
 void ThumbnailProcessor::set_cache_dir(const std::string& path) {
@@ -443,12 +328,20 @@ void ThumbnailProcessor::clear_cache() {
 size_t ThumbnailProcessor::pending_tasks() const {
     // Was an unlocked null-check followed by an unlocked dereference — the same
     // use-after-free window as process_async(), against shutdown()'s reset
-    // (#1202). taskNum() is a cheap read, so the whole thing goes under the lock.
+    // (#1202). All three reads are cheap, so the whole thing goes under the lock.
     std::lock_guard<std::mutex> lock(mutex_);
     if (!thread_pool_) {
         return 0;
     }
-    return thread_pool_->taskNum();
+    // taskNum() alone only counts tasks still sitting in the queue: a task a
+    // worker has already popped and is executing drops out of it before the
+    // task itself finishes, so it must not be read as "nothing pending" on
+    // its own. currentThreadNum() - idleThreadNum() adds back exactly what
+    // HThreadPool::wait()'s own idle condition checks
+    // (`tasks.empty() && idle_thread_num == cur_thread_num`).
+    size_t queued = thread_pool_->taskNum();
+    int busy_workers = thread_pool_->currentThreadNum() - thread_pool_->idleThreadNum();
+    return queued + (busy_workers > 0 ? static_cast<size_t>(busy_workers) : 0);
 }
 
 void ThumbnailProcessor::wait_for_completion() {
@@ -467,60 +360,28 @@ void ThumbnailProcessor::wait_for_completion() {
     }
 }
 
+void ThumbnailProcessor::submit_test_task(std::function<void()> task) {
+    // commit() must run under mutex_, the same as process_async()/process_from_path()
+    // above (#1202): HThreadPool::commit() opens with `if (status == STOP) start();`,
+    // so releasing the lock first would let a concurrent shutdown() stop the pool and
+    // then have this commit() resurrect it.
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!shutdown_ && thread_pool_) {
+        thread_pool_->commit([task = std::move(task)] {
+            helix::install_thread_altstack();
+            task();
+        });
+    }
+}
+
 // ============================================================================
 // Private Implementation
 // ============================================================================
 
-std::string ThumbnailProcessor::generate_cache_filename(const std::string& source_path,
-                                                        const ThumbnailTarget& target) const {
-    // Hash the source path for a unique identifier
-    std::hash<std::string> hasher;
-    size_t hash = hasher(source_path);
-
-    // Always ARGB8888 now
-    const char* format_str = "ARGB8888";
-
-    // Generate filename: {hash}_{w}x{h}_{format}.bin
-    // NOTE: Must use .bin extension for LVGL's bin decoder (lv_bin_decoder.c only accepts .bin)
-    char filename[128];
-    std::snprintf(filename, sizeof(filename), "%zu_%dx%d_%s.bin", hash, target.width, target.height,
-                  format_str);
-
-    return filename;
-}
-
-// A complete PNG starts with the 8-byte signature and ends with an IEND chunk.
-// stb_image is fragile on malformed/truncated input — crafted or severed streams
-// can drive heap overreads — and the gcode-header extraction fallback can hand us
-// a PNG cut mid-stream by the 100 KB partial-download boundary. A bad decode runs
-// on the worker thread and corrupts the heap, surfacing later as an unrelated
-// glibc abort on the main thread (debug bundle 783DVYKD). Reject non-PNG and
-// truncated data before stb_image ever touches it.
-static bool is_complete_png(const std::vector<uint8_t>& data) {
-    static const unsigned char SIG[8] = {0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A};
-    static const unsigned char IEND[4] = {0x49, 0x45, 0x4E, 0x44}; // "IEND"
-
-    if (data.size() < 16) {
-        return false; // too small to hold signature + a terminating IEND chunk
-    }
-    if (std::memcmp(data.data(), SIG, sizeof(SIG)) != 0) {
-        return false; // not a PNG
-    }
-    // A complete stream ends with [len=0]["IEND"][CRC], so the IEND marker sits in
-    // the last 12 bytes; scan the final 16 to tolerate a stray trailing byte.
-    constexpr size_t window = 16;
-    const unsigned char* tail = data.data() + (data.size() - window);
-    for (size_t i = 0; i + sizeof(IEND) <= window; ++i) {
-        if (std::memcmp(tail + i, IEND, sizeof(IEND)) == 0) {
-            return true;
-        }
-    }
-    return false; // no IEND near the end → truncated/corrupt
-}
-
 ProcessResult
 ThumbnailProcessor::do_process(const std::vector<uint8_t>& png_data, const std::string& source_path,
-                               const ThumbnailTarget& target, const std::string& cache_dir,
+                               const std::string& cache_key, const ThumbnailTarget& target,
+                               const std::string& cache_dir,
                                const std::shared_ptr<ThumbnailWriteJournal>& journal) {
     ProcessResult result;
 
@@ -536,11 +397,12 @@ ThumbnailProcessor::do_process(const std::vector<uint8_t>& png_data, const std::
         return result;
     }
 
-    // Reject truncated/corrupt or non-PNG data before stb_image touches it (see
-    // is_complete_png). All thumbnails in this pipeline are PNG (Moonraker-served
-    // or extracted from gcode), so a complete-PNG gate is both correct and tightest.
-    if (!is_complete_png(png_data)) {
-        result.error = "Incomplete or non-PNG thumbnail data (truncated or corrupt)";
+    // stb_image is fragile on malformed/truncated input: a severed stream (the
+    // 100 KB gcode-header boundary, a partial download) can drive heap
+    // overreads on this worker that surface later as an unrelated abort on the
+    // main thread (debug bundle 783DVYKD). Only a complete PNG or JPEG is decoded.
+    if (!is_complete_image(png_data)) {
+        result.error = "Incomplete or unsupported thumbnail data (not a complete PNG or JPEG)";
         return result;
     }
 
@@ -557,6 +419,21 @@ ThumbnailProcessor::do_process(const std::vector<uint8_t>& png_data, const std::
     // — breadcrumb::note() is written for concurrent producers.
     crash_handler::breadcrumb::note("thumb", "decode_begin", static_cast<long>(png_data.size()));
 
+    // Read the dimensions from the header first: the decode allocates
+    // width*height*4 bytes, which on a 128 MB device must not be attempted for
+    // an image over the cap.
+    if (!stbi_info_from_memory(png_data.data(), static_cast<int>(png_data.size()), &src_width,
+                               &src_height, &src_channels)) {
+        result.error = std::string("Failed to read PNG header: ") + stbi_failure_reason();
+        return result;
+    }
+    if (src_width > MAX_SOURCE_DIMENSION || src_height > MAX_SOURCE_DIMENSION) {
+        result.error = "Source image too large (" + std::to_string(src_width) + "x" +
+                       std::to_string(src_height) + ", max " +
+                       std::to_string(MAX_SOURCE_DIMENSION) + ")";
+        return result;
+    }
+
     // stbi_load_from_memory returns RGBA data (4 channels) when we request it
     unsigned char* src_pixels = stbi_load_from_memory(
         png_data.data(), static_cast<int>(png_data.size()), &src_width, &src_height, &src_channels,
@@ -565,15 +442,6 @@ ThumbnailProcessor::do_process(const std::vector<uint8_t>& png_data, const std::
 
     if (!src_pixels) {
         result.error = std::string("Failed to decode PNG: ") + stbi_failure_reason();
-        return result;
-    }
-
-    // Safety check: reject excessively large decoded images
-    if (src_width > MAX_SOURCE_DIMENSION || src_height > MAX_SOURCE_DIMENSION) {
-        stbi_image_free(src_pixels);
-        result.error = "Source image too large (" + std::to_string(src_width) + "x" +
-                       std::to_string(src_height) + ", max " +
-                       std::to_string(MAX_SOURCE_DIMENSION) + ")";
         return result;
     }
 
@@ -648,7 +516,7 @@ ThumbnailProcessor::do_process(const std::vector<uint8_t>& png_data, const std::
     // ========================================================================
     // Step 5: Write LVGL binary file
     // ========================================================================
-    std::string filename = generate_cache_filename(source_path, target);
+    std::string filename = thumbnail_file_name(cache_key, &target);
     std::string output_path = cache_dir + "/" + filename;
 
     if (!write_lvbin(output_path, out_width, out_height, target.color_format, resized_pixels.data(),

@@ -18,459 +18,73 @@ std::vector<DeviceSection> afc_default_sections() {
 }
 
 std::vector<DeviceAction> afc_default_actions() {
-    std::vector<DeviceAction> actions;
+    using DA = DeviceAction;
+    return {
+        // Setup section (calibration + LED)
+        DA::button("calibration_wizard", "Run Calibration Wizard", "setup", "play",
+                   "Interactive calibration for all lanes"),
+        DA::slider("bowden_length", "Bowden Length", "setup", 450.0f, 100, 2000, "mm", "ruler",
+                   "Distance from hub to toolhead"),
 
-    // Setup section (calibration + LED)
-    actions.push_back({
-        .id = "calibration_wizard",
-        .label = "Run Calibration Wizard",
-        .icon = "play",
-        .section = "setup",
-        .description = "Interactive calibration for all lanes",
-        .type = ActionType::BUTTON,
-        .current_value = {},
-        .options = {},
-        .min_value = 0,
-        .max_value = 0,
-        .unit = "",
-        .slot_index = -1,
-        .enabled = true,
-        .disable_reason = "",
-    });
+        // Speed section
+        DA::slider("speed_fwd", "Forward Multiplier", "speed", 1.0f, 0.5f, 2.0f, "x",
+                   "fast-forward", "Speed multiplier for forward moves"),
+        DA::slider("speed_rev", "Reverse Multiplier", "speed", 1.0f, 0.5f, 2.0f, "x", "rewind",
+                   "Speed multiplier for reverse moves"),
 
-    actions.push_back({
-        .id = "bowden_length",
-        .label = "Bowden Length",
-        .icon = "ruler",
-        .section = "setup",
-        .description = "Distance from hub to toolhead",
-        .type = ActionType::SLIDER,
-        .current_value = std::any(450.0f),
-        .options = {},
-        .min_value = 100,
-        .max_value = 2000,
-        .unit = "mm",
-        .slot_index = -1,
-        .enabled = true,
-        .disable_reason = "",
-    });
+        // Toolhead section (extruder distances)
+        DA::slider("tool_stn", "Sensor to Nozzle", "toolhead", 72.0f, 0.0f, 200.0f, "mm", "ruler",
+                   "Distance from toolhead sensor to nozzle tip"),
+        DA::slider("tool_stn_unload", "Unload Distance", "toolhead", 100.0f, 0.0f, 200.0f, "mm",
+                   "ruler", "Retraction distance to clear extruder gears"),
+        DA::slider("tool_sensor_after_extruder", "Post-Sensor Clear", "toolhead", 0.0f, 0.0f,
+                   100.0f, "mm", "ruler", "Extra distance to move once sensors clear"),
 
-    // Speed section
-    actions.push_back({
-        .id = "speed_fwd",
-        .label = "Forward Multiplier",
-        .icon = "fast-forward",
-        .section = "speed",
-        .description = "Speed multiplier for forward moves",
-        .type = ActionType::SLIDER,
-        .current_value = std::any(1.0f),
-        .options = {},
-        .min_value = 0.5f,
-        .max_value = 2.0f,
-        .unit = "x",
-        .slot_index = -1,
-        .enabled = true,
-        .disable_reason = "",
-    });
+        // Maintenance section
+        DA::button("test_lanes", "Test All Lanes", "maintenance", "test-tube",
+                   "Run test sequence on all lanes"),
+        DA::button("change_blade", "Change Blade", "maintenance", "box-cutter",
+                   "Initiate blade change procedure"),
+        DA::button("park", "Park", "maintenance", "parking", "Park the AFC system"),
+        DA::button("brush", "Clean Brush", "maintenance", "broom", "Run brush cleaning sequence"),
+        DA::button("reset_motor", "Reset Motor Timer", "maintenance", "timer-refresh",
+                   "Reset motor run-time counter"),
 
-    actions.push_back({
-        .id = "speed_rev",
-        .label = "Reverse Multiplier",
-        .icon = "rewind",
-        .section = "speed",
-        .description = "Speed multiplier for reverse moves",
-        .type = ActionType::SLIDER,
-        .current_value = std::any(1.0f),
-        .options = {},
-        .min_value = 0.5f,
-        .max_value = 2.0f,
-        .unit = "x",
-        .slot_index = -1,
-        .enabled = true,
-        .disable_reason = "",
-    });
+        // Setup section (LED & Modes)
+        DA::button("led_toggle", "Turn On LEDs", "setup", "lightbulb-on", "Toggle AFC LED strip"),
+        DA::button("led_extruder", "Toolhead LED", "setup", "lightbulb-on",
+                   "Toggle toolhead LED for an extruder"),
+        DA::button("quiet_mode", "Toggle Quiet Mode", "setup", "volume-off",
+                   "Enable/disable quiet operation mode"),
 
-    // Toolhead section (extruder distances)
-    actions.push_back({
-        .id = "tool_stn",
-        .label = "Sensor to Nozzle",
-        .icon = "ruler",
-        .section = "toolhead",
-        .description = "Distance from toolhead sensor to nozzle tip",
-        .type = ActionType::SLIDER,
-        .current_value = std::any(72.0f),
-        .options = {},
-        .min_value = 0.0f,
-        .max_value = 200.0f,
-        .unit = "mm",
-        .slot_index = -1,
-        .enabled = true,
-        .disable_reason = "",
-    });
+        // Hub & Cutter section
+        DA::toggle("hub_cut_enabled", "Cutter Enabled", "hub", false, "content-cut",
+                   "Enable or disable the hub cutter"),
+        DA::slider("hub_cut_dist", "Cut Distance", "hub", 50.0f, 0.0f, 100.0f, "mm", "ruler",
+                   "Distance for hub cutter operation"),
+        DA::slider("hub_bowden_length", "Hub Bowden Length", "hub", 450.0f, 100.0f, 2000.0f, "mm",
+                   "ruler", "Bowden tube length from hub to toolhead"),
+        DA::toggle("assisted_retract", "Assisted Retract", "hub", false, "arrow-u-left-top",
+                   "Enable assisted retraction at hub"),
 
-    actions.push_back({
-        .id = "tool_stn_unload",
-        .label = "Unload Distance",
-        .icon = "ruler",
-        .section = "toolhead",
-        .description = "Retraction distance to clear extruder gears",
-        .type = ActionType::SLIDER,
-        .current_value = std::any(100.0f),
-        .options = {},
-        .min_value = 0.0f,
-        .max_value = 200.0f,
-        .unit = "mm",
-        .slot_index = -1,
-        .enabled = true,
-        .disable_reason = "",
-    });
+        // Tip Forming section
+        DA::slider("ramming_volume", "Ramming Volume", "tip_forming", 0.0f, 0.0f, 100.0f, "mm³",
+                   "hydraulic-oil-level", "Volume of filament used during ramming"),
+        DA::slider("unloading_speed_start", "Unloading Start Speed", "tip_forming", 80.0f, 0.0f,
+                   200.0f, "mm/s", "speedometer", "Initial speed for filament unloading"),
+        DA::slider("cooling_tube_length", "Cooling Tube Length", "tip_forming", 15.0f, 0.0f, 100.0f,
+                   "mm", "thermometer-minus", "Length of the cooling tube section"),
+        DA::slider("cooling_tube_retraction", "Cooling Tube Retraction", "tip_forming", 0.0f, 0.0f,
+                   100.0f, "mm", "thermometer-minus", "Retraction distance in the cooling tube"),
 
-    actions.push_back({
-        .id = "tool_sensor_after_extruder",
-        .label = "Post-Sensor Clear",
-        .icon = "ruler",
-        .section = "toolhead",
-        .description = "Extra distance to move once sensors clear",
-        .type = ActionType::SLIDER,
-        .current_value = std::any(0.0f),
-        .options = {},
-        .min_value = 0.0f,
-        .max_value = 100.0f,
-        .unit = "mm",
-        .slot_index = -1,
-        .enabled = true,
-        .disable_reason = "",
-    });
-
-    // Maintenance section
-    actions.push_back({
-        .id = "test_lanes",
-        .label = "Test All Lanes",
-        .icon = "test-tube",
-        .section = "maintenance",
-        .description = "Run test sequence on all lanes",
-        .type = ActionType::BUTTON,
-        .current_value = {},
-        .options = {},
-        .min_value = 0,
-        .max_value = 0,
-        .unit = "",
-        .slot_index = -1,
-        .enabled = true,
-        .disable_reason = "",
-    });
-
-    actions.push_back({
-        .id = "change_blade",
-        .label = "Change Blade",
-        .icon = "box-cutter",
-        .section = "maintenance",
-        .description = "Initiate blade change procedure",
-        .type = ActionType::BUTTON,
-        .current_value = {},
-        .options = {},
-        .min_value = 0,
-        .max_value = 0,
-        .unit = "",
-        .slot_index = -1,
-        .enabled = true,
-        .disable_reason = "",
-    });
-
-    actions.push_back({
-        .id = "park",
-        .label = "Park",
-        .icon = "parking",
-        .section = "maintenance",
-        .description = "Park the AFC system",
-        .type = ActionType::BUTTON,
-        .current_value = {},
-        .options = {},
-        .min_value = 0,
-        .max_value = 0,
-        .unit = "",
-        .slot_index = -1,
-        .enabled = true,
-        .disable_reason = "",
-    });
-
-    actions.push_back({
-        .id = "brush",
-        .label = "Clean Brush",
-        .icon = "broom",
-        .section = "maintenance",
-        .description = "Run brush cleaning sequence",
-        .type = ActionType::BUTTON,
-        .current_value = {},
-        .options = {},
-        .min_value = 0,
-        .max_value = 0,
-        .unit = "",
-        .slot_index = -1,
-        .enabled = true,
-        .disable_reason = "",
-    });
-
-    actions.push_back({
-        .id = "reset_motor",
-        .label = "Reset Motor Timer",
-        .icon = "timer-refresh",
-        .section = "maintenance",
-        .description = "Reset motor run-time counter",
-        .type = ActionType::BUTTON,
-        .current_value = {},
-        .options = {},
-        .min_value = 0,
-        .max_value = 0,
-        .unit = "",
-        .slot_index = -1,
-        .enabled = true,
-        .disable_reason = "",
-    });
-
-    // Setup section (LED & Modes)
-    actions.push_back({
-        .id = "led_toggle",
-        .label = "Turn On LEDs",
-        .icon = "lightbulb-on",
-        .section = "setup",
-        .description = "Toggle AFC LED strip",
-        .type = ActionType::BUTTON,
-        .current_value = {},
-        .options = {},
-        .min_value = 0,
-        .max_value = 0,
-        .unit = "",
-        .slot_index = -1,
-        .enabled = true,
-        .disable_reason = "",
-    });
-
-    actions.push_back({
-        .id = "led_extruder",
-        .label = "Toolhead LED",
-        .icon = "lightbulb-on",
-        .section = "setup",
-        .description = "Toggle toolhead LED for an extruder",
-        .type = ActionType::BUTTON,
-        .current_value = {},
-        .options = {},
-        .min_value = 0,
-        .max_value = 0,
-        .unit = "",
-        .slot_index = -1,
-        .enabled = true,
-        .disable_reason = "",
-    });
-
-    actions.push_back({
-        .id = "quiet_mode",
-        .label = "Toggle Quiet Mode",
-        .icon = "volume-off",
-        .section = "setup",
-        .description = "Enable/disable quiet operation mode",
-        .type = ActionType::BUTTON,
-        .current_value = {},
-        .options = {},
-        .min_value = 0,
-        .max_value = 0,
-        .unit = "",
-        .slot_index = -1,
-        .enabled = true,
-        .disable_reason = "",
-    });
-
-    // Hub & Cutter section
-    actions.push_back({
-        .id = "hub_cut_enabled",
-        .label = "Cutter Enabled",
-        .icon = "content-cut",
-        .section = "hub",
-        .description = "Enable or disable the hub cutter",
-        .type = ActionType::TOGGLE,
-        .current_value = std::any(false),
-        .options = {},
-        .min_value = 0,
-        .max_value = 0,
-        .unit = "",
-        .slot_index = -1,
-        .enabled = true,
-        .disable_reason = "",
-    });
-
-    actions.push_back({
-        .id = "hub_cut_dist",
-        .label = "Cut Distance",
-        .icon = "ruler",
-        .section = "hub",
-        .description = "Distance for hub cutter operation",
-        .type = ActionType::SLIDER,
-        .current_value = std::any(50.0f),
-        .options = {},
-        .min_value = 0.0f,
-        .max_value = 100.0f,
-        .unit = "mm",
-        .slot_index = -1,
-        .enabled = true,
-        .disable_reason = "",
-    });
-
-    actions.push_back({
-        .id = "hub_bowden_length",
-        .label = "Hub Bowden Length",
-        .icon = "ruler",
-        .section = "hub",
-        .description = "Bowden tube length from hub to toolhead",
-        .type = ActionType::SLIDER,
-        .current_value = std::any(450.0f),
-        .options = {},
-        .min_value = 100.0f,
-        .max_value = 2000.0f,
-        .unit = "mm",
-        .slot_index = -1,
-        .enabled = true,
-        .disable_reason = "",
-    });
-
-    actions.push_back({
-        .id = "assisted_retract",
-        .label = "Assisted Retract",
-        .icon = "arrow-u-left-top",
-        .section = "hub",
-        .description = "Enable assisted retraction at hub",
-        .type = ActionType::TOGGLE,
-        .current_value = std::any(false),
-        .options = {},
-        .min_value = 0,
-        .max_value = 0,
-        .unit = "",
-        .slot_index = -1,
-        .enabled = true,
-        .disable_reason = "",
-    });
-
-    // Tip Forming section
-    actions.push_back({
-        .id = "ramming_volume",
-        .label = "Ramming Volume",
-        .icon = "hydraulic-oil-level",
-        .section = "tip_forming",
-        .description = "Volume of filament used during ramming",
-        .type = ActionType::SLIDER,
-        .current_value = std::any(0.0f),
-        .options = {},
-        .min_value = 0.0f,
-        .max_value = 100.0f,
-        .unit = "mm³",
-        .slot_index = -1,
-        .enabled = true,
-        .disable_reason = "",
-    });
-
-    actions.push_back({
-        .id = "unloading_speed_start",
-        .label = "Unloading Start Speed",
-        .icon = "speedometer",
-        .section = "tip_forming",
-        .description = "Initial speed for filament unloading",
-        .type = ActionType::SLIDER,
-        .current_value = std::any(80.0f),
-        .options = {},
-        .min_value = 0.0f,
-        .max_value = 200.0f,
-        .unit = "mm/s",
-        .slot_index = -1,
-        .enabled = true,
-        .disable_reason = "",
-    });
-
-    actions.push_back({
-        .id = "cooling_tube_length",
-        .label = "Cooling Tube Length",
-        .icon = "thermometer-minus",
-        .section = "tip_forming",
-        .description = "Length of the cooling tube section",
-        .type = ActionType::SLIDER,
-        .current_value = std::any(15.0f),
-        .options = {},
-        .min_value = 0.0f,
-        .max_value = 100.0f,
-        .unit = "mm",
-        .slot_index = -1,
-        .enabled = true,
-        .disable_reason = "",
-    });
-
-    actions.push_back({
-        .id = "cooling_tube_retraction",
-        .label = "Cooling Tube Retraction",
-        .icon = "thermometer-minus",
-        .section = "tip_forming",
-        .description = "Retraction distance in the cooling tube",
-        .type = ActionType::SLIDER,
-        .current_value = std::any(0.0f),
-        .options = {},
-        .min_value = 0.0f,
-        .max_value = 100.0f,
-        .unit = "mm",
-        .slot_index = -1,
-        .enabled = true,
-        .disable_reason = "",
-    });
-
-    // Purge & Wipe section
-    actions.push_back({
-        .id = "purge_enabled",
-        .label = "Enable Purge",
-        .icon = "water",
-        .section = "purge",
-        .description = "Enable purging during tool changes",
-        .type = ActionType::TOGGLE,
-        .current_value = std::any(false),
-        .options = {},
-        .min_value = 0,
-        .max_value = 0,
-        .unit = "",
-        .slot_index = -1,
-        .enabled = true,
-        .disable_reason = "",
-    });
-
-    actions.push_back({
-        .id = "purge_length",
-        .label = "Purge Length",
-        .icon = "ruler",
-        .section = "purge",
-        .description = "Length of filament to purge",
-        .type = ActionType::SLIDER,
-        .current_value = std::any(50.0f),
-        .options = {},
-        .min_value = 0.0f,
-        .max_value = 200.0f,
-        .unit = "mm",
-        .slot_index = -1,
-        .enabled = true,
-        .disable_reason = "",
-    });
-
-    actions.push_back({
-        .id = "brush_enabled",
-        .label = "Enable Brush Wipe",
-        .icon = "broom",
-        .section = "purge",
-        .description = "Enable brush wipe after purging",
-        .type = ActionType::TOGGLE,
-        .current_value = std::any(false),
-        .options = {},
-        .min_value = 0,
-        .max_value = 0,
-        .unit = "",
-        .slot_index = -1,
-        .enabled = true,
-        .disable_reason = "",
-    });
-
-    return actions;
+        // Purge & Wipe section
+        DA::toggle("purge_enabled", "Enable Purge", "purge", false, "water",
+                   "Enable purging during tool changes"),
+        DA::slider("purge_length", "Purge Length", "purge", 50.0f, 0.0f, 200.0f, "mm", "ruler",
+                   "Length of filament to purge"),
+        DA::toggle("brush_enabled", "Enable Brush Wipe", "purge", false, "broom",
+                   "Enable brush wipe after purging"),
+    };
 }
 
 AfcCapabilities afc_default_capabilities() {

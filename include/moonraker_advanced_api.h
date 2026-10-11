@@ -32,6 +32,31 @@ namespace helix {
 class IMoonrakerClient;
 } // namespace helix
 class MoonrakerAPI;
+class OperationTimeoutGuard; // NAMESPACE_OK: matches the global-namespace class in
+                             // operation_timeout_guard.h
+
+namespace helix::calibration {
+/**
+ * @brief The idle-fallback backstop armed by the most recent absorbed transport
+ *        error, or nullptr when no calibration is waiting one out.
+ *
+ * Test observability only. The collectors are internal to
+ * moonraker_advanced_api.cpp and the backstop budget runs to minutes, so a test
+ * fires the timer the driver installed (`OperationTimeoutGuard::pending_timer()`
+ * + `lv_timer_ready()`) instead of waiting it out. Main thread only.
+ */
+OperationTimeoutGuard* armed_idle_backstop();
+
+/**
+ * @brief The idle-fallback grace window armed by an idle report, or nullptr.
+ *
+ * Test observability only, same contract as armed_idle_backstop(). Firing this
+ * rather than advancing the clock also keeps a case off the mock printer's own
+ * calibration timers: MoonrakerClientMock's PID simulation emits its result at
+ * virtual t=3000ms, which is exactly the grace budget.
+ */
+OperationTimeoutGuard* armed_idle_grace();
+} // namespace helix::calibration
 
 /**
  * @brief Advanced Panel Operations API via Moonraker
@@ -46,26 +71,10 @@ class MoonrakerAPI;
  *
  * Usage:
  *   MoonrakerAdvancedAPI advanced(client, api);
- *   advanced.start_bed_mesh_calibrate(on_progress, on_complete, on_error);
+ *   advanced.start_bed_mesh_calibrate(command, on_progress, on_complete, on_error);
  */
 class MoonrakerAdvancedAPI : public IAdvancedAPI {
   public:
-    // ========== Timeout constants for long-running G-code commands ==========
-    static constexpr uint32_t CALIBRATION_TIMEOUT_MS =
-        300000; // 5 min - BED_MESH_CALIBRATE, SCREWS_TILT_CALCULATE
-    static constexpr uint32_t LEVELING_TIMEOUT_MS = 600000; // 10 min - QGL, Z_TILT_ADJUST
-    static constexpr uint32_t SHAPER_TIMEOUT_MS =
-        600000; // 10 min - SHAPER_CALIBRATE, MEASURE_AXES_NOISE. Analysis alone
-                // measured ~3m50s per axis on a Creality K1C host; the analysis
-                // phase shows a spinner + elapsed time, so the longer wait is
-                // not silent.
-    static constexpr uint32_t PID_TIMEOUT_MS =
-        1200000; // 20 min - PID_CALIBRATE (slow-cooling beds, e.g. AD5M Pro, exceed 15 min)
-    static constexpr uint32_t MPC_TIMEOUT_MS = 1200000; // 20 min - MPC_CALIBRATE
-    static constexpr uint32_t PROBING_TIMEOUT_MS =
-        180000; // 3 min - PROBE_CALIBRATE, Z_ENDSTOP_CALIBRATE
-    static constexpr uint32_t BELT_TENSION_TIMEOUT_MS = 120000; // 2 min per path
-
     using SuccessCallback = std::function<void()>;
     using ErrorCallback = std::function<void(const MoonrakerError&)>;
 
@@ -209,7 +218,8 @@ class MoonrakerAdvancedAPI : public IAdvancedAPI {
      *        or [bltouch] config).  Used to divide the fallback "probe at" line
      *        count back to mesh points.  Default 1.
      */
-    void start_bed_mesh_calibrate(BedMeshProgressCallback on_progress, SuccessCallback on_complete,
+    void start_bed_mesh_calibrate(const BedMeshCommand& command,
+                                  BedMeshProgressCallback on_progress, SuccessCallback on_complete,
                                   ErrorCallback on_error, int expected_probes = 0,
                                   int probe_samples = 1) override;
 
@@ -368,7 +378,7 @@ class MoonrakerAdvancedAPI : public IAdvancedAPI {
                              PIDProgressCallback on_progress = nullptr) override;
 
     /**
-     * @brief Start MPC calibration for a heater (Kalico/Danger Klipper)
+     * @brief Start MPC calibration for a heater (Kalico)
      *
      * Executes MPC_CALIBRATE HEATER={heater} TARGET={target_temp} command
      * and collects multi-line results via gcode_response parsing.
@@ -386,6 +396,28 @@ class MoonrakerAdvancedAPI : public IAdvancedAPI {
     void start_mpc_calibrate(const std::string& heater, int target_temp, int fan_breakpoints,
                              MPCCalibrateCallback on_complete, ErrorCallback on_error,
                              MPCProgressCallback on_progress = nullptr) override;
+
+    /**
+     * @brief Run one automatic pressure-advance calibration
+     *
+     * Sends `proc.start_gcode` and watches the console for `proc.result_pattern`,
+     * whose first capture is the measured K. Which firmware this is, what the
+     * command is called and what its output looks like are all decided by
+     * helix::pacal::procedure_for() - this method knows none of it.
+     *
+     * As with PID_CALIBRATE the console result line, not the RPC reply, is the
+     * authority for completion: a run that outlives its RPC timeout is still
+     * running, and the collector stays registered to catch the result.
+     *
+     * @param proc Resolved procedure from helix::pacal
+     * @param on_complete Called with the measured K on success
+     * @param on_error Called on refusal or failure
+     * @param on_progress Best-effort per-attempt progress; may never fire
+     */
+    std::function<void()> start_pa_calibrate(const helix::pacal::Procedure& proc,
+                                             PACalibrateCallback on_complete,
+                                             ErrorCallback on_error,
+                                             PAProgressCallback on_progress = nullptr) override;
 
     // ========================================================================
     // Machine Limits Operations
@@ -457,8 +489,10 @@ class MoonrakerAdvancedAPI : public IAdvancedAPI {
     // Belt Tension Operations
     // ========================================================================
 
-    /// Callback for belt resonance test completion (returns output name for CSV lookup)
-    using BeltResonanceCallback = std::function<void(const std::string& csv_path)>;
+    /// Mirrors IAdvancedAPI (contracts live there).
+    using BeltSweepProgressCallback = IAdvancedAPI::BeltSweepProgressCallback;
+    using BeltCurveCallback = IAdvancedAPI::BeltCurveCallback;
+    using BeltRunCancel = IAdvancedAPI::BeltRunCancel;
 
     /// Callback for belt hardware detection
     using BeltHardwareCallback =
@@ -479,47 +513,23 @@ class MoonrakerAdvancedAPI : public IAdvancedAPI {
     /**
      * @brief Run TEST_RESONANCES for belt tension measurement
      *
-     * Executes TEST_RESONANCES with OUTPUT=raw_data to produce a CSV file
-     * of accelerometer data for belt tension analysis.
+     * Executes TEST_RESONANCES with OUTPUT=resonances and SWEEPING_PERIOD=0
+     * (pulse-only excitation) and collects the console sweep, then reads the
+     * CSV Klipper names in its "Resonances data written to" line and hands
+     * back the parsed curve.
      *
-     * @param axis_param Axis parameter: "1,1" for CoreXY Path A, "1,-1" for Path B, "X"/"Y" for
-     * Cartesian
+     * @param axis_param Axis parameter: "1,-1" for CoreXY Path A, "1,1" for Path B
      * @param output_name Name for the CSV output file
-     * @param on_progress Called with progress percentage (0-100)
-     * @param on_complete Called with output name on success
+     * @param on_progress Called with progress percentage (0-100) and current frequency
+     * @param on_complete Called with the parsed curve on success
      * @param on_error Called on failure
+     * @return Cancel handle; stops listening and suppresses every later callback
      */
-    void test_belt_resonance(const std::string& axis_param, const std::string& output_name,
-                             helix::AdvancedProgressCallback on_progress,
-                             BeltResonanceCallback on_complete, ErrorCallback on_error) override;
-
-    /**
-     * @brief Run TEST_RESONANCES at a fixed frequency
-     *
-     * Holds near freq_hz for ~5 seconds by using a narrow frequency band
-     * (FREQ_START=F FREQ_END=F+0.5 HZ_PER_SEC=0.1).
-     *
-     * @param axis_param Axis parameter (same as test_belt_resonance)
-     * @param freq_hz Frequency to excite at
-     * @param on_complete Called when excitation completes
-     * @param on_error Called on failure
-     */
-    void excite_belt_at_frequency(const std::string& axis_param, float freq_hz,
-                                  SuccessCallback on_complete, ErrorCallback on_error) override;
-
-    /**
-     * @brief Download raw accelerometer CSV from Klipper data store
-     *
-     * Retrieves the raw resonance CSV file produced by TEST_RESONANCES.
-     * The file is typically at /tmp/raw_data_<name>*.csv on the printer host.
-     *
-     * @param filename CSV filename to download
-     * @param on_complete Called with raw CSV data on success
-     * @param on_error Called on failure
-     */
-    void download_accel_csv(const std::string& filename,
-                            std::function<void(const std::string& csv_data)> on_complete,
-                            ErrorCallback on_error) override;
+    [[nodiscard]] BeltRunCancel test_belt_resonance(const std::string& axis_param,
+                                                    const std::string& output_name,
+                                                    BeltSweepProgressCallback on_progress,
+                                                    BeltCurveCallback on_complete,
+                                                    ErrorCallback on_error) override;
 
   protected:
     helix::IMoonrakerClient& client_;

@@ -21,6 +21,7 @@
 
 #include "lvgl/lvgl.h"
 #include "overlay_base.h"
+#include "static_panel_registry.h"
 
 namespace helix::settings {
 
@@ -28,67 +29,24 @@ namespace helix::settings {
  * @class HelpSettingsOverlay
  * @brief Overlay for help, support, and about actions
  *
- * ## Usage:
- *
  * @code
- * auto& overlay = helix::settings::get_help_settings_overlay();
- * overlay.show(parent_screen);
+ * helix::settings::get_help_settings_overlay().show(parent_screen);
  * @endcode
  */
 class HelpSettingsOverlay : public OverlayBase {
   public:
-    HelpSettingsOverlay();
-    ~HelpSettingsOverlay() override;
-
-    // Non-copyable
-    HelpSettingsOverlay(const HelpSettingsOverlay&) = delete;
-    HelpSettingsOverlay& operator=(const HelpSettingsOverlay&) = delete;
-
-    //
-    // === OverlayBase Interface ===
-    //
-
-    void init_subjects() override;
-    void register_callbacks() override;
-
     const char* get_name() const override {
         return "Help & About";
     }
-
-    void on_activate() override;
-    void on_deactivate() override;
-
-    //
-    // === UI Creation ===
-    //
-
-    lv_obj_t* create(lv_obj_t* parent) override;
-    void show(lv_obj_t* parent_screen);
-
-    bool is_created() const {
-        return overlay_root_ != nullptr;
+    const char* xml_component() const override {
+        return "settings_help_overlay";
     }
 
-  private:
-    //
-    // === Static Callbacks ===
-    //
-
-    static void on_replay_tour_clicked(lv_event_t* e);
-    static void on_debug_bundle_clicked(lv_event_t* e);
-    static void on_discord_clicked(lv_event_t* e);
-    static void on_docs_clicked(lv_event_t* e);
-    static void on_about_clicked(lv_event_t* e);
+    void register_callbacks() override;
 };
 
-/**
- * @brief Global instance accessor
- *
- * Creates the overlay on first access and registers it for cleanup
- * with StaticPanelRegistry.
- *
- * @return Reference to singleton HelpSettingsOverlay
- */
-HelpSettingsOverlay& get_help_settings_overlay();
+inline HelpSettingsOverlay& get_help_settings_overlay() {
+    return lazy_global<HelpSettingsOverlay>("HelpSettingsOverlay");
+}
 
 } // namespace helix::settings

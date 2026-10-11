@@ -155,6 +155,27 @@ TEST_CASE("insufficient_spool_weight_in: length fallback via material density",
     CHECK(r->second == 5.0f);
 }
 
+TEST_CASE("insufficient_spool_weight_in: length fallback uses the printer's filament diameter",
+          "[print-start][gate-pipeline][filament_diameter]") {
+    // 100m of PLA weighs about 298g at 1.75mm and 791g at 2.85mm.
+    auto with_diameter = [](float diameter_mm) {
+        return ctx_with([diameter_mm](PrintStartContext& c) {
+            SlotInfo spool;
+            spool.remaining_weight_g = 500.0f;
+            spool.material = "PLA";
+            c.external_spool = spool;
+            FileMetadata md;
+            md.filament_total = 100000.0;
+            c.metadata = md;
+            c.filament_diameter_mm = diameter_mm;
+        });
+    };
+    CHECK_FALSE(insufficient_spool_weight_in(with_diameter(1.75f)).has_value());
+    auto r = insufficient_spool_weight_in(with_diameter(2.85f));
+    REQUIRE(r.has_value());
+    CHECK(r->first == Catch::Approx(791.0f).epsilon(0.01));
+}
+
 TEST_CASE("insufficient_spool_weight_in: silent on a lane-fed AMS print",
           "[print-start][gate-pipeline]") {
     // K2 Plus, 2026-08-24: the user mapped a large print from T1 to T2 and kept
@@ -532,25 +553,26 @@ TEST_CASE("material_mismatches_in: bypass falls back to palette materials",
 
 TEST_CASE("default gate list: names in behavior-preserving order", "[print-start][gate-pipeline]") {
     auto& gates = default_print_start_gates();
-    REQUIRE(gates.size() == 7);
-    CHECK(gates[0].name == "insufficient_spool_weight");
+    REQUIRE(gates.size() == 8);
+    CHECK(gates[0].name == "printer_stopping_command");
+    CHECK(gates[1].name == "insufficient_spool_weight");
     // The lane-fed counterpart sits beside its sibling; the two are mutually
     // exclusive by construction, so their relative order is not load-bearing.
-    CHECK(gates[1].name == "insufficient_lane_weight");
-    CHECK(gates[2].name == "bypass_engaged_lane_print");
-    CHECK(gates[3].name == "unaccounted_toolhead_filament");
-    CHECK(gates[4].name == "required_filament_present");
-    CHECK(gates[5].name == "unresolved_tools");
-    CHECK(gates[6].name == "material_compatibility");
+    CHECK(gates[2].name == "insufficient_lane_weight");
+    CHECK(gates[3].name == "bypass_engaged_lane_print");
+    CHECK(gates[4].name == "unaccounted_toolhead_filament");
+    CHECK(gates[5].name == "required_filament_present");
+    CHECK(gates[6].name == "unresolved_tools");
+    CHECK(gates[7].name == "material_compatibility");
 }
 
 TEST_CASE("default gate list: the two new gates keep their relative order",
           "[print-start][gate-pipeline]") {
     auto& gates = default_print_start_gates();
-    REQUIRE(gates.size() == 7);
-    CHECK(gates[2].name == "bypass_engaged_lane_print");
-    CHECK(gates[3].name == "unaccounted_toolhead_filament");
-    CHECK(gates[4].name == "required_filament_present"); // shifted, order otherwise preserved
+    REQUIRE(gates.size() == 8);
+    CHECK(gates[3].name == "bypass_engaged_lane_print");
+    CHECK(gates[4].name == "unaccounted_toolhead_filament");
+    CHECK(gates[5].name == "required_filament_present");
 }
 
 // ---------------------------------------------------------------------------
@@ -648,15 +670,56 @@ TEST_CASE("gate required_filament_present: empty required lane warns with Start 
         c.ams_manages_filament = true;
         c.has_active_backend = true;
         // (tool_index, 0-based slot_index); lanes display slot + 1, so tool 0
-        // -> "Slot 1".
+        // -> "Slot 1". Two entries take the bulleted multi-lane branch of
+        // build_empty_lane_message.
         c.empty_required_lanes = {{0, 0}, {2, 3}};
     });
     auto r = gate_named("required_filament_present").evaluate(ctx);
     REQUIRE(r.verdict == CheckResult::Verdict::Warn);
     CHECK(r.title == "No Filament Detected"); // lv_tr identity in the test locale
     CHECK(r.proceed_label == "Start Print");
-    CHECK(r.body.find("Tool 0") != std::string::npos);
+    // The gcode tool spells as "T0" (never "Tool 0"); the lane is a 1-based label.
+    CHECK(r.body.find("T0") != std::string::npos);
     CHECK(r.body.find("Slot 1") != std::string::npos);
+    CHECK(r.body.find("Tool 0") == std::string::npos);
+}
+
+TEST_CASE("gate required_filament_present: a single empty lane takes the one-line branch",
+          "[print-start][gate-pipeline]") {
+    auto ctx = ctx_with([](PrintStartContext& c) {
+        c.ams_manages_filament = true;
+        c.has_active_backend = true;
+        c.empty_required_lanes = {{3, 4}}; // tool 3 -> slot index 4 -> "Slot 5"
+    });
+    auto r = gate_named("required_filament_present").evaluate(ctx);
+    REQUIRE(r.verdict == CheckResult::Verdict::Warn);
+    CHECK(r.body.find("T3") != std::string::npos);
+    CHECK(r.body.find("Slot 5") != std::string::npos);
+    CHECK(r.body.find("Tool 3") == std::string::npos);
+}
+
+TEST_CASE("gate required_filament_present: multi-unit lane names the unit-local position",
+          "[print-start][gate-pipeline]") {
+    // Same two-BoxTurtle layout as the lane-weight gate: global slot 5 is the
+    // second unit's local lane 1, "Turtle_2 · Lane 2" on every other surface.
+    auto ctx = ctx_with([](PrintStartContext& c) {
+        c.ams_manages_filament = true;
+        c.has_active_backend = true;
+        c.empty_required_lanes = {{0, 5}};
+        helix::AvailableSlot s{};
+        s.slot_index = 5;
+        s.backend_index = 0;
+        s.local_slot_index = 1;
+        s.unit_display_name = "Turtle_2";
+        s.noun = helix::ui::LaneNoun::Lane;
+        s.is_empty = true;
+        c.available_slots = {s};
+    });
+    auto r = gate_named("required_filament_present").evaluate(ctx);
+    REQUIRE(r.verdict == CheckResult::Verdict::Warn);
+    CHECK(r.body.find("Turtle_2") != std::string::npos);
+    CHECK(r.body.find("Lane 2") != std::string::npos);
+    CHECK(r.body.find("Lane 6") == std::string::npos);
 }
 
 TEST_CASE("gate required_filament_present: AMS lanes all fed -> pass",
@@ -761,6 +824,51 @@ TEST_CASE("gate material_compatibility: warns with verbatim title",
     CHECK(r.proceed_label == "Start Anyway");
 }
 
+TEST_CASE("gate material_compatibility: names the gcode tool, not the physical lane",
+          "[print-start][gate-pipeline][numbering]") {
+    // T0 is the slicer's tool number, so the multi-tool dialog names it 0-based
+    // even though a physical lane in this same dialog would count from 1.
+    auto ctx = ctx_with([](PrintStartContext& c) {
+        c.has_detail_view = true;
+        c.ams_available = true;
+
+        GcodeToolInfo t0;
+        t0.tool_index = 0;
+        t0.material = "PETG";
+        GcodeToolInfo t1;
+        t1.tool_index = 1;
+        t1.material = "ABS";
+        c.tool_info = {t0, t1};
+
+        ToolMapping m0;
+        m0.tool_index = 0;
+        m0.mapped_slot = 0;
+        m0.mapped_backend = 0;
+        m0.material_mismatch = true;
+        ToolMapping m1;
+        m1.tool_index = 1;
+        m1.mapped_slot = 1;
+        m1.mapped_backend = 0;
+        m1.material_mismatch = true;
+        c.mappings = {m0, m1};
+
+        AvailableSlot s0;
+        s0.slot_index = 0;
+        s0.backend_index = 0;
+        s0.material = "PLA";
+        AvailableSlot s1;
+        s1.slot_index = 1;
+        s1.backend_index = 0;
+        s1.material = "PLA";
+        c.available_slots = {s0, s1};
+    });
+
+    auto r = gate_named("material_compatibility").evaluate(ctx);
+    REQUIRE(r.verdict == CheckResult::Verdict::Warn);
+    CHECK(r.body.find("T0") != std::string::npos);
+    CHECK(r.body.find("T1") != std::string::npos);
+}
+
 // ---------------------------------------------------------------------------
 // Runner mechanics (toy gates — no printer state needed)
 // ---------------------------------------------------------------------------
@@ -770,6 +878,7 @@ TEST_CASE("gate material_compatibility: warns with verbatim title",
 
 #include "../lvgl_ui_test_fixture.h"
 #include "../test_helpers/print_start_controller_test_access.h"
+#include "../ui_test_utils.h"
 #include "moonraker_api_mock.h"
 #include "moonraker_client_mock.h"
 #include "printer_state.h"
@@ -805,8 +914,7 @@ class GateRunnerFixture : public LVGLUITestFixture {
 
     GateRunnerFixture() {
         state.init_subjects(false);
-        // modal_configure() silently no-ops without these, leaving the button
-        // captions at their defaults - the app does this at startup.
+        // The app registers the modal callbacks at startup.
         helix::ui::modal_init_subjects();
         api = std::make_unique<MoonrakerAPIMock>(client, state);
         controller.set_api(api.get());
@@ -853,15 +961,8 @@ TEST_CASE("gate runner: proceed resumes at NEXT gate", "[print-start][gate-pipel
     CHECK(fx.cancelled == 0);
 }
 
-// Two Warn gates in a row is the chain that shipped the v0.99.118 ASan
-// overflow: gate N's modal_confirm parks result.proceed_label.c_str() - a
-// loop-local - in the shared caption subject, and gate N+1's modal_confirm
-// builds ModalConfigRollback, whose ctor snapshots that subject AFTER gate
-// N's iteration frame is gone. The suites only ever warned once per chain,
-// so nothing exercised the read. modal_configure() must copy captions into
-// storage the modal layer owns; the caption check below pins the visible
-// contract on top (the second dialog carries gate B's label, and a
-// same-address republish still notifies - LVGL skips nothing).
+// Gate captions are copied into the dialog, so the second warn shows gate B's
+// label even though gate A's loop-local label string is gone.
 TEST_CASE("gate runner: two chained warns - captions outlive the first gate's frame",
           "[print-start][gate-pipeline]") {
     GateRunnerFixture fx;
@@ -877,10 +978,8 @@ TEST_CASE("gate runner: two chained warns - captions outlive the first gate's fr
     REQUIRE(PrintStartControllerTestAccess::print_gate_modal(fx.controller) != nullptr);
     CHECK(PrintStartControllerTestAccess::gate_resume_index(fx.controller) == 1);
 
-    const char* primary = static_cast<const char*>(
-        lv_subject_get_pointer(helix::ui::modal_get_primary_text_subject()));
-    REQUIRE(primary != nullptr);
-    CHECK(std::string(primary) == "Proceed B");
+    CHECK(UITest::button_text(PrintStartControllerTestAccess::print_gate_modal(fx.controller),
+                              "btn_primary") == "Proceed B");
 }
 
 TEST_CASE("gate runner: cancel re-enables button and fires on_print_cancelled",
@@ -925,6 +1024,10 @@ helix::AvailableSlot lane(int slot_index, int backend_index, float remaining_g) 
     s.backend_index = backend_index;
     s.is_empty = false;
     s.remaining_weight_g = remaining_g;
+    // Matches AmsState::collect_available_slots() for a single-unit backend:
+    // local_slot_index is the unit's own slot_index, which equals the global
+    // index when there is only one unit.
+    s.local_slot_index = slot_index;
     return s;
 }
 
@@ -1075,6 +1178,34 @@ TEST_CASE("gate_insufficient_lane_weight: names the short slot", "[print-start][
     CHECK(result.body.find("65") != std::string::npos);
     CHECK(result.body.find("863") != std::string::npos);
     CHECK(!result.proceed_label.empty());
+    // The tool spells as "T1" (orca_ctx's tool), not the lowercase word form.
+    CHECK(result.body.find("T1") != std::string::npos);
+    CHECK(result.body.find("tool 1") == std::string::npos);
+}
+
+TEST_CASE("gate_insufficient_lane_weight: multi-unit lane names the unit-local position",
+          "[print-start][gate-pipeline]") {
+    // Two BoxTurtle units, 4 lanes each: global slot 5 is the second unit's
+    // local lane 1 (0-based), i.e. "Turtle_2 · Lane 2" everywhere else on
+    // screen. The gate must agree, not spell it "Lane 6" from the global index.
+    auto ctx = ctx_with([](PrintStartContext& c) {
+        FileMetadata md;
+        md.filament_weight_total = 863.07;
+        c.metadata = md;
+        c.tool_grams = {0.0, 863.07};
+        c.tools_used = {1};
+        c.mappings = {map_tool(1, /*slot=*/5, /*backend=*/0)};
+        auto short_lane = lane(5, 0, /*remaining=*/65.0f);
+        short_lane.local_slot_index = 1;
+        short_lane.unit_display_name = "Turtle_2";
+        short_lane.noun = helix::ui::LaneNoun::Lane;
+        c.available_slots = {short_lane};
+    });
+    auto result = gate_named("insufficient_lane_weight").evaluate(ctx);
+    REQUIRE(result.verdict == CheckResult::Verdict::Warn);
+    CHECK(result.body.find("Turtle_2") != std::string::npos);
+    CHECK(result.body.find("Lane 2") != std::string::npos);
+    CHECK(result.body.find("Lane 6") == std::string::npos);
 }
 
 // ---------------------------------------------------------------------------
@@ -1124,4 +1255,97 @@ TEST_CASE("gate unaccounted_toolhead_filament: a missing capability entry reads 
     auto r = gate_named("unaccounted_toolhead_filament").evaluate(c);
     REQUIRE(r.verdict == CheckResult::Verdict::Warn);
     CHECK(r.body.find("Pull it out manually") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// printer_stopping_command - a file that calls a command this printer turns
+// into an emergency stop
+// ---------------------------------------------------------------------------
+
+namespace {
+PrinterStopCheck stops_at(size_t line, const char* command, const char* message) {
+    PrinterStopCheck check;
+    check.state = PrinterStopCheck::State::Stops;
+    check.line_number = line;
+    check.command = command;
+    check.stop_message = message;
+    return check;
+}
+} // namespace
+
+TEST_CASE("gate printer_stopping_command: runs before every filament gate",
+          "[print-start][gate-pipeline][printer_stop]") {
+    REQUIRE_FALSE(default_print_start_gates().empty());
+    CHECK(default_print_start_gates().front().name == std::string("printer_stopping_command"));
+}
+
+TEST_CASE("gate printer_stopping_command: blocks a file that calls one",
+          "[print-start][gate-pipeline][printer_stop]") {
+    const auto& gate = gate_named("printer_stopping_command");
+
+    SECTION("with the printer's message") {
+        auto ctx = ctx_with([](PrintStartContext& c) {
+            c.printer_stop = stops_at(12, "m729", "M729 is not supported");
+        });
+        const auto r = gate.evaluate(ctx);
+        REQUIRE(r.verdict == CheckResult::Verdict::Block);
+        CHECK(r.severity == GateSeverity::Error);
+        CHECK(r.title == "File Will Stop the Printer");
+        CHECK(r.body == "Line 12 calls m729, which this printer treats as an emergency stop. "
+                        "Re-slice the file with a profile made for this printer.\n\n"
+                        "Printer message: M729 is not supported");
+        CHECK(r.proceed_label.empty());
+    }
+
+    SECTION("without one, no message line") {
+        auto ctx =
+            ctx_with([](PrintStartContext& c) { c.printer_stop = stops_at(3, "M8213", ""); });
+        const auto r = gate.evaluate(ctx);
+        REQUIRE(r.verdict == CheckResult::Verdict::Block);
+        CHECK(r.body == "Line 3 calls M8213, which this printer treats as an emergency stop. "
+                        "Re-slice the file with a profile made for this printer.");
+    }
+}
+
+TEST_CASE("gate printer_stopping_command: a clean or unchecked file passes",
+          "[print-start][gate-pipeline][printer_stop]") {
+    const auto& gate = gate_named("printer_stopping_command");
+
+    auto clean = ctx_with(
+        [](PrintStartContext& c) { c.printer_stop.state = PrinterStopCheck::State::Clean; });
+    CHECK(gate.evaluate(clean).verdict == CheckResult::Verdict::Pass);
+
+    auto unchecked = ctx_with([](PrintStartContext& c) {
+        c.printer_stop.state = PrinterStopCheck::State::NotRun;
+        c.printer_stop.not_run_reason = "the file could not be read";
+    });
+    CHECK(gate.evaluate(unchecked).verdict == CheckResult::Verdict::Pass);
+}
+
+TEST_CASE("gate runner: a block shows a dialog and never starts the print",
+          "[print-start][gate-pipeline][printer_stop]") {
+    GateRunnerFixture fx;
+    std::vector<PrintStartGate> gates;
+    gates.push_back({"toy_block", +[](const PrintStartContext&) {
+                         CheckResult r;
+                         r.verdict = CheckResult::Verdict::Block;
+                         r.title = "Stops";
+                         r.body = "body";
+                         r.severity = GateSeverity::Error;
+                         return r;
+                     }});
+    gates.push_back({"toy_after", +[](const PrintStartContext&) { return pass_result(); }});
+    PrintStartControllerTestAccess::set_gates(fx.controller, std::move(gates));
+
+    PrintStartControllerTestAccess::run_gates(fx.controller);
+    REQUIRE(PrintStartControllerTestAccess::print_gate_modal(fx.controller) != nullptr);
+    CHECK(PrintStartControllerTestAccess::gate_resume_index(fx.controller) == 0);
+    // Parked on the dialog: execute_print_start() would have re-enabled the button.
+    CHECK(fx.button_updates == 0);
+
+    // Its one button closes it the way Cancel does: button back, nothing started.
+    PrintStartControllerTestAccess::gate_cancel(fx.controller);
+    CHECK(PrintStartControllerTestAccess::print_gate_modal(fx.controller) == nullptr);
+    CHECK(fx.button_updates == 1);
+    CHECK(fx.cancelled == 1);
 }

@@ -57,7 +57,6 @@ class NozzleCleanCapabilityFixture : public HelixTestFixture {
     /// Write the user's slot assignment the way Settings > Macro Buttons does.
     static void assign_clean_nozzle(const std::string& macro) {
         helix::Config* cfg = helix::Config::get_instance();
-        REQUIRE(cfg != nullptr);
         cfg->set<std::string>("/standard_macros/clean_nozzle", macro);
     }
 

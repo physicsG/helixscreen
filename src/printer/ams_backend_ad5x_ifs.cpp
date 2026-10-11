@@ -4,39 +4,50 @@
 
 #include "ams_backend_ad5x_ifs.h"
 
+#include "ui_insert_notice.h"
 #include "ui_temperature_utils.h"
+#include "ui_update_queue.h"
 
 #include "ams_fault_event.h"
 #include "ams_state.h"
 #include "app_globals.h"
 #include "config.h"
 #include "helix-xml/src/xml/lv_xml.h"
+#include "helix_fs.h"
+#include "helix_regex.h"
 #include "host_identity.h"
 #include "http_executor.h"
 #include "i_moonraker_api.h"
 #include "i_moonraker_client.h"
 #include "json_utils.h"
+#include "lane_apply.h"
+#include "lane_legacy_migration.h"
+#include "lane_source_store.h"
+#include "lane_translation.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "post_op_cooldown_manager.h"
 #include "print_lifecycle_state.h"
 #include "printer_state.h"
 #include "settings_manager.h"
 #include "static_subject_registry.h"
+#include "text_io.h"
+#include "zmod_color_status.h"
 
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
-#include <filesystem>
-#include <fstream>
 #include <lvgl.h>
-#include <regex>
-#include <sstream>
 #include <thread>
+
+namespace helix {
+
+namespace hfs = fs;
 
 using json = nlohmann::json;
 
@@ -44,7 +55,7 @@ namespace {
 
 /// True when the printer's job state is PAUSED.
 ///
-/// Reads the same subject handle_status_update() already uses to pick the
+/// Reads the same subject handle_status() already uses to pick the
 /// Adventurer5M.json poll cadence, so there is one way this backend learns the
 /// print state. Null-safe: before PrinterState::init_subjects() (cold boot,
 /// non-LVGL unit tests) the accessor returns nullptr and we answer "not paused",
@@ -62,7 +73,12 @@ namespace {
     // Equivalent to the old raw comparison — derive_print_state() excepts PAUSED
     // from the "a live phase outranks the job state" rule, so the two can never
     // disagree — but expressed on the one axis everything else now reads.
-    return get_printer_state().get_print_lifecycle() == PrintState::Paused;
+    return get_printer_state().print_state().get_print_lifecycle() == PrintState::Paused;
+}
+
+[[nodiscard]] bool job_holds_machine_now() {
+    return get_printer_state().are_subjects_initialized() &&
+           job_holds_machine(get_printer_state().print_state().get_print_lifecycle());
 }
 
 /// Fallback purge for a runout recovery: 50 mm of fresh filament at 10 mm/s.
@@ -169,31 +185,34 @@ bool AmsBackendAd5xIfs::owns_filament_sensor(const std::string& bare_name,
         bare_name.rfind("_ifs_motion_sensor_", 0) == 0) {
         return true;
     }
-    // Standalone IFS module: its sensors register as STOCK
-    // filament_switch_sensor objects ("lane1".."lane4" per-channel presence,
-    // "toolhead" for the ADC-classified toolhead switch), so nothing about the
-    // name itself marks them. Claimed by exact shape only - and this predicate
-    // only ever runs for a printer already detected as AD5X IFS
+    // Standalone IFS module: its toolhead sensor registers as a STOCK
+    // filament_switch_sensor named "toolhead" (its frames are the
+    // head-presence authority on that firmware), so nothing about the name
+    // itself marks it. Claimed by exact shape only - and this predicate only
+    // ever runs for a printer already detected as AD5X IFS
     // (AmsBackend::sensor_belongs_to_backend routes on mmu_type), so a
-    // differently-firmwareed printer's sensor that happens to be named
-    // "toolhead" never reaches this branch.
+    // differently-firmwared printer's sensor that happens to be named
+    // "toolhead" never reaches this branch. Per-channel presence is read from
+    // the module's structured `ifs` status object, not from individual
+    // sensors, so no "lane<N>" name is claimed here.
     if (bare_name == "toolhead") {
         return true;
     }
-    if (bare_name.rfind("lane", 0) == 0 && bare_name.size() > 4) {
-        bool all_digits = true;
-        for (size_t i = 4; i < bare_name.size(); ++i) {
-            if (!std::isdigit(static_cast<unsigned char>(bare_name[i]))) {
-                all_digits = false;
-                break;
-            }
-        }
-        if (all_digits) {
-            return true;
-        }
-    }
     return false;
 }
+
+namespace {
+/// Z-Mod's change macro; its last_data.channel is the change in flight.
+constexpr const char* ZMOD_CHANGE_MACRO = "gcode_macro END_CHANGE_FILAMENT";
+/// last_data.channel when no change is running.
+constexpr int ZMOD_CHANGE_IDLE_CHANNEL = 99;
+
+/// What each synthesized phase projects to, by the phase index the tracker
+/// publishes. The step model and the tracker's action both read these, so the
+/// two cannot disagree.
+constexpr std::array kIfsUnloadPhases{AmsAction::HEATING, AmsAction::CUTTING, AmsAction::UNLOADING};
+constexpr std::array kIfsLoadPhases{AmsAction::HEATING, AmsAction::LOADING, AmsAction::PURGING};
+} // namespace
 
 std::vector<std::string>
 AmsBackendAd5xIfs::required_status_objects(const helix::PrinterDiscovery& hw) {
@@ -208,7 +227,7 @@ AmsBackendAd5xIfs::required_status_objects(const helix::PrinterDiscovery& hw) {
     // Klipper's objects/list only carries objects that implement get_status(),
     // so listing them IS the capability check.
     const auto& available = hw.printer_objects();
-    for (const char* name : {"ifs", "ifs_materials", "zmod_ifs", "zmod_color"}) {
+    for (const char* name : {"ifs", "ifs_materials", "zmod_ifs", "zmod_color", ZMOD_CHANGE_MACRO}) {
         if (std::find(available.begin(), available.end(), name) != available.end()) {
             objects.emplace_back(name);
         }
@@ -221,29 +240,23 @@ AmsBackendAd5xIfs::required_status_objects(const helix::PrinterDiscovery& hw) {
 void AmsBackendAd5xIfs::on_started() {
     // Load persisted per-slot overrides (brand, spool name, spoolman IDs, etc.)
     // BEFORE issuing the initial status query — otherwise the first
-    // handle_status_update() callback may fire (on the websocket thread) and
+    // handle_status() callback may fire (on the websocket thread) and
     // update slots before overrides_ is populated, so the first frame of
     // EVENT_STATE_CHANGED would be missing override data. load_blocking runs
     // on this (main) thread; the Moonraker DB callback fires on the libhv
     // event loop, so the two threads don't interfere.
     if (api_) {
-        override_store_ = std::make_unique<helix::ams::FilamentSlotOverrideStore>(
-            api_, "ifs", helix::ams::lane_key_style_for(get_type()));
-        // Do the (potentially 5s) MR DB round-trip OUTSIDE the lock, then swap in
-        // under mutex_. AmsSubscriptionBackend::start() registers the WebSocket
-        // notify subscription before on_started() is invoked, so a status
-        // notification could in principle fire on the libhv thread while we're
-        // still inside load_blocking. Holding mutex_ during the swap ensures
-        // the parse path (which reads overrides_ under mutex_) sees a coherent
-        // map rather than a torn write.
-        auto loaded = override_store_->load_blocking();
-        const auto loaded_count = loaded.size();
+        auto loaded =
+            helix::ams::make_loaded_override_store(api_, "ifs", get_type(), backend_log_tag());
+        if (loaded.store) {
+            helix::ams::ingest_legacy_records(*loaded.store, helix::ams::LegacyLockKeys::LaneData,
+                                              backend_index());
+        }
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            overrides_ = std::move(loaded);
+            override_store_ = std::move(loaded.store);
+            overrides_ = std::move(loaded.overrides);
         }
-        spdlog::info("{} Loaded {} slot overrides from filament_slot store", backend_log_tag(),
-                     loaded_count);
 
         // Restore the last-known seated lane (#1065 power-cycle floor). The
         // firmware forgets the seated channel across a reboot, so this is the only
@@ -311,6 +324,7 @@ void AmsBackendAd5xIfs::on_started() {
                    // gate closed, same as a printer without the module.
                    {"ifs", nullptr},
                    {"ifs_materials", nullptr},
+                   {ZMOD_CHANGE_MACRO, nullptr},
                    // The module's toolhead sensor registers under this stock
                    // name ([ifs_toolhead_sensor toolhead]); its frames are the
                    // head-presence authority on that firmware.
@@ -340,7 +354,7 @@ void AmsBackendAd5xIfs::on_started() {
                 // a real macro's get_status() returns a non-empty dict.
                 //
                 // Only the existence bool is extracted here; the dict itself
-                // survives into status_copy below and handle_status_update()
+                // survives into status_copy below and handle_status()
                 // reads its `variable_*` payload (parse_ifs_vars_macro_locked).
                 macro_exists = status.contains("gcode_macro _ifs_vars") &&
                                status["gcode_macro _ifs_vars"].is_object() &&
@@ -353,13 +367,13 @@ void AmsBackendAd5xIfs::on_started() {
                 have_status = true;
             }
 
-            // MAIN THREAD: apply latch, run handle_status_update, log, and
+            // MAIN THREAD: apply latch, run handle_status, log, and
             // launch the follow-up chain (each call accesses api_/client_).
             token.defer("Ad5xIfsBackend::on_started_apply",
                         [this, macro_exists, klippy_ready, have_status,
                          status_copy = std::move(status_copy)]() mutable {
                             if (have_status) {
-                                // Update latch BEFORE handle_status_update so
+                                // Update latch BEFORE handle_status so
                                 // parse_save_variables sees the correct state.
                                 // ifs_macro_confirmed_missing_ starts true
                                 // (pessimistic) and is only cleared here when
@@ -372,7 +386,7 @@ void AmsBackendAd5xIfs::on_started() {
                                     // !macro_exists: latch stays true
                                 }
 
-                                handle_status_update(status_copy);
+                                handle_status(status_copy);
                             }
 
                             // Log initial state after processing query response
@@ -404,7 +418,7 @@ void AmsBackendAd5xIfs::on_started() {
                                                  "macro not found — clearing has_ifs_vars_ "
                                                  "(tool-mapping from save_variables disabled)",
                                                  backend_log_tag(), var_prefix_);
-                                    has_ifs_vars_ = false;
+                                    demote_ifs_vars_locked();
                                 }
                             }
 
@@ -471,18 +485,8 @@ void AmsBackendAd5xIfs::request_resync() {
 
 // --- Status parsing ---
 
-void AmsBackendAd5xIfs::handle_status_update(const json& notification) {
-    // notify_status_update has format: { "method": "notify_status_update", "params": [{ ... },
-    // timestamp] }
-    // Initial query response sends unwrapped status directly — handle both formats.
-    const json* status = &notification;
-    if (notification.contains("params") && notification["params"].is_array() &&
-        !notification["params"].empty()) {
-        status = &notification["params"][0];
-        if (!status->is_object()) {
-            return;
-        }
-    }
+void AmsBackendAd5xIfs::handle_status(const json& status_obj) {
+    const json* status = &status_obj;
 
     std::unique_lock<std::mutex> lock(mutex_);
 
@@ -670,8 +674,10 @@ void AmsBackendAd5xIfs::handle_status_update(const json& notification) {
     // an EVENT_STATE_CHANGED -> sync_from_backend refresh, so treat a toggle as a
     // state change worth publishing (#1065 row 14).
     const bool indet_before = system_info_.operation_indeterminate;
+    const AmsAction action_before_timeout = system_info_.action;
     check_action_timeout();
     const bool indet_toggled = system_info_.operation_indeterminate != indet_before;
+    const bool timeout_changed_action = system_info_.action != action_before_timeout;
 
     // Unattended-runout detector (#1250). Deliberately AFTER check_action_timeout:
     // a timed-out operation owns the ERROR state, and the runout predicate
@@ -708,12 +714,13 @@ void AmsBackendAd5xIfs::handle_status_update(const json& notification) {
     // board's `activity` are applied, which is what lets both ZMOD polls stand
     // down (see apply_ifs_module_objects).
     apply_ifs_module_objects(*status);
+    apply_zmod_change_macro(*status);
 
     // No AD5X-specific plugin subjects to publish: the auto-switchover state is
     // now carried by the backend-neutral `ams_endless_state` / `ams_endless_text`
     // subjects, which AmsState derives from get_endless_spool_capabilities() when
     // it handles the EVENT_STATE_CHANGED below.
-    if (state_changed || indet_toggled || runout_changed) {
+    if (state_changed || indet_toggled || runout_changed || timeout_changed_action) {
         emit_event(EVENT_STATE_CHANGED);
     }
 
@@ -743,7 +750,8 @@ void AmsBackendAd5xIfs::handle_status_update(const json& notification) {
     // queue, so the fast cadence is still the right choice there.
     bool printing_now = false;
     if (get_printer_state().are_subjects_initialized()) {
-        printing_now = get_printer_state().get_print_job_state() == helix::PrintJobState::PRINTING;
+        printing_now = get_printer_state().print_state().get_print_job_state() ==
+                       helix::PrintJobState::PRINTING;
     }
 
     auto now = std::chrono::steady_clock::now();
@@ -824,7 +832,7 @@ void AmsBackendAd5xIfs::parse_save_variables(const json& vars) {
     // values that diverged silently from zmod's truth (raza's debug bundle
     // ZYYRVVTG showed Adventurer5M.json and less_waste_colors out of sync).
     // Color/type reads now come from GET_ZCOLOR SILENT=1 (live) and
-    // Adventurer5M.json (boot snapshot) only. set_slot_info() correspondingly
+    // Adventurer5M.json (boot snapshot) only. apply_user_edit() correspondingly
     // writes via CHANGE_ZCOLOR rather than _IFS_VARS, so the dirty_-clearing
     // round-trip that lived in this branch is no longer needed.
     //
@@ -871,14 +879,7 @@ void AmsBackendAd5xIfs::parse_save_variables(const json& vars) {
                          "— stale data from a deactivated plugin; falling back to default "
                          "1:1 tool mapping",
                          backend_log_tag());
-            tool_map_.fill(UNMAPPED_PORT);
-            for (int t = 0; t < NUM_PORTS; ++t) {
-                tool_map_[static_cast<size_t>(t)] = t + 1;
-            }
-            rebuild_slot_tool_mapping_locked();
-            for (int i = 0; i < NUM_PORTS; ++i) {
-                update_slot_from_state(i);
-            }
+            install_identity_tool_map_locked();
             return;
         }
 
@@ -899,7 +900,7 @@ void AmsBackendAd5xIfs::parse_save_variables(const json& vars) {
         // scan of tools 4..15 could never find a backup lane). SAVE_VARIABLE
         // persists the damage across reboots, and lessWaste's own start dialog
         // only re-heals it until our next push. Detect the truncated shape and
-        // stage a repair; handle_status_update() dispatches it with mutex_
+        // stage a repair; handle_status() dispatches it with mutex_
         // released. bambufy arrays legitimately hold 4 entries, so the check is
         // lessWaste-only. Not an array (string/absent) means the plugin never
         // wrote the row or uses another form — leave it alone.
@@ -952,7 +953,7 @@ void AmsBackendAd5xIfs::parse_save_variables(const json& vars) {
                           backend_log_tag(), loaded, seated_chan_);
             seated_chan_ = loaded;
         }
-        // Keep current_tool in step too — handle_status_update snapshots
+        // Keep current_tool in step too — handle_status snapshots
         // active_tool_ into system_info_ on this same frame, and the identity
         // tool map the latch installed makes tool == channel - 1.
         active_tool_ = (loaded >= 1 && loaded <= NUM_PORTS) ? loaded - 1 : -1;
@@ -973,6 +974,47 @@ void AmsBackendAd5xIfs::rebuild_slot_tool_mapping_locked() {
     // the UI reads. Caller holds mutex_.
     for (int i = 0; i < NUM_PORTS; ++i) {
         slots_.set_tool_mapping(i, find_first_tool_for_port(i + 1)); // port is 1-based
+    }
+}
+
+void AmsBackendAd5xIfs::install_identity_tool_map_locked() {
+    // Clear first: `_tools` is a 16-entry tool-indexed array, and a tool left
+    // aimed at a lane past T3 still shows up in get_system_info()'s attachment
+    // map, which carries no contract gate.
+    tool_map_.fill(UNMAPPED_PORT);
+    for (int t = 0; t < NUM_PORTS; ++t) {
+        tool_map_[static_cast<size_t>(t)] = t + 1;
+    }
+    rebuild_slot_tool_mapping_locked();
+    for (int i = 0; i < NUM_PORTS; ++i) {
+        update_slot_from_state(i);
+    }
+}
+
+void AmsBackendAd5xIfs::apply_ifs_vars_macro_absent_locked() {
+    if (!ifs_macro_confirmed_missing_ || has_ifs_vars_) {
+        spdlog::warn("{} _IFS_VARS macro no longer present (post FIRMWARE_RESTART) — "
+                     "disabling _IFS_VARS writes",
+                     backend_log_tag());
+    }
+    ifs_macro_confirmed_missing_ = true;
+    demote_ifs_vars_locked();
+    // The plugin went away with the macro; a remembered variable_backup would be
+    // a claim about software that is no longer installed.
+    ifs_backup_variable_.reset();
+    system_info_.endless_spool_enabled = false;
+}
+
+void AmsBackendAd5xIfs::demote_ifs_vars_locked() {
+    has_ifs_vars_ = false;
+
+    // The wire table keeps itself current by subscription, and a routing the
+    // user set with IFS_MAP_TOOL is live firmware state — neither is the
+    // withdrawn plugin's to hand back. Only a module-live rig with no wire
+    // contract is left holding a table nothing owns, and there the module's own
+    // macros are the firmware truth the latch would have installed.
+    if (ifs_module_live_.load() && !ifs_tool_map_live_) {
+        install_identity_tool_map_locked();
     }
 }
 
@@ -1013,12 +1055,11 @@ bool AmsBackendAd5xIfs::parse_ifs_tool_map_locked(const nlohmann::json& ifs_obje
     std::array<int, TOOL_MAP_SIZE> parsed{};
     parsed.fill(UNMAPPED_PORT);
     for (auto entry = it->begin(); entry != it->end(); ++entry) {
-        int tool = 0;
-        try {
-            tool = std::stoi(entry.key());
-        } catch (...) {
+        const auto tool_number = helix::text_io::parse_leading<int>(entry.key());
+        if (!tool_number) {
             continue; // not a tool number
         }
+        const int tool = *tool_number;
         if (tool < 0 || tool >= TOOL_MAP_SIZE) {
             continue;
         }
@@ -1055,7 +1096,8 @@ void AmsBackendAd5xIfs::parse_port_sensor(int port_1based, bool detected) {
     int slot = port_1based - 1;
     if (slot >= 0 && slot < NUM_PORTS) {
         bool was_first = !has_per_port_sensors_;
-        bool changed = port_presence_[static_cast<size_t>(slot)] != detected;
+        const bool was_present = port_presence_[static_cast<size_t>(slot)];
+        bool changed = was_present != detected;
         has_per_port_sensors_ = true;
         port_presence_[static_cast<size_t>(slot)] = detected;
         if (was_first || changed) {
@@ -1063,6 +1105,34 @@ void AmsBackendAd5xIfs::parse_port_sensor(int port_1based, bool detected) {
                           port_1based, detected ? "present" : "empty",
                           was_first ? ", first detection" : "");
         }
+        note_presence_transition_locked(slot, was_present, detected);
+    }
+}
+
+void AmsBackendAd5xIfs::note_presence_transition_locked(int slot_index, bool was_present,
+                                                        bool now_present, bool sensor_edge) {
+    const auto idx = static_cast<size_t>(slot_index);
+    // The first sighting of a port is the session's baseline, never an edge:
+    // a spool seated at boot is not an insert.
+    if (!presence_observed_[idx]) {
+        presence_observed_[idx] = true;
+        return;
+    }
+    if (was_present == now_present) {
+        return;
+    }
+    // Presence is the only token naming this hardware's occupant, so any
+    // transition retires the echo suppression: what the printer states next
+    // about the port is its own word again.
+    own_write_echoes_.abandon(slot_index);
+    if (!was_present && now_present && sensor_edge) {
+        // The IFS reads nothing off a spool: its colour and material are its
+        // own memory of the last write. An insert therefore carries no
+        // evidence under the slot spec's insert rule and the user is asked
+        // instead (docs/specs/filament_slots.md §6).
+        helix::ui::queue_update("AmsBackendAd5xIfs::note_presence_transition_locked", [slot_index] {
+            helix::ui::offer_clear_after_unverified_insert(slot_index);
+        });
     }
 }
 
@@ -1094,17 +1164,37 @@ void AmsBackendAd5xIfs::update_slot_from_state(int slot_index) {
 
     auto idx = static_cast<size_t>(slot_index);
 
-    // Color: parse hex string to uint32_t
-    if (!colors_[idx].empty()) {
-        try {
-            entry->info.color_rgb = static_cast<uint32_t>(std::stoul(colors_[idx], nullptr, 16));
-        } catch (...) {
-            // Invalid hex — leave color unchanged
-        }
+    // Color: read the string through the shared lane grammar. observed_color
+    // is what this call read out of colors_[idx], and it is the ONLY
+    // firmware-truth colour in scope below - entry->info.color_rgb stops being
+    // one the moment apply_resolved_lane() has run over this persistent
+    // SlotInfo once.
+    //
+    // colors_[idx] is not guaranteed to be six hex digits: parse_adventurer_json
+    // stores ffmColorN as the printer sent it, minus a leading '#', and the
+    // stock UI writes the '#RGB' short form. Only an Observed reading is a
+    // colour; anything else leaves color_rgb alone so the last good colour
+    // stays on screen. Cleared lands there too, because an empty colors_[idx]
+    // is a slot no source has spoken for yet rather than the board stating the
+    // lane has no colour - parse_save_variables and handle_status run
+    // before parse_adventurer_json fills it.
+    std::optional<uint32_t> observed_color;
+    if (const auto reading = ams::read_lane_color(colors_[idx]);
+        reading.kind == ams::ColorReadingKind::Observed) {
+        observed_color = reading.rgb;
+        entry->info.color_rgb = reading.rgb;
     }
 
-    // Material
-    entry->info.material = materials_[idx];
+    // Material follows the color rule above: an empty materials_[idx] is a
+    // slot no source has spoken for yet (parse_save_variables and
+    // handle_status run before parse_adventurer_json fills it), not
+    // the board stating the lane has no material. The vendor-cache filing
+    // below already treats it that way, and painting "" here would wipe an
+    // identity the lane model cannot restore — a sync carries no declaration
+    // of its own.
+    if (!materials_[idx].empty()) {
+        entry->info.material = materials_[idx];
+    }
 
     // Status based on sensor and active state
     bool is_active_slot = (system_info_.current_slot == slot_index);
@@ -1144,27 +1234,18 @@ void AmsBackendAd5xIfs::update_slot_from_state(int slot_index) {
     // Reverse tool mapping: find first tool that maps to this port
     entry->info.mapped_tool = find_first_tool_for_port(slot_index + 1);
 
-    // External-edit detection MUST run BEFORE apply_overrides. entry->info
-    // .color_rgb is firmware-truth here IF colors_[idx] was non-empty above;
-    // after apply_overrides it would be masked by the (possibly stale)
-    // override and we'd miss the delta vs. the prior firmware baseline.
+    // External-edit detection MUST run BEFORE apply_resolved_lane: it compares
+    // a firmware reading against the last firmware baseline, and
+    // apply_resolved_lane overwrites entry->info with the lane's resolved
+    // answer, in which a declared field outranks this frame's vendor reading.
     //
-    // When colors_[idx] is empty we have NO firmware reading yet —
-    // entry->info.color_rgb is whatever was left there by the SlotInfo
-    // default (AMS_DEFAULT_SLOT_COLOR / 0x808080) or a prior apply_overrides
-    // leak. Pass nullopt (the helper's explicit "no reading" signal) so we
-    // don't establish a phantom baseline that would later be misread as an
-    // external edit. Boot path: parse_save_variables / handle_status_update
-    // call update_slot_from_state BEFORE parse_adventurer_json fills in
-    // colors_[]; pre-fix this populated a 0x808080 baseline, then the first
-    // real parse triggered a bogus sync.
+    // observed_color is nullopt whenever this call read no colour at all: an
+    // empty colors_[idx] (parse_save_variables / handle_status run
+    // before parse_adventurer_json fills it), or a string that would not parse.
+    // That is the helper's explicit "no reading" signal, and it establishes no
+    // baseline, so a genuine later reading is not misread as an external edit.
+    // Any uint32_t inside the optional IS a reading, 0 for pure black included.
     //
-    // When colors_[idx] is non-empty, pass the parsed value AS-IS — including
-    // 0 for pure black. The helper accepts any uint32_t inside the optional
-    // as a real reading; only nullopt means "no reading" (replaces the prior
-    // ambiguous 0-as-no-signal sentinel that silently dropped black).
-    std::optional<uint32_t> observed_color =
-        colors_[idx].empty() ? std::nullopt : std::optional<uint32_t>{entry->info.color_rgb};
     // Pass slot_has_filament so the helper skips creating a phantom override
     // when a slot read came back as the empty-placeholder #808080 — the eject
     // path in parse_adventurer_json clears the override explicitly.
@@ -1174,67 +1255,75 @@ void AmsBackendAd5xIfs::update_slot_from_state(int slot_index) {
     // stale and mask firmware truth (#981/#1065 — color updated, type stuck).
     check_external_type_change(slot_index, materials_[idx], observed_color, port_presence_[idx]);
 
-    // Layer user-configured overrides on top of firmware-reported data. Called
-    // last so overrides win for any non-default field. Callers hold mutex_,
-    // which also covers overrides_ writes from on_started() and set_slot_info()
-    // — see apply_overrides() below for the invariant.
-    apply_overrides(entry->info, slot_index);
-}
-
-void AmsBackendAd5xIfs::apply_overrides(SlotInfo& slot, int slot_index) {
-    // overrides_ is mutated in on_started() (initial load) and set_slot_info()
-    // (persisted user edit). Both writers hold mutex_, and every caller of
-    // apply_overrides runs inside update_slot_from_state() under mutex_ — so
-    // the map is implicitly lock-protected here. If a slot has no override
-    // entry, this is a zero-cost hash lookup followed by early return — safe
-    // to call inside the hot parse path. The whole spec §5 policy + the
-    // re-bind/eject rules live in helix::ams::merge_override — the single
-    // implementation every backend shares. Rule 1 (re-bind) is NOT gated by
-    // the capability: it can fire on any backend whose firmware reports a
-    // positive spool id disagreeing with the override (AFC, Happy Hare,
-    // flat-schema CFS). IFS firmware never reports one, so Rule 1 cannot
-    // fire here today — but that is a fact about this firmware, not what
-    // the capability gates. Rule 2 (eject) IS what
-    // printer_reports_spool_ids() gates (base false here: 0 is IFS's
-    // everyday reading, never an eject), and the erase branch is correct
-    // tomorrow if a firmware ever starts reporting ids.
-    auto it = overrides_.find(slot_index);
-    if (it == overrides_.end())
-        return;
-    helix::ams::MergeOptions opts;
-    opts.printer_reports_spool_ids = printer_reports_spool_ids();
-    opts.keep_spool_info_on_eject =
-        helix::SettingsManager::instance().get_ams_keep_spool_info_on_eject();
-    // Own-write echo suppression (SlotFingerprintTracker::expect()
-    // semantics): Rule 1 must not read an in-flight stale firmware id as an
-    // external re-bind. IFS never writes firmware ids, so this is always
-    // {0, 0} today — the call keeps one shape across backends.
-    const auto [own_old_id, own_new_id] = own_write_expectation(slot_index, slot.spoolman_id);
-    opts.suppress_rebind_firmware_old_id = own_old_id;
-    opts.suppress_rebind_firmware_new_id = own_new_id;
-    const auto result = helix::ams::merge_override(slot, it->second, opts);
-    if (result.cleared_rebind || result.cleared_eject) {
-        overrides_.erase(it);
-        if (override_store_) {
-            const std::string tag = backend_log_tag();
-            override_store_->clear_async(slot_index, [tag, slot_index](bool ok, std::string err) {
-                if (!ok) {
-                    spdlog::warn("{} clear_async failed for slot {}: {}", tag, slot_index, err);
-                }
-            });
+    // Translate this frame's signal into the lane source model. Every value
+    // read here is one this call produced, never entry->info:
+    // apply_resolved_lane rewrites that struct in place, so reading it back
+    // files a declared value as something the board reported. What makes this correct
+    // is the values, not the position - the same block one line lower, reading
+    // entry->info, would launder every user edit into a vendor reading.
+    {
+        helix::ams::Observation sensed(helix::ams::ObservationSource::Sensed);
+        // port_presence_ reads false on every lane until a sensor has actually
+        // spoken, which is a sensor nobody has queried rather than an empty
+        // lane. The record is filed either way: "nothing observed" and "no
+        // translation ran" are different facts.
+        if (ifs_status_ports_seen_.load() || has_per_port_sensors_) {
+            sensed.present = port_presence_[idx];
         }
+        helix::ams::ingest(lane_id(slot_index), sensed);
+
+        // Adventurer5M.json keeps colour and type across an eject, so it is a
+        // cache of a past declaration and never evidence of presence.
+        helix::ams::Observation cache(helix::ams::ObservationSource::VendorCache);
+        cache.color_rgb = observed_color;
+        if (!materials_[idx].empty()) {
+            cache.material = materials_[idx];
+        }
+        // A colour or material repeating this port's armed declaration is our
+        // own write coming back, not a reading. The filter lives here, at the
+        // one ingest every parse path (JSON, GET_ZCOLOR, save_variables)
+        // flows through. The boundary is always empty: nothing this hardware
+        // reads names a spool, so presence transitions (the arm's authority)
+        // are what end the suppression.
+        //
+        // Only a parse that just moved the latch gets the full guard: a
+        // differing value there is firmware's own word and releases the
+        // declaration. settle_port_locked and the slot-info readers re-run
+        // this function with the OLD latch, where pre-edit values differing
+        // from the just-armed declaration would wrongly release it; those
+        // re-files only strip fields equal to the declaration.
+        if (identity_statement_fresh_[idx]) {
+            identity_statement_fresh_[idx] = false;
+            own_write_echoes_.withhold(slot_index, std::string{}, cache);
+        } else {
+            own_write_echoes_.strip_standing(slot_index, cache);
+        }
+        helix::ams::ingest(lane_id(slot_index), cache);
     }
+
+    // Lay the lane's resolved values over the struct built above. Only a field
+    // some source observed is written; one nobody observed keeps the firmware
+    // value read here. Of the sources, a DECLARED field outranks the vendor
+    // cache this frame just filed, and a merely remembered one does not.
+    // Callers hold mutex_, which also covers overrides_ writes from
+    // on_started() and apply_user_edit(); apply_resolved_lane() requires that
+    // lock, as its declaration in ams_backend.h states.
+    //
+    // The clear runs first because the struct persists across frames: without
+    // it, a field an earlier frame's paint wrote outlives the record that
+    // stated it, and the paint below faithfully keeps it there.
+    prepare_lane_repaint_locked(slot_index, entry->info);
+    apply_resolved_lane(entry->info, slot_index);
 }
 
 bool AmsBackendAd5xIfs::check_external_color_change(int slot_index,
                                                     std::optional<uint32_t> observed_color,
                                                     bool slot_has_filament) {
-    // observed_color is whatever color this parse (or caller) believes is
-    // currently in the slot — typically firmware-truth from the parse path,
-    // but set_slot_info() also pre-updates the baseline with the user's
-    // chosen color before calling update_slot_from_state(), so this helper
-    // can be fed a user-provided color too. Either way, the "did it change
-    // from what we last saw?" contract is the same.
+    // observed_color is the reading update_slot_from_state() took from
+    // colors_[idx]: firmware truth from a printer frame, always. A user edit
+    // never reaches this helper as a value — it rides the lane's declaration,
+    // so when the echo parse lands the edited colour here, the delta fires
+    // and the mirror's declared_on_lane guard keeps the edit (#965).
     //
     // `nullopt` is the explicit "no reading available" signal (empty
     // colors_[idx], unread slot, transient JSON parse race). Treat as
@@ -1254,8 +1343,8 @@ bool AmsBackendAd5xIfs::check_external_color_change(int slot_index,
     if (it == last_firmware_color_.end()) {
         // First observation for this slot — establish baseline. Even if the
         // override's color_rgb differs from firmware, the initial startup
-        // observation is NEVER an external-edit signal. apply_overrides will
-        // still run after us and the override wins.
+        // observation is NEVER an external-edit signal. apply_resolved_lane
+        // still runs after us and a declared colour outranks this reading.
         last_firmware_color_[slot_index] = color;
         spdlog::debug("{} Slot {} baseline color: #{:06X}", backend_log_tag(), slot_index, color);
         return false;
@@ -1288,17 +1377,23 @@ bool AmsBackendAd5xIfs::check_external_color_change(int slot_index,
     // save_async doesn't make us re-fire every poll.
     it->second = color;
 
+    // Provenance-neutral wording: the delta between two firmware readings is
+    // a fact, but whether it is our own write echoing back or a foreign edit
+    // is not knowable here — that discrimination is the round-trip echo
+    // guard's job. The mirror itself is safe either way: declared fields are
+    // skipped, so our own echo lands as a no-op.
     spdlog::info("{} Slot {} firmware color changed #{:06X} -> #{:06X}, "
-                 "syncing override + Moonraker DB lane_data (external edit detected)",
+                 "syncing override + Moonraker DB lane_data",
                  backend_log_tag(), slot_index, old_color, color);
 
     // External edit (Mainsail console, AD5X LCD, native zmod dialog,
     // CHANGE_ZCOLOR from any non-Helix path). Refresh the override's
     // color_rgb + material — preserving brand/spool_name/spoolman_id —
     // and push the result to lane_data so OrcaSlicer's MoonrakerPrinterAgent
-    // sees the new state. The caller's next apply_overrides() call lays the
-    // refreshed override back over entry->info; since color_rgb + material
-    // now match firmware-truth, that's a no-op for those fields.
+    // sees the new state. The caller's next apply_resolved_lane() lays the
+    // lane's resolved answer back over entry->info; the call below retracts
+    // the lane's declaration of the same fields, so color_rgb + material
+    // resolve to the firmware truth just accepted.
     sync_override_to_firmware_locked(slot_index, color,
                                      materials_[static_cast<size_t>(slot_index)]);
     return true;
@@ -1387,12 +1482,12 @@ bool AmsBackendAd5xIfs::check_external_type_change(int slot_index,
     }
 
     spdlog::info("{} Slot {} firmware material changed {} -> {}, syncing override "
-                 "+ Moonraker DB lane_data (external type edit detected)",
+                 "+ Moonraker DB lane_data",
                  backend_log_tag(), slot_index, old_material, observed_material);
 
     // OverwriteAlways mirror skips user-locked material (#965), so a genuine
     // user choice is preserved; a stale auto-mirror material is refreshed so
-    // the new firmware type surfaces on the next apply_overrides().
+    // the new firmware type surfaces on the next apply_resolved_lane().
     sync_override_to_firmware_locked(slot_index, *observed_color, observed_material);
     return true;
 }
@@ -1404,21 +1499,44 @@ bool AmsBackendAd5xIfs::sync_override_to_firmware_locked(int slot_index, uint32_
     // observation. Pass slot_has_filament=true unconditionally; the helper's
     // own guards then enforce firmware_color != 0.
     //
-    // OverwriteAlways policy on IFS: set_slot_info pushes user color back to
+    // OverwriteAlways policy on IFS: apply_user_edit pushes user color back to
     // firmware via Adventurer5M.json, so in the steady state user-truth and
     // firmware-truth converge. The mirror bootstraps an empty override on
     // hardware swap and catches genuine external edits (Mainsail console,
     // native LCD, CHANGE_ZCOLOR).
     //
-    // User-lock guard (#965): set_slot_info(persist=true) tags the override
-    // user_locked_color / user_locked_material; the helper skips those
-    // fields. Without the guard, an AD5X firmware post-print FFMInfo revert
-    // (re-emits prior material into Adventurer5M.json) was clobbering the
-    // user's material choice through this call site. To re-enable auto-track
-    // on a previously-edited slot the user calls clear_slot_override.
+    // Declaration guard (#965): apply_user_edit() declares the colour and
+    // material the user moved, and the record's own declarations guard this
+    // mirror. Without the guard, an AD5X firmware post-print FFMInfo revert
+    // (which re-emits the prior material into Adventurer5M.json) would clobber
+    // the user's material choice through this call site. A field a declaring
+    // lane source holds is guarded the same way, which is how a linked spool's
+    // material survives a type the printer's own menu sets. To re-enable
+    // auto-track on a previously-edited slot the user calls clear_slot_override.
+    const helix::ams::DeclaredOnLane declared = helix::ams::declared_on_lane(lane_id(slot_index));
     bool changed = helix::ams::mirror_firmware_to_lane_data(
         override_store_.get(), overrides_, slot_index, firmware_color, firmware_material,
-        /*slot_has_filament=*/true, helix::ams::MirrorPolicy::OverwriteAlways, backend_log_tag());
+        /*slot_has_filament=*/true, helix::ams::MirrorPolicy::OverwriteAlways, backend_log_tag(),
+        declared);
+
+    // The lane's stored declaration of what the mirror just rewrote goes with
+    // it, or the two stores disagree and the stronger record paints a value the
+    // override has stopped holding. Exactly the fields the record does
+    // not declare: a declared field is the user still standing behind their
+    // choice, the mirror skips it, and firmware does not get to retract it.
+    //
+    // Not gated on `changed`, which says the override needed moving. The lane
+    // is a separate store and can be stale on its own, and this path runs only
+    // where firmware has deliberately restated the field.
+    auto it = overrides_.find(slot_index);
+    RetractedFields restated;
+    restated.color = it == overrides_.end() || !helix::ams::declares_color(it->second);
+    // A linked spool's material never reaches firmware, so a type firmware
+    // states does not retract what the server states.
+    restated.material = it == overrides_.end() ||
+                        (!helix::ams::declares_material(it->second) && !declared.material);
+    retract_lane_declaration_locked(slot_index, restated);
+
     if (!changed)
         return false;
 
@@ -1430,40 +1548,83 @@ bool AmsBackendAd5xIfs::sync_override_to_firmware_locked(int slot_index, uint32_
     return true;
 }
 
-void AmsBackendAd5xIfs::clear_override_locked(int slot_index, SlotInfo& slot) {
-    // Caller must hold mutex_. Erases the in-memory override, resets
-    // override-exclusive fields on the live SlotInfo (so the next
-    // get_slot_info sees cleared state — apply_overrides is a no-op for this
-    // slot after erase), and fires the async store delete. Firmware-sourced
-    // fields (color_rgb, material, mapped_tool, status) are left alone —
-    // update_slot_from_state has already refreshed them.
-    overrides_.erase(slot_index);
+void AmsBackendAd5xIfs::retract_lane_declaration_locked(int slot_index, RetractedFields fields) {
+    // Caller holds mutex_. See the header for why both stores have to move
+    // together.
+    if (!fields.color && !fields.material && !fields.catalog) {
+        return;
+    }
+    helix::ams::retract_lane_declarations(lane_id(slot_index),
+                                          [&fields](helix::ams::Observation& kept) {
+                                              if (fields.color) {
+                                                  kept.color_rgb.reset();
+                                                  // The name travels with the colour it names: a
+                                                  // swatch labelled with a different colour's name
+                                                  // contradicts itself.
+                                                  kept.color_name.reset();
+                                              }
+                                              if (fields.material) {
+                                                  kept.material.reset();
+                                              }
+                                              if (fields.catalog) {
+                                                  kept.catalog_id.reset();
+                                                  kept.product_name.reset();
+                                              }
+                                          });
+}
 
-    slot.brand.clear();
-    slot.spool_name.clear();
-    slot.spoolman_id = 0;
-    slot.spoolman_vendor_id = 0;
-    slot.remaining_weight_g = -1.0f;
-    slot.total_weight_g = -1.0f;
-    slot.color_name.clear();
-    // The catalog pick is override-exclusive on every backend — no AMS
-    // firmware carries a branded product id — so a clear always drops it.
-    // Leaving it would re-navigate the editor to the removed spool's
-    // product on the next open.
-    slot.catalog_id.clear();
-    slot.product_name.clear();
+void AmsBackendAd5xIfs::release_color_material_locks_locked(int slot_index,
+                                                            helix::ams::FilamentSlotOverride& ovr,
+                                                            ReleasedValues disposition) {
+    // Caller holds mutex_. Both stores, always: see the header for why one of
+    // them on its own leaves the released values still painting.
+    //
+    // The record's own spool id is the question, not the lane's: a link whose
+    // server is unreachable is still a link, and this record is what the
+    // release operates on.
+    const bool linked = ovr.spoolman_id > 0;
+    helix::ams::withdraw_color_and_material(ovr);
+    if (disposition == ReleasedValues::Strip) {
+        // These are the fields the persisted record stops carrying, so a
+        // restart reloads a record that declares nothing for them and the
+        // firmware-truth color_rgb/material resolve. The live lane's own
+        // declaration is retracted below.
+        ovr.color_set = false;
+        ovr.color_rgb = 0;
+        ovr.color_name.clear();
+        // A linked spool owns its material, and firmware re-authoring a type
+        // says nothing about the spool the lane is bound to.
+        if (!linked) {
+            ovr.material.clear();
+            // The catalog pick is scoped to a MATERIAL: "sunlu-pla-plus-2-0"
+            // only makes sense while the lane is PLA, and a Strip release is
+            // firmware re-authoring the material. setup_details_selector()
+            // seeds the type dropdown from catalog_id first, so a stale id
+            // drags the editor back to the old material family and contradicts
+            // the firmware truth just accepted.
+            ovr.catalog_id.clear();
+            ovr.product_name.clear();
+        }
+    }
 
+    // The lane's own records are trimmed to match, whatever the disposition:
+    // the values Keep leaves standing are the mirror's to refresh, and a
+    // declaring record outranks the vendor cache the mirror feeds.
+    RetractedFields released;
+    released.color = true;
+    // The material and the pick scoped to it stay on a linked lane, where the
+    // server states the material and firmware does not.
+    released.material = !linked;
+    // The catalog pick goes with the material it is scoped to, for the same
+    // reason it goes from the override above.
+    released.catalog = disposition == ReleasedValues::Strip && !linked;
+    retract_lane_declaration_locked(slot_index, released);
+
+    // Persist so a restart reloads the released record rather than the locked
+    // one. Capture by value: the callback can fire long after this returns.
     if (override_store_) {
-        // Capture by value only — clear_async's Moonraker callback can fire
-        // long after this function returns (MR tracker ~60s timeout) and
-        // after the backend itself may be gone. Same pattern as the
-        // save_async site in set_slot_info().
-        const std::string tag = backend_log_tag();
-        override_store_->clear_async(slot_index, [tag, slot_index](bool ok, std::string err) {
-            if (!ok) {
-                spdlog::warn("{} clear_async failed for slot {}: {}", tag, slot_index, err);
-            }
-        });
+        helix::ams::save_override_async(override_store_.get(), slot_index, ovr, backend_log_tag(),
+                                        "lock release");
     }
 }
 
@@ -1474,8 +1635,8 @@ void AmsBackendAd5xIfs::release_locked_override_keep_identity_locked(int slot_in
     // (firmware truth wins), but the firmware can't carry brand/spool_name/
     // spoolman_id/weights — those are the user's identity metadata and must
     // survive a routine physical load (Bug B / #981). Release the locks + strip
-    // the firmware-carryable fields so apply_overrides stops masking firmware
-    // truth for color/material, but keep the identity fields. When there is no
+    // the firmware-carryable fields so the lane stops declaring color/material
+    // and firmware truth resolves, but keep the identity fields. When there is no
     // identity to preserve, fall back to a full erase.
     auto it = overrides_.find(slot_index);
     if (it == overrides_.end())
@@ -1492,7 +1653,7 @@ void AmsBackendAd5xIfs::release_locked_override_keep_identity_locked(int slot_in
     if (!has_identity) {
         // Nothing firmware-uncarryable to keep — behave exactly like the
         // pre-existing #981 clear so those tests still see a clean wipe.
-        clear_override_locked(slot_index, slot);
+        clear_override_locked(slot_index, &slot);
         return;
     }
 
@@ -1501,56 +1662,23 @@ void AmsBackendAd5xIfs::release_locked_override_keep_identity_locked(int slot_in
                  "can't carry (#1071-style retention, Bug B)",
                  backend_log_tag(), slot_index);
 
-    // Release the user-locks and strip the firmware-carryable override fields.
-    // apply_overrides only masks a field when the override still carries a real
-    // value (non-empty string / color_set / >0 id), so clearing these lets the
-    // firmware-truth color_rgb/material (refreshed by update_slot_from_state)
-    // show through. The identity fields (brand, spool_name, spoolman_id,
-    // spoolman_vendor_id, weights) stay put.
-    ovr.user_locked_color = false;
-    ovr.user_locked_material = false;
-    ovr.color_set = false;
-    ovr.color_rgb = 0;
-    ovr.color_name.clear();
-    ovr.material.clear();
-    // The catalog pick is scoped to a MATERIAL — "sunlu-pla-plus-2-0" only makes
-    // sense while the lane is PLA. This path exists because firmware just
-    // re-authored the material, so the pick goes with it. Keeping it would be
-    // worse than losing it: setup_details_selector() seeds the type dropdown
-    // from catalog_id first, so a stale id would drag the editor back to the old
-    // material family and contradict the firmware truth we just accepted.
-    // Deliberately NOT counted in has_identity above for the same reason — it is
-    // not firmware-uncarryable metadata like brand/spool_name, it is material-
-    // derived.
-    ovr.catalog_id.clear();
-    ovr.product_name.clear();
-
-    // Persist the trimmed override so a restart reloads the retained identity
-    // (and the released locks) instead of the pre-edit locked record. Capture
-    // by value — the callback can fire long after this returns.
-    if (override_store_) {
-        helix::ams::FilamentSlotOverride snapshot = ovr;
-        const std::string tag = backend_log_tag();
-        override_store_->save_async(slot_index, snapshot,
-                                    [tag, slot_index](bool ok, std::string err) {
-                                        if (!ok) {
-                                            spdlog::warn("{} identity-retain persist failed for "
-                                                         "slot {}: {}",
-                                                         tag, slot_index, err);
-                                        }
-                                    });
-    }
+    // Strip the firmware-carryable values along with the locks: firmware has
+    // just re-authored colour and material, so this frame's truth paints
+    // immediately rather than waiting for a mirror pass. The identity fields
+    // (brand, spool_name, spoolman_id, spoolman_vendor_id, weights) stay put.
+    // catalog_id is material-derived rather than firmware-uncarryable metadata,
+    // which is why has_identity above does not count it.
+    release_color_material_locks_locked(slot_index, ovr, ReleasedValues::Strip);
 }
 
 void AmsBackendAd5xIfs::unlock_auto_tracked_override_on_insert_locked(int slot_index) {
     // Caller holds mutex_. See the header doc + FILAMENT_MANAGEMENT.md for the
-    // full model. Short version: a lane's material/color override can be
-    // user-locked either by a menu edit (set_slot_info) or by the pessimistic
-    // !material.empty() load default (from_lane_data_record). A locked field is
-    // never refreshed by the OverwriteAlways auto-mirror, so a freshly inserted
-    // spool keeps painting the PREVIOUS spool's type/color. Only an external
-    // CHANGE_ZCOLOR clears that lock (#981), and a physical insert emits none —
-    // so unlock here, on the insert edge itself.
+    // full model. Short version: a lane's material/color override is declared
+    // by a menu edit (apply_user_edit). A declared field is never refreshed by
+    // the OverwriteAlways auto-mirror, so a freshly inserted spool keeps
+    // painting the PREVIOUS spool's type/color. Only an external CHANGE_ZCOLOR
+    // withdraws that declaration (#981), and a physical insert emits none, so
+    // withdraw it here, on the insert edge itself.
     auto it = overrides_.find(slot_index);
     if (it == overrides_.end())
         return; // auto-tracking already (no override) — nothing to unlock
@@ -1561,29 +1689,17 @@ void AmsBackendAd5xIfs::unlock_auto_tracked_override_on_insert_locked(int slot_i
     // the bound spool, not a stale guess.
     if (ovr.spoolman_id > 0)
         return;
-    if (!ovr.user_locked_material && !ovr.user_locked_color)
+    if (!helix::ams::declares_material(ovr) && !helix::ams::declares_color(ovr))
         return; // already auto-tracking both fields
     spdlog::info("{} Slot {} inserted (empty->present) with no Spoolman link — "
                  "unlocking auto-tracked material/color so the new spool's firmware "
                  "type/color refresh (#1065)",
                  backend_log_tag(), slot_index);
-    ovr.user_locked_material = false;
-    ovr.user_locked_color = false;
-    // Persist the unlock so a restart doesn't reload the pessimistic
-    // !material.empty() lock default and re-stick the old type. The subsequent
-    // update_slot_from_state -> auto-mirror will save again once firmware truth
-    // refreshes the material/color; this first save just makes the unlock
-    // durable even if the same spool goes back in and no material delta follows.
-    if (override_store_) {
-        helix::ams::FilamentSlotOverride snapshot = ovr;
-        const std::string tag = backend_log_tag();
-        override_store_->save_async(
-            slot_index, snapshot, [tag, slot_index](bool success, const std::string& err) {
-                if (!success) {
-                    spdlog::warn("{} unlock persist failed for slot {}: {}", tag, slot_index, err);
-                }
-            });
-    }
+    // Keep the values: the OverwriteAlways mirror refreshes them to the new
+    // spool's firmware truth on the next parse, and the released record is
+    // persisted so a restart cannot reload the old declaration and re-stick the
+    // old type.
+    release_color_material_locks_locked(slot_index, ovr, ReleasedValues::Keep);
 }
 
 void AmsBackendAd5xIfs::clear_slot_override(int slot_index) {
@@ -1601,7 +1717,7 @@ void AmsBackendAd5xIfs::clear_slot_override(int slot_index) {
             return;
         }
         spdlog::info("{} Slot {} override cleared by user request", backend_log_tag(), slot_index);
-        clear_override_locked(slot_index, entry->info);
+        clear_override_locked(slot_index, &entry->info);
     }
 
     emit_event(EVENT_SLOT_CHANGED, std::to_string(slot_index));
@@ -1649,27 +1765,10 @@ AmsSystemInfo AmsBackendAd5xIfs::get_system_info() const {
     // This catches cases where the printer goes silent (network drop, Klipper crash).
     const_cast<AmsBackendAd5xIfs*>(this)->check_action_timeout();
 
-    auto info = slots_.build_system_info();
-
-    // Overlay our cached system info
-    info.type = system_info_.type;
-    info.type_name = system_info_.type_name;
-    info.total_slots = system_info_.total_slots;
-    info.current_tool = system_info_.current_tool;
-    info.current_slot = system_info_.current_slot;
-    info.filament_loaded = system_info_.filament_loaded;
-    info.action = system_info_.action;
-    // Surface the phase machine's live sub-phase + detail so
-    // AmsState::sync_from_backend can drive the ams_operation_phase subject and
-    // the operation-detail line. Without this the right-side step tracker renders
-    // the steps but never highlights the active one, and the detail goes blank
-    // (#1065 Bug 2: "the 1-2-3 steps show but fail to launch any of them").
-    info.operation_detail = system_info_.operation_detail;
-    info.operation_phase = system_info_.operation_phase;
-    info.operation_indeterminate = system_info_.operation_indeterminate;
-    info.supports_bypass = system_info_.supports_bypass;
-    info.endless_spool_enabled = system_info_.endless_spool_enabled;
-    info.supports_purge = system_info_.supports_purge;
+    auto info = slots_.build_system_info(system_info_);
+    // Motion-only firmware publishes no head switch: no toolhead sensor to show.
+    for (auto& unit : info.units)
+        unit.has_toolhead_sensor = head_switch_seen_;
 
     // Replace registry's tool map with IFS-specific 16-entry mapping
     info.tool_to_slot_map.clear();
@@ -1683,15 +1782,6 @@ AmsSystemInfo AmsBackendAd5xIfs::get_system_info() const {
     }
 
     return info;
-}
-
-SlotInfo AmsBackendAd5xIfs::get_slot_info(int slot_index) const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    const auto* entry = slots_.get(slot_index);
-    if (!entry) {
-        return SlotInfo{};
-    }
-    return entry->info;
 }
 
 bool AmsBackendAd5xIfs::is_bypass_active() const {
@@ -1796,8 +1886,8 @@ PathSegment AmsBackendAd5xIfs::infer_error_segment() const {
 // --- Filament operations ---
 
 AmsError AmsBackendAd5xIfs::do_load_filament(int slot_index) {
-    if (!validate_slot_index(slot_index)) {
-        return AmsErrorHelper::invalid_slot(slot_index, NUM_PORTS - 1);
+    if (auto err = validate_slot_index(slot_index); !err.success()) {
+        return err;
     }
 
     int port = slot_index + 1;
@@ -1835,15 +1925,9 @@ AmsError AmsBackendAd5xIfs::do_load_filament(int slot_index) {
     // timeout flips to ERROR (raza616 stuck-on-Purging). on_complete fires on a
     // bg thread, so hop to the main thread before touching state.
     //
-    // ensure_homed_then() WITHOUT skip_homing is deliberate (#1248 proposed
-    // skip_homing=true on the theory that this double-homes; it does not). The
+    // ensure_homed_then() WITHOUT skip_homing does not double-home (#1248): the
     // macro's leading _G28 is conditional on homed_axes, so once our G28 has
-    // run it falls through - one home either way. What ensure_homed_then() buys
-    // over letting the macro home itself is the "Home printer first?" prompt:
-    // on a loadcell-Z AD5X the load is about to run a full probing home plus a
-    // trash-drop and nozzle wipe, and the user gets told before the toolhead
-    // moves. Unlike the unload above, which the user reaches only from an
-    // already-loaded head, Load is the entry point from a cold idle printer.
+    // run it falls through - one home either way.
     auto token = lifetime_.token();
     if (ifs_module_live_.load()) {
         // Standalone module: IFS_LOAD SLOT=n is the whole choreography - heat
@@ -1949,7 +2033,7 @@ AmsError AmsBackendAd5xIfs::do_unload_filament(int slot_index) {
                          backend_log_tag());
             return AmsError(AmsResult::WRONG_STATE,
                             "unload_filament: head sensor empty, no seated or active lane",
-                            "Nothing to unload: no filament at the nozzle");
+                            lv_tr("Nothing to unload: no filament at the nozzle"));
         }
         spdlog::info("{} Unload with empty toolhead sensor -> cold lane eject (slot {})",
                      backend_log_tag(), eject_slot);
@@ -1981,11 +2065,9 @@ AmsError AmsBackendAd5xIfs::do_unload_filament(int slot_index) {
     // device cfg and ZMOD v1.7.1.
     //
     // Raw rather than ensure_homed_then() because the macro's own _G28 already
-    // covers the unhomed case, so our G28 would add nothing but a "Home printer
-    // first?" prompt in front of a home the user cannot decline anyway. It is
-    // NOT to avoid a double home: _G28 is conditional on homed_axes and no-ops
-    // once we have homed (see filament_ops_self_home() in the header). The load
-    // path below deliberately makes the opposite call - see do_load_filament().
+    // covers the unhomed case, so our G28 would add nothing. _G28 is conditional
+    // on homed_axes and no-ops once we have homed (see filament_ops_self_home()
+    // in the header).
     spdlog::info("{} Unloading filament from toolhead (slot {}, current_slot {}, seated_slot {}, "
                  "head_empty {})",
                  backend_log_tag(), slot_index, current_slot, seated_slot, head_empty);
@@ -2005,7 +2087,8 @@ AmsError AmsBackendAd5xIfs::do_unload_filament(int slot_index) {
         // exactly the "current channel" the zmod macro resolves internally.
         std::string cmd = "IFS_UNLOAD";
         if (slot_index >= 0) {
-            cmd += " SLOT=" + std::to_string(slot_index + 1);
+            cmd += " SLOT=";
+            cmd += std::to_string(slot_index + 1); // DISPLAY_NUMBERING_OK: gcode wire, not a label
         }
         result = execute_gcode(std::move(cmd), [this, token]() {
             token.defer("Ad5xIfsBackend::unload_macro_complete",
@@ -2086,8 +2169,8 @@ void AmsBackendAd5xIfs::finalize_op_after_macro(bool is_unload) {
 }
 
 AmsError AmsBackendAd5xIfs::do_select_slot(int slot_index) {
-    if (!validate_slot_index(slot_index)) {
-        return AmsErrorHelper::invalid_slot(slot_index, NUM_PORTS - 1);
+    if (auto err = validate_slot_index(slot_index); !err.success()) {
+        return err;
     }
 
     // Standalone module: it has no point-without-load command — selection IS a
@@ -2098,17 +2181,17 @@ AmsError AmsBackendAd5xIfs::do_select_slot(int slot_index) {
     if (ifs_module_live_.load()) {
         return AmsError(AmsResult::NOT_SUPPORTED,
                         "select_slot: the standalone IFS module has no load-free selection",
-                        "This firmware can only switch slots by loading them");
+                        lv_tr("This firmware can only switch slots by loading them"));
     }
 
-    int port = slot_index + 1;
+    int port = slot_index + 1; // DISPLAY_NUMBERING_OK: 1-based SET_EXTRUDER_SLOT gcode parameter
     spdlog::info("{} Selecting port {}", backend_log_tag(), port);
     return execute_gcode("SET_EXTRUDER_SLOT SLOT=" + std::to_string(port));
 }
 
 AmsError AmsBackendAd5xIfs::do_change_tool(int tool_number) {
     if (tool_number < 0 || tool_number >= TOOL_MAP_SIZE) {
-        return AmsErrorHelper::invalid_slot(tool_number, TOOL_MAP_SIZE - 1);
+        return AmsErrorHelper::tool_out_of_range(tool_number);
     }
 
     int port;
@@ -2118,7 +2201,7 @@ AmsError AmsBackendAd5xIfs::do_change_tool(int tool_number) {
     }
 
     if (port < 1 || port > NUM_PORTS) {
-        return AmsErrorHelper::invalid_parameter("Tool T" + std::to_string(tool_number) +
+        return AmsErrorHelper::invalid_parameter("Tool " + helix::ui::tool_label(tool_number) +
                                                  " is not mapped to any port");
     }
 
@@ -2181,8 +2264,8 @@ AmsError AmsBackendAd5xIfs::eject_lane(int slot_index) {
         // The dispatch stamp is that test (#1250).
         note_filament_op_dispatch_locked();
 
-        if (!validate_slot_index(slot_index)) {
-            return AmsErrorHelper::invalid_slot(slot_index, NUM_PORTS - 1);
+        if (auto err = validate_slot_index_locked(slot_index); !err.success()) {
+            return err;
         }
 
         // Refuse to cold-eject the lane currently seated at the toolhead: the
@@ -2199,7 +2282,7 @@ AmsError AmsBackendAd5xIfs::eject_lane(int slot_index) {
         // a seated lane and wave the cold retract straight through.
         if (system_info_.current_slot == slot_index && !head_empty_for_unload_routing_locked()) {
             return AmsError(AmsResult::WRONG_STATE, "Lane is loaded in toolhead",
-                            "Unload from toolhead first", "Use Unload before Eject");
+                            lv_tr("Unload from toolhead first"), lv_tr("Use Unload before Eject"));
         }
 
         // Resolve the cold-retract LEN/SPEED from filament.json keyed by the
@@ -2217,7 +2300,7 @@ AmsError AmsBackendAd5xIfs::eject_lane(int slot_index) {
         }
     }
 
-    int port = slot_index + 1;
+    int port = slot_index + 1; // DISPLAY_NUMBERING_OK: 1-based SLOT= gcode parameter (IFS_EJECT)
     const std::string port_str = std::to_string(port);
     AmsError err39;
     if (ifs_module_live_.load()) {
@@ -2340,6 +2423,73 @@ AmsError AmsBackendAd5xIfs::reset() {
     const char* reset_cmd = ifs_module_live_.load() ? "IFS_RESET_DRIVER" : "IFS_UNLOCK";
     spdlog::info("{} Reset: {}", backend_log_tag(), reset_cmd);
     return execute_gcode(reset_cmd);
+}
+
+void AmsBackendAd5xIfs::release_zmod_change_locked(const char* reason) {
+    spdlog::warn("{} Z-Mod filament change released: {}", backend_log_tag(), reason);
+    if (system_info_.action == AmsAction::SELECTING) {
+        system_info_.action = AmsAction::IDLE;
+        set_operation_detail_locked("");
+    }
+    zmod_change_owns_action_ = false;
+    zmod_change_stale_ = true;
+}
+
+bool AmsBackendAd5xIfs::can_cancel_operation() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return !zmod_change_owns_action_;
+}
+
+void AmsBackendAd5xIfs::apply_zmod_change_macro(const json& status) {
+    auto it = status.find(ZMOD_CHANGE_MACRO);
+    if (it == status.end() || !it->is_object()) {
+        return;
+    }
+    // A diff frame without last_data means it did not change.
+    auto data = it->find("last_data");
+    if (data == it->end() || !data->is_object()) {
+        return;
+    }
+    auto channel = data->find("channel");
+    if (channel == data->end() || !channel->is_number_integer()) {
+        return;
+    }
+    const bool changing = channel->get<int>() != ZMOD_CHANGE_IDLE_CHANNEL;
+    const bool in_job = job_holds_machine_now();
+
+    bool action_changed = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const AmsAction before = system_info_.action;
+        if (changing) {
+            // Our own ops drive the action through the phase tracker; this only
+            // speaks for a change nothing of ours started.
+            if (!zmod_change_stale_ && !phase_tracker_.active &&
+                system_info_.action == AmsAction::IDLE) {
+                system_info_.action = AmsAction::SELECTING;
+                action_start_time_ = std::chrono::steady_clock::now();
+                set_operation_detail_locked("Changing filament");
+                zmod_change_owns_action_ = true;
+                zmod_change_in_job_ = in_job;
+            }
+        } else {
+            zmod_change_stale_ = false;
+            if (zmod_change_owns_action_) {
+                if (system_info_.action == AmsAction::SELECTING) {
+                    system_info_.action = AmsAction::IDLE;
+                    set_operation_detail_locked("");
+                }
+                zmod_change_owns_action_ = false;
+            }
+        }
+        if (phase_tracker_.active) {
+            zmod_change_owns_action_ = false;
+        }
+        action_changed = system_info_.action != before;
+    }
+    if (action_changed) {
+        emit_event(EVENT_STATE_CHANGED);
+    }
 }
 
 AmsError AmsBackendAd5xIfs::cancel() {
@@ -2558,11 +2708,16 @@ AmsBackendAd5xIfs::get_operation_step_model(StepOperationType op) const {
     // nozzle temperature. Labels are wrapped in lv_tr() so they are translated
     // and picked up by the string-extraction tooling (mirrors Snapmaker).
     const bool unload = (op == StepOperationType::UNLOAD);
+    const auto& phases = unload ? kIfsUnloadPhases : kIfsLoadPhases;
     OperationStepModel model;
-    model.steps.push_back({lv_tr("Heat nozzle"), 0, false, /*live_temp=*/true});
-    model.steps.push_back(
-        {unload ? lv_tr("Cut filament") : lv_tr("Feed filament"), 1, false, false});
-    model.steps.push_back({unload ? lv_tr("Retract") : lv_tr("Purge"), 2, false, false});
+    model.steps.push_back({lv_tr("Heat nozzle"), 0, false, /*live_temp=*/true, phases[0]});
+    if (unload) {
+        model.steps.push_back({lv_tr("Cut filament"), 1, false, false, phases[1]});
+        model.steps.push_back({lv_tr("Retract"), 2, false, false, phases[2]});
+    } else {
+        model.steps.push_back({lv_tr("Feed filament"), 1, false, false, phases[1]});
+        model.steps.push_back({lv_tr("Purge"), 2, false, false, phases[2]});
+    }
     return model;
 }
 
@@ -2588,8 +2743,7 @@ std::optional<std::vector<std::string>> AmsBackendAd5xIfs::get_supported_materia
     // unchanged on save (#904).
     auto lower = [](const std::string& s) {
         std::string out = s;
-        std::transform(out.begin(), out.end(), out.begin(),
-                       [](unsigned char c) { return std::tolower(c); });
+        out = helix::text_io::to_lower(out);
         return out;
     };
     auto already_present = [&](const std::string& name) {
@@ -2603,7 +2757,7 @@ std::optional<std::vector<std::string>> AmsBackendAd5xIfs::get_supported_materia
     };
     {
         // Use custom_types_mutex_ — NOT mutex_ — so callers that already hold
-        // mutex_ (e.g., normalize_material() invoked inside set_slot_info)
+        // mutex_ (e.g., normalize_material() invoked inside write_port_locked)
         // don't deadlock.
         std::lock_guard<std::mutex> lock(custom_types_mutex_);
         for (const auto& name : custom_material_types_) {
@@ -2627,274 +2781,324 @@ std::vector<std::pair<std::string, std::string>> AmsBackendAd5xIfs::get_material
     };
 }
 
-AmsError AmsBackendAd5xIfs::set_slot_info(int slot_index, const SlotInfo& info, bool persist) {
-    if (!validate_slot_index(slot_index)) {
-        return AmsErrorHelper::invalid_slot(slot_index, NUM_PORTS - 1);
+std::string AmsBackendAd5xIfs::write_port_locked(int slot_index, SlotInfo& slot,
+                                                 const SlotInfo& info) {
+    auto idx = static_cast<size_t>(slot_index);
+
+    // Mark slot dirty to prevent parse_save_variables from overwriting our edit
+    dirty_[idx] = true;
+
+    // colors_[idx] / materials_[idx] are firmware-truth caches: only a printer
+    // frame (a parse) moves them. The edit's own values travel with the
+    // callers below and the firmware writers in apply_user_edit(); the echo
+    // parse is what finally lands them in the caches.
+
+    // Normalize material to a value the IFS firmware will accept.
+    // Empty input stays empty (an empty slot has no material), but any
+    // non-empty input is coerced to the firmware whitelist so we never
+    // send "PLA+" or "Silk PLA" and hit "Invalid material type".
+    const std::string normalized_material =
+        info.material.empty() ? std::string{} : normalize_material(info.material);
+
+    // With no presence reading of any kind, infer it from the identity the
+    // caller supplied: colour or material means occupied, neither means
+    // empty. This is a last resort for devices that report nothing, and it
+    // must stand down the moment a real reading exists. Identity survives an
+    // eject by design (#1071), so on a device whose silk sensors have
+    // spoken, inferring from it resurrects a lane the sensors reported
+    // empty. Same guard as the three other inference sites: apply_zcolor's
+    // slot lines, the Adventurer5M.json poll, and schedule_zcolor_query.
+    if (!has_per_port_sensors_ && !ifs_status_ports_seen_.load()) {
+        bool has_data = !normalized_material.empty() || ams::is_declarable_color(info.color_rgb);
+        port_presence_[idx] = has_data;
+    }
+
+    spdlog::debug("{} slot {} written: dirty=true, color={:06X}, material={} (raw={}), "
+                  "presence={}",
+                  backend_log_tag(), slot_index, info.color_rgb & 0xFFFFFF, normalized_material,
+                  info.material, port_presence_[idx]);
+
+    // Update entry directly. Covers every resolver-owned SlotInfo field the
+    // caller may have set, not just the IFS-native color/material, otherwise a
+    // sync would silently drop brand / spool_name / spoolman_* / color_name and
+    // the UI would snap back to the previous values on the next
+    // get_slot_info(). material comes from normalized_material: firmware
+    // re-reads the spelling it issued, not the string the user typed.
+    helix::ams::copy_resolver_owned_identity(slot, info);
+    slot.material = normalized_material;
+
+    return normalized_material;
+}
+
+void AmsBackendAd5xIfs::settle_port_locked(int slot_index) {
+    auto* entry = slots_.get_mut(slot_index);
+    if (!entry) {
+        return;
+    }
+
+    // write_port_locked() has already put the caller's identity on the slot.
+    // Recalculate slot status now that port_presence may have changed, and
+    // keep that identity across the recalculation.
+    //
+    // update_slot_from_state() repaints identity from the firmware-truth
+    // caches and the lane's filed records. The write that led here is on
+    // neither: an edit's declaration is filed by commit_user_edit() once
+    // apply_user_edit() returns, and a sync files nothing at all. Worse, on a
+    // re-bind the lane still holds the records describing the spool this write
+    // replaces, and user_edit_observation() declares the id alone, so those
+    // records never speak for the new binding at all. A paint run here
+    // therefore lays the OUTGOING spool's identity over the incoming one
+    // (prestonbrown/helixscreen#1672).
+    //
+    // So snapshot what the caller wrote, let the parse run for the status and
+    // presence it recomputes, and put the identity back over its answer. The
+    // repaint commit_user_edit() runs once the declaration is filed is what
+    // lays down the lane's real verdict.
+    const SlotInfo caller = entry->info;
+    update_slot_from_state(slot_index);
+
+    if (auto* settled = slots_.get_mut(slot_index)) {
+        helix::ams::copy_resolver_owned_identity(settled->info, caller);
+    }
+}
+
+AmsError AmsBackendAd5xIfs::apply_user_edit(int slot_index, const SlotInfo& info,
+                                            const helix::ams::Observation& declared) {
+    if (auto err = validate_slot_index(slot_index); !err.success()) {
+        return err;
     }
 
     auto idx = static_cast<size_t>(slot_index);
 
-    // Assigned inside the locked block below; hoisted here so the standalone
-    // module's write path (outside the lock, further down) reuses the exact
-    // normalized value the cached arrays got.
+    // Assigned inside the locked block below; hoisted here so the write paths
+    // (outside the lock, further down) carry the same normalized value
+    // write_port_locked() returned.
     std::string normalized_material;
+    // The echo staging's stamp, for the matched abandon on a failed write.
+    std::uint64_t echo_sequence = 0;
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
 
-        // Update local state
         auto* entry = slots_.get_mut(slot_index);
         if (!entry) {
-            return AmsErrorHelper::invalid_slot(slot_index, NUM_PORTS - 1);
+            return AmsErrorHelper::invalid_slot(lane_noun(), slot_index, NUM_PORTS - 1);
         }
+        normalized_material = write_port_locked(slot_index, entry->info, info);
 
-        // Mark slot dirty to prevent parse_save_variables from overwriting our edit
-        dirty_[idx] = true;
-
-        // Convert color to hex string for our cached array
-        char hex[7];
-        snprintf(hex, sizeof(hex), "%06X", info.color_rgb & 0xFFFFFF);
-        colors_[idx] = hex;
-
-        // Normalize material to a value the IFS firmware will accept.
-        // Empty input stays empty (an empty slot has no material), but any
-        // non-empty input is coerced to the firmware whitelist so we never
-        // send "PLA+" or "Silk PLA" and hit "Invalid material type".
-        normalized_material =
-            info.material.empty() ? std::string{} : normalize_material(info.material);
-        materials_[idx] = normalized_material;
-
-        // Without per-port sensors, infer presence from user-provided data.
-        // Setting color/material marks the slot occupied; clearing both marks it empty.
-        if (!has_per_port_sensors_) {
-            bool has_data =
-                !normalized_material.empty() || info.color_rgb != AMS_DEFAULT_SLOT_COLOR;
-            port_presence_[idx] = has_data;
-        }
-
-        spdlog::debug("{} set_slot_info: slot {} dirty=true, color={}, material={} (raw={}), "
-                      "presence={}",
-                      backend_log_tag(), slot_index, hex, normalized_material, info.material,
-                      port_presence_[idx]);
-
-        // Update entry directly. Covers every SlotInfo field the caller may
-        // have set, not just the IFS-native color/material — otherwise a
-        // persist=false "preview" write would silently drop brand /
-        // spool_name / spoolman_* / color_name and the UI would snap back
-        // to the previous values on the next get_slot_info().
-        entry->info.color_rgb = info.color_rgb;
-        entry->info.color_name = info.color_name;
-        entry->info.material = normalized_material;
-        entry->info.brand = info.brand;
-        // Carry the catalog product identity through preview writes too — a
-        // persist=false preview that dropped it would make the editor snap
-        // back to a different variant on the next get_slot_info().
-        entry->info.catalog_id = info.catalog_id;
-        entry->info.product_name = info.product_name;
-        entry->info.spool_name = info.spool_name;
-        entry->info.spoolman_id = info.spoolman_id;
-        entry->info.spoolman_vendor_id = info.spoolman_vendor_id;
-        entry->info.remaining_weight_g = info.remaining_weight_g;
-        entry->info.total_weight_g = info.total_weight_g;
-
-        // If the caller asked for persistence, stage the new override into
-        // overrides_ BEFORE update_slot_from_state() — otherwise the call
-        // below will re-apply the PRE-EDIT override (if any), snap brand /
-        // spool_name / spoolman_id back to their old saved values, and
-        // revert the user's edit visually until the next parse. The
-        // override store's own save_async fires outside the lock further
-        // down, so there's only one place that mutates overrides_ for
-        // persist=true set_slot_info.
-        if (persist) {
-            helix::ams::FilamentSlotOverride ovr;
-            ovr.brand = info.brand;
-            ovr.spool_name = info.spool_name;
-            ovr.spoolman_id = info.spoolman_id;
-            ovr.spoolman_vendor_id = info.spoolman_vendor_id;
-            ovr.remaining_weight_g = info.remaining_weight_g;
-            ovr.total_weight_g = info.total_weight_g;
-            ovr.color_rgb = info.color_rgb;
-            ovr.color_set = true; // a user-edit always records a color, even pure black (#000000)
-            ovr.color_name = info.color_name;
-            // normalize_material() was already applied to the cached
-            // materials_ copy; reuse it so the on-disk record carries the
-            // firmware-valid value instead of the raw user-typed string.
-            ovr.material = normalized_material;
-            // Catalog product identity. Persisted so a reopen can restore the
-            // EXACT product rather than the alphabetically-first variant of the
-            // same vendor+material. Never auto-mirrored (firmware has no notion
-            // of a catalog product), so no user-lock flag is needed: a non-empty
-            // value can only have come from a user pick.
-            ovr.catalog_id = info.catalog_id;
-            ovr.product_name = info.product_name;
-            // User-lock signals: persist=true is a user edit, so tag both
-            // fields user-locked. Material is only locked when the user
-            // actually provided one — an explicit empty material is the user
-            // saying "no material set", which the bootstrap mirror is allowed
-            // to fill from a subsequent firmware report. See #965 for why
-            // these locks exist (post-print firmware revert clobbered user
-            // material via the OverwriteAlways auto-mirror).
-            ovr.user_locked_color = true;
-            ovr.user_locked_material = !normalized_material.empty();
-            // SlotInfo carries the user's edit OR the bound Spoolman spool's
-            // filament profile; the material-DB fallback for fields left at 0
-            // is applied at emit time inside resolved_temps(). Centralized in
-            // the helper so the four AMS backends stay in sync.
-            helix::ams::populate_temps_from_slot_info(ovr, info);
-            // updated_at left default — save_async stamps a fresh value so
-            // the on-disk record's scan_time wins over any local clock skew.
-            overrides_[slot_index] = ovr;
-        }
-
-        // Treat the user's chosen color as the new "firmware truth" baseline
-        // so check_external_color_change() doesn't interpret the upcoming
-        // update_slot_from_state() call as a foreign edit and fire a
-        // redundant lane_data sync. The semantics match user intent: "I'm
-        // telling the system this IS the current color." A subsequent
-        // genuinely-external CHANGE_ZCOLOR will be detected against the
-        // user's chosen color.
+        // Stage the new override into overrides_ BEFORE settle_port_locked()
+        // runs update_slot_from_state(), or that call re-applies the PRE-EDIT
+        // override (if any), snaps brand / spool_name / spoolman_id back to
+        // their old saved values, and reverts the edit visually until the next
+        // parse. The override store's own save_async fires outside the lock
+        // further down, so this is the one place an edit mutates overrides_.
         //
-        // Applies to both persist=true (override just staged above) and
-        // persist=false (preview must not retrigger a sync against
-        // last_firmware_color_). NO guard on color_rgb == 0: pure black is
-        // a legitimate user choice and recording it as the baseline is
-        // exactly what we want — the next firmware reading of black will
-        // compare equal and not trigger a bogus sync. (Pre-fix this was
-        // gated on != 0 to match the prior 0-as-no-signal contract; that
-        // contract was wrong, so its mirror here is wrong too.)
-        last_firmware_color_[slot_index] = info.color_rgb;
+        // normalize_material() was already applied to the cached materials_
+        // copy; record that instead of the raw user-typed string so the
+        // on-disk record carries a firmware-valid value.
+        helix::ams::stage_user_override(overrides_, slot_index, info, normalized_material,
+                                        declared);
 
-        // Symmetric material baseline seed: treat the user's chosen material as
-        // the new firmware-truth baseline so the upcoming update_slot_from_state()
-        // -> check_external_type_change() doesn't misread it as a foreign edit
-        // and fire a redundant lane_data sync. Without this seed the material
-        // path lacked the baseline the color path already established above,
-        // reinforcing the missing-baseline gap on empty->insert (#981/#1065).
-        last_firmware_material_[slot_index] = normalized_material;
+        settle_port_locked(slot_index);
 
-        // Recalculate slot status now that port_presence may have changed.
-        // update_slot_from_state() re-applies apply_overrides() from
-        // overrides_ — which for persist=true now holds the values we
-        // just staged above, so the override wins and matches the edit.
-        // For persist=false with NO existing override, apply_overrides is
-        // a no-op and the direct entry->info fields survive.
-        update_slot_from_state(slot_index);
+        // The write carries TYPE and COLOR only; every other declared field
+        // stays a lane-side record firmware cannot echo, so prune the staging
+        // to those two. Material keeps the write's own spelling: the
+        // normalized name is what IFS_SET_MATERIAL and Adventurer5M.json
+        // carry, not the string the user typed.
+        //
+        // This runs AFTER settle_port_locked(): the settle re-runs
+        // update_slot_from_state(), whose ingest still carries firmware's
+        // PRE-edit values, and a value differing from the declaration is what
+        // releases it, so arming first would have the settle disarm the guard
+        // with the very state the edit is about to replace.
+        echo_sequence = own_write_echoes_.stage(slot_index, declared);
+        if (auto* staged = own_write_echoes_.staged(slot_index)) {
+            staged->brand.reset();
+            staged->spool_name.reset();
+            staged->color_name.reset();
+            staged->product_name.reset();
+            if (staged->material.has_value()) {
+                staged->material = normalized_material;
+            }
+        }
+        // Presence authority is the write's boundary: with no per-port
+        // sensor, no IFS_STATUS Ports and no confirmed GET_ZCOLOR, nothing on
+        // this machine can ever name the spool the write was made against, so
+        // an armed suppression would outlive every reading it should have
+        // ended on. Refuse to arm there.
+        if (has_per_port_sensors_ || ifs_status_ports_seen_.load() ||
+            zcolor_silent_confirmed_.load()) {
+            own_write_echoes_.arm(slot_index, std::string{});
+        } else {
+            own_write_echoes_.abandon(slot_index, echo_sequence);
+        }
     }
 
-    if (persist) {
-        // Persist user-provided metadata to the slot-override store.
-        //
-        // Two persistence paths run here, by design:
-        //
-        //   1. IFS-native fields (color, material) are sent to Klipper via
-        //      _IFS_VARS / Adventurer5M.json below — that's the printer-
-        //      facing side the firmware and other UIs (Orca, LCD) see.
-        //
-        //   2. User metadata the firmware can't carry (brand, spool_name,
-        //      spoolman_id, weights, color_name) lands in the Moonraker DB
-        //      lane_data namespace via the override store. apply_overrides
-        //      layers these back over firmware data on every parse.
-        //
-        // Color + material go into BOTH stores so an external writer
-        // (Orca via its own MoonrakerPrinterAgent, another HelixScreen
-        // instance) sees the full record in lane_data even when it's not
-        // also listening to _IFS_VARS.
-        if (override_store_) {
-            // Re-read from overrides_ under the lock to get the same object
-            // we staged above (including the normalized material). Cheap —
-            // FilamentSlotOverride is a small POD-ish struct.
-            helix::ams::FilamentSlotOverride ovr_to_save;
+    // Bare-hex spelling of the edit's colour — the wire form IFS_SET_MATERIAL,
+    // Adventurer5M.json and the _IFS_VARS payloads all carry. The caches still
+    // hold the printer's last reading until the echo parse; every writer below
+    // takes the edit's own values, not theirs.
+    char color_hex[7];
+    snprintf(color_hex, sizeof(color_hex), "%06X", info.color_rgb & 0xFFFFFF);
+
+    // Persist user-provided metadata to the slot-override store.
+    //
+    // Two persistence paths run here, by design:
+    //
+    //   1. IFS-native fields (color, material) are sent to Klipper via
+    //      _IFS_VARS / Adventurer5M.json below — that's the printer-
+    //      facing side the firmware and other UIs (Orca, LCD) see.
+    //
+    //   2. User metadata the firmware can't carry (brand, spool_name,
+    //      spoolman_id, weights, color_name) lands in the Moonraker DB
+    //      lane_data namespace via the override store. The lane resolves
+    //      these back over firmware data on every parse, through
+    //      apply_resolved_lane().
+    //
+    // Color + material go into BOTH stores so an external writer
+    // (Orca via its own MoonrakerPrinterAgent, another HelixScreen
+    // instance) sees the full record in lane_data even when it's not
+    // also listening to _IFS_VARS.
+    if (override_store_) {
+        helix::ams::persist_staged_override(override_store_.get(), mutex_, overrides_, slot_index,
+                                            backend_log_tag(), "Override");
+    }
+
+    if (ifs_module_live_.load()) {
+        // Standalone module: IFS_SET_MATERIAL is the writer. The module
+        // owns Adventurer5M.json itself ("a stock UI that writes it stays
+        // in agreement" is its design rule), so writing the file directly
+        // from here would race the module's own mtime-cached view — and
+        // the _IFS_VARS mirror below has no plugin to talk to. TYPE=/
+        // COLOR= absent means leave-alone and empty means clear; we hold
+        // the full post-edit state, so always send both. COLOR is bare
+        // hex because klipper's parser eats '#' as a comment start — the
+        // module re-prefixes it on its side.
+        auto err = execute_gcode(
+            "IFS_SET_MATERIAL SLOT=" +
+            std::to_string(slot_index + 1) + // DISPLAY_NUMBERING_OK: gcode wire, not a label
+            " TYPE=" + normalized_material + " COLOR=" + color_hex);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            dirty_[idx] = false;
+        }
+        if (!err.success()) {
+            // The write never left: no echo is coming for this staging.
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                auto it = overrides_.find(slot_index);
-                if (it != overrides_.end()) {
-                    ovr_to_save = it->second;
-                }
+                own_write_echoes_.abandon(slot_index, echo_sequence);
             }
-            // Capture backend_log_tag by value — the save callback may fire
-            // well after set_slot_info returns (MR tracker ~60s timeout).
-            // Do NOT capture `this`: the backend may outlive its store, but
-            // the store will outlive the scheduled save by design.
-            const std::string tag = backend_log_tag();
-            override_store_->save_async(
-                slot_index, ovr_to_save, [tag, slot_index](bool success, const std::string& err) {
-                    if (!success) {
-                        spdlog::warn("{} Override persist failed for slot {}: {}", tag, slot_index,
-                                     err);
-                    }
-                });
+            return err;
+        }
+    } else {
+        // Write directly to Adventurer5M.json — zmod's authoritative store.
+        // CHANGE_ZCOLOR is the macro-level equivalent but always emits the
+        // Mainsail "Select print materials" prompt and (on display=True
+        // setups) a native AD5X-screen popup, both of which the user must
+        // dismiss manually. zmod re-reads Adventurer5M.json on every
+        // GET_ZCOLOR call (no in-memory cache), so direct file writes are
+        // picked up without ceremony.
+        auto err = write_adventurer_json(slot_index, color_hex, normalized_material);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            dirty_[idx] = false;
+        }
+        if (!err.success()) {
+            // The write never left: no echo is coming for this staging.
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                own_write_echoes_.abandon(slot_index, echo_sequence);
+            }
+            return err;
         }
 
-        if (ifs_module_live_.load()) {
-            // Standalone module: IFS_SET_MATERIAL is the writer. The module
-            // owns Adventurer5M.json itself ("a stock UI that writes it stays
-            // in agreement" is its design rule), so writing the file directly
-            // from here would race the module's own mtime-cached view — and
-            // the _IFS_VARS mirror below has no plugin to talk to. TYPE=/
-            // COLOR= absent means leave-alone and empty means clear; we hold
-            // the full post-edit state, so always send both. COLOR is bare
-            // hex because klipper's parser eats '#' as a comment start — the
-            // module re-prefixes it on its side.
-            char color_hex[7];
-            snprintf(color_hex, sizeof(color_hex), "%06X", info.color_rgb & 0xFFFFFF);
-            auto err = execute_gcode("IFS_SET_MATERIAL SLOT=" + std::to_string(slot_index + 1) +
-                                     " TYPE=" + normalized_material + " COLOR=" + color_hex);
+        // lessWaste/bambufy users: also persist to the plugin's save_variables
+        // store so its purge-skip logic sees consistent colors. zmod does not
+        // read these — both writes are required for fully-synchronized state.
+        // Best-effort: a failure here doesn't fail the operation because zmod's
+        // truth (Adventurer5M.json) is already current.
+        if (has_ifs_vars_) {
+            std::string colors_val;
+            std::string types_val;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                dirty_[idx] = false;
+                // The payload replaces the plugin's whole list, so splice the
+                // edited lane's values over the firmware-truth arrays; every
+                // other lane keeps what the printer last said.
+                colors_val = build_ifs_list_value(/*colors=*/true, slot_index, color_hex);
+                types_val = build_ifs_list_value(/*colors=*/false, slot_index, normalized_material);
             }
-            if (!err.success()) {
-                return err;
+            auto colors_err = write_ifs_var("colors", colors_val);
+            if (!colors_err.success()) {
+                spdlog::warn("{} _IFS_VARS colors write failed for slot {}: {}", backend_log_tag(),
+                             slot_index, colors_err.technical_msg);
             }
-        } else {
-            // Write directly to Adventurer5M.json — zmod's authoritative store.
-            // CHANGE_ZCOLOR is the macro-level equivalent but always emits the
-            // Mainsail "Select print materials" prompt and (on display=True
-            // setups) a native AD5X-screen popup, both of which the user must
-            // dismiss manually. zmod re-reads Adventurer5M.json on every
-            // GET_ZCOLOR call (no in-memory cache), so direct file writes are
-            // picked up without ceremony.
-            auto err = write_adventurer_json(slot_index);
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                dirty_[idx] = false;
+            auto types_err = write_ifs_var("types", types_val);
+            if (!types_err.success()) {
+                spdlog::warn("{} _IFS_VARS types write failed for slot {}: {}", backend_log_tag(),
+                             slot_index, types_err.technical_msg);
             }
-            if (!err.success())
-                return err;
+        }
+    } // zmod/plugin write path (module path dispatched above)
 
-            // lessWaste/bambufy users: also persist to the plugin's save_variables
-            // store so its purge-skip logic sees consistent colors. zmod does not
-            // read these — both writes are required for fully-synchronized state.
-            // Best-effort: a failure here doesn't fail the operation because zmod's
-            // truth (Adventurer5M.json) is already current.
-            if (has_ifs_vars_) {
-                std::string colors_val;
-                std::string types_val;
-                {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    colors_val = build_color_list_value();
-                    types_val = build_type_list_value();
-                }
-                auto colors_err = write_ifs_var("colors", colors_val);
-                if (!colors_err.success()) {
-                    spdlog::warn("{} _IFS_VARS colors write failed for slot {}: {}",
-                                 backend_log_tag(), slot_index, colors_err.technical_msg);
-                }
-                auto types_err = write_ifs_var("types", types_val);
-                if (!types_err.success()) {
-                    spdlog::warn("{} _IFS_VARS types write failed for slot {}: {}",
-                                 backend_log_tag(), slot_index, types_err.technical_msg);
-                }
-            }
-        } // zmod/plugin write path (module path dispatched above)
+    emit_event(EVENT_SLOT_CHANGED, std::to_string(slot_index));
+    return AmsErrorHelper::success();
+}
+
+void AmsBackendAd5xIfs::persist_external_identity_impl(int slot_index,
+                                                       const helix::ams::Observation& spoolman) {
+    const std::string tag = backend_log_tag();
+    std::lock_guard<std::mutex> lock(mutex_);
+    helix::ams::persist_override_external_identity(override_store_.get(), overrides_, slot_index,
+                                                   spoolman, tag);
+}
+
+AmsError AmsBackendAd5xIfs::sync_external_identity(int slot_index, const SlotInfo& info) {
+    if (auto err = validate_slot_index(slot_index); !err.success()) {
+        return err;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        auto* entry = slots_.get_mut(slot_index);
+        if (!entry) {
+            return AmsErrorHelper::invalid_slot(lane_noun(), slot_index, NUM_PORTS - 1);
+        }
+        // Nothing reaches Adventurer5M.json, _IFS_VARS or the override store: a
+        // synced value lives in memory only.
+        write_port_locked(slot_index, entry->info, info);
+        settle_port_locked(slot_index);
     }
 
     emit_event(EVENT_SLOT_CHANGED, std::to_string(slot_index));
     return AmsErrorHelper::success();
 }
 
-void AmsBackendAd5xIfs::update_slot_weight(int slot_index, float remaining_weight_g,
-                                           float total_weight_g, bool persist) {
+SlotInfo* AmsBackendAd5xIfs::cached_slot_locked(int slot_index) {
+    // Only the lane's resolution goes stale between frames: the readings and
+    // baselines update_slot_from_state() took are still this port's own, so a
+    // repaint re-runs the paint alone.
+    auto* entry = slots_.get_mut(slot_index);
+    return entry ? &entry->info : nullptr;
+}
+
+void AmsBackendAd5xIfs::prepare_lane_repaint_locked(int slot_index, SlotInfo& slot) {
+    const auto it = overrides_.find(slot_index);
+    const helix::ams::FilamentSlotOverride* ovr = it == overrides_.end() ? nullptr : &it->second;
+    helix::ams::clear_lane_only_identity(slot, ovr);
+    // colour_name joins the shared set here and not in the helper: AD5X
+    // firmware has no name key at all, where Happy Hare's gate map states one.
+    if (ovr != nullptr && !ovr->color_name.empty()) {
+        slot.color_name = ovr->color_name;
+    } else {
+        slot.color_name.clear();
+    }
+}
+
+void AmsBackendAd5xIfs::update_slot_weight_impl(int slot_index, float remaining_weight_g,
+                                                float total_weight_g, bool persist) {
     if (slot_index < 0 || slot_index >= NUM_PORTS) {
         spdlog::warn("{} update_slot_weight: invalid slot {}", backend_log_tag(), slot_index);
         return;
@@ -2902,7 +3106,7 @@ void AmsBackendAd5xIfs::update_slot_weight(int slot_index, float remaining_weigh
 
     // Weight is automated consumption-tracker data, not filament identity. We
     // touch ONLY the weight fields — never material/color, never the user-lock
-    // flags, and never write_adventurer_json()/_IFS_VARS. set_slot_info()'s
+    // flags, and never write_adventurer_json()/_IFS_VARS. apply_user_edit()'s
     // firmware-facing writers re-emitted ffmType from a stale override material
     // on every 60 s persist, reverting the user's material to disk (#981). Weight
     // lives in the Moonraker DB lane_data override record, which is the only
@@ -2915,25 +3119,17 @@ void AmsBackendAd5xIfs::update_slot_weight(int slot_index, float remaining_weigh
             if (total_weight_g >= 0.0f)
                 entry->info.total_weight_g = total_weight_g;
         }
-        // overrides_[slot] default-constructs a weight-only record when the slot
-        // had no prior override (material empty, color_set=false, locks false —
-        // apply_overrides then layers only the weight). An existing override
-        // (e.g. a user-locked material edit) keeps every other field intact.
-        auto& ovr = overrides_[slot_index];
-        ovr.remaining_weight_g = remaining_weight_g;
-        if (total_weight_g >= 0.0f)
-            ovr.total_weight_g = total_weight_g;
-        ovr_to_save = ovr;
+        // A slot with no prior override gets a weight-only record (material
+        // empty, color_set=false, locks false), so the lane declares only the
+        // weight. An existing override (e.g. a user-locked material edit) keeps
+        // every other field intact.
+        ovr_to_save = helix::ams::stage_weight_override(overrides_, slot_index, remaining_weight_g,
+                                                        total_weight_g);
     }
 
     if (persist && override_store_) {
-        const std::string tag = backend_log_tag();
-        override_store_->save_async(
-            slot_index, ovr_to_save, [tag, slot_index](bool ok, const std::string& err) {
-                if (!ok) {
-                    spdlog::warn("{} weight persist failed for slot {}: {}", tag, slot_index, err);
-                }
-            });
+        helix::ams::save_override_async(override_store_.get(), slot_index, ovr_to_save,
+                                        backend_log_tag(), "weight");
     }
 
     emit_event(EVENT_SLOT_CHANGED, std::to_string(slot_index));
@@ -2984,9 +3180,23 @@ std::vector<int> AmsBackendAd5xIfs::get_tool_mapping() const {
     return result;
 }
 
-AmsError AmsBackendAd5xIfs::set_tool_mapping(int tool_number, int slot_index) {
+AmsError AmsBackendAd5xIfs::can_set_tool_mapping(int tool_number, int slot_index) const {
     if (tool_number < 0 || tool_number >= TOOL_MAP_SIZE) {
         return AmsErrorHelper::invalid_parameter("Invalid tool number");
+    }
+    bool wire_backed = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        wire_backed = ifs_tool_map_live_;
+    }
+    // Only the Forge-X wire rejects a lane; the plugin table takes any slot and
+    // stores an out-of-range one as unmapped.
+    return wire_backed ? validate_slot_index(slot_index) : AmsErrorHelper::success();
+}
+
+AmsError AmsBackendAd5xIfs::set_tool_mapping_impl(int tool_number, int slot_index) {
+    if (auto err = can_set_tool_mapping(tool_number, slot_index); !err.success()) {
+        return err;
     }
 
     bool wire_backed = false;
@@ -3008,11 +3218,8 @@ AmsError AmsBackendAd5xIfs::set_tool_mapping(int tool_number, int slot_index) {
     // structural error, not a verb to send. Takes precedence when both
     // contracts are detected (parse_ifs_tool_map_locked logs that case).
     if (wire_backed) {
-        if (slot_index < 0 || slot_index >= NUM_PORTS) {
-            return AmsErrorHelper::invalid_slot(slot_index, NUM_PORTS - 1);
-        }
-        std::string verb = "IFS_MAP_TOOL TOOL=" + std::to_string(tool_number) +
-                           " SLOT=" + std::to_string(slot_index + 1);
+        std::string verb = "IFS_MAP_TOOL TOOL=" + std::to_string(tool_number) + " SLOT=";
+        verb += std::to_string(slot_index + 1); // DISPLAY_NUMBERING_OK: gcode wire, not a label
         return execute_gcode(verb);
     }
 
@@ -3093,7 +3300,8 @@ std::string AmsBackendAd5xIfs::build_type_list_value() const {
     return build_ifs_list_value(/*colors=*/false);
 }
 
-std::string AmsBackendAd5xIfs::build_ifs_list_value(bool colors) const {
+std::string AmsBackendAd5xIfs::build_ifs_list_value(bool colors, int override_slot,
+                                                    const std::string& override_value) const {
     // Shape is plugin-specific (#1247):
     //
     //   * bambufy: 4-entry, PORT-indexed. `_RUNOUT_HEAD` iterates `ifs.types`
@@ -3111,18 +3319,28 @@ std::string AmsBackendAd5xIfs::build_ifs_list_value(bool colors) const {
     //
     // `_IFS_VARS` passes the value straight to SET_GCODE_VARIABLE, which evals
     // it as a Python literal; both shapes ride that unchanged.
-    std::ostringstream ss;
-    ss << "\"[";
+    //
+    // Entries come from the firmware-truth arrays; an edit's push splices its
+    // own value over its lane (the arrays still hold the printer's last
+    // reading until the echo parse). override_slot < 0 reads arrays only, and
+    // an EMPTY override_value is a value — a cleared material — so the slot
+    // index alone discriminates.
+    const auto port_entry = [&](int port) -> const std::string& {
+        if (port - 1 == override_slot) {
+            return override_value;
+        }
+        const auto i = static_cast<size_t>(port - 1);
+        return colors ? colors_[i] : materials_[i];
+    };
+    std::string ss = "\"[";
     if (var_prefix_ != "less_waste") {
         for (int i = 0; i < NUM_PORTS; ++i) {
             if (i > 0)
-                ss << ", ";
-            ss << "'"
-               << (colors ? colors_[static_cast<size_t>(i)] : materials_[static_cast<size_t>(i)])
-               << "'";
+                ss += ", ";
+            ss += "'" + port_entry(i + 1) + "'";
         }
-        ss << "]\"";
-        return ss.str();
+        ss += "]\"";
+        return ss;
     }
 
     // Tool-indexed projection. Until the plugin's `<prefix>_tools` array has
@@ -3138,37 +3356,35 @@ std::string AmsBackendAd5xIfs::build_ifs_list_value(bool colors) const {
     }
     for (int t = 0; t < TOOL_MAP_SIZE; ++t) {
         if (t > 0)
-            ss << ", ";
+            ss += ", ";
         int port = tool_map_[static_cast<size_t>(t)];
         if (!any_mapped) {
             port = (t < NUM_PORTS) ? t + 1 : UNMAPPED_PORT;
         }
         if (port >= 1 && port <= NUM_PORTS) {
-            const auto idx = static_cast<size_t>(port - 1);
-            ss << "'" << (colors ? colors_[idx] : materials_[idx]) << "'";
+            ss += "'" + port_entry(port) + "'";
         } else {
             // Unmapped tool: no lane, no colour. A candidate on an unmapped
             // tool can never pass lessWaste's port-sensor check, so the empty
             // entry is inert in `_RUNOUT_HEAD`'s comparisons.
-            ss << "''";
+            ss += "''";
         }
     }
-    ss << "]\"";
-    return ss.str();
+    ss += "]\"";
+    return ss;
 }
 
 std::string AmsBackendAd5xIfs::build_tool_map_value() const {
     // Integer list — no quotes around elements.
     // Example: "[1, 2, 3, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5]"
-    std::ostringstream ss;
-    ss << "\"[";
+    std::string ss = "\"[";
     for (int i = 0; i < TOOL_MAP_SIZE; ++i) {
         if (i > 0)
-            ss << ", ";
-        ss << tool_map_[static_cast<size_t>(i)];
+            ss += ", ";
+        ss += std::to_string(tool_map_[static_cast<size_t>(i)]);
     }
-    ss << "]\"";
-    return ss.str();
+    ss += "]\"";
+    return ss;
 }
 
 AmsError AmsBackendAd5xIfs::write_ifs_var(const std::string& key, const std::string& value) {
@@ -3211,7 +3427,8 @@ void AmsBackendAd5xIfs::dispatch_ifs_vars_repair() {
     }
 }
 
-AmsError AmsBackendAd5xIfs::write_adventurer_json(int slot_index) {
+AmsError AmsBackendAd5xIfs::write_adventurer_json(int slot_index, const std::string& hex,
+                                                  const std::string& material) {
     // Same-host fast path: write the file via direct filesystem access.
     // Avoids Moonraker's HTTP upload, which on AD5X stock-ZMOD does an
     // os.rename across mount points (/root/printer_data/tmp →
@@ -3219,22 +3436,14 @@ AmsError AmsBackendAd5xIfs::write_adventurer_json(int slot_index) {
     // Bundle DQK7X96B (v0.99.52) was a bricked Klipper at boot from this
     // exact failure mode.
     if (!local_adventurer_json_path_.empty()) {
-        return write_adventurer_json_local(slot_index);
+        return write_adventurer_json_local(slot_index, hex, material);
     }
 
     if (!api_) {
         return AmsErrorHelper::invalid_parameter("No API connection");
     }
 
-    auto idx = static_cast<size_t>(slot_index);
     int port = slot_index + 1; // JSON uses 1-based slot numbering
-
-    std::string hex, material;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        hex = colors_[idx];
-        material = materials_[idx];
-    }
 
     auto fields = ffm_fields_for_slot(hex, material);
     const std::string color_field = std::move(fields.color);
@@ -3258,12 +3467,9 @@ AmsError AmsBackendAd5xIfs::write_adventurer_json(int slot_index) {
                 return;
             }
 
-            json doc;
-            try {
-                doc = json::parse(content);
-            } catch (const json::parse_error& e) {
-                spdlog::warn("{} Failed to parse Adventurer5M.json for write: {}",
-                             backend_log_tag(), e.what());
+            json doc = json::parse(content, nullptr, false);
+            if (doc.is_discarded()) {
+                spdlog::warn("{} Failed to parse Adventurer5M.json for write", backend_log_tag());
                 *result =
                     AmsErrorHelper::command_failed("write_adventurer_json", "JSON parse error");
                 done->store(true);
@@ -3280,7 +3486,7 @@ AmsError AmsBackendAd5xIfs::write_adventurer_json(int slot_index) {
             doc["FFMInfo"]["ffmType" + std::to_string(port)] = type_field;
 
             // Serialize with indentation to match zmod's format
-            std::string updated = doc.dump(4);
+            std::string updated = helix::json_util::safe_dump(doc, 4);
 
             api_->transfers().upload_file(
                 "config", "Adventurer5M.json", updated,
@@ -3316,21 +3522,15 @@ AmsError AmsBackendAd5xIfs::write_adventurer_json(int slot_index) {
     return *result;
 }
 
-AmsError AmsBackendAd5xIfs::write_adventurer_json_local(int slot_index) {
+AmsError AmsBackendAd5xIfs::write_adventurer_json_local(int slot_index, const std::string& hex,
+                                                        const std::string& material) {
     if (local_adventurer_json_path_.empty()) {
         return AmsErrorHelper::command_failed("write_adventurer_json_local",
                                               "Local path not resolved");
     }
 
-    auto idx = static_cast<size_t>(slot_index);
     int port = slot_index + 1;
 
-    std::string hex, material;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        hex = colors_[idx];
-        material = materials_[idx];
-    }
     auto fields = ffm_fields_for_slot(hex, material);
     const std::string color_field = std::move(fields.color);
     const std::string type_field = std::move(fields.type);
@@ -3341,16 +3541,13 @@ AmsError AmsBackendAd5xIfs::write_adventurer_json_local(int slot_index) {
     // failure mode this code path exists to fix).
     json doc;
     {
-        std::ifstream in(local_adventurer_json_path_);
-        std::stringstream buf;
-        buf << in.rdbuf();
-        const std::string content = buf.str();
+        const std::string content =
+            helix::text_io::read_file(local_adventurer_json_path_).value_or("");
         if (content.empty()) {
             doc = json::object();
         } else {
-            try {
-                doc = json::parse(content);
-            } catch (const json::parse_error&) {
+            doc = json::parse(content, nullptr, false);
+            if (doc.is_discarded()) {
                 spdlog::warn("{} Adventurer5M.json at {} is unparseable; rewriting from scratch",
                              backend_log_tag(), local_adventurer_json_path_);
                 doc = json::object();
@@ -3364,36 +3561,15 @@ AmsError AmsBackendAd5xIfs::write_adventurer_json_local(int slot_index) {
     doc["FFMInfo"]["ffmColor" + std::to_string(port)] = color_field;
     doc["FFMInfo"]["ffmType" + std::to_string(port)] = type_field;
 
-    const std::string updated = doc.dump(4);
+    const std::string updated = helix::json_util::safe_dump(doc, 4);
 
     // Atomic write: stage to <path>.tmp in the same directory, then rename().
     // POSIX rename() is atomic when src+dst are on the same filesystem — that's
     // guaranteed here because both live in the same directory. Critically, we
     // do NOT cross filesystems the way Moonraker's upload does.
-    const std::string tmp_path = local_adventurer_json_path_ + ".tmp";
-    {
-        std::ofstream out(tmp_path, std::ios::binary | std::ios::trunc);
-        if (!out) {
-            return AmsErrorHelper::command_failed("write_adventurer_json_local",
-                                                  std::string("open(") + tmp_path +
-                                                      ") failed: " + std::strerror(errno));
-        }
-        out << updated;
-        out.flush();
-        if (!out) {
-            std::error_code ec;
-            std::filesystem::remove(tmp_path, ec);
-            return AmsErrorHelper::command_failed("write_adventurer_json_local", "Write failed");
-        }
-    }
-
-    if (std::rename(tmp_path.c_str(), local_adventurer_json_path_.c_str()) != 0) {
-        const int saved_errno = errno;
-        std::error_code ec;
-        std::filesystem::remove(tmp_path, ec);
+    if (!helix::text_io::write_file_atomic(local_adventurer_json_path_, updated)) {
         return AmsErrorHelper::command_failed("write_adventurer_json_local",
-                                              std::string("rename failed: ") +
-                                                  std::strerror(saved_errno));
+                                              std::string("write failed: ") + std::strerror(errno));
     }
 
     spdlog::info("{} Wrote slot {} to Adventurer5M.json (direct fs path: {})", backend_log_tag(),
@@ -3405,9 +3581,9 @@ void AmsBackendAd5xIfs::detect_local_adventurer_json_path() {
     // Only meaningful when Moonraker runs on the same host — otherwise
     // /usr/prog/config/ is on a remote filesystem we can't touch.
     std::string moonraker_host;
-    if (helix::Config* cfg = helix::Config::get_instance()) {
-        moonraker_host = cfg->get<std::string>(cfg->df() + "moonraker_host", "localhost");
-    }
+    helix::Config* cfg = helix::Config::get_instance();
+    moonraker_host = cfg->get<std::string>(cfg->df() + "moonraker_host", "localhost");
+
     if (!helix::is_moonraker_on_same_host(moonraker_host)) {
         spdlog::debug("{} Moonraker is remote ({}); leaving Adventurer5M.json on upload path",
                       backend_log_tag(), moonraker_host);
@@ -3424,12 +3600,11 @@ void AmsBackendAd5xIfs::detect_local_adventurer_json_path() {
     };
 
     for (const auto* candidate : candidates) {
-        std::error_code ec;
-        if (!std::filesystem::exists(candidate, ec) || ec) {
+        if (!hfs::exists(candidate)) {
             continue;
         }
         // Must be a regular file (or a symlink resolving to one) and writable.
-        if (!std::filesystem::is_regular_file(candidate, ec) || ec) {
+        if (!hfs::is_regular_file(candidate)) {
             continue;
         }
         if (::access(candidate, W_OK) != 0) {
@@ -3472,8 +3647,7 @@ void AmsBackendAd5xIfs::fetch_user_cfg_materials() {
                             // case-insensitively.
                             auto lower = [](const std::string& s) {
                                 std::string out = s;
-                                std::transform(out.begin(), out.end(), out.begin(),
-                                               [](unsigned char c) { return std::tolower(c); });
+                                out = helix::text_io::to_lower(out);
                                 return out;
                             };
                             size_t total;
@@ -3526,12 +3700,11 @@ std::vector<std::string> AmsBackendAd5xIfs::parse_user_cfg_filament_types(const 
     // try to fully reimplement Klipper's INI parser, just match the lines we
     // care about within the [zmod_ifs] section.
     std::vector<std::string> out;
-    std::istringstream is(body);
-    std::string line;
     bool in_section = false;
-    static const std::regex section_re(R"(^\s*\[\s*([^\]\s]+)\s*\]\s*$)");
-    static const std::regex filament_re(R"(^\s*filament_([A-Za-z0-9_+\-]+)\s*[:=].*$)");
-    while (std::getline(is, line)) {
+    static const helix::Regex section_re(R"(^\s*\[\s*([^\]\s]+)\s*\]\s*$)");
+    static const helix::Regex filament_re(R"(^\s*filament_([A-Za-z0-9_+\-]+)\s*[:=].*$)");
+    for (std::string_view line_view : helix::text_io::lines(body)) {
+        std::string line(line_view);
         // Strip trailing CR for files saved with CRLF.
         if (!line.empty() && line.back() == '\r') {
             line.pop_back();
@@ -3547,12 +3720,12 @@ std::vector<std::string> AmsBackendAd5xIfs::parse_user_cfg_filament_types(const 
         if (line.find_first_not_of(" \t") == std::string::npos) {
             continue;
         }
-        std::smatch m;
-        if (std::regex_match(line, m, section_re)) {
+        helix::RegexMatch m;
+        if (helix::regex_match(line, m, section_re)) {
             in_section = (m[1].str() == "zmod_ifs");
             continue;
         }
-        if (in_section && std::regex_match(line, m, filament_re)) {
+        if (in_section && helix::regex_match(line, m, filament_re)) {
             out.push_back(m[1].str());
         }
     }
@@ -3633,11 +3806,9 @@ void AmsBackendAd5xIfs::parse_filament_json(const std::string& content) {
     // SPEED), among many fields we don't use. Build a {tube_length, ifs_speed}
     // pair per material; resolve missing fields against the "default" entry,
     // and missing "default" against the literal 1000/1200.
-    json root;
-    try {
-        root = json::parse(content);
-    } catch (const std::exception& e) {
-        spdlog::warn("[AMS AD5X-IFS] filament.json parse failed: {}", e.what());
+    json root = json::parse(content, nullptr, false);
+    if (root.is_discarded()) {
+        spdlog::warn("[AMS AD5X-IFS] filament.json parse failed");
         return;
     }
     if (!root.is_object()) {
@@ -3655,11 +3826,8 @@ void AmsBackendAd5xIfs::parse_filament_json(const std::string& content) {
         if (it->is_number_float())
             return static_cast<int>(it->get<double>());
         if (it->is_string()) {
-            try {
-                return std::stoi(it->get<std::string>());
-            } catch (...) {
-                return fallback;
-            }
+            return helix::text_io::parse_leading<int>(it->get_ref<const std::string&>())
+                .value_or(fallback);
         }
         return fallback;
     };
@@ -3801,9 +3969,9 @@ bool AmsBackendAd5xIfs::on_gcode_response_line(const std::string& line) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (phase_tracker_.active) {
-            static const std::regex heat_re(R"(Heating the nozzle to\s+(\d+))");
-            std::smatch m;
-            if (std::regex_search(line, m, heat_re)) {
+            static const helix::Regex heat_re(R"(Heating the nozzle to\s+(\d+))");
+            helix::RegexMatch m;
+            if (helix::regex_search(line, m, heat_re)) {
                 int degrees = std::atoi(m[1].str().c_str());
                 if (degrees > 0) {
                     phase_tracker_.target_deci = helix::ui::temperature::degrees_to_deci(degrees);
@@ -3863,8 +4031,8 @@ bool AmsBackendAd5xIfs::on_gcode_response_line(const std::string& line) {
     // also produces a bare "Extruder: N". Re-reading after a Helix-initiated
     // tool change is harmless and desirable (fresh state); schedule_zcolor_query
     // is debounced + idempotent, so it collapses to one query either way.
-    static const std::regex extruder_commit_re(R"(^\s*(?://\s*)?Extruder:\s*\d+\s*$)");
-    if (std::regex_search(line, extruder_commit_re)) {
+    static const helix::Regex extruder_commit_re(R"(^\s*(?://\s*)?Extruder:\s*\d+\s*$)");
+    if (helix::regex_search(line, extruder_commit_re)) {
         spdlog::debug("{} Detected external channel commit ('{}') in gcode stream — "
                       "scheduling GET_ZCOLOR to resurrect presence",
                       backend_log_tag(), line);
@@ -3888,7 +4056,7 @@ bool AmsBackendAd5xIfs::on_gcode_response_line(const std::string& line) {
         // applied all 24 in sequence, so the slot ended up on the LAST swatch
         // (#161616) and the last material in the whitelist (PETG-CF) until the
         // confirming GET_ZCOLOR corrected it ~1s later — a visible flicker,
-        // a false "external edit detected" delta, and a lane_data write per
+        // a false external-edit delta, and a lane_data write per
         // phantom apply (25 server.database.post_item requests queued in 300ms
         // on a 473MB MIPS AD5X). 87 echoed buttons produced 162 phantom applies
         // in a two-minute session.
@@ -3900,7 +4068,7 @@ bool AmsBackendAd5xIfs::on_gcode_response_line(const std::string& line) {
             // One shape IS load-bearing: the root menu's per-slot rows are a
             // four-slot firmware snapshot, and the freshest one in the stream.
             apply_color_menu_slot_row(line);
-            ++external_change_burst_count_;
+            ++menu_render_burst_count_;
             schedule_json_reread();
             schedule_zcolor_query("color_menu_render");
             return false;
@@ -3912,8 +4080,8 @@ bool AmsBackendAd5xIfs::on_gcode_response_line(const std::string& line) {
         // the AD5X LCD, Mainsail, or zmod's COLOR/material macro. If the slot
         // still carries a user-locked override from an earlier HelixScreen edit,
         // sync_override_to_firmware_locked() skips the locked color/material
-        // (the #965 guard) and apply_overrides() keeps re-painting that stale
-        // value on every parse — so the user's new firmware color/type never
+        // (the #965 guard) and apply_resolved_lane() keeps re-painting that
+        // stale declared value on every parse — so the user's new firmware color/type never
         // surfaces (raza616, #981: set yellow PLA on the zmod screen, HelixScreen
         // kept showing the previously Helix-set white PETG). The user has plainly
         // overridden their earlier choice, so drop the stale override and let
@@ -3941,7 +4109,7 @@ bool AmsBackendAd5xIfs::on_gcode_response_line(const std::string& line) {
         // Extracting TYPE=/HEX= directly from the gcode makes the refresh
         // synchronous and lets GET_ZCOLOR degrade to a confirming no-op.
         if (line.find("CHANGE_ZCOLOR") != std::string::npos) {
-            static const std::regex slot_re(R"(SLOT=(\d+))");
+            static const helix::Regex slot_re(R"(SLOT=(\d+))");
             // Match TYPE= up to the next whitespace, a '|', or end of string.
             // zmod's stock whitelist is single-token (PLA, PLA-CF, PETG, PETG-CF,
             // SILK, ABS, TPU), and custom [zmod_ifs] filament_<NAME> entries are
@@ -3959,12 +4127,12 @@ bool AmsBackendAd5xIfs::on_gcode_response_line(const std::string& line) {
             // sync_override_to_firmware_locked that pinned a stale color into a
             // fresh auto-mirror override (#1065 raza616 07-22, bundle H2X5QMCU).
             // HEX= is already `{6}`-bounded so it stops at the '|' on its own.
-            static const std::regex type_re(R"(TYPE=([^\s|]+))");
+            static const helix::Regex type_re(R"(TYPE=([^\s|]+))");
             // HEX= is exactly 6 hex digits in zmod output. Tolerate lowercase
             // (Mainsail console typing) — canonicalized to upper below.
-            static const std::regex hex_re(R"(HEX=([0-9A-Fa-f]{6}))");
-            std::smatch m;
-            if (std::regex_search(line, m, slot_re)) {
+            static const helix::Regex hex_re(R"(HEX=([0-9A-Fa-f]{6}))");
+            helix::RegexMatch m;
+            if (helix::regex_search(line, m, slot_re)) {
                 // zmod SLOT is 1-based; overrides_ is 0-based.
                 int slot0 = std::atoi(m[1].str().c_str()) - 1;
 
@@ -3972,13 +4140,13 @@ bool AmsBackendAd5xIfs::on_gcode_response_line(const std::string& line) {
                 // (regex_search is the expensive part; do it once on the local
                 // line string). empty optional == "not present in this gcode".
                 std::optional<std::string> parsed_type;
-                std::smatch tm;
-                if (std::regex_search(line, tm, type_re)) {
+                helix::RegexMatch tm;
+                if (helix::regex_search(line, tm, type_re)) {
                     parsed_type = tm[1].str();
                 }
                 std::optional<std::string> parsed_hex;
-                std::smatch hm;
-                if (std::regex_search(line, hm, hex_re)) {
+                helix::RegexMatch hm;
+                if (helix::regex_search(line, hm, hex_re)) {
                     parsed_hex = hm[1].str();
                     // Canonicalize to upper-case so the follow-up GET_ZCOLOR
                     // response (which parse_zcolor_silent also receives as
@@ -4000,8 +4168,8 @@ bool AmsBackendAd5xIfs::on_gcode_response_line(const std::string& line) {
                     std::lock_guard<std::mutex> lock(mutex_);
                     auto it = overrides_.find(slot0);
                     const bool has_locked_override =
-                        (it != overrides_.end() &&
-                         (it->second.user_locked_color || it->second.user_locked_material));
+                        (it != overrides_.end() && (helix::ams::declares_color(it->second) ||
+                                                    helix::ams::declares_material(it->second)));
 
                     if (has_locked_override) {
                         spdlog::info(
@@ -4043,29 +4211,27 @@ bool AmsBackendAd5xIfs::on_gcode_response_line(const std::string& line) {
                         }
                         if (parsed_hex) {
                             colors_[idx] = *parsed_hex;
-                            try {
-                                const uint32_t color_value =
-                                    static_cast<uint32_t>(std::stoul(*parsed_hex, nullptr, 16));
-                                last_firmware_color_[slot0] = color_value;
+                            // Don't advance the baseline on the off-chance the
+                            // parse failed — the next GET_ZCOLOR poll will
+                            // recover.
+                            const auto color_value =
+                                helix::text_io::parse_leading<unsigned long>(*parsed_hex, 16);
+                            if (color_value) {
+                                last_firmware_color_[slot0] = static_cast<uint32_t>(*color_value);
                                 spdlog::info(
                                     "{} External CHANGE_ZCOLOR applied HEX='{}' to slot {} "
                                     "(#1065 gcode-path extraction)",
                                     backend_log_tag(), *parsed_hex, slot0);
                                 mutated = true;
-                            } catch (...) {
-                                // std::stoul on a regex-validated 6-hex-digit
-                                // string can't realistically throw; defensive
-                                // only. Don't advance the baseline on the
-                                // off-chance the parse failed — the next
-                                // GET_ZCOLOR poll will recover.
                             }
                         }
-
+                        identity_statement_fresh_[idx] = true;
                         // Refresh a pre-existing NON-locked auto-mirror override
                         // to match what we just wrote. Without this, the values
-                        // above land in colors_/materials_ but apply_overrides
-                        // (below, via update_slot_from_state) re-masks them with
-                        // the override's stale color_rgb / material — so the
+                        // above land in colors_/materials_ but
+                        // apply_resolved_lane (below, via update_slot_from_state)
+                        // re-paints them from the lane's stale declared
+                        // color_rgb / material — so the
                         // just-tapped value never surfaces. Concretely: change a
                         // slot's type then its color from back-to-back COLOR
                         // macros and the new color never appeared, because an
@@ -4079,13 +4245,14 @@ bool AmsBackendAd5xIfs::on_gcode_response_line(const std::string& line) {
                         // stream with echoed CHANGE_ZCOLOR button-definition
                         // lines on every prompt render — syncing on each would
                         // fabricate auto-mirror overrides for slots the user
-                        // never edited. When no override exists, apply_overrides
-                        // is already a no-op and firmware truth shows unaided.
+                        // never edited. When no override exists, the lane
+                        // declares nothing for those fields and firmware truth
+                        // shows unaided.
                         //
-                        // The #981 clear above erases any locked override before
-                        // we get here, so a surviving entry is auto-mirror
-                        // (locks false); sync_override_to_firmware_locked diffs
-                        // both fields and honors user_locked_* regardless, so it
+                        // The #981 clear above erases any declared override
+                        // before we get here, so a surviving entry is
+                        // auto-mirror (nothing declared); sync_override_to_firmware_locked diffs
+                        // both fields and honors a declared colour or material regardless, so it
                         // updates only the dimension that actually changed. Skip
                         // when no real firmware color baseline exists yet, so we
                         // don't pin black (0x000000) onto the override.
@@ -4101,10 +4268,11 @@ bool AmsBackendAd5xIfs::on_gcode_response_line(const std::string& line) {
                     }
 
                     if (mutated) {
-                        // Re-run apply_overrides + slot-state derivation so the
-                        // UI-visible SlotInfo picks up the new values. If a
-                        // locked override was cleared above, apply_overrides is
-                        // now a no-op and the firmware-truth arrays win.
+                        // Re-run the lane resolve + slot-state derivation so
+                        // the UI-visible SlotInfo picks up the new values. If a
+                        // locked override was cleared above, the lane declares
+                        // nothing for those fields and the firmware-truth
+                        // arrays win.
                         update_slot_from_state(slot0);
                     }
                 }
@@ -4138,7 +4306,7 @@ bool AmsBackendAd5xIfs::on_gcode_response_line(const std::string& line) {
                          "disabling has_ifs_vars_ for the session "
                          "(plugin macro not loaded)",
                          backend_log_tag());
-            has_ifs_vars_ = false;
+            demote_ifs_vars_locked();
             ifs_macro_confirmed_missing_ = true;
         }
         return false;
@@ -4153,19 +4321,19 @@ bool AmsBackendAd5xIfs::apply_color_menu_slot_row(const std::string& line) {
     // submenu's buttons (Load|IN_ZCOLOR …, Change color|CHANGE_ZCOLOR …), and
     // RUN_ZCOLOR is display-only — it never mutates firmware state, so a row
     // can be read as a snapshot with no risk of confusing it for a command.
-    static const std::regex slot_row_re(
+    static const helix::Regex slot_row_re(
         R"(action:prompt_button\s+(\d+)\s*:[^|]*\|\s*RUN_ZCOLOR\b)");
-    std::smatch rm;
-    if (!std::regex_search(line, rm, slot_row_re))
+    helix::RegexMatch rm;
+    if (!helix::regex_search(line, rm, slot_row_re))
         return false;
 
     // Same token grammar as the CHANGE_ZCOLOR extractor: TYPE stops at the '|'
     // that begins the button's style/hex suffix, HEX is 6 digits.
-    static const std::regex slot_re(R"(SLOT=(\d+))");
-    static const std::regex type_re(R"(TYPE=([^\s|]+))");
-    static const std::regex hex_re(R"(HEX=([0-9A-Fa-f]{6}))");
-    std::smatch sm;
-    if (!std::regex_search(line, sm, slot_re))
+    static const helix::Regex slot_re(R"(SLOT=(\d+))");
+    static const helix::Regex type_re(R"(TYPE=([^\s|]+))");
+    static const helix::Regex hex_re(R"(HEX=([0-9A-Fa-f]{6}))");
+    helix::RegexMatch sm;
+    if (!helix::regex_search(line, sm, slot_re))
         return false;
     // The label index and SLOT= must agree, or this isn't the row we think it
     // is (a localized or restyled menu, a future zmod layout). Bail rather than
@@ -4177,10 +4345,10 @@ bool AmsBackendAd5xIfs::apply_color_menu_slot_row(const std::string& line) {
     if (slot0 < 0 || slot0 >= NUM_PORTS)
         return false;
 
-    std::smatch tm;
-    std::smatch hm;
-    const bool has_type = std::regex_search(line, tm, type_re);
-    const bool has_hex = std::regex_search(line, hm, hex_re);
+    helix::RegexMatch tm;
+    helix::RegexMatch hm;
+    const bool has_type = helix::regex_search(line, tm, type_re);
+    const bool has_hex = helix::regex_search(line, hm, hex_re);
     if (!has_type && !has_hex)
         return false;
 
@@ -4204,6 +4372,7 @@ bool AmsBackendAd5xIfs::apply_color_menu_slot_row(const std::string& line) {
             materials_[idx] = tm[1].str();
         if (has_hex)
             colors_[idx] = hex;
+        identity_statement_fresh_[idx] = true;
 
         spdlog::info("{} Slot {} refreshed from COLOR-menu row (material='{}' color='{}')",
                      backend_log_tag(), slot0, materials_[idx], colors_[idx]);
@@ -4372,18 +4541,7 @@ void AmsBackendAd5xIfs::recheck_ifs_vars_macro() {
                                     ifs_macro_confirmed_missing_ = false;
                                 }
                             } else {
-                                if (!ifs_macro_confirmed_missing_ || has_ifs_vars_) {
-                                    spdlog::warn("{} _IFS_VARS macro no longer present (post "
-                                                 "FIRMWARE_RESTART) — disabling _IFS_VARS writes",
-                                                 backend_log_tag());
-                                }
-                                ifs_macro_confirmed_missing_ = true;
-                                has_ifs_vars_ = false;
-                                // The plugin went away with the macro; a remembered
-                                // variable_backup would be a claim about software that is
-                                // no longer installed.
-                                ifs_backup_variable_.reset();
-                                system_info_.endless_spool_enabled = false;
+                                apply_ifs_vars_macro_absent_locked();
                             }
                         });
         });
@@ -4412,12 +4570,14 @@ void AmsBackendAd5xIfs::schedule_json_reread() {
         // which itself touches api_ and member state.
         token.defer("Ad5xIfsBackend::reread_apply", [this]() {
             reread_pending_.store(false);
-            const int n = external_change_burst_count_;
+            const int edits = external_change_burst_count_;
+            const int renders = menu_render_burst_count_;
             external_change_burst_count_ = 0;
-            if (n > 0) {
-                spdlog::debug("{} Detected {} external color change(s) in gcode stream — "
-                              "re-reading Adventurer5M.json + querying zcolor",
-                              backend_log_tag(), n);
+            menu_render_burst_count_ = 0;
+            if (edits > 0 || renders > 0) {
+                spdlog::debug("{} Re-reading Adventurer5M.json + querying zcolor after {} "
+                              "external colour edit(s) and {} colour-menu render line(s)",
+                              backend_log_tag(), edits, renders);
             } else {
                 // Reread scheduled by a non-stream trigger (klippy_ready, etc.).
                 spdlog::debug("{} Re-reading Adventurer5M.json after external change",
@@ -4653,52 +4813,19 @@ bool AmsBackendAd5xIfs::read_zmod_color_object(const json& obj, ZColorSilentResu
         channel = chan_it->get<int>();
     }
 
-    auto slots_it = obj.find("slots");
-    if (slots_it == obj.end() || !slots_it->is_array()) {
+    auto slots = helix::zmod_color::parse_slots(obj, NUM_PORTS);
+    if (!slots) {
         return false;
     }
     bool saw_slot = false;
-    for (const auto& entry : *slots_it) {
-        if (!entry.is_object()) {
-            continue;
-        }
-        // ID is the 1-based slot number, emitted as a string (str(i) in the
-        // module) but accepted either way — this is somebody else's schema.
-        auto id_it = entry.find("ID");
-        if (id_it == entry.end()) {
-            continue;
-        }
-        int id = 0;
-        if (id_it->is_number_integer()) {
-            id = id_it->get<int>();
-        } else if (id_it->is_string()) {
-            try {
-                id = std::stoi(id_it->get<std::string>());
-            } catch (...) {
-                continue;
-            }
-        } else {
-            continue;
-        }
-        if (id < 1 || id > NUM_PORTS) {
+    for (size_t i = 0; i < slots->size(); ++i) {
+        if (!(*slots)[i]) {
             continue;
         }
         ZColorSlot slot;
-        if (auto mat = entry.find("Material"); mat != entry.end() && mat->is_string()) {
-            slot.material = mat->get<std::string>();
-            // Firmware-native unset sentinel, same one ffmType carries in
-            // Adventurer5M.json (parse_adventurer_json normalizes it there).
-            // A live 1.7.2-37 frame returns Material "?" with HEX "" for every
-            // lane that has no assigned material; passed through it renders as
-            // a literal "?" where the UI should show "--".
-            if (slot.material == "?") {
-                slot.material.clear();
-            }
-        }
-        if (auto hex = entry.find("HEX"); hex != entry.end() && hex->is_string()) {
-            slot.hex = hex->get<std::string>();
-        }
-        result.slots[static_cast<size_t>(id - 1)] = std::move(slot);
+        slot.material = (*slots)[i]->material;
+        slot.hex = (*slots)[i]->hex;
+        result.slots[i] = std::move(slot);
         saw_slot = true;
     }
     if (saw_slot) {
@@ -4778,8 +4905,7 @@ std::string AmsBackendAd5xIfs::normalize_module_color_hex(const std::string& val
             return {};
         }
     }
-    std::transform(digits.begin(), digits.end(), digits.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+    digits = helix::text_io::to_upper(digits);
     return digits;
 }
 
@@ -4791,14 +4917,13 @@ bool AmsBackendAd5xIfs::read_ifs_materials_object(const json& obj, ZColorSilentR
     bool saw_slot = false;
     for (auto slot_it = slots_it->begin(); slot_it != slots_it->end(); ++slot_it) {
         // Moonraker serialises dict keys as strings, so "1".."4" - but accept
-        // an integer key too, same tolerance read_zmod_color_object gives the
-        // ID field (it is somebody else's serializer either way).
-        int id = 0;
-        try {
-            id = std::stoi(slot_it.key());
-        } catch (...) {
+        // an integer key too, same tolerance helix::zmod_color::parse_slots
+        // gives the ID field (it is somebody else's serializer either way).
+        const auto id_number = helix::text_io::parse_leading<int>(slot_it.key());
+        if (!id_number) {
             continue;
         }
+        const int id = *id_number;
         if (id < 1 || id > NUM_PORTS || !slot_it.value().is_object()) {
             continue;
         }
@@ -4920,15 +5045,7 @@ bool AmsBackendAd5xIfs::apply_ifs_module_objects(const json& status) {
             std::any_of(tool_map_.begin(), tool_map_.end(),
                         [](int port) { return port >= 1 && port <= NUM_PORTS; });
         if (!plugin_owns_table) {
-            for (int t = 0; t < NUM_PORTS; ++t) {
-                tool_map_[static_cast<size_t>(t)] = t + 1;
-            }
-            for (int i = 0; i < NUM_PORTS; ++i) {
-                slots_.set_tool_mapping(i, i);
-            }
-            for (int i = 0; i < NUM_PORTS; ++i) {
-                update_slot_from_state(i);
-            }
+            install_identity_tool_map_locked();
         }
     }
 
@@ -5195,6 +5312,7 @@ void AmsBackendAd5xIfs::apply_zcolor_result(const ZColorSilentResult& result) {
                     }
                     const bool was_present = port_presence_[idx];
                     port_presence_[idx] = ports[idx];
+                    note_presence_transition_locked(i, was_present, ports[idx]);
                     chan_changed = true;
                     // present->absent: the lane went empty (eject / runout /
                     // unload). #1071: KEEP the lane->Spoolman override so a
@@ -5350,6 +5468,7 @@ void AmsBackendAd5xIfs::apply_zcolor_result(const ZColorSilentResult& result) {
                 !ifs_status_ports_seen_.load() && port_presence_[idx] != loaded) {
                 const bool was_present = port_presence_[idx];
                 port_presence_[idx] = loaded;
+                note_presence_transition_locked(i, was_present, loaded);
                 changed = true;
 
                 // present->absent: the spool was physically removed. #1071:
@@ -5378,10 +5497,12 @@ void AmsBackendAd5xIfs::apply_zcolor_result(const ZColorSilentResult& result) {
             }
             if (!parsed->hex.empty() && colors_[idx] != parsed->hex) {
                 colors_[idx] = parsed->hex;
+                identity_statement_fresh_[idx] = true;
                 changed = true;
             }
             if (!parsed->material.empty() && materials_[idx] != parsed->material) {
                 materials_[idx] = parsed->material;
+                identity_statement_fresh_[idx] = true;
                 changed = true;
             }
         }
@@ -5526,13 +5647,14 @@ AmsBackendAd5xIfs::parse_zcolor_silent(const std::vector<std::string>& lines, co
     // Regexes compiled once per call; parsing is off the hot path.
     // Summary: "// Extruder: None (N) | IFS: True"
     //   or:    "// Extruder: N: MATERIAL/HEX | IFS: True"
-    static const std::regex summary_re(R"(^//\s*Extruder:\s*(.+?)\s*\|\s*IFS:\s*(True|False)\s*$)");
+    static const helix::Regex summary_re(
+        R"(^//\s*Extruder:\s*(.+?)\s*\|\s*IFS:\s*(True|False)\s*$)");
     // Slot: "// N: MATERIAL/HEX" or "// N: MATERIAL/NAME/HEX" or old "// N: MATERIAL"
-    static const std::regex slot_re(R"(^//\s*([1-9])\s*:\s*(.+?)\s*$)");
+    static const helix::Regex slot_re(R"(^//\s*([1-9])\s*:\s*(.+?)\s*$)");
     // Extruder detail inside summary text: "N: MATERIAL/..."
-    static const std::regex extruder_slot_re(R"(^([1-9])\s*:)");
+    static const helix::Regex extruder_slot_re(R"(^([1-9])\s*:)");
     // current channel: "None (N)" or bare "N" form — look for "(N)" paren form
-    static const std::regex channel_paren_re(R"(\((\d+)\))");
+    static const helix::Regex channel_paren_re(R"(\((\d+)\))");
 
     // First pass: classify the response and pull the IFS_STATUS JSON line.
     //
@@ -5558,74 +5680,65 @@ AmsBackendAd5xIfs::parse_zcolor_silent(const std::vector<std::string>& lines, co
         if (slashes != std::string::npos) {
             body = body.substr(slashes + 2);
         }
-        try {
-            json obj = json::parse(body);
-            if (obj.is_object()) {
-                const bool had_chan = result.ifs_chan.has_value();
-                read_ifs_status_object(obj, result);
-                if (!had_chan && result.ifs_chan.has_value()) {
-                    // Diagnostic: log the seated channel + presence view so the
-                    // next field bundle proves Chan's loaded-idle behavior.
-                    // safe_int, not .value(): the catch below is parse_error
-                    // only, so a line like {"Chan":1,"State":null} would throw
-                    // type_error.302 straight past it — breaking the promise
-                    // that comment makes. Every other read here is already
-                    // find + is_*() guarded; this was the lone gap.
-                    std::string ports_str;
-                    if (auto ports_it = obj.find("Ports");
-                        ports_it != obj.end() && ports_it->is_array()) {
-                        ports_str = ports_it->dump();
-                    }
-                    spdlog::info("[AMS AD5X-IFS] IFS_STATUS trigger={} Chan={} State={} Ports={}",
-                                 reason, *result.ifs_chan,
-                                 helix::json_util::safe_int(obj, "State", -1), ports_str);
+        json obj = json::parse(body, nullptr, false);
+        // Not valid JSON (malformed line, partial buffer) — ignore. Never
+        // throw on a bad gcode-response line.
+        if (!obj.is_discarded() && obj.is_object()) {
+            const bool had_chan = result.ifs_chan.has_value();
+            read_ifs_status_object(obj, result);
+            if (!had_chan && result.ifs_chan.has_value()) {
+                // Diagnostic: log the seated channel + presence view so the
+                // next field bundle proves Chan's loaded-idle behavior.
+                // safe_int, not .value(): a line like {"Chan":1,"State":null}
+                // would make .value() throw type_error.302 — nothing here
+                // catches a type error on a gcode-response line.
+                std::string ports_str;
+                if (auto ports_it = obj.find("Ports");
+                    ports_it != obj.end() && ports_it->is_array()) {
+                    ports_str = helix::json_util::safe_dump(*ports_it);
                 }
+                spdlog::info("[AMS AD5X-IFS] IFS_STATUS trigger={} Chan={} State={} Ports={}",
+                             reason, *result.ifs_chan, helix::json_util::safe_int(obj, "State", -1),
+                             ports_str);
             }
-        } catch (const json::parse_error&) {
-            // Not valid JSON (malformed line, partial buffer) — ignore. Never
-            // throw on a bad gcode-response line.
         }
     }
 
     int slot_lines_seen = 0;
     int slot_lines_with_hex = 0;
-    std::smatch m;
+    helix::RegexMatch m;
 
     for (const auto& line : lines) {
-        if (std::regex_match(line, m, summary_re)) {
+        if (helix::regex_match(line, m, summary_re)) {
             result.saw_valid_response = true;
             result.saw_silent_content = true;   // genuine GET_ZCOLOR summary line
             result.saw_extruder_summary = true; // carries the "Extruder:" head field
             result.ifs_active = (m[2].str() == "True");
             const std::string extruder_part = m[1].str();
 
-            std::smatch em;
-            if (std::regex_search(extruder_part, em, extruder_slot_re)) {
-                try {
-                    int n = std::stoi(em[1].str());
-                    if (n >= 1 && n <= NUM_PORTS) {
-                        result.extruder_slot = n - 1; // 0-based
-                    }
-                } catch (...) {
+            helix::RegexMatch em;
+            if (helix::regex_search(extruder_part, em, extruder_slot_re)) {
+                const auto n = helix::text_io::parse_leading<int>(em[1].str());
+                if (n && *n >= 1 && *n <= NUM_PORTS) {
+                    result.extruder_slot = *n - 1; // 0-based
                 }
             }
-            std::smatch cm;
-            if (std::regex_search(extruder_part, cm, channel_paren_re)) {
-                try {
-                    result.current_channel = std::stoi(cm[1].str());
-                } catch (...) {
+            helix::RegexMatch cm;
+            if (helix::regex_search(extruder_part, cm, channel_paren_re)) {
+                const auto chan = helix::text_io::parse_leading<int>(cm[1].str());
+                if (chan) {
+                    result.current_channel = *chan;
                 }
             }
             continue;
         }
 
-        if (std::regex_match(line, m, slot_re)) {
-            int n;
-            try {
-                n = std::stoi(m[1].str());
-            } catch (...) {
+        if (helix::regex_match(line, m, slot_re)) {
+            const auto parsed_n = helix::text_io::parse_leading<int>(m[1].str());
+            if (!parsed_n) {
                 continue;
             }
+            const int n = *parsed_n;
             if (n < 1 || n > NUM_PORTS) {
                 continue; // slot number out of range — skip (e.g. "// 99: nonsense")
             }
@@ -5663,11 +5776,9 @@ AmsBackendAd5xIfs::parse_zcolor_silent(const std::vector<std::string>& lines, co
 }
 
 void AmsBackendAd5xIfs::parse_adventurer_json(const std::string& content) {
-    json doc;
-    try {
-        doc = json::parse(content);
-    } catch (const json::parse_error& e) {
-        spdlog::warn("{} Failed to parse Adventurer5M.json: {}", backend_log_tag(), e.what());
+    json doc = json::parse(content, nullptr, false);
+    if (doc.is_discarded()) {
+        spdlog::warn("{} Failed to parse Adventurer5M.json", backend_log_tag());
         return;
     }
 
@@ -5751,6 +5862,7 @@ void AmsBackendAd5xIfs::parse_adventurer_json(const std::string& content) {
             if (!live_owns) {
                 colors_[static_cast<size_t>(idx)] = hex;
                 materials_[static_cast<size_t>(idx)] = type;
+                identity_statement_fresh_[static_cast<size_t>(idx)] = true;
             }
 
             // Build a per-slot signature (count + color + material) so the
@@ -5795,6 +5907,7 @@ void AmsBackendAd5xIfs::parse_adventurer_json(const std::string& content) {
             if (!has_per_port_sensors_ && !zcolor_silent_supported_.load() &&
                 !ifs_status_ports_seen_.load()) {
                 auto& presence = port_presence_[static_cast<size_t>(idx)];
+                const bool was_present = presence;
                 if (has_filament_data) {
                     presence = true;
                 } else if (presence && system_info_.action == AmsAction::IDLE) {
@@ -5811,6 +5924,11 @@ void AmsBackendAd5xIfs::parse_adventurer_json(const std::string& content) {
                     presence = false;
                     needs_ifs_vars_push = true;
                 }
+                // The file latches identity across an eject and our own edit
+                // writes it, so a rising edge inferred from it is not
+                // evidence a spool went in: bookkeeping only, no notice.
+                note_presence_transition_locked(idx, was_present, presence,
+                                                /*sensor_edge=*/false);
             }
 
             update_slot_from_state(idx);
@@ -6048,41 +6166,24 @@ bool AmsBackendAd5xIfs::apply_phase_action_locked() {
         return false;
     }
 
-    AmsAction synth;
     std::string detail;
-    // Step index for the right-side vertical operation tracker. Mirrors the
-    // phase_id values get_operation_step_model() emits: unload
-    // HEATING→0 / CUTTING→1 / UNLOADING→2 ; load HEATING→0 / LOADING→1 / PURGING→2.
-    // AmsState::sync_from_backend() copies this into the ams_operation_phase
-    // subject the tracker observes.
-    int phase_index;
+    // Step index for the right-side vertical operation tracker, the phase_id
+    // get_operation_step_model() emits. AmsState::sync_from_backend() copies it
+    // into the ams_operation_phase subject the tracker observes, and the action
+    // is that step's projection.
     const int tgt = phase_tracker_.target_deci;
-
-    if (phase_tracker_.is_unload) {
-        // HEATING → CUTTING → UNLOADING
-        if (!phase_tracker_.reached_target_once) {
-            synth = AmsAction::HEATING;
-            phase_index = 0;
-        } else if (!phase_tracker_.seen_head_drop) {
-            synth = AmsAction::CUTTING;
-            phase_index = 1;
-        } else {
-            synth = AmsAction::UNLOADING;
-            phase_index = 2;
-        }
+    int phase_index;
+    if (!phase_tracker_.reached_target_once) {
+        phase_index = 0;
+    } else if (!(phase_tracker_.is_unload ? phase_tracker_.seen_head_drop
+                                          : phase_tracker_.seen_head_rise)) {
+        phase_index = 1;
     } else {
-        // HEATING → LOADING → PURGING
-        if (!phase_tracker_.reached_target_once) {
-            synth = AmsAction::HEATING;
-            phase_index = 0;
-        } else if (!phase_tracker_.seen_head_rise) {
-            synth = AmsAction::LOADING;
-            phase_index = 1;
-        } else {
-            synth = AmsAction::PURGING;
-            phase_index = 2;
-        }
+        phase_index = 2;
     }
+    const AmsAction synth =
+        (phase_tracker_.is_unload ? kIfsUnloadPhases
+                                  : kIfsLoadPhases)[static_cast<size_t>(phase_index)];
     system_info_.operation_phase = phase_index;
 
     // Build the per-phase operation_detail. Dynamic (contains live temps), so it
@@ -6183,7 +6284,7 @@ void AmsBackendAd5xIfs::detect_load_unload_completion(bool head_detected) {
 // === Unattended runout detection (#1250, reported as #1247) ===
 
 void AmsBackendAd5xIfs::note_head_switch_reading_locked(bool detected) {
-    // Reads the PREVIOUS latch values; handle_status_update calls this before it
+    // Reads the PREVIOUS latch values; handle_status calls this before it
     // overwrites head_switch_seen_ / head_switch_present_.
     const bool was_seen = head_switch_seen_;
     const bool was_present = head_switch_present_;
@@ -6345,8 +6446,7 @@ bool AmsBackendAd5xIfs::backup_eligible_locked(int slot, int candidate) const {
         return false; // Nothing to match against; claim nothing.
     }
     const auto lower = [](std::string s) {
-        std::transform(s.begin(), s.end(), s.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        s = helix::text_io::to_lower(s);
         return s;
     };
     const auto idx = static_cast<size_t>(candidate);
@@ -6444,7 +6544,7 @@ std::string AmsBackendAd5xIfs::build_runout_detail_locked() const {
         const int backup = find_backup_slot_locked(runout_slot_);
         detail += " ";
         if (backup >= 0) {
-            detail += fmt::format(lv_tr("Slot {} matches."), backup + 1);
+            detail += fmt::format(lv_tr("{} matches."), helix::ui::lane_label(lane_noun(), backup));
         } else {
             detail += lv_tr("No slot currently matches.");
         }
@@ -6558,27 +6658,7 @@ void AmsBackendAd5xIfs::persist_seated_slot_locked(int slot0) {
     }
 }
 
-bool AmsBackendAd5xIfs::validate_slot_index(int slot_index) const {
-    return slot_index >= 0 && slot_index < NUM_PORTS;
-}
-
 // ensure_homed_then() provided by AmsSubscriptionBackend
-
-void AmsBackendAd5xIfs::on_home_confirmation_declined() {
-    // load_filament()/unload_filament() arm HEATING + begin_phase_tracking_locked()
-    // before ever reaching ensure_homed_then(); undo that half here, then let the
-    // base implementation reset the action to IDLE and emit. Without this the
-    // phase tracker stays active, apply_phase_action_locked() has no `!= IDLE`
-    // guard, and the next extruder-temp frame flips IDLE -> HEATING again with a
-    // fresh action_start_time_ -- 300s later check_action_timeout() latches ERROR
-    // on an operation the user already declined.
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        end_phase_tracking_locked();
-        set_operation_detail_locked("");
-    }
-    AmsSubscriptionBackend::on_home_confirmation_declined();
-}
 
 void AmsBackendAd5xIfs::check_action_timeout() {
     // Indeterminate ("Working…") detector (#1065 row 14). While a phase-tracked
@@ -6597,6 +6677,15 @@ void AmsBackendAd5xIfs::check_action_timeout() {
             since_progress > std::chrono::seconds(INDETERMINATE_THRESHOLD_SECONDS);
     } else {
         system_info_.operation_indeterminate = false;
+    }
+
+    if (zmod_change_owns_action_) {
+        const auto held = std::chrono::steady_clock::now() - action_start_time_;
+        if (held >= std::chrono::seconds(SWAP_LOADING_TIMEOUT_SECONDS)) {
+            release_zmod_change_locked("END_CHANGE_FILAMENT never ran");
+        } else if (zmod_change_in_job_ && !job_holds_machine_now()) {
+            release_zmod_change_locked("the job ended mid-change");
+        }
     }
 
     const AmsAction a = system_info_.action;
@@ -6650,5 +6739,7 @@ void AmsBackendAd5xIfs::check_action_timeout() {
         set_operation_detail_locked(timeout_detail);
     }
 }
+
+} // namespace helix
 
 #endif // HELIX_HAS_IFS

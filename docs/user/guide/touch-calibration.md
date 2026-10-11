@@ -4,7 +4,7 @@ Touch calibration maps the raw coordinates from your touchscreen to the actual p
 
 **Which screens need calibration?**
 
-- **Resistive touchscreens** — Common on budget printers like the Creality AD5M (sun4i_ts) and Nebula Pad (NS2009). These almost always need calibration.
+- **Resistive touchscreens** — Common on budget printers like the FlashForge AD5M (sun4i_ts) and Nebula Pad (NS2009). These almost always need calibration.
 - **Most capacitive touchscreens** — Goodix, FocalTech, and similar controllers come factory-calibrated. No calibration needed.
 - **USB touchscreens** — BTT HDMI displays and generic USB HID screens report pre-mapped coordinates. No calibration needed.
 - **Raspberry Pi Official Touchscreen** — Factory calibrated. No calibration needed.
@@ -52,7 +52,7 @@ You may need to recalibrate if:
 
 **To recalibrate:**
 
-1. Go to **Settings > System > Touch Calibration**
+1. Go to **Settings > Touch & Input > Touch Calibration**
 2. You'll see a status indicator showing **Calibrated** or **Not calibrated**
 3. Tap the option — calibration starts immediately
 4. Complete the same 3-point crosshair flow described above
@@ -73,7 +73,7 @@ Sometimes you need to force calibration even when HelixScreen doesn't think it's
 
 If you can navigate the UI:
 
-1. Go to **Settings > System > Touch Calibration**
+1. Go to **Settings > Touch & Input > Touch Calibration**
 2. Tap to start the calibration flow
 
 ### Method 2: Environment Variable (recommended when touch is broken)
@@ -148,7 +148,7 @@ If nothing else works:
 1. Go to **Settings > System > Factory Reset**
 2. Confirm the reset
 
-This resets **all** settings and re-runs the Setup Wizard from scratch, including calibration if your screen needs it. Only use this as a last resort.
+This resets **all** settings and re-runs the Setup Wizard from scratch, including calibration if your screen needs it. The reset also clears the backup copies of your settings, so the wizard cannot be skipped by a restore. Only use this as a last resort. If the screen is too broken to reach Settings at all, use Method 2 or 3 above, or the SSH procedure in [Reset HelixScreen or re-run the setup wizard](../TROUBLESHOOTING.md#reset-helixscreen-or-re-run-the-setup-wizard).
 
 ---
 
@@ -168,7 +168,7 @@ This resets **all** settings and re-runs the Setup Wizard from scratch, includin
 | FlashForge AD5M — ZMOD | `/srv/helixscreen` | `/srv/helixscreen/config/settings.json` |
 | FlashForge AD5X (ZMOD) | `/srv/helixscreen` | `/srv/helixscreen/config/settings.json` |
 | Creality K1 series | `/usr/data/helixscreen` | `/usr/data/helixscreen/config/settings.json` |
-| Creality K2 series | `/opt/helixscreen` | `/opt/helixscreen/config/settings.json` |
+| Creality K2 series | `/mnt/UDISK/helixscreen` | `/mnt/UDISK/helixscreen/config/settings.json` |
 | Elegoo Centauri Carbon (CC1) | `/user-resource/helixscreen` | `/user-resource/helixscreen/config/settings.json` |
 | Snapmaker U1 | `/userdata/helixscreen` | `/userdata/helixscreen/config/settings.json` |
 | Development (running from source) | `./` | `./config/settings.json` |
@@ -313,8 +313,10 @@ HELIX_DISPLAY_ROTATION=90
 
 | Device / Screen | Type | Needs Calibration? | Notes |
 |----------------|------|-------------------|-------|
-| Creality AD5M built-in | Resistive (sun4i_ts) | Yes | Auto-detected |
+| FlashForge AD5M built-in | Resistive (sun4i_ts) | Yes | Auto-detected |
 | Nebula Pad | Resistive (NS2009) | Yes | Auto-detected |
+| Creality K1C built-in | Capacitive (goodix-ts) | No | Declared ABS range matches the panel, so the wizard auto-skips |
+| Creality K2 Plus built-in | Capacitive (gt9xxnew_ts) | No | Declared ABS range matches the panel, so the wizard auto-skips |
 | BTT HDMI 5"/7" | USB capacitive | No | Reports mapped coordinates |
 | Raspberry Pi Official Touchscreen | Capacitive (Goodix) | No | Factory calibrated |
 | Goodix GT911 panels | Capacitive | Usually no | May need calibration if wired to a mismatched-resolution display |

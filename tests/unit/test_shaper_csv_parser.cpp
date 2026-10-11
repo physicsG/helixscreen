@@ -231,3 +231,68 @@ TEST_CASE("Parser detects shaper columns without marker", "[shaper_csv]") {
     CHECK(data.shaper_curves[0].values[1] == Catch::Approx(0.100f * 1.000f)); // zv row 1
     CHECK(data.shaper_curves[2].values[0] == Catch::Approx(0.789f * 0.500f)); // ei row 0
 }
+
+// ============================================================================
+// Resonance CSV (TEST_RESONANCES OUTPUT=resonances)
+// ============================================================================
+
+static const char* MAINLINE_RESONANCES_CSV = "freq,psd_x,psd_y,psd_z,psd_xyz\n"
+                                             "5.0,1.0e+01,2.0e+01,3.0e+00,3.3e+01\n"
+                                             "5.8,1.1e+01,2.1e+01,3.0e+00,3.5e+01\n"
+                                             "6.6,1.2e+01,2.2e+01,3.0e+00,3.7e+01\n";
+
+static const char* KALICO_RESONANCES_CSV = "freq,psd_x,psd_y,psd_z,psd_xyz,accel_per_hz\n"
+                                           "5.0,1.0e+01,2.0e+01,3.0e+00,3.3e+01,60.0\n"
+                                           "5.8,1.1e+01,2.1e+01,3.0e+00,3.5e+01,60.0\n";
+
+static const char* MULTI_CHIP_CSV = "freq,adxl345,adxl345_hotend\n"
+                                    "5.0,1.0e+01,2.0e+01\n";
+
+TEST_CASE("resonance CSV: mainline columns", "[shaper_csv][belt]") {
+    TempCsvFile csv(MAINLINE_RESONANCES_CSV);
+    auto d = parse_resonance_csv(csv.path);
+    REQUIRE(d.error == ResonanceCsvError::NONE);
+    REQUIRE(d.curve.size() == 3);
+    CHECK(d.curve[0].first == Catch::Approx(5.0f));
+    CHECK(d.curve[0].second == Catch::Approx(33.0f)); // psd_xyz, not psd_x
+    CHECK(d.curve[2].second == Catch::Approx(37.0f));
+}
+
+TEST_CASE("resonance CSV: Kalico's extra column is ignored", "[shaper_csv][belt]") {
+    TempCsvFile csv(KALICO_RESONANCES_CSV);
+    auto d = parse_resonance_csv(csv.path);
+    REQUIRE(d.error == ResonanceCsvError::NONE);
+    REQUIRE(d.curve.size() == 2);
+    CHECK(d.curve[1].second == Catch::Approx(35.0f));
+}
+
+TEST_CASE("resonance CSV: per-chip columns are reported, not guessed", "[shaper_csv][belt]") {
+    TempCsvFile csv(MULTI_CHIP_CSV);
+    auto d = parse_resonance_csv(csv.path);
+    CHECK(d.error == ResonanceCsvError::MULTI_CHIP);
+    CHECK(d.curve.empty());
+}
+
+TEST_CASE("resonance CSV: missing file", "[shaper_csv][belt]") {
+    auto d = parse_resonance_csv("/tmp/helix-no-such-resonances.csv");
+    CHECK(d.error == ResonanceCsvError::MISSING);
+}
+
+TEST_CASE("resonance CSV: header only is empty", "[shaper_csv][belt]") {
+    TempCsvFile csv("freq,psd_x,psd_y,psd_z,psd_xyz\n");
+    CHECK(parse_resonance_csv(csv.path).error == ResonanceCsvError::EMPTY);
+}
+
+TEST_CASE("resonance CSV: a truncated last row is dropped, the rest kept", "[shaper_csv][belt]") {
+    TempCsvFile csv("freq,psd_x,psd_y,psd_z,psd_xyz\n"
+                    "5.0,1,2,3,6\n"
+                    "5.8,1,2\n");
+    auto d = parse_resonance_csv(csv.path);
+    REQUIRE(d.error == ResonanceCsvError::NONE);
+    CHECK(d.curve.size() == 1);
+}
+
+TEST_CASE("resonance CSV: no freq or psd_xyz column", "[shaper_csv][belt]") {
+    TempCsvFile csv("freq,psd_x,psd_y\n5.0,1,2\n");
+    CHECK(parse_resonance_csv(csv.path).error == ResonanceCsvError::NO_PSD_COLUMN);
+}

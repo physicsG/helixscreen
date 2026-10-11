@@ -7,6 +7,7 @@
 #include "ui_icon_codepoints.h"
 #include "ui_notification_history.h"
 #include "ui_notification_manager.h"
+#include "ui_panel_common.h"
 #include "ui_update_queue.h"
 #include "ui_utils.h"
 
@@ -14,6 +15,7 @@
 #include "sound_manager.h"
 #include "static_subject_registry.h"
 #include "theme_manager.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/spdlog.h>
 
@@ -76,20 +78,20 @@ static const char* severity_to_string(ToastSeverity s) {
 static void severity_to_icon(ToastSeverity s, const char*& glyph, const char*& color_token) {
     switch (s) {
     case ToastSeverity::SUCCESS:
-        glyph = ui_icon::lookup_codepoint("check");
+        glyph = helix::ui::icon::lookup_codepoint("check");
         color_token = "#success";
         break;
     case ToastSeverity::WARNING:
-        glyph = ui_icon::lookup_codepoint("triangle_exclamation");
+        glyph = helix::ui::icon::lookup_codepoint("triangle_exclamation");
         color_token = "#warning";
         break;
     case ToastSeverity::ERROR:
-        glyph = ui_icon::lookup_codepoint("triangle_exclamation");
+        glyph = helix::ui::icon::lookup_codepoint("triangle_exclamation");
         color_token = "#danger";
         break;
     case ToastSeverity::INFO:
     default:
-        glyph = ui_icon::lookup_codepoint("info_circle");
+        glyph = helix::ui::icon::lookup_codepoint("info_circle");
         color_token = "#info";
         break;
     }
@@ -242,10 +244,17 @@ void ToastManager::deinit_subjects() {
             inst.dismiss_timer = nullptr;
         }
     }
-    // Stack container is parented to lv_layer_top — that gets cleaned by
-    // lv_deinit. Just drop the pointer.
+    // Runs on every printer switch, with LVGL still alive: a toast left on
+    // lv_layer_top() would outlive its entry and stay on screen for good.
+    // Deleting the stack deletes the toasts in it. Until the async delete
+    // runs, their button callbacks find nothing in the cleared list and
+    // no-op. At real shutdown safe_delete_deferred_raw no-ops and lv_deinit
+    // reclaims everything.
+    if (toast_stack_) {
+        helix::ui::safe_delete_deferred_raw(toast_stack_);
+        toast_stack_ = nullptr;
+    }
     active_.clear();
-    toast_stack_ = nullptr;
 
     initialized_.store(false, std::memory_order_release);
     spdlog::debug("[ToastManager] Deinitialized");
@@ -379,10 +388,12 @@ void ToastManager::show_with_action(ToastSeverity severity, const char* message,
 }
 
 void ToastManager::hide() {
-    // Dismiss all visible toasts.
-    for (auto it = active_.begin(); it != active_.end(); ++it) {
-        if (!it->is_exiting)
-            begin_exit(it);
+    // Dismiss all visible toasts. With animations off begin_exit erases the
+    // entry synchronously, so advance before calling it.
+    for (auto it = active_.begin(); it != active_.end();) {
+        auto cur = it++;
+        if (!cur->is_exiting)
+            begin_exit(cur);
     }
 }
 
@@ -404,8 +415,9 @@ void ToastManager::create_toast_internal(ToastSeverity severity, const char* mes
     }
 
     // Dedupe: rapid identical toasts refresh the existing one instead of
-    // stacking. Action toasts are excluded (callback/user_data may differ).
-    if (!with_action && refresh_duplicate(severity, message)) {
+    // stacking. An action toast matches only the same callback and user_data.
+    if (refresh_duplicate(severity, message, with_action ? action_cb : nullptr,
+                          with_action ? action_user_data : nullptr)) {
         return;
     }
 
@@ -442,8 +454,7 @@ void ToastManager::create_toast_internal(ToastSeverity severity, const char* mes
                            "hide_action", hide_action_str, "detail",      detail_safe,
                            "hide_detail", hide_detail_str, nullptr};
 
-    lv_obj_t* widget =
-        static_cast<lv_obj_t*>(lv_xml_create(toast_stack_, "toast_notification", attrs));
+    lv_obj_t* widget = helix::ui::create_xml_laid_out(toast_stack_, "toast_notification", attrs);
     if (!widget) {
         spdlog::error("[ToastManager] Failed to create toast notification widget");
         return;
@@ -459,10 +470,12 @@ void ToastManager::create_toast_internal(ToastSeverity severity, const char* mes
     it->message = message;
 
     if (with_action) {
-        lv_obj_t* action_btn = lv_obj_find_by_name(widget, "toast_action_btn");
+        lv_obj_t* action_btn = helix::ui::find_required(widget, "toast_action_btn", "ToastManager");
         if (action_btn) {
-            // Pointer to ToastInstance is stable because active_ is std::list.
-            lv_obj_add_event_cb(action_btn, action_btn_clicked, LV_EVENT_CLICKED, &*it);
+            // No user_data: a ToastInstance* would dangle once deinit_subjects()
+            // clears active_ while the widget is still on screen (printer
+            // switch). action_btn_clicked re-resolves the entry instead.
+            lv_obj_add_event_cb(action_btn, action_btn_clicked, LV_EVENT_CLICKED, nullptr);
         } else {
             spdlog::warn("[ToastManager] action toast missing toast_action_btn widget");
         }
@@ -470,9 +483,13 @@ void ToastManager::create_toast_internal(ToastSeverity severity, const char* mes
 
     animate_entrance(widget);
 
-    it->dismiss_timer = lv_timer_create(dismiss_timer_cb, duration_ms, widget);
-    if (it->dismiss_timer)
-        lv_timer_set_repeat_count(it->dismiss_timer, 1);
+    // duration_ms of 0 is the sticky form: no dismiss timer, so the toast
+    // stays until its close button is tapped.
+    if (duration_ms > 0) {
+        it->dismiss_timer = lv_timer_create(dismiss_timer_cb, duration_ms, widget);
+        if (it->dismiss_timer)
+            lv_timer_set_repeat_count(it->dismiss_timer, 1);
+    }
 
     update_notification_bell();
 
@@ -493,21 +510,19 @@ void ToastManager::detach_from_input(lv_obj_t* widget) {
     if (!widget)
         return;
 
-    // A toast being torn down may be an input device's cached press target.
-    // force_remove()/finalize_remove() hand the widget to
-    // safe_delete_deferred_raw(), which reparents it to lv_layer_top() and
-    // async-deletes it; in the window before that delete runs, indev's act_obj
-    // still points at the (soon-to-be-freed) action button. A release/click
-    // dispatched in that window dereferences freed widget memory in
-    // event_send_core (target->spec_attr->event_list) — SIGBUS (#850 pattern;
-    // crash bundle A5V73UV4). lv_indev_reset(NULL, ...) clears the cached
-    // press/scroll target on every pointer device; it is a no-op unless a press
-    // is actually in flight, so an idle auto-dismiss costs nothing.
-    lv_indev_reset(nullptr, widget);
+    // A press in flight on the action button must not complete (#850; bundle
+    // A5V73UV4). force_remove() and finalize_remove() erase the entry from
+    // active_ before the widget's async delete runs, and LVGL takes the press
+    // away only at that delete; through the exit animation, a completed click
+    // would run the action of a toast already dismissed. Only a pointer
+    // pressing or scrolling inside the toast is reset: a drag, a slider or a
+    // scroll anywhere else keeps its gesture.
+    helix::ui::reset_input_within(widget);
 
-    // Belt-and-suspenders: a dying toast's action button must not latch a fresh
-    // press once teardown has begun (CLICKABLE gates indev hit-testing).
-    if (lv_obj_t* action_btn = lv_obj_find_by_name(widget, "toast_action_btn")) {
+    // A dying toast's action button must not latch a fresh press once teardown
+    // has begun (CLICKABLE gates indev hit-testing).
+    if (lv_obj_t* action_btn =
+            helix::ui::find_required(widget, "toast_action_btn", "ToastManager")) {
         lv_obj_remove_flag(action_btn, LV_OBJ_FLAG_CLICKABLE);
     }
 }
@@ -598,31 +613,31 @@ void ToastManager::dismiss_timer_cb(lv_timer_t* timer) {
 void ToastManager::close_btn_clicked(lv_event_t* e) {
     // event_cb is registered via XML; target is the close button. Walk up to
     // toast_root (the lv_xml_create return) and look up by widget pointer.
-    lv_obj_t* node = lv_event_get_target_obj(e);
     auto& mgr = ToastManager::instance();
-    while (node) {
-        auto it = mgr.find_by_widget(node);
-        if (it != mgr.active_.end()) {
-            mgr.begin_exit(it);
-            return;
-        }
-        node = lv_obj_get_parent(node);
+    auto it = mgr.find_owning_toast(lv_event_get_target_obj(e));
+    if (it != mgr.active_.end()) {
+        mgr.begin_exit(it);
     }
 }
 
 void ToastManager::action_btn_clicked(lv_event_t* e) {
-    auto* inst = static_cast<ToastInstance*>(lv_event_get_user_data(e));
-    if (!inst)
+    // Registered with nullptr user_data: resolve the owning toast from the
+    // widget tree, so a click on a toast whose list entry is already gone
+    // (deinit_subjects cleared it, e.g. mid printer switch) is a no-op
+    // instead of a dereference of freed memory.
+    auto& mgr = ToastManager::instance();
+    auto it = mgr.find_owning_toast(lv_event_get_target_obj(e));
+    if (it == mgr.active_.end())
         return;
 
-    auto& mgr = ToastManager::instance();
-    // Snapshot callback before dismissing (find_by_widget may re-enter).
-    toast_action_callback_t cb = inst->action_cb;
-    void* data = inst->action_user_data;
-    inst->action_cb = nullptr;
-    inst->action_user_data = nullptr;
+    // Snapshot callback before dismissing (begin_exit can erase the entry
+    // synchronously when animations are disabled).
+    toast_action_callback_t cb = it->action_cb;
+    void* data = it->action_user_data;
+    it->action_cb = nullptr;
+    it->action_user_data = nullptr;
 
-    mgr.begin_exit(mgr.find_by_widget(inst->widget));
+    mgr.begin_exit(it);
 
     // Run the user action OUTSIDE this input-dispatch frame. Actions commonly
     // navigate or tear down panels; doing that synchronously while LVGL is

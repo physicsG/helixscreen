@@ -136,8 +136,8 @@ run_check_requirements_with_path() {
 
     run_check_requirements_with_path "$rbin"
     [ "$status" -ne 0 ]
-    [[ "$output" == *"curl, wget, or python3"* ]]
-    [[ "$output" == *"tar"* ]]
+    contains "curl, wget, or python3" "$output"
+    contains "tar" "$output"
     [[ "$output" == *"gunzip"* ]]
 }
 
@@ -196,12 +196,12 @@ run_check_requirements_with_path() {
 # check_disk_space
 # ===========================================================================
 
-@test "check_disk_space: succeeds with adequate space (GNU df)" {
+@test "check_disk_space: succeeds with adequate space (GNU df -kP)" {
     mkdir -p "$BATS_TEST_TMPDIR/opt"
 
     mock_command_script "df" '
-echo "Filesystem     1M-blocks  Used Available Use% Mounted on"
-echo "/dev/sda1          1000   900       100  90% /"
+echo "Filesystem     1K-blocks  Used Available Use% Mounted on"
+echo "/dev/sda1          1024000   921600       102400  90% /"
 '
 
     run check_disk_space "pi"
@@ -209,12 +209,12 @@ echo "/dev/sda1          1000   900       100  90% /"
     [[ "$output" == *"100MB available"* ]]
 }
 
-@test "check_disk_space: exits when space insufficient (GNU df)" {
+@test "check_disk_space: exits when space insufficient (GNU df -kP)" {
     mkdir -p "$BATS_TEST_TMPDIR/opt"
 
     mock_command_script "df" '
-echo "Filesystem     1M-blocks  Used Available Use% Mounted on"
-echo "/dev/sda1          1000   990        10  99% /"
+echo "Filesystem     1K-blocks  Used Available Use% Mounted on"
+echo "/dev/sda1          1024000   1013760       10240  99% /"
 '
 
     run check_disk_space "pi"
@@ -227,8 +227,8 @@ echo "/dev/sda1          1000   990        10  99% /"
     mkdir -p "$BATS_TEST_TMPDIR/opt"
 
     mock_command_script "df" '
-echo "Filesystem     1M-blocks  Used Available Use% Mounted on"
-echo "/dev/sda1          1000   800       200  80% /"
+echo "Filesystem     1K-blocks  Used Available Use% Mounted on"
+echo "/dev/sda1          1024000   819200       204800  80% /"
 '
 
     run check_disk_space "pi"
@@ -240,8 +240,8 @@ echo "/dev/sda1          1000   800       200  80% /"
     export INSTALL_DIR="$BATS_TEST_TMPDIR/a/b/c/d/helixscreen"
 
     mock_command_script "df" '
-echo "Filesystem     1M-blocks  Used Available Use% Mounted on"
-echo "/dev/sda1          1000   800       200  80% /"
+echo "Filesystem     1K-blocks  Used Available Use% Mounted on"
+echo "/dev/sda1          1024000   819200       204800  80% /"
 '
 
     run check_disk_space "pi"
@@ -287,12 +287,36 @@ echo "/dev/mmcblk0p1         1048576   1038336     10240  99% /"
     [[ "$output" == *"Insufficient disk space"* ]]
 }
 
+@test "check_disk_space: BusyBox df wrapping a long device name still parses" {
+    mkdir -p "$BATS_TEST_TMPDIR/opt"
+
+    # Without -P, BusyBox puts a long filesystem name on its own line and the
+    # numbers on the next, so that line's 4th field is Use%.
+    mock_command_script "df" '
+case "$1" in
+  -kP|-P)
+    echo "Filesystem           1024-blocks    Used Available Capacity Mounted on"
+    echo "/dev/disk/by-partlabel/userdata 1048576 945152 102400 90% /"
+    ;;
+  *)
+    echo "Filesystem           1K-blocks      Used Available Use% Mounted on"
+    echo "/dev/disk/by-partlabel/userdata"
+    echo "                       1048576    945152    102400  90% /"
+    ;;
+esac
+'
+
+    run check_disk_space "k2"
+    [ "$status" -eq 0 ] || fail "$output"
+    [[ "$output" == *"100MB available"* ]] || fail "$output"
+}
+
 @test "check_disk_space: uses default /opt/helixscreen when INSTALL_DIR unset" {
     unset INSTALL_DIR
 
     mock_command_script "df" '
-echo "Filesystem     1M-blocks  Used Available Use% Mounted on"
-echo "/dev/sda1          1000   800       200  80% /"
+echo "Filesystem     1K-blocks  Used Available Use% Mounted on"
+echo "/dev/sda1          1024000   819200       204800  80% /"
 '
 
     run check_disk_space "pi"
@@ -313,6 +337,10 @@ echo "/dev/sda1          1000   800       200  80% /"
     local data="$BATS_TEST_TMPDIR/usr/data"
     mkdir -p "$data"
     export HELIX_DATA_MOUNT_CANDIDATES="$data"
+    # The service definition lands somewhere writable, so the service-dest
+    # check that follows passes and only the disk-space verdict is under test.
+    mkdir -p "$BATS_TEST_TMPDIR/init.d"
+    export INIT_SCRIPT_DEST="$BATS_TEST_TMPDIR/init.d/S99helixscreen"
 
     # df answers "full" for "/" and roomy for everything else: if the check
     # df'd "/", it would refuse; measuring the data mount passes.
@@ -324,8 +352,8 @@ esac
 '
 
     run check_disk_space "ad5x"
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"${data}"* ]]      # measured the data mount
+    [ "$status" -eq 0 ] || fail "$output"
+    contains "${data}" "$output"      # measured the data mount
     [[ "$output" != *"Insufficient"* ]]
 }
 
@@ -341,7 +369,7 @@ echo "/dev/mmcblk0p7 4831838 4816000 10240 99% $2"
 
     run check_disk_space "ad5x"
     [ "$status" -ne 0 ]
-    [[ "$output" == *"Insufficient disk space"* ]]
+    contains "Insufficient disk space" "$output"
     [[ "$output" == *"${data}"* ]]      # names the partition that is full
 }
 
@@ -467,9 +495,10 @@ echo "/dev/mmcblk0p7 4831838 4816000 10240 99% $2"
     # Mock dpkg-query to report all packages as installed
     mock_command_script "dpkg-query" 'echo "install ok installed"'
 
-    run install_runtime_deps "pi"
+    detect_then_install() { detect_missing_runtime_deps "$1" && install_runtime_deps "$1"; }
+    run detect_then_install "pi"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"Checking runtime dependencies"* ]]
+    contains "Checking runtime dependencies" "$output"
     [[ "$output" == *"already installed"* ]]
 }
 
@@ -541,8 +570,8 @@ fi
 
     run verify_binary_deps "pi"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"libssl.so.1.1 not found"* ]]
-    [[ "$output" == *"Installing libssl1.1"* ]]
+    contains "libssl.so.1.1 not found" "$output"
+    contains "Installing libssl1.1" "$output"
     [[ "$output" == *"resolved"* ]]
 }
 
@@ -557,7 +586,7 @@ echo "	libc.so.6 => /lib/aarch64-linux-gnu/libc.so.6 (0x7f1230000000)"
 
     run verify_binary_deps "pi"
     [ "$status" -ne 0 ]
-    [[ "$output" == *"libssl1.1 package not available"* ]]
+    contains "libssl1.1 package not available" "$output"
     [[ "$output" == *"OpenSSL 3"* ]]
 }
 
@@ -570,8 +599,8 @@ echo "	libc.so.6 => /lib/aarch64-linux-gnu/libc.so.6 (0x7f1230000000)"
 
     run verify_binary_deps "pi"
     [ "$status" -ne 0 ]
-    [[ "$output" == *"Missing shared libraries"* ]]
-    [[ "$output" == *"libfoo.so.42"* ]]
+    contains "Missing shared libraries" "$output"
+    contains "libfoo.so.42" "$output"
     [[ "$output" == *"Could not resolve"* ]]
 }
 
@@ -583,7 +612,7 @@ echo "	libfoo.so.1 => not found"
 
     run verify_binary_deps "ad5m"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"Missing shared libraries"* ]]
+    contains "Missing shared libraries" "$output"
     [[ "$output" == *"may not start correctly"* ]]
 }
 
@@ -614,8 +643,8 @@ echo "	libc.so.6 => /lib/aarch64-linux-gnu/libc.so.6 (0x7f1230000000)"
     # (We can't easily change mock mid-test, so the re-check will still show both)
 
     run verify_binary_deps "pi"
-    [[ "$output" == *"Missing shared libraries"* ]]
-    [[ "$output" == *"libssl.so.1.1"* ]]
+    contains "Missing shared libraries" "$output"
+    contains "libssl.so.1.1" "$output"
     [[ "$output" == *"libcrypto.so.1.1"* ]]
 }
 
@@ -679,7 +708,7 @@ echo "	libc.so.0 => not found"
     grep -q "chroot $CHROOT ldd /opt/config/mod/.bin/helixscreen/bin/helix-screen" \
         "$BATS_TEST_TMPDIR/chroot-calls" \
         || fail "chroot-side ldd not invoked: $(cat "$BATS_TEST_TMPDIR/chroot-calls")"
-    [[ "$output" == *"verified inside the mod chroot"* ]]
+    contains "verified inside the mod chroot" "$output"
     [[ "$output" != *"not found"* ]]
 }
 
@@ -706,7 +735,7 @@ echo "	libc.so.0 => not found"
     run verify_binary_deps "ad5x"
     [ "$status" -eq 0 ]
     [ ! -s "$BATS_TEST_TMPDIR/chroot-calls" ]  # nothing to verify against
-    [[ "$output" != *"libstdc++.so.6"* ]]     # host-side false error suppressed
+    lacks "libstdc++.so.6" "$output"     # host-side false error suppressed
     [[ "$output" == *"chroot"* ]]             # the hint names the chroot
 }
 
@@ -719,6 +748,6 @@ echo "	libdrm.so.2 => /usr/lib/aarch64-linux-gnu/libdrm.so.2 (0x7f1234000000)"
 
     run verify_binary_deps "pi"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"All shared library dependencies satisfied"* ]]
+    contains "All shared library dependencies satisfied" "$output"
     [[ "$output" != *"CHROOT-LDD"* ]]
 }

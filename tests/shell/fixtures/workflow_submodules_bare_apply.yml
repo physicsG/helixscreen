@@ -1,0 +1,10 @@
+name: bare-apply fixture
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/init-submodules
+      - name: Apply submodule patches
+        run: make apply-patches

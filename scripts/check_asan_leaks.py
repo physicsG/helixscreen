@@ -27,7 +27,8 @@ Each direct leak is attributed to its ORIGIN: the first stack frame that is our
 code. Frame #0 is always the sanitizer's own allocator interceptor, and the
 frames below the origin are libstdc++ plumbing and Catch2's runner, which are
 identical for hundreds of unrelated leaks. Skipped as not-our-code:
-libsanitizer, /usr/include/, /usr/lib/, tests/catch_amalgamated.*, and anything
+libsanitizer, /usr/include/, /usr/lib/, tests/catch_amalgamated.*, the observer
+factory (shared plumbing every observer allocates through), and anything
 whose path is absolute or escapes the tree with `../` (glibc's ../csu/,
 ../sysdeps/). Everything else — src/, include/, tests/unit/, lib/lvgl/,
 lib/helix-xml/ — is ours; a leak that originates in vendored LVGL is still one
@@ -59,15 +60,13 @@ people regenerate blindly, which is the same as having no gate:
     and between declaration orders; the function name that remains is what
     both compilers agree on.
   * TEMPLATE ARGUMENTS are truncated to the first one:
-    `observe_int_sync<helix::PrintStatusWidget, helix::PrintStatusWidget::attach(
-    lv_obj_t*, lv_obj_t*)::<lambda(helix::PrintStatusWidget*, int)> >` becomes
-    `observe_int_sync<helix::PrintStatusWidget>`. The tail of that list is a
-    lambda's synthesized name — it carries the enclosing function's full
-    signature, so it changes when an unrelated parameter changes type, and gcc
-    and clang do not spell it the same way. The first argument is the observing
-    class, which is the part that identifies the site. The cost is real and
-    accepted: several observe_* leaks in one class collapse into one key, and
-    the ceilings are what notice if that bucket grows.
+    `std::vector<helix::Foo, std::allocator<helix::Foo> >::push_back` becomes
+    `std::vector<helix::Foo>::push_back`. A trailing argument is often a lambda's
+    synthesized name, which carries the enclosing function's full signature, so it
+    changes when an unrelated parameter changes type, and gcc and clang do not
+    spell it the same way. The cost is real and accepted: several leaks in one
+    template collapse into one key, and the ceilings are what notice if that
+    bucket grows.
   * The PARAMETER LIST is dropped: `MoonrakerClientMock::gcode_script(std::__cxx11
     ::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)`
     is just `MoonrakerClientMock::gcode_script`. Demangled parameter spellings
@@ -168,6 +167,10 @@ RUN_MARKER_RE = re.compile(r'All tests passed|test cases:\s*\d+|assertions:\s*\d
 SKIP_PATH_PREFIXES = ('/usr/include/', '/usr/lib/')
 SKIP_PATH_SUBSTRINGS = ('libsanitizer/',)
 CATCH2_BASENAME = 'catch_amalgamated.'
+# Our code, but shared allocation plumbing: every observer context is allocated
+# here, so keying on it would fold every caller's leak into one key and hide a
+# new one. The origin is the frame that asked for the observer.
+PLUMBING_PATHS = ('src/ui/observer_factory.cpp', 'include/observer_factory.h')
 
 CEILING_BYTES = 'max-leaked-bytes'
 CEILING_OBJECTS = 'max-leaked-objects'
@@ -402,6 +405,8 @@ def is_our_code(path):
         return False
     if os.path.basename(path).startswith(CATCH2_BASENAME):
         return False
+    if path in PLUMBING_PATHS:
+        return False
     return True
 
 
@@ -516,9 +521,12 @@ def parse(streams):
                 continue
             m = SUMMARY_RE.search(line)
             if m:
+                # A sharded run concatenates one SUMMARY per shard process; the
+                # ceilings are for the run as a whole.
                 report.saw_leak_block = True
-                report.summary_bytes = int(m.group('bytes'))
-                report.summary_allocations = int(m.group('allocations'))
+                report.summary_bytes = (report.summary_bytes or 0) + int(m.group('bytes'))
+                report.summary_allocations = ((report.summary_allocations or 0) +
+                                              int(m.group('allocations')))
                 continue
             m = LEAK_BLOCK_RE.match(line)
             if m:

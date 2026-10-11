@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Rotation probe screen: full-screen prompt shown while the first-boot orientation probe
+     cycles rotations. The colors are fixed on purpose: the probe must read the same whichever
+     rotation is active, so they are not theme tokens. Text comes from the rotation_probe_*
+     subjects the probe owns. -->
+<component>
+  <api>
+    <prop name="bg_color" type="string" default="#1a1a2e"/>
+  </api>
+  <view name="rotation_probe_screen"
+        extends="lv_obj" width="100%" height="100%" style_bg_color="$bg_color" style_bg_opa="255" style_border_width="0"
+        style_radius="0" style_pad_all="0" scrollable="false">
+    <lv_label name="probe_main"
+              width="90%" long_mode="wrap" align="center" y="-30" bind_text="rotation_probe_main"
+              style_text_color="#ffffff" style_text_font="noto_sans_24" style_text_align="center"/>
+    <lv_label name="probe_help"
+              width="90%" long_mode="wrap" align="center" y="5" bind_text="rotation_probe_help"
+              style_text_color="#888888" style_text_font="noto_sans_16" style_text_align="center"/>
+    <lv_label name="probe_subtitle"
+              width="90%" long_mode="wrap" align="center" y="35" bind_text="rotation_probe_subtitle"
+              style_text_color="#aaaaaa" style_text_font="noto_sans_16" style_text_align="center"/>
+  </view>
+</component>

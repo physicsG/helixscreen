@@ -44,7 +44,7 @@ targets, cross-compilation): → [BUILD_SYSTEM.md](BUILD_SYSTEM.md).
 | `--test` | Enable test mode (required for mocks) |
 | `--real-wifi` | Use real WiFi instead of mock |
 | `--real-ethernet` | Use real Ethernet instead of mock |
-| `--real-moonraker` | Connect to real printer |
+| `--real-moonraker` | Connect to real printer. Implies `--real-ams`. Without `--real-files`, database and Spoolman calls still reach the printer |
 | `--real-files` | Use real printer files |
 | `--real-ams` | Use a real AMS backend instead of mock |
 | `--real-sensors` | Use real sensor data instead of mock |
@@ -478,7 +478,7 @@ docs(readme): update build instructions
 ## Installer Scripts
 
 The installation system is modular POSIX shell (`scripts/lib/installer/`, 17
-modules) bundled into the one-line `scripts/install.sh` for BusyBox-compatible
+modules) bundled by `make installer` into the one-line `install.sh` for BusyBox-compatible
 `curl | sh` distribution. Module structure, BusyBox rules, bundle regeneration,
 and installer testing: → **[INSTALLER.md](INSTALLER.md)**.
 

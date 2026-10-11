@@ -8,7 +8,7 @@
 #include "async_lifetime_guard.h"
 #include "macro_param_cache.h"
 #include "macro_param_modal.h"
-#include "panel_widget.h"
+#include "src/ui/panel_widgets/tiled_panel_widget.h"
 
 #include <memory>
 #include <string>
@@ -24,7 +24,7 @@ class FavoriteMacroConfigModal;
 /// instance IDs like "favorite_macro:1", "favorite_macro:3", etc.
 /// Tap executes assigned macro; configure button opens config modal.
 /// When unconfigured, tap also opens config modal.
-class FavoriteMacroWidget : public PanelWidget {
+class FavoriteMacroWidget : public TiledPanelWidget {
   public:
     /// @param instance_id e.g. "favorite_macro:1"
     explicit FavoriteMacroWidget(const std::string& instance_id);
@@ -33,7 +33,6 @@ class FavoriteMacroWidget : public PanelWidget {
     void set_config(const nlohmann::json& config) override;
     void attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) override;
     void detach() override;
-    void on_size_changed(int colspan, int rowspan, int width_px, int height_px) override;
     bool has_edit_configure() const override {
         return true;
     }

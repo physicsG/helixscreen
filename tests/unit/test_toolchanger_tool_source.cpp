@@ -357,11 +357,59 @@ TEST_CASE("A changer without klipper-toolchanger names its own commands",
     CHECK(cmds.unselect == "DROP_TOOL");
 }
 
-TEST_CASE("A printer with no changer at all names no commands",
+TEST_CASE("A printer with no changer module at all swaps with plain T<n>",
           "[toolchanger][toolsource][commands]") {
+    // Two hot ends and nothing that calls itself a changer. SELECT_TOOL exists
+    // only where klipper-toolchanger does, so naming it here would send a
+    // command this printer does not have; T<n> is what Klipper maps to
+    // ACTIVATE_EXTRUDER.
     PrinterDiscovery hw;
     hw.parse_objects(json::array({"extruder", "extruder1", "toolhead"}));
 
     auto cmds = toolchanger_addon::resolve_tool_commands(hw);
-    CHECK_FALSE(cmds.present);
+    REQUIRE(cmds.present);
+    CHECK(cmds.select_prefix == "T");
+    // Only the provider table names an unmount, and no provider claims this
+    // machine: its tool can only be swapped for another.
+    CHECK(cmds.unselect.empty());
+}
+
+// ============================================================================
+// Which -2 readings are faults
+// ============================================================================
+
+TEST_CASE("A swap in flight makes a derived -2 transitional, not a fault",
+          "[toolchanger][toolsource]") {
+    using helix::toolchanger_addon::sensor_error_is_fault;
+
+    // Derived from -2: the controller published no flag of its own.
+    auto derived = read_tool(json{{"medusahc", {{"state", "changing"}, {"current_tool", -2}}}});
+    REQUIRE(derived.has_value());
+    REQUIRE(derived->sensor_error);
+    REQUIRE_FALSE(derived->sensor_error_reported);
+
+    CHECK_FALSE(sensor_error_is_fault(*derived, /*swap_in_flight=*/true));
+    CHECK(sensor_error_is_fault(*derived, /*swap_in_flight=*/false));
+}
+
+TEST_CASE("A published sensor_error is a fault even mid-swap", "[toolchanger][toolsource]") {
+    using helix::toolchanger_addon::sensor_error_is_fault;
+
+    auto flagged = read_tool(json{{"medusahc", {{"sensor_error", true}, {"current_tool", 1}}}});
+    REQUIRE(flagged.has_value());
+    REQUIRE(flagged->sensor_error_reported);
+
+    CHECK(sensor_error_is_fault(*flagged, /*swap_in_flight=*/true));
+    CHECK(sensor_error_is_fault(*flagged, /*swap_in_flight=*/false));
+}
+
+TEST_CASE("A clean reading is never a fault", "[toolchanger][toolsource]") {
+    using helix::toolchanger_addon::sensor_error_is_fault;
+
+    auto clean = read_tool(json{{"medusahc", {{"state", "ready"}, {"current_tool", 1}}}});
+    REQUIRE(clean.has_value());
+    REQUIRE_FALSE(clean->sensor_error);
+
+    CHECK_FALSE(sensor_error_is_fault(*clean, /*swap_in_flight=*/true));
+    CHECK_FALSE(sensor_error_is_fault(*clean, /*swap_in_flight=*/false));
 }

@@ -9,6 +9,7 @@
 #include "operation_timeout_guard.h"
 #include "overlay_base.h"
 #include "save_config_restart.h"
+#include "static_panel_registry.h"
 #include "subject_managed_panel.h"
 #include "z_offset_utils.h"
 
@@ -40,12 +41,8 @@ class PrinterState;
  * ## Usage:
  * ```cpp
  * auto& overlay = get_global_zoffset_cal_panel();
- * if (!overlay.get_root()) {
- *     overlay.init_subjects();
- *     overlay.set_api(get_moonraker_api());
- *     overlay.create(parent_screen);
- * }
- * overlay.show();
+ * overlay.set_api(get_moonraker_api());
+ * overlay.show(parent_screen);
  * ```
  */
 class ZOffsetCalibrationPanel : public OverlayBase {
@@ -63,7 +60,6 @@ class ZOffsetCalibrationPanel : public OverlayBase {
         WARMING    ///< Bed warming before calibration (6)
     };
 
-    ZOffsetCalibrationPanel();
     ~ZOffsetCalibrationPanel() override;
 
     //
@@ -85,6 +81,9 @@ class ZOffsetCalibrationPanel : public OverlayBase {
      * @return Root object of overlay, or nullptr on failure
      */
     lv_obj_t* create(lv_obj_t* parent) override;
+    const char* xml_component() const override {
+        return "calibration_zoffset_panel";
+    }
 
     /**
      * @brief Get human-readable overlay name
@@ -106,24 +105,22 @@ class ZOffsetCalibrationPanel : public OverlayBase {
      *
      * Aborts calibration if in progress.
      */
-    void on_deactivate() override;
+    void on_deactivating(DeactivateReason reason) override;
 
     /**
      * @brief Clean up resources for async-safe destruction
      */
     void cleanup() override;
 
+    /// Freed on close; the next open rebuilds it. The calibration state lives in
+    /// state_ and the zoffset_cal_state subject, never in the widgets.
+    bool destroy_on_close() const override {
+        return true;
+    }
+
     //
     // === Public API ===
     //
-
-    /**
-     * @brief Show overlay panel
-     *
-     * Pushes overlay onto navigation stack and registers with NavigationManager.
-     * on_activate() will be called automatically after animation completes.
-     */
-    void show();
 
     /**
      * @brief Set the IMoonrakerAPI for G-code commands
@@ -155,19 +152,11 @@ class ZOffsetCalibrationPanel : public OverlayBase {
      */
     void on_calibration_result(bool success, const std::string& message);
 
-    // Static trampolines for XML event_cb (must be public for registration)
-    static void on_start_clicked(lv_event_t* e);
-    static void on_z_adjust(lv_event_t* e); ///< Single callback — delta from user_data string
-    static void on_accept_clicked(lv_event_t* e);
-    static void on_abort_clicked(lv_event_t* e);
-    static void on_done_clicked(lv_event_t* e);
-    static void on_retry_clicked(lv_event_t* e);
-    static void on_warm_bed_toggled(lv_event_t* e);
-
   private:
+    void on_ui_destroyed() override;
+
     // API reference
     // Note: overlay_root_ inherited from OverlayBase
-    lv_obj_t* parent_screen_ = nullptr;
     IMoonrakerAPI* api_ = nullptr;
 
     // State management
@@ -223,7 +212,6 @@ class ZOffsetCalibrationPanel : public OverlayBase {
     // Operation timeout guard (PROBING: 180s, SAVING: 30s)
     OperationTimeoutGuard operation_guard_;
     static constexpr uint32_t WARMING_TIMEOUT_MS = 300000; // 5 min for bed to reach temp
-    static constexpr uint32_t PROBING_TIMEOUT_MS = 180000;
     static constexpr uint32_t SAVING_TIMEOUT_MS = 30000;
 
     /// Arm (or re-arm) the SAVING-state timeout.
@@ -258,6 +246,7 @@ class ZOffsetCalibrationPanel : public OverlayBase {
 };
 
 // Global instance accessor
+// Defined out of line: the ESP32 build, which excludes this panel, supplies its own.
 ZOffsetCalibrationPanel& get_global_zoffset_cal_panel();
 
 /**

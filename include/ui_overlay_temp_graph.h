@@ -7,7 +7,9 @@
 #include "ui_heater_icon_binder.h"
 #include "ui_temp_graph.h"
 
+#include "observer_factory.h"
 #include "overlay_base.h"
+#include "static_panel_registry.h"
 #include "temp_graph_controller.h"
 
 #include <memory>
@@ -41,36 +43,46 @@ class TempGraphOverlay : public OverlayBase {
   public:
     enum class Mode { GraphOnly, Nozzle, Bed, Chamber };
 
-    TempGraphOverlay();
     ~TempGraphOverlay() override;
 
     // OverlayBase interface
     void init_subjects() override;
     void register_callbacks() override;
+    const char* xml_component() const override {
+        return "temp_graph_overlay";
+    }
+    /// Freed on close; the next open rebuilds it.
+    bool destroy_on_close() const override {
+        return true;
+    }
     lv_obj_t* create(lv_obj_t* parent) override;
     const char* get_name() const override {
         return "Temperature Graph";
     }
     void on_activate() override;
-    void on_deactivate() override;
+    void on_deactivating(DeactivateReason reason) override;
     void cleanup() override;
+    void on_ui_destroyed() override;
 
     /**
      * @brief Open the overlay in a specific mode
      *
-     * Sets the mode and pushes the overlay via NavigationManager.
-     * Must be called after init_subjects/create on first use.
+     * Sets the mode and shows the overlay (OverlayBase::show).
      *
      * @param mode The display mode (determines which controls are shown)
      * @param parent_screen Parent screen for lazy creation
      */
     void open(Mode mode, lv_obj_t* parent_screen);
 
-    // Static event callbacks (for XML registration)
+  protected:
+    void before_show() override;
+
+  private:
     static void on_temp_graph_preset_clicked(lv_event_t* e);
     static void on_temp_graph_custom_clicked(lv_event_t* e);
 
-  private:
+    friend class TempGraphOverlayTestAccess;
+
     /**
      * @brief Per-series display metadata for chips and UI
      *
@@ -82,11 +94,11 @@ class TempGraphOverlay : public OverlayBase {
         std::string heater_name;  ///< History manager key (e.g., "extruder", "heater_bed")
         std::string klipper_name; ///< Full Klipper object name for API calls
         lv_color_t color{};       ///< Series line color
-        int series_id = -1;       ///< Graph series ID (mapped from controller)
-        bool visible = true;      ///< Current visibility state
-        bool has_target = false;  ///< Whether this heater has a controllable target
-        bool is_dynamic = false;  ///< Dynamic sensor (needs SubjectLifetime)
-        lv_obj_t* chip = nullptr; ///< Toggle chip widget
+        SeriesId series_id = SeriesId::None; ///< Graph series ID (mapped from controller)
+        bool visible = true;                 ///< Current visibility state
+        bool has_target = false;             ///< Whether this heater has a controllable target
+        bool is_dynamic = false;             ///< Dynamic sensor (needs SubjectLifetime)
+        lv_obj_t* chip = nullptr;            ///< Toggle chip widget
     };
 
     // Series management
@@ -109,9 +121,37 @@ class TempGraphOverlay : public OverlayBase {
     // Keypad callback
     static void keypad_value_cb(float value, void* user_data);
 
+    /// Context captured when the custom-entry keypad opens. A nozzle captures
+    /// the klipper name of the extruder the card was displaying, so the send
+    /// still reaches it after the keypad's stacked push deactivates this
+    /// overlay. A member (not function-static) so the overlay owns its life:
+    /// the overlay is a global singleton that outlives the keypad.
+    struct KeypadCtx {
+        TempGraphOverlay* overlay = nullptr;
+        helix::HeaterType type{};
+        std::string klipper_name; ///< Nozzle only; empty for bed/chamber
+    };
+    KeypadCtx keypad_ctx_;
+
     // Extruder selector
     void rebuild_extruder_selector();
     static void on_extruder_selected(lv_event_t* e);
+    /// Record a tool pick from the selector and repoint the card at it.
+    void select_extruder(const std::string& name);
+
+    /// The extruder the nozzle card is displaying: the picked tool while a
+    /// pick is held and still exists, the machine's active tool otherwise.
+    const std::string& displayed_extruder_name() const;
+    /// Point the card's mirror subjects at the displayed extruder and seed
+    /// them; call after any change to the pick, the extruder list, or
+    /// activation state.
+    void repoint_nozzle_card();
+    /// Recompute the card's status glyph + duty from the card temp/target
+    /// mirrors and the displayed extruder's cached heater power.
+    void update_nozzle_card_status();
+    /// Arm the one-per-activation extruder_version watch whose handler calls
+    /// repoint_nozzle_card().
+    void watch_extruder_version();
 
     // Preset helpers
     struct PresetData {
@@ -158,29 +198,69 @@ class TempGraphOverlay : public OverlayBase {
     helix::ui::HeaterIconBinder nozzle_icon_binder_;
     helix::ui::HeaterIconBinder bed_icon_binder_;
     helix::ui::HeaterIconBinder chamber_icon_binder_;
+    helix::ui::HeaterIconBinder chamber_hero_icon_binder_;
 
     // Dependencies (resolved on open)
     helix::PrinterState* printer_state_ = nullptr;
     TemperatureService* temp_control_panel_ = nullptr;
 
-    // Active extruder name (for nozzle mode)
-    std::string active_extruder_name_ = "extruder";
+    // The tool number the nozzle subscript digit shows. Mirrors whichever extruder the
+    // card displays - the picked one while a pick is held, the
+    // machine's active tool otherwise. Bound in on_activate() to ToolState's
+    // active_tool/tools_version pair (the same two subjects ui_ams_tool_text
+    // observes for the badge), unbound in on_deactivating().
+    lv_subject_t nozzle_badge_subject_{};
+    char nozzle_badge_buffer_[16]{};
+    ObserverGuard nozzle_badge_tool_observer_;
+    ObserverGuard nozzle_badge_version_observer_;
+    void publish_nozzle_badge();
+
+    // The extruder the card is displaying, as a VIEW pick (Klipper name; empty
+    // = follow the machine's tool). Distinct from the machine's active
+    // extruder, which other surfaces keep tracking. Survives every
+    // deactivation (the custom-entry keypad stacks on top of this overlay and
+    // its confirm still targets the picked tool); open() drops it, because
+    // opening is the one thing that means a fresh view.
+    std::string picked_extruder_;
+
+    // Mirror of the displayed extruder's decidegree current/target. The card's
+    // temp_display binds these by name (temp_graph_nozzle_temp/target);
+    // repoint_nozzle_card() aims the observers at the picked extruder's own
+    // subjects or, with no pick, at the active-extruder subjects, which
+    // already re-target on every machine toolchange.
+    lv_subject_t nozzle_card_temp_subject_{};
+    lv_subject_t nozzle_card_target_subject_{};
+    // The card's status area (glyph + duty), classified from the mirrors
+    // above plus the displayed extruder's own power. TemperatureService's
+    // nozzle status tracks the MACHINE's tool on purpose, so a card showing a
+    // picked tool computes its own.
+    lv_subject_t nozzle_card_status_state_subject_{};
+    lv_subject_t nozzle_card_status_subject_{};
+    char nozzle_card_status_buffer_[16]{};
+    /// Last power reading (whole percent, -1 unknown) from the displayed
+    /// extruder's power subject.
+    int nozzle_card_power_ = -1;
+    ObserverGuard nozzle_card_temp_observer_;
+    ObserverGuard nozzle_card_target_observer_;
+    ObserverGuard nozzle_card_power_observer_;
+    // Rediscovery bumps extruder_version; the observer repoints so a pick
+    // whose extruder vanished falls back instead of freezing the card. Armed
+    // once per activation by watch_extruder_version(); repoint_nozzle_card()
+    // must not re-arm it, or every queued repoint re-fires itself and the
+    // queue never drains (lv_subject_add_observer notifies on attach, and
+    // observe<int> defers the handler through queue_update).
+    ObserverGuard extruder_version_observer_;
 
     // Subject management
     SubjectManager subjects_;
 
-    // Cached panel for lazy creation
-    lv_obj_t* cached_overlay_ = nullptr;
-
     // Color palette — uses shared TEMP_GRAPH_SERIES_COLORS from temp_graph_controller.h
 };
 
-/**
- * @brief Global instance accessor
- *
- * Creates the overlay on first access and registers cleanup with StaticPanelRegistry.
- */
-TempGraphOverlay& get_global_temp_graph_overlay();
+/// Lazy singleton shared by every entry point that opens the graph.
+inline TempGraphOverlay& get_global_temp_graph_overlay() {
+    return helix::lazy_global<TempGraphOverlay>("TempGraphOverlay");
+}
 
 /**
  * @brief Snapshot of klipper sensor names last visible on the full-screen overlay.

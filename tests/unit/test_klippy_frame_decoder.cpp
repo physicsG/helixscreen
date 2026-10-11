@@ -9,6 +9,8 @@
 
 namespace {
 
+// TEST_MIRROR_OK: collect() gathers decoder output; it shares only its name with Diagnostics
+// collect()
 std::vector<std::string> collect(helix::KlippyFrameDecoder& d, const std::string& chunk) {
     std::vector<std::string> out;
     d.feed(chunk.data(), chunk.size(), [&out](std::string_view f) { out.emplace_back(f); });

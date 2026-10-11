@@ -20,8 +20,8 @@ class TouchCalibrationOverlayTestAccess {
     /// Arm the capture session exactly as show() does: snapshot the stored
     /// calibration into the session backup and disable the affine transform.
     static void begin_session(TouchCalibrationOverlay& o) {
-        if (helix::ICalibrationSink* sink = o.calibration_sink()) {
-            o.session_.begin_capture(*sink);
+        if (helix::ICalibrationSink* sink = o.controller_.sink()) {
+            o.controller_.session().begin_capture(*sink);
         }
     }
 };

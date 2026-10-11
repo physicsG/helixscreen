@@ -6,18 +6,9 @@
  * @brief Regression tests for the 3D tray draw-callback attachment in
  *        ams_detail_update_tray()
  *
- * Two invariants are pinned here:
- *
- * 1. Neither slot_grid nor slot_tray may carry LV_OBJ_FLAG_USER_1. That flag is
- *    ui_dialog's marker for "this subtree is a dialog root" -
- *    ThemeManager::is_on_elevated_surface() walks the parent chain and treats the
- *    first ancestor carrying it as an elevated surface. Using it as a private
- *    "already attached" guard here would silently restyle any input widget placed
- *    inside the slot grid or tray, and burns one of only four app-usable flags.
- *
- * 2. Repeated calls must not accumulate draw callbacks. ams_detail_update_tray()
- *    runs on every panel rebuild; idempotence comes from lv_obj_remove_event_cb()
- *    ahead of lv_obj_add_event_cb(), not from any flag.
+ * ams_detail_update_tray() runs on every panel rebuild, so repeated calls must
+ * not accumulate draw callbacks; idempotence comes from lv_obj_remove_event_cb()
+ * ahead of lv_obj_add_event_cb().
  *
  * tray_back_draw_cb / tray_front_draw_cb have internal linkage in
  * src/ui/ui_ams_detail.cpp, so the test cannot name them. Instead the test builds
@@ -43,10 +34,10 @@
 class AmsDetailTrayFixture : public LVGLTestFixture {
   public:
     AmsDetailTrayFixture() {
-        AmsState::instance().clear_backends();
+        helix::AmsState::instance().clear_backends();
     }
     ~AmsDetailTrayFixture() override {
-        AmsState::instance().clear_backends();
+        helix::AmsState::instance().clear_backends();
     }
 };
 
@@ -81,31 +72,6 @@ lv_event_cb_t event_cb_at(lv_obj_t* obj, uint32_t index) {
 }
 
 } // namespace
-
-TEST_CASE_METHOD(AmsDetailTrayFixture, "ams_detail_update_tray does not squat LV_OBJ_FLAG_USER_1",
-                 "[ams][ui][user_flags]") {
-    AmsDetailWidgets w = make_tray_widgets(test_screen());
-
-    // Precondition: the widgets are clean, so anything observed below came from
-    // ams_detail_update_tray() and not from lv_obj_create().
-    REQUIRE_FALSE(lv_obj_has_flag(w.slot_grid, LV_OBJ_FLAG_USER_1));
-    REQUIRE_FALSE(lv_obj_has_flag(w.slot_tray, LV_OBJ_FLAG_USER_1));
-
-    ams_detail_update_tray(w);
-
-    // USER_1 means "dialog root" (ui_dialog.cpp) and nothing else. If either of
-    // these fires, ThemeManager::is_on_elevated_surface() will report true for
-    // every descendant of the AMS slot grid or tray.
-    CHECK_FALSE(lv_obj_has_flag(w.slot_grid, LV_OBJ_FLAG_USER_1));
-    CHECK_FALSE(lv_obj_has_flag(w.slot_tray, LV_OBJ_FLAG_USER_1));
-
-    // And the flag must stay clear across repeat calls too.
-    ams_detail_update_tray(w);
-    CHECK_FALSE(lv_obj_has_flag(w.slot_grid, LV_OBJ_FLAG_USER_1));
-    CHECK_FALSE(lv_obj_has_flag(w.slot_tray, LV_OBJ_FLAG_USER_1));
-
-    lv_obj_delete(w.root);
-}
 
 TEST_CASE_METHOD(AmsDetailTrayFixture,
                  "ams_detail_update_tray attaches draw callbacks idempotently",

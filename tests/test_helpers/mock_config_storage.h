@@ -5,7 +5,6 @@
 #include "config_storage.h"
 
 #include <optional>
-#include <stdexcept>
 #include <string>
 
 namespace helix::test {
@@ -17,16 +16,18 @@ class MockConfigStorage : public helix::ConfigStorage {
     bool ro = false;
     int store_calls = 0;
     // Simulates "present but unreadable" (e.g. permission denied): load()
-    // throws instead of returning nullopt, matching the real
-    // ConfigStorage::load() contract — see config_storage.h.
+    // reports a read error, matching the real ConfigStorage::load() contract
+    // (config_storage.h).
     bool unreadable = false;
+    bool small = false;
 
     explicit MockConfigStorage(std::optional<std::string> initial = std::nullopt)
         : doc(std::move(initial)) {}
 
-    std::optional<std::string> load() override {
+    std::optional<std::string> load(std::string& read_error) override {
         if (unreadable && doc) {
-            throw std::runtime_error("mock: document present but unreadable");
+            read_error = "mock: document present but unreadable";
+            return std::nullopt;
         }
         return doc;
     }
@@ -47,6 +48,9 @@ class MockConfigStorage : public helix::ConfigStorage {
     }
     std::string describe() const override {
         return "mock://config";
+    }
+    bool small_footprint() const override {
+        return small;
     }
 };
 

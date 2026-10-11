@@ -4,6 +4,7 @@
 #include "helix_plugin_installer.h"
 
 #include "config.h"
+#include "helix_fs.h"
 #include "host_identity.h"
 #include "i_moonraker_api.h"
 #include "lvgl/src/others/translation/lv_translation.h"
@@ -15,7 +16,7 @@
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
-#include <filesystem>
+#include <cstring>
 #include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
@@ -23,6 +24,8 @@
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #endif
+
+namespace hfs = helix::fs;
 
 namespace helix {
 
@@ -139,8 +142,7 @@ bool HelixPluginInstaller::is_local_moonraker() const {
     return is_moonraker_on_same_host(host);
 }
 
-HelixPluginInstaller::SyncInstallResult
-HelixPluginInstaller::install_local_sync(bool enable_phase_tracking) {
+HelixPluginInstaller::SyncInstallResult HelixPluginInstaller::install_local_sync() {
     // NOTE: This method is designed to be called from a background thread.
     // It does NOT use std::function to avoid ARM/glibc static linking issues.
 
@@ -151,14 +153,18 @@ HelixPluginInstaller::install_local_sync(bool enable_phase_tracking) {
 
     std::string script_path = get_install_script_path();
     if (script_path.empty()) {
-        spdlog::warn("[PluginInstaller] Install script not found");
         return {false, lv_tr("Install script not found. Use the remote install command instead.")};
     }
 
     state_.store(PluginInstallState::INSTALLING);
-    spdlog::info("[PluginInstaller] Starting local installation: {} --auto (phase_tracking={})",
-                 script_path, enable_phase_tracking);
+    spdlog::info("[PluginInstaller] Starting local installation: {} --no-restart --auto",
+                 script_path);
 
+    // fork/exec instead of popen(): sh receives the script as a path argument,
+    // not a command string, so nothing inside script_path is interpreted.
+    // Running it through /bin/sh also works when the file has no exec bit:
+    // Moonraker's type:web self-update extracts the release zip with Python's
+    // zipfile, which does not restore unix modes.
     pid_t pid = fork();
 
     if (pid < 0) {
@@ -169,12 +175,9 @@ HelixPluginInstaller::install_local_sync(bool enable_phase_tracking) {
     }
 
     if (pid == 0) {
-        if (enable_phase_tracking) {
-            execl(script_path.c_str(), script_path.c_str(), "--auto", "--with-phase-tracking",
-                  nullptr);
-        } else {
-            execl(script_path.c_str(), script_path.c_str(), "--auto", nullptr);
-        }
+        // --no-restart: NoNewPrivileges keeps the script from sudo; the
+        // caller restarts Moonraker over its API instead.
+        execl("/bin/sh", "sh", script_path.c_str(), "--no-restart", "--auto", nullptr);
         _exit(127);
     }
 
@@ -202,120 +205,41 @@ HelixPluginInstaller::install_local_sync(bool enable_phase_tracking) {
     return {false, lv_tr("Installation failed. Check logs for details.")};
 }
 
-void HelixPluginInstaller::install_local(InstallCallback callback, bool enable_phase_tracking) {
-    // NOTE: Thread safety - this method must be called from the main thread only.
-    // The state_ member is not protected by a mutex for performance reasons.
+namespace {
+// install.sh's --uninstall / --uninstall-auto exit code for "the plugin was
+// removed, but a config file was skipped or failed during the phase-tracking
+// strip" (moonraker-plugin/install.sh, moonraker-plugin/strip_phase_tracking.py).
+constexpr int UNINSTALL_EXIT_NEEDS_ATTENTION = 2;
+} // namespace
 
-    if (!is_local_moonraker()) {
-        spdlog::warn("[PluginInstaller] Cannot auto-install on remote Moonraker");
-        if (callback) {
-            callback(false, lv_tr("Auto-install only works on local Moonraker"));
-        }
-        return;
-    }
-
-    std::string script_path = get_install_script_path();
-    if (script_path.empty()) {
-        spdlog::warn("[PluginInstaller] Install script not found");
-        if (callback) {
-            callback(false,
-                     lv_tr("Install script not found. Use the remote install command instead."));
-        }
-        return;
-    }
-
-    state_.store(PluginInstallState::INSTALLING);
-    spdlog::info("[PluginInstaller] Starting local installation: {} --auto (phase_tracking={})",
-                 script_path, enable_phase_tracking);
-
-    // Use fork/exec instead of popen() to avoid shell command injection.
-    // The script path is passed directly to execl() without shell interpretation.
-    // NOTE: This is a blocking call. For production UI, consider std::async.
-
-    pid_t pid = fork();
-
-    if (pid < 0) {
-        // Fork failed
-        state_.store(PluginInstallState::FAILED);
-        std::string err_msg = strerror(errno);
-        spdlog::error("[PluginInstaller] Fork failed: {}", err_msg);
-        if (callback) {
-            callback(false, lv_tr("Failed to start installer: ") + err_msg);
-        }
-        return;
-    }
-
-    if (pid == 0) {
-        // Child process - execute the script
-        // Note: execl() does NOT go through shell, preventing command injection
-        if (enable_phase_tracking) {
-            execl(script_path.c_str(), script_path.c_str(), "--auto", "--with-phase-tracking",
-                  nullptr);
-        } else {
-            execl(script_path.c_str(), script_path.c_str(), "--auto", nullptr);
-        }
-
-        // If execl returns, it failed
-        _exit(127);
-    }
-
-    // Parent process - wait for child with timeout
-    constexpr int INSTALL_TIMEOUT_SECONDS = 60;
-    WaitResult result = wait_for_child_with_timeout(pid, INSTALL_TIMEOUT_SECONDS, "Installation");
-
-    if (result.timed_out) {
-        state_.store(PluginInstallState::FAILED);
-        if (callback) {
-            callback(false, lv_tr("Installation timed out. The script may be stuck."));
-        }
-        return;
-    }
-
-    if (result.error) {
-        state_.store(PluginInstallState::FAILED);
-        if (callback) {
-            callback(false, lv_tr("Installation failed: ") + result.error_message);
-        }
-        return;
-    }
-
-    if (result.exit_code == 0) {
-        state_.store(PluginInstallState::SUCCESS);
-        spdlog::info("[PluginInstaller] Installation completed successfully");
-        if (callback) {
-            callback(true, lv_tr("Plugin installed successfully. Moonraker is restarting..."));
-        }
-    } else {
-        state_.store(PluginInstallState::FAILED);
-        spdlog::error("[PluginInstaller] Installation failed (exit code {})", result.exit_code);
-        if (callback) {
-            callback(false, lv_tr("Installation failed. Check logs for details."));
-        }
-    }
-}
-
-void HelixPluginInstaller::uninstall_local(InstallCallback callback) {
+void HelixPluginInstaller::uninstall_local(UninstallCallback callback) {
     if (!is_local_moonraker()) {
         spdlog::warn("[PluginInstaller] Cannot auto-uninstall on remote Moonraker");
         if (callback) {
-            callback(false, lv_tr("Auto-uninstall only works on local Moonraker"));
+            callback(UninstallOutcome::FAILED,
+                     lv_tr("Auto-uninstall only works on local Moonraker"));
         }
         return;
     }
 
     std::string script_path = get_install_script_path();
     if (script_path.empty()) {
-        spdlog::warn("[PluginInstaller] Install script not found for uninstall");
         if (callback) {
-            callback(false, lv_tr("Uninstall script not found."));
+            callback(UninstallOutcome::FAILED, lv_tr("Uninstall script not found."));
         }
         return;
     }
 
     state_.store(PluginInstallState::INSTALLING);
-    spdlog::info("[PluginInstaller] Starting local uninstallation: {} --uninstall-auto",
-                 script_path);
+    spdlog::info(
+        "[PluginInstaller] Starting local uninstallation: {} --no-restart --uninstall-auto",
+        script_path);
 
+    // fork/exec instead of popen(): sh receives the script as a path argument,
+    // not a command string, so nothing inside script_path is interpreted.
+    // Running it through /bin/sh also works when the file has no exec bit:
+    // Moonraker's type:web self-update extracts the release zip with Python's
+    // zipfile, which does not restore unix modes.
     pid_t pid = fork();
 
     if (pid < 0) {
@@ -323,13 +247,13 @@ void HelixPluginInstaller::uninstall_local(InstallCallback callback) {
         std::string err_msg = strerror(errno);
         spdlog::error("[PluginInstaller] Fork failed: {}", err_msg);
         if (callback) {
-            callback(false, lv_tr("Failed to start uninstaller: ") + err_msg);
+            callback(UninstallOutcome::FAILED, lv_tr("Failed to start uninstaller: ") + err_msg);
         }
         return;
     }
 
     if (pid == 0) {
-        execl(script_path.c_str(), script_path.c_str(), "--uninstall-auto", nullptr);
+        execl("/bin/sh", "sh", script_path.c_str(), "--no-restart", "--uninstall-auto", nullptr);
         _exit(127);
     }
 
@@ -341,7 +265,8 @@ void HelixPluginInstaller::uninstall_local(InstallCallback callback) {
     if (result.timed_out) {
         state_.store(PluginInstallState::FAILED);
         if (callback) {
-            callback(false, lv_tr("Uninstallation timed out. The script may be stuck."));
+            callback(UninstallOutcome::FAILED,
+                     lv_tr("Uninstallation timed out. The script may be stuck."));
         }
         return;
     }
@@ -349,7 +274,8 @@ void HelixPluginInstaller::uninstall_local(InstallCallback callback) {
     if (result.error) {
         state_.store(PluginInstallState::FAILED);
         if (callback) {
-            callback(false, lv_tr("Uninstallation failed: ") + result.error_message);
+            callback(UninstallOutcome::FAILED,
+                     lv_tr("Uninstallation failed: ") + result.error_message);
         }
         return;
     }
@@ -358,13 +284,24 @@ void HelixPluginInstaller::uninstall_local(InstallCallback callback) {
         state_.store(PluginInstallState::SUCCESS);
         spdlog::info("[PluginInstaller] Uninstallation completed successfully");
         if (callback) {
-            callback(true, lv_tr("Plugin uninstalled successfully."));
+            callback(UninstallOutcome::SUCCESS, lv_tr("Plugin uninstalled successfully."));
+        }
+    } else if (result.exit_code == UNINSTALL_EXIT_NEEDS_ATTENTION) {
+        state_.store(PluginInstallState::NEEDS_ATTENTION);
+        spdlog::warn("[PluginInstaller] Uninstallation removed the plugin but left a config "
+                     "file needing attention (exit code {})",
+                     result.exit_code);
+        if (callback) {
+            callback(UninstallOutcome::NEEDS_ATTENTION,
+                     lv_tr("Plugin removed. A config file needs attention - check the "
+                           "HelixScreen log for details."));
         }
     } else {
         state_.store(PluginInstallState::FAILED);
         spdlog::error("[PluginInstaller] Uninstallation failed (exit code {})", result.exit_code);
         if (callback) {
-            callback(false, lv_tr("Uninstallation failed. Check logs for details."));
+            callback(UninstallOutcome::FAILED,
+                     lv_tr("Uninstallation failed. Check logs for details."));
         }
     }
 }
@@ -383,8 +320,7 @@ std::string HelixPluginInstaller::get_install_script_path() const {
     char path[1024];
     uint32_t size = sizeof(path);
     if (_NSGetExecutablePath(path, &size) == 0) {
-        std::filesystem::path exe_path(path);
-        exe_dir = exe_path.parent_path().string();
+        exe_dir = std::string(hfs::parent_path(path));
     }
 #else
     // Linux: read /proc/self/exe
@@ -392,8 +328,7 @@ std::string HelixPluginInstaller::get_install_script_path() const {
     ssize_t len = readlink("/proc/self/exe", path, sizeof(path) - 1);
     if (len != -1) {
         path[len] = '\0';
-        std::filesystem::path exe_path(path);
-        exe_dir = exe_path.parent_path().string();
+        exe_dir = std::string(hfs::parent_path(path));
     }
 #endif
 
@@ -410,46 +345,37 @@ std::string HelixPluginInstaller::get_install_script_path() const {
         "/usr/share/helix/moonraker-plugin/install.sh"};
 
     for (const auto& candidate : search_paths) {
-        try {
-            std::filesystem::path p(candidate);
-            if (std::filesystem::exists(p)) {
-                // canonical() resolves symlinks and normalizes the path
-                // It can throw filesystem_error if the path doesn't exist or is inaccessible
-                auto canonical_path = std::filesystem::canonical(p);
-
-                // Security check: ensure the resolved path still points to install.sh
-                // This prevents symlink attacks where a malicious symlink points elsewhere
-                if (canonical_path.filename() != "install.sh") {
-                    spdlog::warn("[PluginInstaller] Skipping {} - resolved to unexpected file: {}",
-                                 candidate, canonical_path.string());
-                    continue;
-                }
-
-                // Check if script is executable
-                auto status = std::filesystem::status(canonical_path);
-                auto perms = status.permissions();
-                if ((perms & std::filesystem::perms::owner_exec) == std::filesystem::perms::none) {
-                    spdlog::warn("[PluginInstaller] Script not executable: {}",
-                                 canonical_path.string());
-                    continue;
-                }
-
-                return canonical_path.string();
-            }
-        } catch (const std::filesystem::filesystem_error& e) {
-            spdlog::warn("[PluginInstaller] Failed to resolve {}: {}", candidate, e.what());
+        if (!hfs::exists(candidate)) {
             continue;
         }
+        // canonical() resolves symlinks and normalizes the path; nullopt when
+        // the path is inaccessible
+        auto canonical_path = hfs::canonical(candidate);
+        if (!canonical_path) {
+            spdlog::warn("[PluginInstaller] Failed to resolve {}: {}", candidate,
+                         std::strerror(errno));
+            continue;
+        }
+
+        // Security check: ensure the resolved path still points to install.sh
+        // This prevents symlink attacks where a malicious symlink points elsewhere
+        if (hfs::filename(*canonical_path) != "install.sh") {
+            spdlog::warn("[PluginInstaller] Skipping {} - resolved to unexpected file: {}",
+                         candidate, *canonical_path);
+            continue;
+        }
+
+        // No exec-bit check: the script runs via /bin/sh, and a release
+        // unpacked by Moonraker's zip extractor carries no unix modes.
+        return *canonical_path;
     }
 
+    spdlog::warn("[PluginInstaller] install.sh not found below exe dir {}", exe_dir);
     return "";
 }
 
 bool HelixPluginInstaller::should_prompt_install() const {
     Config* config = Config::get_instance();
-    if (!config) {
-        return false; // Don't prompt if config not available
-    }
 
     // Gate plugin install prompt behind beta_features flag
     if (!config->is_beta_features_enabled()) {
@@ -472,11 +398,9 @@ bool HelixPluginInstaller::should_prompt_install() const {
 
 void HelixPluginInstaller::set_install_declined() {
     Config* config = Config::get_instance();
-    if (config) {
-        config->set<bool>(PREF_INSTALL_DECLINED, true);
-        config->save();
-        spdlog::debug("[PluginInstaller] User declined plugin install prompt");
-    }
+    config->set<bool>(PREF_INSTALL_DECLINED, true);
+    config->save();
+    spdlog::debug("[PluginInstaller] User declined plugin install prompt");
 }
 
 PluginInstallState HelixPluginInstaller::get_state() const {

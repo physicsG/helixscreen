@@ -1,6 +1,6 @@
 # Label Printing
 
-Print spool labels directly from HelixScreen to a compatible thermal label printer. Labels include spool name, material type, color swatch, temperatures, and a QR code linking back to Spoolman.
+Print spool labels directly from HelixScreen to a compatible thermal label printer. On every layout the **spool number** is the first and largest line, so you can identify a spool from across the room without scanning it. Labels also include vendor, material type and color, remaining weight, temperatures, and a QR code linking back to Spoolman.
 
 > **Two ways to print labels:** Most of this guide covers **thermal label printers** — dedicated devices (Brother, Phomemo, Niimbot, MakeID) that print one label at a time onto a roll or tape. If you don't own one, HelixScreen can also print onto **Avery-style sheet labels** using a normal networked office printer (inkjet or laser). See [Office-Printer (Sheet) Labels](#office-printer-sheet-labels) below.
 
@@ -26,7 +26,7 @@ HelixScreen supports five families of label printers:
 
 ### Step 1: Open Label Printer Settings
 
-1. Go to **Settings → Hardware & Devices → Spoolman → Label Printer**
+1. Go to **Settings → Devices → Spoolman → Label Printer**
 2. Tap to open the Label Printer settings overlay
 
 ![Label Printer Settings](../../images/user/settings-label-printer.png)
@@ -65,7 +65,7 @@ Select the label size that matches your loaded label roll:
 
 **Brother QL sizes:** 29mm, 62mm, 29x90mm, and more (300 DPI)
 
-**Brother PT sizes:** 3.5mm, 6mm, 9mm, 12mm, 18mm, 24mm continuous tape (180 DPI). Tape width is **auto-detected** — HelixScreen reads the installed tape cassette and adjusts the label layout automatically. Narrow tapes (≤9mm) use a compact minimal layout.
+**Brother PT sizes:** 3.5mm, 6mm, 9mm, 12mm, 18mm, 24mm continuous tape (180 DPI). Tape width is **auto-detected** — HelixScreen reads the installed tape cassette and adjusts the label layout automatically. Narrow tapes (≤9mm) use a compact minimal layout. The remaining weight always sits on its own line, so a narrow label truncates the weight, never the spool number.
 
 **Phomemo sizes:** 40x30mm, 50x30mm, and more (203 DPI)
 
@@ -81,9 +81,9 @@ Select the label size that matches your loaded label roll:
 
 | Preset | Description |
 |--------|-------------|
-| **Standard** | Full label with spool name, material, color, temps, and QR code |
+| **Standard** | Full label with spool number, vendor, material and color, weight, temps, and QR code |
 | **Compact** | Condensed layout for smaller labels |
-| **QR Only** | A QR code only — no material or color text |
+| **QR Only** | A QR code and the spool number - no material or color text |
 
 ---
 
@@ -106,7 +106,7 @@ This is a completely separate path from the thermal label printers above — you
 
 ### Step 1: Set the Connection Type to Network
 
-1. Go to **Settings → Hardware & Devices → Spoolman → Label Printer**
+1. Go to **Settings → Devices → Spoolman → Label Printer**
 2. Under **Connection Type**, set **Type** to **Network**
 
 ### Step 2: Pick Your Office Printer

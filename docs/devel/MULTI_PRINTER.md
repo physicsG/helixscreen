@@ -10,7 +10,7 @@ Multi-printer management allows users to configure, switch between, add, and del
 
 Key properties:
 
-- **Opt-in via a user setting** -- the navbar printer badge is gated on the `show_printer_switcher` setting (Settings > Printers). The old `<beta_feature>` wrappers around the entry points were removed; the `multi_printer_enabled` subject still exists and reflects whether more than one printer is configured.
+- **Opt-in via a user setting** -- the navbar printer badge is gated on the `show_printer_switcher` setting (Settings > Connection > Printers). Printer count does not gate the badge on its own: `show_printer_switcher` is the single source of truth, and a config migration defaults it off for single-printer setups.
 - **Config schema v4** -- per-printer data lives under `/printers/{id}/`, with `df()` routing dynamically to the active printer
 - **Soft restart** -- switching printers tears down and reinitializes the entire printer state without restarting the application or LVGL display
 
@@ -19,7 +19,8 @@ Key properties:
 | File | Purpose |
 |------|---------|
 | `include/config.h` | Config class: `df()`, CRUD methods, `slugify()`, `CURRENT_CONFIG_VERSION` |
-| `src/system/config.cpp` | Config v4 schema, `migrate_v3_to_v4()`, multi-printer CRUD |
+| `src/system/config.cpp` | Config v4 schema, multi-printer CRUD |
+| `src/system/config_migrations.cpp` | `normalize_versionless_document()` |
 | `include/application.h` | `switch_printer()`, `add_printer_via_wizard()`, `cancel_add_printer_wizard()`, soft restart state |
 | `src/application/application.cpp` | Soft restart lifecycle: `tear_down_printer_state()`, `init_printer_state()` |
 | `include/ui_printer_switch_menu.h` | `PrinterSwitchMenu` context menu (extends `ContextMenu`) |
@@ -29,7 +30,7 @@ Key properties:
 | `src/ui/ui_printer_manager_overlay.cpp` | "Manage Printers" button in Printer Manager overlay |
 | `src/ui/ui_panel_settings.cpp` | "Printers" row in Settings panel |
 | `src/ui/ui_nav_manager.cpp` | Printer badge click handler, switch/add callbacks, `PrinterSwitchMenu` ownership |
-| `include/printer_state.h` | `active_printer_name_`, `multi_printer_enabled_` subjects |
+| `include/printer_state.h` | `active_printer_name_` subject |
 | `src/printer/printer_state.cpp` | Subject initialization and setters |
 | `include/wizard_config_paths.h` | Per-printer vs device-level config path constants |
 | `ui_xml/printer_switch_menu.xml` | Context menu layout (backdrop, printer list, add button) |
@@ -63,7 +64,7 @@ NavigationManager (callback bridge)
   |
   +-- PrinterListOverlay (settings overlay)
   |     Full overlay: switch, add, delete (with confirmation modal)
-  |     Also reachable from Settings > Printers
+  |     Also reachable from Settings > Connection > Printers
   |
   +-- PrinterManagerOverlay (Section 4)
         "Manage Printers" button → opens PrinterListOverlay
@@ -74,8 +75,7 @@ NavigationManager (callback bridge)
 | Subject | Type | Description |
 |---------|------|-------------|
 | `active_printer_name` | string | Human-readable name of the active printer, bound to navbar badge label |
-| `multi_printer_enabled` | int (0/1) | 1 when more than one printer is configured. Reflects printer count. |
-| `show_printer_switcher` | int (0/1) | User setting (Settings > Printers). Controls navbar badge visibility. |
+| `show_printer_switcher` | int (0/1) | User setting (Settings > Connection > Printers). Controls navbar badge visibility. |
 
 The navbar badge is gated on the `show_printer_switcher` setting:
 
@@ -173,7 +173,7 @@ Device-level settings include: WiFi, display, input/touch calibration, language,
 
 ### Migration v3 to v4
 
-`migrate_v3_to_v4()` restructures legacy single-printer configs:
+`normalize_versionless_document()` restructures versionless single-printer configs (the shipped presets):
 
 1. Reads the old `/printer` object
 2. Generates a slug ID from the printer name (e.g., "Voron 2.4" becomes "voron-2-4") via `Config::slugify()`
@@ -247,7 +247,7 @@ Switching printers performs a "soft restart" -- the LVGL display stays alive, bu
 ```
  1. Reinitialize UpdateQueue (before moonraker — background threads need the queue)
  2. Init core subjects (PrinterState, AmsState, etc.)
- 2b. Set multi-printer subjects (active_printer_name, multi_printer_enabled) from config
+ 2b. Seed active_printer_name from config
  3. Init Moonraker (creates client + API + history managers)
  4. Init panel subjects (with API injection + post-init)
  5. Recreate UI (app_layout from XML, wire navigation + printer callbacks)
@@ -255,15 +255,14 @@ Switching printers performs a "soft restart" -- the LVGL display stays alive, bu
  7. Create overlay panels (if not in wizard)
  8. Reload plugins
  9. Connect to new printer's Moonraker
-10. ObserverGuard::revalidate_all() (all old guards cleared, new observers attached)
-    Force full screen refresh
+10. Force full screen refresh
 ```
 
 ### Key Safety Mechanisms
 
 **ScopedFreeze**: During teardown, the update queue is frozen (step 5) to prevent the WebSocket background thread from enqueuing new callbacks between `drain()` and widget destruction. The freeze thaws when it goes out of scope.
 
-**ObserverGuard invalidate/revalidate**: At teardown step 17, `ObserverGuard::invalidate_all()` marks all existing guards as stale. During init, when old guards are reassigned (`guard = observe_*()`), the move-assignment safely releases instead of calling `lv_observer_remove()` on freed observer pointers. After init step 10, `revalidate_all()` re-enables normal guard behavior.
+**ObserverGuard invalidation**: At teardown step 17, `ObserverGuard::invalidate_all()` bumps an epoch that marks every existing guard as stale. During init, when old guards are reassigned (`guard = observe_*()`), the move-assignment safely releases instead of calling `lv_observer_remove()` on freed observer pointers. Guards created after the bump are removed normally, so init needs no closing step.
 
 **Re-entrancy guard**: `m_soft_restart_in_progress` (bool in Application) prevents `switch_printer()`, `add_printer_via_wizard()`, and `cancel_add_printer_wizard()` from being called during an active soft restart.
 
@@ -287,7 +286,7 @@ User taps navbar printer badge
     7. Clear re-entrancy guard
 ```
 
-Alternate path: Settings > Printers > PrinterListOverlay > tap row:
+Alternate path: Settings > Connection > Printers > PrinterListOverlay > tap row:
 
 ```
 PrinterListOverlay::handle_switch_printer()
@@ -356,7 +355,7 @@ PrinterListOverlay → user taps delete icon on a row
     3. If deleted printer was active:
        queue_update → go_back() + trigger_printer_switch(remaining.front())
     4. If deleted printer was inactive:
-       queue_update → update multi_printer_enabled subject + repopulate list
+       queue_update → repopulate list
 ```
 
 `Config::remove_printer()` prevents deleting the last printer:
@@ -372,11 +371,8 @@ if (data["printers"].size() <= 1) {
 
 ## Entry-Point Visibility
 
-The multi-printer entry points are no longer beta-gated. The `<beta_feature>` wrappers
-that once surrounded them have been removed; visibility is now driven by the
-`show_printer_switcher` user setting (toggled from Settings > Printers).
-
-Entry points:
+Visibility is driven by the `show_printer_switcher` user setting (toggled from
+Settings > Connection > Printers). Entry points:
 - **Navbar printer badge** (`nav_printer_badge`) -- gated on the `show_printer_switcher` subject
 - **Printer Manager > Manage Printers** button (`pm_manage_printers_btn`) -- always present in the Printer Manager overlay
 
@@ -428,11 +424,10 @@ Checked at the top of `switch_printer()`, `add_printer_via_wizard()`, and `cance
 
 ### ObserverGuard Lifecycle
 
-During soft restart, observer guards in surviving singletons (not destroyed by `StaticPanelRegistry`) hold freed observer pointers. The invalidate/revalidate protocol handles this:
+During soft restart, observer guards in surviving singletons (not destroyed by `StaticPanelRegistry`) hold freed observer pointers. The invalidation epoch handles this:
 
 1. `ObserverGuard::invalidate_all()` at end of teardown (step 17)
 2. During init, when guards are reassigned (`guard = observe_*()`), `reset()` safely releases instead of calling `lv_observer_remove()` on freed memory
-3. `ObserverGuard::revalidate_all()` at end of init (step 10) restores normal behavior
 
 ---
 
@@ -480,7 +475,7 @@ void MySingleton::init_subjects() {
 
 2. **Implement `deinit_subjects()`** to call `lv_subject_deinit()` on each subject.
 
-3. If your singleton creates ObserverGuards, they will be safely handled by the `invalidate_all()`/`revalidate_all()` protocol during soft restart.
+3. If your singleton creates ObserverGuards, they will be safely handled by the `invalidate_all()` epoch during soft restart.
 
 4. If your singleton is a panel/overlay, register with `StaticPanelRegistry` so it is destroyed during teardown step 14.
 
@@ -488,7 +483,7 @@ void MySingleton::init_subjects() {
 
 In `--test` mode (SDL desktop build), press the **P** key:
 
-- **First press**: Creates a test printer ("Voron 2.4" with ID "voron-24") and enables the `multi_printer_enabled` subject so the navbar badge appears
+- **First press**: Creates a test printer ("Voron 2.4" with ID "voron-24"). The navbar badge appears only if `show_printer_switcher` is on
 - **Subsequent presses**: Cycles through configured printers, triggering a full soft restart each time
 
 This exercises the entire switch_printer flow without needing real hardware.
@@ -516,7 +511,7 @@ The printer list is populated imperatively (not XML-bound) because it is dynamic
 
 ### PrinterListOverlay (Settings Management)
 
-An `OverlayBase` subclass accessed from Settings > Printers or Printer Manager > Manage Printers.
+An `OverlayBase` subclass accessed from Settings > Connection > Printers or Printer Manager > Manage Printers.
 
 ```
 ┌──────────────────────────┐
@@ -539,7 +534,7 @@ The list is repopulated on every `on_activate()` to reflect config changes.
 
 ### PrinterManagerOverlay (Manage Printers Button)
 
-Section 4 of the Printer Manager overlay contains a "Manage Printers" button wrapped in `<beta_feature>`. Clicking it opens the `PrinterListOverlay`.
+Section 4 of the Printer Manager overlay contains a "Manage Printers" button (`pm_manage_printers_btn`). Clicking it opens the `PrinterListOverlay`.
 
 ---
 

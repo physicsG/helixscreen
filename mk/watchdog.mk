@@ -47,7 +47,7 @@ ifneq ($(UNAME_S),Darwin)
     # Linux: may need DRM/input libraries
     ifeq ($(DISPLAY_BACKEND),drm)
         WATCHDOG_LDFLAGS += -ldrm -linput
-        ifeq ($(ENABLE_OPENGLES),yes)
+        ifneq ($(filter yes,$(ENABLE_OPENGLES) $(ENABLE_GLES_3D)),)
             WATCHDOG_LDFLAGS += -lEGL -lGLESv2 -lgbm -ldl
         endif
     endif
@@ -72,7 +72,7 @@ ifdef WATCHDOG_BUILD
 
 # Compile watchdog source (with dependency tracking for header changes)
 # Depends on LIBHV_LIB to ensure libhv headers are installed before compilation
-$(BUILD_DIR)/watchdog/%.o: src/%.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) | $(BUILD_DIR)/watchdog
+$(BUILD_DIR)/watchdog/%.o: src/%.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(ABI_STAMP) | $(BUILD_DIR)/watchdog
 	@echo "[CXX] $< (watchdog)"
 	$(Q)$(CXX) $(WATCHDOG_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
@@ -85,64 +85,91 @@ $(BUILD_DIR)/watchdog/%.o: src/%.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) | $(BUILD
 # (added for #766 -s resolution support). These are small, dependency-free
 # modules that can be linked into watchdog as extra objects.
 WATCHDOG_EXTRA_OBJS := $(BUILD_DIR)/watchdog/config.o \
+                       $(BUILD_DIR)/watchdog/config_migrations.o \
                        $(BUILD_DIR)/watchdog/config_backup.o \
                        $(BUILD_DIR)/watchdog/config_storage_file.o \
                        $(BUILD_DIR)/watchdog/backlight_backend.o \
                        $(BUILD_DIR)/watchdog/data_root_resolver.o \
                        $(BUILD_DIR)/watchdog/helix_paths.o \
+                       $(BUILD_DIR)/watchdog/text_io.o \
+                       $(BUILD_DIR)/watchdog/helix_fs.o \
                        $(BUILD_DIR)/watchdog/logging_init.o \
                        $(BUILD_DIR)/watchdog/platform_capabilities.o \
+                       $(BUILD_DIR)/watchdog/helix_regex.o \
                        $(BUILD_DIR)/watchdog/ui_notification_stub.o \
                        $(BUILD_DIR)/watchdog/drm_mode_matching.o \
                        $(BUILD_DIR)/watchdog/fbdev_size_helper.o \
                        $(BUILD_DIR)/watchdog/pending_startup_warnings.o \
                        $(BUILD_DIR)/watchdog/log_redact.o \
+                       $(BUILD_DIR)/watchdog/platform_info.o \
                        $(BUILD_DIR)/watchdog/helix_lvgl_anomaly_stub.o
 
 # Compile config for watchdog (with HELIX_WATCHDOG to guard get_runtime_config dependency)
-$(BUILD_DIR)/watchdog/config.o: src/system/config.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) | $(BUILD_DIR)/watchdog
+$(BUILD_DIR)/watchdog/config.o: src/system/config.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(ABI_STAMP) | $(BUILD_DIR)/watchdog
+	@echo "[CXX] $< (watchdog)"
+	$(Q)$(CXX) $(WATCHDOG_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
+
+# Compile config_migrations for watchdog (config.cpp runs the migration ladder)
+$(BUILD_DIR)/watchdog/config_migrations.o: src/system/config_migrations.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(ABI_STAMP) | $(BUILD_DIR)/watchdog
 	@echo "[CXX] $< (watchdog)"
 	$(Q)$(CXX) $(WATCHDOG_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # Compile config_backup for watchdog (config.cpp references it)
-$(BUILD_DIR)/watchdog/config_backup.o: src/system/config_backup.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) | $(BUILD_DIR)/watchdog
+$(BUILD_DIR)/watchdog/config_backup.o: src/system/config_backup.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(ABI_STAMP) | $(BUILD_DIR)/watchdog
 	@echo "[CXX] $< (watchdog)"
 	$(Q)$(CXX) $(WATCHDOG_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # Compile config_storage_file for watchdog (config.cpp's default ConfigStorage backend)
-$(BUILD_DIR)/watchdog/config_storage_file.o: src/system/config_storage_file.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) | $(BUILD_DIR)/watchdog
+$(BUILD_DIR)/watchdog/config_storage_file.o: src/system/config_storage_file.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(ABI_STAMP) | $(BUILD_DIR)/watchdog
 	@echo "[CXX] $< (watchdog)"
 	$(Q)$(CXX) $(WATCHDOG_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # Compile backlight backend for watchdog (with HELIX_WATCHDOG to skip runtime_config dependency)
-$(BUILD_DIR)/watchdog/backlight_backend.o: src/api/backlight_backend.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) | $(BUILD_DIR)/watchdog
+$(BUILD_DIR)/watchdog/backlight_backend.o: src/api/backlight_backend.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(ABI_STAMP) | $(BUILD_DIR)/watchdog
 	@echo "[CXX] $< (watchdog)"
 	$(Q)$(CXX) $(WATCHDOG_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # Compile data_root_resolver for watchdog (zero deps; provides writable_path,
 # get_user_config_dir, etc. for HELIX_CONFIG_DIR-aware path resolution)
-$(BUILD_DIR)/watchdog/data_root_resolver.o: src/application/data_root_resolver.cpp | $(BUILD_DIR)/watchdog
+$(BUILD_DIR)/watchdog/data_root_resolver.o: src/application/data_root_resolver.cpp $(ABI_STAMP) | $(BUILD_DIR)/watchdog
 	@echo "[CXX] $< (watchdog)"
 	$(Q)$(CXX) $(WATCHDOG_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # Compile helix_paths for watchdog (pure path primitives; data_root_resolver.cpp
 # calls helix::paths::strip_trailing_slash).
-$(BUILD_DIR)/watchdog/helix_paths.o: src/system/helix_paths.cpp | $(BUILD_DIR)/watchdog
+$(BUILD_DIR)/watchdog/helix_paths.o: src/system/helix_paths.cpp $(ABI_STAMP) | $(BUILD_DIR)/watchdog
 	@echo "[CXX] $< (watchdog)"
 	$(Q)$(CXX) $(WATCHDOG_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
+# Compile text_io for watchdog (config_storage_file.cpp reads and writes through it).
+# Large-file offsets, as in the app build (mk/rules.mk).
+$(BUILD_DIR)/watchdog/text_io.o: src/system/text_io.cpp $(ABI_STAMP) | $(BUILD_DIR)/watchdog
+	@echo "[CXX] $< (watchdog)"
+	$(Q)$(CXX) $(WATCHDOG_CXXFLAGS) -D_FILE_OFFSET_BITS=64 $(DEPFLAGS) -c $< -o $@
+
+# Compile helix_fs for watchdog (config, config_backup, config_storage_file and
+# helix_paths query and copy files through it). Large-file offsets, as text_io.
+$(BUILD_DIR)/watchdog/helix_fs.o: src/system/helix_fs.cpp $(ABI_STAMP) | $(BUILD_DIR)/watchdog
+	@echo "[CXX] $< (watchdog)"
+	$(Q)$(CXX) $(WATCHDOG_CXXFLAGS) -D_FILE_OFFSET_BITS=64 $(DEPFLAGS) -c $< -o $@
+
 # Compile logging_init for watchdog
-$(BUILD_DIR)/watchdog/logging_init.o: src/system/logging_init.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) | $(BUILD_DIR)/watchdog
+$(BUILD_DIR)/watchdog/logging_init.o: src/system/logging_init.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(ABI_STAMP) | $(BUILD_DIR)/watchdog
 	@echo "[CXX] $< (watchdog)"
 	$(Q)$(CXX) $(WATCHDOG_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # logging_init sizes the debug ring from total RAM, so the watchdog links this too.
-$(BUILD_DIR)/watchdog/platform_capabilities.o: src/system/platform_capabilities.cpp | $(BUILD_DIR)/watchdog
+$(BUILD_DIR)/watchdog/platform_capabilities.o: src/system/platform_capabilities.cpp $(ABI_STAMP) | $(BUILD_DIR)/watchdog
+	@echo "[CXX] $< (watchdog)"
+	$(Q)$(CXX) $(WATCHDOG_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
+
+# Regex engine; platform_capabilities.cpp parses /proc/cpuinfo with it.
+$(BUILD_DIR)/watchdog/helix_regex.o: src/system/helix_regex.cpp $(ABI_STAMP) | $(BUILD_DIR)/watchdog
 	@echo "[CXX] $< (watchdog)"
 	$(Q)$(CXX) $(WATCHDOG_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # Compile notification stub for watchdog (with dependency tracking)
-$(BUILD_DIR)/watchdog/ui_notification_stub.o: tools/ui_notification_stub.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) | $(BUILD_DIR)/watchdog
+$(BUILD_DIR)/watchdog/ui_notification_stub.o: tools/ui_notification_stub.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(ABI_STAMP) | $(BUILD_DIR)/watchdog
 	@echo "[CXX] $< (watchdog stub)"
 	$(Q)$(CXX) $(WATCHDOG_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
@@ -151,37 +178,44 @@ $(BUILD_DIR)/watchdog/ui_notification_stub.o: tools/ui_notification_stub.cpp $(L
 # object in that archive becomes a hard link dependency whether or not this binary
 # reaches it. Without this the non-LTO targets (pi, pi32, x86) fail to link while the
 # -flto ones drop the unreachable caller and link clean.
-$(BUILD_DIR)/watchdog/log_redact.o: src/system/log_redact.cpp | $(BUILD_DIR)/watchdog
+$(BUILD_DIR)/watchdog/log_redact.o: src/system/log_redact.cpp $(ABI_STAMP) | $(BUILD_DIR)/watchdog
 	@echo "[CXX] $< (watchdog)"
 	$(Q)$(CXX) $(WATCHDOG_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # No-op stub for helix_lvgl_anomaly() — patched LVGL references it but watchdog
 # has no telemetry pipeline. Real impl lives in src/system/helix_lvgl_anomaly.cpp.
-$(BUILD_DIR)/watchdog/helix_lvgl_anomaly_stub.o: tools/helix_lvgl_anomaly_stub.cpp | $(BUILD_DIR)/watchdog
+$(BUILD_DIR)/watchdog/helix_lvgl_anomaly_stub.o: tools/helix_lvgl_anomaly_stub.cpp $(ABI_STAMP) | $(BUILD_DIR)/watchdog
 	@echo "[CXX] $< (watchdog stub)"
 	$(Q)$(CXX) $(WATCHDOG_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # DRM mode-matching helper (pure, referenced by display_backend_drm.cpp). Added for #766.
-$(BUILD_DIR)/watchdog/drm_mode_matching.o: src/api/drm_mode_matching.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) | $(BUILD_DIR)/watchdog
+$(BUILD_DIR)/watchdog/drm_mode_matching.o: src/api/drm_mode_matching.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(ABI_STAMP) | $(BUILD_DIR)/watchdog
 	@echo "[CXX] $< (watchdog)"
 	$(Q)$(CXX) $(WATCHDOG_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # Fbdev kernel-size helper (pure, referenced by display_backend_fbdev.cpp). Added for #766.
-$(BUILD_DIR)/watchdog/fbdev_size_helper.o: src/api/fbdev_size_helper.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) | $(BUILD_DIR)/watchdog
+$(BUILD_DIR)/watchdog/fbdev_size_helper.o: src/api/fbdev_size_helper.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(ABI_STAMP) | $(BUILD_DIR)/watchdog
 	@echo "[CXX] $< (watchdog)"
 	$(Q)$(CXX) $(WATCHDOG_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # PendingStartupWarnings queue (referenced by both display backends). Added for #766.
-$(BUILD_DIR)/watchdog/pending_startup_warnings.o: src/system/pending_startup_warnings.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) | $(BUILD_DIR)/watchdog
+$(BUILD_DIR)/watchdog/pending_startup_warnings.o: src/system/pending_startup_warnings.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(ABI_STAMP) | $(BUILD_DIR)/watchdog
+	@echo "[CXX] $< (watchdog)"
+	$(Q)$(CXX) $(WATCHDOG_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
+
+# touch_calibration.cpp (in DISPLAY_LIB, linked --whole-archive) picks its
+# default fit via the mod-layout probe on the unified MIPS build, so the probe
+# implementation is a hard link dependency here too. Zero deps beyond spdlog.
+$(BUILD_DIR)/watchdog/platform_info.o: src/system/platform_info.cpp $(ABI_STAMP) | $(BUILD_DIR)/watchdog
 	@echo "[CXX] $< (watchdog)"
 	$(Q)$(CXX) $(WATCHDOG_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # Link watchdog binary
 # Dependencies: watchdog object, display library, LVGL objects (compiled from source), fonts
 # Note: Use --whole-archive for DISPLAY_LIB to prevent LTO from stripping create_auto()
-$(WATCHDOG_BIN): $(WATCHDOG_OBJ) $(DISPLAY_LIB) $(LVGL_OBJS) $(LVGL_OPENGLES_OBJS) $(THORVG_OBJS) $(FONT_OBJS) $(WATCHDOG_EXTRA_OBJS) | $(BUILD_DIR)/bin
+$(WATCHDOG_BIN): $(WATCHDOG_OBJ) $(DISPLAY_LIB) $(LVGL_OBJS) $(LVGL_OPENGLES_OBJS) $(THORVG_OBJS) $(SPDLOG_OBJS) $(FONT_OBJS) $(WATCHDOG_EXTRA_OBJS) | $(BUILD_DIR)/bin
 	@echo "[LD] $@"
-	$(Q)$(CXX) $(WATCHDOG_OBJ) -Wl,--whole-archive $(DISPLAY_LIB) -Wl,--no-whole-archive $(LVGL_OBJS) $(LVGL_OPENGLES_OBJS) $(THORVG_OBJS) $(FONT_OBJS) $(WATCHDOG_EXTRA_OBJS) -o $@ $(WATCHDOG_LDFLAGS)
+	$(Q)$(CXX) $(WATCHDOG_OBJ) -Wl,--whole-archive $(DISPLAY_LIB) -Wl,--no-whole-archive $(LVGL_OBJS) $(LVGL_OPENGLES_OBJS) $(THORVG_OBJS) $(SPDLOG_OBJS) $(FONT_OBJS) $(WATCHDOG_EXTRA_OBJS) -o $@ $(WATCHDOG_LDFLAGS)
 
 # Create build directories
 $(BUILD_DIR)/watchdog:

@@ -25,9 +25,10 @@
  * it now asks is_placed(). The multi-instance "(N Placed)" count gets the same
  * treatment for the same reason.
  *
- * The last test covers the other half: placing such a widget from the catalog
- * while editing a DIFFERENT page must move its entry, not mint a second one
- * with the same ID.
+ * The last two tests cover the other half, placing from the catalog: a widget
+ * whose entry sits on a DIFFERENT page has that entry moved, not a second one
+ * minted with the same ID, and a new multi-instance ID gets an entry whose
+ * config is an object.
  */
 
 #include "ui_breakpoint.h"
@@ -37,6 +38,8 @@
 #include "../lvgl_ui_test_fixture.h"
 #include "../test_fixtures.h"
 #include "../test_helpers/grid_edit_mode_test_access.h"
+#include "../test_helpers/scoped_runtime_config.h"
+#include "../ui_test_utils.h"
 #include "config.h"
 #include "grid_edit_mode.h"
 #include "grid_layout.h"
@@ -417,4 +420,84 @@ TEST_CASE_METHOD(XMLTestFixture, "Catalog placement moves a limbo entry instead 
     // The per-widget config travels with the entry — dropping the old entry
     // must not drop what the user configured on it.
     CHECK(placed->config.value("marker", 0) == 42);
+}
+
+// A minted multi-instance ID names no entry on any page, so placing it creates
+// one. The entry's config reaches the widget's set_config(), which reads it with
+// .value(), and .value() throws on a JSON null: load gives every entry an
+// object, and so must placement.
+TEST_CASE_METHOD(XMLTestFixture,
+                 "Catalog placement of a new instance creates its entry with an object config",
+                 "[widget_catalog][grid_edit]") {
+    lv_subject_t* bp_subj = theme_manager_get_breakpoint_subject();
+    REQUIRE(bp_subj != nullptr);
+    lv_subject_set_int(bp_subj, to_int(UiBreakpoint::Medium));
+
+    const std::string panel_id = "test_catalog_new_instance_place";
+    auto* cfg = Config::get_instance();
+    cfg->set<nlohmann::json>(
+        cfg->df() + "panel_widgets/" + panel_id,
+        nlohmann::json{{"main_page_index", 0},
+                       {"next_page_id", 2},
+                       {"pages", {{{"id", "main"}, {"widgets", nlohmann::json::array()}}}}});
+
+    PanelWidgetConfig config(panel_id, *cfg);
+    config.load();
+    REQUIRE(config.page_count() == 1);
+
+    const std::string instance_id = config.mint_instance_id(MULTI_ID);
+    for (const auto& e : config.page_entries(0)) {
+        REQUIRE(e.id != instance_id);
+    }
+
+    lv_obj_t* container = lv_obj_create(test_screen());
+    lv_obj_set_size(container, 800, 480);
+    lv_obj_remove_flag(container, LV_OBJ_FLAG_SCROLLABLE);
+    process_lvgl(10);
+
+    GridEditMode em;
+    em.enter(container, &config, /*page_index=*/0);
+    GridEditModeTestAccess::place_from_catalog(em, instance_id);
+    em.exit();
+    process_lvgl(10);
+
+    const PanelWidgetEntry* placed = nullptr;
+    for (const auto& e : config.page_entries(0)) {
+        if (e.id == instance_id) {
+            placed = &e;
+        }
+    }
+    INFO("instance id: " << instance_id);
+    REQUIRE(placed != nullptr);
+    CHECK(placed->is_placed());
+    CHECK(placed->config.is_object());
+}
+
+// Crash-loop safe mode shows the default layout and saves nothing, so any
+// layout edit would vanish on the next reload. Edit mode refuses to start, and
+// says why, so neither the catalog nor a rearrange can be reached.
+TEST_CASE_METHOD(XMLTestFixture, "Grid edit: crash-loop safe mode refuses to enter with a toast",
+                 "[widget_catalog][grid_edit][crash_loop]") {
+    ScopedRuntimeConfig scoped_config;
+    get_runtime_config()->crash_loop_safe_mode = true;
+
+    PanelWidgetConfig config("test_catalog_safe_mode", *Config::get_instance());
+    config.load();
+    const auto before = config.page_entries(0);
+
+    lv_obj_t* container = lv_obj_create(test_screen());
+    lv_obj_set_size(container, 800, 480);
+    process_lvgl(10);
+
+    std::vector<ToastSeverity> toasts;
+    helix::ui::set_test_toast_hook(
+        [&](ToastSeverity sev, const std::string&, uint32_t) { toasts.push_back(sev); });
+    GridEditMode em;
+    const bool entered = em.enter(container, &config, /*page_index=*/0);
+    helix::ui::set_test_toast_hook(nullptr);
+
+    CHECK_FALSE(entered);
+    CHECK_FALSE(em.is_active());
+    CHECK(toasts == std::vector<ToastSeverity>{ToastSeverity::WARNING});
+    CHECK(config.page_entries(0) == before);
 }

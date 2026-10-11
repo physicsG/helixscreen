@@ -1,8 +1,25 @@
 diff --git a/cpputil/hthreadpool.h b/cpputil/hthreadpool.h
-index 8df9871..402bd96 100644
+index 8df9871..814e578 100644
 --- a/cpputil/hthreadpool.h
 +++ b/cpputil/hthreadpool.h
-@@ -109,8 +109,16 @@ public:
+@@ -80,7 +80,15 @@ public:
+ 
+     int stop() {
+         if (status == STOP) return -1;
+-        status = STOP;
++        {
++            // PATCH NOTE(helixscreen): publish STOP under task_mutex. A worker
++            // checks its wait predicate holding that mutex; an unlocked store
++            // plus notify can land between the check and the block, and the
++            // lost wakeup leaves the worker asleep for max_idle_time (60s)
++            // while join() below waits on it.
++            std::lock_guard<std::mutex> locker(task_mutex);
++            status = STOP;
++        }
+         task_cond.notify_all();
+         for (auto& i : threads) {
+             if (i.thread->joinable()) {
+@@ -109,8 +117,16 @@ public:
  
      int wait() {
          while (status != STOP) {
@@ -21,7 +38,7 @@ index 8df9871..402bd96 100644
              }
              std::this_thread::yield();
          }
-@@ -127,7 +135,10 @@ public:
+@@ -127,7 +143,10 @@ public:
      template<class Fn, class... Args>
      auto commit(Fn&& fn, Args&&... args) -> std::future<decltype(fn(args...))> {
          if (status == STOP) start();
@@ -33,3 +50,56 @@ index 8df9871..402bd96 100644
              createThread();
          }
          using RetType = decltype(fn(args...));
+@@ -147,8 +166,20 @@ public:
+ 
+ protected:
+     bool createThread() {
+-        if (cur_thread_num >= max_thread_num) return false;
+-        std::thread* thread = new std::thread([this] {
++        // PATCH NOTE(helixscreen): reserve the worker slot under thread_mutex
++        // BEFORE spawning. An unlocked cap check lets concurrent commits both
++        // pass at cur < max and both spawn, running live workers past
++        // max_thread_num (#1585). cur_thread_num counts the reserved worker
++        // from here, so a committer arriving mid-spawn sees the pool's true
++        // size.
++        thread_mutex.lock();
++        if (cur_thread_num >= max_thread_num) {
++            thread_mutex.unlock();
++            return false;
++        }
++        ++cur_thread_num;
++        thread_mutex.unlock();
++        auto worker = [this] {
+             while (status != STOP) {
+                 while (status == PAUSE) {
+                     std::this_thread::yield();
+@@ -177,14 +208,27 @@ protected:
+                     ++idle_thread_num;
+                 }
+             }
+-        });
++        };
++        std::thread* thread = nullptr;
++        try {
++            thread = new std::thread(std::move(worker));
++        } catch (...) {
++            // The reservation must not outlive a spawn that produced no
++            // worker. Answer false like the cap path: commit() ignores the
++            // return and queues the task regardless, and a rethrown EAGAIN
++            // walks out through commit() into LVGL callbacks that have no
++            // handler between (prestonbrown/helixscreen#724).
++            --cur_thread_num;
++            return false;
++        }
+         addThread(thread);
+         return true;
+     }
+ 
+     void addThread(std::thread* thread) {
+         thread_mutex.lock();
+-        ++cur_thread_num;
++        // PATCH NOTE(helixscreen): createThread() reserved cur_thread_num
++        // under this lock before spawning; account only idle here.
+         ++idle_thread_num;
+         ThreadData data;
+         data.thread = std::shared_ptr<std::thread>(thread);

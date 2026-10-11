@@ -5,6 +5,7 @@
 
 #include "ui_heater_config.h"
 #include "ui_heater_icon_binder.h"
+#include "ui_widget_ref.h"
 
 #include "async_lifetime_guard.h"
 #include "panel_widget.h"
@@ -39,8 +40,8 @@ class TempStackWidget : public PanelWidget {
     TemperatureService* temp_control_panel_;
     nlohmann::json config_;
 
-    lv_obj_t* widget_obj_ = nullptr;
-    lv_obj_t* parent_screen_ = nullptr;
+    helix::ui::WidgetRef widget_obj_;
+    helix::ui::WidgetRef parent_screen_;
 
     // Heating icon binders (nozzle/bed/chamber). Each owns its own temperature
     // observers, bound from the narrowest applicable root: widget_obj_ for the

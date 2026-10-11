@@ -10,6 +10,9 @@
 #ifndef HELIX_MAX_FONT_TIER
 #define HELIX_MAX_FONT_TIER 6 // default: all tiers (micro=0 .. xxlarge=6)
 #endif
+#ifndef HELIX_HAS_HIDPI_FONTS
+#define HELIX_HAS_HIDPI_FONTS 0 // conservative: assume the 48/64 faces are not linked
+#endif
 
 namespace helix::system {
 
@@ -20,10 +23,16 @@ struct FontMapping {
 
 // NOTE: xlarge (≥5) and xxlarge (≥6) font entries are guarded with
 // HELIX_MAX_FONT_TIER checks because those font symbols are pruned from the
-// link on constrained platforms (e.g. AD5M ships only medium+large tiers).
-// Taking their address unconditionally would produce undefined references.
+// link on constrained platforms (e.g. AD5M ships only medium+large tiers). The
+// 48/64 regular/bold and 32/40 light faces need a second, narrower guard,
+// HELIX_HAS_HIDPI_FONTS: a platform can reach tier 6 (ESP32 does) while still
+// not linking those high-DPI-only rungs, matching the same flag's use in
+// asset_manager.cpp register_xxlarge_tier_fonts() and
+// ui_wizard_language_chooser.cpp. Taking either guard's faces' address
+// unconditionally would produce undefined references.
 // clang-format off
 static const FontMapping REGULAR_FONTS[] = {
+    {&noto_sans_8, "noto_sans_cjk_8.bin"},
     {&noto_sans_10, "noto_sans_cjk_10.bin"},
     {&noto_sans_11, "noto_sans_cjk_11.bin"},
     {&noto_sans_12, "noto_sans_cjk_12.bin"},
@@ -43,6 +52,13 @@ static const FontMapping REGULAR_FONTS[] = {
 #endif
 #if HELIX_MAX_FONT_TIER >= 6
     {&noto_sans_40, "noto_sans_cjk_40.bin"},
+#if HELIX_HAS_HIDPI_FONTS
+    // 48/64 are the high-DPI scale rungs (DisplayMetrics::scaled_font_name).
+    // A platform that reaches tier 6 without linking them (HELIX_HAS_HIDPI_FONTS=0,
+    // e.g. ESP32) has no compiled symbol to take the address of.
+    {&noto_sans_48, "noto_sans_cjk_48.bin"},
+    {&noto_sans_64, "noto_sans_cjk_64.bin"},
+#endif
 #endif
 };
 
@@ -58,6 +74,11 @@ static const FontMapping BOLD_FONTS[] = {
 #endif
 #if HELIX_MAX_FONT_TIER >= 6
     {&noto_sans_bold_40, "noto_sans_cjk_bold_40.bin"},
+#if HELIX_HAS_HIDPI_FONTS
+    // High-DPI scale rungs; see the noto_sans_48/64 note above.
+    {&noto_sans_bold_48, "noto_sans_cjk_bold_48.bin"},
+    {&noto_sans_bold_64, "noto_sans_cjk_bold_64.bin"},
+#endif
 #endif
 };
 
@@ -79,6 +100,11 @@ static const FontMapping LIGHT_FONTS[] = {
 #endif
 #if HELIX_MAX_FONT_TIER >= 6
     {&noto_sans_light_26, "noto_sans_cjk_light_26.bin"},
+#if HELIX_HAS_HIDPI_FONTS
+    // High-DPI scale rungs; see the noto_sans_48/64 note above.
+    {&noto_sans_light_32, "noto_sans_cjk_light_32.bin"},
+    {&noto_sans_light_40, "noto_sans_cjk_light_40.bin"},
+#endif
 #endif
 };
 // clang-format on

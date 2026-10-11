@@ -47,7 +47,6 @@ std::string probe_key(Config* cfg) {
 TEST_CASE_METHOD(HelixTestFixture, "Config singleton is sandboxed and reset per test",
                  "[config][isolation]") {
     auto* cfg = Config::get_instance();
-    REQUIRE(cfg != nullptr);
 
     SECTION("the singleton persists inside the sandbox, never the repo or $HOME") {
         const std::string path = cfg->get_path();

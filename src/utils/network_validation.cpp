@@ -3,21 +3,13 @@
 
 #include "utils/network_validation.h"
 
+#include "text_io.h"
+
 #include <algorithm>
 #include <cctype>
 
-// Trim leading and trailing whitespace from user input
-static std::string trim(const std::string& s) {
-    auto start =
-        std::find_if_not(s.begin(), s.end(), [](unsigned char c) { return std::isspace(c); });
-    auto end = std::find_if_not(s.rbegin(), s.rend(), [](unsigned char c) {
-                   return std::isspace(c);
-               }).base();
-    return (start < end) ? std::string(start, end) : std::string();
-}
-
 bool is_valid_ip_or_hostname(const std::string& host_raw) {
-    std::string host = trim(host_raw);
+    std::string host(helix::text_io::trim(host_raw));
 
     if (host.empty()) {
         return false;
@@ -83,12 +75,8 @@ bool is_valid_ip_or_hostname(const std::string& host_raw) {
                     return false;
                 }
 
-                try {
-                    int num = std::stoi(segment);
-                    if (num < 0 || num > 255) {
-                        return false;
-                    }
-                } catch (...) {
+                const auto num = helix::text_io::parse_leading<int>(segment);
+                if (!num || *num < 0 || *num > 255) {
                     return false;
                 }
 
@@ -163,7 +151,7 @@ std::string sanitize_port(const std::string& str) {
 }
 
 bool is_valid_port(const std::string& port_str_raw) {
-    std::string port_str = trim(port_str_raw);
+    std::string port_str(helix::text_io::trim(port_str_raw));
 
     if (port_str.empty()) {
         return false;
@@ -183,16 +171,12 @@ bool is_valid_port(const std::string& port_str_raw) {
     }
 
     // Parse and validate range
-    try {
-        int port = std::stoi(port_str);
-        return port > 0 && port <= 65535;
-    } catch (...) {
-        return false;
-    }
+    const auto port = helix::text_io::parse_leading<int>(port_str);
+    return port && *port > 0 && *port <= 65535;
 }
 
 std::string resolve_moonraker_host_default(const std::string& stored_host, bool is_android) {
-    if (!trim(stored_host).empty()) {
+    if (!helix::text_io::trim(stored_host).empty()) {
         return stored_host;
     }
     return is_android ? std::string() : std::string("127.0.0.1");

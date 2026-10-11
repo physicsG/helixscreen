@@ -50,7 +50,7 @@ Pick the row that matches what you want to do. Each links to the doc that will a
 | **Add a new filament backend** (AMS / IFS / CFS / etc.) | → [Filament Management](docs/devel/FILAMENT_MANAGEMENT.md) |
 | **Add support for a new platform** (a new SBC, a new stock firmware) | Open a GitHub Discussion first — these contributions span build system, cross-compile, and deployment. → [Build System](docs/devel/BUILD_SYSTEM.md) |
 | **Write or improve documentation** | → [docs/CLAUDE.md](docs/CLAUDE.md) for the doc structure. User docs in `docs/user/`, developer docs in `docs/devel/`. |
-| **Write a plugin** | → [Plugin Development](docs/devel/PLUGIN_DEVELOPMENT.md) |
+| **Write a Lua plugin** | → [Plugin Development](docs/devel/PLUGIN_DEVELOPMENT.md) |
 | **Propose something bigger** (architectural change, new subsystem) | Open a GitHub Discussion. Align on scope before writing code — it saves rework for both of us. |
 
 If you're unsure where your contribution fits, open a [Discussion](https://github.com/prestonbrown/helixscreen/discussions) or ask on [Discord](https://discord.gg/RZCT2StKhr) before starting.

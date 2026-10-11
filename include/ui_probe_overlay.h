@@ -6,10 +6,13 @@
 #include "ui_modal.h"
 
 #include "klipper_config_editor.h"
+#include "operation_timeout_guard.h"
 #include "overlay_base.h"
+#include "static_panel_registry.h"
 #include "subject_managed_panel.h"
 
 #include <lvgl.h>
+#include <map>
 #include <memory>
 #include <string>
 
@@ -33,9 +36,7 @@ class IMoonrakerAPI;
  * ## Usage:
  * ```cpp
  * ProbeOverlay& overlay = get_global_probe_overlay();
- * overlay.init_subjects();  // Once at startup
- * overlay.create(screen);   // Lazy create
- * overlay.show();           // Opens overlay
+ * overlay.show(screen);  // Creates on first open
  * ```
  */
 class ProbeOverlay : public OverlayBase {
@@ -53,16 +54,16 @@ class ProbeOverlay : public OverlayBase {
     const char* get_name() const override {
         return "Probe";
     }
+    const char* xml_component() const override {
+        return "probe_overlay";
+    }
 
     void on_activate() override;
-    void on_deactivate() override;
-    void cleanup() override;
 
     //
     // === Public API ===
     //
 
-    void show();
     void set_api(IMoonrakerAPI* api);
 
     //
@@ -75,6 +76,18 @@ class ProbeOverlay : public OverlayBase {
 
     /// Show probe accuracy results in a modal
     void show_accuracy_results(const std::string& results_line);
+
+    /// Bound the wait after PROBE_ACCURACY's RPC is lost to the transport
+    ///
+    /// The absorb path keeps the gcode_response handler registered because the
+    /// printer may still be measuring, but nothing else can conclude the run:
+    /// progress advances only on arriving sample lines, and the handler is
+    /// removed only by a results line, an error line, or the next run. Without
+    /// this the modal reports "measuring" for as long as the overlay lives.
+    /// @param handler_name The run this backstop belongs to; a newer run owns
+    ///        the modal and is left alone.
+    /// @param backstop_ms Ceiling to wait, matching the RPC's own budget.
+    void arm_accuracy_backstop(const std::string& handler_name, uint32_t backstop_ms);
 
     /// Close the accuracy results modal
     void handle_accuracy_close();
@@ -185,14 +198,20 @@ class ProbeOverlay : public OverlayBase {
     // Gcode response handler name (for unregistering)
     std::string probe_acc_handler_name_;
 
+    // Ceiling on an absorbed transport loss during PROBE_ACCURACY
+    OperationTimeoutGuard probe_acc_backstop_;
+
     // Config editor
     helix::system::KlipperConfigEditor config_editor_;
     std::string editing_field_key_; // Current field being edited
     std::string probe_section_;     // Config section name (e.g., "probe", "bltouch")
+    // printer.cfg value per config row key; a key absent here is not set in printer.cfg
+    std::map<std::string, std::string> probe_cfg_configured_;
     lv_obj_t* edit_modal_ = nullptr;
 
     // Widget/client references
-    lv_obj_t* parent_screen_ = nullptr;
+    friend struct ProbeOverlayTestAccess;
+
     IMoonrakerAPI* api_ = nullptr;
 
     // Type-specific panel container
@@ -214,8 +233,20 @@ class ProbeOverlay : public OverlayBase {
     std::string get_probe_config_section() const;
 };
 
+namespace helix::ui {
+/// Klipper's value for a [probe]/[bltouch]/[smart_effector] option left out of
+/// printer.cfg. Empty for a key that has no default.
+std::string probe_config_klipper_default(const std::string& key);
+
+/// What a probe config row shows. @p configured is the printer.cfg value,
+/// empty when the option is not set there and Klipper's default applies.
+std::string probe_config_display_value(const std::string& key, const std::string& configured);
+} // namespace helix::ui
+
 // Global instance accessor
-ProbeOverlay& get_global_probe_overlay();
+inline ProbeOverlay& get_global_probe_overlay() {
+    return helix::lazy_global<ProbeOverlay>("ProbeOverlay");
+}
 
 /**
  * @brief Register XML event callbacks for probe overlay
@@ -223,6 +254,12 @@ ProbeOverlay& get_global_probe_overlay();
  * Call once at startup before creating any probe_overlay XML.
  */
 void ui_probe_overlay_register_callbacks();
+
+/// Send a probe command through the API's send gate. False when refused on the
+/// spot (a print holds the machine, or spools are on the bed).
+namespace helix::ui {
+bool probe_send_gcode(const char* gcode, const char* label);
+} // namespace helix::ui
 
 /**
  * @brief Initialize row click callback for opening from Advanced panel

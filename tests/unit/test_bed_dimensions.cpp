@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "../../include/bed_dimensions.h"
+#include "../test_helpers/mock_printer.h"
 #include "moonraker_api_mock.h"
 #include "moonraker_client_mock.h"
 #include "printer_state.h"
@@ -47,10 +48,8 @@ TEST_CASE("bed_dimensions carries a negative origin through for delta beds", "[b
 // a real IMoonrakerAPI so the sentinel-equality bug in bed_dimensions() (not
 // bed_dimensions_from_volume, which is unaffected) actually gets hit.
 TEST_CASE("bed_dimensions preserves origin for a coincidentally-235mm bed", "[bed_dimensions]") {
-    MoonrakerClientMock client(MoonrakerClientMock::PrinterType::VORON_24);
-    PrinterState state;
-    state.init_subjects(false);
-    MoonrakerAPIMock api(client, state);
+    MockPrinter mock_printer;
+    auto& api = mock_printer.api;
 
     BuildVolume vol;
     vol.x_min = -5.0f;

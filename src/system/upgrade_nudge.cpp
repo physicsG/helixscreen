@@ -52,9 +52,6 @@ UpgradeNudge::UpgradeNudge() {
 
 void UpgradeNudge::reload() {
     auto* cfg = Config::get_instance();
-    if (!cfg) {
-        return;
-    }
     std::lock_guard<std::mutex> lock(mu_);
     std::string raw = cfg->get<std::string>(INTENSITY_PTR, std::string("off"));
     intensity_ = parse_intensity(raw);
@@ -85,7 +82,7 @@ bool UpgradeNudge::is_update_visible_now() const {
     // for the same reason, and a user who has just committed to a print is the
     // last person who wants an upgrade prompt. Deliberately normalised: this
     // makes the nudge strictly rarer, never more frequent.
-    const auto lifecycle = get_printer_state().get_print_lifecycle();
+    const auto lifecycle = get_printer_state().print_state().get_print_lifecycle();
     if (job_holds_machine(lifecycle)) {
         return false;
     }
@@ -136,9 +133,6 @@ void UpgradeNudge::dismiss_current_version() {
     }
 
     auto* cfg = Config::get_instance();
-    if (!cfg) {
-        return;
-    }
     cfg->set<std::string>(DISMISSED_VERSION_PTR, available);
     cfg->save();
 

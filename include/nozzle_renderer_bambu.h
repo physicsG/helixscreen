@@ -7,6 +7,8 @@
 
 #include "lvgl/lvgl.h"
 
+#include <optional>
+
 /// @brief Draw Bambu-style metallic gray print head
 ///
 /// Creates a 3D isometric view of a print head with:
@@ -17,7 +19,8 @@
 /// @param layer LVGL draw layer
 /// @param cx Center X position
 /// @param cy Center Y position (center of entire print head)
-/// @param filament_color Color of loaded filament (tints nozzle tip)
+/// @param filament Loaded filament color (tints the nozzle tip), or nullopt when unloaded
 /// @param scale_unit Base scaling unit (typically from theme space_md)
-void draw_nozzle_bambu(lv_layer_t* layer, int32_t cx, int32_t cy, lv_color_t filament_color,
-                       int32_t scale_unit, lv_opa_t opa = LV_OPA_COVER);
+void draw_nozzle_bambu(lv_layer_t* layer, int32_t cx, int32_t cy,
+                       std::optional<lv_color_t> filament, int32_t scale_unit,
+                       lv_opa_t opa = LV_OPA_COVER);

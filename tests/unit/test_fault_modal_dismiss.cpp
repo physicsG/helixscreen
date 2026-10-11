@@ -29,6 +29,7 @@
 #include "ui_update_queue.h"
 
 #include "../test_fixtures.h"
+#include "display_settings_manager.h"
 #include "fault_modal_registry.h"
 #include "moonraker_api.h"
 #include "printer_state.h"
@@ -37,6 +38,8 @@
 
 using helix::KlippyState;
 using helix::ui::dismiss_fault_modals;
+using helix::ui::fault_carrier_showing;
+using helix::ui::set_fault_carrier;
 using helix::ui::track_fault_modal;
 using helix::ui::UpdateQueue;
 
@@ -45,8 +48,7 @@ namespace {
 class FaultModalFixture : public XMLTestFixture {
   public:
     FaultModalFixture() {
-        // modal_configure() silently no-ops without these, leaving the button
-        // captions at their defaults — the app does this at startup.
+        // The app registers the modal callbacks at startup.
         helix::ui::modal_init_subjects();
         REQUIRE(register_component("modal_dialog"));
     }
@@ -193,6 +195,86 @@ TEST_CASE_METHOD(FaultModalFixture, "A swept fault modal leaves an untracked one
     CHECK(std::string(lv_label_get_text(title)) == "Wizard Error");
 }
 
+// One fault, one dialog: a dialog that restates the fault retires the alerts
+// for it and holds new ones back while it is up.
+TEST_CASE_METHOD(FaultModalFixture, "A fault carrier retires the fault alerts it restates",
+                 "[faultmodal][faultcarrier]") {
+    lv_obj_t* alert =
+        raise_fault("Printer Error", "Heater dragonbreath not heating at expected rate");
+    lv_obj_t* carrier =
+        raise_untracked("Klipper Shutdown", "Heater dragonbreath not heating at expected rate");
+    REQUIRE_FALSE(fault_carrier_showing());
+
+    set_fault_carrier(carrier);
+    settle();
+
+    CHECK(ModalStack::instance().backdrop_for(alert) == nullptr);
+    CHECK(helix::ui::tracked_fault_modal_count() == 0);
+    CHECK(Modal::get_top() == carrier);
+    CHECK(fault_carrier_showing());
+
+    Modal::hide(carrier);
+    settle();
+    CHECK_FALSE(fault_carrier_showing());
+}
+
+TEST_CASE_METHOD(FaultModalFixture, "A fault alert raised under a carrier is demoted to a toast",
+                 "[faultmodal][faultcarrier]") {
+    using helix::ui::fault_alert_gets_modal;
+    lv_obj_t* carrier = raise_untracked("Klipper Shutdown", "Heater not heating");
+    set_fault_carrier(carrier);
+
+    CHECK_FALSE(fault_alert_gets_modal(/*modal=*/true, /*fault=*/true));
+    CHECK(fault_alert_gets_modal(/*modal=*/true, /*fault=*/false));
+    CHECK_FALSE(fault_alert_gets_modal(/*modal=*/false, /*fault=*/true));
+
+    // With animations on, the hidden carrier stays on the stack while it
+    // animates out, and a closing carrier already demotes nothing.
+    struct AnimationsOn {
+        bool was = helix::DisplaySettingsManager::instance().get_animations_enabled();
+        AnimationsOn() {
+            helix::DisplaySettingsManager::instance().set_animations_enabled(true);
+        }
+        ~AnimationsOn() {
+            helix::DisplaySettingsManager::instance().set_animations_enabled(was);
+        }
+    } animations_on;
+    Modal::hide(carrier);
+    REQUIRE(ModalStack::instance().backdrop_for(carrier) != nullptr);
+    CHECK(fault_alert_gets_modal(/*modal=*/true, /*fault=*/true));
+    process_lvgl(500);
+    CHECK(ModalStack::instance().backdrop_for(carrier) == nullptr);
+}
+
+TEST_CASE_METHOD(FaultModalFixture, "A carrier that already left the stack is not adopted",
+                 "[faultmodal][faultcarrier]") {
+    lv_obj_t* alert = raise_fault("Printer Error", "Heater not heating");
+    lv_obj_t* gone = raise_untracked("Klipper Shutdown", "Heater not heating");
+    Modal::hide(gone);
+    settle();
+
+    set_fault_carrier(gone);
+    settle();
+
+    CHECK_FALSE(fault_carrier_showing());
+    CHECK(ModalStack::instance().backdrop_for(alert) != nullptr);
+}
+
+TEST_CASE_METHOD(FaultModalFixture, "Clearing the fault carrier leaves fault alerts up",
+                 "[faultmodal][faultcarrier]") {
+    lv_obj_t* carrier = raise_untracked("Klipper Shutdown", "Heater not heating");
+    set_fault_carrier(carrier);
+    raise_fault("Printer Error", "Heater not heating");
+
+    // The carrier stopped restating the fault (its text went generic), so the
+    // alert holds the only copy on screen.
+    set_fault_carrier(nullptr);
+    settle();
+
+    CHECK_FALSE(fault_carrier_showing());
+    CHECK(helix::ui::tracked_fault_modal_count() == 1);
+}
+
 // ============================================================================
 // The wiring: a Klipper READY transition must actually reach the sweep.
 // ============================================================================
@@ -206,6 +288,7 @@ class KlippyRecoveryFixture : public FaultModalFixture {
         estop.init(state(), &api());
         estop.init_subjects();
         estop.create(); // subscribes the klippy_state observer
+        REQUIRE(register_component("klipper_recovery_dialog"));
 
         // Burn the initial-fire guard: production deliberately ignores the
         // first fire, which carries the subject's placeholder value. Burn it
@@ -262,4 +345,145 @@ TEST_CASE_METHOD(KlippyRecoveryFixture, "A fault raised while Klipper stays READ
 
     CHECK(Modal::get_top() != nullptr);
     CHECK(helix::ui::tracked_fault_modal_count() == 1);
+}
+
+TEST_CASE_METHOD(KlippyRecoveryFixture,
+                 "A Klipper shutdown folds its fault alert into the recovery dialog",
+                 "[faultmodal][faultcarrier][recovery]") {
+    state().set_klippy_state_sync(KlippyState::READY);
+    settle();
+    settle();
+
+    const char* reason = "Heater dragonbreath not heating at expected rate, temp: 27.20 "
+                         "target: 60.00";
+    lv_obj_t* alert = raise_fault("Printer Error", reason);
+    REQUIRE(helix::ui::tracked_fault_modal_count() == 1);
+
+    state().network_state().set_klippy_state_message(reason);
+    state().set_klippy_state_sync(KlippyState::SHUTDOWN);
+    settle();
+    settle();
+
+    lv_obj_t* recovery = lv_obj_find_by_name(lv_screen_active(), "klipper_recovery_card");
+    REQUIRE(recovery != nullptr);
+    CHECK(Modal::get_top() == recovery);
+    CHECK(ModalStack::instance().backdrop_for(alert) == nullptr);
+    CHECK(helix::ui::tracked_fault_modal_count() == 0);
+    CHECK(fault_carrier_showing());
+
+    // The recovery dialog is the only modal left.
+    Modal::hide(recovery);
+    settle();
+    CHECK(ModalStack::instance().empty());
+}
+
+TEST_CASE_METHOD(KlippyRecoveryFixture,
+                 "A disconnect under a shutdown dialog keeps the shutdown reason on screen",
+                 "[faultmodal][faultcarrier][recovery]") {
+    state().set_klippy_state_sync(KlippyState::READY);
+    settle();
+    settle();
+
+    raise_fault("Printer Error", "Heater dragonbreath not heating at expected rate");
+    state().network_state().set_klippy_state_message(
+        "Heater dragonbreath not heating at expected rate");
+    state().set_klippy_state_sync(KlippyState::SHUTDOWN);
+    settle();
+    settle();
+    lv_obj_t* recovery = lv_obj_find_by_name(lv_screen_active(), "klipper_recovery_card");
+    REQUIRE(recovery != nullptr);
+    REQUIRE(helix::ui::tracked_fault_modal_count() == 0);
+
+    // The alert it retired is gone, so the reason must survive the upgrade even
+    // though a stale cached message would read as something else.
+    state().network_state().set_klippy_state_message("Printer is ready");
+    EmergencyStopOverlay::instance().show_recovery_for(RecoveryReason::DISCONNECTED);
+    settle();
+    settle();
+
+    lv_obj_t* message = lv_obj_find_by_name(recovery, "recovery_message");
+    REQUIRE(message != nullptr);
+    CHECK(std::string(lv_label_get_text(message)).find("dragonbreath") != std::string::npos);
+    lv_obj_t* restart_row = lv_obj_find_by_name(recovery, "recovery_restart_actions");
+    REQUIRE(restart_row != nullptr);
+    CHECK(lv_obj_has_flag(restart_row, LV_OBJ_FLAG_HIDDEN));
+    CHECK(fault_carrier_showing());
+}
+
+TEST_CASE_METHOD(KlippyRecoveryFixture, "A shutdown with no reason text keeps the fault alert",
+                 "[faultmodal][faultcarrier][recovery]") {
+    state().set_klippy_state_sync(KlippyState::READY);
+    settle();
+    settle();
+
+    raise_fault("Printer Error", "Heater dragonbreath not heating at expected rate");
+
+    // The recovery dialog falls back to generic text, so the alert is the only
+    // place the reason is on screen.
+    state().network_state().set_klippy_state_message("");
+    state().set_klippy_state_sync(KlippyState::SHUTDOWN);
+    settle();
+    settle();
+
+    REQUIRE(lv_obj_find_by_name(lv_screen_active(), "klipper_recovery_card") != nullptr);
+    CHECK(helix::ui::tracked_fault_modal_count() == 1);
+    CHECK_FALSE(fault_carrier_showing());
+}
+
+// ============================================================================
+// The dialog never shows a READY-era state_message under a fault title, in
+// either delivery order of the shutdown edge and the webhooks frame.
+// ============================================================================
+
+namespace {
+
+std::string recovery_message_text() {
+    lv_obj_t* recovery = lv_obj_find_by_name(lv_screen_active(), "klipper_recovery_card");
+    REQUIRE(recovery != nullptr);
+    lv_obj_t* message = lv_obj_find_by_name(recovery, "recovery_message");
+    REQUIRE(message != nullptr);
+    return lv_label_get_text(message);
+}
+
+void apply_webhooks(helix::PrinterState& ps, const char* state, const char* message) {
+    ps.network_state().apply_webhooks({{"state", state}, {"state_message", message}}, 0.0, false,
+                                      std::nullopt);
+}
+
+constexpr const char* kM112Reason = "Shutdown due to M112 command";
+
+} // namespace
+
+TEST_CASE_METHOD(KlippyRecoveryFixture,
+                 "A shutdown edge ahead of its reason shows generic text, then the reason",
+                 "[recovery][state_message][faultmodal]") {
+    apply_webhooks(state(), "ready", "Printer is ready");
+    settle();
+    settle();
+
+    // notify_klippy_shutdown applied before the webhooks frame carrying the reason.
+    state().set_klippy_state_sync(KlippyState::SHUTDOWN);
+    settle();
+    settle();
+    const std::string before = recovery_message_text();
+    CHECK(before.find("Printer is ready") == std::string::npos);
+    CHECK_FALSE(before.empty());
+
+    apply_webhooks(state(), "shutdown", kM112Reason);
+    settle();
+    settle();
+    CHECK(recovery_message_text().find(kM112Reason) != std::string::npos);
+}
+
+TEST_CASE_METHOD(KlippyRecoveryFixture, "A shutdown frame carrying its reason shows the reason",
+                 "[recovery][state_message][faultmodal]") {
+    apply_webhooks(state(), "ready", "Printer is ready");
+    settle();
+    settle();
+
+    apply_webhooks(state(), "shutdown", kM112Reason);
+    state().set_klippy_state_sync(KlippyState::SHUTDOWN);
+    settle();
+    settle();
+    CHECK(recovery_message_text().find(kM112Reason) != std::string::npos);
 }

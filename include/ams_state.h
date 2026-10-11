@@ -6,9 +6,12 @@
 #include "ui_observer_guard.h"
 
 #include "ams_backend.h"
+#include "ams_backend_registry.h"
+#include "ams_runout_grace.h"
 #include "ams_step_operation.h"
 #include "ams_types.h"
 #include "async_lifetime_guard.h"
+#include "buffer_reading.h"
 #include "filament_consumption_tracker.h"
 #include "filament_mapper.h"
 #include "lvgl/lvgl.h"
@@ -21,7 +24,7 @@
 #include <functional>
 #include <map>
 #include <memory>
-#include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -48,8 +51,15 @@ class PrinterDiscovery;
  * 3. Subjects auto-update when backend emits events
  *
  * Thread Safety:
- * All public methods are thread-safe. Subject updates are posted
- * to LVGL's thread via lv_async_call when called from background threads.
+ * Main thread only, checked, except where a method says otherwise. The
+ * exceptions answer from state with its own guard: the backend registry
+ * (backend_count, primary_type, any_filament_batch_in_flight; get_backend
+ * returns a raw pointer and is main-thread only),
+ * RunoutGrace (the unload grace and per-slot unload stamps), the action and
+ * step-operation atomics, and the setters that marshal themselves to the main
+ * thread (set_pending_target_slot, set_active_tool_port_present). An off-main
+ * call aborts under strict UI checks (unit tests, --test) and otherwise logs
+ * and files an "ams_off_main" anomaly once.
  */
 /**
  * @brief Does a pre-print-send backend's SEED follow the persisted auto-color
@@ -114,7 +124,6 @@ class PrinterDiscovery;
  */
 namespace helix {
 inline constexpr bool kPreprintSeedFollowsUserSetting = false;
-} // namespace helix
 
 class AmsState {
   public:
@@ -131,15 +140,15 @@ class AmsState {
      *
      * Per-unit subjects (temperature, humidity, environment indicator) are
      * allocated statically, one set per unit, and registered under
-     * ams_unit_<i>_* / ams_env_ind_<i>_* names. Eight matches the widest rig the
-     * AMS system-path canvas draws, so every unit the path shows also has a
-     * badge to bind.
+     * ams_unit_<i>_* / ams_env_ind_<i>_* names. The cap is AMS_MAX_UNITS, the same
+     * constant that bounds the AMS system-path canvas, so every unit the path
+     * shows also has a badge to bind.
      *
      * A unit past the cap still gets a card; its environment indicator binds the
      * always-off placeholders below instead of names nothing registered — see
      * env_indicator_subject_names().
      */
-    static constexpr int MAX_UNITS = 8;
+    static constexpr int MAX_UNITS = AMS_MAX_UNITS;
 
     /// Always-0 int subject bound by unit cards past MAX_UNITS. Keeps the
     /// environment badge hidden rather than naming a subject that does not exist
@@ -172,6 +181,58 @@ class AmsState {
      * that do not exist and showing unit 0's readings under another unit's name.
      */
     [[nodiscard]] static EnvIndicatorSubjectNames env_indicator_subject_names(int unit_index);
+
+    /// The int subject a unit card binds to say its unit is absent (1) - an
+    /// address gap held for a box that is not on the bus. Past MAX_UNITS it is
+    /// the always-0 placeholder.
+    [[nodiscard]] static std::string unit_absent_subject_name(int unit_index);
+
+    /// The int subject that says a present unit is disconnected (1): on the bus
+    /// map but reported offline (AmsUnit::connected false). An absent unit is
+    /// 0 here; it has its own subject. Past MAX_UNITS, the always-0 placeholder.
+    [[nodiscard]] static std::string unit_disconnected_subject_name(int unit_index);
+
+    /// Name the unit a per-unit view is showing (-1: none), so
+    /// `ams_viewed_unit_disconnected` describes it. Works for any unit index,
+    /// not only those below MAX_UNITS. Main thread only.
+    void set_viewed_unit(int unit_index);
+
+    /// @name Unit paging
+    /// What the overview's unit view shows: which page of how many, and the unit on it.
+    /// Published for its XML as ams_unit_view_active (1 while the unit view is on screen),
+    /// ams_page_count, ams_page_current (0-based), ams_page_has_prev / ams_page_has_next
+    /// (1 only when a neighboring page exists), ams_page_unit_name, ams_page_unit_logo and
+    /// ams_page_has_logo (1 while the shown unit has a logo; XML hides the image on 0).
+    /// Main thread only.
+    /// @{
+    /// @p current is clamped into [0, count - 1]; with no pages everything reads 0.
+    void set_unit_page(int count, int current);
+    /// The shown unit's display name and logo image path (null or empty: no logo).
+    void set_unit_page_header(const std::string& name, const char* logo_path);
+    /// Whether the overview shows its unit view instead of its unit cards.
+    void set_unit_view_active(bool active);
+    lv_subject_t* get_ams_unit_view_active_subject() {
+        return &ams_unit_view_active_;
+    }
+    lv_subject_t* get_ams_page_count_subject() {
+        return &ams_page_count_;
+    }
+    lv_subject_t* get_ams_page_current_subject() {
+        return &ams_page_current_;
+    }
+    lv_subject_t* get_ams_page_has_prev_subject() {
+        return &ams_page_has_prev_;
+    }
+    lv_subject_t* get_ams_page_has_next_subject() {
+        return &ams_page_has_next_;
+    }
+    lv_subject_t* get_ams_page_unit_name_subject() {
+        return &ams_page_unit_name_;
+    }
+    lv_subject_t* get_ams_page_has_logo_subject() {
+        return &ams_page_has_logo_;
+    }
+    /// @}
 
     /// @name Dryer Constants
     /// @{
@@ -281,6 +342,15 @@ class AmsState {
     [[nodiscard]] AmsBackend* get_backend() const;
 
     /**
+     * @brief Type of the primary backend. Safe off the main thread.
+     *
+     * For callers off the main thread: they cannot keep get_backend()'s pointer
+     * past the lock, since clear_backends() frees it.
+     * @return nullopt when no backend is registered
+     */
+    [[nodiscard]] std::optional<AmsType> primary_type() const;
+
+    /**
      * @brief Add a backend to the multi-backend list
      * @param backend Backend instance (ownership transferred)
      * @return Index of the added backend
@@ -299,6 +369,15 @@ class AmsState {
      * @return Number of backends
      */
     [[nodiscard]] int backend_count() const;
+
+    /**
+     * @brief Whether any backend has a filament batch it dispatched and has not
+     *        seen complete
+     *
+     * Safe off the main thread: the registry holds its lock across every
+     * backend it asks, so no pointer outlives clear_backends().
+     */
+    [[nodiscard]] bool any_filament_batch_in_flight() const;
 
     /**
      * @brief Remove and stop all backends
@@ -498,6 +577,12 @@ class AmsState {
         return &ams_data_revision_;
     }
 
+    /// Tick ams_data_revision. Main thread only; call it AFTER the sync it
+    /// announces, so an observer that re-reads the backend sees synced values.
+    void bump_data_revision() {
+        lv_subject_set_int(&ams_data_revision_, lv_subject_get_int(&ams_data_revision_) + 1);
+    }
+
     /**
      * @brief Get active backend subject
      * @return Subject holding index of the currently selected backend
@@ -602,8 +687,8 @@ class AmsState {
      * (currently Snapmaker U1): -1 = none/not-applicable, 0 = Home, 1 = Select,
      * 2 = Heat, 3 = Move (Retract on unload / Feed on load). Synced from
      * AmsSystemInfo::operation_phase in sync_from_backend(). Drives the sidebar
-     * step bar's current step on the Snapmaker backend. Static-lifetime
-     * singleton subject — no SubjectLifetime token needed to observe it.
+     * step bar's current step on the Snapmaker backend. Registered with
+     * subjects_; observe with get_subjects_lifetime().
      *
      * @return Subject holding the operation phase index
      */
@@ -619,7 +704,7 @@ class AmsState {
      * and should be replaced by an indeterminate "Working…" busy state; 0
      * otherwise. Synced from AmsSystemInfo::operation_indeterminate in
      * sync_from_backend() (AD5X IFS drives it; other backends leave it 0).
-     * Static-lifetime singleton subject — no SubjectLifetime token needed.
+     * Registered with subjects_; observe with get_subjects_lifetime().
      *
      * @return Subject holding the indeterminate busy flag (0/1)
      */
@@ -675,7 +760,8 @@ class AmsState {
 
     /**
      * @brief Get current tool text subject
-     * @return Subject holding formatted tool string (e.g., "T0", "T1", or "---")
+     * @return Subject holding the physical position label (e.g., "Lane 2",
+     *         "Slot 1", "Tool 3", or "---")
      */
     lv_subject_t* get_current_tool_text_subject() {
         return &ams_current_tool_text_;
@@ -810,7 +896,7 @@ class AmsState {
      * deinit_subjects() freed.
      */
     [[nodiscard]] SubjectLifetime get_subjects_lifetime() const {
-        return subjects_lifetime_;
+        return subjects_.get_subjects_lifetime();
     }
 
     lv_subject_t* get_tool_map_version_subject() {
@@ -822,7 +908,7 @@ class AmsState {
      *
      * 1 = filament present at the active tool's port/buffer sensor, 0 = absent.
      * The runout dialog observes this to gate Resume on auto-feed backends.
-     * Static-lifetime subject — no SubjectLifetime token needed to observe it.
+     * Registered with subjects_; observe with get_subjects_lifetime().
      *
      * @return Subject holding 1 (present) or 0 (absent)
      */
@@ -854,14 +940,6 @@ class AmsState {
     }
 
     /**
-     * @brief Get path active slot subject
-     * @return Subject holding slot index whose path is being shown (-1=none)
-     */
-    lv_subject_t* get_path_active_slot_subject() {
-        return &path_active_slot_;
-    }
-
-    /**
      * @brief Get path filament segment subject
      *
      * Indicates where the filament currently is along the path.
@@ -870,28 +948,6 @@ class AmsState {
      */
     lv_subject_t* get_path_filament_segment_subject() {
         return &path_filament_segment_;
-    }
-
-    /**
-     * @brief Get path error segment subject
-     *
-     * Indicates which segment has an error (for highlighting).
-     *
-     * @return Subject holding PathSegment enum as int (NONE if no error)
-     */
-    lv_subject_t* get_path_error_segment_subject() {
-        return &path_error_segment_;
-    }
-
-    /**
-     * @brief Get path animation progress subject
-     *
-     * Used for load/unload animations.
-     *
-     * @return Subject holding progress 0-100
-     */
-    lv_subject_t* get_path_anim_progress_subject() {
-        return &path_anim_progress_;
     }
 
     // ========================================================================
@@ -970,29 +1026,6 @@ class AmsState {
         return &dryer_time_text_;
     }
 
-    /**
-     * @brief Get dryer modal temperature text subject
-     * @return Subject holding formatted temp string (e.g., "55°C")
-     */
-    lv_subject_t* get_dryer_modal_temp_text_subject() {
-        return &dryer_modal_temp_text_;
-    }
-
-    /**
-     * @brief Get dryer modal duration text subject
-     * @return Subject holding formatted duration string (e.g., "4h", "4h 30m")
-     */
-    lv_subject_t* get_dryer_modal_duration_text_subject() {
-        return &dryer_modal_duration_text_;
-    }
-
-    /// Get subject for formatted dryer humidity text (e.g., "35%" or "---")
-    [[nodiscard]] lv_subject_t* get_dryer_humidity_text_subject();
-
-    /// Get subject for dryer info bar visibility (1 = show, 0 = hide)
-    /// Shows when dryer_supported OR humidity sensor exists
-    [[nodiscard]] lv_subject_t* get_dryer_info_visible_subject();
-
     /// Select which AMS unit the scalar dryer subjects mirror (the opened unit).
     void set_dryer_mirror_unit(int unit);
 
@@ -1042,9 +1075,91 @@ class AmsState {
     lv_subject_t* get_clog_meter_label_right_subject() {
         return &clog_meter_label_right_;
     }
+    lv_subject_t* get_clog_meter_note_kind_subject() {
+        return &clog_meter_note_kind_;
+    }
+    lv_subject_t* get_clog_meter_note_text_subject() {
+        return &clog_meter_note_text_;
+    }
 
     /**
-     * @brief Set source override for clog meter display
+     * @brief The last minute of one buffer reading, for the trace beside a slider
+     * @param unit Unit position, or -1 for the system-level reading (buffer_reading(info, -1))
+     *
+     * A unit with no reading of its own still has a trace: a sensorless unit
+     * mirrors the system reading, or records a gap (one invalid point) when
+     * there is none. Main thread only.
+     */
+    [[nodiscard]] const BufferTrace& buffer_trace(int unit) const;
+
+    /// The system-level buffer reading (buffer_reading(info, -1)), as the home
+    /// widget and the loaded card bind it. Observe with get_subjects_lifetime().
+    lv_subject_t* get_buffer_present_subject() {
+        return &buffer_present_;
+    }
+    lv_subject_t* get_buffer_slider_subject() {
+        return &buffer_slider_;
+    }
+    lv_subject_t* get_buffer_bias_pct_subject() {
+        return &buffer_bias_pct_;
+    }
+    lv_subject_t* get_buffer_status_subject() {
+        return &buffer_status_;
+    }
+    /// BufferGauge of the reading: 0 two-ended bias, 1 one-sided fill.
+    lv_subject_t* get_buffer_gauge_subject() {
+        return &buffer_gauge_;
+    }
+    /// Pressure 0..100 of a fill reading; 0 for a bias reading.
+    lv_subject_t* get_buffer_value_pct_subject() {
+        return &buffer_value_pct_;
+    }
+    /// Set point 0..100 of a fill reading; -1 without one or for a bias reading.
+    lv_subject_t* get_buffer_target_pct_subject() {
+        return &buffer_target_pct_;
+    }
+    lv_subject_t* get_buffer_label_subject() {
+        return &buffer_label_;
+    }
+    lv_subject_t* get_buffer_value_text_subject() {
+        return &buffer_value_text_;
+    }
+    lv_subject_t* get_buffer_short_text_subject() {
+        return &buffer_short_text_;
+    }
+    lv_subject_t* get_buffer_lean_text_subject() {
+        return &buffer_lean_text_;
+    }
+    lv_subject_t* get_buffer_target_text_subject() {
+        return &buffer_target_text_;
+    }
+    lv_subject_t* get_clog_meter_mode_text_subject() {
+        return &clog_meter_mode_text_;
+    }
+
+    /// One clog-meter sample's subjects, as ClogMeterModel reads them.
+    struct ClogMeterSubjects {
+        lv_subject_t* mode;
+        lv_subject_t* value;
+        lv_subject_t* warning;
+        lv_subject_t* status;
+        lv_subject_t* mode_text;
+        lv_subject_t* danger_pct;
+        lv_subject_t* peak_pct;
+        lv_subject_t* center_text;
+        lv_subject_t* label_left;
+        lv_subject_t* label_right;
+    };
+
+    /**
+     * @brief The subjects the clog meter is published on, as ClogMeterModel reads them
+     *
+     * Observe with get_subjects_lifetime().
+     */
+    [[nodiscard]] ClogMeterSubjects clog_meter_subjects();
+
+    /**
+     * @brief Set source override for the clog meter
      * @param source 0=auto (priority logic), 1=encoder, 2=flowguard, 3=afc
      */
     void set_source_override(int source);
@@ -1178,6 +1293,42 @@ class AmsState {
     [[nodiscard]] lv_subject_t* get_slot_lane_state_subject(int slot_index);
 
     /**
+     * @brief Get per-slot error-flag subject
+     *
+     * 1 when the slot is BLOCKED or carries a SlotError, else 0 - the same
+     * derivation the lane-bar consumers compute from SlotInfo. XML name:
+     * ams_slot_<n>_has_error.
+     *
+     * @param slot_index Slot index (0 to MAX_SLOTS-1)
+     * @return Subject pointer or nullptr if out of range
+     */
+    [[nodiscard]] lv_subject_t* get_slot_has_error_subject(int slot_index);
+
+    /**
+     * @brief Get per-slot error-severity subject
+     *
+     * Holds SlotError::Severity as int; INFO when the slot carries no error.
+     * XML name: ams_slot_<n>_error_severity.
+     *
+     * @param slot_index Slot index (0 to MAX_SLOTS-1)
+     * @return Subject pointer or nullptr if out of range
+     */
+    [[nodiscard]] lv_subject_t* get_slot_error_severity_subject(int slot_index);
+
+    /**
+     * @brief Per-backend lane_state / has_error / error_severity subjects.
+     *
+     * Same token rule as get_slot_fill_subject(int, int, SubjectLifetime&):
+     * observers MUST hold the token for every backend.
+     */
+    [[nodiscard]] lv_subject_t* get_slot_lane_state_subject(int backend_index, int slot_index,
+                                                            SubjectLifetime& lifetime);
+    [[nodiscard]] lv_subject_t* get_slot_has_error_subject(int backend_index, int slot_index,
+                                                           SubjectLifetime& lifetime);
+    [[nodiscard]] lv_subject_t* get_slot_error_severity_subject(int backend_index, int slot_index,
+                                                                SubjectLifetime& lifetime);
+
+    /**
      * @brief Get slot color subject for a specific backend and slot
      *
      * For backend_index 0, delegates to existing flat slot subjects.
@@ -1192,9 +1343,9 @@ class AmsState {
     /**
      * @brief Token'd overload of get_slot_color_subject for observer safety.
      *
-     * For secondary backends the returned subject is DYNAMIC (recreated on
-     * backend rediscovery), so observers MUST hold the lifetime token. For
-     * backend 0 the subject is static and the token is emptied (always-alive).
+     * Observers MUST hold the lifetime token. For secondary backends it dies
+     * when the subject is recreated on backend rediscovery; for backend 0 it
+     * is get_subjects_lifetime(), which dies in deinit_subjects().
      */
     [[nodiscard]] lv_subject_t* get_slot_color_subject(int backend_index, int slot_index,
                                                        SubjectLifetime& lifetime);
@@ -1229,20 +1380,37 @@ class AmsState {
     [[nodiscard]] lv_subject_t* get_slot_remaining_subject(int slot_index);
 
     /**
-     * @brief Get per-slot material-type subject (primary backend).
+     * @brief Get per-slot material-type subject (primary backend's flat array).
      *
      * Holds the last-synced material string ("PLA", "PETG", …, or "" when the
      * lane has no material). Written by the status-sync path; a delta bumps
      * slots_version so the panel's refresh_slots() re-reads the material label
      * even when the color/status did not change (#1065 — native ZMOD AD5X where
      * a type change keeps the same color and previously left the label stale).
-     * Primary backend only; secondary-backend material labels refresh via the
-     * color observer's re-read.
      *
      * @param slot_index Slot index (0 to MAX_SLOTS-1)
      * @return Subject pointer or nullptr if out of range
      */
     [[nodiscard]] lv_subject_t* get_slot_material_subject(int slot_index);
+
+    /**
+     * @brief Get per-slot material-type subject for a specific backend and slot
+     *
+     * For backend_index 0, delegates to the flat slot subjects above.
+     * For secondary backends, returns from per-backend subject storage.
+     *
+     * @param backend_index Backend index (0 = primary)
+     * @param slot_index Slot index within that backend
+     * @return Subject pointer or nullptr if out of range
+     */
+    [[nodiscard]] lv_subject_t* get_slot_material_subject(int backend_index, int slot_index);
+
+    /**
+     * @brief Token'd overload of get_slot_material_subject for observer safety.
+     * @see get_slot_color_subject(int, int, SubjectLifetime&)
+     */
+    [[nodiscard]] lv_subject_t* get_slot_material_subject(int backend_index, int slot_index,
+                                                          SubjectLifetime& lifetime);
 
     /**
      * @brief Get per-slot fill-level subject (primary backend).
@@ -1261,9 +1429,8 @@ class AmsState {
     /**
      * @brief Get per-slot fill-level subject for a specific backend and slot.
      *
-     * For backend 0 the subject is static and the token is emptied. For
-     * secondary backends the subject is DYNAMIC and observers MUST hold the
-     * lifetime token.
+     * Observers MUST hold the lifetime token: get_subjects_lifetime() for
+     * backend 0, the per-backend token for secondary backends.
      * @see get_slot_color_subject(int, int, SubjectLifetime&)
      */
     [[nodiscard]] lv_subject_t* get_slot_fill_subject(int backend_index, int slot_index,
@@ -1275,12 +1442,10 @@ class AmsState {
     //
     // These reflect real-time, Moonraker-fed per-slot state the panel observes
     // to redraw the filament path and active-lane highlight as sensors change.
-    // They are backed by static arrays (singleton lifetime, same as the color /
-    // status / remaining subjects above), so the bare accessors are safe to
-    // observe directly. A (slot, SubjectLifetime&) overload is provided for
-    // call-site symmetry with the project's dynamic-subject pattern; because the
-    // subjects are static, it returns an EMPTY lifetime token (always alive),
-    // which is the documented contract for static subjects (ui_observer_guard.h).
+    // The arrays live in the singleton but are registered with subjects_, so
+    // deinit_subjects() frees their observers like the color / status /
+    // remaining subjects above. Observe through the (slot, SubjectLifetime&)
+    // overload, which hands out get_subjects_lifetime().
 
     /**
      * @brief Get per-slot filament path-segment subject.
@@ -1378,6 +1543,15 @@ class AmsState {
     [[nodiscard]] lv_subject_t* get_env_ind_detail_temp_text_subject() {
         return &env_ind_detail_temp_text_;
     }
+    [[nodiscard]] lv_subject_t* get_env_ind_detail_humidity_text_subject() {
+        return &env_ind_detail_humidity_text_;
+    }
+
+    /// Bumps whenever the set of units with a running dryer changes. The unit view's
+    /// off-page stubs read it: a unit on another page has no subject of its own to watch.
+    [[nodiscard]] lv_subject_t* get_units_dryer_version_subject() {
+        return &ams_units_dryer_version_;
+    }
 
     // ========================================================================
     // Direct State Update (called by backend event handler)
@@ -1448,6 +1622,10 @@ class AmsState {
      */
     void sync_current_loaded_from_backend(const AmsSystemInfo& primary_info);
 
+    /// Writes the "Current: ..." header for @p slot_index on @p backend, with
+    /// the unit name on multi-unit systems.
+    void set_current_slot_header(AmsBackend& backend, int slot_index);
+
     /**
      * @brief Set action detail text directly (for UI-managed states)
      *
@@ -1459,10 +1637,19 @@ class AmsState {
     void set_action_detail(const std::string& detail);
 
     /**
-     * @brief Get external spool info from persistent storage
+     * @brief Get external spool info, resolved through the bypass lane
+     *
+     * The stored record is the binding; what the sources say about the bound
+     * spool (the Spoolman poll's record, the consumption meter, the user's
+     * edits) is layered on via resolve(BYPASS_LANE_ID) before returning.
      * @return SlotInfo or nullopt if not set
      */
     std::optional<SlotInfo> get_external_spool_info() const;
+
+    /// The stored record with no lane resolution: in-memory override, else
+    /// SettingsManager. The poll's stale guard and the edit diff compare
+    /// against this raw binding, not the resolved view.
+    std::optional<SlotInfo> raw_external_spool_info() const;
 
     /**
      * @brief Set external spool info and update color subject
@@ -1493,10 +1680,30 @@ class AmsState {
      *    manages_active_spool() by design: matches the previous overlay
      *    semantics (see spec § follow-ups for the SET-arm gating question).
      * 2. S6: invalidate the old spool's identity cache when the link changed.
-     * 3. S3: backend->set_slot_info() (firmware SET_SPOOL_ID gcode rides inside).
+     * 3. S3: backend->commit_user_edit() (firmware SET_SPOOL_ID gcode rides inside
+     *    its apply_user_edit()).
      * 4. S4+S7: sync_from_backend().
      *
-     * @return the AmsError from set_slot_info so callers keep their error toasts.
+     * This is the method layer: it performs the edit against every backing
+     * store. It also calls the declaration layer,
+     * helix::ams::commit_slot_edit() (lane_source_store.h), once the backend
+     * has applied the edit, recording the user's authorship as a lane source
+     * record. The user's declaration is computed once, from @p original and
+     * @p info, and the backend records its stored authorship from that same
+     * answer. Every backend paints its slots from the lane model through
+     * AmsBackend::apply_resolved_lane(), so that record is what the lane shows
+     * for each field the user declared. Once it is filed, the backend repaints
+     * the slot (AmsBackend::repaint_slot_from_lane()), so a backend that paints
+     * while applying the edit shows the new declaration at once.
+     *
+     * @param slot_index a global slot index on the primary backend. A slot
+     *        outside that backend's lane block derives no lane id, and the
+     *        declaration layer drops it rather than filing the edit on a
+     *        neighbouring backend's lane. The edit itself still runs.
+     *
+     * @return the AmsError from apply_user_edit so callers keep their error toasts.
+     *         An error the backend marks AmsError::partially_applied still
+     *         files what it applied.
      */
     AmsError commit_slot_edit(int slot_index, const SlotInfo& original, const SlotInfo& info);
 
@@ -1537,6 +1744,23 @@ class AmsState {
      * @param action The action state to set
      */
     void set_action(AmsAction action);
+
+    /**
+     * @brief Keep the current action through backend silence for up to @p budget
+     *
+     * For a UI-started operation on a backend that publishes nothing until its
+     * firmware starts: while held, a sync that finds the backend IDLE leaves the
+     * current action alone. The first busy action the backend reports takes over
+     * and ends the hold, so its own IDLE at the end then resolves the operation.
+     * Calling again restarts the budget. Main thread only.
+     */
+    void hold_optimistic_action(std::chrono::milliseconds budget);
+
+    /// @brief End a hold_optimistic_action() early; the next sync copies the backend.
+    void release_optimistic_action();
+
+    /// @brief Whether a hold_optimistic_action() is in force. Main thread only.
+    [[nodiscard]] bool optimistic_action_held() const;
 
     /// @brief Subject holding the current toolchange narration phase index (-1 = none).
     lv_subject_t* get_toolchange_step_subject() {
@@ -1615,7 +1839,7 @@ class AmsState {
      *
      * @param slot_index Slot index (0 to MAX_SLOTS-1)
      * @return true if mark_slot_unloaded(slot_index) was called within the last
-     *         RECENT_UNLOAD_GRACE window
+     *         RunoutGrace::WINDOW
      */
     bool was_slot_recently_unloaded(int slot_index) const;
 
@@ -1634,10 +1858,16 @@ class AmsState {
     void notify_external_spool_changed(const SlotInfo& info);
 
     /** @brief Set "Currently Loaded" subjects to default/empty state with guards */
-    void set_current_loaded_defaults();
+    void set_current_loaded_defaults(bool write_header = true);
 
     /** @brief Sync clog detection meter subjects from system info */
     void sync_clog_meter_from_info(const AmsSystemInfo& info);
+
+    /** @brief Publish the system-level buffer reading and note every reading in its trace */
+    void sync_buffer_from_info(const AmsSystemInfo& info, int64_t now_ms);
+
+    /** @brief Write one reading onto the buffer_* subjects */
+    void publish_buffer_reading(const BufferReading& r);
 
     /**
      * @brief Sync the endless-spool status subjects from a backend's capabilities.
@@ -1662,6 +1892,42 @@ class AmsState {
      * @param data Event data
      */
     void on_backend_event(int backend_index, const std::string& event, const std::string& data);
+
+    /// @name sync_from_backend() steps, in the order it runs them. Main thread
+    /// only; @p backend is the primary backend and never null.
+    /// @{
+    /// Type, action, operation phase, system name and logo, current slot/tool.
+    /// Every backend-derived subject back to its init_subjects() value.
+    void reset_backend_subjects();
+    void sync_system_subjects(const AmsSystemInfo& info);
+    /// Push or drop the AMS tool topology in ToolState.
+    void sync_tool_topology(AmsBackend* backend);
+    /// filament_loaded, the runout indicator's edge state, and the unload grace.
+    void sync_filament_runout(const AmsSystemInfo& info);
+    /// The bypass subjects, the bypass edge, and the external spool subjects.
+    void sync_bypass(AmsBackend* backend, const AmsSystemInfo& info);
+    /// Bump tool_map_version when the physical or applied routing moved.
+    void sync_tool_routing(AmsBackend* backend, const AmsSystemInfo& info);
+    /// The slot <-> ToolState spool bridge, both directions, and its save.
+    /// @return true when a slot subject changed
+    bool sync_tool_spools(AmsBackend* backend, const AmsSystemInfo& info);
+    /// Per-unit temperature, humidity and environment-indicator subjects.
+    void sync_unit_environment(AmsBackend* backend, const AmsSystemInfo& info);
+    /// Reset the slot subjects past @p total_slots.
+    /// @return true when a slot subject changed
+    bool clear_unused_slot_subjects(int total_slots);
+    /// @}
+
+    /**
+     * @brief Write one primary-backend slot's per-slot subjects from @p slot
+     *
+     * The one per-slot derivation, shared by sync_from_backend() and
+     * update_slot(). Main thread only.
+     *
+     * @return true when a value refresh_slots() re-reads changed, so the caller
+     *         owes a slots_version bump
+     */
+    bool write_slot_subjects(AmsBackend& backend, int slot_index, const SlotInfo& slot);
 
     /**
      * @brief Probe for ACE via REST endpoint
@@ -1689,7 +1955,15 @@ class AmsState {
     struct BackendSlotSubjects {
         std::vector<lv_subject_t> colors;
         std::vector<lv_subject_t> statuses;
-        std::vector<lv_subject_t> fills; // int: fill percent 0-100, -1 = unknown
+        std::vector<lv_subject_t> fills;       // int: fill percent 0-100, -1 = unknown
+        std::vector<lv_subject_t> lane_states; // int: helix::ui::LaneState
+        std::vector<lv_subject_t> has_errors;
+        std::vector<lv_subject_t> severities; // int: SlotError::Severity
+        /// Material strings need storage the subject points into; same size as
+        /// slot_materials_buf_ ("PETG-CF" etc. fits comfortably).
+        static constexpr int MATERIAL_BUF_SIZE = 24;
+        std::vector<lv_subject_t> materials; // string: "PLA", "PETG", … or ""
+        std::vector<std::array<char, MATERIAL_BUF_SIZE>> material_bufs;
         int slot_count = 0;
         /// Lifetime token shared by every subject in this struct. These subjects
         /// are DYNAMIC (destroyed in deinit() on backend rediscovery), so any
@@ -1698,20 +1972,31 @@ class AmsState {
         SubjectLifetime lifetime;
         void init(int count);
         void deinit();
+        /// Write every per-slot subject for slot @p i from @p slot.
+        void write(int i, const SlotInfo& slot);
     };
 
-    mutable std::recursive_mutex mutex_;
-    std::vector<std::unique_ptr<AmsBackend>> backends_;
+    /// Secondary-backend subject from @p member, or @p primary's slot for
+    /// backend 0, with the lifetime token set accordingly. Every per-backend
+    /// slot getter resolves through here.
+    lv_subject_t* backend_slot_subject(int backend_index, int slot_index, SubjectLifetime& lifetime,
+                                       std::vector<lv_subject_t> BackendSlotSubjects::*member,
+                                       lv_subject_t (&primary)[MAX_SLOTS]);
+
+    AmsBackendRegistry registry_;
     std::vector<BackendSlotSubjects> secondary_slot_subjects_;
-    /// FilamentConsumptionTracker sink handles, keyed by backend index. One
-    /// AmsSlotSink per slot is registered when a backend is added and removed
-    /// in clear_backends().
-    std::map<int, std::vector<helix::FilamentConsumptionTracker::SinkHandle>> consumption_sinks_;
     bool initialized_ = false;
 
     // Moonraker API for Spoolman integration
     IMoonrakerAPI* api_ = nullptr;
     int last_synced_spoolman_id_ = 0; ///< Track to avoid duplicate set_active_spool calls
+
+    /// Resolved (slot, loaded) identity behind the "Currently Loaded" card.
+    /// Backend status frames arrive several times a second and each one re-runs
+    /// sync_current_loaded_from_backend(), so only a change of this pair is
+    /// worth a log line.
+    int last_synced_loaded_slot_ = -1;
+    bool last_synced_filament_loaded_ = false;
 
     /// S5+S7 store subset shared by both commit_external_spool_edit arms:
     /// persist non-empty records, erase empty ones (kills empty
@@ -1725,10 +2010,6 @@ class AmsState {
 
     // Subject manager for automatic cleanup
     SubjectManager subjects_;
-    /// See get_subjects_lifetime(). Created with the object and REPLACED (never
-    /// nulled) by deinit_subjects(): an empty token reads as "dead" and would
-    /// suppress removal for live observers.
-    SubjectLifetime subjects_lifetime_ = std::make_shared<bool>(true);
 
     /// Expires the setters that marshal themselves to the main thread. Declared
     /// after `subjects_` so reverse-order member destruction invalidates it
@@ -1738,23 +2019,28 @@ class AmsState {
     helix::AsyncLifetimeGuard async_lifetime_;
 
     // Backend selector subjects
-    lv_subject_t backend_count_;
-    lv_subject_t active_backend_;
-    lv_subject_t ams_data_revision_;
+    lv_subject_t backend_count_{};
+    lv_subject_t active_backend_{};
+    lv_subject_t ams_data_revision_{};
 
     // System-level subjects
-    lv_subject_t ams_type_;
-    lv_subject_t ams_is_tool_changer_;
-    lv_subject_t ams_is_filament_system_;
-    lv_subject_t ams_action_;
+    lv_subject_t ams_type_{};
+    lv_subject_t ams_is_tool_changer_{};
+    lv_subject_t ams_is_filament_system_{};
+    lv_subject_t ams_action_{};
+    /// Copy of ams_action_ for readers off the main thread. Every write to the
+    /// subject updates it.
+    std::atomic<AmsAction> action_mirror_{AmsAction::IDLE};
+    /// Deadline of the hold_optimistic_action() in force. Main thread only.
+    std::optional<std::chrono::steady_clock::time_point> optimistic_action_until_;
     /// Granular load/unload sub-phase (-1=none, 0=Home, 1=Select, 2=Heat,
-    /// 3=Move). Snapmaker U1 only; static-lifetime singleton subject.
-    lv_subject_t ams_operation_phase_;
+    /// 3=Move). Snapmaker U1 only; registered with subjects_.
+    lv_subject_t ams_operation_phase_{};
     /// 1 while an active op's phase-progress feed has stalled (~8s) so the frozen
     /// live-temp number should read as "Working…"; 0 otherwise. AD5X IFS only.
-    /// Static-lifetime singleton subject.
-    lv_subject_t ams_operation_indeterminate_;
-    lv_subject_t toolchange_step_; ///< current narration phase index (-1 = none/idle)
+    /// Registered with subjects_.
+    lv_subject_t ams_operation_indeterminate_{};
+    lv_subject_t toolchange_step_{}; ///< current narration phase index (-1 = none/idle)
     /// Active toolchange operation for the narration router to resolve a phase
     /// index without a sidebar pointer. Defaults to a swap (most common case).
     std::atomic<StepOperationType> active_step_operation_{StepOperationType::LOAD_SWAP};
@@ -1762,18 +2048,18 @@ class AmsState {
     /// toolchange_step_ against firmware that narrates one phase more than once
     /// per operation (AFC wipes before AND after the kick). -1 = no phase yet.
     int narration_phase_high_water_{-1};
-    lv_subject_t current_slot_;
-    lv_subject_t pending_target_slot_;
-    lv_subject_t ams_current_tool_;
-    lv_subject_t filament_loaded_;
-    lv_subject_t filament_runout_;
+    lv_subject_t current_slot_{};
+    lv_subject_t pending_target_slot_{};
+    lv_subject_t ams_current_tool_{};
+    lv_subject_t filament_loaded_{};
+    lv_subject_t filament_runout_{};
     /// Edge tracking behind `ams_filament_runout`. `AmsSystemInfo::filament_runout`
     /// is a LEVEL on some backends and a sticky latch on at least one (the CFS
     /// mirrors `box.filament_useup`, which is only ever cleared by a successful
     /// extrude, not by the print ending), so the level alone cannot say whether a
     /// runout happened during THIS job. sync_from_backend() therefore looks for a
     /// false->true transition seen while a job was running, not for the level.
-    /// All three are written only under mutex_ and reset by clear_backends().
+    /// All three are main-thread state, reset by clear_backends().
     ///
     /// Last raw level, for edge detection.
     bool prev_backend_runout_{false};
@@ -1791,44 +2077,33 @@ class AmsState {
     /// slot-delta scan notices it, and the pre-print filament check would keep
     /// serving a stale result.
     bool last_bypass_active_{false};
-    /// How long after an unload completes its removal edge is still credited to
-    /// that unload. Same 30s window as RECENT_UNLOAD_GRACE below and as the
-    /// AD5X IFS runout suppression: past it, an empty sensor is a real runout.
-    static constexpr std::chrono::seconds POST_UNLOAD_RUNOUT_GRACE{30};
-    /// One-shot: an unload completed and its removal edge has not arrived yet.
-    bool post_unload_runout_grace_{false};
-    /// When post_unload_runout_grace_ was armed. Without it the flag has no time
-    /// bound, and an unload that leaves nothing loaded never reaches the
-    /// filament-back retirement — the next genuine idle runout, days later,
-    /// would be swallowed.
-    std::chrono::steady_clock::time_point post_unload_runout_grace_at_{};
-    /// Whether the operation currently in flight has passed through UNLOADING.
-    bool saw_unload_in_op_{false};
+    /// Unload grace and per-slot unload stamps, behind their own leaf mutex.
+    RunoutGrace runout_grace_;
     /// prev_backend_runout_ has no meaning yet, so the first sample seeds it
     /// instead of counting as an edge — a flag that was already true when we
     /// connected (or when a backend was swapped in) describes no transition we
     /// witnessed. Same reasoning as AmsBackendAd5xIfs's head-switch edge gate.
     bool runout_level_seeded_{false};
-    lv_subject_t bypass_active_;
-    lv_subject_t external_spool_color_;
+    lv_subject_t bypass_active_{};
+    lv_subject_t external_spool_color_{};
     /// External spool material name — string flavor of external_spool_color_.
     /// Pure reflector of get_external_spool_info(); mirrors the color subject's
     /// update sites so XML text bindings stay in lockstep with the color dot.
-    lv_subject_t external_spool_material_;
+    lv_subject_t external_spool_material_{};
     char external_spool_material_buf_[32]; // "PLA", "PETG-CF", ... fits comfortably
-    lv_subject_t supports_bypass_;
-    lv_subject_t ams_slot_count_;
-    lv_subject_t ams_cards_compact_;
-    lv_subject_t slots_version_;
-    lv_subject_t tool_map_version_;
+    lv_subject_t supports_bypass_{};
+    lv_subject_t ams_slot_count_{};
+    lv_subject_t ams_cards_compact_{};
+    lv_subject_t slots_version_{};
+    lv_subject_t tool_map_version_{};
     /// First-gate (port) filament-present flag for the ACTIVE tool (#991).
     /// 1 = filament present at the active tool's port/buffer sensor, 0 = absent.
     /// Auto-feed backends (Snapmaker U1) update this from the port sensor — NOT
     /// the toolhead motion sensor — so the runout dialog can gate Resume on the
-    /// signal that flips true the moment a fresh spool is re-fed. Static-lifetime
-    /// singleton subject (no SubjectLifetime token needed). Defaults to 1 so
-    /// non-auto-feed / unknown backends never gate Resume.
-    lv_subject_t active_tool_port_present_;
+    /// signal that flips true the moment a fresh spool is re-fed. Registered with
+    /// subjects_. Defaults to 1 so non-auto-feed / unknown backends never gate
+    /// Resume.
+    lv_subject_t active_tool_port_present_{};
     std::vector<int> last_tool_map_;
     /// Companion to last_tool_map_ for the APPLIED routing (get_tool_mapping()),
     /// which moves independently of the physical map on a backend that publishes
@@ -1852,7 +2127,6 @@ class AmsState {
 
     /// Recompute the ams_action_detail subject from current AMS action +
     /// cached operation_detail + PrinterState print state.
-    /// Caller must hold mutex_.
     void recompute_action_detail();
 
     /// Wire (or rewire) the print_state_observer_. Idempotent.
@@ -1864,7 +2138,7 @@ class AmsState {
     /// subjects must already be initialized — no lv_subject_init_* here, init
     /// memzeros the subject and would wipe the observers bound since the first
     /// init. MUST mirror the registration list in init_subjects(): a name
-    /// registered there must be registered here too. Caller must hold mutex_.
+    /// registered there must be registered here too.
     void register_xml_subject_names();
 
     /// In-memory override for external spool info. Set by set_external_spool_info_in_memory()
@@ -1873,174 +2147,230 @@ class AmsState {
     std::optional<SlotInfo> in_memory_external_spool_;
 
     // String subjects (need buffers)
-    lv_subject_t ams_action_detail_;
-    char action_detail_buf_[64];
-    lv_subject_t ams_system_name_;
+    lv_subject_t ams_action_detail_{};
+    // Sized for the longest known translated composition any producer hands
+    // this subject: the CFS load-failure verdict message
+    // (AmsBackendCfs::phase_verdict_message), worst case ru at 364 bytes, with
+    // margin for future translation growth. That is a floor, not a ceiling:
+    // some producers (AFC's message.message) forward a raw firmware string
+    // with no length bound at all, so recompute_action_detail() truncates on
+    // a UTF-8 boundary before the copy rather than relying on this size alone.
+    char action_detail_buf_[512];
+    lv_subject_t ams_system_name_{};
     char system_name_buf_[32];
-    lv_subject_t ams_system_logo_;
+    lv_subject_t ams_system_logo_{};
     char system_logo_buf_[64];
-    lv_subject_t ams_current_tool_text_;
-    char ams_current_tool_text_buf_[16]; // "T0" to "T15" or "---"
+    lv_subject_t ams_current_tool_text_{};
+    // Holds a translated position label ("Tool 1", "Инструмент 16", "Печатающая
+    // головка 16") or "---". Sized like current_slot_text_buf_/system_logo_buf_:
+    // a translated noun plus a two-digit number can run well past ASCII length.
+    char ams_current_tool_text_buf_[64];
 
     /// Endless-spool status: kind as int, sentence as string. See the accessors.
     /// The buffer holds two translated lines; German and Russian restriction
     /// texts are the long ones, and Cyrillic costs ~2 bytes a character, hence
     /// 384 rather than the 64 used elsewhere.
-    lv_subject_t ams_endless_state_;
-    lv_subject_t ams_endless_text_;
+    lv_subject_t ams_endless_state_{};
+    lv_subject_t ams_endless_text_{};
     char ams_endless_text_buf_[384];
 
     // Tool change progress (AFC multi-color prints)
-    lv_subject_t toolchange_visible_;        // 1 when swaps expected, 0 otherwise
-    lv_subject_t ams_current_toolchange_;    // 0-based current toolchange index (-1=none)
-    lv_subject_t ams_number_of_toolchanges_; // Total expected toolchanges
-    lv_subject_t toolchange_text_;           // "2 / 5" formatted display
-    char toolchange_text_buf_[32]{};         // Buffer for formatted text
+    lv_subject_t toolchange_visible_{};        // 1 when swaps expected, 0 otherwise
+    lv_subject_t ams_current_toolchange_{};    // 0-based current toolchange index (-1=none)
+    lv_subject_t ams_number_of_toolchanges_{}; // Total expected toolchanges
+    lv_subject_t toolchange_text_{};           // "2 / 5" formatted display
+    char toolchange_text_buf_[32]{};           // Buffer for formatted text
 
     // Filament path visualization subjects
-    lv_subject_t path_topology_;
-    lv_subject_t path_active_slot_;
-    lv_subject_t path_filament_segment_;
-    lv_subject_t path_error_segment_;
-    lv_subject_t path_anim_progress_;
+    lv_subject_t path_topology_{};
+    lv_subject_t path_filament_segment_{};
 
     // Dryer subjects (for AMS systems with integrated drying)
-    lv_subject_t dryer_supported_;
-    lv_subject_t dryer_active_;
-    lv_subject_t dryer_current_temp_;
-    lv_subject_t dryer_target_temp_;
-    lv_subject_t dryer_remaining_min_;
-    lv_subject_t dryer_progress_pct_;
+    lv_subject_t dryer_supported_{};
+    lv_subject_t dryer_active_{};
+    lv_subject_t dryer_current_temp_{};
+    lv_subject_t dryer_target_temp_{};
+    lv_subject_t dryer_remaining_min_{};
+    lv_subject_t dryer_progress_pct_{};
     int dryer_mirror_unit_ = 0; ///< Unit whose dryer state the scalar subjects mirror
 
     // Dryer text subjects (need buffers)
-    lv_subject_t dryer_current_temp_text_;
+    lv_subject_t dryer_current_temp_text_{};
     char dryer_current_temp_text_buf_[16];
-    lv_subject_t dryer_target_temp_text_;
+    lv_subject_t dryer_target_temp_text_{};
     char dryer_target_temp_text_buf_[16];
-    lv_subject_t dryer_time_text_;
+    lv_subject_t dryer_time_text_{};
     char dryer_time_text_buf_[32];
 
-    // Dryer humidity and info bar visibility subjects
-    lv_subject_t dryer_humidity_text_;
-    char dryer_humidity_text_buf_[8]; ///< "35%" or "---"
-    lv_subject_t dryer_info_visible_; ///< 1 when info bar should show
-
     // Dryer modal editing subjects (user-adjustable values)
-    lv_subject_t dryer_modal_temp_text_;
-    char dryer_modal_temp_text_buf_[16];
-    lv_subject_t dryer_modal_duration_text_;
-    char dryer_modal_duration_text_buf_[16];
-    lv_subject_t modal_target_temp_;  ///< Modal's target temp in °C (raw int subject)
-    lv_subject_t modal_duration_min_; ///< Modal's duration in minutes (raw int subject)
+    lv_subject_t modal_target_temp_{};  ///< Modal's target temp in °C (raw int subject)
+    lv_subject_t modal_duration_min_{}; ///< Modal's duration in minutes (raw int subject)
 
     // Clog detection config overrides (set by ClogDetectionConfigModal)
     int source_override_ = 0;           // 0=auto, 1=encoder, 2=flowguard, 3=afc
     int danger_threshold_override_ = 0; // 0=use computed default
 
     // Clog detection meter subjects
-    lv_subject_t clog_meter_mode_;    // 0=none, 1=encoder, 2=flowguard, 3=afc_buffer
-    lv_subject_t clog_meter_value_;   // 0-100 (encoder/afc) or -100..+100 (flowguard)
-    lv_subject_t clog_meter_warning_; // 0=ok, 1=warning
-    lv_subject_t clog_meter_status_;  // ClogMeterStatus: 0=ok, 1=warning, 2=fault
-    lv_subject_t clog_meter_mode_text_;
-    char clog_meter_mode_text_buf_[24]{};
-    lv_subject_t clog_meter_danger_pct_;  // 0-100, where danger zone starts
-    lv_subject_t clog_meter_peak_pct_;    // 0-100, peak-hold marker position
-    lv_subject_t clog_meter_center_text_; // Enhanced center display
+    /// Buffer reading traces, keyed by unit position, -1 for the system-level reading.
+    std::map<int, BufferTrace> buffer_traces_;
+
+    lv_subject_t buffer_present_{};    // 0/1: a proportional reading exists (widget gate)
+    lv_subject_t buffer_slider_{};     // 0/1: it has a set point, so the slider draws
+    lv_subject_t buffer_bias_pct_{};   // -100 tight .. +100 loose; 0 for a fill gauge
+    lv_subject_t buffer_status_{};     // ClogMeterStatus of the reading
+    lv_subject_t buffer_gauge_{};      // BufferGauge: 0 bias, 1 fill
+    lv_subject_t buffer_value_pct_{};  // fill gauge: the pressure, 0..100
+    lv_subject_t buffer_target_pct_{}; // fill gauge: the set point, -1 without one
+    lv_subject_t buffer_label_{};      // "FPS" / "Sync"
+    char buffer_label_buf_[16]{};
+    lv_subject_t buffer_value_text_{}; // "32%", "-45%", "Pressure: 32%"
+    char buffer_value_text_buf_[48]{};
+    lv_subject_t buffer_short_text_{}; // "32%", "-45%": the number alone, for narrow surfaces
+    char buffer_short_text_buf_[16]{};
+    lv_subject_t
+        buffer_lean_text_{}; // "Running tight" / "Balanced", or "At target" / "Above target"
+    char buffer_lean_text_buf_[48]{};
+    lv_subject_t buffer_target_text_{}; // "target 50%" where a set point is known
+    char buffer_target_text_buf_[48]{};
+
+    lv_subject_t clog_meter_mode_{};  // ClogMeterMode: 0=none, 1=encoder, 2=flowguard, 3=afc_buffer
+    lv_subject_t clog_meter_value_{}; // 0-100 (encoder/afc) or -100..+100 (flowguard)
+    lv_subject_t clog_meter_warning_{}; // 0=ok, 1=warning
+    lv_subject_t clog_meter_status_{};  // ClogMeterStatus: 0=ok, 1=warning, 2=fault
+    lv_subject_t clog_meter_mode_text_{};
+    // Mode names render translated: ru "Засор: вручную" is 24 bytes before the
+    // NUL, es "Obstrucción automática" the same. Undersized buffers truncate
+    // mid-codepoint, silently.
+    char clog_meter_mode_text_buf_[32]{};
+    lv_subject_t clog_meter_danger_pct_{};  // 0-100, where danger zone starts
+    lv_subject_t clog_meter_peak_pct_{};    // 0-100, peak-hold marker position
+    lv_subject_t clog_meter_center_text_{}; // Enhanced center display
     char clog_meter_center_text_buf_[16]{};
-    lv_subject_t clog_meter_label_left_; // Left endpoint label
-    char clog_meter_label_left_buf_[16]{};
-    lv_subject_t clog_meter_label_right_; // Right endpoint label
-    char clog_meter_label_right_buf_[16]{};
+    lv_subject_t clog_meter_label_left_{}; // Left endpoint label
+    // Endpoint labels render translated: ru "СПУТЫВАНИЕ" is 20 bytes.
+    char clog_meter_label_left_buf_[24]{};
+    lv_subject_t clog_meter_label_right_{}; // Right endpoint label
+    char clog_meter_label_right_buf_[24]{};
+    lv_subject_t clog_meter_note_kind_{}; // helix::ui::ClogNote; 0 hides the note line
+    lv_subject_t clog_meter_note_text_{};
+    char clog_meter_note_text_buf_[96]{}; // a firmware-supplied trip reason, or a translated phrase
 
     // Currently Loaded display subjects (reactive binding for "Currently Loaded" card)
-    lv_subject_t current_material_text_;
+    lv_subject_t current_material_text_{};
     // Holds a full filament identity — brand, Spoolman filament name and
     // material concatenated. lv_subject_copy_string() truncates with
     // lv_strlcpy and reports nothing, so an undersized buffer clips the label
     // silently; real Spoolman names run past 50 characters on their own.
     char current_material_text_buf_[128];
-    lv_subject_t current_slot_text_;
+    lv_subject_t current_slot_text_{};
     char current_slot_text_buf_[64];
-    lv_subject_t current_weight_text_;
-    char current_weight_text_buf_[16];
-    lv_subject_t current_has_weight_;
-    lv_subject_t current_color_;
+    lv_subject_t current_weight_text_{};
+    char current_weight_text_buf_[32];
+    lv_subject_t current_has_weight_{};
+    lv_subject_t current_color_{};
 
     // Per-slot subjects (color, status, remaining filament)
-    lv_subject_t slot_colors_[MAX_SLOTS];
-    lv_subject_t slot_statuses_[MAX_SLOTS];
-    lv_subject_t slot_remaining_[MAX_SLOTS]; // string: "52m" or "432g" or ""
-    char slot_remaining_buf_[MAX_SLOTS][16]; // buffers for remaining strings
-    lv_subject_t slot_materials_[MAX_SLOTS]; // string: "PLA", "PETG", … or "" (last synced type)
+    lv_subject_t slot_colors_[MAX_SLOTS]{};
+    lv_subject_t slot_statuses_[MAX_SLOTS]{};
+    lv_subject_t slot_remaining_[MAX_SLOTS]{}; // string: "52m" or "432g" or ""
+    char slot_remaining_buf_[MAX_SLOTS][16];   // buffers for remaining strings
+    lv_subject_t slot_materials_[MAX_SLOTS]{}; // string: "PLA", "PETG", … or "" (last synced type)
     char slot_materials_buf_[MAX_SLOTS][24]; // buffers for material strings (holds "PETG-CF" etc.)
-    lv_subject_t slot_fills_[MAX_SLOTS];     // int: fill percent 0-100, -1 = unknown/no-data
+    lv_subject_t slot_fills_[MAX_SLOTS]{};   // int: fill percent 0-100, -1 = unknown/no-data
                                              // (SlotInfo::display_fill_pct encoding)
 
     // Per-slot LIVE state subjects — the panel observes these to redraw the path
     // and active-lane highlight in real time as Moonraker sensor data arrives.
     // Updated alongside slot_colors_/slot_statuses_ in the status-sync path.
-    lv_subject_t slot_segments_[MAX_SLOTS];         // int: PathSegment enum value
-    lv_subject_t slot_toolhead_present_[MAX_SLOTS]; // int: 0/1 per-slot toolhead sensor
-    lv_subject_t slot_active_loaded_[MAX_SLOTS];    // int: 0/1 firmware seated & loaded
-    lv_subject_t slot_lane_states_[MAX_SLOTS];      // int: helix::ui::LaneState (classify_lane)
+    lv_subject_t slot_segments_[MAX_SLOTS]{};         // int: PathSegment enum value
+    lv_subject_t slot_toolhead_present_[MAX_SLOTS]{}; // int: 0/1 per-slot toolhead sensor
+    lv_subject_t slot_active_loaded_[MAX_SLOTS]{};    // int: 0/1 firmware seated & loaded
+    lv_subject_t slot_lane_states_[MAX_SLOTS]{};      // int: helix::ui::LaneState (classify_lane)
+    lv_subject_t slot_has_error_[MAX_SLOTS]{};        // int: 0/1 BLOCKED or carries a SlotError
+    lv_subject_t slot_error_severity_[MAX_SLOTS]{};   // int: SlotError::Severity (INFO when none)
 
     // Per-unit environment subjects (CFS temp/humidity)
-    lv_subject_t unit_temp_[MAX_UNITS];     // int: tenths of C (270 = 27.0C), 0 = no data
-    lv_subject_t unit_humidity_[MAX_UNITS]; // int: percentage, 0 = no data
+    lv_subject_t unit_temp_[MAX_UNITS]{};         // int: tenths of C (270 = 27.0C), 0 = no data
+    lv_subject_t unit_humidity_[MAX_UNITS]{};     // int: percentage, 0 = no data
+    lv_subject_t unit_absent_[MAX_UNITS]{};       // int: 1 = AmsUnit::absent
+    lv_subject_t unit_disconnected_[MAX_UNITS]{}; // int: 1 = present but !connected
+    // int: 1 = the unit set_viewed_unit() names is disconnected
+    lv_subject_t viewed_unit_disconnected_{};
+    // int: 1 = units exist and every present one is disconnected
+    lv_subject_t all_units_disconnected_{};
+    int viewed_unit_ = -1;
+    void publish_viewed_unit_disconnected(const AmsSystemInfo* info);
+
+    // Unit paging (set_unit_page)
+    lv_subject_t ams_unit_view_active_{};
+    lv_subject_t ams_page_count_{};
+    lv_subject_t ams_page_current_{};
+    lv_subject_t ams_page_has_prev_{};
+    lv_subject_t ams_page_has_next_{};
+    lv_subject_t ams_page_unit_name_{};
+    char page_unit_name_buf_[48]{};
+    lv_subject_t ams_page_unit_logo_{};
+    char page_unit_logo_buf_[64]{};
+    lv_subject_t ams_page_has_logo_{};
+
+    /// Which units' dryers ran at the last sync, one character per unit position.
+    std::string units_drying_signature_;
+    lv_subject_t ams_units_dryer_version_{};
 
     // Per-unit environment indicator display subjects (formatted text for XML binding)
     static constexpr int ENV_IND_TEXT_BUF_SIZE = 16;
     static constexpr int ENV_IND_DRYING_BUF_SIZE = 32;
 
-    lv_subject_t env_ind_temp_text_[MAX_UNITS];
+    lv_subject_t env_ind_temp_text_[MAX_UNITS]{};
     char env_ind_temp_text_buf_[MAX_UNITS][ENV_IND_TEXT_BUF_SIZE]{};
-    lv_subject_t env_ind_humidity_text_[MAX_UNITS];
+    lv_subject_t env_ind_humidity_text_[MAX_UNITS]{};
     char env_ind_humidity_text_buf_[MAX_UNITS][ENV_IND_TEXT_BUF_SIZE]{};
-    lv_subject_t env_ind_visible_[MAX_UNITS];
-    lv_subject_t env_ind_humidity_status_[MAX_UNITS]; // 0=ok, 1=warn, 2=danger
-    lv_subject_t env_ind_humidity_visible_[MAX_UNITS];
-    lv_subject_t env_ind_drying_active_[MAX_UNITS];
-    lv_subject_t env_ind_drying_text_[MAX_UNITS];
+    lv_subject_t env_ind_visible_[MAX_UNITS]{};
+    lv_subject_t env_ind_humidity_status_[MAX_UNITS]{}; // 0=ok, 1=warn, 2=danger
+    lv_subject_t env_ind_humidity_visible_[MAX_UNITS]{};
+    lv_subject_t env_ind_drying_active_[MAX_UNITS]{};
+    lv_subject_t env_ind_drying_text_[MAX_UNITS]{};
     char env_ind_drying_text_buf_[MAX_UNITS][ENV_IND_DRYING_BUF_SIZE]{};
 
     // Always-off placeholders for units past MAX_UNITS (see
     // env_indicator_subject_names). Written once at init and never again.
-    lv_subject_t env_ind_off_flag_;
-    lv_subject_t env_ind_off_text_;
+    lv_subject_t env_ind_off_flag_{};
+    lv_subject_t env_ind_off_text_{};
     char env_ind_off_text_buf_[ENV_IND_TEXT_BUF_SIZE]{};
 
     // Detail-view env indicator mirror subjects (reflect detail_env_unit_)
-    lv_subject_t env_ind_detail_temp_text_;
+    lv_subject_t env_ind_detail_temp_text_{};
     char env_ind_detail_temp_text_buf_[ENV_IND_TEXT_BUF_SIZE]{};
-    lv_subject_t env_ind_detail_humidity_text_;
+    lv_subject_t env_ind_detail_humidity_text_{};
     char env_ind_detail_humidity_text_buf_[ENV_IND_TEXT_BUF_SIZE]{};
-    lv_subject_t env_ind_detail_humidity_status_;
-    lv_subject_t env_ind_detail_humidity_visible_;
-    lv_subject_t env_ind_detail_visible_;
-    lv_subject_t env_ind_detail_drying_active_;
-    lv_subject_t env_ind_detail_drying_text_;
+    lv_subject_t env_ind_detail_humidity_status_{};
+    lv_subject_t env_ind_detail_humidity_visible_{};
+    lv_subject_t env_ind_detail_visible_{};
+    lv_subject_t env_ind_detail_drying_active_{};
+    lv_subject_t env_ind_detail_drying_text_{};
     char env_ind_detail_drying_text_buf_[ENV_IND_DRYING_BUF_SIZE]{};
     int detail_env_unit_ = 0;
 
-    /// Mirror the detail_env_unit_'s per-unit env indicator subjects into the
-    /// dedicated ams_env_ind_detail_* subjects consumed by the statically
-    /// embedded detail-view indicator (see Task 9 brief).
-    void mirror_detail_env_subjects();
+    /// One unit's environment indicator, ready to publish.
+    struct UnitEnvIndicator {
+        std::string temp_text;
+        std::string humidity_text;
+        int humidity_status = 0; // 0=ok, 1=warn, 2=danger
+        bool humidity_visible = false;
+        bool visible = false;
+        bool drying_active = false;
+        std::string drying_text;
+    };
 
-    // Stored callback for mock gcode response injection
-    std::function<void(const std::string&)> gcode_response_callback_;
+    /// The single computation behind both the per-unit ams_env_ind_<n>_* subjects
+    /// and the detail mirror.
+    static UnitEnvIndicator compute_unit_env_indicator(AmsBackend* backend, const AmsUnit& unit);
+    void publish_unit_env_indicator(int idx, const UnitEnvIndicator& indicator);
 
-    /// Grace window after an unload during which a runout on that lane's sensor
-    /// is expected (the user pulls the just-unloaded filament out) and must NOT
-    /// pop the runout-guidance modal. Auto-expires.
-    static constexpr std::chrono::seconds RECENT_UNLOAD_GRACE{30};
-
-    /// Per-slot timestamp of the last completed unload (unload_finish). A
-    /// non-subject plain field guarded by mutex_ — written from the backend's
-    /// background-thread status parse, read from FilamentSensorManager. Default
-    /// time_point{} (epoch) means "never unloaded" and is always outside the
-    /// grace window.
-    std::array<std::chrono::steady_clock::time_point, MAX_SLOTS> last_unload_time_{};
+    /// Publish the detail_env_unit_'s indicator into the ams_env_ind_detail_*
+    /// subjects, computed from @p info directly so any unit index works. A null
+    /// backend or info publishes the empty indicator.
+    void mirror_detail_env_subjects(AmsBackend* backend, const AmsSystemInfo* info);
 };
+
+} // namespace helix

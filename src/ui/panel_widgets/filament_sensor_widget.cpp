@@ -12,11 +12,13 @@
 #include "app_globals.h"
 #include "filament_op_dispatch.h"
 #include "filament_op_execute.h"
+#include "filament_sensor_manager.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "observer_factory.h"
 #include "panel_widget_registry.h"
 #include "print_control_buttons.h"
 #include "printer_state.h"
+#include "subject_managed_panel.h"
 
 #include <spdlog/spdlog.h>
 
@@ -24,8 +26,14 @@
 
 namespace helix {
 
+namespace {
+/// Owns the XML-published static subjects shared by every FilamentSensorWidget.
+SubjectManager s_static_subjects;
+} // namespace
+
 void register_filament_sensor_widget() {
     FilamentSensorWidget::init_static_subjects();
+    register_widget_subjects("filament", FilamentSensorWidget::init_static_subjects);
 
     register_widget_factory(
         "filament", [](const std::string&) { return std::make_unique<FilamentSensorWidget>(); });
@@ -67,7 +75,7 @@ void FilamentSensorWidget::init_static_subjects() {
     // resolving it fine, since those short-circuit against the local scope
     // before ever needing the fallback. lv_xml_register_subject(nullptr, ...)
     // routes to "globals" (lib/helix-xml/src/xml/lv_xml.c:689).
-    lv_xml_register_subject(nullptr, "filament_tile_state", &tile_state_subject_);
+    s_static_subjects.publish("filament_tile_state", &tile_state_subject_);
 
     // Same reasoning, same fallback trap: the check icons that bind this live in
     // filament_source_row, a different component from filament_source_picker, and
@@ -75,19 +83,19 @@ void FilamentSensorWidget::init_static_subjects() {
     // never into another component's private scope
     // (lib/helix-xml/src/xml/lv_xml.c:689,757-778). Register globally or the
     // check icons silently never resolve it.
-    lv_xml_register_subject(nullptr, "filament_tile_source", &source_subject_);
+    s_static_subjects.publish("filament_tile_source", &source_subject_);
 
     StaticSubjectRegistry::instance().register_deinit("FilamentSensorWidget", []() {
         if (!subjects_initialized_) {
             return;
         }
-        lv_subject_deinit(&tile_state_subject_);
-        lv_subject_deinit(&source_subject_);
+        s_static_subjects.deinit_all();
         subjects_initialized_ = false;
     });
 }
 
-FilamentSensorWidget::FilamentSensorWidget() = default;
+FilamentSensorWidget::FilamentSensorWidget()
+    : TiledPanelWidget("filament", TileSizing::Content{"", "", "Loaded", false}) {}
 
 FilamentSensorWidget::~FilamentSensorWidget() {
     detach();
@@ -96,7 +104,6 @@ FilamentSensorWidget::~FilamentSensorWidget() {
 void FilamentSensorWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
     widget_obj_ = widget_obj;
     parent_screen_ = parent_screen;
-    lv_obj_set_user_data(widget_obj_, this);
 
     // Instances are recycled across grid rebuilds, so the source binding must be
     // (re)established here, not only in set_config().
@@ -111,9 +118,6 @@ void FilamentSensorWidget::detach() {
     // parent_screen_ is about to be torn down under it.
     tap_modal_.hide();
     lifetime_.invalidate();
-    if (widget_obj_) {
-        lv_obj_set_user_data(widget_obj_, nullptr);
-    }
     widget_obj_ = nullptr;
     parent_screen_ = nullptr;
 }
@@ -188,7 +192,8 @@ void FilamentSensorWidget::handle_click() {
     // policy only asks whether a print is running right now; Paused keeps the
     // full modal on purpose (Load/Unload are safe then), so this is exactly
     // Printing rather than job_holds_machine().
-    const bool printing = get_printer_state().get_print_lifecycle() == PrintState::Printing;
+    const bool printing =
+        get_printer_state().print_state().get_print_lifecycle() == PrintState::Printing;
 
     switch (ui::decide_tap_destination(sensor_state, printing ? 1 : 0)) {
     case ui::FilamentTapDestination::None:
@@ -341,10 +346,11 @@ void FilamentSensorWidget::dispatch_unload() {
     // exactly what it exists to prevent.
     bool loaded = false;
     if (backend) {
-        loaded = helix::ui::unload_target_is_loaded(slot, backend->slot_is_actively_loaded(slot),
-                                                    backend->slot_has_filament_at_toolhead(slot),
-                                                    /*is_current_slot=*/true,
-                                                    backend->get_system_info().filament_loaded);
+        loaded = helix::ui::unload_target_is_loaded(
+            slot, backend->slot_is_actively_loaded(slot),
+            backend->slot_has_filament_at_toolhead(slot),
+            /*is_current_slot=*/true, backend->get_system_info().filament_loaded,
+            backend->toolhead_filament_unaccounted().value_or(false));
     }
 
     helix::ui::execute_filament_unload(backend, slot, loaded, "[FilamentSensorWidget]");
@@ -369,13 +375,13 @@ void FilamentSensorWidget::rebind_source() {
     // Mirror the selected role subject into the one the XML binds. A runtime
     // source mux, not a compound condition, so <subject_expr> cannot express it.
     // DECLARATIVE_OK: the selection is user config, not a static relationship.
-    source_observer_ = helix::ui::observe_int_sync<FilamentSensorWidget>(
+    source_observer_ = helix::ui::observe<int>(
         src, this,
         [](FilamentSensorWidget* self, int value) {
             (void)self;
             lv_subject_set_int(&tile_state_subject_, value);
         },
-        source_lifetime_);
+        FilamentSensorManager::instance().get_subjects_lifetime());
 }
 
 } // namespace helix

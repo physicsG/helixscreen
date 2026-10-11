@@ -10,7 +10,6 @@ namespace helix::timelapse {
 
 // --- Thumbnail utilities ---
 
-std::string cache_key(const std::string& video_filename);
 std::string companion_filename(const std::string& video_filename);
 
 /// Build an argument list for ffmpeg thumbnail extraction (safe from shell injection)

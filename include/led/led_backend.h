@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include "device_display_name.h"
+
 #include <cctype>
 #include <string>
 #include <vector>
@@ -151,12 +153,6 @@ inline MacroFieldView macro_field_view(const std::string& stored,
     return {macro_custom_index(discovered), stored};
 }
 
-/// WLED preset info fetched from device
-struct WledPresetInfo {
-    int id = -1;
-    std::string name;
-};
-
 /// WLED strip runtime state (from Moonraker status polling)
 struct WledStripState {
     bool is_on = false;
@@ -165,8 +161,7 @@ struct WledStripState {
 };
 
 /// Pretty-print a Klipper macro name for display.
-/// Strips common prefixes (LED_, LIGHT_, STATUS_LED_), replaces underscores
-/// with spaces, and title-cases each word.
+/// Strips common prefixes (LED_, LIGHT_, STATUS_LED_), then helix::prettify_name().
 /// Example: "LED_PARTY_MODE" -> "Party Mode"
 inline std::string pretty_print_macro(const std::string& macro_name) {
     std::string s = macro_name;
@@ -180,21 +175,12 @@ inline std::string pretty_print_macro(const std::string& macro_name) {
         }
     }
 
-    // Replace underscores with spaces and title-case
-    bool capitalize_next = true;
+    // Macro names are all capitals by convention, which prettify_name() would keep
+    // as acronyms; lowercase first so only its known acronyms (LED, RGB) stay.
     for (auto& ch : s) {
-        if (ch == '_') {
-            ch = ' ';
-            capitalize_next = true;
-        } else if (capitalize_next) {
-            ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
-            capitalize_next = false;
-        } else {
-            ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-        }
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
     }
-
-    return s;
+    return helix::prettify_name(s);
 }
 
 } // namespace helix::led

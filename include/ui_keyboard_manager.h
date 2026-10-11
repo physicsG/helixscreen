@@ -68,6 +68,20 @@ class KeyboardManager {
     void register_textarea_ex(lv_obj_t* textarea, bool is_password);
 
     /**
+     * @brief Undo register_textarea() for one widget.
+     *
+     * <text_input> registers every textarea it creates, so a field that takes its
+     * value some other way - a numeric keypad, a picker - has to opt back out or the
+     * tap raises the software keyboard underneath whatever it opened. Removes the
+     * focus hooks and drops the widget from the input group; the delete hook stays,
+     * so the manager still forgets the widget when it dies.
+     *
+     * @param textarea The textarea to stop managing. Safe on null and on a widget
+     *                 that was never registered.
+     */
+    void unregister_textarea(lv_obj_t* textarea);
+
+    /**
      * @brief Manually show the keyboard for a specific textarea
      *
      * @param textarea The textarea to assign to the keyboard (NULL to clear)
@@ -127,7 +141,7 @@ class KeyboardManager {
      * Deletes keyboard_ and overlay_ widgets (children of m_screen that survive
      * app_layout teardown), then resets all state so init() can be called again.
      *
-     * Call from Application::tear_down_printer_state() before rebuilding UI.
+     * Call from PrinterSession::tear_down_printer_state() before rebuilding UI.
      */
     void reset();
 

@@ -73,8 +73,8 @@ teardown() {
     export HELIX_SYM_FILE="$TEST_DIR/test.sym"
     run bash "$SCRIPT" 0.9.9 pi 0x400100 0x400250 0x400900
     [ "$status" -eq 0 ]
-    [[ "$output" == *"main"* ]]
-    [[ "$output" == *"PrinterState::update()"* ]]
+    contains "main" "$output"
+    contains "PrinterState::update()" "$output"
     [[ "$output" == *"lv_obj_create"* ]]
 }
 
@@ -161,9 +161,9 @@ UNRESOLVED_ISSUE='## Crash Summary
     stub_gh_issue "$UNRESOLVED_ISSUE"
     run bash "$SCRIPT" --issue 1240 --repo owner/repo
     [ "$status" -eq 0 ]
-    [[ "$output" == *"3 addresses"* ]]
-    [[ "$output" == *"PrinterState::update()"* ]]
-    [[ "$output" == *"WebSocketClient::connect"* ]]
+    contains "3 addresses" "$output"
+    contains "PrinterState::update()" "$output"
+    contains "WebSocketClient::connect" "$output"
     [[ "$output" == *"lv_obj_create"* ]]
 }
 
@@ -207,7 +207,7 @@ UNRESOLVED_ISSUE='## Crash Summary
     run bash "$SCRIPT" --issue 1239 --repo owner/repo
     [ "$status" -eq 0 ]
     # Two table rows — not the four register cells above them
-    [[ "$output" == *"2 addresses"* ]]
+    contains "2 addresses" "$output"
     [[ "$output" != *"0x4d1"* ]]
 }
 
@@ -230,8 +230,8 @@ UNRESOLVED_ISSUE='## Crash Summary
 '
     run bash "$SCRIPT" --issue 1239 --repo owner/repo
     [ "$status" -eq 0 ]
-    [[ "$output" == *"2 addresses"* ]]
-    [[ "$output" == *"reliable frames"* ]]
+    contains "2 addresses" "$output"
+    contains "reliable frames" "$output"
     [[ "$output" == *"stack-scan candidates"* ]]
 }
 
@@ -250,7 +250,7 @@ UNRESOLVED_ISSUE='## Crash Summary
 '
     run bash "$SCRIPT" --issue 1239 --repo owner/repo
     [ "$status" -eq 0 ]
-    [[ "$output" == *"2 addresses"* ]]
+    contains "2 addresses" "$output"
     [[ "$output" != *"0x7fd4f57890"* ]]
 }
 
@@ -322,6 +322,79 @@ printf '%s\n' 'func_a' 'file.c:10' 'func_b' 'file.c:20' 'func_c' 'file.c:30' 'fu
     cd "$TEST_DIR/cwd"
     run bash "$script_path" 0.9.9 x86 0x400100 0x400250 0x400900 0x400a00 0x400b00
     [ "$status" -eq 0 ]
-    [[ "$output" == *"func_a at file.c:10"* ]]
+    contains "func_a at file.c:10" "$output"
     [ "$(wc -l < "$a2l_log")" -eq 2 ]
+}
+
+@test "does not shift an absolute-linked (non-PIE) symbol map by its load base" {
+    export HELIX_SYM_FILE="$TEST_DIR/test.sym"
+    run bash "$SCRIPT" --base 0x400000 0.9.9 k1 0x400150
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"main+0x50"* ]]
+}
+
+@test "still subtracts the load base from a PIE symbol map" {
+    cat > "$TEST_DIR/pie.sym" << 'EOF'
+0000000000001000 T _start
+0000000000002000 T main
+0000000000003000 T PrinterState::update()
+EOF
+    export HELIX_SYM_FILE="$TEST_DIR/pie.sym"
+    run bash "$SCRIPT" --base 0xaaaa0000 0.9.9 pi 0xaaaa2050
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"main+0x50"* ]]
+}
+
+# A crash file whose mapped executable is the given path, with no platform line.
+write_mapped_crash() {
+    cat > "$TEST_DIR/crash.txt" << EOF2
+version:0.9.9
+load_base:0x400000
+bt:0x400150
+map:00400000-00500000 r-xp 00000000 b3:02 1234 $1
+EOF2
+}
+
+@test "a pi crash mapped from helix-screen-fbdev resolves against pi-fbdev" {
+    export HELIX_SYM_FILE="$TEST_DIR/test.sym"
+    write_mapped_crash /home/m1/helixscreen/bin/helix-screen-fbdev
+    run bash "$SCRIPT" --crash-file "$TEST_DIR/crash.txt" pi
+    [ "$status" -eq 0 ]
+    contains "using platform pi-fbdev" "$output"
+    contains "against v0.9.9/pi-fbdev" "$output"
+}
+
+@test "a pi crash mapped from the DRM helix-screen stays on pi" {
+    export HELIX_SYM_FILE="$TEST_DIR/test.sym"
+    write_mapped_crash /home/m1/helixscreen/bin/helix-screen
+    run bash "$SCRIPT" --crash-file "$TEST_DIR/crash.txt" pi
+    [ "$status" -eq 0 ]
+    contains "against v0.9.9/pi" "$output"
+    [[ "$output" != *pi-fbdev* ]]
+}
+
+@test "a platform with no fbdev variant ignores an -fbdev map name" {
+    export HELIX_SYM_FILE="$TEST_DIR/test.sym"
+    write_mapped_crash /usr/data/helixscreen/bin/helix-screen-fbdev
+    run bash "$SCRIPT" --crash-file "$TEST_DIR/crash.txt" k1
+    [ "$status" -eq 0 ]
+    contains "against v0.9.9/k1" "$output"
+    [[ "$output" != *k1-fbdev* ]]
+}
+
+@test "pi-fbdev uses the aarch64 addr2line" {
+    export HELIX_SYM_FILE="$TEST_DIR/test.sym"
+    local script_path a2l_log
+    script_path="$(pwd)/$SCRIPT"
+    a2l_log="$TEST_DIR/a2l.log"
+    mock_command_script "aarch64-linux-gnu-addr2line" "printf '%s\n' \"\$*\" >> '$a2l_log'; exit 1"
+
+    mkdir -p "$TEST_DIR/cwd/build/pi-fbdev/bin"
+    printf '#!/bin/sh\n' > "$TEST_DIR/cwd/build/pi-fbdev/bin/helix-screen"
+    chmod +x "$TEST_DIR/cwd/build/pi-fbdev/bin/helix-screen"
+
+    cd "$TEST_DIR/cwd"
+    run bash "$script_path" 0.9.9 pi-fbdev 0x400150
+    [ "$status" -eq 0 ]
+    grep -q "build/pi-fbdev/bin/helix-screen" "$a2l_log"
 }

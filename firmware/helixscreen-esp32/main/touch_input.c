@@ -12,8 +12,27 @@ static const char* TAG = "touch";
 static esp_lcd_touch_handle_t s_touch;
 static bool s_available;
 
+// A tap injected from the serial console: reported as a press for a few reads
+// so LVGL registers it, then the real controller takes over and reads release.
+static volatile int16_t s_inject_x;
+static volatile int16_t s_inject_y;
+static volatile int s_inject_reads;
+
+void touch_input_inject_tap(int x, int y) {
+    s_inject_x = (int16_t)x;
+    s_inject_y = (int16_t)y;
+    s_inject_reads = 3;
+}
+
 static void indev_read(lv_indev_t* indev, lv_indev_data_t* data) {
     (void)indev;
+    if (s_inject_reads > 0) {
+        --s_inject_reads;
+        data->point.x = s_inject_x;
+        data->point.y = s_inject_y;
+        data->state = LV_INDEV_STATE_PRESSED;
+        return;
+    }
     esp_lcd_touch_read_data(s_touch);
     uint16_t x, y;
     uint8_t cnt = 0;

@@ -8,6 +8,7 @@
 #include "display_backend_fbdev.h"
 
 #include "config.h"
+#include "env_knobs.h"
 #include "fbdev_size_helper.h"
 #include "input_device_scanner.h"
 #include "pending_startup_warnings.h"
@@ -20,7 +21,6 @@
 
 // System includes for device access checks
 #include <algorithm>
-#include <climits>
 #include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
@@ -32,43 +32,16 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+// The kernel writes input_event with its timestamp as two native longs. A libc with a
+// 64-bit time_t on a 32-bit target paired with pre-4.16 uapi headers gets a larger
+// struct, and every evdev reader (LVGL's touch driver included) then decodes garbage.
+static_assert(sizeof(struct input_event) == 2 * sizeof(long) + 8,
+              "struct input_event does not match the kernel ABI: toolchain uapi headers "
+              "must be 4.16+ when time_t is 64-bit on a 32-bit target");
+
 // Optional LVGL extension in some branches/builds; weak symbol allows probing at runtime.
 extern "C" void lv_linux_fbdev_set_skip_unblank(lv_display_t* disp, bool enabled)
     __attribute__((weak));
-
-namespace {
-
-using helix::is_known_touchscreen_name;
-
-/**
- * @brief Check if an input device has INPUT_PROP_DIRECT set
- *
- * Reads /sys/class/input/eventN/device/properties and checks bit 0
- * (INPUT_PROP_DIRECT), which indicates a direct-input device like a
- * touchscreen (as opposed to a touchpad or mouse).
- *
- * @param event_num Event device number
- * @return true if INPUT_PROP_DIRECT is set
- */
-bool has_direct_input_prop(int event_num) {
-    std::string path = "/sys/class/input/event" + std::to_string(event_num) + "/device/properties";
-    std::string props_str = helix::input::read_sysfs_line(path);
-    if (props_str.empty())
-        return false;
-
-    try {
-        // Properties file may have space-separated hex values; lowest bits are rightmost
-        size_t last_space = props_str.rfind(' ');
-        std::string last_hex =
-            (last_space != std::string::npos) ? props_str.substr(last_space + 1) : props_str;
-        unsigned long props = std::stoul(last_hex, nullptr, 16);
-        return (props & 0x1) != 0; // INPUT_PROP_DIRECT
-    } catch (...) {
-        return false;
-    }
-}
-
-} // anonymous namespace
 
 DisplayBackendFbdev::DisplayBackendFbdev() = default;
 
@@ -76,7 +49,10 @@ DisplayBackendFbdev::~DisplayBackendFbdev() {
     // Tear down the calibration read callback before calibration_context_ is
     // destroyed. If LVGL's indev timer fires between our destruction and
     // lv_deinit(), calibrated_read_cb would reach freed memory (use-after-free /
-    // SIGSEGV).
+    // SIGSEGV). The pointer frame hook comes off first: where it fronts the
+    // calibration wrapper that hands the wrapper back, and uninstall only
+    // silences a device whose read callback is the wrapper itself.
+    pointer_frames_.restore_all();
     helix::uninstall_calibration_wrapper(touch_, calibration_context_);
 
     restore_console();
@@ -214,7 +190,7 @@ lv_display_t* DisplayBackendFbdev::create_display(int width, int height) {
     // offsets. HELIX_COLOR_SWAP_RB=1 forces the swap on, =0 forces it off.
     const char* swap_rb_env = std::getenv("HELIX_COLOR_SWAP_RB");
     if (swap_rb_env != nullptr) {
-        bool force_swap = (strcmp(swap_rb_env, "1") == 0);
+        bool force_swap = helix::env_truthy(swap_rb_env);
         lv_linux_fbdev_set_swap_rb(display_, force_swap);
         spdlog::info("[Fbdev Backend] R/B channel swap {} (HELIX_COLOR_SWAP_RB={})",
                      force_swap ? "forced ON" : "forced OFF", swap_rb_env);
@@ -257,6 +233,8 @@ lv_indev_t* DisplayBackendFbdev::create_input_pointer() {
         spdlog::error("[Fbdev Backend] Failed to create evdev touch input on {}", touch_path);
         return nullptr;
     }
+
+    configure_touch_gestures(touch_);
 
     // Determine if touch calibration is needed using unified logic.
     // Reads device name, phys, and capabilities from sysfs.
@@ -314,6 +292,9 @@ lv_indev_t* DisplayBackendFbdev::create_input_pointer() {
     // Hoisted alongside them so the touch diagnostics below can record whether the
     // declared range came from the MT axes rather than ABS_X/ABS_Y.
     bool used_mt_fallback = false;
+    // The declared range is the display transposed, and the display size is
+    // programmed in its place until a sample says otherwise.
+    bool transposed_guess = false;
     if (has_abs) {
         int fd = open(touch_path.c_str(), O_RDONLY | O_CLOEXEC);
         if (fd >= 0) {
@@ -358,8 +339,24 @@ lv_indev_t* DisplayBackendFbdev::create_input_pointer() {
                     // calibration (e.g., SonicPad gt9xxnew_ts).
                     needs_calibration_ = true;
                     spdlog::warn("[Fbdev Backend] ABS range is zero — LVGL cannot map "
-                                 "coordinates to display ({}x{}), forcing calibration",
+                                 "coordinates to display ({}x{}), panel needs affine "
+                                 "calibration",
                                  screen_width_, screen_height_);
+                } else if (!needs_calibration_ &&
+                           helix::has_transposed_abs_range(abs_x.maximum, abs_y.maximum,
+                                                           screen_width_, screen_height_)) {
+                    // The advertised range is the display's own dimensions with the
+                    // axes swapped, while the coordinates the driver emits span the
+                    // framebuffer the normal way round. Scaling by the advertised
+                    // range compresses one axis and clamps the other, and no affine
+                    // can un-clamp it, so scale by the display size and leave
+                    // rotation to LVGL. The HELIX_TOUCH_MIN_X/MAX_X/MIN_Y/MAX_Y
+                    // override below still replaces this when it is set.
+                    lv_evdev_set_calibration(touch_, 0, 0, screen_width_, screen_height_);
+                    transposed_guess = true;
+                    spdlog::info("[Fbdev Backend] ABS range ({},{}) is the display ({}x{}) "
+                                 "transposed — scaling touch by the display size",
+                                 abs_x.maximum, abs_y.maximum, screen_width_, screen_height_);
                 } else if (!needs_calibration_ &&
                            helix::has_abs_display_mismatch(abs_x.maximum, abs_y.maximum,
                                                            screen_width_, screen_height_)) {
@@ -369,7 +366,7 @@ lv_indev_t* DisplayBackendFbdev::create_input_pointer() {
                     // resolution-independent and LVGL maps them correctly.
                     needs_calibration_ = true;
                     spdlog::warn("[Fbdev Backend] ABS range ({},{}) mismatches display "
-                                 "({}x{}) — forcing calibration",
+                                 "({}x{}) — panel needs affine calibration",
                                  abs_x.maximum, abs_y.maximum, screen_width_, screen_height_);
                 }
             } else {
@@ -384,7 +381,7 @@ lv_indev_t* DisplayBackendFbdev::create_input_pointer() {
     // Check for touch axis configuration via environment variables
     // HELIX_TOUCH_SWAP_AXES=1 - swap X and Y axes
     const char* swap_axes = std::getenv("HELIX_TOUCH_SWAP_AXES");
-    if (swap_axes != nullptr && strcmp(swap_axes, "1") == 0) {
+    if (helix::env_truthy(swap_axes)) {
         spdlog::info("[Fbdev Backend] Touch axes swapped (HELIX_TOUCH_SWAP_AXES=1)");
         lv_evdev_set_swap_axes(touch_, true);
     }
@@ -417,41 +414,37 @@ lv_indev_t* DisplayBackendFbdev::create_input_pointer() {
     const bool env_range_override = env_min_x && env_max_x && env_min_y && env_max_y;
     const bool env_swap_override = swap_axes != nullptr;
     const helix::TouchRangeSettings stored_range = helix::load_touch_range();
+    // Asked of the display, not of `/display/rotate`, and via the same helper the
+    // calibration solver gates on - the key is only the request, and it differs
+    // from the applied rotation both ways (CLI/env rotation with no key; a failed
+    // DRM->fbdev rotation fallback leaving the key set on an unrotated display).
+    // This runs from create_input_pointer(), which DisplayManager calls after it
+    // applies rotation, so the display is already at its final rotation.
+    const int applied_rotation = display_rotation_degrees();
+    const helix::TouchRangeSource range_source =
+        helix::resolve_touch_range_source(env_range_override, stored_range, applied_rotation);
     if (env_range_override) {
         spdlog::info("[Fbdev Backend] Touch range source: environment override{}",
                      stored_range.valid ? " (stored calibration range ignored)" : "");
-    } else if (stored_range.valid) {
-        // A stored range solved on a rotated panel folds the rotation into
-        // (min,max,swap) and double-applies it at runtime
-        // (prestonbrown/helixscreen#1394). The range stage post-dates the
-        // rotation-blind solver by days, so any stored range on a rotated
-        // display is from the broken window: ignore it and ride the
-        // affine-only path. Asked of the display, not of `/display/rotate`,
-        // and via the same helper the calibration solver gates on - the key
-        // is only the request, and it differs from the applied rotation both
-        // ways (CLI/env rotation with no key; a failed DRM->fbdev rotation
-        // fallback leaving the key set on an unrotated display). This runs
-        // from create_input_pointer(), which DisplayManager calls after it
-        // applies rotation, so the display is already at its final rotation.
-        const int applied_rotation = display_rotation_degrees();
-        if (applied_rotation != 0) {
-            spdlog::warn("[Fbdev Backend] Ignoring stored touch range on a {}°-rotated display"
-                         " - solved through the rotation, affine-only path applies",
-                         applied_rotation);
-        } else {
-            if (!env_swap_override) {
-                lv_evdev_set_swap_axes(touch_, stored_range.swap_axes);
-            }
-            lv_evdev_set_calibration(touch_, stored_range.min_x, stored_range.min_y,
-                                     stored_range.max_x, stored_range.max_y);
-            spdlog::info("[Fbdev Backend] Touch range source: stored calibration "
-                         "X({}..{}) Y({}..{}) swap={}{}",
-                         stored_range.min_x, stored_range.max_x, stored_range.min_y,
-                         stored_range.max_y, stored_range.swap_axes,
-                         env_swap_override ? " (swap held by environment override)" : "");
+    } else if (range_source == helix::TouchRangeSource::Stored) {
+        if (!env_swap_override) {
+            lv_evdev_set_swap_axes(touch_, stored_range.swap_axes);
         }
+        lv_evdev_set_calibration(touch_, stored_range.min_x, stored_range.min_y, stored_range.max_x,
+                                 stored_range.max_y);
+        spdlog::info("[Fbdev Backend] Touch range source: stored calibration "
+                     "X({}..{}) Y({}..{}) swap={}{}",
+                     stored_range.min_x, stored_range.max_x, stored_range.min_y, stored_range.max_y,
+                     stored_range.swap_axes,
+                     env_swap_override ? " (swap held by environment override)" : "");
+    } else if (stored_range.valid) {
+        spdlog::warn("[Fbdev Backend] Ignoring stored touch range on a {}°-rotated display"
+                     " - not stamped as solved unrotated (rotation={}), affine-only path applies",
+                     applied_rotation, stored_range.capture_rotation);
     } else {
-        spdlog::info("[Fbdev Backend] Touch range source: kernel/MT-declared ABS range");
+        spdlog::info("[Fbdev Backend] Touch range source: {}",
+                     transposed_guess ? "display size (declared range is the display transposed)"
+                                      : "kernel/MT-declared ABS range");
     }
 
     // Load affine calibration from config (saved by calibration wizard)
@@ -462,24 +455,23 @@ lv_indev_t* DisplayBackendFbdev::create_input_pointer() {
     // those panels now ride on evdev's linear scaling applied above. The v17→v18
     // migration set recheck_pending; decide here, where the device's resistive nature
     // and live ABS range are known.
-    if (helix::Config* cfg = helix::Config::get_instance()) {
-        bool recheck_pending = cfg->get<bool>("/input/calibration/recheck_pending", false);
-        if (recheck_pending) {
-            bool is_resistive = helix::is_resistive_touchscreen_name(dev_name);
-            bool abs_mismatch =
-                got_range && helix::has_abs_display_mismatch(abs_x.maximum, abs_y.maximum,
-                                                             screen_width_, screen_height_);
-            if (helix::should_invalidate_legacy_calibration(recheck_pending, is_resistive,
-                                                            abs_mismatch)) {
-                spdlog::info("[Fbdev Backend] Invalidating legacy pre-#943 affine calibration "
-                             "(non-resistive panel, ABS/display mismatch)");
-                calibration_.valid = false;
-                cfg->set<bool>("/input/calibration/valid", false);
-            }
-            // One-shot: clear the flag regardless of the decision above.
-            cfg->set<bool>("/input/calibration/recheck_pending", false);
-            cfg->save();
+    helix::Config* cfg = helix::Config::get_instance();
+    bool recheck_pending = cfg->get<bool>("/input/calibration/recheck_pending", false);
+    if (recheck_pending) {
+        bool is_resistive = helix::is_resistive_touchscreen_name(dev_name);
+        bool abs_mismatch =
+            got_range && helix::has_abs_display_mismatch(abs_x.maximum, abs_y.maximum,
+                                                         screen_width_, screen_height_);
+        if (helix::should_invalidate_legacy_calibration(recheck_pending, is_resistive,
+                                                        abs_mismatch)) {
+            spdlog::info("[Fbdev Backend] Invalidating legacy pre-#943 affine calibration "
+                         "(non-resistive panel, ABS/display mismatch)");
+            calibration_.valid = false;
+            cfg->set<bool>("/input/calibration/valid", false);
         }
+        // One-shot: clear the flag regardless of the decision above.
+        cfg->set<bool>("/input/calibration/recheck_pending", false);
+        cfg->save();
     }
 
     // needs_calibration_ stays a STABLE capability flag: "this panel uses affine
@@ -502,6 +494,16 @@ lv_indev_t* DisplayBackendFbdev::create_input_pointer() {
     calibration_context_.raw_source = [raw_indev](int& x, int& y) {
         return lv_evdev_get_last_raw(raw_indev, &x, &y);
     };
+    // Only the transposed guess is ever re-programmed from a sample: the first
+    // touch past the display edge, within the declared range, disproves it.
+    const bool display_size_live =
+        transposed_guess && range_source == helix::TouchRangeSource::Declared;
+    if (display_size_live) {
+        calibration_context_.reprogram_range = [raw_indev](int min_x, int min_y, int max_x,
+                                                           int max_y) {
+            lv_evdev_set_calibration(raw_indev, min_x, min_y, max_x, max_y);
+        };
+    }
 
     // Always install the calibrated read callback — it handles both rotation
     // transform and affine calibration independently. Without this, rotation
@@ -530,8 +532,9 @@ lv_indev_t* DisplayBackendFbdev::create_input_pointer() {
         pipeline.stored = stored_range;
         // Mirrors the swap decision above: an environment variable that is present
         // at all holds the swap, even when it says 0.
-        pipeline.swap_axes = env_swap_override ? (strcmp(swap_axes, "1") == 0)
-                                               : (stored_range.valid && stored_range.swap_axes);
+        pipeline.swap_axes = env_swap_override ? helix::env_truthy(swap_axes)
+                                               : (range_source == helix::TouchRangeSource::Stored &&
+                                                  stored_range.swap_axes);
         if (env_range_override) {
             pipeline.source = helix::TouchRangeSource::Environment;
             pipeline.configured_valid = true;
@@ -539,13 +542,20 @@ lv_indev_t* DisplayBackendFbdev::create_input_pointer() {
             pipeline.max_x = std::atoi(env_max_x);
             pipeline.min_y = std::atoi(env_min_y);
             pipeline.max_y = std::atoi(env_max_y);
-        } else if (stored_range.valid) {
+        } else if (range_source == helix::TouchRangeSource::Stored) {
             pipeline.source = helix::TouchRangeSource::Stored;
             pipeline.configured_valid = true;
             pipeline.min_x = stored_range.min_x;
             pipeline.max_x = stored_range.max_x;
             pipeline.min_y = stored_range.min_y;
             pipeline.max_y = stored_range.max_y;
+        } else if (display_size_live) {
+            pipeline.source = helix::TouchRangeSource::DisplaySize;
+            pipeline.configured_valid = true;
+            pipeline.min_x = 0;
+            pipeline.max_x = screen_width_;
+            pipeline.min_y = 0;
+            pipeline.max_y = screen_height_;
         } else {
             // lv_evdev runs its own EVIOCGABS on open, so the effective range is
             // the declared one. When our query failed we do not know what it
@@ -563,10 +573,12 @@ lv_indev_t* DisplayBackendFbdev::create_input_pointer() {
     spdlog::info("[Fbdev Backend] Evdev touch input created on {}", touch_path);
 
     // Detect USB HID mouse (in addition to touchscreen)
+    std::string mouse_path;
     const char* mouse_env = std::getenv("HELIX_MOUSE_DEVICE");
     if (mouse_env && mouse_env[0] != '\0') {
         mouse_ = lv_evdev_create(LV_INDEV_TYPE_POINTER, mouse_env);
         if (mouse_) {
+            mouse_path = mouse_env;
             spdlog::info("[Fbdev Backend] Mouse created on {} (env override)", mouse_env);
         }
     }
@@ -576,6 +588,7 @@ lv_indev_t* DisplayBackendFbdev::create_input_pointer() {
         if (mouse_dev) {
             mouse_ = lv_evdev_create(LV_INDEV_TYPE_POINTER, mouse_dev->path.c_str());
             if (mouse_) {
+                mouse_path = mouse_dev->path;
                 spdlog::info("[Fbdev Backend] Mouse created on {} ({})", mouse_dev->path,
                              mouse_dev->name);
             }
@@ -593,6 +606,20 @@ lv_indev_t* DisplayBackendFbdev::create_input_pointer() {
         lv_obj_clear_flag(cursor_obj, LV_OBJ_FLAG_CLICKABLE);
         lv_indev_set_cursor(mouse_, cursor_obj);
         spdlog::info("[Fbdev Backend] Mouse cursor enabled");
+    }
+
+    // LVGL turns every pointer sample by the display's rotation. That is what a
+    // touch panel's samples need, but a relative pointer's position is already
+    // on the picture. The hook fronts both and takes each kind from the device.
+    if (const auto kind = pointer_frames_.install(touch_, touch_path, true, &touch_)) {
+        spdlog::info("[Fbdev Backend] Pointer frame hook installed on {} ({} device)", touch_path,
+                     helix::input::pointer_kind_name(*kind));
+    }
+    if (mouse_ != nullptr) {
+        if (const auto kind = pointer_frames_.install(mouse_, mouse_path, true, &mouse_)) {
+            spdlog::info("[Fbdev Backend] Mouse frame hook installed on {} ({} device)", mouse_path,
+                         helix::input::pointer_kind_name(*kind));
+        }
     }
 
     return touch_;
@@ -642,91 +669,19 @@ std::string DisplayBackendFbdev::auto_detect_touch_device() const {
 
     // Check for common misconfiguration: touch_device at root or display level
     // instead of under /input/
-    if (cfg) {
-        auto root_touch = cfg->get<std::string>("/touch_device", "");
-        auto display_touch = cfg->get<std::string>("/display/touch_device", "");
-        if (!root_touch.empty() || !display_touch.empty()) {
-            spdlog::warn("[Fbdev Backend] Found 'touch_device' at config root or display section, "
-                         "but it should be under 'input'. "
-                         "See docs/user/CONFIGURATION.md");
-        }
+    auto root_touch = cfg->get<std::string>("/touch_device", "");
+    auto display_touch = cfg->get<std::string>("/display/touch_device", "");
+    if (!root_touch.empty() || !display_touch.empty()) {
+        spdlog::warn("[Fbdev Backend] Found 'touch_device' at config root or display section, "
+                     "but it should be under 'input'. "
+                     "See docs/user/CONFIGURATION.md");
     }
 
     // Priority 3: Capability-based detection using Linux sysfs
-    // Scan /dev/input/eventN devices and check for touch capabilities
     const char* input_dir = "/dev/input";
-    DIR* dir = opendir(input_dir);
-    if (dir == nullptr) {
-        spdlog::debug("[Fbdev Backend] Cannot open {}", input_dir);
-        return "";
-    }
+    auto touch = helix::input::find_touch_device(input_dir, "/sys/class/input");
 
-    std::string best_device;
-    std::string best_name;
-    int best_score = -1;
-    int best_event_num = INT_MAX;
-
-    struct dirent* entry;
-    while ((entry = readdir(dir)) != nullptr) {
-        // Look for eventN devices
-        if (strncmp(entry->d_name, "event", 5) != 0) {
-            continue;
-        }
-
-        // Extract event number
-        int event_num = -1;
-        if (sscanf(entry->d_name, "event%d", &event_num) != 1 || event_num < 0) {
-            continue;
-        }
-
-        std::string device_path = std::string(input_dir) + "/" + entry->d_name;
-
-        // Check if accessible
-        if (access(device_path.c_str(), R_OK) != 0) {
-            continue;
-        }
-
-        // Get device name from sysfs (do this once, before capability check)
-        std::string name = helix::input::get_input_device_name(event_num);
-
-        // Check for ABS capabilities (single-touch or multitouch)
-        helix::AbsCapabilities dev_abs_caps;
-        if (!helix::input::get_input_touch_capabilities(event_num, &dev_abs_caps)) {
-            spdlog::trace("[Fbdev Backend] {} ({}) - no touch capabilities", device_path, name);
-            continue;
-        }
-
-        // Score this candidate
-        int score = 0;
-
-        bool is_known = is_known_touchscreen_name(name);
-        if (is_known)
-            score += 2;
-
-        bool is_direct = has_direct_input_prop(event_num);
-        if (is_direct)
-            score += 2;
-
-        std::string phys = helix::input::get_input_device_phys(event_num);
-        bool is_usb = helix::is_usb_input_phys(phys);
-        if (is_usb)
-            score += 1;
-
-        spdlog::debug("[Fbdev Backend] {} ({}) score={} [known={} direct={} usb={} phys='{}']",
-                      device_path, name, score, is_known, is_direct, is_usb, phys);
-
-        // Best score wins; ties broken by lowest event number
-        if (score > best_score || (score == best_score && event_num < best_event_num)) {
-            best_device = device_path;
-            best_name = name;
-            best_score = score;
-            best_event_num = event_num;
-        }
-    }
-
-    closedir(dir);
-
-    if (best_device.empty()) {
+    if (!touch) {
         // No device with ABS_X/ABS_Y found. Fall back to first accessible event device
         // so VNC mouse input (uinput) or other pointer sources still work.
         DIR* fallback_dir = opendir(input_dir);
@@ -752,9 +707,8 @@ std::string DisplayBackendFbdev::auto_detect_touch_device() const {
         return "";
     }
 
-    spdlog::info("[Fbdev Backend] Selected touchscreen: {} ({}) [score={}]", best_device, best_name,
-                 best_score);
-    return best_device;
+    spdlog::info("[Fbdev Backend] Selected touchscreen: {} ({})", touch->path, touch->name);
+    return touch->path;
 }
 
 void DisplayBackendFbdev::suppress_console() {
@@ -1034,7 +988,7 @@ void DisplayBackendFbdev::enable_affine_calibration() {
 }
 
 bool DisplayBackendFbdev::apply_touch_range(bool swap_axes, int min_x, int min_y, int max_x,
-                                            int max_y) {
+                                            int max_y, helix::TouchRangeSource source) {
     if (!touch_) {
         return false;
     }
@@ -1047,8 +1001,7 @@ bool DisplayBackendFbdev::apply_touch_range(bool swap_axes, int min_x, int min_y
     }
     lv_evdev_set_swap_axes(touch_, swap_axes);
     lv_evdev_set_calibration(touch_, min_x, min_y, max_x, max_y);
-    helix::set_touch_configured_range(swap_axes, min_x, min_y, max_x, max_y,
-                                      helix::TouchRangeSource::Stored);
+    helix::set_touch_configured_range(swap_axes, min_x, min_y, max_x, max_y, source);
     spdlog::info("[Fbdev Backend] Touch range re-programmed: swap={} X({}..{}) Y({}..{})",
                  swap_axes, min_x, max_x, min_y, max_y);
     return true;
@@ -1060,15 +1013,6 @@ void DisplayBackendFbdev::clear_calibration() {
     calibration_ = helix::TouchCalibration{};
     calibration_context_.calibration = calibration_;
     spdlog::info("[Fbdev Backend] Stored calibration cleared — device is uncalibrated");
-}
-
-void DisplayBackendFbdev::set_display_rotation(lv_display_rotation_t rot, int phys_w, int phys_h) {
-    // No-op for fbdev — LVGL's indev_pointer_proc() already calls
-    // lv_display_rotate_point() to transform touch coordinates for
-    // the current display rotation. No manual touch transform needed.
-    (void)rot;
-    (void)phys_w;
-    (void)phys_h;
 }
 
 #endif // HELIX_DISPLAY_FBDEV

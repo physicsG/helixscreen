@@ -1,14 +1,23 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "../helix_test_fixture.h"
 #include "ams_backend_afc.h"
 #include "ams_backend_happy_hare.h"
 #include "ams_types.h"
+#include "test_helpers/afc_test_access.h"
+#include "test_helpers/happy_hare_test_access.h"
 
 #include <algorithm>
 #include <vector>
 
 #include "../catch_amalgamated.hpp"
+
+using helix::AmsUnit;
+using helix::BufferHealth;
+using helix::SlotError;
+using helix::SlotInfo;
+using helix::SlotStatus;
 
 // ============================================================================
 // Task 1: Data Model Tests — SlotError, BufferHealth, SlotInfo, AmsUnit
@@ -163,6 +172,34 @@ TEST_CASE("AmsUnit::has_any_error with mixed error states", "[ams][error_state]"
     REQUIRE(unit.has_any_error());
 }
 
+TEST_CASE("A BLOCKED lane is an error-severity fault", "[ams][error_state]") {
+    SlotInfo slot;
+    slot.status = SlotStatus::BLOCKED;
+    CHECK(slot.has_fault());
+    CHECK(slot.fault_severity() == SlotError::ERROR);
+
+    SECTION("even when it carries an info-level error") {
+        slot.error = SlotError{"Jam", SlotError::INFO};
+        CHECK(slot.fault_severity() == SlotError::ERROR);
+    }
+    SECTION("a carried error keeps its own severity on a lane that is not jammed") {
+        slot.status = SlotStatus::AVAILABLE;
+        slot.error = SlotError{"Slow", SlotError::WARNING};
+        CHECK(slot.fault_severity() == SlotError::WARNING);
+    }
+}
+
+TEST_CASE("AmsUnit::has_any_error counts a BLOCKED lane", "[ams][error_state]") {
+    AmsUnit unit;
+    for (int i = 0; i < 4; ++i) {
+        SlotInfo slot;
+        slot.slot_index = i;
+        slot.status = (i == 2) ? SlotStatus::BLOCKED : SlotStatus::AVAILABLE;
+        unit.slots.push_back(slot);
+    }
+    CHECK(unit.has_any_error());
+}
+
 TEST_CASE("AmsUnit::has_any_error with empty slots vector", "[ams][error_state]") {
     AmsUnit unit;
     unit.unit_index = 0;
@@ -174,6 +211,8 @@ TEST_CASE("AmsUnit::has_any_error with empty slots vector", "[ams][error_state]"
 // ============================================================================
 // Task 2: AFC Backend — Slot Errors from Lane Status
 // ============================================================================
+
+namespace helix {
 
 // Re-use the test helper from test_ams_backend_afc.cpp pattern
 class AfcErrorStateHelper : public AmsBackendAfc {
@@ -205,7 +244,7 @@ class AfcErrorStateHelper : public AmsBackendAfc {
 
         system_info_.units.push_back(unit);
         system_info_.total_slots = count;
-        slots_.initialize("Box Turtle 1", names);
+        AfcTestAccess::slots(*this).initialize("Box Turtle 1", names);
     }
 
     void feed_status_update(const nlohmann::json& params_inner) {
@@ -233,16 +272,16 @@ class AfcErrorStateHelper : public AmsBackendAfc {
     }
 
     void set_buffer_names(const std::vector<std::string>& names) {
-        buffer_names_ = names;
+        AfcTestAccess::buffer_names(*this) = names;
     }
 
     const SlotInfo* get_slot(int idx) const {
-        const auto* entry = slots_.get(idx);
+        const auto* entry = AfcTestAccess::slots(*this).get(idx);
         return entry ? &entry->info : nullptr;
     }
 
     SlotInfo* get_slot_mut(int idx) {
-        auto* entry = slots_.get_mut(idx);
+        auto* entry = AfcTestAccess::slots(*this).get_mut(idx);
         return entry ? &entry->info : nullptr;
     }
 
@@ -250,9 +289,10 @@ class AfcErrorStateHelper : public AmsBackendAfc {
         return system_info_;
     }
 };
+} // namespace helix
 
 TEST_CASE("AFC lane error: Error status populates slot.error", "[ams][afc][error_state]") {
-    AfcErrorStateHelper helper;
+    helix::AfcErrorStateHelper helper;
     helper.initialize_test_lanes_with_slots(4);
 
     // Feed lane1 with Error status
@@ -269,7 +309,7 @@ TEST_CASE("AFC lane error: Error status populates slot.error", "[ams][afc][error
 }
 
 TEST_CASE("AFC lane error: default message when no system message", "[ams][afc][error_state]") {
-    AfcErrorStateHelper helper;
+    helix::AfcErrorStateHelper helper;
     helper.initialize_test_lanes_with_slots(4);
 
     nlohmann::json lane_data;
@@ -283,7 +323,7 @@ TEST_CASE("AFC lane error: default message when no system message", "[ams][afc][
 }
 
 TEST_CASE("AFC lane error: message flows from system message", "[ams][afc][error_state]") {
-    AfcErrorStateHelper helper;
+    helix::AfcErrorStateHelper helper;
     helper.initialize_test_lanes_with_slots(4);
 
     // First feed system-level message
@@ -304,7 +344,7 @@ TEST_CASE("AFC lane error: message flows from system message", "[ams][afc][error
 }
 
 TEST_CASE("AFC lane error: severity from system message type", "[ams][afc][error_state]") {
-    AfcErrorStateHelper helper;
+    helix::AfcErrorStateHelper helper;
     helper.initialize_test_lanes_with_slots(4);
 
     // Feed system warning message
@@ -322,8 +362,9 @@ TEST_CASE("AFC lane error: severity from system message type", "[ams][afc][error
     REQUIRE(slot->error->severity == SlotError::WARNING);
 }
 
-TEST_CASE("AFC lane error: cleared when status leaves Error", "[ams][afc][error_state]") {
-    AfcErrorStateHelper helper;
+TEST_CASE_METHOD(HelixTestFixture, "AFC lane error: cleared when status leaves Error",
+                 "[ams][afc][error_state]") {
+    helix::AfcErrorStateHelper helper;
     helper.initialize_test_lanes_with_slots(4);
 
     // Put lane into error
@@ -350,7 +391,7 @@ TEST_CASE("AFC lane error: empty errored lane is EMPTY, not present", "[ams][afc
     // lane as empty, NOT as "filament present, not loaded". Regression for the
     // catch-all in parse_afc_stepper that previously defaulted unknown statuses
     // (including "Error") to AVAILABLE -> is_present() == true.
-    AfcErrorStateHelper helper;
+    helix::AfcErrorStateHelper helper;
     helper.initialize_test_lanes_with_slots(4); // slots start AVAILABLE
 
     nlohmann::json lane_data;
@@ -378,7 +419,7 @@ TEST_CASE("AFC lane error: errored lane WITH prep sensor stays present",
     // Counterpart to the empty-lane case: if the prep sensor sees filament, an
     // "Error" status (e.g. a jam) must keep the lane present so the user sees
     // there is still filament to clear.
-    AfcErrorStateHelper helper;
+    helix::AfcErrorStateHelper helper;
     helper.initialize_test_lanes_with_slots(4);
 
     nlohmann::json lane_data;
@@ -395,7 +436,7 @@ TEST_CASE("AFC lane error: errored lane WITH prep sensor stays present",
 }
 
 TEST_CASE("AFC lane error: only errored lane gets error, not others", "[ams][afc][error_state]") {
-    AfcErrorStateHelper helper;
+    helix::AfcErrorStateHelper helper;
     helper.initialize_test_lanes_with_slots(4);
 
     nlohmann::json lane_error;
@@ -417,7 +458,7 @@ TEST_CASE("AFC lane error: only errored lane gets error, not others", "[ams][afc
 
 TEST_CASE("AFC buffer health: parsed to unit level from buffer update",
           "[ams][afc][buffer_health]") {
-    AfcErrorStateHelper helper;
+    helix::AfcErrorStateHelper helper;
     helper.initialize_test_lanes_with_slots(4);
     helper.set_buffer_names({"Turtle_1"});
 
@@ -441,7 +482,7 @@ TEST_CASE("AFC buffer health: parsed to unit level from buffer update",
 }
 
 TEST_CASE("AFC buffer health: no fault when distance_to_fault is 0", "[ams][afc][buffer_health]") {
-    AfcErrorStateHelper helper;
+    helix::AfcErrorStateHelper helper;
     helper.initialize_test_lanes_with_slots(4);
     helper.set_buffer_names({"Turtle_1"});
 
@@ -459,7 +500,7 @@ TEST_CASE("AFC buffer health: no fault when distance_to_fault is 0", "[ams][afc]
 
 TEST_CASE("AFC buffer health: fault_detection_enabled false stored on unit",
           "[ams][afc][buffer_health]") {
-    AfcErrorStateHelper helper;
+    helix::AfcErrorStateHelper helper;
     helper.initialize_test_lanes_with_slots(4);
     helper.set_buffer_names({"Turtle_1"});
 
@@ -478,6 +519,8 @@ TEST_CASE("AFC buffer health: fault_detection_enabled false stored on unit",
 // ============================================================================
 // Task 4: Happy Hare Backend — Slot Errors from System Error
 // ============================================================================
+
+namespace helix {
 
 class HappyHareErrorStateHelper : public AmsBackendHappyHare {
   public:
@@ -510,9 +553,9 @@ class HappyHareErrorStateHelper : public AmsBackendHappyHare {
         for (int i = 0; i < count; ++i) {
             slot_names.push_back(std::to_string(i));
         }
-        slots_.initialize("MMU", slot_names);
+        HappyHareTestAccess::slots(*this).initialize("MMU", slot_names);
         for (int i = 0; i < count; ++i) {
-            auto* entry = slots_.get_mut(i);
+            auto* entry = HappyHareTestAccess::slots(*this).get_mut(i);
             if (entry) {
                 entry->info.status = SlotStatus::AVAILABLE;
                 entry->info.color_rgb = AMS_DEFAULT_SLOT_COLOR;
@@ -533,7 +576,7 @@ class HappyHareErrorStateHelper : public AmsBackendHappyHare {
     }
 
     const SlotInfo* get_slot(int idx) const {
-        const auto* entry = slots_.get(idx);
+        const auto* entry = HappyHareTestAccess::slots(*this).get(idx);
         return entry ? &entry->info : nullptr;
     }
 
@@ -545,22 +588,26 @@ class HappyHareErrorStateHelper : public AmsBackendHappyHare {
         return AmsErrorHelper::success();
     }
 };
+} // namespace helix
 
-TEST_CASE("Happy Hare error: system error sets slot.error on current_slot",
+// Happy Hare's fault shape: print_state pause_locked with reason_for_pause set,
+// and "" once the pause ends. It publishes no Error action.
+namespace {
+nlohmann::json hh_fault(const char* reason) {
+    return {{"print_state", "pause_locked"}, {"reason_for_pause", reason}};
+}
+nlohmann::json hh_pause_ended() {
+    return {{"print_state", "printing"}, {"reason_for_pause", ""}};
+}
+} // namespace
+
+TEST_CASE("Happy Hare error: a fault sets slot.error on current_slot",
           "[ams][happy_hare][error_state]") {
-    HappyHareErrorStateHelper helper;
+    helix::HappyHareErrorStateHelper helper;
     helper.initialize_test_gates(4);
 
-    // Set current slot to gate 2
-    nlohmann::json idle_state;
-    idle_state["gate"] = 2;
-    idle_state["action"] = "Idle";
-    helper.feed_mmu_state(idle_state);
-
-    // Transition to error
-    nlohmann::json error_state;
-    error_state["action"] = "Error";
-    helper.feed_mmu_state(error_state);
+    helper.feed_mmu_state({{"gate", 2}, {"action", "Idle"}});
+    helper.feed_mmu_state(hh_fault("Gate 2 is empty!"));
 
     const auto* slot = helper.get_slot(2);
     REQUIRE(slot != nullptr);
@@ -568,91 +615,39 @@ TEST_CASE("Happy Hare error: system error sets slot.error on current_slot",
     REQUIRE(slot->error->severity == SlotError::ERROR);
 }
 
-TEST_CASE("Happy Hare error: error cleared on IDLE transition", "[ams][happy_hare][error_state]") {
-    HappyHareErrorStateHelper helper;
+TEST_CASE("Happy Hare error: error cleared when the pause ends", "[ams][happy_hare][error_state]") {
+    helix::HappyHareErrorStateHelper helper;
     helper.initialize_test_gates(4);
 
-    // Set gate and enter error
-    nlohmann::json setup;
-    setup["gate"] = 1;
-    setup["action"] = "Idle";
-    helper.feed_mmu_state(setup);
-
-    nlohmann::json error_state;
-    error_state["action"] = "Error";
-    helper.feed_mmu_state(error_state);
-
+    helper.feed_mmu_state({{"gate", 1}, {"action", "Idle"}});
+    helper.feed_mmu_state(hh_fault("Gate 1 is empty!"));
     REQUIRE(helper.get_slot(1)->error.has_value());
 
-    // Recover to idle
-    nlohmann::json idle_state;
-    idle_state["action"] = "Idle";
-    helper.feed_mmu_state(idle_state);
-
+    helper.feed_mmu_state(hh_pause_ended());
     REQUIRE_FALSE(helper.get_slot(1)->error.has_value());
-}
-
-TEST_CASE("Happy Hare error: error message from operation_detail",
-          "[ams][happy_hare][error_state]") {
-    HappyHareErrorStateHelper helper;
-    helper.initialize_test_gates(4);
-
-    nlohmann::json setup;
-    setup["gate"] = 0;
-    setup["action"] = "Idle";
-    helper.feed_mmu_state(setup);
-
-    nlohmann::json error_state;
-    error_state["action"] = "Error";
-    helper.feed_mmu_state(error_state);
-
-    const auto* slot = helper.get_slot(0);
-    REQUIRE(slot != nullptr);
-    REQUIRE(slot->error.has_value());
-    // The message should come from the action string (operation_detail)
-    REQUIRE_FALSE(slot->error->message.empty());
 }
 
 TEST_CASE("Happy Hare error: only current_slot gets error, not all slots",
           "[ams][happy_hare][error_state]") {
-    HappyHareErrorStateHelper helper;
+    helix::HappyHareErrorStateHelper helper;
     helper.initialize_test_gates(4);
 
-    nlohmann::json setup;
-    setup["gate"] = 2;
-    setup["action"] = "Idle";
-    helper.feed_mmu_state(setup);
+    helper.feed_mmu_state({{"gate", 2}, {"action", "Idle"}});
+    helper.feed_mmu_state(hh_fault("Gate 2 is empty!"));
 
-    nlohmann::json error_state;
-    error_state["action"] = "Error";
-    helper.feed_mmu_state(error_state);
-
-    // Only slot 2 should have error
     REQUIRE(helper.get_slot(2)->error.has_value());
     REQUIRE_FALSE(helper.get_slot(0)->error.has_value());
     REQUIRE_FALSE(helper.get_slot(1)->error.has_value());
     REQUIRE_FALSE(helper.get_slot(3)->error.has_value());
 }
 
-TEST_CASE("Happy Hare error: reason_for_pause used as error message when available",
+TEST_CASE("Happy Hare error: reason_for_pause is the slot error message",
           "[ams][happy_hare][error_state]") {
-    HappyHareErrorStateHelper helper;
+    helix::HappyHareErrorStateHelper helper;
     helper.initialize_test_gates(4);
 
-    nlohmann::json setup;
-    setup["gate"] = 0;
-    setup["action"] = "Idle";
-    setup["reason_for_pause"] = "";
-    helper.feed_mmu_state(setup);
-
-    // Feed reason_for_pause before error
-    nlohmann::json reason;
-    reason["reason_for_pause"] = "Filament not detected at extruder after load";
-    helper.feed_mmu_state(reason);
-
-    nlohmann::json error_state;
-    error_state["action"] = "Error";
-    helper.feed_mmu_state(error_state);
+    helper.feed_mmu_state({{"gate", 0}, {"action", "Idle"}, {"reason_for_pause", ""}});
+    helper.feed_mmu_state(hh_fault("Filament not detected at extruder after load"));
 
     const auto* slot = helper.get_slot(0);
     REQUIRE(slot != nullptr);
@@ -662,15 +657,12 @@ TEST_CASE("Happy Hare error: reason_for_pause used as error message when availab
 
 TEST_CASE("Happy Hare error: no slot error when no gate selected",
           "[ams][happy_hare][error_state]") {
-    HappyHareErrorStateHelper helper;
+    helix::HappyHareErrorStateHelper helper;
     helper.initialize_test_gates(4);
 
     // No gate set (default is -1)
-    nlohmann::json error_state;
-    error_state["action"] = "Error";
-    helper.feed_mmu_state(error_state);
+    helper.feed_mmu_state(hh_fault("Failed to home the selector"));
 
-    // No slot should have error since current_slot is -1
     for (int i = 0; i < 4; ++i) {
         REQUIRE_FALSE(helper.get_slot(i)->error.has_value());
     }
@@ -681,7 +673,7 @@ TEST_CASE("Happy Hare error: no slot error when no gate selected",
 // ============================================================================
 
 TEST_CASE("AFC buffer health: error_sensitivity parsed from JSON", "[ams][afc][buffer_health]") {
-    AfcErrorStateHelper helper;
+    helix::AfcErrorStateHelper helper;
     helper.initialize_test_lanes_with_slots(4);
     helper.set_buffer_names({"Turtle_1"});
 

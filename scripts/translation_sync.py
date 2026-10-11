@@ -43,7 +43,10 @@ from translations.glossary import write_glossary
 PROJECT_ROOT = Path(__file__).parent.parent
 DEFAULT_XML_DIR = PROJECT_ROOT / "ui_xml"
 DEFAULT_YAML_DIR = PROJECT_ROOT / "translations"
-DEFAULT_CPP_DIR = PROJECT_ROOT / "src"
+# lv_tr() strings live in src/ and in headers under include/; a root missing
+# here means its keys are never added by a sync (obsolete detection still sees
+# them through the repo-root reference scan).
+DEFAULT_CPP_DIRS = [PROJECT_ROOT / "src", PROJECT_ROOT / "include"]
 DEFAULT_GLOSSARY = PROJECT_ROOT / "translations" / "GLOSSARY.md"
 
 
@@ -51,7 +54,7 @@ def cmd_sync(args):
     """Run sync command."""
     xml_dir = Path(args.xml_dir)
     yaml_dir = Path(args.yaml_dir)
-    cpp_dir = Path(args.cpp_dir) if args.cpp_dir else None
+    cpp_dirs = [Path(p) for p in args.cpp_dir] if args.cpp_dir else DEFAULT_CPP_DIRS
 
     if not xml_dir.exists():
         print(f"Error: XML directory not found: {xml_dir}")
@@ -63,7 +66,7 @@ def cmd_sync(args):
 
     print(f"Syncing translations...")
     print(f"  XML source:  {xml_dir}")
-    if cpp_dir:
+    for cpp_dir in cpp_dirs:
         print(f"  C++ source:  {cpp_dir}")
     print(f"  YAML target: {yaml_dir}")
     print(f"  Dry run:     {args.dry_run}")
@@ -74,7 +77,7 @@ def cmd_sync(args):
         yaml_dir,
         dry_run=args.dry_run,
         with_sources=args.with_sources,
-        cpp_dir=cpp_dir,
+        cpp_dirs=cpp_dirs,
     )
 
     if result.new_keys_found == 0:
@@ -146,7 +149,7 @@ def cmd_obsolete(args):
     """Run obsolete command."""
     xml_dir = Path(args.xml_dir)
     yaml_dir = Path(args.yaml_dir)
-    cpp_dir = Path(args.cpp_dir) if args.cpp_dir else None
+    cpp_dirs = [Path(p) for p in args.cpp_dir] if args.cpp_dir else DEFAULT_CPP_DIRS
 
     if not xml_dir.exists():
         print(f"Error: XML directory not found: {xml_dir}")
@@ -161,7 +164,7 @@ def cmd_obsolete(args):
         yaml_dir,
         action=args.action,
         dry_run=args.dry_run,
-        cpp_dir=cpp_dir,
+        cpp_dirs=cpp_dirs,
     )
 
     if len(result.obsolete_keys) == 0:
@@ -204,8 +207,9 @@ def main():
     )
     parser.add_argument(
         "--cpp-dir",
-        default=str(DEFAULT_CPP_DIR),
-        help=f"C++ source directory (default: {DEFAULT_CPP_DIR})",
+        action="append",
+        default=None,
+        help="C++ source directory; repeatable (default: src/ and include/)",
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")

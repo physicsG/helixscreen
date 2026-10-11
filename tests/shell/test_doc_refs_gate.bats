@@ -4,6 +4,8 @@
 # Meta-tests for check_doc_refs.py --devel: the docs/devel dead-path and
 # dead-link gate added for the architecture overhaul.
 
+load helpers
+
 setup() {
     CHECK="$BATS_TEST_DIRNAME/../../scripts/check_doc_refs.py"
     FIX="$BATS_TEST_TMPDIR/devel"
@@ -30,6 +32,15 @@ EOF
     run python3 "$CHECK" --devel "$FIX/bad.md"
     [ "$status" -eq 1 ]
     [[ "$output" == *"zz_fixture_missing_thing.cpp"* ]]
+}
+
+@test "devel: a Makefile citation is path-checked despite having no extension" {
+    cat > "$FIX/mk.md" <<'EOF'
+Cites `mk/zz_missing/Makefile#all` which does not exist.
+EOF
+    run python3 "$CHECK" --devel "$FIX/mk.md"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"zz_missing/Makefile"* ]]
 }
 
 @test "devel: dead relative markdown link fails" {
@@ -120,7 +131,7 @@ MD
     [ "$status" -eq 0 ]
 }
 
-@test "scope: .claude/worktrees is skipped, .claude/skills is not" {
+@test "scope: .claude/worktrees is skipped, .claude/skills and .claude/rules are not" {
     # The harness keeps its live agent checkouts under .claude/worktrees/, each
     # a COMPLETE copy of this repo — CLAUDE.md, docs/ and all. A by-name prune
     # cannot express "skip that but keep .claude/skills", so the walk descended
@@ -130,20 +141,23 @@ MD
     # them with. Nothing asserted the walk's scope, which is why it survived.
     REPO="$BATS_TEST_TMPDIR/scoperepo"
     mkdir -p "$REPO/.claude/worktrees/agent-deadbeef" "$REPO/.claude/skills/thing" \
-             "$REPO/docs/devel" "$REPO/src"
+             "$REPO/.claude/rules" "$REPO/docs/devel" "$REPO/src"
     echo 'Root doc.' > "$REPO/CLAUDE.md"
     echo 'A live agent copy of the root doc.' \
         > "$REPO/.claude/worktrees/agent-deadbeef/CLAUDE.md"
     printf -- '---\nname: thing\n---\nA real skill doc.\n' \
         > "$REPO/.claude/skills/thing/SKILL.md"
+    printf -- '---\npaths:\n  - "src/**/*"\n---\nA path-scoped rule.\n' \
+        > "$REPO/.claude/rules/rule.md"
     cd "$REPO"
 
     run python3 "$CHECK" --list
     [ "$status" -eq 0 ]
     # The skills doc is deliberately in scope...
-    [[ "$output" == *".claude/skills/thing/SKILL.md"* ]]
+    contains ".claude/skills/thing/SKILL.md" "$output"
+    contains ".claude/rules/rule.md" "$output"
     # ...and the agent worktree is deliberately not.
-    [[ "$output" != *"agent-deadbeef"* ]]
+    lacks "agent-deadbeef" "$output"
     # The repo's own CLAUDE.md is still scanned, exactly once.
     [ "$(printf '%s\n' "$output" | grep -c 'scanned: CLAUDE.md$')" -eq 1 ]
 }
@@ -179,7 +193,7 @@ print(r.indexed_docs())
 "
     [ "$status" -eq 0 ]
     # Listed and present on disk -> a target. Listed but absent -> not invented.
-    [[ "$output" == *"docs/audits/A.md"* ]]
+    contains "docs/audits/A.md" "$output"
     [[ "$output" != *"docs/user/U.md"* ]]
 }
 
@@ -196,4 +210,52 @@ print(r.indexed_docs())
 "
     [ "$status" -eq 0 ]
     [ "$output" = "[]" ]
+}
+
+make_patch_fixture() {
+    # A scratch tree shaped like the repo's patch shelf: one wired LVGL patch
+    # with a creation hunk and a modification hunk.
+    mkdir -p "$BATS_TEST_TMPDIR/patches" "$BATS_TEST_TMPDIR/mk"
+    cat > "$BATS_TEST_TMPDIR/patches/zz_creates.patch" <<'EOF'
+diff --git a/src/zz_patch_created.h b/src/zz_patch_created.h
+new file mode 100644
+--- /dev/null
++++ b/src/zz_patch_created.h
+@@ -0,0 +1 @@
++int zz_patch_created(void);
+diff --git a/src/zz_modified_not_created.h b/src/zz_modified_not_created.h
+--- a/src/zz_modified_not_created.h
++++ b/src/zz_modified_not_created.h
+@@ -1 +1 @@
+-old
++new
+EOF
+    printf '$(Q)$(APPLY_PATCH) $(LVGL_DIR) $(PATCH_DIR)/zz_creates.patch "fixture patch"\n' \
+        > "$BATS_TEST_TMPDIR/mk/patches.mk"
+}
+
+@test "devel: a file a wired patch creates resolves on an unapplied tree" {
+    # The citation's existence is patch state, not doc state: a fresh clone
+    # before the first build, and a tree between reset-patches and the next
+    # apply, do not carry the file, while every built tree does. The gate
+    # resolves such citations against what patches/ create.
+    make_patch_fixture
+    cat > "$FIX/pc.md" <<'EOF'
+See `lib/lvgl/src/zz_patch_created.h` for the guard it installs.
+EOF
+    run python3 "$CHECK" --devel "$FIX/pc.md"
+    [ "$status" -eq 0 ]
+}
+
+@test "devel: a file a patch only modifies is still required to exist" {
+    # Only a creation hunk licenses the citation: a patch that merely edits a
+    # file says nothing about that file existing on an unapplied tree.
+    make_patch_fixture
+    cat > "$FIX/pm.md" <<'EOF'
+See `lib/lvgl/src/zz_modified_not_created.h` and `lib/lvgl/src/zz_never_anywhere.h`.
+EOF
+    run python3 "$CHECK" --devel "$FIX/pm.md"
+    [ "$status" -eq 1 ]
+    contains "zz_modified_not_created.h" "$output"
+    contains "zz_never_anywhere.h" "$output"
 }

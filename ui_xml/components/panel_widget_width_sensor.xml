@@ -2,11 +2,39 @@
 <!-- Copyright (C) 2025-2026 356C LLC -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <component>
+  <api>
+    <!-- Per-instance subject names, supplied by the widget at creation. They
+         must exist before this component is parsed: a binding whose subject is
+         missing at parse time is dropped permanently and silently. -->
+    <prop name="tile_icon_subject" type="string" default=""/>
+    <prop name="tile_label_subject" type="string" default=""/>
+    <prop name="tile_dir_subject" type="string" default=""/>
+    <prop name="tile_target_subject" type="string" default=""/>
+  </api>
+  <!-- Hardware gate (width_sensor_count) checked in C++ populate_widgets(). The glyph over
+       its reading and caption, or beside them when the box is too short to
+       stack: the two shapes TileSizing measures. -->
   <view name="panel_widget_width_sensor"
-        extends="lv_obj" height="100%" flex_grow="1" style_pad_all="0" flex_flow="column" style_flex_main_place="center"
-        style_flex_cross_place="center" style_flex_track_place="center" scrollable="false">
-    <!-- Hardware gate (width_sensor_count) checked in C++ populate_widgets() -->
-    <width_indicator name="width_indicator"/>
-    <text_tiny text="Width" translation_tag="Width" style_text_align="center"/>
+        extends="lv_obj" height="100%" flex_grow="1" style_pad_ver="0" style_pad_gap="#space_xxs" scrollable="false">
+    <style name="styles.tile_column"/>
+    <bind_style_if_eq name="styles.tile_row" subject="$tile_dir_subject" ref_value="1"/>
+    <icon name="width_sensor_icon" src="ruler" size="sm" variant="secondary" clickable="false" event_bubble="true">
+      <bind_tile_rung ladder="icon" subject="$tile_icon_subject"/>
+    </icon>
+    <lv_obj name="width_sensor_text_col"
+            width="100%" height="content" style_pad_all="0" style_pad_gap="#space_xxs" scrollable="false"
+            clickable="false" event_bubble="true">
+      <style name="styles.tile_column"/>
+      <bind_style_if_eq name="styles.tile_fill" subject="$tile_dir_subject" ref_value="1"/>
+      <text_tiny name="width_value" bind_text="filament_diameter_text" clickable="false" event_bubble="true">
+        <bind_tile_rung ladder="value" subject="$tile_icon_subject"/>
+      </text_tiny>
+      <text_tiny text="Width"
+                 style_text_align="center" style_text_color="#text_muted" clickable="false" event_bubble="true">
+        <bind_tile_rung ladder="label" subject="$tile_icon_subject"/>
+        <bind_flag_if_eq subject="show_widget_labels" flag="hidden" ref_value="0"/>
+        <bind_flag_if_eq subject="$tile_label_subject" flag="hidden" ref_value="0"/>
+      </text_tiny>
+    </lv_obj>
   </view>
 </component>

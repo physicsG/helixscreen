@@ -3,7 +3,7 @@
 //
 // Sanity / invariant tests for the two-layer filament material database.
 //
-//   Layer A — material TYPE table: filament::MATERIALS[] in filament_database.h
+//   Layer A — material TYPE table: `types` in assets/filaments.json
 //   Layer B — brand PRODUCT catalog: assets/filaments.json via FilamentCatalog
 //
 // These tests exist because the *previous* guard here was a disjunction —
@@ -82,7 +82,7 @@ constexpr int TYPE_DIVERGENCE_TOLERANCE = 50;
 
 TEST_CASE("MATERIALS - nozzle range is ordered and physically plausible",
           "[filament][database][invariant]") {
-    for (const auto& mat : MATERIALS) {
+    for (const auto& mat : *shipped_materials()) {
         INFO("material: " << mat.name << " nozzle " << mat.nozzle_min << "-" << mat.nozzle_max);
         // Strict: a zero-width range means the "range" carries no information and
         // nozzle_recommended() degenerates to a single point.
@@ -103,7 +103,7 @@ TEST_CASE("MATERIALS - nozzle range is ordered and physically plausible",
 
 TEST_CASE("MATERIALS - bed and chamber temps are physically plausible",
           "[filament][database][invariant]") {
-    for (const auto& mat : MATERIALS) {
+    for (const auto& mat : *shipped_materials()) {
         INFO("material: " << mat.name << " bed " << mat.bed_temp << " chamber "
                           << mat.chamber_temp_c);
         // A 0 °C bed is the exact bug that shipped in generic-pet. No FDM
@@ -128,7 +128,7 @@ TEST_CASE("MATERIALS - density is in the thermoplastic band", "[filament][databa
     // decorative grades can reach ~2.0. A 0.0 is the inheritance bug; a 12.0 is a
     // misplaced decimal. Either poisons weight_to_length_m() and every remaining
     // -filament estimate derived from it.
-    for (const auto& mat : MATERIALS) {
+    for (const auto& mat : *shipped_materials()) {
         INFO("material: " << mat.name << " density " << mat.density_g_cm3);
         CHECK(mat.density_g_cm3 >= 0.80f);
         CHECK(mat.density_g_cm3 <= 2.20f);
@@ -141,7 +141,7 @@ TEST_CASE("MATERIALS - drying temp is safely below the material's softening poin
     // welds the coil. Every hygroscopic row today clears nozzle_min by at least
     // 135 °C (tightest: CoPE 55 vs 190, PVA 45 vs 180), so a 100 °C margin is a
     // real constraint with headroom, not a rubber stamp.
-    for (const auto& mat : MATERIALS) {
+    for (const auto& mat : *shipped_materials()) {
         if (mat.dry_temp_c == 0)
             continue;
         INFO("material: " << mat.name << " dry " << mat.dry_temp_c << " nozzle_min "
@@ -176,7 +176,7 @@ TEST_CASE("MATERIALS - every compat group is served by a drying preset or is who
     };
 
     std::map<std::string, bool> group_has_hygroscopic;
-    for (const auto& mat : MATERIALS) {
+    for (const auto& mat : *shipped_materials()) {
         REQUIRE(mat.compat_group != nullptr);
         auto& flag = group_has_hygroscopic[mat.compat_group];
         flag = flag || (mat.dry_temp_c > 0);
@@ -217,7 +217,7 @@ TEST_CASE("MATERIALS - a group's drying preset never under-dries any of its memb
     // max (never over-dries beyond what some member actually asked for — which
     // would mean someone hardcoded a value instead of deriving it).
     std::map<std::string, std::pair<int, int>> group_max; // group -> {temp, time}
-    for (const auto& mat : MATERIALS) {
+    for (const auto& mat : *shipped_materials()) {
         if (mat.dry_temp_c == 0)
             continue;
         auto& mx = group_max[mat.compat_group];
@@ -231,7 +231,7 @@ TEST_CASE("MATERIALS - a group's drying preset never under-dries any of its memb
     for (const auto& p : get_drying_presets_by_group())
         presets.emplace(p.name, p);
 
-    for (const auto& mat : MATERIALS) {
+    for (const auto& mat : *shipped_materials()) {
         if (mat.dry_temp_c == 0)
             continue;
         INFO("material: " << mat.name << " (group " << mat.compat_group << ")");
@@ -267,7 +267,7 @@ TEST_CASE("MATERIALS - a group's drying preset is safe for the LOWEST-melting me
     // 190 -> 35 °C of slack) and PLA (45 °C vs PVA's 180 -> 35 °C). Raising any
     // member's dry_temp_c enough to eat that slack fails here, naming the group.
     std::map<std::string, int> group_min_nozzle;
-    for (const auto& mat : MATERIALS) {
+    for (const auto& mat : *shipped_materials()) {
         auto it = group_min_nozzle.find(mat.compat_group);
         if (it == group_min_nozzle.end())
             group_min_nozzle[mat.compat_group] = mat.nozzle_min;
@@ -288,7 +288,7 @@ TEST_CASE("drying data has exactly ONE source, and every consumer derives from i
     // THE anti-regression gate for this whole file.
     //
     // There used to be THREE independent drying opinions:
-    //   (a) MATERIALS[] dry_temp_c / dry_time_min          <- the real one
+    //   (a) `types` dry_temp / dry_time                      <- the real one
     //   (b) get_drying_presets_by_group()                  <- first-member, under-dried 8
     //   (c) get_comfort_range()'s own hardcoded 10-row list <- contradicted (a) outright:
     //                                                          PLA 55 vs 45, PETG 65 vs 55,
@@ -296,7 +296,7 @@ TEST_CASE("drying data has exactly ONE source, and every consumer derives from i
     // (b) and (c) are now both derived from (a). This test fails if anyone
     // reintroduces an independent opinion in either place, because the moment a
     // hardcoded number reappears it stops matching the derivation below.
-    for (const auto& mat : MATERIALS) {
+    for (const auto& mat : *shipped_materials()) {
         INFO("material: " << mat.name << " (group " << mat.compat_group << ")");
         const auto comfort = get_comfort_range(mat.name);
         REQUIRE(comfort.has_value());
@@ -337,7 +337,7 @@ TEST_CASE("get_categories returns exactly the distinct categories in MATERIALS",
     // grouped picker headings, so they are tested to stay correct rather than
     // left to rot silently.
     std::set<std::string> expected;
-    for (const auto& mat : MATERIALS) {
+    for (const auto& mat : *shipped_materials()) {
         REQUIRE(mat.category != nullptr);
         CHECK(std::string_view(mat.category) != "");
         expected.insert(mat.category);
@@ -372,8 +372,8 @@ TEST_CASE("get_materials_by_category partitions MATERIALS exactly",
         }
     }
 
-    CHECK(total == MATERIAL_COUNT);
-    for (const auto& mat : MATERIALS) {
+    CHECK(total == shipped_materials()->size());
+    for (const auto& mat : *shipped_materials()) {
         INFO("material: " << mat.name);
         CHECK(seen[mat.name] == 1);
     }
@@ -394,7 +394,7 @@ TEST_CASE("resolve_alias is idempotent", "[filament][database][invariant][alias]
         CHECK(once == twice);
         CHECK(once == std::string_view(alias.canonical));
     }
-    for (const auto& mat : MATERIALS) {
+    for (const auto& mat : *shipped_materials()) {
         INFO("material: " << mat.name);
         CHECK(resolve_alias(mat.name) == std::string_view(mat.name));
     }
@@ -405,7 +405,7 @@ TEST_CASE("find_material is case-insensitive for every material and alias",
     // Catalog `type` strings arrive in whatever case the source used ("SILK" from
     // the AD5X firmware whitelist, "PLA" from Orca). A row that only matches in
     // its declared case would strand every product that spells it differently.
-    for (const auto& mat : MATERIALS) {
+    for (const auto& mat : *shipped_materials()) {
         const std::string name = mat.name;
         std::string up = name, lo = name;
         std::transform(up.begin(), up.end(), up.begin(), ::toupper);
@@ -457,10 +457,10 @@ TEST_CASE("are_materials_compatible is reflexive and symmetric",
     // Endless spool asks this question in an arbitrary argument order. An
     // asymmetric answer means a swap is allowed in one direction and refused in
     // the other, which surfaces as an intermittent, unreproducible bug.
-    for (const auto& a : MATERIALS) {
+    for (const auto& a : *shipped_materials()) {
         INFO("material: " << a.name);
         CHECK(are_materials_compatible(a.name, a.name));
-        for (const auto& b : MATERIALS) {
+        for (const auto& b : *shipped_materials()) {
             const bool ab = are_materials_compatible(a.name, b.name);
             const bool ba = are_materials_compatible(b.name, a.name);
             const bool same_group =
@@ -502,7 +502,7 @@ TEST_CASE("MATERIALS - names survive JSON and Orca string matching",
     // filament type strings, and compared verbatim by AMS backends. A quote,
     // backslash, control character or stray edge whitespace breaks one of those
     // paths without breaking the build.
-    for (const auto& mat : MATERIALS) {
+    for (const auto& mat : *shipped_materials()) {
         const std::string name = mat.name;
         INFO("material: [" << name << "]");
         REQUIRE_FALSE(name.empty()); // front()/back() below need a non-empty string
@@ -532,7 +532,7 @@ TEST_CASE("AD5X firmware material whitelist all resolves", "[filament][database]
     // guards. The stock AD5X firmware rejects anything outside the list, so these
     // are the only types that printer's picker can offer. If one stops resolving in
     // Layer A it inherits a 0 °C bed and no drying data, and the picker breaks.
-    for (const auto* type : AmsBackendAd5xIfs::STOCK_WHITELIST) {
+    for (const auto* type : helix::AmsBackendAd5xIfs::STOCK_WHITELIST) {
         INFO("AD5X whitelist type: " << type);
         auto mat = find_material(type);
         REQUIRE(mat.has_value());
@@ -575,22 +575,22 @@ TEST_CASE_METHOD(HelixTestFixture, "every mock-backend fixture material resolves
 
     // Each entry drives the mock into one scripted configuration. Adding a new
     // mock mode? Add it here so its fixture strings are covered too.
-    using ModeSetter = std::function<void(AmsBackendMock&)>;
+    using ModeSetter = std::function<void(helix::AmsBackendMock&)>;
     const std::vector<std::pair<const char*, ModeSetter>> MODES = {
-        {"default", [](AmsBackendMock&) {}},
-        {"tool_changer", [](AmsBackendMock& b) { b.set_tool_changer_mode(true); }},
-        {"afc", [](AmsBackendMock& b) { b.set_afc_mode(true); }},
-        {"multi_unit", [](AmsBackendMock& b) { b.set_multi_unit_mode(true); }},
-        {"mixed_topology", [](AmsBackendMock& b) { b.set_mixed_topology_mode(true); }},
-        {"vivid_mixed", [](AmsBackendMock& b) { b.set_vivid_mixed_mode(true); }},
-        {"htlf_toolchanger", [](AmsBackendMock& b) { b.set_htlf_toolchanger_mode(true); }},
-        {"ifs", [](AmsBackendMock& b) { b.set_ifs_mode(true); }},
-        {"snapmaker", [](AmsBackendMock& b) { b.set_snapmaker_mode(true); }},
+        {"default", [](helix::AmsBackendMock&) {}},
+        {"tool_changer", [](helix::AmsBackendMock& b) { b.set_tool_changer_mode(true); }},
+        {"afc", [](helix::AmsBackendMock& b) { b.set_afc_mode(true); }},
+        {"multi_unit", [](helix::AmsBackendMock& b) { b.set_multi_unit_mode(true); }},
+        {"mixed_topology", [](helix::AmsBackendMock& b) { b.set_mixed_topology_mode(true); }},
+        {"vivid_mixed", [](helix::AmsBackendMock& b) { b.set_vivid_mixed_mode(true); }},
+        {"htlf_toolchanger", [](helix::AmsBackendMock& b) { b.set_htlf_toolchanger_mode(true); }},
+        {"ifs", [](helix::AmsBackendMock& b) { b.set_ifs_mode(true); }},
+        {"snapmaker", [](helix::AmsBackendMock& b) { b.set_snapmaker_mode(true); }},
     };
 
     size_t checked = 0;
     for (const auto& [mode_name, apply_mode] : MODES) {
-        AmsBackendMock backend;
+        helix::AmsBackendMock backend;
         apply_mode(backend);
         backend.start();
 
@@ -624,7 +624,7 @@ TEST_CASE("get_comfort_range covers EVERY material, and only real materials",
     // and this asserts that construction actually holds — a compat group with no
     // GROUP_HUMIDITY_RANGES row would fall into the fail-closed nullopt branch and
     // silently drop that material off the AMS humidity indicator.
-    for (const auto& mat : MATERIALS) {
+    for (const auto& mat : *shipped_materials()) {
         INFO("material: " << mat.name << " (group " << mat.compat_group << ")");
         const auto range = get_comfort_range(mat.name);
         REQUIRE(range.has_value());
@@ -696,10 +696,10 @@ TEST_CASE("MATERIAL_HUMIDITY_OVERRIDES stay small, real, and earned",
 TEST_CASE("GROUP_HUMIDITY_RANGES covers every compat group exactly once",
           "[filament][database][invariant]") {
     // The structural reason get_comfort_range() can be total. A new compat group
-    // in MATERIALS[] with no humidity row fails HERE, naming the group, rather
+    // in the `types` table with no humidity row fails HERE, naming the group, rather
     // than surfacing later as a material that mysteriously has no indicator.
     std::set<std::string> groups;
-    for (const auto& mat : MATERIALS)
+    for (const auto& mat : *shipped_materials())
         groups.insert(mat.compat_group);
 
     std::set<std::string> rows;
@@ -930,7 +930,7 @@ TEST_CASE_METHOD(HelixTestFixture, "two-layer closure - every material type is r
                  "[filament_data][invariant][closure]") {
     // ============ THE structural guard for two-layer drift ============
     //
-    // Layer A (MATERIALS[], types) and Layer B (filaments.json, products) drift
+    // Layer A (`types`) and Layer B (filaments.json, products) drift
     // because nothing forces them to agree, and every gap so far has been found by
     // a human audit: ASA-GF/ABS-CF/PC-CF/PC-GF/PET-GF/PLA-GF were invisible in the
     // picker for months, then 25 more were found the same way. An audit that only
@@ -964,7 +964,7 @@ TEST_CASE_METHOD(HelixTestFixture, "two-layer closure - every material type is r
     }
 
     std::set<std::string> unreachable;
-    for (const auto& mat : MATERIALS) {
+    for (const auto& mat : *shipped_materials()) {
         if (reachable.count(mat.name) == 0)
             unreachable.insert(mat.name);
     }
@@ -995,5 +995,5 @@ TEST_CASE_METHOD(HelixTestFixture, "two-layer closure - every material type is r
     // Both at once, so the failure message shows the whole picture.
     CHECK(unreachable == declared);
     CHECK(declared.size() == RESOLUTION_ONLY_COUNT);
-    CHECK(reachable.size() + declared.size() == MATERIAL_COUNT);
+    CHECK(reachable.size() + declared.size() == shipped_materials()->size());
 }

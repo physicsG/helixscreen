@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "sensor_enum_names.h"
+
 #include <string>
 
 namespace helix::sensors {
@@ -39,83 +41,40 @@ struct AccelSensorConfig {
 
 /// @brief Runtime state for an accelerometer sensor
 struct AccelSensorState {
-    bool connected = false;       ///< Accelerometer connected/responding
-    std::string last_measurement; ///< Timestamp of last measurement
-    bool available = false;       ///< Sensor available in current config
+    bool available = false; ///< Sensor available in current config
 };
 
-/// @brief Convert role enum to config string
-/// @param role The role to convert
-/// @return Config-safe string for JSON storage
+inline constexpr EnumName<AccelSensorRole> kAccelSensorRoles[] = {
+    {AccelSensorRole::NONE, "none", "Unassigned"},
+    {AccelSensorRole::INPUT_SHAPER, "input_shaper", "Input Shaper"},
+};
+
+inline constexpr EnumName<AccelSensorType> kAccelSensorTypes[] = {
+    {AccelSensorType::ADXL345, "adxl345", "ADXL345"},
+    {AccelSensorType::LIS2DW, "lis2dw", "LIS2DW"},
+    {AccelSensorType::LIS3DH, "lis3dh", "LIS3DH"},
+    {AccelSensorType::MPU9250, "mpu9250", "MPU9250"},
+    {AccelSensorType::ICM20948, "icm20948", "ICM20948"},
+};
+
 [[nodiscard]] inline std::string accel_role_to_string(AccelSensorRole role) {
-    switch (role) {
-    case AccelSensorRole::NONE:
-        return "none";
-    case AccelSensorRole::INPUT_SHAPER:
-        return "input_shaper";
-    default:
-        return "none";
-    }
+    return enum_id(kAccelSensorRoles, role);
 }
 
-/// @brief Parse role string to enum
-/// @param str The config string to parse
-/// @return Parsed role, or NONE if unrecognized
 [[nodiscard]] inline AccelSensorRole accel_role_from_string(const std::string& str) {
-    if (str == "input_shaper")
-        return AccelSensorRole::INPUT_SHAPER;
-    return AccelSensorRole::NONE;
+    return enum_from_id(kAccelSensorRoles, str);
 }
 
-/// @brief Convert role to display string
-/// @param role The role to convert
-/// @return Human-readable role name for UI display
 [[nodiscard]] inline std::string accel_role_to_display_string(AccelSensorRole role) {
-    switch (role) {
-    case AccelSensorRole::NONE:
-        return "Unassigned";
-    case AccelSensorRole::INPUT_SHAPER:
-        return "Input Shaper";
-    default:
-        return "Unassigned";
-    }
+    return enum_display(kAccelSensorRoles, role);
 }
 
-/// @brief Convert type enum to config string
-/// @param type The type to convert
-/// @return Config-safe string
 [[nodiscard]] inline std::string accel_type_to_string(AccelSensorType type) {
-    switch (type) {
-    case AccelSensorType::ADXL345:
-        return "adxl345";
-    case AccelSensorType::LIS2DW:
-        return "lis2dw";
-    case AccelSensorType::LIS3DH:
-        return "lis3dh";
-    case AccelSensorType::MPU9250:
-        return "mpu9250";
-    case AccelSensorType::ICM20948:
-        return "icm20948";
-    default:
-        return "adxl345";
-    }
+    return enum_id(kAccelSensorTypes, type);
 }
 
-/// @brief Parse type string to enum
-/// @param str The config string to parse
-/// @return Parsed type, defaults to ADXL345 if unrecognized
 [[nodiscard]] inline AccelSensorType accel_type_from_string(const std::string& str) {
-    if (str == "adxl345")
-        return AccelSensorType::ADXL345;
-    if (str == "lis2dw")
-        return AccelSensorType::LIS2DW;
-    if (str == "lis3dh")
-        return AccelSensorType::LIS3DH;
-    if (str == "mpu9250")
-        return AccelSensorType::MPU9250;
-    if (str == "icm20948")
-        return AccelSensorType::ICM20948;
-    return AccelSensorType::ADXL345;
+    return enum_from_id(kAccelSensorTypes, str);
 }
 
 } // namespace helix::sensors

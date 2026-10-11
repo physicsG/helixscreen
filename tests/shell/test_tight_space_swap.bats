@@ -34,7 +34,6 @@ setup() {
     export INSTALL_DIR="$BATS_TEST_TMPDIR/opt/helixscreen"
     export SUDO=""
     export BACKUP_CONFIG=""
-    export ORIGINAL_INSTALL_EXISTS=""
 
     mkdir -p "$TMP_DIR"
 
@@ -91,13 +90,12 @@ mock_df_du() {
     local install_parent=$1 roomy=$2 install_free_kb=$3 roomy_free_kb=$4 new_install_mb=$5
 
     mock_command_script "df" '
-# df -P <path>  -> device-id query (col1 is the filesystem device)
-# df <path>     -> free-space query (col4 is 1K-blocks available)
+# df -kP <path> -> col1 is the filesystem device, col4 is 1K-blocks available
 _pmode=0
 _path=""
 for _a in "$@"; do
     case "$_a" in
-        -P) _pmode=1 ;;
+        -P|-kP) _pmode=1 ;;
         -*) ;;
         *)  _path="$_a" ;;
     esac
@@ -211,7 +209,7 @@ _pmode=0
 _path=""
 for _a in "$@"; do
     case "$_a" in
-        -P) _pmode=1 ;;
+        -P|-kP) _pmode=1 ;;
         -*) ;;
         *)  _path="$_a" ;;
     esac
@@ -261,7 +259,6 @@ esac
 @test "cleanup_old_install: refuses to remove a non-helixscreen-rollback path" {
     mkdir -p "$INSTALL_DIR/config"
     echo '{"user": true}' > "$INSTALL_DIR/config/settings.json"
-    ORIGINAL_INSTALL_EXISTS=true
 
     local bogus="$BATS_TEST_TMPDIR/some-mount-root"
     mkdir -p "$bogus"

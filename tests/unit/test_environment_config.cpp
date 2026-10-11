@@ -1,6 +1,7 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "env_knobs.h"
 #include "environment_config.h"
 
 #include <cstdlib>
@@ -11,6 +12,7 @@ using namespace helix;
 using namespace helix::config;
 
 // Helper to set/unset environment variables for testing
+namespace {
 class EnvGuard {
   public:
     explicit EnvGuard(const char* name, const char* value = nullptr) : m_name(name) {
@@ -46,6 +48,7 @@ class EnvGuard {
     std::string m_original;
     bool m_had_original{false};
 };
+} // namespace
 
 TEST_CASE("EnvironmentConfig::get_int basic parsing", "[environment][config]") {
     SECTION("Valid integer within range") {
@@ -150,30 +153,29 @@ TEST_CASE("EnvironmentConfig::get_int_scaled", "[environment][config]") {
     }
 }
 
-TEST_CASE("EnvironmentConfig::get_bool", "[environment][config]") {
-    SECTION("\"1\" returns true") {
-        EnvGuard guard("TEST_BOOL_VAR", "1");
-        REQUIRE(EnvironmentConfig::get_bool("TEST_BOOL_VAR") == true);
+TEST_CASE("env_flag reads a variable through env_truthy", "[environment][config][env]") {
+    SECTION("\"1\", \"true\", \"Yes\" and \" on \" return true") {
+        for (const char* v : {"1", "true", "Yes", " on "}) {
+            EnvGuard guard("TEST_BOOL_VAR", v);
+            CHECK(helix::env_flag("TEST_BOOL_VAR"));
+        }
     }
 
-    SECTION("\"0\" returns false") {
-        EnvGuard guard("TEST_BOOL_VAR", "0");
-        REQUIRE(EnvironmentConfig::get_bool("TEST_BOOL_VAR") == false);
+    SECTION("\"0\", \"false\", \"10\" and \"1abc\" return false") {
+        for (const char* v : {"0", "false", "10", "1abc"}) {
+            EnvGuard guard("TEST_BOOL_VAR", v);
+            CHECK_FALSE(helix::env_flag("TEST_BOOL_VAR"));
+        }
     }
 
     SECTION("Missing variable returns false") {
         EnvGuard guard("TEST_BOOL_VAR"); // unset
-        REQUIRE(EnvironmentConfig::get_bool("TEST_BOOL_VAR") == false);
+        REQUIRE_FALSE(helix::env_flag("TEST_BOOL_VAR"));
     }
 
     SECTION("Empty string returns false") {
         EnvGuard guard("TEST_BOOL_VAR", "");
-        REQUIRE(EnvironmentConfig::get_bool("TEST_BOOL_VAR") == false);
-    }
-
-    SECTION("Other strings return false") {
-        EnvGuard guard("TEST_BOOL_VAR", "true");
-        REQUIRE(EnvironmentConfig::get_bool("TEST_BOOL_VAR") == false);
+        REQUIRE_FALSE(helix::env_flag("TEST_BOOL_VAR"));
     }
 }
 

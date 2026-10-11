@@ -60,6 +60,12 @@ AFC topology is inferred from the extruder count per unit:
 
 This is stored per-unit in `unit_topologies_[]` and queried via `get_unit_topology(unit_index)`.
 
+`get_topology()` reduces those units to the one answer the filament path canvas renders from:
+the units' shared topology where they agree, `MIXED` where they do not, and `HUB` before any
+unit object has been parsed (lane-only frames arrive first, and the object-format unit path
+never populates the roster). A single Box Turtle in toolchanger mode therefore reports
+`PARALLEL` system-wide and draws four toolheads rather than one nozzle behind a hub.
+
 ### The `map` Field Problem
 
 AFC assigns each lane a virtual tool number via the `map` field (e.g., `"T4"`). **For HUB units, AFC gives each lane a unique map value even though all lanes physically feed the same extruder.**
@@ -202,6 +208,14 @@ implicitly: `reset_failure()` (AFC_error.py) and `AFC_RESUME` both leave `messag
 untouched, so entries accumulate across a whole session and anything left behind resurfaces as
 the next session's stale error. (Verified against the add-on source on a live BoxTurtle,
 2026-07-29.)
+
+*The stale head must not re-toast on every HelixScreen start.* Because the latch survives our
+restarts and a fresh process has no prior text to dedup against, the backend seeds its error
+dedup from `AfcMessageDedup` (`system/afc_message_dedup.h`): the last error text a previous
+session surfaced, persisted in the config dir. An unchanged text raises no toast and no
+`EVENT_ERROR`; a text the store has never seen — including a live, non-pausing fault enqueued
+by `AFC_logger.error()` with `error_state` still false — toasts normally. The seed clears with
+the message field, so a recurrence toasts again.
 
 *A single clear is not enough.* `AmsBackendAfc::clear_fault()` drains **until the queue reports
 empty**, bounded by a wall-clock deadline and by `MESSAGE_DRAIN_MAX_CLEARS` as a runaway guard
@@ -622,7 +636,7 @@ See `path_segment_from_afc_sensors()` in `ams_types.h`.
 
 #### Hub Bowden Length
 
-The bowden tube length from hub to toolhead is read from `AFC_hub.afc_bowden_length` and exposed as a slider in the device actions UI. Adjustable via `SET_BOWDEN_LENGTH LENGTH={mm}` G-code.
+The bowden tube length from hub to toolhead is read from `AFC_hub.afc_bowden_length` and exposed as a slider in the device actions UI. Adjustable via `SET_BOWDEN_LENGTH LENGTH={mm}` G-code. The generic calibration-section `bowden_length` slider is advertised only when a hub has been discovered (`AFC.hubs` non-empty or an `AFC_hub` object seen): `SET_BOWDEN_LENGTH` is HUB-keyed, so a hub-less topology (PARALLEL / direct_load) has nothing it can address.
 
 #### Per-Lane Stepper Fields
 
@@ -641,7 +655,7 @@ then derives `AmsUnit::buffer_health` from `buffer_health_` plus `buffer_lane_na
 resolving the first lane that maps to a unit. Two invariants make that work:
 
 - **Unit objects must be parsed before anything that resolves a lane to a unit.**
-  `handle_status_update()` runs `AFC_BoxTurtle`/`AFC_OpenAMS`/`AFC_vivid` first, then
+  `handle_status()` runs `AFC_BoxTurtle`/`AFC_OpenAMS`/`AFC_vivid` first, then
   `AFC_buffer`. Those unit objects are what build the multi-unit layout
   (`parse_afc_unit_object` → `rebuild_unit_map_from_klipper` → `reorganize_slots`). With
   buffers parsed first, every buffer in the first frame resolved against the synthetic
@@ -660,6 +674,25 @@ Attribution is logged only when it **changes** (`buffer_unit_attribution_`).
 an unconditional line there is per-buffer-per-unit spam that pushes the incident window out
 of the debug-bundle ring - and this is precisely the line that has to survive in a bundle,
 since a buffer landing on the wrong unit is what it exists to show.
+
+**An `FPS_PSF` buffer is a buffer reading; a switched one is clog detection only.** An
+`AFC_buffer` configured `type: FPS_PSF` (AFC v1.2.0+) carries an analog filament-pressure
+sensor where the stock TurtleNeck carries a mechanical switch: `get_status()` publishes
+`fps_value`, `smoothed_fps` and `set_point`, and `BufferHealth::has_fps()` /
+`fps_to_bias()` (`include/ams_types.h`) normalize `smoothed_fps` - the value AFC's own
+advance/trailing triggers compare - onto the `-1..+1` bias around the set point. The
+sensor stays on the unit's `AmsUnit::buffer_health`; the backend writes no
+`sync_feedback_bias` (that is Happy Hare's field). `helix::buffer_reading()` reads the
+unit's own sensor, or for the system level the unit feeding the current slot, else the
+first unit with a sensor, so the Filament Buffer widget, the loaded-spool card, the
+Buffer Status modal and the path-canvas buffer box all draw it. The fault distance
+(`fault_detection_enabled`) is the separate clog-detection source and feeds the
+`clog_meter_*` subjects. A switched TurtleNeck reports no pressure, so it has no reading.
+The pressure rail is 0..1 by declaration but a voltage divider in real hardware, so `has_fps()` keys on
+`fps_reported && fps_set_point > 0` rather than on the value: a reading slightly below zero
+is max tension, the one reading a value-based sentinel would blank exactly. Not yet
+verified on hardware. See
+[Filament buffer reading](FILAMENT_MANAGEMENT.md#filament-buffer-reading).
 
 #### Global State
 
@@ -755,7 +788,7 @@ absent from `src/` and `include/`, and is recorded here so the reasoning is not 
 | Dryer | No | -- |
 | Device Actions | Yes | Setup, Speed, Toolhead, Maintenance, Hub & Cutter, Tip Forming, Purge & Wipe (see [Device Operations Overlay](FILAMENT_MANAGEMENT.md#device-operations-overlay)) |
 
-`recovers_filament_on_resume()` is **not** overridden (default `false`), so an AFC runout
+`recovers_filament_on_resume()` is left at its `kTraits` default (`false`), so an AFC runout
 gets the dialog with manual **Load** kept prominent, because Resume alone does not re-feed.
 `supports_per_tool_spool_assignment()` is not overridden either; it falls through to
 `is_tool_changer(get_type())`, which is false for AFC.

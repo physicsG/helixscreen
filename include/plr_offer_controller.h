@@ -17,36 +17,42 @@ namespace helix::ui {
 /// connect time. Owned by SubjectInitializer (constructed in init_observers,
 /// destroyed with it — the ObserverGuard members auto-reset via RAII).
 ///
-/// Two backends feed ONE normalized "a resumable snapshot exists" signal, which
+/// Three backends feed ONE normalized "a resumable snapshot exists" signal, which
 /// is what keeps the latch / re-arm / wizard logic backend-agnostic. Full
 /// mechanism: docs/devel/POWER_LOSS_RECOVERY.md.
 ///
 ///   Snapmaker (PASSIVE): virtual_sdcard.pl_env_valid goes true on its own.
+///   Qidi      (PASSIVE): save_variables.variables.was_interrupted reads true
+///                        at boot after power loss; the stock macros keep it
+///                        true during every normal print, so the printer_idle
+///                        input of the offer decision scopes it to a fresh boot.
 ///   Creality  (ACTIVE):  print_stats.power_loss appearing in status marks the
 ///                        capability; availability requires firing the
 ///                        side-effectful `check_continue_print_state` probe,
 ///                        ONCE per connection, ONLY while the printer is in
 ///                        STANDBY, and getting both states back true.
 ///
-/// Four observers, all on STATIC subjects (singleton lifetime, no
+/// Five observers, all on STATIC subjects (singleton lifetime, no
 /// SubjectLifetime token needed). The authoritative account of WHEN the offer
 /// fires and re-fires lives at the plr_should_offer decision site in
 /// evaluate_offer (ui_plr_offer_controller.cpp); the observers below are just
 /// the edges that drive it:
 ///   - pl_env_valid (PRIMARY Snapmaker trigger): a genuine 0->1 edge offers.
-///   - creality_plr_capable (PRIMARY Creality trigger): a 0->1 edge fires the
+///   - plr_interrupted_flag (PRIMARY Qidi trigger): an edge re-evaluates the
+///     offer; the capability half comes from discovery, not status.
+///   - plr_power_loss_signal (PRIMARY Creality trigger): a 0->1 edge fires the
 ///     one-shot probe, whose response then offers.
 ///   - connection state: on a CONNECTED->not-CONNECTED edge, re-arms BOTH
 ///     one-shot latches (offer and probe), drops the cached Creality detect
-///     result, AND forces both capability subjects back to 0 (see
-///     on_connection_state_changed) so the next reconnect produces real 0->1
-///     edges rather than same-value writes the subjects would swallow.
+///     result, AND forces the capability and availability subjects back to 0
+///     (see on_connection_state_changed) so the next reconnect produces real
+///     0->1 edges rather than same-value writes the subjects would swallow.
 ///   - wizard active: on a 1->0 edge (wizard closed) re-evaluates the offer,
 ///     so an offer that was suppressed only because the wizard owned the
 ///     screen now fires. This is what makes wizard suppression temporary
 ///     instead of permanent.
 ///
-/// Observer callbacks all run on the main thread — observe_int_sync defers via
+/// Observer callbacks all run on the main thread — observe<int> defers via
 /// the update queue and plr_should_offer/plr_should_rearm are pure. The one
 /// genuine thread crossing is the probe response (a JSON-RPC callback on the
 /// WebSocket thread), which is wrapped in lifetime_.bg_cb().
@@ -68,6 +74,7 @@ class PlrOfferController {
     // exactly one place.
     void evaluate_offer();
     void on_pl_env_valid_changed(int pl_env_valid);
+    void on_plr_interrupted_flag_changed(int was_interrupted);
     void on_creality_capable_changed(int capable);
     void on_connection_state_changed(int new_conn_state);
     void on_wizard_active_changed(int wizard_active);
@@ -79,6 +86,7 @@ class PlrOfferController {
     void on_creality_detect_result(const helix::PlrDetectResult& result);
 
     ObserverGuard pl_valid_observer_;
+    ObserverGuard interrupted_flag_observer_;
     ObserverGuard creality_capable_observer_;
     ObserverGuard conn_observer_;
     ObserverGuard wizard_observer_;

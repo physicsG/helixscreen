@@ -5,6 +5,7 @@
 
 #include "ui_format_utils.h"
 
+#include "lv_draw_buf_guard.h"
 #include "system/crash_handler.h"
 #include "temp_graph_column_map.h"
 #include "temp_graph_internal.h"
@@ -46,18 +47,11 @@ static inline void mark_gradient_cache_dirty(ui_temp_graph_t* graph) {
 // Helper: Find series metadata by ID
 // Returns nullptr if graph, chart, or series is invalid (protects against use-after-free
 // when chart LVGL widget is destroyed but ui_temp_graph_t struct survives)
-static ui_temp_series_meta_t* find_series(ui_temp_graph_t* graph, int series_id) {
-    if (!graph || !graph->chart || series_id < 0 || series_id >= UI_TEMP_GRAPH_MAX_SERIES) {
+static ui_temp_series_meta_t* find_series(ui_temp_graph_t* graph, SeriesId series_id) {
+    if (!graph || !graph->chart) {
         return nullptr;
     }
-
-    for (int i = 0; i < UI_TEMP_GRAPH_MAX_SERIES; i++) {
-        if (graph->series_meta[i].id == series_id &&
-            graph->series_meta[i].chart_series != nullptr) {
-            return &graph->series_meta[i];
-        }
-    }
-    return nullptr;
+    return helix::temp_graph_internal::find_meta_by_id(graph, series_id);
 }
 
 namespace helix::temp_graph_internal {
@@ -226,6 +220,8 @@ static void chart_resize_cb(lv_event_t* e) {
     }
 }
 
+static void gradient_render_start_cb(lv_event_t* e);
+
 // Event callback: Null out graph->chart when the LVGL chart widget is destroyed.
 // Prevents use-after-free when parent widget deletion cascades to the chart
 // but the ui_temp_graph_t struct (and temp_graphs registrations) survive.
@@ -233,15 +229,16 @@ static void chart_delete_cb(lv_event_t* e) {
     auto* graph = static_cast<ui_temp_graph_t*>(lv_event_get_user_data(e));
     if (graph) {
         spdlog::debug("[TempGraph] Chart widget deleted, nulling graph->chart");
+        lv_display_remove_event_cb_with_user_data(lv_obj_get_display(graph->chart),
+                                                  gradient_render_start_cb, graph);
         graph->chart = nullptr;
         // The gradient canvas is a child of the chart, so LVGL's delete cascade
         // already freed it — just null our pointer. The backing draw buffer is
         // ours to free.
         graph->gradient_canvas = nullptr;
-        if (graph->gradient_cache_buf) {
-            lv_draw_buf_destroy(graph->gradient_cache_buf);
-            graph->gradient_cache_buf = nullptr;
-        }
+        // The chart's draw callback blits this buffer during rendering; a
+        // blend may still be in flight when the chart is deleted.
+        helix::safe_draw_buf_destroy(graph->gradient_cache_buf, "tg_grad");
         graph->gradient_cache_w = 0;
         graph->gradient_cache_h = 0;
     }
@@ -547,10 +544,8 @@ static bool gradient_ensure_cache_buf(ui_temp_graph_t* graph, const temp_graph_g
 
     if (!graph->gradient_cache_buf || graph->gradient_cache_w != g.cw ||
         graph->gradient_cache_h != g.ch) {
-        if (graph->gradient_cache_buf) {
-            lv_draw_buf_destroy(graph->gradient_cache_buf);
-            graph->gradient_cache_buf = nullptr;
-        }
+        // The draw callback blits the old buffer; drain before replacing it.
+        helix::safe_draw_buf_destroy(graph->gradient_cache_buf, "tg_grad");
         graph->gradient_cache_buf = lv_draw_buf_create(g.cw, g.ch, LV_COLOR_FORMAT_ARGB8888, 0);
         if (graph->gradient_cache_buf) {
             // Bind the draw-buf directly. lv_canvas_set_buffer() would treat its
@@ -645,14 +640,28 @@ static bool gradient_skip_enabled() {
     return enabled;
 }
 
+static int count_visible_series(const ui_temp_graph_t* graph) {
+    int visible_count = 0;
+    for (int i = 0; i < UI_TEMP_GRAPH_MAX_SERIES; i++) {
+        if (graph->series_meta[i].chart_series && graph->series_meta[i].visible)
+            visible_count++;
+    }
+    return visible_count;
+}
+
+// Gradients are skipped when too many series are visible (visual clutter).
+static bool gradient_series_fit(const ui_temp_graph_t* graph) {
+    return count_visible_series(graph) <= 3;
+}
+
 // Recompute the cached gradient buffer. lv_canvas_init_layer / finish_layer run a
 // nested synchronous draw dispatch and end with lv_obj_invalidate(canvas), which
 // is ILLEGAL during an active render pass (disp->rendering_in_progress) — doing it
 // from the DRAW_MAIN_END draw callback produced an empty/undrawn buffer, so the
 // blit rendered nothing (the LVGL 9.5 gradient regression; same rule the filament
-// path layers obey, see ui_filament_path_layers.cpp). This runs from the graph's
-// gradient_refresh timer, OUTSIDE the render pass, so the canvas layer round-trip
-// is legal here.
+// path layers obey, see ui_filament_path_layers.cpp). This runs at the display's
+// LV_EVENT_RENDER_START or from the graph's gradient_refresh timer, both OUTSIDE
+// the render pass, so the canvas layer round-trip is legal here.
 static void gradient_recompute(ui_temp_graph_t* graph) {
     if (!graph || !graph->chart)
         return;
@@ -727,6 +736,16 @@ static void gradient_recompute(ui_temp_graph_t* graph) {
     lv_obj_invalidate(graph->chart);
 }
 
+// A stale cache is rebuilt after layout and before anything draws, so the frame
+// that shows new data blits the gradient once. Left to the draw callback, that
+// frame draws it directly and the recompute it schedules repaints the chart.
+static void gradient_render_start_cb(lv_event_t* e) {
+    auto* graph = static_cast<ui_temp_graph_t*>(lv_event_get_user_data(e));
+    if (graph->chart && graph->gradient_cache_dirty && gradient_series_fit(graph) &&
+        lv_obj_is_visible(graph->chart))
+        gradient_recompute(graph);
+}
+
 // Render gradient fills by reading chart data directly.
 // LVGL 9.5 changed DRAW_TASK_ADDED to fire during rendering (after all draw events),
 // so we can no longer add draw tasks from that callback. Instead, we compute pixel
@@ -739,13 +758,7 @@ static void draw_gradient_cb(lv_event_t* e) {
     if (!(graph->features & TEMP_GRAPH_FEATURE_GRADIENTS))
         return;
 
-    // Disable gradients when too many series are visible (visual clutter)
-    int visible_count = 0;
-    for (int i = 0; i < UI_TEMP_GRAPH_MAX_SERIES; i++) {
-        if (graph->series_meta[i].chart_series && graph->series_meta[i].visible)
-            visible_count++;
-    }
-    if (visible_count > 3)
+    if (!gradient_series_fit(graph))
         return;
 
     lv_layer_t* event_layer = lv_event_get_layer(e);
@@ -784,55 +797,69 @@ static void draw_gradient_cb(lv_event_t* e) {
     graph->gradient_refresh.schedule_once([graph]() { gradient_recompute(graph); });
 }
 
-// Draw legend chips in the upper-left of the chart content area.
+static int32_t legend_chip_height() {
+    return theme_manager_get_font_height(theme_manager_get_font("font_xs")) + 4; // 2px each side
+}
+
+static bool legend_drawn(const ui_temp_graph_t* graph) {
+    // One series needs no key.
+    return (graph->features & TEMP_GRAPH_FEATURE_LEGEND) && count_visible_series(graph) > 1;
+}
+
+// The legend row lives in the chart's top padding, above the plot, so no curve,
+// fill or target line ever draws under its text. Re-run whenever the axis
+// padding, the feature set, or the number of visible series changes.
+static void apply_top_pad(ui_temp_graph_t* graph) {
+    int32_t top_pad = graph->axis_top_pad;
+    if (legend_drawn(graph))
+        top_pad = LV_MAX(top_pad, legend_chip_height() + theme_manager_get_spacing("space_xs"));
+    lv_obj_set_style_pad_top(graph->chart, top_pad, LV_PART_MAIN);
+}
+
+lv_area_t helix::temp_graph_internal::temp_graph_legend_row(ui_temp_graph_t* graph) {
+    lv_area_t row{0, 0, -1, -1};
+    if (!graph || !graph->chart || !legend_drawn(graph))
+        return row;
+
+    lv_area_t coords;
+    lv_obj_get_coords(graph->chart, &coords);
+    row.x1 = coords.x1 + lv_obj_get_style_pad_left(graph->chart, LV_PART_MAIN) + 4;
+    row.x2 = coords.x2 - lv_obj_get_style_pad_right(graph->chart, LV_PART_MAIN) - 4;
+    row.y1 = coords.y1;
+    row.y2 = row.y1 + legend_chip_height() - 1;
+    return row;
+}
+
+// Draw legend chips in a row along the top of the chart.
 // Each chip is a semi-transparent rounded rectangle with a color swatch and series name.
-// Only drawn when TEMP_GRAPH_FEATURE_LEGEND is enabled (rowspan >= 2 or colspan >= 2).
 static void draw_legend_cb(lv_event_t* e) {
-    lv_obj_t* chart = lv_event_get_target_obj(e);
     ui_temp_graph_t* graph = static_cast<ui_temp_graph_t*>(lv_event_get_user_data(e));
     if (!graph || !graph->chart)
         return;
 
-    if (!(graph->features & TEMP_GRAPH_FEATURE_LEGEND))
+    lv_obj_t* chart = graph->chart;
+    lv_area_t row = helix::temp_graph_internal::temp_graph_legend_row(graph);
+    if (row.x2 < row.x1)
         return;
 
     lv_layer_t* layer = lv_event_get_layer(e);
     if (!layer)
         return;
 
-    // Count visible series — skip legend if only one series (no ambiguity)
-    int visible_count = 0;
-    for (int i = 0; i < UI_TEMP_GRAPH_MAX_SERIES; i++) {
-        if (graph->series_meta[i].chart_series && graph->series_meta[i].visible)
-            visible_count++;
-    }
-    if (visible_count <= 1)
-        return;
-
-    // Content area (inside padding)
-    lv_area_t coords;
-    lv_obj_get_coords(chart, &coords);
-    int32_t pad_left = lv_obj_get_style_pad_left(chart, LV_PART_MAIN);
-    int32_t pad_top = lv_obj_get_style_pad_top(chart, LV_PART_MAIN);
-    int32_t pad_right = lv_obj_get_style_pad_right(chart, LV_PART_MAIN);
-    int32_t content_x1 = coords.x1 + pad_left;
-    int32_t content_x2 = coords.x2 - pad_right;
-    int32_t content_y1 = coords.y1 + pad_top;
+    int visible_count = count_visible_series(graph);
 
     // Layout constants
     const lv_font_t* font = theme_manager_get_font("font_xs");
     int32_t font_h = theme_manager_get_font_height(font);
-    int32_t chip_h = font_h + 4;      // 2px vertical padding
+    int32_t chip_h = row.y2 - row.y1 + 1;
     int32_t swatch_size = font_h - 2; // Color swatch square
     int32_t chip_pad_h = 4;           // Horizontal padding inside chip
     int32_t chip_gap = 3;             // Gap between chips
     int32_t chip_radius = chip_h / 2; // Fully rounded ends
 
-    // Starting position: upper-left with small inset
-    int32_t x_start = content_x1 + 4;
-    int32_t x = x_start;
-    int32_t y = content_y1 + 3;
-    int32_t available_x_max = content_x2 - 4;
+    int32_t x = row.x1;
+    int32_t y = row.y1;
+    int32_t available_x_max = row.x2;
 
     // Worst-case overflow indicator width ("+N" with N up to visible_count).
     // Reserved when there could still be more chips after the one we're about
@@ -1265,7 +1292,9 @@ static void draw_x_axis_labels_cb(lv_event_t* e) {
         if (!graph->axis_font)
             continue;
         time_t tick_sec = static_cast<time_t>(tick_ms / 1000);
-        std::string tick_text = format_time(localtime(&tick_sec));
+        struct tm tick_tm {};
+        localtime_r(&tick_sec, &tick_tm);
+        std::string tick_text = format_time(&tick_tm);
         lv_point_t tick_size;
         lv_text_get_size(&tick_size, tick_text.c_str(), graph->axis_font, 0, 0, LV_COORD_MAX,
                          LV_TEXT_FLAG_NONE);
@@ -1301,8 +1330,9 @@ static void draw_x_axis_labels_cb(lv_event_t* e) {
 
         // Format time via central formatter (handles 12H/24H, leading zero strip)
         time_t time_sec = static_cast<time_t>(label_time_ms / 1000);
-        struct tm* tm_info = localtime(&time_sec);
-        std::string formatted = format_time(tm_info);
+        struct tm tm_buf {};
+        localtime_r(&time_sec, &tm_buf);
+        std::string formatted = format_time(&tm_buf);
         // Copy to static buffer — LVGL draw tasks need persistent string pointers
         static char time_str_buf[8][12]; // 8 labels max, 12 chars each
         static int time_str_idx = 0;
@@ -1354,8 +1384,9 @@ static void draw_x_axis_labels_cb(lv_event_t* e) {
     // (at least 80% of points have data) - prevents overlap with time-based labels
     if (graph->visible_point_count >= (graph->point_count * 4 / 5)) {
         time_t now_sec = static_cast<time_t>(latest_ms / 1000);
-        struct tm* tm_info = localtime(&now_sec);
-        std::string now_formatted = format_time(tm_info);
+        struct tm now_tm {};
+        localtime_r(&now_sec, &now_tm);
+        std::string now_formatted = format_time(&now_tm);
         static char now_str[12];
         strncpy(now_str, now_formatted.c_str(), 11);
         now_str[11] = '\0';
@@ -1649,6 +1680,7 @@ ui_temp_graph_t* ui_temp_graph_create(lv_obj_t* parent) {
     int32_t label_height = theme_manager_get_font_height(theme_manager_get_font("font_small"));
     int32_t y_axis_label_width = 40; // Width for Y-axis labels (fits "320°")
 
+    graph->axis_top_pad = space_md;
     lv_obj_set_style_pad_top(graph->chart, space_md, LV_PART_MAIN);
     lv_obj_set_style_pad_right(graph->chart, space_md, LV_PART_MAIN);
     // Extra left padding for Y-axis labels: label width + gap
@@ -1688,6 +1720,8 @@ ui_temp_graph_t* ui_temp_graph_create(lv_obj_t* parent) {
     // gradient reads them — gradients will clamp to chart top (via lv_map) which is
     // the desired visual: gradient fills to top indicating off-scale data.
     lv_obj_add_event_cb(graph->chart, draw_gradient_cb, LV_EVENT_DRAW_MAIN_END, graph);
+    lv_display_add_event_cb(lv_obj_get_display(graph->chart), gradient_render_start_cb,
+                            LV_EVENT_RENDER_START, graph);
 
     // Store graph pointer in chart user data for retrieval
     lv_obj_set_user_data(graph->chart, graph);
@@ -1777,6 +1811,8 @@ void ui_temp_graph_destroy(ui_temp_graph_t* graph) {
         lv_obj_remove_event_cb(chart, mask_overrange_end_cb);
         lv_obj_remove_event_cb(chart, draw_gradient_cb);
         lv_obj_remove_event_cb(chart, chart_delete_cb);
+        lv_display_remove_event_cb_with_user_data(lv_obj_get_display(chart),
+                                                  gradient_render_start_cb, graph);
         lv_obj_remove_event_cb(chart, draw_grid_lines_cb);
         lv_obj_remove_event_cb(chart, draw_x_axis_labels_cb);
         lv_obj_remove_event_cb(chart, draw_y_axis_labels_cb);
@@ -1801,10 +1837,7 @@ void ui_temp_graph_destroy(ui_temp_graph_t* graph) {
         // child of the chart and will be removed by the async chart deletion
         // cascade below — just null our pointer so nothing dereferences it.
         graph_ptr->gradient_canvas = nullptr;
-        if (graph_ptr->gradient_cache_buf) {
-            lv_draw_buf_destroy(graph_ptr->gradient_cache_buf);
-            graph_ptr->gradient_cache_buf = nullptr;
-        }
+        helix::safe_draw_buf_destroy(graph_ptr->gradient_cache_buf, "tg_grad");
 
         // Hide the chart before queuing the async delete: lv_refr's tree walk
         // skips LV_OBJ_FLAG_HIDDEN, so any display-refresh frame that fires
@@ -1828,15 +1861,13 @@ void ui_temp_graph_destroy(ui_temp_graph_t* graph) {
     for (int i = 0; i < UI_TEMP_GRAPH_MAX_SERIES; i++) {
         delete[] graph_ptr->series_meta[i].target_deci_buf;
         graph_ptr->series_meta[i].target_deci_buf = nullptr;
+        graph_ptr->series_meta[i].target_cap = 0;
     }
 
     // Defensive: free the gradient cache buffer if it somehow survived both the
     // chart-present path above and chart_delete_cb (e.g. destroy after a cascade
     // delete that didn't carry our user_data). Idempotent: pointer is nulled.
-    if (graph_ptr->gradient_cache_buf) {
-        lv_draw_buf_destroy(graph_ptr->gradient_cache_buf);
-        graph_ptr->gradient_cache_buf = nullptr;
-    }
+    helix::safe_draw_buf_destroy(graph_ptr->gradient_cache_buf, "tg_grad");
 
     // graph_ptr automatically freed via ~unique_ptr()
     spdlog::trace("[TempGraph] Destroyed");
@@ -1848,15 +1879,15 @@ lv_obj_t* ui_temp_graph_get_chart(ui_temp_graph_t* graph) {
 }
 
 // Add a new temperature series
-int ui_temp_graph_add_series(ui_temp_graph_t* graph, const char* name, lv_color_t color) {
+SeriesId ui_temp_graph_add_series(ui_temp_graph_t* graph, const char* name, lv_color_t color) {
     if (!graph || !graph->chart || !name) {
         spdlog::error("[TempGraph] NULL graph, chart, or name");
-        return -1;
+        return SeriesId::None;
     }
 
     if (graph->series_count >= UI_TEMP_GRAPH_MAX_SERIES) {
         spdlog::error("[TempGraph] Maximum series count ({}) reached", UI_TEMP_GRAPH_MAX_SERIES);
-        return -1;
+        return SeriesId::None;
     }
 
     // Find next available slot
@@ -1870,14 +1901,14 @@ int ui_temp_graph_add_series(ui_temp_graph_t* graph, const char* name, lv_color_
 
     if (slot == -1) {
         spdlog::error("[TempGraph] No available series slots");
-        return -1;
+        return SeriesId::None;
     }
 
     // Create LVGL chart series
     lv_chart_series_t* ser = lv_chart_add_series(graph->chart, color, LV_CHART_AXIS_PRIMARY_Y);
     if (!ser) {
         spdlog::error("[TempGraph] Failed to create chart series");
-        return -1;
+        return SeriesId::None;
     }
 
     // Initialize all points to POINT_NONE (no data) so empty chart doesn't show false history.
@@ -1886,7 +1917,7 @@ int ui_temp_graph_add_series(ui_temp_graph_t* graph, const char* name, lv_color_
 
     // Initialize series metadata
     ui_temp_series_meta_t* meta = &graph->series_meta[slot];
-    meta->id = graph->next_series_id++;
+    meta->id = static_cast<SeriesId>(graph->next_series_id++);
     meta->chart_series = ser;
     meta->color = color;
     strncpy(meta->name, name, sizeof(meta->name) - 1);
@@ -1906,13 +1937,15 @@ int ui_temp_graph_add_series(ui_temp_graph_t* graph, const char* name, lv_color_
         lv_chart_remove_series(graph->chart, ser);
         memset(meta, 0, sizeof(ui_temp_series_meta_t));
         meta->chart_series = nullptr;
-        return -1;
+        return SeriesId::None;
     }
+    meta->target_cap = graph->point_count;
 
     graph->series_count++;
 
     // New series introduces another gradient band.
     mark_gradient_cache_dirty(graph);
+    apply_top_pad(graph);
 
     spdlog::trace("[TempGraph] Added series {} '{}' (slot {}, color 0x{:06X})", meta->id,
                   meta->name, slot, lv_color_to_u32(color));
@@ -1921,7 +1954,7 @@ int ui_temp_graph_add_series(ui_temp_graph_t* graph, const char* name, lv_color_
 }
 
 // Remove a temperature series
-void ui_temp_graph_remove_series(ui_temp_graph_t* graph, int series_id) {
+void ui_temp_graph_remove_series(ui_temp_graph_t* graph, SeriesId series_id) {
     ui_temp_series_meta_t* meta = find_series(graph, series_id);
     if (!meta) {
         spdlog::error("[TempGraph] Series {} not found", series_id);
@@ -1934,7 +1967,7 @@ void ui_temp_graph_remove_series(ui_temp_graph_t* graph, int series_id) {
     // Free target history buffer
     delete[] meta->target_deci_buf;
 
-    // Clear metadata (also zeros target_deci_buf and target_head)
+    // Clear metadata (also zeros target_deci_buf, target_cap and target_head)
     memset(meta, 0, sizeof(ui_temp_series_meta_t));
     meta->chart_series = nullptr;
 
@@ -1942,6 +1975,7 @@ void ui_temp_graph_remove_series(ui_temp_graph_t* graph, int series_id) {
 
     // Removing a series drops its gradient band.
     mark_gradient_cache_dirty(graph);
+    apply_top_pad(graph);
 
     helix::temp_graph_internal::temp_graph_tooltip_on_series_hidden(graph, series_id);
 
@@ -1949,8 +1983,20 @@ void ui_temp_graph_remove_series(ui_temp_graph_t* graph, int series_id) {
                   graph->series_count);
 }
 
+// Rename a series; the legend draws its name
+void helix::temp_graph_set_series_name(ui_temp_graph_t* graph, SeriesId series_id,
+                                       const char* name) {
+    ui_temp_series_meta_t* meta = find_series(graph, series_id);
+    if (!meta || !name) {
+        return;
+    }
+    strncpy(meta->name, name, sizeof(meta->name) - 1);
+    meta->name[sizeof(meta->name) - 1] = '\0';
+    lv_obj_invalidate(graph->chart);
+}
+
 // Show or hide a series
-void ui_temp_graph_show_series(ui_temp_graph_t* graph, int series_id, bool visible) {
+void ui_temp_graph_show_series(ui_temp_graph_t* graph, SeriesId series_id, bool visible) {
     ui_temp_series_meta_t* meta = find_series(graph, series_id);
     if (!meta) {
         spdlog::error("[TempGraph] Series {} not found", series_id);
@@ -1964,6 +2010,7 @@ void ui_temp_graph_show_series(ui_temp_graph_t* graph, int series_id, bool visib
 
     // Visibility change adds/removes a series' gradient band.
     mark_gradient_cache_dirty(graph);
+    apply_top_pad(graph);
 
     if (!visible) {
         helix::temp_graph_internal::temp_graph_tooltip_on_series_hidden(graph, series_id);
@@ -1979,21 +2026,21 @@ void ui_temp_graph_show_series(ui_temp_graph_t* graph, int series_id, bool visib
 // draw callback can walk target_deci_buf[0..target_head-1] linearly, oldest-to-newest,
 // without tracking the chart's start_point offset. Called from update_series*
 // immediately after lv_chart_set_next_value.
-static void push_target_sample(ui_temp_graph_t* graph, ui_temp_series_meta_t* meta) {
-    if (!meta->target_deci_buf || graph->point_count <= 0)
+static void push_target_sample(ui_temp_series_meta_t* meta) {
+    if (!meta->target_deci_buf || meta->target_cap <= 0)
         return;
     int16_t v = static_cast<int16_t>(meta->target_temp * TEMP_SCALE);
-    if (meta->target_head < graph->point_count) {
+    if (meta->target_head < meta->target_cap) {
         meta->target_deci_buf[meta->target_head++] = v;
     } else {
         memmove(meta->target_deci_buf, meta->target_deci_buf + 1,
-                static_cast<size_t>(graph->point_count - 1) * sizeof(int16_t));
-        meta->target_deci_buf[graph->point_count - 1] = v;
+                static_cast<size_t>(meta->target_cap - 1) * sizeof(int16_t));
+        meta->target_deci_buf[meta->target_cap - 1] = v;
     }
 }
 
 // Add a single temperature point (push mode)
-void ui_temp_graph_update_series(ui_temp_graph_t* graph, int series_id, float temp) {
+void ui_temp_graph_update_series(ui_temp_graph_t* graph, SeriesId series_id, float temp) {
     ui_temp_series_meta_t* meta = find_series(graph, series_id);
     if (!meta) {
         spdlog::error("[TempGraph] Series {} not found", series_id);
@@ -2007,7 +2054,7 @@ void ui_temp_graph_update_series(ui_temp_graph_t* graph, int series_id, float te
     helix::temp_graph_internal::temp_graph_tooltip_on_sample_pushed(graph, series_id);
 
     // Mirror the push into the parallel target buffer.
-    push_target_sample(graph, meta);
+    push_target_sample(meta);
 
     // Update max visible temperature for gradient rendering
     update_max_visible_temp(graph);
@@ -2025,7 +2072,7 @@ void ui_temp_graph_update_series(ui_temp_graph_t* graph, int series_id, float te
 }
 
 // Add temperature point with timestamp (for X-axis labels)
-void ui_temp_graph_update_series_with_time(ui_temp_graph_t* graph, int series_id, float temp,
+void ui_temp_graph_update_series_with_time(ui_temp_graph_t* graph, SeriesId series_id, float temp,
                                            int64_t timestamp_ms) {
     ui_temp_series_meta_t* meta = find_series(graph, series_id);
     if (!meta) {
@@ -2066,7 +2113,7 @@ void ui_temp_graph_update_series_with_time(ui_temp_graph_t* graph, int series_id
     helix::temp_graph_internal::temp_graph_tooltip_on_sample_pushed(graph, series_id);
 
     // Mirror the push into the parallel target buffer.
-    push_target_sample(graph, meta);
+    push_target_sample(meta);
 
     // Update max visible temperature for gradient rendering
     update_max_visible_temp(graph);
@@ -2081,7 +2128,7 @@ void ui_temp_graph_update_series_with_time(ui_temp_graph_t* graph, int series_id
 }
 
 // Replace all data points (array mode)
-void ui_temp_graph_set_series_data(ui_temp_graph_t* graph, int series_id, const float* temps,
+void ui_temp_graph_set_series_data(ui_temp_graph_t* graph, SeriesId series_id, const float* temps,
                                    int count) {
     ui_temp_series_meta_t* meta = find_series(graph, series_id);
     if (!meta || !temps || count <= 0) {
@@ -2129,7 +2176,7 @@ void ui_temp_graph_set_series_data(ui_temp_graph_t* graph, int series_id, const 
 // Replace all data + target history for a series (array mode, parallel arrays).
 // Used by backfill paths that have both temp and target history per sample
 // (e.g., TemperatureHistoryManager::get_samples_since() replay).
-void ui_temp_graph_set_series_data_with_targets(ui_temp_graph_t* graph, int series_id,
+void ui_temp_graph_set_series_data_with_targets(ui_temp_graph_t* graph, SeriesId series_id,
                                                 const float* temps, const float* targets,
                                                 int count) {
     ui_temp_series_meta_t* meta = find_series(graph, series_id);
@@ -2147,21 +2194,22 @@ void ui_temp_graph_set_series_data_with_targets(ui_temp_graph_t* graph, int seri
 
     // Populate target buffer in lockstep. Zero-init any tail we don't fill.
     if (meta->target_deci_buf) {
-        for (int i = 0; i < points_to_copy; i++) {
+        int target_points = points_to_copy > meta->target_cap ? meta->target_cap : points_to_copy;
+        for (int i = 0; i < target_points; i++) {
             meta->target_deci_buf[i] = static_cast<int16_t>(targets[i] * TEMP_SCALE);
         }
-        if (points_to_copy < graph->point_count) {
-            memset(meta->target_deci_buf + points_to_copy, 0,
-                   static_cast<size_t>(graph->point_count - points_to_copy) * sizeof(int16_t));
+        if (target_points < meta->target_cap) {
+            memset(meta->target_deci_buf + target_points, 0,
+                   static_cast<size_t>(meta->target_cap - target_points) * sizeof(int16_t));
         }
-        meta->target_head = points_to_copy;
+        meta->target_head = target_points;
 
         // Pre-stage current target so the next push_target_sample (from a live
         // observer's update_series call) writes the correct value, not stale 0.
         // Without this, the next sample punches a 0 gap between the last replayed
         // target and the next live target, fragmenting the trace into two segments.
-        if (points_to_copy > 0) {
-            meta->target_temp = targets[points_to_copy - 1];
+        if (target_points > 0) {
+            meta->target_temp = targets[target_points - 1];
         }
     }
 
@@ -2202,7 +2250,7 @@ void ui_temp_graph_clear(ui_temp_graph_t* graph) {
             // Also wipe target history.
             if (meta->target_deci_buf) {
                 memset(meta->target_deci_buf, 0,
-                       static_cast<size_t>(graph->point_count) * sizeof(int16_t));
+                       static_cast<size_t>(meta->target_cap) * sizeof(int16_t));
             }
             meta->target_head = 0;
         }
@@ -2217,7 +2265,7 @@ void ui_temp_graph_clear(ui_temp_graph_t* graph) {
 }
 
 // Clear data for a specific series
-void ui_temp_graph_clear_series(ui_temp_graph_t* graph, int series_id) {
+void ui_temp_graph_clear_series(ui_temp_graph_t* graph, SeriesId series_id) {
     ui_temp_series_meta_t* meta = find_series(graph, series_id);
     if (!meta) {
         spdlog::error("[TempGraph] Series {} not found", series_id);
@@ -2228,7 +2276,7 @@ void ui_temp_graph_clear_series(ui_temp_graph_t* graph, int series_id) {
 
     // Wipe target history too.
     if (meta->target_deci_buf) {
-        memset(meta->target_deci_buf, 0, static_cast<size_t>(graph->point_count) * sizeof(int16_t));
+        memset(meta->target_deci_buf, 0, static_cast<size_t>(meta->target_cap) * sizeof(int16_t));
     }
     meta->target_head = 0;
 
@@ -2241,7 +2289,7 @@ void ui_temp_graph_clear_series(ui_temp_graph_t* graph, int series_id) {
 }
 
 // Set target temperature and visibility
-void ui_temp_graph_set_series_target(ui_temp_graph_t* graph, int series_id, float target,
+void ui_temp_graph_set_series_target(ui_temp_graph_t* graph, SeriesId series_id, float target,
                                      bool show) {
     ui_temp_series_meta_t* meta = find_series(graph, series_id);
     if (!meta) {
@@ -2258,7 +2306,7 @@ void ui_temp_graph_set_series_target(ui_temp_graph_t* graph, int series_id, floa
 }
 
 // Show or hide target temperature line
-void ui_temp_graph_show_target(ui_temp_graph_t* graph, int series_id, bool show) {
+void ui_temp_graph_show_target(ui_temp_graph_t* graph, SeriesId series_id, bool show) {
     ui_temp_series_meta_t* meta = find_series(graph, series_id);
     if (!meta) {
         spdlog::error("[TempGraph] Series {} not found", series_id);
@@ -2270,7 +2318,7 @@ void ui_temp_graph_show_target(ui_temp_graph_t* graph, int series_id, bool show)
 
 // Stage a new current target without pushing into the history buffer.
 // The buffer push happens on the next actuals sample (push_target_sample).
-void ui_temp_graph_set_current_target(ui_temp_graph_t* graph, int series_id, float target,
+void ui_temp_graph_set_current_target(ui_temp_graph_t* graph, SeriesId series_id, float target,
                                       bool show) {
     ui_temp_series_meta_t* meta = find_series(graph, series_id);
     if (!meta) {
@@ -2335,6 +2383,7 @@ void ui_temp_graph_set_point_count(ui_temp_graph_t* graph, int count) {
             continue;
         delete[] m.target_deci_buf;
         m.target_deci_buf = new (std::nothrow) int16_t[static_cast<size_t>(count)]();
+        m.target_cap = m.target_deci_buf ? count : 0;
         m.target_head = 0;
         if (!m.target_deci_buf) {
             spdlog::error("[TempGraph] Failed to realloc target buffer for series '{}'", m.name);
@@ -2345,8 +2394,8 @@ void ui_temp_graph_set_point_count(ui_temp_graph_t* graph, int count) {
 }
 
 // Set gradient opacity for a series
-void ui_temp_graph_set_series_gradient(ui_temp_graph_t* graph, int series_id, lv_opa_t bottom_opa,
-                                       lv_opa_t top_opa) {
+void ui_temp_graph_set_series_gradient(ui_temp_graph_t* graph, SeriesId series_id,
+                                       lv_opa_t bottom_opa, lv_opa_t top_opa) {
     ui_temp_series_meta_t* meta = find_series(graph, series_id);
     if (!meta) {
         spdlog::error("[TempGraph] Series {} not found", series_id);
@@ -2429,7 +2478,8 @@ void ui_temp_graph_set_axis_size(ui_temp_graph_t* graph, const char* size) {
     int32_t bottom_pad =
         is_xs ? (space_xs + label_height + space_xs) : (space_sm + label_height + space_md);
 
-    lv_obj_set_style_pad_top(graph->chart, top_pad, LV_PART_MAIN);
+    graph->axis_top_pad = top_pad;
+    apply_top_pad(graph);
     lv_obj_set_style_pad_left(graph->chart, left_pad, LV_PART_MAIN);
     lv_obj_set_style_pad_bottom(graph->chart, bottom_pad, LV_PART_MAIN);
 
@@ -2486,8 +2536,8 @@ void ui_temp_graph_set_features(ui_temp_graph_t* graph, uint32_t features) {
     lv_obj_set_style_pad_bottom(graph->chart, bottom_pad, LV_PART_MAIN);
 
     // Top padding: reserve space for top Y-axis label, or use minimal padding
-    int32_t top_pad = want_y ? LV_MAX(space_sm, label_height) : space_xs;
-    lv_obj_set_style_pad_top(graph->chart, top_pad, LV_PART_MAIN);
+    graph->axis_top_pad = want_y ? LV_MAX(space_sm, label_height) : space_xs;
+    apply_top_pad(graph);
 
     // Toggle gradient opacity: zero out when disabled, restore defaults when enabled
     bool want_gradients = (features & TEMP_GRAPH_FEATURE_GRADIENTS) != 0;

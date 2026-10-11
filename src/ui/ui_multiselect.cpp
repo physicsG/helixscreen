@@ -81,6 +81,7 @@ lv_obj_t* UiMultiselect::create_row(const MultiSelectItem& item) {
 
     // Row container: flex row, full width, content height
     lv_obj_t* row = lv_obj_create(container_);
+    lv_obj_set_name(row, fmt::format("item_{}", data->key).c_str());
     lv_obj_set_width(row, lv_pct(100));
     lv_obj_set_height(row, LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
@@ -108,6 +109,7 @@ lv_obj_t* UiMultiselect::create_row(const MultiSelectItem& item) {
 
     // Checkbox: right-aligned, empty text, not directly clickable
     lv_obj_t* cb = lv_checkbox_create(row);
+    lv_obj_set_name(cb, "check");
     lv_checkbox_set_text(cb, "");
     lv_obj_remove_flag(cb, LV_OBJ_FLAG_CLICKABLE);
 

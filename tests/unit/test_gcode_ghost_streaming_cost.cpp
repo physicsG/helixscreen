@@ -191,7 +191,6 @@ TEST_CASE("ghost pass over a streamed file does not read one layer per layer",
     GCodeLayerRenderer renderer;
     renderer.set_canvas_size(CANVAS_W, CANVAS_H);
     renderer.set_streaming_controller(&fx.controller);
-    renderer.set_view_mode(ViewMode::FRONT);
 
     // Everything before this point — the index build in particular — is not what
     // is being measured.
@@ -228,7 +227,6 @@ TEST_CASE("ghost pass does not drive the prefetch worker across the file",
     GCodeLayerRenderer renderer;
     renderer.set_canvas_size(CANVAS_W, CANVAS_H);
     renderer.set_streaming_controller(&fx.controller);
-    renderer.set_view_mode(ViewMode::FRONT);
 
     fx.controller.wait_for_prefetch_idle();
     fx.counter->reset();
@@ -289,7 +287,6 @@ TEST_CASE("a streamed ghost leaves no empty row inside the model",
     GCodeLayerRenderer renderer;
     renderer.set_canvas_size(CANVAS_W, CANVAS_H);
     renderer.set_streaming_controller(&controller);
-    renderer.set_view_mode(ViewMode::FRONT);
 
     GCodeLayerRendererTestAccess::run_ghost_pass(renderer);
     REQUIRE(GCodeLayerRendererTestAccess::ghost_completed(renderer));

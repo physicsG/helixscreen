@@ -3,24 +3,21 @@
 
 /**
  * @file belt_tension_calibrator.h
- * @brief High-level orchestrator for belt tension calibration workflow
+ * @brief One-path-at-a-time belt tension measurement orchestrator
  *
- * BeltTensionCalibrator manages the belt tension measurement process:
- * 1. Detect printer hardware (kinematics, ADXL)
- * 2. Home printer if needed
- * 3. Run resonance sweeps on belt paths A and B
- * 4. Compute PSD, find peaks, calculate similarity
- *
- * This is a state machine that coordinates IMoonrakerAPI calls and
- * provides progress/error callbacks to the UI layer.
+ * BeltTensionCalibrator coordinates IMoonrakerAPI calls and marshals the
+ * API's off-thread callbacks onto the LVGL thread for the UI layer. One
+ * measure_path() call homes if needed, then sweeps one belt path.
  *
  * @see InputShaperCalibrator for the equivalent input shaper workflow
  */
 
 #include "async_lifetime_guard.h"
 #include "belt_tension_types.h"
+#include "i_moonraker_sub_apis.h"
 
 #include <atomic>
+#include <functional>
 #include <string>
 
 // Forward declaration
@@ -34,11 +31,8 @@ class BeltTensionCalibrator {
     enum class State {
         IDLE,               ///< Ready to start, no measurement in progress
         DETECTING_HARDWARE, ///< Querying printer for capabilities
-        CHECKING_ADXL,      ///< Verifying accelerometer connectivity
         HOMING,             ///< Homing printer axes
-        TESTING_PATH_A,     ///< Running resonance sweep on path A
-        TESTING_PATH_B,     ///< Running resonance sweep on path B
-        RESULTS_READY,      ///< Both paths measured, results available
+        MEASURING,          ///< Running the resonance sweep on one path
         ERROR,              ///< An error occurred
     };
 
@@ -71,12 +65,17 @@ class BeltTensionCalibrator {
     [[nodiscard]] State get_state() const {
         return state_.load();
     }
-    [[nodiscard]] const BeltTensionResult& get_results() const {
-        return results_;
-    }
     [[nodiscard]] const BeltTensionHardware& get_hardware() const {
         return hardware_;
     }
+
+    /// Klipper XY-vector form of a path's axis: PATH_A sweeps (1,-1), PATH_B
+    /// (1,1). The letters follow the Voron motor names Shake&Tune uses: a 1,1
+    /// move turns only stepper_x, which is a Voron's B motor.
+    [[nodiscard]] static const char* axis_param(BeltPath p);
+
+    /// TEST_RESONANCES NAME= for a path; also the CSV basename Klipper writes.
+    [[nodiscard]] static const char* output_name(BeltPath p);
 
     // ========================================================================
     // Hardware Detection
@@ -94,65 +93,49 @@ class BeltTensionCalibrator {
     void detect_hardware(BeltHardwareDetectCallback on_complete, BeltErrorCallback on_error);
 
     // ========================================================================
-    // Auto-Sweep Measurement (ADXL required)
+    // Measurement
     // ========================================================================
 
     /**
-     * @brief Run complete auto-sweep measurement on both belt paths
+     * @brief Home if needed, then sweep one belt path
      *
-     * Sequence: detect_hardware -> ensure_homed -> test A -> test B -> results
+     * Runs TEST_RESONANCES on the path's diagonal and reports the parsed
+     * curve. All three callbacks run on the LVGL thread. A run already in
+     * progress is cancelled first.
      *
-     * @param on_progress Called with percentage (0-100) during test
-     * @param on_complete Called with complete results
-     * @param on_error Called with error message on failure
+     * @param path Which belt diagonal to sweep
+     * @param on_progress (percent 0-100, current sweep frequency Hz)
+     * @param on_complete Parsed (frequency_hz, psd_xyz) curve, ascending
+     * @param on_error Error message on failure (homing or sweep)
      */
-    void run_auto_sweep(BeltProgressCallback on_progress, BeltResultCallback on_complete,
-                        BeltErrorCallback on_error);
-
-    /**
-     * @brief Run resonance test on a single belt path
-     *
-     * @param path Belt path to test
-     * @param on_progress Called with percentage (0-100) during test
-     * @param on_complete Called with measurement result
-     * @param on_error Called with error message on failure
-     */
-    void test_path(BeltPath path, BeltProgressCallback on_progress,
-                   BeltMeasurementCallback on_complete, BeltErrorCallback on_error);
+    void measure_path(BeltPath path, std::function<void(int percent, float freq_hz)> on_progress,
+                      std::function<void(BeltCurve)> on_complete, BeltErrorCallback on_error);
 
     // ========================================================================
     // Control
     // ========================================================================
 
-    /// Cancel any in-progress operation and return to IDLE
+    /// Stop listening to the running sweep. The printer keeps sweeping.
     void cancel();
 
-    /// Reset calibrator to initial state, clearing all results
+    /// Stop the printer: cancel() then emergency_stop_and_restart().
+    void emergency_abort();
+
+    /// Cancel any run and clear detected hardware
     void reset();
 
-    // ========================================================================
-    // Configuration
-    // ========================================================================
-
-    void set_target_frequency(float hz) {
-        results_.target_frequency = hz;
-    }
-    void set_tolerance(float hz) {
-        results_.tolerance = hz;
-    }
-
   private:
-    void execute_resonance_test(BeltPath path, BeltProgressCallback on_progress,
-                                BeltMeasurementCallback on_complete, BeltErrorCallback on_error);
-    void process_csv_data(const std::string& csv_data, BeltMeasurementCallback on_complete,
-                          BeltErrorCallback on_error);
-    std::string belt_path_to_axis_param(BeltPath path) const;
-    static std::string belt_path_to_name(BeltPath path);
-
     std::atomic<State> state_{State::IDLE};
     IMoonrakerAPI* api_ = nullptr;
-    BeltTensionResult results_;
     BeltTensionHardware hardware_;
+
+    /// Silences the running sweep's callbacks; null when no run is active.
+    IAdvancedAPI::BeltRunCancel run_cancel_;
+
+    /// Bumped by cancel(). Each step of a run (the post-homing start, progress,
+    /// completion, error) acts only while it still holds the current value, so a
+    /// run cancelled mid-homing never starts its sweep.
+    uint32_t run_generation_ = 0;
 
     /// Async callback safety guard
     helix::AsyncLifetimeGuard lifetime_;

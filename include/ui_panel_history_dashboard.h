@@ -8,6 +8,7 @@
 #include "overlay_base.h"
 #include "print_history_data.h"
 #include "print_history_manager.h"
+#include "static_panel_registry.h"
 #include "subject_managed_panel.h"
 
 #include <vector>
@@ -74,17 +75,12 @@ class HistoryDashboardPanel : public OverlayBase {
      */
     void deinit_subjects();
 
-    /**
-     * @brief Register XML event callbacks
-     */
     void register_callbacks() override;
 
-    /**
-     * @brief Create the dashboard panel from XML
-     *
-     * @param parent Parent widget (screen)
-     * @return Root widget of the overlay
-     */
+    const char* xml_component() const override {
+        return "history_dashboard_panel";
+    }
+
     lv_obj_t* create(lv_obj_t* parent) override;
 
     [[nodiscard]] const char* get_name() const override {
@@ -105,7 +101,7 @@ class HistoryDashboardPanel : public OverlayBase {
     /**
      * @brief Called when panel becomes invisible (navigated away)
      */
-    void on_deactivate() override;
+    void on_deactivating(DeactivateReason reason) override;
 
     //
     // === Public API ===
@@ -135,18 +131,6 @@ class HistoryDashboardPanel : public OverlayBase {
         return cached_jobs_;
     }
 
-    //
-    // === Static Event Callbacks (registered with lv_xml_register_event_cb) ===
-    // Must be public for LVGL XML system registration
-    //
-
-    static void on_filter_day_clicked(lv_event_t* e);
-    static void on_filter_week_clicked(lv_event_t* e);
-    static void on_filter_month_clicked(lv_event_t* e);
-    static void on_filter_year_clicked(lv_event_t* e);
-    static void on_filter_all_clicked(lv_event_t* e);
-    static void on_view_history_clicked(lv_event_t* e);
-
   private:
     //
     // === Widget References ===
@@ -167,7 +151,6 @@ class HistoryDashboardPanel : public OverlayBase {
 
     // Containers
     lv_obj_t* stats_grid_ = nullptr;
-    lv_obj_t* charts_section_ = nullptr;
     lv_obj_t* empty_state_ = nullptr;
     lv_obj_t* btn_view_history_ = nullptr;
 
@@ -195,12 +178,6 @@ class HistoryDashboardPanel : public OverlayBase {
     std::vector<PrintHistoryJob> cached_jobs_; ///< Time-filtered subset for get_cached_jobs()
     bool is_active_ = false;                   ///< Track if panel is currently visible
 
-    // Parent screen reference
-    lv_obj_t* parent_screen_ = nullptr;
-
-    // Callback registration tracking
-    bool callbacks_registered_ = false;
-
     // Connection state observer to auto-refresh when connected (ObserverGuard handles cleanup)
     ObserverGuard connection_observer_;
 
@@ -211,28 +188,36 @@ class HistoryDashboardPanel : public OverlayBase {
     SubjectManager subjects_;
 
     // Subject for empty state binding (must persist for LVGL binding lifetime)
-    lv_subject_t history_has_jobs_subject_;
+    lv_subject_t history_has_jobs_subject_{};
 
     // Boolean subjects for filter button state binding (L040: two bind_styles pattern)
-    lv_subject_t history_filter_day_active_;
-    lv_subject_t history_filter_week_active_;
-    lv_subject_t history_filter_month_active_;
-    lv_subject_t history_filter_year_active_;
-    lv_subject_t history_filter_all_active_;
+    lv_subject_t history_filter_day_active_{};
+    lv_subject_t history_filter_week_active_{};
+    lv_subject_t history_filter_month_active_{};
+    lv_subject_t history_filter_year_active_{};
+    lv_subject_t history_filter_all_active_{};
 
     // String subjects for stat labels
-    lv_subject_t stat_total_prints_subject_;
-    lv_subject_t stat_print_time_subject_;
-    lv_subject_t stat_filament_subject_;
-    lv_subject_t stat_success_rate_subject_;
-    lv_subject_t trend_period_subject_;
+    lv_subject_t stat_total_prints_subject_{};
+    lv_subject_t stat_print_time_subject_{};
+    lv_subject_t stat_filament_subject_{};
+    lv_subject_t stat_success_rate_subject_{};
+    lv_subject_t trend_period_subject_{};
+    // Set while the shown stats come from fewer jobs than the period holds.
+    lv_subject_t history_coverage_partial_subject_{};
+    lv_subject_t history_coverage_subject_{};
 
     // Static buffers for string subjects (required for lv_subject_init_string)
     char stat_total_prints_buf_[32];
     char stat_print_time_buf_[32];
     char stat_filament_buf_[32];
     char stat_success_rate_buf_[16];
-    char trend_period_buf_[32];
+    char trend_period_buf_[64];
+    char history_coverage_buf_[96];
+
+    /// Say which jobs the stats come from when the cache does not cover the
+    /// period: the newest N prints, never a silent undercount.
+    void update_coverage_note(bool partial);
 
     //
     // === Data Fetching ===
@@ -326,9 +311,7 @@ class HistoryDashboardPanel : public OverlayBase {
     double get_trend_period_seconds() const;
 };
 
-/**
- * @brief Global instance accessor
- *
- * Creates instance on first call. Used by static callbacks.
- */
-HistoryDashboardPanel& get_global_history_dashboard_panel();
+/// Lazy singleton shared by the callbacks and the panels that open it.
+inline HistoryDashboardPanel& get_global_history_dashboard_panel() {
+    return helix::lazy_global<HistoryDashboardPanel>("HistoryDashboardPanel");
+}

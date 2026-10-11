@@ -221,3 +221,19 @@ inline bool subject_get_bool_or(const lv_subject_t& subject, bool fallback) {
     }
     return lv_subject_get_int(const_cast<lv_subject_t*>(&subject)) != 0;
 }
+
+namespace helix::ui {
+
+/**
+ * @brief Write @p text into a string subject only when it differs
+ *
+ * A string subject initialized without a previous-value buffer notifies on
+ * every copy, and a bound label then redraws even for the text it shows.
+ */
+inline void copy_string_if_changed(lv_subject_t* subject, const char* text) {
+    if (std::strcmp(lv_subject_get_string(subject), text) != 0) {
+        lv_subject_copy_string(subject, text);
+    }
+}
+
+} // namespace helix::ui

@@ -13,8 +13,9 @@
 > No hardcoded colors/spacing. Use semantic widgets (ui_card, ui_button, text_*, divider_*) — they apply tokens. Do not restate built-in defaults (style_radius on ui_card, button_height on ui_button). Defaults: `docs/devel/LVGL9_XML_GUIDE.md` § "Custom Semantic Widgets".
 
 ### [L009] Icon font sync workflow
-- **Learned**: 2025-12-14 | **Category**: gotcha | **Type**: constraint
+- **Learned**: 2025-12-14 | **Category**: gotcha | **Superseded**: CLAUDE.md | **Type**: constraint
 > Add icon to codepoints.h → add to regen_mdi_fonts.sh → `make regen-fonts` → rebuild. Skip any step = missing icon.
+> RETIRED as a duplicate: CLAUDE.md Code Standards now carries the full two-list icon recipe.
 
 ### [L011] No mutex in destructors
 - **Learned**: 2025-12-14 | **Category**: gotcha | **Type**: constraint
@@ -103,6 +104,7 @@
 ### [L062] AD5M build and deploy targets
 - **Learned**: 2026-02-07 | **Category**: build
 > AD5M build: `make ad5m-docker` (Docker ARM cross), NOT `make pi-test` (Pi). Deploy: `AD5M_HOST=192.168.1.67 make ad5m-deploy`.
+> Memory twin: `reference_ad5m_build` - update both or they drift.
 
 ### [L064] Commit generated translation artifacts
 - **Learned**: 2026-02-10 | **Category**: i18n
@@ -187,7 +189,7 @@
 
 ### [L086] OpenWrt/procd silently skips plain SysV init scripts at boot
 - **Learned**: 2026-04-28 | **Category**: gotcha | **Type**: constraint
-> OpenWrt/procd (Tina Linux K2, Allwinner) boot iterator only runs `/etc/init.d/<name>` with BOTH `#!/bin/sh /etc/rc.common` shebang AND a `DEPEND=`. Plain SysV silently skipped even if symlinked SXXname — no log. Symptom: hang at boot anim, no UI/helix procs/log, manual `/etc/init.d/SXX start` works. Fix: procd shim `/etc/init.d/<name>` (`START=99 STOP=01 DEPEND=done`, boot/start/stop delegate to SysV), then `<shim> enable`. See `install_procd_shim_k2()` service.sh. Check: `head -1` shows rc.common.
+> OpenWrt/procd (Tina Linux K2, Allwinner) boot iterator runs `/etc/init.d/<name>` only when it has the `#!/bin/sh /etc/rc.common` shebang. Plain SysV is silently skipped even if symlinked SXXname - no log. DEPEND is NOT required: on a K2 Plus (2026-09-14) adbd, nginx, sysntpd and cron carry no DEPEND and run at boot. And an rc.common script with an S-link IS dispatched - proven 2026-09-15 by a logger probe + reboot: S99helix-k2-webserver's start fired at boot, before S99helixscreen. Boot failures that look like "it was skipped" are usually kill-order: the later S99's hook runs `app stop`, whose killall takes down whatever the earlier S99 started, moments after it started. A script whose start() prints nothing leaves no logread line whether or not it was dispatched, so "zero log lines" never proves a skip: add a `logger` line before concluding. Symptom: hang at boot anim, no UI/helix procs/log, manual `/etc/init.d/SXX start` works. Fix: procd shim `/etc/init.d/<name>` (`START=99 STOP=01 DEPEND=done`, boot/start/stop delegate to SysV), then `<shim> enable`. See `install_procd_shim_k2()` service.sh. Check: `head -1` shows rc.common.
 
 ### [L087] Default-constructed nlohmann::json is NULL — `.value()` throws
 - **Learned**: 2026-05-06 | **Category**: gotcha | **Type**: constraint
@@ -238,8 +240,9 @@
 > helix_print.py coded against a fantasy Moonraker API; hand-rolled mocks implemented the fantasy → wrong calls shipped GREEN a month (bundle RA6EPJTZ: `'KlippyConnection' has no attribute 'run_gcode'`). Real API (Moonraker d5ee171): Klipper via `lookup_component("klippy_apis")` (run_gcode/start_print/do_restart), NOT klippy_connection (only request(WebRequest)); `database`=sql_execute; `history`=get_job/save_job. FIX: mocks `MagicMock(spec_set=[real method names])` so nonexistent-method calls raise AttributeError (reproduces the crash, no Moonraker import). spec_set catches nonexistent attr, not wrong signature. Companion L088.
 
 ### [L099] Recycled PanelWidget keeps layout bool → stale imperative DOM
-- **Learned**: 2026-07-16 | **Category**: pattern
+- **Learned**: 2026-07-16 | **Category**: pattern | **Superseded**: CLAUDE.md
 > PanelWidgetManager reuses widget instances across rebuilds (attach(new)+on_size_changed on the SAME instance); a member layout flag (is_wide_/is_column_) persists but the fresh XML component starts at its defaults. on_size_changed's `if(mode==flag_)return` then skips the apply when the new size matches the stale flag → stuck at XML default (#1109 active_spool white spool; print_status card stuck column at 1x2/3x2). Fix: hoist the imperative apply to a helper, call from attach() too. Immune: widgets recomputing every call (nozzle_temps/tips) or driven by retained subjects.
+> RETIRED as a duplicate: CLAUDE.md Patterns carries the attach() duty; the mechanism lives in project_recycled_widget_stale_layout.
 
 ### [L100] Lossy member vector leaks through every public getter
 - **Learned**: 2026-07-20 | **Category**: correction
@@ -292,6 +295,7 @@
 ### [L112] Dilate-and-overpaint is not a silhouette algorithm
 - **Learned**: 2026-08-19 | **Category**: gotcha
 > Drawing an object wider in a highlight colour then painting its own strokes over the middle only leaves a rim where the covering strokes are denser than the dilation. It floods on sloped geometry: a cone's outer wall shifts laterally each layer so 7px halos tile across the slope and ~2px of white survives PER LAYER (solid white blob by layer 120/218), while a cylinder looks perfect because its walls stack vertically and the halos coincide. The 3D equivalent, inverted-hull (mesh pushed along normals + glCullFace(GL_FRONT)), assumes a WATERTIGHT mesh so back faces sit behind the real surface; G-code is a soup of independent extrusion tubes, so back faces poke through as ~6% white speckle. Both need edge detection on a per-object coverage mask. Zero-memory route: apply_ssao() already edge-detects 'filled pixel with an empty neighbour' - draw the selected object with a sentinel alpha (254) and detect on that, instead of a 143KB object-id buffer. Also apply_ssao darkens every boundary pixel by OUTLINE_DARKEN=0.3, so a 1px white rim is consumed entirely (255->76), and SSAO is ON by default so any test disabling it for determinism tests a config production never runs.
+> Memory twin: `reference_gcode_silhouette_dilate_fails` - update both or they drift.
 
 ### [L113] Instrument any complicated path you cannot directly observe
 - **Learned**: 2026-08-19 | **Category**: pattern
@@ -300,6 +304,7 @@
 ### [L114] Verify WHICH gcode renderer is live before judging appearance
 - **Learned**: 2026-08-19 | **Category**: gotcha
 > Auto resolves to 3D on any ENABLE_GLES_3D build, so print-status defaults to GLES on desktop/pi. The viewer's top-right '3D' badge names the live renderer and is the cheapest check. The cube button in the viewer is NOT a 2D/3D toggle - on_view_toggle_clicked flips complete_view_mode_ (printed-so-far vs whole-model, ghost off). 'ctl set settings_gcode_render_mode N' usually does nothing: it writes the subject directly, bypassing DisplaySettingsManager::set_gcode_render_mode (so no persistence), and the print-status observer only acts if (gcode_viewer_ && is_active_), so setting it from another panel is silently dropped. What works: seed display/gcode_render_mode before launch, in settings-test.json under --test (0=Auto 1=3D 2=2D 3=Thumbnail), confirmed by the log pair 'Set G-code render mode: N (settings)' then 'Render mode set to 2D_LAYER'. GLES cannot run headless: SDL_CreateWindow fails under SDL_VIDEODRIVER=dummy, so 3D verification needs a real display.
+> Memory twin: `reference_gcode_render_mode_selection` - update both or they drift.
 
 ### [L115] The sample that works may be the best case - pick an adversarial one
 - **Learned**: 2026-08-19 | **Category**: pattern
@@ -308,10 +313,12 @@
 ### [L116] Cherry-pick main-based fixes onto a devel-branch, never merge
 - **Learned**: 2026-08-19 | **Category**: gotcha
 > devel/1.1 and main diverge by hundreds of commits, so merging a main-based fix branch into a devel/1.1-based feature branch drags in all of it - my attempt conflicted across input-shaper, temp-graph and nine translation YAMLs, none related to the fix. Cherry-pick the specific commits instead. When both branches appended tests to the same file, git's hunks cut THROUGH functions: concatenating 'ours then theirs' splices one side's block into the middle of the other's function body and fails to compile. Rebuild the file instead - 'git show <sha>:<path>' for the incoming version, then re-append only your own contiguous additions plus includes. A failed 'cherry-pick --continue' also leaves sequencer state that makes the NEXT cherry-pick fail with 'already in progress'; 'git cherry-pick --quit' clears it without touching HEAD or the working tree, unlike --abort which reverts. Landing on main itself is the opposite case - prefer a 3-way merge there.
+> Memory twin: `feedback_cherry_pick_across_diverged_bases` - update both or they drift.
 
 ### [L117] New src/ files need an ESP32 decision, and the exclusion file has sections
 - **Learned**: 2026-08-19 | **Category**: gotcha
 > A pre-commit gate fails while any src/ file is 'not decided for the ESP32 firmware build', and it lists files OTHER branches added, so it blocks commits that never touched them (I had to classify another feature's ui_keycap_style.cpp to land unrelated work). app_srcs.txt = compiled (the keyboard subsystem is in the v1 Core+AMS cut); app_srcs_excluded.txt = not, tagged '# not in the v1 Core+AMS cut', where all src/rendering/gcode_* lives. The trap: that file is NOT one flat sorted list - an early section excludes whole directories ('src/calibration/  # all 5 src/ files beneath') and a later '# --- individual files ---' section holds per-file entries, so a naive sorted insert lands ~100 lines from its siblings in the wrong section. Anchor the insert on a neighbouring file in the same directory. Do not use --write-exclusions; it answers 'exclude' for every undecided file at once.
+> Memory twin: `reference_esp32_app_srcs_sections` - update both or they drift.
 
 ### [L118] Idle signal without a report means the final message never landed - ping for a re-send
 - **Learned**: 2026-08-21 | **Category**: gotcha
@@ -340,4 +347,40 @@
 ### [L124] Suite logs are binary - grep prints NOTHING without -a
 - **Learned**: 2026-08-22 | **Category**: gotcha
 > GNU grep treats make test-run logs as BINARY (LVGL assertion banners embed non-UTF8 box-drawing bytes) and then suppresses ALL stdout - including for -c. 'grep -c "All tests passed" run.log' prints an EMPTY line, not '0'. That reads exactly like 'no matches, nothing failed' and silently defeats L109's prescribed failure sweep: 'grep -ciE "FAILED|SIGSEGV|error:"' returns empty and looks clean on a log that may not be. Worse, plain tail/cat/sed on the SAME file work normally, so it presents as 'grep is broken' rather than 'the file is binary', and redirecting to a file to inspect it also yields empty. Always use 'LC_ALL=C grep -a' when sweeping a suite log, and treat EMPTY output from 'grep -c' as a red flag in itself - a working -c ALWAYS prints a number, so blank means binary-suppressed, never zero matches. Cost 4 round-trips on devel/1.1: identical command returned nothing three times, then '95' the moment -a was added. Same family as L092/L109 - the tool between you and the evidence lied about the evidence.
+
+### [L125] An issue's body is not its current state - read the comments AND check main
+- **Learned**: 2026-09-02 | **Category**: correction
+> An issue body can carry a fix proposal the maintainer retracted in the comments. #1350's body listed 'gate the Manage button on has_ams' as the PREFERRED fix while two comments from Preston explicitly retracted it ('a detection defect, not a panel defect... hiding the Manage button would have been the wrong fix') and retargeted the issue. Briefing an implementation from the body alone would have shipped a vetoed fix. Before scoping: gh issue view N --json state,labels,comments and read the full thread plus the body. The body is the original report; the comments are the current truth. Same duty as rechecking comments before posting (peer-post race). Caught 2026-09-02 only because the explorer agent fetched the thread while mapping call sites. Second failure mode, same moment: the fix may already be on main and the issue simply never got closed - 18 open issues currently have commits on origin/main citing them, so implementing from the body rewrites work that already shipped. Before writing a line of code for issue N: `gh issue view N --json state,labels,comments` for the thread, and `git log origin/main --oneline --grep '#N'` for the code. If it is already implemented, close it with a comment naming the commit instead of reopening the work.
+
+### [L126] bats rewrites @test inside heredocs - fixture .bats files need printf
+- **Learned**: 2026-09-08 | **Category**: gotcha
+> bats preprocesses EVERY line starting with @test as it loads a file, heredoc bodies INCLUDED. A test that writes a fixture .bats with cat > f <<'EOF' ... @test ... EOF ships a test_x() { bats_test_begin ... } function with no @test in it. Two symptoms, ONE cause: (1) the inner bats collects ZERO tests, prints 1..0 and PASSES - so a mutate-diff style harness reports SURVIVED for every mutant and the gate is VACUOUS, not merely red; (2) the outer suite gains a phantom test with no function behind it -> 'bats: unknown test name test_x' plus 'Executed N instead of expected N+1'. FIX: write fixture .bats with printf '%s\n' '@test "name" {' ... - the convention the rest of tests/shell already uses. Version-dependent: bats 1.10.0 rewrites, newer npm bats does not, so CI can be GREEN while local is RED and the local failure looks like an environment quirk. Do not chase --jobs/GNU parallel: it reproduces in serial too. Hit in tests/shell/test_mutate_diff_gate.bats.
+
+### [L127] mutate-diff 'uncompilable' can mean bundled hunk, not missing coverage
+- **Learned**: 2026-09-08 | **Category**: gotcha
+> mutate-diff reverts ONE hunk at a time, so a hunk that bundles two adjacent edits reverts both. Adding a function next to a line you changed puts them in the same hunk: my SlotStatus::EMPTY guard in get_slot_filament_segment() diffed together with a whole new current_error() defined just below it, so reverting deleted a function the header still declared -> link error -> 'uncompilable'. That is counted as neither killed nor survived, so it reads as 'no test could judge this' when the truth was 'covered' - hand-mutating just the three guard lines made the test fail 7 == 0 (NOZZLE vs NONE) immediately. THE TELL is the hunk header: '@@ -432,12 +433,38 @@' means 12 lines became 38, far too big for the change you think you made; check it before believing an uncompilable verdict. Distinguish from the REAL uncompilable: a type change threaded through a header plus its use sites (int -> std::optional<int>) cannot be mutated hunk-wise by anyone, and no test fixes that - 4 of my 6 were this kind. The escape for logic worth pinning is to extract it as a pure function, which is independently revertible: doing that to an inline fault predicate took it from unmutable to killing 3 assertions across two test files. Do not read 'Nothing survived' as evidence when the verdict also says INCOMPLETE; the tool says so itself.
+
+### [L128] Merging a worktree branch while a peer has staged files: rebase + --ff-only
+- **Learned**: 0001-01-01 | **Category**: 
+> A true `git merge` into the shared main tree FAILS whenever the index is dirty at all (git errors "Your local changes ... would be overwritten" even for non-overlapping staged adds), but `git merge --ff-only` after rebasing the branch onto current main SAILS through and leaves the peer's staging intact (verified in a scratch repo, 2026-09-10). Do NOT push — local main intentionally runs ahead of origin; peers batch-push. Before concluding a peer is mid-commit, `git diff HEAD -- <path>`: empty means the index just holds a stale pre-format copy (`git add <path>` clears it).
+
+### [L129] make mutate-diff cannot baseline a small test tag
+- **Learned**: 0001-01-01 | **Category**: 
+> The mutation gate runs the SHARDED suite; Catch2 exits nonzero for shards that match zero tests, so any `--tests` filter selecting fewer tests than there are shards (~94) reads the BASELINE as RED. Use a broad tag UNION (e.g. `--tests '[ams],[1134],[overlay_base]'`) sized well above the shard count, or hand-mutate the production hunk and name the red run in the commit body (tests/CLAUDE.md sanctions this).
+
+### [L130] Background jobs: setsid nohup + disown, and check liveness by PID
+- **Learned**: 0001-01-01 | **Category**: 
+> A bare `cmd & redirect` inside a shell-tool call dies when the call hits its timeout. Use `setsid nohup cmd > log 2>&1 < /dev/null & disown`. And never check liveness with `pgrep -f` — it matches the shell's own command line (RECURS violation, burned 10 min on a "wedged" build that was fine). `pgrep -x -a make | grep <worktree>` instead.
+
+### [L131] SSH ControlMaster hides remote group changes
+- **Learned**: 2026-09-11 | **Category**: gotcha
+> With ControlMaster auto in ~/.ssh/config, every ssh to a host reuses one master connection authenticated once. A usermod -aG on that host does NOT reach any reused session: /etc/group shows the new group, 'id -nG <user>' from root shows it, and your own sessions keep the stale set indefinitely. Symptom is misleading - the app fails with 'Permission denied' on /dev/input/event* (or any group-gated device) and it reads like a udev/group bug ON the device rather than a client-side connection-reuse artifact. Cost four failed benchmark runs on the CB1 2026-09-11. Fix: drop the master with 'ssh -O exit user@host' (both the user AND root sockets), or test with -o ControlMaster=no -o ControlPath=none. Verify with a genuinely fresh connection before concluding the group did not apply.
+
+### [L132] Label what a check measures, not what you want it to prove
+- **Learned**: 2026-09-11 | **Category**: gotcha
+> A label written beside a shell check is composed before the number exists, then colours how the number is read, so a check that CANNOT fire reads as a pass. Three in one session: `grep -c '^<<<<<<<'` labelled "(0 = clean)" when git 2.43's three-arg `merge-tree` emits markers inside a diff so they carry a leading `+` and never match anchored; a "twins untouched" grep that could not tell which of two identical occurrences a `-` line came from; and `--is-ancestor A B` labelled "diverged" when a NO there means A is a DESCENDANT. Every one was caught by a second, differently-shaped check, never by rereading the output. Print `markers=N`, not `(0 = clean)`. Prefer a structural fact (`--is-ancestor`, is this a fast-forward) over a textual one. Canary the check against something that MUST fail before believing a pass. Sibling of [L092]: there the exit code lied, here the label does.
+
+### [L133] A REFUSED helix-claim take is a hard stop
+- **Learned**: 2026-09-12 | **Category**: correction
+> When scripts/helix-claim take refuses (LIVE: another session holds the resource), STOP the entire sequence: do not proceed to the merge/commit, and never mask the refusal with || true inside a compound command. Run take as its own step and branch on its exit code. Incident 2026-09-12: merged into main while a peer's pre-push claim was LIVE, then released their claim early, because the refused take was buried in 'take ... || true; git merge ...'. The refusal WAS the protocol working; masking it turned a guard into a no-op.
 

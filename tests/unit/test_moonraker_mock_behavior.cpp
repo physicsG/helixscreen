@@ -503,6 +503,66 @@ TEST_CASE("MoonrakerClientMock initial state dispatch", "[connection][slow][init
     }
 }
 
+TEST_CASE("MoonrakerClientMock status frames report the persona's kinematics after a rebuild",
+          "[connection][kinematics]") {
+    // A hardware-list rebuild re-parses the object list, which carries no
+    // kinematics. The toolhead status must still agree with configfile, or
+    // PrinterState flips every kinematics-derived capability off after boot.
+    MockBehaviorTestFixture fixture;
+    MoonrakerClientMock mock(MoonrakerClientMock::PrinterType::VORON_24);
+    mock.set_fans(mock.hardware().fans());
+    mock.register_notify_update(fixture.create_capture_callback());
+    mock.connect("ws://mock/websocket", []() {}, []() {});
+
+    std::string kinematics = "<none>";
+    REQUIRE(fixture.wait_for_matching(
+        [&kinematics](const json& n) {
+            if (!n.contains("params") || !n["params"].is_array() || n["params"].empty()) {
+                return false;
+            }
+            const json& status = n["params"][0];
+            if (!status.is_object() || !status.contains("toolhead") ||
+                !status["toolhead"].contains("kinematics")) {
+                return false;
+            }
+            kinematics = status["toolhead"]["kinematics"].get<std::string>();
+            return true;
+        },
+        2000));
+    mock.stop_temperature_simulation();
+    mock.disconnect();
+
+    CHECK(kinematics == "corexy");
+}
+
+TEST_CASE("MoonrakerClientMock object snapshots report the mock's own homed_axes",
+          "[connection][homing]") {
+    // The status stream carries homed_axes on every tick, so a query or
+    // subscribe reply that disagrees with it flips the UI's homed state about
+    // a second after boot.
+    MoonrakerClientMock mock(MoonrakerClientMock::PrinterType::VORON_24);
+
+    auto snapshot = [&mock](const char* method) {
+        std::string homed = "<none>";
+        mock.send_jsonrpc(
+            method, json{{"objects", {{"toolhead", nullptr}}}},
+            [&homed](const json& r) {
+                homed = r["result"]["status"]["toolhead"]["homed_axes"].get<std::string>();
+            },
+            [](const MoonrakerError&) {});
+        return homed;
+    };
+
+    REQUIRE(mock.get_homed_axes().empty());
+    CHECK(snapshot("printer.objects.query") == "");
+    CHECK(snapshot("printer.objects.subscribe") == "");
+
+    REQUIRE(mock.gcode_script("G28 X") == 0);
+    REQUIRE(mock.get_homed_axes() == "x");
+    CHECK(snapshot("printer.objects.query") == "x");
+    CHECK(snapshot("printer.objects.subscribe") == "x");
+}
+
 // ============================================================================
 // Notification Format Tests
 // ============================================================================
@@ -892,12 +952,15 @@ TEST_CASE_METHOD(HelixTestFixture, "MoonrakerClientMock hardware discovery",
         auto hw = mock.hardware();
 
         const auto& heaters = hw.heaters();
+        const auto& fans = hw.fans();
         const auto& leds = hw.leds();
 
         REQUIRE(std::find(heaters.begin(), heaters.end(), "heater_bed") != heaters.end());
         REQUIRE(std::find(heaters.begin(), heaters.end(), "extruder") != heaters.end());
-        // AD5M has chamber light
-        REQUIRE(!leds.empty());
+        CHECK(std::find(fans.begin(), fans.end(), "controller_fan stepper_driver_fan") !=
+              fans.end());
+        // The plain 5M has no chamber light; that LED is the 5M Pro's.
+        CHECK(leds.empty());
     }
 
     SECTION("GENERIC_COREXY has minimal hardware") {
@@ -921,6 +984,15 @@ TEST_CASE_METHOD(HelixTestFixture, "MoonrakerClientMock hardware discovery",
         REQUIRE(std::find(heaters.begin(), heaters.end(), "extruder") != heaters.end());
         // Bedslinger has no dedicated temperature sensors or LEDs
         REQUIRE(leds.empty());
+    }
+
+    SECTION("DELTA reports delta kinematics and no gantry leveling") {
+        MoonrakerClientMock mock(MoonrakerClientMock::PrinterType::DELTA);
+        auto hw = mock.hardware();
+
+        REQUIRE(hw.kinematics() == "delta");
+        REQUIRE_FALSE(hw.has_qgl());
+        REQUIRE_FALSE(hw.has_z_tilt());
     }
 
     SECTION("MULTI_EXTRUDER has multiple extruders") {
@@ -2389,6 +2461,42 @@ TEST_CASE("MoonrakerClientMock M112 emergency stop sets error state", "[print][e
     }
 }
 
+TEST_CASE("MoonrakerClientMock M112 reports Klipper's shutdown reason until a restart",
+          "[print][emergency][mock][restart]") {
+    MockBehaviorTestFixture fixture;
+    MoonrakerClientMock mock(MoonrakerClientMock::PrinterType::VORON_24, 100.0);
+    mock.connect("ws://mock/websocket", []() {}, []() {});
+    mock.register_notify_update(fixture.create_capture_callback());
+    fixture.reset();
+
+    auto webhooks_with = [](const char* state) {
+        return [state](const json& n) {
+            return n.contains("params") && n["params"][0].contains("webhooks") &&
+                   n["params"][0]["webhooks"].value("state", "") == state;
+        };
+    };
+
+    mock.gcode_script("M112");
+    REQUIRE(fixture.wait_for_matching(webhooks_with("shutdown"), 500));
+    CHECK(mock.get_klippy_state() == MoonrakerClientMock::KlippyState::SHUTDOWN);
+    for (const auto& n : fixture.get_notifications()) {
+        if (webhooks_with("shutdown")(n)) {
+            const auto msg = n["params"][0]["webhooks"].value("state_message", "");
+            CHECK(msg.find("Shutdown due to M112 command") != std::string::npos);
+            CHECK(msg.find("Printer is ready") == std::string::npos);
+            break;
+        }
+    }
+
+    fixture.reset();
+    mock.gcode_script("FIRMWARE_RESTART");
+    REQUIRE(fixture.wait_for_matching(webhooks_with("ready"), 500));
+    CHECK(mock.get_klippy_state() == MoonrakerClientMock::KlippyState::READY);
+
+    mock.stop_temperature_simulation();
+    mock.disconnect();
+}
+
 // ============================================================================
 // Bed Mesh G-code Simulation Tests (Task 5)
 // ============================================================================
@@ -2804,6 +2912,25 @@ bool has_z_offset(const nlohmann::json& n, double want) {
     }
     return gm["homing_origin"][2].get<double>() == Catch::Approx(want);
 }
+
+/// True when `n` carries a motion_report live_position whose Z (index 2)
+/// equals `want`. Real printers report live_position in gcode space, so the
+/// mock folds the gcode z offset into it (gcode_position stays plain).
+bool live_position_z_is(const nlohmann::json& n, double want) {
+    if (!n.contains("params") || !n["params"].is_array() || n["params"].empty()) {
+        return false;
+    }
+    const auto& p0 = n["params"][0];
+    if (!p0.is_object() || !p0.contains("motion_report")) {
+        return false;
+    }
+    const auto& mr = p0["motion_report"];
+    if (!mr.contains("live_position") || !mr["live_position"].is_array() ||
+        mr["live_position"].size() < 3 || !mr["live_position"][2].is_number()) {
+        return false;
+    }
+    return mr["live_position"][2].get<double>() == Catch::Approx(want);
+}
 } // namespace
 
 TEST_CASE("MoonrakerClientMock Z offset tracking", "[slow][mock][offset]") {
@@ -2840,6 +2967,17 @@ TEST_CASE("MoonrakerClientMock Z offset tracking", "[slow][mock][offset]") {
         mock.gcode_script("SET_GCODE_OFFSET Z=-0.2");
         REQUIRE(fixture.wait_for_matching(
             [](const nlohmann::json& n) { return has_z_offset(n, -0.2); }, 2000));
+    }
+
+    SECTION("live_position reports gcode space: commanded Z plus the offset") {
+        mock.gcode_script("SET_GCODE_OFFSET Z=0.15");
+        REQUIRE(fixture.wait_for_matching(
+            [](const nlohmann::json& n) { return has_z_offset(n, 0.15); }, 2000));
+        fixture.reset();
+
+        mock.gcode_script("G0 Z10");
+        REQUIRE(fixture.wait_for_matching(
+            [](const nlohmann::json& n) { return live_position_z_is(n, 10.15); }, 2000));
     }
 
     (void)sub_id; // Callback auto-unregisters when mock destructs
@@ -3521,6 +3659,174 @@ TEST_CASE("MoonrakerClientMock: M117 message survives periodic status broadcasts
     REQUIRE(periodic_broadcasts_checked >= 1);
 
     mock.disconnect();
+}
+
+// ============================================================================
+// LED effect model: dispatch fan-out, STOP=1, and query truthfulness
+// ============================================================================
+//
+// A Lua plugin subscribes to printer objects as a notify_status_update METHOD
+// callback, so the mock's synthetic status updates must reach that registrant
+// too - not only the notify callbacks - and the led_effect state the mock
+// models must survive a re-query (which is where a plugin takes its first
+// values).
+
+TEST_CASE("a synthetic status update reaches each registrant once", "[mock][led_effect]") {
+    MoonrakerClientMock mock(MoonrakerClientMock::PrinterType::VORON_24);
+
+    int notify_count = 0;
+    mock.register_notify_update([&notify_count](const json&) { ++notify_count; });
+
+    int method_count = 0;
+    json method_msg;
+    mock.register_method_callback("notify_status_update", "led_effect_test",
+                                  [&method_count, &method_msg](const json& msg) {
+                                      ++method_count;
+                                      method_msg = msg;
+                                  });
+
+    const json status = {{"led_effect rainbow", {{"enabled", true}}}};
+    mock.dispatch_status_update(status);
+
+    REQUIRE(notify_count == 1);
+    REQUIRE(method_count == 1);
+    const json expected = {{"method", "notify_status_update"},
+                           {"params", json::array({status, 0.0})}};
+    REQUIRE(method_msg == expected);
+}
+
+TEST_CASE("SET_LED_EFFECT STOP=1 stops only that effect", "[mock][led_effect]") {
+    MoonrakerClientMock mock(MoonrakerClientMock::PrinterType::VORON_24);
+    MockBehaviorTestFixture fixture;
+    mock.register_notify_update(fixture.create_capture_callback());
+
+    mock.gcode_script("SET_LED_EFFECT EFFECT=rainbow");
+    mock.gcode_script("SET_LED_EFFECT EFFECT=breathing");
+    mock.gcode_script("SET_LED_EFFECT EFFECT=rainbow STOP=1");
+
+    // gcode_script dispatches synchronously, so the LAST captured frame that
+    // mentions rainbow is the STOP=1 one.
+    json last;
+    for (const auto& n : fixture.get_notifications()) {
+        if (!n.contains("params") || !n["params"].is_array() || n["params"].empty()) {
+            continue;
+        }
+        if (n["params"][0].contains("led_effect rainbow")) {
+            last = n["params"][0];
+        }
+    }
+    REQUIRE_FALSE(last.is_null());
+    REQUIRE_FALSE(last["led_effect rainbow"]["enabled"].get<bool>());
+    // breathing is still running: the stop of one effect must not disable another
+    REQUIRE_FALSE(last.contains("led_effect breathing"));
+}
+
+TEST_CASE("the enable frame names a custom effect", "[mock][led_effect]") {
+    MoonrakerClientMock mock(MoonrakerClientMock::PrinterType::VORON_24);
+    MockBehaviorTestFixture fixture;
+    mock.register_notify_update(fixture.create_capture_callback());
+
+    // A plugin's effect setting is a free string, not one of the built-ins
+    mock.gcode_script("SET_LED_EFFECT EFFECT=sparkle");
+
+    json last;
+    for (const auto& n : fixture.get_notifications()) {
+        if (!n.contains("params") || !n["params"].is_array() || n["params"].empty()) {
+            continue;
+        }
+        if (n["params"][0].contains("led_effect sparkle")) {
+            last = n["params"][0];
+        }
+    }
+    REQUIRE_FALSE(last.is_null());
+    REQUIRE(last["led_effect sparkle"]["enabled"].get<bool>());
+}
+
+TEST_CASE("a query reports which effects are running", "[mock][led_effect]") {
+    MoonrakerClientMock mock(MoonrakerClientMock::PrinterType::VORON_24);
+
+    mock.gcode_script("SET_LED_EFFECT EFFECT=rainbow");
+
+    bool answered = false;
+    bool rainbow_enabled = false;
+    bool breathing_enabled = true;
+    mock.send_jsonrpc(
+        "printer.objects.query",
+        {{"objects", {{"led_effect rainbow", nullptr}, {"led_effect breathing", nullptr}}}},
+        [&](json response) {
+            answered = true;
+            const json& status = response["result"]["status"];
+            // contains()-guarded: an unreported object must fail the REQUIREs,
+            // not abort on a const operator[] of a missing key
+            if (status.contains("led_effect rainbow")) {
+                rainbow_enabled = status["led_effect rainbow"]["enabled"].get<bool>();
+            }
+            if (status.contains("led_effect breathing")) {
+                breathing_enabled = status["led_effect breathing"]["enabled"].get<bool>();
+            }
+        },
+        nullptr);
+    REQUIRE(answered);
+    REQUIRE(rainbow_enabled);
+    REQUIRE_FALSE(breathing_enabled);
+
+    mock.gcode_script("STOP_LED_EFFECTS");
+
+    answered = false;
+    rainbow_enabled = true;
+    mock.send_jsonrpc(
+        "printer.objects.query", {{"objects", {{"led_effect rainbow", nullptr}}}},
+        [&](json response) {
+            answered = true;
+            const json& status = response["result"]["status"];
+            if (status.contains("led_effect rainbow")) {
+                rainbow_enabled = status["led_effect rainbow"]["enabled"].get<bool>();
+            }
+        },
+        nullptr);
+    REQUIRE(answered);
+    REQUIRE_FALSE(rainbow_enabled);
+
+    // STOP=1 must clear the queried state for that one effect, so the set
+    // erase is observable through a re-query
+    mock.gcode_script("SET_LED_EFFECT EFFECT=rainbow");
+    mock.gcode_script("SET_LED_EFFECT EFFECT=rainbow STOP=1");
+
+    answered = false;
+    rainbow_enabled = true;
+    mock.send_jsonrpc(
+        "printer.objects.query", {{"objects", {{"led_effect rainbow", nullptr}}}},
+        [&](json response) {
+            answered = true;
+            const json& status = response["result"]["status"];
+            if (status.contains("led_effect rainbow")) {
+                rainbow_enabled = status["led_effect rainbow"]["enabled"].get<bool>();
+            }
+        },
+        nullptr);
+    REQUIRE(answered);
+    REQUIRE_FALSE(rainbow_enabled);
+}
+
+TEST_CASE("a subscribe reports which effects are running", "[mock][led_effect]") {
+    MoonrakerClientMock mock(MoonrakerClientMock::PrinterType::VORON_24);
+
+    mock.gcode_script("SET_LED_EFFECT EFFECT=rainbow");
+
+    bool answered = false;
+    bool rainbow_enabled = false;
+    mock.send_jsonrpc(
+        "printer.objects.subscribe", {{"objects", {{"led_effect rainbow", nullptr}}}},
+        [&](json response) {
+            answered = true;
+            const json& status = response["result"]["status"];
+            if (status.contains("led_effect rainbow")) {
+                rainbow_enabled = status["led_effect rainbow"]["enabled"].get<bool>();
+            }
+        },
+        nullptr);
+    REQUIRE(answered);
+    REQUIRE(rainbow_enabled);
 }
 
 #pragma GCC diagnostic pop

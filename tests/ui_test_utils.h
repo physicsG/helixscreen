@@ -7,6 +7,8 @@
 
 #include "lvgl/lvgl.h"
 
+#include <algorithm>
+#include <cmath>
 #include <functional>
 #include <string>
 
@@ -47,6 +49,60 @@ void lv_init_safe();
  */
 void ensure_headless_display();
 
+/**
+ * @brief Let a flush wait return on every display registered so far.
+ *
+ * A test display renders into a buffer nobody reads, so a flush is finished the
+ * moment it is issued. LVGL cannot know that: `wait_for_flushing()` busy-waits
+ * on `disp->flushing` whenever a display has no flush_wait_cb, and a display
+ * with no flush callback never clears that flag, so the next refresh of it
+ * spins at 100% CPU with no way out. A no-op flush_wait_cb takes the branch
+ * that clears the flag instead.
+ *
+ * Idempotent and cheap. Called from HelixTestFixture::reset_all(), so it covers
+ * every display a fixture, a TEST_CASE or a static initialiser has created by
+ * then.
+ */
+void ensure_displays_never_block_on_flush();
+
+/**
+ * @brief WCAG contrast math shared by tests that assert readability
+ *
+ * Deliberately independent of theme_manager's implementation so a wrong
+ * formula in the source cannot make the tests agree with it.
+ */
+namespace wcag {
+
+/// WCAG relative luminance of one 8-bit sRGB channel.
+inline double channel_luminance(uint8_t v) {
+    const double c = v / 255.0;
+    return (c <= 0.03928) ? c / 12.92 : std::pow((c + 0.055) / 1.055, 2.4);
+}
+
+/// WCAG relative luminance of a color.
+inline double luminance(lv_color_t c) {
+    return 0.2126 * channel_luminance(c.red) + 0.7152 * channel_luminance(c.green) +
+           0.0722 * channel_luminance(c.blue);
+}
+
+/// WCAG contrast ratio between two colors (1.0 = identical).
+inline double contrast(lv_color_t a, lv_color_t b) {
+    const double la = luminance(a), lb = luminance(b);
+    return (std::max(la, lb) + 0.05) / (std::min(la, lb) + 0.05);
+}
+
+/// True when blending @p text toward the pole on its own side of @p fill
+/// (white for text lighter than the fill, black for darker) can itself reach
+/// a 4:1 ratio. White reaches 4:1 below fill luminance 0.2125, black above
+/// 0.15; outside those bounds no tint on the text's side is readable and a
+/// side-preservation assertion would be demanding the impossible.
+inline bool own_pole_reaches_4_1(lv_color_t text, lv_color_t fill) {
+    const double lf = luminance(fill);
+    return (luminance(text) > lf) ? (lf <= 0.2125) : (lf >= 0.15);
+}
+
+} // namespace wcag
+
 // Install a real TemperatureHistoryManager for get_temperature_history_manager()
 // to return (tests default to nullptr). Lets a test exercise history backfill
 // paths; pass nullptr to restore the default. See #1124.
@@ -64,6 +120,15 @@ namespace ui {
  * to clear. The hook receives the formatted warning message.
  */
 void set_test_notification_warning_hook(std::function<void(const std::string&)> hook);
+
+/**
+ * @brief Install a hook invoked by the test ui_notification_warning_sticky() stub.
+ *
+ * Separate hook from the warning one so a test can tell the sticky channel
+ * (never auto-dismisses) from the timed one, not just read the text. Pass
+ * nullptr to clear. The hook receives the formatted warning message.
+ */
+void set_test_notification_sticky_warning_hook(std::function<void(const std::string&)> hook);
 
 /**
  * @brief Install a hook invoked by the test ui_notification_error() stub.
@@ -86,16 +151,36 @@ void set_test_notification_error_hook(std::function<void(const std::string&)> ho
 void set_test_notification_info_hook(std::function<void(const std::string&)> hook);
 
 /**
+ * @brief Install a hook invoked by the test ui_notification_success() stubs.
+ *
+ * The fourth of the set, for flows whose outcome is a success toast: a test that
+ * a failure is never reported as success needs to see the success path too.
+ * Pass nullptr to clear.
+ */
+void set_test_notification_success_hook(std::function<void(const std::string&)> hook);
+
+/**
  * @brief Install a hook invoked by the test ToastManager stub's show paths.
  *
  * Same purpose as the notification hooks, one layer down: code that calls
  * ToastManager::show() directly (deliberately bypassing ui_notification_* and
  * its history row) has no other observation point in the test binary — the
  * real ToastManager is excluded from the link. Carries the severity so a
- * wrong-severity toast fails on severity, not just wording. Pass nullptr to
+ * wrong-severity toast fails on severity, not just wording, and the duration
+ * so a sticky (0) call cannot silently read as a timed one. Pass nullptr to
  * clear.
  */
-void set_test_toast_hook(std::function<void(ToastSeverity, const std::string&)> hook);
+void set_test_toast_hook(std::function<void(ToastSeverity, const std::string&, uint32_t)> hook);
+
+/**
+ * @brief Press the action button of the most recent action toast
+ *
+ * The stub ToastManager keeps the last show_with_action() callback and its
+ * user_data so a test can act as the user tapping the button. Returns false
+ * when no action toast has been shown since the last call or since
+ * set_test_toast_hook(), which forgets the last action.
+ */
+bool fire_last_toast_action();
 
 } // namespace ui
 } // namespace helix
@@ -136,6 +221,14 @@ bool click_at(int32_t x, int32_t y);
  * LV_EVENT_CLICKED to an object captured before the teardown. Pair with release().
  */
 bool press_at(int32_t x, int32_t y);
+
+/**
+ * @brief Move the pointer while a press started by press_at() is held
+ *
+ * One read per call, so a single large jump is one sample: past the indev's gesture
+ * distance it is a swipe. Pair with press_at() and release().
+ */
+bool move_to(int32_t x, int32_t y);
 
 /**
  * @brief Release the current press started by press_at()
@@ -226,6 +319,32 @@ bool is_visible(lv_obj_t* widget);
  * @return Text content or empty string if not found
  */
 std::string get_text(lv_obj_t* widget);
+
+/**
+ * @brief Last lv_label child of a button: ui_button's text label
+ *
+ * The icon glyph is an lv_label too and precedes the text once stacked
+ * (stacked layout, icon_position="left"), so "first label" would hand back
+ * the icon instead of the text.
+ */
+inline lv_obj_t* button_label(lv_obj_t* btn) {
+    lv_obj_t* found = nullptr;
+    uint32_t count = lv_obj_get_child_count(btn);
+    for (uint32_t i = 0; i < count; i++) {
+        lv_obj_t* child = lv_obj_get_child(btn, i);
+        if (lv_obj_check_type(child, &lv_label_class)) {
+            found = child;
+        }
+    }
+    return found;
+}
+
+/// Caption of the named button inside `root`, empty if absent.
+inline std::string button_text(lv_obj_t* root, const char* btn_name) {
+    lv_obj_t* btn = lv_obj_find_by_name(root, btn_name);
+    lv_obj_t* label = btn ? button_label(btn) : nullptr;
+    return label ? lv_label_get_text(label) : std::string();
+}
 
 /**
  * @brief Check if widget is in checked/selected state

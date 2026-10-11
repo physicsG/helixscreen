@@ -29,8 +29,10 @@
 #pragma once
 
 #include "overlay_base.h"
+#include "static_panel_registry.h"
 #include "subject_managed_panel.h"
 #include "touch_calibration.h"
+#include "touch_calibration_controller.h"
 #include "touch_calibration_layout.h"
 #include "touch_calibration_panel.h"
 #include "touch_calibration_session.h"
@@ -50,7 +52,7 @@ namespace helix::ui {
  *
  * Inherits from OverlayBase for lifecycle management (on_activate/on_deactivate).
  */
-class TouchCalibrationOverlay : public OverlayBase {
+class TouchCalibrationOverlay : public OverlayBase, public helix::ui::ITouchCalibrationView {
   public:
     /**
      * @brief Completion callback type
@@ -124,7 +126,7 @@ class TouchCalibrationOverlay : public OverlayBase {
      *
      * Cancels any in-progress calibration.
      */
-    void on_deactivate() override;
+    void on_deactivating(DeactivateReason reason) override;
 
     /**
      * @brief Clean up resources for async-safe destruction
@@ -135,14 +137,20 @@ class TouchCalibrationOverlay : public OverlayBase {
     // === Public API ===
     //
 
+    /// Freed on close; the next open rebuilds it. The capture surface, crosshair and
+    /// Cancel chip are put back under the root before it goes.
+    bool destroy_on_close() const override {
+        return true;
+    }
+
     /**
      * @brief Show overlay and begin calibration workflow
      *
-     * @param callback Optional callback invoked on completion/cancel/skip
-     *
-     * Pushes overlay onto navigation stack and shows initial UI state.
+     * @param parent_screen Screen to build on
+     * @param callback Invoked once on completion/cancel/skip
      */
-    void show(CompletionCallback callback = nullptr);
+    using OverlayBase::show;
+    bool show(lv_obj_t* parent_screen, CompletionCallback callback);
 
     /**
      * @brief Hide overlay and return to previous screen
@@ -152,8 +160,13 @@ class TouchCalibrationOverlay : public OverlayBase {
     void hide();
 
     //
-    // === Event Handlers (called by static trampolines) ===
+    // === Event Handlers (called from the XML callback table) ===
     //
+
+    // helix::ui::ITouchCalibrationView - what the controller asks this view to draw
+    void on_progress() override;
+    void on_capture_feedback(helix::Point landed) override;
+    void on_verify_feedback(helix::Point p) override;
 
     /** @brief Handle accept button click - saves calibration */
     void handle_accept_clicked();
@@ -218,7 +231,7 @@ class TouchCalibrationOverlay : public OverlayBase {
      * @return Pointer to TouchCalibrationPanel, or nullptr if not created
      */
     helix::TouchCalibrationPanel* get_panel() {
-        return panel_.get();
+        return controller_.panel();
     }
 
     /**
@@ -230,15 +243,12 @@ class TouchCalibrationOverlay : public OverlayBase {
      * phase installs. Pass nullptr to go back to DisplayManager.
      */
     void set_calibration_sink(helix::ICalibrationSink* sink) {
-        calibration_sink_override_ = sink;
+        controller_.set_sink_override(sink);
     }
 
   private:
-    /**
-     * @brief The sink that receives this session's calibration operations.
-     * @return The injected sink if one is set, else DisplayManager (may be null).
-     */
-    helix::ICalibrationSink* calibration_sink();
+    void before_show() override;
+    void on_ui_destroyed() override;
 
     /** @brief Update state subject from panel state */
     void update_state_subject();
@@ -282,19 +292,21 @@ class TouchCalibrationOverlay : public OverlayBase {
     // === State Machine ===
     //
 
-    std::unique_ptr<helix::TouchCalibrationPanel> panel_;
+    /// Panel, session, sink resolution, capture, retry and commit. Shared with
+    /// the first-run wizard step so neither can drift from the other.
+    helix::ui::TouchCalibrationController controller_;
 
     //
     // === Subjects (managed by SubjectManager) ===
     //
 
     SubjectManager subjects_;
-    lv_subject_t state_subject_;       ///< int: 0-5 for states
-    lv_subject_t instruction_subject_; ///< string: instruction text
+    lv_subject_t state_subject_{};       ///< int: 0-5 for states
+    lv_subject_t instruction_subject_{}; ///< string: instruction text
     char instruction_buffer_[128];
 
     // Accept button countdown text
-    lv_subject_t accept_button_text_;
+    lv_subject_t accept_button_text_{};
     char accept_text_buffer_[32] = "Accept";
 
     //
@@ -303,14 +315,6 @@ class TouchCalibrationOverlay : public OverlayBase {
 
     CompletionCallback completion_callback_;
     bool callback_invoked_ = false; ///< Guard against double-invoke
-
-    // Backup/disable/restore of the pre-session calibration. Shared with the
-    // first-run wizard; guarantees the affine transform is re-enabled however
-    // the session ends (#943).
-    helix::TouchCalibrationSession session_;
-
-    // Test seam for the above: nullptr means "use DisplayManager".
-    helix::ICalibrationSink* calibration_sink_override_ = nullptr;
 
     //
     // === Widget References ===
@@ -346,7 +350,7 @@ class TouchCalibrationOverlay : public OverlayBase {
     static constexpr int STATE_VERIFY = 4;
     static constexpr int STATE_COMPLETE = 5;
 
-    static constexpr int CROSSHAIR_SIZE = 48;
+    static constexpr int CROSSHAIR_SIZE = 50;
     static constexpr int CROSSHAIR_HALF_SIZE = CROSSHAIR_SIZE / 2;
 
     //
@@ -382,16 +386,19 @@ class TouchCalibrationOverlay : public OverlayBase {
 /**
  * @brief Get the global TouchCalibrationOverlay instance
  *
- * Creates the instance on first call. Singleton pattern.
+ * Creates the instance on first call and registers it for cleanup with
+ * StaticPanelRegistry.
  *
  * @return Reference to the global TouchCalibrationOverlay
  */
-TouchCalibrationOverlay& get_touch_calibration_overlay();
+inline TouchCalibrationOverlay& get_touch_calibration_overlay() {
+    return lazy_global<TouchCalibrationOverlay>("TouchCalibrationOverlay");
+}
 
 /**
  * @brief Register touch calibration overlay event callbacks
  *
- * Registers static callback trampolines with lv_xml_register_event_cb().
+ * Registers the overlay's XML event callbacks.
  * Call during application initialization before creating overlay.
  */
 void register_touch_calibration_overlay_callbacks();

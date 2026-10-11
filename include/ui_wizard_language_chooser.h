@@ -2,9 +2,11 @@
 
 #pragma once
 
+#include "ui_breakpoint.h"
 #include "ui_timer_guard.h"
 
 #include "lvgl/lvgl.h"
+#include "subject_managed_panel.h"
 #include "wizard_step.h"
 
 #include <atomic>
@@ -153,8 +155,12 @@ class WizardLanguageChooserStep : public helix::wizard::Step {
     // Screen instance
     lv_obj_t* screen_root_ = nullptr;
 
+    // SubjectManager, declared ahead of the subject it owns so it tears down
+    // after it (the name withdraws before the storage dies).
+    SubjectManager subjects_;
+
     // Subjects
-    lv_subject_t welcome_text_;
+    lv_subject_t welcome_text_{};
 
     // String buffer for welcome text subject
     char welcome_buffer_[64] = "Welcome!";
@@ -190,3 +196,27 @@ WizardLanguageChooserStep* get_wizard_language_chooser_step();
  * @param force true to force-show the step, false for normal behavior
  */
 void force_language_chooser_step(bool force);
+
+namespace helix {
+
+/**
+ * @brief Display-size face for the cycling Welcome header, per breakpoint
+ *
+ * The header is the first thing a user ever sees and sits a size class above
+ * a section heading (prestonbrown/helixscreen#1599). The 48/64 faces are the
+ * hi-DPI scale rungs (xxlarge tier per mk/fonts.mk; HELIX_HAS_HIDPI_FONTS
+ * from the top-level Makefile);
+ * no XML font constant names them, so this is the computed-font exception.
+ * Below those rungs the ladder's top steps down the linked tiers:
+ * noto_sans_32 where the build reaches tier 5 (the largest text face the xlarge
+ * tier links — k2; prestonbrown/helixscreen#1609), noto_sans_28 at tier 4
+ * (equal to font_heading_large — FONTS_LARGE links nothing larger), and
+ * noto_sans_26 at tier 3. A tier-6 build with the hi-DPI flag off (ESP32)
+ * takes the tier-5 rung as well.
+ *
+ * @param bp Current UI breakpoint
+ * @return Font for the welcome header at that tier
+ */
+const lv_font_t* wizard_welcome_header_font(UiBreakpoint bp);
+
+} // namespace helix

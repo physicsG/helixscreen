@@ -1,0 +1,129 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component>
+  <api>
+    <prop name="label_subject" type="string" default=""/>
+    <prop name="state_subject" type="string" default=""/>
+    <prop name="active_subject" type="string" default=""/>
+    <!-- The active_subject value that means "this tab is selected". A per-tab 0/1
+         subject leaves it at 1; a strip with one shared index subject passes the
+         tab's own index. -->
+    <prop name="active_value" type="string" default="1"/>
+    <prop name="tab_index" type="string" default=""/>
+    <!-- Optional leading icon; omitted entirely when empty (zone tabs carry a
+         state dot instead, motion tabs carry no per-tab state). -->
+    <prop name="icon" type="string" default=""/>
+    <!-- Click routing: every tab strip that is not the AMS environment picker
+         needs its own callback, so the name is a prop like the subjects. -->
+    <prop name="callback" type="string" default="on_zone_tab_clicked"/>
+    <!-- "row" lays the dot/icon beside the label; "column" stacks icon above
+         label for narrow vertical rails. -->
+    <prop name="layout" type="string" default="row"/>
+    <prop name="cross_place" type="string" default="start"/>
+    <!-- Style names bound for the selected/idle states. The defaults keep the
+         AMS environment strip's look; a strip that wants filled pills (the
+         motion tabs) passes the pill pair. The names resolve in this file's
+         style table, so callers can only pick styles declared here. -->
+    <prop name="selected_style" type="string" default="zone_tab_selected"/>
+    <prop name="idle_style" type="string" default="zone_tab_idle"/>
+    <!-- Icon-only tabs (the portrait motion header) hide the label. -->
+    <prop name="hide_label" type="boolean" default="false"/>
+    <!-- Style bound on the label while the tab is idle (a muted label for the
+         underline strip); the default changes nothing. -->
+    <prop name="label_idle_style" type="string" default="zone_tab_label_plain"/>
+    <!-- Style bound on the icon and label while the tab is selected. A strip
+         whose selected style fills the tab passes the matching foreground
+         (zone_tab_on_primary for the pill pair); the default changes nothing. -->
+    <prop name="content_selected_style" type="string" default="zone_tab_label_plain"/>
+    <prop name="radius" type="string" default="#border_radius"/>
+    <!-- Optional light dot (the LEDs overlay): light_subject holds 1 on, 0 off,
+         2 unknown; light_color_subject fills the lit dot. Collapsed when empty. -->
+    <prop name="light_subject" type="string" default=""/>
+    <prop name="light_color_subject" type="string" default=""/>
+  </api>
+  <styles>
+    <!-- Two styles, not one plus an inline attribute: an inline `style_bg_opa` would
+         override the bound style and the selected pill would never paint (rule 6). -->
+    <style name="zone_tab_selected" bg_opa="255" bg_color="#card_bg" border_width="0"/>
+    <style name="zone_tab_idle" bg_opa="0" border_width="0"/>
+    <!-- Filled-pill variant: the selected tab is a solid primary pill, idle
+         tabs sit on a subtle card fill. The pill's icon and label need
+         zone_tab_on_primary: the theme's text colour is dark in light mode. -->
+    <style name="zone_tab_pill_selected" bg_opa="255" bg_color="#primary" border_width="0"/>
+    <style name="zone_tab_pill_idle" bg_opa="255" bg_color="#card_bg" border_width="0"/>
+    <style name="zone_tab_on_primary" text_color="#text_on_primary"/>
+    <!-- Underline variant: no fill, a primary rule under the selected tab. -->
+    <style name="zone_tab_underline_selected"
+           bg_opa="0" border_side="bottom" border_width="#tab_underline_width" border_color="#primary" border_opa="255"/>
+    <style name="zone_tab_underline_idle" bg_opa="0" border_width="0"/>
+    <style name="zone_tab_label_plain"/>
+    <style name="zone_tab_label_muted" text_color="#text_muted"/>
+    <!-- The lit dot's own border reset, a style so the light-theme edge can outrank it. -->
+    <style name="zone_tab_dot_plain" border_width="0"/>
+  </styles>
+  <view name="zone_tab"
+        extends="lv_button" width="content" height="content" style_radius="$radius" style_pad_hor="#space_md"
+        style_pad_ver="#space_sm" style_shadow_width="0">
+    <!-- Selected tab reads as a filled pill; the rest stay flat. The style
+         names come from props so a caller can swap in the filled-pill pair
+         without touching this component's AMS behaviour. -->
+    <bind_style_if_eq name="$selected_style" subject="$active_subject" ref_value="$active_value"/>
+    <bind_style_if_not_eq name="$idle_style" subject="$active_subject" ref_value="$active_value"/>
+    <lv_obj width="content"
+            height="content" flex_flow="$layout" style_pad_gap="#space_xs" scrollable="false" clickable="false"
+            style_flex_cross_place="$cross_place">
+      <icon name="tab_icon" src="$icon" size="sm" hidden_if_empty="$icon">
+        <bind_style_if_eq name="$content_selected_style" subject="$active_subject" ref_value="$active_value"/>
+      </icon>
+      <!-- The dot carries the other zone's state, so it is readable without selecting it.
+           An icon's src is a parse-time attribute, so each state gets its own icon and the
+           state subject decides which one is visible. Idle shows none. The wrapper is
+           collapsed when the caller passes no state subject: an empty container would
+           still claim the flex gap and push the label off-centre. -->
+      <lv_obj name="tab_dot"
+              width="content" height="content" scrollable="false" clickable="false" hidden_if_empty="$state_subject">
+        <icon src="progress_clock" size="xs" variant="secondary" hidden="true">
+          <bind_flag_if_not_eq subject="$state_subject" flag="hidden" ref_value="1"/>
+        </icon>
+        <icon src="heat_wave" size="xs" variant="warning" hidden="true">
+          <bind_flag_if_not_eq subject="$state_subject" flag="hidden" ref_value="2"/>
+        </icon>
+        <icon src="check_circle" size="xs" variant="success" hidden="true">
+          <bind_flag_if_not_eq subject="$state_subject" flag="hidden" ref_value="3"/>
+        </icon>
+        <icon src="close_circle" size="xs" variant="danger" hidden="true">
+          <bind_flag_if_not_eq subject="$state_subject" flag="hidden" ref_value="4"/>
+        </icon>
+      </lv_obj>
+      <lv_obj name="light_dot"
+              width="content" height="content" scrollable="false" clickable="false" hidden_if_empty="$light_subject">
+        <lv_obj width="#tab_dot_size"
+                height="#tab_dot_size" style_radius="9999" style_bg_opa="255" scrollable="false" clickable="false"
+                hidden="true">
+          <style name="zone_tab_dot_plain"/>
+          <bind_style_prop prop="bg_color" subject="$light_color_subject"/>
+          <bind_style_if name="styles.contrast_edge" cond="settings_dark_mode eq 0"/>
+          <bind_flag_if_not_eq subject="$light_subject" flag="hidden" ref_value="1"/>
+        </lv_obj>
+        <lv_obj width="#tab_dot_size"
+                height="#tab_dot_size" style_radius="9999" style_bg_opa="0" style_border_width="#tab_dot_ring_width"
+                style_border_color="#text_muted" scrollable="false" clickable="false" hidden="true">
+          <bind_flag_if_not_eq subject="$light_subject" flag="hidden" ref_value="0"/>
+        </lv_obj>
+        <!-- Unknown: the off ring, dimmed, so all three states share one size. -->
+        <lv_obj width="#tab_dot_size"
+                height="#tab_dot_size" style_radius="9999" style_bg_opa="0" style_border_width="#tab_dot_ring_width"
+                style_border_color="#text_muted" style_border_opa="#tab_dot_unknown_opacity" scrollable="false"
+                clickable="false" hidden="true">
+          <bind_flag_if_not_eq subject="$light_subject" flag="hidden" ref_value="2"/>
+        </lv_obj>
+      </lv_obj>
+      <text_body name="tab_label" width="content" bind_text="$label_subject" hidden="$hide_label">
+        <bind_style_if_not_eq name="$label_idle_style" subject="$active_subject" ref_value="$active_value"/>
+        <bind_style_if_eq name="$content_selected_style" subject="$active_subject" ref_value="$active_value"/>
+      </text_body>
+    </lv_obj>
+    <event_cb trigger="clicked" callback="$callback" user_data="$tab_index"/>
+  </view>
+</component>

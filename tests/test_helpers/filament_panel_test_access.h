@@ -39,6 +39,32 @@ struct FilamentPanelTestAccess {
         p.handle_load_button();
     }
 
+    static void handle_unload_button(FilamentPanel& p) {
+        p.handle_unload_button();
+    }
+
+    static void handle_preset_button(FilamentPanel& p, int slot) {
+        p.handle_preset_button(slot);
+    }
+
+    static void handle_spool_preset_button(FilamentPanel& p) {
+        p.handle_spool_preset_button();
+    }
+
+    static void update_spool_preset(FilamentPanel& p) {
+        p.update_spool_preset();
+    }
+
+    static void execute_purge(FilamentPanel& p) {
+        p.execute_purge();
+    }
+
+    /// The preset index the material buttons select (-1 = none), set without
+    /// the heater commands a real preset press also sends.
+    static void set_selected_material(FilamentPanel& p, int preset) {
+        p.selected_material_ = preset;
+    }
+
     static void populate_extruder_dropdown(FilamentPanel& p) {
         p.populate_extruder_dropdown();
     }
@@ -53,6 +79,16 @@ struct FilamentPanelTestAccess {
 
     static lv_obj_t* extruder_dropdown(FilamentPanel& p) {
         return p.extruder_dropdown_;
+    }
+
+    /// Raw member pointers, for asserting an orientation flip re-finds them
+    /// into the rebuilt tree (compare against lv_obj_find_by_name).
+    static lv_obj_t* temp_graph_card(FilamentPanel& p) {
+        return p.temp_graph_card_;
+    }
+
+    static lv_obj_t* btn_temp_graph(FilamentPanel& p) {
+        return p.btn_temp_graph_;
     }
 
     // --- Operation timeout / on-button op state (#1183) ---------------------
@@ -106,6 +142,18 @@ struct FilamentPanelTestAccess {
 
     static float keypad_max_for(::FilamentPanel& p, helix::HeaterType type, int fallback_deg) {
         return p.keypad_max_for(type, fallback_deg);
+    }
+
+    // --- Chamber heater --------------------------------------------------
+    // Cool Down's default gcode and a material's chamber target both depend on
+    // whether the printer has a chamber heater.
+
+    static void handle_cooldown(::FilamentPanel& p) {
+        p.handle_cooldown();
+    }
+
+    static int chamber_target(const ::FilamentPanel& p) {
+        return p.chamber_target_;
     }
 };
 

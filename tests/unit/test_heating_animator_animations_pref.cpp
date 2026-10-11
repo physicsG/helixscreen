@@ -5,7 +5,7 @@
  * @file test_heating_animator_animations_pref.cpp
  * @brief The "Animations" preference gates the heater icon pulse — and nothing else.
  *
- * HeatingIconAnimator runs an LV_ANIM_REPEAT_INFINITE opacity pulse while a
+ * helix::ui::HeatingIconAnimator runs an LV_ANIM_REPEAT_INFINITE opacity pulse while a
  * heater climbs toward a setpoint, and the preference that governs motion has
  * to reach it: a user who switched animations off still got a moving icon. Each
  * step also restyles and invalidates the icon, which is a couple of points of
@@ -39,8 +39,8 @@ namespace {
 /// True while LVGL is running any animation against @p animator as its `var`.
 /// A null exec_cb matches every callback, so this finds the pulse whatever it
 /// drives.
-bool is_pulsing(const HeatingIconAnimator& animator) {
-    return lv_anim_get(const_cast<HeatingIconAnimator*>(&animator), nullptr) != nullptr;
+bool is_pulsing(const helix::ui::HeatingIconAnimator& animator) {
+    return lv_anim_get(const_cast<helix::ui::HeatingIconAnimator*>(&animator), nullptr) != nullptr;
 }
 
 lv_color_t icon_color(lv_obj_t* icon) {
@@ -96,7 +96,7 @@ class AnimatorPrefFixture : public XMLTestFixture {
 TEST_CASE_METHOD(AnimatorPrefFixture, "heater icon pulses while heating and animations are on",
                  "[animator][animations_pref]") {
     lv_obj_t* icon = make_icon();
-    HeatingIconAnimator animator;
+    helix::ui::HeatingIconAnimator animator;
     animator.attach(icon);
 
     animator.update(1500, 2000);
@@ -113,7 +113,7 @@ TEST_CASE_METHOD(AnimatorPrefFixture, "animations off: heating icon holds still 
     set_animations(false);
 
     lv_obj_t* icon = make_icon();
-    HeatingIconAnimator animator;
+    helix::ui::HeatingIconAnimator animator;
     animator.attach(icon);
 
     animator.update(1500, 2000);
@@ -142,7 +142,7 @@ TEST_CASE_METHOD(AnimatorPrefFixture, "animations off: the thermal states stay d
     set_animations(false);
 
     lv_obj_t* icon = make_icon();
-    HeatingIconAnimator animator;
+    helix::ui::HeatingIconAnimator animator;
     animator.attach(icon);
 
     struct Case {
@@ -183,7 +183,7 @@ TEST_CASE_METHOD(AnimatorPrefFixture, "animations off: the thermal states stay d
 TEST_CASE_METHOD(AnimatorPrefFixture, "toggling the preference reaches a live heater icon",
                  "[animator][animations_pref]") {
     lv_obj_t* icon = make_icon();
-    HeatingIconAnimator animator;
+    helix::ui::HeatingIconAnimator animator;
     animator.attach(icon);
 
     animator.update(1500, 2000);
@@ -216,7 +216,7 @@ TEST_CASE_METHOD(AnimatorPrefFixture, "toggling the preference reaches a live he
 TEST_CASE_METHOD(AnimatorPrefFixture, "the preference does not pulse a heater that is at temp",
                  "[animator][animations_pref]") {
     lv_obj_t* icon = make_icon();
-    HeatingIconAnimator animator;
+    helix::ui::HeatingIconAnimator animator;
     animator.attach(icon);
 
     animator.update(2000, 2000);
@@ -241,7 +241,7 @@ TEST_CASE_METHOD(AnimatorPrefFixture, "the preference does not pulse a heater th
 TEST_CASE_METHOD(AnimatorPrefFixture, "a running pulse keeps the state colour on every step",
                  "[animator][animations_pref][pulse_cost]") {
     lv_obj_t* icon = make_icon();
-    HeatingIconAnimator animator;
+    helix::ui::HeatingIconAnimator animator;
     animator.attach(icon);
 
     animator.update(1500, 2000);
@@ -273,7 +273,7 @@ TEST_CASE_METHOD(AnimatorPrefFixture, "a running pulse keeps the state colour on
 TEST_CASE_METHOD(AnimatorPrefFixture, "a state change mid-pulse repaints the icon colour",
                  "[animator][animations_pref][pulse_cost]") {
     lv_obj_t* icon = make_icon();
-    HeatingIconAnimator animator;
+    helix::ui::HeatingIconAnimator animator;
     animator.attach(icon);
 
     animator.update(1500, 2000);
@@ -309,7 +309,7 @@ TEST_CASE_METHOD(AnimatorPrefFixture, "a wrapper's child icon follows the tint a
     lv_obj_set_style_text_color(glyph, lv_color_hex(0x123456), LV_PART_MAIN);
     lv_obj_set_style_text_opa(glyph, LV_OPA_50, LV_PART_MAIN);
 
-    HeatingIconAnimator animator;
+    helix::ui::HeatingIconAnimator animator;
     animator.attach(wrapper);
 
     animator.update(1500, 2000);
@@ -340,12 +340,12 @@ TEST_CASE_METHOD(AnimatorPrefFixture, "moving an animator carries the pulse to t
                  "[animator][animations_pref][move]") {
     lv_obj_t* icon = make_icon();
 
-    auto source = std::make_unique<HeatingIconAnimator>();
+    auto source = std::make_unique<helix::ui::HeatingIconAnimator>();
     source->attach(icon);
     source->update(1500, 2000);
     REQUIRE(is_pulsing(*source));
 
-    HeatingIconAnimator moved(std::move(*source));
+    helix::ui::HeatingIconAnimator moved(std::move(*source));
     CHECK(moved.is_attached());
     CHECK_FALSE(source->is_attached());
 

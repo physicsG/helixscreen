@@ -3,11 +3,11 @@
 //
 // Which tools a print uses must not depend on how the viewer happens to be
 // holding the file. Reading ParsedGCodeFile directly answered EMPTY for every
-// STREAMED file, and a tool changer with 961MB of RAM (Snapmaker U1) is forced
-// to stream by MemoryInfo::should_force_streaming() - so on that printer the
-// answer was empty 100% of the time. Both consumers went silently dead with
-// it: the print-scoped filament-runout badge, and the U1 reprint's
-// SET_PRINT_USED_EXTRUDERS preamble.
+// STREAMED file, and a tool changer with 961MB of RAM (Snapmaker U1) streams
+// every file above a few MB - so on that printer the answer was empty on every
+// large print. Both consumers went silently dead with it: the print-scoped
+// filament-runout badge, and the U1 reprint's SET_PRINT_USED_EXTRUDERS
+// preamble.
 //
 // The files are real slicer output rather than synthesised fixtures. The
 // multi-tool one is what test_detail_gcode_download_integrity.cpp already uses

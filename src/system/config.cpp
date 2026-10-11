@@ -3,6 +3,8 @@
 
 #include "config.h"
 
+#include "completion_alert_mode.h"
+
 #if !defined(HELIX_SPLASH_ONLY) && !defined(HELIX_WATCHDOG)
 #include "system/telemetry_manager.h"
 #define CONFIG_RECORD_ERROR(...) TelemetryManager::instance().record_error(__VA_ARGS__)
@@ -13,36 +15,36 @@
 
 #include "app_constants.h"
 #include "config_backup.h"
+#include "config_migrations.h"
 #include "config_testing.h"
 #include "data_root_resolver.h"
+#include "helix_fs.h"
 #include "host_identity.h"
+#include "input_defaults.h"
 #include "json_utils.h"
-#include "platform_capabilities.h"
 #include "printer_detector.h"
 #include "runtime_config.h"
+#include "text_io.h"
 #include "wizard_config_paths.h"
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
-#include <fstream>
-#include <iomanip>
+#include <cstring>
 #include <map>
 #include <optional>
-#include <sstream>
 #include <sys/stat.h>
-// C++17 filesystem - use std::filesystem if available, fall back to experimental
-#if __cplusplus >= 201703L && __has_include(<filesystem>)
-#include <filesystem>
-namespace fs = std::filesystem;
-#else
-#include <experimental/filesystem>
-namespace fs = std::experimental::filesystem;
-#endif
+
+namespace hfs = helix::fs;
 
 using namespace helix;
+
+namespace tio = helix::text_io;
+
+using namespace helix::config_detail;
 
 using AppConstants::Update::config_backup_fallback;
 using AppConstants::Update::config_backup_primary;
@@ -53,6 +55,102 @@ using AppConstants::Update::legacy_config_backup_primary;
 
 Config* Config::instance{NULL};
 
+namespace helix {
+
+const char* const kDefaultCooldownGcode = "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=0\n"
+                                          "SET_HEATER_TEMPERATURE HEATER=heater_bed TARGET=0";
+
+bool is_default_cooldown_gcode(const std::string& gcode) {
+    return gcode == kDefaultCooldownGcode;
+}
+
+} // namespace helix
+
+namespace helix::config_detail {
+
+/// The unescaped reference tokens of @p ptr, or nullopt where
+/// json::json_pointer's constructor would throw: a non-empty pointer without a
+/// leading '/', or a '~' not followed by '0' or '1'.
+static std::optional<std::vector<std::string>> pointer_tokens(const std::string& ptr) {
+    std::vector<std::string> tokens;
+    if (ptr.empty()) {
+        return tokens;
+    }
+    if (ptr[0] != '/') {
+        return std::nullopt;
+    }
+    std::string token;
+    for (size_t i = 1; i <= ptr.size(); ++i) {
+        if (i == ptr.size() || ptr[i] == '/') {
+            tokens.push_back(std::move(token));
+            token.clear();
+        } else if (ptr[i] == '~') {
+            if (i + 1 >= ptr.size() || (ptr[i + 1] != '0' && ptr[i + 1] != '1')) {
+                return std::nullopt;
+            }
+            token += ptr[i + 1] == '0' ? '~' : '/';
+            ++i;
+        } else {
+            token += ptr[i];
+        }
+    }
+    return tokens;
+}
+
+/// An array index token as nlohmann accepts one: "0", or digits with no
+/// leading zero, fitting size_t. "-" (one past the end) is not an index.
+static std::optional<size_t> array_token_index(const std::string& token) {
+    if (token.empty() || token[0] < '0' || token[0] > '9' ||
+        (token.size() > 1 && token[0] == '0')) {
+        return std::nullopt;
+    }
+    return tio::parse_int<size_t>(token);
+}
+
+/// The node @p root[json_pointer(ptr)] would assign to, creating missing
+/// objects on the way, or nullptr where nlohmann would throw: a malformed
+/// pointer, a path through a scalar, or an array token that is not an index.
+/// @p why names the refusal. The whole path is checked before any of it is
+/// created, so a refusal leaves @p root untouched.
+json* node_for_write(json& root, const std::string& ptr, const char** why) {
+    const auto tokens = pointer_tokens(ptr);
+    if (!tokens) {
+        *why = "malformed JSON pointer";
+        return nullptr;
+    }
+    // Past the first missing component everything is created fresh, and
+    // nlohmann can always create that.
+    const json* node = &root;
+    for (const auto& token : *tokens) {
+        if (node->is_null()) {
+            break;
+        }
+        if (node->is_object()) {
+            const auto it = node->find(token);
+            if (it == node->end()) {
+                break;
+            }
+            node = &*it;
+        } else if (node->is_array()) {
+            const auto idx = array_token_index(token);
+            if (!idx) {
+                *why = "not an index into an array";
+                return nullptr;
+            }
+            if (*idx >= node->size()) {
+                break;
+            }
+            node = &(*node)[*idx];
+        } else {
+            *why = "a path component holds a value, not an object";
+            return nullptr;
+        }
+    }
+    return &root[json::json_pointer(ptr)];
+}
+
+} // namespace helix::config_detail
+
 namespace {
 
 /// Default macro configuration - shared between init() and reset_to_defaults()
@@ -61,8 +159,22 @@ json get_default_macros() {
             {"unload_filament", {{"label", "Unload"}, {"gcode", "UNLOAD_FILAMENT"}}},
             {"macro_1", {{"label", "Clean Nozzle"}, {"gcode", "HELIX_CLEAN_NOZZLE"}}},
             {"macro_2", {{"label", "Bed Level"}, {"gcode", "HELIX_BED_MESH_IF_NEEDED"}}},
-            {"cooldown", "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=0\nSET_HEATER_TEMPERATURE "
-                         "HEATER=heater_bed TARGET=0"}};
+            {"cooldown", kDefaultCooldownGcode}};
+}
+
+/// default_macros text a shipped preset used to persist in an earlier
+/// release, keyed by preset name then macro key. apply_preset_file()'s
+/// post-wizard migration replaces a stored macro with the preset's CURRENT
+/// text only when it byte-matches an entry here, so a user's own edit is
+/// never touched and an already-migrated printer is a no-op.
+const std::map<std::string, std::map<std::string, std::string>>& stale_default_macro_text() {
+    static const std::map<std::string, std::map<std::string, std::string>> table = {
+        {"k2",
+         {{"cooldown", "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=0\n"
+                       "SET_HEATER_TEMPERATURE HEATER=heater_bed TARGET=0\n"
+                       "SET_HEATER_TEMPERATURE HEATER=chamber_heater TARGET=0"}}},
+    };
+    return table;
 }
 
 /// Default printer configuration - shared between init() and reset_to_defaults()
@@ -74,6 +186,17 @@ json get_default_printer_config(const std::string& moonraker_host) {
         {"moonraker_port", 7125},
         {"heaters", {{"bed", "heater_bed"}, {"hotend", "extruder"}}},
         {"temp_sensors", {{"bed", "heater_bed"}, {"hotend", "extruder"}}},
+        {"motion",
+         {{"jog_speed_xy", 6000},
+          {"jog_speed_z", 600},
+          {"show_actual_position", false},
+          {"bed_map_clearance", 5},
+          {"fine_inner", 0.1f},
+          {"fine_outer", 1.0f},
+          {"coarse_inner", 1.0f},
+          {"coarse_outer", 10.0f},
+          {"turbo_inner", 10.0f},
+          {"turbo_outer", 50.0f}}},
         {"fans",
          {{"part", "fan"}, {"hotend", "heater_fan hotend_fan"}, {"chamber", ""}, {"exhaust", ""}}},
         {"leds",
@@ -108,6 +231,9 @@ bool migrate_display_config(json& data) {
     // Ensure display section exists
     if (!data.contains("display")) {
         data["display"] = json::object();
+    } else if (!data["display"].is_object()) {
+        spdlog::warn("[Config] /display is not an object - leaving display settings unmigrated");
+        return false;
     }
 
     // Migrate root-level display settings (only if target key doesn't already exist)
@@ -148,6 +274,10 @@ bool migrate_display_config(json& data) {
         // Ensure calibration subsection exists
         if (!data["display"].contains("calibration")) {
             data["display"]["calibration"] = json::object();
+        } else if (!data["display"]["calibration"].is_object()) {
+            spdlog::warn("[Config] /display/calibration is not an object - leaving touch "
+                         "calibration unmigrated");
+            return true;
         }
 
         if (data.contains("touch_calibrated")) {
@@ -203,6 +333,10 @@ bool has_value_at(const json& data, const json::json_pointer& ptr) {
     return data.contains(ptr) && !data.at(ptr).is_null();
 }
 
+} // namespace
+
+namespace helix::config_detail {
+
 /// Migrate config keys from old paths to new paths
 ///
 /// A null at either end counts as ABSENT, never as a value:
@@ -219,6 +353,12 @@ bool migrate_config_keys(json& data,
     bool any_migrated = false;
 
     for (const auto& [from_path, to_path] : migrations) {
+        // A target built from a printer id carries whatever the id holds.
+        if (!pointer_tokens(from_path) || !pointer_tokens(to_path)) {
+            spdlog::warn("[Config] Migration of {} -> {} skipped: malformed path", from_path,
+                         to_path);
+            continue;
+        }
         json::json_pointer from_ptr(from_path);
         json::json_pointer to_ptr(to_path);
 
@@ -244,19 +384,15 @@ bool migrate_config_keys(json& data,
             continue;
         }
 
-        // Ensure parent path exists for target
-        // For example, if to_path is "/input/calibration", ensure "/input" exists
-        auto last_slash = to_path.rfind('/');
-        if (last_slash != std::string::npos && last_slash > 0) {
-            std::string parent_path = to_path.substr(0, last_slash);
-            json::json_pointer parent_ptr(parent_path);
-            if (!data.contains(parent_ptr)) {
-                data[parent_ptr] = json::object();
-            }
+        // Copy value to new location (creating its parents) and remove from old
+        json value = data.at(from_ptr);
+        const char* why = nullptr;
+        json* target = node_for_write(data, to_path, &why);
+        if (target == nullptr) {
+            spdlog::warn("[Config] Migration of {} -> {} skipped: {}", from_path, to_path, why);
+            continue;
         }
-
-        // Copy value to new location and remove from old
-        data[to_ptr] = data[from_ptr];
+        *target = std::move(value);
         erase_at_pointer(data, from_ptr);
         spdlog::info("[Config] Migrated {} -> {}", from_path, to_path);
         any_migrated = true;
@@ -264,6 +400,10 @@ bool migrate_config_keys(json& data,
 
     return any_migrated;
 }
+
+} // namespace helix::config_detail
+
+namespace {
 
 /// Config::init()'s display-migration step, as one callable unit.
 ///
@@ -282,637 +422,15 @@ bool run_display_migrations(json& data) {
     return changed;
 }
 
-// ============================================================================
-// Versioned config migrations
-// ============================================================================
-
 } // end anonymous namespace
 
-// Test injection seam: allows unit tests to force a platform tier classification
-// without monkey-patching /proc. Production code never sets this.
-namespace {
-static std::optional<helix::PlatformTier> g_forced_tier_for_migration;
-} // namespace
-
 namespace helix::config_testing {
-void set_forced_tier_for_migration(std::optional<helix::PlatformTier> tier) {
-    g_forced_tier_for_migration = tier;
-}
-
 bool run_display_migrations_for_test(nlohmann::json& data) {
     return ::run_display_migrations(data);
 }
 } // namespace helix::config_testing
 
-namespace {
-
-#if !defined(HELIX_SPLASH_ONLY) && !defined(HELIX_WATCHDOG)
-static helix::PlatformTier current_tier_for_migration() {
-    if (g_forced_tier_for_migration.has_value()) {
-        return *g_forced_tier_for_migration;
-    }
-    return helix::PlatformCapabilities::detect().tier;
-}
-#endif
-
-/// Migration v0→v1: Sound support added — default sounds OFF for existing configs.
-/// Before sound actually worked, configs had sounds_enabled: true as a harmless default.
-/// Force it off so upgrading users don't get surprise beeps.
-static void migrate_v0_to_v1(json& config) {
-    if (config.contains("sounds_enabled")) {
-        config["sounds_enabled"] = false;
-        spdlog::info("[Config] Migration v1: disabled sounds_enabled for existing config");
-    }
-}
-
-/// Migration v1→v2: Multi-LED support — convert single LED string to array
-static void migrate_v1_to_v2(json& config) {
-    json::json_pointer strip_ptr("/printer/leds/strip");
-    json::json_pointer selected_ptr("/printer/leds/selected");
-
-    // If new array path already exists, nothing to do
-    if (config.contains(selected_ptr)) {
-        return;
-    }
-
-    // Convert old single string to array
-    if (config.contains(strip_ptr)) {
-        auto& strip_val = config[strip_ptr];
-        if (strip_val.is_string()) {
-            std::string led = strip_val.get<std::string>();
-            if (!led.empty()) {
-                config[selected_ptr] = json::array({led});
-                spdlog::info("[Config] Migration v2: converted LED '{}' from /printer/leds/strip "
-                             "to /printer/leds/selected array",
-                             led);
-            } else {
-                config[selected_ptr] = json::array();
-                spdlog::info(
-                    "[Config] Migration v2: empty LED strip, created empty selected array");
-            }
-        }
-        // Don't remove /printer/leds/strip - keep for wizard backward compat
-    } else {
-        // No LED configured at all - create empty array
-        config[selected_ptr] = json::array();
-        spdlog::info("[Config] Migration v2: no LED configured, created empty selected array");
-    }
-}
-
-/// Migration v2→v3: retired. It retuned /input/jitter_threshold, a setting that
-/// never reached the input pipeline and has since been removed
-/// (prestonbrown/helixscreen#1358). The step stays so the version chain is
-/// unbroken - a v2 config still has to walk through 3 to reach the current
-/// version. Any /input/jitter_threshold left in an existing config is inert.
-static void migrate_v2_to_v3(json& /*config*/) {}
-
-/// Migration v3→v4: Restructure single /printer to multi-printer /printers map.
-/// Moves the old singular "printer" object under "printers/{slug}/" and sets active_printer_id.
-/// Also moves root-level "filament", "panel_widgets" under the printer entry.
-static void migrate_v3_to_v4(json& config) {
-    // Skip if already has /printers (idempotent)
-    if (config.contains("printers")) {
-        return;
-    }
-
-    // Skip if no old /printer section exists
-    if (!config.contains("printer") || !config["printer"].is_object()) {
-        return;
-    }
-
-    json printer_data = config["printer"];
-
-    // Determine the slug ID from the printer name
-    std::string printer_name;
-    if (printer_data.contains("printer_name") && printer_data["printer_name"].is_string()) {
-        printer_name = printer_data["printer_name"].get<std::string>();
-    } else if (printer_data.contains("name") && printer_data["name"].is_string()) {
-        printer_name = printer_data["name"].get<std::string>();
-    }
-    std::string slug = printer_name.empty() ? "default" : Config::slugify(printer_name);
-    if (slug.empty()) {
-        slug = "default";
-    }
-
-    // Move root-level per-printer sections into the printer entry
-    if (config.contains("filament") && config["filament"].is_object()) {
-        printer_data["filament"] = config["filament"];
-        config.erase("filament");
-    }
-    if (config.contains("panel_widgets") && config["panel_widgets"].is_object()) {
-        printer_data["panel_widgets"] = config["panel_widgets"];
-        config.erase("panel_widgets");
-    }
-
-    // Copy root-level wizard_completed into the printer entry
-    if (config.contains("wizard_completed")) {
-        printer_data["wizard_completed"] = config["wizard_completed"];
-        // Keep root-level for backward compatibility
-    }
-
-    // Create the new printers map and set the active printer
-    config["printers"] = {{slug, printer_data}};
-    config["active_printer_id"] = slug;
-
-    // Remove the old singular "printer" key
-    config.erase("printer");
-
-    // Migrate /display/printer_image to per-printer /printers/{id}/printer_image
-    if (config.contains("display") && config["display"].contains("printer_image")) {
-        config["printers"][slug]["printer_image"] = config["display"]["printer_image"];
-        config["display"].erase("printer_image");
-        spdlog::info(
-            "[Config] Migration v4: moved /display/printer_image to /printers/{}/printer_image",
-            slug);
-    }
-
-    spdlog::info("[Config] Migration v4: restructured /printer to /printers/{}", slug);
-}
-
-/// Default show_printer_switcher to false for single-printer configs.
-/// Shared by v4→v5 and v5→v6 migrations (v6 re-runs for fresh v5 installs that had wrong default).
-static void default_printer_switcher_off(json& config, int target_version) {
-    if (config.contains("/printers/show_printer_switcher"_json_pointer)) {
-        return;
-    }
-
-    int printer_count = 0;
-    if (config.contains("printers") && config["printers"].is_object()) {
-        for (auto& [key, val] : config["printers"].items()) {
-            if (val.is_object()) {
-                printer_count++;
-            }
-        }
-    }
-
-    if (printer_count <= 1) {
-        config["/printers/show_printer_switcher"_json_pointer] = false;
-        spdlog::info(
-            "[Config] Migration v{}: disabled show_printer_switcher for single-printer config",
-            target_version);
-    }
-}
-
-static void migrate_v4_to_v5(json& config) {
-    default_printer_switcher_off(config, 5);
-}
-static void migrate_v5_to_v6(json& config) {
-    default_printer_switcher_off(config, 6);
-}
-
-/// Bump default brightness from 50% to 80% for users who never changed it.
-static void migrate_v6_to_v7(json& config) {
-    if (config.contains("brightness") && config["brightness"].is_number() &&
-        config["brightness"].get<int>() == 50) {
-        config["brightness"] = 80;
-        spdlog::info("[Config] Migration v7: updated default brightness from 50% to 80%");
-    }
-}
-
-/// Remap toolhead_style after alphabetical reorder of enum values.
-/// Old: AUTO=0, DEFAULT=1, STEALTHBURNER=2, A4T=3, JABBERWOCKY=4
-/// New: AUTO=0, DEFAULT=1, A4T=2, ANTHEAD=3, JABBERWOCKY=4, STEALTHBURNER=5
-static void migrate_v7_to_v8(json& config) {
-    auto remap_toolhead = [](json& printers_obj) {
-        for (auto& [id, printer] : printers_obj.items()) {
-            json::json_pointer ptr("/appearance/toolhead_style");
-            if (printer.contains(ptr) && printer[ptr].is_number_integer()) {
-                int old_val = printer[ptr].get<int>();
-                // Only 2 (old STEALTHBURNER) and 3 (old A4T) need remapping
-                if (old_val == 2) {
-                    printer[ptr] = 5; // STEALTHBURNER
-                    spdlog::info(
-                        "[Config] Migration v8: remapped toolhead_style 2→5 (Stealthburner) "
-                        "for printer {}",
-                        id);
-                } else if (old_val == 3) {
-                    printer[ptr] = 2; // A4T
-                    spdlog::info("[Config] Migration v8: remapped toolhead_style 3→2 (A4T) "
-                                 "for printer {}",
-                                 id);
-                }
-            }
-        }
-    };
-
-    if (config.contains("printers") && config["printers"].is_object()) {
-        remap_toolhead(config["printers"]);
-    }
-}
-
-/// Re-apply brightness 50->80 bump for users whose config was written with the
-/// old default of 50 after v7 migration already ran (the default in
-/// get_default_config() was still 50, so new installs after v7 got 50 again).
-static void migrate_v8_to_v9(json& config) {
-    if (config.contains("brightness") && config["brightness"].is_number() &&
-        config["brightness"].get<int>() == 50) {
-        config["brightness"] = 80;
-        spdlog::info("[Config] Migration v9: updated default brightness from 50% to 80%");
-    }
-}
-
-/// Consolidate "power" widget into "power_device" with __all__ sentinel.
-/// Scans all printers/panels/pages for widget entries with id=="power" and replaces
-/// them with "power_device:N" (using the next available instance number).
-static void migrate_v9_to_v10(json& config) {
-    if (!config.contains("printers"))
-        return;
-
-    for (auto& [printer_id, printer] : config["printers"].items()) {
-        if (!printer.is_object() || !printer.contains("panel_widgets"))
-            continue;
-
-        for (auto& [panel_id, panel] : printer["panel_widgets"].items()) {
-            if (!panel.is_object() || !panel.contains("pages") || !panel["pages"].is_array())
-                continue;
-
-            // Find max power_device instance number across all pages
-            int max_instance = 0;
-            for (auto& page : panel["pages"]) {
-                if (!page.contains("widgets") || !page["widgets"].is_array())
-                    continue;
-                for (auto& widget : page["widgets"]) {
-                    std::string id = widget.value("id", "");
-                    if (id.substr(0, 13) == "power_device:") {
-                        try {
-                            int n = std::stoi(id.substr(13));
-                            if (n > max_instance)
-                                max_instance = n;
-                        } catch (...) {
-                        }
-                    }
-                }
-            }
-
-            // Migrate "power" → "power_device:N+1"
-            for (auto& page : panel["pages"]) {
-                if (!page.contains("widgets") || !page["widgets"].is_array())
-                    continue;
-                for (auto& widget : page["widgets"]) {
-                    if (widget.value("id", "") == "power") {
-                        max_instance++;
-                        widget["id"] = "power_device:" + std::to_string(max_instance);
-                        widget["config"] = {{"device", "__all__"}, {"icon", "power_cycle"}};
-                        spdlog::info("[Config] Migrated power widget to power_device:{} for "
-                                     "printer '{}'",
-                                     max_instance, printer_id);
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Migrate PID heat rates to shared thermal path; strip heating phases from predictor entries.
-static void migrate_v10_to_v11(json& config) {
-    // 1. Move PID heat rates to shared thermal path
-    for (const auto& heater : {"extruder", "heater_bed"}) {
-        if (config.contains("calibration") && config["calibration"].contains("pid_history") &&
-            config["calibration"]["pid_history"].contains(heater) &&
-            config["calibration"]["pid_history"][heater].contains("heat_rate")) {
-            // Copy to new location if not already present
-            bool dest_exists = config.contains("thermal") && config["thermal"].contains("rates") &&
-                               config["thermal"]["rates"].contains(heater) &&
-                               config["thermal"]["rates"][heater].contains("heat_rate");
-
-            if (!dest_exists) {
-                config["thermal"]["rates"][heater]["heat_rate"] =
-                    config["calibration"]["pid_history"][heater]["heat_rate"];
-                spdlog::info("[Config] Migration v11: copied heat_rate for '{}' to /thermal/rates",
-                             heater);
-            }
-
-            // Erase from old location (leave parent intact for oscillation_duration)
-            config["calibration"]["pid_history"][heater].erase("heat_rate");
-            spdlog::info(
-                "[Config] Migration v11: removed heat_rate from /calibration/pid_history/{}",
-                heater);
-        }
-    }
-
-    // 2. Strip heating phases (HEATING_BED=3, HEATING_NOZZLE=4) from predictor entries
-    if (config.contains("print_start_history") &&
-        config["print_start_history"].contains("entries") &&
-        config["print_start_history"]["entries"].is_array()) {
-        int count = 0;
-        for (auto& entry : config["print_start_history"]["entries"]) {
-            if (entry.contains("phases") && entry["phases"].is_object()) {
-                entry["phases"].erase("3"); // HEATING_BED
-                entry["phases"].erase("4"); // HEATING_NOZZLE
-                count++;
-            }
-        }
-        if (count > 0) {
-            spdlog::info(
-                "[Config] Migration v11: stripped heating phases from {} predictor entries", count);
-        }
-    }
-}
-
-/// Consolidate chamber assignment keys: move `printer/chamber_sensor` → `temp_sensors/chamber`
-/// and `printer/chamber_heater` → `heaters/chamber` under each printer, matching the flat
-/// per-hardware-type convention used everywhere else (heaters/bed, fans/chamber, etc.).
-static void migrate_v11_to_v12(json& config) {
-    if (!config.contains("printers") || !config["printers"].is_object())
-        return;
-
-    for (auto& [printer_id, printer] : config["printers"].items()) {
-        if (!printer.is_object())
-            continue;
-        const std::vector<std::pair<std::string, std::string>> migrations = {
-            {"/printer/chamber_sensor", "/temp_sensors/chamber"},
-            {"/printer/chamber_heater", "/heaters/chamber"},
-        };
-        if (migrate_config_keys(printer, migrations)) {
-            spdlog::info("[Config] Migration v12: consolidated chamber keys for printer '{}'",
-                         printer_id);
-        }
-        // If the now-empty /printer subkey remains, drop it.
-        if (printer.contains("printer") && printer["printer"].is_object() &&
-            printer["printer"].empty()) {
-            printer.erase("printer");
-        }
-    }
-}
-
-/// Repair stale AD5X display settings from the pre-#431 preset. The original AD5X
-/// preset (#235) set sleep_backlight_off=false under the assumption that backlight
-/// power-off prevented wake-on-touch. #431 corrected this after hardware verification.
-/// Users whose wizard ran between those commits still have the stale combination
-/// (backlight never turns off at sleep).
-static void migrate_v12_to_v13(json& config) {
-    bool is_ad5x = false;
-    if (config.value("preset", "") == "ad5x") {
-        is_ad5x = true;
-    } else if (config.contains("printers") && config["printers"].is_object()) {
-        for (auto& [printer_id, printer] : config["printers"].items()) {
-            if (printer.is_object() && printer.value("type", "") == "FlashForge Adventurer 5X") {
-                is_ad5x = true;
-                break;
-            }
-        }
-    }
-    if (!is_ad5x)
-        return;
-
-    if (!config.contains("display") || !config["display"].is_object())
-        return;
-
-    auto& display = config["display"];
-    if (display.value("sleep_backlight_off", true) == false &&
-        display.value("hardware_blank", -1) == 0) {
-        display["sleep_backlight_off"] = true;
-        display["hardware_blank"] = 1;
-        spdlog::info("[Config] Migration v13: restored AD5X backlight-off sleep "
-                     "(sleep_backlight_off=true, hardware_blank=1)");
-    }
-}
-
-/// Fold legacy telemetry_config.json into settings.json. The previous
-/// architecture had two sources of truth for /telemetry_enabled: TelemetryManager
-/// owned telemetry_config.json; SystemSettingsManager owned settings.json's
-/// /telemetry_enabled. A sync line in application.cpp clobbered the former
-/// with the latter on every startup, silently disabling telemetry for users
-/// whose settings.json had never had the key set. This migration preserves
-/// whatever state telemetry_config.json held and then retires the file.
-static void migrate_v13_to_v14(json& config, const std::string& config_path) {
-    // If /telemetry_enabled is already in settings.json, no migration needed —
-    // but still delete the legacy file below if it exists.
-    bool has_key = config.contains("telemetry_enabled");
-
-    if (config_path.empty()) {
-        // Called from a test path without a filesystem; nothing to migrate.
-        return;
-    }
-
-    fs::path legacy_path = fs::path(config_path).parent_path() / "telemetry_config.json";
-    std::error_code ec;
-    if (!fs::exists(legacy_path, ec)) {
-        return;
-    }
-
-    try {
-        std::ifstream f(legacy_path);
-        json legacy;
-        f >> legacy;
-        if (!has_key && legacy.contains("enabled") && legacy["enabled"].is_boolean()) {
-            bool legacy_enabled = legacy["enabled"].get<bool>();
-            config["telemetry_enabled"] = legacy_enabled;
-            spdlog::info("[Config] Migration v14: imported telemetry_enabled={} "
-                         "from legacy {}",
-                         legacy_enabled ? "true" : "false", legacy_path.string());
-        }
-    } catch (const std::exception& e) {
-        spdlog::warn("[Config] Migration v14: failed to read legacy {}: {} "
-                     "(leaving file in place for retry)",
-                     legacy_path.string(), e.what());
-        return;
-    }
-
-    fs::remove(legacy_path, ec);
-    if (!ec) {
-        spdlog::debug("[Config] Migration v14: removed legacy {}", legacy_path.string());
-    }
-}
-
-/// v14→v15: Re-apply AD5X sleep preset for users whose printer-identify wizard
-/// ran AFTER the v12→v13 migration. The wizard (pre-fix) force-wrote the stale
-/// pre-#431 display config on every confirmation, undoing the v13 restore for
-/// any AD5X user who ran it. The wizard block has been removed in the same
-/// release that introduces this migration. Detection condition is identical to
-/// v12→v13 so the fix is idempotent if the wizard is re-run on an older build.
-static void migrate_v14_to_v15(json& config) {
-    bool is_ad5x = false;
-    if (config.value("preset", "") == "ad5x") {
-        is_ad5x = true;
-    } else if (config.contains("printers") && config["printers"].is_object()) {
-        for (auto& [printer_id, printer] : config["printers"].items()) {
-            if (printer.is_object() && printer.value("type", "") == "FlashForge Adventurer 5X") {
-                is_ad5x = true;
-                break;
-            }
-        }
-    }
-    if (!is_ad5x)
-        return;
-
-    if (!config.contains("display") || !config["display"].is_object())
-        return;
-
-    auto& display = config["display"];
-    if (display.value("sleep_backlight_off", true) == false &&
-        display.value("hardware_blank", -1) == 0) {
-        display["sleep_backlight_off"] = true;
-        display["hardware_blank"] = 1;
-        spdlog::info("[Config] Migration v15: re-applied AD5X backlight-off sleep "
-                     "after wizard-override removal");
-    }
-}
-
-/// v15 → v16: Turn the screensaver off on BASIC/EMBEDDED tiers where Flying Toasters
-/// causes Klipper print failures. Queues a one-time info modal via a transient flag
-/// consumed by Application post-boot. Only affects type 1 (Flying Toasters); types 2/3
-/// (Starfield, Pipes 3D) are left untouched because we have no evidence they cause
-/// the same problem, and silently flipping an explicit user choice is worse than
-/// leaving a slightly expensive screensaver running on their preferred setting.
-static void migrate_v15_to_v16(json& config) {
-#if defined(HELIX_SPLASH_ONLY) || defined(HELIX_WATCHDOG)
-    // Splash and watchdog don't render the screensaver and don't link the
-    // PlatformCapabilities object code. The version still advances; the next
-    // helix-screen run will surface the migration notice if applicable.
-    (void)config;
-#else
-    using helix::PlatformTier;
-    PlatformTier tier = current_tier_for_migration();
-    if (tier != PlatformTier::BASIC && tier != PlatformTier::EMBEDDED) {
-        return; // STANDARD hardware keeps its setting
-    }
-
-    if (!config.contains("display") || !config["display"].is_object()) {
-        return;
-    }
-    auto& display = config["display"];
-
-    int current_type = display.value("screensaver_type", 0);
-    if (current_type != 1) {
-        return; // only migrate Flying Toasters
-    }
-
-    display["screensaver_type"] = 0;
-    display["screensaver_migration_notice_pending"] = true;
-    spdlog::info("[Config] Migration v16: screensaver disabled on {} tier "
-                 "(was Flying Toasters); notice queued",
-                 helix::platform_tier_to_string(tier));
-#endif
-}
-
-/// v16 → v17: Rename retired Voron printer image IDs (#964). The 0.2 and 2.4r2 PNGs
-/// were replaced by voron-v0 / voron-v2 on disk; auto-detect users are covered by
-/// the printer_database.json update, but anyone who manually picked the old image
-/// in the Printer Image overlay has "shipped:voron-24r2" or "shipped:voron-0-2"
-/// frozen in their per-printer printer_image setting and would render the
-/// generic-CoreXY fallback after upgrade.
-static void migrate_v16_to_v17(json& config) {
-    static const std::vector<std::pair<std::string, std::string>> renames = {
-        {"shipped:voron-24r2", "shipped:voron-v2"},
-        {"shipped:voron-0-2", "shipped:voron-v0"},
-    };
-
-    if (!config.contains("printers") || !config["printers"].is_object())
-        return;
-
-    for (auto& [printer_id, printer] : config["printers"].items()) {
-        if (!printer.is_object())
-            continue;
-        if (!printer.contains("printer_image") || !printer["printer_image"].is_string())
-            continue;
-        std::string current = printer["printer_image"].get<std::string>();
-        for (const auto& [from, to] : renames) {
-            if (current == from) {
-                printer["printer_image"] = to;
-                spdlog::info("[Config] Migration v17: renamed printer_image '{}' -> '{}' "
-                             "for printer '{}'",
-                             from, to, printer_id);
-                break;
-            }
-        }
-    }
-}
-
-/// v17 → v18: After the #943/#986 touch-scaling fix, the DRM/fbdev backends apply
-/// evdev linear scaling to MT-only digitizers (e.g. Qidi Q2: 800x480 controller on a
-/// 480x272 panel). Any affine calibration captured before the fix was computed in the
-/// wrong (unscaled) coordinate space and would re-break touch on upgrade. We cannot
-/// distinguish a stale capacitive affine from a legitimate resistive one in JSON alone
-/// (large coefficients are valid for resistive panels), so set a one-shot
-/// recheck_pending flag here; the display backend decides at boot — when it knows the
-/// device's resistive/capacitive nature and live ABS range — whether to invalidate.
-static void migrate_v17_to_v18(json& config) {
-    // Guard ([L087]): an absent/default-constructed json is null, and writing into a
-    // null via operator[] would replace it — but reading .value()/iterating a null
-    // throws. Create the input/calibration objects only when missing, never overwrite
-    // existing data.
-    if (!config.contains("input") || !config["input"].is_object()) {
-        config["input"] = json::object();
-    }
-    if (!config["input"].contains("calibration") || !config["input"]["calibration"].is_object()) {
-        config["input"]["calibration"] = json::object();
-    }
-
-    config["input"]["calibration"]["recheck_pending"] = true;
-    spdlog::info("[Config] Migration v18: flagged touch calibration for post-#943 recheck "
-                 "(recheck_pending=true)");
-}
-
-/// Phase 2 offline filament picker (Task 6): /preset_materials grows from a 4-string
-/// array to a 4-object array so branded filament info (id/brand/name/temps) can be
-/// attached to each quick-material preset slot. Idempotent: elements already objects
-/// are left untouched, so re-running against an already-migrated config never clobbers
-/// branding.
-static void migrate_v18_to_v19(json& config) {
-    if (!config.contains("preset_materials") || !config["preset_materials"].is_array()) {
-        return;
-    }
-    json& arr = config["preset_materials"];
-    int converted = 0;
-    for (auto& el : arr) {
-        if (el.is_string()) {
-            json obj = json::object();
-            obj["type"] = el.get<std::string>();
-            el = obj;
-            ++converted;
-        }
-    }
-    spdlog::info("[Config] Migration v19: preset_materials strings -> objects ({} converted)",
-                 converted);
-}
-
-/// Recursively erase object members whose value is null.
-///
-/// Array elements are deliberately left alone: erasing one shifts every later
-/// index, and no config consumer treats a null array slot as removable.
-/// Audited 2026-07-25 — no config setting uses null as a meaningful tri-state
-/// value; every `.is_null()` check on config data (hardware_validator,
-/// panel_widget_config, config.cpp's own default-filling) means "absent, use
-/// the default", which is exactly what erasing the key produces.
-static int strip_null_leaves(json& node) {
-    int removed = 0;
-    if (node.is_object()) {
-        for (auto it = node.begin(); it != node.end();) {
-            if (it.value().is_null()) {
-                it = node.erase(it);
-                ++removed;
-            } else {
-                removed += strip_null_leaves(it.value());
-                ++it;
-            }
-        }
-    } else if (node.is_array()) {
-        for (auto& element : node) {
-            removed += strip_null_leaves(element);
-        }
-    }
-    return removed;
-}
-
-/// True when @p node holds anything a user could have set — i.e. any leaf that
-/// is not null. An empty object/array counts as nothing, and so does a tree that
-/// bottoms out entirely in nulls (the shape read-only probes left behind).
-/// Used to decide whether a legacy node is safe to erase.
-static bool has_any_value(const json& node) {
-    if (node.is_null()) {
-        return false;
-    }
-    if (node.is_object() || node.is_array()) {
-        for (const auto& child : node) {
-            if (has_any_value(child)) {
-                return true;
-            }
-        }
-        return false;
-    }
-    return true;
-}
+namespace helix::config_detail {
 
 /// Resolve which entry of /printers the config's /active_printer_id refers to,
 /// applying the "empty or dangling → first printer object" fallback.
@@ -927,7 +445,7 @@ static bool has_any_value(const json& node) {
 ///        a string — callers that already hold a resolved id keep it rather
 ///        than sliding to whichever printer happens to sort first.
 /// @return the resolved printer id, or "" when the map holds no printer object.
-static std::string find_active_printer_key(const json& config, const std::string& preferred = "") {
+std::string find_active_printer_key(const json& config, const std::string& preferred) {
     if (!config.contains("printers") || !config["printers"].is_object()) {
         return "";
     }
@@ -949,579 +467,9 @@ static std::string find_active_printer_key(const json& config, const std::string
     return "";
 }
 
-/// Migration v19→v20: purge the null-node garbage that read-only probes through
-/// Config::get_json() vivified into settings.json (#1129), and retire the
-/// legacy top-level /led block for good.
-///
-/// Previously the /led → printers/<id>/leds fold lived in
-/// LedController::load_config() and LedAutoState::load_config(), which run on
-/// EVERY boot — so the probes there re-created the /led orphan each time and
-/// erasing it would have been pointless. Doing the fold here (once, guarded by
-/// the version number, using non-vivifying contains()) is what makes the
-/// erase stick.
-///
-/// The /printer erase matters beyond tidiness: migrate_v3_to_v4() gates on
-/// `config.contains("printer") && config["printer"].is_object()`, so a
-/// resurrected /printer node would be split into a bogus printers/default entry
-/// if that migration ever re-ran.
-static void migrate_v19_to_v20(json& config) {
-    // --- 1. Fold any real legacy /led values into the active printer ---
-    //
-    // Resolve the fold target exactly the way Config::init() resolves the active
-    // printer, INCLUDING its "active_printer_id is empty or dangling → take the
-    // first printer object" fallback — hence the shared helper. The migration
-    // cannot defer to init()'s own resolution: that runs after
-    // run_versioned_migrations(), by which point config_version is already 20
-    // and this migration will never run again.
-    const std::string active = find_active_printer_key(config);
-    const bool have_target = !active.empty();
-    bool folded = false;
+} // namespace helix::config_detail
 
-    if (have_target && config.contains("led") && config["led"].is_object()) {
-        const std::string base = "/printers/" + active + "/leds";
-        std::vector<std::pair<std::string, std::string>> moves;
-        for (const char* key :
-             {"selected_strips", "last_color", "last_brightness", "last_white", "color_presets",
-              "macro_devices", "led_on_at_start", "startup_brightness"}) {
-            moves.emplace_back(std::string("/led/") + key, base + "/" + key);
-        }
-        for (const char* key : {"enabled", "mappings"}) {
-            moves.emplace_back(std::string("/led/auto_state/") + key, base + "/auto_state/" + key);
-        }
-        // migrate_config_keys() skips (and drops) sources whose target already
-        // holds a REAL value, so per-printer values already in place are never
-        // clobbered — while a probe-vivified null target is correctly treated as
-        // absent and gets overwritten by the legacy value.
-        folded = migrate_config_keys(config, moves);
-        if (folded) {
-            spdlog::info("[Config] Migration v20: folded legacy /led into /printers/{}/leds",
-                         active);
-        }
-    }
-
-    // --- 2. Erase the orphan top-level nodes ---
-    //
-    // Only ever erase a node we have finished with. Erasing unconditionally
-    // destroyed the whole /led block whenever the fold above was skipped (no
-    // printers map at all, for instance) — the user's settings deleted with
-    // nothing put in their place. If there is still something of value in there,
-    // leave it: a later boot that can resolve a printer gets another chance.
-    if (config.contains("led")) {
-        if (folded || !has_any_value(config["led"])) {
-            config.erase("led");
-            spdlog::info("[Config] Migration v20: erased orphan top-level /led node");
-        } else {
-            spdlog::warn("[Config] Migration v20: keeping legacy /led — no printer to fold it "
-                         "into yet");
-        }
-    }
-    // /printer at this point is probe pollution: a real legacy /printer block was
-    // already split out by migrate_v3_to_v4(). Erase it only when it truly holds
-    // nothing, so an unexpected real one is never silently destroyed.
-    if (config.contains("printer")) {
-        if (!has_any_value(config["printer"])) {
-            config.erase("printer");
-            spdlog::info("[Config] Migration v20: erased orphan top-level /printer node");
-        } else {
-            spdlog::warn("[Config] Migration v20: keeping top-level /printer — it still holds "
-                         "values");
-        }
-    }
-
-    // --- 3. Strip the null leaves left behind by vivifying probes ---
-    int removed = strip_null_leaves(config);
-    if (removed > 0) {
-        spdlog::info("[Config] Migration v20: removed {} null config leaf/leaves", removed);
-    }
-}
-
-/// Split a '/'-separated relative config path into its segments.
-static std::vector<std::string> split_config_path(const std::string& path) {
-    std::vector<std::string> parts;
-    size_t start = 0;
-    while (true) {
-        const size_t slash = path.find('/', start);
-        if (slash == std::string::npos) {
-            parts.push_back(path.substr(start));
-            return parts;
-        }
-        parts.push_back(path.substr(start, slash - start));
-        start = slash + 1;
-    }
-}
-
-/// Walk a relative path without vivifying anything.
-/// @return pointer to the node, or nullptr when any segment is missing or a
-///         non-object stands where an object is needed.
-static json* find_relative(json& node, const std::string& path) {
-    json* cur = &node;
-    for (const auto& segment : split_config_path(path)) {
-        if (!cur->is_object()) {
-            return nullptr;
-        }
-        const auto it = cur->find(segment);
-        if (it == cur->end()) {
-            return nullptr;
-        }
-        cur = &(*it);
-    }
-    return cur;
-}
-
-/// Walk a relative path, creating the intermediate objects. A non-object
-/// standing in the way is replaced, since nothing can be stored beneath it.
-static json& ensure_relative(json& node, const std::string& path) {
-    const auto parts = split_config_path(path);
-    json* cur = &node;
-    for (size_t i = 0; i + 1 < parts.size(); ++i) {
-        if (!cur->contains(parts[i]) || !(*cur)[parts[i]].is_object()) {
-            (*cur)[parts[i]] = json::object();
-        }
-        cur = &(*cur)[parts[i]];
-    }
-    return (*cur)[parts.back()];
-}
-
-/// Erase the leaf at a relative path, then unwind any intermediate object the
-/// erase left empty — so retiring /appearance/toolhead_style does not leave an
-/// empty /appearance behind, while /detection survives because /detection/enabled
-/// is still in it.
-static void erase_relative(json& node, const std::string& path) {
-    const auto parts = split_config_path(path);
-    std::vector<json*> chain{&node};
-    json* cur = &node;
-    for (size_t i = 0; i + 1 < parts.size(); ++i) {
-        if (!cur->is_object() || !cur->contains(parts[i])) {
-            return;
-        }
-        cur = &(*cur)[parts[i]];
-        chain.push_back(cur);
-    }
-    if (!cur->is_object()) {
-        return;
-    }
-    cur->erase(parts.back());
-    for (size_t i = chain.size(); i-- > 1;) {
-        if (!chain[i]->is_object() || !chain[i]->empty()) {
-            break;
-        }
-        chain[i - 1]->erase(parts[i - 1]);
-    }
-}
-
-/// Copy a root-level value into every printer object, then retire the root key.
-///
-/// Used by migrate_v20_to_v21 for settings that were install-wide but describe
-/// one machine. Giving every printer the old value is what keeps an upgraded
-/// install behaving exactly as it did; printers the setting is meaningless on
-/// simply carry an inert copy. A per-printer value already in place is never
-/// overwritten.
-///
-/// @return number of printer objects that received a copy
-static int fan_out_to_printers(json& config, const std::string& root_path,
-                               const std::string& printer_path) {
-    json* source = find_relative(config, root_path);
-    if (source == nullptr || source->is_null()) {
-        return 0;
-    }
-    if (!config.contains("printers") || !config["printers"].is_object()) {
-        // No printers map: leave the root key alone rather than deleting the
-        // value with nowhere to put it (cf. migrate_v19_to_v20's /led).
-        return 0;
-    }
-
-    const json value = *source;
-    int copied = 0;
-    int printers_seen = 0;
-    for (auto& [key, printer] : config["printers"].items()) {
-        // The printers map is MIXED — `show_printer_switcher` is a plain bool
-        // sibling of the printer objects, so only objects count as printers.
-        if (!printer.is_object()) {
-            continue;
-        }
-        ++printers_seen;
-        json* existing = find_relative(printer, printer_path);
-        if (existing != nullptr && !existing->is_null()) {
-            continue;
-        }
-        ensure_relative(printer, printer_path) = value;
-        ++copied;
-    }
-
-    // Only retire the root key once it has somewhere to live. The shipped
-    // template's printers map holds nothing but `show_printer_switcher`, so a
-    // fresh install really can reach here with no printer to fan out into;
-    // erasing then would destroy the setting outright.
-    if (printers_seen == 0) {
-        return 0;
-    }
-    erase_relative(config, root_path);
-    return copied;
-}
-
-/// The four leaves of a printer's legacy scanner/ node.
-static constexpr const char* SCANNER_LEAVES[] = {"usb_vendor_product", "usb_device_name",
-                                                 "bt_address", "keymap"};
-
-/// Collapse the per-printer scanner/ nodes into one root-level /scanner.
-///
-/// The active printer's values are the ones kept — a barcode scanner is plugged
-/// into the host, so at most one of the stored copies ever described real
-/// hardware, and the active printer's is the copy the user last configured.
-/// Every printer's node is then dropped, including the ones whose values were
-/// not taken. That loss is intended: N divergent copies cannot become one
-/// without discarding N-1 of them.
-static void collapse_scanner_to_root(json& config) {
-    const std::string active = find_active_printer_key(config);
-
-    std::vector<std::string> taken;
-    if (!active.empty()) {
-        json* source = find_relative(config, "printers/" + active + "/scanner");
-        if (source != nullptr && source->is_object()) {
-            for (const char* leaf : SCANNER_LEAVES) {
-                const auto it = source->find(leaf);
-                if (it == source->end() || it->is_null()) {
-                    continue;
-                }
-                const json value = *it;
-                json& destination = ensure_relative(config, std::string("scanner/") + leaf);
-                if (destination.is_null()) {
-                    destination = value;
-                    taken.emplace_back(leaf);
-                }
-            }
-        }
-    }
-
-    int dropped = 0;
-    if (config.contains("printers") && config["printers"].is_object()) {
-        for (auto& [key, printer] : config["printers"].items()) {
-            if (!printer.is_object()) {
-                continue;
-            }
-            if (printer.erase("scanner") > 0) {
-                ++dropped;
-            }
-        }
-    }
-
-    if (!taken.empty()) {
-        std::string list;
-        for (const auto& leaf : taken) {
-            list += (list.empty() ? "" : ", ") + leaf;
-        }
-        spdlog::info("[Config] Migration v21: took scanner settings from active printer '{}' ({})",
-                     active, list);
-    }
-    if (dropped > 0) {
-        spdlog::info("[Config] Migration v21: dropped per-printer scanner node from {} printer(s)",
-                     dropped);
-    }
-}
-
-/// Migration v20→v21: store four settings in the scope that matches what they
-/// actually describe.
-///
-/// * /appearance/toolhead_style and /detection/policy_u1 describe one machine,
-///   so they move under /printers/<id>/ and fan out to EVERY printer — that is
-///   what keeps an existing install looking and behaving identically after the
-///   upgrade.
-/// * scanner/* describes a USB or Bluetooth device attached to the host running
-///   HelixScreen, not to any printer, so it moves to the root.
-/// * /console/filter_user_{add,remove} stay exactly where they are. They became
-///   the global layer of a two-layer read (a per-printer layer now sits beside
-///   them), so no data moves.
-static void migrate_v20_to_v21(json& config) {
-    const int toolhead_copies =
-        fan_out_to_printers(config, "appearance/toolhead_style", "appearance/toolhead_style");
-    if (toolhead_copies > 0) {
-        spdlog::info("[Config] Migration v21: copied /appearance/toolhead_style to {} printer(s)",
-                     toolhead_copies);
-    }
-
-    const int policy_copies =
-        fan_out_to_printers(config, "detection/policy_u1", "detection/policy_u1");
-    if (policy_copies > 0) {
-        spdlog::info("[Config] Migration v21: copied /detection/policy_u1 to {} printer(s)",
-                     policy_copies);
-    }
-
-    collapse_scanner_to_root(config);
-}
-
-/// Migration v21→v22: the two filament settings that were still read
-/// per-printer but stored at the root.
-///
-/// Both are read as `df() + "filament/..."`, i.e. under /printers/<id>/, so a
-/// value at the root was never consulted. On a real K2 Plus the root held
-/// {"color_rgb": 16711680, "material": "PETG"} - a red PETG spool from months
-/// earlier - while the live ASA-GF sat in the printer's own node. Harmless as
-/// long as nothing reads it, and exactly the kind of thing that bites the day
-/// something does.
-///
-/// fan_out_to_printers() is the right shape for both: a printer that already
-/// holds a real value keeps it (so the live spool above survives untouched),
-/// one that holds none inherits the root value rather than losing it, and the
-/// root key is retired only once there was somewhere to put it.
-static void migrate_v21_to_v22(json& config) {
-    const int spool_copies =
-        fan_out_to_printers(config, "filament/external_spool", "filament/external_spool");
-    if (spool_copies > 0) {
-        spdlog::info("[Config] Migration v22: copied /filament/external_spool to {} printer(s)",
-                     spool_copies);
-    }
-
-    const int cooldown_copies = fan_out_to_printers(config, "filament/cooldown_delay_seconds",
-                                                    "filament/cooldown_delay_seconds");
-    if (cooldown_copies > 0) {
-        spdlog::info(
-            "[Config] Migration v22: copied /filament/cooldown_delay_seconds to {} printer(s)",
-            cooldown_copies);
-    }
-
-    // Drop the container only once it is genuinely empty - a key we have not
-    // accounted for here is a key we must not delete.
-    if (config.contains("filament") && config["filament"].is_object() &&
-        config["filament"].empty()) {
-        config.erase("filament");
-    }
-}
-
-/// Migration v22→v23: the Macro Button widget's per-instance run gate changed
-/// polarity and name.
-///
-/// It used to be "skip_param_prompt" (default false), which suppressed only the
-/// parameter-entry modal — the Settings → Safety confirmation still fired, so a
-/// user who asked for a one-tap macro button got a dialog anyway. It is now
-/// "require_confirmation" (default true), governing both prompts, and its
-/// off-state is what actually delivers the one-tap run.
-///
-/// The two keys are exact inverses, so the rewrite is lossless: a widget that
-/// had skip_param_prompt:true becomes require_confirmation:false and keeps
-/// running without a parameter prompt, now without the confirmation too.
-/// Widgets that never carried the key keep the default and are left untouched,
-/// which is why nothing is written when the key is absent.
-///
-/// The same fallback lives in favorite_macro_config_from_json() for configs this
-/// migration cannot reach (preset assets under panel_widgets/<preset>/, an
-/// imported widget config). This pass exists so the legacy key does not linger
-/// on disk for users who never reopen the widget's config modal.
-static void migrate_v22_to_v23(json& config) {
-    if (!config.contains("printers") || !config["printers"].is_object())
-        return;
-
-    int rewritten = 0;
-    for (auto& [printer_id, printer] : config["printers"].items()) {
-        if (!printer.is_object() || !printer.contains("panel_widgets") ||
-            !printer["panel_widgets"].is_object())
-            continue;
-        for (auto& [panel_id, panel] : printer["panel_widgets"].items()) {
-            if (!panel.is_object() || !panel.contains("pages") || !panel["pages"].is_array())
-                continue;
-            for (auto& page : panel["pages"]) {
-                if (!page.is_object() || !page.contains("widgets") || !page["widgets"].is_array())
-                    continue;
-                for (auto& widget : page["widgets"]) {
-                    if (!widget.is_object() || !widget.contains("config") ||
-                        !widget["config"].is_object())
-                        continue;
-                    json& wc = widget["config"];
-                    if (!wc.contains("skip_param_prompt"))
-                        continue;
-                    // A non-boolean legacy value was never honoured by the
-                    // reader either; drop it rather than inventing a meaning.
-                    if (wc["skip_param_prompt"].is_boolean() &&
-                        !wc.contains("require_confirmation")) {
-                        wc["require_confirmation"] = !wc["skip_param_prompt"].get<bool>();
-                    }
-                    wc.erase("skip_param_prompt");
-                    ++rewritten;
-                }
-            }
-        }
-    }
-
-    if (rewritten > 0) {
-        spdlog::info("[Config] Migration v23: rewrote skip_param_prompt -> require_confirmation "
-                     "on {} macro widget(s)",
-                     rewritten);
-    }
-}
-
-/// Migration v23->v24: mark every saved home layout as holding pre-square-cell units.
-///
-/// Runs at v24 rather than v22 because the released 1.0 line already spent v22
-/// and v23 on the filament re-scope and the macro-button gate above; a config
-/// stamped 23 by those builds has never seen this tag. Replaying it is a no-op
-/// (see the three guards below), so the configs that did get it on the 1.1 line
-/// are left alone.
-///
-/// Saved col/row/colspan/rowspan are counts of cells in a grid whose track
-/// count and cell size both changed. This runs at config load — before
-/// Application settles the screen size and long before LayoutManager::init() —
-/// so there is no resolution HERE to rescale against, and none is stored in
-/// settings.json either. That rules out converting the numbers now; it does not
-/// rule out converting them at all. The first grid build knows the panel extent
-/// and the measured content box, which is everything the conversion needs, so
-/// the coordinates are left intact and tagged, and PanelWidgetManager ports them
-/// once (see port_legacy_layout(), include/layout_port.h) and drops the tag.
-///
-/// `legacy_rows` carries what /ui/cached_grid/<panel>/rows held. The old grid
-/// sized its row axis from the widgets in use rather than from a table, using
-/// that cache as a floor for widgets whose hardware gate had not yet fired, so
-/// it is the one part of the old grid the saved layout cannot re-derive alone.
-/// It travels with the tag rather than being read back out of /ui, so the port
-/// has a single source and the /ui key can go now.
-///
-/// Intent is read for entries with no coordinates: one that is disabled AND
-/// holds real coordinates was removed with the trash button, which leaves the
-/// position intact. One that is disabled at -1 was auto-disabled by the
-/// placement engine or was never added, so the key is dropped and the
-/// registry's default_enabled decides.
-///
-/// Iterates every printer profile, not just the active one — the shipped
-/// config/settings.json already carries two.
-static void migrate_v23_to_v24(json& config) {
-    // Harvest the per-panel row cache before dropping the node: nothing else
-    // reads /ui/cached_grid any more, and the port wants it keyed to the panel.
-    std::map<std::string, int> cached_rows;
-    if (config.contains("ui") && config["ui"].is_object() && config["ui"].contains("cached_grid") &&
-        config["ui"]["cached_grid"].is_object()) {
-        for (const auto& [panel_id, node] : config["ui"]["cached_grid"].items()) {
-            if (node.is_object() && node.contains("rows") && node["rows"].is_number_integer()) {
-                cached_rows[panel_id] = node["rows"].get<int>();
-            }
-        }
-        config["ui"].erase("cached_grid");
-    }
-
-    if (!config.contains("printers") || !config["printers"].is_object()) {
-        return;
-    }
-
-    int tagged = 0;
-    int profiles = 0;
-
-    // An entry that never had coordinates and is switched off carries no intent
-    // worth preserving; drop the key so the registry default decides. Entries
-    // WITH coordinates are left exactly as they are for the port to read.
-    auto clean_array = [](json& widgets) {
-        if (!widgets.is_array()) {
-            return;
-        }
-        for (auto& entry : widgets) {
-            if (!entry.is_object()) {
-                continue;
-            }
-            const bool enabled =
-                entry.contains("enabled") && entry["enabled"].is_boolean() && entry["enabled"];
-            const int col = (entry.contains("col") && entry["col"].is_number_integer())
-                                ? entry["col"].get<int>()
-                                : -1;
-            if (!enabled && col < 0) {
-                entry.erase("enabled");
-            }
-        }
-    };
-
-    // Replaying this migration must not change a document it has already run
-    // on. That is not hypothetical: a rollback to a v22 build stamps the
-    // version back down, and the next upgrade runs the chain again over a
-    // layout that is already in track units. Re-tagging it makes the port read
-    // tracks as cells and convert a second time. Three states have to be left
-    // alone, each for its own reason.
-
-    // Ported: `grid` and `parked_grids` are written by per-grid storage, which
-    // is newer than this migration, so they cannot appear on a genuine v21
-    // layout — PanelWidgetConfig::load() documents `grid` as absent on
-    // everything written before it. Their presence means the coordinates
-    // already count against a measured grid.
-    auto already_ported = [](const json& panel) {
-        return (panel.contains("grid") && panel["grid"].is_string() &&
-                !panel["grid"].get<std::string>().empty()) ||
-               (panel.contains("parked_grids") && panel["parked_grids"].is_object() &&
-                !panel["parked_grids"].empty());
-    };
-
-    // Tagged but not yet ported: re-tagging would overwrite legacy_rows with 0,
-    // because the /ui/cached_grid node it comes from was erased by the first
-    // run. The tag that is already there carries the real value.
-    auto already_tagged = [](const json& panel) {
-        return panel.contains("layout_units") && panel["layout_units"].is_string() &&
-               panel["layout_units"].get<std::string>() == "cells_v21";
-    };
-
-    // Nothing to port: the tag exists so port_legacy_layout() knows which
-    // numbers are cells. A layout whose entries carry no coordinates has no
-    // such numbers, so the tag would be cleared again having converted nothing.
-    auto has_coordinates = [](const json& panel) {
-        auto p = panel.find("pages");
-        if (p == panel.end() || !p->is_array()) {
-            return false;
-        }
-        for (const auto& page : *p) {
-            auto w = page.is_object() ? page.find("widgets") : page.end();
-            if (w == page.end() || !w->is_array()) {
-                continue;
-            }
-            for (const auto& entry : *w) {
-                if (entry.is_object() && entry.contains("col") &&
-                    entry["col"].is_number_integer()) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    };
-
-    auto tag_panel = [&](const std::string& panel_id, json& panel) {
-        if (already_ported(panel) || already_tagged(panel) || !has_coordinates(panel)) {
-            return;
-        }
-        panel["layout_units"] = "cells_v21";
-        auto it = cached_rows.find(panel_id);
-        panel["legacy_rows"] = (it != cached_rows.end()) ? it->second : 0;
-        ++tagged;
-    };
-
-    for (auto& printer : config["printers"]) {
-        if (!printer.is_object() || !printer.contains("panel_widgets") ||
-            !printer["panel_widgets"].is_object()) {
-            continue;
-        }
-        ++profiles;
-        for (auto&& [panel_id, panel] : printer["panel_widgets"].items()) {
-            // Legacy flat array: lift it into the page shape as well. Left as an
-            // array, PanelWidgetConfig::load() would find no entry with a grid
-            // position, read the config as pre-grid and replace it wholesale
-            // with the registry defaults, discarding every deliberate hide.
-            if (panel.is_array()) {
-                json widgets = panel;
-                clean_array(widgets);
-                panel = json{{"main_page_index", 0},
-                             {"next_page_id", 1},
-                             {"pages", json::array({json{{"id", "main"}, {"widgets", widgets}}})}};
-                tag_panel(panel_id, panel);
-                continue;
-            }
-            if (!panel.is_object() || !panel.contains("pages") || !panel["pages"].is_array()) {
-                continue;
-            }
-            for (auto& page : panel["pages"]) {
-                if (page.is_object() && page.contains("widgets")) {
-                    clean_array(page["widgets"]);
-                }
-            }
-            tag_panel(panel_id, panel);
-        }
-    }
-
-    if (tagged > 0) {
-        spdlog::info("[Config] Migration v24: tagged {} panel layout(s) across {} printer "
-                     "profile(s) for porting to the square-cell grid",
-                     tagged, profiles);
-    }
-}
+namespace {
 
 /// Lift a legacy root-level "preset" marker into the active printer's node.
 ///
@@ -1579,83 +527,6 @@ static bool lift_root_preset(json& config, const std::string& active_printer_id)
     return true;
 }
 
-/// Run all versioned migrations in sequence from current version to CURRENT_CONFIG_VERSION
-static void run_versioned_migrations(json& config, const std::string& config_path = "") {
-    int version = 0;
-    if (config.contains("config_version")) {
-        version = config["config_version"].get<int>();
-    }
-
-    // A config written by a NEWER build than this one — reachable as soon as
-    // update channels are user-switchable, since moving from the devel channel
-    // back to stable installs an older binary over a newer config.
-    //
-    // Every gate below is `version < N`, so none of them would fire; the damage
-    // is the unconditional stamp at the end, which would rewrite config_version
-    // DOWN to ours. The newer build would then re-run migrations it had already
-    // applied, against data already in the new shape. Leave the document alone
-    // instead: unknown keys are read-through-default everywhere, and
-    // Config::save() serializes the whole in-memory document, so the newer
-    // build's settings survive a round trip through this one untouched.
-    if (version > CURRENT_CONFIG_VERSION) {
-        spdlog::warn("[Config] config_version {} was written by a newer build (this build "
-                     "understands {}) — leaving the document unmigrated and unstamped",
-                     version, CURRENT_CONFIG_VERSION);
-        return;
-    }
-
-    if (version < 1)
-        migrate_v0_to_v1(config);
-    if (version < 2)
-        migrate_v1_to_v2(config);
-    if (version < 3)
-        migrate_v2_to_v3(config);
-    if (version < 4)
-        migrate_v3_to_v4(config);
-    if (version < 5)
-        migrate_v4_to_v5(config);
-    if (version < 6)
-        migrate_v5_to_v6(config);
-    if (version < 7)
-        migrate_v6_to_v7(config);
-    if (version < 8)
-        migrate_v7_to_v8(config);
-    if (version < 9)
-        migrate_v8_to_v9(config);
-    if (version < 10)
-        migrate_v9_to_v10(config);
-    if (version < 11)
-        migrate_v10_to_v11(config);
-    if (version < 12)
-        migrate_v11_to_v12(config);
-    if (version < 13)
-        migrate_v12_to_v13(config);
-    if (version < 14)
-        migrate_v13_to_v14(config, config_path);
-    if (version < 15)
-        migrate_v14_to_v15(config);
-    if (version < 16)
-        migrate_v15_to_v16(config);
-    if (version < 17)
-        migrate_v16_to_v17(config);
-    if (version < 18)
-        migrate_v17_to_v18(config);
-    if (version < 19)
-        migrate_v18_to_v19(config);
-    if (version < 20)
-        migrate_v19_to_v20(config);
-    if (version < 21)
-        migrate_v20_to_v21(config);
-    if (version < 22)
-        migrate_v21_to_v22(config);
-    if (version < 23)
-        migrate_v22_to_v23(config);
-    if (version < 24)
-        migrate_v23_to_v24(config);
-
-    config["config_version"] = CURRENT_CONFIG_VERSION;
-}
-
 /// Default root-level config - shared between init() and reset_to_defaults()
 /// @param moonraker_host Host address for printer
 /// @param include_user_prefs Include user preference fields (brightness, sounds, etc.)
@@ -1672,7 +543,7 @@ json get_default_config(const std::string& moonraker_host, bool include_user_pre
                    {"display", get_default_display_config()},
                    {"gcode_viewer", {{"tube_sides", 4}}},
                    {"input",
-                    {{"scroll_throw", 25},
+                    {{"scroll_throw", helix::input_defaults::SCROLL_THROW},
                      {"scroll_limit", 10},
                      {"long_press_time", 500},
                      {"touch_device", ""},
@@ -1701,7 +572,7 @@ json get_default_config(const std::string& moonraker_host, bool include_user_pre
     if (include_user_prefs) {
         config["brightness"] = 80;
         config["sounds_enabled"] = false;
-        config["completion_alert"] = true;
+        config["completion_alert"] = static_cast<int>(helix::CompletionAlertMode::ALERT);
         config["wizard_completed"] = false;
         config["wifi_expected"] = false;
         config["language"] = "en";
@@ -1710,8 +581,32 @@ json get_default_config(const std::string& moonraker_host, bool include_user_pre
     return config;
 }
 
+/// Whether a document holds only keys the installer seeded: no config_version,
+/// no single /printer, and no printer object under /printers. That is a fresh
+/// install, not a config to migrate - the chain would treat the seeded keys as
+/// old data and leave the defaults they lack (log_path, gcode_viewer) unset.
+static bool is_installer_seed_document(const json& config) {
+    if (helix::json_util::safe_int(config, "config_version", 0) != 0) {
+        return false;
+    }
+    if (config.contains("printer") && config["printer"].is_object()) {
+        return false;
+    }
+    const auto printers = config.find("printers");
+    if (printers != config.end() && printers->is_object()) {
+        for (const auto& [key, value] : printers->items()) {
+            if (value.is_object()) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 using helix::config_backup::find_backup;
+using helix::config_backup::remove_backups;
 using helix::config_backup::restore_from_backup;
+using helix::config_backup::write_backup_file;
 using helix::config_backup::write_rolling_backup;
 
 /// Whether the rolling-backup tiers apply to this run.
@@ -1764,15 +659,14 @@ static void recover_config_from_backup_or_defaults(json& data, ConfigStorage& st
 
     bool restored = false;
     if (!backup_src.empty()) {
-        try {
-            // ifstream, not fstream: fstream's default openmode is in|out, so a
-            // read-only backup fails to open and parses as empty input.
-            data = json::parse(std::ifstream(backup_src));
+        json backup = json::parse(tio::read_file(backup_src).value_or(""), nullptr, false);
+        if (backup.is_object()) {
+            data = std::move(backup);
             restored = true;
             spdlog::info("[Config] Restored from backup: {}", backup_src);
             NOTIFY_WARNING("Settings were corrupted — restored from backup");
-        } catch (const json::exception& e2) {
-            spdlog::warn("[Config] Backup also corrupt: {}", e2.what());
+        } else {
+            spdlog::warn("[Config] Backup also corrupt: {}", backup_src);
         }
     }
 
@@ -1805,7 +699,44 @@ std::string Config::resolve_path(const std::string& config_path) {
     const char* env_dir = std::getenv("HELIX_CONFIG_DIR");
     if (env_dir == nullptr || env_dir[0] == '\0')
         return config_path;
-    return (fs::path(env_dir) / fs::path(config_path).filename()).string();
+    return hfs::join_path(env_dir, hfs::filename(config_path));
+}
+
+/// Copy what must survive @p old_doc being replaced by defaults into @p fresh:
+/// the active printer's Moonraker connection, so an install whose printer is on
+/// another host still reaches it, and /update/channel, so an install the
+/// installer put on beta does not fall back to stable.
+static void carry_across_migration_floor(const json& old_doc, json& fresh) {
+    if (const auto update = old_doc.find("update");
+        update != old_doc.end() && update->is_object()) {
+        const auto channel = update->find("channel");
+        if (channel != update->end() && channel->is_number_integer()) {
+            fresh["update"]["channel"] = *channel;
+        }
+    }
+
+    const json* printer = nullptr;
+    if (const auto printers = old_doc.find("printers");
+        printers != old_doc.end() && printers->is_object()) {
+        const auto it = printers->find(find_active_printer_key(old_doc));
+        if (it != printers->end()) {
+            printer = &*it;
+        }
+    } else if (const auto single = old_doc.find("printer");
+               single != old_doc.end() && single->is_object()) {
+        printer = &*single;
+    }
+    if (printer == nullptr) {
+        return;
+    }
+    json& target =
+        fresh["printers"][helix::json_util::safe_string(fresh, "active_printer_id", "default")];
+    for (const char* key : {"moonraker_host", "moonraker_port", "moonraker_api_key"}) {
+        const auto it = printer->find(key);
+        if (it != printer->end() && !it->is_null()) {
+            target[key] = *it;
+        }
+    }
 }
 
 void Config::init(const std::string& config_path) {
@@ -1815,105 +746,33 @@ void Config::init(const std::string& config_path) {
     // must still get the directory created.
     if (const char* env_dir = std::getenv("HELIX_CONFIG_DIR");
         env_dir != nullptr && env_dir[0] != '\0') {
-        std::error_code ec;
-        fs::path base(env_dir);
-        fs::create_directories(base, ec);
-        if (fs::is_directory(base, ec)) {
+        if (hfs::create_directories(env_dir)) {
             spdlog::info("[Config] HELIX_CONFIG_DIR override: using {}", resolved_path);
         } else {
             spdlog::warn("[Config] HELIX_CONFIG_DIR={} unusable ({}); falling back to {}", env_dir,
-                         ec ? ec.message() : "not a directory", config_path);
+                         std::strerror(errno), config_path);
             resolved_path = config_path;
         }
     }
     path = resolved_path;
     struct stat buffer;
 
-    // Migration: rename helixconfig.json -> settings.json if old name exists
-    fs::path old_config = fs::path(path).parent_path() / "helixconfig.json";
-    if (stat(path.c_str(), &buffer) != 0 && fs::exists(old_config) && !fs::is_symlink(old_config)) {
-        spdlog::info("[Config] Migrating {} -> {}", old_config.string(), path);
-        std::error_code ec;
-        fs::rename(old_config, path, ec);
-        if (ec) {
-            spdlog::warn("[Config] Migration rename failed: {} — trying copy", ec.message());
-            try {
-                fs::copy_file(old_config, path);
-                fs::remove(old_config);
-                spdlog::info("[Config] Migration complete (copy+remove)");
-            } catch (const fs::filesystem_error& e) {
-                spdlog::error("[Config] Migration failed: {}", e.what());
-            }
-        } else {
-            spdlog::info("[Config] Migration complete");
-        }
-    } else if (stat(path.c_str(), &buffer) != 0 && fs::is_symlink(old_config)) {
-        // Old config is a symlink (Pi/SonicPad: points to printer_data).
-        // Don't rename symlinks — the installer handles that. Just use the
-        // symlink path directly so we read/write the user's real config.
+    // A Pi/SonicPad install may still reach its config through a
+    // helixconfig.json symlink into printer_data. Use it directly; the
+    // installer renames it on the next update.
+    const std::string old_config = hfs::join_path(hfs::parent_path(path), "helixconfig.json");
+    if (stat(path.c_str(), &buffer) != 0 && hfs::is_symlink(old_config)) {
         if (stat(old_config.c_str(), &buffer) == 0) {
-            path = old_config.string();
+            path = old_config;
             spdlog::info("[Config] {} is a symlink — using it directly, "
                          "installer will migrate on next update",
-                         old_config.string());
+                         old_config);
         } else {
-            spdlog::warn("[Config] {} is a dangling symlink", old_config.string());
-        }
-    } else if (stat(path.c_str(), &buffer) == 0 && fs::exists(old_config)) {
-        spdlog::warn("[Config] Both settings.json and helixconfig.json exist; "
-                     "using settings.json (old file left in place)");
-    }
-
-    // Migrate test config unconditionally (has its own existence guard)
-    fs::path old_test = fs::path(path).parent_path() / "helixconfig-test.json";
-    fs::path new_test = fs::path(path).parent_path() / "settings-test.json";
-    if (fs::exists(old_test) && !fs::exists(new_test)) {
-        std::error_code ec;
-        fs::rename(old_test, new_test, ec);
-        if (!ec) {
-            spdlog::info("[Config] Migrated test config: {} -> {}", old_test.string(),
-                         new_test.string());
-        } else {
-            spdlog::warn("[Config] Test config migration failed: {}", ec.message());
+            spdlog::warn("[Config] {} is a dangling symlink", old_config);
         }
     }
 
-    // Migration: Check for legacy config at old location (helixconfig.json in app root)
-    // If new location doesn't exist but old location does, migrate it
-    // Note: use `path` (not `config_path`) — may have been redirected to symlink above
     if (stat(path.c_str(), &buffer) != 0) {
-        // Config doesn't exist - check for legacy locations
-        const std::vector<std::string> legacy_paths = {
-            "helixconfig.json",                  // Old location (app root)
-            "/opt/helixscreen/helixconfig.json", // Legacy embedded install
-        };
-
-        for (const auto& legacy_path : legacy_paths) {
-            if (stat(legacy_path.c_str(), &buffer) == 0) {
-                spdlog::info("[Config] Found legacy config at {}, migrating to {}", legacy_path,
-                             path);
-
-                // Ensure config/ directory exists
-                fs::path config_dir = fs::path(path).parent_path();
-                if (!config_dir.empty() && !fs::exists(config_dir)) {
-                    fs::create_directories(config_dir);
-                }
-
-                // Copy legacy config to new location, then remove old file
-                try {
-                    fs::copy_file(legacy_path, path);
-                    // Remove legacy file to avoid confusion
-                    fs::remove(legacy_path);
-                    spdlog::info("[Config] Migration complete: {} -> {} (old file removed)",
-                                 legacy_path, path);
-                } catch (const fs::filesystem_error& e) {
-                    spdlog::warn("[Config] Migration failed: {}", e.what());
-                    // Fall through to create default config
-                }
-                break;
-            }
-        }
-
         // Recovery: restore config from rolling backups if missing.
         // Backups are maintained by Config::save() and survive Moonraker's
         // shutil.rmtree() wipe of the install directory.
@@ -1922,126 +781,136 @@ void Config::init(const std::string& config_path) {
 
     // Restore helixscreen.env independently — it can be lost even if config survived
     {
-        std::string env_path = (fs::path(path).parent_path() / "helixscreen.env").string();
+        std::string env_path = hfs::join_path(hfs::parent_path(path), "helixscreen.env");
         restore_from_backup(env_path, "helixscreen.env", env_backup_search_paths());
     }
 
     ensure_storage();
     bool config_modified = false;
 
-    // A thrown load() means the document is present but unreadable (e.g.
-    // permission denied) — distinct from "absent" (nullopt, no throw). Both
-    // cases route into the "load existing config" branch below so a
+    // Probe for read-only storage before attempting any writes.
+    read_only_mode_ = storage_->read_only();
+    if (read_only_mode_) {
+        spdlog::warn("[Config] Read-only storage ({}): config changes will not be persisted",
+                     storage_->describe());
+    }
+
+    // A read error means the document is present but unreadable (e.g.
+    // permission denied), distinct from "absent" (nullopt, no error). Both
+    // route into the "load existing config" branch below so a
     // present-but-unreadable config gets the same corrupt-preserve +
     // backup-restore recovery as a parse failure, instead of being silently
     // treated as first-boot and reset to defaults.
     std::optional<std::string> loaded_doc;
-    bool load_read_failed = false;
+    // True while `data` is the document parsed from `path`, whatever put it
+    // there (a backup restored onto a missing file counts).
+    bool data_is_on_disk_doc = false;
     std::string load_read_error;
-    try {
-        loaded_doc = storage_->load();
-    } catch (const std::exception& e) {
-        load_read_failed = true;
-        load_read_error = e.what();
-    }
+    loaded_doc = storage_->load(load_read_error);
+    const bool load_read_failed = !loaded_doc && !load_read_error.empty();
 
     if (loaded_doc || load_read_failed) {
         // Load existing config
         spdlog::info("[Config] Loading config from {}", path);
 
         if (load_read_failed) {
-            // Route directly into the shared recovery path rather than
-            // re-throwing into the json::parse try/catch below — that would
-            // require widening its catch to std::exception, which would
-            // also swallow an unrelated failure (e.g. bad_alloc under
-            // memory pressure on RAM-constrained embedded targets) and
-            // misdiagnose it as document corruption, renaming a perfectly
-            // healthy settings.json to .corrupt.
             spdlog::error("[Config] Failed to read {}: {}", path, load_read_error);
             CONFIG_RECORD_ERROR("file_io", "config_read_failed",
                                 fmt::format("read error: {}", load_read_error));
             recover_config_from_backup_or_defaults(data, *storage_);
             config_modified = true;
+        } else if (json parsed = json::parse(*loaded_doc, nullptr, false); !parsed.is_object()) {
+            // Everything downstream indexes the document by key, so a
+            // well-formed array or scalar is as unusable as a syntax error.
+            const char* problem = parsed.is_discarded() ? "not valid JSON" : "not a JSON object";
+            spdlog::error("[Config] Failed to parse {}: {}", path, problem);
+            CONFIG_RECORD_ERROR("file_io", "config_read_failed",
+                                fmt::format("parse error: {}", problem));
+            data_is_on_disk_doc = false;
+            recover_config_from_backup_or_defaults(data, *storage_);
+            config_modified = true;
         } else {
-            try {
-                data = json::parse(*loaded_doc);
+            data = std::move(parsed);
+            data_is_on_disk_doc = true;
 
-                // Detect tarball default that replaced user config during a Moonraker
-                // web update.  Moonraker type:web does rmtree() on the install dir and
-                // extracts the release tarball fresh — the tarball includes a preset-based
-                // settings.json with wizard_completed=false and no config_version.  If a
-                // rolling backup with real user data exists, prefer it.
-                // safe_int, not .value(): a hand-edited "config_version": null throws
-                // type_error.302, which lands in the catch below and destroys the
-                // user's settings.json (renamed .corrupt, then reset to defaults)
-                // over a single bad field.
-                //
-                // The packaged document alone cannot say which of the two
-                // happened: a fresh install ships the identical bytes, and
-                // neither the backup's age (the archive's stored mtime is the
-                // release build date, newer than the backup in both cases) nor
-                // its richness differs between them.  The installer settles it.
-                // It leaves FRESH_INSTALL_MARKER beside settings.json whenever
-                // it kept the packaged config because no user config existed to
-                // restore; Moonraker's rmtree() removes the marker and the
-                // re-extract does not bring it back, since it is not in the
-                // archive.  Consumed here so it only ever answers for the
-                // config it shipped beside.
-                if (helix::json_util::safe_int(data, "config_version", 0) == 0) {
-                    const fs::path fresh_marker =
-                        fs::path(path).parent_path() / AppConstants::Update::FRESH_INSTALL_MARKER;
-                    std::error_code marker_ec;
-                    const bool installer_kept_it = fs::exists(fresh_marker, marker_ec);
-                    if (installer_kept_it) {
-                        spdlog::info("[Config] Packaged config kept - installer marked a fresh "
-                                     "install ({})",
-                                     fresh_marker.string());
-                        fs::remove(fresh_marker, marker_ec);
-                    }
+            // Detect tarball default that replaced user config during a Moonraker
+            // web update.  Moonraker type:web does rmtree() on the install dir and
+            // extracts the release tarball fresh — the tarball includes a preset-based
+            // settings.json with wizard_completed=false and no config_version.  If a
+            // rolling backup with real user data exists, prefer it.
+            // safe_int, not .value(): a hand-edited "config_version": null has
+            // to read as 0 here, not fail the whole document over one field.
+            //
+            // The packaged document alone cannot say which of the two
+            // happened: a fresh install ships the identical bytes, and
+            // neither the backup's age (the archive's stored mtime is the
+            // release build date, newer than the backup in both cases) nor
+            // its richness differs between them.  The installer settles it.
+            // It leaves FRESH_INSTALL_MARKER beside settings.json whenever
+            // it kept the packaged config because no user config existed to
+            // restore; Moonraker's rmtree() removes the marker and the
+            // re-extract does not bring it back, since it is not in the
+            // archive.  Consumed here so it only ever answers for the
+            // config it shipped beside.
+            if (helix::json_util::safe_int(data, "config_version", 0) == 0) {
+                const std::string fresh_marker = hfs::join_path(
+                    hfs::parent_path(path), AppConstants::Update::FRESH_INSTALL_MARKER);
+                const bool installer_kept_it = hfs::exists(fresh_marker);
+                if (installer_kept_it) {
+                    spdlog::info("[Config] Packaged config kept - installer marked a fresh "
+                                 "install ({})",
+                                 fresh_marker);
+                    hfs::remove(fresh_marker);
+                }
 
-                    std::string backup_src = installer_kept_it
-                                                 ? std::string{}
-                                                 : find_backup(config_backup_search_paths());
-                    if (!backup_src.empty()) {
-                        try {
-                            auto backup_data = json::parse(std::ifstream(backup_src));
-                            if (helix::json_util::safe_int(backup_data, "config_version", 0) > 0) {
-                                spdlog::warn("[Config] Loaded config is a tarball default "
-                                             "(no config_version) — restoring from backup: {}",
-                                             backup_src);
-                                data = std::move(backup_data);
-                                config_modified = true;
-                                NOTIFY_WARNING("Settings restored after update");
-                            }
-                        } catch (const json::exception& e) {
-                            spdlog::warn(
-                                "[Config] Backup parse failed during tarball detection: {}",
-                                e.what());
-                        }
+                std::string backup_src =
+                    installer_kept_it ? std::string{} : find_backup(config_backup_search_paths());
+                if (!backup_src.empty()) {
+                    auto backup_data =
+                        json::parse(tio::read_file(backup_src).value_or(""), nullptr, false);
+                    if (!backup_data.is_object()) {
+                        spdlog::warn("[Config] Backup parse failed during tarball detection: {}",
+                                     backup_src);
+                    } else if (helix::json_util::safe_int(backup_data, "config_version", 0) > 0) {
+                        spdlog::warn("[Config] Loaded config is a tarball default "
+                                     "(no config_version) — restoring from backup: {}",
+                                     backup_src);
+                        data = std::move(backup_data);
+                        data_is_on_disk_doc = false;
+                        config_modified = true;
+                        NOTIFY_WARNING("Settings restored after update");
                     }
                 }
-            } catch (const json::exception& e) {
-                spdlog::error("[Config] Failed to parse {}: {}", path, e.what());
-                CONFIG_RECORD_ERROR("file_io", "config_read_failed",
-                                    fmt::format("parse error: {}", e.what()));
-                recover_config_from_backup_or_defaults(data, *storage_);
-                config_modified = true;
             }
         }
 
-        // The migrations below get their own try/catch, deliberately separate
-        // from the parse recovery above.
-        //
-        // They used to sit outside every handler: Config::init() has no other
-        // try, and neither does its caller Application::init_config(), so a
-        // single null field anywhere in a migration threw straight out of app
-        // startup. But they must NOT share the parse handler either — that one
-        // renames settings.json to .corrupt and resets to factory defaults,
-        // which is far too destructive a response to a migration bug. A failed
-        // migration should leave the user's config un-migrated and loudly
-        // logged, not discarded. config_version is left unstamped, so the
-        // migration is retried on the next boot.
+        // A document holding only installer-seeded keys starts from the fresh
+        // defaults, with the seeded keys laid over them. Its legacy display keys
+        // move first: once the defaults fill /input/calibration, a calibration
+        // still under /display/ has nowhere to go. Runs after the tarball
+        // detection above, so a rolling backup still replaces such a document.
+        if (is_installer_seed_document(data)) {
+            spdlog::info("[Config] Config holds no printer and no version: starting from "
+                         "defaults under its {} seeded key(s)",
+                         data.size());
+            run_display_migrations(data);
+            json fresh = get_default_config("127.0.0.1", false);
+            fresh.merge_patch(data);
+            fresh["config_version"] = CURRENT_CONFIG_VERSION;
+            data = std::move(fresh);
+            config_modified = true;
+        }
+
+        // With exceptions, the migrations run under their own catch-all,
+        // separate from the parse recovery above: that one renames
+        // settings.json to .corrupt and resets to factory defaults, far too
+        // destructive a response to a migration bug. A failed migration leaves
+        // the config un-migrated and logged, with config_version unstamped so
+        // it is retried on the next boot. Without exceptions (ESP32) there is
+        // nothing to catch, so every step has to be non-throwing by itself.
+#if defined(__cpp_exceptions)
         try {
+#endif
             // Moves root-level display_* to /display/, then the touch keys from
             // /display/ to /input/. Shared with the config_testing seam so tests
             // drive this exact sequence instead of restating it.
@@ -2052,19 +921,87 @@ void Config::init(const std::string& config_path) {
             // Run versioned migrations (v0→v1: disable sounds for existing configs, etc.)
             // Pass path so v13→v14 can find the legacy telemetry_config.json sidecar.
             int version_before = helix::json_util::safe_int(data, "config_version", 0);
-            run_versioned_migrations(data, path);
+            // The save() after migrating also refreshes the rolling backup, so
+            // without this copy nothing keeps the pre-upgrade document. It is a
+            // fixed sibling of settings.json that no restore path searches, and
+            // a file copy, so it applies only when the storage is that file.
+            // A snapshot already at version_before is kept: the file on disk
+            // may be a partly migrated document that still carries that
+            // version, and the first copy is the original.
+            // One generation only - the next migrating boot from a
+            // different version overwrites it; keep a versioned name per
+            // migration if older ones are wanted.
+            //
+            // A document below the migration floor is replaced by defaults, and
+            // it may have come from a rolling backup rather than from path (a
+            // corrupt settings.json, or a tarball default after a Moonraker web
+            // update). The snapshot is then its only copy, so it is written
+            // from memory whatever the source.
+            const std::string snapshot = path + ".pre-migration";
+            const bool below_floor =
+                version_before > 0 && version_before < MIN_MIGRATABLE_CONFIG_VERSION;
+            const bool copy_from_file = data_is_on_disk_doc && storage_->describe() == path;
+            // A small partition cannot spare a second copy of settings.json for
+            // a manual recovery nobody can perform there. A below-floor document
+            // still gets one: it is about to be replaced and has no other copy.
+            const bool small = storage_->small_footprint();
+            if (small && !below_floor) {
+                std::remove(snapshot.c_str());
+            }
+            bool snapshot_kept = false;
+            if (version_before > 0 && version_before < CURRENT_CONFIG_VERSION &&
+                ((copy_from_file && !small) || below_floor) && !read_only_mode_) {
+                // Absent or unreadable parses as discarded, which reads as 0:
+                // nothing worth keeping.
+                const int snapshot_version = helix::json_util::safe_int(
+                    json::parse(tio::read_file(snapshot).value_or(""), nullptr, false),
+                    "config_version", 0);
+                if (snapshot_version == version_before) {
+                    spdlog::debug("[Config] Keeping existing v{} pre-migration copy: {}",
+                                  version_before, snapshot);
+                    snapshot_kept = true;
+                } else if (copy_from_file
+                               ? write_backup_file(path, snapshot)
+                               : tio::write_file_atomic(
+                                     snapshot, helix::json_util::safe_dump(data, small ? -1 : 2))) {
+                    spdlog::info("[Config] Saved v{} config before migrating: {}", version_before,
+                                 snapshot);
+                    snapshot_kept = true;
+                } else {
+                    spdlog::warn("[Config] Could not save pre-migration copy to {}", snapshot);
+                }
+            }
+            if (below_floor && !snapshot_kept && !read_only_mode_) {
+                // Replacing it now would leave no copy anywhere. Left unmigrated
+                // and unstamped, it is retried on the next boot.
+                spdlog::error("[Config] config_version {} is older than this build migrates "
+                              "(oldest: {}) and could not be copied to {}; leaving it unmigrated",
+                              version_before, MIN_MIGRATABLE_CONFIG_VERSION, snapshot);
+            } else if (below_floor) {
+                spdlog::warn("[Config] config_version {} is older than this build migrates "
+                             "(oldest: {}); starting from defaults, previous config kept at {}",
+                             version_before, MIN_MIGRATABLE_CONFIG_VERSION, snapshot);
+                json fresh = get_default_config("127.0.0.1", false);
+                carry_across_migration_floor(data, fresh);
+                data = std::move(fresh);
+                config_modified = true;
+            } else {
+                helix::config_detail::run_versioned_migrations(data, path);
+            }
             // safe_int, not data["config_version"] — operator[] on the non-const
             // `data` VIVIFIES a null if a migration failed to stamp the version,
             // and .get<int>() then throws on it (#1129 is the same hazard).
             if (helix::json_util::safe_int(data, "config_version", 0) != version_before) {
                 config_modified = true;
             }
+#if defined(__cpp_exceptions)
         } catch (const std::exception& e) {
             spdlog::error("[Config] Migration failed, continuing with un-migrated config: {}",
                           e.what());
             CONFIG_RECORD_ERROR("migration", "config_migration_failed",
                                 fmt::format("migration error: {}", e.what()));
         }
+#endif
     } else {
         // Create default config
         spdlog::info("[Config] Creating default config at {}", path);
@@ -2072,11 +1009,22 @@ void Config::init(const std::string& config_path) {
         config_modified = true;
     }
 
-    // Ensure printers map exists
-    if (!data.contains("printers") || !data["printers"].is_object()) {
-        data["printers"] = {{"default", get_default_printer_config("127.0.0.1")}};
-        data["active_printer_id"] = "default";
-        config_modified = true;
+    // Ensure the printers map holds a printer. A versionless document naming none
+    // still reaches here with a printers object: normalize_versionless_document()
+    // gives it /printers/show_printer_switcher, which is not a printer. A config
+    // from a newer build is exempt: its printers may be in a shape this build
+    // does not read, and it is left as written (see run_versioned_migrations).
+    const bool from_newer_build =
+        helix::json_util::safe_int(data, "config_version", 0) > CURRENT_CONFIG_VERSION;
+    if (!from_newer_build) {
+        if (!data.contains("printers") || !data["printers"].is_object()) {
+            data["printers"] = json::object();
+        }
+        if (get_printer_ids().empty()) {
+            data["printers"]["default"] = get_default_printer_config("127.0.0.1");
+            data["active_printer_id"] = "default";
+            config_modified = true;
+        }
     }
 
     // Load the active printer ID from config (must happen before df() is used),
@@ -2086,80 +1034,42 @@ void Config::init(const std::string& config_path) {
         config_modified = true;
     }
 
-    // Ensure active printer has required fields with defaults
+    // Ensure active printer has required fields with defaults. Addressed by key,
+    // not through a df() pointer: the id is a key of the printers object (made
+    // an object above), whatever characters it holds.
     if (!active_printer_id_.empty()) {
-        auto printer_ptr = json::json_pointer("/printers/" + active_printer_id_);
-        auto& printer = data[printer_ptr];
+        json& printer = data["printers"][active_printer_id_];
         if (printer.is_null()) {
-            data[printer_ptr] = get_default_printer_config("127.0.0.1");
+            printer = get_default_printer_config("127.0.0.1");
             config_modified = true;
-        } else {
-            // Ensure heaters exists with defaults
-            auto& heaters = data[json::json_pointer(df() + "heaters")];
-            if (heaters.is_null()) {
-                data[json::json_pointer(df() + "heaters")] = {{"bed", "heater_bed"},
-                                                              {"hotend", "extruder"}};
-                config_modified = true;
-            }
-
-            // Ensure temp_sensors exists with defaults
-            auto& temp_sensors = data[json::json_pointer(df() + "temp_sensors")];
-            if (temp_sensors.is_null()) {
-                data[json::json_pointer(df() + "temp_sensors")] = {{"bed", "heater_bed"},
-                                                                   {"hotend", "extruder"}};
-                config_modified = true;
-            }
-
-            // Ensure fans exists with defaults
-            auto& fans = data[json::json_pointer(df() + "fans")];
-            if (fans.is_null()) {
-                data[json::json_pointer(df() + "fans")] = {{"part", "fan"},
-                                                           {"hotend", "heater_fan hotend_fan"}};
-                config_modified = true;
-            }
-
-            // Ensure leds exists with defaults
-            auto& leds = data[json::json_pointer(df() + "leds")];
-            if (leds.is_null()) {
-                data[json::json_pointer(df() + "leds")] = {{"strip", "neopixel chamber_light"}};
-                config_modified = true;
-            }
+        } else if (printer.is_object()) {
+            auto ensure = [&](const char* key, json value) {
+                if (!printer.contains(key) || printer[key].is_null()) {
+                    printer[key] = std::move(value);
+                    config_modified = true;
+                }
+            };
+            ensure("heaters", {{"bed", "heater_bed"}, {"hotend", "extruder"}});
+            ensure("temp_sensors", {{"bed", "heater_bed"}, {"hotend", "extruder"}});
+            ensure("fans", {{"part", "fan"}, {"hotend", "heater_fan hotend_fan"}});
+            ensure("leds", {{"strip", "neopixel chamber_light"}});
 
             // Ensure leds/selected array exists (for multi-LED support)
-            auto& leds_selected = data[json::json_pointer(df() + "leds/selected")];
-            if (leds_selected.is_null()) {
-                // Check if there's a legacy strip value to migrate. Read it
-                // through the non-vivifying accessor — get_json()/operator[]
-                // would leave a permanent "leds/strip": null behind (#1129).
-                const json* strip = try_get_json(df() + "leds/strip");
+            json& leds = printer["leds"];
+            if (leds.is_object() && (!leds.contains("selected") || leds["selected"].is_null())) {
+                // Seed it from a legacy strip value when there is one.
+                const auto strip = leds.find("strip");
                 std::string led =
-                    (strip != nullptr && strip->is_string()) ? strip->get<std::string>() : "";
-                leds_selected = led.empty() ? json::array() : json::array({led});
+                    (strip != leds.end() && strip->is_string()) ? strip->get<std::string>() : "";
+                leds["selected"] = led.empty() ? json::array() : json::array({led});
                 config_modified = true;
             }
 
-            // Ensure extra_sensors exists (empty object for user additions)
-            auto& extra_sensors = data[json::json_pointer(df() + "extra_sensors")];
-            if (extra_sensors.is_null()) {
-                data[json::json_pointer(df() + "extra_sensors")] = json::object();
-                config_modified = true;
-            }
-
-            // Ensure hardware section exists
-            auto& hardware = data[json::json_pointer(df() + "hardware")];
-            if (hardware.is_null()) {
-                data[json::json_pointer(df() + "hardware")] = {{"optional", json::array()},
-                                                               {"expected", json::array()},
-                                                               {"last_snapshot", json::object()}};
-                config_modified = true;
-            }
-
-            // Ensure default_macros exists
-            auto& default_macros = data[json::json_pointer(df() + "default_macros")];
-            if (default_macros.is_null()) {
-                data[json::json_pointer(df() + "default_macros")] = get_default_macros();
-                config_modified = true;
-            }
+            ensure("extra_sensors", json::object());
+            ensure("hardware", {{"optional", json::array()},
+                                {"expected", json::array()},
+                                {"last_snapshot", json::object()}});
+            ensure("default_macros", get_default_macros());
         }
     }
 
@@ -2173,7 +1083,7 @@ void Config::init(const std::string& config_path) {
     // log_level intentionally NOT migrated - absence allows test_mode fallback
 
     // Ensure display section exists with defaults
-    if (!data.contains("display")) {
+    if (!data.contains("display") || !data["display"].is_object()) {
         data["display"] = get_default_display_config();
         config_modified = true;
     } else {
@@ -2190,8 +1100,8 @@ void Config::init(const std::string& config_path) {
     }
 
     // Ensure input section exists with defaults (scroll settings + touch calibration)
-    if (!data.contains("input")) {
-        data["input"] = {{"scroll_throw", 25},
+    if (!data.contains("input") || !data["input"].is_object()) {
+        data["input"] = {{"scroll_throw", helix::input_defaults::SCROLL_THROW},
                          {"scroll_limit", 10},
                          {"long_press_time", 500},
                          {"touch_device", ""},
@@ -2210,7 +1120,7 @@ void Config::init(const std::string& config_path) {
 
         // Ensure scroll settings exist
         if (!input.contains("scroll_throw")) {
-            input["scroll_throw"] = 25;
+            input["scroll_throw"] = helix::input_defaults::SCROLL_THROW;
             config_modified = true;
         }
         if (!input.contains("scroll_limit")) {
@@ -2223,7 +1133,7 @@ void Config::init(const std::string& config_path) {
         }
 
         // Ensure calibration subsection exists with all required fields
-        if (!input.contains("calibration")) {
+        if (!input.contains("calibration") || !input["calibration"].is_object()) {
             input["calibration"] = {{"valid", false}, {"a", 1.0}, {"b", 0.0}, {"c", 0.0},
                                     {"d", 0.0},       {"e", 1.0}, {"f", 0.0}};
             config_modified = true;
@@ -2239,13 +1149,6 @@ void Config::init(const std::string& config_path) {
                 }
             }
         }
-    }
-
-    // Probe for read-only storage before attempting any writes.
-    read_only_mode_ = storage_->read_only();
-    if (read_only_mode_) {
-        spdlog::warn("[Config] Read-only storage ({}): config changes will not be persisted",
-                     storage_->describe());
     }
 
     // Save updated config with any new defaults or migrations.
@@ -2270,7 +1173,7 @@ void Config::init(const std::string& config_path) {
 
     // Back up helixscreen.env outside install dir (env only changes at startup via launcher)
     if (backups_enabled()) {
-        std::string env_path = (fs::path(path).parent_path() / "helixscreen.env").string();
+        std::string env_path = hfs::join_path(hfs::parent_path(path), "helixscreen.env");
         write_rolling_backup(env_path, env_backup_primary(), env_backup_fallback());
     }
 
@@ -2338,9 +1241,49 @@ std::vector<std::string> Config::get_printer_ids() const {
     return ids;
 }
 
+std::string Config::next_printer_id() const {
+    const auto existing = get_printer_ids();
+    int counter = static_cast<int>(existing.size()) + 1;
+    std::string id;
+    do {
+        id = "printer-" + std::to_string(counter++);
+    } while (std::find(existing.begin(), existing.end(), id) != existing.end());
+    return id;
+}
+
+std::string Config::find_printer_by_host(const std::string& host, int port) const {
+    for (const auto& id : get_printer_ids()) {
+        const std::string base = "/printers/" + id + "/";
+        if (get<std::string>(base + "moonraker_host", "") == host &&
+            get<int>(base + "moonraker_port", 7125) == port) {
+            return id;
+        }
+    }
+    return {};
+}
+
+std::string Config::get_printer_display_name(const std::string& printer_id,
+                                             const std::string& fallback) const {
+    const std::string base = "/printers/" + printer_id + "/";
+    for (const char* key : {"printer_name", "type", "moonraker_host"}) {
+        std::string value = get<std::string>(base + key, "");
+        if (!value.empty()) {
+            return value;
+        }
+    }
+    return fallback;
+}
+
+std::string Config::get_active_printer_name() const {
+    return get_printer_display_name(active_printer_id_, active_printer_id_);
+}
+
 void Config::add_printer(const std::string& printer_id, const json& printer_data) {
     if (!data.contains("printers")) {
         data["printers"] = json::object();
+    } else if (!data["printers"].is_object()) {
+        spdlog::error("[Config] Cannot add printer '{}': /printers is not an object", printer_id);
+        return;
     }
     data["printers"][printer_id] = printer_data;
     spdlog::info("[Config] Added printer '{}'", printer_id);
@@ -2373,6 +1316,9 @@ void Config::remove_printer(const std::string& printer_id) {
 
     data["printers"].erase(printer_id);
     spdlog::info("[Config] Removed printer '{}'", printer_id);
+    if (printer_removed_hook_) {
+        printer_removed_hook_(printer_id);
+    }
 
     // If we just removed the active printer, switch to the first remaining one.
     // find_active_printer_key() skips the non-printer keys; taking
@@ -2411,6 +1357,11 @@ void Config::archive_printer(const std::string& printer_id) {
     }
 
     snapshot[ARCHIVED_AT_KEY] = next_archive_stamp();
+    // The printer is already gone from /printers, so a malformed archive is
+    // replaced rather than losing the snapshot too.
+    if (!data.contains("removed_printers") || !data["removed_printers"].is_object()) {
+        data["removed_printers"] = json::object();
+    }
     data["removed_printers"][printer_id] = std::move(snapshot);
     spdlog::info("[Config] Archived printer '{}' to /removed_printers", printer_id);
     prune_archived_printers();
@@ -2500,12 +1451,12 @@ std::string Config::get_path() {
 }
 
 void Config::log_type_mismatch(const std::string& json_ptr, const char* stored_type,
-                               const char* expected_type, const char* detail) {
+                               const char* expected_type) {
     // warn, not debug: the user's setting was silently discarded, and the only
     // way they can act on it is by seeing which key and which type to correct.
     spdlog::warn("[Config] '{}' is stored as {} but must be a {} - ignoring it and using the "
-                 "built-in default ({})",
-                 json_ptr, stored_type, expected_type, detail);
+                 "built-in default",
+                 json_ptr, stored_type, expected_type);
 }
 
 void Config::log_set_failed(const std::string& json_ptr, const char* detail) {
@@ -2513,16 +1464,47 @@ void Config::log_set_failed(const std::string& json_ptr, const char* detail) {
                  detail);
 }
 
+json* Config::create_path(const std::string& json_ptr) {
+    const char* why = nullptr;
+    json* node = node_for_write(data, json_ptr, &why);
+    if (node == nullptr) {
+        log_set_failed(json_ptr, why);
+    }
+    return node;
+}
+
 json& Config::get_json(const std::string& json_path) {
-    return data[json::json_pointer(json_path)];
+    if (json* node = create_path(json_path)) {
+        return *node;
+    }
+    discarded_write_ = nullptr;
+    return discarded_write_;
 }
 
 const json* Config::try_get_json(const std::string& json_path) const {
-    json::json_pointer ptr(json_path);
-    if (!data.contains(ptr)) {
+    const auto tokens = pointer_tokens(json_path);
+    if (!tokens) {
         return nullptr;
     }
-    return &data.at(ptr);
+    const json* node = &data;
+    for (const auto& token : *tokens) {
+        if (node->is_object()) {
+            const auto it = node->find(token);
+            if (it == node->end()) {
+                return nullptr;
+            }
+            node = &*it;
+        } else if (node->is_array()) {
+            const auto idx = array_token_index(token);
+            if (!idx || *idx >= node->size()) {
+                return nullptr;
+            }
+            node = &(*node)[*idx];
+        } else {
+            return nullptr;
+        }
+    }
+    return node;
 }
 
 std::vector<std::string> Config::get_string_array(const std::string& json_path) const {
@@ -2567,15 +1549,17 @@ bool Config::save() {
 
     ensure_storage();
 
-    // Serialization is inside the handler: operator<< dumps with
-    // error_handler_t::strict, which throws json::type_error 316 on invalid
-    // UTF-8 in any stored string, and the stream buffer can throw bad_alloc on
-    // a RAM-constrained target. save() has 133 call sites, many inside LVGL
-    // event callbacks, where an escaping exception unwinds through a C frame.
+    // safe_dump() replaces invalid UTF-8 rather than throwing on it, so a stray
+    // byte in a printer name or SSID costs those bytes and not the user's whole
+    // save. With exceptions, the try catches what serialization can still throw
+    // — bad_alloc on a RAM-constrained target — because save() has 133 call
+    // sites, many inside LVGL event callbacks, where an escaping exception
+    // unwinds through a C frame.
+#if defined(__cpp_exceptions)
     try {
-        std::ostringstream oss;
-        oss << std::setw(2) << data << std::endl;
-        if (!storage_->store(oss.str())) {
+#endif
+        if (!storage_->store(
+                helix::json_util::safe_dump(data, storage_->small_footprint() ? -1 : 2) + "\n")) {
             // FileConfigStorage (the default backend) already reports the specific
             // failure via NOTIFY_ERROR + CONFIG_RECORD_ERROR at the failing phase
             // (open/write/rename/exception) — don't double-toast here. Non-file
@@ -2583,6 +1567,7 @@ bool Config::save() {
             spdlog::error("[Config] Failed to save via {}", storage_->describe());
             return false;
         }
+#if defined(__cpp_exceptions)
     } catch (const std::exception& e) {
         NOTIFY_ERROR("Failed to save configuration: {}", e.what());
         LOG_ERROR_INTERNAL("Exception while saving config to {}: {}", path, e.what());
@@ -2590,6 +1575,7 @@ bool Config::save() {
                             fmt::format("exception: {}", e.what()));
         return false;
     }
+#endif
     spdlog::trace("[Config] saved successfully to {}", storage_->describe());
 
     // Rolling backup outside the install dir (survives Moonraker wipes). Kept
@@ -2630,19 +1616,19 @@ void Config::set_preset(const std::string& preset_name) {
     if (preset_name.empty()) {
         return;
     }
-    data[json::json_pointer(df() + "preset")] = preset_name;
+    set(df() + "preset", preset_name);
     spdlog::info("[Config] Preset set to '{}' for printer '{}'", preset_name, active_printer_id_);
 }
 
 void Config::clear_preset() {
     bool cleared = false;
-    if (data.contains(json::json_pointer(df() + "preset"))) {
-        // df() ends in '/', which as a JSON pointer would name an empty-string
-        // key inside the printer node rather than the node itself.
-        std::string printer_path = df();
-        printer_path.pop_back();
-        data[json::json_pointer(printer_path)].erase("preset");
-        cleared = true;
+    const std::string id = active_printer_id_.empty() ? "default" : active_printer_id_;
+    if (data.contains("printers") && data["printers"].is_object()) {
+        const auto printer = data["printers"].find(id);
+        if (printer != data["printers"].end() && printer->is_object() &&
+            printer->erase("preset") > 0) {
+            cleared = true;
+        }
     }
     // Drop any legacy root-level marker too. Leaving it would let lift_root_preset()
     // put the preset straight back on the next boot, silently undoing the wizard
@@ -2682,15 +1668,39 @@ bool preset_targets_this_device(const std::string& moonraker_host) {
 
 bool Config::apply_preset_file(const std::string& preset_name) {
     // Guard: only full-apply if wizard hasn't been completed for this printer.
-    // Post-wizard, still allow a narrow migration for filament_sensors so that
-    // a printer detected with an empty filament_sensors block (preset never
-    // populated it at first-install, or preset was extended later) gets the
-    // current preset's runout/toolhead role assignments. Without this, fixing
-    // a preset only helps fresh installs — existing users stay broken even
-    // after an update.
+    // Post-wizard, still allow narrow migrations for an already-provisioned printer:
+    // filament_sensors, default_macros, role keys the stored config never held
+    // (fans/*, heaters/*, temp_sensors/*, seeded only when absent or empty), and a
+    // hardware/expected union. Without this, fixing a preset only helps fresh
+    // installs: existing users stay broken even after an update.
     const bool wizard_done = get<bool>(df() + "wizard_completed", false);
     if (wizard_done) {
-        // Post-wizard migration window. Two cases:
+        // The merge addresses the printer both through df() pointers and as
+        // /printers/<id>, so both have to be usable.
+        if (active_printer_id_.empty() || !pointer_tokens(df()) ||
+            (data.contains("printers") && !data["printers"].is_object())) {
+            spdlog::info("[Config] Wizard completed, skipping preset '{}' merge", preset_name);
+            return false;
+        }
+        std::string preset_relpath = std::string("presets/") + preset_name + ".json";
+        std::string preset_path = helix::find_readable(preset_relpath);
+        if (!hfs::exists(preset_path)) {
+            spdlog::info("[Config] Wizard completed, skipping preset '{}' merge", preset_name);
+            return false;
+        }
+        json preset_json = json::parse(tio::read_file(preset_path).value_or(""), nullptr, false);
+        if (preset_json.is_discarded()) {
+            spdlog::info("[Config] Wizard completed, skipping preset '{}' merge", preset_name);
+            return false;
+        }
+        if (!preset_json.contains("printer") || !preset_json["printer"].is_object()) {
+            spdlog::info("[Config] Wizard completed, skipping preset '{}' merge", preset_name);
+            return false;
+        }
+        const auto& preset_printer = preset_json["printer"];
+        bool changed = false;
+
+        // Migration 1: filament_sensors. Two cases:
         //  A) filament_sensors.sensors is empty/missing → seed from preset
         //     (original installs whose old preset didn't write the block).
         //  B) Block exists but the preset has been updated to assign RUNOUT
@@ -2699,93 +1709,170 @@ bool Config::apply_preset_file(const std::string& preset_name) {
         //     specific sensors. User-edited role=runout entries are never
         //     downgraded; role=none entries the preset also wants at none
         //     are left alone.
-        if (active_printer_id_.empty()) {
-            spdlog::info("[Config] Wizard completed, skipping preset '{}' merge", preset_name);
-            return false;
-        }
-        std::string preset_relpath = std::string("presets/") + preset_name + ".json";
-        std::string preset_path = helix::find_readable(preset_relpath);
-        if (!fs::exists(preset_path)) {
-            spdlog::info("[Config] Wizard completed, skipping preset '{}' merge", preset_name);
-            return false;
-        }
-        json preset_json;
-        try {
-            preset_json = json::parse(std::ifstream(preset_path));
-        } catch (const json::exception&) {
-            spdlog::info("[Config] Wizard completed, skipping preset '{}' merge", preset_name);
-            return false;
-        }
-        if (!preset_json.contains("printer") || !preset_json["printer"].is_object() ||
-            !preset_json["printer"].contains("filament_sensors")) {
-            spdlog::info("[Config] Wizard completed, skipping preset '{}' merge", preset_name);
-            return false;
-        }
-        const auto& preset_fs = preset_json["printer"]["filament_sensors"];
+        if (preset_printer.contains("filament_sensors")) {
+            const auto& preset_fs = preset_printer["filament_sensors"];
+            json::json_pointer sensors_ptr(df() + "filament_sensors/sensors");
 
-        json::json_pointer fs_ptr(df() + "filament_sensors");
-        json::json_pointer sensors_ptr(df() + "filament_sensors/sensors");
+            if (!data.contains(sensors_ptr) ||
+                (data.at(sensors_ptr).is_array() && data.at(sensors_ptr).empty())) {
+                auto& printer_node = data["printers"][active_printer_id_];
+                if (!printer_node.is_object()) {
+                    printer_node = json::object();
+                }
+                printer_node["filament_sensors"] = preset_fs;
+                spdlog::info("[Config] Migrated filament_sensors from preset '{}' "
+                             "(existing block was empty)",
+                             preset_name);
+                changed = true;
+            } else if (preset_fs.contains("sensors") && preset_fs["sensors"].is_array() &&
+                       data.at(sensors_ptr).is_array()) {
+                auto& user_sensors = data.at(sensors_ptr);
+                for (const auto& preset_sensor : preset_fs["sensors"]) {
+                    if (!preset_sensor.is_object())
+                        continue;
+                    std::string preset_klipper =
+                        helix::json_util::safe_string(preset_sensor, "klipper_name");
+                    std::string preset_role =
+                        helix::json_util::safe_string(preset_sensor, "role", "none");
+                    if (preset_klipper.empty() || preset_role == "none")
+                        continue;
+                    bool found = false;
+                    for (auto& user_sensor : user_sensors) {
+                        if (!user_sensor.is_object())
+                            continue;
+                        if (helix::json_util::safe_string(user_sensor, "klipper_name") !=
+                            preset_klipper)
+                            continue;
+                        found = true;
+                        std::string user_role =
+                            helix::json_util::safe_string(user_sensor, "role", "none");
+                        // Only upgrade when user has role=none — never overwrite an
+                        // explicit user assignment (runout/toolhead/entry/z_probe).
+                        if (user_role == "none") {
+                            user_sensor["role"] = preset_role;
+                            changed = true;
+                            spdlog::info(
+                                "[Config] Upgraded sensor '{}' role: none -> {} (preset '{}')",
+                                preset_klipper, preset_role, preset_name);
+                        }
+                        break;
+                    }
+                    // Sensor in preset but missing entirely from user settings → append.
+                    if (!found) {
+                        user_sensors.push_back(preset_sensor);
+                        changed = true;
+                        spdlog::info("[Config] Added missing sensor '{}' from preset '{}'",
+                                     preset_klipper, preset_name);
+                    }
+                }
+            }
+        }
 
-        // Case A: empty/missing block — full seed.
-        if (!data.contains(sensors_ptr) ||
-            (data.at(sensors_ptr).is_array() && data.at(sensors_ptr).empty())) {
+        // Migration 2: default_macros. A stored macro is replaced with the
+        // preset's CURRENT text only when it byte-matches an EARLIER release's
+        // text for that (preset, key) pair (stale_default_macro_text()): a
+        // user's own edit, or an already-migrated macro, never matches and is
+        // left untouched. Idempotent: once migrated the stored text equals the
+        // current text, not the stale one, so a second run finds nothing to do.
+        if (preset_printer.contains("default_macros") &&
+            preset_printer["default_macros"].is_object()) {
+            auto stale_it = stale_default_macro_text().find(preset_name);
+            json::json_pointer macros_ptr(df() + "default_macros");
+            if (stale_it != stale_default_macro_text().end() && data.contains(macros_ptr) &&
+                data.at(macros_ptr).is_object()) {
+                auto& user_macros = data.at(macros_ptr);
+                const auto& preset_macros = preset_printer["default_macros"];
+                for (const auto& [macro_key, stale_text] : stale_it->second) {
+                    if (!user_macros.contains(macro_key) || !user_macros[macro_key].is_string()) {
+                        continue;
+                    }
+                    if (user_macros[macro_key].get<std::string>() != stale_text) {
+                        continue;
+                    }
+                    if (!preset_macros.contains(macro_key) ||
+                        !preset_macros[macro_key].is_string()) {
+                        continue;
+                    }
+                    user_macros[macro_key] = preset_macros[macro_key].get<std::string>();
+                    changed = true;
+                    spdlog::info(
+                        "[Config] Migrated default_macros.{} from preset '{}' (stale text)",
+                        macro_key, preset_name);
+                }
+            }
+        }
+
+        // Migration 3: role keys. Seed the hardware mappings the preset defines onto a
+        // machine provisioned before the preset landed, writing only absent-or-empty
+        // stored values: a present value is the user's (or the auto-heal path's) call,
+        // and a wrong-but-present one is the auto-heal path's job, not the preset's.
+        // leds/strip is deliberately excluded — a preset LED name the machine lacks
+        // raises "Configured LED strip not found", which notify_user reports ahead of
+        // the toast this migration exists to silence.
+        {
             auto& printer_node = data["printers"][active_printer_id_];
             if (!printer_node.is_object()) {
                 printer_node = json::object();
             }
-            printer_node["filament_sensors"] = preset_fs;
-            spdlog::info("[Config] Migrated filament_sensors from preset '{}' "
-                         "(existing block was empty)",
-                         preset_name);
-            save();
-            return true;
+            for (const char* group : {"fans", "heaters", "temp_sensors"}) {
+                if (!preset_printer.contains(group) || !preset_printer[group].is_object() ||
+                    (printer_node.contains(group) && !printer_node[group].is_object())) {
+                    continue;
+                }
+                for (const auto& [key, val] : preset_printer[group].items()) {
+                    if (!val.is_string() || val.get<std::string>().empty()) {
+                        continue;
+                    }
+                    const std::string rel = std::string(group) + "/" + key;
+                    const json* stored = try_get_json(df() + rel);
+                    const bool held = stored != nullptr && stored->is_string() &&
+                                      !stored->get<std::string>().empty();
+                    if (!held) {
+                        printer_node[group][key] = val;
+                        changed = true;
+                        spdlog::info("[Config] Seeded '{}' from preset '{}'", rel, preset_name);
+                    }
+                }
+            }
         }
 
-        // Case B: per-sensor role-upgrade from "none" → preset's role.
-        if (!preset_fs.contains("sensors") || !preset_fs["sensors"].is_array()) {
-            spdlog::info("[Config] Wizard completed, skipping preset '{}' merge", preset_name);
-            return false;
-        }
-        if (!data.at(sensors_ptr).is_array()) {
-            spdlog::info("[Config] Wizard completed, skipping preset '{}' merge", preset_name);
-            return false;
-        }
-        int upgraded = 0;
-        auto& user_sensors = data.at(sensors_ptr);
-        for (const auto& preset_sensor : preset_fs["sensors"]) {
-            if (!preset_sensor.is_object())
-                continue;
-            std::string preset_klipper = preset_sensor.value("klipper_name", "");
-            std::string preset_role = preset_sensor.value("role", "none");
-            if (preset_klipper.empty() || preset_role == "none")
-                continue;
-            bool found = false;
-            for (auto& user_sensor : user_sensors) {
-                if (!user_sensor.is_object())
-                    continue;
-                if (user_sensor.value("klipper_name", "") != preset_klipper)
-                    continue;
-                found = true;
-                std::string user_role = user_sensor.value("role", "none");
-                // Only upgrade when user has role=none — never overwrite an
-                // explicit user assignment (runout/toolhead/entry/z_probe).
-                if (user_role == "none") {
-                    user_sensor["role"] = preset_role;
-                    ++upgraded;
-                    spdlog::info("[Config] Upgraded sensor '{}' role: none -> {} (preset '{}')",
-                                 preset_klipper, preset_role, preset_name);
+        // Migration 4: hardware/expected union. The four AMS keywords are the only
+        // expected entries that can raise an expected_missing warning ("AMS/MMU system
+        // not detected"), so unioning one could invent that warning; every other name
+        // only ever suppresses a false "new hardware" report.
+        if (preset_printer.contains("hardware") && preset_printer["hardware"].is_object() &&
+            preset_printer["hardware"].contains("expected") &&
+            preset_printer["hardware"]["expected"].is_array()) {
+            const char* why = nullptr;
+            json* expected = node_for_write(data, df() + "hardware/expected", &why);
+            if (expected == nullptr) {
+                spdlog::warn("[Config] hardware/expected not merged from preset '{}': {}",
+                             preset_name, why);
+            } else {
+                if (!expected->is_array()) {
+                    *expected = json::array();
                 }
-                break;
-            }
-            // Sensor in preset but missing entirely from user settings → append.
-            if (!found) {
-                user_sensors.push_back(preset_sensor);
-                ++upgraded;
-                spdlog::info("[Config] Added missing sensor '{}' from preset '{}'", preset_klipper,
-                             preset_name);
+                json& stored = *expected;
+                for (const auto& entry : preset_printer["hardware"]["expected"]) {
+                    if (!entry.is_string()) {
+                        continue;
+                    }
+                    const std::string name = entry.get<std::string>();
+                    if (name.empty() || name == "AFC" || name == "mmu" || name == "toolchanger" ||
+                        name == "ace") {
+                        continue;
+                    }
+                    if (std::find(stored.begin(), stored.end(), entry) == stored.end()) {
+                        stored.push_back(entry);
+                        changed = true;
+                        spdlog::info("[Config] Added '{}' to hardware/expected from preset '{}'",
+                                     name, preset_name);
+                    }
+                }
             }
         }
-        if (upgraded > 0) {
+
+        if (changed) {
             save();
             return true;
         }
@@ -2800,18 +1887,17 @@ bool Config::apply_preset_file(const std::string& preset_name) {
     // the writable config dir would miss every preset on a fresh install.
     std::string preset_relpath = std::string("presets/") + preset_name + ".json";
     std::string preset_path = helix::find_readable(preset_relpath);
-    if (!fs::exists(preset_path)) {
+    if (!hfs::exists(preset_path)) {
         spdlog::warn("[Config] Preset file not found: {} (looked in writable + seed bundle)",
                      preset_path);
         return false;
     }
 
     // Load and parse preset JSON
-    json preset_json;
-    try {
-        preset_json = json::parse(std::ifstream(preset_path));
-    } catch (const json::exception& e) {
-        spdlog::error("[Config] Failed to parse preset '{}': {}", preset_path, e.what());
+    json preset_json = json::parse(tio::read_file(preset_path).value_or(""), nullptr, false);
+    if (preset_json.is_discarded()) {
+        spdlog::error("[Config] Failed to parse preset '{}': unreadable or not valid JSON",
+                      preset_path);
         return false;
     }
 
@@ -2827,7 +1913,8 @@ bool Config::apply_preset_file(const std::string& preset_name) {
     // HelixScreen connect to localhost on the next restart. Strip those keys so the
     // preset can never overwrite them.
     if (preset_json.contains("printer") && preset_json["printer"].is_object() &&
-        !active_printer_id_.empty()) {
+        !active_printer_id_.empty() &&
+        (!data.contains("printers") || data["printers"].is_object())) {
         json patch = preset_json["printer"];
         patch.erase("moonraker_host");
         patch.erase("moonraker_port");
@@ -2912,23 +1999,18 @@ bool Config::apply_preset_file(const std::string& preset_name) {
 bool Config::is_wizard_required() {
     // Check per-printer wizard_completed first (v3 config)
     if (!active_printer_id_.empty()) {
-        json::json_pointer printer_ptr(df() + "wizard_completed");
-        if (data.contains(printer_ptr)) {
-            auto& wc = data[printer_ptr];
-            if (wc.is_boolean()) {
-                bool is_completed = wc.get<bool>();
-                spdlog::trace("[Config] Per-printer wizard_completed = {}", is_completed);
-                return !is_completed;
-            }
+        const json* wc = try_get_json(df() + "wizard_completed");
+        if (wc != nullptr && wc->is_boolean()) {
+            bool is_completed = wc->get<bool>();
+            spdlog::trace("[Config] Per-printer wizard_completed = {}", is_completed);
+            return !is_completed;
         }
     }
 
     // Fall back to root-level wizard_completed (backward compat)
-    json::json_pointer ptr("/wizard_completed");
-    if (data.contains(ptr)) {
-        auto& wizard_completed = data[ptr];
-        if (wizard_completed.is_boolean()) {
-            bool is_completed = wizard_completed.get<bool>();
+    if (const json* wizard_completed = try_get_json("/wizard_completed")) {
+        if (wizard_completed->is_boolean()) {
+            bool is_completed = wizard_completed->get<bool>();
             spdlog::trace("[Config] Root wizard_completed flag = {}", is_completed);
             return !is_completed;
         }
@@ -2981,43 +2063,50 @@ void Config::reset_to_defaults() {
     // restart never notice; the ones that stay live would.
     refresh_active_printer_id();
 
+    // The restore chain reads these tiers whenever settings.json goes missing,
+    // so a surviving backup would resurrect this pre-reset document on any
+    // later loss of the file. No settings backup is written afterwards: init()
+    // and save() both refuse to back up a wizard-incomplete document, which the
+    // defaults are. The env backup comes back on the next start from the
+    // unchanged helixscreen.env, which a factory reset does not touch.
+    remove_backups(config_backup_search_paths());
+    remove_backups(env_backup_search_paths());
+
     spdlog::info("[Config] Configuration reset to defaults. Wizard will run on next startup.");
 }
 
 MacroConfig Config::get_macro(const std::string& key, const MacroConfig& default_val) {
-    try {
-        std::string path = df() + "default_macros/" + key;
-        json::json_pointer ptr(path);
-
-        if (!data.contains(ptr)) {
-            spdlog::trace("[Config] Macro '{}' not found, using default", key);
-            return default_val;
-        }
-
-        const auto& val = data[ptr];
-
-        // Handle string format (backward compatibility): use as both label and gcode
-        if (val.is_string()) {
-            std::string macro = val.get<std::string>();
-            spdlog::trace("[Config] Macro '{}' is string format: '{}'", key, macro);
-            return {macro, macro};
-        }
-
-        // Handle object format: {label, gcode}
-        if (val.is_object()) {
-            MacroConfig result;
-            result.label = val.value("label", default_val.label);
-            result.gcode = val.value("gcode", default_val.gcode);
-            spdlog::trace("[Config] Macro '{}': label='{}', gcode='{}'", key, result.label,
-                          result.gcode);
-            return result;
-        }
-
-        spdlog::warn("[Config] Macro '{}' has unexpected type, using default", key);
-        return default_val;
-
-    } catch (const std::exception& e) {
-        spdlog::warn("[Config] Error reading macro '{}': {}", key, e.what());
+    const json* val = try_get_json(df() + "default_macros/" + key);
+    if (val == nullptr) {
+        spdlog::trace("[Config] Macro '{}' not found, using default", key);
         return default_val;
     }
+
+    // Handle string format (backward compatibility): use as both label and gcode
+    if (val->is_string()) {
+        std::string macro = val->get<std::string>();
+        spdlog::trace("[Config] Macro '{}' is string format: '{}'", key, macro);
+        return {macro, macro};
+    }
+
+    // Handle object format: {label, gcode}. A field of the wrong type makes the
+    // whole entry unusable rather than half of it.
+    if (val->is_object()) {
+        const auto label = val->find("label");
+        const auto gcode = val->find("gcode");
+        if ((label != val->end() && !label->is_string()) ||
+            (gcode != val->end() && !gcode->is_string())) {
+            spdlog::warn("[Config] Error reading macro '{}': label and gcode must be strings", key);
+            return default_val;
+        }
+        MacroConfig result;
+        result.label = label != val->end() ? label->get<std::string>() : default_val.label;
+        result.gcode = gcode != val->end() ? gcode->get<std::string>() : default_val.gcode;
+        spdlog::trace("[Config] Macro '{}': label='{}', gcode='{}'", key, result.label,
+                      result.gcode);
+        return result;
+    }
+
+    spdlog::warn("[Config] Macro '{}' has unexpected type, using default", key);
+    return default_val;
 }

@@ -14,15 +14,21 @@
 #include "ui_update_queue.h"
 
 #include "ams_state.h"
+#include "config.h"
 #include "data_root_resolver.h"
+#include "display_numbering.h"
+#include "helix_fs.h"
 #include "i_moonraker_api.h"
 #include "i_moonraker_client.h"
 #include "json_utils.h"
 #include "klipper_extruder_naming.h"
 #include "lvgl/src/others/translation/lv_translation.h"
+#include "printer_cache_registry.h"
 #include "printer_discovery.h"
 #include "state/subject_macros.h"
 #include "static_subject_registry.h"
+#include "system/helix_paths.h"
+#include "text_io.h"
 #include "tool_offsets.h"
 
 #include <spdlog/fmt/fmt.h>
@@ -34,10 +40,10 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
-#include <filesystem>
-#include <fstream>
 
 namespace helix {
+
+namespace hfs = helix::fs;
 
 namespace {
 
@@ -56,6 +62,11 @@ bool subjects_ready(bool initialized, const char* what) {
     }
     spdlog::error("[ToolState] {} before init_subjects() - ignored", what);
     return false;
+}
+
+/// "Tool 2", in the active backend's noun, for the tool at zero-based @p index.
+std::string noun_tool_label(int index) {
+    return helix::ui::lane_label(helix::ui::active_tool_noun(), index);
 }
 
 } // namespace
@@ -85,19 +96,43 @@ void ToolState::init_subjects(bool register_xml) {
     INIT_SUBJECT_STRING(tool_badge_text, "", subjects_, register_xml);
     INIT_SUBJECT_INT(show_tool_badge, 0, subjects_, register_xml);
 
-    // Per-tool z-offset. Defaults say "this printer has none and we know
-    // nothing", which is the correct answer until init_tools() sees the
-    // hardware and a status frame carries a value.
+    // Per-tool offsets: which axes this printer keeps per toolhead, and the
+    // aggregate save affordance. Defaults say "this printer has none and we
+    // know nothing", which is the correct answer until init_tools() sees the
+    // hardware and a status frame carries a value. The values themselves live
+    // in tools_ and are read through the tool_offset_*() accessors.
+    INIT_SUBJECT_INT(per_tool_x_supported, 0, subjects_, register_xml);
+    INIT_SUBJECT_INT(per_tool_y_supported, 0, subjects_, register_xml);
     INIT_SUBJECT_INT(per_tool_z_supported, 0, subjects_, register_xml);
-    INIT_SUBJECT_INT(active_tool_z_offset, 0, subjects_, register_xml);
-    INIT_SUBJECT_INT(active_tool_z_offset_valid, 0, subjects_, register_xml);
-    INIT_SUBJECT_INT(any_tool_z_dirty, 0, subjects_, register_xml);
+    INIT_SUBJECT_INT(any_tool_offset_dirty, 0, subjects_, register_xml);
 
     subjects_initialized_ = true;
 
     // Self-register cleanup — ensures deinit runs before lv_deinit()
     StaticSubjectRegistry::instance().register_deinit(
         "ToolState", []() { ToolState::instance().deinit_subjects(); });
+
+    // Spool assignments belong to the printer they were loaded from; the next one loads
+    // its own. A reply still in flight (a spool load, a tool-offset query) belongs to the
+    // previous printer: applied now it would land on, and be saved as, the next one's.
+    helix::PrinterCacheRegistry::instance().register_invalidator("ToolState", []() {
+        auto& ts = ToolState::instance();
+        if (!ts.spool_load_printer_.empty()) {
+            spdlog::info("[ToolState] spool load for {} dropped: printer scope ended",
+                         ts.spool_load_printer_);
+            ts.spool_load_printer_.clear();
+        }
+        ts.async_lifetime_.invalidate();
+        ts.spool_assignments_loaded_ = false;
+        // Unsaved changes were the previous printer's; saved now they would land under
+        // the next printer's key and in its DB.
+        ts.spool_dirty_ = false;
+        ts.spool_set_adopted_ = false;
+    });
+    if (Config* config = Config::get_instance()) {
+        config->set_printer_removed_hook(
+            [](const std::string& id) { ToolState::instance().forget_printer_spools(id); });
+    }
 
     spdlog::trace("[ToolState] Subjects initialized successfully");
 }
@@ -108,17 +143,6 @@ void ToolState::deinit_subjects() {
     }
 
     spdlog::debug("[ToolState] Deinitializing subjects");
-
-    // Death signal BEFORE the subjects go away: deinit frees every observer
-    // node on them, so outside ObserverGuards must learn they are gone or their
-    // next reset() calls lv_observer_remove() on freed memory. Replaced, not
-    // cleared — an empty token reads as "dead" and would suppress removal for
-    // observers registered after this teardown.
-    if (subjects_lifetime_) {
-        *subjects_lifetime_ = false;
-    }
-    subjects_lifetime_ = std::make_shared<bool>(true);
-
     // Expire the in-flight Moonraker-DB callbacks before the subjects they
     // ultimately notify go away (#1165, #1146).
     async_lifetime_.invalidate();
@@ -126,6 +150,7 @@ void ToolState::deinit_subjects() {
     tools_.clear();
     active_tool_index_ = 0;
     spool_assignments_loaded_ = false;
+    spool_set_adopted_ = false;
 
     // Drop any AMS-backend override so the next init_subjects() / init_tools()
     // starts from a clean extruder-enumerated state. Without this, test fixtures
@@ -134,10 +159,16 @@ void ToolState::deinit_subjects() {
     ams_topology_active_ = false;
     ams_topology_tool_count_ = 0;
     ams_topology_tool_to_slot_.clear();
-    ams_topology_tool_name_prefix_ = "T";
 
     subjects_.deinit_all();
     subjects_initialized_ = false;
+}
+
+void ToolState::refresh_display_labels() {
+    for (auto& tool : tools_) {
+        tool.display_label = noun_tool_label(tool.index);
+    }
+    lv_subject_set_int(&tools_version_, lv_subject_get_int(&tools_version_) + 1);
 }
 
 void ToolState::init_tools(const helix::PrinterDiscovery& hardware) {
@@ -150,16 +181,22 @@ void ToolState::init_tools(const helix::PrinterDiscovery& hardware) {
     ams_topology_active_ = false;
     ams_topology_tool_count_ = 0;
     ams_topology_tool_to_slot_.clear();
-    ams_topology_tool_name_prefix_ = "T";
 
-    // Whether this printer keeps a z-offset per toolhead. Asked once, here,
-    // because this is the only place ToolState sees the hardware; the status
-    // path has no PrinterDiscovery to hand.
-    const bool per_tool_z = helix::tool_offsets::supports_per_tool_z(hardware);
-    lv_subject_set_int(&per_tool_z_supported_, per_tool_z ? 1 : 0);
-    if (per_tool_z) {
-        spdlog::info("[ToolState] Per-tool z-offset via {}",
-                     helix::tool_offsets::provider_name(hardware));
+    // Which offsets this printer keeps per toolhead, and the model that reads
+    // them. Asked once, here, because this is the only place ToolState sees
+    // the hardware; the status path has no PrinterDiscovery to hand.
+    offset_reader_ = helix::tool_offsets::resolve_reader(hardware);
+    std::string axes;
+    for (Axis axis : kAllAxes) {
+        const bool supported = helix::tool_offsets::supports_axis(hardware, axis);
+        lv_subject_set_int(get_per_tool_axis_supported_subject(axis), supported ? 1 : 0);
+        if (supported) {
+            axes += axis_letter(axis);
+        }
+    }
+    if (!axes.empty()) {
+        spdlog::info("[ToolState] Per-tool offsets via {} (axes: {})",
+                     helix::tool_offsets::provider_name(hardware), axes);
     }
 
     if (hardware.has_snapmaker()) {
@@ -169,7 +206,8 @@ void ToolState::init_tools(const helix::PrinterDiscovery& hardware) {
         for (int i = 0; i < 4; ++i) {
             ToolInfo tool;
             tool.index = i;
-            tool.name = fmt::format("T{}", i);
+            tool.name = helix::ui::tool_label(i);
+            tool.display_label = noun_tool_label(i);
             tool.extruder_name = extruder_names[i];
             tool.heater_name = extruder_names[i];
             tool.fan_name = (i == 0)
@@ -200,7 +238,11 @@ void ToolState::init_tools(const helix::PrinterDiscovery& hardware) {
         for (int i = 0; i < static_cast<int>(tool_names.size()); ++i) {
             ToolInfo tool;
             tool.index = i;
+            // The discovered name is the tool's real klipper identity (e.g. a
+            // custom-named [tool Left]), so it is not always the generated
+            // "T{i}" pattern and must not be overwritten.
             tool.name = tool_names[i];
+            tool.display_label = noun_tool_label(i);
 
             // Map extruder by index if available
             if (i < static_cast<int>(extruder_names.size())) {
@@ -235,11 +277,10 @@ void ToolState::init_tools(const helix::PrinterDiscovery& hardware) {
         for (int i = 0; i < static_cast<int>(extruder_names.size()); ++i) {
             ToolInfo tool;
             tool.index = i;
-            tool.name = ::fmt::format("T{}", i);
+            tool.name = helix::ui::tool_label(i);
+            tool.display_label = noun_tool_label(i);
             tool.extruder_name = extruder_names[i];
             tool.heater_name = std::nullopt;
-            tool.fan_name = (i == 0) ? std::optional<std::string>("fan") : std::nullopt;
-            tool.active = (i == 0);
 
             spdlog::debug("[ToolState] Tool {}: name={}, extruder={}", i, tool.name,
                           tool.extruder_name.value_or("none"));
@@ -247,7 +288,20 @@ void ToolState::init_tools(const helix::PrinterDiscovery& hardware) {
         }
     }
 
+    // T0 holds the head until a status frame says otherwise. active_tool_index_
+    // and the per-tool flag are the same claim, so every branch above leaves
+    // both to this one place. Set in only one of them they disagree, and
+    // whichever a caller happens to read decides what it sees.
     active_tool_index_ = 0;
+    if (!tools_.empty()) {
+        tools_[0].active = true;
+        // Klipper's [fan] is the first extruder's part cooling fan. A branch
+        // that knows the machine's own per-tool names (Snapmaker) has already
+        // filled this in; everything else gets the one name always true of T0.
+        if (!tools_[0].fan_name) {
+            tools_[0].fan_name = "fan";
+        }
+    }
 
     // Update subjects
     lv_subject_set_int(&tool_count_, static_cast<int>(tools_.size()));
@@ -255,8 +309,8 @@ void ToolState::init_tools(const helix::PrinterDiscovery& hardware) {
     // tools_ was just rebuilt, so every dirty flag it carried is gone. Without
     // this the subject keeps its old value forever on a printer that no longer
     // has per-tool offsets — update_from_status()'s recompute is gated on
-    // per_tool_z_supported_, which init_tools() may have just set to 0.
-    refresh_any_tool_z_dirty();
+    // the *_supported trio, which init_tools() may have just cleared.
+    refresh_any_tool_dirty();
     int version = lv_subject_get_int(&tools_version_) + 1;
     lv_subject_set_int(&tools_version_, version);
 
@@ -271,13 +325,11 @@ void ToolState::set_ams_topology(const ToolTopology& topo) {
     }
 
     bool needs_rebuild = !ams_topology_active_ || ams_topology_tool_count_ != topo.tool_count ||
-                         ams_topology_tool_to_slot_ != topo.tool_to_slot ||
-                         ams_topology_tool_name_prefix_ != topo.tool_name_prefix;
+                         ams_topology_tool_to_slot_ != topo.tool_to_slot;
 
     ams_topology_active_ = true;
     ams_topology_tool_count_ = topo.tool_count;
     ams_topology_tool_to_slot_ = topo.tool_to_slot;
-    ams_topology_tool_name_prefix_ = topo.tool_name_prefix;
 
     if (needs_rebuild) {
         // Snapshot per-tool hardware mappings populated by init_tools() so we can
@@ -292,7 +344,8 @@ void ToolState::set_ams_topology(const ToolTopology& topo) {
         for (int i = 0; i < topo.tool_count; ++i) {
             ToolInfo t;
             t.index = i;
-            t.name = ::fmt::format("{}{}", topo.tool_name_prefix, i);
+            t.name = helix::ui::tool_label(i);
+            t.display_label = noun_tool_label(i);
             t.backend_index = topo.backend_index;
             t.backend_slot =
                 (i < static_cast<int>(topo.tool_to_slot.size())) ? topo.tool_to_slot[i] : -1;
@@ -301,11 +354,7 @@ void ToolState::set_ams_topology(const ToolTopology& topo) {
                 t.extruder_name = previous[i].extruder_name;
                 t.heater_name = previous[i].heater_name;
                 t.fan_name = previous[i].fan_name;
-                t.gcode_x_offset = previous[i].gcode_x_offset;
-                t.gcode_y_offset = previous[i].gcode_y_offset;
-                t.gcode_z_offset = previous[i].gcode_z_offset;
-                t.gcode_z_offset_known = previous[i].gcode_z_offset_known;
-                t.gcode_z_offset_saved = previous[i].gcode_z_offset_saved;
+                t.gcode_offsets = previous[i].gcode_offsets;
                 // And the spool record, but ONLY while this tool still sources
                 // the same lane. Which spool is mounted is durable user data and
                 // a rebuild has no business discarding it — dropping it wholesale
@@ -345,7 +394,8 @@ void ToolState::set_ams_topology(const ToolTopology& topo) {
     }
 
     int new_active = topo.active_tool;
-    if (new_active < 0 || new_active >= static_cast<int>(tools_.size())) {
+    const bool empty_carriage = topo.allows_empty_carriage && new_active == -1;
+    if (!empty_carriage && (new_active < 0 || new_active >= static_cast<int>(tools_.size()))) {
         new_active = 0; // Out-of-range falls back to T0 (matches init_tools convention)
     }
     if (new_active != active_tool_index_) {
@@ -356,22 +406,22 @@ void ToolState::set_ams_topology(const ToolTopology& topo) {
 }
 
 void ToolState::clear_ams_topology() {
+    // Nothing to clear is not an error: set_ams_topology() refuses before init,
+    // so an inactive topology is the normal state on early-exit shutdown paths.
+    if (!ams_topology_active_)
+        return;
     if (!subjects_ready(subjects_initialized_, "clear_ams_topology()")) {
         return;
     }
-    if (!ams_topology_active_)
-        return;
     ams_topology_active_ = false;
     ams_topology_tool_count_ = 0;
     ams_topology_tool_to_slot_.clear();
-    ams_topology_tool_name_prefix_ = "T";
     tools_.clear();
     active_tool_index_ = 0;
     lv_subject_set_int(&tool_count_, 0);
     lv_subject_set_int(&active_tool_, 0);
     // Same reason as init_tools(): the flags died with tools_.
-    refresh_any_tool_z_dirty();
-    refresh_active_tool_z_offset();
+    refresh_any_tool_dirty();
     int version = lv_subject_get_int(&tools_version_) + 1;
     lv_subject_set_int(&tools_version_, version);
     spdlog::info("[ToolState] AMS topology cleared");
@@ -458,7 +508,12 @@ void ToolState::update_from_status(const nlohmann::json& status) {
         if (tool_status.contains("detect_state") && tool_status["detect_state"].is_string()) {
             std::string ds = tool_status["detect_state"].get<std::string>();
             DetectState new_state = DetectState::UNAVAILABLE;
-            if (ds == "present") {
+            // klipper-toolchanger spells DETECT_PRESENT "mounted"
+            // (klipper/extras/toolchanger.py). "present" is what forks that
+            // copied the older wording send; both mean the tool is on the
+            // carriage. Anything else, DETECT_UNAVAILABLE included, stays
+            // UNAVAILABLE.
+            if (ds == "mounted" || ds == "present") {
                 new_state = DetectState::PRESENT;
             } else if (ds == "absent") {
                 new_state = DetectState::ABSENT;
@@ -469,18 +524,10 @@ void ToolState::update_from_status(const nlohmann::json& status) {
             }
         }
 
-        if (tool_status.contains("gcode_x_offset") && tool_status["gcode_x_offset"].is_number()) {
-            tool.gcode_x_offset = tool_status["gcode_x_offset"].get<float>();
-            changed = true;
-        }
-        if (tool_status.contains("gcode_y_offset") && tool_status["gcode_y_offset"].is_number()) {
-            tool.gcode_y_offset = tool_status["gcode_y_offset"].get<float>();
-            changed = true;
-        }
-        // gcode_z_offset is NOT parsed here: which store is authoritative is a
-        // per-firmware question helix::tool_offsets owns, and on a MedusaHC the
-        // value on this object is not the one the machine prints with. The
-        // per-tool z-offset is read from the whole frame below.
+        // gcode_x/y/z_offset are NOT parsed here: which store is authoritative
+        // is a per-firmware question helix::tool_offsets owns, and on a
+        // MedusaHC the value on this object is not the one the machine prints
+        // with. The per-tool offsets are read from the whole frame below.
 
         if (tool_status.contains("extruder") && tool_status["extruder"].is_string()) {
             std::string ext = tool_status["extruder"].get<std::string>();
@@ -501,38 +548,44 @@ void ToolState::update_from_status(const nlohmann::json& status) {
         }
     }
 
-    // Per-tool z-offset, in its own pass over tools_ rather than inside the loop
-    // above. That loop skips a tool whose `tool T<n>` object is not in this
-    // frame, and on a firmware that keeps every tool's offset on ONE object
-    // (see helix::tool_offsets) that would skip the offsets entirely.
-    if (lv_subject_get_int(&per_tool_z_supported_) == 1) {
+    // Per-tool offsets, in their own pass over tools_ rather than inside the
+    // loop above. That loop skips a tool whose `tool T<n>` object is not in
+    // this frame, and on a firmware that keeps every tool's offset on ONE
+    // object (see helix::tool_offsets) that would skip the offsets entirely.
+    if (per_tool_offsets_supported()) {
         for (int i = 0; i < static_cast<int>(tools_.size()); ++i) {
-            auto microns = helix::tool_offsets::read_tool_z_microns(status, i, tools_[i].name);
-            if (!microns) {
-                // No news. Moonraker republishes only what CHANGED, so this is
-                // routine and must not be read as a reset to zero.
-                continue;
-            }
-            float mm = static_cast<float>(*microns) / 1000.0f;
-            if (!tools_[i].gcode_z_offset_known) {
-                // First value seen for this tool is the persisted one: on a
-                // fresh connect the runtime offset IS what the config holds.
-                // Seeding the baseline here is what stops a freshly-connected
-                // printer from claiming unsaved work it does not have.
-                tools_[i].gcode_z_offset_saved = mm;
-            }
-            if (tools_[i].gcode_z_offset != mm || !tools_[i].gcode_z_offset_known) {
-                tools_[i].gcode_z_offset = mm;
-                tools_[i].gcode_z_offset_known = true;
-                changed = true;
+            for (Axis axis : kAllAxes) {
+                if (lv_subject_get_int(get_per_tool_axis_supported_subject(axis)) != 1) {
+                    continue;
+                }
+                auto microns = helix::tool_offsets::read_tool_offset_microns(
+                    offset_reader_, status, axis, i, tools_[i].name);
+                if (!microns) {
+                    // No news. Moonraker republishes only what CHANGED, per
+                    // field, so this is routine and must not be read as a
+                    // reset to zero.
+                    continue;
+                }
+                ToolAxisOffset& offset = tools_[i].gcode_offset(axis);
+                const float mm = static_cast<float>(*microns) / 1000.0f;
+                if (!offset.known) {
+                    // First value seen for this axis is the persisted one: on
+                    // a fresh connect the runtime offset IS what the config
+                    // holds. Seeding the baseline here is what stops a
+                    // freshly-connected printer from claiming unsaved work it
+                    // does not have.
+                    offset.saved_mm = mm;
+                }
+                if (offset.mm != mm || !offset.known) {
+                    offset.mm = mm;
+                    offset.known = true;
+                    changed = true;
+                }
             }
         }
-        // After the reads, so this covers both a new value arriving and the
-        // active tool having changed in this same frame with no value of its
-        // own — otherwise the panel would keep showing the previous tool's
-        // number beside the new selection.
-        refresh_active_tool_z_offset();
-        refresh_any_tool_z_dirty();
+        // After the reads, so the aggregate reflects every value this frame
+        // carried.
+        refresh_any_tool_dirty();
     }
 
     if (changed) {
@@ -543,9 +596,18 @@ void ToolState::update_from_status(const nlohmann::json& status) {
     }
 }
 
-void ToolState::query_tool_z_offsets(IMoonrakerClient* client,
-                                     const helix::PrinterDiscovery& hardware) {
-    if (!client || tools_.empty() || lv_subject_get_int(&per_tool_z_supported_) != 1) {
+bool ToolState::per_tool_offsets_supported() const {
+    // lv_subject_get_int takes a non-const pointer but only reads.
+    auto get = [](const lv_subject_t& subject) {
+        return lv_subject_get_int(const_cast<lv_subject_t*>(&subject));
+    };
+    return get(per_tool_x_supported_) == 1 || get(per_tool_y_supported_) == 1 ||
+           get(per_tool_z_supported_) == 1;
+}
+
+void ToolState::query_tool_offsets(IMoonrakerClient* client,
+                                   const helix::PrinterDiscovery& hardware) {
+    if (!client || tools_.empty() || !per_tool_offsets_supported()) {
         return;
     }
 
@@ -565,86 +627,84 @@ void ToolState::query_tool_z_offsets(IMoonrakerClient* client,
     // lv_subject_set_int() off the main thread fires observers into LVGL
     // (CLAUDE.md § Threading invariant 1). bg_cb also drops the body if the
     // subjects were torn down while the request was in flight.
-    auto cb =
-        async_lifetime_.bg_cb("ToolState::query_tool_z_offsets", [this](nlohmann::json response) {
+    auto cb = async_lifetime_.bg_cb(
+        "ToolState::query_tool_offsets", [this](const nlohmann::json& response) {
             if (!response.contains("result") || !response["result"].contains("status")) {
-                spdlog::debug("[ToolState] Tool z-offset query returned no status");
+                spdlog::debug("[ToolState] Tool offset query returned no status");
                 return;
             }
             update_from_status(response["result"]["status"]);
-            spdlog::debug("[ToolState] Seeded per-tool z-offsets from query");
+            for (const auto& tool : tools_) {
+                spdlog::debug(
+                    "[ToolState] Seeded per-tool offsets from query: {} x={:.3f}{} "
+                    "y={:.3f}{} z={:.3f}{}",
+                    tool.name, tool.gcode_offset(Axis::X).mm,
+                    tool.gcode_offset(Axis::X).known ? "" : "?", tool.gcode_offset(Axis::Y).mm,
+                    tool.gcode_offset(Axis::Y).known ? "" : "?", tool.gcode_offset(Axis::Z).mm,
+                    tool.gcode_offset(Axis::Z).known ? "" : "?");
+            }
         });
     client->send_jsonrpc("printer.objects.query", nlohmann::json{{"objects", objects}},
                          std::move(cb));
 }
 
-std::vector<int> ToolState::dirty_tool_z_indices() const {
+std::vector<int> ToolState::dirty_tool_indices() const {
     std::vector<int> dirty;
     for (int i = 0; i < static_cast<int>(tools_.size()); ++i) {
-        if (tools_[i].gcode_z_offset_known &&
-            tools_[i].gcode_z_offset != tools_[i].gcode_z_offset_saved) {
-            dirty.push_back(i);
+        for (Axis axis : kAllAxes) {
+            if (tools_[i].gcode_offset(axis).dirty()) {
+                dirty.push_back(i);
+                break;
+            }
         }
     }
     return dirty;
 }
 
-float ToolState::tool_z_offset_mm(int tool_index) const {
-    if (tool_index < 0 || tool_index >= static_cast<int>(tools_.size()) ||
-        !tools_[tool_index].gcode_z_offset_known) {
+bool ToolState::tool_offset_dirty(int tool_index, Axis axis) const {
+    if (tool_index < 0 || tool_index >= static_cast<int>(tools_.size())) {
+        return false;
+    }
+    return tools_[tool_index].gcode_offset(axis).dirty();
+}
+
+float ToolState::tool_offset_mm(int tool_index, Axis axis) const {
+    if (!tool_offset_known(tool_index, axis)) {
         return 0.0f;
     }
-    return tools_[tool_index].gcode_z_offset;
+    return tools_[tool_index].gcode_offset(axis).mm;
 }
 
-void ToolState::set_tool_z_offset_local(int tool_index, int microns) {
+bool ToolState::tool_offset_known(int tool_index, Axis axis) const {
+    if (tool_index < 0 || tool_index >= static_cast<int>(tools_.size())) {
+        return false;
+    }
+    return tools_[tool_index].gcode_offset(axis).known;
+}
+
+void ToolState::set_tool_offset_local(int tool_index, Axis axis, int microns) {
     if (tool_index < 0 || tool_index >= static_cast<int>(tools_.size())) {
         return;
     }
-    tools_[tool_index].gcode_z_offset = static_cast<float>(microns) / 1000.0f;
-    tools_[tool_index].gcode_z_offset_known = true;
-    if (tool_index == active_tool_index_) {
-        refresh_active_tool_z_offset();
-    }
-    refresh_any_tool_z_dirty();
+    ToolAxisOffset& offset = tools_[tool_index].gcode_offset(axis);
+    offset.mm = static_cast<float>(microns) / 1000.0f;
+    offset.known = true;
+    refresh_any_tool_dirty();
 }
 
-void ToolState::mark_tool_z_saved(int tool_index) {
+void ToolState::mark_tool_offsets_saved(int tool_index) {
     if (tool_index < 0 || tool_index >= static_cast<int>(tools_.size())) {
         return;
     }
-    tools_[tool_index].gcode_z_offset_saved = tools_[tool_index].gcode_z_offset;
-    refresh_any_tool_z_dirty();
+    for (ToolAxisOffset& offset : tools_[tool_index].gcode_offsets) {
+        offset.saved_mm = offset.mm;
+    }
+    refresh_any_tool_dirty();
 }
 
-void ToolState::refresh_any_tool_z_dirty() {
-    const int dirty = dirty_tool_z_indices().empty() ? 0 : 1;
-    if (lv_subject_get_int(&any_tool_z_dirty_) != dirty) {
-        lv_subject_set_int(&any_tool_z_dirty_, dirty);
-    }
-}
-
-void ToolState::refresh_active_tool_z_offset() {
-    const bool have = active_tool_index_ >= 0 &&
-                      active_tool_index_ < static_cast<int>(tools_.size()) &&
-                      tools_[active_tool_index_].gcode_z_offset_known;
-
-    // valid_ is latched separately because 0 microns is a legitimate offset and
-    // cannot double as "nothing known" — the UI needs to tell a tool sitting at
-    // zero from one that has never reported. Dropping it back to 0 matters as
-    // much as raising it: on a tool change to a tool we have no value for, the
-    // previous tool's number must not stay on screen beside the new selection.
-    const int microns =
-        have ? static_cast<int>(std::lround(tools_[active_tool_index_].gcode_z_offset * 1000.0f))
-             : 0;
-
-    if (lv_subject_get_int(&active_tool_z_offset_) != microns) {
-        lv_subject_set_int(&active_tool_z_offset_, microns);
-    }
-    const int valid = have ? 1 : 0;
-    if (lv_subject_get_int(&active_tool_z_offset_valid_) != valid) {
-        lv_subject_set_int(&active_tool_z_offset_valid_, valid);
-    }
+void ToolState::refresh_any_tool_dirty() {
+    const int any = dirty_tool_indices().empty() ? 0 : 1;
+    lv_subject_set_int(&any_tool_offset_dirty_, any);
 }
 
 int ToolState::extruder_count() const {
@@ -676,7 +736,17 @@ std::string ToolState::nozzle_label() const {
     }
     const auto* tool = active_tool();
     if (tool) {
-        return std::string(lv_tr("Nozzle")) + " " + tool->name;
+        // The number, not the gcode identity: the three other producers of a
+        // nozzle label (PrinterTemperatureState, the temp graph, the print
+        // status widget) all spell this nozzle with lane_number_text(), and two
+        // names for one physical nozzle is the confusion. A tool its owner
+        // named keeps that name.
+        const std::string suffix = helix::ui::is_generated_tool_name(tool->name)
+                                       ? helix::ui::lane_number_text(tool->index)
+                                       : tool->name;
+        if (!suffix.empty()) {
+            return std::string(lv_tr("Nozzle")) + " " + suffix;
+        }
     }
     return lv_tr("Nozzle");
 }
@@ -687,6 +757,22 @@ std::string ToolState::tool_name_for_extruder(const std::string& extruder_name) 
     for (const auto& tool : tools_) {
         if (tool.extruder_name && *tool.extruder_name == extruder_name) {
             return tool.name;
+        }
+    }
+    return {};
+}
+
+std::string ToolState::extruder_name_for_tool(int tool_index) const {
+    if (tool_index < 0 || tool_index >= static_cast<int>(tools_.size())) {
+        return {};
+    }
+    return tools_[static_cast<size_t>(tool_index)].extruder_name.value_or("");
+}
+
+std::string ToolState::display_label_for_extruder(const std::string& extruder_name) const {
+    for (const auto& tool : tools_) {
+        if (tool.extruder_name && *tool.extruder_name == extruder_name) {
+            return tool.display_label;
         }
     }
     return {};
@@ -750,7 +836,7 @@ void ToolState::request_tool_change(int tool_index, IMoonrakerAPI* api,
     // Klipper auto-defines Tn → ACTIVATE_EXTRUDER for plain multi-extruder,
     // and toolchanger plugins (ktcc, tapchanger, etc.) override Tn with
     // proper physical tool change logic.
-    std::string gcode = ::fmt::format("T{}", tool_index);
+    std::string gcode = helix::ui::tool_label(tool_index);
     spdlog::info("[ToolState] Requesting tool change to T{} via gcode", tool_index);
 
     api->execute_gcode(
@@ -760,8 +846,11 @@ void ToolState::request_tool_change(int tool_index, IMoonrakerAPI* api,
                 on_success();
         },
         [on_error](const MoonrakerError& error) {
-            if (on_error)
-                on_error(error.user_message());
+            if (!on_error)
+                return;
+            // on_error is UI-facing; Klipper's reply arrives on the WebSocket thread.
+            helix::ui::run_on_main("ToolState::tool_change_error",
+                                   [on_error, error]() { on_error(error.localized_message()); });
         });
 }
 
@@ -772,6 +861,30 @@ void ToolState::request_tool_change(int tool_index, IMoonrakerAPI* api,
 static constexpr const char* SPOOL_JSON_FILENAME = "tool_spools.json";
 static constexpr const char* MOONRAKER_DB_NAMESPACE = "helix-screen";
 static constexpr const char* MOONRAKER_DB_KEY = "tool_spool_assignments";
+
+namespace {
+
+/// The spool file keeps one assignment set per printer under "printers"; a file without
+/// it is the single-printer layout, a bare set keyed by tool index.
+constexpr const char* SPOOL_JSON_PRINTERS = "printers";
+
+/// The printer whose set was adopted from a single-printer file and has not yet loaded
+/// from its own DB.
+constexpr const char* SPOOL_JSON_ADOPTED_BY = "adopted_by";
+
+/// The configured printer whose assignments are being read or written.
+std::string spool_printer_key() {
+    const Config* config = Config::get_instance();
+    std::string id = config ? config->get_active_printer_id() : std::string();
+    return id.empty() ? "default" : id;
+}
+
+bool is_per_printer_spool_file(const nlohmann::json& data) {
+    const auto it = data.find(SPOOL_JSON_PRINTERS);
+    return it != data.end() && it->is_object();
+}
+
+} // namespace
 
 /**
  * @brief Whether two spool weights render identically.
@@ -919,8 +1032,8 @@ void ToolState::apply_spool_assignments(const nlohmann::json& data) {
         }
 
         const auto& entry = data[key];
-        tool.spoolman_id = entry.value("spoolman_id", 0);
-        tool.spool_name = entry.value("spool_name", std::string{});
+        tool.spoolman_id = json_util::safe_int(entry, "spoolman_id");
+        tool.spool_name = json_util::safe_string(entry, "spool_name");
         tool.remaining_weight_g = json_util::safe_float(entry, "remaining_weight_g", -1.0f);
         tool.total_weight_g = json_util::safe_float(entry, "total_weight_g", -1.0f);
 
@@ -932,93 +1045,114 @@ void ToolState::apply_spool_assignments(const nlohmann::json& data) {
 }
 
 void ToolState::save_spool_json() const {
-    namespace fs = std::filesystem;
+    std::string path = hfs::join_path(config_dir_, SPOOL_JSON_FILENAME);
 
-    auto json_data = spool_assignments_to_json();
-    auto path = fs::path(config_dir_) / SPOOL_JSON_FILENAME;
+    // Ensure directory exists
+    hfs::create_directories(config_dir_);
 
-    try {
-        // Ensure directory exists
-        fs::create_directories(config_dir_);
+    // The installer links this file out to printer_data; rename onto the target.
+    path = helix::paths::write_target(path);
 
-        // Resolve symlinks so the atomic rename below targets the real file rather
-        // than replacing the link. The installer symlinks this file out to
-        // printer_data (HELIX_USER_CONFIG_FILES), and that link is the only thing
-        // keeping it alive through Moonraker's update, which rmtree()s the install
-        // dir. rename(2) onto a symlink replaces the symlink itself, so without
-        // this the first save silently strands the file in the doomed directory.
-        // Mirrors Config::save().
-        {
-            std::error_code ec;
-            if (fs::is_symlink(path, ec)) {
-                auto real = fs::canonical(path, ec);
-                if (!ec) {
-                    spdlog::debug("[ToolState] Resolved symlink {} -> {}", path.string(),
-                                  real.string());
-                    path = real;
-                }
-            }
-        }
-
-        // Atomic save: write to temp file, then rename to avoid partial writes on crash/power loss
-        auto tmp_path = path;
-        tmp_path += ".tmp";
-        {
-            std::ofstream ofs(tmp_path);
-            if (!ofs.is_open()) {
-                spdlog::error("[ToolState] Failed to open {} for writing: {}", tmp_path.string(),
-                              strerror(errno));
-                std::remove(tmp_path.c_str());
-                return;
-            }
-            ofs << json_data.dump(2);
-            ofs.flush();
-            if (!ofs.good()) {
-                spdlog::error("[ToolState] Failed to write spool JSON to {}: {}", tmp_path.string(),
-                              strerror(errno));
-                std::remove(tmp_path.c_str());
-                return;
-            }
-        }
-
-        if (std::rename(tmp_path.c_str(), path.c_str()) != 0) {
-            spdlog::error("[ToolState] Failed to rename '{}' to '{}': {}", tmp_path.string(),
-                          path.string(), strerror(errno));
-            std::remove(tmp_path.c_str());
-            return;
-        }
-
-        spdlog::debug("[ToolState] Saved spool assignments to {}", path.string());
-    } catch (const std::exception& e) {
-        spdlog::warn("[ToolState] Error saving spool JSON: {}", e.what());
+    // The other printers' sets are kept. A single-printer file is replaced: it belongs to
+    // whichever printer loaded it first, and that printer's set is being written now.
+    const auto existing = helix::text_io::read_file(path);
+    nlohmann::json file =
+        existing ? nlohmann::json::parse(*existing, nullptr, false) : nlohmann::json();
+    if (hfs::exists(path) && (!existing || file.is_discarded())) {
+        // Rewriting it would lose every other printer's set.
+        spdlog::warn("[ToolState] {} cannot be read; not overwriting it", path);
+        return;
     }
+    if (!is_per_printer_spool_file(file)) {
+        file = nlohmann::json{{SPOOL_JSON_PRINTERS, nlohmann::json::object()}};
+    }
+    file[SPOOL_JSON_PRINTERS][spool_printer_key()] = spool_assignments_to_json();
+    if (spool_set_adopted_) {
+        file[SPOOL_JSON_ADOPTED_BY] = spool_printer_key();
+    } else if (json_util::safe_string(file, SPOOL_JSON_ADOPTED_BY) == spool_printer_key()) {
+        file.erase(SPOOL_JSON_ADOPTED_BY);
+    }
+
+    // Every connect reloads the assignments from Moonraker and saves them back,
+    // almost always unchanged. Skip the write then: on the ESP32 a flash write
+    // stalls the display's scan-out, and elsewhere it is SD-card wear for nothing.
+    const std::string text = helix::json_util::safe_dump(file, 2);
+    if (existing && *existing == text) {
+        spdlog::trace("[ToolState] Spool assignments unchanged, not rewriting {}", path);
+        return;
+    }
+
+    // Atomic save: write to temp file, then rename to avoid partial writes on crash/power loss
+    if (!helix::text_io::write_file_atomic(path, text)) {
+        spdlog::error("[ToolState] Failed to write spool JSON to {}: {}", path, strerror(errno));
+        return;
+    }
+
+    spdlog::debug("[ToolState] Saved spool assignments to {}", path);
 }
 
 bool ToolState::load_spool_json() {
-    namespace fs = std::filesystem;
+    std::string path = hfs::join_path(config_dir_, SPOOL_JSON_FILENAME);
 
-    auto path = fs::path(config_dir_) / SPOOL_JSON_FILENAME;
-
-    if (!fs::exists(path)) {
-        spdlog::debug("[ToolState] No spool JSON file at {}", path.string());
+    if (!hfs::exists(path)) {
+        spdlog::debug("[ToolState] No spool JSON file at {}", path);
         return false;
     }
 
-    try {
-        std::ifstream ifs(path);
-        if (!ifs.is_open()) {
-            spdlog::warn("[ToolState] Failed to open {}", path.string());
-            return false;
-        }
+    auto text = helix::text_io::read_file(path);
+    if (!text) {
+        spdlog::warn("[ToolState] Failed to open {}", path);
+        return false;
+    }
 
-        auto data = nlohmann::json::parse(ifs);
+    auto data = nlohmann::json::parse(*text, nullptr, false);
+    if (data.is_discarded()) {
+        spdlog::warn("[ToolState] Spool JSON at {} is not valid JSON", path);
+        return false;
+    }
+
+    if (!is_per_printer_spool_file(data)) {
+        // A single-printer file goes to the first printer that loads it, and is rewritten
+        // under that printer at once so no other printer can load it.
         apply_spool_assignments(data);
-        spdlog::info("[ToolState] Loaded spool assignments from {}", path.string());
+        spool_set_adopted_ = true;
+        save_spool_json();
+        spdlog::info("[ToolState] Loaded single-printer spool assignments from {} for printer "
+                     "'{}'",
+                     path, spool_printer_key());
         return true;
-    } catch (const std::exception& e) {
-        spdlog::warn("[ToolState] Error loading spool JSON: {}", e.what());
+    }
+
+    const auto& printers = data[SPOOL_JSON_PRINTERS];
+    const auto mine = printers.find(spool_printer_key());
+    if (mine == printers.end()) {
+        spdlog::debug("[ToolState] No spool assignments for printer '{}' in {}",
+                      spool_printer_key(), path);
         return false;
     }
+    apply_spool_assignments(*mine);
+    spool_set_adopted_ = json_util::safe_string(data, SPOOL_JSON_ADOPTED_BY) == spool_printer_key();
+    spdlog::info("[ToolState] Loaded spool assignments for printer '{}' from {}",
+                 spool_printer_key(), path);
+    return true;
+}
+
+void ToolState::forget_printer_spools(const std::string& printer_id) const {
+    const std::string path =
+        helix::paths::write_target(hfs::join_path(config_dir_, SPOOL_JSON_FILENAME));
+    const auto text = helix::text_io::read_file(path);
+    if (!text) {
+        return;
+    }
+    auto data = nlohmann::json::parse(*text, nullptr, false);
+    if (!is_per_printer_spool_file(data) || data[SPOOL_JSON_PRINTERS].erase(printer_id) == 0) {
+        return;
+    }
+    if (!helix::text_io::write_file_atomic(path, helix::json_util::safe_dump(data, 2))) {
+        spdlog::error("[ToolState] Failed to drop printer '{}' from {}", printer_id, path);
+        return;
+    }
+    spdlog::info("[ToolState] Dropped removed printer '{}' from {}", printer_id, path);
 }
 
 void ToolState::save_spool_assignments_if_dirty(IMoonrakerAPI* api) {
@@ -1040,7 +1174,7 @@ void ToolState::save_spool_assignments(IMoonrakerAPI* api) {
             MOONRAKER_DB_NAMESPACE, MOONRAKER_DB_KEY, json_data,
             []() { spdlog::debug("[ToolState] Spool assignments saved to Moonraker DB"); },
             [](const MoonrakerError& err) {
-                spdlog::warn("[ToolState] Failed to save to Moonraker DB: {}", err.user_message());
+                spdlog::warn("[ToolState] Failed to save to Moonraker DB: {}", err.message);
             });
     }
 }
@@ -1064,11 +1198,14 @@ void ToolState::load_spool_assignments(IMoonrakerAPI* api) {
     // it both marshals to the main thread and drops the body if the subjects
     // were torn down while the request was in flight (#1165). That subsumes the
     // manual unique_ptr payload copy this used to do by hand.
+    spool_load_printer_ = spool_printer_key();
     api->database_get_item(
         MOONRAKER_DB_NAMESPACE, MOONRAKER_DB_KEY,
         async_lifetime_.bg_cb("ToolState::load_spool_assignments",
                               [this](const nlohmann::json& data) {
+                                  spool_load_printer_.clear();
                                   apply_spool_assignments(data);
+                                  spool_set_adopted_ = false;
                                   save_spool_json();
                                   spool_assignments_loaded_ = true;
                                   // Re-sync AmsState so slot UI subjects reflect loaded assignments
@@ -1078,12 +1215,18 @@ void ToolState::load_spool_assignments(IMoonrakerAPI* api) {
                               }),
         async_lifetime_.bg_cb(
             "ToolState::load_spool_assignments_error", [this, api](const MoonrakerError& err) {
+                spool_load_printer_.clear();
                 spdlog::debug("[ToolState] Moonraker DB load failed ({}), trying local JSON",
-                              err.user_message());
-                load_spool_json();
+                              err.message);
+                const bool had_local = load_spool_json();
                 spool_assignments_loaded_ = true;
-                // Seed Moonraker DB so subsequent connections don't hit 404
-                save_spool_assignments(api);
+                // Seed the DB only when it said the key is absent, or with a local set to
+                // restore: a timeout or a dropped connection says nothing about what the
+                // DB holds, and an empty seed would overwrite real assignments. An adopted
+                // set may be another printer's, so it never seeds.
+                if (!spool_set_adopted_ && (err.code == 404 || had_local)) {
+                    save_spool_assignments(api);
+                }
                 // Re-sync AmsState so slot UI subjects reflect loaded assignments
                 AmsState::instance().sync_from_backend();
             }));

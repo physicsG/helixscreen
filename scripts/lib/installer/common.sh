@@ -18,11 +18,67 @@ _HELIX_COMMON_SOURCED=1
 # Well-known paths (used by uninstall, clean, stop_service)
 # AD5M: /opt/helixscreen, /root/printer_software/helixscreen, /srv/helixscreen (ZMOD)
 # K1: /usr/data/helixscreen
+# K2: /mnt/UDISK/helixscreen, and /opt/helixscreen until it migrates
 # Pi: /opt/helixscreen
 # CC1 (COSMOS): /user-resource/helixscreen (/ is RO squashfs)
 # Snapmaker U1: /userdata/helixscreen
 # shellcheck disable=SC2034  # consumed by uninstall.sh (sweep of all known install locations)
-HELIX_INSTALL_DIRS="/root/printer_software/helixscreen /opt/helixscreen /usr/data/helixscreen /srv/helixscreen /user-resource/helixscreen /userdata/helixscreen"
+HELIX_INSTALL_DIRS="/root/printer_software/helixscreen /opt/helixscreen /mnt/UDISK/helixscreen /usr/data/helixscreen /srv/helixscreen /user-resource/helixscreen /userdata/helixscreen"
+
+# Where cache/ and logs/ live. Deliberately NOT inside an install root: the
+# payload is what an update replaces, and Moonraker's type:web entry rmtree()s
+# it first. Swept on uninstall, since nothing else ever removes them.
+# Mirrors kStateRoots in include/helix_install_roots.h.
+# shellcheck disable=SC2034  # consumed by uninstall.sh
+HELIX_STATE_DIRS="/mnt/UDISK/helixscreen-state /mnt/UDISK/helixscreen /data/.helixscreen /data/helixscreen /usr/data/helixscreen-state /user-resource/helixscreen-state /userdata/helixscreen-state /srv/helixscreen-state /opt/config/mod_data/helixscreen-state"
+
+# Mounts release.sh's detect_rollback_dir() tries, in order, for an
+# off-partition update-backup when the install filesystem is too tight to
+# hold the old and new tree at once (HELIX_ROLLBACK_CANDIDATES overrides this
+# for tests). Shared here, rather than left local to release.sh, so
+# uninstall.sh's disabled-services ledger lookup can also recognise a backup
+# under one of these mounts without depending on release.sh, which the
+# standalone uninstaller does not bundle.
+# shellcheck disable=SC2034  # consumed by release.sh and uninstall.sh
+HELIX_ROLLBACK_CANDIDATES_DEFAULT="/mnt/UDISK /usr/data /mnt/data /data /user-resource /oem /userdata /var/tmp"
+
+# Remove a state root that is now empty.
+#
+# The sweep above takes cache/ and logs/ but leaves the directory that held
+# them. Only a name this installer coins is removed: the "-state" suffix, and
+# the dot-prefixed AD5M root (no operator names a directory with a leading
+# dot by hand). A bare ".../helixscreen" state root is left alone even when
+# empty - /data/helixscreen and the pre-migration /mnt/UDISK/helixscreen are
+# plain enough names that the operator may have meant that directory
+# themselves.
+#
+# rmdir carries the rest of the safety: it refuses a directory with anything
+# still in it, so a root someone has put their own files in survives.
+helix_state_prune_empty_roots() {
+    for _hsper in $HELIX_STATE_DIRS; do
+        case "$_hsper" in
+            */helixscreen-state|*/.helixscreen) ;;
+            *) continue ;;
+        esac
+        [ -d "$_hsper" ] || continue
+        rmdir "$_hsper" 2>/dev/null || $SUDO rmdir "$_hsper" 2>/dev/null || true
+    done
+}
+
+# Cache and log directories an uninstall removes: every declared state dir, plus
+# the in-payload locations older installs still carry. Emitting the legacy ones
+# is what makes an upgrade-then-uninstall clean, since a box installed before
+# the state moved still has them.
+# shellcheck disable=SC2034  # consumed by uninstall.sh
+helix_state_sweep_paths() {
+    for _hssp in $HELIX_STATE_DIRS; do
+        printf '%s/cache\n%s/logs\n' "$_hssp" "$_hssp"
+    done
+    printf '%s\n' /root/.cache/helix /tmp/helix_thumbs /.cache/helix \
+        /data/helixscreen/cache /usr/data/helixscreen/cache \
+        /user-resource/helixscreen/cache /userdata/helixscreen/cache \
+        /srv/helixscreen/cache
+}
 
 # Init script locations vary by platform/firmware
 # AD5M Klipper Mod: S80, AD5M Forge-X: S90, K1: S99, CC1 (COSMOS): plain /etc/init.d/helixscreen
@@ -115,6 +171,43 @@ path_sudo() {
     [ -w "$dir" ] && echo "" || echo "$SUDO"
 }
 
+# Pin the trust properties of helixscreen.env: the launcher's env-file parse
+# evaluates the file's lines, so its owner and mode decide who can run code as
+# the launcher's user (root on every SysV firmware device). State 0644 and
+# service-user ownership instead of inheriting whatever the staging umask left
+# behind; with no KLIPPER_USER (root-run firmware) the file stays root's.
+# Resolves through the printer_data symlink: pinning the link's own mode does
+# nothing to the file the launcher reads. The launcher re-checks on every load,
+# so a file this helper never reached is refused rather than evaluated.
+pin_env_file() {
+    local file="${INSTALL_DIR}/config/helixscreen.env"
+    [ -f "$file" ] || return 0
+
+    local real="$file"
+    if [ -L "$file" ]; then
+        real=$(readlink -f "$file" 2>/dev/null || echo "$file")
+    fi
+    [ -n "$real" ] && [ -f "$real" ] || real="$file"
+
+    # Failures warn rather than fail the install, but never silently: an
+    # unpinned file is one the launcher refuses on every boot, and an
+    # unreported chmod is indistinguishable from a pinned one at install time.
+    if ! $(file_sudo "$real") chmod 0644 "$real" 2>/dev/null; then
+        log_warn "pin_env_file: could not chmod 0644 '$real' (the launcher will refuse this file until fixed)"
+    fi
+
+    local user="${KLIPPER_USER:-}"
+    if [ -n "$user" ]; then
+        local group="$user"
+        if type _resolve_primary_group >/dev/null 2>&1; then
+            group=$(_resolve_primary_group "$user")
+        fi
+        if ! $(file_sudo "$real") chown "${user}:${group}" "$real" 2>/dev/null; then
+            log_warn "pin_env_file: could not chown ${user}:${group} '$real'"
+        fi
+    fi
+}
+
 # Resolve the directory holding the user's Klipper/Moonraker config files.
 #
 # Almost every Klipper install puts them in <klipper home>/printer_data/config,
@@ -148,37 +241,343 @@ klipper_config_dir() {
 CLEANUP_TMP=false
 BACKUP_CONFIG=""
 BACKUP_ENV=""
-# shellcheck disable=SC2034  # consumed by release.sh (set true at the swap, read at config restore)
-ORIGINAL_INSTALL_EXISTS=false
 
-# Colors (if terminal supports it)
-setup_colors() {
-    if [ -t 1 ]; then
-        RED='\033[0;31m'
-        GREEN='\033[0;32m'
-        YELLOW='\033[1;33m'
-        CYAN='\033[0;36m'
-        BOLD='\033[1m'
-        NC='\033[0m'
+# Output is decided by stderr, where every log line goes: under `curl | sh`
+# stdin is the script and stdout may be a pipe while stderr is the terminal.
+# HELIX_INSTALL_TTY=0|1 overrides the probe (tests, and callers that know).
+# shellcheck disable=SC2034  # UI_UTF8, BOLD and DIM are consumed by the step layer and main.sh
+ui_detect() {
+    case "${HELIX_INSTALL_TTY:-}" in
+        0) UI_TTY=0 ;;
+        1) UI_TTY=1 ;;
+        *) if [ -t 2 ]; then UI_TTY=1; else UI_TTY=0; fi ;;
+    esac
+
+    _ui_locale="${LC_ALL:-${LC_CTYPE:-${LANG:-}}}"
+    case "$_ui_locale" in
+        *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*) UI_UTF8=1 ;;
+        *) UI_UTF8=0 ;;
+    esac
+
+    UI_COLOR=0
+    if [ "$UI_TTY" = 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != dumb ]; then
+        case "${TERM:-}:${COLORTERM:-}" in
+            *256color*|*:truecolor|*:24bit) UI_COLOR=256 ;;
+            *) UI_COLOR=16 ;;
+        esac
+    fi
+
+    if [ "$UI_COLOR" != 0 ]; then
+        RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+        CYAN='\033[0;36m'; BOLD='\033[1m'; DIM='\033[2m'; NC='\033[0m'
     else
-        RED=''
-        GREEN=''
-        YELLOW=''
-        CYAN=''
-        # shellcheck disable=SC2034  # consumed by main.sh (installer banner) and release.sh
-        BOLD=''
-        NC=''
+        RED=''; GREEN=''; YELLOW=''; CYAN=''; BOLD=''; DIM=''; NC=''
+    fi
+}
+ui_detect
+
+# The log file. Lines logged before log_open (detection runs before the
+# install has anywhere to write) are held in _LOG_BUFFER and flushed by it.
+INSTALL_LOG=""
+_LOG_BUFFER=""
+
+_log_write() {
+    _lw_line="[$(date +%H:%M:%S)] $1"
+    if [ -n "$INSTALL_LOG" ]; then
+        printf '%s\n' "$_lw_line" >> "$INSTALL_LOG" 2>/dev/null || true
+    else
+        _LOG_BUFFER="${_LOG_BUFFER}${_lw_line}
+"
     fi
 }
 
-# Initialize colors immediately
-setup_colors
+log_open() {
+    INSTALL_LOG="$1"
+    : > "$INSTALL_LOG" 2>/dev/null || { INSTALL_LOG=""; return 1; }
+    printf '%s' "$_LOG_BUFFER" >> "$INSTALL_LOG"
+    _LOG_BUFFER=""
+}
 
-# Logging functions (printf %b interprets \033 escapes; BusyBox echo does not)
-log_info() { printf '%b\n' "${CYAN}[INFO]${NC} $1" >&2; }
-log_success() { printf '%b\n' "${GREEN}[OK]${NC} $1" >&2; }
-log_warn() { printf '%b\n' "${YELLOW}[WARN]${NC} $1" >&2; }
-log_error() { printf '%b\n' "${RED}[ERROR]${NC} $1" >&2; }
+# True when a question can reach a person: the controlling terminal opens, or
+# stdin is one. The probes redirect into `true`, never `:`: a redirection that
+# fails on a special builtin ends a dash or BusyBox ash script, and /dev/tty
+# fails to open in any run without a controlling terminal.
+tty_can_ask() {
+    # shellcheck disable=SC2217  # the redirect is the probe; true only absorbs it
+    { true < "${HELIX_TTY_DEVICE:-/dev/tty}"; } 2>/dev/null || [ -t 0 ]
+}
+
+# Ask a yes/no question. Under `curl | sh` stdin is the script, so the answer
+# comes from the controlling terminal; with neither, the default stands. An
+# empty line takes the default; end of input (Ctrl-D) is a no.
+tty_confirm() { # question default(y|n)
+    [ "${ASSUME_YES:-false}" = true ] && return 0
+    _tc_dev="${HELIX_TTY_DEVICE:-/dev/tty}"
+    _tc_hint="[y/N]"; [ "$2" = y ] && _tc_hint="[Y/n]"
+    _tc_ans=""
+    # shellcheck disable=SC2217  # open probe, see tty_can_ask
+    if { true < "$_tc_dev"; } 2>/dev/null; then
+        printf '%s %s ' "$1" "$_tc_hint" >&2
+        IFS= read -r _tc_ans < "$_tc_dev" || [ -n "$_tc_ans" ] || _tc_ans=n
+    elif [ -t 0 ]; then
+        printf '%s %s ' "$1" "$_tc_hint" >&2
+        IFS= read -r _tc_ans || [ -n "$_tc_ans" ] || _tc_ans=n
+    else
+        _tc_ans="$2"
+    fi
+    _log_write "ASK $1 -> ${_tc_ans:-$2}"
+    case "${_tc_ans:-$2}" in [yY]|[yY][eE][sS]) return 0 ;; *) return 1 ;; esac
+}
+
+# Strip \033[...m sequences from a message before it reaches the log. The ESC
+# byte comes from printf: BusyBox sed does not understand \x1b.
+_ESC=$(printf '\033')
+_log_plain() { printf '%b' "$1" | sed "s/${_ESC}\\[[0-9;]*m//g"; }
+
+# Steps: a titled unit of work that resolves to done, failed or skipped. On a
+# terminal the open step is a spinner line that later lines redraw beneath;
+# without one nothing prints until the step resolves, as one numbered line.
+# STEP_TOTAL is set by the plan; 0 means "do not number".
+STEP_TOTAL=0
+STEP_NUM=0
+STEP_OPEN=0
+STEP_TITLE=""
+STEP_DONE_TITLE=""
+_SPIN_I=0
+
+_ui_marks() {
+    if [ "$UI_UTF8" = 1 ]; then
+        MARK_OK="✓"; MARK_FAIL="✗"; ELLIPSIS="…"
+    else
+        MARK_OK="ok"; MARK_FAIL="FAIL"; ELLIPSIS="..."
+    fi
+}
+
+_spin_frame() {
+    if [ "$UI_UTF8" = 1 ]; then
+        set -- ⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏
+    else
+        set -- '|' '/' '-' '\'
+    fi
+    _SPIN_I=$(( (_SPIN_I % $#) + 1 ))
+    eval "_SPIN_CH=\${$_SPIN_I}"
+}
+
+# Redraw the open step's line (terminal only). Called by step and by every
+# line printed while the step is open, so the spinner advances as work logs.
+_step_redraw() {
+    [ "$UI_TTY" = 1 ] && [ "$STEP_OPEN" = 1 ] || return 0
+    _spin_frame
+    printf '\r\033[K  %b%s%b %s%s' "$CYAN" "$_SPIN_CH" "$NC" "$STEP_TITLE" "$ELLIPSIS" >&2
+}
+
+# Screen output for the four levels: indented under an open step, as given
+# otherwise.
+_ui_emit() {
+    if [ "$STEP_OPEN" = 1 ]; then
+        [ "$UI_TTY" = 1 ] && printf '\r\033[K' >&2
+        printf '%b\n' "      $1" >&2
+        _step_redraw
+    else
+        printf '%b\n' "$1" >&2
+    fi
+}
+
+log_info() {
+    _log_write "INFO $(_log_plain "$1")"
+    [ "${HELIX_INSTALL_VERBOSE:-0}" = 1 ] && _ui_emit "${CYAN}[INFO]${NC} $1"
+    return 0
+}
+log_success() {
+    _log_write "OK $(_log_plain "$1")"
+    [ "${HELIX_INSTALL_VERBOSE:-0}" = 1 ] && _ui_emit "${GREEN}[OK]${NC} $1"
+    return 0
+}
+log_warn() {
+    _log_write "WARN $(_log_plain "$1")"
+    _ui_emit "${YELLOW}[WARN]${NC} $1"
+}
+log_error() {
+    _log_write "ERROR $(_log_plain "$1")"
+    _ui_emit "${RED}[ERROR]${NC} $1"
+}
+# A detail line a regular user should see. Used sparingly.
+log_note() {
+    _log_write "NOTE $(_log_plain "$1")"
+    _ui_emit "    $1"
+}
+
+# A step has a running title, shown by the spinner and by a failure (what was
+# attempted), and a done title, shown once it succeeds; one title serves both.
+step() { # running-title [done-title]
+    [ "$STEP_OPEN" = 1 ] && step_done
+    _ui_marks
+    STEP_TITLE="$1"
+    STEP_DONE_TITLE="${2:-$1}"
+    STEP_OPEN=1
+    _log_write "STEP $1"
+    _step_redraw
+}
+
+_step_close() { # mark color word detail title
+    STEP_NUM=$((STEP_NUM + 1))
+    if [ "$UI_TTY" = 1 ]; then
+        if [ -n "$4" ]; then
+            printf '\r\033[K  %b%s%b %-22s %b%s%b\n' "$2" "$1" "$NC" "$5" "$DIM" "$4" "$NC" >&2
+        else
+            printf '\r\033[K  %b%s%b %s\n' "$2" "$1" "$NC" "$5" >&2
+        fi
+    else
+        _sc_prefix=""
+        [ "$STEP_TOTAL" -gt 0 ] && _sc_prefix="[$STEP_NUM/$STEP_TOTAL] "
+        if [ -n "$4" ]; then
+            printf '%s%s ... %s (%s)\n' "$_sc_prefix" "$5" "$3" "$4" >&2
+        else
+            printf '%s%s ... %s\n' "$_sc_prefix" "$5" "$3" >&2
+        fi
+    fi
+    STEP_OPEN=0
+}
+
+# shellcheck disable=SC2120  # step() closes a stale step with no detail
+step_done() {
+    [ "$STEP_OPEN" = 1 ] || return 0
+    if [ -n "${1:-}" ]; then _log_write "DONE $STEP_DONE_TITLE ($1)"; else _log_write "DONE $STEP_DONE_TITLE"; fi
+    _step_close "$MARK_OK" "$GREEN" ok "${1:-}" "$STEP_DONE_TITLE"
+}
+
+step_fail() {
+    [ "$STEP_OPEN" = 1 ] || return 0
+    _log_write "FAIL $STEP_TITLE${1:+ ($1)}"
+    _step_close "$MARK_FAIL" "$RED" FAILED "${1:-}" "$STEP_TITLE"
+}
+
+step_skip() {
+    [ "$STEP_OPEN" = 1 ] || return 0
+    _log_write "SKIP $STEP_TITLE"
+    [ "$UI_TTY" = 1 ] && printf '\r\033[K' >&2
+    STEP_OPEN=0
+}
+
+# A path for display, with $HOME shown as ~.
+display_path() {
+    if [ -n "${HOME:-}" ] && [ "$HOME" != / ]; then
+        case "$1" in "$HOME"/*) printf '~%s' "${1#"$HOME"}"; return 0 ;; esac
+    fi
+    printf '%s' "$1"
+}
+
+# A file's size for display, in whole MB, or KB below one MB.
+file_size_text() {
+    [ -f "$1" ] || return 0
+    _fst=$(wc -c < "$1")
+    if [ "$_fst" -ge 1048576 ]; then
+        printf '%s MB' "$((_fst / 1048576))"
+    else
+        printf '%s KB' "$((_fst / 1024))"
+    fi
+}
+
+# Where the install log is kept: Moonraker's logs root, which Mainsail and
+# Fluidd show, else the logs/ of a state root outside the payload, which an
+# update replaces whole.
+install_log_dest() {
+    if [ -n "${KLIPPER_HOME:-}" ] && [ -d "$KLIPPER_HOME/printer_data" ]; then
+        printf '%s' "$KLIPPER_HOME/printer_data/logs/helixscreen-install.log"
+    else
+        printf '%s/logs/helixscreen-install.log' "$(install_state_root)"
+    fi
+}
+
+# The platform's declared state root (set_install_paths), else the
+# <install>-state sibling the app also reads (HELIX_STATE_DIRS), else the
+# .helixscreen sibling the update service keeps its sentinel in. Uninstall
+# sweeps all three.
+install_state_root() {
+    if [ -n "${STATE_DIR:-}" ]; then
+        printf '%s' "$STATE_DIR"
+    elif [ -n "${STATE_ROOT:-}" ]; then
+        printf '%s' "$STATE_ROOT"
+    else
+        case " $HELIX_STATE_DIRS " in
+            *" ${INSTALL_DIR%/}-state "*) printf '%s' "${INSTALL_DIR%/}-state" ;;
+            *) printf '%s/.helixscreen' "$(dirname "$INSTALL_DIR")" ;;
+        esac
+    fi
+}
+
+# Move this run's log from the scratch dir to install_log_dest, keeping the
+# previous run's as .1. The in-app updater sends stdout and stderr to a log
+# file of its own, through a descriptor that does not append: should that be
+# the same file, this run's log is written through that descriptor, and the
+# file is never rotated, replaced or appended to by name. Sets
+# INSTALL_LOG_KEPT to where the log now is.
+finalize_install_log() {
+    [ -n "$INSTALL_LOG" ] && [ -f "$INSTALL_LOG" ] || return 0
+    _fil_dest=$(install_log_dest)
+    [ "$INSTALL_LOG" = "$_fil_dest" ] && return 0
+    # -ef is in dash, BusyBox ash and bash, every shell this runs under.
+    # shellcheck disable=SC3013
+    if [ "$_fil_dest" -ef /proc/self/fd/2 ]; then
+        cat "$INSTALL_LOG" >&2; INSTALL_LOG=""; INSTALL_LOG_KEPT="$_fil_dest"; return 0
+    fi
+    # shellcheck disable=SC3013
+    if [ "$_fil_dest" -ef /proc/self/fd/1 ]; then
+        cat "$INSTALL_LOG"; INSTALL_LOG=""; INSTALL_LOG_KEPT="$_fil_dest"; return 0
+    fi
+    _fil_dir=$(dirname "$_fil_dest")
+    mkdir -p "$_fil_dir" 2>/dev/null || $SUDO mkdir -p "$_fil_dir" 2>/dev/null || return 0
+    _fil_sudo=$(file_sudo "$_fil_dest")
+    if [ -f "$_fil_dest" ]; then
+        $_fil_sudo mv -f "$_fil_dest" "$_fil_dest.1" 2>/dev/null || true
+    fi
+    $_fil_sudo mv -f "$INSTALL_LOG" "$_fil_dest" 2>/dev/null || return 0
+    INSTALL_LOG="$_fil_dest"
+    # shellcheck disable=SC2034  # read by main.sh and plan.sh
+    INSTALL_LOG_KEPT="$_fil_dest"
+}
+
+RUN_LOGGED_TAIL=${RUN_LOGGED_TAIL:-15}
+
+# The failure block: what ran, how it ended, and the last lines it said.
+print_failure() { # description rc output-file [hint]
+    _ui_emit "${RED}$1 failed (exit $2):${NC}"
+    if [ -s "$3" ]; then
+        tail -n "$RUN_LOGGED_TAIL" "$3" | while IFS= read -r _pf_line || [ -n "$_pf_line" ]; do
+            _ui_emit "  $_pf_line"
+        done
+    fi
+    if [ -n "${4:-}" ]; then _ui_emit "$4"; fi
+    return 0
+}
+
+# The command runs in the foreground so a sudo inside it can still prompt;
+# its output goes to a temp file, never a pipe, so $? is the command's own.
+# The exit code is captured with && ||, so a failing command does not abort a
+# caller running under set -e before the failure block prints.
+run_logged() {
+    _log_write "RUN $*"
+    _rl_out=$(mktemp "${TMPDIR:-/tmp}/helix-run.XXXXXX") || { "$@" && return 0 || return $?; }
+    _step_redraw
+    "$@" > "$_rl_out" 2>&1 && _rl_rc=0 || _rl_rc=$?
+    if [ -n "$INSTALL_LOG" ]; then
+        cat "$_rl_out" >> "$INSTALL_LOG" 2>/dev/null || true
+        # Command substitution drops a trailing newline, so a non-empty result
+        # means the output ended mid-line; terminate it before the next entry.
+        if [ -s "$_rl_out" ] && [ -n "$(tail -c 1 "$_rl_out")" ]; then
+            printf '\n' >> "$INSTALL_LOG" 2>/dev/null || true
+        fi
+    else
+        _LOG_BUFFER="${_LOG_BUFFER}$(cat "$_rl_out")
+"
+    fi
+    if [ "${HELIX_INSTALL_VERBOSE:-0}" = 1 ]; then
+        while IFS= read -r _rl_line || [ -n "$_rl_line" ]; do _ui_emit "  $_rl_line"; done < "$_rl_out"
+    fi
+    if [ "$_rl_rc" -ne 0 ]; then print_failure "$*" "$_rl_rc" "$_rl_out"; fi
+    rm -f "$_rl_out"
+    return "$_rl_rc"
+}
 
 # Error handler - cleanup and report what went wrong
 # Usage: trap 'error_handler $LINENO' ERR
@@ -241,7 +640,40 @@ error_handler() {
                 log_success "helixscreen.env restored from previous install"
             fi
         fi
+        pin_env_file
     fi
+
+    # A ledger stop_competing_uis already wrote records a disable (chmod -x on
+    # a stock UI's init script, a systemd unit taken down) that is still in
+    # effect on the live system; losing the only copy leaves nothing for a
+    # later uninstall to reverse it with (prestonbrown/helixscreen#1618). A
+    # copy surviving anywhere but here is proof one was written, so carry it
+    # forward the same way settings.json and helixscreen.env are above.
+    local _ledger_restored=true
+    if [ ! -f "${INSTALL_DIR}/config/.disabled_services" ] \
+       && type _disabled_services_ledger_candidates >/dev/null 2>&1; then
+        local _ledger_src=""
+        local _ledger_candidate
+        for _ledger_candidate in $(_disabled_services_ledger_candidates); do
+            [ "$_ledger_candidate" = "${INSTALL_DIR}/config/.disabled_services" ] && continue
+            if [ -f "$_ledger_candidate" ]; then
+                _ledger_src="$_ledger_candidate"
+                break
+            fi
+        done
+        if [ -n "$_ledger_src" ]; then
+            _ledger_restored=false
+            if $(file_sudo "${INSTALL_DIR}/config") cp "$_ledger_src" "${INSTALL_DIR}/config/.disabled_services" 2>/dev/null; then
+                log_success "Disabled-services ledger recovered from $_ledger_src"
+                _ledger_restored=true
+            else
+                log_warn "Could not recover the disabled-services ledger from $_ledger_src"
+            fi
+        fi
+    fi
+
+    # The log lives in TMP_DIR until it is kept.
+    finalize_install_log
 
     # Cleanup temporary files after restores are done
     if [ "$CLEANUP_TMP" = true ] && [ -d "$TMP_DIR" ]; then
@@ -250,7 +682,12 @@ error_handler() {
 
     echo ""
     log_error "Installation was NOT completed."
-    log_error "Your system should be in its original state."
+    if [ "$_ledger_restored" = true ]; then
+        log_error "Your system should be in its original state."
+    else
+        log_error "A previously disabled system service could not be recorded for recovery."
+        log_error "Re-run this script, or run it with --uninstall, to finish reversing it."
+    fi
     echo ""
     log_info "For help, please:"
     log_info "  1. Check the error message above"
@@ -259,6 +696,31 @@ error_handler() {
     echo ""
 
     exit $exit_code
+}
+
+# ---------------------------------------------------------------------------
+# Filesystem measurement helpers
+#
+# Every free-space and same-filesystem question the installer asks goes
+# through these two, so the df parse lives in one place.
+#
+# `-P` is load-bearing, not decoration: without it BusyBox df wraps a long
+# device name onto its own line, so the last line's $1 is a BLOCK COUNT and its
+# $4 is Use% ("44%"), which then fails every integer test. POSIX output is one
+# line per filesystem.
+#
+# `-P` alone reports 512-byte blocks, so pair it with `-k` to get the 1K units
+# the arithmetic below assumes. Verified on BusyBox 1.29.3 and 1.33.2.
+
+# Echo the filesystem identity for a path (df's device column). Two paths with
+# the same value are on one filesystem, so a mv between them is a rename.
+_fs_id() {
+    df -kP "$1" 2>/dev/null | tail -1 | awk '{print $1}'
+}
+
+# Echo free space in MB on the filesystem holding a path.
+_fs_free_mb() {
+    df -kP "$1" 2>/dev/null | tail -1 | awk '{print int($4/1024)}'
 }
 
 # ---------------------------------------------------------------------------
@@ -392,6 +854,41 @@ cleanup_on_success() {
     fi
 }
 
+# Kill the process(es) running one exact executable path.
+# A stock UI whose binary has a generic basename cannot go through
+# kill_process_by_name: the QIDI Q2's stock screen is literally `client`, and
+# `pidof client` on a general-purpose SBC matches whatever else answers to that
+# name. Resolving /proc/<pid>/exe identifies the binary instead of trusting its
+# name. SIGTERM first, then SIGKILL any survivor, matching the sibling above.
+# Args: /absolute/path/to/binary
+# Returns: 0 if any process was killed, 1 if none found
+kill_process_by_path() {
+    local target="$1"
+    local killed_any=false
+    local procdir pid exe
+
+    [ -n "$target" ] || return 1
+
+    for procdir in /proc/[0-9]*; do
+        exe=$(readlink "$procdir/exe" 2>/dev/null) || continue
+        [ "$exe" = "$target" ] || continue
+        pid="${procdir#/proc/}"
+        $SUDO kill "$pid" 2>/dev/null || true
+        killed_any=true
+    done
+
+    [ "$killed_any" = true ] || return 1
+
+    sleep 1
+    for procdir in /proc/[0-9]*; do
+        exe=$(readlink "$procdir/exe" 2>/dev/null) || continue
+        [ "$exe" = "$target" ] || continue
+        $SUDO kill -9 "${procdir#/proc/}" 2>/dev/null || true
+    done
+
+    return 0
+}
+
 # Kill process(es) by name — SIGTERM first, then SIGKILL any survivors.
 # helix-watchdog and helix-screen catch SIGTERM but don't always exit (e.g.
 # during splash handoff or when blocked on I/O), so the installer must
@@ -470,12 +967,8 @@ kill_process_by_name() {
 #
 # Reads: KLIPPER_HOME, SUDO, HELIX_STATE_VAR_LIB, HELIX_STATE_ROOT_HOME
 retire_legacy_config_backups() {
-    local state_var_lib="${HELIX_STATE_VAR_LIB:-/var/lib/helixscreen}"
-    local state_root_home="${HELIX_STATE_ROOT_HOME:-/root/.helixscreen}"
-
     local tier
-    for tier in "$state_var_lib" "$state_root_home" "${KLIPPER_HOME:+${KLIPPER_HOME}/.helixscreen}"; do
-        [ -n "$tier" ] || continue
+    config_backup_tiers | while IFS= read -r tier; do
         [ -f "${tier}/helixconfig.json.backup" ] || continue
         # The gate: no current backup means the legacy file is still load-bearing.
         [ -f "${tier}/settings.json.backup" ] || continue
@@ -484,6 +977,24 @@ retire_legacy_config_backups() {
             log_info "Removed superseded config backup: ${tier}/helixconfig.json.backup"
         fi
     done
+}
+
+# The directories Config::init searches for a rolling settings backup, one per
+# line: the StateDirectory, then each HOME/.helixscreen the service may run with
+# (config_backup_primary/fallback, include/app_constants.h).
+# Reads: KLIPPER_HOME, HELIX_STATE_VAR_LIB, HELIX_STATE_ROOT_HOME
+config_backup_tiers() {
+    echo "${HELIX_STATE_VAR_LIB:-/var/lib/helixscreen}"
+    echo "${HELIX_STATE_ROOT_HOME:-/root/.helixscreen}"
+    [ -n "${KLIPPER_HOME:-}" ] && echo "${KLIPPER_HOME}/.helixscreen"
+    return 0
+}
+
+# The rolling settings backup file names Config::init restores from, in its
+# priority order (config_backup_search_paths, src/system/config.cpp).
+config_backup_names() {
+    echo "settings.json.backup"
+    echo "helixconfig.json.backup"
 }
 
 clean_helix_state_dirs() {
@@ -531,39 +1042,5 @@ clean_helix_state_dirs() {
     if [ -d "$state_root_home" ]; then
         $SUDO rm -rf "$state_root_home"
         log_success "Removed $state_root_home"
-    fi
-}
-
-# Print post-install commands for the user
-# Reads: INIT_SYSTEM, SERVICE_NAME, INIT_SCRIPT_DEST, INSTALL_DIR
-# $1:   service mechanism, passed BY THE CALLER (the prober's answer;
-#       this module is bundle position 1 and must not reach forward for
-#       any later module's globals)
-print_post_install_commands() {
-    if [ "${1:-}" = "mod-managed" ]; then
-        # Payload install: the service lives in the mod's chroot, which the
-        # mod's own start.sh runs at boot. Nothing is running yet, so the
-        # useful instruction is how to get there.
-        echo "Useful commands:"
-        echo "  Reboot to start the UI (installed as ${INIT_SCRIPT_DEST})"
-        echo "  tail -f ${INSTALL_DIR}/logs/launcher.log   # View logs"
-        return 0
-    fi
-    echo "Useful commands:"
-    if [ "$INIT_SYSTEM" = "systemd" ]; then
-        # journalctl and restart need privilege: a service user outside adm/
-        # systemd-journal gets "No journal files were found" on stderr and an
-        # empty stdout, which reads as "there are no logs" when redirected.
-        echo "  systemctl status ${SERVICE_NAME}         # Check status"
-        echo "  sudo journalctl -u ${SERVICE_NAME} -f    # View logs"
-        echo "  sudo systemctl restart ${SERVICE_NAME}   # Restart"
-    else
-        # helixscreen.init writes to /var/log/helixscreen/launcher.log when /var/log
-        # is persistent, else ${INSTALL_DIR}/logs/launcher.log — show whichever exists.
-        local log_path="/var/log/helixscreen/launcher.log"
-        [ -f "$log_path" ] || log_path="${INSTALL_DIR}/logs/launcher.log"
-        echo "  ${INIT_SCRIPT_DEST} status   # Check status"
-        echo "  tail -f ${log_path}   # View logs"
-        echo "  ${INIT_SCRIPT_DEST} restart  # Restart"
     fi
 }

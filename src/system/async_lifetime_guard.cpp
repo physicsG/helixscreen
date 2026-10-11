@@ -12,6 +12,7 @@
 
 #include "async_lifetime_guard.h"
 
+#include "env_knobs.h"
 #include "helix_lvgl_anomaly.h"
 
 #include <spdlog/spdlog.h>
@@ -89,8 +90,7 @@ void set_main_thread_id() noexcept {
     // set_strict_bg_check(true) explicitly; CI exports the env var.
     // Release builds skip both the env-var read and the abort branch
     // so a stray HELIX_STRICT_BG_THREAD_CHECK=1 can never crash a user.
-    if (const char* v = std::getenv("HELIX_STRICT_BG_THREAD_CHECK");
-        v != nullptr && (v[0] == '1' || v[0] == 't' || v[0] == 'T' || v[0] == 'y' || v[0] == 'Y')) {
+    if (helix::env_flag("HELIX_STRICT_BG_THREAD_CHECK")) {
         g_strict_bg_check.store(true, std::memory_order_release);
     }
 #endif

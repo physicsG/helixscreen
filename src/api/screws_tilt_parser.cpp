@@ -4,6 +4,7 @@
 #include "screws_tilt_parser.h"
 
 #include "printer_detector.h"
+#include "text_io.h"
 
 #include <spdlog/spdlog.h>
 
@@ -63,11 +64,7 @@ bool parse_screws_tilt_line(const std::string& line, ScrewTiltResult& out) {
         if (end == std::string::npos) {
             end = line.length();
         }
-        try {
-            return std::stof(line.substr(pos, end - pos));
-        } catch (...) {
-            return 0.0f;
-        }
+        return text_io::parse_leading<float>(line.substr(pos, end - pos)).value_or(0.0f);
     };
 
     result.x_pos = parse_float("x=");

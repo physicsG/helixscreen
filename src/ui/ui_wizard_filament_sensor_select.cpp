@@ -11,11 +11,12 @@
 
 #include "app_globals.h"
 #include "filament_sensor_manager.h"
+#include "i_moonraker_client.h"
 #include "lvgl/lvgl.h"
-#include "moonraker_client.h"
 #include "printer_hardware.h"
 #include "printer_state.h"
 #include "static_panel_registry.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/spdlog.h>
 
@@ -29,16 +30,8 @@
 // Global Instance
 // ============================================================================
 
-static std::unique_ptr<WizardFilamentSensorSelectStep> g_wizard_filament_sensor_select_step;
-
 WizardFilamentSensorSelectStep* get_wizard_filament_sensor_select_step() {
-    if (!g_wizard_filament_sensor_select_step) {
-        g_wizard_filament_sensor_select_step = std::make_unique<WizardFilamentSensorSelectStep>();
-        StaticPanelRegistry::instance().register_destroy("WizardFilamentSensorSelectStep", []() {
-            g_wizard_filament_sensor_select_step.reset();
-        });
-    }
-    return g_wizard_filament_sensor_select_step.get();
+    return &helix::lazy_global<WizardFilamentSensorSelectStep>("WizardFilamentSensorSelectStep");
 }
 
 // ============================================================================
@@ -50,8 +43,16 @@ WizardFilamentSensorSelectStep::WizardFilamentSensorSelectStep() {
 }
 
 WizardFilamentSensorSelectStep::~WizardFilamentSensorSelectStep() {
-    // NOTE: Do NOT call LVGL functions here - LVGL may be destroyed first
     // NOTE: Do NOT log here - spdlog may be destroyed first
+
+    // Shutdown runs StaticPanelRegistry::destroy_all() BEFORE lv_deinit(), so
+    // an armed refresh one-shot is still in LVGL's timer list here, holding a
+    // freed `this`. A teardown that destroys the step without calling
+    // cleanup() first must not leave it armed. The shared helper goes through
+    // lv_timer_cancel_safe(), which no-ops when LVGL is already gone, so it is
+    // safe from the destructor either way (prestonbrown/helixscreen#1577).
+    cancel_refresh_timer();
+
     screen_root_ = nullptr;
 }
 
@@ -90,14 +91,12 @@ void WizardFilamentSensorSelectStep::filter_standalone_sensors() {
 // ============================================================================
 
 void WizardFilamentSensorSelectStep::init_subjects() {
-    if (subjects_initialized_) {
-        spdlog::debug("[{}] Subjects already initialized, resetting value", get_name());
-        lv_subject_set_int(&runout_sensor_selected_, 0);
-        return;
-    }
-
     spdlog::debug("[{}] Initializing subjects", get_name());
-    helix::ui::wizard::init_int_subject(&runout_sensor_selected_, 0, "runout_sensor_selected");
+
+    // Each visit re-initializes; drop the previous visit's subjects and names first.
+    subjects_.deinit_all();
+    helix::ui::wizard::init_int_subject(subjects_, &runout_sensor_selected_, 0,
+                                        "runout_sensor_selected");
 
     subjects_initialized_ = true;
     spdlog::debug("[{}] Subjects initialized", get_name());
@@ -157,7 +156,8 @@ void WizardFilamentSensorSelectStep::populate_dropdowns() {
     }
 
     // Find and populate the runout dropdown
-    lv_obj_t* runout_dropdown = lv_obj_find_by_name(screen_root_, "runout_sensor_dropdown");
+    lv_obj_t* runout_dropdown =
+        helix::ui::find_required(screen_root_, "runout_sensor_dropdown", get_name());
 
     if (runout_dropdown) {
         lv_dropdown_set_options(runout_dropdown, options.c_str());
@@ -258,6 +258,35 @@ lv_obj_t* WizardFilamentSensorSelectStep::create(lv_obj_t* parent) {
 // ============================================================================
 // Refresh
 // ============================================================================
+
+void WizardFilamentSensorSelectStep::schedule_deferred_refresh() {
+    // Re-arming must not stack a second one-shot behind a still-pending one.
+    cancel_refresh_timer();
+    refresh_timer_ = lv_timer_create(refresh_timer_cb, 1500, this);
+    lv_timer_set_repeat_count(refresh_timer_, 1); // One-shot timer
+}
+
+void WizardFilamentSensorSelectStep::cancel_refresh_timer() {
+    // Neuter rather than delete: cleanup() can run from inside lv_timer_handler
+    // (a Next click), where deleting a timer corrupts LVGL's timer list.
+    // lv_timer_cancel_safe() also no-ops when LVGL is already gone, so this is
+    // safe from the destructor as well.
+    if (refresh_timer_ && lv_is_initialized()) {
+        helix::ui::lv_timer_cancel_safe(refresh_timer_);
+    }
+    refresh_timer_ = nullptr;
+}
+
+void WizardFilamentSensorSelectStep::refresh_timer_cb(lv_timer_t* timer) {
+    auto* self = static_cast<WizardFilamentSensorSelectStep*>(lv_timer_get_user_data(timer));
+    if (!self) {
+        return;
+    }
+    // The timer is one-shot — LVGL deletes it immediately after this callback
+    // returns. Null the member FIRST so no later cancel can touch freed memory.
+    self->refresh_timer_ = nullptr;
+    self->refresh();
+}
 
 void WizardFilamentSensorSelectStep::refresh() {
     if (!screen_root_) {
@@ -364,13 +393,10 @@ void WizardFilamentSensorSelectStep::auto_configure_single_sensor() {
 void WizardFilamentSensorSelectStep::cleanup() {
     spdlog::debug("[{}] Cleaning up resources", get_name());
 
-    // Cancel pending refresh timer to prevent stale access after navigation.
-    // Use lv_timer_cancel_safe to avoid corrupting LVGL's timer linked list
-    // when cleanup is called from within lv_timer_handler (via click event).
-    if (refresh_timer_) {
-        helix::ui::lv_timer_cancel_safe(refresh_timer_);
-        refresh_timer_ = nullptr;
-    }
+    // A pending refresh must never fire into a screen that navigation is
+    // tearing down; the shared helper neuters instead of unlinking because
+    // cleanup can run from inside lv_timer_handler (via a click event).
+    cancel_refresh_timer();
 
     auto& sensor_mgr = helix::FilamentSensorManager::instance();
 

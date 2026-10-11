@@ -3,6 +3,8 @@
 
 #include "panel_widget_config.h"
 
+#include "ui_timer_guard.h"
+
 #include "config.h"
 #include "data_root_resolver.h"
 #include "grid_layout.h"
@@ -11,24 +13,76 @@
 #include "layout_manager.h"
 #include "layout_port.h"
 #include "panel_widget_registry.h"
+#include "runtime_config.h"
+#include "text_io.h"
 #include "theme_manager.h"
 
 #include <hv/json.hpp>
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
-#include <fstream>
 #include <iterator>
 #include <set>
 #include <string>
 
 namespace helix {
 
+namespace {
+
+/// The config version from which a panel layout that places widgets also names
+/// the system its coordinates count in — `grid` for tracks, `layout_units` for
+/// pre-v22 cells. No layout below it carries either key, so the absence of both
+/// says nothing there.
+constexpr int kCoordinateSystemNamedFrom = 24;
+
+} // namespace
+
+bool PanelWidgetConfig::has_uninterpretable_coordinates(const nlohmann::json& panel_node,
+                                                        int config_version) {
+    if (config_version < kCoordinateSystemNamedFrom || !panel_node.is_object()) {
+        return false;
+    }
+    auto pages = panel_node.find("pages");
+    if (pages == panel_node.end() || !pages->is_array()) {
+        return false;
+    }
+    // "anchors": "pending" names the defaults builder's own placement, saved before a grid
+    // was measured and re-anchored once one is.
+    if (!helix::json_util::safe_string(panel_node, "grid").empty() ||
+        !helix::json_util::safe_string(panel_node, "layout_units").empty() ||
+        helix::json_util::safe_string(panel_node, "anchors") == "pending") {
+        return false;
+    }
+
+    // Only a placed widget carries a number whose units matter, so a layout
+    // that places nothing is not this shape whatever its keys say — rebuilding
+    // it would throw away deliberate hides to fix a coordinate that is not
+    // there. Placed means what has_grid_position() means, read off the node
+    // before any of it is parsed into entries.
+    for (const auto& page : *pages) {
+        if (!page.is_object()) {
+            continue;
+        }
+        auto widgets = page.find("widgets");
+        if (widgets == page.end() || !widgets->is_array()) {
+            continue;
+        }
+        for (const auto& entry : *widgets) {
+            if (entry.is_object() && helix::json_util::safe_int(entry, "col", -1) >= 0 &&
+                helix::json_util::safe_int(entry, "row", -1) >= 0) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 PanelWidgetConfig::PanelWidgetConfig(const std::string& panel_id, Config& config)
     : panel_id_(panel_id), config_(config) {}
 
 std::vector<PanelWidgetEntry> PanelWidgetConfig::parse_widget_array(const nlohmann::json& arr,
-                                                                    bool append_registry_defaults) {
+                                                                    bool append_registry_defaults,
+                                                                    nlohmann::json* retained) {
     std::vector<PanelWidgetEntry> result;
     std::set<std::string> seen_ids;
 
@@ -76,9 +130,18 @@ std::vector<PanelWidgetEntry> PanelWidgetConfig::parse_widget_array(const nlohma
             continue;
         }
 
-        // Skip unknown widget IDs (not in registry)
+        // An id with no definition is either kept verbatim (a plugin widget
+        // while its plugin is absent, so the placement returns when it does)
+        // or dropped, when no destination was given. Recording the id here
+        // also collapses a duplicate unknown entry to its first copy.
+        seen_ids.insert(id);
         if (find_widget_def(id) == nullptr) {
-            spdlog::debug("[PanelWidgetConfig] Dropping unknown widget ID: {}", id);
+            if (retained) {
+                retained->push_back(item);
+                spdlog::debug("[PanelWidgetConfig] Keeping unknown widget ID: {}", id);
+            } else {
+                spdlog::debug("[PanelWidgetConfig] Dropping unknown widget ID: {}", id);
+            }
             continue;
         }
 
@@ -115,7 +178,6 @@ std::vector<PanelWidgetEntry> PanelWidgetConfig::parse_widget_array(const nlohma
             rowspan = item["rowspan"].get<int>();
         }
 
-        seen_ids.insert(id);
         result.push_back({id, enabled, widget_config, col, row_val, colspan, rowspan});
     }
 
@@ -148,6 +210,18 @@ void PanelWidgetConfig::load() {
     legacy_units_ = false;
     legacy_rows_ = 0;
 
+    // Crash-loop safe mode: the saved layout may be what crashes, so this run
+    // shows the shipped defaults and write_to() leaves the saved node alone.
+    if (get_runtime_config()->crash_loop_safe_mode) {
+        PageConfig page;
+        page.id = "main";
+        page.widgets = build_defaults();
+        pending_anchors_ = true;
+        pages_.push_back(std::move(page));
+        loaded_ = true;
+        return;
+    }
+
     // Per-panel path: /printers/{active}/panel_widgets/<panel_id>
     std::string panel_path = config_.df() + "panel_widgets/" + panel_id_;
     auto saved = config_.get<json>(panel_path, json());
@@ -163,6 +237,24 @@ void PanelWidgetConfig::load() {
             config_.save();
             saved = legacy;
         }
+    }
+
+    // A layout that places widgets but names no system for the coordinates is
+    // dropped rather than read. Adopting it would hand switch_to_grid() numbers
+    // that are not tracks and get them stamped as this grid's arrangement, so
+    // the dashboard comes back rearranged with nothing left to restore it from.
+    // Falling through to the fresh-install path below reseats the panel from
+    // its preset, or from the shipped defaults: a dashboard that visibly
+    // returns to defaults is diagnosable, one that comes back subtly wrong is
+    // not.
+    const int config_version = config_.get<int>("/config_version", 0);
+    if (has_uninterpretable_coordinates(saved, config_version)) {
+        spdlog::info("[PanelWidgetConfig] '{}': the saved layout places widgets but names no "
+                     "coordinate system (config_version {}, no 'grid', no 'layout_units', {} "
+                     "page(s)), so its coordinates cannot be read — rebuilding the panel from "
+                     "defaults",
+                     panel_id_, config_version, saved["pages"].size());
+        saved = json();
     }
 
     // Format detection: object with "pages" key = new multi-page format
@@ -221,7 +313,8 @@ void PanelWidgetConfig::load() {
                 // page). Keyed off pages_ rather than page_idx so a skipped
                 // leading entry doesn't cost the first real page its defaults.
                 bool append_defaults = pages_.empty();
-                page.widgets = parse_widget_array(page_json["widgets"], append_defaults);
+                page.widgets =
+                    parse_widget_array(page_json["widgets"], append_defaults, &page.retained);
             }
             pages_.push_back(std::move(page));
             ++page_idx;
@@ -319,17 +412,15 @@ bool PanelWidgetConfig::try_populate_from_preset_seed() {
 
     std::string rel_path = "panel_widgets/" + preset + "/" + panel_id_ + ".json";
     std::string seed_path = helix::find_readable(rel_path);
-    std::ifstream in(seed_path);
-    if (!in.is_open()) {
+    const auto seed_text = helix::text_io::read_file(seed_path);
+    if (!seed_text) {
         return false;
     }
 
-    nlohmann::json seed;
-    try {
-        seed = nlohmann::json::parse(in);
-    } catch (const std::exception& e) {
-        spdlog::warn("[PanelWidgetConfig] Failed to parse preset seed '{}': {}", seed_path,
-                     e.what());
+    nlohmann::json seed = nlohmann::json::parse(*seed_text, nullptr, false);
+    if (seed.is_discarded()) {
+        spdlog::warn("[PanelWidgetConfig] Failed to parse preset seed '{}': not valid JSON",
+                     seed_path);
         return false;
     }
 
@@ -338,10 +429,9 @@ bool PanelWidgetConfig::try_populate_from_preset_seed() {
         return false;
     }
 
-    // The try above covers only json::parse — these reads were outside it. Same
-    // null/non-object hazard as the settings.json path in load(); see the
-    // comments there. A seed that fails here would otherwise unwind out of
-    // load(), taking dashboard construction with it.
+    // These reads face the same null/non-object hazard as the settings.json
+    // path in load(); see the comments there. A seed that fails here would
+    // otherwise unwind out of load(), taking dashboard construction with it.
     main_page_index_ = static_cast<size_t>(helix::json_util::safe_int(seed, "main_page_index"));
     next_page_id_ = helix::json_util::safe_int(seed, "next_page_id");
 
@@ -358,7 +448,8 @@ bool PanelWidgetConfig::try_populate_from_preset_seed() {
         page.id = helix::json_util::safe_string(page_json, "id");
         if (page_json.contains("widgets") && page_json["widgets"].is_array()) {
             bool append_defaults = pages_.empty();
-            page.widgets = parse_widget_array(page_json["widgets"], append_defaults);
+            page.widgets =
+                parse_widget_array(page_json["widgets"], append_defaults, &page.retained);
         }
         pages_.push_back(std::move(page));
         ++page_idx;
@@ -379,14 +470,33 @@ bool PanelWidgetConfig::try_populate_from_preset_seed() {
     return true;
 }
 
+/// True when @p entry is exactly what parse_widget_array() appends for a
+/// registry widget the saved page does not mention: off by default, unplaced,
+/// unconfigured, at the registry spans. Only the disabled kind qualifies: an
+/// enabled unplaced entry's position in the list is its auto-placement order.
+static bool is_appended_registry_default(const PanelWidgetEntry& entry) {
+    const auto* def = find_widget_def(entry.id);
+    return def != nullptr && def->id == entry.id && !def->default_enabled && !entry.enabled &&
+           entry.col < 0 && entry.row < 0 && entry.config.empty() &&
+           entry.colspan == def->colspan && entry.rowspan == def->rowspan;
+}
+
 nlohmann::json PanelWidgetConfig::serialize_pages() const {
     json pages_json = json::array();
     for (const auto& page : pages_) {
         json page_obj;
         page_obj["id"] = page.id;
 
+        // The first page is read back with the registry defaults appended, so
+        // writing those defaults out would cost every printer's settings.json
+        // a copy of the registry: about 2.4 KB, on a K-Touch whose whole
+        // settings partition is 128 KB.
+        const bool registry_appended_on_read = pages_json.empty();
         json widgets_array = json::array();
         for (const auto& entry : page.widgets) {
+            if (registry_appended_on_read && is_appended_registry_default(entry)) {
+                continue;
+            }
             json item = {{"id", entry.id}, {"enabled", entry.enabled}};
             if (!entry.config.empty()) {
                 item["config"] = entry.config;
@@ -397,6 +507,11 @@ nlohmann::json PanelWidgetConfig::serialize_pages() const {
             item["colspan"] = entry.colspan;
             item["rowspan"] = entry.rowspan;
             widgets_array.push_back(std::move(item));
+        }
+        // The saved entries no definition vouches for ride after the known
+        // ones, verbatim, so the layout keeps them until the definition returns.
+        for (const auto& item : page.retained) {
+            widgets_array.push_back(item);
         }
         page_obj["widgets"] = std::move(widgets_array);
         pages_json.push_back(std::move(page_obj));
@@ -409,8 +524,81 @@ nlohmann::json PanelWidgetConfig::serialize_pages() const {
     return out;
 }
 
+void PanelWidgetConfig::mark_dirty() {
+    flush_pending_save();
+    loaded_ = false;
+}
+
+void PanelWidgetConfig::DeferredSave::cancel() {
+    helix::ui::lv_timer_cancel_safe(timer);
+    timer = nullptr;
+    path.clear();
+}
+
+PanelWidgetConfig::DeferredSave::~DeferredSave() {
+    cancel();
+}
+
+void PanelWidgetConfig::save_soon() {
+    if (!deferred_save_.timer) {
+        deferred_save_.path = config_.df() + "panel_widgets/" + panel_id_;
+        deferred_save_.timer = lv_timer_create(
+            [](lv_timer_t* t) {
+                auto* self = static_cast<PanelWidgetConfig*>(lv_timer_get_user_data(t));
+                // One-shot: the runner retires it.
+                self->deferred_save_.timer = nullptr;
+                const std::string path = std::move(self->deferred_save_.path);
+                self->deferred_save_.path.clear();
+                self->write_to(path);
+            },
+            SAVE_SETTLE_MS, this);
+        lv_timer_set_repeat_count(deferred_save_.timer, 1);
+        return;
+    }
+    lv_timer_reset(deferred_save_.timer);
+}
+
+void PanelWidgetConfig::flush_pending_save() {
+    if (!deferred_save_.timer) {
+        return;
+    }
+    const std::string path = deferred_save_.path;
+    deferred_save_.cancel();
+    write_to(path);
+}
+
 void PanelWidgetConfig::save() {
-    json root = serialize_pages();
+    deferred_save_.cancel();
+    write_to(config_.df() + "panel_widgets/" + panel_id_);
+}
+
+void PanelWidgetConfig::write_to(const std::string& panel_path) {
+    if (get_runtime_config()->crash_loop_safe_mode) {
+        return;
+    }
+    // This node also carries layout state written by builds newer than this
+    // one, which arrives whenever an update channel is rolled back. Those keys
+    // are unreadable here but must survive the trip, so the node is edited
+    // rather than replaced (prestonbrown/helixscreen#1460). A first save, or a
+    // legacy array left by an older format, starts from an empty object.
+    json root = config_.get<json>(panel_path, json());
+    if (!root.is_object()) {
+        root = json::object();
+    }
+
+    // Every key below is rewritten from member state, and the conditional ones
+    // are cleared first: a key this build owns must not outlive the state that
+    // asked for it just because an earlier save wrote it.
+    for (const char* owned : {"anchors", "layout_units", "legacy_rows", "grid", "parked_grids"}) {
+        root.erase(owned);
+    }
+    // Named, not iterated straight off the call: items() is a proxy that does
+    // not keep the document it walks alive.
+    json owned_keys = serialize_pages();
+    for (auto& [key, value] : owned_keys.items()) {
+        root[key] = std::move(value);
+    }
+
     // Has to survive a save that lands before the anchors are applied: the
     // placement engine writes auto-placed positions back on every populate, so
     // dropping the tag here would make an unanchored default look arranged.
@@ -434,7 +622,7 @@ void PanelWidgetConfig::save() {
         root["parked_grids"] = parked_grids_;
     }
 
-    config_.set<json>(config_.df() + "panel_widgets/" + panel_id_, root);
+    config_.set<json>(panel_path, root);
     config_.save();
 }
 
@@ -501,12 +689,9 @@ std::string PanelWidgetConfig::mint_instance_id(const std::string& base_id) {
         for (const auto& entry : page.widgets) {
             if (entry.id.size() > prefix.size() && entry.id.substr(0, prefix.size()) == prefix) {
                 auto suffix = entry.id.substr(prefix.size());
-                try {
-                    int n = std::stoi(suffix);
-                    if (n > max_n)
-                        max_n = n;
-                } catch (...) {
-                }
+                const auto n = helix::text_io::parse_leading<int>(suffix);
+                if (n && *n > max_n)
+                    max_n = *n;
             }
         }
     }
@@ -522,6 +707,15 @@ void PanelWidgetConfig::delete_entry(const std::string& id) {
             page.widgets.erase(it);
             return;
         }
+    }
+}
+
+void PanelWidgetConfig::remove_from_page(size_t page_index, size_t index) {
+    auto& widgets = pages_[page_index].widgets;
+    if (widgets[index].id.find(':') != std::string::npos) {
+        widgets.erase(widgets.begin() + static_cast<std::ptrdiff_t>(index));
+    } else {
+        widgets[index].disable_and_unplace();
     }
 }
 
@@ -541,10 +735,68 @@ bool PanelWidgetConfig::is_placed(const std::string& id) const {
         auto it = std::find_if(page.widgets.begin(), page.widgets.end(),
                                [&id](const PanelWidgetEntry& e) { return e.id == id; });
         if (it != page.widgets.end()) {
-            return it->enabled && it->has_grid_position();
+            return it->is_placed();
         }
     }
     return false;
+}
+
+bool PanelWidgetConfig::page_is_populated(size_t page_index) const {
+    const auto& entries = page_entries(page_index);
+    return std::any_of(entries.begin(), entries.end(),
+                       [](const PanelWidgetEntry& e) { return e.is_placed(); });
+}
+
+int PanelWidgetConfig::place_entry(std::string id, size_t page_index, int col, int row, int colspan,
+                                   int rowspan) {
+    if (page_index >= pages_.size()) {
+        spdlog::warn("[PanelWidgetConfig] Cannot place '{}' on page {}: {} pages exist", id,
+                     page_index, pages_.size());
+        return -1;
+    }
+
+    // The first entry named id on the landing page is kept; every other one is
+    // erased and offers its config. On the landing page the erased entries all
+    // come after the kept one, so its index stays valid.
+    int kept = -1;
+    nlohmann::json carried = nlohmann::json::object();
+    for (size_t p = 0; p < pages_.size(); ++p) {
+        auto& widgets = pages_[p].widgets;
+        size_t i = 0;
+        while (i < widgets.size()) {
+            if (widgets[i].id != id) {
+                ++i;
+                continue;
+            }
+            if (p == page_index && kept < 0) {
+                kept = static_cast<int>(i);
+                ++i;
+                continue;
+            }
+            if (carried.empty() && !widgets[i].config.empty()) {
+                carried = widgets[i].config;
+            }
+            spdlog::debug("[PanelWidgetConfig] Removing '{}' from page {}: placed on page {}", id,
+                          p, page_index);
+            widgets.erase(widgets.begin() + static_cast<ptrdiff_t>(i));
+        }
+    }
+
+    auto& landing = pages_[page_index].widgets;
+    if (kept < 0) {
+        landing.push_back({std::move(id), true, std::move(carried), col, row, colspan, rowspan});
+        return static_cast<int>(landing.size() - 1);
+    }
+    auto& entry = landing[static_cast<size_t>(kept)];
+    entry.enabled = true;
+    entry.col = col;
+    entry.row = row;
+    entry.colspan = colspan;
+    entry.rowspan = rowspan;
+    if (entry.config.empty() && !carried.empty()) {
+        entry.config = std::move(carried);
+    }
+    return kept;
 }
 
 nlohmann::json PanelWidgetConfig::get_widget_config(const std::string& id) const {
@@ -571,36 +823,55 @@ void PanelWidgetConfig::set_widget_config(const std::string& id, const nlohmann:
     spdlog::debug("[PanelWidgetConfig] set_widget_config: widget '{}' not found", id);
 }
 
-int PanelWidgetConfig::add_page(const std::string& name) {
-    if (pages_.size() >= MAX_PAGES) {
+int PanelWidgetConfig::add_page(const std::string& name, int position) {
+    if (!can_add_page()) {
         spdlog::warn("[PanelWidgetConfig] Cannot add page: at maximum ({} pages)", MAX_PAGES);
         return -1;
     }
 
     PageConfig page;
     page.id = name.empty() ? generate_page_id() : name;
-    pages_.push_back(std::move(page));
-    return static_cast<int>(pages_.size() - 1);
+    if (position < 0) {
+        position = static_cast<int>(pages_.size());
+    }
+    position = std::min(position, static_cast<int>(pages_.size()));
+    const size_t at = static_cast<size_t>(position);
+    pages_.insert(pages_.begin() + static_cast<int64_t>(at), std::move(page));
+    // A page landing at or before the main page shifts it one later, so the
+    // main page keeps its place in the numbering.
+    if (main_page_index_ >= at) {
+        ++main_page_index_;
+    }
+    return position;
 }
 
 bool PanelWidgetConfig::remove_page(size_t page_index) {
+    // A refusal is an expected answer: callers may offer any page that emptied.
     if (pages_.size() <= 1) {
-        spdlog::warn("[PanelWidgetConfig] Cannot remove last page");
+        spdlog::debug("[PanelWidgetConfig] Not removing the last page");
         return false;
     }
     if (page_index >= pages_.size()) {
         return false;
     }
     if (page_index == main_page_index_) {
-        spdlog::warn("[PanelWidgetConfig] Cannot remove main page (index {})", page_index);
+        spdlog::debug("[PanelWidgetConfig] Not removing the main page (index {})", page_index);
         return false;
     }
 
+    // A removed page's undefined-widget entries move to the main page rather
+    // than dying with it: the plugin they wait for is absent either way, and
+    // the main page is the one that survives every removal.
+    json retained = std::move(pages_[page_index].retained);
     pages_.erase(pages_.begin() + static_cast<ptrdiff_t>(page_index));
 
     // Adjust main_page_index
     if (main_page_index_ > page_index) {
         --main_page_index_;
+    }
+
+    for (const auto& item : retained) {
+        pages_[main_page_index_].retained.push_back(item);
     }
 
     return true;
@@ -779,15 +1050,17 @@ std::vector<PanelWidgetEntry> PanelWidgetConfig::build_default_grid(int grid_col
     // "not on this tier" needs saying explicitly.
     std::set<std::string> disabled_ids;
 
-    std::ifstream layout_file(helix::find_readable("default_layout.json"));
-    if (layout_file.is_open()) {
-        try {
-            nlohmann::json layout = nlohmann::json::parse(layout_file);
+    const auto layout_text = helix::text_io::read_file(helix::find_readable("default_layout.json"));
+    if (layout_text) {
+        nlohmann::json layout = nlohmann::json::parse(*layout_text, nullptr, false);
+        if (layout.is_discarded()) {
+            spdlog::warn("[PanelWidgetConfig] Failed to parse default_layout.json: not valid JSON");
+        } else {
             // find + is_array rather than .value("anchors", array()): default_
             // layout.json is runtime-editable, and .value() throws type_error
-            // .302 on a key present with a null value. The catch below would
-            // turn that into "no anchors at all" — every anchor lost to one bad
-            // key. Each read below degrades to its own default instead.
+            // .302 on a key present with a null value; one failed read would
+            // cost every anchor rather than the one bad key. Each read below
+            // degrades to its own default instead.
             auto anchors_it = layout.is_object() ? layout.find("anchors") : layout.end();
             const nlohmann::json empty_array = nlohmann::json::array();
             const nlohmann::json* anchor_list =
@@ -890,9 +1163,6 @@ std::vector<PanelWidgetEntry> PanelWidgetConfig::build_default_grid(int grid_col
             spdlog::debug(
                 "[PanelWidgetConfig] Loaded {} anchors from default_layout.json (bp={}, table={})",
                 anchors.size(), bp_name, variant_used);
-        } catch (const std::exception& e) {
-            spdlog::warn("[PanelWidgetConfig] Failed to parse default_layout.json: {}", e.what());
-            anchors.clear();
         }
     }
 
@@ -1065,7 +1335,7 @@ bool PanelWidgetConfig::migrate_stuck_ams_filament_swap() {
             continue;
         if (!ams->enabled || ams->has_grid_position())
             continue;
-        if (!fil->enabled || !fil->has_grid_position())
+        if (!fil->is_placed())
             continue;
 
         spdlog::info("[PanelWidgetConfig] Migrating stuck ams/filament on page '{}': "
@@ -1105,7 +1375,8 @@ void PanelWidgetConfig::restore_pages(const nlohmann::json& payload) {
             PageConfig page;
             page.id = helix::json_util::safe_string(page_json, "id");
             if (page_json.contains("widgets") && page_json["widgets"].is_array()) {
-                page.widgets = parse_widget_array(page_json["widgets"], pages_.empty());
+                page.widgets =
+                    parse_widget_array(page_json["widgets"], pages_.empty(), &page.retained);
             }
             pages_.push_back(std::move(page));
         }

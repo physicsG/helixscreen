@@ -5,80 +5,50 @@
 
 #include "app_globals.h"
 #include "data_root_resolver.h"
+#include "helix_fs.h"
 #include "lvgl_image_writer.h"
+#include "prerender_size_class.h"
 #include "stb_image.h"
 #include "stb_image_resize.h"
+#include "text_io.h"
 
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cctype>
+#include <cerrno>
 #include <charconv>
+#include <cstdint>
+#include <cstdio>
 #include <cstring>
-#include <filesystem>
-#include <fstream>
+#include <set>
 #include <vector>
 
 namespace helix {
+
+// lz4 lives inside the LVGL submodule's private layout; declaring the one entry
+// point keeps this file from pinning that path. extern "C" keeps the C linkage
+// the symbol actually has, so the enclosing namespace costs nothing.
+extern "C" int LZ4_decompress_safe(const char* src, char* dst, int compressedSize, int dstCapacity);
+
+namespace {
+/// Follows the LVGL image header when LV_IMAGE_FLAGS_COMPRESSED is set.
+struct CompressBlock {
+    uint32_t method;
+    uint32_t compressed_size;
+    uint32_t decompressed_size;
+};
+} // namespace
 
 bool prerendered_exists(const std::string& path) {
     // Callers pass a relative "assets/images/..." path. Resolve it against the
     // asset root so the check works on firmware (bundle mounted at /assets ->
     // /assets/assets/images/...); identity on desktop (asset_root ".").
     //
-    // error_code overload, NOT exists(p): an existence probe must never throw.
-    // The throwing overload only maps ENOENT/ENOTDIR to "not found"; the ESP32
-    // VFS reports missing frogfs paths as ENODATA, which std::filesystem treats
-    // as an error — on firmware exists(p) throws filesystem_error for every
-    // miss, and the escaping exception blanked the home-panel printer image.
-    std::error_code ec;
-    return std::filesystem::exists(asset_path(path), ec);
-}
-
-const char* get_splash_size_name(int screen_width) {
-    if (screen_width < 600) {
-        return "tiny"; // 480x320 class
-    } else if (screen_width < 900) {
-        return "small"; // 800x480 class (AD5M)
-    } else if (screen_width < 1100) {
-        return "medium"; // 1024x600 class
-    } else {
-        return "large"; // 1280x720+ class
-    }
-}
-
-const char* get_splash_3d_size_name(int screen_width, int screen_height) {
-    // Ultra-wide displays (e.g. 1920x440): wide but very short
-    if (screen_width >= 1100 && screen_height < 500) {
-        return "ultrawide";
-    }
-
-    if (screen_width < 600) {
-        // Distinguish K1 (480x400) from generic tiny (480x320)
-        return (screen_height >= 380) ? "tiny_alt" : "tiny";
-    } else if (screen_width < 900) {
-        return "small"; // 800x480 class (AD5M)
-    } else if (screen_width < 1100) {
-        return "medium"; // 1024x600 class
-    } else {
-        return "large"; // 1280x720+ class
-    }
-}
-
-int get_splash_3d_target_height(const char* size_name) {
-    // Known heights for pre-rendered splash images (from gen_splash_3d.py SCREEN_SIZES)
-    if (strcmp(size_name, "tiny") == 0)
-        return 320;
-    if (strcmp(size_name, "tiny_alt") == 0)
-        return 400;
-    if (strcmp(size_name, "small") == 0)
-        return 480;
-    if (strcmp(size_name, "medium") == 0)
-        return 600;
-    if (strcmp(size_name, "large") == 0)
-        return 720;
-    if (strcmp(size_name, "ultrawide") == 0)
-        return 440;
-    return 0; // Unknown — caller should fall back to runtime scaling
+    // An existence probe must never throw: the ESP32 VFS reports a missing
+    // frogfs path as ENODATA, and helix::fs::exists reads every stat failure as
+    // "not there".
+    return helix::fs::exists(asset_path(path));
 }
 
 std::string get_prerendered_splash_3d_path(int screen_width, int screen_height, bool dark_mode) {
@@ -97,8 +67,8 @@ std::string get_prerendered_splash_3d_path(int screen_width, int screen_height, 
         return asset_component_uri(path);
     }
 
-    // Fallback: try base "tiny" if tiny_alt not found (backward compat)
-    if (std::string(size_name) == "tiny_alt") {
+    // A 480x400 panel takes the tiny canvas when its own is absent.
+    if (std::string(size_name) == "small") {
         path = "assets/images/prerendered/splash-3d-";
         path += mode_name;
         path += "-tiny.bin";
@@ -113,8 +83,8 @@ std::string get_prerendered_splash_3d_path(int screen_width, int screen_height, 
     return "";
 }
 
-std::string get_prerendered_splash_path(int screen_width) {
-    const char* size_name = get_splash_size_name(screen_width);
+std::string get_prerendered_splash_path(int screen_width, int screen_height) {
+    const char* size_name = get_splash_size_name(screen_width, screen_height);
 
     // Path relative to install directory
     std::string path = "assets/images/prerendered/splash-logo-";
@@ -130,14 +100,41 @@ std::string get_prerendered_splash_path(int screen_width) {
     return asset_component_uri("assets/images/helixscreen-logo.png");
 }
 
-int get_printer_image_size(int screen_width) {
-    // 300px for medium-large displays (800x480+)
-    // 150px for small displays (480x320)
-    return (screen_width >= 600) ? 300 : 150;
+namespace {
+
+/// One line per distinct key for the whole process. The resolver runs on every
+/// panel rebuild, so an unconditional message here reprints several times per
+/// navigation and the signal is lost in its own repeats.
+///
+/// Main thread only, which every caller of this file's resolvers is; the set has
+/// no lock.
+bool first_mention(const std::string& key) {
+    static std::set<std::string> seen;
+    return seen.insert(key).second;
 }
+
+/// Says once what the process will be decoding, because "which tier am I on"
+/// is the first question any slow-paint report has to answer and it is
+/// otherwise only inferable from a full debug trace.
+void announce_tier_once(int size) {
+    if (!first_mention("tier")) {
+        return;
+    }
+    if (prerendered_exists("assets/images/printers/prerendered")) {
+        spdlog::info("[Prerendered] Printer art: {}px renders", size);
+        return;
+    }
+    // Absent for a source checkout and for any build that skipped
+    // gen-printer-images, which is normal; a shipped package always carries them.
+    spdlog::info("[Prerendered] Printer art: no renders installed, decoding full-resolution "
+                 "PNGs instead (make gen-printer-images)");
+}
+
+} // namespace
 
 std::string get_prerendered_printer_path(const std::string& printer_name, int screen_width) {
     int size = get_printer_image_size(screen_width);
+    announce_tier_once(size);
 
     // Path relative to install directory
     std::string path = "assets/images/printers/prerendered/";
@@ -147,19 +144,31 @@ std::string get_prerendered_printer_path(const std::string& printer_name, int sc
     path += ".bin";
 
     if (prerendered_exists(path)) {
-        spdlog::debug("[Prerendered] Using printer image: {}", path);
+        spdlog::debug("[Prerendered] {} -> {}", printer_name, path);
         return asset_component_uri(path);
     }
 
     // Fall back to original PNG, but verify it exists
     std::string png_path = "assets/images/printers/" + printer_name + ".png";
     if (prerendered_exists(png_path)) {
-        spdlog::trace("[Prerendered] Printer {} fallback to PNG (no {}px)", printer_name, size);
+        // A render dir that exists but lacks THIS printer is partial coverage, and
+        // the only state here that is never expected. A wholly absent dir already
+        // spoke once in announce_tier_once(); repeating it per printer buries it.
+        if (prerendered_exists("assets/images/printers/prerendered") &&
+            first_mention(printer_name + "-" + std::to_string(size))) {
+            spdlog::warn("[Prerendered] No {}px render for '{}' - decoding {} at full "
+                         "resolution on every repaint. Expected {}",
+                         size, printer_name, png_path, path);
+        }
+        spdlog::debug("[Prerendered] {} -> {} (full-resolution PNG)", printer_name, png_path);
         return asset_component_uri(png_path);
     }
 
     // Neither prerendered nor PNG exists — fall back to generic
-    spdlog::debug("[Prerendered] Printer {} has no image, using generic fallback", printer_name);
+    if (first_mention("generic:" + printer_name)) {
+        spdlog::warn("[Prerendered] No artwork for '{}' - showing the generic CoreXY frame",
+                     printer_name);
+    }
     std::string generic_bin =
         "assets/images/printers/prerendered/generic-corexy-" + std::to_string(size) + ".bin";
     if (prerendered_exists(generic_bin)) {
@@ -178,20 +187,19 @@ std::string get_printer_image_cache_dir() {
     return get_helix_cache_dir(PRINTER_CACHE_SUBDIR);
 }
 
+/// Filesystem path for an LVGL image path, which may carry the "A:" drive prefix.
+static std::string strip_lvgl_prefix(const std::string& path) {
+    if (path.size() >= 2 && path[0] == 'A' && path[1] == ':') {
+        return path.substr(2);
+    }
+    return path;
+}
+
 /// Extract a basename from an LVGL image path for use as cache key prefix.
 /// "A:assets/images/printers/prerendered/creality-k1c-150.bin" -> "creality-k1c-150"
 /// "A:assets/images/printers/creality-k1c.png" -> "creality-k1c"
 static std::string extract_source_basename(const std::string& source_image_path) {
-    std::string path = source_image_path;
-
-    // Strip LVGL "A:" prefix
-    if (path.size() >= 2 && path[0] == 'A' && path[1] == ':') {
-        path = path.substr(2);
-    }
-
-    // Extract filename and strip extension
-    std::filesystem::path p(path);
-    return p.stem().string();
+    return std::string(helix::fs::stem(strip_lvgl_prefix(source_image_path)));
 }
 
 namespace {
@@ -204,7 +212,7 @@ std::string png_source_for_prerendered(const std::string& fs_path) {
     if (prerendered_pos == std::string::npos) {
         return {};
     }
-    std::string name = std::filesystem::path(fs_path).stem().string();
+    std::string name(helix::fs::stem(fs_path));
     auto dash = name.rfind('-'); // strip the size suffix
     if (dash == std::string::npos) {
         return {};
@@ -219,7 +227,7 @@ int prerendered_tier_size(const std::string& fs_path) {
     if (fs_path.find("/prerendered/") == std::string::npos) {
         return 0;
     }
-    std::string name = std::filesystem::path(fs_path).stem().string();
+    std::string name(helix::fs::stem(fs_path));
     auto dash = name.rfind('-');
     if (dash == std::string::npos) {
         return 0;
@@ -229,23 +237,91 @@ int prerendered_tier_size(const std::string& fs_path) {
     return ec == std::errc() ? size : 0;
 }
 
+/// Source identity carried in a cache filename: last-write time and byte size,
+/// "0-0" for anything that is not a readable regular file so the name stays
+/// deterministic either way.
+///
+/// The time half is libstdc++'s file_clock tick count (nanoseconds from its
+/// 2174-01-01 epoch), which is what names already on disk carry: rendering it
+/// any other way would orphan every cached image once. Both halves print
+/// unsigned so the routinely negative tick count keeps a "-" out of the name.
+std::string source_fingerprint(const std::string& fs_path) {
+    // libstdc++'s filesystem::__file_clock::_S_epoch_diff.
+    constexpr std::int64_t kFileClockEpochDiffNs = 6'437'664'000LL * 1'000'000'000LL;
+    unsigned long long mtime = 0;
+    unsigned long long size = 0;
+
+    if (helix::fs::is_regular_file(fs_path)) {
+        if (const auto written = helix::fs::mtime_ns(fs_path)) {
+            mtime = static_cast<unsigned long long>(*written - kFileClockEpochDiffNs);
+        }
+        if (const auto bytes = helix::text_io::file_size(fs_path)) {
+            size = static_cast<unsigned long long>(*bytes);
+        }
+    }
+    return std::to_string(mtime) + "-" + std::to_string(size);
+}
+
+/// Consume "<digits>" at `pos`, advancing it. False when there is no digit there.
+bool consume_digits(const std::string& s, size_t& pos) {
+    const size_t start = pos;
+    while (pos < s.size() && std::isdigit(static_cast<unsigned char>(s[pos]))) {
+        ++pos;
+    }
+    return pos > start;
+}
+
 } // namespace
 
 std::string get_cached_printer_image_path(const std::string& source_image_path, int width,
                                           int height) {
+    // The name carries the source's mtime and size, so an image rewritten in place
+    // under an existing filename resolves to a different entry and the one holding
+    // the old pixels is never consulted again.
+    //
+    // The fingerprint covers the REQUESTED source only. generate_cached_printer_image()
+    // may read the pixels from the full-resolution PNG instead when the request
+    // exceeds the prerendered tier, and a change to that PNG alone leaves this name
+    // unmoved.
     std::string cache_dir = get_printer_image_cache_dir();
     std::string basename = extract_source_basename(source_image_path);
     return cache_dir + "/" + basename + "-" + std::to_string(width) + "x" + std::to_string(height) +
-           ".bin";
+           "-" + source_fingerprint(strip_lvgl_prefix(source_image_path)) + ".bin";
+}
+
+bool printer_cache_entry_matches(const std::string& cache_filename,
+                                 const std::string& source_image_path) {
+    const std::string basename = extract_source_basename(source_image_path);
+    if (basename.empty()) {
+        return false;
+    }
+    const std::string prefix = basename + "-";
+    if (cache_filename.rfind(prefix, 0) != 0) {
+        return false;
+    }
+
+    // Past the basename the name must continue "<W>x<H>-", the dimension segment
+    // get_cached_printer_image_path() writes. That segment is what separates a
+    // PNG's own entries from those of the prerendered variants beside it:
+    // "creality-k1-se-" also prefixes "creality-k1-se-300-233x209-…", which caches
+    // a different source image.
+    size_t pos = prefix.size();
+    if (!consume_digits(cache_filename, pos)) {
+        return false;
+    }
+    if (pos >= cache_filename.size() || cache_filename[pos] != 'x') {
+        return false;
+    }
+    ++pos;
+    if (!consume_digits(cache_filename, pos)) {
+        return false;
+    }
+    return pos < cache_filename.size() && cache_filename[pos] == '-';
 }
 
 bool generate_cached_printer_image(const std::string& source_image_path, int width, int height,
                                    const std::string& output_path) {
-    // Strip LVGL "A:" prefix for filesystem access
-    std::string fs_path = source_image_path;
-    if (fs_path.size() >= 2 && fs_path[0] == 'A' && fs_path[1] == ':') {
-        fs_path = fs_path.substr(2);
-    }
+    std::string fs_path = strip_lvgl_prefix(source_image_path);
 
     // Upscaling from the prerendered tier would bake blur into the cache, which is
     // then kept forever. The tiers are 150px and 300px, but the widget can be much
@@ -256,33 +332,33 @@ bool generate_cached_printer_image(const std::string& source_image_path, int wid
     // resizing from the PNG costs one extra decode ONCE per widget size and gives a
     // genuinely sharp result instead of a permanently soft one. Downscaling from
     // the tier is still preferred (it is smaller and already the right colours).
-    std::error_code png_ec;
     if (std::string png = png_source_for_prerendered(fs_path);
         !png.empty() && std::max(width, height) > prerendered_tier_size(fs_path) &&
-        std::filesystem::exists(png, png_ec)) {
+        helix::fs::exists(png)) {
         spdlog::debug("[PrinterCache] {}x{} exceeds the prerendered tier; sourcing from {}", width,
                       height, png);
         fs_path = png;
     }
 
     // Determine source format from extension
-    std::filesystem::path src(fs_path);
-    std::string ext = src.extension().string();
+    std::string ext(helix::fs::extension(fs_path));
 
     int src_w = 0, src_h = 0;
     std::vector<uint8_t> rgba_pixels;
 
     if (ext == ".bin") {
         // Source is LVGL binary — read header + BGRA pixel data, convert back to RGBA for resize
-        std::ifstream file(fs_path, std::ios::binary);
+        helix::text_io::File file = helix::text_io::open_file(fs_path, "rb");
         if (!file) {
             spdlog::warn("[PrinterCache] Cannot open source .bin: {}", fs_path);
             return false;
         }
+        auto read_exact = [&file](void* dst, size_t n) {
+            return n == 0 || std::fread(dst, n, 1, file.get()) == 1;
+        };
 
         lv_image_header_t header{};
-        file.read(reinterpret_cast<char*>(&header), sizeof(header));
-        if (!file.good() || header.magic != LV_IMAGE_HEADER_MAGIC) {
+        if (!read_exact(&header, sizeof(header)) || header.magic != LV_IMAGE_HEADER_MAGIC) {
             spdlog::warn("[PrinterCache] Invalid .bin header: {}", fs_path);
             return false;
         }
@@ -293,20 +369,67 @@ bool generate_cached_printer_image(const std::string& source_image_path, int wid
         size_t expected_bytes = stride * src_h;
 
         // Check file has enough data (handles compressed/RLE .bin files gracefully)
-        auto file_pos = file.tellg();
-        file.seekg(0, std::ios::end);
-        size_t file_size = static_cast<size_t>(file.tellg()) - static_cast<size_t>(file_pos);
-        file.seekg(file_pos);
+        const size_t file_size = static_cast<size_t>(
+            helix::text_io::file_size(fs_path).value_or(sizeof(header)) - sizeof(header));
 
-        if (file_size < expected_bytes) {
-            // File is smaller than expected — likely compressed (RLE/LZ4).
-            // Fall back to original PNG if available.
+        if (header.flags & LV_IMAGE_FLAGS_COMPRESSED) {
+            // Every shipped tier is LZ4: scripts/lib/lvgl_image_lib.sh renders with
+            // --compress LZ4. Decode it here rather than reaching for the source
+            // PNG, because packaging deletes those PNGs (prune_assets), so on a
+            // device there is nothing to reach for and the cache is never built.
+            CompressBlock comp{};
+            if (!read_exact(&comp, sizeof(comp))) {
+                spdlog::warn("[PrinterCache] Truncated compression header: {}", fs_path);
+                return false;
+            }
+            if (comp.method != LV_IMAGE_COMPRESS_LZ4) {
+                spdlog::warn("[PrinterCache] Unsupported compression {} in {}", comp.method,
+                             fs_path);
+                return false;
+            }
+
+            std::vector<char> packed(comp.compressed_size);
+            if (!read_exact(packed.data(), packed.size())) {
+                spdlog::warn("[PrinterCache] Truncated compressed payload: {}", fs_path);
+                return false;
+            }
+
+            std::vector<uint8_t> raw(comp.decompressed_size);
+            const int produced =
+                LZ4_decompress_safe(packed.data(), reinterpret_cast<char*>(raw.data()),
+                                    static_cast<int>(packed.size()), static_cast<int>(raw.size()));
+            if (produced < 0 || static_cast<size_t>(produced) != raw.size()) {
+                spdlog::warn("[PrinterCache] LZ4 decode failed for {}", fs_path);
+                return false;
+            }
+
+            // Rows arrive stride-padded; the resizer wants them tight.
+            rgba_pixels.resize(static_cast<size_t>(src_w) * src_h * 4);
+            const size_t row_bytes = static_cast<size_t>(src_w) * 4;
+            if (raw.size() < stride * static_cast<size_t>(src_h)) {
+                spdlog::warn("[PrinterCache] Decoded {}B, short of {}x{} stride {}", raw.size(),
+                             src_w, src_h, stride);
+                return false;
+            }
+            for (int row = 0; row < src_h; ++row) {
+                std::memcpy(rgba_pixels.data() + static_cast<size_t>(row) * row_bytes,
+                            raw.data() + static_cast<size_t>(row) * stride, row_bytes);
+            }
+
+            // BGRA (LVGL) -> RGBA (stb)
+            for (size_t i = 0; i < rgba_pixels.size(); i += 4) {
+                std::swap(rgba_pixels[i], rgba_pixels[i + 2]);
+            }
+        } else if (file_size < expected_bytes) {
+            // Not flagged compressed and too small to hold its own pixels: the
+            // file is truncated. The source PNG is the only way back, and it is
+            // present on a dev tree even though a package has none.
             std::string png_fallback = png_source_for_prerendered(fs_path);
             if (png_fallback.empty()) {
                 png_fallback = fs_path;
             }
 
-            spdlog::debug("[PrinterCache] .bin may be compressed ({}B < {}B expected), "
+            spdlog::debug("[PrinterCache] .bin is short ({}B < {}B expected), "
                           "trying PNG fallback: {}",
                           file_size, expected_bytes, png_fallback);
 
@@ -323,14 +446,17 @@ bool generate_cached_printer_image(const std::string& source_image_path, int wid
         } else {
             // Uncompressed — read pixel data using stride
             rgba_pixels.resize(static_cast<size_t>(src_w) * src_h * 4);
-            for (int row = 0; row < src_h; ++row) {
-                file.read(reinterpret_cast<char*>(rgba_pixels.data() + row * src_w * 4), src_w * 4);
+            bool read_ok = true;
+            for (int row = 0; row < src_h && read_ok; ++row) {
+                read_ok = read_exact(rgba_pixels.data() + row * src_w * 4,
+                                     static_cast<size_t>(src_w) * 4);
                 // Skip stride padding if any
-                if (stride > static_cast<size_t>(src_w * 4)) {
-                    file.seekg(stride - src_w * 4, std::ios::cur);
+                if (read_ok && stride > static_cast<size_t>(src_w * 4)) {
+                    read_ok = std::fseek(file.get(), static_cast<long>(stride - src_w * 4),
+                                         SEEK_CUR) == 0;
                 }
             }
-            if (!file.good()) {
+            if (!read_ok) {
                 spdlog::warn("[PrinterCache] Read error from .bin: {}", fs_path);
                 return false;
             }
@@ -384,9 +510,7 @@ bool generate_cached_printer_image(const std::string& source_image_path, int wid
     }
 
     // Ensure output directory exists
-    std::filesystem::path out_dir = std::filesystem::path(output_path).parent_path();
-    std::error_code ec;
-    std::filesystem::create_directories(out_dir, ec);
+    helix::fs::create_directories(std::string(helix::fs::parent_path(output_path)));
 
     // Write LVGL binary (atomic via write_lvgl_bin)
     bool result =
@@ -403,19 +527,24 @@ void prune_printer_image_cache(int max_files, int max_keep) {
     std::string cache_dir = get_printer_image_cache_dir();
 
     struct CacheEntry {
-        std::filesystem::path path;
-        std::filesystem::file_time_type mtime;
+        std::string path;
+        std::int64_t mtime_ns;
     };
     std::vector<CacheEntry> entries;
 
-    try {
-        for (const auto& entry : std::filesystem::directory_iterator(cache_dir)) {
-            if (std::filesystem::is_regular_file(entry.path())) {
-                entries.push_back({entry.path(), std::filesystem::last_write_time(entry.path())});
-            }
-        }
-    } catch (const std::filesystem::filesystem_error&) {
+    const auto listing = helix::fs::list_dir(cache_dir);
+    if (!listing) {
         return; // Directory doesn't exist or can't be read
+    }
+    for (const auto& entry : *listing) {
+        if (!entry.is_regular) {
+            continue;
+        }
+        const auto mtime = helix::fs::mtime_ns(entry.path);
+        if (!mtime) {
+            return; // Unreadable entry: leave the cache as it is
+        }
+        entries.push_back({entry.path, *mtime});
     }
 
     if (static_cast<int>(entries.size()) <= max_files) {
@@ -424,53 +553,17 @@ void prune_printer_image_cache(int max_files, int max_keep) {
 
     // Sort oldest first
     std::sort(entries.begin(), entries.end(),
-              [](const CacheEntry& a, const CacheEntry& b) { return a.mtime < b.mtime; });
+              [](const CacheEntry& a, const CacheEntry& b) { return a.mtime_ns < b.mtime_ns; });
 
     int to_remove = static_cast<int>(entries.size()) - max_keep;
     for (int i = 0; i < to_remove; ++i) {
-        std::error_code ec;
-        std::filesystem::remove(entries[i].path, ec);
-        if (!ec) {
+        if (helix::fs::remove(entries[i].path) || errno == ENOENT) {
             spdlog::debug("[PrinterCache] Pruned old cache entry: {}",
-                          entries[i].path.filename().string());
+                          helix::fs::filename(entries[i].path));
         }
     }
 
     spdlog::info("[PrinterCache] Pruned {} old cache entries", to_remove);
-}
-
-int invalidate_printer_image_cache(const std::string& source_image_path) {
-    std::string basename = extract_source_basename(source_image_path);
-    if (basename.empty()) {
-        return 0;
-    }
-
-    std::string cache_dir = get_printer_image_cache_dir();
-    std::string prefix = basename + "-";
-    int removed = 0;
-
-    try {
-        for (const auto& entry : std::filesystem::directory_iterator(cache_dir)) {
-            if (!std::filesystem::is_regular_file(entry.path()))
-                continue;
-            std::string filename = entry.path().filename().string();
-            if (filename.rfind(prefix, 0) == 0) {
-                std::error_code ec;
-                std::filesystem::remove(entry.path(), ec);
-                if (!ec) {
-                    ++removed;
-                    spdlog::debug("[PrinterCache] Invalidated cache: {}", filename);
-                }
-            }
-        }
-    } catch (const std::filesystem::filesystem_error&) {
-        // Cache dir doesn't exist — nothing to invalidate
-    }
-
-    if (removed > 0) {
-        spdlog::info("[PrinterCache] Invalidated {} cache entries for '{}'", removed, basename);
-    }
-    return removed;
 }
 
 } // namespace helix

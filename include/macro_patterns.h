@@ -42,4 +42,28 @@ inline const std::vector<std::string>& clean_nozzle() {
     return kPatterns;
 }
 
+/**
+ * @brief Macro names that mean "park the toolhead"
+ *
+ * Read by StandardMacros' ParkToolhead slot detection. Matching is exact-name
+ * everywhere this table is consumed, so an underscore-prefixed form such as
+ * _PARK never matches: the leading underscore is the config author marking a
+ * macro internal, and invoking one is machine motion nobody sanctioned.
+ */
+inline const std::vector<std::string>& park_toolhead() {
+    static const std::vector<std::string> kPatterns = {"PARK", "PARK_TOOLHEAD", "TOOLHEAD_PARK"};
+    return kPatterns;
+}
+
+/**
+ * @brief The macro that wraps a multi-head filament feed
+ *
+ * Named in four places: the discovery scan that sets the capability flag, the
+ * subscription that requests the macro object, the reconcile that reads its
+ * `doing` interlock from that object, and the backend that resolves the
+ * config-case object key. A drift between any two makes the interlock lookup
+ * miss a key nothing requested, and the cleanup silently does nothing.
+ */
+inline constexpr const char* AUTO_FEEDING_BATCH = "AUTO_FEEDING_BATCH";
+
 } // namespace helix::macro_patterns

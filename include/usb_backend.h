@@ -45,20 +45,21 @@ struct UsbError {
 
 /**
  * @brief USB drive information
+ *
+ * Carries no capacity fields: free space on a removable FAT volume costs a
+ * full FAT scan on the first query after mount (seconds on embedded flash),
+ * so whoever displays capacity computes it on demand - never the detection
+ * path that decides a drive exists.
  */
 struct UsbDrive {
-    std::string mount_path;   ///< Mount point path ("/media/usb0" or "/Volumes/USBDRIVE")
-    std::string device;       ///< Device path ("/dev/sda1")
-    std::string label;        ///< Volume label ("USBDRIVE")
-    uint64_t total_bytes;     ///< Total capacity in bytes
-    uint64_t available_bytes; ///< Available space in bytes
+    std::string mount_path; ///< Mount point path ("/media/usb0" or "/Volumes/USBDRIVE")
+    std::string device;     ///< Device path ("/dev/sda1")
+    std::string label;      ///< Volume label ("USBDRIVE")
 
-    UsbDrive() : total_bytes(0), available_bytes(0) {}
+    UsbDrive() = default;
 
-    UsbDrive(const std::string& mount, const std::string& dev, const std::string& lbl,
-             uint64_t total = 0, uint64_t available = 0)
-        : mount_path(mount), device(dev), label(lbl), total_bytes(total),
-          available_bytes(available) {}
+    UsbDrive(const std::string& mount, const std::string& dev, const std::string& lbl)
+        : mount_path(mount), device(dev), label(lbl) {}
 };
 
 /**
@@ -89,9 +90,11 @@ enum class UsbEvent {
  *
  * Provides a clean, platform-agnostic API for USB drive monitoring.
  * Concrete implementations handle platform-specific details:
- * - UsbBackendLinux: inotify on /dev, parse /proc/mounts
- * - UsbBackendMacOS: FSEvents on /Volumes
+ * - UsbBackendLinux: polls /proc/self/mountinfo for mount table changes,
+ *   parses /proc/mounts
  * - UsbBackendMock: Simulator mode with fake drives
+ *
+ * No other platform has a backend: create() returns nullptr there.
  *
  * Design principles:
  * - Hide all platform-specific details from UsbManager
@@ -184,12 +187,15 @@ class UsbBackend {
     /**
      * @brief Create appropriate backend for current platform
      *
-     * - Linux: UsbBackendLinux (inotify + /proc/mounts)
-     * - macOS: UsbBackendMacOS (FSEvents on /Volumes)
+     * - Linux: UsbBackendLinux (mount table poll)
      * - Test mode: UsbBackendMock (simulator with fake data)
+     * - Anything else: nullptr
+     *
+     * The backend comes back unstarted, so the caller can attach its event
+     * callback before start().
      *
      * @param force_mock If true, always return mock backend (for testing)
-     * @return Unique pointer to backend instance
+     * @return Unique pointer to backend instance, or nullptr
      */
     static std::unique_ptr<UsbBackend> create(bool force_mock = false);
 };

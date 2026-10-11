@@ -3,6 +3,8 @@
 
 #include "afc_fault_position.h"
 
+#include "text_io.h"
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -64,20 +66,11 @@ constexpr std::array<Rule, 5> RULES{{
     {"pre extruder gear toolhead sensor", PathSegment::OUTPUT},
 }};
 
-std::string_view trim(std::string_view s) {
-    const auto is_space = [](char c) { return std::isspace(static_cast<unsigned char>(c)) != 0; };
-    while (!s.empty() && is_space(s.front()))
-        s.remove_prefix(1);
-    while (!s.empty() && is_space(s.back()))
-        s.remove_suffix(1);
-    return s;
-}
-
 /// The bar row: `||=====||==>--||-----||`. Only pipes, fill, the filament head and
 /// spaces, and it must actually contain pipes — otherwise a plain `---` separator
 /// line in some future message would qualify.
 bool is_diagram_row(std::string_view line) {
-    line = trim(line);
+    line = helix::text_io::trim(line);
     if (line.empty())
         return false;
     bool has_pipe = false;

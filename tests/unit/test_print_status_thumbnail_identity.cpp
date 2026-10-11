@@ -39,7 +39,7 @@ namespace {
 // Deliberately NOT benchy_thumbnail_white.png: that is the no-thumbnail
 // placeholder AND the subject's initial value, so publishing it would be a
 // no-op write that never fires the observer these cases are about.
-constexpr const char* THUMB_PATH = "A:assets/images/printer.png";
+constexpr const char* THUMB_PATH = "A:assets/images/printer_400.png";
 
 /// Owns a PrintStatusPanel with a thumbnail widget attached, which is what the
 /// XML build normally supplies. Without it the observer's image branch — the
@@ -50,7 +50,7 @@ struct PrintStatusThumbFixture : public LVGLTestFixture {
         // Own the PrinterState rather than sharing the global one: the panel's
         // observer is registered against whatever reference it is handed, and a
         // path left behind by an earlier test would be delivered to it the
-        // moment it subscribes (observe_string_immediate fires on registration).
+        // moment it subscribes (observe<const char*> fires on registration).
         // register_xml=false keeps these subjects out of the process-wide XML
         // registry, which outlives this stack frame.
         state_.init_subjects(false);
@@ -93,7 +93,7 @@ TEST_CASE_METHOD(PrintStatusThumbFixture,
     helix::ui::UpdateQueue::instance().drain();
 
     // A late publish belonging to the PREVIOUS print.
-    state().set_print_thumbnail("previous.gcode", THUMB_PATH);
+    state().print_state().set_print_thumbnail("previous.gcode", THUMB_PATH);
     helix::ui::UpdateQueue::instance().drain();
 
     // The stamp is the self-sealing half: claiming current.gcode is on screen
@@ -108,7 +108,7 @@ TEST_CASE_METHOD(PrintStatusThumbFixture,
     report_filename("current.gcode");
     helix::ui::UpdateQueue::instance().drain();
 
-    state().set_print_thumbnail("current.gcode", THUMB_PATH);
+    state().print_state().set_print_thumbnail("current.gcode", THUMB_PATH);
     helix::ui::UpdateQueue::instance().drain();
 
     // The identity check must not degenerate into ignoring everything: the
@@ -124,7 +124,7 @@ TEST_CASE_METHOD(PrintStatusThumbFixture,
     // PrintStartController pre-sets a USB thumbnail before the filename observer
     // fires. With no effective filename yet there is nothing to compare against,
     // so the value must still be taken.
-    state().set_print_thumbnail("usb_model.gcode", THUMB_PATH);
+    state().print_state().set_print_thumbnail("usb_model.gcode", THUMB_PATH);
     helix::ui::UpdateQueue::instance().drain();
 
     CHECK(PrintStatusPanelTestAccess::cached_thumbnail_path(panel()) == THUMB_PATH);
@@ -148,7 +148,7 @@ TEST_CASE_METHOD(PrintStatusThumbFixture,
                  "PrintStatusPanel: an externally started print invalidates the preview marker",
                  "[print_status][thumbnail]") {
     report_filename("printA.gcode");
-    state().set_print_thumbnail("printA.gcode", THUMB_PATH);
+    state().print_state().set_print_thumbnail("printA.gcode", THUMB_PATH);
     helix::ui::UpdateQueue::instance().drain();
     REQUIRE(PrintStatusPanelTestAccess::displayed_file(panel()) == "printA.gcode");
 
@@ -161,7 +161,7 @@ TEST_CASE_METHOD(PrintStatusThumbFixture,
     CHECK(PrintStatusPanelTestAccess::displayed_file(panel()) != "printA.gcode");
 
     // And the new print's thumbnail must be adopted once it lands.
-    state().set_print_thumbnail("printB.gcode", THUMB_PATH_B);
+    state().print_state().set_print_thumbnail("printB.gcode", THUMB_PATH_B);
     helix::ui::UpdateQueue::instance().drain();
     CHECK(PrintStatusPanelTestAccess::cached_thumbnail_path(panel()) == THUMB_PATH_B);
     CHECK(PrintStatusPanelTestAccess::displayed_file(panel()) == "printB.gcode");
@@ -184,15 +184,15 @@ TEST_CASE_METHOD(PrintStatusThumbFixture,
     // Preparing (:34), so the Complete->Idle edge is swallowed for any print
     // started from the app. The override must therefore be retired when it stops
     // describing the incoming filename.
-    state().set_print_identity_override("printA.gcode");
+    state().print_state().set_print_identity_override("printA.gcode");
     report_filename("printA.gcode");
-    state().set_print_thumbnail("printA.gcode", THUMB_PATH);
+    state().print_state().set_print_thumbnail("printA.gcode", THUMB_PATH);
     helix::ui::UpdateQueue::instance().drain();
     REQUIRE(PrintStatusPanelTestAccess::cached_thumbnail_path(panel()) == THUMB_PATH);
 
     // Next print starts externally, so nothing re-points the override at it.
     report_filename("printB.gcode");
-    state().set_print_thumbnail("printB.gcode", THUMB_PATH_B);
+    state().print_state().set_print_thumbnail("printB.gcode", THUMB_PATH_B);
     helix::ui::UpdateQueue::instance().drain();
 
     // The override no longer describes the incoming file, so it must be dropped
@@ -228,7 +228,7 @@ TEST_CASE_METHOD(PrintStatusThumbFixture,
     helix::ui::UpdateQueue::instance().drain();
 
     // The manager publishes under the resolved original, as it always does.
-    state().set_print_thumbnail("Widget.gcode", THUMB_PATH);
+    state().print_state().set_print_thumbnail("Widget.gcode", THUMB_PATH);
     helix::ui::UpdateQueue::instance().drain();
 
     CHECK(PrintStatusPanelTestAccess::cached_thumbnail_path(panel()) == THUMB_PATH);
@@ -246,11 +246,11 @@ TEST_CASE_METHOD(PrintStatusThumbFixture,
     // observer alone would leave the previous print's image on screen and let
     // the src assertion pass for the wrong reason.
     report_filename("printA.gcode");
-    state().set_print_thumbnail("printA.gcode", THUMB_PATH_B);
+    state().print_state().set_print_thumbnail("printA.gcode", THUMB_PATH_B);
     helix::ui::UpdateQueue::instance().drain();
     REQUIRE(PrintStatusPanelTestAccess::displayed_src(panel()) == THUMB_PATH_B);
 
-    state().set_print_thumbnail("Widget.gcode", THUMB_PATH);
+    state().print_state().set_print_thumbnail("Widget.gcode", THUMB_PATH);
     helix::ui::UpdateQueue::instance().drain();
 
     report_filename(".helix_temp/modified_1748_Widget.gcode");
@@ -282,14 +282,14 @@ TEST_CASE_METHOD(PrintStatusThumbFixture,
     const std::string placeholder = helix::PrinterPrintState::no_thumbnail_placeholder();
 
     report_filename("printA.gcode");
-    state().set_print_thumbnail("printA.gcode", THUMB_PATH);
+    state().print_state().set_print_thumbnail("printA.gcode", THUMB_PATH);
     helix::ui::UpdateQueue::instance().drain();
     REQUIRE(PrintStatusPanelTestAccess::displayed_file(panel()) == "printA.gcode");
 
     // printB starts and the manager clears: the placeholder, published for the
     // file that is now printing, before any fetch has run.
     report_filename("printB.gcode");
-    state().set_print_thumbnail("printB.gcode", placeholder);
+    state().print_state().set_print_thumbnail("printB.gcode", placeholder);
     helix::ui::UpdateQueue::instance().drain();
 
     // It goes on screen — that IS what "no thumbnail yet" looks like, and the
@@ -301,7 +301,7 @@ TEST_CASE_METHOD(PrintStatusThumbFixture,
     CHECK(PrintStatusPanelTestAccess::displayed_file(panel()) != "printB.gcode");
 
     // The real image still lands when the fetch completes.
-    state().set_print_thumbnail("printB.gcode", THUMB_PATH_B);
+    state().print_state().set_print_thumbnail("printB.gcode", THUMB_PATH_B);
     helix::ui::UpdateQueue::instance().drain();
     CHECK(PrintStatusPanelTestAccess::displayed_src(panel()) == THUMB_PATH_B);
     CHECK(PrintStatusPanelTestAccess::displayed_file(panel()) == "printB.gcode");
@@ -320,12 +320,12 @@ TEST_CASE_METHOD(PrintStatusThumbFixture,
     const std::string placeholder = helix::PrinterPrintState::no_thumbnail_placeholder();
 
     report_filename("printA.gcode");
-    state().set_print_thumbnail("printA.gcode", THUMB_PATH);
+    state().print_state().set_print_thumbnail("printA.gcode", THUMB_PATH);
     helix::ui::UpdateQueue::instance().drain();
     REQUIRE(PrintStatusPanelTestAccess::displayed_file(panel()) == "printA.gcode");
 
     // Published while the panel still names printA: dropped by the observer.
-    state().set_print_thumbnail("printB.gcode", placeholder);
+    state().print_state().set_print_thumbnail("printB.gcode", placeholder);
     helix::ui::UpdateQueue::instance().drain();
 
     // Filename catches up; the adopt branch applies the published value.

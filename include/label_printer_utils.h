@@ -6,6 +6,7 @@
 #include "label_printer.h"
 #include "mdns_discovery.h"
 #include "spoolman_types.h"
+#include "text_io.h"
 
 #include <algorithm>
 #include <string>
@@ -35,7 +36,7 @@ std::string friendly_label_printer_error(const std::string& raw);
 inline int label_printer_score(const DiscoveredPrinter& printer) {
     auto lower = [](const std::string& s) {
         std::string out = s;
-        std::transform(out.begin(), out.end(), out.begin(), ::tolower);
+        out = helix::text_io::to_lower(out);
         return out;
     };
     std::string name = lower(printer.name);
@@ -78,7 +79,7 @@ inline int label_printer_score(const DiscoveredPrinter& printer) {
 inline int ipp_printer_score(const DiscoveredPrinter& printer) {
     auto lower = [](const std::string& s) {
         std::string out = s;
-        std::transform(out.begin(), out.end(), out.begin(), ::tolower);
+        out = helix::text_io::to_lower(out);
         return out;
     };
     std::string name = lower(printer.name);

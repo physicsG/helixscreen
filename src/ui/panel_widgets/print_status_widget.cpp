@@ -3,13 +3,17 @@
 
 #include "print_status_widget.h"
 
+#include "ui_callback_helpers.h"
 #include "ui_error_reporting.h"
 #include "ui_event_safety.h"
+#include "ui_filename_utils.h"
 #include "ui_format_utils.h"
-#include "ui_nav_manager.h"
+#include "ui_nav.h"
+#include "ui_next_tick.h"
 #include "ui_overlay_temp_graph.h"
 #include "ui_panel_print_select.h"
 #include "ui_panel_print_status.h"
+#include "ui_pause_markers.h"
 #include "ui_progress_arc.h"
 #include "ui_temperature_utils.h"
 #include "ui_update_queue.h"
@@ -20,15 +24,19 @@
 #include "app_constants.h"
 #include "app_globals.h"
 #include "data_root_resolver.h"
+#include "display_numbering.h"
 #include "filament_op_dispatch.h"
 #include "filament_op_execute.h"
 #include "filament_op_router.h"
 #include "filament_sensor_manager.h"
 #include "format_utils.h"
+#include "helix_fs.h"
+#include "i_moonraker_client.h"
+#include "job_queue_state.h"
 #include "klipper_extruder_naming.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "moonraker_api.h"
-#include "moonraker_client.h"
+#include "observe_language.h"
 #include "observer_factory.h"
 #include "panel_widget_manager.h"
 #include "panel_widget_registry.h"
@@ -54,6 +62,9 @@
 #include <unordered_set>
 
 namespace {
+/// Owns the XML-published static subjects shared by every PrintStatusWidget.
+SubjectManager s_static_subjects;
+
 // The idle hero thumbnail is the same benchy image the print-thumbnail subject
 // publishes when a file has no thumbnail of its own, so both come from one
 // resolution point. The returned pointer outlives the widget, which
@@ -61,6 +72,8 @@ namespace {
 const char* benchy_thumb_path() {
     return helix::PrinterPrintState::no_thumbnail_placeholder();
 }
+
+void open_temp_graph_for(lv_event_t* e, TempGraphOverlay::Mode mode);
 } // namespace
 
 namespace helix {
@@ -69,24 +82,22 @@ void register_print_status_widget() {
         "print_status", [](const std::string&) { return std::make_unique<PrintStatusWidget>(); });
 
     // Register XML event callbacks at startup (before any XML is parsed)
-    lv_xml_register_event_cb(nullptr, "print_card_clicked_cb",
-                             PrintStatusWidget::print_card_clicked_cb);
-    lv_xml_register_event_cb(nullptr, "library_files_cb", PrintStatusWidget::library_files_cb);
-    lv_xml_register_event_cb(nullptr, "library_last_cb", PrintStatusWidget::library_last_cb);
-    lv_xml_register_event_cb(nullptr, "library_recent_cb", PrintStatusWidget::library_recent_cb);
-    lv_xml_register_event_cb(nullptr, "library_queue_cb", PrintStatusWidget::library_queue_cb);
-    lv_xml_register_event_cb(nullptr, "print_status_nozzle_chevron_cb",
-                             PrintStatusWidget::print_status_nozzle_chevron_cb);
-    lv_xml_register_event_cb(nullptr, "print_status_layout_library_cb",
-                             PrintStatusWidget::print_status_layout_library_cb);
-    lv_xml_register_event_cb(nullptr, "print_status_layout_detailed_cb",
-                             PrintStatusWidget::print_status_layout_detailed_cb);
-    lv_xml_register_event_cb(nullptr, "on_print_status_nozzle_temp_clicked",
-                             PrintStatusWidget::on_print_status_nozzle_temp_clicked);
-    lv_xml_register_event_cb(nullptr, "on_print_status_bed_temp_clicked",
-                             PrintStatusWidget::on_print_status_bed_temp_clicked);
-    lv_xml_register_event_cb(nullptr, "on_print_status_chamber_temp_clicked",
-                             PrintStatusWidget::on_print_status_chamber_temp_clicked);
+    register_xml_callbacks({
+        {"print_card_clicked_cb", PrintStatusWidget::print_card_clicked_cb},
+        {"library_files_cb", PrintStatusWidget::library_files_cb},
+        {"library_last_cb", PrintStatusWidget::library_last_cb},
+        {"library_recent_cb", PrintStatusWidget::library_recent_cb},
+        {"library_queue_cb", PrintStatusWidget::library_queue_cb},
+        {"print_status_nozzle_chevron_cb", PrintStatusWidget::print_status_nozzle_chevron_cb},
+        {"print_status_layout_library_cb", PrintStatusWidget::print_status_layout_library_cb},
+        {"print_status_layout_detailed_cb", PrintStatusWidget::print_status_layout_detailed_cb},
+        {"on_print_status_nozzle_temp_clicked",
+         [](lv_event_t* e) { open_temp_graph_for(e, TempGraphOverlay::Mode::Nozzle); }},
+        {"on_print_status_bed_temp_clicked",
+         [](lv_event_t* e) { open_temp_graph_for(e, TempGraphOverlay::Mode::Bed); }},
+        {"on_print_status_chamber_temp_clicked",
+         [](lv_event_t* e) { open_temp_graph_for(e, TempGraphOverlay::Mode::Chamber); }},
+    });
 }
 } // namespace helix
 
@@ -104,42 +115,42 @@ void PrintStatusWidget::init_static_subjects() {
         return;
 
     lv_subject_init_int(&column_mode_subject_, 0);
-    lv_xml_register_subject(nullptr, "print_status_column_mode", &column_mode_subject_);
+    s_static_subjects.publish("print_status_column_mode", &column_mode_subject_);
     column_mode_subject_initialized_ = true;
     lv_subject_init_int(&width_band_subject_, 1); // 1 = normal, matches the old colspan=2 default
-    lv_xml_register_subject(nullptr, "print_status_width_band", &width_band_subject_);
+    s_static_subjects.publish("print_status_width_band", &width_band_subject_);
     width_band_subject_initialized_ = true;
 
     lv_subject_init_int(&title_hidden_subject_, 0);
-    lv_xml_register_subject(nullptr, "print_status_title_hidden", &title_hidden_subject_);
+    s_static_subjects.publish("print_status_title_hidden", &title_hidden_subject_);
     lv_subject_init_int(&files_hidden_subject_, 0);
-    lv_xml_register_subject(nullptr, "print_status_files_hidden", &files_hidden_subject_);
+    s_static_subjects.publish("print_status_files_hidden", &files_hidden_subject_);
     lv_subject_init_int(&last_hidden_subject_, 0);
-    lv_xml_register_subject(nullptr, "print_status_last_hidden", &last_hidden_subject_);
+    s_static_subjects.publish("print_status_last_hidden", &last_hidden_subject_);
     lv_subject_init_int(&recent_hidden_subject_, 0);
-    lv_xml_register_subject(nullptr, "print_status_recent_hidden", &recent_hidden_subject_);
+    s_static_subjects.publish("print_status_recent_hidden", &recent_hidden_subject_);
     lv_subject_init_int(&queue_hidden_subject_, 1); // queue starts hidden until jobs arrive
-    lv_xml_register_subject(nullptr, "print_status_queue_hidden", &queue_hidden_subject_);
+    s_static_subjects.publish("print_status_queue_hidden", &queue_hidden_subject_);
     lv_subject_init_int(&actions_hidden_subject_, 0);
-    lv_xml_register_subject(nullptr, "print_status_actions_hidden", &actions_hidden_subject_);
+    s_static_subjects.publish("print_status_actions_hidden", &actions_hidden_subject_);
     visibility_subjects_initialized_ = true;
 
     // Detailed-layout subjects
     lv_subject_init_int(&layout_effective_subject_, 0);
     // Observed through layout_effective_subject_for_test() by
     // tests/unit/test_print_status_widget_layout_gate.cpp, the width-gating guard.
-    lv_xml_register_subject(nullptr, "print_status_layout_effective",
-                            &layout_effective_subject_); // SUBJECT_OK: read by the layout-gate test
+    s_static_subjects.publish(
+        "print_status_layout_effective",
+        &layout_effective_subject_); // SUBJECT_OK: read by the layout-gate test
     lv_subject_init_int(&show_filament_active_subject_, 0);
-    lv_xml_register_subject(nullptr, "print_status_show_filament_active",
-                            &show_filament_active_subject_);
+    s_static_subjects.publish("print_status_show_filament_active", &show_filament_active_subject_);
     lv_subject_init_int(&multi_tool_subject_, 0);
-    lv_xml_register_subject(nullptr, "print_status_multi_tool", &multi_tool_subject_);
+    s_static_subjects.publish("print_status_multi_tool", &multi_tool_subject_);
     // Initial value 0 = idle_library_full — matches the default ref_value=0
     // on print_card_idle's bind_flag_if_not_eq so it shows by default
     // before any state events fire.
     lv_subject_init_int(&view_subject_, 0);
-    lv_xml_register_subject(nullptr, "print_status_view", &view_subject_);
+    s_static_subjects.publish("print_status_view", &view_subject_);
     // Default to benchy; reset_print_card_to_idle replaces with last-print
     // thumbnail when history loads.
     // Resolve the benchy default to its bundle-absolute path before the subject
@@ -148,42 +159,21 @@ void PrintStatusWidget::init_static_subjects() {
     snprintf(idle_thumb_path_buf_, sizeof(idle_thumb_path_buf_), "%s", benchy_thumb_path());
     lv_subject_init_string(&idle_thumb_path_subject_, idle_thumb_path_buf_, nullptr,
                            sizeof(idle_thumb_path_buf_), idle_thumb_path_buf_);
-    lv_xml_register_subject(nullptr, "print_status_idle_thumb_path", &idle_thumb_path_subject_);
+    s_static_subjects.publish("print_status_idle_thumb_path", &idle_thumb_path_subject_);
     // Default to tier 2 (8px) — matches the previous hardcoded medium thickness
     // until the arc lays out and C++ publishes the diameter-derived tier.
     lv_subject_init_int(&arc_thickness_tier_subject_, 2);
-    lv_xml_register_subject( // SUBJECT_OK: attach_progress_arc() publishes into this by
-                             // pointer and helix_progress_arc.xml bind_styles read it
-        nullptr, "print_status_arc_thickness_tier", &arc_thickness_tier_subject_);
+    s_static_subjects.publish( // SUBJECT_OK: attach_progress_arc() publishes into this by
+                               // pointer and helix_progress_arc.xml bind_styles read it
+        "print_status_arc_thickness_tier", &arc_thickness_tier_subject_);
     detailed_subjects_initialized_ = true;
 
     StaticSubjectRegistry::instance().register_deinit("PrintStatusWidgetSubjects", []() {
-        if (detailed_subjects_initialized_ && lv_is_initialized()) {
-            lv_subject_deinit(&layout_effective_subject_);
-            lv_subject_deinit(&show_filament_active_subject_);
-            lv_subject_deinit(&multi_tool_subject_);
-            lv_subject_deinit(&view_subject_);
-            lv_subject_deinit(&idle_thumb_path_subject_);
-            lv_subject_deinit(&arc_thickness_tier_subject_);
-            detailed_subjects_initialized_ = false;
-        }
-        if (visibility_subjects_initialized_ && lv_is_initialized()) {
-            lv_subject_deinit(&title_hidden_subject_);
-            lv_subject_deinit(&files_hidden_subject_);
-            lv_subject_deinit(&last_hidden_subject_);
-            lv_subject_deinit(&recent_hidden_subject_);
-            lv_subject_deinit(&queue_hidden_subject_);
-            lv_subject_deinit(&actions_hidden_subject_);
-            visibility_subjects_initialized_ = false;
-        }
-        if (width_band_subject_initialized_ && lv_is_initialized()) {
-            lv_subject_deinit(&width_band_subject_);
-            width_band_subject_initialized_ = false;
-        }
-        if (column_mode_subject_initialized_ && lv_is_initialized()) {
-            lv_subject_deinit(&column_mode_subject_);
-            column_mode_subject_initialized_ = false;
-        }
+        s_static_subjects.deinit_all();
+        detailed_subjects_initialized_ = false;
+        visibility_subjects_initialized_ = false;
+        width_band_subject_initialized_ = false;
+        column_mode_subject_initialized_ = false;
     });
 }
 
@@ -227,10 +217,9 @@ PrintStatusWidget::~PrintStatusWidget() {
 }
 
 void PrintStatusWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
-    using helix::ui::observe_int_immediate;
-    using helix::ui::observe_int_sync;
+    using helix::ui::Dispatch;
+    using helix::ui::observe;
     using helix::ui::observe_print_lifecycle;
-    using helix::ui::observe_string_immediate;
 
     widget_obj_ = widget_obj;
     parent_screen_ = parent_screen;
@@ -246,50 +235,19 @@ void PrintStatusWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
         save_widget_config(config_);
     }
 
-    // Store this pointer for event callback recovery
-    lv_obj_set_user_data(widget_obj_, this);
-
     // Cache widget references from XML
     print_card_thumb_ = lv_obj_find_by_name(widget_obj_, "print_card_thumb");
-    print_card_active_thumb_ = lv_obj_find_by_name(widget_obj_, "print_card_active_thumb");
-    print_card_layout_ = lv_obj_find_by_name(widget_obj_, "print_card_layout");
-    print_card_thumb_wrap_ = lv_obj_find_by_name(widget_obj_, "print_card_thumb_wrap");
-    print_card_info_ = lv_obj_find_by_name(widget_obj_, "print_card_info");
-    print_card_printing_ = lv_obj_find_by_name(widget_obj_, "print_card_printing");
-    print_card_preparing_info_ = lv_obj_find_by_name(widget_obj_, "print_card_preparing_info");
 
     // Library idle state widgets
-    print_card_idle_ = lv_obj_find_by_name(widget_obj_, "print_card_idle");
-    print_card_idle_compact_ = lv_obj_find_by_name(widget_obj_, "print_card_idle_compact");
-    print_card_idle_detailed_ = lv_obj_find_by_name(widget_obj_, "print_card_idle_detailed");
-    print_card_printing_detailed_ =
-        lv_obj_find_by_name(widget_obj_, "print_card_printing_detailed");
     print_card_thumb_compact_ = lv_obj_find_by_name(widget_obj_, "print_card_thumb_compact");
     library_row_last_ = lv_obj_find_by_name(widget_obj_, "library_row_last");
     compact_row_last_ = lv_obj_find_by_name(widget_obj_, "compact_row_last");
 
-    // Hand the detailed-layout arc widget to the formatter (may be nullptr if not in DOM yet)
-    if (s_formatter_) {
-        lv_obj_t* arc = lv_obj_find_by_name(widget_obj_, "detailed_progress_arc");
-        if (arc)
-            s_formatter_->attach_arc(arc);
-    }
-
-    // Nozzle reads the tool-pin-aware proxy subjects rather than the raw
-    // active-extruder ones, so the icon tracks whichever tool the card is
-    // showing. Bed and chamber use the PrinterState defaults. The proxy
-    // subjects live on s_formatter_, which is only ever replaced from
-    // acquire_formatter() — i.e. while no widget is attached — so they genuinely
-    // outlive this binder.
-    nozzle_icon_binder_.bind_subjects(widget_obj_, "nozzle_icon_glyph",
-                                      lv_xml_get_subject(nullptr, "print_status_nozzle_current"),
-                                      lv_xml_get_subject(nullptr, "print_status_nozzle_target"));
-    bed_icon_binder_.bind(widget_obj_, printer_state_, helix::HeaterType::Bed);
-    chamber_icon_binder_.bind(widget_obj_, printer_state_, helix::HeaterType::Chamber);
+    bind_active_branch();
 
     // Set up observers (after widget references are cached and widget_obj_ is set)
     print_state_observer_ = observe_print_lifecycle<PrintStatusWidget>(
-        printer_state_.get_print_lifecycle_subject(), this,
+        printer_state_.print_state().get_print_lifecycle_subject(), this,
         [](PrintStatusWidget* self, PrintState state) {
             if (!self->widget_obj_)
                 return;
@@ -297,40 +255,43 @@ void PrintStatusWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
         },
         printer_state_.get_subjects_lifetime());
 
-    // Use observe_string_immediate: the thumbnail handler only calls lv_image_set_src
+    // Use Dispatch::Immediate: the thumbnail handler only calls lv_image_set_src
     // (no observer lifecycle changes), and set_print_thumbnail is always called
     // from the UI thread via queue_update. Immediate avoids the double-deferral that
     // caused stale reads when the subject changed between notification and handler.
-    print_thumbnail_path_observer_ = observe_string_immediate<PrintStatusWidget>(
-        printer_state_.get_print_thumbnail_path_subject(), this,
-        [](PrintStatusWidget* self, const char* path) {
+    print_thumbnail_path_observer_ = observe<const char*>(
+        printer_state_.print_state().get_print_thumbnail_path_subject(), this,
+        [](PrintStatusWidget* self, const char* /*path*/) {
             if (!self->widget_obj_)
                 return;
-            self->on_print_thumbnail_path_changed(path);
+            self->defer_apply_active_thumbnail();
         },
-        printer_state_.get_subjects_lifetime());
+        printer_state_.get_subjects_lifetime(), Dispatch::Immediate);
 
 #if defined(HELIX_PLATFORM_ESP32)
     // ESP32 has no disk thumbnail cache, so print_thumbnail_path stays empty and
     // the image arrives as a PSRAM buffer instead. Observe the generation counter
-    // ActivePrintMediaManager bumps when it installs one. observe_int_immediate
-    // for the same reason as the path observer above: the handler only does
-    // lv_image_set_src plus a shared_ptr swap (no observer lifecycle changes, no
-    // widget destruction), and the setter always runs on the UI thread — so the
-    // extra deferral would only add a frame and a stale-read window.
-    print_psram_thumb_observer_ = observe_int_immediate<PrintStatusWidget>(
-        printer_state_.get_print_psram_thumb_gen_subject(), this,
+    // ActivePrintMediaManager bumps when it installs or clears one, and
+    // join the path observer's deferred apply, which reads whichever is current.
+    print_psram_thumb_observer_ = observe<int>(
+        printer_state_.print_state().get_print_psram_thumb_gen_subject(), this,
         [](PrintStatusWidget* self, int /*gen*/) {
             if (!self->widget_obj_)
                 return;
-            self->apply_esp_psram_thumbnail();
+            self->defer_apply_active_thumbnail();
+            // The thumbnail can land after the card went idle for a finished
+            // print; the idle thumbs show it only through a fresh resolve.
+            if (!self->is_active_) {
+                self->defer_reset_print_card_to_idle();
+            }
         },
-        printer_state_.get_subjects_lifetime());
+        printer_state_.get_subjects_lifetime(), Dispatch::Immediate);
 #endif
 
     auto& fsm = helix::FilamentSensorManager::instance();
-    filament_runout_observer_ = observe_int_sync<PrintStatusWidget>(
-        fsm.get_any_runout_subject(), this, [](PrintStatusWidget* self, int any_runout) {
+    filament_runout_observer_ = observe<int>(
+        fsm.get_any_runout_subject(), this,
+        [](PrintStatusWidget* self, int any_runout) {
             if (!self->widget_obj_)
                 return;
             spdlog::debug("[PrintStatusWidget] Filament runout subject changed: {}", any_runout);
@@ -338,18 +299,23 @@ void PrintStatusWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
                 self->check_and_show_idle_runout_modal();
             } else {
                 self->runout_modal_shown_ = false;
+                self->saw_filament_present_ = true;
             }
-        });
+        },
+        fsm.get_subjects_lifetime());
 
     // Observe job queue count to show/hide queue row
     auto* jq_count_subj = lv_xml_get_subject(nullptr, "job_queue_count");
+    auto* jqs = get_job_queue_state();
     if (jq_count_subj) {
-        job_queue_count_observer_ = helix::ui::observe_int_sync<PrintStatusWidget>(
-            jq_count_subj, this, [](PrintStatusWidget* self, int /*count*/) {
+        job_queue_count_observer_ = helix::ui::observe<int>(
+            jq_count_subj, this,
+            [](PrintStatusWidget* self, int /*count*/) {
                 if (!self->widget_obj_)
                     return;
                 self->update_job_queue_row_visibility();
-            });
+            },
+            jqs ? jqs->get_subjects_lifetime() : SubjectLifetime{});
     }
 
     // Register history observer to update idle thumbnail when history loads.
@@ -361,7 +327,7 @@ void PrintStatusWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
         token.defer("PrintStatusWidget::on_history_changed", [this]() {
             if (!widget_obj_ || !print_card_thumb_)
                 return;
-            bool is_idle = !job_holds_machine(printer_state_.get_print_lifecycle());
+            bool is_idle = !job_holds_machine(printer_state_.print_state().get_print_lifecycle());
             if (is_idle) {
                 // Defer: token.defer body runs inside UpdateQueue::process_pending,
                 // and synchronous reset_print_card_to_idle would cascade lv_image_set_src
@@ -377,17 +343,17 @@ void PrintStatusWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
         // is served by whatever response is already in flight, while fetch()
         // would read this ask as an invalidation and queue a second identical
         // request.
-        hm->ensure_loaded();
+        hm->ensure_loaded(HistoryScope::RECENT);
     }
 
     // Observe connection state to fetch history once connected (widget may
     // attach before the WebSocket connection is established)
-    connection_observer_ = helix::ui::observe_int_sync<PrintStatusWidget>(
-        printer_state_.get_printer_connection_state_subject(), this,
+    connection_observer_ = helix::ui::observe<int>(
+        printer_state_.network_state().get_printer_connection_state_subject(), this,
         [](PrintStatusWidget* /*self*/, int state) {
             if (state == static_cast<int>(ConnectionState::CONNECTED)) {
                 if (auto* hm = get_print_history_manager()) {
-                    hm->ensure_loaded();
+                    hm->ensure_loaded(HistoryScope::RECENT);
                 }
             }
         },
@@ -395,19 +361,12 @@ void PrintStatusWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
 
     spdlog::debug("[PrintStatusWidget] Subscribed to print state/progress/time/thumbnail/runout");
 
-    // Check initial print state
-    if (print_card_thumb_ && print_card_active_thumb_) {
-        const PrintState state = printer_state_.get_print_lifecycle();
+    // Check initial print state. The active widgets exist only while a print holds the
+    // machine, so the idle thumbnail is what proves the tree is this widget's.
+    if (print_card_thumb_) {
+        const PrintState state = printer_state_.print_state().get_print_lifecycle();
         if (job_holds_machine(state)) {
             on_print_state_changed(state);
-#if defined(HELIX_PLATFORM_ESP32)
-            // Widget instances are recycled across page rebuilds, so a fresh
-            // attach lands on a print that already has its thumbnail loaded and
-            // no further generation bump coming. Re-apply from the held buffer;
-            // on other platforms the print_thumbnail_path observer's initial
-            // notification covers this.
-            apply_esp_psram_thumbnail();
-#endif
         } else {
             // Defer the initial idle reset: synchronous reset_print_card_to_idle
             // cascades lv_image_set_src → update_align → lv_obj_update_layout up
@@ -418,22 +377,36 @@ void PrintStatusWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
         }
         spdlog::debug("[PrintStatusWidget] Found print card widgets for dynamic updates");
     } else {
-        spdlog::warn("[PrintStatusWidget] Could not find all print card widgets "
-                     "(thumb={}, active_thumb={})",
-                     print_card_thumb_ != nullptr, print_card_active_thumb_ != nullptr);
+        spdlog::warn("[PrintStatusWidget] Could not find the print card thumbnail");
     }
 
     // Apply section visibility from config (drives all print_status_*_hidden subjects)
     apply_visibility_config();
 
+    // The view subject is shared: one card's change rebuilds every card's active views,
+    // so each card rebinds its own after any change, whoever made it.
+    view_observer_ = observe<int>(
+        &view_subject_, this,
+        [](PrintStatusWidget* self, int v) {
+            if (!self->widget_obj_)
+                return;
+            self->bind_active_branch();
+            self->apply_card_layout();
+            if (v >= 3)
+                self->defer_apply_active_thumbnail();
+        },
+        subject_never_freed());
+
     // Re-run visibility when the breakpoint changes so the 'Print Library' header
     // hides on shrink-to-micro and returns on grow-past-micro.
     if (auto* bp_subj = theme_manager_get_breakpoint_subject()) {
-        breakpoint_observer_ = observe_int_sync<PrintStatusWidget>(
-            bp_subj, this, [](PrintStatusWidget* self, int /*bp*/) {
+        breakpoint_observer_ = observe<int>(
+            bp_subj, this,
+            [](PrintStatusWidget* self, int /*bp*/) {
                 if (self->widget_obj_)
                     self->apply_visibility_config();
-            });
+            },
+            subject_never_freed());
     }
 
     // Explicit visibility pass — observer fires may be deferred; ensure correct
@@ -458,6 +431,10 @@ void PrintStatusWidget::detach() {
     // Invalidate lifetime guard FIRST to abort in-flight async fetches
     lifetime_.invalidate();
     live_instances().erase(this);
+    idle_reset_pending_ = false;
+    active_apply_pending_ = false;
+    // The next attach may bring fresh XML thumbs that show nothing of this.
+    shown_idle_thumb_ = {};
 
     // Unregister history observer
     if (auto* hm = get_print_history_manager()) {
@@ -466,6 +443,7 @@ void PrintStatusWidget::detach() {
 
     // Release observers
     print_state_observer_.reset();
+    view_observer_.reset();
     print_thumbnail_path_observer_.reset();
 #if defined(HELIX_PLATFORM_ESP32)
     print_psram_thumb_observer_.reset();
@@ -474,10 +452,8 @@ void PrintStatusWidget::detach() {
     // recycled, so the lv_image outlives this detach, and for a variable source
     // lv_image stores the raw pointer (it only strdups paths). Ours can be the
     // last reference — PrinterState drops its own on the next filename change.
-    if (esp_thumbnail_ && print_card_active_thumb_ &&
-        lv_image_get_src(print_card_active_thumb_) == esp_thumbnail_->dsc()) {
-        lv_image_set_src(print_card_active_thumb_,
-                         helix::PrinterPrintState::no_thumbnail_placeholder());
+    if (esp_thumbnail_) {
+        unpoint_thumbs_from(esp_thumbnail_->dsc());
     }
     esp_thumbnail_.reset();
 #endif
@@ -498,18 +474,12 @@ void PrintStatusWidget::detach() {
     print_card_layout_ = nullptr;
     print_card_thumb_wrap_ = nullptr;
     print_card_info_ = nullptr;
-    print_card_printing_ = nullptr;
     print_card_preparing_info_ = nullptr;
-    print_card_idle_ = nullptr;
-    print_card_idle_compact_ = nullptr;
-    print_card_idle_detailed_ = nullptr;
-    print_card_printing_detailed_ = nullptr;
     print_card_thumb_compact_ = nullptr;
     library_row_last_ = nullptr;
     compact_row_last_ = nullptr;
 
     if (widget_obj_) {
-        lv_obj_set_user_data(widget_obj_, nullptr);
         widget_obj_ = nullptr;
     }
     parent_screen_ = nullptr;
@@ -526,6 +496,18 @@ void PrintStatusWidget::detach() {
 // ============================================================================
 // Size-Dependent Layout
 // ============================================================================
+
+void PrintStatusWidget::on_activate() {
+    // Each return to the dashboard re-resolves the idle thumbnail. That is the
+    // retry for a refetch that failed while it was away (the fetch itself never
+    // retries), and the probe counts as a use, which keeps the render ahead of
+    // the file grid's in the cache's eviction order. Once per activation, so a
+    // printer that keeps failing costs one request per visit, not a loop.
+    if (widget_obj_ && print_card_thumb_ &&
+        !job_holds_machine(printer_state_.print_state().get_print_lifecycle())) {
+        defer_reset_print_card_to_idle();
+    }
+}
 
 void PrintStatusWidget::on_size_changed(int /*colspan*/, int /*rowspan*/, int width_px,
                                         int height_px) {
@@ -555,7 +537,8 @@ void PrintStatusWidget::on_size_changed(int /*colspan*/, int /*rowspan*/, int wi
     // Combined gate: only show the filament line at the wide band AND when actual
     // filament has been extruded. update_filament_text() also writes this
     // subject on used_mm changes, keeping both inputs in sync.
-    int used_mm = lv_subject_get_int(printer_state_.get_print_filament_used_subject());
+    int used_mm =
+        lv_subject_get_int(printer_state_.print_state().get_print_filament_used_subject());
     lv_subject_set_int(&show_filament_active_subject_, (width_band >= 2 && used_mm > 0) ? 1 : 0);
 
     // Compact mode: narrow — not enough horizontal space for thumbnail + action rows
@@ -642,7 +625,67 @@ void PrintStatusWidget::update_view_subject() {
     } else {
         v = use_detailed ? 2 : (is_compact_ ? 1 : 0);
     }
-    lv_subject_set_int(&view_subject_, v);
+    if (lv_subject_get_int(&view_subject_) == v) {
+        // The subject is shared: another instance's change rebuilds this tree's active
+        // branch too, so the bound branch is current only if it is still the one built.
+        if (widget_obj_ &&
+            print_card_layout_.get() == lv_obj_find_by_name(widget_obj_, "print_card_layout")) {
+            return;
+        }
+    } else {
+        // The XML rebuilds the active branch synchronously on every change of this
+        // subject, so its widgets are new once this returns.
+        lv_subject_set_int(&view_subject_, v);
+    }
+    bind_active_branch();
+    apply_card_layout();
+    if (v >= 3) {
+        defer_apply_active_thumbnail();
+    }
+}
+
+void PrintStatusWidget::bind_active_branch() {
+    print_card_active_thumb_ = nullptr;
+    print_card_layout_ = nullptr;
+    print_card_thumb_wrap_ = nullptr;
+    print_card_info_ = nullptr;
+    print_card_preparing_info_ = nullptr;
+    nozzle_icon_binder_.unbind();
+    bed_icon_binder_.unbind();
+    chamber_icon_binder_.unbind();
+    if (!widget_obj_) {
+        return;
+    }
+    // Present only while the active branch is built (print_status_view 3 or 4).
+    print_card_active_thumb_ = lv_obj_find_by_name(widget_obj_, "print_card_active_thumb");
+    print_card_layout_ = lv_obj_find_by_name(widget_obj_, "print_card_layout");
+    print_card_thumb_wrap_ = lv_obj_find_by_name(widget_obj_, "print_card_thumb_wrap");
+    print_card_info_ = lv_obj_find_by_name(widget_obj_, "print_card_info");
+    print_card_preparing_info_ = lv_obj_find_by_name(widget_obj_, "print_card_preparing_info");
+
+    lv_obj_t* detailed_arc = lv_obj_find_by_name(widget_obj_, "detailed_progress_arc");
+    if (s_formatter_) {
+        s_formatter_->attach_arc(detailed_arc);
+    }
+
+    // Scheduled-pause ticks on both progress surfaces of this card: the arc in
+    // the detailed active view and the linear bar in the library active view.
+    // The fill itself stays on the XML bind_value to print_progress_display.
+    helix::ui::attach_arc_pause_markers(detailed_arc, printer_state_);
+    helix::ui::attach_bar_pause_markers(lv_obj_find_by_name(widget_obj_, "print_progress_bar"),
+                                        printer_state_);
+
+    // Nozzle reads the tool-pin-aware proxy subjects rather than the raw
+    // active-extruder ones, so the icon tracks whichever tool the card is
+    // showing. Bed and chamber use the PrinterState defaults. The proxy
+    // subjects live on s_formatter_, which is only ever replaced from
+    // acquire_formatter() — i.e. while no widget is attached — so they genuinely
+    // outlive this binder.
+    nozzle_icon_binder_.bind_subjects(widget_obj_, "nozzle_icon_glyph",
+                                      lv_xml_get_subject(nullptr, "print_status_nozzle_current"),
+                                      lv_xml_get_subject(nullptr, "print_status_nozzle_target"));
+    bed_icon_binder_.bind(widget_obj_, printer_state_, helix::HeaterType::Bed);
+    chamber_icon_binder_.bind(widget_obj_, printer_state_, helix::HeaterType::Chamber);
 }
 
 // Kept as thin wrappers so existing call sites (on_size_changed,
@@ -670,7 +713,7 @@ void PrintStatusWidget::handle_print_card_clicked() {
         return;
     }
 
-    if (!printer_state_.can_start_new_print()) {
+    if (!printer_state_.print_state().can_start_new_print()) {
         // Print in progress - show print status overlay
         spdlog::info(
             "[PrintStatusWidget] Print card clicked - showing print status (print in progress)");
@@ -690,7 +733,7 @@ void PrintStatusWidget::handle_print_card_clicked() {
 
 void PrintStatusWidget::handle_library_files() {
     spdlog::info("[PrintStatusWidget] Library: Print Files");
-    NavigationManager::instance().set_active(PanelId::PrintSelect);
+    helix::nav::set_active(PanelId::PrintSelect);
 }
 
 void PrintStatusWidget::handle_library_last() {
@@ -699,7 +742,7 @@ void PrintStatusWidget::handle_library_last() {
     }
 
     auto* history = get_print_history_manager();
-    if (!history || !history->is_loaded()) {
+    if (!history || !history->is_loaded(HistoryScope::RECENT)) {
         spdlog::info("[PrintStatusWidget] Library: Print Last - no history available");
         return;
     }
@@ -713,7 +756,7 @@ void PrintStatusWidget::handle_library_last() {
     spdlog::info("[PrintStatusWidget] Library: Print Last -> {}", last_job->filename);
 
     // Navigate to PrintSelectPanel, select the file, and return to home on back
-    NavigationManager::instance().set_active(PanelId::PrintSelect);
+    helix::nav::set_active(PanelId::PrintSelect);
 
     auto* panel = get_print_select_panel(printer_state_, get_moonraker_api());
     if (panel) {
@@ -727,7 +770,7 @@ void PrintStatusWidget::handle_library_last() {
 void PrintStatusWidget::handle_library_recent() {
     spdlog::info("[PrintStatusWidget] Library: Recent");
 
-    NavigationManager::instance().set_active(PanelId::PrintSelect);
+    helix::nav::set_active(PanelId::PrintSelect);
 
     auto* panel = get_print_select_panel(printer_state_, get_moonraker_api());
     if (panel) {
@@ -788,23 +831,12 @@ void PrintStatusWidget::on_print_state_changed(PrintState state) {
     }
 }
 
-void PrintStatusWidget::on_print_thumbnail_path_changed(const char* path) {
-    if (!widget_obj_ || !print_card_active_thumb_) {
-        return;
-    }
-
-    // No empty-path branch: ActivePrintMediaManager is the subject's sole writer
-    // and publishes no_thumbnail_placeholder() — the very image this used to
-    // substitute — when a file has no thumbnail, so the value is always an image.
-    defer_apply_active_thumbnail(path);
-}
-
 #if defined(HELIX_PLATFORM_ESP32)
 void PrintStatusWidget::apply_esp_psram_thumbnail() {
     if (!widget_obj_ || !print_card_active_thumb_) {
         return;
     }
-    auto thumb = printer_state_.get_print_psram_thumbnail();
+    auto thumb = printer_state_.print_state().get_print_psram_thumbnail();
     if (!thumb) {
         return;
     }
@@ -814,10 +846,85 @@ void PrintStatusWidget::apply_esp_psram_thumbnail() {
     // which is what EspPsramThumbnail's destructor requires.
     auto previous = std::move(esp_thumbnail_);
     esp_thumbnail_ = std::move(thumb);
+    if (previous && previous != esp_thumbnail_) {
+        unpoint_thumbs_from(previous->dsc());
+    }
     lv_image_set_src(print_card_active_thumb_, esp_thumbnail_->dsc());
     spdlog::info("[PrintStatusWidget] Active print PSRAM thumbnail applied");
 }
+
+void PrintStatusWidget::unpoint_thumbs_from(const void* dsc) {
+    lv_obj_t* thumbs[] = {print_card_active_thumb_, print_card_thumb_, print_card_thumb_compact_,
+                          idle_hero_thumb()};
+    for (auto* img : thumbs) {
+        if (img && lv_obj_is_valid(img) && lv_image_get_src(img) == dsc) {
+            lv_image_set_src(img, helix::PrinterPrintState::no_thumbnail_placeholder());
+        }
+    }
+}
+
+bool PrintStatusWidget::show_finished_print_image() {
+    // The active-print media keeps the last print's image until another print
+    // starts. The history fetch cannot produce one here: there is no disk cache
+    // for it to land in.
+    auto* history = get_print_history_manager();
+    const PrintHistoryJob* newest = history ? history->get_newest_existing_job() : nullptr;
+    const char* raw =
+        lv_subject_get_string(printer_state_.print_state().get_print_filename_subject());
+    const std::string& identity = printer_state_.print_state().get_effective_print_filename();
+    if (!idle_card_shows_active_thumbnail(
+            printer_state_.print_state().get_print_lifecycle(),
+            newest ? newest->filename : std::string(), raw ? raw : "", identity,
+            printer_state_.print_state().get_print_thumbnail_file())) {
+        return false;
+    }
+    auto thumb = printer_state_.print_state().get_print_psram_thumbnail();
+    if (!thumb) {
+        return false;
+    }
+    if (thumb != esp_thumbnail_) {
+        apply_esp_psram_thumbnail();
+    }
+    if (esp_thumbnail_ != thumb) {
+        return false; // no active thumb to apply it to; this tree is incomplete
+    }
+    // idle_thumb_path_subject_ is a string and cannot carry a descriptor, so
+    // the hero is written directly; set_thumb_on_widgets() writes it back.
+    shown_idle_thumb_ = {};
+    lv_obj_t* thumbs[] = {print_card_thumb_, print_card_thumb_compact_, idle_hero_thumb()};
+    for (auto* img : thumbs) {
+        if (img && lv_obj_is_valid(img)) {
+            lv_image_set_src(img, esp_thumbnail_->dsc());
+        }
+    }
+    spdlog::debug("[PrintStatusWidget] Idle thumbnail: finished print '{}' (PSRAM)", identity);
+    return true;
+}
+
+lv_obj_t* PrintStatusWidget::idle_hero_thumb() const {
+    return widget_obj_ && lv_obj_is_valid(widget_obj_)
+               ? lv_obj_find_by_name(widget_obj_, "idle_thumb")
+               : nullptr;
+}
 #endif
+
+bool PrintStatusWidget::history_job_is_active_print(const std::string& history_file,
+                                                    const std::string& raw_file,
+                                                    const std::string& identity_file) {
+    return !history_file.empty() && (history_file == raw_file || history_file == identity_file);
+}
+
+bool PrintStatusWidget::idle_card_shows_active_thumbnail(PrintState state,
+                                                         const std::string& history_file,
+                                                         const std::string& raw_file,
+                                                         const std::string& identity_file,
+                                                         const std::string& thumbnail_file) {
+    if (thumbnail_file.empty() || thumbnail_file != identity_file) {
+        return false;
+    }
+    return state == PrintState::Complete ||
+           history_job_is_active_print(history_file, raw_file, identity_file);
+}
 
 std::string PrintStatusWidget::get_last_print_thumbnail_path() const {
     auto* history = get_print_history_manager();
@@ -835,34 +942,15 @@ std::string PrintStatusWidget::get_last_print_thumbnail_path() const {
     }
     const auto& job = *newest;
 
-    // Select the best thumbnail for the widget's actual rendered size
-    if (!job.thumbnails.empty() && print_card_thumb_ && lv_obj_is_valid(print_card_thumb_)) {
-        int target_w = lv_obj_get_width(print_card_thumb_);
-        int target_h = lv_obj_get_height(print_card_thumb_);
-
-        // Find smallest thumbnail that meets or exceeds the widget dimensions
-        const ThumbnailInfo* best_adequate = nullptr;
-        const ThumbnailInfo* largest = &job.thumbnails[0];
-
-        for (const auto& t : job.thumbnails) {
-            if (t.pixel_count() > largest->pixel_count()) {
-                largest = &t;
-            }
-            if (t.width >= target_w && t.height >= target_h) {
-                if (!best_adequate || t.pixel_count() < best_adequate->pixel_count()) {
-                    best_adequate = &t;
-                }
-            }
-        }
-
-        const auto* best = best_adequate ? best_adequate : largest;
-        spdlog::debug("[PrintStatusWidget] Widget {}x{}, selected thumbnail {}x{} ({})", target_w,
-                      target_h, best->width, best->height, best->relative_path);
-        return best->relative_path;
-    }
-
-    // Fallback: use pre-selected largest thumbnail
-    return job.thumbnail_path;
+    // Sized for the widget as rendered; unmeasured, that is the largest.
+    const bool measured = print_card_thumb_ && lv_obj_is_valid(print_card_thumb_);
+    const int target_w = measured ? lv_obj_get_width(print_card_thumb_) : 0;
+    const int target_h = measured ? lv_obj_get_height(print_card_thumb_) : 0;
+    std::string path = helix::select_and_resolve_thumbnail(
+        job.thumbnails, helix::gcode_dir_of(job.filename), target_w, target_h);
+    spdlog::debug("[PrintStatusWidget] Widget {}x{}, selected thumbnail '{}'", target_w, target_h,
+                  path);
+    return path;
 }
 
 time_t PrintStatusWidget::get_last_print_source_modified() const {
@@ -878,61 +966,75 @@ time_t PrintStatusWidget::get_last_print_source_modified() const {
 }
 
 void PrintStatusWidget::defer_reset_print_card_to_idle() {
-    // Raw lv_async_call escapes the UpdateQueue::process_pending() batch (see
-    // CLAUDE.md "Safe escape routes"). live_instances() + widget_obj_ guard UAF
-    // if the widget is destroyed before the next tick.
-    lv_async_call(
-        [](void* ud) {
-            auto* self = static_cast<PrintStatusWidget*>(ud);
-            if (live_instances().count(self) != 0 && self->widget_obj_) {
-                self->reset_print_card_to_idle();
-            }
-        },
-        this);
+    if (idle_reset_pending_) {
+        return;
+    }
+    idle_reset_pending_ = true;
+    // run_next_tick escapes the UpdateQueue::process_pending() batch (see
+    // CLAUDE.md "Safe escape routes"). detach() invalidates lifetime_, so a
+    // callback queued before it is skipped and the next attach queues its own.
+    helix::ui::run_next_tick(lifetime_.token(), [this]() {
+        if (widget_obj_ && idle_reset_pending_) {
+            idle_reset_pending_ = false;
+            reset_print_card_to_idle();
+        }
+    });
 }
 
-void PrintStatusWidget::defer_apply_active_thumbnail(const char* path) {
-    // Heap-allocate the payload so lv_async_call can carry it as void*, and copy
-    // the path: the subject may publish again before the tick, and the pointer it
-    // handed us is its own buffer. The LifetimeToken (not a live_instances()
-    // lookup) is what keeps this safe — detach() invalidates it, so a pending
-    // write cannot land on a widget that has already let go of its objects.
-    struct PendingThumb {
-        helix::LifetimeToken token;
-        PrintStatusWidget* self;
-        std::string path;
-    };
-    auto* pending = new PendingThumb{lifetime_.token(), this, path ? path : ""};
+void PrintStatusWidget::defer_apply_active_thumbnail() {
+    if (active_apply_pending_) {
+        return;
+    }
+    active_apply_pending_ = true;
+    // run_next_tick escapes the UpdateQueue::process_pending() batch the
+    // observers run in, the same escape defer_reset_print_card_to_idle() makes
+    // for the idle sibling. detach() invalidates lifetime_, so a callback queued
+    // before it is skipped and the next attach queues its own.
+    helix::ui::run_next_tick(lifetime_.token(), [this]() {
+        if (!active_apply_pending_) {
+            return;
+        }
+        active_apply_pending_ = false;
+        if (!widget_obj_ || !print_card_active_thumb_) {
+            return;
+        }
+        // Trigger hardening (#1001), matching reset_print_card_to_idle(): by the
+        // time the tick fires, populate_page's safe_clean_children() may have
+        // reparented this subtree onto lv_layer_top() to await deletion.
+        // lv_image_set_src → update_align → lv_obj_update_layout would then walk
+        // the whole layer and recurse into sibling condemned grid subtrees whose
+        // children may already be freed → SIGSEGV in grid calc().
+        if (!helix::ui::is_on_active_screen(print_card_active_thumb_)) {
+            spdlog::debug("[PrintStatusWidget] Skip active thumbnail: off active screen "
+                          "(mid-teardown)");
+            return;
+        }
+        apply_active_thumbnail();
+    });
+}
 
-    // Raw lv_async_call escapes the UpdateQueue::process_pending() batch this
-    // observer body runs in, the same escape defer_reset_print_card_to_idle()
-    // makes for the idle sibling.
-    lv_async_call(
-        [](void* ud) {
-            std::unique_ptr<PendingThumb> p(static_cast<PendingThumb*>(ud));
-            if (p->token.expired())
-                return;
-            PrintStatusWidget* self = p->self;
-            if (!self->widget_obj_ || !self->print_card_active_thumb_)
-                return;
-
-            // Trigger hardening (#1001), matching reset_print_card_to_idle():
-            // by the time the tick fires, populate_page's safe_clean_children()
-            // may have reparented this subtree onto lv_layer_top() to await
-            // deletion. lv_image_set_src → update_align → lv_obj_update_layout
-            // would then walk the whole layer and recurse into sibling condemned
-            // grid subtrees whose children may already be freed → SIGSEGV in
-            // grid calc().
-            if (!helix::ui::is_on_active_screen(self->print_card_active_thumb_)) {
-                spdlog::debug("[PrintStatusWidget] Skip active thumbnail: off active screen "
-                              "(mid-teardown)");
-                return;
-            }
-
-            lv_image_set_src(self->print_card_active_thumb_, p->path.c_str());
-            spdlog::info("[PrintStatusWidget] Active print thumbnail updated: {}", p->path);
-        },
-        pending);
+void PrintStatusWidget::apply_active_thumbnail() {
+#if defined(HELIX_PLATFORM_ESP32)
+    // ESP32 publishes only the placeholder as a path; a loaded image is the
+    // PSRAM buffer.
+    if (printer_state_.print_state().get_print_psram_thumbnail()) {
+        apply_esp_psram_thumbnail();
+        return;
+    }
+    // Cleared for a new file or a cleared print: holding the old buffer keeps
+    // PSRAM the next file's decode needs.
+    if (esp_thumbnail_) {
+        unpoint_thumbs_from(esp_thumbnail_->dsc());
+        esp_thumbnail_.reset();
+    }
+#endif
+    // No empty-path branch: ActivePrintMediaManager publishes
+    // no_thumbnail_placeholder() when a file has no thumbnail, so the value is
+    // always an image.
+    const char* path =
+        lv_subject_get_string(printer_state_.print_state().get_print_thumbnail_path_subject());
+    lv_image_set_src(print_card_active_thumb_, path);
+    spdlog::info("[PrintStatusWidget] Active print thumbnail updated: {}", path);
 }
 
 void PrintStatusWidget::reset_print_card_to_idle() {
@@ -962,9 +1064,17 @@ void PrintStatusWidget::reset_print_card_to_idle() {
     // an older fetch completing afterwards would otherwise overwrite it.
     auto ctx = ThumbnailLoadContext::create(lifetime_, &idle_thumb_generation_);
 
+#if defined(HELIX_PLATFORM_ESP32)
+    // Ahead of the history resolve: history may not be loaded at all.
+    if (show_finished_print_image()) {
+        return;
+    }
+#endif
+
     // Try to show the last printed file's thumbnail instead of benchy
     std::string thumb_rel_path = get_last_print_thumbnail_path();
     if (thumb_rel_path.empty()) {
+        shown_idle_thumb_ = {};
         set_thumb_on_widgets(benchy_thumb_path());
         spdlog::debug("[PrintStatusWidget] Idle thumbnail: benchy (no history)");
         return;
@@ -989,17 +1099,27 @@ void PrintStatusWidget::reset_print_card_to_idle() {
     // Check if we already have a fresh pre-scaled BIN version
     auto cached = get_thumbnail_cache().get_if_cached(req);
     if (!cached.empty()) {
-        set_thumb_on_widgets(cached.c_str());
+        publish_idle_render(req.key, req.source_modified, cached);
         spdlog::debug("[PrintStatusWidget] Idle thumbnail from cache: {}", cached);
         return;
     }
 
-    // Set benchy as placeholder while we fetch
-    set_thumb_on_widgets(benchy_thumb_path());
+    // The render on screen stays while the refetch runs only if it is this
+    // same render AND its file is still on disk. No image cache sits in front
+    // of a file path, so every redraw reopens it: a missing file draws nothing,
+    // which is worse than the placeholder.
+    const std::string& shown = shown_idle_thumb_.src;
+    const bool same_render = shown_idle_thumb_.key == req.key &&
+                             shown_idle_thumb_.source_modified == req.source_modified;
+    if (!same_render ||
+        !helix::fs::exists(ThumbnailCache::is_lvgl_path(shown) ? shown.substr(2) : shown)) {
+        shown_idle_thumb_ = {};
+        set_thumb_on_widgets(benchy_thumb_path());
+    }
 
     auto* api = get_moonraker_api();
     if (!api) {
-        spdlog::debug("[PrintStatusWidget] Idle thumbnail: benchy (no API)");
+        spdlog::debug("[PrintStatusWidget] Idle thumbnail: no API, fetch skipped");
         return;
     }
 
@@ -1012,17 +1132,28 @@ void PrintStatusWidget::reset_print_card_to_idle() {
 
     get_thumbnail_cache().fetch(
         req, ctx,
-        [this, token](const std::string& lvgl_path, bool /*degraded*/) {
+        [this, token, ctx, key = req.key, stamp = req.source_modified](const std::string& lvgl_path,
+                                                                       bool /*degraded*/) {
             // Marshal first, then touch members — a bare expired() check
             // followed by a `this` dereference is L081 Mechanism C.
-            token.defer("PrintStatusWidget::apply_idle_thumb", [this, lvgl_path]() {
-                set_thumb_on_widgets(lvgl_path.c_str());
-                spdlog::info("[PrintStatusWidget] Idle thumbnail loaded: {}", lvgl_path);
-            });
+            token.defer(
+                "PrintStatusWidget::apply_idle_thumb", [this, ctx, key, stamp, lvgl_path]() {
+                    // A later resolve can land in the hop this defer adds.
+                    if (!ctx.is_valid())
+                        return;
+                    publish_idle_render(key, stamp, lvgl_path);
+                    spdlog::info("[PrintStatusWidget] Idle thumbnail loaded: {}", lvgl_path);
+                });
         },
         [](const std::string& error) {
             spdlog::debug("[PrintStatusWidget] Idle thumbnail fetch failed: {}", error);
         });
+}
+
+void PrintStatusWidget::publish_idle_render(const std::string& key, time_t source_modified,
+                                            const std::string& src) {
+    shown_idle_thumb_ = {key, source_modified, src};
+    set_thumb_on_widgets(src.c_str());
 }
 
 void PrintStatusWidget::set_thumb_on_widgets(const char* src) {
@@ -1035,7 +1166,20 @@ void PrintStatusWidget::set_thumb_on_widgets(const char* src) {
     if (print_card_thumb_compact_ && lv_obj_is_valid(print_card_thumb_compact_)) {
         lv_image_set_src(print_card_thumb_compact_, src);
     }
+#if defined(HELIX_PLATFORM_ESP32)
+    // The subject only notifies on a change, and the hero may have been
+    // written directly (show_finished_print_image) while it held this value.
+    if (lv_obj_t* hero = idle_hero_thumb(); hero && lv_obj_is_valid(hero)) {
+        lv_image_set_src(hero, src);
+    }
+#endif
     lv_subject_copy_string(&idle_thumb_path_subject_, src);
+}
+
+void PrintStatusWidget::on_edit_mode_exited() {
+    // The Print Last rows' clickability follows history, which can change while
+    // edit mode holds every control unclickable.
+    update_last_print_availability();
 }
 
 void PrintStatusWidget::update_last_print_availability() {
@@ -1066,6 +1210,17 @@ void PrintStatusWidget::check_and_show_idle_runout_modal() {
     auto& fsm = helix::FilamentSensorManager::instance();
     if (fsm.is_in_startup_grace_period()) {
         spdlog::debug("[PrintStatusWidget] In startup grace period - skipping runout modal");
+        return;
+    }
+
+    // Nothing extrudes while the printer is idle, so filament that leaves the
+    // sensor in this state was pulled out by whoever is standing at the machine.
+    // Announcing it back to them under a warning icon reports a fault that cannot
+    // have happened. An empty sensor found on arrival is the case worth raising:
+    // that operator may not know, and Load is what they need.
+    // (prestonbrown/helixscreen#1497)
+    if (saw_filament_present_) {
+        spdlog::debug("[PrintStatusWidget] Filament left the sensor while idle - no dialog");
         return;
     }
 
@@ -1106,7 +1261,7 @@ void PrintStatusWidget::check_and_show_idle_runout_modal() {
     // before plus Preparing, which the wire could not express: a "load filament"
     // dialog on top of a start the user just committed to is an ambush, and the
     // block below would burn the one-shot grace on the way past.
-    const PrintState lifecycle = printer_state_.get_print_lifecycle();
+    const PrintState lifecycle = printer_state_.print_state().get_print_lifecycle();
     if (lifecycle != PrintState::Idle && lifecycle != PrintState::Complete &&
         lifecycle != PrintState::Cancelled) {
         spdlog::debug(
@@ -1633,9 +1788,13 @@ std::vector<PrintStatusWidget::NozzleToolOption> PrintStatusWidget::build_nozzle
         if (!info.display_name.empty()) {
             opt.label = info.display_name;
         } else {
+            // A bare "extruder" name by itself carries no signal about whether the
+            // printer has one nozzle or several, so index 0 answers with the common
+            // single-extruder case rather than guessing multi.
             const int index = helix::tool_number_for_extruder(name).value_or(0);
             opt.label = index == 0 ? std::string(lv_tr("Nozzle"))
-                                   : std::string(lv_tr("Nozzle")) + " " + std::to_string(index + 1);
+                                   : std::string(lv_tr("Nozzle")) + " " +
+                                         helix::ui::lane_number_text(index);
         }
         options.push_back(std::move(opt));
     }
@@ -1788,18 +1947,19 @@ int cd_to_c(int cd) {
 
 void PrintStatusWidget::DetailedFormatter::update_layer_text() {
     auto& ps = get_printer_state();
-    int cur = lv_subject_get_int(ps.get_print_layer_current_subject());
-    int tot = lv_subject_get_int(ps.get_print_layer_total_subject());
+    int cur = lv_subject_get_int(ps.print_state().get_print_layer_current_subject());
+    int tot = lv_subject_get_int(ps.print_state().get_print_layer_total_subject());
     std::string text = helix::ui::format_layer_progress(
-        cur, tot, ps.layer_is_accurate(), lv_subject_get_int(ps.get_gcode_position_z_subject()));
+        cur, tot, ps.print_state().layer_is_accurate(),
+        lv_subject_get_int(ps.motion_state().get_gcode_position_z_subject()));
     snprintf(layer_text_buf_, sizeof(layer_text_buf_), "%s", text.c_str());
     lv_subject_copy_string(&layer_text_subject_, layer_text_buf_);
 }
 
 void PrintStatusWidget::DetailedFormatter::update_time_text() {
     auto& ps = get_printer_state();
-    int elapsed = lv_subject_get_int(ps.get_print_elapsed_subject());
-    int remain = lv_subject_get_int(ps.get_print_time_left_subject());
+    int elapsed = lv_subject_get_int(ps.print_state().get_print_elapsed_subject());
+    int remain = lv_subject_get_int(ps.print_state().get_print_time_left_subject());
     int total = elapsed + remain;
     std::string text =
         helix::format::duration_padded(elapsed) + " / " + helix::format::duration_padded(total);
@@ -1808,7 +1968,8 @@ void PrintStatusWidget::DetailedFormatter::update_time_text() {
 }
 
 void PrintStatusWidget::DetailedFormatter::update_filament_text() {
-    int used_mm = lv_subject_get_int(get_printer_state().get_print_filament_used_subject());
+    int used_mm =
+        lv_subject_get_int(get_printer_state().print_state().get_print_filament_used_subject());
     if (used_mm <= 0) {
         filament_text_buf_[0] = '\0';
     } else {
@@ -1823,9 +1984,7 @@ void PrintStatusWidget::DetailedFormatter::update_filament_text() {
     // used-mm transition (e.g., first extrusion of the print).
     int width_band = lv_subject_get_int(&PrintStatusWidget::width_band_subject_);
     int show = (width_band >= 2 && used_mm > 0) ? 1 : 0;
-    if (lv_subject_get_int(&PrintStatusWidget::show_filament_active_subject_) != show) {
-        lv_subject_set_int(&PrintStatusWidget::show_filament_active_subject_, show);
-    }
+    lv_subject_set_int(&PrintStatusWidget::show_filament_active_subject_, show);
 }
 
 void PrintStatusWidget::DetailedFormatter::update_nozzle_text() {
@@ -1833,23 +1992,19 @@ void PrintStatusWidget::DetailedFormatter::update_nozzle_text() {
     lv_subject_t* temp_sub;
     lv_subject_t* tgt_sub;
     if (current_nozzle_override_ == "auto") {
-        temp_sub = ps.get_active_extruder_temp_subject();
-        tgt_sub = ps.get_active_extruder_target_subject();
+        temp_sub = ps.temperature_state().get_active_extruder_temp_subject();
+        tgt_sub = ps.temperature_state().get_active_extruder_target_subject();
     } else {
-        temp_sub = ps.get_extruder_temp_subject(current_nozzle_override_);
-        tgt_sub = ps.get_extruder_target_subject(current_nozzle_override_);
+        temp_sub = ps.temperature_state().get_extruder_temp_subject(current_nozzle_override_);
+        tgt_sub = ps.temperature_state().get_extruder_target_subject(current_nozzle_override_);
     }
     int temp_dd = temp_sub ? lv_subject_get_int(temp_sub) : 0;
     int tgt_dd = tgt_sub ? lv_subject_get_int(tgt_sub) : 0;
     // Mirror into proxy subjects (decidegrees) — temp_display in the detailed
     // XML binds to these and gets heating-color rendering for free, including
     // when pinned to a specific tool.
-    if (lv_subject_get_int(&nozzle_current_subject_) != temp_dd) {
-        lv_subject_set_int(&nozzle_current_subject_, temp_dd);
-    }
-    if (lv_subject_get_int(&nozzle_target_subject_) != tgt_dd) {
-        lv_subject_set_int(&nozzle_target_subject_, tgt_dd);
-    }
+    lv_subject_set_int(&nozzle_current_subject_, temp_dd);
+    lv_subject_set_int(&nozzle_target_subject_, tgt_dd);
     // String form kept for the (unused-by-XML but test-asserted) nozzle_text
     // subject, so test_print_status_widget_tool_override.cpp still verifies
     // the pinning + auto-mode dispatch.
@@ -1860,7 +2015,7 @@ void PrintStatusWidget::DetailedFormatter::update_nozzle_text() {
 
 bool PrintStatusWidget::DetailedFormatter::set_nozzle_tool_override(
     const std::string& override_name) {
-    using helix::ui::observe_int_sync;
+    using helix::ui::observe;
     auto& ps = get_printer_state();
 
     // Skip rebind when the override hasn't changed — avoids needless
@@ -1879,12 +2034,12 @@ bool PrintStatusWidget::DetailedFormatter::set_nozzle_tool_override(
 
     auto bind_auto = [&]() {
         current_nozzle_override_ = "auto";
-        nozzle_temp_observer_ = observe_int_sync<DetailedFormatter>(
-            ps.get_active_extruder_temp_subject(), this,
+        nozzle_temp_observer_ = observe<int>(
+            ps.temperature_state().get_active_extruder_temp_subject(), this,
             [](DetailedFormatter* self, int) { self->update_nozzle_text(); },
             ps.get_subjects_lifetime());
-        nozzle_target_observer_ = observe_int_sync<DetailedFormatter>(
-            ps.get_active_extruder_target_subject(), this,
+        nozzle_target_observer_ = observe<int>(
+            ps.temperature_state().get_active_extruder_target_subject(), this,
             [](DetailedFormatter* self, int) { self->update_nozzle_text(); },
             ps.get_subjects_lifetime());
         update_nozzle_text();
@@ -1897,8 +2052,10 @@ bool PrintStatusWidget::DetailedFormatter::set_nozzle_tool_override(
     }
 
     // Pinned: resolve dynamic per-tool subjects
-    auto* temp_sub = ps.get_extruder_temp_subject(override_name, nozzle_temp_lifetime_);
-    auto* tgt_sub = ps.get_extruder_target_subject(override_name, nozzle_target_lifetime_);
+    auto* temp_sub =
+        ps.temperature_state().get_extruder_temp_subject(override_name, nozzle_temp_lifetime_);
+    auto* tgt_sub =
+        ps.temperature_state().get_extruder_target_subject(override_name, nozzle_target_lifetime_);
     if (!temp_sub || !tgt_sub) {
         spdlog::info("[DetailedFormatter] nozzle override '{}' not found, falling back to auto",
                      override_name);
@@ -1913,10 +2070,10 @@ bool PrintStatusWidget::DetailedFormatter::set_nozzle_tool_override(
     // Per-extruder subjects are dynamic — the lifetime token must be handed to the
     // observer too, or its guard never learns the subject was deinitialized when
     // PrinterTemperatureState::init_extruders() re-runs on heater rediscovery (#705).
-    nozzle_temp_observer_ = observe_int_sync<DetailedFormatter>(
+    nozzle_temp_observer_ = observe<int>(
         temp_sub, this, [](DetailedFormatter* self, int) { self->update_nozzle_text(); },
         nozzle_temp_lifetime_);
-    nozzle_target_observer_ = observe_int_sync<DetailedFormatter>(
+    nozzle_target_observer_ = observe<int>(
         tgt_sub, this, [](DetailedFormatter* self, int) { self->update_nozzle_text(); },
         nozzle_target_lifetime_);
     update_nozzle_text();
@@ -1941,7 +2098,7 @@ void PrintStatusWidget::DetailedFormatter::update_tool_label() {
     } else {
         // Label tracks what the user is VIEWING — the pinned tool when one
         // is set, otherwise the currently active tool. Anything else looks
-        // broken right after a pin ("I picked Nozzle 2 but it still says T0").
+        // broken right after a pin ("I picked Nozzle 2 but it still says Tool 1").
         int idx = -1;
         // Defend against hand-edited config — the name has to parse as a
         // Klipper extruder AND name an extruder this printer has.
@@ -1954,10 +2111,71 @@ void PrintStatusWidget::DetailedFormatter::update_tool_label() {
             // "auto", unrecognized, or out-of-range → follow active tool.
             idx = tools.active_tool_index();
         }
-        snprintf(nozzle_tool_label_buf_, sizeof(nozzle_tool_label_buf_), "T%d", idx);
+        const auto& tool_list = tools.tools();
+        if (idx >= 0 && idx < static_cast<int>(tool_list.size())) {
+            snprintf(nozzle_tool_label_buf_, sizeof(nozzle_tool_label_buf_), "%s",
+                     tool_list[idx].display_label.c_str());
+        } else {
+            nozzle_tool_label_buf_[0] = '\0';
+        }
     }
     lv_subject_copy_string(&nozzle_tool_label_subject_, nozzle_tool_label_buf_);
 }
+
+namespace helix {
+
+LastPrintText describe_last_print(const PrintHistoryJob& job, double now_s) {
+    LastPrintText text;
+    text.filename = helix::gcode::get_display_filename(job.filename);
+
+    const double when_s = job_timestamp(job);
+    const long delta_s = static_cast<long>(now_s - when_s);
+    if (job.status == PrintJobStatus::COMPLETED) {
+        // Each branch is a whole sentence with the number as a placeholder. The
+        // unit stays inside the key rather than being appended, because a locale
+        // may put it before the number or attach a particle to it.
+        if (when_s <= 0) {
+            text.when = lv_tr("Completed");
+        } else if (delta_s < 60) {
+            text.when = lv_tr("Completed just now");
+        } else if (delta_s < 3600) {
+            text.when = fmt::format(lv_tr("Completed {}m ago"), delta_s / 60);
+        } else if (delta_s < 86400) {
+            text.when = fmt::format(lv_tr("Completed {}h ago"), delta_s / 3600);
+        } else {
+            text.when = fmt::format(lv_tr("Completed {}d ago"), delta_s / 86400);
+        }
+    } else {
+        // The idle tile never shows the running print, so an in_progress row
+        // here is one Moonraker has not finalised: it gets no status word.
+        const bool ended =
+            job.status == PrintJobStatus::CANCELLED || job.status == PrintJobStatus::ERROR;
+        const char* status = ended ? lv_tr(status_to_label(job.status)) : "";
+        const std::string age =
+            when_s > 0
+                ? ui::format_relative_time(static_cast<uint64_t>(std::max(0L, delta_s)) * 1000)
+                : "";
+        text.when = (*status && !age.empty()) ? fmt::format("{} • {}", status, age) : status + age;
+    }
+
+    // Durations format in whole seconds, so anything under one reads "0s": no
+    // time recorded, which the card hides like a zero.
+    const std::string duration =
+        job.print_duration >= 1   ? helix::format::duration(static_cast<int>(job.print_duration))
+        : job.total_duration >= 1 ? helix::format::duration(static_cast<int>(job.total_duration))
+                                  : "";
+    const bool has_filament = job.filament_used > 0 && !job.filament_str.empty();
+    if (has_filament && !duration.empty()) {
+        text.meta = fmt::format(lv_tr("{} filament • {}"), job.filament_str, duration);
+    } else if (has_filament) {
+        text.meta = fmt::format(lv_tr("{} filament"), job.filament_str);
+    } else {
+        text.meta = duration;
+    }
+    return text;
+}
+
+} // namespace helix
 
 void PrintStatusWidget::DetailedFormatter::update_idle_fields() {
     auto* hm = get_print_history_manager();
@@ -1969,46 +2187,19 @@ void PrintStatusWidget::DetailedFormatter::update_idle_fields() {
     const PrintHistoryJob* newest = hm ? hm->get_newest_existing_job() : nullptr;
     if (!newest) {
         lv_subject_copy_string(&idle_filename_subject_, "");
-        lv_subject_copy_string(&idle_when_subject_, "Never printed");
+        lv_subject_copy_string(&idle_when_subject_, lv_tr("No prints yet"));
         lv_subject_copy_string(&idle_meta_subject_, "");
         lv_subject_set_int(&idle_has_last_subject_, 0);
         return;
     }
-    const PrintHistoryJob& job = *newest;
-    snprintf(idle_filename_buf_, sizeof(idle_filename_buf_), "%s", job.filename.c_str());
-    lv_subject_copy_string(&idle_filename_subject_, idle_filename_buf_);
-
-    double now_s =
+    const double now_s =
         std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
-    long delta_s = static_cast<long>(now_s - job.end_time);
-    // Each branch is a whole sentence with the number as a placeholder. The unit
-    // stays inside the key rather than being appended, because a locale may put
-    // it before the number or attach a particle to it.
-    std::string when;
-    if (delta_s < 60) {
-        when = lv_tr("Completed just now");
-    } else if (delta_s < 3600) {
-        when = fmt::format(lv_tr("Completed {}m ago"), delta_s / 60);
-    } else if (delta_s < 86400) {
-        when = fmt::format(lv_tr("Completed {}h ago"), delta_s / 3600);
-    } else {
-        when = fmt::format(lv_tr("Completed {}d ago"), delta_s / 86400);
-    }
-    snprintf(idle_when_buf_, sizeof(idle_when_buf_), "%s", when.c_str());
+    const LastPrintText text = describe_last_print(*newest, now_s);
+    snprintf(idle_filename_buf_, sizeof(idle_filename_buf_), "%s", text.filename.c_str());
+    lv_subject_copy_string(&idle_filename_subject_, idle_filename_buf_);
+    snprintf(idle_when_buf_, sizeof(idle_when_buf_), "%s", text.when.c_str());
     lv_subject_copy_string(&idle_when_subject_, idle_when_buf_);
-
-    if (!job.filament_str.empty() && !job.duration_str.empty()) {
-        const std::string meta =
-            fmt::format(lv_tr("{} filament • {}"), job.filament_str, job.duration_str);
-        snprintf(idle_meta_buf_, sizeof(idle_meta_buf_), "%s", meta.c_str());
-    } else if (!job.duration_str.empty()) {
-        snprintf(idle_meta_buf_, sizeof(idle_meta_buf_), "%s", job.duration_str.c_str());
-    } else if (job.total_duration > 0) {
-        int d = static_cast<int>(job.total_duration);
-        snprintf(idle_meta_buf_, sizeof(idle_meta_buf_), "%dh %02dm", d / 3600, (d % 3600) / 60);
-    } else {
-        idle_meta_buf_[0] = '\0';
-    }
+    snprintf(idle_meta_buf_, sizeof(idle_meta_buf_), "%s", text.meta.c_str());
     lv_subject_copy_string(&idle_meta_subject_, idle_meta_buf_);
     lv_subject_set_int(&idle_has_last_subject_, 1);
 }
@@ -2028,8 +2219,8 @@ PrintStatusWidget::DetailedFormatter::DetailedFormatter() {
     UI_MANAGED_SUBJECT_INT(nozzle_target_subject_, 0, "print_status_nozzle_target", subjects_);
     UI_MANAGED_SUBJECT_STRING(idle_filename_subject_, idle_filename_buf_, "",
                               "print_status_idle_filename", subjects_);
-    UI_MANAGED_SUBJECT_STRING(idle_when_subject_, idle_when_buf_, "Never printed",
-                              "print_status_idle_when", subjects_);
+    UI_MANAGED_SUBJECT_STRING(idle_when_subject_, idle_when_buf_, "", "print_status_idle_when",
+                              subjects_);
     UI_MANAGED_SUBJECT_STRING(idle_meta_subject_, idle_meta_buf_, "", "print_status_idle_meta",
                               subjects_);
     UI_MANAGED_SUBJECT_INT(idle_has_last_subject_, 0, "print_status_idle_has_last", subjects_);
@@ -2056,30 +2247,30 @@ PrintStatusWidget::DetailedFormatter::DetailedFormatter() {
         s_formatter_->nozzle_target_observer_.reset();
         s_formatter_->tools_version_observer_.reset();
         s_formatter_->active_tool_observer_.reset();
-        s_formatter_->arc_value_observer_.reset();
+        s_formatter_->language_observer_.reset();
         s_formatter_->nozzle_temp_lifetime_.reset();
         s_formatter_->nozzle_target_lifetime_.reset();
         s_formatter_->subjects_.deinit_all();
     });
 
-    using helix::ui::observe_int_sync;
+    using helix::ui::observe;
     auto& ps = get_printer_state();
-    layer_current_observer_ = observe_int_sync<DetailedFormatter>(
-        ps.get_print_layer_current_subject(), this,
+    layer_current_observer_ = observe<int>(
+        ps.print_state().get_print_layer_current_subject(), this,
         [](DetailedFormatter* self, int) { self->update_layer_text(); },
         ps.get_subjects_lifetime());
-    layer_total_observer_ = observe_int_sync<DetailedFormatter>(
-        ps.get_print_layer_total_subject(), this,
+    layer_total_observer_ = observe<int>(
+        ps.print_state().get_print_layer_total_subject(), this,
         [](DetailedFormatter* self, int) { self->update_layer_text(); },
         ps.get_subjects_lifetime());
-    elapsed_observer_ = observe_int_sync<DetailedFormatter>(
-        ps.get_print_elapsed_subject(), this,
+    elapsed_observer_ = observe<int>(
+        ps.print_state().get_print_elapsed_subject(), this,
         [](DetailedFormatter* self, int) { self->update_time_text(); }, ps.get_subjects_lifetime());
-    time_left_observer_ = observe_int_sync<DetailedFormatter>(
-        ps.get_print_time_left_subject(), this,
+    time_left_observer_ = observe<int>(
+        ps.print_state().get_print_time_left_subject(), this,
         [](DetailedFormatter* self, int) { self->update_time_text(); }, ps.get_subjects_lifetime());
-    filament_used_observer_ = observe_int_sync<DetailedFormatter>(
-        ps.get_print_filament_used_subject(), this,
+    filament_used_observer_ = observe<int>(
+        ps.print_state().get_print_filament_used_subject(), this,
         [](DetailedFormatter* self, int) { self->update_filament_text(); },
         ps.get_subjects_lifetime());
 
@@ -2087,12 +2278,12 @@ PrintStatusWidget::DetailedFormatter::DetailedFormatter() {
     // PrinterState, but its lifetime token still has to be handed over — the
     // guard is what learns the subjects died when PrinterState deinits, instead
     // of leaving that to StaticSubjectRegistry ordering.
-    nozzle_temp_observer_ = observe_int_sync<DetailedFormatter>(
-        ps.get_active_extruder_temp_subject(), this,
+    nozzle_temp_observer_ = observe<int>(
+        ps.temperature_state().get_active_extruder_temp_subject(), this,
         [](DetailedFormatter* self, int) { self->update_nozzle_text(); },
         ps.get_subjects_lifetime());
-    nozzle_target_observer_ = observe_int_sync<DetailedFormatter>(
-        ps.get_active_extruder_target_subject(), this,
+    nozzle_target_observer_ = observe<int>(
+        ps.temperature_state().get_active_extruder_target_subject(), this,
         [](DetailedFormatter* self, int) { self->update_nozzle_text(); },
         ps.get_subjects_lifetime());
     // Bed and chamber temp_display widgets bind directly to bed_temp / bed_target /
@@ -2108,32 +2299,19 @@ PrintStatusWidget::DetailedFormatter::DetailedFormatter() {
     // Multi-extruder: observe the tool-list version + active_tool to drive the
     // gate and the T<n> label. tools_version bumps on every tool-list rebuild,
     // including the ones that leave the count alone.
-    tools_version_observer_ = observe_int_sync<DetailedFormatter>(
+    tools_version_observer_ = observe<int>(
         ToolState::instance().get_tools_version_subject(), this,
         [](DetailedFormatter* self, int) {
             self->update_multi_tool();
             self->update_tool_label();
         },
         ToolState::instance().get_subjects_lifetime());
-    active_tool_observer_ = observe_int_sync<DetailedFormatter>(
+    active_tool_observer_ = observe<int>(
         ToolState::instance().get_active_tool_subject(), this,
         [](DetailedFormatter* self, int) { self->update_tool_label(); },
         ToolState::instance().get_subjects_lifetime());
     update_multi_tool();
     update_tool_label();
-
-    // Arc value observer — keeps lv_arc value in sync with print progress.
-    // arc_widget_ is nulled by an LV_EVENT_DELETE callback registered in
-    // attach_arc(), so a non-null pointer here is always live (L075: no
-    // lv_obj_is_valid in observer cbs).
-    arc_value_observer_ = observe_int_sync<DetailedFormatter>(
-        ps.get_print_progress_subject(), this,
-        [](DetailedFormatter* self, int pct) {
-            if (self->arc_widget_) {
-                lv_arc_set_value(self->arc_widget_, pct);
-            }
-        },
-        ps.get_subjects_lifetime());
 
     // Idle hero — populate from print history and refresh on history-changed notifications.
     // PrintHistoryManager fires observers on the main thread (defer-wrapped in on_history_fetched),
@@ -2144,9 +2322,15 @@ PrintStatusWidget::DetailedFormatter::DetailedFormatter() {
         // ensure_loaded(), not fetch(): the response already in flight serves
         // this caller through the observer above, and fetch() would read the
         // ask as an invalidation and queue a second identical request.
-        hm->ensure_loaded();
+        hm->ensure_loaded(HistoryScope::RECENT);
     }
     update_idle_fields();
+
+    language_observer_ = helix::ui::observe_language_change(this, [](DetailedFormatter* self) {
+        self->update_layer_text();
+        self->update_filament_text();
+        self->update_idle_fields();
+    });
 
     spdlog::debug("[DetailedFormatter] subjects initialized");
 }
@@ -2174,7 +2358,7 @@ PrintStatusWidget::DetailedFormatter::~DetailedFormatter() {
     nozzle_target_observer_.reset();
     tools_version_observer_.reset();
     active_tool_observer_.reset();
-    arc_value_observer_.reset();
+    language_observer_.reset();
     nozzle_temp_lifetime_.reset();
     nozzle_target_lifetime_.reset();
     subjects_.deinit_all();
@@ -2183,30 +2367,9 @@ PrintStatusWidget::DetailedFormatter::~DetailedFormatter() {
 void PrintStatusWidget::DetailedFormatter::attach_arc(lv_obj_t* arc) {
     arc_widget_ = arc;
     if (arc) {
-        // Range + angles + styling come from helix_progress_arc; just seed the
-        // initial value.
-        int pct = lv_subject_get_int(get_printer_state().get_print_progress_subject());
-        lv_arc_set_value(arc, pct);
-        // Null arc_widget_ when LVGL destroys the arc — lets the progress
-        // observer null-check without lv_obj_is_valid (L075). Guard against
-        // the layout-rebuild race: the home panel attaches widget A → detaches A
-        // → attaches B in quick succession; A's deferred LV_EVENT_DELETE fires
-        // AFTER B has already overwritten arc_widget_ with its own arc. An
-        // unconditional null here clobbers B's live arc and leaves the
-        // progress observer with no widget to update — the arc renders the
-        // grey track only, forever. Only clear when the deleted object is
-        // still the one we're tracking.
-        lv_obj_add_event_cb(
-            arc,
-            [](lv_event_t* e) {
-                if (!s_formatter_)
-                    return;
-                lv_obj_t* deleted = lv_event_get_target_obj(e);
-                if (s_formatter_->arc_widget_ == deleted) {
-                    s_formatter_->arc_widget_ = nullptr;
-                }
-            },
-            LV_EVENT_DELETE, nullptr);
+        // Range, angles, styling and the value binding all come from the XML
+        // (helix_progress_arc + bind_value="print_progress_display"); this
+        // helper only owns what has no declarative equivalent.
         // Auto-resize + diameter-driven thickness via the shared helper.
         // It hooks LV_EVENT_SIZE_CHANGED on the parent and publishes the
         // tier to our class-level subject, which the XML bind_styles
@@ -2259,21 +2422,3 @@ void open_temp_graph_for(lv_event_t* e, TempGraphOverlay::Mode mode) {
     get_global_temp_graph_overlay().open(mode, parent_screen);
 }
 } // namespace
-
-void PrintStatusWidget::on_print_status_nozzle_temp_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("on_print_status_nozzle_temp_clicked");
-    open_temp_graph_for(e, TempGraphOverlay::Mode::Nozzle);
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void PrintStatusWidget::on_print_status_bed_temp_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("on_print_status_bed_temp_clicked");
-    open_temp_graph_for(e, TempGraphOverlay::Mode::Bed);
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void PrintStatusWidget::on_print_status_chamber_temp_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("on_print_status_chamber_temp_clicked");
-    open_temp_graph_for(e, TempGraphOverlay::Mode::Chamber);
-    LVGL_SAFE_EVENT_CB_END();
-}

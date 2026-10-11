@@ -27,6 +27,8 @@ namespace {
 
 constexpr lv_opa_t SWATCH_BORDER_OPA = 80; // must match src/ui/ui_swatch.cpp
 
+// TEST_MIRROR_OK: color_eq() wraps lv_color_eq() for assertions, as theme_live_recolor.cpp's does
+// for its own use
 bool color_eq(lv_color_t a, lv_color_t b) {
     return lv_color_eq(a, b);
 }

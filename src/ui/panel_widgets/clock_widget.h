@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "ui_widget_ref.h"
+
 #include "panel_widget.h"
 
 namespace helix {
@@ -22,8 +24,8 @@ class ClockWidget : public PanelWidget {
     }
 
   private:
-    lv_obj_t* widget_obj_ = nullptr;
-    lv_obj_t* parent_screen_ = nullptr;
+    helix::ui::WidgetRef widget_obj_;
+    helix::ui::WidgetRef parent_screen_;
     lv_timer_t* clock_timer_ = nullptr;
 
     // Update all clock subjects with current time/date/uptime

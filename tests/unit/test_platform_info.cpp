@@ -11,6 +11,7 @@
 
 #include "platform_info.h"
 #include "test_helpers/ad5x_layout_fixture.h"
+#include "test_helpers/unique_temp_dir.h"
 
 #include <cstdlib>
 #include <filesystem>
@@ -26,8 +27,7 @@ namespace {
 struct TempDirGuard {
     fs::path path;
     TempDirGuard() {
-        path = fs::temp_directory_path() / ("helix-layout-test-" + std::to_string(::getpid()) +
-                                            "-" + std::to_string(std::rand()));
+        path = helix::test::unique_temp_dir("helix-layout-test");
         fs::create_directories(path);
     }
     ~TempDirGuard() {
@@ -78,4 +78,73 @@ TEST_CASE("helix::ad5x_mod_layout_present requires the marker kinds, not just na
     auto root = tmp.path / "zmod-dir";
     fs::create_directories(root / "ZMOD");
     REQUIRE_FALSE(helix::ad5x_mod_layout_present(root.string()));
+}
+
+namespace {
+
+/// Writes @p text to @p rel under @p root, creating parent directories.
+void write_probe_file(const fs::path& root, const fs::path& rel, const std::string& text) {
+    fs::create_directories(root / rel.parent_path());
+    std::ofstream out(root / rel, std::ios::binary);
+    out << text;
+}
+
+} // namespace
+
+TEST_CASE("helix::flashforge_machine_id reads MACHINE= from app_startup.sh",
+          "[platform_info][machine-id]") {
+    TempDirGuard tmp;
+    write_probe_file(tmp.path, "usr/prog/app_startup.sh",
+                     "#!/bin/sh\nMACHINE=Creator5Pro\nVER=1.9.9\n");
+    REQUIRE(helix::flashforge_machine_id(tmp.path.string()) ==
+            helix::FlashForgeMachine::Creator5Pro);
+
+    // Whole-value match: Creator5 is a prefix of Creator5Pro, so a prefix test
+    // would fold the Pro into the plain Creator 5. The shell rule this mirrors
+    // (ff_machine_id in scripts/lib/installer/platform.sh) pins the same.
+    write_probe_file(tmp.path, "usr/prog/app_startup.sh", "MACHINE=Creator5\n");
+    REQUIRE(helix::flashforge_machine_id(tmp.path.string()) == helix::FlashForgeMachine::Creator5);
+
+    write_probe_file(tmp.path, "usr/prog/app_startup.sh", "MACHINE=AD5X\n");
+    REQUIRE(helix::flashforge_machine_id(tmp.path.string()) == helix::FlashForgeMachine::Ad5x);
+}
+
+TEST_CASE("helix::flashforge_machine_id falls back to the os-release codename",
+          "[platform_info][machine-id]") {
+    TempDirGuard tmp;
+    // The Z-Mod chroot's start.sh writes VERSION_CODENAME="<MACHINE> <version>"
+    // on every boot; the first word is the board, the rest is firmware version.
+    write_probe_file(tmp.path, "etc/os-release",
+                     "ID=buildroot\nVERSION_CODENAME=\"Creator5Pro 1.9.9\"\n");
+    REQUIRE(helix::flashforge_machine_id(tmp.path.string()) ==
+            helix::FlashForgeMachine::Creator5Pro);
+
+    // A distro codename left over (bookworm & co) fails the whole-value match.
+    write_probe_file(tmp.path, "etc/os-release", "VERSION_CODENAME=\"bookworm\"\n");
+    REQUIRE_FALSE(helix::flashforge_machine_id(tmp.path.string()).has_value());
+}
+
+TEST_CASE("helix::flashforge_machine_id prefers app_startup.sh and answers nothing on a K1",
+          "[platform_info][machine-id]") {
+    TempDirGuard tmp;
+    write_probe_file(tmp.path, "usr/prog/app_startup.sh", "MACHINE=AD5X\n");
+    write_probe_file(tmp.path, "etc/os-release", "VERSION_CODENAME=\"Creator5 1.0.0\"\n");
+    REQUIRE(helix::flashforge_machine_id(tmp.path.string()) == helix::FlashForgeMachine::Ad5x);
+
+    // A Creality K1 carries neither file in a shape the probe reads, so it
+    // answers nothing and the caller keeps its own fallback.
+    TempDirGuard k1;
+    write_probe_file(k1.path, "etc/os-release", "ID=debian\n");
+    REQUIRE_FALSE(helix::flashforge_machine_id(k1.path.string()).has_value());
+}
+
+TEST_CASE("helix::flashforge_machine_display_name matches the printer DB spellings",
+          "[platform_info][machine-id]") {
+    CHECK(std::string(helix::flashforge_machine_display_name(helix::FlashForgeMachine::Ad5x)) ==
+          "FlashForge Adventurer 5X");
+    CHECK(std::string(helix::flashforge_machine_display_name(helix::FlashForgeMachine::Creator5)) ==
+          "FlashForge Creator 5");
+    CHECK(std::string(
+              helix::flashforge_machine_display_name(helix::FlashForgeMachine::Creator5Pro)) ==
+          "FlashForge Creator 5 Pro");
 }

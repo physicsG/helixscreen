@@ -3,6 +3,9 @@
 
 #include "belt_stream_client.h"
 
+#include "helix_thread.h"
+#include "system/helix_paths.h"
+
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -88,7 +91,7 @@ int counter_delta(int raw, int& previous) {
 /// socket() + connect() to a UDS path. Returns -1 on failure, errno preserved.
 int connect_uds(const std::string& path) {
     sockaddr_un addr{};
-    if (!fill_sockaddr(path, addr)) {
+    if (!fill_sockaddr(BeltStreamClient::expand_home(path, helix::paths::home()), addr)) {
         errno = ENAMETOOLONG;
         return -1;
     }
@@ -131,6 +134,13 @@ std::string BeltStreamClient::endpoint_for_chip(const std::string& accel_chip) {
 
 std::string BeltStreamClient::sensor_key_for_chip(const std::string& accel_chip) {
     return last_token(accel_chip);
+}
+
+std::string BeltStreamClient::expand_home(const std::string& path, const std::string& home) {
+    if (home.empty() || path.rfind("~/", 0) != 0) {
+        return path;
+    }
+    return home + path.substr(1);
 }
 
 bool BeltStreamClient::socket_reachable(const std::string& socket_path) {
@@ -199,7 +209,10 @@ bool BeltStreamClient::start(const std::string& socket_path, const std::string& 
                  socket_path);
 
     loop_thread_ = std::make_unique<hv::EventLoopThread>();
-    loop_thread_->start(true, [this]() -> int { return attach() ? 0 : -1; });
+    loop_thread_->start(true, [this]() -> int {
+        helix::install_thread_altstack();
+        return attach() ? 0 : -1;
+    });
     return true;
 }
 

@@ -38,6 +38,11 @@ void PrinterMotionState::init_subjects(bool register_xml) {
     INIT_SUBJECT_INT(gcode_position_y, 0, subjects_, register_xml);
     INIT_SUBJECT_INT(gcode_position_z, 0, subjects_, register_xml);
 
+    // Live position subjects (physical position mid-move, motion_report)
+    INIT_SUBJECT_INT(live_position_x, 0, subjects_, register_xml);
+    INIT_SUBJECT_INT(live_position_y, 0, subjects_, register_xml);
+    INIT_SUBJECT_INT(live_position_z, 0, subjects_, register_xml);
+
     INIT_SUBJECT_STRING(homed_axes, "", subjects_, register_xml);
 
     // Speed/Flow subjects (percentages)
@@ -45,9 +50,9 @@ void PrinterMotionState::init_subjects(bool register_xml) {
     INIT_SUBJECT_INT(flow_factor, 100, subjects_, register_xml);
 
     // Actual speed/velocity subjects
-    INIT_SUBJECT_INT(gcode_speed, 0, subjects_, register_xml);
     INIT_SUBJECT_INT(max_velocity, 0, subjects_, register_xml);
     INIT_SUBJECT_INT(live_extruder_velocity, 0, subjects_, register_xml);
+    INIT_SUBJECT_INT(live_velocity, 0, subjects_, register_xml);
     INIT_SUBJECT_INT(gcode_z_offset, 0, subjects_,
                      register_xml); // Z-offset in microns from homing_origin[2]
     INIT_SUBJECT_INT(pending_z_offset_delta, 0, subjects_,
@@ -70,6 +75,7 @@ void PrinterMotionState::deinit_subjects() {
     subjects_.deinit_all();
     subjects_initialized_ = false;
     axis_bounds_ = AxisBounds{};
+    homing_origin_x_ = homing_origin_y_ = homing_origin_z_ = 0.0;
 }
 
 void PrinterMotionState::update_from_status(const nlohmann::json& status) {
@@ -85,23 +91,15 @@ void PrinterMotionState::update_from_status(const nlohmann::json& status) {
                 int new_x = helix::units::to_centimm(pos[0].get<double>());
                 int new_y = helix::units::to_centimm(pos[1].get<double>());
                 int new_z = helix::units::to_centimm(pos[2].get<double>());
-                if (lv_subject_get_int(&position_x_) != new_x) {
-                    lv_subject_set_int(&position_x_, new_x);
-                }
-                if (lv_subject_get_int(&position_y_) != new_y) {
-                    lv_subject_set_int(&position_y_, new_y);
-                }
-                if (lv_subject_get_int(&position_z_) != new_z) {
-                    lv_subject_set_int(&position_z_, new_z);
-                }
+                lv_subject_set_int(&position_x_, new_x);
+                lv_subject_set_int(&position_y_, new_y);
+                lv_subject_set_int(&position_z_, new_z);
             }
         }
 
         if (toolhead.contains("max_velocity") && toolhead["max_velocity"].is_number()) {
             int max_vel = static_cast<int>(toolhead["max_velocity"].get<double>());
-            if (lv_subject_get_int(&max_velocity_) != max_vel) {
-                lv_subject_set_int(&max_velocity_, max_vel);
-            }
+            lv_subject_set_int(&max_velocity_, max_vel);
         }
 
         // Kinematic envelope — set has-bits when first values arrive so jog
@@ -151,42 +149,34 @@ void PrinterMotionState::update_from_status(const nlohmann::json& status) {
                 int new_x = helix::units::to_centimm(pos[0].get<double>());
                 int new_y = helix::units::to_centimm(pos[1].get<double>());
                 int new_z = helix::units::to_centimm(pos[2].get<double>());
-                if (lv_subject_get_int(&gcode_position_x_) != new_x) {
-                    lv_subject_set_int(&gcode_position_x_, new_x);
-                }
-                if (lv_subject_get_int(&gcode_position_y_) != new_y) {
-                    lv_subject_set_int(&gcode_position_y_, new_y);
-                }
-                if (lv_subject_get_int(&gcode_position_z_) != new_z) {
-                    lv_subject_set_int(&gcode_position_z_, new_z);
-                }
-            }
-        }
-
-        if (gcode_move.contains("speed") && gcode_move["speed"].is_number()) {
-            int speed_mm_s = static_cast<int>(gcode_move["speed"].get<double>());
-            if (lv_subject_get_int(&gcode_speed_) != speed_mm_s) {
-                lv_subject_set_int(&gcode_speed_, speed_mm_s);
+                lv_subject_set_int(&gcode_position_x_, new_x);
+                lv_subject_set_int(&gcode_position_y_, new_y);
+                lv_subject_set_int(&gcode_position_z_, new_z);
             }
         }
 
         if (gcode_move.contains("speed_factor") && gcode_move["speed_factor"].is_number()) {
             int factor_pct = helix::units::json_to_percent(gcode_move, "speed_factor");
-            if (lv_subject_get_int(&speed_factor_) != factor_pct) {
-                lv_subject_set_int(&speed_factor_, factor_pct);
-            }
+            lv_subject_set_int(&speed_factor_, factor_pct);
         }
 
         if (gcode_move.contains("extrude_factor") && gcode_move["extrude_factor"].is_number()) {
             int factor_pct = helix::units::json_to_percent(gcode_move, "extrude_factor");
-            if (lv_subject_get_int(&flow_factor_) != factor_pct) {
-                lv_subject_set_int(&flow_factor_, factor_pct);
-            }
+            lv_subject_set_int(&flow_factor_, factor_pct);
         }
 
         // Parse Z-offset from homing_origin[2] (baby stepping / SET_GCODE_OFFSET Z=)
         if (gcode_move.contains("homing_origin") && gcode_move["homing_origin"].is_array()) {
             const auto& origin = gcode_move["homing_origin"];
+            // Full origin per axis (mm): machine = gcode + homing_origin, so the
+            // G-code envelope the motion panel clamps against is the machine
+            // one shifted by minus each component (see to_gcode_space()).
+            if (origin.size() >= 3 && origin[0].is_number() && origin[1].is_number() &&
+                origin[2].is_number()) {
+                homing_origin_x_ = origin[0].get<double>();
+                homing_origin_y_ = origin[1].get<double>();
+                homing_origin_z_ = origin[2].get<double>();
+            }
             if (origin.size() >= 3 && origin[2].is_number()) {
                 // Round (not truncate) so Klipper's float accumulation of relative
                 // Z_ADJUST deltas (0.04 - 0.01 -> 0.0299999) snaps back to a clean
@@ -208,19 +198,33 @@ void PrinterMotionState::update_from_status(const nlohmann::json& status) {
             lv_subject_set_int(&persisted_z_offset_, *persisted);
             spdlog::debug("[PrinterMotionState] Persisted Z-offset: {}um", *persisted);
         }
-        if (lv_subject_get_int(&persisted_z_offset_valid_) != 1) {
-            lv_subject_set_int(&persisted_z_offset_valid_, 1);
-        }
+        lv_subject_set_int(&persisted_z_offset_valid_, 1);
     }
 
-    // Update motion_report data (live extruder velocity)
+    // Update motion_report data (live toolhead and extruder velocity)
     if (status.contains("motion_report")) {
         const auto& mr = status["motion_report"];
+        if (mr.contains("live_position") && mr["live_position"].is_array()) {
+            const auto& pos = mr["live_position"];
+            // Where the nozzle physically is, mesh and z-offset included,
+            // updating during moves. Stored as centimillimeters like the
+            // toolhead/gcode positions.
+            if (pos.size() >= 3 && pos[0].is_number() && pos[1].is_number() && pos[2].is_number()) {
+                int new_x = helix::units::to_centimm(pos[0].get<double>());
+                int new_y = helix::units::to_centimm(pos[1].get<double>());
+                int new_z = helix::units::to_centimm(pos[2].get<double>());
+                lv_subject_set_int(&live_position_x_, new_x);
+                lv_subject_set_int(&live_position_y_, new_y);
+                lv_subject_set_int(&live_position_z_, new_z);
+            }
+        }
         if (mr.contains("live_extruder_velocity") && mr["live_extruder_velocity"].is_number()) {
             int vel_centimm = static_cast<int>(mr["live_extruder_velocity"].get<double>() * 100.0);
-            if (lv_subject_get_int(&live_extruder_velocity_) != vel_centimm) {
-                lv_subject_set_int(&live_extruder_velocity_, vel_centimm);
-            }
+            lv_subject_set_int(&live_extruder_velocity_, vel_centimm);
+        }
+        if (mr.contains("live_velocity") && mr["live_velocity"].is_number()) {
+            int vel_mm_s = static_cast<int>(std::lround(mr["live_velocity"].get<double>()));
+            lv_subject_set_int(&live_velocity_, vel_mm_s);
         }
     }
 }

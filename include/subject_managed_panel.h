@@ -63,7 +63,10 @@
 
 #pragma once
 
+#include "ui_observer_guard.h" // SubjectLifetime
+
 #include "helix/xml/scoped_subject_registry.h"
+#include "helix_lvgl_anomaly.h"
 #include "lvgl/lvgl.h"
 #include "subject_debug_registry.h"
 
@@ -102,11 +105,15 @@ class SubjectManager {
     SubjectManager(const SubjectManager&) = delete;
     SubjectManager& operator=(const SubjectManager&) = delete;
 
-    // Movable (transfers subject ownership)
+    // Movable (transfers subject ownership). The moved-from manager gets a
+    // fresh live token: get_subjects_lifetime() must never hand out an empty
+    // one, which observe_*() reads as no defence at all.
     SubjectManager(SubjectManager&& other) noexcept
-        : subjects_(std::move(other.subjects_)), subject_names_(std::move(other.subject_names_)) {
+        : subjects_(std::move(other.subjects_)), subject_names_(std::move(other.subject_names_)),
+          subjects_lifetime_(std::move(other.subjects_lifetime_)) {
         other.subjects_.clear();
         other.subject_names_.clear();
+        other.subjects_lifetime_ = std::make_shared<bool>(true);
     }
 
     SubjectManager& operator=(SubjectManager&& other) noexcept {
@@ -114,10 +121,55 @@ class SubjectManager {
             deinit_all();
             subjects_ = std::move(other.subjects_);
             subject_names_ = std::move(other.subject_names_);
+            subjects_lifetime_ = std::move(other.subjects_lifetime_);
             other.subjects_.clear();
             other.subject_names_.clear();
+            other.subjects_lifetime_ = std::make_shared<bool>(true);
         }
         return *this;
+    }
+
+    /**
+     * @brief Death signal for the subjects this manager owns
+     *
+     * Hand to observe_*() by anything that can outlive a deinit_all(): the
+     * subjects' observer nodes are freed there without bumping the
+     * ObserverGuard invalidation epoch, so a guard without this token calls
+     * lv_observer_remove() on a freed node. Always live — flipped and renewed
+     * by deinit_all() / expire_subjects_lifetime(), never left empty.
+     */
+    [[nodiscard]] SubjectLifetime get_subjects_lifetime() const {
+        return subjects_lifetime_;
+    }
+
+    /**
+     * @brief Flip the death signal false and mint a fresh live token
+     *
+     * For owners whose token must expire BEFORE teardown proper begins — an
+     * umbrella token covering sub-components torn down ahead of this manager's
+     * own subjects (PrinterState::deinit_subjects()). deinit_all() runs this
+     * at its top; calling it separately just moves the flip earlier, and the
+     * flip deinit_all() performs later lands on the renewed token nobody
+     * fetched in between.
+     */
+    void expire_subjects_lifetime() {
+        if (subjects_lifetime_) {
+            *subjects_lifetime_ = false;
+        }
+        subjects_lifetime_ = std::make_shared<bool>(true);
+    }
+
+    /**
+     * @brief Flip the death signal false and leave it dead
+     *
+     * Destructor backstops only: a dying object has no successor generation,
+     * so a renewed token could never be fetched and the flip is the whole
+     * message.
+     */
+    void mark_subjects_dead() {
+        if (subjects_lifetime_) {
+            *subjects_lifetime_ = false;
+        }
     }
 
     /**
@@ -153,6 +205,17 @@ class SubjectManager {
         subject_names_.emplace_back(xml_name ? xml_name : "");
     }
 
+    /// Publish an initialized subject under `xml_name` in the current XML scope and
+    /// register it, so deinit_all() withdraws the name before freeing the subject.
+    /// A null `xml_name` registers without publishing. Argument order follows
+    /// register_subject_in_current_scope(), which the subject lint gates parse.
+    void publish(const char* xml_name, lv_subject_t* subject) {
+        if (xml_name) {
+            helix::xml::register_subject_in_current_scope(xml_name, subject);
+        }
+        register_subject(subject, xml_name);
+    }
+
     /**
      * @brief Deinitialize all registered subjects
      *
@@ -162,13 +225,15 @@ class SubjectManager {
      * Safe to call multiple times - subsequent calls are no-ops.
      *
      * @note Checks lv_is_initialized() to handle static destruction order safely
-     * @note Never logs. A SubjectManager owned by a static reaches this through
-     *       the C++ atexit chain, and spdlog's registry - a lazily built
-     *       function-local static - is torn down before any object created
-     *       during dynamic initialization, so a log call here reads a freed
-     *       logger. An app that ran Application::shutdown() arrives with an
-     *       empty subjects_ and returns above; a binary that never does (every
-     *       unit test) takes the full path.
+     * @note Never calls spdlog (lint-enforced). A SubjectManager owned by a
+     *       static reaches this through the C++ atexit chain, and spdlog's
+     *       registry - a lazily built function-local static - is torn down
+     *       before any object created during dynamic initialization, so a log
+     *       call here reads a freed logger. The nameless-registration trap
+     *       below reports through helix_lvgl_anomaly (telemetry), which is
+     *       itself teardown-safe. An app that ran Application::shutdown()
+     *       arrives with an empty subjects_ and returns above; a binary that
+     *       never does (every unit test) takes the full path.
      * @note Each subject's XML-scope name is withdrawn before the subject is freed,
      *       so a name can never outlive the storage it resolves to. Owners that do
      *       not live for the whole process (a panel held by a stack-allocated test
@@ -178,6 +243,13 @@ class SubjectManager {
      *       StaticPanelRegistry BEFORE lv_deinit(); do not destroy them after.
      */
     void deinit_all() {
+        // Death signal before BOTH early returns below. An empty list still
+        // means this generation's subjects are gone, and when LVGL is down the
+        // subjects are not freed but the bookkeeping is dropped — a guard
+        // holding a copy with a live refcount must read them as dead either
+        // way, and it reads the VALUE, not the refcount.
+        expire_subjects_lifetime();
+
         if (subjects_.empty()) {
             return;
         }
@@ -203,8 +275,39 @@ class SubjectManager {
             // pointing at dead memory, and the next lv_xml_create() that binds
             // it reads freed storage. Unregistering turns that into a clean
             // "subject not found" instead.
-            if (i < subject_names_.size() && !subject_names_[i].empty()) {
-                helix::xml::unregister_subject_in_current_scope(subject_names_[i].c_str());
+            const char* registered_name = (i < subject_names_.size() && !subject_names_[i].empty())
+                                              ? subject_names_[i].c_str()
+                                              : nullptr;
+            if (registered_name) {
+                // Only while the name is still ours: a successor owner (a modal
+                // reopened before the old instance is freed) may have re-published
+                // it, and dropping its record would strand its bindings.
+                helix::xml::unregister_subject_in_current_scope(registered_name, subject);
+            } else if (const SubjectDebugInfo* info =
+                           SubjectDebugRegistry::instance().lookup(subject)) {
+                // Registered without a name while the subject IS published
+                // under one (through a raw register or a macro elsewhere): the
+                // call site reads as RAII-correct, and the scope name would
+                // outlive this teardown. Withdraw it and make the trap loud
+                // via the anomaly channel — no logging can run here: this body
+                // reaches the C++ atexit chain, where spdlog may already be
+                // gone (and LV_LOG_* is banned in app code regardless).
+                //
+                // This reaches only what the debug registry knows: the
+                // UI_MANAGED_SUBJECT_*/UI_SUBJECT_INIT_AND_REGISTER_* families
+                // and the handful of explicit register_subject() calls beside
+                // them. A subject published through INIT_SUBJECT_* or a bare
+                // register_subject_in_current_scope() is absent from that
+                // registry, so for those the name has to reach the manager at
+                // the call site — there is nothing here to recover it from.
+                helix_lvgl_anomaly("subject_manager_nameless_registered", info->name.c_str());
+                // Only withdraw when the name still resolves to THIS subject: a
+                // newer owner may have re-published the same name at a
+                // different address, and dropping that entry would strand its
+                // live bindings.
+                if (SubjectDebugRegistry::instance().lookup_by_name(info->name) == subject) {
+                    helix::xml::unregister_subject_in_current_scope(info->name.c_str());
+                }
             }
             // Same reasoning for the debug registry, which is also keyed by a
             // pointer that is about to dangle. Safe during static destruction:
@@ -240,6 +343,8 @@ class SubjectManager {
     /// XML-scope name per entry in subjects_, same index. Empty when a subject was
     /// registered without one (register_subject() called directly, not via a macro).
     std::vector<std::string> subject_names_;
+    /// Death signal handed out by get_subjects_lifetime().
+    SubjectLifetime subjects_lifetime_ = std::make_shared<bool>(true);
 };
 
 /**

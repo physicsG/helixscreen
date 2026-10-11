@@ -8,13 +8,16 @@
 #include "console_filter_engine.h"
 #include "in_flight_guard.h"
 #include "lvgl.h"
+#include "moonraker_types.h"
 #include "overlay_base.h"
+#include "static_panel_registry.h"
 #include "subject_managed_panel.h"
 
 #include <chrono>
 #include <cstdint>
 #include <deque>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "hv/json.hpp"
@@ -47,21 +50,28 @@
  */
 class ConsolePanel : public OverlayBase {
   public:
-    ConsolePanel();
     ~ConsolePanel() override;
 
     // === OverlayBase interface ===
     void init_subjects() override;
     void deinit_subjects();
     void register_callbacks() override;
+    const char* xml_component() const override {
+        return "console_panel";
+    }
     lv_obj_t* create(lv_obj_t* parent) override;
+    /// Freed on close; the next open rebuilds it.
+    bool destroy_on_close() const override {
+        return true;
+    }
+
     [[nodiscard]] const char* get_name() const override {
         return "Console";
     }
 
     // === Lifecycle hooks ===
     void on_activate() override;
-    void on_deactivate() override;
+    void on_deactivating(DeactivateReason reason) override;
     void on_ui_destroyed() override;
 
     /// Send the current G-code command from the input field via Moonraker
@@ -91,9 +101,7 @@ class ConsolePanel : public OverlayBase {
     /// been pruned from the buffer, which is the normal outcome for a tap that races
     /// a burst of incoming responses. Callers must handle nullptr; it is not an error.
     ///
-    /// Static and container-taking so it is testable without constructing a panel
-    /// (see the lifetime trap in
-    /// docs/devel/specs/2026-07-20-print-status-panel-test-isolation.md).
+    /// Static and container-taking so it is testable without constructing a panel.
     [[nodiscard]] static const GcodeEntry* find_entry_by_id(const std::deque<GcodeEntry>& entries,
                                                             uint64_t id);
 
@@ -112,6 +120,26 @@ class ConsolePanel : public OverlayBase {
                                              bool filter_temps, bool filter_firmware_noise,
                                              const helix::ui::ConsoleFilterEngine& firmware_filter);
 
+    /// Whether @p entry is shown, under the user's console filter settings as
+    /// they stand now and the active printer's @p firmware_filter. The one
+    /// display decision for the overlay's history and live paths and the home
+    /// console tile. Main thread: reads SettingsManager.
+    [[nodiscard]] static bool accepts(const GcodeEntry& entry,
+                                      const helix::ui::ConsoleFilterEngine& firmware_filter);
+
+    /// One server.gcode_store row as an entry. Pure, safe on any thread.
+    [[nodiscard]] static GcodeEntry entry_from_store(const GcodeStoreEntry& stored);
+
+    /// The response line a notify_gcode_response carries, or nullopt for a
+    /// malformed frame, an empty line or a bare "ok". Pure, safe on any thread.
+    [[nodiscard]] static std::optional<GcodeEntry>
+    entry_from_gcode_response(const nlohmann::json& msg);
+
+    /// Fill @p filter with the active printer's firmware-noise presets plus the
+    /// user's own additions and removals. Main thread: reads PrinterState and
+    /// SettingsManager.
+    static void load_firmware_filter(helix::ui::ConsoleFilterEngine& filter);
+
   private:
     /// Fetch initial history from Moonraker's server.gcode_store
     void fetch_history();
@@ -128,17 +156,11 @@ class ConsolePanel : public OverlayBase {
     /// Scroll to the bottom (newest entries visible)
     void scroll_to_bottom();
 
-    /// True if message starts with "!!" or "Error" (case-insensitive)
-    static bool is_error_message(const std::string& message);
-
     /// Toggle console_container_ vs empty_state_ visibility
     void update_visibility();
 
     /// Append a single entry, create its widget, and auto-scroll if appropriate
     void add_entry(const GcodeEntry& entry);
-
-    /// Handle incoming notify_gcode_response WebSocket notification
-    void on_gcode_response(const nlohmann::json& msg);
 
     /// Subscribe to real-time G-code responses (called from on_activate)
     void subscribe_to_gcode_responses();
@@ -149,9 +171,6 @@ class ConsolePanel : public OverlayBase {
     /// Rebuild the firmware-noise filter engine for the current printer.
     /// Cheap when the printer hasn't changed (compares against firmware_filter_printer_).
     void rebuild_firmware_filter();
-
-    /// True if message is a periodic temperature report (e.g. "ok T:210.0 /210.0 B:60.0 /60.0")
-    static bool is_temp_message(const std::string& message);
 
     /// Tap handler for a command line: paste it back into the input field.
     /// Refills only — never sends. A mis-tap must not re-run a printer command.
@@ -189,14 +208,9 @@ class ConsolePanel : public OverlayBase {
     helix::InFlightGuard fetch_guard_{std::chrono::milliseconds(30000)};
     bool user_scrolled_up_ = false; ///< True if user manually scrolled up
 
-    // Filtering — engine + observers driven by SettingsManager subjects.
-    // The engine is rebuilt on every on_activate() so user pattern edits take
-    // effect immediately when returning from the settings overlay.
+    // Firmware-noise patterns, rebuilt on every on_activate() so user pattern
+    // edits take effect when returning from the settings overlay.
     helix::ui::ConsoleFilterEngine firmware_filter_;
-    ObserverGuard filter_temps_observer_;
-    ObserverGuard filter_firmware_observer_;
-    bool filter_temps_ = true;
-    bool filter_firmware_noise_ = true;
 
     // Timestamp display (responsive: medium+ breakpoints only)
     bool show_timestamps_ = false; ///< True if screen is large enough for timestamps
@@ -207,9 +221,6 @@ class ConsolePanel : public OverlayBase {
     lv_subject_t status_subject_{};
     lv_subject_t status_visible_subject_{}; ///< 1 = status text visible, 0 = hidden
     lv_subject_t has_entries_subject_{};    ///< 1 = has console entries, 0 = empty
-
-    // Callback registration tracking
-    bool callbacks_registered_ = false;
 };
 
 /**
@@ -218,4 +229,6 @@ class ConsolePanel : public OverlayBase {
  *
  * Creates the instance on first call. Used by static callbacks.
  */
-ConsolePanel& get_global_console_panel();
+inline ConsolePanel& get_global_console_panel() {
+    return helix::lazy_global<ConsolePanel>("ConsolePanel");
+}

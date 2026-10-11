@@ -57,7 +57,7 @@ class BusyGuardFixture : public LVGLTestFixture {
     }
 
     void set_print_state(PrintJobState s) {
-        lv_subject_set_int(state.get_print_state_enum_subject(), static_cast<int>(s));
+        lv_subject_set_int(state.print_state().get_print_state_enum_subject(), static_cast<int>(s));
     }
 
     /**
@@ -73,7 +73,7 @@ class BusyGuardFixture : public LVGLTestFixture {
     }
 
     void set_manual_probe(bool on) {
-        lv_subject_set_int(state.get_manual_probe_active_subject(), on ? 1 : 0);
+        lv_subject_set_int(state.calibration_state().get_manual_probe_active_subject(), on ? 1 : 0);
     }
 
     /// Make an external blocking op (calibration / console macro) look active.

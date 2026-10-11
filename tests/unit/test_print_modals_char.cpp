@@ -9,7 +9,6 @@
  *
  * Modal classes tested:
  * - PrintCancelModal: Confirmation dialog for canceling an active print
- * - SaveZOffsetModal: Warning modal for saving Z-offset (causes Klipper restart)
  * - ExcludeObjectModal: Confirmation dialog for excluding objects during print
  * - RunoutGuidanceModal: Multi-button modal for filament runout handling
  */
@@ -34,12 +33,6 @@ class TestablePrintCancelModal : public PrintCancelModal {
   public:
     using PrintCancelModal::on_cancel;
     using PrintCancelModal::on_ok;
-};
-
-class TestableSaveZOffsetModal : public SaveZOffsetModal {
-  public:
-    using SaveZOffsetModal::on_cancel;
-    using SaveZOffsetModal::on_ok;
 };
 
 class TestableExcludeObjectModal : public ExcludeObjectModal {
@@ -118,50 +111,6 @@ TEST_CASE_METHOD(LVGLTestFixture, "CHAR: PrintCancelModal callback can be change
     modal.set_on_confirm([&]() { call_count = 2; });
     modal.on_ok();
     REQUIRE(call_count == 2);
-}
-
-// ============================================================================
-// CHARACTERIZATION: SaveZOffsetModal
-// ============================================================================
-
-TEST_CASE_METHOD(LVGLTestFixture, "CHAR: SaveZOffsetModal default construction",
-                 "[characterization][modals]") {
-    SaveZOffsetModal modal;
-
-    SECTION("get_name returns expected value") {
-        REQUIRE(std::string(modal.get_name()) == "Save Z-Offset");
-    }
-
-    SECTION("component_name returns expected value") {
-        REQUIRE(std::string(modal.component_name()) == "save_z_offset_modal");
-    }
-
-    SECTION("is_visible returns false before show") {
-        REQUIRE(modal.is_visible() == false);
-    }
-}
-
-TEST_CASE_METHOD(LVGLTestFixture, "CHAR: SaveZOffsetModal callback invocation",
-                 "[characterization][modals]") {
-    TestableSaveZOffsetModal modal;
-    bool confirm_called = false;
-
-    modal.set_on_confirm([&]() { confirm_called = true; });
-
-    SECTION("on_ok triggers confirm callback") {
-        modal.on_ok();
-        REQUIRE(confirm_called == true);
-    }
-
-    SECTION("on_ok with no callback doesn't crash") {
-        TestableSaveZOffsetModal modal2;
-        REQUIRE_NOTHROW(modal2.on_ok());
-    }
-
-    SECTION("on_cancel with no callback doesn't crash") {
-        TestableSaveZOffsetModal modal2;
-        REQUIRE_NOTHROW(modal2.on_cancel());
-    }
 }
 
 // ============================================================================
@@ -350,11 +299,6 @@ TEST_CASE_METHOD(LVGLTestFixture, "CHAR: Modal destructor is safe when not visib
         REQUIRE_NOTHROW(modal.reset());
     }
 
-    SECTION("SaveZOffsetModal") {
-        auto modal = std::make_unique<SaveZOffsetModal>();
-        REQUIRE_NOTHROW(modal.reset());
-    }
-
     SECTION("ExcludeObjectModal") {
         auto modal = std::make_unique<ExcludeObjectModal>();
         REQUIRE_NOTHROW(modal.reset());
@@ -370,9 +314,6 @@ TEST_CASE_METHOD(LVGLTestFixture, "CHAR: Modal dialog() returns nullptr when not
                  "[characterization][modals]") {
     PrintCancelModal modal;
     REQUIRE(modal.dialog() == nullptr);
-
-    SaveZOffsetModal modal2;
-    REQUIRE(modal2.dialog() == nullptr);
 
     ExcludeObjectModal modal3;
     REQUIRE(modal3.dialog() == nullptr);
@@ -401,18 +342,13 @@ TEST_CASE_METHOD(LVGLTestFixture, "CHAR: Modal hide() is safe when not visible",
  *    - on_ok() calls callback then hides
  *    - on_cancel() just hides (inherited from Modal)
  *
- * 2. SaveZOffsetModal (Same as PrintCancelModal):
- *    - Single confirm callback
- *    - on_ok() calls callback then hides
- *    - Used for destructive action warning (SAVE_CONFIG restarts Klipper)
- *
- * 3. ExcludeObjectModal (Confirmation with both callbacks):
+ * 2. ExcludeObjectModal (Confirmation with both callbacks):
  *    - Separate confirm and cancel callbacks
  *    - on_ok() calls confirm callback then hides
  *    - on_cancel() calls cancel callback then hides
  *    - Has set_object_name() for dynamic content
  *
- * 4. RunoutGuidanceModal (Multi-button modal):
+ * 3. RunoutGuidanceModal (Multi-button modal):
  *    - 6 different callbacks for different actions
  *    - Button mapping:
  *      - on_ok() = Load Filament (hides)

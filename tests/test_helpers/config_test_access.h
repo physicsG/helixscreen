@@ -30,6 +30,14 @@ class ConfigTestAccess {
     static Config*& instance_ref() {
         return Config::instance;
     }
+    // The document store save() writes to. A store swapped in for a scope must
+    // also clear storage_is_default, or save() rebuilds the file store over it.
+    static std::unique_ptr<ConfigStorage>& storage(Config& c) {
+        return c.storage_;
+    }
+    static bool& storage_is_default(Config& c) {
+        return c.storage_is_default_;
+    }
 };
 
 // Shared replacement for the duplicated per-fixture setup_printer_data helper.

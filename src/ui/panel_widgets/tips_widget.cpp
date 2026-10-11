@@ -9,10 +9,12 @@
 #include "ui_timer_guard.h"
 
 #include "display_settings_manager.h"
+#include "exception_policy.h"
 #include "panel_widget_registry.h"
 #include "panel_widget_size.h"
 #include "static_subject_registry.h"
 #include "subject_debug_registry.h"
+#include "subject_managed_panel.h"
 #include "theme_manager.h"
 
 #include <spdlog/spdlog.h>
@@ -27,6 +29,7 @@ static constexpr uint32_t TIP_FADE_DURATION_MS = 300;
 static lv_subject_t s_status_subject;
 static char s_status_buffer[512];
 static bool s_subjects_initialized = false;
+static SubjectManager s_subjects;
 
 static void tips_widget_init_subjects() {
     if (s_subjects_initialized) {
@@ -35,7 +38,7 @@ static void tips_widget_init_subjects() {
 
     lv_subject_init_string(&s_status_subject, s_status_buffer, nullptr, sizeof(s_status_buffer),
                            "Welcome to HelixScreen");
-    lv_xml_register_subject(nullptr, "status_text", &s_status_subject);
+    s_subjects.publish("status_text", &s_status_subject);
     SubjectDebugRegistry::instance().register_subject(&s_status_subject, "status_text",
                                                       LV_SUBJECT_TYPE_STRING, __FILE__, __LINE__);
 
@@ -44,7 +47,7 @@ static void tips_widget_init_subjects() {
     // Self-register cleanup with StaticSubjectRegistry (co-located with init)
     StaticSubjectRegistry::instance().register_deinit("TipsWidgetSubjects", []() {
         if (s_subjects_initialized && lv_is_initialized()) {
-            lv_subject_deinit(&s_status_subject);
+            s_subjects.deinit_all();
             s_subjects_initialized = false;
             spdlog::trace("[TipsWidget] Subjects deinitialized");
         }
@@ -75,9 +78,6 @@ TipsWidget::~TipsWidget() {
 void TipsWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
     widget_obj_ = widget_obj;
     parent_screen_ = parent_screen;
-
-    // Store this pointer for event callback recovery
-    lv_obj_set_user_data(widget_obj_, this);
 
     // Set user_data on the tip_container child (where event_cb is registered in XML)
     // so the callback can recover this widget instance via lv_obj_get_user_data()
@@ -121,7 +121,6 @@ void TipsWidget::detach() {
         if (tip_container) {
             lv_obj_set_user_data(tip_container, nullptr);
         }
-        lv_obj_set_user_data(widget_obj_, nullptr);
         widget_obj_ = nullptr;
     }
     parent_screen_ = nullptr;
@@ -201,10 +200,9 @@ void TipsWidget::update_tip_of_day() {
     // (ad5x, k1) a std::bad_alloc here would otherwise unwind out of a
     // 60-second LVGL timer callback and terminate the process (#771).
     PrintingTip tip;
-    try {
-        tip = TipsManager::get_instance()->get_random_unique_tip();
-    } catch (const std::exception& e) {
-        spdlog::warn("[TipsWidget] get_random_unique_tip threw: {} — skipping rotation", e.what());
+    if (!helix::contain_exceptions("[TipsWidget] get_random_unique_tip, skipping rotation", [&] {
+            tip = TipsManager::get_instance()->get_random_unique_tip();
+        })) {
         return;
     }
 

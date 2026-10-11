@@ -29,19 +29,19 @@ class IMoonrakerAPI;
 class TimelapseInstallOverlay : public OverlayBase {
   public:
     explicit TimelapseInstallOverlay(IMoonrakerAPI* api);
-    ~TimelapseInstallOverlay() override = default;
 
-    void init_subjects() override;
-    lv_obj_t* create(lv_obj_t* parent) override;
     const char* get_name() const override {
         return "Timelapse Install";
     }
-    const char* get_xml_component_name() const {
+    const char* xml_component() const override {
         return "timelapse_install_overlay";
     }
 
+    lv_obj_t* create(lv_obj_t* parent) override;
+    void register_callbacks() override;
+
     void on_activate() override;
-    void on_deactivate() override;
+    void on_deactivating(DeactivateReason reason) override;
     void cleanup() override;
 
     lv_obj_t* get_panel() const {
@@ -96,9 +96,6 @@ class TimelapseInstallOverlay : public OverlayBase {
     void download_and_modify_config();
     void write_timelapse_config(const std::string& helix_content,
                                 const std::string& moonraker_content);
-
-    // Static event callbacks
-    static void on_action_clicked(lv_event_t* e);
 
     IMoonrakerAPI* api_;
     lv_obj_t* step_progress_ = nullptr;

@@ -109,7 +109,7 @@ TEST_CASE_METHOD(ManualPullFixture, "Manual pull: no toolhead sensor falls back 
 TEST_CASE_METHOD(ManualPullFixture,
                  "Manual pull: arming while already clear does not fire immediately",
                  "[manual_pull][regression]") {
-    // observe_int_sync invokes its handler once at registration. Hooking the
+    // observe<int> invokes its handler once at registration. Hooking the
     // sensor up while it already reads 0 would therefore toast instantly, with
     // the filament still gripped by the extruder gears.
     set_toolhead(0);

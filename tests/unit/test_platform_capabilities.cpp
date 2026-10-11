@@ -94,6 +94,14 @@ TEST_CASE("RAM detection: handle empty content", "[platform][meminfo][edge]") {
     REQUIRE(ram_mb == 0);
 }
 
+TEST_CASE("parse_meminfo_kb matches a key only at the start of a line",
+          "[platform][meminfo][edge]") {
+    const std::string meminfo = "SwapCached:        77 kB\nCached:          2624748 kB\n";
+    REQUIRE(parse_meminfo_kb(meminfo, "Cached") == 2624748);
+    REQUIRE(parse_meminfo_kb(meminfo, "Swap") == 0);
+    REQUIRE(parse_meminfo_kb("MemAvailable:\t8192 kB", "MemAvailable") == 8192);
+}
+
 // ============================================================================
 // CPU Core Detection Tests (/proc/cpuinfo parsing)
 // ============================================================================
@@ -269,7 +277,7 @@ TEST_CASE("Tier classification: EMBEDDED for zero cores (parse failure)",
 }
 
 TEST_CASE("Tier classification: BASIC for mid-range hardware", "[platform][tier]") {
-    // 512MB-2GB RAM with 2-3 cores = BASIC
+    // 512MB or more RAM with fewer than 4 cores = BASIC
     auto caps = PlatformCapabilities::from_metrics(1024, 2, 500.0f);
     REQUIRE(caps.tier == PlatformTier::BASIC);
     REQUIRE(caps.supports_charts);
@@ -278,7 +286,7 @@ TEST_CASE("Tier classification: BASIC for mid-range hardware", "[platform][tier]
 }
 
 TEST_CASE("Tier classification: BASIC for dual-core with good RAM", "[platform][tier]") {
-    // 2GB+ RAM but only 2 cores = BASIC (CPU limited)
+    // Plenty of RAM but only 2 cores = BASIC (CPU limited)
     auto caps = PlatformCapabilities::from_metrics(4096, 2, 1000.0f);
     REQUIRE(caps.tier == PlatformTier::BASIC);
 }
@@ -290,7 +298,7 @@ TEST_CASE("Tier classification: BASIC for 3 cores with good RAM", "[platform][ti
 }
 
 TEST_CASE("Tier classification: STANDARD for high-end hardware", "[platform][tier]") {
-    // 2GB+ RAM AND 4+ cores = STANDARD
+    // 768MB+ RAM AND 4+ cores = STANDARD
     auto caps = PlatformCapabilities::from_metrics(4096, 4, 1000.0f);
     REQUIRE(caps.tier == PlatformTier::STANDARD);
     REQUIRE(caps.supports_charts);
@@ -310,14 +318,25 @@ TEST_CASE("Tier classification: boundary at exactly 512MB", "[platform][tier][bo
     REQUIRE(caps.tier == PlatformTier::BASIC);
 }
 
-TEST_CASE("Tier classification: boundary at exactly 2048MB", "[platform][tier][boundary]") {
-    // Exactly 2048MB (2GB) with 4 cores = STANDARD
-    auto caps = PlatformCapabilities::from_metrics(2048, 4, 1000.0f);
+TEST_CASE("Tier classification: boundary at exactly 768MB", "[platform][tier][boundary]") {
+    // Exactly 768MB with 4 cores = STANDARD; one MB less = BASIC
+    auto caps = PlatformCapabilities::from_metrics(768, 4, 1000.0f);
     REQUIRE(caps.tier == PlatformTier::STANDARD);
+    auto below = PlatformCapabilities::from_metrics(767, 4, 1000.0f);
+    REQUIRE(below.tier == PlatformTier::BASIC);
+    REQUIRE_FALSE(below.supports_animations);
+}
+
+TEST_CASE("Tier classification: a 1GB quad-core Pi 3B is STANDARD", "[platform][tier]") {
+    // A Pi 3B reports about 856MB of its 1GB
+    auto caps = PlatformCapabilities::from_metrics(856, 4, 1000.0f);
+    REQUIRE(caps.tier == PlatformTier::STANDARD);
+    REQUIRE(caps.supports_animations);
+    REQUIRE(caps.max_chart_points == PlatformCapabilities::STANDARD_CHART_POINTS);
 }
 
 TEST_CASE("Tier classification: boundary at exactly 4 cores", "[platform][tier][boundary]") {
-    // Exactly 4 cores with 2GB+ RAM = STANDARD
+    // Exactly 4 cores with plenty of RAM = STANDARD
     auto caps = PlatformCapabilities::from_metrics(4096, 4, 1000.0f);
     REQUIRE(caps.tier == PlatformTier::STANDARD);
 

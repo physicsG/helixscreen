@@ -29,7 +29,7 @@ constexpr int32_t TEMP_GRAPH_TOOLTIP_HIT_RADIUS_PX = 28;
 
 /// A resolved tap: one plotted sample of one visible series.
 struct TempGraphHit {
-    int series_id = -1;
+    SeriesId series_id = SeriesId::None;
     int logical_index = -1;  ///< 0 = oldest slot, point_count-1 = newest
     int32_t deci_temp = 0;   ///< value x 10
     int16_t deci_target = 0; ///< target x 10 in effect at that sample; 0 = off
@@ -90,10 +90,10 @@ void temp_graph_tooltip_clear(ui_temp_graph_t* graph);
 /// Called after a sample is pushed to `series_id`. Walks the pin one slot left
 /// when it belongs to that series, dismissing it once it falls off the edge.
 /// Per-series because each lv_chart_series_t carries its own start_point.
-void temp_graph_tooltip_on_sample_pushed(ui_temp_graph_t* graph, int series_id);
+void temp_graph_tooltip_on_sample_pushed(ui_temp_graph_t* graph, SeriesId series_id);
 
 /// Called when `series_id` is hidden. Dismisses the caption if it was pinned there.
-void temp_graph_tooltip_on_series_hidden(ui_temp_graph_t* graph, int series_id);
+void temp_graph_tooltip_on_series_hidden(ui_temp_graph_t* graph, SeriesId series_id);
 
 /// Sever both the press and draw callbacks and free tooltip state. Real
 /// teardown only - called from ui_temp_graph_destroy. Do NOT call this to

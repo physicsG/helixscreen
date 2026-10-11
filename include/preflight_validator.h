@@ -16,7 +16,7 @@ struct ToolCheck {
     bool slot_present = false;
     bool color_ok = true;
     bool material_ok = true;
-    enum class Severity { Ok, ColorMismatch, MaterialMismatch, EmptySlot };
+    enum class Severity { Ok, ColorMismatch, MaterialMismatch, EmptySlot, UnknownMaterial };
     Severity severity = Severity::Ok;
 };
 

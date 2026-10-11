@@ -11,7 +11,7 @@
 #include "ams_backend_mock.h"
 
 TEST_CASE("AmsBackendMock satisfies AmsBackend interface", "[compile][drift]") {
-    std::unique_ptr<AmsBackend> p = std::make_unique<AmsBackendMock>();
+    std::unique_ptr<helix::AmsBackend> p = std::make_unique<helix::AmsBackendMock>();
     REQUIRE(p != nullptr);
 }
 #endif

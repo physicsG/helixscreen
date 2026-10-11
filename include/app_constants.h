@@ -18,8 +18,8 @@
 
 #include <chrono>
 #include <cstdlib>
-#include <filesystem>
 #include <string>
+#include <sys/stat.h>
 
 /**
  * @brief Application-wide constants shared between UI and backend
@@ -233,10 +233,11 @@ constexpr const char* UPDATE_RESTART_MARKER_PRIMARY = "/var/lib/helixscreen/upda
 
 inline std::string update_restart_marker_path() {
     // Try primary (systemd StateDirectory) first
-    namespace fs = std::filesystem;
-    std::error_code ec;
-    fs::path primary_dir = fs::path(UPDATE_RESTART_MARKER_PRIMARY).parent_path();
-    if (fs::exists(primary_dir, ec) && !ec) {
+    // A plain stat, not helix::fs: this header is included too widely to bring
+    // that namespace into files that alias std::filesystem as `fs`.
+    const std::string primary(UPDATE_RESTART_MARKER_PRIMARY);
+    struct stat st {};
+    if (::stat(primary.substr(0, primary.rfind('/')).c_str(), &st) == 0) {
         return UPDATE_RESTART_MARKER_PRIMARY;
     }
     // Fallback to $HOME/.helixscreen/

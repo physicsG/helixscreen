@@ -3,6 +3,7 @@
 
 #include "job_queue_widget.h"
 
+#include "ui_next_tick.h"
 #include "ui_utils.h"
 
 #include "app_globals.h"
@@ -12,6 +13,7 @@
 #include "panel_widget_size.h"
 #include "static_subject_registry.h"
 #include "subject_debug_registry.h"
+#include "subject_managed_panel.h"
 #include "theme_manager.h"
 
 #include <spdlog/spdlog.h>
@@ -21,6 +23,7 @@
 // Module-level subject for size mode — static like all panel widget subjects
 static lv_subject_t s_size_mode_subject;
 static bool s_subjects_initialized = false;
+static SubjectManager s_subjects;
 
 static void job_queue_widget_init_subjects() {
     if (s_subjects_initialized) {
@@ -29,7 +32,7 @@ static void job_queue_widget_init_subjects() {
 
     // Size mode (0=compact, 1=normal/2x2, 2=expanded/3x2+)
     lv_subject_init_int(&s_size_mode_subject, 1);
-    lv_xml_register_subject(nullptr, "jq_size_mode", &s_size_mode_subject);
+    s_subjects.publish("jq_size_mode", &s_size_mode_subject);
     SubjectDebugRegistry::instance().register_subject(&s_size_mode_subject, "jq_size_mode",
                                                       LV_SUBJECT_TYPE_INT, __FILE__, __LINE__);
 
@@ -38,7 +41,7 @@ static void job_queue_widget_init_subjects() {
     // Self-register cleanup with StaticSubjectRegistry (co-located with init)
     StaticSubjectRegistry::instance().register_deinit("JobQueueWidgetSubjects", []() {
         if (s_subjects_initialized && lv_is_initialized()) {
-            lv_subject_deinit(&s_size_mode_subject);
+            s_subjects.deinit_all();
             s_subjects_initialized = false;
             spdlog::trace("[JobQueueWidget] Subjects deinitialized");
         }
@@ -82,9 +85,6 @@ void JobQueueWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
     widget_obj_ = widget_obj;
     parent_screen_ = parent_screen;
 
-    // Store this pointer for event callback recovery
-    lv_obj_set_user_data(widget_obj_, this);
-
     // Find the scrollable job list container by name
     job_list_container_ = lv_obj_find_by_name(widget_obj_, "job_list_container");
     if (!job_list_container_) {
@@ -93,44 +93,37 @@ void JobQueueWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
 
     // Observe job_queue_count subject to rebuild the list when count changes
     auto* count_subj = lv_xml_get_subject(nullptr, "job_queue_count");
+    auto* jqs = get_job_queue_state();
     if (count_subj) {
-        count_observer_ = helix::ui::observe_int_sync<JobQueueWidget>(
-            count_subj, this, [](JobQueueWidget* self, int /*count*/) {
+        count_observer_ = helix::ui::observe<int>(
+            count_subj, this,
+            [](JobQueueWidget* self, int /*count*/) {
                 // Defer rebuild (#80) AND use safe_clean_children inside
-                // rebuild_job_list (#776): lv_async_call moves the rebuild off
+                // rebuild_job_list (#776): run_next_tick moves the rebuild off
                 // the observer callback's stack, and safe_clean_children schedules
                 // child deletion via lv_obj_delete_async so sync lv_obj_clean()
                 // can't corrupt LVGL's event linked list.
                 if (!self->list_rebuild_pending_) {
                     self->list_rebuild_pending_ = true;
-                    struct RebuildCtx {
-                        helix::LifetimeToken token;
-                        JobQueueWidget* self;
-                    };
-                    auto* ctx = new RebuildCtx{self->lifetime_.token(), self};
-                    lv_async_call(
-                        [](void* data) {
-                            auto* ctx = static_cast<RebuildCtx*>(data);
-                            auto token = ctx->token;
-                            auto* widget = ctx->self;
-                            delete ctx;
-                            if (token.expired())
-                                return;
-                            widget->list_rebuild_pending_ = false;
-                            if (widget->job_list_container_)
-                                widget->rebuild_job_list();
-                        },
-                        ctx);
+                    helix::ui::run_next_tick(self->lifetime_.token(), [self]() {
+                        self->list_rebuild_pending_ = false;
+                        if (self->job_list_container_)
+                            self->rebuild_job_list();
+                    });
                 }
-            });
+            },
+            jqs ? jqs->get_subjects_lifetime() : SubjectLifetime{});
     }
 
     spdlog::debug("[JobQueueWidget] Attached");
 }
 
 void JobQueueWidget::detach() {
-    // Invalidate lifetime guard so pending lv_async_call callbacks become no-ops
+    // Invalidate lifetime guard so pending next-tick callbacks become no-ops.
+    // That drops a queued rebuild, so the coalescing flag goes with it, or a
+    // recycled instance would never queue another.
     lifetime_.invalidate();
+    list_rebuild_pending_ = false;
 
     if (lv_is_initialized()) {
         count_observer_ = {};
@@ -139,7 +132,6 @@ void JobQueueWidget::detach() {
     job_list_container_ = nullptr;
 
     if (widget_obj_) {
-        lv_obj_set_user_data(widget_obj_, nullptr);
         widget_obj_ = nullptr;
     }
     parent_screen_ = nullptr;

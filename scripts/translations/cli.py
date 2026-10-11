@@ -64,7 +64,7 @@ def run_sync(
     dry_run: bool = True,
     with_sources: bool = False,
     base_locale: str = "en",
-    cpp_dir: Path = None,
+    cpp_dirs: list = None,
 ) -> SyncResult:
     """
     Run the full sync workflow: extract from XML and C++, merge to YAML.
@@ -75,7 +75,7 @@ def run_sync(
         dry_run: If True, don't modify files
         with_sources: If True, add source file comments
         base_locale: Base locale for comparison
-        cpp_dir: Optional directory containing C++ source files
+        cpp_dirs: Optional list of directories containing C++ source files
 
     Returns:
         SyncResult with statistics
@@ -89,10 +89,11 @@ def run_sync(
     else:
         new_keys = extract_strings_from_directory(xml_dir, recursive=True)
 
-    # Also extract from C++ if directory provided
-    if cpp_dir and cpp_dir.exists():
-        cpp_strings = extract_strings_from_cpp_directory(cpp_dir, recursive=True)
-        new_keys.update(cpp_strings)
+    # Also extract from C++ if directories provided
+    for cpp_dir in cpp_dirs or []:
+        if cpp_dir.exists():
+            cpp_strings = extract_strings_from_cpp_directory(cpp_dir, recursive=True)
+            new_keys.update(cpp_strings)
 
     # Get existing keys from YAML
     base_path = yaml_dir / f"{base_locale}.yml"
@@ -144,7 +145,7 @@ def run_sync(
         xml_dir,
         yaml_dir,
         base_locale,
-        cpp_dir=cpp_dir,
+        cpp_dirs=cpp_dirs,
         extracted=None if with_sources else set(new_keys),
     )
     result.obsolete_keys_found = len(obsolete)
@@ -209,7 +210,7 @@ def run_obsolete(
     action: str = "report",
     dry_run: bool = True,
     base_locale: str = "en",
-    cpp_dir: Path = None,
+    cpp_dirs: list = None,
 ) -> ObsoleteResult:
     """
     Detect and optionally handle obsolete translation keys.
@@ -220,12 +221,12 @@ def run_obsolete(
         action: One of "report", "mark", "delete"
         dry_run: If True, don't modify files (for delete/mark actions)
         base_locale: Base locale for comparison
-        cpp_dir: Optional directory containing C++ source files
+        cpp_dirs: Optional list of directories containing C++ source files
 
     Returns:
         ObsoleteResult with obsolete keys and action results
     """
-    obsolete = find_obsolete_keys(xml_dir, yaml_dir, base_locale, cpp_dir=cpp_dir)
+    obsolete = find_obsolete_keys(xml_dir, yaml_dir, base_locale, cpp_dirs=cpp_dirs)
 
     result = ObsoleteResult(obsolete_keys=obsolete)
 

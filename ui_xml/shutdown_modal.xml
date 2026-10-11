@@ -16,7 +16,7 @@
             height="content" style_pad_left="#space_lg" style_pad_right="#space_sm" style_pad_top="#space_lg"
             style_pad_bottom="#space_sm" flex_flow="row" style_flex_cross_place="center" style_pad_gap="#space_sm">
       <icon name="header_icon" src="power" size="md" variant="warning"/>
-      <text_heading text="Shutdown / Reboot" translation_tag="Shutdown / Reboot" style_text_align="left" flex_grow="1"/>
+      <text_heading text="Shutdown / Reboot" style_text_align="left" flex_grow="1"/>
       <ui_button name="btn_close" width="40" height="40" variant="ghost" icon="close" focusable="false">
         <event_cb trigger="clicked" callback="on_modal_cancel_clicked"/>
       </ui_button>
@@ -28,8 +28,7 @@
             style_pad_top="0" style_pad_bottom="#space_lg">
       <bind_flag_if_not_eq subject="shutdown_view_state" flag="hidden" ref_value="0"/>
       <text_body width="100%"
-                 text="Are you sure? This will power off or restart this device."
-                 translation_tag="Are you sure? This will power off or restart this device." style_text_align="left"
+                 text="Are you sure? This will power off or restart this device." style_text_align="left"
                  long_mode="wrap"/>
     </lv_obj>
 
@@ -38,9 +37,7 @@
             height="content" style_min_height="80" style_pad_left="#space_lg" style_pad_right="#space_lg"
             style_pad_top="0" style_pad_bottom="#space_lg">
       <bind_flag_if_not_eq subject="shutdown_view_state" flag="hidden" ref_value="1"/>
-      <text_body width="100%"
-                 text="Choose what to power off or restart." translation_tag="Choose what to power off or restart."
-                 style_text_align="left" long_mode="wrap"/>
+      <text_body width="100%" text="Choose what to power off or restart." style_text_align="left" long_mode="wrap"/>
     </lv_obj>
 
     <!-- Progress: screen shutting down -->
@@ -50,7 +47,7 @@
             style_pad_gap="#space_sm">
       <bind_flag_if_not_eq subject="shutdown_view_state" flag="hidden" ref_value="2"/>
       <spinner size="lg"/>
-      <text_muted text="Shutting down screen..." translation_tag="Shutting down screen..." style_text_align="center"/>
+      <text_muted text="Shutting down screen..." style_text_align="center"/>
     </lv_obj>
 
     <!-- Progress: screen rebooting -->
@@ -60,7 +57,7 @@
             style_pad_gap="#space_sm">
       <bind_flag_if_not_eq subject="shutdown_view_state" flag="hidden" ref_value="3"/>
       <spinner size="lg"/>
-      <text_muted text="Restarting screen..." translation_tag="Restarting screen..." style_text_align="center"/>
+      <text_muted text="Restarting screen..." style_text_align="center"/>
     </lv_obj>
 
     <!-- Progress: printer shutting down -->
@@ -70,7 +67,7 @@
             style_pad_gap="#space_sm">
       <bind_flag_if_not_eq subject="shutdown_view_state" flag="hidden" ref_value="4"/>
       <spinner size="lg"/>
-      <text_muted text="Shutting down printer..." translation_tag="Shutting down printer..." style_text_align="center"/>
+      <text_muted text="Shutting down printer..." style_text_align="center"/>
     </lv_obj>
 
     <!-- Progress: printer rebooting -->
@@ -80,7 +77,7 @@
             style_pad_gap="#space_sm">
       <bind_flag_if_not_eq subject="shutdown_view_state" flag="hidden" ref_value="5"/>
       <spinner size="lg"/>
-      <text_muted text="Restarting printer..." translation_tag="Restarting printer..." style_text_align="center"/>
+      <text_muted text="Restarting printer..." style_text_align="center"/>
     </lv_obj>
 
     <!-- Progress: both shutting down -->
@@ -90,7 +87,7 @@
             style_pad_gap="#space_sm">
       <bind_flag_if_not_eq subject="shutdown_view_state" flag="hidden" ref_value="6"/>
       <spinner size="lg"/>
-      <text_muted text="Shutting down..." translation_tag="Shutting down..." style_text_align="center"/>
+      <text_muted text="Shutting down..." style_text_align="center"/>
     </lv_obj>
 
     <!-- Progress: both rebooting -->
@@ -100,7 +97,7 @@
             style_pad_gap="#space_sm">
       <bind_flag_if_not_eq subject="shutdown_view_state" flag="hidden" ref_value="7"/>
       <spinner size="lg"/>
-      <text_muted text="Restarting..." translation_tag="Restarting..." style_text_align="center"/>
+      <text_muted text="Restarting..." style_text_align="center"/>
     </lv_obj>
 
     <!-- Single-scope buttons: Reboot + Shutdown (single row; same host, both go via Moonraker) -->
@@ -109,8 +106,8 @@
             style_pad_bottom="#space_lg">
       <bind_flag_if_not_eq subject="shutdown_view_state" flag="hidden" ref_value="0"/>
       <modal_button_row secondary_icon="restart"
-                        secondary_text="Reboot" secondary_tag="Reboot" secondary_callback="on_reboot_printer_clicked"
-                        primary_icon="power" primary_text="Shutdown" primary_tag="Shutdown"
+                        secondary_variant="primary" secondary_text="Reboot"
+                        secondary_callback="on_reboot_printer_clicked" primary_icon="power" primary_text="Shutdown"
                         primary_callback="on_shutdown_printer_clicked" primary_variant="danger"/>
     </lv_obj>
 

@@ -1,5 +1,5 @@
 {
-  "config_version": 24,
+  "config_version": 27,
   "_config_version_comment": "Config schema version. MUST be present and current: Config::init treats a missing version as 0, reads that as a tarball default, and will restore a rolling backup over this file. Pinned by tests/unit/test_settings_template_contract.cpp.",
   "dark_mode": true,
   "brightness": 80,
@@ -12,8 +12,8 @@
   "_sound_theme_comment": "Active sound theme. Loads from config/sounds/<name>.json. Options: 'default', 'minimal'. Default: 'default'.",
   "disable_sound": false,
   "_disable_sound_comment": "Disable all sound output. Prevents audio backend initialization entirely. Use on hardware where audio causes excessive CPU load (e.g., Artillery M1 Pro). Also available as --no-sound CLI flag. Default: false.",
-  "completion_alert": 1,
-  "_completion_alert_comment": "Print completion alert mode: 0=Off, 1=Notification, 2=Alert. Default: 1.",
+  "completion_alert": 2,
+  "_completion_alert_comment": "Print completion alert mode: 0=Off, 1=Notification, 2=Alert. Default: 2.",
   "wizard_completed": false,
   "_wizard_completed_comment": "Whether the setup wizard has been completed. Set automatically after first-run wizard.",
   "wifi_expected": false,
@@ -29,9 +29,9 @@
   "log_dest": "auto",
   "_log_dest_comment": "Log destination: 'auto' (detect best), 'journal' (systemd), 'syslog', 'file', 'console' (disable system log)",
   "log_path": "",
-  "_log_path_comment": "Log file path when using file destination. Empty = auto (/var/log or ~/.local/share)",
-  "log_level": "warn",
-  "_log_level_comment": "Log verbosity: warn (quiet), info, debug, trace. CLI -v flags override this.",
+  "_log_path_comment": "Log file path when using file destination. Empty = auto (/var/log or ~/.local/share). Must be an absolute *.log path under /tmp, /var/log or the install dir (subdirectory owned by root or the app user, no group/world write, no .. and not a symlink); anything else is refused and the default location is used.",
+  "log_level": "info",
+  "_log_level_comment": "Log verbosity: warn (quiet), info (default), debug, trace. CLI -v flags override this.",
   "network": {
     "connection_type": "None",
     "wifi_ssid": "",
@@ -39,7 +39,7 @@
   },
   "gcode_viewer": {
     "tube_sides": 4,
-    "_tube_sides_comment": "Number of sides for tube cross-section. Options: 4 (diamond, fastest, default), 8 (octagonal, balanced), 16 (circular, highest quality, matches OrcaSlicer)",
+    "_tube_sides_comment": "Number of sides for tube cross-section. Options: 4 (rectangular, fastest, default), 8 (octagonal, balanced), 16 (circular, highest quality, matches OrcaSlicer)",
     "streaming_mode": "auto",
     "_streaming_mode_comment": "G-code streaming mode for large files. 'auto' (calculate based on RAM), 'on' (always stream), 'off' (always full load). Override with HELIX_GCODE_STREAMING env var.",
     "streaming_threshold_percent": 40,
@@ -73,6 +73,8 @@
     "rotate": 0,
     "backlight_enable_ioctl": true,
     "_backlight_enable_ioctl_comment": "Use BACKLIGHT_ENABLE/DISABLE ioctls for Allwinner display control. Some platforms (e.g. Elegoo CC1, AD5X) invert PWM polarity when these are called; set false for brightness-only control. Default: true.",
+    "backlight_floor_percent": 0,
+    "_backlight_floor_percent_comment": "Lowest brightness level (percent of the panel's raw range) the screen may drop to while on. Some panels render lower levels as black; raise this if the panel goes black before the slider minimum. 0 disables. Default: 0 (20 on K2 builds). Requires restart.",
     "sleep_backlight_off": true,
     "_sleep_backlight_off_comment": "Power off backlight during display sleep. Set false only on platforms where backlight power-off is verified to prevent wake-on-touch. When false, software overlay + FBIOBLANK make screen appear off while backlight stays powered. Default: true.",
     "sleep_sec": 1200,
@@ -84,7 +86,7 @@
     "dim_brightness": 30,
     "_dim_brightness_comment": "Brightness percentage when dimmed (1-100). Default: 30%.",
     "screensaver_type": 1,
-    "_screensaver_type_comment": "Screensaver during display sleep. 0=Off (blank screen), 1=Clock (default). Replaces legacy screensaver_enabled boolean.",
+    "_screensaver_type_comment": "Screensaver shown when the display dims. 0=Off, 1=Flying Toasters (default), 2=Starfield, 3=3D Pipes, 4=Bouncing Printer, 5=Fireworks. Replaces legacy screensaver_enabled boolean.",
     "drm_device": "",
     "_drm_device_comment": "Override DRM device path (e.g., '/dev/dri/card1'). Empty string enables auto-detection. Pi 5 has multiple DRM cards: card0 (v3d, 3D only), card1 (DSI touchscreen), card2 (vc4/HDMI). Auto-detection finds the first with dumb buffer support and a connected display.",
     "gcode_render_mode": 2,
@@ -134,9 +136,9 @@
   },
   "streaming": {
     "threshold_mb": 0,
-    "_threshold_mb_comment": "File size threshold in MB for using streaming (disk-based) operations instead of buffered (in-memory). 0 = auto-detect based on 10% of available RAM. Override with HELIX_FORCE_STREAMING=1 env var to force streaming for all files.",
+    "_threshold_mb_comment": "Files larger than this many MB always stream, even when RAM would allow a full load. 0 = no ceiling; the RAM rule in gcode_viewer.streaming_threshold_percent decides.",
     "force_streaming": false,
-    "_force_streaming_comment": "Always use streaming operations regardless of file size. Useful for memory-constrained devices or testing. Can also be set via HELIX_FORCE_STREAMING=1 env var."
+    "_force_streaming_comment": "Always stream regardless of file size. Same as gcode_viewer.streaming_mode 'on' or HELIX_GCODE_STREAMING=on."
   },
   "plugins": {
     "enabled": [],
@@ -272,19 +274,6 @@
           "gcode": "HELIX_BED_LEVEL_IF_NEEDED"
         }
       },
-      "safety_limits": {
-        "max_temperature_celsius": 400.0,
-        "min_temperature_celsius": 0.0,
-        "max_fan_speed_percent": 100.0,
-        "min_fan_speed_percent": 0.0,
-        "max_feedrate_mm_min": 50000.0,
-        "min_feedrate_mm_min": 0.0,
-        "max_relative_distance_mm": 1000.0,
-        "min_relative_distance_mm": -1000.0,
-        "max_absolute_position_mm": 1000.0,
-        "min_absolute_position_mm": 0.0,
-        "_comment": "Safety limits for G-code generation. Explicit values override Moonraker auto-detection. Defaults are conservative for most FDM printers. High-temp printers may need max_temperature_celsius > 400. Leave unset to auto-detect from printer.cfg via Moonraker."
-      },
       "chamber_heater": "auto",
       "_chamber_heater_comment": "Chamber heater assignment. 'auto' (detect by name heuristics), 'none' (disable), or Klipper object name (e.g., 'heater_generic chamber'). Default: 'auto'.",
       "chamber_sensor": "auto",
@@ -345,7 +334,6 @@
   "update": {
     "channel": 0,
     "_channel_comment": "Update channel. 0=Stable, 1=Beta (pre-releases), 2=Dev (custom URL)",
-    "dev_url": "",
-    "_dev_url_comment": "Base URL for dev channel manifest. Set to enable Dev channel option."
+    "_url_comment": "Update URLs live in /var/lib/helixscreen/update_urls.json (owned by root, mode 0644), not here: settings.json is editable from the web UI and the updater installs whatever those URLs serve. Keys: r2_url (manifest base, default https://releases.helixscreen.org), dev_url (dev channel base)."
   }
 }

@@ -3,14 +3,19 @@
 
 #pragma once
 
+#include "helix/xml/indexed_subject_pool.h"
 #include "overlay_base.h"
+#include "spoolman_catalog_search.h"
 #include "spoolman_types.h"
+#include "static_panel_registry.h"
 #include "subject_managed_panel.h"
 
 #include <functional>
 #include <memory>
 #include <string>
 #include <vector>
+
+#include "hv/json.hpp"
 
 // Forward declarations
 namespace helix::ui {
@@ -45,12 +50,14 @@ class SpoolWizardOverlay : public OverlayBase {
     void init_subjects() override;
     void deinit_subjects();
     void register_callbacks() override;
-    lv_obj_t* create(lv_obj_t* parent) override;
     const char* get_name() const override {
         return "SpoolWizard";
     }
+    const char* xml_component() const override {
+        return "spool_wizard";
+    }
     void on_activate() override;
-    void on_deactivate() override;
+    void on_deactivating(DeactivateReason reason) override;
 
     // ========== Step navigation (public for testing) ==========
     Step current_step() const {
@@ -104,22 +111,21 @@ class SpoolWizardOverlay : public OverlayBase {
         int bed_temp_min = 0;
         int bed_temp_max = 0;
         bool from_server = false;
-        bool from_database = false;
+        std::string multi_color_hexes;     ///< Comma-separated, Spoolman's form
+        std::string multi_color_direction; ///< "coaxial" or "longitudinal"
     };
 
-    // ========== Vendor entry (merged from SpoolmanDB + server) ==========
+    // ========== Vendor entry ==========
     struct VendorEntry {
         std::string name;
-        int server_id = -1;         ///< Spoolman server ID, -1 = DB-only
-        bool from_server = false;   ///< Present on Spoolman server
-        bool from_database = false; ///< Present in SpoolmanDB
+        int server_id = -1;       ///< Spoolman server ID, -1 = not created yet
+        bool from_server = false; ///< Present on Spoolman server
     };
 
     // ========== Vendor step logic (public for testing) ==========
 
-    /// Merge external DB vendors with server vendors, deduplicate by name
-    static std::vector<VendorEntry> merge_vendors(const std::vector<VendorEntry>& external_vendors,
-                                                  const std::vector<VendorEntry>& server_vendors);
+    /// The server's vendors, one per case-insensitive name, sorted by name
+    static std::vector<VendorEntry> sorted_vendors(const std::vector<VendorEntry>& server_vendors);
 
     /// Filter vendor list by case-insensitive substring match
     static std::vector<VendorEntry> filter_vendor_list(const std::vector<VendorEntry>& vendors,
@@ -159,10 +165,11 @@ class SpoolWizardOverlay : public OverlayBase {
 
     // ========== Filament step logic (public for testing) ==========
 
-    /// Merge server filaments with external DB filaments, deduplicate by material+color_hex
-    static std::vector<FilamentEntry>
-    merge_filaments(const std::vector<FilamentInfo>& server_filaments,
-                    const std::vector<FilamentInfo>& external_filaments);
+    /// The POST /v1/vendor body for a new vendor named @p name with website @p url
+    static nlohmann::json vendor_create_payload(const std::string& name, const std::string& url);
+
+    /// The POST /v1/filament body for @p f under @p vendor_id
+    static nlohmann::json filament_create_payload(const FilamentEntry& f, int vendor_id);
 
     /// Load filaments for the selected vendor from server + SpoolmanDB
     void load_filaments();
@@ -217,6 +224,39 @@ class SpoolWizardOverlay : public OverlayBase {
         return new_filament_density_;
     }
 
+    // ========== SpoolmanDB search (public for testing) ==========
+
+    /// What the catalog section shows; the spool_db_state subject carries it.
+    enum class CatalogState { Idle = 0, Loading = 1, Results = 2, NoResults = 3, Error = 4 };
+
+    /// The filament a SpoolmanDB result describes, ready to create.
+    static FilamentEntry entry_from_catalog(const helix::ExternalFilament& f);
+
+    /// The server vendor named @p name, compared case-insensitively, or -1.
+    static int find_server_vendor(const std::vector<VendorEntry>& vendors, const std::string& name);
+
+    /// A keystroke in the search box: restarts the debounce and nothing else.
+    void on_search_key();
+
+    /// Searches for @p query, when the server has the route and it is long
+    /// enough. With a search already in flight, @p query waits as the one
+    /// pending search and the in-flight answer is dropped on arrival.
+    void run_catalog_search(const std::string& query);
+
+    /// Show @p results for the current query.
+    void apply_catalog_results(std::vector<helix::ExternalFilament> results);
+
+    /// Take result @p index: the vendor and filament it names, reusing the
+    /// server's when they already exist, then the spool step.
+    void select_catalog_result(int index);
+
+    const std::vector<helix::ExternalFilament>& catalog_results() const {
+        return catalog_results_;
+    }
+    CatalogState catalog_state() const {
+        return catalog_state_;
+    }
+
     // ========== Spool details state (public for testing) ==========
     double spool_remaining_weight() const {
         return spool_remaining_weight_;
@@ -235,7 +275,6 @@ class SpoolWizardOverlay : public OverlayBase {
     // ========== Navigation state ==========
     Step current_step_ = Step::VENDOR;
     bool can_proceed_ = false;
-    bool callbacks_registered_ = false;
 
     // ========== Callbacks ==========
     CompletionCallback completion_callback_;
@@ -243,20 +282,33 @@ class SpoolWizardOverlay : public OverlayBase {
 
     // ========== Subjects ==========
     SubjectManager subjects_;
-    lv_subject_t step_subject_;
-    lv_subject_t can_proceed_subject_;
-    lv_subject_t step_label_subject_;
-    lv_subject_t creating_subject_;
-    lv_subject_t selected_vendor_name_subject_;
-    lv_subject_t summary_vendor_subject_;
-    lv_subject_t summary_filament_subject_;
-    lv_subject_t show_create_vendor_subject_;
-    lv_subject_t show_create_filament_subject_;
-    lv_subject_t vendor_count_subject_;
-    lv_subject_t filament_count_subject_;
-    lv_subject_t vendors_loading_subject_;
-    lv_subject_t filaments_loading_subject_;
-    lv_subject_t can_create_vendor_subject_;
+    lv_subject_t step_subject_{};
+    lv_subject_t can_proceed_subject_{};
+    lv_subject_t step_label_subject_{};
+    lv_subject_t creating_subject_{};
+    lv_subject_t selected_vendor_name_subject_{};
+    lv_subject_t summary_vendor_subject_{};
+    lv_subject_t summary_filament_subject_{};
+    lv_subject_t show_create_vendor_subject_{};
+    lv_subject_t show_create_filament_subject_{};
+    lv_subject_t vendor_count_subject_{};
+    lv_subject_t filament_count_subject_{};
+    lv_subject_t vendors_loading_subject_{};
+    lv_subject_t filaments_loading_subject_{};
+    lv_subject_t can_create_vendor_subject_{};
+    lv_subject_t summary_color_subject_{};
+    lv_subject_t summary_edge_subject_{};
+    lv_subject_t catalog_available_subject_{};
+    lv_subject_t catalog_state_subject_{};
+    lv_subject_t catalog_count_subject_{};
+    helix::xml::IndexedSubjectPool catalog_titles_{
+        "spool_db_result_title", helix::xml::IndexedSubjectPool::Type::String, 128};
+    helix::xml::IndexedSubjectPool catalog_details_{
+        "spool_db_result_detail", helix::xml::IndexedSubjectPool::Type::String, 128};
+    helix::xml::IndexedSubjectPool catalog_colors_{"spool_db_result_color",
+                                                   helix::xml::IndexedSubjectPool::Type::Color};
+    helix::xml::IndexedSubjectPool catalog_edges_{"spool_db_result_edge",
+                                                  helix::xml::IndexedSubjectPool::Type::Int};
 
     // ========== String buffers for subjects ==========
     char step_label_buf_[64] = {};
@@ -295,6 +347,25 @@ class SpoolWizardOverlay : public OverlayBase {
     std::string spool_lot_nr_;
     std::string spool_notes_;
 
+    // ========== SpoolmanDB search state ==========
+    helix::SpoolmanCatalogSearch catalog_;
+    std::vector<helix::ExternalFilament> catalog_results_;
+    CatalogState catalog_state_ = CatalogState::Idle;
+    bool catalog_in_flight_ = false;
+    bool catalog_has_pending_ = false;
+    std::string catalog_pending_query_;
+    lv_timer_t* search_timer_ = nullptr; ///< Paused between keystroke bursts
+    static void search_timer_cb(lv_timer_t* timer);
+    void cancel_search_timer();
+    void apply_search_text();
+    void send_catalog_search(std::string query);
+    void set_catalog_state(CatalogState state);
+    void sync_catalog_available();
+    void probe_catalog_search();
+    void enter_spool_details();
+    void publish_vendor_selection();
+    void publish_filament_summary();
+
     // ========== Create vendor modal ==========
     lv_obj_t* create_vendor_dialog_ = nullptr;
 
@@ -322,32 +393,12 @@ class SpoolWizardOverlay : public OverlayBase {
     void on_creation_error(const std::string& message, int rollback_vendor_id = -1,
                            int rollback_filament_id = -1);
 
-    // ========== Static event callbacks ==========
-    static void on_wizard_vendor_selected(lv_event_t* e);
-    static void on_wizard_back(lv_event_t* e);
-    static void on_wizard_next(lv_event_t* e);
-    static void on_wizard_create(lv_event_t* e);
-    static void on_wizard_show_create_vendor_modal(lv_event_t* e);
-    static void on_wizard_cancel_create_vendor(lv_event_t* e);
-    static void on_wizard_vendor_search_changed(lv_event_t* e);
-    static void on_wizard_new_vendor_name_changed(lv_event_t* e);
-    static void on_wizard_new_vendor_url_changed(lv_event_t* e);
-    static void on_wizard_confirm_create_vendor(lv_event_t* e);
-    static void on_wizard_filament_selected(lv_event_t* e);
-    static void on_wizard_show_create_filament_modal(lv_event_t* e);
-    static void on_wizard_cancel_create_filament(lv_event_t* e);
-    static void on_wizard_material_changed(lv_event_t* e);
-    static void on_wizard_new_filament_name_changed(lv_event_t* e);
-    static void on_wizard_pick_filament_color(lv_event_t* e);
-    static void on_wizard_nozzle_temp_changed(lv_event_t* e);
-    static void on_wizard_bed_temp_changed(lv_event_t* e);
-    static void on_wizard_filament_weight_changed(lv_event_t* e);
-    static void on_wizard_spool_weight_changed(lv_event_t* e);
-    static void on_wizard_confirm_create_filament(lv_event_t* e);
-    static void on_wizard_remaining_weight_changed(lv_event_t* e);
-    static void on_wizard_price_changed(lv_event_t* e);
-    static void on_wizard_lot_changed(lv_event_t* e);
-    static void on_wizard_notes_changed(lv_event_t* e);
+    // ========== Modal flows (row callbacks in the table call these) ==========
+    void show_create_vendor_modal();
+    void confirm_create_vendor();
+    void show_create_filament_modal();
+    void pick_filament_color();
+    void confirm_create_filament();
 };
 
 // ============================================================================
@@ -360,4 +411,6 @@ class SpoolWizardOverlay : public OverlayBase {
  *
  * Creates the instance on first call. Used by static callbacks.
  */
-SpoolWizardOverlay& get_global_spool_wizard();
+inline SpoolWizardOverlay& get_global_spool_wizard() {
+    return helix::lazy_global<SpoolWizardOverlay>("SpoolWizardOverlay");
+}

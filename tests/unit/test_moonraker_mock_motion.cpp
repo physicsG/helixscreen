@@ -880,7 +880,7 @@ TEST_CASE("MoonrakerClientMock out-of-range move error handling", "[api][movemen
         mock.gcode_script("G28"); // Home to reset position
         REQUIRE(mock.get_last_gcode_error().empty());
 
-        // Try to move beyond X_MAX (350mm for Voron 2.4)
+        // Try to move beyond X_MAX (250mm for the Voron 2.4 persona)
         int result = mock.gcode_script("G0 X400");
 
         // Should return non-zero error code
@@ -903,7 +903,7 @@ TEST_CASE("MoonrakerClientMock out-of-range move error handling", "[api][movemen
         mock.gcode_script("G28");
         REQUIRE(mock.get_last_gcode_error().empty());
 
-        // Try to move beyond Y_MAX (350mm)
+        // Try to move beyond Y_MAX (250mm)
         int result = mock.gcode_script("G0 Y500");
 
         REQUIRE(result != 0);
@@ -923,7 +923,7 @@ TEST_CASE("MoonrakerClientMock out-of-range move error handling", "[api][movemen
         mock.gcode_script("G28");
         REQUIRE(mock.get_last_gcode_error().empty());
 
-        // Try to move beyond Z_MAX (340mm)
+        // Try to move beyond Z_MAX (300mm)
         int result = mock.gcode_script("G0 Z400");
 
         REQUIRE(result != 0);
@@ -996,12 +996,12 @@ TEST_CASE("MoonrakerClientMock out-of-range move error handling", "[api][movemen
         mock.connect("ws://mock/websocket", []() {}, []() {});
 
         mock.gcode_script("G28");     // Start at 0,0,0
-        mock.gcode_script("G0 X300"); // Move to X=300
+        mock.gcode_script("G0 X200"); // Move to X=200
 
         // Switch to relative mode
         mock.gcode_script("G91");
 
-        // Try to move +100 from X=300, which would put us at X=400 (out of range)
+        // Try to move +100 from X=200, which would put us at X=300 (out of range)
         int result = mock.gcode_script("G0 X100");
 
         REQUIRE(result != 0);
@@ -1089,7 +1089,7 @@ TEST_CASE("MoonrakerClientMock multi-line script surfaces the failing line's err
     bool error_called = false;
     MoonrakerError captured;
 
-    // Relative +400 from X=0 lands at 400, beyond the Voron 2.4 X_MAX of 350.
+    // Relative +400 from X=0 lands at 400, beyond the Voron 2.4 X_MAX of 250.
     json params = {{"script", "G91\nG0 X400 F6000\nG90"}};
     mock.send_jsonrpc(
         "printer.gcode.script", params, [&success_called](json) { success_called = true; },

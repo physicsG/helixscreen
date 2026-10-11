@@ -22,11 +22,10 @@
  *    index sidesteps the problem entirely: the per-segment test becomes an array
  *    lookup, with no string and no lock.
  *
- * 2. Invalidation scope. A highlight change used to call invalidate_cache(),
- *    which also clears the ghost cache and resets ghost_rendered_up_to_,
- *    restarting a multi-second background ghost render -- despite the ghost pass
- *    never rendering highlight at all. Exclusion must still invalidate ghost,
- *    because the ghost pass does dim excluded objects.
+ * 2. Invalidation scope. Any real change invalidates both caches: the ghost
+ *    pass dims excluded objects and draws the selection tag and rim, and the
+ *    ghost is what shows for the unprinted part of a print. An unchanged set
+ *    invalidates nothing, so repeated calls do not restart the ghost build.
  *
  * Thread safety: the index map is a SNAPSHOT of the name table taken on the main
  * thread. It is never a view into a table another thread can mutate, which is
@@ -49,8 +48,7 @@ enum class InvalidationScope {
     /// compile. The printer targets never include X11, which is why this only ever
     /// broke on those three platforms.
     Nothing,       ///< contents unchanged; do not touch either cache
-    SolidCache,    ///< solid layer cache only (highlight: ghost never draws it)
-    SolidAndGhost, ///< both (exclusion: the ghost pass dims excluded objects)
+    SolidAndGhost, ///< both: the ghost pass dims exclusions and draws the selection
 };
 
 /// Result of classifying one segment's object.

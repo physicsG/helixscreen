@@ -5,7 +5,7 @@
 
 #include "ui_event_safety.h"
 #include "ui_format_utils.h"
-#include "ui_nav_manager.h"
+#include "ui_nav.h"
 #include "ui_notification_manager.h"
 #include "ui_panel_common.h"
 #include "ui_severity_card.h"
@@ -14,9 +14,11 @@
 
 #include "app_globals.h"
 #include "lvgl/src/others/translation/lv_translation.h"
+#include "observer_factory.h"
 #include "printer_state.h"
 #include "static_panel_registry.h"
 #include "system/update_checker.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
@@ -61,6 +63,7 @@ void NotificationHistoryPanel::deinit_subjects() {
     if (!subjects_initialized_) {
         return;
     }
+    history_version_observer_.reset();
     subjects_.deinit_all();
     subjects_initialized_ = false;
     spdlog::debug("[{}] Subjects deinitialized", get_name());
@@ -87,6 +90,24 @@ void NotificationHistoryPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
         lv_obj_bind_flag_if_eq(action_btn, &has_entries_subject_, LV_OBJ_FLAG_HIDDEN, 0);
     }
 
+    // Refresh the list when a notification arrives while the panel is open.
+    // The observer attaches at most once per panel lifetime — setup() runs
+    // again on every reopen, and the subject is owned by the manager singleton
+    // that outlives this panel.
+    if (!history_version_observer_) {
+        lv_subject_t* version_subject = helix::ui::notification_history_version_subject();
+        if (version_subject) {
+            history_version_observer_ = helix::ui::observe<int>(
+                version_subject, this,
+                [](NotificationHistoryPanel* p, int value) {
+                    p->handle_history_version_change(value);
+                },
+                NotificationManager::instance().get_subjects_lifetime());
+        } else {
+            spdlog::warn("[{}] Notification history version subject not initialized", get_name());
+        }
+    }
+
     // Populate list
     refresh();
 
@@ -107,9 +128,8 @@ void NotificationHistoryPanel::refresh() {
     auto entries = history_.get_all();
 
     // Find content container
-    lv_obj_t* overlay_content = lv_obj_find_by_name(panel_, "overlay_content");
+    lv_obj_t* overlay_content = helix::ui::find_required(panel_, "overlay_content", get_name());
     if (!overlay_content) {
-        spdlog::error("[{}] Could not find overlay_content", get_name());
         return;
     }
 
@@ -126,13 +146,14 @@ void NotificationHistoryPanel::refresh() {
         // Format timestamp
         std::string timestamp_str = format_timestamp(entry.timestamp_ms);
 
-        // Use title if present, otherwise use severity-based default
-        const char* title = entry.title[0] ? entry.title : lv_tr("Notification");
+        // An untitled entry (every plain toast) leads with its message; the icon and
+        // border already carry the severity, so a placeholder title says nothing.
+        const bool has_title = entry.title[0] != '\0';
 
         // Build attributes array - just pass semantic severity, widget handles colors
         const char* attrs[] = {"severity",  severity_to_string(entry.severity),
-                               "title",     title,
-                               "message",   entry.message,
+                               "title",     has_title ? entry.title : entry.message,
+                               "message",   has_title ? entry.message : "",
                                "timestamp", timestamp_str.c_str(),
                                nullptr};
 
@@ -208,8 +229,30 @@ std::string NotificationHistoryPanel::format_timestamp(uint64_t timestamp_ms) {
 // BUTTON HANDLERS
 // ============================================================================
 
+void NotificationHistoryPanel::handle_history_version_change(int32_t version) {
+    if (version == last_applied_history_version_) {
+        return;
+    }
+    last_applied_history_version_ = version;
+
+    // A hidden panel is not destroyed (NavigationManager::go_back() only hides
+    // the overlay), so the observer stays attached and would otherwise rebuild
+    // an invisible list and mark it read. setup() already does an unconditional
+    // refresh() on every real (re)open, which catches up on anything that
+    // arrived while hidden. A panel hidden only until its queued push lands is
+    // opening, and setup() has already run, so it refreshes now.
+    if (!panel_ || !helix::nav::is_showing(panel_)) {
+        return;
+    }
+    refresh();
+}
+
 void NotificationHistoryPanel::handle_clear_clicked() {
     history_.clear();
+    // clear() bumps the store revision; the manager publishes it on its next
+    // badge refresh. Record it now so that publish does not rebuild the list
+    // again once it lands.
+    last_applied_history_version_ = static_cast<int32_t>(history_.version());
     refresh();
     spdlog::info("[{}] History cleared by user", get_name());
 }
@@ -237,7 +280,7 @@ void NotificationHistoryPanel::dispatch_action(const char* action) {
 
     if (strcmp(action, "show_update_modal") == 0) {
         // Close notification history overlay first, then show update modal
-        NavigationManager::instance().go_back();
+        helix::nav::go_back();
         UpdateChecker::instance().show_update_notification();
     } else {
         spdlog::warn("[{}] Unknown action: {}", get_name(), action);
@@ -261,14 +304,7 @@ void NotificationHistoryPanel::on_clear_clicked(lv_event_t* e) {
 // GLOBAL INSTANCE (needed by main.cpp)
 // ============================================================================
 
-static std::unique_ptr<NotificationHistoryPanel> g_notification_history_panel;
-
 NotificationHistoryPanel& get_global_notification_history_panel() {
-    if (!g_notification_history_panel) {
-        g_notification_history_panel =
-            std::make_unique<NotificationHistoryPanel>(get_printer_state(), nullptr);
-        StaticPanelRegistry::instance().register_destroy(
-            "NotificationHistoryPanel", []() { g_notification_history_panel.reset(); });
-    }
-    return *g_notification_history_panel;
+    return helix::lazy_global<NotificationHistoryPanel>("NotificationHistoryPanel",
+                                                        get_printer_state(), nullptr);
 }

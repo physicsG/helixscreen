@@ -32,12 +32,12 @@ namespace {
 /// the stock-CFS shape. AmsBackendMock alone cannot express this: its
 /// is_bypass_active() is exactly current_slot == -2, so the two readers can
 /// never disagree and the regression is invisible.
-class DeclaredBypassBackend : public AmsBackendMock {
+class DeclaredBypassBackend : public helix::AmsBackendMock {
   public:
-    using AmsBackendMock::AmsBackendMock;
+    using helix::AmsBackendMock::AmsBackendMock;
 
     [[nodiscard]] bool is_bypass_active() const override {
-        return declared_ || AmsBackendMock::is_bypass_active();
+        return declared_ || helix::AmsBackendMock::is_bypass_active();
     }
 
     void set_declared(bool declared) {
@@ -56,17 +56,17 @@ TEST_CASE_METHOD(LVGLTestFixture, "bypass subject follows the backend, not the s
     REQUIRE(mock->start().success());
     auto* backend = mock.get();
 
-    AmsState::instance().set_backend(std::move(mock));
-    AmsState::instance().init_subjects(true);
+    helix::AmsState::instance().set_backend(std::move(mock));
+    helix::AmsState::instance().init_subjects(true);
 
-    lv_subject_t* subject = AmsState::instance().get_bypass_active_subject();
+    lv_subject_t* subject = helix::AmsState::instance().get_bypass_active_subject();
     REQUIRE(subject != nullptr);
 
     SECTION("declared with nothing at the toolhead still reads engaged") {
         // Exactly the K2 state: declaration latched, no external filament, so
         // no backend writes current_slot to the -2 sentinel.
         backend->set_declared(true);
-        AmsState::instance().sync_from_backend();
+        helix::AmsState::instance().sync_from_backend();
 
         REQUIRE(backend->get_system_info().current_slot != -2);
         // The switch must not claim OFF while the tap would disable.
@@ -76,7 +76,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "bypass subject follows the backend, not the s
 
     SECTION("not declared reads disengaged") {
         backend->set_declared(false);
-        AmsState::instance().sync_from_backend();
+        helix::AmsState::instance().sync_from_backend();
 
         CHECK(lv_subject_get_int(subject) == 0);
         CHECK_FALSE(backend->is_bypass_active());
@@ -87,10 +87,10 @@ TEST_CASE_METHOD(LVGLTestFixture, "bypass subject follows the backend, not the s
         // on is what the surfaces render.
         for (bool declared : {false, true, false, true}) {
             backend->set_declared(declared);
-            AmsState::instance().sync_from_backend();
+            helix::AmsState::instance().sync_from_backend();
             CHECK(lv_subject_get_int(subject) == (backend->is_bypass_active() ? 1 : 0));
         }
     }
 
-    AmsState::instance().set_backend(nullptr);
+    helix::AmsState::instance().set_backend(nullptr);
 }

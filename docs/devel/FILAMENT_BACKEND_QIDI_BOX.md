@@ -37,7 +37,7 @@ QIDI printers (Q1 Pro and newer) run forks of Klipper and Moonraker from [QIDITE
 
 All control runs through Klipper gcode macros and `SAVE_VARIABLE` — **no dedicated Moonraker endpoints**, no REST extension. State lives in `save_variables` and printer objects, same shape as AD5X IFS.
 
-**State the backend reads** (`parse_save_variables()` + `handle_status_update()`):
+**State the backend reads** (`parse_save_variables()` + `handle_status()`):
 
 | Source | Keys | Meaning |
 |--------|------|---------|
@@ -46,7 +46,7 @@ All control runs through Klipper gcode macros and `SAVE_VARIABLE` — **no dedic
 | `save_variables` | `value_t<N>` = `"slot<M>"` | Tool N prints from slot M (the tool map, one direction only) |
 | `save_variables` | `last_load_slot` (`"slot-1"` = nothing) | Aggregate loaded pointer |
 | `save_variables` | `is_tool_change` | `AmsAction::LOADING` while the box is busy |
-| `save_variables` | `filament_slot<N>` / `color_slot<N>` / `vendor_slot<N>` | RFID indices resolved via `officiall_filas_list.cfg` |
+| `save_variables` | `filament_slot<N>` / `color_slot<N>` / `vendor_slot<N>` | RFID row indices resolved via `officiall_filas_list.cfg`; a quoted `VALUE="5"` (Qidi Studio's spelling) parses the same as a bare int |
 | `heater_generic heater_box<N>` | `temperature`, `target`, `power` | Per-box dryer heater |
 | `aht20_f heater_box<N>` | `temperature`, `humidity` | Per-box environment |
 | `box_extras` | `box_drying_state.box<N>.{dry_state, end_time}` | Drying countdown |
@@ -61,7 +61,7 @@ All control runs through Klipper gcode macros and `SAVE_VARIABLE` — **no dedic
 | `FORCE_MOVE STEPPER="box_stepper slot<N>" VELOCITY=… DISTANCE=…` | Lane eject on Q2/Plus 4 (#1041), gated on `[force_move] enable_force_move`; distance/velocity user-tunable (defaults 878 mm / 100 mm/s) |
 | `MULTI_COLOR_BOX_UNLOAD SLOT=slot<N>` | Lane eject + unload dialect on Max 4 (#1083) — the multi_color_controller rejects FORCE_MOVE |
 | `SAVE_VARIABLE VARIABLE=value_t<N> VALUE="slot<M>"` | Tool remap (`RemapStrategy::Native`, the unified remap path) |
-| `SAVE_VARIABLE VARIABLE={filament,color,vendor}_slot<N>` | Persisting slot metadata back to the Box's RFID indices |
+| `SAVE_VARIABLE VARIABLE={filament,color,vendor}_slot<N>` | Persisting slot metadata back to the Box's RFID indices, and the metadata clear (`VALUE=0` x3, see Slot Metadata below) |
 | `ENABLE_BOX_DRY` / `DISABLE_BOX_DRY BOX=<n>` | Dryer start/stop when the box_extras timer is present |
 | `SET_HEATER_TEMPERATURE HEATER=heater_box<N>` | Dryer start/stop fallback |
 
@@ -87,6 +87,41 @@ Spools identify via MIFARE Classic RFID tags. Data lives in sector 1 block 0. Th
 - [n0cloud/qidi-box-rfid-manager](https://github.com/n0cloud/qidi-box-rfid-manager) — mobile
 - [LexyGuru/Qidi_RFID_App](https://github.com/LexyGuru/Qidi_RFID_App)
 
+### Slot Metadata, Swap Detection and the Metadata Clear
+
+Slot identity is the three save_variables row indices `filament_slot<N>` /
+`color_slot<N>` / `vendor_slot<N>`, resolved against the Box's own tables in
+`officiall_filas_list.cfg` (`[fila<N>]` profiles, `[colordict]` palette,
+`[vendor_list]` names). `read_slot_id()` accepts a bare int or a quoted
+`VALUE="5"` - Qidi Studio emits the quoted spelling, and Klipper's
+save_variables module evaluates the literal before saving, so it lands as a
+string - and rejects negatives in either spelling. Zero IS an id: it is the
+Box stating the field is unset, and the parse blanks the painted field so the
+last reading does not linger.
+
+The Box states no tag UID, so the spool fingerprint is the composite
+`fila|color|vendor` (all three ids <= 0 is the empty string, which the tracker
+reads as no signal). It runs through the shared `SlotFingerprintTracker`
+([FILAMENT_SLOT_METADATA.md](FILAMENT_SLOT_METADATA.md) § Swap fingerprints):
+a change no write of ours asked for is a physical spool swap and clears the
+user's override. Each field is a separate `SAVE_VARIABLE`, so a poll can land
+between writes - `apply_user_edit()` and the clear arm every old/new
+cross-product composite as an expected echo before dispatching, and a dispatch
+that fails entirely releases only its own claims. The record's persisted
+fingerprint is the baseline at startup, so a swap made while HelixScreen was
+down clears the stale override on the first frame.
+
+`clear_slot_override()` clears locally (erase + `clear_async` against the
+shared `lane_data` namespace) and then erases what the firmware remembers:
+three `SAVE_VARIABLE VARIABLE={filament,color,vendor}_slot<N> VALUE=0` writes,
+sent mid-print too because `SAVE_VARIABLE` moves nothing. Table row ids start
+at 1, so 0 names no row and the slot reads as no identity - the clear erases what the slot remembers,
+not what the hardware can read, and a tagged spool re-populates the ids on its
+next insert, boot or RFID read. Vendor is the one field where 0 is a real row
+(`vendor_list` row 0 = Generic), so user edits write vendor 0 legitimately;
+the clear's zeros still read as no identity because all three fields land on
+0 together.
+
 ### Do NOT Confuse With
 
 - **Happy Hare "QuattroBox"** — listed in Happy Hare's supported hardware, but it is an unrelated DIY MMU by [Batalhoti](https://github.com/Batalhoti/QuattroBox). Happy Hare does **not** support the QIDI Box.
@@ -101,13 +136,14 @@ Spools identify via MIFARE Classic RFID tags. Data lives in sector 1 block 0. Th
 | Per-slot loaded authority | Yes | `save_variables slot<N> == 2` is the Box's own per-slot statement; reconciled against the `last_load_slot` aggregate every parse pass (#1199) |
 | Bypass Mode | No | `enable_bypass()`/`disable_bypass()` return `not_supported`; [the force override](FILAMENT_MANAGEMENT.md#bypass-visibility-and-the-force-override) shows the external spool for tracking only |
 | Spoolman | Optional | Works through standard Moonraker `[spoolman]` |
+| Slot Overrides | Yes | Store-backed through the shared `lane_data` namespace (`backend_id` `qidi`); spool-swap detection via the fingerprint tracker (Slot Metadata below) |
 | Auto-Heat on Load | Yes | The backend drives `EXTRUDER_LOAD` with its own heat → load → wipe → cool envelope (`supports_auto_heat_on_load() = true`); the UI must not run its own preheat |
 | Dryer | Yes | Per-box PTC heater + aht20 humidity, 35-90°C (ceiling refined from configfile), up to 720 min, allowed during print (#1019). `ENABLE_BOX_DRY` when the box_extras timer is present, `SET_HEATER_TEMPERATURE` otherwise; countdown from `box_drying_state` end_time |
 | Lane Eject | Yes (capability-gated) | `supports_lane_eject()` only when `[force_move]` is enabled or the Max 4 `multi_color_controller` dialect is detected (#1041, #1083) |
 | Device Actions | Eject params | `supports_configurable_eject_params() = true` — user-tunable eject distance/velocity surface as device-ops slider rows |
 | Error channel | Yes | A blocked slot (`slot<N>` negative) raises a sticky CRITICAL `ErrorEvent` with a dismiss-only affordance (#1172, #1041) |
 
-Not implemented: `recover()` / `reset()` / `cancel()` (return `not_supported`), `clear_slot_override()` (logs a warning), bypass (above), and path visualization (`get_filament_segment()` returns `NONE`). `select_slot()` is deliberately `not_supported` — `load_filament()` is the only path. Filament ops gate at `FilamentOpGate::PrintActiveOnly`, a deliberate narrowing (the box reports `AmsAction::LOADING` itself).
+Not implemented: `recover()` / `reset()` / `cancel()` (return `not_supported`), bypass (above), and path visualization (`get_filament_segment()` returns `NONE`). `clear_slot_override()` IS implemented - see Slot Metadata below. `select_slot()` is deliberately `not_supported` — `load_filament()` is the only path. Filament ops gate at `FilamentOpGate::PrintActiveOnly`, a deliberate narrowing (the box reports `AmsAction::LOADING` itself).
 
 ### Key Files
 
@@ -117,7 +153,7 @@ Not implemented: `recover()` / `reset()` / `cancel()` (return `not_supported`), 
 | `src/printer/ams_backend_qidi.cpp` | Full implementation: save_variables parse, gcode builders, dryer, RFID reverse-lookups |
 | `include/printer_discovery.h` | `box_stepper slot<N>` detection + slot count |
 | `include/ams_types.h` | `AmsType::QIDI_BOX` enum + string converters |
-| `tests/unit/test_ams_backend_qidi.cpp` | 102 cases: save_variables parsing, tool map, dryer, eject, remap, filas list |
+| `tests/unit/test_ams_backend_qidi.cpp` | 140 cases: save_variables parsing, tool map, dryer, eject, remap, filas list, fingerprint swap detection, metadata clear |
 | `tests/unit/test_ams_qidi_per_slot_loaded.cpp` | 7 cases: the #1199 per-slot loaded authority reconcile |
 
 ### Follow-up Work (in order)

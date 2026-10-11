@@ -52,8 +52,9 @@ void SaveConfigWatch::begin(IMoonrakerAPI* api, const char* initiation_message,
 
     // Watch klippy for the whole save. This, not the rpc, is what tells us the
     // save worked: SAVE_CONFIG's reply is dropped by the restart it causes.
-    klippy_observer_ = observe_int_sync<SaveConfigWatch>(
-        get_printer_state().get_klippy_state_subject(), this, [](SaveConfigWatch* self, int state) {
+    klippy_observer_ = observe<int>(
+        get_printer_state().network_state().get_klippy_state_subject(), this,
+        [](SaveConfigWatch* self, int state) {
             if (!self->in_flight_) {
                 return; // Stale fire after this save settled
             }
@@ -67,7 +68,8 @@ void SaveConfigWatch::begin(IMoonrakerAPI* api, const char* initiation_message,
                 self->lifetime_.defer("SaveConfigWatch::settle_after_restart",
                                       [self]() { self->settle_saved(); });
             }
-        });
+        },
+        get_printer_state().get_subjects_lifetime());
 
     // Arms the recovery-dialog and disconnect-modal suppressions. It does not
     // touch the rpc error path, which is what this class adds.

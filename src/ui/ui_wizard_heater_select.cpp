@@ -31,15 +31,8 @@ using namespace helix;
 // Global Instance
 // ============================================================================
 
-static std::unique_ptr<WizardHeaterSelectStep> g_wizard_heater_select_step;
-
 WizardHeaterSelectStep* get_wizard_heater_select_step() {
-    if (!g_wizard_heater_select_step) {
-        g_wizard_heater_select_step = std::make_unique<WizardHeaterSelectStep>();
-        StaticPanelRegistry::instance().register_destroy(
-            "WizardHeaterSelectStep", []() { g_wizard_heater_select_step.reset(); });
-    }
-    return g_wizard_heater_select_step.get();
+    return &helix::lazy_global<WizardHeaterSelectStep>("WizardHeaterSelectStep");
 }
 
 // ============================================================================
@@ -51,7 +44,8 @@ WizardHeaterSelectStep::WizardHeaterSelectStep() {
 }
 
 WizardHeaterSelectStep::~WizardHeaterSelectStep() {
-    // NOTE: Do NOT call LVGL functions here - LVGL may be destroyed first
+    // LVGL may be destroyed first: no direct LVGL calls here. The subjects_ member
+    // deinits its subjects only while lv_is_initialized().
     // NOTE: Do NOT log here - spdlog may be destroyed first
     screen_root_ = nullptr;
 }
@@ -64,10 +58,14 @@ WizardHeaterSelectStep::~WizardHeaterSelectStep() {
 void WizardHeaterSelectStep::init_subjects() {
     spdlog::debug("[{}] Initializing subjects", get_name());
 
+    // Each visit re-initializes; drop the previous visit's subjects and names first.
+    subjects_.deinit_all();
+
     // Initialize subjects with default index 0
     // Actual selection will be restored from config during create() after hardware is discovered
-    helix::ui::wizard::init_int_subject(&bed_heater_selected_, 0, "bed_heater_selected");
-    helix::ui::wizard::init_int_subject(&hotend_heater_selected_, 0, "hotend_heater_selected");
+    helix::ui::wizard::init_int_subject(subjects_, &bed_heater_selected_, 0, "bed_heater_selected");
+    helix::ui::wizard::init_int_subject(subjects_, &hotend_heater_selected_, 0,
+                                        "hotend_heater_selected");
 
     subjects_initialized_ = true;
     spdlog::debug("[{}] Subjects initialized", get_name());
@@ -143,7 +141,7 @@ lv_obj_t* WizardHeaterSelectStep::create(lv_obj_t* parent) {
         "bed", // Filter for bed-related heaters
         true,  // Allow "None" option
         helix::wizard::BED_HEATER, [](const PrinterHardware& hw) { return hw.guess_bed_heater(); },
-        "[Wizard Heater]", helix::DeviceType::HEATER);
+        "[Wizard Heater]", helix::ui::wizard::display_name_for(helix::DeviceType::HEATER));
 
     // Populate hotend heater dropdown (discover + filter + populate + restore)
     // Event handler is wired via XML <event_cb>
@@ -154,7 +152,7 @@ lv_obj_t* WizardHeaterSelectStep::create(lv_obj_t* parent) {
         true,       // Allow "None" option
         helix::wizard::HOTEND_HEATER,
         [](const PrinterHardware& hw) { return hw.guess_hotend_heater(); }, "[Wizard Heater]",
-        helix::DeviceType::HEATER);
+        helix::ui::wizard::display_name_for(helix::DeviceType::HEATER));
 
     spdlog::debug("[{}] Screen created successfully", get_name());
     return screen_root_;
@@ -168,10 +166,6 @@ void WizardHeaterSelectStep::cleanup() {
     spdlog::debug("[{}] Cleaning up resources", get_name());
 
     Config* config = Config::get_instance();
-    if (!config) {
-        spdlog::error("[{}] Config instance not available!", get_name());
-        return;
-    }
 
     // Save bed heater selection
     // Store the heater name to BOTH heater and sensor paths (Klipper heaters provide temp readings)

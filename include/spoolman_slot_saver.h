@@ -3,6 +3,7 @@
 #pragma once
 
 #include "ams_types.h"
+#include "filament_database.h"
 #include "moonraker_error.h"
 #include "spoolman_types.h"
 
@@ -24,8 +25,13 @@ namespace helix {
  * require updating the spool record.
  */
 struct ChangeSet {
-    bool filament_level = false; ///< vendor, material, or color changed
-    bool spool_level = false;    ///< remaining weight changed
+    bool filament_level = false; ///< vendor, material, color or the catalog product changed
+    /// vendor, material or color changed: the three fields a Spoolman filament
+    /// is identified by. A catalog product is HelixScreen's own, so a pick
+    /// moves filament_level without needing anything from Spoolman, and only
+    /// these three decide whether a save has enough to write.
+    bool filament_identity = false;
+    bool spool_level = false; ///< remaining weight changed
 
     /// Check if any change was detected
     [[nodiscard]] bool any() const {
@@ -34,14 +40,36 @@ struct ChangeSet {
 };
 
 /**
+ * @brief Which of the three fields a Spoolman filament is identified by this
+ *        slot does not carry.
+ *
+ * A save that has to find or create a filament needs a vendor, a material and a
+ * colour. The editor names the first one missing, so this is a set rather than
+ * a bool.
+ */
+struct MissingFilamentFields {
+    bool brand = false;
+    bool material = false;
+    bool color = false;
+
+    /// Whether any field a filament write needs is absent.
+    [[nodiscard]] bool any() const {
+        return brand || material || color;
+    }
+};
+
+/**
  * @brief Outcome of a save operation, including any IDs assigned during a
  *        new-spool creation or filament repoint.
  *
  * When `created_new_spool` or `repointed_filament` is true, the modal should
- * persist the new IDs back to the slot via backend->set_slot_info().
+ * persist the new IDs back to the slot via AmsState::commit_slot_edit().
  */
 struct SaveResult {
     bool success = false;
+    /// The fields a filament write needed and the slot did not carry. Set only
+    /// on a save that stopped for them, so it never accompanies success.
+    MissingFilamentFields missing;
     bool created_new_spool = false;  ///< set when a new spool was POSTed
     bool repointed_filament = false; ///< set when PATCH spool changed filament_id
     int new_spool_id = 0;            ///< spool_id assigned on create (0 if unchanged)
@@ -74,8 +102,10 @@ class SpoolmanSlotSaver {
     /**
      * @brief Construct a SpoolmanSlotSaver
      * @param api IMoonrakerAPI instance for Spoolman API calls
+     * @param filament_diameter_mm Diameter a filament this saver creates is filed with
      */
-    explicit SpoolmanSlotSaver(IMoonrakerAPI* api);
+    explicit SpoolmanSlotSaver(IMoonrakerAPI* api,
+                               float filament_diameter_mm = filament::DEFAULT_DIAMETER_MM);
 
     /**
      * @brief Compare two SlotInfo structs and detect what changed
@@ -95,11 +125,19 @@ class SpoolmanSlotSaver {
     static bool is_filament_complete(const SlotInfo& slot);
 
     /**
+     * @brief The fields is_filament_complete() finds missing, named one by one.
+     *
+     * One rule for both questions: is_filament_complete() is this answer with
+     * the names dropped.
+     */
+    static MissingFilamentFields missing_filament_fields(const SlotInfo& slot);
+
+    /**
      * @brief Split spool edits into the two Spoolman PATCH bodies.
      *
-     * Per-spool fields (remaining_weight, price, lot_nr, comment, location) go
-     * into @p spool_patch; shared-filament fields (spool_weight, color_hex) go
-     * into @p filament_patch. A field is emitted only when it differs from the
+     * Per-spool fields (remaining_weight, price, lot_nr, comment, location,
+     * spool_weight) go into @p spool_patch; the shared-filament field color_hex
+     * goes into @p filament_patch. A field is emitted only when it differs from the
      * original (weights beyond WEIGHT_THRESHOLD, price beyond 0.001). Shared by
      * the AMS edit overlay's spool-edit save and the standalone SpoolEditModal.
      */
@@ -167,18 +205,10 @@ class SpoolmanSlotSaver {
                                ErrorCallback on_error);
 
     /**
-     * @brief Normalize a hex color string for case-insensitive comparison.
-     *        Strips leading "#", upper-cases, returns empty string on invalid input
-     *        (not exactly 6 hex chars).
-     */
-    static std::string normalize_color_hex(const std::string& in);
-
-    /**
      * @brief Resolve a (vendor_id, material, color_hex) triple to a Spoolman filament_id,
      *        creating a new filament if none matches.
      *
-     * Match is: vendor_id exact; material exact (case-sensitive);
-     * color_hex case-insensitive via normalize_color_hex() on both sides.
+     * Match is vendor_id exact plus spoolman::find_matching_filament().
      *
      * On create, POSTs `{vendor_id, material, color_hex, name}`, where `name`
      * is `filament_name` when the slot carries one and falls back to `material`
@@ -208,6 +238,7 @@ class SpoolmanSlotSaver {
 
   private:
     IMoonrakerAPI* api_;
+    float filament_diameter_mm_;
 
     /**
      * @brief Convert uint32_t RGB to hex string like "FF0000" (no # prefix)

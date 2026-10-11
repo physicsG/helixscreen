@@ -9,20 +9,12 @@ This guide walks you through installing HelixScreen on your 3D printer's touchsc
 ## Table of Contents
 
 - [Quick Start](#quick-start)
+- [Which printer are you installing on?](#which-printer-are-you-installing-on)
 - [Remote Screen Setup (Run on a Separate Device)](#remote-screen-setup-run-on-a-separate-device)
 - [Android App (Experimental)](#android-app-experimental)
-- [Prerequisites](#prerequisites)
-- [MainsailOS Installation](#raspberry-pi--mainsailos-installation)
-- [Flashforge Adventurer 5M Installation](#flashforge-adventurer-5m-installation)
-- [Creality K1 Installation](#creality-k1-series)
-- [Creality K2 Series](#creality-k2-series)
-- [FlashForge Adventurer 5X](#flashforge-adventurer-5x)
-- [Elegoo Centauri Carbon 1](#elegoo-centauri-carbon)
-- [Creality Sonic Pad](#creality-sonic-pad)
-- [Snapmaker U1](#snapmaker-u1)
+- [Generic Linux Install (Raspberry Pi, BTT, x86)](#generic-linux-install-raspberry-pi-btt-x86)
 - [First Boot & Setup Wizard](#first-boot--setup-wizard)
 - [Display Configuration](#display-configuration)
-- [Starting on Boot](#starting-on-boot)
 - [Updating HelixScreen](#updating-helixscreen)
 - [Uninstalling](#uninstalling)
 - [Getting Help](#getting-help)
@@ -35,34 +27,15 @@ This guide walks you through installing HelixScreen on your 3D printer's touchsc
 >
 > SSH into your Raspberry Pi, BTT CB1/CB2/Manta, or similar host. For all-in-one printers (Creality K1, K2 series, Flashforge Adventurer 5M/Pro), SSH directly into the printer itself as root.
 
-**Raspberry Pi (MainsailOS):**
 ```bash
-curl -sSL https://raw.githubusercontent.com/prestonbrown/helixscreen/main/scripts/install.sh | sh
+curl -sSL https://releases.helixscreen.org/install.sh | sh
 ```
 
 The installer automatically detects your platform and downloads the correct release.
 
-**Creality K1/K1C/K1 Max:** Run directly on the printer via SSH:
-```bash
-wget -O - http://dl.helixscreen.org/install.sh | sh
-```
-No SSL required — uses plain HTTP. See [Creality K1 Series](#creality-k1-series) for details.
-
-**Flashforge Adventurer 5M:** The easiest option is our [ready-made firmware image](https://github.com/prestonbrown/ff5m) — just flash from a USB drive. For manual installation on existing Forge-X or Klipper Mod setups, see [Flashforge Adventurer 5M Installation](#flashforge-adventurer-5m-installation).
-
-**Flashforge Adventurer 5X:** Install [ZMOD](https://github.com/ghzserg/zmod), which manages HelixScreen installation and updates. See [FlashForge Adventurer 5X](#flashforge-adventurer-5x).
-
-**Snapmaker U1:** Run directly on the printer via SSH (stock firmware with **Root access** enabled, or [PAXX Extended Firmware](https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware) which enables SSH by default):
-```bash
-curl -sSL https://releases.helixscreen.org/install.sh | sh
-```
-See [Snapmaker U1](#snapmaker-u1) for details.
-
 > **Note:** Both `bash` and `sh` work. The installer is POSIX-compatible for BusyBox environments.
 
 **KIAUH users:** HelixScreen is available as a KIAUH extension! Run `kiauh` and find HelixScreen in the extensions menu, or use the one-liner above. See [scripts/kiauh/](https://github.com/prestonbrown/helixscreen/tree/main/scripts/kiauh) for details.
-
-> **Pre-flight checks:** On AD5M and K1, the installer validates that Klipper and Moonraker are running before proceeding. If either is missing, you'll get a clear error message explaining what's needed.
 
 After installation, the setup wizard will guide you through initial configuration.
 
@@ -70,29 +43,58 @@ After installation, the setup wizard will guide you through initial configuratio
 
 ---
 
+## Which printer are you installing on?
+
+The one-liner above works on every supported platform, but each printer family has quirks: firmware prerequisites, different install locations, its own service and update commands. The guide for your printer has all of that:
+
+| Printer | Install guide |
+|---------|---------------|
+| Generic Linux - Raspberry Pi, BTT CB1/CB2/Manta, x86 | This page - see [Generic Linux Install](#generic-linux-install-raspberry-pi-btt-x86) below |
+| Creality K1 / K1C / K1 Max | [Creality K1C Setup Guide](guide/creality-k1c-setup.md) - root access plus Simple AF or Guilouz firmware |
+| Creality K2 / K2 Plus / K2 Pro | [K2 Series Install](guide/install-k2.md) - works on stock firmware, no custom firmware needed |
+| Flashforge Adventurer 5M / 5M Pro | [Adventurer 5M Install](guide/install-ad5m.md) - Forge-X or Klipper Mod, plus a ready-made firmware image |
+| FlashForge Adventurer 5X | [Adventurer 5X Install (ZMOD)](guide/install-ad5x.md) - the ZMOD firmware mod manages install and updates |
+| FlashForge Creator 5 / Creator 5 Pro | [Z-Mod wiki](https://wiki.zmod.link/C5PRO/) - Z-Mod installs and updates HelixScreen itself; on [Reforge](https://github.com/Klipper4FlashForge/firmware), HelixScreen ships with the firmware |
+| Elegoo Centauri Carbon | [Centauri Carbon Install](guide/install-cc1.md) - requires the OpenCentauri COSMOS firmware, 26.07.0 or newer |
+| Creality Sonic Pad | [Sonic Pad Install](guide/install-sonicpad.md) - requires the SonicPad-Debian firmware |
+| Snapmaker U1 | [Snapmaker U1 Install](guide/install-u1.md) - stock firmware 1.2+ with Root access, or PAXX Extended Firmware |
+| BigTreeTech K-Touch (standalone ESP32 screen) | [K-Touch Install](guide/install-esp32.md) - alpha firmware, flashed from your browser or over USB; 1.1 betas and newer |
+
+---
+
 ## Remote Screen Setup (Run on a Separate Device)
 
-HelixScreen does **not** have to run on your printer. You can install it on any supported Linux device and have it drive a display while it talks to your printer's Moonraker over the network. This is ideal when the printer sits on the floor and you want the screen at your desk, or when your printer's stock panel can't be replaced (some QIDI models).
+HelixScreen does **not** have to run on your printer. You can install it on any supported Linux device and have it drive a display while it talks to your printer's Moonraker over the network.
 
-Common setups:
-- A spare Raspberry Pi (3/4/5, Zero 2 W, CM4) with a touchscreen, sitting at your desk
+This is the setup to choose when:
+
+- Your printer has no built-in screen, like a Voron, RatRig, or any Klipper printer whose host has no panel of its own
+- The printer lives somewhere you don't: another room, a garage, a workshop
+- You run more than one printer and want a single screen for all of them: with [multi-printer support](guide/beta-features.md) (beta) enabled, the printer manager switches between every printer you've added
+- Your printer's stock panel can't be replaced (some QIDI models)
+
+Common screen devices:
+
+- A spare Raspberry Pi (3/4/5, Zero 2 W, CM4) with a touchscreen
+- A repurposed Klipper pad or a small self-built touchscreen PC
 - A mini PC or x86 box with an HDMI touchscreen
 - Your desktop, running the app in a window (macOS or Linux) for monitoring
+- A BigTreeTech K-Touch, with the [ESP32 firmware](guide/install-esp32.md) (alpha)
 
-**How it works:** HelixScreen is a Moonraker client. It only needs network access to your printer's Moonraker instance (port `7125` by default) — it does **not** need to run on the same machine as Klipper.
+**How it works:** HelixScreen is a Moonraker client. It only needs network access to your printer's Moonraker instance (port `7125` by default); it does **not** need to run on the same machine as Klipper.
 
 **Steps:**
 
-1. Install HelixScreen on the device that will drive the display, using the [Quick Start](#quick-start) one-liner or the platform section that matches that device (e.g. a Raspberry Pi uses the [MainsailOS](#raspberry-pi--mainsailos-installation) steps). Install it on the *screen* device, not the printer.
-2. Make sure the device is on the same network as your printer and can reach it — from the device, `ping <printer-ip>` should succeed.
+1. Install HelixScreen on the device that will drive the display, using the [Quick Start](#quick-start) one-liner or the platform section that matches that device (e.g. a Raspberry Pi uses the [generic Linux](#generic-linux-install-raspberry-pi-btt-x86) steps). Install it on the *screen* device, not the printer.
+2. Make sure the device is on the same network as your printer and can reach it: from the device, `ping <printer-ip>` should succeed.
 3. On first boot, the setup wizard reaches [Step 4: Moonraker Connection](#step-4-moonraker-connection). Enter your **printer's IP address** (not `localhost`), for example `192.168.1.50`. Leave the port at the default `7125` unless you've changed it.
 4. The wizard tests the connection, then discovers your printer's capabilities as usual.
 
 > **Point it at Moonraker, not Mainsail/Fluidd.** HelixScreen connects to Moonraker's API (port `7125`), not the Mainsail/Fluidd web interface. You do not need Mainsail or Fluidd installed on the screen device at all.
 
-To change the host later, go to **Settings > System > Host**, or edit `moonraker_host` in `settings.json`.
+To change the host later, go to **Settings > Connection > Host**, or edit `moonraker_host` in `settings.json`.
 
-> **Note:** A remote screen controls the printer the same as an on-printer screen would. Features that require running *on the printer* (for example, HelixScreen taking over the printer's own physical panel, or on-device WiFi configuration in the wizard) don't apply to a remote install — but all printing, monitoring, and control features work normally.
+> **Note:** A remote screen controls the printer the same as an on-printer screen would. Features that require running *on the printer* (for example, HelixScreen taking over the printer's own physical panel, or on-device WiFi configuration in the wizard) don't apply to a remote install, but all printing, monitoring, and control features work normally.
 
 ---
 
@@ -113,6 +115,7 @@ HelixScreen also runs on an Android phone or tablet. It is the same remote clien
 | File | Use it for |
 |------|-----------|
 | `helixscreen-android-arm64-v<VERSION>.apk` | Essentially every modern phone and tablet. **Start here** |
+| `helixscreen-android-armv7-v<VERSION>.apk` | 32-bit devices, where arm64 fails with `INSTALL_FAILED_NO_MATCHING_ABIS`: an Echo Show 5 (2nd gen) running LineageOS, Fire tablets, older phones |
 | `helixscreen-android-x86_64-v<VERSION>.apk` | Emulators and x86 Chromebooks |
 | `helixscreen-android-universal-v<VERSION>.apk` | Works everywhere, but a larger download. Use it if arm64 refuses to install |
 
@@ -132,21 +135,21 @@ Ignore the `.aab` file on the release page. That one is only for publishing to G
 - **It asks for very little.** Network access, and permission to keep the screen awake so a print you are watching does not black out. No location, storage, contacts, or camera.
 - **Updating means downloading the new APK** and installing over the old one. There is no in-app updater on Android yet, and the app will not update itself.
 - **Foldables and unusual screen shapes** can show layout quirks when the device folds or resizes. Reports with a screenshot are welcome.
-- **It cannot do the printer-side things.** Anything that requires running *on* the printer, like taking over the printer's own panel or configuring the printer's WiFi during the wizard, does not apply here. Printing, monitoring, and control all work normally.
+- **It cannot do the printer-side things.** Anything that requires running *on the printer*, like taking over the printer's own panel or configuring the printer's WiFi during the wizard, does not apply here. Printing, monitoring, and control all work normally.
 - **Power controls are hidden.** An Android app can't power off or reboot the device it runs on, so the shutdown widget never appears on the Home panel (it shows as "Not available on Android" in the widget catalog) and the **POWER** section of the Advanced panel is hidden too. Moonraker power *devices* (smart plugs and the like) are unaffected.
 
 **Coming to Google Play.** Play Store distribution is in progress. When it lands, installs from Play will be signed differently from these APKs, which means moving from a sideloaded install to the Play version will require uninstalling first and setting the app up again. Sideloading will keep working either way.
 
 ---
 
-## Prerequisites
+## Generic Linux Install (Raspberry Pi, BTT, x86)
 
-### MainsailOS (Raspberry Pi)
+This covers any Klipper printer with a Raspberry Pi running MainsailOS (or similar), including SOVOL SV06, SOVOL SV08, Voron, RatRig, and other printers where Klipper runs on a separate Pi. Also works on x86 Linux PCs (e.g., mini ITX) running Debian/Ubuntu with Klipper and a touchscreen, and on BTT CB1/CB2/Manta host boards.
 
-This covers any Klipper printer with a Raspberry Pi running MainsailOS (or similar), including SOVOL SV06, SOVOL SV08, Voron, RatRig, and other printers where Klipper runs on a separate Pi. Also works on x86 Linux PCs (e.g., mini ITX) running Debian/Ubuntu with Klipper and a touchscreen.
+### Prerequisites
 
 - **Hardware:**
-  - Raspberry Pi 3, 4, or 5 — any of them work. Pi 3 / Zero 2 W is plenty for HelixScreen; Pi 4/5 only matters if your overall Klipper setup wants more headroom for cameras, slicing, etc.
+  - Raspberry Pi 3, 4, or 5, or a BTT CB1/CB2: any of them work. Pi 3 / Zero 2 W is plenty for HelixScreen; Pi 4/5 only matters if your overall Klipper setup wants more headroom for cameras, slicing, etc.
   - Both **64-bit** and **32-bit** Raspberry Pi OS / MainsailOS supported
   - Touchscreen display (HDMI, DSI, or SPI)
   - Network connection (Ethernet or WiFi)
@@ -155,14 +158,14 @@ This covers any Klipper printer with a Raspberry Pi running MainsailOS (or simil
   - MainsailOS installed and working
   - Klipper running and printing works via Mainsail web interface
   - SSH access to your Pi
-  - **Debian 11 (Bullseye) or newer** — glibc 2.31+. See the OS version note below.
+  - **Debian 11 (Bullseye) or newer**: glibc 2.31+. See the OS version note below.
   - About 100MB free disk space
 
-> **32-bit vs 64-bit:** The installer automatically detects your OS architecture and downloads the correct binary. If you're unsure which you have, run `uname -m` — `aarch64` means 64-bit, `armv7l` means 32-bit.
+> **32-bit vs 64-bit:** The installer automatically detects your OS architecture and downloads the correct binary. If you're unsure which you have, run `uname -m`: `aarch64` means 64-bit, `armv7l` means 32-bit.
 
-> **OS version — Bullseye or newer.** The `pi` and `pi32` packages are dynamically linked
+> **OS version: Bullseye or newer.** The `pi` and `pi32` packages are dynamically linked
 > against **glibc 2.31**, the version in Debian 11 (Bullseye). They will not start on an
-> older release. Debian 10 (Buster) ships glibc 2.28, which is too old — the binary fails
+> older release. Debian 10 (Buster) ships glibc 2.28, which is too old; the binary fails
 > at load with `version 'GLIBC_2.29' not found` or similar. Check yours with:
 >
 > ```bash
@@ -172,291 +175,10 @@ This covers any Klipper printer with a Raspberry Pi running MainsailOS (or simil
 >
 > This matters mainly on **stock printer images**, several of which still ship Buster even
 > though current Raspberry Pi OS and MainsailOS are well past it. If you are on one of
-> those and cannot upgrade the OS, install the **`cc1` package instead** — it is statically
+> those and cannot upgrade the OS, install the **`cc1` package instead**; it is statically
 > linked and carries its own C library, so it runs on old armv7 systems regardless of what
 > glibc they have. It has been used successfully this way on non-Creality armv7 hardware
 > (e.g. Rockchip RV1126 boards). See [TROUBLESHOOTING.md](TROUBLESHOOTING.md#binary-wont-start-glibc-version-not-found).
-
-### Flashforge Adventurer 5M / 5M Pro
-
-> **Easiest option:** We provide a [ready-made firmware image](https://github.com/prestonbrown/ff5m) — a fork of Forge-X 1.4.0 with HelixScreen pre-configured. Just put it on a flash drive and install on your printer. No SSH, no manual setup. If you'd rather install HelixScreen on an existing Forge-X or Klipper Mod setup, follow the manual instructions below.
-
-- **Hardware:**
-  - Flashforge Adventurer 5M or 5M Pro
-  - Stock 4.3" touchscreen (800x480)
-  - Network connection
-
-- **Software:**
-  - Custom Klipper firmware: [Forge-X](https://github.com/DrA1ex/ff5m) **or** [Klipper Mod](https://github.com/xblax/flashforge_ad5m_klipper_mod)
-  - SSH access to the printer (usually `root@<printer-ip>`)
-  - About 100MB free disk space
-
-> **Tested versions:** Most thoroughly tested on ForgeX 1.4.0 with Flashforge firmware 3.1.5. Other versions may work fine.
-
-#### AD5M Firmware Variants
-
-The installer automatically detects which firmware you're running and configures paths accordingly:
-
-| Firmware | Replaces | Install Location | Init Script |
-|----------|----------|------------------|-------------|
-| **Forge-X** | GuppyScreen | `/opt/helixscreen/` | `S90helixscreen` |
-| **Klipper Mod** | KlipperScreen | `/root/printer_software/helixscreen/` | `S80helixscreen` |
-
-**Memory Savings:** On Klipper Mod, HelixScreen (~15MB) replaces KlipperScreen (~50MB), freeing ~35MB RAM on the memory-constrained AD5M.
-
-#### Forge-X Prerequisites
-
-**Important:** ForgeX must be installed and configured for GuppyScreen mode **before** installing HelixScreen. HelixScreen uses ForgeX's infrastructure (Klipper, Moonraker, backlight control) but replaces the GuppyScreen UI.
-
-1. Install ForgeX following [their instructions](https://github.com/DrA1ex/ff5m)
-2. Configure ForgeX with `display = 'GUPPY'` in variables.cfg
-3. Verify GuppyScreen works on the touchscreen
-4. Then run the HelixScreen installer
-
-The HelixScreen installer will:
-- Keep ForgeX in GUPPY display mode (required for backlight control)
-- Disable GuppyScreen's init scripts (so HelixScreen takes over)
-- Disable the stock Flashforge UI in auto_run.sh
-- Patch ForgeX's screen.sh to prevent backlight dimming conflicts
-- Install HelixScreen as the replacement touchscreen UI
-
-On uninstall, all ForgeX changes are reversed and GuppyScreen is restored.
-
-### Creality K1 Series
-
-Creality K1, K1C, and K1 Max. Requires rooting and community firmware (for Moonraker).
-
-See the **[Creality K1C Setup Guide](guide/creality-k1c-setup.md)** for complete instructions — covers rooting, firmware options, and HelixScreen installation.
-
-**Quick version** (if you already have root + Moonraker running):
-
-### One-Liner Install (Recommended)
-
-If your K1 has internet access, install directly on the printer:
-
-```bash
-wget -O - http://dl.helixscreen.org/install.sh | sh
-```
-
-This works because `dl.helixscreen.org` serves over plain HTTP, which BusyBox wget supports.
-
-### Two-Step Install (No Internet on Printer)
-
-If your printer doesn't have internet access, download on another computer first:
-
-**Step 1: Download on your computer**
-
-Go to the [latest release page](https://github.com/prestonbrown/helixscreen/releases/latest) and download:
-- `helixscreen-k1.zip` (the K1 release archive)
-- `install.sh` (the installer script, under "Assets")
-
-Or use the command line (replace `vX.Y.Z` with the actual version):
-```bash
-VERSION=vX.Y.Z  # Check latest at https://github.com/prestonbrown/helixscreen/releases/latest
-wget "https://github.com/prestonbrown/helixscreen/releases/download/${VERSION}/helixscreen-k1.zip"
-wget https://raw.githubusercontent.com/prestonbrown/helixscreen/main/scripts/install.sh
-```
-
-**Step 2: Copy to your printer and install**
-
-```bash
-scp helixscreen-k1.zip install.sh root@<printer-ip>:/usr/data/
-ssh root@<printer-ip>   # password: creality_2023
-sh /usr/data/install.sh --local /usr/data/helixscreen-k1.zip
-```
-
-Installs to `/usr/data/helixscreen/`, boot service at `/etc/init.d/S99helixscreen`.
-
-### Creality K2 Series
-
-- **Hardware:**
-  - Creality K2, K2 Plus, or K2 Pro
-  - Stock 4.3" touchscreen display (480x800)
-  - Network connection
-
-- **Software:**
-  - Stock firmware with root access enabled (Settings → "Root account information")
-  - SSH access (`root@<printer-ip>`, password: `creality_2024`)
-  - Moonraker is included in stock firmware on port 4408
-
-**Install:**
-```bash
-python3 -c "import urllib.request as u;u.urlretrieve('https://raw.githubusercontent.com/prestonbrown/helixscreen/main/scripts/install.sh','/tmp/install.sh')" && sh /tmp/install.sh
-```
-
-> **Why not `wget`?** Recent K2 firmware (Tina/OpenWrt) ships neither `wget` nor `curl` on the
-> `PATH` — even the BusyBox `wget` applet has been compiled out. Every K2 does include `python3`
-> (Klipper and Moonraker need it) with working SSL, so the command above uses Python to fetch the
-> installer over HTTPS; the installer then uses Python for the rest of the download and extraction.
-> If your firmware still has `wget` (older builds did), `wget -O - http://dl.helixscreen.org/install.sh | sh` also works.
-
-**What's different from K1:**
-- ARM processor (Allwinner, not MIPS) — standard cross-compilation
-- Stock Moonraker — no community firmware required
-- OpenWrt-based init system (procd, not SysV)
-- CFS (Creality Filament System) support for RS-485 filament management
-
-### FlashForge Adventurer 5X
-
-> **Tested and working.** Prebuilt binaries are included in releases. Installation is handled through the ZMOD firmware modification.
-
-- **Hardware:**
-  - FlashForge Adventurer 5X
-  - Built-in 4.3" touchscreen (800x480)
-  - Network connection
-
-- **Software:**
-  - [ZMOD](https://github.com/ghzserg/zmod) firmware modification installed
-  - ZMOD provides Klipper, Moonraker, and SSH access
-
-**Current status:**
-- Dedicated build target: `ad5x` with its own toolchain and release binary
-- Prebuilt `ad5x` binaries are included in GitHub releases
-- ZMOD manages installation and updates via Moonraker update manager
-- **Auto-detection:** HelixScreen automatically detects ZMOD firmware (by recognizing ZMOD-specific Klipper device names) and applies ZMOD-optimized presets for display, input, and fan configuration. No manual configuration needed.
-- IFS (4-channel filament system) supported — see [Filament Management](guide/filament.md)
-
-#### Manual install from the command line (advanced)
-
-Most users never need this — ZMOD handles initial install and ongoing updates through Moonraker's update manager and that path "just works." Use the manual route only if you're pinning a specific version, working from a `--local` zip, or recovering from a failed update.
-
-ZMOD installs HelixScreen into a chroot rooted at `/usr/data/.mod/.zmod/`. When you SSH into the printer you land in the host filesystem, *not* the chroot — so a plain `curl … | sh` writes into the squashfs base view that HelixScreen never sees. The installer detects this and refuses to run with a friendly message; the fix is to enter the chroot first:
-
-```bash
-ssh root@<printer-ip>
-chroot /usr/data/.mod/.zmod
-# now you're in the same view HelixScreen runs from:
-curl -fsSL https://releases.helixscreen.org/install.sh | sh
-```
-
-The same applies to the uninstaller — run `sh /tmp/install.sh --uninstall` from inside the chroot.
-
-For **upgrades** (including recovery from a failed Mainsail update) see [UPGRADING.md → Adventurer 5X (ZMOD)](UPGRADING.md#quick-upgrade).
-
-### Elegoo Centauri Carbon
-
-> **Tested and working.** Prebuilt binaries ship in releases and the installer has auto-detection support. Requires the community [OpenCentauri COSMOS firmware](https://docs.opencentauri.cc/klipper-conversion/cosmos/cosmos/) — stock Elegoo firmware is not supported (no SSH, no Klipper, no Moonraker).
-
-- **Hardware:**
-  - Elegoo Centauri Carbon (4.3" 480×272 touchscreen, Allwinner R528, armv7l)
-  - Network connection (WiFi or Ethernet)
-
-- **Software:**
-  - [OpenCentauri COSMOS firmware](https://github.com/OpenCentauri/cosmos/releases) installed (replaces stock Elegoo firmware; ships Klipper + Moonraker + grumpyscreen/atomscreen/guppyscreen)
-  - SSH access: `root` / default password `OpenCentauri` (change it after install)
-
-#### Step 1: Install COSMOS firmware
-
-OpenCentauri COSMOS is a full firmware replacement for the Centauri Carbon. It ships with Klipper, Moonraker, Mainsail, and a `gui-switcher` that lets you pick which touch UI to run.
-
-1. Download the latest `update.swu` from https://github.com/OpenCentauri/cosmos/releases
-2. Copy it to the root of a FAT32-formatted USB stick
-3. Insert the USB stick into the printer, power on
-4. From the stock Elegoo UI, navigate to the firmware-update menu and apply the update
-5. **First boot takes 5–10 minutes** while it reflashes the toolhead and bed boards — be patient
-6. After reboot, connect to WiFi from the COSMOS UI and note the printer's IP address
-
-If the update fails or the device won't boot, consult the OpenCentauri [install guide](https://docs.opencentauri.cc/klipper-conversion/cosmos/install/) and [emergency USB recovery](https://docs.opencentauri.cc/software/updates/) docs.
-
-#### Step 2: Install HelixScreen
-
-SSH into the printer (replace `<ip>` with your printer's IP):
-
-```bash
-ssh root@<ip>
-# Default password: OpenCentauri
-```
-
-Then run the installer:
-
-```bash
-curl -sSL https://raw.githubusercontent.com/prestonbrown/helixscreen/main/scripts/install.sh | sh
-```
-
-The installer auto-detects COSMOS, installs HelixScreen to `/user-resource/helixscreen/`, and registers it with `gui-switcher` as the selected touch UI. It stops the currently active UI (grumpyscreen, atomscreen, or guppyscreen) and starts HelixScreen in its place.
-
-#### Step 3: Switch back to another UI (optional)
-
-COSMOS's `config-manager` tool lets you switch between installed UIs without uninstalling HelixScreen:
-
-```bash
-config-manager ui screen_ui grumpyscreen   # or atomscreen, guppyscreen, helixscreen
-/etc/init.d/gui-switcher restart
-```
-
-**Notes:**
-- Moonraker on COSMOS listens on port `80` directly (no nginx); HelixScreen's `cc1` preset is configured for this
-- Install directory: `/user-resource/helixscreen/` (`/` is read-only squashfs on COSMOS)
-- Init script: `/etc/init.d/helixscreen` (LSB-style, PIDFILE=`/var/run/gui.pid` for gui-switcher compatibility)
-- The `cc1` preset ships with **factory white-balance calibration** (per-channel panel gain) so colors look neutral out of the box on the Centauri Carbon's 4.3" panel — no manual tuning needed
-- COSMOS's `config-manager` has a fixed allowlist for the `screen_ui` slot. The installer handles this automatically via an init-script wrapper so HelixScreen can be selected without patching COSMOS itself; the uninstaller fully reverses it
-
-**If you're testing on this printer**, please report your results via [GitHub Issues](https://github.com/prestonbrown/helixscreen/issues) or [Discord](https://discord.gg/RZCT2StKhr).
-
-### Creality Sonic Pad
-
-The Creality Sonic Pad is a standalone 7" touchscreen that can run Klipper. It uses a 32-bit ARM userspace (armhf) despite having a 64-bit capable processor (Allwinner H616).
-
-> **Tested firmware: [SonicPad-Debian](https://github.com/Jpe230/SonicPad-Debian) only.**
-> This is the only Sonic Pad firmware HelixScreen has been tested on. It replaces
-> Creality's stock OpenWrt image with Debian 11 (bullseye), which is what gives the
-> Pad a normal systemd + GNU userspace for HelixScreen to install into.
->
-> HelixScreen is **not** tested on Creality's stock Sonic Pad firmware. The stock
-> image is a heavily cut-down OpenWrt build, so the installer's assumptions about
-> systemd, package tooling, and archive utilities do not hold there. If you are on
-> stock firmware, flash SonicPad-Debian first.
-
-HelixScreen requires Klipper and Moonraker to already be installed and working on the Sonic Pad. This is typically done via [KIAUH](https://github.com/dw-0/kiauh) or a similar tool. HelixScreen replaces whatever touchscreen UI you're currently using (e.g., KlipperScreen).
-
-- **Hardware:**
-  - Creality Sonic Pad (7" 1024x600 capacitive touchscreen)
-  - Network connection (Ethernet)
-
-- **Software:**
-  - [SonicPad-Debian](https://github.com/Jpe230/SonicPad-Debian) (Debian 11 bullseye) — see the note above
-  - Klipper and Moonraker installed and working (via KIAUH or similar)
-  - SSH access (`sonic@<pad-ip>`)
-  - About 100MB free disk space
-
-**Installation:**
-
-The standard installer works on Sonic Pad:
-
-```bash
-curl -sSL https://raw.githubusercontent.com/prestonbrown/helixscreen/main/scripts/install.sh | sh
-```
-
-The installer detects the Sonic Pad as a 32-bit ARM platform and downloads the `pi32` release binary. HelixScreen installs to `~/helixscreen/` and runs as a systemd service.
-
-**Notes:**
-- The Sonic Pad has a Goodix GT9xx touchscreen controller — the touch calibration wizard runs automatically on first boot if needed
-- Moonraker runs on `localhost:7125` (default)
-- The `display-sleep` service is automatically stopped to prevent backlight conflicts
-
-### Snapmaker U1
-
-The Snapmaker U1 is an all-in-one printer with a built-in touchscreen. HelixScreen replaces the stock UI and launches automatically on boot.
-
-- **Hardware:**
-  - Snapmaker U1
-  - Built-in touchscreen display
-  - Network connection
-
-- **Software:**
-  - **SSH access** — via either firmware path:
-    - **Stock Snapmaker firmware (1.2+):** enable the **Root access** option in printer settings (added in V1.2.0). This turns on SSH. *(The stock-firmware path has not been verified end-to-end on a real stock device — see note below.)*
-    - **[PAXX Extended Firmware](https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware):** SSH on by default. Tested on **1.2.x, 1.3.x, and 1.4.x**.
-  - SSH login (`root@<printer-ip>` or `lava@<printer-ip>`, password: `snapmaker`)
-
-**Notes:**
-- **Reinstall after a firmware update** — any firmware update (stock or PAXX) resets system files and can overwrite HelixScreen; re-run the installer afterward.
-- **Remote screen ("gui" camera) works on PAXX firmware** — the built-in "gui" webcam in Mainsail/Fluidd shows the live HelixScreen UI, and you can tap it to control the printer remotely. Enable **Remote Screen** in the firmware settings web UI at `http://<printer-ip>/firmware-config/` — it registers the "gui" webcam and restarts HelixScreen and Moonraker for you (hand-editing the config value alone is not enough). The physical "case" camera is unaffected. Stock firmware is not yet confirmed to expose the feed. Setup steps: [Supported Printers → Snapmaker U1](guide/supported-printers.md#snapmaker-u1-snapswap).
-- **Two harmless Moonraker warnings are expected** — after install, the Mainsail/Fluidd "Moonraker warnings found" banner may show *"Unable to find DBus PolKit Interface"* and *"Unable to initialize System Update Provider for distribution: buildroot"*. Both are inherent to Moonraker on the U1's buildroot firmware (no PolKit, no OS package manager) and do **not** affect HelixScreen or printing. They are not specific to HelixScreen — installing simply restarts Moonraker, which re-surfaces them. See [Troubleshooting](TROUBLESHOOTING.md).
-
----
-
-## Raspberry Pi / MainsailOS Installation
 
 ### Step 1: Connect to Your Pi
 
@@ -473,18 +195,36 @@ Default password is usually `raspberry` unless you changed it.
 ### Step 2: Run the Installer
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/prestonbrown/helixscreen/main/scripts/install.sh | sh
+curl -sSL https://releases.helixscreen.org/install.sh | sh
 ```
 
 The installer automatically:
 1. Detects your platform, architecture (32-bit or 64-bit), and Klipper ecosystem
 2. Downloads the correct release
 3. Stops any competing UIs (KlipperScreen, etc.)
-4. Installs to `~/helixscreen` (if Klipper ecosystem detected) or `/opt/helixscreen` (fallback)
+4. Installs to `~/helixscreen` when run as a normal user, or `/opt/helixscreen` when run as root
 5. Configures and starts the systemd service
 6. Sets up Moonraker update_manager for web UI updates
 
-> **Install path auto-detection:** The installer checks for `~/klipper`, `~/moonraker`, `~/printer_data`, or an active `moonraker.service`. If any are found, HelixScreen installs alongside them in your home directory. Override with `INSTALL_DIR=/custom/path`.
+The installer prints the plan first (your printer, what it found, what it will install, and what it will change) and asks `Continue? [Y/n]`. Then it shows one line per step as it goes. If something fails, it tells you what state your printer is left in and where the log is.
+
+To see the plan without changing anything, add `--dry-run`:
+
+```bash
+curl -sSL https://releases.helixscreen.org/install.sh | sh -s -- --dry-run
+```
+
+It prints the plan and "Dry run, nothing changed." If a check would stop the install, it exits with an error instead.
+
+To watch every detail line and command output as it happens, add `--verbose` (or `-v`):
+
+```bash
+curl -sSL https://releases.helixscreen.org/install.sh | sh -s -- --verbose
+```
+
+The full log is saved either way, to `~/printer_data/logs/helixscreen-install.log` (it shows up in Mainsail and Fluidd's log list). The previous run's log is kept as `helixscreen-install.log.1`. On printers without a `printer_data` folder, the log is in a `logs` folder next to the HelixScreen install.
+
+> **Where does it install?** The installer puts HelixScreen in your home directory when it runs as a normal user (with or without a Klipper ecosystem alongside), and in `/opt` when it runs as root. Override with `INSTALL_DIR=/custom/path/helixscreen` (the directory name must contain `helixscreen`).
 
 ### Step 3: Complete the Setup Wizard
 
@@ -496,282 +236,71 @@ After installation, HelixScreen starts automatically. The on-screen wizard guide
 
 See [First Boot & Setup Wizard](#first-boot--setup-wizard) for details.
 
----
+### Service Management
 
-## Flashforge Adventurer 5M Installation
-
-### Ready-Made Firmware Image (Easiest)
-
-We maintain a [ready-made firmware image](https://github.com/prestonbrown/ff5m) — a fork of Forge-X 1.4.0 with HelixScreen pre-configured. This is the fastest way to get up and running:
-
-1. Download the image from [github.com/prestonbrown/ff5m](https://github.com/prestonbrown/ff5m)
-2. Copy it to a USB flash drive
-3. Insert the flash drive into your AD5M or AD5M Pro and install
-
-That's it — no SSH, no manual commands. HelixScreen will be ready to go after the firmware installs.
-
-> If you already have Forge-X or Klipper Mod installed and prefer to add HelixScreen manually, continue with the instructions below.
-
-### Manual Installation
-
-> **Important:** Installing HelixScreen replaces your current screen UI (GuppyScreen on Forge-X, KlipperScreen on Klipper Mod). Make sure you have a backup method to access your printer (SSH, Mainsail/Fluidd web interface).
-
-### Automated Installation (Recommended)
-
-The AD5M uses BusyBox which doesn't support HTTPS downloads directly. This is a **two-step process**:
-1. Download on your local computer (Steps 1-2)
-2. SSH into the printer as root and run the installer (Step 3)
-
-**Step 1: Download on your computer**
-
-Go to the [latest release page](https://github.com/prestonbrown/helixscreen/releases/latest) and download:
-- `helixscreen-ad5m.zip` (the AD5M release archive)
-- `install.sh` (the installer script, under "Assets")
-
-Or use the command line (replace `vX.Y.Z` with the actual version):
-```bash
-VERSION=vX.Y.Z  # Check latest at https://github.com/prestonbrown/helixscreen/releases/latest
-wget "https://github.com/prestonbrown/helixscreen/releases/download/${VERSION}/helixscreen-ad5m.zip"
-wget https://raw.githubusercontent.com/prestonbrown/helixscreen/main/scripts/install.sh
-```
-
-**Step 2: Copy to your printer**
+The installer configures systemd to start HelixScreen on boot. Verify with:
 
 ```bash
-# AD5M requires -O flag for scp (BusyBox lacks sftp-server)
-# Note: Use /data/ not /tmp/ - AD5M's /tmp is a tiny tmpfs (~54MB)
-scp -O helixscreen-ad5m.zip install.sh root@<printer-ip>:/data/
+sudo systemctl is-enabled helixscreen
+# Should show: enabled
 ```
 
-> **Windows users:** The `-O` flag is not supported by Windows 11's built-in OpenSSH.
-> Use one of these alternatives instead:
-> - **WSL** (recommended) — open a WSL terminal and run all commands as shown (Linux tools work natively)
-> - **[WinSCP](https://winscp.net/)** (free, GUI) — set the protocol to **SCP**, then drag and drop files to `/data/` on the printer
-> - **[PuTTY pscp](https://www.chiark.greenend.org.uk/~sgtatham/putty/latest.html)** (free, command-line):
->   `pscp helixscreen-ad5m.zip install.sh root@<printer-ip>:/data/`
+If not enabled:
+```bash
+sudo systemctl enable helixscreen
+```
 
-**Step 3: SSH into the printer and run the installer**
+Day-to-day control:
+```bash
+sudo systemctl start helixscreen      # start
+sudo systemctl stop helixscreen       # stop
+sudo systemctl restart helixscreen    # restart (after config changes)
+sudo systemctl status helixscreen     # status
+sudo journalctl -u helixscreen -f     # follow live logs
+```
+
+> **Note:** The installer automatically stops and disables competing UIs. To disable KlipperScreen by hand:
+> ```bash
+> sudo systemctl stop KlipperScreen
+> sudo systemctl disable KlipperScreen
+> ```
+> Printers with SysV init (K1, K2, AD5M, AD5X, CC1, Snapmaker U1) use their init script instead; see your printer's install guide.
+
+### Raspberry Pi 5
+
+Pi 5 has multiple DRM devices. HelixScreen auto-detects the correct one, but if you have issues:
+
+```json
+// settings.json
+{
+  "display": {
+    "drm_device": "/dev/dri/card1"
+  }
+}
+```
+
+Common Pi 5 DRM devices:
+- `/dev/dri/card0`: v3d (3D acceleration only, no display)
+- `/dev/dri/card1`: DSI touchscreen (if connected)
+- `/dev/dri/card2`: HDMI output
+
+### Camera Streaming Performance
+
+If you use a webcam with HelixScreen, install `libturbojpeg0` for faster camera feed rendering:
 
 ```bash
-# From your local computer, SSH into the printer as root
-ssh root@<printer-ip>
-
-# Now on the printer, run the installer
-sh /data/install.sh --local /data/helixscreen-ad5m.zip
+sudo apt install libturbojpeg0
 ```
 
-The install script automatically detects your firmware (Forge-X or Klipper Mod) and installs to the correct location.
+The installer attempts this automatically, but it's listed here in case your Pi was offline during installation. HelixScreen detects and uses it automatically for 3-5x faster JPEG decoding via hardware SIMD acceleration.
 
-**What the installer does on Forge-X:**
-- Verifies ForgeX is installed and sets display mode to `GUPPY`
-- Stops and disables GuppyScreen (`chmod -x` on init scripts)
-- Disables stock Flashforge UI in /opt/auto_run.sh
-- Patches /opt/config/mod/.shell/screen.sh to skip backlight commands when HelixScreen is running (prevents ForgeX's delayed_gcode from dimming the screen)
-- Installs HelixScreen to `/opt/helixscreen/`
-- Creates init script at `/etc/init.d/S90helixscreen`
+### Low Memory Systems (Pi 3, Pi Zero 2 W)
 
-**What the installer does on Klipper Mod:**
-- Stops Xorg and KlipperScreen
-- Disables their init scripts (`chmod -x`)
-- Installs HelixScreen to `/root/printer_software/helixscreen/`
-- Creates init script at `/etc/init.d/S80helixscreen`
+HelixScreen is optimized for low memory, but if the host is still tight:
 
-### Manual Installation
-
-<details>
-<summary>Forge-X Manual Installation</summary>
-
-```bash
-# Download on your computer (replace vX.Y.Z with actual version)
-VERSION=vX.Y.Z
-wget "https://github.com/prestonbrown/helixscreen/releases/download/${VERSION}/helixscreen-ad5m.zip"
-
-# Copy to printer (AD5M requires scp -O for legacy protocol)
-# Note: Use /data/ not /tmp/ - AD5M's /tmp is a tiny tmpfs (~54MB)
-# Windows users: use WinSCP (SCP protocol) or PuTTY's pscp instead — see note above
-scp -O helixscreen-ad5m.zip root@<printer-ip>:/data/
-
-# SSH into printer
-ssh root@<printer-ip>
-
-# Extract to /opt (Forge-X location)
-cd /opt
-unzip -q /data/helixscreen-ad5m.zip
-
-# Stop GuppyScreen
-/opt/config/mod/.root/S80guppyscreen stop 2>/dev/null || true
-chmod -x /opt/config/mod/.root/S80guppyscreen
-
-# Install init script
-cp /opt/helixscreen/config/helixscreen.init /etc/init.d/S90helixscreen
-chmod +x /etc/init.d/S90helixscreen
-
-# Start HelixScreen
-/etc/init.d/S90helixscreen start
-
-# Clean up
-rm /data/helixscreen-ad5m.zip
-```
-
-</details>
-
-<details>
-<summary>Klipper Mod Manual Installation</summary>
-
-> **Note:** Klipper Mod's `/tmp` is a small tmpfs (~54MB). The package is ~70MB, so we must use `/mnt/data` instead.
-
-```bash
-# Download on your computer (replace vX.Y.Z with actual version)
-VERSION=vX.Y.Z
-wget "https://github.com/prestonbrown/helixscreen/releases/download/${VERSION}/helixscreen-ad5m.zip"
-
-# Copy to printer's data partition (NOT /tmp - it's too small!)
-# Windows users: use WinSCP (SCP protocol) or PuTTY's pscp instead — see note above
-scp -O helixscreen-ad5m.zip root@<printer-ip>:/mnt/data/
-
-# SSH into printer
-ssh root@<printer-ip>
-
-# Extract to /root/printer_software (Klipper Mod location)
-cd /root/printer_software
-unzip -q /mnt/data/helixscreen-ad5m.zip
-
-# Stop KlipperScreen
-/etc/init.d/S80klipperscreen stop 2>/dev/null || true
-chmod -x /etc/init.d/S80klipperscreen
-
-# Install init script (S80 to match KlipperScreen's boot order)
-cp /root/printer_software/helixscreen/config/helixscreen.init /etc/init.d/S80helixscreen
-chmod +x /etc/init.d/S80helixscreen
-
-# Update the install path in the init script
-sed -i 's|DAEMON_DIR=.*|DAEMON_DIR="/root/printer_software/helixscreen"|' /etc/init.d/S80helixscreen
-
-# Start HelixScreen
-/etc/init.d/S80helixscreen start
-
-# Clean up
-rm /mnt/data/helixscreen-ad5m.zip
-```
-
-</details>
-
-> **Note:** AD5M runs as root, so `sudo` is not needed.
-> **Note:** AD5M uses BusyBox utilities. Use `unzip` to extract `.zip` archives.
-> **Note:** AD5M uses SysV init (BusyBox), not systemd.
-
-### Step 4: Reboot
-
-```bash
-reboot
-```
-
-After reboot, HelixScreen will start automatically on the touchscreen.
-
-### Step 5: Complete Setup
-
-Use the touchscreen to complete the setup wizard. The printer should auto-detect since it's running locally.
-
----
-
-## Snapmaker U1 Installation
-
-> **Requires SSH access.** Enable it on **stock firmware (1.2+)** via the **Root access** option in printer settings, or install [PAXX Extended Firmware](https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware) (SSH on by default). PAXX is **not** required — it's just the turnkey option.
->
-> **Firmware versions:** Tested on PAXX Extended Firmware **1.2.x, 1.3.x, and 1.4.x**. The stock-firmware path has not been verified end-to-end on a real stock device. After any firmware update, **reinstall HelixScreen** — the update resets the printer's system files and the stock screen will return until you reinstall (see [Upgrading the firmware](#upgrading-the-extended-firmware-with-helixscreen-installed)).
-
-SSH into the printer:
-
-```bash
-ssh root@<printer-ip>
-# or: ssh lava@<printer-ip>
-# password: snapmaker
-```
-
-### Quick Install (Recommended)
-
-```bash
-curl -sSL https://releases.helixscreen.org/install.sh | sh
-```
-
-The installer automatically detects the Snapmaker U1 and installs to `/userdata/helixscreen/`. It configures autostart so HelixScreen launches instead of the stock UI on boot.
-
-### Manual Install
-
-If you prefer to install manually or the one-liner doesn't work on your network:
-
-**Step 1: Download the release archive**
-
-```bash
-wget https://releases.helixscreen.org/stable/helixscreen-snapmaker-u1.zip
-```
-
-**Step 2: Extract to the install directory**
-
-```bash
-mkdir -p /userdata/helixscreen && unzip -q helixscreen-snapmaker-u1.zip -d /userdata/helixscreen
-```
-
-**Step 3: Configure autostart**
-
-```bash
-bash /userdata/helixscreen/scripts/snapmaker-u1-setup-autostart.sh /userdata/helixscreen
-```
-
-This sets HelixScreen to launch on boot and disables the stock UI program (`/usr/bin/gui`) so HelixScreen owns the screen. (The stock UI program lives in a read-only part of the firmware and is only disabled, never deleted — the uninstaller re-enables it.)
-
-**Step 4: Start HelixScreen**
-
-```bash
-killall gui 2>/dev/null; /userdata/helixscreen/bin/helix-launcher.sh &
-```
-
-### Reverting to Stock UI
-
-Run the uninstaller — it re-enables the stock UI and removes HelixScreen:
-
-```bash
-curl -sSL https://raw.githubusercontent.com/prestonbrown/helixscreen/main/scripts/install.sh | sh -s -- --uninstall
-reboot
-```
-
-If you can't run the uninstaller, revert manually. HelixScreen *disables* the stock UI program rather than deleting it, so re-enable it and remove HelixScreen's files:
-
-```bash
-chmod +x /usr/bin/gui          # re-enable the stock UI program
-rm -rf /userdata/helixscreen   # remove HelixScreen
-reboot
-```
-
-**Notes:**
-- SSH is required — enable stock firmware's **Root access** option, or use PAXX Extended Firmware (SSH on by default). PAXX is not required.
-- Display resolution may need manual configuration if the screen appears stretched or misaligned (see [Display Configuration](#display-configuration))
-- A firmware update resets the printer's system files and brings the stock screen back — reinstall HelixScreen afterward
-
-### Upgrading the Extended Firmware with HelixScreen installed
-
-A firmware upgrade is safe to run with HelixScreen installed — it does **not** brick the printer. HelixScreen's files live in a layer that the upgrade clears, so after upgrading you simply **reinstall HelixScreen**.
-
-Because HelixScreen replaces the stock touchscreen, the stock screen's on-device **"Local Update"** button is gone. Upgrade over the network instead:
-
-1. In a web browser on the same network, open **`http://<printer-ip>/firmware-config`**.
-2. Choose **Firmware Upgrade**, upload the new `U1_extended_<version>_upgrade.bin`, and let it complete. The printer reboots into the new firmware.
-3. The stock screen comes back (HelixScreen was cleared by the upgrade). **Reinstall HelixScreen** with the [Quick Install](#quick-install-recommended) one-liner. Your settings, WiFi, and printer config are preserved (they live on a separate partition the upgrade keeps).
-
-### Recovery: screen is blank or the printer is off the network
-
-If something goes wrong and the printer comes up with a blank screen and is unreachable over WiFi, recover over a wired connection:
-
-1. Plug a **USB-Ethernet adapter** into the printer and connect it to your router. The printer auto-configures the wired link and gets an IP from your router (check the router's client list).
-2. SSH in over that wired IP: `ssh root@<wired-ip>` (password `snapmaker`).
-3. Run the uninstaller to return to the stock UI, then reboot:
-   ```bash
-   curl -sSL https://raw.githubusercontent.com/prestonbrown/helixscreen/main/scripts/install.sh | sh -s -- --uninstall
-   reboot
-   ```
-4. Once the stock screen is back and the printer is on WiFi again, you can reinstall HelixScreen.
-
-> If the uninstaller can't run, reset HelixScreen's persistence flag and files manually, then reboot: `rm -f /oem/.debug && rm -rf /oem/overlay/* && rm -rf /userdata/helixscreen && sync && reboot`. This returns the printer to a clean stock state.
+1. Camera streaming is usually the biggest memory consumer on a small Pi; disable it if you don't need it
+2. Reduce Moonraker's print history retention
+3. Disable other services you don't need
 
 ---
 
@@ -782,7 +311,7 @@ When HelixScreen starts for the first time, a setup wizard guides you through co
 ### Step 1: Touchscreen Calibration
 Calibrate your touchscreen by tapping the targets. This ensures accurate touch input.
 
-> **Note:** This step may be skipped automatically for known tier-1 supported printers that ship with default calibration values. You can always recalibrate later from **Settings**.
+> **Note:** This step is skipped automatically when your touchscreen doesn't need calibration: most capacitive and USB touchscreens are factory-calibrated. Only resistive panels (and panels reporting broken coordinate ranges) get this step. You can always recalibrate later from **Settings**.
 
 ### Step 2: Language Selection
 Choose your preferred language.
@@ -790,8 +319,9 @@ Choose your preferred language.
 ### Step 3: Network Setup
 Connect to your wireless network or configure Ethernet. You can:
 - Select from detected WiFi networks
-- Enter a hidden network name manually
 - Skip if using Ethernet or already connected
+
+> **Note:** Hidden networks are not listed. Skip this step and join later from **Settings > Connection > Network Settings**, which can add a network by name.
 
 ### Step 4: Moonraker Connection
 Enter your Moonraker host. For most setups:
@@ -819,20 +349,28 @@ Select your cooling fans:
 - Hotend fan
 - Other auxiliary fans
 
-### Step 8: LED Selection (Optional)
+### Step 8: AMS Identification (If Detected)
+If a multi-filament system (AMS, CFS, IFS, ACE, and similar) is detected, confirm which lanes or slots exist and what is loaded in them.
+
+### Step 9: LED Selection (Optional)
 If your printer has controllable LEDs:
 - Chamber lights
 - Status LEDs
 - NeoPixel strips
 
-### Step 9: Input Shaper (Optional)
+### Step 10: Filament Sensor (Optional)
+If standalone filament sensors are present, choose what each one does (runout detection, motion detection).
+
+### Step 11: Input Shaper (Optional)
 Configure resonance compensation if your printer supports input shaping.
 
-### Step 10: Hardware Summary
+### Step 12: Hardware Summary
 Review your configured hardware before completing setup.
 
 ### Completion
 After the wizard, you'll be taken to the home screen. Your settings are saved automatically.
+
+> **Note:** On printers whose install package ships pre-configured hardware (K2, AD5M, and similar), the hardware steps and the summary are collapsed, and a one-time telemetry opt-in screen appears instead.
 
 ---
 
@@ -868,17 +406,15 @@ For SPI displays (like many small LCDs):
 
 See the [MainsailOS display documentation](https://docs.mainsail.xyz/) for specific display setup.
 
-### BTT Pad 7, CB2, and Similar
+### BTT Pad 7 and Similar All-in-One Pads
 
-The BTT Pad 7, CB2, and similar "Klipper Pad" devices typically include:
-- Pre-configured display output
-- Touch input via USB
-
-HelixScreen should detect and use these automatically.
+The BTT Pad 7 and similar "Klipper Pad" devices are complete units, with the single-board computer and touchscreen integrated in one housing. Display output and USB touch input come pre-configured, and HelixScreen should detect and use them automatically.
 
 ### Screen Rotation
 
-To rotate the display (e.g., if your screen is mounted upside-down), add to your `settings.json` (typically at `~/helixscreen/config/settings.json`):
+**Prefer rotating the display itself when it can.** If your monitor has a rotation option (usually a button or an OSD menu), use it. On a Pi with a DSI panel, the kernel can rotate the panel in hardware: add `video=DSI-1:panel_orientation=upside_down` to /boot/firmware/cmdline.txt (HelixScreen detects this automatically on first boot; see [TROUBLESHOOTING: display upside down or rotated](TROUBLESHOOTING.md#display-upside-down-or-rotated)). Rotation done by the display is free. HelixScreen can otherwise rotate the image itself; GPU-enabled builds do this efficiently, while other builds may use the framebuffer backend.
+
+To rotate in software (e.g., a screen mounted upside-down that has no rotation of its own), add to your `settings.json` (typically at `~/helixscreen/config/settings.json`):
 
 ```json
 {
@@ -890,15 +426,15 @@ To rotate the display (e.g., if your screen is mounted upside-down), add to your
 
 Valid values: `0`, `90`, `180`, `270`. Restart HelixScreen after changing.
 
-Touch coordinates are automatically adjusted to match the rotation — no separate touch configuration is needed.
+Touch coordinates are automatically adjusted to match the rotation: no separate touch configuration is needed.
 
-**Rotation and display backends:** When rotation is configured on Raspberry Pi, HelixScreen checks whether your display hardware supports rotating the image directly. Most DSI/HDMI displays on Pi do not support hardware rotation. In that case, HelixScreen automatically switches from the DRM (GPU) backend to the framebuffer backend, which handles software rotation without any screen flicker. This switch is transparent — no manual configuration needed.
+**Rotation and display backends:** GPU-enabled DRM builds rotate the final image on the GPU and stay on DRM, even when the display plane cannot rotate. Other DRM builds use display-plane rotation when available and transparently switch to the framebuffer backend otherwise.
 
 If you experience any display issues with rotation, you can also force the framebuffer backend manually by setting `HELIX_DISPLAY_BACKEND=fbdev` (see below).
 
-### GPU Rendering
+### Display Backends: DRM vs Framebuffer
 
-By default, HelixScreen uses GPU-accelerated rendering via DRM/KMS when available. On boards where DRM is not supported, it falls back to CPU-based software rendering (`fbdev` backend).
+By default, HelixScreen uses the DRM/KMS backend when available. DRM presents each frame with a vsynced page flip instead of a plain memory copy, which avoids tearing. GPU-enabled builds also accelerate display presentation and rotation. On boards where DRM is not supported, HelixScreen falls back to the framebuffer (`fbdev` backend), which copies each frame directly with no vsync.
 
 **When rotation is configured**, HelixScreen may automatically switch to the fbdev backend if the display hardware doesn't support hardware rotation. This is normal and provides flicker-free rotation.
 
@@ -925,7 +461,7 @@ Then restart:
 sudo systemctl restart helixscreen
 ```
 
-Valid backends: `drm` (GPU-accelerated), `fbdev` (CPU rendering, maximum compatibility).
+Valid backends: `drm` (vsynced, avoids tearing), `fbdev` (maximum compatibility).
 
 **How to revert to auto-detection:**
 
@@ -939,120 +475,28 @@ sudo systemctl restart helixscreen
 
 ---
 
-## Starting on Boot
-
-### Enable Automatic Start
-
-The installer configures systemd to start HelixScreen on boot. Verify with:
-
-```bash
-sudo systemctl is-enabled helixscreen
-# Should show: enabled
-```
-
-If not enabled:
-```bash
-sudo systemctl enable helixscreen
-```
-
-### Service Management
-
-**MainsailOS (systemd):**
-```bash
-# Start HelixScreen
-sudo systemctl start helixscreen
-
-# Stop HelixScreen
-sudo systemctl stop helixscreen
-
-# Restart (after config changes)
-sudo systemctl restart helixscreen
-
-# View status
-sudo systemctl status helixscreen
-
-# View logs
-sudo journalctl -u helixscreen -f
-```
-
-**AD5M (SysV init):**
-
-*Forge-X:*
-```bash
-/etc/init.d/S90helixscreen start|stop|restart|status
-tail -100 /opt/helixscreen/logs/launcher.log       # launcher / crash capture
-grep helix-screen /var/log/messages | tail -100    # structured app log
-```
-
-*Klipper Mod:*
-```bash
-/etc/init.d/S80helixscreen start|stop|restart|status
-tail -100 /opt/helixscreen/logs/launcher.log
-grep helix-screen /var/log/messages | tail -100
-```
-
-**K1/Simple AF (SysV init, BusyBox syslog in RAM):**
-```bash
-/etc/init.d/S99helixscreen start|stop|restart|status
-tail -100 /usr/data/helixscreen/logs/launcher.log    # launcher / crash capture
-logread | grep helix-screen | tail -100              # structured app log
-```
-
-> If `launcher.log` doesn't exist, you're on a pre-v0.99.62 install; the log lived at `/tmp/helixscreen.log` then.
-
-### Disabling Other UIs
-
-If you have another UI installed, disable it to avoid conflicts:
-
-**MainsailOS (systemd):**
-```bash
-# Disable KlipperScreen (if installed)
-sudo systemctl stop KlipperScreen
-sudo systemctl disable KlipperScreen
-```
-
-**AD5M Forge-X (SysV init):**
-```bash
-# Disable GuppyScreen
-/opt/config/mod/.root/S80guppyscreen stop
-chmod -x /opt/config/mod/.root/S80guppyscreen
-```
-
-**AD5M Klipper Mod (SysV init):**
-```bash
-# Disable KlipperScreen
-/etc/init.d/S80klipperscreen stop
-chmod -x /etc/init.d/S80klipperscreen
-```
-
-**K1/Simple AF (SysV init):**
-```bash
-# Disable GuppyScreen
-/etc/init.d/S99guppyscreen stop
-chmod -x /etc/init.d/S99guppyscreen
-```
-
-> **Note:** The HelixScreen installer automatically stops and disables competing UIs.
-
----
-
 ## Updating HelixScreen
+
+> Platform-specific update commands live in your printer's install guide: the two-step offline process on printers without HTTPS fetch tools (K1, Adventurer 5M), the AD5X chroot path, bundled-installer locations. Start from [Which printer are you installing on?](#which-printer-are-you-installing-on).
+
+Three ways to update, in order of preference: in the app itself, from the Mainsail/Fluidd update manager, or from the command line.
+
+### In the App Itself (Preferred)
+
+The app can update itself: **Settings > Updates > Check for Updates**. It shows the new version, downloads it with a progress bar, and installs it; a **Retry** button appears if the download fails. No SSH and no web browser needed. The **Update Channel** row beside it picks Stable or Beta.
+
+This option is hidden where something else manages updates for you, such as on the Snapmaker U1, whose firmware handles HelixScreen updates itself. On Android, the install step opens the Play Store listing if you installed from Google Play, and otherwise the GitHub release page, where you download the new APK. See [Checking for Updates](guide/settings/updates.md#check-for-updates) for the full walkthrough.
 
 ### Check Current Version
 
-On the touchscreen: **Settings** → scroll down to the bottom of the page to find the version number.
+On the touchscreen: **Settings > Help & About > About** shows the current version.
 
-Or via SSH:
+Or via SSH (path shown for a generic Linux install; other platforms' paths are in their guides):
 ```bash
-# Path varies by platform:
-#   Pi: ~/helixscreen/bin/helix-screen (or /opt/helixscreen if no Klipper ecosystem)
-#   K1: /usr/data/helixscreen/bin/helix-screen
-#   K2: /opt/helixscreen/bin/helix-screen
-#   AD5M Klipper Mod: /root/printer_software/helixscreen/bin/helix-screen
 ~/helixscreen/bin/helix-screen --version
 ```
 
-### Update from Mainsail/Fluidd Web UI (Pi Only)
+### Update from Mainsail/Fluidd Web UI
 
 If you installed via the installer script, it automatically configures Moonraker's update_manager. You can update HelixScreen with one click from the Mainsail or Fluidd web interface:
 
@@ -1063,72 +507,42 @@ If you installed via the installer script, it automatically configures Moonraker
 
 > **Note:** The installer adds an `[update_manager helixscreen]` section to your `moonraker.conf`. If you installed manually, see [Manual Update Manager Setup](#manual-update-manager-setup) below.
 
-### Update Using Install Script (Recommended)
+### Update Using the Install Script (Command Line)
 
-The easiest way to update is using the install script with `--update`:
+From the command line, over SSH, run the installer with `--update`:
 
-**Raspberry Pi:**
 ```bash
-curl -sSL https://raw.githubusercontent.com/prestonbrown/helixscreen/main/scripts/install.sh | sh -s -- --update
+curl -sSL https://releases.helixscreen.org/install.sh | sh -s -- --update
 ```
 
-**Creality K1** (no HTTPS support - two-step process):
-```bash
-# On your computer (replace vX.Y.Z with actual version):
-VERSION=vX.Y.Z  # Check latest at https://github.com/prestonbrown/helixscreen/releases/latest
-wget "https://github.com/prestonbrown/helixscreen/releases/download/${VERSION}/helixscreen-k1.zip"
-scp helixscreen-k1.zip root@<printer-ip>:/usr/data/
-
-# On the printer (use the bundled install.sh - no need to download it again):
-/usr/data/helixscreen/install.sh --local /usr/data/helixscreen-k1.zip --update
-```
-
-**Flashforge Adventurer 5M** (no HTTPS support - two-step process):
-```bash
-# On your computer (replace vX.Y.Z with actual version):
-VERSION=vX.Y.Z  # Check latest at https://github.com/prestonbrown/helixscreen/releases/latest
-wget "https://github.com/prestonbrown/helixscreen/releases/download/${VERSION}/helixscreen-ad5m.zip"
-# Windows users: use WSL, WinSCP (SCP protocol), or PuTTY's pscp instead of scp -O
-scp -O helixscreen-ad5m.zip root@<printer-ip>:/data/
-
-# On the printer (use the bundled install.sh - no need to download it again):
-# Forge-X:
-/opt/helixscreen/install.sh --local /data/helixscreen-ad5m.zip --update
-# Klipper Mod:
-/root/printer_software/helixscreen/install.sh --local /data/helixscreen-ad5m.zip --update
-```
-
-This preserves your configuration and updates to the latest version.
+This preserves your configuration and updates to the latest version. Printers without direct internet access use a two-step process instead; see your printer's install guide.
 
 ### Update to Specific Version
 
-**Raspberry Pi:**
 ```bash
-curl -sSL https://raw.githubusercontent.com/prestonbrown/helixscreen/main/scripts/install.sh | sh -s -- --update --version v1.2.0
+curl -sSL https://releases.helixscreen.org/install.sh | sh -s -- --update --version v1.2.0
 ```
-
-**Creality K1 / Flashforge Adventurer 5M:** Download the specific version archive from [GitHub Releases](https://github.com/prestonbrown/helixscreen/releases), then use `--local` as shown above.
 
 To reinstall a specific version with a **fresh settings.json** (instead of keeping your existing settings), swap `--update` for `--clean`:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/prestonbrown/helixscreen/main/scripts/install.sh | sh -s -- --clean --version v1.2.0
+curl -sSL https://releases.helixscreen.org/install.sh | sh -s -- --clean --yes --version v1.2.0
 ```
 
 ### Preserving Configuration
 
-The update process preserves your `settings.json` settings. If you want to reset to defaults, use the `--clean` flag — it removes your HelixScreen settings and caches everywhere they live, then does a fresh install:
+The update process preserves your `settings.json` settings. If you want to reset to defaults, use the `--clean` flag; it removes your HelixScreen settings and caches everywhere they live, then does a fresh install:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/prestonbrown/helixscreen/main/scripts/install.sh | sh -s -- --clean
+curl -sSL https://releases.helixscreen.org/install.sh | sh -s -- --clean --yes
 ```
 
-`--clean` asks for confirmation before wiping anything. Your Klipper config, Moonraker settings, print history, and G-code files are **not** touched — only HelixScreen's own settings.
+`--yes` skips the confirmation prompt, which a piped command cannot show; run the downloaded script interactively over SSH and you get the prompt instead. Your Klipper config, Moonraker settings, print history, and G-code files are **not** touched: only HelixScreen's own settings.
 
 To reset settings **and** pin a specific version in one step, combine `--clean` with `--version`:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/prestonbrown/helixscreen/main/scripts/install.sh | sh -s -- --clean --version v1.2.0
+curl -sSL https://releases.helixscreen.org/install.sh | sh -s -- --clean --yes --version v1.2.0
 ```
 
 If you'd rather delete the settings file by hand instead of reinstalling:
@@ -1157,7 +571,7 @@ path: ~/helixscreen
 ```
 
 > **Important:** Do not add `install_script`, `managed_services`, or `persistent_files`
-> to this section — these options are not supported with `type: web` and Moonraker will
+> to this section; these options are not supported with `type: web` and Moonraker will
 > log warnings about unparsed config options. Service restart after updates is handled
 > automatically by a systemd path unit installed during setup.
 
@@ -1172,30 +586,18 @@ sudo systemctl restart moonraker
 
 ### Using Install Script (Recommended)
 
-The install script with `--uninstall` removes HelixScreen and **restores your previous UI** (GuppyScreen, KlipperScreen, etc.):
+The install script with `--uninstall` removes HelixScreen and **restores your previous UI** (KlipperScreen, the stock printer screen, etc.):
 
-**Raspberry Pi:**
 ```bash
-curl -sSL https://raw.githubusercontent.com/prestonbrown/helixscreen/main/scripts/install.sh | sh -s -- --uninstall
+curl -sSL https://releases.helixscreen.org/install.sh | sh -s -- --uninstall
 ```
 
-**Creality K1** (use the bundled install.sh):
-```bash
-/usr/data/helixscreen/install.sh --uninstall
-```
-
-**Flashforge Adventurer 5M** (use the bundled install.sh):
-```bash
-# Forge-X:
-/opt/helixscreen/install.sh --uninstall
-# Klipper Mod:
-/root/printer_software/helixscreen/install.sh --uninstall
-```
+Platform-specific details are in your printer's install guide: the bundled installer's location on printers without HTTPS fetch tools, manual revert steps, what gets restored on each firmware.
 
 ### Manual Uninstall
 
 <details>
-<summary>MainsailOS</summary>
+<summary>Generic Linux (systemd)</summary>
 
 ```bash
 # Stop and disable service
@@ -1213,82 +615,14 @@ sudo rm -rf /opt/helixscreen
 ```
 </details>
 
-<details>
-<summary>AD5M Forge-X</summary>
-
-```bash
-# Stop and remove service
-/etc/init.d/S90helixscreen stop
-rm /etc/init.d/S90helixscreen
-
-# Remove files
-rm -rf /opt/helixscreen
-
-# Re-enable GuppyScreen
-chmod +x /opt/config/mod/.root/S80guppyscreen 2>/dev/null || true
-chmod +x /opt/config/mod/.root/S35tslib 2>/dev/null || true
-
-# Restore stock Flashforge UI in auto_run.sh (if it was disabled)
-sed -i 's|^# Disabled by HelixScreen: /opt/PROGRAM/ffstartup-arm|/opt/PROGRAM/ffstartup-arm|' /opt/auto_run.sh 2>/dev/null || true
-
-# Remove HelixScreen patch from screen.sh (restores backlight control)
-# The automated uninstaller handles this; for manual removal, edit:
-# /opt/config/mod/.shell/screen.sh and remove the helixscreen_active check
-
-# Reboot to restore GuppyScreen
-reboot
-```
-
-> **Note:** The automated uninstaller (`install.sh --uninstall`) handles all ForgeX restoration automatically, including unpatching screen.sh.
-</details>
-
-<details>
-<summary>AD5M Klipper Mod</summary>
-
-```bash
-# Stop and remove service
-/etc/init.d/S80helixscreen stop
-rm /etc/init.d/S80helixscreen
-
-# Remove files
-rm -rf /root/printer_software/helixscreen
-
-# Re-enable KlipperScreen
-chmod +x /etc/init.d/S80klipperscreen 2>/dev/null || true
-
-# Reboot to restore KlipperScreen
-reboot
-```
-</details>
-
-<details>
-<summary>K1/Simple AF</summary>
-
-```bash
-# Stop and remove service
-/etc/init.d/S99helixscreen stop
-rm /etc/init.d/S99helixscreen
-
-# Remove files
-rm -rf /usr/data/helixscreen
-
-# Re-enable GuppyScreen
-chmod +x /etc/init.d/S99guppyscreen 2>/dev/null || true
-
-# Reboot to restore GuppyScreen
-reboot
-```
-</details>
-
 ---
 
 ## Getting Help
 
 ### Check Logs First
 
-Most issues are diagnosed from the logs:
+Most issues are diagnosed from the logs. On systemd hosts (Raspberry Pi, BTT, x86, Sonic Pad):
 
-**MainsailOS (systemd):**
 ```bash
 # View recent logs
 sudo journalctl -u helixscreen -n 100
@@ -1300,25 +634,18 @@ sudo journalctl -u helixscreen -f
 sudo journalctl -u helixscreen -p err
 ```
 
-**AD5M / K1 / K2 / AD5X / CC1 / Snapmaker U1 (SysV init):**
+If the install itself failed or did something odd, read the install log first: `~/printer_data/logs/helixscreen-install.log` (the failure message prints the exact path as `Full log:`). Attach it to a bug report.
 
-There are two log streams; collect both when reporting an issue.
+Log locations for the other platforms (K1, K2, AD5M, AD5X, CC1, Snapmaker U1) are in your printer's install guide: each has a launcher/crash log plus a platform-specific app log.
 
-```bash
-# 1) Structured app log — where to look depends on your platform's syslog:
-#    - BusyBox in-memory syslog (K1, K2, CC1, AD5X):
-logread | grep helix-screen | tail -100
-#    - Persistent /var/log/messages (AD5M, Snapmaker U1):
-grep helix-screen /var/log/messages | tail -100
+### Capturing Logs for a Bug Report
 
-# 2) Launcher / supervisor capture (startup, crash output) — path varies:
-#    - AD5M:           /opt/helixscreen/logs/launcher.log
-#    - K1 / K1C / K2 / AD5X: /usr/data/helixscreen/logs/launcher.log
-#    - Snapmaker U1:   /var/log/helixscreen/launcher.log
-#    - CC1 (COSMOS):   /user-resource/helixscreen/logs/launcher.log
-#    - Pre-v0.99.62 installs (legacy): /tmp/helixscreen.log
-tail -100 <path>
-```
+A problem reproduced at a higher log level gives far more to work with:
+
+1. Set **Settings > System > Log Level** to **Debug**, or **Trace** for touch or display issues (Trace is very verbose). It takes effect immediately; no restart is needed.
+2. Perform the action that misbehaves.
+3. Send a debug bundle: **Settings > Help & About > Upload Debug Bundle** collects the logs (including everything since startup), strips personal data, and gives you a share code to include in your report. See [Debug Bundles](guide/settings/help-about.md#upload-debug-bundle).
+4. Turn the log level back to where it was. Debug and trace generate a lot of output; journald rotates and caps itself on systemd hosts, but the printer-hosted platforms write plain log files that nothing rotates.
 
 ### Common Issues
 
@@ -1331,72 +658,13 @@ See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for solutions to:
 ### Still Stuck?
 
 1. Ask in the [HelixScreen Discord](https://discord.gg/RZCT2StKhr) for quick help
-2. Check [GitHub Issues](https://github.com/prestonbrown/helixscreen/issues) for known problems
-3. Open a new issue with:
-   - Your hardware (Pi model, display type)
-   - HelixScreen version
-   - Relevant log output
-   - Steps to reproduce
+1. Check [GitHub Issues](https://github.com/prestonbrown/helixscreen/issues) for known problems
+1. Open a new issue with:
+    1. Your hardware (Pi model, display type)
+    1. HelixScreen version
+    1. Relevant log output
+    1. Steps to reproduce
 
 ---
 
-## Platform-Specific Notes
-
-### Raspberry Pi 5
-
-Pi 5 has multiple DRM devices. HelixScreen auto-detects the correct one, but if you have issues:
-
-```json
-// settings.json
-{
-  "display": {
-    "drm_device": "/dev/dri/card1"
-  }
-}
-```
-
-Common Pi 5 DRM devices:
-- `/dev/dri/card0` - v3d (3D acceleration only, no display)
-- `/dev/dri/card1` - DSI touchscreen (if connected)
-- `/dev/dri/card2` - HDMI output
-
-### Camera Streaming Performance
-
-If you use a webcam with HelixScreen, install `libturbojpeg0` for faster camera feed rendering:
-
-```bash
-sudo apt install libturbojpeg0
-```
-
-The installer attempts this automatically, but it's listed here in case your Pi was offline during installation. HelixScreen detects and uses it automatically for 3-5x faster JPEG decoding via hardware SIMD acceleration.
-
-### Low Memory Systems (Pi 3, Pi Zero 2 W)
-
-HelixScreen is optimized for low memory, but if you experience issues:
-
-1. Disable other services that aren't needed
-2. Reduce Moonraker's cache size
-3. Consider a lighter Mainsail configuration
-
-### Flashforge Adventurer 5M Memory Constraints
-
-The AD5M has limited RAM (~108MB total, with only ~24MB free after Klipper, Moonraker, and screen UI). HelixScreen is built with static linking and memory optimization for this environment.
-
-**Measured memory comparison (VmRSS):**
-| Component | KlipperScreen | HelixScreen |
-|-----------|---------------|-------------|
-| Screen UI | ~50 MB (Python + X Server) | **~10 MB** (C++) |
-| **Total** | ~50 MB | **~10 MB** |
-
-On Klipper Mod systems, switching from KlipperScreen to HelixScreen frees approximately **40 MB** of RAM - a significant improvement on a memory-constrained device!
-
-> **Note:** The 10 MB footprint includes the full LVGL widget tree, draw buffers for UI elements (gradients, color pickers, AMS spool icons), and runtime state for all panels. Images are loaded on-demand, not pre-cached.
-
-If you experience memory issues:
-- Reduce print history retention in Moonraker
-- Avoid keeping many G-code files on the printer
-- Consider disabling the camera stream if not needed
-
----
-
-*Next: [User Guide](USER_GUIDE.md) - Learn how to use HelixScreen*
+*Next: [User Guide](USER_GUIDE.md) (learn how to use HelixScreen)*

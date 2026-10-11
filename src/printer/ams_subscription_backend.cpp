@@ -3,7 +3,10 @@
 
 #include "ams_subscription_backend.h"
 
-#include "filament_op_router.h"
+#include "lane_echo.h"
+#include "lane_legacy_migration.h"
+#include "lane_source_store.h"
+#include "lane_translation.h"
 #include "moonraker_error.h"
 #include "print_lifecycle_state.h"
 #include "printer_state.h"
@@ -12,6 +15,8 @@
 #include <utility>
 
 #include "hv/json.hpp"
+
+namespace helix {
 
 AmsSubscriptionBackend::AmsSubscriptionBackend(IMoonrakerAPI* api, helix::IMoonrakerClient* client)
     : api_(api), client_(client) {
@@ -89,6 +94,21 @@ AmsError AmsSubscriptionBackend::start() {
     return AmsErrorHelper::success();
 }
 
+SlotInfo AmsSubscriptionBackend::get_slot_info(int slot_index) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const SlotInfo* slot = slot_info_locked(slot_index);
+    return slot ? *slot : SlotInfo{};
+}
+
+void AmsSubscriptionBackend::handle_status_update(const nlohmann::json& notification) {
+    auto params = notification.find("params");
+    if (params == notification.end() || !params->is_array() || params->empty() ||
+        !(*params)[0].is_object()) {
+        return;
+    }
+    handle_status((*params)[0]);
+}
+
 void AmsSubscriptionBackend::stop() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!running_) {
@@ -100,12 +120,177 @@ void AmsSubscriptionBackend::stop() {
     spdlog::info("{} Backend stopped", backend_log_tag());
 }
 
+std::uint64_t AmsSubscriptionBackend::own_write_echo_sequence(int slot_index) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return own_write_echoes_.staged_sequence(slot_index);
+}
+
+void AmsSubscriptionBackend::abandon_own_write_echoes(int slot_index,
+                                                      std::uint64_t staged_sequence) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    own_write_echoes_.abandon(slot_index, staged_sequence);
+}
+
+void AmsSubscriptionBackend::clear_override_locked(int slot_index, SlotInfo* slot) {
+    // An unlink marker is not identity, so the clear keeps it on an otherwise
+    // empty record: dropping it would let firmware's stale id relink the lane.
+    const auto existing = overrides_.find(slot_index);
+    const int unlinked_spool_id =
+        existing != overrides_.end() ? existing->second.unlinked_spool_id : 0;
+    overrides_.erase(slot_index);
+    // The lane's own records go with it: a clear that reached only one store
+    // would leave resolve() still reporting the identity just removed.
+    helix::ams::reset_lane_to_machine_readings(lane_id(slot_index));
+    // The user just disowned the write, so what firmware repeats from here on
+    // is its own word again.
+    own_write_echoes_.abandon(slot_index);
+
+    if (slot) {
+        clear_override_fields(*slot);
+    }
+
+    if (unlinked_spool_id > 0) {
+        helix::ams::FilamentSlotOverride& marker = overrides_[slot_index];
+        marker.unlinked_spool_id = unlinked_spool_id;
+        if (override_store_) {
+            helix::ams::save_override_async(override_store_.get(), slot_index, marker,
+                                            backend_log_tag(), "unlink");
+        }
+    } else if (override_store_) {
+        // Capture by value: clear_async's Moonraker callback can fire after
+        // the backend itself is gone.
+        const std::string tag = backend_log_tag();
+        override_store_->clear_async(slot_index, [tag, slot_index](bool ok, std::string err) {
+            if (!ok) {
+                spdlog::warn("{} clear_async failed for slot {}: {}", tag, slot_index, err);
+            }
+        });
+    }
+}
+
+void AmsSubscriptionBackend::clear_override_fields(SlotInfo& slot) const {
+    slot.brand.clear();
+    slot.clear_spoolman_link();
+    slot.remaining_weight_g = -1.0f;
+    slot.total_weight_g = -1.0f;
+    slot.color_name.clear();
+    slot.catalog_id.clear();
+    slot.product_name.clear();
+}
+
 void AmsSubscriptionBackend::release_subscriptions() {
     subscription_.release();
 }
 
 bool AmsSubscriptionBackend::is_running() const {
     return running_;
+}
+
+void AmsSubscriptionBackend::request_resync() {
+    // A lane whose firmware states its own identity already has a producer on
+    // the vendor-cache slot, and a second one there races it. With nothing to
+    // file, the round-trip has no reader, so it is not made at all.
+    if (firmware_publishes_lane_identity()) {
+        return;
+    }
+    auto* store = lane_record_store();
+    if (!store) {
+        // The persisted record is this backend's identity producer (firmware
+        // states none of its own) and there is no store to read it from, so
+        // the resync cannot be issued. Only a started backend with an
+        // attached API owes a store: a store is built in on_started(), and
+        // one with no API never builds it, so a pre-start or API-less resync
+        // is expected to find nothing and stays quiet.
+        if (running_ && api_) {
+            spdlog::warn("{} request_resync(): no lane-record store to re-read; resync skipped",
+                         backend_log_tag());
+        }
+        return;
+    }
+    // The record map is keyed by slot index, so the lambda needs this
+    // backend's block to name a lane. Carried by value: the deferred callback
+    // has no claim on `this` by the time it runs, and backend_index() is
+    // stamped by registration, which every resync call site is downstream of.
+    // `self` rides the reload callback un-dereferenced; it is reached only
+    // inside the token-guarded defer, which skips a dead owner.
+    const int block = backend_index();
+    auto token = lifetime_.token();
+    AmsSubscriptionBackend* self = this;
+    store->reload_async([token, block,
+                         self](std::unordered_map<int, helix::ams::LaneDataRecord> records) {
+        token.defer(
+            "AmsSubscriptionBackend::resync_lane_records",
+            [self, block, records = std::move(records)]() {
+                for (const auto& [slot, entry] : records) {
+                    // Only what the namespace merely remembers is
+                    // re-filed. A record naming a spool is the
+                    // server's statement and one declaring a colour or material
+                    // is a person's; re-filing either would forge a
+                    // declaration out of a re-read, which is the
+                    // confusion the source model exists to end.
+                    //
+                    // Remembered rather than VendorCache because this
+                    // re-reads our own store, not a firmware frame.
+                    helix::ams::Observation obs = helix::ams::declared_from_record(entry.record);
+                    if (obs.source != helix::ams::ObservationSource::Remembered) {
+                        continue;
+                    }
+                    // A co-authored namespace carries the mirror of
+                    // this backend's own write, so the re-read
+                    // strips what it can see is a standing
+                    // declaration. It is a stored record, not a
+                    // live producer: a value that differs from the
+                    // declaration is staleness in the store, not
+                    // firmware demonstrating it can say something
+                    // else, so it releases nothing - withholding
+                    // here would let one stale record unhook the
+                    // guard while the live firmware is still
+                    // echoing the write.
+                    //
+                    // The strip runs first either way: firmware
+                    // mirrors a write back with none of our
+                    // authorship keys, so a foreign-looking record
+                    // can still be that echo. What the guard strips
+                    // is our write whatever the record reads as;
+                    // what survives is not explained by any write
+                    // of ours. A slot with the guard still standing
+                    // has a write of ours unconfirmed in flight,
+                    // which is newer than anything a stored record
+                    // can say about the lane: there the strip alone
+                    // decides what files, and the promotion below
+                    // is not this record's to judge.
+                    bool write_in_flight = false;
+                    {
+                        std::lock_guard<std::mutex> lock(self->mutex_);
+                        self->own_write_echoes_.strip_standing(slot, obs);
+                        write_in_flight = self->own_write_echoes_.standing(slot);
+                    }
+                    const helix::ams::LaneId lane = helix::ams::lane_id_for(block, slot);
+                    // A record another tool wrote is the newest
+                    // statement on the lane when it displaces what
+                    // stands there (prestonbrown/helixscreen#1632):
+                    // it files on the user's rung, where it
+                    // resolves over firmware's cache and yields to
+                    // whatever edit lands next. A record the
+                    // backend's own firmware plugin wrote is a
+                    // reading, not an edit, and keeps filing as
+                    // remembered; anything else does too, below
+                    // whatever a person said.
+                    if (helix::ams::file_outside_edit_if_newer(lane, entry, obs, write_in_flight)) {
+                        continue;
+                    }
+                    helix::ams::ingest(lane, obs);
+                }
+            });
+    });
+}
+
+void AmsSubscriptionBackend::repaint_slot_from_lane(int slot_index) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (SlotInfo* slot = cached_slot_locked(slot_index)) {
+        prepare_lane_repaint_locked(slot_index, *slot);
+        apply_resolved_lane(*slot, slot_index);
+    }
 }
 
 void AmsSubscriptionBackend::set_event_callback(EventCallback callback) {
@@ -126,7 +311,7 @@ void AmsSubscriptionBackend::emit_event(const std::string& event, const std::str
 
 AmsAction AmsSubscriptionBackend::get_current_action() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return system_info_.action;
+    return published_action_locked();
 }
 
 int AmsSubscriptionBackend::get_current_tool() const {
@@ -176,10 +361,8 @@ AmsError AmsSubscriptionBackend::claim_filament_op(FilamentOp op, bool check_sta
     case FilamentOp::SelectSlot:
     case FilamentOp::ChangeTool:
     case FilamentOp::Park:
-        // Park is carriage motion like a select/tool change, and the closest
-        // name the busy refusal can carry. Left off this switch it fell to the
-        // initialiser above, and a contender was refused with "Loading in
-        // progress" for a load that was never started.
+        // Park is carriage motion like a select/tool change, and SELECTING is
+        // the closest name the busy refusal can carry for it.
         pending = AmsAction::SELECTING;
         break;
     }
@@ -214,7 +397,8 @@ void AmsSubscriptionBackend::release_filament_op_claim() {
     filament_op_claimed_action_ = AmsAction::IDLE;
 }
 
-AmsError AmsSubscriptionBackend::run_filament_op(FilamentOp op, int arg) {
+AmsError AmsSubscriptionBackend::run_filament_op(FilamentOp op, int arg,
+                                                 const std::vector<int>* batch) {
     // Order of refusals is load-bearing and matches what check_preconditions()
     // has always produced: not-started, then busy, then print-active.
     if (auto e = claim_filament_op(op, filament_op_gate() == FilamentOpGate::Standard);
@@ -241,6 +425,9 @@ AmsError AmsSubscriptionBackend::run_filament_op(FilamentOp op, int arg) {
     // it here would deadlock on the first two and serialize the network on the
     // third. The claim is a flag, not a lock: a contending op is refused
     // immediately rather than blocked behind the send.
+    if (batch != nullptr) {
+        return do_filament_batch(*batch, op == FilamentOp::Load);
+    }
     switch (op) {
     case FilamentOp::Load:
         return do_load_filament(arg);
@@ -277,6 +464,14 @@ AmsError AmsSubscriptionBackend::park_toolhead() {
     return run_filament_op(FilamentOp::Park, -1);
 }
 
+AmsError AmsSubscriptionBackend::load_filament_batch(const std::vector<int>& slots) {
+    return run_filament_op(FilamentOp::Load, -1, &slots);
+}
+
+AmsError AmsSubscriptionBackend::unload_filament_batch(const std::vector<int>& slots) {
+    return run_filament_op(FilamentOp::Unload, -1, &slots);
+}
+
 AmsError AmsSubscriptionBackend::state_preconditions_unlocked() const {
     if (!running_) {
         return AmsErrorHelper::not_connected(std::string(backend_log_tag()) +
@@ -286,6 +481,22 @@ AmsError AmsSubscriptionBackend::state_preconditions_unlocked() const {
         return AmsErrorHelper::busy(ams_action_to_string(system_info_.action));
     }
     return AmsErrorHelper::success();
+}
+
+AmsError AmsSubscriptionBackend::validate_slot_index_locked(int slot_index) const {
+    const int bound = slot_index_bound_locked();
+    if (bound <= 0) {
+        return AmsErrorHelper::no_slots_discovered(lane_noun());
+    }
+    if (slot_index < 0 || slot_index >= bound || system_info_.slot_absent(slot_index)) {
+        return AmsErrorHelper::invalid_slot(lane_noun(), slot_index, bound - 1);
+    }
+    return AmsErrorHelper::success();
+}
+
+AmsError AmsSubscriptionBackend::validate_slot_index(int slot_index) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return validate_slot_index_locked(slot_index);
 }
 
 AmsError AmsSubscriptionBackend::check_preconditions(bool requires_toolhead_motion) const {
@@ -303,51 +514,36 @@ AmsError AmsSubscriptionBackend::check_preconditions(bool requires_toolhead_moti
 }
 
 AmsError AmsSubscriptionBackend::refuse_if_printing() const {
-    // Refuse toolhead-motion filament ops while a print OWNS the toolhead.
+    // The AmsError face of print_blocks_filament_op(), which states the rule and
+    // why each lifecycle answers as it does. Only the parts specific to being
+    // the BACKEND end of it live here.
     //
-    // PRINTING is always refused: the nozzle is laying plastic and any filament
-    // move collides with the job.
-    //
-    // PAUSED splits on filament_ops_self_home(). Pause-then-swap is the runout /
-    // colour-change recovery workflow — pause_resume has saved the gcode state,
-    // the job resumes where it left off, and this is exactly what a user does
-    // from Mainsail. Refusing it universally made HelixScreen the only surface
-    // that could not perform the recovery Klipper had just asked for. What still
-    // has to be refused is a backend whose firmware macro homes ITSELF: on the
-    // loadcell-Z AD5X, `_IFS_REMOVE_CURRENT_PRUTOK` runs a buried `_G28` that
-    // probes the nozzle down into the part, tripping ZMOD's ZCONTROL_AUTO into a
-    // Klipper shutdown (bundle XWPBR2DX, commit 329e731e9). Layer 1's gcode-send
-    // guard never sees that `_G28`, so it must be stopped here, before the op.
-    //
-    // Relaxing PAUSED does NOT widen what homing can reach the printer:
-    // helix::api::reject_homing_during_active_print() still refuses every
-    // app-emitted G28 while PRINTING or PAUSED, and ensure_homed_then() only
-    // emits one when toolhead.homed_axes lacks "xyz" — which a paused print,
-    // homed by construction, never does.
-    //
-    // PREPARING is refused like PRINTING. Asked of the raw print_stats.state
-    // this window was invisible — a host-side pre-start block reads STANDBY (or
-    // the previous job's terminal state) for its whole duration — so a filament
-    // op was accepted while the pre-start G-code homed and probed. Note that
-    // Layer 1 deliberately does NOT extend to Preparing: it would refuse the
-    // app's own pre-start block, which is itself sent through execute_gcode()
-    // and may contain a G28. That is why this guard has to cover the window.
+    // This layer has to cover the window Layer 1 cannot. Layer 1
+    // (helix::api::reject_homing_during_active_print) refuses every app-emitted
+    // G28 while PRINTING or PAUSED, but it cannot see a `_G28` buried inside a
+    // firmware macro, which is what filament_ops_self_home() reports and why a
+    // self-homing backend is refused even while paused (bundle XWPBR2DX). Layer 1
+    // also deliberately stops short of PREPARING — it would refuse the app's own
+    // pre-start block, sent through execute_gcode() and free to contain a G28 —
+    // so PREPARING has to be caught here or nowhere.
     //
     // api_ can be null in unit tests / cold-boot; when it is, print state is
     // unknown and we do not block (mirrors ensure_homed_then's null-client path).
     if (!api_) {
         return AmsErrorHelper::success();
     }
-    const auto lifecycle = api_->printer_state().get_print_lifecycle();
-    if (!job_holds_machine(lifecycle)) {
-        return AmsErrorHelper::success();
-    }
+    const auto lifecycle = api_->printer_state().print_state().get_print_lifecycle();
     const bool is_paused = (lifecycle == PrintState::Paused);
     const bool self_homes = filament_ops_self_home();
-    if (is_paused && !self_homes) {
-        spdlog::info("{} Allowing filament operation on a PAUSED print "
-                     "(backend does not self-home; Layer 1 still blocks any G28)",
-                     backend_log_tag());
+    // print_blocks_filament_op() is the rule, shared with every surface that
+    // greys a filament-op button. This function's job is to map its answer onto
+    // an AmsError, not to decide it a second time.
+    if (!print_blocks_filament_op(lifecycle, self_homes)) {
+        if (is_paused) {
+            spdlog::info("{} Allowing filament operation on a PAUSED print "
+                         "(backend does not self-home; Layer 1 still blocks any G28)",
+                         backend_log_tag());
+        }
         return AmsErrorHelper::success();
     }
     spdlog::warn("{} Refusing filament operation while a print is active (lifecycle={}, "
@@ -356,15 +552,6 @@ AmsError AmsSubscriptionBackend::refuse_if_printing() const {
     // A non-self-homing backend that reaches here is PRINTING, and pausing is a
     // recovery it can actually offer — say so instead of "finish or cancel".
     return AmsErrorHelper::print_active(is_paused, /*pause_allows_ops=*/!self_homes);
-}
-
-void AmsSubscriptionBackend::on_home_confirmation_declined() {
-    spdlog::info("{} User declined the pre-op home; operation cancelled", backend_log_tag());
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        system_info_.action = AmsAction::IDLE;
-    }
-    emit_event(EVENT_STATE_CHANGED);
 }
 
 bool AmsSubscriptionBackend::toolhead_homed() const {
@@ -377,130 +564,77 @@ bool AmsSubscriptionBackend::toolhead_homed() const {
     return helix::toolhead_is_homed(api_->printer_state());
 }
 
-AmsError
-AmsSubscriptionBackend::ensure_homed_then(std::string gcode, std::function<void()> on_complete,
-                                          std::function<void(const MoonrakerError&)> on_error,
-                                          uint32_t timeout_ms, bool skip_homing, bool silent,
-                                          std::optional<bool> caller_surfaces_errors) {
+AmsError AmsSubscriptionBackend::ensure_homed_then(
+    std::string gcode, std::function<void()> on_complete,
+    std::function<void(const MoonrakerError&)> on_error, uint32_t timeout_ms, bool skip_homing,
+    bool silent, std::optional<bool> caller_surfaces_errors,
+    std::function<void(const MoonrakerError&)> on_predispatch_error) {
     // The homed answer comes from the live homed_axes subject, not an RPC:
     // toolhead is in the standing objects.subscribe set, so querying it again
     // was a redundant round trip. skip_homing short-circuits the check
     // entirely -- toolhead_homed() is never called -- for firmware macros that
     // home themselves (CFS Fork variant). delegates_homing_to_printer()
     // short-circuits the same way when the printer-side system homes (AFC
-    // auto_home) — neither prompt nor G28.
-    //
-    // home_preconfirmed_ is intentionally NOT consulted here: it must never
-    // substitute for the toolhead_homed() answer (that would skip the G28
-    // itself, changing what the printer does), only for the PROMPT below. See
-    // the std::exchange() consume further down, which only runs once this
-    // branch has already proven the toolhead genuinely needs a G28.
+    // auto_home) — no G28 from us.
     if (skip_homing || delegates_homing_to_printer() || toolhead_homed()) {
         return dispatch_payload(std::move(gcode), std::move(on_complete), std::move(on_error),
                                 timeout_ms, silent, caller_surfaces_errors);
     }
 
-    auto gcode_copy = std::move(gcode);
+    // An operation that needs a home just homes first, with no confirmation:
+    // asking for the op is consent to the home it requires.
+    spdlog::info("{} Sending G28 before operation", backend_log_tag());
+    // A failure here happens BEFORE the payload ships, so it routes to
+    // on_predispatch_error when the caller supplied one.
+    auto pre_err = on_predispatch_error ? on_predispatch_error : on_error;
 
-    // The confirmation always resolves through on_confirm/on_cancel below,
-    // never back through this function's return value: with a real prompter
-    // installed the answer arrives on a later main-thread tick (a modal
-    // button tap), so there is nothing left here to return synchronously.
-    // request_home_confirmation() is what makes on_confirm fire immediately
-    // and synchronously when no prompter is installed -- the default every
-    // pre-existing test relies on -- so the two branches below still run in
-    // this same call for all of them.
-    auto token = lifetime_.token();
-    auto send_g28_then_dispatch = [this, token, gcode_copy, on_complete, on_error, timeout_ms,
-                                   silent, caller_surfaces_errors]() {
-        // Runs either inline in this call (no prompter, or a synchronous
-        // test prompter) or later from an LVGL confirm-button event
-        // callback. Both cases are on the main thread -- the modal only
-        // ever fires its callbacks from lv_timer_handler() -- so this is
-        // not the bg-thread TOCTOU the bare expired()-then-`this` pattern
-        // usually flags.
-        if (token.expired()) { // L081_OK: main-thread only, see comment above
-            return;
+    // No API: emit the G28 through the VIRTUAL execute_gcode rather than
+    // skipping it. api_ is null only in fixtures, and they override the
+    // virtual to capture - routing around it here would make the unhomed
+    // branch untestable and silently drop the G28 from the recorded sequence.
+    // The real path below cannot use the virtual because it needs an error
+    // callback and HOMING_TIMEOUT_MS, which the virtual forms do not take.
+    // Fixtures are synchronous (no real RPC), so the AmsError the virtual
+    // returns IS the only failure signal available here -- there is no async
+    // MoonrakerError to forward, so a failure is translated into one.
+    if (!api_) {
+        AmsError g28_result = execute_gcode("G28");
+        if (!g28_result.success()) {
+            MoonrakerError synthetic;
+            synthetic.type = MoonrakerErrorType::UNKNOWN;
+            synthetic.message = g28_result.technical_msg;
+            handle_dispatch_error(synthetic, pre_err);
+            return AmsErrorHelper::success();
         }
-        spdlog::info("{} Sending G28 before operation", backend_log_tag());
-
-        // No API: emit the G28 through the VIRTUAL execute_gcode rather
-        // than skipping it. api_ is null only in fixtures, and they
-        // override the virtual to capture - routing around it here would
-        // make the unhomed branch untestable and silently drop the G28
-        // from the recorded sequence. The real path below cannot use the
-        // virtual because it needs an error callback and
-        // HOMING_TIMEOUT_MS, which the virtual forms do not take.
-        // Fixtures are synchronous (no real RPC), so the AmsError the
-        // virtual returns IS the only failure signal available here --
-        // there is no async MoonrakerError to forward, so a failure is
-        // translated into one.
-        if (!api_) {
-            AmsError g28_result = execute_gcode("G28");
-            if (!g28_result.success()) {
-                MoonrakerError synthetic;
-                synthetic.type = MoonrakerErrorType::UNKNOWN;
-                synthetic.message = g28_result.technical_msg;
-                handle_dispatch_error(synthetic, on_error);
-                return;
-            }
-            dispatch_payload(gcode_copy, on_complete, on_error, timeout_ms, silent,
-                             caller_surfaces_errors);
-            return;
-        }
-
-        // IMoonrakerAPI::execute_gcode() returns void (it's inherently
-        // async); dispatch_payload()'s result on the success leg mirrors
-        // the pre-refactor behavior of the query path this replaces (it
-        // never returned the send_jsonrpc() call either).
-        api_->execute_gcode(
-            "G28",
-            [this, token, gcode_copy, on_complete, on_error, timeout_ms, silent,
-             caller_surfaces_errors]() {
-                // L081 Mechanism C: the ack lands on a bg thread and
-                // dispatch_payload touches api_/members. Marshal to main.
-                token.defer("AmsSubscriptionBackend::ensure_homed_then_g28_success",
-                            [this, gcode_copy, on_complete, on_error, timeout_ms, silent,
-                             caller_surfaces_errors]() {
-                                dispatch_payload(gcode_copy, on_complete, on_error, timeout_ms,
-                                                 silent, caller_surfaces_errors);
-                            });
-            },
-            [this, token, on_error](const MoonrakerError& err) {
-                token.defer("AmsSubscriptionBackend::ensure_homed_then_g28_error",
-                            [this, err, on_error]() { handle_dispatch_error(err, on_error); });
-            },
-            IMoonrakerAPI::HOMING_TIMEOUT_MS, /*silent=*/false, /*on_queued=*/nullptr,
-            // The G28 error leg lands in handle_dispatch_error(), which without
-            // a caller on_error only logs and resets the action to IDLE. Its
-            // ownership answer is the caller's, not this wrapper's.
-            caller_surfaces_errors.value_or(on_error != nullptr));
-    };
-
-    // Single-shot consume: a UI surface that already asked "home printer
-    // first?" before its own preheat (FilamentPanel / AmsOperationSidebar)
-    // arms this so we don't ask AGAIN here -- but the toolhead is still
-    // genuinely unhomed at this point (nothing sends G28 early), so the G28
-    // itself still fires, unprompted, exactly where it always has. Consuming
-    // AFTER the toolhead_homed() branch above (never reached via short-circuit
-    // when already homed) is what keeps a later, genuinely-unprompted dispatch
-    // asking normally.
-    if (std::exchange(home_preconfirmed_, false)) {
-        spdlog::info("{} Not homed, but pre-confirmed by an earlier prompt -- sending G28 without "
-                     "asking again",
-                     backend_log_tag());
-        send_g28_then_dispatch();
+        dispatch_payload(std::move(gcode), std::move(on_complete), std::move(on_error), timeout_ms,
+                         silent, caller_surfaces_errors);
         return AmsErrorHelper::success();
     }
 
-    spdlog::info("{} Not homed -- asking before sending G28", backend_log_tag());
-    helix::ui::request_home_confirmation(send_g28_then_dispatch, [this, token]() {
-        // Same main-thread-only reasoning as send_g28_then_dispatch above.
-        if (token.expired()) { // L081_OK: main-thread only, see comment above
-            return;
-        }
-        on_home_confirmation_declined();
-    });
+    auto token = lifetime_.token();
+    api_->execute_gcode(
+        "G28",
+        [this, token, gcode = std::move(gcode), on_complete, on_error, timeout_ms, silent,
+         caller_surfaces_errors]() {
+            // L081 Mechanism C: the ack lands on a bg thread and dispatch_payload
+            // touches api_/members. Marshal to main.
+            token.defer(
+                "AmsSubscriptionBackend::ensure_homed_then_g28_success",
+                [this, gcode, on_complete, on_error, timeout_ms, silent, caller_surfaces_errors]() {
+                    dispatch_payload(gcode, on_complete, on_error, timeout_ms, silent,
+                                     caller_surfaces_errors);
+                });
+        },
+        [this, token, pre_err](const MoonrakerError& err) {
+            token.defer("AmsSubscriptionBackend::ensure_homed_then_g28_error",
+                        [this, err, pre_err]() { handle_dispatch_error(err, pre_err); });
+        },
+        IMoonrakerAPI::HOMING_TIMEOUT_MS, /*silent=*/false, /*on_queued=*/nullptr,
+        // The G28 error leg lands in handle_dispatch_error(), which without a
+        // caller callback only logs and resets the action to IDLE. Its ownership
+        // answer is the caller's, not this wrapper's — and on this leg the
+        // caller's callback is pre_err.
+        caller_surfaces_errors.value_or(pre_err != nullptr));
 
     return AmsErrorHelper::success();
 }
@@ -517,6 +651,15 @@ void AmsSubscriptionBackend::handle_dispatch_error(
     spdlog::error("{} G-code failed: {}", backend_log_tag(), err.message);
     std::lock_guard<std::mutex> lock(mutex_);
     system_info_.action = AmsAction::IDLE;
+}
+
+AmsError AmsSubscriptionBackend::refuse_dispatch_no_api(
+    const std::function<void(const MoonrakerError&)>& on_error) {
+    MoonrakerError synthetic;
+    synthetic.type = MoonrakerErrorType::CONNECTION_LOST;
+    synthetic.message = "IMoonrakerAPI not available";
+    handle_dispatch_error(synthetic, on_error);
+    return AmsErrorHelper::not_connected("IMoonrakerAPI not available");
 }
 
 AmsError
@@ -542,11 +685,7 @@ AmsSubscriptionBackend::dispatch_payload(std::string gcode, std::function<void()
     // directly, the same way AmsBackendCfs::dispatch_action_script used to
     // before this method existed to replace its fork.
     if (!api_) {
-        MoonrakerError synthetic;
-        synthetic.type = MoonrakerErrorType::CONNECTION_LOST;
-        synthetic.message = "IMoonrakerAPI not available";
-        handle_dispatch_error(synthetic, on_error);
-        return AmsErrorHelper::not_connected("IMoonrakerAPI not available");
+        return refuse_dispatch_no_api(on_error);
     }
 
     const char* tag = backend_log_tag();
@@ -562,11 +701,18 @@ AmsSubscriptionBackend::dispatch_payload(std::string gcode, std::function<void()
 
     api_->execute_gcode(
         gcode,
-        [tag, on_complete = std::move(on_complete)]() {
+        [tag, token, on_complete = std::move(on_complete)]() {
             spdlog::debug("{} G-code executed successfully", tag);
-            if (on_complete) {
-                on_complete();
+            if (!on_complete) {
+                return;
             }
+            // The answer lands on the libhv response thread, while the status
+            // frames that arrived before it are still queued for main. A
+            // completion that judges state (CFS reads the toolhead switch) must
+            // run behind them, on main, or it reads values those frames are
+            // about to replace.
+            token.defer("AmsSubscriptionBackend::dispatch_payload_complete",
+                        [on_complete]() { on_complete(); });
         },
         [this, token, on_error](const MoonrakerError& err) {
             // L081 Mechanism C: this lands on the libhv response thread and
@@ -656,3 +802,53 @@ AmsError AmsSubscriptionBackend::execute_gcode(const std::string& gcode,
         /*caller_surfaces_errors=*/false);
     return AmsErrorHelper::success();
 }
+
+AmsError AmsSubscriptionBackend::execute_gcode(const std::string& gcode,
+                                               std::function<void()> on_complete,
+                                               std::function<void(const MoonrakerError&)> on_error,
+                                               bool silent) {
+    if (!api_) {
+        // The send never went out, but on_error still owes the caller its
+        // unwind: an optimistic AmsAction set before this dispatch stays set
+        // forever if only the return value reports the refusal. Callers may
+        // hold mutex_ here, so this leg touches no backend state itself.
+        if (on_error) {
+            MoonrakerError synthetic;
+            synthetic.type = MoonrakerErrorType::CONNECTION_LOST;
+            synthetic.message = "IMoonrakerAPI not available";
+            on_error(synthetic);
+        }
+        return AmsErrorHelper::not_connected("IMoonrakerAPI not available");
+    }
+    const char* tag = backend_log_tag();
+    spdlog::info("{} Executing G-code: {}", tag, gcode);
+    api_->execute_gcode(
+        gcode,
+        [tag, on_complete = std::move(on_complete)]() {
+            spdlog::debug("{} G-code executed successfully", tag);
+            if (on_complete) {
+                on_complete();
+            }
+        },
+        [tag, gcode, on_error = std::move(on_error)](const MoonrakerError& err) {
+            if (err.type == MoonrakerErrorType::TIMEOUT) {
+                spdlog::warn("{} G-code response timed out (may still be running): {}", tag, gcode);
+            } else if (err.type == MoonrakerErrorType::NOT_READY) {
+                spdlog::debug("{} G-code skipped (Klipper halted): {}", tag, gcode);
+            } else {
+                spdlog::error("{} G-code failed: {} - {}", tag, gcode, err.message);
+            }
+            if (on_error) {
+                on_error(err);
+            }
+        },
+        IMoonrakerAPI::AMS_OPERATION_TIMEOUT_MS, silent, /*on_queued=*/nullptr,
+        // caller_surfaces_errors=false: on_error unwinds caller state but does
+        // not put anything on screen, so declaring otherwise would silence
+        // GcodeErrorRouter and a real macro rejection would reach nobody.
+        // See include/rpc_error_policy.h.
+        /*caller_surfaces_errors=*/false);
+    return AmsErrorHelper::success();
+}
+
+} // namespace helix

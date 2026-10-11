@@ -15,9 +15,12 @@
  * - Missing sensor handling
  */
 
+#include "../test_helpers/filament_sensor_manager_test_access.h"
+#include "../test_helpers/update_queue_test_access.h"
 #include "../ui_test_utils.h"
 #include "filament_sensor_manager.h"
 #include "filament_sensor_types.h"
+#include "probe_sensor_manager.h"
 
 #include <spdlog/spdlog.h>
 
@@ -26,52 +29,6 @@
 #include "../catch_amalgamated.hpp"
 
 using json = nlohmann::json;
-
-// Test access helper — avoids polluting production API with test methods
-namespace helix {
-class FilamentSensorManagerTestAccess {
-  public:
-    static void reset(FilamentSensorManager& mgr) {
-        std::lock_guard<std::recursive_mutex> lock(mgr.mutex_);
-
-        // Clear all sensors and states
-        mgr.sensors_.clear();
-        mgr.states_.clear();
-
-        // Reset master enabled
-        mgr.master_enabled_ = true;
-
-        // Clear callback
-        mgr.state_change_callback_ = nullptr;
-
-        // Enable sync mode for testing (avoids lv_async_call)
-        mgr.sync_mode_ = true;
-
-        // Reset initial status tracking (ensures first update_from_status triggers subjects)
-        mgr.initial_status_received_ = false;
-
-        // Reset startup time to 10 seconds in the past so the 2-second grace period
-        // is already expired in tests (avoids flaky timing-dependent failures)
-        mgr.startup_time_ = std::chrono::steady_clock::now() - std::chrono::seconds(10);
-
-        // Reset subjects if initialized
-        if (mgr.subjects_initialized_) {
-            lv_subject_set_int(&mgr.runout_detected_, -1);
-            lv_subject_set_int(&mgr.toolhead_detected_, -1);
-            lv_subject_set_int(&mgr.entry_detected_, -1);
-            lv_subject_set_int(&mgr.probe_triggered_, -1);
-            lv_subject_set_int(&mgr.any_runout_, 0);
-            lv_subject_set_int(&mgr.motion_active_, 0);
-            lv_subject_set_int(&mgr.master_enabled_subject_, 1);
-            lv_subject_set_int(&mgr.sensor_count_, 0);
-        }
-    }
-
-    static void clear_startup_grace_period(FilamentSensorManager& mgr) {
-        mgr.startup_time_ = std::chrono::steady_clock::now() - std::chrono::seconds(10);
-    }
-};
-} // namespace helix
 
 using namespace helix;
 
@@ -799,87 +756,6 @@ TEST_CASE_METHOD(FilamentSensorTestFixture, "FilamentSensorManager - thread safe
 }
 
 // ============================================================================
-// SwitchSensorTypes Tests (switch_sensor_types.h)
-// ============================================================================
-
-// Include the new types header for testing the helpers
-#include "switch_sensor_types.h"
-
-using namespace helix::sensors;
-
-TEST_CASE("SwitchSensorTypes - role string conversion", "[sensors][switch][types]") {
-    SECTION("switch_role_to_string") {
-        REQUIRE(switch_role_to_string(SwitchSensorRole::NONE) == "none");
-        REQUIRE(switch_role_to_string(SwitchSensorRole::FILAMENT_RUNOUT) == "filament_runout");
-        REQUIRE(switch_role_to_string(SwitchSensorRole::FILAMENT_TOOLHEAD) == "filament_toolhead");
-        REQUIRE(switch_role_to_string(SwitchSensorRole::FILAMENT_ENTRY) == "filament_entry");
-        REQUIRE(switch_role_to_string(SwitchSensorRole::Z_PROBE) == "z_probe");
-        REQUIRE(switch_role_to_string(SwitchSensorRole::DOCK_DETECT) == "dock_detect");
-    }
-
-    SECTION("switch_role_from_string") {
-        REQUIRE(switch_role_from_string("none") == SwitchSensorRole::NONE);
-        REQUIRE(switch_role_from_string("filament_runout") == SwitchSensorRole::FILAMENT_RUNOUT);
-        REQUIRE(switch_role_from_string("filament_toolhead") ==
-                SwitchSensorRole::FILAMENT_TOOLHEAD);
-        REQUIRE(switch_role_from_string("filament_entry") == SwitchSensorRole::FILAMENT_ENTRY);
-        REQUIRE(switch_role_from_string("z_probe") == SwitchSensorRole::Z_PROBE);
-        REQUIRE(switch_role_from_string("dock_detect") == SwitchSensorRole::DOCK_DETECT);
-        REQUIRE(switch_role_from_string("invalid") == SwitchSensorRole::NONE);
-        REQUIRE(switch_role_from_string("") == SwitchSensorRole::NONE);
-    }
-
-    SECTION("switch_role_from_string - backwards compatibility") {
-        // Old config strings should still work
-        REQUIRE(switch_role_from_string("runout") == SwitchSensorRole::FILAMENT_RUNOUT);
-        REQUIRE(switch_role_from_string("toolhead") == SwitchSensorRole::FILAMENT_TOOLHEAD);
-        REQUIRE(switch_role_from_string("entry") == SwitchSensorRole::FILAMENT_ENTRY);
-    }
-
-    SECTION("switch_role_to_display_string") {
-        REQUIRE(switch_role_to_display_string(SwitchSensorRole::NONE) == "Unassigned");
-        REQUIRE(switch_role_to_display_string(SwitchSensorRole::FILAMENT_RUNOUT) == "Runout");
-        REQUIRE(switch_role_to_display_string(SwitchSensorRole::Z_PROBE) == "Z Probe");
-        REQUIRE(switch_role_to_display_string(SwitchSensorRole::DOCK_DETECT) == "Dock Detect");
-    }
-}
-
-TEST_CASE("SwitchSensorTypes - role category helpers", "[sensors][switch][types]") {
-    SECTION("is_filament_role") {
-        REQUIRE(is_filament_role(SwitchSensorRole::FILAMENT_RUNOUT) == true);
-        REQUIRE(is_filament_role(SwitchSensorRole::FILAMENT_TOOLHEAD) == true);
-        REQUIRE(is_filament_role(SwitchSensorRole::FILAMENT_ENTRY) == true);
-        REQUIRE(is_filament_role(SwitchSensorRole::Z_PROBE) == false);
-        REQUIRE(is_filament_role(SwitchSensorRole::DOCK_DETECT) == false);
-        REQUIRE(is_filament_role(SwitchSensorRole::NONE) == false);
-    }
-
-    SECTION("is_probe_role") {
-        REQUIRE(is_probe_role(SwitchSensorRole::Z_PROBE) == true);
-        REQUIRE(is_probe_role(SwitchSensorRole::FILAMENT_RUNOUT) == false);
-        REQUIRE(is_probe_role(SwitchSensorRole::NONE) == false);
-    }
-}
-
-TEST_CASE("SwitchSensorTypes - type string conversion", "[sensors][switch][types]") {
-    SECTION("switch_type_to_string") {
-        REQUIRE(switch_type_to_string(SwitchSensorType::SWITCH) == "switch");
-        REQUIRE(switch_type_to_string(SwitchSensorType::MOTION) == "motion");
-    }
-
-    SECTION("switch_type_from_string") {
-        REQUIRE(switch_type_from_string("switch") == SwitchSensorType::SWITCH);
-        REQUIRE(switch_type_from_string("motion") == SwitchSensorType::MOTION);
-        REQUIRE(switch_type_from_string("invalid") == SwitchSensorType::SWITCH);
-        REQUIRE(switch_type_from_string("") == SwitchSensorType::SWITCH);
-    }
-}
-
-// ============================================================================
-// Z_PROBE Role Tests
-// ============================================================================
-
-// ============================================================================
 // Z_PROBE Role Tests
 // ============================================================================
 
@@ -1217,4 +1093,40 @@ TEST_CASE_METHOD(FilamentSensorTestFixture,
         REQUIRE(old_detected == true);
         REQUIRE(new_detected == false);
     }
+}
+
+// A deferral queued before deinit_subjects() must not land on the subjects a
+// later init_subjects() creates.
+TEST_CASE_METHOD(FilamentSensorTestFixture,
+                 "FilamentSensorManager - deferred update dropped after deinit",
+                 "[filament][lifetime]") {
+    discover_test_sensors();
+    mgr().set_sensor_role("filament_switch_sensor runout", FilamentSensorRole::RUNOUT);
+    mgr().set_sync_mode(false);
+
+    update_sensor_state("filament_switch_sensor runout", false);
+    mgr().deinit_subjects();
+    mgr().init_subjects();
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+    REQUIRE(lv_subject_get_int(mgr().get_runout_detected_subject()) == -1);
+
+    update_sensor_state("filament_switch_sensor runout", true);
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+    REQUIRE(lv_subject_get_int(mgr().get_runout_detected_subject()) == 1);
+    mgr().set_sync_mode(true);
+}
+
+// Each manager's triggered subject is reachable from XML under its own name.
+TEST_CASE_METHOD(
+    FilamentSensorTestFixture,
+    "FilamentSensorManager - probe subject name does not collide with ProbeSensorManager",
+    "[filament][probe]") {
+    auto& psm = helix::sensors::ProbeSensorManager::instance();
+    psm.init_subjects();
+    mgr().deinit_subjects();
+    mgr().init_subjects();
+
+    REQUIRE(lv_xml_get_subject(nullptr, "filament_probe_triggered") ==
+            mgr().get_probe_triggered_subject());
+    REQUIRE(lv_xml_get_subject(nullptr, "probe_triggered") == psm.get_probe_triggered_subject());
 }

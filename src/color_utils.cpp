@@ -118,11 +118,16 @@ std::string describe_color(uint32_t rgb) {
     std::string color_name;
 
     // Special cases: white, black, gray
-    if (s < 5.0f && l > 95.0f) {
+    // Below ~8% lightness no hue is perceptible at any saturation; up to ~18% a
+    // near-neutral still reads as black, and below ~4.5% a neutral is "Deep Black".
+    // Near-white mirrors the black band.
+    if ((l > 98.0f) || (s < 25.0f && l >= 94.0f)) {
         return "White";
-    } else if (s < 5.0f && l < 5.0f) {
+    } else if (s < 25.0f && l < 4.5f) {
+        return "Deep Black";
+    } else if ((l < 8.0f) || (s < 25.0f && l < 18.0f)) {
         return "Black";
-    } else if (s < 10.0f && l > 5.0f && l < 95.0f) {
+    } else if (s < 10.0f) {
         // Grayscale
         if (lightness_name[0] != '\0') {
             color_name = lightness_name;

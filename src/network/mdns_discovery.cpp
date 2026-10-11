@@ -4,7 +4,8 @@
  * @brief mDNS discovery implementation for finding Moonraker printers
  *
  * @pattern PIMPL with background thread for network I/O
- * @threading Discovery runs on background thread; callbacks dispatched via helix::ui::async_call()
+ * @threading Discovery runs on background thread; callbacks dispatched via
+ * helix::ui::queue_update()
  * @gotchas Socket may fail on systems without network; handle gracefully
  *
  * @see wifi_manager.cpp for similar threading patterns
@@ -15,6 +16,7 @@
 
 #include "ui_update_queue.h"
 
+#include "helix_thread.h"
 #include "mdns/mdns.h"
 
 #include <spdlog/spdlog.h>
@@ -25,6 +27,7 @@
 #include <condition_variable>
 #include <cstring>
 #include <map>
+#include <sys/time.h>
 #include <thread>
 
 using namespace helix;
@@ -131,7 +134,7 @@ class MdnsDiscovery::Impl {
         running_.store(true);
         initial_update_sent_.store(false); // Reset so first query dispatches even if empty
         try {
-            thread_ = std::thread(&Impl::discovery_loop, this);
+            thread_ = helix::make_thread(&Impl::discovery_loop, this);
             spdlog::info("[MdnsDiscovery] Started discovery for {}", service_type_);
         } catch (const std::system_error& e) {
             spdlog::error("[MdnsDiscovery] Failed to spawn discovery thread: {}", e.what());
@@ -460,7 +463,7 @@ class MdnsDiscovery::Impl {
         auto printers_copy = std::make_shared<std::vector<DiscoveredPrinter>>(printers_);
         auto callback_copy = callback_;
 
-        helix::ui::queue_update([printers_copy, callback_copy]() {
+        helix::ui::queue_update("MdnsDiscovery::dispatch_update", [printers_copy, callback_copy]() {
             if (callback_copy) {
                 callback_copy(*printers_copy);
             }

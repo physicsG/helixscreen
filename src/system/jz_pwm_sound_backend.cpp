@@ -2,7 +2,10 @@
 
 #include "jz_pwm_sound_backend.h"
 
+#include "env_knobs.h"
+#include "helix_thread.h"
 #include "note_event.h"
+#include "platform_info.h"
 
 #include <spdlog/spdlog.h>
 
@@ -189,6 +192,12 @@ bool jz_voice_should_flush(bool dirty, double ms_since_flush, double ms_since_ca
 }
 
 bool JzPwmSoundBackend::available() {
+    // The Ingenic PWM device node exists on every Ingenic board, K1 series
+    // included, where its channels drive things other than the piezo (the
+    // K1C's backlight among them). Only the AD5X mod install wires fx-pwm
+    // to the buzzer, so the probe runs there and nowhere else.
+    if (!helix::ad5x_mod_layout_present())
+        return false;
     if (access(kDevice, F_OK) != 0)
         return false;
     for (int i = 0; kFxPwmPaths[i]; ++i)
@@ -421,8 +430,7 @@ bool JzPwmSoundBackend::initialize() {
     knobs_.carrier_hz = env_float("HELIX_JZ_CARRIER", knobs_.carrier_hz);
     set_voice_knobs(knobs_); /* apply clamps */
 
-    const char* log = getenv("HELIX_JZ_LOG_VOICE");
-    if (log && log[0] == '1') {
+    if (helix::env_flag("HELIX_JZ_LOG_VOICE")) {
         voice_log_ = fopen(kVoiceLog, "a");
         if (voice_log_) {
             voice_log_epoch_ = std::chrono::steady_clock::now();
@@ -650,7 +658,7 @@ void JzPwmSoundBackend::enqueue_frame(std::vector<uint32_t>&& words, uint32_t ho
         pending_frame_ = PendingFrame{std::move(words), hold_ms};
     }
     if (!worker_.joinable()) {
-        worker_ = std::thread([this] { sender_worker(); });
+        worker_ = helix::make_thread([this] { sender_worker(); });
         spdlog::info("[JzPwmBackend] sender worker started");
     }
     send_cv_.notify_one();

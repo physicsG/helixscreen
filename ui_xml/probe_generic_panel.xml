@@ -12,18 +12,18 @@
             scrollable="false">
       <bind_flag_if_eq subject="probe_is_klicky" flag="hidden" ref_value="0"/>
 
-      <setting_section_header title="KLICKY CONTROLS" title_tag="KLICKY CONTROLS" icon="magnet"/>
+      <setting_section_header title="KLICKY CONTROLS" icon="magnet"/>
 
       <lv_obj width="100%"
               height="content" style_pad_all="0" flex_flow="row" style_pad_gap="#space_sm" scrollable="false">
         <ui_button name="btn_klicky_deploy"
                    width="1" height="#button_height_sm" flex_grow="1" variant="secondary" text="Deploy"
-                   translation_tag="Deploy" icon="arrow_down">
+                   icon="arrow_down" moves_machine="true">
           <event_cb trigger="clicked" callback="on_klicky_deploy"/>
         </ui_button>
         <ui_button name="btn_klicky_dock"
-                   width="1" height="#button_height_sm" flex_grow="1" variant="secondary" text="Dock"
-                   translation_tag="Dock" icon="arrow_up">
+                   width="1" height="#button_height_sm" flex_grow="1" variant="secondary" text="Dock" icon="arrow_up"
+                   moves_machine="true">
           <event_cb trigger="clicked" callback="on_klicky_dock"/>
         </ui_button>
       </lv_obj>

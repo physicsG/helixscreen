@@ -27,14 +27,11 @@ namespace helix::ui {
  * @brief Bundle for position observers (X, Y, Z axes)
  *
  * Use when a panel needs to observe all 3 position subjects from PrinterState.
- * Supports two patterns:
- * 1. Sync observers with per-axis callbacks (UI thread only)
- * 2. Async observers for background thread updates with unified UI callback
+ * Handlers run deferred on the UI thread, one per subject.
  *
  * @tparam Panel The panel class type (must be pointer-safe)
  *
  * @code{.cpp}
- * // Pattern 1: Sync with individual handlers (simpler, UI thread only)
  * PositionObserverBundle<MyPanel> pos_observers_;
  *
  * pos_observers_.setup_sync(
@@ -43,16 +40,6 @@ namespace helix::ui {
  *     [](MyPanel* p, int v) { p->format_x(v); p->update_display(); },
  *     [](MyPanel* p, int v) { p->format_y(v); p->update_display(); },
  *     [](MyPanel* p, int v) { p->format_z(v); p->update_display(); }
- * );
- *
- * // Pattern 2: Async with caching + unified update (thread-safe)
- * pos_observers_.setup_async(
- *     this,
- *     printer_state_,
- *     [](MyPanel* p, int v) { p->cached_x_ = v; },
- *     [](MyPanel* p, int v) { p->cached_y_ = v; },
- *     [](MyPanel* p, int v) { p->cached_z_ = v; },
- *     [](MyPanel* p) { p->update_all_position_displays(); }
  * );
  * @endcode
  */
@@ -80,54 +67,14 @@ template <typename Panel> class PositionObserverBundle {
         // on observer nodes lv_subject_deinit() already freed.
         const SubjectLifetime lifetime = state.get_subjects_lifetime();
 
-        x_pos_observer_ = observe_int_sync<Panel>(state.get_gcode_position_x_subject(), panel,
-                                                  std::forward<XPosHandler>(on_x_pos), lifetime);
+        x_pos_observer_ = observe<int>(state.motion_state().get_gcode_position_x_subject(), panel,
+                                       std::forward<XPosHandler>(on_x_pos), lifetime);
 
-        y_pos_observer_ = observe_int_sync<Panel>(state.get_gcode_position_y_subject(), panel,
-                                                  std::forward<YPosHandler>(on_y_pos), lifetime);
+        y_pos_observer_ = observe<int>(state.motion_state().get_gcode_position_y_subject(), panel,
+                                       std::forward<YPosHandler>(on_y_pos), lifetime);
 
-        z_pos_observer_ = observe_int_sync<Panel>(state.get_gcode_position_z_subject(), panel,
-                                                  std::forward<ZPosHandler>(on_z_pos), lifetime);
-    }
-
-    /**
-     * @brief Setup async position observers with unified update callback
-     *
-     * Use when updates come from background threads and need thread-safe
-     * caching followed by a single UI update. The value handlers cache
-     * data directly, then update_handler is called via ui_queue_update().
-     *
-     * @param panel Panel instance (must outlive observers)
-     * @param state PrinterState reference for position subjects
-     * @param cache_x_pos Handler to cache X position (any thread)
-     * @param cache_y_pos Handler to cache Y position (any thread)
-     * @param cache_z_pos Handler to cache Z position (any thread)
-     * @param update_handler Called on UI thread after any position changes
-     */
-    template <typename CacheXPos, typename CacheYPos, typename CacheZPos, typename UpdateHandler>
-    void setup_async(Panel* panel, PrinterState& state, CacheXPos&& cache_x_pos,
-                     CacheYPos&& cache_y_pos, CacheZPos&& cache_z_pos,
-                     UpdateHandler&& update_handler) {
-        clear();
-
-        // Copy update_handler since it's used by all 3 observers
-        // (forwarding an rvalue multiple times would move-from it)
-        auto update_copy = update_handler;
-
-        // See setup_sync(): PrinterState-owned subjects need the death signal.
-        const SubjectLifetime lifetime = state.get_subjects_lifetime();
-
-        x_pos_observer_ =
-            observe_int_async<Panel>(state.get_gcode_position_x_subject(), panel,
-                                     std::forward<CacheXPos>(cache_x_pos), update_copy, lifetime);
-
-        y_pos_observer_ =
-            observe_int_async<Panel>(state.get_gcode_position_y_subject(), panel,
-                                     std::forward<CacheYPos>(cache_y_pos), update_copy, lifetime);
-
-        z_pos_observer_ = observe_int_async<Panel>(state.get_gcode_position_z_subject(), panel,
-                                                   std::forward<CacheZPos>(cache_z_pos),
-                                                   std::move(update_copy), lifetime);
+        z_pos_observer_ = observe<int>(state.motion_state().get_gcode_position_z_subject(), panel,
+                                       std::forward<ZPosHandler>(on_z_pos), lifetime);
     }
 
     /**

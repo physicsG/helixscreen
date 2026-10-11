@@ -71,7 +71,7 @@ setup() {
     grep -q "stop mksclient" "$systemctl_log"
     grep -q "disable mksclient" "$systemctl_log"
     # ...and the service was recorded for later re-enablement.
-    grep -qF "systemd:mksclient" "$DISABLED_SERVICES_FILE"
+    grep -qF "systemd-dropin:mksclient" "$DISABLED_SERVICES_FILE"
 }
 
 @test "sovol: disables a SysV mksclient init script (chmod a-x + record)" {

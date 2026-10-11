@@ -2,8 +2,9 @@
 
 #include "ui_notification_manager.h"
 
-#include "ui_nav_manager.h"
+#include "ui_nav.h"
 #include "ui_notification_history.h"
+#include "ui_panel_common.h"
 #include "ui_panel_notification_history.h"
 #include "ui_toast_manager.h"
 #include "ui_update_queue.h"
@@ -45,10 +46,9 @@ void NotificationManager::notification_history_clicked([[maybe_unused]] lv_event
 
     auto& mgr = NotificationManager::instance();
 
-    // Prevent multiple panel instances - if panel already exists and is visible, ignore click
-    if (mgr.notification_panel_obj_ &&
-        !lv_obj_has_flag(mgr.notification_panel_obj_, LV_OBJ_FLAG_HIDDEN)) {
-        spdlog::debug("[NotificationManager] Notification panel already visible, ignoring click");
+    // One panel at a time: queued, open, or still sliding out
+    if (helix::nav::is_showing(mgr.notification_panel_obj_)) {
+        spdlog::debug("[NotificationManager] Notification panel already open, ignoring click");
         return;
     }
 
@@ -61,16 +61,15 @@ void NotificationManager::notification_history_clicked([[maybe_unused]] lv_event
     }
 
     // Clean up old panel if it exists but is hidden.
-    // Use lv_obj_delete_async to schedule deletion for the next lv_timer_handler cycle
-    // where event_head is guaranteed NULL, preventing lv_event_mark_deleted from
-    // corrupting the LVGL event linked list (issue #190, previously #179).
+    // safe_delete_deferred uses lv_obj_delete_async, a one-shot LVGL timer that runs in the
+    // same or the next lv_timer_handler() pass, where event_head is guaranteed NULL, so
+    // lv_event_mark_deleted cannot corrupt the LVGL event linked list (#190, #179).
     if (mgr.notification_panel_obj_) {
         helix::ui::safe_delete_deferred(mgr.notification_panel_obj_);
     }
 
     // Now create XML component
-    lv_obj_t* panel_obj =
-        static_cast<lv_obj_t*>(lv_xml_create(parent, "notification_history_panel", nullptr));
+    lv_obj_t* panel_obj = helix::ui::create_xml_hidden(parent, "notification_history_panel");
     if (!panel_obj) {
         spdlog::error("[NotificationManager] Failed to create notification_history_panel from XML");
         return;
@@ -83,9 +82,9 @@ void NotificationManager::notification_history_clicked([[maybe_unused]] lv_event
     panel.setup(panel_obj, parent);
 
     // Register with nullptr lifecycle — notification history extends PanelBase, not OverlayBase
-    NavigationManager::instance().register_overlay_instance(panel_obj, nullptr);
+    helix::nav::register_overlay(panel_obj, nullptr);
 
-    NavigationManager::instance().push_overlay(panel_obj);
+    helix::nav::push_overlay(panel_obj);
 }
 
 // ============================================================================
@@ -120,6 +119,8 @@ void NotificationManager::init_subjects() {
                                "notification_count_text", subjects_);
     UI_MANAGED_SUBJECT_INT(notification_severity_subject_, NOTIFICATION_SEVERITY_INFO,
                            "notification_severity", subjects_);
+    UI_MANAGED_SUBJECT_INT(notification_history_version_subject_, 0, "notification_history_version",
+                           subjects_);
 
     subjects_initialized_ = true;
 
@@ -296,6 +297,30 @@ void helix::ui::notification_refresh_from_history() {
         }
     }
     NotificationManager::instance().update_notification(status);
+
+    // Publish the history revision so the open notification panel can rebuild
+    // its list when an entry arrives (prestonbrown/helixscreen#1525).
+    NotificationManager::instance().publish_history_version();
+}
+
+void NotificationManager::publish_history_version() {
+    if (!subjects_initialized_) {
+        return;
+    }
+    uint64_t version = NotificationHistory::instance().version();
+    if (version == last_published_history_version_) {
+        return;
+    }
+    last_published_history_version_ = version;
+    lv_subject_set_int(&notification_history_version_subject_, static_cast<int32_t>(version));
+}
+
+lv_subject_t* NotificationManager::history_version_subject() {
+    return subjects_initialized_ ? &notification_history_version_subject_ : nullptr;
+}
+
+lv_subject_t* helix::ui::notification_history_version_subject() {
+    return NotificationManager::instance().history_version_subject();
 }
 
 void helix::ui::notification_deinit_subjects() {

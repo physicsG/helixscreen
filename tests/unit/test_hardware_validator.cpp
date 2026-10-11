@@ -18,6 +18,9 @@
 #include "moonraker_client_mock.h"
 #include "printer_discovery.h"
 
+#include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -578,6 +581,128 @@ TEST_CASE_METHOD(HardwareValidatorConfigFixture,
     }
 }
 
+// LedController persists the configured strips to leds/selected_strips; leds/selected
+// and leds/strip are legacy. An LED the user configured through the live key must not
+// be re-offered as newly discovered hardware.
+TEST_CASE_METHOD(HardwareValidatorConfigFixture,
+                 "HardwareValidator - LED configured via leds/selected_strips is not newly "
+                 "discovered",
+                 "[hardware][validator]") {
+    setup_printer_data({{"moonraker_host", "127.0.0.1"},
+                        {"moonraker_port", 7125},
+                        {"leds", {{"selected_strips", {"led chamber_light"}}}},
+                        {"hardware",
+                         {{"optional", json::array()},
+                          {"expected", json::array()},
+                          {"last_snapshot", json::object()}}}});
+
+    MoonrakerClientMock client;
+    client.set_leds({"led chamber_light"});
+
+    HardwareValidator validator;
+    auto result = validator.validate(&config, client.hardware());
+
+    for (const auto& issue : result.newly_discovered) {
+        INFO("unexpected new LED: " << issue.hardware_name);
+        REQUIRE(issue.hardware_type != HardwareType::LED);
+    }
+}
+
+// The same live key drives the missing-hardware side: a strip the user holds in
+// leds/selected_strips that the printer stops reporting is a real absence, and
+// reading only the legacy keys would answer "no LED configured" and stay silent.
+TEST_CASE_METHOD(HardwareValidatorConfigFixture,
+                 "HardwareValidator - LED held in leds/selected_strips but absent from discovery "
+                 "is reported missing",
+                 "[hardware][validator]") {
+    setup_printer_data({{"moonraker_host", "127.0.0.1"},
+                        {"moonraker_port", 7125},
+                        {"leds", {{"selected_strips", {"led chamber_light"}}}},
+                        {"hardware",
+                         {{"optional", json::array()},
+                          {"expected", json::array()},
+                          {"last_snapshot", json::object()}}}});
+
+    MoonrakerClientMock client;
+    client.set_leds({"neopixel something_else"});
+
+    HardwareValidator validator;
+    auto result = validator.validate(&config, client.hardware());
+
+    bool reported = false;
+    for (const auto& issue : result.expected_missing) {
+        if (issue.hardware_type == HardwareType::LED &&
+            issue.hardware_name == "led chamber_light") {
+            reported = true;
+        }
+    }
+    REQUIRE(reported);
+}
+
+// leds/selected_strips spans every LED backend, and macro devices ("macro:NAME") and
+// WLED strips are served outside printer.objects, so neither can ever appear in
+// discovery. Only Klipper-object strips are absence-checkable; a synthetic id must not
+// be reported missing just because the Klipper object list has no row for it.
+TEST_CASE_METHOD(HardwareValidatorConfigFixture,
+                 "HardwareValidator - a macro LED strip is never reported missing",
+                 "[hardware][validator]") {
+    setup_printer_data({{"moonraker_host", "127.0.0.1"},
+                        {"moonraker_port", 7125},
+                        {"leds", {{"selected_strips", {"led chamber_light", "macro:LED"}}}},
+                        {"hardware",
+                         {{"optional", json::array()},
+                          {"expected", json::array()},
+                          {"last_snapshot", json::object()}}}});
+
+    MoonrakerClientMock client;
+    client.set_leds({"led chamber_light"});
+
+    HardwareValidator validator;
+    auto result = validator.validate(&config, client.hardware());
+
+    REQUIRE(
+        std::none_of(result.expected_missing.begin(), result.expected_missing.end(),
+                     [](const auto& issue) { return issue.hardware_type == HardwareType::LED; }));
+}
+
+// leds/auto_state/strips names devices the user chose, so it counts as configuring
+// an LED on its own.
+TEST_CASE_METHOD(HardwareValidatorConfigFixture,
+                 "HardwareValidator - LED held only in leds/auto_state/strips is configured",
+                 "[hardware][validator]") {
+    setup_printer_data({{"moonraker_host", "127.0.0.1"},
+                        {"moonraker_port", 7125},
+                        {"leds", {{"auto_state", {{"strips", {"neopixel chamber_light"}}}}}},
+                        {"hardware",
+                         {{"optional", json::array()},
+                          {"expected", json::array()},
+                          {"last_snapshot", json::object()}}}});
+
+    SECTION("present: not suggested as new") {
+        MoonrakerClientMock client;
+        client.set_leds({"neopixel chamber_light"});
+        auto result = HardwareValidator{}.validate(&config, client.hardware());
+        for (const auto& issue : result.newly_discovered) {
+            INFO("unexpected new LED: " << issue.hardware_name);
+            REQUIRE(issue.hardware_type != HardwareType::LED);
+        }
+    }
+
+    SECTION("absent: reported missing") {
+        MoonrakerClientMock client;
+        client.set_leds({"neopixel something_else"});
+        auto result = HardwareValidator{}.validate(&config, client.hardware());
+        bool reported = false;
+        for (const auto& issue : result.expected_missing) {
+            if (issue.hardware_type == HardwareType::LED &&
+                issue.hardware_name == "neopixel chamber_light") {
+                reported = true;
+            }
+        }
+        REQUIRE(reported);
+    }
+}
+
 TEST_CASE_METHOD(HardwareValidatorConfigFixture,
                  "HardwareValidator - is_hardware_optional with empty config",
                  "[hardware][validator][config]") {
@@ -712,9 +837,6 @@ TEST_CASE_METHOD(HardwareValidatorConfigFixture,
     // These should be no-ops with nullptr (no crash)
     HardwareValidator::set_hardware_optional(nullptr, "test", true);
     HardwareValidator::add_expected_hardware(nullptr, "test");
-
-    // If we got here without crashing, the test passes
-    REQUIRE(true);
 }
 
 // ============================================================================
@@ -1459,4 +1581,100 @@ TEST_CASE_METHOD(ExpectedHardwareSuppressFixture,
     auto result = validator.validate(&config, client.hardware());
 
     REQUIRE(has_newly_discovered(result, "filament_switch_sensor filament_sensor"));
+}
+
+// The bespoke aux-fan check in validate_configured_hardware() turns any fans/aux
+// mapping into an expected-missing warning when discovery does not return that
+// object. Feed it the fans block HelixScreen actually ships for the k1 so the
+// preset data and the check are held to the same contract.
+TEST_CASE_METHOD(HardwareValidatorConfigFixture,
+                 "HardwareValidator - shipped k1 preset maps no aux fan to warn about",
+                 "[hardware][validator][k1]") {
+    std::filesystem::path shipped =
+        std::filesystem::current_path() / "assets" / "config" / "presets" / "k1.json";
+    INFO("reading " << shipped.string() << " (tests must run from the repo root)");
+    REQUIRE(std::filesystem::exists(shipped));
+    std::ifstream in(shipped);
+    REQUIRE(in.good());
+    json preset = json::parse(in);
+    REQUIRE(preset["printer"].contains("fans"));
+    json fans = preset["printer"]["fans"];
+
+    // A printer whose config comments the aux and exhaust output pins out.
+    MoonrakerClientMock client;
+    client.set_heaters({"extruder", "heater_bed"});
+    client.set_fans({"output_pin fan0", "heater_fan hotend_fan", "temperature_fan chamber_fan"});
+
+    auto missing_fan_names = [&](const json& fans_block) {
+        setup_printer_data({{"moonraker_host", "127.0.0.1"},
+                            {"moonraker_port", 7125},
+                            {"fans", fans_block},
+                            {"hardware",
+                             {{"optional", json::array()},
+                              {"expected", json::array()},
+                              {"last_snapshot", json::object()}}}});
+        HardwareValidator validator;
+        auto result = validator.validate(&config, client.hardware());
+        std::vector<std::string> names;
+        for (const auto& issue : result.expected_missing) {
+            names.push_back(issue.hardware_name);
+        }
+        return names;
+    };
+
+    // Known positive first: an aux mapping onto an absent object IS reported, so a
+    // clean result below means the preset claims nothing, not that the check is dead.
+    json with_aux = fans;
+    with_aux["aux"] = "output_pin fan1";
+    auto reported = missing_fan_names(with_aux);
+    REQUIRE(std::find(reported.begin(), reported.end(), "output_pin fan1") != reported.end());
+
+    for (const auto& name : missing_fan_names(fans)) {
+        INFO("unexpected missing-hardware warning: " << name);
+        REQUIRE(name != "output_pin fan1");
+    }
+}
+
+// Creality K2 Plus preset regression: the PTC heater's own blower keeps
+// Klipper's factory name "heater_fan chamber_fan" on a stock unit, distinct by
+// section prefix from the chamber circulation loop "temperature_fan
+// chamber_fan" (see the "stock K2 naming" fixture in test_printer_hardware.cpp).
+// The preset's hardware/expected list must cover that stock name, or a stock
+// rig's real fan reads as newly discovered on every boot.
+TEST_CASE_METHOD(ExpectedHardwareSuppressFixture,
+                 "HardwareValidator - shipped k2 preset covers the stock chamber heater fan",
+                 "[hardware][validator][k2]") {
+    std::filesystem::path shipped =
+        std::filesystem::current_path() / "assets" / "config" / "presets" / "k2.json";
+    INFO("reading " << shipped.string() << " (tests must run from the repo root)");
+    REQUIRE(std::filesystem::exists(shipped));
+    std::ifstream in(shipped);
+    REQUIRE(in.good());
+    json preset = json::parse(in);
+    REQUIRE(preset["printer"].contains("hardware"));
+    REQUIRE(preset["printer"]["hardware"].contains("expected"));
+    REQUIRE(preset["printer"].contains("fans"));
+
+    // Object list as reported by Moonraker /printer/objects/list on a stock K2
+    // Plus, unmodified from the factory config.
+    client.set_heaters({"extruder", "heater_bed", "heater_generic chamber_heater"});
+    client.set_fans({"heater_fan hotend_fan", "output_pin fan0", "output_pin fan2",
+                     "output_pin fan1", "heater_fan chamber_fan", "temperature_fan chamber_fan",
+                     "output_pin extruder_fan"});
+
+    setup_printer_data({{"moonraker_host", "127.0.0.1"},
+                        {"moonraker_port", 7125},
+                        {"fans", preset["printer"]["fans"]},
+                        {"hardware",
+                         {{"optional", json::array()},
+                          {"expected", preset["printer"]["hardware"]["expected"]},
+                          {"last_snapshot", json::object()}}}});
+
+    HardwareValidator validator;
+    auto result = validator.validate(&config, client.hardware());
+
+    // hardware/expected is a suppression set for non-AMS entries, not a
+    // presence requirement, so a name listed in it is never checked for
+    // absence — result.expected_missing has nothing to assert here.
+    REQUIRE_FALSE(has_newly_discovered(result, "heater_fan chamber_fan"));
 }

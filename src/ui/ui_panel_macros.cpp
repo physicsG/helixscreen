@@ -3,29 +3,35 @@
 
 #include "ui_panel_macros.h"
 
+#include "ui_callback_helpers.h"
 #include "ui_error_reporting.h"
 #include "ui_event_safety.h"
-#include "ui_global_panel_helper.h"
 #include "ui_modal.h"
-#include "ui_nav_manager.h"
+#include "ui_nav.h"
 #include "ui_panel_common.h"
 #include "ui_subject_registry.h"
 #include "ui_update_queue.h"
 #include "ui_utils.h"
+#include "ui_virtual_list.h"
 
 #include "app_globals.h"
 #include "device_display_name.h"
 #include "i_moonraker_api.h"
+#include "i_moonraker_client.h"
+#include "lap_log.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "macro_edit_logic.h"
 #include "macro_executor.h"
 #include "macro_param_cache.h"
-#include "moonraker_client.h"
+#include "macro_param_defaults.h"
 #include "observer_factory.h"
+#include "preprint_skip_wrappers.h"
 #include "printer_state.h"
 #include "safety_settings_manager.h"
 #include "settings_manager.h"
+#include "static_panel_registry.h"
 #include "static_subject_registry.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
@@ -35,20 +41,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
+#include <tuple>
 
-// ============================================================================
-// Global Instance
-// ============================================================================
-
-DEFINE_GLOBAL_PANEL(MacrosPanel, g_macros_panel, get_global_macros_panel)
-
-// ============================================================================
-// Constructor
-// ============================================================================
-
-MacrosPanel::MacrosPanel() {
-    spdlog::debug("[MacrosPanel] Instance created");
-}
+using helix::ui::find_required;
 
 MacrosPanel::~MacrosPanel() {
     deinit_subjects();
@@ -59,31 +55,32 @@ MacrosPanel::~MacrosPanel() {
 // ============================================================================
 
 void MacrosPanel::init_subjects() {
-    init_subjects_guarded([this]() {
+    {
         // Legacy status subject (XML-bound; kept for macro_panel.xml).
         UI_MANAGED_SUBJECT_STRING(status_subject_, status_buf_, status_buf_, "macros_status",
                                   subjects_);
         // Scalar subjects that drive the reactive repeat + edit-mode chrome.
         // Registered BEFORE the XML is created (subject-init-order rule). The
-        // five per-row pools self-manage their own subject lifetime and are NOT
+        // per-slot pools self-manage their own subject lifetime and are NOT
         // registered here.
         UI_MANAGED_SUBJECT_INT(macro_row_count_, 0, "macro_row_count", subjects_);
+        UI_MANAGED_SUBJECT_INT(macro_slot_count_, 0, "macro_slot_count", subjects_);
         UI_MANAGED_SUBJECT_INT(macro_edit_mode_, 0, "macro_edit_mode", subjects_);
         UI_MANAGED_SUBJECT_INT(macros_edit_save_hidden_, 1, "macros_edit_save_hidden", subjects_);
 
         // Self-register cleanup so subjects deinit before lv_deinit().
-        // Test the pointer instead of calling get_global_macros_panel(): this
+        // Peek instead of calling get_global_macros_panel(): this
         // callback runs from StaticSubjectRegistry::deinit_all(), which is
         // sequenced AFTER StaticPanelRegistry::destroy_all() has already
         // destroyed the panel. The auto-creating getter would build a
         // replacement whose destructor then runs during static destruction,
         // with LVGL and spdlog already gone.
         StaticSubjectRegistry::instance().register_deinit("MacrosPanel", []() {
-            if (g_macros_panel) {
-                g_macros_panel->deinit_subjects();
+            if (auto* panel = helix::lazy_global_if_exists<MacrosPanel>()) {
+                panel->deinit_subjects();
             }
         });
-    });
+    }
 }
 
 void MacrosPanel::deinit_subjects() {
@@ -100,20 +97,56 @@ void MacrosPanel::deinit_subjects() {
 // ============================================================================
 
 void MacrosPanel::register_callbacks() {
-    if (callbacks_registered_) {
-        spdlog::debug("[{}] Callbacks already registered", get_name());
-        return;
-    }
-
-    spdlog::debug("[{}] Registering event callbacks", get_name());
-
-    lv_xml_register_event_cb(nullptr, "on_macro_row_clicked", on_macro_row_clicked);
-    lv_xml_register_event_cb(nullptr, "on_macro_card_long_press", on_macro_card_long_press);
-    lv_xml_register_event_cb(nullptr, "on_macros_edit_save", on_macros_edit_save);
-    lv_xml_register_event_cb(nullptr, "on_macros_back_clicked", on_macros_back_clicked);
-
-    callbacks_registered_ = true;
-    spdlog::debug("[{}] Event callbacks registered", get_name());
+    // Row identity comes from the event_cb user_data ("$row_index" string).
+    // It names the row's slot; the slot says which macro it shows right now.
+    register_xml_callbacks({
+        {"on_macro_row_clicked",
+         [](lv_event_t* e) {
+             auto& self = get_global_macros_panel();
+             if (auto i = helix::ui::event_user_int(e))
+                 self.handle_row_clicked(self.item_in_slot(static_cast<size_t>(*i)));
+         }},
+        {"on_macro_card_long_press",
+         [](lv_event_t*) { get_global_macros_panel().handle_long_press(); }},
+        {"on_macro_defaults_clicked",
+         [](lv_event_t* e) {
+             auto& self = get_global_macros_panel();
+             if (auto i = helix::ui::event_user_int(e))
+                 self.handle_defaults_clicked(self.item_in_slot(static_cast<size_t>(*i)));
+         }},
+        {"on_macro_list_scroll",
+         [](lv_event_t*) { get_global_macros_panel().update_visible(false); }},
+        {"on_macro_list_resized",
+         [](lv_event_t*) {
+             // Row heights follow the list width and the slot count its height, and
+             // measuring needs a layout pass, which cannot nest inside the one
+             // reporting this resize.
+             auto& self = get_global_macros_panel();
+             self.lifetime_.defer("MacrosPanel::relayout", [&self]() {
+                 if (!self.scroll_container_) {
+                     return;
+                 }
+                 if (lv_obj_get_width(self.scroll_container_) != self.measured_width_ ||
+                     lv_obj_get_content_height(self.scroll_container_) !=
+                         self.measured_viewport_h_) {
+                     self.layout_rows();
+                 } else {
+                     self.update_visible(false);
+                 }
+             });
+         }},
+        {"on_macros_edit_save",
+         [](lv_event_t*) { get_global_macros_panel().exit_edit_mode(true); }},
+        {"on_macros_back_clicked",
+         [](lv_event_t*) {
+             auto& self = get_global_macros_panel();
+             if (self.edit_mode_) {
+                 self.exit_edit_mode(false); // discard pending changes, stay on panel
+             } else {
+                 helix::nav::go_back(); // normal Back: close the overlay
+             }
+         }},
+    });
 }
 
 // ============================================================================
@@ -121,21 +154,31 @@ void MacrosPanel::register_callbacks() {
 // ============================================================================
 
 lv_obj_t* MacrosPanel::create(lv_obj_t* parent) {
-    // Reset the row count BEFORE building the XML so the freshly-created
+    // Reset the slot count BEFORE building the XML so the freshly-created
     // <repeat> starts at zero rows. on_ui_destroyed() reclaims the pools
     // (unregistering macro_name_<i> etc.), so a stale non-zero count would let
     // the repeat build rows bound to now-unregistered subjects; starting at 0
-    // and then setting the real count in rebuild_rows() forces a clean build.
+    // and growing it in layout_rows() forces a clean build.
     lv_subject_set_int(&macro_row_count_, 0);
+    lv_subject_set_int(&macro_slot_count_, 0);
+    slots_.clear();
+    slot_items_.clear();
+    row_tops_.clear();
+    shown_first_ = shown_last_ = -1;
+    last_leading_ = last_trailing_ = -1;
+    measured_width_ = measured_viewport_h_ = -1;
 
-    if (!create_overlay_from_xml(parent, "macro_panel")) {
+    helix::LapLog laps("MacrosPanel");
+    if (!OverlayBase::create(parent)) {
         return nullptr;
     }
+    laps.lap("create overlay");
     ui_alive_ = true;
 
-    // Cache the scrollable rows container so edit-mode transitions can reset
-    // scroll position (see enter_edit_mode()/exit_edit_mode()).
-    scroll_container_ = lv_obj_find_by_name(overlay_root_, "macro_list");
+    scroll_container_ = find_required(overlay_root_, "macro_list", get_name());
+    rows_container_ = find_required(overlay_root_, "rows_container", get_name());
+    leading_spacer_ = find_required(overlay_root_, "leading_spacer", get_name());
+    trailing_spacer_ = find_required(overlay_root_, "trailing_spacer", get_name());
 
     // Rebuild reactively as macros arrive. When opened at startup (e.g.
     // `--test -p macros`) the panel is created before the queued
@@ -143,20 +186,20 @@ lv_obj_t* MacrosPanel::create(lv_obj_t* parent) {
     // nav_buttons_enabled flips to 1 only after hardware is populated on the
     // main thread, so observing it re-runs rebuild_rows() once real macros
     // exist (this also covers reconnect / printer switch).
-    nav_enabled_observer_ = helix::ui::observe_int_sync<MacrosPanel>(
-        get_printer_state().get_nav_buttons_enabled_subject(), this,
+    nav_enabled_observer_ = helix::ui::observe<int>(
+        get_printer_state().network_state().get_nav_buttons_enabled_subject(), this,
         [](MacrosPanel* self, int) {
-            // Re-fetch from the API (macros may have just been populated) then
-            // rebuild — rebuild_rows() alone would reuse the stale cached list.
-            self->refresh_macros();
-            self->rebuild_rows();
+            // Macros may have just been populated; rebuild only if they changed.
+            if (self->refresh_macros()) {
+                self->rebuild_rows();
+            }
         },
         get_printer_state().get_subjects_lifetime());
 
     refresh_macros();
     rebuild_rows();
+    laps.lap("build rows");
 
-    spdlog::info("[{}] Overlay created successfully", get_name());
     return overlay_root_;
 }
 
@@ -169,18 +212,18 @@ void MacrosPanel::on_activate() {
 
     spdlog::debug("[{}] on_activate()", get_name());
 
-    // Defer the rebuild (#80) — on_activate() fires inside
-    // overlay_slide_out_complete_cb() while LVGL is still processing the
-    // animation tick. rebuild_rows() only mutates subjects (the repeat owns row
-    // widget lifecycle), so the defer is purely to sequence after the tick.
+    // create() built the rows for this open (the panel is destroyed on close), so only
+    // macros discovered since then need a rebuild. Deferred (#80): on_activate() fires
+    // inside overlay_slide_out_complete_cb() while LVGL is still in the animation tick.
     lifetime_.defer("MacrosPanel::rebuild", [this]() {
-        refresh_macros();
-        rebuild_rows();
+        if (refresh_macros()) {
+            rebuild_rows();
+        }
     });
 }
 
-void MacrosPanel::on_deactivate() {
-    spdlog::debug("[{}] on_deactivate()", get_name());
+void MacrosPanel::on_deactivating(DeactivateReason) {
+    spdlog::debug("[{}] on_deactivating()", get_name());
 
     // Leaving the panel (back button / nav-away) discards any unsaved edit-mode
     // changes: only the header Save persists pending_hidden_.
@@ -189,16 +232,20 @@ void MacrosPanel::on_deactivate() {
     }
 
     // Call base class (invalidates lifetime_)
-    OverlayBase::on_deactivate();
 }
 
 void MacrosPanel::on_ui_destroyed() {
     // overlay_root_ and all its children have been async-deleted. Drop the
-    // discovery observer and reclaim the five row pools so their name-registered
+    // discovery observer and reclaim the row slot pools so their name-registered
     // subjects are unregistered + freed while LVGL is still live (reclaim runs
     // synchronously here, before the async row deletion tick).
     ui_alive_ = false;
     scroll_container_ = nullptr;
+    rows_container_ = nullptr;
+    leading_spacer_ = nullptr;
+    trailing_spacer_ = nullptr;
+    slots_.clear();
+    slot_items_.clear();
     nav_enabled_observer_.reset();
 
     name_pool_.reclaim();
@@ -206,22 +253,29 @@ void MacrosPanel::on_ui_destroyed() {
     visible_pool_.reclaim();
     desc_hidden_pool_.reclaim();
     chevron_hidden_pool_.reclaim();
+    defaults_hidden_pool_.reclaim();
+    slot_hidden_pool_.reclaim();
 }
 
 // ============================================================================
 // Row model
 // ============================================================================
 
-void MacrosPanel::refresh_macros() {
+bool MacrosPanel::refresh_macros() {
     IMoonrakerAPI* api = get_moonraker_api();
     if (!api) {
         // No API (early boot, or a unit test that pre-set all_macros_). Leave
         // the current list intact rather than clobbering it to empty.
-        return;
+        return false;
     }
-    const auto& macros = api->hardware().macros();
-    all_macros_.assign(macros.begin(), macros.end());
-    std::sort(all_macros_.begin(), all_macros_.end());
+    const auto& hw = api->hardware();
+    std::vector<std::string> fresh = helix::macros::panel_macros(
+        hw.macros(), helix::skip_wrappers::wrapped_commands(hw.skip_active()));
+    if (fresh == all_macros_) {
+        return false;
+    }
+    all_macros_ = std::move(fresh);
+    return true;
 }
 
 std::set<std::string> MacrosPanel::seed_default_hidden() const {
@@ -244,39 +298,140 @@ void MacrosPanel::rebuild_rows() {
     const std::set<std::string> hidden = seed_default_hidden();
     displayed_ = edit_mode_ ? all_macros_ : helix::macros::filter_visible(all_macros_, hidden);
 
+    lv_subject_set_int(&macro_row_count_, static_cast<int>(displayed_.size()));
+    layout_rows();
+
+    spdlog::info("[{}] rebuild_rows: {} displayed ({} discovered, edit={})", get_name(),
+                 displayed_.size(), all_macros_.size(), edit_mode_);
+}
+
+helix::macros::RowValues MacrosPanel::row_values(size_t item) const {
+    const std::string& macro = displayed_[item];
+    const auto cached = helix::MacroParamCache::instance().get(macro);
+    return helix::macros::compute_row_values(
+        edit_mode_, pending_hidden_.count(macro) > 0, !cached.description.empty(),
+        cached.knowledge == helix::MacroParamKnowledge::KNOWN_NO_PARAMS,
+        cached.knowledge == helix::MacroParamKnowledge::KNOWN_PARAMS);
+}
+
+void MacrosPanel::fill_slot(size_t slot, size_t item) {
+    const auto rv = row_values(item);
+    name_pool_.set_string(slot, prettify_macro_name(displayed_[item]));
+    desc_pool_.set_string(slot,
+                          helix::MacroParamCache::instance().get(displayed_[item]).description);
+    visible_pool_.set_int(slot, rv.visible);
+    desc_hidden_pool_.set_int(slot, rv.desc_hidden);
+    chevron_hidden_pool_.set_int(slot, rv.chevron_hidden);
+    defaults_hidden_pool_.set_int(slot, rv.defaults_hidden);
+    slot_hidden_pool_.set_int(slot, 0);
+}
+
+size_t MacrosPanel::item_in_slot(size_t slot) const {
+    if (slot >= slot_items_.size() || slot_items_[slot] < 0) {
+        return SIZE_MAX;
+    }
+    return static_cast<size_t>(slot_items_[slot]);
+}
+
+void MacrosPanel::layout_rows() {
+    if (!rows_container_) {
+        return;
+    }
+    // Every slot is about to be rebound, so a press held on one would release onto
+    // a different macro.
+    helix::ui::reset_input_within(rows_container_);
+
+    helix::LapLog laps("MacrosPanel");
     const size_t n = displayed_.size();
-
-    // Grow all five pools before setting any values (grow-only within session).
-    name_pool_.ensure_size(n);
-    desc_pool_.ensure_size(n);
-    visible_pool_.ensure_size(n);
-    desc_hidden_pool_.ensure_size(n);
-    chevron_hidden_pool_.ensure_size(n);
-
-    // Populate every pool BEFORE publishing the count, so the repeat binds to
-    // already-populated subjects (no first-frame flash).
-    for (size_t i = 0; i < n; ++i) {
-        const std::string& macro = displayed_[i];
-        std::string display_name = prettify_macro_name(macro);
-        auto cached = helix::MacroParamCache::instance().get(macro);
-        const bool has_desc = !cached.description.empty();
-        const bool no_params = (cached.knowledge == helix::MacroParamKnowledge::KNOWN_NO_PARAMS);
-        const bool is_hidden = pending_hidden_.count(macro) > 0;
-
-        const auto rv =
-            helix::macros::compute_row_values(edit_mode_, is_hidden, has_desc, no_params);
-
-        name_pool_.set_string(i, display_name);
-        desc_pool_.set_string(i, cached.description);
-        visible_pool_.set_int(i, rv.visible);
-        desc_hidden_pool_.set_int(i, rv.desc_hidden);
-        chevron_hidden_pool_.set_int(i, rv.chevron_hidden);
+    const auto grow_slots = [this](size_t count) {
+        name_pool_.ensure_size(count);
+        desc_pool_.ensure_size(count);
+        visible_pool_.ensure_size(count);
+        desc_hidden_pool_.ensure_size(count);
+        chevron_hidden_pool_.ensure_size(count);
+        defaults_hidden_pool_.ensure_size(count);
+        slot_hidden_pool_.ensure_size(count);
+        for (size_t s = slots_.size(); s < count; s++) {
+            slot_hidden_pool_.set_int(s, 1);
+        }
+        // The repeat rebuilds every slot for the new count.
+        lv_subject_set_int(&macro_slot_count_, static_cast<int>(count));
+        slots_.clear();
+        for (size_t s = 0; s < count; s++) {
+            slots_.push_back(find_required(rows_container_, fmt::format("macro_slot_{}", s).c_str(),
+                                           get_name()));
+        }
+        slot_items_.assign(count, -1);
+    };
+    if (n > 0 && slots_.empty()) {
+        grow_slots(1);
     }
 
-    lv_subject_set_int(&macro_row_count_, static_cast<int>(n));
+    // A row's height follows only what it shows besides its one-line name, so rows
+    // sharing a description and the same optional parts are measured once.
+    const int gap = slots_.empty() ? 0 : lv_obj_get_style_margin_bottom(slots_[0], LV_PART_MAIN);
+    std::map<std::tuple<std::string, int, int, int>, int> measured;
+    row_tops_.assign(1, 0);
+    int min_h = INT32_MAX, max_h = 0;
+    for (size_t i = 0; i < n; i++) {
+        const auto rv = row_values(i);
+        auto key =
+            std::make_tuple(helix::MacroParamCache::instance().get(displayed_[i]).description,
+                            rv.desc_hidden, rv.defaults_hidden, rv.chevron_hidden);
+        auto it = measured.find(key);
+        if (it == measured.end()) {
+            fill_slot(0, i);
+            lv_obj_update_layout(slots_[0]);
+            it = measured.emplace(std::move(key), lv_obj_get_height(slots_[0])).first;
+        }
+        min_h = std::min(min_h, it->second);
+        max_h = std::max(max_h, it->second);
+        row_tops_.push_back(row_tops_.back() + it->second + gap);
+    }
+    laps.lap("measure rows");
 
-    spdlog::info("[{}] rebuild_rows: {} displayed ({} discovered, edit={})", get_name(), n,
-                 all_macros_.size(), edit_mode_);
+    if (n > 0) {
+        // The most rows a window can hold: a viewport of the shortest rows below a
+        // partly scrolled-off tallest one, plus the overscan at each end.
+        const int viewport = lv_obj_get_content_height(scroll_container_);
+        const size_t needed =
+            std::min(n, static_cast<size_t>((viewport + max_h + gap) / std::max(1, min_h + gap) +
+                                            1 + 2 * BUFFER_ROWS));
+        if (needed > slots_.size()) {
+            grow_slots(needed);
+        }
+    }
+    std::fill(slot_items_.begin(), slot_items_.end(), -1);
+    update_visible(true);
+    // A list that shrank can leave the scroll position past its new end; clamp it and
+    // show the rows that brings into view.
+    lv_obj_update_layout(scroll_container_);
+    lv_obj_readjust_scroll(scroll_container_, LV_ANIM_OFF);
+    update_visible(false);
+    measured_width_ = lv_obj_get_width(scroll_container_);
+    measured_viewport_h_ = lv_obj_get_content_height(scroll_container_);
+    laps.lap("show rows");
+}
+
+void MacrosPanel::update_visible(bool refill) {
+    if (!rows_container_ || !scroll_container_) {
+        return;
+    }
+    const auto w = helix::ui::compute_window(lv_obj_get_scroll_y(scroll_container_),
+                                             lv_obj_get_content_height(scroll_container_),
+                                             row_tops_, BUFFER_ROWS);
+    if (!refill && w.first == shown_first_ && w.last == shown_last_) {
+        return;
+    }
+    shown_first_ = w.first;
+    shown_last_ = w.last;
+    helix::ui::sync_list_spacers(rows_container_, leading_spacer_, trailing_spacer_, w,
+                                 last_leading_, last_trailing_);
+    helix::ui::show_window(
+        rows_container_, slot_items_, w.first, w.last, refill,
+        [this](size_t slot) { return slots_[slot]; },
+        [this](size_t slot, ssize_t item) { fill_slot(slot, static_cast<size_t>(item)); },
+        [this](size_t slot) { slot_hidden_pool_.set_int(slot, 1); });
 }
 
 void MacrosPanel::enter_edit_mode() {
@@ -310,18 +465,9 @@ void MacrosPanel::exit_edit_mode(bool save) {
 }
 
 void MacrosPanel::scroll_list_to_top() {
-    // The row-count change on rebuild_rows() drives a <repeat> rebuild that
-    // leaves the scrollable list scrolled to the bottom. Reset to top after
-    // the mode-change rebuild. Rows are created synchronously when
-    // macro_row_count is set, but layout may still be pending, so defer to
-    // the next main-thread tick (lifetime_.defer is safe here — main thread,
-    // `this`/singleton stays valid).
     if (scroll_container_) {
-        lifetime_.defer("MacrosPanel::scroll_top", [this]() {
-            if (scroll_container_) {
-                lv_obj_scroll_to_y(scroll_container_, 0, LV_ANIM_OFF);
-            }
-        });
+        lv_obj_scroll_to_y(scroll_container_, 0, LV_ANIM_OFF);
+        update_visible(false);
     }
 }
 
@@ -335,8 +481,12 @@ void MacrosPanel::toggle_row(size_t display_index) {
     } else {
         pending_hidden_.insert(macro);
     }
-    // Reactive: flip only this row's visibility int (no full rebuild).
-    visible_pool_.set_int(display_index, pending_hidden_.count(macro) ? 0 : 1);
+    // Reactive: flip only the visibility int of the slot showing it (no rebuild).
+    for (size_t slot = 0; slot < slot_items_.size(); slot++) {
+        if (slot_items_[slot] == static_cast<ssize_t>(display_index)) {
+            visible_pool_.set_int(slot, row_values(display_index).visible);
+        }
+    }
 }
 
 std::string MacrosPanel::prettify_macro_name(const std::string& name) {
@@ -347,10 +497,6 @@ std::string MacrosPanel::prettify_macro_name(const std::string& name) {
 // Run path
 // ============================================================================
 
-void MacrosPanel::execute_macro(const std::string& macro_name) {
-    execute_with_params(macro_name, {});
-}
-
 void MacrosPanel::fetch_params_and_execute(const std::string& macro_name) {
     IMoonrakerAPI* api = get_moonraker_api();
     if (!api) {
@@ -358,10 +504,14 @@ void MacrosPanel::fetch_params_and_execute(const std::string& macro_name) {
         return;
     }
 
-    bool dangerous = helix::is_dangerous_macro(macro_name, get_printer_state().get_discovery());
+    helix::MacroRunRequest req;
+    req.dangerous = helix::is_dangerous_macro(macro_name, get_printer_state().get_discovery());
+    req.confirm_plain_run =
+        helix::SafetySettingsManager::instance().get_macro_require_confirmation();
 
     // For dangerous macros, show confirmation before doing anything else
-    if (dangerous) {
+    if (helix::decide_macro_run(helix::MacroParamCache::instance().get(macro_name), req).action ==
+        helix::MacroRunAction::ConfirmDangerous) {
         spdlog::warn("[{}] Dangerous macro requested: {}", get_name(), macro_name);
 
         // Store pending macro name for the confirmation callbacks; on_dismiss
@@ -394,30 +544,48 @@ void MacrosPanel::fetch_params_and_execute(const std::string& macro_name) {
 void MacrosPanel::fetch_params_and_run(const std::string& macro_name) {
     auto cached = helix::MacroParamCache::instance().get(macro_name);
 
-    if (cached.knowledge == helix::MacroParamKnowledge::KNOWN_NO_PARAMS) {
-        // Ask for generic run confirmation when the setting is on. Skip for
-        // dangerous macros — the dangerous-macro confirm already ran upstream.
-        bool needs_confirm =
-            helix::SafetySettingsManager::instance().get_macro_require_confirmation() &&
-            !helix::is_dangerous_macro(macro_name, get_printer_state().get_discovery());
-        if (needs_confirm) {
-            pending_run_macro_ = macro_name;
-            std::string msg = fmt::format(lv_tr("Run {}?"), prettify_macro_name(macro_name));
-            helix::ui::ConfirmOptions opts;
-            opts.on_cancel = [this] { pending_run_macro_.clear(); };
-            opts.on_dismiss = [this] { pending_run_macro_.clear(); };
-            opts.owner_token = lifetime_.token();
-            helix::ui::modal_confirm(
-                lv_tr("Run Macro?"), msg.c_str(), ModalSeverity::Info, lv_tr("Run"),
-                [this] {
-                    std::string macro = pending_run_macro_;
-                    pending_run_macro_.clear();
-                    execute_macro(macro);
-                },
-                opts);
-            return;
-        }
-        execute_macro(macro_name);
+    // Reached straight from a row tap, or from the dangerous-macro dialog's
+    // Run button - where the dangerous flag recomputes true and suppresses the
+    // plain-run confirm below, so the macro is never confirmed twice.
+    helix::MacroRunRequest req;
+    req.dangerous = helix::is_dangerous_macro(macro_name, get_printer_state().get_discovery());
+    req.dangerous_confirmed = true;
+    req.confirm_plain_run =
+        helix::SafetySettingsManager::instance().get_macro_require_confirmation();
+
+    // Saved defaults: ask off runs (or confirms a run) with the saved values;
+    // ask on prefills the param modal with them. Either way a missing record
+    // behaves exactly as before.
+    const helix::MacroParamDefaultRecord defaults =
+        helix::MacroParamDefaults::instance().get(macro_name);
+    req.prompt_for_params = defaults.ask_for_params;
+    req.saved_values = defaults.values;
+
+    const helix::MacroRunDecision decision = helix::decide_macro_run(cached, req);
+
+    if (decision.action == helix::MacroRunAction::Run) {
+        execute_with_params(macro_name,
+                            helix::macro_param_result_from_values(cached.params, decision.params));
+        return;
+    }
+
+    if (decision.action == helix::MacroRunAction::ConfirmRun) {
+        pending_run_macro_ = macro_name;
+        const helix::MacroParamResult params =
+            helix::macro_param_result_from_values(cached.params, decision.params);
+        std::string msg = fmt::format(lv_tr("Run {}?"), prettify_macro_name(macro_name));
+        helix::ui::ConfirmOptions opts;
+        opts.on_cancel = [this] { pending_run_macro_.clear(); };
+        opts.on_dismiss = [this] { pending_run_macro_.clear(); };
+        opts.owner_token = lifetime_.token();
+        helix::ui::modal_confirm(
+            lv_tr("Run Macro?"), msg.c_str(), ModalSeverity::Info, lv_tr("Run"),
+            [this, params] {
+                std::string macro = pending_run_macro_;
+                pending_run_macro_.clear();
+                execute_with_params(macro, params);
+            },
+            opts);
         return;
     }
 
@@ -436,8 +604,8 @@ void MacrosPanel::fetch_params_and_run(const std::string& macro_name) {
         execute_with_params(name, result);
     };
 
-    if (cached.knowledge == helix::MacroParamKnowledge::KNOWN_PARAMS) {
-        param_modal_.show_for_macro(screen, macro_name, cached.params, on_result);
+    if (decision.action == helix::MacroRunAction::Prompt) {
+        param_modal_.show_for_macro(screen, macro_name, cached.params, on_result, decision.params);
     } else {
         param_modal_.show_for_unknown_params(screen, macro_name, on_result);
     }
@@ -451,72 +619,69 @@ void MacrosPanel::execute_with_params(const std::string& macro_name,
 }
 
 // ============================================================================
-// Static Callbacks
+// Event Handlers
 // ============================================================================
 
-void MacrosPanel::on_macro_row_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[MacrosPanel] on_macro_row_clicked");
-
-    auto& self = get_global_macros_panel();
-
-    // Row identity comes from the event_cb user_data ("$row_index" string).
-    const char* ud = static_cast<const char*>(lv_event_get_user_data(e));
-    if (ud) {
-        size_t i = static_cast<size_t>(atoi(ud));
-        if (i < self.displayed_.size()) {
-            if (self.edit_mode_) {
-                self.toggle_row(i);
-            } else {
-                self.fetch_params_and_execute(self.displayed_[i]);
-            }
-        }
+void MacrosPanel::handle_row_clicked(size_t i) {
+    if (i >= displayed_.size()) {
+        return;
     }
-
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void MacrosPanel::on_macro_card_long_press(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[MacrosPanel] on_macro_card_long_press");
-
-    auto& self = get_global_macros_panel();
-    if (!self.edit_mode_) {
-        // Minimal scroll-suppression: LVGL fires LONG_PRESSED on hold duration
-        // alone, so a hold during a scroll drag would falsely enter edit mode.
-        // The macro list has no arcs/sliders, so a scroll-object check is
-        // sufficient (cf. HomePanel::should_suppress_edit_mode, which also
-        // guards arc/slider drags — not needed here).
-        lv_indev_t* indev = lv_indev_active();
-        // Return inside the SAFE_EVENT_CB try block; the single _END below
-        // closes it — do NOT call _END here (that would double-close the try).
-        if (indev && lv_indev_get_scroll_obj(indev)) {
-            return;
-        }
-        // Cancel the in-progress press so the row's click (run macro) does not
-        // fire on release now that we're switching into edit mode.
-        if (indev) {
-            lv_indev_reset(indev, nullptr);
-        }
-        self.enter_edit_mode();
-    }
-
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void MacrosPanel::on_macros_edit_save(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[MacrosPanel] on_macros_edit_save");
-    (void)e;
-    get_global_macros_panel().exit_edit_mode(true);
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void MacrosPanel::on_macros_back_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[MacrosPanel] on_macros_back_clicked");
-    (void)e;
-    auto& self = get_global_macros_panel();
-    if (self.edit_mode_) {
-        self.exit_edit_mode(false); // discard pending changes, stay on panel
+    if (edit_mode_) {
+        toggle_row(i);
     } else {
-        NavigationManager::instance().go_back(); // normal Back: close the overlay
+        fetch_params_and_execute(displayed_[i]);
     }
-    LVGL_SAFE_EVENT_CB_END();
+}
+
+void MacrosPanel::handle_long_press() {
+    if (edit_mode_) {
+        return;
+    }
+    // Minimal scroll-suppression: LVGL fires LONG_PRESSED on hold duration
+    // alone, so a hold during a scroll drag would falsely enter edit mode.
+    // The macro list has no arcs/sliders, so a scroll-object check is
+    // sufficient (cf. HomePanel::should_suppress_edit_mode, which also
+    // guards arc/slider drags - not needed here).
+    lv_indev_t* indev = lv_indev_active();
+    if (indev && lv_indev_get_scroll_obj(indev)) {
+        return;
+    }
+    // Cancel the in-progress press so the row's click (run macro) does not
+    // fire on release now that we're switching into edit mode.
+    if (indev) {
+        lv_indev_reset(indev, nullptr);
+    }
+    enter_edit_mode();
+}
+
+void MacrosPanel::handle_defaults_clicked(size_t i) {
+    if (i >= displayed_.size()) {
+        return;
+    }
+    const std::string& macro = displayed_[i];
+
+    auto cached = helix::MacroParamCache::instance().get(macro);
+    if (cached.knowledge != helix::MacroParamKnowledge::KNOWN_PARAMS) {
+        // No declared parameter list to edit. The button is hidden for these
+        // rows; this is the belt for a stale row index after a rebuild.
+        spdlog::debug("[{}] No saved-defaults editor for '{}' (knowledge != KNOWN_PARAMS)",
+                      get_name(), macro);
+        return;
+    }
+
+    lv_obj_t* screen = lv_screen_active();
+    if (!screen) {
+        spdlog::warn("[{}] No active screen for the defaults editor of '{}'", get_name(), macro);
+        return;
+    }
+
+    auto token = lifetime_.token();
+    std::string name = macro;
+    param_modal_.show_for_defaults(screen, name, cached.params,
+                                   helix::MacroParamDefaults::instance().get(name),
+                                   [token, name](const helix::MacroParamDefaultRecord& record) {
+                                       if (token.expired())
+                                           return;
+                                       helix::MacroParamDefaults::instance().set(name, record);
+                                   });
 }

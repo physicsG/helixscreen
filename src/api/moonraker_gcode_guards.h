@@ -41,4 +41,23 @@ bool reject_homing_during_active_print(const std::string& gcode, helix::PrinterS
                                        const std::function<void(const MoonrakerError&)>& on_error,
                                        const char* log_tag);
 
+/// Reject a script while spools lie on the bed, unless every line is on the
+/// spool latch allowlist (spool_latch_gate.h). Same contract as the homing
+/// guard: true means refused and @p on_error already called
+/// (prestonbrown/helixscreen#1730).
+bool reject_motion_while_spools_on_bed(const std::string& gcode, helix::PrinterState& state,
+                                       bool silent,
+                                       const std::function<void(const MoonrakerError&)>& on_error,
+                                       const char* log_tag);
+
+/// Reject a Klipper or firmware restart while spools lie on the bed, with the
+/// restart wording (spool_latch_restart_message). @p state may be null.
+bool reject_restart_while_spools_on_bed(const helix::PrinterState* state, const char* method,
+                                        const std::function<void(const MoonrakerError&)>& on_error);
+
+/// Reject a print start, resume or queue start while spools lie on the bed.
+/// @p state may be null (a sub-API built without one), which refuses nothing.
+bool reject_job_while_spools_on_bed(const helix::PrinterState* state, const char* method,
+                                    const std::function<void(const MoonrakerError&)>& on_error);
+
 } // namespace helix::api

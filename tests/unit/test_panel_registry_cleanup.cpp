@@ -297,7 +297,10 @@ TEST_CASE_METHOD(LVGLTestFixture,
 TEST_CASE_METHOD(LVGLTestFixture, "Panel registry: clear does not run callbacks",
                  "[shutdown][registry][panel-lifecycle]") {
     auto& registry = StaticPanelRegistry::instance();
-    registry.destroy_all(); // Start clean
+    // destroy_all() lets a destroyer re-register through a lazy panel getter, so
+    // clear() is what leaves the registry empty.
+    registry.destroy_all();
+    registry.clear();
 
     bool callback_ran = false;
     registry.register_destroy("TestPanel", [&callback_ran]() { callback_ran = true; });

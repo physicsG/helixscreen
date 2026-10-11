@@ -113,10 +113,10 @@ teardown() {
 }
 
 @test "bundled install.sh carries path_sudo" {
-    grep -q '^path_sudo()' "$WORKTREE_ROOT/scripts/install.sh"
-    ! grep -E 'file_sudo "\$\{INSTALL_DIR\}"\) mv "\$\{INSTALL_DIR\}"' "$WORKTREE_ROOT/scripts/install.sh"
+    grep -q '^path_sudo()' "$INSTALL_BUNDLE"
+    ! grep -E 'file_sudo "\$\{INSTALL_DIR\}"\) mv "\$\{INSTALL_DIR\}"' "$INSTALL_BUNDLE"
 }
 
 @test "bundled uninstall.sh carries path_sudo" {
-    grep -q '^path_sudo()' "$WORKTREE_ROOT/scripts/uninstall.sh"
+    grep -q '^path_sudo()' "$UNINSTALL_BUNDLE"
 }

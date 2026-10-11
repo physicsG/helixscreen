@@ -13,6 +13,17 @@
   <api>
     <prop name="title" type="string"/>
     <prop name="title_tag" type="string" default=""/>
+    <!-- Optional live title. When a screen's header names something that changes
+         under it - the box a detail view is showing, say - it binds a string
+         subject here and leaves `title` as the value shown until the first
+         publish. An empty default resolves to no binding at all, so every header
+         that does not need one is untouched. `title` is still what a static
+         header uses, and stays the translated one: a bound title carries a name
+         the app composed, and is translated at the point it is composed. -->
+    <prop name="title_subject" type="string" default=""/>
+    <!-- Titles render in capitals; "none" keeps the title's own case (a name
+         whose case carries meaning, like "LEDs"). -->
+    <prop name="title_transform" type="string" default="uppercase"/>
     <!-- Optional trailing badge: a small image plus a short label, for a screen
          that needs to show WHICH record it is editing. Both parts are empty by
          default and the group stays hidden unless title_badge_subject resolves
@@ -48,20 +59,30 @@
     <!-- Subject name for reactive disabled state binding (empty = no binding) -->
     <prop name="action_button_disabled_subject" type="string" default=""/>
     <!-- Expression form of the above, for buttons whose disabled state depends on
-         more than one subject. Mirrors the base header_bar; see its comment for
-         why the two forms are mutually exclusive and why ordering matters. -->
+         more than one subject. Mirrors the base header_bar; setting both forms is
+         fine, since bindings on one state OR together. -->
     <prop name="action_button_disabled_cond" type="string" default="0"/>
     <!-- Optional int subject: 1 hides the action button entirely (per-view Save) -->
     <prop name="action_button_hidden_subject" type="string" default=""/>
     <!-- Second action button (appears to LEFT of primary action button) -->
     <prop name="action_button_2_text" type="string" default=""/>
     <prop name="action_button_2_text_tag" type="string" default=""/>
+    <prop name="action_button_2_icon" type="string" default=""/>
+    <prop name="action_button_2_icon_size" type="string" default="sm"/>
     <prop name="action_button_2_bg_color" type="string" default="#secondary"/>
+    <prop name="action_button_2_radius" type="string" default="#border_radius"/>
+    <prop name="action_button_2_width" type="string" default="content"/>
+    <!-- Floor for the text-shaped slot; an icon-only consumer passes a smaller
+         value so the button reads as a circle. 72, not the base 90: this tier's
+         header is 40px tall and every slot-2 px comes out of the title. -->
+    <prop name="action_button_2_min_width" type="string" default="72"/>
     <prop name="action_button_2_callback" type="string" default=""/>
     <prop name="hide_action_button_2" type="string" default="true"/>
-    <!-- Dedicated E-Stop spacer (rightmost). Mirrors the base header_bar; see
-         its comment. The floating circle lives at the panel root, not here. -->
-    <prop name="estop_visible_subject" type="string" default=""/>
+    <prop name="action_button_2_hidden_subject" type="string" default=""/>
+    <!-- Expression form of the above; mirrors the base header_bar, including
+         the empty default (see its comment for why not a constant). -->
+    <prop name="action_button_2_hidden_cond" type="string" default=""/>
+    <prop name="action_button_2_disabled_subject" type="string" default=""/>
   </api>
   <view extends="lv_obj"
         width="100%" height="40" style_pad_left="0" style_pad_right="#space_xl" style_pad_top="0" style_pad_bottom="0"
@@ -74,9 +95,18 @@
             style_flex_track_place="center" flex_flow="row" style_pad_gap="#space_xs">
       <event_cb trigger="clicked" callback="$back_button_callback"/>
       <icon src="back" size="lg" variant="text" clickable="false" event_bubble="true"/>
+      <!-- bind_text is deliberately FIRST. An unsupplied title_subject resolves to the
+           empty name, which is a registered no-op INT subject, and binding to that
+           stamps "0" over the title. Applying text/translation_tag afterwards puts the
+           static title back, and the no-op subject never changes, so it never returns.
+           A header that does supply a subject still retitles on every publish. -->
+      <!-- clip, not dots: dots with a content height wraps a title too long
+           for its slot onto a second line mid-word. clip measures the text
+           unwrapped, so the title stays one line and is cut at the slot edge. -->
       <text_heading name="header_title"
-                    text="$title" translation_tag="$title_tag" text_transform="uppercase" flex_grow="1"
-                    style_text_align="left" clickable="false" event_bubble="true" scrollable="false"/>
+                    long_mode="clip" bind_text="$title_subject" text="$title" translation_tag="$title_tag"
+                    text_transform="$title_transform" flex_grow="1" style_text_align="left" clickable="false"
+                    event_bubble="true" scrollable="false"/>
       <!-- Trailing badge (image + label), see the props above. -->
       <lv_obj name="header_title_badge"
               width="content" height="content" style_pad_all="0" flex_flow="row" style_flex_cross_place="center"
@@ -87,11 +117,27 @@
         <text_small name="header_title_badge_text" style_text_color="#text_muted" clickable="false" event_bubble="true"/>
       </lv_obj>
     </lv_obj>
-    <!-- Secondary action button (left of primary, hidden by default) -->
+    <!-- Content slot; mirrors the base header_bar. Filled by nesting a
+         <header_bar-header_content> tag inside the header_bar instantiation.
+         Carries no padding of its own (injected content brings its left
+         margin), so unfilled it is zero width and costs nothing. -->
+    <lv_obj name="header_content"
+            width="content" height="100%" style_pad_all="0" style_pad_left="0" style_pad_right="0" style_bg_opa="0"
+            style_border_width="0" scrollable="false" clickable="false" flex_flow="row" style_pad_gap="#space_xs"
+            style_flex_cross_place="center"/>
+    <!-- Secondary action button (left of primary, hidden by default). -->
+    <!-- No style_max_height, as on the primary action button above:
+         #header_button_height is a const of the base file, which this
+         override does not carry. -->
     <ui_button name="action_button_2"
-               width="content" height="$action_button_height" style_min_width="72"
-               style_bg_color="$action_button_2_bg_color" hidden="$hide_action_button_2" text="$action_button_2_text"
+               width="$action_button_2_width" height="$action_button_height"
+               style_min_width="$action_button_2_min_width" style_radius="$action_button_2_radius"
+               style_bg_color="$action_button_2_bg_color" hidden="$hide_action_button_2" icon="$action_button_2_icon"
+               icon_size="$action_button_2_icon_size" text="$action_button_2_text"
                translation_tag="$action_button_2_text_tag">
+      <bind_state_if_eq subject="$action_button_2_disabled_subject" state="disabled" ref_value="1"/>
+      <bind_flag_if cond="$action_button_2_hidden_cond" flag="hidden"/>
+      <bind_flag_if_eq subject="$action_button_2_hidden_subject" flag="hidden" ref_value="1"/>
       <event_cb trigger="clicked" callback="$action_button_2_callback"/>
     </ui_button>
     <!-- Primary action button (hidden by default, pass hide_action_button="false" to show) -->
@@ -101,12 +147,7 @@
                width="$action_button_width" height="$action_button_height" style_radius="$action_button_radius"
                style_bg_color="$action_button_bg_color" hidden="$hide_action_button" icon="$action_button_icon"
                icon_size="$action_button_icon_size" text="$action_button_text" translation_tag="$action_button_text_tag">
-      <!-- STATE_BINDING_OK: a caller supplies EITHER action_button_disabled_cond
-           OR action_button_disabled_subject, never both, and the unused one
-           defaults to a constant that fires once at bind and never again. This
-           expression form must precede the subject binding so the subject form
-           wins when it is the one in use; see the prop comment in the base
-           header_bar. -->
+      <!-- Two independent reasons to be disabled; they OR together. -->
       <bind_state_if cond="$action_button_disabled_cond" state="disabled"/>
       <!-- Reactive disabled state binding (enabled when subject exists and is non-empty) -->
       <bind_state_if_eq subject="$action_button_disabled_subject" state="disabled" ref_value="1"/>
@@ -115,26 +156,14 @@
       <event_cb trigger="clicked" callback="$action_button_callback"/>
     </ui_button>
     <!-- Unsaved-z-offset save. Mirrors the base header_bar; see its comment for
-         why the condition is inline and why one binding carries both tests.
+         what z_offset_save_available carries.
          No style_max_height here: #header_button_height lives in the base
          file's <consts>, and the micro override carries no consts block. -->
     <ui_button name="header_save_z_offset"
                width="content" height="$action_button_height" style_bg_color="#success" icon="check" icon_size="sm"
-               hidden="true">
-      <bind_flag_if cond="z_offset_can_save and (gcode_z_offset ne 0 or any_tool_z_dirty)" flag="hidden" invert="true"/>
-      <bind_state_if_eq subject="job_holds_machine" state="disabled" ref_value="1"/>
+               hidden="true" moves_machine="true">
+      <bind_flag_if_eq subject="z_offset_save_available" flag="hidden" ref_value="0"/>
       <event_cb trigger="clicked" callback="on_header_save_z_offset"/>
     </ui_button>
-    <!-- E-Stop spacer: rightmost reserved gutter — NO button inside. The
-         floating circle lives at the panel root; this just keeps the title and
-         any action button clear of it. See base header_bar for full design. -->
-    <!-- SIZE_OK: 48 matches estop_slot_width_micro in the base file's ladder
-         (FAB 44 + 4px margin). Micro override has no <consts> block by
-         convention; a token would not resolve to 48 at this tier anyway. -->
-    <lv_obj name="estop_slot"
-            width="48" height="100%" style_pad_all="0" style_bg_opa="0" style_border_width="0" scrollable="false"
-            clickable="false" hidden="true">
-      <bind_flag_if_eq subject="$estop_visible_subject" flag="hidden" ref_value="0"/>
-    </lv_obj>
   </view>
 </component>

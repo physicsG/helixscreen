@@ -84,7 +84,6 @@ class PluginInstallModal : public Modal {
     lv_obj_t* result_container_ = nullptr;
     lv_obj_t* checkbox_container_ = nullptr;
     lv_obj_t* dont_ask_checkbox_ = nullptr;
-    lv_obj_t* phase_tracking_checkbox_ = nullptr;
     lv_obj_t* copy_feedback_ = nullptr;
 
     // Internal handlers

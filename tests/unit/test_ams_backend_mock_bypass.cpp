@@ -1,6 +1,7 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "../test_helpers/mock_bypass.h"
 #include "ams_backend_mock.h"
 
 #include "../catch_amalgamated.hpp"
@@ -14,9 +15,10 @@
  */
 
 TEST_CASE("AmsBackendMock bypass mode", "[ams][mock][bypass]") {
-    AmsBackendMock backend(4);
+    helix::AmsBackendMock backend(4);
     backend.set_operation_delay(0); // Instant operations for tests
     REQUIRE(backend.start());
+    REQUIRE(helix::test::unload_for_bypass(backend));
 
     SECTION("initially not in bypass mode") {
         REQUIRE_FALSE(backend.is_bypass_active());
@@ -78,7 +80,7 @@ TEST_CASE("AmsBackendMock bypass mode", "[ams][mock][bypass]") {
 
     SECTION("get_filament_segment shows NOZZLE when bypass active") {
         backend.enable_bypass();
-        REQUIRE(backend.get_filament_segment() == PathSegment::NOZZLE);
+        REQUIRE(backend.get_filament_segment() == helix::PathSegment::NOZZLE);
     }
 
     SECTION("supports_bypass flag is set") {
@@ -90,18 +92,19 @@ TEST_CASE("AmsBackendMock bypass mode", "[ams][mock][bypass]") {
 }
 
 TEST_CASE("AmsBackendMock bypass events", "[ams][mock][bypass][events]") {
-    AmsBackendMock backend(4);
+    helix::AmsBackendMock backend(4);
     backend.set_operation_delay(0);
 
     bool state_changed = false;
     backend.set_event_callback([&](const std::string& event, const std::string&) {
-        if (event == AmsBackend::EVENT_STATE_CHANGED) {
+        if (event == helix::AmsBackend::EVENT_STATE_CHANGED) {
             state_changed = true;
         }
     });
 
     REQUIRE(backend.start());
-    state_changed = false; // Reset after start event
+    REQUIRE(helix::test::unload_for_bypass(backend));
+    state_changed = false; // Reset after start and unload events
 
     SECTION("enable bypass emits state changed event") {
         backend.enable_bypass();
@@ -119,9 +122,10 @@ TEST_CASE("AmsBackendMock bypass events", "[ams][mock][bypass][events]") {
 }
 
 TEST_CASE("AmsBackendMock hardware bypass sensor", "[ams][mock][bypass][sensor]") {
-    AmsBackendMock backend(4);
+    helix::AmsBackendMock backend(4);
     backend.set_operation_delay(0);
     REQUIRE(backend.start());
+    REQUIRE(helix::test::unload_for_bypass(backend));
 
     SECTION("default is virtual bypass (no hardware sensor)") {
         auto info = backend.get_system_info();
@@ -165,4 +169,29 @@ TEST_CASE("AmsBackendMock hardware bypass sensor", "[ams][mock][bypass][sensor]"
     }
 
     backend.stop();
+}
+
+TEST_CASE("AmsBackendMock refuses bypass with filament loaded where the hardware does",
+          "[ams][mock][bypass]") {
+    // Happy Hare and AFC do not chain an unload in front of bypass, so they
+    // refuse it themselves while the toolhead holds filament.
+    for (const bool afc : {false, true}) {
+        helix::AmsBackendMock backend(4);
+        backend.set_operation_delay(0);
+        if (afc) {
+            backend.set_afc_mode(true);
+        }
+        REQUIRE(backend.start());
+        REQUIRE(backend.get_system_info().filament_loaded);
+        REQUIRE_FALSE(backend.allows_implicit_chaining());
+
+        const auto refused = backend.enable_bypass();
+        CHECK(refused.result == helix::AmsResult::WRONG_STATE);
+        CHECK_FALSE(backend.is_bypass_active());
+
+        REQUIRE(helix::test::unload_for_bypass(backend));
+        CHECK(backend.enable_bypass().success());
+        CHECK(backend.is_bypass_active());
+        backend.stop();
+    }
 }

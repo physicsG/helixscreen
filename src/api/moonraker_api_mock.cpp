@@ -6,26 +6,39 @@
 #include "ui_update_queue.h"
 
 #include "../tests/mocks/mock_printer_state.h"
+#include "env_knobs.h"
 #include "gcode_parser.h"
+#include "mock_planted_gcodes.h"
+#include "moonraker_client_mock.h"
 #include "moonraker_client_mock_internal.h"
+#include "plugin_source_app.h"
 #include "power_device_state.h"
 #include "runtime_config.h"
 #include "screws_tilt_parser.h"
 #include "sensor_state.h"
+#include "text_io.h"
+#include "thumbnail_rules.h"
 #include "timelapse_state.h"
 
 #include <spdlog/spdlog.h>
+
+#include <fcntl.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
 
 // Alias for cleaner code - use shared constant from RuntimeConfig
 #define TEST_GCODE_DIR RuntimeConfig::TEST_GCODE_DIR
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <random>
 #include <set>
 #include <sstream>
@@ -62,8 +75,8 @@ MoonrakerAPIMock::MoonrakerAPIMock(MoonrakerClient& client, PrinterState& state)
     file_transfer_api_ =
         std::make_unique<MoonrakerFileTransferAPIMock>(client, get_http_base_url());
     file_api_ = std::make_unique<MoonrakerFileAPIMock>(client);
+    job_api_ = std::make_unique<helix::MoonrakerJobAPIMock>(client, &state);
     rest_api_ = std::make_unique<MoonrakerRestAPIMock>(client, get_http_base_url());
-    spoolman_api_ = std::make_unique<MoonrakerSpoolmanAPIMock>(client);
     timelapse_api_ = std::make_unique<MoonrakerTimelapseAPIMock>(client, get_http_base_url());
 }
 
@@ -73,6 +86,10 @@ MoonrakerAdvancedAPIMock& MoonrakerAPIMock::advanced_mock() {
 
 MoonrakerFileTransferAPIMock& MoonrakerAPIMock::transfers_mock() {
     return static_cast<MoonrakerFileTransferAPIMock&>(*file_transfer_api_);
+}
+
+helix::MoonrakerJobAPIMock& MoonrakerAPIMock::job_mock() {
+    return static_cast<helix::MoonrakerJobAPIMock&>(*job_api_);
 }
 
 MoonrakerFileAPIMock& MoonrakerAPIMock::files_mock() {
@@ -93,21 +110,8 @@ MoonrakerRestAPIMock& MoonrakerAPIMock::rest_mock() {
     return static_cast<MoonrakerRestAPIMock&>(*rest_api_);
 }
 
-MoonrakerSpoolmanAPIMock& MoonrakerAPIMock::spoolman_mock() {
-    return static_cast<MoonrakerSpoolmanAPIMock&>(*spoolman_api_);
-}
-
 MoonrakerTimelapseAPIMock& MoonrakerAPIMock::timelapse_mock() {
     return static_cast<MoonrakerTimelapseAPIMock&>(*timelapse_api_);
-}
-
-// ============================================================================
-// MoonrakerSpoolmanAPIMock Implementation
-// ============================================================================
-
-MoonrakerSpoolmanAPIMock::MoonrakerSpoolmanAPIMock(MoonrakerClient& client)
-    : MoonrakerSpoolmanAPI(client) {
-    init_mock_spools();
 }
 
 // ============================================================================
@@ -123,15 +127,15 @@ bool MoonrakerAPIMock::unsubscribe_notifications(SubscriptionId /*id*/) {
     return true;
 }
 
-void MoonrakerAPIMock::register_method_callback(const std::string& /*method*/,
-                                                const std::string& /*name*/,
-                                                std::function<void(const json&)> /*callback*/) {
-    // No-op in mock
+void MoonrakerAPIMock::register_method_callback(const std::string& method, const std::string& name,
+                                                std::function<void(const json&)> callback) {
+    // The mock client dispatches notifications itself, so listeners reach them.
+    MoonrakerAPI::register_method_callback(method, name, std::move(callback));
 }
 
-bool MoonrakerAPIMock::unregister_method_callback(const std::string& /*method*/,
-                                                  const std::string& /*name*/) {
-    return true;
+bool MoonrakerAPIMock::unregister_method_callback(const std::string& method,
+                                                  const std::string& name) {
+    return MoonrakerAPI::unregister_method_callback(method, name);
 }
 
 void MoonrakerAPIMock::suppress_disconnect_modal(uint32_t duration_ms) {
@@ -165,273 +169,13 @@ void MoonrakerAPIMock::get_gcode_store(
     }
 }
 
-void MoonrakerAPIMock::database_get_item(const std::string& namespace_name, const std::string& key,
-                                         std::function<void(const json&)> on_success,
-                                         ErrorCallback on_error) {
-    std::string db_key = namespace_name + ":" + key;
-    auto it = mock_db_.find(db_key);
-    if (it != mock_db_.end()) {
-        if (on_success) {
-            on_success(it->second);
-        }
-    } else {
-        if (on_error) {
-            MoonrakerError err = MoonrakerError::unknown("Key not found in mock DB");
-            on_error(err);
-        }
-    }
-}
-
-void MoonrakerAPIMock::mock_set_db_value(const std::string& namespace_name, const std::string& key,
-                                         const nlohmann::json& value) {
-    mock_db_[namespace_name + ":" + key] = value;
-}
-
-nlohmann::json MoonrakerAPIMock::mock_get_db_value(const std::string& namespace_name,
-                                                   const std::string& key) const {
-    auto it = mock_db_.find(namespace_name + ":" + key);
-    if (it == mock_db_.end())
-        return nlohmann::json();
-    return it->second;
-}
-
-void MoonrakerAPIMock::mock_reject_next_db_post() {
-    next_db_post_rejection_ = MoonrakerError::unknown("Mock: database_post_item rejected");
-}
-
-void MoonrakerAPIMock::mock_reject_next_db_post(MoonrakerError err) {
-    next_db_post_rejection_ = std::move(err);
-}
-
-void MoonrakerAPIMock::mock_reject_next_db_delete() {
-    next_db_delete_rejection_ = MoonrakerError::unknown("Mock: database_delete_item rejected");
-}
-
-void MoonrakerAPIMock::mock_reject_next_db_delete(MoonrakerError err) {
-    next_db_delete_rejection_ = std::move(err);
-}
-
-void MoonrakerAPIMock::mock_reject_next_db_get() {
-    next_db_get_rejection_ = MoonrakerError::unknown("Mock: database_get_namespace rejected");
-}
-
-void MoonrakerAPIMock::mock_reject_next_db_get(MoonrakerError err) {
-    next_db_get_rejection_ = std::move(err);
-}
-
-void MoonrakerAPIMock::mock_defer_next_db_post() {
-    defer_next_db_post_ = true;
-}
-
-void MoonrakerAPIMock::fire_deferred_db_post_success() {
-    // No-op if nothing was captured. This is important for the
-    // destruction-before-fire lifetime tests: a test can safely call this in
-    // cleanup without caring whether a previous test consumed it.
-    if (!deferred_db_post_.has_value())
-        return;
-    auto captured = std::move(*deferred_db_post_);
-    deferred_db_post_.reset();
-    // Apply the deferred DB write now that the "server" has acknowledged.
-    mock_db_[captured.namespace_name + ":" + captured.key] = captured.value;
-    if (captured.on_success)
-        captured.on_success();
-}
-
-void MoonrakerAPIMock::fire_deferred_db_post_error(MoonrakerError err) {
-    if (!deferred_db_post_.has_value())
-        return;
-    auto captured = std::move(*deferred_db_post_);
-    deferred_db_post_.reset();
-    if (captured.on_error)
-        captured.on_error(err);
-}
-
-void MoonrakerAPIMock::mock_defer_next_db_delete() {
-    defer_next_db_delete_ = true;
-}
-
-void MoonrakerAPIMock::fire_deferred_db_delete_success() {
-    if (!deferred_db_delete_.has_value())
-        return;
-    auto captured = std::move(*deferred_db_delete_);
-    deferred_db_delete_.reset();
-    // Apply the deferred DB erase now that the "server" has acknowledged.
-    mock_db_.erase(captured.namespace_name + ":" + captured.key);
-    if (captured.on_success)
-        captured.on_success();
-}
-
-void MoonrakerAPIMock::fire_deferred_db_delete_error(MoonrakerError err) {
-    if (!deferred_db_delete_.has_value())
-        return;
-    auto captured = std::move(*deferred_db_delete_);
-    deferred_db_delete_.reset();
-    if (captured.on_error)
-        captured.on_error(err);
-}
-
-void MoonrakerAPIMock::mock_defer_next_db_get() {
-    defer_next_db_get_ = true;
-}
-
-void MoonrakerAPIMock::fire_deferred_db_get_success(const nlohmann::json& value) {
-    if (!deferred_db_get_.has_value())
-        return;
-    auto captured = std::move(*deferred_db_get_);
-    deferred_db_get_.reset();
-    if (captured.on_success)
-        captured.on_success(value);
-}
-
-void MoonrakerAPIMock::fire_deferred_db_get_error(MoonrakerError err) {
-    if (!deferred_db_get_.has_value())
-        return;
-    auto captured = std::move(*deferred_db_get_);
-    deferred_db_get_.reset();
-    if (captured.on_error)
-        captured.on_error(err);
-}
-
-void MoonrakerAPIMock::set_database_empty(const std::string& namespace_name,
-                                          const std::string& key) {
-    mock_db_.erase(namespace_name + ":" + key);
-}
-
-void MoonrakerAPIMock::database_post_item(const std::string& namespace_name, const std::string& key,
-                                          const json& value, std::function<void()> on_success,
-                                          ErrorCallback on_error) {
-    ++db_post_count_;
-    if (next_db_post_rejection_.has_value()) {
-        MoonrakerError err = std::move(*next_db_post_rejection_);
-        next_db_post_rejection_.reset();
-        if (on_error) {
-            on_error(err);
-        }
-        return;
-    }
-    if (defer_next_db_post_) {
-        // Capture for later fire_deferred_db_post_*. Importantly, we do NOT
-        // write to the DB yet — the fire_*_success path applies the write so
-        // behavior matches a real server that only mutates state after ACK.
-        defer_next_db_post_ = false;
-        DeferredDbPost captured;
-        captured.on_success = std::move(on_success);
-        captured.on_error = std::move(on_error);
-        captured.namespace_name = namespace_name;
-        captured.key = key;
-        captured.value = value;
-        deferred_db_post_ = std::move(captured);
-        return;
-    }
-    mock_db_[namespace_name + ":" + key] = value;
-    if (on_success) {
-        on_success();
-    }
-}
-
-void MoonrakerAPIMock::database_get_namespace(const std::string& namespace_name,
-                                              std::function<void(const json&)> on_success,
-                                              ErrorCallback on_error) {
-    if (next_db_get_rejection_.has_value()) {
-        MoonrakerError err = std::move(*next_db_get_rejection_);
-        next_db_get_rejection_.reset();
-        if (on_error) {
-            on_error(err);
-        }
-        return;
-    }
-    if (defer_next_db_get_) {
-        defer_next_db_get_ = false;
-        DeferredDbGet captured;
-        captured.on_success = std::move(on_success);
-        captured.on_error = std::move(on_error);
-        captured.namespace_name = namespace_name;
-        deferred_db_get_ = std::move(captured);
-        return;
-    }
-    // Collect all entries whose mock key starts with "<namespace_name>:" into
-    // a single JSON object keyed by the portion after the colon.
-    nlohmann::json result = nlohmann::json::object();
-    const std::string prefix = namespace_name + ":";
-    for (const auto& [db_key, value] : mock_db_) {
-        if (db_key.rfind(prefix, 0) == 0) {
-            result[db_key.substr(prefix.size())] = value;
-        }
-    }
-    if (on_success) {
-        on_success(result);
-    }
-}
-
-void MoonrakerAPIMock::database_delete_item(const std::string& namespace_name,
-                                            const std::string& key,
-                                            std::function<void()> on_success,
-                                            ErrorCallback on_error) {
-    ++db_delete_count_;
-    if (next_db_delete_rejection_.has_value()) {
-        MoonrakerError err = std::move(*next_db_delete_rejection_);
-        next_db_delete_rejection_.reset();
-        // Mirror MoonrakerAPI::database_delete_item's missing-key normalization
-        // so the mock faithfully simulates the real API's contract. Tests that
-        // inject a 404 or "not found" error through mock_reject_next_db_delete
-        // verify callers see on_success — exactly as they would against a real
-        // Moonraker instance.
-        const bool missing_key =
-            err.code == 404 || err.message.find("not found") != std::string::npos;
-        if (missing_key) {
-            if (on_success) {
-                on_success();
-            }
-            return;
-        }
-        if (on_error) {
-            on_error(err);
-        }
-        return;
-    }
-    if (defer_next_db_delete_) {
-        // Capture for later fire_deferred_db_delete_*. We do NOT erase from the
-        // DB yet — fire_*_success applies the erase so behavior matches a real
-        // server that only mutates state after ACK.
-        defer_next_db_delete_ = false;
-        DeferredDbPost captured; // reused shape (success/error identical)
-        captured.on_success = std::move(on_success);
-        captured.on_error = std::move(on_error);
-        captured.namespace_name = namespace_name;
-        captured.key = key;
-        deferred_db_delete_ = std::move(captured);
-        return;
-    }
-    // Absent keys are a silent success (matches Moonraker's semantics after the
-    // real impl maps its "key not found" error to success).
-    mock_db_.erase(namespace_name + ":" + key);
-    if (on_success) {
-        on_success();
-    }
-}
-
-// ============================================================================
-// Helix Plugin Method Overrides (mock)
-// ============================================================================
-
-void MoonrakerAPIMock::get_phase_tracking_status(std::function<void(bool)> on_success,
-                                                 ErrorCallback /*on_error*/) {
-    if (on_success) {
-        on_success(false);
-    }
-}
-
-void MoonrakerAPIMock::set_phase_tracking_enabled(bool enabled,
-                                                  std::function<void(bool)> on_success,
-                                                  ErrorCallback /*on_error*/) {
-    spdlog::debug("[MoonrakerAPIMock] set_phase_tracking_enabled({})", enabled);
-    if (on_success) {
-        on_success(enabled);
-    }
-}
-
 std::string MoonrakerFileTransferAPIMock::find_test_file(const std::string& filename) const {
     namespace fs = std::filesystem;
+
+    const std::string& planted = helix::mock::planted_gcode_dir();
+    if (!planted.empty() && fs::exists(planted + "/" + filename)) {
+        return planted + "/" + filename;
+    }
 
     for (const auto& prefix : PATH_PREFIXES) {
         std::string path = prefix + std::string(TEST_GCODE_DIR) + "/" + filename;
@@ -464,6 +208,38 @@ std::map<std::string, std::string> MoonrakerFileTransferAPIMock::get_config_file
     return config_files_;
 }
 
+MoonrakerFileTransferAPIMock::ConfigRootFile
+MoonrakerFileTransferAPIMock::lookup_config_root(const std::string& root,
+                                                 const std::string& path) const {
+    ConfigRootFile out;
+    if (root != "config")
+        return out;
+    const std::string_view plugin_path(path);
+    const char* plugins_dir = std::getenv("HELIX_MOCK_PLUGINS_DIR");
+    std::error_code dir_ec;
+    if (plugins_dir && *plugins_dir && std::filesystem::is_directory(plugins_dir, dir_ec) &&
+        plugin_path.rfind(plugin::kPluginRootPath, 0) == 0) {
+        // The plugins directory owns the whole plugin folder: a miss inside it is a
+        // not-found, never a fall-through that could resolve some same-basename test file.
+        out.owned = true;
+        const std::filesystem::path local =
+            std::filesystem::path(plugins_dir) /
+            plugin_path.substr(std::string_view(plugin::kPluginRootPath).size());
+        std::ifstream in(local, std::ios::binary);
+        if (in)
+            out.content =
+                std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        return out;
+    }
+    if (!config_files_.empty()) {
+        auto it = config_files_.find(path);
+        if (it != config_files_.end())
+            out.content = it->second;
+        out.owned = true;
+    }
+    return out;
+}
+
 MoonrakerFileAPIMock::MoonrakerFileAPIMock(helix::IMoonrakerClient& client)
     : MoonrakerFileAPI(client) {}
 
@@ -474,28 +250,115 @@ void MoonrakerFileAPIMock::set_config_files(std::map<std::string, std::string> f
 void MoonrakerFileAPIMock::list_files(const std::string& root, const std::string& path,
                                       bool recursive, FileListCallback on_success,
                                       ErrorCallback on_error) {
-    if (root != "config" || config_files_.empty()) {
-        MoonrakerFileAPI::list_files(root, path, recursive, std::move(on_success),
-                                     std::move(on_error));
+    if (root == "config") {
+        std::vector<FileInfo> listing;
+        for (const auto& [file_path, content] : config_files_) {
+            FileInfo info;
+            info.path = file_path;
+            auto slash = file_path.rfind('/');
+            info.filename = (slash == std::string::npos) ? file_path : file_path.substr(slash + 1);
+            info.size = content.size();
+            info.is_dir = false;
+            listing.push_back(info);
+        }
+
+        // HELIX_MOCK_PLUGINS_DIR serves the plugin folder of the config root from a local
+        // directory, so a --test run lists and syncs plugins exactly like a printer would.
+        // Runs before the fall-through: with no injected files the directory alone still
+        // owns the config root.
+        const char* plugins_dir = std::getenv("HELIX_MOCK_PLUGINS_DIR");
+        bool plugins_dir_active = false;
+        std::error_code dir_ec;
+        if (plugins_dir && *plugins_dir && std::filesystem::is_directory(plugins_dir, dir_ec)) {
+            plugins_dir_active = true;
+            std::error_code walk_ec;
+            for (std::filesystem::recursive_directory_iterator it(plugins_dir, walk_ec), end;
+                 !walk_ec && it != end; it.increment(walk_ec)) {
+                std::error_code file_ec;
+                if (!it->is_regular_file(file_ec) || file_ec)
+                    continue;
+                FileInfo info;
+                info.path = std::string(plugin::kPluginRootPath) +
+                            it->path().lexically_relative(plugins_dir).generic_string();
+                info.filename = it->path().filename().string();
+                info.size = it->file_size(file_ec);
+                std::error_code mtime_ec;
+                const auto mtime = std::filesystem::last_write_time(it->path(), mtime_ec);
+                if (!mtime_ec)
+                    info.modified = std::chrono::duration<double>(mtime.time_since_epoch()).count();
+                info.is_dir = false;
+                listing.push_back(info);
+            }
+            spdlog::debug("[MoonrakerAPIMock] HELIX_MOCK_PLUGINS_DIR={} listed into config root",
+                          plugins_dir);
+        }
+
+        if (!config_files_.empty() || plugins_dir_active) {
+            spdlog::debug("[MoonrakerAPIMock] list_files(config) serving {} mock files",
+                          listing.size());
+            if (on_success)
+                on_success(listing);
+            return;
+        }
+    }
+
+    MoonrakerFileAPI::list_files(root, path, recursive, std::move(on_success), std::move(on_error));
+}
+
+void MoonrakerFileAPIMock::delete_file(const std::string& filename, SuccessCallback on_success,
+                                       ErrorCallback on_error) {
+    (void)on_error; // Unused - the mock always accepts a delete
+    deleted_files_.push_back(filename);
+    spdlog::debug("[MoonrakerAPIMock] Mock delete_file: {}", filename);
+    if (on_success) {
+        on_success();
+    }
+}
+
+// ============================================================================
+// MoonrakerJobAPIMock
+// ============================================================================
+
+helix::MoonrakerJobAPIMock::MoonrakerJobAPIMock(helix::IMoonrakerClient& client,
+                                                const helix::PrinterState* state)
+    : MoonrakerJobAPI(client, state) {}
+
+void helix::MoonrakerJobAPIMock::start_print(const std::string& filename,
+                                             SuccessCallback on_success, ErrorCallback on_error) {
+    started_prints_.push_back(filename);
+    MoonrakerJobAPI::start_print(filename, std::move(on_success), std::move(on_error));
+}
+
+void helix::MoonrakerJobAPIMock::start_modified_print(const std::string& original_filename,
+                                                      const std::string& temp_file_path,
+                                                      const std::vector<std::string>& modifications,
+                                                      ModifiedPrintCallback on_success,
+                                                      ErrorCallback on_error) {
+    if (refused_by_spool_latch("server.helix.print_modified", on_error)) {
+        return;
+    }
+    modified_prints_.push_back({original_filename, temp_file_path, modifications});
+
+    spdlog::info("[MoonrakerAPIMock] Mock start_modified_print: original='{}', temp='{}', "
+                 "{} modification(s)",
+                 original_filename, temp_file_path, modifications.size());
+
+    if (fail_modified_prints_) {
+        if (on_error) {
+            on_error(MoonrakerError::unknown("Mock plugin rejected: " + temp_file_path,
+                                             "start_modified_print"));
+        }
         return;
     }
 
-    std::vector<FileInfo> listing;
-    for (const auto& [file_path, content] : config_files_) {
-        FileInfo info;
-        info.path = file_path;
-        auto slash = file_path.rfind('/');
-        info.filename = (slash == std::string::npos) ? file_path : file_path.substr(slash + 1);
-        info.size = content.size();
-        info.is_dir = false;
-        listing.push_back(info);
+    if (on_success) {
+        ModifiedPrintResult result;
+        result.original_filename = original_filename;
+        result.print_filename = original_filename;
+        result.temp_filename = temp_file_path;
+        result.status = "printing";
+        on_success(result);
     }
-
-    spdlog::debug("[MoonrakerAPIMock] list_files(config) serving {} injected files",
-                  listing.size());
-
-    if (on_success)
-        on_success(listing);
 }
 
 void MoonrakerFileTransferAPIMock::download_file(const std::string& root, const std::string& path,
@@ -588,16 +451,32 @@ void MoonrakerFileTransferAPIMock::download_file(const std::string& root, const 
 void MoonrakerFileTransferAPIMock::download_file_partial(const std::string& root,
                                                          const std::string& path, size_t max_bytes,
                                                          StringCallback on_success,
-                                                         ErrorCallback on_error) {
+                                                         ErrorCallback on_error,
+                                                         CancelFlag /*cancelled*/) {
+    spdlog::debug("[MoonrakerAPIMock] download_file_partial: root='{}', path='{}', max_bytes={}",
+                  root, path, max_bytes);
+
+    // Config root: serve HELIX_MOCK_PLUGINS_DIR and the injected config root by full path,
+    // mirroring the real partial download's head-range contract.
+    const ConfigRootFile config = lookup_config_root(root, path);
+    if (config.owned) {
+        if (!config.content) {
+            if (on_error)
+                on_error(MoonrakerError::file_not_found("download_file_partial",
+                                                        "Mock config file not found: " + path));
+            return;
+        }
+        if (on_success)
+            on_success(config.content->substr(0, max_bytes));
+        return;
+    }
+
     // Strip any leading directory components to get just the filename
     std::string filename = path;
     size_t last_slash = path.rfind('/');
     if (last_slash != std::string::npos) {
         filename = path.substr(last_slash + 1);
     }
-
-    spdlog::debug("[MoonrakerAPIMock] download_file_partial: root='{}', path='{}', max_bytes={}",
-                  root, path, max_bytes);
 
     // Find the test file using fallback path search
     std::string local_path = find_test_file(filename);
@@ -696,6 +575,33 @@ void MoonrakerFileTransferAPIMock::download_file_to_path(
     const std::string& root, const std::string& path, const std::string& dest_path,
     StringCallback on_success, ErrorCallback on_error, ProgressCallback on_progress) {
     (void)on_progress; // Progress callback ignored in mock
+    download_destinations_.push_back(dest_path);
+
+    // Config root: serve HELIX_MOCK_PLUGINS_DIR and the injected config root by full path,
+    // so a config download lands on disk exactly what the in-memory root holds.
+    const ConfigRootFile config = lookup_config_root(root, path);
+    if (config.owned) {
+        if (!config.content) {
+            spdlog::warn("[MoonrakerAPIMock] File not found in config root: {}", path);
+            if (on_error) {
+                on_error(MoonrakerError::file_not_found("download_file_to_path",
+                                                        "Mock config file not found: " + path));
+            }
+            return;
+        }
+        if (!text_io::write_file(dest_path, *config.content)) {
+            spdlog::error("[MoonrakerAPIMock] Failed to create destination file: {}", dest_path);
+            if (on_error) {
+                on_error(MoonrakerError::unknown("Failed to create destination file: " + dest_path,
+                                                 "download_file_to_path"));
+            }
+            return;
+        }
+        if (on_success)
+            on_success(dest_path);
+        return;
+    }
+
     // Extract just the filename from the path
     std::string filename = path;
     size_t last_slash = path.find_last_of('/');
@@ -776,6 +682,48 @@ void MoonrakerFileTransferAPIMock::download_file_to_path(
     }
 }
 
+void MoonrakerFileTransferAPIMock::upload_file_from_path(
+    const std::string& root, const std::string& dest_path, const std::string& local_path,
+    SuccessCallback on_success, ErrorCallback on_error, ProgressCallback on_progress) {
+    (void)on_progress; // Progress callback ignored in mock
+
+    // Snapshot the bytes now: the producer deletes local_path from its own
+    // success callback, so a test that reads the file afterwards finds nothing.
+    PathUploadRecord record;
+    record.root = root;
+    record.dest_path = dest_path;
+    record.local_path = local_path;
+    {
+        std::ifstream src(local_path, std::ios::binary);
+        if (src) {
+            record.content.assign(std::istreambuf_iterator<char>(src),
+                                  std::istreambuf_iterator<char>());
+        }
+    }
+    path_uploads_.push_back(record);
+
+    spdlog::info("[MoonrakerAPIMock] Mock upload_file_from_path: root='{}', dest='{}', "
+                 "local='{}', size={} bytes",
+                 root, dest_path, local_path, record.content.size());
+
+    if (hold_path_uploads_) {
+        held_path_uploads_.push_back(std::move(on_success));
+        return;
+    }
+
+    if (fail_path_uploads_) {
+        if (on_error) {
+            on_error(MoonrakerError::unknown("Mock upload rejected: " + dest_path,
+                                             "upload_file_from_path"));
+        }
+        return;
+    }
+
+    if (on_success) {
+        on_success();
+    }
+}
+
 void MoonrakerFileTransferAPIMock::upload_file(const std::string& root, const std::string& path,
                                                const std::string& content,
                                                SuccessCallback on_success, ErrorCallback on_error) {
@@ -806,6 +754,14 @@ void MoonrakerFileTransferAPIMock::upload_file_with_name(
         "size={} bytes",
         root, path, filename, content.size());
 
+    // Same recording contract as upload_file(): an injected config root
+    // receives the write, so tests can assert on what a config edit actually
+    // wrote. An empty path is the config root, so the file lands at the bare
+    // filename; a subdirectory prefixes it.
+    if (root == "config" && !config_files_.empty()) {
+        config_files_[path.empty() ? filename : path + "/" + filename] = content;
+    }
+
     // Mock always succeeds
     if (on_success) {
         on_success();
@@ -825,38 +781,44 @@ void MoonrakerFileTransferAPIMock::download_thumbnail(const std::string& thumbna
     // download → HttpExecutor worker → decode → prescale → evict pipeline is
     // never executed under --test, which is the pipeline bundle 6F3QJLFG
     // implicates (#960). This is the only way to reach it without a printer.
-    static const bool remote_thumbs = [] {
-        const char* v = std::getenv("HELIX_MOCK_REMOTE_THUMBS");
-        return v && v[0] && std::string(v) != "0";
-    }();
+    static const bool remote_thumbs = [] { return helix::env_flag("HELIX_MOCK_REMOTE_THUMBS"); }();
     if (remote_thumbs) {
         MoonrakerFileTransferAPI::download_thumbnail(thumbnail_path, cache_path,
                                                      std::move(on_success), std::move(on_error));
         return;
     }
 
-    (void)on_error; // Unused below - mock falls back to placeholder on failure
-
     namespace fs = std::filesystem;
 
     // First check: if thumbnail_path is already a local file that exists, use it directly
     // This handles paths like "build/thumbnail_cache/filename.png" from mock metadata
+    // Written as PNG bytes whatever the source format, as the real download does.
     if (fs::exists(thumbnail_path)) {
-        try {
-            // Copy to cache path (unless they're the same)
-            if (thumbnail_path != cache_path) {
-                fs::copy_file(thumbnail_path, cache_path, fs::copy_options::overwrite_existing);
-            }
+        const auto raw = helix::text_io::read_file(thumbnail_path);
+        const std::vector<uint8_t> png =
+            raw ? helix::ensure_png({raw->begin(), raw->end()}) : std::vector<uint8_t>{};
+        if (!png.empty() &&
+            helix::text_io::write_file_atomic(
+                cache_path, {reinterpret_cast<const char*>(png.data()), png.size()})) {
             spdlog::info("[MoonrakerAPIMock] Using local thumbnail {} -> {}", thumbnail_path,
                          cache_path);
             if (on_success) {
                 on_success("A:" + cache_path);
             }
             return;
-        } catch (const fs::filesystem_error& e) {
-            spdlog::warn("[MoonrakerAPIMock] Failed to copy local thumbnail: {}", e.what());
-            // Fall through to other methods
         }
+        if (raw && png.empty()) {
+            // The real download refuses a format it cannot store as PNG.
+            if (on_error) {
+                MoonrakerError err;
+                err.type = MoonrakerErrorType::VALIDATION_ERROR;
+                err.message = "Not a PNG or decodable JPEG thumbnail: " + thumbnail_path;
+                on_error(err);
+            }
+            return;
+        }
+        spdlog::warn("[MoonrakerAPIMock] Failed to copy local thumbnail {} as PNG", thumbnail_path);
+        // Fall through to other methods
     }
 
     // Moonraker thumbnail paths look like: ".thumbnails/filename-NNxNN.png"
@@ -881,27 +843,18 @@ void MoonrakerFileTransferAPIMock::download_thumbnail(const std::string& thumbna
     if (!gcode_filename.empty()) {
         std::string gcode_path = find_test_file(gcode_filename);
         if (!gcode_path.empty()) {
-            // Extract thumbnails from the G-code file
-            auto thumbnails = helix::gcode::extract_thumbnails(gcode_path);
-            if (!thumbnails.empty()) {
-                // Find the largest thumbnail (best quality)
-                const helix::gcode::GCodeThumbnail* best = &thumbnails[0];
-                for (const auto& thumb : thumbnails) {
-                    if (thumb.pixel_count() > best->pixel_count()) {
-                        best = &thumb;
-                    }
-                }
-
+            const auto thumb = helix::gcode::get_best_thumbnail(gcode_path);
+            if (!thumb.png_data.empty()) {
                 // Write the thumbnail to the cache path
                 std::ofstream file(cache_path, std::ios::binary);
                 if (file) {
-                    file.write(reinterpret_cast<const char*>(best->png_data.data()),
-                               static_cast<std::streamsize>(best->png_data.size()));
+                    file.write(reinterpret_cast<const char*>(thumb.png_data.data()),
+                               static_cast<std::streamsize>(thumb.png_data.size()));
                     file.close();
 
                     spdlog::info(
                         "[MoonrakerAPIMock] Extracted thumbnail {}x{} ({} bytes) from {} -> {}",
-                        best->width, best->height, best->png_data.size(), gcode_filename,
+                        thumb.width, thumb.height, thumb.png_data.size(), gcode_filename,
                         cache_path);
 
                     if (on_success) {
@@ -946,7 +899,7 @@ void MoonrakerAPIMock::get_power_devices(PowerDevicesCallback on_success, ErrorC
     (void)on_error; // Mock never fails
 
     // Test empty state with: MOCK_EMPTY_POWER=1
-    if (std::getenv("MOCK_EMPTY_POWER")) {
+    if (helix::env_flag("MOCK_EMPTY_POWER")) {
         spdlog::info("[MoonrakerAPIMock] Returning empty power devices (MOCK_EMPTY_POWER set)");
         on_success({});
         return;
@@ -1045,7 +998,21 @@ MoonrakerRestAPIMock::MoonrakerRestAPIMock(MoonrakerClient& client,
                                            const std::string& http_base_url)
     : MoonrakerRestAPI(client, http_base_url) {}
 
-void MoonrakerRestAPIMock::wled_get_strips(RestCallback on_success, ErrorCallback /*on_error*/) {
+void MoonrakerRestAPIMock::mock_release_wled_strips() {
+    hold_wled_strips_ = false;
+    auto held = std::move(held_wled_strips_);
+    held_wled_strips_.clear();
+    for (auto& answer : held) {
+        answer();
+    }
+}
+
+void MoonrakerRestAPIMock::wled_get_strips(RestCallback on_success, ErrorCallback on_error) {
+    if (hold_wled_strips_) {
+        held_wled_strips_.push_back(
+            [this, on_success, on_error]() { wled_get_strips(on_success, on_error); });
+        return;
+    }
     spdlog::info("[MoonrakerAPIMock] WLED get_strips (returning mock strips from tracked state)");
 
     // Initialize defaults if not already set (same pattern as wled_get_status)
@@ -1176,6 +1143,10 @@ void MoonrakerRestAPIMock::wled_get_status(RestCallback on_success, ErrorCallbac
     }
 }
 
+namespace {
+const char* mock_klippy_uds_address(); // defined below, beside its socket setup
+}
+
 void MoonrakerRestAPIMock::get_server_config(RestCallback on_success, ErrorCallback /*on_error*/) {
     spdlog::info("[MoonrakerAPIMock] get_server_config");
 
@@ -1186,13 +1157,62 @@ void MoonrakerRestAPIMock::get_server_config(RestCallback on_success, ErrorCallb
         resp.data = {
             {"result",
              {{"config",
-               {{"wled printer_led",
+               {{"server", {{"klippy_uds_address", mock_klippy_uds_address()}}},
+                {"wled printer_led",
                  {{"type", "http"}, {"address", "192.168.1.50"}, {"initial_preset", -1}}},
                 {"wled enclosure_led",
                  {{"type", "http"}, {"address", "192.168.1.51"}, {"initial_preset", -1}}}}}}}};
         on_success(resp);
     }
 }
+
+// ============================================================================
+// Mock klippy UDS
+// ============================================================================
+
+namespace {
+
+/// Owns the mock klippy socket; unlinks the path at process exit.
+struct SocketGuard {
+    std::string path;
+    int fd;
+    ~SocketGuard() {
+        ::unlink(path.c_str());
+        ::close(fd);
+    }
+};
+
+/// A process-lifetime listening unix socket standing in for klippy's UDS.
+/// Co-location checks connect() to the address Moonraker reports, so the mock
+/// must name a socket that accepts a connection. Created once per process on
+/// first use and unlinked at exit.
+const char* mock_klippy_uds_address() {
+    static const std::string path = [] {
+        const std::string p = "/tmp/helix-mock-klippy-" + std::to_string(getpid()) + ".sock";
+        ::unlink(p.c_str());
+        const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+        if (fd >= 0) {
+            sockaddr_un addr{};
+            addr.sun_family = AF_UNIX;
+            std::strncpy(addr.sun_path, p.c_str(), sizeof(addr.sun_path) - 1);
+            // SOMAXCONN, never 1: connect_uds() blocks on a full backlog, and
+            // nothing ever accepts here - a tiny backlog would wedge the
+            // second co-location probe for the process lifetime.
+            if (::bind(fd, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) == 0 &&
+                ::listen(fd, SOMAXCONN) == 0) {
+                static_cast<void>(fcntl(fd, F_SETFD, FD_CLOEXEC));
+                // Local static: its destructor unlinks at process exit.
+                static const SocketGuard guard{p, fd};
+                return p;
+            }
+            ::close(fd);
+        }
+        return std::string("/nonexistent/mock-klippy.sock");
+    }();
+    return path.c_str();
+}
+
+} // namespace
 
 // ============================================================================
 // Shared State Methods
@@ -1407,24 +1427,25 @@ void MoonrakerAdvancedAPIMock::reset_mock_bed_state() {
     spdlog::info("[MoonrakerAdvancedAPIMock] Mock bed state reset");
 }
 
-void MoonrakerAdvancedAPIMock::start_bed_mesh_calibrate(BedMeshProgressCallback on_progress,
-                                                        SuccessCallback on_complete,
-                                                        ErrorCallback /*on_error*/,
-                                                        int /*expected_probes*/,
-                                                        int /*probe_samples*/) {
-    spdlog::info(
-        "[MoonrakerAdvancedAPIMock] start_bed_mesh_calibrate() - simulating probe sequence");
+void MoonrakerAdvancedAPIMock::start_bed_mesh_calibrate(
+    const BedMeshCommand& command, BedMeshProgressCallback on_progress, SuccessCallback on_complete,
+    ErrorCallback /*on_error*/, int /*expected_probes*/, int /*probe_samples*/) {
+    spdlog::info("[MoonrakerAdvancedAPIMock] start_bed_mesh_calibrate('{}') - simulating probe "
+                 "sequence",
+                 command.script);
 
     // Context struct to track state across timer callbacks
     struct ProbeSimContext {
         MoonrakerAdvancedAPIMock* advanced;
         BedMeshProgressCallback on_progress;
         SuccessCallback on_complete;
+        std::string script;
         int current = 0;
         int total = 49; // 7x7 mesh = 49 probe points
     };
 
-    auto* ctx = new ProbeSimContext{this, std::move(on_progress), std::move(on_complete)};
+    auto* ctx =
+        new ProbeSimContext{this, std::move(on_progress), std::move(on_complete), command.script};
 
     // Timer callback - advances probe simulation one step at a time
     auto timer_cb = [](lv_timer_t* t) {
@@ -1444,10 +1465,10 @@ void MoonrakerAdvancedAPIMock::start_bed_mesh_calibrate(BedMeshProgressCallback 
             spdlog::info("[MoonrakerAdvancedAPIMock] Probe simulation complete, regenerating mesh");
             lv_timer_delete(t);
 
-            // Send BED_MESH_CALIBRATE to client mock to regenerate mesh data
-            // Match real API: no PROFILE= parameter, mesh goes to "default" profile
+            // The client mock regenerates the mesh and stores it in whatever
+            // profile the command's PROFILE= names, as Klipper does.
             c->advanced->api_.execute_gcode(
-                "BED_MESH_CALIBRATE",
+                c->script,
                 [c]() {
                     spdlog::debug("[MoonrakerAdvancedAPIMock] Mesh regenerated");
                     if (c->on_complete) {
@@ -1468,1014 +1489,6 @@ void MoonrakerAdvancedAPIMock::start_bed_mesh_calibrate(BedMeshProgressCallback 
     // Create timer - 50ms between each probe point (~2.5 seconds total for 49 points)
     lv_timer_t* timer = lv_timer_create(timer_cb, 50, ctx);
     lv_timer_set_repeat_count(timer, ctx->total + 1); // +1 for final completion check
-}
-
-// ============================================================================
-// MoonrakerSpoolmanAPIMock - Spoolman Override
-// ============================================================================
-
-void MoonrakerSpoolmanAPIMock::init_mock_spools() {
-    // Create a realistic mock spool inventory
-    mock_spools_.clear();
-
-    // Spool 1: Polymaker PLA - Jet Black (active, 85% remaining)
-    SpoolInfo spool1;
-    spool1.id = 1;
-    spool1.vendor = "Polymaker";
-    spool1.material = "PLA";
-    spool1.filament_name = "Jet Black";
-    spool1.color_hex = "1A1A2E";
-    spool1.remaining_weight_g = 850.0;
-    spool1.initial_weight_g = 1000.0;
-    spool1.remaining_length_m = 290.0;
-    spool1.spool_weight_g = 140.0;
-    spool1.nozzle_temp_recommended = 210;
-    spool1.bed_temp_recommended = 60;
-    spool1.is_active = true;
-    mock_spools_.push_back(spool1);
-
-    // Spool 2: eSUN Silk PLA - Silk Blue (75% remaining)
-    SpoolInfo spool2;
-    spool2.id = 2;
-    spool2.vendor = "eSUN";
-    spool2.material = "Silk PLA";
-    spool2.filament_name = "Silk Blue";
-    spool2.color_hex = "26DCD9";
-    spool2.remaining_weight_g = 750.0;
-    spool2.initial_weight_g = 1000.0;
-    spool2.remaining_length_m = 258.0;
-    spool2.spool_weight_g = 240.0;
-    spool2.nozzle_temp_recommended = 210;
-    spool2.bed_temp_recommended = 50;
-    spool2.is_active = false;
-    mock_spools_.push_back(spool2);
-
-    // Spool 3: Elegoo ASA - Pop Blue (50% remaining)
-    SpoolInfo spool3;
-    spool3.id = 3;
-    spool3.vendor = "Elegoo";
-    spool3.material = "ASA";
-    spool3.filament_name = "Pop Blue";
-    spool3.color_hex = "00AEFF";
-    spool3.remaining_weight_g = 500.0;
-    spool3.initial_weight_g = 1000.0;
-    spool3.remaining_length_m = 185.0;
-    spool3.spool_weight_g = 170.0;
-    spool3.nozzle_temp_recommended = 260;
-    spool3.bed_temp_recommended = 100;
-    spool3.is_active = false;
-    mock_spools_.push_back(spool3);
-
-    // Spool 4: Flashforge ABS - Fire Engine Red (LOW: 10% remaining)
-    SpoolInfo spool4;
-    spool4.id = 4;
-    spool4.vendor = "Flashforge";
-    spool4.material = "ABS";
-    spool4.filament_name = "Fire Engine Red";
-    spool4.color_hex = "D20000";
-    spool4.remaining_weight_g = 100.0;
-    spool4.initial_weight_g = 1000.0;
-    spool4.remaining_length_m = 39.0;
-    spool4.spool_weight_g = 160.0;
-    spool4.nozzle_temp_recommended = 260;
-    spool4.bed_temp_recommended = 100;
-    spool4.is_active = false;
-    mock_spools_.push_back(spool4);
-
-    // Spool 5: Kingroon PETG - Signal Yellow (NEW: 100% remaining)
-    SpoolInfo spool5;
-    spool5.id = 5;
-    spool5.vendor = "Kingroon";
-    spool5.material = "PETG";
-    spool5.filament_name = "Signal Yellow";
-    spool5.color_hex = "F4E111";
-    spool5.remaining_weight_g = 1000.0;
-    spool5.initial_weight_g = 1000.0;
-    spool5.remaining_length_m = 333.0;
-    spool5.spool_weight_g = 155.0;
-    spool5.nozzle_temp_recommended = 235;
-    spool5.bed_temp_recommended = 70;
-    spool5.is_active = false;
-    mock_spools_.push_back(spool5);
-
-    // Spool 6: Overture TPU - Clear (60% remaining)
-    SpoolInfo spool6;
-    spool6.id = 6;
-    spool6.vendor = "Overture";
-    spool6.material = "TPU";
-    spool6.filament_name = "Clear";
-    spool6.color_hex = "E8E8E8";
-    spool6.remaining_weight_g = 600.0;
-    spool6.initial_weight_g = 1000.0;
-    spool6.remaining_length_m = 198.0;
-    spool6.spool_weight_g = 230.0;
-    spool6.nozzle_temp_recommended = 220;
-    spool6.bed_temp_recommended = 50;
-    spool6.is_active = false;
-    mock_spools_.push_back(spool6);
-
-    // === Additional spools from real Spoolman inventory for realistic testing ===
-
-    // Spool 7: Bambu Lab ASA - Gray (NEW: 100%)
-    SpoolInfo spool7;
-    spool7.id = 7;
-    spool7.vendor = "Bambu Lab";
-    spool7.material = "ASA";
-    spool7.filament_name = "Gray ASA";
-    spool7.color_hex = "8A949E";
-    spool7.remaining_weight_g = 1000.0;
-    spool7.initial_weight_g = 1000.0;
-    spool7.remaining_length_m = 370.0;
-    spool7.spool_weight_g = 250.0;
-    spool7.nozzle_temp_recommended = 250;
-    spool7.bed_temp_recommended = 90;
-    spool7.is_active = false;
-    mock_spools_.push_back(spool7);
-
-    // Spool 8: Polymaker PC - Grey (67% - Polycarbonate engineering material)
-    SpoolInfo spool8;
-    spool8.id = 8;
-    spool8.vendor = "Polymaker";
-    spool8.material = "PC";
-    spool8.filament_name = "PolyMax PC Grey";
-    spool8.color_hex = "A2AAAD";
-    spool8.remaining_weight_g = 500.0;
-    spool8.initial_weight_g = 750.0;
-    spool8.remaining_length_m = 152.0;
-    spool8.spool_weight_g = 125.0;
-    spool8.nozzle_temp_recommended = 270;
-    spool8.bed_temp_recommended = 100;
-    spool8.is_active = false;
-    mock_spools_.push_back(spool8);
-
-    // Spool 9: Polymaker PA12-CF15 - Carbon Fiber Nylon (100% - HIGH TEMP)
-    SpoolInfo spool9;
-    spool9.id = 9;
-    spool9.vendor = "Polymaker";
-    spool9.material = "PA-CF";
-    spool9.filament_name = "Fiberon PA12-CF15 Black";
-    spool9.color_hex = "000000";
-    spool9.remaining_weight_g = 500.0;
-    spool9.initial_weight_g = 500.0;
-    spool9.remaining_length_m = 170.0;
-    spool9.spool_weight_g = 190.0;
-    spool9.nozzle_temp_recommended = 290;
-    spool9.bed_temp_recommended = 50;
-    spool9.is_active = false;
-    mock_spools_.push_back(spool9);
-
-    // Spool 10: Tinmorry TPU - Blue (90% - Flexible)
-    SpoolInfo spool10;
-    spool10.id = 10;
-    spool10.vendor = "Tinmorry";
-    spool10.material = "TPU";
-    spool10.filament_name = "Blue TPU";
-    spool10.color_hex = "435FCC";
-    spool10.remaining_weight_g = 900.0;
-    spool10.initial_weight_g = 1000.0;
-    spool10.remaining_length_m = 297.0;
-    spool10.spool_weight_g = 200.0;
-    spool10.nozzle_temp_recommended = 230;
-    spool10.bed_temp_recommended = 50;
-    spool10.is_active = false;
-    mock_spools_.push_back(spool10);
-
-    // Spool 11: eSUN ABS - Black (40%)
-    SpoolInfo spool11;
-    spool11.id = 11;
-    spool11.vendor = "eSUN";
-    spool11.material = "ABS";
-    spool11.filament_name = "Black ABS+HS";
-    spool11.color_hex = "000000";
-    spool11.remaining_weight_g = 400.0;
-    spool11.initial_weight_g = 1000.0;
-    spool11.remaining_length_m = 148.0;
-    spool11.spool_weight_g = 160.0;
-    spool11.nozzle_temp_recommended = 260;
-    spool11.bed_temp_recommended = 100;
-    spool11.is_active = false;
-    mock_spools_.push_back(spool11);
-
-    // Spool 12: Flashforge ASA - Dark Green Sparkle (35%)
-    SpoolInfo spool12;
-    spool12.id = 12;
-    spool12.vendor = "Flashforge";
-    spool12.material = "ASA";
-    spool12.filament_name = "Dark Green Sparkle ASA";
-    spool12.color_hex = "276E27";
-    spool12.remaining_weight_g = 350.0;
-    spool12.initial_weight_g = 1000.0;
-    spool12.remaining_length_m = 129.5;
-    spool12.spool_weight_g = 175.0;
-    spool12.nozzle_temp_recommended = 260;
-    spool12.bed_temp_recommended = 100;
-    spool12.is_active = false;
-    mock_spools_.push_back(spool12);
-
-    // Spool 13: Bambu Lab PETG - Translucent Green (100%)
-    SpoolInfo spool13;
-    spool13.id = 13;
-    spool13.vendor = "Bambu Lab";
-    spool13.material = "PETG";
-    spool13.filament_name = "Translucent Green PETG";
-    spool13.color_hex = "29A261";
-    spool13.remaining_weight_g = 1000.0;
-    spool13.initial_weight_g = 1000.0;
-    spool13.remaining_length_m = 333.0;
-    spool13.spool_weight_g = 250.0;
-    spool13.nozzle_temp_recommended = 250;
-    spool13.bed_temp_recommended = 70;
-    spool13.is_active = false;
-    mock_spools_.push_back(spool13);
-
-    // Spool 14: Eryone Silk PLA - Gold/Silver/Copper (49% - tri-color)
-    SpoolInfo spool14;
-    spool14.id = 14;
-    spool14.vendor = "Eryone";
-    spool14.material = "Silk PLA";
-    spool14.filament_name = "Gold/Silver/Copper Tri-Color";
-    spool14.color_hex = "D4AF37";                          // Primary color (gold)
-    spool14.multi_color_hexes = "#D4AF37,#C0C0C0,#B87333"; // Gold, Silver, Copper
-    spool14.remaining_weight_g = 494.0;
-    spool14.initial_weight_g = 1000.0;
-    spool14.remaining_length_m = 170.0;
-    spool14.spool_weight_g = 150.0;
-    spool14.nozzle_temp_recommended = 220;
-    spool14.bed_temp_recommended = 60;
-    spool14.is_active = false;
-    mock_spools_.push_back(spool14);
-
-    // Spool 15: Bambu Lab PLA - Red (100%)
-    SpoolInfo spool15;
-    spool15.id = 15;
-    spool15.vendor = "Bambu Lab";
-    spool15.material = "PLA";
-    spool15.filament_name = "Red PLA";
-    spool15.color_hex = "C12E1F";
-    spool15.remaining_weight_g = 1000.0;
-    spool15.initial_weight_g = 1000.0;
-    spool15.remaining_length_m = 340.0;
-    spool15.spool_weight_g = 250.0;
-    spool15.nozzle_temp_recommended = 220;
-    spool15.bed_temp_recommended = 60;
-    spool15.is_active = false;
-    mock_spools_.push_back(spool15);
-
-    // Spool 16: Polymaker ABS - Metallic Blue (17%)
-    SpoolInfo spool16;
-    spool16.id = 16;
-    spool16.vendor = "Polymaker";
-    spool16.material = "ABS";
-    spool16.filament_name = "PolyLite ABS Metallic Blue";
-    spool16.color_hex = "333C64";
-    spool16.remaining_weight_g = 174.0;
-    spool16.initial_weight_g = 1000.0;
-    spool16.remaining_length_m = 64.0;
-    spool16.spool_weight_g = 140.0;
-    spool16.nozzle_temp_recommended = 260;
-    spool16.bed_temp_recommended = 100;
-    spool16.is_active = false;
-    mock_spools_.push_back(spool16);
-
-    // Spool 17: Sunlu PETG - Black (55%)
-    SpoolInfo spool17;
-    spool17.id = 17;
-    spool17.vendor = "Sunlu";
-    spool17.material = "PETG";
-    spool17.filament_name = "Black PETG";
-    spool17.color_hex = "000000";
-    spool17.remaining_weight_g = 550.0;
-    spool17.initial_weight_g = 1000.0;
-    spool17.remaining_length_m = 183.0;
-    spool17.spool_weight_g = 130.0;
-    spool17.nozzle_temp_recommended = 255;
-    spool17.bed_temp_recommended = 80;
-    spool17.is_active = false;
-    mock_spools_.push_back(spool17);
-
-    // Spool 18: eSUN PLA+ - White (30%)
-    SpoolInfo spool18;
-    spool18.id = 18;
-    spool18.vendor = "eSUN";
-    spool18.material = "PLA+";
-    spool18.filament_name = "PLA+ White";
-    spool18.color_hex = "FFFFFF";
-    spool18.remaining_weight_g = 300.0;
-    spool18.initial_weight_g = 1000.0;
-    spool18.remaining_length_m = 103.0;
-    spool18.spool_weight_g = 170.0;
-    spool18.nozzle_temp_recommended = 220;
-    spool18.bed_temp_recommended = 60;
-    spool18.is_active = false;
-    mock_spools_.push_back(spool18);
-
-    // Spool 19: TTYT3D Marble PLA - Black/White (85% - dual-color marble)
-    SpoolInfo spool19;
-    spool19.id = 19;
-    spool19.vendor = "TTYT3D";
-    spool19.material = "Marble PLA";
-    spool19.filament_name = "Black/White Marble";
-    spool19.color_hex = "202020";                  // Primary color (dark base)
-    spool19.multi_color_hexes = "#202020,#F0F0F0"; // Black, White
-    spool19.remaining_weight_g = 850.0;
-    spool19.initial_weight_g = 1000.0;
-    spool19.remaining_length_m = 292.0;
-    spool19.spool_weight_g = 200.0;
-    spool19.nozzle_temp_recommended = 210;
-    spool19.bed_temp_recommended = 60;
-    spool19.is_active = false;
-    mock_spools_.push_back(spool19);
-
-    // HELIX_MOCK_SPOOLMAN_SPOOLS: pad the inventory with deterministic
-    // synthetic spools so search/filter cost can be measured at realistic
-    // sizes -- real Spoolman databases run to hundreds of spools, while the
-    // hand-written inventory above tops out at 19. Padding only extends: the
-    // curated spools the mock backends link against keep their ids
-    // (test_mock_spool_consistency pins those).
-    if (const char* pad_env = std::getenv("HELIX_MOCK_SPOOLMAN_SPOOLS")) {
-        const long target = atol(pad_env);
-        static constexpr int kMaxPadded = 5000;
-        static constexpr const char* kVendors[] = {"Polymaker", "eSUN",     "Prusament",
-                                                   "Bambu Lab", "Elegoo",   "Overture",
-                                                   "Sunlu",     "Hatchbox", "Kexcelled"};
-        static constexpr const char* kMaterials[] = {"PLA", "PETG", "ASA", "ABS", "TPU", "PA-CF"};
-        static constexpr const char* kColors[] = {"1A1A2E", "2E6F40", "6F2E2E", "2E406F",
-                                                  "6F6F2E", "402E6F", "2E6F6F", "6F402E"};
-        const size_t limit = std::min<size_t>(std::max<long>(target, 0), kMaxPadded);
-        for (size_t i = mock_spools_.size(); i < limit; ++i) {
-            SpoolInfo spool;
-            spool.id = 1000 + static_cast<int>(i);
-            spool.vendor = kVendors[i % std::size(kVendors)];
-            spool.material = kMaterials[i % std::size(kMaterials)];
-            spool.filament_name = "Synthetic " + spool.material + " " + std::to_string(i);
-            spool.color_hex = kColors[i % std::size(kColors)];
-            spool.remaining_weight_g = 100.0 + (i % 9) * 100.0;
-            spool.initial_weight_g = 1000.0;
-            spool.remaining_length_m = 40.0 + (i % 7) * 40.0;
-            spool.spool_weight_g = 140.0;
-            spool.nozzle_temp_recommended = 220;
-            spool.bed_temp_recommended = 60;
-            mock_spools_.push_back(spool);
-        }
-        if (mock_spools_.size() > 19) {
-            spdlog::info("[MoonrakerAPIMock] Padded mock spool inventory to {} via "
-                         "HELIX_MOCK_SPOOLMAN_SPOOLS",
-                         mock_spools_.size());
-        }
-    }
-
-    spdlog::debug("[MoonrakerAPIMock] Initialized {} mock spools", mock_spools_.size());
-}
-
-void MoonrakerSpoolmanAPIMock::fail_spoolman_unavailable(const std::string& method,
-                                                         const ErrorCallback& on_error) const {
-    spdlog::debug("[MoonrakerAPIMock] {}() -> Spoolman disabled, failing like the real proxy",
-                  method);
-    if (on_error) {
-        MoonrakerError err =
-            MoonrakerError::json_rpc_error(method, "Spoolman component not available");
-        on_error(err);
-    }
-}
-
-void MoonrakerSpoolmanAPIMock::get_spoolman_status(std::function<void(bool, int)> on_success,
-                                                   ErrorCallback /*on_error*/, bool /*silent*/) {
-    spdlog::debug("[MoonrakerAPIMock] get_spoolman_status() -> connected={}, active={}",
-                  mock_spoolman_enabled_, mock_active_spool_id_);
-
-    if (on_success) {
-        on_success(mock_spoolman_enabled_, mock_active_spool_id_);
-    }
-}
-
-void MoonrakerSpoolmanAPIMock::get_spoolman_spools(SpoolListCallback on_success,
-                                                   ErrorCallback on_error) {
-    if (!mock_spoolman_enabled_) {
-        fail_spoolman_unavailable("get_spoolman_spools", on_error);
-        return;
-    }
-
-    spdlog::debug("[MoonrakerAPIMock] get_spoolman_spools() -> {} spools", mock_spools_.size());
-
-    if (on_success) {
-        // List GETs exclude archived spools (see update_spoolman_spool); the
-        // single-spool GET below deliberately still serves them.
-        std::vector<SpoolInfo> sorted;
-        sorted.reserve(mock_spools_.size());
-        for (const auto& spool : mock_spools_) {
-            if (archived_spool_ids_.count(spool.id) == 0) {
-                sorted.push_back(spool);
-            }
-        }
-        sort_spools_by_recency(sorted);
-        on_success(sorted);
-    }
-}
-
-void MoonrakerSpoolmanAPIMock::get_spoolman_spool(int spool_id, SpoolCallback on_success,
-                                                  ErrorCallback on_error, bool /*silent*/) {
-    if (!mock_spoolman_enabled_) {
-        fail_spoolman_unavailable("get_spoolman_spool", on_error);
-        return;
-    }
-
-    // Search mock spools for the requested ID
-    for (const auto& spool : mock_spools_) {
-        if (spool.id == spool_id) {
-            spdlog::trace("[MoonrakerAPIMock] get_spoolman_spool({}) -> {} {}", spool_id,
-                          spool.vendor, spool.material);
-            if (on_success) {
-                on_success(spool);
-            }
-            return;
-        }
-    }
-
-    // Spool not found - return empty optional
-    spdlog::trace("[MoonrakerAPIMock] get_spoolman_spool({}) -> not found", spool_id);
-    if (on_success) {
-        on_success(std::nullopt);
-    }
-}
-
-void MoonrakerSpoolmanAPIMock::set_active_spool(int spool_id, SuccessCallback on_success,
-                                                ErrorCallback on_error) {
-    if (!mock_spoolman_enabled_) {
-        fail_spoolman_unavailable("set_active_spool", on_error);
-        return;
-    }
-
-    spdlog::info("[MoonrakerAPIMock] set_active_spool({}) - was {}", spool_id,
-                 mock_active_spool_id_);
-
-    // Update active spool state
-    mock_active_spool_id_ = spool_id;
-
-    // Update is_active flag on all spools
-    for (auto& spool : mock_spools_) {
-        spool.is_active = (spool.id == spool_id);
-    }
-
-    if (on_success) {
-        on_success();
-    }
-}
-
-void MoonrakerSpoolmanAPIMock::update_spoolman_spool_weight(int spool_id, double remaining_weight_g,
-                                                            SuccessCallback on_success,
-                                                            ErrorCallback on_error) {
-    if (!mock_spoolman_enabled_) {
-        fail_spoolman_unavailable("update_spoolman_spool_weight", on_error);
-        return;
-    }
-
-    spdlog::info("[MoonrakerAPIMock] update_spoolman_spool_weight({}, {:.1f}g)", spool_id,
-                 remaining_weight_g);
-    weight_updates.push_back({spool_id, remaining_weight_g});
-
-    // Find and update the mock spool
-    for (auto& spool : mock_spools_) {
-        if (spool.id == spool_id) {
-            spool.remaining_weight_g = remaining_weight_g;
-            spdlog::debug("[MoonrakerAPIMock] Updated spool {} remaining weight to {:.1f}g",
-                          spool_id, remaining_weight_g);
-            break;
-        }
-    }
-
-    if (on_success) {
-        on_success();
-    }
-}
-
-void MoonrakerSpoolmanAPIMock::update_spoolman_spool(int spool_id, const nlohmann::json& spool_data,
-                                                     SuccessCallback on_success,
-                                                     ErrorCallback on_error) {
-    if (!mock_spoolman_enabled_) {
-        fail_spoolman_unavailable("update_spoolman_spool", on_error);
-        return;
-    }
-
-    spdlog::info("[MoonrakerAPIMock] update_spoolman_spool({}, {} fields)", spool_id,
-                 spool_data.size());
-    spool_updates.push_back({spool_id, spool_data});
-
-    // Real Spoolman keeps an archived spool and only filters it from LIST GETs
-    // (the single-spool GET still returns it, which is how its web UI offers
-    // the un-archive toggle). Track the flag in a side set; other fields in the
-    // same PATCH still apply to the retained spool below.
-    if (spool_data.contains("archived")) {
-        const bool archived = spool_data["archived"].get<bool>();
-        if (archived) {
-            archived_spool_ids_.insert(spool_id);
-        } else {
-            archived_spool_ids_.erase(spool_id);
-        }
-    }
-
-    for (auto& spool : mock_spools_) {
-        if (spool.id == spool_id) {
-            if (spool_data.contains("remaining_weight")) {
-                spool.remaining_weight_g = spool_data["remaining_weight"].get<double>();
-            }
-            if (spool_data.contains("spool_weight")) {
-                spool.spool_weight_g = spool_data["spool_weight"].get<double>();
-            }
-            if (spool_data.contains("price")) {
-                spool.price = spool_data["price"].get<double>();
-            }
-            if (spool_data.contains("lot_nr")) {
-                spool.lot_nr = spool_data["lot_nr"].get<std::string>();
-            }
-            if (spool_data.contains("comment")) {
-                spool.comment = spool_data["comment"].get<std::string>();
-            }
-            if (spool_data.contains("location")) {
-                spool.location = spool_data["location"].get<std::string>();
-            }
-            if (spool_data.contains("filament_id")) {
-                spool.filament_id = spool_data["filament_id"].get<int>();
-                // Re-resolve denormalized fields from the new filament so subsequent
-                // GETs reflect the repoint (mirrors real Spoolman's response shape).
-                for (const auto& f : mock_filaments_) {
-                    if (f.id == spool.filament_id) {
-                        spool.material = f.material;
-                        spool.filament_name = f.filament_name;
-                        spool.color_hex = f.color_hex;
-                        spool.vendor_id = f.vendor_id;
-                        spool.vendor = f.vendor_name;
-                        break;
-                    }
-                }
-            }
-            spdlog::debug("[MoonrakerAPIMock] Updated spool {} with {} fields", spool_id,
-                          spool_data.size());
-            break;
-        }
-    }
-
-    if (on_success) {
-        on_success();
-    }
-}
-
-void MoonrakerSpoolmanAPIMock::update_spoolman_filament(int filament_id,
-                                                        const nlohmann::json& filament_data,
-                                                        SuccessCallback on_success,
-                                                        ErrorCallback on_error) {
-    if (!mock_spoolman_enabled_) {
-        fail_spoolman_unavailable("update_spoolman_filament", on_error);
-        return;
-    }
-
-    spdlog::info("[MoonrakerAPIMock] update_spoolman_filament({}, {} fields)", filament_id,
-                 filament_data.size());
-    filament_updates.push_back({filament_id, filament_data});
-    if (on_success) {
-        on_success();
-    }
-}
-
-void MoonrakerSpoolmanAPIMock::update_spoolman_filament_color(int filament_id,
-                                                              const std::string& color_hex,
-                                                              SuccessCallback on_success,
-                                                              ErrorCallback on_error) {
-    if (!mock_spoolman_enabled_) {
-        fail_spoolman_unavailable("update_spoolman_filament_color", on_error);
-        return;
-    }
-
-    spdlog::info("[MoonrakerAPIMock] update_spoolman_filament_color({}, {})", filament_id,
-                 color_hex);
-
-    // In a real Spoolman, filament_id refers to a shared filament definition.
-    // For mock purposes, we'll update the color on all spools (simulating the shared nature).
-    // In practice, you'd need to track filament_id separately from spool_id.
-    spdlog::debug("[MoonrakerAPIMock] Mock: color update logged (filament {} -> {})", filament_id,
-                  color_hex);
-
-    if (on_success) {
-        on_success();
-    }
-}
-
-// ============================================================================
-// MoonrakerSpoolmanAPIMock - Spoolman CRUD Methods
-// ============================================================================
-
-void MoonrakerSpoolmanAPIMock::get_spoolman_vendors(VendorListCallback on_success,
-                                                    ErrorCallback on_error) {
-    if (!mock_spoolman_enabled_) {
-        fail_spoolman_unavailable("get_spoolman_vendors", on_error);
-        return;
-    }
-
-    spdlog::debug("[MoonrakerAPIMock] get_spoolman_vendors()");
-
-    // Include explicitly seeded vendors first (stable IDs for tests).
-    std::vector<VendorInfo> vendors = mock_vendors_;
-    std::set<std::string> seen;
-    std::set<int> seen_ids;
-    int next_id = 1;
-    for (const auto& v : vendors) {
-        seen.insert(v.name);
-        seen_ids.insert(v.id);
-        if (v.id >= next_id) {
-            next_id = v.id + 1;
-        }
-    }
-
-    // Build vendor list from existing mock spools (deduplicate by vendor name)
-    for (const auto& spool : mock_spools_) {
-        if (!spool.vendor.empty() && seen.find(spool.vendor) == seen.end()) {
-            seen.insert(spool.vendor);
-            VendorInfo v;
-            // Skip any IDs already claimed by seeded vendors.
-            while (seen_ids.count(next_id)) {
-                ++next_id;
-            }
-            v.id = next_id++;
-            v.name = spool.vendor;
-            vendors.push_back(v);
-        }
-    }
-
-    spdlog::debug("[MoonrakerAPIMock] Returning {} vendors", vendors.size());
-    if (on_success) {
-        on_success(vendors);
-    }
-}
-
-void MoonrakerSpoolmanAPIMock::get_spoolman_filaments(FilamentListCallback on_success,
-                                                      ErrorCallback on_error) {
-    if (!mock_spoolman_enabled_) {
-        fail_spoolman_unavailable("get_spoolman_filaments", on_error);
-        return;
-    }
-
-    spdlog::debug("[MoonrakerAPIMock] get_spoolman_filaments()");
-
-    // Build filament list from existing mock spools (deduplicate by vendor+material+color)
-    std::vector<FilamentInfo> filaments;
-    std::set<std::string> seen;
-    std::set<int> seen_ids; // Track IDs from explicitly created filaments
-    int next_id = 1;
-
-    // Include explicitly created filaments first (they have stable IDs)
-    for (const auto& mf : mock_filaments_) {
-        filaments.push_back(mf);
-        seen_ids.insert(mf.id);
-        // Track by key to avoid duplicates with spool-synthesized entries
-        std::string key = mf.vendor_name + "|" + mf.material + "|" + mf.filament_name;
-        seen.insert(key);
-        // Ensure auto-assigned IDs don't collide
-        if (mf.id >= next_id) {
-            next_id = mf.id + 1;
-        }
-    }
-
-    // Synthesize filaments from spools (skip duplicates already covered above)
-    for (const auto& spool : mock_spools_) {
-        std::string key = spool.vendor + "|" + spool.material + "|" + spool.filament_name;
-        if (seen.find(key) == seen.end()) {
-            seen.insert(key);
-            FilamentInfo f;
-            f.id = next_id++;
-            f.vendor_name = spool.vendor;
-            f.material = spool.material;
-            f.filament_name = spool.filament_name;
-            f.color_hex = spool.color_hex;
-            f.diameter = 1.75f;
-            f.weight = static_cast<float>(spool.initial_weight_g);
-            f.nozzle_temp_min = spool.nozzle_temp_min;
-            f.nozzle_temp_max = spool.nozzle_temp_max;
-            f.bed_temp_min = spool.bed_temp_min;
-            f.bed_temp_max = spool.bed_temp_max;
-            filaments.push_back(f);
-        }
-    }
-
-    spdlog::debug("[MoonrakerAPIMock] Returning {} filaments ({} created + synthesized)",
-                  filaments.size(), mock_filaments_.size());
-    if (on_success) {
-        on_success(filaments);
-    }
-}
-
-void MoonrakerSpoolmanAPIMock::create_spoolman_vendor(const nlohmann::json& vendor_data,
-                                                      VendorCreateCallback on_success,
-                                                      ErrorCallback on_error) {
-    if (!mock_spoolman_enabled_) {
-        fail_spoolman_unavailable("create_spoolman_vendor", on_error);
-        return;
-    }
-
-    spdlog::info("[MoonrakerAPIMock] create_spoolman_vendor({})",
-                 vendor_data.value("name", "unknown"));
-
-    // Capture the POST payload for test inspection.
-    created_vendors.push_back(vendor_data);
-
-    VendorInfo vendor;
-    vendor.id = next_created_vendor_id > 0
-                    ? next_created_vendor_id
-                    : static_cast<int>(mock_spools_.size()) + 100; // Avoid ID conflicts
-    vendor.name = vendor_data.value("name", "");
-    vendor.url = vendor_data.value("url", "");
-
-    // Persist so subsequent get_spoolman_vendors() includes it.
-    mock_vendors_.push_back(vendor);
-
-    if (on_success) {
-        on_success(vendor);
-    }
-}
-
-void MoonrakerSpoolmanAPIMock::create_spoolman_filament(const nlohmann::json& filament_data,
-                                                        FilamentCreateCallback on_success,
-                                                        ErrorCallback on_error) {
-    if (!mock_spoolman_enabled_) {
-        fail_spoolman_unavailable("create_spoolman_filament", on_error);
-        return;
-    }
-
-    spdlog::info("[MoonrakerAPIMock] create_spoolman_filament({} {})",
-                 filament_data.value("material", "?"), filament_data.value("name", "?"));
-
-    // Capture the POST payload for test inspection.
-    created_filaments.push_back(filament_data);
-
-    FilamentInfo filament;
-    filament.id = next_created_filament_id > 0 ? next_created_filament_id : next_filament_id_++;
-    filament.material = filament_data.value("material", "");
-    filament.filament_name = filament_data.value("name", "");
-    filament.color_hex = filament_data.value("color_hex", "");
-    filament.diameter = filament_data.value("diameter", 1.75f);
-    filament.weight = filament_data.value("weight", 0.0f);
-    filament.spool_weight = filament_data.value("spool_weight", 0.0f);
-
-    if (filament_data.contains("vendor_id")) {
-        filament.vendor_id = filament_data.value("vendor_id", 0);
-        // Denormalize vendor_name from seeded or created vendors so GETs can serve it.
-        for (const auto& v : mock_vendors_) {
-            if (v.id == filament.vendor_id) {
-                filament.vendor_name = v.name;
-                break;
-            }
-        }
-    }
-
-    // Persist so subsequent get_spoolman_filaments() includes it
-    mock_filaments_.push_back(filament);
-
-    if (on_success) {
-        on_success(filament);
-    }
-}
-
-void MoonrakerSpoolmanAPIMock::create_spoolman_spool(const nlohmann::json& spool_data,
-                                                     SpoolCreateCallback on_success,
-                                                     ErrorCallback on_error) {
-    if (!mock_spoolman_enabled_) {
-        fail_spoolman_unavailable("create_spoolman_spool", on_error);
-        return;
-    }
-
-    spdlog::info("[MoonrakerAPIMock] create_spoolman_spool()");
-
-    // Capture the POST payload for test inspection.
-    created_spools.push_back(spool_data);
-
-    // Create a new spool and add to the mock list
-    SpoolInfo spool;
-    spool.id = next_created_spool_id > 0 ? next_created_spool_id
-                                         : static_cast<int>(mock_spools_.size()) + 1;
-    spool.initial_weight_g = spool_data.value("initial_weight", 1000.0);
-    spool.remaining_weight_g = spool_data.value("remaining_weight", spool.initial_weight_g);
-    spool.spool_weight_g = spool_data.value("spool_weight", 0.0);
-    if (spool_data.contains("filament_id")) {
-        spool.filament_id = spool_data.value("filament_id", 0);
-        // Resolve filament_id to its filament record (mirroring real Spoolman's GET
-        // behavior where the spool response includes the linked filament's fields).
-        for (const auto& f : mock_filaments_) {
-            if (f.id == spool.filament_id) {
-                spool.material = f.material;
-                spool.filament_name = f.filament_name;
-                spool.color_hex = f.color_hex;
-                spool.vendor_id = f.vendor_id;
-                spool.vendor = f.vendor_name;
-                break;
-            }
-        }
-    }
-
-    // Persist optional spool-level string fields
-    if (spool_data.contains("location") && spool_data["location"].is_string()) {
-        spool.location = spool_data["location"].get<std::string>();
-    }
-
-    mock_spools_.push_back(spool);
-
-    if (on_success) {
-        on_success(spool);
-    }
-}
-
-void MoonrakerSpoolmanAPIMock::delete_spoolman_spool(int spool_id, SuccessCallback on_success,
-                                                     ErrorCallback on_error) {
-    if (!mock_spoolman_enabled_) {
-        fail_spoolman_unavailable("delete_spoolman_spool", on_error);
-        return;
-    }
-
-    spdlog::info("[MoonrakerAPIMock] delete_spoolman_spool({})", spool_id);
-
-    // Remove from mock list
-    auto it = std::remove_if(mock_spools_.begin(), mock_spools_.end(),
-                             [spool_id](const SpoolInfo& s) { return s.id == spool_id; });
-    if (it != mock_spools_.end()) {
-        mock_spools_.erase(it, mock_spools_.end());
-        spdlog::debug("[MoonrakerAPIMock] Spool {} removed from mock list", spool_id);
-    }
-
-    if (on_success) {
-        on_success();
-    }
-}
-
-void MoonrakerSpoolmanAPIMock::get_spoolman_external_vendors(VendorListCallback on_success,
-                                                             ErrorCallback on_error) {
-    if (!mock_spoolman_enabled_) {
-        fail_spoolman_unavailable("get_spoolman_external_vendors", on_error);
-        return;
-    }
-
-    spdlog::debug("[MoonrakerAPIMock] get_spoolman_external_vendors()");
-
-    std::vector<VendorInfo> vendors;
-
-    VendorInfo v1;
-    v1.id = 1;
-    v1.name = "Hatchbox";
-    v1.url = "https://www.hatchbox3d.com";
-    vendors.push_back(v1);
-
-    VendorInfo v2;
-    v2.id = 2;
-    v2.name = "Polymaker";
-    v2.url = "https://www.polymaker.com";
-    vendors.push_back(v2);
-
-    VendorInfo v3;
-    v3.id = 3;
-    v3.name = "eSUN";
-    v3.url = "https://www.esun3d.com";
-    vendors.push_back(v3);
-
-    VendorInfo v4;
-    v4.id = 4;
-    v4.name = "Prusament";
-    v4.url = "https://www.prusa3d.com";
-    vendors.push_back(v4);
-
-    spdlog::debug("[MoonrakerAPIMock] Returning {} external vendors", vendors.size());
-    if (on_success) {
-        on_success(vendors);
-    }
-}
-
-void MoonrakerSpoolmanAPIMock::get_spoolman_external_filaments(const std::string& vendor_name,
-                                                               FilamentListCallback on_success,
-                                                               ErrorCallback on_error) {
-    if (!mock_spoolman_enabled_) {
-        fail_spoolman_unavailable("get_spoolman_external_filaments", on_error);
-        return;
-    }
-
-    spdlog::debug("[MoonrakerAPIMock] get_spoolman_external_filaments(vendor={})", vendor_name);
-
-    std::vector<FilamentInfo> filaments;
-
-    FilamentInfo f1;
-    f1.id = 1;
-    f1.vendor_name = vendor_name;
-    f1.material = "PLA";
-    f1.filament_name = "Black";
-    f1.color_hex = "000000";
-    f1.diameter = 1.75f;
-    f1.weight = 1000.0f;
-    f1.nozzle_temp_min = 190;
-    f1.nozzle_temp_max = 220;
-    f1.bed_temp_min = 50;
-    f1.bed_temp_max = 60;
-    filaments.push_back(f1);
-
-    FilamentInfo f2;
-    f2.id = 2;
-    f2.vendor_name = vendor_name;
-    f2.material = "PLA";
-    f2.filament_name = "White";
-    f2.color_hex = "FFFFFF";
-    f2.diameter = 1.75f;
-    f2.weight = 1000.0f;
-    f2.nozzle_temp_min = 190;
-    f2.nozzle_temp_max = 220;
-    f2.bed_temp_min = 50;
-    f2.bed_temp_max = 60;
-    filaments.push_back(f2);
-
-    FilamentInfo f3;
-    f3.id = 3;
-    f3.vendor_name = vendor_name;
-    f3.material = "PETG";
-    f3.filament_name = "Blue";
-    f3.color_hex = "0000FF";
-    f3.diameter = 1.75f;
-    f3.weight = 1000.0f;
-    f3.nozzle_temp_min = 220;
-    f3.nozzle_temp_max = 250;
-    f3.bed_temp_min = 70;
-    f3.bed_temp_max = 80;
-    filaments.push_back(f3);
-
-    spdlog::debug("[MoonrakerAPIMock] Returning {} external filaments for vendor '{}'",
-                  filaments.size(), vendor_name);
-    if (on_success) {
-        on_success(filaments);
-    }
-}
-
-void MoonrakerSpoolmanAPIMock::get_spoolman_filaments(int vendor_id,
-                                                      FilamentListCallback on_success,
-                                                      ErrorCallback on_error) {
-    if (!mock_spoolman_enabled_) {
-        fail_spoolman_unavailable("get_spoolman_filaments", on_error);
-        return;
-    }
-
-    spdlog::debug("[MoonrakerAPIMock] get_spoolman_filaments(vendor_id={})", vendor_id);
-
-    std::vector<FilamentInfo> filaments;
-
-    // Include explicitly-seeded filaments whose vendor_id matches.
-    for (const auto& mf : mock_filaments_) {
-        if (mf.vendor_id == vendor_id) {
-            filaments.push_back(mf);
-        }
-    }
-
-    // SpoolInfo doesn't have vendor_id so we can't filter spool-synthesized
-    // filaments here. The wizard applies client-side vendor filtering after merge.
-    int next_id = 1;
-    for (const auto& spool : mock_spools_) {
-        FilamentInfo f;
-        f.id = next_id++;
-        f.vendor_name = spool.vendor;
-        f.material = spool.material;
-        f.filament_name = spool.filament_name;
-        f.color_hex = spool.color_hex;
-        f.diameter = 1.75f;
-        f.weight = static_cast<float>(spool.initial_weight_g);
-        f.nozzle_temp_min = spool.nozzle_temp_min;
-        f.nozzle_temp_max = spool.nozzle_temp_max;
-        f.bed_temp_min = spool.bed_temp_min;
-        f.bed_temp_max = spool.bed_temp_max;
-        filaments.push_back(f);
-    }
-
-    spdlog::debug("[MoonrakerAPIMock] Returning {} filaments for vendor_id {}", filaments.size(),
-                  vendor_id);
-    if (on_success) {
-        on_success(filaments);
-    }
-}
-
-void MoonrakerSpoolmanAPIMock::delete_spoolman_vendor(int vendor_id, SuccessCallback on_success,
-                                                      ErrorCallback on_error) {
-    if (!mock_spoolman_enabled_) {
-        fail_spoolman_unavailable("delete_spoolman_vendor", on_error);
-        return;
-    }
-
-    spdlog::info("[MoonrakerAPIMock] delete_spoolman_vendor({})", vendor_id);
-
-    if (on_success) {
-        on_success();
-    }
-}
-
-void MoonrakerSpoolmanAPIMock::delete_spoolman_filament(int filament_id, SuccessCallback on_success,
-                                                        ErrorCallback on_error) {
-    if (!mock_spoolman_enabled_) {
-        fail_spoolman_unavailable("delete_spoolman_filament", on_error);
-        return;
-    }
-
-    spdlog::info("[MoonrakerAPIMock] delete_spoolman_filament({})", filament_id);
-
-    if (on_success) {
-        on_success();
-    }
 }
 
 // ============================================================================
@@ -2568,99 +1581,6 @@ void MoonrakerRestAPIMock::call_rest_post(const std::string& endpoint, const nlo
 
     if (on_complete) {
         on_complete(resp);
-    }
-}
-
-// ============================================================================
-// MoonrakerSpoolmanAPIMock - Slot-Spool Mapping
-// ============================================================================
-
-void MoonrakerSpoolmanAPIMock::assign_spool_to_slot(int slot_index, int spool_id) {
-    if (spool_id <= 0) {
-        unassign_spool_from_slot(slot_index);
-        return;
-    }
-
-    // Find the spool to verify it exists
-    SpoolInfo* spool = nullptr;
-    for (auto& s : mock_spools_) {
-        if (s.id == spool_id) {
-            spool = &s;
-            break;
-        }
-    }
-
-    if (!spool) {
-        spdlog::warn("[MoonrakerAPIMock] assign_spool_to_slot: spool {} not found", spool_id);
-        return;
-    }
-
-    slot_spool_map_[slot_index] = spool_id;
-    spdlog::info("[MoonrakerAPIMock] Assigned spool {} ({} {}) to slot {}", spool_id, spool->vendor,
-                 spool->filament_name, slot_index);
-}
-
-void MoonrakerSpoolmanAPIMock::unassign_spool_from_slot(int slot_index) {
-    auto it = slot_spool_map_.find(slot_index);
-    if (it != slot_spool_map_.end()) {
-        spdlog::info("[MoonrakerAPIMock] Unassigned spool {} from slot {}", it->second, slot_index);
-        slot_spool_map_.erase(it);
-    }
-}
-
-int MoonrakerSpoolmanAPIMock::get_spool_for_slot(int slot_index) const {
-    auto it = slot_spool_map_.find(slot_index);
-    return (it != slot_spool_map_.end()) ? it->second : 0;
-}
-
-std::optional<SpoolInfo> MoonrakerSpoolmanAPIMock::get_spool_info_for_slot(int slot_index) const {
-    int spool_id = get_spool_for_slot(slot_index);
-    if (spool_id <= 0) {
-        return std::nullopt;
-    }
-
-    for (const auto& spool : mock_spools_) {
-        if (spool.id == spool_id) {
-            return spool;
-        }
-    }
-    return std::nullopt;
-}
-
-void MoonrakerSpoolmanAPIMock::consume_filament(float grams, int slot_index) {
-    // Determine which spool to update
-    int spool_id = mock_active_spool_id_;
-    if (slot_index >= 0) {
-        int slot_spool = get_spool_for_slot(slot_index);
-        if (slot_spool > 0) {
-            spool_id = slot_spool;
-        }
-    }
-
-    if (spool_id <= 0) {
-        spdlog::debug("[MoonrakerAPIMock] consume_filament: no active spool");
-        return;
-    }
-
-    // Find and update the spool
-    for (auto& spool : mock_spools_) {
-        if (spool.id == spool_id) {
-            double old_weight = spool.remaining_weight_g;
-            spool.remaining_weight_g =
-                std::max(0.0, spool.remaining_weight_g - static_cast<double>(grams));
-
-            // Update remaining length proportionally
-            if (spool.initial_weight_g > 0) {
-                float ratio = spool.remaining_weight_g / spool.initial_weight_g;
-                // Estimate ~333m per 1kg for PLA (adjust per material if needed)
-                spool.remaining_length_m = ratio * 333.0f;
-            }
-
-            spdlog::debug(
-                "[MoonrakerAPIMock] Consumed {:.1f}g from spool {} ({}): {:.1f}g -> {:.1f}g", grams,
-                spool_id, spool.filament_name, old_weight, spool.remaining_weight_g);
-            return;
-        }
     }
 }
 

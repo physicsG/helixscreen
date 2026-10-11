@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include "ui_observer_guard.h"
+
 #include "subject_managed_panel.h"
 
 #include <glm/vec2.hpp>
@@ -10,6 +12,8 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+#include "hv/json.hpp"
 
 namespace helix {
 
@@ -43,6 +47,11 @@ class PrinterExcludedObjectsState {
         bool has_bbox{true};
     };
 
+    /// One object as the map and badges read it: the bbox spans the polygon's
+    /// points, and an empty polygon means no bbox.
+    static ObjectInfo make_object_info(std::string name, std::optional<glm::vec2> center,
+                                       std::vector<glm::vec2> polygon);
+
     PrinterExcludedObjectsState() = default;
     ~PrinterExcludedObjectsState() = default;
 
@@ -64,6 +73,14 @@ class PrinterExcludedObjectsState {
     // ========================================================================
     // Setters
     // ========================================================================
+
+    /**
+     * @brief Apply the exclude_object object of a Klipper status frame
+     *
+     * A frame without one changes nothing, and within it each absent field is
+     * left alone (Moonraker sends deltas). Main thread only.
+     */
+    void update_from_status(const nlohmann::json& status);
 
     /**
      * @brief Update excluded objects from Moonraker status update
@@ -212,6 +229,16 @@ class PrinterExcludedObjectsState {
      */
     bool has_objects() const {
         return !defined_objects_.empty();
+    }
+
+    /// Death signal for the subjects this object owns.
+    ///
+    /// deinit_subjects() frees every observer node on them without bumping
+    /// the ObserverGuard invalidation epoch, so outside observers must pass
+    /// this to observe_*(), or their guards call lv_observer_remove() on a
+    /// freed node.
+    [[nodiscard]] SubjectLifetime get_subjects_lifetime() const {
+        return subjects_.get_subjects_lifetime();
     }
 
   private:

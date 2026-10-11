@@ -55,16 +55,16 @@ class RunoutGuidanceFixture : public LVGLUITestFixture {
     static constexpr const char* SENSOR = "filament_switch_sensor runout_sensor";
 
     RunoutGuidanceFixture() {
-        AmsState::instance().clear_backends();
+        helix::AmsState::instance().clear_backends();
 
         auto& fsm = FilamentSensorManager::instance();
-        PostUnloadGraceTestAccess::reset(fsm);
+        helix::PostUnloadGraceTestAccess::reset(fsm);
         fsm.set_master_enabled(true);
         fsm.discover_sensors({SENSOR});
         fsm.set_sensor_role(SENSOR, FilamentSensorRole::RUNOUT);
         // Baseline present so the sensor is "available", then let each test choose.
         fsm.update_from_status(sensor_status(true));
-        PostUnloadGraceTestAccess::clear_startup_grace(fsm);
+        helix::PostUnloadGraceTestAccess::clear_startup_grace(fsm);
         settle();
         REQUIRE_FALSE(fsm.is_in_startup_grace_period());
         REQUIRE(get_runtime_config()->should_show_runout_modal());
@@ -78,8 +78,8 @@ class RunoutGuidanceFixture : public LVGLUITestFixture {
             handler.reset();
         }
         settle();
-        PostUnloadGraceTestAccess::reset(FilamentSensorManager::instance());
-        AmsState::instance().clear_backends();
+        helix::PostUnloadGraceTestAccess::reset(FilamentSensorManager::instance());
+        helix::AmsState::instance().clear_backends();
     }
 
     static nlohmann::json sensor_status(bool detected) {

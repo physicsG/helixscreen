@@ -6,6 +6,7 @@
 #include "ui_update_queue.h"
 
 #include "app_globals.h"
+#include "i_moonraker_client.h"
 #include "observer_factory.h"
 #include "printer_state.h"
 #include "system/crash_handler.h"
@@ -71,7 +72,7 @@ std::vector<int> decimate_indices(const std::vector<int64_t>& timestamps_ms, int
 
 namespace helix {
 
-using helix::ui::observe_int_sync;
+using helix::ui::observe;
 using helix::ui::temperature::deci_to_degrees_f;
 
 // ============================================================================
@@ -102,6 +103,18 @@ uint32_t temp_graph_series_hex(int index) {
 // ============================================================================
 
 namespace {
+// A series plots the chamber's subjects only when it names the chamber: the
+// "chamber" alias, its heater, or the object its reading comes from. Every
+// other heater_generic / temperature_fan is its own object and reads through
+// TemperatureSensorManager.
+bool is_chamber_series(const std::string& name) {
+    if (name == "chamber")
+        return true;
+    const auto& temps = get_printer_state().temperature_state();
+    return !name.empty() &&
+           (name == temps.chamber_heater_name() || name == temps.chamber_temperature_source());
+}
+
 // Registry of live controllers so refresh_all_from_history() can re-backfill
 // every persistent graph after the history manager is (re)seeded. Main-thread
 // only: controllers are created, destroyed, and refreshed on the UI thread, so
@@ -187,6 +200,15 @@ void TempGraphController::set_features(uint32_t features) {
 
 void TempGraphController::pause() {
     paused_ = true;
+    forget_latest_readings();
+}
+
+void TempGraphController::forget_latest_readings() {
+    // A reading observed before a pause or reattach may no longer be current;
+    // a series only rejoins the slot-batched pushes once it reports again.
+    for (auto& s : series_) {
+        s.latest_deci = 0;
+    }
 }
 
 void TempGraphController::resume() {
@@ -194,8 +216,38 @@ void TempGraphController::resume() {
     refresh_from_history();
 }
 
+bool TempGraphController::sample_due(int64_t last_ms, int64_t now_ms) {
+    constexpr int64_t slot_ms = UI_TEMP_GRAPH_SAMPLE_INTERVAL_SEC * 1000;
+    return last_ms == 0 || now_ms / slot_ms != last_ms / slot_ms;
+}
+
 void TempGraphController::refresh_from_history() {
     backfill_history();
+}
+
+void TempGraphController::seed_from_moonraker(IMoonrakerClient& client) {
+    client.get_temperature_store(
+        [](const TemperatureStore& store) {
+            auto store_copy = std::make_shared<TemperatureStore>(store);
+            helix::ui::queue_update("TempGraphController::seed_from_moonraker", [store_copy]() {
+                auto* mgr = get_temperature_history_manager();
+                if (mgr == nullptr) {
+                    return;
+                }
+                using namespace std::chrono;
+                const int64_t now_ms =
+                    duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
+                mgr->seed_from_store(*store_copy, now_ms);
+                // Persistent graphs (home dashboard widget, filament mini graph)
+                // are built before this seed arrives, so their construction-time
+                // backfill was empty (#1124).
+                refresh_all_from_history();
+            });
+        },
+        [](const MoonrakerError& err) {
+            spdlog::debug("[TempGraphController] server.temperature_store seed failed: {}",
+                          err.message);
+        });
 }
 
 void TempGraphController::refresh_all_from_history() {
@@ -203,7 +255,9 @@ void TempGraphController::refresh_all_from_history() {
     spdlog::debug("[TempGraphController] refresh_all_from_history: {} live controllers",
                   snapshot.size());
     for (auto* c : snapshot) {
-        if (c) {
+        // A paused graph is off screen; resume() backfills it from the same
+        // history when it comes back.
+        if (c && !c->paused_) {
             c->refresh_from_history();
         }
     }
@@ -291,11 +345,11 @@ void TempGraphController::reattach_observers() {
         s.lifetime = SubjectLifetime{};
     }
 
-    // Suppress the attach-time fire from observe_int_sync. Those fires push the
+    // Suppress the attach-time fire from observe<int>. Those fires push the
     // subject's PRE-reconnect value, and the live handler stamps it with a
     // fresh `now` — a phantom spike bridging the whole disconnect gap (#1245).
     //
-    // The suppression cannot be scoped to this function: observe_int_sync's
+    // The suppression cannot be scoped to this function: observe<int>'s
     // LVGL callback only *queues* the handler (observer_factory.h:344), so the
     // attach-time fires have not run yet when setup_observers() returns.
     // Restoring the flag inline here would restore it before a single one of
@@ -305,18 +359,27 @@ void TempGraphController::reattach_observers() {
     // after every attach-time fire has been dropped and before any sample that
     // arrives on a later tick.
     suppress_attach_fire_ = true;
+    forget_latest_readings();
     setup_observers();
     lifetime_.defer("TempGraphController::clear_attach_suppression",
                     [this]() { suppress_attach_fire_ = false; });
 }
 
-int TempGraphController::series_id_for(const std::string& klipper_name) const {
+void TempGraphController::set_series_name(const std::string& klipper_name,
+                                          const std::string& display_name) {
+    const SeriesId id = series_id_for(klipper_name);
+    if (graph_ && id != SeriesId::None) {
+        temp_graph_set_series_name(graph_, id, display_name.c_str());
+    }
+}
+
+SeriesId TempGraphController::series_id_for(const std::string& klipper_name) const {
     for (const auto& s : series_) {
         if (s.klipper_name == klipper_name) {
             return s.series_id;
         }
     }
-    return -1;
+    return SeriesId::None;
 }
 
 // ============================================================================
@@ -363,8 +426,8 @@ void TempGraphController::setup_series() {
     for (const auto& spec : config_.series) {
         const char* label =
             spec.display_name.empty() ? spec.klipper_name.c_str() : spec.display_name.c_str();
-        int series_id = ui_temp_graph_add_series(graph_, label, spec.color);
-        if (series_id < 0) {
+        SeriesId series_id = ui_temp_graph_add_series(graph_, label, spec.color);
+        if (series_id == SeriesId::None) {
             spdlog::warn("[TempGraphController] Failed to add series '{}'", spec.klipper_name);
             continue;
         }
@@ -375,7 +438,8 @@ void TempGraphController::setup_series() {
         state.show_target = spec.show_target;
 
         // Determine if this uses a dynamic subject
-        if (spec.klipper_name.find("extruder") == 0 && ps.extruder_count() > 1) {
+        if (spec.klipper_name.find("extruder") == 0 &&
+            ps.temperature_state().extruder_count() > 1) {
             state.is_dynamic = true;
         } else if (spec.klipper_name.find("temperature_sensor") == 0 ||
                    spec.klipper_name.find("temperature_fan") == 0) {
@@ -410,62 +474,66 @@ void TempGraphController::setup_observers() {
     // TemperatureSensorManager::instance() constructs that singleton (and
     // registers its subjects) on first touch, which shows up as a subject leak
     // to any test measuring the registry around an unrelated graph.
-    int unresolved_extruder = 0;
-    int unresolved_sensor = 0;
+    int extruder_series = 0;
+    int sensor_series = 0;
+    int unresolved = 0;
 
     // Auxiliary sensors are whatever does not route to the bed, chamber, or
     // extruder subjects in attach_series_observers().
     auto is_sensor_series = [](const std::string& n) {
-        return n != "heater_bed" && n.rfind("heater_generic", 0) != 0 &&
-               n.rfind("temperature_fan", 0) != 0 && n.rfind("extruder", 0) != 0;
+        return n != "heater_bed" && !is_chamber_series(n) && n.rfind("extruder", 0) != 0;
     };
 
     for (size_t i = 0; i < series_.size(); ++i) {
+        const std::string& name = series_[i].klipper_name;
+        if (is_sensor_series(name)) {
+            ++sensor_series;
+        } else if (name.rfind("extruder", 0) == 0) {
+            ++extruder_series;
+        }
         // A provisional binding counts as unresolved: it is producing data, but
         // from a stand-in subject that discovery will replace.
         if (!attach_series_observers(i) || series_[i].provisional) {
-            if (is_sensor_series(series_[i].klipper_name)) {
-                ++unresolved_sensor;
-            } else {
-                ++unresolved_extruder;
-            }
+            ++unresolved;
         }
     }
-    const int unresolved = unresolved_extruder + unresolved_sensor;
 
-    // A series whose subject did not exist yet has no observer and would sit
-    // frozen on backfilled history for the whole session — the home temp_graph
-    // widget is built at app startup, before discovery creates the per-extruder
-    // and per-sensor subjects. Watch the discovery version subjects so those
-    // series can attach late. Only when something is actually unresolved: a
-    // fully-wired graph must not re-resolve on every discovery bump.
-    if (unresolved > 0) {
+    // Extruder and sensor subjects are created by discovery, which runs after
+    // the home temp_graph widget is built and again on every klippy ready.
+    // Each run may create or free the subjects a series is bound to, so
+    // any graph with such a series watches the discovery subjects for as long
+    // as it lives; resolve_pending_series() rebinds only what is missing or dead.
+    // The sensor watch keys on the sensor COUNT, so a rediscovery that swaps one
+    // sensor for another at the same count does not trigger a rebind.
+    if (extruder_series > 0 || sensor_series > 0) {
         auto& ps = get_printer_state();
         spdlog::debug("[TempGraphController] {} of {} series unresolved — watching discovery",
                       unresolved, series_.size());
 
-        if (unresolved_extruder > 0) {
-            if (auto* extruder_version = ps.get_extruder_version_subject()) {
-                discovery_observer_ = observe_int_sync<TempGraphController>(
+        if (extruder_series > 0) {
+            if (auto* extruder_version = ps.temperature_state().get_extruder_version_subject()) {
+                discovery_observer_ = observe<int>(
                     extruder_version, this,
                     [token = lifetime_.token(), gen = generation_](TempGraphController* self, int) {
                         if (token.expired() || gen != self->generation_)
                             return;
                         self->resolve_pending_series();
-                    });
+                    },
+                    ps.get_subjects_lifetime());
             }
         }
 
-        if (unresolved_sensor > 0) {
+        if (sensor_series > 0) {
             auto& sensor_mgr = sensors::TemperatureSensorManager::instance();
             if (auto* sensor_count = sensor_mgr.get_sensor_count_subject()) {
-                sensor_discovery_observer_ = observe_int_sync<TempGraphController>(
+                sensor_discovery_observer_ = observe<int>(
                     sensor_count, this,
                     [token = lifetime_.token(), gen = generation_](TempGraphController* self, int) {
                         if (token.expired() || gen != self->generation_)
                             return;
                         self->resolve_pending_series();
-                    });
+                    },
+                    sensor_mgr.get_subjects_lifetime());
             }
         }
     }
@@ -480,11 +548,15 @@ void TempGraphController::resolve_pending_series() {
     int resolved = 0;
     for (size_t i = 0; i < series_.size(); ++i) {
         auto& s = series_[i];
-        if (s.temp_obs && !s.provisional)
-            continue; // already bound to its real subject
-        if (s.provisional) {
+        // A dead lifetime means discovery freed the subject this series was
+        // bound to: its object disappeared from a rediscovery.
+        const bool dead = s.lifetime && !*s.lifetime;
+        if (s.temp_obs && !s.provisional && !dead)
+            continue; // already bound to its real, live subject
+        if (s.provisional || dead) {
             // Drop the stand-in before re-resolving, or the series ends up with
-            // two observers pushing into the same chart slot.
+            // two observers pushing into the same chart slot. A dead guard's
+            // reset() skips lv_observer_remove(): the subject freed it already.
             s.temp_obs.reset();
             s.target_obs.reset();
         }
@@ -517,13 +589,11 @@ bool TempGraphController::attach_series_observers(size_t i) {
         lv_subject_t* target_subj = nullptr;
 
         if (s.klipper_name == "heater_bed") {
-            temp_subj = ps.get_bed_temp_subject();
-            target_subj = ps.get_bed_target_subject();
-        } else if (s.klipper_name.find("heater_generic") == 0 ||
-                   s.klipper_name.find("temperature_fan") == 0) {
-            // Chamber (or other heater/fan-based heaters)
-            temp_subj = ps.get_chamber_temp_subject();
-            target_subj = ps.get_chamber_target_subject();
+            temp_subj = ps.temperature_state().get_bed_temp_subject(s.lifetime);
+            target_subj = ps.temperature_state().get_bed_target_subject(s.lifetime);
+        } else if (is_chamber_series(s.klipper_name)) {
+            temp_subj = ps.temperature_state().get_chamber_temp_subject(s.lifetime);
+            target_subj = ps.temperature_state().get_chamber_target_subject(s.lifetime);
         } else if (s.klipper_name.find("extruder") == 0) {
             // Always prefer this extruder's OWN subject — update_from_status
             // publishes one per discovered head, single-tool printers included.
@@ -531,28 +601,35 @@ bool TempGraphController::attach_series_observers(size_t i) {
             // binding a named series to it plots the active tool's trace under
             // another tool's label (a changer printing on T4 showed 230°C under
             // "Nozzle 1").
-            temp_subj = ps.get_extruder_temp_subject(s.klipper_name, s.lifetime);
-            target_subj = ps.get_extruder_target_subject(s.klipper_name, s.lifetime);
+            temp_subj =
+                ps.temperature_state().get_extruder_temp_subject(s.klipper_name, s.lifetime);
+            target_subj =
+                ps.temperature_state().get_extruder_target_subject(s.klipper_name, s.lifetime);
 
             // Nothing discovered yet: the generic "extruder" series can ride the
             // active subject until init_extruders() runs. A numbered head cannot
             // — it stays unresolved so the discovery watcher retries it.
-            if (!temp_subj && s.klipper_name == "extruder" && ps.extruder_count() == 0) {
-                temp_subj = ps.get_active_extruder_temp_subject();
-                target_subj = ps.get_active_extruder_target_subject();
+            if (!temp_subj && s.klipper_name == "extruder" &&
+                ps.temperature_state().extruder_count() == 0) {
+                temp_subj = ps.temperature_state().get_active_extruder_temp_subject();
+                target_subj = ps.temperature_state().get_active_extruder_target_subject();
+                s.lifetime = ps.get_subjects_lifetime();
                 s.provisional = (temp_subj != nullptr);
             }
         } else {
-            // Auxiliary sensor from TemperatureSensorManager
+            // Auxiliary sensor or heater from TemperatureSensorManager. Temp and
+            // target share one lifetime token, so s.lifetime covers both.
             auto& sensor_mgr = sensors::TemperatureSensorManager::instance();
             temp_subj = sensor_mgr.get_temp_subject(s.klipper_name, s.lifetime);
+            if (temp_subj && sensors::klipper_object_has_target(s.klipper_name))
+                target_subj = sensor_mgr.get_target_subject(s.klipper_name, s.lifetime);
         }
 
         resolved = (temp_subj != nullptr);
 
         if (temp_subj) {
             size_t idx = i;
-            s.temp_obs = observe_int_sync<TempGraphController>(
+            s.temp_obs = observe<int>(
                 temp_subj, this,
                 [token, gen, idx](TempGraphController* self, int temp_deci) {
                     if (token.expired() || gen != self->generation_)
@@ -561,7 +638,7 @@ bool TempGraphController::attach_series_observers(size_t i) {
                         return;
 
                     auto& si = self->series_[idx];
-                    if (si.series_id < 0)
+                    if (si.series_id == SeriesId::None)
                         return;
 
                     // Filter garbage / "no data" readings at the source, mirroring
@@ -575,30 +652,39 @@ bool TempGraphController::attach_series_observers(size_t i) {
                     // the next real reading. Upper bound rejects obviously-bogus spikes
                     // (deci-degrees: 4000 = 400°C covers any nozzle).
                     constexpr int MAX_VALID_TEMP_DECI = 4000;
-                    if (temp_deci <= 0 || temp_deci > MAX_VALID_TEMP_DECI)
+                    if (temp_deci <= 0 || temp_deci > MAX_VALID_TEMP_DECI) {
+                        si.latest_deci = 0;
                         return;
+                    }
+                    si.latest_deci = temp_deci;
 
                     // Throttle chart updates to one sample per SAMPLE_INTERVAL_SEC
                     // per series — Klipper pushes status at ~4Hz, and the chart
                     // only holds one point per interval, so faster pushes just
-                    // burn LVGL redraws (the K2 Plus freeze, #979).
-                    auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                      std::chrono::system_clock::now().time_since_epoch())
-                                      .count();
-                    if (now_ms - si.last_update_ms < UI_TEMP_GRAPH_SAMPLE_INTERVAL_SEC * 1000)
+                    // burn LVGL redraws (the K2 Plus freeze, #979). The first
+                    // reading of a slot pushes every series that has a current
+                    // value, so the chart repaints once per slot however the
+                    // readings are spread across notifies, and all series keep
+                    // the same number of points.
+                    const int64_t now_ms = self->now_ms_fn_();
+                    if (!sample_due(si.last_update_ms, now_ms))
                         return;
-                    si.last_update_ms = now_ms;
 
-                    float temp_deg = deci_to_degrees_f(temp_deci);
-                    // trace, not debug: one line per series per sample interval with
-                    // no decision content — the value is already in the subject and on
-                    // the chart. The bundle's ring buffer captures DEBUG by default
-                    // (ring_captures_debug()), so at debug this single line evicts
-                    // every other line: bundle ED2YC336 was 2000/2000 of these.
-                    spdlog::trace("[TempGraphController] live push series_id={} '{}' {:.1f}°C",
-                                  si.series_id, si.klipper_name, temp_deg);
-                    ui_temp_graph_update_series_with_time(self->graph_, si.series_id, temp_deg,
-                                                          now_ms);
+                    for (auto& sj : self->series_) {
+                        if (sj.series_id == SeriesId::None || sj.latest_deci == 0 ||
+                            !sample_due(sj.last_update_ms, now_ms))
+                            continue;
+                        sj.last_update_ms = now_ms;
+                        float temp_deg = deci_to_degrees_f(sj.latest_deci);
+                        // trace, not debug: one line per series per sample interval
+                        // with no decision content. The bundle's ring buffer captures
+                        // DEBUG by default (ring_captures_debug()), so at debug this
+                        // line evicts every other line: bundle ED2YC336 was 2000/2000.
+                        spdlog::trace("[TempGraphController] live push series_id={} '{}' {:.1f}°C",
+                                      sj.series_id, sj.klipper_name, temp_deg);
+                        ui_temp_graph_update_series_with_time(self->graph_, sj.series_id, temp_deg,
+                                                              now_ms);
+                    }
                     self->apply_auto_range();
                 },
                 s.lifetime);
@@ -606,7 +692,7 @@ bool TempGraphController::attach_series_observers(size_t i) {
 
         if (target_subj && s.show_target) {
             size_t idx = i;
-            s.target_obs = observe_int_sync<TempGraphController>(
+            s.target_obs = observe<int>(
                 target_subj, this,
                 [token, gen, idx](TempGraphController* self, int target_deci) {
                     if (token.expired() || gen != self->generation_)
@@ -615,7 +701,7 @@ bool TempGraphController::attach_series_observers(size_t i) {
                         return;
 
                     auto& si = self->series_[idx];
-                    if (si.series_id < 0)
+                    if (si.series_id == SeriesId::None)
                         return;
 
                     float target_deg = deci_to_degrees_f(target_deci);
@@ -646,18 +732,18 @@ void TempGraphController::setup_connection_observer() {
     // printer's sensor configuration changed) while preserving existing
     // chart data, chip visibility, and X-axis timestamps.
     //
-    // Transition detection: observe_int_sync fires once synchronously with the
+    // Transition detection: observe<int> fires once synchronously with the
     // current value when attached. Without tracking the previous state, every
     // re-attach would create a new observer that sync-fires CONNECTED and
     // triggers another re-attach — an infinite loop. By tracking prev_state,
     // only ACTUAL state changes (disconnect → reconnect) trigger re-attach.
     // This ensures ALL controllers re-attach, not just the first one (#1245).
-    auto* conn_subj = ps.get_printer_connection_state_subject();
+    auto* conn_subj = ps.network_state().get_printer_connection_state_subject();
     if (conn_subj) {
         auto conn_token = lifetime_.token();
         uint32_t conn_gen = generation_;
         auto prev_state = std::make_shared<int>(lv_subject_get_int(conn_subj));
-        connection_observer_ = observe_int_sync<TempGraphController>(
+        connection_observer_ = observe<int>(
             conn_subj, this,
             [conn_token, conn_gen, prev_state](TempGraphController* self, int state) {
                 if (conn_token.expired())
@@ -674,7 +760,8 @@ void TempGraphController::setup_connection_observer() {
                         "[TempGraphController] Connection restored — re-attaching observers");
                     self->reattach_observers();
                 }
-            });
+            },
+            ps.get_subjects_lifetime());
     }
 }
 
@@ -694,7 +781,7 @@ void TempGraphController::backfill_history() {
                                      UI_TEMP_GRAPH_SAMPLE_INTERVAL_SEC * 1000;
 
     for (auto& s : series_) {
-        if (s.series_id < 0)
+        if (s.series_id == SeriesId::None)
             continue;
 
         auto samples = history_mgr->get_samples_since(s.klipper_name, cutoff_ms);
@@ -762,7 +849,7 @@ void TempGraphController::apply_auto_range() {
     // Find max relevant temperature (from data and targets)
     float max_temp = graph_->max_visible_temp;
     for (const auto& s : series_) {
-        if (s.show_target && s.series_id >= 0) {
+        if (s.show_target && s.series_id != SeriesId::None) {
             for (int j = 0; j < graph_->series_count; j++) {
                 auto& meta = graph_->series_meta[j];
                 if (meta.id == s.series_id && meta.show_target && meta.target_temp > max_temp) {

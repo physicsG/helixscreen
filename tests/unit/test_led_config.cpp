@@ -7,6 +7,7 @@
 #include "../test_helpers/update_queue_test_access.h"
 #include "color_utils.h"
 #include "config.h"
+#include "led/led_auto_state.h"
 #include "led/led_controller.h"
 #include "printer_discovery.h"
 
@@ -30,8 +31,6 @@ struct LedConfigFixture : public HelixTestFixture {
 /// Tests run in random order and the Config singleton persists between tests.
 static void clear_led_config_paths() {
     auto* cfg = Config::get_instance();
-    if (!cfg)
-        return;
     cfg->set(cfg->df() + "leds/selected_strips", nlohmann::json::array());
     cfg->set(cfg->df() + "leds/selected", nlohmann::json());
     cfg->set(cfg->df() + "leds/strip", nlohmann::json());
@@ -41,8 +40,23 @@ static void clear_led_config_paths() {
     cfg->set(cfg->df() + "leds/macro_devices", nlohmann::json());
     cfg->set(cfg->df() + "leds/auto_paired_bases", nlohmann::json());
     cfg->set(cfg->df() + "leds/led_on_at_start", nlohmann::json());
+    cfg->set(cfg->df() + "leds/auto_state/strips", nlohmann::json());
+    cfg->set(cfg->df() + "leds/light_button_pending", nlohmann::json());
     cfg->save();
 }
+
+/// The selection load_config() read from the legacy keys, as the migration sees
+/// it: run a discovery and read back the auto-state list it staged.
+static std::vector<std::string> migrated_legacy_selection() {
+    auto* cfg = Config::get_instance();
+    helix::PrinterDiscovery discovery;
+    helix::led::LedController::instance().discover_from_hardware(discovery);
+    std::vector<std::string> out = cfg->get_string_array(cfg->df() + "leds/auto_state/strips");
+    cfg->set(cfg->df() + "leds/auto_state/strips", nlohmann::json());
+    cfg->set(cfg->df() + "leds/light_button_pending", nlohmann::json());
+    return out;
+}
+
 TEST_CASE_METHOD(LedConfigFixture, "LedController config: default values after init",
                  "[led][config]") {
     auto& ctrl = helix::led::LedController::instance();
@@ -52,57 +66,11 @@ TEST_CASE_METHOD(LedConfigFixture, "LedController config: default values after i
 
     REQUIRE(ctrl.last_color() == 0xFFFFFF);
     REQUIRE(ctrl.last_brightness() == 100);
-    REQUIRE(ctrl.selected_strips().empty());
     // Default presets loaded during init->load_config
-    REQUIRE(ctrl.color_presets().size() == 8);
-    REQUIRE(ctrl.color_presets()[0] == 0xFFFFFF);
-    REQUIRE(ctrl.color_presets()[1] == 0xFFD700);
+    REQUIRE(ctrl.color_presets().size() == 7);
+    REQUIRE(ctrl.color_presets()[0] == 0xFF4444);
+    REQUIRE(ctrl.color_presets()[1] == 0xFF6B35);
     REQUIRE(ctrl.configured_macros().empty());
-
-    ctrl.deinit();
-}
-
-TEST_CASE_METHOD(LedConfigFixture, "LedController config: set and get last_color",
-                 "[led][config]") {
-    auto& ctrl = helix::led::LedController::instance();
-    ctrl.deinit();
-    ctrl.init(nullptr, nullptr);
-
-    ctrl.set_last_color(0xFF0000);
-    REQUIRE(ctrl.last_color() == 0xFF0000);
-
-    ctrl.set_last_color(0x00FF00);
-    REQUIRE(ctrl.last_color() == 0x00FF00);
-
-    ctrl.deinit();
-}
-
-TEST_CASE_METHOD(LedConfigFixture, "LedController config: set and get last_brightness",
-                 "[led][config]") {
-    auto& ctrl = helix::led::LedController::instance();
-    ctrl.deinit();
-    ctrl.init(nullptr, nullptr);
-
-    ctrl.set_last_brightness(75);
-    REQUIRE(ctrl.last_brightness() == 75);
-
-    ctrl.set_last_brightness(0);
-    REQUIRE(ctrl.last_brightness() == 0);
-
-    ctrl.deinit();
-}
-
-TEST_CASE_METHOD(LedConfigFixture, "LedController config: set and get selected_strips",
-                 "[led][config]") {
-    auto& ctrl = helix::led::LedController::instance();
-    ctrl.deinit();
-    ctrl.init(nullptr, nullptr);
-
-    std::vector<std::string> strips = {"neopixel chamber", "dotstar status"};
-    ctrl.set_selected_strips(strips);
-    REQUIRE(ctrl.selected_strips().size() == 2);
-    REQUIRE(ctrl.selected_strips()[0] == "neopixel chamber");
-    REQUIRE(ctrl.selected_strips()[1] == "dotstar status");
 
     ctrl.deinit();
 }
@@ -170,7 +138,6 @@ TEST_CASE_METHOD(LedConfigFixture, "LedController config: deinit resets config s
     // Modify state
     ctrl.set_last_color(0xFF0000);
     ctrl.set_last_brightness(50);
-    ctrl.set_selected_strips({"neopixel test"});
     ctrl.set_color_presets({0xABCDEF});
 
     helix::led::LedMacroInfo m;
@@ -180,7 +147,6 @@ TEST_CASE_METHOD(LedConfigFixture, "LedController config: deinit resets config s
 
     REQUIRE(ctrl.last_color() == 0xFF0000);
     REQUIRE(ctrl.last_brightness() == 50);
-    REQUIRE(ctrl.selected_strips().size() == 1);
     REQUIRE(ctrl.color_presets().size() == 1);
     REQUIRE(ctrl.configured_macros().size() == 1);
 
@@ -191,8 +157,7 @@ TEST_CASE_METHOD(LedConfigFixture, "LedController config: deinit resets config s
     ctrl.init(nullptr, nullptr);
     REQUIRE(ctrl.last_color() == 0xFFFFFF);
     REQUIRE(ctrl.last_brightness() == 100);
-    REQUIRE(ctrl.selected_strips().empty());
-    REQUIRE(ctrl.color_presets().size() == 8); // Default presets restored
+    REQUIRE(ctrl.color_presets().size() == 7); // Default presets restored
     REQUIRE(ctrl.configured_macros().empty());
 
     ctrl.deinit();
@@ -205,39 +170,41 @@ TEST_CASE_METHOD(LedConfigFixture, "LedController config: default presets have c
     ctrl.init(nullptr, nullptr);
 
     auto& presets = ctrl.color_presets();
-    REQUIRE(presets.size() == 8);
-    REQUIRE(presets[0] == 0xFFFFFF); // White
-    REQUIRE(presets[1] == 0xFFD700); // Gold
-    REQUIRE(presets[2] == 0xFF6B35); // Orange
-    REQUIRE(presets[3] == 0x4FC3F7); // Light Blue
-    REQUIRE(presets[4] == 0xFF4444); // Red
-    REQUIRE(presets[5] == 0x66BB6A); // Green
-    REQUIRE(presets[6] == 0x9C27B0); // Purple
-    REQUIRE(presets[7] == 0x00BCD4); // Cyan
+    REQUIRE(presets.size() == 7);
+    REQUIRE(presets[0] == 0xFF4444); // Red
+    REQUIRE(presets[1] == 0xFF6B35); // Orange
+    REQUIRE(presets[2] == 0x66BB6A); // Green
+    REQUIRE(presets[3] == 0x00BCD4); // Cyan
+    REQUIRE(presets[4] == 0x2962FF); // Blue
+    REQUIRE(presets[5] == 0x9C27B0); // Purple
+    REQUIRE(presets[6] == 0xFF4081); // Pink
 
     ctrl.deinit();
 }
 
-TEST_CASE_METHOD(LedConfigFixture, "LedController config: paths use df() + leds/ prefix",
+TEST_CASE_METHOD(LedConfigFixture,
+                 "LedController config: paths use df() + leds/ prefix; the legacy selection is "
+                 "never rewritten",
                  "[led][config]") {
     // This test verifies that after save + reload, data persists under the new paths
+    auto* cfg = Config::get_instance();
+    // A pre-1.1 selection on disk: read for the migration, never rewritten.
+    cfg->set(cfg->df() + "leds/selected_strips", nlohmann::json::array({"Lamp"}));
+    cfg->set(cfg->df() + "leds/macro_devices",
+             nlohmann::json::array(
+                 {{{"name", "Lamp"}, {"type", "toggle"}, {"toggle_macro", "LAMP_TOGGLE"}}}));
+
     auto& ctrl = helix::led::LedController::instance();
     ctrl.deinit();
     ctrl.init(nullptr, nullptr);
 
-    ctrl.set_selected_strips({"neopixel test_strip"});
     ctrl.set_last_color(0xAABBCC);
     ctrl.set_last_brightness(42);
     ctrl.save_config();
 
-    // Verify config was written to new paths
-    auto* cfg = Config::get_instance();
-    REQUIRE(cfg != nullptr);
-
-    auto& strips_json = cfg->get_json(cfg->df() + "leds/selected_strips");
-    REQUIRE(strips_json.is_array());
-    REQUIRE(strips_json.size() == 1);
-    REQUIRE(strips_json[0].get<std::string>() == "neopixel test_strip");
+    // The unprefixed macro name reads as "macro:Lamp" in memory; disk keeps "Lamp".
+    CHECK(cfg->get_json(cfg->df() + "leds/selected_strips") == nlohmann::json::array({"Lamp"}));
+    CHECK(migrated_legacy_selection() == std::vector<std::string>{"macro:Lamp"});
 
     REQUIRE(cfg->get<std::string>(cfg->df() + "leds/last_color", "") == "#AABBCC");
     REQUIRE(cfg->get<int>(cfg->df() + "leds/last_brightness", 0) == 42);
@@ -246,13 +213,12 @@ TEST_CASE_METHOD(LedConfigFixture, "LedController config: paths use df() + leds/
     ctrl.deinit();
     ctrl.init(nullptr, nullptr);
 
-    REQUIRE(ctrl.selected_strips().size() == 1);
-    REQUIRE(ctrl.selected_strips()[0] == "neopixel test_strip");
     REQUIRE(ctrl.last_color() == 0xAABBCC);
     REQUIRE(ctrl.last_brightness() == 42);
 
     // Cleanup
     cfg->set(cfg->df() + "leds/selected_strips", nlohmann::json::array());
+    cfg->set(cfg->df() + "leds/macro_devices", nlohmann::json());
     cfg->set(cfg->df() + "leds/last_color", 0xFFFFFF);
     cfg->set(cfg->df() + "leds/last_brightness", 100);
     cfg->save();
@@ -263,7 +229,6 @@ TEST_CASE_METHOD(LedConfigFixture, "LedController config: paths use df() + leds/
 TEST_CASE_METHOD(LedConfigFixture, "LedController config: legacy /printer/leds/selected migration",
                  "[led][config]") {
     auto* cfg = Config::get_instance();
-    REQUIRE(cfg != nullptr);
 
     // Simulate old SettingsManager data at df()+"leds/selected" (JSON array)
     nlohmann::json legacy_selected = nlohmann::json::array({"neopixel legacy_led"});
@@ -277,9 +242,8 @@ TEST_CASE_METHOD(LedConfigFixture, "LedController config: legacy /printer/leds/s
     ctrl.deinit();
     ctrl.init(nullptr, nullptr);
 
-    // Should have migrated legacy selected -> selected_strips
-    REQUIRE(ctrl.selected_strips().size() == 1);
-    REQUIRE(ctrl.selected_strips()[0] == "neopixel legacy_led");
+    // The legacy leds/selected array is the selection the migration reads
+    REQUIRE(migrated_legacy_selection() == std::vector<std::string>{"neopixel legacy_led"});
 
     // Cleanup
     cfg->set(cfg->df() + "leds/selected", nlohmann::json());
@@ -293,7 +257,6 @@ TEST_CASE_METHOD(LedConfigFixture,
                  "LedController config: legacy /printer/leds/strip string migration",
                  "[led][config]") {
     auto* cfg = Config::get_instance();
-    REQUIRE(cfg != nullptr);
 
     // Simulate oldest format: single string at df()+"leds/strip"
     cfg->set<std::string>(cfg->df() + "leds/strip", "neopixel oldest_led");
@@ -307,9 +270,8 @@ TEST_CASE_METHOD(LedConfigFixture,
     ctrl.deinit();
     ctrl.init(nullptr, nullptr);
 
-    // Should have migrated string -> array in selected_strips
-    REQUIRE(ctrl.selected_strips().size() == 1);
-    REQUIRE(ctrl.selected_strips()[0] == "neopixel oldest_led");
+    // The single leds/strip string is the selection the migration reads
+    REQUIRE(migrated_legacy_selection() == std::vector<std::string>{"neopixel oldest_led"});
 
     // Cleanup
     cfg->set<std::string>(cfg->df() + "leds/strip", "");
@@ -323,7 +285,6 @@ TEST_CASE_METHOD(LedConfigFixture,
                  "LedController config: wizard saves both strip and selected_strips",
                  "[led][config]") {
     auto* cfg = Config::get_instance();
-    REQUIRE(cfg != nullptr);
 
     // Simulate wizard behavior: saves to both leds/strip (string for dropdown
     // restore) and leds/selected_strips (array for LedController)
@@ -338,9 +299,8 @@ TEST_CASE_METHOD(LedConfigFixture,
     ctrl.deinit();
     ctrl.init(nullptr, nullptr);
 
-    // selected_strips should read from the canonical array path
-    REQUIRE(ctrl.selected_strips().size() == 1);
-    REQUIRE(ctrl.selected_strips()[0] == "output_pin LED");
+    // The canonical array path is the one read
+    REQUIRE(migrated_legacy_selection() == std::vector<std::string>{"output_pin LED"});
 
     // Cleanup
     cfg->set<std::string>(cfg->df() + "leds/strip", "");
@@ -354,7 +314,6 @@ TEST_CASE_METHOD(LedConfigFixture,
                  "LedController config: selected_strips takes priority over legacy strip",
                  "[led][config]") {
     auto* cfg = Config::get_instance();
-    REQUIRE(cfg != nullptr);
 
     // Both paths set with different values — selected_strips should win
     cfg->set<std::string>(cfg->df() + "leds/strip", "neopixel old_led");
@@ -368,9 +327,8 @@ TEST_CASE_METHOD(LedConfigFixture,
     ctrl.deinit();
     ctrl.init(nullptr, nullptr);
 
-    // Should use selected_strips, NOT the legacy strip value
-    REQUIRE(ctrl.selected_strips().size() == 1);
-    REQUIRE(ctrl.selected_strips()[0] == "output_pin NEW_LED");
+    // leds/selected_strips is read, NOT the legacy strip value
+    REQUIRE(migrated_legacy_selection() == std::vector<std::string>{"output_pin NEW_LED"});
 
     // Cleanup
     cfg->set<std::string>(cfg->df() + "leds/strip", "");
@@ -383,7 +341,6 @@ TEST_CASE_METHOD(LedConfigFixture,
 TEST_CASE_METHOD(LedConfigFixture, "LedController config: wizard None selection saves empty array",
                  "[led][config]") {
     auto* cfg = Config::get_instance();
-    REQUIRE(cfg != nullptr);
 
     // Simulate wizard saving "None" — empty string and empty array
     cfg->set<std::string>(cfg->df() + "leds/strip", "");
@@ -395,7 +352,7 @@ TEST_CASE_METHOD(LedConfigFixture, "LedController config: wizard None selection 
     ctrl.deinit();
     ctrl.init(nullptr, nullptr);
 
-    REQUIRE(ctrl.selected_strips().empty());
+    REQUIRE(migrated_legacy_selection().empty());
 
     ctrl.deinit();
 }
@@ -494,7 +451,6 @@ TEST_CASE_METHOD(LedConfigFixture, "LedController config: hex string colors save
 TEST_CASE_METHOD(LedConfigFixture, "LedController config: loads hex string colors from config",
                  "[led][config]") {
     auto* cfg = Config::get_instance();
-    REQUIRE(cfg != nullptr);
 
     // Write hex string colors to config
     cfg->set<std::string>(cfg->df() + "leds/last_color", "#AABB00");
@@ -523,7 +479,6 @@ TEST_CASE_METHOD(LedConfigFixture, "LedController config: loads hex string color
 TEST_CASE_METHOD(LedConfigFixture, "LedController config: loads legacy integer colors from config",
                  "[led][config]") {
     auto* cfg = Config::get_instance();
-    REQUIRE(cfg != nullptr);
 
     // Write old-style integer colors
     cfg->set(cfg->df() + "leds/last_color", static_cast<int>(0xFF8800));
@@ -552,7 +507,6 @@ TEST_CASE_METHOD(LedConfigFixture, "LedController config: loads legacy integer c
 TEST_CASE_METHOD(LedConfigFixture, "LedController config: mixed integer and hex string presets",
                  "[led][config]") {
     auto* cfg = Config::get_instance();
-    REQUIRE(cfg != nullptr);
 
     // Mix of old integers and new hex strings
     nlohmann::json presets = nlohmann::json::array();
@@ -597,7 +551,6 @@ TEST_CASE_METHOD(LedConfigFixture,
                  "LedController config: per-printer selected_strips wins over legacy formats",
                  "[led][config][integration]") {
     auto* cfg = Config::get_instance();
-    REQUIRE(cfg != nullptr);
 
     auto& ctrl = helix::led::LedController::instance();
     ctrl.deinit();
@@ -610,9 +563,8 @@ TEST_CASE_METHOD(LedConfigFixture,
 
     ctrl.init(nullptr, nullptr);
 
-    REQUIRE(ctrl.selected_strips().size() == 1);
-    REQUIRE(ctrl.selected_strips()[0] == "neopixel NEW");
     REQUIRE(ctrl.last_color() == 0x222222);
+    REQUIRE(migrated_legacy_selection() == std::vector<std::string>{"neopixel NEW"});
 
     // Cleanup
     cfg->set(cfg->df() + "leds/selected", nlohmann::json());
@@ -649,7 +601,6 @@ TEST_CASE_METHOD(LedConfigFixture, "LedController config: draft macro is never p
     ctrl.save_config();
 
     const auto* cfg = Config::get_instance();
-    REQUIRE(cfg != nullptr);
     const nlohmann::json* saved =
         Config::get_instance()->try_get_json(Config::get_instance()->df() + "leds/macro_devices");
     REQUIRE(saved != nullptr);
@@ -806,4 +757,120 @@ TEST_CASE_METHOD(LedConfigFixture, "LedController: auto-pairing is idempotent ac
 
     ctrl.deinit();
     clear_led_config_paths();
+}
+
+TEST_CASE_METHOD(LedConfigFixture, "LedController: a legacy selection migrates once at discovery",
+                 "[led][config][migration]") {
+    auto& ctrl = helix::led::LedController::instance();
+    ctrl.deinit();
+    clear_led_config_paths();
+    auto* cfg = Config::get_instance();
+    cfg->set(cfg->df() + "leds/selected_strips",
+             nlohmann::json::array({"neopixel a", "neopixel b"}));
+    ctrl.init(nullptr, nullptr);
+
+    helix::PrinterDiscovery discovery;
+    discovery.parse_objects(nlohmann::json::array({"neopixel a", "neopixel b", "extruder"}));
+    ctrl.discover_from_hardware(discovery);
+
+    const auto* strips = cfg->try_get_json(cfg->df() + "leds/auto_state/strips");
+    REQUIRE(strips != nullptr);
+    CHECK(*strips == nlohmann::json::array({"neopixel a", "neopixel b"}));
+    const auto* pending = cfg->try_get_json(cfg->df() + "leds/light_button_pending");
+    REQUIRE(pending != nullptr);
+    CHECK(*pending == "all");
+
+    // Run once: a changed legacy list does not re-migrate.
+    cfg->set(cfg->df() + "leds/selected_strips", nlohmann::json::array({"neopixel b"}));
+    cfg->set(cfg->df() + "leds/light_button_pending", nlohmann::json());
+    ctrl.deinit();
+    ctrl.init(nullptr, nullptr);
+    ctrl.discover_from_hardware(discovery);
+    CHECK(*cfg->try_get_json(cfg->df() + "leds/auto_state/strips") ==
+          nlohmann::json::array({"neopixel a", "neopixel b"}));
+    CHECK(cfg->try_get_json(cfg->df() + "leds/light_button_pending")->is_null());
+    ctrl.deinit();
+    clear_led_config_paths();
+}
+
+TEST_CASE_METHOD(LedConfigFixture,
+                 "LedController: a fresh config selects nothing and stays controllable",
+                 "[led][config][migration]") {
+    auto& ctrl = helix::led::LedController::instance();
+    ctrl.deinit();
+    clear_led_config_paths();
+    ctrl.init(nullptr, nullptr);
+    helix::PrinterDiscovery discovery;
+    discovery.parse_objects(nlohmann::json::array({"neopixel a", "extruder"}));
+    ctrl.discover_from_hardware(discovery);
+
+    auto* cfg = Config::get_instance();
+    const auto* strips = cfg->try_get_json(cfg->df() + "leds/auto_state/strips");
+    CHECK((strips == nullptr || strips->is_null()));
+    CHECK(lv_subject_get_int(ctrl.get_led_controllable_subject()) == 1);
+    ctrl.deinit();
+}
+
+TEST_CASE_METHOD(LedConfigFixture,
+                 "LedController: the pre-1.1 default presets load as the new default",
+                 "[led][config][migration]") {
+    auto& ctrl = helix::led::LedController::instance();
+    ctrl.deinit();
+    clear_led_config_paths();
+    auto* cfg = Config::get_instance();
+    cfg->set(cfg->df() + "leds/color_presets",
+             nlohmann::json::array({"#FFFFFF", "#FFD700", "#FF6B35", "#4FC3F7", "#FF4444",
+                                    "#66BB6A", "#9C27B0", "#00BCD4"}));
+    ctrl.init(nullptr, nullptr);
+    CHECK(ctrl.color_presets().size() == 7);
+    CHECK(ctrl.color_presets().front() == 0xFF4444);
+    ctrl.deinit();
+    clear_led_config_paths();
+}
+
+TEST_CASE_METHOD(LedConfigFixture,
+                 "LedController: an auto-state save before discovery does not pre-empt the "
+                 "migration",
+                 "[led][config][migration]") {
+    auto& ctrl = helix::led::LedController::instance();
+    ctrl.deinit();
+    clear_led_config_paths();
+    auto* cfg = Config::get_instance();
+    cfg->set(cfg->df() + "leds/selected_strips",
+             nlohmann::json::array({"neopixel a", "neopixel b"}));
+    ctrl.init(nullptr, nullptr);
+
+    auto& auto_state = helix::led::LedAutoState::instance();
+    auto_state.set_strips({});
+    auto_state.save_config();
+
+    helix::PrinterDiscovery discovery;
+    discovery.parse_objects(nlohmann::json::array({"neopixel a", "neopixel b", "extruder"}));
+    ctrl.discover_from_hardware(discovery);
+
+    const auto* strips = cfg->try_get_json(cfg->df() + "leds/auto_state/strips");
+    REQUIRE(strips != nullptr);
+    CHECK(*strips == nlohmann::json::array({"neopixel a", "neopixel b"}));
+
+    ctrl.deinit();
+    auto_state.set_strips({});
+    cfg->set(cfg->df() + "leds/auto_state/enabled", nlohmann::json());
+    cfg->set(cfg->df() + "leds/auto_state/mappings", nlohmann::json());
+    clear_led_config_paths();
+}
+
+TEST_CASE_METHOD(LedConfigFixture, "apply_startup_preference with no targets defers",
+                 "[led][config][startup]") {
+    auto& ctrl = helix::led::LedController::instance();
+    ctrl.deinit();
+    clear_led_config_paths();
+    ctrl.init(nullptr, nullptr);
+    ctrl.set_led_on_at_start(true);
+    ctrl.apply_startup_preference({});
+    // Still armed: the next call with a target applies (last_brightness follows the preference).
+    ctrl.set_startup_brightness(40);
+    ctrl.set_last_brightness(100);
+    ctrl.apply_startup_preference({"neopixel a"});
+    CHECK(ctrl.last_brightness() == 40);
+    ctrl.deinit();
 }

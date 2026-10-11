@@ -11,7 +11,9 @@
 #include "helix-xml/src/xml/lv_xml_widget.h"
 #include "helix-xml/src/xml/parsers/lv_xml_label_parser.h"
 #include "helix-xml/src/xml/parsers/lv_xml_obj_parser.h"
+#include "helix/ui/shared_font_style.h"
 #include "lvgl/lvgl.h"
+#include "lvgl/src/misc/lv_text_private.h" // lv_text_get_width, lv_text_encoded_next/prev
 #include "theme_manager.h"
 
 #include <spdlog/spdlog.h>
@@ -19,6 +21,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <string>
+#include <utility>
 
 /**
  * Enum for text style types used by semantic text widgets
@@ -66,7 +70,7 @@ static void apply_semantic_font(lv_obj_t* label, const char* font_const_name) {
         std::exit(EXIT_FAILURE);
     }
 
-    lv_obj_set_style_text_font(label, font, 0);
+    helix::ui::apply_font_style(label, font);
 
     // Debug: log the actual font being applied
     spdlog::trace("[ui_text] Applied font '{}' (from '{}') - line_height={}px", font_name,
@@ -171,6 +175,17 @@ static bool long_mode_animates(lv_label_long_mode_t mode) {
  *
  * The long mode the XML declared is carried in the observer's user data, so the
  * label goes back to scrolling if the preference is switched on again.
+ *
+ * CLIP is the still counterpart of a scrolling mode, and the only one: it sets
+ * the same LV_TEXT_FLAG_EXPAND, so the text measures unwrapped and the label
+ * stays exactly one line, which is the height every layout around a scrolling
+ * label is built for. DOTS clears that flag - the label wraps to two or three
+ * lines and pushes whatever sits below it out of its container - and it also
+ * rewrites the label's own text buffer with the ellipsized string, so
+ * lv_label_get_text() would start returning truncated text app-wide for as long
+ * as the preference is off. The ellipsis a still label shows instead comes from
+ * middle_ellipsis_draw_cb, which swaps the string at draw time and leaves both
+ * the buffer and the one-line geometry alone.
  */
 static void animations_pref_observer_cb(lv_observer_t* observer, lv_subject_t* subject) {
     lv_obj_t* label = lv_observer_get_target_obj(observer);
@@ -179,8 +194,93 @@ static void animations_pref_observer_cb(lv_observer_t* observer, lv_subject_t* s
     }
     auto declared = static_cast<lv_label_long_mode_t>(
         reinterpret_cast<intptr_t>(lv_observer_get_user_data(observer)));
-    lv_label_set_long_mode(label, helix::ui::animations_enabled(subject) ? declared
-                                                                         : LV_LABEL_LONG_MODE_DOTS);
+    const bool still = !helix::ui::animations_enabled(subject);
+    lv_label_set_long_mode(label, still ? LV_LABEL_LONG_MODE_CLIP : declared);
+
+    // The middle-ellipsis hook below only hears about the label's draw task
+    // while this flag is set. It is set only while the label is held still:
+    // with the flag on, LVGL re-measures the text on every draw instead of
+    // reading the cached size, and a scrolling label draws at the refresh rate.
+    if (still) {
+        lv_obj_add_flag(label, LV_OBJ_FLAG_SEND_DRAW_TASK_EVENTS);
+    } else {
+        lv_obj_remove_flag(label, LV_OBJ_FLAG_SEND_DRAW_TASK_EVENTS);
+    }
+}
+
+namespace {
+
+/**
+ * The display string a still, overflowing label draws in place of its text
+ *
+ * Owned by the label (freed on LV_EVENT_DELETE). `shown` is what the draw task
+ * renders; it stays empty while the stored text fits. The remaining fields are
+ * the inputs `shown` was derived from, so the string is rebuilt only when the
+ * text, the width or the font changes, never on every draw.
+ */
+struct MiddleEllipsis {
+    std::string source;
+    std::string shown;
+    int32_t width = -1;
+    const lv_font_t* font = nullptr;
+    int32_t letter_space = 0;
+};
+
+} // namespace
+
+/**
+ * Draw hook: render "<head>…<tail>" for a still label whose text overflows
+ *
+ * Runs on LV_EVENT_DRAW_TASK_ADDED, between LVGL building the label's draw
+ * task and a draw unit taking it, so the text pointer in the task's own copy of
+ * the descriptor can be swapped for the fitted string. The label's text buffer
+ * and geometry are untouched: lv_label_get_text() keeps returning what was
+ * set, and CLIP keeps the label one line tall. LVGL measures the descriptor's
+ * text (not the label's cached size) when this flag is set, so a centred label
+ * centres the fitted string.
+ *
+ * Content width, font and letter spacing are read on every draw, so a resize
+ * or a font-tier change - both of which invalidate the label - recomputes the
+ * string on the next frame. While the label scrolls (animations on) LVGL draws
+ * the text whole and this does nothing.
+ */
+static void middle_ellipsis_draw_cb(lv_event_t* e) {
+    auto* label = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
+    auto* state = static_cast<MiddleEllipsis*>(lv_event_get_user_data(e));
+    lv_draw_task_t* task = lv_event_get_draw_task(e);
+    if (!label || !state || !task || lv_draw_task_get_type(task) != LV_DRAW_TASK_TYPE_LABEL) {
+        return;
+    }
+    if (lv_label_get_long_mode(label) != LV_LABEL_LONG_MODE_CLIP) {
+        return;
+    }
+    lv_draw_label_dsc_t* dsc = lv_draw_task_get_label_dsc(task);
+    if (!dsc || !dsc->text || !dsc->font) {
+        return;
+    }
+
+    const int32_t width = lv_obj_get_content_width(label);
+    if (state->width != width || state->font != dsc->font ||
+        state->letter_space != dsc->letter_space || state->source != dsc->text) {
+        state->width = width;
+        state->font = dsc->font;
+        state->letter_space = dsc->letter_space;
+        state->source = dsc->text;
+        std::string fitted =
+            helix::ui::middle_ellipsize(state->source.c_str(), width, dsc->font, dsc->letter_space);
+        state->shown = fitted == state->source ? std::string() : std::move(fitted);
+    }
+    if (state->shown.empty()) {
+        return;
+    }
+
+    dsc->text = state->shown.c_str();
+    // The hint indexes lines of the stored text, which is not what is drawn now.
+    dsc->hint = nullptr;
+}
+
+static void middle_ellipsis_delete_cb(lv_event_t* e) {
+    delete static_cast<MiddleEllipsis*>(lv_event_get_user_data(e));
 }
 
 /**
@@ -189,9 +289,9 @@ static void animations_pref_observer_cb(lv_observer_t* observer, lv_subject_t* s
  * A scrolling long mode repaints the label's area at the display refresh rate
  * for as long as the text overflows, and the repaint costs the render and blend
  * threads on every step. Turning animations off has to reach that, so the label
- * ellipsizes instead for as long as the preference is off. Labels that do not
- * scroll are left alone, and so is a label built before the preference subject
- * exists.
+ * holds still and clips instead for as long as the preference is off. Labels
+ * that do not scroll are left alone, and so is a label built before the
+ * preference subject exists.
  *
  * The observer is registered against the label, so LVGL drops it when the label
  * is deleted.
@@ -213,6 +313,12 @@ static void bind_long_mode_to_animations_pref(lv_xml_parser_state_t* state, lv_o
     if (!subject) {
         return;
     }
+
+    // While held still, an overflowing text is drawn as "<head>…<tail>" rather
+    // than cut mid-glyph at the label's edge (prestonbrown/helixscreen#1441).
+    auto* ellipsis = new MiddleEllipsis();
+    lv_obj_add_event_cb(label, middle_ellipsis_draw_cb, LV_EVENT_DRAW_TASK_ADDED, ellipsis);
+    lv_obj_add_event_cb(label, middle_ellipsis_delete_cb, LV_EVENT_DELETE, ellipsis);
 
     // Fires immediately, so the label is already in the right mode when it is
     // first drawn.
@@ -344,8 +450,11 @@ static void ui_text_button_apply(lv_xml_parser_state_t* state, const char** attr
 
     // Only apply auto-contrast if parent has a visible background
     if (bg_opa > LV_OPA_50) {
-        // Use theme-aware contrast text (matches ui_button)
-        lv_color_t text_color = theme_manager_get_contrast_color(bg_color);
+        // The parent is a filled button, so its colour is an accent; the label
+        // starts from the palette text colour and shifts only as far as needed
+        // (matches ui_button)
+        lv_color_t text_color =
+            theme_manager_get_contrast_adjusted_text(theme_manager_get_color("text"), bg_color);
         lv_obj_set_style_text_color(label, text_color, LV_PART_MAIN);
     }
 }
@@ -377,6 +486,94 @@ void ui_text_apply_transform(lv_obj_t* label, const char* transform) {
         lv_label_set_text_transform_upper(label, true);
     }
 }
+
+/// Drawn width of the first @p len bytes of @p txt, as lv_draw_label lays them out.
+static int32_t text_width(const char* txt, uint32_t len, const lv_font_t* font,
+                          int32_t letter_space) {
+    if (len == 0) {
+        return 0;
+    }
+    lv_text_attributes_t attributes = {};
+    attributes.letter_space = letter_space;
+    attributes.max_width = LV_COORD_MAX;
+    attributes.text_flags = LV_TEXT_FLAG_NONE;
+    return lv_text_get_width(txt, len, font, &attributes);
+}
+
+/// "…" when @p font has the glyph, else the three-dot spelling LVGL's own DOTS mode uses.
+static const char* ellipsis_for(const lv_font_t* font) {
+    static constexpr const char* ELLIPSIS = "\xE2\x80\xA6"; // U+2026
+    lv_font_glyph_dsc_t glyph;
+    if (lv_font_get_glyph_dsc(font, &glyph, 0x2026, 0) && !glyph.is_placeholder) {
+        return ELLIPSIS;
+    }
+    return "...";
+}
+
+namespace helix::ui {
+
+std::string middle_ellipsize(const char* text, int32_t max_width, const lv_font_t* font,
+                             int32_t letter_space) {
+    if (!text) {
+        return std::string();
+    }
+    std::string source(text);
+    if (!font || max_width <= 0 || source.empty()) {
+        return source;
+    }
+    const auto len = static_cast<uint32_t>(source.size());
+    if (text_width(text, len, font, letter_space) <= max_width) {
+        return source;
+    }
+
+    const char* ellipsis = ellipsis_for(font);
+    const int32_t budget = max_width - text_width(ellipsis, static_cast<uint32_t>(strlen(ellipsis)),
+                                                  font, letter_space);
+    if (budget <= 0) {
+        return ellipsis;
+    }
+
+    // Head: whole glyphs from the start, up to half the budget (the odd pixel
+    // goes to the head, which carries the name).
+    const int32_t head_budget = (budget + 1) / 2;
+    uint32_t head_end = 0;
+    while (head_end < len) {
+        uint32_t next = head_end;
+        lv_text_encoded_next(text, &next);
+        if (next > len || text_width(text, next, font, letter_space) > head_budget) {
+            break;
+        }
+        head_end = next;
+    }
+
+    // Tail: whole glyphs from the end, into whatever the head left over.
+    const int32_t tail_budget = budget - text_width(text, head_end, font, letter_space);
+    uint32_t tail_start = len;
+    while (tail_start > head_end) {
+        uint32_t prev = tail_start;
+        lv_text_encoded_prev(text, &prev);
+        if (prev <= head_end ||
+            text_width(text + prev, len - prev, font, letter_space) > tail_budget) {
+            break;
+        }
+        tail_start = prev;
+    }
+
+    // Glyph widths are not additive across a join (kerning), so measure the
+    // composed string and shave the tail while it still overflows.
+    std::string fitted;
+    for (;;) {
+        fitted = source.substr(0, head_end) + ellipsis + source.substr(tail_start);
+        if (tail_start >= len || text_width(fitted.c_str(), static_cast<uint32_t>(fitted.size()),
+                                            font, letter_space) <= max_width) {
+            break;
+        }
+        lv_text_encoded_next(text, &tail_start);
+    }
+    return fitted;
+}
+
+} // namespace helix::ui
 
 void ui_text_set_stroke(lv_obj_t* label, int32_t width, lv_color_t color, lv_opa_t opa) {
     if (!label) {

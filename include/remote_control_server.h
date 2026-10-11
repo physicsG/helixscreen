@@ -11,14 +11,16 @@
  * thread via ui_queue_update() + std::promise for thread-safe execution.
  *
  * Usage:
- *   RemoteControlServer::instance().start("/tmp/helixscreen-control.sock");
+ *   RemoteControlServer server;
+ *   server.start(config);
  *   // ... app runs ...
- *   RemoteControlServer::instance().stop();
+ *   server.stop();
  */
 
 #include "remote_transport.h"
 
 #include <atomic>
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <string>
@@ -45,7 +47,42 @@ struct RemoteConfig {
     std::string socket_path;             // UnixSocket: resolved socket path.
     std::string http_bind = "127.0.0.1"; // Http: bind address.
     int http_port = 7130;                // Http: TCP port.
+    std::string http_token;              // Http: bearer token gating off-box binds.
 };
+
+/**
+ * @brief Why an HTTP listener may or may not bind a given address
+ *
+ * The HTTP endpoint exposes the whole ctl command set, which can drive any
+ * widget in the UI, so an address reachable from off-box only comes up behind
+ * a bearer token. Loopback needs none: reaching it already requires local
+ * access, which the Unix socket transport grants anyway.
+ */
+enum class HttpBindDecision {
+    Allow,
+    InvalidHost,   ///< Not a numeric IPv4 address, which is all inet_pton accepts.
+    TokenRequired, ///< Off-box address with no token configured.
+    TokenTooWeak,  ///< Off-box address with a token below the length floor.
+};
+
+/// Shortest token accepted for an off-box bind, in bytes.
+inline constexpr size_t kMinHttpTokenLength = 16;
+
+/**
+ * @brief Decide whether @p bind_host may be bound with @p token configured
+ *
+ * Pure, so the policy is exercised without opening a socket.
+ */
+HttpBindDecision decide_http_bind(const std::string& bind_host, const std::string& token);
+
+/**
+ * @brief Check an Authorization header value against the configured token
+ *
+ * Expects `Bearer <token>`, scheme matched case-insensitively per RFC 7235,
+ * compared in constant time. False when @p expected is empty, so an absent
+ * configuration authenticates nobody.
+ */
+bool http_token_matches(const std::string& expected, const std::string& authorization);
 
 /**
  * @brief JSON-RPC 2.0 remote control server over a pluggable transport
@@ -61,7 +98,8 @@ struct RemoteConfig {
  */
 class RemoteControlServer {
   public:
-    static RemoteControlServer& instance();
+    RemoteControlServer() = default;
+    ~RemoteControlServer();
 
     // Non-copyable
     RemoteControlServer(const RemoteControlServer&) = delete;
@@ -104,9 +142,6 @@ class RemoteControlServer {
     void register_handler(const std::string& method, CommandHandler handler);
 
   private:
-    RemoteControlServer() = default;
-    ~RemoteControlServer();
-
     // Process a single JSON-RPC request and return the response string.
     // Passed to the transport as its RequestHandler.
     std::string process_request(const std::string& request_line);
@@ -174,6 +209,9 @@ class RemoteControlServer {
     nlohmann::json handle_pointer_press(const nlohmann::json& params);
     nlohmann::json handle_pointer_move(const nlohmann::json& params);
     nlohmann::json handle_pointer_release(const nlohmann::json& params);
+    nlohmann::json handle_pointer_tap(const nlohmann::json& params);
+    nlohmann::json handle_overflow(const nlohmann::json& params);
+    nlohmann::json handle_home(const nlohmann::json& params);
     /// Press, hold past the long-press threshold, and release, all without
     /// returning to the client. See the comment on the implementation for why the
     /// hold cannot live in the caller's shell.

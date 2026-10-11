@@ -74,3 +74,56 @@ TEST_CASE("HardwareValidationResult - changed_from_last_session aggregation",
         REQUIRE(result.total_issue_count() == 4);
     }
 }
+
+TEST_CASE("HardwareValidationResult - headline_level rollup", "[hardware][validator]") {
+    SECTION("a clean result is OK") {
+        HardwareValidationResult result;
+
+        REQUIRE(result.headline_level() == HardwareStatusLevel::OK);
+    }
+
+    SECTION("newly discovered hardware is INFO but still asks for attention") {
+        HardwareValidationResult result;
+        result.newly_discovered.push_back(HardwareIssue::info(
+            "filament_switch_sensor runout", HardwareType::FILAMENT_SENSOR, "Detected"));
+
+        REQUIRE(result.max_severity() == HardwareIssueSeverity::INFO);
+        REQUIRE(result.headline_level() == HardwareStatusLevel::ATTENTION);
+    }
+
+    SECTION("missing configured hardware asks for attention") {
+        HardwareValidationResult result;
+        result.expected_missing.push_back(
+            HardwareIssue::warning("fan part", HardwareType::FAN, "Not found"));
+
+        REQUIRE(result.headline_level() == HardwareStatusLevel::ATTENTION);
+    }
+
+    SECTION("a session change asks for attention") {
+        HardwareValidationResult result;
+        result.changed_from_last_session.push_back(
+            HardwareIssue::warning("fan part", HardwareType::FAN, "Was present last session"));
+
+        REQUIRE(result.headline_level() == HardwareStatusLevel::ATTENTION);
+    }
+
+    SECTION("missing core hardware is CRITICAL") {
+        HardwareValidationResult result;
+        result.critical_missing.push_back(
+            HardwareIssue::critical("extruder", HardwareType::HEATER, "Missing"));
+
+        REQUIRE(result.headline_level() == HardwareStatusLevel::CRITICAL);
+    }
+
+    SECTION("critical outranks every lesser issue") {
+        HardwareValidationResult result;
+        result.newly_discovered.push_back(
+            HardwareIssue::info("neopixel chamber", HardwareType::LED, "Detected"));
+        result.expected_missing.push_back(
+            HardwareIssue::warning("fan part", HardwareType::FAN, "Not found"));
+        result.critical_missing.push_back(
+            HardwareIssue::critical("heater_bed", HardwareType::HEATER, "Missing"));
+
+        REQUIRE(result.headline_level() == HardwareStatusLevel::CRITICAL);
+    }
+}

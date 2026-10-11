@@ -20,6 +20,7 @@
  */
 
 #include "../lvgl_test_fixture.h"
+#include "../test_helpers/breadcrumb_capture.h"
 #include "system/crash_handler.h"
 
 #include <string>
@@ -29,33 +30,6 @@
 #include "../catch_amalgamated.hpp"
 
 namespace {
-
-/// dump_to_fd() writes with write(2) (signal-safe), so a pipe is the simplest
-/// readable sink from a normal test context.
-std::vector<std::string> capture_breadcrumb_dump() {
-    int pipe_fds[2];
-    REQUIRE(::pipe(pipe_fds) == 0);
-    crash_handler::breadcrumb::dump_to_fd(pipe_fds[1]);
-    ::close(pipe_fds[1]);
-
-    std::string buf;
-    char chunk[256];
-    ssize_t n;
-    while ((n = ::read(pipe_fds[0], chunk, sizeof(chunk))) > 0) {
-        buf.append(chunk, static_cast<size_t>(n));
-    }
-    ::close(pipe_fds[0]);
-
-    std::vector<std::string> lines;
-    size_t start = 0;
-    for (size_t i = 0; i < buf.size(); ++i) {
-        if (buf[i] == '\n') {
-            lines.emplace_back(buf.substr(start, i - start));
-            start = i + 1;
-        }
-    }
-    return lines;
-}
 
 /// The ring holds 256 slots; fill it so the crumb under test is unambiguously
 /// last regardless of what earlier tests left behind.
@@ -77,7 +51,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "Crash: delete crumbs carry the widget name",
 
     helix_crash_note_async_del(named, "lv_obj");
 
-    auto lines = capture_breadcrumb_dump();
+    auto lines = helix::capture_breadcrumb_lines();
     REQUIRE_FALSE(lines.empty());
     const std::string& last = lines.back();
     CHECK(last.find("async_d") != std::string::npos);
@@ -97,7 +71,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "Crash: delete crumbs fall back to the bare cl
 
     helix_crash_note_sync_del(anon, "lv_obj");
 
-    auto lines = capture_breadcrumb_dump();
+    auto lines = helix::capture_breadcrumb_lines();
     REQUIRE_FALSE(lines.empty());
     const std::string& last = lines.back();
     CHECK(last.find("sync_d") != std::string::npos);
@@ -121,7 +95,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "Crash: an over-long widget name cannot overru
 
     helix_crash_note_async_del(obj, "lv_obj");
 
-    auto lines = capture_breadcrumb_dump();
+    auto lines = helix::capture_breadcrumb_lines();
     REQUIRE_FALSE(lines.empty());
     const std::string& last = lines.back();
 

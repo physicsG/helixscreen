@@ -11,128 +11,66 @@
 #include "ui_callback_helpers.h"
 #include "ui_event_safety.h"
 #include "ui_led_chip_factory.h"
-#include "ui_nav_manager.h"
 #include "ui_toast_manager.h"
 #include "ui_update_queue.h"
 #include "ui_utils.h"
 
-#include "device_display_name.h"
+#include "app_globals.h"
 #include "led/led_auto_state.h"
 #include "led/led_controller.h"
 #include "lvgl/src/others/translation/lv_translation.h"
-#include "static_panel_registry.h"
+#include "printer_state.h"
 #include "theme_manager.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
-#include <memory>
 
 namespace helix::settings {
 
-// ============================================================================
-// SINGLETON ACCESSOR
-// ============================================================================
-
-static std::unique_ptr<LedSettingsOverlay> g_led_settings_overlay;
-
-LedSettingsOverlay& get_led_settings_overlay() {
-    if (!g_led_settings_overlay) {
-        g_led_settings_overlay = std::make_unique<LedSettingsOverlay>();
-        StaticPanelRegistry::instance().register_destroy("LedSettingsOverlay",
-                                                         []() { g_led_settings_overlay.reset(); });
-    }
-    return *g_led_settings_overlay;
-}
-
-// ============================================================================
-// CONSTRUCTOR / DESTRUCTOR
-// ============================================================================
-
-LedSettingsOverlay::LedSettingsOverlay() {
-    spdlog::debug("[{}] Created", get_name());
-}
+using helix::ui::event_checked;
+using helix::ui::find_required;
 
 LedSettingsOverlay::~LedSettingsOverlay() {
     discard_unsaved_macro_entry();
-    spdlog::trace("[{}] Destroyed", get_name());
 }
-
-// ============================================================================
-// INITIALIZATION
-// ============================================================================
 
 void LedSettingsOverlay::init_subjects() {
-    init_subjects_guarded([this]() {
-        UI_MANAGED_SUBJECT_INT(auto_state_enabled_subject_, 0, "led_auto_state_enabled", subjects_);
-        UI_MANAGED_SUBJECT_INT(led_on_at_start_subject_, 0, "led_on_at_start_enabled", subjects_);
-    });
+    UI_MANAGED_SUBJECT_INT(auto_state_enabled_subject_, 0, "led_auto_state_enabled", subjects_);
+    UI_MANAGED_SUBJECT_INT(led_on_at_start_subject_, 0, "led_on_at_start_enabled", subjects_);
+    UI_MANAGED_SUBJECT_INT(print_macros_drive_leds_subject_, 0, "led_print_macros_drive_leds",
+                           subjects_);
 }
+
+namespace {
+int event_slider_value(lv_event_t* e) {
+    return lv_slider_get_value(lv_event_get_current_target_obj(e));
+}
+} // namespace
 
 void LedSettingsOverlay::register_callbacks() {
     register_xml_callbacks({
-        {"on_led_on_at_start_changed", on_led_on_at_start_changed},
-        {"on_startup_brightness_changed", on_startup_brightness_changed},
-        {"on_startup_brightness_commit", on_startup_brightness_commit},
-        {"on_auto_state_changed", on_auto_state_changed},
-        {"on_add_macro_device", on_add_macro_device},
+        {"on_led_on_at_start_changed",
+         [](lv_event_t* e) {
+             get_led_settings_overlay().handle_led_on_at_start_changed(event_checked(e));
+         }},
+        {"on_startup_brightness_changed",
+         [](lv_event_t* e) {
+             get_led_settings_overlay().handle_startup_brightness_changed(event_slider_value(e));
+         }},
+        {"on_startup_brightness_commit",
+         [](lv_event_t* e) {
+             get_led_settings_overlay().handle_startup_brightness_commit(event_slider_value(e));
+         }},
+        {"on_auto_state_changed",
+         [](lv_event_t* e) {
+             get_led_settings_overlay().handle_auto_state_changed(event_checked(e));
+         }},
+        {"on_add_macro_device",
+         [](lv_event_t*) { get_led_settings_overlay().handle_add_macro_device(); }},
     });
-
-    spdlog::debug("[{}] Callbacks registered", get_name());
-}
-
-// ============================================================================
-// UI CREATION
-// ============================================================================
-
-lv_obj_t* LedSettingsOverlay::create(lv_obj_t* parent) {
-    if (overlay_root_) {
-        spdlog::warn("[{}] create() called but overlay already exists", get_name());
-        return overlay_root_;
-    }
-
-    spdlog::debug("[{}] Creating overlay...", get_name());
-
-    overlay_root_ = static_cast<lv_obj_t*>(lv_xml_create(parent, "led_settings_overlay", nullptr));
-    if (!overlay_root_) {
-        spdlog::error("[{}] Failed to create overlay from XML", get_name());
-        return nullptr;
-    }
-
-    // Initially hidden until show() pushes it
-    lv_obj_add_flag(overlay_root_, LV_OBJ_FLAG_HIDDEN);
-
-    spdlog::info("[{}] Overlay created", get_name());
-    return overlay_root_;
-}
-
-void LedSettingsOverlay::show(lv_obj_t* parent_screen) {
-    spdlog::debug("[{}] show() called", get_name());
-
-    parent_screen_ = parent_screen;
-
-    // Ensure subjects and callbacks are initialized
-    if (!subjects_initialized_) {
-        init_subjects();
-        register_callbacks();
-    }
-
-    // Lazy create overlay
-    if (!overlay_root_ && parent_screen_) {
-        create(parent_screen_);
-    }
-
-    if (!overlay_root_) {
-        spdlog::error("[{}] Cannot show - overlay not created", get_name());
-        return;
-    }
-
-    // Register for lifecycle callbacks
-    NavigationManager::instance().register_overlay_instance(overlay_root_, this);
-
-    // Push onto navigation stack (on_activate will initialize widgets)
-    NavigationManager::instance().push_overlay(overlay_root_);
 }
 
 // ============================================================================
@@ -149,10 +87,6 @@ void LedSettingsOverlay::on_activate() {
     populate_macro_devices();
 }
 
-void LedSettingsOverlay::on_deactivate() {
-    OverlayBase::on_deactivate();
-}
-
 // ============================================================================
 // INTERNAL METHODS
 // ============================================================================
@@ -162,33 +96,17 @@ void LedSettingsOverlay::init_led_on_at_start_toggle() {
         return;
 
     auto& ctrl = helix::led::LedController::instance();
-    bool enabled = ctrl.get_led_on_at_start();
 
-    // Init toggle state
-    lv_obj_t* row = lv_obj_find_by_name(overlay_root_, "row_led_on_at_start");
-    if (row) {
-        lv_obj_t* toggle = lv_obj_find_by_name(row, "toggle");
-        if (toggle) {
-            if (enabled) {
-                lv_obj_add_state(toggle, LV_STATE_CHECKED);
-            } else {
-                lv_obj_remove_state(toggle, LV_STATE_CHECKED);
-            }
-            spdlog::trace("[{}]   LED on at start toggle: {}", get_name(), enabled ? "ON" : "OFF");
-        }
-    }
+    // The toggle row binds this subject, and the slider row hides on it
+    lv_subject_set_int(&led_on_at_start_subject_, ctrl.get_led_on_at_start() ? 1 : 0);
 
-    // Drive visibility subject for the startup brightness slider
-    lv_subject_set_int(&led_on_at_start_subject_, enabled ? 1 : 0);
-
-    // Init startup brightness slider value
-    lv_obj_t* brightness_row = lv_obj_find_by_name(overlay_root_, "row_startup_brightness");
+    lv_obj_t* brightness_row = find_required(overlay_root_, "row_startup_brightness", get_name());
     if (brightness_row) {
-        lv_obj_t* slider = lv_obj_find_by_name(brightness_row, "slider");
+        lv_obj_t* slider = helix::ui::find_required(brightness_row, "slider", get_name());
         if (slider) {
             lv_slider_set_value(slider, ctrl.get_startup_brightness(), LV_ANIM_OFF);
         }
-        lv_obj_t* value_label = lv_obj_find_by_name(brightness_row, "value_label");
+        lv_obj_t* value_label = helix::ui::find_required(brightness_row, "value_label", get_name());
         if (value_label) {
             lv_label_set_text_fmt(value_label, "%d%%", ctrl.get_startup_brightness());
         }
@@ -196,24 +114,11 @@ void LedSettingsOverlay::init_led_on_at_start_toggle() {
 }
 
 void LedSettingsOverlay::init_auto_state_toggle() {
-    if (!overlay_root_)
-        return;
-
-    lv_obj_t* row = lv_obj_find_by_name(overlay_root_, "row_auto_state_enabled");
-    if (row) {
-        lv_obj_t* toggle = lv_obj_find_by_name(row, "toggle");
-        if (toggle) {
-            bool enabled = helix::led::LedAutoState::instance().is_enabled();
-            if (enabled) {
-                lv_obj_add_state(toggle, LV_STATE_CHECKED);
-            } else {
-                lv_obj_remove_state(toggle, LV_STATE_CHECKED);
-            }
-            // Sync visibility subject for auto-state rows container
-            lv_subject_set_int(&auto_state_enabled_subject_, enabled ? 1 : 0);
-            spdlog::trace("[{}]   Auto state toggle: {}", get_name(), enabled ? "ON" : "OFF");
-        }
-    }
+    // The toggle row binds this subject, and the rows container hides on it
+    lv_subject_set_int(&auto_state_enabled_subject_,
+                       helix::led::LedAutoState::instance().is_enabled() ? 1 : 0);
+    lv_subject_set_int(&print_macros_drive_leds_subject_,
+                       get_printer_state().get_discovery().print_macros_drive_leds() ? 1 : 0);
 }
 
 void LedSettingsOverlay::populate_macro_devices() {
@@ -234,7 +139,7 @@ void LedSettingsOverlay::populate_macro_devices_impl() {
     if (!overlay_root_)
         return;
 
-    lv_obj_t* container = lv_obj_find_by_name(overlay_root_, "macro_devices_container");
+    lv_obj_t* container = find_required(overlay_root_, "macro_devices_container", get_name());
     if (!container)
         return;
 
@@ -351,18 +256,14 @@ void LedSettingsOverlay::populate_macro_devices_impl() {
                                          "variant", "tertiary", nullptr};
         lv_xml_create(edit_btn, "icon", edit_icon_attrs);
 
-        // TODO: lv_obj user_data is safe on these buttons because they're
-        // plain lv_button_create() (not XML widgets). If buttons are ever
-        // created via lv_xml_create() from a component that claims user_data,
-        // move to event callback user_data instead. See L069.
+        // The index rides on the event callback, not on lv_obj user_data, so
+        // the button's base widget is free to claim that slot (L069).
         auto* edit_idx = new int(i);
-        lv_obj_set_user_data(edit_btn, edit_idx);
         lv_obj_add_event_cb(
             edit_btn,
             [](lv_event_t* e) {
                 LVGL_SAFE_EVENT_CB_BEGIN("[LedSettingsOverlay] edit_macro_device");
-                auto* idx = static_cast<int*>(
-                    lv_obj_get_user_data(static_cast<lv_obj_t*>(lv_event_get_current_target(e))));
+                auto* idx = static_cast<int*>(lv_event_get_user_data(e));
                 if (idx) {
                     get_led_settings_overlay().handle_edit_macro_device(*idx);
                 }
@@ -384,13 +285,11 @@ void LedSettingsOverlay::populate_macro_devices_impl() {
         lv_xml_create(del_btn, "icon", del_icon_attrs);
 
         auto* del_idx = new int(i);
-        lv_obj_set_user_data(del_btn, del_idx);
         lv_obj_add_event_cb(
             del_btn,
             [](lv_event_t* e) {
                 LVGL_SAFE_EVENT_CB_BEGIN("[LedSettingsOverlay] delete_macro_device");
-                auto* idx = static_cast<int*>(
-                    lv_obj_get_user_data(static_cast<lv_obj_t*>(lv_event_get_current_target(e))));
+                auto* idx = static_cast<int*>(lv_event_get_user_data(e));
                 if (idx) {
                     get_led_settings_overlay().handle_delete_macro_device(*idx);
                 }
@@ -403,26 +302,7 @@ void LedSettingsOverlay::populate_macro_devices_impl() {
 
         // --- Macro summary line (shown when NOT editing) ---
         if (!is_editing) {
-            std::string summary;
-            switch (macro.type) {
-            case helix::led::MacroLedType::ON_OFF:
-                summary = fmt::format(lv_tr("ON: {} | OFF: {}"),
-                                      macro.on_macro.empty() ? "—" : macro.on_macro,
-                                      macro.off_macro.empty() ? "—" : macro.off_macro);
-                break;
-            case helix::led::MacroLedType::TOGGLE:
-                summary = fmt::format(lv_tr("TOGGLE: {}"),
-                                      macro.toggle_macro.empty() ? "—" : macro.toggle_macro);
-                break;
-            case helix::led::MacroLedType::PRESET:
-                if (macro.presets.empty()) {
-                    summary = lv_tr("No presets configured");
-                } else {
-                    summary = fmt::format(lv_tr("{} preset{}"), macro.presets.size(),
-                                          macro.presets.size() == 1 ? "" : "s");
-                }
-                break;
-            }
+            const std::string summary = helix::led::macro_device_note(macro);
 
             auto* summary_label = lv_label_create(card);
             lv_label_set_text(summary_label, summary.c_str());
@@ -473,11 +353,8 @@ void LedSettingsOverlay::rebuild_macro_edit_controls(lv_obj_t* container, int in
                                 nullptr};
     auto* name_row =
         static_cast<lv_obj_t*>(lv_xml_create(container, "setting_form_input", name_attrs));
-    // Guard the parent: lv_obj_find_by_name(nullptr, ...) falls back to searching
-    // the active screen and would return an unrelated same-named widget.
-    auto* name_ta = name_row ? lv_obj_find_by_name(name_row, "input") : nullptr;
+    auto* name_ta = helix::ui::find_required(name_row, "input", get_name());
     if (!name_ta) {
-        spdlog::error("[{}] Failed to build name input row from XML", get_name());
         return;
     }
     lv_obj_set_name(name_ta, "macro_name_input");
@@ -487,9 +364,8 @@ void LedSettingsOverlay::rebuild_macro_edit_controls(lv_obj_t* container, int in
     const char* type_attrs[] = {"label", lv_tr("Type:"), nullptr};
     auto* type_row =
         static_cast<lv_obj_t*>(lv_xml_create(container, "setting_form_dropdown", type_attrs));
-    auto* type_dd = type_row ? lv_obj_find_by_name(type_row, "dropdown") : nullptr;
+    auto* type_dd = helix::ui::find_required(type_row, "dropdown", get_name());
     if (!type_dd) {
-        spdlog::error("[{}] Failed to build type dropdown row from XML", get_name());
         return;
     }
     std::string type_options = std::string(lv_tr("On/Off (state-aware)")) + "\n" +
@@ -593,11 +469,9 @@ void LedSettingsOverlay::rebuild_macro_edit_controls(lv_obj_t* container, int in
                                nullptr};
         auto* row =
             static_cast<lv_obj_t*>(lv_xml_create(container, "setting_form_macro_field", attrs));
-        auto* dd = row ? lv_obj_find_by_name(row, "dropdown") : nullptr;
-        auto* ta = row ? lv_obj_find_by_name(row, "input") : nullptr;
+        auto* dd = helix::ui::find_required(row, "dropdown", get_name());
+        auto* ta = helix::ui::find_required(row, "input", get_name());
         if (!dd || !ta) {
-            spdlog::error("[{}] Failed to build macro field row '{}' from XML", get_name(),
-                          dd_name);
             return false;
         }
         const auto view = helix::led::macro_field_view(stored, discovered);
@@ -796,7 +670,10 @@ void LedSettingsOverlay::rebuild_macro_edit_controls(lv_obj_t* container, int in
 
     auto* save_lbl = lv_label_create(save_btn);
     lv_label_set_text(save_lbl, lv_tr("Save"));
-    lv_obj_set_style_text_color(save_lbl, lv_color_white(), 0);
+    lv_obj_set_style_text_color(
+        save_lbl,
+        theme_manager_get_contrast_adjusted_text(theme_manager_get_color("text"), primary_color),
+        0);
     lv_obj_center(save_lbl);
 
     auto* save_idx = new int(index);
@@ -896,13 +773,15 @@ void LedSettingsOverlay::handle_delete_macro_device(int index) {
     updated.erase(updated.begin() + index);
     ctrl.set_configured_macros(updated);
 
-    // Remove deleted macro from selected strips to prevent stale entries
+    // Drop the deleted macro from Automatic LED Control's targets.
     std::string macro_strip_id = "macro:" + deleted_name;
-    auto strips = ctrl.selected_strips();
+    auto& auto_state = helix::led::LedAutoState::instance();
+    auto strips = auto_state.strips();
     auto it = std::find(strips.begin(), strips.end(), macro_strip_id);
     if (it != strips.end()) {
         strips.erase(it);
-        ctrl.set_selected_strips(strips);
+        auto_state.set_strips(strips);
+        auto_state.save_config();
     }
 
     ctrl.save_config();
@@ -1062,62 +941,48 @@ void LedSettingsOverlay::populate_led_chips_impl() {
     if (!overlay_root_)
         return;
 
-    lv_obj_t* led_chip_row = lv_obj_find_by_name(overlay_root_, "row_led_select");
-    if (!led_chip_row)
+    lv_obj_t* row = find_required(overlay_root_, "row_auto_state_strips", get_name());
+    if (!row)
         return;
 
-    lv_obj_t* chip_container = lv_obj_find_by_name(led_chip_row, "chip_container");
+    lv_obj_t* chip_container = helix::ui::find_required(row, "chip_container", get_name());
     if (!chip_container || !lv_obj_is_valid(chip_container)) {
-        spdlog::warn("[{}] LED chip row found but chip_container invalid/missing", get_name());
+        spdlog::warn("[{}] Applies-to chip row found but chip_container invalid/missing",
+                     get_name());
         return;
     }
 
     helix::ui::safe_clean_children(chip_container);
 
-    // Source LED list from all backends (native + WLED + macros)
+    // Chip list spans all backends (native + WLED + macros); selection is
+    // Automatic LED Control's current targets.
     auto& led_ctrl = helix::led::LedController::instance();
-    discovered_leds_.clear();
+    const auto targets = helix::led::LedAutoState::instance().targets();
+
+    size_t selected_count = 0;
     for (const auto& strip : led_ctrl.all_selectable_strips()) {
-        discovered_leds_.push_back(strip.id);
-    }
-
-    // Load selected LEDs from LedController
-    selected_leds_.clear();
-    for (const auto& strip_id : led_ctrl.selected_strips()) {
-        selected_leds_.insert(strip_id);
-    }
-
-    // Create chips for each discovered LED
-    for (const auto& led : discovered_leds_) {
-        bool selected = selected_leds_.count(led) > 0;
-        std::string display_name = helix::get_display_name(led, helix::DeviceType::LED);
+        bool selected = std::find(targets.begin(), targets.end(), strip.id) != targets.end();
+        selected_count += selected ? 1 : 0;
+        std::string display_name = helix::led::device_display_name(strip);
 
         helix::ui::create_led_chip(
-            chip_container, led, display_name, selected,
+            chip_container, strip.id, display_name, selected,
             [this](const std::string& led_name) { handle_led_chip_clicked(led_name); });
     }
 
-    spdlog::debug("[{}] LED chips populated ({} LEDs, {} selected)", get_name(),
-                  discovered_leds_.size(), selected_leds_.size());
+    spdlog::debug("[{}] Applies-to chips populated ({} selected)", get_name(), selected_count);
 }
 
 void LedSettingsOverlay::handle_led_chip_clicked(const std::string& led_name) {
-    // Toggle selection
-    if (selected_leds_.count(led_name) > 0) {
-        selected_leds_.erase(led_name);
-        spdlog::info("[{}] LED deselected: {}", get_name(), led_name);
-    } else {
-        selected_leds_.insert(led_name);
-        spdlog::info("[{}] LED selected: {}", get_name(), led_name);
-    }
+    auto& as = helix::led::LedAutoState::instance();
+    // The saved list, not targets(): a strip not discovered yet stays selected.
+    as.set_strips(
+        helix::led::toggle_target(as.strips().empty() ? as.targets() : as.strips(), led_name));
+    as.save_config();
+    as.evaluate();
 
-    // Save via LedController
-    std::vector<std::string> strips_vec(selected_leds_.begin(), selected_leds_.end());
-    helix::led::LedController::instance().set_selected_strips(strips_vec);
-    helix::led::LedController::instance().save_config();
-
-    // Rebuild chips to update visual state
     populate_led_chips();
+    populate_auto_state_rows();
 }
 
 // ============================================================================
@@ -1147,14 +1012,10 @@ void LedSettingsOverlay::handle_startup_brightness_changed(int value) {
     helix::led::LedController::instance().set_startup_brightness(value);
 
     // Update the value label
-    if (overlay_root_) {
-        lv_obj_t* brightness_row = lv_obj_find_by_name(overlay_root_, "row_startup_brightness");
-        if (brightness_row) {
-            lv_obj_t* value_label = lv_obj_find_by_name(brightness_row, "value_label");
-            if (value_label) {
-                lv_label_set_text_fmt(value_label, "%d%%", value);
-            }
-        }
+    lv_obj_t* brightness_row = find_required(overlay_root_, "row_startup_brightness", get_name());
+    if (lv_obj_t* value_label =
+            helix::ui::find_required(brightness_row, "value_label", get_name())) {
+        lv_label_set_text_fmt(value_label, "%d%%", value);
     }
 }
 
@@ -1196,7 +1057,7 @@ void LedSettingsOverlay::populate_auto_state_rows() {
     if (!overlay_root_)
         return;
 
-    lv_obj_t* container = lv_obj_find_by_name(overlay_root_, "auto_state_rows_container");
+    lv_obj_t* container = find_required(overlay_root_, "auto_state_rows_container", get_name());
     if (!container)
         return;
 
@@ -1211,19 +1072,23 @@ void LedSettingsOverlay::populate_auto_state_rows() {
     action_type_options_.push_back("brightness");
 
     auto& ctrl = helix::led::LedController::instance();
+    const auto targets = auto_state.targets();
     bool has_color = false;
-    for (const auto& strip_id : ctrl.selected_strips()) {
+    bool has_wled = false;
+    for (const auto& strip_id : targets) {
         const auto* s = helix::led::find_strip(ctrl.native().strips(), strip_id);
         if (s != nullptr && s->supports_color) {
             has_color = true;
-            break;
+        }
+        if (ctrl.backend_for_strip(strip_id) == helix::led::LedBackendType::WLED) {
+            has_wled = true;
         }
     }
     if (has_color)
         action_type_options_.push_back("color");
     if (ctrl.effects().is_available())
         action_type_options_.push_back("effect");
-    if (ctrl.wled().is_available())
+    if (has_wled)
         action_type_options_.push_back("wled_preset");
     if (ctrl.macro().is_available())
         action_type_options_.push_back("macro");
@@ -1262,9 +1127,8 @@ void LedSettingsOverlay::populate_auto_state_rows() {
         const char* row_attrs[] = {"label", lv_tr(state.display_name), "icon", state.icon, nullptr};
         auto* row =
             static_cast<lv_obj_t*>(lv_xml_create(container, "setting_state_row", row_attrs));
-        auto* dropdown = row ? lv_obj_find_by_name(row, "dropdown") : nullptr;
+        auto* dropdown = helix::ui::find_required(row, "dropdown", get_name());
         if (!dropdown) {
-            spdlog::error("[{}] Failed to build state row '{}' from XML", get_name(), key);
             continue;
         }
         lv_dropdown_set_options(dropdown, options_str.c_str());
@@ -1309,17 +1173,15 @@ void LedSettingsOverlay::populate_auto_state_rows() {
 
         auto* detail =
             static_cast<lv_obj_t*>(lv_xml_create(container, "setting_detail_panel", nullptr));
-        auto* ctx_container = detail ? lv_obj_find_by_name(detail, "controls") : nullptr;
+        auto* ctx_container = helix::ui::find_required(detail, "controls", get_name());
         if (!ctx_container) {
-            spdlog::error("[{}] Failed to build detail panel for state '{}' from XML", get_name(),
-                          key);
             continue;
         }
         lv_obj_set_name(detail, fmt::format("detail_{}", key).c_str());
         lv_obj_set_name(ctx_container, fmt::format("ctx_{}", key).c_str());
 
         if (!needs_detail) {
-            lv_obj_add_flag(detail, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(detail, LV_OBJ_FLAG_HIDDEN); // XML_HIDDEN_OK: row child, not a root
         }
 
         // Populate contextual controls for current action type
@@ -1771,49 +1633,6 @@ void LedSettingsOverlay::save_and_evaluate(const std::string& state_key) {
     (void)state_key; // Used for logging context only
     helix::led::LedAutoState::instance().save_config();
     helix::led::LedAutoState::instance().evaluate();
-}
-
-// ============================================================================
-// STATIC CALLBACKS
-// ============================================================================
-
-void LedSettingsOverlay::on_led_on_at_start_changed(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[LedSettingsOverlay] on_led_on_at_start_changed");
-    auto* toggle = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
-    bool enabled = lv_obj_has_state(toggle, LV_STATE_CHECKED);
-    get_led_settings_overlay().handle_led_on_at_start_changed(enabled);
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void LedSettingsOverlay::on_startup_brightness_changed(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[LedSettingsOverlay] on_startup_brightness_changed");
-    auto* slider = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
-    int value = lv_slider_get_value(slider);
-    get_led_settings_overlay().handle_startup_brightness_changed(value);
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void LedSettingsOverlay::on_startup_brightness_commit(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[LedSettingsOverlay] on_startup_brightness_commit");
-    auto* slider = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
-    int value = lv_slider_get_value(slider);
-    get_led_settings_overlay().handle_startup_brightness_commit(value);
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void LedSettingsOverlay::on_auto_state_changed(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[LedSettingsOverlay] on_auto_state_changed");
-    auto* toggle = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
-    bool enabled = lv_obj_has_state(toggle, LV_STATE_CHECKED);
-    get_led_settings_overlay().handle_auto_state_changed(enabled);
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void LedSettingsOverlay::on_add_macro_device(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[LedSettingsOverlay] on_add_macro_device");
-    (void)e;
-    get_led_settings_overlay().handle_add_macro_device();
-    LVGL_SAFE_EVENT_CB_END();
 }
 
 } // namespace helix::settings

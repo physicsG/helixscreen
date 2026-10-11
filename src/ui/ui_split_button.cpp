@@ -93,7 +93,7 @@ void update_split_button_contrast(lv_obj_t* sb) {
         text_color = theme_manager_get_color("text");
     } else {
         lv_color_t bg = lv_obj_get_style_bg_color(sb, LV_PART_MAIN);
-        text_color = theme_manager_get_contrast_color(bg);
+        text_color = theme_manager_get_contrast_adjusted_text(theme_manager_get_color("text"), bg);
     }
 
     auto set_contrast = [&](lv_obj_t* obj) {
@@ -116,8 +116,7 @@ void split_button_style_changed_cb(lv_event_t* e) {
     lv_obj_t* sb = lv_event_get_target_obj(e);
     // Defer contrast update to avoid setting styles during refresh_children_style
     // cascade — same fix as ui_button.cpp (#729).
-    helix::ui::async_call(
-        sb, [](void* data) { update_split_button_contrast(static_cast<lv_obj_t*>(data)); }, sb);
+    helix::ui::queue_widget_update(sb, [](lv_obj_t* obj) { update_split_button_contrast(obj); });
 }
 
 /**
@@ -176,7 +175,8 @@ void style_dropdown_list(lv_obj_t* sb, lv_obj_t* list) {
         return;
 
     lv_color_t bg_color = lv_obj_get_style_bg_color(sb, LV_PART_MAIN);
-    lv_color_t text_color = theme_manager_get_contrast_color(bg_color);
+    lv_color_t text_color =
+        theme_manager_get_contrast_adjusted_text(theme_manager_get_color("text"), bg_color);
 
     lv_obj_set_style_bg_color(list, bg_color, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(list, LV_OPA_COVER, LV_PART_MAIN);
@@ -322,11 +322,11 @@ lv_obj_t* create_icon(lv_obj_t* parent, const char* icon_name) {
     if (!icon_name || strlen(icon_name) == 0)
         return nullptr;
 
-    const char* codepoint = ui_icon::lookup_codepoint(icon_name);
+    const char* codepoint = helix::ui::icon::lookup_codepoint(icon_name);
     if (!codepoint) {
-        const char* stripped = ui_icon::strip_legacy_prefix(icon_name);
+        const char* stripped = helix::ui::icon::strip_legacy_prefix(icon_name);
         if (stripped != icon_name) {
-            codepoint = ui_icon::lookup_codepoint(stripped);
+            codepoint = helix::ui::icon::lookup_codepoint(stripped);
         }
     }
     if (!codepoint) {
@@ -477,7 +477,7 @@ void* ui_split_button_create(lv_xml_parser_state_t* state, const char** attrs) {
     lv_obj_set_size(divider, 1, lv_pct(60));
     lv_obj_set_style_bg_opa(divider, LV_OPA_30, LV_PART_MAIN);
     lv_obj_set_style_bg_color(
-        divider, theme_manager_get_contrast_color(lv_obj_get_style_bg_color(sb, LV_PART_MAIN)),
+        divider, theme_manager_get_readable_on(lv_obj_get_style_bg_color(sb, LV_PART_MAIN)),
         LV_PART_MAIN);
     lv_obj_set_style_border_width(divider, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(divider, 0, LV_PART_MAIN);
@@ -502,7 +502,7 @@ void* ui_split_button_create(lv_xml_parser_state_t* state, const char** attrs) {
 
     // Chevron down icon
     lv_obj_t* chevron = lv_label_create(data->arrow_btn);
-    const char* chevron_cp = ui_icon::lookup_codepoint("chevron_down");
+    const char* chevron_cp = helix::ui::icon::lookup_codepoint("chevron_down");
     if (chevron_cp) {
         lv_label_set_text(chevron, chevron_cp);
     }
@@ -540,32 +540,28 @@ void* ui_split_button_create(lv_xml_parser_state_t* state, const char** attrs) {
 
     // Compute label width from available space after layout resolves.
     // Must defer because flex_grow sizes aren't final during create.
-    // Widget-safe async_call (lv_obj_is_valid guard): during rapid panel
-    // teardown the container can be freed before this deferral fires, and a
-    // raw lv_async_call would then dereference freed memory via get_data()
-    // (#980 SIGSEGV). Same guard the style-change deferral above uses.
-    helix::ui::async_call(
-        sb,
-        [](void* user_data) {
-            auto* sb = static_cast<lv_obj_t*>(user_data);
-            auto* d = get_data(sb);
-            if (!d || !d->label || !d->main_btn)
-                return;
+    // Widget-safe (lv_obj_is_valid guard): during rapid panel teardown the
+    // container can be freed before this deferral fires, and get_data() would
+    // then dereference freed memory (#980). Same guard the style-change
+    // deferral above uses.
+    helix::ui::queue_widget_update(sb, [](lv_obj_t* obj) {
+        auto* d = get_data(obj);
+        if (!d || !d->label || !d->main_btn)
+            return;
 
-            lv_obj_update_layout(sb);
+        lv_obj_update_layout(obj);
 
-            int32_t avail = lv_obj_get_content_width(d->main_btn);
-            if (d->icon) {
-                avail -= lv_obj_get_width(d->icon);
-                avail -= lv_obj_get_style_pad_column(d->main_btn, LV_PART_MAIN);
-            }
-            if (avail < 0)
-                avail = 0;
-            lv_obj_set_width(d->label, avail);
-            spdlog::debug("[ui_split_button] Label width set to {} (main_btn content_w={})", avail,
-                          lv_obj_get_content_width(d->main_btn));
-        },
-        sb);
+        int32_t avail = lv_obj_get_content_width(d->main_btn);
+        if (d->icon) {
+            avail -= lv_obj_get_width(d->icon);
+            avail -= lv_obj_get_style_pad_column(d->main_btn, LV_PART_MAIN);
+        }
+        if (avail < 0)
+            avail = 0;
+        lv_obj_set_width(d->label, avail);
+        spdlog::debug("[ui_split_button] Label width set to {} (main_btn content_w={})", avail,
+                      lv_obj_get_content_width(d->main_btn));
+    });
 
     // Also recompute label width on resize (breakpoint changes, etc.)
     lv_obj_add_event_cb(

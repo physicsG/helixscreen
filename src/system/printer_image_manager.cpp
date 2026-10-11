@@ -4,17 +4,23 @@
 #include "printer_image_manager.h"
 
 #include "config.h"
+#include "data_root_resolver.h"
+#include "helix_fs.h"
 #include "lvgl_image_writer.h"
 #include "prerendered_images.h"
+#include "printer_image_regions.h"
+#include "printer_images.h"
 #include "settings_manager.h"
 #include "static_subject_registry.h"
+#include "text_io.h"
 #include "wizard_config_paths.h"
 
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cctype>
+#include <cerrno>
 #include <cstring>
-#include <filesystem>
 #include <set>
 
 // stb headers — implementations are in thumbnail_processor.cpp
@@ -24,7 +30,7 @@
 // LVGL for color format constant
 #include <lvgl/src/draw/lv_image_dsc.h>
 
-namespace fs = std::filesystem;
+namespace hfs = helix::fs;
 
 namespace helix {
 
@@ -45,23 +51,26 @@ void PrinterImageManager::init(const std::string& config_dir) {
     // Initialize image-changed subject (version counter for observers)
     if (!subjects_initialized_) {
         lv_subject_init_int(&image_changed_subject_, 0);
+        subjects_.register_subject(&image_changed_subject_);
         subjects_initialized_ = true;
         StaticSubjectRegistry::instance().register_deinit(
             "PrinterImageManager", []() { PrinterImageManager::instance().deinit_subjects(); });
     }
 
-    try {
-        fs::create_directories(custom_dir_);
-        spdlog::info("[PrinterImageManager] Initialized, custom_dir: {}", custom_dir_);
-    } catch (const fs::filesystem_error& e) {
-        spdlog::error("[PrinterImageManager] Failed to create custom_images dir: {}", e.what());
+    if (!hfs::create_directories(custom_dir_)) {
+        spdlog::error("[PrinterImageManager] Failed to create custom_images dir: {}",
+                      std::strerror(errno));
+        return;
     }
+    spdlog::info("[PrinterImageManager] Initialized, custom_dir: {}", custom_dir_);
 }
 
 void PrinterImageManager::deinit_subjects() {
     if (!subjects_initialized_)
         return;
-    lv_subject_deinit(&image_changed_subject_);
+
+    // deinit_all() flips the death signal first, then frees the subject.
+    subjects_.deinit_all();
     subjects_initialized_ = false;
 }
 
@@ -71,25 +80,17 @@ void PrinterImageManager::deinit_subjects() {
 
 std::string PrinterImageManager::get_active_image_id() const {
     Config* config = Config::get_instance();
-    if (!config)
-        return "";
     return config->get<std::string>(config->df() + PRINTER_IMAGE, "");
 }
 
 void PrinterImageManager::set_active_image(const std::string& id) {
     Config* config = Config::get_instance();
-    if (!config)
-        return;
     config->set<std::string>(config->df() + PRINTER_IMAGE, id);
     config->save();
     spdlog::info("[PrinterImageManager] Active image set to: '{}'",
                  id.empty() ? "(auto-detect)" : id);
 
-    // Notify observers (e.g., home panel) that the image changed
-    if (subjects_initialized_) {
-        int ver = lv_subject_get_int(&image_changed_subject_);
-        lv_subject_set_int(&image_changed_subject_, ver + 1);
-    }
+    notify_image_changed();
 }
 
 std::string PrinterImageManager::get_active_image_path(int screen_width) {
@@ -111,32 +112,34 @@ std::string PrinterImageManager::get_active_image_path(int screen_width) {
         std::string name = id.substr(7);
         std::string bin_path = custom_dir_ + name + "-" + std::to_string(target_size) + ".bin";
 
-        if (fs::exists(bin_path)) {
+        if (hfs::exists(bin_path)) {
             return "A:" + bin_path;
         }
 
         // .bin missing — scan directory for a raw source image matching this name
-        if (fs::exists(custom_dir_)) {
-            for (const auto& entry : fs::directory_iterator(custom_dir_)) {
-                if (!fs::is_regular_file(entry.path()))
-                    continue;
-                if (entry.path().stem().string() != name)
-                    continue;
-                std::string ext = entry.path().extension().string();
-                std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-                if (ext != ".png" && ext != ".jpg" && ext != ".jpeg" && ext != ".bmp" &&
-                    ext != ".gif")
-                    continue;
+        if (hfs::exists(custom_dir_)) {
+            if (auto entries = hfs::list_dir(custom_dir_)) {
+                for (const auto& e : *entries) {
+                    if (!e.is_regular)
+                        continue;
+                    if (hfs::stem(e.name) != name)
+                        continue;
+                    std::string ext{hfs::extension(e.name)};
+                    ext = helix::text_io::to_lower(ext);
+                    if (ext != ".png" && ext != ".jpg" && ext != ".jpeg" && ext != ".bmp" &&
+                        ext != ".gif")
+                        continue;
 
-                std::string raw_path = entry.path().string();
-                spdlog::info("[PrinterImageManager] Lazy-importing raw image: {}", raw_path);
-                auto result = import_image(raw_path);
-                if (result.success && fs::exists(bin_path)) {
-                    return "A:" + bin_path;
+                    std::string raw_path = e.path;
+                    spdlog::info("[PrinterImageManager] Lazy-importing raw image: {}", raw_path);
+                    auto result = import_image(raw_path);
+                    if (result.success && hfs::exists(bin_path)) {
+                        return "A:" + bin_path;
+                    }
+                    spdlog::warn("[PrinterImageManager] Lazy-import failed for {}: {}", raw_path,
+                                 result.error);
+                    return "";
                 }
-                spdlog::warn("[PrinterImageManager] Lazy-import failed for {}: {}", raw_path,
-                             result.error);
-                return "";
             }
         }
 
@@ -146,6 +149,23 @@ std::string PrinterImageManager::get_active_image_path(int screen_width) {
 
     spdlog::warn("[PrinterImageManager] Unknown image ID format: '{}'", id);
     return "";
+}
+
+void PrinterImageManager::notify_image_changed() {
+    if (subjects_initialized_) {
+        int ver = lv_subject_get_int(&image_changed_subject_);
+        lv_subject_set_int(&image_changed_subject_, ver + 1);
+    }
+}
+
+std::string PrinterImageManager::get_displayed_image_path(int screen_width) {
+    std::string path = get_active_image_path(screen_width);
+    if (!path.empty())
+        return path;
+    Config* config = Config::get_instance();
+    const std::string printer_type =
+        config->get<std::string>(config->df() + helix::wizard::PRINTER_TYPE, "");
+    return PrinterImages::get_best_printer_image(printer_type);
 }
 
 // =============================================================================
@@ -170,20 +190,47 @@ std::string PrinterImageManager::format_display_name(const std::string& stem) {
 // Browsing
 // =============================================================================
 
-std::vector<PrinterImageManager::ImageInfo> PrinterImageManager::get_shipped_images() const {
+std::vector<PrinterImageManager::ImageInfo>
+PrinterImageManager::get_shipped_images(int screen_width) const {
     std::vector<ImageInfo> results;
+    std::set<std::string> stems;
 
+    // Two shapes hold the shipped set, and the picker has to read both. A
+    // checkout has the source PNGs and no tiers; a device has one tier per
+    // printer and no PNGs at all, because packaging deletes them. Reading only
+    // the PNGs hands every device an empty picker.
     const std::string printer_dir = "assets/images/printers/";
-    auto paths = scan_for_images(printer_dir);
+    for (const auto& path : scan_for_images(helix::asset_path(printer_dir)))
+        stems.insert(std::string(hfs::stem(path)));
 
-    for (const auto& path : paths) {
-        std::string stem = fs::path(path).stem().string();
+    const std::string tier_dir = helix::asset_path(printer_dir + "prerendered/");
+    if (hfs::exists(tier_dir)) {
+        if (auto entries = hfs::list_dir(tier_dir)) {
+            for (const auto& e : *entries) {
+                if (!e.is_regular || hfs::extension(e.name) != ".bin")
+                    continue;
+                // "<stem>-<size>.bin" -> "<stem>"; anything else is not a tier.
+                const std::string name{hfs::stem(e.name)};
+                const size_t dash = name.rfind('-');
+                if (dash == std::string::npos || dash == 0)
+                    continue;
+                const std::string suffix = name.substr(dash + 1);
+                if (suffix.empty() ||
+                    !std::all_of(suffix.begin(), suffix.end(),
+                                 [](unsigned char c) { return std::isdigit(c) != 0; }))
+                    continue;
+                stems.insert(name.substr(0, dash));
+            }
+        }
+    }
 
+    for (const auto& stem : stems) {
         ImageInfo info;
         info.id = "shipped:" + stem;
         info.display_name = format_display_name(stem);
-        // Preview uses 150px prerendered variant
-        info.preview_path = get_prerendered_printer_path(stem, 480); // 480 -> 150px
+        // Sized off the real display: packaging keeps only the tier this width
+        // selects, so any fixed size names a file half the fleet does not have.
+        info.preview_path = get_prerendered_printer_path(stem, screen_width);
         results.push_back(std::move(info));
     }
 
@@ -197,33 +244,35 @@ std::vector<PrinterImageManager::ImageInfo> PrinterImageManager::get_shipped_ima
 std::vector<PrinterImageManager::ImageInfo> PrinterImageManager::get_custom_images() const {
     std::vector<ImageInfo> results;
 
-    if (custom_dir_.empty() || !fs::exists(custom_dir_)) {
+    if (custom_dir_.empty() || !hfs::exists(custom_dir_)) {
         return results;
     }
 
-    for (const auto& entry : fs::directory_iterator(custom_dir_)) {
-        if (!fs::is_regular_file(entry.path()))
-            continue;
+    if (auto entries = hfs::list_dir(custom_dir_)) {
+        for (const auto& e : *entries) {
+            if (!e.is_regular)
+                continue;
 
-        std::string filename = entry.path().filename().string();
-        // Look for the 300px variant as the canonical marker
-        if (filename.size() < 8 || filename.substr(filename.size() - 8) != "-300.bin")
-            continue;
+            std::string filename = e.name;
+            // Look for the 300px variant as the canonical marker
+            if (filename.size() < 8 || filename.substr(filename.size() - 8) != "-300.bin")
+                continue;
 
-        // Extract base name: "my-printer-300.bin" -> "my-printer"
-        std::string name = filename.substr(0, filename.size() - 8);
+            // Extract base name: "my-printer-300.bin" -> "my-printer"
+            std::string name = filename.substr(0, filename.size() - 8);
 
-        ImageInfo info;
-        info.id = "custom:" + name;
-        info.display_name = format_display_name(name);
-        // Preview uses the 150px variant
-        std::string preview_bin = custom_dir_ + name + "-150.bin";
-        if (fs::exists(preview_bin)) {
-            info.preview_path = "A:" + preview_bin;
-        } else {
-            info.preview_path = "A:" + entry.path().string();
+            ImageInfo info;
+            info.id = "custom:" + name;
+            info.display_name = format_display_name(name);
+            // Preview uses the 150px variant
+            std::string preview_bin = custom_dir_ + name + "-150.bin";
+            if (hfs::exists(preview_bin)) {
+                info.preview_path = "A:" + preview_bin;
+            } else {
+                info.preview_path = "A:" + e.path;
+            }
+            results.push_back(std::move(info));
         }
-        results.push_back(std::move(info));
     }
 
     std::sort(results.begin(), results.end(),
@@ -235,43 +284,46 @@ std::vector<PrinterImageManager::ImageInfo> PrinterImageManager::get_custom_imag
 std::vector<PrinterImageManager::ImageInfo> PrinterImageManager::get_invalid_custom_images() const {
     std::vector<ImageInfo> results;
 
-    if (custom_dir_.empty() || !fs::exists(custom_dir_)) {
+    if (custom_dir_.empty() || !hfs::exists(custom_dir_)) {
         return results;
     }
 
     // Collect stems that have a successful .bin conversion
     std::set<std::string> valid_stems;
-    for (const auto& entry : fs::directory_iterator(custom_dir_)) {
-        if (!fs::is_regular_file(entry.path()))
-            continue;
-        std::string filename = entry.path().filename().string();
-        if (filename.size() >= 8 && filename.substr(filename.size() - 8) == "-300.bin") {
-            valid_stems.insert(filename.substr(0, filename.size() - 8));
+    if (auto entries = hfs::list_dir(custom_dir_)) {
+        for (const auto& e : *entries) {
+            if (!e.is_regular)
+                continue;
+            if (e.name.size() >= 8 && e.name.substr(e.name.size() - 8) == "-300.bin") {
+                valid_stems.insert(e.name.substr(0, e.name.size() - 8));
+            }
         }
     }
 
     // Find raw files that don't have a corresponding .bin
-    for (const auto& entry : fs::directory_iterator(custom_dir_)) {
-        if (!fs::is_regular_file(entry.path()))
-            continue;
+    if (auto entries = hfs::list_dir(custom_dir_)) {
+        for (const auto& e : *entries) {
+            if (!e.is_regular)
+                continue;
 
-        std::string ext = entry.path().extension().string();
-        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+            std::string ext{hfs::extension(e.name)};
+            ext = helix::text_io::to_lower(ext);
 
-        // Only consider image-like extensions (skip .bin, .DS_Store, .tmp, etc.)
-        static const std::set<std::string> image_exts = {".png", ".jpg", ".jpeg",
-                                                         ".bmp", ".gif", ".webp"};
-        if (image_exts.find(ext) == image_exts.end())
-            continue;
+            // Only consider image-like extensions (skip .bin, .DS_Store, .tmp, etc.)
+            static const std::set<std::string> image_exts = {".png", ".jpg", ".jpeg",
+                                                             ".bmp", ".gif", ".webp"};
+            if (image_exts.find(ext) == image_exts.end())
+                continue;
 
-        std::string stem = entry.path().stem().string();
-        if (valid_stems.count(stem))
-            continue;
+            std::string stem{hfs::stem(e.name)};
+            if (valid_stems.count(stem))
+                continue;
 
-        ImageInfo info;
-        info.id = "invalid:" + stem;
-        info.display_name = format_display_name(stem);
-        results.push_back(std::move(info));
+            ImageInfo info;
+            info.id = "invalid:" + stem;
+            info.display_name = format_display_name(stem);
+            results.push_back(std::move(info));
+        }
     }
 
     std::sort(results.begin(), results.end(),
@@ -281,7 +333,7 @@ std::vector<PrinterImageManager::ImageInfo> PrinterImageManager::get_invalid_cus
 }
 
 int PrinterImageManager::auto_import_raw_images() {
-    if (custom_dir_.empty() || !fs::exists(custom_dir_)) {
+    if (custom_dir_.empty() || !hfs::exists(custom_dir_)) {
         return 0;
     }
 
@@ -289,11 +341,11 @@ int PrinterImageManager::auto_import_raw_images() {
     auto raw_files = scan_for_images(custom_dir_);
 
     for (const auto& path : raw_files) {
-        std::string stem = fs::path(path).stem().string();
+        std::string stem{hfs::stem(path)};
         std::string bin_path = custom_dir_ + stem + "-300.bin";
 
         // Skip if already converted
-        if (fs::exists(bin_path)) {
+        if (hfs::exists(bin_path)) {
             continue;
         }
 
@@ -315,18 +367,21 @@ int PrinterImageManager::auto_import_raw_images() {
 std::vector<std::string> PrinterImageManager::scan_for_images(const std::string& dir) const {
     std::vector<std::string> results;
 
-    if (!fs::exists(dir))
+    if (!hfs::exists(dir))
         return results;
 
-    for (const auto& entry : fs::directory_iterator(dir)) {
-        if (!fs::is_regular_file(entry.path()))
-            continue;
+    if (auto entries = hfs::list_dir(dir)) {
+        for (const auto& e : *entries) {
+            if (!e.is_regular)
+                continue;
 
-        std::string ext = entry.path().extension().string();
-        // Case-insensitive extension check
-        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-        if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".gif") {
-            results.push_back(entry.path().string());
+            std::string ext{hfs::extension(e.name)};
+            // Case-insensitive extension check
+            ext = helix::text_io::to_lower(ext);
+            if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" ||
+                ext == ".gif") {
+                results.push_back(e.path);
+            }
         }
     }
 
@@ -343,16 +398,20 @@ PrinterImageManager::validate_image(const std::string& path) const {
     ValidationResult result;
 
     // Check file exists
-    if (!fs::exists(path)) {
+    if (!hfs::exists(path)) {
         result.error = "File not found: " + path;
         return result;
     }
 
     // Check file size
-    auto file_size = fs::file_size(path);
-    if (file_size > MAX_FILE_SIZE) {
+    auto file_size = helix::text_io::file_size(path);
+    if (!file_size) {
+        result.error = "File not found: " + path;
+        return result;
+    }
+    if (*file_size > MAX_FILE_SIZE) {
         result.error =
-            "File too large (" + std::to_string(file_size / 1024 / 1024) + "MB, max 5MB)";
+            "File too large (" + std::to_string(*file_size / 1024 / 1024) + "MB, max 5MB)";
         return result;
     }
 
@@ -379,6 +438,30 @@ PrinterImageManager::validate_image(const std::string& path) const {
 // =============================================================================
 // Import + conversion
 // =============================================================================
+
+int PrinterImageManager::invalidate_printer_image_cache(const std::string& source_image_path) {
+    int removed = 0;
+
+    // An absent cache dir leaves nothing to invalidate.
+    if (const auto listing = helix::fs::list_dir(get_printer_image_cache_dir())) {
+        for (const auto& entry : *listing) {
+            if (!entry.is_regular)
+                continue;
+            if (printer_cache_entry_matches(entry.name, source_image_path)) {
+                if (helix::fs::remove(entry.path) || errno == ENOENT) {
+                    ++removed;
+                    spdlog::debug("[PrinterCache] Invalidated cache: {}", entry.name);
+                }
+            }
+        }
+    }
+
+    if (removed > 0) {
+        spdlog::info("[PrinterCache] Invalidated {} cache entries for '{}'", removed,
+                     source_image_path);
+    }
+    return removed;
+}
 
 bool PrinterImageManager::convert_to_bin(const uint8_t* pixels, int w, int h,
                                          const std::string& output_path, int target_size) {
@@ -431,7 +514,7 @@ PrinterImageManager::import_image(const std::string& source_path) {
     }
 
     // Extract base name from source
-    std::string stem = fs::path(source_path).stem().string();
+    std::string stem{hfs::stem(source_path)};
 
     // Load with stbi — force 4 channels (RGBA)
     int w = 0, h = 0, channels = 0;
@@ -468,7 +551,7 @@ PrinterImageManager::import_image(const std::string& source_path) {
     if (!convert_to_bin(pixels, w, h, path_150, 150)) {
         stbi_image_free(pixels);
         // Clean up the 300px variant
-        fs::remove(path_300);
+        hfs::remove(path_300);
         result.error = "Failed to create 150px variant";
         return result;
     }
@@ -478,6 +561,8 @@ PrinterImageManager::import_image(const std::string& source_path) {
     result.success = true;
     result.id = "custom:" + stem;
     spdlog::info("[PrinterImageManager] Imported '{}' as '{}'", source_path, result.id);
+    // Tags made on the old picture would pin chips to the wrong places on this one.
+    reset_user_image_regions(printer_image_region_key(path_300));
     return result;
 }
 
@@ -503,14 +588,15 @@ bool PrinterImageManager::delete_custom_image(const std::string& name) {
     // Remove both size variants
     for (const char* suffix : {"-300.bin", "-150.bin"}) {
         std::string path = custom_dir_ + name + suffix;
-        if (fs::exists(path)) {
-            fs::remove(path);
+        if (hfs::exists(path)) {
+            hfs::remove(path);
             any_removed = true;
         }
     }
 
     if (any_removed) {
         spdlog::info("[PrinterImageManager] Deleted custom image: '{}'", name);
+        reset_user_image_regions(printer_image_region_key(custom_dir_ + name + "-300.bin"));
     } else {
         spdlog::warn("[PrinterImageManager] No files found to delete for: '{}'", name);
     }

@@ -38,6 +38,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <vector>
 
 static bool try_create_dir(const std::string& path) {
@@ -71,57 +72,77 @@ static std::vector<CacheCandidate> cache_path_candidates(const std::string& subd
     // 1. HELIX_CACHE_DIR env var (explicit override)
     const char* helix_cache = std::getenv("HELIX_CACHE_DIR");
     if (helix_cache && helix_cache[0] != '\0')
-        out.push_back({std::string(helix_cache) + "/" + subdir, "HELIX_CACHE_DIR", false, false});
+        out.push_back({std::string(helix_cache) + "/" + subdir, "HELIX_CACHE_DIR", false});
 
     // 2. Config /cache/base_directory
-    if (helix::Config* config = helix::Config::get_instance()) {
-        std::string base = config->get<std::string>("/cache/base_directory", "");
-        if (!base.empty())
-            out.push_back({base + "/" + subdir, "config", false, false});
-    }
+    helix::Config* config = helix::Config::get_instance();
+    std::string base = config->get<std::string>("/cache/base_directory", "");
+    if (!base.empty())
+        out.push_back({base + "/" + subdir, "config", false});
 
-    // 3. Platform-specific compile-time paths
+        // 3. Platform-specific compile-time paths
 #if defined(HELIX_PLATFORM_AD5M)
-    out.push_back({"/data/helixscreen/cache/" + subdir, "AD5M", false, true});
+    // Dot-prefixed on purpose: /data is the only large writable partition on
+    // this board and the vendor symlinks it whole into Moonraker's gcodes
+    // root, so a plain-named directory shows up in the print-file picker.
+    // Moonraker's listings hide dot-entries (the vendor's own .mod and .thumbs
+    // rely on exactly that), no moonraker.conf edit needed.
+    out.push_back({"/data/.helixscreen/cache/" + subdir, "AD5M", true});
 #elif defined(HELIX_PLATFORM_CC1)
-    out.push_back({"/opt/helixscreen/cache/" + subdir, "CC1", false, true});
+    // /user-resource is the 6.3GB ext4 partition. / is a read-only squashfs with
+    // no /opt, so anything rooted there falls through to RAM-backed /tmp. The
+    // -state sibling keeps the cache off the payload, which every update deletes.
+    out.push_back({"/user-resource/helixscreen-state/cache/" + subdir, "CC1", true});
 #elif defined(HELIX_PLATFORM_K2)
-    // The K2 mounts its bulk storage at /mnt/UDISK (27.5GB). /usr/data is
-    // on the root overlay, which is only ~240MB and shared with the
-    // install itself, so caching thumbnails and modified gcode there
-    // competes with the firmware for the smallest partition on the box.
-    // Probed in order so a unit without the mount still gets a cache.
-    // Mirrors CREALITY_DATA_ROOTS in plr_backend.cpp.
-    for (const char* root : {"/mnt/UDISK", "/usr/data"})
-        out.push_back({std::string(root) + "/helixscreen/cache/" + subdir, "K2", false, true});
+    // /mnt/UDISK is the 27.5GB user partition and carries both the payload and
+    // its state; the cache sits in the -state sibling because the payload is
+    // what an update replaces. /usr/data is on the root overlay, only ~240MB
+    // and shared with the firmware, so it is the fallback for a unit without
+    // the mount. Same two roots plr_backend.cpp probes for Creality data.
+    out.push_back({"/mnt/UDISK/helixscreen-state/cache/" + subdir, "K2", true});
+    out.push_back({"/usr/data/helixscreen-state/cache/" + subdir, "K2", true});
 #elif defined(HELIX_PLATFORM_MIPS)
     // K1 series: /usr/data IS the large user partition here, unlike on the K2.
-    out.push_back({"/usr/data/helixscreen/cache/" + subdir, "MIPS", false, true});
+    // The cache sits in a sibling of the payload rather than inside it, because
+    // the payload is what an update replaces. This binary also serves the AD5X,
+    // where /usr/data exists only in the ZMOD chroot (persistent — cache lands
+    // here) and never in the Forge-X chroot (can_create_dir fails and the
+    // cascade falls through to XDG, same as the dedicated AD5X build did).
+    out.push_back({"/usr/data/helixscreen-state/cache/" + subdir, "MIPS", true});
 #elif defined(HELIX_PLATFORM_ANDROID) || defined(__ANDROID__)
     // Use SDL's Android internal storage path (app-private, no permissions needed)
     if (const char* android_path = SDL_AndroidGetInternalStoragePath())
-        out.push_back({std::string(android_path) + "/cache/" + subdir, "Android", false, true});
+        out.push_back({std::string(android_path) + "/cache/" + subdir, "Android", true});
 #endif
 
     // 4/5. XDG cache base: $XDG_CACHE_HOME then $HOME/.cache (try each in order
     // so an uncreatable XDG dir still falls through to $HOME/.cache).
     for (const std::string& base : helix::paths::xdg_cache_bases())
-        out.push_back({base + "/helix/" + subdir, nullptr, false, false});
+        out.push_back({base + "/helix/" + subdir, nullptr, false});
 
-    // 6. /var/tmp (persistent, often larger than /tmp on embedded)
-    out.push_back({"/var/tmp/helix_" + subdir, nullptr, false, false});
+    // 6. /var/tmp. Persistent and larger than /tmp on a general-purpose host,
+    //    but on a Yocto/buildroot device it is often a symlink into the same
+    //    tmpfs /tmp reaches, so reaching this rung is not proof of storage.
+    //    get_helix_cache_dir() measures the chosen path rather than trusting
+    //    the ordering here.
+    out.push_back({"/var/tmp/helix_" + subdir, nullptr, false});
 
-    // 7. Last resort: /tmp (may be RAM-backed tmpfs)
-    out.push_back({"/tmp/helix_" + subdir, nullptr, true, false});
+    // 7. Last resort: /tmp, RAM-backed on most embedded devices.
+    out.push_back({"/tmp/helix_" + subdir, nullptr, false});
 
     return out;
 }
 
-std::string peek_helix_cache_dir(const std::string& subdir) {
+std::string peek_helix_cache_dir(const std::string& subdir, const char** tier_out) {
     for (const CacheCandidate& c : cache_path_candidates(subdir)) {
-        if (cache_candidate_viable(c.path))
+        if (cache_candidate_viable(c.path)) {
+            if (tier_out != nullptr)
+                *tier_out = c.tier;
             return c.path;
+        }
     }
+    if (tier_out != nullptr)
+        *tier_out = nullptr;
     return "";
 }
 
@@ -129,12 +150,21 @@ std::string get_helix_cache_dir(const std::string& subdir) {
     for (const CacheCandidate& c : cache_path_candidates(subdir)) {
         // Viability is checked first so a candidate we cannot use is skipped
         // without leaving a directory behind as the cost of finding out.
-        if (!cache_candidate_viable(c.path))
+        if (!cache_candidate_viable(c.path) || !try_create_dir(c.path)) {
+            // A deliberate rung names a location someone chose on purpose, so
+            // one that cannot be used is a misconfiguration, not a fallback.
+            // Skipping it silently is how a path the device does not have stays
+            // unnoticed while the cascade lands somewhere worse.
+            if (is_deliberate(c))
+                spdlog::warn("[CacheDir] {} path unusable, falling through: {}", c.tier, c.path);
             continue;
-        if (!try_create_dir(c.path))
-            continue;
-        if (c.ram_backed)
-            spdlog::warn("[CacheDir] Using /tmp for cache - may be RAM-backed");
+        }
+        // Measured, not declared. A per-rung flag cannot see that /var/tmp is a
+        // symlink into tmpfs on some devices, and bytes cached on tmpfs are
+        // memory the app is otherwise trying to protect.
+        if (helix::paths::is_ram_backed(c.path))
+            spdlog::warn("[CacheDir] Cache dir is RAM-backed - cached bytes are memory: {}",
+                         c.path);
         else if (c.tier)
             spdlog::info("[CacheDir] Cache dir ({}): {}", c.tier, c.path);
         return c.path;
@@ -240,6 +270,57 @@ std::vector<std::string> select_stale_paths(const std::vector<CacheCandidate>& c
     return stale;
 }
 
+int migrate_state_root(const std::string& legacy_root, const std::string& current_root) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    int actions = 0;
+
+    if (!fs::is_directory(legacy_root, ec))
+        return 0;
+
+    if (!fs::is_directory(current_root, ec)) {
+        fs::rename(legacy_root, current_root, ec);
+        if (ec) {
+            spdlog::warn("[CacheDir] Could not move state root {} to {}: {}", legacy_root,
+                         current_root, ec.message());
+            return 0;
+        }
+        spdlog::info("[CacheDir] Moved state root {} -> {}", legacy_root, current_root);
+        return 1;
+    }
+
+    // Both roots exist: a half-finished migration. Carry the known state
+    // subtrees across, never clobbering — a subtree already on the new side
+    // stays, and its legacy twin is left for the operator to inspect.
+    for (const char* sub : {"cache", "logs"}) {
+        const fs::path from = fs::path(legacy_root) / sub;
+        const fs::path to = fs::path(current_root) / sub;
+        if (!fs::is_directory(from, ec) || fs::exists(to, ec))
+            continue;
+        fs::rename(from, to, ec);
+        if (!ec) {
+            spdlog::info("[CacheDir] Moved state subtree {} -> {}", from.string(), to.string());
+            ++actions;
+        }
+    }
+
+    // An empty legacy tree is pure scaffolding: the pre-rename platform hook
+    // recreates <legacy>/logs at every pre-start. fs::remove refuses a
+    // non-empty directory, so anything with content survives on its own.
+    for (const char* sub : {"cache", "logs"}) {
+        const fs::path dir = fs::path(legacy_root) / sub;
+        if (fs::is_empty(dir, ec)) {
+            fs::remove(dir, ec);
+            if (!ec)
+                ++actions;
+        }
+    }
+    fs::remove(legacy_root, ec);
+    if (!ec)
+        ++actions;
+    return actions;
+}
+
 } // namespace helix::cache_internal
 
 int sweep_stale_helix_cache_dirs() {
@@ -251,3 +332,34 @@ int sweep_stale_helix_cache_dirs() {
     }
     return removed;
 }
+
+namespace helix {
+
+void migrate_legacy_state_roots() {
+#if defined(HELIX_PLATFORM_AD5M)
+    // /data is this board's only large writable partition and the vendor
+    // symlinks it whole into Moonraker's gcodes root, so the state root has to
+    // stay dot-prefixed to stay out of the print-file picker. A binary update
+    // that lands without the installer (a dev deploy) still runs under the
+    // pre-rename platform hook, whose exported defaults point at the old root;
+    // those env values would recreate the visible directory on first use, so
+    // they are repointed alongside the rename.
+    constexpr const char* kLegacyRoot = "/data/helixscreen";
+    constexpr const char* kCurrentRoot = "/data/.helixscreen";
+    constexpr std::string_view kLegacyPrefix = "/data/helixscreen/";
+
+    helix::cache_internal::migrate_state_root(kLegacyRoot, kCurrentRoot);
+
+    for (const char* var : {"HELIX_CACHE_DIR", "HELIX_LOG_FILE"}) {
+        const char* value = std::getenv(var);
+        // string_view::starts_with is C++20; the build is -std=c++17.
+        if (value == nullptr || std::string_view(value).rfind(kLegacyPrefix, 0) != 0)
+            continue;
+        const std::string repaired = std::string(kCurrentRoot) + (value + kLegacyPrefix.size() - 1);
+        setenv(var, repaired.c_str(), 1);
+        spdlog::info("[CacheDir] Repointed {} to the renamed state root: {}", var, repaired);
+    }
+#endif
+}
+
+} // namespace helix

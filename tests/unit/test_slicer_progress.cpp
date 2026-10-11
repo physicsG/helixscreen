@@ -19,6 +19,7 @@
  * - Time estimation uses slicer progress when active
  */
 
+#include "../helix_test_fixture.h"
 #include "../test_helpers/printer_state_test_access.h"
 #include "../ui_test_utils.h"
 #include "app_globals.h"
@@ -33,8 +34,9 @@ using json = nlohmann::json;
 // Slicer Preference When Active
 // ============================================================================
 
-TEST_CASE("Slicer progress: display_status overrides virtual_sdcard when non-zero",
-          "[print][progress][slicer]") {
+TEST_CASE_METHOD(HelixTestFixture,
+                 "Slicer progress: display_status overrides virtual_sdcard when non-zero",
+                 "[print][progress][slicer]") {
     lv_init_safe();
 
     PrinterState& state = get_printer_state();
@@ -52,11 +54,12 @@ TEST_CASE("Slicer progress: display_status overrides virtual_sdcard when non-zer
     state.update_from_status(status);
 
     // Slicer says 30%, file says 50% -- slicer should win
-    REQUIRE(lv_subject_get_int(state.get_print_progress_subject()) == 30);
+    REQUIRE(lv_subject_get_int(state.print_state().get_print_progress_subject()) == 30);
 }
 
-TEST_CASE("Slicer progress: activates on first non-zero display_status value",
-          "[print][progress][slicer]") {
+TEST_CASE_METHOD(HelixTestFixture,
+                 "Slicer progress: activates on first non-zero display_status value",
+                 "[print][progress][slicer]") {
     lv_init_safe();
 
     PrinterState& state = get_printer_state();
@@ -73,7 +76,7 @@ TEST_CASE("Slicer progress: activates on first non-zero display_status value",
     state.update_from_status(status1);
 
     // With display_status at 0, file progress should be used
-    REQUIRE(lv_subject_get_int(state.get_print_progress_subject()) == 10);
+    REQUIRE(lv_subject_get_int(state.print_state().get_print_progress_subject()) == 10);
 
     // Second update: display_status becomes non-zero -- switch to slicer
     json status2 = {{"virtual_sdcard", {{"progress", 0.15}}},
@@ -81,11 +84,12 @@ TEST_CASE("Slicer progress: activates on first non-zero display_status value",
     state.update_from_status(status2);
 
     // Slicer activated: 8% from slicer, not 15% from file
-    REQUIRE(lv_subject_get_int(state.get_print_progress_subject()) == 8);
+    REQUIRE(lv_subject_get_int(state.print_state().get_print_progress_subject()) == 8);
 }
 
-TEST_CASE("Slicer progress: virtual_sdcard-only updates do not override slicer once active",
-          "[print][progress][slicer]") {
+TEST_CASE_METHOD(HelixTestFixture,
+                 "Slicer progress: virtual_sdcard-only updates do not override slicer once active",
+                 "[print][progress][slicer]") {
     lv_init_safe();
 
     PrinterState& state = get_printer_state();
@@ -100,7 +104,7 @@ TEST_CASE("Slicer progress: virtual_sdcard-only updates do not override slicer o
     json activate = {{"virtual_sdcard", {{"progress", 0.2}}},
                      {"display_status", {{"progress", 0.15}}}};
     state.update_from_status(activate);
-    REQUIRE(lv_subject_get_int(state.get_print_progress_subject()) == 15);
+    REQUIRE(lv_subject_get_int(state.print_state().get_print_progress_subject()) == 15);
 
     // Now send only virtual_sdcard update (no display_status)
     // Slicer is authoritative -- progress should NOT change to file value
@@ -108,10 +112,11 @@ TEST_CASE("Slicer progress: virtual_sdcard-only updates do not override slicer o
     state.update_from_status(file_only);
 
     // Should still show slicer value (15%), not file value (60%)
-    REQUIRE(lv_subject_get_int(state.get_print_progress_subject()) == 15);
+    REQUIRE(lv_subject_get_int(state.print_state().get_print_progress_subject()) == 15);
 }
 
-TEST_CASE("Slicer progress: slicer-only update advances progress", "[print][progress][slicer]") {
+TEST_CASE_METHOD(HelixTestFixture, "Slicer progress: slicer-only update advances progress",
+                 "[print][progress][slicer]") {
     lv_init_safe();
 
     PrinterState& state = get_printer_state();
@@ -126,21 +131,22 @@ TEST_CASE("Slicer progress: slicer-only update advances progress", "[print][prog
     json activate = {{"virtual_sdcard", {{"progress", 0.2}}},
                      {"display_status", {{"progress", 0.15}}}};
     state.update_from_status(activate);
-    REQUIRE(lv_subject_get_int(state.get_print_progress_subject()) == 15);
+    REQUIRE(lv_subject_get_int(state.print_state().get_print_progress_subject()) == 15);
 
     // New display_status update advances progress
     json slicer_update = {{"display_status", {{"progress", 0.25}}}};
     state.update_from_status(slicer_update);
 
-    REQUIRE(lv_subject_get_int(state.get_print_progress_subject()) == 25);
+    REQUIRE(lv_subject_get_int(state.print_state().get_print_progress_subject()) == 25);
 }
 
 // ============================================================================
 // Fallback -- No Slicer Data
 // ============================================================================
 
-TEST_CASE("Slicer progress: virtual_sdcard used when display_status never appears",
-          "[print][progress][slicer]") {
+TEST_CASE_METHOD(HelixTestFixture,
+                 "Slicer progress: virtual_sdcard used when display_status never appears",
+                 "[print][progress][slicer]") {
     lv_init_safe();
 
     PrinterState& state = get_printer_state();
@@ -156,11 +162,12 @@ TEST_CASE("Slicer progress: virtual_sdcard used when display_status never appear
     state.update_from_status(status);
 
     // File progress should be used as fallback
-    REQUIRE(lv_subject_get_int(state.get_print_progress_subject()) == 45);
+    REQUIRE(lv_subject_get_int(state.print_state().get_print_progress_subject()) == 45);
 }
 
-TEST_CASE("Slicer progress: virtual_sdcard used when display_status.progress stays at 0",
-          "[print][progress][slicer]") {
+TEST_CASE_METHOD(HelixTestFixture,
+                 "Slicer progress: virtual_sdcard used when display_status.progress stays at 0",
+                 "[print][progress][slicer]") {
     lv_init_safe();
 
     PrinterState& state = get_printer_state();
@@ -177,14 +184,15 @@ TEST_CASE("Slicer progress: virtual_sdcard used when display_status.progress sta
     state.update_from_status(status);
 
     // File progress should be used since slicer never activated
-    REQUIRE(lv_subject_get_int(state.get_print_progress_subject()) == 35);
+    REQUIRE(lv_subject_get_int(state.print_state().get_print_progress_subject()) == 35);
 }
 
 // ============================================================================
 // Reset on New Print
 // ============================================================================
 
-TEST_CASE("Slicer progress: slicer active flag resets on new print", "[print][progress][slicer]") {
+TEST_CASE_METHOD(HelixTestFixture, "Slicer progress: slicer active flag resets on new print",
+                 "[print][progress][slicer]") {
     lv_init_safe();
 
     PrinterState& state = get_printer_state();
@@ -198,7 +206,7 @@ TEST_CASE("Slicer progress: slicer active flag resets on new print", "[print][pr
     json activate = {{"virtual_sdcard", {{"progress", 0.3}}},
                      {"display_status", {{"progress", 0.2}}}};
     state.update_from_status(activate);
-    REQUIRE(lv_subject_get_int(state.get_print_progress_subject()) == 20);
+    REQUIRE(lv_subject_get_int(state.print_state().get_print_progress_subject()) == 20);
 
     // Print completes
     json complete = {{"print_stats", {{"state", "complete"}}}};
@@ -217,14 +225,15 @@ TEST_CASE("Slicer progress: slicer active flag resets on new print", "[print][pr
     state.update_from_status(file_only);
 
     // Slicer flag was reset, so file progress should be used
-    REQUIRE(lv_subject_get_int(state.get_print_progress_subject()) == 40);
+    REQUIRE(lv_subject_get_int(state.print_state().get_print_progress_subject()) == 40);
 }
 
 // ============================================================================
 // Terminal State Guard
 // ============================================================================
 
-TEST_CASE("Slicer progress: cannot go backward in COMPLETE state", "[print][progress][slicer]") {
+TEST_CASE_METHOD(HelixTestFixture, "Slicer progress: cannot go backward in COMPLETE state",
+                 "[print][progress][slicer]") {
     lv_init_safe();
 
     PrinterState& state = get_printer_state();
@@ -236,7 +245,7 @@ TEST_CASE("Slicer progress: cannot go backward in COMPLETE state", "[print][prog
                      {"virtual_sdcard", {{"progress", 0.95}}},
                      {"display_status", {{"progress", 0.98}}}};
     state.update_from_status(printing);
-    REQUIRE(lv_subject_get_int(state.get_print_progress_subject()) == 98);
+    REQUIRE(lv_subject_get_int(state.print_state().get_print_progress_subject()) == 98);
 
     // Complete the print
     json complete = {{"print_stats", {{"state", "complete"}}}};
@@ -247,15 +256,16 @@ TEST_CASE("Slicer progress: cannot go backward in COMPLETE state", "[print][prog
     state.update_from_status(reset);
 
     // Progress should stay at 98 (terminal guard)
-    REQUIRE(lv_subject_get_int(state.get_print_progress_subject()) == 98);
+    REQUIRE(lv_subject_get_int(state.print_state().get_print_progress_subject()) == 98);
 }
 
 // ============================================================================
 // Time Estimation Uses Slicer Progress
 // ============================================================================
 
-TEST_CASE("Slicer progress: time estimation uses slicer progress when active",
-          "[print][progress][slicer]") {
+TEST_CASE_METHOD(HelixTestFixture,
+                 "Slicer progress: time estimation uses slicer progress when active",
+                 "[print][progress][slicer]") {
     lv_init_safe();
 
     PrinterState& state = get_printer_state();
@@ -277,11 +287,12 @@ TEST_CASE("Slicer progress: time estimation uses slicer progress when active",
     // remaining = print_duration * (100 - progress) / progress
     // With slicer at 50%: 600 * (100 - 50) / 50 = 600
     // NOT with file at 80%: 600 * (100 - 80) / 80 = 150
-    REQUIRE(lv_subject_get_int(state.get_print_time_left_subject()) == 600);
+    REQUIRE(lv_subject_get_int(state.print_state().get_print_time_left_subject()) == 600);
 }
 
-TEST_CASE("Slicer progress: time estimation uses file progress when slicer inactive",
-          "[print][progress][slicer]") {
+TEST_CASE_METHOD(HelixTestFixture,
+                 "Slicer progress: time estimation uses file progress when slicer inactive",
+                 "[print][progress][slicer]") {
     lv_init_safe();
 
     PrinterState& state = get_printer_state();
@@ -299,5 +310,112 @@ TEST_CASE("Slicer progress: time estimation uses file progress when slicer inact
     state.update_from_status(time);
 
     // remaining = 600 * (100 - 80) / 80 = 150
-    REQUIRE(lv_subject_get_int(state.get_print_time_left_subject()) == 150);
+    REQUIRE(lv_subject_get_int(state.print_state().get_print_time_left_subject()) == 150);
+}
+
+// ============================================================================
+// A Paused Print Does Not Advance
+// ============================================================================
+
+/*
+ * Klipper expires the M73 value behind display_status.progress and substitutes
+ * virtual_sdcard's byte position into the same field. A pause is exactly when
+ * M73 stops being refreshed, so the field a paused HelixScreen reads as "the
+ * slicer estimate" is really file position -- and on a multi-material print the
+ * two disagree by a wide margin, because the wipe tower is byte-dense and quick
+ * to print. Progress cannot advance while paused, so nothing arriving in that
+ * window is a new position, whichever source it came from.
+ */
+
+TEST_CASE("Paused progress: a differing payload cannot move the bar",
+          "[print][progress][slicer][paused]") {
+    lv_init_safe();
+
+    PrinterState& state = get_printer_state();
+    PrinterStateTestAccess::reset(state);
+    state.init_subjects(false);
+
+    json printing = {{"print_stats", {{"state", "printing"}}}};
+    state.update_from_status(printing);
+    state.update_from_status(json{{"display_status", {{"progress", 0.11}}}});
+    REQUIRE(lv_subject_get_int(state.print_state().get_print_progress_subject()) == 11);
+
+    state.update_from_status(json{{"print_stats", {{"state", "paused"}}}});
+
+    // The same field now carries byte position instead of the slicer estimate.
+    state.update_from_status(json{{"display_status", {{"progress", 0.25}}}});
+    CHECK(lv_subject_get_int(state.print_state().get_print_progress_subject()) == 11);
+
+    // The bar the user watches binds the display subject, so it has to hold too.
+    CHECK(lv_subject_get_int(state.print_state().get_print_progress_display_subject()) == 11);
+}
+
+TEST_CASE("Paused progress: file position cannot move the bar either",
+          "[print][progress][slicer][paused]") {
+    lv_init_safe();
+
+    PrinterState& state = get_printer_state();
+    PrinterStateTestAccess::reset(state);
+    state.init_subjects(false);
+
+    json printing = {{"print_stats", {{"state", "printing"}}}};
+    state.update_from_status(printing);
+    state.update_from_status(json{{"virtual_sdcard", {{"progress", 0.11}}}});
+    REQUIRE(lv_subject_get_int(state.print_state().get_print_progress_subject()) == 11);
+
+    state.update_from_status(json{{"print_stats", {{"state", "paused"}}}});
+    state.update_from_status(json{{"virtual_sdcard", {{"progress", 0.25}}}});
+
+    // Both writers are judged by the same rules, so neither gets a free pass.
+    CHECK(lv_subject_get_int(state.print_state().get_print_progress_subject()) == 11);
+}
+
+TEST_CASE("Paused progress: tracking resumes once the print does",
+          "[print][progress][slicer][paused]") {
+    lv_init_safe();
+
+    PrinterState& state = get_printer_state();
+    PrinterStateTestAccess::reset(state);
+    state.init_subjects(false);
+
+    json printing = {{"print_stats", {{"state", "printing"}}}};
+    state.update_from_status(printing);
+    state.update_from_status(json{{"display_status", {{"progress", 0.11}}}});
+
+    state.update_from_status(json{{"print_stats", {{"state", "paused"}}}});
+    state.update_from_status(json{{"display_status", {{"progress", 0.25}}}});
+    REQUIRE(lv_subject_get_int(state.print_state().get_print_progress_subject()) == 11);
+
+    // Holding while paused must not latch. A pause that permanently froze the
+    // bar would trade a bouncing number for a dead one.
+    state.update_from_status(printing);
+    state.update_from_status(json{{"display_status", {{"progress", 0.12}}}});
+    CHECK(lv_subject_get_int(state.print_state().get_print_progress_subject()) == 12);
+}
+
+TEST_CASE("Paused progress: a message-only payload after resume cannot publish the paused value",
+          "[print][progress][slicer][paused]") {
+    lv_init_safe();
+
+    PrinterState& state = get_printer_state();
+    PrinterStateTestAccess::reset(state);
+    state.init_subjects(false);
+
+    json printing = {{"print_stats", {{"state", "printing"}}}};
+    state.update_from_status(printing);
+    state.update_from_status(json{{"display_status", {{"progress", 0.11}}}});
+    REQUIRE(lv_subject_get_int(state.print_state().get_print_progress_subject()) == 11);
+
+    // Paused, and the field starts carrying byte position instead of M73.
+    state.update_from_status(json{{"print_stats", {{"state", "paused"}}}});
+    state.update_from_status(json{{"display_status", {{"progress", 0.25}}}});
+    REQUIRE(lv_subject_get_int(state.print_state().get_print_progress_subject()) == 11);
+
+    state.update_from_status(printing);
+
+    // An M117 update carries display_status with no progress field, so it
+    // refreshes nothing yet still reaches the publish. Declining to record the
+    // paused reading in the first place is what stops it arriving here.
+    state.update_from_status(json{{"display_status", {{"message", "Resuming"}}}});
+    CHECK(lv_subject_get_int(state.print_state().get_print_progress_subject()) == 11);
 }

@@ -4,8 +4,10 @@
 #include "probe_preparation.h"
 
 #include "app_globals.h"
+#include "json_utils.h"
 #include "printer_discovery.h"
 #include "printer_state.h"
+#include "text_io.h"
 
 #include <spdlog/spdlog.h>
 
@@ -16,30 +18,33 @@ namespace helix::probe_prep {
 
 namespace {
 
-std::string to_upper(std::string s) {
-    std::transform(s.begin(), s.end(), s.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
-    return s;
-}
-
 /**
  * Evaluate one `when` entry. Returns false for anything this build does not
  * understand — an unrecognised predicate must never read as "no objection",
  * because a rule firing on the wrong printer sends g-code to real hardware.
  */
 bool predicate_holds(const nlohmann::json& pred,
-                     const std::unordered_set<std::string>& macros_upper) {
+                     const std::unordered_set<std::string>& macros_upper,
+                     const std::vector<std::string>& objects) {
     if (!pred.is_object()) {
         return false;
     }
-    const std::string type = pred.value("type", "");
-    const std::string pattern = pred.value("pattern", "");
+    const std::string type = helix::json_util::safe_string(pred, "type");
+    const std::string pattern = helix::json_util::safe_string(pred, "pattern");
     if (pattern.empty()) {
         return false;
     }
 
     if (type == "macro_match") {
-        return macros_upper.count(to_upper(pattern)) > 0;
+        return macros_upper.count(helix::text_io::to_upper(pattern)) > 0;
+    }
+
+    // Same semantics as the detection heuristic: substring, '^'/'$' anchors.
+    // Commands registered by register_mux_command (e.g. a load cell's tare)
+    // never appear as gcode_macro objects, so macro_match cannot see them;
+    // the module object that publishes them can.
+    if (type == "object_exists") {
+        return helix::has_pattern(objects, pattern);
     }
 
     spdlog::debug("[ProbePrep] Unknown predicate type '{}' — rule cannot match", type);
@@ -91,9 +96,9 @@ bool suppressed_by_resolved_macro(const nlohmann::json& rule, const std::string&
     if (it == rule.end() || !it->is_array()) {
         return false;
     }
-    const std::string wanted = to_upper(resolved_macro);
+    const std::string wanted = helix::text_io::to_upper(resolved_macro);
     return std::any_of(it->begin(), it->end(), [&](const nlohmann::json& entry) {
-        return entry.is_string() && to_upper(entry.get<std::string>()) == wanted;
+        return entry.is_string() && helix::text_io::to_upper(entry.get<std::string>()) == wanted;
     });
 }
 
@@ -114,7 +119,8 @@ const char* operation_key(Operation op) {
 }
 
 Preparation resolve_from_rules(const nlohmann::json& rules,
-                               const std::unordered_set<std::string>& macros_upper, Operation op,
+                               const std::unordered_set<std::string>& macros_upper,
+                               const std::vector<std::string>& objects, Operation op,
                                const std::string& resolved_macro) {
     if (!rules.is_array()) {
         return {};
@@ -124,7 +130,7 @@ Preparation resolve_from_rules(const nlohmann::json& rules,
         if (!rule.is_object()) {
             continue;
         }
-        if (!rule.value("enabled", true)) {
+        if (!helix::json_util::safe_bool(rule, "enabled", true)) {
             continue;
         }
         if (!lists_operation(rule, op)) {
@@ -135,11 +141,11 @@ Preparation resolve_from_rules(const nlohmann::json& rules,
         const auto when = rule.find("when");
         if (when == rule.end() || !when->is_array() || when->empty()) {
             spdlog::debug("[ProbePrep] Rule '{}' has no usable 'when' — skipping",
-                          rule.value("id", "?"));
+                          helix::json_util::safe_string(rule, "id", "?"));
             continue;
         }
         const bool all_hold = std::all_of(when->begin(), when->end(), [&](const nlohmann::json& p) {
-            return predicate_holds(p, macros_upper);
+            return predicate_holds(p, macros_upper, objects);
         });
         if (!all_hold) {
             continue;
@@ -147,7 +153,7 @@ Preparation resolve_from_rules(const nlohmann::json& rules,
 
         if (suppressed_by_resolved_macro(rule, resolved_macro)) {
             spdlog::debug("[ProbePrep] Rule '{}' stands down: '{}' prepares itself",
-                          rule.value("id", "?"), resolved_macro);
+                          helix::json_util::safe_string(rule, "id", "?"), resolved_macro);
             continue;
         }
 
@@ -155,11 +161,11 @@ Preparation resolve_from_rules(const nlohmann::json& rules,
         prep.gcode = read_gcode(rule);
         if (prep.gcode.empty()) {
             spdlog::warn("[ProbePrep] Rule '{}' matched but has no usable 'gcode' — skipping",
-                         rule.value("id", "?"));
+                         helix::json_util::safe_string(rule, "id", "?"));
             continue;
         }
-        prep.label = rule.value("label", "");
-        prep.rule_id = rule.value("id", "");
+        prep.label = helix::json_util::safe_string(rule, "label");
+        prep.rule_id = helix::json_util::safe_string(rule, "id");
         const auto timeout = rule.find("timeout_s");
         if (timeout != rule.end() && timeout->is_number()) {
             const double seconds = timeout->get<double>();
@@ -176,7 +182,8 @@ Preparation resolve_from_rules(const nlohmann::json& rules,
 }
 
 Preparation resolve(const PrinterDiscovery& hw, Operation op, const std::string& resolved_macro) {
-    return resolve_from_rules(database_rules(), hw.get_macros(), op, resolved_macro);
+    return resolve_from_rules(database_rules(), hw.get_macros(), hw.printer_objects(), op,
+                              resolved_macro);
 }
 
 uint32_t append_preparation(std::string& script, Operation op, const std::string& resolved_macro) {

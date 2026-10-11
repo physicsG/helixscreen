@@ -3,10 +3,10 @@
 
 #pragma once
 
+#include "helix_regex.h"
 #include "printer_state.h"
 
 #include <memory>
-#include <regex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -33,6 +33,13 @@ class PrintStartProfile {
         helix::PrintStartPhase phase;
         std::string message;
         int progress; // 0-100, only meaningful in sequential mode
+        /// Seconds the matched text says the printer will spend without a
+        /// word (a heat soak's G4); 0 when it announces none.
+        int hold_seconds = 0;
+        /// Whether the text is the printer narrating its sequence. A label
+        /// that only names a target ("Bed: 90c") says nothing about what runs
+        /// next, so it must not silence the collector's own inference.
+        bool narrates = true;
     };
 
     /**
@@ -47,10 +54,15 @@ class PrintStartProfile {
      * @brief A regex response pattern
      */
     struct ResponsePattern {
-        std::regex pattern;
+        helix::Regex pattern;
         helix::PrintStartPhase phase;
         std::string message_template; // supports $1, $2 capture group substitution
         int weight;                   // only used in weighted mode
+        /// Capture group holding a number of minutes the printer stays silent
+        /// after this text; 0 when the pattern declares no hold.
+        int hold_minutes_group = 0;
+        /// False for a label that states a target rather than narrating a step
+        bool narrates = true;
     };
 
     /**
@@ -109,6 +121,10 @@ class PrintStartProfile {
         helix::PrintStartPhase phase = helix::PrintStartPhase::IDLE;
         std::string message;
         int weight = 0;
+        /// Hold only once every heater with a target is at it (the collector's
+        /// at-target band): evidence that also appears earlier in a start
+        /// means this phase only after the heat.
+        bool after_heat = false;
     };
 
     /**
@@ -137,8 +153,8 @@ class PrintStartProfile {
      * @brief Load the default profile
      *
      * Loads from config/print_start_profiles/default.json.
-     * If that file is missing, returns a built-in fallback with the same patterns
-     * currently hardcoded in PrintStartCollector.
+     * If that file cannot be read or parsed, returns an empty profile named
+     * "Generic": no text matching, the engine's own signals still work.
      *
      * @return Default profile
      */
@@ -180,6 +196,11 @@ class PrintStartProfile {
      * console line. Capture substitution and weight-in-progress behave
      * identically.
      *
+     * A profile with no state_patterns matches against its response_patterns
+     * instead: the two feeds carry the same phase vocabulary, so one list
+     * serves both and a profile declaring a phase object needs no second copy
+     * of the same regexes.
+     *
      * @param state State string read from the phase object's field
      * @param[out] result Match result (phase, message, weight in progress field)
      * @return true if matched
@@ -196,13 +217,6 @@ class PrintStartProfile {
     ProgressMode progress_mode() const {
         return progress_mode_;
     }
-
-    /**
-     * @brief Get phase weight for weighted progress calculation
-     *
-     * Returns the weight assigned to a phase, or 0 if not defined.
-     */
-    int get_phase_weight(helix::PrintStartPhase phase) const;
 
     // =========================================================================
     // Accessors
@@ -333,7 +347,6 @@ class PrintStartProfile {
     std::vector<SignalFormat> signal_formats_;
     std::vector<ResponsePattern> response_patterns_;
     std::vector<ResponsePattern> state_patterns_;
-    std::unordered_map<helix::PrintStartPhase, int> phase_weights_;
     std::vector<SilentPhaseEntry> silent_progression_;
     std::string phase_object_name_;
     std::string phase_object_field_;
@@ -378,5 +391,5 @@ class PrintStartProfile {
     /**
      * @brief Substitute regex capture groups ($1, $2, ...) in a template
      */
-    static std::string substitute_captures(const std::string& tmpl, const std::smatch& match);
+    static std::string substitute_captures(const std::string& tmpl, const helix::RegexMatch& match);
 };

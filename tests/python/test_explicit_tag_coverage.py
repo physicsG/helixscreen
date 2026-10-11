@@ -1,5 +1,5 @@
-"""Every explicit *_tag literal in ui_xml must have a non-empty translation in
-every shipped locale.
+"""Every *_tag literal in ui_xml, written or implied by its paired text, must
+have a non-empty translation in every shipped locale.
 
 A tag that never reaches the locale YAMLs leaves that string in English on
 every non-English device. Bundle CSLYH92R showed both failure shapes:
@@ -15,7 +15,6 @@ uses and one string ("Suppress periodic temperature status lines") that reached
 no locale at all.
 """
 
-import re
 import sys
 from pathlib import Path
 
@@ -26,15 +25,12 @@ from translations.extractor import (  # noqa: E402
     EXPLICIT_TAG_ATTRIBUTES,
     I18N_SKIP_FILE_RE,
     _decode_xml_entities,
+    component_tag_props,
+    implied_tags,
+    iter_elements,
     should_skip_text,
 )
 from translations.yaml_manager import load_yaml_file_readonly  # noqa: E402
-
-# (?<![\w]) matches the extractor's own guard: without it `text_tag` would also
-# match inside `action_button_text_tag`, attributing one literal to two props.
-TAG_RES = {
-    attr: re.compile(rf'(?<![\w]){attr}="([^"]*)"') for attr in EXPLICIT_TAG_ATTRIBUTES
-}
 
 # Floor per attribute, only to guard the scan against silently matching
 # nothing -- a typo'd attribute name would otherwise make this gate vacuous.
@@ -61,20 +57,49 @@ MIN_TAGS = {
 KNOWN_UNTRANSLATED: set[str] = set()
 
 
-def _tags_by_attribute() -> dict:
-    found = {attr: set() for attr in EXPLICIT_TAG_ATTRIBUTES}
+def _ui_xml_files():
     for xml in sorted((REPO_ROOT / "ui_xml").rglob("*.xml")):
         if "translations" in xml.parts:
             continue
         content = xml.read_text(encoding="utf-8")
-        if I18N_SKIP_FILE_RE.search(content):
-            continue
-        for attr, pattern in TAG_RES.items():
-            for match in pattern.finditer(content):
-                text = _decode_xml_entities(match.group(1))
-                if text and not text.startswith(("$", "#")) and not should_skip_text(text):
+        if not I18N_SKIP_FILE_RE.search(content):
+            yield xml, content
+
+
+def _tags_by_attribute() -> dict:
+    found = {attr: set() for attr in EXPLICIT_TAG_ATTRIBUTES}
+    props = component_tag_props(REPO_ROOT / "ui_xml")
+    for _xml, content in _ui_xml_files():
+        for element, attrs, _match in iter_elements(content):
+            implied = implied_tags(element, attrs, props)
+            for attr in EXPLICIT_TAG_ATTRIBUTES:
+                raw = attrs.get(attr, implied.get(attr))
+                if not raw:
+                    continue
+                text = _decode_xml_entities(raw)
+                if not text.startswith(("$", "#")) and not should_skip_text(text):
                     found[attr].add(text)
     return found
+
+
+def test_no_tag_repeats_the_text_it_is_implied_from():
+    """A *_tag equal to the literal it would be implied from is dead bytes, and
+    each copy sits on the heap in its component's view definition."""
+    props = component_tag_props(REPO_ROOT / "ui_xml")
+    redundant = []
+    for xml, content in _ui_xml_files():
+        for element, attrs, match in iter_elements(content):
+            for attr, value in attrs.items():
+                if not attr.endswith("_tag"):
+                    continue
+                rest = {k: v for k, v in attrs.items() if k != attr}
+                if implied_tags(element, rest, props).get(attr) == value:
+                    line = content.count("\n", 0, match.start()) + 1
+                    redundant.append(f"{xml.relative_to(REPO_ROOT)}:{line}: {attr}={value!r}")
+    assert not redundant, (
+        "these tags repeat the text they are implied from; delete them:\n  "
+        + "\n  ".join(redundant)
+    )
 
 
 def test_every_explicit_tag_attribute_has_a_floor():

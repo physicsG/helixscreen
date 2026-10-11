@@ -72,7 +72,7 @@ TEST_CASE_METHOD(LVGLTestFixture,
     // Deliberately NOT setting klippy_state: it sits at its startup default of
     // SHUTDOWN, which is precisely what made the old gate misfire. Asserting the
     // default here keeps the test honest if that default ever changes.
-    REQUIRE(lv_subject_get_int(state.get_klippy_state_subject()) ==
+    REQUIRE(lv_subject_get_int(state.network_state().get_klippy_state_subject()) ==
             static_cast<int>(KlippyState::SHUTDOWN));
 
     UnconnectedApi u(state);

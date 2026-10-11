@@ -18,12 +18,13 @@
  * test_filament_op_dispatch.cpp.
  */
 
+#include "../test_helpers/mock_bypass.h"
 #include "ams_backend_mock.h"
 
 #include "../catch_amalgamated.hpp"
 
 TEST_CASE("AMS backend requires_slot_selection_for_load", "[filament][bypass][ams]") {
-    AmsBackendMock backend(4);
+    helix::AmsBackendMock backend(4);
     backend.set_operation_delay(0);
     REQUIRE(backend.start());
 
@@ -32,6 +33,7 @@ TEST_CASE("AMS backend requires_slot_selection_for_load", "[filament][bypass][am
     }
 
     SECTION("bypass active — does not require slot selection") {
+        REQUIRE(helix::test::unload_for_bypass(backend));
         auto result = backend.enable_bypass();
         REQUIRE(result);
 
@@ -39,8 +41,9 @@ TEST_CASE("AMS backend requires_slot_selection_for_load", "[filament][bypass][am
     }
 
     SECTION("bypass toggled off — requires slot selection again") {
-        backend.enable_bypass();
-        backend.disable_bypass();
+        REQUIRE(helix::test::unload_for_bypass(backend));
+        REQUIRE(backend.enable_bypass());
+        REQUIRE(backend.disable_bypass());
 
         REQUIRE(backend.requires_slot_selection_for_load());
     }

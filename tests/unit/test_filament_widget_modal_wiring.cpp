@@ -73,7 +73,7 @@ class TapModalFixture : public LVGLUITestFixture {
         // No AMS backend: the tile is only ever shown on printers without one,
         // and it keeps the dispatches on the macro/raw-gcode tiers where the
         // mock's gcode history can see them.
-        AmsState::instance().clear_backends();
+        helix::AmsState::instance().clear_backends();
 
         widget.attach(test_screen(), test_screen());
     }
@@ -82,7 +82,7 @@ class TapModalFixture : public LVGLUITestFixture {
         widget.detach();
         set_moonraker_api(previous_api_);
         StandardMacros::instance().reset();
-        AmsState::instance().clear_backends();
+        helix::AmsState::instance().clear_backends();
         helix::ui::UpdateQueue::instance().drain();
         mock_client.stop_temperature_simulation();
         mock_client.disconnect();
@@ -90,7 +90,8 @@ class TapModalFixture : public LVGLUITestFixture {
     }
 
     void set_print_state(helix::PrintJobState s) {
-        lv_subject_set_int(state().get_print_state_enum_subject(), static_cast<int>(s));
+        lv_subject_set_int(state().print_state().get_print_state_enum_subject(),
+                           static_cast<int>(s));
         helix::ui::UpdateQueue::instance().drain();
     }
 
@@ -148,8 +149,9 @@ TEST_CASE_METHOD(TapModalFixture, "Paused tap modal wires the buttons its paused
     // Half the claim: at print_state_enum == 2 the XML really does show this
     // row, so the buttons are reachable. Without this the wiring assertions
     // below would pass just as happily against a row nobody can press.
-    CHECK_FALSE(lv_obj_has_flag(lv_obj_get_parent(resume), LV_OBJ_FLAG_HIDDEN));
-    CHECK_FALSE(lv_obj_has_flag(resume, LV_OBJ_FLAG_HIDDEN));
+    for (lv_obj_t* o = resume; o != dialog; o = lv_obj_get_parent(o)) {
+        CHECK_FALSE(lv_obj_has_flag(o, LV_OBJ_FLAG_HIDDEN));
+    }
 
     // The other half: reachable buttons are wired ones.
     CHECK(modal().has_resume_handler());
@@ -317,7 +319,7 @@ TEST_CASE_METHOD(TapModalFixture, "Detach closes an open tap modal",
 
 TEST_CASE_METHOD(TapModalFixture, "Tile taps do not latch the advisory icon on",
                  "[filament][widget_tap][wiring]") {
-    // runout_is_advisory is static and component-scoped: it outlives every show.
+    // runout_is_advisory is static and global: it outlives every show.
     // The tile sets it to 1; nothing used to set it back, so one tap swapped the
     // warning icon for the neutral one on every later runout dialog, including
     // the one that pops when a print pauses.
@@ -339,4 +341,25 @@ TEST_CASE_METHOD(TapModalFixture, "Tile taps do not latch the advisory icon on",
     RunoutGuidanceModal real_runout;
     real_runout.set_advisory(false);
     CHECK(lv_subject_get_int(advisory) == 0);
+}
+
+TEST_CASE_METHOD(TapModalFixture, "Paused runout dialog gates and rings Resume from its subjects",
+                 "[filament][widget_tap][wiring][runout]") {
+    set_print_state(helix::PrintJobState::PAUSED);
+    show_tap_modal(/*status_only=*/false);
+    REQUIRE(modal().is_visible());
+    lv_obj_t* resume = lv_obj_find_by_name(modal().dialog(), "btn_resume");
+    REQUIRE(resume != nullptr);
+
+    // An auto-feed runout with an empty port must not offer a Resume that fails.
+    modal().set_resume_blocked(true);
+    CHECK(lv_obj_has_state(resume, LV_STATE_DISABLED));
+    modal().set_resume_blocked(false);
+    CHECK_FALSE(lv_obj_has_state(resume, LV_STATE_DISABLED));
+
+    // Autofeed makes Resume the recovery action, so it carries the accent ring.
+    modal().set_autofeed_capable(true);
+    CHECK(lv_obj_get_style_outline_width(resume, LV_PART_MAIN) > 0);
+    modal().set_autofeed_capable(false);
+    CHECK(lv_obj_get_style_outline_width(resume, LV_PART_MAIN) == 0);
 }

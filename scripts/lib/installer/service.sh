@@ -3,7 +3,8 @@
 # Module: service
 # Service installation and management (systemd and SysV)
 #
-# Reads: INIT_SYSTEM, INSTALL_DIR, INIT_SCRIPT_DEST, SERVICE_NAME, SUDO
+# Reads: INIT_SYSTEM, INSTALL_DIR, INIT_SCRIPT_DEST, SERVICE_NAME, SUDO,
+#        HELIX_MOD_TREE_CANDIDATES, HELIX_HOST_INITD_DIR (stale-init sweep)
 
 # Source guard
 [ -n "${_HELIX_SERVICE_SOURCED:-}" ] && return 0
@@ -16,6 +17,18 @@ _sed_inplace() {
     local pattern=$1 file=$2
     $SUDO sed -i "$pattern" "$file" 2>/dev/null || \
     $SUDO sed -i '' "$pattern" "$file" 2>/dev/null || true
+}
+
+# Fill the install-path placeholders (@@INSTALL_DIR@@, @@INSTALL_PARENT@@) in
+# installed unit files. config/refresh-service-units.sh does the same on the
+# device, where this library is not shipped.
+# Args: UNIT_FILE...   Reads: INSTALL_DIR, SUDO
+_template_install_paths() {
+    local install_dir="${INSTALL_DIR:-/opt/helixscreen}" install_parent f
+    install_parent="$(dirname "$install_dir")"
+    for f in "$@"; do
+        _sed_inplace "s|@@INSTALL_DIR@@|${install_dir}|g; s|@@INSTALL_PARENT@@|${install_parent}|g" "$f"
+    done
 }
 
 # Returns true if this process is running under the NoNewPrivileges systemd constraint.
@@ -49,6 +62,51 @@ _has_no_new_privs() {
 # already-installed users.  This surgical sed rewrites only that one
 # known-broken substring; anything else the platform may have customized
 # is left alone.
+# Point the init script's DAEMON_DIR at the install root.
+# On a mod host the script runs inside the chroot, where the install root may
+# have a different spelling than it does on the host (see
+# resolve_chroot_daemon_dir). Use the in-chroot one when we have it.
+_set_init_script_daemon_dir() {
+    _daemon_dir="${HELIX_CHROOT_DAEMON_DIR:-$INSTALL_DIR}"
+    _sed_inplace "s|DAEMON_DIR=.*|DAEMON_DIR=\"${_daemon_dir}\"|" "$INIT_SCRIPT_DEST"
+}
+
+# Remove a HOST-side init script this install superseded. The payload's own
+# init lives inside the mod's chroot; an install from the in-mod-tree root
+# era wrote one on the host, and it still fires at boot. The discriminator is
+# the root a script NAMES - its DAEMON_DIR line - never its filename: a
+# script naming the current INSTALL_DIR is a boot path this run depends on
+# (an adopted legacy root's, for one), and a script naming any other root is
+# not ours to interpret. No DAEMON_DIR line, no verdict - the script stays.
+# $@: every spelling of the superseded root's mod tree. The tree is reachable
+# by more than one host path, and the init names whichever spelling its
+# install resolved; HELIX_MOD_TREE_CANDIDATES covers the rest.
+# HELIX_HOST_INITD_DIR is the test seam; nothing on a device ever sets it.
+remove_superseded_host_init() {
+    local _rshi_dir="${HELIX_HOST_INITD_DIR:-/etc/init.d}"
+    local _rshi_roots="" _rshi_cand _rshi_init _rshi_named
+    # shellcheck disable=SC2086  # word splitting is the point: a candidate path list
+    for _rshi_cand in "$@" ${HELIX_MOD_TREE_CANDIDATES:-/usr/data/config/mod /opt/config/mod}; do
+        [ -n "$_rshi_cand" ] || continue
+        _rshi_roots="${_rshi_roots}${_rshi_cand}/.bin/helixscreen "
+    done
+    [ -n "$_rshi_roots" ] || return 0
+
+    for _rshi_init in "$_rshi_dir"/*helixscreen*; do
+        [ -f "$_rshi_init" ] || continue
+        _rshi_named="$(sed -n 's|^DAEMON_DIR="\([^"]*\)".*|\1|p' "$_rshi_init" 2>/dev/null)"
+        [ -n "$_rshi_named" ] || continue
+        [ "$_rshi_named" != "$INSTALL_DIR" ] || continue
+        case " $_rshi_roots" in
+            *" $_rshi_named "*) ;;
+            *) continue ;;
+        esac
+        rm -f "$_rshi_init" 2>/dev/null || $SUDO rm -f "$_rshi_init" 2>/dev/null || true
+        log_success "Removed the stale init script at ${_rshi_init} (it named ${_rshi_named})"
+    done
+    return 0
+}
+
 _migrate_init_script_hooks_path() {
     local init_script="${INIT_SCRIPT_DEST:-}"
     [ -n "$init_script" ] && [ -f "$init_script" ] || return 0
@@ -76,23 +134,143 @@ install_service() {
         install_service_systemd
     else
         install_service_sysv
-        # K2 (procd) needs an extra shim — see install_procd_shim_k2
+        # K2 (procd) needs an extra shim — see install_procd_shim_k2.
+        # Non-fatal on purpose: by this point the stock UI is already
+        # stopped and nothing of ours has started, so an abort would leave
+        # the device with no UI at all — strictly worse than the incomplete
+        # boot entry the function just detected and logged. The session UI
+        # still comes up via start_service.
         if [ "$platform" = "k2" ]; then
-            install_procd_shim_k2
+            install_procd_shim_k2 || {
+                log_error "K2 procd shim not verified — the UI will not autostart at boot"
+                log_error "Manual fix: $SUDO /etc/init.d/helixscreen enable"
+            }
         fi
     fi
 }
 
-# K2 (Tina Linux / procd) requires init scripts to use the rc.common
-# shebang AND declare a DEPEND directive — without both, procd's boot
-# iterator silently skips them. Our shared SysV-style S99helixscreen has
-# neither, so on K2 it's never auto-started at boot, leaving the device
-# stuck on the Creality boot logo with no UI.
+# True when $1 is an rc.common script: its first line names /etc/rc.common,
+# the shebang rc.common dispatches and a plain SysV script does not carry.
+# read and case are shell builtins, so the check needs no external applet.
+# A missing, unreadable or empty file answers non-zero (an empty first
+# line is not a shebang).
+is_rc_common_script() {
+    local first
+    IFS= read -r first 2>/dev/null < "$1" || return 1
+    case "$first" in
+        */etc/rc.common*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Verify one rc.d boot link points where rc.common's `enable` puts it. A
+# mismatch — including a missing link — is a failed boot entry; the caller
+# has already run `enable`, so the manual fix is to run it again by hand.
+_verify_rcd_link() {
+    local link="$1" expected="$2" script="$3"
+    local actual
+    actual="$($SUDO readlink "$link" 2>/dev/null || true)"
+    if [ "$actual" != "$expected" ]; then
+        log_error "$link -> '$actual' (expected '$expected')"
+        log_error "The rc.d boot entry is incomplete; Manual fix: $SUDO $script enable"
+        return 1
+    fi
+    return 0
+}
+
+# The START=/STOP= slot a script declares, as bare digits; prints it and
+# returns 0, or returns 1 when nothing parseable remains. rc.common reads
+# these directives by sourcing the script, where comments and quotes never
+# survive — this reads without executing anything, so it strips what
+# sourcing would have discarded: a trailing comment, surrounding quotes,
+# CR from a CRLF edit, stray spaces. A duplicated directive keeps its
+# newline and fails the digit check rather than silently picking a winner.
+_rcd_slot() {
+    local directive="$1" script="$2" value
+    value="$(sed -n "s/^${directive}=//p" "$script" 2>/dev/null | tr -d '\r \t')"
+    value="${value%%#*}"
+    value="${value#\"}" ; value="${value%\"}"
+    value="${value#\'}" ; value="${value%\'}"
+    case "$value" in
+        ''|*[!0-9]*) return 1 ;;
+        *) printf '%s\n' "$value" ;;
+    esac
+}
+
+# Enable an rc.common init script and verify the rc.d boot links it made.
 #
-# Fix: install a tiny procd-compatible /etc/init.d/helixscreen shim that
-# delegates every action to the real SysV script. Replace any existing
-# rc.d symlink (older installs pointed it at the SysV script directly,
-# which procd silently skips).
+# rc.common's `enable` writes relative links /etc/rc.d/S${START}<name> and
+# K${STOP}<name> (START/STOP read from the script itself) and exits 0 when
+# at least ONE link was made — so a partial enable (the S link without its
+# K link, say) reads as success and leaves the boot entry silently
+# incomplete. Drop the script's existing S??/K?? links first (an older
+# install may have used a different two-digit slot — the same space
+# rc.common's own disable globs), run `enable`, then verify each link by
+# readlink against ../init.d/<name>.
+#
+# START is required: it is the boot slot, and without it rc.common makes
+# no S link — there is no boot entry to verify. STOP is verified when
+# declared: rc.common makes no K link without one, and this helper also
+# runs against stock firmware scripts we do not author, so an absent or
+# unparseable STOP downgrades to a warning and an S-only verification
+# instead of failing the enable.
+enable_and_verify_rcd() {
+    local script="$1"
+    local name start stop
+
+    name="$(basename "$script")"
+
+    # A missing or unreadable script must not be diagnosed as a directive
+    # problem: the operator would be sent to edit a file that does not
+    # exist while the real fault is the copy step or permissions.
+    if [ ! -f "$script" ]; then
+        log_error "$script: not found at verification time"
+        log_error "The copy step failed; Manual fix: check the install logs above"
+        return 1
+    fi
+    if [ ! -r "$script" ]; then
+        log_error "$script: not readable — cannot verify its rc.d boot entry"
+        return 1
+    fi
+
+    if ! start="$(_rcd_slot START "$script")"; then
+        log_error "unparseable START= in $script (expected a two-digit slot)"
+        log_error "Manual fix: set START=<nn> to a plain number in $script"
+        return 1
+    fi
+    if ! stop="$(_rcd_slot STOP "$script")"; then
+        log_warn "$name: no parseable STOP= in $script — the shutdown half of the boot entry is left unverified"
+        stop=""
+    fi
+
+    # The glob must expand as root: an unprivileged shell cannot read
+    # /etc/rc.d, the pattern would reach rm literally, and rm -f on the
+    # literal name removes nothing without a sound.
+    $SUDO sh -c "rm -f /etc/rc.d/S??\"$name\" /etc/rc.d/K??\"$name\"" \
+        || log_warn "$name: could not drop a stale rc.d link; a duplicate boot entry may remain"
+
+    if ! $SUDO "$script" enable; then
+        log_error "$name: enable failed — the rc.d boot entry was not installed"
+        log_error "Manual fix: $SUDO $script enable"
+        return 1
+    fi
+
+    _verify_rcd_link "/etc/rc.d/S${start}${name}" "../init.d/$name" "$script" || return 1
+    if [ -n "$stop" ]; then
+        _verify_rcd_link "/etc/rc.d/K${stop}${name}" "../init.d/$name" "$script" || return 1
+    fi
+
+    log_info "$name: rc.d boot links verified (S${start}${name}${stop:+ K${stop}${name}})"
+    return 0
+}
+
+# K2 (Tina Linux / procd) boot-dispatches init scripts carrying the
+# `#!/bin/sh /etc/rc.common` shebang; a DEPEND directive is optional for
+# boot dispatch. Our shared SysV-style S99helixscreen has no such shebang,
+# so on K2 install a tiny procd-compatible /etc/init.d/helixscreen shim
+# that delegates every action to the real SysV script, and repoint the
+# rc.d entry at it: a link straight at the SysV script names a file rc.common
+# will not dispatch.
 install_procd_shim_k2() {
     local shim_src="${INSTALL_DIR}/config/helixscreen-k2-procd-shim.sh"
     local shim_dest="/etc/init.d/helixscreen"
@@ -114,27 +292,96 @@ install_procd_shim_k2() {
     $SUDO cp "$shim_src" "$shim_dest"
     $SUDO chmod +x "$shim_dest"
 
-    # procd skips an /etc/rc.d/S99helixscreen that points straight at the
-    # SysV script, so drop any such symlink, then let rc.common's `enable`
-    # create fresh S99/K01 symlinks pointing at the shim. Verify the rc.d
-    # entry before returning — `enable` exits 0 even when it produced no
-    # symlink at all, so a silently-wrong entry is otherwise invisible.
-    $SUDO rm -f /etc/rc.d/S99helixscreen /etc/rc.d/K01helixscreen
-    if ! $SUDO "$shim_dest" enable; then
-        log_warn "K2 procd shim: enable failed — UI will not autostart at boot"
-        log_warn "Manual fix: $SUDO $shim_dest enable"
-        return 1
-    fi
-
-    local rcd_target
-    rcd_target=$(readlink /etc/rc.d/S99helixscreen 2>/dev/null || true)
-    if [ "$rcd_target" != "../init.d/helixscreen" ]; then
-        log_error "K2 procd shim: /etc/rc.d/S99helixscreen -> '$rcd_target' (expected '../init.d/helixscreen')"
-        log_error "UI will not autostart at boot (see [L086])."
-        return 1
-    fi
+    # Drop any rc.d entry an older install left, then verify the fresh pair.
+    enable_and_verify_rcd "$shim_dest" || return 1
 
     log_success "Installed K2 procd shim at $shim_dest (boot symlink verified)"
+}
+
+# K2 web-server carve-out (prestonbrown/helixscreen#1617). The runtime hook
+# runs `/etc/init.d/app stop` + `disable`: stop kills any running
+# web-server (killall -9 in the stock app's stop_service, ours included,
+# even with the app already stopped) while disable only removes the app's
+# rc.d links. The hook therefore restores the carve-out at the end of every
+# HelixScreen start, through the rc.common procd script this installs at
+# /etc/init.d/helix-k2-webserver — the service-shaped starter and
+# supervisor whose registered instance procd respawns. Its rc.d boot entry
+# is belt-and-braces next to the hook's restore.
+#
+# INSTALL half: runs BEFORE start_service, so the hook's first
+# platform_stop_competing_uis finds the script and the procd instance is
+# registered from the first launch (the hook's bare-launch fallback then
+# stays unreachable for shipped payloads; it exists for degraded installs
+# that never got this script). No-op when the stock app service is absent
+# (a firmware without the stock set has nothing to carve out of) or when
+# procd's rc.common is missing. The START half is
+# start_k2_webserver_backend, which runs after start_service.
+install_k2_webserver_backend() {
+    [ "${1:-}" = "k2" ] || return 0
+
+    if [ ! -f /etc/init.d/app ]; then
+        log_info "No stock /etc/init.d/app on this host; skipping web-server carve-out"
+        return 0
+    fi
+
+    if [ ! -x /etc/rc.common ]; then
+        log_warn "K2 web-server carve-out: /etc/rc.common not found — skipping"
+        return 0
+    fi
+
+    local src="${INSTALL_DIR}/config/k2-webserver.init"
+    local dest="/etc/init.d/helix-k2-webserver"
+
+    if [ ! -f "$src" ]; then
+        log_warn "k2-webserver.init missing from ${INSTALL_DIR}/config (the payload being installed may predate prestonbrown/helixscreen#1617); the web-server carve-out will not survive reboot"
+        return 0
+    fi
+
+    # A single sudo cp, like the shim's copy: /etc/init.d is root-owned
+    # and the carve-out has no non-root install path that could write it.
+    # The guard is load-bearing: main.sh calls this function as
+    # `... || log_warn`, and under set -e an || context does not abort —
+    # an unguarded cp failure would fall through to the ledger write and
+    # the enable below. chmod stays non-fatal: without +x the rc.common
+    # shebang cannot execute, and `enable` below surfaces that loudly.
+    $SUDO cp "$src" "$dest" || {
+        log_warn "Could not install $dest; the web-server carve-out will not survive reboot"
+        return 0
+    }
+    $SUDO chmod +x "$dest" || log_warn "chmod failed on $dest"
+
+    # Record the script for uninstall BEFORE any step below can fail: a
+    # carve-out left on disk without its ledger entry survives uninstall as
+    # an orphan competing with the restored stock UI.
+    record_disabled_service "sysv-created" "$dest"
+
+    # Drop any rc.d entry an older install left, then verify the fresh pair.
+    enable_and_verify_rcd "$dest" || return 1
+
+    log_info "Installed K2 web-server carve-out: $dest (boot symlink verified)"
+    return 0
+}
+
+# START half of the carve-out install: bring web-server up for the current
+# session, AFTER start_service. The service start's hook already ran
+# platform_stop_competing_uis — its app stop took whatever web-server was
+# live down, and its own restore brings the carve-out back — so this
+# explicit start is belt-and-braces for paths that bypass the hook (a
+# degraded install whose hook was never copied, say). A failed start is
+# logged, not fatal: procd respawns a registered instance, and the verified
+# boot entry brings it up at the next boot. No-op when the carve-out script
+# is not installed.
+start_k2_webserver_backend() {
+    [ "${1:-}" = "k2" ] || return 0
+
+    if [ ! -x /etc/init.d/helix-k2-webserver ]; then
+        return 0
+    fi
+
+    if ! $SUDO /etc/init.d/helix-k2-webserver start 2>/dev/null; then
+        log_warn "K2 web-server carve-out: start failed; procd respawn or the next boot brings it up"
+    fi
+    return 0
 }
 
 install_service_snapmaker_u1() {
@@ -212,17 +459,12 @@ install_service_systemd() {
     # `mks` user has no `mks` group and systemd refuses to spawn the unit.
     local helix_user="${KLIPPER_USER:-root}"
     local helix_group="${KLIPPER_GROUP:-${KLIPPER_USER:-root}}"
-    local install_dir="${INSTALL_DIR:-/opt/helixscreen}"
-
-    local install_parent
-    install_parent="$(dirname "${install_dir}")"
 
     _sed_inplace "s|@@HELIX_USER@@|${helix_user}|g" "$service_dest"
     _sed_inplace "s|@@HELIX_GROUP@@|${helix_group}|g" "$service_dest"
-    _sed_inplace "s|@@INSTALL_DIR@@|${install_dir}|g" "$service_dest"
-    _sed_inplace "s|@@INSTALL_PARENT@@|${install_parent}|g" "$service_dest"
+    _template_install_paths "$service_dest"
 
-    if ! $SUDO systemctl daemon-reload; then
+    if ! run_logged $SUDO systemctl daemon-reload; then
         log_error "Failed to reload systemd daemon."
         exit 1
     fi
@@ -236,10 +478,10 @@ install_service_systemd() {
 
 # During self-update, check if the deployed update-watcher path unit has the
 # old PathExists directive (which causes infinite restart loops) and fix it.
-# The watcher units have no platform customizations — only @@INSTALL_DIR@@.
+# The watcher units have no platform customizations, only install-path placeholders.
 # Under NoNewPrivileges we can't write to /etc/systemd/system/ or run
 # systemctl daemon-reload, so we rely on helixscreen-update.service's
-# ExecStartPre to refresh the main service file on next Moonraker update.
+# ExecStart script to refresh the main service file on next Moonraker update.
 # However, the PATH unit itself won't get refreshed that way, so we attempt
 # a direct fix here and fall back to a warning if permissions block it.
 update_watcher_if_stale() {
@@ -271,8 +513,6 @@ update_watcher_if_stale() {
     local path_src="${INSTALL_DIR}/config/helixscreen-update.path"
     local svc_src="${INSTALL_DIR}/config/helixscreen-update.service"
     local install_dir="${INSTALL_DIR:-/opt/helixscreen}"
-    local install_parent
-    install_parent="$(dirname "$install_dir")"
 
     if _has_no_new_privs; then
         # Can't write to /etc/systemd/system/ under NoNewPrivileges.
@@ -283,9 +523,8 @@ update_watcher_if_stale() {
         fi
         if [ -f "$svc_src" ] && [ -f "$svc_dest" ]; then
             if cp "$svc_src" "$svc_dest" 2>/dev/null; then
-                sed -i -e "s|@@INSTALL_DIR@@|${install_dir}|g" \
-                       -e "s|@@INSTALL_PARENT@@|${install_parent}|g" \
-                    "$svc_dest" 2>/dev/null
+                # sudo is blocked under NoNewPrivileges, so write directly.
+                ( SUDO=""; _template_install_paths "$svc_dest" )
                 fixed=true
             fi
         fi
@@ -302,12 +541,9 @@ update_watcher_if_stale() {
     if [ -f "$path_src" ] && [ -f "$svc_src" ]; then
         $SUDO cp "$path_src" "$path_dest"
         $SUDO cp "$svc_src" "$svc_dest"
-        _sed_inplace "s|@@INSTALL_DIR@@|${install_dir}|g" "$path_dest"
-        _sed_inplace "s|@@INSTALL_DIR@@|${install_dir}|g" "$svc_dest"
-        _sed_inplace "s|@@INSTALL_PARENT@@|${install_parent}|g" "$path_dest"
-        _sed_inplace "s|@@INSTALL_PARENT@@|${install_parent}|g" "$svc_dest"
-        $SUDO systemctl daemon-reload 2>/dev/null || true
-        $SUDO systemctl restart helixscreen-update.path 2>/dev/null || true
+        _template_install_paths "$path_dest" "$svc_dest"
+        run_logged $SUDO systemctl daemon-reload || true
+        run_logged $SUDO systemctl restart helixscreen-update.path || true
         log_success "Updated watcher units ($reason)"
     fi
 }
@@ -324,18 +560,13 @@ install_update_watcher_systemd() {
         return 0
     fi
 
-    local install_dir="${INSTALL_DIR:-/opt/helixscreen}"
-
     $SUDO cp "$path_src" "$path_dest"
     $SUDO cp "$svc_src" "$svc_dest"
+    _template_install_paths "$path_dest" "$svc_dest"
 
-    # Template the install directory path in both units
-    _sed_inplace "s|@@INSTALL_DIR@@|${install_dir}|g" "$path_dest"
-    _sed_inplace "s|@@INSTALL_DIR@@|${install_dir}|g" "$svc_dest"
-
-    $SUDO systemctl daemon-reload
-    $SUDO systemctl enable helixscreen-update.path 2>/dev/null || true
-    $SUDO systemctl start helixscreen-update.path 2>/dev/null || true
+    run_logged $SUDO systemctl daemon-reload
+    run_logged $SUDO systemctl enable helixscreen-update.path || true
+    run_logged $SUDO systemctl start helixscreen-update.path || true
 
     log_info "Installed update watcher (helixscreen-update.path)"
 }
@@ -347,6 +578,16 @@ install_service_sysv() {
     if _is_self_update; then
         log_info "Skipping init script install (self-update; already installed)"
         _migrate_init_script_hooks_path
+        # A migration is the one case where the installed script names a tree
+        # that is about to stop existing. Rewrite that single line rather than
+        # copying the script, so platform customizations survive (#314).
+        # By this point the payload at INSTALL_DIR is already complete, so the
+        # boot path never names a directory without an install in it.
+        if [ -n "${MIGRATE_FROM_DIR:-}" ] && [ -n "${INIT_SCRIPT_DEST:-}" ] \
+           && [ -f "$INIT_SCRIPT_DEST" ]; then
+            log_info "Repointing DAEMON_DIR at ${INSTALL_DIR}"
+            _set_init_script_daemon_dir
+        fi
         return 0
     fi
 
@@ -368,14 +609,7 @@ install_service_sysv() {
     $SUDO cp "$init_src" "$INIT_SCRIPT_DEST"
     $SUDO chmod +x "$INIT_SCRIPT_DEST"
 
-    # Update the DAEMON_DIR in the init script to match the install location
-    # This is important for Klipper Mod which uses a different path.
-    #
-    # On a mod host the script runs inside the chroot, where the install root
-    # may have a different spelling than it does on the host (see
-    # resolve_chroot_daemon_dir). Use the in-chroot one when we have it.
-    _daemon_dir="${HELIX_CHROOT_DAEMON_DIR:-$INSTALL_DIR}"
-    _sed_inplace "s|DAEMON_DIR=.*|DAEMON_DIR=\"${_daemon_dir}\"|" "$INIT_SCRIPT_DEST"
+    _set_init_script_daemon_dir
 
     log_success "Installed SysV init script at $INIT_SCRIPT_DEST"
 }
@@ -462,6 +696,14 @@ start_service_snapmaker_u1() {
     log_warn "Check logs: /var/log/helixscreen/launcher.log or ${INSTALL_DIR}/logs/launcher.log"
 }
 
+_enable_helixscreen_unit() {
+    # shellcheck disable=SC2086
+    if ! run_logged $SUDO systemctl enable "$SERVICE_NAME"; then
+        log_error "Failed to enable ${SERVICE_NAME} service."
+        return 1
+    fi
+}
+
 # Start service (systemd)
 start_service_systemd() {
     log_info "Enabling and starting HelixScreen (systemd)..."
@@ -474,10 +716,7 @@ start_service_systemd() {
         return 0
     fi
 
-    if ! $SUDO systemctl enable "$SERVICE_NAME"; then
-        log_error "Failed to enable ${SERVICE_NAME} service."
-        exit 1
-    fi
+    _enable_helixscreen_unit || exit 1
 
     # "systemctl start" is a no-op when the service is already active, which
     # would leave the OLD (pre-upgrade) binary running while we report success
@@ -488,7 +727,7 @@ start_service_systemd() {
         action=restart
     fi
 
-    if ! $SUDO systemctl "$action" "$SERVICE_NAME"; then
+    if ! run_logged $SUDO systemctl "$action" "$SERVICE_NAME"; then
         log_error "Failed to start ${SERVICE_NAME} service."
         log_error "Check logs with: sudo journalctl -u ${SERVICE_NAME} -n 50"
         exit 1
@@ -576,7 +815,15 @@ deploy_platform_hooks() {
     mkdir -p "${install_dir}/platform" 2>/dev/null || $SUDO mkdir -p "${install_dir}/platform" 2>/dev/null || true
     cp "$hooks_src" "${install_dir}/platform/hooks.sh" 2>/dev/null || $SUDO cp "$hooks_src" "${install_dir}/platform/hooks.sh" 2>/dev/null || true
     chmod +x "${install_dir}/platform/hooks.sh" 2>/dev/null || $SUDO chmod +x "${install_dir}/platform/hooks.sh" 2>/dev/null || true
-    log_info "Deployed platform hooks: $platform"
+
+    # Every copy above is non-fatal, so success has to be observed rather than
+    # assumed. A missing hooks.sh leaves each platform_* function the no-op stub
+    # the init script declares, and nothing else reports that.
+    if [ -s "${install_dir}/platform/hooks.sh" ]; then
+        log_info "Deployed platform hooks: $platform"
+    else
+        log_warn "Platform hooks NOT deployed: ${install_dir}/platform/hooks.sh is missing or empty"
+    fi
 }
 
 # Fix ownership of install directory for non-root service users.
@@ -623,7 +870,7 @@ stop_service() {
             log_info "Skipping service stop (NoNewPrivileges; restart via watchdog)"
         elif systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
             log_info "Stopping existing HelixScreen service (systemd)..."
-            $SUDO systemctl stop "$SERVICE_NAME" || true
+            run_logged $SUDO systemctl stop "$SERVICE_NAME" || true
         fi
     else
         # During in-app self-update, the app must stay running so the user sees

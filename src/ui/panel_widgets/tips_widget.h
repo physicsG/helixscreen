@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "ui_widget_ref.h"
+
 #include "panel_widget.h"
 #include "tips_manager.h"
 
@@ -26,11 +28,11 @@ class TipsWidget : public PanelWidget {
     static void tip_text_clicked_cb(lv_event_t* e);
 
   private:
-    lv_obj_t* widget_obj_ = nullptr;
-    lv_obj_t* parent_screen_ = nullptr;
+    helix::ui::WidgetRef widget_obj_;
+    helix::ui::WidgetRef parent_screen_;
 
     // Cached label for fade animation (looked up by name in widget_obj_)
-    lv_obj_t* tip_label_ = nullptr;
+    helix::ui::WidgetRef tip_label_;
 
     // Tip state
     PrintingTip current_tip_;

@@ -264,9 +264,9 @@ TEST_CASE("is_safe_material_param() accepts every material HelixScreen offers",
     // The bug class, not just the one reported instance: any name the filament
     // database offers must survive the validator that persists it, or picking it
     // in the UI silently writes nothing.
-    for (size_t i = 0; i < filament::MATERIAL_COUNT; ++i) {
-        INFO("material: " << filament::MATERIALS[i].name);
-        REQUIRE(is_safe_material_param(filament::MATERIALS[i].name) == true);
+    for (const auto& mat : *filament::materials()) {
+        INFO("material: " << mat.name);
+        REQUIRE(is_safe_material_param(mat.name) == true);
     }
 }
 

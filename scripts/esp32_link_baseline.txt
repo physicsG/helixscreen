@@ -1,0 +1,47 @@
+# Firmware-listed files whose native objects reference a symbol that only an
+# app_srcs_excluded.txt file defines (scripts/check_esp32_app_srcs.py --link).
+# Each still links on the ESP32: the IDF link takes objects from a static archive
+# and drops sections nothing reaches, which nm on the native objects cannot see.
+#
+# An edge NOT listed here fails. A listed edge that no longer occurs fails, so
+# delete it and lower the ceiling. The ceiling makes adding an entry fail too:
+# the answer to a new edge is a HELIX_HAS_* guard, a firmware stub, or moving
+# the defining file into app_srcs.txt.
+max-edges: 37
+src/api/wifi_manager.cpp -> src/api/wifi_backend_wpa_supplicant.cpp
+src/application/moonraker_manager.cpp -> src/api/mock_http_file_server.cpp
+src/application/printer_switch_flow.cpp -> src/app_globals.cpp
+src/rendering/gcode_file_modifier.cpp -> src/rendering/gcode_streaming_config.cpp
+src/system/sound_manager.cpp -> src/system/alsa_sound_backend.cpp
+src/system/sound_manager.cpp -> src/system/pwm_sound_backend.cpp
+src/system/sound_manager.cpp -> src/system/sdl_sound_backend.cpp
+src/system/sound_manager.cpp -> src/system/tracker_player.cpp
+src/ui/print_preview_controller.cpp -> src/ui/gcode_viewer_loader.cpp
+src/ui/ui_ams_context_menu.cpp -> src/ui/ui_overlay_qr_scanner.cpp
+src/ui/ui_ams_edit_overlay.cpp -> src/system/label_printer_settings.cpp
+src/ui/ui_ams_edit_overlay.cpp -> src/ui/ui_overlay_qr_scanner.cpp
+src/ui/ui_external_spool_menu.cpp -> src/ui/ui_overlay_qr_scanner.cpp
+src/ui/ui_gcode_viewer.cpp -> src/rendering/gcode_layer_renderer.cpp
+src/ui/ui_panel_controls.cpp -> src/ui/ui_panel_calibration_pa.cpp
+src/ui/ui_print_select_detail_view.cpp -> src/ui/gcode_viewer_loader.cpp
+src/ui/ui_wizard.cpp -> src/app_globals.cpp
+src/ui/ui_wizard.cpp -> src/system/platform_info.cpp
+src/ui/ui_wizard.cpp -> src/system/wizard_step.cpp
+src/ui/ui_wizard.cpp -> src/ui/ui_wizard_ams_identify.cpp
+src/ui/ui_wizard.cpp -> src/ui/ui_wizard_filament_sensor_select.cpp
+src/ui/ui_wizard.cpp -> src/ui/ui_wizard_printer_identify.cpp
+src/ui/ui_wizard.cpp -> src/ui/ui_wizard_touch_calibration.cpp
+src/ui/ui_wizard.cpp -> src/ui/ui_wizard_wifi.cpp
+src/ui/wizard_step_registry.cpp -> src/ui/ui_wizard_ams_identify.cpp
+src/ui/wizard_step_registry.cpp -> src/ui/ui_wizard_connection.cpp
+src/ui/wizard_step_registry.cpp -> src/ui/ui_wizard_fan_select.cpp
+src/ui/wizard_step_registry.cpp -> src/ui/ui_wizard_filament_sensor_select.cpp
+src/ui/wizard_step_registry.cpp -> src/ui/ui_wizard_heater_select.cpp
+src/ui/wizard_step_registry.cpp -> src/ui/ui_wizard_input_shaper.cpp
+src/ui/wizard_step_registry.cpp -> src/ui/ui_wizard_language_chooser.cpp
+src/ui/wizard_step_registry.cpp -> src/ui/ui_wizard_led_select.cpp
+src/ui/wizard_step_registry.cpp -> src/ui/ui_wizard_printer_identify.cpp
+src/ui/wizard_step_registry.cpp -> src/ui/ui_wizard_summary.cpp
+src/ui/wizard_step_registry.cpp -> src/ui/ui_wizard_telemetry.cpp
+src/ui/wizard_step_registry.cpp -> src/ui/ui_wizard_touch_calibration.cpp
+src/ui/wizard_step_registry.cpp -> src/ui/ui_wizard_wifi.cpp

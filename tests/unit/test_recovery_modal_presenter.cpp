@@ -68,7 +68,7 @@ class RecoveryPreheatFixture : public LVGLUITestFixture {
         // execute_gcode() refuses everything while Klipper reads SHUTDOWN, which
         // is where the subjects initialize.
         st.set_klippy_state_sync(helix::KlippyState::READY);
-        lv_subject_set_int(st.get_print_state_enum_subject(),
+        lv_subject_set_int(st.print_state().get_print_state_enum_subject(),
                            static_cast<int>(helix::PrintJobState::STANDBY));
 
         SafetyLimits limits; // min_extrude_temp_celsius = 170 (Klipper default)
@@ -76,7 +76,7 @@ class RecoveryPreheatFixture : public LVGLUITestFixture {
 
         // No AMS backend and no external spool: the preheat target resolves to
         // DEFAULT_LOAD_PREHEAT_TEMP, so the tests know what they are waiting for.
-        AmsState::instance().set_backend(nullptr);
+        helix::AmsState::instance().set_backend(nullptr);
         prev_cold_extrude_ = helix::SafetySettingsManager::instance().get_allow_cold_extrude();
         helix::SafetySettingsManager::instance().set_allow_cold_extrude(false);
 
@@ -90,7 +90,9 @@ class RecoveryPreheatFixture : public LVGLUITestFixture {
     }
 
     void set_nozzle_c(int celsius) {
-        lv_subject_set_int(get_printer_state().get_active_extruder_temp_subject(), celsius * 10);
+        lv_subject_set_int(
+            get_printer_state().temperature_state().get_active_extruder_temp_subject(),
+            celsius * 10);
     }
 
     helix::ui::RecoveryModalPresenter& presenter() {
@@ -230,6 +232,24 @@ TEST_CASE_METHOD(RecoveryPreheatFixture,
 
     CHECK(gcode_count(mock_client_, "TOOL_UNLOAD") == 1);
     CHECK_FALSE(TA::preheating(presenter()));
+}
+
+TEST_CASE_METHOD(RecoveryPreheatFixture,
+                 "A nozzle one degree under a fractional extrusion minimum is still cold",
+                 "[error-center][recovery-presenter][preheat]") {
+    SafetyLimits limits;
+    limits.min_extrude_temp_celsius = 180.5;
+    api_.set_safety_limits(limits);
+    presenter().present(make_afc_jam());
+    process_lvgl(20);
+
+    // Klipper refuses to extrude at 180 against a 180.5 minimum.
+    set_nozzle_c(180);
+    TA::tap(presenter(), "TOOL_UNLOAD");
+    process_lvgl(20);
+
+    CHECK(gcode_count(mock_client_, "TOOL_UNLOAD") == 0);
+    CHECK(TA::preheating(presenter()));
 }
 
 TEST_CASE_METHOD(RecoveryPreheatFixture,
